@@ -10,9 +10,11 @@ use common.ui.theme_package_wire.{
     theme_package_install_wire_v1_decode,
     theme_package_install_wire_v1_within_bound
 }
+use common.ui.generated.aetheric_dark_theme_snapshot.{aetheric_dark_theme_render_snapshot}
+use common.ui.generated.fluid_light_theme_snapshot.{fluid_light_theme_render_snapshot}
 use common.ui.theme_render_snapshot.{ThemeRenderSnapshot}
-use common.ui.window_scene.{WM_CONTENT_ORIGIN_SIMPLE_WEB, WmContentFrame, wm_content_frame_checksum}
-use nogc_sync_mut.ui.theme_package.{default_theme_id, resolved_theme_css, resolve_theme_alias, theme_package_fingerprint, theme_package_material_solid_fallback_rgba, theme_package_material_text_rgba, theme_package_render_snapshot}
+use common.ui.window_scene.{WM_CONTENT_DAMAGE_FULL, WM_CONTENT_ORIGIN_SIMPLE_WEB, WmContentFrame, wm_content_frame_checksum}
+use nogc_sync_mut.ui.theme_package.{default_theme_id, resolve_theme_alias, theme_package_render_snapshot}
 use common.ui.wm_chrome_theme.{
     active_wm_theme_id,
     active_wm_theme_snapshot_present,
@@ -42,6 +44,27 @@ fn _active_or_default_wm_theme_id() -> text:
     # WM bootstrap yet.
     default_theme_id()
 
+fn _canonical_theme_id(theme: text) -> text:
+    """Resolve empty strings and theme aliases even when config/themes/theme.sdn
+    is absent (such as on diskless baremetal SimpleOS images)."""
+    val requested = if theme == "": _active_or_default_wm_theme_id() else: theme
+    val aliased = resolve_theme_alias(requested)
+    if (aliased == "light" or aliased == "glass_light" or aliased == "fluid" or
+        aliased == "liquid" or aliased == "fluid_light"):
+        return "fluid_light"
+    if (aliased == "dark" or aliased == "obsidian_dark" or aliased == "glass_dark" or
+        aliased == "glass_obsidian_dark" or aliased == "glass_obsidian_light" or
+        aliased == "aetheric_dark"):
+        return "aetheric_dark"
+    aliased
+
+fn _embedded_theme_snapshot(canonical_theme: text) -> ThemeRenderSnapshot?:
+    if canonical_theme == "fluid_light":
+        return Some(fluid_light_theme_render_snapshot())
+    if canonical_theme == "aetheric_dark":
+        return Some(aetheric_dark_theme_render_snapshot())
+    None
+
 fn _theme_hex_digit(value: u32) -> text:
     "0123456789ABCDEF".char_at(value.to_i64())
 
@@ -51,24 +74,64 @@ fn _theme_rgb_css(value: u32) -> text:
     val b = value & 0xFF
     "#{_theme_hex_digit(r >> 4)}{_theme_hex_digit(r & 0xF)}{_theme_hex_digit(g >> 4)}{_theme_hex_digit(g & 0xF)}{_theme_hex_digit(b >> 4)}{_theme_hex_digit(b & 0xF)}"
 
+fn _theme_css_has_core_tokens(css: text) -> bool:
+    css.contains("--app-surface") and css.contains("--ui-fg")
+
+fn _theme_snapshot_has_package_tokens(snapshot: ThemeRenderSnapshot) -> bool:
+    (snapshot.family_id != "" and
+        snapshot.source_manifest_sha256 != "" and
+        snapshot.material_sha256 != "" and
+        _theme_css_has_core_tokens(snapshot.composed_css))
+
+fn _resolved_snapshot_from_package(
+    pkg_snapshot: ThemeRenderSnapshot,
+    canonical_theme: text
+) -> ThemeRenderSnapshot?:
+    if _theme_snapshot_has_package_tokens(pkg_snapshot):
+        return Some(pkg_snapshot)
+    _embedded_theme_snapshot(canonical_theme)
+
+fn _resolved_wm_frame_theme_id(theme: text) -> text:
+    if theme == "" or theme == "light" or theme == "dark":
+        return _canonical_theme_id(theme)
+    theme
+
+fn simple_web_diskless_theme_fallback_snapshot(
+    theme: text,
+    unbacked_snapshot: ThemeRenderSnapshot
+) -> ThemeRenderSnapshot:
+    """Resolve an unbacked/diskless ThemeRenderSnapshot to its embedded theme."""
+    val canonical_theme = _canonical_theme_id(theme)
+    if val Some(snap) = _resolved_snapshot_from_package(unbacked_snapshot, canonical_theme):
+        return snap
+    unbacked_snapshot
+
 fn _theme_solid_fallback_rgba(theme: text) -> u32:
-    val installed = active_theme_solid_fallback_rgba(theme)
+    val canonical_theme = _canonical_theme_id(theme)
+    val installed = active_theme_solid_fallback_rgba(canonical_theme)
     if installed != 0u32:
         return installed
-    theme_package_material_solid_fallback_rgba(theme)
+    val pkg_snapshot = theme_package_render_snapshot(canonical_theme)
+    if val Some(snap) = _resolved_snapshot_from_package(pkg_snapshot, canonical_theme):
+        return snap.material.solid_fallback_rgba
+    0u32
 
 fn _theme_text_rgba(theme: text) -> u32:
-    val installed = active_theme_text_rgba(theme)
+    val canonical_theme = _canonical_theme_id(theme)
+    val installed = active_theme_text_rgba(canonical_theme)
     if installed != 0u32:
         return installed
-    theme_package_material_text_rgba(theme)
+    val pkg_snapshot = theme_package_render_snapshot(canonical_theme)
+    if val Some(snap) = _resolved_snapshot_from_package(pkg_snapshot, canonical_theme):
+        return snap.material.text_rgba
+    0u32
 
 fn _wm_root_behavior_attrs() -> text:
-    "data-wm-motion=\"standard\" data-wm-animation-style=\"spring\" data-wm-transparency=\"standard\" data-wm-energy=\"standard\" data-wm-feedback=\"standard\" data-wm-contrast=\"comfortable\" data-wm-density=\"comfortable\" data-wm-wallpaper=\"aurora\" data-wm-backdrop-motion=\"ambient\" data-wm-backdrop-intensity=\"balanced\" data-wm-dock-magnification=\"standard\" data-wm-dock-visibility=\"shown\" data-wm-surface-depth=\"layered\" data-wm-traffic-side=\"left\" data-wm-chrome-verbosity=\"full\" data-wm-window-transition=\"mac\" data-wm-accent=\"blue\" data-wm-focus-mode=\"off\" data-wm-quiet-mode=\"off\" data-wm-icon-mask=\"circle\" data-wm-corner-radius=\"round\""
+    "data-wm-motion=\"standard\" data-wm-animation-style=\"spring\" data-wm-transparency=\"standard\" data-wm-energy=\"standard\" data-wm-feedback=\"standard\" data-wm-contrast=\"comfortable\" data-wm-density=\"comfortable\" data-wm-wallpaper=\"aurora\" data-wm-backdrop-motion=\"ambient\" data-wm-backdrop-intensity=\"balanced\" data-wm-dock-magnification=\"standard\" data-wm-dock-visibility=\"shown\" data-wm-surface-depth=\"layered\" data-wm-traffic-side=\"left\" data-wm-chrome-verbosity=\"full\" data-wm-window-transition=\"mac\" data-wm-accent=\"theme\" data-wm-focus-mode=\"off\" data-wm-quiet-mode=\"off\" data-wm-icon-mask=\"circle\" data-wm-corner-radius=\"round\""
 
 fn _wm_root_data_attrs(theme_id: text) -> text:
-    val canonical_theme = resolve_theme_alias(theme_id)
-    "data-wm-theme=\"{canonical_theme}\" " + _wm_root_behavior_attrs()
+    val attr_theme = _resolved_wm_frame_theme_id(theme_id)
+    "data-wm-theme=\"{attr_theme}\" " + _wm_root_behavior_attrs()
 
 fn _simple_web_theme_attr_text_valid(value: text) -> bool:
     (value != "" and not value.contains("\"") and
@@ -100,13 +163,31 @@ fn _wm_root_data_attrs_with_snapshot(
 fn _simple_web_structural_css() -> text:
     ".wm-app-container { min-height: 100vh; } .wm-app-titlebar { height: 24px; } .wm-app-content { min-height: calc(100vh - 24px); }"
 
+fn _resolved_theme_package_css(theme: text) -> text:
+    val canonical_theme = _canonical_theme_id(theme)
+    val installed_css = active_theme_composed_css(canonical_theme)
+    if _theme_css_has_core_tokens(installed_css):
+        return installed_css
+    val pkg_snapshot = theme_package_render_snapshot(canonical_theme)
+    if val Some(snap) = _resolved_snapshot_from_package(pkg_snapshot, canonical_theme):
+        return snap.composed_css
+    ""
+
+fn _resolved_theme_source_fingerprint(theme: text) -> text:
+    val canonical_theme = _canonical_theme_id(theme)
+    val installed_fingerprint = active_theme_source_fingerprint(canonical_theme)
+    if installed_fingerprint != "":
+        return installed_fingerprint
+    val pkg_snapshot = theme_package_render_snapshot(canonical_theme)
+    if val Some(snap) = _resolved_snapshot_from_package(pkg_snapshot, canonical_theme):
+        return snap.source_manifest_sha256
+    ""
+
 fn _simple_web_window_css(theme: text) -> text:
     # Theme aliases, package inheritance, widget CSS, and visual tokens belong
     # to theme_package. This adapter contributes layout only; keeping colors,
     # shadows, and glass effects here created a second, divergent theme owner.
-    val installed_css = active_theme_composed_css(theme)
-    val package_css = if installed_css != "": installed_css else: resolved_theme_css(theme)
-    package_css + "\n" + _simple_web_structural_css()
+    _resolved_theme_package_css(theme) + "\n" + _simple_web_structural_css()
 
 fn _simple_web_window_css_with_snapshot(
     snapshot: ThemeRenderSnapshot
@@ -262,8 +343,25 @@ fn simple_web_content_render_request_with_active_theme(title: text, body_html: t
 # Canonical serialized document for host Web surfaces and capture adapters.
 # Keeping serialization beside request construction prevents evidence tools
 # and host wrappers from substituting the static UI preview fixture.
-fn simple_web_content_full_html_with_theme(theme: text, title: text, body_html: text, viewport_w: i32, viewport_h: i32) -> text:
+pub fn simple_web_content_full_html_with_theme(theme: text, title: text, body_html: text, viewport_w: i32, viewport_h: i32) -> text:
     web_render_full_html(simple_web_content_render_request_with_theme(theme, title, body_html, viewport_w, viewport_h))
+
+# App-window variant of the themed full document: the WM-owned app window
+# chrome (`.wm-app-container` > `.wm-app-titlebar` + `.wm-app-content`) around
+# the client body, with a provenance attribute identifying the SimpleOS shell
+# as the producer. The content-only variant above deliberately emits no
+# titlebar; this one is for surfaces where the app window itself is the
+# document (host Web shells, capture adapters, app HTML previews).
+pub fn simple_web_app_html_with_theme(theme: text, title: text, body_html: text) -> text:
+    val css = _simple_web_window_css(theme)
+    val app_css = css + "body { margin: 0; overflow: hidden; background: var(--app-surface); color: var(--ui-fg); } #app { min-height: 100vh; padding: 0; } .wm-app-content { min-height: calc(100vh - 24px); color: var(--ui-fg); }"
+    val solid_css = _theme_rgb_css(_theme_solid_fallback_rgba(theme))
+    val text_css = _theme_rgb_css(_theme_text_rgba(theme))
+    val app_body = "<div class='wm-app-container' data-wm-shell='SimpleOS shell via Simple Web'><div class='wm-app-titlebar'>" + title + "</div><div id='wm-app-content' class='wm-app-content widget-panel' data-wm-theme-material-mode='engine2d-cpu-composited-material-v1' data-wm-theme-fallback='solid-material' data-wm-theme-bg='{solid_css}' data-wm-theme-fg='{text_css}'>" + body_html + "</div></div>"
+    val request = WebRenderRequest.html(
+        WEB_RENDER_TARGET_SIMPLE_WEB, title, app_body, app_css, "", 1024, 768
+    ).with_root_attrs(_wm_root_data_attrs(theme))
+    web_render_full_html(request)
 
 fn _simple_web_revision_mix(hash: i64, value: i64) -> i64:
     ((hash * 131 + value) % 2147483647) + 1
@@ -302,13 +400,16 @@ fn _simple_web_theme_cache_fingerprint(theme: text) -> text:
     source manifest but different realized material. Keep that material in the
     content revision so timed and retained Web artifacts cannot cross it.
     """
-    val canonical_theme = resolve_theme_alias(theme)
+    val canonical_theme = _canonical_theme_id(theme)
     if active_wm_theme_snapshot_present():
         val active = active_wm_theme_snapshot_unchecked()
-        if active.id == canonical_theme:
+        if active.id == canonical_theme and _theme_css_has_core_tokens(active.composed_css):
             return active.id + "|" + active.source_manifest_sha256 + "|" +
                 active.material_sha256
     val snapshot = theme_package_render_snapshot(canonical_theme)
+    if val Some(effective) = _resolved_snapshot_from_package(snapshot, canonical_theme):
+        return effective.id + "|" + effective.source_manifest_sha256 + "|" +
+            effective.material_sha256
     snapshot.id + "|" + snapshot.source_manifest_sha256 + "|" +
         snapshot.material_sha256
 
@@ -424,7 +525,11 @@ fn simple_web_external_content_frame(
     cpu_composited_count: i32,
     cpu_composited_sha256: text,
     solid_material_count: i32,
-    solid_material_sha256: text
+    solid_material_sha256: text,
+    producer_revision: i64 = 0,
+    damage_mode: i64 = WM_CONTENT_DAMAGE_FULL,
+    damage_rects: [i64] = [],
+    damage_resources_accepted: bool = false
 ) -> WmContentFrame:
     if (window_id == "" or content_revision <= 0 or width <= 0 or height <= 0 or
         render.fallback_required or render.skipped_command_count != 0 or
@@ -441,7 +546,11 @@ fn simple_web_external_content_frame(
             checksum: 0u64,
             parent_window_id: "",
             offset_x: 0,
-            offset_y: 0
+            offset_y: 0,
+            producer_revision: producer_revision,
+            damage_mode: damage_mode,
+            damage_rects: damage_rects,
+            damage_resources_accepted: damage_resources_accepted
         )
     val witness = SimpleWebLayoutMaterialWitness(
         cpu_composited_count: cpu_composited_count,
@@ -461,11 +570,8 @@ fn simple_web_external_content_frame(
         render.glass_backend_handle,
         render.glass_device_identity
     )
-    val installed_fingerprint = active_theme_source_fingerprint(theme)
-    val theme_fingerprint = if installed_fingerprint != "":
-        installed_fingerprint
-    else:
-        theme_package_fingerprint(theme)
+    val theme_fingerprint = _resolved_theme_source_fingerprint(theme)
+    val frame_theme = _resolved_wm_frame_theme_id(theme)
     WmContentFrame(
         window_id: window_id,
         scene_revision: 0,
@@ -487,8 +593,12 @@ fn simple_web_external_content_frame(
         material_fallback_kind: material.kind,
         material_fallback_reason: material.reason,
         material_fallback_sha256: material.material_sha256,
-        theme_id: theme,
-        theme_source_manifest_sha256: theme_fingerprint
+        theme_id: frame_theme,
+        theme_source_manifest_sha256: theme_fingerprint,
+        producer_revision: producer_revision,
+        damage_mode: damage_mode,
+        damage_rects: damage_rects,
+        damage_resources_accepted: damage_resources_accepted
     )
 
 fn _simple_web_theme_receipt_matches_install_wire(
@@ -515,6 +625,23 @@ fn _simple_web_theme_receipt_matches_install_wire(
                     theme_material_sha256
             )
 
+fn _simple_web_is_lower_hex_64(value: text) -> bool:
+    val n = value.byte_len()
+    if n != 64:
+        return false
+    var i: i64 = 0
+    while i < n:
+        val b = value.byte_at(i) & 0xFF
+        var ok = false
+        if b >= 48 and b <= 57:
+            ok = true
+        if b >= 97 and b <= 102:
+            ok = true
+        if not ok:
+            return false
+        i = i + 1
+    true
+
 fn simple_web_external_content_frame_with_theme_receipt(
     window_id: text,
     content_revision: i64,
@@ -530,7 +657,11 @@ fn simple_web_external_content_frame_with_theme_receipt(
     cpu_composited_count: i32,
     cpu_composited_sha256: text,
     solid_material_count: i32,
-    solid_material_sha256: text
+    solid_material_sha256: text,
+    producer_revision: i64 = 0,
+    damage_mode: i64 = WM_CONTENT_DAMAGE_FULL,
+    damage_rects: [i64] = [],
+    damage_resources_accepted: bool = false
 ) -> WmContentFrame:
     val exact_theme_receipt = (
         _simple_web_theme_receipt_matches_install_wire(
@@ -578,8 +709,19 @@ fn simple_web_external_content_frame_with_theme_receipt(
         render.glass_backend_handle,
         render.glass_device_identity
     )
-    if material.material_sha256 != theme_material_sha256:
-        return WmContentFrame(
+    # Sequential gates avoid freestanding entry-closure drops on mixed `(A or B) and C`.
+    var needs_material_digest = false
+    if cpu_composited_count > 0:
+        needs_material_digest = true
+    if solid_material_count > 0:
+        needs_material_digest = true
+    if render.cpu_composited_material_count > 0:
+        needs_material_digest = true
+    if render.metal_device_glass_material_count > 0:
+        needs_material_digest = true
+    if needs_material_digest:
+        if not _simple_web_is_lower_hex_64(material.material_sha256):
+            return WmContentFrame(
             window_id: window_id,
             scene_revision: 0,
             content_revision: content_revision,
@@ -615,7 +757,11 @@ fn simple_web_external_content_frame_with_theme_receipt(
         material_fallback_sha256: material.material_sha256,
         theme_id: theme,
         theme_source_manifest_sha256:
-            theme_source_manifest_sha256
+            theme_source_manifest_sha256,
+        producer_revision: producer_revision,
+        damage_mode: damage_mode,
+        damage_rects: damage_rects,
+        damage_resources_accepted: damage_resources_accepted
     )
 
 # Slices the `ch`-tall visible window starting at row `scroll_y` out of a
@@ -685,8 +831,8 @@ fn _simple_web_content_frame_cached_impl(cache: WebRenderPixelArtifactCache, win
     else:
         cache.request_to_pixel_artifact(req)
     val visible = _window_scrolled_pixels(artifact.pixels, width, full_h, height, clamped_scroll)
-    val installed_fingerprint = active_theme_source_fingerprint(theme)
-    val theme_fingerprint = if installed_fingerprint != "": installed_fingerprint else: theme_package_fingerprint(theme)
+    val theme_fingerprint = _resolved_theme_source_fingerprint(theme)
+    val frame_theme = _resolved_wm_frame_theme_id(theme)
     val material_kind = artifact.material_fallback.kind
     val material_sha = artifact.material_fallback.material_sha256
     # De-mixed into sequential gates for two reasons. First, the previous form
@@ -729,7 +875,7 @@ fn _simple_web_content_frame_cached_impl(cache: WebRenderPixelArtifactCache, win
         material_fallback_kind: artifact.material_fallback.kind,
         material_fallback_reason: artifact.material_fallback.reason,
         material_fallback_sha256: artifact.material_fallback.material_sha256,
-        theme_id: theme,
+        theme_id: frame_theme,
         theme_source_manifest_sha256: theme_fingerprint
     )
 

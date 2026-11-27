@@ -128,3 +128,31 @@ fn main() -> i32:
 "#;
     assert_eq!(run_program(source), Ok(111));
 }
+
+#[test]
+fn cast_push_reassembly_preserves_packed_u64() {
+    let source = r#"
+extern fn rt_typed_bytes_u64_le_at(buf: [u8], off: u64) -> u64
+
+fn main() -> i32:
+    var a: [u8] = [111u8, 205u8, 118u8, 127u8, 204u8, 90u8, 6u8, 0u8]
+    var b: [u8] = []
+    var i = 0
+    while i < a.len():
+        b.push((a[i] as i64) as u8)
+        i = i + 1
+    if b.len() != a.len():
+        return 1
+    i = 0
+    while i < a.len():
+        if b[i] != a[i]:
+            return 2
+        i = i + 1
+    if rt_typed_bytes_u64_le_at(a, 0u64) != 1788684218584431u64:
+        return 3
+    if rt_typed_bytes_u64_le_at(b, 0u64) != 1788684218584431u64:
+        return 4
+    return 0
+"#;
+    assert_eq!(run_program(source), Ok(0));
+}

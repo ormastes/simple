@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status: OPEN** (filed; not fixed). Class 3 of the stage1-closure HIR fatals.
+**Status:** SUPERSEDED 2026-11-11 (lane p3fix-comp7-20261111) — HIR gate removed at tip, #158 mono machinery landed; re-verified fresh-seed 5/5 (see addenda). Class 3 of the stage1-closure HIR fatals.
 
 ## Exact text
 ```
@@ -62,3 +62,77 @@ failure stays loud and attributed to poll.spl.
 non-generically (`match p: case Poll.Ready(_)`), or the impl could be moved
 out of the closure; both change stdlib API shape and were not done here.
 
+
+---
+
+## Addendum 2026-11-11 — lane compiler2 — verdict SUPERSEDED (gate removed; #158 landed)
+
+Triage-first pass, batch 2. The reported HIR gate no longer exists on the
+refreshed seed (build-commit 0791c2b7f4a7).
+
+**The exact error is gone from source.** `trait_impl_lowering.spl` no longer
+calls `self.error(...)` for "generic struct/class methods are not supported on
+the native build path yet." Both the trait tier (:144-145) and the impl tier
+(:348-349) now do `if type_params.len() > 0: hir_fn.is_generic_template = true`
+(#158 Phase B marking) — the loud fatal this doc described was replaced by
+template marking, and #158 monomorphization machinery has since landed, e.g.
+`c9294577eff5` (substitute receiver type args into generic method return types,
+2026-11-09), `6672f9336413` (exempt bare generic impl owner headers from nominal
+arity), `7c03cb625fa3` (module-scoped monomorphization / COMDAT). The impl for
+a type-with-type-params declaring methods is now a template consumed by the mono
+path, not a hard error.
+
+**Seed-smoke (HIR lane, green):**
+`test/01_unit/compiler/20.hir/generic_enum_self_match_spec.spl`
+(`--mode=interpreter --no-cache`) -> `outcome=OK, passed=5/5` — generic-enum
+self-match (the `Poll<T>`-shape) lowers at HIR with NO gate diagnostic. Evidence
+log: `build/review/p3c2-genenum-seedsmoke.log`.
+
+**Verification caveats (honest):**
+- The true end-to-end oracle — a native build of a `Poll<i64>` user — was NOT
+  run (heavy entry-closure native build; blocked under this lane's mandate).
+- The MIR-level generic specs that would exercise the full native path,
+  `test/01_unit/compiler/50.mir/poll_payload_typeparam_match_spec.spl` and
+  `generic_method_return_subst_spec.spl`, currently ERROR on an UNRELATED
+  pre-existing compiler-source visibility defect: private generic fn
+  `compiler_value_discriminant` (`src/compiler/00.common/value_access.spl:29`)
+  is imported/used by `src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:54,61`.
+  That is a separate compiler bug (flagged to the parent), NOT bug 7 — the
+  generic-impl specs get PAST the HIR gate and only then hit it. Logs:
+  `build/review/p3c2-pollmono-seedsmoke.log`, `build/review/p3c2-genmethreturn-seedsmoke.log`.
+
+**Cycles:** 0 (no fix attempted; defect already addressed in source).
+
+---
+
+## 2026-11-11 (lane p3fix-comp7-20261111) — Status re-verified SUPERSEDED, header flipped
+
+Independent re-verification of the same-day compiler2 addendum on this lane's
+fresh worktree (base `a64cda1ee32d`, tracked seed `bin/simple.exe`,
+build-commit 46fe8f6b6def):
+
+- The reported HIR gate no longer exists: the exact error string "generic
+  struct/class methods are not supported on the native build path yet" is
+  absent from `src/compiler/20.hir/hir_lowering/_Items/trait_impl_lowering.spl`
+  (grep exit 1), and both the trait tier (:146) and the impl tier (:352) now
+  mark `hir_fn.is_generic_template = true`.
+- Seed-smoke: `test/01_unit/compiler/20.hir/generic_enum_self_match_spec.spl`
+  (`--mode=interpreter --no-cache`) → `outcome=OK, executed=5 passed=5 failed=0`
+  — the `Poll<T>`-shape generic-enum self-match lowers at HIR with no gate
+  diagnostic.
+
+Disposition: SUPERSEDED — absorbed by the #158 monomorphization work that
+landed after this was filed. Header Status line normalized to the dated form.
+
+Remaining live tail (not this bug, already routed): the deeper MIR-level
+generic specs (`poll_payload_typeparam_match_spec.spl`,
+`generic_method_return_subst_spec.spl`) still stop on the known LIVE
+seed private-fn-import visibility divergence around private
+`compiler_value_discriminant` (`src/compiler/00.common/value_access.spl:29`)
+— an owner-decision row; per campaign routing the wrappers must NOT be pub'd
+(`value_access_ownership_spec` pins non-pub).
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lane p3fix-comp7: SUPERSEDED — HIR gate removed at tip, mono
+machinery landed. No in-lane change.

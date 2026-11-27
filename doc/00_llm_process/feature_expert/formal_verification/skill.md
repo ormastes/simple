@@ -33,6 +33,13 @@ model, generic annotation preservation, owner resolution and native behavior
 need independent refinement and execution evidence. See the generics model
 design's reduced Lean proof boundary.
 
+Executable model keys use `mt_key_type` / `mt_key_types` / `mk_key`, with
+constructor tags and length/arity framing. `mt_render` is diagnostic display
+and is not injective for arbitrary names. The executable candidate has focused
+delimiter and constructor-collision regressions; require an admitted runtime
+test result before accepting it. Model substitution proofs alone do not prove
+key-encoding correctness or exact production/model key-string agreement.
+
 `GenericSubstModel` is an additional manual default target with the actual
 three-constructor MType shape, arbitrary application lists and `con "?"` unknown.
 Its composition law is unconditional; idempotence needs a closed substitution

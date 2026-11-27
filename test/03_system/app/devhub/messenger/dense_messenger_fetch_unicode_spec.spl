@@ -1,0 +1,50 @@
+# Acceptance layer: fetch_message of the Unicode and escaped message.
+#
+# ONE production Messenger verb call over the dense encrypted database, made once
+# at load and shared by every scenario below.  A successful read decrypts all
+# nine pages (about 45 s each on the Phase 1 seed), so each success-path verb
+# lives in its own file to stay inside the per-spec time budget.  Expected
+# payloads are serialised by Python's json.dumps in the generator and parsed
+# back here; nothing is compared with a value the adapter produced itself.
+# Lifecycle: doc/01_research/app/tools/devhub/devhub_cli_wrapper_forwarding_2026-09-06.md ;
+# doc/03_plan/agent_tasks/devhub_messenger_master.md ;
+# doc/04_architecture/app/devhub/messenger_gateway.md ;
+# doc/05_design/app/devhub/messenger_sdn_and_api.md
+# @manual_section: messenger-fetch-unicode
+
+"""
+## Purpose and audience
+Purpose: fetch_message returns one message whose body holds Unicode, quotes, a backslash and a newline, escaped so the payload is valid JSON and decodes to the original text.
+Audience: DevHub release reviewers who accept the encrypted Messenger read path.
+The passphrase is public synthetic test data from dense_ground_truth.json.
+"""
+
+use std.spec.*
+use test.support.devhub_messenger_dense.*
+use std.common.json.value.{JsonValue, json_value_field, json_value_items, json_value_len}
+use app.devhub.messenger.adapter.sqlcipher_reader.{
+    messenger_sqlcipher4_list_rooms, messenger_sqlcipher4_list_members,
+    messenger_sqlcipher4_history, messenger_sqlcipher4_fetch_message
+}
+
+val dn_truth = dense_truth()
+val dn_good = truth_passphrase(dn_truth)
+val _secret_ready = dense_set_secret(dn_good)
+val dn_target = dense_target_with(dense_path(DENSE_BASE), DENSE_REF, true)
+val dn_result = messenger_sqlcipher4_fetch_message(dn_target, "14", "user")
+
+describe "fetch_message of message 14 through the production verb":
+    it "returns exactly the json.dumps rendering of the stored row":
+        # @req REQ-MSGR-DENSE-ACC-FETCH14-001
+        step("Fetch message 14 and compare the payload with the ground-truth object")
+        # @capture(protocol_json): fetch_message status, exit code and payload against the ground-truth object
+        expect(outcome_line(dn_result)).to_equal("ok:0:payload")
+        expect(dn_result.payload == tf(json_value_field(dn_truth, "message_object"), "14")).to_equal(true)
+
+    it "escapes the body so the payload parses back to the original text":
+        # @req REQ-MSGR-DENSE-ACC-FETCH14-002
+        step("Parse the payload and compare the decoded body with the generator's raw body")
+        # @capture(protocol_binary): decoded body of message 14 against the generator's raw body
+        expect(payload_is_json(dn_result.payload)).to_equal(true)
+        expect(tf(payload_json(dn_result.payload), "body")).to_equal(tf(dn_truth, "unicode_body"))
+        expect(dn_result.payload.contains("\\n")).to_equal(true)

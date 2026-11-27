@@ -1,6 +1,6 @@
 # Site 12: the Stage-2 candidate freezes every native capsule's source identity as sha256("")
 
-- **Status:** OPEN (2026-09-13) — cause ISOLATED to `SIMPLE_STAGE3_STREAMING_SURFACES=1`, fix blocked (fenced files)
+- **Status:** FIX-IMPLEMENTED, VERIFICATION PENDING (2026-11-04; was OPEN 2026-09-13) — cause ISOLATED to `SIMPLE_STAGE3_STREAMING_SURFACES=1`, fix blocked (fenced files)
 - **Lane:** BOOT-10, measured on the pinned Stage-2 candidate
   `build/bootstrap-boot9b/stage2-rejected/aarch64-unknown-linux-gnu/simple`,
   sha256 `99ba0cf430d255a4141edfc7…`, 152198272 B (pin

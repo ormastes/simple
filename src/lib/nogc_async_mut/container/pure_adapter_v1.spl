@@ -1,0 +1,379 @@
+# Async-tree adapter that gives the synchronous pure-Simple container runtime
+# (nogc_sync_mut/container/pure_runtime_v1.spl) a SimpleContainerOwnerV2 case.
+# The runtime is one-shot: it prepares, runs and tears down inside `start`, so
+# prepare/create only retain an admitted intent, `start` runs to completion and
+# retains the real exit, and stop/destroy are accepted only when no cleanup is
+# unproven. Evidence comes from the owner policy (measured by
+# pure_container_qualify_v1), never from request bytes. Operations the pure
+# runtime cannot back (logs, configuration, recovery, absence, user probe,
+# intent) return a typed refusal; nothing falls through to another backend.
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, ContainerHostObservationV2,
+    ContainerExecutionRequestV2, ContainerRequestProjectionV2, ContainerActionProjectionV2,
+    container_scope_fence_id_v2}
+use std.common.contracts.container.effect_deadline_v1.{ContainerEffectDeadlineV1, container_effect_remaining_ms_v1}
+use std.common.contracts.container.control_deadline_v1.{ContainerControlDeadlineV1, container_control_remaining_ms_v1}
+use std.common.contracts.container.runtime_v1.{RuntimeIdentityV1, RuntimeIntentV1, RuntimeOperationV1, RuntimeStateV1,
+    RuntimeExitStatusV1, runtime_command_empty, RUNTIME_STATUS_OK, RUNTIME_STATUS_REJECTED, RUNTIME_STATUS_BLOCKED,
+    RUNTIME_PHASE_PREPARED, RUNTIME_PHASE_CREATED, RUNTIME_PHASE_EXITED, RUNTIME_PHASE_STOPPED,
+    RUNTIME_PHASE_DESTROYED, RUNTIME_PHASE_UNKNOWN}
+use std.common.contracts.container.execution_evidence_v2.{ContainerAbsenceReceiptV2, ContainerExecutionUserReceiptV2}
+use std.common.contracts.container.capability_report_v1.{ContainerCapabilityRequirementV1, ContainerCapabilityFlagV1,
+    container_capability_v1_admission_reason}
+use std.common.contracts.container.pure_backend_v1.{PureContainerEvidenceV1, pure_container_capability_report_v1}
+use std.common.contracts.container.backend_identity_v1.{CONTAINER_BACKEND_SIMPLE_PURE_PROCESS_V1,
+    CONTAINER_ENGINE_SIMPLE_PURE_CONTAINER_V1}
+use std.common.contracts.sosix.containment_v1.{SosixContainLimitsV1, SosixContainMillisV1}
+use std.common.container_policy.attempt_dir_plan_v1.{ContainerAttemptNumberV1}
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.container.pure_runtime_v1.{PureContainerSpecV1, pure_container_run_v1}
+use std.nogc_sync_mut.sosix.containment_v1.sosix_contain_support_v1
+use std.nogc_sync_mut.sosix.time.sosix_time_now_unix_micros
+use std.nogc_sync_mut.storage.storage_view_v1.ViewBytesV1
+
+pub const PURE_CONTAINER_REQUEST_MAGIC_V1 = "simple-pure-request-v1"
+const _PURE_REQUEST_MAX_BYTES = 1048576
+
+# Owner-held policy. The evidence is the output of pure_container_qualify_v1 for
+# this state_root/view_root pair; it is never decoded from a request.
+pub struct PureContainerOwnerPolicyV1:
+    store: text
+    view_root: text
+    base_root: text
+    quota: ViewBytesV1
+    limits: SosixContainLimitsV1
+    identity: text
+    requirement: ContainerCapabilityRequirementV1
+    evidence: PureContainerEvidenceV1
+
+pub struct PureContainerRequestV1:
+    pod_uid: text
+    attempt: ContainerAttemptNumberV1
+    operation_id: text
+    program: text
+    program_digest: text
+    args: [text]
+    environment: [text]
+    network: text
+
+struct PureRetainedV1:
+    pod_uid: text
+    attempt: i64
+    operation_id: text
+    phase: text
+    exit_code: i64
+    reason: text
+    has_exit: bool
+
+fn _pure_line_ok_v1(value: text) -> bool:
+    not value.contains("\n") and not value.contains("\r") and not value.contains("\0")
+
+pub fn pure_container_request_encode_v1(request: PureContainerRequestV1) -> Result<text, text>:
+    if not builder_identifier_valid_v1(request.pod_uid) or not builder_identifier_valid_v1(request.operation_id) or
+            request.attempt.value <= 0:
+        return Err("pure-container-request-identity-invalid")
+    if request.program == "" or request.network == "":
+        return Err("pure-container-request-program-invalid")
+    for field in [request.program, request.program_digest, request.network]:
+        if not _pure_line_ok_v1(field): return Err("pure-container-request-field-invalid")
+    var lines: [text] = [PURE_CONTAINER_REQUEST_MAGIC_V1, "pod=" + request.pod_uid,
+        "attempt=" + request.attempt.value.to_text(), "operation=" + request.operation_id,
+        "program=" + request.program, "digest=" + request.program_digest, "network=" + request.network]
+    for arg in request.args:
+        if not _pure_line_ok_v1(arg): return Err("pure-container-request-field-invalid")
+        lines.push("arg=" + arg)
+    for entry in request.environment:
+        if not _pure_line_ok_v1(entry): return Err("pure-container-request-field-invalid")
+        lines.push("env=" + entry)
+    val encoded = lines.join("\n") + "\n"
+    if encoded.byte_len() > _PURE_REQUEST_MAX_BYTES: return Err("pure-container-request-too-large")
+    Ok(encoded)
+
+fn _pure_after_v1(line: text, key: text) -> Option<text>:
+    if line.starts_with(key + "="): Some(line.substring(key.byte_len() + 1, line.byte_len())) else: None
+
+pub fn pure_container_request_decode_v1(bytes: text) -> Result<PureContainerRequestV1, text>:
+    if bytes.byte_len() == 0 or bytes.byte_len() > _PURE_REQUEST_MAX_BYTES or bytes.contains("\0") or bytes.contains("\r"):
+        return Err("pure-container-request-size")
+    if not bytes.ends_with("\n"): return Err("pure-container-request-unterminated")
+    val lines = bytes.substring(0, bytes.byte_len() - 1).split("\n")
+    if lines.len() < 7 or lines[0] != PURE_CONTAINER_REQUEST_MAGIC_V1: return Err("pure-container-request-magic")
+    var fixed: [text] = []
+    var index = 1
+    for key in ["pod", "attempt", "operation", "program", "digest", "network"]:
+        val value = _pure_after_v1(lines[index], key)
+        if value.is_none(): return Err("pure-container-request-field-order:" + key)
+        fixed.push(value.unwrap())
+        index = index + 1
+    var args: [text] = []
+    var environment: [text] = []
+    while index < lines.len():
+        val arg = _pure_after_v1(lines[index], "arg")
+        val env = _pure_after_v1(lines[index], "env")
+        if arg.is_some(): args.push(arg.unwrap())
+        elif env.is_some(): environment.push(env.unwrap())
+        else: return Err("pure-container-request-line-unknown")
+        index = index + 1
+    val attempt = fixed[1].to_int()
+    if attempt.is_none(): return Err("pure-container-request-attempt-invalid")
+    val request = PureContainerRequestV1(pod_uid: fixed[0], attempt: ContainerAttemptNumberV1(attempt.unwrap()),
+        operation_id: fixed[2], program: fixed[3], program_digest: fixed[4], args: args, environment: environment,
+        network: fixed[5])
+    # Canonical form only: re-encoding must reproduce the exact bytes.
+    val again = pure_container_request_encode_v1(request)?
+    if again != bytes: return Err("pure-container-request-not-canonical")
+    Ok(request)
+
+pub fn pure_container_request_digest_v1(bytes: text) -> text:
+    sha256_text(bytes)
+
+# Digest the owner and caller pin the provider by: binds the measured evidence
+# and its root pair, so a different qualification is a different provider.
+pub fn pure_container_provider_pin_v1(policy: PureContainerOwnerPolicyV1) -> text:
+    val evidence = policy.evidence
+    sha256_text("simple-pure-container-provider-v1\n" + evidence.evidence_revision + "\n" + evidence.roots_digest +
+        "\n" + evidence.host_os + "\n" + evidence.host_arch)
+
+fn _pure_op_refused_v1(action: text, reason: text, status: text = RUNTIME_STATUS_BLOCKED) -> RuntimeOperationV1:
+    RuntimeOperationV1(status: status, operation: action, command: runtime_command_empty(),
+        state: RuntimeStateV1(phase: RUNTIME_PHASE_UNKNOWN, identity: RuntimeIdentityV1(pod_uid: "", attempt: 0,
+            provider_generation: 0, operation_id: "", engine: "", native_id: "", node_boot_id: ""),
+            exit_code: -1, reason: ""),
+        exit_code: -1, stdout: "", stderr: "", reason: reason)
+
+# The runtime judges read-only reuse after materialization, so admission lifts it (as pure_runtime_v1 does).
+fn _pure_admission_reason_v1(policy: PureContainerOwnerPolicyV1) -> text:
+    var gated = policy.requirement
+    gated.required_readonly_file_backing_reuse = ContainerCapabilityFlagV1(false)
+    val report = pure_container_capability_report_v1(sosix_contain_support_v1(), policy.evidence)
+    container_capability_v1_admission_reason(report, gated)
+
+pub class PureSimpleContainerAdapterV1:
+    policy: PureContainerOwnerPolicyV1
+    state_root: text
+    scope: ContainerHostScopeV2
+    observed: ContainerHostObservationV2
+    timeout: SosixContainMillisV1
+    var records: Dict<text, PureRetainedV1>
+
+impl PureSimpleContainerAdapterV1:
+    # Fail closed at open: the policy's own evidence must admit its own requirement.
+    pub static fn open(policy: PureContainerOwnerPolicyV1, state_root: text, scope: ContainerHostScopeV2,
+            expected_provider_identity_digest: text, timeout: SosixContainMillisV1) -> Result<PureSimpleContainerAdapterV1, text>:
+        val evidence = policy.evidence
+        if evidence.evidence_revision == "": return Err("pure-container-evidence-missing")
+        if policy.requirement.required_isolation_kind == "": return Err("pure-container-requirement-isolation-required")
+        val reason = _pure_admission_reason_v1(policy)
+        if reason != "": return Err("pure-container-admission-refused:" + reason)
+        if state_root == "" or state_root.byte_len() > 512 or not _pure_line_ok_v1(state_root): return Err("pure-container-state-root-invalid")
+        if timeout.value <= 0 or timeout.value != policy.limits.wall.value: return Err("pure-container-policy-scope-mismatch")
+        if not builder_digest_valid_v1(expected_provider_identity_digest) or
+                expected_provider_identity_digest != pure_container_provider_pin_v1(policy):
+            return Err("pure-container-provider-identity-mismatch")
+        # ponytail: caller-scope-v1 is NOT a native boot incarnation. The machine and boot identities are the
+        # trusted owner's scope text; the upgrade path is a SOSIX host-identity API that lets this adapter
+        # observe them itself and report native-boot-incarnation-v1.
+        # The pure runtime has no persistent service incarnation: the machine and
+        # boot identities are the trusted owner's scope, not a native observation.
+        val observed = ContainerHostObservationV2(backend: CONTAINER_BACKEND_SIMPLE_PURE_PROCESS_V1,
+            native_machine_id: scope.native_machine_id, native_boot_id: scope.boot_id,
+            provider_identity_digest: expected_provider_identity_digest, execution_os: "host",
+            architecture: evidence.host_arch, continuity_assurance: "caller-scope-v1", boot_observation: "")
+        Ok(PureSimpleContainerAdapterV1(policy: policy, state_root: state_root, scope: scope, observed: observed,
+            timeout: timeout, records: {}))
+
+    pub fn observation() -> ContainerHostObservationV2: self.observed
+
+    # Non-empty while any retained run ended with its teardown unproven.
+    pub fn unproven_cleanup_reason() -> text:
+        for record in self.records.values():
+            if record.phase == RUNTIME_PHASE_UNKNOWN: return "pure-container-cleanup-unproven"
+        ""
+
+    fn _decode(request: ContainerExecutionRequestV2) -> Result<PureContainerRequestV1, text>:
+        val plan = request.plan
+        if plan.backend != CONTAINER_BACKEND_SIMPLE_PURE_PROCESS_V1 or
+                plan.physical_host_id != self.scope.physical_host_id or plan.service_scope_id != self.scope.service_scope_id or
+                plan.boot_id != self.scope.boot_id or plan.provider_generation != self.scope.provider_generation or
+                plan.native_machine_id != self.scope.native_machine_id or plan.continuity_mode != self.scope.continuity_mode or
+                plan.continuity_id != self.scope.continuity_id:
+            return Err("pure-container-request-scope-mismatch")
+        val decoded = pure_container_request_decode_v1(request.request_bytes)?
+        if plan.workload_uid != decoded.pod_uid or plan.attempt != decoded.attempt.value or
+                plan.operation_id != decoded.operation_id or
+                plan.request_digest != pure_container_request_digest_v1(request.request_bytes):
+            return Err("pure-container-request-binding-mismatch")
+        Ok(decoded)
+
+    pub fn validate(request: ContainerExecutionRequestV2) -> Result<ContainerCapabilityFlagV1, text>:
+        val decoded = self._decode(request)?
+        Ok(ContainerCapabilityFlagV1(true))
+
+    pub fn project(request: ContainerExecutionRequestV2) -> Result<ContainerRequestProjectionV2, text>:
+        val decoded = self._decode(request)?
+        Ok(ContainerRequestProjectionV2(workload_uid: decoded.pod_uid, attempt: decoded.attempt.value,
+            operation_id: decoded.operation_id, request_digest: request.plan.request_digest, cpu_millis: 0,
+            memory_bytes: self.policy.limits.memory.value, timeout_ms: self.timeout.value,
+            has_devices: false, has_workspace: false))
+
+    pub fn action_project(request: ContainerExecutionRequestV2) -> Result<ContainerActionProjectionV2, text>:
+        val decoded = self._decode(request)?
+        Ok(ContainerActionProjectionV2(argv: [decoded.program] + decoded.args, working_directory: self.state_root, mounts: []))
+
+    fn _key(decoded: PureContainerRequestV1) -> text:
+        decoded.pod_uid + "|" + decoded.attempt.value.to_text() + "|" + decoded.operation_id
+
+    fn _container_id(decoded: PureContainerRequestV1) -> text:
+        # The scope fence is part of the id, so two scopes sharing a caller id cannot collide on a view.
+        val fence = match container_scope_fence_id_v2(self.scope):
+            case Ok(value): value
+            case Err(_): "invalid-scope"
+        "pure-" + sha256_text(fence + "|" + decoded.pod_uid + "|" + decoded.attempt.value.to_text() + "|" + decoded.operation_id).substring(0, 40)
+
+    fn _identity(decoded: PureContainerRequestV1) -> Result<RuntimeIdentityV1, text>:
+        val fence = container_scope_fence_id_v2(self.scope)?
+        Ok(RuntimeIdentityV1(pod_uid: decoded.pod_uid, attempt: decoded.attempt.value,
+            provider_generation: self.scope.provider_generation, operation_id: decoded.operation_id,
+            engine: CONTAINER_ENGINE_SIMPLE_PURE_CONTAINER_V1, native_id: sha256_text(self._container_id(decoded)),
+            node_boot_id: fence))
+
+    fn _op(action: text, decoded: PureContainerRequestV1, record: PureRetainedV1, status: text, reason: text) -> RuntimeOperationV1:
+        val identity = match self._identity(decoded):
+            case Ok(value): value
+            case Err(failure): return _pure_op_refused_v1(action, failure, RUNTIME_STATUS_BLOCKED)
+        var exit = RuntimeExitStatusV1.Unobserved
+        if record.phase == RUNTIME_PHASE_UNKNOWN: exit = RuntimeExitStatusV1.Unknown(record.reason)
+        elif record.has_exit: exit = RuntimeExitStatusV1.Exited(record.exit_code)
+        val code = if record.has_exit: record.exit_code else: -1
+        RuntimeOperationV1(status: status, operation: action, command: runtime_command_empty(),
+            state: RuntimeStateV1(phase: record.phase, identity: identity, exit_code: code,
+                reason: record.reason, workload_exit: exit),
+            exit_code: code, stdout: "", stderr: "", reason: reason)
+
+    pub me fn read(action: text, request: ContainerExecutionRequestV2) -> RuntimeOperationV1:
+        if action != "inspect" and action != "logs" and action != "wait" and action != "configuration" and action != "input-configuration":
+            return _pure_op_refused_v1(action, "pure-container-read-action-unsupported", RUNTIME_STATUS_REJECTED)
+        val decoded = match self._decode(request):
+            case Ok(value): value
+            case Err(reason): return _pure_op_refused_v1(action, reason, RUNTIME_STATUS_REJECTED)
+        if action == "logs" or action == "configuration" or action == "input-configuration":
+            return _pure_op_refused_v1(action, "pure-container-" + action + "-unsupported", RUNTIME_STATUS_REJECTED)
+        val key = self._key(decoded)
+        if not self.records.contains_key(key): return _pure_op_refused_v1(action, "pure-container-not-retained", RUNTIME_STATUS_BLOCKED)
+        val record = self.records[key]
+        if action == "wait" and record.phase != RUNTIME_PHASE_EXITED:
+            return self._op(action, decoded, record, RUNTIME_STATUS_BLOCKED, "pure-container-not-exited")
+        self._op(action, decoded, record, RUNTIME_STATUS_OK, "")
+
+    fn _admission() -> text:
+        _pure_admission_reason_v1(self.policy)
+
+    me fn _set(key: text, record: PureRetainedV1) -> PureRetainedV1:
+        self.records[key] = record
+        record
+
+    me fn _run(decoded: PureContainerRequestV1, record: PureRetainedV1) -> PureRetainedV1:
+        val spec = PureContainerSpecV1(container_id: self._container_id(decoded), store: self.policy.store,
+            view_root: self.policy.view_root, state_root: self.state_root, base_root: self.policy.base_root,
+            quota: self.policy.quota, program: decoded.program, program_digest: decoded.program_digest,
+            args: decoded.args, environment: decoded.environment, limits: self.policy.limits,
+            identity: self.policy.identity, network: decoded.network, requirement: self.policy.requirement,
+            evidence: self.policy.evidence, extra_grants: [])
+        val run = pure_container_run_v1(spec)
+        var next = record
+        if run.status == "exited":
+            next.phase = RUNTIME_PHASE_EXITED
+            next.exit_code = run.exit_code.value
+            next.has_exit = true
+            next.reason = ""
+        elif run.status == "rejected":
+            next.phase = RUNTIME_PHASE_CREATED
+            next.reason = run.reason
+        else:
+            next.phase = RUNTIME_PHASE_UNKNOWN
+            next.reason = run.reason
+        next
+
+    fn _launch_window(action: text, request: ContainerExecutionRequestV2, decoded: PureContainerRequestV1,
+            deadline: ContainerEffectDeadlineV1) -> text:
+        val remaining = container_effect_remaining_ms_v1(deadline, request.plan.request_digest, decoded.operation_id,
+            action, sosix_time_now_unix_micros() / 1000)
+        if remaining.is_err(): remaining.unwrap_err() else: ""
+
+    pub me fn apply(action: text, request: ContainerExecutionRequestV2, deadline: ContainerEffectDeadlineV1) -> RuntimeOperationV1:
+        if not ["prepare", "create", "start", "inspect", "logs", "wait", "configuration", "input-configuration", "stop", "destroy"].contains(action):
+            return _pure_op_refused_v1(action, "pure-container-action-unsupported", RUNTIME_STATUS_REJECTED)
+        if action == "inspect" or action == "logs" or action == "wait" or action == "configuration" or action == "input-configuration":
+            return self.read(action, request)
+        val decoded = match self._decode(request):
+            case Ok(value): value
+            case Err(reason): return _pure_op_refused_v1(action, reason, RUNTIME_STATUS_REJECTED)
+        val key = self._key(decoded)
+        val fresh = PureRetainedV1(pod_uid: decoded.pod_uid, attempt: decoded.attempt.value,
+            operation_id: decoded.operation_id, phase: "", exit_code: -1, reason: "", has_exit: false)
+        val known = self.records.contains_key(key)
+        val current = if known: self.records[key] else: fresh
+        if action == "prepare" or action == "create":
+            if known and not (action == "create" and current.phase == RUNTIME_PHASE_PREPARED):
+                return self._op(action, decoded, current, RUNTIME_STATUS_BLOCKED, "pure-container-already-retained")
+            val refused = self._admission()
+            if refused != "": return _pure_op_refused_v1(action, "pure-container-admission-refused:" + refused, RUNTIME_STATUS_REJECTED)
+            if action == "create":
+                val window = self._launch_window(action, request, decoded, deadline)
+                if window != "": return _pure_op_refused_v1(action, window, RUNTIME_STATUS_BLOCKED)
+            var next = current
+            next.phase = if action == "prepare": RUNTIME_PHASE_PREPARED else: RUNTIME_PHASE_CREATED
+            return self._op(action, decoded, self._set(key, next), RUNTIME_STATUS_OK, "")
+        if not self.records.contains_key(key): return _pure_op_refused_v1(action, "pure-container-not-retained", RUNTIME_STATUS_BLOCKED)
+        if action == "start":
+            if current.phase != RUNTIME_PHASE_CREATED:
+                return self._op(action, decoded, current, RUNTIME_STATUS_BLOCKED, "pure-container-start-requires-created")
+            val window = self._launch_window(action, request, decoded, deadline)
+            if window != "": return _pure_op_refused_v1(action, window, RUNTIME_STATUS_BLOCKED)
+            val ran = self._set(key, self._run(decoded, current))
+            val status = if ran.phase == RUNTIME_PHASE_EXITED: RUNTIME_STATUS_OK else: RUNTIME_STATUS_BLOCKED
+            return self._op(action, decoded, ran, status, ran.reason)
+        self._finish(action, decoded, key)
+
+    # stop/destroy: the one-shot runtime already tore its view down inside start.
+    me fn _finish(action: text, decoded: PureContainerRequestV1, key: text) -> RuntimeOperationV1:
+        val current = self.records[key]
+        if current.phase == RUNTIME_PHASE_UNKNOWN:
+            return self._op(action, decoded, current, RUNTIME_STATUS_BLOCKED, "pure-container-cleanup-unproven")
+        var next = current
+        if action == "stop":
+            if current.phase == RUNTIME_PHASE_DESTROYED: return self._op(action, decoded, current, RUNTIME_STATUS_OK, "")
+            next.phase = RUNTIME_PHASE_STOPPED
+        else:
+            next.phase = RUNTIME_PHASE_DESTROYED
+        self._op(action, decoded, self._set(key, next), RUNTIME_STATUS_OK, "")
+
+    pub me fn control(action: text, request: ContainerExecutionRequestV2, context: ContainerControlDeadlineV1) -> RuntimeOperationV1:
+        if action != "stop" and action != "destroy":
+            return _pure_op_refused_v1(action, "pure-container-control-action-unsupported", RUNTIME_STATUS_REJECTED)
+        val decoded = match self._decode(request):
+            case Ok(value): value
+            case Err(reason): return _pure_op_refused_v1(action, reason, RUNTIME_STATUS_REJECTED)
+        val key = self._key(decoded)
+        if not self.records.contains_key(key): return _pure_op_refused_v1(action, "pure-container-not-retained", RUNTIME_STATUS_BLOCKED)
+        val window = container_control_remaining_ms_v1(context, request.plan.request_digest, decoded.operation_id,
+            action, sosix_time_now_unix_micros() / 1000)
+        if window.is_err(): return _pure_op_refused_v1(action, window.unwrap_err(), RUNTIME_STATUS_BLOCKED)
+        self._finish(action, decoded, key)
+
+    pub fn intent(request: ContainerExecutionRequestV2) -> Result<RuntimeIntentV1, text>:
+        val decoded = self._decode(request)?
+        Err("pure-container-intent-unsupported")
+
+    pub me fn recover(request: ContainerExecutionRequestV2, intent: RuntimeIntentV1) -> RuntimeOperationV1:
+        _pure_op_refused_v1("recover", "pure-container-recovery-unsupported", RUNTIME_STATUS_REJECTED)
+
+    pub me fn absence(request: ContainerExecutionRequestV2, expected: RuntimeIdentityV1) -> Result<ContainerAbsenceReceiptV2, text>:
+        Err("pure-container-absence-unsupported")
+
+    pub me fn execution_user(request: ContainerExecutionRequestV2, expected: RuntimeIdentityV1) -> Result<ContainerExecutionUserReceiptV2, text>:
+        Err("pure-container-execution-user-unsupported")
+
+export PureContainerOwnerPolicyV1, PureContainerRequestV1, PureSimpleContainerAdapterV1
+export pure_container_request_encode_v1, pure_container_request_decode_v1, pure_container_request_digest_v1
+export pure_container_provider_pin_v1, PURE_CONTAINER_REQUEST_MAGIC_V1

@@ -1,0 +1,115 @@
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.common.driver_compile_options.{CompileOptions}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.common.driver_source_file.{source_file_coverage_identity}
+use compiler.common.library_mode_policy_v1.{library_mode_import_key_v1}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_lowering.module_surface.{ModuleSurfacesByName, module_surfaces_from_modules, module_surface_canonical_path}
+use compiler.hir.hir_lowering.module_surface_registry_index.{module_surface_registry_index, module_surface_resolve_import_key}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.driver.driver_source_pipeline_parsing.*
+use compiler.driver.driver_preclosed_source_aliases.{driver_preclosed_source_aliases_v1}
+use compiler.driver.cache.driver_hir_source_body_surfaces_v1.{driver_hir_source_body_replay_surfaces_v1}
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded}
+use std.common.crypto.sha256.{sha256_text}
+
+# Real parser, closure aliases, frozen registry, re-export and private surface
+# replay. These fixtures do not manufacture compiler/runtime admission receipts.
+fn library_mode_surface_driver(no_imports: bool = false) -> CompilerDriver:
+    val root = module_surface_canonical_path("test/fixtures/compiler/library_mode_selection")
+    val rows = if no_imports: [["src/app/no_imports.spl", "app.no_imports"]] else: [["src/app/mixed_entry.spl", "app.mixed_entry"],
+        ["src/lib/nogc_sync_mut/library_mode_probe.spl", "std.nogc_sync_mut.library_mode_probe"],
+        ["src/lib/gc_sync_mut/library_mode_probe.spl", "std.gc_sync_mut.library_mode_probe"],
+        ["src/lib/gc_sync_mut/library_internal.spl", "std.gc_sync_mut.library_internal"],
+        ["src/lib/common/library_reexport.spl", "std.common.library_reexport"],
+        ["src/lib/common/library_named_reexport.spl", "std.common.library_named_reexport"],
+        ["src/lib/common/library_shared_probe.spl", "std.common.library_shared_probe"]]
+    var files: [SourceFile] = []
+    for row in rows:
+        val path = root + "/" + row[0]
+        val content = file_read_regular_no_follow_bounded(path, 65536).unwrap()
+        files.push(SourceFile(path: path, content: content, module_name: row[1]))
+    val aliased = driver_preclosed_source_aliases_v1(files, [root + "/src/lib"], root, "nogc-sync-mut").unwrap()
+    var modules: Dict<text, Module> = {}
+    for source in aliased:
+        modules[source.module_name] = parse_full_frontend(source.content, source.path, source.module_name, Logger(level: 0))
+    val surfaces = module_surfaces_from_modules(modules, aliased, "nogc-sync-mut").unwrap()
+    var options = CompileOptions.default()
+    options.library_mode = "nogc-sync-mut"
+    options.gc_off = true
+    options.allowed_families = ["nogc_sync_mut", "common"]
+    var driver = CompilerDriver.create(options)
+    driver.ctx.modules = modules
+    driver.ctx.sources = aliased
+    for source in aliased:
+        val coverage = source_file_coverage_identity(source.path, source.content)
+        driver.ctx.source_module_names_owner.push(source.module_name)
+        driver.ctx.source_paths_owner.push(source.path)
+        driver.ctx.source_authored_paths_owner.push(coverage.0)
+        driver.ctx.source_contents_owner.push(coverage.1)
+        driver.ctx.source_identities_owner.push(sha256_text(coverage.1))
+        driver.ctx.source_byte_lengths_owner.push(coverage.1.len())
+    driver.streaming_module_surfaces_owner = surfaces
+    driver.streaming_surface_owner_ready = true
+    driver
+
+fn library_mode_check_surface_owners(surfaces: ModuleSurfacesByName):
+    expect(surfaces.library_mode).to_equal("nogc-sync-mut")
+    val app_index = module_surface_registry_index(surfaces, "app.mixed_entry")
+    val gc_index = module_surface_registry_index(surfaces, "std.gc_sync_mut.library_internal")
+    expect(app_index >= 0 and gc_index >= 0).to_equal(true)
+    val app_target = module_surface_resolve_import_key(surfaces, surfaces.surfaces[app_index], "std.library_mode_probe")
+    val gc_target = module_surface_resolve_import_key(surfaces, surfaces.surfaces[gc_index], "std.library_mode_probe")
+    expect(app_target != gc_target).to_equal(true)
+    val app_owner = module_surface_registry_index(surfaces, app_target)
+    val gc_owner = module_surface_registry_index(surfaces, gc_target)
+    expect(app_owner >= 0 and gc_owner >= 0 and app_owner != gc_owner).to_equal(true)
+    expect(surfaces.surfaces[app_owner].canonical_path.ends_with("/nogc_sync_mut/library_mode_probe.spl")).to_equal(true)
+    expect(surfaces.surfaces[gc_owner].canonical_path.ends_with("/gc_sync_mut/library_mode_probe.spl")).to_equal(true)
+    val shared_key = library_mode_import_key_v1("std.library_shared_probe", "nogc-sync-mut", "std.common.library_reexport")
+    val shared_index = module_surface_registry_index(surfaces, shared_key)
+    expect(shared_index >= 0).to_equal(true)
+    expect(surfaces.surfaces[shared_index].canonical_path.ends_with("/common/library_shared_probe.spl")).to_equal(true)
+
+describe "configured frozen surfaces and body replay":
+    it "coexists with an explicit GC owner and resolves a common re-export":
+        step("coexists with an explicit GC owner and resolves a common re-export")
+        val driver = library_mode_surface_driver()
+        library_mode_check_surface_owners(driver.streaming_module_surfaces_owner)
+        var lowering = hirlowering_for_module("app.mixed_entry", driver.streaming_module_surfaces_owner)
+        lowering.library_mode = "nogc-sync-mut"
+        val lowered = lowering.lower_module(driver.ctx.modules["app.mixed_entry"])
+        expect(lowering.errors.len()).to_equal(0)
+        expect(lowered.functions.len() > 0).to_equal(true)
+
+    it "replays physical declarations with the same owner mode and rejects a changed mode":
+        step("replays physical declarations with the same owner mode and rejects a changed mode")
+        var driver = library_mode_surface_driver()
+        val replayed = driver_hir_source_body_replay_surfaces_v1(driver).unwrap()
+        library_mode_check_surface_owners(replayed)
+        driver.ctx.options.library_mode = "gc-sync-mut"
+        driver.ctx.options.gc_off = false
+        driver.ctx.options.allowed_families = ["gc_sync_mut", "common"]
+        expect(driver_hir_source_body_replay_surfaces_v1(driver).is_err()).to_equal(true)
+
+    it "refuses changed mode against a retained no-import corpus before replay":
+        step("refuse changed mode against a retained no-import corpus before replay")
+        var driver = library_mode_surface_driver(true)
+        expect(driver.streaming_module_surfaces_owner.surfaces.len()).to_equal(1)
+        expect(driver.streaming_module_surfaces_owner.surfaces[0].imports.len()).to_equal(0)
+        val replayed = driver_hir_source_body_replay_surfaces_v1(driver).unwrap()
+        expect(replayed.library_mode).to_equal("nogc-sync-mut")
+        expect(replayed.surfaces.len()).to_equal(1)
+        # Mutate only the request mode. Retained source rows, registry and all
+        # other options stay fixed, so a missing import cannot cause refusal.
+        driver.ctx.options.library_mode = "gc-sync-mut"
+        val refused = driver_hir_source_body_replay_surfaces_v1(driver)
+        expect(refused.is_err()).to_equal(true)
+        match refused:
+            case Err(reason): expect(reason).to_contain("LIBRARY_MODE_REPLAY_MISMATCH")
+            case Ok(_): panic("changed mode reused retained no-import authority")
+        expect(driver.streaming_module_surfaces_owner.library_mode).to_equal("nogc-sync-mut")

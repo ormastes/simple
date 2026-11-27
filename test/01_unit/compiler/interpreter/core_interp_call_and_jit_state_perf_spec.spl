@@ -1,0 +1,483 @@
+"""
+## Purpose and audience
+Purpose: Verify Wave B1 core frontend interpreter JIT in-memory hash-table state,
+elimination of fake-0 JIT returns and repeated compile attempts, O(1) caller/owner
+function tables, yield-cache reset on func_table_reset, and fast-local method
+receiver static-probe skip.
+Audience: compiler engineers maintaining `src/compiler/10.frontend/core/interpreter/`.
+"""
+
+use std.spec.step
+use std.io_runtime.{file_exists, file_read, getpid}
+use compiler.core.ast.{ast_reset, decl_fn, decl_struct_def, decl_set_is_value_type}
+use compiler.core.ast_expr.{expr_ident, expr_int_lit, expr_method_call, expr_owner_int_set, expr_yield}
+use compiler.core.ast_stmt.{stmt_expr_stmt, stmt_return_stmt}
+use compiler.core.interpreter.hashmap.{HM_SIZE, hm_hash_text}
+use compiler.core.interpreter.value.{val_get_array, val_get_int, val_is_array, val_is_int, val_make_int, val_make_struct}
+use compiler.core.interpreter.env.{env_define, env_push_frame, env_set_local}
+use compiler.core.interpreter.eval.{eval_has_error, eval_get_error}
+use compiler.core.interpreter.eval_decls.{eval_init}
+use compiler.core.interpreter.eval_calls.{eval_function_call}
+use compiler.core.interpreter._EvalOps.call_method_eval.{eval_method_call}
+use compiler.core.interpreter.jit.{
+    jit_init,
+    jit_cleanup,
+    jit_record_call,
+    jit_get_call_count,
+    jit_should_compile,
+    jit_is_compiled,
+    jit_mark_compiled,
+    jit_try_compile,
+    jit_try_execute,
+    jit_try_execute_checked,
+    jit_is_compile_failed,
+    jit_compile_failed_count,
+    jit_compile_attempt_count,
+    jit_register_native_return,
+    jit_has_native_callable,
+    jit_is_enabled,
+    jit_compiled_count,
+    jit_total_tracked,
+    jit_mark_symbol_used,
+    jit_advance_epoch,
+    jit_get_epoch,
+    jit_sweep_stale,
+    jit_cleanup_symbol,
+    jit_sweep_tracked_count
+}
+use compiler.core.interpreter.eval_tables.{
+    FUNC_LOOKUP_AMBIGUOUS,
+    func_table_reset,
+    func_table_register,
+    func_table_register_owned,
+    func_table_lookup_owned,
+    func_owner_count,
+    func_owners_of,
+    func_flat_lookup_for_caller,
+    func_import_binding_reset,
+    func_import_binding_register,
+    func_import_binding_route,
+    func_module_namespace_register,
+    func_module_namespace_lookup,
+    func_yield_cache_get,
+    func_yield_cache_set,
+    eval_table_chain_probes_reset,
+    eval_table_chain_probes_get,
+    struct_table_register,
+    enum_table_register
+}
+
+fn find_single_key_collision(prefix: text) -> (text, text):
+    var seen: [text] = []
+    var i: i64 = 0
+    while i < HM_SIZE:
+        seen.push("")
+        i = i + 1
+    i = 0
+    while i <= HM_SIZE:
+        val candidate = "{prefix}_{i}"
+        val bucket = hm_hash_text(candidate) % HM_SIZE
+        if seen[bucket] != "":
+            return (seen[bucket], candidate)
+        seen[bucket] = candidate
+        i = i + 1
+    ("", "")
+
+fn pair_bucket_for_spec(a: text, b: text) -> i64:
+    val ha = hm_hash_text(a)
+    val hb = hm_hash_text(b)
+    var mixed = (ha * 1099511628211) xor (hb + 2654435761)
+    if mixed < 0:
+        mixed = 0 - mixed
+        if mixed < 0:
+            mixed = 0
+    mixed % HM_SIZE
+
+fn find_pair_key_collision(prefix: text) -> (text, text, text, text):
+    var first_a: [text] = []
+    var first_b: [text] = []
+    var i: i64 = 0
+    while i < HM_SIZE:
+        first_a.push("")
+        first_b.push("")
+        i = i + 1
+    i = 0
+    while i <= HM_SIZE:
+        val ca = "{prefix}_owner_{i}"
+        val cb = "{prefix}_name_{i}"
+        val bucket = pair_bucket_for_spec(ca, cb)
+        if first_a[bucket] != "":
+            return (first_a[bucket], first_b[bucket], ca, cb)
+        first_a[bucket] = ca
+        first_b[bucket] = cb
+        i = i + 1
+    ("", "", "", "")
+
+fn check_jit_in_memory_no_disk_state() -> text:
+    val pid = getpid()
+    val legacy_path = "/tmp/simple_jit_{pid}.sdn"
+    val jit_src = file_read("src/compiler/10.frontend/core/interpreter/jit.spl") ?? ""
+    if jit_src.contains("/tmp/simple_jit_"):
+        return "jit.spl still references /tmp/simple_jit_ state file"
+    if jit_src.contains("file_atomic_write") or jit_src.contains("file_read_result"):
+        return "jit.spl still imports file I/O helpers"
+
+    jit_init(4, 0)
+    if not jit_is_enabled():
+        return "expected jit_is_enabled() == true for threshold 4"
+    var i: i64 = 0
+    while i < 300:
+        val sym = "hot_sym_{i}"
+        jit_record_call(sym)
+        jit_record_call(sym)
+        i = i + 1
+    if jit_total_tracked() != 300:
+        return "expected 300 tracked symbols, got {jit_total_tracked()}"
+    if jit_sweep_tracked_count() != 300:
+        return "expected 300 used_epochs symbols, got {jit_sweep_tracked_count()}"
+    if jit_get_call_count("hot_sym_0") != 2 or jit_get_call_count("hot_sym_299") != 2:
+        return "unexpected call counts across >HM_SIZE symbols"
+    if file_exists(legacy_path):
+        return "jit_record_call wrote legacy state file {legacy_path}"
+
+    # Verify collision-chain accuracy in call_counts, compiled, compile_failed, used_epochs.
+    val coll = find_single_key_collision("jit_coll")
+    if coll.0 == "" or coll.1 == "":
+        return "failed to construct HM_SIZE collision pair"
+    jit_init(2, 0)
+    jit_record_call(coll.0)
+    jit_record_call(coll.0)
+    jit_record_call(coll.1)
+    if jit_get_call_count(coll.0) != 2 or jit_get_call_count(coll.1) != 1:
+        return "collision pair call counts drifted"
+
+    jit_mark_compiled(coll.0)
+    val ep1 = jit_advance_epoch()
+    jit_mark_symbol_used(coll.1)
+    jit_mark_compiled(coll.1)
+    val ep2 = jit_advance_epoch()
+    if ep1 != 1 or ep2 != 2 or jit_get_epoch() != 2:
+        return "epoch progression mismatch"
+    if jit_compiled_count() != 2:
+        return "expected 2 compiled entries before sweep, got {jit_compiled_count()}"
+    val swept = jit_sweep_stale(1)
+    if swept != 1:
+        return "expected 1 stale compiled symbol swept, got {swept}"
+    if jit_is_compiled(coll.0):
+        return "stale symbol should have been swept"
+    if not jit_is_compiled(coll.1):
+        return "fresh colliding symbol should remain compiled"
+    jit_cleanup_symbol(coll.1)
+    if jit_is_compiled(coll.1) or jit_compiled_count() != 0:
+        return "jit_cleanup_symbol did not clear live compiled entry"
+    jit_cleanup()
+    if jit_is_enabled() or jit_total_tracked() != 0:
+        return "jit_cleanup did not reset state"
+    ""
+
+fn check_jit_negative_cache_and_checked_execute() -> text:
+    jit_init(3, 0)
+    jit_record_call("unbacked_hot")
+    jit_record_call("unbacked_hot")
+    if jit_should_compile("unbacked_hot"):
+        return "should not compile below threshold"
+    jit_record_call("unbacked_hot")
+    if not jit_should_compile("unbacked_hot"):
+        return "should be eligible at threshold before first compile attempt"
+
+    # First compile attempt with no native callable: must NOT mark compiled,
+    # must record in compile_failed, and must never re-attempt compilation.
+    if jit_try_compile("unbacked_hot", "mir"):
+        return "jit_try_compile succeeded without a native callable"
+    if jit_is_compiled("unbacked_hot"):
+        return "unbacked function was falsely marked compiled"
+    if not jit_is_compile_failed("unbacked_hot"):
+        return "unbacked function was not recorded in compile_failed"
+    if jit_compile_failed_count() != 1:
+        return "expected compile_failed_count == 1, got {jit_compile_failed_count()}"
+    if jit_compile_attempt_count() != 1:
+        return "expected compile_attempt_count == 1, got {jit_compile_attempt_count()}"
+
+    var attempt: i64 = 0
+    while attempt < 20:
+        jit_record_call("unbacked_hot")
+        if jit_should_compile("unbacked_hot"):
+            return "compile_failed negative cache failed to block jit_should_compile"
+        if jit_try_compile("unbacked_hot", "mir"):
+            return "jit_try_compile succeeded on retry without callable"
+        attempt = attempt + 1
+    if jit_compile_attempt_count() != 1:
+        return "expected at most 1 compile attempt, got {jit_compile_attempt_count()}"
+
+    # Even if jit_mark_compiled is called directly without a native callable,
+    # jit_try_execute_checked must fall back with (false, 0) rather than fake 0.
+    jit_mark_compiled("marked_without_callable")
+    val fallback_exec = jit_try_execute_checked("marked_without_callable", [])
+    if fallback_exec.0 or fallback_exec.1 != 0:
+        return "expected (false, 0) fallback for unbacked compiled mark"
+    if jit_try_execute("marked_without_callable", []) != -1:
+        return "expected -1 fallback from legacy jit_try_execute without callable"
+
+    # Register a legitimate native callable returning -1 and verify checked execution.
+    jit_register_native_return("native_minus_one", -1)
+    if not jit_has_native_callable("native_minus_one"):
+        return "expected native callable registered"
+    jit_record_call("native_minus_one")
+    jit_record_call("native_minus_one")
+    jit_record_call("native_minus_one")
+    if not jit_try_compile("native_minus_one", "mir"):
+        return "jit_try_compile should succeed when native callable exists"
+    val neg_exec = jit_try_execute_checked("native_minus_one", [])
+    if not neg_exec.0 or neg_exec.1 != -1:
+        return "expected (true, -1) from jit_try_execute_checked, got ({neg_exec.0}, {neg_exec.1})"
+    jit_cleanup()
+    ""
+
+fn check_eval_function_call_jit_minus_one_and_no_fake_zero() -> text:
+    eval_init()
+    ast_reset()
+    jit_init(1, 0)
+
+    # 1) Unbacked function marked compiled must fall back to tree-walking (return 42, not fake 0).
+    val body_42 = [stmt_return_stmt(expr_int_lit(42, 0), 0)]
+    val decl_42 = decl_fn("unbacked_forty_two", [], [], 0, body_42, 0, [], 0)
+    jit_mark_compiled("unbacked_forty_two")
+    val vid_42 = eval_function_call(decl_42, [], [])
+    if eval_has_error():
+        return "unexpected error on fallback call: {eval_get_error()}"
+    if not val_is_int(vid_42) or val_get_int(vid_42) != 42:
+        return "expected tree-walked 42 instead of fake 0, got vid={vid_42}"
+
+    # 2) Native-compiled function legitimately returning -1 must return -1 WITHOUT
+    # falling back to its AST body (which returns 999 if tree-walked).
+    val body_sentinel = [stmt_return_stmt(expr_int_lit(999, 0), 0)]
+    val decl_neg = decl_fn("compiled_neg_one", [], [], 0, body_sentinel, 0, [], 0)
+    jit_register_native_return("compiled_neg_one", -1)
+    jit_record_call("compiled_neg_one")
+    if not jit_try_compile("compiled_neg_one", "mir"):
+        return "failed to compile compiled_neg_one"
+    val vid_neg = eval_function_call(decl_neg, [], [])
+    if eval_has_error():
+        return "unexpected error on compiled -1 call: {eval_get_error()}"
+    if not val_is_int(vid_neg) or val_get_int(vid_neg) != -1:
+        return "expected legitimate JIT -1 return without fallback to 999, got {val_get_int(vid_neg)}"
+
+    jit_cleanup()
+    ""
+
+fn check_eval_tables_o1_hash_indices() -> text:
+    ast_reset()
+    func_table_reset()
+
+    var i: i64 = 0
+    while i < 512:
+        val owner = "src/mod_{i}.spl"
+        val fn_name = "fn_{i}"
+        func_table_register(fn_name, 1000 + i)
+        func_table_register_owned(owner, fn_name, 1000 + i)
+        func_import_binding_register("src/caller_{i}.spl", "src_fn_{i}:local_fn_{i}", owner)
+        func_module_namespace_register("src/ns_caller_{i}.spl", "alias_{i}", owner)
+        i = i + 1
+
+    # Probe both #0 and #511: any forward or reverse linear scan would take >= 512 probes.
+    eval_table_chain_probes_reset()
+    val d0 = func_table_lookup_owned("src/mod_0.spl", "fn_0")
+    val d511 = func_table_lookup_owned("src/mod_511.spl", "fn_511")
+    val fto_probes = eval_table_chain_probes_get()
+    if d0 != 1000 or d511 != 1511:
+        return "fto lookup mismatch: d0={d0}, d511={d511}"
+    if fto_probes >= 32:
+        return "fto lookup is not O(1): {fto_probes} probes for 2 lookups across 512 entries"
+
+    eval_table_chain_probes_reset()
+    val r0 = func_import_binding_route("src/caller_0.spl", "local_fn_0")
+    val r511 = func_import_binding_route("src/caller_511.spl", "local_fn_511")
+    val fib_probes = eval_table_chain_probes_get()
+    if r0.0 != "src/mod_0.spl" or r0.1 != "src_fn_0":
+        return "fib route #0 mismatch"
+    if r511.0 != "src/mod_511.spl" or r511.1 != "src_fn_511":
+        return "fib route #511 mismatch"
+    if fib_probes >= 32:
+        return "fib lookup is not O(1): {fib_probes} probes for 2 lookups across 512 entries"
+
+    eval_table_chain_probes_reset()
+    val ns0 = func_module_namespace_lookup("src/ns_caller_0.spl", "alias_0")
+    val ns511 = func_module_namespace_lookup("src/ns_caller_511.spl", "alias_511")
+    val fmn_probes = eval_table_chain_probes_get()
+    if ns0 != "src/mod_0.spl" or ns511 != "src/mod_511.spl":
+        return "fmn lookup mismatch"
+    if fmn_probes >= 32:
+        return "fmn lookup is not O(1): {fmn_probes} probes for 2 lookups across 512 entries"
+
+    # Flat fallback for a caller with no `use ... as ns` aliases must not scan 512 fmn entries
+    # nor scan 512 fto entries for owner counts.
+    eval_table_chain_probes_reset()
+    val flat_did = func_flat_lookup_for_caller("src/plain_caller.spl", "fn_511")
+    val flat_probes = eval_table_chain_probes_get()
+    if flat_did != 1511:
+        return "expected single-owner flat lookup 1511, got {flat_did}"
+    if flat_probes >= 32:
+        return "func_flat_lookup_for_caller scanned linearly: {flat_probes} probes"
+
+    # Re-registering the SAME (owner, name) updates decl_id without inflating owner count;
+    # registering a SECOND owner increments func_owner_count to 2 and triggers AMBIGUOUS.
+    func_table_register_owned("src/mod_511.spl", "fn_511", 2511)
+    if func_owner_count("fn_511") != 1:
+        return "re-registering same owner inflated func_owner_count to {func_owner_count(\"fn_511\")}"
+    if func_table_lookup_owned("src/mod_511.spl", "fn_511") != 2511:
+        return "in-place fto update did not replace decl_id"
+    func_table_register("fn_511", 3511)
+    func_table_register_owned("src/other_owner.spl", "fn_511", 3511)
+    if func_owner_count("fn_511") != 2:
+        return "expected func_owner_count == 2, got {func_owner_count(\"fn_511\")}"
+    if func_flat_lookup_for_caller("src/plain_caller.spl", "fn_511") != FUNC_LOOKUP_AMBIGUOUS:
+        return "expected FUNC_LOOKUP_AMBIGUOUS for two-owner symbol"
+    val owners = func_owners_of("fn_511")
+    if owners.len() != 2 or owners[0] != "src/mod_511.spl" or owners[1] != "src/other_owner.spl":
+        return "func_owners_of lost registration order"
+
+    # Composite-key hash collision check across fto, fib, and fmn.
+    val pcoll = find_pair_key_collision("pair_coll")
+    if pcoll.0 == "" or pcoll.2 == "":
+        return "failed to find composite-key bucket collision"
+    func_table_register_owned(pcoll.0, pcoll.1, 71)
+    func_table_register_owned(pcoll.2, pcoll.3, 72)
+    if func_table_lookup_owned(pcoll.0, pcoll.1) != 71 or func_table_lookup_owned(pcoll.2, pcoll.3) != 72:
+        return "fto collision chain returned wrong entry"
+    func_import_binding_register(pcoll.0, "s1:{pcoll.1}", "owner_1")
+    func_import_binding_register(pcoll.2, "s2:{pcoll.3}", "owner_2")
+    if func_import_binding_route(pcoll.0, pcoll.1).0 != "owner_1" or func_import_binding_route(pcoll.2, pcoll.3).0 != "owner_2":
+        return "fib collision chain returned wrong entry"
+    func_module_namespace_register(pcoll.0, pcoll.1, "ns_owner_1")
+    func_module_namespace_register(pcoll.2, pcoll.3, "ns_owner_2")
+    if func_module_namespace_lookup(pcoll.0, pcoll.1) != "ns_owner_1" or func_module_namespace_lookup(pcoll.2, pcoll.3) != "ns_owner_2":
+        return "fmn collision chain returned wrong entry"
+    ""
+
+fn check_yield_cache_cleared_on_func_table_reset() -> text:
+    # 1) Direct cache table check
+    func_table_reset()
+    if func_yield_cache_get(0) != -1:
+        return "expected uncached -1 after reset"
+    func_yield_cache_set(0, true)
+    if func_yield_cache_get(0) != 1:
+        return "expected cached generator flag 1"
+    func_table_reset()
+    if func_yield_cache_get(0) != -1:
+        return "func_table_reset did not clear _yield_cache"
+
+    # 2) End-to-end recycled decl_id = 0 across two module runs:
+    # Run 1 defines a generator at decl_id 0 (`yield 7` -> [7]).
+    eval_init()
+    ast_reset()
+    jit_init(999999, 0)
+    val gen_body = [stmt_expr_stmt(expr_yield(expr_int_lit(7, 0), 0), 0)]
+    val gen_decl = decl_fn("gen_at_zero", [], [], 0, gen_body, 0, [], 0)
+    if gen_decl != 0:
+        return "expected first decl_id == 0, got {gen_decl}"
+    val gen_res = eval_function_call(gen_decl, [], [])
+    if not val_is_array(gen_res) or val_get_array(gen_res).len() != 1:
+        return "expected generator call to return 1-element array"
+
+    # Run 2 resets AST + func_table and defines a non-generator at decl_id 0 (`return 42`).
+    # Without clearing _yield_cache on func_table_reset(), decl_id 0 would still be
+    # treated as a generator or carry stale classification.
+    ast_reset()
+    func_table_reset()
+    val plain_body = [stmt_return_stmt(expr_int_lit(42, 0), 0)]
+    val plain_decl = decl_fn("plain_at_zero", [], [], 0, plain_body, 0, [], 0)
+    if plain_decl != 0:
+        return "expected recycled decl_id == 0, got {plain_decl}"
+    if func_yield_cache_get(0) != -1:
+        return "recycled decl_id 0 still had cached yield entry before call"
+    val plain_res = eval_function_call(plain_decl, [], [])
+    if not val_is_int(plain_res) or val_get_int(plain_res) != 42:
+        return "recycled decl_id 0 did not evaluate as plain int 42"
+    ""
+
+fn check_method_call_receiver_single_bind_and_fast_local_skip() -> text:
+    val src = file_read("src/compiler/10.frontend/core/interpreter/_EvalOps/call_method_eval.spl") ?? ""
+    if not src.contains("val receiver_node = expr_get(receiver_eid)"):
+        return "call_method_eval.spl does not bind expr_get(receiver_eid) once"
+    if not src.contains("if receiver_node.tag == EXPR_IDENT and expr_owner_int(receiver_eid) < 0:"):
+        return "call_method_eval.spl does not skip static probes when expr_owner_int(receiver_eid) >= 0"
+
+    # Behavioural proof: suppose a local slot 0 holds a `Counter` instance, while
+    # the local variable's identifier spelling ALSO matches an enum variant owner
+    # (`Box` with variant `inc`) AND a static method (`Box__inc` returning 999).
+    # Because expr_owner_int(receiver_eid) == 0 (>= 0, resolved local!), static
+    # enum/struct probes MUST be skipped and instance method `Counter__inc` (43) wins!
+    eval_init()
+    ast_reset()
+    jit_init(999999, 0)
+
+    val counter_decl = decl_struct_def("Counter", ["n"], [0], [], [], 0)
+    decl_set_is_value_type(counter_decl, 0)
+    struct_table_register("Counter", counter_decl)
+
+    val box_decl = decl_struct_def("Box", [], [], [], [], 0)
+    struct_table_register("Box", box_decl)
+    enum_table_register("Box", ["inc"])
+
+    val static_body = [stmt_return_stmt(expr_int_lit(999, 0), 0)]
+    val static_fn = decl_fn("Box__inc", [], [], 0, static_body, 0, [], 0)
+    func_table_register("Box__inc", static_fn)
+
+    val inst_body = [stmt_return_stmt(expr_int_lit(43, 0), 0)]
+    val inst_fn = decl_fn("Counter__inc", ["self"], [0], 0, inst_body, 0, [], 0)
+    func_table_register("Counter__inc", inst_fn)
+
+    val counter_val = val_make_struct("Counter", ["n"], [val_make_int(42)])
+    env_define("Box", counter_val)
+    env_push_frame(1)
+    env_set_local(0, counter_val)
+
+    val local_recv = expr_ident("Box", 0)
+    expr_owner_int_set(local_recv, 0)
+    val local_call = expr_method_call(local_recv, "inc", [], 0)
+    val local_res = eval_method_call(local_call)
+    if eval_has_error():
+        return "unexpected error on fast-local method call: {eval_get_error()}"
+    if not val_is_int(local_res) or val_get_int(local_res) != 43:
+        return "fast-local receiver did not skip static enum/struct probes: got {val_get_int(local_res)}"
+
+    # Conversely, an unresolved static Type receiver (expr_owner_int == -1) still
+    # dispatches static `StaticOnly.ping()` -> `StaticOnly__ping`.
+    val static_only_decl = decl_struct_def("StaticOnly", [], [], [], [], 0)
+    struct_table_register("StaticOnly", static_only_decl)
+    val ping_body = [stmt_return_stmt(expr_int_lit(77, 0), 0)]
+    val ping_fn = decl_fn("StaticOnly__ping", [], [], 0, ping_body, 0, [], 0)
+    func_table_register("StaticOnly__ping", ping_fn)
+    val static_recv = expr_ident("StaticOnly", 0)
+    val static_call = expr_method_call(static_recv, "ping", [], 0)
+    val static_res = eval_method_call(static_call)
+    if eval_has_error():
+        return "unexpected error on static method call: {eval_get_error()}"
+    if not val_is_int(static_res) or val_get_int(static_res) != 77:
+        return "static receiver dispatch broke: expected 77, got {val_get_int(static_res)}"
+    ""
+
+describe "Wave B1 core interpreter JIT state and O(1) call tables":
+    it "replaces per-call JIT file I/O with in-memory HM_SIZE=256 hash tables":
+        step("Verify: call_counts, compiled, and used_epochs stay in memory with zero /tmp/simple_jit_*.sdn I/O")
+        expect(check_jit_in_memory_no_disk_state()).to_equal("")
+
+    it "caches compile failures and returns (false, 0) fallback instead of fake 0":
+        step("Verify: jit_try_compile attempts at most once per unbacked fn and jit_try_execute_checked preserves -1")
+        expect(check_jit_negative_cache_and_checked_execute()).to_equal("")
+
+    it "wires jit_try_execute_checked into eval_function_call for -1 returns and unbacked fallback":
+        step("Verify: eval_function_call returns legitimate -1 from JIT and falls back on unbacked fns without fake 0")
+        expect(check_eval_function_call_jit_minus_one_and_no_fake_zero()).to_equal("")
+
+    it "indexes fto, fib, fmn, and per-name owner counts in O(1) chained hash tables":
+        step("Verify: 512-entry lookups, flat ambiguity checks, and bucket collisions resolve in O(1) probes")
+        expect(check_eval_tables_o1_hash_indices()).to_equal("")
+
+    it "clears _yield_cache on func_table_reset across recycled decl_ids":
+        step("Verify: func_table_reset clears cached generator classifications for recycled decl_id 0")
+        expect(check_yield_cache_cleared_on_func_table_reset()).to_equal("")
+
+    it "binds expr_get(receiver_eid) once and skips static enum/struct probes for fast locals":
+        step("Verify: expr_owner_int(receiver_eid) >= 0 skips static enum/struct probes while preserving Type.method()")
+        expect(check_method_call_receiver_single_bind_and_fast_local_skip()).to_equal("")

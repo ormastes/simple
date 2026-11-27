@@ -1,0 +1,84 @@
+# @platform: baremetal
+#
+# Realtime IRQ dispatch: an interrupt wakes the handler task bound to its
+# vector (deferred handling in task context). Fixed binding table, no
+# dynamic allocation after irq_init.
+#
+# Replay (DHR P6): every delivery is gated by rr_hook_irq. Off/Record/Verify
+# deliver; Replay delivers only the logged vector, so a mismatched vector or
+# an exhausted log wakes nothing.
+#
+# Trap routing: the RV32 machine trap entry (context/riscv32.spl) sends a
+# machine external interrupt through the PLIC claim -> irq_dispatch_claimed
+# -> PLIC complete; the decode and claim handling live here so they run
+# without MMIO. Cortex-M (NVIC: one vector per IRQ, no claim register) and
+# x86_64 (only the APIC timer vector has an ISR) have no external-interrupt
+# entry to route yet.
+
+use os.realtime.replay.hooks.{rr_hook_irq}
+
+val IRQ_MAX_BINDINGS: i32 = 16
+
+var irq_vectors: [i32] = []
+var irq_tasks: [i32] = []
+
+fn irq_init():
+    """Clear every vector binding."""
+    irq_vectors = []
+    irq_tasks = []
+
+fn irq_find(vector: i32) -> i32:
+    """Index of the binding for vector, or -1."""
+    var i = 0
+    while i < irq_vectors.len():
+        if irq_vectors[i] == vector:
+            return i
+        i = i + 1
+    -1
+
+@allow(primitive_api)  # reason: bare-metal IRQ vector and task id are raw hardware/table indices
+fn irq_bind(vector: i32, task_id: i32) -> bool:
+    """Bind vector to its handler task (rebinding replaces). False when the
+    table is full."""
+    val i = irq_find(vector)
+    if i >= 0:
+        irq_tasks[i] = task_id
+        return true
+    if irq_vectors.len() >= IRQ_MAX_BINDINGS:
+        return false
+    irq_vectors.push(vector)
+    irq_tasks.push(task_id)
+    true
+
+@allow(primitive_api)  # reason: called from the trap entry with the raw hardware vector; no allocation for a wrapper
+fn irq_dispatch(vector: i32) -> bool:
+    """Deliver one interrupt: wake the bound handler task. Returns whether it
+    was delivered; Replay refuses any vector the log does not name."""
+    if not rr_hook_irq(vector, sched_get_tick()):
+        return false
+    val i = irq_find(vector)
+    if i >= 0:
+        sched_unblock(irq_tasks[i])
+    true
+
+# RV32 mcause: bit 31 marks an interrupt; the low bits are the cause code.
+val RV32_MCAUSE_INTERRUPT: u32 = 0x80000000u32
+val RV32_MCAUSE_CODE_MASK: u32 = 0x7FFFFFFFu32
+val RV_IRQ_M_EXTERNAL: u32 = 11u32
+
+@allow(primitive_api)  # reason: raw RV32 mcause CSR value read by the trap entry
+fn irq_rv32_mcause_is_external(mcause: u32) -> bool:
+    """True only for a machine external interrupt (PLIC). Every other cause,
+    the machine timer included, stays on the trap entry's timer path."""
+    (mcause & RV32_MCAUSE_INTERRUPT) != 0u32 and (mcause & RV32_MCAUSE_CODE_MASK) == RV_IRQ_M_EXTERNAL
+
+@allow(primitive_api)  # reason: raw PLIC claim id from the trap entry; returns whether the claim must be completed
+fn irq_dispatch_claimed(claim: i32) -> bool:
+    """Dispatch one interrupt-controller claim. Claim 0 means nothing was
+    pending: nothing is dispatched and there is nothing to complete. Any other
+    claim goes to irq_dispatch (an unbound vector wakes nothing) and must be
+    completed whether or not it was delivered."""
+    if claim == 0:
+        return false
+    val _ = irq_dispatch(claim)
+    true

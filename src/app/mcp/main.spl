@@ -17,12 +17,21 @@
 #   - main_static_tools.spl    — _mcp_static_tools_result (tools/list cache)
 
 use std.io_runtime.{env_get, file_exists, exit, get_args}
-use app.protocol.framing.{frame_strip_line_end, frame_parse_decimal}
+use app.protocol.framing.{frame_strip_line_end, frame_parse_decimal, frame_line_is_jsonl_payload}
+use app.protocol.mcp_request_envelope.{mcp_parse_request_envelope_v1}
 use std.nogc_sync_mut.io.stderr_ops.{stderr_write, stderr_flush}
 use .mcp_log_options
 
-extern fn stdin_read_char() -> text
-use std.nogc_async_mut.sosix.stdio.{sosix_print_raw as print_raw, sosix_stdout_flush}
+# Linear stdio framing primitives in src/runtime/runtime_native.c (matching
+# src/app/md_lsp/md_lsp_main.spl). Note: C-runtime-only ABI — not registered in
+# the Rust seed interpreter (src/compiler_rust/.../interpreter_extern/mod.rs);
+# when running under the seed interpreter or JIT, route through
+# .main_stdio_fallback so both native and interpreter lanes stay functional.
+extern fn rt_stdin_read_line_text() -> text
+extern fn rt_stdin_read_chars_text(n: i64) -> text
+use .main_stdio_fallback.{mcp_needs_stdin_fallback, mcp_fallback_read_line, mcp_fallback_read_chars}
+use app.protocol.wire_stdout.{wire_stdout_write as print_raw}
+use std.nogc_sync_mut.sffi.diag.{stdout_flush as sosix_stdout_flush}
 
 var _MCP_TRANSPORT_MODE = "framed"
 
@@ -32,11 +41,8 @@ fn _mcp_error(scope: text, msg: text):
 # Deliberately NO std.mcp_sdk import: it co-compiled a second jo1..jo4 /
 # extract_json_* / make_tool_error set (String-typed) beside main_lazy_json's,
 # and the seed resolves such collisions by arg-type or last-definition
-# fallback, so a call could run the wrong body. The request helpers below
-# reuse main_lazy_json's scanner instead.
-fn _mcp_method_is(msg: text, name: text) -> bool:
-    msg.contains("\"method\":\"" + name + "\"") or msg.contains("\"method\": \"" + name + "\"")
-
+# fallback, so a call could run the wrong body. Root envelopes use the shared
+# protocol parser; isolated tool-argument helpers remain in main_lazy_json.
 fn _mcp_request_obj(json: text, key: text) -> text:
     val raw = extract_field_raw(json: json, key: key)
     if raw.starts_with(LB()):
@@ -44,14 +50,25 @@ fn _mcp_request_obj(json: text, key: text) -> text:
     ""
 
 # Load split module implementations from sibling files.
-# Startup path (initialize / tools/list / --probe) needs only JSON helpers,
-# protocol handlers, and the static tool table. The per-tool handler modules
-# (diag/vcs/debug/dialog/query/play/assistant/editor) are reached only through
-# dispatch_tool, so they are imported by main_dispatch — not duplicated here.
+# Startup pre-dispatch uses only .main_lazy_json and lightweight
+# app.mcp.main_lazy_dispatch wrappers; heavy tool dispatch (main_dispatch),
+# static tool schema tables (main_static_tools / tool_table), and secondary
+# protocol handlers (main_lazy_protocol) load lazily on demand inside the
+# non-entry bridge so entry main.spl holds zero function-local `use`s.
 use .main_lazy_json
-use .main_lazy_protocol
-use .main_static_tools
-# .main_dispatch is reached only through _mcp_dispatch_tool_lazy below.
+use app.mcp.main_lazy_dispatch.{
+    mcp_lazy_dispatch_tool,
+    mcp_lazy_static_tools_result_cached,
+    mcp_lazy_tools_list_json_for_set,
+    mcp_lazy_probe_tool_count,
+    mcp_lazy_handle_resources_list,
+    mcp_lazy_handle_resource_templates_list,
+    mcp_lazy_handle_resources_read,
+    mcp_lazy_handle_prompts_list,
+    mcp_lazy_handle_prompts_get,
+    mcp_lazy_handle_completion_req,
+    mcp_lazy_get_cwd
+}
 
 val SERVER_NAME = "simple-mcp-full"
 val SERVER_VERSION = "4.0.0"
@@ -219,17 +236,19 @@ fn _mcp_upgraded_value() -> i64:
 fn _mcp_emit_flag_value() -> i64:
     _MCP_EMIT_LIST_CHANGED
 
+# Delegates via main_lazy_dispatch to main_static_tools._mcp_static_tools_result_cached
+# so startup does not eagerly parse tool_table.spl or main_static_tools.spl.
 fn _mcp_tools_list_payload() -> text:
     if _MCP_TOOL_SET == "auto":
         if _mcp_upgraded_value() == 0:
             _MCP_LIST_UPGRADED = 1
             _MCP_EMIT_LIST_CHANGED = 1
-            return _mcp_tools_list_json_for_set("core")
-        return _mcp_static_tools_result_cached()
+            return mcp_lazy_tools_list_json_for_set("core")
+        return mcp_lazy_static_tools_result_cached()
     if _MCP_TOOL_SET == "core":
-        return _mcp_tools_list_json_for_set("core")
+        return mcp_lazy_tools_list_json_for_set("core")
     # "all" (and any unexpected value)
-    _mcp_static_tools_result_cached()
+    mcp_lazy_static_tools_result_cached()
 
 # Returns true once the auto-mode upgrade has been served (first tools/list done).
 fn _mcp_list_upgraded() -> bool:
@@ -261,37 +280,15 @@ fn _mcp_initialize_result() -> text:
     result = result + RB()
     result
 
-# Extract JSON-RPC id from message, with sensible fallbacks.
-fn _mcp_extract_id(msg: text, method: text) -> text:
-    val parsed = extract_field_raw(json: msg, key: "id")
-    if parsed != "" and parsed != "null":
-        return parsed
-    if method == "initialize":
-        return "\"1\""
-    if method == "tools/list":
-        return "\"2\""
-    parsed
-
 fn _mcp_read_line() -> text:
-    var result = ""
-    while true:
-        val ch = stdin_read_char()
-        if ch == "":
-            return result
-        result = result + ch
-        if ch == "\n":
-            return result
+    if mcp_needs_stdin_fallback():
+        return mcp_fallback_read_line()
+    rt_stdin_read_line_text()
 
 fn _mcp_read_chars(count: i64) -> text:
-    var result = ""
-    var i = 0
-    while i < count:
-        val ch = stdin_read_char()
-        if ch == "":
-            break
-        result = result + ch
-        i = i + 1
-    result
+    if mcp_needs_stdin_fallback():
+        return mcp_fallback_read_chars(count)
+    rt_stdin_read_chars_text(count)
 
 # Delegates to the canonical framing primitives in app.protocol.framing.
 # Behaviour is fixed by test/01_unit/app/protocol/jsonrpc_framing_spec.spl.
@@ -301,7 +298,11 @@ fn _mcp_strip_line_end(line: text) -> text:
 fn _mcp_parse_decimal_raw(s: text) -> i64:
     frame_parse_decimal(s)
 
-fn _mcp_read_message() -> (text, bool):
+# Hard cap on a single Content-Length frame (64 MiB, matching _CTX_CAPTURE_HARD_MAX_BYTES)
+# so a corrupt header cannot ask rt_stdin_read_chars_text to malloc gigabytes upfront.
+const _MCP_MAX_CONTENT_LENGTH: i64 = 67108864
+
+fn _mcp_read_message() -> text:
     var content_length = 0
     while true:
         var line = _mcp_read_line()
@@ -314,16 +315,20 @@ fn _mcp_read_message() -> (text, bool):
                 break
             continue
         line = _mcp_strip_line_end(line)
-        if line.starts_with(LB()):
+        if frame_line_is_jsonl_payload(line):
             _MCP_TRANSPORT_MODE = "jsonl"
             return line
         if line.starts_with("Content-Length:"):
             var len_str = line.replace("Content-Length:", "")
             len_str = len_str.trim()
             content_length = _mcp_parse_decimal_raw(len_str)
-    if content_length <= 0:
+    if content_length <= 0 or content_length > _MCP_MAX_CONTENT_LENGTH:
         return ""
-    _mcp_read_chars(content_length)
+    _MCP_TRANSPORT_MODE = "framed"
+    val body = _mcp_read_chars(content_length)
+    if body.byte_len() < content_length:
+        return ""
+    body
 
 fn _mcp_write_message(body: text):
     if _MCP_TRANSPORT_MODE == "jsonl":
@@ -331,7 +336,7 @@ fn _mcp_write_message(body: text):
         sosix_stdout_flush()
         return
     val nl = "\n"
-    print_raw("Content-Length: " + str(body.len()) + "\r" + nl + "\r" + nl)
+    print_raw("Content-Length: " + str(body.byte_len()) + "\r" + nl + "\r" + nl)
     print_raw(body)
     sosix_stdout_flush()
 
@@ -367,7 +372,7 @@ fn main() -> i64:
     # full handshake and unit specs verify the manifest content.
     if args.len() > 0 and args[0] == "--probe":
         val active_set = _mcp_get_tool_set()
-        print "simple-mcp probe ok version=" + SERVER_VERSION + " tools=" + str(_mcp_probe_tool_count()) + " tool_set=" + active_set
+        print "simple-mcp probe ok version=" + SERVER_VERSION + " tools=" + str(mcp_lazy_probe_tool_count()) + " tool_set=" + active_set
         return 0
     if raw_args.len() > 0 and mcp_has_explicit_json_ready_arg(raw_args):
         print "{\"command\":\"mcp\",\"status\":\"ready\",\"tool\":\"Simple MCP Server\",\"version\":\"{SERVER_VERSION}\"}"
@@ -387,16 +392,23 @@ fn main() -> i64:
             exit(0)
             return 0
 
+        val envelope = mcp_parse_request_envelope_v1(msg)
+        if not envelope.valid:
+            val reason = if envelope.error_code == -32700: "Parse error" else: "Invalid Request"
+            _mcp_write_message(make_error(envelope.request_id_raw, envelope.error_code, reason))
+            continue
+        val method = envelope.method
+
         # Core methods: delegate to the McpServer facade.
         # tools/list is handled locally so we return the full static-table tool list
         # without registry pagination (smoke check requires all tools in one response).
         var response = ""
-        if _mcp_method_is(msg, "initialize"):
-            val id = _mcp_extract_id(msg, "initialize")
+        if method == "initialize":
+            val id = envelope.request_id_raw
             response = make_json_result(id, _mcp_initialize_result())
-        elif _mcp_method_is(msg, "tools/call"):
-            val id = _mcp_extract_id(msg, "tools/call")
-            val params = _mcp_request_obj(msg, "params")
+        elif method == "tools/call":
+            val id = envelope.request_id_raw
+            val params = if envelope.params_raw.starts_with(LB()): envelope.params_raw else: ""
             var tool_name = ""
             var args_raw = "{}"
             if params != "":
@@ -405,75 +417,70 @@ fn main() -> i64:
                 if extracted_args != "":
                     args_raw = extracted_args
             response = _mcp_dispatch_tool_lazy(id, tool_name, args_raw)
-        elif _mcp_method_is(msg, "tools/list"):
-            val id = _mcp_extract_id(msg, "tools/list")
+        elif method == "tools/list":
+            val id = envelope.request_id_raw
             response = make_json_result(id, _mcp_tools_list_payload())
-        elif _mcp_method_is(msg, "notifications/initialized") or (
-            _mcp_method_is(msg, "notifications/cancelled")) or (
-            _mcp_method_is(msg, "notifications/roots/list_changed")) or (
-            _mcp_method_is(msg, "initialized")):
+        elif method == "notifications/initialized" or (
+            method == "notifications/cancelled") or (
+            method == "notifications/roots/list_changed") or (
+            method == "initialized"):
             response = ""
-        elif _mcp_method_is(msg, "shutdown"):
-            val id = _mcp_extract_id(msg, "shutdown")
+        elif method == "shutdown":
+            val id = envelope.request_id_raw
             response = make_json_result(id, "null")
-        elif _mcp_method_is(msg, "resources/list"):
-            val id = _mcp_extract_id(msg, "resources/list")
-            response = handle_resources_list(id)
-        elif _mcp_method_is(msg, "resources/templates/list"):
-            val id = _mcp_extract_id(msg, "resources/templates/list")
-            response = handle_resource_templates_list(id)
-        elif _mcp_method_is(msg, "resources/read"):
-            val id = _mcp_extract_id(msg, "resources/read")
+        elif method == "resources/list":
+            val id = envelope.request_id_raw
+            response = mcp_lazy_handle_resources_list(id)
+        elif method == "resources/templates/list":
+            val id = envelope.request_id_raw
+            response = mcp_lazy_handle_resource_templates_list(id)
+        elif method == "resources/read":
+            val id = envelope.request_id_raw
             val uri = extract_nested(msg, "uri")
-            response = handle_resources_read(id, uri)
-        elif _mcp_method_is(msg, "prompts/list"):
-            val id = _mcp_extract_id(msg, "prompts/list")
-            response = handle_prompts_list(id)
-        elif _mcp_method_is(msg, "prompts/get"):
-            val id = _mcp_extract_id(msg, "prompts/get")
+            response = mcp_lazy_handle_resources_read(id, uri)
+        elif method == "prompts/list":
+            val id = envelope.request_id_raw
+            response = mcp_lazy_handle_prompts_list(id)
+        elif method == "prompts/get":
+            val id = envelope.request_id_raw
             val prompt_name = extract_nested(msg, "name")
-            response = handle_prompts_get(id, prompt_name, msg)
-        elif _mcp_method_is(msg, "completion/complete") or _mcp_method_is(msg, "completions/complete"):
-            val id = _mcp_extract_id(msg, "completion/complete")
-            response = handle_completion_req(id, msg)
-        elif _mcp_method_is(msg, "logging/setLevel"):
-            val id = _mcp_extract_id(msg, "logging/setLevel")
+            response = mcp_lazy_handle_prompts_get(id, prompt_name, msg)
+        elif method == "completion/complete" or method == "completions/complete":
+            val id = envelope.request_id_raw
+            response = mcp_lazy_handle_completion_req(id, msg)
+        elif method == "logging/setLevel":
+            val id = envelope.request_id_raw
             val level = extract_nested(msg, "level")
             if level != "":
                 MCP_LOG_LEVEL = level
             response = make_json_result(id, jo1(jp("level", js(MCP_LOG_LEVEL))))
-        elif _mcp_method_is(msg, "roots/list"):
-            val id = _mcp_extract_id(msg, "roots/list")
-            val cwd = get_cwd()
+        elif method == "roots/list":
+            val id = envelope.request_id_raw
+            val cwd = mcp_lazy_get_cwd()
             var root = LB()
             root = root + jp("uri", js("file://" + cwd))
             root = root + "," + jp("name", js("workspace"))
             root = root + RB()
             response = make_json_result(id, jo1(jp("roots", "[" + root + "]")))
-        elif _mcp_method_is(msg, "ping"):
-            val id = _mcp_extract_id(msg, "ping")
+        elif method == "ping":
+            val id = envelope.request_id_raw
             response = make_json_result(id, LB() + RB())
         else:
-            val id = _mcp_extract_id(msg, "")
+            val id = envelope.request_id_raw
             if id != "" and id != "null":
                 response = make_error(id, -32601, "Method not found")
-        if response != "":
+        if response != "" and envelope.has_id:
             _mcp_write_message(response)
             if _mcp_take_emit_list_changed():
                 val notif = "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/tools/list_changed\"}"
                 _mcp_write_message(notif)
     0
 
-# Module-level on purpose. A function-local `use` in this entry module segfaults
-# the seed JIT on its first call (rc 139, doc/08_tracking/bug/
-# seed_jit_function_local_use_segfaults_2026-09-13.md); every
-# tools/call hit it once main.spl stopped falling back to the interpreter.
-# Laziness is kept one level down: main_dispatch imports only main_lazy_json at
-# top level and loads each handler family inside the function that needs it.
-use app.mcp.main_dispatch.{dispatch_tool}
-
+# Module-level lazy bridge call on purpose (no function-local `use` in this
+# entry module, preserving seed JIT safety while deferring app.mcp.main_dispatch
+# loading until the first tools/call).
 fn _mcp_dispatch_tool_lazy(id: text, tool_name: text, args_raw: text) -> text:
-    return dispatch_tool(id, tool_name, args_raw)
+    return mcp_lazy_dispatch_tool(id, tool_name, args_raw)
 
 export _mcp_get_tool_set
 export _mcp_init_tool_set

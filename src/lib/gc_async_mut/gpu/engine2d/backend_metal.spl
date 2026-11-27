@@ -32,7 +32,7 @@ use std.gc_async_mut.io.metal_sffi.{
 }
 
 extern fn rt_alloc(size: i64) -> i64
-extern fn rt_free(ptr: i64) -> i64?
+extern fn rt_free(ptr: i64)
 @unsafe(reason: "nonnull caller-owned host buffer with checked four-byte offset", capabilities: [ffi, raw_ptr])
 extern fn rt_ptr_write_i32(ptr: i64, offset: i64, value: i32)
 @unsafe(reason: "nonnull raw read; Metal staging allocation and bounds are caller-owned", capabilities: [ffi, raw_ptr])
@@ -42,10 +42,10 @@ extern fn rt_ptr_read_i64(ptr: i64, offset: i64) -> i64
 # =cdylib). These externs ARE registered on the deployed self-hosted binary
 # (verified 2026-07-06); the one-call upload extern rt_write_u32s_to_raw is NOT,
 # which is why draw_image degrades to one FFI round-trip per pixel by default.
-@unsafe(reason: "status/out GPU transfer provider loader ABI", capabilities: [ffi, raw_ptr])
-extern fn spl_dlopen_checked(path: text, out_handle: *mut i64) -> i64
-@unsafe(reason: "status/out GPU transfer symbol resolver ABI", capabilities: [ffi, raw_ptr])
-extern fn spl_dlsym_checked(handle: i64, name: text, out_symbol: *mut i64) -> i64
+@unsafe(reason: "raw GPU transfer provider loader ABI", capabilities: [ffi])
+extern fn spl_dlopen(path: text) -> i64
+@unsafe(reason: "raw GPU transfer symbol resolver ABI", capabilities: [ffi, raw_ptr])
+extern fn spl_dlsym(handle: i64, name: text) -> i64
 @unsafe(reason: "raw GPU transfer provider release ABI", capabilities: [ffi])
 extern fn spl_dlclose(handle: i64) -> i64
 @unsafe(reason: "untyped integer-only GPU transfer call ABI", capabilities: [ffi, raw_ptr])
@@ -62,7 +62,7 @@ var _bulk_begin: i64 = 0
 var _bulk_write8: i64 = 0
 var _bulk_write1: i64 = 0
 
-fn _bulk_candidate_paths() -> [text]:
+pub fn bulk_candidate_paths() -> [text]:
     var out: [text] = []
     val override = env_get("SIMPLE_SPL_GPU_TRANSFER_PATH") ?? ""
     if override != "":
@@ -70,7 +70,11 @@ fn _bulk_candidate_paths() -> [text]:
     out.push("build/sffi/libspl_gpu_transfer.dylib")
     out.push("build/sffi/libspl_gpu_transfer.so")
     out.push("build/sffi/libspl_gpu_transfer.dll")
+    out.push("build/sffi/spl_gpu_transfer.dll")
     out
+
+fn _bulk_candidate_paths() -> [text]:
+    bulk_candidate_paths()
 
 fn _bulk_ensure_loaded() -> bool:
     if _bulk_handle == -1:
@@ -81,25 +85,21 @@ fn _bulk_ensure_loaded() -> bool:
     val paths = _bulk_candidate_paths()
     var pi = 0
     while pi < paths.len() and h == 0:
-        var candidate_handle: i64 = 0
-        val load_status = unsafe(capabilities: [ffi, raw_ptr]):
-            spl_dlopen_checked(paths[pi], &mut candidate_handle)
-        if load_status == 0 and candidate_handle > 0:
+        val candidate_handle = unsafe(capabilities: [ffi]):
+            spl_dlopen(paths[pi])
+        if candidate_handle > 0:
             h = candidate_handle
         pi = pi + 1
     if h == 0:
         _bulk_handle = -1
         return false
-    var fb: i64 = 0
-    var fw8: i64 = 0
-    var fw1: i64 = 0
-    val fb_status = unsafe(capabilities: [ffi, raw_ptr]):
-        spl_dlsym_checked(h, "spl_gpu_stage_begin", &mut fb)
-    val fw8_status = unsafe(capabilities: [ffi, raw_ptr]):
-        spl_dlsym_checked(h, "spl_gpu_stage_write8", &mut fw8)
-    val fw1_status = unsafe(capabilities: [ffi, raw_ptr]):
-        spl_dlsym_checked(h, "spl_gpu_stage_write1", &mut fw1)
-    if fb_status != 0 or fw8_status != 0 or fw1_status != 0 or fb <= 0 or fw8 <= 0 or fw1 <= 0:
+    val fb = unsafe(capabilities: [ffi, raw_ptr]):
+        spl_dlsym(h, "spl_gpu_stage_begin")
+    val fw8 = unsafe(capabilities: [ffi, raw_ptr]):
+        spl_dlsym(h, "spl_gpu_stage_write8")
+    val fw1 = unsafe(capabilities: [ffi, raw_ptr]):
+        spl_dlsym(h, "spl_gpu_stage_write1")
+    if fb <= 0 or fw8 <= 0 or fw1 <= 0:
         unsafe(capabilities: [ffi]):
             spl_dlclose(h)
         _bulk_handle = -1
@@ -214,7 +214,8 @@ fn metal_host_alloc(size: i64) -> i64:
     rt_alloc(size)
 
 fn metal_host_free(ptr: i64) -> i64:
-    rt_free(ptr) ?? 0
+    rt_free(ptr)
+    0
 
 fn metal_host_write_i32(ptr: i64, offset: i64, value: i64):
     unsafe(capabilities: [ffi, raw_ptr]):
@@ -369,6 +370,9 @@ class MetalBackend:
     # Device readbacks and material receipts must both use this owner field.
     device_identity: i64
     last_image_blend_target: text
+    # Non-empty when CPU-mirror rasterization mutated the current gpu_only frame;
+    # prevents read_pixels_with_source() from mislabelling it as device_readback.
+    cpu_composite_reason: text
 
     static fn create() -> MetalBackend:
         val backend = make_metal_backend()
@@ -394,6 +398,7 @@ fn make_metal_backend() -> MetalBackend:
         gpu_only: false,
         device_identity: 0,
         last_image_blend_target: "",
+        cpu_composite_reason: "",
         dirty: false,
         initialized: false,
         gpu_frame_complete: false,
@@ -476,6 +481,7 @@ impl RenderBackend for MetalBackend:
         self.clip_h = height
         self.clip_enabled = false
         self.gpu_only = false
+        self.cpu_composite_reason = ""
         self.dirty = false
         self.initialized = true
         self.gpu_frame_complete = false
@@ -528,6 +534,7 @@ impl RenderBackend for MetalBackend:
         self.w = width
         self.h = height
         self.gpu_only = false
+        self.cpu_composite_reason = ""
         val bytes = width.to_i64() * height.to_i64() * 4
         self.d_framebuffer = metal_sffi_alloc_buffer(self.session.device, bytes)
         if self.d_framebuffer == 0:
@@ -615,6 +622,7 @@ impl RenderBackend for MetalBackend:
         self.w = 0
         self.h = 0
         self.gpu_only = false
+        self.cpu_composite_reason = ""
         self.dirty = false
         self.initialized = false
         self.gpu_frame_complete = false
@@ -626,6 +634,7 @@ impl RenderBackend for MetalBackend:
         # flushes, but by then there is nothing left pending.
         self.font.flush()
         self.font.begin_frame()
+        self.cpu_composite_reason = ""
         if not self.gpu_only:
             self.mirror.clear(color)
         if self.initialized and self.d_framebuffer != 0 and self.session.pipe_clear != 0:
@@ -646,6 +655,7 @@ impl RenderBackend for MetalBackend:
     me draw_rect_filled(x: i32, y: i32, w: i32, h: i32, color: u32):
         if self._gpu_only_mask_emulation_active():
             self.mirror.draw_rect_filled(x, y, w, h, color)
+            self.cpu_composite_reason = "gpu-only-mask-emulation"
             self.dirty = true
             return
         if not self.gpu_only:
@@ -825,7 +835,7 @@ impl RenderBackend for MetalBackend:
         self.font.flush()
         if not self.gpu_only:
             self.mirror.present()
-    fn read_pixels() -> [u32]:
+    me read_pixels() -> [u32]:
         # Checksum-free: read_pixels_with_source() runs an O(n) interpreted
         # checksum loop (engine2d_readback_with_identity) — ~8.8s at 1024x768 and
         # ~80s at Retina physical. Pixel-only callers skip it; evidence rows
@@ -839,11 +849,17 @@ impl RenderBackend for MetalBackend:
             return empty
         self.mirror.read_pixels()
 
-    fn read_pixels_with_source() -> Engine2DReadback:
+    fn cpu_composite_reason_in_frame() -> text:
+        """Return CPU-mirror composite reason for current frame, or empty when pure GPU."""
+        self.cpu_composite_reason
+
+    me read_pixels_with_source() -> Engine2DReadback:
         if self.gpu_frame_complete:
             val gpu_pixels = self.read_pixels_gpu_only()
             if gpu_pixels.len() == (self.w * self.h):
-                val source = readback_source_label(ReadbackSource.DeviceReadback)
+                val source = metal_resolve_gpu_only_readback_source(self.cpu_composite_reason)
+                if self.cpu_composite_reason != "":
+                    return engine2d_readback(gpu_pixels, source)
                 val readback = engine2d_readback_with_identity(
                     gpu_pixels, source, self.d_framebuffer,
                     self.device_identity)
@@ -1355,23 +1371,27 @@ impl MetalBackend:
         self.gpu_only and self.mirror.mask_buf.len() > 0
 
     me _begin_gpu_only_cpu_composite() -> bool:
-        # Fence a CPU-rasterized operation into the device framebuffer. The
-        # device is snapshotted before the unsupported operation and the exact
-        # SoftwareBackend result is uploaded afterward, retaining the original
-        # Metal framebuffer handle and device-readback provenance.
+        # Snapshot the device framebuffer before running a CPU-rasterized
+        # fallback operation on self.mirror. Once a frame relies on CPU-mirror
+        # compositing, cpu_composite_reason stays non-empty until clear/reset so
+        # read_pixels_with_source() reports cpu_mirror rather than device_readback.
         #
         # set_mask already snapshots once before installing the mask. While
         # that mask remains active, the mirror is authoritative for fallback
         # rasterization; downloading again would either reject the deliberately
         # incomplete GPU frame or discard masked changes not yet uploaded.
         if self._gpu_only_mask_emulation_active():
-            return self.mirror.buf.len() == self.w * self.h
+            if self.mirror.buf.len() == self.w * self.h:
+                self.cpu_composite_reason = "gpu-only-mask-emulation"
+                return true
+            return false
         if not self.initialized or self.d_framebuffer == 0 or not self.gpu_frame_complete:
             return false
         val pixels = self.read_pixels_gpu_only()
         if pixels.len() != self.w * self.h:
             return false
         self.mirror.buf = pixels
+        self.cpu_composite_reason = "gpu-only-cpu-composite"
         true
 
     me _commit_gpu_only_cpu_composite() -> bool:
@@ -1395,6 +1415,8 @@ impl MetalBackend:
                 i = i + 1
         val uploaded = metal_buffer_upload_ptr(self.d_framebuffer, host, byte_size) != 0
         metal_host_free(host)
+        if uploaded and self.cpu_composite_reason == "":
+            self.cpu_composite_reason = "gpu-only-cpu-composite"
         self.dirty = self.dirty or uploaded
         uploaded
 
@@ -1987,6 +2009,11 @@ impl MetalBackend:
         # command buffer. Submit it before this one is recorded or the
         # frame paints out of order.
         if self.font.flush() < 0:
+            # This call owns source already; no auxiliary command references it
+            # yet. The caller still owns params and the persistent auxiliary LUT.
+            metal_sffi_free_buffer(source)
+            self.gpu_frame_complete = false
+            self.last_error = "Metal deferred font batch failed to submit before auxiliary image"
             return false
         if self.pending_composite_command != 0:
             metal_sffi_free_buffer(source)
@@ -2319,18 +2346,6 @@ impl MetalBackend:
             self.mirror.draw_rect_blend(x, y, w, h, color)
         self.gpu_frame_complete = false
 
-    me draw_image_blend(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
-        if self.gpu_only:
-            if not self._begin_gpu_only_cpu_composite():
-                self.gpu_frame_complete = false
-                return
-            self.mirror.draw_image_blend(x, y, w, h, pixels)
-            self.gpu_frame_complete = self._commit_gpu_only_cpu_composite()
-            return
-        if not self.gpu_only:
-            self.mirror.draw_image_blend(x, y, w, h, pixels)
-        self.gpu_frame_complete = false
-
     me draw_image_scaled(dst_x: i32, dst_y: i32, dst_w: i32, dst_h: i32, src_w: i32, src_h: i32, pixels: [u32]):
         if self.gpu_only:
             if not self._begin_gpu_only_cpu_composite():
@@ -2406,8 +2421,15 @@ impl MetalBackend:
             self.mirror.draw_rect_blend_mode(x, y, w, h, color, mode)
         self.gpu_frame_complete = false
 
+pub fn metal_resolve_gpu_only_readback_source(cpu_composite_reason: text) -> text:
+    """Return honest ReadbackSource label for a gpu_only Metal frame."""
+    if cpu_composite_reason != "":
+        return readback_source_label(ReadbackSource.CpuMirror)
+    readback_source_label(ReadbackSource.DeviceReadback)
+
 export MetalBackend
 export MetalErrorKind
 export metal_classify_error
+export metal_resolve_gpu_only_readback_source
 export probe_metal
 export make_metal_backend

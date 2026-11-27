@@ -1,0 +1,51 @@
+#!/bin/sh
+# Regression: the release-tree runtime must remain a valid freestanding RV64
+# translation unit after policy/registry changes are transplanted.
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+source_file=$root/examples/09_embedded/simple_os/arch/riscv64/boot/full_networking_runtime.c
+linker_source=$root/src/compiler_rust/compiler/src/pipeline/native_project/linker.rs
+compiler=${CLANG:-clang}
+cxx_compiler=${CLANGXX:-clang++}
+
+perl -0ne 'exit(/"-c",\s*(?:\/\/[^\n]*\n\s*)*"-x",\s*"c",\s*"-ffreestanding"/s ? 0 : 1)' "$linker_source" || {
+    echo "FAIL: native-build boot C command does not force C language before freestanding compilation" >&2
+    exit 1
+}
+
+command -v "$compiler" >/dev/null 2>&1 || {
+    echo "SKIP: clang is required for the RV64 runtime compile contract"
+    exit 0
+}
+printf 'int x;\n' | "$compiler" --target=riscv64-unknown-elf -x c -c -o /dev/null - >/dev/null 2>&1 || {
+    echo "SKIP: $compiler has no riscv64-unknown-elf target"
+    exit 0
+}
+
+"$compiler" --target=riscv64-unknown-elf -std=gnu11 -ffreestanding \
+    -fsyntax-only "$source_file"
+command -v "$cxx_compiler" >/dev/null 2>&1 || {
+    echo "FAIL: clang++ is required to mirror native-build's boot-source driver" >&2
+    exit 1
+}
+fixture=$(mktemp -d "${TMPDIR:-/tmp}/rv64-runtime-compile.XXXXXX")
+trap 'rm -rf "$fixture"' EXIT HUP INT TERM
+"$cxx_compiler" --target=riscv64-unknown-elf -x c -std=gnu11 -ffreestanding \
+    -c "$source_file" -o "$fixture/runtime.o"
+nm_tool=nm
+command -v llvm-nm >/dev/null 2>&1 && nm_tool=llvm-nm
+symbols=$($nm_tool -g "$fixture/runtime.o")
+printf '%s\n' "$symbols" | grep -Eq '[[:space:]]T[[:space:]]+rt_boot_tcp_registry_close$' || {
+    echo "FAIL: native-build C++ driver did not preserve the registry C ABI" >&2
+    exit 1
+}
+printf '%s\n' "$symbols" | grep -Eq '[[:space:]]U[[:space:]]+rt_pci_is_virtio_net$' || {
+    echo "FAIL: pure-Simple PCI policy import is not an unmangled C ABI reference" >&2
+    exit 1
+}
+if printf '%s\n' "$symbols" | grep -Eq '[[:space:]](_Z|__Z)'; then
+    echo "FAIL: native-build boot object contains C++-mangled globals" >&2
+    exit 1
+fi
+echo "PASS: RV64 runtime compiles as C and clang++ -x c preserves its C ABI"

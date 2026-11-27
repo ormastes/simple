@@ -1,0 +1,102 @@
+# @req REQ-SSPEC-COMPILER
+# Parser transport only; nominal default application belongs to HIR lowering.
+use std.spec.{describe, it, expect, fail}
+use compiler.frontend.parser_types.{ParserModule, ParserEnum, Type, TypeKind, VariantKind}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module_checked_reference_v1,
+    parse_and_build_module_scoped, flat_pool_capture_arm, flat_pool_capture_take,
+    build_module_from_flat_pool_blob}
+use compiler.core.parser.parser_has_errors
+
+fn enum_parameters_parse(source: text) -> ParserModule:
+    val result = parse_and_build_module_checked_reference_v1(source, "enum_parameters.spl")
+    expect(result.is_ok()).to_equal(true)
+    result.unwrap()
+
+fn enum_parameters_named(type_: Type, name: text):
+    match type_.kind:
+        case TypeKind.Named(actual, args):
+            expect(actual).to_equal(name)
+            expect(args.len()).to_equal(0)
+        case _: fail("lost named enum parameter type " + name)
+
+fn enum_parameters_assert_template(definition: ParserEnum):
+    expect(definition.name).to_equal("Envelope")
+    expect(definition.is_public).to_equal(true)
+    expect(definition.type_params.len()).to_equal(2)
+    val first = definition.type_params[0]
+    expect(first.name).to_equal("T")
+    expect(first.bounds.len()).to_equal(2)
+    enum_parameters_named(first.bounds[0], "Marked")
+    enum_parameters_named(first.bounds[1], "Audited")
+    expect(first.has_default).to_equal(true)
+    enum_parameters_named(first.default, "text")
+    val second = definition.type_params[1]
+    expect(second.name).to_equal("U")
+    expect(second.bounds.len()).to_equal(0)
+    expect(second.has_default).to_equal(true)
+    match second.default.kind:
+        case TypeKind.Array(element, _): enum_parameters_named(element, "T")
+        case _: fail("lost structured dependent enum default")
+    expect(definition.variants.len()).to_equal(2)
+    expect(definition.variants[1].name).to_equal("Full")
+    match definition.variants[1].kind:
+        case VariantKind.Struct(fields):
+            expect(fields.len()).to_equal(2)
+            expect(fields[0].name).to_equal("value")
+            enum_parameters_named(fields[0].type_, "T")
+            expect(fields[1].name).to_equal("rest")
+            enum_parameters_named(fields[1].type_, "U")
+        case _: fail("lost declared generic enum payload fields")
+
+val ENUM_PARAMETERS_SOURCE = "pub enum Envelope<T: Marked + Audited = text, U = [T]>:\n    Empty\n    Full(value: T, rest: U)\nenum Required<T>:\n    Value(T)\nenum Plain:\n    Done\n"
+
+describe "generic enum parameter transport":
+    it "preserves supported bounds defaults dependent types and payload declarations":
+        val module = enum_parameters_parse(ENUM_PARAMETERS_SOURCE)
+        expect(module.enums.len()).to_equal(3)
+        enum_parameters_assert_template(module.enums["Envelope"])
+
+    it "keeps a required parameter and a non-generic enum free of prior defaults":
+        val module = enum_parameters_parse(ENUM_PARAMETERS_SOURCE)
+        val required = module.enums["Required"].type_params
+        expect(required.len()).to_equal(1)
+        expect(required[0].name).to_equal("T")
+        expect(required[0].bounds.len()).to_equal(0)
+        expect(required[0].has_default).to_equal(false)
+        expect(module.enums["Plain"].type_params.len()).to_equal(0)
+        expect(module.enums["Plain"].variants.len()).to_equal(1)
+
+    it "restores enum rows after unrelated flat pools replace the active parser state":
+        flat_pool_capture_arm()
+        val original = parse_and_build_module_scoped(ENUM_PARAMETERS_SOURCE, "enum_parameters_cache.spl", false)
+        expect(parser_has_errors()).to_equal(false)
+        enum_parameters_assert_template(original.enums["Envelope"])
+        val blob = flat_pool_capture_take()
+        expect(blob.len()).to_be_greater_than(0)
+        val replacement = enum_parameters_parse("enum Other<W>:\n    Different(W)\n")
+        expect(replacement.enums.len()).to_equal(1)
+        val restored = build_module_from_flat_pool_blob(blob, ENUM_PARAMETERS_SOURCE, "enum_parameters_cache.spl")
+        val restored_present: bool = restored.?
+        expect(restored_present).to_equal(true)
+        val module = restored.unwrap()
+        expect(module.enums.len()).to_equal(3)
+        enum_parameters_assert_template(module.enums["Envelope"])
+        expect(module.enums["Required"].type_params[0].has_default).to_equal(false)
+        expect(parser_has_errors()).to_equal(false)
+
+    it "preserves the existing class and function generic default paths":
+        val module = enum_parameters_parse("class Box<T = i64, U = T>:\n    value: T\nfn identity<T = i64>(value: T) -> T:\n    value\n")
+        val class_params = module.classes["Box"].type_params
+        expect(class_params.len()).to_equal(2)
+        expect(class_params[0].has_default).to_equal(true)
+        enum_parameters_named(class_params[0].default, "i64")
+        expect(class_params[1].has_default).to_equal(true)
+        enum_parameters_named(class_params[1].default, "T")
+        val function_params = module.functions["identity"].type_params
+        expect(function_params.len()).to_equal(1)
+        expect(function_params[0].has_default).to_equal(true)
+        enum_parameters_named(function_params[0].default, "i64")
+
+    it "rejects a missing enum parameter default through the canonical parser":
+        val result = parse_and_build_module_checked_reference_v1("enum Broken<T = >:\n    Value(T)\n", "invalid_enum_default.spl")
+        expect(result.is_err()).to_equal(true)

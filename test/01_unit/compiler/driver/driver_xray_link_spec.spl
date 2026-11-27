@@ -1,0 +1,60 @@
+"""XRay PR5b/PR6 link wiring: the resident runtime object joins ONLY --xray native builds."""
+use std.spec.*
+use compiler.driver.driver_xray_link.{xray_link_runtime_needed_v1, xray_link_objects_v1, xray_native_runtime_source_v1, xray_native_runtime_cflags_v1}
+
+val RT_OBJ: text = "build/xray/xray_native_runtime_aarch64.o"
+val AARCH64_LINUX: text = "aarch64-unknown-linux-gnu"
+
+describe "XRay link inputs (driver_xray_link)":
+    it "returns the object list unchanged when --xray is off":
+        val objects = ["a.o", "b.o"]
+        val result = xray_link_objects_v1(objects, false, "native", AARCH64_LINUX, RT_OBJ)
+        expect(result.is_ok()).to_equal(true)
+        expect(result.unwrap()).to_equal(["a.o", "b.o"])
+
+    it "does not even classify the target when --xray is off":
+        val result = xray_link_objects_v1(["a.o"], false, "native", "x86_64-unknown-linux-gnu", RT_OBJ)
+        expect(result.unwrap()).to_equal(["a.o"])
+
+    it "appends the resident runtime object for native aarch64 Linux":
+        val result = xray_link_objects_v1(["a.o", "b.o"], true, "native", AARCH64_LINUX, RT_OBJ)
+        expect(result.is_ok()).to_equal(true)
+        expect(result.unwrap()).to_equal(["a.o", "b.o", RT_OBJ])
+
+    it "leaves LLVM --xray links unchanged (compiler-rt link is out of scope)":
+        val result = xray_link_objects_v1(["a.o"], true, "llvm", AARCH64_LINUX, RT_OBJ)
+        expect(result.unwrap()).to_equal(["a.o"])
+        expect(xray_link_runtime_needed_v1(true, "llvm", AARCH64_LINUX).unwrap()).to_equal(false)
+
+    it "appends the resident runtime object for native x86_64 Linux (PR6)":
+        val result = xray_link_objects_v1(["a.o"], true, "native", "x86_64-unknown-linux-gnu", RT_OBJ)
+        expect(result.unwrap()).to_equal(["a.o", RT_OBJ])
+
+    it "picks the per-ISA runtime TU and never passes an AArch64-only flag to x86_64":
+        expect(xray_native_runtime_source_v1(AARCH64_LINUX)).to_equal("src/runtime/xray/xray_native_runtime_aarch64.c")
+        expect(xray_native_runtime_source_v1("x86_64-unknown-linux-gnu")).to_equal("src/runtime/xray/xray_native_runtime_x86_64.c")
+        expect(xray_native_runtime_cflags_v1(AARCH64_LINUX).contains("-mno-outline-atomics")).to_equal(true)
+        val x86_flags = xray_native_runtime_cflags_v1("x86_64-unknown-linux-gnu")
+        expect(x86_flags.contains("-mno-outline-atomics")).to_equal(false)
+        expect(x86_flags.contains("-mgeneral-regs-only")).to_equal(true)
+
+    it "fails closed for a native riscv64 --xray link":
+        val result = xray_link_objects_v1(["a.o"], true, "native", "riscv64-unknown-linux-gnu", RT_OBJ)
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err().starts_with("XRAY-E-UNSUPPORTED-TARGET")).to_equal(true)
+
+    it "fails closed for --backend native on Darwin Mach-O and directs users to --backend llvm":
+        val arm_err = xray_link_objects_v1(["a.o"], true, "native", "aarch64-apple-darwin", RT_OBJ)
+        val x64_err = xray_link_objects_v1(["a.o"], true, "native", "x86_64-apple-darwin", RT_OBJ)
+        expect(arm_err.is_err()).to_equal(true)
+        expect(x64_err.is_err()).to_equal(true)
+        expect(arm_err.unwrap_err()).to_contain("--backend llvm")
+        expect(x64_err.unwrap_err()).to_contain("--backend llvm")
+
+    it "fails closed for unsupported Windows/FreeBSD native targets":
+        expect(xray_link_objects_v1(["a.o"], true, "native", "x86_64-pc-windows-msvc", RT_OBJ).is_err()).to_equal(true)
+        expect(xray_link_objects_v1(["a.o"], true, "native", "aarch64-unknown-freebsd", RT_OBJ).is_err()).to_equal(true)
+
+    it "fails closed for an unresolved (empty) native target instead of guessing the host":
+        val result = xray_link_objects_v1(["a.o"], true, "native", "", RT_OBJ)
+        expect(result.is_err()).to_equal(true)

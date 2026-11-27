@@ -1,0 +1,134 @@
+# @tag: unit, collection
+"""
+## Purpose and audience
+Executable contract for builtin `Dict` iteration order. Owner decision
+2026-11-06: every engine iterates a `Dict` in INSERTION order — `keys()`,
+`values()`, `entries()`/`items()`, `for (k, v) in d`, and `to_text`/print.
+## Rules
+- A new key is appended at the end.
+- Re-setting an existing key replaces its value in place (position kept).
+- Removing a key drops it from the order; re-adding it appends at the end.
+- Order survives table growth.
+## Operator workflow
+Run: `simple test test/01_unit/lib/collections/dict_insertion_order_spec.spl`.
+Run it again with `SIMPLE_EXECUTION_MODE=jit` for the compiled-runtime path.
+Guide: `doc/07_guide/language/dict_iteration_order.md`.
+"""
+
+use std.spec.{describe, it, expect, step}
+
+fn dio_text_keys() -> Dict<text, i64>:
+    var d: Dict<text, i64> = {}
+    d["b"] = 1
+    d["a"] = 2
+    d["10"] = 3
+    d["9"] = 4
+    d
+
+describe "Dict insertion order":
+    it "keys come back in insertion order, not sorted order":
+        step("Insert keys whose sorted order differs from insertion order")
+        val d = dio_text_keys()
+        expect(d.keys()).to_equal(["b", "a", "10", "9"])
+
+    it "values pair with keys in insertion order":
+        val d = dio_text_keys()
+        expect(d.values()).to_equal([1, 2, 3, 4])
+
+    it "entries come back in insertion order":
+        val d = dio_text_keys()
+        var seen: [text] = []
+        for pair in d.entries():
+            seen.push("{pair[0]}={pair[1]}")
+        expect(seen).to_equal(["b=1", "a=2", "10=3", "9=4"])
+
+    it "a for loop over the dict visits keys in insertion order":
+        val d = dio_text_keys()
+        var seen: [text] = []
+        for (k, v) in d:
+            seen.push("{k}={v}")
+        expect(seen).to_equal(["b=1", "a=2", "10=3", "9=4"])
+
+    it "a dict literal keeps its source order":
+        val d = {"z": 1, "m": 2, "a": 3}
+        expect(d.keys()).to_equal(["z", "m", "a"])
+
+    it "int keys keep insertion order":
+        var d: Dict<i64, text> = {}
+        d[3] = "c"
+        d[1] = "a"
+        d[2] = "b"
+        expect(d.keys()).to_equal([3, 1, 2])
+        expect(d.values()).to_equal(["c", "a", "b"])
+
+    it "replacing an existing key keeps its original position":
+        var d = dio_text_keys()
+        d["a"] = 20
+        expect(d.keys()).to_equal(["b", "a", "10", "9"])
+        expect(d.values()).to_equal([1, 20, 3, 4])
+
+    it "removing a key drops it and re-adding appends it at the end":
+        var d = dio_text_keys()
+        d.remove("a")
+        expect(d.keys()).to_equal(["b", "10", "9"])
+        d["a"] = 5
+        expect(d.keys()).to_equal(["b", "10", "9", "a"])
+        expect(d.values()).to_equal([1, 3, 4, 5])
+
+    it "order survives growth past many resizes":
+        var d: Dict<text, i64> = {}
+        var expected: [text] = []
+        var i = 99
+        while i >= 0:
+            val key = "k{i}"
+            d[key] = i
+            expected.push(key)
+            i = i - 1
+        expect(d.len()).to_equal(100)
+        expect(d.keys()).to_equal(expected)
+        expect(d["k42"]).to_equal(42)
+
+    it "printing the dict renders entries in insertion order":
+        val d = {"b": 1, "a": 2}
+        expect("{d}").to_equal("{b: 1, a: 2}")
+
+
+    it "merge keeps existing keys in place and appends new ones":
+        var d: Dict<text, i64> = {}
+        d["b"] = 1
+        d["a"] = 2
+        d.merge({"z": 9, "b": 10})
+        expect(d.keys()).to_equal(["b", "a", "z"])
+        expect(d.values()).to_equal([10, 2, 9])
+
+    it "extend keeps existing keys in place and appends new ones":
+        var d: Dict<text, i64> = {}
+        d["q"] = 1
+        d.extend({"p": 2, "q": 3})
+        expect(d.keys()).to_equal(["q", "p"])
+        expect(d.values()).to_equal([3, 2])
+
+    it "setdefault appends a missing key and keeps existing order":
+        var d: Dict<text, i64> = {}
+        d["y"] = 1
+        d["b"] = 2
+        val result = d.setdefault("a", 3)
+        val updated = result[1]
+        expect(updated.keys()).to_equal(["y", "b", "a"])
+
+    it "a dict comprehension keeps source order":
+        val d = {k: k.len() for k in ["ccc", "a", "bb"]}
+        expect(d.keys()).to_equal(["ccc", "a", "bb"])
+
+    it "a spread keeps the source order then appends":
+        val a = {"b": 1, "a": 2}
+        val d = {**a, "c": 3}
+        expect(d.keys()).to_equal(["b", "a", "c"])
+
+    it "removing a middle key keeps the rest in order":
+        var d = dio_text_keys()
+        d.remove("10")
+        var seen: [text] = []
+        for (k, v) in d:
+            seen.push("{k}={v}")
+        expect(seen).to_equal(["b=1", "a=2", "9=4"])

@@ -1,0 +1,150 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+"""
+# Grid `justify-content` overflow, gaps, second freeze pass and GPU admission (Chrome 159)
+
+Review follow-up to `grid_minmax_floor_justify_content_chrome159_spec`.
+Chrome values from getBoundingClientRect in Chrome for Testing 159.0.8154.6
+(headless, 400x300); every edge is a whole CSS px, so k=4 runs are 4x.
+
+Page 2: each case is a `.w` grid (margin-left 40px, 200px wide unless noted);
+the blue item's run is read on CSS row `case * 30 + 10`.
+
+| case | template / justify-content | Chrome k=1 |
+|------|----------------------------|------------|
+| 0 | 240px `minmax(60px,1fr) minmax(150px,1fr) 1fr` (two freeze passes: 60/150/30) | 250..279 |
+| 1 | `minmax(120px,1fr) 1fr`, column-gap 10px | 170..239 |
+| 2 | `40px 40px`, gap 10px, space-between | 200..239 |
+| 3 | `40px 40px`, gap 10px, center | 145..184 |
+| 4 | `150px 150px`, center (overflow: unsafe, centred) | 140..289 |
+| 5 | two `minmax(150px,1fr)`, center (overflow) | 140..289 |
+| 6 | `150px 150px`, end (overflow) | 90..239 |
+| 7 | `150px 150px`, space-between (overflow falls back to start) | 190..339 |
+| 8 | `150px 150px`, space-around (overflow falls back to start) | 190..339 |
+| 9 | `150px 150px`, safe center (overflow falls back to start) | 190..339 |
+
+Page 3: `20px 100px` centred in 200px (lead 40); item 0 has padding-left:50%
+of its 20px column (10px, Chrome getComputedStyle) and a blue
+`background-clip:content-box`, so blue paints 90..99. Base resolved the
+painted padding against column 1 (100px -> 50px) and painted nothing.
+k=1 only: at k=4 the device-scale paint path ignores percent padding under
+`background-clip:content-box` even on a plain block (Chrome 360..399, Simple
+320..399; open, see the wiki note of 2026-11-27).
+
+AC-5 pins GPU admission. Today the adapter reads `40px` as 0 (`to_i64`), so no
+stored grid template is admitted at all and these pins are not red on base;
+they keep `justify-content` and `L+Nfr` tracks out once px tracks are read.
+"""
+
+"""
+Traceability: web_grid_minmax_floor_and_justify_content_2026-11-27 — review follow-up: overflow alignment, gaps, freeze passes, painted percent padding and GPU admission.
+"""
+# @tag: unit, browser_engine, layout, grid, chrome159
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl 1%
+use std.spec.*
+use std.common.structural.layout.{layout_execution_profile, LAYOUT_GPU_ADMISSION_UNSUPPORTED_TRACK}
+use std.gc_async_mut.gpu.browser_engine.gpu_web.layout.adapter.{web_layout_adapt_cpu_oracle}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_web_layout_render_html_draw_ir_result}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+val CSS_W: i32 = 400
+val CSS_H: i32 = 300
+
+val PAGE2: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>body{{margin:0;background:#fff}}.w{{margin-left:40px;width:200px;height:30px;display:grid}}.b{{height:20px;background:#00f}}.e{{height:20px}}</style></head><body><div class=\"w\" style=\"width:240px;grid-template-columns:minmax(60px,1fr) minmax(150px,1fr) 1fr\"><div class=\"e\"></div><div class=\"e\"></div><div class=\"b\"></div></div><div class=\"w\" style=\"grid-template-columns:minmax(120px,1fr) 1fr;column-gap:10px\"><div class=\"e\"></div><div class=\"b\"></div></div><div class=\"w\" style=\"grid-template-columns:40px 40px;column-gap:10px;justify-content:space-between\"><div class=\"e\"></div><div class=\"b\"></div></div><div class=\"w\" style=\"grid-template-columns:40px 40px;column-gap:10px;justify-content:center\"><div class=\"e\"></div><div class=\"b\"></div></div><div class=\"w\" style=\"grid-template-columns:150px 150px;justify-content:center\"><div class=\"e\"></div><div class=\"b\"></div></div><div class=\"w\" style=\"grid-template-columns:minmax(150px,1fr) minmax(150px,1fr);justify-content:center\"><div class=\"e\"></div><div class=\"b\"></div></div><div class=\"w\" style=\"grid-template-columns:150px 150px;justify-content:end\"><div class=\"e\"></div><div class=\"b\"></div></div><div class=\"w\" style=\"grid-template-columns:150px 150px;justify-content:space-between\"><div class=\"e\"></div><div class=\"b\"></div></div><div class=\"w\" style=\"grid-template-columns:150px 150px;justify-content:space-around\"><div class=\"e\"></div><div class=\"b\"></div></div><div class=\"w\" style=\"grid-template-columns:150px 150px;justify-content:safe center\"><div class=\"e\"></div><div class=\"b\"></div></div></body></html>"
+val PAGE3: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>body{{margin:0;background:#fff}}</style></head><body><div style=\"margin-left:40px;width:200px;display:grid;grid-template-columns:20px 100px;justify-content:center\"><div class=\"b\" style=\"padding-left:50%;height:20px;background:#00f;background-clip:content-box\"></div><div style=\"height:20px\"></div></div></body></html>"
+var g_p2_1: [u32] = []
+var g_p2_4: [u32] = []
+var g_p3_1: [u32] = []
+var g_p3_4: [u32] = []
+
+fn _render(page: text, k: i32) -> [u32]:
+    if k == 1:
+        return simple_web_render_html_to_pixels_with_engine2d_backend(page, CSS_W, CSS_H, "cpu_simd")
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale(page, CSS_W, CSS_H, k, "cpu_simd")
+
+fn _px(page_no: i32, k: i32) -> [u32]:
+    if page_no == 2 and k == 1:
+        if g_p2_1.len() == 0:
+            g_p2_1 = _render(PAGE2, 1)
+        return g_p2_1
+    if page_no == 2:
+        if g_p2_4.len() == 0:
+            g_p2_4 = _render(PAGE2, k)
+        return g_p2_4
+    if k == 1:
+        if g_p3_1.len() == 0:
+            g_p3_1 = _render(PAGE3, 1)
+        return g_p3_1
+    if g_p3_4.len() == 0:
+        g_p3_4 = _render(PAGE3, k)
+    g_p3_4
+
+# Blue runs " a..b" on the device row through CSS row `css_y`.
+fn _runs(page_no: i32, k: i32, css_y: i32) -> text:
+    val px = _px(page_no, k)
+    val w = CSS_W * k
+    val y = css_y * k
+    var out = ""
+    var x = 0
+    var inr = false
+    var start = 0
+    while x <= w:
+        var blue = false
+        if x < w:
+            val v = px[y * w + x]
+            val r = ((v >> 16u32) & 0xFFu32).to_i32()
+            val b = (v & 0xFFu32).to_i32()
+            blue = b > 128 and r < 128
+        if blue and not inr:
+            inr = true
+            start = x
+        if not blue and inr:
+            inr = false
+            out = out + " {start}..{x - 1}"
+        x = x + 1
+    out
+
+fn _both(row: i32, r1: text, r4: text):
+    expect(_runs(2, 1, row * 30 + 10)).to_equal(r1)
+    expect(_runs(2, 4, row * 30 + 10)).to_equal(r4)
+
+fn _grid_track_flag(columns: text, justify: text) -> i64:
+    val page = "<div style=\"display:grid;grid-template-columns:" + columns + ";justify-content:" + justify + "\"><div>a</div><div>b</div></div>"
+    val browser = simple_web_layout_render_html_draw_ir_result(page, 320, 240)
+    val execution = layout_execution_profile("serial_cpu", 50, 0, 0, 0, 0, 0, 0, 0)
+    val adapted = web_layout_adapt_cpu_oracle(browser, 1, execution, 4)
+    for node in adapted.snapshot.nodes:
+        if node.semantics.display == "grid":
+            return node.semantics.gpu_admission_flags & LAYOUT_GPU_ADMISSION_UNSUPPORTED_TRACK
+    -1
+
+describe "grid justify-content and minmax floors: review follow-up (Chrome 159)":
+    it "AC-1: a floored track freezes on a second pass":
+        _both(0, " 250..279", " 1000..1119")
+
+    it "AC-2: column-gap with a floor and with justify-content":
+        _both(1, " 170..239", " 680..959")
+        _both(2, " 200..239", " 800..959")
+        _both(3, " 145..184", " 580..739")
+
+    it "AC-3: overflowing tracks: center and end overflow both sides, space-* and safe fall back to start":
+        _both(4, " 140..289", " 560..1159")
+        _both(5, " 140..289", " 560..1159")
+        _both(6, " 90..239", " 360..959")
+        _both(7, " 190..339", " 760..1359")
+        _both(8, " 190..339", " 760..1359")
+        _both(9, " 190..339", " 760..1359")
+
+    it "AC-4: percent padding of a centred grid item resolves against its own column (k=1)":
+        expect(_runs(3, 1, 10)).to_equal(" 90..99")
+
+    it "AC-5: the GPU lane does not admit grid alignment or floored fr tracks it cannot place":
+        expect(_grid_track_flag("40px 40px", "center")).to_equal(LAYOUT_GPU_ADMISSION_UNSUPPORTED_TRACK)
+        expect(_grid_track_flag("40px 40px", "space-between")).to_equal(LAYOUT_GPU_ADMISSION_UNSUPPORTED_TRACK)
+        expect(_grid_track_flag("minmax(60px, 1fr) 40px", "normal")).to_equal(LAYOUT_GPU_ADMISSION_UNSUPPORTED_TRACK)

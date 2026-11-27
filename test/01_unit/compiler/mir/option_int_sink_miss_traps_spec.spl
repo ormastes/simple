@@ -1,0 +1,69 @@
+"""
+Regression: bug native_option_int_sink_miss_and_payload_three_2026-11-07.
+
+1. A None reaching a declared non-optional scalar sink (`-> i64` tail,
+   `return`, `val y: i64 =`) was unwrapped through rt_unwrap_or_self and read
+   as its payload word 3. The sinks now emit rt_unwrap_or_trap.
+2. (Defect 2, a stored list element 3, was fixed by c07e5d09df1/43a523eb900
+   and is pinned by their spec.)
+None-tolerant reads (`??`, `.?`, `==`) keep rt_unwrap_or_self / no trap.
+"""
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering.{MirLowering}
+use compiler.mir.mir_json.{serialize_mir_function}
+
+fn lower_module_json(src: text) -> Dict<text, text>:
+    val module = parse_full_frontend(src, "list_get.spl", "list_get.spl", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename("list_get.spl")
+    val hir = hir_lowering.lower_module(module)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var out: Dict<text, text> = {}
+    for function in mir.functions.values():
+        val dot = function.name.rfind(".")
+        val short = if dot >= 0: function.name.substring(dot + 1, function.name.len()) else: function.name
+        out[short] = serialize_mir_function(function)
+    out
+
+fn count_of(hay: text, needle: text) -> i64:
+    var n = 0
+    var i = 0
+    while i + needle.len() <= hay.len():
+        if hay.substring(i, i + needle.len()) == needle:
+            n = n + 1
+            i = i + needle.len()
+        else:
+            i = i + 1
+    n
+
+val SRC = (
+    "fn tail_list(w: list, i: i64) -> i64:\n    val x = w.get(i)\n    x\n\n" +
+    "fn ret_typed(w: [i64], i: i64) -> i64:\n    return w.get(i)\n\n" +
+    "fn bind_typed(w: [i64], i: i64) -> i64:\n    val y: i64 = w.get(i)\n    y\n\n" +
+    "fn tail_bool(w: [bool], i: i64) -> bool:\n    val x = w.get(i)\n    x\n\n" +
+    "fn coalesce_list(w: list, i: i64) -> i64:\n    w.get(i) ?? -1\n\n" +
+    "fn present_list(w: list, i: i64) -> bool:\n    w.get(i).?\n\n" +
+    "fn eq_typed(w: [i64], i: i64) -> bool:\n    w.get(i) == 3\n"
+)
+
+describe "Option into a declared scalar sink traps on None":
+    it "emits rt_unwrap_or_trap at tail, return and annotated binding sinks":
+        val fns = lower_module_json(SRC)
+        for name in ["tail_list", "ret_typed", "bind_typed", "tail_bool"]:
+            val j = fns[name] ?? ""
+            expect(j.len() > 0).to_equal(true)
+            expect(j).to_contain("rt_unwrap_or_trap")
+            expect(j.contains("rt_unwrap_or_self")).to_equal(false)
+
+    it "keeps None-tolerant reads off the trap":
+        val fns = lower_module_json(SRC)
+        for name in ["coalesce_list", "present_list", "eq_typed"]:
+            val j = fns[name] ?? ""
+            expect(j.len() > 0).to_equal(true)
+            expect(j.contains("rt_unwrap_or_trap")).to_equal(false)
+

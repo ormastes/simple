@@ -17,7 +17,7 @@ use std.nogc_sync_mut.gpu.native_session_owner_v1.{NativeSessionOwnerV1,
     native_session_owner_register_v1, native_session_owner_begin_v1,
     native_session_owner_end_v1, native_session_owner_claim_destroy_v1,
     native_session_owner_finish_destroy_v1}
-use std.io_runtime.{file_hash_sha256}
+use std.io_runtime.{file_hash_sha256_or_shell}
 use std.common.string_core.{text_to_bytes}
 use std.common.browser.chrome_render_shim_twin.{chrome_render_create_status,
     chrome_render_status_text}
@@ -87,13 +87,13 @@ struct ChromeRenderHandle:
     released: bool
 
 fn _chrome_render_handle_live(handle: ChromeRenderHandle) -> bool:
-    if handle.released or handle.library == nil or handle.session_owner == nil:
+    if handle.released or handle.library.is_none() or handle.session_owner.is_none():
         return false
     handle.library.?.is_live()
 
 @unsafe(reason: "pins a cached Chrome render symbol through one provider call", capabilities: [ffi, raw_ptr])
 fn _chrome_render_begin_call(handle: ChromeRenderHandle) -> bool:
-    if handle.released or handle.library == nil:
+    if handle.released or handle.library.is_none():
         return false
     handle.library.?.begin_raw_call()
 
@@ -105,7 +105,7 @@ fn _chrome_render_end_call(handle: ChromeRenderHandle):
 # A positive begin reserves both the mapping and this session until end.
 @unsafe(reason: "borrows one admitted Chrome render session and its mapping", capabilities: [ffi, raw_ptr])
 fn _chrome_render_begin_session(handle: ChromeRenderHandle, ticket: i64) -> i64:
-    if ticket <= 0 or handle.session_owner == nil or
+    if ticket <= 0 or handle.session_owner.is_none() or
        not _chrome_render_begin_call(handle):
         return 0
     val raw = native_session_owner_begin_v1(handle.session_owner.?, ticket.to_u64())
@@ -231,7 +231,7 @@ fn chrome_render_load(request: ChromeRenderLoadRequest) -> ChromeRenderLoadResul
     if not chrome_render_request_valid(request):
         return _chrome_render_result(request, false, "invalid-request",
             _chrome_render_empty_abi(), "request-rejected-before-load", "")
-    val digest = file_hash_sha256(request.library_path)
+    val digest = file_hash_sha256_or_shell(request.library_path)
     if digest != request.manifest_sha256:
         return _chrome_render_result(request, false, "manifest-mismatch",
             _chrome_render_empty_abi(), "provider-artifact-digest-mismatch", "")
@@ -256,7 +256,7 @@ fn chrome_render_load(request: ChromeRenderLoadRequest) -> ChromeRenderLoadResul
         lib.close()
         return _chrome_render_result(request, false, "symbol-missing",
             _chrome_render_empty_abi(), "required-abi-v1-symbol-missing", missing)
-    val digest_after_load = file_hash_sha256(request.library_path)
+    val digest_after_load = file_hash_sha256_or_shell(request.library_path)
     if digest_after_load != digest:
         lib.close()
         return _chrome_render_result(request, false, "manifest-mismatch",
@@ -468,7 +468,7 @@ actually CALLABLE, which merely resolving a symbol address does not.
 """
 @unsafe(reason: "invokes the admitted Chrome render destroy ABI", capabilities: [ffi, raw_ptr])
 fn chrome_render_destroy(handle: ChromeRenderHandle, session_handle: i64) -> i64:
-    if handle.library == nil or handle.session_owner == nil or
+    if handle.library.is_none() or handle.session_owner.is_none() or
        handle.symbols.destroy <= 0:
         return 2
     if session_handle == 0:
@@ -501,7 +501,7 @@ session remains active, or another copied handle already closed the provider.
 """
 @unsafe(reason: "retires the admitted Chrome render provider after sessions drain", capabilities: [ffi, raw_ptr])
 fn chrome_render_close(handle: ChromeRenderHandle) -> bool:
-    if handle.library == nil or handle.session_owner == nil:
+    if handle.library.is_none() or handle.session_owner.is_none():
         return false
     if not native_session_owner_claim_close_v1(handle.session_owner.?):
         return false

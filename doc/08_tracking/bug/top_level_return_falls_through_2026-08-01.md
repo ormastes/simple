@@ -239,3 +239,27 @@ contract for whoever takes it.
 
 Do not "fix" call sites by wrapping the `return` in `if true:`. The guard has to
 work, or the dead code has to be deleted.
+
+## Triage 2026-11-25 (P2 ledger pass, release/1.0.0)
+
+Classification: SKIP — the outstanding half (pure-Simple `src/compiler/50.mir`)
+requires a stage2 bootstrap build plus the native-lane gate this entry itself
+defines ("the real gate is the native lane ... must compile and run, not
+`simple test`"); neither a bootstrap nor any spec execution is possible on
+this host (pinned `bin/simple.exe` rejects `@representation_boundary`
+repo-wide at this HEAD).
+
+Code-inspection update on the pure-Simple site, for whoever picks this up:
+the fix shape described under "Fix shape" appears to have landed since
+2026-08-01. `current_block_has_explicit_terminator()`
+(`src/compiler/50.mir/mir_data.spl:2290`) is now consulted at BOTH explicit
+return-lowering sites before `terminate_return`
+(`_MirLoweringExpr/expr_dispatch.spl:4600` and `:4635` — a second return on an
+already-terminated block now early-outs with a dummy temp instead of
+overwriting the terminator), and dead-block machinery exists
+(`current_block_is_dead()`, `mir_data.spl:2300`, used by
+`_MirLowering/function_lowering.spl:1234`). `set_terminator` itself
+(`mir_data.spl:2258`) remains an unconditional overwrite, so the guard-at-
+call-site pattern is the whole defense. This is inspection only — the
+native-lane RED→GREEN evidence this entry requires is still outstanding, so
+the pure-Simple half stays OPEN. No code change in this pass.

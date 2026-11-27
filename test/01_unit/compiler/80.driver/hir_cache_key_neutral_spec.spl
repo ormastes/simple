@@ -1,0 +1,190 @@
+# @req: REQ-COMP-HIR-CFG-SELECT-004 - HIR cache key drops the target fold only for truly target-neutral closures.
+"""
+## Purpose and audience
+Purpose: with SIMPLE_HIR_CFG_SELECT=1 a source whose marker-mode preprocess
+made zero strip decisions, in a closure where every surface is also neutral,
+keys identically under two native targets. Any strip decision, any non-neutral
+closure member, or a target-receipted parse keeps the target in the key. The
+strip-decision memo is keyed by (content, cfg identity, native target, mode).
+Flag off is pinned to the pre-change key formula. Audience: cache maintainers.
+"""
+# @tag: unit, compiler, hir, cache
+
+use std.spec.*
+use compiler.driver.driver_hir_cache.{hir_cache_key, hir_cache_closure_digest_from_rows, hir_cache_surface_neutral_token}
+use compiler.frontend.core.parser_preprocessor.{_pp_preprocess_conditionals, _pp_preprocess_conditionals_target_receipted_v1, pp_last_strip_decision_count, pp_declare_parse_scope, pp_ensure_marker_strip_decisions, pp_marker_strip_count, pp_marker_strip_log, pp_strip_memo_size}
+use compiler.core.cfg_platform.{cfg_guard_context_identity_v1}
+use compiler.hir.hir_codec.{hir_codec_header}
+use compiler.common.module_path_naming.{module_source_relative_path}
+use std.common.crypto.sha256.{sha256_text}
+use std.io_runtime.{env_get, env_set, env_remove_process}
+use std.nogc_sync_mut.io_runtime.{file_read_nullable}
+
+extern fn rt_file_hash_sha256(path: text) -> text
+extern fn rt_hash_text(content: text) -> i64
+
+val DIR = "test/fixtures/compiler/hir_cache_neutral/"
+val NEUTRAL = DIR + "neutral.spl"
+val CFG_DECL = DIR + "cfg_decl.spl"
+val BINDING = DIR + "binding_when.spl"
+val PLAIN = DIR + "plain.spl"
+val TOP_WHEN = DIR + "top_when.spl"
+val CFG_USE = DIR + "cfg_use.spl"
+val FB_BRACE = DIR + "fb_brace.spl"
+val FB_EMPTY = DIR + "fb_empty_arm.spl"
+val FB_NESTED = DIR + "fb_nested.spl"
+val LINUX = "x86_64-unknown-linux-gnu"
+val WIN = "x86_64-pc-windows-msvc"
+
+fn _restore_env(name: text, old: text?):
+    if old.?:
+        env_set(name, old ?? "")
+    else:
+        env_remove_process(name)
+
+# Closure digest as the driver builds it: declare the parse scope, let the
+# surface-time call record each surface, then fold hir_cache_surface_neutral_token.
+fn _closure(paths: [text], target: text, target_receipted: bool) -> text:
+    pp_declare_parse_scope(target_receipted, target)
+    var rows: [text] = []
+    var tokens: [text] = []
+    var i = 0
+    while i < paths.len():
+        val src = file_read_nullable(paths[i]) ?? ""
+        pp_ensure_marker_strip_decisions(src, target)
+        val h = rt_hash_text(src)
+        rows = rows.push("{paths[i]}|{h}")
+        tokens = tokens.push(hir_cache_surface_neutral_token(h))
+        i = i + 1
+    hir_cache_closure_digest_from_rows(rows, tokens)
+
+fn _key(flag: text, src: text, paths: [text], target: text, receipted: bool) -> text:
+    val old = env_get("SIMPLE_HIR_CFG_SELECT")
+    env_set("SIMPLE_HIR_CFG_SELECT", flag)
+    val closure = _closure(paths, target, receipted)
+    val k = hir_cache_key(src, closure, false, "", target)
+    _restore_env("SIMPLE_HIR_CFG_SELECT", old)
+    k
+
+fn _keys(flag: text, src: text, paths: [text]) -> [text]:
+    [_key(flag, src, paths, LINUX, false), _key(flag, src, paths, WIN, false)]
+
+fn _pre_change_key(src: text, closure: text, target: text) -> text:
+    var sw = ""
+    for name in ["SIMPLE_BOOTSTRAP", "SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE", "SIMPLE_BOOTSTRAP_STAGE4", "SIMPLE_STUB_HIR", "SIMPLE_STAGE3_STREAMING_SURFACES", "SIMPLE_HIR_CFG_SELECT"]:
+        sw = sw + name + "=" + (env_get(name) ?? "") + "\n"
+    val ctx = "hir-target-v2:" + cfg_guard_context_identity_v1() + ";native-target={target.len()}:{target}"
+    sha256_text("hir-source-key-v2\n" + sha256_text(module_source_relative_path(src)) + "\n" + rt_file_hash_sha256(src) + "\n" + closure + "\nmodule\n" + sw + ctx + "\n" + hir_codec_header() + "\n")
+
+describe "HIR cache key target-neutral rule":
+    it "(a) flag off: distinct keys per target, equal to the pre-change formula":
+        val k = _keys("0", NEUTRAL, [NEUTRAL])
+        expect(k[0].len()).to_equal(64)
+        expect(k[0] == k[1]).to_equal(false)
+        val old = env_get("SIMPLE_HIR_CFG_SELECT")
+        env_set("SIMPLE_HIR_CFG_SELECT", "0")
+        val closure = _closure([NEUTRAL], LINUX, false)
+        val expected = _pre_change_key(NEUTRAL, closure, LINUX)
+        _restore_env("SIMPLE_HIR_CFG_SELECT", old)
+        expect(k[0]).to_equal(expected)
+
+    it "(b) flag on, statement-only @when source, neutral closure: identical key":
+        val k = _keys("1", NEUTRAL, [NEUTRAL, PLAIN])
+        expect(k[0].len()).to_equal(64)
+        expect(k[0]).to_equal(k[1])
+
+    it "(c) flag on, top-level @cfg decl keeps target in the key":
+        val k = _keys("1", CFG_DECL, [CFG_DECL])
+        expect(k[0] == k[1]).to_equal(false)
+
+    it "(c) flag on, binding-declaring @when keeps target in the key":
+        val k = _keys("1", BINDING, [BINDING])
+        expect(k[0] == k[1]).to_equal(false)
+
+    it "(d) flag on, neutral source with a non-neutral closure member keeps target":
+        val k = _keys("1", NEUTRAL, [NEUTRAL, CFG_DECL])
+        expect(k[0] == k[1]).to_equal(false)
+
+    it "(f) closure gaining a non-neutral import changes the neutral key":
+        val before = _key("1", NEUTRAL, [NEUTRAL], LINUX, false)
+        val after = _key("1", NEUTRAL, [NEUTRAL, CFG_DECL], LINUX, false)
+        val again = _key("1", NEUTRAL, [NEUTRAL], LINUX, false)
+        expect(before == after).to_equal(false)
+        expect(again).to_equal(before)
+
+    it "(g) same content, two targets, one process: separate memo entries and strip digests":
+        val old = env_get("SIMPLE_HIR_CFG_SELECT")
+        val old_os = env_get("SIMPLE_TARGET_OS")
+        env_set("SIMPLE_HIR_CFG_SELECT", "1")
+        val src = file_read_nullable(CFG_DECL) ?? ""
+        val h = rt_hash_text(src)
+        val before = pp_strip_memo_size()
+        pp_declare_parse_scope(false, "tgt-g-linux")
+        env_set("SIMPLE_TARGET_OS", "linux")
+        pp_ensure_marker_strip_decisions(src, "tgt-g-linux")
+        val log_linux = pp_marker_strip_log(h, "tgt-g-linux")
+        val key_linux = _key("1", CFG_DECL, [CFG_DECL], "tgt-g-linux", false)
+        pp_declare_parse_scope(false, "tgt-g-windows")
+        env_set("SIMPLE_TARGET_OS", "windows")
+        pp_ensure_marker_strip_decisions(src, "tgt-g-windows")
+        val log_win = pp_marker_strip_log(h, "tgt-g-windows")
+        val key_win = _key("1", CFG_DECL, [CFG_DECL], "tgt-g-windows", false)
+        val win_count = pp_marker_strip_count(h, "tgt-g-windows")
+        _restore_env("SIMPLE_TARGET_OS", old_os)
+        _restore_env("SIMPLE_HIR_CFG_SELECT", old)
+        expect(pp_strip_memo_size() - before >= 2).to_equal(true)
+        expect(log_linux == log_win).to_equal(false)
+        expect(key_linux == key_win).to_equal(false)
+        expect(win_count >= 1).to_equal(true)
+
+    it "(h) target-receipted parse: key is never neutral":
+        val old = env_get("SIMPLE_HIR_CFG_SELECT")
+        env_set("SIMPLE_HIR_CFG_SELECT", "1")
+        pp_declare_parse_scope(true, LINUX)
+        _pp_preprocess_conditionals_target_receipted_v1(file_read_nullable(NEUTRAL) ?? "", "linux", "x86_64")
+        _restore_env("SIMPLE_HIR_CFG_SELECT", old)
+        val a = _key("1", NEUTRAL, [NEUTRAL, PLAIN], LINUX, true)
+        val b = _key("1", NEUTRAL, [NEUTRAL, PLAIN], WIN, true)
+        expect(a == b).to_equal(false)
+
+    it "(i) top-level @when gives distinct keys":
+        val k = _keys("1", TOP_WHEN, [TOP_WHEN])
+        expect(k[0] == k[1]).to_equal(false)
+
+    it "(j) @cfg on a use line gives distinct keys":
+        val k = _keys("1", CFG_USE, [CFG_USE])
+        expect(k[0] == k[1]).to_equal(false)
+
+    it "(k) brace-condition fallback gives distinct keys":
+        val k = _keys("1", FB_BRACE, [FB_BRACE])
+        expect(k[0] == k[1]).to_equal(false)
+
+    it "(k) empty-arm fallback gives distinct keys":
+        val k = _keys("1", FB_EMPTY, [FB_EMPTY])
+        expect(k[0] == k[1]).to_equal(false)
+
+    it "(k) nested fallback gives distinct keys":
+        val k = _keys("1", FB_NESTED, [FB_NESTED])
+        expect(k[0] == k[1]).to_equal(false)
+
+    it "records strip decisions unconditionally, markers do not count":
+        val old = env_get("SIMPLE_HIR_CFG_SELECT")
+        env_set("SIMPLE_HIR_CFG_SELECT", "0")
+        _pp_preprocess_conditionals(file_read_nullable(CFG_DECL) ?? "")
+        expect(pp_last_strip_decision_count()).to_equal(1)
+        _pp_preprocess_conditionals(file_read_nullable(PLAIN) ?? "")
+        expect(pp_last_strip_decision_count()).to_equal(0)
+        env_set("SIMPLE_HIR_CFG_SELECT", "1")
+        _pp_preprocess_conditionals(file_read_nullable(NEUTRAL) ?? "")
+        expect(pp_last_strip_decision_count()).to_equal(0)
+        _restore_env("SIMPLE_HIR_CFG_SELECT", old)
+
+    it "(e) flag off: preprocess output is the pre-change stripped text":
+        val old = env_get("SIMPLE_HIR_CFG_SELECT")
+        val old_os = env_get("SIMPLE_TARGET_OS")
+        env_set("SIMPLE_HIR_CFG_SELECT", "0")
+        env_set("SIMPLE_TARGET_OS", "linux")
+        val out = _pp_preprocess_conditionals(file_read_nullable(NEUTRAL) ?? "")
+        _restore_env("SIMPLE_HIR_CFG_SELECT", old)
+        _restore_env("SIMPLE_TARGET_OS", old_os)
+        expect(out).to_equal("fn pick() -> i64:\n    var r = 0\n\n    r = 4101\n\n\n\n\n\n    r\n")

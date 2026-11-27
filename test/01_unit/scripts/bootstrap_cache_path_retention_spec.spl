@@ -1,0 +1,47 @@
+# @cover scripts/bootstrap/collect-diagnostic-continuation.shs 80%
+"""
+## Purpose and audience
+Purpose: the real diagnostic collector keeps only canonical bootstrap native-cache
+names (plus owner metadata) and reports them as UNADMITTED. Ported from
+bootstrap_cache_path_retention_test.py.
+Audience: maintainers of scripts/bootstrap/collect-diagnostic-continuation.shs.
+"""
+
+use std.spec.step
+use std.spec.*
+use std.io_runtime.{process_run}
+use std.nogc_sync_mut.io.process_ops.{resolve_shell_argv, is_posix_shell_argv}
+
+fn has_posix_shell() -> bool:
+    val (sh_bin, _args) = resolve_shell_argv("true")
+    is_posix_shell_argv(sh_bin)
+
+fn run_script_sh(cmd: text) -> (text, text, i64):
+    val (sh_bin, sh_args) = resolve_shell_argv(cmd)
+    process_run(sh_bin, sh_args)
+
+# Builds a fixture repo, runs the collector, prints the retained paths (sorted),
+# the admission value and the preserved byte count.
+fn collect_cmd(extra_file: text) -> text:
+    val build = "d=$(mktemp -d); r=$d/repo; for n in build/bootstrap/stage3/x/stage2-native-cache/scope-a/objects/a.o build/bootstrap/stage3/x/stage3-native-cache/scope-b/objects/b.obj build/bootstrap/stage3/x/stage2-native-cache/scope-a/.cache_scope build/bootstrap/stage3/x/stage2-native-cache/scope-a/incremental_manifest.txt build/bootstrap/not-native-cache/ignore.o elsewhere/native_cache/ignore.o {extra_file}; do mkdir -p $r/$(dirname $n); printf fixture > $r/$n; done; "
+    val run = "sh scripts/bootstrap/collect-diagnostic-continuation.shs $r $d/out 4096 >/dev/null || echo COLLECT_FAILED; grep -o '\"path\": \"[^\"]*\"' $d/out/receipt.json | sort; grep -o '\"admission\": \"[A-Z]*\"' $d/out/receipt.json; grep -o '\"preserved_bytes\": [0-9]*' $d/out/receipt.json; rm -rf $d"
+    build + run
+
+describe "bootstrap diagnostic collector cache path retention":
+
+    it "keeps exactly the canonical native-cache names, UNADMITTED, with their bytes":
+        if not has_posix_shell():
+            pending("BLOCKED: POSIX sh not available for script execution")
+        else:
+            step("Collect from a fixture repo with 4 canonical and 2 non-canonical files")
+            val (out, err, code) = run_script_sh(collect_cmd("elsewhere/other.o"))
+            expect(code).to_equal(0)
+            expect(out).not_to_contain("COLLECT_FAILED")
+            expect(out).to_contain("\"path\": \"build/bootstrap/stage3/x/stage2-native-cache/scope-a/objects/a.o\"")
+            expect(out).to_contain("\"path\": \"build/bootstrap/stage3/x/stage3-native-cache/scope-b/objects/b.obj\"")
+            expect(out).to_contain("\"path\": \"build/bootstrap/stage3/x/stage2-native-cache/scope-a/.cache_scope\"")
+            expect(out).to_contain("\"path\": \"build/bootstrap/stage3/x/stage2-native-cache/scope-a/incremental_manifest.txt\"")
+            expect(out).not_to_contain("ignore.o")
+            expect(out).not_to_contain("elsewhere/other.o")
+            expect(out).to_contain("\"admission\": \"UNADMITTED\"")
+            expect(out).to_contain("\"preserved_bytes\": 28")

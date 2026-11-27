@@ -1,0 +1,46 @@
+use std.spec
+use std.nogc_sync_mut.io.file_ops.{file_read}
+
+# Phase-3 stage3 bootstrap: the frozen stage2 (ef0681fc0e1) mis-lowers two
+# source shapes in the driver modules it compiles:
+#  - bug stage2_if_val_struct_option_binding_as_int_wide_2026-11-03:
+#    `if val x = <struct-typed Option>` binds x through rt_value_as_int_wide.
+#  - bug stage2_inline_env_get_boxed_extern_abi_2026-11-03: the inlined
+#    std.env.env_get passes the boxed text to rt_env_get(ptr, len).
+# These specs pin the rewritten shapes so neither can silently return.
+
+describe "driver_pipeline_lowering binds struct-typed optionals through if val":
+    it "has no frozen-stage2 int-wide Option workaround left on the MIR path":
+        val src = file_read("src/compiler/80.driver/driver_pipeline_lowering.spl")
+        expect(src).not_to_contain("stage2_if_val_struct_option_binding_as_int_wide_2026-11-03")
+        expect(src).not_to_contain("if err_span_opt != nil:")
+        expect(src).not_to_contain("if entry_mir_opt != nil:")
+        expect(src).not_to_contain("if bootstrap_enum_hir != nil:")
+        expect(src).not_to_contain("if enum_inventory_hir != nil:")
+        expect(src).not_to_contain("if prelower_hir_opt != nil:")
+        expect(src).not_to_contain("if reused_opt != nil:")
+        expect(src).not_to_contain("if direct_hir != nil:")
+
+    it "uses idiomatic if-val struct Option bindings":
+        val src = file_read("src/compiler/80.driver/driver_pipeline_lowering.spl")
+        expect(src).to_contain("if val span = err.span:")
+        expect(src).to_contain("if val entry_mir = self.ctx.bootstrap_entry_mir:")
+        expect(src).to_contain("if val present_bootstrap_enum_hir = bootstrap_enum_hir:")
+        expect(src).to_contain("if val present_enum_hir = enum_inventory_hir:")
+        expect(src).to_contain("if val prelower_hir = prelower_hir_opt:")
+        expect(src).to_contain("if val reused = file_worker_inc_reuse_lookup_v1(reuse_plan, name_direct):")
+        expect(src).to_contain("if val present_direct_hir = direct_hir:")
+
+describe "driver env reads go through the non-inline io_runtime wrapper":
+    it "driver_aot_native_output reads SIMPLE_M4_WORK_RECEIPT through env_get_nullable":
+        val src = file_read("src/compiler/80.driver/driver_aot_native_output.spl")
+        expect(src).to_contain("env_get_nullable(\"SIMPLE_M4_WORK_RECEIPT\")")
+        expect(src).not_to_contain("env_get(\"SIMPLE_M4_WORK_RECEIPT\")")
+
+    it "driver_bootstrap no longer imports the always-inline std.env.env_get":
+        val src = file_read("src/compiler/80.driver/driver_bootstrap.spl")
+        # Brace-free needles: `{name}` inside a literal is interpolation.
+        expect(src).not_to_contain("use std.env.")
+        expect(src).to_contain("use std.nogc_sync_mut.io_runtime.")
+        expect(src).to_contain("fn env_get(key: text) -> text:")
+        expect(src).to_contain("env_get_nullable(key) ?? \"\"")

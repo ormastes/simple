@@ -1,6 +1,6 @@
 # HIR cache I/O failure reason escapes its scratch lifetime
 
-Status: source repair and regressions authored; runtime verification UNRUN.
+Status: verified by spec 2026-11-07 (seed release100-7a0e6fe516f, macOS aarch64): hir_cache_store_failure_reported_spec 2/2 PASS. Native stage3 store-lane evidence still not run.
 Database registration pending: no admitted database CLI is available.
 
 ## Evidence and scope
@@ -65,3 +65,7 @@ This work is based on the primary development lane. Frozen producer source
 were not edited and do not contain this repair. No current or future run of
 that frozen producer establishes execution coverage for this patch. Root owns
 independent review, integration and any separately admitted compiler execution.
+
+## Verification 2026-11-07
+`bin/simple test test/01_unit/compiler/driver/hir_cache_store_failure_reported_spec.spl`
+on seed release100-7a0e6fe516f (macOS aarch64): 2/2 PASS on origin/release/1.0.0.

@@ -1,6 +1,17 @@
 # `ElfObject.relocations` merges every SHT_RELA section without recording its target section
 ## Closed 2026-09-16 — RESOLVED 2026-08-17; sh_info parsed, reproducing + class specs 4/4 green
 
+## 2026-11-25 — re-verified on release/1.0.0 (0819b116ecb)
+
+By code inspection: `ElfSectionHeader.sh_info` exists and is populated in
+both readers (`elf_inspect.spl:70,180-188` and `elf_parser.spl:533,552`);
+`ElfRelocation.target_section_idx` exists (`elf_parser.spl:73`) and is
+populated from the owning RELA section's `sh_info` (`elf_parser.spl:404`).
+Both spec files named below still exist. Execution limit: the pinned seed
+binary (v1.0.0-rc.1) rejects the `@representation_boundary` decorator that
+release/1.0.0 sources use, so the specs could not be executed; verification
+is by source inspection only.
+
 Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
 bookkeeping from in-file evidence, not a re-run of the repro. Re-open with a
 fresh dated repro if the symptom returns.

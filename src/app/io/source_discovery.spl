@@ -4,10 +4,19 @@ use std.nogc_sync_mut.io.sffi_common.{is_absolute_path}
 use std.path.{normalize}
 
 extern fn rt_dir_walk(path: text) -> [text]
-extern fn rt_path_absolute(path: text) -> text
+# Nil when a relative path cannot be resolved (cwd unreadable); never the input.
+extern fn rt_path_absolute(path: text) -> text?
 
-fn discover_spl_files(root: text) -> [text]:
-    val scan_root = rt_path_absolute(root).replace("\\", "/")
+# Source discovery cannot name files without a resolvable root, so an
+# unreadable cwd is a fatal, explicit error rather than a relative fallback.
+fn _source_absolute(path: text) -> text:
+    val resolved = rt_path_absolute(path)
+    if resolved == nil:
+        panic("source discovery: cannot make '{path}' absolute: current directory unreadable")
+    resolved.unwrap()
+
+pub fn discover_spl_files(root: text) -> [text]:
+    val scan_root = _source_absolute(root).replace("\\", "/")
     val relative_root = source_relative_root(root)
     var files: [text] = []
     for physical_path in rt_dir_walk(scan_root):
@@ -17,15 +26,15 @@ fn discover_spl_files(root: text) -> [text]:
     files.sort()
     files
 
-fn source_path_identity(path: text) -> text:
-    normalize(rt_path_absolute(path).replace("\\", "/"))
+pub fn source_path_identity(path: text) -> text:
+    normalize(_source_absolute(path).replace("\\", "/"))
 
 fn source_relative_root(path: text) -> text:
     if is_absolute_path(path):
         return ""
     var root = path.replace("\\", "/")
     while root.len() > 1 and root.ends_with("/"):
-        root = root.substring(0, root.len() - 1)
+        root = root.substring(0, root.byte_len() - 1)
     root
 
 fn source_restore_relative_path(physical_path: text, scan_root: text, relative_root: text) -> text:
@@ -35,4 +44,4 @@ fn source_restore_relative_path(physical_path: text, scan_root: text, relative_r
     val prefix = scan_root + "/"
     if not normalized.starts_with(prefix):
         return physical_path
-    relative_root + "/" + normalized.substring(prefix.len(), normalized.len())
+    relative_root + "/" + normalized.substring(prefix.len(), normalized.byte_len())

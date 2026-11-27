@@ -1,5 +1,5 @@
 # rt_file_truncate caps extend at 4 MiB via the self-hosted binary
-## Open 2026-09-16 — needs owner triage
+## RESOLVED 2026-11-25 — cap verified gone end-to-end on the deployed binary
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
@@ -94,3 +94,42 @@ self-hosted interpreter, confirm where the length is clamped to 4 MiB,
 and widen it to the full 64-bit length the native `ftruncate`
 (`runtime_native.c:2644`) already accepts.
 
+
+## Resolution 2026-11-25 — end-to-end repro now passes; closing
+
+The 2026-08-09 re-verification showed the 4 MiB clamp absent from
+`src/compiler_rust/compiler/src/interpreter_extern/file_io.rs` source but could
+not confirm end-to-end because extern file-I/O calls failed with
+`argument 0 must be a string path` in that environment. Both halves are now
+closed on the current deployed binary (`bin/simple.exe`, Rust seed
+v1.0.0-rc.1, build-commit `1343b77bbaa`, Windows host):
+
+Probe (exact original repro shape — write 3 bytes, truncate up to 32 MiB):
+
+```simple
+extern fn rt_file_truncate(path: text, size: u64) -> bool
+extern fn rt_file_write_bytes(path: text, data: [u8]) -> bool
+extern fn rt_file_size(path: text) -> i64
+
+fn main():
+    val p = "C:/.../trunc_probe.img"
+    val w = rt_file_write_bytes(p, [104, 105, 33])
+    val ok = rt_file_truncate(p, 33554432)
+    print("truncate ok: {ok}")
+    print("size: {rt_file_size(p)}")
+```
+
+Measured output:
+
+```text
+write ok: true
+truncate ok: true
+size: 33554432
+```
+
+`ls -l` on the produced file confirms 33,554,432 bytes — the requested 32 MiB,
+not the 4,194,304-byte cap. The `argument 0 must be a string path` marshalling
+failure that blocked the 2026-08-09 repro also no longer occurs: the `text`
+path argument marshals correctly through `extract_path`. No 4 MiB ceiling
+exists on this lane; the FAT flat-bake blocker described above is gone.
+Status: RESOLVED.

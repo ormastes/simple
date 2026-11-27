@@ -1,0 +1,169 @@
+"""
+## Purpose and audience
+Purpose: Pin a `<summary>`'s disclosure marker against Chrome 159.
+- **Advance:** Chrome reserves `trunc64(0.66em) + trunc64(0.4em)`, in every family (16 px: 675/64 + 409/64 = 16.9375; 13 px: 13.7656). Simple reserved a fixed 16 px.
+- **Paint:** Chrome fills the canonical disclosure path (list_marker_painter.cc, unit square) with analytic AA:
+  - closed: (0,0) (0.86,0.5) (0,1);
+  - open: (0,0.07) (0.5,0.93) (1,0.07).
+  - The square is the 0.66em symbol, at the content start, ending on the baseline.
+- **Before this fix**, Simple painted a `▶` / `▼` glyph that Liberation Sans does not have, so a missing-glyph box showed.
+
+Audience: web renderer list-marker / Draw IR path maintainers.
+
+Chrome oracle (Chrome for Testing 159.0.8154.6, `--headless=new --disable-gpu --hide-scrollbars --force-device-scale-factor=1`):
+- **Geometry:** `--dump-dom` + `getBoundingClientRect`. The summary text starts at 16.9375 (16 px) and 13.7656 (13 px) for sans-serif, serif and monospace alike.
+- **Pixels:** `--window-size=64,96 --screenshot` of PAGE: `details{position:absolute;left:4px}`, 16px/1.5 sans-serif, black on white. Closed marker at top 0, open marker at top 30. The rows below are the grey level (all three channels equal):
+
+closed, x=4..13
+| y  | 4  | 5  | 6  | 7  | 8  | 9  | 10 | 11 | 12 | 13 |
+|----|----|----|----|----|----|----|----|----|----|----|
+| 6  | c7 | ff | ff | ff | ff | ff | ff | ff | ff | ff |
+| 7  | 01 | 5c | e9 | ff | ff | ff | ff | ff | ff | ff |
+| 8  | 00 | 00 | 0e | 8b | f8 | ff | ff | ff | ff | ff |
+| 9  | 00 | 00 | 00 | 00 | 23 | b0 | ff | ff | ff | ff |
+| 10 | 00 | 00 | 00 | 00 | 00 | 00 | 3f | d7 | ff | ff |
+| 11 | 00 | 00 | 00 | 00 | 00 | 00 | 00 | 04 | 79 | ff |
+| 12 | 00 | 00 | 00 | 00 | 00 | 00 | 00 | 53 | e3 | ff |
+| 13 | 00 | 00 | 00 | 00 | 00 | 2f | c0 | ff | ff | ff |
+| 14 | 00 | 00 | 00 | 17 | 9d | fd | ff | ff | ff | ff |
+| 15 | 00 | 04 | 6f | f2 | ff | ff | ff | ff | ff | ff |
+| 16 | 48 | d7 | ff | ff | ff | ff | ff | ff | ff | ff |
+
+open, x=4..14
+| y  | 4  | 5  | 6  | 7  | 8  | 9  | 10 | 11 | 12 | 13 | 14 |
+|----|----|----|----|----|----|----|----|----|----|----|----|
+| 37 | 6a | 40 | 40 | 40 | 40 | 40 | 40 | 40 | 40 | 40 | be |
+| 38 | b7 | 00 | 00 | 00 | 00 | 00 | 00 | 00 | 00 | 36 | fc |
+| 39 | ff | 4f | 00 | 00 | 00 | 00 | 00 | 00 | 00 | c9 | ff |
+| 40 | ff | e1 | 07 | 00 | 00 | 00 | 00 | 00 | 57 | ff | ff |
+| 41 | ff | ff | 77 | 00 | 00 | 00 | 00 | 0d | e1 | ff | ff |
+| 42 | ff | ff | f2 | 1e | 00 | 00 | 00 | 87 | ff | ff | ff |
+| 43 | ff | ff | ff | a7 | 00 | 00 | 29 | f8 | ff | ff | ff |
+| 44 | ff | ff | ff | ff | 44 | 00 | b7 | ff | ff | ff | ff |
+| 45 | ff | ff | ff | ff | d6 | 4a | ff | ff | ff | ff | ff |
+| 46 | ff | ff | ff | ff | ff | f5 | ff | ff | ff | ff | ff |
+
+- **Vertical (AC-4):** `--window-size=64,400 --screenshot` of `SERIF_PAGE` (serif 24px, `line-height: normal`, so the line box is 27). Chrome ends the closed triangle on baseline 21 (rows 5..20), which is Liberation Serif's own ascent 21. A sans 0.905em ascent gives 22, one row low. At x=4 its ink spans rows 5 (0x88) to 20 (0x48); rows 4 and 21 are white.
+"""
+
+"""
+Traceability: REQ-WEB-SUMMARY-MARKER-001 — a summary's disclosure marker reserves Chrome's advance and paints Chrome's filled triangle.
+"""
+# @tag: unit, browser_engine, paint, chrome159
+# @cover src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl 1%
+use std.spec.*
+use std.io_runtime.{file_exists}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val SANS: text = "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
+val W: i32 = 64
+val H: i32 = 96
+# Analytic coverage against Skia's: within two 8-bit steps of 8.
+val TOL: i32 = 16
+val PAGE: text = "<!doctype html><html><head><style>body{margin:0;background:#fff;font:16px/1.5 sans-serif;color:#000}details{position:absolute;left:4px}</style></head><body><details style=\"top:0\"><summary><span>W</span></summary></details><details open style=\"top:30px\"><summary><span>W</span></summary></details></body></html>"
+
+val CLOSED: [[i32]] = [
+    [0xc7, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+    [0x01, 0x5c, 0xe9, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+    [0x00, 0x00, 0x0e, 0x8b, 0xf8, 0xff, 0xff, 0xff, 0xff, 0xff],
+    [0x00, 0x00, 0x00, 0x00, 0x23, 0xb0, 0xff, 0xff, 0xff, 0xff],
+    [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x3f, 0xd7, 0xff, 0xff],
+    [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x04, 0x79, 0xff],
+    [0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x53, 0xe3, 0xff],
+    [0x00, 0x00, 0x00, 0x00, 0x00, 0x2f, 0xc0, 0xff, 0xff, 0xff],
+    [0x00, 0x00, 0x00, 0x17, 0x9d, 0xfd, 0xff, 0xff, 0xff, 0xff],
+    [0x00, 0x04, 0x6f, 0xf2, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+    [0x48, 0xd7, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff]
+]
+val OPEN: [[i32]] = [
+    [0x6a, 0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0x40, 0xbe],
+    [0xb7, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x36, 0xfc],
+    [0xff, 0x4f, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xc9, 0xff],
+    [0xff, 0xe1, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x57, 0xff, 0xff],
+    [0xff, 0xff, 0x77, 0x00, 0x00, 0x00, 0x00, 0x0d, 0xe1, 0xff, 0xff],
+    [0xff, 0xff, 0xf2, 0x1e, 0x00, 0x00, 0x00, 0x87, 0xff, 0xff, 0xff],
+    [0xff, 0xff, 0xff, 0xa7, 0x00, 0x00, 0x29, 0xf8, 0xff, 0xff, 0xff],
+    [0xff, 0xff, 0xff, 0xff, 0x44, 0x00, 0xb7, 0xff, 0xff, 0xff, 0xff],
+    [0xff, 0xff, 0xff, 0xff, 0xd6, 0x4a, 0xff, 0xff, 0xff, 0xff, 0xff],
+    [0xff, 0xff, 0xff, 0xff, 0xff, 0xf5, 0xff, 0xff, 0xff, 0xff, 0xff]
+]
+
+val SERIF: text = "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf"
+# Serif 24px, line-height normal (27): the face baseline is 21 (Liberation
+# Serif ascent 21); a sans 0.905em ascent would put it at 22.
+val SERIF_PAGE: text = "<!doctype html><html><head><style>body{margin:0;background:#fff;color:#000}details{position:absolute;left:4px;top:0;font-family:serif;font-size:24px}</style></head><body><details><summary><span>W</span></summary></details></body></html>"
+fn _abs(v: i32) -> i32:
+    if v < 0: 0 - v else: v
+
+# Largest per-channel |ours - chrome grey| over the grid at (x0, y0).
+fn _worst_delta(px: [u32], x0: i32, y0: i32, grid: [[i32]]) -> i32:
+    var worst = 0
+    var r = 0
+    while r < grid.len().to_i32():
+        var c = 0
+        while c < grid[r].len().to_i32():
+            val ours = px[(y0 + r) * W + x0 + c]
+            for sh in [16u32, 8u32, 0u32]:
+                val d = _abs(((ours >> sh) & 0xFFu32).to_i32() - grid[r][c])
+                if d > worst:
+                    worst = d
+            c = c + 1
+        r = r + 1
+    worst
+
+# [first, last] row in y0..y1 whose column-x pixel is darker than 0xf0 grey.
+fn _ink_rows(px: [u32], x: i32, y0: i32, y1: i32) -> [i32]:
+    var first = -1
+    var last = -1
+    var y = y0
+    while y < y1:
+        if ((px[y * W + x] >> 8u32) & 0xFFu32) < 0xF0u32:
+            if first < 0:
+                first = y
+            last = y
+        y = y + 1
+    [first, last]
+
+fn _label_x(fs: i32) -> text:
+    val html = "<!doctype html><html><head><style>body{{margin:0;font:{fs}px/1.5 sans-serif}}</style></head><body><details><summary><span id=\"x\">Disclosure widget</span></summary></details></body></html>"
+    simple_web_layout_debug_layout_by_id(html, 400, 200, "x", "x")
+
+describe "summary disclosure marker against Chrome 159":
+    it "AC-1: reserves Chrome's marker advance before the summary text":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        step("Chrome 16.9375 at 16 px, 13.7656 at 13 px")
+        expect([_label_x(16), _label_x(13)]).to_equal(["17", "14"])
+
+    it "AC-2: paints the closed triangle":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(PAGE, W, H, "cpu_simd")
+        expect(px.len()).to_equal((W * H).to_i64())
+        step("Chrome rows 6..16, x 4..13")
+        expect(_worst_delta(px, 4, 6, CLOSED) <= TOL).to_be(true)
+
+    it "AC-3: paints the open triangle":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(PAGE, W, H, "cpu_simd")
+        expect(px.len()).to_equal((W * H).to_i64())
+        step("Chrome rows 37..46, x 4..14")
+        expect(_worst_delta(px, 4, 37, OPEN) <= TOL).to_be(true)
+
+    it "AC-4: ends on the resolved face's baseline, not a sans ascent":
+        if not file_exists(SERIF):
+            skip("no Liberation Serif on this host")
+            return
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(SERIF_PAGE, W, H, "cpu_simd")
+        expect(px.len()).to_equal((W * H).to_i64())
+        step("Chrome: x=4 inked on rows 5..20 (baseline 21)")
+        expect(_ink_rows(px, 4, 0, 30)).to_equal([5, 20])

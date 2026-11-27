@@ -1,0 +1,68 @@
+#!/bin/sh
+# P7 TargetHIR fan-out bench (PERF-TH-01).
+# Seed-safe part: runs src/app/target_hir_bench/main.spl on bin/simple and
+# records counters + wall time. Native part needs a Stage 3 compiler named by
+# SIMPLE_STAGE3_COMPILER; without it prints PENDING_STAGE3=1 and exits 0.
+# Evidence: doc/09_report/evidence/target_hir_p7_<date>/ (never git-add).
+set -u
+root=$(cd "$(dirname "$0")/../.." && pwd)
+simple="${SIMPLE_BIN:-$root/bin/simple}"
+day=$(date -u +%Y-%m-%d)
+out="${TARGET_HIR_BENCH_OUT:-$root/doc/09_report/evidence/target_hir_p7_$day}"
+mkdir -p "$out"
+env_file="$out/target_hir_bench.env"
+entry="$root/src/app/target_hir_bench/main.spl"
+
+t0=$(date +%s)
+"$simple" run "$entry" > "$out/seed_run.log" 2>&1
+rc=$?
+t1=$(date +%s)
+{
+  echo "DATE=$day"
+  echo "SIMPLE_BIN=$simple"
+  echo "SEED_RC=$rc"
+  echo "SEED_WALL_S=$((t1 - t0))"
+  grep '^TARGET_HIR_BENCH ' "$out/seed_run.log" | sed 's/^TARGET_HIR_BENCH /SEED_/; s/ /_/g'
+} > "$env_file"
+lines=$(grep -c '^TARGET_HIR_BENCH targets=' "$out/seed_run.log")
+if [ "$rc" -ne 0 ] || [ "$lines" -ne 4 ]; then
+  echo "FAIL — seed workload rc=$rc, $lines/4 fan-out rows (see $out/seed_run.log)"
+  exit 1
+fi
+
+s3="${SIMPLE_STAGE3_COMPILER:-}"
+if [ -z "$s3" ]; then
+  echo "PENDING_STAGE3=1" >> "$env_file"
+  echo "PENDING_STAGE3=1"
+  echo "PENDING — seed workload 4/4 rows checked; native workload waits on SIMPLE_STAGE3_COMPILER ($env_file)"
+  exit 0
+fi
+if [ ! -x "$s3" ]; then
+  echo "ERROR — SIMPLE_STAGE3_COMPILER not executable: $s3"
+  exit 2
+fi
+bin="$out/target_hir_bench_native"
+"$s3" native-build "$entry" -o "$bin" > "$out/native_build.log" 2>&1
+brc=$?
+echo "NATIVE_BUILD_RC=$brc" >> "$env_file"
+if [ "$brc" -ne 0 ]; then
+  echo "FAIL — native-build rc=$brc (see $out/native_build.log)"
+  exit 1
+fi
+t0=$(date +%s)
+tflag=-v
+[ "$(uname -s)" = Linux ] || tflag=-l
+/usr/bin/time "$tflag" "$bin" > "$out/native_run.log" 2> "$out/native_time.log"
+nrc=$?
+t1=$(date +%s)
+{
+  echo "PENDING_STAGE3=0"
+  echo "NATIVE_RC=$nrc"
+  echo "NATIVE_WALL_S=$((t1 - t0))"
+  grep '^TARGET_HIR_BENCH ' "$out/native_run.log" | sed 's/^TARGET_HIR_BENCH /NATIVE_/; s/ /_/g'
+} >> "$env_file"
+if [ "$nrc" -ne 0 ]; then
+  echo "FAIL — native workload rc=$nrc"
+  exit 1
+fi
+echo "PASS — seed + native workloads, 8 fan-out rows checked ($env_file)"

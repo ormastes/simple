@@ -1,11 +1,11 @@
 # `std.nogc_sync_mut.file_system.file_ops` is a MOCK: `file_exists` is true for any path, reads return "mock file content"
-## Open 2026-09-16 — needs owner triage
+## Resolved 2026-10-31
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-06
-**Status:** OPEN — worked around at one call site, root cause not fixed
+**Status:** RESOLVED 2026-10-31. `file_exists_mock` and the mock `file_read_text` are deleted. Both `file_system` families re-export the real `io.file_ops` owners. Root cause, fix and test: `std_file_system_write_mocks_return_true_without_writing_2026-09-06.md`, section "Resolved 2026-10-31 (all remaining mocks, both families)"; spec `test/01_unit/lib/io/file_system_dir_walk_dirs_copy_real_spec.spl`.
 **Severity:** High — a caller that trusts these functions silently processes
 fabricated data with a success exit code.
 **Component:** `src/lib/nogc_sync_mut/file_system/file_ops.spl`

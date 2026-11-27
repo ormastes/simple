@@ -68,7 +68,7 @@ adm_fail() {
 }
 
 usage() {
-    echo "usage: $0 --target=<//bootstrap:stageN> --reason=<typed-reason> --parent-compiler=<path> [--bootstrap-output=<path>] [--runtime-dir=<path>] [--out=<path>]" >&2
+    echo "usage: $0 --target=<//bootstrap:stageN> --reason=<typed-reason> --parent-compiler=<path> [--planner-backend=<llvm|llvm-lib|cranelift>] [--bootstrap-output=<path>] [--runtime-dir=<path>] [--out=<path>]" >&2
     echo "       --validate-parent-only checks the complete existing Stage-2 authority and exits before planner compilation" >&2
     echo "       $0 --selftest" >&2
 }
@@ -80,6 +80,7 @@ adm_reason=''
 adm_parent=''
 adm_runtime=''
 adm_out=''
+adm_planner_backend=llvm
 adm_root=$root
 # Left EMPTY on purpose; resolved after argv parsing, because the correct
 # default depends on --root. Presetting it to the ambient centralized storage
@@ -98,6 +99,7 @@ while [ "$#" -gt 0 ]; do
         --parent-compiler=*) adm_parent=${1#*=} ;;
         --bootstrap-output=*) adm_bootstrap_output=${1#*=} ;;
         --runtime-dir=*) adm_runtime=${1#*=} ;;
+        --planner-backend=*) adm_planner_backend=${1#*=} ;;
         --out=*) adm_out=${1#*=} ;;
         --root=*) adm_root=${1#*=} ;;
         --help|-h) usage; exit 0 ;;
@@ -112,6 +114,7 @@ if [ "$selftest" -eq 1 ]; then
 fi
 
 [ -n "$adm_target" ] && [ -n "$adm_reason" ] && [ -n "$adm_parent" ] || { usage; exit 2; }
+case "$adm_planner_backend" in llvm|llvm-lib|cranelift) ;; *) adm_fail planner-backend-unsupported ;; esac
 
 adm_root=$(bootstrap_planner_v2_canonical_dir "$adm_root") || adm_fail root-not-canonical
 bootstrap_planner_v2_reason_allowed "$adm_target" "$adm_reason" || adm_fail typed-reason-not-allowed-for-target
@@ -222,6 +225,38 @@ if [ "$validate_parent_only" -eq 1 ]; then
     exit 0
 fi
 
+# --- MSVC lane environment for the planner build -----------------------------
+# An MSVC-triple parent must build its planner on the MSVC lane. The compiler
+# selects the Windows ABI from SIMPLE_LINKER_FLAVOR / SIMPLE_WINDOWS_ABI and
+# defaults to the llvm-mingw (gnu) lane when they are unset
+# (src/compiler/70.backend/backend/llvm_target.spl:37-42,
+# runtime_compiler.spl:120-125). bootstrap-from-scratch.sh derives and exports
+# both, but this producer is also run out of band: measured 2026-11-22 (ledger
+# W19), a run with only LIB/INCLUDE exported failed `planner-build-failed`
+# rc=64 while the same command with windows-msvc-bootstrap-env.shs sourced
+# produced the receipt. LIB/INCLUDE carry neither selector, so the planner build
+# fell to the gnu lane against an MSVC runtime authority. Source the canonical
+# lane env when either selector is missing (never when both are already set,
+# so the in-run path is untouched), then fail naming any variable still absent.
+# See doc/08_tracking/bug/planner_smoke_refusal_exit_status_lost_windows_2026-11-22.md
+case "$parent_dir" in
+    *-windows-msvc)
+        if [ "${SIMPLE_WINDOWS_ABI:-}" != msvc ] || [ "${SIMPLE_LINKER_FLAVOR:-}" != msvc ]; then
+            adm_msvc_env="$adm_root/scripts/setup/windows-msvc-bootstrap-env.shs"
+            [ -f "$adm_msvc_env" ] || adm_fail msvc-lane-env-script-missing
+            echo "bootstrap-admission-note: msvc parent with SIMPLE_WINDOWS_ABI=${SIMPLE_WINDOWS_ABI:-<unset>} SIMPLE_LINKER_FLAVOR=${SIMPLE_LINKER_FLAVOR:-<unset>}; sourcing $adm_msvc_env" >&2
+            SIMPLE_PROJECT_ROOT=$adm_root
+            export SIMPLE_PROJECT_ROOT
+            set +u
+            if . "$adm_msvc_env" >&2; then adm_msvc_env_rc=0; else adm_msvc_env_rc=$?; fi
+            set -u
+            [ "$adm_msvc_env_rc" -eq 0 ] || adm_fail msvc-lane-env-unavailable
+        fi
+        [ "${SIMPLE_WINDOWS_ABI:-}" = msvc ] || adm_fail msvc-lane-env-missing-SIMPLE_WINDOWS_ABI
+        [ "${SIMPLE_LINKER_FLAVOR:-}" = msvc ] || adm_fail msvc-lane-env-missing-SIMPLE_LINKER_FLAVOR
+        ;;
+esac
+
 planner_source="$adm_root/src/app/cli/bootstrap_reason_planner.spl"
 bootstrap_planner_v2_canonical_file "$planner_source" >/dev/null || adm_fail planner-source-missing
 bootstrap_planner_v2_canonical_dir "$adm_runtime" >/dev/null || adm_fail runtime-dir-missing
@@ -266,7 +301,7 @@ closure_sha=$(bootstrap_planner_v2_hash_file "$stage/planner-source-closure.snap
 } >"$stage/git-state.txt"
 
 scope_key=$(printf '%s:%s\n' "$runtime_sha" "$closure_sha" | bootstrap_planner_v2_hash_stdin) || adm_fail scope-key-unavailable
-adm_dir=$(bootstrap_planner_v2_admission_dir "$adm_bootstrap_output" "$scope_key")
+adm_dir=$(bootstrap_planner_v2_admission_dir "$adm_bootstrap_output" "$scope_key" "$adm_target") || adm_fail admission-dir-unavailable
 rm -rf -- "$adm_dir"
 mkdir -p "$adm_dir"
 adm_dir=$(bootstrap_planner_v2_canonical_dir "$adm_dir") || adm_fail admission-dir-not-canonical
@@ -295,12 +330,58 @@ git_sha=$(bootstrap_planner_v2_hash_file "$adm_dir/git-state.txt")
 planner_entry_rel=src/app/cli/bootstrap_reason_planner.spl
 [ "$adm_root/$planner_entry_rel" = "$planner_source" ] || adm_fail planner-entry-not-checkout-relative
 build_planner_out=$(bootstrap_planner_v2_planner_path "$adm_dir" "$parent_file") || adm_fail planner-path-invalid
-if ! ( cd "$adm_root" && SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_BOOTSTRAP=1 SIMPLE_RUNTIME_PATH="$admission_root/stage2-runtime-authority" "$parent_file" \
-        native-build --source src/app/cli --source src/lib \
+planner_build_argv=$(bootstrap_planner_v2_canonical_build_argv_text \
+    "$parent_file" "$adm_planner_backend" \
+    "$admission_root/stage2-runtime-authority" \
+    "$adm_dir/planner-cache" "$planner_entry_rel" "$build_planner_out")
+planner_build_argv_sha=$(bootstrap_planner_v2_hash_text "$planner_build_argv") || adm_fail planner-build-argv-unavailable
+# Default to the per-file worker pool (SIMPLE_FILE_WORKERS=1 when unset);
+# explicit caller SIMPLE_FILE_WORKERS=0 opts out to the two-pass phase route.
+# Prebuilt Stage 2 binaries predating the clang IR-to-object cutover could
+# intermittently hit an inert per-unit-child spawn (`llc-no-object`,
+# doc/08_tracking/bug/per_file_pool_llc_spawn_flaky_noop_2026-11-05.md).
+# Run the canonical argv on the per-file default first, and ONLY on that exact
+# spawn-noop signature retry once cleanly (keeping planner_build_argv_sha
+# identical by reusing the exact `$adm_dir/planner-cache` path).
+adm_run_planner_build() {
+    # The ambient SIMPLE_HIR_CACHE_DIR points into the stage2 native cache,
+    # which is sealed read-only once Stage 2 admission completes; a warm
+    # rerun's planner build then cannot create its per-file worker ledger
+    # (queue-<pid>-N / mir-queue-<pid>-N). Keep the planner's HIR/MIR ledger
+    # in an admission-owned dir instead.
+    # doc/08_tracking/bug/managed_planner_build_sealed_stage2_native_cache_2026-11-25.md
+    ( cd "$adm_root" && SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_BOOTSTRAP=1 SIMPLE_FILE_WORKERS="$1" SIMPLE_RUNTIME_PATH="$admission_root/stage2-runtime-authority" SIMPLE_HIR_CACHE_DIR="$adm_dir/planner-hir-cache" "$parent_file" \
+        native-build "--backend=$adm_planner_backend" --source src/app/cli --source src/lib \
         --runtime-path "$admission_root/stage2-runtime-authority" --runtime-bundle core-c-bootstrap \
         --cache-dir "$adm_dir/planner-cache" \
-        --entry-closure --entry "$planner_entry_rel" -o "$build_planner_out" ) >"$adm_dir/planner-build.log" 2>&1; then
-    adm_fail planner-build-failed
+        --entry-closure --entry "$planner_entry_rel" -o "$build_planner_out" ) >"$adm_dir/planner-build.log" 2>&1
+}
+adm_requested_fw=${SIMPLE_FILE_WORKERS:-1}
+if ! adm_run_planner_build "$adm_requested_fw"; then
+    if [ -z "${SIMPLE_FILE_WORKERS:-}" ] && grep -Eq 'llc-no-object|llc produced no object file|Failed to read compiled object file' "$adm_dir/planner-build.log"; then
+        cp "$adm_dir/planner-build.log" "$adm_dir/planner-build.attempt1.log" 2>/dev/null || :
+        rm -rf "$adm_dir/planner-cache" "$build_planner_out"
+        if ! adm_run_planner_build 1; then
+            if grep -Eq 'llc-no-object|llc produced no object file|Failed to read compiled object file' "$adm_dir/planner-build.log"; then
+                cp "$adm_dir/planner-build.log" "$adm_dir/planner-build.attempt2.log" 2>/dev/null || :
+                rm -rf "$adm_dir/planner-cache" "$build_planner_out"
+                adm_run_planner_build 0 || adm_fail planner-build-failed
+            else
+                adm_fail planner-build-failed
+            fi
+        fi
+    else
+        adm_fail planner-build-failed
+    fi
+fi
+# A per-file pool that cannot admit two workers (low reported free memory, e.g.
+# a Hyper-V ballooned guest) aborts the closure, yet native-build still exits 0
+# with no executable. Retry once on the phase route, as for the spawn-noop case.
+if [ ! -x "$build_planner_out" ] && [ -z "${SIMPLE_FILE_WORKERS:-}" ] &&
+    grep -q 'per-file worker pool refused' "$adm_dir/planner-build.log"; then
+    cp "$adm_dir/planner-build.log" "$adm_dir/planner-build.pool-refused.log" 2>/dev/null || :
+    rm -rf "$adm_dir/planner-cache" "$build_planner_out"
+    adm_run_planner_build 0 || adm_fail planner-build-failed
 fi
 [ -x "$build_planner_out" ] || adm_fail planner-build-produced-no-executable
 planner_sha=$(bootstrap_planner_v2_hash_file "$build_planner_out")
@@ -348,7 +429,12 @@ expected_auth=$(bootstrap_planner_v2_authorization_text \
 # An admitted planner must REFUSE an untyped reason. A planner that accepts
 # anything is not a policy gate, so we prove refusal before trusting its pass.
 smoke_rc=0
+# Same MSYS argv-conversion exclusion as the positive exec above: without it
+# the target reaches a native planner as /bootstrap:stage3, so any refusal is
+# about the mangled TARGET rather than the untyped reason and the smoke stops
+# proving what it claims. Empty on Unix, where this line is unchanged.
 env -i LC_ALL=C LANG=C TZ=UTC PATH=/usr/bin:/bin SOURCE_DATE_EPOCH=0 \
+    ${adm_env_excl_arg} \
     SIMPLE_BOOTSTRAP=1 SIMPLE_RUNTIME_PATH="$adm_runtime" \
     "$build_planner_out" \
     '--bootstrap-reason=none' \
@@ -358,11 +444,37 @@ env -i LC_ALL=C LANG=C TZ=UTC PATH=/usr/bin:/bin SOURCE_DATE_EPOCH=0 \
     "--planner-source-closure-sha256=$closure_sha" \
     "--planner-sha256=$planner_sha" \
     "--bootstrap-receipt=$stage/smoke.receipt" >"$stage/smoke.out" 2>&1 || smoke_rc=$?
-[ "$smoke_rc" -ne 0 ] || adm_fail planner-smoke-accepted-untyped-reason
+# The refusal TEXT is authoritative as well as the status. Measured 2026-11-22
+# on the Windows MSVC lane (release 8dae652711e, ledger W19): the in-run planner
+# printed `bootstrap-policy-error: typed-reason-required` yet the process exit
+# status read back here was 0, so the producer reported it had ACCEPTED the
+# untyped reason -- the opposite of what it printed. The status read above is
+# direct (no pipe, tee or subshell); the 0 came from the planner process itself,
+# while a standalone run of the same source exited 2. A planner that refuses
+# in words and writes no receipt has refused; the receipt check below stays
+# unconditional, so a "refusal" that still wrote a receipt is never admitted.
+# See doc/08_tracking/bug/planner_smoke_refusal_exit_status_lost_windows_2026-11-22.md
+smoke_refused_text=no
+if grep -Eq '^bootstrap-policy-error: typed-reason-required[[:space:]]*$' "$stage/smoke.out"; then
+    smoke_refused_text=yes
+fi
+if [ "$smoke_rc" -eq 0 ] && [ "$smoke_refused_text" = yes ]; then
+    echo "bootstrap-admission-note: planner printed typed-reason-required but exited 0; counting the smoke as refused by its text (exit status recorded as 0 in planner-smoke.txt)" >&2
+fi
+if [ "$smoke_rc" -eq 0 ] && [ "$smoke_refused_text" = no ]; then
+    # $stage is removed on exit, so keep the transcript in the admission dir;
+    # a zero exit is otherwise undiagnosable. The check itself is unchanged.
+    cp -- "$stage/smoke.out" "$adm_dir/planner-smoke-accepted.out" 2>/dev/null || :
+    smoke_bytes=$(wc -c <"$stage/smoke.out" 2>/dev/null || echo unknown)
+    echo "bootstrap-admission-note: smoke transcript ($smoke_bytes bytes) kept at $adm_dir/planner-smoke-accepted.out; first lines:" >&2
+    head -n 20 -- "$stage/smoke.out" >&2 2>/dev/null || :
+    adm_fail planner-smoke-accepted-untyped-reason
+fi
 [ ! -e "$stage/smoke.receipt" ] || adm_fail planner-smoke-wrote-receipt-on-refusal
 {
     printf 'smoke-schema: simple-planner-smoke-v1\n'
     printf 'untyped-reason-exit: %s\n' "$smoke_rc"
+    printf 'untyped-reason-refusal-text: %s\n' "$smoke_refused_text"
     printf 'untyped-reason-wrote-receipt: no\n'
     cat -- "$stage/smoke.out"
 } >"$adm_dir/planner-smoke.txt"
@@ -382,7 +494,7 @@ case "$adm_out" in /*) ;; *) adm_out="$PWD/$adm_out" ;; esac
 platform=$(uname -m 2>/dev/null || echo unknown)
 
 {
-    printf 'schema=simple-bootstrap-planner-admission-v2\n'
+    printf 'schema=simple-bootstrap-planner-admission-v3\n'
     printf 'status=pass\n'
     printf 'platform=%s\n' "$platform"
     printf 'target=%s\n' "$adm_target"
@@ -404,6 +516,8 @@ platform=$(uname -m 2>/dev/null || echo unknown)
     printf 'git_state_sha256=%s\n' "$git_sha"
     printf 'build_argv_sha256=%s\n' "$argv_sha"
     printf 'build_env_sha256=%s\n' "$env_sha"
+    printf 'planner_build_backend=%s\n' "$adm_planner_backend"
+    printf 'planner_build_argv_sha256=%s\n' "$planner_build_argv_sha"
     printf 'cache_scope_key=%s\n' "$scope_key"
     printf 'planner_path=%s\n' "$build_planner_out"
     printf 'planner_sha256=%s\n' "$planner_sha"

@@ -8,6 +8,7 @@
 use std.spec.step
 
 use std.spec
+use std.common.types.{ByteSize, Length}
 use std.spec.step
 use common.memory.packed_span.{
 
@@ -192,7 +193,7 @@ describe "packed span counted refusal gate (F2)":
         val slot = reg.register(64)
         val r = packed_span_make(slot, reg.generation_of(slot), 0, 16, 4)
         assert_true(reg.resolve(r) == PACKED_SPAN_OK)
-        val resolved = packed_span_resolve_base(packed_span_probe_bytes(64), r)
+        val resolved = packed_span_resolve_base(packed_span_probe_bytes(ByteSize(value: 64)), r)
         match resolved:
             case Ok(base):
                 assert_equal(name, "native-packed-v1")
@@ -213,56 +214,56 @@ describe "packed span native resolve ABI (F2, SimplePackedSpanV1)":
         step("pins the SimplePackedSpanV1 ABI width at 40 bytes")
         # magic-first, LP64, no padding holes. A silent layout change here
         # would silently change what every caller reads.
-        assert_equal(packed_span_abi_struct_size(), 40)
+        assert_equal(packed_span_abi_struct_size().value, 40)
 
     it "refuses a backing that is not a bytes basis, and counts it":
         # @req REQ-SSPEC-UNIT
         step("refuses a backing that is not a bytes basis, and counts it")
         # [u32] / rt_typed_words_u32_* are 8-byte-stride, value-tagged storage
         # and are NOT a packed pixel basis. Never a silent cast.
-        val before = packed_span_rejected_count()
+        val before = packed_span_rejected_count().value
         # basis_len < 0 == "not a bytes basis".
-        assert_equal(packed_span_probe_verdict(-1, 0, 16, 4, 4), PACKED_SPAN_C_WRONG_BASIS)
+        assert_equal(packed_span_probe_verdict(Length(value: -1), 0, 16, 4, 4), PACKED_SPAN_C_WRONG_BASIS)
         assert_equal(packed_span_last_verdict(), PACKED_SPAN_C_WRONG_BASIS)
-        assert_equal(packed_span_rejected_count() - before, 1)
+        assert_equal(packed_span_rejected_count().value - before, 1)
 
     it "refuses a window one byte past the end, and counts it":
         # @req REQ-SSPEC-UNIT
         step("refuses a window one byte past the end, and counts it")
-        val before = packed_span_rejected_count()
-        assert_equal(packed_span_probe_verdict(4096, 1, 4096, 1024, 4), PACKED_SPAN_C_OUT_OF_BOUNDS)
+        val before = packed_span_rejected_count().value
+        assert_equal(packed_span_probe_verdict(Length(value: 4096), 1, 4096, 1024, 4), PACKED_SPAN_C_OUT_OF_BOUNDS)
         assert_equal(packed_span_last_verdict(), PACKED_SPAN_C_OUT_OF_BOUNDS)
-        assert_equal(packed_span_rejected_count() - before, 1)
+        assert_equal(packed_span_rejected_count().value - before, 1)
 
     it "refuses count * stride != byte_length, and counts it":
         # @req REQ-SSPEC-UNIT
         step("refuses count * stride != byte_length, and counts it")
-        val before = packed_span_rejected_count()
-        assert_equal(packed_span_probe_verdict(4096, 0, 4096, 1000, 4), PACKED_SPAN_C_BAD_STRIDE)
+        val before = packed_span_rejected_count().value
+        assert_equal(packed_span_probe_verdict(Length(value: 4096), 0, 4096, 1000, 4), PACKED_SPAN_C_BAD_STRIDE)
         assert_equal(packed_span_last_verdict(), PACKED_SPAN_C_BAD_STRIDE)
-        assert_equal(packed_span_rejected_count() - before, 1)
+        assert_equal(packed_span_rejected_count().value - before, 1)
 
     it "refuses a zero stride rather than dividing by it":
         # @req REQ-SSPEC-UNIT
         step("refuses a zero stride rather than dividing by it")
-        val before = packed_span_rejected_count()
-        assert_equal(packed_span_probe_verdict(4096, 0, 4096, 1024, 0), PACKED_SPAN_C_BAD_STRIDE)
-        assert_equal(packed_span_rejected_count() - before, 1)
+        val before = packed_span_rejected_count().value
+        assert_equal(packed_span_probe_verdict(Length(value: 4096), 0, 4096, 1024, 0), PACKED_SPAN_C_BAD_STRIDE)
+        assert_equal(packed_span_rejected_count().value - before, 1)
 
     it "refuses an empty window rather than returning a zero-length OK span":
         # @req REQ-SSPEC-UNIT
         step("refuses an empty window rather than returning a zero-length OK span")
-        val before = packed_span_rejected_count()
-        assert_equal(packed_span_probe_verdict(64, 0, 0, 0, 4), PACKED_SPAN_C_EMPTY)
+        val before = packed_span_rejected_count().value
+        assert_equal(packed_span_probe_verdict(Length(value: 64), 0, 0, 0, 4), PACKED_SPAN_C_EMPTY)
         assert_equal(packed_span_last_verdict(), PACKED_SPAN_C_EMPTY)
-        assert_equal(packed_span_rejected_count() - before, 1)
+        assert_equal(packed_span_rejected_count().value - before, 1)
 
     it "never returns OK without a base -- the no-base path is typed":
         # @req REQ-SSPEC-UNIT
         step("never returns OK without a base -- the no-base path is typed")
         # A structurally perfect window with no backing pointer is still a
         # refusal (-7), never a zero-address success.
-        assert_equal(packed_span_probe_verdict(4096, 0, 4096, 1024, 4), PACKED_SPAN_C_NO_BASE)
+        assert_equal(packed_span_probe_verdict(Length(value: 4096), 0, 4096, 1024, 4), PACKED_SPAN_C_NO_BASE)
 
     it "never reaches C for a stale generation -- the registry refuses first":
         # @req REQ-SSPEC-UNIT
@@ -274,9 +275,9 @@ describe "packed span native resolve ABI (F2, SimplePackedSpanV1)":
         val slot = reg.register(4096)
         val r = packed_span_make(slot, reg.generation_of(slot), 0, 1024, 4)
         assert_true(reg.invalidate(slot))
-        val c_before = packed_span_rejected_count()
+        val c_before = packed_span_rejected_count().value
         assert_true(reg.resolve(r) == PACKED_SPAN_STALE_GENERATION)
-        assert_equal(packed_span_rejected_count() - c_before, 0)
+        assert_equal(packed_span_rejected_count().value - c_before, 0)
 
     it "keeps the two halves of the one batch check on their own sides":
         # @req REQ-SSPEC-UNIT

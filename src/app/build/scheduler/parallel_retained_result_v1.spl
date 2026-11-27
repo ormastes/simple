@@ -22,8 +22,8 @@ use std.common.io.read_only_file_view.{read_only_file_view_open_v1,
     read_only_file_view_read_v1, read_only_file_view_close_v1}
 use std.common.io.file_read_policy.{FileReadPolicyV1}
 use std.async.cancellation.{CancellationToken}
-use std.common.crypto.sha256.{sha256_text, sha256_stream_v1_new,
-    sha256_stream_v1_update, sha256_stream_v1_finish_hex}
+use std.common.crypto.sha256.{sha256_text, sha256_stream_v1_new}
+use app.build.host_path_policy.{build_host_abs_path_valid_v1}
 use std.nogc_sync_mut.io.file.{FileHandle}
 use app.io.mod.{secure_temp_dir, dir_create_all, dir_remove_all,
     file_hash_sha256, file_is_regular_no_follow, file_size_raw,
@@ -46,16 +46,7 @@ fn _retained_failure_v1(reason: text,
         BuildResultFetchV1(false, false, detail, "", "", "", ""))
 
 fn _retained_path_v1(path: text) -> bool:
-    if not path.starts_with("/") or path.len() < 2 or path.len() > 4096 or
-       path.ends_with("/") or path.contains("//") or path.contains("\0"):
-        return false
-    val parts = path.split("/")
-    var i: i64 = 1
-    while i < parts.len():
-        val item = parts[i]
-        if item == "" or item == "." or item == "..": return false
-        i = i + 1
-    true
+    build_host_abs_path_valid_v1(path, false, false, 4096, 4096)
 
 fn _retained_file_limit_v1(path: text) -> i64:
     if path == "outputs/result.wire": return 4096
@@ -86,7 +77,7 @@ fn _copy_retained_file_v1(child_root: text, output_root: text,
         val _ = read_only_file_view_close_v1(view)
         return "result-stage-write"
     var stage = created.unwrap()
-    val stream = sha256_stream_v1_new()
+    var stream = sha256_stream_v1_new()
     val cancellation = CancellationToken.new()
     var offset: u64 = 0u64
     var error = ""
@@ -101,7 +92,7 @@ fn _copy_retained_file_v1(child_root: text, output_root: text,
             break
         val bytes = read.unwrap().bytes
         if bytes.len().to_u64() != length or
-           not sha256_stream_v1_update(stream, bytes):
+           not stream.update(bytes):
             error = "result-file-read"
             break
         if stage.write_all(bytes).is_err():
@@ -109,8 +100,8 @@ fn _copy_retained_file_v1(child_root: text, output_root: text,
             break
         offset = offset + length
     if error == "":
-        val digest = sha256_stream_v1_finish_hex(stream)
-        if digest == nil or digest.unwrap() != file.sha256:
+        val digest = stream.finish_hex()
+        if digest.is_none() or digest.unwrap() != file.sha256:
             error = "result-file-digest"
     val stage_closed = stage.close()
     val view_closed = read_only_file_view_close_v1(view)
@@ -119,7 +110,7 @@ fn _copy_retained_file_v1(child_root: text, output_root: text,
         return "result-file-close"
     if not file_is_regular_no_follow(target) or
        file_size_raw(target) != file.byte_count or
-       file_hash_sha256(target) != file.sha256:
+       not _file_sha256_matches_v1(target, file.sha256):
         return "result-stage-verify"
     ""
 
@@ -144,7 +135,7 @@ fn verify_parallel_retained_result_v1(handoff: ParallelTransportHandoffV1,
        handoff.result_root.starts_with(local_state_dir + "/"):
         return _retained_failure_v1("result-root-or-budget-invalid", "")
     val request = parse_build_worker_request_v1(handoff.request_wire)
-    if request == nil:
+    if request.is_none():
         return _retained_failure_v1("request-invalid", "")
     val created = secure_temp_dir(local_state_dir, "parallel-retained")
     if created.is_err():
@@ -171,7 +162,7 @@ fn verify_parallel_retained_result_v1(handoff: ParallelTransportHandoffV1,
     val dispatch = encode_build_dispatch_v1(current.action, current.attempt,
         current.fence, current.cpu_tokens, current.fd_tokens)
     val reply = validate_build_worker_reply_v1(dispatch, result_text.unwrap())
-    if not reply.received or reply.result == nil:
+    if not reply.received or reply.result.is_none():
         return _retained_failure_v1("result-candidate-invalid", stage_root)
     val candidate = reply.result.unwrap().candidate
     if candidate.success != plan.success:
@@ -200,7 +191,7 @@ fn verify_parallel_retained_result_v1(handoff: ParallelTransportHandoffV1,
     if proof.is_err():
         return _retained_failure_v1("failure-proof-invalid", stage_root)
     val parsed = parse_build_worker_failure_proof_v1(proof.unwrap())
-    if parsed == nil or
+    if parsed.is_none() or
        parsed.unwrap().request_digest != sha256_text(
            encode_build_worker_request_v1(current)) or
        parsed.unwrap().attempt_id != current.attempt.attempt_id or
@@ -213,3 +204,9 @@ fn verify_parallel_retained_result_v1(handoff: ParallelTransportHandoffV1,
 
 export PARALLEL_RETAINED_MAX_FILE_BYTES_V1
 export ParallelRetainedResultV1, verify_parallel_retained_result_v1
+
+# Absent/unreadable file == mismatch: a missing digest never matches.
+fn _file_sha256_matches_v1(path: text, expected: text) -> bool:
+    if val digest = file_hash_sha256(path):
+        return digest == expected
+    false

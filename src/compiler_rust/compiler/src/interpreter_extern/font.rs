@@ -27,6 +27,8 @@ unsafe extern "C" {
     fn rt_font_free(handle: i64);
     fn rt_font_glyph_bitmap(font_handle: i64, codepoint: i64, size: f64) -> i64;
     fn rt_font_glyph_index(font_handle: i64, codepoint: i64) -> i64;
+    fn rt_font_glyph_bitmap_index(font_handle: i64, glyph_index: i64, size: f64) -> i64;
+    fn rt_font_glyph_advance_index(font_handle: i64, glyph_index: i64, size: f64) -> i64;
     fn rt_font_bitmap_width(bitmap_handle: i64) -> i64;
     fn rt_font_bitmap_height(bitmap_handle: i64) -> i64;
     fn rt_font_bitmap_get_pixel(bitmap_handle: i64, x: i64, y: i64) -> i64;
@@ -189,6 +191,28 @@ pub fn rt_font_glyph_bitmap_fn(args: &[Value]) -> Result<Value, CompileError> {
         unsafe { rt_font_bitmap_free(raw) };
     }
     Ok(Value::Int(handle))
+}
+
+/// Glyph-index twin of `rt_font_glyph_bitmap`: the shaped-run path rasterizes by
+/// glyph index, and without this bridge the interpreter refused the extern, so
+/// no glyph ever reached the atlas (a fully transparent atlas).
+pub fn rt_font_glyph_bitmap_index_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let font = font_raw("rt_font_glyph_bitmap_index", arg_i64(args, 0, "rt_font_glyph_bitmap_index", 3)?)?;
+    let glyph_index = arg_i64(args, 1, "rt_font_glyph_bitmap_index", 3)?;
+    let size = arg_f64(args, 2, "rt_font_glyph_bitmap_index")?;
+    let raw = unsafe { rt_font_glyph_bitmap_index(font, glyph_index, size) };
+    let handle = table(&BITMAPS).insert(raw);
+    if raw != 0 && handle == 0 {
+        unsafe { rt_font_bitmap_free(raw) };
+    }
+    Ok(Value::Int(handle))
+}
+
+pub fn rt_font_glyph_advance_index_fn(args: &[Value]) -> Result<Value, CompileError> {
+    let font = font_raw("rt_font_glyph_advance_index", arg_i64(args, 0, "rt_font_glyph_advance_index", 3)?)?;
+    let glyph_index = arg_i64(args, 1, "rt_font_glyph_advance_index", 3)?;
+    let size = arg_f64(args, 2, "rt_font_glyph_advance_index")?;
+    Ok(Value::Int(unsafe { rt_font_glyph_advance_index(font, glyph_index, size) }))
 }
 
 pub fn rt_font_glyph_advance_fn(args: &[Value]) -> Result<Value, CompileError> {

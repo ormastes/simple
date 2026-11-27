@@ -1,7 +1,8 @@
 # BUG: matching a `Result` value with `Some`/`nil` arms hits NEITHER arm — silently on interpret, exit 2 with no message on JIT
 
 - **id:** option_pattern_against_result_value_matches_nothing_2026-09-19
-- **status:** OPEN (the language defect). The one production casualty found so far is FIXED — see "Casualty" below.
+- **status:** fix-implemented-verification-pending (checker fix landed in 7dafd1d21d2, PR #1245; remaining: `case nil` over Result not named, and seed interpret/JIT lanes need a stage3 default engine to verify). The one production casualty found so far is FIXED — see "Casualty" below.
+- **Update 2026-11-03 (fix-implemented-verification-pending):** the self-hosted checker rejects `case Some(v)` over a `Result`-typed value with `Option pattern requires an optional scrutinee; found Result(..)` (error). Spec: `test/01_unit/compiler/lint/frontend_diag/option_pattern_non_option_scrutinee_spec.spl`. The seed interpreter/JIT lanes in the probe below still silently match nothing until the stage3 self-hosted binary is the default engine; verify by running the probe with a stage3 binary. `case nil` over Result is not yet named.
 - **severity:** P1 — a wrong answer with no diagnostic on one lane, and a non-zero exit with **no output at all** on the other
 - **found:** 2026-09-19, while landing an 8-day-old unpushed commit and discovering main had diverged
 
@@ -113,3 +114,10 @@ even after the type mismatch is rejected.
 - `duplicate_impl_method_definitions_silent_first_wins_2026-08-08` and
   `nested_fn_name_collision_across_scopes_2026-09-19` — the same theme: two
   declarations of one name that disagree, with nothing checking they agree.
+
+## JIT re-probe 2026-11-03 (deployed seed)
+JIT no longer exits 2: it exits 0 and the `Some(v)` arm WRONGLY matches the `Result` value (a `text`-typed
+scrutinee holding `Ok(..)`; `print r` shows `<enum@0x..>`), so `"Some:" + v` prints blank. Interpret prints `none`.
+Root cause is the missing static type error (scrutinee typed `text`, see
+`hir/lower/option_pattern_shape_diag.rs`, warn-only default OFF via SIMPLE_DIAG_OPTION_PATTERN_SHAPE=1), owned by
+the type-checker worker; no JIT-only codegen fix is possible without changing that diagnostic's design.

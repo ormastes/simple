@@ -594,7 +594,7 @@ fn _resolved_icons(icon_sdn: text, roles: [text]) -> Dict<text, ResolvedThemeIco
     out
 
 fn _icons_to_css(icons: Dict<text, ResolvedThemeIcon>, roles: [text]) -> text:
-    var css = ":root {\n"
+    var css = ":root {{\n"
     for role in roles:
         # Bracket + contains_key, not `.get()` + match: the struct-valued
         # Option payload from dict `.get()` decodes as nil under the cranelift
@@ -608,7 +608,7 @@ fn _icons_to_css(icons: Dict<text, ResolvedThemeIcon>, roles: [text]) -> text:
             css = "{css}  --theme-icon-{key}-label: \"{icon.label}\";\n"
             css = "{css}  --theme-icon-{key}-color: {icon.color_token};\n"
             css = "{css}  --theme-icon-{key}-size: \"{icon.size_role}\";\n"
-    css = "{css}\}\n"
+    css = css + "}\n"
     css
 
 fn _css_var(css: text, name: text, fallback: text) -> text:
@@ -700,8 +700,9 @@ fn _material_from_css(base_css: text, shape_css: text, composed_css: text) -> Th
     val secondary_text = _argb_from_css(_css_var(base_css, "--ui-dim", "rgba(193,198,215,0.68)"), 0xADC1C6D7)
     val active_shadows = _shadow_layers(_css_var(shape_css, "--elevation-high", "0 28px 76px rgba(0,0,0,0.46)"))
     val inactive_shadows = _shadow_layers(_css_var(shape_css, "--elevation-mid", "0 18px 46px rgba(0,0,0,0.34)"))
-    val surface_alpha = (((window >> 24) & 0xFF).to_i64() * 1000 + 127) / 255
-    val solid_fallback = 0xFF000000 | (window & 0x00FFFFFF)
+    val window_alpha: i64 = (((window >> 24) & 0xFFu32) as i64)
+    val surface_alpha = (window_alpha * 1000 + 127) / 255
+    val solid_fallback = 0xFF000000u32 | (window & 0x00FFFFFFu32)
     val window_gradient = _wm_window_gradient_from_css(composed_css, solid_fallback)
     val font_weight: i64 = _parse_decimal_i64(_css_var(base_css, "--font-weight-normal", "400"), 400)
     ThemeMaterialSemantics(
@@ -709,7 +710,7 @@ fn _material_from_css(base_css: text, shape_css: text, composed_css: text) -> Th
         window_fill_rgba: window,
         active_title_fill_rgba: active_title,
         inactive_title_fill_rgba: inactive_title,
-        surface_alpha_milli: surface_alpha.to_i32(),
+        surface_alpha_milli: (surface_alpha as i32),
         backdrop_blur_px: _px_int(_css_var(shape_css, "--blur-surface", "30px"), 30),
         # Aetheric's canonical widget material declares saturate(170%). Keep
         # this renderer-neutral value aligned even when no optional numeric
@@ -748,7 +749,7 @@ fn _wm_window_background_css(composed_css: text) -> text:
     # material represents the base window surface rather than transient state.
     var background = ""
     for block in composed_css.split("}"):
-        val pieces = block.split("{")
+        val pieces = block.split("{{")
         if pieces.len() < 2:
             continue
         if not _selector_list_contains_exact(pieces[0], ".wm-window"):
@@ -878,9 +879,9 @@ fn resolve_wm_window_gradient_for_css(composed_css: text, solid_fallback: u32) -
     _wm_window_gradient_from_css(composed_css, solid_fallback)
 
 fn _argb_luminance(color: u32) -> i64:
-    val r = ((color >> 16) & 0xFF).to_i64()
-    val g = ((color >> 8) & 0xFF).to_i64()
-    val b = (color & 0xFF).to_i64()
+    val r: i64 = ((color >> 16) & 0xFFu32) as i64
+    val g: i64 = ((color >> 8) & 0xFFu32) as i64
+    val b: i64 = (color & 0xFFu32) as i64
     (r * 299 + g * 587 + b * 114) / 1000
 
 fn _argb_contrast_milli(fg: u32, bg: u32) -> i32:
@@ -888,21 +889,21 @@ fn _argb_contrast_milli(fg: u32, bg: u32) -> i32:
     val bg_l = _argb_luminance(bg)
     val lighter = if fg_l > bg_l: fg_l else: bg_l
     val darker = if fg_l > bg_l: bg_l else: fg_l
-    (((lighter + 5) * 1000) / (darker + 5)).to_i32()
+    ((((lighter + 5) * 1000) / (darker + 5)) as i32)
 
 fn _clamp_css_channel(value: i64) -> u32:
     if value < 0:
-        return 0
+        return 0u32
     if value > 255:
-        return 255
-    value.to_u32()
+        return 255u32
+    (value as u32)
 
 fn _clamp_css_alpha(value: f64) -> u32:
     if value <= 0.0:
-        return 0
+        return 0u32
     if value >= 1.0:
-        return 255
-    ((value * 255.0) + 0.5).to_i64().to_u32()
+        return 255u32
+    (((value * 255.0) + 0.5) as i64) as u32
 
 fn _decimal_milli(value: text, fallback: i32) -> i32:
     val trimmed = value.trim()
@@ -1045,26 +1046,31 @@ fn _argb_from_css(value: text, fallback: u32) -> u32:
     if _theme_starts_with_text(v, "rgba(") and _theme_ends_with_text(v, ")"):
         val parts = v[5:v.len() - 1].split(",")
         if parts.len() == 4:
-            val r = _clamp_css_channel(parts[0].trim().to_i64() ?? 0)
-            val g = _clamp_css_channel(parts[1].trim().to_i64() ?? 0)
-            val b = _clamp_css_channel(parts[2].trim().to_i64() ?? 0)
+            val r = _clamp_css_channel(_parse_decimal_i64(parts[0], 0))
+            val g = _clamp_css_channel(_parse_decimal_i64(parts[1], 0))
+            val b = _clamp_css_channel(_parse_decimal_i64(parts[2], 0))
             val alpha_text = parts[3].trim()
             if alpha_text == "":
                 return fallback
             val alpha_milli = _decimal_milli(alpha_text, -1)
             if alpha_milli < 0:
                 return fallback
-            val clamped_milli = if alpha_milli > 1000: 1000 else: alpha_milli
-            val alpha = ((clamped_milli.to_i64() * 255 + 500) / 1000).to_u32()
-            return (alpha << 24) | (r << 16) | (g << 8) | b
+            val clamped_milli: i64 = if alpha_milli > 1000: 1000 else: (alpha_milli as i64)
+            val alpha: u32 = ((clamped_milli * 255 + 500) / 1000) as u32
+            val hi = (alpha << 24)
+            val mid = (r << 16)
+            val lo = (g << 8)
+            return hi | mid | lo | b
         return fallback
     if _theme_starts_with_text(v, "rgb(") and _theme_ends_with_text(v, ")"):
         val parts = v[4:v.len() - 1].split(",")
         if parts.len() == 3:
-            val r = _clamp_css_channel(parts[0].trim().to_i64() ?? 0)
-            val g = _clamp_css_channel(parts[1].trim().to_i64() ?? 0)
-            val b = _clamp_css_channel(parts[2].trim().to_i64() ?? 0)
-            return 0xFF000000 | (r << 16) | (g << 8) | b
+            val r = _clamp_css_channel(_parse_decimal_i64(parts[0], 0))
+            val g = _clamp_css_channel(_parse_decimal_i64(parts[1], 0))
+            val b = _clamp_css_channel(_parse_decimal_i64(parts[2], 0))
+            val mid = (r << 16)
+            val lo = (g << 8)
+            return 0xFF000000u32 | mid | lo | b
         return fallback
     if not _theme_starts_with_text(v, "#"):
         return fallback
@@ -1072,14 +1078,20 @@ fn _argb_from_css(value: text, fallback: u32) -> u32:
         val r = _theme_package_hex_digit(v.char_code_at(1) as i64)
         val g = _theme_package_hex_digit(v.char_code_at(2) as i64)
         val b = _theme_package_hex_digit(v.char_code_at(3) as i64)
-        return 0xFF000000 | ((r * 17).to_u32() << 16) | ((g * 17).to_u32() << 8) | (b * 17).to_u32()
+        val r_u: u32 = (r * 17) as u32
+        val g_u: u32 = (g * 17) as u32
+        val b_u: u32 = (b * 17) as u32
+        return 0xFF000000u32 | (r_u << 16) | (g_u << 8) | b_u
     if v.len() < 7:
         return fallback
     val hex = v[1:7]
     val r = _theme_package_hex_digit(hex.char_code_at(0) as i64) * 16 + _theme_package_hex_digit(hex.char_code_at(1) as i64)
     val g = _theme_package_hex_digit(hex.char_code_at(2) as i64) * 16 + _theme_package_hex_digit(hex.char_code_at(3) as i64)
     val b = _theme_package_hex_digit(hex.char_code_at(4) as i64) * 16 + _theme_package_hex_digit(hex.char_code_at(5) as i64)
-    0xFF000000 | (r.to_u32() << 16) | (g.to_u32() << 8) | b.to_u32()
+    val r_u: u32 = r as u32
+    val g_u: u32 = g as u32
+    val b_u: u32 = b as u32
+    0xFF000000u32 | (r_u << 16) | (g_u << 8) | b_u
 
 fn _theme_package_hex_digit(ch: i64) -> i64:
     if ch >= 48 and ch <= 57:

@@ -1,0 +1,144 @@
+# Durable attempt head under the SAME retained journal writer. A pending head
+# without its process-local exchange is Unknown, never permission to resend.
+use std.common.contracts.container.primary_geometry_v1.ContainerPrimaryGeometryRequestV1
+use std.common.contracts.mux.session_runtime_control_v1.session_runtime_control_target_bytes_v1
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.task_runner.distributed_operation_journal_v2.{DistributedOperationJournalV2,
+    distributed_operation_journal_read_v3, distributed_operation_journal_publish_v3}
+use std.nogc_sync_mut.orchestration.host_helper_stream_record_v1.{host_helper_stream_fields_v1, host_helper_stream_text_v1}
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+pub struct HostPrimaryGeometryReceiptV1:
+    binding_uid: text
+    publication_id: text
+    session_identity: text
+    target_digest: text
+    request_digest: text
+    wire_digest: text
+    revision: i64
+    sequence: i64
+    columns: i64
+    rows: i64
+    disposition: text
+    cleanup_pending: bool
+    error: text
+
+pub fn host_primary_geometry_request_digest_v1(request: ContainerPrimaryGeometryRequestV1) -> Result<text, text>:
+    val fields: Dict<text, SdnValue> = {"target": SdnValue.String(session_runtime_control_target_bytes_v1(request.target)?),
+        "leaseTarget": SdnValue.String(session_runtime_control_target_bytes_v1(request.lease.target)?),
+        "principal": SdnValue.String(request.principal), "leasePrincipal": SdnValue.String(request.lease.principal_id),
+        "nonce": SdnValue.String(sha256_text(request.nonce)), "leaseNonce": SdnValue.String(request.lease.nonce_digest),
+        "revision": SdnValue.Int(request.lease.revision), "issued": SdnValue.Int(request.lease.issued_monotonic_ms),
+        "expires": SdnValue.Int(request.lease.expires_monotonic_ms), "sequence": SdnValue.Int(request.attempt_sequence),
+        "columns": SdnValue.Int(request.columns), "rows": SdnValue.Int(request.rows),
+        "wire": SdnValue.String(request.request_digest), "kind": SdnValue.String("geometry")}
+    Ok(sha256_text(sdn_encode_canonical(SdnValue.Dict(fields))))
+
+pub fn host_primary_geometry_receipt_encode_v1(record: HostPrimaryGeometryReceiptV1) -> Result<text, text>:
+    if (not builder_identifier_valid_v1(record.binding_uid) or record.revision < 1 or record.sequence < 1 or
+            record.columns < 1 or record.columns > 512 or record.rows < 1 or record.rows > 256 or
+            record.columns * record.rows > 60000 or record.error.byte_len() > 1024 or
+            not ["pending", "rejected", "acknowledged", "unknown"].contains(record.disposition)):
+        return Err("host-primary-geometry-record-shape")
+    for digest in [record.publication_id, record.session_identity, record.target_digest, record.request_digest, record.wire_digest]:
+        if not builder_digest_valid_v1(digest): return Err("host-primary-geometry-record-digest")
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("host-primary-geometry"),
+        "bindingUid": SdnValue.String(record.binding_uid), "publicationId": SdnValue.String(record.publication_id), "sessionIdentity": SdnValue.String(record.session_identity),
+        "targetDigest": SdnValue.String(record.target_digest), "requestDigest": SdnValue.String(record.request_digest),
+        "wireDigest": SdnValue.String(record.wire_digest), "revision": SdnValue.Int(record.revision),
+        "sequence": SdnValue.Int(record.sequence), "columns": SdnValue.Int(record.columns), "rows": SdnValue.Int(record.rows),
+        "disposition": SdnValue.String(record.disposition), "cleanupPending": SdnValue.Bool(record.cleanup_pending),
+        "error": SdnValue.String(record.error)}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+fn record_int(fields: Dict<text, SdnValue>, name: text) -> Result<i64, text>:
+    match fields[name]:
+        case SdnValue.Int(value): Ok(value)
+        case _: Err("host-primary-geometry-record-integer")
+
+pub fn host_primary_geometry_receipt_decode_v1(source: text) -> Result<HostPrimaryGeometryReceiptV1, text>:
+    if source.byte_len() > 8192: return Err("host-primary-geometry-record-bound")
+    val fields = host_helper_stream_fields_v1(source, "host-primary-geometry", ["version", "kind", "bindingUid", "publicationId",
+        "sessionIdentity", "targetDigest", "requestDigest", "wireDigest", "revision", "sequence", "columns", "rows",
+        "disposition", "cleanupPending", "error"])?
+    val pending = match fields["cleanupPending"]:
+        case SdnValue.Bool(value): value
+        case _: return Err("host-primary-geometry-record-cleanup")
+    val record = HostPrimaryGeometryReceiptV1(host_helper_stream_text_v1(fields, "bindingUid")?, host_helper_stream_text_v1(fields, "publicationId")?,
+        host_helper_stream_text_v1(fields, "sessionIdentity")?, host_helper_stream_text_v1(fields, "targetDigest")?,
+        host_helper_stream_text_v1(fields, "requestDigest")?, host_helper_stream_text_v1(fields, "wireDigest")?,
+        record_int(fields, "revision")?, record_int(fields, "sequence")?, record_int(fields, "columns")?,
+        record_int(fields, "rows")?, host_helper_stream_text_v1(fields, "disposition")?, pending,
+        host_helper_stream_text_v1(fields, "error")?)
+    if host_primary_geometry_receipt_encode_v1(record)? != source: return Err("host-primary-geometry-record-canonical")
+    Ok(record)
+
+pub fn host_primary_geometry_receipt_blocks_v1(record: HostPrimaryGeometryReceiptV1) -> bool:
+    record.cleanup_pending or ["pending", "unknown"].contains(record.disposition)
+
+# An exact retry is receipt retrieval only. Rotation never clears uncertainty.
+pub fn host_primary_geometry_replay_v1(previous: HostPrimaryGeometryReceiptV1,
+        next: HostPrimaryGeometryReceiptV1) -> Result<bool, text>:
+    if previous.binding_uid != next.binding_uid: return Err("host-primary-geometry-binding-changed")
+    if previous.request_digest == next.request_digest and previous.session_identity == next.session_identity:
+        return Ok(true)
+    if host_primary_geometry_receipt_blocks_v1(previous): return Err("host-primary-geometry-prior-unresolved")
+    if previous.session_identity == next.session_identity and previous.revision == next.revision:
+        if next.sequence <= previous.sequence: return Err("host-primary-geometry-old-or-changed-attempt")
+        if next.sequence != previous.sequence + 1: return Err("host-primary-geometry-attempt-not-next")
+    elif next.sequence != 1: return Err("host-primary-geometry-first-attempt-required")
+    Ok(false)
+
+pub const HOST_PRIMARY_GEOMETRY_HISTORY_MAX_V1 = 4096
+
+fn receipt_path(uid: text, slot: i64, terminal: bool) -> Result<text, text>:
+    if not builder_identifier_valid_v1(uid) or slot < 1 or slot > HOST_PRIMARY_GEOMETRY_HISTORY_MAX_V1:
+        return Err("host-primary-geometry-history-bound")
+    val suffix = if terminal: ".receipt.sdn" else: ".attempt.sdn"
+    Ok("primary-geometry-v2/" + sha256_text(uid) + "/" + slot.to_text() + suffix)
+
+# One bounded record per call; no directory inventory or unbounded history scan.
+pub fn host_primary_geometry_record_read_v1(journal: DistributedOperationJournalV2,
+        uid: text, slot: i64, terminal: bool) -> Result<Option<HostPrimaryGeometryReceiptV1>, text>:
+    val bytes = distributed_operation_journal_read_v3(journal, receipt_path(uid, slot, terminal)?, 8192)?
+    match bytes:
+        case None: Ok(nil)
+        case Some(value):
+            val record = host_primary_geometry_receipt_decode_v1(value)?
+            if record.binding_uid != uid: return Err("host-primary-geometry-record-binding")
+            if terminal and record.disposition == "pending": return Err("host-primary-geometry-terminal-pending")
+            if not terminal and (record.disposition != "pending" or not record.cleanup_pending):
+                return Err("host-primary-geometry-attempt-not-reserved")
+            Ok(Some(record))
+
+# Terminal evidence must describe the same immutable attempt, with no authority
+# reconstructed from metadata. Only this retained process can know its outcome.
+pub fn host_primary_geometry_terminal_match_v1(attempt: HostPrimaryGeometryReceiptV1,
+        terminal: HostPrimaryGeometryReceiptV1) -> Result<(), text>:
+    var normalized = terminal
+    normalized.disposition = "pending"
+    normalized.cleanup_pending = true
+    normalized.error = ""
+    if (terminal.disposition == "pending" or terminal.cleanup_pending or
+            host_primary_geometry_receipt_encode_v1(normalized)? != host_primary_geometry_receipt_encode_v1(attempt)?):
+        return Err("host-primary-geometry-terminal-attempt-mismatch")
+    Ok(())
+
+pub fn host_primary_geometry_record_publish_v1(journal: DistributedOperationJournalV2,
+        slot: i64, terminal: bool, record: HostPrimaryGeometryReceiptV1) -> Result<bool, text>:
+    val path = receipt_path(record.binding_uid, slot, terminal)?
+    val source = host_primary_geometry_receipt_encode_v1(record)?
+    if terminal:
+        val attempt = host_primary_geometry_record_read_v1(journal, record.binding_uid, slot, false)?
+        if attempt.is_none(): return Err("host-primary-geometry-attempt-missing")
+        val same = host_primary_geometry_terminal_match_v1(attempt.unwrap(), record)?
+        val previous = distributed_operation_journal_read_v3(journal, path, 8192)?
+        if val bytes = previous:
+            if bytes != source: return Err("host-primary-geometry-terminal-conflict")
+            return Ok(true)
+    elif record.disposition != "pending" or not record.cleanup_pending or record.error != "":
+        return Err("host-primary-geometry-attempt-shape")
+    # Existing attempt publication is NEVER a fresh admission, even if identical.
+    distributed_operation_journal_publish_v3(journal, path, source)

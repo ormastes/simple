@@ -1,0 +1,32 @@
+# Regression guard for doc/08_tracking/bug/indcall_try_then_member_2026-10-25.md.
+# `f(x)?.m()` lexes `?.` as safe navigation, so native MIR rejected the
+# chained callee ("indirect callable lacks a proven function signature").
+# The phase-3 module archive_file now spells try-then-member as `(f(x)?).m()`.
+# This spec is interpreter-run: it pins the source sites and the value
+# semantics of the parenthesized form; the native RED/GREEN evidence is in
+# the bug doc.
+use std.io_runtime.{read_file_text}
+use std.spec.*
+
+val ARCHIVE_FILE = "src/compiler/70.backend/linker/elf/archive_file.spl"
+
+fn try_word(value: text) -> Result<text, text>:
+    if value == "": return Err("empty")
+    Ok(value)
+
+fn trimmed_len(value: text) -> Result<i64, text>:
+    val trimmed = (try_word(value)?).trim()
+    Ok(trimmed.len())
+
+describe "Try-then-member spelled with a parenthesized try":
+    it "keeps the archive_file header name and size reads parenthesized":
+        val source = read_file_text(ARCHIVE_FILE)
+        expect(source).to_contain("(archive_file_ascii(header, 0, 16)?).trim()")
+        expect(source).to_contain("archive_file_decimal((archive_file_ascii(header, 48, 10)?).trim())?")
+        expect(source.index_of(")?.trim(")).to_equal(-1)
+
+    it "applies the member to the Ok payload":
+        expect(trimmed_len("  ab  ").unwrap()).to_equal(2)
+
+    it "propagates the Err before the member call":
+        expect(trimmed_len("").is_err()).to_equal(true)

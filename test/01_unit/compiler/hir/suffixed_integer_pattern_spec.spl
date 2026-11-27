@@ -1,0 +1,102 @@
+# @cover src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl
+# @cover src/compiler/20.hir/hir_lowering/_Expressions/expression_components.spl
+# Regression for db_page_decode's typed-byte arms becoming wildcards.
+use std.spec.*
+use compiler.core.ast.{ast_reset}
+use compiler.core.ast_expr.{expr_suffixed_int}
+use compiler.frontend._FlatAstBridge.convert_nodes.{convert_flat_pattern}
+use compiler.frontend.parser_types_expr.{PatternKind, ExprKind, TypeKind}
+use compiler.hir.hir_types.{HirType, HirTypeKind}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind}
+use compiler.hir.hir_lowering._Expressions.expression_components.{hir_normalize_integer_pattern_literal}
+use compiler.common.diagnostics.span.{Span}
+
+fn integer_pattern_cast(value: i64, bits: i64, signed: bool) -> HirExpr:
+    val span = Span.empty()
+    val operand = HirExpr(kind: HirExprKind.IntLit(value, nil), has_type_: true,
+        type_: HirType(kind: HirTypeKind.Int(64, true), span: span), span: span)
+    val target = HirType(kind: HirTypeKind.Int(bits, signed), span: span)
+    HirExpr(kind: HirExprKind.Cast(operand, target), has_type_: true, type_: target, span: span)
+
+fn check_integer_pattern(value: i64, bits: i64, signed: bool, expected: i64):
+    val result = hir_normalize_integer_pattern_literal(integer_pattern_cast(value, bits, signed))
+    expect(result.has_type_).to_be(true)
+    match result.kind:
+        case HirExprKind.IntLit(actual, _): expect(actual).to_equal(expected)
+        case _: fail("typed integer pattern did not normalize to a literal")
+    match result.type_.kind:
+        case HirTypeKind.Int(actual_bits, actual_signed):
+            expect(actual_bits).to_equal(bits)
+            expect(actual_signed).to_equal(signed)
+        case _: fail("integer pattern lost its target type")
+
+describe "suffixed integer match patterns":
+    it "retains the suffix cast instead of producing a wildcard in the flat bridge":
+        step("Convert each typed-byte tag used by the database page decoder")
+        ast_reset()
+        for value in [1, 2, 3, 4, 5]:
+            val pattern = convert_flat_pattern(expr_suffixed_int(value, "u8", 0))
+            match pattern.kind:
+                case PatternKind.Literal(literal):
+                    match literal.kind:
+                        case ExprKind.Cast(operand, target):
+                            match operand.kind:
+                                case ExprKind.IntLit(actual): expect(actual).to_equal(value)
+                                case _: fail("suffixed pattern lost its integer value")
+                            match target.kind:
+                                case TypeKind.Named(name, _): expect(name).to_equal("u8")
+                                case _: fail("suffixed pattern lost its type")
+                        case _: fail("suffixed pattern lost its cast")
+                case _: fail("suffixed integer became an unconditional pattern")
+
+    it "normalizes unsigned truncation and signed extension with the target type intact":
+        step("Normalize integer casts before MIR match dispatch")
+        check_integer_pattern(255, 8, false, 255)
+        check_integer_pattern(256, 8, false, 0)
+        check_integer_pattern(255, 8, true, -1)
+        check_integer_pattern(65535, 16, true, -1)
+        check_integer_pattern(4294967295, 32, true, -1)
+        check_integer_pattern(-1, 64, false, -1)
+        check_integer_pattern(-1, 64, true, -1)
+
+    it "preserves an unsupported integer width as an explicit cast":
+        step("Keep unsupported patterns visible to the ordinary diagnostic")
+        val result = hir_normalize_integer_pattern_literal(integer_pattern_cast(3, 7, false))
+        var explicit_cast = false
+        match result.kind:
+            case HirExprKind.Cast(_, _): explicit_cast = true
+            case _: ()
+        expect(explicit_cast).to_be(true)
+
+    it "does not reinterpret a noninteger operand as an integer literal":
+        step("Preserve a noninteger cast operand for ordinary type checking")
+        val span = Span.empty()
+        val operand = HirExpr(kind: HirExprKind.BoolLit(true), has_type_: true,
+            type_: HirType(kind: HirTypeKind.Bool, span: span), span: span)
+        val target = HirType(kind: HirTypeKind.Int(8, false), span: span)
+        val cast = HirExpr(kind: HirExprKind.Cast(operand, target), has_type_: true,
+            type_: target, span: span)
+        var explicit_cast = false
+        match hir_normalize_integer_pattern_literal(cast).kind:
+            case HirExprKind.Cast(_, _): explicit_cast = true
+            case _: ()
+        expect(explicit_cast).to_be(true)
+
+    it "keeps noninteger casts and ordinary literals outside integer-cast normalization":
+        step("Preserve existing noninteger and unsuffixed literal behavior")
+        val input = integer_pattern_cast(4, 32, true)
+        val float_type = HirType(kind: HirTypeKind.Float(32), span: input.span)
+        val operand = HirExpr(kind: HirExprKind.IntLit(4, nil), has_type_: false,
+            type_: input.type_, span: input.span)
+        val cast = HirExpr(kind: HirExprKind.Cast(operand, float_type), has_type_: true,
+            type_: float_type, span: input.span)
+        var explicit_cast = false
+        match hir_normalize_integer_pattern_literal(cast).kind:
+            case HirExprKind.Cast(_, _): explicit_cast = true
+            case _: ()
+        expect(explicit_cast).to_be(true)
+        val unchanged = hir_normalize_integer_pattern_literal(operand)
+        expect(unchanged.has_type_).to_be(false)
+        match unchanged.kind:
+            case HirExprKind.IntLit(value, _): expect(value).to_equal(4)
+            case _: fail("ordinary literal changed")

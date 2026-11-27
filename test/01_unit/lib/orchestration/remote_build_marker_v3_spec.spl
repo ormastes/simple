@@ -1,0 +1,44 @@
+# milestone_0030 DESIGN section 2: the remote-build workload marker in the signed draft/association.
+# AUTHORED_NOT_RUN. Additive optional key, emitted only when set: legacy and agent encodings keep their exact bytes.
+use std.spec.{describe, it, expect, step}
+use std.common.contracts.container.execution_draft_v3.*
+
+fn marker_draft_v3() -> ContainerExecutionDraftV3:
+    ContainerExecutionDraftV3(backend: "linux-podman", workload_uid: "workload_1", attempt: 1,
+        operation_id: "operation_1", request_digest: "a".repeat(64), request_bytes: "request\n")
+
+describe "Remote-build workload marker V3 (milestone_0030)":
+    it "keeps legacy bytes and round-trips a set remote-build task digest":
+        val legacy = marker_draft_v3()
+        val legacy_bytes = container_execution_draft_encode_v3(legacy).unwrap()
+        expect(legacy_bytes.contains("remoteBuildTaskDigest")).to_equal(false)
+        expect(container_execution_draft_decode_v3(legacy_bytes).unwrap().remote_build_task_digest).to_equal("")
+        var build = legacy
+        build.remote_build_task_digest = "d".repeat(64)
+        val build_bytes = container_execution_draft_encode_v3(build).unwrap()
+        expect(build_bytes.contains("remoteBuildTaskDigest")).to_equal(true)
+        expect(container_execution_draft_decode_v3(build_bytes).unwrap().remote_build_task_digest).to_equal("d".repeat(64))
+        expect(container_execution_draft_digest_v3(build).unwrap() != container_execution_draft_digest_v3(legacy).unwrap()).to_equal(true)
+
+    it "refuses a draft that names both workload kinds":
+        var both = marker_draft_v3()
+        both.remote_build_task_digest = "d".repeat(64)
+        both.agent_invocation_manifest_digest = "b".repeat(64)
+        expect(container_execution_draft_encode_v3(both)).to_equal(Err("execution-workload-kind-ambiguous"))
+        both.agent_invocation_manifest_digest = ""
+        both.agent_probe_list_digest = "c".repeat(64)
+        expect(container_execution_draft_encode_v3(both)).to_equal(Err("execution-workload-kind-ambiguous"))
+        step("hand-built ambiguous bytes are refused at decode too")
+        var build = marker_draft_v3()
+        build.remote_build_task_digest = "d".repeat(64)
+        val build_bytes = container_execution_draft_encode_v3(build).unwrap()
+        val stuffed = build_bytes.replace("attempt: 1", "agentInvocationManifestDigest: \"" + "b".repeat(64) + "\"\n  attempt: 1")
+        expect(container_execution_draft_decode_v3(stuffed).is_err()).to_equal(true)
+
+    it "refuses an invalid set digest and a present empty key":
+        var bad = marker_draft_v3()
+        bad.remote_build_task_digest = "short"
+        expect(container_execution_draft_encode_v3(bad)).to_equal(Err("associated-remote-build-digest"))
+        val legacy_bytes = container_execution_draft_encode_v3(marker_draft_v3()).unwrap()
+        val stuffed = legacy_bytes.replace("attempt: 1", "remoteBuildTaskDigest: \"\"\n  attempt: 1")
+        expect(container_execution_draft_decode_v3(stuffed).is_err()).to_equal(true)

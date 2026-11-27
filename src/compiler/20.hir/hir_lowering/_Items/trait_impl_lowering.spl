@@ -4,6 +4,7 @@
 # This module handles lowering of top-level items (functions, classes, structs, enums, traits, impls) from AST to HIR.
 
 use compiler.hir.hir_types.*
+use compiler.hir.primitive_method_identity.{hir_primitive_impl_method_name}
 use compiler.hir.hir_definitions.*
 use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types.{ParserFunction, ImportItem, Param}
@@ -11,6 +12,7 @@ use compiler.frontend.flat_ast_bridge.{flat_bootstrap_function_count, flat_boots
 use compiler.common.diagnostics.span.{Span}
 use compiler.hir.hir_lowering.types.HirLowering
 use compiler.hir.hir_lowering.type_equality.{hir_types_equal}
+use compiler.hir.hir_lowering.binding_types.{hir_const_type_settled}
 use compiler.hir.hir_lowering.context_helpers.*
 use compiler.hir.hir_lowering.expressions.*
 use compiler.common.attributes.{parse_layout_attrs, parse_function_attrs, parse_export_attrs, parse_driver_manifest_attrs, parse_platform_attrs, parse_vhdl_hardware_attrs, vhdl_hardware_metadata_default, FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind, VhdlHardwareMetadata}
@@ -44,7 +46,7 @@ impl HirLowering:
                                 )
                         case _: ()
                 return symbol_type
-        nil
+        None
 
     me lower_bitfield_field(f: BitfieldField, offset: i64) -> HirBitfieldField:
         val symbol = self.symbols.define(f.name, SymbolKind.Field, nil, f.span, Visibility.Private, false, nil)
@@ -62,18 +64,18 @@ impl HirLowering:
             self.infer_bit_width(f.type_)
 
         # `HirBitfieldField.type_` is a DESUGARED optional slot (has_type_/
-        # type_ pair). Declare `ftype` with its type annotation on the SAME
-        # line as the `nil` literal (rather than a ternary whose `else`
-        # branch is a bare `nil`) so the seed's local inference sees the
-        # real `HirType?` union from the point of declaration, matching the
-        # `HirSymbol.type_: HirType?` precedent used elsewhere in this file.
-        var ftype: HirType? = nil
+        # type_ pair) whose type_ is a PLAIN HirType: an `HirType?` local stored
+        # here puts the Option word in the span slot (same class as the
+        # HirImpl.trait_ writer, #7069). Use a bare placeholder; has_type_
+        # carries presence.
+        var ftype: HirType = HirType(kind: HirTypeKind.Error, span: Span(start: 0, end: 0, line: 0, col: 0, file: "", length: 0))
         if f.type_.?:
             ftype = self.lower_type(f.type_)
         HirBitfieldField(
             symbol: symbol,
             name: f.name,
             type_: ftype,
+            has_type_: f.type_.?,
             bit_width: bit_width,
             bit_offset: offset,
             is_reserved: f.is_reserved,
@@ -100,6 +102,8 @@ impl HirLowering:
     me lower_trait(trait_: ParserTrait) -> HirTrait:
         val symbol = self.symbols.lookup_or_invalid(trait_.name)
 
+        val saved_trait_prescan_parameters = self.prescan_type_parameters
+        self.prescan_type_parameters = {}
         self.symbols.push_scope(ScopeKind.Class)
 
         var type_params: [HirTypeParam] = []
@@ -128,7 +132,8 @@ impl HirLowering:
             val method_kind = if method.is_static: SymbolKind.Function else: SymbolKind.Method
             val method_type = self.declared_callable_type(method, Some(symbol))
             val method_name = self.symbols.method_symbol_name(symbol, method.name)
-            self.symbols.define(method_name, method_kind, method_type, method.span, method.visibility, false, self.module_filename)
+            val trait_method_sym = self.symbols.define(method_name, method_kind, method_type, method.span, method.visibility, false, self.module_filename)
+            self.record_call_arity_row(trait_method_sym.id, method, not method.is_static)
         # Trait signatures carry the same explicit receiver slot as concrete
         # methods. Retain its declared owner; dynamic lowering must not infer
         # a receiver or its ABI from the first user argument.
@@ -136,7 +141,7 @@ impl HirLowering:
         self.current_method_self_type = Some(HirType(kind: HirTypeKind.Named(symbol, []), span: trait_.span))
         for m in trait_.methods:
             var hir_fn = self.lower_function(m)
-            # #158 Phase B: a method of a GENERIC trait is an unmonomorphized
+            # #158 Phase B: a method of a GENERIC trait is an erased
             # template even when the method itself declares no type params.
             # lower_function only sees the method's own type params, so the
             # trait-level ones are folded in here.
@@ -151,6 +156,7 @@ impl HirLowering:
 
         self.current_method_self_type = previous_method_self_type
         self.symbols.pop_scope()
+        self.prescan_type_parameters = saved_trait_prescan_parameters
 
         # Compute effective visibility using filename matching
         val effective_visibility = self.compute_visibility(trait_.name, trait_.visibility)
@@ -166,9 +172,11 @@ impl HirLowering:
             assoc_types: assoc_types,
             visibility: effective_visibility,
             is_public: trait_.is_public,
+            has_doc_comment: trait_.has_doc_comment,
             doc_comment: trait_.doc_comment,
             span: trait_.span,
             is_generic_template: false,
+            has_specialization_of: false,
             specialization_of: nil,
             type_bindings: {}
         )
@@ -210,9 +218,53 @@ impl HirLowering:
             if not impl_.methods.contains_key(name): return false
         true
 
+    me record_impl_textual_method_keys(impls: [Impl]):
+        """Index every method written in this module's impl blocks as
+        "Owner::method" before any impl is lowered, so trait-default injection
+        sees an override regardless of impl block order.
+
+        A method written BOTH in a trait impl and in an inherent impl of the
+        same owner is two bodies under one `Owner::method` symbol (bug
+        trait_default_inherent_override_duplicate_symbol_2026-10-24, case 2:
+        calls silently bind the wrong arity). Reject it here. An inherent body
+        that overrides a trait DEFAULT (not written in the trait impl) is legal."""
+        var keys: [text] = []
+        var trait_keys: Dict<text, bool> = {}
+        var inherent_keys: Dict<text, bool> = {}
+        var impl_index = 0
+        while impl_index < impls.len():
+            val impl_: Impl = impls[impl_index]
+            val owner_name = parser_type_kind_named_name(impl_.type_.kind)
+            if owner_name != "":
+                for method_name in impl_.methods.keys():
+                    val key = "{owner_name}::{method_name}"
+                    keys.push(key)
+                    if impl_.has_trait_:
+                        if inherent_keys.has(key):
+                            self.error("method '{method_name}' of '{owner_name}' is defined in both a trait impl and an inherent impl; rename one (they would share symbol '{key}')", impl_.span)
+                        trait_keys[key] = true
+                    else:
+                        if trait_keys.has(key):
+                            self.error("method '{method_name}' of '{owner_name}' is defined in both a trait impl and an inherent impl; rename one (they would share symbol '{key}')", impl_.span)
+                        inherent_keys[key] = true
+            impl_index = impl_index + 1
+        self.impl_textual_method_keys = keys
+
+    me impl_textual_method_key_present(owner_name: text, method_name: text) -> bool:
+        if owner_name == "": return false
+        val key = "{owner_name}::{method_name}"
+        var key_index = 0
+        while key_index < self.impl_textual_method_keys.len():
+            if self.impl_textual_method_keys[key_index] == key:
+                return true
+            key_index = key_index + 1
+        false
+
     me lower_impl(impl_: Impl) -> HirImpl:
         # `class X with Trait:` is a trait impl only once confirmed here.
         val has_trait = impl_.has_trait_ or self.with_trait_candidate_conforms(impl_)
+        val saved_impl_prescan_parameters = self.prescan_type_parameters
+        self.prescan_type_parameters = {}
         self.symbols.push_scope(ScopeKind.Impl)
 
         # Lower generic type parameters
@@ -232,7 +284,13 @@ impl HirLowering:
             self.module_filename, impl_owner_name)
         if local_impl_owner >= 0:
             self.symbols.bind_local_type_if_free(impl_owner_name, SymbolId(id: local_impl_owner))
+        # The parser hoists `<A, B>` off `impl Owner<A, B>:` into
+        # impl_.type_params, leaving the owner with no written arguments; that
+        # header names the owner, so it keeps the bare `Named(owner, [])` shape.
+        val previous_impl_header_owner = self.nominal_impl_header_owner
+        self.nominal_impl_header_owner = impl_owner_name != "" and parser_type_kind_named_args(impl_.type_.kind).len() == 0
         val lowered_impl_type = self.lower_type(impl_.type_)
+        self.nominal_impl_header_owner = previous_impl_header_owner
         val type_: HirType = if local_impl_owner >= 0:
             # Keep specialization arguments from the parsed/lowered type;
             # only replace its owner identity.
@@ -249,14 +307,17 @@ impl HirLowering:
         # pair) -- same pattern as `ftype` in `lower_bitfield_field` above.
         # Declare with the type annotation on the same line as the `nil`
         # literal rather than a ternary with a bare `nil` else-branch.
-        var trait_: HirType? = nil
+        # HirImpl.trait_ is a plain HirType: an HirType? local stored the Option
+        # word into its span slot (span word = 1) and every by-value copy of
+        # implementation.trait_ in MIR faulted (F3 AV).
+        var trait_: HirType = HirType(kind: HirTypeKind.Error, span: Span(start: 0, end: 0, line: 0, col: 0, file: "", length: 0))
         if has_trait:
             trait_ = self.lower_type(impl_.trait_)
 
         # #158 generics sweep: an impl block for a generic struct/class (e.g.
         # methods nested inside `struct Box<T>: ... fn get(self) -> T: ...`,
         # desugared by the parser into a synthetic impl -- see
-        # fn_struct_decls.spl) has no monomorphization support on the native
+        # fn_struct_decls.spl) has no specialization on the native
         # build path, same as bare generic functions (#158 Phase A). Before
         # `impl_.type_params` was threaded through (this sweep), this was
         # silently unreachable dead code (always `[]`) and the method's use of
@@ -265,11 +326,11 @@ impl HirLowering:
         # struct that crashed `llc` downstream with a cryptic, wrong-layer
         # diagnostic instead of identifying the unsupported generic use.
         # #158 Phase C: the impl-tier declaration fatal is replaced by
-        # non-emittable templating (hardening plan 9.3 step 12). Every method
-        # below is flagged `is_generic_template` and MIR skips flagged
-        # functions. Unrewritten calls remain errors in 40.mono (E-MONO-030/032).
-        # Postmono invariants still reject retained templates under robust/
-        # critical profiles. HWIR-E-GENERIC applies to hardware lowering.
+        # templating (hardening plan 9.3 step 12). Every method below is
+        # flagged `is_generic_template`; since 2026-10-31 (generics = one
+        # erased body) MIR emits each flagged method once with tagged `T`
+        # slots and treats a direct generic call as an ordinary call.
+        # HWIR-E-GENERIC applies to hardware lowering.
 
         var methods: Dict<text, SymbolId> = {}
         # Method name -> declared return type's struct NAME (methchain lane;
@@ -288,7 +349,9 @@ impl HirLowering:
             case _: -1
         for name in impl_.methods.keys():
             val fn_ = impl_.methods[name]
-            var hir_fn = self.lower_function(fn_)
+            val primitive_method_name = hir_primitive_impl_method_name(
+                self.symbols, type_, trait_, has_trait, self.module_filename, name)
+            var hir_fn = self.lower_function(fn_, primitive_method_name, type_params)
             # #158 Phase B: same rule as the trait tier above -- an impl for a
             # type with type parameter(s) makes every method a template.
             if type_params.len() > 0:
@@ -353,12 +416,42 @@ impl HirLowering:
                     if self.lowered_traits.contains_key(trait_name):
                         val trait_hir: HirTrait = self.lowered_traits[trait_name]
                         for default_fn in trait_hir.defaults:
-                            if not methods.contains_key(default_fn.name):
+                            # Another impl block of this owner (typically an
+                            # inherent `impl Owner:` override) writes this
+                            # method: it owns the `Owner::name` symbol, so
+                            # injecting the default would emit a second body
+                            # under the same name (Cranelift "Duplicate
+                            # definition"). Bind the written method instead.
+                            var default_written_elsewhere = not methods.contains_key(default_fn.name) and self.impl_textual_method_key_present(impl_owner_name, default_fn.name)
+                            val primitive_inherent_name = hir_primitive_impl_method_name(
+                                self.symbols, type_, trait_, false, self.module_filename, default_fn.name)
+                            if primitive_inherent_name != "":
+                                # A method in ANOTHER trait impl is not an
+                                # inherent override of this trait's default.
+                                # Canonical preregistration also recognizes an
+                                # inherent i16 method for an alias to i16.
+                                default_written_elsewhere = not methods.contains_key(default_fn.name) and self.symbols.lookup_or_invalid(primitive_inherent_name).is_valid()
+                            if default_written_elsewhere:
+                                match type_.kind:
+                                    case Named(written_owner_symbol, _):
+                                        val written_symbol_name = self.symbols.method_symbol_name(written_owner_symbol, default_fn.name)
+                                        if val written_symbol = self.symbols.lookup(written_symbol_name):
+                                            if written_symbol != nil:
+                                                methods[default_fn.name] = written_symbol
+                                    case _:
+                                        if primitive_inherent_name != "":
+                                            if val primitive_inherent_symbol = self.symbols.lookup(primitive_inherent_name):
+                                                methods[default_fn.name] = primitive_inherent_symbol
+                            if not methods.contains_key(default_fn.name) and not default_written_elsewhere:
                                 var concrete_default = default_fn
                                 val concrete_symbol_type = self.concrete_default_method_type(default_fn, type_)
-                                val concrete_symbol_name = match type_.kind:
+                                var concrete_symbol_name = match type_.kind:
                                     case Named(owner_symbol, _): self.symbols.method_symbol_name(owner_symbol, default_fn.name)
                                     case _: default_fn.name
+                                val primitive_default_name = hir_primitive_impl_method_name(
+                                    self.symbols, type_, trait_, has_trait, self.module_filename, default_fn.name)
+                                if primitive_default_name != "":
+                                    concrete_symbol_name = primitive_default_name
                                 val concrete_symbol = self.symbols.define(
                                     concrete_symbol_name,
                                     if default_fn.is_static: SymbolKind.Function else: SymbolKind.Method,
@@ -368,6 +461,7 @@ impl HirLowering:
                                     false,
                                     self.module_filename
                                 )
+                                self.copy_call_arity_row(default_fn.symbol.id, concrete_symbol.id)
                                 # #157 body half: the default body was lowered in
                                 # the trait scope where `self` is the trait's Self
                                 # type, so MIR's function_lowering would not
@@ -418,6 +512,7 @@ impl HirLowering:
             assoc_type_impls = assoc_type_impls.push(self.lower_assoc_type_impl(at))
 
         self.symbols.pop_scope()
+        self.prescan_type_parameters = saved_impl_prescan_parameters
 
         HirImpl(
             type_: type_,
@@ -449,6 +544,7 @@ impl HirLowering:
         HirAssocTypeDecl(
             name: at.name,
             bounds: bounds,
+            has_default: at.has_default,
             default: default_type,
             span: at.span
         )
@@ -588,9 +684,26 @@ impl HirLowering:
                             if val const_type = const_info.type_:
                                 match const_type.kind:
                                     case HirTypeKind.Int(_, _): return const_type
+                                    case HirTypeKind.Array(_, _): return const_type
                                     case _: ()
                         case _: ()
                 infer
+            case HirExprKind.Binary(cat_op, cat_left, cat_right):
+                # phase2_module_static_array_concat_initialization_2026_10_27:
+                # `A + B` over two arrays of ONE settled element type is an
+                # array of that type, so owner and importer agree on storage.
+                val concat_op: HirBinOp = cat_op
+                val concat_left: HirExpr = cat_left
+                val concat_right: HirExpr = cat_right
+                match concat_op:
+                    case HirBinOp.Add:
+                        val lt = self.lowered_const_value_type(concat_left, span)
+                        val rt = self.lowered_const_value_type(concat_right, span)
+                        match lt.kind:
+                            case HirTypeKind.Array(_, _):
+                                if hir_types_equal(lt, rt): lt else: infer
+                            case _: infer
+                    case _: infer
             case HirExprKind.StructLit(struct_type, _):
                 val struct_lit_type: HirType = struct_type
                 match struct_lit_type.kind:
@@ -612,17 +725,17 @@ impl HirLowering:
                 val callee_symbol: HirSymbol = callee_info.unwrap()
                 match callee_symbol.kind:
                     case SymbolKind.Struct | SymbolKind.Class:
-                        # Only a record declared here without type parameters:
-                        # `Box(value: 1)` on a generic `Box<T>` has no settled
-                        # type until inference, and an imported record's
-                        # genericity is not known at this point.
+                        # Only a record without type parameters (declared here,
+                        # or imported: module_import_registration marks it from
+                        # the import surface): `Box(value: 1)` on a generic
+                        # `Box<T>` has no settled type until inference.
                         if call_type_args.len() == 0 and self.nongeneric_record_owners.has(callee_symbol.id.id):
                             HirType(kind: HirTypeKind.Named(callee_symbol.id, []), span: span)
                         else:
                             infer
                     case SymbolKind.Function:
                         # Explicit type arguments mean a generic callee whose
-                        # return type is only known after monomorphization.
+                        # return type is only known at the call site.
                         if call_type_args.len() > 0:
                             return infer
                         val callee_type_opt = callee_symbol.type_
@@ -654,7 +767,11 @@ impl HirLowering:
             case _: infer
 
     me lower_hir_const_decl(const_: ParserConst) -> HirConst:
-        val symbol = self.symbols.lookup_or_invalid(const_.name)
+        var symbol = self.symbols.lookup_or_invalid(const_.name)
+        val effective_visibility = self.compute_declared_visibility(const_.name, const_.visibility)
+        if not symbol.is_valid():
+            val mod_name: text? = if self.module_filename != "": Some(self.module_filename) else: None
+            symbol = self.symbols.define(const_.name, SymbolKind.Const, None, const_.span, effective_visibility, false, mod_name)
         val shape_type = if const_.has_type_:
             self.lower_type(const_.type_)
         else:
@@ -665,8 +782,15 @@ impl HirLowering:
                 if const_.has_type_: shape_type else: self.lowered_const_value_type(value, const_.span)
             case _: shape_type
 
-        # Compute effective visibility using filename matching
-        val effective_visibility = self.compute_visibility(const_.name, const_.visibility)
+        # The declaration and reads of this exact binding must share its
+        # settled semantic type. Never locate a replacement by display name:
+        # a synthetic-main local or another owner may use the same spelling.
+        if hir_const_type_settled(type_):
+            if val definition = self.symbols.get_symbol_raw(symbol.id):
+                if definition.kind == SymbolKind.Const:
+                    var updated = definition
+                    updated.type_ = type_
+                    self.symbols.register_preserved_symbol(updated)
 
         HirConst(
             symbol: symbol,
@@ -677,6 +801,7 @@ impl HirLowering:
             visibility: effective_visibility,
             is_public: const_.is_public,
             is_volatile: const_.is_volatile,
+            has_fixed_address: const_.has_fixed_address,
             fixed_address: const_.fixed_address,
             span: const_.span
         )
@@ -686,17 +811,22 @@ impl HirLowering:
 
         HirStaticAssert(
             condition: condition,
+            has_message: assert_.has_message,
             message: assert_.message,
             span: assert_.span
         )
 
-    fn lower_aop_advice(advice: AopAdvice) -> HirAopAdvice:
+    me lower_aop_advice(advice: AopAdvice) -> HirAopAdvice:
+        if advice.aspect_name != "" and advice.aspect_module == "":
+            self.error("E-AOP-OWNER: named aspect requires a loader-bound module identity", advice.span)
         HirAopAdvice(
             predicate_text: advice.pointcut,
             advice_function: advice.handler,
             form: advice.form,
             priority: advice.priority,
-            span: advice.span
+            span: advice.span,
+            aspect_name: advice.aspect_name,
+            aspect_module: advice.aspect_module
         )
 
     fn lower_di_binding(binding: DiBinding) -> HirDiBinding:
@@ -720,55 +850,3 @@ impl HirLowering:
             trait_name: mock_decl.trait_name,
             span: mock_decl.span
         )
-
-fn hir_const_type_settled(type_: HirType) -> bool:
-    """True when `type_` is a concrete storage type for a module global:
-    no `Infer`/`Error`/`Any`/`Never`/type parameter/unresolved projection
-    at the top or inside any component (generic arguments, elements,
-    pointees, result arms, callable signature, union members)."""
-    match type_.kind:
-        case HirTypeKind.Infer(_, _) | HirTypeKind.Error | HirTypeKind.Any | HirTypeKind.Never: false
-        case HirTypeKind.TypeParam(_, _) | HirTypeKind.Projection(_, _): false
-        case HirTypeKind.Named(_, args):
-            val named_args: [HirType] = args
-            hir_const_types_settled(named_args)
-        case HirTypeKind.Union(members):
-            val union_members: [HirType] = members
-            hir_const_types_settled(union_members)
-        case HirTypeKind.Function(params, ret, _):
-            val fn_params: [HirType] = params
-            val fn_ret: HirType = ret
-            hir_const_types_settled(fn_params) and hir_const_type_settled(fn_ret)
-        case HirTypeKind.Result(ok, err):
-            val result_ok: HirType = ok
-            val result_err: HirType = err
-            hir_const_type_settled(result_ok) and hir_const_type_settled(result_err)
-        case HirTypeKind.Slice(elem):
-            val slice_elem: HirType = elem
-            hir_const_type_settled(slice_elem)
-        case HirTypeKind.Ref(inner, _) | HirTypeKind.Ptr(inner, _) | HirTypeKind.Isolated(inner):
-            val pointee: HirType = inner
-            hir_const_type_settled(pointee)
-        case HirTypeKind.Unique(inner) | HirTypeKind.Shared(inner) | HirTypeKind.Weak(inner):
-            val owned_pointee: HirType = inner
-            hir_const_type_settled(owned_pointee)
-        case HirTypeKind.Array(elem, _):
-            val array_elem: HirType = elem
-            hir_const_type_settled(array_elem)
-        case HirTypeKind.Optional(inner):
-            val optional_inner: HirType = inner
-            hir_const_type_settled(optional_inner)
-        case HirTypeKind.Dict(key, value):
-            val dict_key: HirType = key
-            val dict_value: HirType = value
-            hir_const_type_settled(dict_key) and hir_const_type_settled(dict_value)
-        case HirTypeKind.Tuple(elements):
-            val tuple_elements: [HirType] = elements
-            hir_const_types_settled(tuple_elements)
-        case _: true
-
-fn hir_const_types_settled(types: [HirType]) -> bool:
-    for component in types:
-        if not hir_const_type_settled(component):
-            return false
-    true

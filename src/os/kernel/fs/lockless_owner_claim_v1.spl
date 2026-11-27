@@ -1,0 +1,63 @@
+"""Lockless serialization claim for SimpleOS filesystem owners.
+
+A single CAS word: 0 = free, 1 = claimed. `try_claim` is one
+compare-exchange 0 -> 1 and never waits; a contender receives `Busy` and
+must take its own reject/rollback path. `claim_bounded` retries that CAS a
+fixed number of times for cleanup paths (complete/cancel/close) that cannot
+reject without stranding a pin or close ticket; owners keep their critical
+sections free of driver I/O, so the retry window is short and bounded.
+`release` is one compare-exchange 1 -> 0, so a non-holder release is
+reported instead of silently freeing another owner's claim.
+
+The runtime CAS is sequentially consistent; the orderings passed below
+document intent only (`AtomicI64.compare_exchange` ignores them).
+
+A claim whose atomic word could not be allocated is `Unavailable`: every
+claim attempt then fails closed instead of panicking at module init.
+"""
+
+use std.nogc_sync_mut.atomic.{AtomicI64, MemoryOrdering, atomic_i64_try_new}
+
+pub struct LocklessOwnerClaimV1:
+    word: Option<AtomicI64>
+
+pub enum LocklessClaimOutcomeV1:
+    Claimed
+    Busy
+    Unavailable
+
+pub enum LocklessReleaseOutcomeV1:
+    Released
+    NotHeld
+
+pub fn lockless_owner_claim_new_v1() -> LocklessOwnerClaimV1:
+    LocklessOwnerClaimV1(word: atomic_i64_try_new(0))
+
+pub fn lockless_owner_try_claim_v1(claim: LocklessOwnerClaimV1) -> LocklessClaimOutcomeV1:
+    match claim.word:
+        case Some(word):
+            if word.compare_exchange(0, 1, MemoryOrdering.AcqRel, MemoryOrdering.Acquire):
+                return LocklessClaimOutcomeV1.Claimed
+            LocklessClaimOutcomeV1.Busy
+        case None:
+            LocklessClaimOutcomeV1.Unavailable
+
+# Reason: `attempts` is a plain CAS retry count, not a domain quantity.
+# @allow(primitive_api)
+pub fn lockless_owner_claim_bounded_v1(claim: LocklessOwnerClaimV1, attempts: i64) -> LocklessClaimOutcomeV1:
+    var i = 0
+    while i < attempts:
+        val outcome = lockless_owner_try_claim_v1(claim)
+        match outcome:
+            case LocklessClaimOutcomeV1.Busy: i = i + 1
+            case _: return outcome
+    LocklessClaimOutcomeV1.Busy
+
+pub fn lockless_owner_release_v1(claim: LocklessOwnerClaimV1) -> LocklessReleaseOutcomeV1:
+    match claim.word:
+        case Some(word):
+            if word.compare_exchange(1, 0, MemoryOrdering.AcqRel, MemoryOrdering.Acquire):
+                return LocklessReleaseOutcomeV1.Released
+            LocklessReleaseOutcomeV1.NotHeld
+        case None:
+            LocklessReleaseOutcomeV1.NotHeld

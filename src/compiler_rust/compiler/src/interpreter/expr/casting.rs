@@ -13,8 +13,11 @@ use crate::value::Value;
 
 /// Cast a value to a target type
 pub(super) fn cast_value(val: Value, target_type: &Type) -> Result<Value, CompileError> {
+    let resolved_type = crate::interpreter::resolve_generic_type_in_scope(target_type);
+    let target_type = &resolved_type;
     match target_type {
         Type::Simple(type_name) => cast_to_simple_type(val, type_name),
+        Type::Generic { name, .. } => cast_to_simple_type(val, name),
         Type::Optional(inner) => {
             // Optional values follow the interpreter's bare-payload convention:
             // `None` is `Value::Nil`, a present optional is its bare payload (see
@@ -83,6 +86,11 @@ fn cast_to_simple_type(val: Value, type_name: &str) -> Result<Value, CompileErro
             let actual_type = val.type_name();
             if actual_type == other {
                 Ok(val)
+            } else if let Some(suffix) = crate::interpreter_unit::standalone_unit_suffix(other) {
+                // `raw as Unit` for a standalone `unit Name: T as sfx`.
+                crate::interpreter_unit::construct_standalone_unit(other, &suffix, val).map_err(|msg| {
+                    CompileError::semantic_with_context(msg, ErrorContext::new().with_code(codes::TYPE_MISMATCH))
+                })
             } else {
                 let ctx = ErrorContext::new().with_code(codes::TYPE_MISMATCH).with_help(format!(
                     "cannot convert {} to {} through type assertion",
@@ -143,6 +151,22 @@ fn cast_to_numeric(val: Value, target: NumericType) -> Result<Value, CompileErro
         Value::Str(ref s) if s.chars().count() == 1 => {
             let code_point = s.chars().next().unwrap() as i64;
             Ok(finalize_numeric_cast(cast_int_to_numeric(code_point, target), target))
+        }
+        // A boxed optional (`Option.Some(payload)` — how a function-returned
+        // `T?` arrives here) is NOT an enum ordinal. The arm below used to
+        // turn `mk() as u64` into the position of `Some` (0) and silently
+        // zero every payload (bug optional_as_cast_yields_zero_2026_11_09).
+        // The HIR lowerer rejects this cast at compile time; this runtime
+        // arm is the fail-closed twin for the tree-walking lane.
+        Value::Enum { ref enum_name, .. } if enum_name == "Option" => {
+            let ctx = ErrorContext::new().with_code(codes::TYPE_MISMATCH).with_help(
+                "narrow the optional first with `?? <default>`, `if val x = ...`, or `match`; \
+                 `T? as T` is not allowed outside `unsafe` (nil-only-in-unsafe, ERR-01)",
+            );
+            Err(CompileError::semantic_with_context(
+                format!("type mismatch: cannot cast an optional `T?` to {}", target.name()),
+                ctx,
+            ))
         }
         // Enum variant to numeric (ordinal position)
         Value::Enum {
@@ -262,5 +286,69 @@ mod tests {
         };
         let cast = cast_value(original, &target).expect("packed byte array assertion");
         assert_eq!(cast.byte_array_view(), Some(&[1, 2, 3][..]));
+    }
+}
+
+#[cfg(test)]
+mod optional_cast_tests {
+    use super::*;
+
+    /// optional_as_cast_yields_zero_2026_11_09: a boxed `Option.Some(payload)`
+    /// reaching a numeric cast used to be treated as an enum ordinal and
+    /// yield 0. It must be a type error; a plain enum ordinal cast and the
+    /// `nil` rejection are unchanged.
+    #[test]
+    fn boxed_option_some_to_numeric_is_an_error_not_zero() {
+        let some = Value::Enum {
+            enum_name: "Option".to_string(),
+            variant: "Some".to_string(),
+            payload: Some(Box::new(Value::UInt { value: 4275044352, width: 64 })),
+        };
+        for target in ["u64", "i64", "u32", "f64"] {
+            let err = cast_value(some.clone(), &Type::Simple(target.to_string()))
+                .expect_err("Option.Some as numeric must fail, never yield the ordinal");
+            let msg = format!("{err}");
+            assert!(msg.contains("optional"), "{target}: {msg}");
+        }
+        assert!(cast_value(Value::Nil, &Type::Simple("u64".to_string())).is_err());
+    }
+}
+
+#[cfg(test)]
+mod generic_cast_tests {
+    use super::*;
+    use std::collections::{HashMap, HashSet};
+
+    #[test]
+    fn generic_cast_resolves_bound_type_param_and_optional() {
+        let mut updates = HashMap::new();
+        updates.insert("T".to_string(), Type::Simple("i32".to_string()));
+        {
+            let _guard = crate::interpreter::GenericTypeBindingsGuard::enter(updates);
+            let cast_int = cast_value(Value::Float(3.9), &Type::Simple("T".to_string()))
+                .expect("bound T -> i32 must cast float to i32");
+            assert_eq!(cast_int, Value::Int(3));
+
+            let cast_opt = cast_value(Value::Float(7.2), &Type::Optional(Box::new(Type::Simple("T".to_string()))))
+                .expect("bound T? -> i32? must cast float to i32");
+            assert_eq!(cast_opt, Value::Int(7));
+        }
+
+        let err = cast_value(Value::Float(2.0), &Type::Simple("T".to_string()))
+            .expect_err("unbound T must still fail");
+        assert!(format!("{err}").contains("cannot cast f64 to T"), "{err}");
+    }
+
+    #[test]
+    fn unify_generic_type_value_infers_element_from_array() {
+        let params: HashSet<String> = ["T".to_string()].into_iter().collect();
+        let mut bindings = HashMap::new();
+        let field_ty = Type::Array {
+            element: Box::new(Type::Simple("T".to_string())),
+            size: None,
+        };
+        let arr_val = Value::array(vec![Value::Float(4.0), Value::Float(16.0)]);
+        crate::interpreter::unify_generic_type_value(&field_ty, &arr_val, &params, &mut bindings);
+        assert_eq!(bindings.get("T"), Some(&Type::Simple("f64".to_string())));
     }
 }

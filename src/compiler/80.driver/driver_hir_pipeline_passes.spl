@@ -1,22 +1,32 @@
-# CompilerDriver HIR resolution, type checking, and monomorphization passes.
+# CompilerDriver HIR resolution and type checking passes.
 
 use compiler.driver.driver_compiler_type.{CompilerDriver}
+use compiler.common.api_signature_facts_v1.{ApiSignatureFactsV1, ApiCallableFactV1, ApiSignatureNodeV1}
 use compiler.driver.hir_typecheck_consumer_v1.{HirTypecheckReceiptV1, collect_module_typecheck_receipt_v1}
+use compiler.driver.driver_unit_profile.{unit_profile_policy, unit_profile_apply, unit_profile_drain_diagnostics}
 use compiler.driver.hir_semantic_consumer_v1.{collect_module_safety_receipt_v1,
     collect_module_any_escape_receipt_v1, collect_module_enum_contract_receipt_v1,
     collect_module_representation_receipt_v1}
-use compiler.common.assurance.representation_context_v1.{RepresentationSourceContextV1}
+use compiler.common.assurance.representation_context_v1.{RepresentationProjectContextV1, RepresentationSourceContextV1, representation_context_from_project_v1, representation_source_context_v1}
 use compiler.common.assurance.representation_manifest_v1.{RepresentationDeclarationV1}
 use compiler.semantics.representation_boundary.hir_binding.{representation_bind_hir_v1}
 use std.common.crypto.sha256.{sha256_text}
-use compiler.driver.driver_collection_planner.*
 use std.env.{env_get}
 use compiler.driver.driver_types.{CompileContext}
+use compiler.common.driver_core_types.{CompileMode}
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurfacesByName}
+use compiler.hir.hir_lowering.api_export_route_projection_v1.{bind_api_signature_surface_v1, project_api_export_routes_v1}
+use compiler.types.type_infer.api_exposure_walker_v1.{walk_api_exposure_v1}
+use compiler.types.type_infer.api_exposure_closure_v1.{apply_api_export_closure_v1}
+use compiler.hir.hir_lowering.api_export_closure_projection_v1.{project_api_export_closure_v1}
 use compiler.hir.hir.*
 use compiler.driver.driver_log_helpers.{log_debug, log_phase}
 use compiler.semantics.resolve.{resolve_methods, resolve_methods_quiet, resolve_methods_module_owner}
 use std.nogc_sync_mut.io.process_ops.{eprint}
-use compiler.mono.monomorphize_integration.*
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_read}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause,
+    transient_scope_end, transient_promote}
 use compiler.driver.driver_safety_severity.{
     SafetyPassSeverity,
     safety_pass_severity_phased
@@ -28,10 +38,6 @@ use compiler.driver.driver_typecheck_severity.{
 use compiler.common.parallel_policy.policy_schema.{ResolvedParallelPolicyV1}
 use compiler.common.assurance.policy_schema.{AssuranceStrictness}
 use compiler.driver.driver_pass_receipt.{PassReceipt, record_pass_receipt}
-use compiler.mono.verify.post_mono_verify.{post_mono_verify_modules}
-use compiler.driver.driver_post_mono_publication_v1.{driver_publish_post_mono_report_v1}
-use compiler.driver.driver_mono_publication_v1.{driver_publish_mono_warnings_and_stats_v1, driver_publish_mono_diagnostics_v1}
-
 
 impl CompilerDriver:
     fn resolve_methods_impl() -> (CompileContext, bool):
@@ -95,75 +101,23 @@ impl CompilerDriver:
         # This standalone method is kept for API compatibility but is a no-op.
         (ctx, not ctx.has_errors())
 
-    me monomorphize_impl(hir_phase_admitted: bool) -> bool:
-        self.monomorphize_with_policy(hir_phase_admitted, true)
-
-    me monomorphize_for_explicit_compilation(hir_phase_admitted: bool) -> bool:
-        self.monomorphize_with_policy(hir_phase_admitted, false)
-
-    me monomorphize_with_policy(
-        hir_phase_admitted: bool,
-        allow_ambient_bootstrap_policy: bool
-    ) -> bool:
-        """Run monomorphization pass on all HIR modules.
-
-        This creates specialized versions of generic functions, structs, and
-        classes by substituting concrete type arguments. Call sites are
-        rewritten to use the mangled names of specialized definitions.
-        """
-        log_debug("running monomorphization")
-        # Phase admission is produced only after HIR lowering and every
-        # post-HIR validator succeeds. Do not reconstruct that authority by
-        # rereading CompileContext.error_count_value after a 609-module
-        # aggregate return boundary: the Stage-3 native value ABI can corrupt
-        # that adjacent scalar even though the canonical owner completed with
-        # zero errors.
-        if not self.analyze_collections_before_monomorphize(hir_phase_admitted):
-            return false
-        val skip_mono = if allow_ambient_bootstrap_policy:
-            env_get("SIMPLE_BOOTSTRAP_SKIP_MONO")
-        else:
-            ""
-        # SIMPLE_BOOTSTRAP=1 used to skip the pass too. That was only safe while
-        # HIR lowering refused every generic fn; with that gate open (#158
-        # Phase B, 2026-08-22) a skipped pass would hand generic templates to
-        # MIR. Only the explicit SIMPLE_BOOTSTRAP_SKIP_MONO=1 escape remains.
-        if skip_mono == "1":
-            print "[bootstrap] skipping monomorphization (SIMPLE_BOOTSTRAP_SKIP_MONO=1)"
-            return true
-        # Cycle-121: the modules dict comes back through the module-global
-        # owner (mono_report_modules_owner), not the 4-tuple return -- the
-        # tuple's native value ABI corrupted the dict slot (the docstring
-        # above documents this boundary; cycles 117-121 traced the poisoned
-        # elements to here).
-        val (mono_stats, mono_diags, mono_warnings) =
-            run_monomorphization_with_report(self.ctx.hir_modules)
-        log_phase("phase4:monomorphize:breakdown {mono_last_phase_profile_v1}")
-        driver_publish_mono_warnings_and_stats_v1(self.ctx, mono_stats, mono_warnings)
-        self.ctx.hir_modules = mono_report_modules_owner
-        # SIMPLE_SDN_RACE_TRACE=1 companion (see driver_hir_pipeline_lowering):
-        # if a module's counts changed across monomorphization (or a module
-        # vanished), the SdnValue declaration loss is in the mono pass; if
-        # identical to the hir-final lines, the loss is in MIR scope build.
-        if (env_get("SIMPLE_SDN_RACE_TRACE") ?? "") == "1":
-            val race_trace_keys: [text] = self.ctx.hir_modules.keys()
-            for race_key in race_trace_keys:
-                if self.ctx.hir_modules[race_key] == nil:
-                    continue
-                eprint("[race-trace] mono-final module={race_key} enums={self.ctx.hir_modules[race_key].enums.len()} classes={self.ctx.hir_modules[race_key].classes.len()} functions={self.ctx.hir_modules[race_key].functions.len()}")
-        if not driver_publish_mono_diagnostics_v1(self.ctx, mono_diags, self.ctx.hir_modules.len()):
-            return false
-        # Section 9.5 post-monomorphization invariants (E-MONO-031). Runs on
-        # the MONOMORPHIZED modules -- the whole point is that nothing generic,
-        # unsubstituted, or type-erased survived, so it cannot run before this
-        # assignment. Under `critical` ANY non-zero counter is fatal; every
-        # other profile warns, so the inventory is visible during migration.
-        val mono_report = post_mono_verify_modules(self.ctx.hir_modules)
-        driver_publish_post_mono_report_v1(self.ctx, mono_report, self.ctx.hir_modules.len())
-
 export publish_module_typecheck_receipt_v1
 
 pub fn publish_module_typecheck_receipt_v1(ctx: CompileContext, receipt: HirTypecheckReceiptV1):
+    if val facts = receipt.api_signatures:
+        if ctx.api_signature_facts.has(facts.module_name):
+            ctx.api_signature_node_count = ctx.api_signature_node_count - ctx.api_signature_facts[facts.module_name].nodes.len()
+            ctx.api_signature_facts.remove(facts.module_name)
+        if ctx.api_exposure.has(facts.module_name):
+            ctx.api_exposure.remove(facts.module_name)
+        if facts.module_name != "" and ctx.api_signature_facts.len() < 256 and facts.nodes.len() <= 16384 - ctx.api_signature_node_count:
+            ctx.api_signature_facts[facts.module_name] = facts
+            ctx.api_signature_node_count = ctx.api_signature_node_count + facts.nodes.len()
+            # Classify exactly the retained facts; an unretained module keeps
+            # no exposure row, so a missing row means NotCollected.
+            ctx.api_exposure[facts.module_name] = walk_api_exposure_v1(facts)
+        else:
+            ctx.api_signature_retention_exhausted = true
     for message in receipt.warnings:
         ctx.add_warning(message)
     for message in receipt.errors:
@@ -171,7 +125,8 @@ pub fn publish_module_typecheck_receipt_v1(ctx: CompileContext, receipt: HirType
 
 pub fn run_typecheck_warn_pass(
     ctx: CompileContext,
-    hir_modules: Dict<text, HirModule>
+    hir_modules: Dict<text, HirModule>,
+    surfaces: ModuleSurfacesByName? = None
 ) -> [text]:
     """Type-inference + visibility diagnostics, profile-gated for enforcement.
 
@@ -197,12 +152,42 @@ pub fn run_typecheck_warn_pass(
     """
     # Keep module iteration, severity, diagnostic order, and feature policy.
     val severity = typecheck_pass_severity()
+    # A fresh pass replaces the prior observation generation, including failed
+    # and budget-limited runs. Absent modules never inherit previous facts.
+    ctx.api_signature_facts = {}
+    ctx.api_signature_node_count = 0
+    ctx.api_signature_retention_exhausted = false
+    ctx.api_export_route_facts = None
+    ctx.api_export_closure_facts = None
+    ctx.api_exposure = {}
+    ctx.api_publication_decision = None
     var out: [text] = []
+    # Script (interpreted) execution is the only SPL-UNIT-002 relaxation.
+    val script_mode = ctx.options.mode == CompileMode.Interpret
+    # Warm lazy unit-profile policy and edition resolution before per-module
+    # transient scopes begin so neither the global snapshot nor
+    # _EDITION_UNKNOWN_WARN_COUNTS is allocated inside module 0's scratch heap.
+    if hir_modules.len() > 0:
+        val _warm_unit_policy = unit_profile_policy()
+        unit_profile_apply(env_get("SIMPLE_TYPECHECK_PROFILE") ?? "", script_mode)
+        val _warm_unit_notices = unit_profile_drain_diagnostics("<warm>")
     for name in hir_modules.keys():
-        val receipt = collect_module_typecheck_receipt_v1(name, hir_modules[name], severity)
+        val collect_signatures = not ctx.api_signature_retention_exhausted
+        var receipt = _typecheck_receipt_scoped_v1(name, hir_modules[name], severity, collect_signatures, script_mode, hir_modules)
+        if val registry = surfaces:
+            if val facts = receipt.api_signatures:
+                receipt.api_signatures = Some(bind_api_signature_surface_v1(facts, registry))
         for message in receipt.messages:
             out = out.push(message)
         publish_module_typecheck_receipt_v1(ctx, receipt)
+    if val registry = surfaces:
+        ctx.api_export_route_facts = Some(project_api_export_routes_v1(registry, ctx.api_signature_facts))
+        # Effective export closure over the frozen routes, applied to every
+        # retained exposure row so a module verdict can become Safe.
+        val closure = project_api_export_closure_v1(registry, ctx.api_export_route_facts, ctx.api_signature_facts)
+        ctx.api_export_closure_facts = Some(closure)
+        for module_name in ctx.api_exposure.keys():
+            ctx.api_exposure[module_name] = apply_api_export_closure_v1(ctx.api_exposure[module_name], closure)
     out
 
 pub fn run_safety_warn_pass(ctx: CompileContext,
@@ -212,7 +197,7 @@ pub fn run_safety_warn_pass(ctx: CompileContext,
     val parallel_policy = ResolvedParallelPolicyV1.for_assurance(ctx.assurance_policy.strictness)
     var out: [text] = []
     for name in hir_modules.keys():
-        val receipt = collect_module_safety_receipt_v1(name, hir_modules[name], severity, parallel_policy)
+        val receipt = _safety_receipt_scoped_v1(name, hir_modules[name], severity, parallel_policy)
         for message in receipt.messages: out.push(message)
         publish_module_typecheck_receipt_v1(ctx, receipt)
     out
@@ -232,6 +217,140 @@ pub fn run_safety_warn_pass(ctx: CompileContext,
 # distinguishable from "it ran and found nothing".
 # ---------------------------------------------------------------------------
 
+# Bug native_build_hir_phase_scopes_2026_10_24: the any-escape, enum-contract
+# and representation passes walk every module with no transient scope, so
+# each walk's scratch (~1.3 MB/module measured for the enum-contract window at
+# 472 modules) stays immortal in the no-GC runtime. The collectors are
+# read-only ("Only rendered diagnostic arrays escape",
+# hir_semantic_consumer_v1.spl) and write no global or ctx state, so each one
+# runs in its own scope and only its receipt is promoted. Every persistent
+# write -- publish_module_typecheck_receipt_v1 (ctx.add_warning/add_error),
+# the `out` push, the representation write-back into `hir_modules` -- runs
+# AFTER scope end. SIMPLE_HIR_SEMANTIC_PASS_SCOPE=0 restores the unscoped walk.
+fn hir_semantic_pass_scope_enabled_v1() -> bool:
+    (env_get("SIMPLE_HIR_SEMANTIC_PASS_SCOPE") ?? "") != "0"
+
+# SIMPLE_HIR_SEMANTIC_PASS_SCOPE_SKIP=<comma pass names> runs just those passes
+# unscoped (typecheck, safety_warn, any_escape, enum_contract,
+# representation_manifest, representation_bind) so a dangling-scope crash can be
+# bisected without giving up scoping for every pass. Bug
+# hir_semantic_pass_scope_dangling_hirtype_2026-11-24.
+fn hir_pass_scope_skipped_v1(skip_list: text, pass_name: text) -> bool:
+    for item in skip_list.split(","):
+        if item.trim() == pass_name: return true
+    false
+
+# SIMPLE_HIR_SEMANTIC_PASS_TRACE=1 prints the module entering each scoped pass,
+# so the last line before E-HIR-VISIT-UNHANDLED names the failing module.
+fn _hir_pass_scope_open_v1(pass_name: text, name: text) -> bool:
+    if not hir_semantic_pass_scope_enabled_v1(): return false
+    if (env_get("SIMPLE_HIR_SEMANTIC_PASS_TRACE") ?? "") == "1":
+        eprint("[hir-pass-scope] trace pass={pass_name} module={name}")
+    if hir_pass_scope_skipped_v1(env_get("SIMPLE_HIR_SEMANTIC_PASS_SCOPE_SKIP") ?? "", pass_name): return false
+    if transient_array_scope_state_v1() != 0 or not transient_scope_begin():
+        eprint("[hir-pass-scope] WARNING transient scope refused; running {pass_name} UNSCOPED, arena retained: module={name}")
+        return false
+    true
+
+# Promotion stays in the frame that owns the receipt (a struct passed by value
+# could reach a helper as a copy), and the three arrays are promoted too so the
+# children survive even if the struct shell is a by-value no-op promotion.
+# Re-promoting an already-immortal child is a documented no-op success.
+fn _hir_pass_scope_failed_v1(pass_name: text, name: text, paused: bool, owned: bool, ended: bool):
+    eprint("[hir-pass-scope] WARNING receipt promotion failed (paused={paused} owned={owned} ended={ended}); re-running {pass_name} UNSCOPED: module={name}")
+
+fn _typecheck_receipt_scoped_v1(name: text, module: HirModule,
+        severity: TypecheckPassSeverity, collect_signatures: bool,
+        script_mode: bool, project_modules: Dict<text, HirModule>) -> HirTypecheckReceiptV1:
+    if not _hir_pass_scope_open_v1("typecheck", name):
+        return collect_module_typecheck_receipt_v1(name, module, severity, collect_signatures, script_mode, project_modules)
+    val receipt: HirTypecheckReceiptV1 = collect_module_typecheck_receipt_v1(
+        name, module, severity, collect_signatures, script_mode, project_modules)
+    val paused = transient_scope_pause()
+    var owned = paused and transient_promote(receipt) and transient_promote(receipt.messages) and
+        transient_promote(receipt.warnings) and transient_promote(receipt.errors)
+    if owned:
+        if val facts_v = receipt.api_signatures:
+            owned = transient_promote(receipt.api_signatures) and transient_promote(facts_v) and
+                transient_promote(facts_v.callables) and transient_promote(facts_v.nodes) and
+                transient_promote(facts_v.unknown_reasons) and transient_promote(facts_v.module_name) and
+                transient_promote(facts_v.module_path) and transient_promote(facts_v.surface_path) and
+                transient_promote(facts_v.surface_binding_reason)
+    val ended = transient_scope_end()
+    if paused and owned and ended: return receipt
+    _hir_pass_scope_failed_v1("typecheck", name, paused, owned, ended)
+    collect_module_typecheck_receipt_v1(name, module, severity, collect_signatures, script_mode, project_modules)
+
+fn _safety_receipt_scoped_v1(name: text, module: HirModule,
+        severity: SafetyPassSeverity,
+        parallel_policy: ResolvedParallelPolicyV1) -> HirTypecheckReceiptV1:
+    if not _hir_pass_scope_open_v1("safety_warn", name):
+        return collect_module_safety_receipt_v1(name, module, severity, parallel_policy)
+    val receipt: HirTypecheckReceiptV1 = collect_module_safety_receipt_v1(
+        name, module, severity, parallel_policy)
+    val paused = transient_scope_pause()
+    val owned = paused and transient_promote(receipt) and transient_promote(receipt.messages) and
+        transient_promote(receipt.warnings) and transient_promote(receipt.errors)
+    val ended = transient_scope_end()
+    if paused and owned and ended: return receipt
+    _hir_pass_scope_failed_v1("safety_warn", name, paused, owned, ended)
+    collect_module_safety_receipt_v1(name, module, severity, parallel_policy)
+
+fn _any_escape_receipt_scoped_v1(name: text, module: HirModule,
+        strictness: AssuranceStrictness) -> HirTypecheckReceiptV1:
+    if not _hir_pass_scope_open_v1("any_escape", name):
+        return collect_module_any_escape_receipt_v1(name, module, strictness)
+    val receipt: HirTypecheckReceiptV1 = collect_module_any_escape_receipt_v1(name, module, strictness)
+    val paused = transient_scope_pause()
+    val owned = paused and transient_promote(receipt) and transient_promote(receipt.messages) and
+        transient_promote(receipt.warnings) and transient_promote(receipt.errors)
+    val ended = transient_scope_end()
+    if paused and owned and ended: return receipt
+    _hir_pass_scope_failed_v1("any_escape", name, paused, owned, ended)
+    collect_module_any_escape_receipt_v1(name, module, strictness)
+
+fn _enum_contract_receipt_scoped_v1(name: text, module: HirModule,
+        strictness: AssuranceStrictness) -> HirTypecheckReceiptV1:
+    if not _hir_pass_scope_open_v1("enum_contract", name):
+        return collect_module_enum_contract_receipt_v1(name, module, strictness)
+    val receipt: HirTypecheckReceiptV1 = collect_module_enum_contract_receipt_v1(name, module, strictness)
+    val paused = transient_scope_pause()
+    val owned = paused and transient_promote(receipt) and transient_promote(receipt.messages) and
+        transient_promote(receipt.warnings) and transient_promote(receipt.errors)
+    val ended = transient_scope_end()
+    if paused and owned and ended: return receipt
+    _hir_pass_scope_failed_v1("enum_contract", name, paused, owned, ended)
+    collect_module_enum_contract_receipt_v1(name, module, strictness)
+
+fn _representation_receipt_scoped_v1(name: text, module: HirModule,
+        strictness: AssuranceStrictness) -> HirTypecheckReceiptV1:
+    if not _hir_pass_scope_open_v1("representation_manifest", name):
+        return collect_module_representation_receipt_v1(name, module, strictness)
+    val receipt: HirTypecheckReceiptV1 = collect_module_representation_receipt_v1(name, module, strictness)
+    val paused = transient_scope_pause()
+    val owned = paused and transient_promote(receipt) and transient_promote(receipt.messages) and
+        transient_promote(receipt.warnings) and transient_promote(receipt.errors)
+    val ended = transient_scope_end()
+    if paused and owned and ended: return receipt
+    _hir_pass_scope_failed_v1("representation_manifest", name, paused, owned, ended)
+    collect_module_representation_receipt_v1(name, module, strictness)
+
+# The bind result is written back into the persistent `hir_modules` by the
+# caller, so it is promoted here and the module is never mutated in scope.
+fn _representation_bind_scoped_v1(contexts: Dict<text, RepresentationSourceContextV1>,
+        name: text, module: HirModule) -> [RepresentationDeclarationV1]:
+    if not _hir_pass_scope_open_v1("representation_bind", name):
+        return representation_bind_module_facts_v1(contexts, name, module)
+    val declarations = representation_bind_module_facts_v1(contexts, name, module)
+    val paused = transient_scope_pause()
+    val owned = paused and transient_promote(declarations)
+    val ended = transient_scope_end()
+    if paused and owned and ended: return declarations
+    eprint("[hir-pass-scope] WARNING declaration promotion failed (paused={paused} owned={owned} ended={ended}); re-running representation_bind UNSCOPED: module={name}")
+    representation_bind_module_facts_v1(contexts, name, module)
+
+export hir_pass_scope_skipped_v1
+
 pub fn run_any_escape_pass(
     ctx: CompileContext,
     hir_modules: Dict<text, HirModule>
@@ -243,7 +362,7 @@ pub fn run_any_escape_pass(
     var modules_checked = 0
     for name in hir_modules.keys():
         modules_checked = modules_checked + 1
-        val receipt = collect_module_any_escape_receipt_v1(name, hir_modules[name], strictness)
+        val receipt = _any_escape_receipt_scoped_v1(name, hir_modules[name], strictness)
         for message in receipt.messages: out.push(message)
         errors_raised = errors_raised + receipt.errors.len()
         publish_module_typecheck_receipt_v1(ctx, receipt)
@@ -272,7 +391,7 @@ pub fn run_enum_contract_pass(
     var modules_checked = 0
     for name in hir_modules.keys():
         modules_checked = modules_checked + 1
-        val receipt = collect_module_enum_contract_receipt_v1(name, hir_modules[name], strictness)
+        val receipt = _enum_contract_receipt_scoped_v1(name, hir_modules[name], strictness)
         for message in receipt.messages: out.push(message)
         errors_raised = errors_raised + receipt.errors.len()
         publish_module_typecheck_receipt_v1(ctx, receipt)
@@ -296,10 +415,13 @@ pub fn representation_invocation_context_index_v1(ctx: CompileContext) -> Dict<t
             conflicting[context.module_identity] = true
         else:
             contexts[context.module_identity] = context
-    if ctx.options.representation_sources.len() == 0:
+    val derive_from_project = ctx.options.representation_sources.len() == 0 and
+        ctx.options.representation_project_root != ""
+    if ctx.options.representation_sources.len() == 0 and not derive_from_project:
         ctx.representation_context_index_v1 = Some(contexts)
         return contexts
     var source_identities: Dict<text, text> = {}
+    var source_paths: Dict<text, text> = {}
     var source_conflicts: Dict<text, bool> = {}
     if ctx.source_module_names_owner.len() > 0 and
             ctx.source_module_names_owner.len() == ctx.source_identities_owner.len() and
@@ -310,21 +432,94 @@ pub fn representation_invocation_context_index_v1(ctx: CompileContext) -> Dict<t
                 source_conflicts[name] = true
             else:
                 source_identities[name] = ctx.source_identities_owner[i]
+                source_paths[name] = ctx.source_paths_owner[i]
     else:
         for source in ctx.sources:
             if source_identities.contains_key(source.module_name):
                 source_conflicts[source.module_name] = true
             else:
                 source_identities[source.module_name] = sha256_text(source.content)
+                source_paths[source.module_name] = if source.authored_path != "": source.authored_path else: source.path
     var admitted: Dict<text, RepresentationSourceContextV1> = {}
-    for name in contexts.keys():
-        if contexts.contains_key(name) and not conflicting.contains_key(name) and
-                not source_conflicts.contains_key(name) and source_identities.contains_key(name):
-            val proposed = contexts[name]
-            if proposed.source_identity == source_identities[name]:
-                admitted[name] = proposed
+    if derive_from_project:
+        admitted = representation_derive_project_contexts_v1(
+            ctx.options.representation_project_root, source_identities, source_paths, source_conflicts)
+    else:
+        for name in contexts.keys():
+            if contexts.contains_key(name) and not conflicting.contains_key(name) and
+                    not source_conflicts.contains_key(name) and source_identities.contains_key(name):
+                val proposed = contexts[name]
+                if proposed.source_identity == source_identities[name]:
+                    admitted[name] = proposed
     ctx.representation_context_index_v1 = Some(admitted)
     admitted
+
+# Derive one representation source context per admitted source from the
+# nearest simple.sdn manifest at or below the explicitly selected project
+# root. Sources outside the root, sources without a manifest on their
+# ancestor chain, conflicting module names, and malformed manifests all
+# fail closed to "no context" (the pre-derivation behavior for that source).
+# Each manifest is parsed once per invocation.
+pub fn representation_derive_project_contexts_v1(root: text,
+        source_identities: Dict<text, text>, source_paths: Dict<text, text>,
+        source_conflicts: Dict<text, bool>) -> Dict<text, RepresentationSourceContextV1>:
+    var out: Dict<text, RepresentationSourceContextV1> = {}
+    val norm_root = _representation_path_normalize_v1(root)
+    if norm_root == "":
+        return out
+    var projects: Dict<text, RepresentationProjectContextV1> = {}
+    var dir_manifests: Dict<text, text> = {}
+    for name in source_identities.keys():
+        if source_conflicts.contains_key(name) or not source_paths.contains_key(name):
+            continue
+        val source_path = _representation_path_normalize_v1(source_paths[name])
+        if source_path != norm_root and not source_path.starts_with(norm_root + "/"):
+            continue
+        var dir = _representation_path_dirname_v1(source_path)
+        var manifest_path = ""
+        var walked: [text] = []
+        var resolved = false
+        while dir != "" and (dir == norm_root or dir.starts_with(norm_root + "/")):
+            if dir_manifests.contains_key(dir):
+                manifest_path = dir_manifests[dir]
+                resolved = true
+                break
+            walked.push(dir)
+            val candidate = dir + "/simple.sdn"
+            if file_exists(candidate):
+                manifest_path = candidate
+                resolved = true
+                break
+            if dir == norm_root:
+                break
+            dir = _representation_path_dirname_v1(dir)
+        for visited in walked:
+            dir_manifests[visited] = if resolved: manifest_path else: ""
+        if manifest_path == "":
+            continue
+        if not projects.contains_key(manifest_path):
+            projects[manifest_path] = representation_context_from_project_v1(
+                file_read(manifest_path), manifest_path)
+        val project = projects[manifest_path]
+        if project.error != "":
+            continue
+        out[name] = representation_source_context_v1(project, name, source_identities[name])
+    out
+
+fn _representation_path_normalize_v1(path: text) -> text:
+    var out = ""
+    for i in 0..path.byte_len():
+        val ch = path.substring(i, i + 1)
+        out = out + if ch == "\\": "/" else: ch
+    while out.ends_with("/"):
+        out = out.substring(0, out.byte_len() - 1)
+    out
+
+fn _representation_path_dirname_v1(path: text) -> text:
+    val idx = path.last_index_of("/")
+    if idx < 0:
+        return ""
+    path.substring(0, idx)
 
 pub fn representation_bind_module_facts_v1(contexts: Dict<text, RepresentationSourceContextV1>,
         name: text, module: HirModule) -> [RepresentationDeclarationV1]:
@@ -341,9 +536,9 @@ pub fn run_representation_manifest_pass(ctx: CompileContext,
     var errors_raised = 0
     for name in hir_modules.keys():
         var module: HirModule = hir_modules[name]
-        module.representation_declarations = representation_bind_module_facts_v1(contexts, name, module)
+        module.representation_declarations = _representation_bind_scoped_v1(contexts, name, module)
         hir_modules[name] = module
-        val receipt = collect_module_representation_receipt_v1(name, module, strictness)
+        val receipt = _representation_receipt_scoped_v1(name, module, strictness)
         for message in receipt.messages: out.push(message)
         errors_raised = errors_raised + receipt.errors.len()
         publish_module_typecheck_receipt_v1(ctx, receipt)

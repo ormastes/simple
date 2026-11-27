@@ -1,0 +1,111 @@
+# @cover src/compiler/00.common/data/async_init_registry_v1.spl 80%
+"""
+## Purpose and audience
+Registered async initialization (immutable-views plan section 3.3-3.4, phase
+P3): a per-(arena, generation, node, attr) once-only gate over the existing
+write-once `phase_cell_*_v1` cells. The registry adds only what the cells lack:
+a producer/declared type check, an epoch fence so a stale build attempt cannot
+publish, and the zero-slot guarantee for nodes with no pending field. Readers
+are compiler authors.
+Plan: doc/03_plan/compiler/data/immutable_views_async_init_revisions_2026-11-13.md
+(ASY-01, ASY-02, ASY-06, ASY-07, ASY-08). Category: Language.
+## Operator workflow
+bin/simple test test/01_unit/compiler/data/async_init_registry_v1_spec.spl
+## Compatibility and limitations
+Pure value state machine (lockless): every transition returns a new registry.
+The runtime binding (CAS publish, parked fibers) must agree with these outcomes
+and is not part of this spec. Values are identities, as in the phase cells.
+## Verification guidance and troubleshooting
+A RED on the stale-epoch case means a superseded build can publish into a newer
+snapshot; fix before anything else.
+"""
+# @manual_section: Async initialization registry
+use std.spec
+use compiler.common.data.node_lifecycle_contracts.*
+use compiler.common.data.async_init_registry_v1.*
+
+fn decl(reg: AsyncInitRegistryV1, node: i64, attr: text) -> AsyncInitRegistryV1:
+    async_init_declare_v1(reg, 1, 7, node, attr, "TypeId", "TypeId").unwrap()
+
+describe "ASY-01 and ASY-08 no async machinery without pending fields":
+    it "keeps zero slots when no producer is registered":
+        val reg = async_init_registry_new_v1(3)
+        expect(async_init_slot_count_v1(reg)).to_equal(0)
+
+    it "allocates a slot only for the node attr that registered a producer":
+        var reg = async_init_registry_new_v1(3)
+        reg = decl(reg, 42, "inferred_type")
+        expect(async_init_slot_count_v1(reg)).to_equal(1)
+
+describe "ASY-02 valid producer then explicit await":
+    it "waits while pending and reads the published value":
+        var reg = decl(async_init_registry_new_v1(3), 42, "inferred_type")
+        val key = async_init_key_v1(1, 7, 42, "inferred_type")
+        val before = async_init_await_v1(reg, "reader:1", key).unwrap()
+        expect(phase_await_outcome_code_v1(before.1)).to_equal(1)
+        val settled = async_init_publish_v1(before.0, key, 3, "type:i64").unwrap()
+        expect(settled.1.len()).to_equal(1)
+        val after = async_init_await_v1(settled.0, "reader:2", key).unwrap()
+        expect(phase_await_outcome_code_v1(after.1)).to_equal(2)
+        expect(phase_await_value_v1(after.1)).to_equal("type:i64")
+
+describe "ASY-06 mismatch, duplicate, failure and cancel":
+    it "rejects a producer whose type differs from the attribute type":
+        val r = async_init_declare_v1(async_init_registry_new_v1(3), 1, 7, 42, "inferred_type", "TypeId", "text")
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err().starts_with("E_ASYNC_INIT_TYPE")).to_equal(true)
+
+    it "rejects a second registration of the same attr":
+        val reg = decl(async_init_registry_new_v1(3), 42, "inferred_type")
+        val r = async_init_declare_v1(reg, 1, 7, 42, "inferred_type", "TypeId", "TypeId")
+        expect(r.is_err()).to_equal(true)
+
+    it "rejects a second completion":
+        val reg = decl(async_init_registry_new_v1(3), 42, "inferred_type")
+        val key = async_init_key_v1(1, 7, 42, "inferred_type")
+        val once = async_init_publish_v1(reg, key, 3, "type:i64").unwrap()
+        expect(async_init_publish_v1(once.0, key, 3, "type:other").is_err()).to_equal(true)
+
+    it "wakes every waiter with the failure":
+        var reg = decl(async_init_registry_new_v1(3), 42, "inferred_type")
+        val key = async_init_key_v1(1, 7, 42, "inferred_type")
+        reg = async_init_await_v1(reg, "reader:1", key).unwrap().0
+        reg = async_init_await_v1(reg, "reader:2", key).unwrap().0
+        val failed = async_init_fail_v1(reg, key, 3, "producer exploded").unwrap()
+        expect(failed.1.len()).to_equal(2)
+        val seen = async_init_await_v1(failed.0, "reader:3", key).unwrap()
+        expect(phase_await_outcome_code_v1(seen.1)).to_equal(3)
+
+    it "wakes every waiter on cancel and reports it as cancelled":
+        var reg = decl(async_init_registry_new_v1(3), 42, "inferred_type")
+        val key = async_init_key_v1(1, 7, 42, "inferred_type")
+        reg = async_init_await_v1(reg, "reader:1", key).unwrap().0
+        val cancelled = async_init_cancel_v1(reg, key, 3).unwrap()
+        expect(cancelled.1.len()).to_equal(1)
+        val seen = async_init_await_v1(cancelled.0, "reader:2", key).unwrap()
+        expect(phase_await_outcome_code_v1(seen.1)).to_equal(3)
+        expect(phase_await_value_v1(seen.1)).to_equal("cancelled")
+
+describe "ASY-07 cycle and stale attempt":
+    it "diagnoses a dependency cycle instead of hanging":
+        var reg = decl(decl(async_init_registry_new_v1(3), 1, "a"), 2, "b")
+        val ka = async_init_key_v1(1, 7, 1, "a")
+        val kb = async_init_key_v1(1, 7, 2, "b")
+        reg = async_init_await_v1(reg, ka, kb).unwrap().0
+        val r = async_init_await_v1(reg, kb, ka)
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err().starts_with("await cycle")).to_equal(true)
+
+    it "refuses a stale build epoch publish and leaves the cell pending":
+        val reg = decl(async_init_registry_new_v1(3), 42, "inferred_type")
+        val key = async_init_key_v1(1, 7, 42, "inferred_type")
+        val r = async_init_publish_v1(reg, key, 2, "type:stale")
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err().starts_with("E_ASYNC_INIT_STALE")).to_equal(true)
+        val still = async_init_await_v1(reg, "reader:1", key).unwrap()
+        expect(phase_await_outcome_code_v1(still.1)).to_equal(1)
+
+    it "refuses a stale epoch failure as well":
+        val reg = decl(async_init_registry_new_v1(3), 42, "inferred_type")
+        val key = async_init_key_v1(1, 7, 42, "inferred_type")
+        expect(async_init_fail_v1(reg, key, 4, "late").is_err()).to_equal(true)

@@ -115,6 +115,63 @@ mod tests {
         assert_eq!(registry.lookup("Point"), Some(id));
     }
 
+    /// Imported `unit Length: i64` aliases `Length` onto I64; a later
+    /// `struct Length` must get its own id, never rewrite I64 itself (that made
+    /// every i64 a self-referential struct and overflowed MIR to_string).
+    #[test]
+    fn update_named_over_builtin_alias_does_not_rewrite_builtin() {
+        let mut registry = TypeRegistry::new();
+        let builtin_before = registry.get(TypeId::I64).cloned();
+        registry.register_alias("Length".to_string(), TypeId::I64);
+
+        let struct_type = HirType::Struct {
+            name: "Length".to_string(),
+            fields: vec![("value".to_string(), TypeId::F64), ("unit".to_string(), TypeId::STRING)],
+            has_snapshot: false,
+            generic_params: vec![],
+            is_generic_template: false,
+            type_bindings: std::collections::HashMap::new(),
+        };
+        let id = registry.update_named("Length".to_string(), struct_type.clone());
+
+        assert_ne!(id, TypeId::I64);
+        assert_eq!(registry.get(TypeId::I64).cloned(), builtin_before);
+        assert_eq!(registry.get(id), Some(&struct_type));
+        assert_eq!(registry.lookup("Length"), Some(id));
+    }
+
+    #[test]
+    fn optional_provenance_survives_clone_and_alias_but_not_replacement() {
+        let mut registry = TypeRegistry::new();
+        let optional = registry.register_optional(TypeId::STRING);
+        registry.register_alias("MaybeText".to_string(), optional);
+
+        let cloned = registry.clone();
+        assert_eq!(cloned.lookup("MaybeText"), Some(optional));
+        assert_eq!(cloned.optional_inner(optional), Some(TypeId::STRING));
+
+        registry.update_named(
+            "MaybeText".to_string(),
+            HirType::Pointer {
+                kind: PointerKind::Shared,
+                capability: simple_parser::ast::ReferenceCapability::Shared,
+                inner: TypeId::STRING,
+            },
+        );
+        assert_eq!(registry.optional_inner(optional), None);
+    }
+
+    #[test]
+    fn raw_shared_pointer_does_not_gain_optional_provenance() {
+        let mut registry = TypeRegistry::new();
+        let raw_pointer = registry.register(HirType::Pointer {
+            kind: PointerKind::Shared,
+            capability: simple_parser::ast::ReferenceCapability::Shared,
+            inner: TypeId::STRING,
+        });
+        assert_eq!(registry.optional_inner(raw_pointer), None);
+    }
+
     #[test]
     fn test_hir_expr_integer() {
         let expr = HirExpr {
@@ -207,6 +264,8 @@ mod tests {
             is_ghost: false,
             is_sync: false,
             has_suspension: false,
+            generic_params: vec![],
+            generic_bounds: vec![],
         };
 
         assert_eq!(func.name, "add");

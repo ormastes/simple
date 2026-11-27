@@ -5,6 +5,27 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 ## Status
+FIXED (`3e932aabea0`, 2026-11-20; verified 2026-11-24 at release/1.0.0 tip `b99b512ada8`; startup latency re-measured 2026-11-26 in BF-5 lane):
+`src/app/mcp/main.spl` has no module-scope `use .main_dispatch`; `tools/call`
+reaches it through the `mcp_lazy_dispatch_tool` bridge (`main.spl:482-483`,
+`main_lazy_dispatch.spl`).
+
+## Verification 2026-11-26 (BF-5 lane, `origin/release/1.0.0`)
+
+Measured under `SIMPLE_EXECUTION_MODE=interpreter` (`SIMPLE_LOG=error`, `RUST_LOG=error`, `SIMPLE_MCP_TOOL_SET=all`) with `wa3_shared_bin\simple.exe` (`89b32c2e80d`) on Windows:
+
+| run | elapsed | result |
+|---|---|---|
+| trivial `fn main(): print "hi"` | 0.25s | exit 0 |
+| `src/app/mcp/main.spl --probe` | 1.51s (1509ms) | exit 0 (`tools=184`) |
+| `src/app/mcp/main.spl` framed `initialize` + UTF-8 `ping`, exit on EOF | 1.74s (1743ms) | exit 0 (2 valid framed replies) |
+
+Targeted regression specs (`--mode=interpreter`):
+- `test/01_unit/app/mcp/mcp_startup_lazy_dispatch_spec.spl`: `5/5` passed (`outcome=OK`)
+- `test/01_unit/app/mcp/mcp_startup_closure_isolation_prevention_spec.spl`: `4/4` passed (`outcome=OK`)
+
+Historical investigation text follows:
+
 OPEN — breakdown below, fix identified but not yet applied (see "Why not
 applied here").
 

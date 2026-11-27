@@ -13,7 +13,9 @@
 
 use os.kernel.log.klog_api.{log_init, log_info, log_warn, log_error, log_raw, log_raw_println}
 use os.kernel.errno.{EACCES, ENOSYS, ECONNREFUSED, ENOTCONN, EAGAIN, EMFILE, EADDRINUSE}
+use os.kernel.net.socket_ipc_transport.{socket_ipc_send_bytes, socket_ipc_recv_bytes}
 use os.kernel.fd_table.{fd_alloc, fd_set, fd_close, fd_is_valid, fd_get_status_flags, fd_get_type, fd_get_backend_handle, fd_update_ready}
+use os.kernel.fd_table.{FD_NET_PORT_NONE, fd_set_net_bound_port, fd_get_net_bound_port, fd_set_net_server_port, fd_get_net_server_port, fd_set_net_bound_endpoint, fd_get_net_bound_endpoint}
 use os.ai_cli_js_node_contract.{AiCliManifest, ai_cli_socket_network_decision}
 # Well-known netstack service IPC port
 val _NET_PORT: u64 = 2
@@ -36,8 +38,6 @@ val _POLLOUT: i16 = 4
 val _POLLERR: i16 = 8
 
 var g_ai_cli_socket_manifest: AiCliManifest? = nil
-var g_ai_cli_socket_bound_fds: [i32] = []
-var g_ai_cli_socket_bound_endpoints: [text] = []
 
 extern fn unsafe_addr_of(ref: any) -> u64
 use os.kernel.boot.mmio.{mmio_write8, mmio_read8}
@@ -46,8 +46,10 @@ use os.kernel.boot.mmio.{mmio_write8, mmio_read8}
 # (inline asm in syscall_raw.spl not supported by Cranelift)
 extern fn rt_ipc_send(port: u64, method: u64, flags: u64, buf_addr: u64, buf_len: u64) -> i64
 extern fn rt_ipc_recv(port: u64, buf_addr: u64, max_len: u64) -> i64
-extern fn rt_ipc_send_bytes(port: u64, method: u64, data: [u8]) -> i64
-extern fn rt_ipc_recv_bytes(port: u64, max_len: i64) -> [u8]
+# Byte-array IPC goes through the architecture-neutral transport wrappers
+# (os.kernel.net.socket_ipc_transport): the raw rt_ipc_*_bytes runtime
+# bridge is x86_64-only; other targets fail closed with ENOSYS instead of
+# acquiring an unresolved symbol at link time.
 
 # ============================================================================
 # Socket Address
@@ -70,13 +72,9 @@ fn sockaddr_any(port: u16) -> SockaddrIn:
 
 fn set_ai_cli_socket_manifest_for_test(manifest: AiCliManifest):
     g_ai_cli_socket_manifest = manifest
-    g_ai_cli_socket_bound_fds = []
-    g_ai_cli_socket_bound_endpoints = []
 
 fn clear_ai_cli_socket_manifest_for_test():
     g_ai_cli_socket_manifest = nil
-    g_ai_cli_socket_bound_fds = []
-    g_ai_cli_socket_bound_endpoints = []
 
 # ============================================================================
 # Socket Operations
@@ -138,6 +136,7 @@ fn posix_bind(fd: i32, addr: SockaddrIn) -> i64:
     val reply = _net_ipc_request(NET_BIND, payload)
     if reply.status == 0:
         _record_bound_endpoint(fd, endpoint)
+        _record_bound_port(fd, addr.port)
     reply.status as i64
 
 fn posix_listen(fd: i32, backlog: i32) -> i64:
@@ -207,6 +206,9 @@ fn posix_accept(fd: i32) -> i64:
     if set_result < 0:
         _net_close_remote(reply.value_i32)
         return set_result as i64
+    match posix_bound_port_for_fd(fd):
+        Some(port): _record_server_io_port(accepted_fd, port)
+        nil: pass
     accepted_fd as i64
 
 fn posix_send(fd: i32, data_addr: u64, data_len: u64, flags: i32) -> i64:
@@ -263,6 +265,33 @@ fn posix_close_socket(fd: i32) -> i64:
         _net_close_remote(net_fd)
     fd_close(fd) as i64
 
+# Port provenance for the portable syscall owner's exact authority checks
+# lives on the fd table's open-file description, not in a side table keyed by
+# descriptor number: dup/dup2 share it with the same socket, and every release
+# path (fd_close, fd_set over a slot, dup2, close-on-exec, process exit)
+# resets it, so a reused descriptor number never inherits another socket's
+# port. A port-0 (ephemeral) bind records port 0, so listen on it requires
+# exactly NetListen(port: 0).
+
+fn posix_bound_port_for_fd(fd: i32) -> u16?:
+    """Local port a descriptor was successfully bound to, if any."""
+    _port_or_none(fd_get_net_bound_port(fd))
+
+fn posix_server_port_for_fd(fd: i32) -> u16?:
+    """Listener port an accepted descriptor was produced by, if any."""
+    _port_or_none(fd_get_net_server_port(fd))
+
+fn _port_or_none(raw: u32) -> u16?:
+    if raw == FD_NET_PORT_NONE:
+        return nil
+    Some(raw as u16)
+
+fn _record_bound_port(fd: i32, port: u16):
+    fd_set_net_bound_port(fd, port)
+
+fn _record_server_io_port(fd: i32, port: u16):
+    fd_set_net_server_port(fd, port)
+
 fn _copy_user_bytes(data_addr: u64, data_len: u64) -> [u8]:
     var data: [u8] = []
     var i: u64 = 0
@@ -313,23 +342,16 @@ fn _ipv4_addr_text(addr: u32) -> text:
     val d = ((addr >> 24) & 0xFF) as u32
     "{a}.{b}.{c}.{d}"
 
+# The bound endpoint lives on the fd table's open-file description (see the
+# port provenance note above): dup shares it, every release path resets it.
 fn _record_bound_endpoint(fd: i32, endpoint: text):
-    var i = 0
-    while i < g_ai_cli_socket_bound_fds.len():
-        if g_ai_cli_socket_bound_fds[i] == fd:
-            g_ai_cli_socket_bound_endpoints[i] = endpoint
-            return
-        i = i + 1
-    g_ai_cli_socket_bound_fds.push(fd)
-    g_ai_cli_socket_bound_endpoints.push(endpoint)
+    fd_set_net_bound_endpoint(fd, endpoint)
 
 fn _bound_endpoint_for_fd(fd: i32) -> text?:
-    var i = 0
-    while i < g_ai_cli_socket_bound_fds.len():
-        if g_ai_cli_socket_bound_fds[i] == fd:
-            return Some(g_ai_cli_socket_bound_endpoints[i])
-        i = i + 1
-    nil
+    val endpoint = fd_get_net_bound_endpoint(fd)
+    if endpoint == "":
+        return nil
+    Some(endpoint)
 
 fn _array_data_ptr(data: [u8]) -> u64:
     val hdr = unsafe_addr_of(data)
@@ -337,12 +359,12 @@ fn _array_data_ptr(data: [u8]) -> u64:
 
 fn _net_ipc_request(method: u32, payload: [u8]) -> _NetIpcReply:
     """Send IPC request to netstack and receive i32 reply."""
-    val send_result = rt_ipc_send_bytes(_NET_PORT, method as u64, payload)
+    val send_result = socket_ipc_send_bytes(_NET_PORT, method as u64, payload)
     if send_result < 0:
         return _NetIpcReply(status: -5, value_i32: 0)
 
     # Receive reply: status(i32) | value(i32)
-    val reply_buf = rt_ipc_recv_bytes(_NET_PORT, 64)
+    val reply_buf = socket_ipc_recv_bytes(_NET_PORT, 64)
     if reply_buf.len() < 4:
         return _NetIpcReply(status: -5, value_i32: 0)
 
@@ -352,12 +374,12 @@ fn _net_ipc_request(method: u32, payload: [u8]) -> _NetIpcReply:
 
 fn _net_ipc_request_bytes(method: u32, payload: [u8]) -> _NetIpcReplyBytes:
     """Send IPC request to netstack and receive byte array reply."""
-    val send_result = rt_ipc_send_bytes(_NET_PORT, method as u64, payload)
+    val send_result = socket_ipc_send_bytes(_NET_PORT, method as u64, payload)
     if send_result < 0:
         return _NetIpcReplyBytes(status: -5, data: [])
 
     # Receive reply: status(i32) | data(bytes)
-    val reply_buf = rt_ipc_recv_bytes(_NET_PORT, 4096)
+    val reply_buf = socket_ipc_recv_bytes(_NET_PORT, 4096)
     if reply_buf.len() < 4:
         return _NetIpcReplyBytes(status: -5, data: [])
 
@@ -379,7 +401,7 @@ fn _net_close_remote(net_fd: i32):
     """Send NET_CLOSE to netstack for a netstack-side fd."""
     var payload: [u8] = []
     _sock_push_i32(payload, net_fd)
-    rt_ipc_send_bytes(_NET_PORT, NET_CLOSE as u64, payload)
+    socket_ipc_send_bytes(_NET_PORT, NET_CLOSE as u64, payload)
     # Best-effort close: ignore IPC errors
 
 # ============================================================================

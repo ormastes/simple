@@ -1,0 +1,142 @@
+"""
+## Purpose and audience
+Purpose: Pin a BLURRED CSS `text-shadow` (blur > 0) on the Draw IR text lane
+(cpu_simd and vulkan) against Chrome 159. Chrome blurs the run's coverage mask
+with sigma = blur / 2 (Skia's triple box for sigma >= 2), tints it with the
+shadow colour and paints it under the text. Before this was painted, a
+bare-text page with a blurred shadow kept the raster lane, which drew the
+shadow SHARP (bbox = the text's own 41,35-220,56).
+Audience: web renderer text maintainers.
+
+Chrome oracle (Chrome for Testing 159, `--headless=new --disable-gpu
+--force-device-scale-factor=1 --window-size=400,300`, page below, rows 0..119).
+"dsum" sums 765 - r - g - b over the region; "ming" is the darkest green
+channel; "red" counts pixels whose red exceeds green and blue by more than 100.
+
+| page | text-shadow                          | Chrome bbox      | dsum      | ming |
+|------|--------------------------------------|------------------|-----------|------|
+| A    | `0 0 4px #000`, `color:transparent`  | 36,30 - 225,61   | 741,681   | 123  |
+| B    | `2px 2px 4px #000`                   | 38,32 - 227,63   | 1,260,584 | 0    |
+| C    | `0 0 8px red`                        | 31,25 - 230,66   | 1,101,194 | 0    |
+| D    | `0 0 8px rgba(0,0,255,.5)`, transp.  | 31,25 - 230,66   | 256,632   | 206  |
+
+Halo profiles (green channel), row 45, x 34..48:
+A Chrome `254 250 240 221 196 169 148 139 144 160 178 193 200` from x 36.
+D Chrome `246 242 238 234 230 226 224 221 220 219 218 218 218` from x 36.
+Engine 2026-11-20: A within 3, D within 1 per pixel; dsum 1.6-6.3 % above
+Chrome (8-bit rounding of the blur tails), so the spec allows 8 %.
+"""
+
+"""
+Traceability: REQ-WEB-TEXT-SHADOW-002 — Draw IR text lane paints blurred text-shadow like Chrome 159.
+"""
+# @tag: unit, browser_engine, text, chrome159
+# @cover src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl 1%
+use std.spec.*
+use std.io_runtime.{file_exists}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels_with_resolved_engine2d_backend}
+
+val SANS: text = "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
+val W: i32 = 400
+val H: i32 = 120
+val HEAD: text = "<!doctype html><html><body style=\"margin:0;background:#fff;font:24px Liberation Sans;color:#000\"><div style=\"position:absolute;left:40px;top:30px;"
+val TAIL: text = "\">Hamburgefonstiv</div></body></html>"
+val PAGE_A: text = "color:transparent;text-shadow:0 0 4px #000"
+val PAGE_B: text = "text-shadow:2px 2px 4px #000"
+val PAGE_C: text = "text-shadow:0 0 8px red"
+val PAGE_D: text = "color:transparent;text-shadow:0 0 8px rgba(0,0,255,.5)"
+val HALO_A: [i32] = [254, 250, 240, 221, 196, 169, 148, 139, 144, 160, 178, 193, 200]
+val HALO_D: [i32] = [246, 242, 238, 234, 230, 226, 224, 221, 220, 219, 218, 218, 218]
+
+fn _chan(px: u32, shift: u32) -> i32:
+    ((px >> shift) & 0xFFu32).to_i32()
+
+fn _abs(v: i64) -> i64:
+    if v < 0: 0 - v else: v
+
+fn _render(style: text, lane: text) -> [u32]:
+    simple_web_render_html_to_pixels_with_resolved_engine2d_backend(HEAD + style + TAIL, W, H, lane)
+
+# [x0, y0, x1, y1, dsum, ming, red] of one rendered page.
+fn _measure(px: [u32]) -> [i64]:
+    var x0: i64 = 9999
+    var y0: i64 = 9999
+    var x1: i64 = -1
+    var y1: i64 = -1
+    var dsum: i64 = 0
+    var ming: i64 = 255
+    var red: i64 = 0
+    var i: i64 = 0
+    while i < px.len():
+        val p = px[i]
+        val r = _chan(p, 16u32)
+        val g = _chan(p, 8u32)
+        val b = _chan(p, 0u32)
+        val d = 765 - r - g - b
+        if d > 0:
+            val x = i % (W as i64)
+            val y = i / (W as i64)
+            if x < x0: x0 = x
+            if y < y0: y0 = y
+            if x > x1: x1 = x
+            if y > y1: y1 = y
+            dsum = dsum + (d as i64)
+            if (g as i64) < ming: ming = g as i64
+        if r - g > 100 and r - b > 100: red = red + 1
+        i = i + 1
+    [x0, y0, x1, y1, dsum, ming, red]
+
+fn _bbox_near(m: [i64], want: [i64]) -> bool:
+    _abs(m[0] - want[0]) <= 1 and _abs(m[1] - want[1]) <= 1 and _abs(m[2] - want[2]) <= 1 and _abs(m[3] - want[3]) <= 1
+
+fn _dsum_near(m: [i64], want: i64) -> bool:
+    _abs(m[4] - want) * 100 <= want * 8
+
+# Largest per-pixel gap between row 45, x 36.. and a Chrome halo profile.
+fn _halo_gap(px: [u32], want: [i32]) -> i32:
+    var worst = 0
+    var k = 0
+    while k < want.len():
+        val g = _chan(px[45 * W + 36 + k], 8u32)
+        val gap = if g > want[k]: g - want[k] else: want[k] - g
+        if gap > worst: worst = gap
+        k = k + 1
+    worst
+
+fn _check_lane(lane: text):
+    val a = _render(PAGE_A, lane)
+    val ma = _measure(a)
+    step("A: Chrome bbox 36,30-225,61, dsum 741681, ming 123; halo row 45 within 6")
+    expect(_bbox_near(ma, [36, 30, 225, 61])).to_be(true)
+    expect(_dsum_near(ma, 741681)).to_be(true)
+    expect(_abs(ma[5] - 123) <= 6).to_be(true)
+    expect(_halo_gap(a, HALO_A) <= 6).to_be(true)
+    val mb = _measure(_render(PAGE_B, lane))
+    step("B: Chrome bbox 38,32-227,63, dsum 1260584")
+    expect(_bbox_near(mb, [38, 32, 227, 63])).to_be(true)
+    expect(_dsum_near(mb, 1260584)).to_be(true)
+    val mc = _measure(_render(PAGE_C, lane))
+    step("C: Chrome bbox 31,25-230,66, dsum 1101194, red halo present (163)")
+    expect(_bbox_near(mc, [31, 25, 230, 66])).to_be(true)
+    expect(_dsum_near(mc, 1101194)).to_be(true)
+    expect(mc[6] > 100).to_be(true)
+    val d = _render(PAGE_D, lane)
+    val md = _measure(d)
+    step("D: Chrome bbox 31,25-230,66, dsum 256632, ming 206; halo row 45 within 4")
+    expect(_bbox_near(md, [31, 25, 230, 66])).to_be(true)
+    expect(_dsum_near(md, 256632)).to_be(true)
+    expect(_abs(md[5] - 206) <= 6).to_be(true)
+    expect(_halo_gap(d, HALO_D) <= 4).to_be(true)
+
+describe "Blurred text-shadow against Chrome 159":
+    it "AC-1: cpu_simd paints the blurred halo like Chrome":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        _check_lane("cpu_simd")
+
+    it "AC-2: vulkan paints the blurred halo like Chrome":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        _check_lane("vulkan")

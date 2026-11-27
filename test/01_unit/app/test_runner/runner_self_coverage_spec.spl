@@ -1,0 +1,52 @@
+# @cover src/lib/nogc_sync_mut/test_runner/runner_self_coverage.spl
+# @cover src/lib/nogc_sync_mut/test_runner/native_compile_contract.spl
+# @tag: unit, test_runner, coverage
+use std.spec.{describe, it, expect}
+use std.test_runner.runner_self_coverage.{runner_self_coverage_start, runner_self_coverage_decision, runner_self_coverage_sdn}
+use std.test_runner.native_compile_contract.{native_test_request_error}
+use std.test_runner.test_runner_coverage.{parse_coverage_state_sdn}
+
+describe "scoped runner admission self coverage":
+    it "retains six unexecuted declarations without claiming whole runner coverage":
+        runner_self_coverage_start()
+        val report = runner_self_coverage_sdn()
+        val data = parse_coverage_state_sdn(report)
+        expect(data.total_decisions).to_equal(6)
+        expect(data.total_decisions_covered).to_equal(0)
+        expect(data.total_conditions).to_equal(0)
+        expect(report).to_contain("whole_runner_coverage: false")
+        expect(report).to_contain("automatic_source_coverage: false")
+
+    it "preserves results and ignores out of range site identifiers":
+        runner_self_coverage_start()
+        expect(runner_self_coverage_decision(0, true)).to_equal(true)
+        expect(runner_self_coverage_decision(7, false)).to_equal(false)
+        val data = parse_coverage_state_sdn(runner_self_coverage_sdn())
+        expect(data.total_decisions).to_equal(6)
+        expect(data.total_decisions_covered).to_equal(0)
+
+    it "records every production admission decision without changing errors":
+        runner_self_coverage_start()
+        expect(native_test_request_error("llvm", false)).to_equal("")
+        expect(native_test_request_error("llvm", false, false, [], "bad")).to_start_with("LIBRARY_MODE_INVALID")
+        expect(native_test_request_error("llvm", false, false, [""])).to_start_with("invalid value for --native-source")
+        expect(native_test_request_error("", false, false, ["."])).to_equal("Native source roots require an explicit native backend")
+        expect(native_test_request_error("llvm", false, true)).to_equal("Explicit native backend and --safe cannot be combined")
+        expect(native_test_request_error("bad", false)).to_equal("Unsupported native backend: bad")
+        expect(native_test_request_error("cranelift", true)).to_equal("Native Cranelift coverage is not qualified; refusing LLVM fallback")
+        val report = runner_self_coverage_sdn()
+        val data = parse_coverage_state_sdn(report)
+        expect(data.total_decisions).to_equal(6)
+        expect(data.total_decisions_covered).to_equal(6)
+        expect(data.total_conditions).to_equal(0)
+        expect(report).to_contain(", 70, 4, 1, 3")
+
+    it "resets observations for the next measurement":
+        runner_self_coverage_start()
+        expect(runner_self_coverage_decision(1, true)).to_equal(true)
+        val observed = parse_coverage_state_sdn(runner_self_coverage_sdn())
+        expect(observed.total_decisions_covered).to_equal(1)
+        runner_self_coverage_start()
+        val reset = parse_coverage_state_sdn(runner_self_coverage_sdn())
+        expect(reset.total_decisions).to_equal(6)
+        expect(reset.total_decisions_covered).to_equal(0)

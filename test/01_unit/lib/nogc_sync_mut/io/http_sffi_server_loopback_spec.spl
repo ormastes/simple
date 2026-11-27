@@ -1,0 +1,32 @@
+# Pure-Simple http_sffi server / upload / client-header backing, driven over a
+# real loopback socket: server fixture in one process, client fixture in another.
+# Native lane: run the same probe with `native` and HTTP_SFFI_SERVER_EXE /
+# HTTP_SFFI_CLIENT_EXE set to native-built fixtures.
+use std.spec.*
+use std.spec.step
+use std.process.{run}
+
+val PROBE = "test/01_unit/lib/nogc_sync_mut/io/fixtures/http_sffi_loopback_probe.shs"
+val probe = run("bash", [PROBE, "interp"])
+
+describe "http_sffi loopback server":
+    """
+    As a Simple program I can create an HTTP server through http_sffi, register
+    routes and a static directory, and reach it from an HTTP client.
+    """
+    it "serves a registered route body":
+        step("Start the server fixture and GET /hello")
+        expect(probe.stdout).to_contain("hello: status=200 body=hello-from-simple")
+
+    it "serves a file from the static mount and refuses an absent one":
+        expect(probe.stdout).to_contain("static: status=200 body=static-page-content")
+        expect(probe.stdout).not_to_contain("missing: status=200")
+
+    it "puts a header recorded by rt_http_client_set_header on the wire":
+        expect(probe.stdout).to_contain("set_header: true")
+        expect(probe.stdout).to_contain("X-Lane-Probe: probe-42")
+
+    it "uploads the file as multipart form data the server receives":
+        expect(probe.stdout).to_contain("upload: status=200")
+        expect(probe.stdout).to_contain("name=\"attachment\"; filename=\"note.txt\"")
+        expect(probe.stdout).to_contain("upload-payload-xyz")

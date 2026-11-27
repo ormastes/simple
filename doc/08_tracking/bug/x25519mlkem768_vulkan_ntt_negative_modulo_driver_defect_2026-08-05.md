@@ -1,8 +1,10 @@
 # X25519MLKEM768 Vulkan NTT coefficient mismatch — root-caused: negative-operand `%` on the NVIDIA Vulkan compute path
-## Open 2026-09-16 — needs owner triage
+## Closed 2026-11-25 — acceptance met on the original NVIDIA host 2026-08-05 (see triage note at end)
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
+(That pass missed the body's own "Acceptance condition ... — met,
+2026-08-05" section; superseded by the 2026-11-25 triage note below.)
 
 Date: 2026-08-05
 Worktree: `/home/ormastes/dev/pub/simple/.claude/worktrees/x25519-paired-timing`
@@ -190,3 +192,24 @@ forward and inverse.
 - `build/evidence/x25519mlkem768/vulkan/x25519mlkem768_ntt_forward.spv`,
   `..._inverse.spv` (freshly built, gitignored, not committed)
 
+
+## 2026-11-25 triage (release/1.0.0, worktree p2w6-al) — closing; hardware-only evidence
+
+The 2026-09-16 normalization header ("needs owner triage") overlooked that
+this doc's own body already records the defect as root-caused and its
+acceptance condition as met: "Both physical NVIDIA devices must report
+compile, submit, fence completion, device-origin readback, and
+all-coefficient oracle equality — met, 2026-08-05, `NVIDIA TITAN RTX` and
+`NVIDIA RTX A6000`, stages 1–7, forward and inverse, 28/28 PASS." The pinned
+`.comp` sources compile bit-for-bit to the pinned SPIR-V SHA-256 hashes and
+the `modq` guard avoids the negative-operand `OpSMod` defect.
+
+Re-verification on this host is impossible: this is a Windows machine with
+no NVIDIA Vulkan device, and the check script
+(`scripts/check/check-x25519mlkem768-vulkan-ntt.shs`) requires the two
+physical GPUs. The only residual item — the unresolved discrepancy about
+what the 2026-08-03 native rerun actually executed — is historical and can
+only be adjudicated on the original Linux/NVIDIA host; it does not block
+the acceptance condition, which was met with fresh evidence on 2026-08-05.
+Closing as RESOLVED-BY-EVIDENCE (hardware-lane); re-open only with a fresh
+dated repro on an NVIDIA Vulkan host.

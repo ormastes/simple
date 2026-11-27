@@ -1,0 +1,55 @@
+"""Strict bounded SDN persistence for build retention owner records."""
+use std.scv.build_retention_v1.*
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.strict_v1.{sdn_parse_strict_bytes_v1}
+use std.common.sdn.strict_types_v1.{SdnStrictLimitsV1}
+use std.scv.scv_config_fields_v1.{scv_config_dict_v1, scv_config_text_v1,
+    scv_config_int_v1, scv_config_bool_v1}
+
+fn retention_array_v1(value: SdnValue) -> Result<[SdnValue], text>:
+    match value:
+        case Array(items):
+            if items.len() > 4096: return Err("retention_array_budget")
+            Ok(items)
+        case _: Err("retention_array_type")
+
+fn build_retention_validation_limits_v1() -> BuildRetentionLimitsV1:
+    BuildRetentionLimitsV1(max_nodes: 4096, max_edges: 65536, max_work: 16777216,
+        max_bytes: 9223372036854775807, max_retained: 4096, max_remove: 0)
+
+fn build_retention_parse_v1(bytes: [u8]) -> Result<BuildRetentionStateV1, text>:
+    val limits = SdnStrictLimitsV1(max_source_bytes: 8388608, max_depth: 8,
+        max_nodes: 262144, max_rows: 65536, max_cells: 262144, max_columns: 16)
+    val document = match sdn_parse_strict_bytes_v1(bytes, limits):
+        case Ok(value): value
+        case Err(issue): return Err("retention_sdn: " + issue.code)
+    val fields = scv_config_dict_v1(document.value, "retention", ["version", "generation", "nodes", "pins", "leases"])?
+    scv_config_int_v1(fields["version"], "version", 1, 1)?
+    val generation = scv_config_int_v1(fields["generation"], "generation", 1, 9223372036854775807)?
+    var nodes: [BuildRetentionNodeV1] = []
+    for item in retention_array_v1(fields["nodes"])?:
+        val node = scv_config_dict_v1(item, "node", ["namespace", "id", "dependencies", "authoritative", "rebuildable", "bytes", "last_used"])?
+        var dependencies: [text] = []
+        for dependency in retention_array_v1(node["dependencies"])?:
+            dependencies.push(scv_config_text_v1(dependency, "dependency")?)
+        nodes.push(BuildRetentionNodeV1(namespace: scv_config_text_v1(node["namespace"], "namespace")?,
+            id: scv_config_text_v1(node["id"], "id")?, dependencies: dependencies,
+            authoritative: scv_config_bool_v1(node["authoritative"], "authoritative")?,
+            rebuildable: scv_config_bool_v1(node["rebuildable"], "rebuildable")?,
+            bytes: scv_config_int_v1(node["bytes"], "bytes", 0, 9223372036854775807)?,
+            last_used: scv_config_int_v1(node["last_used"], "last_used", 0, 9223372036854775807)?))
+    var pins: [BuildRetentionPinV1] = []
+    for item in retention_array_v1(fields["pins"])?:
+        val pin = scv_config_dict_v1(item, "pin", ["ref", "root"])?
+        pins.push(BuildRetentionPinV1(ref: scv_config_text_v1(pin["ref"], "ref")?, root: scv_config_text_v1(pin["root"], "root")?))
+    var leases: [BuildRetentionLeaseV1] = []
+    for item in retention_array_v1(fields["leases"])?:
+        val lease = scv_config_dict_v1(item, "lease", ["owner", "root", "expires_at"])?
+        leases.push(BuildRetentionLeaseV1(owner: scv_config_text_v1(lease["owner"], "owner")?,
+            root: scv_config_text_v1(lease["root"], "root")?,
+            expires_at: scv_config_int_v1(lease["expires_at"], "expires_at", 0, 9223372036854775807)?))
+    val state = BuildRetentionStateV1(generation: generation, nodes: nodes, pins: pins, leases: leases)
+    build_retention_plan_v1(state, build_retention_validation_limits_v1(), 0)?
+    Ok(state)
+
+export build_retention_parse_v1, build_retention_validation_limits_v1

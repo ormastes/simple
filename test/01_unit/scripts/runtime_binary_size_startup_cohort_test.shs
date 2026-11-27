@@ -3,11 +3,80 @@ set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
 scratch=$(mktemp -d "${TMPDIR:-/tmp}/bs7-test.XXXXXX"); trap 'rm -rf "$scratch"' EXIT HUP INT TERM
 fail() { echo "BS7 cohort test: FAIL — $*" >&2; exit 1; }
-reject() { if "$@" >/dev/null 2>&1; then fail "mutation accepted"; fi; }
+reject() { if "$@" >"$scratch/rejection.log" 2>&1; then cat "$scratch/rejection.log" >&2; fail "mutation accepted: $* (last file: ${file:-none})"; fi; }
 hash_file() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1"; else shasum -a 256 "$1"; fi | awk '{print $1}'; }
 PYTHON=$(command -v python3) || fail missing-python3
 
-printf 'stage=4\ncompiler_kind=pure-simple-stage4\n' >"$scratch/stage4.env"
+# Contract-only synthetic protocol. The canonical Stage4 verifier is copied
+# UNMODIFIED; only its deep Stage3 dependency is stubbed in this private facade.
+# No production flag/callback bypass exists and these bytes are never executed
+# or published as compiler/bootstrap/native qualification.
+protocol="$scratch/protocol"
+mkdir -p "$protocol/scripts/check"
+cp -R "$ROOT/scripts/check/lib" "$protocol/scripts/check/lib"
+for script in produce-runtime-binary-size-startup-cohort.shs check-runtime-binary-size-startup-cohort.shs check-runtime-binary-size-matched-link.py; do
+  cp "$ROOT/scripts/check/$script" "$protocol/scripts/check/$script"
+done
+cat >>"$protocol/scripts/check/lib/bootstrap-stage3-provenance.shs" <<'STAGE3_TEST_STUB'
+bootstrap_stage3_verify_manifest() {
+  [ "$#" -eq 6 ] && [ "$1" = "$2" ] && [ "$4" = "$5" ] &&
+    [ "$6" = "$1.authority-map.env" ] || return 1
+  printf 'stage3 dependency called\n' >>"$BS7_TEST_STAGE3_CALLS"
+  [ ! -e "$BS7_TEST_STAGE3_REFUSE" ]
+}
+STAGE3_TEST_STUB
+BS7_TEST_STAGE3_CALLS="$scratch/stage3-calls"
+BS7_TEST_STAGE3_REFUSE="$scratch/stage3-refuse"
+export BS7_TEST_STAGE3_CALLS BS7_TEST_STAGE3_REFUSE
+source_root="$scratch/source"
+mkdir -p "$source_root/scripts/bootstrap" "$source_root/scripts/check/lib" \
+  "$source_root/src/compiler" "$source_root/src/lib" "$source_root/src/app" \
+  "$source_root/src/runtime" "$source_root/examples/10_tooling" \
+  "$scratch/output/stage3/contract" "$scratch/output/full/contract" "$scratch/output/logs/contract"
+printf 'synthetic bootstrap source; never executed\n' >"$source_root/scripts/bootstrap/bootstrap-from-scratch.sh"
+cp "$ROOT/scripts/check/lib/stage4-candidate-provenance.shs" "$source_root/scripts/check/lib/stage4-candidate-provenance.shs"
+printf 'synthetic source\n' >"$source_root/src/compiler/fixture.spl"
+compiler="$scratch/output/full/contract/simple"
+printf 'synthetic compiler bytes; never executed\n' >"$compiler"; chmod 700 "$compiler"
+parent="$scratch/output/stage3/contract/simple"
+printf 'synthetic parent bytes\n' >"$parent"
+stage3="$scratch/output/stage3/contract/provenance.env"
+printf 'platform=contract\noutput_path=%s\n' "$parent" >"$stage3"
+build="$scratch/output/logs/contract/stage4-native-build.log"
+smoke="$scratch/output/logs/contract/stage4-essential-tools-smoke.log"
+printf 'cwd: %s\ncommand: bootstrap_native_build_main %s %s\n' "$source_root" "$parent" "$compiler" >"$build"
+printf 'cwd: %s\ncommand: run_timeout_kill 180 env SIMPLE_BINARY=%s sh scripts/check/check-bootstrap-essential-tools-smoke.shs\n' "$source_root" "$compiler" >"$smoke"
+printf '%s\n' essential_tools_pure_simple_identity=true essential_test_runner_smoke=true essential_lint_smoke=true essential_duplicate_checker_smoke=true bootstrap_essential_tools_smoke=true >>"$smoke"
+BOOTSTRAP_STAGE3_FACADE_PATH="$protocol/scripts/check/lib/bootstrap-stage3-provenance.shs"
+STAGE4_PROVENANCE_HELPER_PATH="$protocol/scripts/check/lib/stage4-candidate-provenance.shs"
+. "$BOOTSTRAP_STAGE3_FACADE_PATH"
+. "$STAGE4_PROVENANCE_HELPER_PATH"
+stage4="$compiler.provenance.env"
+{
+  echo schema=simple-bootstrap-stage4-provenance-v1
+  echo status=pass
+  echo artifact_kind=pure-simple-full-cli
+  echo output_path="$compiler"
+  echo output_sha256="$(hash_file "$compiler")"
+  echo source_revision_kind=content-sha256
+  echo source_revision="$(stage4_source_revision "$source_root")"
+  echo source_roots=src/compiler:src/lib:src/app:src/runtime:examples/10_tooling
+  echo producer_path="$source_root/scripts/bootstrap/bootstrap-from-scratch.sh"
+  echo producer_sha256="$(hash_file "$source_root/scripts/bootstrap/bootstrap-from-scratch.sh")"
+  echo provenance_helper_path="$source_root/scripts/check/lib/stage4-candidate-provenance.shs"
+  echo provenance_helper_sha256="$(hash_file "$source_root/scripts/check/lib/stage4-candidate-provenance.shs")"
+  echo parent_compiler_path="$parent"
+  echo parent_compiler_sha256="$(hash_file "$parent")"
+  echo stage3_provenance_path="$stage3"
+  echo stage3_provenance_sha256="$(hash_file "$stage3")"
+  echo build_log_path="$build"
+  echo build_log_sha256="$(hash_file "$build")"
+  echo essential_tools_log_path="$smoke"
+  echo essential_tools_log_sha256="$(hash_file "$smoke")"
+  echo completed_gate=stage4-essential-tools-smoke
+} >"$stage4"
+cp "$stage4" "$scratch/stage4.good"
+
 printf 'Hello World\n' >"$scratch/expected-stdout.txt"
 : >"$scratch/nogc.tsv"; : >"$scratch/providers.tsv"; : >"$scratch/samples.tsv"
 
@@ -34,8 +103,10 @@ EOF
 #include <stdint.h>
 #include <stdio.h>
 void rt_println_str(const uint8_t *text, uint64_t size) {
-    fwrite(text, 1, size, stdout);
-    fputc('\n', stdout);
+    /* This synthetic fixture supplies exactly one NUL-terminated literal.
+     * Keep its shim minimal; this is not the production length-based runtime. */
+    (void)size;
+    puts((const char *)text);
 }
 EOF
   (cd "$scratch" &&
@@ -91,9 +162,9 @@ done
 
 produce() {
   if [ "$(uname -s)" = Linux ]; then
-    (cd "$scratch" && "$ROOT/scripts/check/produce-runtime-binary-size-startup-cohort.shs" \
+    (cd "$scratch" && "$protocol/scripts/check/produce-runtime-binary-size-startup-cohort.shs" \
       --mode development --output-dir out --samples samples.tsv --simple-binary simple --interpreter-binary interpreter --c-binary c --python-binary "$PYTHON" \
-      --c-reference matched-startup-v1 --stage4-receipt stage4.env --nogc-inventory nogc.tsv \
+      --c-reference matched-startup-v1 --stage4-receipt "$stage4" --stage4-compiler "$compiler" --stage4-source-root "$source_root" --nogc-inventory nogc.tsv \
       --provider-trace providers.tsv --format-allowance-bytes 0 \
       --matched-simple-unstripped simple-unstripped --matched-c-unstripped "$C_UNSTRIPPED" \
       --matched-c-source "$C_SOURCE" --matched-archive hello-link.tar \
@@ -101,18 +172,18 @@ produce() {
       --matched-archive-receipt hello-link.tar.receipt --matched-clang "$CLANG" \
       --matched-lld "$LLD" --matched-strip "$STRIP")
   else
-    (cd "$scratch" && "$ROOT/scripts/check/produce-runtime-binary-size-startup-cohort.shs" \
+    (cd "$scratch" && "$protocol/scripts/check/produce-runtime-binary-size-startup-cohort.shs" \
       --mode development --output-dir out --samples samples.tsv --simple-binary simple --interpreter-binary interpreter --c-binary c --python-binary "$PYTHON" \
-      --c-reference matched-startup-v1 --stage4-receipt stage4.env --nogc-inventory nogc.tsv \
+      --c-reference matched-startup-v1 --stage4-receipt "$stage4" --stage4-compiler "$compiler" --stage4-source-root "$source_root" --nogc-inventory nogc.tsv \
       --provider-trace providers.tsv --format-allowance-bytes 0)
   fi
 }
 check() {
   if [ "$(uname -s)" = Linux ]; then
-    "$ROOT/scripts/check/check-runtime-binary-size-startup-cohort.shs" \
+    "$protocol/scripts/check/check-runtime-binary-size-startup-cohort.shs" \
       --receipt "$scratch/out/receipt.env" --samples "$scratch/out/samples.tsv" \
       --simple-binary "$scratch/simple" --interpreter-binary "$scratch/interpreter" --c-binary "$scratch/c" --python-binary "$PYTHON" \
-      --stage4-receipt "$scratch/stage4.env" --nogc-inventory "$scratch/out/nogc-inventory.tsv" \
+      --stage4-receipt "$stage4" --stage4-compiler "$compiler" --stage4-source-root "$source_root" --nogc-inventory "$scratch/out/nogc-inventory.tsv" \
       --provider-trace "$scratch/out/provider-trace.tsv" \
       --matched-simple-unstripped "$scratch/simple-unstripped" --matched-c-unstripped "$C_UNSTRIPPED" \
       --matched-c-source "$C_SOURCE" --matched-archive "$scratch/hello-link.tar" \
@@ -120,10 +191,10 @@ check() {
       --matched-archive-receipt "$scratch/hello-link.tar.receipt" --matched-clang "$CLANG" \
       --matched-lld "$LLD" --matched-strip "$STRIP"
   else
-    "$ROOT/scripts/check/check-runtime-binary-size-startup-cohort.shs" \
+    "$protocol/scripts/check/check-runtime-binary-size-startup-cohort.shs" \
       --receipt "$scratch/out/receipt.env" --samples "$scratch/out/samples.tsv" \
       --simple-binary "$scratch/simple" --interpreter-binary "$scratch/interpreter" --c-binary "$scratch/c" --python-binary "$PYTHON" \
-      --stage4-receipt "$scratch/stage4.env" --nogc-inventory "$scratch/out/nogc-inventory.tsv" \
+      --stage4-receipt "$stage4" --stage4-compiler "$compiler" --stage4-source-root "$source_root" --nogc-inventory "$scratch/out/nogc-inventory.tsv" \
       --provider-trace "$scratch/out/provider-trace.tsv"
   fi
 }
@@ -131,16 +202,28 @@ check() {
 produce >/dev/null || fail clean-producer
 check >/dev/null || fail clean-checker
 if [ "$(uname -s)" = Linux ]; then
-  reject "$ROOT/scripts/check/check-runtime-binary-size-startup-cohort.shs" \
+  reject "$protocol/scripts/check/check-runtime-binary-size-startup-cohort.shs" \
     --receipt "$scratch/out/receipt.env" --samples "$scratch/out/samples.tsv" \
     --simple-binary "$scratch/simple" --interpreter-binary "$scratch/interpreter" --c-binary "$scratch/c" --python-binary "$PYTHON" \
-    --stage4-receipt "$scratch/stage4.env" --nogc-inventory "$scratch/out/nogc-inventory.tsv" \
+    --stage4-receipt "$stage4" --stage4-compiler "$compiler" --stage4-source-root "$source_root" --nogc-inventory "$scratch/out/nogc-inventory.tsv" \
     --provider-trace "$scratch/out/provider-trace.tsv"
 fi
 printf 'collector\n' >"$scratch/out/nogc-inventory.tsv"; reject check; : >"$scratch/out/nogc-inventory.tsv"
 printf 'provider\n' >"$scratch/out/provider-trace.tsv"; reject check; : >"$scratch/out/provider-trace.tsv"
-printf 'stage=3\ncompiler_kind=rust-seed\n' >"$scratch/stage4.env"; reject check
-printf 'stage=4\ncompiler_kind=pure-simple-stage4\n' >"$scratch/stage4.env"
+printf 'stage=3\ncompiler_kind=rust-seed\n' >"$stage4"; reject check
+cp "$scratch/stage4.good" "$stage4"
+printf 'stage=4\ncompiler_kind=pure-simple-stage4\n' >"$stage4"
+reject check
+reject produce
+cp "$scratch/stage4.good" "$stage4"
+: >"$BS7_TEST_STAGE3_REFUSE"; reject check; reject produce; rm "$BS7_TEST_STAGE3_REFUSE"
+[ -s "$BS7_TEST_STAGE3_CALLS" ] || fail canonical-stage3-dependency-not-called
+for file in "$compiler" "$parent" "$stage3" "$source_root/src/compiler/fixture.spl" "$source_root/scripts/check/lib/stage4-candidate-provenance.shs" "$build" "$smoke"; do
+  cp "$file" "$scratch/mutation.good"
+  printf 'changed\n' >>"$file"
+  reject check
+  cp "$scratch/mutation.good" "$file"
+done
 sed -i.bak 's/sample_count=30/sample_count=29/' "$scratch/out/receipt.env"; reject check; mv "$scratch/out/receipt.env.bak" "$scratch/out/receipt.env"
 printf x >>"$scratch/simple"; reject check; cp "$scratch/simple.good" "$scratch/simple"
 printf x >>"$scratch/interpreter"; reject check; cp "$scratch/interpreter.good" "$scratch/interpreter"
@@ -153,7 +236,7 @@ reject check
 mv "$scratch/out/samples.good" "$scratch/out/samples.tsv"
 mv "$scratch/out/receipt.good" "$scratch/out/receipt.env"
 if [ "$(uname -s)" = Linux ]; then
-  sed -i.bak 's/^matched_archive_sha256=./matched_archive_sha256=0/' "$scratch/out/receipt.env"; reject check; mv "$scratch/out/receipt.env.bak" "$scratch/out/receipt.env"
+  sed -i.bak 's/^matched_archive_sha256=.*/matched_archive_sha256=0000000000000000000000000000000000000000000000000000000000000000/' "$scratch/out/receipt.env"; reject check; mv "$scratch/out/receipt.env.bak" "$scratch/out/receipt.env"
   cp "$scratch/hello-link.tar.receipt" "$scratch/hello-link.tar.receipt.good"
   printf x >>"$scratch/hello-link.tar.receipt"; reject check; mv "$scratch/hello-link.tar.receipt.good" "$scratch/hello-link.tar.receipt"
   cp "$scratch/expected-stdout.txt" "$scratch/expected-stdout.good"
@@ -164,3 +247,5 @@ if [ "$(uname -s)" = Linux ]; then
   mv "$scratch/out/receipt.env.bak" "$scratch/out/receipt.env"
 fi
 echo 'BS7 cohort test: PASS — clean cohort, label-only refusal, and matched-link/stdout/sample evidence mutations'
+
+echo 'BS7 Stage4 contract: PASS — canonical verifier joins, old-label and deep-verifier refusals; synthetic Stage3 stub, no native admission'

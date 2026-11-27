@@ -1,0 +1,75 @@
+"""Lockless (CAS, non-blocking) serialization claim for SimpleOS fs owners.
+
+Replaces blocking mutexes in the open-file-description owner. A contended
+claim fails fast with `Busy` instead of waiting, so no owner holds a lock
+across driver I/O and no waiter can deadlock.
+"""
+
+use std.spec.*
+use os.kernel.fs.lockless_owner_claim_v1.{
+    LocklessOwnerClaimV1, LocklessClaimOutcomeV1, LocklessReleaseOutcomeV1,
+    lockless_owner_claim_new_v1, lockless_owner_try_claim_v1,
+    lockless_owner_claim_bounded_v1, lockless_owner_release_v1
+}
+use os.kernel.fs.open_file_description_owner_v1.{
+    OpenFileDescriptionAccessV1, OpenFileDescriptionBackendBindingV1,
+    OpenFileDescriptionIoKindV1,
+    open_file_description_create_v1, open_file_description_pin_io_v1,
+    open_file_description_cancel_undispatched_io_v1
+}
+
+fn _claim_spec_ofd(id: u64, access: OpenFileDescriptionAccessV1):
+    open_file_description_create_v1(
+        access, 0u32,
+        OpenFileDescriptionBackendBindingV1(
+            file_object_id: id, file_object_generation: 1u32,
+            backend_kind: 1u8),
+        0u64).unwrap()
+
+describe "lockless owner claim":
+    it "grants one holder and reports Busy to a contender without blocking":
+        val claim = lockless_owner_claim_new_v1()
+        expect(lockless_owner_try_claim_v1(claim)).to_equal(LocklessClaimOutcomeV1.Claimed)
+        expect(lockless_owner_try_claim_v1(claim)).to_equal(LocklessClaimOutcomeV1.Busy)
+        expect(lockless_owner_release_v1(claim)).to_equal(LocklessReleaseOutcomeV1.Released)
+        expect(lockless_owner_try_claim_v1(claim)).to_equal(LocklessClaimOutcomeV1.Claimed)
+        expect(lockless_owner_release_v1(claim)).to_equal(LocklessReleaseOutcomeV1.Released)
+
+    it "bounded claim gives up with Busy while another holder keeps the claim":
+        val claim = lockless_owner_claim_new_v1()
+        expect(lockless_owner_try_claim_v1(claim)).to_equal(LocklessClaimOutcomeV1.Claimed)
+        expect(lockless_owner_claim_bounded_v1(claim, 8)).to_equal(LocklessClaimOutcomeV1.Busy)
+        expect(lockless_owner_release_v1(claim)).to_equal(LocklessReleaseOutcomeV1.Released)
+        expect(lockless_owner_claim_bounded_v1(claim, 8)).to_equal(LocklessClaimOutcomeV1.Claimed)
+        expect(lockless_owner_release_v1(claim)).to_equal(LocklessReleaseOutcomeV1.Released)
+
+    it "bounded claim with zero attempts never claims":
+        val claim = lockless_owner_claim_new_v1()
+        expect(lockless_owner_claim_bounded_v1(claim, 0)).to_equal(LocklessClaimOutcomeV1.Busy)
+        expect(lockless_owner_try_claim_v1(claim)).to_equal(LocklessClaimOutcomeV1.Claimed)
+
+    it "rejects a release that does not hold the claim":
+        val claim = lockless_owner_claim_new_v1()
+        expect(lockless_owner_release_v1(claim)).to_equal(LocklessReleaseOutcomeV1.NotHeld)
+        expect(lockless_owner_try_claim_v1(claim)).to_equal(LocklessClaimOutcomeV1.Claimed)
+
+describe "open file description owner on the lockless claim":
+    it "releases serialization after every operation":
+        val a = _claim_spec_ofd(77001u64, OpenFileDescriptionAccessV1.ReadWrite)
+        val b = _claim_spec_ofd(77002u64, OpenFileDescriptionAccessV1.ReadWrite)
+        val pin = open_file_description_pin_io_v1(
+            a, OpenFileDescriptionIoKindV1.Read, 0u64, 4u64)
+        expect(pin.is_ok()).to_be(true)
+        expect(open_file_description_cancel_undispatched_io_v1(pin.unwrap()).is_ok()).to_be(true)
+        expect(open_file_description_pin_io_v1(
+            b, OpenFileDescriptionIoKindV1.Read, 0u64, 4u64).is_ok()).to_be(true)
+
+    it "enforces O_RDONLY on the shared description":
+        val ro = _claim_spec_ofd(77003u64, OpenFileDescriptionAccessV1.ReadOnly)
+        expect(open_file_description_pin_io_v1(
+            ro, OpenFileDescriptionIoKindV1.Write, 0u64, 4u64).is_err()).to_be(true)
+
+    it "enforces O_WRONLY on the shared description":
+        val wo = _claim_spec_ofd(77004u64, OpenFileDescriptionAccessV1.WriteOnly)
+        expect(open_file_description_pin_io_v1(
+            wo, OpenFileDescriptionIoKindV1.Read, 0u64, 4u64).is_err()).to_be(true)

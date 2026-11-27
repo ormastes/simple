@@ -23,8 +23,45 @@ use app.io.mod.{file_read}
 
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
-fn shell(command: text) -> i64:
-    val (stdout, stderr, code) = rt_process_run("/bin/sh", ["-c", command])
+var _windows_shell_state: [i64] = []
+var _runtime_tmp_holder: [text] = []
+
+fn is_windows_shell() -> bool:
+    if _windows_shell_state.len() == 0:
+        val (out, _err, code) = rt_process_run("/bin/sh", ["-c", "uname -s"])
+        var detected = 0
+        if code == 0 and (out.contains("MINGW") or out.contains("MSYS") or out.contains("CYGWIN") or out.contains("NT")):
+            detected = 1
+        _windows_shell_state = [detected]
+    _windows_shell_state[0] == 1
+
+# Git Bash maps /tmp to %TEMP%, while the Simple runtime maps /tmp to
+# <drive>:\tmp, and MSYS rewrites /tmp-looking arguments of native binaries.
+# Align the two views on Windows: shell-side paths (before `--`) point at the
+# runtime's <drive>:\tmp, and MSYS argument conversion is disabled so the
+# generator receives the literal /tmp/... paths it must embed.
+fn runtime_tmp_bash() -> text:
+    if _runtime_tmp_holder.len() == 0:
+        val (out, _err, code) = rt_process_run("/bin/sh", ["-c", "pwd"])
+        var tmp = "/tmp/"
+        if code == 0:
+            val cwd = out.replace("\r", "").replace("\n", "")
+            val segments = cwd.split("/")
+            if segments.len() >= 2 and segments[1].len() == 1:
+                tmp = "/{segments[1]}/tmp/"
+        _runtime_tmp_holder = [tmp]
+    _runtime_tmp_holder[0]
+
+fn adapt_shell_command(command: text) -> text:
+    if not is_windows_shell():
+        return command
+    val parts = command.split(" -- ")
+    if parts.len() == 2:
+        return "MSYS_NO_PATHCONV=1 " + parts[0].replace("/tmp/", runtime_tmp_bash()) + " -- " + parts[1]
+    return "MSYS_NO_PATHCONV=1 " + command.replace("/tmp/", runtime_tmp_bash())
+
+fn shell_ok(command: text) -> i64:
+    val (stdout, stderr, code) = rt_process_run("/bin/sh", ["-c", adapt_shell_command(command)])
     if code != 0:
         print stdout
         print stderr
@@ -44,12 +81,12 @@ describe "generate_rv64_test_program_package":
         val payload_hex = "{root}/payload.hex"
         val pkg = "{root}/test_program.vhd"
 
-        expect(shell("rm -rf '" + root + "' && mkdir -p '" + root + "'")).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(shell_ok("rm -rf '" + root + "' && mkdir -p '" + root + "'")).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
-        expect(shell("printf '\\001\\002\\003\\004\\005\\006\\007\\010\\011' > '" + fw_bin + "'")).to_equal(0)  # oracle: 0 — named expected value from the requirement
-        expect(shell("printf '\\252\\273\\314\\335' > '" + payload_bin + "'")).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(shell_ok("printf '\\001\\002\\003\\004\\005\\006\\007\\010\\011' > '" + fw_bin + "'")).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(shell_ok("printf '\\252\\273\\314\\335' > '" + payload_bin + "'")).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
-        expect(shell("bin/simple run src/hardware/fpga_linux/generate_rv64_test_program_package.spl -- '" + fw_bin + "' '" + fw_hex + "' '" + payload_bin + "' '" + payload_hex + "' '" + pkg + "'")).to_equal(0)  # oracle: 0 — named expected value from the requirement
+        expect(shell_ok("bin/simple run src/hardware/fpga_linux/generate_rv64_test_program_package.spl -- '" + fw_bin + "' '" + fw_hex + "' '" + payload_bin + "' '" + payload_hex + "' '" + pkg + "'")).to_equal(0)  # oracle: 0 — named expected value from the requirement
 
         expect(file_read(fw_hex)).to_equal("0807060504030201\n0000000000000009\n")
         expect(file_read(payload_hex)).to_equal("00000000DDCCBBAA\n")

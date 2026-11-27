@@ -1,0 +1,183 @@
+# Daemonless single-owner value transitions over validated capture snapshots.
+# Retention bounds both event history and subscriber count. A watcher cannot
+# publish events here without providing an exact canonically valid capture.
+use std.scv.build_capture_v1.{BuildFrozenSnapshotV1, ScvBuildCursorV1, scv_build_snapshot_valid_v1, scv_build_snapshot_freeze_v1}
+use std.common.crypto.sha256.{sha256_text}
+export use std.scv.build_change_diff_v1.{ScvBuildEntryChangeV1, ScvBuildSnapshotDeltaV1, scv_build_snapshot_diff_v1, scv_build_delta_affects_path_v1, scv_build_cursor_equal_v1}
+
+pub struct ScvBuildFeedEventV1:
+    event_id: text
+    before: BuildFrozenSnapshotV1
+    after: BuildFrozenSnapshotV1
+
+pub struct ScvBuildSubscriptionV1:
+    subscriber_id: text
+    cursor: ScvBuildCursorV1
+
+pub struct ScvBuildChangeFeedV1:
+    current: BuildFrozenSnapshotV1
+    floor_snapshot_id: text
+    floor_cursor: ScvBuildCursorV1
+    events: [ScvBuildFeedEventV1]
+    subscriptions: [ScvBuildSubscriptionV1]
+    retention: i64
+    max_subscribers: i64
+
+pub struct ScvBuildFeedPollV1:
+    status: text
+    reason: text
+    from_snapshot_id: text
+    to_snapshot_id: text
+    from_cursor: ScvBuildCursorV1
+    to_cursor: ScvBuildCursorV1
+    events: [ScvBuildFeedEventV1]
+    changes: [ScvBuildEntryChangeV1]
+    membership_changed: bool
+    universe_changed: bool
+
+fn scv_build_feed_frame_v1(value: text) -> text:
+    "{value.len()}:{value}"
+
+pub fn scv_build_feed_event_id_v1(before: BuildFrozenSnapshotV1, after: BuildFrozenSnapshotV1) -> text:
+    """Canonical IDs prevent ID reuse even after bounded history expires.
+
+    All event payload is derived from these canonical snapshots. No unbound
+    transaction metadata or caller-supplied rename claims are accepted.
+    """
+    "sha256_" + sha256_text("scv-build-feed-event-v1:" +
+        scv_build_feed_frame_v1(before.snapshot_id) + scv_build_feed_frame_v1(after.snapshot_id) +
+        scv_build_feed_frame_v1(before.cursor.epoch) + scv_build_feed_frame_v1("{before.cursor.sequence}") +
+        scv_build_feed_frame_v1(after.cursor.epoch) + scv_build_feed_frame_v1("{after.cursor.sequence}"))
+
+pub fn scv_build_feed_new_v1(initial: BuildFrozenSnapshotV1, retention: i64, max_subscribers: i64 = 64) -> Result<ScvBuildChangeFeedV1, text>:
+    if retention < 1 or retention > 65536: return Err("invalid-feed-retention")
+    if max_subscribers < 1 or max_subscribers > 4096: return Err("invalid-subscriber-bound")
+    if not scv_build_snapshot_valid_v1(initial): return Err("invalid-initial-snapshot")
+    val copied = scv_build_snapshot_freeze_v1(initial.universe, initial.entries, initial.cursor)?
+    Ok(ScvBuildChangeFeedV1(copied, copied.snapshot_id, copied.cursor, [], [], retention, max_subscribers))
+
+fn scv_build_feed_bounds_valid_v1(feed: ScvBuildChangeFeedV1) -> bool:
+    feed.retention > 0 and feed.retention <= 65536 and feed.events.len() <= feed.retention and feed.max_subscribers > 0 and feed.max_subscribers <= 4096 and feed.subscriptions.len() <= feed.max_subscribers
+
+fn scv_build_feed_refusal_v1(feed: ScvBuildChangeFeedV1, from: ScvBuildCursorV1, status: text, reason: text) -> ScvBuildFeedPollV1:
+    # Empty payload on a refusal never means verified no-change.
+    ScvBuildFeedPollV1(status, reason, "", feed.current.snapshot_id, from, feed.current.cursor, [], [], false, false)
+
+pub fn scv_build_feed_poll_v1(feed: ScvBuildChangeFeedV1, from: ScvBuildCursorV1) -> ScvBuildFeedPollV1:
+    if not scv_build_feed_bounds_valid_v1(feed) or not scv_build_snapshot_valid_v1(feed.current):
+        return scv_build_feed_refusal_v1(feed, from, "Gap", "invalid-feed-state")
+    if from.epoch != feed.current.cursor.epoch or from.sequence < 0:
+        return scv_build_feed_refusal_v1(feed, from, "UnknownCursor", "foreign-or-invalid-cursor")
+    if from.sequence < feed.floor_cursor.sequence:
+        return scv_build_feed_refusal_v1(feed, from, "StaleCursor", "history-retention-expired")
+    if from.sequence > feed.current.cursor.sequence:
+        return scv_build_feed_refusal_v1(feed, from, "UnknownCursor", "future-cursor")
+    var cursor = feed.floor_cursor
+    var root = feed.floor_snapshot_id
+    var found = scv_build_cursor_equal_v1(cursor, from)
+    var from_id = if found: root else: ""
+    var events: [ScvBuildFeedEventV1] = []
+    var changes: [ScvBuildEntryChangeV1] = []
+    var membership = false
+    var universe = false
+    for event in feed.events:
+        if not scv_build_snapshot_valid_v1(event.before) or not scv_build_snapshot_valid_v1(event.after):
+            return scv_build_feed_refusal_v1(feed, from, "Gap", "invalid-history-snapshot")
+        if event.before.snapshot_id != root or not scv_build_cursor_equal_v1(event.before.cursor, cursor):
+            return scv_build_feed_refusal_v1(feed, from, "Gap", "disconnected-history")
+        if event.after.cursor.epoch != cursor.epoch or event.after.cursor.sequence != cursor.sequence + 1:
+            return scv_build_feed_refusal_v1(feed, from, "Gap", "noncontiguous-history")
+        if event.event_id != scv_build_feed_event_id_v1(event.before, event.after):
+            return scv_build_feed_refusal_v1(feed, from, "Gap", "history-event-id-mismatch")
+        if found:
+            val difference = scv_build_snapshot_diff_v1(event.before, event.after).unwrap()
+            events = events.push(event)
+            for change in difference.changes: changes = changes.push(change)
+            membership = membership or difference.membership_changed
+            universe = universe or difference.universe_changed
+        cursor = event.after.cursor
+        root = event.after.snapshot_id
+        if not found and scv_build_cursor_equal_v1(cursor, from):
+            found = true
+            from_id = root
+    if root != feed.current.snapshot_id or not scv_build_cursor_equal_v1(cursor, feed.current.cursor):
+        return scv_build_feed_refusal_v1(feed, from, "Gap", "current-root-disconnected")
+    if not found:
+        return scv_build_feed_refusal_v1(feed, from, "Gap", "cursor-not-in-history")
+    ScvBuildFeedPollV1("CompleteDelta", "continuous-canonical-history", from_id, root,
+        from, cursor, events, changes, membership, universe)
+
+pub fn scv_build_feed_publish_v1(feed: ScvBuildChangeFeedV1, expected_root: text, event_id: text, next: BuildFrozenSnapshotV1) -> Result<ScvBuildChangeFeedV1, text>:
+    """Validate expected-root CAS before returning a new feed; caller commits it."""
+    if not scv_build_snapshot_valid_v1(next): return Err("invalid-next-snapshot")
+    val continuity = scv_build_feed_poll_v1(feed, feed.floor_cursor)
+    if continuity.status != "CompleteDelta": return Err("feed-history-gap")
+    # Check replay before current-root CAS, so a retained successful publication
+    # can be retried against its original expected root without duplicating it.
+    for event in feed.events:
+        if event.event_id == event_id:
+            if event.before.snapshot_id == expected_root and event.after.snapshot_id == next.snapshot_id:
+                return Ok(feed)
+            return Err("event-id-payload-conflict")
+    if feed.current.snapshot_id != expected_root: return Err("expected-root-conflict-or-stale-replay")
+    if next.cursor.epoch != feed.current.cursor.epoch: return Err("cursor-epoch-mismatch")
+    if feed.current.cursor.sequence == 9223372036854775807: return Err("cursor-sequence-overflow")
+    if next.cursor.sequence != feed.current.cursor.sequence + 1: return Err("cursor-gap")
+    if event_id != scv_build_feed_event_id_v1(feed.current, next): return Err("event-id-payload-conflict")
+    val copied = scv_build_snapshot_freeze_v1(next.universe, next.entries, next.cursor)?
+    var events: [ScvBuildFeedEventV1] = []
+    var floor_id = feed.floor_snapshot_id
+    var floor_cursor = feed.floor_cursor
+    for index in 0..feed.events.len():
+        if feed.events.len() == feed.retention and index == 0:
+            floor_id = feed.events[index].after.snapshot_id
+            floor_cursor = feed.events[index].after.cursor
+        else:
+            events = events.push(feed.events[index])
+    events = events.push(ScvBuildFeedEventV1(event_id, feed.current, copied))
+    Ok(ScvBuildChangeFeedV1(copied, floor_id, floor_cursor, events,
+        feed.subscriptions, feed.retention, feed.max_subscribers))
+
+pub fn scv_build_feed_subscribe_v1(feed: ScvBuildChangeFeedV1, subscriber_id: text, cursor: ScvBuildCursorV1) -> Result<ScvBuildChangeFeedV1, text>:
+    if subscriber_id == "" or subscriber_id.len() > 256: return Err("invalid-subscriber-id")
+    if scv_build_feed_poll_v1(feed, cursor).status != "CompleteDelta": return Err("unavailable-subscription-cursor")
+    for subscription in feed.subscriptions:
+        if subscription.subscriber_id == subscriber_id:
+            if scv_build_cursor_equal_v1(subscription.cursor, cursor): return Ok(feed)
+            return Err("subscriber-id-conflict")
+    if feed.subscriptions.len() >= feed.max_subscribers: return Err("subscriber-bound-exceeded")
+    var subscriptions: [ScvBuildSubscriptionV1] = []
+    for subscription in feed.subscriptions: subscriptions = subscriptions.push(subscription)
+    subscriptions = subscriptions.push(ScvBuildSubscriptionV1(subscriber_id, cursor))
+    Ok(ScvBuildChangeFeedV1(feed.current, feed.floor_snapshot_id, feed.floor_cursor,
+        feed.events, subscriptions, feed.retention, feed.max_subscribers))
+
+pub fn scv_build_feed_poll_subscription_v1(feed: ScvBuildChangeFeedV1, subscriber_id: text) -> ScvBuildFeedPollV1:
+    for subscription in feed.subscriptions:
+        if subscription.subscriber_id == subscriber_id: return scv_build_feed_poll_v1(feed, subscription.cursor)
+    scv_build_feed_refusal_v1(feed, feed.current.cursor, "UnknownSubscription", "subscriber-not-found")
+
+pub fn scv_build_feed_acknowledge_v1(feed: ScvBuildChangeFeedV1, subscriber_id: text, cursor: ScvBuildCursorV1) -> Result<ScvBuildChangeFeedV1, text>:
+    if scv_build_feed_poll_v1(feed, cursor).status != "CompleteDelta": return Err("unavailable-acknowledgement-cursor")
+    var found = false
+    var subscriptions: [ScvBuildSubscriptionV1] = []
+    for subscription in feed.subscriptions:
+        if subscription.subscriber_id == subscriber_id:
+            if cursor.sequence < subscription.cursor.sequence: return Err("acknowledgement-regression")
+            subscriptions = subscriptions.push(ScvBuildSubscriptionV1(subscriber_id, cursor))
+            found = true
+        else:
+            subscriptions = subscriptions.push(subscription)
+    if not found: return Err("subscriber-not-found")
+    Ok(ScvBuildChangeFeedV1(feed.current, feed.floor_snapshot_id, feed.floor_cursor,
+        feed.events, subscriptions, feed.retention, feed.max_subscribers))
+
+pub fn scv_build_feed_unsubscribe_v1(feed: ScvBuildChangeFeedV1, subscriber_id: text) -> Result<ScvBuildChangeFeedV1, text>:
+    var found = false
+    var subscriptions: [ScvBuildSubscriptionV1] = []
+    for subscription in feed.subscriptions:
+        if subscription.subscriber_id == subscriber_id: found = true
+        else: subscriptions = subscriptions.push(subscription)
+    if not found: return Err("subscriber-not-found")
+    Ok(ScvBuildChangeFeedV1(feed.current, feed.floor_snapshot_id, feed.floor_cursor,
+        feed.events, subscriptions, feed.retention, feed.max_subscribers))

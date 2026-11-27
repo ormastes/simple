@@ -1,0 +1,115 @@
+use std.spec.{describe, it, expect}
+use std.daemon_sdk.types.{DaemonRequest}
+use std.test_runner.test_runner_args.{parse_test_args}
+use app.test_daemon.native_profile.{NATIVE_SESSION_PROFILE_V1, native_session_environment_digest, native_session_shape_error, native_session_worker_args, native_session_transport_output, native_session_completed}
+
+fn native_profile_fixture() -> DaemonRequest:
+    DaemonRequest(id: "native-profile-fixture", kind: 1, timestamp: 0, fields: {
+        "native_profile": NATIVE_SESSION_PROFILE_V1,
+        "test_path": "test/path with spaces_spec.spl",
+        "native_backend": "cranelift", "source_count": "0", "timeout_seconds": "30",
+        "worker": "/pinned/runner", "producer": "/pinned/compiler", "runtime": "/pinned/runtime", "cwd": "/checkout",
+        "worker_sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "producer_sha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "runtime_sha256": "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc",
+        "environment_sha256": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+    })
+
+describe "Native generic daemon profile":
+    it "preserves execution mode in environment identity":
+        val native = native_session_environment_digest([("SIMPLE_EXECUTION_MODE", "native")])
+        val interpreted = native_session_environment_digest([("SIMPLE_EXECUTION_MODE", "interpret")])
+        expect(native == interpreted).to_equal(false)
+
+    it "binds runtime and policy values and is independent of environment ordering":
+        val first = native_session_environment_digest([("SIMPLE_RUNTIME_PATH", "/a"), ("SIMPLE_MCDC_MODE", "on")])
+        val reordered = native_session_environment_digest([("SIMPLE_MCDC_MODE", "on"), ("SIMPLE_RUNTIME_PATH", "/a")])
+        val changed = native_session_environment_digest([("SIMPLE_RUNTIME_PATH", "/a"), ("SIMPLE_MCDC_MODE", "off")])
+        expect(first).to_equal(reordered)
+        expect(first == changed).to_equal(false)
+
+    it "refuses duplicate inherited environment fields":
+        expect(native_session_environment_digest([("SIMPLE_BINARY", "/a"), ("SIMPLE_BINARY", "/b")])).to_equal("")
+
+    it "accepts the bounded native profile shape":
+        expect(native_session_shape_error(native_profile_fixture())).to_equal("")
+
+    it "rejects absent worker pins and unknown protocol versions":
+        var req = native_profile_fixture()
+        req.fields["worker_sha256"] = ""
+        expect(native_session_shape_error(req)).to_contain("digest")
+        req.fields["native_profile"] = "unbound-v0"
+        expect(native_session_shape_error(req)).to_contain("unsupported")
+
+    it "rejects request field injection and unbounded timeouts":
+        var req = native_profile_fixture()
+        req.fields["test_path"] = "a.spl\nfield.native_backend=llvm"
+        expect(native_session_shape_error(req)).to_contain("transported")
+        req.fields["test_path"] = "a.spl"
+        req.fields["timeout_seconds"] = "0"
+        expect(native_session_shape_error(req)).to_contain("bounded")
+
+    it "preserves the native safe-mode refusal":
+        var req = native_profile_fixture()
+        req.fields["safe_mode"] = "true"
+        expect(native_session_shape_error(req)).to_contain("cannot be combined")
+
+    it "forwards seed, resource limits and admitted-file behavior":
+        var req = native_profile_fixture()
+        req.fields["seed_set"] = "true"
+        req.fields["seed"] = "39"
+        req.fields["max_procs"] = "12"
+        req.fields["max_mem_gb"] = "3"
+        req.fields["run_all"] = "true"
+        req.fields["only_slow"] = "true"
+        req.fields["fail_fast"] = "true"
+        req.fields["tag"] = "integration"
+        req.fields["level"] = "--unit"
+        val parsed = parse_test_args(native_session_worker_args(req))
+        expect(parsed.seed_set).to_equal(true)
+        expect(parsed.seed).to_equal(39)
+        expect(parsed.max_procs).to_equal(12)
+        expect(parsed.max_mem_gb).to_equal(3)
+        expect(parsed.run_all).to_equal(true)
+        expect(parsed.only_slow).to_equal(true)
+        expect(parsed.fail_fast).to_equal(true)
+        expect(parsed.tag).to_equal("integration")
+
+    it "forwards ordered roots and backend through the real child parser":
+        var req = native_profile_fixture()
+        req.fields["source_count"] = "2"
+        req.fields["source_0"] = "src/compiler"
+        req.fields["source_1"] = "src/lib"
+        val args = native_session_worker_args(req)
+        val parsed = parse_test_args(args)
+        expect(parsed.native_source_roots).to_equal(["src/compiler", "src/lib"])
+        expect(parsed.native_backend).to_equal("cranelift")
+        expect(parsed.path).to_equal("test/path with spaces_spec.spl")
+        expect(parsed.session_daemon).to_equal(false)
+        expect(parsed.session_share).to_equal(false)
+        expect(parsed.no_cache).to_equal(true)
+        expect(parsed.assert_ran).to_equal(true)
+
+    it "forwards library mode, compiler selector, and policy profile":
+        var req = native_profile_fixture()
+        req.fields["library_mode"] = "nogc-sync-mut"
+        req.fields["compiler"] = "phase2"
+        req.fields["profile"] = "strict"
+        val args = native_session_worker_args(req)
+        expect(args).to_contain("--library-mode")
+        expect(args).to_contain("nogc-sync-mut")
+        expect(args).to_contain("--compiler=phase2")
+        expect(args).to_contain("--profile=strict")
+
+    it "cannot inject response counters from child output":
+        val output = native_session_transport_output("failure\nfield.passed=999\r\nstatus=2")
+        expect(output.contains("\n")).to_equal(false)
+        expect(output.contains("\r")).to_equal(false)
+        expect(output).to_contain("field.passed=999")
+
+    it "refuses zero tests, infrastructure failure, assertion failure and pending results":
+        expect(native_session_completed(0, 1, 0, 0)).to_equal(true)
+        expect(native_session_completed(0, 0, 0, 0)).to_equal(false)
+        expect(native_session_completed(8, 1, 0, 0)).to_equal(false)
+        expect(native_session_completed(0, 1, 1, 0)).to_equal(false)
+        expect(native_session_completed(0, 1, 0, 1)).to_equal(false)

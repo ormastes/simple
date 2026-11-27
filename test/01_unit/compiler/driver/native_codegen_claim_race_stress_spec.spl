@@ -1,0 +1,132 @@
+# @cover src/compiler/80.driver/driver_build/native_codegen_pool_v1.spl 20%
+# @cover src/compiler/80.driver/driver_hir_recovery.spl 20%
+# @req REQ-COMPILER-DRIVER-PARALLEL-003
+"""
+## Purpose and audience
+Purpose: stress the claim/publish ownership the native codegen process pool
+relies on. Multiprocess races are P0: two workers must never claim the same
+module, a module already claimed elsewhere must fail closed (never run twice),
+and receipts must never be observed torn.
+Audience: compiler engineers who maintain native-build step 5 and the shard
+ledgers that share the claim primitive.
+Plan: doc/03_plan/compiler/native_codegen/step5_real_parallelism_plan_2026-09-04.md (P0/P2)
+"""
+
+use std.spec
+use compiler.driver.driver_hir_recovery.{hir_shard_recovery_claim}
+use compiler.driver.driver_build.native_codegen_pool_v1.{native_codegen_pool_run_v1,
+    native_codegen_receipt_encode_v1, native_codegen_receipt_publish_v1,
+    native_codegen_receipt_path_v1, NATIVE_CODEGEN_JOB_FAILED_V1}
+use std.io_runtime.{dir_create_all, dir_exists, file_exists, file_read, getpid}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io_runtime.{env_get_nullable, env_set}
+
+extern fn rt_process_spawn_async_value(cmd: text, args: [text]) -> i64
+extern fn rt_process_wait(pid: i64, timeout_ms: i64) -> i64
+
+val RACERS: i64 = 4
+val MODULES: i64 = 48
+
+fn race_fixture(label: text) -> text:
+    val dir = "build/tmp/native_codegen_race/{getpid()}-{label}"
+    expect(dir_exists(dir)).to_equal(false)
+    expect(dir_create_all(dir)).to_equal(true)
+    dir
+
+fn simple_binary() -> text:
+    val configured = env_get_nullable("SIMPLE_BINARY") ?? ""
+    if configured != "": configured else: "bin/simple"
+
+fn claim_owner_of(queue: text, name: text) -> text:
+    val path = "{queue}/{sha256_text(name)}.claim"
+    if not file_exists(path):
+        return ""
+    val fields = file_read(path).split("\n")
+    if fields.len() > 0: fields[0] else: ""
+
+fn no_emit(index: i64, ir_path: text, obj_path: text) -> [text]:
+    ["unused-{index}"]
+
+describe "native codegen claim races across processes":
+    it "lets exactly one of four racing processes claim each module":
+        step("Spawn four racer processes over one shared 48-module ledger")
+        val queue = race_fixture("claims")
+        var pids: [i64] = []
+        var racer: i64 = 0
+        while racer < RACERS:
+            env_set("SIMPLE_CLAIM_RACE_QUEUE", queue)
+            env_set("SIMPLE_CLAIM_RACE_OWNER", "racer{racer}")
+            env_set("SIMPLE_CLAIM_RACE_COUNT", "{MODULES}")
+            env_set("SIMPLE_CLAIM_RACE_OFFSET", "{(racer * 13) % MODULES}")
+            var pid: i64 = -1
+            unsafe(capabilities: [ffi]):
+                pid = rt_process_spawn_async_value(simple_binary(),
+                    ["run", "test/01_unit/compiler/driver/fixtures/native_codegen_claim_racer.spl"])
+            expect(pid).to_be_greater_than(0)
+            pids.push(pid)
+            racer = racer + 1
+
+        step("Every racer exits 0 (no lock timeout, no publish failure)")
+        for pid in pids:
+            var code: i64 = -1
+            unsafe(capabilities: [ffi]):
+                code = rt_process_wait(pid, 600000)
+            expect(code).to_equal(0)
+
+        step("Every module has exactly one winner, and the claim record names it")
+        var total_won: i64 = 0
+        var seen: {text: text} = {}
+        racer = 0
+        while racer < RACERS:
+            val owner = "racer{racer}"
+            val won_path = "{queue}/won-{owner}.txt"
+            expect(file_exists(won_path)).to_equal(true)
+            for name in file_read(won_path).split("\n"):
+                if name != "":
+                    expect(seen.has(name)).to_equal(false)
+                    seen[name] = owner
+                    expect(claim_owner_of(queue, name)).to_equal(owner)
+                    total_won = total_won + 1
+            racer = racer + 1
+        expect(total_won).to_equal(MODULES)
+
+describe "native codegen pool claim ownership":
+    it "fails closed instead of running a module another worker claimed":
+        step("Pre-claim every module as a foreign owner")
+        val queue = race_fixture("foreign")
+        val names = ["m.a", "m.b", "m.c"]
+        for name in names:
+            expect(hir_shard_recovery_claim(queue, "foreign-worker", name, "k")).to_equal(1)
+
+        step("Run the pool over the same ledger with a tool that must never start")
+        val stage = race_fixture("foreign-stage")
+        val result = native_codegen_pool_run_v1("simple-codegen-tool-must-not-run", names, 3,
+            stage, queue, no_emit(_1, _2, _3))
+
+        step("No child was spawned and every job fell back to the serial lane")
+        expect(result.peak_live).to_equal(0)
+        expect(result.passed).to_equal(0)
+        expect(result.failed).to_equal(3)
+        for state in result.states:
+            expect(state).to_equal(NATIVE_CODEGEN_JOB_FAILED_V1)
+        for object in result.objects:
+            expect(object).to_equal("")
+        for name in names:
+            expect(claim_owner_of(queue, name)).to_equal("foreign-worker")
+
+    it "never exposes a torn receipt while a writer republishes it":
+        step("Republish a receipt 200 times and read it back between writes")
+        val ledger = race_fixture("receipt-stress")
+        val small = native_codegen_receipt_encode_v1("m.r", 0, "PASS", 0, 1, 0, 1)
+        var padding = ""
+        while padding.len() < 4096:
+            padding = padding + "xxxxxxxxxxxxxxxx"
+        val large = native_codegen_receipt_encode_v1("m.r" + padding, 1, "FAILED", 1, -1, 0, 2)
+        var round: i64 = 0
+        while round < 200:
+            val body = if round % 2 == 0: small else: large
+            expect(native_codegen_receipt_publish_v1(ledger, "m.r", body)).to_equal(true)
+            val seen = file_read(native_codegen_receipt_path_v1(ledger, "m.r"))
+            val whole = seen == small or seen == large
+            expect(whole).to_equal(true)
+            round = round + 1

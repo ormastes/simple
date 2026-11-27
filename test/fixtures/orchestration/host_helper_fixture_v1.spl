@@ -1,0 +1,167 @@
+# Real budget/helper signatures and physical capacity journal. Parent setup is
+# a trusted capacity primitive; no container/helper native effect is simulated.
+use test.fixtures.daemon_sdk.distributed_authority_verification_fixture_v2.*
+use test.fixtures.orchestration.host_execution_envelope_fixture_v2.host_execution_envelope_fixture_v2
+use std.nogc_sync_mut.orchestration.host_helper_request_v1.HostHelperRequestV1
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.*
+use std.nogc_sync_mut.orchestration.local_authority_policy_v1.LocalAuthorityPolicyV1
+use std.common.contracts.orchestration.host_helper_plan_v1.*
+use std.common.contracts.orchestration.controller_parent_budget_v1.*
+use std.common.contracts.orchestration.assignment_v1.*
+use std.common.contracts.orchestration.host_reservation_codec_v1.*
+use std.common.contracts.orchestration.host_capacity_v1.*
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.distributed_control_v2.{OperationEnvelopeV2, ExecutionGrantV2}
+use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
+use std.common.contracts.distributed_control_codec_v2.*
+use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.distributed_authority_snapshot_create_v2
+use std.nogc_sync_mut.daemon_sdk.distributed_grant_verification_v2.*
+use std.common.crypto.ed25519.pure_ed25519_sign_from_seed_v1
+use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.io.file_ops.secure_temp_dir
+
+pub struct HostHelperFixtureV1:
+    root: text
+    owner: HostCapacityOwnerV1
+    request: HostHelperRequestV1
+    policy: LocalAuthorityPolicyV1
+    scope: ContainerHostScopeV2
+    execution_signed: DistributedSignedGrantV2
+    execution_approval: DistributedSignedApprovalV2
+
+pub fn host_helper_clock_v1() -> HostReservationAuthorizationContextV1:
+    HostReservationAuthorizationContextV1(grant_clock: 100, monotonic_ms: 10,
+        policy_revision: 4, revocation_epoch: 2, session_generation: 3)
+
+fn helper_fixture_signed_v1(operation: OperationEnvelopeV2, issuer: text, grant_id: text) -> DistributedSignedGrantV2:
+    var grant = verification_fixture().signed.grant
+    grant.id = grant_id
+    grant.host_id = operation.host_id
+    grant.operations = [operation.operation]
+    var signed = DistributedSignedGrantV2(grant: grant, issuer_id: issuer, key_revision: 1, signature: [])
+    signed.signature = pure_ed25519_sign_from_seed_v1(verification_seed(1), distributed_grant_signature_message_v2(signed).unwrap()).signature
+    signed
+
+fn helper_fixture_approval_v1(operation: OperationEnvelopeV2, signed: DistributedSignedGrantV2, approver: text) -> DistributedSignedApprovalV2:
+    var approval = verification_fixture().approval
+    approval.approver_id = approver
+    approval.grant_digest = sha256_text(distributed_encode_grant_v2(signed.grant).unwrap())
+    approval.request_digest = sha256_text(distributed_encode_operation_v2(operation).unwrap())
+    approval.signature = pure_ed25519_sign_from_seed_v1(verification_seed(65), distributed_approval_signature_message_v2(approval).unwrap()).signature
+    approval
+
+fn helper_fixture_key_v1(identity: text, role: text, host: text, operations: [text]) -> DistributedAuthorityKeyV2:
+    val base = verification_fixture()
+    var key = if role == "grant-issuer": base.issuer else: base.approver
+    key.identity = identity
+    key.host_id = host
+    key.operations = operations
+    key
+
+pub fn host_helper_fixture_v1() -> HostHelperFixtureV1:
+    val envelope = host_execution_envelope_fixture_v2()
+    val root = secure_temp_dir("/tmp", "host-helper-owner").unwrap()
+    val scope = envelope.scope
+    val capacity = HostCapacityV1(physical_host_id: scope.physical_host_id, authority_id: "authority",
+        boot_id: container_scope_fence_id_v2(scope).unwrap(), provider_generation: scope.provider_generation,
+        cpu_millis: 4000, memory_bytes: 8192, exclusive_devices: [])
+    val opened = host_capacity_owner_open_v1(root, capacity, "c".repeat(64), 100, true).unwrap()
+    var parent_grant = verification_fixture().signed.grant
+    parent_grant.operations = ["host_reservation_v1"]
+    val owner = host_capacity_owner_prepare_v1(opened, envelope.common.intent, envelope.common.operation, parent_grant, host_helper_clock_v1()).unwrap()
+    val binding = ControllerAssignmentBindingV1(controller_id: "controller_1", controller_epoch: 1,
+        workload_uid: "parent-workload", desired_revision: 1, host_intent: envelope.common.intent, host_operation: envelope.common.operation)
+    val binding_bytes = controller_assignment_bytes_v1(binding).unwrap()
+    var parent_controller = envelope.common.operation
+    parent_controller.id = "assignment_1"
+    parent_controller.operation = "controller_assignment_v1"
+    parent_controller.host_id = binding.controller_id
+    parent_controller.payload_digest = sha256_text(binding_bytes)
+    val budget = ControllerParentBudgetV1(parent_operation_id: binding.host_operation.id,
+        parent_operation_digest: sha256_text(distributed_encode_operation_v2(binding.host_operation).unwrap()),
+        parent_assignment_digest: sha256_text(binding_bytes), maximum_cpu_millis: 2000, maximum_memory_bytes: 1024, scope: scope)
+    var budget_operation = parent_controller
+    budget_operation.id = "budget_1"
+    budget_operation.operation = "controller_helper_budget_v1"
+    budget_operation.payload_digest = controller_parent_budget_digest_v1(budget).unwrap()
+    budget_operation.memory_bytes = budget.maximum_memory_bytes
+    budget_operation.duration_ms = 400
+    val budget_signed = helper_fixture_signed_v1(budget_operation, "budget_issuer", "budget_grant")
+    val proof = ControllerParentBudgetProofV1(budget: budget, operation: budget_operation, signed: budget_signed,
+        approval: helper_fixture_approval_v1(budget_operation, budget_signed, "budget_approver"))
+    val placeholder_plan = HostHelperPlanV1(operation_id: "helper_1", helper_kind: "agent-image-probe",
+        parent_operation_id: budget.parent_operation_id, parent_operation_digest: budget.parent_operation_digest,
+        parent_assignment_digest: budget.parent_assignment_digest, parent_budget_digest: controller_parent_budget_digest_v1(budget).unwrap(),
+        request_digest: "d".repeat(64), scope: scope)
+    val row = HostReservationV1(id: "helper-reservation-helper_1", operation_id: "helper_1", payload_digest: "0".repeat(64),
+        service_scope_id: scope.service_scope_id, assignment_generation: 1, nonce: "helper-nonce-helper_1", cpu_millis: 500,
+        memory_bytes: 256, exclusive_devices: [], prepare_deadline_ms: 1000, state: HostReservationStateV1.Prepared)
+    val intent = host_reservation_bind_intent_v1(HostReservationIntentV1(physical_host_id: scope.physical_host_id,
+        fence: HostLedgerFenceV1(authority_id: capacity.authority_id, boot_id: capacity.boot_id,
+            provider_generation: capacity.provider_generation, revision: owner.ledger.revision),
+        plan_digest: host_helper_plan_digest_v1(placeholder_plan).unwrap(), reservation: row)).unwrap()
+    var operation = binding.host_operation
+    operation.id = "helper_1"
+    operation.operation = "host_helper_reservation_v1"
+    operation.payload_digest = intent.reservation.payload_digest
+    operation.memory_bytes = 256
+    operation.duration_ms = 200
+    val signed = helper_fixture_signed_v1(operation, "helper_issuer", "helper_prepare_grant")
+    val request = HostHelperRequestV1(plan: placeholder_plan, intent: intent, operation: operation, signed: signed,
+        approval: helper_fixture_approval_v1(operation, signed, "helper_approver"), budget_proof: proof,
+        parent_binding: binding, parent_controller_operation: parent_controller)
+    var execution = operation
+    execution.operation = "host_helper_execute_v1"
+    val execution_signed = helper_fixture_signed_v1(execution, "helper_issuer", "helper_execution_grant")
+    val keys = [helper_fixture_key_v1("helper_issuer", "grant-issuer", scope.physical_host_id, ["host_helper_reservation_v1", "host_helper_execute_v1"]),
+        helper_fixture_key_v1("helper_approver", "human-approver", scope.physical_host_id, ["host_helper_reservation_v1", "host_helper_execute_v1"]),
+        helper_fixture_key_v1("budget_issuer", "grant-issuer", binding.controller_id, ["controller_helper_budget_v1"]),
+        helper_fixture_key_v1("budget_approver", "human-approver", binding.controller_id, ["controller_helper_budget_v1"])]
+    HostHelperFixtureV1(root: root, owner: owner, request: request,
+        policy: LocalAuthorityPolicyV1(snapshot: distributed_authority_snapshot_create_v2(keys, 7, 4, 2).unwrap(),
+            session_generation: 3, source_digest: "f".repeat(64)), scope: scope,
+        execution_signed: execution_signed, execution_approval: helper_fixture_approval_v1(execution, execution_signed, "helper_approver"))
+
+# New helper operation, same retained parent and signed budget, exact current
+# fence and fresh real helper signatures. Existing siblings remain in ledger.
+pub fn host_helper_sibling_fixture_v1(fixture: HostHelperFixtureV1, owner: HostCapacityOwnerV1,
+        operation_id: text, duration_ms: i64 = 200) -> HostHelperFixtureV1:
+    var result = fixture
+    result.owner = owner
+    result.request.plan.operation_id = operation_id
+    var row = fixture.request.intent.reservation
+    row.id = "helper-reservation-" + operation_id
+    row.operation_id = operation_id
+    row.nonce = "helper-nonce-" + operation_id
+    val intent = host_reservation_bind_intent_v1(HostReservationIntentV1(physical_host_id: fixture.scope.physical_host_id,
+        fence: HostLedgerFenceV1(authority_id: owner.ledger.capacity.authority_id, boot_id: owner.ledger.capacity.boot_id,
+            provider_generation: owner.ledger.capacity.provider_generation, revision: owner.ledger.revision),
+        plan_digest: host_helper_plan_digest_v1(result.request.plan).unwrap(), reservation: row)).unwrap()
+    result.request.intent = intent
+    result.request.operation.id = operation_id
+    result.request.operation.payload_digest = intent.reservation.payload_digest
+    result.request.operation.duration_ms = duration_ms
+    result.request.signed = helper_fixture_signed_v1(result.request.operation, "helper_issuer", "helper_prepare_grant")
+    result.request.approval = helper_fixture_approval_v1(result.request.operation, result.request.signed, "helper_approver")
+    var execution = result.request.operation
+    execution.operation = "host_helper_execute_v1"
+    result.execution_signed = helper_fixture_signed_v1(execution, "helper_issuer", "helper_execution_grant")
+    result.execution_approval = helper_fixture_approval_v1(execution, result.execution_signed, "helper_approver")
+    result
+
+pub fn host_helper_renew_budget_fixture_v1(fixture: HostHelperFixtureV1) -> HostHelperFixtureV1:
+    var renewed = fixture
+    renewed.request.budget_proof.operation.id = "budget_renewed"
+    renewed.request.budget_proof.signed = helper_fixture_signed_v1(renewed.request.budget_proof.operation,
+        "budget_issuer", "budget_renewed_grant")
+    renewed.request.budget_proof.approval = helper_fixture_approval_v1(renewed.request.budget_proof.operation,
+        renewed.request.budget_proof.signed, "budget_approver")
+    renewed
+
+pub fn host_helper_alternate_execution_fixture_v1(fixture: HostHelperFixtureV1) -> HostHelperFixtureV1:
+    var alternate = fixture
+    var execution = fixture.request.operation
+    execution.operation = "host_helper_execute_v1"
+    alternate.execution_signed = helper_fixture_signed_v1(execution, "helper_issuer", "helper_execution_grant_alternate")
+    alternate.execution_approval = helper_fixture_approval_v1(execution, alternate.execution_signed, "helper_approver")
+    alternate

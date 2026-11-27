@@ -1,0 +1,96 @@
+# Cranelift stack-slot frame-size fixture.
+#
+# Bug: the Simple Cranelift backend asked for 8-byte slot alignment by passing
+# `8` to rt_cranelift_stack_slot, which forwards it to cranelift-codegen
+# 0.116.1 `StackSlotData::new(kind, size, align_shift)` -- a log2 exponent --
+# so every slot was 256-byte aligned (one slot per 0x100 bytes of frame).
+# Seed spec: test/01_unit/compiler/backend/cranelift_stack_slot_alignment_spec.spl
+#
+# (a) churn(): non-tail recursion, DEPTH frames of a function with a dozen
+#     locals. Must finish under the default 8 MB stack.
+# (b) wide(): 40 locals, called once; its frame size is the measured number.
+#
+# Build + run (stage2 = a Simple Stage 2 compiler; backend cranelift or llvm):
+#   SIMPLE_BOOTSTRAP=1 SIMPLE_NATIVE_GO_TO_END=1 SIMPLE_FILE_WORKERS=0 \
+#   SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1 <stage2> native-build main.spl \
+#     --backend=cranelift --entry-closure --cache-dir cache -o out && ./out
+# Frame size (aarch64):
+#   a=$(llvm-nm out | grep -E ' [Tt] main\.churn$' | cut -d' ' -f1)
+#   llvm-objdump -d --start-address=0x$a --stop-address=$((0x$a+48)) out
+#   and read `mov x16, #N ; sub sp, sp, x16` (or `sub sp, sp, #N`); same for main.wide.
+#   Measured, aarch64, pre-fix Stage 2 (pinned-e45e89468d3e s2probe-p3traittail3):
+#     cranelift churn 0x3910 = 14608 B (57 slots x 256), DEPTH 3000 -> ~44 MB: SIGSEGV (rc 139)
+#     cranelift wide  0x6710 = 26384 B (103 slots x 256)
+#     llvm      churn 0x30 = 48 B, wide: no stack frame; both print the expected stdout
+#   Expected post-fix cranelift: ~8 B per slot (churn ~0x1d0, wide ~0x340), DEPTH 3000 ~1.5 MB.
+#
+# Expected stdout (seed interpreter, banner lines removed):
+# churn=585568
+# wide=360529
+
+val DEPTH = 3000
+
+fn churn(n: i64, acc: i64) -> i64:
+    if n == 0:
+        return acc
+    val a = n * 3 + 1
+    val b = a % 97
+    val c = b * b + n
+    val d = c % 1009
+    val e = d + a - b
+    val f = e % 31
+    val g = f * 7 + d
+    val h = g % 503
+    val i = h + c % 13
+    val j = i * 3 - f
+    val k = j % 211
+    val m = k + b + h
+    val r = churn(n - 1, (acc + m) % 1000003)
+    (r + k * 2 + i) % 1000003
+
+fn wide(x: i64) -> i64:
+    val v01 = x + 1
+    val v02 = v01 * 3
+    val v03 = v02 - x
+    val v04 = v03 % 101
+    val v05 = v04 + v01
+    val v06 = v05 * 2
+    val v07 = v06 % 89
+    val v08 = v07 + v02
+    val v09 = v08 - v04
+    val v10 = v09 % 83
+    val v11 = v10 + v05
+    val v12 = v11 * 5
+    val v13 = v12 % 79
+    val v14 = v13 + v06
+    val v15 = v14 - v07
+    val v16 = v15 % 73
+    val v17 = v16 + v08
+    val v18 = v17 * 7
+    val v19 = v18 % 71
+    val v20 = v19 + v09
+    val v21 = v20 - v10
+    val v22 = v21 % 67
+    val v23 = v22 + v11
+    val v24 = v23 * 11
+    val v25 = v24 % 61
+    val v26 = v25 + v12
+    val v27 = v26 - v13
+    val v28 = v27 % 59
+    val v29 = v28 + v14
+    val v30 = v29 * 13
+    val v31 = v30 % 53
+    val v32 = v31 + v15
+    val v33 = v32 - v16
+    val v34 = v33 % 47
+    val v35 = v34 + v17
+    val v36 = v35 * 17
+    val v37 = v36 % 43
+    val v38 = v37 + v18
+    val v39 = v38 - v19
+    val v40 = v39 % 41
+    v40 + v20 + v30
+
+fn main():
+    print "churn={churn(DEPTH, 0)}"
+    print "wide={wide(12345)}"

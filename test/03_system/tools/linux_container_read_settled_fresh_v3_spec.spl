@@ -1,0 +1,73 @@
+# AUTHORED_NOT_RUN. milestone_0030 op (ii) (DESIGN 14.6 P2-3): on a GENUINE `open_fresh_v2` adapter
+# the settled-workspace read is routed to the fresh owner and never reaches `self.provider`.
+# Disposable installed-host fixture: it opens a real local principal and a fresh owner only when
+# the fixture environment is set, runs no workload, and closes every owner it opened.
+# @req REQ-M0030-OP-II-FRESH-ONLY
+use std.spec.{describe, it, expect, step, fail, pending}
+use std.nogc_async_mut.container.api_v2.*
+use std.common.contracts.container.settled_workspace_read_v3.ContainerSettledWorkspaceBoundsV3
+use std.common.build_manager.group_process_stream_protocol_v2.group_process_stream_template_decode_v3
+use std.nogc_sync_mut.io.machine_local_process_principal_v1.*
+use std.nogc_sync_mut.io.env_ops.env_get
+use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
+
+var read_settled_principal_v3: Option<MachineLocalProcessPrincipalV1> = None
+var read_settled_open_v3: Option<SimpleContainerFreshOpenV2> = None
+
+# (refusal reason, provider executor calls) observed on the genuine fresh adapter.
+fn read_settled_run_v3(template_source: text) -> Result<(text, i64), text>:
+    if read_settled_open_v3.is_some() or read_settled_principal_v3.is_some(): return Err("read-settled-fixture-prior-cleanup-retained")
+    val template = group_process_stream_template_decode_v3(template_source)?
+    val principal = match machine_local_process_principal_open_v1():
+        case MachineLocalProcessPrincipalOpenV1.Ready(owner):
+            read_settled_principal_v3 = Some(owner)
+            owner
+        case MachineLocalProcessPrincipalOpenV1.CleanupRequired(owner, reason):
+            read_settled_principal_v3 = Some(owner)
+            return Err("read-settled-fixture-principal:" + reason)
+        case MachineLocalProcessPrincipalOpenV1.Rejected(reason): return Err("read-settled-fixture-principal:" + reason)
+    val opened = simple_container_open_fresh_v2(principal, template)
+    read_settled_open_v3 = Some(opened)
+    if opened.error != "" or opened.owner.is_none(): return Err("read-settled-fixture-open:" + opened.error)
+    val owner = opened.owner.unwrap()
+    val result = simple_container_read_settled_workspace_v3(owner, ContainerSettledWorkspaceBoundsV3(maximum_bytes: 4096, output_paths: []))
+    if result.is_ok(): return Err("read-settled-fixture-unexpected-read-without-workload")
+    match owner:
+        case SimpleContainerOwnerV2.Linux(_, adapter): Ok((result.unwrap_err(), adapter.provider.executor_call_count()))
+        case SimpleContainerOwnerV2.Windows(_, _): Err("read-settled-fixture-linux-required")
+
+fn read_settled_finish_v3() -> text:
+    var first_error = ""
+    if val opened = read_settled_open_v3:
+        val closed = simple_container_fresh_cleanup_v2(opened)
+        read_settled_open_v3 = closed.retained
+        if closed.retained.is_some() or not closed.closed: return "read-settled-fixture-cleanup-retained:" + closed.error
+        if closed.error != "": first_error = closed.error
+    if val principal = read_settled_principal_v3:
+        val closed = principal.close_v1()
+        if closed == "released" or closed == "consumed-error": read_settled_principal_v3 = None
+        if closed != "released" and first_error == "": first_error = "read-settled-fixture-principal-close:" + closed
+    first_error
+
+describe "settled remote-build read on a genuine fresh Linux adapter":
+    it "routes to the fresh owner and makes zero provider calls":
+        # Fixture-environment gate (owner decision 2026-11-16, OPEN_ISSUE B-10): BLOCKED, never a pass.
+        val template_path = env_get("SIMPLE_LINUX_CONTAINER_READ_SETTLED_TEMPLATE")
+        if template_path == "":
+            pending("BLOCKED: read-settled fresh fixture env unset: SIMPLE_LINUX_CONTAINER_READ_SETTLED_TEMPLATE")
+            return
+        step("Open a genuine principal-path fresh owner; no workload is prepared")
+        val template = file_read_regular_no_follow_bounded(template_path, 65536).unwrap()
+        val result = read_settled_run_v3(template)
+        step("Close every owner before asserting")
+        val cleanup = read_settled_finish_v3()
+        if cleanup != "":
+            fail("read-settled fixture retained cleanup or has a diagnostic:" + cleanup)
+            return
+        if result.is_err():
+            fail("read-settled fixture failed:" + result.unwrap_err())
+            return
+        val observed = result.unwrap()
+        step("The fresh owner refused (no settled workload); the provider was never invoked")
+        expect(observed.0 != "linux-workspace-fresh-root-required").to_equal(true)
+        expect(observed.1).to_equal(0)

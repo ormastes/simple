@@ -1,0 +1,58 @@
+#!/bin/sh
+# Runs the UTF-8/UTF-16 converter characterization (oracle == helper) and the
+# rt_file_unlock HANDLE/fd characterization, diffing each transcript against
+# its golden. clang only (never gcc). Fail-closed verdict, last line of stdout:
+#   PASS — <n> selfcheck(s) ran ...   exit 0
+#   FAIL — ...                         exit 1
+#   ERROR — nothing was checked (...)  exit 2
+set -u
+root=$(cd "$(dirname "$0")/../.." && pwd) || { echo "ERROR — nothing was checked (no repo root)"; exit 2; }
+cd "$root" || { echo "ERROR — nothing was checked (cd failed)"; exit 2; }
+CC=${CC:-clang}
+case "$(basename "$CC")" in *gcc*|*g++*) echo "ERROR — nothing was checked (gcc is forbidden: $CC)"; exit 2;; esac
+command -v "$CC" >/dev/null 2>&1 || { echo "ERROR — nothing was checked (no clang: $CC)"; exit 2; }
+"$CC" --version 2>/dev/null | grep -qi clang || { echo "ERROR — nothing was checked ($CC is not clang)"; exit 2; }
+t="$root/src/runtime/test"
+out="$root/build/win_utf16_selfcheck"
+mkdir -p "$out" || { echo "ERROR — nothing was checked (mkdir $out)"; exit 2; }
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) os=windows; exe=.exe;; *) os=posix; exe=;; esac
+ran=0; fails=""
+
+run_one() { # name golden src...
+  name=$1; golden=$2; shift 2
+  "$CC" -std=c11 -Wall -Wextra -Werror -Wno-unused-variable -D_CRT_SECURE_NO_WARNINGS -I src/runtime "$@" -o "$out/$name$exe"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then fails="$fails $name(compile rc=$rc)"; return; fi
+  "$out/$name$exe" > "$out/$name.txt" 2> "$out/$name.err"
+  rc=$?
+  ran=$((ran + 1))
+  if [ "$rc" -ne 0 ]; then fails="$fails $name(run rc=$rc)"; return; fi
+  if [ -n "$golden" ]; then
+    if [ "$os" = windows ]; then
+      # MSVC text-mode stdout writes CRLF. Repository goldens use LF.
+      diff --strip-trailing-cr "$out/$name.txt" "$golden" > "$out/$name.diff"
+    else
+      diff "$out/$name.txt" "$golden" > "$out/$name.diff"
+    fi
+    rc=$?
+    if [ "$rc" -ne 0 ]; then
+      sed -n '1,25p' "$out/$name.diff" >&2
+      fails="$fails $name(golden diff, see $out/$name.diff)"
+    fi
+  fi
+}
+
+if [ "$os" = windows ]; then
+  run_one utf16 "$t/rt_win_utf16_convert_characterization.golden.txt" \
+    "$t/rt_win_utf16_convert_characterization_selfcheck.c"
+  grep -q "PASS (oracle == helper)" "$out/utf16.err" 2>/dev/null || fails="$fails utf16(no oracle==helper PASS line)"
+fi
+# Strict C11 on Linux needs the libc declarations for the linked file owner.
+case "$(uname -s)" in Linux) set -- -D_DEFAULT_SOURCE;; *) set --;; esac
+run_one unlock "$t/rt_file_unlock_handle_characterization.$os.golden.txt" \
+  "$@" "$t/rt_file_unlock_handle_characterization_selfcheck.c" src/runtime/runtime_host_file_exports.c
+
+if [ -n "$fails" ]; then echo "FAIL — $ran selfcheck(s) ran ($os), failed:$fails"; exit 1; fi
+if [ "$ran" -eq 0 ]; then echo "ERROR — nothing was checked (0 selfchecks ran)"; exit 2; fi
+echo "PASS — $ran selfcheck(s) ran ($os), transcripts equal goldens"
+exit 0

@@ -1,0 +1,50 @@
+use std.spec.*
+use compiler.common.mir_target_context.{mir_target_context_from_explicit}
+use compiler.hir.target_hir.hir_snapshot.{hir_snapshot_id_new}
+use compiler.hir.target_hir.target_hir.{target_hir_for_explicit, target_hir_identity}
+use compiler.hir.target_hir.hir_target_constraints.{HirGuardRead, hir_target_constraints_capture, hir_target_constraints_digest, hir_target_constraints_satisfied}
+use compiler.hir.target_hir.target_hir_constrained_identity.{target_hir_identity_with_constraints}
+
+fn linux_x64():
+    mir_target_context_from_explicit("x86_64-unknown-linux-gnu", "llvm", 23).unwrap()
+
+fn mac_arm():
+    mir_target_context_from_explicit("aarch64-apple-darwin", "llvm", 23).unwrap()
+
+describe "TargetHIR P2 constraints":
+    it "THIR-04: guard reads that differ by target give distinct digests and identities":
+        val on_linux = hir_target_constraints_capture("app.io", [HirGuardRead(key: "os", value: "linux", held: true)], []).unwrap()
+        val on_mac = hir_target_constraints_capture("app.io", [HirGuardRead(key: "os", value: "linux", held: false)], []).unwrap()
+        val d1 = hir_target_constraints_digest(on_linux)
+        val d2 = hir_target_constraints_digest(on_mac)
+        expect(d1 == d2).to_be(false)
+        expect(d1.len()).to_equal(64)
+        val again = hir_target_constraints_capture(" app.io ", [HirGuardRead(key: " OS ", value: "Linux", held: true), HirGuardRead(key: "os", value: "linux", held: true)], []).unwrap()
+        expect(hir_target_constraints_digest(again)).to_equal(d1)
+        val snap = hir_snapshot_id_new("app.io", "d1", 0).unwrap()
+        val view = target_hir_for_explicit(snap, "x86_64-unknown-linux-gnu", "llvm", 23, "module").unwrap()
+        val id1 = target_hir_identity_with_constraints(view, d1).unwrap()
+        expect(id1).to_equal(target_hir_identity(view) + "|constraints:" + d1)
+        expect(id1 == target_hir_identity_with_constraints(view, d2).unwrap()).to_be(false)
+        expect(hir_target_constraints_satisfied(on_linux, linux_x64(), []).unwrap()).to_be(true)
+        expect(hir_target_constraints_satisfied(on_linux, mac_arm(), []).unwrap()).to_be(false)
+        expect(hir_target_constraints_satisfied(on_mac, mac_arm(), []).unwrap()).to_be(true)
+
+    it "THIR-05: a negative read flipping or a feature appearing invalidates reuse":
+        val c = hir_target_constraints_capture("app.mach", [HirGuardRead(key: "feature", value: "macho", held: false), HirGuardRead(key: "arch", value: "aarch64", held: false)], []).unwrap()
+        expect(hir_target_constraints_satisfied(c, linux_x64(), []).unwrap()).to_be(true)
+        expect(hir_target_constraints_satisfied(c, linux_x64(), ["macho"]).unwrap()).to_be(false)
+        expect(hir_target_constraints_satisfied(c, mac_arm(), []).unwrap()).to_be(false)
+        val with_feat = hir_target_constraints_capture("app.mach", [HirGuardRead(key: "feature", value: "macho", held: true)], ["MachO"]).unwrap()
+        expect(hir_target_constraints_digest(with_feat) == hir_target_constraints_digest(c)).to_be(false)
+        expect(hir_target_constraints_satisfied(with_feat, linux_x64(), ["macho"]).unwrap()).to_be(true)
+        expect(hir_target_constraints_satisfied(with_feat, linux_x64(), []).unwrap()).to_be(false)
+
+    it "IHIR-02: incomplete or unsupported obligations are named errors, never Ready":
+        expect(hir_target_constraints_capture(" ", [], []).unwrap_err()).to_equal("hir_target_constraints_module_required")
+        expect(hir_target_constraints_capture("m", [HirGuardRead(key: "os", value: "", held: true)], []).unwrap_err()).to_start_with("hir_target_constraints_read_incomplete:")
+        val cpu = hir_target_constraints_capture("m", [HirGuardRead(key: "cpu", value: "zen4", held: true)], []).unwrap()
+        expect(hir_target_constraints_satisfied(cpu, linux_x64(), []).unwrap_err()).to_equal("hir_target_constraint_unsupported:cpu=zen4")
+        val snap = hir_snapshot_id_new("m", "d1", 0).unwrap()
+        val view = target_hir_for_explicit(snap, "x86_64-unknown-linux-gnu", "llvm", 23, "module").unwrap()
+        expect(target_hir_identity_with_constraints(view, " ").unwrap_err()).to_equal("target_hir_constraints_digest_required")

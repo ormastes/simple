@@ -1,6 +1,6 @@
 # Bug: Baremetal --entry-closure imported-class instantiation FAULT
 
-- **Status:** INVESTIGATING (root-cause candidates verified in binary artifacts; fix pending probe confirmation)
+- **Status:** fix-implemented-verification-pending (2026-11-27 W2-4: findings 1-3 & `probe_events_len` `pub` fixed in source; host specs PASS; waiting-for QEMU CLASSOK serial probe)
 - **Date:** 2026-07-06
 - **Where seen:** `examples/09_embedded/simple_os/arch/x86_64/wm_entry.spl:14-17` — instantiating a class imported from a shared module (e.g. `os.gui.shortcut.ShortcutHandler`) inside an x86_64 `--entry-closure` baremetal kernel faults at runtime. Workaround so far: procedural duplication (the 3603-line WM), factory free-functions in the defining module (`create_fb_engine`), and integer action codes instead of shared enums (arm64 `wm_entry_io`).
 - **Impact:** blocks sharing `src/os/compositor` classes (`HostCompositor`, `CompositorBackend` trait impls) into the QEMU guest WM.
@@ -143,3 +143,92 @@ backend-codegen implementation pass is required before finding 1's symptom
 disappears. Freestanding/board verification of the link-stage change itself
 remains pending per the board-runnable rule (no QEMU/board boot attempted
 this pass).
+
+**Revalidated 2026-11-02: still plausible because INVESTIGATING (root-cause candidates verified in binary artifacts; fix pending probe confirmation); no merged fix commit with a passing regression is cited in this doc.**
+
+## Re-verification 2026-11-07 (work/simpleos-p1-codegen-20261107) — findings 1-3 do not reproduce on current seed; finding 4 and board run unverified
+
+New seed test
+`src/compiler_rust/compiler/tests/baremetal_entry_closure_imported_class_x86_64_none.rs`
+builds this record's probe shape (shared module: scalar global read by a
+static ctor, heap-typed `[u64] = []` global pushed by a `me` method; entry
+module instantiates the imported class) through `NativeProjectBuilder` with
+`--entry-closure --target x86_64-unknown-none --backend cranelift
+--opt-level=aggressive --emit-archive` and inspects every archive member:
+
+- finding 1: `__module_init_class_probe` is DEFINED (plus the
+  `__simple_call_module_inits` aggregator) — the heap-typed global gets an
+  initializer (`codegen/common_backend.rs::generate_module_init` +
+  `native_project/module_global_init.rs`).
+- findings 2/3: every non-`rt_*` undefined reference
+  (`class_probe__ProbeCounter_dot_new`, `..._dot_bump`,
+  `class_probe__probe_events_len`, ...) has a matching definition in the
+  closure under one mangling, so nothing falls through to an `auto_stubs.c`
+  weak NIL stub.
+
+`cargo test --release -p simple-compiler --test baremetal_entry_closure_imported_class_x86_64_none`
+-> 1 passed. No product code changed (no red state existed to fix).
+
+Unverified: finding 4 (field-layout ordering) is not exercised at runtime by
+this static check, and the real `class_fault_probe_entry.spl` QEMU/board run
+(S1..S5/CLASSOK) was not performed (no QEMU-system/board in this session).
+Status stays INVESTIGATING until that run is done.
+
+These tests are local-only: CI `rust-tests.yml:112` excludes `simple-compiler`
+from `cargo test`, and they need clang/ld.lld (X86 target) and `qemu-x86_64`.
+
+## 2026-11-12 fix attempt (baremetal lane, work/fix-baremetal-20261112)
+
+Reviewed at 7a06b4aafd5 within the lane's file scope
+(`examples/09_embedded/simple_os/**` + baremetal runtime C; src/compiler and
+src/app are out of scope):
+
+- **No new in-scope fix landed.** Per the 2026-11-07 re-verification,
+  findings 1-3 (module-init emission, weak-NIL-stub binding, dual mangling)
+  do not reproduce on the current seed's static archive inspection; the
+  remaining candidates are finding 4 (per-module MIR field-map ordering —
+  compiler, out of scope) and the runtime QEMU CLASSOK probe.
+- **Probe entry intact.** `class_fault_probe_entry.spl` and the S1..S5/CLASSOK
+  markers are present. `crt0.s:323-328` still calls
+  `__simple_call_module_inits` via `.weak` — which now resolves to the real
+  link-stage aggregator from the 2026-07-17 fix instead of staying
+  permanently unresolved.
+- **Verification blocked:** the QEMU probe needs a native `--entry-closure`
+  kernel build; the host has no admitted/working compiler for current source
+  (Oct-31 seed predates current src/lib; Nov-7 stage2 fails MIR lowering), and
+  the lane scripts are Linux-oriented. One concrete observation from this
+  lane's ssh_ring3 audit: dangling externs (e.g.
+  `simpleos_fat32_note_preload_size`, fixed in this lane) silently bind to
+  weak NIL stubs — the same hazard as finding 2 — so any future probe build
+  should diff undefined non-`rt_*` symbols against auto_stubs.c before boot.
+
+**Status: OPEN** (INVESTIGATING; QEMU CLASSOK run + finding 4 pending an
+admitted compiler). DB row updated.
+
+## Fix verification
+
+2026-11-12, worktree simple-lfix-baremetal-entry-20261112 (branch work/lfix-baremetal-entry-20261112).
+
+The bug's own regression spec `test/01_unit/compiler/50.mir/entry_closure_imported_class_probe_symbols_spec.spl` was RED on current origin/release/1.0.0 (5/6, seed bootstrap binary): the staged W-HIR-PRIVATE-IMPORT-001 check (2026-11-09/12) flagged the probe entry's cross-directory import of the bare private fn `probe_events_len` in `src/os/gui/class_probe.spl`, and the spec treats any recorded HIR diagnostic as fatal. The worker `--mode=interpreter` argv injection named in the Repro section was already removed upstream (d307a06141b, 2026-07-06). Fix: promote `probe_events_len` to `pub` (same remedy as the 49 promotions in 42001d49e74), which also un-warnings the real probe entry `class_fault_probe_entry.spl`. Results (seed, hosted): probe spec 6/6 PASS; neighbors private_fn_import_cross_module_visibility 7/7, cross_module_unimported_method_surface 4/4, imported_module_val_const 7/7. QEMU CLASSOK run still pending an admitted native compiler.
+
+## Triage note 2026-11-25 (release/1.0.0 @ 76fa786a2b3, worktree wt-p1w1-aa) — remains OPEN, blocked as recorded
+
+Nothing in this lane's environment changes the 2026-11-12 status: the two
+outstanding items are (a) the QEMU `class_fault_probe_entry.spl` CLASSOK run
+and (b) finding 4 (per-module MIR field-map ordering). Both need an admitted
+native `--entry-closure` compiler for current source plus QEMU — neither
+exists on this Windows host (the pinned `bin/simple.exe` is the Rust seed
+v1.0.0-rc.1, and the known `@representation_boundary` source/binary
+inconsistency at HEAD blocks even repo spec runs, let alone a freestanding
+kernel build). The 2026-11-07 static re-verification (findings 1-3 do not
+reproduce) and the 2026-11-12 probe-spec fix (6/6 PASS) stand as the latest
+evidence. The status header (OPEN / INVESTIGATING) is accurate; no code
+change.
+
+## W2-4 Update (2026-11-27) — Host runtime contract verified; `fix-implemented-verification-pending`
+
+- **Source verification:** `src/app/cli/native_build_main.spl` contains zero `--mode=interpreter` worker argument injection; `examples/09_embedded/simple_os/arch/x86_64/boot/crt0.s:323-328` calls `__simple_call_module_inits`; `probe_events_len` in `src/os/gui/class_probe.spl:33` is `pub`.
+- **Host unit specs:**
+  - Added `test/01_unit/os/gui/class_probe_imported_class_spec.spl` exercising `ShortcutHandler` (`alt_held` press/release + `Alt+F4` -> `WmAction.Close`) and `ProbeCounter` + `probe_events_len()` -> `2 total, 2 passed, 0 failed`.
+  - Re-ran `test/01_unit/compiler/50.mir/entry_closure_imported_class_probe_symbols_spec.spl --mode=interpreter` -> `6 total, 6 passed, 0 failed`.
+- **Waiting-for:** native x86_64 `--entry-closure` build and QEMU `CLASSOK` serial probe of `examples/09_embedded/simple_os/arch/x86_64/class_fault_probe_entry.spl` (and a compiler-lane MIR field-map ordering investigation if S3 still fails under QEMU).

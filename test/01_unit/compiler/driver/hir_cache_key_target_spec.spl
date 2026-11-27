@@ -1,0 +1,48 @@
+use std.spec.*
+use compiler.driver.driver_hir_cache.{hir_cache_key}
+use std.io_runtime.{env_get, env_set, env_remove_process}
+
+val SRC = "test/fixtures/compiler/hir_cache_source_identity/left.spl"
+val CLOSURE = "same-frozen-closure"
+
+# Run `body_key` with an env var set, then restore its exact prior state
+# (unset when it was previously absent).
+fn _with_env(name: text, value: text) -> text:
+    val old = env_get(name)
+    env_set(name, value)
+    val key = hir_cache_key(SRC, CLOSURE, false)
+    _restore_env(name, old)
+    key
+
+fn _restore_env(name: text, old: text?):
+    if old.?:
+        env_set(name, old ?? "")
+    else:
+        env_remove_process(name)
+
+describe "HIR cache key folds the compile target":
+    it "gives different keys for different env targets":
+        val linux = _with_env("SIMPLE_NATIVE_BUILD_TARGET", "x86_64-unknown-linux-gnu")
+        val win = _with_env("SIMPLE_NATIVE_BUILD_TARGET", "x86_64-pc-windows-msvc")
+        val arm = _with_env("SIMPLE_NATIVE_BUILD_TARGET", "aarch64-unknown-linux-gnu")
+        expect(linux.len()).to_equal(64)
+        expect(linux == win).to_equal(false)
+        expect(linux == arm).to_equal(false)
+
+    it "gives equal keys for the same target":
+        expect(_with_env("SIMPLE_NATIVE_BUILD_TARGET", "x86_64-unknown-linux-gnu")).to_equal(_with_env("SIMPLE_NATIVE_BUILD_TARGET", "x86_64-unknown-linux-gnu"))
+
+    it "gives different keys when only the enabled feature set differs":
+        val off = _with_env("SIMPLE_FEATURES", "")
+        val on = _with_env("SIMPLE_FEATURES", "macho")
+        expect(off.len()).to_equal(64)
+        expect(off == on).to_equal(false)
+
+    it "gives different keys for different explicit native targets under the same env":
+        val linux = hir_cache_key(SRC, CLOSURE, false, "", "x86_64-unknown-linux-gnu")
+        val win = hir_cache_key(SRC, CLOSURE, false, "", "x86_64-pc-windows-msvc")
+        val unset = hir_cache_key(SRC, CLOSURE, false)
+        expect(linux.len()).to_equal(64)
+        expect(linux == win).to_equal(false)
+        expect(linux == unset).to_equal(false)
+        expect(hir_cache_key(SRC, CLOSURE, false, "", "x86_64-unknown-linux-gnu")).to_equal(linux)

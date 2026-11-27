@@ -1,0 +1,80 @@
+# boot_link_cli — the option front end of scripts/check/baremetal-simple-link.spl
+#
+# Fixtures: test/fixtures/linker/elf/aarch64_boot/ (start_a64.o, lib_a64.o,
+# lib_a64.a = llvm-ar rcsD of lib_a64.o, objects_start_lib.txt = their two
+# paths, inc_via_libdir.ld = fs_exec_linker.ld
+# with its INCLUDE reduced to the bare "linker_arm_common.ld").
+#
+# @cover src/compiler/70.backend/linker/elf/boot_link_cli.spl
+
+use compiler.backend.linker.elf.boot_link_cli.{boot_link_cli_parse, boot_link_cli_run}
+
+val CLI_FIX: text = "test/fixtures/linker/elf/aarch64_boot"
+val CLI_LDS: text = "examples/09_embedded/simple_os/arch/arm64/fs_exec_linker.ld"
+val CLI_COMMON: text = "examples/09_embedded/simple_os/arch/common"
+
+fn cli_entry(bytes: [i64]) -> i64:
+    var v: i64 = 0
+    var i: i64 = 7
+    while i >= 0:
+        v = (v << 8) | bytes[24 + i]
+        i = i - 1
+    v
+
+describe "boot_link_cli_parse":
+    it "keeps the positional form and reads every option":
+        val o = boot_link_cli_parse(["aarch64", "k.ld", "k.elf", "--gc-sections", "-L", "d",
+            "--defsym", "a=b", "--archive", "r.a", "x.o", "y.o"])
+        expect(o.error).to_equal("")
+        expect(o.output).to_equal("k.elf")
+        expect(o.gc_sections).to_equal(true)
+        expect(o.lib_dirs).to_equal(["d"])
+        expect(o.defsyms).to_equal(["a=b"])
+        expect(o.archives).to_equal(["r.a"])
+        expect(o.objects).to_equal(["x.o", "y.o"])
+
+    it "rejects unknown options and malformed --defsym":
+        expect(boot_link_cli_parse(["aarch64", "k.ld", "k.elf", "--bogus", "x.o"]).error).to_contain("unknown option")
+        expect(boot_link_cli_parse(["aarch64", "k.ld", "k.elf", "--defsym", "ab", "x.o"]).error).to_contain("name=target")
+
+describe "boot_link_cli_run":
+    it "accepts i386 and i686 aliases and emits ELF32":
+        val fixture = "test/fixtures/linker/elf/i386_boot"
+        for arch in ["i386", "i686"]:
+            val r = boot_link_cli_run([arch, "{fixture}/i386_boot.ld", "k.elf",
+                "{fixture}/start_i386.o", "{fixture}/lib_i386.o"])
+            expect(r.rc).to_equal(0)
+            expect(r.bytes[4]).to_equal(1)
+            expect(r.bytes[18]).to_equal(3)
+
+    it "links the arm64 kernel script with --gc-sections at the ld.lld entry":
+        val r = boot_link_cli_run(["aarch64", CLI_LDS, "k.elf", "--gc-sections",
+            "{CLI_FIX}/start_a64.o", "{CLI_FIX}/lib_a64.o"])
+        expect(r.rc).to_equal(0)
+        expect(cli_entry(r.bytes)).to_equal(0x40200000)
+
+    it "resolves a bare INCLUDE through -L":
+        val bad = boot_link_cli_run(["aarch64", "{CLI_FIX}/inc_via_libdir.ld", "k.elf",
+            "{CLI_FIX}/start_a64.o", "{CLI_FIX}/lib_a64.o"])
+        expect(bad.rc).to_equal(1)
+        val r = boot_link_cli_run(["aarch64", "{CLI_FIX}/inc_via_libdir.ld", "k.elf", "-L", CLI_COMMON,
+            "{CLI_FIX}/start_a64.o", "{CLI_FIX}/lib_a64.o"])
+        expect(r.rc).to_equal(0)
+
+    it "pulls archive members on demand":
+        val r = boot_link_cli_run(["aarch64", CLI_LDS, "k.elf", "--archive", "{CLI_FIX}/lib_a64.a",
+            "{CLI_FIX}/start_a64.o"])
+        expect(r.rc).to_equal(0)
+
+    it "reports each undefined symbol once, on its own line":
+        val r = boot_link_cli_run(["aarch64", CLI_LDS, "k.elf", "--gc-sections", "{CLI_FIX}/start_a64.o"])
+        expect(r.rc).to_equal(1)
+        expect(r.undefined.contains("lib_fn")).to_equal(true)
+        expect(r.lines.contains("simple-link: undefined symbol: lib_fn")).to_equal(true)
+
+    it "reads objects from --objects-list":
+        val r = boot_link_cli_run(["aarch64", CLI_LDS, "k.elf", "--gc-sections",
+            "--objects-list", "{CLI_FIX}/objects_start_lib.txt"])
+        expect(r.rc).to_equal(0)
+        expect(cli_entry(r.bytes)).to_equal(0x40200000)
+        expect(boot_link_cli_run(["aarch64", CLI_LDS, "k.elf", "--objects-list", "{CLI_FIX}/none.txt"]).rc).to_equal(1)

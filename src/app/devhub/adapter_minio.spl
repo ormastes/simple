@@ -5,10 +5,14 @@
 # Returns (success: bool, parsed: T, raw_text: text) per ITF adapter pattern.
 
 use std.common.crypto.types.{rotr32}
-use std.nogc_sync_mut.env.{env_get}
-use std.nogc_sync_mut.file_system.file_ops.{file_read_text, file_exists}
-use std.nogc_sync_mut.io.http_client_core.{rt_http_request, rt_http_download}
-use std.nogc_sync_mut.aws_sigv4.{
+use std.env.{env_get}
+use std.io.file_ops.{file_exists, file_read_regular_no_follow_bounded_bytes}
+use std.io_runtime.{read_file_text_result}
+use std.io.http_client_core.{rt_http_request, rt_http_download, http_request_v2_raw}
+use std.common.crypto.sha256.{sha256_u8_fast_hex}
+use std.common.encoding.external_text.{bytes_to_text_checked}
+use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
+use std.aws_sigv4.{
     SIGV4_EMPTY_SHA256, SIGV4_UNSIGNED_PAYLOAD,
     SigV4Header, SigV4QueryParam,
     sigv4_sha256_hex, sigv4_uri_encode, sigv4_canonical_query,
@@ -85,9 +89,9 @@ fn load_minio_config() -> MinioConfig:
     val path = auth_read_path()
     if not file_exists(path):
         return MinioConfig.default()
-    val content = file_read_text(path)
-    if content == nil:
-        return MinioConfig.default()
+    val content: text = match read_file_text_result(path):
+        case Ok(bound): bound
+        case Err(_): return MinioConfig.default()
     # NOTE: tls_skip_verify enforcement lives at the command boundary
     # (cmd_minio._require_transport), not here — this loader stays a pure
     # parser so config-parsing specs can assert on it directly. Memory note:
@@ -276,17 +280,17 @@ fn _xml_first_inner(body: text, tag: text, start: i64) -> (text, i64):
     val open = "<" + tag + ">"
     val close = "</" + tag + ">"
     val from = if start < 0: 0 else: start
-    val rest = body[from:]
+    val rest = body.substring(from)
     val a = rest.find(open)
     if a < 0:
         return ("", -1)
     val abs_a = from + a
-    val rest2 = body[abs_a + open.len():]
+    val rest2 = body.substring(abs_a + open.byte_len())
     val b = rest2.find(close)
     if b < 0:
         return ("", -1)
-    val inner = rest2[0:b]
-    val end = abs_a + open.len() + b + close.len()
+    val inner = rest2.substring(0, b)
+    val end = abs_a + open.byte_len() + b + close.byte_len()
     (inner, end)
 
 fn _xml_first(body: text, tag: text) -> text:
@@ -301,11 +305,11 @@ fn _xml_extract_all_inner(body: text, parent_tag: text, child_tag: text) -> [tex
     val a = body.find(open_p)
     if a < 0:
         return out
-    val rest = body[a + open_p.len():]
+    val rest = body.substring(a + open_p.byte_len())
     val end = rest.find(close_p)
     if end < 0:
         return out
-    var scope = rest[0:end]
+    var scope = rest.substring(0, end)
     var pos = 0
     while true:
         val (inner, np) = _xml_first_inner(scope, child_tag, pos)
@@ -336,11 +340,11 @@ fn _parse_list_buckets_xml(body: text) -> [BucketInfo]:
     val a = body.find(buckets_open)
     if a < 0:
         return out
-    val rest = body[a + buckets_open.len():]
+    val rest = body.substring(a + buckets_open.byte_len())
     val end = rest.find(buckets_close)
     if end < 0:
         return out
-    var scope = rest[0:end]
+    var scope = rest.substring(0, end)
     var pos = 0
     while true:
         val (inner, np) = _xml_first_inner(scope, "Bucket", pos)
@@ -359,6 +363,8 @@ fn minio_list_buckets(cfg: MinioConfig) -> (bool, [BucketInfo], text):
     val mapped = map_s3_error(resp.status, resp.body, resp.error)
     if mapped.kind != "ok":
         return (false, [], mapped.message)
+    if not resp.body.contains("</ListAllMyBucketsResult>"):
+        return (false, [], "invalid S3 response: not a complete ListAllMyBucketsResult")
     (true, _parse_list_buckets_xml(resp.body), resp.body)
 
 
@@ -382,7 +388,7 @@ class ListObjectsResult:
 fn _parse_size(s: text) -> i64:
     var n: i64 = 0
     var i = 0
-    while i < s.len():
+    while i < s.byte_len():
         val ch = s.char_code_at(i)
         if ch >= 48 and ch <= 57:
             n = n * 10 + (ch - 48)
@@ -426,6 +432,8 @@ fn minio_list_objects(cfg: MinioConfig, bucket: text, prefix: text) -> (bool, [O
         val mapped = map_s3_error(resp.status, resp.body, resp.error)
         if mapped.kind != "ok":
             return (false, all, mapped.message)
+        if not resp.body.contains("</ListBucketResult>"):
+            return (false, all, "invalid S3 response: not a complete ListBucketResult")
         raw_last = resp.body
         val page = _parse_list_objects_xml(resp.body)
         for obj in page.objects:
@@ -443,10 +451,40 @@ fn minio_list_objects(cfg: MinioConfig, bucket: text, prefix: text) -> (bool, [O
 # GetObject (text body) and streaming download (binary)
 # ---------------------------------------------------------------------------
 
+val MINIO_INVALID_UTF8_PREFIX = "object body is invalid UTF-8"
+
 class GetObjectResult:
     body: text          # text body for small/text objects
     content_length: i64 # always populated; -1 if unknown
     etag: text
+
+
+fn _minio_header_value(raw_headers: text, name: text) -> text:
+    """First value of a header in a raw response block; "" when absent."""
+    val prefix = name.lower() + ":"
+    for line in raw_headers.split("\n"):
+        if line.trim().lower().starts_with(prefix):
+            return line.trim()[prefix.len():].trim()
+    ""
+
+
+fn _minio_get_checked(url: text, headers: [text]) -> (i64, text, text):
+    """GET that treats a short body as a transport error. rt_http_request turns a
+    failed body read into an empty success and exposes no headers, so a truncated
+    object looked like a valid empty one. v2 exposes both sides of the comparison."""
+    # Typed: the runtime rejects an untyped empty array as "body must be bytes".
+    val no_body: [u8] = []
+    val response: (i64, text, text, [u8], text) = http_request_v2_raw("GET", url, headers, no_body, 30000)
+    if response.0 == -1:
+        return (0, "", response.4)
+    val received: [u8] = response.3
+    val declared = _minio_header_value(response.2, "Content-Length")
+    if declared != "" and declared != "{received.len()}":
+        return (0, "", "truncated response: Content-Length {declared}, received {received.len()} bytes")
+    # Fail closed: lossy decoding would hand binary objects to text callers corrupted.
+    match validated_utf8_bytes_to_text_linear(received):
+        case Ok(decoded): (response.0, decoded, "")
+        case Err(why): (0, "", "{MINIO_INVALID_UTF8_PREFIX}: {why}; use minio_download for binary objects")
 
 
 fn minio_get_object(cfg: MinioConfig, bucket: text, key: text, range_header: text) -> (bool, GetObjectResult, text):
@@ -481,11 +519,13 @@ fn minio_get_object(cfg: MinioConfig, bucket: text, key: text, range_header: tex
     var body = ""
     var err = ""
     while attempt < ITF_RETRY_MAX_ATTEMPTS:
-        val r = rt_http_request("GET", "{cfg.url}{canonical_uri}", sffi, "")
+        val r = _minio_get_checked("{cfg.url}{canonical_uri}", sffi)
         status = r.0
         body = r.1
         err = r.2
         attempt = attempt + 1
+        if err.starts_with(MINIO_INVALID_UTF8_PREFIX):
+            break
         if not itf_should_retry(status, err) or attempt >= ITF_RETRY_MAX_ATTEMPTS:
             break
         itf_retry_wait(attempt - 1, "")
@@ -493,7 +533,7 @@ fn minio_get_object(cfg: MinioConfig, bucket: text, key: text, range_header: tex
     val empty = GetObjectResult(body: "", content_length: -1, etag: "")
     if mapped.kind != "ok":
         return (false, empty, mapped.message)
-    (true, GetObjectResult(body: body, content_length: body.len(), etag: ""), body)
+    (true, GetObjectResult(body: body, content_length: body.byte_len(), etag: ""), body)
 
 
 fn minio_download(cfg: MinioConfig, bucket: text, key: text, dest_path: text, expires: i64) -> (bool, i64, text):
@@ -648,12 +688,9 @@ fn minio_delete_object(cfg: MinioConfig, bucket: text, key: text) -> (bool, text
 # ---------------------------------------------------------------------------
 # PutObject
 #
-# IMPORTANT LIMITATION (recorded per issue #10 follow-up):
-#   `rt_http_request` takes `body: text`, which is UTF-8. Binary PUTs (e.g. FW
-#   images) cannot round-trip through `text` losslessly. We therefore expose
-#   `minio_put_text` for text/JSON/XML bodies (≤64 MiB) and reject binary PUTs
-#   with a clear error. Multipart upload + binary streaming PUT require a new
-#   `rt_http_request_bytes`/`rt_http_upload_raw` SFFI — see TODO below.
+# Legacy text requests remain available. Binary uploads use the already-owned
+# v2 HTTP byte-array API, preserving NUL and non-UTF-8 octets without conversion.
+# Both single-request APIs are limited to 64 MiB; multipart is a separate feature.
 # ---------------------------------------------------------------------------
 
 fn minio_put_text(cfg: MinioConfig, bucket: text, key: text, body: text, content_type: text) -> (bool, text, text):
@@ -661,7 +698,7 @@ fn minio_put_text(cfg: MinioConfig, bucket: text, key: text, body: text, content
 
     Returns (success, etag_or_empty, raw_response_body_or_error).
     """
-    if body.len() > MINIO_MULTIPART_THRESHOLD:
+    if body.byte_len() > MINIO_MULTIPART_THRESHOLD:
         return (false, "", "minio_put_text: body exceeds {MINIO_MULTIPART_THRESHOLD} bytes — multipart not yet implemented (issue #10 follow-up)")
     val canonical_uri = _build_object_path(bucket, key)
     val amz_dt = _amz_datetime_now()
@@ -671,7 +708,7 @@ fn minio_put_text(cfg: MinioConfig, bucket: text, key: text, body: text, content
     val ct = if content_type == "": "application/octet-stream" else: content_type
 
     var sig_headers: [SigV4Header] = []
-    sig_headers = sig_headers + [SigV4Header(name: "content-length", value: "{body.len()}")]
+    sig_headers = sig_headers + [SigV4Header(name: "content-length", value: "{body.byte_len()}")]
     sig_headers = sig_headers + [SigV4Header(name: "content-type", value: ct)]
     sig_headers = sig_headers + [SigV4Header(name: "host", value: host)]
     sig_headers = sig_headers + [SigV4Header(name: "x-amz-content-sha256", value: payload_hash)]
@@ -685,7 +722,7 @@ fn minio_put_text(cfg: MinioConfig, bucket: text, key: text, body: text, content
     var sffi: [text] = []
     sffi = sffi + ["Host: {host}"]
     sffi = sffi + ["Content-Type: {ct}"]
-    sffi = sffi + ["Content-Length: {body.len()}"]
+    sffi = sffi + ["Content-Length: {body.byte_len()}"]
     sffi = sffi + ["x-amz-content-sha256: {payload_hash}"]
     sffi = sffi + ["x-amz-date: {amz_dt}"]
     sffi = sffi + ["Authorization: {auth}"]
@@ -799,18 +836,69 @@ fn minio_delete_bucket(cfg: MinioConfig, bucket: text) -> (bool, text):
     (true, "")
 
 
-fn minio_put_object(cfg: MinioConfig, bucket: text, key: text, local_path: text) -> (bool, text, text):
-    """PUT a local file as an object.
+fn _minio_binary_payload_hash(body: [u8]) -> text:
+    sha256_u8_fast_hex(body)
 
-    BLOCKER (issue #10 follow-up): the existing `rt_http_request`/`rt_http_upload`
-    SFFI does not support raw-bytes PUT bodies — `rt_http_request` body is `text`
-    (UTF-8) and `rt_http_upload` is multipart/form-data. Until a `rt_http_put_file`
-    or `rt_http_request_bytes` SFFI lands, this returns a clear error rather than
-    silently corrupting binary uploads. Small text files can use `minio_put_text`.
+fn minio_put_bytes(cfg: MinioConfig, bucket: text, key: text, body: [u8], content_type: text) -> (bool, text, text):
+    """Lossless bounded binary PUT through native HTTP or the real curl transport."""
+    if body.len() > MINIO_MULTIPART_THRESHOLD:
+        return (false, "", "minio_put_bytes: body exceeds {MINIO_MULTIPART_THRESHOLD} bytes; multipart upload required")
+    val canonical_uri = _build_object_path(bucket, key)
+    val amz_dt = _amz_datetime_now()
+    val host = _host_from_url(cfg.url)
+    val payload_hash = _minio_binary_payload_hash(body)
+    val ct = if content_type == "": "application/octet-stream" else: content_type
+    val sig_headers: [SigV4Header] = [
+        SigV4Header(name: "content-length", value: "{body.len()}"),
+        SigV4Header(name: "content-type", value: ct),
+        SigV4Header(name: "host", value: host),
+        SigV4Header(name: "x-amz-content-sha256", value: payload_hash),
+        SigV4Header(name: "x-amz-date", value: amz_dt)
+    ]
+    val auth = sigv4_authorization_header("PUT", canonical_uri, "", sig_headers,
+        payload_hash, cfg.access_key, cfg.secret_key, cfg.region, MINIO_SERVICE, amz_dt)
+    val headers: [text] = ["Host: {host}", "Content-Type: {ct}",
+        "Content-Length: {body.len()}", "x-amz-content-sha256: {payload_hash}",
+        "x-amz-date: {amz_dt}", "Authorization: {auth}"]
+    var attempt = 0
+    var status = 0
+    var response_body = ""
+    var transport_error = ""
+    var body_error = ""
+    while attempt < ITF_RETRY_MAX_ATTEMPTS:
+        body_error = ""
+        val response: (i64, text, text, [u8], text) = http_request_v2_raw(
+            "PUT", "{cfg.url}{canonical_uri}", headers, body, 30000)
+        status = response.0
+        val response_bytes: [u8] = response.3
+        transport_error = response.4
+        match bytes_to_text_checked(response_bytes):
+            case Ok(t): response_body = t
+            case Err(_):
+                response_body = ""
+                body_error = "S3 response body is not valid UTF-8"
+        attempt = attempt + 1
+        if not itf_should_retry(status, transport_error) or attempt >= ITF_RETRY_MAX_ATTEMPTS:
+            break
+        itf_retry_wait(attempt - 1, "")
+    val mapped = map_s3_error(status, response_body, transport_error)
+    if mapped.kind != "ok":
+        return (false, "", mapped.message)
+    if body_error != "":
+        return (false, "", body_error)
+    (true, "", response_body)
+
+fn minio_put_object(cfg: MinioConfig, bucket: text, key: text, local_path: text) -> (bool, text, text):
+    """PUT raw file bytes without interpreting or re-encoding them as UTF-8.
+
+    The admitted read refuses symlinks, nonregular files and bodies over the
+    current single-request limit. Empty files are successful zero-byte bodies.
     """
-    if not file_exists(local_path):
-        return (false, "", "local file not found: {local_path}")
-    (false, "", "minio_put_object: binary PUT not yet implemented — needs raw-bytes HTTP SFFI (issue #10 follow-up). Workaround: `itf minio presign-put {bucket} {key}` then PUT the file's raw bytes to that URL with curl/any HTTP client. Use minio_put_text for ≤64 MiB text bodies instead.")
+    val body: [u8] = match file_read_regular_no_follow_bounded_bytes(local_path, MINIO_MULTIPART_THRESHOLD):
+        case Ok(bound): bound
+        case Err(reason): return (false, "", reason)
+    minio_put_bytes(cfg, bucket, key, body, "application/octet-stream")
+
 
 
 # ---------------------------------------------------------------------------

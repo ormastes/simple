@@ -1,0 +1,49 @@
+# @cover scripts/check/validate-wm-browser-event-routing-proof.js 40%
+"""
+## Purpose and audience
+Verifies `productionEnvelopeArtifact()` in
+`scripts/check/validate-wm-browser-event-routing-proof.js` reports `missing`
+rather than `invalid-envelope` when `production_envelope_path` is absent, empty,
+or whitespace-only (preventing `path.resolve('')` from resolving the repo cwd).
+
+## Operator workflow
+```sh
+SIMPLE_LIB=src bin/simple test test/01_unit/scripts/validate_wm_browser_event_routing_proof_spec.spl --mode=interpreter
+```
+"""
+
+use std.io_runtime.{dir_create_all, dir_remove_all, file_write_exact, process_run}
+use std.spec.*
+
+fn _run_validator(proof_path: text) -> (text, i64):
+    val (stdout, _stderr, code) = process_run("node", ["scripts/check/validate-wm-browser-event-routing-proof.js", proof_path])
+    (stdout, code)
+
+describe "WM browser event-routing proof validator envelope handling":
+
+    it "reports missing instead of invalid-envelope for empty or whitespace envelope paths":
+        # @req REQ-SCRIPTS-WM-ENVELOPE-001
+        val root = "build/test-unit-wm-browser-envelope"
+        val _removed = dir_remove_all(root)
+        expect(dir_create_all(root)).to_equal(true)
+
+        step("Write fixtures with omitted, empty, and whitespace production_envelope_path")
+        expect(file_write_exact(root + "/omitted.json", "{{\"pass\":true}}")).to_equal(true)
+        expect(file_write_exact(root + "/empty.json", "{{\"pass\":true,\"production_envelope_path\":\"\"}}")).to_equal(true)
+        expect(file_write_exact(root + "/blank.json", "{{\"pass\":true,\"production_envelope_path\":\"   \"}}")).to_equal(true)
+        expect(file_write_exact(root + "/dir_path.json", "{{\"pass\":true,\"production_envelope_path\":\"" + root + "\"}}")).to_equal(true)
+
+        val (omitted, c1) = _run_validator(root + "/omitted.json")
+        val (empty, c2) = _run_validator(root + "/empty.json")
+        val (blank, c3) = _run_validator(root + "/blank.json")
+        val (dir_path, c4) = _run_validator(root + "/dir_path.json")
+        expect(c1).to_equal(1)
+        expect(c2).to_equal(1)
+        expect(c3).to_equal(1)
+        expect(c4).to_equal(1)
+
+        step("Verify validator reports missing production envelope artifact instead of cwd resolution")
+        expect(omitted).to_contain("wm_browser_event_routing_production_envelope_artifact_status=missing")
+        expect(empty).to_contain("wm_browser_event_routing_production_envelope_artifact_status=missing")
+        expect(blank).to_contain("wm_browser_event_routing_production_envelope_artifact_status=missing")
+        expect(dir_path).to_contain("wm_browser_event_routing_production_envelope_artifact_status=invalid-envelope")

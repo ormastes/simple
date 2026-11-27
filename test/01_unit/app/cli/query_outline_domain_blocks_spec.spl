@@ -2,13 +2,33 @@ use std.spec
 use std.common.spec.evidence.untyped_capture.{UntypedCapture, untyped_capture_to_canonical}
 use std.common.spec.evidence.model.{EvidenceStatus, oracle_spec, check_exact}
 use std.common.spec.evidence.evidence_comparator.{compare_evidence}
+use std.io_runtime.{env_get, env_set, cwd, dir_create_all, file_exists, file_write, dir_remove_all}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
+use std.nogc_sync_mut.fs.host_path.{host_path_canonical}
 
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 
+fn _outline_simple_bin() -> text:
+    if file_exists("bin/simple.exe"):
+        return "bin/simple.exe"
+    if file_exists("bin/simple"):
+        return "bin/simple"
+    env_get("SIMPLE_BINARY") ?? "bin/simple"
+
 describe "query outline domain blocks":
     it "exposes top-level domain blocks in the outline surface":
-        val script = "p=/tmp/simple_query_outline_domain_probe.spl; printf 'use app.cli.query_outline.{OutlineOptions, parse_outline_source}\\nfn main():\\n    val source = \"schemaBlock\\\\nstyleBlock\\\\nval schema = 1\\\\n\"\\n    val outline = parse_outline_source(source, OutlineOptions(parent_for_types: true, include_import_symbols: false, include_fields: true, extract_binding_types: false))\\n    print(outline[0].name)\\n    print(outline[0].token_start)\\n    print(outline[0].token_end)\\n    print(outline[1].name)\\n    print(outline[1].token_start)\\n    print(outline[1].token_end)\\n    print(outline[2].name)\\n    print(outline[2].token_start)\\n    print(outline[2].token_end)\\n' > $p; SIMPLE_LIB=src bin/simple run $p"
-        val (out, _err, code) = rt_process_run("/bin/sh", ["-c", script])
+        val test_root = cwd() + "/build/test"
+        val _mk = dir_create_all(test_root)
+        val parent = host_path_canonical(test_root)
+        val work = secure_temp_dir(parent, "simple_query_outline_domain").unwrap()
+        val probe = work + "/probe.spl"
+        val body = "use app.cli.query_outline.{OutlineOptions, parse_outline_source}\nfn main():\n    val source = \"schemaBlock\\nstyleBlock\\nval schema = 1\\n\"\n    val outline = parse_outline_source(source, OutlineOptions(parent_for_types: true, include_import_symbols: false, include_fields: true, extract_binding_types: false))\n    print(outline[0].name)\n    print(outline[0].token_start)\n    print(outline[0].token_end)\n    print(outline[1].name)\n    print(outline[1].token_start)\n    print(outline[1].token_end)\n    print(outline[2].name)\n    print(outline[2].token_start)\n    print(outline[2].token_end)\n"
+        expect(file_write(probe, body)).to_equal(true)
+        val old_lib = env_get("SIMPLE_LIB") ?? ""
+        val _set = env_set("SIMPLE_LIB", "src")
+        val (out, _err, code) = rt_process_run(_outline_simple_bin(), ["run", probe])
+        val _restore = env_set("SIMPLE_LIB", old_lib)
+        val _cleanup = dir_remove_all(work)
 
         expect(code).to_equal(0)
         expect(out).to_contain("schema" + "{}")

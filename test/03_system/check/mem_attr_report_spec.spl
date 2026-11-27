@@ -38,22 +38,24 @@ owner's name in the top-N report text.
 """
 
 use std.spec.*
-use std.io_runtime.{process_run, env_get}
+use std.io_runtime.{file_exists, process_run, env_get}
+use std.nogc_sync_mut.io.process_ops.{resolve_shell_argv}
 
 extern fn rt_mem_attr_enabled() -> i64
 extern fn rt_mem_attr_report(n: i64) -> text
 
 val FIXTURE = "test/fixture/memstat/attr_workload.spl"
 
-# Mirrors the SIMPLE_TEST_BINARY override convention used elsewhere in the
-# system suite (e.g. doctest_lane_symmetry_contract_spec.spl): defaults to the
-# deployed self-hosted bin/simple, but honors an explicit override so this
-# spec can also be verified against a bootstrap seed binary without editing
-# the file.
+# Mirrors the SIMPLE_TEST_BINARY / SIMPLE_BINARY override convention used
+# elsewhere in the system suite: defaults to deployed bin/simple, honoring an
+# explicit override so this spec can run against a bootstrap seed or candidate.
 fn contract_binary() -> text:
     val override = env_get("SIMPLE_TEST_BINARY")
     if override != "" and override != nil:
-        return override
+        return override.replace("\\", "/")
+    val bin_override = env_get("SIMPLE_BINARY")
+    if bin_override != "" and bin_override != nil:
+        return bin_override.replace("\\", "/")
     "bin/simple"
 
 # Forced to the interpreter engine: under the Cranelift JIT the extern
@@ -65,7 +67,8 @@ fn contract_binary() -> text:
 # preserves the owner name correctly, which is what this spec checks.
 fn run_with(binary: text) -> (text, text, i64):
     val cmd = "SIMPLE_MEM_ATTR=1 SIMPLE_BOOTSTRAP=1 SIMPLE_EXECUTION_MODE=interpreter '{binary}' run '{FIXTURE}'"
-    process_run("/bin/sh", ["-c", cmd])
+    val (sh_bin, sh_args) = resolve_shell_argv(cmd)
+    process_run(sh_bin, sh_args)
 
 # @step: Run the attribution fixture in a child process with SIMPLE_MEM_ATTR=1
 fn run_attr_workload_child() -> (text, text, i64):
@@ -76,14 +79,16 @@ fn run_attr_workload_child() -> (text, text, i64):
     # "unknown extern function" until the next bootstrap redeploy (extern
     # additions require a bootstrap rebuild). Self-heal onto the bootstrap
     # seed instead of red-lining the suite on a stale deploy.
-    val (probe, _pe, _pc) = process_run("/bin/sh",
-        ["-c", "test -x src/compiler_rust/target/release/simple && echo yes || echo no"])
-    if probe.contains("yes"):
-        return run_with("src/compiler_rust/target/release/simple")
-    val (probe2, _pe2, _pc2) = process_run("/bin/sh",
-        ["-c", "test -x src/compiler_rust/target/debug/simple && echo yes || echo no"])
-    if probe2.contains("yes"):
-        return run_with("src/compiler_rust/target/debug/simple")
+    for candidate in [
+        "src/compiler_rust/target/release/simple.exe",
+        "src/compiler_rust/target/release/simple",
+        "src/compiler_rust/target/debug/simple.exe",
+        "src/compiler_rust/target/debug/simple"
+    ]:
+        if file_exists(candidate):
+            val (out2, err2, code2) = run_with(candidate)
+            if out2.contains("attr_spec_owner"):
+                return (out2, err2, code2)
     (out, err, code)
 
 describe "Per-owner allocation attribution report":

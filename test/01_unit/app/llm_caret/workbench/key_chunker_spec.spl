@@ -1,0 +1,144 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+
+"""
+Caret cs terminal-surface passthrough (CU-005, plan 6.3): byte-safe chunking
+across read boundaries, guarded raw forwarding, and the focus toggle.
+"""
+
+use std.spec.*
+use app.llm_caret.workbench.leader_keys.{LeaderAction, new_leader_state}
+use app.llm_caret.workbench.key_resolver.{KeyFocus, KeyRouteKind}
+use app.llm_caret.workbench.session_contract.{SessionId, new_session_id}
+use app.llm_caret.workbench.pane_binding.{PaneBinding, PaneBindingResult, resolve_pane_binding}
+use app.llm_caret.workbench.key_chunker.{split_complete_keys, flush_carry, terminal_key_step, toggle_focus, focus_label}
+
+val LEAD = "ctrl+g"
+
+fn _flat(keys: [[u8]]) -> [u8]:
+    var out: [u8] = []
+    for k in keys:
+        for b in k:
+            out.push(b)
+    out
+
+fn _bound() -> PaneBindingResult:
+    val sid = new_session_id("a1")
+    resolve_pane_binding([PaneBinding(session: sid, pane_id: "%3", pane_generation: 1)], sid, 1)
+
+fn _unbound() -> PaneBindingResult:
+    resolve_pane_binding([], new_session_id("a1"), 1)
+
+fn _first(bytes: [u8]) -> [u8]:
+    split_complete_keys([], bytes).0[0]
+
+# Records every byte the injected send function receives, in order.
+var _seen: [u8] = []
+
+fn _record(b: [u8]) -> bool:
+    for x in b:
+        _seen.push(x)
+    true
+
+# Feeds `chunks` through split + terminal_key_step; returns (bytes sent, action count).
+fn _run(chunks: [[u8]], binding: PaneBindingResult) -> ([u8], i64):
+    var carry: [u8] = []
+    var st = new_leader_state()
+    var actions = 0
+    var empty: [u8] = []
+    _seen = empty
+    for chunk in chunks:
+        val (keys, next) = split_complete_keys(carry, chunk)
+        carry = next
+        for k in keys:
+            val r = terminal_key_step(LEAD, st, k, binding, "a1", 1, _record)
+            st = r.state
+            if r.route.kind == KeyRouteKind.Action:
+                actions = actions + 1
+    (_seen, actions)
+
+describe "cs terminal surface key chunking (CU-005)":
+    it "keeps escape sequences and multibyte chars whole":
+        # @req REQ-CARET-UI-004
+        step("split one chunk of ctrl+b, ESC [ A, Hangul, emoji")
+        val chunk: [u8] = [2, 27, 91, 65, 234, 176, 128, 240, 159, 152, 128]
+        val (keys, carry) = split_complete_keys([], chunk)
+        expect(keys.len()).to_equal(4)
+        expect(carry.len()).to_equal(0)
+        expect(_flat(keys)).to_equal(chunk)
+
+    it "carries a chunk ending mid escape sequence":
+        # @req REQ-CARET-UI-004
+        val (k1, c1) = split_complete_keys([], [97, 27, 91])
+        expect(_flat(k1)).to_equal([97])
+        expect(c1).to_equal([27, 91])
+        val (k2, c2) = split_complete_keys(c1, [65, 98])
+        expect(_flat(k2)).to_equal([27, 91, 65, 98])
+        expect(c2.len()).to_equal(0)
+
+    it "carries a chunk ending mid UTF-8 char":
+        # @req REQ-CARET-UI-004
+        val (k1, c1) = split_complete_keys([], [240, 159])
+        expect(k1.len()).to_equal(0)
+        val (k2, c2) = split_complete_keys(c1, [152, 128])
+        expect(_flat(k2)).to_equal([240, 159, 152, 128])
+        expect(c2.len()).to_equal(0)
+
+    it "flushes a carried lone ESC as a real key":
+        # @req REQ-CARET-UI-004
+        val (keys, carry) = split_complete_keys([], [27])
+        expect(keys.len()).to_equal(0)
+        expect(_flat(flush_carry(carry))).to_equal([27])
+
+    it "delivers the same bytes in order however the stream is split":
+        # @req REQ-CARET-UI-004
+        val whole: [u8] = [2, 27, 91, 65, 234, 176, 128, 240, 159, 152, 128, 27, 91, 49, 59, 53, 67]
+        var cuts = 1
+        while cuts < whole.len():
+            var a: [u8] = []
+            var b: [u8] = []
+            var i = 0
+            while i < whole.len():
+                if i < cuts:
+                    a.push(whole[i])
+                else:
+                    b.push(whole[i])
+                i = i + 1
+            val (sent, _n) = _run([a, b], _bound())
+            expect(sent).to_equal(whole)
+            cuts = cuts + 1
+
+describe "cs terminal surface routing (CU-005)":
+    it "leader m is a toggle action and never forwarded":
+        # @req REQ-CARET-UI-004
+        val (sent, actions) = _run([[7, 109]], _bound())
+        expect(sent.len()).to_equal(0)
+        expect(actions).to_equal(1)
+        val r1 = terminal_key_step(LEAD, new_leader_state(), _first([7]), _bound(), "a1", 1, _record)
+        val r2 = terminal_key_step(LEAD, r1.state, _first([109]), _bound(), "a1", 1, _record)
+        expect(r2.route.action).to_equal(LeaderAction.ToggleComposerTerminal)
+
+    it "toggles focus and labels it":
+        # @req REQ-CARET-UI-004
+        expect(toggle_focus(KeyFocus.NativeView)).to_equal(KeyFocus.TerminalSurface)
+        expect(toggle_focus(KeyFocus.TerminalSurface)).to_equal(KeyFocus.NativeView)
+        expect(focus_label(KeyFocus.TerminalSurface, "%3")).to_equal("focus: terminal %3")
+        expect(focus_label(KeyFocus.NativeView, "%3")).to_equal("focus: command")
+
+    it "never forwards a bound chord":
+        # @req REQ-CARET-UI-004
+        val (sent, actions) = _run([[7, 110]], _bound())
+        expect(sent.len()).to_equal(0)
+        expect(actions).to_equal(1)
+
+    it "refuses to send to an unbound pane":
+        # @req REQ-CARET-UI-002
+        val (sent, _a) = _run([[97]], _unbound())
+        expect(sent.len()).to_equal(0)
+        val r = terminal_key_step(LEAD, new_leader_state(), _first([97]), _unbound(), "a1", 1, _record)
+        expect(r.sent).to_equal(false)
+        expect(r.status).to_equal("terminal input refused: unbound terminal")
+
+    it "refuses when the live generation differs from the binding":
+        # @req REQ-CARET-UI-002
+        val r = terminal_key_step(LEAD, new_leader_state(), _first([97]), _bound(), "a1", 2, _record)
+        expect(r.sent).to_equal(false)

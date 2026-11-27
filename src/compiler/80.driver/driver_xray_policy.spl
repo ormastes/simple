@@ -1,0 +1,301 @@
+# XRay instrumentation policy — the single resolution point.
+#
+# Design: doc/04_architecture/compiler/xray/xray_compiler_structural_change_2026-11-06.md
+#
+# Two switches, never conflated:
+#   - static:  CompileOptions.xray_enabled (`--xray`). Off (default) = no sleds,
+#              no metadata, byte-identical output. On = sleds are emitted.
+#   - dynamic: aspect params (`simple.trace/observer-v1`) select at RUNTIME
+#              which existing sleds are patched on. They never decide whether
+#              sleds exist: xray_policy_resolve/apply never read AspectParamsV1.
+#              xray_observer_request_check is the ONE compile-time gate for that
+#              extension; it only rejects (fail-closed) and never changes sleds.
+#
+# There is no instruction threshold: with `--xray` on, every function except
+# the compiler-owned never-list gets sleds. A threshold may be re-added later
+# only if measured code-size overhead requires it.
+# ponytail: ceiling/upgrade path — threshold knob re-added only on measured need.
+
+use compiler.hir.hir_types.{SymbolId}
+use compiler.mir.mir_instruction_graph.{MirFunction, MirModule}
+use compiler.backend.backend_helpers.{get_effective_backend_name}
+use common.types.{Enabled}
+use common.plugin.aspect_params.{AspectParamsV1}
+use common.trace.observer_contract_v1.{TraceFailureV1, TraceConfigV1, TraceInstrumentationV1, trace_failure_code_v1}
+use common.trace.observer_aspect_config_v1.{trace_aspect_config_v1}
+use common.trace.observer_build_route_v1.{TraceBuildRouteKindV1, trace_build_route_v1}
+use compiler.common.driver_compile_options.{CompileOptions, TargetTraceCapabilityV1, TargetDebugRequestV1,
+    compileoptions_target_profile_v1, target_profile_identity_text_v1}
+
+# The current bootstrap index has no admitted debug-observer receipt. A route
+# candidate or static XRay request cannot substitute for that evidence. Keep
+# this failure visible until the runtime admission owner supplies its receipt.
+# This describes the automatic debug-aspect path, not ordinary static sleds.
+pub fn driver_target_trace_capability_v1(options: CompileOptions) -> TargetTraceCapabilityV1:
+    if options.native_target != "x86_64-unknown-linux-gnu" and
+            options.native_target != "aarch64-unknown-linux-gnu":
+        return TargetTraceCapabilityV1.Unavailable("trace-target-not-admitted-v1")
+    if options.backend == "llvm" or options.backend == "llvm-lib" or options.backend == "auto":
+        return TargetTraceCapabilityV1.Unavailable("llvm-observer-link-handler-not-admitted-v1")
+    if options.backend == "native":
+        return TargetTraceCapabilityV1.Unavailable("native-observer-admission-receipt-absent-v1")
+    TargetTraceCapabilityV1.Unavailable("trace-backend-not-admitted-v1")
+
+val XRAY_MODE_NONE: i64 = 0
+val XRAY_MODE_ENTRY_EXIT: i64 = 1
+val XRAY_MODE_ENTRY_EXIT_TAIL: i64 = 2
+
+struct XrayBuildPolicy:
+    enabled: bool
+    include_tail_exit: bool
+
+impl XrayBuildPolicy:
+    static fn off() -> XrayBuildPolicy:
+        XrayBuildPolicy(enabled: false, include_tail_exit: true)
+
+    static fn on() -> XrayBuildPolicy:
+        XrayBuildPolicy(enabled: true, include_tail_exit: true)
+
+fn xray_unsupported(what: text) -> text:
+    "XRAY-E-UNSUPPORTED-TARGET: --xray is not supported {what}"
+
+# Resolve the static switch against the compile route. Off always resolves.
+# On is admitted only for AOT builds whose backend can carry sleds (LLVM XRay
+# or the pure-Simple native backend). Cranelift lowers through seed-owned
+# externs that cannot emit sleds; it is rejected in every stage.
+fn xray_policy_resolve(enabled: bool, compile_mode_text: text, backend: text, release: bool, output_format: text) -> Result<XrayBuildPolicy, text>:
+    if not enabled:
+        return Ok(XrayBuildPolicy.off())
+    if release:
+        return Err("TARGET-PROFILE-E-CONFLICT: release forbids XRay instrumentation")
+    val effective = get_effective_backend_name(backend, release)
+    if effective == "cranelift":
+        return Err(xray_unsupported("with the Cranelift backend (it cannot emit XRay sleds); use --backend=llvm or --backend=native"))
+    if compile_mode_text != "aot":
+        return Err(xray_unsupported("in '{compile_mode_text}' mode; XRay sleds exist only in AOT native builds"))
+    # SMF/self-contained outputs have no sled emitter; accepting them would
+    # carry sled intent that nothing emits (fail-open).
+    if output_format != "native":
+        return Err(xray_unsupported("for output format '{output_format}'; use --native"))
+    # get_effective_backend_name maps unknown names to "llvm", so the requested
+    # name must itself be a native-code backend before trusting that fallback.
+    val requested = backend.trim().lower()
+    val requested_native = requested == "" or requested == "auto" or requested == "llvm" or
+        requested == "llvm-lib" or requested == "llvmlib" or requested == "native"
+    if not requested_native:
+        return Err(xray_unsupported("with backend '{backend}'"))
+    Ok(XrayBuildPolicy.on())
+
+# The single compile-time gate for the `simple.trace/observer-v1` aspect-param
+# extension, decided once in CompileContext.create. Absent or explicit-Off is
+# admitted; a malformed request is rejected. A Dynamic request is admitted
+# ONLY when this build emits the sleds its backend honours (no Feature receipt
+# is fabricated from config, target or map):
+#   - TraceBackendV1.Simple: `--xray` resolved on (sleds_on) with the native
+#     backend — the pure-Simple leaf (PR5/5b/6) patches those sleds at runtime.
+#     Without `--xray` there are no sleds: InstrumentationAbsent, never a silent
+#     no-op. On another backend there are no Simple sleds: UnsupportedTarget.
+#   - TraceBackendV1.Llvm / Auto: UnsupportedProfile until the clang_rt.xray
+#     link and handler shim land (design §F PR4).
+fn xray_observer_request_admit(params: AspectParamsV1, target: text, sleds_on: bool, backend: text
+        ) -> Result<bool, TraceFailureV1>:
+    val requested = trace_aspect_config_v1(params)?
+    if val config = requested:
+        val route = trace_build_route_v1(target, config.instrumentation, config.backend)?
+        if route.kind == TraceBuildRouteKindV1.Off:
+            return Ok(true)
+        if route.kind == TraceBuildRouteKindV1.LinuxSimpleCandidate:
+            if not sleds_on:
+                return Err(TraceFailureV1.InstrumentationAbsent)
+            if backend.trim().lower() != "native":
+                return Err(TraceFailureV1.UnsupportedTarget)
+            return Ok(true)
+        # Windows x64 flag-guard sleds come from the LLVM translator only.
+        if route.kind == TraceBuildRouteKindV1.WindowsLlvmFlagGuardCandidate:
+            if not sleds_on:
+                return Err(TraceFailureV1.InstrumentationAbsent)
+            if backend.trim().lower() != "llvm":
+                return Err(TraceFailureV1.UnsupportedTarget)
+            return Ok(true)
+        return Err(TraceFailureV1.UnsupportedProfile)
+    Ok(true)
+
+# The no-sleds build (PR2 contract): never admits a Dynamic request.
+fn xray_observer_request_check(params: AspectParamsV1, target: text) -> Result<bool, TraceFailureV1>:
+    xray_observer_request_admit(params, target, false, "")
+
+# "" when admitted, else the stable diagnostic stored as xray_config_error.
+fn xray_observer_request_error_for_build(params: AspectParamsV1, target: text, sleds_on: bool, backend: text) -> text:
+    match xray_observer_request_admit(params, target, sleds_on, backend):
+        case Err(failure):
+            "TRACE-E-REQUEST: observer V1 request rejected (status={trace_failure_code_v1(failure)})"
+        case Ok(_):
+            ""
+
+fn xray_observer_request_error(params: AspectParamsV1, target: text) -> text:
+    xray_observer_request_error_for_build(params, target, false, "")
+
+# SDN `trace.instrumentation` (plan §5.3) -> the static switch. `off` keeps
+# the default; `dynamic` means sleds exist and aspect params patch them at
+# runtime. `always_on` is a V1 schema value no backend supports yet.
+fn xray_trace_instrumentation_enabled(value: text) -> Result<bool, text>:
+    match value:
+        case "off": Ok(false)
+        case "dynamic": Ok(true)
+        case _: Err("XRAY-E-CONFIG: trace.instrumentation '{value}' is not supported (expected off or dynamic)")
+
+fn xray_sdn_strip_comment(value: text) -> text:
+    if value.contains(" #"):
+        return value.split(" #")[0].trim()
+    value.trim()
+
+fn xray_sdn_indent(line: text) -> i64:
+    var count = 0
+    while count < line.len() and (line[count:count + 1] == " " or line[count:count + 1] == "\t"):
+        count = count + 1
+    count
+
+# `instrumentation:` as a DIRECT child of the top-level `trace:` block of a
+# project manifest (simple.sdn); "" when absent. Trailing ` # comments` are
+# stripped. An inline `trace: {...}` is returned verbatim so the caller
+# rejects it instead of silently ignoring a requested switch.
+fn xray_sdn_trace_instrumentation(content: text) -> text:
+    var in_trace = false
+    var child_indent = -1
+    for line in content.split("\n"):
+        val trimmed = xray_sdn_strip_comment(line)
+        if trimmed == "" or trimmed.starts_with("#"):
+            continue
+        val indent = xray_sdn_indent(line)
+        if indent == 0:
+            in_trace = false
+            if trimmed.starts_with("trace:"):
+                val inline = trimmed.substring(6).trim()
+                if inline != "":
+                    return inline
+                in_trace = true
+                child_indent = -1
+            continue
+        if not in_trace:
+            continue
+        if child_indent < 0:
+            child_indent = indent
+        if indent == child_indent and trimmed.starts_with("instrumentation:"):
+            var value = trimmed.substring(16).trim()
+            if value.len() >= 2 and ((value.starts_with("\"") and value.ends_with("\"")) or (value.starts_with("'") and value.ends_with("'"))):
+                value = value.substring(1, value.byte_len() - 1)
+            return value
+    ""
+
+# Explicit hosted startup consumer is a request, never a provider admission.
+# The final-link owner separately verifies executable shape and the strong export.
+pub fn xray_startup_consumer_request_error_v1(options: CompileOptions) -> text:
+    if not options.xray_startup_consumer_v1: return ""
+    if not options.xray_enabled:
+        return "XRAY-E-STARTUP-CONSUMER: requires explicit --xray"
+    if options.backend != "llvm" and options.backend != "llvm-lib" and options.backend != "llvmlib":
+        return "XRAY-E-STARTUP-CONSUMER: requires an explicit LLVM backend"
+    if options.native_target != "x86_64-unknown-linux-gnu" and options.native_target != "aarch64-unknown-linux-gnu":
+        return "XRAY-E-STARTUP-CONSUMER: requires a supported explicit Linux target"
+    val mode = if options.cli_mode_text != "": options.cli_mode_text else: options.mode.to_text()
+    match xray_policy_resolve(true, mode, options.backend, options.release, options.output_format.to_text()):
+        case Err(reason): return reason
+        case Ok(_): return ""
+
+pub fn xray_startup_consumer_identity_suffix_v1(enabled: Enabled) -> text:
+    if enabled.value: "|xray-startup-consumer-v1=on" else: ""
+
+# Cache-key token. Empty when off so every existing cache identity is unchanged.
+fn xray_option_identity_suffix(enabled: bool) -> text:
+    if enabled: "|xray=on|xray-semantic-row-v1" else: ""
+
+# `rt_` also excludes user functions named rt_*: that prefix is the runtime ABI.
+val XRAY_NEVER_NAME_PREFIXES: [text] = ["__spl_", "__xray_", "__simple_xray", "simple_xray_", "rt_"]
+# Matched after stripping the `lib.` (module_logical_name_from_path of
+# src/lib/...) or `std.` (import spelling) root.
+val XRAY_NEVER_MODULE_PREFIXES: [text] = [
+    "common.trace.", "nogc_sync_mut.trace.",
+    "nogc_sync_mut.allocator", "nogc_async_mut.allocator",
+    "gc_sync_mut.allocator", "gc_async_mut.allocator"
+]
+
+fn xray_module_library_path(module_name: text) -> text:
+    if module_name.starts_with("lib.") or module_name.starts_with("std."):
+        return module_name.substring(4)
+    module_name
+
+# Compiler-owned never-list; not user-overridable. Runtime hooks, allocator,
+# the xray handler itself, naked/interrupt-style (custom section) functions,
+# GPU kernels, generic templates and forced-inline functions (no physical body).
+fn xray_function_never_instrumented(module_name: text, func: MirFunction) -> bool:
+    if func.is_naked or func.is_kernel or func.is_generic_template or func.is_inline:
+        return true
+    if func.section != "":
+        return true
+    for prefix in XRAY_NEVER_NAME_PREFIXES:
+        if func.name.starts_with(prefix):
+            return true
+    val library_path = xray_module_library_path(module_name)
+    for prefix in XRAY_NEVER_MODULE_PREFIXES:
+        if library_path.starts_with(prefix):
+            return true
+    false
+
+fn xray_policy_apply(module: MirModule, policy: XrayBuildPolicy) -> MirModule:
+    if not policy.enabled:
+        return module
+    val sled_mode = if policy.include_tail_exit: XRAY_MODE_ENTRY_EXIT_TAIL else: XRAY_MODE_ENTRY_EXIT
+    var functions: Dict<SymbolId, MirFunction> = {}
+    for symbol in module.functions.keys():
+        var func = module.functions[symbol]
+        func.xray_mode = if xray_function_never_instrumented(module.name, func): XRAY_MODE_NONE else: sled_mode
+        functions[symbol] = func
+    MirModule(
+        module.name,
+        functions,
+        module.statics,
+        module.constants,
+        module.types,
+        module.external_layout_traces,
+        module.collection_plan_explanations,
+        module.enum_semantic_declarations,
+        module.attr_sites,
+        module.initializer_plan_v1,
+        module.xray_ring_wrap
+    )
+
+export XrayBuildPolicy, XRAY_MODE_NONE, XRAY_MODE_ENTRY_EXIT, XRAY_MODE_ENTRY_EXIT_TAIL
+export xray_policy_resolve, xray_policy_apply, xray_option_identity_suffix, xray_function_never_instrumented
+export xray_observer_request_check, xray_observer_request_admit, xray_observer_request_error, xray_observer_request_error_for_build
+export xray_trace_instrumentation_enabled, xray_sdn_trace_instrumentation
+
+# Preserve extension presence at the same boundary used by cache/no-op identity.
+# An explicit Off extension is an opt-out; malformed/unsupported extensions may
+# never disappear into the Default request. Static sled policy stays separate.
+pub fn driver_target_debug_request_v1(request: TargetDebugRequestV1,
+        parsed: Result<TraceConfigV1?, TraceFailureV1>) -> Result<TargetDebugRequestV1, text>:
+    match parsed:
+        case Err(failure):
+            Err("TRACE-E-REQUEST: invalid observer extension (status={trace_failure_code_v1(failure)})")
+        case Ok(optional):
+            if val config = optional:
+                val explicit = match config.instrumentation:
+                    case Off: TargetDebugRequestV1.Disabled
+                    case Dynamic: TargetDebugRequestV1.Enabled
+                    case AlwaysOn:
+                        return Err("TRACE-E-REQUEST: always-on observer instrumentation is unavailable")
+                if request != TargetDebugRequestV1.Default and request != explicit:
+                    return Err("TARGET-PROFILE-E-CONFLICT: typed and extension debug requests differ")
+                return Ok(explicit)
+            Ok(request)
+
+pub fn driver_target_profile_identity_v1(options: CompileOptions) -> Result<text, text>:
+    val request = driver_target_debug_request_v1(options.target_debug_request,
+        trace_aspect_config_v1(options.aspect_params))?
+    var selected = options
+    selected.target_debug_request = request
+    val policy = compileoptions_target_profile_v1(selected, driver_target_trace_capability_v1(selected))?
+    val startup_error = xray_startup_consumer_request_error_v1(selected)
+    if startup_error != "": return Err(startup_error)
+    Ok(target_profile_identity_text_v1(policy) +
+        xray_startup_consumer_identity_suffix_v1(Enabled(value: selected.xray_startup_consumer_v1)))

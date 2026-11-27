@@ -26,20 +26,32 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
 val VIEW: i32 = 200
 
 fn fixture(box_bg: text) -> text:
+    fixture_offset(box_bg, 0)
+
+fn fixture_offset(box_bg: text, dy: i32) -> text:
     (
         "<html><body style=\"margin:0;padding:0;background:#ffffff\">" +
         "<div style=\"margin:70px 0 0 40px;width:120px;height:60px;background:" + box_bg +
-        ";box-shadow:0 0 20px #000000\"></div></body></html>"
+        ";box-shadow:0 " + str(dy) + "px 20px #000000\"></div></body></html>"
     )
 
 fn gray_at(box_bg: text, x: i32, y: i32) -> i32:
-    val pixels = simple_web_render_html_to_pixels_with_engine2d_backend(fixture(box_bg), VIEW, VIEW, "cpu_simd")
+    gray_at_offset(box_bg, 0, x, y)
+
+fn gray_at_offset(box_bg: text, dy: i32, x: i32, y: i32) -> i32:
+    val pixels = simple_web_render_html_to_pixels_with_engine2d_backend(fixture_offset(box_bg, dy), VIEW, VIEW, "cpu_simd")
     ((pixels[y * VIEW + x] >> 16) & 0xFFu32) as i32
 
 describe "box-shadow rasterizes an alpha coverage falloff":
     it "AC-1: the shadow centre is the shadow colour (opaque black)":
-        # A transparent box lets the fully-covered centre of the shadow show.
-        expect(gray_at("transparent", 100, 100)).to_be_less_than(8)
+        # The shadow is clipped to outside the border box (CSS Backgrounds 3
+        # section 7.1), so the fully covered centre is probed on a shadow
+        # offset 70px below the box: Chrome 159 reads 000000 at (100,170).
+        expect(gray_at_offset("transparent", 70, 100, 170)).to_be_less_than(8)
+
+    it "AC-1b: a transparent box shows the page, not its own shadow":
+        # Chrome 159 reads FFFFFF at the box centre (100,100).
+        expect(gray_at("transparent", 100, 100)).to_equal(255)
 
     it "AC-2: one pixel outside the box edge is ~50% of the shadow alpha":
         # CSS puts the 50% coverage crossing ON the un-expanded rect edge:

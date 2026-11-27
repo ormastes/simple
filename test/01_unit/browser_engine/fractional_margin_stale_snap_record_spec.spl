@@ -1,0 +1,95 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+# A flex / grid / float item whose % margin was fractional in an earlier
+# pass and is whole now must not keep that pass's snap record. The
+# `contain: layout` relayout (`layout_selected`) bypasses `layout()`'s
+# table reset, so it is the pass that shows it: the item's device dx and
+# line-start pen error after the relayout must equal a fresh full layout
+# of the same tree (k = 4: 10% of 205 px = 20.5 px snaps to 21 and records dx -2; 10% of
+# 200 px is whole and records nothing).
+# `griditem` (one `auto` column) goes through the block-flow snap site;
+# `tgriditem` (second column of a templated grid, 10% of 165 vs 160 px)
+# through the grid one.
+#
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl
+use std.spec.step
+
+use std.spec.{describe, it, expect}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{HNode, LayoutResult, layout_selected, parse_html, build_child_index, extract_css_vw, compute_styles}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{layout_device_scale_set, box_device_dx_total, box_line_start_err_at}
+
+val WIDTH: i32 = 400
+val VIEWPORT_H: i32 = 600
+val ITEMS: [text] = ["rowitem", "colitem", "griditem", "floatitem", "tgriditem"]
+
+fn empty_retained() -> LayoutResult:
+    LayoutResult(bx: [], by: [], bw: [], bh: [], wrap_starts: [], wrap_ends: [], intrinsic_widths: [], height: 0)
+
+fn node_index(nodes: [HNode], target_id: text) -> i32:
+    var i = 0
+    while i < nodes.len():
+        if nodes[i].id_attr == target_id:
+            return i as i32
+        i = i + 1
+    -1
+
+fn page(w: i32) -> text:
+    val item = "style=\"margin-left:10%;width:40px;height:20px\""
+    val ws = "width:{w}px"
+    "<div id=\"c\" style=\"width:300px;height:200px;overflow:hidden\" contain=\"layout\">" +
+        "<div id=\"row\" style=\"display:flex;{ws}\"><div id=\"rowitem\" {item}></div></div>" +
+        "<div id=\"col\" style=\"display:flex;flex-direction:column;{ws}\"><div id=\"colitem\" {item}></div></div>" +
+        "<div id=\"grid\" style=\"display:grid;grid-template-columns:auto;{ws}\"><div id=\"griditem\" {item}></div></div>" +
+        "<div id=\"tgrid\" style=\"display:grid;grid-template-columns:40px {w - 40}px;width:{w}px\"><div style=\"height:20px\"></div><div id=\"tgriditem\" style=\"margin-left:10%;width:40px;height:20px\"></div></div>" +
+        "<div id=\"fl\" style=\"{ws};height:30px\"><div id=\"floatitem\" style=\"float:left;margin-left:10%;width:40px;height:20px\"></div></div>" +
+        "</div>"
+
+# Snap records of every item after layout_selected (seeded from a 205 px
+# layout) and after a fresh full layout, both of the 200 px tree:
+# "id:dx:err" per item, relayout first then full.
+fn records() -> [text]:
+    layout_device_scale_set(4)
+    val html1 = page(205)
+    val nodes1 = parse_html(html1)
+    val ci1 = build_child_index(nodes1)
+    val styles1 = compute_styles(nodes1, extract_css_vw(html1, WIDTH, false), ci1, false, true)
+    val retained = layout_selected(nodes1, styles1, ci1, [1], WIDTH, VIEWPORT_H, empty_retained()).layout
+    val html2 = page(200)
+    val nodes2 = parse_html(html2)
+    val ci2 = build_child_index(nodes2)
+    val styles2 = compute_styles(nodes2, extract_css_vw(html2, WIDTH, false), ci2, false, true)
+    val sel = [(node_index(nodes2, "row") + 1) as i64, (node_index(nodes2, "col") + 1) as i64, (node_index(nodes2, "grid") + 1) as i64, (node_index(nodes2, "fl") + 1) as i64, (node_index(nodes2, "tgrid") + 1) as i64]
+    val _relaid = layout_selected(nodes2, styles2, ci2, sel, WIDTH, VIEWPORT_H, retained)
+    var out: [text] = []
+    for id in ITEMS:
+        val n = node_index(nodes2, id)
+        out.push("{id}:{box_device_dx_total(nodes2, n)}:{box_line_start_err_at(n)}")
+    val _full = layout_selected(nodes2, styles2, ci2, [1], WIDTH, VIEWPORT_H, empty_retained())
+    for id in ITEMS:
+        val n = node_index(nodes2, id)
+        out.push("{id}:{box_device_dx_total(nodes2, n)}:{box_line_start_err_at(n)}")
+    layout_device_scale_set(1)
+    out
+
+describe "fractional margin snap records across layout passes":
+    it "AC-1: the 205 px tree records a snap for every item (the seed pass is fractional)":
+        step("AC-1: seed pass records")
+        layout_device_scale_set(4)
+        val html1 = page(205)
+        val nodes1 = parse_html(html1)
+        val ci1 = build_child_index(nodes1)
+        val styles1 = compute_styles(nodes1, extract_css_vw(html1, WIDTH, false), ci1, false, true)
+        val _l = layout_selected(nodes1, styles1, ci1, [1], WIDTH, VIEWPORT_H, empty_retained())
+        var got: [text] = []
+        for id in ITEMS:
+            got.push("{id}:{box_device_dx_total(nodes1, node_index(nodes1, id))}")
+        layout_device_scale_set(1)
+        expect(got).to_equal(["rowitem:-2", "colitem:-2", "griditem:-2", "floatitem:-2", "tgriditem:-2"])
+
+    it "AC-2: a whole-margin relayout leaves no stale record (matches a full layout)":
+        step("AC-2: relayout equals full layout")
+        val r = records()
+        expect(r.slice(0, 5)).to_equal(r.slice(5, 10))
+        expect(r.slice(5, 10)).to_equal(["rowitem:0:0", "colitem:0:0", "griditem:0:0", "floatitem:0:0", "tgriditem:0:0"])

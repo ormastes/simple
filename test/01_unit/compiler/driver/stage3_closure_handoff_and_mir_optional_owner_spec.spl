@@ -1,0 +1,140 @@
+# Regression coverage for Stage 3a pure-Simple MIR optional-record None
+# reassignment, unit TLDR summary vs class-without-interface-hir fallback, and
+# typed NativeEntryClosureRequestV1 projection helpers.
+use std.spec.{describe, it, expect}
+use std.io_runtime.{dir_create_all, dir_remove_all, file_write, getpid}
+use compiler.common.config.{Logger}
+use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLowering.provider_metadata.*
+use compiler.mir._MirLoweringExpr.optional_record_owner.*
+use compiler.driver.driver_unit_tldr_imports_v1.{unit_tldr_plan_v1}
+use compiler.driver.driver_build.native_entry_closure_owner.{
+    NativeEntryClosureRequestV1,
+    native_entry_closure_request_source_roots_v1,
+    native_entry_closure_request_snapshot_root_v1,
+    native_entry_closure_request_snapshot_id_v1
+}
+use compiler.driver.driver_build.native_entry_closure_receipt.{NativeEntryClosureBindingV1}
+use std.scv.compile_snapshot.{ScvCompileSnapshotV1}
+
+class MirOptionalOwnerProbe:
+    lowering: MirLowering
+    provider_id: i64
+
+fn build_mir_optional_owner_probe() -> MirOptionalOwnerProbe:
+    val source = "pub class ProbeSurface:\n    name: text\n    count: i64\n"
+    val ast = parse_full_frontend(
+        source, "app/probe/provider.spl", "app.probe.provider", Logger(level: 0))
+    var hir = HirLowering.with_filename("app/probe/provider.spl")
+    val provider = hir.lower_module(ast)
+    expect(hir.errors.len()).to_equal(0)
+    var lowering = MirLowering.new(SymbolTable.new())
+    var prescan_mods: Dict<text, HirModule> = {}
+    prescan_mods["provider"] = provider
+    lowering.prescan_module_struct_names(prescan_mods, "provider")
+    var found_id = -1
+    for record in provider.classes.values():
+        if record.name == "ProbeSurface":
+            val relocated = lowering.relocate_provider_type_symbol(record.symbol, provider.symbols)
+            found_id = relocated.id
+            lowering.register_composite_field_metadata(
+                "app.probe.provider.ProbeSurface", record.fields, provider.symbols, false)
+    expect(found_id).to_be_greater_than(-1)
+    MirOptionalOwnerProbe(lowering: lowering, provider_id: found_id)
+
+describe "MIR optional-record owner preservation across None/nil reassignment":
+    it "preserves an established optional-record owner when None or nil is reassigned":
+        val probe = build_mir_optional_owner_probe()
+        var lowering = probe.lowering
+        lowering.optional_record_owners[10] = "app.probe.provider.ProbeSurface"
+        lowering.option_none_locals[20] = true
+        lowering.copy_optional_record_owner(20, 10)
+        expect(lowering.optional_record_owners[10]).to_equal("app.probe.provider.ProbeSurface")
+
+        lowering.nil_locals[21] = true
+        lowering.copy_optional_record_owner(21, 10)
+        expect(lowering.optional_record_owners[10]).to_equal("app.probe.provider.ProbeSurface")
+
+        val resolved = lowering.checked_optional_record_type(10, Span.empty())
+        expect(lowering.errors.len()).to_equal(0)
+        match resolved.kind:
+            case HirTypeKind.Named(sym, _):
+                expect(sym.id).to_equal(probe.provider_id)
+            case _:
+                expect("Named").to_equal("UnexpectedHirTypeKind")
+
+    it "leaves unowned destinations unowned on None/nil init and fails closed on untracked or conflicting owners":
+        val probe = build_mir_optional_owner_probe()
+        var lowering = probe.lowering
+        lowering.option_none_locals[30] = true
+        lowering.copy_optional_record_owner(30, 11)
+        expect(lowering.optional_record_owners.contains(11)).to_equal(false)
+
+        lowering.optional_record_owners[31] = "app.probe.provider.ProbeSurface"
+        lowering.copy_optional_record_owner(31, 11)
+        expect(lowering.optional_record_owners[11]).to_equal("app.probe.provider.ProbeSurface")
+
+        # Conflicting record owner clears destination (fail closed)
+        lowering.optional_record_owners[32] = "app.probe.other.OtherSurface"
+        lowering.copy_optional_record_owner(32, 11)
+        expect(lowering.optional_record_owners[11]).to_equal("")
+
+        # Untracked non-None source clears destination (fail closed)
+        lowering.optional_record_owners[12] = "app.probe.provider.ProbeSurface"
+        lowering.copy_optional_record_owner(99, 12)
+        expect(lowering.optional_record_owners[12]).to_equal("")
+
+describe "Typed NativeEntryClosureRequestV1 nested-field projections":
+    it "projects source_roots, snapshot_root, and snapshot_id without nested Stage 2 Unit loss":
+        val snapshot = ScvCompileSnapshotV1(
+            true, "", "rev-42", "commit-42", "tree-42", "inv-digest-99", 3,
+            "/tmp/snapshot-root", "/tmp/snapshot-root/prov", "/tmp/snapshot-root/receipt", false)
+        val binding = NativeEntryClosureBindingV1(
+            "rev-42", "commit-42", "tree-42", "inv-digest-99",
+            "src/app/cli/bootstrap_main.spl",
+            ["src/compiler", "src/app", "src/lib"],
+            "policy-1", "producer-1")
+        val request = NativeEntryClosureRequestV1(
+            "/repo", snapshot, "src-digest-1", 7, binding,
+            "/tmp/closure/selection.v1", "receipt-digest-1")
+        expect(native_entry_closure_request_source_roots_v1(request)).to_equal(
+            ["src/compiler", "src/app", "src/lib"])
+        expect(native_entry_closure_request_snapshot_root_v1(request)).to_equal(
+            "/tmp/snapshot-root")
+        expect(native_entry_closure_request_snapshot_id_v1(request)).to_equal(
+            "rev-42:inv-digest-99")
+
+describe "Unit TLDR import planning summary vs composite fallback":
+    it "binds pure function summary surfaces and falls back when a composite lacks .hirkey":
+        val root = "build/spec_unit_tldr_plan_{getpid()}"
+        val _clean = dir_remove_all(root)
+        expect(dir_create_all("{root}/src/app")).to_equal(true)
+        expect(dir_create_all("{root}/cache")).to_equal(true)
+        val main_path = "{root}/src/app/main.spl"
+        val free_path = "{root}/src/app/free_mod.spl"
+        val comp_path = "{root}/src/app/comp_mod.spl"
+        expect(file_write(main_path,
+            "use app.free_mod.{{helper_val}}\nuse app.comp_mod.{{BoxItem}}\nfn entry() -> i64: helper_val()\n")).to_equal(true)
+        expect(file_write(free_path,
+            "pub fn helper_val() -> i64: 11\n")).to_equal(true)
+        expect(file_write(comp_path,
+            "pub struct BoxItem:\n    count: i64\n")).to_equal(true)
+        var module_paths: Dict<text, text> = {}
+        module_paths["app.main"] = main_path
+        module_paths["app.free_mod"] = free_path
+        module_paths["app.comp_mod"] = comp_path
+        val plan = unit_tldr_plan_v1("unit-0", "{root}/cache", [main_path], module_paths)
+        expect(plan.summaries).to_equal(2)
+        expect(plan.surfaces.len()).to_equal(1)
+        expect(plan.surfaces[0].logical_name).to_contain("free_mod")
+        expect(plan.fallbacks).to_equal(1)
+        expect(plan.fallback_modules).to_equal(["app.comp_mod"])
+        expect(plan.parse_paths.contains(comp_path)).to_equal(true)
+        val _rm = dir_remove_all(root)

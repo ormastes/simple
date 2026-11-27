@@ -1,0 +1,78 @@
+#!/bin/sh
+# Build-input scope of the Stage 2/3 source-quiescence snapshot.
+# Bug: stage2_admission_source_quiescence_unsatisfiable_in_shared_tree_2026-08-31
+# Churn in an unlisted src/app dir (concurrent shared-tree lane edits) must not
+# change the snapshot; churn in a listed build-input dir, or anywhere else in
+# the authority roots, must. The list is mandatory. No symlinks (portable).
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+tmp=$(mktemp -d)
+tmp=$(CDPATH= cd -- "$tmp" && pwd -P)
+trap 'rm -rf "$tmp"' EXIT INT TERM
+
+. "$root/scripts/check/lib/bootstrap-stage3/authority.shs"
+. "$root/scripts/check/lib/bootstrap-stage3/command-snapshot.shs"
+
+r="$tmp/repo"
+for d in src/compiler src/app/cli src/app/spipe src/lib src/os src/runtime \
+    src/package_ownership src/plugins src/compositions examples/10_tooling \
+    scripts/bootstrap scripts/check/lib \
+    test/03_system/app/bootstrap_builder/feature test/fixtures/bootstrap_builder; do
+  mkdir -p "$r/$d"
+done
+list="$r/scripts/bootstrap/stage2-build-input-app-dirs.txt"
+printf '# fixture\ncli\n' >"$list"
+printf 'c1\n' >"$r/src/compiler/a.spl"
+printf 'cli-one\n' >"$r/src/app/cli/main.spl"
+printf 'spipe-one\n' >"$r/src/app/spipe/fusion.spl"
+printf 'top\n' >"$r/src/app/FILE.md"
+
+fail() { echo "FAIL: $*" >&2; exit 1; }
+snap() { bootstrap_stage3_source_snapshot "$tmp/$1" "$r"; }
+
+snap before
+grep -q "$(printf src/app/cli/main.spl | od -An -tx1 | tr -d ' \n')" "$tmp/before" ||
+  fail "listed build-input file missing from snapshot"
+! grep -q "$(printf src/app/spipe | od -An -tx1 | tr -d ' \n')" "$tmp/before" ||
+  fail "unlisted app dir present in snapshot"
+
+# The incident's exact churn: spipe/fusion edit + add, new spipe_knowledge_provider.
+printf 'spipe-two\n' >"$r/src/app/spipe/fusion.spl"
+printf 'new\n' >"$r/src/app/spipe/graph_source.spl"
+mkdir -p "$r/src/app/spipe_knowledge_provider"
+printf 'kp\n' >"$r/src/app/spipe_knowledge_provider/main.spl"
+snap unrelated
+cmp -s "$tmp/before" "$tmp/unrelated" ||
+  fail "unrelated src/app churn changed the quiescence snapshot"
+
+printf 'cli-two\n' >"$r/src/app/cli/main.spl"
+snap input
+! cmp -s "$tmp/unrelated" "$tmp/input" ||
+  fail "build-input src/app churn did not change the snapshot"
+
+printf 'c2\n' >"$r/src/compiler/a.spl"
+snap compiler
+! cmp -s "$tmp/input" "$tmp/compiler" || fail "src/compiler churn not detected"
+
+printf 'top2\n' >"$r/src/app/FILE.md"
+snap topfile
+! cmp -s "$tmp/compiler" "$tmp/topfile" || fail "src/app top-level file churn not detected"
+
+# Editing the list itself is authority churn (it lives in scripts/bootstrap).
+printf '# fixture\ncli\nspipe\n' >"$list"
+snap widened
+! cmp -s "$tmp/topfile" "$tmp/widened" || fail "list edit not detected"
+
+rm "$list"
+if snap nolist 2>"$tmp/err"; then fail "missing list accepted"; fi
+grep -q 'missing build-input app list' "$tmp/err" || fail "missing list wrong error"
+printf '# only comments\n\n' >"$list"
+if snap empty 2>/dev/null; then fail "empty list accepted"; fi
+printf 'bad/entry\n' >"$list"
+if snap badentry 2>/dev/null; then fail "invalid entry accepted"; fi
+
+sh "$root/scripts/bootstrap/stage2-build-input-app-dirs-check.shs" --selftest >/dev/null ||
+  fail "closure checker selftest"
+
+echo "bootstrap_stage3_source_snapshot_scope=true"

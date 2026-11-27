@@ -129,6 +129,11 @@ pub enum TokenKind {
     RawString(String),              // 'raw string' - no escapes, no interpolation
     TypedString(String, String),    // "value"_suffix - string with unit suffix (e.g., "127.0.0.1"_ip)
     TypedRawString(String, String), // 'value'_suffix - raw string with unit suffix
+    /// `'x'` char literal (one Unicode scalar or one escape). Only produced when the
+    /// ADR-005 char-literal lexer gate is ON (`SIMPLE_CHAR_LITERAL_LEXER=1`); the
+    /// parser does not accept it yet (activation step 1 in
+    /// doc/08_tracking/bug/char_literal_lexer_switch_staged_2026-11-03.md).
+    CharLit(char),
     Bool(bool),
     Nil,
     Symbol(String), // :symbol
@@ -274,6 +279,11 @@ pub enum TokenKind {
     OrColon,   // or: (fallback value suffix)
     ElseColon, // else: (lazy fallback suffix)
     OrReturn,  // or_return: (unwrap or early return)
+
+    /// `s{` — set literal opener (`s{1, 2, 3}`). The lexer emits it only for
+    /// an `s` identifier IMMEDIATELY followed by `{`; the parser lowers the
+    /// literal to `Set.from([..])` (bug set_literal_s_brace_unparsed_2026-09-06).
+    SetLitStart,
 
     // Custom Blocks (#1090-1098)
     // DSL embedding blocks: kind{payload} where payload is captured raw

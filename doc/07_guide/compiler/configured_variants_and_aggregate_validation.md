@@ -10,6 +10,39 @@ Candidate fallback order is a search mechanism. It must not silently override a 
 
 Compare the Rust bootstrap resolver and the Pure-Simple pipeline using the same requested configuration, importer, source inventory, and module spelling. Check the selected physical module and export owner at each stage. A source patch to discovery alone does not prove that HIR selects the same owner. Configured-selection parity is active work; historical fixed candidate ordering is not proof of the intended contract.
 
+### Native library-mode configuration
+
+The current source candidate adds `native-build --library-mode <mode>`. Native
+execution and admission of this interface remain pending; do not assume an older
+installed compiler supports it merely because its directory is named Phase3.
+
+Modes use semantic configuration tokens: `(gc|nogc)-(sync|async)-(mut|immut)`
+or the existing `noalloc-async-mut` profile. For example:
+
+```text
+<verified-compiler> native-build --source src --entry <entry.spl> --library-mode nogc-sync-mut --output <private-output>
+```
+
+Keep the admitted producer's required target, platform-provider, backend and
+runtime options. Library mode is separate from host CPU/runtime-tier selection.
+Use generic application imports such as `std.sosix.time`; do not select NoGC
+with a physical family root or silently replace a missing configured owner with
+another family. An implementation's deliberate internal family boundary remains
+owner-coherent, including when an explicit other-family owner is imported.
+
+An explicit mode binds the typed compile options, source closure, frozen
+imports/re-exports, HIR validation and cache identities. Missing selected owners
+or symbols must report `LIBRARY_MODE_OWNER_MISSING` or
+`LIBRARY_MODE_SYMBOL_MISSING`. Unsupported capabilities are not a reason to
+change the requested family. Empty mode preserves legacy behavior, including
+existing target-preset allowlists; a nonempty allowlist alone is not proof of an
+explicit library-mode request.
+
+Qualification requires actual owner/value and negative controls through native
+compilation, including fresh/warm caches and mixed application/internal-owner
+imports. CLI parsing, source inventory, source review and authored specifications
+alone do not establish configured-selection parity.
+
 ## Bind observations to the compiler that produced them
 
 Record source revision, producer executable hash, runtime/provider identity, backend, relevant options, and actual cache scope. A repaired source tree compiled by an older producer may repeat an already understood grammar or resolution failure. Mark that result pending a rebuilt producer rather than repeatedly editing the leaf or claiming it passed.

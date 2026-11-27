@@ -26,6 +26,7 @@ MEMORY {
 SECTIONS {
     /* Code section -- entry point must be first */
     .text : ALIGN(4K) {
+        _kernel_start = .;
         KEEP(*(.text.entry))        /* Boot entry point (_entry_asm) */
         *(.text*)                   /* All other code */
     } > RAM

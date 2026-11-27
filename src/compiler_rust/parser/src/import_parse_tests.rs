@@ -16,6 +16,11 @@ mod tests {
         assert_eq!(try_parse("val x = 5; print(x)\n").unwrap(), 2);
     }
 
+    #[test]
+    fn parses_one_line_fail_and_return_statements() {
+        assert_eq!(try_parse("fail(\"expected failure\"); return\n").unwrap(), 2);
+    }
+
     fn parse_file_detail(path: &str) -> String {
         let full_path = format!("/home/ormastes/dev/pub/simple/{}", path);
         let source = match std::fs::read_to_string(&full_path) {
@@ -147,6 +152,59 @@ mod tests {
     fn test_use_double_colon_with_group() {
         let r = try_parse("use base64::types::{A, B, C}\n");
         assert!(r.is_ok(), "use :: with group: {:?}", r);
+    }
+
+    #[test]
+    fn test_parent_relative_from_import_is_one_use_statement() {
+        // `from ..pkg import {A}` used to fall through the statement gate: `..`
+        // lexes as DoubleDot, the gate only admitted Dot, so `from` became an
+        // expression identifier (load error: variable `from` not found) and
+        // `import {A}` a second statement.
+        for src in [
+            "from ..core import {Interpreter, Value}\n",
+            "from ..core.execution_guard import {push_call_depth}\n",
+            "from ...core import {Interpreter}\n",
+            "from .sibling import {helper}\n",
+        ] {
+            let mut parser = Parser::new(src);
+            let module = parser.parse().unwrap_or_else(|e| panic!("{:?}: {}", src, e));
+            assert_eq!(module.items.len(), 1, "{:?} must be one statement", src);
+            assert!(
+                matches!(module.items[0], crate::ast::Node::UseStmt(_)),
+                "{:?} must parse as a use statement, got {:?}",
+                src,
+                module.items[0]
+            );
+        }
+    }
+
+    #[test]
+    fn test_from_stays_an_identifier_when_not_an_import() {
+        // `from` is a soft keyword: these are expressions/assignments, not imports.
+        for src in ["from = 3\n", "val from = 1\nval to = from + 2\n", "from(1)\n"] {
+            let mut parser = Parser::new(src);
+            let module = parser.parse().unwrap_or_else(|e| panic!("{:?}: {}", src, e));
+            assert!(
+                !module.items.iter().any(|n| matches!(n, crate::ast::Node::UseStmt(_))),
+                "{:?} must not parse as an import",
+                src
+            );
+        }
+    }
+
+    #[test]
+    fn test_relative_use_with_brace_member_list() {
+        // relative_use_with_brace_member_list_fails_to_parse_2026-08-17
+        for src in [
+            "use .sub.mod.{helper}\n",
+            "use .vhdl.vhdl_builder.{VhdlBuilder}\n",
+            "use .sub.mod.{A, B}\n",
+            "use .sub.mod\n",
+            "use sub.mod.{helper}\n",
+        ] {
+            let r = try_parse(src);
+            assert!(r.is_ok(), "{:?}: {:?}", src, r);
+        }
     }
 
     #[test]

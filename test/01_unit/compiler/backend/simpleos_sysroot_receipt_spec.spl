@@ -1,0 +1,111 @@
+use compiler.driver.driver_build.native_link_receipt_v1.{native_link_receipt_cache_eligible_v1}
+# Real Clang fixture setup is separate from SDK validation. The validator
+# itself never launches a process and never requires the producer's local CC.
+# @cover src/compiler/70.backend/backend/simpleos_sysroot_receipt.spl
+use compiler.backend.simpleos_sysroot_receipt.{simpleos_sdk_canonical_arch_v1,
+    simpleos_sdk_receipt_decode_v1, simpleos_sdk_ledger_decode_v1, simpleos_sysroot_validate_sdk_v1, simpleos_caller_input_digest_v1}
+use std.io_runtime.{process_run_timeout, file_read, file_write, file_copy, file_read_bytes, file_write_bytes, file_hash_sha256_or_empty}
+
+fn sdk_native_fixture_v1() -> text:
+    val (stdout, stderr, code) = process_run_timeout("sh",
+        ["test/01_unit/os/port/simpleos_sysroot_receipt_test.shs", "--fixture-only"], 120000)
+    if code != 0: panic("real SDK fixture compile failed: {stderr}")
+    val result: text = stdout.trim()
+    if not result.starts_with("fixture="): panic("SDK fixture did not publish its evidence path")
+    result.substring(8)
+
+fn sdk_native_omit_row_v1(raw: text, needle: text) -> text:
+    var kept = ""
+    for line in raw.split("\n"):
+        if line != "" and not line.contains(needle): kept = kept + line + "\n"
+    kept
+
+describe "SimpleOS SDK provenance":
+    it "normalizes target aliases through the canonical backend target owner":
+        expect(simpleos_sdk_canonical_arch_v1("simpleos-x86_64")).to_equal("x86_64")
+        expect(simpleos_sdk_canonical_arch_v1("aarch64-unknown-simpleos")).to_equal("aarch64")
+        expect(simpleos_sdk_canonical_arch_v1("riscv64gc-unknown-simpleos")).to_equal("riscv64")
+        expect(simpleos_sdk_canonical_arch_v1("i686-unknown-simpleos")).to_equal("i686")
+        expect(simpleos_sdk_canonical_arch_v1("armv7-unknown-simpleos")).to_equal("arm32")
+        expect(simpleos_sdk_canonical_arch_v1("riscv32imac-unknown-simpleos")).to_equal("riscv32")
+        expect(simpleos_sdk_canonical_arch_v1("x86_64-unknown-linux-gnu")).to_equal("")
+
+    it "rejects ambiguous, unbounded or escaping ledgers":
+        val digest = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+        val good = "schema: simpleos-sdk-inputs-v1\nfiles:\n  \"src/os/libc/simpleos_libc.c\": {digest}\n"
+        expect(simpleos_sdk_ledger_decode_v1(good, "simpleos-sdk-inputs-v1").is_ok()).to_equal(true)
+        val duplicate = good + "  \"src/os/libc/simpleos_libc.c\": {digest}\n"
+        expect(simpleos_sdk_ledger_decode_v1(duplicate, "simpleos-sdk-inputs-v1").is_err()).to_equal(true)
+        expect(simpleos_sdk_ledger_decode_v1(good.replace("src/os/libc/simpleos_libc.c", "../outside.c"), "simpleos-sdk-inputs-v1").is_err()).to_equal(true)
+        expect(simpleos_sdk_ledger_decode_v1(good + "unknown: value\n", "simpleos-sdk-inputs-v1").is_err()).to_equal(true)
+        var oversized = "x"
+        while oversized.len() <= 32768: oversized = oversized + oversized
+        expect(simpleos_sdk_receipt_decode_v1(oversized, "i686").unwrap_err()).to_contain("bound")
+
+    it "checks real source and ELF archive bytes without requiring local producer tools":
+        val fixture = sdk_native_fixture_v1()
+        val source = fixture + "/source"
+        val sdk = fixture + "/sdk"
+        val receipt_path = sdk + "/share/simpleos/sysroot-receipt.sdn"
+        val raw = file_read(receipt_path)
+        val fields = simpleos_sdk_receipt_decode_v1(raw, "i686").unwrap()
+        expect(fields["runtime_qualification"]).to_equal("none")
+        expect(fields["stdio_source_profile"]).to_equal("legacy-serial-unqualified")
+        expect(simpleos_sysroot_validate_sdk_v1(sdk, "i686", source).is_ok()).to_equal(true)
+        expect(simpleos_sdk_receipt_decode_v1(raw + "status: built\n", "i686").is_err()).to_equal(true)
+        expect(simpleos_sdk_receipt_decode_v1(raw + "unknown: value\n", "i686").is_err()).to_equal(true)
+        expect(simpleos_sdk_receipt_decode_v1(raw.replace("status: built\n", ""), "i686").is_err()).to_equal(true)
+        expect(simpleos_sdk_receipt_decode_v1(raw, "aarch64").is_err()).to_equal(true)
+        val producer_path = fields["compiler_path"]
+        val foreign = raw.replace("compiler_path: \"{producer_path}\"", "compiler_path: \"/foreign/build-host/clang\"")
+        expect(file_write(receipt_path, foreign)).to_equal(true)
+        expect(simpleos_sysroot_validate_sdk_v1(sdk, "i686", source).is_ok()).to_equal(true)
+        expect(file_write(receipt_path, raw)).to_equal(true)
+        val source_path = source + "/src/os/libc/simpleos_libc.c"
+        val source_before = file_read(source_path)
+        expect(file_write(source_path, source_before + "\nint changed_write_abi(void) {{ return 32; }}\n")).to_equal(true)
+        expect(simpleos_sysroot_validate_sdk_v1(sdk, "i686", source).unwrap_err()).to_contain("stale")
+        expect(file_write(source_path, source_before)).to_equal(true)
+        val archive = sdk + "/lib/libsimpleos_c.a"
+        val saved = fixture + "/native-archive.saved"
+        expect(file_copy(archive, saved)).to_equal(true)
+        var changed = file_read_bytes(archive)
+        changed.push(0u8)
+        expect(file_write_bytes(archive, changed)).to_equal(true)
+        expect(simpleos_sysroot_validate_sdk_v1(sdk, "i686", source).unwrap_err()).to_contain("stale")
+        expect(file_copy(saved, archive)).to_equal(true)
+        # An explicit libc override cannot bypass the validated SDK generation.
+        expect(file_write_bytes(fixture + "/other-libc.a", changed)).to_equal(true)
+        expect(simpleos_sysroot_validate_sdk_v1(sdk, "i686", source, "", fixture + "/other-libc.a").is_err()).to_equal(true)
+        val script_copy = fixture + "/native-script-override.ld"
+        expect(file_copy(sdk + "/share/simpleos/simpleos.ld", script_copy)).to_equal(true)
+        expect(simpleos_sysroot_validate_sdk_v1(sdk, "i686", source, "", "", script_copy).is_ok()).to_equal(true)
+        val first_script = simpleos_caller_input_digest_v1(script_copy, 2097152).unwrap()
+        val input_before = ["caller|linker-script|" + script_copy + "|" + first_script]
+        expect(native_link_receipt_cache_eligible_v1(input_before)).to_equal(false)
+        expect(file_write(script_copy, "ENTRY(different_entry)\n")).to_equal(true)
+        expect(simpleos_sysroot_validate_sdk_v1(sdk, "i686", source, "", "", script_copy).is_ok()).to_equal(true)
+        val input_after = ["caller|linker-script|" + script_copy + "|" + simpleos_caller_input_digest_v1(script_copy, 2097152).unwrap()]
+        expect(input_before.join("\n") == input_after.join("\n")).to_equal(false)
+        expect(native_link_receipt_cache_eligible_v1(input_after)).to_equal(false)
+        val artifacts_path = sdk + "/share/simpleos/sysroot-artifacts.sdn"
+        val members_path = sdk + "/share/simpleos/sysroot-members.sdn"
+        val artifacts_before = file_read(artifacts_path)
+        val members_before = file_read(members_path)
+        expect(file_write(artifacts_path, sdk_native_omit_row_v1(artifacts_before, "\"lib/libsimpleos_all.a\""))).to_equal(true)
+        expect(file_write(members_path, sdk_native_omit_row_v1(members_before, "\"lib/libsimpleos_all.a/"))).to_equal(true)
+        val artifacts_hash = file_hash_sha256_or_empty(artifacts_path)
+        val members_hash = file_hash_sha256_or_empty(members_path)
+        val prior_artifacts_hash = fields["artifacts_sha256"]
+        val prior_members_hash = fields["members_sha256"]
+        val rebound = raw.replace("artifacts_sha256: \"{prior_artifacts_hash}\"", "artifacts_sha256: \"{artifacts_hash}\"").replace(
+            "members_sha256: \"{prior_members_hash}\"", "members_sha256: \"{members_hash}\"")
+        expect(file_write(receipt_path, rebound)).to_equal(true)
+        expect(simpleos_sysroot_validate_sdk_v1(sdk, "i686", source).unwrap_err()).to_contain("aggregate")
+
+    it "keeps unproven SDK and arbitrary script dependency closure fresh only":
+        val sdk = ["sdk|sdk-receipt|sysroot/share/simpleos/sysroot-receipt.sdn|" + "a".repeat(64)]
+        val custom = sdk + ["caller|linker-script|custom.ld|" + "b".repeat(64)]
+        expect(native_link_receipt_cache_eligible_v1(sdk)).to_equal(false)
+        expect(native_link_receipt_cache_eligible_v1(custom)).to_equal(false)
+        expect(native_link_receipt_cache_eligible_v1([])).to_equal(true)

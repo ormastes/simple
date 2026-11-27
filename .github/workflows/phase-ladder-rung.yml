@@ -12,9 +12,18 @@ on:
       lanes:
         type: string
         required: true
+      build_jobs:
+        description: "Build job override; 0 retains the automatic lane default"
+        type: number
+        default: 0
+      fresh:
+        description: "Skip handoffs proven by earlier runs"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
+  actions: read
 
 jobs:
   native:
@@ -26,11 +35,11 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - { platform: linux-x86_64, os: ubuntu-24.04, threads: 4 }
-          - { platform: linux-riscv64, os: ubuntu-24.04, threads: 4 }
-          - { platform: darwin-arm64, os: macos-15, threads: 3 }
-          - { platform: darwin-x86_64, os: macos-15-intel, threads: 4 }
-          - { platform: windows-x86_64, os: windows-2025, threads: 4 }
+          - { platform: linux-x86_64, os: ubuntu-24.04, threads: 4, selfhost_threads: 1 }
+          - { platform: linux-riscv64, os: ubuntu-24.04, threads: 4, selfhost_threads: 1 }
+          - { platform: darwin-arm64, os: macos-15, threads: 3, selfhost_threads: 1 }
+          - { platform: darwin-x86_64, os: macos-15-intel, threads: 4, selfhost_threads: 2 }
+          - { platform: windows-x86_64, os: windows-2025, threads: 4, selfhost_threads: 2 }
     defaults:
       run:
         shell: bash
@@ -42,17 +51,50 @@ jobs:
             ,all,|*",${{ matrix.platform }},"*) echo "on=true" >> "$GITHUB_OUTPUT" ;;
             *) echo "on=false" >> "$GITHUB_OUTPUT" ;;
           esac
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         if: steps.sel.outputs.on == 'true'
         with:
           persist-credentials: false
+      - name: Select build jobs
+        if: steps.sel.outputs.on == 'true'
+        id: build_jobs
+        env:
+          REQUESTED_BUILD_JOBS: ${{ inputs.build_jobs }}
+          DEFAULT_BUILD_JOBS: ${{ matrix.threads }}
+          DEFAULT_SELFHOST_JOBS: ${{ matrix.selfhost_threads }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          jobs=$REQUESTED_BUILD_JOBS
+          selfhost_jobs=$jobs
+          if [ "$jobs" = 0 ] && [ "$EVENT_NAME" != workflow_dispatch ]; then jobs=$DEFAULT_BUILD_JOBS; selfhost_jobs=$DEFAULT_SELFHOST_JOBS; fi
+          case "$jobs" in ''|0*|*[!0-9]*) echo "build_jobs must be an integer from 1 through 256" >&2; exit 2 ;; esac
+          [ "${#jobs}" -le 3 ] && [ "$jobs" -le 256 ] || { echo "build_jobs must be an integer from 1 through 256" >&2; exit 2; }
+          echo "count=$jobs" >> "$GITHUB_OUTPUT"
+          echo "selfhost_count=$selfhost_jobs" >> "$GITHUB_OUTPUT"
+          echo "Selected build jobs: seed=$jobs selfhost=$selfhost_jobs"
       - name: Previous rungs' handoffs
         if: steps.sel.outputs.on == 'true' && inputs.rung > 1
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v7
         with:
           pattern: ladder-*
           path: build/ladder/in
           merge-multiple: true
+      # Every rung resumes from the highest phase any ladder run on this branch
+      # (this one included) already proved, so phases are never rebuilt.
+      - name: Proven handoffs (any run)
+        if: steps.sel.outputs.on == 'true' && !inputs.fresh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          lanes="${{ matrix.platform }}"
+          [ "$lanes" = linux-riscv64 ] && lanes="linux-riscv64 linux-x86_64"
+          sh scripts/bootstrap/phase-ladder-resume.shs build/ladder/in $lanes
+      - name: Earlier diagnostic receipts (not admitted handoffs)
+        if: steps.sel.outputs.on == 'true' && inputs.rung > 1
+        uses: actions/download-artifact@v7
+        with:
+          pattern: bootstrap-ladder-receipts-${{ matrix.platform }}-r*
+          path: build/ladder/diagnostics
       - name: Rust toolchain (riscv64 cross runtime)
         if: steps.sel.outputs.on == 'true' && matrix.platform == 'linux-riscv64'
         run: |
@@ -67,15 +109,225 @@ jobs:
             "$VERSION_CODENAME" "$VERSION_CODENAME" | sudo tee /etc/apt/sources.list.d/riscv64-ports.sources
           sudo apt-get update -qq
           sudo apt-get install -y -qq libsqlite3-dev:riscv64 zlib1g-dev:riscv64 libzstd-dev:riscv64 libncurses-dev:riscv64
+      # A first rung with no qualified RC builds phase 1 with the Rust seed,
+      # which needs the same tools as release.yml's seed steps.
+      # A pure-Simple compiler building the compiler peaks above the 16 GB
+      # runner after HIR (runs 40091812567, 40098331925: runner shutdown);
+      # darwin-arm64 (7 GB) got through on macOS swap. Give Linux swap too.
+      # 24 GB was not enough (run 40136579984: shutdown at MIR start); the
+      # measured peak before the first MIR module is 36-40 GB at 1471 modules
+      # (doc/08_tracking/bug/native_build_per_worker_baseline_rss_2026_10_24.md),
+      # so use the /mnt temp disk, keeping 8 GB free, capped at 64 GB.
+      - name: Swap for pure-Simple builds (linux)
+        if: steps.sel.outputs.on == 'true' && startsWith(matrix.platform, 'linux-')
+        run: |
+          sudo swapoff -a || :
+          sudo rm -f /mnt/swapfile
+          df -h / /mnt
+          avail_bytes=$(df -B1 --output=avail /mnt | tail -1 | tr -dc 0-9)
+          avail=$((avail_bytes / 1073741824))
+          # Keep 32 GiB for Cargo, the 20 GiB preflight floor, and native outputs.
+          # Never force the minimum swap size by consuming that build reserve.
+          size=$((avail - 32)); [ "$size" -gt 64 ] && size=64
+          if [ "$size" -lt 24 ]; then
+            echo "BLOCKED: ${avail} GiB free cannot provide 24 GiB swap and the 32 GiB build reserve" >&2
+            exit 1
+          fi
+          printf 'phase-ladder swap: available_bytes=%s available_floor_gib=%s swap_gib=%s reserve_gib=32\n' "$avail_bytes" "$avail" "$size"
+          sudo fallocate -l "${size}G" /mnt/ladder.swap
+          sudo chmod 600 /mnt/ladder.swap
+          sudo mkswap /mnt/ladder.swap
+          sudo swapon /mnt/ladder.swap
+          free -g
+      - name: Build tools (linux-x86_64)
+        if: steps.sel.outputs.on == 'true' && matrix.platform == 'linux-x86_64'
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq clang lld llvm libunwind-dev gdb
+      # Diagnostics only: a crashing worker (e.g. SIGSEGV) leaves a core file
+      # that the failure step below turns into a gdb backtrace. Gates unchanged.
+      - name: Enable core dumps (linux)
+        if: steps.sel.outputs.on == 'true' && startsWith(matrix.platform, 'linux-')
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/build/ladder/cores"
+          chmod 1777 "$GITHUB_WORKSPACE/build/ladder/cores"
+          sudo systemctl stop apport.service 2>/dev/null || true
+          echo "$GITHUB_WORKSPACE/build/ladder/cores/core.%E.%p.%s" | sudo tee /proc/sys/kernel/core_pattern
+          echo 0 | sudo tee /proc/sys/kernel/core_uses_pid
+      - name: Install LLVM (macOS)
+        if: steps.sel.outputs.on == 'true' && startsWith(matrix.platform, 'darwin-')
+        run: |
+          brew install llvm
+          prefix=$(brew --prefix llvm)
+          echo "DYLD_LIBRARY_PATH=$prefix/lib${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" >> "$GITHUB_ENV"
+          echo "$prefix/bin" >> "$GITHUB_PATH"
+      # Windows default lane: MinGW UCRT (pinned llvm-mingw: clang + lld, no
+      # GCC, no Visual Studio), Rust host x86_64-pc-windows-gnullvm. MSVC stays
+      # available through SIMPLE_WINDOWS_ABI=msvc but CI builds gnu only.
+      - name: MinGW UCRT toolchain (windows-x86_64)
+        if: steps.sel.outputs.on == 'true' && matrix.platform == 'windows-x86_64'
+        run: |
+          sh scripts/setup/bootstrap-prereqs.shs install-llvm-mingw
+          echo "SIMPLE_WINDOWS_ABI=gnu" >> "$GITHUB_ENV"
+          channel=$(sed -n 's/^channel = "\(.*\)"$/\1/p' src/compiler_rust/rust-toolchain.toml)
+          rustup set default-host x86_64-pc-windows-gnullvm
+          rustup toolchain install "$channel" --profile minimal
       - name: Climb one phase
         if: steps.sel.outputs.on == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          # Automatic runs retain the lane's memory-sized self-host count;
+          # an explicit manual selection applies to both compiler generations.
+          PHASE_LADDER_SELFHOST_THREADS: ${{ steps.build_jobs.outputs.selfhost_count }}
+          CARGO_BUILD_JOBS: ${{ steps.build_jobs.outputs.count }}
+          SIMPLE_HOST_MAX_THREADS: ${{ steps.build_jobs.outputs.count }}
+          SIMPLE_HOST_MAX_BUILD_JOBS: ${{ steps.build_jobs.outputs.count }}
+          SIMPLE_BOOTSTRAP_MAX_BUILD_JOBS: ${{ steps.build_jobs.outputs.count }}
+          SIMPLE_NATIVE_FILE_TIMING: 1
         run: |
-          mkdir -p build/ladder/in build/ladder/out
-          sh scripts/bootstrap/phase-ladder-step.shs "${{ matrix.platform }}" build/ladder/in build/ladder/out "${{ matrix.threads }}"
-      - uses: actions/upload-artifact@v4
-        if: steps.sel.outputs.on == 'true'
+          if [ "${{ matrix.platform }}" = windows-x86_64 ]; then
+            . scripts/setup/windows-gitbash-bootstrap-env.shs
+            clang --version | head -1
+            ld.lld --version
+          fi
+          mkdir -p build/ladder/in build/ladder/out build/ladder/evidence
+          case "${{ matrix.platform }}" in linux-*) ulimit -c unlimited || true ;; esac
+          rc=0
+          case "${{ matrix.platform }}" in
+          linux-*)
+            # Diagnostics only: run the build in its own process group and
+            # sample memory every 10 s into evidence/mem.log. If MemAvailable +
+            # SwapFree drops below LADDER_MEM_FLOOR_KB, kill the build loudly
+            # so the artifact steps still run instead of the VM starving. A
+            # kill always fails the step; it can never make the gate pass.
+            mem_log=build/ladder/evidence/mem.log
+            floor_kb=${LADDER_MEM_FLOOR_KB:-1572864}
+            # Root fs floor: leaves room for the artifact steps to stage uploads.
+            disk_floor_kb=${LADDER_DISK_FLOOR_KB:-2097152}
+            setsid sh -c 'sh scripts/bootstrap/phase-ladder-step.shs "$1" build/ladder/in build/ladder/out "$2" > build/ladder/evidence/step.log 2>&1' sh "${{ matrix.platform }}" "${{ steps.build_jobs.outputs.count }}" &
+            bpid=$!
+            tail -n +1 -F build/ladder/evidence/step.log 2>/dev/null &
+            tpid=$!
+            ( set +e
+              peak_rss=0; peak_swap=0; min_avail=999999999
+              while kill -0 "$bpid" 2>/dev/null; do
+                avail=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo)
+                sfree=$(awk '/^SwapFree:/{print $2}' /proc/meminfo)
+                rss=0; swp=0; top=""
+                for p in $(ps -eo pid=,pgid= | awk -v g="$bpid" '$2==g{print $1}'); do
+                  r=$(awk '/^VmRSS:/{print $2}' /proc/$p/status 2>/dev/null); s=$(awk '/^VmSwap:/{print $2}' /proc/$p/status 2>/dev/null)
+                  rss=$((rss + ${r:-0})); swp=$((swp + ${s:-0}))
+                done
+                top=$(ps -eo pgid=,rss=,comm= --sort=-rss | awk -v g="$bpid" '$1==g{print $3":"$2; if(++n==3) exit}' | tr '\n' ' ')
+                [ "$rss" -gt "$peak_rss" ] && peak_rss=$rss
+                [ "$swp" -gt "$peak_swap" ] && peak_swap=$swp
+                head=$((avail + sfree)); [ "$head" -lt "$min_avail" ] && min_avail=$head
+                stotal=$(awk '/^SwapTotal:/{print $2}' /proc/meminfo)
+                root_free=$(df -k --output=avail / | tail -1 | tr -dc 0-9)
+                mnt_free=$(df -k --output=avail /mnt | tail -1 | tr -dc 0-9)
+                load=$(cut -d' ' -f1-3 /proc/loadavg | tr ' ' '/')
+                iop=$(awk '/^full/{print $2}' /proc/pressure/io 2>/dev/null | cut -d= -f2)
+                cpup=$(awk '/^some/{print $2}' /proc/pressure/cpu 2>/dev/null | cut -d= -f2)
+                line="$(date -u +%H:%M:%S) root_free_kb=$root_free mnt_free_kb=$mnt_free swap_used_kb=$((stotal - sfree)) load=$load io_full_avg10=$iop cpu_some_avg10=$cpup avail_kb=$avail swapfree_kb=$sfree build_rss_kb=$rss build_swap_kb=$swp peak_rss_kb=$peak_rss peak_swap_kb=$peak_swap min_headroom_kb=$min_avail top=[$top] hir=$(grep -o 'done=[0-9]* total=[0-9]*' build/ladder/evidence/step.log 2>/dev/null | tail -1)"
+                echo "$line" >> "$mem_log"
+                { echo "=== $(date -u +%H:%M:%S)"; cat /proc/meminfo; df -h / /mnt; } >> build/ladder/evidence/meminfo.log
+                echo "[mem] $line"
+                why=""
+                [ "$head" -lt "$floor_kb" ] && why="MemAvailable+SwapFree=${head} kB < floor ${floor_kb} kB"
+                [ "${root_free:-0}" -lt "$disk_floor_kb" ] && why="${why:+$why; }root fs free=${root_free} kB < floor ${disk_floor_kb} kB"
+                if [ -n "$why" ]; then
+                  echo "LADDER-MEM-KILL: $why; killing build group $bpid" | tee -a "$mem_log" build/ladder/evidence/mem-kill.txt
+                  df -h >> build/ladder/evidence/mem-kill.txt
+                  du -xsh build/ladder/* "$HOME"/.cache 2>/dev/null >> build/ladder/evidence/mem-kill.txt
+                  ps -eo pid,pgid,rss,vsz,etimes,args --sort=-rss | head -40 >> build/ladder/evidence/mem-kill.txt
+                  kill -KILL -- "-$bpid" 2>/dev/null || true
+                  break
+                fi
+                sleep 10
+              done
+            ) &
+            spid=$!
+            wait "$bpid" || rc=$?
+            kill "$spid" "$tpid" 2>/dev/null || true
+            wait "$spid" 2>/dev/null || true
+            if [ -f build/ladder/evidence/mem-kill.txt ]; then
+              echo "phase-ladder: build killed by memory floor (see evidence/mem-kill.txt)"
+              [ "$rc" -ne 0 ] || rc=1
+            fi
+            ;;
+          *)
+            sh scripts/bootstrap/phase-ladder-step.shs "${{ matrix.platform }}" build/ladder/in build/ladder/out "${{ steps.build_jobs.outputs.count }}" 2>&1 | tee build/ladder/evidence/step.log || rc=$?
+            ;;
+          esac
+          exit "$rc"
+      - name: Retain tiny attempt receipts (no compiler or cache)
+        if: always() && steps.sel.outputs.on == 'true'
+        uses: actions/upload-artifact@v6
+        with:
+          name: bootstrap-ladder-receipts-${{ matrix.platform }}-r${{ inputs.rung }}
+          path: |
+            build/ladder/evidence/attempt.sdn
+            build/ladder/evidence/seed-native-failure.sdn
+          retention-days: 14
+          if-no-files-found: warn
+      # Diagnostics only: turn every core left by a crashed process into a
+      # `thread apply all bt full` text file inside the diagnostics artifact.
+      # Cores themselves are kept only when small (<= 2 GiB total budget).
+      - name: Backtraces from core dumps (linux)
+        if: failure() && steps.sel.outputs.on == 'true' && startsWith(matrix.platform, 'linux-')
+        run: |
+          out=build/ladder/evidence/backtraces
+          mkdir -p "$out"
+          ls -la build/ladder/cores > "$out/cores.ls" 2>&1 || true
+          for core in build/ladder/cores/core.*; do
+            [ -f "$core" ] || continue
+            base=$(basename "$core")
+            exe=$(printf '%s' "$base" | sed 's/^core\.//; s/\.[0-9]*\.[0-9]*$//' | tr '!' '/')
+            [ -x "$exe" ] || exe=$(gdb -batch -c "$core" 2>/dev/null | sed -n "s/^Core was generated by \`\([^ ']*\).*/\1/p" | head -1)
+            echo "core=$core exe=$exe" | tee "$out/$base.bt.txt"
+            timeout 900 gdb -batch -nx -ex 'set pagination off' -ex 'info signals SIGSEGV' \
+              -ex 'info threads' -ex 'thread apply all bt full' -ex 'info registers' -ex 'x/16i $pc-32' \
+              "$exe" "$core" >> "$out/$base.bt.txt" 2>&1 || echo "gdb rc=$?" >> "$out/$base.bt.txt"
+            timeout 300 gdb -batch -nx -ex 'thread apply all bt 60' "$exe" "$core" > "$out/$base.bt-short.txt" 2>&1 || true
+            sz=$(stat -c %s "$core")
+            if [ "$sz" -le 2147483648 ]; then cp "$core" "$out/" && xz -T0 -1 "$out/$base" || true; fi
+          done
+          ls -la "$out"
+      - name: Retain diagnostic logs, exact producer and native cache
+        if: always() && steps.sel.outputs.on == 'true'
+        uses: actions/upload-artifact@v6
+        with:
+          name: bootstrap-ladder-diagnostics-${{ matrix.platform }}-r${{ inputs.rung }}
+          path: |
+            build/ladder/evidence
+            build/ladder/producer
+            build/ladder/cache
+            build/ladder/in/.resume-evidence
+          include-hidden-files: true
+          retention-days: 14
+          if-no-files-found: warn
+      # PHASE is written only by the existing successful Hello owner. This
+      # retention gate is shape-only; it cannot qualify a compiler itself.
+      - name: Detect retained proven handoffs
+        id: handoffs
+        if: always() && steps.sel.outputs.on == 'true'
+        env:
+          PLATFORM: ${{ matrix.platform }}
+        run: |
+          available=false
+          exe=
+          case "$PLATFORM" in windows-*) exe=.exe ;; esac
+          for phase in 1 2 3 4; do
+            dir="build/ladder/out/$PLATFORM-p$phase"
+            if [ -f "$dir/PHASE" ] && [ "$(cat "$dir/PHASE")" = "$phase" ] && [ -s "$dir/simple$exe" ]; then
+              available=true
+            fi
+          done
+          echo "available=$available" >> "$GITHUB_OUTPUT"
+      # Upload only output that contains an actual PHASE handoff; rejected
+      # candidates remain exclusively in the diagnostic artifact above.
+      - uses: actions/upload-artifact@v6
+        if: always() && steps.sel.outputs.on == 'true' && steps.handoffs.outputs.available == 'true'
         with:
           name: ladder-${{ matrix.platform }}-r${{ inputs.rung }}
           path: build/ladder/out
@@ -88,31 +340,135 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 340
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
         with:
           persist-credentials: false
-      - uses: actions/download-artifact@v4
+      - name: Select build jobs
+        id: build_jobs
+        env:
+          REQUESTED_BUILD_JOBS: ${{ inputs.build_jobs }}
+          DEFAULT_BUILD_JOBS: 2
+          DEFAULT_SELFHOST_JOBS: 1
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          jobs=$REQUESTED_BUILD_JOBS
+          selfhost_jobs=$jobs
+          if [ "$jobs" = 0 ] && [ "$EVENT_NAME" != workflow_dispatch ]; then jobs=$DEFAULT_BUILD_JOBS; selfhost_jobs=$DEFAULT_SELFHOST_JOBS; fi
+          case "$jobs" in ''|0*|*[!0-9]*) echo "build_jobs must be an integer from 1 through 256" >&2; exit 2 ;; esac
+          [ "${#jobs}" -le 3 ] && [ "$jobs" -le 256 ] || { echo "build_jobs must be an integer from 1 through 256" >&2; exit 2; }
+          echo "count=$jobs" >> "$GITHUB_OUTPUT"
+          echo "selfhost_count=$selfhost_jobs" >> "$GITHUB_OUTPUT"
+          echo "Selected build jobs: seed=$jobs selfhost=$selfhost_jobs"
+      - uses: actions/download-artifact@v7
         if: inputs.rung > 1
         with:
           pattern: ladder-freebsd-*
           path: build/ladder/in
           merge-multiple: true
+      - name: Proven handoffs (any run)
+        if: ${{ !inputs.fresh }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: sh scripts/bootstrap/phase-ladder-resume.shs build/ladder/in freebsd-x86_64
+      - name: Earlier diagnostic receipts (not admitted handoffs)
+        if: inputs.rung > 1
+        uses: actions/download-artifact@v7
+        with:
+          pattern: bootstrap-ladder-receipts-freebsd-x86_64-r*
+          path: build/ladder/diagnostics
       - name: Climb one phase in a FreeBSD VM
         uses: vmactions/freebsd-vm@v1
         env:
           GH_TOKEN: ${{ github.token }}
+          BUILD_JOBS: ${{ steps.build_jobs.outputs.count }}
+          PHASE_LADDER_SELFHOST_THREADS: ${{ steps.build_jobs.outputs.selfhost_count }}
+          CARGO_BUILD_JOBS: ${{ steps.build_jobs.outputs.count }}
+          SIMPLE_HOST_MAX_THREADS: ${{ steps.build_jobs.outputs.count }}
+          SIMPLE_HOST_MAX_BUILD_JOBS: ${{ steps.build_jobs.outputs.count }}
+          SIMPLE_BOOTSTRAP_MAX_BUILD_JOBS: ${{ steps.build_jobs.outputs.count }}
+          SIMPLE_NATIVE_FILE_TIMING: 1
         with:
           usesh: true
           mem: 12288
-          envs: GH_TOKEN
-          prepare: pkg install -y bash git gmake pkgconf zstd llvm gh
+          envs: GH_TOKEN BUILD_JOBS PHASE_LADDER_SELFHOST_THREADS CARGO_BUILD_JOBS SIMPLE_HOST_MAX_THREADS SIMPLE_HOST_MAX_BUILD_JOBS SIMPLE_BOOTSTRAP_MAX_BUILD_JOBS SIMPLE_NATIVE_FILE_TIMING
+          prepare: |
+            pkg install -y bash curl git gmake pkgconf zstd llvm gh
+            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain none
           run: |
             set -eu
-            mkdir -p build/ladder/in build/ladder/out
-            sh scripts/bootstrap/phase-ladder-step.shs freebsd-x86_64 build/ladder/in build/ladder/out 2
-      - uses: actions/upload-artifact@v4
+            . "$HOME/.cargo/env"
+            # The automatic 12 GB VM default remains one self-host thread;
+            # explicit manual build_jobs overrides arrive through the VM env.
+            # The synced checkout is owned by another uid; without this git refuses it
+            # ("dubious ownership") and SCV fails with git-event-source-unavailable.
+            git config --global --add safe.directory "$(pwd -P)"
+            # 12 GB VM: add swap for the pure-Simple build's post-HIR peak (best
+            # effort; a small VM disk only skips it).
+            if dd if=/dev/zero of=/usr/ladder.swap bs=1m count=12288 2>/dev/null; then
+              chmod 0600 /usr/ladder.swap
+              md=$(mdconfig -a -t vnode -f /usr/ladder.swap) && swapon "/dev/$md" || echo "ladder: swap unavailable"
+            else
+              rm -f /usr/ladder.swap; echo "ladder: no disk for swap"
+            fi
+            swapinfo -h || :
+            mkdir -p build/ladder/in build/ladder/out build/ladder/evidence
+            # Record the verdict instead of failing the VM run: the action copies
+            # build/ files back to the host only when the run succeeds.
+            rc=0
+            sh scripts/bootstrap/lib/freebsd-command-telemetry.shs build/ladder/evidence -- \
+              sh scripts/bootstrap/phase-ladder-step.shs freebsd-x86_64 build/ladder/in build/ladder/out "$BUILD_JOBS" > build/ladder/evidence/step.log 2>&1 || rc=$?
+            cat build/ladder/evidence/step.log
+            echo "$rc" > build/ladder/rc
+      - name: Retain tiny attempt receipts (no compiler or cache)
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: bootstrap-ladder-receipts-freebsd-x86_64-r${{ inputs.rung }}
+          path: |
+            build/ladder/evidence/attempt.sdn
+            build/ladder/evidence/seed-native-failure.sdn
+          retention-days: 14
+          if-no-files-found: warn
+      - name: Retain diagnostic logs, exact producer and native cache
+        if: always()
+        uses: actions/upload-artifact@v6
+        with:
+          name: bootstrap-ladder-diagnostics-freebsd-x86_64-r${{ inputs.rung }}
+          path: |
+            build/ladder/evidence
+            build/ladder/producer
+            build/ladder/cache
+            build/ladder/in/.resume-evidence
+          include-hidden-files: true
+          retention-days: 14
+          if-no-files-found: warn
+      # PHASE is written only by the existing successful Hello owner. This
+      # retention gate is shape-only; it cannot qualify a compiler itself.
+      - name: Detect retained proven handoffs
+        id: handoffs
+        if: always()
+        env:
+          PLATFORM: freebsd-x86_64
+        run: |
+          available=false
+          exe=
+          case "$PLATFORM" in windows-*) exe=.exe ;; esac
+          for phase in 1 2 3 4; do
+            dir="build/ladder/out/$PLATFORM-p$phase"
+            if [ -f "$dir/PHASE" ] && [ "$(cat "$dir/PHASE")" = "$phase" ] && [ -s "$dir/simple$exe" ]; then
+              available=true
+            fi
+          done
+          echo "available=$available" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v6
+        if: always() && steps.handoffs.outputs.available == 'true'
         with:
           name: ladder-freebsd-x86_64-r${{ inputs.rung }}
           path: build/ladder/out
           retention-days: 14
           if-no-files-found: error
+      - name: Climb verdict
+        run: |
+          rc=$(cat build/ladder/rc 2>/dev/null || echo 1)
+          echo "phase-ladder-step exit $rc"
+          exit "$rc"

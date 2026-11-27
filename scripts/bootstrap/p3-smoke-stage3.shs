@@ -1,0 +1,142 @@
+#!/bin/sh
+# Smoke a phase-3 (stage3) compiler binary: `--version`, then have the binary
+# itself native-build a hello world and run it, expecting exactly "hello".
+#
+# Usage: sh scripts/bootstrap/p3-smoke-stage3.shs <exe>
+# Prints PASS or FAIL as the last line; exit 0 on PASS, 1 on FAIL.
+#
+# The build invocation is the `--entry` form of
+# scripts/check/check-stage2-hello-world-native-build.shs (--entry-closure is
+# mandatory: without it the compiler scans every default source root).
+# Env: P3_SMOKE_ROOT (cwd for the build, default this checkout),
+#      P3_SMOKE_BACKEND (default llvm), P3_SMOKE_THREADS (default 4),
+#      P3_RUNTIME_DLL_DIR (default C:/msys64/clang64/bin, as in r11/run.ps1),
+#      P3_SMOKE_TIMEOUT (build seconds, default 900), P3_SMOKE_WORK (scratch dir).
+# Toolchain: llvm-mingw UCRT clang + lld ($SIMPLE_LLVM_MINGW_ROOT); never GCC/MSVC.
+set -u
+
+if [ "${SIMPLE_ALLOW_LEGACY_P3_SCRIPT:-0}" != "1" ]; then
+  cat >&2 <<'EOF_DEPRECATED'
+DEPRECATED: Do not use scripts/bootstrap/p3-smoke-stage3.shs directly.
+Use 'scripts/bootstrap/build-phase3-phase4.sh' (or 'scripts/bootstrap/build-phase3-phase4.bat' on Windows; default --win-config=mingw):
+  Default / phased shard build: sh scripts/bootstrap/build-phase3-phase4.sh --phase=p3 --compile-mode=shard
+  File-based parallel build:    sh scripts/bootstrap/build-phase3-phase4.sh --phase=p3 --compile-mode=file
+  Phase 4 (release + xray):     sh scripts/bootstrap/build-phase3-phase4.sh --phase=p4
+  Windows (mingw default):      scripts\bootstrap\build-phase3-phase4.bat --win-config=mingw --phase=p3
+EOF_DEPRECATED
+  if [ -t 0 ] && [ "${CI:-}" != "true" ] && [ "${SIMPLE_NONINTERACTIVE:-0}" != "1" ]; then
+    printf 'Press Enter to return...' >&2
+    if read -r _; then :; fi
+  fi
+  return 0 2>/dev/null || exit 0
+fi
+
+if [ "$#" -ne 1 ]; then
+    echo "usage: $0 <exe>" >&2
+    exit 2
+fi
+exe=$1
+here=$(cd "$(dirname "$0")" && pwd)
+root=${P3_SMOKE_ROOT:-$(cd "$here/../.." && pwd)}
+backend=${P3_SMOKE_BACKEND:-llvm}
+threads=${P3_SMOKE_THREADS:-4}
+build_timeout=${P3_SMOKE_TIMEOUT:-900}
+lm=${SIMPLE_LLVM_MINGW_ROOT:-${SIMPLE_MINGW_ROOT:-}}
+if [ -z "$lm" ]; then
+    _lm_home=${HOME:-}
+    if [ -z "$_lm_home" ] && [ -n "${USERPROFILE:-}" ]; then
+        _lm_home=$(cygpath -u "$USERPROFILE" 2>/dev/null || printf '%s' "$USERPROFILE" | tr '\\' '/')
+    fi
+    lm=$(
+        for _lm_base in "${_lm_home:+$_lm_home/.simple/toolchains}" "/c/dev/tool"; do
+            [ -n "$_lm_base" ] || continue
+            for _lm_cand in "$_lm_base"/llvm-mingw-*-ucrt-x86_64; do
+                [ -d "$_lm_cand/bin" ] || continue
+                printf '%s\t%s\n' "$(basename "$_lm_cand")" "$_lm_cand"
+            done
+        done | LC_ALL=C sort -t "$(printf '\t')" -k1,1 -r | head -n 1 | cut -f2-
+    )
+fi
+if [ -n "$lm" ] && [ -d "$lm/bin" ]; then
+    lm_bin=$(cygpath -u "$lm/bin" 2>/dev/null || echo "$lm/bin")
+    PATH="$lm_bin:$PATH"; CC="$lm/bin/clang.exe"
+    SIMPLE_LLVM_MINGW_ROOT=$lm; SIMPLE_MINGW_ROOT=$lm
+    export PATH CC SIMPLE_LLVM_MINGW_ROOT SIMPLE_MINGW_ROOT
+fi
+# Keep the admitted runtime DLL dir available for compiler subprocesses. The
+# candidate itself is bundled and separately launched under the conflicting
+# llvm-mingw-first PATH below, so the smoke proves it no longer depends on this
+# PATH workaround.
+dll_dir=${P3_RUNTIME_DLL_DIR:-C:/msys64/clang64/bin}
+if [ -d "$dll_dir" ]; then PATH="$(cygpath -u "$dll_dir" 2>/dev/null || echo "$dll_dir"):$PATH"; export PATH; fi
+unset LIB 2>/dev/null || true
+# Same SCV admission knobs as the phase-3 launcher (r11/run.ps1).
+SIMPLE_SCV_INVENTORY_COLD_INIT=${SIMPLE_SCV_INVENTORY_COLD_INIT:-1}
+SIMPLE_SCV_FREEZE_FALLBACK=${SIMPLE_SCV_FREEZE_FALLBACK:-1}
+export SIMPLE_SCV_INVENTORY_COLD_INIT SIMPLE_SCV_FREEZE_FALLBACK
+# A one-module entry with 2 MIR shards leaves one shard empty, and the frozen
+# stage2 fails that empty shard ("empty mir_modules"); one shard is enough here.
+SIMPLE_MIR_SHARD_COUNT=${SIMPLE_MIR_SHARD_COUNT:-1}
+export SIMPLE_MIR_SHARD_COUNT
+case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*) ext=.exe; target=${P3_SMOKE_TARGET:-x86_64-pc-windows-gnu} ;;
+    *) ext=; target=${P3_SMOKE_TARGET:-} ;;
+esac
+
+fail() { echo "FAIL: $*"; exit 1; }
+
+[ -f "$exe" ] || fail "no such binary: $exe"
+work=${P3_SMOKE_WORK:-$exe.smoke}
+rm -rf "$work"
+mkdir -p "$work/cache"
+
+# 1. --version. Windows LLVM-built stage compilers import the full CLANG64
+# libLLVM-23.dll, while llvm-mingw ships a partial DLL with the same name.
+# Bundle the admitted DLL closure next to the candidate, then deliberately
+# put llvm-mingw first and set SIMPLE_PROJECT_ROOT for this launch. Windows
+# searches the executable directory before PATH, so this checks that the
+# candidate survives both historical failure conditions without relying on
+# the launcher's PATH workaround.
+if [ "$ext" = ".exe" ]; then
+    [ -d "$lm/bin" ] || fail "missing LLVM-MinGW tools for Windows stage smoke: $lm/bin"
+    [ -f "$dll_dir/libLLVM-23.dll" ] || fail "missing admitted LLVM runtime DLL: $dll_dir/libLLVM-23.dll"
+    lm_bin=$(cygpath -u "$lm/bin" 2>/dev/null || echo "$lm/bin")
+    sh "$here/tests/stage2-dll-path-independence-test.shs" "$exe" || \
+        fail "stage candidate failed the DLL path independence check"
+    sh "$here/../setup/bundle-llvm-runtime-dlls.shs" "$exe" "$dll_dir" || \
+        fail "could not bundle the admitted libLLVM-23.dll closure"
+    project_root=${SIMPLE_PROJECT_ROOT:-$root}
+    ver=$(PATH="$lm_bin:$PATH" SIMPLE_PROJECT_ROOT="$project_root" timeout 60 "$exe" --version 2>&1); rc=$?
+else
+    ver=$(timeout 60 "$exe" --version 2>&1); rc=$?
+fi
+echo "version: rc=$rc $(printf '%s' "$ver" | head -n 1)"
+[ "$rc" -eq 0 ] && [ -n "$ver" ] || fail "--version rc=$rc"
+
+# 2. self-compile hello world
+# In-tree fixture shared with scripts/check/check-stage2-hello-world-native-build.shs
+# (prints exactly "hello"). SCV admits only entries in the frozen inventory, so
+# a generated file outside the tracked families is refused (SCV-E-ENTRY).
+fix=${P3_SMOKE_FIXTURE:-test/04_smoke/bootstrap_hello_world.spl}
+[ -f "$root/$fix" ] || fail "missing fixture $root/$fix"
+hw="$work/hello$ext"
+(
+    cd "$root" || exit 1
+    timeout -k 10 "$build_timeout" "$exe" native-build --backend "$backend" \
+        --runtime-bundle core-c-bootstrap --entry-closure --mode one-binary \
+        --threads "$threads" --cache-dir "$work/cache" \
+        ${target:+--target "$target"} --entry "$fix" --output "$hw"
+) > "$work/build.log" 2>&1
+rc=$?
+echo "build: rc=$rc log=$work/build.log"
+if [ "$rc" -ne 0 ] || [ ! -f "$hw" ]; then
+    tail -n 15 "$work/build.log"
+    fail "hello native-build rc=$rc"
+fi
+
+# 3. run it
+out=$(timeout 60 "$hw" 2>&1 | tr -d '\r'); rc=$?
+echo "run: rc=$rc stdout='$out'"
+[ "$rc" -eq 0 ] || fail "hello exited rc=$rc"
+[ "$out" = "hello" ] || fail "hello printed '$out', expected 'hello'"
+echo "PASS"

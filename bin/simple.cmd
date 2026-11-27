@@ -19,8 +19,18 @@ if defined SIMPLE_BINARY if exist "%SIMPLE_BINARY%" (
     goto :done
 )
 
+rem Prefer the committed tree-matching seed at bin\simple.exe over a stale
+rem local cargo build: the untracked target\bootstrap seed can predate syntax
+rem merged upstream (2026-11-11 it could not parse @when blocks, killing every
+rem source-mode MCP server). An intentionally rebuilt local seed still wins
+rem via SIMPLE_BINARY above.
 set "BOOTSTRAP_BIN="
-if exist "%REPO_ROOT%\src\compiler_rust\target\bootstrap\simple.exe" (
+if exist "%REPO_ROOT%\bin\simple.exe" (
+    for %%P in ("%REPO_ROOT%\bin\simple.exe") do if %%~zP GTR 0 (
+        set "BOOTSTRAP_BIN=%%~fP"
+    )
+)
+if not defined BOOTSTRAP_BIN if exist "%REPO_ROOT%\src\compiler_rust\target\bootstrap\simple.exe" (
     for %%P in ("%REPO_ROOT%\src\compiler_rust\target\bootstrap\simple.exe") do if %%~zP GTR 0 (
         set "BOOTSTRAP_BIN=%%~fP"
     )
@@ -46,11 +56,6 @@ for %%P in (
     )
 )
 
-if /I "%~1"=="lint" if defined BOOTSTRAP_BIN (
-    "%BOOTSTRAP_BIN%" %*
-    goto :done
-)
-
 if /I "%~x1"==".spl" if defined CURRENT_DRIVER_BIN (
     "%CURRENT_DRIVER_BIN%" %*
     goto :done
@@ -61,14 +66,23 @@ if defined RELEASE_BIN (
     goto :done
 )
 
+rem Lint uses the deployed self-hosted CLI. Bootstrap diagnostics remain
+rem available through an explicitly named SIMPLE_BINARY above.
+if /I "%~1"=="lint" (
+    echo error: lint requires a deployed self-hosted Simple runtime under %REPO_ROOT%\bin\release 1>&2
+    echo   deploy a runtime or set SIMPLE_BINARY explicitly for diagnostics 1>&2
+    exit /b 1
+)
+
 if defined BOOTSTRAP_BIN (
     "%BOOTSTRAP_BIN%" %*
     goto :done
 )
 
 echo error: no Simple runtime found under %REPO_ROOT% 1>&2
-echo   set SIMPLE_BINARY to a seed built from this tree, or deploy one: 1>&2
-echo   sh scripts/bootstrap/bootstrap-windows.sh --msvc ^&^& sh scripts/setup/setup.shs 1>&2
+echo   set SIMPLE_BINARY to a seed built from this tree, or build Phase 3/4 ^(mingw default^): 1>&2
+echo   scripts\bootstrap\build-phase3-phase4.bat --win-config=mingw --phase=all 1>&2
+echo   ^(cold seed fallback: sh scripts/bootstrap/bootstrap-windows.sh --mingw ^&^& sh scripts/setup/setup.shs^) 1>&2
 echo   check a deployed binary with: sh scripts/check/check-deployed-simple-runnable.shs 1>&2
 exit /b 1
 

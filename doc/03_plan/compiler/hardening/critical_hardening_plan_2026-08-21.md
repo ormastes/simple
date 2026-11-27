@@ -1,5 +1,7 @@
 # Critical Hardening Plan — phases 0–9, waves 0–5
 
+> **PARTLY SUPERSEDED (2026-11-01):** Phase 3 / wave 2C (typed monomorphization, `40.mono/**`, M1–M9, `check-post-mono-invariants.shs`) is superseded by `doc/03_plan/compiler/generics/generics_refactoring_formal_verification_plan_2026-10-31.md` because `40.mono` was deleted (commit `200a05f5bc8`). Non-mono phases remain in force; the still-open generic-relevant guards are carried into that plan's §1A.6.
+
 **Date:** 2026-08-21
 **Research:** `doc/01_research/compiler/hardening/simple_hardening_plan_2026-08-21.md` (§15, §20, §21, §24)
 **Design:** `doc/05_design/compiler/hardening/critical_completeness_design_2026-08-21.md`

@@ -1,4 +1,6 @@
+use compiler.mir.mir_instruction_support.{MirCallOrigin, mir_call_origin_uses_local_symbols, mir_call_origin_uses_local_symbols_named}
 use compiler.backend.float_literal_owner.{float_literal_scalar}
+use std.common.binary_io.{f64_to_bits, f32_to_bits}
 # Cranelift Codegen Adapter
 #
 # Implements the Codegen trait for the Cranelift backend.
@@ -18,17 +20,23 @@ use compiler.backend.codegen_types.{Codegen, CodegenOutput, CodegenOutputKind}
 use compiler.backend.runtime_compiler.{_get_temp_dir}
 use compiler.backend.cranelift_gemm_fusion.{GemmAddFusion, detect_gemm_add_pair}
 use compiler.backend.cranelift_global_address.*
-use compiler.backend.cranelift_runtime_imports.{translate_runtime_import_call_f64_i64, translate_runtime_import_call_i64_f64, translate_runtime_import_call_i64_i64_f64_i64, translate_runtime_import_call_i64, translate_runtime_import_call_void}
+use compiler.backend.cranelift_runtime_imports.{translate_runtime_import_call_f64_i64, translate_runtime_import_call_i64_f64, translate_runtime_import_call_i64_i64_f64_i64, translate_runtime_import_call_i64, translate_runtime_import_call_i8, translate_runtime_import_call_void, cl_declare_import_function, cl_import_ledger_begin, cl_import_ledger_end, cl_jit_refuse_call_abi, cl_jit_import_refused, cl_aot_call_abi_begin, cl_aot_call_abi_end, cl_aot_refuse_call_abi}
 use compiler.backend.mir_target_context_provider.{backend_requested_aot_target_triple}
-use compiler.mir.mir_call_ownership.{mir_runtime_owned_call_name}
+use compiler.mir.mir_instruction_graph.{mir_module_functions_sorted, mir_module_statics_sorted}
+use compiler.mir.mir_call_ownership.{mir_runtime_owned_call_name, mir_runtime_owned_local_symbol}
+use compiler.mir.text_extern_abi.{runtime_tuple_result_facade}
 use compiler.common.dependency.visibility.{Visibility}
 use std.nogc_sync_mut.sffi.codegen.*
 use compiler.mir.mir_instruction_support.{mir_operand_const_int}
 use compiler.backend.common.mir_inst_variant_name.{mir_instkind_variant_name}
+use compiler.backend.jit_extern_resolution.{jit_module_extern_errors, jit_callee_names, jit_refused_import_errors}
+use std.nogc_sync_mut.io.file_ops.{file_delete}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
+use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
 
 extern fn rt_file_read_bytes(path: text) -> [u8]?
 @unsafe(reason: "raw backend-policy environment read; empty text conflates unset input with provider failure", capabilities: [ffi])
-extern fn rt_env_get(key: text) -> text
+extern fn rt_env_get(key: text) -> text?  # nil when unset; callers here use `?? ""` because unset == empty is the intended semantics
 extern fn rt_enum_discriminant(value: MirInstKind) -> i64
 extern fn rt_enum_payload(value: MirInstKind) -> i64
 extern fn rt_tuple_get(tuple: i64, index: i64) -> i64
@@ -37,6 +45,39 @@ fn cranelift_file_read_bytes(path: text) -> [u8]:
     # nil on an unreadable file; both call sites already treat an empty result as
     # "empty or unreadable", so collapsing keeps the wrapper total (E-SFFI-016).
     rt_file_read_bytes(path) ?? []
+
+var _cranelift_temp_seq: i64 = 0
+
+pub fn cranelift_sanitize_module_name(module_name: text) -> text:
+    """Replace path separators in a module name so temp object filenames stay flat."""
+    val clean = module_name.replace("/", "_").replace("\\", "_").replace(":", "_")
+    if clean == "": "module" else: clean
+
+pub fn cranelift_temp_object_path(module_name: text) -> text:
+    """Build a collision-free temporary .o path scoped to this PID, timestamp, and sequence."""
+    _cranelift_temp_seq = _cranelift_temp_seq + 1
+    val safe_name = cranelift_sanitize_module_name(module_name)
+    "{_get_temp_dir()}/simple_cranelift_{safe_name}_{getpid()}_{time_now_unix_micros()}_{_cranelift_temp_seq}.o"
+
+fn cranelift_emit_and_read_object_bytes(cl_module: i64, module_name: text, log_emit: bool) -> Result<CodegenOutput, CompileError>:
+    """Emit a Cranelift module to a unique temp .o path, read its bytes, and always unlink it."""
+    val output_path = cranelift_temp_object_path(module_name)
+    if log_emit:
+        print "[cranelift-direct] emit {output_path}"
+    val ok = cranelift_emit_object(cl_module, output_path)
+    cranelift_free_module(cl_module)
+
+    if not ok:
+        val _deleted = file_delete(output_path)
+        return Err(compileerror_backend_error(BackendKind.Cranelift,
+            "Failed to emit object file"))
+
+    val object_bytes = cranelift_file_read_bytes(output_path)
+    val _deleted = file_delete(output_path)
+    if object_bytes.len() == 0:
+        return Err(compileerror_backend_error(BackendKind.Cranelift,
+            "Emitted object file was empty or unreadable: {output_path}"))
+    Ok(CodegenOutput.object(module_name, object_bytes))
 
 # ============================================================================
 # Cranelift Type Constants (must match cranelift_sffi.rs)
@@ -76,18 +117,27 @@ val CL_LINKAGE_EXPORT: i64 = 0
 val CL_LINKAGE_IMPORT: i64 = 1
 val CL_LINKAGE_LOCAL: i64 = 2
 val CL_LINKAGE_HIDDEN: i64 = 3
+# module-scoped instance (`MirFunction.is_comdat`): every requesting object
+# carries its own copy and the linker keeps one -- the cranelift analogue of the
+# `linkonce_odr` + `comdat any` MirToLlvm emits. The SFFI places it in a
+# COMDAT(any) group (ELF: weak in a group; COFF: IMAGE_COMDAT_SELECT_ANY) or,
+# on Mach-O, marks it N_WEAK_DEF. See comdat_instance_linkage in cranelift_sffi.rs.
+val CL_LINKAGE_COMDAT: i64 = 4
+
+fn cranelift_function_linkage(func: MirFunction) -> i64:
+    if func.is_comdat: CL_LINKAGE_COMDAT else: CL_LINKAGE_EXPORT
 val CRANELIFT_STATIC_MAX_ALIGNMENT: i64 = 4096
 
 # Takes the MirStatic (both callers pass one): the original signature took a
 # bare Visibility, so matching a MirStatic against it fell through every arm.
-fn cranelift_static_linkage(static_: MirStatic) -> i64:
+pub fn cranelift_static_linkage(static_: MirStatic) -> i64:
     if static_.is_external: return CL_LINKAGE_IMPORT
     match static_.visibility:
         case Visibility.Public: CL_LINKAGE_EXPORT
         case Visibility.Private: CL_LINKAGE_LOCAL
         case Visibility.Peer | Visibility.Up | Visibility.Internal | Visibility.Package: CL_LINKAGE_HIDDEN
 
-fn cranelift_static_alignment(static_: MirStatic) -> i64:
+pub fn cranelift_static_alignment(static_: MirStatic) -> i64:
     if static_.alignment == 0:
         return static_.type_.alignment()
     if static_.alignment < 0 or static_.alignment > CRANELIFT_STATIC_MAX_ALIGNMENT:
@@ -108,18 +158,14 @@ val CL_TARGET_RISCV64: i64 = 2
 # Cranelift Codegen Adapter
 # ============================================================================
 
-fn cranelift_default_retained_features_v2() -> [text]:
-    []
-
 class CraneliftCodegenAdapter:
     """Adapts Cranelift backend to the Codegen trait interface."""
     options: BackendCompileOptions
-    retained_target_triple: text? = nil
-    retained_cpu_v2: text? = nil
-    # @workaround bug=mir_provider_optional_type_wrapper_segv_2026-10-14 recover=4710b22a9913b294d8c1c8edd44c9e22bceddede reason=old-A174-provider-ArrayLit-optional-ABI
-    retained_features_v2: [text] = cranelift_default_retained_features_v2()
+    retained_target_triple: text? = None
+    retained_cpu_v2: text? = None
+    retained_features_v2: [text] = []
 
-fn cranelift_isa_opt_level_v2(options: BackendCompileOptions) -> i64:
+pub fn cranelift_isa_opt_level_v2(options: BackendCompileOptions) -> i64:
     match options.opt_level:
         case OptimizationLevel.None_ | OptimizationLevel.Debug: 0
         # Cranelift 0.116 has no distinct O1/Basic mode; fail closed rather
@@ -151,8 +197,87 @@ fn cranelift_new_aot_for_request_v2(
         return module
     cranelift_new_aot_module(name, target)
 
+fn cranelift_declare_and_compile_functions(cl_module: i64, module: MirModule,
+    global_handles: Dict<i64, CraneliftGlobalBinding>, jit: bool) -> text:
+    """Lower every function of `module` into `cl_module` (AOT or JIT).
+    Returns the name of the function that failed, or "" when all compiled."""
+    val functions = mir_module_functions_sorted(module)
+    var func_handles: Dict<text, i64> = {}
+    for func in functions:
+        val emit_name = cl_function_emit_name(func.name)
+        if not jit:
+            print "[cranelift-direct] declare {emit_name}"
+        val sig = build_signature(func.signature, func.name == "main")
+        val handle = cranelift_declare_function(cl_module, emit_name, sig, cranelift_function_linkage(func))
+        func_handles[func.name] = handle
+
+    for func in functions:
+        if not jit:
+            print "[cranelift-direct] compile {func.name}"
+        if not compile_function(cl_module, func, func_handles, global_handles, jit):
+            return func.name
+    ""
+
+# Any code outside the provider's explicit CL_TARGET_* set selects the host
+# triple. A callable JIT module must match the host; cross targets are AOT.
+val CL_TARGET_HOST: i64 = -1
+
+pub fn cranelift_jit_run_main(module: MirModule) -> Result<i64, text>:
+    """Compile `module` into a host JIT module and call its `main`.
+
+    Same lowering as the AOT lane. Callees that cannot be bound are refused by
+    name before any code is generated (jit_extern_resolution); every import the
+    lowering declares is admitted or refused by the provider at declaration,
+    and a refused one is reported by name before finalize."""
+    val refusals = jit_module_extern_errors(module)
+    if refusals.len() > 0:
+        return Err(refusals.join("; "))
+    var has_main = false
+    var main_params = 0
+    for func in mir_module_functions_sorted(module):
+        if func.name == "main":
+            has_main = true
+            main_params = func.signature.params.len()
+    if not has_main:
+        return Err("E-JIT-ENTRY: module {module.name} defines no main")
+    # The entry is called with no arguments and read as one i64 result.
+    if main_params != 0:
+        return Err("E-JIT-ENTRY: main of {module.name} takes {main_params} parameter(s); the JIT entry passes none")
+
+    val cl_module = cranelift_new_module(module.name, CL_TARGET_HOST)
+    if cl_module == 0:
+        return Err("E-JIT-MODULE: the Cranelift provider refused a host JIT module for {module.name}")
+    val global_handles = declare_module_statics(cl_module, module)
+    if global_handles.has(STATICS_FAILED_KEY):
+        cranelift_free_module(cl_module)
+        return Err("E-JIT-STATICS: failed to declare statics of {module.name}")
+    cl_import_ledger_begin(cl_module, jit_callee_names(module, MirCallOrigin.Foreign))
+    val failed_function = cranelift_declare_and_compile_functions(cl_module, module, global_handles, true)
+    val ledger = cl_import_ledger_end()
+    # Reported before a function failure: a refused import latches the
+    # provider module, so the function that declared it fails too.
+    var unbound: [text] = ledger.abi_errors
+    for refusal in jit_refused_import_errors(module, ledger.refused):
+        unbound = unbound.push(refusal)
+    if unbound.len() > 0:
+        cranelift_free_module(cl_module)
+        return Err(unbound.join("; "))
+    if failed_function != "":
+        cranelift_free_module(cl_module)
+        return Err("E-JIT-COMPILE: failed to compile function {failed_function}")
+    if cranelift_finalize_module(cl_module) == 0:
+        cranelift_free_module(cl_module)
+        return Err("E-JIT-FINALIZE: the Cranelift provider rejected {module.name}")
+    val entry = cranelift_get_function_ptr(cl_module, cl_function_emit_name("main"))
+    if entry == 0:
+        cranelift_free_module(cl_module)
+        return Err("E-JIT-ENTRY: no native address for main of {module.name}")
+    val result = cranelift_call_function_ptr(entry, 0, 0)
+    cranelift_free_module(cl_module)
+    Ok(result)
+
 pub fn cranelift_compile_module_direct(options: BackendCompileOptions, module: MirModule,
-    retained_target_triple: text? = nil, retained_cpu_v2: text? = nil,
+    retained_target_triple: text? = None, retained_cpu_v2: text? = None,
     retained_features_v2: [text] = []) -> Result<CodegenOutput, CompileError>:
     print "[cranelift-direct] start"
     val target_code = codegen_target_to_cl(options.target)
@@ -174,37 +299,21 @@ pub fn cranelift_compile_module_direct(options: BackendCompileOptions, module: M
         return Err(compileerror_backend_error(BackendKind.Cranelift,
             "Failed to declare module statics"))
 
-    var func_handles: Dict<text, i64> = {}
-    for func in module.functions.values():
-        val emit_name = cl_function_emit_name(func.name)
-        print "[cranelift-direct] declare {emit_name}"
-        val sig = build_signature(func.signature, func.name == "main")
-        val handle = cranelift_declare_function(cl_module, emit_name, sig, CL_LINKAGE_EXPORT)
-        func_handles[func.name] = handle
-
-    for func in module.functions.values():
-        print "[cranelift-direct] compile {func.name}"
-        val result = compile_function(cl_module, func, func_handles, global_handles)
-        if not result:
-            cranelift_free_module(cl_module)
-            return Err(compileerror_backend_error(BackendKind.Cranelift,
-                "Failed to compile function: {func.name}"))
-
-    val output_path = "{_get_temp_dir()}/simple_cranelift_{module.name}.o"
-    print "[cranelift-direct] emit {output_path}"
-    val ok = cranelift_emit_object(cl_module, output_path)
-    cranelift_free_module(cl_module)
-
-    if not ok:
+    cl_aot_call_abi_begin(cl_module)
+    val failed_function = cranelift_declare_and_compile_functions(cl_module, module, global_handles, false)
+    # Reported before a function failure: the placeholder a refused call
+    # leaves behind may be what failed that function.
+    val call_abi_refusals = cl_aot_call_abi_end()
+    if call_abi_refusals.len() > 0:
+        cranelift_free_module(cl_module)
         return Err(compileerror_backend_error(BackendKind.Cranelift,
-            "Failed to emit object file"))
-
-    val object_bytes = cranelift_file_read_bytes(output_path)
-    if object_bytes.len() == 0:
+            call_abi_refusals.join("; ")))
+    if failed_function != "":
+        cranelift_free_module(cl_module)
         return Err(compileerror_backend_error(BackendKind.Cranelift,
-            "Emitted object file was empty or unreadable: {output_path}"))
-    val cg_out = CodegenOutput.object(module.name, object_bytes)
-    Ok(cg_out)
+            "Failed to compile function: {failed_function}"))
+
+    cranelift_emit_and_read_object_bytes(cl_module, module.name, true)
 
 impl Codegen for CraneliftCodegenAdapter:
     fn backend_kind() -> BackendKind: BackendKind.Cranelift
@@ -237,34 +346,36 @@ impl Codegen for CraneliftCodegenAdapter:
 
         # First pass: declare all functions so forward references work
         var func_handles: Dict<text, i64> = {}
-        for func in module.functions.values():
+        for func in mir_module_functions_sorted(module):
             val sig = build_signature(func.signature, func.name == "main")
             val emit_name = cl_function_emit_name(func.name)
-            val handle = cranelift_declare_function(cl_module, emit_name, sig, CL_LINKAGE_EXPORT)
+            val handle = cranelift_declare_function(cl_module, emit_name, sig, cranelift_function_linkage(func))
             func_handles[func.name] = handle
 
-        # Second pass: compile each function
-        for func in module.functions.values():
-            val result = compile_function(cl_module, func, func_handles, global_handles)
-            if not result:
-                cranelift_free_module(cl_module)
-                return Err(compileerror_backend_error(BackendKind.Cranelift,
-                    "Failed to compile function: {func.name}"))
+        # Second pass: compile each function. A refused cross-module call is
+        # recorded, not fatal: every function is still lowered so the module
+        # reports all of its refusals, and the module fails below -- before
+        # any object is emitted -- instead of aborting the codegen worker.
+        cl_aot_call_abi_begin(cl_module)
+        var failed_function = ""
+        for func in mir_module_functions_sorted(module):
+            if failed_function == "":
+                if not compile_function(cl_module, func, func_handles, global_handles, false):
+                    failed_function = func.name
+        # Reported before a function failure: the placeholder a refused call
+        # leaves behind may be what failed that function.
+        val call_abi_refusals = cl_aot_call_abi_end()
+        if call_abi_refusals.len() > 0:
+            cranelift_free_module(cl_module)
+            return Err(compileerror_backend_error(BackendKind.Cranelift,
+                call_abi_refusals.join("; ")))
+        if failed_function != "":
+            cranelift_free_module(cl_module)
+            return Err(compileerror_backend_error(BackendKind.Cranelift,
+                "Failed to compile function: {failed_function}"))
 
         # Emit object file
-        val output_path = "{_get_temp_dir()}/simple_cranelift_{module.name}.o"
-        val ok = cranelift_emit_object(cl_module, output_path)
-        cranelift_free_module(cl_module)
-
-        if not ok:
-            return Err(compileerror_backend_error(BackendKind.Cranelift,
-                "Failed to emit object file"))
-
-        val object_bytes = cranelift_file_read_bytes(output_path)
-        if object_bytes.len() == 0:
-            return Err(compileerror_backend_error(BackendKind.Cranelift,
-                "Emitted object file was empty or unreadable: {output_path}"))
-        Ok(CodegenOutput.object(module.name, object_bytes))
+        cranelift_emit_and_read_object_bytes(cl_module, module.name, false)
 
 # ============================================================================
 # Target Mapping
@@ -319,7 +430,7 @@ fn sig_type_to_cl(ty: MirType) -> i64:
         return CL_TYPE_I64
     return cl
 
-fn build_signature(sig: MirSignature, is_main: bool) -> i64:
+pub fn build_signature(sig: MirSignature, is_main: bool) -> i64:
     val cl_sig = cranelift_new_signature(CL_CC_PLATFORM)
     for param in sig.params:
         cranelift_sig_add_param(cl_sig, sig_type_to_cl(param))
@@ -332,7 +443,7 @@ fn build_signature(sig: MirSignature, is_main: bool) -> i64:
 # Split supported/value pair instead of one `-> i64?` accessor: Option
 # returns from live-interpreted compiler code are unreliable (same seed
 # interpreter bug as STATICS_FAILED_KEY above).
-fn cranelift_static_init_supported(static_: MirStatic) -> bool:
+pub fn cranelift_static_init_supported(static_: MirStatic) -> bool:
     # Imported declarations never own initial storage bytes.
     if static_.is_external and static_.init.?: return false
     match static_.type_.kind:
@@ -341,6 +452,8 @@ fn cranelift_static_init_supported(static_: MirStatic) -> bool:
                 return true
             match static_.init.unwrap().value:
                 case Zero: return true
+                case Float(_): return true
+                case FloatLexeme(_): return true
                 case _: return false
         case I8 | U8 | I16 | U16 | I32 | U32 | I64 | U64 | Bool:
             ()
@@ -359,13 +472,22 @@ fn cranelift_static_init_supported(static_: MirStatic) -> bool:
         case Zero: true
         case _: false
 
-fn cranelift_static_init_bits_value(static_: MirStatic) -> i64:
+pub fn cranelift_static_init_bits_value(static_: MirStatic) -> i64:
     if not static_.init.?:
         return 0
     match static_.init.unwrap().value:
         case Int(value): value
         case Bool(value): if value: 1 else: 0
+        case Float(value): cranelift_float_static_bits(static_.type_, value)
+        case FloatLexeme(text_value): cranelift_float_static_bits(static_.type_, float_literal_scalar(text_value))
         case _: 0
+
+# IEEE-754 bit pattern, zero-extended: F32 -> low 32 bits (the provider writes
+# 4 bytes for CL_TYPE_F32), F64 -> all 64 bits.
+fn cranelift_float_static_bits(type_: MirType, value: f64) -> i64:
+    match type_.kind:
+        case F32: (f32_to_bits(value as f32) as i64) & 0xFFFFFFFF
+        case _: f64_to_bits(value) as i64
 
 # Sentinel key marking declare_module_statics failure. Real symbol ids are
 # non-negative, so -1 never collides. This avoids returning Dict<i64,i64>?:
@@ -377,7 +499,7 @@ val STATICS_FAILED_KEY: i64 = -1
 fn declare_module_statics(cl_module: i64, module: MirModule) -> Dict<i64, CraneliftGlobalBinding>:
     var handles: Dict<i64, CraneliftGlobalBinding> = {}
     val failed = CraneliftGlobalBinding(data_handle: 0, accessor_handle: 0)
-    for static_ in module.statics.values():
+    for static_ in mir_module_statics_sorted(module):
         if not cranelift_static_init_supported(static_):
             print "[cranelift] unsupported module static '{static_.name}' (non-scalar type or non-const init)"
             handles[STATICS_FAILED_KEY] = failed
@@ -428,7 +550,70 @@ fn declare_module_statics(cl_module: i64, module: MirModule) -> Dict<i64, Cranel
 # Function Compilation
 # ============================================================================
 
-fn compile_function(cl_module: i64, func: MirFunction, func_handles: Dict<text, i64>, global_handles: Dict<i64, CraneliftGlobalBinding>) -> bool:
+pub fn cranelift_ssa_phi_dest_ids(func: MirFunction) -> Dict<i64, bool>:
+    # __simple_ssa_phi destinations must always carry a stack slot: incoming
+    # values are stored per predecessor edge (store_phi_incomings_for_edge)
+    # and the join reloads the slot -- that path is arity-agnostic and is the
+    # only correct N-ary lowering. Unit-typed locals otherwise get size 0 and
+    # would fall into the degenerate no-slot fallbacks / the N-ary trap
+    # (bug cranelift_ssa_phi_nary_join_guard_now_fires_2026-08-17). Plain-i64
+    # dict, no LocalId? arguments: stage4-lane ABI (see compile_function).
+    var ids: Dict<i64, bool> = {}
+    for block in func.blocks:
+        for inst in block.instructions:
+            match inst.kind:
+                case Intrinsic(dest, name, _):
+                    if name == "__simple_ssa_phi":
+                        if val d = dest:
+                            ids[d.id] = true
+                case _:
+                    ()
+    ids
+
+pub fn cranelift_local_slot_sizes(func: MirFunction) -> Dict<i64, i64>:
+    # Stack-slot size per local id; compile_function allocates exactly these.
+    # 8-byte floor: Bool lowers to i64 (mir_type_to_cl), so a 1-byte slot would
+    # be overflowed by i64 stores. Kind-based sizing, no method calls
+    # (`size_bytes()` on a loop-bound field returned 0 on the stage4 lane).
+    var sizes: Dict<i64, i64> = {}
+    for local in func.locals:
+        var size = 8
+        match local.type_.kind:
+            case Unit:
+                size = 0
+            case _:
+                ()
+        if size > 0:
+            sizes[local.id.id] = size
+    # Every __simple_ssa_phi destination needs a slot -- Unit-typed ones AND
+    # ones with no MirLocal entry at all: the per-edge store/reload lowering
+    # (store_phi_incomings_for_edge) is the only arity-agnostic join lowering;
+    # without a slot an N-ary join hits the trap guard in
+    # cl_translate_instruction (cranelift_ssa_phi_nary_join_guard_now_fires_2026-08-17).
+    val phi_dest_ids = cranelift_ssa_phi_dest_ids(func)
+    for phi_id in phi_dest_ids.keys():
+        if not sizes.has(phi_id):
+            sizes[phi_id] = 8
+    # The catch-all Aggregate arm (Enum) stores one word per operand into the
+    # destination's own slot (cl_translate_instruction), so the slot must hold
+    # every word, not just the 8-byte floor. Slots are packed at 8-byte
+    # alignment, so an undersized slot overwrites its neighbour.
+    for block in func.blocks:
+        for inst in block.instructions:
+            match inst.kind:
+                case Aggregate(dest, kind, operands):
+                    match kind:
+                        case Enum(_, _):
+                            val need = operands.len() * 8
+                            if sizes.has(dest.id) and need > sizes[dest.id]:
+                                sizes[dest.id] = need
+                        case _:
+                            ()
+                case _:
+                    ()
+    sizes
+
+fn compile_function(cl_module: i64, func: MirFunction, func_handles: Dict<text, i64>, global_handles: Dict<i64, CraneliftGlobalBinding>, jit: bool) -> bool:
     val emit_name = cl_function_emit_name(func.name)
     val sig = build_signature(func.signature, func.name == "main")
     val ctx = cranelift_begin_function(cl_module, emit_name, sig)
@@ -459,25 +644,9 @@ fn compile_function(cl_module: i64, func: MirFunction, func_handles: Dict<text, 
     var alloc_addresses: Dict<i64, i64> = {}
 
     # Allocate stack slots for all locals
-    for local in func.locals:
-        # (vestigial local.? gate removed: `.?` on a loop-bound plain
-        # struct is FALSE on the stage4 lane and skipped EVERY local.)
-        # 8-byte slot floor: Bool lowers to i64 in this backend (see
-        # mir_type_to_cl), so a 1-byte Bool slot would be clobber-overflowed
-        # by i64 stores. Widening is safe (stack waste only).
-        # Kind-based sizing, no method calls: `local.type_.size_bytes()` (a
-        # method on a loop-bound struct field, inside a value-if) returned 0
-        # on the stage4 lane (receiver-transport + value-if family), so NO
-        # slots were ever allocated and everything ran on value_map alone.
-        var size = 8
-        match local.type_.kind:
-            case Unit:
-                size = 0
-            case _:
-                ()
-        if size > 0:
-            val slot = cranelift_stack_slot(ctx, size, 8)
-            slot_map[local.id.id] = slot
+    val slot_sizes = cranelift_local_slot_sizes(func)
+    for slot_id in slot_sizes.keys():
+        slot_map[slot_id] = cranelift_stack_slot(ctx, slot_sizes[slot_id], 8)
 
     # Switch to entry block and process
     cranelift_switch_to_block(ctx, entry_block)
@@ -554,7 +723,9 @@ fn compile_function(cl_module: i64, func: MirFunction, func_handles: Dict<text, 
         return false
 
     # Define function in module
-    val ok = cranelift_aot_define_function(cl_module, finished)
+    # A JIT module defines through the JIT entry; the AOT entry only knows
+    # object modules and returns false for a JIT handle.
+    val ok = if jit: cranelift_define_function(cl_module, 0, finished) else: cranelift_aot_define_function(cl_module, finished)
     ok
 
 # ============================================================================
@@ -567,7 +738,8 @@ fn store_local_result(ctx: i64, dest: LocalId, value: i64, slot_map: Dict<i64, i
         val addr = cranelift_stack_addr(ctx, slot_map[dest.id], 0)
         cranelift_store(ctx, value, addr, 0)
 
-fn cl_translate_instruction(
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in cl_translate_instruction", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn cl_translate_instruction(
     ctx: i64,
     inst: MirInst,
     mut value_map: Dict<i64, i64>,
@@ -585,7 +757,7 @@ fn cl_translate_instruction(
         val dest: LocalId = rt_tuple_get(payload, 0)
         val value: MirConstValue = rt_tuple_get(payload, 1)
         val type_: MirType = rt_tuple_get(payload, 2)
-        val cl_val = cl_translate_const_value(ctx, cl_module, value, type_)
+        val cl_val = cl_translate_const_value(ctx, cl_module, value, type_, func.name, MirCallOrigin.Source)
         value_map[dest.id] = cl_val
         if slot_map.has(dest.id):
             val addr = cranelift_stack_addr(ctx, slot_map[dest.id], 0)
@@ -615,7 +787,10 @@ fn cl_translate_instruction(
         case BinOp(dest, op, left, right):
             val a = cl_translate_operand(ctx, cl_module, left, value_map, slot_map, func)
             val b = cl_translate_operand(ctx, cl_module, right, value_map, slot_map, func)
-            val result = cl_translate_binop(ctx, cl_module, op, a, b, left, right, func)
+            val dest_type = local_type(dest.id, func)
+            val raw_result = cl_translate_binop(ctx, cl_module, op, a, b, left, right, func, dest_type)
+            val signed_result = cl_canonicalize_signed_narrow(ctx, raw_result, dest_type)
+            val result = cl_canonicalize_unsigned_narrow(ctx, signed_result, dest_type)
             value_map[dest.id] = result
             if slot_map.has(dest.id):
                 val addr = cranelift_stack_addr(ctx, slot_map[dest.id], 0)
@@ -624,13 +799,14 @@ fn cl_translate_instruction(
         case CheckedBinOp(dest, op, left, right):
             val a = cl_translate_operand(ctx, cl_module, left, value_map, slot_map, func)
             val b = cl_translate_operand(ctx, cl_module, right, value_map, slot_map, func)
-            val result = cl_translate_binop(ctx, cl_module, op, a, b, left, right, func)
+            val result = cl_translate_binop(ctx, cl_module, op, a, b, left, right, func, local_type(dest.id, func))
             value_map[dest.id] = result
             store_local_result(ctx, dest, result, slot_map, func)
 
         case UnaryOp(dest, op, operand):
             val a = cl_translate_operand(ctx, cl_module, operand, value_map, slot_map, func)
-            val result = cl_translate_unaryop(ctx, op, a, operand, func)
+            val raw_result = cl_translate_unaryop(ctx, op, a, operand, func)
+            val result = cl_canonicalize_unsigned_narrow(ctx, raw_result, local_type(dest.id, func))
             value_map[dest.id] = result
             store_local_result(ctx, dest, result, slot_map, func)
 
@@ -655,11 +831,7 @@ fn cl_translate_instruction(
             cranelift_store(ctx, val_, addr, 0)
 
         case LoadGlobal(dest, symbol):
-            if not global_handles.has(symbol.id):
-                panic("Cranelift global load missing declaration: {symbol.id}")
-            val addr = cranelift_bound_global_address_v1(ctx, global_handles[symbol.id])
-            if addr == 0:
-                panic("Cranelift global address unavailable: {symbol.id}")
+            val addr = cl_global_address(ctx, cl_module, global_handles, symbol.id, "load", func)
             # Globals are declared at their true width (rt_cranelift_declare_
             # global_data sizes the data object from the type code), so the
             # load must stay typed — but the uniformly-i64 lane requires
@@ -677,20 +849,12 @@ fn cl_translate_instruction(
             store_local_result(ctx, dest, result, slot_map, func)
 
         case StoreGlobal(symbol, value):
-            if not global_handles.has(symbol.id):
-                panic("Cranelift global store missing declaration: {symbol.id}")
-            val addr = cranelift_bound_global_address_v1(ctx, global_handles[symbol.id])
-            if addr == 0:
-                panic("Cranelift global address unavailable: {symbol.id}")
+            val addr = cl_global_address(ctx, cl_module, global_handles, symbol.id, "store", func)
             val value_ = cl_translate_operand(ctx, cl_module, value, value_map, slot_map, func)
             cranelift_store(ctx, value_, addr, 0)
 
         case GlobalAddr(dest, symbol, _):
-            if not global_handles.has(symbol.id):
-                panic("Cranelift global address missing declaration: {symbol.id}")
-            val addr = cranelift_bound_global_address_v1(ctx, global_handles[symbol.id])
-            if addr == 0:
-                panic("Cranelift global address unavailable: {symbol.id}")
+            val addr = cl_global_address(ctx, cl_module, global_handles, symbol.id, "address", func)
             value_map[dest.id] = addr
             store_local_result(ctx, dest, addr, slot_map, func)
 
@@ -835,19 +999,31 @@ fn cl_translate_instruction(
                 val len = cl_translate_operand(ctx, cl_module, args[1], value_map, slot_map, func)
                 translate_runtime_import_call_i64(ctx, cl_module, "__simple_intrinsic_bounds_check", [index, len])
             elif name == "__simple_ssa_phi" and dest.?:
-                # bug #135 (opus review Finding 3): the stack-slot path below
-                # doesn't care about arg count (it just loads the phi's slot),
-                # but the two elif fallbacks (no slot registered) only ever
-                # look at args[0] / args[1] -- an N-ary join (elif-ladder,
-                # more than one incoming pair) would silently use just the
-                # first pair. No caller currently emits N-ary joins through
-                # this backend, so this is latent; guard it loudly rather
-                # than miscompiling silently if that ever changes.
+                # bug #135 (opus review Finding 3) +
+                # cranelift_ssa_phi_nary_join_guard_now_fires_2026-08-17:
+                # compile_function guarantees every __simple_ssa_phi
+                # destination a stack slot (even Unit-typed), and the slot
+                # path is arity-agnostic: incoming values are stored per
+                # predecessor edge in store_phi_incomings_for_edge and the
+                # join just reloads the slot. The two elif fallbacks below
+                # (no slot registered) only ever look at args[0] / args[1]
+                # and cannot represent an N-ary join (elif-ladder, more than
+                # one incoming pair), so if that combination is ever reached
+                # we fail closed — trap plus a defined value_map entry in the
+                # unreachable continuation — rather than silently using the
+                # first pair.
                 var phi_guard_id = -1
                 if val phi_guard_l = dest:
                     phi_guard_id = phi_guard_l.id
                 if args.len() > 4 and not slot_map.has(phi_guard_id):
                     eprint("[cranelift] ERROR: __simple_ssa_phi has {args.len()} args (N-ary join) with no stack slot; this fallback only supports a single then/else pair")
+                    # Fail closed: trap here and give the phi dest a defined
+                    # value in the (unreachable) continuation, so later uses
+                    # never read an unset value_map entry.
+                    cranelift_trap(ctx, 0)
+                    val phi_continuation = cranelift_create_block(ctx)
+                    cranelift_switch_to_block(ctx, phi_continuation)
+                    value_map[phi_guard_id] = cranelift_iconst(ctx, CL_TYPE_I64, 0)
                     return
                 # Inline extraction: calling a helper with a LocalId? ARGUMENT is
                 # miscompiled on the stage4 lane (callee never runs, garbage
@@ -870,6 +1046,18 @@ fn cl_translate_instruction(
                 val continuation = cranelift_create_block(ctx)
                 cranelift_switch_to_block(ctx, continuation)
 
+        case Ref(dest, _, place):
+            # A borrow (`&x` / `&mut x`) lowers to the identity on the borrowed
+            # place's value, exactly as the LLVM backend's llvm_ref_impl does
+            # (and with the same Copy store discipline). Missing here, the
+            # catch-all panicked and aborted MIR shard workers in codegen.
+            # See doc/08_tracking/bug/cranelift_ref_unlowered_shard_abort_2026-10-24.md
+            val src_val = load_local(ctx, place.local.id, value_map, slot_map, func)
+            value_map[dest.id] = src_val
+            if slot_map.has(dest.id) and (not type_is_aggregate(local_type(dest.id, func)) or type_is_runtime_handle(local_type(dest.id, func))):
+                val addr = cranelift_stack_addr(ctx, slot_map[dest.id], 0)
+                cranelift_store(ctx, src_val, addr, 0)
+
         case Nop:
             ()
 
@@ -890,13 +1078,47 @@ fn cl_translate_instruction(
             # report success. Same shape as the C and LLVM backends
             # (`emit_unsupported_panic`), including their
             # `SIMPLE_ALLOW_UNLOWERED_MIR=1` escape hatch.
+            # The kind comes from the module being lowered, so on the AOT lane
+            # it fails that module (cl_module_codegen_error), not the worker;
+            # the instruction is dropped and the module never emits an object.
             val cl_unlowered_name = mir_instkind_variant_name(inst_kind)
-            eprint("[cranelift] E-BACKEND-CRANELIFT-INST-{cl_unlowered_name}: Cranelift backend does not lower {cl_unlowered_name}")
             var allow_unlowered = false
             unsafe(capabilities: [ffi]):
                 allow_unlowered = (rt_env_get("SIMPLE_ALLOW_UNLOWERED_MIR") ?? "") == "1"
-            if not allow_unlowered:
-                panic("compile error: E-BACKEND-CRANELIFT-INST-{cl_unlowered_name}: Cranelift backend does not lower {cl_unlowered_name}")
+            if allow_unlowered:
+                eprint("[cranelift] E-BACKEND-CRANELIFT-INST-{cl_unlowered_name}: Cranelift backend does not lower {cl_unlowered_name}")
+            else:
+                cl_module_codegen_error(cl_module, "E-BACKEND-CRANELIFT-INST-{cl_unlowered_name}: in {func.name}: Cranelift backend does not lower {cl_unlowered_name}")
+
+# A condition of the module being lowered that the lowering cannot translate
+# is a compile error of THAT module, like a refused call ABI
+# (cl_aot_refuse_call_abi): recorded into the open AOT module record, so the
+# AOT entry fails the module before any object is emitted, and the caller
+# emits a placeholder to keep the IR well formed. A panic here used to abort
+# the codegen worker and fail every module of its Stage 3 claim. With no AOT
+# record open for this module (the JIT lane, or a caller outside both AOT
+# entries) it stays the fail-closed panic.
+fn cl_module_codegen_error(cl_module: i64, message: text):
+    if cl_aot_refuse_call_abi(cl_module, message):
+        eprint("[cranelift] {message}")
+        return
+    panic("compile error: {message}")
+
+# Address of a module global for `use` (load/store/address) in `func`. A global
+# with no declaration in this module, or one the provider gives no address
+# for, is the module's compile error; the placeholder address is never
+# emitted (the module fails before its object is written).
+fn cl_global_address(ctx: i64, cl_module: i64, global_handles: Dict<i64, CraneliftGlobalBinding>,
+        symbol_id: i64, use_: text, func: MirFunction) -> i64:
+    if not global_handles.has(symbol_id):
+        cl_module_codegen_error(cl_module, "E-BACKEND-CRANELIFT-GLOBAL-UNDECLARED: global {symbol_id}: {use_} in {func.name}: no declaration in this module")
+        return cranelift_iconst(ctx, CL_TYPE_I64, 0)
+    val addr = cranelift_bound_global_address_v1(ctx, global_handles[symbol_id])
+    if addr == 0:
+        cl_module_codegen_error(cl_module, "E-BACKEND-CRANELIFT-GLOBAL-ADDRESS: global {symbol_id}: {use_} in {func.name}: the Cranelift provider gave no address")
+        return cranelift_iconst(ctx, CL_TYPE_I64, 0)
+    # EXPLICIT return: mixed-return/tail rule (see cl_translate_operand).
+    return addr
 
 # ============================================================================
 # Terminator Translation
@@ -907,8 +1129,8 @@ fn cranelift_phi_const_block_arg(arg: MirOperand) -> i64?:
         case Const(value, _):
             match value:
                 case Int(v): Some(v)
-                case _: nil
-        case _: nil
+                case _: None
+        case _: None
 
 fn cranelift_phi_incoming_for_predecessor(pred_id: i64, args: [MirOperand]) -> MirOperand?:
     # NOTE: explicit match, not `if block.?:` -- a const block-id operand can
@@ -922,10 +1144,10 @@ fn cranelift_phi_incoming_for_predecessor(pred_id: i64, args: [MirOperand]) -> M
             case Some(block_id):
                 if block_id == pred_id:
                     return Some(args[i + 1])
-            case nil:
+            case None:
                 pass_do_nothing
         i = i + 2
-    nil
+    None
 
 fn store_phi_incomings_for_edge(
     ctx: i64,
@@ -957,7 +1179,7 @@ fn store_phi_incomings_for_edge(
                     case _:
                         ()
 
-fn cl_translate_terminator(
+pub fn cl_translate_terminator(
     ctx: i64,
     cl_module: i64,
     current_block: BlockId,
@@ -1052,7 +1274,7 @@ fn cl_translate_terminator(
             if val term_dest_l = dest:
                 term_ret_type = local_type(term_dest_l.id, func)
                 term_has_dest = true
-            val result = cl_translate_call(ctx, func_op, args, value_map, slot_map, 0, {}, func, term_ret_type, term_has_dest)
+            val result = cl_translate_call(ctx, func_op, args, value_map, slot_map, cl_module, {}, func, term_ret_type, term_has_dest)
             if dest.?:
                 # Inline extraction: calling a helper with a LocalId? ARGUMENT is
                 # miscompiled on the stage4 lane (callee never runs, garbage
@@ -1096,7 +1318,7 @@ fn cl_translate_operand(
                 return load_local(ctx, local_value.id, value_map, slot_map, func)
             return cranelift_iconst(ctx, CL_TYPE_I64, 0)
         case Const(value, type_):
-            return cl_translate_const_value(ctx, cl_module, value, type_)
+            return cl_translate_const_value(ctx, cl_module, value, type_, func.name, operand.call_origin)
 
 # Uniform-i64 memory load for a local's value: floats keep their typed
 # load, everything else loads as I64 (the lane is uniformly i64 — see the
@@ -1160,11 +1382,11 @@ fn load_local(
 # Constant Translation
 # ============================================================================
 
-fn cl_translate_const_value(ctx: i64, cl_module: i64, value: MirConstValue, type_: MirType) -> i64:
+fn cl_translate_const_value(ctx: i64, cl_module: i64, value: MirConstValue, type_: MirType, func_name: text, origin: MirCallOrigin = MirCallOrigin.Source) -> i64:
     # EXPLICIT returns: mixed-return/tail rule (see cl_translate_operand).
     match value:
-        case Int(v):
-            return cranelift_iconst(ctx, const_int_cl_type(type_), v)
+        case Int(_):
+            return cl_emit_scalar_const_plan(ctx, cl_scalar_const_plan(value, type_), type_)
         case FloatLexeme(v):
             return cranelift_fconst(ctx, mir_type_to_cl(type_), float_literal_scalar(v))
         case Float(v):
@@ -1175,9 +1397,27 @@ fn cl_translate_const_value(ctx: i64, cl_module: i64, value: MirConstValue, type
         case Str(v):
             match type_.kind:
                 case FuncPtr(_):
-                    val address = cranelift_function_addr_in_func(ctx, v)
+                    # Unknown authority is the module's compile error, checked
+                    # before the origin helper (which panics on it).
+                    if origin == MirCallOrigin.Unknown:
+                        cl_module_codegen_error(cl_module, "E-BACKEND-CRANELIFT-CALL-ORIGIN: {v}: function value in {func_name}: callee lacks proven source/runtime/foreign origin")
+                        return cranelift_iconst(ctx, CL_TYPE_I64, 0)
+                    val source_call = mir_call_origin_uses_local_symbols_named(origin, v)
+                    val symbol = if source_call and mir_runtime_owned_call_name(v): mir_runtime_owned_local_symbol(v) else: v
+                    var address = cranelift_function_addr_in_func(ctx, symbol)
                     if address == 0:
-                        panic("Cranelift function address missing declaration: {v}")
+                        # A function VALUE naming an imported function: only
+                        # this module's own functions are pre-declared, so
+                        # declare the import from the declared FuncPtr
+                        # signature, as cl_translate_call does for calls.
+                        val import_sig = cl_import_call_signature(type_, cl_declared_callee_params(type_).len())
+                        cl_declare_import_function(cl_module, symbol, import_sig)
+                        address = cranelift_function_addr_in_func(ctx, symbol)
+                    if address == 0:
+                        if cl_jit_refuse_call_abi(cl_module, "E-JIT-FUNCTION-ADDRESS-UNBOUND: {v}: the Cranelift JIT provider has no address for this function value"):
+                            return cranelift_iconst(ctx, CL_TYPE_I64, 0)
+                        cl_module_codegen_error(cl_module, "E-BACKEND-CRANELIFT-FUNCTION-ADDRESS: '{v}': function value in {func_name}: no declaration or import for this function")
+                        return cranelift_iconst(ctx, CL_TYPE_I64, 0)
                     return address
                 case Ptr(_, _):
                     # MIR's literal-print fast path passes raw UTF-8 bytes
@@ -1199,11 +1439,13 @@ fn cl_translate_const_value(ctx: i64, cl_module: i64, value: MirConstValue, type
             # and bootstrap_stage4_selfhost_parse_memory_blowup_2026-07-20.md.
             val data_id = cranelift_declare_string_data(cl_module, v)
             val ptr_val = cranelift_data_addr_in_func(ctx, data_id)
-            val len_val = cranelift_iconst(ctx, CL_TYPE_I64, v.len())
+            val len_val = cranelift_iconst(ctx, CL_TYPE_I64, v.byte_len())
             val strnew_vreg = translate_runtime_import_call_i64(ctx, cl_module, "rt_string_new_literal", [ptr_val, len_val])
             return strnew_vreg
         case Zero:
-            return cranelift_iconst(ctx, mir_type_to_cl(type_), 0)
+            # `x!` / `x.unwrap()` on an `f64?` emits Zero typed F64 on the nil
+            # (panic) arm; a float zero must be fconst, never iconst.f64.
+            return cl_emit_scalar_const_plan(ctx, cl_scalar_const_plan(value, type_), type_)
         case _:
             return cranelift_iconst(ctx, CL_TYPE_I64, 0)
 
@@ -1211,7 +1453,7 @@ fn cl_translate_const_value(ctx: i64, cl_module: i64, value: MirConstValue, type
 # Binary Operation Translation
 # ============================================================================
 
-fn cl_translate_binop(ctx: i64, cl_module: i64, op: MirBinOp, left_value: i64, right_value: i64, left_operand: MirOperand, right_operand: MirOperand, func: MirFunction) -> i64:
+fn cl_translate_binop(ctx: i64, cl_module: i64, op: MirBinOp, left_value: i64, right_value: i64, left_operand: MirOperand, right_operand: MirOperand, func: MirFunction, result_type: MirType) -> i64:
     val left_type = operand_type(left_operand, func)
     val right_type = operand_type(right_operand, func)
     val left_is_float = type_is_float(left_type)
@@ -1219,14 +1461,14 @@ fn cl_translate_binop(ctx: i64, cl_module: i64, op: MirBinOp, left_value: i64, r
     val is_float = left_is_float or right_is_float
     var a = left_value
     var b = right_value
+    var float_type = left_type
     # MIR retains each operand's numeric type. Cranelift requires equal SSA
     # types, so promote before choosing the floating instruction. In particular,
     # both 5 / 2.0 and 5.0 / 2 must divide as floats rather than emit an invalid
     # sdiv(i64, f64) or fdiv(f64, i64). Reuse cast signedness and width handling.
     match op:
-        case Add | Sub | Mul | Div | Eq | Ne | Lt | Le | Gt | Ge:
+        case Add | Sub | Mul | Div | Rem | Pow | Eq | Ne | Lt | Le | Gt | Ge:
             if is_float:
-                var float_type = left_type
                 if not left_is_float:
                     float_type = right_type
                 elif right_is_float and right_type.size_bytes() > left_type.size_bytes():
@@ -1246,7 +1488,17 @@ fn cl_translate_binop(ctx: i64, cl_module: i64, op: MirBinOp, left_value: i64, r
         case Div:
             if is_float: cranelift_fdiv(ctx, a, b) elif is_unsigned: cranelift_udiv(ctx, a, b) else: cranelift_sdiv(ctx, a, b)
         case Rem:
-            if is_unsigned: cranelift_urem(ctx, a, b) else: cranelift_srem(ctx, a, b)
+            if is_float:
+                cl_translate_float_binary_import(ctx, cl_module, "fmod", a, b, float_type)
+            elif is_unsigned:
+                cranelift_urem(ctx, a, b)
+            else:
+                cranelift_srem(ctx, a, b)
+        case Pow:
+            if is_float:
+                cl_translate_float_binary_import(ctx, cl_module, "rt_math_pow", a, b, float_type)
+            else:
+                cl_translate_integer_power(ctx, a, b, operand_is_unsigned(right_operand, func))
         case BitAnd:
             cranelift_band(ctx, a, b)
         case BitOr:
@@ -1254,9 +1506,11 @@ fn cl_translate_binop(ctx: i64, cl_module: i64, op: MirBinOp, left_value: i64, r
         case BitXor:
             cranelift_bxor(ctx, a, b)
         case Shl:
-            cranelift_ishl(ctx, a, b)
+            val count = cl_mask_shift_count(ctx, b, result_type)
+            cranelift_ishl(ctx, a, count)
         case Shr:
-            if left_is_unsigned: cranelift_ushr(ctx, a, b) else: cranelift_sshr(ctx, a, b)
+            val count = cl_mask_shift_count(ctx, b, result_type)
+            if left_is_unsigned: cranelift_ushr(ctx, a, count) else: cranelift_sshr(ctx, a, count)
         # NOTE: the cranelift_icmp/cranelift_fcmp FFI wrappers already return
         # i64 results (verified empirically: wrapping them in uextend.i64
         # fails verification with "arg 0 with type i64 failed to satisfy type
@@ -1290,8 +1544,81 @@ fn cl_translate_binop(ctx: i64, cl_module: i64, op: MirBinOp, left_value: i64, r
         case BroadcastPow:
             translate_runtime_import_call_i64(ctx, cl_module, "__simple_runtime_broadcast_pow", [a, b])
         case _:
-            # Pow and unsupported future ops still use the scalar fallback.
-            cranelift_iadd(ctx, a, b)
+            # Every MirBinOp variant has an arm above; reached only through a
+            # corrupted operator value of the function being lowered.
+            cl_module_codegen_error(cl_module, "E-BACKEND-CRANELIFT-BINOP: in {func.name}: unsupported binary operation")
+            cranelift_iconst(ctx, CL_TYPE_I64, 0)
+
+fn cl_mask_shift_count(ctx: i64, count: i64, result_type: MirType) -> i64:
+    # SSA uses I64 even for narrow destinations, so the hardware's implicit
+    # 63 mask is insufficient. Match the declared result width, as LLVM does.
+    val mask = match result_type.kind:
+        case I8 | U8: 7
+        case I16 | U16: 15
+        case I32 | U32 | Char: 31
+        case _: 63
+    cranelift_band(ctx, count, cranelift_iconst(ctx, CL_TYPE_I64, mask))
+
+fn cl_translate_integer_power(ctx: i64, base: i64, exponent: i64, unsigned_exponent: bool) -> i64:
+    # Emit wrapping I64 multiplication, avoiding the signed C intrinsic's
+    # overflow and signed-exponent ABI. Unsigned exponents consume all 64 bits.
+    val zero = cranelift_iconst(ctx, CL_TYPE_I64, 0)
+    val one = cranelift_iconst(ctx, CL_TYPE_I64, 1)
+    val base_addr = cranelift_stack_addr(ctx, cranelift_stack_slot(ctx, 8, 8), 0)
+    val exponent_addr = cranelift_stack_addr(ctx, cranelift_stack_slot(ctx, 8, 8), 0)
+    val result_addr = cranelift_stack_addr(ctx, cranelift_stack_slot(ctx, 8, 8), 0)
+    cranelift_store(ctx, base, base_addr, 0)
+    cranelift_store(ctx, exponent, exponent_addr, 0)
+    cranelift_store(ctx, one, result_addr, 0)
+    val header = cranelift_create_block(ctx)
+    val body = cranelift_create_block(ctx)
+    val multiply = cranelift_create_block(ctx)
+    val advance = cranelift_create_block(ctx)
+    val done = cranelift_create_block(ctx)
+    if not unsigned_exponent:
+        val negative = cranelift_create_block(ctx)
+        val is_negative = cranelift_icmp(ctx, CL_CMP_SLT, exponent, zero)
+        cranelift_brif(ctx, is_negative, negative, header)
+        cranelift_switch_to_block(ctx, negative)
+        cranelift_store(ctx, zero, result_addr, 0)
+        cranelift_jump(ctx, done)
+    else:
+        cranelift_jump(ctx, header)
+    cranelift_switch_to_block(ctx, header)
+    val remaining = cranelift_load(ctx, CL_TYPE_I64, exponent_addr, 0)
+    val has_bits = cranelift_icmp(ctx, CL_CMP_NE, remaining, zero)
+    cranelift_brif(ctx, has_bits, body, done)
+    cranelift_switch_to_block(ctx, body)
+    val factor = cranelift_load(ctx, CL_TYPE_I64, base_addr, 0)
+    val odd = cranelift_band(ctx, remaining, one)
+    cranelift_brif(ctx, odd, multiply, advance)
+    cranelift_switch_to_block(ctx, multiply)
+    val accumulated = cranelift_load(ctx, CL_TYPE_I64, result_addr, 0)
+    cranelift_store(ctx, cranelift_imul(ctx, accumulated, factor), result_addr, 0)
+    cranelift_jump(ctx, advance)
+    cranelift_switch_to_block(ctx, advance)
+    cranelift_store(ctx, cranelift_imul(ctx, factor, factor), base_addr, 0)
+    cranelift_store(ctx, cranelift_ushr(ctx, remaining, one), exponent_addr, 0)
+    cranelift_jump(ctx, header)
+    cranelift_switch_to_block(ctx, done)
+    cranelift_load(ctx, CL_TYPE_I64, result_addr, 0)
+
+fn cl_translate_float_binary_import(ctx: i64, cl_module: i64, name: text, left: i64, right: i64, float_type: MirType) -> i64:
+    # Existing runtime/platform math providers use the F64 ABI. Promote F32
+    # arguments before the call and demote its result back to the MIR width.
+    val narrow = float_type.size_bytes() == 4
+    val a = if narrow: cranelift_fpromote(ctx, CL_TYPE_F64, left) else: left
+    val b = if narrow: cranelift_fpromote(ctx, CL_TYPE_F64, right) else: right
+    val sig = cranelift_new_signature(CL_CC_PLATFORM)
+    cranelift_sig_add_param(sig, CL_TYPE_F64)
+    cranelift_sig_add_param(sig, CL_TYPE_F64)
+    cranelift_sig_set_return(sig, CL_TYPE_F64)
+    val handle = cl_declare_import_function(cl_module, name, sig)
+    if cl_jit_import_refused(cl_module, handle):
+        return cranelift_fconst(ctx, if narrow: CL_TYPE_F32 else: CL_TYPE_F64, 0.0)
+    val func_ref = cranelift_import_function(ctx, handle)
+    val result = cranelift_call(ctx, func_ref, [a, b])
+    if narrow: cranelift_fdemote(ctx, CL_TYPE_F32, result) else: result
 
 # ============================================================================
 # Unary Operation Translation
@@ -1313,8 +1640,16 @@ fn cl_translate_unaryop(ctx: i64, op: MirUnaryOp, a: i64, operand: MirOperand, f
                 val negated = cranelift_bxor(ctx, bits, mask)
                 cranelift_bitcast(ctx, float_type, negated)
             else:
-                val zero = cranelift_iconst(ctx, mir_type_to_cl(operand_type(operand, func)), 0)
-                cranelift_isub(ctx, zero, a)
+                # Integer SSA values are uniformly I64 in this lane, so the
+                # zero must be I64 too: an I32 zero against the I64 operand
+                # failed the verifier (`isub.i32 0, v: arg 1 has type i64`).
+                # A signed narrow result is re-sign-extended so that negating
+                # the minimum wraps at its declared width (-(-2^31) == -2^31).
+                # Unsigned narrow results are canonicalized by the caller.
+                val zero = cranelift_iconst(ctx, CL_TYPE_I64, 0)
+                val negated = cranelift_isub(ctx, zero, a)
+                val neg_type = operand_type(operand, func)
+                cl_canonicalize_signed_narrow(ctx, negated, neg_type)
         case Not:
             # i64 mask, not i8: bool values (cmp results, bool locals, consts)
             # are uniformly i64 in this backend (see mir_type_to_cl).
@@ -1370,24 +1705,43 @@ fn cl_translate_cast(ctx: i64, cl_module: i64, src_val: i64, operand: MirOperand
         val len_val = cranelift_load(ctx, CL_TYPE_I64, src_val, 8)
         val boxed = translate_runtime_import_call_i64(ctx, cl_module, "rt_string_new", [ptr_val, len_val])
         val parsed = translate_runtime_import_call_i64(ctx, cl_module, "rt_string_to_int_lenient", [boxed])
-        # Bool-aware width: Bool targets are i64 in this backend (mir_type_to_cl),
-        # so an ireduce to the same-width i64 would fail verification.
-        val narrow_cl = cl_cast_narrow_int_type(target)
-        if narrow_cl != 0:
-            # Narrow for wrap semantics, then extend straight back to I64:
-            # no sub-64 SSA value may escape on this uniformly-i64 lane.
-            val narrowed = cranelift_ireduce(ctx, narrow_cl, parsed)
-            val zero_extend_back = match target.kind:
-                case U8 | U16 | U32 | Bool | Char: true
-                case _: false
-            if zero_extend_back:
-                return cranelift_uextend(ctx, CL_TYPE_I64, narrowed)
-            return cranelift_sextend(ctx, CL_TYPE_I64, narrowed)
-        return parsed
+        return cl_normalize_cast_integer(ctx, parsed, target)
 
     if is_src_float and not is_dst_float:
-        # Float to int
-        cranelift_fcvt_to_sint(ctx, to_cl, src_val)
+        # The pinned x64 provider lowers float conversions only to I32/I64.
+        # Convert small targets through I32, then check their truncated
+        # integer against the normalized destination before returning I64.
+        # fcvt itself retains the NaN/infinity and I32/I64 overflow traps.
+        val narrow_cl = cl_cast_narrow_int_type(target)
+        val small_target = narrow_cl == CL_TYPE_I8 or narrow_cl == CL_TYPE_I16
+        val integer_cl = if narrow_cl == 0:
+            CL_TYPE_I64
+        elif small_target:
+            CL_TYPE_I32
+        else:
+            narrow_cl
+        val converted = if cl_cast_zero_extends(target):
+            cranelift_fcvt_to_uint(ctx, integer_cl, src_val)
+        else:
+            cranelift_fcvt_to_sint(ctx, integer_cl, src_val)
+        val extended = if narrow_cl == 0:
+            converted
+        elif cl_cast_zero_extends(target):
+            cranelift_uextend(ctx, CL_TYPE_I64, converted)
+        else:
+            cranelift_sextend(ctx, CL_TYPE_I64, converted)
+        if small_target:
+            val normalized = cl_normalize_cast_integer(ctx, extended, target)
+            val in_range = cranelift_icmp(ctx, CL_CMP_EQ, extended, normalized)
+            val valid_block = cranelift_create_block(ctx)
+            val overflow_block = cranelift_create_block(ctx)
+            cranelift_brif(ctx, in_range, valid_block, overflow_block)
+            cranelift_switch_to_block(ctx, overflow_block)
+            cranelift_trap(ctx, 2)
+            cranelift_switch_to_block(ctx, valid_block)
+            normalized
+        else:
+            extended
     elif not is_src_float and is_dst_float:
         # Int to float
         match src_type.kind:
@@ -1403,30 +1757,28 @@ fn cl_translate_cast(ctx: i64, cl_module: i64, src_val: i64, operand: MirOperand
         else:
             src_val
     else:
-        # Int to int. Bool-aware widths: Bool values are materialized as i64
-        # (see mir_type_to_cl), so a Bool<->i64 cast is a same-width no-op —
-        # the 1-byte MIR storage width would emit an invalid same-width
-        # uextend/sextend/ireduce.
-        val src_size = cl_cast_int_width_bytes(src_type)
-        val dst_size = cl_cast_int_width_bytes(target)
-        val narrow_cl = cl_cast_narrow_int_type(target)
-        if dst_size > src_size or narrow_cl == 0:
-            # Widening is a no-op on this uniformly-i64 lane: every int SSA
-            # value is already a canonically-extended I64 (I64-uniform loads,
-            # I64 consts, runtime-widened cmp results), so uextend/sextend
-            # here would be an invalid same-width widen (verifier reject).
-            src_val
-        elif dst_size < src_size:
-            # Narrow for wrap semantics, then extend straight back to I64:
-            # no sub-64 SSA value may escape on this uniformly-i64 lane
-            # (probe_enum6: a typed narrow fed i16 into an i64-signature call).
-            val reduced = cranelift_ireduce(ctx, narrow_cl, src_val)
-            val zero_extend_back = match target.kind:
-                case U8 | U16 | U32 | Bool | Char: true
-                case _: false
-            if zero_extend_back: cranelift_uextend(ctx, CL_TYPE_I64, reduced) else: cranelift_sextend(ctx, CL_TYPE_I64, reduced)
-        else:
-            src_val
+        # Normalize by destination, even for equal/wider MIR widths:
+        # u8(255) as i8 must sign-extend -1, and i8(-1) as u16 must
+        # zero-extend 65535. Only 64-bit destinations are already canonical.
+        cl_normalize_cast_integer(ctx, src_val, target)
+
+fn cl_cast_zero_extends(target: MirType) -> bool:
+    match target.kind:
+        case U8 | U16 | U32 | U64 | Bool | Char: true
+        case _: false
+
+fn cl_normalize_cast_integer(ctx: i64, value: i64, target: MirType) -> i64:
+    """Normalize an I64 input to the target integer's canonical I64 value.
+    Bool stays I64 and Char reduces to I32; no same-width reduce is emitted.
+    Float conversion results must first be extended to I64 before use here."""
+    val narrow_cl = cl_cast_narrow_int_type(target)
+    if narrow_cl == 0:
+        return value
+    val reduced = cranelift_ireduce(ctx, narrow_cl, value)
+    if cl_cast_zero_extends(target):
+        cranelift_uextend(ctx, CL_TYPE_I64, reduced)
+    else:
+        cranelift_sextend(ctx, CL_TYPE_I64, reduced)
 
 # ============================================================================
 # Function Call Translation
@@ -1454,6 +1806,44 @@ fn cl_translate_call(
         case Const(value, type_):
             match value:
                 case Str(name):
+                    # Unknown authority is the module's compile error, checked
+                    # before the origin helper (which panics on it).
+                    if func_op.call_origin == MirCallOrigin.Unknown:
+                        cl_module_codegen_error(cl_module, "E-BACKEND-CRANELIFT-CALL-ORIGIN: {name}: call in {func.name}: callee lacks proven source/runtime/foreign origin")
+                        return cranelift_iconst(ctx, CL_TYPE_I64, 0)
+                    val source_call = mir_call_origin_uses_local_symbols_named(func_op.call_origin, name)
+                    # Source authority wins before runtime-specific ABI rewrites.
+                    # Runtime and Foreign must never use this local handle table.
+                    if source_call and func_handles.has(name):
+                        val source_ref = cranelift_import_function(ctx, func_handles[name])
+                        return cranelift_call(ctx, source_ref, arg_vals)
+                    # Tuple-result owners (process-run, cpuid) -> raw-block
+                    # facade for runtime AND foreign (stdlib extern) origin.
+                    val tuple_facade = if source_call: "" else: runtime_tuple_result_facade(name, arg_vals.len())
+                    if tuple_facade != "":
+                        return translate_runtime_import_call_i64(ctx, cl_module, tuple_facade, arg_vals)
+                    if func_op.call_origin != MirCallOrigin.Runtime:
+                        val external_name = if source_call and mir_runtime_owned_call_name(name): mir_runtime_owned_local_symbol(name) else: name
+                        val abi_error = cl_import_call_abi_error(type_, args, ret_type, has_ret_dest, func)
+                        if abi_error != "":
+                            if cl_jit_refuse_call_abi(cl_module, "E-BACKEND-CRANELIFT-CALL-ABI: {external_name}: {abi_error}"):
+                                return cranelift_iconst(ctx, CL_TYPE_I64, 0)
+                            # AOT: this module's compile error, reported by
+                            # the AOT entry; the build goes on to the next.
+                            # Printed here as well: the error text crosses
+                            # several Result/diagnostic-file hops to the driver.
+                            if cl_aot_refuse_call_abi(cl_module, "E-BACKEND-CRANELIFT-CALL-ABI: {external_name}: call in {func.name}: {abi_error}"):
+                                eprint("[cranelift] E-BACKEND-CRANELIFT-CALL-ABI: {external_name}: call in {func.name}: {abi_error}")
+                                return cranelift_iconst(ctx, CL_TYPE_I64, 0)
+                            panic("E-BACKEND-CRANELIFT-CALL-ABI: {external_name}: call in {func.name}: {abi_error}")
+                        val signature = cl_import_call_signature(type_, args.len())
+                        val handle = cl_declare_import_function(cl_module, external_name, signature)
+                        if cl_jit_import_refused(cl_module, handle):
+                            return cranelift_iconst(ctx, CL_TYPE_I64, 0)
+                        val reference = cranelift_import_function(ctx, handle)
+                        return cl_normalize_import_result(ctx, type_, cranelift_call(ctx, reference, arg_vals))
+                    if name == "rt_array_new" or name == "rt_array_push" or name == "rt_bytes_u8_at":
+                        return translate_runtime_import_call_i64(ctx, cl_module, name, arg_vals)
                     val method = method_leaf_name(name)
                     if (method == "unwrap" or method == "unwrap_err" or method == "unwrap_or") and arg_vals.len() > 0:
                         return arg_vals[0]
@@ -1477,9 +1867,12 @@ fn cl_translate_call(
                         return translate_runtime_import_call_f64_i64(ctx, cl_module, name, arg_vals[0])
                     if name == "rt_value_as_float" and arg_vals.len() == 1:
                         return translate_runtime_import_call_i64_f64(ctx, cl_module, name, arg_vals[0])
+                    if (name == "rt_value_is_float" or name == "rt_value_is_nil" or name == "rt_value_is_int" or name == "rt_value_is_bool") and arg_vals.len() == 1:
+                        val raw_i8 = translate_runtime_import_call_i8(ctx, cl_module, name, arg_vals)
+                        return cranelift_sextend(ctx, CL_TYPE_I64, raw_i8)
                     if (name == "cranelift_fconst" or name == "rt_cranelift_fconst") and arg_vals.len() == 3:
                         return translate_runtime_import_call_i64_i64_f64_i64(ctx, cl_module, name, arg_vals[0], arg_vals[1], arg_vals[2])
-                    if name == "rt_array_free" or name == "rt_print_str" or name == "rt_println_str" or name == "rt_eprintln_str":
+                    if name == "rt_array_free" or name == "rt_print_str" or name == "rt_println_str" or name == "rt_eprintln_str" or (name == "rt_panic" and arg_vals.len() == 2):
                         translate_runtime_import_call_void(ctx, cl_module, name, arg_vals)
                         return cranelift_iconst(ctx, CL_TYPE_I64, 0)
                     # rt_string_free is i64 -> i64 (1 = reclaimed, 0 = refused),
@@ -1499,17 +1892,19 @@ fn cl_translate_call(
                         return translate_runtime_import_call_i64(ctx, cl_module, "rt_process_spawn_guarded_value", arg_vals)
                     if name == "rt_env_get" and arg_vals.len() == 1:
                         return translate_runtime_import_call_i64(ctx, cl_module, "rt_env_get_value", arg_vals)
+                    if name == "__simple_rt_string_char_code_at" and arg_vals.len() == 2:
+                        return translate_runtime_import_call_i64(ctx, cl_module, "rt_string_char_code_at", arg_vals)
                     # MIR currently represents compiler-generated collection
                     # helpers and source calls with the same string operand.
                     # Keep the lowering-owned primitives on the runtime ABI so
                     # a coincidentally named local body cannot capture them.
                     val owned_rt = cl_is_lowering_owned_runtime(name)
-                    if owned_rt:
+                    if owned_rt and not source_call:
                         return translate_runtime_import_call_i64(ctx, cl_module, name, arg_vals)
                     # Named function call. EXPLICIT returns: the implicit
                     # tail-value through match->if nesting yields 0 on the
                     # stage4 native lane (rt_print received a NULL handle).
-                    if func_handles.has(name):
+                    if source_call and func_handles.has(name):
                         val handle = func_handles[name]
                         val func_ref = cranelift_import_function(ctx, handle)
                         return cranelift_call(ctx, func_ref, arg_vals)
@@ -1523,12 +1918,19 @@ fn cl_translate_call(
                         # is a compile error (cl_import_call_abi_error).
                         val abi_error = cl_import_call_abi_error(type_, args, ret_type, has_ret_dest, func)
                         if abi_error != "":
+                            if cl_jit_refuse_call_abi(cl_module, "E-BACKEND-CRANELIFT-CALL-ABI: {name}: call in {func.name}: {abi_error}"):
+                                return cranelift_iconst(ctx, CL_TYPE_I64, 0)
+                            if cl_aot_refuse_call_abi(cl_module, "E-BACKEND-CRANELIFT-CALL-ABI: {name}: call in {func.name}: {abi_error}"):
+                                eprint("[cranelift] E-BACKEND-CRANELIFT-CALL-ABI: {name}: call in {func.name}: {abi_error}")
+                                return cranelift_iconst(ctx, CL_TYPE_I64, 0)
                             eprint("[cranelift] E-BACKEND-CRANELIFT-CALL-ABI: call to {name} in {func.name}: {abi_error}")
                             panic("compile error: E-BACKEND-CRANELIFT-CALL-ABI: call to {name} in {func.name}: {abi_error}")
                         val sig = cl_import_call_signature(type_, args.len())
-                        val handle = cranelift_declare_function(cl_module, name, sig, CL_LINKAGE_IMPORT)
+                        val handle = cl_declare_import_function(cl_module, name, sig)
+                        if cl_jit_import_refused(cl_module, handle):
+                            return cranelift_iconst(ctx, CL_TYPE_I64, 0)
                         val func_ref = cranelift_import_function(ctx, handle)
-                        return cranelift_call(ctx, func_ref, arg_vals)
+                        return cl_normalize_import_result(ctx, type_, cranelift_call(ctx, func_ref, arg_vals))
                 case _:
                     return cranelift_iconst(ctx, CL_TYPE_I64, 0)
         case Copy(local):
@@ -1557,13 +1959,19 @@ fn cl_translate_call(
 fn cl_is_lowering_owned_runtime(name: text) -> bool:
     name == "rt_array_len" or name == "rt_array_get" or name == "rt_array_get_text" or name == "rt_array_set" or name == "rt_array_set_text" or name == "rt_bytes_u8_at"
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in cl_function_emit_name", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 fn cl_function_emit_name(name: text) -> text:
     if name == "main":
         return "__simple_main"
     var no_mangle = false
     unsafe(capabilities: [ffi]):
         no_mangle = (rt_env_get("SIMPLE_NATIVE_BUILD_NO_MANGLE") ?? "") == "1"
-    if no_mangle:
+    # `--no-mangle` builds the C-ABI runtime provider: its `rt_*` definitions
+    # ARE the runtime symbols and keep the bare name (same rule as
+    # MirToLlvm.llvm_function_symbol_name). MIR already stripped the module
+    # prefix and fails closed on leaf collisions (mir_no_mangle_claim_leaf).
+    # See doc/08_tracking/bug/no_mangle_emits_module_qualified_symbols_2026-11-16.md
+    if no_mangle and not cl_is_lowering_owned_runtime(name):
         return name
     # cl_is_lowering_owned_runtime names are unconditionally runtime-routed
     # in cl_translate_call above -- a same-named local body is unreachable
@@ -1639,7 +2047,7 @@ fn type_is_slot_scalar(ty: MirType) -> bool:
         case _:
             return false
 
-fn cl_cast_narrow_int_type(ty: MirType) -> i64:
+pub fn cl_cast_narrow_int_type(ty: MirType) -> i64:
     """Cranelift type a Cast must `ireduce` to for a sub-64 integer target,
     or 0 when the target is already 64 bits wide in this lane.
 
@@ -1655,7 +2063,7 @@ fn cl_cast_narrow_int_type(ty: MirType) -> i64:
         case I32 | U32 | Char: return CL_TYPE_I32
         case _: return 0
 
-fn cl_cast_int_width_bytes(ty: MirType) -> i64:
+pub fn cl_cast_int_width_bytes(ty: MirType) -> i64:
     """Integer value width for Cast width decisions in this uniformly-i64
     lane: Bool is materialized as i64 (see mir_type_to_cl) and Char is a
     32-bit Unicode scalar (see cl_cast_narrow_int_type)."""
@@ -1664,7 +2072,7 @@ fn cl_cast_int_width_bytes(ty: MirType) -> i64:
         case Char: return 4
         case _: return ty.size_bytes()
 
-fn cl_fallback_abi_type(ty: MirType) -> i64:
+pub fn cl_fallback_abi_type(ty: MirType) -> i64:
     """Register class of a CALLER-side value at an imported call: F32/F64
     stay float, everything else is the uniform i64 lane. Used only to CHECK
     the caller against the callee's declared signature -- never to build the
@@ -1715,13 +2123,23 @@ fn cl_declared_callee_return(callee_type: MirType) -> MirType:
         case FuncPtr(sig): return sig.return_type
         case _: return MirType.i64()
 
+fn cl_declared_callee_int_literal_coerced_params(callee_type: MirType) -> [bool]:
+    """Per-parameter int-literal -> declared-float-slot coercion provenance
+    recorded by MIR lowering (MirSignature.int_literal_coerced_params). The
+    coercion runs before any module split, so the caller's operand types at
+    an imported call already read f64; only this pin preserves the source
+    int -> float crossing for the no-implicit-coercion import check."""
+    match callee_type.kind:
+        case FuncPtr(sig): return sig.int_literal_coerced_params
+        case _: return []
+
 fn cl_import_call_abi_error(callee_type: MirType, args: [MirOperand], ret_type: MirType, has_ret_dest: bool, func: MirFunction) -> text:
     var arg_types: [MirType] = []
     for arg in args:
         arg_types = arg_types.push(operand_type(arg, func))
     cl_call_abi_mismatch(callee_type, arg_types, ret_type, has_ret_dest)
 
-fn cl_call_abi_mismatch(callee_type: MirType, arg_types: [MirType], ret_type: MirType, has_ret_dest: bool) -> text:
+pub fn cl_call_abi_mismatch(callee_type: MirType, arg_types: [MirType], ret_type: MirType, has_ret_dest: bool) -> text:
     """Empty when an imported call is ABI-sound; otherwise why it is not.
 
     Known callee signature: every argument's register class must equal the
@@ -1742,10 +2160,18 @@ fn cl_call_abi_mismatch(callee_type: MirType, arg_types: [MirType], ret_type: Mi
             return "callee signature unknown; result is {cl_abi_class_name(cl_fallback_abi_type(ret_type))} and cannot be read from the all-i64 import"
         return ""
     val params = cl_declared_callee_params(callee_type)
+    val coerced_params = cl_declared_callee_int_literal_coerced_params(callee_type)
     var index = 0
     for arg_type in arg_types:
         val caller_cls = cl_fallback_abi_type(arg_type)
         val callee_cls = cl_abi_class(sig_type_to_cl(params[index]))
+        # The source argument was an unsuffixed int literal that MIR lowering
+        # coerced into this declared float slot. The operand already reads
+        # f64 here (the coercion runs before the module split), but the
+        # crossing is int -> f64: per the cross-module contract there is no
+        # implicit coercion, so reject it instead of admitting it.
+        if index < coerced_params.len() and coerced_params[index]:
+            return "arg {index} is i64 but the callee declares {cl_abi_class_name(callee_cls)}; convert it explicitly at the call site"
         if caller_cls != callee_cls:
             return "arg {index} is {cl_abi_class_name(caller_cls)} but the callee declares {cl_abi_class_name(callee_cls)}; convert it explicitly at the call site"
         index = index + 1
@@ -1779,14 +2205,92 @@ fn cl_import_call_signature(callee_type: MirType, arg_count: i64) -> i64:
         cranelift_sig_set_return(sig, sig_type_to_cl(declared_ret))
     sig
 
-fn const_int_cl_type(ty: MirType) -> i64:
+pub fn cl_import_result_narrow_plan(declared_ret: MirType) -> (i64, bool):
+    """(narrow cl type, signed) an imported call's i64 result must be
+    re-extended from, or (0, false) when the declared return is already a
+    full machine word.
+
+    The import signature keeps sub-64 returns as I64 (sig_type_to_cl), but a
+    C callee returning `bool`/`int8_t`/`int32_t` only defines the low bits of
+    RAX (x86-64 SysV and Win64 alike): clang's rt_io_file_write_all ends
+    `setbe %bpl; movl %ebp, %eax`, leaving the caller's saved-RBP bits 8..31
+    in EAX. `not` lowers to `xor 1`, so a true result with garbage upper bits
+    read as false (bug cranelift_lsp_mcp_stdout_write_failed_2026-11-13).
+    Bool is unsigned 0/1 like LLVM's `zext i1`."""
+    match declared_ret.kind:
+        case Bool | U8: return (CL_TYPE_I8, false)
+        case I8: return (CL_TYPE_I8, true)
+        case U16: return (CL_TYPE_I16, false)
+        case I16: return (CL_TYPE_I16, true)
+        case U32 | Char: return (CL_TYPE_I32, false)
+        case I32: return (CL_TYPE_I32, true)
+        case _: return (0, false)
+
+pub fn cl_import_call_result_narrow_plan(callee_type: MirType) -> (i64, bool):
+    """Narrow plan for the result of an imported call, from the return type
+    the call operand records -- whatever the argument arity.
+
+    The return type must not be gated on cl_declared_callee_signature_known:
+    MIR splits a `text` argument of a (ptr, len) runtime extern into two
+    operands (text_extern_abi.text_arg_indices), so `rt_file_exists(text) ->
+    bool` reaches the backend with 2 arguments against 1 declared parameter.
+    That arity gate left every such bool result as the raw register (bug
+    phase2_cranelift_extern_bool_return_upper_bits_2026-11-18). A callee with
+    no recorded return is I64 here and stays untouched."""
+    cl_import_result_narrow_plan(cl_declared_callee_return(callee_type))
+
+fn cl_normalize_import_result(ctx: i64, callee_type: MirType, value: i64) -> i64:
+    val (narrow, signed) = cl_import_call_result_narrow_plan(callee_type)
+    if narrow == 0: return value
+    val low = cranelift_ireduce(ctx, narrow, value)
+    if signed: return cranelift_sextend(ctx, CL_TYPE_I64, low)
+    cranelift_uextend(ctx, CL_TYPE_I64, low)
+
+pub fn const_int_cl_type(ty: MirType) -> i64:
     """Int consts emit as I64 regardless of declared width: the lane is
     uniformly i64 and sub-64 iconst types leaked i16 args into i64-signature
-    calls (probe_enum6 verifier reject)."""
+    calls (probe_enum6 verifier reject). Never a float type: `iconst` is integer-only (float consts go through
+    cl_scalar_const_plan)."""
+    CL_TYPE_I64
+
+pub fn cl_const_is_float(ty: MirType) -> bool:
     match ty.kind:
-        case F32: return CL_TYPE_F32
-        case F64: return CL_TYPE_F64
-        case _: return CL_TYPE_I64
+        case F32 | F64: true
+        case _: false
+
+pub fn cl_scalar_const_plan(value: MirConstValue, type_: MirType) -> (text, i64, i64):
+    """Instruction selection for an Int/Zero MIR const: (opcode, cl type, operand).
+
+    - "iconst"         integer-typed: iconst.<cl type> operand.
+    - "fconst_zero"    float-typed Zero: fconst.<cl type> 0.0.
+    - "iconst_bitcast" float-typed Int(v): v is a BIT PATTERN (a raw word such
+      as the nil sentinel 3), never a number -- numeric float constants are
+      MirConstValue.Float. Emit iconst.<cl type> of the bits, then bitcast to
+      the float type. A numeric `v as f64` here turned sentinel 3 into 3.0
+      (bits 0x4008...), which rt_is_none no longer recognises. Cranelift's
+      iconst only admits I8..I64 (verifier iconst_bounds unreachable!() on
+      F32/F64), hence the integer carrier."""
+    match value:
+        case Int(v):
+            match type_.kind:
+                case F64: return ("iconst_bitcast", CL_TYPE_I64, v)
+                case F32: return ("iconst_bitcast", CL_TYPE_I32, v & 4294967295)
+                case _: return ("iconst", const_int_cl_type(type_), v)
+        case Zero:
+            if cl_const_is_float(type_):
+                return ("fconst_zero", mir_type_to_cl(type_), 0)
+            return ("iconst", mir_type_to_cl(type_), 0)
+        case _:
+            return ("iconst", CL_TYPE_I64, 0)
+
+fn cl_emit_scalar_const_plan(ctx: i64, plan: (text, i64, i64), type_: MirType) -> i64:
+    val (opcode, cl_type, operand) = plan
+    if opcode == "fconst_zero":
+        return cranelift_fconst(ctx, cl_type, 0.0)
+    val word = cranelift_iconst(ctx, cl_type, operand)
+    if opcode == "iconst_bitcast":
+        return cranelift_bitcast(ctx, mir_type_to_cl(type_), word)
+    word
 
 fn type_is_aggregate(ty: MirType) -> bool:
     match ty.kind:
@@ -1829,3 +2333,37 @@ fn type_is_text(ty: MirType) -> bool:
 # ============================================================================
 # Exports
 # ============================================================================
+
+fn cl_canonicalize_signed_narrow(ctx: i64, value: i64, dest_type: MirType) -> i64:
+    """Restore a signed narrow result's sign-extended I64 representation.
+
+    Ordinary BinOp arithmetic executes in I64, but its declared I8/I16/I32
+    result wraps at that width before a widening cast can expose it. Reuse
+    the unary-negation rule; do not narrow floats, pointers or Bool values.
+    CheckedBinOp has a separate overflow contract and does not use this path.
+    """
+    match dest_type.kind:
+        case I8 | I16 | I32:
+            val narrow_cl = cl_cast_narrow_int_type(dest_type)
+            val reduced = cranelift_ireduce(ctx, narrow_cl, value)
+            return cranelift_sextend(ctx, CL_TYPE_I64, reduced)
+        case _: return value
+
+fn cl_canonicalize_unsigned_narrow(ctx: i64, value: i64, dest_type: MirType) -> i64:
+    """Re-establish the canonical zero-extended I64 form of a U8/U16/U32 result.
+
+    The lane keeps every int SSA value as I64 and treats casts to I64 as
+    no-ops (see cl_translate_cast), so an Add/Sub/Mul/Shl/Neg/BitNot result
+    typed U32 can carry bits above its width (`~x`, `a - b` wrap, `a << 8`),
+    which a later `.to_i64()` then exposes as a value off by 2^32 (bug
+    phase2_crc32_i64_width_spill_2026_10_27). Float and 64-bit results are
+    returned unchanged."""
+    match dest_type.kind:
+        case U8 | U16 | U32:
+            val narrow_cl = cl_cast_narrow_int_type(dest_type)
+            if narrow_cl == 0:
+                return value
+            val reduced = cranelift_ireduce(ctx, narrow_cl, value)
+            return cranelift_uextend(ctx, CL_TYPE_I64, reduced)
+        case _:
+            return value

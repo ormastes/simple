@@ -1,0 +1,72 @@
+# Installed configuration metadata only. A codec cannot qualify a kernel or
+# recreate a native owner; completed Host installation and actual observation
+# must remain separate producers.
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.string_core.str_len
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+
+pub struct ContainerKernelQualificationProfileV1:
+    kernel_release: text
+    kernel_build_id: text
+    source_manifest_digest: text
+    config_digest: text
+    patch_manifest_digest: text
+    rule_id: text
+
+fn kernel_profile_validate_v1(profile: ContainerKernelQualificationProfileV1) -> Result<(), text>:
+    if str_len(profile.kernel_release) < 1 or str_len(profile.kernel_release) > 256:
+        return Err("kernel-profile-release-bound")
+    for i in 0..str_len(profile.kernel_release):
+        val c = profile.kernel_release.byte_at(i) as i64
+        if c < 32 or c > 126 or c == 47: return Err("kernel-profile-release-shape")
+    val size = str_len(profile.kernel_build_id)
+    if size < 2 or size > 128 or size % 2 != 0: return Err("kernel-profile-build-id-bound")
+    for i in 0..size:
+        val c = profile.kernel_build_id.byte_at(i) as i64
+        if not ((c >= 48 and c <= 57) or (c >= 97 and c <= 102)):
+            return Err("kernel-profile-build-id-shape")
+    for digest in [profile.source_manifest_digest, profile.config_digest, profile.patch_manifest_digest]:
+        if not builder_digest_valid_v1(digest): return Err("kernel-profile-manifest-digest")
+    if profile.rule_id != "linux-v6.12-core-events-deactivation-v1": return Err("kernel-profile-rule-unsupported")
+    Ok(())
+
+pub fn container_kernel_qualification_profile_encode_v1(profile: ContainerKernelQualificationProfileV1) -> Result<text, text>:
+    kernel_profile_validate_v1(profile)?
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("container-kernel-qualification-profile"),
+        "kernelRelease": SdnValue.String(profile.kernel_release), "kernelBuildId": SdnValue.String(profile.kernel_build_id),
+        "sourceManifestDigest": SdnValue.String(profile.source_manifest_digest), "configDigest": SdnValue.String(profile.config_digest),
+        "patchManifestDigest": SdnValue.String(profile.patch_manifest_digest), "ruleId": SdnValue.String(profile.rule_id)}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)))
+
+fn kernel_profile_text_v1(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("kernel-profile-field-type")
+
+pub fn container_kernel_qualification_profile_decode_v1(bytes: text) -> Result<ContainerKernelQualificationProfileV1, text>:
+    if str_len(bytes) < 1 or str_len(bytes) > 4096: return Err("kernel-profile-wire-bound")
+    val parsed = sdn_parse_strict_v1(bytes, SdnStrictLimitsV1(max_source_bytes: 4096,
+        max_depth: 2, max_nodes: 24, max_rows: 0, max_cells: 0, max_columns: 10))
+    if parsed.is_err(): return Err("kernel-profile-syntax")
+    val fields = match parsed.unwrap().value:
+        case SdnValue.Dict(value): value
+        case _: return Err("kernel-profile-object")
+    val keys = ["version", "kind", "kernelRelease", "kernelBuildId", "sourceManifestDigest", "configDigest", "patchManifestDigest", "ruleId"]
+    if fields.len() != keys.len(): return Err("kernel-profile-fields")
+    for key in keys:
+        if not fields.contains_key(key): return Err("kernel-profile-fields")
+    if fields["version"] != SdnValue.Int(1) or fields["kind"] != SdnValue.String("container-kernel-qualification-profile"):
+        return Err("kernel-profile-version")
+    val profile = ContainerKernelQualificationProfileV1(kernel_release: kernel_profile_text_v1(fields, "kernelRelease")?,
+        kernel_build_id: kernel_profile_text_v1(fields, "kernelBuildId")?, source_manifest_digest: kernel_profile_text_v1(fields, "sourceManifestDigest")?,
+        config_digest: kernel_profile_text_v1(fields, "configDigest")?, patch_manifest_digest: kernel_profile_text_v1(fields, "patchManifestDigest")?,
+        rule_id: kernel_profile_text_v1(fields, "ruleId")?)
+    if container_kernel_qualification_profile_encode_v1(profile)? != bytes: return Err("kernel-profile-noncanonical")
+    Ok(profile)
+
+pub fn container_kernel_qualification_profile_digest_v1(profile: ContainerKernelQualificationProfileV1) -> Result<text, text>:
+    Ok(sha256_text(container_kernel_qualification_profile_encode_v1(profile)?))

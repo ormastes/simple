@@ -1,0 +1,278 @@
+#!/bin/sh
+# Simple RenderDoc capture check: render ONE web catalog page through Simple's
+# Vulkan Engine2D path under the RenderDoc capture layer and prove the .rdc is
+# a real, replayable record of that render -- not just a file with RDOC magic:
+#
+#   1. a .rdc is produced (RDOC magic);
+#   2. REPLAYING it yields > 0 draw/dispatch actions (Engine2D is compute-only,
+#      so its "draw calls" are vkCmdDispatch actions; both kinds are counted);
+#   3. the framebuffer the replay leaves in the W*H*4 storage buffer equals the
+#      normal (no RenderDoc) Vulkan render of the same page, tolerance 0.
+#
+# Simple side only: no Chrome, no native build. The page runs on the seed/
+# release interpreter; the replay runs headless through librenderdoc.
+# scripts/check/check-renderdoc-web-capture-lane.shs --simple-only stops at
+# step 1; this check is the replay inspection chained after it.
+#
+# Usage:
+#   sh scripts/check/check-simple-renderdoc-capture.shs [--page NAME] [--out DIR] [--selftest]
+#
+# Env: RDOC_HOME (RenderDoc install or build tree), RDOC_SOURCE_DIR (RenderDoc
+# source root holding renderdoc/api/replay/renderdoc_replay.h; default
+# $RDOC_HOME/../src), RDOC_SIMPLE_BIN, RDOC_CXX (a clang++; never GCC),
+# RDOC_WEB_PAGE_W/H (default 900x760), RDOC_WEB_TIMEOUT, VK_DRIVER_FILES
+# (set it to lavapipe's lvp_icd.json for a deterministic capture),
+# RDOC_CAPTURE_MEMORY_MAX (systemd-run cap, default 8G; "0" disables).
+#
+# Verdict is the LAST stdout line:
+#   PASS  — page <p>: <n> action(s) replayed, framebuffer equal ...   exit 0
+#   FAIL  — ...                                                       exit 1
+#   ERROR — nothing was checked (<reason>)                            exit 2
+#
+# Receipt: <out>/receipt.env
+set -eu
+
+ROOT="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
+cd "$ROOT"
+
+CATALOG_DIR="examples/06_io/ui/web_catalog"
+CATALOG="$CATALOG_DIR/catalog.sdn"
+OUT_DIR="${RDOC_WEB_OUT_DIR:-build/renderdoc/simple-capture}"
+PAGE="overview"
+PAGE_W="${RDOC_WEB_PAGE_W:-900}"
+PAGE_H="${RDOC_WEB_PAGE_H:-760}"
+CAPTURE_TIMEOUT="${RDOC_WEB_TIMEOUT:-600}"
+TOOL_SRC="$ROOT/scripts/tool/renderdoc-replay-buffer-dump.cpp"
+RUN_SELFTEST_ONLY=0
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --page) shift; [ $# -gt 0 ] || { echo "--page needs a value" >&2; exit 2; }; PAGE="$1" ;;
+        --out) shift; [ $# -gt 0 ] || { echo "--out needs a value" >&2; exit 2; }; OUT_DIR="$1" ;;
+        --selftest) RUN_SELFTEST_ONLY=1 ;;
+        *) echo "usage: $0 [--page NAME] [--out DIR] [--selftest]" >&2; exit 2 ;;
+    esac
+    shift
+done
+
+# One memory cap over the whole run (two interpreter renders + a replay).
+if [ "${SIMPLE_RDOC_CAPTURE_INNER:-0}" != 1 ] && [ "$RUN_SELFTEST_ONLY" = 0 ] &&
+   [ "${RDOC_CAPTURE_MEMORY_MAX:-8G}" != 0 ] && command -v systemd-run >/dev/null 2>&1; then
+    SIMPLE_RDOC_CAPTURE_INNER=1
+    export SIMPLE_RDOC_CAPTURE_INNER
+    exec systemd-run --user --scope -q -p MemoryMax="${RDOC_CAPTURE_MEMORY_MAX:-8G}" \
+        sh "$0" --page "$PAGE" --out "$OUT_DIR"
+fi
+
+# ----------------------------------------------------------------- classifier
+# classify_capture <magic> <replay_status> <draws> <dispatches> <buffers> <equal>
+#   -> pass | <fail reason>. Every field must be positively present: an empty
+#   or non-numeric field is a failure, never a pass.
+classify_capture() {
+    [ "${1:-}" = pass ] || { echo "no-rdc-capture"; return; }
+    [ "${2:-}" = pass ] || { echo "replay-failed:${2:-missing}"; return; }
+    for n in "${3:-}" "${4:-}" "${5:-}" "${6:-}"; do
+        case "$n" in ''|*[!0-9]*) echo "malformed-replay-receipt"; return ;; esac
+    done
+    [ $(( $3 + $4 )) -gt 0 ] || { echo "zero-draw-calls"; return; }
+    [ "$5" -gt 0 ] || { echo "no-framebuffer-sized-buffer"; return; }
+    [ "$6" -gt 0 ] || { echo "framebuffer-differs-from-vulkan-render"; return; }
+    echo pass
+}
+
+selftest_classifier() {
+    fixtures=0
+    fails=0
+    t() {
+        fixtures=$((fixtures + 1))
+        [ "$2" = "$3" ] && return 0
+        fails=$((fails + 1))
+        echo "selftest FAIL: $1 (expected '$3', got '$2')" >&2
+    }
+    t good                "$(classify_capture pass pass 0 196 1 1)" pass
+    t draws-count-too     "$(classify_capture pass pass 3 0 1 1)" pass
+    t no-rdc              "$(classify_capture fail pass 0 196 1 1)" no-rdc-capture
+    t replay-crash        "$(classify_capture pass '' 0 196 1 1)" replay-failed:missing
+    t replay-refused      "$(classify_capture pass replay-failed 0 0 0 0)" replay-failed:replay-failed
+    t zero-actions        "$(classify_capture pass pass 0 0 1 1)" zero-draw-calls
+    t no-buffer           "$(classify_capture pass pass 0 196 0 0)" no-framebuffer-sized-buffer
+    t pixels-differ       "$(classify_capture pass pass 0 196 1 0)" framebuffer-differs-from-vulkan-render
+    t empty-field         "$(classify_capture pass pass 0 196 1 '')" malformed-replay-receipt
+    t non-numeric-field   "$(classify_capture pass pass 0 x 1 1)" malformed-replay-receipt
+    echo "selftest_classifier_fixtures=$fixtures selftest_classifier_failures=$fails"
+    [ "$fails" -eq 0 ] || { echo "FAIL — selftest: $fails of $fixtures classifier fixture(s) failed"; exit 1; }
+}
+selftest_classifier
+if [ "$RUN_SELFTEST_ONLY" = 1 ]; then
+    echo "PASS — selftest: classifier fixtures passed (compare fixtures need the replay tool; run without --selftest)"
+    exit 0
+fi
+
+# --------------------------------------------------------------- tool resolve
+. "$ROOT/scripts/lib/renderdoc-evidence-common.shs"
+
+mkdir -p "$OUT_DIR"
+OUT_DIR="$(CDPATH= cd -- "$OUT_DIR" && pwd)"
+RECEIPT="$OUT_DIR/receipt.env"
+: > "$RECEIPT"
+echo "receipt_schema=simple-renderdoc-capture-v1" >> "$RECEIPT"
+
+error_out() {
+    echo "check_status=error" >> "$RECEIPT"
+    echo "check_reason=$1" >> "$RECEIPT"
+    echo "ERROR — nothing was checked ($1)"
+    exit 2
+}
+fail_out() {
+    echo "check_status=fail" >> "$RECEIPT"
+    echo "check_reason=$1" >> "$RECEIPT"
+    echo "FAIL — page $PAGE: $1"
+    exit 1
+}
+
+[ -f "$CATALOG" ] || error_out "missing-catalog:$CATALOG"
+sed -n 's/^[[:space:]]*- tab:[[:space:]]*//p' "$CATALOG" | grep -qx "$PAGE" || error_out "unknown-page:$PAGE"
+HTML="$ROOT/$CATALOG_DIR/$PAGE.html"
+[ -f "$HTML" ] || error_out "missing-html:$HTML"
+
+RENDERDOC_HOME="$(rdoc_find_renderdoc_home "$ROOT" 2>/dev/null || true)"
+[ "$RENDERDOC_HOME" != "" ] || error_out "renderdoc-unavailable"
+RDOC_LIB="$(rdoc_renderdoc_lib_path "$RENDERDOC_HOME")"
+RDOC_SRC="${RDOC_SOURCE_DIR:-$RENDERDOC_HOME/../src}"
+[ -s "$RDOC_SRC/renderdoc/api/replay/renderdoc_replay.h" ] ||
+    error_out "renderdoc-replay-headers-unavailable:$RDOC_SRC"
+SIMPLE_BIN="${RDOC_SIMPLE_BIN:-$(rdoc_resolve_simple_interpreter "$ROOT" 2>/dev/null || true)}"
+[ "$SIMPLE_BIN" != "" ] && [ -x "$SIMPLE_BIN" ] || error_out "simple-binary-unavailable"
+
+CXX="${RDOC_CXX:-}"
+if [ "$CXX" = "" ]; then
+    for c in clang++ clang++-23 clang++-20; do
+        if command -v "$c" >/dev/null 2>&1; then CXX="$c"; break; fi
+    done
+fi
+[ "$CXX" != "" ] || error_out "clang++-unavailable"
+"$CXX" --version 2>/dev/null | grep -qi clang || error_out "compiler-is-not-clang:$CXX"
+
+{
+    echo "page=$PAGE"
+    echo "page_size=${PAGE_W}x${PAGE_H}"
+    echo "renderdoc_home=$RENDERDOC_HOME"
+    echo "simple_bin=$SIMPLE_BIN"
+    echo "vk_driver_files=${VK_DRIVER_FILES:-}"
+} >> "$RECEIPT"
+
+# ---------------------------------------------------------- replay tool build
+# -rdynamic exports renderdoc__replay__marker; without it librenderdoc treats
+# the process as a capture target and the replay segfaults in ContextReplayLog.
+TOOL="$OUT_DIR/renderdoc-replay-buffer-dump"
+set +e
+"$CXX" -std=c++17 -O1 -fuse-ld=lld -rdynamic -Wno-deprecated-literal-operator \
+    -DRENDERDOC_PLATFORM_LINUX \
+    -I"$RDOC_SRC/renderdoc" -I"$RDOC_SRC/renderdoc/api/replay" \
+    -L"$RDOC_LIB" -Wl,-rpath,"$RDOC_LIB" \
+    -o "$TOOL" "$TOOL_SRC" -lrenderdoc >"$OUT_DIR/tool-build.log" 2>&1
+build_rc=$?
+set -e
+[ "$build_rc" -eq 0 ] && [ -x "$TOOL" ] || error_out "replay-tool-build-failed:$OUT_DIR/tool-build.log"
+
+# Compare fixtures (fatal): 2x1 px, buffer bytes are B,G,R,A.
+fx="$OUT_DIR/selftest"
+rm -rf "${fx:?}"
+mkdir -p "$fx"
+printf 'P6\n2 1\n255\n\001\002\003\004\005\006' > "$fx/ref.ppm"
+printf '\003\002\001\377\006\005\004\377' > "$fx/equal.bin"
+printf '\003\002\001\377\006\005\007\377' > "$fx/differ.bin"
+printf '\003\002\001\377' > "$fx/short.bin"
+set +e
+"$TOOL" --compare "$fx/equal.bin" "$fx/ref.ppm" >"$fx/equal.out" 2>&1; rc_equal=$?
+"$TOOL" --compare "$fx/differ.bin" "$fx/ref.ppm" >"$fx/differ.out" 2>&1; rc_differ=$?
+"$TOOL" --compare "$fx/short.bin" "$fx/ref.ppm" >"$fx/short.out" 2>&1; rc_short=$?
+set -e
+if [ "$rc_equal" != 0 ] || [ "$rc_differ" != 1 ] || [ "$rc_short" != 2 ] ||
+   ! grep -qx 'compare_mismatch_pixels=1' "$fx/differ.out"; then
+    echo "FAIL — selftest: compare fixtures (equal rc=$rc_equal want 0, differ rc=$rc_differ want 1, short rc=$rc_short want 2)"
+    exit 1
+fi
+echo "selftest_compare_fixtures=3 selftest_compare_failures=0"
+
+# ------------------------------------------- (1) reference: plain Vulkan render
+REF_PPM="$OUT_DIR/$PAGE.vulkan.ppm"
+rm -f "$REF_PPM"
+try=1
+while :; do
+    set +e
+    SIMPLE_EXECUTION_MODE=interpreter SIMPLE_TIMEOUT_SECONDS=0 \
+    SIMPLE_2D_BACKEND=vulkan SIMPLE_2D_BACKEND_STRICT=1 SIMPLE_VK_READBACK=native \
+        timeout "$CAPTURE_TIMEOUT" "$SIMPLE_BIN" run examples/06_io/ui/web_render_page_ppm.spl \
+        "$HTML" "$REF_PPM" "$PAGE_W" "$PAGE_H" >"$OUT_DIR/reference.log" 2>&1
+    set -e
+    grep -q "unavailable (strict mode)" "$OUT_DIR/reference.log" || break
+    [ "$try" -lt 4 ] || break
+    try=$((try + 1))
+    sleep 5
+done
+echo "reference_attempts=$try" >> "$RECEIPT"
+[ -s "$REF_PPM" ] && grep -q "backend_reported=vulkan" "$OUT_DIR/reference.log" ||
+    error_out "vulkan-reference-render-unavailable:$OUT_DIR/reference.log"
+
+# ------------------------------------------ (2) capture under the RenderDoc layer
+CAP_DIR="$OUT_DIR/capture"
+RDC="$OUT_DIR/$PAGE.simple.rdc"
+rm -f "$RDC"
+set +e
+(
+    RDOC_SIMPLE_PROG="$ROOT/src/app/test/renderdoc_web_page_capture.spl" \
+    RDOC_SIMPLE_BIN="$SIMPLE_BIN" \
+    RDOC_HTML_PATH="$HTML" \
+    RDOC_SCENE="web-catalog-$PAGE" \
+    PAGE_W="$PAGE_W" PAGE_H="$PAGE_H" \
+    SIMPLE_2D_BACKEND=vulkan SIMPLE_2D_BACKEND_STRICT=1 SIMPLE_VK_READBACK=native \
+    SIMPLE_TIMEOUT_SECONDS=0 \
+    rdoc_capture_simple_vulkan "$ROOT" "$RENDERDOC_HOME" "$CAP_DIR"
+) >"$OUT_DIR/capture.log" 2>&1
+set -e
+found="$(find "$CAP_DIR" -type f -name '*.rdc' 2>/dev/null | sed -n 1p)"
+[ -n "$found" ] && cp "$found" "$RDC"
+magic=fail
+if [ -s "$RDC" ] && [ "$(dd if="$RDC" bs=4 count=1 2>/dev/null || true)" = "RDOC" ]; then magic=pass; fi
+{
+    echo "simple_rdc=$RDC"
+    echo "simple_rdc_bytes=$(wc -c < "$RDC" 2>/dev/null || echo 0)"
+    echo "simple_rdc_magic=$magic"
+} >> "$RECEIPT"
+
+# --------------------------------------------------- (3) replay + pixel compare
+REPLAY_ENV="$OUT_DIR/replay.env"
+: > "$REPLAY_ENV"
+DUMP_DIR="$OUT_DIR/replay"
+rm -rf "${DUMP_DIR:?}"
+mkdir -p "$DUMP_DIR"
+equal=0
+if [ "$magic" = pass ]; then
+    set +e
+    timeout "$CAPTURE_TIMEOUT" "$TOOL" "$RDC" $((PAGE_W * PAGE_H * 4)) "$DUMP_DIR" \
+        >"$REPLAY_ENV" 2>"$OUT_DIR/replay.log"
+    replay_rc=$?
+    set -e
+    echo "replay_exit=$replay_rc" >> "$RECEIPT"
+    cat "$REPLAY_ENV" >> "$RECEIPT"
+    for buf in "$DUMP_DIR"/buffer-*.bin; do
+        [ -f "$buf" ] || continue
+        set +e
+        "$TOOL" --compare "$buf" "$REF_PPM" >"$buf.compare" 2>&1
+        cmp_rc=$?
+        set -e
+        sed "s|^|$(basename "$buf")_|" "$buf.compare" >> "$RECEIPT"
+        [ "$cmp_rc" -eq 0 ] && equal=$((equal + 1))
+    done
+fi
+field() { sed -n "s/^$1=//p" "$REPLAY_ENV" | sed -n 1p; }
+draws="$(field replay_draws)"
+dispatches="$(field replay_dispatches)"
+buffers="$(field replay_buffers)"
+echo "framebuffers_equal=$equal" >> "$RECEIPT"
+
+verdict="$(classify_capture "$magic" "$(field replay_status)" "$draws" "$dispatches" "$buffers" "$equal")"
+[ "$verdict" = pass ] || fail_out "$verdict (receipt $RECEIPT)"
+echo "check_status=pass" >> "$RECEIPT"
+echo "PASS — page $PAGE: $((draws + dispatches)) action(s) replayed ($draws draw, $dispatches dispatch), framebuffer equal to the Vulkan render (${PAGE_W}x${PAGE_H}, 0 differing pixels)"

@@ -1,0 +1,136 @@
+# Real Ed25519 authority and Linux-backed shared journal. Windows provider
+# responses are explicitly scripted: no Windows native-host qualification.
+use test.fixtures.daemon_sdk.distributed_authority_verification_fixture_v2.*
+use test.fixtures.orchestration.simple_container_windows_adapter_fixture_v2.*
+use std.nogc_async_mut.container.api_v2.SimpleContainerOwnerV2
+use std.nogc_async_mut.container.service_v2.*
+use std.nogc_async_mut.container.providers.windows.simple_container_adapter_v2.WindowsServiceInventorySampleV2
+use std.nogc_async_mut.container.providers.windows.docker_contract_v1.WindowsDockerScriptedResultV1
+use std.nogc_async_mut.container.providers.windows.docker_scope_v2.windows_docker_scoped_create_v2
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.*
+use std.nogc_sync_mut.orchestration.local_authority_policy_v1.LocalAuthorityPolicyV1
+use std.common.contracts.orchestration.host_capacity_v1.*
+use std.common.contracts.orchestration.host_reservation_codec_v1.*
+use std.common.contracts.orchestration.host_execute_request_v2.*
+use std.common.contracts.container.execution_v2.*
+use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.distributed_authority_snapshot_create_v2
+use std.nogc_sync_mut.daemon_sdk.distributed_grant_verification_v2.{distributed_grant_signature_message_v2,
+    distributed_approval_signature_message_v2}
+use std.common.contracts.distributed_control_codec_v2.{distributed_encode_operation_v2, distributed_encode_grant_v2}
+use std.common.crypto.ed25519.pure_ed25519_sign_from_seed_v1
+use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_exists}
+use std.nogc_sync_mut.io_runtime.dir_remove
+
+pub struct HostWindowsProgressFixtureV4:
+    root: text
+    owner: HostCapacityOwnerV1
+    container: SimpleContainerOwnerV2
+    envelope: HostExecuteRequestV2
+    policy: LocalAuthorityPolicyV1
+    provider_digest: text
+    context: HostReservationAuthorizationContextV1
+
+var windows_progress_roots_v4: [text] = []
+
+pub fn host_windows_progress_sweep_v4():
+    for root in windows_progress_roots_v4:
+        if file_exists(root):
+            val removed = dir_remove(root, true)
+    windows_progress_roots_v4 = []
+
+pub fn host_windows_progress_clock_v4() -> HostReservationAuthorizationContextV1:
+    HostReservationAuthorizationContextV1(grant_clock: 1000, monotonic_ms: 1000,
+        policy_revision: 4, revocation_epoch: 2, session_generation: 3)
+
+pub fn host_windows_progress_script_v4() -> [WindowsDockerScriptedResultV1]:
+    val created = windows_docker_scoped_create_v2(windows_adapter_policy_fixture_v2(),
+        windows_adapter_native_request_fixture_v2(), windows_adapter_scope_fixture_v2()).unwrap()
+    val id = windows_adapter_native_id_fixture_v2()
+    # prepare2, create5, start5, independent inspect2. Every command is checked
+    # by the real scripted provider before its cursor can advance.
+    [windows_adapter_engine_fixture_v2(), windows_adapter_image_fixture_v2(),
+        windows_adapter_engine_fixture_v2(), windows_adapter_image_fixture_v2(),
+        WindowsDockerScriptedResultV1(operation: "create", program: created.program, args: created.args,
+            stdout: id + "\n", stderr: "", exit_code: 0),
+        windows_adapter_engine_fixture_v2(), windows_adapter_inspect_fixture_v2("created"),
+        windows_adapter_engine_fixture_v2(), windows_adapter_inspect_fixture_v2("created"),
+        windows_adapter_response_fixture_v2("start", ["start", id], id + "\n"),
+        windows_adapter_engine_fixture_v2(), windows_adapter_inspect_fixture_v2("running"),
+        windows_adapter_engine_fixture_v2(), windows_adapter_inspect_fixture_v2("running")]
+
+pub fn host_windows_progress_fixture_v4() -> HostWindowsProgressFixtureV4:
+    val request = windows_adapter_request_fixture_v2()
+    val scope = windows_adapter_scope_fixture_v2()
+    val fence = container_scope_fence_id_v2(scope).unwrap()
+    val pin = windows_adapter_observation_fixture_v2().provider_identity_digest
+    val initial = windows_adapter_owner_fixture_v2(host_windows_progress_script_v4(),
+        [WindowsServiceInventorySampleV2(entries: [], error: ""), WindowsServiceInventorySampleV2(entries: [], error: "")])
+    val refreshed = simple_container_inventory_service_v2(initial)
+    assert(refreshed.error == "")
+    assert(refreshed.inventory.unwrap().len() == 0)
+    val activated = simple_container_complete_quarantine_v2(refreshed.owner, windows_adapter_admission_fixture_v2([]))
+    assert(activated.error == "")
+    assert(activated.admitted)
+    val root = secure_temp_dir("/tmp", "host-windows-progress-v4").unwrap()
+    windows_progress_roots_v4.push(root)
+    val capacity = HostCapacityV1(physical_host_id: scope.physical_host_id, authority_id: "authority",
+        boot_id: fence, provider_generation: scope.provider_generation, cpu_millis: 4000,
+        memory_bytes: 1073741824, exclusive_devices: [])
+    # This is deliberately the shared Linux-backed journal, not Windows store IO.
+    val owner = host_capacity_owner_open_v1(root + "/journal", capacity, "c".repeat(64), 64, true).unwrap()
+    val reservation = HostReservationV1(id: "reservation-operation-a", operation_id: request.plan.operation_id,
+        payload_digest: "0".repeat(64), service_scope_id: scope.service_scope_id, assignment_generation: 1,
+        nonce: "reservation-nonce-operation-a", cpu_millis: 2000, memory_bytes: 536870912,
+        exclusive_devices: [], prepare_deadline_ms: 8000, state: HostReservationStateV1.Prepared)
+    val intent = host_reservation_bind_intent_v1(HostReservationIntentV1(physical_host_id: scope.physical_host_id,
+        fence: HostLedgerFenceV1(authority_id: "authority", boot_id: fence, provider_generation: scope.provider_generation, revision: 1),
+        plan_digest: container_execution_plan_digest_v2(request.plan).unwrap(), reservation: reservation)).unwrap()
+    val base = verification_fixture()
+    var operation = base.request
+    operation.id = request.plan.operation_id
+    operation.host_id = scope.physical_host_id
+    operation.operation = "host_reservation_v1"
+    operation.payload_digest = intent.reservation.payload_digest
+    operation.environment_digest = pin
+    operation.memory_bytes = 536870912
+    operation.duration_ms = 5000
+    var grant = base.signed.grant
+    grant.host_id = scope.physical_host_id
+    grant.environment_digest = pin
+    grant.maximum_memory_bytes = 536870912
+    grant.maximum_duration_ms = 5000
+    grant.expires_at = 10000
+    grant.operations = ["host_reservation_v1"]
+    val context = host_windows_progress_clock_v4()
+    val reserved = host_capacity_owner_prepare_v1(owner, intent, operation, grant, context).unwrap()
+    val receipt = host_capacity_owner_prepared_receipt_v1(reserved, intent, operation, grant, context).unwrap()
+    grant.operations = ["host_execute_v1"]
+    var signed = base.signed
+    signed.grant = grant
+    signed.signature = pure_ed25519_sign_from_seed_v1(verification_seed(1), distributed_grant_signature_message_v2(signed).unwrap()).signature
+    var execution = operation
+    execution.operation = "host_execute_v1"
+    var approval = base.approval
+    approval.grant_digest = sha256_text(distributed_encode_grant_v2(grant).unwrap())
+    approval.request_digest = sha256_text(distributed_encode_operation_v2(execution).unwrap())
+    approval.expires_at = 9000
+    approval.signature = pure_ed25519_sign_from_seed_v1(verification_seed(65), distributed_approval_signature_message_v2(approval).unwrap()).signature
+    var issuer = base.issuer
+    var approver = base.approver
+    issuer.host_id = scope.physical_host_id
+    approver.host_id = scope.physical_host_id
+    issuer.maximum_memory_bytes = 536870912
+    approver.maximum_memory_bytes = 536870912
+    issuer.maximum_duration_ms = 5000
+    approver.maximum_duration_ms = 5000
+    issuer.expires_at = 30000
+    approver.expires_at = 30000
+    issuer.operations = ["host_execute_v1"]
+    approver.operations = ["host_execute_v1"]
+    val snapshot = distributed_authority_snapshot_create_v2([issuer, approver], 7, 4, 2).unwrap()
+    HostWindowsProgressFixtureV4(root: root, owner: reserved, container: activated.owner,
+        envelope: HostExecuteRequestV2(intent: intent, operation: operation, receipt: receipt,
+            execution: request, signed: signed, approval: approval),
+        policy: LocalAuthorityPolicyV1(snapshot: snapshot, session_generation: 3, source_digest: "f".repeat(64)),
+        provider_digest: pin, context: context)

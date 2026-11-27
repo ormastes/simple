@@ -1,0 +1,147 @@
+# OCI -> Simple Container workload projection and OCI export (pure, no IO).
+#
+# OCI portability is not OS/runtime interchangeability (design §16.5.4): the
+# projection names its target backend EXPLICITLY (no implicit provider
+# selection) and refuses every OCI field the backend cannot honour — Linux
+# namespaces/cgroups/seccomp/devices/capabilities/hooks/mounts for a
+# non-Linux backend such as macos-seatbelt — instead of silently dropping
+# enforcement. Export emits only representable runtime-spec data and names
+# every Simple Container semantic it could not carry.
+#
+# The projection is an input to the ONE container facade (std.container); it
+# owns no attempt, lifecycle, journal or provider state.
+
+use std.common.json.value.{JsonValue, json_value_object_from, json_value_str_array, json_value_serialize}
+use std.common.oci.descriptor_v1.{oci_digest_valid_v1}
+use std.common.oci.image_v1.{OciImageConfigV1}
+use std.common.oci.runtime_v1.{OciBundleV1}
+
+pub struct OciWorkloadV1:
+    """Provider-neutral workload facts derived from an OCI artifact."""
+    backend: text
+    execution_os: text
+    image_digest: text
+    argv: [text]
+    env: [text]
+    working_dir: text
+    user: text
+    rootfs_path: text
+    rootfs_readonly: bool
+
+pub struct OciExportV1:
+    config_json: text
+    lost_semantics: [text]
+
+# Exhaustive backend -> OCI platform os mapping. An unknown backend is
+# rejected; there is no default branch reinterpreting it as Linux/Docker.
+pub fn oci_backend_platform_os_v1(backend: text) -> Result<text, text>:
+    if backend == "linux-podman" or backend == "linux-docker" or backend == "linux-runc":
+        return Ok("linux")
+    if backend == "macos-seatbelt":
+        return Ok("darwin")
+    if backend == "freebsd-jail":
+        return Ok("freebsd")
+    if backend == "windows-docker-process":
+        return Ok("windows")
+    if backend == "simpleos-native":
+        return Ok("simpleos")
+    Err("oci-backend-unknown: " + backend)
+
+# "" when `user` is empty or numeric "uid" / "uid:gid". Names need a passwd
+# lookup inside the image, which this pure layer cannot perform.
+fn _oci_user_numeric_v1(user: text) -> bool:
+    if user == "":
+        return true
+    val parts = user.split(":")
+    if parts.len() > 2:
+        return false
+    for part in parts:
+        if part == "":
+            return false
+        var i = 0
+        while i < part.len():
+            if not "0123456789".contains(part.substring(i, i + 1)):
+                return false
+            i = i + 1
+    true
+
+pub fn oci_bundle_to_workload_v1(bundle: OciBundleV1, backend: text) -> Result<OciWorkloadV1, text>:
+    val platform_os = oci_backend_platform_os_v1(backend)?
+    val config = bundle.config
+    if platform_os != "linux":
+        if config.linux_only_fields.len() > 0:
+            return Err("oci-linux-runtime-field-unsupported: " + backend + ": " + config.linux_only_fields[0])
+        # Non-Linux native backends have no mount namespace to place mounts in.
+        if config.mounts.len() > 0:
+            return Err("oci-runtime-mounts-unsupported: " + backend)
+        if config.hooks_present:
+            return Err("oci-runtime-hooks-unsupported: " + backend)
+    var foreign = ""
+    for section in config.other_platform_sections:
+        if not (platform_os == "windows" and section == "windows") and foreign == "":
+            foreign = section
+    if foreign != "":
+        return Err("oci-runtime-platform-section-unsupported: " + backend + ": " + foreign)
+    Ok(OciWorkloadV1(backend: backend, execution_os: platform_os, image_digest: bundle.digest,
+        argv: config.args, env: config.env, working_dir: config.cwd,
+        user: config.uid.to_text() + ":" + config.gid.to_text(),
+        rootfs_path: bundle.rootfs_path, rootfs_readonly: config.root_readonly))
+
+pub fn oci_image_to_workload_v1(config: OciImageConfigV1, image_digest: text, backend: text,
+        rootfs_path: text) -> Result<OciWorkloadV1, text>:
+    val platform_os = oci_backend_platform_os_v1(backend)?
+    if config.os != platform_os:
+        return Err("oci-image-platform-mismatch: image " + config.os + ", backend " + backend)
+    if not oci_digest_valid_v1(image_digest):
+        return Err("oci-image-digest-invalid")
+    var argv: [text] = []
+    for part in config.entrypoint:
+        argv.push(part)
+    for part in config.cmd:
+        argv.push(part)
+    if argv.len() == 0 or argv[0] == "":
+        return Err("oci-image-command-empty")
+    if not _oci_user_numeric_v1(config.user):
+        return Err("oci-image-user-name-unresolved")
+    var working_dir = config.working_dir
+    if working_dir == "":
+        working_dir = "/"
+    Ok(OciWorkloadV1(backend: backend, execution_os: platform_os, image_digest: image_digest,
+        argv: argv, env: config.env, working_dir: working_dir, user: config.user,
+        rootfs_path: rootfs_path, rootfs_readonly: true))
+
+fn _oci_user_json_v1(user: text) -> JsonValue:
+    var uid = 0
+    var gid = 0
+    if user != "":
+        val parts = user.split(":")
+        uid = parts[0].to_i64()
+        if parts.len() == 2:
+            gid = parts[1].to_i64()
+    json_value_object_from([("uid", JsonValue.Int(uid)), ("gid", JsonValue.Int(gid))])
+
+# Export a workload as runtime-spec config.json. Only process/root data is
+# representable; backend selection, attempt/provider identity and any
+# backend-specific enforcement are reported as lost, never implied.
+pub fn oci_export_v1(workload: OciWorkloadV1) -> Result<OciExportV1, text>:
+    val platform_os = oci_backend_platform_os_v1(workload.backend)?
+    if platform_os != workload.execution_os:
+        return Err("oci-export-backend-os-mismatch")
+    if not _oci_user_numeric_v1(workload.user):
+        return Err("oci-export-user-not-numeric")
+    if workload.argv.len() == 0:
+        return Err("oci-export-command-empty")
+    val process = json_value_object_from([("args", json_value_str_array(workload.argv)),
+        ("env", json_value_str_array(workload.env)), ("cwd", JsonValue.Str(workload.working_dir)),
+        ("user", _oci_user_json_v1(workload.user))])
+    val root = json_value_object_from([("path", JsonValue.Str(workload.rootfs_path)),
+        ("readonly", JsonValue.Bool(workload.rootfs_readonly))])
+    val document = json_value_object_from([("ociVersion", JsonValue.Str("1.0.2")),
+        ("process", process), ("root", root)])
+    var lost: [text] = ["backend-selection: " + workload.backend, "attempt-and-provider-identity"]
+    if workload.image_digest != "":
+        lost.push("image-digest-binding: " + workload.image_digest)
+    if platform_os != "linux":
+        lost.push("native-sandbox-enforcement: " + workload.backend)
+        lost.push("root-path-is-not-a-private-root: " + workload.backend)
+    Ok(OciExportV1(config_json: json_value_serialize(document), lost_semantics: lost))

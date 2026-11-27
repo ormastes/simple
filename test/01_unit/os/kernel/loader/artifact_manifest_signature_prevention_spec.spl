@@ -1,0 +1,135 @@
+# Purpose and audience: prevention specification for bug #18 (trust-anchor rotation, conflict rejection, and canonical field binding).
+# @req REQ-SSPEC-OS
+
+"""Prevent trust-anchor overwrite, stale revoked-key reuse, and manifest metadata tampering after signing."""
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.common.crypto.ed25519.{pure_ed25519_keypair_from_seed}
+use os.kernel.types.capability_types.{CAP_RIGHT_ADMIN}
+use os.kernel.loader.artifact_manifest.{
+    ManifestTrustAnchor,
+    manifest_kind_elf,
+    manifest_for_kind,
+    manifest_with_entrypoint,
+    manifest_with_requested_rights,
+    manifest_with_signature,
+    manifest_sha256_hex,
+    manifest_reason_ok,
+    manifest_reason_content_hash_mismatch,
+    manifest_reason_invalid_trust_anchor,
+    manifest_reason_untrusted_signer,
+    manifest_reason_signature_verification_failed,
+    manifest_trust_anchor_register,
+    manifest_trust_anchor_revoke,
+    manifest_trust_anchors_clear,
+    manifest_trust_anchor_count,
+    manifest_sign_ed25519,
+    manifest_verify_signature,
+    manifest_verify_signature_with_anchors
+}
+
+fn _prev_seed_a() -> [u8]:
+    [
+        0x9du8, 0x61u8, 0xb1u8, 0x9du8, 0xefu8, 0xfdu8, 0x5au8, 0x60u8,
+        0xbau8, 0x84u8, 0x4au8, 0xf4u8, 0x92u8, 0xecu8, 0x2cu8, 0xc4u8,
+        0x44u8, 0x49u8, 0xc5u8, 0x69u8, 0x7bu8, 0x32u8, 0x69u8, 0x19u8,
+        0x70u8, 0x3bu8, 0xacu8, 0x03u8, 0x1cu8, 0xaeu8, 0x7fu8, 0x60u8
+    ]
+
+fn _prev_seed_b() -> [u8]:
+    [
+        0x4cu8, 0xcdu8, 0x08u8, 0x9bu8, 0x28u8, 0xffu8, 0x96u8, 0xdau8,
+        0x9du8, 0xb6u8, 0xc3u8, 0x46u8, 0xecu8, 0x11u8, 0x4eu8, 0x0fu8,
+        0x5bu8, 0x8au8, 0x31u8, 0x9fu8, 0x35u8, 0xabu8, 0xa6u8, 0x24u8,
+        0xdau8, 0x8cu8, 0xf6u8, 0xedu8, 0x4fu8, 0xb8u8, 0xa6u8, 0xfbu8
+    ]
+
+describe "artifact manifest Ed25519 prevention (#18)":
+    it "rejects conflicting key_id overwrite and enforces revocation during key rotation":
+        step("register key-a, reject unrevoked overwrite by key-b, revoke key-a, rotate to key-b, and verify old sig fails")
+        manifest_trust_anchors_clear()
+        val seed_a = _prev_seed_a()
+        val seed_b = _prev_seed_b()
+        val pk_a = pure_ed25519_keypair_from_seed(seed_a).1
+        val pk_b = pure_ed25519_keypair_from_seed(seed_b).1
+
+        expect(manifest_trust_anchor_register("prod-release", pk_a).ok).to_equal(true)
+        val conflict = manifest_trust_anchor_register("prod-release", pk_b)
+        expect(conflict.ok).to_equal(false)
+        expect(conflict.reason).to_equal(manifest_reason_invalid_trust_anchor())
+        expect(manifest_trust_anchor_count()).to_equal(1)
+
+        val payload: [u8] = [0x01u8, 0x02u8, 0x03u8, 0x04u8]
+        val digest = manifest_sha256_hex(payload)
+        val base_m = manifest_with_signature(
+            manifest_with_entrypoint(manifest_for_kind(manifest_kind_elf()), "init"),
+            "",
+            [digest]
+        )
+        val signed_a = manifest_sign_ed25519(base_m, "prod-release", seed_a, pk_a, digest)
+        expect(manifest_verify_signature(signed_a, digest).ok).to_equal(true)
+
+        expect(manifest_trust_anchor_revoke("prod-release")).to_equal(true)
+        expect(manifest_trust_anchor_count()).to_equal(0)
+        expect(manifest_trust_anchor_register("prod-release", pk_b).ok).to_equal(true)
+
+        val stale_chk = manifest_verify_signature(signed_a, digest)
+        expect(stale_chk.ok).to_equal(false)
+        expect(stale_chk.reason).to_equal(manifest_reason_signature_verification_failed())
+
+        val signed_b = manifest_sign_ed25519(base_m, "prod-release", seed_b, pk_b, digest)
+        expect(manifest_verify_signature(signed_b, digest).ok).to_equal(true)
+        manifest_trust_anchors_clear()
+
+    it "binds signature to requested rights and image digest using explicit anchor pinning":
+        step("verify canonical SAM1 signing rejects escalated rights and substituted image digests even with valid hash")
+        val seed_a = _prev_seed_a()
+        val pk_a = pure_ed25519_keypair_from_seed(seed_a).1
+        val seed_b = _prev_seed_b()
+        val pk_b = pure_ed25519_keypair_from_seed(seed_b).1
+
+        val digest_a = manifest_sha256_hex([0x10u8, 0x20u8])
+        val digest_b = manifest_sha256_hex([0x30u8, 0x40u8])
+        val base_m = manifest_with_signature(
+            manifest_with_entrypoint(manifest_for_kind(manifest_kind_elf()), "worker"),
+            "",
+            [digest_a]
+        )
+        val signed = manifest_sign_ed25519(base_m, "pinned-a", seed_a, pk_a, digest_a)
+        val anchors = [ManifestTrustAnchor(key_id: "pinned-a", public_key: pk_a)]
+
+        expect(manifest_verify_signature_with_anchors(signed, digest_a, anchors).ok).to_equal(true)
+
+        val escalated = manifest_with_requested_rights(signed, CAP_RIGHT_ADMIN)
+        val esc_chk = manifest_verify_signature_with_anchors(escalated, digest_a, anchors)
+        expect(esc_chk.ok).to_equal(false)
+        expect(esc_chk.reason).to_equal(manifest_reason_signature_verification_failed())
+
+        val swapped_digest = manifest_verify_signature_with_anchors(signed, digest_b, anchors)
+        expect(swapped_digest.ok).to_equal(false)
+        expect(swapped_digest.reason).to_equal(manifest_reason_content_hash_mismatch())
+
+        val wrong_anchors = [ManifestTrustAnchor(key_id: "pinned-b", public_key: pk_b)]
+        val wrong_chk = manifest_verify_signature_with_anchors(signed, digest_a, wrong_anchors)
+        expect(wrong_chk.ok).to_equal(false)
+        expect(wrong_chk.reason).to_equal(manifest_reason_untrusted_signer())
+
+    it "populates and signs canonical hashes even when initial manifest content_hashes is empty or stale":
+        step("sign a manifest with empty content_hashes and re-sign a manifest with stale hash")
+        val seed_a = _prev_seed_a()
+        val pk_a = pure_ed25519_keypair_from_seed(seed_a).1
+        val anchors = [ManifestTrustAnchor(key_id: "pinned-a", public_key: pk_a)]
+        val digest_a = manifest_sha256_hex([0xAAu8, 0xBBu8])
+        val digest_b = manifest_sha256_hex([0xCCu8, 0xDDu8])
+
+        val empty_hashes_m = manifest_with_entrypoint(manifest_for_kind(manifest_kind_elf()), "fresh")
+        val signed_fresh = manifest_sign_ed25519(empty_hashes_m, "pinned-a", seed_a, pk_a, digest_a)
+        expect(signed_fresh.content_hashes.len()).to_equal(1)
+        expect(signed_fresh.content_hashes[0]).to_equal(digest_a)
+        expect(manifest_verify_signature_with_anchors(signed_fresh, digest_a, anchors).ok).to_equal(true)
+
+        val stale_m = manifest_with_signature(empty_hashes_m, "", [digest_b])
+        val resigned = manifest_sign_ed25519(stale_m, "pinned-a", seed_a, pk_a, digest_a)
+        expect(resigned.content_hashes).to_equal([digest_a])
+        expect(manifest_verify_signature_with_anchors(resigned, digest_a, anchors).ok).to_equal(true)

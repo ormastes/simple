@@ -1,0 +1,171 @@
+"""
+## Static Complexity Compare CLI and Perf Main Routing Specification
+
+Verifies `simple perf compare --baseline <file> --current <file> [--format sdn|json|text]`
+and `static-compare` while preserving existing test-DB `record|compare|explain|baseline`
+subcommands and exit codes (`0|1|2`).
+"""
+
+use std.spec.{describe, context, it, step, expect}
+use std.common.string_core.{char_from_code}
+use app.io.file_ops.{file_write, file_remove, file_exists}
+use app.perf.main.{run_perf_cli}
+use app.perf.static_complexity_cli.{
+    is_static_complexity_compare_args,
+    execute_static_complexity_compare,
+    run_static_complexity_compare_cli
+}
+use compiler.semantics.perf.perf_analysis_contracts_v1.{
+    PerfResourceDimension, BoundRelation, BoundRegime, AnalysisResultStatus, BoundOrigin
+}
+use compiler.semantics.perf.complexity_baseline_diff_v1.{
+    PerfBaselineEntryV1, PerfBaselineSnapshotV1,
+    serialize_baseline_sdn_v1, serialize_baseline_json_v1
+}
+
+fn _cli_entry(fn_id: text, sem_rev: text, callee_hash: text, bound_expr: text, degree: i64) -> PerfBaselineEntryV1:
+    PerfBaselineEntryV1(
+        function_id: fn_id,
+        resource: PerfResourceDimension.Work,
+        function_semantic_revision: sem_rev,
+        callee_summary_hashes: [callee_hash],
+        bound_expression: bound_expr,
+        max_degree: degree,
+        log_power: 0,
+        relation: BoundRelation.UpperBound,
+        regime: BoundRegime.WorstCase,
+        status: AnalysisResultStatus.Complete,
+        origin: BoundOrigin.Inferred,
+        unresolved_terms: [],
+        is_hot_path: true
+    )
+
+fn _cli_snapshot(rev: text, model_ver: text, entry: PerfBaselineEntryV1) -> PerfBaselineSnapshotV1:
+    PerfBaselineSnapshotV1(
+        schema_version: 1,
+        source_revision: rev,
+        analyzer_version: "perf-analyzer-v1.0",
+        model_version: model_ver,
+        numeric_policy: "checked-i64",
+        target_config: "x86_64-pc-windows-msvc",
+        analysis_profile: "perf",
+        entries: [entry]
+    )
+
+describe "Static complexity compare CLI and perf main routing":
+    """Ensure static complexity baseline diffs coexist cleanly with test-DB perf subcommands."""
+
+    context "Route dispatch compatibility":
+        """Route --current / static report files to static compare without breaking DB compare."""
+
+        it "distinguishes static complexity compare flags from test-DB compare arguments":
+            """Check is_static_complexity_compare_args across static and DB invocation forms."""
+            step("Accept --baseline/--current flag forms as static compare")
+            expect(is_static_complexity_compare_args(["--baseline", "base.sdn", "--current", "curr.sdn"])).to_equal(true)
+            expect(is_static_complexity_compare_args(["--baseline=base.json", "--current=curr.json"])).to_equal(true)
+            expect(is_static_complexity_compare_args(["--baseline", "base.sdn"])).to_equal(true)
+
+            step("Keep positional and --run/--db forms on existing test-DB compare path")
+            expect(is_static_complexity_compare_args(["subject-a", "cohort-a", "12.5"])).to_equal(false)
+            expect(is_static_complexity_compare_args(["--baseline", "main", "--run", "run-7", "--db", "test.db"])).to_equal(false)
+            expect(is_static_complexity_compare_args([])).to_equal(false)
+
+        it "preserves existing test-DB CLI validation exit codes in run_perf_cli":
+            """Ensure record, positional compare, explain, and baseline promote still return exit code 2 on invalid input."""
+            step("Invoke legacy routes through run_perf_cli")
+            expect(run_perf_cli(["record", "subject-a", "cohort-a", "not-a-number"])).to_equal(2)
+            expect(run_perf_cli(["compare", "subject-a", "cohort-a", "0"])).to_equal(2)
+            expect(run_perf_cli(["baseline", "promote", "subject-a", ""])).to_equal(2)
+            expect(run_perf_cli(["unknown-subcommand"])).to_equal(2)
+
+    context "End-to-end static baseline comparison formats and exit codes":
+        """Verify exit codes 0, 1, and 2 and sdn/json/text outputs across source regression and C16 model change."""
+
+        it "returns exit code 1 and emits PERF-COST-002 across sdn, json, and text formats on source regression":
+            """Write SDN and JSON snapshots to temp files and verify source regression reporting."""
+            step("Write baseline O(n) and current O(n*m) snapshots")
+            val base_path = "build/perf_static_cli_test_base.sdn"
+            val curr_path = "build/perf_static_cli_test_curr.json"
+            val base_snap = _cli_snapshot("rev-1", "cost-model-v1.0", _cli_entry("count_for_all", "sem-1", "h1", "O(n)", 1))
+            val curr_snap = _cli_snapshot("rev-2", "cost-model-v1.0", _cli_entry("count_for_all", "sem-2", "h2", "O(n*m)", 2))
+            expect(file_write(base_path, serialize_baseline_sdn_v1(base_snap))).to_equal(true)
+            expect(file_write(curr_path, serialize_baseline_json_v1(curr_snap))).to_equal(true)
+
+            step("Check SDN, JSON, and text outputs via execute_static_complexity_compare and run_perf_cli")
+            val sdn_run = execute_static_complexity_compare(["--baseline", base_path, "--current", curr_path, "--format", "sdn"])
+            expect(sdn_run.0).to_equal(1)
+            expect(sdn_run.1).to_contain("PERF-COST-002")
+            expect(sdn_run.1).to_contain("Inferred work upper bound increased from O(n) to O(n*m)")
+
+            val json_run = execute_static_complexity_compare(["--baseline", base_path, "--current", curr_path, "--format", "json"])
+            expect(json_run.0).to_equal(1)
+            expect(json_run.1).to_start_with(char_from_code(123))
+            expect(json_run.1).to_contain("PERF-COST-002")
+
+            val text_run = execute_static_complexity_compare(["--baseline", base_path, "--current", curr_path, "--format", "text"])
+            expect(text_run.0).to_equal(1)
+            expect(text_run.1).to_contain("PERF-COST-002")
+
+            expect(run_perf_cli(["compare", "--baseline", base_path, "--current", curr_path, "--format", "sdn"])).to_equal(1)
+
+            if file_exists(base_path):
+                file_remove(base_path)
+            if file_exists(curr_path):
+                file_remove(curr_path)
+
+        it "returns exit code 0 with model_change and zero PERF-COST-002 when model_version changes on unchanged source (C16)":
+            """Verify C16 through CLI: model upgrade on unchanged function/callees passes CI gate with exit code 0."""
+            step("Write baseline and model-upgraded snapshots with identical function/callee revisions")
+            val base_path = "build/perf_static_cli_c16_base.sdn"
+            val curr_path = "build/perf_static_cli_c16_curr.sdn"
+            val base_snap = _cli_snapshot("rev-10", "cost-model-v1.0", _cli_entry("scan_groups", "sem-same", "callee-same", "O(n)", 1))
+            val curr_snap = _cli_snapshot("rev-10", "cost-model-v2.0", _cli_entry("scan_groups", "sem-same", "callee-same", "O(n^2)", 2))
+            expect(file_write(base_path, serialize_baseline_sdn_v1(base_snap))).to_equal(true)
+            expect(file_write(curr_path, serialize_baseline_sdn_v1(curr_snap))).to_equal(true)
+
+            val res = execute_static_complexity_compare(["--baseline", base_path, "--current", curr_path, "--format", "json"])
+            expect(res.0).to_equal(0)
+            expect(res.1).to_contain("model_change")
+            expect(res.1.contains("PERF-COST-002")).to_equal(false)
+            expect(run_perf_cli(["static-compare", "--baseline", base_path, "--current", curr_path])).to_equal(0)
+
+            if file_exists(base_path):
+                file_remove(base_path)
+            if file_exists(curr_path):
+                file_remove(curr_path)
+
+        it "returns exit code 2 on missing flags, nonexistent files, unknown formats, or malformed snapshots":
+            """Reject invalid CLI invocations cleanly without crashing."""
+            step("Verify missing --current, unknown --format, missing file, and malformed content all return 2")
+            expect(run_static_complexity_compare_cli(["--baseline", "only_base.sdn"])).to_equal(2)
+            expect(run_static_complexity_compare_cli(["--baseline", "nonexistent_a.sdn", "--current", "nonexistent_b.sdn"])).to_equal(2)
+
+            val bad_path = "build/perf_static_cli_bad.sdn"
+            expect(file_write(bad_path, "schema_version: 999\n")).to_equal(true)
+            expect(run_static_complexity_compare_cli(["--baseline", bad_path, "--current", bad_path])).to_equal(2)
+            expect(run_static_complexity_compare_cli(["--baseline", bad_path, "--current", bad_path, "--format", "xml"])).to_equal(2)
+            if file_exists(bad_path):
+                file_remove(bad_path)
+
+        it "parses --baseline=, --current=, and --format= flags with multi-byte UTF-8 paths without truncation":
+            """Ensure byte-offset slicing in static_complexity_cli preserves non-ASCII path characters."""
+            step("Write snapshots to UTF-8 paths and invoke --baseline= / --current= / --format=")
+            val utf8_base = "build/perf_static_cli_utf8_αβ_한글_base.sdn"
+            val utf8_curr = "build/perf_static_cli_utf8_αβ_한글_curr.sdn"
+            val snap_a = _cli_snapshot("rev-utf8-1", "cost-model-v1.0", _cli_entry("fn_αβ", "sem-1", "h1", "O(n)", 1))
+            val snap_b = _cli_snapshot("rev-utf8-2", "cost-model-v1.0", _cli_entry("fn_αβ", "sem-2", "h2", "O(n*m)", 2))
+            expect(file_write(utf8_base, serialize_baseline_sdn_v1(snap_a))).to_equal(true)
+            expect(file_write(utf8_curr, serialize_baseline_sdn_v1(snap_b))).to_equal(true)
+
+            val res = execute_static_complexity_compare([
+                "--baseline=" + utf8_base,
+                "--current=" + utf8_curr,
+                "--format=json"
+            ])
+            if file_exists(utf8_base):
+                file_remove(utf8_base)
+            if file_exists(utf8_curr):
+                file_remove(utf8_curr)
+            expect(res.0).to_equal(1)
+            expect(res.1).to_contain("PERF-COST-002")
+            expect(res.1).to_contain("fn_αβ")

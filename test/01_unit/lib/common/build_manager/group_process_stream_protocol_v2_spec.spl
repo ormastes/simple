@@ -1,0 +1,144 @@
+# @req GSTREAM-01 GSTREAM-02 GSTREAM-03
+# Pure protocol assertions; execution status is separate from source authorship.
+use std.spec.{describe, it, expect, fail}
+use std.common.build_manager.group_process_stream_protocol_v2.*
+use std.common.build_manager.group_process_protocol.{GroupProcessInputV1, GroupProcessRequestV1, GroupProcessLaunchV1, group_process_launch_validate_v1}
+use std.common.crypto.sha256.{sha256_text}
+
+fn stream_protocol_fixture_v2() -> GroupProcessStreamLaunchV2:
+    val program = "/opt/child"
+    val args = ["--plain", "argument\né%"]
+    val request = GroupProcessStreamRequestV2(program: program, producer_digest: "a".repeat(64),
+        args: args, environment: ["LANG=C.UTF-8"], directory: "/work/cwd",
+        inputs: [GroupProcessInputV1("/work/input", "b".repeat(64))], timeout_ms: 0,
+        broker_program: "/opt/broker", broker_digest: "c".repeat(64),
+        child_argv_digest: group_process_child_argv_digest_v2(program, args),
+        launch_deadline_unix_ms: 1900000000000)
+    GroupProcessStreamLaunchV2(root: "/work/owner", worker_id: "worker_1", generation: 7,
+        snapshot_digest: "d".repeat(64), cache_identity: "e".repeat(64),
+        memory_limit_bytes: 1048576, request: request, delegated_cgroup_path: "/sys/fs/cgroup/delegated")
+
+fn stream_protocol_error_v2(payload: text) -> text:
+    match group_process_stream_launch_decode_v2(payload):
+        case Ok(value):
+            fail("noncanonical stream payload was accepted")
+            ""
+        case Err(reason): reason
+
+describe "strict group stream profile V2":
+    it "binds independently specified canonical program and ordered argv bytes":
+        val expected = "SIMPLE-GROUP-STREAM-ARGV-2\n/opt/child\n2\n--plain\nargument%0Aé%25\n"
+        val launch = stream_protocol_fixture_v2()
+        expect(launch.request.child_argv_digest).to_equal(sha256_text(expected))
+        expect(group_process_stream_launch_validate_v2(launch)).to_equal("")
+        val wire = group_process_stream_launch_encode_v2(launch)
+        expect(wire.starts_with("SIMPLE-GROUP-STREAM-2\nenforce\n")).to_equal(true)
+        match group_process_stream_launch_decode_v2(wire):
+            case Err(reason): fail("valid stream launch failed: {reason}")
+            case Ok(decoded):
+                expect(decoded.request.args).to_equal(launch.request.args)
+                expect(decoded.request.directory).to_equal("/work/cwd")
+                expect(decoded.transport_generation).to_equal(0)
+                expect(group_process_stream_launch_encode_v2(decoded)).to_equal(wire)
+
+    it "binds actual transport generation and admission deadline into owner identity":
+        var launch = stream_protocol_fixture_v2()
+        val original = group_process_stream_identity_v2(launch)
+        launch.transport_generation = 34
+        val prepared = group_process_stream_identity_v2(launch)
+        expect(prepared == original).to_equal(false)
+        var request = launch.request
+        request.launch_deadline_unix_ms = request.launch_deadline_unix_ms + 1
+        launch.request = request
+        expect(group_process_stream_identity_v2(launch) == prepared).to_equal(false)
+        # Admission expiry is independent from the signed workload lifetime.
+        expect(launch.request.timeout_ms).to_equal(0)
+        expect(group_process_stream_launch_validate_v2(launch)).to_equal("")
+
+    it "round-trips full positive i64 transport generations without changing V1 integer parsing":
+        var launch = stream_protocol_fixture_v2()
+        launch.transport_generation = 9223372036854775807
+        var request = launch.request
+        request.launch_deadline_unix_ms = 9223372036854775807
+        launch.request = request
+        match group_process_stream_launch_decode_v2(group_process_stream_launch_encode_v2(launch)):
+            case Err(reason): fail("full i64 stream values failed: {reason}")
+            case Ok(decoded):
+                expect(decoded.transport_generation).to_equal(9223372036854775807)
+                expect(decoded.request.launch_deadline_unix_ms).to_equal(9223372036854775807)
+
+    it "rejects changed argv without a matching canonical digest and requires positive launch deadline":
+        var launch = stream_protocol_fixture_v2()
+        var request = launch.request
+        request.args = ["different"]
+        launch.request = request
+        expect(group_process_stream_launch_validate_v2(launch)).to_equal("stream child argv digest mismatch")
+        launch = stream_protocol_fixture_v2()
+        request = launch.request
+        request.launch_deadline_unix_ms = 0
+        launch.request = request
+        expect(group_process_stream_launch_validate_v2(launch)).to_equal("invalid stream launch deadline")
+
+    it "rejects noncanonical integers, trailing fields, wrong profiles and missing final newline":
+        var launch = stream_protocol_fixture_v2()
+        launch.transport_generation = 34
+        val wire = group_process_stream_launch_encode_v2(launch)
+        expect(stream_protocol_error_v2(wire.replace("\n34\n", "\n034\n")) != "").to_equal(true)
+        expect(stream_protocol_error_v2(wire + "extra\n") != "").to_equal(true)
+        expect(stream_protocol_error_v2(wire.replace("SIMPLE-GROUP-STREAM-2", "SIMPLE-GROUP-BROKER-1")) != "").to_equal(true)
+        expect(stream_protocol_error_v2(wire.substring(0, wire.len() - 1)) != "").to_equal(true)
+
+    it "keeps generic path/delegation shape portable while leaving V1 restrictions intact":
+        var launch = stream_protocol_fixture_v2()
+        launch.delegated_cgroup_path = "relative"
+        expect(group_process_stream_launch_validate_v2(launch)).to_equal("invalid stream delegated path shape")
+        launch = stream_protocol_fixture_v2()
+        launch.delegated_cgroup_path = ""
+        expect(group_process_stream_launch_validate_v2(launch)).to_equal("")
+        val request = launch.request
+        val legacy = GroupProcessRequestV1(request.program, request.producer_digest,
+            request.args, request.environment, request.directory, request.inputs,
+            "/work/stdout", "/work/stderr", request.timeout_ms, request.broker_program, request.broker_digest)
+        val legacy_launch = GroupProcessLaunchV1(launch.root, launch.worker_id, launch.generation,
+            launch.snapshot_digest, launch.cache_identity, launch.memory_limit_bytes, legacy)
+        expect(group_process_launch_validate_v1(legacy_launch)).to_equal("group worker argv must name exact group root")
+
+    it "accepts drive-absolute and UNC program spellings without claiming Windows native admission":
+        var launch = stream_protocol_fixture_v2()
+        launch.root = "C:/work/owner"
+        launch.delegated_cgroup_path = ""
+        var request = launch.request
+        request.program = "C:/tools/child.exe"
+        request.broker_program = "//server/share/broker.exe"
+        request.directory = "C:/work/cwd"
+        request.inputs = []
+        request.child_argv_digest = group_process_child_argv_digest_v2(request.program, request.args)
+        launch.request = request
+        expect(group_process_stream_launch_validate_v2(launch)).to_equal("")
+        match group_process_stream_launch_decode_v2(group_process_stream_launch_encode_v2(launch)):
+            case Err(reason): fail("portable canonical shape was refused: {reason}")
+            case Ok(decoded): expect(decoded.request.program).to_equal("C:/tools/child.exe")
+
+    it "encodes exact exec-ready proof with owner identity, transport generation and argv digest":
+        val launch = stream_protocol_fixture_v2()
+        val identity = group_process_stream_identity_v2(launch)
+        val expected = "SIMPLE-GROUP-STREAM-READY-2\n" + identity + "\n34\n" + launch.request.child_argv_digest + "\n"
+        expect(group_process_stream_ready_encode_v2(identity, 34, launch.request.child_argv_digest)).to_equal(expected)
+        expect(group_process_stream_ready_encode_v2(identity, 0, launch.request.child_argv_digest)).to_equal("")
+
+    it "separates known-unlaunched proof from exec-ready and terminal tree observations":
+        val launch = stream_protocol_fixture_v2()
+        val identity = group_process_stream_identity_v2(launch)
+        val proof = group_process_stream_unlaunched_encode_v2(identity, 34, launch.request.child_argv_digest)
+        expect(proof).to_equal("SIMPLE-GROUP-STREAM-UNLAUNCHED-2\n" + identity + "\n34\n" + launch.request.child_argv_digest + "\n")
+        expect(proof == group_process_stream_ready_encode_v2(identity, 34, launch.request.child_argv_digest)).to_equal(false)
+
+    it "rejects oversized aggregate escaped fields before constructing an enormous payload":
+        var launch = stream_protocol_fixture_v2()
+        var request = launch.request
+        val path = "/" + "%".repeat(60000)
+        var inputs: [GroupProcessInputV1] = []
+        for i in 0..100: inputs.push(GroupProcessInputV1(path, "b".repeat(64)))
+        request.inputs = inputs
+        launch.request = request
+        expect(group_process_stream_launch_encode_v2(launch)).to_equal("")

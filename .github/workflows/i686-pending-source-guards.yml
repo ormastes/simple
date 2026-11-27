@@ -1,0 +1,41 @@
+name: i686 remaining whitespace only
+
+on:
+  pull_request:
+    types: [labeled]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: i686-pending-source-${{ github.event.pull_request.head.sha || github.sha }}
+  cancel-in-progress: false
+
+jobs:
+  source-guards:
+    if: github.event_name == 'workflow_dispatch' || (github.event.label.name == 'i686-pending-source-guards' && github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'work/i686-pending-source-guards-20261124')
+    runs-on: ubuntu-22.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Complete only the remaining thirteen frozen whitespace checks
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p build/verify/i686-pending-source-linux
+          git rev-parse HEAD > build/verify/i686-pending-source-linux/executor-head.txt
+          sha256sum test/fixtures/compiler/i686_pending_source_guards/payload.sdn scripts/check/tests/i686-pending-source-guards.shs > build/verify/i686-pending-source-linux/inputs.sha256
+          set +e
+          timeout 540 sh scripts/check/tests/i686-pending-source-guards.shs --whitespace-only > build/verify/i686-pending-source-linux/stdout.log 2> build/verify/i686-pending-source-linux/stderr.log
+          status=$?
+          printf '%s\n' "$status" > build/verify/i686-pending-source-linux/exit.txt
+          exit "$status"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: i686-pending-source-guards-${{ github.run_id }}
+          path: build/verify/i686-pending-source-linux

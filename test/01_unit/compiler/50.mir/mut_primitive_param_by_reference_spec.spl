@@ -1,0 +1,708 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# MIR & LLVM: `x: mut <primitive>` is passed by reference across calls
+
+Bug: mut_param_annotation_no_reference_propagation_2026-07-20
+
+`fn bump(x: mut i64): x = x + 1` must write through to the caller's place.
+HIR lowers `mut T` to Ref(T, true); MIR passes a stack-slot address
+(`Alloc` + `Store`) at free calls, method calls (instance, static, UFCS),
+field/index lvalues, and nested `mut` callers, then loads back (`Load`) and
+writes back to the caller place; the callee loads on entry and stores back
+before every return.
+Struct and array `mut` params keep their existing pointer path.
+"""
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{SymbolId, SymbolTable, SymbolKind}
+use compiler.hir.hir_definitions.*
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.mir.mir.*
+use compiler.mir.mir_data.*
+use compiler.mir.mir_verify.{mir_verify_module}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir.mir_lowering_stmts.*
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLowering.named_call_arguments_v1.*
+use compiler.mir._MirLowering.provider_metadata.*
+use compiler.mir.hir_declaration_types_v1.{MirHirDeclarationRepositoryV1, MirHirCallableDefaultsV1, MirHirFunctionDeclarationV1, MirHirParamDeclarationV1}
+use compiler.common.cache_contract.hir_owned_artifact_cache_v1.{HirOwnedArtifactContextV1}
+use compiler.mir._MirLoweringExpr.method_calls_literals.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.backend.mir_to_llvm.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+
+val PRIM_SRC = "fn bump(x: mut i64):\n    x = x + 1\n\nfn main() -> i64:\n    var n = 41\n    bump(n)\n    n\n"
+val EARLY_SRC = "fn bump2(x: mut i64) -> i64:\n    if x > 0:\n        x = x + 1\n        return 1\n    x = 7\n    0\n\nfn main() -> i64:\n    var n = 41\n    bump2(n)\n    n\n"
+val PLAIN_SRC = "fn keep(x: i64) -> i64:\n    x + 1\n\nfn main() -> i64:\n    var n = 41\n    keep(n)\n    n\n"
+val STRUCT_SRC = "struct P:\n    v: i64\n\nfn sbump(p: mut P):\n    p.v = p.v + 1\n\nfn main() -> i64:\n    var p = P(v: 1)\n    sbump(p)\n    p.v\n"
+val ARRAY_SRC = "fn abump(xs: mut [i64]):\n    xs[0] = xs[0] + 1\n\nfn main() -> i64:\n    var xs = [1, 2]\n    abump(xs)\n    xs[0]\n"
+val METHOD_SRC = "class Worker:\n    tag: i64\n    fn add_one(x: mut i64):\n        x = x + 1\n    static fn add_two(x: mut i64):\n        x = x + 2\n\nfn ufcs_bump(w: Worker, x: mut i64):\n    x = x + 3\n\nfn main() -> i64:\n    var a = 10\n    val w = Worker(tag: 1)\n    w.add_one(a)\n    Worker.add_two(a)\n    w.ufcs_bump(a)\n    a\n"
+val LVALUE_SRC = "struct Box:\n    count: i64\n\nfn bump(x: mut i64):\n    x = x + 1\n\nfn outer(y: mut i64):\n    bump(y)\n\nfn main() -> i64:\n    var b = Box(count: 5)\n    var xs = [10, 20]\n    bump(b.count)\n    bump(xs[0])\n    var n = 40\n    outer(n)\n    b.count + xs[0] + n\n"
+val DICT_TUPLE_SRC = "fn bump(x: mut i64):\n    x = x + 1\n\nfn dict_case() -> i64:\n    var d: Dict<text, i64> = {\"k\": 10}\n    bump(d[\"k\"])\n    d[\"k\"]\n\nfn tuple_case() -> i64:\n    var t = (10, 20)\n    bump(t.0)\n    t.0\n"
+val NAMED_METHOD_SRC = "class Worker:\n    tag: i64\n    fn add_one(x: mut i64):\n        x = x + 1\n    fn add_pair(delta: i64, x: mut i64):\n        x = x + delta\n    static fn add_two(x: mut i64):\n        x = x + 2\n\nfn ufcs_bump(w: Worker, x: mut i64):\n    x = x + 3\n\nfn main() -> i64:\n    var a = 10\n    val w = Worker(tag: 1)\n    w.add_one(x: a)\n    w.add_pair(x: a, delta: 5)\n    Worker.add_two(x: a)\n    w.ufcs_bump(x: a)\n    a\n"
+val NAMED_INDIRECT_FIELD_SRC = "struct Runner:\n    cb: fn(mut i64)\n    cb2: fn(i64, mut i64)\n\nfn apply_indirect(cb: fn(mut i64)) -> i64:\n    var n = 10\n    cb(x: n)\n    n\n\nfn apply_indirect_two(cb: fn(i64, mut i64)) -> i64:\n    var n = 15\n    cb(5, x: n)\n    n\n\nfn apply_field(r: Runner) -> i64:\n    var n = 20\n    r.cb(x: n)\n    n\n\nfn apply_field_two(r: Runner) -> i64:\n    var n = 25\n    r.cb2(5, x: n)\n    n\n\nfn apply_paren_field(r: Runner) -> i64:\n    var n = 30\n    (r.cb)(x: n)\n    n\n"
+val DIRECT_NAMED_SRC = "fn add_pair(delta: i64, x: mut i64):\n    x = x + delta\n\nfn main() -> i64:\n    var n = 10\n    add_pair(x: n, delta: 5)\n    n\n"
+val SAME_MOD_OPT_SRC = "class OptWorker:\n    tag: i64\n    fn add_opt(x: mut i64, delta: i64 = 5):\n        x = x + delta\n    fn add_reordered(delta: i64 = 7, x: mut i64):\n        x = x + delta\n\nfn free_opt(x: mut i64, delta: i64 = 9):\n    x = x + delta\n\nfn main() -> i64:\n    var a = 10\n    val w = OptWorker(tag: 1)\n    w.add_opt(x: a)\n    w.add_reordered(x: a)\n    free_opt(x: a)\n    a\n"
+val PRESCAN_SAME_MOD_NONLIT_SRC = "fn default_delta() -> i64:\n    7\n\nfn free_nonlit(x: mut i64, delta: i64 = default_delta()):\n    x = x + delta\n\nclass NonLitWorker:\n    tag: i64\n    fn add_nonlit(x: mut i64, delta: i64 = -1):\n        x = x + delta\n\nfn main() -> i64:\n    var n = 10\n    free_nonlit(x: n)\n    var a = 20\n    val w = NonLitWorker(tag: 1)\n    w.add_nonlit(x: a)\n    n + a\n"
+val TRAIT_SRC = "trait Bumper:\n    fn bump(x: mut i64)\n\nclass ImplBumper with Bumper:\n    tag: i64\n    fn bump(x: mut i64):\n        x = x + 1\n\nfn via_trait_pos(b: Bumper) -> i64:\n    var n = 41\n    b.bump(n)\n    n\n\nfn via_trait_named(b: Bumper) -> i64:\n    var n = 41\n    b.bump(x: n)\n    n\n"
+val TRAIT_CAST_SRC = "trait Bumper:\n    fn bump(x: mut i64)\n\nclass ImplBumper with Bumper:\n    tag: i64\n    fn bump(x: mut i64):\n        x = x + 1\n\nfn via_trait(b: Bumper) -> i64:\n    var n = 41\n    b.bump(x: n)\n    n\n\nfn main() -> i64:\n    val imp = ImplBumper(tag: 1)\n    via_trait(imp)\n"
+val MULTI_PRIM_SRC = "fn bump_f(x: mut f64):\n    x = x + 1.5\n\nfn flip_b(b: mut bool):\n    b = not b\n\nfn main() -> i64:\n    var f = 2.0\n    var flag = false\n    bump_f(f)\n    flip_b(flag)\n    if flag: 1 else: 0\n"
+
+fn lower_src(src: text) -> MirModule:
+    val parsed = parse_full_frontend(src, "mut_prim_param_probe.spl", "mut_prim_param_probe", Logger(level: 0))
+    var hl = HirLowering.with_filename("mut_prim_param_probe.spl")
+    val hir = hl.lower_module(parsed)
+    var ml = MirLowering.new_for_target(hir.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    ml.trait_impl_closure_complete = true
+    ml.lower_module(hir)
+
+fn has_call_named_or_ptr(f: MirFunction, check_indirect: bool) -> bool:
+    for block in f.blocks:
+        for inst in block.instructions:
+            match inst.kind:
+                case MirInstKind.Call(_, callee, args):
+                    if not check_indirect:
+                        for arg in args:
+                            match arg.kind:
+                                case MirOperandKind.Copy(l) | MirOperandKind.Move(l):
+                                    for loc in f.locals:
+                                        if loc.id.id == l.id:
+                                            match loc.type_.kind:
+                                                case MirTypeKind.Ptr(_, _): return true
+                                                case _: ()
+                                case _: ()
+                case MirInstKind.CallIndirect(_, _, args, sig):
+                    if check_indirect:
+                        var sig_has_mut = false
+                        for p in sig.params:
+                            match p.kind:
+                                case MirTypeKind.Ptr(_, _) | MirTypeKind.Ref(_, true): sig_has_mut = true
+                                case _: ()
+                        var arg_has_ptr = false
+                        for arg in args:
+                            match arg.kind:
+                                case MirOperandKind.Copy(l) | MirOperandKind.Move(l):
+                                    for loc in f.locals:
+                                        if loc.id.id == l.id:
+                                            match loc.type_.kind:
+                                                case MirTypeKind.Ptr(_, _): arg_has_ptr = true
+                                                case _: ()
+                                case _: ()
+                        if sig_has_mut and arg_has_ptr:
+                            return true
+                case _: ()
+    false
+
+fn has_copy_to_local(f: MirFunction, target: LocalId) -> bool:
+    for block in f.blocks:
+        for inst in block.instructions:
+            match inst.kind:
+                case MirInstKind.Copy(dest, _):
+                    if dest.id == target.id:
+                        return true
+                case _: ()
+    false
+
+fn call_has_arg_types(f: MirFunction, callee_suffix: text, expected_ptr_indices: [i64], expected_arity: i64) -> bool:
+    for block in f.blocks:
+        for inst in block.instructions:
+            match inst.kind:
+                case MirInstKind.Call(_, callee, args):
+                    var matched_name = false
+                    match callee.kind:
+                        case MirOperandKind.Const(MirConstValue.Str(name), _):
+                            if name == callee_suffix or name.ends_with("." + callee_suffix):
+                                matched_name = true
+                        case _: ()
+                    if matched_name and args.len() == expected_arity:
+                        var all_ok = true
+                        var ai = 0
+                        while ai < args.len():
+                            var want_ptr = false
+                            for pi in expected_ptr_indices:
+                                if pi == ai:
+                                    want_ptr = true
+                            var is_ptr = false
+                            match args[ai].kind:
+                                case MirOperandKind.Copy(l) | MirOperandKind.Move(l):
+                                    for loc in f.locals:
+                                        if loc.id.id == l.id:
+                                            match loc.type_.kind:
+                                                case MirTypeKind.Ptr(_, _): is_ptr = true
+                                                case _: ()
+                                case _: ()
+                            if want_ptr and not is_ptr:
+                                all_ok = false
+                            elif not want_ptr and is_ptr and ai > 0:
+                                all_ok = false
+                            ai = ai + 1
+                        if all_ok:
+                            return true
+                case _: ()
+    false
+
+fn count_inst_names(module: MirModule, fn_name: text, callee_needle: text, want_gep: bool) -> i64:
+    var hits = 0
+    for entry in module.functions.values():
+        val f: MirFunction = entry
+        if f.name == fn_name or f.name.ends_with("." + fn_name):
+            for block in f.blocks:
+                for inst in block.instructions:
+                    match inst.kind:
+                        case MirInstKind.Call(_, callee, _):
+                            match callee.kind:
+                                case MirOperandKind.Const(MirConstValue.Str(c), _):
+                                    if callee_needle != "" and c == callee_needle:
+                                        hits = hits + 1
+                                case _: ()
+                        case MirInstKind.GetElementPtr(_, _, _):
+                            if want_gep:
+                                hits = hits + 1
+                        case _: ()
+    hits
+
+fn find_fn_in_mir(module: MirModule, name: text) -> MirFunction?:
+    for entry in module.functions.values():
+        val f: MirFunction = entry
+        if f.name == name or f.name.ends_with("." + name):
+            return Some(f)
+    None
+
+fn count_in_fn(f: MirFunction, kind: text) -> i64:
+    var count = 0
+    for block in f.blocks:
+        for inst in block.instructions:
+            match inst.kind:
+                case MirInstKind.Alloc(_, _):
+                    if kind == "alloc": count = count + 1
+                case MirInstKind.Load(_, _):
+                    if kind == "load": count = count + 1
+                case MirInstKind.Store(_, _):
+                    if kind == "store": count = count + 1
+                case MirInstKind.Ref(_, _, _):
+                    if kind == "ref": count = count + 1
+                case _: ()
+    count
+
+fn emit_llvm_ir(src: text) -> text:
+    val mir = lower_src(src)
+    MirToLlvm.create("mut_prim_llvm_probe", CodegenTarget.X86_64, None).translate_module(mir).to_string()
+
+# Count instructions of one kind ("alloc", "load", "store", "ref") in function `name`.
+fn count_kind(src: text, name: text, kind: text) -> i64:
+    val module = lower_src(src)
+    var count = 0
+    for entry in module.functions.values():
+        val f: MirFunction = entry
+        if f.name == name or f.name.ends_with("." + name):
+            for block in f.blocks:
+                for inst in block.instructions:
+                    match inst.kind:
+                        case MirInstKind.Alloc(_, _):
+                            if kind == "alloc": count = count + 1
+                        case MirInstKind.Load(_, _):
+                            if kind == "load": count = count + 1
+                        case MirInstKind.Store(_, _):
+                            if kind == "store": count = count + 1
+                        case MirInstKind.Ref(_, _, _):
+                            if kind == "ref": count = count + 1
+                        case _: ()
+    count
+
+# Number of Ret terminators in function `name`.
+fn count_returns(src: text, name: text) -> i64:
+    val module = lower_src(src)
+    var count = 0
+    for entry in module.functions.values():
+        val f: MirFunction = entry
+        if f.name == name or f.name.ends_with("." + name):
+            for block in f.blocks:
+                match block.terminator:
+                    case MirTerminator.Ret(_): count = count + 1
+                    case _: ()
+    count
+
+describe "MIR by-reference calling convention for `mut` primitive params":
+    it "caller allocates stack slot, stores initial value, and reloads updated value":
+        expect(count_kind(PRIM_SRC, "main", "alloc")).to_be_greater_than(0)
+        expect(count_kind(PRIM_SRC, "main", "store")).to_be_greater_than(0)
+        expect(count_kind(PRIM_SRC, "main", "load")).to_be_greater_than(0)
+        expect(count_kind(PRIM_SRC, "main", "ref")).to_equal(0)
+
+    it "callee loads the incoming value through the reference":
+        expect(count_kind(PRIM_SRC, "bump", "load")).to_be_greater_than(0)
+
+    it "callee stores the new value back through the reference":
+        expect(count_kind(PRIM_SRC, "bump", "store")).to_be_greater_than(0)
+
+    it "stores back on every return path":
+        expect(count_returns(EARLY_SRC, "bump2")).to_be_greater_than(0)
+        expect(count_kind(EARLY_SRC, "bump2", "store")).to_be_greater_than(count_returns(EARLY_SRC, "bump2") - 1)
+        expect(count_kind(EARLY_SRC, "bump2", "store")).to_be_greater_than(1)
+
+    it "handles instance, static, and UFCS method calls with `mut` primitive args":
+        expect(count_kind(METHOD_SRC, "main", "alloc")).to_be_greater_than(2)
+        expect(count_kind(METHOD_SRC, "main", "store")).to_be_greater_than(2)
+        expect(count_kind(METHOD_SRC, "main", "load")).to_be_greater_than(2)
+
+    it "handles field, array-index, and nested `mut` param forwarding":
+        expect(count_kind(LVALUE_SRC, "main", "alloc")).to_be_greater_than(2)
+        expect(count_kind(LVALUE_SRC, "outer", "alloc")).to_be_greater_than(0)
+        expect(count_kind(LVALUE_SRC, "outer", "store")).to_be_greater_than(1)
+
+    it "emits real pointer-based LLVM IR (alloca + call ptr) for mut primitives":
+        val ir = emit_llvm_ir(PRIM_SRC)
+        expect(ir).to_contain("alloca i64")
+        expect(ir).to_contain("bump(ptr")
+        expect(ir).to_contain("store i64")
+        val method_ir = emit_llvm_ir(METHOD_SRC)
+        expect(method_ir).to_contain("add_one(ptr")
+        expect(method_ir).to_contain("add_two(ptr")
+        expect(method_ir).to_contain("ufcs_bump(ptr")
+        val multi_ir = emit_llvm_ir(MULTI_PRIM_SRC)
+        expect(multi_ir).to_contain("alloca double")
+        expect(multi_ir).to_contain("bump_f(ptr")
+        expect(multi_ir).to_contain("alloca i1")
+        expect(multi_ir).to_contain("flip_b(ptr")
+
+    it "passes MIR verification cleanly for mut-primitive callers and callees":
+        expect(mir_verify_module(lower_src(PRIM_SRC)).findings.len()).to_equal(0)
+        expect(mir_verify_module(lower_src(EARLY_SRC)).findings.len()).to_equal(0)
+        expect(mir_verify_module(lower_src(METHOD_SRC)).findings.len()).to_equal(0)
+        expect(mir_verify_module(lower_src(LVALUE_SRC)).findings.len()).to_equal(0)
+        expect(mir_verify_module(lower_src(MULTI_PRIM_SRC)).findings.len()).to_equal(0)
+
+    it "handles dict and tuple `mut` primitive writebacks":
+        val mod = lower_src(DICT_TUPLE_SRC)
+        expect(count_kind(DICT_TUPLE_SRC, "dict_case", "alloc")).to_be_greater_than(0)
+        expect(count_inst_names(mod, "dict_case", "rt_dict_get", false)).to_be_greater_than(0)
+        expect(count_inst_names(mod, "dict_case", "rt_dict_set", false)).to_be_greater_than(0)
+        expect(count_kind(DICT_TUPLE_SRC, "tuple_case", "alloc")).to_be_greater_than(0)
+        expect(count_kind(DICT_TUPLE_SRC, "tuple_case", "store")).to_be_greater_than(0)
+        expect(count_kind(DICT_TUPLE_SRC, "tuple_case", "load")).to_be_greater_than(0)
+        expect(count_inst_names(mod, "tuple_case", "", true)).to_be_greater_than(0)
+        expect(mir_verify_module(mod).findings.len()).to_equal(0)
+
+    it "handles named `mut` primitive args on instance, out-of-order, static, and UFCS methods":
+        val mod = lower_src(NAMED_METHOD_SRC)
+        val main_opt = find_fn_in_mir(mod, "main")
+        expect(main_opt.?).to_equal(true)
+        val main_fn = main_opt.unwrap()
+        expect(count_in_fn(main_fn, "alloc")).to_be_greater_than(3)
+        expect(count_in_fn(main_fn, "store")).to_be_greater_than(3)
+        expect(count_in_fn(main_fn, "load")).to_be_greater_than(3)
+        expect(call_has_arg_types(main_fn, "Worker.add_pair", [2], 3)).to_equal(true)
+        val ir = emit_llvm_ir(NAMED_METHOD_SRC)
+        expect(ir).to_contain("add_one(ptr")
+        expect(ir).to_contain("define void @mut_prim_param_probe.Worker.add_pair(ptr %l0, i64 %l1, ptr %l2)")
+        var add_pair_call_line = ""
+        for ir_line in ir.split("\n"):
+            if ir_line.contains("call void @mut_prim_param_probe.Worker.add_pair("):
+                add_pair_call_line = ir_line
+        expect(add_pair_call_line).to_contain("(ptr ")
+        expect(add_pair_call_line).to_contain(", i64 ")
+        expect(add_pair_call_line).to_contain(", ptr ")
+        expect(ir).to_contain("add_two(ptr")
+        expect(ir).to_contain("ufcs_bump(ptr")
+        expect(mir_verify_module(mod).findings.len()).to_equal(0)
+
+    it "fails closed when named call omits a trailing default without declaration default metadata":
+        var syms_surf = SymbolTable.new()
+        val surf_sym = syms_surf.define("ext.mod.add_opt", SymbolKind.Method, None, Span.empty(), Visibility.Public, false, Some("ext.mod"))
+        var ml_surf = MirLowering.new_for_target(syms_surf, driver_mir_target_context(driver_core_compile_options_default()))
+        expect(ml_surf.register_surface_param_rows_v1(["ext.mod"], ["add_opt"], [3], ["self", "x", "delta"], [false, false, true])).to_equal(1)
+        var bs = ml_surf.builder
+        bs.begin_function(SymbolId(id: 9910), "surf_probe", MirSignature(params: [], return_type: MirType.i64(), is_variadic: false), Span.empty())
+        val recv_s = bs.emit_const_int(0)
+        val n_s = bs.emit_const_int(10)
+        ml_surf.builder = bs
+        ml_surf.bind_local(9911, n_s)
+        val i64_hir = HirType(kind: HirTypeKind.Int(64, true), span: Span.empty())
+        val mut_i64_hir = HirType(kind: HirTypeKind.Ref(i64_hir, true), span: Span.empty())
+        val arg_x = HirCallArg(has_name: true, name: "x", value: HirExpr(kind: HirExprKind.Var(SymbolId(id: 9911)), has_type_: true, type_: i64_hir, span: Span.empty()), span: Span.empty())
+        val surf_pack = ml_surf.lower_explicit_call_args_with_writebacks_v1([mir_operand_copy(recv_s)], [arg_x], [i64_hir, mut_i64_hir, i64_hir], 1, surf_sym)
+        var bs_end = ml_surf.builder
+        val surf_fn = bs_end.end_function()
+        ml_surf.builder = bs_end
+        expect(ml_surf.errors.len()).to_be_greater_than(0)
+        expect(ml_surf.errors[0].message).to_contain("named default requires admitted declaration scope")
+        expect(surf_pack.writebacks.len()).to_equal(0)
+        expect(count_in_fn(surf_fn, "alloc")).to_equal(0)
+
+        var syms_boot = SymbolTable.new()
+        val boot_sym = syms_boot.define("boot.mod.add_nonlit", SymbolKind.Method, None, Span.empty(), Visibility.Public, false, Some("boot.mod"))
+        val non_lit_callee = HirExpr(kind: HirExprKind.Var(SymbolId(id: 9925)), has_type_: true, type_: i64_hir, span: Span.empty())
+        val non_lit_default = HirExpr(kind: HirExprKind.Call(non_lit_callee, [], []), has_type_: true, type_: i64_hir, span: Span.empty())
+        val lit_zero = HirExpr(kind: HirExprKind.IntLit(0, None), has_type_: true, type_: i64_hir, span: Span.empty())
+        bootstrap_fn_param_defaults_register("boot.mod.add_nonlit", [
+            HirParam(symbol: SymbolId(id: 1), name: "self", type_: i64_hir, has_default: false, default: lit_zero, span: Span.empty(), is_mutable: false),
+            HirParam(symbol: SymbolId(id: 2), name: "x", type_: mut_i64_hir, has_default: false, default: lit_zero, span: Span.empty(), is_mutable: true),
+            HirParam(symbol: SymbolId(id: 3), name: "delta", type_: i64_hir, has_default: true, default: non_lit_default, span: Span.empty(), is_mutable: false)
+        ], "boot.mod")
+        var ml_boot = MirLowering.new_for_target(syms_boot, driver_mir_target_context(driver_core_compile_options_default()))
+        var bb = ml_boot.builder
+        bb.begin_function(SymbolId(id: 9920), "boot_probe", MirSignature(params: [], return_type: MirType.i64(), is_variadic: false), Span.empty())
+        val recv_b = bb.emit_const_int(0)
+        val n_b = bb.emit_const_int(20)
+        ml_boot.builder = bb
+        ml_boot.bind_local(9921, n_b)
+        val arg_bx = HirCallArg(has_name: true, name: "x", value: HirExpr(kind: HirExprKind.Var(SymbolId(id: 9921)), has_type_: true, type_: i64_hir, span: Span.empty()), span: Span.empty())
+        val boot_pack = ml_boot.lower_explicit_call_args_with_writebacks_v1([mir_operand_copy(recv_b)], [arg_bx], [i64_hir, mut_i64_hir, i64_hir], 1, boot_sym)
+        var bb_end = ml_boot.builder
+        val boot_fn = bb_end.end_function()
+        ml_boot.builder = bb_end
+        expect(ml_boot.errors.len()).to_be_greater_than(0)
+        expect(ml_boot.errors[0].message).to_contain("named default requires admitted declaration scope")
+        expect(boot_pack.writebacks.len()).to_equal(0)
+        expect(count_in_fn(boot_fn, "alloc")).to_equal(0)
+
+    it "handles named `mut` primitive calls with omitted trailing defaults within same module":
+        val mod = lower_src(SAME_MOD_OPT_SRC)
+        val main_opt = find_fn_in_mir(mod, "main")
+        expect(main_opt.?).to_equal(true)
+        val main_fn = main_opt.unwrap()
+        expect(count_in_fn(main_fn, "alloc")).to_equal(3)
+        expect(count_in_fn(main_fn, "store")).to_equal(3)
+        expect(count_in_fn(main_fn, "load")).to_equal(3)
+        expect(call_has_arg_types(main_fn, "OptWorker.add_opt", [1], 3)).to_equal(true)
+        expect(call_has_arg_types(main_fn, "OptWorker.add_reordered", [2], 3)).to_equal(true)
+        expect(call_has_arg_types(main_fn, "free_opt", [0], 2)).to_equal(true)
+        expect(mir_verify_module(mod).findings.len()).to_equal(0)
+        val ir = emit_llvm_ir(SAME_MOD_OPT_SRC)
+        expect(ir).to_contain("define void @mut_prim_param_probe.OptWorker.add_opt(ptr %l0, ptr %l1, i64 %l2)")
+        expect(ir).to_contain("define void @mut_prim_param_probe.OptWorker.add_reordered(ptr %l0, i64 %l1, ptr %l2)")
+        expect(ir).to_contain("define void @mut_prim_param_probe.free_opt(ptr %l0, i64 %l1)")
+
+        var syms_lit = SymbolTable.new()
+        val lit_sym = syms_lit.define("boot.mod.add_lit", SymbolKind.Method, None, Span.empty(), Visibility.Public, false, Some("boot.mod"))
+        val i64_hir = HirType(kind: HirTypeKind.Int(64, true), span: Span.empty())
+        val mut_i64_hir = HirType(kind: HirTypeKind.Ref(i64_hir, true), span: Span.empty())
+        val lit_zero = HirExpr(kind: HirExprKind.IntLit(0, None), has_type_: true, type_: i64_hir, span: Span.empty())
+        val lit_seven = HirExpr(kind: HirExprKind.IntLit(7, None), has_type_: true, type_: i64_hir, span: Span.empty())
+        bootstrap_fn_param_defaults_register("boot.mod.add_lit", [
+            HirParam(symbol: SymbolId(id: 1), name: "self", type_: i64_hir, has_default: false, default: lit_zero, span: Span.empty(), is_mutable: false),
+            HirParam(symbol: SymbolId(id: 2), name: "x", type_: mut_i64_hir, has_default: false, default: lit_zero, span: Span.empty(), is_mutable: true),
+            HirParam(symbol: SymbolId(id: 3), name: "delta", type_: i64_hir, has_default: true, default: lit_seven, span: Span.empty(), is_mutable: false)
+        ], "boot.mod")
+        var ml_lit = MirLowering.new_for_target(syms_lit, driver_mir_target_context(driver_core_compile_options_default()))
+        var bl = ml_lit.builder
+        bl.begin_function(SymbolId(id: 9950), "boot_lit_probe", MirSignature(params: [], return_type: MirType.i64(), is_variadic: false), Span.empty())
+        val recv_l = bl.emit_const_int(0)
+        val n_l = bl.emit_const_int(11)
+        ml_lit.builder = bl
+        ml_lit.bind_local(9951, n_l)
+        val arg_lx = HirCallArg(has_name: true, name: "x", value: HirExpr(kind: HirExprKind.Var(SymbolId(id: 9951)), has_type_: true, type_: i64_hir, span: Span.empty()), span: Span.empty())
+        val lit_pack = ml_lit.lower_explicit_call_args_with_writebacks_v1([mir_operand_copy(recv_l)], [arg_lx], [i64_hir, mut_i64_hir, i64_hir], 1, lit_sym)
+        var bl_end = ml_lit.builder
+        val lit_fn = bl_end.end_function()
+        ml_lit.builder = bl_end
+        expect(ml_lit.errors.len()).to_equal(0)
+        expect(lit_pack.operands.len()).to_equal(3)
+        expect(lit_pack.writebacks.len()).to_equal(1)
+        expect(count_in_fn(lit_fn, "alloc")).to_equal(1)
+        expect(count_in_fn(lit_fn, "store")).to_equal(1)
+
+    it "fails closed for known callee symbol lacking param-name metadata or unknown named arg label":
+        var syms_missing = SymbolTable.new()
+        var ml_missing = MirLowering.new_for_target(syms_missing, driver_mir_target_context(driver_core_compile_options_default()))
+        var bm = ml_missing.builder
+        bm.begin_function(SymbolId(id: 9930), "missing_meta_probe", MirSignature(params: [], return_type: MirType.i64(), is_variadic: false), Span.empty())
+        val recv_m = bm.emit_const_int(0)
+        val n_m = bm.emit_const_int(30)
+        ml_missing.builder = bm
+        ml_missing.bind_local(9931, n_m)
+        val i64_hir = HirType(kind: HirTypeKind.Int(64, true), span: Span.empty())
+        val mut_i64_hir = HirType(kind: HirTypeKind.Ref(i64_hir, true), span: Span.empty())
+        val arg_mx = HirCallArg(has_name: true, name: "x", value: HirExpr(kind: HirExprKind.Var(SymbolId(id: 9931)), has_type_: true, type_: i64_hir, span: Span.empty()), span: Span.empty())
+        val missing_pack = ml_missing.lower_explicit_call_args_with_writebacks_v1([mir_operand_copy(recv_m)], [arg_mx], [i64_hir, mut_i64_hir], 1, SymbolId(id: 8805))
+        var bm_end = ml_missing.builder
+        val missing_fn = bm_end.end_function()
+        ml_missing.builder = bm_end
+        expect(ml_missing.errors.len()).to_be_greater_than(0)
+        expect(ml_missing.errors[0].message).to_contain("named call lacks")
+        expect(missing_pack.writebacks.len()).to_equal(0)
+        expect(count_in_fn(missing_fn, "alloc")).to_equal(0)
+        expect(count_in_fn(missing_fn, "store")).to_equal(0)
+
+        var syms_bogus = SymbolTable.new()
+        val bogus_sym = syms_bogus.define("bogus.mod.add_one", SymbolKind.Method, None, Span.empty(), Visibility.Public, false, Some("bogus.mod"))
+        var ml_bogus = MirLowering.new_for_target(syms_bogus, driver_mir_target_context(driver_core_compile_options_default()))
+        expect(ml_bogus.register_surface_param_rows_v1(["bogus.mod"], ["add_one"], [2], ["self", "x"], [false, false])).to_equal(1)
+        var bg = ml_bogus.builder
+        bg.begin_function(SymbolId(id: 9940), "bogus_label_probe", MirSignature(params: [], return_type: MirType.i64(), is_variadic: false), Span.empty())
+        val recv_g = bg.emit_const_int(0)
+        val n_g = bg.emit_const_int(40)
+        ml_bogus.builder = bg
+        ml_bogus.bind_local(9941, n_g)
+        val arg_bogus = HirCallArg(has_name: true, name: "bogus", value: HirExpr(kind: HirExprKind.Var(SymbolId(id: 9941)), has_type_: true, type_: i64_hir, span: Span.empty()), span: Span.empty())
+        val bogus_pack = ml_bogus.lower_explicit_call_args_with_writebacks_v1([mir_operand_copy(recv_g)], [arg_bogus], [i64_hir, mut_i64_hir], 1, bogus_sym)
+        var bg_end = ml_bogus.builder
+        val bogus_fn = bg_end.end_function()
+        ml_bogus.builder = bg_end
+        expect(ml_bogus.errors.len()).to_be_greater_than(0)
+        expect(bogus_pack.writebacks.len()).to_equal(0)
+        expect(count_in_fn(bogus_fn, "alloc")).to_equal(0)
+        expect(count_in_fn(bogus_fn, "store")).to_equal(0)
+
+    it "handles named `mut` primitive args on indirect, function-field, and parenthesized calls":
+        val mod = lower_src(NAMED_INDIRECT_FIELD_SRC)
+        for target in ["apply_indirect", "apply_indirect_two", "apply_field", "apply_field_two", "apply_paren_field"]:
+            val fn_opt = find_fn_in_mir(mod, target)
+            expect(fn_opt.?).to_equal(true)
+            val f = fn_opt.unwrap()
+            expect(count_in_fn(f, "alloc")).to_be_greater_than(0)
+            expect(count_in_fn(f, "store")).to_be_greater_than(0)
+            expect(count_in_fn(f, "load")).to_be_greater_than(0)
+            expect(has_call_named_or_ptr(f, true)).to_equal(true)
+        expect(mir_verify_module(mod).findings.len()).to_equal(0)
+
+    it "handles out-of-order named `mut` primitive args on direct free function calls":
+        val mod = lower_src(DIRECT_NAMED_SRC)
+        val main_opt = find_fn_in_mir(mod, "main")
+        expect(main_opt.?).to_equal(true)
+        val main_fn = main_opt.unwrap()
+        expect(count_in_fn(main_fn, "alloc")).to_be_greater_than(0)
+        expect(count_in_fn(main_fn, "store")).to_be_greater_than(0)
+        expect(count_in_fn(main_fn, "load")).to_be_greater_than(0)
+        expect(has_call_named_or_ptr(main_fn, false)).to_equal(true)
+        val ir = emit_llvm_ir(DIRECT_NAMED_SRC)
+        expect(ir).to_contain("add_pair(i64")
+        expect(ir).to_contain(", ptr")
+        expect(mir_verify_module(mod).findings.len()).to_equal(0)
+
+    it "handles native trait-object `mut` primitive calls (positional and named)":
+        val mod = lower_src(TRAIT_SRC)
+        for target in ["via_trait_pos", "via_trait_named"]:
+            val fn_opt = find_fn_in_mir(mod, target)
+            expect(fn_opt.?).to_equal(true)
+            val f = fn_opt.unwrap()
+            expect(count_in_fn(f, "alloc")).to_be_greater_than(0)
+            expect(count_in_fn(f, "store")).to_be_greater_than(0)
+            expect(count_in_fn(f, "load")).to_be_greater_than(0)
+            expect(has_call_named_or_ptr(f, true)).to_equal(true)
+        var non_fat_ptr_findings = 0
+        for finding in mir_verify_module(mod).findings:
+            if finding.rule != "MIRV-006b":
+                non_fat_ptr_findings = non_fat_ptr_findings + 1
+        expect(non_fat_ptr_findings).to_equal(0)
+        val trait_ir = emit_llvm_ir(TRAIT_CAST_SRC)
+        expect(trait_ir).to_contain("ImplBumper.bump(ptr")
+        expect(trait_ir).to_contain("alloca i64")
+
+    it "handles single-impl devirtualized trait receiver `mut` primitive call and writeback":
+        val parsed = parse_full_frontend(TRAIT_SRC, "devirt_trait_probe.spl", "devirt_trait_probe", Logger(level: 0))
+        var hl = HirLowering.with_filename("devirt_trait_probe.spl")
+        val hir = hl.lower_module(parsed)
+        var ml = MirLowering.new_for_target(hir.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+        ml.trait_impl_closure_complete = true
+        val _init_mir = ml.lower_module(hir)
+        var trait_sym = SymbolId(id: -1)
+        for tr in hir.traits.values():
+            if tr.name == "Bumper":
+                trait_sym = tr.symbol
+        var b = ml.builder
+        val sig = MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)
+        b.begin_function(SymbolId(id: 9901), "devirt_probe", sig, Span.empty())
+        val trait_local = b.emit_const_int(0)
+        val n_local = b.emit_const_int(41)
+        ml.builder = b
+        ml.bind_local(9902, n_local)
+        ml.bind_local(9903, trait_local)
+        val trait_hir = HirType(kind: HirTypeKind.Named(trait_sym, []), span: Span.empty())
+        val i64_hir = HirType(kind: HirTypeKind.Int(64, true), span: Span.empty())
+        val recv_expr = HirExpr(kind: HirExprKind.Var(SymbolId(id: 9903)), has_type_: true, type_: trait_hir, span: Span.empty())
+        val arg_expr = HirExpr(kind: HirExprKind.Var(SymbolId(id: 9902)), has_type_: true, type_: i64_hir, span: Span.empty())
+        val arg = HirCallArg(has_name: true, name: "x", value: arg_expr, span: Span.empty())
+        val trait_key = ml.trait_receiver_identity(recv_expr, "bump")
+        expect(trait_key).to_equal("devirt_trait_probe.Bumper")
+        val before_devirt = ml.devirtualized_calls
+        val _res = ml.lower_trait_receiver_method_call(trait_key, recv_expr, "bump", [arg])
+        expect(ml.devirtualized_calls).to_equal(before_devirt + 1)
+        var b_end = ml.builder
+        b_end.set_terminator(MirTerminator.Ret(Some(mir_operand_copy(n_local))))
+        val devirt_fn = b_end.end_function()
+        ml.builder = b_end
+        expect(count_in_fn(devirt_fn, "alloc")).to_equal(1)
+        expect(count_in_fn(devirt_fn, "store")).to_equal(1)
+        expect(count_in_fn(devirt_fn, "load")).to_equal(1)
+        expect(has_copy_to_local(devirt_fn, n_local)).to_equal(true)
+        expect(has_call_named_or_ptr(devirt_fn, false)).to_equal(true)
+
+    it "resolves unambiguous qualified declaration_parameter_defaults before ambiguous bare entries":
+        val template_ast = parse_full_frontend("fn tmpl(delta: i64, x: mut i64):\n    x = x + delta\n", "decl_tmpl.spl", "decl_tmpl", Logger(level: 0))
+        var template_hl = HirLowering.with_filename("decl_tmpl.spl")
+        val template_hir = template_hl.lower_module(template_ast)
+        val template_fn: HirFunction = template_hir.functions.values()[0]
+        val i64_hir = HirType(kind: HirTypeKind.Int(64, true), span: Span.empty())
+        val mut_i64_hir = HirType(kind: HirTypeKind.Ref(i64_hir, true), span: Span.empty())
+        val decl_params = [
+            MirHirParamDeclarationV1(symbol: SymbolId(id: 1), name: "delta", type_: i64_hir, has_default: false, default_artifact: None, span: Span.empty(), is_mutable: false),
+            MirHirParamDeclarationV1(symbol: SymbolId(id: 2), name: "x", type_: mut_i64_hir, has_default: false, default_artifact: None, span: Span.empty(), is_mutable: true)
+        ]
+        val decl_run = MirHirFunctionDeclarationV1(
+            symbol: template_fn.symbol,
+            name: "run",
+            type_params: template_fn.type_params,
+            params: decl_params,
+            return_type: template_fn.return_type,
+            effects: template_fn.effects,
+            visibility: template_fn.visibility,
+            is_async: template_fn.is_async,
+            is_static: template_fn.is_static,
+            is_public: template_fn.is_public,
+            is_method: template_fn.is_method,
+            is_mutable: template_fn.is_mutable,
+            is_const: template_fn.is_const,
+            is_extern: template_fn.is_extern,
+            func_attr: template_fn.func_attr,
+            has_export_attr: template_fn.has_export_attr,
+            export_attr: template_fn.export_attr,
+            is_generic_template: template_fn.is_generic_template,
+            span: Span.empty()
+        )
+        var syms_decl = SymbolTable.new()
+        val run_sym = syms_decl.define("run", SymbolKind.Function, None, Span.empty(), Visibility.Public, false, Some("mod_a"))
+        val dup_sym = syms_decl.define("dup", SymbolKind.Function, None, Span.empty(), Visibility.Public, false, Some("mod_b"))
+        var ml_decl = MirLowering.new_for_target(syms_decl, driver_mir_target_context(driver_core_compile_options_default()))
+        ml_decl.declaration_repository = Some(MirHirDeclarationRepositoryV1(
+            artifact_context: HirOwnedArtifactContextV1(directory: "", producer_header: "", enabled: false),
+            final_repository_authority: "probe",
+            ordered_modules: [],
+            modules: {},
+            authority: "probe"
+        ))
+        ml_decl.declaration_parameter_defaults["mod_a.run"] = MirHirCallableDefaultsV1(module_name: "mod_a", function: decl_run)
+        ml_decl.declaration_parameter_defaults_ambiguous["run"] = true
+        ml_decl.declaration_parameter_defaults_ambiguous["dup"] = true
+
+        var bd = ml_decl.builder
+        bd.begin_function(SymbolId(id: 9960), "decl_spec_probe", MirSignature(params: [], return_type: MirType.i64(), is_variadic: false), Span.empty())
+        val n_d = bd.emit_const_int(10)
+        val delta_d = bd.emit_const_int(5)
+        ml_decl.builder = bd
+        ml_decl.bind_local(9961, n_d)
+        val arg_rx = HirCallArg(has_name: true, name: "x", value: HirExpr(kind: HirExprKind.Var(SymbolId(id: 9961)), has_type_: true, type_: i64_hir, span: Span.empty()), span: Span.empty())
+        val arg_rdelta = HirCallArg(has_name: true, name: "delta", value: HirExpr(kind: HirExprKind.IntLit(5, None), has_type_: true, type_: i64_hir, span: Span.empty()), span: Span.empty())
+        val run_pack = ml_decl.lower_explicit_call_args_with_writebacks_v1([], [arg_rx, arg_rdelta], [i64_hir, mut_i64_hir], 0, run_sym)
+        expect(ml_decl.errors.len()).to_equal(0)
+        expect(run_pack.operands.len()).to_equal(2)
+        expect(run_pack.writebacks.len()).to_equal(1)
+        ml_decl.emit_mut_ref_primitive_writebacks_v1(run_pack.writebacks)
+        expect(ml_decl.named_call_slots_v1("run", [arg_rx, arg_rdelta], run_sym)).to_equal(Ok([1, 0]))
+        expect(ml_decl.named_call_slots_v1("mod_a.run", [arg_rx, arg_rdelta], SymbolId(id: -1))).to_equal(Ok([1, 0]))
+        val completed = ml_decl.complete_named_call_operands_v1("run", [mir_operand_copy(n_d), mir_operand_copy(delta_d)], [1, 0], run_sym)
+        expect(completed.len()).to_equal(2)
+        expect(ml_decl.errors.len()).to_equal(0)
+
+        var slot_is_ptr_0 = false
+        var slot_is_ptr_1 = false
+        var bd_mid = ml_decl.builder
+        val probe_fn_ok = bd_mid.end_function()
+        ml_decl.builder = bd_mid
+        match run_pack.operands[0].kind:
+            case MirOperandKind.Copy(l0) | MirOperandKind.Move(l0):
+                for loc in probe_fn_ok.locals:
+                    if loc.id.id == l0.id:
+                        match loc.type_.kind:
+                            case MirTypeKind.Ptr(_, _): slot_is_ptr_0 = true
+                            case _: ()
+            case _: ()
+        match run_pack.operands[1].kind:
+            case MirOperandKind.Copy(l1) | MirOperandKind.Move(l1):
+                for loc in probe_fn_ok.locals:
+                    if loc.id.id == l1.id:
+                        match loc.type_.kind:
+                            case MirTypeKind.Ptr(_, _): slot_is_ptr_1 = true
+                            case _: ()
+            case _: ()
+        expect(slot_is_ptr_0).to_equal(false)
+        expect(slot_is_ptr_1).to_equal(true)
+        expect(count_in_fn(probe_fn_ok, "alloc")).to_equal(1)
+        expect(count_in_fn(probe_fn_ok, "store")).to_equal(1)
+        expect(count_in_fn(probe_fn_ok, "load")).to_equal(1)
+
+        val dup_slots = ml_decl.named_call_slots_v1("dup", [arg_rx, arg_rdelta], dup_sym)
+        expect(dup_slots.is_err()).to_equal(true)
+        expect(dup_slots.unwrap_err()).to_contain("named call lacks unique declaration metadata")
+        var bd_fail = ml_decl.builder
+        bd_fail.begin_function(SymbolId(id: 9962), "decl_dup_probe", MirSignature(params: [], return_type: MirType.i64(), is_variadic: false), Span.empty())
+        val n_dup = bd_fail.emit_const_int(1)
+        ml_decl.builder = bd_fail
+        ml_decl.bind_local(9963, n_dup)
+        val arg_dx = HirCallArg(has_name: true, name: "x", value: HirExpr(kind: HirExprKind.Var(SymbolId(id: 9963)), has_type_: true, type_: i64_hir, span: Span.empty()), span: Span.empty())
+        val dup_pack = ml_decl.lower_explicit_call_args_with_writebacks_v1([], [arg_dx, arg_rdelta], [i64_hir, mut_i64_hir], 0, dup_sym)
+        var bd_fail_end = ml_decl.builder
+        val dup_fn = bd_fail_end.end_function()
+        ml_decl.builder = bd_fail_end
+        expect(ml_decl.errors.len()).to_be_greater_than(0)
+        expect(ml_decl.errors[0].message).to_contain("named call lacks unique declaration metadata")
+        expect(dup_pack.writebacks.len()).to_equal(0)
+        expect(count_in_fn(dup_fn, "alloc")).to_equal(0)
+
+    it "prioritizes same-module module_fn_params over prescanned bootstrap defaults for omitted non-literal defaults":
+        val parsed = parse_full_frontend(PRESCAN_SAME_MOD_NONLIT_SRC, "prescan_same_mod_nonlit.spl", "prescan_same_mod_nonlit", Logger(level: 0))
+        var hl = HirLowering.with_filename("prescan_same_mod_nonlit.spl")
+        val hir = hl.lower_module(parsed)
+        expect(hl.errors.len()).to_equal(0)
+        var ml = MirLowering.new_for_target(hir.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+        ml.trait_impl_closure_complete = true
+        var prescan_mods: Dict<text, HirModule> = {}
+        prescan_mods[hir.name] = hir
+        ml.prescan_module_struct_names(prescan_mods, hir.name)
+        val mod = ml.lower_module(hir)
+        expect(ml.errors.len()).to_equal(0)
+        val main_opt = find_fn_in_mir(mod, "main")
+        expect(main_opt.?).to_equal(true)
+        val main_fn = main_opt.unwrap()
+        expect(count_in_fn(main_fn, "alloc")).to_equal(2)
+        expect(count_in_fn(main_fn, "store")).to_equal(2)
+        expect(count_in_fn(main_fn, "load")).to_equal(2)
+        expect(call_has_arg_types(main_fn, "free_nonlit", [0], 2)).to_equal(true)
+        expect(call_has_arg_types(main_fn, "NonLitWorker.add_nonlit", [1], 3)).to_equal(true)
+        expect(mir_verify_module(mod).findings.len()).to_equal(0)
+
+        var syms_xmod = SymbolTable.new()
+        val xmod_sym = syms_xmod.define("cross_boot.mod.free_nonlit", SymbolKind.Function, None, Span.empty(), Visibility.Public, false, Some("cross_boot.mod"))
+        val i64_hir = HirType(kind: HirTypeKind.Int(64, true), span: Span.empty())
+        val mut_i64_hir = HirType(kind: HirTypeKind.Ref(i64_hir, true), span: Span.empty())
+        val lit_zero = HirExpr(kind: HirExprKind.IntLit(0, None), has_type_: true, type_: i64_hir, span: Span.empty())
+        val non_lit_callee = HirExpr(kind: HirExprKind.Var(SymbolId(id: 9975)), has_type_: true, type_: i64_hir, span: Span.empty())
+        val non_lit_default = HirExpr(kind: HirExprKind.Call(non_lit_callee, [], []), has_type_: true, type_: i64_hir, span: Span.empty())
+        bootstrap_fn_param_defaults_register("cross_boot.mod.free_nonlit", [
+            HirParam(symbol: SymbolId(id: 1), name: "x", type_: mut_i64_hir, has_default: false, default: lit_zero, span: Span.empty(), is_mutable: true),
+            HirParam(symbol: SymbolId(id: 2), name: "delta", type_: i64_hir, has_default: true, default: non_lit_default, span: Span.empty(), is_mutable: false)
+        ], "cross_boot.mod")
+        var ml_xmod = MirLowering.new_for_target(syms_xmod, driver_mir_target_context(driver_core_compile_options_default()))
+        var bx = ml_xmod.builder
+        bx.begin_function(SymbolId(id: 9970), "cross_boot_probe", MirSignature(params: [], return_type: MirType.i64(), is_variadic: false), Span.empty())
+        val n_x = bx.emit_const_int(40)
+        ml_xmod.builder = bx
+        ml_xmod.bind_local(9971, n_x)
+        val arg_xx = HirCallArg(has_name: true, name: "x", value: HirExpr(kind: HirExprKind.Var(SymbolId(id: 9971)), has_type_: true, type_: i64_hir, span: Span.empty()), span: Span.empty())
+        val xmod_slots = ml_xmod.named_call_slots_v1("cross_boot.mod.free_nonlit", [arg_xx], xmod_sym)
+        expect(xmod_slots.is_err()).to_equal(true)
+        expect(xmod_slots.unwrap_err()).to_contain("named default requires admitted declaration scope")
+        val xmod_pack = ml_xmod.lower_explicit_call_args_with_writebacks_v1([], [arg_xx], [mut_i64_hir, i64_hir], 0, xmod_sym)
+        var bx_end = ml_xmod.builder
+        val xmod_fn = bx_end.end_function()
+        ml_xmod.builder = bx_end
+        expect(ml_xmod.errors.len()).to_be_greater_than(0)
+        expect(ml_xmod.errors[0].message).to_contain("named default requires admitted declaration scope")
+        expect(xmod_pack.writebacks.len()).to_equal(0)
+        expect(count_in_fn(xmod_fn, "alloc")).to_equal(0)
+
+    it "plain by-value param stays by value (control)":
+        expect(count_kind(PLAIN_SRC, "main", "alloc")).to_equal(0)
+        expect(count_kind(PLAIN_SRC, "keep", "store")).to_equal(0)
+
+    it "mut struct param keeps the pointer path without a primitive alloc slot (control)":
+        expect(count_kind(STRUCT_SRC, "main", "alloc")).to_equal(0)
+
+    it "mut array param keeps the pointer path without a primitive alloc slot (control)":
+        expect(count_kind(ARRAY_SRC, "main", "alloc")).to_equal(0)

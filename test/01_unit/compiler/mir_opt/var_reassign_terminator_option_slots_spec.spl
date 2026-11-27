@@ -1,0 +1,79 @@
+use std.spec.*
+use std.io_runtime.{file_read}
+use compiler.mir.mir_instructions.{BlockId, MirBlock, MirInst, MirInstKind, MirOperand, MirOperandKind, MirTerminator}
+use compiler.mir.mir_types.{LocalId, MirConstValue, MirType}
+use compiler.mir_opt.var_reassign_analysis.{analyze_var_reassign_blocks}
+
+# Stage3 hello canary (s3_fable38, 2026-11-04): native_compile died with
+# panic RTS (rt_panic total enum match fell through in
+# var_reassign_operand_local) because the Ret arm of
+# var_reassign_collect_term_escapes_with_aliases bound the optional
+# terminator value BARE (val ret_value = value), keeping the Option
+# transport word; every function has a Ret, so every object failed. The fix
+# narrows with ?? plus a proven-unreachable sentinel, like the Call arms.
+# These cases drive the Ret / CallTerminator optional slots through the
+# public analysis so the escape verdicts stay exact on the seed and the path
+# reproduces on a stage3 binary that still miscompiles the bare bind.
+
+fn local(id: i64) -> LocalId:
+    LocalId(id: id)
+
+fn copy_operand(id: i64) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Copy(local(id)))
+
+fn const_inst(id: i64, value: i64) -> MirInst:
+    MirInst(kind: MirInstKind.Const(local(id), MirConstValue.Int(value), MirType.i64()), span: nil)
+
+fn reassigned_twice(id: i64) -> [MirInst]:
+    val first = const_inst(id, 1)
+    val second = const_inst(id, 2)
+    [first, second]
+
+fn blocks_with(instructions: [MirInst], terminator: MirTerminator) -> [MirBlock]:
+    val block = MirBlock(id: BlockId.new(0), label: "entry", instructions: instructions, terminator: terminator)
+    [block]
+
+fn no_call_args() -> [MirOperand]:
+    val none: [MirOperand] = []
+    none
+
+describe "var reassignment terminator escapes through optional slots":
+    it "REPRO: a reassigned local returned through Ret(Some) escapes and blocks the SSA transform":
+        val blocks = blocks_with(reassigned_twice(3), MirTerminator.Ret(Some(copy_operand(3))))
+        val analysis = analyze_var_reassign_blocks(blocks)
+        expect(analysis.has_var_reassignment).to_equal(true)
+        expect(analysis.escape_analyzed).to_equal(true)
+        expect(analysis.no_escape).to_equal(false)
+        expect(analysis.ssa_transform_safe).to_equal(false)
+
+    it "sibling: Ret(nil) escapes nothing, so the reassigned local stays SSA-safe":
+        val blocks = blocks_with(reassigned_twice(3), MirTerminator.Ret(nil))
+        val analysis = analyze_var_reassign_blocks(blocks)
+        expect(analysis.has_var_reassignment).to_equal(true)
+        expect(analysis.no_escape).to_equal(true)
+        expect(analysis.ssa_transform_safe).to_equal(true)
+
+    it "sibling: Ret(Some) of an unrelated local keeps the reassigned local SSA-safe":
+        var instructions = reassigned_twice(3)
+        instructions = instructions.push(const_inst(4, 9))
+        val blocks = blocks_with(instructions, MirTerminator.Ret(Some(copy_operand(4))))
+        val analysis = analyze_var_reassign_blocks(blocks)
+        expect(analysis.no_escape).to_equal(true)
+        expect(analysis.ssa_transform_safe).to_equal(true)
+
+    it "sibling: a CallTerminator whose present dest is the reassigned local marks it escaped":
+        val term = MirTerminator.CallTerminator(Some(local(5)), copy_operand(7), no_call_args(), BlockId.new(0), nil, nil, nil)
+        val analysis = analyze_var_reassign_blocks(blocks_with(reassigned_twice(5), term))
+        expect(analysis.no_escape).to_equal(false)
+
+    it "sibling: a CallTerminator with a nil dest and an unrelated callee escapes nothing":
+        val term = MirTerminator.CallTerminator(nil, copy_operand(7), no_call_args(), BlockId.new(0), nil, nil, nil)
+        val analysis = analyze_var_reassign_blocks(blocks_with(reassigned_twice(5), term))
+        expect(analysis.no_escape).to_equal(true)
+
+    it "prevention: no optional terminator slot is bound bare in the analysis source":
+        val src = file_read("src/compiler/60.mir_opt/mir_opt/var_reassign_analysis.spl")
+        expect(src.contains("val ret_value = value\n")).to_equal(false)
+        expect(src.contains("val term_dest = dest\n")).to_equal(false)
+        expect(src.contains("val ret_value: MirOperand = value ?? ")).to_equal(true)
+        expect(src.contains("val term_dest: LocalId = dest ?? ")).to_equal(true)

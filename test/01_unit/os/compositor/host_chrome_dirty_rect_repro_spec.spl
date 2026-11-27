@@ -1,0 +1,204 @@
+"""
+## Purpose and audience
+Purpose: Reproduce HostCompositor cached-chrome full-frame clear/blit bug when only window content updates.
+Audience: compositor and GUI rendering engineers.
+## Operator workflow
+Run with `bin/simple test test/01_unit/os/compositor/host_chrome_dirty_rect_repro_spec.spl --mode=interpreter`.
+## Compatibility and limitations
+Uses an in-process instrumented CompositorBackend over an 800x600 desktop without OS windowing APIs.
+"""
+# @manual: primary
+# @req REQ-OS-COMPOSITOR-001
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use common.window_protocol.geometry.{Size}
+use common.ui.glyph_bitmap_8x16.{get_glyph_8x16}
+use os.compositor.display_backend.{CompositorBackend, CompositorGlassCapable}
+use os.compositor.host_compositor_entry.{
+    HostCompositor,
+    host_wm_force_direct_chrome
+}
+use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW}
+
+var _repro_clear_calls: i64 = 0
+var _repro_fill_calls: i64 = 0
+var _repro_fill_pixels: i64 = 0
+var _repro_blit_calls: i64 = 0
+var _repro_blit_pixels: i64 = 0
+var _repro_present_calls: i64 = 0
+var _repro_present_rect_calls: i64 = 0
+
+fn _reset_repro_counters():
+    _repro_clear_calls = 0
+    _repro_fill_calls = 0
+    _repro_fill_pixels = 0
+    _repro_blit_calls = 0
+    _repro_blit_pixels = 0
+    _repro_present_calls = 0
+    _repro_present_rect_calls = 0
+
+class DirtyRectReproBackend:
+    w: i32
+    h: i32
+    pixels: [u32]
+
+    static fn new(width: i32, height: i32) -> DirtyRectReproBackend:
+        DirtyRectReproBackend(w: width, h: height, pixels: [0u32; width * height])
+
+impl CompositorBackend for DirtyRectReproBackend:
+    fn width() -> i32:
+        self.w
+
+    fn height() -> i32:
+        self.h
+
+    me clear(color: u32):
+        _repro_clear_calls = _repro_clear_calls + 1
+        var i = 0
+        while i < self.pixels.len():
+            self.pixels[i] = color
+            i = i + 1
+
+    me fill_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
+        _repro_fill_calls = _repro_fill_calls + 1
+        if w > 0 and h > 0:
+            _repro_fill_pixels = _repro_fill_pixels + (w.to_i64() * h.to_i64())
+        var x0 = if x < 0: 0 else: x
+        var y0 = if y < 0: 0 else: y
+        var x1 = x + w
+        var y1 = y + h
+        if x1 > self.w:
+            x1 = self.w
+        if y1 > self.h:
+            y1 = self.h
+        var yy = y0
+        while yy < y1:
+            var idx = yy * self.w + x0
+            var xx = x0
+            while xx < x1:
+                self.pixels[idx] = color
+                idx = idx + 1
+                xx = xx + 1
+            yy = yy + 1
+
+    me draw_text(x: i32, y: i32, text_str: text, fg: u32, bg: u32):
+        val bg_opaque = ((bg >> 24) & 0xFFu32) != 0u32
+        var cx = x
+        for ch in text_str:
+            val glyph = get_glyph_8x16(ch.char_code_at(0).to_u8())
+            var row = 0
+            while row < 16:
+                val bits = glyph[row]
+                var col = 0
+                while col < 8:
+                    val px = cx + col
+                    val py = y + row
+                    if px >= 0 and py >= 0 and px < self.w and py < self.h:
+                        val mask = (0x80 >> col).to_u8()
+                        if (bits & mask) != 0u8:
+                            self.pixels[py * self.w + px] = fg
+                        elif bg_opaque:
+                            self.pixels[py * self.w + px] = bg
+                    col = col + 1
+                row = row + 1
+            cx = cx + 8
+
+    me draw_char_8x16(x: i32, y: i32, ch: u8, fg: u32, bg: u32):
+        val bg_opaque = ((bg >> 24) & 0xFFu32) != 0u32
+        val glyph = get_glyph_8x16(ch)
+        var row = 0
+        while row < 16:
+            val bits = glyph[row]
+            var col = 0
+            while col < 8:
+                val px = x + col
+                val py = y + row
+                if px >= 0 and py >= 0 and px < self.w and py < self.h:
+                    val mask = (0x80 >> col).to_u8()
+                    if (bits & mask) != 0u8:
+                        self.pixels[py * self.w + px] = fg
+                    elif bg_opaque:
+                        self.pixels[py * self.w + px] = bg
+                col = col + 1
+            row = row + 1
+
+    me put_pixel(x: i32, y: i32, color: u32):
+        if x >= 0 and y >= 0 and x < self.w and y < self.h:
+            self.pixels[y * self.w + x] = color
+
+    me blit_pixels(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
+        _repro_blit_calls = _repro_blit_calls + 1
+        if w > 0 and h > 0:
+            _repro_blit_pixels = _repro_blit_pixels + (w.to_i64() * h.to_i64())
+        val src_len = pixels.len() as i32
+        var row: i32 = 0
+        while row < h:
+            val dy = y + row
+            if dy >= 0 and dy < self.h:
+                var col0 = if x < 0: 0 - x else: 0
+                var col1 = w
+                if x + col1 > self.w:
+                    col1 = self.w - x
+                var col = col0
+                var src_idx = row * w + col0
+                var dst_idx = dy * self.w + x + col0
+                while col < col1:
+                    if src_idx >= 0 and src_idx < src_len:
+                        self.pixels[dst_idx] = pixels[src_idx]
+                    src_idx = src_idx + 1
+                    dst_idx = dst_idx + 1
+                    col = col + 1
+            row = row + 1
+
+    me present():
+        _repro_present_calls = _repro_present_calls + 1
+
+    me present_rect(x: i32, y: i32, w: i32, h: i32):
+        _repro_present_rect_calls = _repro_present_rect_calls + 1
+
+    fn as_glass_capable() -> CompositorGlassCapable?:
+        nil
+
+fn _pixels_equal(a: [u32], b: [u32]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
+describe "HostCompositor cached chrome dirty-rect reproducer (#68)":
+    it "restores and composites only the dirty window region on a cached chrome hit instead of clearing the 800x600 desktop":
+        step("Render frame 1 on an 800x600 desktop with two windows to populate the chrome cache")
+        host_wm_force_direct_chrome(true)
+        _reset_repro_counters()
+        val backend = DirtyRectReproBackend.new(800, 600)
+        val comp = HostCompositor.new(backend, Size.wh(800, 600))
+        comp.apply_bridge_request(1, 10, COMP_CREATE_WINDOW.to_i64(), 0, "WinOne", 30, 70, 180, 120, "alpha", 1, "/sys/apps/one")
+        comp.apply_bridge_request(2, 11, COMP_CREATE_WINDOW.to_i64(), 0, "WinTwo", 360, 120, 220, 150, "beta", 2, "/sys/apps/two")
+        val win1_id = comp.windows[0].id
+        comp.render_frame()
+
+        step("Reset counters, update only WinOne content, and render frame 2")
+        _reset_repro_counters()
+        expect(comp.update_window_content(win1_id, "omega-updated")).to_equal(true)
+        comp.render_frame()
+        host_wm_force_direct_chrome(false)
+
+        # Chrome cache hit must NOT re-clear the entire 800x600 framebuffer.
+        expect(_repro_clear_calls).to_equal(0)
+        expect(_repro_present_calls + _repro_present_rect_calls).to_equal(1)
+        val drawn_pixels = _repro_fill_pixels + _repro_blit_pixels
+        # WinOne is 180x120 = 21,600 px vs full desktop 800x600 = 480,000 px.
+        expect(drawn_pixels).to_be_less_than(120000)
+
+        # Verify bit-exact parity against a cold full-frame render of identical state.
+        val oracle_backend = DirtyRectReproBackend.new(800, 600)
+        val oracle = HostCompositor.new(oracle_backend, Size.wh(800, 600))
+        oracle.apply_bridge_request(1, 10, COMP_CREATE_WINDOW.to_i64(), 0, "WinOne", 30, 70, 180, 120, "omega-updated", 1, "/sys/apps/one")
+        oracle.apply_bridge_request(2, 11, COMP_CREATE_WINDOW.to_i64(), 0, "WinTwo", 360, 120, 220, 150, "beta", 2, "/sys/apps/two")
+        oracle.render_frame()
+        expect(_pixels_equal(backend.pixels, oracle_backend.pixels)).to_equal(true)

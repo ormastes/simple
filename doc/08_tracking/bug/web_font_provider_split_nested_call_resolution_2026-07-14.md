@@ -57,3 +57,23 @@ with the same `str.split` nested-call diagnostic while compiling
 not font-specific. The prevention test should be one minimal nested
 `text.split` expression under the same interpreter path; SPipe docgen must then
 complete with the selected runtime and zero placeholder manuals.
+
+## 2026-11-25 verification (P2 fleet, release/1.0.0 @ d1b74b3fa1d) — RESOLVED
+
+The seed method-resolution defect is fixed in the tracked release/1.0.0 binary
+(`bin/simple.exe`, Rust seed v1.0.0-rc.1). Both original failure shapes now
+execute correctly (minimal probes, `SIMPLE_LIB=src bin/simple.exe run`,
+interpreter lane):
+
+1. Site-2 shape — `language.trim().lower().split("-")` with the chained result
+   passed as a call argument: prints `[en, us]` (was:
+   `error: semantic: method 'split' not found on value of type str in nested
+   call context`).
+2. Site-1 shape — `strip_q(family.split(",")[0].trim()).to_lower()` (`.split`
+   on an erased receiver in nested call-arg position): prints `arial`.
+
+The "seed compiler fix pending" status line above is stale; the compact
+natural form no longer needs the typed-intermediate workaround on this binary.
+(The source-level workarounds landed in the original commit remain in place
+and are harmless.) Verified by execution on the pinned binary; probe files
+were scratch-only and are not committed.

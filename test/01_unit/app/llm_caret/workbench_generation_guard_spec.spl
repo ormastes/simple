@@ -1,0 +1,39 @@
+"""Reconnect generation guard (CU-019 gap): every input mode captured against the
+old generation is rejected after a restart, a draft re-captured on the new
+generation is queued, and a stale pane binding rejects even a current draft."""
+# @req REQ-CARET-CU-019 REQ-CARET-UI-002
+use std.spec.*
+use app.llm_caret.workbench.session_contract.{SessionId, InputMode, Delivery,
+    ComposerDraft, new_draft, next_generation}
+use app.llm_caret.workbench.session_source.{send_draft_guarded}
+use app.llm_caret.workbench.pane_binding.{PaneBinding, resolve_pane_binding}
+
+fn deliver(draft: ComposerDraft, live: SessionId, pane_gen: i64, observed: i64) -> Delivery:
+    val b = PaneBinding(session: live, pane_id: "%a1", pane_generation: pane_gen)
+    send_draft_guarded(draft, live, resolve_pane_binding([b], live, observed)).delivery
+
+describe "restart generation guard (CU-019)":
+    it "rejects old-generation receipts in every input mode":
+        step("capture on gen 1, restart to gen 2")
+        val g1 = SessionId(value: "a1", generation: 1)
+        val g2 = next_generation(g1)
+        expect(g2.generation).to_equal(2)
+        val modes = [InputMode.Message, InputMode.ProviderCommand, InputMode.WorkbenchCommand, InputMode.TerminalPaste]
+        for m in modes:
+            expect(deliver(new_draft(g1, m), g2, 1, 1) == Delivery.Rejected).to_equal(true)
+
+    it "queues a draft re-captured on the restarted generation":
+        step("draft on gen 2, binding on gen 2")
+        val g2 = next_generation(SessionId(value: "a1", generation: 1))
+        expect(deliver(new_draft(g2, InputMode.Message), g2, 1, 1) == Delivery.Queued).to_equal(true)
+
+    it "rejects a current draft when the pane itself was restarted":
+        step("binding pane gen 1, observed pane gen 2")
+        val g2 = SessionId(value: "a1", generation: 2)
+        expect(deliver(new_draft(g2, InputMode.Message), g2, 1, 2) == Delivery.Rejected).to_equal(true)
+
+    it "rejects a draft for another session id with the same generation":
+        step("draft for a2 on a1's live binding")
+        val live = SessionId(value: "a1", generation: 3)
+        val other = SessionId(value: "a2", generation: 3)
+        expect(deliver(new_draft(other, InputMode.Message), live, 1, 1) == Delivery.Rejected).to_equal(true)

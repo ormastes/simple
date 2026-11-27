@@ -463,14 +463,9 @@ pub extern "C" fn __rt_btreemap_last_key(handle: i64) -> i64 {
 
 // -- Process/System stubs --
 //
-// `rt_getpid` and `rt_thread_available_parallelism` are provided by the
-// bundled `simple-runtime` (duplicate symbols fail the macOS link), so they are
-// not redefined here.
-
-#[no_mangle]
-pub extern "C" fn rt_hostname() -> i64 {
-    stub_make_string("localhost")
-}
+// `rt_getpid`, `rt_hostname`, and `rt_thread_available_parallelism` are provided
+// by the bundled `simple-runtime` (duplicate symbols fail the macOS link), so
+// they are not redefined here.
 
 #[no_mangle]
 pub extern "C" fn rt_system_cpu_count() -> i64 {
@@ -1250,7 +1245,14 @@ noop_stubs!(
     __mock_policy_try_check,
     __mock_policy_disable,
     __mock_policy_get_mode,
-    // Vulkan stubs
+);
+
+// Vulkan stubs: only without the `vulkan` feature. With it, simple_runtime's
+// gpu_vulkan module defines the real twelve, and these duplicates forced
+// `-z muldefs` on every GPU link (Blocker 8,
+// linux_gb10_n2_qualification_executable_blockers_2026-11-18.md).
+#[cfg(not(feature = "vulkan"))]
+noop_stubs!(
     rt_vk_available,
     rt_vk_device_create,
     rt_vk_device_free,

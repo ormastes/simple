@@ -9,3 +9,7 @@ Draft: include slice/substring in existing primitive text receiver provenance pr
 Qualification requires actual ByteSpan prefix/slice comparisons, a colliding custom slice owner, runtime array slices, declared and inferred text substring/slice, and receiver side effects counted once. Check emitted callees and executed values. Guarding the wrong builtin alone is not proof that custom dispatch succeeds. The existing paired Phase 4 fixtures preserve the wrong-code and MIR failures; no PASS claimed.
 
 Phase 4 owner exact two-hunk source review found no P0/P1: existing shared prelower flag preserves evaluation, array dispatch precedes string fallback, static owners excluded. New test/fixtures/native/custom_slice_owner/main.spl adds five value checks, AUTHORED_UNEXECUTED.
+
+**Revalidated 2026-11-02: still plausible because OPEN, draft compiler guard UNEXECUTED; no merged fix commit with a passing regression is cited in this doc.**
+
+**Triage 2026-11-03 (group C):** the draft guard (e14301086, `text_builtin_resolution_allowed and static_receiver_name == ""` on the substring/slice arm plus slice/substring in the primitive-text receiver shape) IS on release/1.0.0 (method_calls_literals.spl:3702 and :3748). Status -> fix-implemented-verification-pending. Verify: native-build test/fixtures/native/custom_slice_owner/main.spl, expect exit 0 and stdout exactly `custom-slice-receiver-once\n`.

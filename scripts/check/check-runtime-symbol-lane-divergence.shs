@@ -52,8 +52,22 @@ LANE_A_FILES="runtime_memory.c runtime_time.c runtime_timestamp.c runtime_db.c r
 # Lane B: src/compiler_rust/compiler/src/pipeline/native_project/tools.rs
 # `build_c_runtime_library` unconditional `runtime_inputs` (core-c-bootstrap).
 LANE_B_FILES="runtime_native.c runtime_framebuffer.c runtime_directx_core.c runtime_legacy_core.c runtime_fork.c runtime_memtrack.c runtime_process.c runtime_font.c runtime_pool.c runtime_simd_utf8.c runtime_simd_dispatch.c"
+# Lane B truthfully compiles every source with -DSIMPLE_CORE_C_STANDALONE=1
+# -DSIMPLE_RUNTIME_MEMORY_OWNER=1 (tools.rs build_c_runtime_library), which
+# compiles out runtime_native.c's memory-family fallback copies; without the
+# defines this script reports pairs the real archive never exhibits.
+LANE_B_DEFINES="-DSIMPLE_CORE_C_STANDALONE=1 -DSIMPLE_RUNTIME_MEMORY_OWNER=1"
 # Lane C: src/app/compile/native.spl `rt_sources` (pure-Simple compile_native).
-LANE_C_FILES="runtime.c runtime_thread.c runtime_memtrack.c runtime_fork.c"
+# Mirrors the modern core-C set (same source of truth as Lane B,
+# src/compiler_rust/compiler/src/pipeline/native_project/tools.rs
+# `build_c_runtime_library` unconditional runtime_inputs, plus
+# runtime_socket_nonblock.c for simple_local_unix_origin_v1 which Lane B
+# resolves from its Rust staticlibs). Compiled with the same
+# -DSIMPLE_CORE_C_STANDALONE=1 -DSIMPLE_RUNTIME_MEMORY_OWNER=1 defines the
+# lane passes on its clang command line, so runtime_legacy_core.c (not
+# runtime_thread.c) owns spl_thread_cpu_count, exactly as in the real link.
+LANE_C_FILES="runtime_native.c runtime_file_view.c runtime_disk_headroom.c runtime_memory_headroom.c runtime_cache_host_authority_v1.c runtime_framebuffer.c runtime_directx_core.c runtime_legacy_core.c runtime_core_io_exports.c runtime_core_host_services.c runtime_fork.c runtime_memtrack.c runtime_process.c runtime_process_tree.c runtime_memory.c runtime_alloc_observer.c runtime_process_owned.c runtime_coverage_core.c runtime_contracts.c runtime_font.c runtime_thread.c runtime_simd_utf8.c runtime_simd_case.c runtime_simd_search.c runtime_simd_dispatch.c runtime_packed_span.c runtime_terminal.c runtime_prof_sample.c runtime_core_exports.c runtime_core_intrinsics.c runtime_backend_plugin.c runtime_socket_nonblock.c hosted_cocoa.c hosted_win32.c"
+LANE_C_DEFINES="-DSIMPLE_CORE_C_STANDALONE=1 -DSIMPLE_RUNTIME_MEMORY_OWNER=1"
 
 MAP_FILE="$TMP_DIR/sym_map.tsv"
 : >"$MAP_FILE"
@@ -61,11 +75,12 @@ MAP_FILE="$TMP_DIR/sym_map.tsv"
 compile_and_collect() {
     lane="$1"
     files="$2"
+    defines="$3"
     for f in $files; do
         src="$RUNTIME_DIR/$f"
         [ -f "$src" ] || { echo "warn: $lane missing source $src" >&2; continue; }
         obj="$TMP_DIR/${lane}_${f}.o"
-        if ! "$CC" -c -std=gnu11 -I "$RUNTIME_DIR" -o "$obj" "$src" >"$TMP_DIR/${lane}_${f}.log" 2>&1; then
+        if ! "$CC" -c -std=gnu11 $defines -I "$RUNTIME_DIR" -o "$obj" "$src" >"$TMP_DIR/${lane}_${f}.log" 2>&1; then
             echo "warn: $lane failed to compile $f (see $TMP_DIR/${lane}_${f}.log) — skipped" >&2
             continue
         fi
@@ -75,9 +90,9 @@ compile_and_collect() {
     done
 }
 
-compile_and_collect laneA "$LANE_A_FILES"
-compile_and_collect laneB "$LANE_B_FILES"
-compile_and_collect laneC "$LANE_C_FILES"
+compile_and_collect laneA "$LANE_A_FILES" ""
+compile_and_collect laneB "$LANE_B_FILES" "$LANE_B_DEFINES"
+compile_and_collect laneC "$LANE_C_FILES" "$LANE_C_DEFINES"
 
 sym_count=$(cut -f1 "$MAP_FILE" | sort -u | wc -l | tr -d ' ')
 echo "runtime_symbols_scanned=$sym_count"

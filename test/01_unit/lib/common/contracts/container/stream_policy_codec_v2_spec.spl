@@ -1,0 +1,65 @@
+"""
+## Purpose and audience
+Pins the strict canonical codec of `ContainerStreamPolicyV2` (milestone_0023 part B): the encoding is exactly the
+bytes `container_stream_policy_digest_v2` hashes, and the decoder accepts only those bytes. Written for owners of
+the V4 agent attach packet, which carries a controller-signed stream policy.
+## Operator workflow
+Run this one file with the self-hosted runner and read `SPEC FILE VERDICT`.
+Status: AUTHORED, NOT_RUN (no runnable binary when written, 2026-11-17).
+## Compatibility and limitations
+A decoded policy is DATA only: this spec proves nothing about helper admission or about opening a stream.
+## Verification guidance and troubleshooting
+A digest that differs from `sha256_text(encode(policy))` means the digest and the wire form drifted apart.
+"""
+use std.common.crypto.sha256.sha256_text
+use std.common.contracts.container.stream_v2.{ContainerStreamPolicyV2, container_stream_policy_encode_v2,
+    container_stream_policy_decode_v2, container_stream_policy_digest_v2}
+use test.fixtures.orchestration.primary_attach_fixture_v1.primary_policy_fixture_v1
+
+describe "ContainerStreamPolicyV2 strict canonical codec":
+    it "round-trips byte-equal and keeps the digest on the encoded bytes":
+        val policy = primary_policy_fixture_v1()
+        val wire = container_stream_policy_encode_v2(policy).unwrap()
+        expect(sha256_text(wire)).to_equal(container_stream_policy_digest_v2(policy).unwrap())
+        val decoded = container_stream_policy_decode_v2(wire).unwrap()
+        expect(container_stream_policy_encode_v2(decoded).unwrap()).to_equal(wire)
+        expect(decoded.broker_program).to_equal("/trusted/broker")
+        expect(decoded.environment).to_equal(["LANG=C"])
+        expect(decoded.broker_budget.memory_limit_bytes).to_equal(16777216)
+        expect(decoded.timeout_ms).to_equal(30000)
+
+    it "round-trips an empty and a full environment":
+        var empty = primary_policy_fixture_v1()
+        empty.environment = []
+        val bare = container_stream_policy_encode_v2(empty).unwrap()
+        expect(container_stream_policy_encode_v2(container_stream_policy_decode_v2(bare).unwrap()).unwrap()).to_equal(bare)
+        var full = primary_policy_fixture_v1()
+        full.environment = []
+        for i in 0..64: full.environment.push("NAME_" + i.to_text() + "=value")
+        val wide = container_stream_policy_encode_v2(full).unwrap()
+        val decoded = container_stream_policy_decode_v2(wide).unwrap()
+        expect(decoded.environment.len()).to_equal(64)
+        expect(container_stream_policy_encode_v2(decoded).unwrap()).to_equal(wide)
+
+    it "refuses bytes that are not the canonical encoding":
+        val wire = container_stream_policy_encode_v2(primary_policy_fixture_v1()).unwrap()
+        expect(container_stream_policy_decode_v2("").unwrap_err()).to_equal("container-stream-policy-size")
+        expect(container_stream_policy_decode_v2(wire + " ").is_err()).to_equal(true)
+        expect(container_stream_policy_decode_v2(wire + "\n").is_err()).to_equal(true)
+        expect(container_stream_policy_decode_v2("[1, 2]").is_err()).to_equal(true)
+
+    it "refuses an unknown, missing or duplicate field":
+        val wire = container_stream_policy_encode_v2(primary_policy_fixture_v1()).unwrap()
+        # The canonical form is one braced dict: insert a field before the closing brace.
+        val body = wire.substring(0, wire.byte_len() - 1)
+        expect(container_stream_policy_decode_v2(body + ", zz: 1}").is_err()).to_equal(true)
+        expect(container_stream_policy_decode_v2(body + ", root: \"/trusted/output\"}").is_err()).to_equal(true)
+        expect(container_stream_policy_decode_v2("{kind: \"container-stream-policy-v2\"}").is_err()).to_equal(true)
+
+    it "refuses a policy the digest validation refuses":
+        var policy = primary_policy_fixture_v1()
+        policy.memory_policy = "advisory"
+        expect(container_stream_policy_encode_v2(policy).unwrap_err()).to_equal("container-stream-policy-bound-invalid")
+        var relative = primary_policy_fixture_v1()
+        relative.broker_program = "broker"
+        expect(container_stream_policy_encode_v2(relative).unwrap_err()).to_equal("container-stream-policy-path-invalid")

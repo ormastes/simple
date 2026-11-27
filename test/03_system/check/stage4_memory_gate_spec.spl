@@ -38,7 +38,13 @@ a positive integer, and a missing-argument invocation fails with usage help.
 """
 
 use std.spec.*
-use std.io_runtime.{file_read, file_exists, process_run, dir_create_all, host_os}
+use std.io_runtime.{file_read, file_exists, process_run, dir_create_all, host_os, env_get}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove_all}
+use std.nogc_sync_mut.io.process_ops.{resolve_shell_argv, is_posix_shell_argv}
+
+fn has_posix_shell() -> bool:
+    val (sh_bin, _args) = resolve_shell_argv("true")
+    is_posix_shell_argv(sh_bin)
 
 val ARTIFACT_DIR = "build/test-artifacts/stage4_memory_gate"
 val CSV_PATH = "build/test-artifacts/stage4_memory_gate/memstat.csv"
@@ -70,84 +76,132 @@ fn non_empty_lines(content: text) -> [text]:
             out = out.push(line)
     out
 
+# Mirrors the SIMPLE_TEST_BINARY / SIMPLE_BINARY override convention used by
+# mem_attr_report_spec.spl: defaults to deployed bin/simple, honoring an
+# explicit override when invoked under a bootstrap seed or candidate binary.
+fn contract_binary() -> text:
+    val override = env_get("SIMPLE_TEST_BINARY")
+    if override != "" and override != nil:
+        return override.replace("\\", "/")
+    val bin_override = env_get("SIMPLE_BINARY")
+    if bin_override != "" and bin_override != nil:
+        return bin_override.replace("\\", "/")
+    "bin/simple"
+
 # @step: Start a short-lived background target process
 fn start_short_lived_target(seconds: text) -> text:
-    val (out, _err, code) = process_run("/bin/sh", ["-c", "sleep {seconds} >/dev/null 2>&1 & echo $!"])
+    val (sh_bin, sh_args) = resolve_shell_argv("sleep {seconds} >/dev/null 2>&1 & echo $!")
+    val (out, _err, code) = process_run(sh_bin, sh_args)
     if code != 0:
         return ""
     out.trim()
 
 # @step: Sample the target with memstat until it exits
 fn sample_with_memstat(pid: text, csv: text) -> i64:
-    val (_out, _err, code) = process_run("bin/simple", ["run", "src/app/memstat/main.spl", pid, csv, "300"])
+    val (_out, _err, code) = process_run(contract_binary(), ["run", "src/app/memstat/main.spl", pid, csv, "300"])
     code
 
+fn run_by_owner_with(binary: text, attr_on: bool) -> (text, text, i64):
+    val attr_prefix = if attr_on: "SIMPLE_MEM_ATTR=1 " else: ""
+    val cmd = "env -u SIMPLE_EXECUTION_MODE {attr_prefix}'{binary}' run src/app/memstat/main.spl --by-owner"
+    val (sh_bin, sh_args) = resolve_shell_argv(cmd)
+    process_run(sh_bin, sh_args)
+
+fn run_by_owner_attr_on() -> (text, text, i64):
+    val (out, err, code) = run_by_owner_with(contract_binary(), true)
+    if out.contains("OWNER\tLIVE\tPEAK\tALLOCS"):
+        return (out, err, code)
+    for candidate in [
+        "src/compiler_rust/target/release/simple.exe",
+        "src/compiler_rust/target/release/simple",
+        "src/compiler_rust/target/debug/simple.exe",
+        "src/compiler_rust/target/debug/simple"
+    ]:
+        if file_exists(candidate):
+            val (out2, err2, code2) = run_by_owner_with(candidate, true)
+            if out2.contains("OWNER\tLIVE\tPEAK\tALLOCS"):
+                return (out2, err2, code2)
+    (out, err, code)
+
 describe "Stage-4 memory gate sampler":
+    after_each:
+        if file_exists(ARTIFACT_DIR):
+            dir_remove_all(ARTIFACT_DIR)
+
     it "records a header plus data rows with positive RSS for a short-lived process":
         # @req REQ-SSPEC-SYSTEM
         step("records a header plus data rows with positive RSS for a short-lived process")
-        step("Prepare a clean artifact directory")
-        dir_create_all(ARTIFACT_DIR)
+        if host_os() == "windows":
+            pending("BLOCKED: memstat PID sampling requires Linux /proc or macOS ps; unsupported on Windows")
+        else:
+            step("Prepare a clean artifact directory")
+            dir_create_all(ARTIFACT_DIR)
 
-        step("Start a short-lived background target process")
-        val pid = start_short_lived_target("8")
-        val pid_num = parse_dec(pid)
-        expect(pid_num).to_be_greater_than(0)
+            step("Start a short-lived background target process")
+            val pid = start_short_lived_target("8")
+            val pid_num = parse_dec(pid)
+            expect(pid_num).to_be_greater_than(0)
 
-        step("Sample the target with memstat until it exits")
-        val rc = sample_with_memstat(pid, CSV_PATH)
-        assert_equal(rc, 0)
+            step("Sample the target with memstat until it exits")
+            val rc = sample_with_memstat(pid, CSV_PATH)
+            assert_equal(rc, 0)
 
-        step("Read back the recorded CSV profile")
-        assert_true(file_exists(CSV_PATH))
-        val lines = non_empty_lines(file_read(CSV_PATH))
-        expect(lines.len()).to_be_greater_than(1)
-        assert_equal(lines[0], CSV_HEADER)
+            step("Read back the recorded CSV profile")
+            assert_true(file_exists(CSV_PATH))
+            val lines = non_empty_lines(file_read(CSV_PATH))
+            expect(lines.len()).to_be_greater_than(1)
+            assert_equal(lines[0], CSV_HEADER)
 
-        step("Parse the RSS column of the first data row")
-        val cols = lines[1].split(",")
-        assert_equal(cols.len(), 8)
-        val rss_kb = parse_dec(cols[1])
-        expect(rss_kb).to_be_greater_than(0)
-        if host_os() == "macos":
-            step("Confirm Linux-only metrics are marked unavailable on macOS")
-            expect(cols[2]).to_equal("-1")
-            expect(cols[7]).to_equal("-1")
+            step("Parse the RSS column of the first data row")
+            val cols = lines[1].split(",")
+            assert_equal(cols.len(), 8)
+            val rss_kb = parse_dec(cols[1])
+            expect(rss_kb).to_be_greater_than(0)
+            if host_os() == "macos":
+                step("Confirm Linux-only metrics are marked unavailable on macOS")
+                expect(cols[2]).to_equal("-1")
+                expect(cols[7]).to_equal("-1")
 
     it "rejects an invocation without arguments and prints usage help":
         # @req REQ-SSPEC-SYSTEM
         step("rejects an invocation without arguments and prints usage help")
         step("Run memstat with no arguments")
-        val (out, _err, code) = process_run("bin/simple", ["run", "src/app/memstat/main.spl"])
+        val (out, _err, code) = process_run(contract_binary(), ["run", "src/app/memstat/main.spl"])
         expect(code).to_equal(2)
         expect(out).to_contain("usage: memstat")
 
     it "--by-owner degrades to a clear status instead of a crash or silent empty output when attribution is off":
         # @req REQ-SSPEC-SYSTEM
         step("--by-owner degrades to a clear status instead of a crash or silent empty output when attribution is off")
-        step("Run memstat --by-owner without SIMPLE_MEM_ATTR set")
-        val (out, _err, code) = run_by_owner_with(contract_binary(), false)
+        if not has_posix_shell():
+            pending("BLOCKED: POSIX sh not available for env -u memstat invocation")
+        else:
+            step("Run memstat --by-owner without SIMPLE_MEM_ATTR set")
+            val (out, _err, code) = run_by_owner_with(contract_binary(), false)
 
-        step("Confirm memstat exits cleanly and always prints the mode banner")
-        assert_equal(code, 0)
-        expect(out).to_contain("memstat --by-owner: per-owner memory report")
+            step("Confirm memstat exits cleanly and always prints the mode banner")
+            assert_equal(code, 0)
+            expect(out).to_contain("memstat --by-owner: per-owner memory report")
 
-        step("Confirm a clear STATUS line is printed: off or extern-unavailable, never a silent empty body")
-        val degraded = out.contains("STATUS\tATTRIBUTION_OFF") or out.contains("STATUS\tEXTERN_UNAVAILABLE")
-        assert_true(degraded)
+            step("Confirm a clear STATUS line is printed: off or extern-unavailable, never a silent empty body")
+            val degraded = out.contains("STATUS\tATTRIBUTION_OFF") or out.contains("STATUS\tEXTERN_UNAVAILABLE")
+            assert_true(degraded)
 
     it "--by-owner prints real per-owner rows when SIMPLE_MEM_ATTR=1 and the extern is available":
         # @req REQ-SSPEC-SYSTEM
         step("--by-owner prints real per-owner rows when SIMPLE_MEM_ATTR=1 and the extern is available")
-        step("Run memstat --by-owner in a child process with SIMPLE_MEM_ATTR=1 (self-heals onto a seed with the extern wired if needed)")
-        val (out, _err, code) = run_by_owner_attr_on()
-
-        step("Confirm the subprocess exited cleanly")
-        assert_equal(code, 0)
-
-        if out.contains("OWNER\tLIVE\tPEAK\tALLOCS"):
-            step("Confirm at least one per-owner data row printed under the header")
-            expect(out).to_contain("<unattributed>")
+        if not has_posix_shell():
+            pending("BLOCKED: POSIX sh not available for env -u memstat invocation")
         else:
-            step("No available binary in this environment has rt_mem_attr_* wired yet; confirm the blocked-dependency status instead of a crash or silent empty output")
-            expect(out).to_contain("STATUS\tEXTERN_UNAVAILABLE")
+            step("Run memstat --by-owner in a child process with SIMPLE_MEM_ATTR=1 (self-heals onto a seed with the extern wired if needed)")
+            val (out, _err, code) = run_by_owner_attr_on()
+
+            step("Confirm the subprocess exited cleanly")
+            assert_equal(code, 0)
+
+            if out.contains("OWNER\tLIVE\tPEAK\tALLOCS"):
+                step("Confirm at least one per-owner data row printed under the header")
+                expect(out).to_contain("<unattributed>")
+            else:
+                step("No available binary in this environment has rt_mem_attr_* wired yet; confirm the blocked-dependency status instead of a crash or silent empty output")
+                expect(out).to_contain("STATUS\tEXTERN_UNAVAILABLE")

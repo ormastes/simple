@@ -1,0 +1,158 @@
+# Pure bounded policy codec plus Linux private bootstrap loader. Decoded data
+# alone is not transport authority: only trusted pinned gateway composition uses
+# a snapshot loaded from the fixed protected-root child below.
+use std.common.sdn.value.SdnValue
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.string_core.str_len
+use std.common.crypto.sha256.sha256_text
+use std.common.base_encoding.utilities.validated_utf8_bytes_to_text_linear
+use std.nogc_sync_mut.orchestration.host_service_domain_v2.host_service_supported_action_v2
+use std.nogc_sync_mut.io.retained_file.*
+use std.io_runtime.host_os
+
+pub const HOST_SERVICE_PEER_POLICY_FILE_V2: text = "host-service-peer-policy-v2.sdn"
+pub const HOST_SERVICE_PEER_POLICY_MAX_BYTES_V2: i64 = 65536
+
+pub struct HostServicePeerRuleV2:
+    peer_uid: i64
+    principal: text
+    project: text
+    service_scope_id: text
+    actions: [text]
+
+pub struct HostServicePeerPolicyV2:
+    rules: [HostServicePeerRuleV2]
+
+pub struct HostServicePeerPolicySnapshotV2:
+    policy: HostServicePeerPolicyV2
+    source_digest: text
+    protected_root: text
+    # Actual geteuid observation on the retained policy FD, not policy data.
+    service_uid: i64
+
+fn host_peer_rule_valid_v2(rule: HostServicePeerRuleV2) -> Result<bool, text>:
+    if rule.peer_uid < 0 or rule.peer_uid > 4294967294: return Err("host-peer-policy-uid-invalid")
+    for identity in [rule.principal, rule.project, rule.service_scope_id]:
+        if not builder_identifier_valid_v1(identity) or identity.contains("*"):
+            return Err("host-peer-policy-identity-invalid")
+    if rule.actions.len() == 0 or rule.actions.len() > 8: return Err("host-peer-policy-actions-bound")
+    var seen: [text] = []
+    for action in rule.actions:
+        if not host_service_supported_action_v2(action): return Err("host-peer-policy-action-invalid")
+        if seen.contains(action): return Err("host-peer-policy-action-duplicate")
+        seen.push(action)
+    Ok(true)
+
+pub fn host_service_peer_policy_encode_v2(policy: HostServicePeerPolicyV2) -> Result<text, text>:
+    if policy.rules.len() == 0 or policy.rules.len() > 64: return Err("host-peer-policy-rules-bound")
+    var seen: [i64] = []
+    var rules: [SdnValue] = []
+    for rule in policy.rules:
+        val valid = host_peer_rule_valid_v2(rule)?
+        if seen.contains(rule.peer_uid): return Err("host-peer-policy-uid-duplicate")
+        seen.push(rule.peer_uid)
+        var actions: [SdnValue] = []
+        for action in rule.actions: actions.push(SdnValue.String(action))
+        rules.push(SdnValue.Dict({"peerUid": SdnValue.Int(rule.peer_uid), "principal": SdnValue.String(rule.principal),
+            "project": SdnValue.String(rule.project), "serviceScopeId": SdnValue.String(rule.service_scope_id),
+            "actions": SdnValue.Array(actions)}))
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(2), "kind": SdnValue.String("host-service-peer-policy"),
+        "rules": SdnValue.Array(rules)}
+    val source = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    if str_len(source) > HOST_SERVICE_PEER_POLICY_MAX_BYTES_V2: return Err("host-peer-policy-source-size")
+    Ok(source)
+
+fn host_peer_fields_v2(value: SdnValue, names: [text]) -> Result<Dict<text, SdnValue>, text>:
+    val fields = match value:
+        case SdnValue.Dict(items): items
+        case _: return Err("host-peer-policy-object-required")
+    for name in fields.keys():
+        if not names.contains(name): return Err("host-peer-policy-unknown-field:" + name)
+    for name in names:
+        if not fields.contains_key(name): return Err("host-peer-policy-missing-field:" + name)
+    Ok(fields)
+
+fn host_peer_text_v2(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("host-peer-policy-text-required:" + key)
+
+pub fn host_service_peer_policy_decode_v2(source: text) -> Result<HostServicePeerPolicyV2, text>:
+    if str_len(source) == 0 or str_len(source) > HOST_SERVICE_PEER_POLICY_MAX_BYTES_V2: return Err("host-peer-policy-source-size")
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 65536, max_depth: 5,
+            max_nodes: 2048, max_rows: 0, max_cells: 0, max_columns: 8)):
+        case Ok(value): value
+        case Err(issue): return Err("host-peer-policy-syntax:" + issue.code)
+    val fields = host_peer_fields_v2(parsed.value, ["version", "kind", "rules"])?
+    if fields["version"] != SdnValue.Int(2) or host_peer_text_v2(fields, "kind")? != "host-service-peer-policy":
+        return Err("host-peer-policy-version")
+    val rows = match fields["rules"]:
+        case SdnValue.Array(items): items
+        case _: return Err("host-peer-policy-rules-array")
+    if rows.len() == 0 or rows.len() > 64: return Err("host-peer-policy-rules-bound")
+    var rules: [HostServicePeerRuleV2] = []
+    for row in rows:
+        val item = host_peer_fields_v2(row, ["peerUid", "principal", "project", "serviceScopeId", "actions"])?
+        val uid = match item["peerUid"]:
+            case SdnValue.Int(value): value
+            case _: return Err("host-peer-policy-uid-type")
+        val action_values = match item["actions"]:
+            case SdnValue.Array(items): items
+            case _: return Err("host-peer-policy-actions-array")
+        if action_values.len() == 0 or action_values.len() > 8: return Err("host-peer-policy-actions-bound")
+        var actions: [text] = []
+        for action in action_values:
+            match action:
+                case SdnValue.String(value): actions.push(value)
+                case _: return Err("host-peer-policy-action-type")
+        rules.push(HostServicePeerRuleV2(peer_uid: uid, principal: host_peer_text_v2(item, "principal")?,
+            project: host_peer_text_v2(item, "project")?, service_scope_id: host_peer_text_v2(item, "serviceScopeId")?, actions: actions))
+    val policy = HostServicePeerPolicyV2(rules: rules)
+    if host_service_peer_policy_encode_v2(policy)? != source: return Err("host-peer-policy-noncanonical")
+    Ok(policy)
+
+fn host_peer_read_retained_v2(file: RetainedFile, protected_root: text, expected_digest: text) -> Result<HostServicePeerPolicySnapshotV2, text>:
+    val metadata = file.security_metadata_v1()?
+    if metadata.owner_uid != metadata.effective_uid or (metadata.mode & 0o7777u32) != 0o600u32:
+        return Err("host-peer-policy-file-not-private")
+    if file.size == 0u64 or file.size > 65536u64: return Err("host-peer-policy-source-size")
+    var bytes: [u8] = []
+    var offset = 0u64
+    while offset < file.size:
+        val count = (file.size - offset) as i64
+        val chunk = retained_file_read_at(file, offset, count)?
+        if chunk.len() == 0: return Err("host-peer-policy-file-truncated")
+        bytes = bytes + chunk
+        offset = offset + chunk.len() as u64
+    val unchanged = retained_file_identity_unchanged(file)?
+    if not unchanged: return Err("host-peer-policy-file-changed")
+    val source = validated_utf8_bytes_to_text_linear(bytes)?
+    if sha256_text(source) != expected_digest: return Err("host-peer-policy-pin-mismatch")
+    val policy = host_service_peer_policy_decode_v2(source)?
+    val service_uid = metadata.effective_uid as i64
+    if service_uid < 0 or service_uid > 4294967294: return Err("host-peer-policy-service-uid-invalid")
+    for rule in policy.rules:
+        if rule.peer_uid == service_uid: return Err("host-peer-policy-service-client-uid-equal")
+    Ok(HostServicePeerPolicySnapshotV2(policy: policy, source_digest: expected_digest, protected_root: protected_root, service_uid: service_uid))
+
+pub fn host_service_peer_policy_load_v2(protected_root: text,
+        expected_transport_policy_digest: text) -> Result<HostServicePeerPolicySnapshotV2, text>:
+    if host_os() != "linux": return Err("host-peer-policy-private-linux-required")
+    if protected_root == "" or str_len(protected_root) > 4096 or protected_root.contains("\u{0}"):
+        return Err("host-peer-policy-root-invalid")
+    if str_len(expected_transport_policy_digest) != 64 or not builder_digest_valid_v1(expected_transport_policy_digest):
+        return Err("host-peer-policy-pin-invalid")
+    var parent = retained_directory_open_trusted_v1(protected_root)?
+    val opened = parent.open_file(HOST_SERVICE_PEER_POLICY_FILE_V2, 65536u64)
+    val parent_closed = parent.close()
+    if opened.is_err():
+        if not parent_closed: return Err("host-peer-policy-parent-consumed-close-error")
+        return Err(opened.unwrap_err())
+    var file = opened.unwrap()
+    val read = host_peer_read_retained_v2(file, protected_root, expected_transport_policy_digest)
+    val closed = file.close()
+    if not closed or not parent_closed: return Err("host-peer-policy-consumed-close-error")
+    read

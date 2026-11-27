@@ -1,0 +1,104 @@
+# Line metrics read from an sfnt blob: source selection and malformed input.
+#
+# `sfnt_blob_line_metric_units` returns [ascent, descent, line_gap, upem] from
+# `hhea`, or from the `OS/2` typo metrics when `fsSelection` bit 7
+# (USE_TYPO_METRICS) is set, and [] for anything it cannot trust. The web
+# renderer derives `line-height: normal` from it, so a bad blob must fall back
+# (an empty row -> 0 px -> the caller keeps its previous value), never crash.
+#
+# Chrome 159.0.8154.6 honours USE_TYPO_METRICS on this host. One-line block
+# height at 16/32/64px for Pagul (typo 1548/444/205, hhea 1850/444/62, upem
+# 2048): 17/34/68 — the typo prediction; hhea predicts 17/37/74.
+use std.spec.*
+use std.nogc_sync_mut.sffi.io.{file_exists, file_read_bytes}
+use std.common.encoding.sfnt_kern.{
+    sfnt_blob_line_metric_units, sfnt_line_metric_units_normal_line_height_px,
+    sfnt_blob_normal_line_height_px
+}
+
+val LIBERATION_SANS: text = "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
+val LIBERATION_SERIF: text = "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf"
+val PAGUL: text = "/usr/share/fonts/truetype/pagul/Pagul.ttf"
+
+fn _prefix(blob: [u8], count: i64) -> [u8]:
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < count and i < blob.len():
+        out.push(blob[i])
+        i = i + 1
+    out
+
+describe "sfnt line metric units":
+    it "answers an empty row for an empty or tiny blob":
+        val empty: [u8] = []
+        expect(sfnt_blob_line_metric_units(empty).len()).to_equal(0)
+        expect(sfnt_blob_normal_line_height_px(empty, 16)).to_equal(0)
+        val tiny: [u8] = [0u8, 1u8, 0u8, 0u8]
+        expect(sfnt_blob_line_metric_units(tiny).len()).to_equal(0)
+
+    it "answers an empty row for a TrueType collection header":
+        # "ttcf", version 1.0, one face: not an offset table.
+        val ttc: [u8] = [0x74u8, 0x74u8, 0x63u8, 0x66u8, 0u8, 1u8, 0u8, 0u8, 0u8, 0u8, 0u8, 1u8, 0u8, 0u8, 0u8, 16u8]
+        expect(sfnt_blob_line_metric_units(ttc).len()).to_equal(0)
+        expect(sfnt_blob_normal_line_height_px(ttc, 16)).to_equal(0)
+
+    it "answers an empty row for a directory that names no tables":
+        # sfnt 1.0 with numTables = 0.
+        val bare: [u8] = [0u8, 1u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8]
+        expect(sfnt_blob_line_metric_units(bare).len()).to_equal(0)
+
+    it "refuses invalid rows and sizes without dividing by zero":
+        val no_units: [i64] = []
+        expect(sfnt_line_metric_units_normal_line_height_px(no_units, 16)).to_equal(0)
+        expect(sfnt_line_metric_units_normal_line_height_px([1854, 434, 67, 0], 16)).to_equal(0)
+        expect(sfnt_line_metric_units_normal_line_height_px([1854, 434, 67, 2048], 0)).to_equal(0)
+        expect(sfnt_line_metric_units_normal_line_height_px([1854, 434, 67, 2048], 513)).to_equal(0)
+
+    it "rounds ascent, descent and gap each on its own":
+        # Liberation Sans, Chrome 14/18/28/37.
+        expect(sfnt_line_metric_units_normal_line_height_px([1854, 434, 67, 2048], 12)).to_equal(14)
+        expect(sfnt_line_metric_units_normal_line_height_px([1854, 434, 67, 2048], 16)).to_equal(18)
+        expect(sfnt_line_metric_units_normal_line_height_px([1854, 434, 67, 2048], 24)).to_equal(28)
+        expect(sfnt_line_metric_units_normal_line_height_px([1854, 434, 67, 2048], 32)).to_equal(37)
+        # Liberation Serif at 12px: 15 in Chrome; rounding the SUM gives 14.
+        expect(sfnt_line_metric_units_normal_line_height_px([1825, 443, 87, 2048], 12)).to_equal(15)
+
+    it "falls back on a truncated real face":
+        if file_exists(LIBERATION_SANS):
+            val blob = file_read_bytes(LIBERATION_SANS)
+            # The directory survives but every table offset is past the end.
+            expect(sfnt_blob_line_metric_units(_prefix(blob, 300)).len()).to_equal(0)
+            expect(sfnt_blob_normal_line_height_px(_prefix(blob, 300), 16)).to_equal(0)
+            expect(sfnt_blob_line_metric_units(_prefix(blob, 11)).len()).to_equal(0)
+
+    it "reads hhea from a face without USE_TYPO_METRICS":
+        if file_exists(LIBERATION_SANS):
+            val units = sfnt_blob_line_metric_units(file_read_bytes(LIBERATION_SANS))
+            expect(units.len()).to_equal(4)
+            expect(units[0]).to_equal(1854)
+            expect(units[1]).to_equal(434)
+            expect(units[2]).to_equal(67)
+            expect(units[3]).to_equal(2048)
+        if file_exists(LIBERATION_SERIF):
+            expect(sfnt_blob_normal_line_height_px(file_read_bytes(LIBERATION_SERIF), 24)).to_equal(27)
+
+    it "reads the OS/2 typo metrics from a face that sets USE_TYPO_METRICS":
+        if file_exists(PAGUL):
+            val blob = file_read_bytes(PAGUL)
+            val units = sfnt_blob_line_metric_units(blob)
+            expect(units.len()).to_equal(4)
+            expect(units[0]).to_equal(1548)
+            expect(units[1]).to_equal(444)
+            expect(units[2]).to_equal(205)
+            # Chrome 159: 17 / 34 / 68.
+            expect(sfnt_blob_normal_line_height_px(blob, 16)).to_equal(17)
+            expect(sfnt_blob_normal_line_height_px(blob, 32)).to_equal(34)
+            expect(sfnt_blob_normal_line_height_px(blob, 64)).to_equal(68)
+
+    it "keeps hhea for a face that does not set USE_TYPO_METRICS":
+        # Liberation Sans (OS/2 version 3, bit 7 clear) has typo metrics
+        # 1491/-431/307, which would give 20px at 16px. Chrome measures 18,
+        # the hhea value. The reader also ignores bit 7 below OS/2 version 4,
+        # where it is reserved, and when the typo ascent is not positive.
+        if file_exists(LIBERATION_SANS):
+            expect(sfnt_blob_normal_line_height_px(file_read_bytes(LIBERATION_SANS), 16)).to_equal(18)

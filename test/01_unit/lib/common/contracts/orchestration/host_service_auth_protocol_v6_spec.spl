@@ -1,0 +1,268 @@
+# Source-only NOT_RUN. Pure protocol assertions, no live owner/native entropy.
+use std.common.contracts.orchestration.host_service_operation_v6.*
+use std.common.contracts.orchestration.host_service_auth_v6.*
+use std.common.contracts.orchestration.host_service_auth_frame_v6.*
+use std.common.crypto.sha256.sha256_text
+use std.common.crypto.hmac.hmac_sha256
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+
+fn operation_fixture_v6(payload: text = "version: 1\nkind: workload\n") -> HostServiceOperationRequestV6:
+    HostServiceOperationRequestV6(action: "execute", service_incarnation: "c".repeat(32), operation_id: "operation",
+        scope_digest: "a".repeat(64), request_digest: host_service_operation_request_digest_v6("operation", payload).unwrap(), payload: payload)
+
+fn context_fixture_v6(request: HostServiceOperationRequestV6) -> HostServiceAuthContextV6:
+    HostServiceAuthContextV6(service_incarnation: request.service_incarnation, client_nonce: "a".repeat(64),
+        server_nonce: "b".repeat(64), command_digest: host_service_operation_command_digest_v6(request).unwrap())
+
+fn operation_fields_fixture_v6(source: text) -> Dict<text, SdnValue>:
+    val limits = SdnStrictLimitsV1(max_source_bytes: 2097152, max_depth: 2,
+        max_nodes: 24, max_rows: 0, max_cells: 0, max_columns: 8)
+    match sdn_parse_strict_v1(source, limits).unwrap().value:
+        case SdnValue.Dict(fields): fields
+        case _: fail("expected canonical operation object")
+
+describe "V6 host operation envelope and bound authentication transcript":
+    it "round trips all actions with exact status and retained execute digest rules":
+        step("Separate empty status payloads requested effects and retained-operation queries")
+        val execute = operation_fixture_v6()
+        for action in ["validate", "prepare", "execute"]:
+            var request = execute
+            request.action = action
+            val encoded = host_service_operation_encode_v6(request).unwrap()
+            val decoded = host_service_operation_decode_v6(encoded).unwrap()
+            expect(operation_fields_fixture_v6(encoded).len()).to_equal(8)
+            expect(decoded.action).to_equal(action)
+            expect(decoded.payload).to_equal(execute.payload)
+            expect(decoded.request_digest).to_equal(sha256_text(request.operation_id + "\n" + request.payload))
+            expect(host_service_operation_encode_v6(decoded).unwrap()).to_equal(encoded)
+        for action in ["inspect", "progress", "cancel"]:
+            var request = execute
+            request.action = action
+            request.payload = ""
+            val decoded = host_service_operation_decode_v6(host_service_operation_encode_v6(request).unwrap()).unwrap()
+            expect(decoded.request_digest).to_equal(execute.request_digest)
+            expect(decoded.payload).to_equal("")
+        val status = HostServiceOperationRequestV6(action: "status", service_incarnation: "c".repeat(32),
+            operation_id: "", scope_digest: "", request_digest: "", payload: "")
+        expect(host_service_operation_decode_v6(host_service_operation_encode_v6(status).unwrap()).unwrap().action).to_equal("status")
+
+    it "rejects unknown duplicate mistyped missing and noncanonical operation fields":
+        step("Require exactly the frozen eight SDN fields without coercion or aliases")
+        val canonical = host_service_operation_encode_v6(operation_fixture_v6()).unwrap()
+        var fields = operation_fields_fixture_v6(canonical)
+        fields["extra"] = SdnValue.Bool(true)
+        expect(host_service_operation_decode_v6(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n").is_err()).to_equal(true)
+        expect(host_service_operation_decode_v6("version: 6\nversion: 6\n").unwrap_err()).to_start_with("host-operation-sdn:")
+        fields = operation_fields_fixture_v6(canonical)
+        fields["version"] = SdnValue.String("6")
+        expect(host_service_operation_decode_v6(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n").is_err()).to_equal(true)
+        var missing: Dict<text, SdnValue> = {}
+        for key in fields.keys():
+            if key != "payload": missing[key] = fields[key]
+        expect(host_service_operation_decode_v6(sdn_encode_canonical(SdnValue.Dict(missing)) + "\n").is_err()).to_equal(true)
+        expect(host_service_operation_decode_v6(canonical + "\n").unwrap_err()).to_equal("host-operation-noncanonical")
+
+    it "refuses malformed action scope incarnation operation and inner digest contracts":
+        step("Validate constructed values before canonical serialization or authentication")
+        var request = operation_fixture_v6()
+        request.action = "destroy"
+        expect(host_service_operation_encode_v6(request).is_err()).to_equal(true)
+        request = operation_fixture_v6()
+        request.service_incarnation = "C".repeat(32)
+        expect(host_service_operation_encode_v6(request).is_err()).to_equal(true)
+        request = operation_fixture_v6()
+        request.operation_id = "operation\ninjected"
+        expect(host_service_operation_encode_v6(request).is_err()).to_equal(true)
+        request = operation_fixture_v6()
+        request.scope_digest = "short"
+        expect(host_service_operation_encode_v6(request).is_err()).to_equal(true)
+        request = operation_fixture_v6()
+        request.request_digest = "d".repeat(64)
+        expect(host_service_operation_encode_v6(request).unwrap_err()).to_equal("host-operation-request-digest-mismatch")
+        request = operation_fixture_v6()
+        request.payload = ""
+        expect(host_service_operation_encode_v6(request).unwrap_err()).to_equal("host-operation-payload-required")
+        request = operation_fixture_v6()
+        request.action = "inspect"
+        expect(host_service_operation_encode_v6(request).unwrap_err()).to_equal("host-operation-query-payload-forbidden")
+        request.action = "status"
+        expect(host_service_operation_encode_v6(request).unwrap_err()).to_equal("host-operation-status-fields")
+
+    it "bounds the complete escaped operation envelope before constructing oversized output":
+        step("Account for canonical SDN escape expansion punctuation and UTF-8 bytes")
+        val within = operation_fixture_v6("x".repeat(2096000))
+        expect(host_service_operation_encode_v6(within).unwrap().byte_len() <= 2097152).to_equal(true)
+        val expanded = operation_fixture_v6("\\".repeat(1048576))
+        expect(expanded.payload.byte_len()).to_equal(1048576)
+        expect(host_service_operation_encode_v6(expanded).unwrap_err()).to_equal("host-operation-encoded-size")
+        val unicode = operation_fixture_v6("é\n\\\"")
+        val decoded = host_service_operation_decode_v6(host_service_operation_encode_v6(unicode).unwrap()).unwrap()
+        expect(decoded.payload).to_equal(unicode.payload)
+        expect(decoded.payload.byte_len()).to_equal(5)
+        expect(host_service_operation_decode_v6("x".repeat(2097153)).unwrap_err()).to_equal("host-operation-source-size")
+
+    it "distinguishes the entire outer command digest from the inner operation payload digest":
+        step("Bind action scope and canonical envelope bytes in addition to the original execute digest")
+        var request = operation_fixture_v6()
+        val source = host_service_operation_encode_v6(request).unwrap()
+        val outer = host_service_operation_command_digest_v6(request).unwrap()
+        expect(outer).to_equal(sha256_text(source))
+        expect(outer == request.request_digest).to_equal(false)
+        val original_inner = request.request_digest
+        request.action = "prepare"
+        expect(request.request_digest).to_equal(original_inner)
+        expect(host_service_operation_command_digest_v6(request).unwrap() == outer).to_equal(false)
+        request.action = "execute"
+        request.scope_digest = "b".repeat(64)
+        expect(host_service_operation_command_digest_v6(request).unwrap() == outer).to_equal(false)
+
+    it "matches an independently spelled domain separated canonical challenge transcript":
+        step("Freeze exact role incarnation nonce command digest body digest and byte count binding")
+        val context = HostServiceAuthContextV6(service_incarnation: "c".repeat(32), client_nonce: "a".repeat(64),
+            server_nonce: "b".repeat(64), command_digest: "d".repeat(64))
+        val expected = "SIMPLE-HOST-SERVICE-AUTH-V6\n{{clientNonce: " + "a".repeat(64) +
+            ", commandDigest: " + "d".repeat(64) + ", payloadBytes: 0, payloadDigest: " +
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855" +
+            ", role: challenge, serverNonce: " + "b".repeat(64) + ", serviceIncarnation: " + "c".repeat(32) + "}}\n"
+        expect(host_service_auth_transcript_v6("challenge", context, "").unwrap()).to_equal(expected)
+        val key = "1a".repeat(32)
+        expect(host_service_auth_tag_v6(key, "challenge", context, "").unwrap()).to_equal(hmac_sha256(key, expected))
+
+    it "verifies challenge request and reply while preventing role and body substitution":
+        step("Reuse one pure MAC surface while keeping each authenticated role distinct")
+        val request = operation_fixture_v6()
+        val body = host_service_operation_encode_v6(request).unwrap()
+        val context = context_fixture_v6(request)
+        val key = "1a".repeat(32)
+        val challenge = host_service_auth_tag_v6(key, "challenge", context, "").unwrap()
+        expect(host_service_auth_verify_v6(key, "challenge", context, "", challenge).unwrap()).to_equal(true)
+        expect(host_service_auth_verify_v6(key, "reply", context, "", challenge).unwrap()).to_equal(false)
+        val tag = host_service_auth_tag_v6(key, "request", context, body).unwrap()
+        expect(host_service_auth_verify_v6(key, "request", context, body, tag).unwrap()).to_equal(true)
+        expect(host_service_auth_verify_v6(key, "request", context, body + "\n", tag).is_err()).to_equal(true)
+        val reply = "version: 6\nstatus: observed\n"
+        val reply_tag = host_service_auth_tag_v6(key, "reply", context, reply).unwrap()
+        expect(host_service_auth_verify_v6(key, "reply", context, reply, reply_tag).unwrap()).to_equal(true)
+        expect(host_service_auth_verify_v6(key, "reply", context, reply + "changed", reply_tag).unwrap()).to_equal(false)
+        expect(host_service_auth_transcript_v6("challenge", context, reply).is_err()).to_equal(true)
+
+    it "rejects replay context changes independent of a correctly shaped tag":
+        step("Bind both nonces service incarnation command digest and secret key to each role")
+        val request = operation_fixture_v6()
+        val context = context_fixture_v6(request)
+        val key = "1a".repeat(32)
+        val tag = host_service_auth_tag_v6(key, "challenge", context, "").unwrap()
+        var changed = context
+        changed.client_nonce = "e".repeat(64)
+        expect(host_service_auth_verify_v6(key, "challenge", changed, "", tag).unwrap()).to_equal(false)
+        changed = context
+        changed.server_nonce = "e".repeat(64)
+        expect(host_service_auth_verify_v6(key, "challenge", changed, "", tag).unwrap()).to_equal(false)
+        changed = context
+        changed.service_incarnation = "e".repeat(32)
+        expect(host_service_auth_verify_v6(key, "challenge", changed, "", tag).unwrap()).to_equal(false)
+        changed = context
+        changed.command_digest = "e".repeat(64)
+        expect(host_service_auth_verify_v6(key, "challenge", changed, "", tag).unwrap()).to_equal(false)
+        expect(host_service_auth_verify_v6("2b".repeat(32), "challenge", context, "", tag).unwrap()).to_equal(false)
+
+    it "refuses request envelopes from another incarnation or a noncanonical body even with recomputed hash":
+        step("Command digest agreement alone does not bypass the canonical operation boundary")
+        val request = operation_fixture_v6()
+        val body = host_service_operation_encode_v6(request).unwrap()
+        var context = context_fixture_v6(request)
+        context.service_incarnation = "d".repeat(32)
+        expect(host_service_auth_transcript_v6("request", context, body).unwrap_err()).to_equal("host-auth-request-incarnation-mismatch")
+        context = context_fixture_v6(request)
+        context.command_digest = sha256_text(body + "\n")
+        expect(host_service_auth_transcript_v6("request", context, body + "\n").is_err()).to_equal(true)
+
+    it "checks public hex shape without treating deterministic fixture values as OS entropy":
+        step("Reject malformed key nonce digest and tag text while preserving provenance limits")
+        val context = context_fixture_v6(operation_fixture_v6())
+        expect(host_service_auth_tag_v6("short", "challenge", context, "").is_err()).to_equal(true)
+        expect(host_service_auth_tag_v6("A".repeat(64), "challenge", context, "").is_err()).to_equal(true)
+        expect(host_service_auth_tag_v6("0".repeat(64), "challenge", context, "").is_ok()).to_equal(true)
+        expect(host_service_auth_verify_v6("1a".repeat(32), "challenge", context, "", "A".repeat(64)).is_err()).to_equal(true)
+        var changed = context
+        changed.client_nonce = "a".repeat(63)
+        expect(host_service_auth_context_validate_v6(changed).is_err()).to_equal(true)
+        changed = context
+        changed.server_nonce = "g".repeat(64)
+        expect(host_service_auth_context_validate_v6(changed).is_err()).to_equal(true)
+        expect(host_service_auth_transcript_v6("hello", context, "").is_err()).to_equal(true)
+
+    it "detects valid-hex tag changes at the first and last comparison positions":
+        step("Exercise the single fixed-width XOR accumulation surface without a native timing claim")
+        val context = context_fixture_v6(operation_fixture_v6())
+        val key = "1a".repeat(32)
+        val tag = host_service_auth_tag_v6(key, "challenge", context, "").unwrap()
+        val first = if tag.substring(0, 1) == "a": "b" else: "a"
+        val last = if tag.substring(63, 64) == "a": "b" else: "a"
+        expect(host_service_auth_verify_v6(key, "challenge", context, "", first + tag.substring(1, 64)).unwrap()).to_equal(false)
+        expect(host_service_auth_verify_v6(key, "challenge", context, "", tag.substring(0, 63) + last).unwrap()).to_equal(false)
+
+    it "enforces reply bounds on UTF-8 bytes before hashing or authentication":
+        step("Accept exactly one MiB of body bytes and refuse the next multibyte scalar")
+        val context = context_fixture_v6(operation_fixture_v6())
+        val boundary = "é".repeat(524288)
+        expect(boundary.byte_len()).to_equal(1048576)
+        expect(host_service_auth_transcript_v6("reply", context, boundary).is_ok()).to_equal(true)
+        expect(host_service_auth_transcript_v6("reply", context, boundary + "é").unwrap_err()).to_equal("host-auth-reply-body-size")
+
+    it "binds service stop to an exact service scope through the existing request MAC and frame roles":
+        step("Use the same canonical request authentication without inventing an inner execute digest or shutdown effect")
+        val stop = HostServiceOperationRequestV6(action: "service-stop", service_incarnation: "c".repeat(32),
+            operation_id: "", scope_digest: "a".repeat(64), request_digest: "", payload: "")
+        val source = host_service_operation_encode_v6(stop).unwrap()
+        val decoded = host_service_operation_decode_v6(source).unwrap()
+        expect(decoded.action).to_equal("service-stop")
+        expect(decoded.operation_id).to_equal("")
+        expect(decoded.scope_digest).to_equal(stop.scope_digest)
+        expect(decoded.request_digest).to_equal("")
+        expect(decoded.payload).to_equal("")
+        val context = context_fixture_v6(stop)
+        val key = "1a".repeat(32)
+        val tag = host_service_auth_tag_v6(key, "request", context, source).unwrap()
+        expect(host_service_auth_verify_v6(key, "request", context, source, tag).unwrap()).to_equal(true)
+        expect(host_service_auth_verify_v6(key, "reply", context, source, tag).unwrap()).to_equal(false)
+        expect(host_service_auth_transcript_v6("challenge", context, source).is_err()).to_equal(true)
+        val frame = HostServiceAuthFrameV6(role: "request", service_incarnation: context.service_incarnation,
+            client_nonce: context.client_nonce, server_nonce: context.server_nonce, command_digest: context.command_digest,
+            payload: source, tag: tag)
+        val retained_frame = host_service_auth_frame_line_decode_v6(host_service_auth_frame_line_encode_v6(frame).unwrap()).unwrap()
+        expect(host_service_operation_decode_v6(retained_frame.payload).unwrap().action).to_equal("service-stop")
+        var changed = stop
+        changed.scope_digest = "b".repeat(64)
+        val changed_source = host_service_operation_encode_v6(changed).unwrap()
+        val changed_context = context_fixture_v6(changed)
+        expect(host_service_auth_verify_v6(key, "request", changed_context, changed_source, tag).unwrap()).to_equal(false)
+
+    it "refuses service stop operation digest payload and legacy action aliases":
+        step("Require the current incarnation and scope without accepting operation control or legacy bearer metadata")
+        val stop = HostServiceOperationRequestV6(action: "service-stop", service_incarnation: "c".repeat(32),
+            operation_id: "", scope_digest: "a".repeat(64), request_digest: "", payload: "")
+        var changed = stop
+        changed.operation_id = "unexpected-operation"
+        expect(host_service_operation_encode_v6(changed).unwrap_err()).to_equal("host-operation-service-stop-fields")
+        changed = stop
+        changed.request_digest = "d".repeat(64)
+        expect(host_service_operation_encode_v6(changed).unwrap_err()).to_equal("host-operation-service-stop-fields")
+        changed = stop
+        changed.payload = "legacy-stop-body"
+        expect(host_service_operation_encode_v6(changed).unwrap_err()).to_equal("host-operation-service-stop-fields")
+        changed = stop
+        changed.scope_digest = ""
+        expect(host_service_operation_encode_v6(changed).unwrap_err()).to_equal("host-operation-scope-shape")
+        changed = stop
+        changed.service_incarnation = "legacy-incarnation"
+        expect(host_service_operation_encode_v6(changed).unwrap_err()).to_equal("host-operation-incarnation-shape")
+        changed = stop
+        changed.action = "stop"
+        expect(host_service_operation_encode_v6(changed).unwrap_err()).to_equal("host-operation-action-unsupported")
+        changed = stop
+        changed.action = "cancel"
+        expect(host_service_operation_encode_v6(changed).unwrap_err()).to_equal("host-operation-id-invalid")

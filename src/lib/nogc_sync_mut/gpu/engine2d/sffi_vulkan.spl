@@ -13,6 +13,7 @@ Usage:
 """
 
 use std.sffi.dynamic.{DynLib}
+use std.io_runtime.{env_get}
 use std.gpu.engine2d.sffi_dispatch.{
     GpuFfiMode, FfiDispatchBase, try_load_gpu_lib,
     gpu_sffi_uses_interpreter_array_abi
@@ -90,7 +91,7 @@ extern fn rt_vulkan_readback_u32_array(handle: i64, pixel_count: i64, offset: i6
 extern fn rt_vulkan_readback_u32_array_checksum(handle: i64, pixel_count: i64, offset: i64) -> i64
 extern fn rt_vulkan_copy_u32_slots(dst: [u32], src: [u32], count: i64) -> i64
 @unsafe(reason: "raw Vulkan ABI; foreign implementation is not compiler-validated", capabilities: [ffi])
-extern fn rt_byte_array_new_len(len: i64) -> [u8]
+extern fn rt_byte_array_new_len(len: i64) -> [u8]?
 @unsafe(reason: "raw Vulkan ABI; foreign implementation is not compiler-validated", capabilities: [ffi])
 extern fn rt_vulkan_compile_spirv(spirv_bytes: [u8]) -> i64
 @unsafe(reason: "raw Vulkan ABI; foreign implementation is not compiler-validated", capabilities: [ffi])
@@ -224,7 +225,10 @@ fn _vulkan_read_buffer_bytes_abi(handle: i64, byte_count: i64, offset: i64) -> [
         return []
     if gpu_sffi_uses_interpreter_array_abi():
         return rt_vulkan_read_buffer_bytes(handle, byte_count, offset)
-    val bytes = rt_byte_array_new_len(byte_count)
+    val bytes_opt = rt_byte_array_new_len(byte_count)
+    if bytes_opt == nil:
+        return []
+    val bytes = bytes_opt.unwrap()
     if not rt_vulkan_copy_from_buffer_array(bytes, byte_count, handle, offset):
         return []
     bytes
@@ -255,7 +259,10 @@ fn _vulkan_read_buffer_strided_bytes_abi(handle: i64, src_offset: i64, row_bytes
                 i += 1
             row += 1
         return packed
-    val packed = rt_byte_array_new_len(byte_count)
+    val packed_opt = rt_byte_array_new_len(byte_count)
+    if packed_opt == nil:
+        return []
+    val packed = packed_opt.unwrap()
     if not rt_vulkan_copy_from_buffer_strided(
         packed, handle, src_offset,
         row_bytes, row_count, src_stride):
@@ -301,7 +308,10 @@ fn _vulkan_read_buffer_regions_bytes_abi(handle: i64, regions: [i64]) -> [u8]:
                 b += 1
             i += 4
         return packed
-    val packed = rt_byte_array_new_len(total_bytes)
+    val packed_opt = rt_byte_array_new_len(total_bytes)
+    if packed_opt == nil:
+        return []
+    val packed = packed_opt.unwrap()
     if not rt_vulkan_copy_from_buffer_regions(packed, handle, regions):
         return []
     packed
@@ -352,18 +362,18 @@ impl FfiDispatchBase for VulkanFfi:
     # --- Constructors -------------------------------------------------------
 
     static fn create_static() -> VulkanFfi:
-        VulkanFfi(_mode: GpuFfiMode.Static, _dyn_lib: nil, _dyn_rejected_ops: 0, _dyn_last_rejection: "")
+        VulkanFfi(_mode: GpuFfiMode.Static, _dyn_lib: None, _dyn_rejected_ops: 0, _dyn_last_rejection: "")
 
     static fn create_dynamic() -> VulkanFfi?:
         val lib = try_load_gpu_lib("vulkan")
         if lib == nil:
-            return nil
+            return None
         VulkanFfi(_mode: GpuFfiMode.Dynamic, _dyn_lib: lib, _dyn_rejected_ops: 0, _dyn_last_rejection: "")
 
     static fn create_dynamic_from(path: text) -> VulkanFfi?:
         val lib = DynLib.load(path)
         if lib == nil:
-            return nil
+            return None
         VulkanFfi(_mode: GpuFfiMode.Dynamic, _dyn_lib: lib, _dyn_rejected_ops: 0, _dyn_last_rejection: "")
 
     static fn create(sffi_mode: GpuFfiMode) -> VulkanFfi?:
@@ -408,7 +418,7 @@ impl FfiDispatchBase for VulkanFfi:
         match self._mode:
             case Static: false
             case Dynamic:
-                if self._dyn_lib != nil:
+                if self._dyn_lib.is_some():
                     val result = self._dyn_lib.call0("vkEnumerateInstanceVersion")
                     result != 0
                 else:
@@ -1295,6 +1305,14 @@ fn vulkan_sffi_copy_to_buffer_u32(handle: i64, words: [u32], offset: i64) -> boo
     unavailable, so every caller keeps a byte-payload fallback.
     """
     _vulkan_copy_to_buffer_u32_abi(handle, words, offset)
+
+# @allow(primitive_api): boolean runtime array ABI capability predicate
+pub fn vulkan_sffi_copy_to_buffer_u32_admitted() -> bool:
+    """True when `vulkan_sffi_copy_to_buffer_u32` can accept words on this
+    runtime: it declines under the compiled array ABI (see
+    `_vulkan_copy_to_buffer_u32_abi`). A caller that defers the copy past the
+    point where it could still fall back must ask this first."""
+    gpu_sffi_uses_interpreter_array_abi()
 
 @unsafe(reason: "raw Vulkan bounded-prefix buffer upload facade", capabilities: [ffi])
 fn vulkan_sffi_copy_to_buffer_prefix(handle: i64, data: [u8], byte_count: i64, offset: i64) -> bool:

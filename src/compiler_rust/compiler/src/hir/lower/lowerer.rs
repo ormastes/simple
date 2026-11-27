@@ -5,7 +5,7 @@ use simple_parser::{Expr, Pattern, Type};
 
 use super::super::capability::CapabilityEnv;
 use super::super::lifetime::LifetimeContext;
-use super::super::types::{HirModule, TypeId};
+use super::super::types::{HirGenericBound, HirModule, TypeId};
 use super::deprecation_warning::DeprecationWarningCollector;
 use super::lenient_global_diag::{LenientGlobal, LenientGlobalCollector, LenientGlobalKind};
 use super::memory_warning::MemoryWarningCollector;
@@ -13,12 +13,35 @@ use crate::module_resolver::ModuleResolver;
 use crate::type_inference_config::TypeInferenceConfig;
 
 type GlobalStructDefs = std::sync::Arc<HashMap<String, Vec<(String, Type)>>>;
+type GlobalStructFieldDefaults = std::sync::Arc<HashMap<String, HashMap<String, Expr>>>;
 type UniqueStructOwners = std::sync::Arc<HashMap<String, String>>;
 type StructModuleOwners = std::sync::Arc<HashMap<PathBuf, String>>;
 type DuplicateGlobalStructDefs = std::sync::Arc<HashMap<String, Vec<Vec<(String, Type)>>>>;
 type AmbiguousFieldNames = std::sync::Arc<HashSet<String>>;
 type GlobalEnumDefs = std::sync::Arc<HashMap<String, Vec<(String, Option<Vec<Type>>)>>>;
 pub(crate) type QualifiedImportFunctions = std::sync::Arc<HashMap<String, String>>;
+
+/// A project-wide enum entry that is the generic builtin `Option<T>`
+/// (`Some(T) | None`, e.g. the legacy std `core/option.spl`). The table keeps
+/// no generic params, so the shape is read from the `Some` payload naming a
+/// single-letter type parameter. A user `enum Option: Some(i64) | None` is not
+/// this.
+pub(crate) fn global_def_is_builtin_option(name: &str, variants: &[(String, Option<Vec<Type>>)]) -> bool {
+    name == "Option"
+        && variants.len() == 2
+        && variants.iter().any(|(v, p)| v == "None" && p.is_none())
+        && variants.iter().any(|(v, p)| {
+            v == "Some"
+                && matches!(p.as_deref(), Some([Type::Simple(t)]) if t.len() == 1 && t.chars().all(|c| c.is_ascii_uppercase()))
+        })
+}
+
+#[derive(Debug, Clone)]
+pub(super) struct GenericIdentityParamSpec {
+    pub index: usize,
+    pub name: String,
+    pub generic_param_pos: Option<usize>,
+}
 
 pub struct Lowerer {
     pub(super) module: HirModule,
@@ -44,6 +67,12 @@ pub struct Lowerer {
     pub(super) current_class_type: Option<TypeId>,
     /// Current function/method name being lowered, used to enrich lowering diagnostics.
     pub(super) current_function_name: Option<String>,
+    /// Return types the untyped-receiver `.method` suffix search borrowed
+    /// from some same-named user method. They are a guess, not a declaration,
+    /// so the Option->scalar return rule (`is_option_into_scalar`) skips them.
+    pub(super) suffix_guessed_return_types: HashSet<TypeId>,
+    /// Set by `lookup_method_return_type` when its result came from that guess.
+    pub(super) last_method_return_guessed: std::cell::Cell<bool>,
     /// Declaration line of the function currently being lowered. Recorded so the
     /// `lenient_types` unresolved-name fallback can attribute the global it
     /// emits to a source location; `Expr::Identifier` carries no span of its own.
@@ -54,6 +83,12 @@ pub struct Lowerer {
     /// `option_pattern_shape_diag` can name a source location instead of only
     /// the run. `Pattern` itself carries no span; `MatchArm` and `IfStmt` do.
     pub(super) current_pattern_span: Option<(usize, usize)>,
+    /// Address of the AST node that is the implicit tail of the function body
+    /// being lowered, when that tail is a `match` and the function declares a
+    /// non-void return: its value is the return value, so a fall-through must
+    /// fail closed like a `val`-position match. Compared by address only.
+    /// doc/08_tracking/bug/seed_value_match_no_arm_yields_nil_2026-11-02.md
+    pub(super) value_tail_match: Option<usize>,
     /// Module resolver for loading types from imports (optional for backward compatibility)
     pub(super) module_resolver: Option<ModuleResolver>,
     /// Current file being compiled (for resolving relative imports)
@@ -76,11 +111,29 @@ pub struct Lowerer {
     /// imported multiple times with different grouped symbols; path-only
     /// de-duplication skips later function imports.
     pub(super) loaded_import_targets: HashSet<(PathBuf, String)>,
+    /// Resolved unit keys whose type names `preregister_imported_type_names`
+    /// already placed. Placeholders are only added when absent and are never
+    /// removed, so a second pass over the same unit is a no-op (but used to
+    /// re-walk its items and re-`read_dir` its package every time).
+    pub(super) preregistered_units: HashSet<PathBuf>,
+    /// Memo for `resolve_imported_module_path`, keyed by (importing file,
+    /// module path, target). Filesystem resolution is fixed for one lowering.
+    pub(super) resolved_import_paths: std::cell::RefCell<HashMap<(PathBuf, String), crate::module_resolver::ResolvedModule>>,
     /// Nesting depth of dependency-only import loads: an imported module's own
     /// `use` statements, followed so its signatures resolve. Aliases those
     /// statements declare are private to that module and must not become
     /// names of the module being lowered (see `materialize_import_aliases`).
     pub(super) dependency_import_depth: usize,
+    /// Bare enum name -> declaring file of the enum the module being lowered
+    /// imported explicitly. Any later load (incl. dependency-only) of a same-named
+    /// enum from another file must not replace it in the bare-name registry.
+    pub(super) direct_enum_owners: HashMap<String, PathBuf>,
+    /// Enum names some `use` of the module being lowered requests explicitly.
+    pub(super) direct_enum_wanted: HashSet<String>,
+    /// Active `load_imported_types` import keys, outermost first.
+    pub(super) import_key_stack: Vec<(PathBuf, String)>,
+    /// Per import key: every enum registered while that import was loading.
+    pub(super) enum_loads: HashMap<(PathBuf, String), Vec<(String, super::super::types::HirType, PathBuf)>>,
     /// Memory safety warning collector
     pub(super) memory_warnings: MemoryWarningCollector,
     /// Lifetime inference context for tracking reference lifetimes
@@ -89,6 +142,16 @@ pub struct Lowerer {
     pub(super) capability_env: CapabilityEnv,
     /// Type aliases: alias_name -> original_name
     pub(super) type_aliases: HashMap<String, String>,
+    /// Record units (`unit Name: T`) erased to their underlying scalar `T`.
+    pub(super) record_unit_scalars: HashMap<String, TypeId>,
+    /// Free-function (`f`) and method (`Type.m`, `self` excluded) signatures
+    /// as authored type names, used to carry unit identity across calls for
+    /// SPL-UNIT-002. A name declared twice with different signatures is
+    /// stored empty (never checked).
+    pub(super) fn_sig_type_names: HashMap<String, super::type_registration::UnitSig>,
+    /// Struct/class fields as authored type names, for SPL-UNIT-002 on
+    /// `p.field` and constructor field arguments.
+    pub(super) type_field_type_names: HashMap<String, Vec<(String, Option<String>)>>,
     /// Function aliases: alias_name -> original_name
     pub(super) function_aliases: HashMap<String, String>,
     /// Free-function names THIS module's own source declares. Used to detect a
@@ -96,6 +159,24 @@ pub struct Lowerer {
     /// non-flattened (native/AOT) lane, rewriting `g` back to the bare `f`
     /// there binds the LOCAL `f` and silently loses the import.
     pub(super) own_declared_function_names: std::collections::HashSet<String>,
+    /// Struct/class names this module declares itself. An imported
+    /// constructor-call default `T(...)` is lowered in the caller only when `T`
+    /// is not one of these (a local `T` would shadow the callee type).
+    pub(super) own_declared_type_names: std::collections::HashSet<String>,
+    /// Names this module imports by `use` (`*` for a glob import). A constructor
+    /// default is lowered in the caller only for a type the caller itself sees.
+    pub(super) own_imported_names: std::collections::HashSet<String>,
+    /// Defining files of every imported struct/class, by bare name. A
+    /// constructor default is lowered in the caller only when the caller sees
+    /// exactly the callee module's own type (same single defining file).
+    pub(super) imported_type_owners: HashMap<String, std::collections::HashSet<std::path::PathBuf>>,
+    /// Defining files of every imported free function, by bare name.
+    pub(super) imported_fn_owners: HashMap<String, std::collections::HashSet<std::path::PathBuf>>,
+    /// All struct/class module owners in a flattened unit, keyed by bare name
+    /// (recorded before `qualify_flattened_structs` renames colliding types).
+    pub(super) flatten_all_type_owners: HashMap<String, Vec<Option<String>>>,
+    /// Defining module owner for each entry in `fn_param_defaults` (emitted symbol -> owner).
+    pub(super) fn_param_default_owners: HashMap<String, Option<String>>,
     /// Reverse lookup for suggestions: original -> Vec<aliases>
     pub(super) type_aliases_reverse: HashMap<String, Vec<String>>,
     /// Reverse lookup for function suggestions: original -> Vec<aliases>
@@ -117,10 +198,42 @@ pub struct Lowerer {
     /// Captured from the AST during module lowering so omitted trailing
     /// arguments can be filled at call sites (`lower_call`).
     pub(super) fn_param_defaults: HashMap<String, Vec<Option<Expr>>>,
+    /// `Owner.method` -> per user parameter, the declared parameter types of
+    /// a `fn(...)`-typed parameter (`None` for any other parameter). An inner
+    /// `None` is an erased generic parameter (`T` -> `ANY`). Lets a lambda
+    /// passed to a method take its declared callback parameter types, as a
+    /// lambda passed to a free function already does (`expr/calls.rs`).
+    pub(super) method_callback_param_types: HashMap<String, Vec<Option<Vec<Option<simple_parser::ast::Type>>>>>,
     /// Importing module identity -> visible name -> parameter defaults.
     /// Separate from local declarations so cached facades and aliases retain
     /// the selected import's contract without a process-wide bare-name lookup.
     pub(super) imported_fn_param_defaults: HashMap<PathBuf, HashMap<String, Vec<Option<Expr>>>>,
+    /// Declared parameter names, parallel to `fn_param_defaults` /
+    /// `imported_fn_param_defaults` (same keys, same order). Lets a call that
+    /// uses named arguments be mapped onto declared slots at the call site.
+    pub(super) fn_param_names: HashMap<String, Vec<String>>,
+    pub(super) imported_fn_param_names: HashMap<PathBuf, HashMap<String, Vec<String>>>,
+    /// Per-parameter `bool`-declared slots, parallel to `fn_param_names`
+    /// (same keys, same order). Drives the static bool-argument admission
+    /// check at HIR call sites
+    /// (doc/08_tracking/bug/bool_typed_parameter_accepts_non_bool_and_jit_corrupts_it_2026-08-04):
+    /// a literal non-bool argument at a `bool` parameter is rejected at
+    /// lowering so the JIT lane cannot re-tag it into a corrupt value.
+    pub(super) fn_param_bool: HashMap<String, Vec<bool>>,
+    /// Per-parameter declared simple type name (`Kind` or `Kind?` -> "Kind"),
+    /// parallel to `fn_param_names`. Lets the enum-slot admission check
+    /// (`reject_callable_for_enum_slot`) see a callee whose HIR value type is
+    /// not yet a `Function` (declared after the caller).
+    pub(super) fn_param_type_names: HashMap<String, Vec<Option<String>>>,
+    /// Same as `fn_param_type_names` for class/struct/impl/trait methods
+    /// (including imported ones), keyed `Owner.method`, `self` excluded. The
+    /// enum-slot check consumes it only for a receiver declared in the file
+    /// being lowered; the float-into-int check consumes every row.
+    pub(super) method_param_type_names: HashMap<String, Vec<Option<String>>>,
+    /// `Owner.method` keys of `method_param_type_names` declared `static`:
+    /// only these rows are checked at a `Type.method(args)` call, so an
+    /// instance method called with an explicit receiver never shifts slots.
+    pub(super) static_method_names: HashSet<String>,
     /// Whole-program map of free-function name -> declared return type,
     /// built by `build_import_map`. Functions reached via the global import map
     /// (called without a `use` import) otherwise have no return-type info, so
@@ -155,10 +268,26 @@ pub struct Lowerer {
     /// override the importer's own (or vice versa). See
     /// `doc/08_tracking/bug/selective_use_leaks_same_named_fn_2026-09-13.md`.
     pub(super) flatten_fn_owners: HashMap<String, Vec<Option<String>>>,
+    /// Flattened unit only: extern name -> (declaring owner, resolved return
+    /// type) for every `extern fn` declaration of that name. Co-compiled modules
+    /// may declare one runtime symbol with different return types (e.g.
+    /// `rt_tuple_get(..) -> i64` vs `rt_tuple_get<T>(..) -> T?`); a call is typed
+    /// by its own module's declaration, not the last one registered. See
+    /// `doc/08_tracking/bug/seed_jit_extern_return_type_last_wins_2026-11-27.md`.
+    pub(super) flatten_extern_owner_returns: HashMap<String, Vec<(Option<String>, TypeId)>>,
     /// Flattened unit only: importer owner -> local name -> (source owner,
     /// source name), decoded from every `__simple_flatten_import_binding__`
     /// marker. Keyed by importer, unlike `import_alias_bindings`.
     pub(super) flatten_owner_import_bindings: HashMap<String, HashMap<String, (String, String)>>,
+    /// Flattened unit only: importer owner -> every source owner it glob-imports
+    /// (`use m.*` / `export use m.*`), in marker order. The `*` markers are
+    /// not name bindings, so `flatten_owner_import_bindings` cannot hold them;
+    /// `flatten_reexport_definer` follows these edges through glob facades.
+    pub(super) flatten_owner_glob_sources: HashMap<String, Vec<String>>,
+    /// Flattened unit only: importer owner -> local namespace name -> source
+    /// owner, decoded from every `__simple_flatten_module_namespace__` marker
+    /// (`use a.b` / `use a.b as m`). Consumed by `resolve_flatten_namespace_*`.
+    pub(super) flatten_owner_module_namespaces: HashMap<String, HashMap<String, String>>,
     /// Flatten owner of the function whose body is being lowered.
     pub(super) current_function_owner: Option<String>,
     /// Flattened unit only: module-global name declared by two or more
@@ -168,6 +297,10 @@ pub struct Lowerer {
     pub(super) flatten_global_owners: HashMap<String, Vec<Option<String>>>,
     /// Owner-exact symbol of each colliding flattened global -> its owner.
     pub(super) flatten_global_symbol_owners: HashMap<String, Option<String>>,
+    /// `(owner, name)` of every module global -> its scalar literal when it is
+    /// a literal `const`, else `None`. Lets an omitted `param = CONST` default
+    /// be inlined as its literal (`call_site_defaults`).
+    pub(super) flatten_const_literals: super::module_lowering::ConstLiteralCensus,
     /// Flattened unit only: struct/class name declared by two or more
     /// distinct owners with differing layouts -> owner of each declaration
     /// (see `module_lowering/flatten_struct_owner.rs`).
@@ -197,8 +330,19 @@ pub struct Lowerer {
     /// at registration so a module-level `val G = f` (lowered before any body)
     /// is typed as a function value rather than ANY.
     pub(super) declared_function_value_types: HashMap<String, TypeId>,
+    /// Generic free functions `fn f<T>(.., x: T, ..) -> T`: name -> parameter
+    /// index/name and generic parameter index of the returned type param.
+    /// Erased generics type the call as Any; a struct/class argument (or
+    /// explicit `<Struct>`) recovers the nominal struct identity.
+    pub(super) generic_identity_param: HashMap<String, GenericIdentityParamSpec>,
     /// Canonical `module_prefix__Type` layouts from all compilation units.
     pub(super) global_struct_defs: Option<GlobalStructDefs>,
+    /// Canonical `module_prefix__Type` -> declared field `= default` exprs,
+    /// keyed like `global_struct_defs`. Fallback for `struct_field_defaults`
+    /// when the constructed type reached this module only through the global
+    /// layout map (e.g. a glob re-export), so its declaration was never
+    /// registered locally and an omitted field would otherwise get nil.
+    pub(super) global_struct_field_defaults: Option<GlobalStructFieldDefaults>,
     /// Bare names that have exactly one canonical nominal owner.  This is a
     /// compatibility index, never an identity source for colliding types.
     pub(super) unique_global_struct_owners: Option<UniqueStructOwners>,
@@ -223,6 +367,12 @@ pub struct Lowerer {
     /// early-return in `expr/access.rs::lower_field_access` falls through
     /// to the field-access fallback (W13-F class 1, fixed in W15-H).
     pub(super) global_enum_defs: Option<GlobalEnumDefs>,
+    /// `user_option_shaped_enums`, keyed by the type count it was built at.
+    pub(super) user_option_shaped_cache: Option<(usize, std::sync::Arc<Vec<(i64, Option<i64>)>>)>,
+    /// Bare enum names declared by several modules; their `global_enum_defs`
+    /// row is a merged union, so a seeded registration from it is not one
+    /// owner's declaration and must not yield a discriminant (#6953).
+    pub(super) merged_global_enum_names: Option<std::sync::Arc<std::collections::HashSet<String>>>,
     /// Source file each struct/class bare name was DECLARED in, recorded by
     /// `register_struct`. A name that collides across modules maps to the file
     /// of whichever declaration registered last -- which is exactly the signal
@@ -247,12 +397,58 @@ pub struct Lowerer {
     /// a field with NO declared default keeps the `Nil` placeholder exactly as
     /// before.
     pub(super) struct_field_defaults: HashMap<String, HashMap<String, Expr>>,
+    /// Authored field types and declaration provenance keyed by receiver TypeId.
+    /// A reused type id from conflicting owners is tombstoned, not guessed. Preserve
+    /// Optional and generic structure: only payload bindings may acquire the
+    /// inner trait identity; the Option carrier itself must never acquire it.
+    pub(super) struct_field_declared_types: HashMap<TypeId, Option<(String, HashMap<String, Type>)>>,
     /// Local bindings authored as untyped empty array literals (`var xs = []`).
     ///
     /// These start as `[Any]` placeholders in HIR so later builtin `append`
     /// calls can specialize the local to the appended element type instead of
     /// freezing the seed to the configured scalar default element type.
     pub(super) untyped_empty_array_locals: HashSet<usize>,
+    /// Active function generic parameter names (type & const generic params).
+    pub(super) active_fn_generic_params: Vec<String>,
+    /// Active function generic trait bounds (e.g. `C: FromIterator<...>`).
+    pub(super) active_fn_generic_bounds: Vec<HirGenericBound>,
+    /// Active impl/struct generic parameter names (type & const generic params).
+    pub(super) active_impl_generic_params: Vec<String>,
+    /// Expected target TypeId propagated from `let x: Target = ...` or return types.
+    pub(super) expected_target_type: Option<TypeId>,
+    /// Active impl associated type bindings (`Self.Item -> Type`).
+    pub(super) active_self_assoc_types: HashMap<String, Type>,
+}
+
+thread_local! {
+    /// Private-fn references found by the lowering in progress; `Some` while
+    /// the gate is armed (JIT run lane only, see `arm_private_ref_gate`).
+    static PRIVATE_REF_VIOLATIONS: std::cell::RefCell<Option<Vec<PrivateRefViolation>>> = const { std::cell::RefCell::new(None) };
+}
+
+fn private_ref_gate_armed() -> bool {
+    PRIVATE_REF_VIOLATIONS.with(|cell| cell.borrow().is_some())
+}
+
+/// Arm the private-fn reference gate for the lowerings that follow on this
+/// thread, until `take_private_ref_violations`.
+pub(crate) fn arm_private_ref_gate() {
+    PRIVATE_REF_VIOLATIONS.with(|cell| *cell.borrow_mut() = Some(Vec::new()));
+}
+
+/// A reference to a private fn of another directory found while lowering.
+pub struct PrivateRefViolation {
+    /// Emitted name of the function whose body holds the reference; `None`
+    /// for module-level code (a global initializer), which always runs.
+    pub function: Option<String>,
+    /// The visibility error, as the interpreter's call rule words it.
+    pub message: String,
+}
+
+/// Disarm the gate and return what it recorded: one entry per distinct
+/// (holding function, private fn) reference in the lowered unit.
+pub fn take_private_ref_violations() -> Vec<PrivateRefViolation> {
+    PRIVATE_REF_VIOLATIONS.with(|cell| cell.borrow_mut().take()).unwrap_or_default()
 }
 
 impl Lowerer {
@@ -274,29 +470,51 @@ impl Lowerer {
             proven_nonescaping_functions: HashSet::new(),
             current_class_type: None,
             current_function_name: None,
+            suffix_guessed_return_types: HashSet::new(),
+            last_method_return_guessed: std::cell::Cell::new(false),
             current_function_line: None,
             current_pattern_span: None,
+            value_tail_match: None,
             module_resolver: None,
             current_file: None,
             loaded_modules: HashSet::new(),
             import_stack: Vec::new(),
             import_cycles: Vec::new(),
             loaded_import_targets: HashSet::new(),
+            preregistered_units: HashSet::new(),
+            resolved_import_paths: std::cell::RefCell::new(HashMap::new()),
             dependency_import_depth: 0,
+            direct_enum_owners: HashMap::new(),
+            direct_enum_wanted: HashSet::new(),
+            import_key_stack: Vec::new(),
+            enum_loads: HashMap::new(),
             memory_warnings: MemoryWarningCollector::strict(), // STRICT mode for Rust-level safety
             lifetime_context: LifetimeContext::new(),
             capability_env: CapabilityEnv::new(),
             type_aliases: HashMap::new(),
+            record_unit_scalars: HashMap::new(),
+            fn_sig_type_names: HashMap::new(),
+            type_field_type_names: HashMap::new(),
             function_aliases: HashMap::new(),
             own_declared_function_names: std::collections::HashSet::new(),
+            own_declared_type_names: std::collections::HashSet::new(),
+            own_imported_names: std::collections::HashSet::new(),
+            imported_type_owners: HashMap::new(),
+            imported_fn_owners: HashMap::new(),
+            flatten_all_type_owners: HashMap::new(),
+            fn_param_default_owners: HashMap::new(),
             import_alias_bindings: HashMap::new(),
             flatten_fn_owners: HashMap::new(),
+            flatten_extern_owner_returns: HashMap::new(),
             flatten_owner_import_bindings: HashMap::new(),
+            flatten_owner_glob_sources: HashMap::new(),
+            flatten_owner_module_namespaces: HashMap::new(),
             current_function_owner: None,
             flatten_global_owners: HashMap::new(),
             flatten_struct_owners: HashMap::new(),
             flatten_struct_scopes: HashMap::new(),
             flatten_global_symbol_owners: HashMap::new(),
+            flatten_const_literals: HashMap::new(),
             type_aliases_reverse: HashMap::new(),
             function_aliases_reverse: HashMap::new(),
             deprecated_items: HashMap::new(),
@@ -306,7 +524,14 @@ impl Lowerer {
             declared_function_returns: HashMap::new(),
             trait_declared_owners: HashMap::new(),
             fn_param_defaults: HashMap::new(),
+            method_callback_param_types: HashMap::new(),
             imported_fn_param_defaults: HashMap::new(),
+            fn_param_names: HashMap::new(),
+            imported_fn_param_names: HashMap::new(),
+            fn_param_bool: HashMap::new(),
+            fn_param_type_names: HashMap::new(),
+            method_param_type_names: HashMap::new(),
+            static_method_names: HashSet::new(),
             global_fn_return_types: None,
             global_method_param_defaults: None,
             qualified_import_functions: None,
@@ -316,15 +541,25 @@ impl Lowerer {
             imported_function_names: HashSet::new(),
             imported_function_value_types: HashMap::new(),
             declared_function_value_types: HashMap::new(),
+            generic_identity_param: HashMap::new(),
             global_struct_defs: None,
+            global_struct_field_defaults: None,
             unique_global_struct_owners: None,
             struct_module_owners: None,
             duplicate_global_struct_defs: None,
             struct_decl_files: HashMap::new(),
             struct_field_defaults: HashMap::new(),
+            struct_field_declared_types: HashMap::new(),
             ambiguous_field_names: None,
             global_enum_defs: None,
+            user_option_shaped_cache: None,
+            merged_global_enum_names: None,
             untyped_empty_array_locals: HashSet::new(),
+            active_fn_generic_params: Vec::new(),
+            active_fn_generic_bounds: Vec::new(),
+            active_impl_generic_params: Vec::new(),
+            expected_target_type: None,
+            active_self_assoc_types: HashMap::new(),
         }
     }
 
@@ -345,29 +580,51 @@ impl Lowerer {
             proven_nonescaping_functions: HashSet::new(),
             current_class_type: None,
             current_function_name: None,
+            suffix_guessed_return_types: HashSet::new(),
+            last_method_return_guessed: std::cell::Cell::new(false),
             current_function_line: None,
             current_pattern_span: None,
+            value_tail_match: None,
             module_resolver: Some(module_resolver),
             current_file: Some(current_file),
             loaded_modules: HashSet::new(),
             import_stack: Vec::new(),
             import_cycles: Vec::new(),
             loaded_import_targets: HashSet::new(),
+            preregistered_units: HashSet::new(),
+            resolved_import_paths: std::cell::RefCell::new(HashMap::new()),
             dependency_import_depth: 0,
+            direct_enum_owners: HashMap::new(),
+            direct_enum_wanted: HashSet::new(),
+            import_key_stack: Vec::new(),
+            enum_loads: HashMap::new(),
             memory_warnings: MemoryWarningCollector::strict(), // STRICT by default
             lifetime_context: LifetimeContext::new(),
             capability_env: CapabilityEnv::new(),
             type_aliases: HashMap::new(),
+            record_unit_scalars: HashMap::new(),
+            fn_sig_type_names: HashMap::new(),
+            type_field_type_names: HashMap::new(),
             function_aliases: HashMap::new(),
             own_declared_function_names: std::collections::HashSet::new(),
+            own_declared_type_names: std::collections::HashSet::new(),
+            own_imported_names: std::collections::HashSet::new(),
+            imported_type_owners: HashMap::new(),
+            imported_fn_owners: HashMap::new(),
+            flatten_all_type_owners: HashMap::new(),
+            fn_param_default_owners: HashMap::new(),
             import_alias_bindings: HashMap::new(),
             flatten_fn_owners: HashMap::new(),
+            flatten_extern_owner_returns: HashMap::new(),
             flatten_owner_import_bindings: HashMap::new(),
+            flatten_owner_glob_sources: HashMap::new(),
+            flatten_owner_module_namespaces: HashMap::new(),
             current_function_owner: None,
             flatten_global_owners: HashMap::new(),
             flatten_struct_owners: HashMap::new(),
             flatten_struct_scopes: HashMap::new(),
             flatten_global_symbol_owners: HashMap::new(),
+            flatten_const_literals: HashMap::new(),
             type_aliases_reverse: HashMap::new(),
             function_aliases_reverse: HashMap::new(),
             deprecated_items: HashMap::new(),
@@ -377,7 +634,14 @@ impl Lowerer {
             declared_function_returns: HashMap::new(),
             trait_declared_owners: HashMap::new(),
             fn_param_defaults: HashMap::new(),
+            method_callback_param_types: HashMap::new(),
             imported_fn_param_defaults: HashMap::new(),
+            fn_param_names: HashMap::new(),
+            imported_fn_param_names: HashMap::new(),
+            fn_param_bool: HashMap::new(),
+            fn_param_type_names: HashMap::new(),
+            method_param_type_names: HashMap::new(),
+            static_method_names: HashSet::new(),
             global_fn_return_types: None,
             global_method_param_defaults: None,
             qualified_import_functions: None,
@@ -387,15 +651,25 @@ impl Lowerer {
             imported_function_names: HashSet::new(),
             imported_function_value_types: HashMap::new(),
             declared_function_value_types: HashMap::new(),
+            generic_identity_param: HashMap::new(),
             global_struct_defs: None,
+            global_struct_field_defaults: None,
             unique_global_struct_owners: None,
             struct_module_owners: None,
             duplicate_global_struct_defs: None,
             struct_decl_files: HashMap::new(),
             struct_field_defaults: HashMap::new(),
+            struct_field_declared_types: HashMap::new(),
             ambiguous_field_names: None,
             global_enum_defs: None,
+            user_option_shaped_cache: None,
+            merged_global_enum_names: None,
             untyped_empty_array_locals: HashSet::new(),
+            active_fn_generic_params: Vec::new(),
+            active_fn_generic_bounds: Vec::new(),
+            active_impl_generic_params: Vec::new(),
+            expected_target_type: None,
+            active_self_assoc_types: HashMap::new(),
         }
     }
 
@@ -439,29 +713,51 @@ impl Lowerer {
             proven_nonescaping_functions: HashSet::new(),
             current_class_type: None,
             current_function_name: None,
+            suffix_guessed_return_types: HashSet::new(),
+            last_method_return_guessed: std::cell::Cell::new(false),
             current_function_line: None,
             current_pattern_span: None,
+            value_tail_match: None,
             module_resolver: None,
             current_file: None,
             loaded_modules: HashSet::new(),
             import_stack: Vec::new(),
             import_cycles: Vec::new(),
             loaded_import_targets: HashSet::new(),
+            preregistered_units: HashSet::new(),
+            resolved_import_paths: std::cell::RefCell::new(HashMap::new()),
             dependency_import_depth: 0,
+            direct_enum_owners: HashMap::new(),
+            direct_enum_wanted: HashSet::new(),
+            import_key_stack: Vec::new(),
+            enum_loads: HashMap::new(),
             memory_warnings: MemoryWarningCollector::new(), // Lenient mode (warnings only)
             lifetime_context: LifetimeContext::new(),
             capability_env: CapabilityEnv::new(),
             type_aliases: HashMap::new(),
+            record_unit_scalars: HashMap::new(),
+            fn_sig_type_names: HashMap::new(),
+            type_field_type_names: HashMap::new(),
             function_aliases: HashMap::new(),
             own_declared_function_names: std::collections::HashSet::new(),
+            own_declared_type_names: std::collections::HashSet::new(),
+            own_imported_names: std::collections::HashSet::new(),
+            imported_type_owners: HashMap::new(),
+            imported_fn_owners: HashMap::new(),
+            flatten_all_type_owners: HashMap::new(),
+            fn_param_default_owners: HashMap::new(),
             import_alias_bindings: HashMap::new(),
             flatten_fn_owners: HashMap::new(),
+            flatten_extern_owner_returns: HashMap::new(),
             flatten_owner_import_bindings: HashMap::new(),
+            flatten_owner_glob_sources: HashMap::new(),
+            flatten_owner_module_namespaces: HashMap::new(),
             current_function_owner: None,
             flatten_global_owners: HashMap::new(),
             flatten_struct_owners: HashMap::new(),
             flatten_struct_scopes: HashMap::new(),
             flatten_global_symbol_owners: HashMap::new(),
+            flatten_const_literals: HashMap::new(),
             type_aliases_reverse: HashMap::new(),
             function_aliases_reverse: HashMap::new(),
             deprecated_items: HashMap::new(),
@@ -471,7 +767,14 @@ impl Lowerer {
             declared_function_returns: HashMap::new(),
             trait_declared_owners: HashMap::new(),
             fn_param_defaults: HashMap::new(),
+            method_callback_param_types: HashMap::new(),
             imported_fn_param_defaults: HashMap::new(),
+            fn_param_names: HashMap::new(),
+            imported_fn_param_names: HashMap::new(),
+            fn_param_bool: HashMap::new(),
+            fn_param_type_names: HashMap::new(),
+            method_param_type_names: HashMap::new(),
+            static_method_names: HashSet::new(),
             global_fn_return_types: None,
             global_method_param_defaults: None,
             qualified_import_functions: None,
@@ -481,15 +784,25 @@ impl Lowerer {
             imported_function_names: HashSet::new(),
             imported_function_value_types: HashMap::new(),
             declared_function_value_types: HashMap::new(),
+            generic_identity_param: HashMap::new(),
             global_struct_defs: None,
+            global_struct_field_defaults: None,
             unique_global_struct_owners: None,
             struct_module_owners: None,
             duplicate_global_struct_defs: None,
             struct_decl_files: HashMap::new(),
             struct_field_defaults: HashMap::new(),
+            struct_field_declared_types: HashMap::new(),
             ambiguous_field_names: None,
             global_enum_defs: None,
+            user_option_shaped_cache: None,
+            merged_global_enum_names: None,
             untyped_empty_array_locals: HashSet::new(),
+            active_fn_generic_params: Vec::new(),
+            active_fn_generic_bounds: Vec::new(),
+            active_impl_generic_params: Vec::new(),
+            expected_target_type: None,
+            active_self_assoc_types: HashMap::new(),
         }
     }
 
@@ -531,12 +844,9 @@ impl Lowerer {
             name: name.to_string(),
             kind,
         };
-        // Mirror into the process-global registry so the native link path can
-        // resolve an "undefined symbol" back to this location. The production
-        // path (`native_project::compile_file_to_object`) calls
-        // `lower_module`, which consumes the lowerer and returns only a
-        // `HirModule`, so this per-instance collector never reaches the linker.
-        super::lenient_global_diag::record_for_link_diagnostics(&entry);
+        // Flushed in batch to the process-global registry when this `Lowerer`
+        // drops so multi-threaded native builds do not contend on a global
+        // mutex per lenient identifier.
         self.lenient_globals.record(entry);
     }
 
@@ -556,6 +866,10 @@ impl Lowerer {
     /// isn't in the per-file registry.
     pub fn set_global_struct_defs(&mut self, defs: GlobalStructDefs) {
         self.global_struct_defs = Some(defs);
+    }
+
+    pub fn set_global_struct_field_defaults(&mut self, defaults: GlobalStructFieldDefaults) {
+        self.global_struct_field_defaults = Some(defaults);
     }
 
     pub fn set_unique_global_struct_owners(&mut self, owners: UniqueStructOwners) {
@@ -607,8 +921,39 @@ impl Lowerer {
     /// W15-H: paired with `register_global_enums()`, which the
     /// `native_project` compiler driver calls before `lower_module(&ast)`.
     /// See the doc comment on `global_enum_defs` for the why.
+    /// The project-wide `Option` entry, if any, is the generic builtin.
+    pub(crate) fn global_option_is_builtin(&self) -> bool {
+        self.global_enum_defs
+            .as_ref()
+            .and_then(|defs| defs.get("Option"))
+            .is_some_and(|vs| global_def_is_builtin_option("Option", vs))
+    }
+
     pub fn set_global_enum_defs(&mut self, defs: GlobalEnumDefs) {
         self.global_enum_defs = Some(defs);
+    }
+
+    /// Names whose `global_enum_defs` row merges several declarations; see
+    /// `merged_global_enum_names`. Call before `register_global_enums`.
+    pub fn set_merged_global_enum_names(&mut self, names: std::sync::Arc<std::collections::HashSet<String>>) {
+        self.merged_global_enum_names = Some(names);
+    }
+
+    /// #6953: discriminant of `variant` in its OWNING enum (the enum
+    /// `owner_ty` is, else `enum_name`, else the index every enum visible to
+    /// this module agrees on). Only when none resolves does it fall back to
+    /// the reported name-only lookup.
+    pub(crate) fn owner_variant_discriminant(
+        &self,
+        owner_ty: crate::hir::TypeId,
+        enum_name: Option<&str>,
+        variant: &str,
+        site: &'static str,
+    ) -> i64 {
+        self.module
+            .types
+            .owned_or_unique_variant_discriminant(owner_ty, enum_name, variant)
+            .unwrap_or_else(|| crate::hir::name_only_variant_discriminant(site, variant))
     }
 
     /// Eagerly register every enum from `global_enum_defs` into the local
@@ -675,6 +1020,13 @@ impl Lowerer {
                     type_bindings: std::collections::HashMap::new(),
                 },
             );
+            if self
+                .merged_global_enum_names
+                .as_ref()
+                .is_some_and(|names| names.contains(&enum_name))
+            {
+                self.module.types.mark_merged_enum(type_id);
+            }
             self.globals.insert(enum_name, type_id);
         }
     }
@@ -853,7 +1205,11 @@ impl Lowerer {
         // compared to silently binding the wrong function. See
         // `doc/08_tracking/bug/flattened_lane_does_not_mangle_duplicate_function_names_2026-08-10.md`.
         self.flatten_fn_owners.clear();
+        self.flatten_extern_owner_returns.clear();
         self.flatten_owner_import_bindings.clear();
+        self.flatten_owner_glob_sources.clear();
+        self.flatten_owner_module_namespaces.clear();
+        self.flatten_all_type_owners.clear();
         let mut definition_counts: HashMap<&str, usize> = HashMap::new();
         // Every name the flattened unit really DECLARES, function or value. The
         // alias branch in `lower_identifier` now runs ahead of the
@@ -869,6 +1225,26 @@ impl Lowerer {
                     declared_names.insert(f.name.as_str());
                     let owner = Self::flatten_owner_of(f.attributes.iter().map(|a| a.name.as_str()));
                     self.flatten_fn_owners.entry(f.name.clone()).or_default().push(owner);
+                }
+                simple_parser::Node::Struct(s) => {
+                    let owner = Self::flatten_owner_of(s.attributes.iter().map(|a| a.name.as_str())).or_else(|| {
+                        Self::flatten_owner_of(
+                            s.methods
+                                .iter()
+                                .flat_map(|m| m.attributes.iter().map(|a| a.name.as_str())),
+                        )
+                    });
+                    self.flatten_all_type_owners.entry(s.name.clone()).or_default().push(owner);
+                }
+                simple_parser::Node::Class(c) => {
+                    let owner = Self::flatten_owner_of(c.attributes.iter().map(|a| a.name.as_str())).or_else(|| {
+                        Self::flatten_owner_of(
+                            c.methods
+                                .iter()
+                                .flat_map(|m| m.attributes.iter().map(|a| a.name.as_str())),
+                        )
+                    });
+                    self.flatten_all_type_owners.entry(c.name.clone()).or_default().push(owner);
                 }
                 simple_parser::Node::Const(c) => {
                     declared_names.insert(c.name.as_str());
@@ -892,10 +1268,28 @@ impl Lowerer {
             let simple_parser::Node::Const(marker) = item else {
                 continue;
             };
+            if let Some((importer, local_name, source_owner)) =
+                crate::interpreter::decode_module_namespace_marker(&marker.name)
+            {
+                // A real declaration of the namespace name wins, as for aliases.
+                if !declared_names.contains(local_name) {
+                    self.flatten_owner_module_namespaces
+                        .entry(importer.to_string())
+                        .or_default()
+                        .insert(local_name.to_string(), source_owner.to_string());
+                }
+                continue;
+            }
             let Some((importer, local_name, source_owner, source_name)) = decode_import_binding_marker(&marker.name)
             else {
                 continue;
             };
+            if local_name == "*" && source_name == "*" {
+                let sources = self.flatten_owner_glob_sources.entry(importer.to_string()).or_default();
+                if !sources.iter().any(|known| known == source_owner) {
+                    sources.push(source_owner.to_string());
+                }
+            }
             if local_name != "*" && source_name != "*" {
                 self.flatten_owner_import_bindings
                     .entry(importer.to_string())
@@ -955,10 +1349,90 @@ impl Lowerer {
             .map(str::to_string)
     }
 
+    /// Return type of a call to extern `name` as declared by the CALLING
+    /// module, when co-compiled modules declare `name` with different return
+    /// types. `None` (keep the bare-name type) when every declaration agrees or
+    /// the caller's module declares none of its own.
+    ///
+    /// Without this the last registered declaration typed every call: with
+    /// `enum_wire.spl`'s `rt_tuple_get(..) -> i64` loaded after the frontend's
+    /// `rt_tuple_get<T>(..) -> T?`, a `text` payload read came back as a raw
+    /// word typed `i64` and was int-boxed (`word << 3`); `rt_text_eq_any` then
+    /// dereferenced it as a C string (SIGSEGV).
+    pub(super) fn owner_scoped_extern_return(&self, name: &str) -> Option<TypeId> {
+        let decls = self.flatten_extern_owner_returns.get(name)?;
+        let first = decls.first()?.1;
+        if decls.iter().all(|(_, ty)| *ty == first) {
+            return None;
+        }
+        decls
+            .iter()
+            .find(|(owner, _)| *owner == self.current_function_owner)
+            .map(|(_, ty)| *ty)
+    }
+
     fn flatten_is_collision(&self, name: &str) -> bool {
         self.flatten_fn_owners
             .get(name)
             .is_some_and(|owners| owners.iter().any(|owner| owner != &owners[0]))
+    }
+
+    /// The `(owner, name)` that DECLARES the function an import binding names,
+    /// following re-export facades (`export use m.{f}` / `export use m.*`).
+    ///
+    /// A binding records the module the `use` names. When that module is a
+    /// facade it declares nothing, and stopping there made the owner-exact
+    /// lookup fall back to the bare name -- under a cross-module collision the
+    /// "last definition" of an unrelated module, i.e. a silent miscompile
+    /// (`app.io.file_ops` re-exports `file_exists`; ~15 modules of the
+    /// native-build closure declare one). Mirrors the interpreter's walk in
+    /// `interpreter_call::import_bound_candidate`: at each hop a declaration in
+    /// the current owner wins, else the owner's own binding for the name, else
+    /// its glob edges. Fail-closed (`None`, keeping the historical lookup) on a
+    /// hop back into the importer (recursion trap), on two distinct declaring
+    /// owners reachable through globs (ambiguous), or past the hop budget.
+    pub(super) fn flatten_reexport_definer(
+        &self,
+        importer: &str,
+        source_owner: &str,
+        source_name: &str,
+    ) -> Option<(String, String)> {
+        const HOP_BUDGET: usize = 64;
+        let mut found: Option<(String, String)> = None;
+        let mut seen: std::collections::HashSet<(String, String)> = std::collections::HashSet::new();
+        let mut pending = vec![(source_owner.to_string(), source_name.to_string())];
+        let mut hops = 0usize;
+        while let Some((owner, name)) = pending.pop() {
+            hops += 1;
+            if hops > HOP_BUDGET {
+                return None;
+            }
+            if owner == importer || !seen.insert((owner.clone(), name.clone())) {
+                continue;
+            }
+            if self.flatten_owner_defines(Some(&owner), &name) {
+                match &found {
+                    None => found = Some((owner, name)),
+                    Some(previous) if previous.0 == owner && previous.1 == name => {}
+                    Some(_) => return None,
+                }
+                continue;
+            }
+            if let Some(next) = self
+                .flatten_owner_import_bindings
+                .get(&owner)
+                .and_then(|bindings| bindings.get(&name))
+            {
+                pending.push(next.clone());
+                continue;
+            }
+            if let Some(globs) = self.flatten_owner_glob_sources.get(&owner) {
+                for glob_owner in globs.iter().rev() {
+                    pending.push((glob_owner.clone(), name.clone()));
+                }
+            }
+        }
+        found
     }
 
     fn flatten_owner_defines(&self, owner: Option<&str>, name: &str) -> bool {
@@ -1001,20 +1475,133 @@ impl Lowerer {
     ///    module other than the importer (an import never names the importer's
     ///    own function; this is the `fn f(): g()` recursion trap).
     pub(super) fn resolve_flatten_owned_callable(&self, name: &str) -> Option<String> {
-        if self.flatten_fn_owners.is_empty() {
+        match self.flatten_owned_callable(name) {
+            FlattenCallable::Resolved(symbol) if symbol != name => Some(symbol),
+            _ => None,
+        }
+    }
+
+    /// Owner decision 2026-11-09 (bug
+    /// `jit_co_compiled_definition_ambiguity_debt_2026-09-15`): a bare callable
+    /// `name` that several co-compiled modules define, referenced from a module
+    /// that neither defines it nor imports it (selectively, through a re-export
+    /// facade, or through exactly one glob source that declares it), is a
+    /// COMPILE ERROR. It used to fall back to whichever definition kept the
+    /// bare name -- the entry module's, else the LAST one loaded -- a silent
+    /// wrong dispatch that depended only on `use` ordering. Returns the
+    /// diagnostic text, or `None` when the reference is unambiguous.
+    pub(super) fn flatten_ambiguous_callable(&self, name: &str) -> Option<String> {
+        let FlattenCallable::Ambiguous(owners) = self.flatten_owned_callable(name) else {
             return None;
+        };
+        let importer = self.current_function_owner.as_deref().unwrap_or("<entry file>");
+        Some(format!(
+            "ambiguous call to `{name}`: {} co-compiled definitions ({}) and `{importer}` neither \
+             defines nor imports it, so no definition can be selected. Qualify the reference with \
+             a selective import (`use <module>.{{{name}}}`) naming the intended definition, or \
+             rename the duplicate definitions to unique names. \
+             [compiler_cross_module_private_symbol_collision]",
+            owners.len(),
+            owners.join(", "),
+        ))
+    }
+
+    /// Shared resolution behind `resolve_flatten_owned_callable` and
+    /// `flatten_ambiguous_callable`, in priority order:
+    ///
+    /// 1. the current module defines a colliding `name` -> its own definition;
+    /// 2. the current module imports `name` (possibly as an alias) -> the
+    ///    definition in the module that import names (re-exports followed);
+    /// 3. exactly one of the current module's glob sources (`use m.*`)
+    ///    declares `name` -> that definition;
+    /// 4. `name` is a function alias of a colliding name -> a definition from a
+    ///    module other than the importer (an import never names the importer's
+    ///    own function; this is the `fn f(): g()` recursion trap);
+    /// 5. otherwise a colliding `name` is `Ambiguous` (owner list for the
+    ///    diagnostic) and a non-colliding one is `NotCollision`.
+    fn flatten_glob_declarer_visible(&self, importer: &str, owner: &str, name: &str) -> bool {
+        let owner_arc = std::sync::Arc::<str>::from(owner);
+        let caller_arc: std::sync::Arc<str> = if importer == "<entry>" {
+            match self.current_file.as_ref() {
+                Some(entry) => std::sync::Arc::from(
+                    crate::interpreter::normalize_path_key(entry)
+                        .to_string_lossy()
+                        .as_ref(),
+                ),
+                None => return true,
+            }
+        } else {
+            std::sync::Arc::from(importer)
+        };
+        crate::interpreter::interpreter_module::is_fn_visible_to(name, &owner_arc, &caller_arc)
+    }
+
+    fn flatten_glob_declarers(&self, importer: &str, name: &str) -> Vec<(String, String)> {
+        let mut declarers: Vec<(String, String)> = Vec::new();
+        for glob_owner in self.flatten_owner_glob_sources.get(importer).into_iter().flatten() {
+            if let Some(declarer) = self.flatten_reexport_definer(importer, glob_owner, name) {
+                if self.flatten_glob_declarer_visible(importer, &declarer.0, &declarer.1)
+                    && !declarers.contains(&declarer)
+                {
+                    declarers.push(declarer);
+                }
+            }
+        }
+        if declarers.len() > 1 {
+            let public_only: Vec<(String, String)> = declarers
+                .iter()
+                .filter(|(owner, source_name)| {
+                    !crate::interpreter::interpreter_module::is_private_fn_of(
+                        &std::sync::Arc::<str>::from(owner.as_str()),
+                        source_name,
+                    )
+                })
+                .cloned()
+                .collect();
+            if !public_only.is_empty() {
+                return public_only;
+            }
+        }
+        declarers
+    }
+
+    fn flatten_owned_callable(&self, name: &str) -> FlattenCallable {
+        if self.flatten_fn_owners.is_empty() {
+            return FlattenCallable::NotCollision;
         }
         let current = self.current_function_owner.as_deref();
-        let resolved = if self.flatten_is_collision(name) && self.flatten_owner_defines(current, name) {
-            Some(self.flatten_emitted_symbol(current, name))
-        } else if let Some((source_owner, source_name)) = current
-            .and_then(|importer| self.flatten_owner_import_bindings.get(importer))
+        // Untagged (entry-module) callers record their imports under the
+        // `<entry>` importer, exactly like `resolve_flatten_owned_global`.
+        let importer = current.unwrap_or("<entry>");
+        if self.flatten_is_collision(name) && self.flatten_owner_defines(current, name) {
+            return FlattenCallable::Resolved(self.flatten_emitted_symbol(current, name));
+        }
+        if let Some((source_owner, source_name)) = self
+            .flatten_owner_import_bindings
+            .get(importer)
             .and_then(|bindings| bindings.get(name))
-            .filter(|(source_owner, source_name)| self.flatten_owner_defines(Some(source_owner), source_name))
+            .and_then(|(source_owner, source_name)| {
+                self.flatten_reexport_definer(importer, source_owner, source_name)
+            })
         {
-            Some(self.flatten_emitted_symbol(Some(source_owner), source_name))
-        } else if !self.flatten_fn_owners.contains_key(name) {
-            self.resolve_function_alias(name)
+            return FlattenCallable::Resolved(self.flatten_emitted_symbol(Some(&source_owner), &source_name));
+        }
+        if self.flatten_is_collision(name) {
+            let declarers = self.flatten_glob_declarers(importer, name);
+            if let [(owner, source_name)] = declarers.as_slice() {
+                return FlattenCallable::Resolved(self.flatten_emitted_symbol(Some(owner), source_name));
+            }
+            let mut owners: Vec<String> = self.flatten_fn_owners[name]
+                .iter()
+                .map(|owner| owner.clone().unwrap_or_else(|| "<entry file>".to_string()))
+                .collect();
+            owners.sort();
+            owners.dedup();
+            return FlattenCallable::Ambiguous(owners);
+        }
+        if !self.flatten_fn_owners.contains_key(name) {
+            if let Some(symbol) = self
+                .resolve_function_alias(name)
                 .filter(|original| *original != name && self.flatten_is_collision(original))
                 .and_then(|original| {
                     let owners = &self.flatten_fn_owners[original];
@@ -1024,10 +1611,11 @@ impl Lowerer {
                         .find(|owner| owner.is_some() && owner.as_deref() != current)
                         .map(|owner| self.flatten_emitted_symbol(owner.as_deref(), original))
                 })
-        } else {
-            None
-        };
-        resolved.filter(|symbol| symbol != name)
+            {
+                return FlattenCallable::Resolved(symbol);
+            }
+        }
+        FlattenCallable::NotCollision
     }
 
     /// Owner-exact symbol for a bare module-global `name` referenced from the
@@ -1064,6 +1652,169 @@ impl Lowerer {
         (resolved != name).then_some(resolved)
     }
 
+    /// Source owner of namespace `ns` (`use a.b` / `use a.b as ns`) as imported
+    /// by the module whose function is being lowered. Flattened unit only.
+    fn flatten_namespace_owner(&self, ns: &str) -> Option<&str> {
+        let importer = self.current_function_owner.as_deref().unwrap_or("<entry>");
+        self.flatten_owner_module_namespaces
+            .get(importer)?
+            .get(ns)
+            .map(String::as_str)
+    }
+
+    /// `(owner, name)` of the free function a bare `name`, referenced from the
+    /// function being lowered, binds to when ANOTHER module of the flattened
+    /// unit declares it: the definition its import names (selective, alias,
+    /// re-export facade, single glob source), else the unit's only definition
+    /// (the flattened namespace binds a bare name with no import at all).
+    /// `None` for the caller's own definition and for anything ambiguous.
+    fn flatten_foreign_callable_definer(&self, name: &str) -> Option<(String, String)> {
+        let current = self.current_function_owner.as_deref();
+        if self.flatten_owner_defines(current, name) {
+            return None;
+        }
+        let importer = current.unwrap_or("<entry>");
+        if let Some((source_owner, source_name)) = self
+            .flatten_owner_import_bindings
+            .get(importer)
+            .and_then(|bindings| bindings.get(name))
+        {
+            // An unresolved walk (hop budget, ambiguous facade) falls through to
+            // the glob and only-definition rules: the name still binds.
+            if let Some(definer) = self.flatten_reexport_definer(importer, source_owner, source_name) {
+                return Some(definer);
+            }
+        }
+        let mut declarers = self.flatten_glob_declarers(importer, name);
+        match declarers.len() {
+            0 => {}
+            1 => return declarers.pop(),
+            _ => return None,
+        }
+        let owners = self.flatten_fn_owners.get(name)?;
+        let only = owners.first()?.clone()?;
+        owners
+            .iter()
+            .all(|owner| owner.as_deref() == Some(only.as_str()))
+            .then(|| (only, name.to_string()))
+    }
+
+    /// JIT run lane: a bare `name` lowered as a module-level callable (call,
+    /// value, alias) is a use of it by the module being lowered. Record it
+    /// when it reaches a private fn of another directory (the interpreter's
+    /// call rule, `check_private_call_visibility`, with a lexical caller).
+    /// jit_main_lane_skips_private_import_visibility_2026-11-13.
+    pub(super) fn gate_private_fn_ref(&self, name: &str) {
+        if !private_ref_gate_armed() {
+            return;
+        }
+        if let Some((owner, source_name)) = self.flatten_foreign_callable_definer(name) {
+            self.record_private_ref(&owner, &source_name);
+        }
+    }
+
+    /// `ns.member` through a whole-module import (see `gate_private_fn_ref`).
+    pub(super) fn gate_private_namespace_ref(&self, ns: &str, member: &str) {
+        if !private_ref_gate_armed() {
+            return;
+        }
+        let Some(source_owner) = self.flatten_namespace_owner(ns) else {
+            return;
+        };
+        let importer = self.current_function_owner.as_deref().unwrap_or("<entry>");
+        if let Some((owner, name)) = self.flatten_reexport_definer(importer, source_owner, member) {
+            self.record_private_ref(&owner, &name);
+        }
+    }
+
+    fn record_private_ref(&self, owner: &str, name: &str) {
+        use crate::interpreter::interpreter_module::check_private_call_visibility;
+        let caller: std::sync::Arc<str> = match (&self.current_function_owner, &self.current_file) {
+            (Some(owner), _) => std::sync::Arc::from(owner.as_str()),
+            (None, Some(entry)) => {
+                std::sync::Arc::from(crate::interpreter::normalize_path_key(entry).to_string_lossy().as_ref())
+            }
+            (None, None) => return,
+        };
+        let owner: std::sync::Arc<str> = std::sync::Arc::from(owner);
+        if let Err(error) = check_private_call_visibility(name, &owner, &caller) {
+            let message = error.to_string();
+            // Same name `lower_function` emits the function under: a method
+            // keeps `Type.method`, a free function its flatten symbol.
+            let function = self.current_function_name.as_ref().map(|name| {
+                if name.contains('.') {
+                    name.clone()
+                } else {
+                    self.flatten_emitted_symbol(self.current_function_owner.as_deref(), name)
+                }
+            });
+            PRIVATE_REF_VIOLATIONS.with(|cell| {
+                if let Some(found) = cell.borrow_mut().as_mut() {
+                    if !found.iter().any(|v| v.function == function && v.message == message) {
+                        found.push(PrivateRefViolation { function, message });
+                    }
+                }
+            });
+        }
+    }
+
+    /// Owner-exact symbol of free function `member` reached as `ns.member(...)`
+    /// through a whole-module import, following re-export facades; `None` when
+    /// `ns` is not such a namespace or its module does not provide `member`.
+    /// See doc/08_tracking/bug/jit_module_namespace_member_access_unresolved_2026-11-13.md
+    pub(super) fn resolve_flatten_namespace_callable(&self, ns: &str, member: &str) -> Option<String> {
+        let source_owner = self.flatten_namespace_owner(ns)?;
+        let importer = self.current_function_owner.as_deref().unwrap_or("<entry>");
+        let (owner, name) = self.flatten_reexport_definer(importer, source_owner, member)?;
+        Some(self.flatten_emitted_symbol(Some(&owner), &name))
+    }
+
+    /// Owner-exact symbol of module global `member` reached as `ns.member`
+    /// through a whole-module import; `None` unless the namespace's module
+    /// itself declares `member`.
+    pub(super) fn resolve_flatten_namespace_global(&self, ns: &str, member: &str) -> Option<String> {
+        use super::module_lowering::flattened_global_symbol;
+        let source_owner = self.flatten_namespace_owner(ns)?;
+        if !self
+            .flatten_const_literals
+            .contains_key(&(Some(source_owner.to_string()), member.to_string()))
+        {
+            return None;
+        }
+        Some(match self.flatten_global_owners.get(member) {
+            Some(owners) => flattened_global_symbol(owners, Some(source_owner), member),
+            None => member.to_string(),
+        })
+    }
+
+    /// Resolve a struct/class/enum/bitfield named `ns.member` imported via a
+    /// whole-module import (`use m as ns` / `use m`). Flattened unit only.
+    pub(super) fn resolve_flatten_namespace_type(&self, ns: &str, member: &str) -> Option<(String, TypeId)> {
+        let source_owner = self.flatten_namespace_owner(ns)?;
+        if self.resolve_flatten_namespace_callable(ns, member).is_some()
+            || self.resolve_flatten_namespace_global(ns, member).is_some()
+        {
+            return None;
+        }
+        let type_name = super::module_lowering::resolve_owned_struct(
+            &self.flatten_struct_owners,
+            &self.flatten_owner_import_bindings,
+            &self.flatten_owner_glob_sources,
+            Some(source_owner),
+            member,
+        )
+        .unwrap_or_else(|| member.to_string());
+        let ty_id = self.module.types.lookup(&type_name)?;
+        match self.module.types.get(ty_id) {
+            Some(
+                crate::hir::HirType::Struct { .. }
+                | crate::hir::HirType::Enum { .. }
+                | crate::hir::HirType::Bitfield { .. },
+            ) => Some((type_name, ty_id)),
+            _ => None,
+        }
+    }
+
     /// Install the type-name scope of `current_function_owner` as the type
     /// registry overlay (same-named flattened structs/classes resolve to the
     /// owner's own or imported declaration), returning the previous overlay.
@@ -1079,6 +1830,7 @@ impl Lowerer {
                 let scope = super::module_lowering::struct_scope_for(
                     &self.flatten_struct_owners,
                     &self.flatten_owner_import_bindings,
+                    &self.flatten_owner_glob_sources,
                     owner.as_deref(),
                 );
                 self.flatten_struct_scopes.insert(owner, scope.clone());
@@ -1109,6 +1861,39 @@ impl Lowerer {
             }
         }
         None
+    }
+
+    pub(super) fn generic_identity_param_spec(
+        f: &simple_parser::ast::FunctionDef,
+    ) -> Option<GenericIdentityParamSpec> {
+        let Type::Simple(ret_param) = f.return_type.as_ref()? else {
+            return None;
+        };
+        let generic_param_pos = f.generic_params.iter().position(|g| g == ret_param)?;
+        let (index, param) = f.params.iter().enumerate().find(|(_, p)| {
+            matches!(&p.ty, Some(Type::Simple(n)) if n == ret_param)
+        })?;
+        Some(GenericIdentityParamSpec {
+            index,
+            name: param.name.clone(),
+            generic_param_pos: Some(generic_param_pos),
+        })
+    }
+
+    pub(super) fn register_generic_identity_param(
+        &mut self,
+        key: &str,
+        f: &simple_parser::ast::FunctionDef,
+    ) {
+        if let Some(spec) = Self::generic_identity_param_spec(f) {
+            self.generic_identity_param.insert(key.to_string(), spec);
+        }
+    }
+
+    pub(super) fn record_generic_identity_param_alias(&mut self, original: &str, alias: &str) {
+        if let Some(spec) = self.generic_identity_param.get(original).cloned() {
+            self.generic_identity_param.insert(alias.to_string(), spec);
+        }
     }
 
     /// Find non-deprecated alternatives for a deprecated type
@@ -1156,10 +1941,89 @@ impl Lowerer {
 
         None
     }
+
+    pub(crate) fn impl_target_type_name(target: &Type) -> Option<String> {
+        match target {
+            Type::Simple(name) | Type::Generic { name, .. } => Some(name.clone()),
+            Type::Array { size: None, .. } => Some("array".to_string()),
+            _ => None,
+        }
+    }
+
+    pub(super) fn extract_generic_bounds(where_clause: &[simple_parser::ast::WhereBound]) -> Vec<super::super::types::HirGenericBound> {
+        where_clause
+            .iter()
+            .filter_map(|bound| {
+                let bounds: Vec<super::super::types::HirTraitBound> = bound
+                    .bounds
+                    .iter()
+                    .filter_map(|ty| match ty {
+                        Type::Simple(name) => Some(super::super::types::HirTraitBound {
+                            trait_name: name.clone(),
+                            type_args: Vec::new(),
+                        }),
+                        Type::Generic { name, args } => Some(super::super::types::HirTraitBound {
+                            trait_name: name.clone(),
+                            type_args: args.iter().map(|a| format!("{a:?}")).collect(),
+                        }),
+                        _ => None,
+                    })
+                    .collect();
+                if bounds.is_empty() {
+                    None
+                } else {
+                    Some(super::super::types::HirGenericBound {
+                        type_param: bound.type_param.clone(),
+                        bounds,
+                    })
+                }
+            })
+            .collect()
+    }
+
+    pub(super) fn enter_impl_signature_scope(
+        &mut self,
+        impl_block: &simple_parser::ast::ImplBlock,
+        type_name: &str,
+    ) -> (Option<TypeId>, Vec<String>, HashMap<String, Type>) {
+        let impl_generics = self.collect_impl_generic_params(impl_block, type_name);
+        let assoc_types = impl_block
+            .associated_types
+            .iter()
+            .map(|a| (a.name.clone(), a.ty.clone()))
+            .collect();
+        let prev_class = self.current_class_type;
+        if let Some(id) = self.module.types.lookup(type_name) {
+            self.current_class_type = Some(id);
+        }
+        let prev_generics = std::mem::replace(&mut self.active_impl_generic_params, impl_generics);
+        let prev_assoc = std::mem::replace(&mut self.active_self_assoc_types, assoc_types);
+        (prev_class, prev_generics, prev_assoc)
+    }
+
+    pub(super) fn restore_impl_signature_scope(
+        &mut self,
+        saved: (Option<TypeId>, Vec<String>, HashMap<String, Type>),
+    ) {
+        self.current_class_type = saved.0;
+        self.active_impl_generic_params = saved.1;
+        self.active_self_assoc_types = saved.2;
+    }
 }
 
 impl Default for Lowerer {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// Outcome of resolving a bare callable name inside a flattened unit; see
+/// `Lowerer::flatten_owned_callable`.
+pub(super) enum FlattenCallable {
+    /// Not a cross-module collision (or not a flattened unit): bare lookup.
+    NotCollision,
+    /// The owner-exact symbol the reference must bind to.
+    Resolved(String),
+    /// Several modules define the name and nothing selects one; the owners.
+    Ambiguous(Vec<String>),
 }

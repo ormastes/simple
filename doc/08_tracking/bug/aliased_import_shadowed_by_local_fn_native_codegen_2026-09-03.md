@@ -2,7 +2,7 @@
 
 - **Filed:** 2026-09-03
 - **Severity:** critical — produces a silent infinite self-recursion (stack overflow) in the emitted binary
-- **Status:** OPEN
+- **Status:** SUPERSEDED 2026-11-11 (lane p3fix-comp6-20261111) — owner-exact alias resolver merged at tip (#7597 / 9e7e7a526edb); re-verified fresh-seed 3/3 (see addenda)
 - **Platforms:** ALL. Reproduced on Windows MSVC; the defect is in the shared Rust-seed AOT lowering,
   not in any Windows-specific code. Linux/macOS bootstrap lanes are affected identically and are
   latent only because they have not rebuilt since 2026-09-02.
@@ -164,3 +164,66 @@ every platform.
 ## Host-environment classification (2026-09-18)
 
 Audited by the fix-pipeline classification review: **environment-blocked: real-gpu** — [env-blocked:windows]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+## Addendum 2026-11-05 (W3b, stage3 s3_fable44)
+
+The alias premise could not be re-measured: on s3_fable44 **every** build with two
+uncached modules crashes the compiler (0xC0000005) in codegen, alias or not
+(`w3_two`: plain `use m.{probe}`; `w3_alias2`: alias with no local shadow; `w3_alias`:
+this bug's shape). The log shows `AOT compile error ... unit (bare): H<binary> ...
+reason capsule-not-found name-len=35`.
+
+Root cause of that crash (not this bug): `driver_aot_native_output.spl` passed
+`builder.build(_compile_frozen_module_capsule(..., _1))`. `build` is not a
+higher-order callee, so by placeholder scoping the inner `_1` desugars to its own
+identity lambda and the `name: text` parameter receives a function pointer. Proven
+on a single-module fixture (`test/w3/w3_ph.spl`, `drive(comp(b, ..., s, _1))`):
+the object's `__lambda_lift_0` is `mov rcx,rax; ret` (`48 89 c8 c3` — the exact
+"garbage" unit-name bytes) and its address is passed as `comp`'s 8th argument;
+the binary AVs at run time. Already fixed on release by `45fb9585333` (explicit
+closures, `scripts/check/check-no-placeholder-callbacks.shs`). Remaining gap: the
+type checker accepts a `fn` value for a `text` parameter, which is why this was
+silent.
+
+Next step: re-run `w3_alias` on the first stage3 built with `45fb9585333`.
+
+
+---
+
+## 2026-11-10 (p3-compiler lane, rows 1-8, Windows worktree, seed-smoke) — SUPERSEDED ON release/1.0.0
+
+Lane: `work/p3-compiler-20261110` on `origin/release/1.0.0` (base `dfc7da8523f4`).
+Runtime: worktree Rust seed `bin/simple.exe` (v1.0.0-rc.1, built 2026-11-10). Seed-smoke only.
+
+**Disposition: SUPERSEDED.** The resolver fix is present on base: `import_alias_symbol`
+(`src/compiler_rust/compiler/src/hir/lower/expr/mod.rs:686-713`, landed via #7597 /
+`9e7e7a526edb`) keeps the authored alias whenever the original bare name is declared in
+the importing module, so the native mangler reaches the owner-exact `use_map` row. The
+`own_declared_function_names` census (`module_pass.rs:1544-1572`) feeds that guard.
+
+Seed-smoke: the existing object-level regression
+`test/01_unit/compiler/aliased_import_shadowed_by_local_fn_spec.spl` passes 3/3 with
+`SIMPLE_BIN=<absolute path>/bin/simple.exe`; the probe's own oracle printed
+`ENTRY_OBJECT=found / ALIAS_TARGET=imported / LOCAL_SYMBOL=present`.
+
+Two environment notes (neither is this defect):
+- The probe script `cd`s to a temp dir before invoking `$BIN`, so a RELATIVE `SIMPLE_BIN`
+  silently runs nothing and every scenario fails; CI/harness usage must pin an absolute path.
+- The native LINK in this fresh worktree cannot find a prebuilt runtime archive
+  (`find_runtime_library()` empty), so the fixture never links; the object-level oracle is
+  unaffected. Same gap seen on every native-build probe in this worktree.
+
+
+---
+
+## 2026-11-11 (lane p3fix-comp6-20261111) — Status flipped SUPERSEDED
+
+Independent re-verification on this lane's fresh worktree (base
+`bf946163122f`, tracked seed `bin/simple.exe`):
+
+`SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe SIMPLE_BIN=$PWD/bin/simple.exe
+bin/simple.exe test test/01_unit/compiler/aliased_import_shadowed_by_local_fn_spec.spl
+--mode=interpreter --no-cache` → **3/3 PASS** (object-level oracle:
+relocation to the imported symbol present). Absorber: owner-exact alias
+resolution `import_alias_symbol` (#7597 / 9e7e7a526edb), per the
+2026-11-10 addendum above. Status line flipped from OPEN.

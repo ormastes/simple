@@ -5,12 +5,15 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
+use sha2::{Digest, Sha256};
 
 use super::super::types::IndividualTestResult;
 
 const ARTIFACT_ROOT: &str = "build/test-artifacts";
 const SCENARIO_ROOT: &str = "scenarios";
 const MANIFEST_FILE: &str = "manifest.txt";
+// ASCII slug + at most 20 decimal index digits and '-' stays below NAME_MAX=255.
+const MAX_SCENARIO_SLUG_BYTES: usize = 180;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum ScenarioArtifactKind {
@@ -202,6 +205,20 @@ fn scenario_slug(index: usize, result: &IndividualTestResult) -> String {
     if slug.is_empty() {
         slug = format!("scenario-{}", index + 1);
     }
+    if slug.len() > MAX_SCENARIO_SLUG_BYTES {
+        // Hash the original fields, not the lossy slug or ambiguous joined text.
+        // Keep short paths compatible and full readable names in the manifest.
+        let mut digest = Sha256::new();
+        digest.update(b"simple-scenario-artifact-v1\0");
+        for field in [&result.group, &result.name] {
+            digest.update((field.len() as u64).to_be_bytes());
+            digest.update(field.as_bytes());
+        }
+        let suffix = format!("{:x}", digest.finalize());
+        // slugify emits ASCII only, so this byte boundary is always valid UTF-8.
+        slug.truncate(MAX_SCENARIO_SLUG_BYTES - 1 - suffix.len());
+        slug = format!("{}-{suffix}", slug.trim_end_matches('-'));
+    }
     slug
 }
 
@@ -352,5 +369,46 @@ mod tests {
     fn write_manifest_skips_empty_scenarios() {
         let written = write_scenario_manifest(Path::new("test/demo_spec.spl"), &[]).unwrap();
         assert!(written.is_none());
+    }
+
+    #[test]
+    fn long_scenario_names_create_real_directories_and_retain_manifest_text() {
+        let group = "MCI_DOMAIN_ARENA_EVIDENCE|subject_hash=".repeat(24);
+        let name = "preserves committed bytes and the independent arena";
+        let plan = build_scenario_artifact_plan(Path::new("test/arena_spec.spl"),
+            &[sample_result(&group, name)]);
+        let temporary = tempfile::tempdir().unwrap();
+        let component = plan.entries[0].directory.file_name().unwrap();
+        let actual = temporary.path().join(component);
+        fs::create_dir_all(&actual).expect("long scenario must have a filesystem-safe component");
+        fs::write(actual.join(MANIFEST_FILE), build_manifest_text(&plan)).unwrap();
+        let written = fs::read_to_string(actual.join(MANIFEST_FILE)).unwrap();
+        assert!(written.contains(&group) && written.contains(name));
+        assert!(component.to_str().unwrap().len() <= 201);
+    }
+
+    #[test]
+    fn bounded_names_distinguish_shared_prefixes_and_original_field_boundaries() {
+        let prefix = "same-prefix-".repeat(40);
+        let left = sample_result(&prefix, "tail one");
+        let right = sample_result(&prefix, "tail two");
+        let left_slug = scenario_slug(0, &left);
+        assert!(left_slug.len() <= 180);
+        assert_eq!(left_slug, scenario_slug(0, &left));
+        assert_ne!(left_slug, scenario_slug(0, &right));
+        // Identical concatenated text must not erase the group/name boundary.
+        assert_ne!(scenario_slug(0, &sample_result(&prefix, "tail one")),
+            scenario_slug(0, &sample_result(&(prefix + " tail"), "one")));
+    }
+
+    #[test]
+    fn bounded_names_hash_unicode_identity_and_keep_existing_short_paths() {
+        let prefix = "prefix".repeat(60);
+        let snow = scenario_slug(0, &sample_result("", &(prefix.clone() + "☃")));
+        let sun = scenario_slug(0, &sample_result("", &(prefix + "☀")));
+        assert!(snow.is_ascii() && snow.len() <= 180);
+        assert_ne!(snow, sun);
+        assert_eq!(scenario_slug(0, &sample_result("rendering", "shows dashboard")),
+            "rendering-shows-dashboard");
     }
 }

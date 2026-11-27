@@ -6,6 +6,16 @@
  */
 #include "cosmos_hal.h"
 
+/* Handoff oracle masks. The test-only oracle extraction
+ * (test/fixtures/os/cosmos/cosmos_fsbl_oracle.c) and the host MMIO runner
+ * fail closed unless the text from the first include through EOF matches this
+ * file exactly; keep these in lockstep with cosmos_fsbl_decision.spl. */
+#define COSMOS_SLCR_LOCKED    (1U << 0)
+#define COSMOS_ARM_CLK_ACTIVE (0x1FU << 24)
+#define COSMOS_DDR_CLK_ACTIVE ((1U << 0) | (1U << 1))
+#define COSMOS_PSS_PRIMARY_RESET (1U << 0)
+#define COSMOS_A9_CPU0_STOPPED ((1U << 0) | (1U << 4) | (1U << 8))
+
 /* Coverage builds replace the compile-time environment constant with a
  * mutable test seam.  The production build still folds this expression to
  * COSMOS_IS_QEMU, while the instrumented host build executes both outcomes of

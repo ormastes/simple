@@ -1,0 +1,164 @@
+"""
+# NVMe FW cross-arch bare-metal slice (fw_xc)
+
+One scalar slice of the NVMe firmware (submission decode -> log-structured
+LBA->PPN placement -> completion status) that builds for six bare-metal
+targets: i686/x86_64, thumbv7em/aarch64, riscv32imac/riscv64gc.
+
+Integer-only on purpose: no text literals, arrays or allocation, because no
+freestanding runtime archive exists yet
+(`doc/08_tracking/bug/baremetal_no_freestanding_runtime_2026-11-15.md`).
+Output goes byte-by-byte through `rt_mmio_write8`, supplied per arch by
+`crt0_<arch>.S` (or by the EFI shim of `check-baremetal-efi-boot.shs`).
+
+Prints "SimpleOS NVMe FW PASS\n" or "SimpleOS NVMe FW FAIL <n>\n".
+"""
+
+extern fn rt_mmio_write8(addr: i64, value: i64)
+
+# Geometry of the simulated band. Power-of-two so placement is shift/mask:
+# 32-bit targets have no 64-bit divide (__divdi3) without compiler-rt builtins.
+val PAGES_SHIFT: i64 = 6
+val PAGES_PER_BLOCK: i64 = 64
+val NUM_BLOCKS: i64 = 16
+val RESERVE_BLOCKS: i64 = 2
+
+# NVMe I/O opcodes and status codes (NVMe base spec, generic command status).
+val OPC_FLUSH: i64 = 0x00
+val OPC_WRITE: i64 = 0x01
+val OPC_READ: i64 = 0x02
+val SC_SUCCESS: i64 = 0x00
+val SC_INVALID_OPCODE: i64 = 0x01
+val SC_LBA_OUT_OF_RANGE: i64 = 0x80
+
+fn putc(ch: i64):
+    rt_mmio_write8(0, ch)
+
+# CQE DW3 status field: bit 0 phase tag, bits 8:1 status code, bits 11:9 SCT.
+fn cqe_status(phase: i64, sct: i64, sc: i64) -> i64:
+    (phase & 1) | ((sc & 0xFF) << 1) | ((sct & 0x7) << 9)
+
+fn cqe_status_code(status: i64) -> i64:
+    (status >> 1) & 0xFF
+
+# CDW0: opcode bits 7:0, command id bits 31:16.
+fn cdw0_opcode(cdw0: i64) -> i64:
+    cdw0 & 0xFF
+
+fn cdw0_cid(cdw0: i64) -> i64:
+    (cdw0 >> 16) & 0xFFFF
+
+fn capacity_lbas() -> i64:
+    (NUM_BLOCKS - RESERVE_BLOCKS) * PAGES_PER_BLOCK
+
+fn validate(opcode: i64, slba: i64, nlb0: i64) -> i64:
+    if opcode == OPC_FLUSH:
+        return SC_SUCCESS
+    if opcode != OPC_WRITE and opcode != OPC_READ:
+        return SC_INVALID_OPCODE
+    if slba < 0 or slba + nlb0 + 1 > capacity_lbas():
+        return SC_LBA_OUT_OF_RANGE
+    SC_SUCCESS
+
+fn ppn_of(block: i64, page: i64) -> i64:
+    (block << PAGES_SHIFT) + page
+
+fn ppn_block(ppn: i64) -> i64:
+    ppn >> PAGES_SHIFT
+
+fn ppn_page(ppn: i64) -> i64:
+    ppn & (PAGES_PER_BLOCK - 1)
+
+# Log-structured placement: next PPN after the write pointer, opening the next
+# free block when the active one fills. Returns -1 when only reserve is left.
+fn next_ppn(active_blk: i64, wp: i64, free_blocks: i64) -> i64:
+    if wp < PAGES_PER_BLOCK:
+        return ppn_of(active_blk, wp)
+    if free_blocks <= RESERVE_BLOCKS:
+        return -1
+    ppn_of(active_blk + 1, 0)
+
+fn check(cond: bool, code: i64, prev: i64) -> i64:
+    if prev != 0:
+        return prev
+    if cond:
+        return 0
+    code
+
+fn nvme_fw_xc_selftest() -> i64:
+    var r: i64 = 0
+    val st = cqe_status(1, 0, SC_LBA_OUT_OF_RANGE)
+    r = check(st == 0x101, 1, r)
+    r = check(cqe_status_code(st) == SC_LBA_OUT_OF_RANGE, 2, r)
+    val cdw0 = (0x1234 << 16) | OPC_WRITE
+    r = check(cdw0_opcode(cdw0) == OPC_WRITE, 3, r)
+    r = check(cdw0_cid(cdw0) == 0x1234, 4, r)
+    r = check(validate(OPC_WRITE, 0, 7) == SC_SUCCESS, 5, r)
+    r = check(validate(0x7F, 0, 0) == SC_INVALID_OPCODE, 6, r)
+    r = check(validate(OPC_READ, capacity_lbas() - 1, 1) == SC_LBA_OUT_OF_RANGE, 7, r)
+    r = check(validate(OPC_FLUSH, -5, 0) == SC_SUCCESS, 8, r)
+    # Write 3 blocks' worth of pages and check the placement walks forward.
+    var blk: i64 = 0
+    var wp: i64 = 0
+    var free_blocks: i64 = NUM_BLOCKS - 1
+    var written: i64 = 0
+    var last: i64 = -1
+    while written < PAGES_PER_BLOCK * 3:
+        val ppn = next_ppn(blk, wp, free_blocks)
+        if ppn < 0:
+            return check(false, 9, r)
+        if ppn_block(ppn) != blk:
+            blk = ppn_block(ppn)
+            free_blocks = free_blocks - 1
+        wp = ppn_page(ppn) + 1
+        r = check(ppn == last + 1, 10, r)
+        last = ppn
+        written = written + 1
+    r = check(blk == 2, 11, r)
+    r = check(wp == PAGES_PER_BLOCK, 12, r)
+    r = check(next_ppn(blk, wp, RESERVE_BLOCKS) == -1, 13, r)
+    r
+
+fn emit_banner():
+    # "SimpleOS NVMe FW "
+    putc(0x53)
+    putc(0x69)
+    putc(0x6D)
+    putc(0x70)
+    putc(0x6C)
+    putc(0x65)
+    putc(0x4F)
+    putc(0x53)
+    putc(0x20)
+    putc(0x4E)
+    putc(0x56)
+    putc(0x4D)
+    putc(0x65)
+    putc(0x20)
+    putc(0x46)
+    putc(0x57)
+    putc(0x20)
+
+fn main() -> i64:
+    val r = nvme_fw_xc_selftest()
+    emit_banner()
+    if r == 0:
+        putc(0x50)
+        putc(0x41)
+        putc(0x53)
+        putc(0x53)
+    else:
+        putc(0x46)
+        putc(0x41)
+        putc(0x49)
+        putc(0x4C)
+        putc(0x20)
+        var tens: i64 = 0
+        var ones: i64 = r
+        while ones >= 10:
+            ones = ones - 10
+            tens = tens + 1
+        putc(0x30 + tens)
+        putc(0x30 + ones)
+    putc(0x0A)
+    r

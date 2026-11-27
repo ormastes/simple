@@ -77,6 +77,7 @@ int64_t rt_process_acquire_pinned_executable(int64_t handle) {
     return fcntl(pinned_self_fd, F_DUPFD_CLOEXEC, 3);
 }
 
+#define RT_OWNED_EXTERNAL_PIN 1 /* This harness stubs the executable pin. */
 #include "../runtime_process_owned.c"
 
 static SplArray* array_of(const int64_t* values, int64_t count) {

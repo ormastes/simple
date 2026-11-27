@@ -1,0 +1,122 @@
+use std.spec.*
+use app.protocol.mcp_request_envelope.{mcp_parse_request_envelope_v1}
+
+# Construct adjacent braces explicitly: doubled braces in a Simple string can
+# be interpreted as a literal-brace escape instead of two JSON delimiters.
+fn mcp_envelope_open() -> text: "{"
+fn mcp_envelope_close() -> text: "}"
+fn mcp_envelope_request(fields: text) -> text:
+    mcp_envelope_open() + "\"jsonrpc\":\"2.0\"," + fields + mcp_envelope_close()
+
+describe "MCP root request-envelope admission":
+    it "recognizes a no-ID ping as a notification":
+        step("Parse a root method without inventing a request identifier")
+        val parsed = mcp_parse_request_envelope_v1(mcp_envelope_request("\"method\":\"ping\""))
+        expect(parsed.valid).to_equal(true)
+        expect(parsed.has_id).to_equal(false)
+        expect(parsed.request_id_raw).to_equal("null")
+        expect(parsed.method).to_equal("ping")
+        expect(parsed.params_raw).to_equal(mcp_envelope_open() + mcp_envelope_close())
+        expect(parsed.error_code).to_equal(0)
+
+    it "ignores nested spoofed IDs and methods":
+        step("Keep nested client metadata out of the root dispatch envelope")
+        val params = mcp_envelope_open() + "\"clientInfo\":" + mcp_envelope_open() + "\"id\":77,\"method\":\"shutdown\"" + mcp_envelope_close() + mcp_envelope_close()
+        val parsed = mcp_parse_request_envelope_v1(mcp_envelope_request("\"method\":\"ping\",\"params\":" + params))
+        expect(parsed.valid).to_equal(true)
+        expect(parsed.has_id).to_equal(false)
+        expect(parsed.request_id_raw).to_equal("null")
+        expect(parsed.method).to_equal("ping")
+        expect(parsed.params_raw).to_equal(params)
+
+    it "rejects explicit null and other invalid ID kinds":
+        step("Reject IDs outside the string or lexical integer contract")
+        val invalid_ids = ["null", "true", "1.5", "1e0", "[]", mcp_envelope_open() + mcp_envelope_close()]
+        for id_raw in invalid_ids:
+            val parsed = mcp_parse_request_envelope_v1(mcp_envelope_request("\"method\":\"initialize\",\"id\":" + id_raw))
+            expect(parsed.valid).to_equal(false)
+            expect(parsed.has_id).to_equal(true)
+            expect(parsed.request_id_raw).to_equal("null")
+            expect(parsed.error_code).to_equal(-32600)
+
+    it "decodes escaped root keys and method names":
+        step("Recognize protocol fields by their decoded key spelling")
+        val input = mcp_envelope_open() + "\"jsonr\\u0070c\":\"2.0\",\"met\\u0068od\":\"p\\u0069ng\",\"\\u0069d\":7" + mcp_envelope_close()
+        val parsed = mcp_parse_request_envelope_v1(input)
+        expect(parsed.valid).to_equal(true)
+        expect(parsed.method).to_equal("ping")
+        expect(parsed.has_id).to_equal(true)
+        expect(parsed.request_id_raw).to_equal("7")
+
+    it "preserves integer ID lexemes without floating-point conversion":
+        step("Retain zero, negative zero and numbers wider than native integer precision")
+        val ids = ["0", "-0", "-17", "9007199254740993", "1234567890123456789012345678901234567890"]
+        for id_raw in ids:
+            val parsed = mcp_parse_request_envelope_v1(mcp_envelope_request("\"method\":\"ping\",\"id\":" + id_raw))
+            expect(parsed.valid).to_equal(true)
+            expect(parsed.has_id).to_equal(true)
+            expect(parsed.request_id_raw).to_equal(id_raw)
+
+    it "preserves an escaped string ID as raw JSON":
+        step("Keep string-ID escape spellings without double-escaping the response ID")
+        val id_raw = "\"quote\\\"slash\\\\line\\n\\u0061\""
+        val parsed = mcp_parse_request_envelope_v1(mcp_envelope_request("\"method\":\"ping\",\"id\":" + id_raw))
+        expect(parsed.valid).to_equal(true)
+        expect(parsed.has_id).to_equal(true)
+        expect(parsed.request_id_raw).to_equal(id_raw)
+
+    it "captures only root params while retaining nested value lexemes":
+        step("Retain raw numeric and string values in the selected structured params")
+        val params = mcp_envelope_open() + "\"n\":9007199254740993,\"s\":\"\\u0061\",\"a\":[1e+9,true,null]" + mcp_envelope_close()
+        val metadata = mcp_envelope_open() + "\"params\":[false]" + mcp_envelope_close()
+        val parsed = mcp_parse_request_envelope_v1(mcp_envelope_request("\"method\":\"ping\",\"metadata\":" + metadata + ",\"params\":" + params))
+        expect(parsed.valid).to_equal(true)
+        expect(parsed.params_raw).to_equal(params)
+
+    it "accepts array params without treating nested IDs as envelope fields":
+        step("Validate a structured array parameter value")
+        val params = "[" + mcp_envelope_open() + "\"id\":5" + mcp_envelope_close() + ",true,null]"
+        val parsed = mcp_parse_request_envelope_v1(mcp_envelope_request("\"method\":\"ping\",\"params\":" + params))
+        expect(parsed.valid).to_equal(true)
+        expect(parsed.has_id).to_equal(false)
+        expect(parsed.params_raw).to_equal(params)
+
+    it "reports malformed nested JSON as a parse error":
+        step("Validate nested separators and closing delimiters before dispatch")
+        val invalid_params = ["[1,]", mcp_envelope_open() + "\"a\":1 \"b\":2" + mcp_envelope_close(), "[true" + mcp_envelope_close()]
+        for params in invalid_params:
+            val parsed = mcp_parse_request_envelope_v1(mcp_envelope_request("\"method\":\"ping\",\"id\":8,\"params\":" + params))
+            expect(parsed.valid).to_equal(false)
+            expect(parsed.error_code).to_equal(-32700)
+            expect(parsed.request_id_raw).to_equal("null")
+
+    it "rejects duplicate decoded IDs as ambiguous":
+        step("Reject a duplicate ID even when one key uses a Unicode escape")
+        val parsed = mcp_parse_request_envelope_v1(mcp_envelope_request("\"method\":\"ping\",\"id\":1,\"\\u0069d\":2"))
+        expect(parsed.valid).to_equal(false)
+        expect(parsed.has_id).to_equal(true)
+        expect(parsed.request_id_raw).to_equal("null")
+        expect(parsed.error_code).to_equal(-32600)
+
+    it "rejects other duplicate root protocol fields":
+        step("Reject duplicate method, version and params fields after validating JSON")
+        val duplicates = [
+            "\"method\":\"ping\",\"method\":\"shutdown\"",
+            "\"method\":\"ping\",\"jsonrpc\":\"2.0\"",
+            "\"method\":\"ping\",\"params\":[],\"params\":[]"
+        ]
+        for fields in duplicates:
+            val parsed = mcp_parse_request_envelope_v1(mcp_envelope_request(fields))
+            expect(parsed.valid).to_equal(false)
+            expect(parsed.error_code).to_equal(-32600)
+
+    it "distinguishes syntactically valid invalid envelopes from malformed JSON":
+        step("Require an object, protocol version, string method and structured params")
+        val invalid_envelopes = ["[]", "null", mcp_envelope_open() + "\"method\":\"ping\"" + mcp_envelope_close(), mcp_envelope_request("\"method\":1"), mcp_envelope_request("\"method\":\"ping\",\"params\":true")]
+        for input in invalid_envelopes:
+            val parsed = mcp_parse_request_envelope_v1(input)
+            expect(parsed.valid).to_equal(false)
+            expect(parsed.error_code).to_equal(-32600)
+        val malformed = mcp_parse_request_envelope_v1(mcp_envelope_request("\"method\":\"ping\"") + "[]")
+        expect(malformed.valid).to_equal(false)
+        expect(malformed.error_code).to_equal(-32700)

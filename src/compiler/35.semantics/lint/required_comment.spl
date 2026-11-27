@@ -12,11 +12,13 @@
 
 use compiler.core.ast_expr.{
     expr_get_tag, expr_get_str, expr_get_left, expr_get_right,
-    expr_get_extra, expr_get_int, expr_get_args, expr_get_stmts
+    expr_get_extra, expr_get_int, expr_get_args, expr_get_stmts,
+    expr_get_span
 }
 use compiler.frontend.core.ast_stmt.{
-    stmt_get_tag, stmt_get_expr, stmt_get_body
+    stmt_get_tag, stmt_get_expr, stmt_get_body, stmt_get_span
 }
+use compiler.core.types.{span_is_valid, span_line}
 use compiler.core.ast.{
     decl_get_tag, decl_get_name, decl_get_body,
     arm_get_pattern, arm_get_guard, arm_get_body, arm_get_rationale
@@ -74,6 +76,17 @@ fn req_comment_decl_get_name(idx: i64) -> text:
 
 fn req_comment_decl_get_body(idx: i64) -> [i64]:
     decl_get_body(idx)
+
+fn req_comment_span_line(span_id: i64) -> i64:
+    # Span 0 is the reserved "no span" sentinel and OOB reads return -1, so
+    # span_is_valid gates every pool access (same contract stub_impl and
+    # argument_count use for their decl-span locators).
+    if span_is_valid(span_id): span_line(span_id) else: 0
+
+fn req_comment_expr_line(expr_idx: i64) -> i64:
+    if expr_idx < 0:
+        return 0
+    req_comment_span_line(expr_get_span(expr_idx))
 
 # ============================================================================
 # Warning Struct
@@ -178,12 +191,12 @@ fn _check_stmt(stmt_idx: i64, site_name: text) -> [RequiredCommentWarning]:
             warnings.push(warning)
         val arms = req_comment_stmt_get_body(stmt_idx)
         for arm_idx in arms:
-            val arm_warnings = _check_match_arm(arm_idx, site_name)
+            val arm_warnings = _check_match_arm(arm_idx, site_name, req_comment_span_line(stmt_get_span(stmt_idx)))
             for warning in arm_warnings:
                 warnings.push(warning)
     warnings
 
-fn _check_match_arm(arm_idx: i64, site_name: text) -> [RequiredCommentWarning]:
+fn _check_match_arm(arm_idx: i64, site_name: text, fallback_line: i64) -> [RequiredCommentWarning]:
     var warnings: [RequiredCommentWarning] = []
     if arm_idx < 0:
         return warnings
@@ -205,7 +218,7 @@ fn _check_match_arm(arm_idx: i64, site_name: text) -> [RequiredCommentWarning]:
                 message: "wildcard match arm used without a rationale",
                 hint: "Use case _(\"why catch-all is correct\"):",
                 site_name: site_name,
-                line: 0
+                line: fallback_line
             ))
     val body = arm_get_body(arm_idx)
     for s in body:
@@ -255,7 +268,7 @@ fn _check_expr(expr_idx: i64, site_name: text) -> [RequiredCommentWarning]:
                     message: "todo used without what-remains and next-step strings",
                     hint: "Use todo(\"what remains\", \"hint or issue\")",
                     site_name: site_name,
-                    line: 0
+                    line: req_comment_expr_line(expr_idx)
                 ))
             return warnings
         if _is_weak_rationale(msg):
@@ -265,7 +278,7 @@ fn _check_expr(expr_idx: i64, site_name: text) -> [RequiredCommentWarning]:
                 message: "pass_* used without a comment string",
                 hint: "Add a rationale: pass_todo(\"what remains\", \"hint or issue\")",
                 site_name: site_name,
-                line: 0
+                line: req_comment_expr_line(expr_idx)
             )
             warnings.push(w)
         return warnings
@@ -291,7 +304,7 @@ fn _check_expr(expr_idx: i64, site_name: text) -> [RequiredCommentWarning]:
                             message: "todo used without what-remains and next-step strings",
                             hint: "Use todo(\"what remains\", \"hint or issue\")",
                             site_name: site_name,
-                            line: 0
+                            line: req_comment_expr_line(expr_idx)
                         ))
                 if is_dangerous_keyword(callee_name):
                     val args = req_comment_expr_get_args(expr_idx)
@@ -311,7 +324,7 @@ fn _check_expr(expr_idx: i64, site_name: text) -> [RequiredCommentWarning]:
                             message: "dangerous keyword '{callee_name}' used without a comment string",
                             hint: "Add a comment: {callee_name}(\"reason\")",
                             site_name: site_name,
-                            line: 0
+                            line: req_comment_expr_line(expr_idx)
                         )
                         warnings.push(w)
         val args2 = req_comment_expr_get_args(expr_idx)
@@ -327,7 +340,7 @@ fn _check_expr(expr_idx: i64, site_name: text) -> [RequiredCommentWarning]:
             warnings.push(warning)
         val arms = req_comment_expr_get_args(expr_idx)
         for arm_idx in arms:
-            val arm_warnings = _check_match_arm(arm_idx, site_name)
+            val arm_warnings = _check_match_arm(arm_idx, site_name, req_comment_expr_line(expr_idx))
             for warning in arm_warnings:
                 warnings.push(warning)
         return warnings

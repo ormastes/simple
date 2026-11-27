@@ -1,13 +1,15 @@
 # Pure compile-inventory records, canonicalization, and event reduction.
-# I/O and publication remain in compile_source_inventory.spl.
+# Filesystem I/O and publication remain in compile_source_inventory.spl.
+# Optional monotonic diagnostics never participate in a semantic identity.
 
 use std.common.crypto.sha256.{sha256_text}
+use std.scv.compile_cost_v1.{ScvCompileCostV1, scv_cost_now_v1, scv_cost_elapsed_v1}
 use std.common.text_whitespace.{split_whitespace}
-use std.common.text_bytes.{text_to_utf8_bytes}
 use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_end}
 
-val COMPILE_SOURCE_INVENTORY_SCHEMA_V1: i64 = 1
-val COMPILE_SOURCE_INVENTORY_MAX_BYTES_V1: i64 = 256 * 1024 * 1024
+pub val COMPILE_SOURCE_INVENTORY_SCHEMA_V1: i64 = 1
+pub val COMPILE_SOURCE_INVENTORY_MAX_BYTES_V1: i64 = 256 * 1024 * 1024
+pub val COMPILE_SOURCE_INVENTORY_EMPTY_SHA256_V1: text = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
 
 struct CompileSourceInventoryEntryV1:
     source_identity: text
@@ -131,9 +133,9 @@ fn compile_source_inventory_whole_text_canonical_v1(content: text) -> text:
         var pieces = body.replace("\n#", "\n\n#").split("\n\n")
         var index = 1
         while index < pieces.len():
-            var rows = pieces[index].split("\n")
-            rows[0] = ""
-            pieces[index] = rows.join("\n")
+            val piece = pieces[index]
+            val nl = piece.index_of("\n")
+            pieces[index] = if nl < 0: "" else: piece.substring(nl)
             index = index + 1
         body = pieces.join("")
     # Every kept line is non-empty and edge-trimmed, so trim removes exactly
@@ -157,7 +159,9 @@ fn compile_source_inventory_whole_text_rows_v1(canonical: text, prefixes: [text]
     var rows: [text] = []
     var index = 1
     while index < pieces.len():
-        rows.push(pieces[index].split("\n")[0])
+        val piece = pieces[index]
+        val nl = piece.index_of("\n")
+        rows.push(if nl < 0: piece else: piece.substring(0, nl))
         index = index + 1
     rows.join("\n")
 
@@ -175,8 +179,20 @@ fn compile_source_inventory_whole_text_rows_v1(canonical: text, prefixes: [text]
 # doc/08_tracking/bug/windows_scv_inventory_cold_init_untracked_walk_slow_2026-09-13.md
 # for what IS still interpreted-only in this file (the comment/whitespace
 # canonicalization below) and the measurement this note is based on.
+fn compile_source_inventory_cost_hash_v1(content: text, cost: ScvCompileCostV1?) -> text:
+    val started = scv_cost_now_v1(cost)
+    val digest = sha256_text(content)
+    if cost.is_some(): cost!.record_hash(scv_cost_elapsed_v1(cost, started))
+    digest
+
 fn compile_source_inventory_event_from_content_v1(
     source: text, operation: text, source_identity: text, content: text
+) -> CompileSourceEventV1:
+    compile_source_inventory_event_from_content_cost_v1(source, operation, source_identity, content, nil)
+
+fn compile_source_inventory_event_from_content_cost_v1(
+    source: text, operation: text, source_identity: text, content: text,
+    cost: ScvCompileCostV1?
 ) -> CompileSourceEventV1:
     if operation == "delete":
         return CompileSourceEventV1(
@@ -214,24 +230,24 @@ fn compile_source_inventory_event_from_content_v1(
         exports = export_rows.join("\n")
         initializers = initializer_rows.join("\n")
         providers = provider_rows.join("\n")
-    val content_digest = sha256_text(content)
+    val content_digest = compile_source_inventory_cost_hash_v1(content, cost)
     val semantic_digest = if canonical == content:
         content_digest
     else:
-        sha256_text(canonical)
+        compile_source_inventory_cost_hash_v1(canonical, cost)
     # Empty and whole-source facets frequently coincide. Reuse only a digest
     # computed for byte-identical text in this event; no cross-source cache or
     # membership/publication authority is introduced.
     val export_digest = if exports == canonical:
         semantic_digest
     else:
-        sha256_text(exports)
+        compile_source_inventory_cost_hash_v1(exports, cost)
     val initializer_digest = if initializers == canonical:
         semantic_digest
     elif initializers == exports:
         export_digest
     else:
-        sha256_text(initializers)
+        compile_source_inventory_cost_hash_v1(initializers, cost)
     val provider_digest = if providers == canonical:
         semantic_digest
     elif providers == exports:
@@ -239,16 +255,22 @@ fn compile_source_inventory_event_from_content_v1(
     elif providers == initializers:
         initializer_digest
     else:
-        sha256_text(providers)
+        compile_source_inventory_cost_hash_v1(providers, cost)
     CompileSourceEventV1(
         source, operation, source_identity, content_digest, semantic_digest,
-        export_digest, initializer_digest, provider_digest, content.len())
+        export_digest, initializer_digest, provider_digest, content.byte_len())
 
 fn compile_source_inventory_git_event_v1(
     operation: text, source_identity: text, content: text
 ) -> CompileSourceEventV1:
-    compile_source_inventory_event_from_content_v1(
-        "git", operation, source_identity, content)
+    compile_source_inventory_git_event_cost_v1(operation, source_identity, content, nil)
+
+fn compile_source_inventory_git_event_cost_v1(
+    operation: text, source_identity: text, content: text,
+    cost: ScvCompileCostV1?
+) -> CompileSourceEventV1:
+    compile_source_inventory_event_from_content_cost_v1(
+        "git", operation, source_identity, content, cost)
 
 fn compile_source_inventory_filesystem_event_v1(
     operation: text, source_identity: text, content: text
@@ -268,26 +290,22 @@ fn compile_source_inventory_text_valid_v1(value: text) -> bool:
         not value.contains("|")
 
 fn compile_source_inventory_digest_valid_v1(value: text) -> bool:
-    # One bulk byte copy instead of 64 `byte_at` calls that each re-validated
-    # the string twice; every entry is checked several times per cold
-    # inventory (initial batch, encode, publication readback, admission).
-    if value.len() != 64:
+    # Native byte-length + hex-strip check avoids 64 interpreter loop iterations
+    # and `[u8]` allocations per facet across cold init, encode, readback, and admission.
+    if value == COMPILE_SOURCE_INVENTORY_EMPTY_SHA256_V1:
+        return true
+    if value.byte_len() != 64:
         return false
-    val raw = text_to_utf8_bytes(value)
-    if raw.len() != 64u64:
-        return false
-    var index = 0
-    while index < 64:
-        val ch = raw[index] as i64
-        if not ((ch >= 48 and ch <= 57) or (ch >= 97 and ch <= 102)):
-            return false
-        index = index + 1
-    true
+    value.replace("0", "").replace("1", "").replace("2", "").replace("3", "")
+        .replace("4", "").replace("5", "").replace("6", "").replace("7", "")
+        .replace("8", "").replace("9", "").replace("a", "").replace("b", "")
+        .replace("c", "").replace("d", "").replace("e", "").replace("f", "") == ""
 
 fn compile_source_inventory_path_valid_v1(value: text) -> bool:
     compile_source_inventory_text_valid_v1(value) and
         not value.starts_with("/") and not value.contains("\\") and
-        not value.contains("//") and not value.split("/").contains("..") and
+        not value.contains("//") and
+        (not value.contains("..") or not value.split("/").contains("..")) and
         (value.ends_with(".spl") or value == "simple.sdn" or
             value.ends_with("/simple.sdn"))
 
@@ -299,22 +317,20 @@ fn compile_source_inventory_cache_root_valid_v1(cache_root: text) -> bool:
 # Pure routing for checkout-owned inventory. Machine cache configuration is a
 # separate contract: SIMPLE_CACHE never relocates an admitted SCV snapshot.
 fn compile_source_inventory_plain_checkout_v1(path: text) -> text:
-    var plain = path
     # A backslash remains a legal POSIX filename byte. Convert only paths
     # that explicitly carry Windows drive/UNC syntax.
-    if path.starts_with("\\\\") or (path.len() >= 2 and path.substring(1, 2) == ":"):
-        plain = path.replace("\\", "/")
-    if plain.starts_with("//?/UNC/"):
-        plain = "//" + plain.substring(8)
-    elif plain.starts_with("//?/"):
-        plain = plain.substring(4)
-    if plain == "": return ""
-    if not plain.starts_with("/") and not (plain.len() >= 3 and plain.substring(1, 3) == ":/"):
+    val slashed: text = if path.starts_with("\\\\") or (path.byte_len() >= 2 and path.substring(1, 2) == ":"): path.replace("\\", "/") else: path
+    val stripped: text = if slashed.starts_with("//?/UNC/"): "//" + slashed.substring(8) elif slashed.starts_with("//?/"): slashed.substring(4) else: slashed
+    if stripped == "": return ""
+    if not stripped.starts_with("/") and not (stripped.byte_len() >= 3 and stripped.substring(1, 3) == ":/"):
         return ""
-    for component in plain.split("/"):
+    for component in stripped.split("/"):
         if component == "." or component == "..": return ""
-    while plain.len() > 1 and plain.ends_with("/"):
-        plain = plain.substring(0, plain.len() - 1)
+    val total_bytes = stripped.byte_len()
+    var byte_idx = total_bytes
+    while byte_idx > 1 and stripped.byte_at(byte_idx - 1) == 47:
+        byte_idx = byte_idx - 1
+    val plain: text = if byte_idx == total_bytes: stripped else: stripped.substring(0, byte_idx)
     plain
 
 fn compile_source_inventory_checkout_cache_root_v1(checkout_root: text) -> text:
@@ -328,7 +344,8 @@ fn compile_source_inventory_snapshot_cache_root_v1(
 ) -> text:
     val root = compile_source_inventory_plain_checkout_v1(checkout_root)
     val snapshot = compile_source_inventory_plain_checkout_v1(snapshot_root)
-    if root == "" or snapshot == "" or not revision_id.starts_with("scv-revision-v1-"):
+    if (root == "" or snapshot == "" or
+            not (revision_id.starts_with("scv-revision-v1-") or revision_id.starts_with("scv-revision-v2-"))):
         return ""
     if not compile_source_inventory_digest_valid_v1(revision_id.substring(16)):
         return ""
@@ -365,15 +382,9 @@ export compile_source_inventory_plain_checkout_v1
 # allocation-order inventory that failed its own canonical re-encode check
 # (inventory-noncanonical on every Windows stage-2 cold init, 2026-09-25).
 fn compile_source_inventory_identity_cmp_v1(left: text, right: text) -> i64:
-    val shared = if left.len() < right.len(): left.len() else: right.len()
-    var index = 0
-    while index < shared:
-        val a = left.byte_at(index) as i64
-        val b = right.byte_at(index) as i64
-        if a != b:
-            return if a < b: -1 else: 1
-        index = index + 1
-    if left.len() == right.len(): 0 elif left.len() < right.len(): -1 else: 1
+    # Native string ordering compares UTF-8 bytes lexicographically without
+    # per-character interpreter `byte_at` loops.
+    if left == right: 0 elif left < right: -1 else: 1
 
 fn compile_source_inventory_sort_v1(
     values: [CompileSourceInventoryEntryV1]
@@ -386,31 +397,40 @@ fn compile_source_inventory_sort_v1(
         ordered = ordered + 1
     if ordered >= sorted.len():
         return sorted
-    # Build a max heap, then move its maximum to the sorted suffix. Cold Git
-    # listings may place untracked paths before cached paths, so insertion
-    # sort is quadratic even when each individual listing is ordered.
-    var start = sorted.len() / 2 - 1
-    var end = sorted.len() - 1
-    while end > 0:
-        var root = 0
-        if start >= 0:
-            root = start
-            start = start - 1
-        else:
-            val maximum = sorted[0]
-            sorted[0] = sorted[end]
-            sorted[end] = maximum
-            end = end - 1
-        while root * 2 + 1 <= end:
-            var child = root * 2 + 1
-            if child < end and compile_source_inventory_identity_cmp_v1(sorted[child].source_identity, sorted[child + 1].source_identity) < 0:
-                child = child + 1
-            if compile_source_inventory_identity_cmp_v1(sorted[root].source_identity, sorted[child].source_identity) >= 0:
-                break
-            val parent = sorted[root]
-            sorted[root] = sorted[child]
-            sorted[child] = parent
-            root = child
+    # Bottom-up merge sort. It must be STABLE: entries with equal identities
+    # keep their input order (heap sort did not, so the survivor of a
+    # duplicate pair depended on its position in the heap). Cold Git listings
+    # may place untracked paths before cached paths, so insertion sort is
+    # quadratic even when each individual listing is ordered; this stays
+    # O(n log n) with one n-sized buffer per pass.
+    val count = sorted.len()
+    var width = 1
+    while width < count:
+        var merged: [CompileSourceInventoryEntryV1] = []
+        var left = 0
+        while left < count:
+            val middle = if left + width < count: left + width else: count
+            val stop = if middle + width < count: middle + width else: count
+            var i = left
+            var j = middle
+            while i < middle and j < stop:
+                # Take the right run only when strictly smaller: ties keep
+                # the left (earlier) entry first.
+                if compile_source_inventory_identity_cmp_v1(sorted[j].source_identity, sorted[i].source_identity) < 0:
+                    merged.push(sorted[j])
+                    j = j + 1
+                else:
+                    merged.push(sorted[i])
+                    i = i + 1
+            while i < middle:
+                merged.push(sorted[i])
+                i = i + 1
+            while j < stop:
+                merged.push(sorted[j])
+                j = j + 1
+            left = stop
+        sorted = merged
+        width = width * 2
     sorted
 
 # Empty-inventory cold initialization is a set of unique creates. Validate
@@ -431,10 +451,10 @@ fn compile_source_inventory_initial_events_v1(
             event.source_identity, event.content_digest, event.semantic_digest,
             event.export_digest, event.initializer_digest, event.provider_digest,
             event.byte_count)
-        if not compile_source_inventory_entry_valid_v1(entry):
+        if not compile_source_inventory_entry_valid_unscoped_v1(entry):
             return nil
         seen[event.source_identity] = true
-        entries = entries.push(entry)
+        entries.push(entry)
     Some(CompileSourceInventoryV1(1, events.len(), compile_source_inventory_sort_v1(entries)))
 
 fn compile_source_inventory_entry_valid_v1(
@@ -455,12 +475,27 @@ fn compile_source_inventory_entry_valid_v1(
 fn compile_source_inventory_entry_valid_unscoped_v1(
     entry: CompileSourceInventoryEntryV1
 ) -> bool:
+    # Facets often share exact bytes (especially empty export/initializer/
+    # provider facets). A successful preceding conjunct has already admitted
+    # that spelling, so do not allocate and scan the same 64-byte digest again.
+    # Keep comparisons local to this entry and preserve first-invalid order:
+    # no cache, hash-only equality, or unvalidated value grants admission.
     compile_source_inventory_path_valid_v1(entry.source_identity) and
         compile_source_inventory_digest_valid_v1(entry.content_digest) and
-        compile_source_inventory_digest_valid_v1(entry.semantic_digest) and
-        compile_source_inventory_digest_valid_v1(entry.export_digest) and
-        compile_source_inventory_digest_valid_v1(entry.initializer_digest) and
-        compile_source_inventory_digest_valid_v1(entry.provider_digest) and
+        (entry.semantic_digest == entry.content_digest or
+            compile_source_inventory_digest_valid_v1(entry.semantic_digest)) and
+        (entry.export_digest == entry.content_digest or
+            entry.export_digest == entry.semantic_digest or
+            compile_source_inventory_digest_valid_v1(entry.export_digest)) and
+        (entry.initializer_digest == entry.content_digest or
+            entry.initializer_digest == entry.semantic_digest or
+            entry.initializer_digest == entry.export_digest or
+            compile_source_inventory_digest_valid_v1(entry.initializer_digest)) and
+        (entry.provider_digest == entry.content_digest or
+            entry.provider_digest == entry.semantic_digest or
+            entry.provider_digest == entry.export_digest or
+            entry.provider_digest == entry.initializer_digest or
+            compile_source_inventory_digest_valid_v1(entry.provider_digest)) and
         entry.byte_count >= 0
 
 fn compile_source_inventory_encode_v1(inventory: CompileSourceInventoryV1) -> text:
@@ -475,15 +510,11 @@ fn compile_source_inventory_encode_v1(inventory: CompileSourceInventoryV1) -> te
     ]
     var previous = ""
     for entry in entries:
-        if (not compile_source_inventory_entry_valid_v1(entry) or
+        if (not compile_source_inventory_entry_valid_unscoped_v1(entry) or
                 entry.source_identity == previous):
             return ""
         previous = entry.source_identity
-        rows = rows.push([
-            entry.source_identity, entry.content_digest, entry.semantic_digest,
-            entry.export_digest, entry.initializer_digest,
-            entry.provider_digest, entry.byte_count.to_text()
-        ].join("|"))
+        rows.push("{entry.source_identity}|{entry.content_digest}|{entry.semantic_digest}|{entry.export_digest}|{entry.initializer_digest}|{entry.provider_digest}|{entry.byte_count}")
     rows.join("\n")
 
 fn compile_source_inventory_digest_v1(inventory: CompileSourceInventoryV1) -> text:
@@ -555,6 +586,7 @@ fn compile_source_inventory_apply_event_v1(
 
 export COMPILE_SOURCE_INVENTORY_SCHEMA_V1
 export COMPILE_SOURCE_INVENTORY_MAX_BYTES_V1
+export COMPILE_SOURCE_INVENTORY_EMPTY_SHA256_V1
 export CompileSourceInventoryEntryV1
 export CompileSourceEventV1
 export CompileSourceGitChangeV1
@@ -568,7 +600,9 @@ export compile_source_inventory_whole_text_eligible_v1
 export compile_source_inventory_whole_text_canonical_v1
 export compile_source_inventory_whole_text_rows_v1
 export compile_source_inventory_event_from_content_v1
+export compile_source_inventory_event_from_content_cost_v1
 export compile_source_inventory_git_event_v1
+export compile_source_inventory_git_event_cost_v1
 export compile_source_inventory_filesystem_event_v1
 export compile_source_inventory_event_path_v1
 export compile_source_inventory_text_valid_v1
@@ -580,6 +614,7 @@ export compile_source_inventory_snapshot_cache_root_v1
 export compile_source_inventory_sort_v1
 export compile_source_inventory_initial_events_v1
 export compile_source_inventory_entry_valid_v1
+export compile_source_inventory_entry_valid_unscoped_v1
 export compile_source_inventory_encode_v1
 export compile_source_inventory_digest_v1
 export compile_source_inventory_find_v1

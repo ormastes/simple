@@ -1,0 +1,59 @@
+"""
+# RV64 Pipeline Hazard Detection and Forwarding
+
+Detects load-use hazards and resolves data forwarding for a classic
+5-stage pipeline (IF/ID/EX/MEM/WB).
+"""
+
+use hardware.riscv_common.pkg.riscv_types_pkg.{ForwardSrc, PipelineControl}
+
+# ---------------------------------------------------------------------------
+# Load-use hazard detection
+# ---------------------------------------------------------------------------
+
+fn detect_load_use_hazard(ex_is_load: bool, ex_rd: i64, id_rs1: i64, id_rs2: i64) -> bool:
+    """Detect if a load in EX stage feeds directly into the next instruction's source.
+    Requires a 1-cycle stall (load-use penalty)."""
+    if ex_is_load and ex_rd != 0:
+        (ex_rd == id_rs1) or (ex_rd == id_rs2)
+    else:
+        false
+
+# ---------------------------------------------------------------------------
+# Data forwarding resolution
+# ---------------------------------------------------------------------------
+
+fn resolve_forward_rs1(id_rs1: i64, ex_rd: i64, ex_write_en: bool,
+                       mem_rd: i64, mem_write_en: bool) -> ForwardSrc:
+    """Determine forwarding source for rs1. EX stage has priority over MEM."""
+    if ex_write_en and ex_rd != 0 and ex_rd == id_rs1:
+        ForwardSrc.FromEx
+    elif mem_write_en and mem_rd != 0 and mem_rd == id_rs1:
+        ForwardSrc.FromMem
+    else:
+        ForwardSrc.RegFile
+
+fn resolve_forward_rs2(id_rs2: i64, ex_rd: i64, ex_write_en: bool,
+                       mem_rd: i64, mem_write_en: bool) -> ForwardSrc:
+    """Determine forwarding source for rs2. EX stage has priority over MEM."""
+    if ex_write_en and ex_rd != 0 and ex_rd == id_rs2:
+        ForwardSrc.FromEx
+    elif mem_write_en and mem_rd != 0 and mem_rd == id_rs2:
+        ForwardSrc.FromMem
+    else:
+        ForwardSrc.RegFile
+
+# ---------------------------------------------------------------------------
+# Combined pipeline control
+# ---------------------------------------------------------------------------
+
+fn compute_pipeline_control(load_use_hazard: bool, branch_taken: bool) -> PipelineControl:
+    """Compute stall and flush signals for the pipeline.
+    - load_use_hazard: stall IF and ID, insert bubble in EX
+    - branch_taken: flush IF and ID stages"""
+    if load_use_hazard:
+        PipelineControl(stall: true, flush: false)
+    elif branch_taken:
+        PipelineControl(stall: false, flush: true)
+    else:
+        PipelineControl(stall: false, flush: false)

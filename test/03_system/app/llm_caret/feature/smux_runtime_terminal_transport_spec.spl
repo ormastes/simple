@@ -1,0 +1,193 @@
+# AUTHORED_UNRUN. Real helper transport acceptance, not Podman/runtime binding.
+# Requires an isolated POSIX test process and the admitted canonical backend.
+# At most two registry slots remain retained; successful teardown is unsupported.
+use std.spec.{describe, it, expect, step, fail}
+use std.sosix.process.{PipedProcessRefV1, sosix_process_spawn_piped_ref_v1,
+    sosix_process_is_piped_alive_ref_v1, sosix_process_close_piped_ref_v1,
+    sosix_process_validate_piped_ref_v1}
+use std.sosix.time.{sosix_time_now_monotonic_ms, sosix_sleep_ms}
+use std.nogc_sync_mut.sosix.entropy.sosix_random_hex
+use std.io_runtime.file_exists
+use os.apps.smux.api.{smux_create_session, smux_list_windows, smux_list_panes,
+    smux_configuration_revision, smux_owner_snapshot, smux_pane_adopt_terminal_transport,
+    smux_poll_output, smux_capture, smux_send_text, smux_send_command, smux_resize,
+    smux_close_pane, smux_kill_session}
+
+struct OutputTransportFixture:
+    reference: PipedProcessRefV1
+    marker: text
+    session_id: text
+    window_id: text
+    pane_id: text
+    adopted: bool
+
+fn spawn_output_transport_fixture() -> Result<OutputTransportFixture, text>:
+    step("Spawn a real bounded output helper")
+    if not file_exists("/bin/sh") or not file_exists("/bin/sleep"):
+        return Err("precondition: absolute shell and sleep helpers are required")
+    val entropy = sosix_random_hex(16)
+    if entropy == nil: return Err("precondition: fresh output marker entropy is unavailable")
+    val marker = "smux-output-" + entropy.unwrap()
+    # Two seconds separates the fresh markers. Only smux reads either marker;
+    # observing their bytes/EOF does not independently establish shell exit.
+    # The consumer feeds raw VT text, so use CRLF to reset the terminal column.
+    val script = "printf '%s\\r\\n' '" + marker + "-start'; /bin/sleep 2 && printf '%s\\r\\n' '" + marker + "-tail'"
+    val reference = sosix_process_spawn_piped_ref_v1("/bin/sh", ["-c", script])?
+    Ok(OutputTransportFixture(reference: reference, marker: marker,
+        session_id: "", window_id: "", pane_id: "", adopted: false))
+
+fn adopt_output_transport_fixture(original: OutputTransportFixture) -> Result<OutputTransportFixture, text>:
+    step("Adopt the canonical reference into the existing smux owner")
+    val session = smux_create_session(original.marker)
+    if session.id == "": return Err("precondition: smux session capacity unavailable")
+    val windows = smux_list_windows(session.id)
+    if windows.len() == 0:
+        val _removed = smux_kill_session(session.id)
+        return Err("precondition: smux created no target window")
+    val panes = smux_list_panes(session.id, windows[0].id)
+    if panes.len() == 0:
+        val _removed = smux_kill_session(session.id)
+        return Err("precondition: smux created no target pane")
+    val revision = smux_configuration_revision()
+    val snapshot = smux_owner_snapshot()
+    val index = snapshot.find_pane_idx(panes[0].id)
+    if index < 0:
+        val _removed = smux_kill_session(session.id)
+        return Err("precondition: smux target snapshot missing")
+    val adopted = smux_pane_adopt_terminal_transport(session.id, windows[0].id,
+        panes[0].id, revision.epoch, revision.value,
+        snapshot.get_pane(index).child_incarnation, original.reference)
+    if adopted.is_err():
+        val _removed = smux_kill_session(session.id)
+        return Err("canonical adoption refused: " + adopted.unwrap_err())
+    var fixture = original
+    fixture.session_id = session.id
+    fixture.window_id = windows[0].id
+    fixture.pane_id = panes[0].id
+    fixture.adopted = true
+    Ok(fixture)
+
+fn poll_output_transport_until_eof(fixture: OutputTransportFixture) -> Result<text, text>:
+    step("Poll a fresh output marker through the sole pane reader")
+    val deadline = sosix_time_now_monotonic_ms() + 8000
+    var seen_start = false
+    var turn = 0
+    while turn < 400 and sosix_time_now_monotonic_ms() < deadline:
+        if sosix_process_validate_piped_ref_v1(fixture.reference).is_err():
+            return Err("canonical owner lost before explicit close")
+        val _progress = smux_poll_output()
+        val capture = smux_capture(fixture.session_id, fixture.window_id, fixture.pane_id, 20)
+        if capture.is_err(): return Err("capture failed: " + capture.unwrap_err())
+        val content = capture.unwrap().content
+        if not seen_start and content.contains(fixture.marker + "-start"):
+            seen_start = true
+            step("Drain output until observed EOF without inferring process exit")
+        val snapshot = smux_owner_snapshot()
+        val index = snapshot.find_pane_idx(fixture.pane_id)
+        if index < 0: return Err("adopted pane disappeared before EOF")
+        val pane = snapshot.get_pane(index)
+        if not pane.same_terminal_ref(fixture.reference): return Err("canonical pane identity changed")
+        if pane.terminal_read_error != "": return Err("canonical read failed before EOF")
+        if pane.terminal_eof:
+            if not seen_start or not content.contains(fixture.marker + "-tail"):
+                return Err("EOF arrived without both fresh helper markers")
+            return Ok(content)
+        turn = turn + 1
+        sosix_sleep_ms(20)
+    Err("bounded output/EOF deadline exceeded")
+
+fn close_output_transport_fixture(fixture: OutputTransportFixture) -> Result<bool, text>:
+    # POSIX close is intentionally unsupported: it sends no signal, closes no
+    # descriptor and frees no registry slot. This helper checks retention,
+    # never pretends to clean up an adopted owner.
+    if fixture.adopted:
+        if smux_close_pane(fixture.session_id, fixture.window_id, fixture.pane_id):
+            return Err("POSIX smux close unexpectedly claimed teardown")
+        val snapshot = smux_owner_snapshot()
+        val index = snapshot.find_pane_idx(fixture.pane_id)
+        if (index < 0 or snapshot.find_window_idx(fixture.window_id) < 0 or
+                snapshot.find_session_idx(fixture.session_id) < 0):
+            return Err("unsupported close discarded retained smux owner metadata")
+        if not snapshot.get_pane(index).same_terminal_ref(fixture.reference):
+            return Err("unsupported close changed canonical owner identity")
+    val closed = sosix_process_close_piped_ref_v1(fixture.reference)
+    if closed.is_ok(): return Err("POSIX canonical close unexpectedly succeeded")
+    if closed.unwrap_err() != "process_close_unsupported": return Err("unexpected canonical close refusal")
+    Ok(true)
+
+fn exercise_output_transport_fixture(fixture: OutputTransportFixture,
+        unrelated: PipedProcessRefV1) -> Result<bool, text>:
+    step("Reject stale close authority while retaining unsupported close ownership")
+    # This deliberate negative uses the real PID with a different generation.
+    # It must fail without invalidating either retained canonical owner.
+    val other_generation = if fixture.reference.generation == 1: 2 else: 1
+    val stale = PipedProcessRefV1(pid: fixture.reference.pid, generation: other_generation)
+    val stale_closed = sosix_process_close_piped_ref_v1(stale)
+    if stale_closed.is_ok(): return Err("stale close was accepted")
+    if stale_closed.unwrap_err() != "stale_process_reference": return Err("unexpected stale generation refusal")
+    if sosix_process_validate_piped_ref_v1(fixture.reference).is_err():
+        return Err("stale close invalidated the primary owner")
+    if sosix_process_validate_piped_ref_v1(unrelated).is_err():
+        return Err("stale close invalidated the unrelated owner")
+    val before_snapshot = smux_owner_snapshot()
+    val before_index = before_snapshot.find_pane_idx(fixture.pane_id)
+    if before_index < 0: return Err("adopted pane missing before input refusal")
+    val before = before_snapshot.get_pane(before_index)
+    for sent in [smux_send_text(fixture.session_id, fixture.window_id, fixture.pane_id, "input"),
+            smux_send_command(fixture.session_id, fixture.window_id, fixture.pane_id, "command")]:
+        if sent.is_ok(): return Err("output-only transport accepted input")
+        if sent.unwrap_err() != "terminal transport is read-only": return Err("unexpected output-only input refusal")
+    if smux_resize(fixture.session_id, fixture.window_id, fixture.pane_id, 81, 25).is_ok():
+        return Err("output-only transport claimed runtime geometry support")
+    val after_snapshot = smux_owner_snapshot()
+    val after_index = after_snapshot.find_pane_idx(fixture.pane_id)
+    if after_index < 0: return Err("adopted pane missing after input refusal")
+    val after = after_snapshot.get_pane(after_index)
+    if after.input.bytes != before.input.bytes: return Err("refused input changed the owner queue")
+    val _output = poll_output_transport_until_eof(fixture)?
+    Ok(true)
+
+describe "smux real POSIX canonical output transport":
+    it "drains a real helper and retains exact authority when POSIX close is unsupported":
+        val spawned = spawn_output_transport_fixture()
+        if spawned.is_err():
+            fail(spawned.unwrap_err())
+            return
+        var fixture = spawned.unwrap()
+        # Independent actual bounded helper, never adopted or read. Registry
+        # validation below proves retained identity only, not continuation.
+        val unrelated_started = sosix_process_spawn_piped_ref_v1("/bin/sh", ["-c", "/bin/sleep 6"])
+        if unrelated_started.is_err():
+            val _retained = close_output_transport_fixture(fixture)
+            fail("precondition: independent bounded helper unavailable")
+            return
+        val unrelated = unrelated_started.unwrap()
+        if sosix_process_validate_piped_ref_v1(unrelated).is_err():
+            fail("precondition: independent helper registry identity unavailable")
+            return
+        val adopted = adopt_output_transport_fixture(fixture)
+        if adopted.is_err():
+            val retained = close_output_transport_fixture(fixture)
+            fail(adopted.unwrap_err() + "; close-retained=" + retained.is_ok().to_text())
+            return
+        fixture = adopted.unwrap()
+        val exercised = exercise_output_transport_fixture(fixture, unrelated)
+        val retained = close_output_transport_fixture(fixture)
+        val unrelated_after_close = sosix_process_validate_piped_ref_v1(unrelated)
+        if exercised.is_err():
+            fail(exercised.unwrap_err() + "; close-retained=" + retained.is_ok().to_text())
+            return
+        if retained.is_err():
+            fail(retained.unwrap_err())
+            return
+        expect(unrelated_after_close.is_ok()).to_equal(true)
+        for reference in [fixture.reference, unrelated]:
+            expect(sosix_process_validate_piped_ref_v1(reference).is_ok()).to_equal(true)
+            val alive = sosix_process_is_piped_alive_ref_v1(reference)
+            expect(alive.is_err()).to_equal(true)
+            expect(alive.unwrap_err()).to_equal("process_liveness_unsupported")
+            val closed = sosix_process_close_piped_ref_v1(reference)
+            expect(closed.is_err()).to_equal(true)
+            expect(closed.unwrap_err()).to_equal("process_close_unsupported")
+        # This isolated process now retains two of sixteen canonical slots.
+        # Process exit is test isolation, not proven helper/resource teardown.

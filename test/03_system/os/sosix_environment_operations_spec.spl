@@ -1,0 +1,169 @@
+"""As a hosted SOSIX tool author, I need to distinguish missing and empty values,
+replace and remove values, and know which process inherits my environment.
+
+Scenarios restore their dedicated key before checking observations. Only a
+matching host runs its shell assertions. This is hosted-provider evidence;
+SimpleOS guest and other host providers require their own execution evidence.
+"""
+use std.spec
+use std.nogc_sync_mut.io_runtime.{platform_name}
+use std.nogc_async_mut.sosix.environment.{sosix_env_get_checked,
+    sosix_env_get_nullable, sosix_env_get, sosix_env_get_opt,
+    sosix_env_set_checked, sosix_env_set, sosix_env_remove_checked, sosix_env_remove,
+    sosix_cwd_checked}
+use std.nogc_async_mut.sosix.host_facade.{sosix_run_bounded_checked}
+use std.common.spec.scenario_evidence.{ScenarioCaptureKind, scenario_evidence_artifact}
+
+fn env_spec_restore(key: text, original: text?):
+    if val value = original:
+        assert_true(sosix_env_set(key, value))
+    else:
+        assert_true(sosix_env_remove(key))
+
+fn env_spec_posix_host() -> bool:
+    val host = platform_name()
+    host == "macos" or host == "linux" or host == "freebsd" or host == "unix" or host == "illumos" or host == "solaris"
+
+# @manual_section: Hosted environment lifecycle
+# @req REQ-SOSIX-ENV-LIFECYCLE
+describe "SOSIX hosted environment operations":
+    if env_spec_posix_host() or platform_name() == "windows":
+        it "preserves missing versus explicitly empty across getter variants":
+            step("Remove a dedicated key and observe its missing forms")
+            val key = "SIMPLE_SOSIX_ENV_LIFECYCLE_20261029"
+            val original = sosix_env_get_nullable(key)
+            val removed = sosix_env_remove_checked(key)
+            val missing_checked = sosix_env_get_checked(key)
+            val missing_nullable = sosix_env_get_nullable(key)
+            val missing_text = sosix_env_get(key)
+            val missing_opt = sosix_env_get_opt(key)
+            step("Set an empty value and observe its distinct nullable form")
+            val assigned = sosix_env_set_checked(key, "")
+            val empty_checked = sosix_env_get_checked(key)
+            val empty_nullable = sosix_env_get_nullable(key)
+            val empty_text = sosix_env_get(key)
+            val empty_opt = sosix_env_get_opt(key)
+            env_spec_restore(key, original)
+            assert_true(removed.is_ok())
+            assert_true(assigned.is_ok())
+            expect(missing_checked.unwrap()).to_be_nil()
+            expect(missing_nullable).to_be_nil()
+            expect(missing_text).to_equal("")
+            expect(missing_opt).to_be_nil()
+            expect(empty_checked.unwrap()).to_equal(Some(""))
+            expect(empty_nullable).to_equal(Some(""))
+            expect(empty_text).to_equal("")
+            expect(empty_opt).to_be_nil()
+
+        it "replaces Unicode values and removes an already absent key idempotently":
+            step("Assign replace and remove a dedicated Unicode key")
+            val key = "SIMPLE_SOSIX_ENV_한_20261029"
+            val original = sosix_env_get_nullable(key)
+            val first_set = sosix_env_set(key, "한é🙂=first")
+            val first = sosix_env_get_nullable(key)
+            val second_set = sosix_env_set_checked(key, "日本語 second value")
+            val second = sosix_env_get_checked(key)
+            val remove_first = sosix_env_remove(key)
+            val absent = sosix_env_get_nullable(key)
+            val remove_again = sosix_env_remove_checked(key)
+            env_spec_restore(key, original)
+            assert_true(first_set)
+            expect(first).to_equal(Some("한é🙂=first"))
+            assert_true(second_set.is_ok())
+            expect(second.unwrap()).to_equal(Some("日本語 second value"))
+            assert_true(remove_first)
+            expect(absent).to_be_nil()
+            assert_true(remove_again.is_ok())
+
+        it "keeps the prior value when checked assignment rejects embedded NUL":
+            step("Attempt an invalid replacement of a valid existing value")
+            val key = "SIMPLE_SOSIX_ENV_ATOMIC_20261029"
+            val original = sosix_env_get_nullable(key)
+            val assigned = sosix_env_set_checked(key, "retained")
+            val rejected = sosix_env_set_checked(key, "prefix\0suffix")
+            val retained = sosix_env_get_nullable(key)
+            env_spec_restore(key, original)
+            assert_true(assigned.is_ok())
+            assert_true(rejected.is_err())
+            expect(retained).to_equal(Some("retained"))
+
+        it "returns an admitted nonempty current directory":
+            step("Request the checked current directory from the environment provider")
+            val cwd = sosix_cwd_checked().unwrap()
+            assert_true(cwd != "")
+            assert_false(cwd.contains("\0"))
+    else:
+        planned("Hosted environment lifecycle", "SOSIX ordinary environment text provider unavailable on " + platform_name())
+
+# @manual_section: Matching host child inheritance and isolation
+# @req REQ-SOSIX-ENV-INHERITANCE
+# @capture(text)
+describe "SOSIX POSIX environment inheritance":
+    if env_spec_posix_host():
+        it "inherits parent values but keeps child mutations out of the parent":
+            step("Launch a bounded POSIX child through SOSIX with an inherited value")
+            val key = "SIMPLE_SOSIX_ENV_CHILD_20261029"
+            val original = sosix_env_get_nullable(key)
+            val assigned = sosix_env_set_checked(key, "parent 한🙂")
+            val child = sosix_run_bounded_checked("/bin/sh", ["-c", "printenv SIMPLE_SOSIX_ENV_CHILD_20261029; export SIMPLE_SOSIX_ENV_CHILD_20261029=child"], 5000, 1024)
+            val parent_after = sosix_env_get_nullable(key)
+            step("Remove the parent value and launch a fresh child")
+            val removed = sosix_env_remove_checked(key)
+            val next = sosix_run_bounded_checked("/bin/sh", ["-c", "if printenv SIMPLE_SOSIX_ENV_CHILD_20261029; then exit 1; else printf unset; fi"], 5000, 1024)
+            env_spec_restore(key, original)
+            assert_true(assigned.is_ok())
+            assert_true(removed.is_ok())
+            val inherited = child.unwrap()
+            val absent = next.unwrap()
+            val evidence = scenario_evidence_artifact(ScenarioCaptureKind.text, "Child environment observations", "text/plain", "", inherited.stdout + "\n" + absent.stdout, "SOSIX-ENV-INHERITANCE", "child-output")
+            expect(inherited.exit_code).to_equal(0)
+            expect(inherited.stderr).to_equal("")
+            expect(inherited.stdout).to_equal("parent 한🙂\n")
+            expect(parent_after).to_equal(Some("parent 한🙂"))
+            expect(absent.exit_code).to_equal(0)
+            expect(absent.stdout).to_equal("unset")
+            expect(evidence.body).to_equal("parent 한🙂\n\nunset")
+    else:
+        planned("POSIX shell inheritance and isolation", "Requires a matching POSIX provider and /bin/sh; this host is " + platform_name())
+
+# @manual_section: Windows case-insensitive environment keys
+# @req REQ-SOSIX-ENV-WINDOWS
+describe "SOSIX Windows environment semantics":
+    if platform_name() == "windows":
+        it "reads a Windows environment key independent of case":
+            step("Set one spelling and read another spelling on Windows")
+            val key = "SIMPLE_SOSIX_ENV_CASE_20261029"
+            val original = sosix_env_get_nullable(key)
+            val assigned = sosix_env_set_checked(key, "Windows value")
+            val lower = sosix_env_get_nullable("simple_sosix_env_case_20261029")
+            env_spec_restore(key, original)
+            assert_true(assigned.is_ok())
+            expect(lower).to_equal(Some("Windows value"))
+    else:
+        planned("Windows case-insensitive key lookup", "Requires the Windows UTF16 environment provider; current host is " + platform_name())
+
+# @manual_section: Windows child environment inheritance
+# @req REQ-SOSIX-ENV-INHERITANCE
+describe "SOSIX Windows environment inheritance":
+    if platform_name() == "windows":
+        it "inherits a Windows parent value and isolates cmd child mutation":
+            step("Launch cmd with a dedicated inherited environment value")
+            val key = "SIMPLE_SOSIX_ENV_WIN_CHILD_20261029"
+            val original = sosix_env_get_nullable(key)
+            val assigned = sosix_env_set_checked(key, "parent-value")
+            val child = sosix_run_bounded_checked("cmd.exe", ["/d", "/c", "set SIMPLE_SOSIX_ENV_WIN_CHILD_20261029 & set SIMPLE_SOSIX_ENV_WIN_CHILD_20261029=child-value"], 5000, 1024)
+            val parent_after = sosix_env_get_nullable(key)
+            val removed = sosix_env_remove_checked(key)
+            val next = sosix_run_bounded_checked("cmd.exe", ["/d", "/c", "if defined SIMPLE_SOSIX_ENV_WIN_CHILD_20261029 (exit /b 1) else (echo unset)"], 5000, 1024)
+            env_spec_restore(key, original)
+            assert_true(assigned.is_ok())
+            assert_true(removed.is_ok())
+            val inherited = child.unwrap()
+            val absent = next.unwrap()
+            expect(inherited.exit_code).to_equal(0)
+            expect(inherited.stdout.trim()).to_equal("SIMPLE_SOSIX_ENV_WIN_CHILD_20261029=parent-value")
+            expect(parent_after).to_equal(Some("parent-value"))
+            expect(absent.exit_code).to_equal(0)
+            expect(absent.stdout.trim()).to_equal("unset")
+    else:
+        planned("Windows cmd inheritance and isolation", "Requires the Windows process provider and cmd.exe; current host is " + platform_name())

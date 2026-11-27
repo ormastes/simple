@@ -55,3 +55,9 @@ gates. No full-suite PASS is claimed here.
 Root owns qualified compiler/spec validation and independent exact-head
 review. The author launched no compiler, native build, test runner, or doc
 generator. Historical groups remain runtime-open until that evidence exists.
+
+## Bootstrap repro/prevention 2026-11-05
+Bootstrap review: test/01_unit/compiler/mir_opt/pass_scope_enum_owner_spec.spl already covers the mitigation (6/6 on seed). Verification-pending on stage3. No new change.
+
+## 2026-11-05 — FIXED (mirp2 family A)
+Mitigation is present at src/compiler/60.mir_opt/mir_opt/mod.spl:871 (typed `PassScope` + qualified arms). Spec now RUN: `bin/simple.exe run test/01_unit/compiler/mir_opt/pass_scope_enum_owner_spec.spl` -> 6 examples, 0 failures.

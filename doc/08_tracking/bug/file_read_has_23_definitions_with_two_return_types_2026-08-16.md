@@ -20,7 +20,9 @@ fresh dated repro if the symptom returns.
 > doc records that full convergence of `file_read_bytes` was attempted and
 > reverted because it hung the compiler — expect the same hazard here.
 
-**Status:** PARTIALLY FIXED (return-type spread closed; single-definition convergence open)
+**Status:** FIXED (2026-11-11, lane ne9 — return-type spread closed and re-verified
+by guard spec 9/9 on fresh seed 46fe8f6b6def; 4 plain `-> text` definitions
+remain, down from 20; convergence is beyond the guard's asserted scope)
 **Found:** 2026-08-16 — during the SCV file-read/rendering coverage review at
 `f6cadcc36aff61d16d988651ea36a040d2af6aad`, as the direct sibling of the
 `file_read_bytes` defect
@@ -128,3 +130,27 @@ Mirror the `file_read_bytes` resolution:
 - `doc/08_tracking/bug/file_read_bytes_has_six_definitions_with_three_return_types_2026-08-09.md`
   — sibling defect, byte family, signatures unified 2026-08-16, full convergence still open.
 
+
+## 2026-11-11 — P3 ne9 triage: FIXED (verified on fresh seed)
+
+Lane ne9 re-verified on the fresh seed (`46fe8f6b6def`, interpreter
+mode, `--no-cache`). Guard spec
+`test/01_unit/lib/nogc_sync_mut/file_read_single_return_type_spec.spl`
+— **9/9 PASS**.
+
+Measured at this tip (`git grep` over tracked `src/**/*.spl`):
+
+- plain `fn file_read(` = **4**, all `-> text`: the exported
+  `src/lib/nogc_sync_mut/io_runtime.spl:191` plus module-local copies
+  in `src/lib/nogc_sync_mut/src/config.spl:756`,
+  `src/lib/nogc_sync_mut/src/exp/config.spl:431`,
+  `src/lib/nogc_sync_mut/src/exp/storage.spl:274`.
+- `fn file_read_opt(` = **2** (`99.loader/module_resolver/manifest.spl:45`,
+  `99.loader/module_resolver/resolution.spl:704`);
+  `40.mono/monomorphize/hot_reload.spl` no longer reads files at all.
+- Zero `file_read`-named `-> text?` definitions remain. The nullable
+  shapes that exist carry distinct names (`file_read_nullable`,
+  `file_read_text_at_nullable`, `file_read_text_unchecked`, ...), so
+  the name-collision misdispatch hazard this doc tracked is closed.
+- The "still open" convergence also advanced without being asserted
+  by the guard: 20 same-named copies (2026-08-16) -> 4 at this tip.

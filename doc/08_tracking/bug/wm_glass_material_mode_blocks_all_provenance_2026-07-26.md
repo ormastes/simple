@@ -1,7 +1,7 @@
 # Historical report: WM windows realized no material on one software/freestanding guest run
 
 - **Filed:** 2026-07-26
-- **Status:** source contract reconciled; current-runtime verification open
+- **Status:** source contract reconciled; host current-runtime VERIFIED 2026-11-25 (run-path, see dated section); SimpleOS/QEMU guest evidence still open
 - **Historical attribution (superseded by the reconciliation below):**
   `6b18dcd874f fix(wm): preserve Aetheric Web glass material`
 - **Blast radius:** SimpleOS-WM x QEMU showcase cell went PASS -> `guest-render-fault`.
@@ -156,3 +156,40 @@ Guest lane, same harness, two trees:
 The delta between those two runs is the regressing commit, and rerun57 also
 clears the level-gating landed alongside it (the WM file set is layout-sensitive,
 so that had to be shown, not argued).
+
+## 2026-11-25 current-runtime verification on host (P3 ledger sweep)
+
+The remaining item was "obtaining revision-bound native/guest execution
+evidence". Host-side current-runtime evidence now exists; the guest lane is
+still open.
+
+Replicated the committed production Aetheric spec
+(`test/01_unit/os/compositor/wm_aetheric_web_material_spec.spl`, all 20
+assertions) as a run-path probe on a Windows worktree at
+`origin/release/1.0.0` (HEAD `24e8647f5d7`), tracked `bin/simple.exe`,
+`SIMPLE_LIB=src`, `SIMPLE_WEB_RENDER_BUDGET_MS=600000`. Result:
+`AETHERIC PROBE: ALL PASS` in ~166 s wall, including:
+
+- producer stamps `data-wm-theme-material-mode='engine2d-cpu-composited-material-v1'`;
+- computed style carries resolved `backdrop-filter: blur(30px) saturate(170%)`,
+  the typed two-stop gradient (`linear-gradient(352321535,117440511)`), empty
+  `background-layers-raw`, realized reduction `blur(4px) saturate(170%)` with
+  reason `cpu-blur-radius-bounded-to-4`;
+- `layout.material_witness.cpu_composited_count == 1` with a 64-char sha and
+  `material_fallback.kind == "none"` (no provenance rejection);
+- Engine2D software execution readback (80x40 pixels) yields
+  `material_fallback.kind == "cpu-composited-material"` whose
+  `material_sha256` equals the layout witness sha (the matching CPU receipt).
+
+The 2026-07-26 "verification trap" (host interpreter starving the 10s render
+budget before the style loop) did not occur here: no budget-break lines, and
+the witness/provenance path executed fully. This is a host-interpreter
+current-runtime result bound to the revision above; it supersedes the "No
+current, source-matched pure-Simple GUI runtime is available on this host"
+caveat for the host lane. The `simple test` entrypoint itself is currently
+blocked on this host (pinned binary predates seed commit `14a34acbe1e`,
+`@representation_boundary`), hence the run-path replication.
+
+**Still open:** revision-bound SimpleOS/QEMU guest execution evidence for the
+showcase cell (`check-simpleos-wm-fullscreen-evidence.shs` PPM captures) —
+emulator lane, not producible on this host.

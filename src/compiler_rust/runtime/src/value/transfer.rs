@@ -370,6 +370,18 @@ impl RuntimeEncodedCopy {
         }
     }
 
+    /// Materialize only when this copy is addressed to `target`.
+    ///
+    /// Channel receive paths decode with the envelope's target domain, so a
+    /// copy minted for a different domain is refused here instead of leaking
+    /// across the boundary.
+    pub(crate) fn materialize_for_target(&self, target: TransferDomain) -> Option<RuntimeValue> {
+        if self.envelope.target_domain() != target {
+            return None;
+        }
+        self.materialize()
+    }
+
     fn payload_is_valid(&self) -> bool {
         if self.payload.len() > MAX_ENCODED_COPY_BYTES {
             return false;

@@ -9,6 +9,7 @@ use compiler.hir.hir_lowering._Items.lowering_helpers.{ReturnScan, return_scan_e
 # This module handles lowering of top-level items (functions, classes, structs, enums, traits, impls) from AST to HIR.
 
 use compiler.hir.hir_types.*
+use compiler.hir.primitive_method_identity.{hir_primitive_owner_name}
 use compiler.hir.hir_definitions.*
 use compiler.frontend.parser_types.*
 use compiler.frontend.parser_types.{ParserFunction, ImportItem, Param, ParserTypeParam}
@@ -36,6 +37,7 @@ extern fn rt_enum_discriminant<T>(value: T) -> i64
 @unsafe(reason: "raw tagged-enum borrowed payload projection ABI", capabilities: [ffi])
 extern fn rt_enum_payload<T>(value: T) -> i64
 @unsafe(reason: "raw tagged-tuple indexed borrowed value projection ABI", capabilities: [ffi])
+# T must match the selected variant slot; the borrowed owner must remain live.
 extern fn rt_tuple_get<T>(tuple: i64, index: i64) -> T?
 
 use compiler.core.{EXPR_INT_LIT, EXPR_STRING_LIT, EXPR_INTERPOLATED_STRING, EXPR_BOOL_LIT, EXPR_NIL_LIT, EXPR_IDENT, EXPR_BINARY, EXPR_CALL, EXPR_FIELD_ACCESS, EXPR_METHOD_CALL, EXPR_BLOCK, EXPR_RETURN, expr_get_tag, expr_get_int, expr_get_str, expr_get_left, expr_get_right, expr_get_args, expr_get_arg_names, expr_get_stmts}
@@ -51,19 +53,19 @@ use compiler.hir.sffi_identity.{sffi_raw_callable_effects}
 pub fn hir_ast_expr_statement_payload_v1(kind: StmtKind) -> Expr?:
     """Project the declared single Expr payload without guessing its ABI."""
     if kind == nil:
-        return nil
+        return None
     # Keep the variant guard: older producers confused the Expr variant with
     # the Expr struct in a broad match. Payload projection stays typed.
     val probe = Expr(kind: ExprKind.NilLit, span: Span.empty())
     val disc = rt_enum_discriminant(kind)
     if disc < 0 or disc != rt_enum_discriminant(StmtKind.Expr(probe)):
-        return nil
+        return None
     match kind:
         case StmtKind.Expr(expr):
             if expr == nil:
-                return nil
+                return None
             Some(expr)
-        case _: nil
+        case _: None
 
 impl HirLowering:
     # Cycle-159 (v18, 2026-10-18): per-field type extraction in a fresh small
@@ -83,7 +85,11 @@ impl HirLowering:
         if field_type == nil:
             HirType(kind: HirTypeKind.Error, span: field.span)
         else:
-            self.lower_type(field_type)
+            val saved_written_any_depth = self.written_any_unsafe_depth
+            self.written_any_unsafe_depth = saved_written_any_depth + 1
+            val lowered = self.lower_type(field_type)
+            self.written_any_unsafe_depth = saved_written_any_depth
+            lowered
 
     me prescan_composite_field_types(name: text, fields: [ParserField], type_params: [ParserTypeParam]):
         """Register parser struct/class fields before function lowering."""
@@ -119,6 +125,11 @@ impl HirLowering:
         self.prescan_type_parameters = saved_parameters
         self.struct_field_types_by_name[name] = field_types
         self.struct_field_order_by_name[name] = field_order
+        var type_param_names: [text] = []
+        for raw_tp in type_params:
+            val tp: ParserTypeParam = raw_tp
+            type_param_names = type_param_names.push(tp.name)
+        self.struct_type_param_names_by_name[name] = type_param_names
         # MODULE-QUALIFIED KEY (2026-08-24). The bare name is NOT a unique key:
         # two modules may declare the same composite name, and the second
         # registration silently overwrites the first, so every field read
@@ -147,6 +158,93 @@ impl HirLowering:
         if self.module_filename != "":
             self.struct_field_types_by_name[self.module_filename + "." + name] = field_types
             self.struct_field_order_by_name[self.module_filename + "." + name] = field_order
+            self.struct_type_param_names_by_name[self.module_filename + "." + name] = type_param_names
+
+    me prescan_generic_class_method_returns(name: text, methods: Dict<text, ParserFunction>, type_params: [ParserTypeParam]):
+        """Record a generic class's instance-method DECLARED return types."""
+        # Bug generic_method_return_subst_2026_11_09: a generic owner's method
+        # symbols are registered untyped (declared_callable_type), so
+        # `b.poll()` on `b: Box<text?>` had no return type to substitute.
+        # Lower each return annotation in the class's generic scope (keys
+        # match struct_type_param_names_by_name) so the call site can
+        # instantiate `Poll<T>` from the receiver's arguments.
+        if type_params.len() == 0:
+            return
+        val saved_written_any_depth = self.written_any_unsafe_depth
+        self.written_any_unsafe_depth = saved_written_any_depth + 1
+        val saved_parameters = self.prescan_type_parameters
+        self.prescan_type_parameters = {}
+        self.symbols.push_scope(ScopeKind.Class)
+        for tp in type_params:
+            val parameter = self.lower_type_param(tp)
+            self.prescan_type_parameters[parameter.symbol.id] = HirType(
+                kind: HirTypeKind.TypeParam(parameter.name, parameter.bounds),
+                span: parameter.span)
+        # `-> Self` needs the owner, exactly as the impl-method declaration
+        # pass publishes it; saved and restored so nothing leaks.
+        val saved_self_type = self.current_method_self_type
+        val local_owner = self.symbols.lookup_qualified_type_raw(self.module_filename, name)
+        val owner_symbol = if local_owner >= 0: SymbolId(id: local_owner) else: self.symbols.lookup_or_invalid(name)
+        if owner_symbol.is_valid():
+            self.current_method_self_type = Some(HirType(kind: HirTypeKind.Named(owner_symbol, []), span: Span.empty()))
+        for method_name in methods.keys():
+            val method: ParserFunction = methods[method_name]
+            if method.is_static or method.type_params.len() > 0 or not method.has_return_type:
+                continue
+            val declared_return: Type = method.return_type
+            val lowered = self.lower_type(declared_return)
+            self.class_method_return_types_by_name[name + "::" + method_name] = lowered
+            if self.module_filename != "":
+                self.class_method_return_types_by_name[self.module_filename + "." + name + "::" + method_name] = lowered
+        self.current_method_self_type = saved_self_type
+        self.symbols.pop_scope()
+        self.prescan_type_parameters = saved_parameters
+        self.written_any_unsafe_depth = saved_written_any_depth
+
+    me prescan_generic_function_return(symbol: SymbolId, fn_decl: ParserFunction):
+        """Record a local generic function's declared return type and ordered binders."""
+        if not symbol.is_valid() or fn_decl.type_params.len() == 0 or not fn_decl.has_return_type:
+            return
+        if self.registering_import_symbols:
+            return
+        val saved_written_any_depth = self.written_any_unsafe_depth
+        self.written_any_unsafe_depth = saved_written_any_depth + 1
+        val saved_parameters = self.prescan_type_parameters
+        self.prescan_type_parameters = {}
+        self.symbols.push_scope(ScopeKind.Class)
+        var tp_names: [text] = []
+        for raw_tp in fn_decl.type_params:
+            val tp: ParserTypeParam = raw_tp
+            tp_names = tp_names.push(tp.name)
+            val parameter = self.lower_type_param(tp)
+            self.prescan_type_parameters[parameter.symbol.id] = HirType(
+                kind: HirTypeKind.TypeParam(parameter.name, parameter.bounds),
+                span: parameter.span)
+        val declared_return: Type = fn_decl.return_type
+        val lowered = self.lower_type(declared_return)
+        self.symbols.pop_scope()
+        self.prescan_type_parameters = saved_parameters
+        self.written_any_unsafe_depth = saved_written_any_depth
+        val sym_key = symbol.id.to_text()
+        self.class_method_return_types_by_name["#fn_ret#" + sym_key] = lowered
+        self.struct_type_param_names_by_name["#fn_tp#" + sym_key] = tp_names
+
+    me prescan_imported_generic_function_return(symbol: SymbolId, callable: ModuleSurfaceCallable, fn_type: HirType?):
+        """Record an imported generic function's declared return type and ordered binders."""
+        if not symbol.is_valid() or callable.type_params.len() == 0:
+            return
+        if val sig = fn_type:
+            match sig.kind:
+                case HirTypeKind.Function(_, returned, _):
+                    var tp_names: [text] = []
+                    for raw_tp in callable.type_params:
+                        val tp: ParserTypeParam = raw_tp
+                        tp_names = tp_names.push(tp.name)
+                    val sym_key = symbol.id.to_text()
+                    val returned_type: HirType = returned
+                    self.class_method_return_types_by_name["#fn_ret#" + sym_key] = returned_type
+                    self.struct_type_param_names_by_name["#fn_tp#" + sym_key] = tp_names
+                case _: ()
 
     # Nested-field-access support (native --entry path bug, see
     # struct_field_types_by_name doc comment in types.spl): record this
@@ -184,6 +282,20 @@ impl HirLowering:
         if not scan.found_value_return:
             if val dynamic_tail = self.dynamic_callback_tail_type(fn_decl):
                 return dynamic_tail
+            # methods-mir-20261031 shape 2: `fn make(n: i64):` ending in a
+            # bare `out` tail whose binding is annotated (`var out: [i64]`).
+            # A bare identifier statement has no side effect, so its only
+            # meaning is the implicit value return; typing it lets callers
+            # resolve `make(3).len()` and lowers the body in value position.
+            if val tail_bound = self.annotated_tail_identifier_type_v1(fn_decl):
+                return tail_bound
+            # Owner decision 2026-11-06: an untyped function infers its return
+            # type from its last expression when possible; when it cannot, the
+            # value is still returned (dynamically) and a diagnostic says so --
+            # never a silent Unit that drops the tail
+            # (native_untyped_return_fn_drops_tail_value_2026-09-13).
+            if val tail_value = self.tail_value_return_type_v1(fn_decl):
+                return tail_value
             return HirType(kind: HirTypeKind.Unit, span: fn_decl.span)
         if scan.ambiguous or scan.resolved_name == "":
             if self.ambient_bootstrap_enabled():
@@ -195,18 +307,238 @@ impl HirLowering:
             return HirType(kind: HirTypeKind.Unit, span: fn_decl.span)
         return HirType(kind: hir_type_kind_from_simple_name(scan.resolved_name), span: fn_decl.span)
 
+    me tail_value_return_type_v1(fn_decl: ParserFunction) -> HirType?:
+        """Return type implied by a value-only tail expression, or nil.
+
+        Only side-effect-free value shapes count (literals, locals, operators,
+        field/index reads, collection/struct literals, ...). Calls, method
+        calls, `if`/`match` and blocks may legitimately be Unit procedures, so
+        they keep the Unit default. A sole string literal is a docstring.
+        A value shape whose type cannot be resolved here returns Any and is
+        reported as W-RET-INFER-001.
+        """
+        val fn_body_stmts: [Stmt] = fn_decl.body.stmts
+        if fn_body_stmts.len() == 0:
+            return None
+        val tail_index: i64 = fn_body_stmts.len() - 1
+        val tail_opt: Expr? = hir_ast_expr_statement_payload_v1(fn_body_stmts[tail_index].kind)
+        val fn_params: [Param] = fn_decl.params
+        if val tail_expr = tail_opt:
+            var value_shape = false
+            var type_name = ""
+            match tail_expr.kind:
+                case ExprKind.StringLit(_, _):
+                    if tail_index == 0:
+                        return None
+                    value_shape = true
+                    type_name = "text"
+                case ExprKind.Ident(name):
+                    value_shape = true
+                    type_name = self.tail_binding_simple_type_name_v1(fn_body_stmts, tail_index, name, fn_params)
+                case ExprKind.IntLit(_) | ExprKind.FloatLit(_) | ExprKind.FloatLexeme(_) | ExprKind.BoolLit(_) | ExprKind.Binary(_, _, _) | ExprKind.Unary(_, _) | ExprKind.Cast(_, _):
+                    value_shape = true
+                    type_name = self.infer_simple_type_name_ast(tail_expr, fn_params) ?? ""
+                case ExprKind.TupleLit(tail_elements):
+                    # `()` is the unit value: an explicit Unit tail, not a
+                    # value return. Typing it Any gave the function an i64
+                    # signature that every bare `return` then contradicted.
+                    if tail_elements.len() == 0:
+                        return None
+                    value_shape = true
+                case ExprKind.ArrayLit(_) | ExprKind.ArrayRepeat(_, _) | ExprKind.DictLit(_) | ExprKind.SetLit(_) | ExprKind.Field(_, _) | ExprKind.Index(_, _) | ExprKind.OptionalChain(_, _) | ExprKind.NullCoalesce(_, _) | ExprKind.ExistsCheck(_) | ExprKind.ForceUnwrap(_) | ExprKind.Range(_, _, _, _) | ExprKind.StructLit(_, _) | ExprKind.ListComprehension(_, _) | ExprKind.DictComprehension(_, _, _):
+                    value_shape = true
+                case _: ()
+            if not value_shape:
+                return None
+            if type_name != "" and hir_simple_type_name_is_known(type_name):
+                return Some(HirType(kind: hir_type_kind_from_simple_name(type_name), span: fn_decl.span))
+            if not self.registering_import_symbols:
+                self.warning("[W-RET-INFER-001] untyped function '{fn_decl.name}' ends in a value whose type cannot be inferred; it is returned dynamically. Add '-> T'", fn_decl.span)
+            return Some(HirType(kind: HirTypeKind.Any, span: fn_decl.span))
+        None
+
+    me tail_binding_simple_type_name_v1(stmts: [Stmt], tail_index: i64, name: text, params: [Param]) -> text:
+        """Simple type name of the newest top-level binding of `name` before
+        the tail (annotation-free initializer), or of a typed parameter."""
+        var found_binding = false
+        var found_name = ""
+        var si: i64 = 0
+        while si < tail_index:
+            match stmts[si].kind:
+                case StmtKind.Val(bound_name, _, init):
+                    if bound_name == name:
+                        found_binding = true
+                        val init_expr: Expr = init
+                        found_name = self.infer_simple_type_name_ast(init_expr, params) ?? ""
+                case StmtKind.Var(bound_name, _, init):
+                    if bound_name == name:
+                        found_binding = true
+                        found_name = ""
+                        val init_opt: Expr? = init
+                        if val init_e = init_opt:
+                            found_name = self.infer_simple_type_name_ast(init_e, params) ?? ""
+                case _: ()
+            si = si + 1
+        if found_binding:
+            return found_name
+        for raw_param in params:
+            val param: Param = raw_param
+            if param.name == name and param.has_type_:
+                return hir_type_simple_name(self.lower_type(param.type_)) ?? ""
+        ""
+
+    me annotated_tail_identifier_type_v1(fn_decl: ParserFunction) -> HirType?:
+        """Declared type of a bare-identifier tail statement, or nil.
+
+        Only the last top-level statement counts, only when it is a plain
+        `Ident`, and only when the newest top-level binding of that name
+        before it carries an explicit annotation (`val`/`var x: T`), or the
+        name is a typed parameter with no later rebinding. Anything else
+        (unannotated binding, nested/conditional binding, call tail) stays
+        nil so the caller keeps the Unit default -- never a guess.
+        """
+        val fn_body_stmts: [Stmt] = fn_decl.body.stmts
+        if fn_body_stmts.len() == 0:
+            return None
+        val tail_index: i64 = fn_body_stmts.len() - 1
+        var tail_name = ""
+        if val tail_expr = hir_ast_expr_statement_payload_v1(fn_body_stmts[tail_index].kind):
+            match tail_expr.kind:
+                case ExprKind.Ident(name): tail_name = name
+                case _: ()
+        if tail_name == "":
+            return None
+        var found_binding = false
+        var found_type: HirType? = None
+        var si: i64 = 0
+        while si < tail_index:
+            match fn_body_stmts[si].kind:
+                case StmtKind.Val(bound_name, bound_type, _):
+                    if bound_name == tail_name:
+                        found_binding = true
+                        found_type = None
+                        val bound_type_opt: Type? = bound_type
+                        if val declared_bound = bound_type_opt:
+                            found_type = Some(self.lower_type(declared_bound))
+                case StmtKind.Var(bound_name, bound_type, _):
+                    if bound_name == tail_name:
+                        found_binding = true
+                        found_type = None
+                        val bound_type_opt: Type? = bound_type
+                        if val declared_bound = bound_type_opt:
+                            found_type = Some(self.lower_type(declared_bound))
+                case _: ()
+            si = si + 1
+        if not found_binding:
+            for raw_param in fn_decl.params:
+                val param: Param = raw_param
+                if param.name == tail_name and param.has_type_:
+                    found_type = Some(self.lower_type(param.type_))
+        if val tail_type = found_type:
+            match tail_type.kind:
+                case HirTypeKind.Unit | HirTypeKind.Infer(_, _) | HirTypeKind.Error: return None
+                case _: return Some(tail_type)
+        None
+
+    me bare_tuple_return_elements_v1(fn_decl: ParserFunction) -> [HirType]:
+        """Element types of a bare `-> tuple` return, inferred from the body.
+
+        Bug stage2_bare_tuple_return_type_index_arity_2026-11-07: the bare
+        annotation lowers to Tuple([]), so indexing a call result was a fatal
+        "tuple index N is out of range for a 0-element tuple". The arity is the
+        widest tuple literal returned (tail or `return`); element types come
+        from simple-type inference, else Any. Empty when nothing is found.
+        """
+        val fn_params: [Param] = fn_decl.params
+        val found: [Expr] = self.bare_tuple_returned_literal_v1(fn_decl.body, fn_params)
+        var elems: [HirType] = []
+        for raw_elem in found:
+            val elem: Expr = raw_elem
+            val name: text = self.infer_simple_type_name_ast(elem, fn_params) ?? ""
+            if name != "" and hir_simple_type_name_is_known(name):
+                elems.push(HirType(kind: hir_type_kind_from_simple_name(name), span: fn_decl.span))
+            else:
+                elems.push(HirType(kind: HirTypeKind.Any, span: fn_decl.span))
+        elems
+
+    me bare_tuple_returned_literal_v1(b: Block, params: [Param]) -> [Expr]:
+        """Elements of the widest returned tuple literal in `b` ([] if none)."""
+        var best: [Expr] = []
+        val stmts: [Stmt] = b.stmts
+        var si: i64 = 0
+        while si < stmts.len():
+            val stmt: Stmt = stmts[si]
+            var cand: [Expr] = []
+            match stmt.kind:
+                case StmtKind.Return(rv):
+                    val rv_opt: Expr? = rv
+                    if val rve = rv_opt:
+                        cand = self.bare_tuple_literal_elements_v1(rve, params)
+                case StmtKind.For(_, _, body):
+                    val body_block: Block = body
+                    cand = self.bare_tuple_returned_literal_v1(body_block, params)
+                case StmtKind.While(_, body):
+                    val body_block: Block = body
+                    cand = self.bare_tuple_returned_literal_v1(body_block, params)
+                case StmtKind.Loop(body):
+                    val body_block: Block = body
+                    cand = self.bare_tuple_returned_literal_v1(body_block, params)
+                case _:
+                    if val ex = hir_ast_expr_statement_payload_v1(stmt.kind):
+                        cand = self.bare_tuple_literal_elements_v1(ex, params)
+            if cand.len() > best.len():
+                best = cand
+            si = si + 1
+        best
+
+    @representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in bare_tuple_literal_elements_v1", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+    me bare_tuple_literal_elements_v1(e: Expr, params: [Param]) -> [Expr]:
+        var out: [Expr] = []
+        if e == nil:
+            return out
+        val e_kind = e.kind
+        val if_exemplar = ExprKind.If(Expr(kind: ExprKind.NilLit, span: e.span),
+            Block(stmts: [], span: e.span), None)
+        if rt_enum_discriminant(e_kind) == rt_enum_discriminant(if_exemplar):
+            val if_payload = rt_enum_payload(e_kind)
+            val if_then: Block = unsafe(capabilities: [ffi]):
+                rt_tuple_get<Block>(if_payload, 1)
+            val if_else: Block? = unsafe(capabilities: [ffi]):
+                rt_tuple_get<Block>(if_payload, 2)
+            out = self.bare_tuple_returned_literal_v1(if_then, params)
+            if val else_b = if_else:
+                val else_elems: [Expr] = self.bare_tuple_returned_literal_v1(else_b, params)
+                if else_elems.len() > out.len():
+                    out = else_elems
+            return out
+        match e_kind:
+            case ExprKind.TupleLit(items):
+                for raw_item in items:
+                    val item: Expr = raw_item
+                    out.push(item)
+            case ExprKind.Return(rv):
+                val rv_opt: Expr? = rv
+                if val rve = rv_opt:
+                    out = self.bare_tuple_literal_elements_v1(rve, params)
+            case _: ()
+        out
+
     me declared_callable_type(fn_decl: ParserFunction, owner_symbol: SymbolId?) -> HirType?:
-        # Generic callables keep the existing untyped-symbol behavior until
-        # monomorphization supplies a concrete signature.
+        # Generic callables keep the existing untyped-symbol behavior.
         if fn_decl.type_params.len() > 0:
-            return nil
+            return None
         # ParserImport/sibling registration is fail-soft: signature diagnostics
         # (untyped returns, param types unlowerable in the importer's
         # context) belong to the defining module's own pass. Register the
         # symbol untyped instead of erroring the importing module.
         if self.registering_import_symbols:
-            return nil
+            return None
 
+        # Pre-declaring a callable signature publishes its symbol type before bodies
+        # are lowered; written-`Any` diagnostics are emitted once when `lower_function`
+        # lowers the parameter and return annotations.
+        val saved_written_any_depth = self.written_any_unsafe_depth
+        self.written_any_unsafe_depth = saved_written_any_depth + 1
         var param_types: [HirType] = []
         val raw_params = fn_decl.params
         var first_raw_param = 0
@@ -222,7 +554,14 @@ impl HirLowering:
                         if receiver_param.name == "self" or receiver_param.name == "me":
                             first_raw_param = 1
             case None:
-                ()
+                if fn_decl.is_method and not fn_decl.is_static:
+                    if val primitive_self = self.current_method_self_type:
+                        if hir_primitive_owner_name(primitive_self.kind) != "":
+                            param_types.push(primitive_self)
+                            if raw_params.len() > 0:
+                                val receiver_param: Param = raw_params[0]
+                                if receiver_param.name == "self" or receiver_param.name == "me":
+                                    first_raw_param = 1
         while first_raw_param < raw_params.len():
             val raw_param: Param = raw_params[first_raw_param]
             # `Param.type_` is a DESUGARED optional paired with `has_type_`: an
@@ -236,8 +575,9 @@ impl HirLowering:
                 # Only publish the dynamic signature when the body proves an
                 # Any callback tail. Other undeclared signatures retain their
                 # existing inference path.
-                if self.dynamic_callback_function_type(fn_decl) == nil:
-                    return nil
+                if self.dynamic_callback_function_type(fn_decl).is_none():
+                    self.written_any_unsafe_depth = saved_written_any_depth
+                    return None
                 val callback_type = self.dynamic_callback_param_type(fn_decl, raw_param)
                 param_types.push(callback_type ?? HirType(kind: HirTypeKind.Any, span: raw_param.span))
             else:
@@ -247,7 +587,12 @@ impl HirLowering:
 
         val return_type = if fn_decl.has_return_type:
             val declared_return_type: Type = fn_decl.return_type
-            self.lower_type(declared_return_type)
+            var lowered_return = self.lower_type(declared_return_type)
+            if parser_type_kind_named_name(declared_return_type.kind) == "tuple":
+                val inferred_tuple = self.bare_tuple_return_elements_v1(fn_decl)
+                if inferred_tuple.len() > 0:
+                    lowered_return = HirType(kind: HirTypeKind.Tuple(inferred_tuple), span: fn_decl.span)
+            lowered_return
         else:
             self.infer_untyped_return_type(fn_decl)
         val callable_type = HirType(
@@ -269,18 +614,21 @@ impl HirLowering:
         # hir_cache_encode_segv_some_box_in_symbol_type_2026-08-23).
         # The sibling `declared_surface_callable_type` below already returns the
         # bare value from its `-> HirType?` tail; match it.
+        self.written_any_unsafe_depth = saved_written_any_depth
         callable_type
 
     me declared_surface_callable_type(callable: ModuleSurfaceCallable, owner_symbol: SymbolId?) -> HirType?:
         if callable.type_params.len() > 0:
-            return nil
+            return None
         # A bodyless extern with no arrow has a complete Unit return contract;
         # retaining its callable type is required for imported alias authority.
         # Ordinary untyped functions keep the existing inference path.
         if not callable.has_return_type and not callable.is_extern:
-            return nil
+            return None
         if self.registering_import_symbols:
-            return nil
+            return None
+        val saved_written_any_depth = self.written_any_unsafe_depth
+        self.written_any_unsafe_depth = saved_written_any_depth + 1
         var param_types: [HirType] = []
         var param_idx = 0
         match owner_symbol:
@@ -295,13 +643,15 @@ impl HirLowering:
                 ()
         while param_idx < callable.params.len():
             if not callable.params[param_idx].has_type_:
-                return nil
+                self.written_any_unsafe_depth = saved_written_any_depth
+                return None
             param_types = param_types.push(self.lower_type(callable.params[param_idx].type_))
             param_idx = param_idx + 1
         val return_type = if callable.has_return_type:
             self.lower_type(callable.return_type)
         else:
             HirType(kind: HirTypeKind.Unit, span: callable.span)
+        self.written_any_unsafe_depth = saved_written_any_depth
         HirType(
             kind: HirTypeKind.Function(
                 param_types,
@@ -583,6 +933,12 @@ impl HirLowering:
             val tp: ParserTypeParam = raw_tp
             var bounds: [HirType] = []
             for bound in tp.bounds:
+                # Same erasure as the local lower_type_param: a bare builtin
+                # trait bound (`where K: Eq + Ord`) the owner never declares
+                # has no HIR symbol; lowering it as a type hard-errored
+                # `unresolved type: Eq` in every importer (s2e Stage 2).
+                if self.imported_owner_bound_is_erased_builtin(bound, imported_module_name):
+                    continue
                 bounds = bounds.push(self.imported_surface_type(bound, imported_module_name))
             val default_ = if tp.has_default:
                 self.imported_surface_type(tp.default, imported_module_name)
@@ -602,13 +958,68 @@ impl HirLowering:
                 span: parameter.span)
         parameters
 
+    me imported_owner_bound_is_erased_builtin(bound: Type, imported_module_name: text) -> bool:
+        # "" for a non-Named bound, which never matches the builtin set.
+        val name = parser_type_kind_named_name(bound.kind)
+        if name == "":
+            return false
+        hir_imported_bound_erases_builtin_v1(name, parser_type_kind_named_args(bound.kind).len(),
+            self.qtype_raw_counted(imported_module_name, name) >= 0)
+
     me declared_imported_surface_callable_type(callable: ModuleSurfaceCallable, imported_module_name: text, owner_symbol: SymbolId?) -> HirType?:
+        # An imported generic callable (`fn array_sort_by<T>(arr: [T], ..)
+        # -> [T]`) used to register UNTYPED, so its call result carried no
+        # HIR type at all: `sorted.len()` failed as "unresolved method call"
+        # and `for x in sorted` as a non-array iterable. Its own binders are
+        # scoped to the signature exactly like an owner's: project them in a
+        # temporary scope so `T` lowers as TypeParam (the erased tagged-word
+        # ABI the callers decode), and publish the declared shape
+        # (generics = one erased body, 2026-11-01).
         if callable.type_params.len() > 0:
-            return nil
+            # Keep the owner's binders (a generic method of a generic owner
+            # arrives inside declared_imported_owner_callable_type's scope);
+            # the callable's own binders are only added on top of them.
+            val saved_parameters = self.prescan_type_parameters
+            self.symbols.push_scope(ScopeKind.Class)
+            self.project_imported_owner_type_parameters(callable.type_params, imported_module_name)
+            val generic_callable_type = self.declared_imported_surface_callable_type_inner(
+                callable, imported_module_name, owner_symbol)
+            self.symbols.pop_scope()
+            self.prescan_type_parameters = saved_parameters
+            return generic_callable_type
+        self.declared_imported_surface_callable_type_inner(callable, imported_module_name, owner_symbol)
+
+    me declared_imported_param_types_v1(callable: ModuleSurfaceCallable, imported_module_name: text, owner_symbol: SymbolId?) -> [HirType]?:
+        # Parameters are declaration evidence, independently of inferred return.
+        # Uninstantiated generic signatures remain unknown, not erased guesses.
+        if callable.type_params.len() > 0:
+            return None
+        val errors_before = self.errors.len()
+        var params: [HirType] = []
+        var index = 0
+        if val owner = owner_symbol:
+            if not callable.is_static:
+                params.push(HirType(kind: HirTypeKind.Named(owner, []), span: callable.span))
+                if callable.params.len() > 0:
+                    val receiver = callable.params[0]
+                    if receiver.name == "self" or receiver.name == "me":
+                        index = 1
+        while index < callable.params.len():
+            val param: ModuleSurfaceParam = callable.params[index]
+            if not param.has_type_:
+                return None
+            params.push(self.imported_surface_type_projected(
+                param.type_, param.type_name, param.array_element_name, imported_module_name))
+            index = index + 1
+        if self.errors.len() != errors_before:
+            return None
+        Some(params)
+
+    me declared_imported_surface_callable_type_inner(callable: ModuleSurfaceCallable, imported_module_name: text, owner_symbol: SymbolId?) -> HirType?:
         # A bodyless extern with no arrow has a complete Unit return contract;
         # retaining its callable type is required for imported alias authority.
         if not callable.has_return_type and not callable.is_extern:
-            return nil
+            return None
         var param_types: [HirType] = []
         var param_idx = 0
         if val owner_id = owner_symbol:
@@ -620,7 +1031,7 @@ impl HirLowering:
                         param_idx = 1
         while param_idx < callable.params.len():
             if not callable.params[param_idx].has_type_:
-                return nil
+                return None
             val param: ModuleSurfaceParam = callable.params[param_idx]
             param_types = param_types.push(self.imported_surface_type_projected(
                 param.type_, param.type_name, param.array_element_name, imported_module_name))
@@ -642,7 +1053,7 @@ impl HirLowering:
 
     me imported_surface_projected_name_type(shape: text, type_name: text, imported_module_name: text, span: Span) -> HirType?:
         if shape != "named" and shape != "named_array":
-            return nil
+            return None
         val raw_symbol_id = self.symbols.lookup_qualified_type_raw(
             imported_module_name, type_name)
         var element: HirType = HirType(kind: HirTypeKind.Error, span: span)
@@ -661,14 +1072,14 @@ impl HirLowering:
 
     me dynamic_callback_tail_type(fn_decl: ParserFunction) -> HirType?:
         if fn_decl.has_return_type:
-            return nil
-        if self.dynamic_callback_function_type(fn_decl) != nil:
+            return None
+        if self.dynamic_callback_function_type(fn_decl).is_some():
             return HirType(kind: HirTypeKind.Any, span: fn_decl.span)
-        nil
+        None
 
     me dynamic_callback_param_type(fn_decl: ParserFunction, param: Param) -> HirType?:
         if param.has_type_ or param.has_default:
-            return nil
+            return None
         if val callback_type = self.dynamic_callback_function_type(fn_decl):
             if val tail_expr = hir_ast_expr_statement_payload_v1(fn_decl.body.stmts[0].kind):
                 match tail_expr.kind:
@@ -678,25 +1089,29 @@ impl HirLowering:
                                 if name == param.name: return callback_type
                             case _: ()
                     case _: ()
-        nil
+        None
 
     me dynamic_callback_function_type(fn_decl: ParserFunction) -> HirType?:
         # A default-Any parameter used as a callee has a dynamic Any result.
         # Do not guess the result of named/typed callees, or override explicit
         # returns with a tail-only decision.
         if self.ambient_bootstrap_enabled() or fn_decl.body.stmts.len() != 1:
-            return nil
+            return None
         for raw_param in fn_decl.params:
             val param: Param = raw_param
             if not param.has_type_ and param.has_default:
-                return nil
+                return None
         if fn_decl.has_return_type:
-            if self.lower_type(fn_decl.return_type).kind == HirTypeKind.Unit:
-                return nil
+            val saved_written_any_depth = self.written_any_unsafe_depth
+            self.written_any_unsafe_depth = saved_written_any_depth + 1
+            val ret_is_unit = self.lower_type(fn_decl.return_type).kind == HirTypeKind.Unit
+            self.written_any_unsafe_depth = saved_written_any_depth
+            if ret_is_unit:
+                return None
         val fn_params: [Param] = fn_decl.params
         val scan: ReturnScan = self.scan_ast_block_for_returns(fn_decl.body, fn_params)
         if scan.found_value_return:
-            return nil
+            return None
         # Cycle-150: bind-free tail reads. The `val tail: Stmt = stmts[len-1]`
         # array-index bind of a large composite drew corrupted (the
         # cycle-116/148 class), and rt_enum_discriminant on the corrupt
@@ -706,7 +1121,7 @@ impl HirLowering:
         # the Stmt is never named.
         val fn_body_stmts: [Stmt] = fn_decl.body.stmts
         if fn_body_stmts.len() == 0:
-            return nil
+            return None
         val tail_index: i64 = fn_body_stmts.len() - 1
         if val tail_expr = hir_ast_expr_statement_payload_v1(fn_body_stmts[tail_index].kind):
             match tail_expr.kind:
@@ -720,12 +1135,12 @@ impl HirLowering:
                                     var argument_types: [HirType] = []
                                     for raw_arg in args:
                                         val arg: CallArg = raw_arg
-                                        if arg.has_name: return nil
+                                        if arg.has_name: return None
                                         argument_types = argument_types.push(HirType(kind: HirTypeKind.Any, span: arg.span))
                                     return HirType(kind: HirTypeKind.Function(argument_types, HirType(kind: HirTypeKind.Any, span: fn_body_stmts[tail_index].span), []), span: fn_body_stmts[tail_index].span)
                         case _: ()
                 case _: ()
-        nil
+        None
 
     me infer_simple_type_name_ast(e: Expr, params: [Param]) -> text?:
         match e.kind:
@@ -741,13 +1156,13 @@ impl HirLowering:
                 Some("bool")
             case ExprKind.Ident(name):
                 var i = 0
-                var found: HirType? = nil
+                var found: HirType? = None
                 while i < params.len():
                     val param: Param = params[i]
                     if param.name == name:
                         found = self.lower_type(param.type_)
                     i = i + 1
-                var found_name: text? = nil
+                var found_name: text? = None
                 if val found_t = found:
                     found_name = hir_type_simple_name(found_t)
                 found_name
@@ -758,21 +1173,21 @@ impl HirLowering:
                     case UnaryOp.Neg:
                         self.infer_simple_type_name_ast(operand, params)
                     case _:
-                        nil
+                        None
             case ExprKind.Binary(op, left, right):
                 if ast_binop_is_comparison(op):
                     Some("bool")
                 elif ast_binop_is_arith(op):
                     val lt = self.infer_simple_type_name_ast(left, params)
                     val rt = self.infer_simple_type_name_ast(right, params)
-                    var arith_name: text? = nil
+                    var arith_name: text? = None
                     if val lt_v = lt:
                         if val rt_v = rt:
                             if lt_v == rt_v and hir_simple_type_name_is_known(lt_v):
                                 arith_name = lt
                     arith_name
                 else:
-                    nil
+                    None
             case ExprKind.Cast(_, target):
                 hir_type_simple_name(self.lower_type(target))
             case _:
@@ -784,7 +1199,7 @@ impl HirLowering:
                 # which `merge_return_scan` turns into `ambiguous`, which
                 # `infer_untyped_return_type` turns into the fatal route-(b)
                 # error instead of a silently-wrong return type.
-                nil
+                None
 
     me scan_ast_block_for_returns(b: Block, params: [Param]) -> ReturnScan:
         var acc = return_scan_empty()
@@ -874,6 +1289,7 @@ impl HirLowering:
     # exactly as broken as it already was before this change (the
     # pre-existing Unit-return default is unchanged), so it cannot regress a
     # working case.
+    @representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in scan_ast_expr_for_returns", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
     me scan_ast_expr_for_returns(e: Expr, params: [Param]) -> ReturnScan:
         # The signature-declaration pass runs before expression lowering and
         # must not turn a parser's absent expression payload into a native
@@ -901,7 +1317,7 @@ impl HirLowering:
             val if_then: Block = unsafe(capabilities: [ffi]):
                 rt_tuple_get<Block>(if_payload, 1)
             val if_else: Block? = unsafe(capabilities: [ffi]):
-                rt_tuple_get<Block?>(if_payload, 2)
+                rt_tuple_get<Block>(if_payload, 2)
             val cond_scan: ReturnScan = self.scan_ast_expr_for_returns(if_cond, params)
             val then_scan: ReturnScan = self.scan_ast_block_for_returns(if_then, params)
             val if_merge: ReturnScan = merge_return_scan(cond_scan, then_scan)
@@ -1139,3 +1555,13 @@ impl HirLowering:
                 return_scan_empty()
             case _:
                 return_scan_empty()
+
+# A bound erases only for a builtin trait spelling (the set the local
+# where-bound lowering erases), without type arguments, that the declaring
+# owner module does not itself declare or import.
+pub fn hir_imported_bound_erases_builtin_v1(name: text, arg_count: i64, owner_declares: bool) -> bool:
+    if arg_count != 0 or owner_declares:
+        return false
+    match name:
+        case "Clone" | "Copy" | "Debug" | "Default" | "Drop" | "Eq" | "Ord": true
+        case _: false

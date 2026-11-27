@@ -1,8 +1,12 @@
+#if defined(__linux__) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE
+#endif
 /*
  * Fork-without-exec implementation for test runner isolation.
  *
  * Key design decisions:
- * - Uses pipe() + fork() + dup2() for stdio capture
+ * - Linux capture pipes are atomically CLOEXEC; captured exec children close
+ *   unrelated descriptors promptly. Raw legacy children keep their FD policy.
  * - poll() multiplexes reads from stdout/stderr pipes (avoids deadlock)
  * - Fixed-size head/tail buffers for bounded test output
  * - _exit() in child to avoid atexit handlers and double-flush
@@ -21,6 +25,13 @@
 int64_t rt_fork_child_setup(void) {
     return -1; /* Not supported on Windows */
 }
+int simple_process_launch_admission_check_v1(int64_t expiry) { (void)expiry; return -1; }
+int64_t simple_fork_child_setup_admitted_v1(int64_t expiry) { (void)expiry; return -3; }
+int64_t simple_fork_child_setup_capture_v1(int64_t expiry, int status_fd) { (void)expiry; (void)status_fd; return -1; }
+int64_t simple_fork_child_setup_capture_v2(int64_t expiry, int status_pipe[2]) { (void)expiry; (void)status_pipe; return -1; }
+int simple_fork_capture_pipe_v1(int fds[2]) { (void)fds; return -1; }
+int64_t simple_fork_parent_capture_flags_v1(void) { return 8; }
+void simple_fork_parent_capture_release_v1(void) {}
 
 int64_t rt_fork_parent_wait_bounded(int64_t child_pid, int64_t timeout_ms,
                                     uint64_t max_output_bytes) {
@@ -51,10 +62,20 @@ void rt_fork_child_exit(int64_t exit_code) {
     exit((int)exit_code);
 }
 
+int64_t rt_fork_shared_heap_v1(void) {
+    return -3; /* EXPERIMENTAL MIR fork workers: no fork on Windows */
+}
+
+int64_t rt_fork_shared_heap_wait_v1(int64_t child_pid) {
+    (void)child_pid;
+    return -1;
+}
+
 #else /* POSIX */
 
 #include "runtime_fork.h"
 #include "runtime_memtrack.h"
+#include "runtime_process_tree.h"
 
 #include <stdio.h>
 #include <unistd.h>
@@ -68,18 +89,9 @@ void rt_fork_child_exit(int64_t exit_code) {
 #include <fcntl.h>
 #include <time.h>
 
-/* Per-fork pipe state (stored by parent after fork) */
-static int s_stdout_read_fd = -1;
-static int s_stderr_read_fd = -1;
-
-/* Stored results from last rt_fork_parent_wait() */
-static char* s_result_stdout = NULL;
-static char* s_result_stderr = NULL;
-static uint64_t s_result_stdout_length = 0;
-static uint64_t s_result_stderr_length = 0;
-static bool s_result_timed_out = false;
-static bool s_result_signaled = false;
-static struct rusage s_result_rusage;
+#include "runtime_fork_capture_fd_private.h"
+#include "runtime_fork_capture_context_private.h"
+#include "runtime_capture_splice_private.h"
 
 /* Each stream retains at most 4 MiB of child output, split head/tail. */
 #define FORK_CAPTURE_LIMIT (4U * 1024U * 1024U)
@@ -103,45 +115,13 @@ static void drain_capture_fds(int stdout_fd, ForkCapture* stdout_capture,
                               int stderr_fd, ForkCapture* stderr_capture,
                               int* stdout_eof, int* stderr_eof);
 
-static void reverse_bytes(char* data, size_t len) {
-    for (size_t left = 0, right = len ? len - 1 : 0; left < right; left++, right--) {
-        char tmp = data[left];
-        data[left] = data[right];
-        data[right] = tmp;
-    }
-}
-
 static void capture_append(ForkCapture* capture, const char* bytes, size_t len) {
     if (UINT64_MAX - capture->total < len) capture->total = UINT64_MAX;
     else capture->total += (uint64_t)len;
 
-    size_t head_add = capture->head_limit - capture->head_len;
-    if (head_add > len) head_add = len;
-    memcpy(capture->data + capture->head_len, bytes, head_add);
-    capture->head_len += head_add;
-    bytes += head_add;
-    len -= head_add;
-    if (len == 0) return;
-
-    if (capture->tail_limit == 0) return;
-    char* tail = capture->data + capture->head_limit;
-    if (len >= capture->tail_limit) {
-        memcpy(tail, bytes + len - capture->tail_limit, capture->tail_limit);
-        capture->tail_start = 0;
-        capture->tail_len = capture->tail_limit;
-        return;
-    }
-
-    size_t overflow = capture->tail_len + len > capture->tail_limit
-        ? capture->tail_len + len - capture->tail_limit : 0;
-    capture->tail_start = (capture->tail_start + overflow) % capture->tail_limit;
-    capture->tail_len -= overflow;
-    size_t write_at = (capture->tail_start + capture->tail_len) % capture->tail_limit;
-    size_t first = capture->tail_limit - write_at;
-    if (first > len) first = len;
-    memcpy(tail + write_at, bytes, first);
-    memcpy(tail, bytes + first, len - first);
-    capture->tail_len += len;
+    rt_capture_ring_append(capture->data, &capture->head_len, capture->head_limit,
+                           capture->data + capture->head_limit, capture->tail_limit,
+                           &capture->tail_start, &capture->tail_len, bytes, len);
 }
 
 /* Append an explicit "this capture is incomplete" marker.
@@ -173,25 +153,14 @@ static size_t capture_finish(ForkCapture* capture) {
     }
     char* tail = capture->data + capture->head_limit;
     if (capture->tail_start != 0 && capture->tail_len != 0) {
-        reverse_bytes(tail, capture->tail_start);
-        reverse_bytes(tail + capture->tail_start, capture->tail_len - capture->tail_start);
-        reverse_bytes(tail, capture->tail_len);
+        rt_capture_reverse_bytes(tail, capture->tail_start);
+        rt_capture_reverse_bytes(tail + capture->tail_start, capture->tail_len - capture->tail_start);
+        rt_capture_reverse_bytes(tail, capture->tail_len);
         capture->tail_start = 0;
     }
 
-    size_t marker_len = 0;
-    if (capture->total > capture->head_len + capture->tail_len) {
-        char marker[FORK_CAPTURE_MARKER_MAX];
-        uint64_t omitted = capture->total - capture->head_len - capture->tail_len;
-        int written = snprintf(marker, sizeof(marker), "\n[output truncated: %llu bytes omitted]\n",
-                               (unsigned long long)omitted);
-        if (written > 0) marker_len = (size_t)written;
-        memmove(capture->data + capture->head_len + marker_len, tail, capture->tail_len);
-        memcpy(capture->data + capture->head_len, marker, marker_len);
-    } else {
-        memmove(capture->data + capture->head_len, tail, capture->tail_len);
-    }
-    size_t result_len = capture->head_len + marker_len + capture->tail_len;
+    size_t result_len = rt_capture_splice_tail(capture->data, capture->head_len, tail,
+                                               capture->tail_len, capture->total);
     capture->data[result_len] = '\0';
     return result_len;
 }
@@ -205,10 +174,7 @@ static void set_nonblocking(int fd) {
 
 /* Free previous results */
 static void free_results(void) {
-    if (s_result_stdout) { SPL_FREE(s_result_stdout); s_result_stdout = NULL; }
-    if (s_result_stderr) { SPL_FREE(s_result_stderr); s_result_stderr = NULL; }
-    s_result_stdout_length = 0;
-    s_result_stderr_length = 0;
+    fork_capture_clear_output_v1(fork_capture_current_v1);
 }
 
 static pid_t wait4_nointr(pid_t pid, int* status, int options) {
@@ -216,34 +182,64 @@ static pid_t wait4_nointr(pid_t pid, int* status, int options) {
     do {
         waited = wait4(pid, status, options, &s_result_rusage);
     } while (waited < 0 && errno == EINTR);
+    if (waited == pid || (waited < 0 && errno == ECHILD)) fork_capture_current_v1->active_child = 0;
     return waited;
 }
 
-int64_t rt_fork_child_setup(void) {
-    int stdout_pipe[2]; /* [0]=read, [1]=write */
-    int stderr_pipe[2];
+int simple_process_launch_admission_check_v1(int64_t expires_at_unix_ms) {
+    struct timespec now;
+    if (expires_at_unix_ms <= 0 || clock_gettime(CLOCK_REALTIME, &now) != 0 ||
+            now.tv_sec < 0 || (uint64_t)now.tv_sec > (uint64_t)INT64_MAX / 1000U ||
+            now.tv_nsec < 0 || now.tv_nsec >= 1000000000L) return -1;
+    if ((uint64_t)now.tv_sec > ((uint64_t)INT64_MAX - (uint64_t)(now.tv_nsec / 1000000)) / 1000U) return -1;
+    int64_t milliseconds = (int64_t)now.tv_sec * 1000 + now.tv_nsec / 1000000;
+    return milliseconds >= expires_at_unix_ms ? 1 : 0;
+}
 
-    if (pipe(stdout_pipe) < 0) {
-        return -1;
+static int64_t fork_child_setup_admission_v1(int64_t expires_at_unix_ms, int captured_status_fd,
+        int owned_status_pipe[2]) {
+    ForkCaptureContextV1* context = fork_capture_context_v1();
+    if (!context || context->active_child > 0 || context->stdout_read_fd >= 0 ||
+            context->stderr_read_fd >= 0) return -1;
+    int stdout_pipe[2] = {-1, -1}; /* [0]=read, [1]=write */
+    int stderr_pipe[2] = {-1, -1};
+    /* Avoid holding writer-inheritance coordination while flushing stdio. */
+    fflush(stdout); fflush(stderr);
+    int cancellation_state;
+    if (capture_setup_acquire_v1(&cancellation_state) != 0) return -1;
+    int64_t failure = -1;
+    if (owned_status_pipe) {
+        if (simple_fork_capture_pipe_v1(owned_status_pipe) != 0 ||
+                fcntl(owned_status_pipe[0], F_SETFL, O_NONBLOCK) < 0) goto setup_failed;
+        captured_status_fd = owned_status_pipe[1];
     }
-    if (pipe(stderr_pipe) < 0) {
-        close(stdout_pipe[0]);
-        close(stdout_pipe[1]);
-        return -1;
+    int captured = captured_status_fd >= 3;
+#if defined(__linux__)
+    if (simple_fork_capture_pipe_v1(stdout_pipe) < 0) {
+#else
+    if ((captured ? simple_fork_capture_pipe_v1(stdout_pipe) : pipe(stdout_pipe)) < 0) {
+#endif
+        goto setup_failed;
+    }
+#if defined(__linux__)
+    if (simple_fork_capture_pipe_v1(stderr_pipe) < 0) {
+#else
+    if ((captured ? simple_fork_capture_pipe_v1(stderr_pipe) : pipe(stderr_pipe)) < 0) {
+#endif
+        goto setup_failed;
     }
 
-    /* Flush parent stdio before fork to avoid double-output */
-    fflush(stdout);
-    fflush(stderr);
-
+    if (expires_at_unix_ms > 0) {
+        int admitted = simple_process_launch_admission_check_v1(expires_at_unix_ms);
+        if (admitted != 0) {
+            failure = admitted > 0 ? -2 : -3;
+            goto setup_failed;
+        }
+    }
     pid_t pid = fork();
     if (pid < 0) {
         /* Fork failed */
-        close(stdout_pipe[0]);
-        close(stdout_pipe[1]);
-        close(stderr_pipe[0]);
-        close(stderr_pipe[1]);
-        return -1;
+        goto setup_failed;
     }
 
     if (pid == 0) {
@@ -257,18 +253,23 @@ int64_t rt_fork_child_setup(void) {
         close(stderr_pipe[0]);
 
         /* Redirect stdout/stderr to pipe write ends */
-        dup2(stdout_pipe[1], STDOUT_FILENO);
-        dup2(stderr_pipe[1], STDERR_FILENO);
+        if (dup2(stdout_pipe[1], STDOUT_FILENO) < 0 || dup2(stderr_pipe[1], STDERR_FILENO) < 0) {
+            if (captured) capture_child_descriptor_reject_v1(captured_status_fd);
+            _exit(126);
+        }
 
         /* Close original write ends (now duped to fd 1/2) */
         close(stdout_pipe[1]);
         close(stderr_pipe[1]);
+        if (captured) capture_child_descriptors_v1(captured_status_fd);
 
         /* Reset signal handlers to default (avoid inheriting parent's handlers) */
         signal(SIGINT, SIG_DFL);
         signal(SIGTERM, SIG_DFL);
         signal(SIGPIPE, SIG_DFL);
-
+        /* Child owns a private mutex copy. Unlock before any raw child can
+         * recursively capture; cancellation state never crosses into wait. */
+        capture_setup_release_v1(cancellation_state);
         return 0; /* Child returns 0 */
     }
 
@@ -280,19 +281,55 @@ int64_t rt_fork_child_setup(void) {
     /* Close write ends (child uses these) */
     close(stdout_pipe[1]);
     close(stderr_pipe[1]);
+    if (owned_status_pipe) {
+        close(owned_status_pipe[1]); owned_status_pipe[1] = -1;
+    }
 
     /* Store read ends for rt_fork_parent_wait */
     s_stdout_read_fd = stdout_pipe[0];
     s_stderr_read_fd = stderr_pipe[0];
-
+    context->active_child = pid;
+    capture_setup_release_v1(cancellation_state);
     return (int64_t)pid;
+
+setup_failed:
+    if (stdout_pipe[0] >= 0) close(stdout_pipe[0]);
+    if (stdout_pipe[1] >= 0) close(stdout_pipe[1]);
+    if (stderr_pipe[0] >= 0) close(stderr_pipe[0]);
+    if (stderr_pipe[1] >= 0) close(stderr_pipe[1]);
+    if (owned_status_pipe) {
+        if (owned_status_pipe[0] >= 0) close(owned_status_pipe[0]);
+        if (owned_status_pipe[1] >= 0) close(owned_status_pipe[1]);
+        owned_status_pipe[0] = owned_status_pipe[1] = -1;
+    }
+    capture_setup_release_v1(cancellation_state);
+    return failure;
+}
+
+int64_t rt_fork_child_setup(void) { return fork_child_setup_admission_v1(0, -1, NULL); }
+int64_t simple_fork_child_setup_admitted_v1(int64_t expiry) {
+    if (expiry <= 0) return -3;
+    return fork_child_setup_admission_v1(expiry, -1, NULL);
+}
+int64_t simple_fork_child_setup_capture_v1(int64_t expiry, int status_fd) {
+    if (expiry < 0 || status_fd < 3) return -1;
+    int flags = fcntl(status_fd, F_GETFD);
+    if (flags < 0 || (flags & FD_CLOEXEC) == 0) return -1;
+    return fork_child_setup_admission_v1(expiry, status_fd, NULL);
+}
+int64_t simple_fork_child_setup_capture_v2(int64_t expiry, int status_pipe[2]) {
+    if (expiry < 0 || !status_pipe) return -1;
+    status_pipe[0] = status_pipe[1] = -1;
+    return fork_child_setup_admission_v1(expiry, -1, status_pipe);
 }
 
 static int64_t fork_parent_wait_mode(int64_t child_pid, int64_t timeout_ms,
                                      uint64_t max_output_bytes, int raw_prefix) {
     /* Reject invalid pids: kill(-1)/waitpid(-1) would signal/reap every
      * process the user owns (e.g. when a failed fork's -1 is passed in). */
-    if (child_pid <= 0) {
+    ForkCaptureContextV1* context = fork_capture_current_v1;
+    if (child_pid <= 0 || !context || context->active_child != child_pid ||
+            context->stdout_read_fd < 0 || context->stderr_read_fd < 0) {
         return -1;
     }
     if (max_output_bytes > SIZE_MAX - 2U * FORK_CAPTURE_MARKER_MAX - 1U) return -1;
@@ -301,12 +338,11 @@ static int64_t fork_parent_wait_mode(int64_t child_pid, int64_t timeout_ms,
     free_results();
     s_result_timed_out = false;
     s_result_signaled = false;
+    s_result_capture_flags_v1 = 8;
     memset(&s_result_rusage, 0, sizeof(s_result_rusage));
 
     int stdout_fd = s_stdout_read_fd;
     int stderr_fd = s_stderr_read_fd;
-    s_stdout_read_fd = -1;
-    s_stderr_read_fd = -1;
 
     size_t capture_limit = (size_t)max_output_bytes;
     /* Allocate bounded captures, plus marker and terminator space. */
@@ -322,8 +358,12 @@ static int64_t fork_parent_wait_mode(int64_t child_pid, int64_t timeout_ms,
         (void)wait4_nointr((pid_t)child_pid, &status, 0);
         close(stdout_fd);
         close(stderr_fd);
+        s_stdout_read_fd = s_stderr_read_fd = -1;
         return -1;
     }
+    /* Preserve ownership for thread-exit/cancellation cleanup during poll. */
+    s_result_stdout = out_buf;
+    s_result_stderr = err_buf;
     size_t head_limit = raw_prefix ? capture_limit : capture_limit / 2U + capture_limit % 2U;
     size_t tail_limit = raw_prefix ? 0 : capture_limit / 2U;
     ForkCapture out_capture = {out_buf, 0, 0, 0, 0, head_limit, tail_limit, raw_prefix};
@@ -493,6 +533,7 @@ static int64_t fork_parent_wait_mode(int64_t child_pid, int64_t timeout_ms,
 
     close(stdout_fd);
     close(stderr_fd);
+    s_stdout_read_fd = s_stderr_read_fd = -1;
 
     /* Why the capture stopped, if it stopped before real EOF. Reported into
      * the captured text itself so a truncated capture can never be mistaken
@@ -518,6 +559,10 @@ static int64_t fork_parent_wait_mode(int64_t child_pid, int64_t timeout_ms,
     s_result_stderr = err_buf;
     s_result_stdout_length = out_len;
     s_result_stderr_length = err_len;
+    s_result_capture_flags_v1 = (timed_out ? 1 : 0) |
+        (out_capture.total > capture_limit ? 2 : 0) |
+        (err_capture.total > capture_limit ? 4 : 0) |
+        ((wait_failed || cleanup_descendants || stdout_read_error || stderr_read_error) ? 8 : 0);
 
     /* Timeout/wait failure cleanup completed before the final pipe drain. */
     if (timed_out || wait_failed) {
@@ -530,6 +575,7 @@ static int64_t fork_parent_wait_mode(int64_t child_pid, int64_t timeout_ms,
     pid_t waited = child_exited ? (pid_t)child_pid : wait4_nointr((pid_t)child_pid, &status, 0);
 
     if (waited < 0) {
+        s_result_capture_flags_v1 |= 8;
         return -1;
     } else if (WIFEXITED(status)) {
         return (int64_t)WEXITSTATUS(status);
@@ -606,47 +652,86 @@ int64_t rt_fork_parent_wait(int64_t child_pid, int64_t timeout_ms) {
     return rt_fork_parent_wait_bounded(child_pid, timeout_ms, FORK_CAPTURE_LIMIT);
 }
 
-bool rt_fork_parent_timed_out(void) {
-    return s_result_timed_out;
-}
-
-bool rt_fork_parent_signaled(void) {
-    return s_result_signaled;
-}
-
-int64_t rt_fork_parent_user_cpu_micros(void) {
-    return (int64_t)s_result_rusage.ru_utime.tv_sec * 1000000LL +
-           (int64_t)s_result_rusage.ru_utime.tv_usec;
-}
-
-int64_t rt_fork_parent_system_cpu_micros(void) {
-    return (int64_t)s_result_rusage.ru_stime.tv_sec * 1000000LL +
-           (int64_t)s_result_rusage.ru_stime.tv_usec;
-}
-
-int64_t rt_fork_parent_peak_rss_bytes(void) {
-#if defined(__APPLE__)
-    return (int64_t)s_result_rusage.ru_maxrss;
-#else
-    return (int64_t)s_result_rusage.ru_maxrss * 1024LL;
-#endif
-}
-
-const char* rt_fork_parent_stdout(void) {
-    return s_result_stdout ? s_result_stdout : "";
-}
-
-const char* rt_fork_parent_stderr(void) {
-    return s_result_stderr ? s_result_stderr : "";
-}
-
-void simple_fork_parent_capture_lengths(uint64_t* stdout_bytes, uint64_t* stderr_bytes) {
-    *stdout_bytes = s_result_stdout_length;
-    *stderr_bytes = s_result_stderr_length;
-}
-
 void rt_fork_child_exit(int64_t exit_code) {
     _exit((int)exit_code);
+}
+
+/* EXPERIMENTAL (SIMPLE_MIR_FORK_WORKERS): fork WITHOUT stdio redirection, so
+ * several children can run at once and share the parent's post-mono heap
+ * copy-on-write. rt_fork_child_setup() cannot be used for that: it keeps ONE
+ * static pipe-read slot, so a second concurrent child's pipe is never drained
+ * and blocks once it fills. Fails closed instead of forking a multithreaded
+ * process (another thread may hold a mimalloc or stdio lock the child would
+ * then deadlock on). The child dies with the parent (PR_SET_PDEATHSIG), stays
+ * in the parent's process group, and must leave via rt_fork_child_exit().
+ *   >0 parent (child pid)   0 child
+ *   -1 fork failed   -2 more than one thread alive   -3 unsupported host
+ * Design: doc/05_design/compiler/perf/mir_fork_workers_cow_v1.md */
+#if defined(__linux__)
+#include <dirent.h>
+#include <sys/prctl.h>
+
+static int fork_shared_heap_thread_count(void) {
+    DIR* tasks = opendir("/proc/self/task");
+    if (!tasks) return -1;
+    int count = 0;
+    struct dirent* entry;
+    while ((entry = readdir(tasks)) != NULL) {
+        if (entry->d_name[0] != '.') count++;
+    }
+    closedir(tasks);
+    return count;
+}
+
+/* runtime_native.c; weak so a runtime_fork.c-only link still resolves. */
+extern void spl_immortal_registry_freeze_for_fork_child_v1(void) __attribute__((weak));
+
+int64_t rt_fork_shared_heap_v1(void) {
+    if (fork_shared_heap_thread_count() != 1) return -2;
+    fflush(NULL);
+    pid_t expected_parent = getpid();
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        /* Shared parent-death arm (runtime_process_tree.c); Linux here, so an
+         * unsupported answer is impossible and any failure is fatal. */
+        if (rt_child_set_pdeathsig(SIGKILL) != 0 || getppid() != expected_parent) {
+            _exit(127);
+        }
+        /* Keep the inherited heap registry read-only so the child neither
+         * privatizes nor regrows the parent's table. */
+        if (spl_immortal_registry_freeze_for_fork_child_v1) {
+            spl_immortal_registry_freeze_for_fork_child_v1();
+        }
+        return 0;
+    }
+    return (int64_t)pid;
+}
+#else
+int64_t rt_fork_shared_heap_v1(void) {
+    /* No portable single-thread proof or parent-death signal here. */
+    return -3;
+}
+#endif
+
+/* Blocking reap of a rt_fork_shared_heap_v1 child. rt_process_wait cannot be
+ * used: the Rust runtime lane's rt_process_wait only knows pids in its
+ * SPAWNED_CHILDREN registry and answers -1 at once for any other pid without
+ * calling waitpid, so a forked child was "reaped" while still running and then
+ * SIGKILLed by PR_SET_PDEATHSIG when the root exited (run-18, 2026-10-24).
+ *   >=0 exit status   -(128+signo) killed by a signal   -1 waitpid failed
+ * Bug: doc/08_tracking/bug/mir_fork_wait_returns_before_children_2026-10-24.md */
+int64_t rt_fork_shared_heap_wait_v1(int64_t child_pid) {
+    if (child_pid <= 0) return -1; /* waitpid(-1) would reap any child */
+    int status = 0;
+    pid_t waited;
+    do {
+        waited = waitpid((pid_t)child_pid, &status, 0);
+    } while (waited < 0 && errno == EINTR);
+    if (waited < 0) return -1;
+    if (WIFEXITED(status)) return (int64_t)WEXITSTATUS(status);
+    if (WIFSIGNALED(status)) return (int64_t)(-(128 + WTERMSIG(status)));
+    return -1;
 }
 
 #endif /* _WIN32 / POSIX */

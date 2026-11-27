@@ -1,0 +1,66 @@
+"""
+## Purpose and audience
+Purpose: Pin Filter Effects 2 Backdrop Root behaviour for production-style
+nested glass on the raster lane against Chrome 159: a gradient image layer
+over a translucent colour, `backdrop-filter: blur(24px) saturate(1.7)`, an
+outer `box-shadow` halo, text inside the glass, and an opaque button with a
+shadow inside the inner panel (the production window fixture's shape);
+the text and button cases are in
+backdrop_root_glass_raster_window_shape_content_chrome159_spec.spl.
+The Engine2D twin is backdrop_root_glass_gradient_saturate_chrome159_spec.spl.
+Audience: maintainers of the raster paint path.
+"""
+
+"""
+Traceability: doc/08_tracking/bug/web_layout_cascade_selector_paint_chrome159_round4_divergences_2026-11-15.md
+(2026-11-20: raster window-fixture glass still reads the whole frame).
+Chrome pixels: headless Chromium 1255 at 400x300, the same pages as the
+cpu_simd spec. Page #1e1e2e with a red bar (0,120 400x60). An outer panel
+(10,10 380x280, radius 20) holds an inner panel (20,50 340x200 in it, radius
+20); both paint `linear-gradient(rgba(255,255,255,0.08),rgba(255,255,255,0.024))`
+over a translucent colour. Probe points (x, y): inner over the bar (200,150),
+inner above the bar (200,80), outer only (200,35) and (200,275), outside the
+outer box on the bar (4,150, where only the halo paints).
+"""
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_software_pixels
+}
+
+val RW_FILTER = "backdrop-filter:blur(24px) saturate(1.7)"
+val RW_BLUR = "backdrop-filter:blur(24px)"
+val RW_HALO = "box-shadow:0 0 120px rgba(137,180,250,0.12)"
+val RW_WHITE = "rgba(255,255,255,0.72)"
+
+fn rw_html(outer_extra: text, outer_bg: text, inner_bg: text, inner_filter: text, outer_content: text, inner_content: text) -> text:
+    val grad = "linear-gradient(rgba(255,255,255,0.08),rgba(255,255,255,0.024))"
+    "<!DOCTYPE html><html><body style='margin:0;background:#1e1e2e'><div style='position:absolute;left:0;top:120px;width:400px;height:60px;background:#c03020'></div><div style='position:absolute;left:10px;top:10px;width:380px;height:280px;border-radius:20px;background:" + grad + "," + outer_bg + ";" + outer_extra + "'>" + outer_content + "<div style='position:absolute;left:20px;top:50px;width:340px;height:200px;border-radius:20px;background:" + grad + "," + inner_bg + ";" + inner_filter + "'>" + inner_content + "</div></div></body></html>"
+
+# Channel mismatches (beyond +-2) against `want`: x, y, r, g, b per point.
+fn rw_mismatches(px: [u32], want: [i32]) -> i32:
+    if px.len() < 400 * 300:
+        return -1
+    var bad = 0
+    var i = 0
+    while i < want.len():  # cpu-lane-loop-ok: spec probe points; bound want.len() / 5
+        val p = px[want[i + 1] * 400 + want[i]]
+        var c = 0
+        while c < 3:  # cpu-lane-loop-ok: RGB channels of one probe pixel; bound 3
+            val d = ((p >> ((16 - c * 8) as u32)) & 0xFFu32) as i32 - want[i + 2 + c]
+            if d > 2 or d < -2:
+                bad = bad + 1
+            c = c + 1
+        i = i + 5
+    bad
+
+fn rw_render(html: text) -> [u32]:
+    simple_web_layout_render_html_software_pixels(html, 400, 300, 600000)
+
+describe "backdrop root glass in the window shape on the raster lane (Chrome 159)":
+    it "a viewport-sized backdrop root group (outer halo) stays isolated":
+        val html = rw_html(RW_BLUR + ";" + RW_HALO, RW_WHITE, RW_WHITE, RW_BLUR, "", "")
+        expect(rw_mismatches(rw_render(html), [200, 150, 252, 250, 250, 200, 80, 252, 251, 252, 200, 35, 197, 197, 201, 200, 275, 194, 194, 198, 4, 150, 188, 55, 43])).to_equal(0)
+
+    it "saturate inside the backdrop root composites once":
+        val html = rw_html(RW_FILTER, RW_WHITE, RW_WHITE, RW_FILTER, "", "")
+        expect(rw_mismatches(rw_render(html), [200, 150, 253, 250, 249, 200, 80, 252, 251, 252, 200, 35, 197, 197, 203, 200, 275, 194, 194, 201, 4, 150, 192, 48, 32])).to_equal(0)

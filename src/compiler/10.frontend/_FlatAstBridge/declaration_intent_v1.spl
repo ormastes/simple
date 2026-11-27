@@ -1,0 +1,51 @@
+use compiler.frontend.declaration_intent_v1.{ParserDeclarationIntentV1}
+use compiler.core.ast.{decl_get_name, decl_get_tag}
+use compiler.core.parser.{parser_has_errors, parser_error}
+use compiler.frontend.core._ParserDecls.enum_module_body.{
+    parser_top_level_visibility_intent_count_v1,
+    parser_top_level_visibility_intent_offset_v1,
+    parser_top_level_visibility_intent_modifier_v1,
+    parser_top_level_visibility_intent_decl_id_v1,
+    parser_top_level_visibility_intent_bindings_valid_v1}
+
+pub fn flat_declaration_intents_v1() -> [ParserDeclarationIntentV1]:
+    if parser_has_errors(): return []
+    if not parser_top_level_visibility_intent_bindings_valid_v1():
+        parser_error("flat AST bridge: invalid source declaration visibility binding")
+        return []
+    var rows: [ParserDeclarationIntentV1] = []
+    var index = 0
+    while index < parser_top_level_visibility_intent_count_v1():
+        val source_id = parser_top_level_visibility_intent_decl_id_v1(index)
+        if source_id >= 0:
+            rows.push(ParserDeclarationIntentV1(
+                raw_decl_id: source_id,
+                source_start: parser_top_level_visibility_intent_offset_v1(index),
+                modifier: parser_top_level_visibility_intent_modifier_v1(index),
+                decl_kind: decl_get_tag(source_id),
+                decl_name: decl_get_name(source_id)))
+        index = index + 1
+    rows
+
+# Match IDs captured at the actual typed dictionary writes. A later synthetic
+# replacement records -1, so neither duplicate names nor generated nodes can
+# inherit the discarded source declaration's intent.
+pub fn flat_project_declaration_intents_v1(target_ids: Dict<text, i64>) -> [ParserDeclarationIntentV1]:
+    val observations = flat_declaration_intents_v1()
+    var keys_by_id: Dict<i64, text> = {}
+    for key in target_ids.keys():
+        val source_id = target_ids[key]
+        if source_id >= 0:
+            if keys_by_id.contains_key(source_id):
+                parser_error("flat AST bridge: source declaration has multiple typed targets")
+                return []
+            keys_by_id[source_id] = key
+    var projected: [ParserDeclarationIntentV1] = []
+    for observation in observations:
+        var row = observation
+        if keys_by_id.contains_key(row.raw_decl_id):
+            row.projection_key = keys_by_id[row.raw_decl_id]
+        projected.push(row)
+    projected
+
+export flat_declaration_intents_v1, flat_project_declaration_intents_v1

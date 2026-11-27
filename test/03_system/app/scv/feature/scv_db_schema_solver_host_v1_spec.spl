@@ -1,0 +1,110 @@
+# Shared host integration, not execution evidence or schema/row admission.
+use std.spec.*
+use std.scv.solver_contract_v1.*
+use std.scv.solver_db_adapters_v1.*
+use std.scv.db_schema_identity_v2.*
+use std.scv.db_schema_codec_v2.*
+use std.scv.db_schema_merge_v2.*
+use std.scv.db_schema_migration_v2.*
+use std.scv.db_patch.{DbValue, FieldEdit, db_patch_bytes, db_patch_digest}
+use std.scv.distributed_identity.{entity_ref_provisional}
+use test.fixtures.scv.db_schema_v2_fixture.{exercise_scv_schema_add, exercise_scv_schema_change, setup_scv_schema_uid, setup_scv_legacy_patch}
+use test.fixtures.scv.solver_host_v1_fixture.{setup_scv_policy}
+use test.fixtures.scv.solver_db_schema_host_v1_fixture.*
+
+describe "Real schema solver through the shared host":
+    it "combines independent columns then preserves the original UID for an old-schema update after rename":
+        step("setup")
+        val base = setup_scv_fixture()
+        val legacy = setup_scv_legacy_patch("old-v1-schema")
+        val original_patch = db_patch_bytes(legacy).unwrap()
+        val original_digest = db_patch_digest(legacy).unwrap()
+        val historical_binding = DbV1SchemaBindingV2(v1_schema_revision: legacy.schema_revision, original_schema_revision: base.revision, binding_digest: db_schema_v1_binding_digest_v2(legacy.schema_revision, base).unwrap())
+        val left = exercise_scv_schema_add(base, 2u64, "labels", false, DbDefaultRuleV2.NoDefault)
+        val right = exercise_scv_schema_add(base, 2u64, "priority", true, DbDefaultRuleV2.Constant(DbValue.Text("normal")))
+        step("capture")
+        val request = freeze_scv_candidate(base, left, right)
+        val policy = setup_scv_policy(request.binding)
+        step("exercise")
+        val solved = exercise_scv_operation(request, policy, base, left, right)
+        val candidate = solved.proposal.unwrap().candidate.unwrap()
+        val title_uid = base.columns[0].column_uid
+        val rename = exercise_scv_schema_change(candidate, title_uid, 20u64, DbSchemaChangeV2.RenameColumn(title_uid, "summary"))
+        val renamed = db_schema_apply_v2(candidate, rename).unwrap()
+        val row = entity_ref_provisional(setup_scv_schema_uid("task", 1u64, false))
+        val edit = db_schema_adapt_v1_edit_v2(historical_binding, base, renamed, legacy, row, FieldEdit(field: "title", before: DbValue.Text("draft"), after: DbValue.Text("edited offline"))).unwrap()
+        step("evidence")
+        val evidence = collect_scv_evidence(solved)
+        step("assert")
+        expect(evidence.status).to_equal("needs_inputs")
+        expect(evidence.execution_status).to_equal("unqualified-builtin-execution")
+        expect(evidence.deterministic_result_key).to_equal("")
+        expect(candidate.columns.len()).to_equal(3)
+        expect(db_schema_uid_equal_v2(edit.address.column_uid, title_uid)).to_equal(true)
+        expect(renamed.columns[db_schema_column_index_v2(renamed, edit.address.column_uid)].name).to_equal("summary")
+        expect(db_cell_state_bytes_v2(edit.after).unwrap()).to_equal(db_cell_state_bytes_v2(DbCellStateV2.Value(DbValue.Text("edited offline"))).unwrap())
+        expect(db_patch_bytes(legacy).unwrap()).to_equal(original_patch)
+        expect(db_patch_digest(legacy).unwrap()).to_equal(original_digest)
+        expect(legacy.signature).to_equal([7u8, 8u8])
+        check_exact_subject(evidence, candidate)
+        check_byte_preservation(solved, base, left, right)
+        check_expected_conflicts(evidence, [])
+        check_cold_warm_equivalence(request, policy, base, left, right)
+
+    it "retains independently created same-name columns as schema conflicts":
+        step("setup")
+        val base = setup_scv_fixture()
+        val left = exercise_scv_schema_add(base, 2u64, "status", false, DbDefaultRuleV2.NoDefault)
+        val right = exercise_scv_schema_add(base, 2u64, "status", true, DbDefaultRuleV2.NoDefault)
+        val request = freeze_scv_candidate(base, left, right)
+        step("exercise")
+        val solved = exercise_scv_operation(request, setup_scv_policy(request.binding), base, left, right)
+        step("assert")
+        check_expected_conflicts(solved.result, ["SCVDB_SCHEMA_NAME_COLLISION"])
+        check_byte_preservation(solved, base, left, right)
+        expect(solved.proposal.unwrap().candidate).to_be_nil()
+        expect(solved.result.conflicts[0].domain).to_equal("db.schema")
+
+    it "refuses a raw source provider on a schema-bound object":
+        step("setup")
+        val base = setup_scv_fixture()
+        val request = freeze_scv_candidate(base, base, base)
+        var policy = setup_scv_policy(request.binding)
+        policy.solver.provider_id = "scv.solver.source-bytes.v1"
+        step("exercise")
+        val solved = exercise_scv_operation(request, policy, base, base, base)
+        step("assert")
+        expect(solved.result.status).to_equal("unsupported")
+        expect(solved.proposal).to_be_nil()
+        check_byte_preservation(solved, base, base, base)
+
+    it "rejects a valid different schema whose bytes disagree with the frozen model ID":
+        step("setup")
+        val base = setup_scv_fixture()
+        val request = freeze_scv_candidate(base, base, base)
+        val extra = exercise_scv_schema_add(base, 2u64, "surprise", true, DbDefaultRuleV2.NoDefault)
+        val solved = exercise_scv_operation(request, setup_scv_policy(request.binding), base, base, extra)
+        step("assert")
+        expect(solved.result.status).to_equal("failed")
+        expect(solved.result.deterministic_result_key).to_equal("")
+        expect(solved.proposal).to_be_nil()
+
+    it "bounds schema metadata and deep default values before encoding them":
+        step("setup")
+        val base = setup_scv_fixture()
+        var request = freeze_scv_candidate(base, base, base)
+        request.memory_budget = 1000000
+        val policy = setup_scv_policy(request.binding)
+        var huge = base
+        huge.table_name = "t".repeat(20000)
+        val metadata = exercise_scv_operation(request, policy, base, huge, base)
+        var nested = DbValue.Text("value")
+        for index in 0..40: nested = DbValue.List([nested])
+        var deep = base
+        deep.columns[0].default_rule = DbDefaultRuleV2.Constant(nested)
+        val nesting = exercise_scv_operation(request, policy, base, deep, base)
+        step("assert")
+        expect(metadata.result.status).to_equal("resource_limited")
+        expect(metadata.result.deterministic_result_key).to_equal("")
+        expect(nesting.result.status).to_equal("resource_limited")
+        expect(nesting.proposal).to_be_nil()

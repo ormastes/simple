@@ -4,8 +4,10 @@
 spec-to-SPipe extension, sidecar evidence loader, and docgen renderer wiring are
 landed. Runnable reference examples are under
 `test/03_system/tools/spipe/examples/`. The four 2026-08-08 red-team comparator
-findings are fixed and covered. Still open: live capture providers and the
-designed `sspec-maintain evidence` subcommands/profile-completeness surface.
+findings have source fixes and regression cases. Process/file capture providers
+and live in-process examples also exist; broader provider qualification and the
+designed `sspec-maintain evidence` subcommands/profile-completeness surface
+remain separate work. This source-status summary is not a fresh runtime PASS.
 See §8 for the exact boundary and §8a for the closed findings.
 **Design:** `doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md`
 **Plan:** `doc/03_plan/infra/sspec/modern_sspec_parallel_agents_plan.md`
@@ -22,6 +24,112 @@ Typed evidence separates the two. The scenario declares, as data: how the observ
 acquired, how it is parsed, which parts matter, what comparison semantics apply, and how
 the result is shown to a reader. The comparator then evaluates that declaration
 fail-closed, so a capture nobody actually checked cannot report PASS.
+
+## Specification sources to executed evidence
+
+Use this workflow when deriving tests from standards, PDFs, published vectors,
+or reference implementations. The same provenance rules apply to non-crypto
+protocols, file formats and application contracts.
+
+### Pin the source and write faithful Markdown
+
+Record the publisher, official URL, document identifier, revision/date, retrieval
+date, original filename/format and SHA-256. Keep printed page numbers distinct
+from PDF page indexes. Record the applicable license or redistribution limits;
+retain an authorized local original and extraction provenance. If no official
+PDF exists, pin the official TXT/HTML/reference source and say so. A print-to-PDF
+copy is a derived artifact, not an official PDF.
+
+Keep a historical PDF's version attached to its requirements. Check the current
+publisher revision and errata separately; record supersession or differences
+without silently rewriting the historical source. A hash pins bytes, not their
+currency, authority, or applicability to the chosen product version.
+
+Markdown should preserve clause meaning, algorithms, byte order, dimensions,
+units, equations and rejection conditions. Check extraction/OCR against the
+original around tables, formulas and vectors; mark uncertain text. Distinguish
+verbatim transcription from a structured summary. Where redistribution is not
+permitted, write a cited summary with section/page references and short allowed
+quotations, not a replacement copy of the document. Hash derived artifacts too.
+
+### Trace requirements into real tests
+
+Map each applicable clause to a stable `REQ-*` ID, production owner/public API,
+independent expected result, executable scenario and mirrored manual. Record
+unsupported features and version boundaries explicitly: an API framing rule or
+implementation restriction is not automatically a standard's universal rule.
+Inspect existing tests before adding cases; extend missing behaviors rather
+than duplicating already-covered vectors to increase a case count.
+
+Use published known answers or independently reasoned/produced expected values.
+Pin reference implementation/version and fixture hashes when it supplies the
+oracle; label such fixtures separately from standard-body vectors. Never derive
+the expected value from the same product call, capture, or implementation being
+checked. A reference-oracle PASS establishes the oracle exercise, not product
+execution or product PASS. Round trips alone cannot prove independent conformance.
+
+Write modern SSpec under `test/`: unit cases exercise owner boundaries and
+invalid inputs; integration cases exercise real callers, provider boundaries or
+streaming/persistence as applicable; system cases exercise the supported product
+flow. Call the actual production APIs and use real assertions with independent
+oracles. Keep `step("...")` readable, helpers implemented, and typed evidence
+fail-closed on missing fields, parse errors or unmatched selectors. Capturing
+bytes or a verdict without checking it is not acceptance evidence. A fixture
+or extracted-provider test must retain its narrower proof class.
+
+### Record RED, repair and GREEN separately
+
+For a defect, author the regression first, then execute it against the original
+owner and retain the observed behavioral RED. An unavailable runner, unresolved
+import or failed build is a blocker, not proof that the intended defect failed.
+Repair the production owner and run the same regression to an observed GREEN,
+with positive controls and relevant existing cases. Record source revision,
+producer/binary hashes, provider/library identity, backend/target, command,
+environment, actual scenario counts, exit status and artifact hashes for each run.
+
+| Evidence state | What may be claimed |
+|---|---|
+| `AUTHORED_UNRUN` | Test source/manual exists; scenario execution is absent. |
+| Source reviewed | Named revision and assertions reviewed; no runtime verdict implied. |
+| Build/provider fixture executed | Only the recorded build or isolated provider scope; not the complete product route. |
+| Actual owner/provider/backend executed | Recorded scenarios and assertions ran on the named owner/provider/backend; verdict applies only to that scope. |
+| Observed RED → fix → observed GREEN | Defect regression demonstrated before and after the repair on identified artifacts. |
+
+These are distinct claims, not interchangeable PASS labels. A source-reviewed
+fix with unexecuted tests remains TDD-incomplete. If the admitted runtime is
+missing, preserve `AUTHORED_UNRUN`/`TEST_BLOCKED`, state the exact blocker and
+remaining execution, and do not substitute bootstrap-seed evidence. A deliberate
+mutation or fault injection must be labeled with the altered component and
+expected failure. It tests oracle sensitivity; it is not the original defect's
+RED or additional production branch coverage unless separately measured as such.
+
+### Measure branches and generate the manual
+
+Report covered branch outcomes over total instrumented branch outcomes for
+each owner, provider, backend and target. Keep the instrumented source inventory,
+including zero-hit branches/files, and the coverage tool/version and artifacts.
+State whether a tool measures branches, decisions or conditions; line/function
+coverage and passing case counts cannot replace branch coverage. List exclusions
+with reasons without silently removing unreachable or unexecuted outcomes from
+the denominator. Do not combine a foreign/reference implementation's coverage
+with Simple owner coverage. An absent instrumented run is `UNMEASURED`, not 0%
+or 100%; a 99% target is met only by the stated measured numerator/denominator.
+
+Run admitted `spipe-docgen` for changed executable specs, require zero stubs,
+and review visible intent/steps plus folded executable source. Mirror
+`test/<path>_spec.spl` as `doc/06_spec/<path>_spec.md`; executable `.spl` specs
+never belong under `doc/06_spec`. Preserve spec and execution-artifact hashes
+and the run's proof class. Docgen success is a documentation result, not evidence
+that scenarios executed. Label a hand-authored companion as authored, not
+docgen-generated, and record its source hash separately from the actual test
+execution status and receipts. It may accompany executed tests with genuine run
+artifacts; use `AUTHORED_UNRUN` and mark execution artifacts absent only when
+execution is absent. Never invent generated provenance. Preserve historical run
+statuses and their runtime identities when refreshing prose.
+
+See the [scenario manual guide](sspec_scenario_manual.md),
+[native test workflow](testing/native_test_binary_workflow.md), and
+[coverage guide](testing/coverage.md) for the existing runner and rendering paths.
 
 ## 2. Pipeline and ownership
 
@@ -41,7 +149,8 @@ EvidenceRequest → provider → RawArtifact → format adapter
 | Spec-to-SPipe evidence extension namespace | `src/lib/common/spec/evidence/spipe_extension.spl` |
 | Executable behaviour of all of the above | `test/01_unit/lib/common/spec/evidence/*_spec.spl` and `test/03_system/tools/spipe/examples/` |
 | `spipe_docgen` evidence sidecar loader + renderer wiring | `src/app/spipe_docgen/spipe_docgen/evidence_loader.spl` and `generator.spl` |
-| Live capture providers and `sspec-maintain evidence` commands | not yet implemented — §8 |
+| Process/file capture providers | `format/exec_capture.spl` and `format/file_capture.spl`; broader acquisition and qualification boundaries remain in §8. |
+| `sspec-maintain evidence` commands | Separate designed surface — §8. |
 
 The runtime never renders Markdown. Capture and `spipe_docgen` run in separate processes
 sharing only files, so a `render_md()` on a runtime object (the shape of the superseded
@@ -216,8 +325,13 @@ sidecar route are real. Missing capabilities are narrower:
 |---|---|---|
 | `spipe_docgen` evidence loader + block renderer wiring | E5 | Implemented through `spipe_docgen/evidence_loader.spl`; it reads the adjacent `.evidence.sdn` sidecar and renders `ManualBlock`s. Absence returns no fragment. The loader currently parses but does not gate rendering through `evidence_manifest_is_complete`, so a rendered fragment alone is not accepted provenance. |
 | `sspec-maintain evidence <spec> --explain` / `verify-examples` / `scan --profile-completeness` | — | Designed in `doc/05_design/infra/sspec/sspec_maintain_evidence_findings.md`, not implemented. `src/app/sspec_maintain/*.spl` has an unrelated `evidence` field (a scoring dimension name/string in its own finding record) — it does not import the typed-evidence module either. |
-| Live capture providers (UI/socket/device acquisition) | — | Every module above takes constructed inputs (`ActionTrace`, `BinaryLayout`, parsed transcript, etc.) built directly in the spec; none of them read from a running terminal, GUI, socket, or file. The provider layer that would populate those records from a live system does not exist yet. |
-| Runnable reference examples | E8 | Implemented under `test/03_system/tools/spipe/examples/`; they demonstrate in-memory adapters/oracles and do not imply a live provider. |
+| Live capture providers | — | `format/exec_capture.spl` calls the process facade; `format/file_capture.spl` reads through the file facade. Live in-process UI and other examples exist. Their presence does not establish socket/device/GPU coverage or qualification on every runtime. |
+| Runnable reference examples | E8 and later live lanes | Present under `test/03_system/tools/spipe/examples/`; distinguish fixture adapters from `live_*` scenarios and inspect each scenario's actual owner/provider. Headless scene state is not GPU readback or physical display proof. |
+
+The feature expert's retained 2026-08-09 ledger reports process/file and live
+example execution on a disclosed Rust seed, with self-hosted requalification
+still owed. This guide corrects stale claims that those providers are absent;
+it does not upgrade those historical results to current admitted runtime PASS.
 
 ## 8a. Closed comparator gaps from red-team review
 

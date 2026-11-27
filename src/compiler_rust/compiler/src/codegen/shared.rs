@@ -16,6 +16,13 @@ use crate::mir::{
 
 use super::types_util::type_to_cranelift;
 
+
+// Also compiled by the standalone compiler backfill; keep the policy in one
+// dependency-free source rather than importing this module's HIR/MIR owners.
+#[path = "function_alignment.rs"]
+mod function_alignment;
+pub use function_alignment::{compile_aligned, define_compiled, define_function_aligned, MIN_FUNCTION_ALIGNMENT};
+
 /// Stable runtime type ID shared by native enum constructors and match checks.
 /// IDs 0 and 1 are reserved for the built-in Result and Option types.
 pub(crate) fn enum_runtime_type_id(runtime_name: &str) -> u32 {
@@ -88,7 +95,7 @@ pub fn create_body_stub<M: Module>(
         builder.finalize();
     }
 
-    module.define_function(func_id, ctx).map_err(|e| e.to_string())?;
+    define_function_aligned(module, func_id, ctx).map_err(|e| e.to_string())?;
     module.clear_context(ctx);
 
     Ok(func_id)
@@ -439,7 +446,7 @@ mod tests {
 ///
 /// Panics if the function is not declared in func_ids.
 pub fn get_func_block_addr<M: Module>(
-    func_ids: &std::collections::BTreeMap<String, cranelift_module::FuncId>,
+    func_ids: &super::func_id_table::FuncIdTable,
     module: &mut M,
     parent_name: &str,
     block: crate::mir::BlockId,
@@ -496,7 +503,9 @@ pub fn expand_with_outlined(mir: &MirModule) -> Vec<MirFunction> {
     let mut seen = HashSet::new();
 
     for func in &mir.functions {
-        let live_ins_map = func.compute_live_ins();
+        // Liveness only matters for functions that own an outlined body;
+        // computing it for all ~4,300 JIT functions cost ~150 ms of startup.
+        let mut live_ins_map = None;
         for block in &func.blocks {
             for (inst_index, inst) in block.instructions.iter().enumerate() {
                 if let Some((body_block, kind, lambda_params, capture_regs, lambda_return_type)) = get_body_kind(inst) {
@@ -519,7 +528,7 @@ pub fn expand_with_outlined(mir: &MirModule) -> Vec<MirFunction> {
                         kind,
                         &lambda_params,
                         &capture_local_indices,
-                        &live_ins_map,
+                        live_ins_map.get_or_insert_with(|| func.compute_live_ins()),
                         &mut functions,
                         lambda_return_type,
                     );
@@ -555,9 +564,18 @@ fn create_outlined_function(
         // signature disagree with the value its `Return` terminator produces,
         // and disagree again with the `IndirectCall` signature built from
         // `return_type` at the call site — the two halves of the same lie that
-        // forced the previous closure-ABI attempt to be reverted. `ANY` (no
-        // inferred type) keeps the old I64 behaviour.
+        // forced the previous closure-ABI attempt to be reverted.
         BodyKind::Lambda if crate::codegen::jit_closure_abi_supports(lambda_return_type) => lambda_return_type,
+        // An `ANY`-typed lambda result is ALREADY a tagged `RuntimeValue`
+        // word: MIR lowering boxes a raw scalar into the `any` return slot
+        // (`BoxInt`/`BoxFloat` before the `Return`). Declaring the outlined
+        // function I64 made the boxed entry (`closure_boxed_entry.rs`
+        // `box_result`) tag that word a SECOND time, so every runtime-facing
+        // caller read a shifted value: `xs.map(\x: any_fn(x))` over
+        // `[1, 2, 3]` answered `[8, 16, 24]`, and a tagged float/text came
+        // back as a garbage integer. Declaring `ANY` keeps the same Cranelift
+        // i64 signature and lets the boxed entry pass the word through.
+        BodyKind::Lambda if lambda_return_type == crate::hir::TypeId::ANY => crate::hir::TypeId::ANY,
         BodyKind::Lambda => crate::hir::TypeId::I64,
         BodyKind::Actor => crate::hir::TypeId::VOID,
     };
@@ -611,6 +629,7 @@ fn create_outlined_function(
             kind,
             &live_ins_map,
             &lambda_capture_local_indices,
+            lambda_return_type,
             functions,
             &func.name,
         );
@@ -643,6 +662,7 @@ fn create_outlined_function(
                     frame_slots: None,
                     is_lambda: false,
                     lambda_capture_local_indices: Vec::new(),
+                    lambda_returns_bool: false,
                 },
             );
         }
@@ -656,6 +676,7 @@ fn create_outlined_function(
                 frame_slots: None,
                 is_lambda: false,
                 lambda_capture_local_indices: Vec::new(),
+                lambda_returns_bool: false,
             },
         );
     }
@@ -767,6 +788,7 @@ fn set_lambda_capture_metadata(
     kind: BodyKind,
     live_ins_map: &std::collections::HashMap<crate::mir::BlockId, std::collections::HashSet<crate::mir::VReg>>,
     lambda_capture_local_indices: &[usize],
+    lambda_return_type: crate::hir::TypeId,
     functions: &mut [MirFunction],
     original_func_name: &str,
 ) {
@@ -784,6 +806,7 @@ fn set_lambda_capture_metadata(
         frame_slots: None,
         is_lambda: kind == BodyKind::Lambda,
         lambda_capture_local_indices: lambda_capture_local_indices.to_vec(),
+        lambda_returns_bool: kind == BodyKind::Lambda && lambda_return_type == crate::hir::TypeId::BOOL,
     };
     if let Some(orig) = functions.iter_mut().find(|f| f.name == original_func_name) {
         orig.outlined_bodies.insert(body_block, meta.clone());

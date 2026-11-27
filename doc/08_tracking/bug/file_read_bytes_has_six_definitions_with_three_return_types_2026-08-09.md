@@ -244,3 +244,22 @@ Status: CLOSED (2026-09-13) — verified fixed on `a6450c9d6f5`
 two out-of-scope items noted above (47-way `rt_file_read_bytes` extern
 re-declaration; the `scv` `& 0xFF` mask cleanup) are unaddressed and not part
 of this record's own single-definition claim.
+
+## Verification note 2026-11-25 (p2w2-aj)
+
+CLOSED status re-verified on release/1.0.0 HEAD by code inspection:
+
+- `grep -rn "fn file_read_bytes" src/ --include=*.spl` returns exactly **one**
+  definition of that name: `src/lib/nogc_sync_mut/io_runtime.spl:346`
+  (`pub fn file_read_bytes(path: text) -> [u8]`). The other hits are distinct
+  names (`file_read_bytes_result`, `file_read_bytes_i64`, `file_read_bytes_at`,
+  `file_read_bytes_raw`), not redefinitions.
+- `sffi/io.spl:77-78` and `io/file_ops.spl:368-369` re-export from
+  `std.io_runtime` with the "defined once" comments as recorded.
+
+Execution limit: `bin/simple.exe test
+test/01_unit/lib/nogc_sync_mut/file_read_bytes_single_definition_spec.spl
+--mode=interpreter` fails before reaching the spec with `unknown decorator
+'@representation_boundary'` (pinned-seed/source inconsistency, cfd89933699),
+so the 5/5 green recorded 2026-09-13 could not be re-run on this host;
+verification is by direct source grep as above.

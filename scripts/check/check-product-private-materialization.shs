@@ -1,11 +1,18 @@
 #!/bin/sh
+# Verdict is the last stdout line: PASS — <n> controls checked (0) /
+# FAIL — <what broke> (1) / ERROR — nothing was checked (<reason>) (2).
 set -eu
 root=$(CDPATH= cd -P -- "$(dirname "$0")/../.." && pwd -P)
-. "$root/scripts/bootstrap/lib/product-private-repository.shs"
+LIB="$root/scripts/bootstrap/lib/product-private-repository.shs"
+[ -f "$LIB" ] || { echo "ERROR — nothing was checked (missing $LIB)"; exit 2; }
+. "$LIB"
 canonical=${1:-"$root/scripts/bootstrap/product-overlay.pl"}
+[ -f "$canonical" ] || { echo "ERROR — nothing was checked (missing $canonical)"; exit 2; }
+FINAL_PL="$root/scripts/check/check-product-overlay-final-verification.pl"
+[ -f "$FINAL_PL" ] || { echo "ERROR — nothing was checked (missing $FINAL_PL)"; exit 2; }
 TMPDIR=${TMPDIR:-/tmp}
 export TMPDIR
-fixture=$(mktemp -d "${TMPDIR:?}/product-overlay.XXXXXXXX")
+fixture=$(mktemp -d "${TMPDIR:?}/product-overlay.XXXXXXXX") || { echo "ERROR — nothing was checked (mktemp)"; exit 2; }
 source_repo="$fixture/source"
 git -c core.longpaths=true init -q "$source_repo"
 git -C "$source_repo" config core.longpaths true
@@ -22,20 +29,31 @@ git -C "$source_repo" commit -qm fixture
 head=$(git -C "$source_repo" rev-parse HEAD)
 index=$(git -C "$source_repo" write-tree)
 git -C "$source_repo" worktree list --porcelain >"$fixture/worktrees-before"
+controls=0
 bootstrap_product_private_repository "$source_repo" "$fixture/overlay" "$head"
-perl "$canonical" source-check "$source_repo"
-perl "$canonical" materialize "$source_repo" "$fixture/overlay" "$fixture/manifest.tsv"
-cmp "$fixture/overlay/src/app/alias/value.spl" "$source_repo/src/lib/value.spl"
-[ "$(git -C "$source_repo" rev-parse HEAD)" = "$head" ]
-[ "$(git -C "$source_repo" write-tree)" = "$index" ]
+perl "$canonical" source-check "$source_repo" || { echo "FAIL — control 1: source-check rejected a clean source"; exit 1; }
+controls=$((controls + 1)); echo "control ok: pre-materialization-source-check"
+perl "$canonical" materialize "$source_repo" "$fixture/overlay" "$fixture/manifest.tsv" || { echo "FAIL — control 2: materialize rejected a clean source"; exit 1; }
+controls=$((controls + 1)); echo "control ok: canonical-materialize"
+cmp "$fixture/overlay/src/app/alias/value.spl" "$source_repo/src/lib/value.spl" || { echo "FAIL — control 3: declared alias did not materialize to the target bytes"; exit 1; }
+controls=$((controls + 1)); echo "control ok: declared-alias-materialized"
+[ "$(git -C "$source_repo" rev-parse HEAD)" = "$head" ] || { echo "FAIL — control 4: source HEAD moved during materialization"; exit 1; }
+controls=$((controls + 1)); echo "control ok: source-head-unchanged"
+[ "$(git -C "$source_repo" write-tree)" = "$index" ] || { echo "FAIL — control 5: source index moved during materialization"; exit 1; }
+controls=$((controls + 1)); echo "control ok: source-index-unchanged"
 git -C "$source_repo" worktree list --porcelain >"$fixture/worktrees-after"
-cmp "$fixture/worktrees-before" "$fixture/worktrees-after"
-printf 'PASS canonical-materialization-including-declared-alias\n'
-perl "$root/scripts/check/check-product-overlay-final-verification.pl" "$canonical" "$source_repo" "$fixture"
+cmp "$fixture/worktrees-before" "$fixture/worktrees-after" || { echo "FAIL — control 6: materialization registered a git worktree"; exit 1; }
+controls=$((controls + 1)); echo "control ok: worktree-list-unchanged"
+perl "$FINAL_PL" "$canonical" "$source_repo" "$fixture" || { echo "FAIL — control 7: final verification rejected the canonical overlay"; exit 1; }
+controls=$((controls + 1)); echo "control ok: final-verification-accepted"
 printf 'tampered\n' >"$fixture/overlay/src/lib/value.spl"
-if perl "$canonical" verify "$source_repo" "$fixture/overlay" "$fixture/manifest.tsv"; then exit 1; fi
-printf 'PASS changed-overlay-bytes-rejected\n'
+if perl "$canonical" verify "$source_repo" "$fixture/overlay" "$fixture/manifest.tsv"; then
+    echo "FAIL — control 8: changed overlay bytes admitted by verify"; exit 1
+fi
+controls=$((controls + 1)); echo "control ok: changed-overlay-bytes-rejected"
 printf 'dirty\n' >>"$source_repo/src/lib/value.spl"
-if perl "$canonical" source-check "$source_repo"; then exit 1; fi
-printf 'PASS changed-source-rejected\n'
-printf 'PASS controls=7 retained_fixture=%s\n' "$fixture"
+if perl "$canonical" source-check "$source_repo"; then
+    echo "FAIL — control 9: dirty source admitted by source-check"; exit 1
+fi
+controls=$((controls + 1)); echo "control ok: changed-source-rejected"
+printf 'PASS — %s controls checked (materialize, alias, source HEAD/index, worktree list, final verification, overlay tamper, source dirt); retained_fixture=%s\n' "$controls" "$fixture"

@@ -1,6 +1,6 @@
 # Self-hosted HIR rejects generic enum patterns on self/field subjects (2026-10-22)
 
-Status: WORKED AROUND in `poll.spl` / `future.spl` (bind the subject to a
+Status: FIXED in-tree by e7b5c93ba65 (see hir_generic_enum_self_match_2026-10-23); previously WORKED AROUND in `poll.spl` / `future.spl` (bind the subject to a
 typed local, or delegate to a module-scope free function taking the value as a
 parameter). The underlying self-hosted HIR limitation remains open.
 
@@ -47,3 +47,31 @@ Teach the self-hosted HIR to resolve `self`/field subjects inside a generic
 impl to the impl's type-parameter bindings (declaration-ordered) and accept
 them the way parameter subjects are accepted, with the payload substitution
 the existing code path already performs.
+
+## 2026-11-04 triage (libbug-async)
+Compiler-root (self-hosted HIR, expression_components.spl). Workaround in poll.spl/future.spl is still required: no self-hosted stage3 is available here to show the HIR now accepts self/field subjects, and the seed accepts both shapes so it cannot prove removal. Keep until the HIR fix lands.
+
+## 2026-11-04 workarounds retired
+
+Root fix is the `own_params_only` branch of `lower_declared_enum_pattern`
+(e7b5c93ba65, same series as hir_generic_enum_self_match_2026-10-23). Proven on
+the self-hosted HIR via `test/01_unit/compiler/20.hir/generic_enum_self_match_spec.spl`,
+which lowers `poll.spl`, `future.spl` (with poll.spl as prelude so `Poll`
+resolves) and both failsafe cores from disk and asserts zero
+`generic enum pattern` / lost-binder diagnostics; knockout reproduces the
+original poll.spl error. `poll.spl` `is_ready`/`is_pending` and `future.spl`
+`complete`/`map`/`then` now match `self` / `self.poll_result` directly;
+`poll_is_ready` is kept as a thin helper for `poll_rti007_wa_spec`, and
+`poll_unwrap` stays for rti007_any_return_rows_2026-11-01.
+
+## 2026-11-05 resolution (HIR P2 worker HA)
+Root fix already on release/1.0.0 (`lower_declared_enum_pattern` own-method identity
+substitution + resolved-not-concrete binder rule, expression_components.spl ~520-545).
+Verified: interpreter `test/01_unit/compiler/20.hir/generic_enum_self_match_spec.spl` 5/5
+(incl. self field `Poll<T>` in `class Future<T>` and the real poll.spl/future.spl), and a
+stage3 native probe (s3_fable44) of `match self` / `match self.poll_result` on a generic
+enum: 0 "generic enum pattern" HIR errors. Workaround tags retired in poll.spl and
+failsafe/core.spl (the free-function helpers stay: they also serve the separate
+rti007_any_return_rows `unwrap() -> T` workaround). Separate finding: that probe's MIR
+reported `unresolved method call: is_ready/done route=runtime-fallback` for methods of a
+generic enum/class declared in a test-dir module — not this row's class.

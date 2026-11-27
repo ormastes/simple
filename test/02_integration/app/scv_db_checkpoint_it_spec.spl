@@ -241,7 +241,7 @@ describe "Checkpoint operation-wide reader budgets":
         val active = db_store_read(root, "paged")
         val barrier = db_store_read(root, "checkpoint-install")
         var tiny = db_checkpoint_reader_limits()
-        tiny.io_bytes = 67108929u64
+        tiny.io_bytes = 0u64
         expect(db_checkpoint_prepare_install_with_limits(root, "", db_checkpoint_encode(checkpoint).unwrap(), authority, source, tiny)).to_equal(Err("SCVDB_CHECKPOINT_READ_QUOTA"))
         expect(db_store_read(root, "paged")).to_equal(active)
         expect(db_store_read(root, "checkpoint-install")).to_equal(barrier)
@@ -342,15 +342,15 @@ describe "Checkpoint operation-wide reader budgets":
         expect(forgotten.reference_bytes).to_equal(0u64)
         expect(forgotten.work_bytes).to_equal(reader.work_bytes)
 
-    it "shares metadata work with pending classification and publishes no Prepared on quota failure":
+    it "shares policy and metadata work and publishes no Prepared on quota failure":
         val (root, checkpoint, authority, source) = setup_item2_checkpoint_files()
         val patch = setup_item2_apply_patch(1, "")
         val queued = db_settlement_enqueue(root, "", patch, authority.policy.admission).unwrap()
         expect(db_checkpoint_stage_pages(root, [checkpoint.metadata], source)).to_equal(Ok(true))
-        # Four 64MiB preflight generations, the policy encode reservation and
-        # one 64MiB page decode fit; the pending patch exceeds what remains.
+        # Policy encoding and metadata validation each fit alone. Together
+        # they exceed this operation-wide ceiling, even with small store reads.
         var limits = db_checkpoint_reader_limits()
-        limits.work_bytes = 407000000u64
+        limits.work_bytes = 100000000u64
         expect(db_checkpoint_validate_metadata(db_checkpoint_reader_with_limits(root, limits).unwrap(), checkpoint).is_ok()).to_be(true)
         val active = db_store_read(root)
         val barrier = db_store_read(root, "checkpoint-install")
@@ -374,3 +374,34 @@ describe "Checkpoint operation-wide reader budgets":
         expect(installed.phase).to_equal("Installed")
         expect(installed.checkpoint_anchor).to_equal(checkpoint.revision)
         expect(db_checkpoint_resume_install(root, installed.journal_head, authority)).to_equal(Ok(installed))
+
+
+describe "checkpoint actual local-store byte accounting":
+    it "reads empty channels without exhausting zero cumulative budgets":
+        val (root, checkpoint, authority, source) = setup_item2_checkpoint_files()
+        var limits = db_checkpoint_reader_limits()
+        limits.io_bytes = 0u64
+        limits.work_bytes = 0u64
+        var reader = db_checkpoint_reader_with_limits(root, limits).unwrap()
+        for channel in ["semantic", "paged", "settlement-work", "checkpoint-install"]:
+            val result = db_checkpoint_reader_store(reader, channel).unwrap()
+            reader = result.0
+            expect(result.1.code).to_equal("empty")
+        expect(reader.io_bytes).to_equal(0u64)
+        expect(reader.work_bytes).to_equal(0u64)
+
+    it "charges repeated real reads cumulatively and enforces the smaller remaining budget":
+        val (root, checkpoint, authority, source) = setup_item2_checkpoint_files()
+        val written = db_store_commit(root, "", sha256_text("reader-accounting"), "small generation")
+        expect(written.code).to_equal("ok")
+        val measured = db_store_read_accounted(root, 67108929u64).unwrap()
+        var limits = db_checkpoint_reader_limits()
+        limits.io_bytes = measured.io_bytes * 2u64 - 1u64
+        val first = db_checkpoint_reader_store(db_checkpoint_reader_with_limits(root, limits).unwrap(), "semantic").unwrap()
+        expect(first.0.io_bytes).to_equal(measured.io_bytes)
+        expect(first.0.work_bytes).to_equal(measured.io_bytes)
+        expect(first.1).to_equal(written)
+        expect(db_checkpoint_reader_store(first.0, "semantic")).to_equal(Err("SCVDB_CHECKPOINT_READ_QUOTA"))
+        limits.io_bytes = measured.io_bytes * 2u64
+        limits.work_bytes = measured.io_bytes - 1u64
+        expect(db_checkpoint_reader_store(db_checkpoint_reader_with_limits(root, limits).unwrap(), "semantic")).to_equal(Err("SCVDB_CHECKPOINT_WORK_QUOTA"))

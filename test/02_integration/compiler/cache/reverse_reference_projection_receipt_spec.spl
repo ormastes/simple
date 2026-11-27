@@ -1,4 +1,4 @@
-use app.spipe.testing.*
+use std.spec.*
 use compiler.driver.driver_build.incremental.{
     build_cache_record_entry_at, build_cache_entry_is_valid_at,
     incremental_detect_changes_at, incremental_reverse_reference_fallback_reason_v1
@@ -12,6 +12,7 @@ use compiler.driver.cache.package_module_index.{
 use compiler.driver.cache.reverse_reference_receipt.{
     REVERSE_REFERENCE_FAMILIES_V1, ReverseReferenceProjectionV1,
     ReverseReferenceGenerationReceiptV1, reverse_reference_read_current_v1,
+    reverse_reference_receipt_migrate_v1_to_v2,
     reverse_reference_consumers_v1, reverse_reference_receipt_encode_v1,
     reverse_reference_receipt_decode_v1, reverse_reference_receipt_digest_v1,
     reverse_reference_publish_generation_v1, reverse_reference_exact_key_v1,
@@ -25,7 +26,8 @@ use std.common.crypto.sha256.{sha256_text}
 use compiler.common.cache.reverse_reference_facts.{
     reverse_reference_owner_begin_v1, reverse_reference_owner_end_v1,
     reverse_reference_owner_mark_known_v1,
-    reverse_reference_owner_snapshot_v1
+    reverse_reference_owner_snapshot_v1,
+    reverse_reference_register_generic_specialization_v1
 }
 use compiler.traits.trait_solver.{trait_solver_publish_trait_candidate_v1}
 use compiler.semantics.resolve_strategies.{
@@ -33,9 +35,6 @@ use compiler.semantics.resolve_strategies.{
 }
 use compiler.hir.hir_lowering._Items.declaration_lowering.{
     declaration_lowering_publish_annotation_consumer_v1
-}
-use compiler.mono.monomorphize.note_sdn.{
-    note_sdn_publish_generic_specialization_v1
 }
 use compiler.mdsoc.aop_index.reverse_index.{
     reverse_index_publish_aop_consumer_v1
@@ -69,8 +68,8 @@ fn register_real_owner_publication_seams(subject: text, consumer: text):
         subject, consumer, "method-candidates-v1")
     declaration_lowering_publish_annotation_consumer_v1(
         subject, consumer, "hir-attributes-v1")
-    note_sdn_publish_generic_specialization_v1(
-        subject, consumer, "mono-record-v1")
+    reverse_reference_register_generic_specialization_v1(
+        subject, consumer, "generic-record-v1")
     reverse_index_publish_aop_consumer_v1(
         subject, consumer, "aop-reverse-index-v1")
     llvm_native_link_orchestrator_publish_runtime_provider_v1(
@@ -195,7 +194,13 @@ describe "M2 immutable reverse-reference projection receipts":
         for family in REVERSE_REFERENCE_FAMILIES_V1:
             val consumers = reverse_reference_consumers_v1(read, fixture.1, family)
             expect(consumers.exact).to_equal(true)
-            expect(consumers.consumers).to_equal([fixture.2])
+            val expected_consumers = if family == "direct-import-export":
+                [fixture.2, fixture.1]
+            elif family == "module-scc-artifact":
+                [fixture.1]
+            else:
+                [fixture.2]
+            expect(consumers.consumers).to_equal(expected_consumers)
 
     it "does not report a consumer for a causally unrelated subject":
         val fixture = publish_fixture()
@@ -224,7 +229,8 @@ describe "M2 immutable reverse-reference projection receipts":
             read, fixture.1, "direct-import-export")
         val trait_consumers = reverse_reference_consumers_v1(
             read, fixture.1, "trait-type-implementation")
-        expect(direct.consumers).to_equal(trait_consumers.consumers)
+        expect(direct.consumers).to_equal([fixture.2, fixture.1])
+        expect(trait_consumers.consumers).to_equal([fixture.2])
         val unknown = reverse_reference_consumers_v1(
             read, fixture.1, "not-a-projection-family")
         expect(unknown.exact).to_equal(false)
@@ -296,7 +302,8 @@ describe "M2 immutable reverse-reference projection receipts":
         val fixture = publish_fixture()
         val pointer = rt_file_read_text(
             "{fixture.0}.reverse-references/CURRENT") ?? ""
-        val receipt_path = "{fixture.0}.reverse-references/{pointer}.receipt"
+        val receipt_path = "{fixture.0}.reverse-references/" +
+            pointer.replace(":", "/") + ".receipt"
         val original = rt_file_read_text(receipt_path) ?? ""
         rt_file_write_text(receipt_path, original + "x")
         val read = reverse_reference_read_current_v1(fixture.0)
@@ -323,7 +330,13 @@ describe "M2 immutable reverse-reference projection receipts":
             val complete_read = reverse_reference_read_current_v1(fixture.0)
             val before = reverse_reference_consumers_v1(
                 complete_read, fixture.1, family)
-            expect(before.consumers).to_equal([fixture.2])
+            val expected_before = if family == "direct-import-export":
+                [fixture.2, fixture.1]
+            elif family == "module-scc-artifact":
+                [fixture.1]
+            else:
+                [fixture.2]
+            expect(before.consumers).to_equal(expected_before)
             val complete = complete_read.receipt.unwrap()
             var retained: [ReverseReferenceProjectionV1] = []
             for projection in complete.projections:
@@ -363,7 +376,7 @@ describe "M2 immutable reverse-reference projection receipts":
                 decoded, "subject|suffi", family)
             expect(absent.consumers.len()).to_equal(0)
             var wrong_schema = receipt
-            wrong_schema.schema_version = 2
+            wrong_schema.schema_version = 3
             expect(reverse_reference_receipt_encode_v1(wrong_schema)).to_equal("")
             val corrupt = reverse_reference_receipt_decode_v1(encoded + "x")
             expect(corrupt.valid).to_equal(false)
@@ -430,7 +443,8 @@ describe "M2 immutable reverse-reference projection receipts":
             fixture.0, [fixture.1, fixture.2])
         expect(changes.files.contains(fixture.1)).to_equal(true)
         expect(changes.files.contains(fixture.2)).to_equal(true)
-        expect(incremental_reverse_reference_fallback_reason_v1()).to_equal("")
+        expect(incremental_reverse_reference_fallback_reason_v1()).to_equal(
+            "changed-subjects-incomplete:tldr-root-unset")
 
     it "attributes a conservative closure rebuild when registry state is unknown":
         reverse_reference_owner_end_v1()
@@ -483,12 +497,13 @@ describe "M2 immutable reverse-reference projection receipts":
         expect(build_cache_record_entry_at(cache, source_a, [], ["{root}/a.o"])).to_equal(true)
         expect(build_cache_record_entry_at(cache, source_b, [source_a], ["{root}/b.o"])).to_equal(true)
         expect(build_cache_record_entry_at(cache, source_c, [source_b], ["{root}/c.o"])).to_equal(true)
-        val unknown_receipt = "simple-reverse-reference-generation-receipt-v2\n" +
-            "schema=2\nowner=declared-v2\nroot=declared-v2\ncount=0"
+        val unknown_receipt = "simple-reverse-reference-generation-receipt-v99\n" +
+            "schema=99\nowner=declared-v99\nroot=declared-v99\ncount=0"
         val unknown_digest = sha256_text(unknown_receipt)
         val generation_dir = "{cache}.reverse-references"
-        rt_file_write_text("{generation_dir}/{unknown_digest}.receipt", unknown_receipt)
-        rt_file_write_text("{generation_dir}/CURRENT", unknown_digest)
+        dir_create_all("{generation_dir}/sha256")
+        rt_file_write_text("{generation_dir}/sha256/{unknown_digest}.receipt", unknown_receipt)
+        rt_file_write_text("{generation_dir}/CURRENT", "sha256:{unknown_digest}")
         val unknown_read = reverse_reference_read_current_v1(cache)
         expect(unknown_read.valid).to_equal(false)
         expect(unknown_read.reason).to_equal("unknown-generation")
@@ -520,7 +535,7 @@ describe "M2 immutable reverse-reference projection receipts":
         expect(reverse_reference_owner_begin_v1()).to_equal(false)
         reverse_reference_owner_end_v1()
 
-    it "keeps an ordinary dependency reusable after a private-body edit":
+    it "widens a private-body edit when V1 lacks macro invalidation evidence":
         reverse_reference_owner_end_v1()
         expect(reverse_reference_owner_begin_v1()).to_equal(true)
         val root = fixture_root()
@@ -530,7 +545,7 @@ describe "M2 immutable reverse-reference projection receipts":
         val semantic_consumer = "{root}/semantic-consumer.spl"
         val link_action = "{root}/link-action.spl"
         val cache = "{root}/build-cache.sdn"
-        rt_file_write_text(provider, "export fn answer() -> i64: 1\n")
+        rt_file_write_text(provider, "export fn answer() -> i64:\n    1\n")
         rt_file_write_text(semantic_consumer, "export fn use_answer() -> i64: 2\n")
         rt_file_write_text(link_action, "export fn link_action() -> i64: 3\n")
         rt_file_write_text("{root}/provider.o", "provider")
@@ -549,16 +564,20 @@ describe "M2 immutable reverse-reference projection receipts":
         expect(build_cache_record_entry_at(
             cache, link_action, [], ["{root}/linked-output"])).to_equal(true)
 
-        rt_file_write_text(provider, "export fn answer() -> i64: 99\n")
+        rt_file_write_text(provider, "export fn answer() -> i64:\n    99\n")
         val changes = incremental_detect_changes_at(
             cache, [provider, semantic_consumer, link_action])
         expect(changes.files.contains(provider)).to_equal(true)
         expect(changes.files.contains(link_action)).to_equal(true)
-        expect(changes.files.contains(semantic_consumer)).to_equal(false)
+        # This BuildCache has no companion root (tldr_root ""), so the macro
+        # path cannot bind the changed source to macro subjects and must widen
+        # to every source in this cache scope (macro RR lane, 2026-11-01).
+        expect(changes.files.contains(semantic_consumer)).to_equal(true)
         expect(build_cache_entry_is_valid_at(cache, semantic_consumer)).to_equal(true)
-        expect(incremental_reverse_reference_fallback_reason_v1()).to_equal("")
+        expect(incremental_reverse_reference_fallback_reason_v1()).to_equal(
+            "changed-subjects-incomplete:tldr-root-unset")
 
-    it "follows exact semantic consumers after an exported-interface edit":
+    it "widens an exported-interface edit when macro source mapping is absent":
         reverse_reference_owner_end_v1()
         expect(reverse_reference_owner_begin_v1()).to_equal(true)
         val root = fixture_root()
@@ -568,7 +587,7 @@ describe "M2 immutable reverse-reference projection receipts":
         val semantic_consumer = "{root}/interface-consumer.spl"
         val unrelated = "{root}/unrelated.spl"
         val cache = "{root}/build-cache.sdn"
-        rt_file_write_text(provider, "export fn answer() -> i64: 1\n")
+        rt_file_write_text(provider, "export fn answer() -> i64:\n    1\n")
         rt_file_write_text(semantic_consumer, "export fn use_answer() -> i64: 2\n")
         rt_file_write_text(unrelated, "export fn unrelated() -> i64: 3\n")
         for path in [provider, semantic_consumer, unrelated]:
@@ -586,7 +605,18 @@ describe "M2 immutable reverse-reference projection receipts":
             cache, [provider, semantic_consumer, unrelated])
         expect(changes.files.contains(provider)).to_equal(true)
         expect(changes.files.contains(semantic_consumer)).to_equal(true)
-        expect(changes.files.contains(unrelated)).to_equal(false)
+        expect(changes.files.contains(unrelated)).to_equal(true)
+        expect(incremental_reverse_reference_fallback_reason_v1()).to_equal(
+            "changed-subjects-incomplete:tldr-root-unset")
+
+    it "does not widen a no-change V2 cache scope":
+        val fixture = publish_fixture()
+        val current = reverse_reference_read_current_v1(fixture.0)
+        expect(current.valid).to_equal(true)
+        val v2 = reverse_reference_receipt_migrate_v1_to_v2(current.receipt!)
+        expect(reverse_reference_publish_generation_v1(fixture.0, v2)).to_equal(true)
+        val changes = incremental_detect_changes_at(fixture.0, [fixture.1, fixture.2])
+        expect(changes.files.len()).to_equal(0)
         expect(incremental_reverse_reference_fallback_reason_v1()).to_equal("")
 
     it "computes the transitive causal closure through dependent consumers":

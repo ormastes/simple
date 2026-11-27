@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** OPEN (observation only — not root-caused here)
+**Status:** FIXED (2026-08-21 fix; 2026-11-11 runner10 lane verified the seed binary contains the Rust half and the reproduce spec covers the pure-Simple half)
 **Found:** 2026-08-21
 **Reporter:** networking fragment-accumulator lane
 
@@ -92,3 +92,31 @@ Reproduce spec: `test/01_unit/app/test_daemon/spec_verdict_invariant_spec.spl`
 Same fail-open family as `SdnTable::update_row`'s discarded bool — see
 `doc/08_tracking/bug/test_db_update_row_keys_nonexistent_id_column_2026-08-21.md`.
 
+
+## 2026-11-11 — runner10 lane verdict: FIXED (both lanes verified in-tree)
+
+Re-verified fresh at base 79d5af6723f6 (no re-runs of prior checks):
+
+1. **Rust seed half — in the tracked binary.** The doc's own 2026-08-21 fix
+   note said "proving it needs a seed rebuild". The tracked seed
+   `bin/simple.exe` is now at commit 46fe8f6b6def, and
+   `git show 46fe8f6b6def:src/compiler_rust/driver/src/cli/basic.rs`
+   contains the invariant at lines 292-307: `failed > 0 &&
+   outcome == SpecOutcome::Ok` downgrades to `SpecOutcome::Error` and a zero
+   `module_exit_code` is raised to 1, in `report_spec_file_verdict` — the
+   single-derivation fix this row specified. The deployed binary post-dates
+   the fix.
+2. **Pure-Simple half — live from source.** `verdict_outcome_token` /
+   `ran_verdict_line` (`src/app/test_daemon/light_protocol.spl`) and the
+   reproduce spec `test/01_unit/app/test_daemon/spec_verdict_invariant_spec.spl`
+   (4 examples: failed>0 never OK, executed==0 never OK, clean file still
+   OK, failing outcome maps to exit 1) are both tracked at this base; the
+   pure-Simple runner runs from source under the seed, so the spec is the
+   live regression gate.
+
+Caveat: the reproduce spec was NOT re-executed this lane (session died
+mid-flight; campaign no-rerun rule) — the flip rests on seed-ancestry
+verification for the Rust half plus in-tree presence of the pure-Simple
+gate. Related but distinct known-live route (inverse polarity: "bin/simple
+test exits 1 with verdict OK — seed lane", child exit plumbing) is owned by
+the seed lane and is NOT this row.

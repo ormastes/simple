@@ -1,0 +1,210 @@
+#!/bin/sh
+# macos_stage3_authority_portability_contract_test.shs — pins macOS/Darwin
+# portability for Stage-3 authority, manifest verification, and stage3_fdwalk.c.
+#
+# Bug: doc/08_tracking/bug/bootstrap_macos_blocked_seed_compile_and_linux_only_stage3_authority_2026-09-06.md
+set -eu
+
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+authority_shs=$root/scripts/check/lib/bootstrap-stage3/authority.shs
+manifest_verify_shs=$root/scripts/check/lib/bootstrap-stage3/manifest-verify.shs
+cache_rs=$root/src/compiler_rust/runtime/src/cache_host_authority_v1.rs
+fdwalk_c=$root/src/runtime/tools/stage3_fdwalk.c
+
+fail() { echo "FAIL: $*" >&2; exit 1; }
+
+# 1. Source contracts (all hosts) --------------------------------------------
+! grep -Fq 'st_mtimespec' "$cache_rs" ||
+    fail 'cache_host_authority_v1.rs regressed to st_mtimespec'
+! grep -Fq 'st_ctimespec' "$cache_rs" ||
+    fail 'cache_host_authority_v1.rs regressed to st_ctimespec'
+grep -Fq 'a.st_mtime_nsec == b.st_mtime_nsec && a.st_ctime_nsec == b.st_ctime_nsec' "$cache_rs" ||
+    fail 'cache_host_authority_v1.rs missing Apple st_mtime_nsec/st_ctime_nsec arm'
+
+grep -Fq 'if [ -r "/proc/$$/stat" ]; then' "$authority_shs" ||
+    fail 'authority.shs missing /proc/$$/stat guard in directory_snapshot'
+grep -Fq "stat -f '%u:%Lp'" "$authority_shs" ||
+    fail 'authority.shs missing BSD stat -f fallback for snapshot destination'
+grep -Fq "stat -f '%Lp'" "$authority_shs" ||
+    fail 'authority.shs missing BSD stat -f fallback for directory_snapshot'
+grep -Fq "stat -Lf '%d %i'" "$authority_shs" ||
+    fail 'authority.shs missing BSD stat -Lf fallback for hosted runtime walk'
+grep -Fq 'getconf _NPROCESSORS_ONLN' "$authority_shs" &&
+grep -Fq 'sysctl -n hw.ncpu' "$authority_shs" ||
+    fail 'authority.shs missing portable CPU count fallback'
+if grep -Fq '${bootstrap_stage3_hash_lines# }' "$authority_shs" ||
+   grep -Fq '${bootstrap_stage3_directory_snapshot_lines# }' "$authority_shs"; then
+    fail 'authority.shs regressed to single-space wc -l trimming'
+fi
+
+grep -Fq 'if [ -r /proc/self/stat ]; then' "$manifest_verify_shs" ||
+    fail 'manifest-verify.shs missing /proc/self/stat guards'
+grep -Fq 'bootstrap_stage3_fd_identity()' "$manifest_verify_shs" &&
+grep -Fq 'bootstrap_stage3_fd_stamp()' "$manifest_verify_shs" &&
+grep -Fq 'bootstrap_stage3_fd_matches_path()' "$manifest_verify_shs" ||
+    fail 'manifest-verify.shs missing portable fd-identity helpers'
+grep -Fq 'portable-descriptor-capsule-not-supported' "$manifest_verify_shs" ||
+    fail 'manifest-verify.shs missing fail-closed capsule refusal without procfs'
+
+# 2. Live Darwin verification ------------------------------------------------
+host=$(uname -s 2>/dev/null || echo unknown)
+if [ "$host" != Darwin ]; then
+    echo "PASS: static Stage-3 macOS portability contracts verified (live Darwin checks skipped on $host)"
+    exit 0
+fi
+
+work=$(mktemp -d "${TMPDIR:-/tmp}/macos-stage3-portability.XXXXXX")
+work=$(CDPATH= cd -- "$work" && pwd -P)
+trap 'chmod -R u+w "$work" 2>/dev/null || true; exec 5<&- 6<&- 7<&- 8<&- 2>/dev/null || true; rm -rf "$work"' EXIT HUP INT TERM
+
+. "$authority_shs"
+. "$root/scripts/check/lib/bootstrap-stage3/command-snapshot.shs"
+. "$root/scripts/check/lib/bootstrap-stage3/sanity.shs"
+. "$root/scripts/check/lib/bootstrap-stage3/manifest-write.shs"
+bootstrap_stage3_provenance_fail() { printf '%s\n' "$1" >&2; return 1; }
+. "$manifest_verify_shs"
+
+# 2a. Portable CPU count in bootstrap_stage3_git_budget_ms without GNU nproc.
+printf '5.00 5.00 5.00 1/500 12345\n' >"$work/loadavg"
+real_ncpu=$(getconf _NPROCESSORS_ONLN 2>/dev/null || sysctl -n hw.ncpu)
+expected_scale=$(( 1 + 5 / real_ncpu ))
+[ "$expected_scale" -le 4 ] || expected_scale=4
+expected_budget=$(( 300000 * expected_scale ))
+got_budget=$(PATH=/usr/bin:/bin STAGE3_LOADAVG_FILE="$work/loadavg" bootstrap_stage3_git_budget_ms)
+[ "$got_budget" = "$expected_budget" ] ||
+    fail "git_budget_ms under stock macOS PATH: got=$got_budget want=$expected_budget"
+
+# 2a-bis. Invalid/empty STAGE3_NCPU, non-numeric getconf ("undefined"), and
+# non-numeric loadavg must fall back cleanly under /bin/sh -eu without crashing.
+for bad_ncpu in '' '0' 'undefined' '12abc'; do
+    got_bad_ncpu=$(/bin/sh -eu -c '. "$1"; STAGE3_NCPU=$2 STAGE3_LOADAVG_FILE=$3 PATH=/usr/bin:/bin bootstrap_stage3_git_budget_ms' \
+        sh "$authority_shs" "$bad_ncpu" "$work/loadavg")
+    [ "$got_bad_ncpu" = "$expected_budget" ] ||
+        fail "git_budget_ms with bad STAGE3_NCPU='$bad_ncpu': got=$got_bad_ncpu want=$expected_budget"
+done
+
+mkdir -p "$work/stub_getconf" "$work/stub_all"
+printf '#!/bin/sh\necho undefined\n' >"$work/stub_getconf/getconf"
+chmod +x "$work/stub_getconf/getconf"
+got_undef_getconf=$(/bin/sh -eu -c '. "$1"; PATH="$2:/usr/bin:/bin" STAGE3_LOADAVG_FILE=$3 bootstrap_stage3_git_budget_ms' \
+    sh "$authority_shs" "$work/stub_getconf" "$work/loadavg")
+sysctl_ncpu=$(sysctl -n hw.ncpu)
+sysctl_scale=$(( 1 + 5 / sysctl_ncpu ))
+[ "$sysctl_scale" -le 4 ] || sysctl_scale=4
+want_sysctl_budget=$(( 300000 * sysctl_scale ))
+[ "$got_undef_getconf" = "$want_sysctl_budget" ] ||
+    fail "git_budget_ms with getconf=undefined: got=$got_undef_getconf want=$want_sysctl_budget"
+
+cp "$work/stub_getconf/getconf" "$work/stub_all/getconf"
+printf '#!/bin/sh\necho bad\n' >"$work/stub_all/sysctl"
+printf '#!/bin/sh\necho 0\n' >"$work/stub_all/nproc"
+chmod +x "$work/stub_all/sysctl" "$work/stub_all/nproc"
+got_all_bad=$(/bin/sh -eu -c '. "$1"; PATH="$2:/usr/bin:/bin" STAGE3_LOADAVG_FILE=$3 bootstrap_stage3_git_budget_ms' \
+    sh "$authority_shs" "$work/stub_all" "$work/loadavg")
+[ "$got_all_bad" = 1200000 ] ||
+    fail "git_budget_ms when all cpu probes non-numeric/0: got=$got_all_bad want=1200000"
+
+printf 'undefined 0.00 0.00 1/1 1\n' >"$work/bad_loadavg"
+got_bad_load=$(/bin/sh -eu -c '. "$1"; STAGE3_LOADAVG_FILE=$2 bootstrap_stage3_git_budget_ms' \
+    sh "$authority_shs" "$work/bad_loadavg")
+[ "$got_bad_load" = 300000 ] ||
+    fail "git_budget_ms with non-numeric loadavg: got=$got_bad_load want=300000"
+
+# 2b. BSD wc -l multi-space trimming + hash_path_list + directory_snapshot parity.
+mkdir -p "$work/rt/sub"
+printf 'alpha\n' >"$work/rt/a.txt"
+printf '#!/bin/sh\necho ok\n' >"$work/rt/sub/run.sh"
+chmod 755 "$work/rt/sub/run.sh"
+chmod 400 "$work/rt/a.txt"
+chmod 500 "$work/rt/sub/run.sh"
+chmod 500 "$work/rt/sub"
+chmod 500 "$work/rt"
+
+printf '%s\n%s\n' "$work/rt/a.txt" "$work/rt/sub/run.sh" >"$work/paths.txt"
+hashed_count=$(bootstrap_stage3_hash_path_list "$work/paths.txt" | wc -l | tr -d ' ')
+[ "$hashed_count" = 2 ] || fail "hash_path_list returned $hashed_count lines"
+
+bootstrap_stage3_directory_snapshot "$work/snap.perl" "$work/rt" ||
+    fail 'bootstrap_stage3_directory_snapshot failed on Darwin'
+set -- $(stat -Lf '%d %i %Lp' "$work/rt")
+rt_binding="directory:$1:$2:$3:-"
+exec 6<"$work/rt/."
+bootstrap_stage3_descriptor_read 6 "$rt_binding" directory-snapshot "$work/rt" "$work/snap.py" ||
+    fail 'portable python directory-snapshot failed on Darwin'
+exec 6<&-
+cmp -s "$work/snap.perl" "$work/snap.py" ||
+    fail 'directory_snapshot Perl vs portable Python parity mismatch on Darwin'
+
+# 2c. manifest-verify.shs procfs-free helpers and capsule fail-closed refusal.
+bootstrap_stage3_own_pid
+[ "$bootstrap_stage3_local_pid" = "$$" ] ||
+    fail "bootstrap_stage3_own_pid returned $bootstrap_stage3_local_pid expected $$"
+[ "$(bootstrap_stage3_phase_status_path 159)" = /dev/fd/159 ] ||
+    fail 'bootstrap_stage3_phase_status_path did not select /dev/fd/159 on Darwin'
+
+printf 'manifest-payload\n' >"$work/payload.env"
+exec 5<"$work/payload.env"
+fd_id=$(bootstrap_stage3_fd_identity 5) || fail 'fd_identity failed on Darwin'
+fd_stamp=$(bootstrap_stage3_fd_stamp 5) || fail 'fd_stamp failed on Darwin'
+bootstrap_stage3_fd_matches_path 5 "$work/payload.env" "$fd_stamp" ||
+    fail 'fd_matches_path rejected unchanged file on Darwin'
+printf 'renamed-payload\n' >"$work/payload.new"
+mv -f "$work/payload.new" "$work/payload.env"
+if bootstrap_stage3_fd_matches_path 5 "$work/payload.env" "$fd_stamp"; then
+    fail 'fd_matches_path admitted renamed-over file on Darwin'
+fi
+exec 5<&-
+
+capsule_write_err=$(BOOTSTRAP_STAGE3_DESCRIPTOR_CAPSULE=1 bootstrap_stage3_write_manifest 2>&1 || true)
+printf '%s\n' "$capsule_write_err" | grep -Fq 'portable-descriptor-capsule-not-supported' ||
+    fail "capsule write refusal missing portable-descriptor-capsule-not-supported: $capsule_write_err"
+
+if BOOTSTRAP_STAGE3_DESCRIPTOR_CAPSULE=1 bootstrap_stage3_verify_manifest \
+    "$work/payload.env" "$work/payload.env" "$root" "$work/payload.env" "$work/payload.env" \
+    "$work/payload.env" "$work/payload.env" "$work/payload.env" >/dev/null 2>&1; then
+    fail 'capsule verify unexpectedly succeeded without procfs'
+fi
+
+# 2d. stage3_fdwalk.c compiles cleanly with cc -Wall -Wextra -Werror and runs.
+cc_bin=$(command -v cc)
+"$cc_bin" -std=c11 -Wall -Wextra -Werror -O1 "$fdwalk_c" -o "$work/stage3_fdwalk" ||
+    fail 'cc -std=c11 -Wall -Wextra -Werror failed on stage3_fdwalk.c'
+"$work/stage3_fdwalk" --selftest >/dev/null || fail 'stage3_fdwalk --selftest failed'
+
+mkdir -p "$work/walk/dir"
+printf 'fdwalk-darwin\n' >"$work/walk/dir/file.txt"
+ln -s dir "$work/walk/symlink_dir"
+exec 7<"$work/walk"
+walk_out=$("$work/stage3_fdwalk" walk --dir-fd 7 --rel dir/file.txt) ||
+    fail 'stage3_fdwalk walk failed on Darwin'
+want_ino=$(stat -f '%i' "$work/walk/dir/file.txt")
+got_ino=$(printf '%s\n' "$walk_out" | sed -n 's/^ino=//p')
+[ "$got_ino" = "$want_ino" ] || fail "stage3_fdwalk inode mismatch: got=$got_ino want=$want_ino"
+
+set +e
+"$work/stage3_fdwalk" walk --dir-fd 7 --rel symlink_dir/file.txt >/dev/null 2>&1; rc_sym=$?
+"$work/stage3_fdwalk" walk --dir-fd 7 --rel dir/missing >/dev/null 2>&1; rc_miss=$?
+"$work/stage3_fdwalk" walk --dir-fd 7 --rel 'dir/../file.txt' >/dev/null 2>&1; rc_bad=$?
+set -e
+[ "$rc_sym" -eq 68 ] || fail "stage3_fdwalk symlink rc=$rc_sym expected 68"
+[ "$rc_miss" -eq 66 ] || fail "stage3_fdwalk missing rc=$rc_miss expected 66"
+[ "$rc_bad" -eq 65 ] || fail "stage3_fdwalk bad-component rc=$rc_bad expected 65"
+exec 7<&-
+
+exec 8</bin/sh
+exec_out=$("$work/stage3_fdwalk" exec --exec-fd 8 -- sh -c 'echo darwin-fdwalk-exec-ok') ||
+    fail 'stage3_fdwalk exec of held binary failed on Darwin'
+[ "$exec_out" = darwin-fdwalk-exec-ok ] || fail "unexpected exec output: $exec_out"
+exec 8<&-
+
+cp /bin/sh "$work/victim_sh"
+chmod 0700 "$work/victim_sh"
+exec 8<"$work/victim_sh"
+rm -f "$work/victim_sh"
+set +e
+"$work/stage3_fdwalk" exec --exec-fd 8 -- sh -c 'echo must-not-run' >/dev/null 2>&1; rc_unlinked=$?
+set -e
+[ "$rc_unlinked" -eq 71 ] || fail "stage3_fdwalk unlinked exec rc=$rc_unlinked expected 71"
+exec 8<&-
+
+echo "PASS: macOS Stage-3 authority, manifest-verify, and stage3_fdwalk portability verified ($fd_id)"

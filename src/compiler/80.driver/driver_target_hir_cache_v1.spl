@@ -1,0 +1,65 @@
+# TargetHIR cache identity (P6, plan immutable_hir_targethir_mir_refactor_plan_2026-11-03 §9).
+#
+# Two pure pieces, no I/O and no env reads (the mode is passed in by the caller,
+# which reads it once via target_hir_mode()):
+#   1. target_hir_cache_key_suffix: the text appended to the HIR cache target
+#      fold. Legacy mode returns "" so the legacy key stays byte-identical
+#      (CACHE-TH-01).
+#   2. A versioned overlay record codec carrying the parent HIR snapshot id and
+#      the schema version. Unknown, old, or corrupt records are an explicit Err
+#      (CACHE-TH-04) — there is no portable fallback.
+
+val TARGET_HIR_CACHE_SCHEMA_V1 = "target-hir-cache-v1"
+val TARGET_HIR_CACHE_RECORD_MAGIC = "THIRREC"
+
+fn target_hir_cache_key_suffix(mode: text, constraints_digest: text) -> text:
+    if mode == "legacy" or mode == "":
+        return ""
+    ";thir:" + TARGET_HIR_CACHE_SCHEMA_V1 + ":" + constraints_digest
+
+struct TargetHirCacheRecordV1:
+    schema: text
+    parent_snapshot_id: text
+    target_id: text
+    constraints_digest: text
+    payload_digest: text
+
+fn target_hir_cache_record_new(parent_snapshot_id: text, target_id: text, constraints_digest: text, payload_digest: text) -> TargetHirCacheRecordV1:
+    TargetHirCacheRecordV1(schema: TARGET_HIR_CACHE_SCHEMA_V1, parent_snapshot_id: parent_snapshot_id, target_id: target_id, constraints_digest: constraints_digest, payload_digest: payload_digest)
+
+fn _thir_field_ok(v: text) -> bool:
+    v != "" and not v.contains("\n")
+
+fn target_hir_cache_record_encode(r: TargetHirCacheRecordV1) -> Result<text, text>:
+    if r.schema != TARGET_HIR_CACHE_SCHEMA_V1:
+        return Err("target-hir-cache: unknown schema '" + r.schema + "'")
+    for v in [r.parent_snapshot_id, r.target_id, r.constraints_digest, r.payload_digest]:
+        if not _thir_field_ok(v):
+            return Err("target-hir-cache: empty or multi-line field")
+    Ok(TARGET_HIR_CACHE_RECORD_MAGIC + "\n" + r.schema + "\n" + r.parent_snapshot_id + "\n" + r.target_id + "\n" + r.constraints_digest + "\n" + r.payload_digest + "\n")
+
+fn target_hir_cache_record_decode(data: text) -> Result<TargetHirCacheRecordV1, text>:
+    val lines = data.split("\n")
+    if lines.len() != 7 or lines[6] != "":
+        return Err("target-hir-cache: corrupt record (line count)")
+    if lines[0] != TARGET_HIR_CACHE_RECORD_MAGIC:
+        return Err("target-hir-cache: corrupt record (bad magic)")
+    if lines[1] != TARGET_HIR_CACHE_SCHEMA_V1:
+        return Err("target-hir-cache: unsupported schema '" + lines[1] + "'")
+    var i = 2
+    while i < 6:
+        if lines[i] == "":
+            return Err("target-hir-cache: corrupt record (empty field)")
+        i = i + 1
+    Ok(TargetHirCacheRecordV1(schema: lines[1], parent_snapshot_id: lines[2], target_id: lines[3], constraints_digest: lines[4], payload_digest: lines[5]))
+
+# A record is usable only against the exact parent snapshot it was built from.
+fn target_hir_cache_record_admit(data: text, parent_snapshot_id: text, target_id: text, constraints_digest: text) -> Result<TargetHirCacheRecordV1, text>:
+    val r = target_hir_cache_record_decode(data)?
+    if r.parent_snapshot_id != parent_snapshot_id:
+        return Err("target-hir-cache: parent snapshot mismatch")
+    if r.target_id != target_id:
+        return Err("target-hir-cache: target mismatch")
+    if r.constraints_digest != constraints_digest:
+        return Err("target-hir-cache: constraints digest mismatch")
+    Ok(r)

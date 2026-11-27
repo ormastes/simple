@@ -1,7 +1,7 @@
 # Parse-shard work-queue helpers shared by the orchestrator (native_build_main)
 # and its specs. std-only on purpose: the orchestrator is a slim entry that
 # must not drag the compiler closure in.
-use std.io_runtime.{dir_list, file_read, file_delete}
+use std.io_runtime.{dir_list_or_empty, file_read, file_delete}
 use std.nogc_sync_mut.io.file_ops.{file_append}
 
 # The file, inside the queue dir, that records every claim released because its
@@ -22,7 +22,7 @@ fn _claim_owner(content: text) -> text:
 # without this second line cannot be attributed to a file at all.
 fn _claim_path(content: text) -> text:
     val nl = content.index_of("\n")
-    if nl < 0: "" else: content.substring(nl + 1, content.len())
+    if nl < 0: "" else: content.substring(nl + 1, content.byte_len())
 
 # Orphan reclaim (orchestrator side). A shard that dies AFTER claiming -- the
 # kill_simple_monitor CPU guard took parse shard 6/8 of run11 at age 901s --
@@ -46,7 +46,7 @@ pub fn parse_shard_release_claims(queue_dir: text, dead_specs: [text]) -> i64:
     if queue_dir == "" or dead_specs.len() == 0:
         return 0
     var released: i64 = 0
-    for name in dir_list(queue_dir):
+    for name in dir_list_or_empty(queue_dir):
         if not name.ends_with(".claim"):
             continue
         val marker = "{queue_dir}/{name}"
@@ -85,7 +85,7 @@ pub fn parse_shard_orphaned_paths(queue_dir: text) -> [text]:
         val at = line.index_of(" path=")
         if at < 0:
             continue
-        val path = line.substring(at + 6, line.len())
+        val path = line.substring(at + 6, line.byte_len())
         if path == "" or path.starts_with("unknown-legacy-marker:"):
             continue
         var seen = false
@@ -106,3 +106,20 @@ pub fn parse_shard_exit_label(code: i64) -> text:
     if code == -1:
         return "SIGNAL/abnormal (killed -- check kill_simple_monitor / dmesg OOM)"
     "exit={code}"
+
+# Pre-partitioned ring start offset for shard `<index>/<count>` over `total`
+# items so W parse shards begin on disjoint regions `[i*N/W .. (i+1)*N/W)` and
+# wrap modulo `total` for lockless work-stealing with zero initial contention.
+# reason: shard spec string and queue length returning partition offset
+@allow(primitive_api)
+pub fn parse_shard_strided_start_v1(spec: text, total: i64) -> i64:
+    if total <= 1 or spec == "":
+        return 0
+    val parts = spec.split("/")
+    if parts.len() != 2:
+        return 0
+    val idx = parts[0].to_i64() ?? -1
+    val count = parts[1].to_i64() ?? 0
+    if count <= 1 or idx <= 0 or idx >= count:
+        return 0
+    (idx * total) / count

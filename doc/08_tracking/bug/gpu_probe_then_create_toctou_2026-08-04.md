@@ -5,6 +5,10 @@
   and landed, together with both legacy mirrors (see Campaign below). The family is
   **larger than the seven** — a second sweep found 5 more instances, still OPEN, the
   biggest of which (`cuda_strict_spec.spl`) has ~19 prediction-gated examples.
+  *(Header updated 2026-11-25: the second-sweep 5 are no longer open as code —
+  their spec repairs landed as the 2026-11-03 candidate and the production root
+  cause was fixed 2026-11-05; only GPU-host runtime validation remains. See the
+  2026-11-25 triage note at the end.)*
 - **Area:** rendering / engine2d GPU offload
 - **Fixed here:** `test/02_integration/rendering/web_engine2d_gpu_offload_parity_spec.spl`
 
@@ -454,3 +458,218 @@ exit 1, the same red as before the widening.
 `web_gpu_first_present_decision_spec.spl` 7/7 ·
 `web_gpu_present_paint_coverage_spec.spl` 23/23 ·
 `web_showcase_full_gpu_offload_spec.spl` 13/13
+
+## 2026-11-03 remaining gate repair candidate (runtime validation pending)
+
+The release source still had three kinds of prediction gates after the earlier
+CUDA/WebGPU strict integration repairs. This candidate changes tests only; a
+probe remains a diagnostic observation and does not reserve or cache a device.
+
+- Modern and legacy `backend_cuda_renderbackend_spec.spl` now attempt strict
+  creation unconditionally and branch on that Result. Previously the success arm
+  referenced `result` declared only in the probe-predicted failure arm. Both
+  outcomes retain requested-backend/typed-failure assertions.
+- Modern and legacy `backend_probe_strict_spec.spl` no longer ask an independent
+  `cuda_available()` to predict the factory outcome. The current factory has no
+  CUDA context route; its actual unavailable diagnostic is checked without
+  pretending it supplies device evidence.
+- `x25519mlkem768_backend_matrix_spec.spl` independently checks each executed
+  forward/inverse Result. Full CUDA/Metal exchanges branch on the first actual
+  keygen Result and reuse it rather than create again. Successful branches retain
+  scalar parity, lifecycle and device-evidence checks. Only explicit physical
+  admission failures disclose unavailable GPU coverage; artifact, pipeline,
+  submission, readback and unknown errors fail. A negative classification
+  regression prevents those failures becoming silent skips. This crypto matrix
+  has no tracked legacy twin.
+
+Verification status: **TEST_BLOCKED**. The Windows host has no qualified
+self-hosted full CLI, so these specs and GPU fault-injection runs have not been
+executed. Source checks are not GPU proof, and this appendix does not mark the
+family fixed. Resume with all five changed specs plus device/fd-pressure and
+unavailable-device runs on a qualified producer; verify skipped coverage remains
+explicit and provenance sabotage fails. The independent historical module-load
+startup timing report is unchanged and needs a current producer reproduction.
+
+## 2026-11-05 production fix — strict create no longer gates on a probe prediction
+
+Fixed on branch `work/libbug-std-gputoctou-20261105` (base `origin/release/1.0.0`),
+worktree `/tmp/wt-libbug-gputoctou`.
+
+`Engine2D.create_with_backend_strict`
+(`src/lib/gc_async_mut/gpu/engine2d/engine.spl`) previously ran
+`probe_backend()` first and returned `Err(probe)` when the probe was not
+Initialized, attempting the create only when the probe predicted success. That
+is the production form of this bug: the probe runs an independent
+create+init+shutdown and caches nothing, so its answer does not survive the
+gap to the create. Both corruption directions lived inside the factory:
+
+- **False RED** — the probe transiently fails while the create would succeed:
+  strict create returned `Err` without ever attempting the create.
+- **Wasted/vacuous half** — the probe succeeds and the create then fails: a
+  typed `Err` was returned, but only after a full wasted probe cycle (and, for
+  vulkan before the instance-reuse fix, a second device acquisition).
+
+**Fix: the create IS the validation.** `create_with_backend_strict` now
+attempts `create_requested_backend` unconditionally — no probe gate. On create
+failure it consults ONE diagnostic probe taken AFTER the failed create (whose
+reason therefore describes the failure moment, never a pre-create prediction)
+and returns that typed result; only when the backend still probes healthy does
+it fall back to `BackendProbeResult.failed(canon, <create message>)`. The Err
+contract observed by the strict spec family is unchanged (terminal status,
+`requested_name` == the canonical request, backend-specific reason text such
+as the Linux/Metal "macOS" diagnostic, never a cpu/software substitute name),
+and a successful create no longer pays a probe cycle. First Green attempt
+(create-only error, no post-failure probe) regressed `metal_strict_spec`
+14/14 → 12/14 by losing the backend's own diagnostic; the post-failure probe
+restored 14/14.
+
+Because probe-vs-create divergence cannot be reproduced deterministically on
+GPU-less hosts, two disclosed fault-injection knobs were added beside
+`SIMPLE_2D_BACKEND` (same precedent as the `SIMPLE_VK_*_SABOTAGE` and
+`SIMPLE_2D_SIMD` test hooks; inert when unset):
+
+- `SIMPLE_2D_PROBE_FAULT` — forces ONE canonical backend's `probe_backend`
+  answer to Unavailable while the create path stays healthy.
+- `SIMPLE_2D_CREATE_FAULT` — forces ONE canonical backend's
+  `create_requested_backend` to fail while the probe stays healthy.
+
+Regression spec:
+`test/01_unit/lib/gpu/engine2d/engine_strict_create_toctou_spec.spl` — 3
+examples covering both directions plus honest-named facade fallback. RED
+pre-fix (3/3 failed), GREEN post-fix (3/3 passed) under the phase1 seed CLI on
+an aarch64 host.
+
+Known residual (unchanged): on hosts with a real device, the
+`web_engine2d_gpu_offload_parity_spec` pixel-parity examples can still diverge
+from the CPU oracle for rendering reasons unrelated to this factory change —
+verified byte-identical failures with the fix stashed and applied.
+
+## Triage 2026-11-25 — code work landed; only GPU-host validation remains
+
+Row-order re-check on release/1.0.0 (a98bed208e2). The header's "second sweep
+found 5 more instances, still OPEN" predates two later sections of this same
+document:
+
+- The 2026-11-03 candidate changed all five second-sweep specs (modern +
+  legacy `backend_cuda_renderbackend_spec.spl`, modern + legacy
+  `backend_probe_strict_spec.spl`, `x25519mlkem768_backend_matrix_spec.spl`)
+  to branch on actual create Results instead of probe predictions —
+  TEST_BLOCKED pending a qualified runner, not un-fixed code.
+- The 2026-11-05 section records the production root-cause fix:
+  `Engine2D.create_with_backend_strict`
+  (`src/lib/gc_async_mut/gpu/engine2d/engine.spl`) no longer gates the create
+  on a probe prediction, with regression spec
+  `test/01_unit/lib/gpu/engine2d/engine_strict_create_toctou_spec.spl` and
+  disclosed fault-injection knobs `SIMPLE_2D_PROBE_FAULT` /
+  `SIMPLE_2D_CREATE_FAULT`.
+
+Both are present on this branch (verified by code inspection: the fault-knob
+names and the strict-create path exist in `engine.spl`, and the regression
+spec file exists). What remains is runtime validation on a real GPU host —
+CUDA/WebGPU/Metal device runs, fd-pressure sabotage, and the vulkan
+instance-reuse gate — which is hardware-dependent and cannot be performed on
+this Windows lane. Also still open per this document: the separate
+production defect "two independent backend resolvers disagree"
+(`web_render_resolved_engine2d_backend_name` vs `_resolved_render_backend`),
+disclosed but never fixed. Classification: SKIP for this lane (hardware);
+row should move to hardware-validation tracking rather than staying a
+code-fix OPEN.
+
+## Verification 2026-11-26 (gpuvk lane, Linux aarch64 NVIDIA GB10, real Vulkan + CUDA)
+
+Seed `/home/yoon/.cache/cargo-target-wr-seed1126b/release/simple` (sha256 prefix
+`fb80903917d6d5f5`), worktree on release/1.0.0 `453118ed07c`. Each run was capped with
+`systemd-run --user --scope -p MemoryMax=8G`, and the fd limit was set inside the scope
+(`sh -c 'ulimit -n 44; exec seed test ...'`, with `/proc/self/limits` confirming 44).
+
+| run | result | provenance / disclosure |
+|---|---|---|
+| `engine_strict_create_toctou_spec` | 3/3 | — |
+| same, `ulimit -n 44` | 3/3 | — |
+| `web_engine2d_gpu_offload_parity_spec`, unconstrained | 17/17 | `lane=vulkan source=device_readback handle=4` |
+| same, `ulimit -n 44`, 3 runs | 17/17 each | `device_readback` each time, 4 GPU-PROVEN examples |
+| same, `ulimit -n 64` | 17/17 | `device_readback` |
+| same, `SIMPLE_2D_CREATE_FAULT=vulkan` | 17/17 | `source=cpu_fallback handle=0`, plus `GPU BRANCH SKIPPED — create_requested_backend('vulkan') failed at use time` |
+| same, `SIMPLE_2D_PROBE_FAULT=vulkan` | 17/17 | `lane=software source=cpu_mirror`, plus `GPU BRANCH SKIPPED — CPU/software lane` |
+| `cuda_strict_spec`, unconstrained / `CREATE_FAULT=cuda` / `PROBE_FAULT=cuda` | 26/26 each | no `injected` line in either knob log, so the cuda knobs are NOT shown to reach this spec |
+| `metal_strict_spec` | 14/14 | — |
+| `web_gpu_first_present_decision_spec` | 7/7 | — |
+| `web_gpu_present_paint_coverage_spec` | 23/23 | — |
+| `web_showcase_full_gpu_offload_spec` | 13/13 | — |
+
+Under both fault directions the parity spec stays honest. There is no false red, and every green
+that the device did not serve is labelled `GPU BRANCH SKIPPED ... proves NOTHING`. It never reads
+as a GPU pass. `ulimit -n 44` does not perturb this NVIDIA driver, so the natural race does not
+fire on this host; the two injection knobs supply the divergence instead.
+
+Three specs in the family are red on this host for reasons unrelated to TOCTOU. Each failing
+example is in a non-probe path:
+
+- `backend_cuda_renderbackend_spec` 29/31: "routes both CUDA image blend interfaces through the
+  native kernel" (a source-text `assert_contains`) and "propagates CUDA font completion state to
+  facade readback". The CUDA create succeeds here, so the typed-failure example prints
+  `FAILURE PATH NOT EXERCISED`.
+- `backend_probe_strict_spec` 8/9: "reports architecture-specific CPU SIMD probes without
+  fallback" (aarch64 CPU SIMD probe, `expected false to equal true`).
+- `x25519mlkem768_backend_matrix_spec` 17/20: the three AVX2/NEON/RVV "reject without build
+  provenance" examples get `stage4-source-roots-invalid` where they expect
+  `unavailable` / `Stage-4 build provenance`.
+
+The separate production defect ("two independent backend resolvers disagree") is now its own
+record, `web_engine2d_two_backend_resolvers_disagree_2026-11-26.md`. With that split out, this
+record's scope is narrower, but it is **not yet verified**: see the addendum below.
+
+## Addendum 2026-11-26 — sibling sweep and sabotage: one more instance fixed, three specs blocked
+
+The siblings listed above in "Sibling instances — OPEN" were run on the same host and seed:
+
+| spec | unconstrained | `SIMPLE_2D_CREATE_FAULT=vulkan` |
+|---|---|---|
+| `02_integration/rendering/vulkan_strict_spec.spl` (before this change) | 19/19 | **17/19**, false red: `:276 called unwrap on Err` and "SPIR-V shader modules load ... expected false to equal true" |
+| same, after this change | 19/19 | 19/19, with 2 `[toctou]` disclosures and `GPU BRANCH SKIPPED` |
+| same, after this change, `SIMPLE_2D_PROBE_FAULT=vulkan` | 19/19, 2 `[toctou]` | — |
+| `03_system/gui/draw_backend_matrix/draw_backend_matrix_spec.spl` | 8/8 | — |
+| `01_unit/lib/gpu/engine2d/backend_opencl_facade_spec.spl` | 6/6 | — |
+| `02_integration/gpu/engine2d_backend_matrix_spec.spl` | 14/14 | — |
+| `01_unit/lib/gc_async_mut/ui/web_render_pixel_backend_queue_spec.spl` | 3/5, semantic error | blocked |
+| `05_perf/graphics_2d/backend_probe_spec.spl` | 0/3, semantic error | blocked |
+| `03_system/gui/draw_backend_matrix/proc_draw_combo_spec.spl` | 8/12, semantic error | blocked |
+
+**Fixed here:** two `vulkan_strict_spec` examples (REQ-VKSTRICT-009 and -011) still asserted
+`create.is_ok()` because the probe had predicted success. They now branch on the create's own
+Result: on success they check the engine, and on failure they call the spec's existing
+`_assert_strict_failure_is_structured` with a `_disclose_toctou` line. Red to green is 17/19 to
+19/19 under `CREATE_FAULT`.
+
+**Sabotage, run on this host:** setting every `device_identity: self.session.device` in
+`backend_vulkan.spl` to `0` (temporary, reverted) turns the parity spec red at 14/17 and
+`vulkan_strict_spec` red at 11/19. Both specs can still fail on a fabricated device identity.
+
+**Blocked:** the last three rows fail on definitions that the 2026-10-01 transplant `88aac2ffe28`
+dropped, so they never reach the probe/create code. Filed as
+`toctou_sibling_specs_broken_by_release_transplant_88aac2ffe28_2026-11-26`. Also not established:
+the cuda knobs reaching `cuda_strict_spec`, and the CUDA typed-failure path in
+`backend_cuda_renderbackend_spec`. That spec stays 29/31 under `CREATE_FAULT=cuda`, prints no
+`injected` line, and its two reds are non-TOCTOU. Status: **fix-implemented-verification-pending**
+until the blocked siblings run.
+
+### Review follow-up 2026-11-26: a host can make a failed create a failure
+
+Review found the gap in the change above. On a Vulkan-capable host whose driver rejects SPIR-V or
+whose init regresses, REQ-VKSTRICT-009 and -011 would pass with only a printed skip. Also,
+REQ-VKSTRICT-010 still gated the create on `probe.is_ok()`. Changes:
+
+- -010 now creates unconditionally and branches on the Result, like -009 and -011.
+- All three call `_fail_if_vulkan_required` on the failure branch. When the host sets
+  `SIMPLE_2D_REQUIRE_VULKAN=1` (the strict lane on a Vulkan runner), a failed create fails the
+  example instead of being disclosed as a skip.
+
+Proof on the GB10 host, `vulkan_strict_spec`:
+
+| env | result |
+|---|---|
+| none | 19/19 |
+| `SIMPLE_2D_CREATE_FAULT=vulkan` | 19/19, 3 `[toctou]` disclosures |
+| `SIMPLE_2D_CREATE_FAULT=vulkan SIMPLE_2D_REQUIRE_VULKAN=1` | **16/19, rc=1**: -009, -010 and -011 fail |
+| `SIMPLE_2D_REQUIRE_VULKAN=1` | 19/19 (the real device creates) |
+| `SIMPLE_2D_PROBE_FAULT=vulkan SIMPLE_2D_REQUIRE_VULKAN=1` | 19/19 (the create is asserted, not the probe) |

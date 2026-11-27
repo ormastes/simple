@@ -1,5 +1,10 @@
 use std.spec.*
+use std.io_runtime.{file_exists}
 use compiler.driver.driver_source_loading.{_driver_resolve_entry_import}
+
+fn expect_t32_file_owner(resolved: text, physical: text, app_path: text):
+    expect(resolved == physical or resolved == app_path).to_equal(true)
+    expect(file_exists(resolved)).to_equal(true)
 
 describe "physical T32 module resolution":
     it "resolves the app alias when checkout symlinks are unavailable":
@@ -13,3 +18,31 @@ describe "physical T32 module resolution":
     it "does not treat a similarly named module as the T32 alias":
         val resolved = _driver_resolve_entry_import("app.t32_cli_missing.mod", "src/app/cli")
         expect(resolved == "examples/10_tooling/trace32_tools/t32_cli/mod.spl" or resolved == "src/app/t32_cli/mod.spl").to_equal(false)
+
+    it "resolves the MCP session state to its real file owner":
+        step("Resolve the app-owned MCP state module without relying on a checkout symlink")
+        val resolved = _driver_resolve_entry_import("app.mcp_t32.session_state", "src/app/cli")
+        expect_t32_file_owner(resolved,
+            "examples/10_tooling/trace32_tools/t32_mcp/session_state.spl",
+            "src/app/mcp_t32/session_state.spl")
+
+    it "resolves the imported MCP session type through its state module":
+        step("Resolve the session type used by the native T32 CLI bridge")
+        val resolved = _driver_resolve_entry_import("app.mcp_t32.session_state.McpT32Session", "src/app/cli")
+        expect_t32_file_owner(resolved,
+            "examples/10_tooling/trace32_tools/t32_mcp/session_state.spl",
+            "src/app/mcp_t32/session_state.spl")
+
+    it "resolves the app-owned CMM parser to its real file owner":
+        step("Resolve the parser namespace imported by TRACE32 tools")
+        val resolved = _driver_resolve_entry_import("app.cmm_lsp.cmm_parser", "src/app/cli")
+        expect_t32_file_owner(resolved,
+            "examples/10_tooling/trace32_tools/cmm_lsp/cmm_parser.spl",
+            "src/app/cmm_lsp/cmm_parser.spl")
+
+    it "does not rewrite similarly named MCP or CMM prefixes":
+        step("Keep prefix boundaries exact while resolving unrelated app imports")
+        val mcp = _driver_resolve_entry_import("app.mcp_t32_missing.session_state", "src/app/cli")
+        expect(mcp == "examples/10_tooling/trace32_tools/t32_mcp/session_state.spl" or mcp == "src/app/mcp_t32/session_state.spl").to_equal(false)
+        val cmm = _driver_resolve_entry_import("app.cmm_lsp_missing.cmm_parser", "src/app/cli")
+        expect(cmm == "examples/10_tooling/trace32_tools/cmm_lsp/cmm_parser.spl" or cmm == "src/app/cmm_lsp/cmm_parser.spl").to_equal(false)

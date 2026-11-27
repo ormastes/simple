@@ -4,6 +4,7 @@ alwaysApply: true
 # Code Style
 
 - **NEVER over-engineer** - only make requested changes
+- **Lockless concurrency by default** — immutable values, CAS, or message passing; a new lock/mutex/file lock needs a documented exception + owner (see `doc/04_architecture/language/concurrency/concurrency_architecture.md`)
 - **Pure Simple first / C boundary / asm-minimization** — see `doc/07_guide/os/hal/pure_simple_hal.md` (dual-run twin gate: `scripts/check/check-dual-run-shadow.shs`)
 - **NEVER add unused code** - delete completely
 - **NEVER link external SQLite.** `rt_sqlite_*` is a *mimic* of the SQLite API

@@ -1,0 +1,39 @@
+# Native PTY probe: open a pseudo-terminal, run one command in it, and print
+# what the terminal showed. Built with `native-build`, it exercises the
+# runtime's own rt_pty_* provider (ConPTY on Windows), not the interpreter's.
+extern fn rt_pty_open(rows: i32, cols: i32) -> i32
+extern fn rt_pty_spawn(handle: i32, program: text) -> i64
+extern fn rt_pty_write(handle: i64, data: text) -> bool
+extern fn rt_pty_read(handle: i64, timeout_ms: i64) -> text
+extern fn rt_pty_close(handle: i64) -> bool
+extern fn rt_pty_is_running(handle: i64) -> bool
+extern fn rt_pty_resize(handle: i64, rows: i32, cols: i32) -> bool
+
+fn main() -> i64:
+    val handle = rt_pty_open(24, 80)
+    print "open=" + handle.to_string()
+    if handle < 0:
+        return 1
+    val h = handle.to_i64()
+    print "resize=" + rt_pty_resize(h, 30, 100).to_string()
+    val pid = rt_pty_spawn(handle, "cmd.exe /d /q /k")
+    print "spawn_ok=" + (pid > 0).to_string()
+    if pid <= 0:
+        return 2
+    print "running=" + rt_pty_is_running(h).to_string()
+    print "write=" + rt_pty_write(h, "echo pty-marker-%COMPUTERNAME:~0,0%42\r\n").to_string()
+    var seen = ""
+    var tries = 0
+    while tries < 100 and not seen.contains("pty-marker-42"):
+        seen = seen + rt_pty_read(h, 100)
+        tries = tries + 1
+    print "marker_seen=" + seen.contains("pty-marker-42").to_string()
+    print "exit_write=" + rt_pty_write(h, "exit\r\n").to_string()
+    var waits = 0
+    while waits < 100 and rt_pty_is_running(h):
+        rt_pty_read(h, 50)
+        waits = waits + 1
+    print "exited=" + (not rt_pty_is_running(h)).to_string()
+    print "close=" + rt_pty_close(h).to_string()
+    print "close_again=" + rt_pty_close(h).to_string()
+    0

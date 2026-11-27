@@ -1,0 +1,68 @@
+"""Focused contract checks for the SCV editor transaction intake adapter."""
+use std.spec.{describe, it, expect}
+use app.io.mod (file_write, dir_remove_all)
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
+use std.scv.editor_transaction_capture_v1.{scv_editor_capture_open_v1, scv_editor_capture_poll_v1}
+
+fn _editor_capture_unit_spool(tag: text) -> (text, text):
+    val root = secure_temp_dir("/tmp", "scv-editor-capture-unit-{tag}-").unwrap()
+    (root, "{root}/events.spool")
+
+describe "SCV editor transaction capture V1 intake":
+    it "emits only complete appended spool records and consumes them once":
+        val (root, spool) = _editor_capture_unit_spool("append")
+        file_write(spool, "buffer_open\tsrc/main.spl\t\tfirst\n")
+        var state = scv_editor_capture_open_v1(spool)
+        val first = scv_editor_capture_poll_v1(state)
+        state = first.state
+        expect(first.origin).to_equal("ide")
+        expect(first.completeness).to_equal("complete")
+        expect(first.events.len()).to_equal(1)
+        expect(first.events[0].kind).to_equal("buffer_open")
+        expect(first.events[0].payload).to_equal("first")
+        val repeated = scv_editor_capture_poll_v1(state)
+        expect(repeated.events.len()).to_equal(0)
+        file_write(spool, "buffer_open\tsrc/main.spl\t\tfirst\nedit\tsrc/main.spl\t\tsecond\n")
+        val appended = scv_editor_capture_poll_v1(repeated.state)
+        expect(appended.events.len()).to_equal(1)
+        expect(appended.events[0].kind).to_equal("edit")
+        expect(appended.events[0].payload).to_equal("second")
+        val reopened = scv_editor_capture_poll_v1(scv_editor_capture_open_v1(spool))
+        expect(reopened.events.len()).to_equal(2)
+        expect(reopened.events[0].payload).to_equal("first")
+        dir_remove_all(root)
+
+    it "holds an unterminated final record until its newline arrives":
+        val (root, spool) = _editor_capture_unit_spool("partial")
+        file_write(spool, "buffer_open\tsrc/main.spl\t\tbase\nedit\tsrc/main.spl\t\tpart")
+        val state = scv_editor_capture_open_v1(spool)
+        val partial = scv_editor_capture_poll_v1(state)
+        expect(partial.events.len()).to_equal(1)
+        expect(partial.events[0].payload).to_equal("base")
+        expect(partial.completeness).to_equal("incomplete")
+        expect(partial.diagnostics.contains("editor-spool-record-pending")).to_equal(true)
+        file_write(spool, "buffer_open\tsrc/main.spl\t\tbase\nedit\tsrc/main.spl\t\tpartial\n")
+        val completed = scv_editor_capture_poll_v1(partial.state)
+        expect(completed.events.len()).to_equal(1)
+        expect(completed.events[0].payload).to_equal("partial")
+        expect(completed.completeness).to_equal("complete")
+        dir_remove_all(root)
+
+    it "preserves an open editor buffer without claiming a disk save":
+        val (root, spool) = _editor_capture_unit_spool("buffer")
+        file_write(spool, "buffer_open\tsrc/main.spl\t\tunsaved bytes\n")
+        val result = scv_editor_capture_poll_v1(scv_editor_capture_open_v1(spool))
+        expect(result.events.len()).to_equal(1)
+        expect(result.events[0].payload).to_equal("unsaved bytes")
+        expect(result.events[0].kind).to_equal("buffer_open")
+        expect(result.proposed_only).to_equal(true)
+        dir_remove_all(root)
+
+    it "preserves multibyte UTF-8 path and payload bytes exactly":
+        val (root, spool) = _editor_capture_unit_spool("utf8")
+        file_write(spool, "edit\t源/例.spl\t\tnaïve λ🙂\n")
+        val result = scv_editor_capture_poll_v1(scv_editor_capture_open_v1(spool))
+        expect(result.events.len()).to_equal(1)
+        expect(result.events[0].path).to_equal("源/例.spl")
+        expect(result.events[0].payload).to_equal("naïve λ🙂")
+        dir_remove_all(root)

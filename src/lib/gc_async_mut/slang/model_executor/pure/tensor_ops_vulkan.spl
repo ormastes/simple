@@ -1,0 +1,238 @@
+#![allow(primitive_api)]
+# reason: raw Vulkan handles, SPIR-V words, counts and tensor positions are untyped integers at the C ABI and kernel launch parameters
+# @gc — module uses GC runtime
+#
+# tensor_ops_vulkan — Vulkan compute provider for the pure runner's compute seam.
+#
+# Same function shapes as tensor_ops_rocm.spl (the HIP provider) over
+# device-resident f32 tensors in Vulkan storage buffers: weights are uploaded
+# once with vk_tensor_upload and stay resident, each op returns a new tensor,
+# and only vk_tensor_download copies data back. Numerical contract per op is the
+# CPU op's, computed in f32 (compare with ~1e-4 relative tolerance). Every
+# status is surfaced as Result<_, text>. Each op submits its own command buffer
+# and waits, so vk_ops_sync has nothing pending.
+#
+# The loader is opened only by vk_ops_open (never at import) and released by
+# vk_ops_close or when the open fails.
+#
+# Also on the device: rope (host-computed f64 cos/sin table), kv_write (in
+# place), row lookup, argmax (one u32 readback). Not on the device: standalone
+# softmax.
+
+use std.gc_async_mut.gpu.vulkan.vk_compute.{VkDevice, VkBuffer, VkKernel, vk_open, vk_close, vk_available, vk_buffer_alloc, vk_buffer_free, vk_buffer_upload_bytes, vk_buffer_download_bytes, vk_f32_bytes, vk_f32_word, vk_kernel, vk_dispatch}
+use std.gc_async_mut.slang.model_executor.pure.tensor_ops.{PureTensor, tensor_decode_f32_le, tensor_from_values}
+use std.common.math.math.{math_sin, math_cos, math_pow}
+use std.gc_async_mut.slang.model_executor.pure.tensor_ops_vulkan_kernels.{vk_spv_matvec, vk_spv_rmsnorm, vk_spv_add, vk_spv_mul, vk_spv_silu, vk_spv_attention, vk_spv_rope, vk_spv_kv_write, vk_spv_row, vk_spv_argmax}
+
+pub struct VkTensor:
+    buf: VkBuffer
+    n: i64
+    shape: [i64]
+
+pub class VkOps:
+    dev: VkDevice
+
+pub fn vk_ops_available() -> bool:
+    vk_available()
+
+pub fn vk_ops_open() -> Result<VkOps, text>:
+    val dev = vk_open()?
+    Ok(VkOps(dev: dev))
+
+# Release the device and unload the Vulkan loader; `ops` must not be used afterwards.
+pub fn vk_ops_close(ops: VkOps):
+    vk_close(ops.dev)
+
+pub fn vk_ops_device_name(ops: VkOps) -> text:
+    ops.dev.name
+
+# Pipelines are built lazily: the SPIR-V is generated and the pipeline created on
+# the first use of an op, then served from the device cache.
+fn _vk_spirv(name: text) -> [u8]:
+    if name == "sgemv_rows":
+        return vk_spv_matvec()
+    if name == "rmsnorm_f32":
+        return vk_spv_rmsnorm()
+    if name == "add_f32":
+        return vk_spv_add()
+    if name == "mul_f32":
+        return vk_spv_mul()
+    if name == "silu_f32":
+        return vk_spv_silu()
+    if name == "attention_f32":
+        return vk_spv_attention()
+    if name == "rope_f32":
+        return vk_spv_rope()
+    if name == "kv_write_f32":
+        return vk_spv_kv_write()
+    if name == "row_f32":
+        return vk_spv_row()
+    vk_spv_argmax()
+
+fn _vk_kernel(ops: VkOps, name: text, n_bufs: i64, push_size: i64) -> Result<VkKernel, text>:
+    val cached = ops.dev.kernels.get(name)
+    if cached.is_some():
+        return Ok(cached.unwrap())
+    vk_kernel(ops.dev, name, _vk_spirv(name), n_bufs, push_size)
+
+fn _vk_numel(shape: [i64]) -> i64:
+    var n: i64 = 1
+    for d in shape:
+        n = n * d
+    n
+
+fn _vk_out_like(ops: VkOps, shape: [i64]) -> Result<VkTensor, text>:
+    val n = _vk_numel(shape)
+    val buf = vk_buffer_alloc(ops.dev, n)?
+    Ok(VkTensor(buf: buf, n: n, shape: shape))
+
+# Dispatch into the freshly allocated `out`; on a failed dispatch `out` is
+# released so an error path leaks no device memory.
+fn _vk_into(ops: VkOps, k: VkKernel, bufs: [VkBuffer], words: [i64], groups: i64, out: VkTensor) -> Result<VkTensor, text>:
+    val r = vk_dispatch(ops.dev, k, bufs, words, groups)
+    if r.is_err():
+        vk_buffer_free(ops.dev, out.buf)
+        return Err(r.unwrap_err())
+    Ok(out)
+
+# Upload a host tensor (weights: call once, keep the handle).
+pub fn vk_tensor_upload(ops: VkOps, t: PureTensor) -> Result<VkTensor, text>:
+    val n = t.data.len()
+    val buf = vk_buffer_alloc(ops.dev, n)?
+    val bytes = vk_f32_bytes(t.data)
+    vk_buffer_upload_bytes(ops.dev, buf, 0, bytes, 0, bytes.len())?
+    Ok(VkTensor(buf: buf, n: n, shape: t.shape))
+
+pub fn vk_tensor_download(ops: VkOps, t: VkTensor) -> Result<PureTensor, text>:
+    val raw = vk_buffer_download_bytes(ops.dev, t.buf, t.n * 4)?
+    Ok(tensor_decode_f32_le(raw, 0, t.n, t.shape))
+
+# Weight upload straight from little-endian F32 bytes (e.g. the file buffer):
+# `bytes[offset .. offset + numel*4]` is copied into the mapped buffer in one go.
+pub fn vk_tensor_upload_f32_bytes(ops: VkOps, bytes: [u8], offset: i64, shape: [i64]) -> Result<VkTensor, text>:
+    val n = _vk_numel(shape)
+    val buf = vk_buffer_alloc(ops.dev, n)?
+    vk_buffer_upload_bytes(ops.dev, buf, 0, bytes, offset, n * 4)?
+    Ok(VkTensor(buf: buf, n: n, shape: shape))
+
+pub fn vk_tensor_free(ops: VkOps, t: VkTensor) -> Result<i64, text>:
+    vk_buffer_free(ops.dev, t.buf)
+    Ok(0)
+
+pub fn vk_tensor_numel(t: VkTensor) -> i64:
+    t.n
+
+# y = W x for W stored [out, in].
+pub fn vk_tensor_matvec(ops: VkOps, w: VkTensor, x: VkTensor) -> Result<VkTensor, text>:
+    if w.shape.len() != 2 or x.n != w.shape[1] or w.n != w.shape[0] * w.shape[1]:
+        return Err("Vulkan matvec: weight shape {w.shape} (numel {w.n}) does not match input of {x.n}")
+    val rows = w.shape[0]
+    val cols = w.shape[1]
+    val k = _vk_kernel(ops, "sgemv_rows", 3, 8)?
+    val out = _vk_out_like(ops, [rows])?
+    _vk_into(ops, k, [w.buf, x.buf, out.buf], [rows, cols], rows, out)
+
+pub fn vk_tensor_rmsnorm(ops: VkOps, x: VkTensor, w: VkTensor, eps: f64) -> Result<VkTensor, text>:
+    if w.n != x.n or x.n < 1:
+        return Err("Vulkan rmsnorm: weight of {w.n} does not match input of {x.n}")
+    val k = _vk_kernel(ops, "rmsnorm_f32", 3, 8)?
+    val out = _vk_out_like(ops, x.shape)?
+    _vk_into(ops, k, [x.buf, w.buf, out.buf], [x.n, vk_f32_word(eps)], 1, out)
+
+pub fn vk_tensor_add(ops: VkOps, a: VkTensor, b: VkTensor) -> Result<VkTensor, text>:
+    if a.n != b.n:
+        return Err("Vulkan add: operand sizes {a.n} and {b.n} differ")
+    val k = _vk_kernel(ops, "add_f32", 3, 4)?
+    val out = _vk_out_like(ops, a.shape)?
+    _vk_into(ops, k, [a.buf, b.buf, out.buf], [a.n], (a.n + 255) / 256, out)
+
+pub fn vk_tensor_mul(ops: VkOps, a: VkTensor, b: VkTensor) -> Result<VkTensor, text>:
+    if a.n != b.n:
+        return Err("Vulkan mul: operand sizes {a.n} and {b.n} differ")
+    val k = _vk_kernel(ops, "mul_f32", 3, 4)?
+    val out = _vk_out_like(ops, a.shape)?
+    _vk_into(ops, k, [a.buf, b.buf, out.buf], [a.n], (a.n + 255) / 256, out)
+
+pub fn vk_tensor_silu(ops: VkOps, x: VkTensor) -> Result<VkTensor, text>:
+    val k = _vk_kernel(ops, "silu_f32", 2, 4)?
+    val out = _vk_out_like(ops, x.shape)?
+    _vk_into(ops, k, [x.buf, out.buf], [x.n], (x.n + 255) / 256, out)
+
+# Causal multi-head attention for one query against KV rows [0, n_pos).
+pub fn vk_tensor_attention(ops: VkOps, q: VkTensor, k_buf: VkTensor, v_buf: VkTensor, n_pos: i64, n_heads: i64, head_dim: i64) -> Result<VkTensor, text>:
+    if n_pos > 1024 or n_pos < 1:
+        return Err("Vulkan attention: n_pos {n_pos} outside 1..1024")
+    val dim = n_heads * head_dim
+    if n_heads < 1 or head_dim < 1 or q.n != dim or k_buf.n < n_pos * dim or v_buf.n < n_pos * dim:
+        return Err("Vulkan attention: q {q.n} / k {k_buf.n} / v {v_buf.n} too small for {n_pos} positions of {dim}")
+    val k = _vk_kernel(ops, "attention_f32", 4, 12)?
+    val out = _vk_out_like(ops, [dim])?
+    _vk_into(ops, k, [q.buf, k_buf.buf, v_buf.buf, out.buf], [n_pos, head_dim, dim], n_heads, out)
+
+# Uninitialised device tensor of `shape` (e.g. a KV row buffer).
+pub fn vk_buffer_alloc_tensor(ops: VkOps, shape: [i64]) -> Result<VkTensor, text>:
+    _vk_out_like(ops, shape)
+
+# RoPE on a [n_heads * head_dim] vector at position `pos` (math of tensor_rope);
+# the cos/sin table is computed on the host in f64 and read by the kernel.
+pub fn vk_tensor_rope(ops: VkOps, x: VkTensor, pos: i64, n_heads: i64, head_dim: i64, theta: f64) -> Result<VkTensor, text>:
+    if head_dim < 2 or head_dim % 2 != 0 or n_heads < 1 or x.n != n_heads * head_dim:
+        return Err("Vulkan rope: x of {x.n} does not match {n_heads} heads of {head_dim}")
+    val half = head_dim / 2
+    var table: [f64] = []
+    var sins: [f64] = []
+    var i: i64 = 0
+    while i < half:
+        val ang = (pos as f64) / math_pow(theta, ((2 * i) as f64) / (head_dim as f64))
+        table.push(math_cos(ang))
+        sins.push(math_sin(ang))
+        i = i + 1
+    val k = _vk_kernel(ops, "rope_f32", 3, 12)?
+    val cs = vk_tensor_upload(ops, tensor_from_values(table + sins, [half * 2]))?
+    val out_r = _vk_out_like(ops, x.shape)
+    if out_r.is_err():
+        vk_buffer_free(ops.dev, cs.buf)
+        return Err(out_r.unwrap_err())
+    val out = out_r.unwrap()
+    val pairs = n_heads * half
+    val r = _vk_into(ops, k, [x.buf, cs.buf, out.buf], [pairs, half, head_dim], (pairs + 255) / 256, out)
+    vk_buffer_free(ops.dev, cs.buf)
+    r
+
+# Copy the [dim] vector `row` into row `pos` of the [capacity, dim] buffer, in place.
+pub fn vk_tensor_kv_write(ops: VkOps, buf: VkTensor, pos: i64, row: VkTensor) -> Result<i64, text>:
+    val dim = buf.shape[1]
+    if pos < 0 or (pos + 1) * dim > buf.n or row.n != dim:
+        return Err("Vulkan kv_write: pos {pos} / row size {row.n} does not fit buffer {buf.n} (dim {dim})")
+    val k = _vk_kernel(ops, "kv_write_f32", 2, 8)?
+    vk_dispatch(ops.dev, k, [buf.buf, row.buf], [pos, dim], (dim + 255) / 256)?
+    Ok(0)
+
+# Row `row` of a [rows, cols] device buffer as a new [cols] device tensor.
+pub fn vk_tensor_row(ops: VkOps, table: VkTensor, row: i64) -> Result<VkTensor, text>:
+    val cols = table.shape[1]
+    if row < 0 or (row + 1) * cols > table.n:
+        return Err("Vulkan row: index {row} outside table of {table.n / cols} rows")
+    val k = _vk_kernel(ops, "row_f32", 2, 8)?
+    val out = _vk_out_like(ops, [cols])?
+    _vk_into(ops, k, [table.buf, out.buf], [row, cols], (cols + 255) / 256, out)
+
+# Index of the largest element (lowest index on ties). Only 4 bytes come back.
+pub fn vk_tensor_argmax(ops: VkOps, x: VkTensor) -> Result<i64, text>:
+    if x.n < 1:
+        return Err("Vulkan argmax: empty tensor")
+    val k = _vk_kernel(ops, "argmax_f32", 2, 4)?
+    val out = vk_buffer_alloc(ops.dev, 1)?
+    val launched = vk_dispatch(ops.dev, k, [x.buf, out], [x.n], 1)
+    if launched.is_err():
+        vk_buffer_free(ops.dev, out)
+        return Err(launched.unwrap_err())
+    val got = vk_buffer_download_bytes(ops.dev, out, 4)
+    vk_buffer_free(ops.dev, out)
+    val raw = got?
+    Ok((raw[0] as i64) + (raw[1] as i64) * 256 + (raw[2] as i64) * 65536 + (raw[3] as i64) * 16777216)
+
+# Every op waits for its own submission, so there is nothing pending; kept for
+# shape parity with rocm_ops_sync.
+pub fn vk_ops_sync(ops: VkOps) -> Result<i64, text>:
+    Ok(0)

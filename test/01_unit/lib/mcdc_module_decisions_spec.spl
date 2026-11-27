@@ -1,0 +1,108 @@
+"""Decision/condition extraction and short-circuit-preserving rewrite for MC/DC module coverage."""
+# @req REQ-MCDC-MOD-002
+# design: doc/05_design/generics_coverage_mcdc.md
+
+use std.spec
+use std.nogc_sync_mut.mcdc.module_decisions.*
+
+val SAMPLE_MODULE: text = "# header\nuse std.x.y\n\nfn f(a: bool, b: bool, opt: i64?) -> bool:\n    if val v = opt:\n        return v > 0 and a\n    elif a or b:\n        return true\n    while not a:\n        a = true\n    match a:\n        case true if b and a:\n            return b\n    val k = if a: 1 else: 2\n    return a or b\n"
+
+describe "mcdc decision extraction":
+    it "extracts three conditions and an and/or tree from a and (b or f(x))":
+        step("Parse a decision whose leaf is a call expression")
+        val d = mcdc_parse_decision_expr("a and (b or f(x))")
+        expect(d.kind).to_equal("expr")
+        expect(d.conditions.len()).to_equal(3)
+        expect(d.conditions[0].expr).to_equal("a")
+        expect(d.conditions[1].expr).to_equal("b")
+        expect(d.conditions[2].expr).to_equal("f(x)")
+        expect(d.conditions[2].col).to_equal(13)
+        expect(mcdc_tree_to_postfix(d)).to_equal("c0 c1 c2 | &")
+
+    it "treats comparisons and non-boolean paren groups as single conditions":
+        val d = mcdc_parse_decision_expr("(x + y) > 2 and not g(k) == 3")
+        expect(d.conditions.len()).to_equal(2)
+        expect(d.conditions[0].expr).to_equal("(x + y) > 2")
+        expect(d.conditions[1].expr).to_equal("g(k) == 3")
+        expect(mcdc_tree_to_postfix(d)).to_equal("c0 c1 ! &")
+
+    it "round-trips the tree postfix":
+        val nodes = mcdc_tree_from_postfix("c0 c1 c2 | &")
+        expect(nodes.len()).to_equal(5)
+        expect(nodes[4].kind).to_equal(MNODE_AND)
+        expect(nodes[nodes[4].left].kind).to_equal(MNODE_LEAF)
+        expect(nodes[nodes[4].left].cond).to_equal(0)
+        expect(nodes[nodes[4].right].kind).to_equal(MNODE_OR)
+        expect(mcdc_tree_from_postfix("c0 &").len()).to_equal(0)
+
+    it "rejects malformed expressions":
+        val d = mcdc_parse_decision_expr("a and")
+        expect(d.kind).to_equal("invalid")
+        expect(d.conditions.len()).to_equal(0)
+
+    it "rewrites an if header preserving short-circuit structure":
+        step("Rewrite `if a and (b or f(x)):` into begin/probe/commit calls")
+        val res = mcdc_rewrite_logical_line("    if a and (b or f(x)):", "m.spl", 7, 3)
+        expect(res.decisions.len()).to_equal(1)
+        expect(res.decisions[0].id).to_equal(3)
+        expect(res.decisions[0].line).to_equal(7)
+        expect(res.decisions[0].col).to_equal(8)
+        expect(res.decisions[0].kind).to_equal("if")
+        expect(res.decisions[0].expr).to_equal("a and (b or f(x))")
+        expect(res.next_id).to_equal(4)
+        expect(res.source).to_contain("mcdc_mod_probe(3, 2, (f(x)))")
+        expect(res.source).to_equal("    if mcdc_mod_commit(3, mcdc_mod_begin(3) and (mcdc_mod_probe(3, 0, (a)) and (mcdc_mod_probe(3, 1, (b)) or mcdc_mod_probe(3, 2, (f(x)))))):")
+
+    it "instruments elif, while, guards, if-expressions and boolean chains":
+        step("Instrument a module containing every decision kind")
+        val res = mcdc_instrument_source(SAMPLE_MODULE, "src/m.spl", 0)
+        expect(res.decisions.len()).to_equal(6)
+        expect(res.decisions[0].kind).to_equal("expr")
+        expect(res.decisions[0].expr).to_equal("v > 0 and a")
+        expect(res.decisions[0].line).to_equal(6)
+        expect(res.decisions[1].kind).to_equal("elif")
+        expect(res.decisions[1].line).to_equal(7)
+        expect(res.decisions[2].kind).to_equal("while")
+        expect(res.decisions[2].conditions.len()).to_equal(1)
+        expect(res.decisions[2].conditions[0].expr).to_equal("a")
+        expect(res.decisions[3].kind).to_equal("guard")
+        expect(res.decisions[3].line).to_equal(12)
+        expect(res.decisions[4].kind).to_equal("if_expr")
+        expect(res.decisions[4].conditions.len()).to_equal(1)
+        expect(res.decisions[5].kind).to_equal("expr")
+        expect(res.decisions[5].line).to_equal(15)
+        expect(res.next_id).to_equal(6)
+        expect(res.skipped.len()).to_equal(0)
+        step("Verify: the `use` import is injected before the first existing `use`")
+        expect(res.use_line).to_equal(2)
+        expect(res.lines_out).to_equal(res.lines_in + 1)
+        val out_lines = res.source.split("\n")
+        expect(out_lines[1]).to_equal(MCDC_PROBE_USE_LINE)
+        expect(out_lines[2]).to_equal("use std.x.y")
+        expect(out_lines[5]).to_equal("    if val v = opt:")
+        expect(out_lines[6]).to_equal("        return mcdc_mod_commit(0, mcdc_mod_begin(0) and (mcdc_mod_probe(0, 0, (v > 0)) and mcdc_mod_probe(0, 1, (a))))")
+        expect(out_lines[9]).to_equal("    while mcdc_mod_commit(2, mcdc_mod_begin(2) and (not mcdc_mod_probe(2, 0, (a)))):")
+        expect(out_lines[14]).to_equal("    val k = if mcdc_mod_commit(4, mcdc_mod_begin(4) and (mcdc_mod_probe(4, 0, (a)))): 1 else: 2")
+
+    it "keeps the physical line count when a decision spans lines":
+        val res = mcdc_instrument_source("if (a and\n    b):\n    x = 1\n", "src/m.spl", 0)
+        expect(res.decisions.len()).to_equal(1)
+        expect(res.decisions[0].conditions.len()).to_equal(2)
+        expect(res.use_line).to_equal(1)
+        expect(res.lines_out).to_equal(res.lines_in + 1)
+        val out_lines = res.source.split("\n")
+        expect(out_lines[1]).to_equal("if mcdc_mod_commit(0, mcdc_mod_begin(0) and (mcdc_mod_probe(0, 0, (a)) and mcdc_mod_probe(0, 1, (b)))):")
+        expect(out_lines[2]).to_equal("")
+        expect(out_lines[3]).to_equal("    x = 1")
+
+    it "finds nested decisions inside call arguments":
+        val res = mcdc_rewrite_logical_line("x = f(p or q, 2)", "m.spl", 1, 0)
+        expect(res.decisions.len()).to_equal(1)
+        expect(res.decisions[0].expr).to_equal("p or q")
+        expect(res.source).to_equal("x = f(mcdc_mod_commit(0, mcdc_mod_begin(0) and (mcdc_mod_probe(0, 0, (p)) or mcdc_mod_probe(0, 1, (q)))), 2)")
+
+    it "leaves strings, comments, docstrings and attribute lines untouched":
+        val src = "@cfg(a or b)\n\"\"\"\nif a and b:\n\"\"\"\nval s = \"a and b\"  # x or y\n"
+        val res = mcdc_instrument_source(src, "src/m.spl", 0)
+        expect(res.decisions.len()).to_equal(0)
+        expect(res.source).to_equal(src)

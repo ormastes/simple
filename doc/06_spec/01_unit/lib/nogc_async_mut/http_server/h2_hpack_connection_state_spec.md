@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 11 | 11 | 0 | 0 |
+| 16 | 16 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -16,10 +16,6 @@
 ### HTTP/2 connection HPACK and request validation
 
 #### retains incrementally indexed fields across blocks on one connection
-
-**Manual warnings:**
-- invalid manual visibility metadata: # @manual scenario evidence (expected show, folded, detail, or skip)
-
 
 - retains incrementally indexed fields across blocks on one connection
    - Expected: first.is_ok() is true
@@ -234,6 +230,93 @@ expect(h2_validate_request_headers(invalid_connect).valid).to_equal(false)
 
 </details>
 
+#### allows a matching Host field alongside :authority
+
+- Host and `:authority` may both be present when their values match.
+- This is a validator rule only; mismatch and no-authority validation policy remains open.
+
+```simple
+step("allows a matching Host field alongside :authority")
+val host_only = [
+    header(":method", "GET"), header(":scheme", "https"),
+    header(":path", "/"), header("host", "example.test")
+]
+expect(h2_validate_request_headers(host_only).valid).to_equal(true)
+var duplicate_authority = valid_get_headers()
+duplicate_authority.push(header("host", "example.test"))
+expect(h2_validate_request_headers(duplicate_authority).valid).to_equal(true)
+```
+
+#### canonicalizes matching conflicting and multiple Host fields to :authority
+
+- Matching and conflicting pairs produce a single downstream Host from `:authority`.
+- All incoming Host fields are removed when authority exists; unrelated headers retain their relative order.
+- Authority-only requests synthesize one Host, and each decoded request is drained once.
+
+```simple
+step("canonicalizes matching conflicting and multiple Host fields to :authority")
+val matching = h2_connection_with_headers(20, [
+    header(":method", "GET"), header(":scheme", "https"),
+    header(":path", "/"), header(":authority", "example.test"),
+    header("x-before", "one"), header("host", "example.test"),
+    header("x-after", "two")
+])
+val matching_requests = matching.take_decoded_requests()
+expect(matching_requests.len()).to_equal(1)
+expect(matching_requests[0].1.headers).to_equal([
+    ("x-before", "one"), ("x-after", "two"), ("Host", "example.test")
+])
+```
+
+#### retains Host without :authority and leaves requests with neither unchanged
+
+- Without `:authority`, incoming Host is retained as received.
+- Without either source, extraction adds no Host. This does not establish new validator policy.
+
+```simple
+step("retains Host without :authority and leaves requests with neither unchanged")
+val host_only = h2_connection_with_headers(24, [
+    header(":method", "GET"), header(":scheme", "https"),
+    header(":path", "/"), header("host", "host-only.test")
+])
+val host_only_requests = host_only.take_decoded_requests()
+expect(host_only_requests.len()).to_equal(1)
+expect(host_only_requests[0].1.headers).to_equal([("host", "host-only.test")])
+```
+
+#### preserves OPTIONS star authority and no-authority behavior
+
+- OPTIONS `*` with authority gets one synthesized Host.
+- OPTIONS `*` without authority keeps its other headers and gets no Host.
+
+```simple
+step("preserves OPTIONS star authority and no-authority behavior")
+val with_authority = h2_connection_with_headers(26, [
+    header(":method", "OPTIONS"), header(":scheme", "https"),
+    header(":path", "*"), header(":authority", "options.test")
+])
+val with_authority_requests = with_authority.take_decoded_requests()
+expect(with_authority_requests.len()).to_equal(1)
+expect(with_authority_requests[0].1.path).to_equal("*")
+expect(with_authority_requests[0].1.headers).to_equal([("Host", "options.test")])
+```
+
+#### keeps CONNECT validation controls while canonicalizing valid authority
+
+- Valid CONNECT with authority uses that value for downstream Host.
+- Host-only CONNECT and CONNECT containing scheme/path remain rejected.
+
+```simple
+step("keeps CONNECT validation controls while canonicalizing valid authority")
+val valid_connect = h2_connection_with_headers(28, [
+    header(":method", "CONNECT"), header(":authority", "connect.test:443"),
+    header("host", "other.test:443")
+])
+val valid_requests = valid_connect.take_decoded_requests()
+expect(valid_requests.len()).to_equal(1)
+expect(valid_requests[0].1.headers).to_equal([("Host", "connect.test:443")])
+```
+
 #### accepts only matching CONTINUATION frames inside an open envelope
 
 - accepts only matching CONTINUATION frames inside an open envelope
@@ -353,7 +436,7 @@ expect(wrong_stream.is_goaway_sent()).to_equal(true)
 | Category | Standard Library |
 | Status | Active |
 | Source | `test/01_unit/lib/nogc_async_mut/http_server/h2_hpack_connection_state_spec.spl` |
-| Updated | 2026-08-26 |
+| Updated | 2026-10-27 |
 | Generator | `simple spipe-docgen` (Simple) |
 
 ## Overview
@@ -365,8 +448,8 @@ Tests covering HTTP/2 connection HPACK and request validation.
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 11 |
-| Active scenarios | 11 |
+| Total scenarios | 16 |
+| Active scenarios | 16 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
@@ -385,42 +468,13 @@ Requirements covered by the scenarios in this manual:
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `274fdbc118e1c5da05c396081ed2a1ab3d946f5cb27aff6a9d0f1a0429d1141c`; maintenance tool `1`, rules `ssdoc-rules/1`.
-
-Source SHA-256: `274fdbc118e1c5da05c396081ed2a1ab3d946f5cb27aff6a9d0f1a0429d1141c`.
+Manually synchronized with the executable spec because no admitted self-hosted
+runner was available for canonical doc generation in this change. The targeted
+spec and maintenance scorecard were not run.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `274fdbc118e1c5da05c396081ed2a1ab3d946f5cb27aff6a9d0f1a0429d1141c`  
-Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **86/100**; effective score: **86/100**; blockers: **0**.
-
-SSpec documentization score: 86/100
-source: test/01_unit/lib/nogc_async_mut/http_server/h2_hpack_connection_state_spec.spl
-mirror: doc/06_spec/01_unit/lib/nogc_async_mut/http_server/h2_hpack_connection_state_spec.md (current)
-findings: 6 blockers: 0
-  narrative=100 structure=100 oracle=70
-  traceability=100 evidence=70 coverage=100 maintainability=70
-  cache=not-used suppressed=0
-  lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
-doc/06_spec/01_unit/lib/nogc_async_mut/http_server/h2_hpack_connection_state_spec.md:1:1: advice SSDOC-MNT-005 [maintainability] (-10): generated manual lacks verification or troubleshooting guidance
-  why: Operators need recovery and evidence interpretation guidance.
-  improve: Author verification and recovery facts in SSpec and regenerate.
-doc/06_spec/01_unit/lib/nogc_async_mut/http_server/h2_hpack_connection_state_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: purpose, audience, scope, assumptions/preconditions, primary workflow, unsupported/limitations, recovery/troubleshooting
-  why: A test dump is not a complete professional specification manual.
-  improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
-test/01_unit/lib/nogc_async_mut/http_server/h2_hpack_connection_state_spec.spl:1:1: advice SSDOC-ORA-003 [oracle] (-30): 3 unexplained numeric expected value(s)
-  why: Reviewers need to know why a magic expected value is authoritative.
-  improve: Name the authoritative expected value or add a '# oracle:' explanation.
-test/01_unit/lib/nogc_async_mut/http_server/h2_hpack_connection_state_spec.spl:35:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'retains incrementally indexed fields across blocks on one connection' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/lib/nogc_async_mut/http_server/h2_hpack_connection_state_spec.spl:52:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'rejects dynamic table growth above the connection limit' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-test/01_unit/lib/nogc_async_mut/http_server/h2_hpack_connection_state_spec.spl:60:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'rejects a table size update after a header field' has no retained capture or evidence
-  why: Professional manuals need retained observable evidence.
-  improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
+Status: NOT RUN; score is unavailable without the admitted runner.
 <!-- sspec-maintain:scorecard:end -->

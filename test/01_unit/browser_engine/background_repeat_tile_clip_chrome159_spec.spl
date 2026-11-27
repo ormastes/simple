@@ -1,0 +1,48 @@
+"""
+## Purpose and audience
+Purpose: Pin that a repeating background image stays inside its own
+background painting area on the raster lane (Chrome 159). With a border, the
+first tile starts left of and above the origin box. Every tile must still be
+clipped to the box, never to the ancestor's clip.
+Audience: maintainers of the web raster paint path.
+"""
+
+"""
+Traceability: doc/08_tracking/bug/web_layout_cascade_selector_paint_chrome159_round4_divergences_2026-11-15.md
+(repeating gradient tiles bleed out of a bordered box).
+Chrome pixels come from headless Chromium 1255 at 1x. The left box is a
+solid red sibling painted before the bordered gradient box.
+"""
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_software_pixels
+}
+
+fn rtc_html(angle: text) -> text:
+    "<!DOCTYPE html><html><body style='margin:0;background:#000'><div style='display:flex'><div style='width:40px;height:40px;background:#ff0000'></div><div style='width:60px;height:40px;border:1px solid #888;background:linear-gradient(" + angle + ", rgba(255,255,255,0.5), rgba(255,255,255,0.1))'></div></div></body></html>"
+
+# Each entry: x, y, r, g, b (Chrome 159).
+fn rtc_mismatches(angle: text, want: [i32]) -> i32:
+    val px = simple_web_layout_render_html_software_pixels(rtc_html(angle), 120, 60, 600000)
+    if px.len() < 120 * 60:
+        return -1
+    var bad = 0
+    var i = 0
+    while i < want.len():
+        val p = px[want[i + 1] * 120 + want[i]]
+        var c = 0
+        while c < 3:
+            val sh = (16 - c * 8) as u32
+            val d = ((p >> sh) & 0xFFu32) as i32 - want[i + 2 + c]
+            if d > 2 or d < -2:
+                bad = bad + 1
+            c = c + 1
+        i = i + 5
+    bad
+
+describe "repeating background tiles stay in their box (Chrome 159)":
+    it "180deg two-stop gradient: the red sibling keeps its colour":
+        expect(rtc_mismatches("180deg", [20, 20, 255, 0, 0, 5, 5, 255, 0, 0, 60, 10, 103, 103, 103, 60, 30, 52, 52, 52])).to_equal(0)
+
+    it "90deg gradient (general raster): the red sibling keeps its colour":
+        expect(rtc_mismatches("90deg", [20, 20, 255, 0, 0, 5, 5, 255, 0, 0, 45, 20, 120, 120, 120, 90, 20, 44, 44, 44])).to_equal(0)

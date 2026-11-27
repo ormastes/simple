@@ -1,8 +1,20 @@
 # CUDA backend requires 2 args for gpu_warp_ballot but codegen (and the intrinsic's real signature) only uses 1
-## Open 2026-09-16 — needs owner triage
+## RESOLVED (verified 2026-11-25) — the 2026-09-16 "Open" banner below is stale bookkeeping
 
-Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
-evidence found in the body. This is bookkeeping, not verification.
+**Verification 2026-11-25 (work/p2w1-af-20261125, release/1.0.0, Windows,
+Rust seed v1.0.0-rc.1):** the suggested fix is already in the tree.
+`src/compiler/70.backend/backend/cuda_backend.spl:1661` places
+`"gpu_warp_ballot"` in the 1-argument arm of `validate_intrinsic`
+(`required_args = 1`, alongside `sin`/`cos`/`gpu_warp_reduce_add`/...), with an
+explicit comment at :1654 ("Arity must match what emit_intrinsic actually
+reads. `gpu_warp_ballot` ..."). Ran
+`SIMPLE_LIB=src bin/simple.exe test
+test/01_unit/compiler/codegen/subgroup_intrinsics_contract_spec.spl
+--mode=interpreter` -> **24 total, 24 passed, 0 failed**, including "emits
+vote.sync.ballot.b32 for gpu_warp_ballot". (Run required a local, reverted
+strip of `@representation_boundary` decorator lines — the release/1.0.0
+source/binary inconsistency; no source was changed.) Status: **STALE /
+CLOSED**.
 
 **Status:** Open
 **Category:** GENUINE-BUG (backend arity-validation bug, precisely root-caused)

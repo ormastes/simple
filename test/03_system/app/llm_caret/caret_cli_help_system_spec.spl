@@ -1,0 +1,76 @@
+# @cover src/app/llm_caret/main.spl 10%
+# @cover src/app/llm_caret/workspace_cli.spl 20%
+"""
+## Purpose and audience
+An operator who types `llm_caret --help` or `llm_caret workspace help` is
+asking a question, not making a mistake: the answer must come back with exit
+status 0 and a usage line that names the program they can actually run. A
+command line that is missing its command is a mistake and keeps exit status 2,
+so scripts can tell the two apart.
+## Operator workflow
+Every example spawns the real CLI as a child process. By default that is
+`bin/simple run src/app/llm_caret/main.spl`; set `LLM_CARET_NATIVE_BIN` to a
+prebuilt native `llm_caret` binary to run the same scenarios against it:
+bin/simple test test/03_system/app/llm_caret/caret_cli_help_system_spec.spl
+## Compatibility and limitations
+No tmux, network or provider is needed: help and usage are answered before
+any pane backend is probed.
+## Verification guidance and troubleshooting
+An exit-status failure means the help/usage split in
+`src/app/llm_caret/workspace_cli.spl` drifted; a usage-line failure means the
+help text names a launch form the operator did not use.
+"""
+# @tag: system, llm_caret, cli, help
+
+use std.spec.{describe, it, expect, step}
+use app.io.mod.{process_run}
+use test.support.llm_caret_cli.{caret_cli_program, caret_cli_args}
+
+struct HelpRun:
+    code: i64
+    out: text
+
+fn _caret(args: [text]) -> HelpRun:
+    val (out, err, code) = process_run(caret_cli_program("bin/simple"), caret_cli_args(args))
+    HelpRun(code: code, out: out + err)
+
+# @manual_section: caret-cli-help
+describe "LLM Caret CLI help":
+    it "answers --help with exit 0 and a usage line naming llm_caret":
+        # @req REQ-LLMCARET-CLI-HELP-001
+        step("Ask the top-level CLI for help")
+        val r = _caret(["--help"])
+        step("Help is a successful answer whose usage line names the program, not a launch recipe")
+        expect(r.code).to_equal(0)  # oracle: an explicit help request is not an error
+        expect(r.out).to_contain("Usage: llm_caret [options]")
+        expect(r.out.contains("Usage: simple run")).to_equal(false)
+        expect(r.out).to_contain("--provider")
+
+    it "answers `workspace help` and `workspace --help` with exit 0":
+        # @req REQ-LLMCARET-CLI-HELP-002
+        for form in [["workspace", "help"], ["workspace", "--help"], ["workspace", "-h"],
+                ["workspace", "team-1", "help"], ["workspace", "team-1", "--help"]]:
+            step("Ask the workspace toolset for help")
+            val r = _caret(form)
+            step("The workspace usage comes back as a successful answer")
+            expect(r.code).to_equal(0)  # oracle: an explicit help request is not an error
+            expect(r.out).to_contain("Usage: llm_caret workspace")
+            expect(r.out).to_contain("broadcast <cmd...>")
+
+    it "keeps exit 2 when the workspace command is missing":
+        # @req REQ-LLMCARET-CLI-HELP-003
+        step("Invoke workspace with no id and no command")
+        val bare = _caret(["workspace"])
+        expect(bare.code).to_equal(2)  # oracle: usage errors exit 2 by the CLI contract
+        expect(bare.out).to_contain("Usage: llm_caret workspace")
+        step("Invoke workspace with an id but no command")
+        val no_cmd = _caret(["workspace", "team-1"])
+        expect(no_cmd.code).to_equal(2)  # oracle: usage errors exit 2 by the CLI contract
+        expect(no_cmd.out).to_contain("Usage: llm_caret workspace")
+
+    it "keeps exit 2 for an unknown top-level option":
+        # @req REQ-LLMCARET-CLI-HELP-004
+        step("Pass an option the CLI does not know")
+        val r = _caret(["--definitely-unknown"])
+        expect(r.code).to_equal(2)  # oracle: usage errors exit 2 by the CLI contract
+        expect(r.out).to_contain("unknown option")

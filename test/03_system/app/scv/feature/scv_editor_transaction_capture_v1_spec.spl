@@ -1,0 +1,295 @@
+"""SCV editor capture V1 validates the editor spool before exporting proposals.
+
+The capture adapter consumes only complete, stable records from the existing
+editor IPC codec. Returned editor events are proposals and hints. They do not
+prove that a save, rename, refactor, or filesystem effect happened.
+"""
+use std.spec.{describe, it, expect, step}
+use app.io.mod (file_exists, file_read, file_write, dir_create, dir_remove_all)
+use std.nogc_sync_mut.io.file_ops.{file_write_bytes}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir}
+use std.scv.editor_transaction_capture_v1.{scv_editor_capture_open_v1, scv_editor_capture_poll_v1}
+
+fn _ide_capture_fixture(tag: text) -> (text, text):
+    val root = secure_temp_dir("/tmp", "scv-editor-capture-system-{tag}-").unwrap()
+    dir_create("{root}/.scv/journal", true)
+    (root, "{root}/editor.spool")
+
+describe "SCV editor transaction capture V1 system contract":
+    # @manual scenario evidence
+    it "accepts a complete append and ignores a later repeated poll":
+        # @req REQ-SCV-EDITOR-CAPTURE-01
+        step("write one complete editor record to a real spool file")
+        val (root, spool) = _ide_capture_fixture("append")
+        file_write(spool, "edit\tsrc/main.spl\t\tlet answer = 42\n")
+        val opened = scv_editor_capture_open_v1(spool)
+        step("poll once and inspect the exact proposal")
+        val first = scv_editor_capture_poll_v1(opened)
+        expect(first.origin).to_equal("ide")
+        expect(first.completeness).to_equal("complete")
+        expect(first.events.len()).to_equal(1)
+        expect(first.events[0].path).to_equal("src/main.spl")
+        expect(first.events[0].payload).to_equal("let answer = 42")
+        expect(first.proposed_only).to_equal(true)
+        step("repeat the poll and confirm no event is duplicated")
+        val repeated = scv_editor_capture_poll_v1(first.state)
+        expect(repeated.events.len()).to_equal(0)
+        expect(repeated.completeness).to_equal("complete")
+        dir_remove_all(root)
+
+    it "carries save and refactor transactions across poll boundaries":
+        # @req REQ-SCV-EDITOR-CAPTURE-01
+        step("poll a save_begin record and retain its open transaction")
+        val (root, spool) = _ide_capture_fixture("cross-poll")
+        file_write(spool, "save_begin\tsrc/a\t\t\n")
+        val first = scv_editor_capture_poll_v1(scv_editor_capture_open_v1(spool))
+        expect(first.events.len()).to_equal(1)
+        expect(first.completeness).to_equal("incomplete")
+        expect(first.diagnostics.contains("editor-transaction-open")).to_equal(true)
+        step("append a matching save_end and confirm the transaction closes")
+        file_write(spool, "save_begin\tsrc/a\t\t\nsave_end\tsrc/a\t\t\n")
+        val saved = scv_editor_capture_poll_v1(first.state)
+        expect(saved.events.len()).to_equal(1)
+        expect(saved.events[0].kind).to_equal("save_end")
+        expect(saved.completeness).to_equal("complete")
+        dir_remove_all(root)
+        step("a refactor entity group also stays open until a later end marker")
+        val (root2, spool2) = _ide_capture_fixture("refactor-cross-poll")
+        file_write(spool2, "refactor_begin\tmove-3\t\t\nrefactor_entity\tentity-9\t\tmove\n")
+        val refactor_open = scv_editor_capture_poll_v1(scv_editor_capture_open_v1(spool2))
+        expect(refactor_open.events.len()).to_equal(0)
+        expect(refactor_open.completeness).to_equal("incomplete")
+        file_write(spool2, "refactor_begin\tmove-3\t\t\nrefactor_entity\tentity-9\t\tmove\nrefactor_end\t\t\t\n")
+        val refactor_closed = scv_editor_capture_poll_v1(refactor_open.state)
+        expect(refactor_closed.events.len()).to_equal(1)
+        expect(refactor_closed.events[0].kind).to_equal("refactor_txn")
+        expect(refactor_closed.events[0].entities[0]).to_equal("entity-9\tmove")
+        expect(refactor_closed.completeness).to_equal("complete")
+        dir_remove_all(root2)
+
+    it "does not emit an earlier valid record from a batch with a malformed suffix":
+        # @req REQ-SCV-EDITOR-CAPTURE-02
+        step("accept initial editor bytes before presenting a later invalid batch")
+        val (root, spool) = _ide_capture_fixture("atomic")
+        file_write(spool, "buffer_open\tsrc/a\t\told bytes\n")
+        val initial = scv_editor_capture_poll_v1(scv_editor_capture_open_v1(spool))
+        expect(initial.events.len()).to_equal(1)
+        step("append a valid edit followed by a malformed record")
+        file_write(spool, "buffer_open\tsrc/a\t\told bytes\nedit\tsrc/a\t\tnew bytes\nedit\tsrc/b\textra\n")
+        val result = scv_editor_capture_poll_v1(initial.state)
+        expect(result.events.len()).to_equal(0)
+        expect(result.completeness).to_equal("needs_reconciliation")
+        expect(result.diagnostics.contains("editor-record-field-count")).to_equal(true)
+        step("the rejected batch leaves previously accepted editor bytes unchanged")
+        expect(result.state.ipc.buffers.len()).to_equal(1)
+        expect(result.state.ipc.buffers[0].bytes).to_equal("old bytes")
+        dir_remove_all(root)
+
+    it "refuses a rename that would shadow another open editor buffer":
+        # @req REQ-SCV-EDITOR-CAPTURE-02
+        step("open two buffers then propose renaming the first onto the second")
+        val (root, spool) = _ide_capture_fixture("rename-collision")
+        file_write(spool, "buffer_open\tsrc/a\t\tbytes A\nbuffer_open\tsrc/b\t\tbytes B\npath_rename\tsrc/a\tsrc/b\t\n")
+        val result = scv_editor_capture_poll_v1(scv_editor_capture_open_v1(spool))
+        expect(result.events.len()).to_equal(0)
+        expect(result.completeness).to_equal("needs_reconciliation")
+        expect(result.diagnostics.contains("editor-rename-target-open")).to_equal(true)
+        dir_remove_all(root)
+
+    it "refuses a rename onto an open target when the source buffer is closed":
+        # @req REQ-SCV-EDITOR-CAPTURE-02
+        step("open only the target buffer and propose an unopened source rename onto it")
+        val (root, spool) = _ide_capture_fixture("closed-source-rename-collision")
+        file_write(spool, "buffer_open\tsrc/b\t\ttarget bytes\npath_rename\tsrc/a\tsrc/b\t\n")
+        val same_poll = scv_editor_capture_poll_v1(scv_editor_capture_open_v1(spool))
+        expect(same_poll.events.len()).to_equal(0)
+        expect(same_poll.completeness).to_equal("needs_reconciliation")
+        expect(same_poll.diagnostics.contains("editor-rename-target-open")).to_equal(true)
+        dir_remove_all(root)
+        step("preserve a previously accepted target buffer when the later rename is ambiguous")
+        val (root2, spool2) = _ide_capture_fixture("closed-source-rename-cross-poll")
+        file_write(spool2, "buffer_open\tsrc/b\t\ttarget bytes\n")
+        val opened = scv_editor_capture_poll_v1(scv_editor_capture_open_v1(spool2))
+        expect(opened.completeness).to_equal("complete")
+        val accepted_prefix = opened.state.verified_prefix
+        file_write(spool2, "buffer_open\tsrc/b\t\ttarget bytes\npath_rename\tsrc/a\tsrc/b\t\n")
+        val later = scv_editor_capture_poll_v1(opened.state)
+        expect(later.events.len()).to_equal(0)
+        expect(later.completeness).to_equal("needs_reconciliation")
+        expect(later.diagnostics.contains("editor-rename-target-open")).to_equal(true)
+        expect(later.state.ipc.buffers.len()).to_equal(1)
+        expect(later.state.ipc.buffers[0].bytes).to_equal("target bytes")
+        expect(later.state.verified_prefix).to_equal(accepted_prefix)
+        dir_remove_all(root2)
+
+    it "preserves a self-rename within the same open editor buffer":
+        # @req REQ-SCV-EDITOR-CAPTURE-02
+        step("open a buffer and report a rename from that path back to itself")
+        val (root, spool) = _ide_capture_fixture("self-rename")
+        file_write(spool, "buffer_open\tsrc/a\t\tbytes\npath_rename\tsrc/a\tsrc/a\t\n")
+        val result = scv_editor_capture_poll_v1(scv_editor_capture_open_v1(spool))
+        expect(result.events.len()).to_equal(2)
+        expect(result.events[1].kind).to_equal("path_rename")
+        expect(result.completeness).to_equal("complete")
+        expect(result.state.ipc.buffers.len()).to_equal(1)
+        expect(result.state.ipc.buffers[0].path).to_equal("src/a")
+        expect(result.state.ipc.buffers[0].bytes).to_equal("bytes")
+        dir_remove_all(root)
+
+    it "waits for a split final line and emits it after the terminating newline":
+        # @req REQ-SCV-EDITOR-CAPTURE-01
+        step("write one full record and one incomplete appended record")
+        val (root, spool) = _ide_capture_fixture("split")
+        file_write(spool, "buffer_open\tsrc/a.spl\t\told\nedit\tsrc/a.spl\t\tnew")
+        val first = scv_editor_capture_poll_v1(scv_editor_capture_open_v1(spool))
+        expect(first.events.len()).to_equal(1)
+        expect(first.events[0].payload).to_equal("old")
+        expect(first.completeness).to_equal("incomplete")
+        expect(first.diagnostics.contains("editor-spool-record-pending")).to_equal(true)
+        step("complete the same spool record, then poll the preserved cursor")
+        file_write(spool, "buffer_open\tsrc/a.spl\t\told\nedit\tsrc/a.spl\t\tnew\n")
+        val second = scv_editor_capture_poll_v1(first.state)
+        expect(second.events.len()).to_equal(1)
+        expect(second.events[0].kind).to_equal("edit")
+        expect(second.events[0].payload).to_equal("new")
+        expect(second.completeness).to_equal("complete")
+        dir_remove_all(root)
+
+    it "fails closed after a complete-prefix truncation or rewrite":
+        # @req REQ-SCV-EDITOR-CAPTURE-02
+        step("accept a verified prefix, then replace it with different bytes")
+        val (root, spool) = _ide_capture_fixture("rewrite")
+        file_write(spool, "edit\tsrc/a.spl\t\tone\n")
+        val first = scv_editor_capture_poll_v1(scv_editor_capture_open_v1(spool))
+        expect(first.events.len()).to_equal(1)
+        file_write(spool, "edit\tsrc/a.spl\t\ttwo\n")
+        val changed = scv_editor_capture_poll_v1(first.state)
+        expect(changed.events.len()).to_equal(0)
+        expect(changed.completeness).to_equal("needs_reconciliation")
+        expect(changed.diagnostics.contains("editor-spool-prefix-changed")).to_equal(true)
+        step("a poisoned cursor continues to refuse new editor proposals")
+        file_write(spool, "edit\tsrc/a.spl\t\ttwo\nedit\tsrc/a.spl\t\tthree\n")
+        val refused = scv_editor_capture_poll_v1(changed.state)
+        expect(refused.events.len()).to_equal(0)
+        expect(refused.completeness).to_equal("needs_reconciliation")
+        dir_remove_all(root)
+        step("a shorter spool is also a reconciliation event")
+        val (root2, spool2) = _ide_capture_fixture("truncate")
+        file_write(spool2, "edit\tsrc/a\t\tone\n")
+        val accepted = scv_editor_capture_poll_v1(scv_editor_capture_open_v1(spool2))
+        expect(accepted.events.len()).to_equal(1)
+        file_write(spool2, "")
+        val truncated = scv_editor_capture_poll_v1(accepted.state)
+        expect(truncated.events.len()).to_equal(0)
+        expect(truncated.completeness).to_equal("needs_reconciliation")
+        expect(truncated.diagnostics.contains("editor-spool-prefix-changed")).to_equal(true)
+        dir_remove_all(root2)
+
+    it "refuses malformed escapes, wrong field counts, and unknown record kinds":
+        # @req REQ-SCV-EDITOR-CAPTURE-02
+        step("try each unsupported record form in a fresh spool")
+        for (tag, record) in [("escape", "edit\tsrc/a\t\tbad\\q\n"),
+                ("fields", "edit\tsrc/a\textra\n"),
+                ("kind", "pretend_saved\tsrc/a\t\tbytes\n")]:
+            val (root, spool) = _ide_capture_fixture(tag)
+            file_write(spool, record)
+            val result = scv_editor_capture_poll_v1(scv_editor_capture_open_v1(spool))
+            expect(result.events.len()).to_equal(0)
+            expect(result.completeness).to_equal("needs_reconciliation")
+            dir_remove_all(root)
+
+    it "refuses invalid UTF-8 and over-limit record counts before decoding":
+        # @req REQ-SCV-EDITOR-CAPTURE-02
+        step("write a byte sequence that cannot be a UTF-8 editor record")
+        val (root, spool) = _ide_capture_fixture("utf8-invalid")
+        file_write_bytes(spool, [255])
+        val invalid = scv_editor_capture_poll_v1(scv_editor_capture_open_v1(spool))
+        expect(invalid.events.len()).to_equal(0)
+        expect(invalid.completeness).to_equal("needs_reconciliation")
+        expect(invalid.diagnostics.contains("editor-spool-utf8-invalid")).to_equal(true)
+        dir_remove_all(root)
+        step("the record bound is checked before the wire records are split")
+        val (root2, spool2) = _ide_capture_fixture("record-limit")
+        var many_records: [u8] = []
+        var index = 0
+        while index < 32769:
+            many_records = many_records.push(10)
+            index = index + 1
+        file_write_bytes(spool2, many_records)
+        val too_many = scv_editor_capture_poll_v1(scv_editor_capture_open_v1(spool2))
+        expect(too_many.events.len()).to_equal(0)
+        expect(too_many.completeness).to_equal("needs_reconciliation")
+        expect(too_many.diagnostics.contains("editor-spool-record-limit")).to_equal(true)
+        dir_remove_all(root2)
+
+    it "rejects unmatched and nested save or refactor transaction markers":
+        # @req REQ-SCV-EDITOR-CAPTURE-02
+        step("an unmatched save_end cannot become an accepted editor event")
+        val (root, spool) = _ide_capture_fixture("unmatched")
+        file_write(spool, "save_end\tsrc/a\t\t\n")
+        val unmatched = scv_editor_capture_poll_v1(scv_editor_capture_open_v1(spool))
+        expect(unmatched.events.len()).to_equal(0)
+        expect(unmatched.completeness).to_equal("needs_reconciliation")
+        dir_remove_all(root)
+        step("nested refactor_begin markers cannot be silently grouped")
+        val (root2, spool2) = _ide_capture_fixture("nested")
+        file_write(spool2, "refactor_begin\tmove-1\t\t\nrefactor_begin\tmove-2\t\t\n")
+        val nested = scv_editor_capture_poll_v1(scv_editor_capture_open_v1(spool2))
+        expect(nested.events.len()).to_equal(0)
+        expect(nested.completeness).to_equal("needs_reconciliation")
+        dir_remove_all(root2)
+
+    it "groups refactor hints and marks a disconnected half transaction incomplete":
+        # @req REQ-SCV-EDITOR-CAPTURE-02
+        step("a complete refactor marker group produces one hint event")
+        val (root, spool) = _ide_capture_fixture("refactor")
+        file_write(spool, "refactor_begin\tmove-1\t\t\nrefactor_entity\tentity-7\t\tmove-to-new\nrefactor_end\t\t\t\n")
+        val grouped = scv_editor_capture_poll_v1(scv_editor_capture_open_v1(spool))
+        expect(grouped.events.len()).to_equal(1)
+        expect(grouped.events[0].kind).to_equal("refactor_txn")
+        expect(grouped.events[0].entities.len()).to_equal(1)
+        expect(grouped.events[0].entities[0]).to_equal("entity-7\tmove-to-new")
+        expect(grouped.proposed_only).to_equal(true)
+        dir_remove_all(root)
+        step("a disconnect marker cannot close an active refactor transaction")
+        val (root2, spool2) = _ide_capture_fixture("disconnect")
+        file_write(spool2, "refactor_begin\tmove-2\t\t\nflush\t\t\t\n")
+        val disconnected = scv_editor_capture_poll_v1(scv_editor_capture_open_v1(spool2))
+        expect(disconnected.events.len()).to_equal(0)
+        expect(disconnected.completeness).to_equal("needs_reconciliation")
+        expect(disconnected.diagnostics.contains("editor-disconnected-during-transaction")).to_equal(true)
+        dir_remove_all(root2)
+
+    it "retains unsaved editor bytes as proposals while rename remains a hint":
+        # @req REQ-SCV-EDITOR-CAPTURE-03
+        step("write disk content and send buffer plus rename proposals")
+        val (root, spool) = _ide_capture_fixture("hint")
+        file_write("{root}/old.spl", "disk bytes")
+        file_write(spool, "buffer_open\t{root}/old.spl\t\tunsaved bytes\npath_rename\t{root}/old.spl\t{root}/new.spl\t\n")
+        val result = scv_editor_capture_poll_v1(scv_editor_capture_open_v1(spool))
+        expect(result.events.len()).to_equal(2)
+        expect(result.events[0].payload).to_equal("unsaved bytes")
+        expect(result.events[1].kind).to_equal("path_rename")
+        expect(result.events[1].path2).to_equal("{root}/new.spl")
+        expect(result.proposed_only).to_equal(true)
+        step("verify the filesystem did not change as a side effect of intake")
+        expect(file_exists("{root}/old.spl")).to_equal(true)
+        expect(file_read("{root}/old.spl")).to_equal("disk bytes")
+        expect(file_exists("{root}/new.spl")).to_equal(false)
+        dir_remove_all(root)
+
+    it "does not mutate the event journal or claim save effects":
+        # @req REQ-SCV-EDITOR-CAPTURE-03
+        step("place a save bracket beside an existing journal sentinel")
+        val (root, spool) = _ide_capture_fixture("journal")
+        val journal = "{root}/.scv/journal/events.log"
+        file_write(journal, "sentinel=unchanged\n")
+        file_write(spool, "save_begin\tsrc/a\t\t\nsave_end\tsrc/a\t\t\n")
+        val result = scv_editor_capture_poll_v1(scv_editor_capture_open_v1(spool))
+        expect(result.events.len()).to_equal(2)
+        expect(result.events[0].kind).to_equal("save_begin")
+        expect(result.events[1].kind).to_equal("save_end")
+        expect(result.proposed_only).to_equal(true)
+        step("confirm the journal bytes remain untouched")
+        expect(file_read(journal)).to_equal("sentinel=unchanged\n")
+        dir_remove_all(root)

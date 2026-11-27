@@ -32,9 +32,11 @@
 #include <time.h>
 #include <sched.h>
 
-/* Forward declarations for SplArray (defined in runtime.h / runtime.c) */
+/* Forward declarations for SplArray. spl_array_new (not the runtime.c-only
+ * spl_array_new_i64 alias) so the core-C bundle, which excludes runtime.c,
+ * defines everything this file references. */
 typedef struct SplArray SplArray;
-SplArray* spl_array_new_i64(void);
+SplArray* spl_array_new(void);
 void      spl_array_push_i64(SplArray* a, int64_t n);
 
 /* ===== Internal Constants ===== */
@@ -587,6 +589,16 @@ static int64_t ep_flush(spl_driver* d) {
 
 /* --- Poll --- */
 
+/* A network op finished on `fd`: drop the fd's interest, retire the op, and
+ * emit `c`. Order matters: `c` already owns any recv buffer taken from `op`. */
+static void ep_finish_net_op(epoll_driver* ed, int fd, pending_op* op,
+                             spl_completion c, spl_completion* out,
+                             int64_t* count) {
+    epoll_ctl(ed->epoll_fd, EPOLL_CTL_DEL, fd, NULL);
+    map_remove(ed, op);
+    out[(*count)++] = c;
+}
+
 static int64_t ep_poll(spl_driver* d, spl_completion* out,
                         int64_t max, int64_t timeout_ms) {
     epoll_driver* ed = (epoll_driver*)d;
@@ -662,9 +674,7 @@ static int64_t ep_poll(spl_driver* d, spl_completion* out,
             c.id     = aop->op_id;
             c.result = (client >= 0) ? client : -errno;
             /* Keep listening: re-register for next accept is caller's job */
-            epoll_ctl(ed->epoll_fd, EPOLL_CTL_DEL, fd, NULL);
-            map_remove(ed, aop);
-            out[count++] = c;
+            ep_finish_net_op(ed, fd, aop, c, out, &count);
             continue;
         }
 
@@ -676,9 +686,7 @@ static int64_t ep_poll(spl_driver* d, spl_completion* out,
             getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &elen);
             c.id     = cop->op_id;
             c.result = (err == 0) ? 0 : -err;
-            epoll_ctl(ed->epoll_fd, EPOLL_CTL_DEL, fd, NULL);
-            map_remove(ed, cop);
-            out[count++] = c;
+            ep_finish_net_op(ed, fd, cop, c, out, &count);
             continue;
         }
 
@@ -695,9 +703,7 @@ static int64_t ep_poll(spl_driver* d, spl_completion* out,
                 c.data_len = n;
                 rop->buf   = NULL;
             }
-            epoll_ctl(ed->epoll_fd, EPOLL_CTL_DEL, fd, NULL);
-            map_remove(ed, rop);
-            out[count++] = c;
+            ep_finish_net_op(ed, fd, rop, c, out, &count);
             continue;
         }
 
@@ -707,9 +713,7 @@ static int64_t ep_poll(spl_driver* d, spl_completion* out,
             ssize_t n = send(fd, sop->buf, (size_t)sop->buf_len, MSG_NOSIGNAL);
             c.id     = sop->op_id;
             c.result = (n >= 0) ? n : -errno;
-            epoll_ctl(ed->epoll_fd, EPOLL_CTL_DEL, fd, NULL);
-            map_remove(ed, sop);
-            out[count++] = c;
+            ep_finish_net_op(ed, fd, sop, c, out, &count);
             continue;
         }
 
@@ -720,9 +724,7 @@ static int64_t ep_poll(spl_driver* d, spl_completion* out,
             ssize_t n = sendfile(fd, sfop->file_fd, &off, (size_t)sfop->buf_len);
             c.id     = sfop->op_id;
             c.result = (n >= 0) ? n : -errno;
-            epoll_ctl(ed->epoll_fd, EPOLL_CTL_DEL, fd, NULL);
-            map_remove(ed, sfop);
-            out[count++] = c;
+            ep_finish_net_op(ed, fd, sfop, c, out, &count);
             continue;
         }
 
@@ -927,7 +929,7 @@ int64_t rt_epoll_ctl(int64_t epfd, int64_t op, int64_t fd, int64_t events) {
 }
 
 SplArray* rt_epoll_wait(int64_t epfd, int64_t max_events, int64_t timeout_ms) {
-    SplArray* result = spl_array_new_i64();
+    SplArray* result = spl_array_new();
 
     int n = (int)max_events;
     if (n > EPOLL_MAX_EVENTS) n = EPOLL_MAX_EVENTS;

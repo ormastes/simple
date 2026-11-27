@@ -1,0 +1,118 @@
+# Pure pre-native rejection cases. SOURCE-ONLY NOT_RUN.
+# Fixture baseline/policy/runtime values are SYNTHETIC validation inputs, never
+# actual native observations, installed-binary evidence, authority or ready facts.
+use std.spec.*
+use std.common.contracts.container.execution_v2.{ContainerExecutionRequestV2, ContainerHostObservationV2}
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.contracts.container.windows_stream_v3.WindowsContainerStreamPolicyV3
+use std.nogc_async_mut.container.providers.windows.docker_contract_v1.windows_docker_request_digest_v1
+use std.nogc_async_mut.container.providers.windows.docker_codec_v1.windows_docker_request_encode_v1
+use std.nogc_async_mut.container.providers.windows.docker_exec_control_policy_v3.WindowsInstalledExecControlProfileV3
+use std.nogc_async_mut.container.providers.windows.docker_exec_control_probe_v3.*
+use std.nogc_async_mut.container.providers.windows.simple_container_adapter_v2.WindowsServiceInventorySampleV2
+use std.nogc_async_mut.container.api_v2.SimpleContainerOwnerV2
+use test.fixtures.orchestration.simple_container_windows_adapter_fixture_v2.{windows_adapter_request_fixture_v2,
+    windows_adapter_policy_fixture_v2, windows_adapter_native_request_fixture_v2,
+    windows_adapter_native_id_fixture_v2, windows_adapter_observation_fixture_v2, windows_adapter_owner_fixture_v2}
+
+# Every unexpected owner is retained BEFORE assertions, including a regressed
+# native connection admission. These values are cleanup retention only and must
+# never be invoked as independent copied readers or treated as effect authority.
+var control_probe_retained_v3: [WindowsDockerExecControlProbeV3] = []
+
+fn control_probe_fixture_v3() -> (ContainerExecutionRequestV2, RuntimeIdentityV1, WindowsInstalledExecControlProfileV3, ContainerHostObservationV2):
+    val request = windows_adapter_request_fixture_v2()
+    val docker = windows_adapter_policy_fixture_v2()
+    val runtime = RuntimeIdentityV1(pod_uid: request.plan.workload_uid, attempt: request.plan.attempt,
+        operation_id: request.plan.operation_id, provider_generation: request.plan.provider_generation,
+        engine: "docker", native_id: windows_adapter_native_id_fixture_v2(), node_boot_id: docker.node_boot_id)
+    val stream = WindowsContainerStreamPolicyV3(root: "C:\\Simple\\brokers\\fixture",
+        broker_program: "C:\\Simple\\broker.exe",
+        broker_digest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        environment: ["SystemRoot=C:\\Windows"], directory: "C:\\Simple", api_version: "1.48", timeout_ms: 5000)
+    (request, runtime, WindowsInstalledExecControlProfileV3(docker_policy: docker, stream_policy: stream),
+        windows_adapter_observation_fixture_v2())
+
+fn control_probe_rejection_v3(outcome: WindowsDockerExecControlProbeOutcomeV3) -> text:
+    match outcome:
+        case WindowsDockerExecControlProbeOutcomeV3.Rejected(reason): reason
+        case WindowsDockerExecControlProbeOutcomeV3.Pending(owner):
+            control_probe_retained_v3.push(owner)
+            "unexpected-probe-owner:pending"
+        case WindowsDockerExecControlProbeOutcomeV3.Complete(owner):
+            control_probe_retained_v3.push(owner)
+            "unexpected-probe-owner:complete"
+        case WindowsDockerExecControlProbeOutcomeV3.Closed(owner):
+            control_probe_retained_v3.push(owner)
+            "unexpected-probe-owner:closed"
+        case WindowsDockerExecControlProbeOutcomeV3.CleanupRequired(owner, _reason):
+            control_probe_retained_v3.push(owner)
+            "unexpected-probe-owner:cleanup-required"
+
+describe "Windows exec control probe rejects invalid inputs before native admission":
+    it "refuses an actual scripted adapter before installed bytes or native observations are used":
+        step("Reject scripted provenance at the real adapter entry before acquiring a native Engine connection")
+        val (request, expected, profile, baseline) = control_probe_fixture_v3()
+        val owner = windows_adapter_owner_fixture_v2([], [WindowsServiceInventorySampleV2(entries: [], error: "")])
+        match owner:
+            case SimpleContainerOwnerV2.Windows(_, value):
+                var adapter = value
+                val reason = control_probe_rejection_v3(adapter.begin_exec_control_probe_v3("not-installed-policy", request, expected))
+                expect(reason).to_equal("windows-control-scripted-native-mixing-refused")
+                expect(adapter.provider.consumed_script_count()).to_equal(0)
+            case SimpleContainerOwnerV2.Linux(_, _): panic("Windows fixture owner required")
+
+    it "rejects a different complete runtime operation identity":
+        step("Reject a mismatched parent runtime operation before acquiring a native Engine connection")
+        val (request, expected, profile, baseline) = control_probe_fixture_v3()
+        var changed = expected
+        changed.operation_id = "different-operation"
+        val reason = control_probe_rejection_v3(WindowsDockerExecControlProbeV3.begin_v3(request, changed, profile, baseline))
+        expect(reason).to_equal("container-exec-control-parent-mismatch")
+
+    it "rejects a different runtime engine":
+        step("Reject a mismatched parent runtime engine before acquiring a native Engine connection")
+        val (request, expected, profile, baseline) = control_probe_fixture_v3()
+        var changed = expected
+        changed.engine = "podman"
+        val reason = control_probe_rejection_v3(WindowsDockerExecControlProbeV3.begin_v3(request, changed, profile, baseline))
+        expect(reason).to_equal("container-exec-control-parent-mismatch")
+
+    it "rejects baseline machine metadata outside the retained request scope":
+        step("Reject a mismatched baseline native machine before acquiring a native Engine connection")
+        val (request, expected, profile, baseline) = control_probe_fixture_v3()
+        var changed = baseline
+        changed.native_machine_id = "windows-machine-guid-v1:22345678-9abc-4def-8012-3456789abcde"
+        val reason = control_probe_rejection_v3(WindowsDockerExecControlProbeV3.begin_v3(request, expected, profile, changed))
+        expect(reason).to_equal("windows-control-retained-parent-binding")
+
+    it "rejects a plan semantic digest different from its retained native request":
+        step("Reject a mismatched request semantic digest before acquiring a native Engine connection")
+        val (request, expected, profile, baseline) = control_probe_fixture_v3()
+        var changed = request
+        changed.plan.request_digest = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+        expect(changed.plan.request_digest == request.plan.request_digest).to_equal(false)
+        val reason = control_probe_rejection_v3(WindowsDockerExecControlProbeV3.begin_v3(changed, expected, profile, baseline))
+        expect(reason).to_equal("windows-control-retained-parent-binding")
+
+    it "rejects an unsupported installed stream API profile":
+        step("Reject an unsupported installed stream API before acquiring a native Engine connection")
+        val (request, expected, profile, baseline) = control_probe_fixture_v3()
+        var changed = profile
+        changed.stream_policy.api_version = "1.47"
+        val reason = control_probe_rejection_v3(WindowsDockerExecControlProbeV3.begin_v3(request, expected, changed, baseline))
+        expect(reason).to_equal("windows-stream-policy-invalid")
+
+    it "rejects a valid request for an installed Docker generation outside the retained scope":
+        step("Reject a mismatched installed Docker generation before acquiring a native Engine connection")
+        val (request, expected, profile, baseline) = control_probe_fixture_v3()
+        var changed = profile
+        changed.docker_policy.provider_generation = request.plan.provider_generation + 1
+        # Rebind actual request bytes/digest to the changed policy so rejection
+        # exercises scope generation rather than a stale wire requestDigest.
+        val native = windows_adapter_native_request_fixture_v2()
+        var rebound = request
+        rebound.request_bytes = windows_docker_request_encode_v1(changed.docker_policy, native).unwrap()
+        rebound.plan.request_digest = windows_docker_request_digest_v1(changed.docker_policy, native).unwrap()
+        val reason = control_probe_rejection_v3(WindowsDockerExecControlProbeV3.begin_v3(rebound, expected, changed, baseline))
+        expect(reason).to_equal("windows-control-retained-parent-binding")

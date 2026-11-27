@@ -1,0 +1,62 @@
+# @cover src/compiler/00.common/cache/canonical_identity.spl 80%
+# @req REQ-CACHE-CANONICAL-IDENTITY-001
+"""
+## Canonical Cache Identity Specification
+
+Covers byte-wise UTF-8 ordering, heapsort determinism, and unambiguous
+length-prefixed canonical framing helpers in `compiler.common.cache.canonical_identity`.
+"""
+
+use std.spec.{describe, it, expect, step}
+use compiler.common.cache.canonical_identity.{
+    canonical_identity_text_lt,
+    canonical_identity_text_le,
+    canonical_identity_sort_texts,
+    canon_str,
+    canon_nat,
+    canon_field,
+    canon_seq
+}
+
+describe "canonical cache identity ordering and framing":
+    it "orders ASCII prefixes and UTF-8 multibyte text by raw byte order":
+        step("Compare prefix pairs and multibyte UTF-8 scalars deterministically")
+        expect(canonical_identity_text_lt("a", "aa")).to_be(true)
+        expect(canonical_identity_text_lt("aa", "a")).to_be(false)
+        expect(canonical_identity_text_lt("a", "b")).to_be(true)
+        expect(canonical_identity_text_lt("z", "한")).to_be(true)
+        expect(canonical_identity_text_lt("é", "한")).to_be(true)
+
+    it "treats equal strings as non-strict less-than and reflexive less-or-equal":
+        step("Verify strict < vs reflexive <= boundaries")
+        expect(canonical_identity_text_lt("same", "same")).to_be(false)
+        expect(canonical_identity_text_le("same", "same")).to_be(true)
+        expect(canonical_identity_text_le("alpha", "beta")).to_be(true)
+        expect(canonical_identity_text_le("beta", "alpha")).to_be(false)
+
+    it "sorts empty, singleton, and reverse-ordered text lists cleanly":
+        step("Run canonical_identity_sort_texts on edge list shapes")
+        expect(canonical_identity_sort_texts([])).to_equal([])
+        expect(canonical_identity_sort_texts(["only"])).to_equal(["only"])
+        expect(canonical_identity_sort_texts(["c", "a", "b", "a"])).to_equal(["a", "a", "b", "c"])
+
+    it "sorts prefix chains and multibyte keys deterministically without mutating caller expectations":
+        step("Sort mixed ASCII prefixes and multibyte strings")
+        val sorted = canonical_identity_sort_texts(["한", "prefix-z", "prefix", "é", "prefix-a"])
+        expect(sorted).to_equal(["prefix", "prefix-a", "prefix-z", "é", "한"])
+
+    it "frames strings and natural numbers with explicit type prefixes":
+        step("Encode empty and populated strings and natural numbers")
+        expect(canon_str("")).to_equal("S0:")
+        expect(canon_str("abc")).to_equal("S3:abc")
+        expect(canon_nat(0)).to_equal("N0;")
+        expect(canon_nat(42)).to_equal("N42;")
+
+    it "prevents delimiter ambiguity across nested fields and sequences":
+        step("Compare two distinct (tag, value) decompositions and verify sequence framing")
+        val f1 = canon_field("a", canon_str("bc"))
+        val f2 = canon_field("ab", canon_str("c"))
+        expect(f1 == f2).to_be(false)
+        expect(f1).to_equal("F1:aS2:bc")
+        expect(canon_seq([])).to_equal("Q0:")
+        expect(canon_seq([f1, canon_nat(7)])).to_equal("Q2:F1:aS2:bcN7;")

@@ -1,0 +1,190 @@
+# CPU Tier Selection Specification
+# Validates tier selection logic for multi-tier SIMD dispatch.
+# The selector picks the highest-ranked admitted tier, breaking ties by feature count
+# and lexicographically by tier text.
+#
+# ## Operator workflow
+# Run `bin/simple test test/01_unit/lib/common/cpu_tier/tier_select_spec.spl` and require the final Results line to report 0 failed.
+#
+# ## Compatibility and limitations
+# Executed on the interpreter test lane; asserts observable behavior only.
+
+# @req: REQ-LIB-CPU_TIER-SELECTOR — stable requirement for tier selection logic.
+# doc-path: doc/05_design/compiler/simd/cpu_tier_multibuild.md#5
+# @manual: primary
+
+use std.spec
+use std.spec.step
+use std.common.cpu_tier.tier_id.{TierId, tier_parse, tier_text}
+use std.common.cpu_tier.tier_select.{tier_select, tier_host_from_probe, tier_level_name}
+
+describe "CPU tier selection":
+    it "selects highest-rank admitted tier":
+        step("Given: x86-64-v4 host and candidates [v2, v3, v4], expect v4 selected")
+        # @req: REQ-LIB-CPU_TIER-SELECTOR
+        val host_v4_result = tier_parse("x86_64", "x86-64-v4")
+        expect(host_v4_result.is_ok()).to_equal(true)
+        val host_v4 = host_v4_result ?? TierId(arch: "", base: "", features: [])
+
+        val cand_v2_result = tier_parse("x86_64", "x86-64-v2")
+        val cand_v3_result = tier_parse("x86_64", "x86-64-v3")
+        val cand_v4_result = tier_parse("x86_64", "x86-64-v4")
+        expect(cand_v2_result.is_ok()).to_equal(true)
+        expect(cand_v3_result.is_ok()).to_equal(true)
+        expect(cand_v4_result.is_ok()).to_equal(true)
+        val cand_v2 = cand_v2_result ?? TierId(arch: "", base: "", features: [])
+        val cand_v3 = cand_v3_result ?? TierId(arch: "", base: "", features: [])
+        val cand_v4 = cand_v4_result ?? TierId(arch: "", base: "", features: [])
+
+        val candidates_v234 = [cand_v2, cand_v3, cand_v4]
+        val selected = tier_select(host_v4, candidates_v234)
+        expect(selected.is_some()).to_equal(true)
+        val selected_tier = selected ?? TierId(arch: "", base: "", features: [])
+        expect(selected_tier.base).to_equal("x86-64-v4")
+
+    it "selects matching tier when host is lower rank":
+        step("Given: x86-64-v3 host and candidates [v2, v3, v4], expect v3 selected")
+        val host_v3_result = tier_parse("x86_64", "x86-64-v3")
+        expect(host_v3_result.is_ok()).to_equal(true)
+        val host_v3 = host_v3_result ?? TierId(arch: "", base: "", features: [])
+
+        val cand_v2_result = tier_parse("x86_64", "x86-64-v2")
+        val cand_v3_result = tier_parse("x86_64", "x86-64-v3")
+        val cand_v4_result = tier_parse("x86_64", "x86-64-v4")
+        val cand_v2 = cand_v2_result ?? TierId(arch: "", base: "", features: [])
+        val cand_v3 = cand_v3_result ?? TierId(arch: "", base: "", features: [])
+        val cand_v4 = cand_v4_result ?? TierId(arch: "", base: "", features: [])
+
+        val candidates_v234 = [cand_v2, cand_v3, cand_v4]
+        val selected = tier_select(host_v3, candidates_v234)
+        expect(selected.is_some()).to_equal(true)
+        val selected_tier = selected ?? TierId(arch: "", base: "", features: [])
+        expect(selected_tier.base).to_equal("x86-64-v3")
+
+    it "returns None when no tier is admitted":
+        step("Given: x86-64-v3 host and candidates [v4] only, expect None (v4 not admitted)")
+        val host_v3_result = tier_parse("x86_64", "x86-64-v3")
+        val host_v3 = host_v3_result ?? TierId(arch: "", base: "", features: [])
+
+        val cand_v4_result = tier_parse("x86_64", "x86-64-v4")
+        val cand_v4 = cand_v4_result ?? TierId(arch: "", base: "", features: [])
+
+        val candidates_v4_only = [cand_v4]
+        val selected = tier_select(host_v3, candidates_v4_only)
+        expect(selected.is_none()).to_equal(true)
+
+    it "breaks ties by feature count: more features win":
+        step("Given: x86-64-v4 host with candidates [v2, v2+avx512vnni], expect v2+avx512vnni (higher feature count)")
+        val host_v4 = TierId(arch: "x86_64", base: "x86-64-v4", features: ["avx512vnni"])
+
+        val cand_v2 = TierId(arch: "x86_64", base: "x86-64-v2", features: [])
+        val cand_v2_extra = TierId(arch: "x86_64", base: "x86-64-v2", features: ["avx512vnni"])
+
+        val candidates = [cand_v2, cand_v2_extra]
+        val selected = tier_select(host_v4, candidates)
+        expect(selected.is_some()).to_equal(true)
+        step("Verify: selected tier has v2+avx512vnni (more features than plain v2)")
+        val winner = selected ?? TierId(arch: "", base: "", features: [])
+        expect(tier_text(winner)).to_equal("x86-64-v2+avx512vnni")
+
+    it "ignores candidates from different architecture":
+        step("Given: x86-64-v3 host and candidates [aarch64 armv9-a, x86-64-v2], expect x86-64-v2")
+        val host_v3_result = tier_parse("x86_64", "x86-64-v3")
+        val host_v3 = host_v3_result ?? TierId(arch: "", base: "", features: [])
+
+        val cand_arm_result = tier_parse("aarch64", "armv9-a")
+        val cand_v2_result = tier_parse("x86_64", "x86-64-v2")
+        expect(cand_arm_result.is_ok()).to_equal(true)
+        expect(cand_v2_result.is_ok()).to_equal(true)
+        val cand_arm = cand_arm_result ?? TierId(arch: "", base: "", features: [])
+        val cand_v2 = cand_v2_result ?? TierId(arch: "", base: "", features: [])
+
+        val candidates = [cand_arm, cand_v2]
+        val selected = tier_select(host_v3, candidates)
+        expect(selected.is_some()).to_equal(true)
+        val selected_tier = selected ?? TierId(arch: "", base: "", features: [])
+        expect(selected_tier.arch).to_equal("x86_64")
+        expect(selected_tier.base).to_equal("x86-64-v2")
+
+    it "selects aarch64 armv9-a when host has sve":
+        step("Given: aarch64 armv9-a+sve host and candidates [armv8-a, armv9-a+sve], expect armv9-a+sve")
+        val host_result = tier_parse("aarch64", "armv9-a+sve")
+        expect(host_result.is_ok()).to_equal(true)
+        val host = host_result ?? TierId(arch: "", base: "", features: [])
+
+        val cand_v8_result = tier_parse("aarch64", "armv8-a")
+        val cand_v9_sve_result = tier_parse("aarch64", "armv9-a+sve")
+        val cand_v8 = cand_v8_result ?? TierId(arch: "", base: "", features: [])
+        val cand_v9_sve = cand_v9_sve_result ?? TierId(arch: "", base: "", features: [])
+
+        val candidates = [cand_v8, cand_v9_sve]
+        val selected = tier_select(host, candidates)
+        expect(selected.is_some()).to_equal(true)
+        val selected_tier = selected ?? TierId(arch: "", base: "", features: [])
+        expect(selected_tier.base).to_equal("armv9-a")
+        expect(selected_tier.features.len()).to_equal(1)
+        expect(selected_tier.features[0]).to_equal("sve")
+
+    it "tier_host_from_probe constructs host tier from level and features":
+        step("Verify: from level x86-64-v3 and features [avx512f], construct tier")
+        val host = tier_host_from_probe("x86_64", "x86-64-v3", ["avx512f"])
+        expect(host.arch).to_equal("x86_64")
+        expect(host.base).to_equal("x86-64-v3")
+        expect(host.features.len()).to_equal(1)
+        expect(host.features[0]).to_equal("avx512f")
+
+        step("Verify: from baseline level with no features")
+        val baseline = tier_host_from_probe("x86_64", "x86-64", [])
+        expect(baseline.arch).to_equal("x86_64")
+        expect(baseline.base).to_equal("x86-64")
+        expect(baseline.features.len()).to_equal(0)
+
+    it "tier_level_name maps all architecture levels":
+        step("Verify: aarch64 levels map to canonical base names")
+        expect(tier_level_name("aarch64", 0i64)).to_equal("armv8-a")
+        expect(tier_level_name("aarch64", 1i64)).to_equal("armv8-a")
+        expect(tier_level_name("aarch64", 2i64)).to_equal("armv9-a")
+        expect(tier_level_name("aarch64", 3i64)).to_equal("armv9-a")
+
+        step("Verify: riscv64 levels map to canonical base names")
+        expect(tier_level_name("riscv64", 0i64)).to_equal("rv64gc")
+        expect(tier_level_name("riscv64", 1i64)).to_equal("rv64gcv")
+
+        step("Verify: unknown architecture returns empty string")
+        expect(tier_level_name("unknown_arch", 0i64)).to_equal("")
+
+describe "host probe coverage":
+    # @manual_section: Host-platform probe instrumentation
+    # Runtime probe_level() function coverage across supported operating systems.
+    # Current host (x86_64-windows) verifies tier_level_name mapping;
+    # other hosts are documented but blocked (reachable only on their target platform).
+
+    it "maps x86-64 numeric probe levels to LLVM tier names":
+        step("Verify: tier_level_name converts dispatcher indices to canonical x86-64 levels")
+        expect(tier_level_name("x86_64", 0i64)).to_equal("x86-64")
+        expect(tier_level_name("x86_64", 1i64)).to_equal("x86-64")
+        expect(tier_level_name("x86_64", 2i64)).to_equal("x86-64-v2")
+        expect(tier_level_name("x86_64", 3i64)).to_equal("x86-64-v3")
+        expect(tier_level_name("x86_64", 4i64)).to_equal("x86-64-v4")
+
+        step("Verify: selector works with all four default x86-64 tiers")
+        val host_v2_result = tier_parse("x86_64", "x86-64-v2")
+        expect(host_v2_result.is_ok()).to_equal(true)
+        val host_v2 = host_v2_result ?? TierId(arch: "", base: "", features: [])
+
+        val tier_v1 = TierId(arch: "x86_64", base: "x86-64", features: [])
+        val tier_v2 = TierId(arch: "x86_64", base: "x86-64-v2", features: [])
+        val tier_v3 = TierId(arch: "x86_64", base: "x86-64-v3", features: [])
+        val tier_v4 = TierId(arch: "x86_64", base: "x86-64-v4", features: [])
+        val tiers = [tier_v1, tier_v2, tier_v3, tier_v4]
+
+        val selected = tier_select(host_v2, tiers)
+        expect(selected.is_some()).to_equal(true)
+        val picked = selected ?? TierId(arch: "", base: "", features: [])
+        expect(picked.base).to_equal("x86-64-v2")
+
+    planned("probes an aarch64 host's NEON/SVE/SVE2 level via getauxval", "blocked: needs a Linux/FreeBSD/SimpleOS aarch64 host run of simple_vector_selected_level()")
+    planned("probes a riscv64 host's RVV level via getauxval + prctl", "blocked: needs a Linux riscv64 host (QEMU lane) run of simple_vector_selected_level()")
+    planned("gates AVX-512 on macOS via hw.optional sysctls", "blocked: needs a macOS x86_64 host run of simple_vector_selected_level()")
+    planned("probes a FreeBSD host via elf_aux_info", "blocked: needs a FreeBSD host (QEMU lane) run of simple_vector_selected_level()")
+    planned("probes a SimpleOS host via the kernel cpuid path", "blocked: needs a SimpleOS guest run of simple_vector_selected_level()")

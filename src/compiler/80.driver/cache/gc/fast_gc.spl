@@ -43,7 +43,7 @@ fn gc_dir_exists_raw(path: text) -> bool:
 @always_inline
 fn gc_dir_list_raw(path: text) -> [text]:
     unsafe(capabilities: [ffi]):
-        dir_list(path)
+        dir_list_or_empty(path)
 @always_inline
 fn gc_dir_walk_raw(root: text) -> [text]:
     dir_walk(root)
@@ -61,13 +61,15 @@ fn gc_process_id_raw() -> i64:
         getpid()
 
 use compiler.driver.cache.metadata.cache_limits.{CacheLimits, cache_limits_low_watermark_bytes}
-use std.io_runtime.{dir_create_all, dir_exists, dir_list, dir_walk, file_delete, file_exists, getpid, time_now_unix_micros}
-use std.nogc_sync_mut.io_runtime.{file_move_cross_device, file_size_signed}
+use std.io_runtime.{dir_create_all, dir_exists, dir_list_or_empty, dir_walk, file_delete, file_exists, getpid, time_now_unix_micros}
+use std.nogc_sync_mut.io_runtime.{file_move_cross_device, file_read_nullable, file_size_signed}
 use std.io.{file_modified_time}
 use std.array.{array_sort_by}
 use compiler.driver.cache.lease.lease.{lease_list_active, CacheLease}
-use compiler.driver.cache.cas_store.{cas_action_path}
+use compiler.driver.cache.cas_store.{cas_action_path, cas_blob_path}
 use compiler.driver.cache.gc.reader_pin_gc_guard.{reader_pin_gc_authoritative_delete_available}
+
+var _gc_trash_seq: i64 = 0
 
 fn now_secs() -> i64:
     gc_time_now_unix_micros_raw() / 1000000
@@ -75,10 +77,17 @@ fn now_secs() -> i64:
 fn trash_dir(root: text) -> text:
     "{root}/trash"
 
+fn _sanitize_trash_name(path: text) -> text:
+    var clean = path.replace("\\", "_")
+    clean = clean.replace("/", "_")
+    clean = clean.replace(":", "_")
+    clean
+
 fn move_to_trash(root: text, path: text) -> bool:
     gc_dir_create_all_raw(trash_dir(root))
-    val stamp = "{gc_process_id_raw()}-{gc_time_now_unix_micros_raw()}"
-    val name = path.replace("/", "_")
+    _gc_trash_seq = _gc_trash_seq + 1
+    val stamp = "{gc_process_id_raw()}-{gc_time_now_unix_micros_raw()}-{_gc_trash_seq}"
+    val name = _sanitize_trash_name(path)
     gc_file_move_raw(path, "{trash_dir(root)}/{name}-{stamp}")
 
 # Sum bytes of every regular file under root (excluding nothing — caller
@@ -113,11 +122,14 @@ fn gc_expire_tmp(root: text, tmp_hours: i64) -> i64:
     val cutoff = now_secs() - (tmp_hours * 3600)
     var count = 0
     for name in gc_dir_list_raw(dir):
+        if name == "" or name == "." or name == "..":
+            continue
         val path = "{dir}/{name}"
         if not gc_dir_exists_raw(path):
-            if gc_file_modified_time_raw(path) < cutoff:
-                gc_file_delete_raw(path)
-                count = count + 1
+            val mtime = gc_file_modified_time_raw(path)
+            if mtime > 0 and mtime < cutoff:
+                if gc_file_delete_raw(path):
+                    count = count + 1
     count
 
 # Expire quarantine/ entries older than quarantine_days. Quarantined bytes
@@ -130,11 +142,14 @@ fn gc_expire_quarantine(root: text, quarantine_days: i64) -> i64:
     val cutoff = now_secs() - (quarantine_days * 86400)
     var count = 0
     for name in gc_dir_list_raw(dir):
+        if name == "" or name == "." or name == "..":
+            continue
         val path = "{dir}/{name}"
         if not gc_dir_exists_raw(path):
-            if gc_file_modified_time_raw(path) < cutoff:
-                gc_file_delete_raw(path)
-                count = count + 1
+            val mtime = gc_file_modified_time_raw(path)
+            if mtime > 0 and mtime < cutoff:
+                if gc_file_delete_raw(path):
+                    count = count + 1
     count
 
 # Delete everything already sitting in trash/ (the grace period has already
@@ -144,14 +159,43 @@ fn gc_delete_trash(root: text) -> i64:
     val dir = trash_dir(root)
     if not gc_file_exists_raw(dir):
         return 0
-    val names = gc_dir_list_raw(dir)
-    gc_dir_remove_all_raw(dir)
-    names.len().to_i64()
+    var count: i64 = 0
+    for name in gc_dir_list_raw(dir):
+        if name != "" and name != "." and name != "..":
+            count = count + 1
+    if not gc_dir_remove_all_raw(dir):
+        if gc_dir_exists_raw(dir):
+            return 0
+    count
 
 # Fast-path sweep: expire tmp + quarantine, delete existing trash, then evict
 # unpinned action mappings oldest-first (by mtime) until at or below the low
 # watermark. `referenced_artifacts` (from active leases) are never evicted —
 # lease_safe. Returns bytes freed (best-effort estimate).
+fn _gc_norm_path(path: text) -> text:
+    path.replace("\\", "/")
+
+fn _gc_build_protected_paths(root: text, active_leases: [CacheLease]) -> Dict<text, bool>:
+    var protected_paths: Dict<text, bool> = {}
+    for lease in active_leases:
+        for d in lease.referenced_artifacts:
+            protected_paths[_gc_norm_path(cas_action_path(root, d))] = true
+        for d in lease.referenced_manifests:
+            protected_paths[_gc_norm_path(cas_action_path(root, d))] = true
+    val pins_path = "{root}/pins"
+    if gc_file_exists_raw(pins_path):
+        val maybe_pins = file_read_nullable(pins_path)
+        if maybe_pins.is_some():
+            for pin_line in maybe_pins.unwrap().split("\n"):
+                val pin_digest = pin_line.trim()
+                if pin_digest != "":
+                    protected_paths[_gc_norm_path(cas_action_path(root, pin_digest))] = true
+                    protected_paths[_gc_norm_path(cas_blob_path(root, pin_digest))] = true
+    protected_paths
+
+fn _gc_is_path_protected(protected_paths: Dict<text, bool>, path: text) -> bool:
+    protected_paths.contains_key(_gc_norm_path(path))
+
 fn gc_fast_sweep(root: text, limits: CacheLimits) -> i64:
     # The legacy local lease/pin view cannot close cross-process roots or bind
     # deletion to a generation. The current guard is explicitly unavailable,
@@ -167,12 +211,7 @@ fn gc_fast_sweep(root: text, limits: CacheLimits) -> i64:
         return 0
 
     val active_leases = lease_list_active(root)
-    var protected_paths: Dict<text, bool> = {}
-    for lease in active_leases:
-        for d in lease.referenced_artifacts:
-            protected_paths[cas_action_path(root, d)] = true
-        for d in lease.referenced_manifests:
-            protected_paths[cas_action_path(root, d)] = true
+    val protected_paths = _gc_build_protected_paths(root, active_leases)
 
     val actions_dir = "{root}/actions"
     if not gc_file_exists_raw(actions_dir):
@@ -181,11 +220,13 @@ fn gc_fast_sweep(root: text, limits: CacheLimits) -> i64:
     var candidates: [GcCandidate] = []
     for path in gc_dir_walk_raw(actions_dir):
         if not gc_dir_exists_raw(path):
-            if not protected_paths.contains_key(path):
+            if not _gc_is_path_protected(protected_paths, path):
                 val size = gc_file_size_raw(path)
+                val raw_mtime = gc_file_modified_time_raw(path)
+                val safe_mtime = if raw_mtime <= 0: 9999999999999 else: raw_mtime
                 candidates = candidates.push(GcCandidate(
                     path: path,
-                    modified_time: gc_file_modified_time_raw(path),
+                    modified_time: safe_mtime,
                     size: if size < 0: 0 else: size,
                 ))
 

@@ -1,0 +1,76 @@
+# Immutable raw task DATA. Integrity and identity grant neither read nor execution.
+use std.common.contracts.orchestration.agent_invocation_binding_v1.AgentTaskInputV1
+use std.common.contracts.orchestration.resource_v1.{parse_resource_document, as_dict, as_int, only_known}
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+# AgentSession reference rules, with every ASCII control rejected explicitly.
+pub fn agent_task_reference_valid_v1(value: text) -> bool:
+    if value.len() == 0 or value.len() > 256 or value.trim() != value: return false
+    var index: i64 = 0
+    while index < value.byte_len():
+        val code = value.byte_at(index) as i64
+        if code < 32 or code == 127: return false
+        index = index + 1
+    true
+
+fn agent_task_object_valid_v1(task: AgentTaskInputV1) -> Result<bool, text>:
+    if not builder_identifier_valid_v1(task.ns) or not agent_task_reference_valid_v1(task.reference):
+        return Err("agent-task-identity-invalid")
+    if task.content.byte_len() > 4096: return Err("agent-task-content-size")
+    if not builder_digest_valid_v1(task.content_digest) or sha256_text(task.content) != task.content_digest:
+        return Err("agent-task-content-mismatch")
+    Ok(true)
+
+pub fn agent_task_object_encode_v1(task: AgentTaskInputV1) -> Result<text, text>:
+    val valid = agent_task_object_valid_v1(task)?
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1),
+        "kind": SdnValue.String("agent-task-object"), "namespace": SdnValue.String(task.ns),
+        "reference": SdnValue.String(task.reference), "content": SdnValue.String(task.content),
+        "contentDigest": SdnValue.String(task.content_digest)}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+# This digest pins namespace/reference/original bytes; no latest or normalization.
+pub fn agent_task_object_identity_digest_v1(task: AgentTaskInputV1) -> Result<text, text>:
+    val valid = agent_task_object_valid_v1(task)?
+    agent_task_identity_digest_v1(task.ns, task.reference, task.content_digest)
+
+pub fn agent_task_identity_digest_v1(ns: text, reference: text, content_digest: text) -> Result<text, text>:
+    if (not builder_identifier_valid_v1(ns) or not agent_task_reference_valid_v1(reference) or
+            not builder_digest_valid_v1(content_digest)): return Err("agent-task-identity-invalid")
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1),
+        "kind": SdnValue.String("agent-task-identity"), "namespace": SdnValue.String(ns),
+        "reference": SdnValue.String(reference), "contentDigest": SdnValue.String(content_digest)}
+    Ok(sha256_text(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"))
+
+fn agent_task_object_text_v1(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    match fields[key]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("agent-task-text-required:" + key)
+
+pub fn agent_task_object_decode_v1(source: text) -> Result<AgentTaskInputV1, text>:
+    # 4096 raw bytes may escape to six times their size in canonical SDN.
+    if source.byte_len() == 0 or source.byte_len() > 32768: return Err("agent-task-object-size")
+    val parsed = match parse_resource_document(source):
+        case Ok(value): value
+        case Err(_): return Err("agent-task-object-syntax")
+    val fields = match as_dict(parsed.0, "", parsed.1):
+        case Ok(value): value
+        case Err(_): return Err("agent-task-object-required")
+    val names = ["version", "kind", "namespace", "reference", "content", "contentDigest"]
+    if only_known(fields, names, "", parsed.1).is_err(): return Err("agent-task-unknown-field")
+    for key in names:
+        if not fields.contains_key(key): return Err("agent-task-missing-field:" + key)
+    val version = match as_int(fields["version"], "version", parsed.1):
+        case Ok(value): value
+        case Err(_): return Err("agent-task-version")
+    if version != 1 or agent_task_object_text_v1(fields, "kind")? != "agent-task-object":
+        return Err("agent-task-version")
+    val task = AgentTaskInputV1(ns: agent_task_object_text_v1(fields, "namespace")?,
+        reference: agent_task_object_text_v1(fields, "reference")?,
+        content: agent_task_object_text_v1(fields, "content")?,
+        content_digest: agent_task_object_text_v1(fields, "contentDigest")?)
+    if agent_task_object_encode_v1(task)? != source: return Err("agent-task-object-noncanonical")
+    Ok(task)

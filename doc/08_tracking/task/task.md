@@ -1,19 +1,19 @@
-# Task Categories
+# Tasks
 
-Last ID: `TRACK-001`
+**Generated:** 2026-11-01
 
-| Category | Tasks | Complete | Planned | In Progress |
+## Summary
+
+| Category | Total | Complete | Planned | In Progress |
 |----------|-------|----------|---------|-------------|
 | tracking | 1 | 0 | 0 | 1 |
 
 ## By Priority
 
-| Priority | Count |
-|----------|-------|
-| high | 1 |
+### HIGH
+
+- U0001F7E1 **Refactor core tracking** (tracking): Normalize bug, feature, test, task, and todo tracking around SDN/text databases
 
 ## Recent Tasks
 
-| ID | Name | Status |
-|----|------|--------|
-| TRACK-001 | Refactor core tracking | in_progress |
+- [in_progress] Refactor core tracking (tracking) - Normalize bug, feature, test, task, and todo tracking around SDN/text databases

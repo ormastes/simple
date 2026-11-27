@@ -1,0 +1,96 @@
+# Actual command planning; no QEMU process, kernel build, or board admission.
+use std.spec.{describe, it, expect}
+use os.qemu_firmware_args_v1.{qemu_firmware_args_v1}
+use os.qemu_runner.{
+    _scenario_from_target, build_scenario_command, build_scenario_command_headless,
+    get_riscv64_fs_exec_target, scenario_riscv64_hosted,
+    scenario_riscv32_virtio_fat32_smf, scenario_rv64_x25519_probe
+}
+use os._QemuRunner.scenario_catalog.{scenario_riscv64_smoke}
+
+fn firmware_option_index_v1(args: [text], option: text) -> i64:
+    var i = 0
+    while i < args.len():
+        if args[i] == option: return i
+        i = i + 1
+    -1
+
+fn expect_single_firmware_v1(args: [text], expected: text):
+    var count = 0
+    for item in args:
+        if item == "-bios": count = count + 1
+    expect(count).to_equal(1)
+    val bios_index = firmware_option_index_v1(args, "-bios")
+    expect(args[bios_index + 1]).to_equal(expected)
+    expect(bios_index).to_be_less_than(firmware_option_index_v1(args, "-kernel"))
+
+describe "QEMU scenario firmware projection":
+    it "preserves default, none and custom target firmware before the payload":
+        for firmware in ["default", "none", "/firmware path/custom-fw_dynamic.bin"]:
+            var target = get_riscv64_fs_exec_target()
+            target.qemu_bios = firmware
+            target.qemu_extra = []
+            val scenario = _scenario_from_target("firmware-projection-test", target, "fixture")
+            expect(scenario.qemu_bios).to_equal(firmware)
+            val command = build_scenario_command(scenario, "payload.elf")
+            expect_single_firmware_v1(command, firmware)
+            expect(command).to_contain("payload.elf")
+
+    it "preserves omitted firmware instead of forcing a platform default":
+        var target = get_riscv64_fs_exec_target()
+        target.qemu_bios = ""
+        target.qemu_extra = ["-global", "virtio-mmio.force-legacy=false"]
+        val scenario = _scenario_from_target("firmware-projection-test", target, "fixture")
+        val command = build_scenario_command(scenario, "payload.elf")
+        expect(command.contains("-bios")).to_equal(false)
+        expect(command).to_contain("virtio-mmio.force-legacy=false")
+
+    it "deduplicates identical legacy extras without losing device arguments":
+        var target = get_riscv64_fs_exec_target()
+        target.qemu_extra = ["-bios", "default", "-device", "virtio-rng-device", "-bios", "default"]
+        val scenario = _scenario_from_target("firmware-projection-test", target, "fixture")
+        val command = build_scenario_command(scenario, "payload.elf")
+        expect_single_firmware_v1(command, "default")
+        expect(command).to_contain("virtio-rng-device")
+
+    it "rejects field versus extra conflicts on normal and headless launch paths":
+        var target = get_riscv64_fs_exec_target()
+        target.qemu_extra = ["-bios", "none"]
+        val scenario = _scenario_from_target("firmware-projection-test", target, "fixture")
+        expect(build_scenario_command(scenario, "payload.elf").len()).to_equal(0)
+        expect(build_scenario_command_headless(scenario, "payload.elf").len()).to_equal(0)
+
+    it "rejects conflicting extra firmware even without a declared field":
+        val result = qemu_firmware_args_v1("", ["-bios", "default", "-bios", "none"])
+        expect(result.is_err()).to_equal(true)
+
+    it "rejects declared firmware that would be interpreted as a QEMU option":
+        var target = get_riscv64_fs_exec_target()
+        target.qemu_bios = "-machine"
+        target.qemu_extra = []
+        val scenario = _scenario_from_target("firmware-projection-test", target, "fixture")
+        expect(qemu_firmware_args_v1(target.qemu_bios, []).is_err()).to_equal(true)
+        expect(build_scenario_command(scenario, "payload.elf").len()).to_equal(0)
+
+    it "rejects malformed firmware operands before forming a launch command":
+        for extra in [["-bios"], ["-bios", ""], ["-bios", "-kernel"], ["-bios=none"], ["--bios=none"]]:
+            expect(qemu_firmware_args_v1("", extra).is_err()).to_equal(true)
+
+    it "preserves existing extra-only firmware and canonicalizes its option":
+        val selected = qemu_firmware_args_v1("", ["--bios", "custom.bin", "-device", "virtio-rng-device"]).unwrap()
+        expect(selected.bios).to_equal("custom.bin")
+        expect(selected.extra).to_equal(["-device", "virtio-rng-device"])
+
+    it "keeps existing RISC-V lane selections without claiming a firmware migration":
+        val hosted = scenario_riscv64_hosted()
+        expect_single_firmware_v1(build_scenario_command(hosted, "hosted.elf"), "default")
+        val probe = scenario_rv64_x25519_probe()
+        expect_single_firmware_v1(build_scenario_command(probe, "probe.elf"), "default")
+        val smoke = scenario_riscv64_smoke()
+        expect(smoke.qemu_bios).to_equal("default")
+        expect_single_firmware_v1(build_scenario_command(smoke, "smoke.elf"), "default")
+        # Current RV32 artifacts are M-mode. Correcting their OpenSbi metadata
+        # and migrating their boot ABI are separate from field propagation.
+        val rv32 = scenario_riscv32_virtio_fat32_smf()
+        expect(rv32.qemu_bios).to_equal("none")
+        expect_single_firmware_v1(build_scenario_command(rv32, "rv32.elf"), "none")

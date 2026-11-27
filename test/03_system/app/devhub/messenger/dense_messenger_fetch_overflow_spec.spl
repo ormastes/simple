@@ -1,0 +1,50 @@
+# Acceptance layer: fetch_message of the overflow message.
+#
+# ONE production Messenger verb call over the dense encrypted database, made once
+# at load and shared by every scenario below.  A successful read decrypts all
+# nine pages (about 45 s each on the Phase 1 seed), so each success-path verb
+# lives in its own file to stay inside the per-spec time budget.  Expected
+# payloads are serialised by Python's json.dumps in the generator and parsed
+# back here; nothing is compared with a value the adapter produced itself.
+# Lifecycle: doc/01_research/app/tools/devhub/devhub_cli_wrapper_forwarding_2026-09-06.md ;
+# doc/03_plan/agent_tasks/devhub_messenger_master.md ;
+# doc/04_architecture/app/devhub/messenger_gateway.md ;
+# doc/05_design/app/devhub/messenger_sdn_and_api.md
+# @manual_section: messenger-fetch-overflow
+
+"""
+## Purpose and audience
+Purpose: fetch_message returns a message whose 11,000+ byte body lives on overflow pages, byte for byte.
+Audience: DevHub release reviewers who accept the encrypted Messenger read path.
+The passphrase is public synthetic test data from dense_ground_truth.json.
+"""
+
+use std.spec.*
+use test.support.devhub_messenger_dense.*
+use std.common.json.value.{JsonValue, json_value_field, json_value_items, json_value_len}
+use app.devhub.messenger.adapter.sqlcipher_reader.{
+    messenger_sqlcipher4_list_rooms, messenger_sqlcipher4_list_members,
+    messenger_sqlcipher4_history, messenger_sqlcipher4_fetch_message
+}
+
+val dn_truth = dense_truth()
+val dn_good = truth_passphrase(dn_truth)
+val _secret_ready = dense_set_secret(dn_good)
+val dn_target = dense_target_with(dense_path(DENSE_BASE), DENSE_REF, true)
+val dn_result = messenger_sqlcipher4_fetch_message(dn_target, "15", "user")
+
+describe "fetch_message of message 15 through the production verb":
+    it "returns the whole object, overflow body included, exactly":
+        # @req REQ-MSGR-DENSE-ACC-FETCH15-001
+        step("Fetch message 15 and rebuild the expected object from the generator's head, unit and tail")
+        # @capture(protocol_binary): the 11,000+ byte fetch payload against its reconstruction
+        expect(outcome_line(dn_result)).to_equal("ok:0:payload")
+        expect(dn_result.payload == expected_overflow_object(json_value_field(dn_truth, "overflow"))).to_equal(true)
+
+    it "parses as JSON and decodes to the generator's overflow body":
+        # @req REQ-MSGR-DENSE-ACC-FETCH15-002
+        step("Parse the payload and compare the decoded body with the generator's body")
+        # @capture(protocol_binary): decoded overflow body against the generator's reconstruction
+        expect(payload_is_json(dn_result.payload)).to_equal(true)
+        expect(tf(payload_json(dn_result.payload), "body") == expected_overflow_body(json_value_field(dn_truth, "overflow"))).to_equal(true)
+        expect(tf(payload_json(dn_result.payload), "id")).to_equal("15")

@@ -1,5 +1,5 @@
 # `rt_cuda_module_load_data_bytes` rejects real cubin/fatbin binaries containing embedded NUL bytes
-## Open 2026-09-16 — needs owner triage
+## Closed for the `_bytes` interior-NUL defect — fix in tree, verified 2026-11-25 (see below)
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
@@ -84,3 +84,44 @@ SIMPLE_TIMEOUT_SECONDS=0 SIMPLE_RUST_SEED_WARNING=0 bin/simple test \
 
 Record already states the fix location is entirely inside src/compiler_rust and needs real CUDA hardware to verify -- explicitly architectural-open and out of pure-Simple scope. No change made.
 
+
+## Fix 2026-11-11 (work/bugfix-cuda-vulkan-20261111)
+
+Fixed the interpreter dlopen twin `rt_cuda_module_load_data_bytes_fn` in
+`src/compiler_rust/compiler/src/interpreter_extern/gpu.rs` (interior-NUL-rejecting
+`CString::new` replaced with the native twin's `Vec<u8>` copy + terminator pattern,
+mirroring `runtime/src/cuda_runtime.rs`). `cargo check -p simple-compiler` PASS.
+
+A/B verified on real NVIDIA GB10 (CC 12.1): a 13,824-byte sm_120 cubin (7,950
+interior NULs) loads through the fixed twin (`module_handle > 0`, unload 0); the
+same source with the old `CString::new` reproduces this doc's exact
+`rt_cuda_module_load_data_bytes does not accept embedded NUL bytes` error.
+
+Pinned spec `x25519mlkem768_cuda_binary_execution_spec.spl` still cannot pass
+end-to-end on this host for reasons independent of this fix: read-only seed
+lacks the dlopen CUDA layer; tip-tree cross-module visibility rejects the
+spec's private fixture import; the interpreter adapter for
+`rt_cuda_module_load_data_array` routes to the `not(feature="cuda")` stub
+(separate pre-existing gap); the pinned sm_86 cubin is rejected by the CC 12.1
+driver (CUDA_ERROR_NO_BINARY_FOR_GPU). Those remain open; the `_bytes` interior
+NUL defect itself is closed by this change.
+
+## Verification 2026-11-25 (work/p2w4-af-20261125)
+
+The 2026-11-11 fix is confirmed present at `origin/release/1.0.0` tip
+`63e791180d3`: `rt_cuda_module_load_data_bytes_fn` in
+`src/compiler_rust/compiler/src/interpreter_extern/gpu.rs:2317-2334` no
+longer routes through interior-NUL-rejecting `CString::new`; it copies the
+buffer and appends a terminator only when missing, mirroring the native
+`cuda_runtime.rs` twin, with a comment stating exactly this rationale. The
+interior-NUL defect this doc tracks is therefore closed in source, with the
+real-hardware A/B evidence recorded in the 2026-11-11 section above.
+
+Verification limit: this Windows host has no CUDA device and the pinned
+`bin/simple.exe` is the Rust seed, so end-to-end re-execution of
+`x25519mlkem768_cuda_binary_execution_spec.spl` was not possible here; this
+note is code-inspection confirmation of the landed fix, not new runtime
+evidence. The independent spec blockers listed in the 2026-11-11 section
+(seed dlopen layer, fixture visibility, `rt_cuda_module_load_data_array`
+adapter stub, sm_86 vs CC 12.1 driver) remain open and are separate from
+this defect.

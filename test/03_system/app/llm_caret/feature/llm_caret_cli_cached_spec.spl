@@ -24,13 +24,23 @@ All provider traffic is supplied by the offline Claude fixture.
 
 use std.spec.step
 
-use std.spec.{describe, it, expect, step}
+use std.spec.{describe, it, expect, step, pending}
 use app.io.mod.{process_run_timeout}
 
 struct CaretCliCachedEvidence:
     stdout: text
     stderr: text
     exit_code: i32
+
+# Exit 6 + evidence_status=BLOCKED: the checker found no cached caret artifact (environment, not a defect).
+fn cached_caret_blocked(result: CaretCliCachedEvidence) -> bool:
+    result.exit_code == 6 and result.stdout.contains("evidence_status=BLOCKED")
+
+fn cached_caret_blocked_reason(result: CaretCliCachedEvidence) -> text:
+    for line in result.stdout.split("\n"):
+        if line.starts_with("blocked_reason="):
+            return "BLOCKED: " + line.substring(15)
+    "BLOCKED: cached caret checker reported BLOCKED without a reason"
 
 fn run_caret_cli_cached_case(case_name: text) -> CaretCliCachedEvidence:
     val (stdout, stderr, exit_code) = process_run_timeout(
@@ -56,6 +66,9 @@ describe "LLM Caret Cached CLI Qualification":
             step("should verify the cached artifact and its provenance before qualification")
             step("Load the cached Caret artifact")
             val result = run_caret_cli_cached_case("prerequisites")
+            if cached_caret_blocked(result):
+                pending(cached_caret_blocked_reason(result))
+                return
             step("Invoke the offline Caret CLI provider")
             expect(result.stdout).to_contain("case=prerequisites status=PASS")
             expect(result.stdout).to_contain("cached_artifact=")
@@ -74,6 +87,9 @@ describe "LLM Caret Cached CLI Qualification":
             step("should return the offline Claude response from the cached executable")
             step("Load the cached Caret artifact")
             val result = run_caret_cli_cached_case("offline-claude")
+            if cached_caret_blocked(result):
+                pending(cached_caret_blocked_reason(result))
+                return
             step("Invoke the offline Caret CLI provider")
             expect(result.stdout).to_contain("case=offline-claude status=PASS")
             step("Check captured output and status")
@@ -86,6 +102,9 @@ describe "LLM Caret Cached CLI Qualification":
             step("should preserve cached provider failure and usage evidence")
             step("Load the cached Caret artifact")
             val result = run_caret_cli_cached_case("failure-usage")
+            if cached_caret_blocked(result):
+                pending(cached_caret_blocked_reason(result))
+                return
             step("Invoke the offline Caret CLI provider")
             expect(result.stdout).to_contain("case=provider-error status=PASS")
             expect(result.stdout).to_contain("case=unknown-option status=PASS")

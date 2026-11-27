@@ -13,11 +13,13 @@ use std.gc_async_mut.gpu.engine2d.backend_vulkan.{VulkanBackend,
     VK_T_SFFI_BIND_PIPE, VK_T_SFFI_BIND_DESC, VK_T_SFFI_PUSH,
     VK_T_SFFI_DISPATCH, VK_T_SFFI_END, VK_T_SFFI_SUBMIT, VK_T_SFFI_WAIT_FENCE,
     VK_T_FONT_ATLAS_UPLOAD}
+use std.nogc_sync_mut.ui.host_frame_clock.{default_frame_clock}
 use std.nogc_sync_mut.io.env_ops.{env_get}
 use std.gpu.engine2d.glyph.{render_text_to_buffer}
+use std.common.binary_io.{f32_to_bits}
 use std.nogc_sync_mut.gpu.engine2d.sffi_dispatch.{gpu_sffi_uses_interpreter_array_abi}
 
-extern fn rt_bytes_alloc(n: i64) -> [u8]
+extern fn rt_bytes_alloc(n: i64) -> [u8]?
 use std.nogc_sync_mut.gpu.engine2d.sffi_vulkan.{
     vulkan_sffi_create_descriptor_set, vulkan_sffi_bind_buffer,
     vulkan_sffi_destroy_descriptor_set, vulkan_sffi_begin_compute,
@@ -240,6 +242,9 @@ fn vulkan_order_trace(message: text):
         print("[vk-order] " + message)
 val VK_IMAGE_COMPOSITE_COPY: i32 = 0
 val VK_IMAGE_COMPOSITE_SRC_OVER: i32 = 1
+# Solid colour fill: Chrome's SkPMSrcOver rule (color.blend_solid) rather
+# than the image rule mode 1 uses.
+val VK_IMAGE_COMPOSITE_SRC_OVER_SOLID: i32 = 2
 
 # ============================================================================
 # Compute Dispatch Methods
@@ -441,7 +446,12 @@ impl VulkanBackend:
             # (`arg_bytes_ptr`) reads packed and boxed arrays to the same bytes.
             # Native lanes keep the literal (their arrays are already compact).
             if gpu_sffi_uses_interpreter_array_abi():
-                self.image_upload_scratch = rt_bytes_alloc(byte_count)
+                if val scratch = rt_bytes_alloc(byte_count):
+                    self.image_upload_scratch = scratch
+                else:
+                    # Refused allocation (nil): fail this upload like the
+                    # oversize path above; the caller takes its fallback.
+                    return false
             else:
                 self.image_upload_scratch = [0u8; byte_count]
             self.image_upload_scratch_resize_count = self.image_upload_scratch_resize_count + 1
@@ -962,6 +972,15 @@ impl VulkanBackend:
         if cmd <= 0:
             return 1
         val has_font_work = self.pending_font_descriptors.len() > 0
+        val font_glyphs = self.pending_font_glyph_count
+        if has_font_work:
+            self.last_font_flush_rc = 0
+            self.last_font_flush_glyphs = font_glyphs
+            self.last_font_flush_fence = 0
+            self.last_font_flush_waited = false
+            self.last_font_flush_fence_destroyed = false
+            self.last_font_flush_queue_ns = 0
+            self.last_font_flush_sync_ns = 0
         val _t_end = vulkan_timing_now_us()
         val _ended = vulkan_sffi_end_compute(cmd)
         vulkan_timing_add(VK_T_SFFI_END, _t_end)
@@ -984,7 +1003,11 @@ impl VulkanBackend:
             self._clear_pending_compute_state()
             return 0
 
+        val font_queue_started = if has_font_work: default_frame_clock().now_micros() else: 0
         val fence = vulkan_counted_submit_and_wait_fence(cmd)
+        if has_font_work:
+            self.last_font_flush_fence = fence
+            self.last_font_flush_queue_ns = (default_frame_clock().now_micros() - font_queue_started) * 1000
         if fence <= 0 and vulkan_order_trace_enabled():
             vulkan_order_trace("flush-fail stage=submit_and_wait_fence cmd={cmd} fence={fence} pending_n={self.pending_compute_count} font_n={self.pending_font_descriptors.len()}")
         if fence < 0:
@@ -1006,6 +1029,7 @@ impl VulkanBackend:
             self.font_frame_submission_count = self.font_frame_submission_count + 1
             self.font_frame_fence_count = self.font_frame_fence_count + 1
 
+        val font_sync_started = if has_font_work: default_frame_clock().now_micros() else: 0
         val _t_wf = vulkan_timing_now_us()
         val completion_waited = vulkan_sffi_wait_fence(fence, 0)
         vulkan_timing_add(VK_T_SFFI_WAIT_FENCE, _t_wf)
@@ -1018,6 +1042,11 @@ impl VulkanBackend:
         val fence_destroyed = vulkan_sffi_destroy_fence(fence)
         val descriptors_released = self._release_pending_compute_descriptors()
         self._clear_pending_compute_state()
+        if has_font_work:
+            self.last_font_flush_waited = completion_waited
+            self.last_font_flush_fence_destroyed = fence_destroyed
+            self.last_font_flush_sync_ns = (default_frame_clock().now_micros() - font_sync_started) * 1000
+            self.last_font_flush_rc = if completion_waited and fence_destroyed and descriptors_released: 1 else: VK_DISPATCH_COMPLETED_INELIGIBLE
         if completion_waited and fence_destroyed and descriptors_released:
             self.observed_device_fence_count = self.observed_device_fence_count + 1
             1
@@ -1736,6 +1765,11 @@ impl VulkanBackend:
         for low-frequency text draws (UI labels, debug overlays).
         """
         if not self.initialized:
+            self.dirty = true
+            self.host_mirror_frame_fresh = false
+            self.note_damage_full()
+            self.last_text_path = "cpu-raster-blit"
+            self.last_text_fallback_reason = "backend-uninitialized"
             return
         val pending_status = self._flush_pending_compute_at("_gpu_draw_text_fallback")
         if pending_status <= 0:
@@ -1753,14 +1787,33 @@ impl VulkanBackend:
             self.host_buf = refreshed
 
         self.mark_cpu_fallback("legacy-text-host-framebuffer-fallback")
+        self.last_text_path = "cpu-raster-blit"
+        self.last_text_fallback_reason = "legacy-text-host-framebuffer-fallback"
         # Render glyphs into host buffer using shared glyph module
         render_text_to_buffer(self.host_buf, self.w, self.h, x, y, text_val, color, font_size)
 
-        # Upload entire host buffer back to GPU
+        # Upload entire host buffer back to GPU and maintain mirror authority
         val fb_size = _i64(self.w) * _i64(self.h) * 4
         val upload_bytes = _pixels_to_bytes(self.host_buf, _i64(self.w) * _i64(self.h))
-        vulkan_sffi_copy_to_buffer(self.d_framebuffer, upload_bytes, 0)
-        self.dirty = false
+        val uploaded = vulkan_sffi_copy_to_buffer(self.d_framebuffer, upload_bytes, 0)
+        self.note_damage_full()
+        if uploaded:
+            self.host_mirror_valid = false
+            self.host_mirror_frame_fresh = false
+            self.dirty = true
+        else:
+            var checksum: i64 = 0
+            var ci: i64 = 0
+            while ci < self.host_buf.len().to_i64():
+                val cpx = (self.host_buf[ci] as i64) & 4294967295
+                checksum = (checksum + cpx) % 2147483647
+                ci = ci + 1
+            self.last_host_checksum = checksum
+            self.host_mirror_valid = true
+            self.host_mirror_frame_fresh = true
+            self.cpu_fallback_host_surface = true
+            self.last_error = "legacy-text-host-framebuffer-upload-failed: {vulkan_sffi_last_error()}"
+            self.dirty = true
 
 # ============================================================================
 # Type Conversion Helpers
@@ -1832,6 +1885,28 @@ fn _pack_rect_pc(x: i32, y: i32, w: i32, h: i32, color: u32, fb_w: i32, fb_h: i3
     var buf: [u8] = [0u8; VK_PUSH_CONSTANT_SIZE]
     _write_rect_pc_into(buf, 0, x, y, w, h, color, fb_w, fb_h, clip_x, clip_y, clip_w, clip_h, clip_enabled)
     buf
+
+fn _pack_affine_coverage_pc(rx: i32, ry: i32, rw: i32, rh: i32,
+    fb_w: i32, fb_h: i32, color: u32, local_w: f64, local_h: f64,
+    a: f64, b: f64, c: f64, d: f64, tx: f64, ty: f64) -> [u8]:
+    """Pack the 60-byte affine shader block after strict f64 preflight."""
+    var data: [u8] = [0u8; VK_PUSH_CONSTANT_SIZE]
+    data = _pack_i32_le(data, 0, rx)
+    data = _pack_i32_le(data, 4, ry)
+    data = _pack_i32_le(data, 8, rw)
+    data = _pack_i32_le(data, 12, rh)
+    data = _pack_i32_le(data, 16, fb_w)
+    data = _pack_i32_le(data, 20, fb_h)
+    data = _pack_u32_le(data, 24, color)
+    data = _pack_u32_le(data, 28, f32_to_bits(local_w as f32))
+    data = _pack_u32_le(data, 32, f32_to_bits(local_h as f32))
+    data = _pack_u32_le(data, 36, f32_to_bits(a as f32))
+    data = _pack_u32_le(data, 40, f32_to_bits(b as f32))
+    data = _pack_u32_le(data, 44, f32_to_bits(c as f32))
+    data = _pack_u32_le(data, 48, f32_to_bits(d as f32))
+    data = _pack_u32_le(data, 52, f32_to_bits(tx as f32))
+    data = _pack_u32_le(data, 56, f32_to_bits(ty as f32))
+    data
 
 fn _pack_rect_batch_pc(bx: i32, by: i32, bw: i32, bh: i32, n: i32,
                        fb_w: i32, fb_h: i32, clip_x: i32, clip_y: i32,
@@ -2061,6 +2136,23 @@ fn _pack_blur_rect_pc(rx: i32, ry: i32, rw: i32, rh: i32,
     buf = _pack_i32_le(buf, 24, radius)
     buf
 
+fn _pack_css_group_restore_pc(x0: i32, y0: i32, w: i32, h: i32, fb_w: i32, fb_h: i32,
+                               alpha8: i32) -> [u8]:
+    """Push constants for the device CSS opacity group restore (28 bytes used).
+
+    FROZEN: the field order is shaders/css_group_restore.comp's PushConstants
+    block.
+    """
+    var buf: [u8] = [0u8; VK_PUSH_CONSTANT_SIZE]
+    buf = _pack_i32_le(buf, 0, x0)
+    buf = _pack_i32_le(buf, 4, y0)
+    buf = _pack_i32_le(buf, 8, w)
+    buf = _pack_i32_le(buf, 12, h)
+    buf = _pack_i32_le(buf, 16, fb_w)
+    buf = _pack_i32_le(buf, 20, fb_h)
+    buf = _pack_i32_le(buf, 24, alpha8)
+    buf
+
 fn _pack_shadow_rect_pc(mx: i32, my: i32, mw: i32, mh: i32,
                         fb_w: i32, fb_h: i32, sr: i32, sg: i32, sb: i32,
                         shadow_a: i32, prof_off: i32) -> [u8]:
@@ -2082,6 +2174,27 @@ fn _pack_shadow_rect_pc(mx: i32, my: i32, mw: i32, mh: i32,
     buf = _pack_i32_le(buf, 32, sb)
     buf = _pack_i32_le(buf, 36, shadow_a)
     buf = _pack_i32_le(buf, 40, prof_off)
+    buf
+
+fn _pack_gradient_layer_pc(x0: i32, y0: i32, w: i32, h: i32, fb_w: i32, fb_h: i32,
+                           mode: i32, tab_off: i32, col_off: i32, row_off: i32) -> [u8]:
+    """Push constants for the device CSS gradient layer kernel (40 bytes used).
+
+    FROZEN: the field order is shaders/gradient_layer.comp's PushConstants
+    block. `mode` is 0 radial / 1 linear; the three offsets are WORD indices
+    into the binding-1 buffer (header + stop ramp, column terms, row terms).
+    """
+    var buf: [u8] = [0u8; VK_PUSH_CONSTANT_SIZE]
+    buf = _pack_i32_le(buf, 0, x0)
+    buf = _pack_i32_le(buf, 4, y0)
+    buf = _pack_i32_le(buf, 8, w)
+    buf = _pack_i32_le(buf, 12, h)
+    buf = _pack_i32_le(buf, 16, fb_w)
+    buf = _pack_i32_le(buf, 20, fb_h)
+    buf = _pack_i32_le(buf, 24, mode)
+    buf = _pack_i32_le(buf, 28, tab_off)
+    buf = _pack_i32_le(buf, 32, col_off)
+    buf = _pack_i32_le(buf, 36, row_off)
     buf
 
 fn _pack_glass_material_pc(fb_w: i32, fb_h: i32, rx: i32, ry: i32, rw: i32, rh: i32,
@@ -2313,3 +2426,26 @@ fn vulkan_font_atlas_slot_plan(slot_found: bool, slot_sequence: i64,
     if free_slot_available:
         return VK_FONT_SLOT_WRITE_FRESH
     VK_FONT_SLOT_FLUSH_THEN_WRITE
+
+val VK_CLEAR_WORKGROUP_SIZE: i64 = 256
+val VK_SPEC_MAX_WORKGROUP_COUNT: i64 = 65535
+val VK_CLEAR_MAX_GROUPS_X: i64 = 32768
+
+fn vulkan_clear_dispatch_groups_x(total_pixels: i64) -> i64:
+    """Compute X workgroup count for `spirv_clear`, bounded within Vulkan's
+    spec-minimum `maxComputeWorkGroupCount[0] = 65535`."""
+    if total_pixels <= 0:
+        return 0
+    val total_groups = (total_pixels + VK_CLEAR_WORKGROUP_SIZE - 1) / VK_CLEAR_WORKGROUP_SIZE
+    if total_groups <= VK_SPEC_MAX_WORKGROUP_COUNT:
+        return total_groups
+    VK_CLEAR_MAX_GROUPS_X
+
+fn vulkan_clear_dispatch_groups_y(total_pixels: i64) -> i64:
+    """Compute Y workgroup count for `spirv_clear` when 1D groups exceed 65535."""
+    if total_pixels <= 0:
+        return 0
+    val total_groups = (total_pixels + VK_CLEAR_WORKGROUP_SIZE - 1) / VK_CLEAR_WORKGROUP_SIZE
+    if total_groups <= VK_SPEC_MAX_WORKGROUP_COUNT:
+        return 1
+    (total_groups + VK_CLEAR_MAX_GROUPS_X - 1) / VK_CLEAR_MAX_GROUPS_X

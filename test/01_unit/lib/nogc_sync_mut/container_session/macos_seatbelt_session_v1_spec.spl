@@ -1,0 +1,72 @@
+# @req SC-MAC-001 SC-MAC-005 SC-MAC-007
+use std.spec.*
+use std.nogc_sync_mut.container_session.podman_session_v1.{PodmanMountV1}
+use std.nogc_sync_mut.container_session.macos_seatbelt_session_v1.{
+    MACOS_SEATBELT_PROGRAM_V1, MacosSeatbeltSessionSpecV1,
+    macos_seatbelt_image_selected_v1, macos_seatbelt_compile_profile_v1,
+    macos_seatbelt_run_argv_v1}
+
+describe "macOS Seatbelt Simple Container session":
+    it "selects the macOS Seatbelt backend for seatbelt/macos-seatbelt and macos default":
+        step("Check explicit seatbelt image selectors")
+        expect(macos_seatbelt_image_selected_v1("macos-seatbelt", "macos")).to_equal(true)
+        expect(macos_seatbelt_image_selected_v1("seatbelt", "macos")).to_equal(true)
+        expect(macos_seatbelt_image_selected_v1("default", "macos")).to_equal(true)
+        expect(macos_seatbelt_image_selected_v1("default", "linux")).to_equal(false)
+        expect(macos_seatbelt_image_selected_v1("busybox:1.36", "macos")).to_equal(false)
+
+    it "compiles a write-confined Seatbelt profile allowing worktree and attempt tmp only":
+        step("Build a macOS Seatbelt session spec for agy in an isolated worktree")
+        val spec = MacosSeatbeltSessionSpecV1(
+            name: "cs-main-a1",
+            owner: "cs-main",
+            image: "macos-seatbelt",
+            command: ["/Users/op/.local/bin/agy", "-p", "HELLO_WORLD"],
+            workdir: "/private/tmp/wt/a1",
+            repo_root: "/private/tmp/repo",
+            worktree_path: "/private/tmp/wt/a1",
+            attempt_dir: "/private/tmp/attempt-a1",
+            home_dir: "/Users/op",
+            mounts: [PodmanMountV1(source: "/private/tmp/shared", target: "/private/tmp/shared", read_only: false)],
+            network: "host",
+            env: ["FOO=bar"],
+            instance: "cs1-1")
+        val compiled = macos_seatbelt_compile_profile_v1(spec)
+        expect(compiled.is_ok()).to_equal(true)
+        val profile = compiled.unwrap()
+        expect(profile).to_start_with("(version 1)\n")
+        expect(profile).to_contain("(deny file-write*)")
+        expect(profile).to_contain("(allow file-write* (subpath \"/private/tmp/attempt-a1\"))")
+        expect(profile).to_contain("(allow file-write* (subpath \"/private/tmp/wt/a1\"))")
+        expect(profile).to_contain("(allow file-write* (subpath \"/Users/op/.gemini\"))")
+        expect(profile).to_contain("(allow file-write* (subpath \"/private/tmp/shared\"))")
+        expect(profile.contains("(deny network*)")).to_equal(false)
+
+        step("Build sandbox-exec argv with private attempt TMPDIR")
+        val argv = macos_seatbelt_run_argv_v1("/private/tmp/attempt-a1/profile.sb", spec).unwrap()
+        expect(argv[0]).to_equal(MACOS_SEATBELT_PROGRAM_V1)
+        expect(argv[1]).to_equal("-f")
+        expect(argv[2]).to_equal("/private/tmp/attempt-a1/profile.sb")
+        expect(argv).to_contain("TMPDIR=/private/tmp/attempt-a1/tmp")
+        expect(argv).to_contain("FOO=bar")
+        expect(argv).to_contain("/Users/op/.local/bin/agy")
+
+    it "emits network denial when network mode is none and rejects invalid paths":
+        step("Verify network=none adds (deny network*)")
+        val offline = MacosSeatbeltSessionSpecV1(
+            name: "cs-main-a2", owner: "cs-main", image: "macos-seatbelt",
+            command: ["/bin/echo", "hi"], workdir: "/private/tmp/wt/a2",
+            repo_root: "/private/tmp/repo", worktree_path: "/private/tmp/wt/a2",
+            attempt_dir: "/private/tmp/attempt-a2", home_dir: "",
+            mounts: [], network: "none", env: [], instance: "cs1-2")
+        val profile = macos_seatbelt_compile_profile_v1(offline).unwrap()
+        expect(profile).to_contain("(deny network*)")
+
+        step("Verify traversal paths are rejected")
+        val bad = MacosSeatbeltSessionSpecV1(
+            name: "cs-main-a3", owner: "cs-main", image: "macos-seatbelt",
+            command: ["/bin/echo"], workdir: "/private/tmp/../etc",
+            repo_root: "/private/tmp/repo", worktree_path: "",
+            attempt_dir: "/private/tmp/attempt-a3", home_dir: "",
+            mounts: [], network: "host", env: [], instance: "cs1-3")
+        expect(macos_seatbelt_compile_profile_v1(bad).is_err()).to_equal(true)

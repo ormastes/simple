@@ -1,0 +1,168 @@
+name: Bootstrap Scripts Contract
+
+on:
+  push:
+    branches: [main, master, develop, release_windows, release_phase3, 'release/**']
+    paths:
+      - 'bin/**'
+      - 'config/**'
+      - 'release/**'
+      - 'doc/04_architecture/compiler/plugin_arch/**'
+      - 'scripts/bootstrap/**'
+      - 'scripts/check/**'
+      - 'scripts/lib/**'
+      - 'scripts/os/**'
+      - 'scripts/resource/**'
+      - 'scripts/setup/**'
+      - 'src/app/cli/*bootstrap*'
+      - 'src/compositions/**'
+      - 'src/plugins/**'
+      - 'test/01_unit/scripts/**'
+      - '.github/workflows/bootstrap-scripts-contract.yml'
+      - '.github/workflows/simpleos-build.yml'
+  pull_request:
+    branches: [main, master, develop, release_windows, release_phase3, 'release/**']
+    paths:
+      - 'bin/**'
+      - 'config/**'
+      - 'release/**'
+      - 'doc/04_architecture/compiler/plugin_arch/**'
+      - 'scripts/bootstrap/**'
+      - 'scripts/check/**'
+      - 'scripts/lib/**'
+      - 'scripts/os/**'
+      - 'scripts/resource/**'
+      - 'scripts/setup/**'
+      - 'src/app/cli/*bootstrap*'
+      - 'src/compositions/**'
+      - 'src/plugins/**'
+      - 'test/01_unit/scripts/**'
+      - '.github/workflows/bootstrap-scripts-contract.yml'
+      - '.github/workflows/simpleos-build.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
+
+jobs:
+  bootstrap-scripts-contract:
+    name: Bootstrap Scripts Contract (${{ matrix.name }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            name: Linux
+          - os: macos-latest
+            name: macOS
+          - os: windows-latest
+            name: Windows
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            bin
+            config
+            release
+            doc/04_architecture/compiler/plugin_arch
+            scripts/bootstrap
+            scripts/check
+            scripts/lib
+            scripts/os
+            scripts/resource
+            scripts/setup
+            src/app/cli
+            src/compiler
+            src/compiler_rust/compiler
+            src/compositions
+            src/plugins
+            src/runtime
+            test/01_unit/scripts
+          sparse-checkout-cone-mode: true
+
+      - name: Install xxhsum for .csm seal verification
+        shell: bash
+        run: |
+          if ! command -v xxhsum >/dev/null 2>&1; then
+            case "$RUNNER_OS" in
+              Linux)
+                sudo apt-get update -qq
+                sudo apt-get install -y -qq --no-install-recommends xxhash
+                ;;
+              macOS)
+                HOMEBREW_NO_AUTO_UPDATE=1 brew install xxhash
+                ;;
+              Windows)
+                xxh_bin="$(cygpath -u "$RUNNER_TEMP")/xxhash-bin"
+                mkdir -p "$xxh_bin"
+                if [ -x /c/msys64/usr/bin/pacman.exe ]; then
+                  if /c/msys64/usr/bin/pacman.exe -Sy --noconfirm --needed mingw-w64-x86_64-xxhash; then
+                    :
+                  fi
+                  if [ -x /c/msys64/mingw64/bin/xxhsum.exe ]; then
+                    cp -f /c/msys64/mingw64/bin/xxhsum.exe "$xxh_bin/xxhsum.exe"
+                    for dll in /c/msys64/mingw64/bin/libxxhash*.dll /c/msys64/mingw64/bin/libwinpthread*.dll /c/msys64/mingw64/bin/libgcc_s_*.dll; do
+                      if [ -f "$dll" ]; then
+                        cp -f "$dll" "$xxh_bin/"
+                      fi
+                    done
+                  fi
+                fi
+                if [ ! -x "$xxh_bin/xxhsum.exe" ] && command -v choco >/dev/null 2>&1; then
+                  choco install xxhash -y --no-progress
+                  if [ -x /c/ProgramData/chocolatey/bin/xxhsum.exe ]; then
+                    cp -f /c/ProgramData/chocolatey/bin/xxhsum.exe "$xxh_bin/xxhsum.exe"
+                  fi
+                fi
+                test -x "$xxh_bin/xxhsum.exe"
+                "$xxh_bin/xxhsum.exe" -V
+                cygpath -w "$xxh_bin" >> "$GITHUB_PATH"
+                export PATH="$xxh_bin:$PATH"
+                ;;
+            esac
+          fi
+          command -v xxhsum
+          xxhsum -V
+
+      - name: Verify standalone P3b continuation
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          mkdir -p build/phase3b-contract
+          perl scripts/resource/process-tree-rss-watchdog.pl --max-rss-kib=131072 --timeout-seconds=120 --receipt=build/phase3b-contract/owner.env -- bash scripts/bootstrap/tests/phase3b-continuation-test.shs >build/phase3b-contract/result.log 2>&1
+
+      - name: Retain standalone P3b contract evidence
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: phase3b-contract-${{ github.sha }}
+          path: build/phase3b-contract/
+          if-no-files-found: error
+
+      - name: Verify admitted scheduler resume contracts
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          mkdir -p build/scheduler-resume-contract
+          perl scripts/resource/process-tree-rss-watchdog.pl --max-rss-kib=131072 --timeout-seconds=120 --receipt=build/scheduler-resume-contract/resume.owner.env -- sh scripts/check/check-bootstrap-scheduler-admitted-resume.shs >build/scheduler-resume-contract/resume.log 2>&1
+          perl scripts/resource/process-tree-rss-watchdog.pl --max-rss-kib=131072 --timeout-seconds=120 --receipt=build/scheduler-resume-contract/binding.owner.env -- sh scripts/bootstrap/tests/stage4-binding-identity-test.shs --strategy-hook-only >build/scheduler-resume-contract/binding.log 2>&1
+
+      - name: Retain scheduler contract evidence
+        if: always() && runner.os == 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: scheduler-resume-contract-${{ github.sha }}
+          path: build/scheduler-resume-contract/
+          if-no-files-found: error
+
+      - name: Run unified bootstrap scripts contract gate
+        shell: bash
+        run: |
+          sh scripts/check/check-bootstrap-unified-scripts-contract.shs --selftest
+          sh scripts/check/check-bootstrap-unified-scripts-contract.shs --require-unit-suites

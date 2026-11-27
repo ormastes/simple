@@ -1,7 +1,7 @@
 # BUG: `.unwrap()` on an `Array.pop()` result yields nil in the seed's LLVM native lane
 
 - **Filed:** 2026-09-13
-- **Status:** OPEN (2026-09-13)
+- **Status:** FIXED (2026-11-11, lane boot19 — the 2026-11-09 fix is now verified; seed-smoke 5/5)
 - **Lane:** BOOT-9 (bootstrap site 10 — the defect immediately behind site 9)
 - **Severity:** High — silent nil, no diagnostic. In a DFS drain loop it turns
   into unbounded allocation, which is how it was found.
@@ -104,3 +104,78 @@ The lowering itself. `.unwrap()` on a raw-form optional should route through
 `??` double-evaluation must be settled first, since the two interact. Any such
 change lands in the seed's Rust HIR lowering AND the pure-Simple MIR lowering
 together, which is out of scope for a bootstrap-unblocking lane.
+
+## Fix implemented 2026-11-09 (verification pending)
+
+**Checked against current policy/design: still valid, re-scoped.** Two of the
+three defects above were already fixed on `release/1.0.0` by sibling lanes and
+are pinned here rather than re-fixed:
+
+- the nil payload: `.unwrap()` no longer lowers to `rt_enum_payload` on either
+  backend; the untyped fallback is `rt_unwrap_or_trap`
+  (`codegen/instr/closures_structs.rs`, `codegen/llvm/emitter.rs`), which
+  passes a raw present value through and traps on raw nil
+  (`unwrap_family_treats_flat_nil_as_present_2026-09-13`);
+- `??` double evaluation: `lower_coalesce` binds its subject to one
+  `$coalesce_subject` local (`compiler/tests/coalesce_single_evaluation.rs`).
+
+What remained, and what this change fixes, is the typing half of the design
+"`pop()` is `T?`, `.unwrap()` on it is the checked unwrap":
+
+- **Seed (Rust HIR):** `pop`/`first`/`last`/`get`/`min`/`max`/`remove` are
+  deliberately typed bare `T` by the method result-type table
+  (`doc/03_plan/compiler/type_system/seed_hirtype_optional_plan.md` — 547
+  direct `.pop()` consumers rely on that today, so retyping them to `T?`
+  wholesale is the staged root fix, not this lane). `.unwrap()` on such a
+  receiver therefore fell through to dynamic dispatch typed `ANY`. It now
+  lowers to `BuiltinCall rt_unwrap_or_trap` typed as the element
+  (`hir/lower/expr/mod.rs`, `"unwrap"` arm), so the checked helper runs and
+  MIR's name-keyed unbox decodes scalars — the same staging `lower_coalesce`
+  already uses for these accessors.
+- **Pure-Simple MIR:** already consistent — `pop()` builds a typed Option
+  before `rt_array_pop` (`method_calls_literals.spl`), `.unwrap()` branches on
+  `rt_is_some` and panics on nil, `??` lowers its operand once
+  (`expr_dispatch.spl`). Pinned by a new MIR-level spec.
+
+Tests (TDD — the cargo test was RED before the seed change):
+
+- `src/compiler_rust/compiler/tests/pop_unwrap_checked.rs` (MIR: one
+  `rt_unwrap_or_trap`, no dynamic `unwrap`; producer called once under
+  `.unwrap()` and `??`; JIT fixture executes).
+- `test/fixtures/compiler/pop_unwrap_checked.spl` (executable oracle).
+- `test/01_unit/compiler/mir/pop_unwrap_checked_lowering_spec.spl`
+  (pure-Simple: one `rt_array_pop`, one `rt_is_some`, `rt_panic`, no
+  `rt_enum_payload`; `??` single pop; tuple payload; executed semantics).
+
+The `topological_order` index-read form is retained (now tagged
+`@workaround`) until a Stage-2 LLVM-lane build confirms the lowering end to
+end; its comment was stale and is corrected.
+
+## 2026-11-11 addendum (lane boot19) — FIXED (2026-11-09 fix verified)
+
+Verdict: FIXED. The "Fix implemented 2026-11-09 (verification pending)"
+section above is now verified on `origin/release/1.0.0`:
+
+- Seed (Rust HIR/codegen): `.unwrap()` lowers to `rt_unwrap_or_trap` on both
+  backends — `src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs:2443`
+  and `codegen/llvm/emitter.rs:381` (plus `codegen/llvm/functions/calls.rs:2250,2497`),
+  with `build_nullable_unwrap` in `hir/lower/expr/mod.rs:204` routing flat
+  nullables the same way. Fixing commit `e569d40037c7` ("fix(seed): checked,
+  typed `.unwrap()` on array pop/first/last/remove") is an ancestor of this
+  branch.
+- All three guard artifacts from that section are in the tree:
+  `src/compiler_rust/compiler/tests/pop_unwrap_checked.rs`,
+  `test/fixtures/compiler/pop_unwrap_checked.spl`,
+  `test/01_unit/compiler/mir/pop_unwrap_checked_lowering_spec.spl`.
+- Verification actually run (2026-11-11, lane boot19, seed-smoke):
+  `bin/simple.exe test test/01_unit/compiler/mir/pop_unwrap_checked_lowering_spec.spl
+  --mode=interpreter --no-cache` → 5 examples, 5 passed, 0 failed (one
+  `rt_array_pop`, `rt_is_some` + `rt_panic`, no `rt_enum_payload`; `??` single
+  pop; tuple payload; executed semantics). The cargo half
+  (`pop_unwrap_checked.rs`) was not run here (lane rule: no cargo/rustc); it
+  stays covered by the project's normal Rust CI.
+- `topological_order`'s index-read form is retained at
+  `parallel.spl:305` with its `@workaround` tag pending the Stage-2 LLVM-lane
+  end-to-end confirm. That confirmation is part of the blocked
+  sanctioned-bootstrap chain (`stage3_driver_hir_lowering_spins_after_parse_fix_2026-09-21`,
+  same batch, BLOCKED), not a live defect in this row's fix.

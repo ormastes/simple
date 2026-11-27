@@ -1351,3 +1351,126 @@ bounded workload, **not attribution or closure of the historical Stage 3 P0**.
 The 25 GB termination, real full-entry-closure RSS budget, provenance-bound
 candidate, hello, and module-qualified field-layout checks remain unverified.
 No canonical Stage 3 was run, and both authoritative DB rows remain OPEN.
+
+**Revalidated 2026-11-02: still plausible because the report title (Current-source Stage 3 terminates at status 143 after unbounded HIR-build RSS g) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**
+
+## Analysis (2026-11-02, opf-3)
+
+- Checked against current policy/design: still valid as a memory-boundedness evidence gap. It is compatible with the one-process-per-file pipeline, the BuildSession memory model and the host.sdn limits. It is not closed: no RSS/termination proof exists on release/1.0.0.
+- The source-side owner fix is still in place at release/1.0.0 `b3bd662bcda`.
+  - `src/compiler/80.driver/driver_hir_pipeline_lowering.spl:1734` constructs one `HirLowering` before the `while hir_loop_pos < hir_visit_order.len():` loop.
+  - `:1882` calls `lowering.begin_module(src_path ?? "")` once per source.
+  - No `hirlowering_for_module*` call is left inside the loop.
+  - `src/compiler/20.hir/hir_lowering/context_helpers.spl:70` `begin_module` still resets in place and does not call `hirlowering_new()`.
+- This is not the s2-rebuild "stage2_next worker AV after load_sources" symptom. This bug is unbounded RSS growth ending in SIGTERM 143, with no access violation.
+- Spec drift: `test/01_unit/compiler/driver/stage3_hir_lowerer_reuse_contract_spec.spl` was 2/10 green. Its loop anchor `while source_idx < ...` had been renamed, so `index_of` returned -1 and the whole owner was scanned. The anchor is updated and now guarded with `expect(loop).to_be_greater_than(0)`. The core example "constructs the registry-bearing lowerer once outside the source loop" passes.
+- The 7 other examples still fail on other renamed text anchors, for example the streaming `surface_content_hash`, telemetry evidence fields and the `promote_phase_memo_transient_owners` body.
+- TODO(owner): re-anchor the remaining 7 contract examples to current source.
+- TODO(owner): run the single cache-preserving canonical Stage3 transaction under the RSS budget. This host cannot run it now: Phase 3 has priority and full bootstrap builds are not allowed.
+
+## Addendum 2026-11-07: phase-1 interface-index scratch (one contributing cause, fixed)
+
+Measured on macOS arm64 with the Stage-2-admitted candidate
+(`/private/tmp/boot4-out/s2y/.../stage2-admitted/simple`, copied), running
+`native-build src/app/cli/main.spl --backend llvm --threads 1` with
+`SIMPLE_HIR_CACHE=0 SIMPLE_FRONTEND_CACHE=0 SIMPLE_PHASE_RSS=1` under
+`/usr/bin/time -l` and a 2400 s timeout:
+
+- Max RSS 7,445,561,344 B (peak_kib 7,271,056). HIR reached 1073 modules
+  before the timeout.
+- RSS was already 3.86 GB at `phase1:load_sources:fingerprint:start`, before
+  any parse or HIR work. Parse then held level around 4 GB. The single
+  largest step was between `owner_copy:done` (1,143,504 KiB) and
+  `fingerprint:start` (3,862,144 KiB): **+2.72 GB in 64 s**.
+- That window runs `native_source_interface_index_from_sources_with_digests_v1`,
+  which calls `native_interface_decls_v1` once per admitted source. Those
+  helpers in `src/compiler/80.driver/cache/native_interface_slice.spl` scanned
+  text one `t[i:i + 1]` slice at a time, built identifiers with `cur = cur + c`,
+  and called `split`/`trim` on every body line. No transient scope is open in
+  phase 1, so every intermediate text lived until process exit. That is about
+  2.7 GB carried into HIR.
+
+Fix: scan with `char_code_at`, slice each identifier once, count `"""`
+without `split`, and test blank and body lines without `trim`. On this
+candidate, `char_code_at` positions agree with `len()` and slicing only on
+ASCII text, so any text holding a non-ASCII character keeps the original
+slice-based scan.
+
+Reproducer: a native probe that runs `native_interface_decls_v1` over the
+3097 unique sources (47.9 MB) of the same CLI closure. It was built twice by
+the same candidate, once from the old copy and once from the new copy of the
+module. The read+split floor is 0.22 GB.
+
+| | max RSS | wall |
+|---|---|---|
+| old | 3,370,582,016 B | 18.8 s |
+| new | 1,603,371,008 B | 11.2 s |
+
+Scratch above the floor dropped from 3.15 GB to 1.38 GB (-56%). Output is
+byte-identical: for every one of the 45,319 `.spl` files under `src/` and
+`test/`, the old and new probes produced the same dump of every decl's
+digest, names, tokens and `always` flag.
+
+Not closed. This removes part of the RSS carried into HIR. In the same run,
+HIR itself still grew from 6.18 GB to 7.1 GB over 1073 modules. A canonical
+Stage 3 under the RSS budget has not been run with this fix, because it
+needs a Stage 2 rebuilt from this tree.
+
+---
+
+## 2026-11-10 (p0-hir-verify lane, Windows worktree, seed-smoke) — OWNER FIX RE-CONFIRMED; FAMILY GUARD RE-ANCHORED; RSS TRANSACTION STILL GATED
+
+Lane: `work/p0-hir-verify-20261110` on `origin/release/1.0.0` (includes Nil-singleton PR #8142).
+Runtime: `bin/simple.exe` Rust seed v1.0.0-rc.1, `--mode=interpreter`. Seed-smoke labeling: all
+results below are source-text contracts executed by the seed interpreter; no native/self-hosted
+claim is made.
+
+### Static re-confirmation of the owner fix (current source)
+
+- `src/compiler/80.driver/driver_hir_pipeline_lowering.spl:1035` constructs one
+  `hirlowering_for_module("", surfaces)` before the streaming per-source loop (`:1122`);
+  `:1827` constructs one `hirlowering_for_module_with_diagnostics(...)` before the
+  retained/bootstrap per-source loop (`:1904`). No `hirlowering_for_module*` constructor
+  appears inside either loop body; the only in-loop call is `lowering.begin_module(...)`.
+- `src/compiler/20.hir/hir_lowering/context_helpers.spl:70-187` `begin_module` resets
+  transient state in place (`symbols.reset_module()`, per-module dict/array clears,
+  re-export visit workspaces cleared); the frozen surface registry, inference config,
+  re-export root caches, generation and counters are not touched. The only
+  `hirlowering_new()` in the file is the separate `with_resolver` constructor at `:190`.
+- Verdict: the RSS-termination owner fix is PRESENT in current source, unchanged in shape
+  from the 2026-11-02 re-validation.
+
+### Executable focused verification (seed-smoke)
+
+| spec | arrival | after | verdict |
+|---|---|---|---|
+| `test/01_unit/compiler/driver/stage3_hir_lowerer_reuse_contract_spec.spl` | 7/7 PASS exit 0 (no repair needed; the 2026-11-02 anchor drift is already repaired on this base) | same | GREEN |
+| `test/01_unit/compiler/driver/driver_memory_lifecycle_family_spec.spl` | 4/5 FAIL exit 1 | 5/5 PASS exit 0 | FIXED (spec-only) |
+
+The family-guard failure was spec-anchor drift, not an owner regression: the example
+anchored `while source_idx < self.ctx.sources.len():`, a loop header renamed to
+`while hir_loop_pos < hir_visit_order.len():` on both per-source paths. Repair
+re-anchors to both current loop bodies (streaming `[1012,1671)` and retained
+`[1811,2443)`, the latter searched after `if self.ctx.sources.len() <= 0:` to skip the
+streaming function's same-named `phase_hir_modules` declaration) and asserts the same two
+forbidden constructors in each loop tail. No driver or lowering source was edited; no
+assertion was weakened — the negative checks still forbid `hirlowering_for_module_with_diagnostics(`
+and `hirlowering_new()` in-loop, now at both loops instead of only the renamed one.
+
+### Still blocked (unchanged, recorded with exact command)
+
+Acceptance item 3 (one cache-preserving canonical Stage-3 transaction under the RSS
+budget) was NOT run: this lane has no admitted Stage-2 producer, the full-closure HIR
+run is the >8 GB multi-hour transaction this row's own history repeatedly documents, and
+the task brief excludes it. Exact canonical command for the granted lane (from
+`scripts/bootstrap/bootstrap-from-scratch.sh:2068-2102`, cache-preserving, single worker):
+
+```bash
+SIMPLE_BOOTSTRAP=1 SIMPLE_NO_STUB_FALLBACK=1 SIMPLE_COMPILER_PHASE_PROFILE=1 \
+SIMPLE_COMPILER_PHASE_PROFILE_FILE=<retained> SIMPLE_MEM_SNAPSHOT_FILE=<retained> \
+sh scripts/bootstrap/bootstrap-from-scratch.sh --stage 3 --resume
+```
+
+(preceded by a current-HEAD Stage-2 admission; RSS/termination evidence requires the
+instrumented sinks this doc's 2026-08-14 section specifies). Row remains OPEN;
+RSS boundedness is proven at source-contract level only, not measured.

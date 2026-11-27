@@ -1,6 +1,18 @@
 # Web file renderer nil-receiver crash
 ## Open 2026-09-16 — needs owner triage
 
+## Triage 2026-11-25
+
+Still open; the header is accurate. The reported blocker is self-host
+program loading/lowering for the runner's import shape (a compiler-lane
+issue, not page content), and no resolution evidence exists in the tree.
+The repro could not be re-run from this Windows worktree: `examples/` is
+outside its sparse checkout, and the tracked seed's `test`/`run` lanes are
+additionally constrained at release/1.0.0 HEAD by the known
+`@representation_boundary` source/binary inconsistency. No execution
+evidence claimed; left open for the renderer/compiler lane with the
+acceptance criteria below unchanged.
+
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 

@@ -26,7 +26,7 @@ pub(crate) use crate::interpreter_unit::*;
 #[path = "../interpreter_state.rs"]
 mod interpreter_state;
 pub(crate) use interpreter_state::{
-    decode_import_binding_marker, flatten_owner_mangled_name, FLATTEN_OWNER_SYMBOL_PREFIX, clear_moved_vars, const_trace, const_trace_target,
+    decode_import_binding_marker, decode_module_namespace_marker, flatten_owner_mangled_name, FLATTEN_OWNER_SYMBOL_PREFIX, clear_moved_vars, const_trace, const_trace_target,
     get_aop_config, get_di_config, mark_as_moved, set_aop_config, set_di_config, ExecutionMode,
     debug_call_stack_snapshot, field_access_debug_enabled, note_enum_payload_function, note_enum_payload_function_opt,
 };
@@ -34,6 +34,7 @@ pub use interpreter_state::{
     check_execution_limit,
     clear_interpreter_state,
     get_current_file,
+    get_current_node_span,
     get_execution_count,
     get_interpreter_args,
     init_signal_handlers,
@@ -43,6 +44,7 @@ pub use interpreter_state::{
     reset_execution_count,
     reset_interrupt,
     set_current_file,
+    set_current_node_span,
     set_debug_mode,
     set_execution_limit,
     set_execution_limit_enabled,
@@ -69,10 +71,14 @@ pub(crate) use interpreter_state::{
     MODULE_GLOBALS_INITIAL_BY_OWNER, MOVED_VARS, SI_BASE_UNITS, USER_SI_BASE_UNITS, USER_UNIT_SUFFIX_TO_FAMILY,
     TIMEOUT_EXCEEDED, TRAIT_IMPLS, TRAITS, MIXINS, UNIT_FAMILY_ARITHMETIC, UNIT_FAMILY_CONVERSIONS,
     UNIT_SUFFIX_TO_FAMILY, USER_MACROS, FUNCTION_OVERLOADS, CLASS_OVERLOADS, FUNCTION_MODULE_OWNER,
-    CURRENT_EXEC_MODULE, FLATTEN_GLOBAL_OWNER_MARKER_PREFIX, FLATTEN_IMPORT_BINDING_MARKER_PREFIX,
+    CURRENT_EXEC_MODULE, FLATTEN_GLOBAL_OWNER_MARKER_PREFIX, FLATTEN_IMPORT_BINDING_MARKER_PREFIX, FLATTEN_MODULE_NAMESPACE_MARKER_PREFIX,
     FLATTEN_MODULE_OWNER_ATTR_PREFIX, tag_function_module_owner, report_globals_census, owned_globals_snapshot,
     owned_global, owned_global_present, owner_has_globals, steal_owned_global, set_owned_global, seed_owner_globals,
     reset_owned_globals_from_initial, owner_bindings, record_owner_binding, record_owner_binding_layer,
+    GENERIC_TYPE_BINDINGS, GenericTypeBindingsGuard, PendingCallGenerics, PendingCallGenericsGuard,
+    push_method_call_generics, push_method_call_generics_with_method, take_pending_call_generics,
+    resolve_generic_type_in_scope, unify_generic_type_value,
+    push_expected_target_type, current_expected_target_type, push_current_fn_return_type, current_fn_return_type,
 };
 
 // Core types and utilities
@@ -102,19 +108,21 @@ pub(crate) use coverage_sites::register_module_sites;
 
 // Place (lvalue) model: identifier root + arbitrary field/index projections.
 // Backs both deep field assignment and mutating-method receivers.
-mod place;
+pub(crate) mod place;
 
 // Node execution
 mod node_exec;
 pub(crate) use node_exec::{
-    coerce_to_declared_type, coerce_to_declared_unsigned, exec_assignment, exec_augmented_assignment, exec_node,
+    coerce_to_declared_field_of, coerce_to_declared_type, coerce_let_value, coerce_to_declared_unsigned, exec_assignment,
+    exec_augmented_assignment, exec_node, fixed_array_zero_element, record_let_declared_width,
+    noinit_named_type_default_decl as node_exec_noinit_named_type_default_decl,
 };
 
 // Block execution
 mod block_exec;
 pub(crate) use block_exec::{
-    assert_dirty_names_invariant, capture_node_scope_shadows, exec_block, exec_block_fn, exec_unsafe_block,
-    restore_block_scope_shadows,
+    assert_dirty_names_invariant, capture_node_scope_shadows, exec_block, exec_block_fn, exec_block_fn_with_target,
+    exec_unsafe_block, bind_block_scope_shadows, restore_block_scope_shadows,
 };
 
 // Public API
@@ -139,7 +147,7 @@ pub(crate) use interpreter_control::exec_with;
 // `expr.rs` still calls `crate::interpreter::dispatch_profile::record`, which
 // left the seed unbuildable (E0433).
 pub(crate) mod dispatch_profile;
-pub(crate) mod sampler;
+pub mod sampler;
 mod expr;
 pub(crate) use expr::evaluate_expr;
 
@@ -150,26 +158,27 @@ pub(crate) use bitfield_runtime::{instantiate_bitfield, register_bitfield, updat
 #[path = "../interpreter_helpers/mod.rs"]
 mod interpreter_helpers;
 pub(crate) use interpreter_helpers::{
-    bind_pattern, bind_pattern_value, comprehension_iterate, control_to_value, create_range_object,
+    bind_pattern, bind_pattern_value, comprehension_for_each, control_to_value, create_range_object,
     create_range_object_opt, create_range_object_step, eval_arg, eval_arg_int, eval_arg_usize, eval_array_all,
     eval_array_any, eval_array_filter, eval_array_find, eval_array_map, eval_array_reduce, eval_dict_filter,
     eval_dict_for_each, eval_dict_map_values, eval_option_and_then, eval_option_filter, eval_option_map,
     eval_option_or_else, eval_result_and_then, eval_result_map, eval_result_map_err, eval_result_or_else,
     find_and_exec_method, handle_functional_update, handle_method_call_with_self_update, iter_to_vec, message_to_value,
-    normalize_index, slice_collection, spawn_actor_with_expr, spawn_future_with_callable,
+    normalize_index, slice_collection, slice_collection_by, spawn_actor_with_expr, spawn_future_with_callable,
     spawn_future_with_callable_and_env, spawn_future_with_expr, try_method_missing, with_effect_context,
 };
 
 // Include the rest of the interpreter functions
 #[path = "../interpreter_call/mod.rs"]
-mod interpreter_call;
+pub(crate) mod interpreter_call;
 pub(crate) use interpreter_call::IN_NEW_METHOD;
 pub(crate) use interpreter_call::exec_block_value;
+pub(crate) use interpreter_call::exec_function_with_values as exec_function_with_value_args;
 pub(crate) use interpreter_call::{
     captured_env_with_live_globals, execute_function_body, publish_and_repoint, publish_live_bound_globals,
     sync_owned_captured_globals,
 };
-pub use interpreter_call::{clear_bdd_state, clear_class_instantiation_state, get_ignored_tests, get_test_results};
+pub use interpreter_call::{clear_bdd_state, clear_class_instantiation_state, get_blocked_test_count, get_ignored_tests, get_test_results, record_external_test_result};
 use interpreter_call::{
     bind_args, bind_args_with_injected, evaluate_call, exec_function, exec_function_with_bound_args,
     exec_function_with_captured_env, exec_function_with_values, exec_lambda, instantiate_class, BDD_AFTER_ALL,
@@ -179,10 +188,16 @@ use interpreter_call::{
 // Module caching and loading state
 #[path = "../module_cache.rs"]
 mod module_cache;
+pub(crate) use module_cache::bump_registry_generation;
+pub use module_cache::{
+    clear_entry_owner_classes, owner_module_class, owner_module_enum, record_entry_owner_class, record_flattened_owner_class,
+    record_flattened_owner_enum, refresh_cached_class, resolve_class_for_instance, resolve_class_for_receiver,
+    resolve_class_in_scope,
+};
 pub use module_cache::clear_module_cache;
 pub use module_cache::{clear_probe_source_cache, probe_source_cached};
 pub use module_cache::{
-    clear_parsed_source_cache, parsed_source_cache_len, shared_source, shared_source_for_target,
+    clear_parsed_source_cache, parsed_source_cache_len, shared_source, shared_source_for_target, shared_source_seed,
     shared_source_lookup, shared_source_lookup_for_target, SharedSource,
 };
 pub(crate) use module_cache::take_shared_ast;
@@ -191,13 +206,14 @@ pub use module_cache::clear_module_cache_selective;
 pub(crate) use module_cache::normalize_path_key;
 pub(crate) use module_cache::{
     filter_functions_from_value, module_dict_contains, module_dict_flat, module_dict_for_each_visible, module_dict_get,
-    module_dict_len, module_dict_make_mut, layered_view as module_dict_layers,
+    module_dict_len, module_dict_make_mut, layered_view as module_dict_layers, is_module_namespace_dict,
 };
 
 // Module loading and resolution
 #[path = "../interpreter_module/mod.rs"]
-mod interpreter_module;
+pub(crate) mod interpreter_module;
 pub use interpreter_module::print_resolve_stats;
+pub use interpreter_module::{FRIEND_SYMBOL_VISIBILITY_HINT, PRIVATE_FN_VISIBILITY_HINT};
 use interpreter_module::{
     evaluate_module_exports, get_import_alias, load_and_merge_module, merge_module_definitions, resolve_module_path,
 };
@@ -215,13 +231,14 @@ pub use interpreter_eval::PRELUDE_UNSHADOWABLE;
 // Re-exported so crate::decorator_apply can invoke a Value as a callable when
 // applying runtime function decorators.
 pub(crate) use interpreter_eval::call_value_with_args;
+pub(crate) use interpreter_eval::initialize_extern_functions;
 
 #[path = "../interpreter_method/mod.rs"]
 mod interpreter_method;
 use interpreter_method::{evaluate_method_call, evaluate_method_call_with_self_update};
 pub(crate) use interpreter_method::{
-    evaluate_call_args, find_and_exec_method_with_self, find_and_exec_method_with_self_owned,
-    exec_resolved_method_with_self_owned_values, resolve_object_method, ResolvedMethod, shared_text_is_ascii,
+    eval_bdd_matcher_on_values, evaluate_call_args, find_and_exec_method_with_self, find_and_exec_method_with_self_owned,
+    exec_resolved_method_with_self_owned_values, resolve_object_method, ResolvedMethod, shared_text_is_ascii, text_cp_len,
 };
 pub(crate) use interpreter_method::{lookup_class_method_index, lookup_impl_method_index};
 use interpreter_method::{evaluate_negated_bdd_matcher, is_argless_bdd_matcher, peel_bdd_matcher_receiver};

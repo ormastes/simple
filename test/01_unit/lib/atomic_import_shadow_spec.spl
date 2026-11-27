@@ -1,0 +1,31 @@
+# Repro + prevention: an explicitly imported std atomic constructor must not be
+# shadowed by a same-named i64-returning stub in an io debug_stubs module that is
+# co-loaded in the same interpreter session. Static check = prevention for every
+# io debug_stubs twin (only atomic_* collided with a real lib fn, 2026-11-23).
+# todo: doc/08_tracking/todo/rb_load_hot_swap_pinning_2026-11-22.md
+use std.spec.*
+use std.nogc_sync_mut.atomic.{AtomicI64, AtomicBool, MemoryOrdering, atomic_i64_new, atomic_bool_new}
+use std.nogc_sync_mut.io_runtime.{file_read}
+
+describe "atomic constructor import vs io debug_stubs":
+    it "atomic_i64_new returns a real AtomicI64 (load/cas work)":
+        val a = atomic_i64_new(7)
+        expect(a.load(MemoryOrdering.SeqCst)).to_equal(7)
+        expect(a.compare_exchange(7, 9, MemoryOrdering.SeqCst, MemoryOrdering.SeqCst)).to_equal(true)
+        expect(a.load(MemoryOrdering.SeqCst)).to_equal(9)
+
+    it "atomic_bool_new returns a real AtomicBool":
+        val b = atomic_bool_new(true)
+        expect(b.load(MemoryOrdering.SeqCst)).to_equal(true)
+
+    it "no io debug_stubs module defines a std atomic constructor name":
+        val stubs = [
+            "src/lib/nogc_sync_mut/io/debug_stubs.spl",
+            "src/lib/nogc_async_mut/io/debug_stubs.spl",
+            "src/lib/gc_sync_mut/io/debug_stubs.spl",
+            "src/lib/gc_async_mut/io/debug_stubs.spl",
+            "src/app/io/debug_stubs.spl"]
+        for path in stubs:
+            val src = file_read(path)
+            expect(src.contains("atomic_i64_new(value")).to_equal(false)
+            expect(src.contains("atomic_bool_new(value")).to_equal(false)

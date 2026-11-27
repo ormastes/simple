@@ -1,0 +1,107 @@
+"""
+## Purpose and audience
+Purpose: Pin negative horizontal margins, and `overflow:hidden` on an
+all-solid page, against Chrome 159 at k=1 (the catalog's Engine2D route) and
+k=4. Two causes:
+- `parse_int` drops a leading `-`, so `margin-left:-10px` (also the `margin`
+  shorthand and `margin-inline-start`) laid the child out 10px RIGHT;
+- an all-solid page takes the GPU-paint solid-only frame, whose fill ops
+  ignored the ancestor `overflow:hidden` clip, so a 40px child of a 20px
+  clipped box painted all 40px at k=1.
+Audience: web renderer style cascade (margins) and Engine2D presenter.
+
+Chrome oracle: Chrome for Testing 159.0.8154.6 aarch64, `--headless=new
+--disable-gpu --hide-scrollbars --force-device-scale-factor=K`, window
+400x300. Each case is a `.w` box (margin-left 40px, 200px wide, 30px tall)
+stacked from y 0 holding a 40x20 #00f child. Runs are blue columns.
+
+| case | child | k=1 row / Chrome / base | k=4 row / Chrome / base |
+|------|-------|------------------------|------------------------|
+| 1 | margin-left:-10px | 10 / 30..69 / 50..89 | 40 / 120..279 / 200..359 |
+| 2 | parent 20px overflow:hidden | 40 / 40..59 / 40..79 | 160 / 160..239 / same |
+| 3 | parent 60px hidden, child -10px | 70 / 40..69 / 50..89 | 280 / 160..279 / 200..359 |
+| 4 | margin:0 0 0 -10px | 100 / 30..69 / 50..89 | 400 / 120..279 / 200..359 |
+| 5 | margin-left:10% (guard) | 130 / 60..99 / same | 520 / 240..399 / same |
+| 6 | margin-inline-start:-10px | 160 / 30..69 / 50..89 | 640 / 120..279 / 200..359 |
+"""
+
+"""
+Traceability: REQ-WEB-NEGATIVE-HORIZONTAL-MARGIN-001 — negative horizontal margins move a box left, and overflow:hidden clips solid fills on every paint route.
+"""
+# @tag: unit, browser_engine, layout, margin, clip, chrome159
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_foundation_values.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+val CSS_W: i32 = 400
+val CSS_H: i32 = 300
+
+val C: text = "width:40px;height:20px;background:#00f"
+val PAGE: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>body{{margin:0;background:#fff}}.w{{margin-left:40px;width:200px;height:30px}}</style></head><body><div class=\"w\"><div style=\"margin-left:-10px;" + C + "\"></div></div><div class=\"w\" style=\"width:20px;overflow:hidden\"><div style=\"" + C + "\"></div></div><div class=\"w\" style=\"width:60px;overflow:hidden\"><div style=\"margin-left:-10px;" + C + "\"></div></div><div class=\"w\"><div style=\"margin:0 0 0 -10px;" + C + "\"></div></div><div class=\"w\"><div style=\"margin-left:10%;" + C + "\"></div></div><div class=\"w\"><div style=\"margin-inline-start:-10px;" + C + "\"></div></div></body></html>"
+
+var g_px1: [u32] = []
+var g_px4: [u32] = []
+
+fn _px(k: i32) -> [u32]:
+    if k == 1:
+        if g_px1.len() == 0:
+            g_px1 = simple_web_render_html_to_pixels_with_engine2d_backend(PAGE, CSS_W, CSS_H, "cpu_simd")
+        return g_px1
+    if g_px4.len() == 0:
+        g_px4 = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE, CSS_W, CSS_H, 4, "cpu_simd")
+    g_px4
+
+# Blue runs " a..b" on device row y of the k-scaled frame.
+fn _runs(k: i32, y: i32) -> text:
+    val px = _px(k)
+    val w = CSS_W * k
+    var out = ""
+    var x = 0
+    var inr = false
+    var start = 0
+    while x <= w:
+        var blue = false
+        if x < w:
+            val v = px[y * w + x]
+            val r = ((v >> 16u32) & 0xFFu32).to_i32()
+            val b = (v & 0xFFu32).to_i32()
+            blue = b > 128 and r < 128
+        if blue and not inr:
+            inr = true
+            start = x
+        if not blue and inr:
+            inr = false
+            out = out + " {start}..{x - 1}"
+        x = x + 1
+    out
+
+describe "Negative horizontal margins and overflow:hidden on an all-solid page (Chrome 159)":
+    it "AC-1: margin-left:-10px moves the child 10px left (k=1 and k=4)":
+        expect(_px(1).len()).to_equal((CSS_W * CSS_H) as i64)
+        expect(_runs(1, 10)).to_equal(" 30..69")
+        expect(_runs(4, 40)).to_equal(" 120..279")
+
+    it "AC-2: an overflow:hidden box clips its solid child on the k=1 route":
+        expect(_runs(1, 40)).to_equal(" 40..59")
+        expect(_runs(4, 160)).to_equal(" 160..239")
+
+    it "AC-3: a child at margin-left:-10px is clipped at its overflow:hidden parent's left edge":
+        expect(_runs(1, 70)).to_equal(" 40..69")
+        expect(_runs(4, 280)).to_equal(" 160..279")
+
+    it "AC-4: the margin shorthand keeps a negative left margin":
+        expect(_runs(1, 100)).to_equal(" 30..69")
+        expect(_runs(4, 400)).to_equal(" 120..279")
+
+    it "AC-5: a percentage margin-left still resolves against the container (guard)":
+        expect(_runs(1, 130)).to_equal(" 60..99")
+        expect(_runs(4, 520)).to_equal(" 240..399")
+
+    it "AC-6: margin-inline-start:-10px moves the child 10px left":
+        expect(_runs(1, 160)).to_equal(" 30..69")
+        expect(_runs(4, 640)).to_equal(" 120..279")

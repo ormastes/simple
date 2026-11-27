@@ -120,3 +120,29 @@ than reaching the raw-pointer `emit_gep`/`emit_load` fallback.
   paths in the same probe file, isolating the defect to bracket-index syntax
   specifically.
 
+
+## Addendum 2026-11-11 — lane compiler5 (P3 batch-5 triage): source fix CONFIRMED; closure BLOCKED on native dual-backend execution (status stays OPEN)
+
+- **Source fix confirmed in current tree:** the `Index` lowering now has the
+  string-receiver branch this doc's "Suggested direction" asked for
+  (`src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:3285-3315`): text
+  bases are normalized via `ensure_tagged_str`, bounds-checked against
+  `rt_string_len`, looked up via `rt_string_char_at`, and decoded as `str` — no
+  raw GEP/load fallback for string receivers. Landed via merge `9e7e7a526edb`
+  (PR #7597, 2026-11-07); ADR-005 follow-up `db56bd08e197` (2026-11-09) moved
+  the len/char_count basis to code points on the native lane.
+- **Interpreter oracle verified on the fresh seed** (build-commit
+  46fe8f6b6def, `--mode=interpreter --no-cache`): this doc's strict parity
+  fixture shape (raw `"hello"[1]`, tagged `"wo"+"rld"` receiver, parameter-passed
+  receiver, equality, one-byte length) prints exactly the gate's expected
+  output `truetruetruetrueraw=e/1;tagged=l/1;param=oo`.
+- **Per this doc's own closure criterion** ("native dual-backend execution is
+  required before marking this bug closed"), the row stays OPEN — **BLOCKED**
+  on this Windows host: the `text_bracket_index` strict case builds with
+  `native-build` on both LLVM and Cranelift, and the Windows native-build hang
+  (build log completes, no binary, process never exits) was confirmed in this
+  worktree with a trivial hello-world probe and not retried per lane rules.
+- **Exact grant command for a host with a working native-build:**
+  `NATIVE_PARITY_CASES=text_bracket_index sh scripts/check/check-native-seed-parity.shs`
+  (case at scripts/check/check-native-seed-parity.shs:2258, strict dual-backend,
+  exact-output compared).

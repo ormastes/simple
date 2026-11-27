@@ -4,7 +4,7 @@ mod i18n;
 mod identifiers;
 mod indentation;
 pub mod numbers;
-mod strings;
+pub(crate) mod strings;
 
 pub use crate::token::{NamePattern, NumericSuffix};
 pub use numbers::{lookup_seed_unit, SEED_UNITS};
@@ -35,9 +35,23 @@ pub struct Lexer<'a> {
     line_mask: Option<std::sync::Arc<crate::cond_compile::LineMask>>,
     /// Diagnostics from conditional-compilation evaluation (unsupported atoms etc.).
     pub cond_diagnostics: Vec<String>,
+    /// `W-STR-BRACE-001` warnings: a `{` in a string literal that is not a valid
+    /// interpolation and fell back to literal text (drained by the parser into hints).
+    pub brace_warnings: Vec<String>,
     /// `false` when the directives are unbalanced (stray `@elif`/`@else`/
     /// `@end`, unclosed `@when`): the parser fails closed on this.
     pub cond_balanced: bool,
+    /// ADR-005 char-literal lexer gate. OFF (default): `'...'` is a legacy raw
+    /// string. ON: `'...'` is a char literal only. Read once from
+    /// `SIMPLE_CHAR_LITERAL_LEXER` at construction; tests use `with_char_literals`.
+    char_literal_mode: bool,
+}
+
+/// Env gate for the ADR-005 char-literal lexer switch (default OFF).
+pub const CHAR_LITERAL_LEXER_ENV: &str = "SIMPLE_CHAR_LITERAL_LEXER";
+
+fn char_literal_mode_from_env() -> bool {
+    matches!(std::env::var(CHAR_LITERAL_LEXER_ENV).as_deref(), Ok("1") | Ok("true") | Ok("on"))
 }
 
 impl<'a> Lexer<'a> {
@@ -60,6 +74,7 @@ impl<'a> Lexer<'a> {
         Self {
             line_mask,
             cond_diagnostics,
+            brace_warnings: Vec::new(),
             cond_balanced,
             source,
             chars: source.char_indices().peekable(),
@@ -72,7 +87,14 @@ impl<'a> Lexer<'a> {
             bracket_depth: 0,
             force_indentation_depth: 0,
             force_indent_bracket_depths: Vec::new(),
+            char_literal_mode: char_literal_mode_from_env(),
         }
+    }
+
+    /// Override the ADR-005 char-literal gate (for tests and explicit callers).
+    pub fn with_char_literals(mut self, on: bool) -> Self {
+        self.char_literal_mode = on;
+        self
     }
 
     /// Create a lexer for parsing inline expressions (e.g., f-string interpolations).
@@ -88,11 +110,13 @@ impl<'a> Lexer<'a> {
             pending_tokens: Vec::new(),
             line_mask: None,
             cond_diagnostics: Vec::new(),
+            brace_warnings: Vec::new(),
             cond_balanced: true,
             at_line_start: false, // Don't treat leading whitespace as indentation
             bracket_depth: 0,
             force_indentation_depth: 0,
             force_indent_bracket_depths: Vec::new(),
+            char_literal_mode: char_literal_mode_from_env(),
         }
     }
 
@@ -539,8 +563,8 @@ impl<'a> Lexer<'a> {
                             }
                         }
                         if has_close_tick {
-                            // 'text' — delegate to raw string scanner
-                            self.scan_raw_string()
+                            // 'text' — raw string (gate OFF) or char literal (gate ON)
+                            self.scan_single_quoted()
                         } else {
                             // 'ident — label (no closing tick)
                             let mut label = String::new();
@@ -555,10 +579,10 @@ impl<'a> Lexer<'a> {
                             TokenKind::Label(label)
                         }
                     } else {
-                        self.scan_raw_string()
+                        self.scan_single_quoted()
                     }
                 } else {
-                    self.scan_raw_string()
+                    self.scan_single_quoted()
                 }
             }
 

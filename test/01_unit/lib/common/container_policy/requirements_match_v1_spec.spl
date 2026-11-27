@@ -1,0 +1,113 @@
+# Sandbox capability requirement versus observation.
+#
+# @req SC-MAC-011 SC-MAC-014 SC-MAC-018 SC-MAC-021 SC-MAC-022 SC-MAC-023
+#
+# **Requirements:** doc/05_design/simple_container_macos_seatbelt.md §3.1
+# **Plan:** doc/05_design/simple_container_macos_seatbelt.md §20 P1
+# **Design:** doc/05_design/simple_container_macos_seatbelt.md §6.3, §7.1, §12.1, §18.2
+# **Research:** N/A
+#
+# ## Overview
+#
+# Admission compares what a validated policy requires with what a provider
+# observed, before any effect. The default observation on a host without
+# native evidence is `Unqualified`, which always refuses (SCMAC-PLATFORM-001)
+# — capability discovery is not readiness. `pod-ip-v1` is refused
+# (SCMAC-NET-001), a hard memory cap the provider cannot enforce is refused
+# (SCMAC-RESOURCE-001), and strict descendant absence is refused when only
+# process-group retirement is observed (SCMAC-ADMIT-002 / SCMAC-OWNER-001).
+#
+# ## Examples
+#
+# The "qualified" observation below is a synthetic test value; no real host
+# produces it until macOS qualification records native evidence.
+use std.io_runtime.{file_read}
+use std.common.diagnostics.diagnostic_v1.{DiagnosticV1}
+use std.common.contracts.container.sandbox_capability_v1.*
+use std.common.container_policy.sandbox_policy_decode_v1.{sandbox_policy_decode_v1}
+use std.common.container_policy.requirements_match_v1.{sandbox_requirements_match_v1}
+use std.common.container_policy.diagnostics_v1.{scmac_codes_of_v1}
+
+fn policy_from(src: text) -> SandboxPolicyV1:
+    match sandbox_policy_decode_v1(src, "policy.sdn"):
+        case Ok(p): p
+        case Err(ds):
+            print("fixture refused: " + ds[0].message)
+            sandbox_policy_decode_v1("", "x").unwrap()
+
+fn valid_source() -> text:
+    file_read("test/fixtures/container_policy/seatbelt_policy_valid.sdn") ?? ""
+
+fn strict_guarantees() -> SandboxEvidenceProfileV1:
+    sandbox_evidence_profile_v1("strict-owned-attempt-v1").unwrap()
+
+fn qualified_observation(guarantees: SandboxEvidenceProfileV1) -> SandboxObservedCapabilityV1:
+    SandboxObservedCapabilityV1(backend: "macos-seatbelt-process", engine: "macos-seatbelt-process-v1",
+        host_os: "macos", architecture: "arm64", qualification: SandboxQualificationV1.Qualified("synthetic-test-evidence"),
+        guarantees: guarantees, network_profiles: ["endpoint-v1"], direct_ip: SandboxSupportV1.Unsupported,
+        host_listen: SandboxSupportV1.Unsupported, udp: SandboxSupportV1.Unsupported,
+        hard_memory_limit: SandboxSupportV1.Unsupported, hard_cpu_limit: SandboxSupportV1.Unsupported)
+
+fn codes(policy: SandboxPolicyV1, observed: SandboxObservedCapabilityV1) -> [text]:
+    match sandbox_requirements_match_v1(policy, observed, "policy.sdn"):
+        case Ok(_): []
+        case Err(ds): scmac_codes_of_v1(ds)
+
+describe "Sandbox capability admission":
+
+    it "refuses every host without native evidence before any effect":
+        """
+        This Windows/Linux CI host and an unqualified Mac both report
+        Unqualified. Admission refuses with SCMAC-PLATFORM-001 and never
+        returns an admitted plan.
+        """
+        val policy = policy_from(valid_source())
+        val observed = sandbox_observed_unqualified_v1("macos-seatbelt-process", "macos-seatbelt-process-v1",
+            "macos", "arm64", "no native qualification evidence recorded")
+        val got = codes(policy, observed)
+        expect(got.len() > 0).to_equal(true)
+        expect(got[0]).to_equal("SCMAC-PLATFORM-001")
+        expect(got).to_contain("SCMAC-ADMIT-002")
+        expect(got).to_contain("SCMAC-OWNER-001")
+
+    it "admits only when a qualified observation meets every guarantee":
+        """
+        With a (synthetic) qualified observation carrying the full strict
+        profile, the same policy is admitted and the plan records the
+        qualification evidence reference.
+        """
+        val policy = policy_from(valid_source())
+        var qref = ""
+        match sandbox_requirements_match_v1(policy, qualified_observation(strict_guarantees()), "policy.sdn"):
+            case Ok(plan): qref = plan.qualification_ref
+            case Err(ds): qref = "refused: " + ds[0].code
+        expect(qref).to_equal("synthetic-test-evidence")
+
+    it "refuses pod-ip-v1 instead of translating it to endpoint emulation":
+        val policy = policy_from(valid_source().replace("profile: \"endpoint-v1\"", "profile: \"pod-ip-v1\""))
+        val got = codes(policy, qualified_observation(strict_guarantees()))
+        expect(got).to_equal(["SCMAC-NET-001"])
+
+    it "refuses an unenforceable hard memory cap":
+        val src = valid_source().replace("cleanup:\n", "resources:\n    hardMemoryLimit: \"512Mi\"\ncleanup:\n")
+        val got = codes(policy_from(src), qualified_observation(strict_guarantees()))
+        expect(got).to_equal(["SCMAC-RESOURCE-001"])
+
+    it "refuses strict descendant absence when only process-group retirement is observed":
+        """
+        Leader exit or process-group retirement never proves complete tree
+        absence. A strict-owned policy against a finite-parent-owned
+        observation is refused, deterministically and in a fixed order.
+        """
+        val weaker = sandbox_evidence_profile_v1("finite-parent-owned-v1").unwrap()
+        val got = codes(policy_from(valid_source()), qualified_observation(weaker))
+        expect(got).to_equal(["SCMAC-PLATFORM-001", "SCMAC-ADMIT-002", "SCMAC-ADMIT-002", "SCMAC-OWNER-001"])
+        val again = codes(policy_from(valid_source()), qualified_observation(weaker))
+        expect(again).to_equal(got)
+
+    it "refuses direct IP and a wrong backend pin":
+        val src = valid_source().replace("directIp: \"deny\"", "directIp: \"allow\"")
+        var observed = qualified_observation(strict_guarantees())
+        observed.backend = "docker"
+        val got = codes(policy_from(src), observed)
+        expect(got).to_equal(["SCMAC-ADMIT-001", "SCMAC-NET-002"])

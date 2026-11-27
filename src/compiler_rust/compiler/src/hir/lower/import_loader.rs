@@ -11,6 +11,20 @@ use super::error::{LowerError, LowerResult};
 use super::lowerer::Lowerer;
 use crate::CompileError;
 
+/// Type of an imported module global declared without an annotation, for the
+/// scalar literal initializers the declaring module also infers
+/// (`module_pass.rs`, `Node::Let` / `Node::Static`). Both sides must agree: the
+/// declaring module stores a raw i64/bool word for these, and an importer that
+/// types the same global ANY reads that word as a tagged value (200 -> 25).
+fn unannotated_literal_global_type(value: Option<&Expr>) -> TypeId {
+    match value {
+        Some(Expr::Bool(_)) => TypeId::BOOL,
+        Some(Expr::String(_)) | Some(Expr::FString { .. }) => TypeId::STRING,
+        Some(expr) if super::module_lowering::try_const_eval(expr).is_some() => TypeId::I64,
+        _ => TypeId::ANY,
+    }
+}
+
 /// Read + parse an imported module, memoized per process.
 ///
 /// The memo itself is `module_cache::PARSED_SOURCE_CACHE`, which the
@@ -33,6 +47,56 @@ pub(crate) fn parsed_imported_module(path: &std::path::Path) -> Option<std::sync
 }
 
 impl Lowerer {
+    fn record_imported_type_owner(&mut self, name: &str) {
+        if let Some(path) = self.current_file.as_deref() {
+            self.imported_type_owners
+                .entry(name.to_string())
+                .or_default()
+                .insert(crate::interpreter::normalize_path_key(path));
+        }
+    }
+
+    fn record_imported_fn_owner(&mut self, name: &str) {
+        if let Some(path) = self.current_file.as_deref() {
+            self.imported_fn_owners
+                .entry(name.to_string())
+                .or_default()
+                .insert(crate::interpreter::normalize_path_key(path));
+        }
+    }
+
+    fn collect_default_ctor_names(expr: &Expr, out: &mut Vec<String>) {
+        match expr {
+            Expr::Call { callee, args } => {
+                if let Expr::Identifier(name) = callee.as_ref() {
+                    if !out.iter().any(|existing| existing == name) {
+                        out.push(name.clone());
+                    }
+                }
+                for arg in args {
+                    Self::collect_default_ctor_names(&arg.value, out);
+                }
+            }
+            Expr::Array(items) | Expr::Tuple(items) => {
+                for item in items {
+                    Self::collect_default_ctor_names(item, out);
+                }
+            }
+            Expr::Dict(entries) => {
+                for (k, v) in entries {
+                    Self::collect_default_ctor_names(k, out);
+                    Self::collect_default_ctor_names(v, out);
+                }
+            }
+            Expr::StructInit { fields, .. } => {
+                for (_, v) in fields {
+                    Self::collect_default_ctor_names(v, out);
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn bind_imported_defaults(&mut self, source: &Path, caller: &Path, target: &ImportTarget) {
         fn selected_names(target: &ImportTarget, contracts: &std::collections::HashMap<String, Vec<Option<Expr>>>, output: &mut Vec<(String, String)>) {
             match target {
@@ -47,6 +111,12 @@ impl Lowerer {
         let Some(contracts) = self.imported_fn_param_defaults.get(source) else { return; };
         let mut names = Vec::new();
         selected_names(target, contracts, &mut names);
+        if let Some(name_contracts) = self.imported_fn_param_names.get(source).cloned() {
+            let copied: Vec<_> = names.iter().filter_map(|(name, alias)| {
+                name_contracts.get(name).cloned().map(|n| (alias.clone(), n))
+            }).collect();
+            self.imported_fn_param_names.entry(caller.to_path_buf()).or_default().extend(copied);
+        }
         let selected: Vec<_> = names.into_iter().filter_map(|(name, alias)| {
             contracts.get(&name).cloned().map(|defaults| (alias, defaults))
         }).collect();
@@ -65,6 +135,7 @@ impl Lowerer {
             } else {
                 &method.params[..]
             };
+            self.record_method_param_type_names(owner, &method.name, user_params, method.is_static);
             if user_params.iter().any(|p| p.default.is_some()) {
                 self.fn_param_defaults
                     .entry(format!("{}.{}", owner, method.name))
@@ -114,6 +185,25 @@ impl Lowerer {
     }
 
     fn resolve_imported_module_path(
+        &self,
+        resolver: &crate::module_resolver::ModuleResolver,
+        current_file: &std::path::Path,
+        module_path: &ModulePath,
+        target: &ImportTarget,
+    ) -> LowerResult<crate::module_resolver::ResolvedModule> {
+        let memo_key = (
+            current_file.to_path_buf(),
+            format!("{:?}\u{1}{}", module_path.segments, Self::import_target_cache_key(target)),
+        );
+        if let Some(hit) = self.resolved_import_paths.borrow().get(&memo_key) {
+            return Ok(hit.clone());
+        }
+        let resolved = self.resolve_imported_module_path_uncached(resolver, current_file, module_path, target)?;
+        self.resolved_import_paths.borrow_mut().insert(memo_key, resolved.clone());
+        Ok(resolved)
+    }
+
+    fn resolve_imported_module_path_uncached(
         &self,
         resolver: &crate::module_resolver::ModuleResolver,
         current_file: &std::path::Path,
@@ -276,6 +366,7 @@ impl Lowerer {
             Node::Let(let_stmt) => Self::extract_pattern_name(&let_stmt.pattern).as_deref() == Some(name),
             Node::Extern(extern_fn) => extern_fn.name == name,
             Node::ExportUseStmt(export_use) => Self::import_target_exports_name(&export_use.target, name),
+            Node::InternalExportDecl(decl) => decl.symbols.iter().any(|sym| sym == name),
             _ => false,
         }
     }
@@ -297,6 +388,7 @@ impl Lowerer {
             Node::Function(func_def) => func_def.name == name,
             Node::Extern(extern_fn) => extern_fn.name == name,
             Node::ExportUseStmt(export_use) => Self::import_target_exports_name(&export_use.target, name),
+            Node::InternalExportDecl(decl) => decl.symbols.iter().any(|sym| sym == name),
             _ => false,
         }
     }
@@ -349,10 +441,17 @@ impl Lowerer {
                 }
             }
 
-            if self.dependency_import_depth == 0 {
-                if let Some(symbol_ty) = self.globals.get(&original_name).copied() {
-                    self.globals.insert(alias_name.clone(), symbol_ty);
-                }
+            // A dependency's own alias (`use m.{f as g}` inside an imported
+            // module) is private to that module. Publishing its callable
+            // metadata under the bare alias retyped the lowered module's own
+            // `g`: `crypto_text_to_bytes as text_to_bytes` (`[i64]`) in a
+            // dependency made an explicitly imported `text_to_bytes` (`[u8]`)
+            // read packed bytes as 8-byte words.
+            if self.dependency_import_depth > 0 {
+                continue;
+            }
+            if let Some(symbol_ty) = self.globals.get(&original_name).copied() {
+                self.globals.insert(alias_name.clone(), symbol_ty);
             }
             if let Some(return_ty) = self.method_return_types.get(&original_name).copied() {
                 self.method_return_types.insert(alias_name.clone(), return_ty);
@@ -373,6 +472,7 @@ impl Lowerer {
                 if let Some(fn_ty) = self.imported_function_value_types.get(&original_name).copied() {
                     self.imported_function_value_types.insert(alias_name.clone(), fn_ty);
                 }
+                self.record_generic_identity_param_alias(&original_name, &alias_name);
                 if self.extern_fn_names.contains(&original_name) {
                     self.extern_fn_names.insert(alias_name.clone());
                 }
@@ -392,26 +492,7 @@ impl Lowerer {
             return false;
         };
 
-        requested_names.iter().any(|name| {
-            let fn_pat = format!("fn {}(", name);
-            let extern_pat = format!("extern fn {}(", name);
-            let type_pat = format!("type {}", name);
-            let class_pat = format!("class {}", name);
-            let struct_pat = format!("struct {}", name);
-            let enum_pat = format!("enum {}", name);
-            let trait_pat = format!("trait {}", name);
-            let let_pat = format!("let {}", name);
-            let const_pat = format!("const {}", name);
-            source.contains(&fn_pat)
-                || source.contains(&extern_pat)
-                || source.contains(&type_pat)
-                || source.contains(&class_pat)
-                || source.contains(&struct_pat)
-                || source.contains(&enum_pat)
-                || source.contains(&trait_pat)
-                || source.contains(&let_pat)
-                || source.contains(&const_pat)
-        })
+        crate::pipeline::module_loader::source_might_define_requested_symbol(&source, requested_names)
     }
 
     fn bind_imported_trait_declarations(&mut self, source: &std::path::Path, caller: &std::path::Path, target: &ImportTarget) {
@@ -434,6 +515,52 @@ impl Lowerer {
         }
     }
 
+    /// Remember the enum an import load registered, under every import still on
+    /// the active load stack, so a cached re-import can re-assert it.
+    fn record_loaded_enum(&mut self, name: &str, ty: HirType, file: &std::path::Path) {
+        for key in &self.import_key_stack {
+            self.enum_loads
+                .entry(key.clone())
+                .or_default()
+                .push((name.to_string(), ty.clone(), file.to_path_buf()));
+        }
+    }
+
+    /// Whether an imported enum declaration may be (re)registered under its bare
+    /// name. A name some `use` of the module being lowered requests explicitly is
+    /// owned by the first file that declares it during that import; a same-named
+    /// enum from another file (e.g. a dependency's own `use`) is refused.
+    fn claim_imported_enum_name(&mut self, name: &str, declaration_file: &std::path::Path) -> bool {
+        if !self.direct_enum_wanted.contains(name) {
+            return true;
+        }
+        match self.direct_enum_owners.get(name) {
+            Some(owner) => owner == declaration_file,
+            None => {
+                self.direct_enum_owners.insert(name.to_string(), declaration_file.to_path_buf());
+                true
+            }
+        }
+    }
+
+    /// A cached explicit import still owns the enum names it requests: another
+    /// load may have re-registered a same-named enum since, so restore this one.
+    fn reassert_cached_enums(&mut self, import_key: &(PathBuf, String), target: &ImportTarget) {
+        let mut requested = Vec::new();
+        Self::requested_import_names(target, &mut requested);
+        for name in requested {
+            let found = self
+                .enum_loads
+                .get(import_key)
+                .and_then(|loads| loads.iter().rev().find(|(loaded, _, _)| *loaded == name))
+                .map(|(_, ty, file)| (ty.clone(), file.clone()));
+            if let Some((ty, file)) = found {
+                self.module.types.update_named(name.clone(), ty);
+                self.direct_enum_owners.insert(name, file);
+            }
+        }
+    }
+
     fn register_imported_symbols_from_items(&mut self, items: &[Node], target: &ImportTarget, declaration_file: &std::path::Path) -> LowerResult<usize> {
         let mut imported_count = 0;
 
@@ -444,23 +571,43 @@ impl Lowerer {
         // later), the referenced type is already in the registry.
         // We register ALL types, not just imported ones, because imported types
         // may have fields that reference non-imported types from the same file.
+        let own_consts = super::module_lowering::const_literal_census(items);
         for item in items {
             self.preregister_imported_type_placeholder(item);
         }
+        // Scalar record units (`unit Name: T`) erase to `T`, as in the module
+        // pass. Register them for ALL items before structs/functions resolve,
+        // so an imported `Pin.digest: Sha256Hex` or `-> FreeBytes?` keeps the
+        // scalar type and `.value` hits the erased-unit identity instead of
+        // failing as `struct 'ANY' field 'value'`.
+        // doc/08_tracking/bug/seed_unit_value_field_hir_2026-11-17.md
+        for item in items {
+            if let Node::Unit(unit_def) = item {
+                self.register_record_unit_scalar(unit_def);
+            }
+        }
 
+        let declared_aliases = Self::declared_type_aliases(items);
         // Intra-file Pass 1: Full registration of imported symbols with field resolution
         for item in items {
             match item {
                 Node::Class(class_def) => {
                     if self.should_import_symbol(&class_def.name, target) {
-                        let class_type_id = self.register_class(class_def)?;
+                        let class_type_id = if declared_aliases.is_empty() {
+                            self.register_class(class_def)?
+                        } else {
+                            let mut scoped = class_def.clone();
+                            Self::expand_field_aliases(&mut scoped.fields, &declared_aliases);
+                            self.register_class(&scoped)?
+                        };
                         self.globals.insert(class_def.name.clone(), class_type_id);
+                        self.record_imported_type_owner(&class_def.name);
                         self.record_imported_method_defaults(&class_def.name, &class_def.methods);
                         imported_count += 1;
                     }
                 }
                 Node::Enum(enum_def) => {
-                    if self.should_import_symbol(&enum_def.name, target) {
+                    if self.should_import_symbol(&enum_def.name, target) && self.claim_imported_enum_name(&enum_def.name, declaration_file) {
                         let variants = enum_def
                             .variants
                             .iter()
@@ -476,16 +623,15 @@ impl Lowerer {
                             .collect();
                         // Use update_named to update the placeholder created in Pass 0
                         // (keeps the same TypeId so earlier references stay valid)
-                        self.module.types.update_named(
-                            enum_def.name.clone(),
-                            HirType::Enum {
-                                name: enum_def.name.clone(),
-                                variants,
-                                generic_params: enum_def.generic_params.clone(),
-                                is_generic_template: enum_def.is_generic_template,
-                                type_bindings: std::collections::HashMap::new(),
-                            },
-                        );
+                        let enum_type = HirType::Enum {
+                            name: enum_def.name.clone(),
+                            variants,
+                            generic_params: enum_def.generic_params.clone(),
+                            is_generic_template: enum_def.is_generic_template,
+                            type_bindings: std::collections::HashMap::new(),
+                        };
+                        self.module.types.update_named(enum_def.name.clone(), enum_type.clone());
+                        self.record_loaded_enum(&enum_def.name, enum_type, declaration_file);
                         // Enum BODY methods: mirror the `Node::Impl` branch
                         // below for return types only. Without this an
                         // imported `SdnValue.get(k) -> SdnValue?` answered ANY
@@ -501,8 +647,15 @@ impl Lowerer {
                 }
                 Node::Struct(struct_def) => {
                     if self.should_import_symbol(&struct_def.name, target) {
-                        let struct_type_id = self.register_struct(struct_def)?;
+                        let struct_type_id = if declared_aliases.is_empty() {
+                            self.register_struct(struct_def)?
+                        } else {
+                            let mut scoped = struct_def.clone();
+                            Self::expand_field_aliases(&mut scoped.fields, &declared_aliases);
+                            self.register_struct(&scoped)?
+                        };
                         self.globals.insert(struct_def.name.clone(), struct_type_id);
+                        self.record_imported_type_owner(&struct_def.name);
                         self.record_imported_method_defaults(&struct_def.name, &struct_def.methods);
                         imported_count += 1;
                     }
@@ -516,11 +669,105 @@ impl Lowerer {
                 }
                 Node::Function(func_def) => {
                     if self.should_import_symbol(&func_def.name, target) {
-                        let defaults: Vec<_> = func_def.params.iter().map(|p| p.default.clone()).collect();
+                        // A default naming a scalar-literal `const` the imported
+                        // module itself declares is recorded as that literal
+                        // (callee scope); a const the callee merely imports is
+                        // not resolved on this lane and stays rejected.
+                        let defaults: Vec<_> = func_def.params.iter().map(|p| match &p.default {
+                            Some(Expr::Identifier(name))
+                                if !func_def.params.iter().any(|other| other.name == *name)
+                                    && !items.iter().any(|item| matches!(item, Node::Function(f) if f.name == *name)) =>
+                            {
+                                own_consts.get(&(None, name.clone())).cloned().flatten().or_else(|| p.default.clone())
+                            }
+                            default => default.clone(),
+                        }).collect();
+                        self.record_imported_fn_owner(&func_def.name);
+                        let mut aliases = Vec::new();
+                        Self::aliased_import_pairs(target, &mut aliases);
+                        for (orig, alias) in &aliases {
+                            if orig == &func_def.name && alias != orig {
+                                self.record_imported_fn_owner(alias);
+                            }
+                        }
+                        let mut default_ctor_names = Vec::new();
+                        for default_expr in defaults.iter().flatten() {
+                            Self::collect_default_ctor_names(default_expr, &mut default_ctor_names);
+                        }
+                        let decl_key = crate::interpreter::normalize_path_key(declaration_file);
+                        for ctor_name in default_ctor_names {
+                            if self.should_import_symbol(&ctor_name, target) {
+                                continue;
+                            }
+                            let mut matched = false;
+                            for ctor_item in items {
+                                match ctor_item {
+                                    Node::Struct(struct_def) if struct_def.name == ctor_name => {
+                                        matched = true;
+                                        self.record_imported_type_owner(&ctor_name);
+                                        let conflicting_owner = self
+                                            .imported_type_owners
+                                            .get(&ctor_name)
+                                            .is_some_and(|owners| owners.iter().any(|p| p != &decl_key));
+                                        let already_complete = matches!(
+                                            self.module.types.lookup(&ctor_name).and_then(|id| self.module.types.get(id)),
+                                            Some(HirType::Struct { fields, .. }) if !fields.is_empty()
+                                        );
+                                        if !self.own_declared_type_names.contains(&ctor_name)
+                                            && !conflicting_owner
+                                            && !already_complete
+                                        {
+                                            let struct_type_id = if declared_aliases.is_empty() {
+                                                self.register_struct(struct_def)?
+                                            } else {
+                                                let mut scoped = struct_def.clone();
+                                                Self::expand_field_aliases(&mut scoped.fields, &declared_aliases);
+                                                self.register_struct(&scoped)?
+                                            };
+                                            self.globals.insert(ctor_name.clone(), struct_type_id);
+                                            self.record_imported_method_defaults(&ctor_name, &struct_def.methods);
+                                        }
+                                        break;
+                                    }
+                                    Node::Class(class_def) if class_def.name == ctor_name => {
+                                        matched = true;
+                                        self.record_imported_type_owner(&ctor_name);
+                                        let conflicting_owner = self
+                                            .imported_type_owners
+                                            .get(&ctor_name)
+                                            .is_some_and(|owners| owners.iter().any(|p| p != &decl_key));
+                                        let already_complete = matches!(
+                                            self.module.types.lookup(&ctor_name).and_then(|id| self.module.types.get(id)),
+                                            Some(HirType::Struct { fields, .. }) if !fields.is_empty()
+                                        );
+                                        if !self.own_declared_type_names.contains(&ctor_name)
+                                            && !conflicting_owner
+                                            && !already_complete
+                                        {
+                                            let class_type_id = if declared_aliases.is_empty() {
+                                                self.register_class(class_def)?
+                                            } else {
+                                                let mut scoped = class_def.clone();
+                                                Self::expand_field_aliases(&mut scoped.fields, &declared_aliases);
+                                                self.register_class(&scoped)?
+                                            };
+                                            self.globals.insert(ctor_name.clone(), class_type_id);
+                                            self.record_imported_method_defaults(&ctor_name, &class_def.methods);
+                                        }
+                                        break;
+                                    }
+                                    _ => {}
+                                }
+                            }
+                            let _ = matched;
+                        }
                         if let Some(path) = &self.current_file {
                             self.imported_fn_param_defaults
                                 .entry(crate::interpreter::normalize_path_key(path)).or_default()
                                 .insert(func_def.name.clone(), defaults);
+                            self.imported_fn_param_names
+                                .entry(crate::interpreter::normalize_path_key(path)).or_default()
+                                .insert(func_def.name.clone(), if func_def.params.iter().any(|p| p.variadic) { Vec::new() } else { func_def.params.iter().map(|p| p.name.clone()).collect() });
                         }
                         let ret_ty = self.resolve_type_opt(&func_def.return_type)?;
                         self.globals.insert(func_def.name.clone(), ret_ty);
@@ -562,7 +809,7 @@ impl Lowerer {
                         let ty = if let Some(ref t) = static_stmt.ty {
                             self.resolve_type(t).unwrap_or(TypeId::ANY)
                         } else {
-                            TypeId::ANY
+                            unannotated_literal_global_type(Some(&static_stmt.value))
                         };
                         self.globals.insert(static_stmt.name.clone(), ty);
                         imported_count += 1;
@@ -595,7 +842,7 @@ impl Lowerer {
                             } else if let Some(t) = Self::extract_pattern_type(&let_stmt.pattern) {
                                 self.resolve_type(t).unwrap_or(TypeId::ANY)
                             } else {
-                                TypeId::ANY
+                                unannotated_literal_global_type(let_stmt.value.as_ref())
                             };
                             self.globals.insert(n, ty);
                             imported_count += 1;
@@ -603,27 +850,33 @@ impl Lowerer {
                     }
                 }
                 Node::Impl(impl_block) => {
-                    let type_name = match &impl_block.target_type {
-                        simple_parser::ast::Type::Simple(name) => Some(name.clone()),
-                        simple_parser::ast::Type::Generic { name, .. } => Some(name.clone()),
-                        _ => None,
-                    };
+                    let type_name = Self::impl_target_type_name(&impl_block.target_type);
 
                     if let Some(ref type_name) = type_name {
-                        if self.should_import_symbol(type_name, target) {
+                        let import_for_trait = impl_block
+                            .trait_name
+                            .as_deref()
+                            .is_some_and(|tn| self.should_import_symbol(tn, target));
+                        if self.should_import_symbol(type_name, target) || import_for_trait {
                             self.record_imported_method_defaults(type_name, &impl_block.methods);
-                            for method in &impl_block.methods {
-                                let ret_ty = self.resolve_type_opt(&method.return_type)?;
-                                let method_full_name = format!("{}.{}", type_name, method.name);
-                                self.globals.insert(method_full_name.clone(), ret_ty);
-                                self.method_return_types.insert(method_full_name.clone(), ret_ty);
-                                // Mark as imported function so MIR lowering skips it as a global
-                                // (prevents IncompatibleDeclaration when codegen declares it as data)
-                                self.imported_function_names.insert(method_full_name);
-                                if method.is_pure() {
-                                    self.pure_functions.insert(format!("{}.{}", type_name, method.name));
+                            let saved_scope = self.enter_impl_signature_scope(impl_block, type_name);
+                            let loop_res: LowerResult<()> = (|| {
+                                for method in &impl_block.methods {
+                                    let ret_ty = self.resolve_type_opt(&method.return_type)?;
+                                    let method_full_name = format!("{}.{}", type_name, method.name);
+                                    self.globals.insert(method_full_name.clone(), ret_ty);
+                                    self.method_return_types.insert(method_full_name.clone(), ret_ty);
+                                    // Mark as imported function so MIR lowering skips it as a global
+                                    // (prevents IncompatibleDeclaration when codegen declares it as data)
+                                    self.imported_function_names.insert(method_full_name);
+                                    if method.is_pure() {
+                                        self.pure_functions.insert(format!("{}.{}", type_name, method.name));
+                                    }
                                 }
-                            }
+                                Ok(())
+                            })();
+                            self.restore_impl_signature_scope(saved_scope);
+                            loop_res?;
                             imported_count += 1;
                         }
                     }
@@ -638,6 +891,22 @@ impl Lowerer {
                         // tracked as such so later MIR/LLVM stages do not redeclare
                         // them as data globals.
                         self.extern_fn_names.insert(extern_fn.name.clone());
+                        // Carry the declared parameter types across the import so
+                        // MIR call coercion sees the real slots for imported
+                        // externs too (raw scalar -> Any boxing). See
+                        // `HirModule::extern_param_types`.
+                        let param_types = extern_fn
+                            .params
+                            .iter()
+                            .map(|p| self.resolve_type_opt(&p.ty))
+                            .collect::<Result<Vec<_>, _>>()?;
+                        self.module.record_extern_system_abi(
+                            &extern_fn.name,
+                            &extern_fn.attributes,
+                            &param_types,
+                            ret_ty,
+                        );
+                        self.module.extern_param_types.insert(extern_fn.name.clone(), param_types);
                         imported_count += 1;
                     }
                 }
@@ -660,6 +929,32 @@ impl Lowerer {
             // They are referenced by a field of a fully-registered struct,
             // but are themselves still placeholders (0 fields).
             let mut needs_registration: Vec<String> = Vec::new();
+
+            // Only names DEFINED in `items` can ever be registered below, so if
+            // none of them is still an unprocessed empty placeholder the
+            // whole-registry reachability scan cannot make progress. Skipping
+            // it avoids an O(|registry|) walk per imported file (the registry
+            // is ~8k types deep into a compiler build).
+            let any_candidate = items.iter().any(|item| {
+                let name = match item {
+                    Node::Class(c) => &c.name,
+                    Node::Struct(s) => &s.name,
+                    Node::Enum(e) => &e.name,
+                    _ => return false,
+                };
+                if transitive_processed.contains(name) {
+                    return false;
+                }
+                match self.module.types.lookup(name).and_then(|id| self.module.types.get(id)) {
+                    Some(HirType::Struct { fields, .. }) => fields.is_empty(),
+                    Some(HirType::Enum { variants, .. }) => variants.is_empty(),
+                    Some(_) => false,
+                    None => true,
+                }
+            });
+            if !any_candidate {
+                break;
+            }
 
             let mut pending = Vec::new();
             for (_tid, hir_ty) in self.module.types.iter() {
@@ -773,6 +1068,7 @@ impl Lowerer {
         for item in items {
             if let Node::Function(f) = item {
                 if self.should_import_symbol(&f.name, target) {
+                    self.register_generic_identity_param(&f.name, f);
                     let dispatch = match &f.return_type {
                         Some(simple_parser::ast::Type::Simple(name)) => self.trait_declaration_in_file(name, Some(declaration_file)),
                         _ => None,
@@ -898,6 +1194,13 @@ impl Lowerer {
             Err(_) => return Ok(()), // Silently skip unresolvable modules
         };
 
+        // Placeholders depend only on the unit's items (and its package
+        // siblings), are added only when absent and are never removed, so
+        // a unit already pre-registered has nothing left to add.
+        if !self.preregistered_units.insert(crate::interpreter::normalize_path_key(&resolved.path)) {
+            return Ok(());
+        }
+
         // Read and parse the module file (memoized per process: this site
         // re-parsed the same imported module once per `use` that names it).
         let Some(imported_module) = parsed_imported_module(&resolved.path) else {
@@ -986,6 +1289,15 @@ impl Lowerer {
         if Self::is_non_addressable_root_import(module_path, target) {
             return Ok(());
         }
+        if self.dependency_import_depth == 0 {
+            // An explicit `use` of a name (re)claims it for the load below.
+            let mut requested = Vec::new();
+            Self::requested_import_names(target, &mut requested);
+            for name in requested {
+                self.direct_enum_owners.remove(&name);
+                self.direct_enum_wanted.insert(name);
+            }
+        }
 
         // Only proceed if we have a module resolver
         let (resolver, current_file) = match (&self.module_resolver, &self.current_file) {
@@ -1007,6 +1319,9 @@ impl Lowerer {
         let caller_key = crate::interpreter::normalize_path_key(current_file);
         let import_key = (unit_key.clone(), Self::import_target_cache_key(target));
         if self.loaded_import_targets.contains(&import_key) {
+            if self.dependency_import_depth == 0 {
+                self.reassert_cached_enums(&import_key, target);
+            }
             self.bind_imported_defaults(&unit_key, &caller_key, target);
             self.bind_imported_trait_declarations(&unit_key, &caller_key, target);
             // The cached load may have been a dependency-only load, which keeps
@@ -1047,10 +1362,12 @@ impl Lowerer {
         }
         self.loaded_modules.insert(unit_key.clone());
         self.import_stack.push(resolved.path.clone());
+        self.import_key_stack.push(import_key.clone());
 
         if resolved.path.extension().is_some_and(|ext| ext == "smf") {
             let result = self.load_types_from_smf(&resolved.path, target);
             self.import_stack.pop();
+            self.import_key_stack.pop();
             self.loaded_modules.remove(&unit_key);
             if result.is_ok() {
                 self.loaded_import_targets.insert(import_key);
@@ -1106,6 +1423,10 @@ impl Lowerer {
                 for item in &imported_module.items {
                     if let Node::Function(f) = item {
                         if self.should_import_symbol(&f.name, target) {
+                            self.register_generic_identity_param(&format!("{}.{}", prefix, f.name), f);
+                            if let Some(short) = module_path.segments.last() {
+                                self.register_generic_identity_param(&format!("{}.{}", short, f.name), f);
+                            }
                             if let Some(dispatch) = self.declared_function_returns.get(&f.name).cloned() {
                                 self.declared_function_returns.insert(format!("{}.{}", prefix, f.name), dispatch);
                             }
@@ -1123,6 +1444,7 @@ impl Lowerer {
 
         self.current_file = previous_file;
         self.import_stack.pop();
+        self.import_key_stack.pop();
         self.loaded_modules.remove(&unit_key);
         if result.is_ok() {
             self.bind_imported_defaults(&unit_key, &caller_key, target);
@@ -1255,6 +1577,76 @@ impl Lowerer {
 
     /// Check if a symbol should be imported based on the import target.
     #[allow(clippy::only_used_in_recursion)] // reason: parameter threaded for consistency with sibling function signatures
+    /// Non-refined type aliases declared in `items`, keyed by name. Used to
+    /// resolve an imported class/struct's field types in the DECLARING
+    /// module's alias scope: a selective import (`use m.{Holder}`) does not
+    /// bring in a private `type Alias = {text: T}`, so resolving the field in
+    /// the importer erased it to `Any`, and dict calls on it (`.contains_key`)
+    /// were bound by bare name to unrelated user methods.
+    /// doc/08_tracking/bug/stage2_lower_trait_alias_dict_dispatch_segv_2026-10-24.md
+    fn declared_type_aliases(items: &[Node]) -> std::collections::HashMap<String, simple_parser::ast::Type> {
+        items
+            .iter()
+            .filter_map(|item| match item {
+                Node::TypeAlias(ta) if ta.where_clause.is_none() => Some((ta.name.clone(), ta.ty.clone())),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Expand declaring-module aliases inside a field type. Depth-bounded so a
+    /// self-referential alias cannot recurse forever.
+    fn expand_declared_aliases(
+        ty: &simple_parser::ast::Type,
+        aliases: &std::collections::HashMap<String, simple_parser::ast::Type>,
+        depth: usize,
+    ) -> simple_parser::ast::Type {
+        use simple_parser::ast::Type;
+        if depth > 16 {
+            return ty.clone();
+        }
+        let rec = |t: &Type| Self::expand_declared_aliases(t, aliases, depth + 1);
+        match ty {
+            Type::Simple(name) => match aliases.get(name) {
+                Some(target) => rec(target),
+                None => ty.clone(),
+            },
+            Type::Generic { name, args } => Type::Generic {
+                name: name.clone(),
+                args: args.iter().map(rec).collect(),
+            },
+            Type::Optional(inner) => Type::Optional(Box::new(rec(inner))),
+            Type::Array { element, size } => Type::Array {
+                element: Box::new(rec(element)),
+                size: size.clone(),
+            },
+            Type::Tuple(elems) => Type::Tuple(elems.iter().map(rec).collect()),
+            Type::Union(elems) => Type::Union(elems.iter().map(rec).collect()),
+            Type::Pointer { kind, inner } => Type::Pointer {
+                kind: *kind,
+                inner: Box::new(rec(inner)),
+            },
+            Type::Capability { capability, inner } => Type::Capability {
+                capability: capability.clone(),
+                inner: Box::new(rec(inner)),
+            },
+            Type::Function { params, ret } => Type::Function {
+                params: params.iter().map(rec).collect(),
+                ret: ret.as_ref().map(|r| Box::new(rec(r))),
+            },
+            _ => ty.clone(),
+        }
+    }
+
+    fn expand_field_aliases(
+        fields: &mut [simple_parser::ast::Field],
+        aliases: &std::collections::HashMap<String, simple_parser::ast::Type>,
+    ) {
+        for field in fields {
+            field.ty = Self::expand_declared_aliases(&field.ty, aliases, 0);
+        }
+    }
+
     fn should_import_symbol(&self, name: &str, target: &ImportTarget) -> bool {
         match target {
             ImportTarget::Glob => !name.starts_with('_'),
@@ -1861,6 +2253,50 @@ fn available(backend: SelectedBackend) -> bool:
         assert!(!lowered.globals.iter().any(|(name, _)| name == "_yield_cache"));
     }
 
+    /// An unannotated module `val` must have the SAME global type in an
+    /// importer as in its declaring module. The declaring module infers i64 /
+    /// bool / text from the literal and stores the raw word; an importer that
+    /// typed it ANY read that raw word as a tagged RuntimeValue, so native
+    /// `val CAP = 200` arrived as 25 (200 >> 3) — devhub history truncated at
+    /// 25 rows (devhub_native_sqlcipher_history_truncated_at_25_rows_2026-11-14).
+    #[test]
+    fn imported_unannotated_literal_val_keeps_declaring_module_type() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        fs::write(
+            src.join("limits.spl"),
+            "val UNTYPED_CAP = 200\nval DERIVED_CAP = 8 * 25\nval ENABLED = true\nval LABEL = \"cap\"\nstatic STATIC_CAP = 200\n",
+        )
+        .unwrap();
+        let main_path = src.join("main.spl");
+        fs::write(
+            &main_path,
+            "use limits.{UNTYPED_CAP, DERIVED_CAP, ENABLED, LABEL, STATIC_CAP}\nfn clamp(x: i64) -> i64:\n    if x > UNTYPED_CAP:\n        return UNTYPED_CAP\n    x\n",
+        )
+        .unwrap();
+
+        let source = crate::read_trace::rts(file!(), line!(), &main_path).unwrap();
+        let ast = Parser::new(&source).parse().expect("parse failed");
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src);
+        let lowered = Lowerer::with_module_resolver(resolver, main_path)
+            .lower_module(&ast)
+            .expect("HIR lowering should succeed");
+
+        let global_type = |wanted: &str| {
+            lowered
+                .globals
+                .iter()
+                .find(|(name, _)| name == wanted)
+                .map(|(_, ty)| *ty)
+                .unwrap_or_else(|| panic!("{wanted} must be an importer global"))
+        };
+        assert_eq!(global_type("UNTYPED_CAP"), TypeId::I64);
+        assert_eq!(global_type("DERIVED_CAP"), TypeId::I64);
+        assert_eq!(global_type("ENABLED"), TypeId::BOOL);
+        assert_eq!(global_type("LABEL"), TypeId::STRING);
+        assert_eq!(global_type("STATIC_CAP"), TypeId::I64);
+    }
+
     #[test]
     fn empty_group_or_glob_imports_are_non_addressable_roots() {
         let module_path = ModulePath::new(vec![]);
@@ -2036,4 +2472,142 @@ mod imported_module_ast_memo_tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+
+}
+
+#[cfg(test)]
+mod private_alias_dict_tests {
+    use crate::hir::lower::lowerer::Lowerer;
+    use crate::module_resolver::ModuleResolver;
+    use crate::test_helpers::create_test_project;
+    use simple_parser::Parser;
+    use std::fs;
+
+    /// Cross-module private dict alias: `type TraitsByName = {text: i64}` is
+    /// private to the declaring module, a class field typed with it is read
+    /// from an importing module, and an unrelated imported class declares a
+    /// same-named `contains_key`. The membership call must lower to the
+    /// tag-dispatched dict builtin (`rt_contains`), never to the user method.
+    /// doc/08_tracking/bug/stage2_lower_trait_alias_dict_dispatch_segv_2026-10-24.md
+    fn lower_private_alias_dict_probe(main_src: &str) -> (crate::hir::HirModule, crate::mir::MirModule) {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let owner = src.join("owner");
+        fs::create_dir_all(&owner).unwrap();
+        fs::write(
+            owner.join("types.spl"),
+            "type TraitsByName = {text: i64}\n\nclass Holder:\n    traits: TraitsByName\n    plain: {text: i64}\n",
+        )
+        .unwrap();
+        fs::write(
+            owner.join("adaptive.spl"),
+            "class AdaptiveMap:\n    profile: i64\n\nimpl AdaptiveMap:\n    fn contains_key(key: text) -> bool:\n        self.profile > 0\n",
+        )
+        .unwrap();
+        let main_path = src.join("main.spl");
+        fs::write(&main_path, main_src).unwrap();
+        let source = crate::read_trace::rts(file!(), line!(), &main_path).unwrap();
+        let ast = Parser::new(&source).parse().expect("parse failed");
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src);
+        let hir = Lowerer::with_module_resolver(resolver, main_path)
+            .lower_module(&ast)
+            .expect("private alias consumer lowers");
+        let mir = crate::mir::lower_to_mir(&hir).expect("private alias consumer lowers to MIR");
+        (hir, mir)
+    }
+
+    fn assert_dict_membership_not_user_method(mir: &crate::mir::MirModule, func: &str) {
+        let f = mir
+            .functions
+            .iter()
+            .find(|f| f.name == func || f.name.ends_with(&format!(".{func}")))
+            .unwrap_or_else(|| panic!("{func} MIR function"));
+        let insts: Vec<_> = f.blocks.iter().flat_map(|b| &b.instructions).collect();
+        let dump = format!("{insts:?}");
+        assert!(
+            insts.iter().all(|i| !matches!(i, crate::mir::MirInst::MethodCallStatic { func_name, .. }
+                if func_name.contains('.') && func_name.ends_with("contains_key"))),
+            "dict membership through a private alias must not bind a nominal contains_key: {dump}"
+        );
+        assert!(
+            dump.contains("rt_contains"),
+            "dict membership must reach the tag-dispatched builtin rt_contains: {dump}"
+        );
+    }
+
+    #[test]
+    fn private_alias_dict_field_membership_in_free_function() {
+        let (_hir, mir) = lower_private_alias_dict_probe(
+            "use owner.types.{Holder}\nuse owner.adaptive.{AdaptiveMap}\n\nfn probe(h: Holder) -> bool:\n    h.traits.contains_key(\"x\")\n",
+        );
+        assert_dict_membership_not_user_method(&mir, "probe");
+    }
+
+    #[test]
+    fn private_alias_dict_field_resolves_to_dict_in_importer() {
+        let (hir, _mir) = lower_private_alias_dict_probe(
+            "use owner.types.{Holder}\n\nfn probe(h: Holder) -> bool:\n    h.traits.contains_key(\"x\")\n",
+        );
+        let holder = hir.types.lookup("Holder").expect("Holder registered");
+        let Some(crate::hir::HirType::Struct { fields, .. }) = hir.types.get(holder) else {
+            panic!("Holder must be a struct type: {:?}", hir.types.get(holder));
+        };
+        let (_, traits_ty) = fields.iter().find(|(n, _)| n == "traits").expect("traits field");
+        assert!(
+            matches!(hir.types.get(*traits_ty), Some(crate::hir::HirType::Dict { .. })),
+            "private alias field must resolve to its Dict target in the importer, got {:?}",
+            hir.types.get(*traits_ty)
+        );
+    }
+
+    #[test]
+    fn private_alias_dict_field_membership_in_imported_class_method() {
+        let (_hir, mir) = lower_private_alias_dict_probe(
+            "use owner.types.{Holder}\nuse owner.adaptive.{AdaptiveMap}\n\nimpl Holder:\n    fn has_trait(name: text) -> bool:\n        self.traits.contains_key(name)\n",
+        );
+        assert_dict_membership_not_user_method(&mir, "has_trait");
+    }
+
+    /// Alias re-imported by the declaring module from a THIRD module: the
+    /// declaring-scope expansion does not see it, so the field stays erased.
+    /// MIR must still emit the bare builtin name, never `void.contains_key`.
+    #[test]
+    fn transitively_imported_alias_field_membership_stays_builtin() {
+        let dir = create_test_project();
+        let src = dir.path().join("src");
+        let owner = src.join("owner");
+        fs::create_dir_all(&owner).unwrap();
+        fs::write(owner.join("aliases.spl"), "type TraitsByName = {text: i64}\n").unwrap();
+        fs::write(
+            owner.join("types.spl"),
+            "use owner.aliases.{TraitsByName}\n\nclass Holder:\n    traits: TraitsByName\n",
+        )
+        .unwrap();
+        fs::write(
+            owner.join("adaptive.spl"),
+            "class AdaptiveMap:\n    profile: i64\n\nimpl AdaptiveMap:\n    fn contains_key(key: text) -> bool:\n        self.profile > 0\n",
+        )
+        .unwrap();
+        let main_path = src.join("main.spl");
+        fs::write(
+            &main_path,
+            "use owner.types.{Holder}\nuse owner.adaptive.{AdaptiveMap}\n\nfn probe(h: Holder) -> bool:\n    h.traits.contains_key(\"x\")\n",
+        )
+        .unwrap();
+        let source = crate::read_trace::rts(file!(), line!(), &main_path).unwrap();
+        let ast = Parser::new(&source).parse().expect("parse failed");
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src);
+        let hir = Lowerer::with_module_resolver(resolver, main_path)
+            .lower_module(&ast)
+            .expect("transitive alias consumer lowers");
+        let mir = crate::mir::lower_to_mir(&hir).expect("transitive alias consumer lowers to MIR");
+        let f = mir.functions.iter().find(|f| f.name == "probe").expect("probe");
+        let insts: Vec<_> = f.blocks.iter().flat_map(|b| &b.instructions).collect();
+        let dump = format!("{insts:?}");
+        assert!(
+            insts.iter().all(|i| !matches!(i, crate::mir::MirInst::MethodCallStatic { func_name, .. }
+                if func_name.contains('.') && func_name.ends_with("contains_key"))),
+            "erased receiver must not carry a nominal contains_key qualifier: {dump}"
+        );
+    }
 }

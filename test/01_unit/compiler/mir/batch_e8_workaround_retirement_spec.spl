@@ -1,0 +1,71 @@
+"""
+# Batch E8 Workaround Retirement Verification
+
+Verifies HIR/MIR lowering and source contracts for the retired Wave E Batch E8
+workaround families:
+1. `stage2_test_runner_record_collection_owner_unavailable_2026_10_12`:
+   `if val rebound = lookup_exact_type(...)` returning `SymbolId?` and
+   `if val keys = dict.get(owner):` on `Dict<text, [text]>`.
+2. `a174_nominal_enum_operator_resolution_2026_10_16`:
+   direct `==` / `!=` on payload-free nominal enums (`PackageSectionKindV1`).
+   (`backend_plugin_enum_equality_mir_2026_10_12` is retired by Batch E7 #11487.)
+3. `backend_plugin_result_payload_mir_2026_10_12`:
+   `Result` `?` propagation + enum `==` in receipt validation.
+4. `rti004_mono_specialization_match_subject_2026-11-01` &
+   `simple_ring_result_payload_provenance_2026-11-06`:
+   direct `match` on generic-class method return, `Result<Rec?, Err>` `Ok`
+   payload, and `Result<(), Err>` `Err` payload.
+
+Note: `query-native-trim-end-dot-20261016` was intentionally NOT retired
+because `method_calls_literals.spl:5263` lowers `trim_end` with `args.len() == 0`
+(`rt_string_trim_end`) and rejects 1-arg `trim_end(".")` as unresolved.
+"""
+
+use std.spec.{describe, it, expect}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+
+fn lower_hir_mir_errors(source: text, filename: text) -> [text]:
+    val parsed = parse_full_frontend(source, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(parsed)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var errors: [text] = []
+    for err in hir_lowering.errors:
+        errors.push("HIR: " + err.message)
+    for err in mir_lowering.errors:
+        errors.push("MIR: " + err.message)
+    if mir.functions.len() == 0:
+        errors.push("no lowered functions")
+    errors
+
+describe "Batch E8 compiler root-cause verification":
+    it "lowers SymbolId? lookup_exact_type and Dict.get [text] if-val with zero HIR/MIR errors":
+        val src = "struct SymId:\n    id: i64\n\nclass Table:\n    exact: Dict<text, i64>\n    keys_by_owner: Dict<text, [text]>\n    fn lookup_exact(name: text) -> SymId?:\n        if self.exact.has(name):\n            return Some(SymId(id: self.exact[name]))\n        nil\n    fn key_at(owner: text, idx: i64) -> text:\n        if val keys = self.keys_by_owner.get(owner):\n            if idx >= 0 and idx < keys.len():\n                return keys[idx]\n        \"\"\n\nfn rebind(t: Table, name: text) -> i64:\n    if val rebound = t.lookup_exact(name):\n        return rebound.id\n    -1\n"
+        val errs = lower_hir_mir_errors(src, "batch_e8_record_owner.spl")
+        expect(errs).to_equal([])
+
+    it "lowers direct payload-free enum == and != with zero HIR/MIR errors":
+        val src = "enum SectionKind:\n    Mir\n    Objects\n    Receipts\n\nfn same_kind(a: SectionKind, b: SectionKind) -> bool:\n    a == b\n\nfn diff_kind(a: SectionKind, b: SectionKind) -> bool:\n    a != b\n"
+        val errs = lower_hir_mir_errors(src, "batch_e8_enum_eq.spl")
+        expect(errs).to_equal([])
+
+    it "lowers Result ? propagation with enum == guard with zero HIR/MIR errors":
+        val src = "enum Role:\n    Aot\n    Jit\n\nenum PluginErr:\n    Rejected(text)\n\nfn check_role(role: Role, has_obj: bool) -> Result<bool, PluginErr>:\n    if role == Role.Aot:\n        if not has_obj:\n            return Err(PluginErr.Rejected(\"missing\")) \n    Ok(true)\n\nfn run_check(role: Role, has_obj: bool) -> Result<i64, PluginErr>:\n    val ok = check_role(role, has_obj)?\n    if ok: Ok(1) else: Ok(0)\n"
+        val errs = lower_hir_mir_errors(src, "batch_e8_result_q.spl")
+        expect(errs).to_equal([])
+
+    it "lowers generic ring match-subject and Result Ok/Err provenance with zero HIR/MIR errors":
+        val src = "enum RingErr:\n    WrongOwner\n\nenum Outcome:\n    Cancelled\n    Rejected(RingErr)\n\nstruct Completion<C>:\n    token: i64\n    val_: C\n\nclass Ring<Op, Cpl>:\n    owner: i64\n    me complete(tok: i64) -> Result<(), RingErr>:\n        Ok(())\n    me take_retained() -> Result<Completion<Cpl>?, RingErr>:\n        Ok(nil)\n    me release(tok: i64) -> Result<(), RingErr>:\n        Ok(())\n    me take_and_release() -> Result<Completion<Cpl>?, RingErr>:\n        val retained = self.take_retained()\n        match retained:\n            case Err(e): Err(e)\n            case Ok(maybe):\n                if val completion = maybe:\n                    match self.release(completion.token):\n                        case Result.Ok(_): Ok(completion)\n                        case Result.Err(e): Err(e)\n                else:\n                    Ok(nil)\n    me cancel() -> Outcome:\n        match self.release(1):\n            case Result.Ok(_): Outcome.Cancelled\n            case Result.Err(error): Outcome.Rejected(error)\n\nfn deliver(r: Ring<i64, i64>) -> Result<i64, RingErr>:\n    match r.complete(1):\n        case Ok(_): Ok(1)\n        case Err(error): Err(error)\n"
+        val errs = lower_hir_mir_errors(src, "batch_e8_ring_provenance.spl")
+        expect(errs).to_equal([])
+
+    it "checks me method(v: f64) without return type in MIR":
+        val src = "class Writer:\n    count: i64\n    me put_f64(v: f64):\n        self.count = self.count + 1\n\nfn call_it(w: Writer, x: f64) -> i64:\n    w.put_f64(x)\n    w.count\n"
+        val errs = lower_hir_mir_errors(src, "batch_e8_put_f64.spl")
+        expect(errs).to_equal([])

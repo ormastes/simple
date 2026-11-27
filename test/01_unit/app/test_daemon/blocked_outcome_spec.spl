@@ -1,0 +1,88 @@
+# Reproduce spec for:
+#   doc/08_tracking/bug/llm_caret_env_gated_specs_no_blocked_outcome_2026-11-12.md
+#
+# An example gated on a missing environment (`pending("BLOCKED: ...")` or an
+# `Err("precondition: ...")` failure) must be counted as BLOCKED: visible on
+# the verdict line, never a pass, never OK, and never a bare failure.
+# @req: REQ-TEST-RUNNER-BLOCKED-001
+
+use app.test_daemon.light_protocol.{ran_verdict_line, verdict_outcome_token, aggregate_spec_file_verdict_line, blocked_reason_line}
+use std.test_runner.test_executor_parsing.{parse_blocked_examples, make_result_from_output}
+use std.test_runner.test_runner_types.{TestFileResult, test_file_result_outcome_class}
+use std.nogc_sync_mut.test_runner.test_db_record.{test_db_file_row_from_result}
+use std.test_runner.test_db_types.{TestStatus, status_to_str, str_to_status}
+use std.test_runner.test_runner_types.{TestRunOutcome, test_run_outcome_exit_code}
+
+val PENDING_OUT = "real infra\n    it BLOCKED: no local SMTP server on this host ... pending\n  ○ sends a mail (pending)\n    it BLOCKED: no local minio ... pending\n  ○ puts an object (pending)\n"
+val PRECOND_OUT = "smux client\n  \u001b[31m✗ classifies capability discovery\u001b[0m\n    \u001b[31mprecondition: mandatory absolute SMUX_SOCKET_TEST_CONFIG\u001b[0m\n\n1 example, 1 failure\n"
+val REAL_FAIL_OUT = "x\n  ✗ adds numbers\n    expected 3 to equal 4\n"
+
+describe "BLOCKED test outcome":
+
+    it "counts pending BLOCKED examples with their reason":
+        step("parse a child transcript with two BLOCKED pending examples")
+        val (pend, fail, reason) = parse_blocked_examples(PENDING_OUT)
+        expect(pend).to_equal(2)
+        expect(fail).to_equal(0)
+        expect(reason).to_equal("no local SMTP server on this host")
+
+    it "counts a precondition failure as blocked, not as a failure":
+        step("parse a child transcript whose only failure is a precondition")
+        val (pend, fail, reason) = parse_blocked_examples(PRECOND_OUT)
+        expect(pend).to_equal(0)
+        expect(fail).to_equal(1)
+        expect(reason).to_equal("precondition: mandatory absolute SMUX_SOCKET_TEST_CONFIG")
+
+    it "does not treat an ordinary assertion failure as blocked":
+        val (pend, fail, reason) = parse_blocked_examples(REAL_FAIL_OUT)
+        expect(pend + fail).to_equal(0)
+        expect(reason).to_equal("")
+
+    it "reports outcome=BLOCKED with a blocked count, never OK":
+        step("build the verdict line for a file with only blocked examples")
+        val line = ran_verdict_line("test/infra_spec.spl", 0, 0, 0, "", 4)
+        expect(line).to_contain("outcome=BLOCKED")
+        expect(line).to_contain("executed=4 passed=0 failed=0 in_development=0 blocked=4 dropped=0")
+        expect(verdict_outcome_token(4, 0, 4)).to_equal("BLOCKED")
+        expect(verdict_outcome_token(5, 0, 1)).to_equal("BLOCKED")
+
+    it "keeps a real failure ERROR even when other examples are blocked":
+        expect(verdict_outcome_token(3, 1, 2)).to_equal("ERROR")
+
+    it "keeps a clean file OK with blocked=0 on the line":
+        val line = ran_verdict_line("test/ok_spec.spl", 3, 0)
+        expect(line).to_contain("outcome=OK")
+        expect(line).to_contain("blocked=0")
+
+    it "carries the blocked count through the directory lane verdict":
+        val line = aggregate_spec_file_verdict_line("test/infra_spec.spl", 0, 0, 0,
+            "BLOCKED: no local SMTP server", "", false, 10, 4)
+        expect(line).to_contain("outcome=BLOCKED")
+        expect(line).to_contain("blocked=4")
+
+    it "prints the reason on its own blocked line":
+        expect(blocked_reason_line("test/infra_spec.spl", 4, "no local SMTP server"))
+            .to_equal("SPEC FILE BLOCKED: test/infra_spec.spl blocked=4 reason=no local SMTP server")
+
+    it "maps a blocked file to its own exit code, distinct from pass and failure":
+        expect(test_run_outcome_exit_code(TestRunOutcome.BlockedScenario)).to_equal(6)
+
+    it "classifies a blocked-only child as BLOCKED on the directory lane":
+        step("build a file result from a child transcript with a precondition failure")
+        val r = make_result_from_output("test/smux_spec.spl", PRECOND_OUT, "", 1, 5, 60)
+        expect(r.failed).to_equal(0)
+        expect(r.blocked).to_equal(1)
+        expect(test_file_result_outcome_class(r)).to_equal("BLOCKED")
+        expect(r.error).to_contain("precondition: mandatory absolute SMUX_SOCKET_TEST_CONFIG")
+
+    it "keeps a real failure ERROR on the directory lane":
+        val r = make_result_from_output("test/x_spec.spl", REAL_FAIL_OUT + "\n1 example, 1 failure\n", "", 1, 5, 60)
+        expect(r.blocked).to_equal(0)
+        expect(test_file_result_outcome_class(r)).to_equal("ERROR")
+
+    it "records a blocked file as blocked in the test DB, not passed":
+        val r = TestFileResult(path: "test/infra_spec.spl", passed: 0, failed: 0, skipped: 0,
+            pending: 0, duration_ms: 0, setup_ms: 0, error: "BLOCKED: no SMTP", timed_out: false,
+            cached: false, blocked: 4)
+        expect(test_db_file_row_from_result(r).status).to_equal("blocked")
+        expect(status_to_str(str_to_status("blocked"))).to_equal("blocked")

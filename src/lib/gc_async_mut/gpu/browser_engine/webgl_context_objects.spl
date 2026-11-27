@@ -1,0 +1,980 @@
+# WebGLContext object lifecycle, shader / program / uniform and extension methods.
+# Split out of webgl_context.spl (impl extension; the class and its fields stay there,
+# and webgl_context.spl pulls this impl in with a trailing `use`).
+
+use std.gc_async_mut.gpu.browser_engine.webgl_context.{WebGLContext, WEBGL_INVALID_ENUM, WEBGL_INVALID_VALUE, WEBGL_INVALID_OPERATION, WEBGL_VERTEX_SHADER, WEBGL_FRAGMENT_SHADER, WEBGL_DELETE_STATUS, WEBGL_COMPILE_STATUS, WEBGL_LINK_STATUS, WEBGL_VALIDATE_STATUS, WEBGL_INFO_LOG_LENGTH, WEBGL_ATTACHED_SHADERS, WEBGL_ACTIVE_UNIFORMS, WEBGL_ACTIVE_ATTRIBUTES, WEBGL_SHADER_TYPE, WEBGL_INT, WEBGL_FLOAT, WEBGL_FLOAT_VEC2, WEBGL_FLOAT_VEC3, WEBGL_FLOAT_VEC4, WEBGL_INT_VEC2, WEBGL_INT_VEC3, WEBGL_INT_VEC4, WEBGL_BOOL, WEBGL_BOOL_VEC2, WEBGL_BOOL_VEC3, WEBGL_BOOL_VEC4, WEBGL_FLOAT_MAT2, WEBGL_FLOAT_MAT3, WEBGL_FLOAT_MAT4, WEBGL_SAMPLER_2D, WEBGL_SAMPLER_CUBE, WebGLBufferHandle, WebGLVertexArrayHandle, WebGLTextureHandle, WebGLSamplerHandle, WebGLFramebufferHandle, WebGLRenderbufferHandle, WebGLShaderHandle, WebGLShaderPrecisionFormat, WebGLActiveInfo, WebGLParameterValue, WebGLUniformValue, WebGLExtensionHandle, WebGLProgramHandle, webgl_validate_shader_source_for_version, webgl_parameter_bool, webgl_parameter_int, webgl_uniform_parameter_value, webgl_default_uniform_parameter_value, webgl_empty_active_info, webgl_invalid_texture_handle, webgl_default_texture_handle, webgl_invalid_sampler_handle, webgl_default_sampler_handle, webgl_default_framebuffer_handle, webgl_attached_shader_count, webgl_collect_active_attribs, webgl_collect_active_uniforms, webgl_canonical_extension_name, webgl_text_list_contains, webgl_default_vertex_attribs, webgl_valid_shader_precision_type, webgl_shader_precision_format_invalid, webgl_shader_precision_format_for, webgl_copy_f64, webgl_copy_i32}
+use std.gc_async_mut.gpu.browser_engine.webgl_render_commands.{webgl_render_command_use_program, webgl_render_command_uniform_1i, webgl_render_command_uniform_2i, webgl_render_command_uniform_3i, webgl_render_command_uniform_4i, webgl_render_command_uniform_1iv, webgl_render_command_uniform_2iv, webgl_render_command_uniform_3iv, webgl_render_command_uniform_4iv, webgl_render_command_uniform_1f, webgl_render_command_uniform_2f, webgl_render_command_uniform_3f, webgl_render_command_uniform_4f, webgl_render_command_uniform_1fv, webgl_render_command_uniform_2fv, webgl_render_command_uniform_3fv, webgl_render_command_uniform_4fv, webgl_render_command_uniform_matrix2fv, webgl_render_command_uniform_matrix3fv, webgl_render_command_uniform_matrix4fv}
+
+impl WebGLContext:
+
+    me create_buffer() -> WebGLBufferHandle:
+        if not self.ensure_context_available():
+            return WebGLBufferHandle(id: -1, valid: false, error: "context lost", target: 0, byte_length: 0, usage: 0, initialized: false)
+        val handle = WebGLBufferHandle(id: self.next_buffer_id, valid: true, error: "", target: 0, byte_length: 0, usage: 0, initialized: false)
+        self.next_buffer_id = self.next_buffer_id + 1
+        self.buffers.push(handle)
+        handle
+
+    me create_texture() -> WebGLTextureHandle:
+        if not self.ensure_context_available():
+            return webgl_invalid_texture_handle("context lost")
+        val handle = webgl_default_texture_handle(self.next_texture_id, true, "")
+        self.next_texture_id = self.next_texture_id + 1
+        self.textures.push(handle)
+        handle
+
+    me create_sampler() -> WebGLSamplerHandle:
+        if not self.ensure_context_available():
+            return webgl_invalid_sampler_handle("context lost")
+        if self.version < 2:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return webgl_invalid_sampler_handle("samplers require WebGL2")
+        val handle = webgl_default_sampler_handle(self.next_sampler_id, true, "")
+        self.next_sampler_id = self.next_sampler_id + 1
+        self.samplers.push(handle)
+        handle
+
+    me create_framebuffer() -> WebGLFramebufferHandle:
+        if not self.ensure_context_available():
+            return webgl_default_framebuffer_handle(-1, false, "context lost")
+        val handle = webgl_default_framebuffer_handle(self.next_framebuffer_id, true, "")
+        self.next_framebuffer_id = self.next_framebuffer_id + 1
+        self.framebuffers.push(handle)
+        handle
+
+    me create_renderbuffer() -> WebGLRenderbufferHandle:
+        if not self.ensure_context_available():
+            return WebGLRenderbufferHandle(id: -1, valid: false, error: "context lost", internal_format: 0, width: 0, height: 0, initialized: false)
+        val handle = WebGLRenderbufferHandle(id: self.next_renderbuffer_id, valid: true, error: "", internal_format: 0, width: 0, height: 0, initialized: false)
+        self.next_renderbuffer_id = self.next_renderbuffer_id + 1
+        self.renderbuffers.push(handle)
+        handle
+
+    me create_vertex_array() -> WebGLVertexArrayHandle:
+        if not self.ensure_context_available():
+            return WebGLVertexArrayHandle(id: -1, valid: false, error: "context lost", element_array_buffer_id: -1, vertex_attribs: [])
+        val handle = WebGLVertexArrayHandle(id: self.next_vertex_array_id, valid: true, error: "", element_array_buffer_id: -1, vertex_attribs: webgl_default_vertex_attribs())
+        self.next_vertex_array_id = self.next_vertex_array_id + 1
+        self.vertex_arrays.push(handle)
+        handle
+
+    me is_buffer(buffer_id: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        val buffer_index = self.find_buffer_index(buffer_id)
+        buffer_index >= 0 and self.buffers[buffer_index].valid
+
+    me is_texture(texture_id: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        val texture_index = self.find_texture_index(texture_id)
+        texture_index >= 0 and self.textures[texture_index].valid
+
+    me is_sampler(sampler_id: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        val sampler_index = self.find_sampler_index(sampler_id)
+        sampler_index >= 0 and self.samplers[sampler_index].valid
+
+    me is_framebuffer(framebuffer_id: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        val framebuffer_index = self.find_framebuffer_index(framebuffer_id)
+        framebuffer_index >= 0 and self.framebuffers[framebuffer_index].valid
+
+    me is_renderbuffer(renderbuffer_id: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        val renderbuffer_index = self.find_renderbuffer_index(renderbuffer_id)
+        renderbuffer_index >= 0 and self.renderbuffers[renderbuffer_index].valid
+
+    me is_vertex_array(vertex_array_id: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        val vertex_array_index = self.find_vertex_array_index(vertex_array_id)
+        vertex_array_index >= 0 and self.vertex_arrays[vertex_array_index].valid
+
+    me delete_buffer(buffer_id: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        if buffer_id == -1:
+            return true
+        val buffer_index = self.find_buffer_index(buffer_id)
+        if buffer_index < 0 or not self.buffers[buffer_index].valid:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        var buffer = self.buffers[buffer_index]
+        buffer.valid = false
+        buffer.initialized = false
+        self.buffers[buffer_index] = buffer
+        if self.bound_array_buffer == buffer_id:
+            self.bound_array_buffer = -1
+        if self.bound_element_array_buffer == buffer_id:
+            self.bound_element_array_buffer = -1
+        self.clear_vertex_attrib_buffer_references(buffer_id)
+        self.clear_vertex_array_buffer_references(buffer_id)
+        true
+
+    me delete_texture(texture_id: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        if texture_id == -1:
+            return true
+        val texture_index = self.find_texture_index(texture_id)
+        if texture_index < 0 or not self.textures[texture_index].valid:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        var texture = self.textures[texture_index]
+        texture.valid = false
+        texture.initialized = false
+        self.textures[texture_index] = texture
+        if self.bound_texture_2d == texture_id:
+            self.bound_texture_2d = -1
+        if self.bound_texture_cube_map == texture_id:
+            self.bound_texture_cube_map = -1
+        self.clear_texture_unit_references(texture_id)
+        self.clear_framebuffer_texture_references(texture_id)
+        true
+
+    me delete_sampler(sampler_id: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        if sampler_id == -1:
+            return true
+        val sampler_index = self.find_sampler_index(sampler_id)
+        if sampler_index < 0 or not self.samplers[sampler_index].valid:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        var sampler = self.samplers[sampler_index]
+        sampler.valid = false
+        self.samplers[sampler_index] = sampler
+        self.clear_sampler_unit_references(sampler_id)
+        true
+
+    me delete_framebuffer(framebuffer_id: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        if framebuffer_id == -1:
+            return true
+        val framebuffer_index = self.find_framebuffer_index(framebuffer_id)
+        if framebuffer_index < 0 or not self.framebuffers[framebuffer_index].valid:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        var framebuffer = self.framebuffers[framebuffer_index]
+        framebuffer.valid = false
+        self.framebuffers[framebuffer_index] = framebuffer
+        if self.bound_framebuffer == framebuffer_id:
+            self.bound_framebuffer = -1
+        true
+
+    me delete_renderbuffer(renderbuffer_id: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        if renderbuffer_id == -1:
+            return true
+        val renderbuffer_index = self.find_renderbuffer_index(renderbuffer_id)
+        if renderbuffer_index < 0 or not self.renderbuffers[renderbuffer_index].valid:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        var renderbuffer = self.renderbuffers[renderbuffer_index]
+        renderbuffer.valid = false
+        renderbuffer.initialized = false
+        self.renderbuffers[renderbuffer_index] = renderbuffer
+        if self.bound_renderbuffer == renderbuffer_id:
+            self.bound_renderbuffer = -1
+        self.clear_framebuffer_renderbuffer_references(renderbuffer_id)
+        true
+
+    me delete_vertex_array(vertex_array_id: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        if vertex_array_id == -1:
+            return true
+        val vertex_array_index = self.find_vertex_array_index(vertex_array_id)
+        if vertex_array_index < 0 or not self.vertex_arrays[vertex_array_index].valid:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        var vertex_array = self.vertex_arrays[vertex_array_index]
+        vertex_array.valid = false
+        self.vertex_arrays[vertex_array_index] = vertex_array
+        if self.bound_vertex_array == vertex_array_id:
+            self.bound_vertex_array = -1
+            self.bound_element_array_buffer = -1
+            self.vertex_attribs = webgl_default_vertex_attribs()
+        true
+
+    me create_shader(shader_type: i32) -> WebGLShaderHandle:
+        if not self.ensure_context_available():
+            return WebGLShaderHandle(id: -1, shader_type: shader_type, source: "", compiled: false, valid: false, info_log: "context lost")
+        if shader_type != WEBGL_VERTEX_SHADER and shader_type != WEBGL_FRAGMENT_SHADER:
+            self.last_error = WEBGL_INVALID_ENUM
+            return WebGLShaderHandle(id: -1, shader_type: shader_type, source: "", compiled: false, valid: false, info_log: "invalid shader type")
+        val handle = WebGLShaderHandle(id: self.next_shader_id, shader_type: shader_type, source: "", compiled: false, valid: true, info_log: "")
+        self.next_shader_id = self.next_shader_id + 1
+        self.shaders.push(handle)
+        handle
+
+    me delete_shader(shader_id: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        if shader_id == -1:
+            return true
+        val shader_index = self.find_shader_index(shader_id)
+        if shader_index < 0 or not self.shaders[shader_index].valid:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        var shader = self.shaders[shader_index]
+        shader.valid = false
+        shader.compiled = false
+        self.shaders[shader_index] = shader
+        true
+
+    me shader_source(shader_id: i32, source: text) -> bool:
+        if not self.ensure_context_available():
+            return false
+        var i = 0
+        while i < self.shaders.len():
+            if self.shaders[i].id == shader_id:
+                if not self.shaders[i].valid:
+                    self.last_error = WEBGL_INVALID_VALUE
+                    return false
+                var shader = self.shaders[i]
+                shader.source = source
+                shader.compiled = false
+                shader.info_log = ""
+                self.shaders[i] = shader
+                return true
+            i = i + 1
+        self.last_error = WEBGL_INVALID_VALUE
+        false
+
+    me get_shader_source(shader_id: i32) -> text:
+        if not self.ensure_context_available():
+            return ""
+        val shader_index = self.find_shader_index(shader_id)
+        if shader_index < 0 or not self.shaders[shader_index].valid:
+            self.last_error = WEBGL_INVALID_VALUE
+            return ""
+        self.shaders[shader_index].source
+
+    me compile_shader(shader_id: i32) -> WebGLShaderHandle:
+        if not self.ensure_context_available():
+            return WebGLShaderHandle(id: -1, shader_type: 0, source: "", compiled: false, valid: false, info_log: "context lost")
+        var i = 0
+        while i < self.shaders.len():
+            if self.shaders[i].id == shader_id:
+                if not self.shaders[i].valid:
+                    self.last_error = WEBGL_INVALID_VALUE
+                    return WebGLShaderHandle(id: -1, shader_type: 0, source: "", compiled: false, valid: false, info_log: "shader deleted")
+                var shader = self.shaders[i]
+                val err = webgl_validate_shader_source_for_version(shader.shader_type, shader.source, self.version)
+                shader.compiled = err == ""
+                shader.info_log = err
+                self.shaders[i] = shader
+                if err != "":
+                    self.last_error = WEBGL_INVALID_OPERATION
+                return shader
+            i = i + 1
+        self.last_error = WEBGL_INVALID_VALUE
+        WebGLShaderHandle(id: -1, shader_type: 0, source: "", compiled: false, valid: false, info_log: "shader not found")
+
+    me is_shader(shader_id: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        val shader_index = self.find_shader_index(shader_id)
+        shader_index >= 0 and self.shaders[shader_index].valid
+
+    me create_program() -> WebGLProgramHandle:
+        if not self.ensure_context_available():
+            return WebGLProgramHandle(id: -1, vertex_shader_id: -1, fragment_shader_id: -1, linked: false, valid: false, info_log: "context lost", active_attribs: [], active_uniforms: [], validate_status: false)
+        val handle = WebGLProgramHandle(id: self.next_program_id, vertex_shader_id: -1, fragment_shader_id: -1, linked: false, valid: true, info_log: "", active_attribs: [], active_uniforms: [], validate_status: false)
+        self.next_program_id = self.next_program_id + 1
+        self.programs.push(handle)
+        handle
+
+    me delete_program(program_id: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        if program_id == -1:
+            return true
+        val program_index = self.find_program_index(program_id)
+        if program_index < 0 or not self.programs[program_index].valid:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        var program = self.programs[program_index]
+        program.valid = false
+        program.linked = false
+        program.validate_status = false
+        self.programs[program_index] = program
+        if self.current_program_id == program_id:
+            self.current_program_id = -1
+        self.remove_uniform_values_for_program(program_id)
+        true
+
+    me is_program(program_id: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        val program_index = self.find_program_index(program_id)
+        program_index >= 0 and self.programs[program_index].valid
+
+    me attach_shader(program_id: i32, shader_id: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        val shader_index = self.find_shader_index(shader_id)
+        val program_index = self.find_program_index(program_id)
+        if shader_index < 0 or program_index < 0:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        if not self.shaders[shader_index].valid or not self.programs[program_index].valid:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        var program = self.programs[program_index]
+        val shader = self.shaders[shader_index]
+        if shader.shader_type == WEBGL_VERTEX_SHADER:
+            program.vertex_shader_id = shader_id
+        if shader.shader_type == WEBGL_FRAGMENT_SHADER:
+            program.fragment_shader_id = shader_id
+        self.programs[program_index] = program
+        true
+
+    me detach_shader(program_id: i32, shader_id: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        val shader_index = self.find_shader_index(shader_id)
+        val program_index = self.find_program_index(program_id)
+        if shader_index < 0 or program_index < 0:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        if not self.programs[program_index].valid:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        var program = self.programs[program_index]
+        val shader = self.shaders[shader_index]
+        if shader.shader_type == WEBGL_VERTEX_SHADER and program.vertex_shader_id == shader_id:
+            program.vertex_shader_id = -1
+            self.programs[program_index] = program
+            return true
+        if shader.shader_type == WEBGL_FRAGMENT_SHADER and program.fragment_shader_id == shader_id:
+            program.fragment_shader_id = -1
+            self.programs[program_index] = program
+            return true
+        self.last_error = WEBGL_INVALID_OPERATION
+        false
+
+    me link_program(program_id: i32) -> WebGLProgramHandle:
+        if not self.ensure_context_available():
+            return WebGLProgramHandle(id: -1, vertex_shader_id: -1, fragment_shader_id: -1, linked: false, valid: false, info_log: "context lost", active_attribs: [], active_uniforms: [], validate_status: false)
+        val program_index = self.find_program_index(program_id)
+        if program_index < 0:
+            self.last_error = WEBGL_INVALID_VALUE
+            return WebGLProgramHandle(id: -1, vertex_shader_id: -1, fragment_shader_id: -1, linked: false, valid: false, info_log: "program not found", active_attribs: [], active_uniforms: [], validate_status: false)
+        var program = self.programs[program_index]
+        if not program.valid:
+            self.last_error = WEBGL_INVALID_VALUE
+            return WebGLProgramHandle(id: -1, vertex_shader_id: -1, fragment_shader_id: -1, linked: false, valid: false, info_log: "program deleted", active_attribs: [], active_uniforms: [], validate_status: false)
+        val vertex_ok = self.shader_compiled(program.vertex_shader_id, WEBGL_VERTEX_SHADER)
+        val fragment_ok = self.shader_compiled(program.fragment_shader_id, WEBGL_FRAGMENT_SHADER)
+        if not vertex_ok or not fragment_ok:
+            program.linked = false
+            program.info_log = "compiled vertex and fragment shaders required"
+            program.active_attribs = []
+            program.active_uniforms = []
+            program.validate_status = false
+            self.last_error = WEBGL_INVALID_OPERATION
+        else:
+            program.linked = true
+            program.info_log = ""
+            program.active_attribs = webgl_collect_active_attribs(self.shader_source_text(program.vertex_shader_id))
+            program.active_uniforms = webgl_collect_active_uniforms(self.shader_source_text(program.vertex_shader_id), self.shader_source_text(program.fragment_shader_id))
+            program.validate_status = true
+        self.programs[program_index] = program
+        program
+
+    me validate_program(program_id: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        val program_index = self.find_program_index(program_id)
+        if program_index < 0 or not self.programs[program_index].valid:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        var program = self.programs[program_index]
+        if not program.linked:
+            program.validate_status = false
+            program.info_log = "linked program required"
+            self.programs[program_index] = program
+            return false
+        val vertex_ok = self.shader_compiled(program.vertex_shader_id, WEBGL_VERTEX_SHADER)
+        val fragment_ok = self.shader_compiled(program.fragment_shader_id, WEBGL_FRAGMENT_SHADER)
+        program.validate_status = vertex_ok and fragment_ok
+        if program.validate_status:
+            program.info_log = ""
+        else:
+            program.info_log = "compiled vertex and fragment shaders required"
+        self.programs[program_index] = program
+        program.validate_status
+
+    me get_shader_parameter(shader_id: i32, pname: i32) -> WebGLParameterValue:
+        if not self.ensure_context_available():
+            return webgl_parameter_bool(false)
+        val shader_index = self.find_shader_index(shader_id)
+        if shader_index < 0:
+            self.last_error = WEBGL_INVALID_VALUE
+            return webgl_parameter_bool(false)
+        val shader = self.shaders[shader_index]
+        if pname == WEBGL_COMPILE_STATUS:
+            return webgl_parameter_bool(shader.compiled)
+        if pname == WEBGL_DELETE_STATUS:
+            return webgl_parameter_bool(not shader.valid)
+        if pname == WEBGL_SHADER_TYPE:
+            return webgl_parameter_int(shader.shader_type)
+        if pname == WEBGL_INFO_LOG_LENGTH:
+            return webgl_parameter_int(shader.info_log.len())
+        self.last_error = WEBGL_INVALID_ENUM
+        webgl_parameter_bool(false)
+
+    me get_shader_info_log(shader_id: i32) -> text:
+        if not self.ensure_context_available():
+            return ""
+        val shader_index = self.find_shader_index(shader_id)
+        if shader_index < 0:
+            self.last_error = WEBGL_INVALID_VALUE
+            return ""
+        self.shaders[shader_index].info_log
+
+    me get_shader_precision_format(shader_type: i32, precision_type: i32) -> WebGLShaderPrecisionFormat:
+        if not self.ensure_context_available():
+            return webgl_shader_precision_format_invalid("context lost")
+        if shader_type != WEBGL_VERTEX_SHADER and shader_type != WEBGL_FRAGMENT_SHADER:
+            self.last_error = WEBGL_INVALID_ENUM
+            return webgl_shader_precision_format_invalid("invalid shader type")
+        if not webgl_valid_shader_precision_type(precision_type):
+            self.last_error = WEBGL_INVALID_ENUM
+            return webgl_shader_precision_format_invalid("invalid precision type")
+        webgl_shader_precision_format_for(precision_type)
+
+    me get_program_parameter(program_id: i32, pname: i32) -> WebGLParameterValue:
+        if not self.ensure_context_available():
+            return webgl_parameter_bool(false)
+        val program_index = self.find_program_index(program_id)
+        if program_index < 0:
+            self.last_error = WEBGL_INVALID_VALUE
+            return webgl_parameter_bool(false)
+        val program = self.programs[program_index]
+        if pname == WEBGL_LINK_STATUS:
+            return webgl_parameter_bool(program.linked)
+        if pname == WEBGL_VALIDATE_STATUS:
+            return webgl_parameter_bool(program.validate_status)
+        if pname == WEBGL_DELETE_STATUS:
+            return webgl_parameter_bool(not program.valid)
+        if pname == WEBGL_INFO_LOG_LENGTH:
+            return webgl_parameter_int(program.info_log.len())
+        if pname == WEBGL_ATTACHED_SHADERS:
+            return webgl_parameter_int(webgl_attached_shader_count(program))
+        if pname == WEBGL_ACTIVE_UNIFORMS:
+            return webgl_parameter_int(program.active_uniforms.len())
+        if pname == WEBGL_ACTIVE_ATTRIBUTES:
+            return webgl_parameter_int(program.active_attribs.len())
+        self.last_error = WEBGL_INVALID_ENUM
+        webgl_parameter_bool(false)
+
+    me get_program_info_log(program_id: i32) -> text:
+        if not self.ensure_context_available():
+            return ""
+        val program_index = self.find_program_index(program_id)
+        if program_index < 0:
+            self.last_error = WEBGL_INVALID_VALUE
+            return ""
+        self.programs[program_index].info_log
+
+    me get_attached_shaders(program_id: i32) -> [WebGLShaderHandle]:
+        if not self.ensure_context_available():
+            return []
+        val program_index = self.find_program_index(program_id)
+        if program_index < 0 or not self.programs[program_index].valid:
+            self.last_error = WEBGL_INVALID_VALUE
+            return []
+        var attached: [WebGLShaderHandle] = []
+        val program = self.programs[program_index]
+        val vertex_index = self.find_shader_index(program.vertex_shader_id)
+        if vertex_index >= 0:
+            attached.push(self.shaders[vertex_index])
+        val fragment_index = self.find_shader_index(program.fragment_shader_id)
+        if fragment_index >= 0:
+            attached.push(self.shaders[fragment_index])
+        attached
+
+    me get_attrib_location(program_id: i32, name: text) -> i32:
+        if not self.ensure_context_available():
+            return -1
+        val program_index = self.find_program_index(program_id)
+        if program_index < 0:
+            self.last_error = WEBGL_INVALID_VALUE
+            return -1
+        val program = self.programs[program_index]
+        if not program.linked:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return -1
+        var i = 0
+        while i < program.active_attribs.len():
+            if program.active_attribs[i].name == name:
+                return program.active_attribs[i].location
+            i = i + 1
+        -1
+
+    me get_active_attrib(program_id: i32, index: i32) -> WebGLActiveInfo:
+        if not self.ensure_context_available():
+            return webgl_empty_active_info()
+        val program_index = self.find_program_index(program_id)
+        if program_index < 0:
+            self.last_error = WEBGL_INVALID_VALUE
+            return webgl_empty_active_info()
+        val program = self.programs[program_index]
+        if not program.linked:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return webgl_empty_active_info()
+        if index < 0 or index >= program.active_attribs.len():
+            self.last_error = WEBGL_INVALID_VALUE
+            return webgl_empty_active_info()
+        program.active_attribs[index]
+
+    me get_uniform_location(program_id: i32, name: text) -> i32:
+        if not self.ensure_context_available():
+            return -1
+        val program_index = self.find_program_index(program_id)
+        if program_index < 0:
+            self.last_error = WEBGL_INVALID_VALUE
+            return -1
+        val program = self.programs[program_index]
+        if not program.linked:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return -1
+        var i = 0
+        while i < program.active_uniforms.len():
+            if program.active_uniforms[i].name == name:
+                return program.active_uniforms[i].location
+            i = i + 1
+        -1
+
+    me get_active_uniform(program_id: i32, index: i32) -> WebGLActiveInfo:
+        if not self.ensure_context_available():
+            return webgl_empty_active_info()
+        val program_index = self.find_program_index(program_id)
+        if program_index < 0:
+            self.last_error = WEBGL_INVALID_VALUE
+            return webgl_empty_active_info()
+        val program = self.programs[program_index]
+        if not program.linked:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return webgl_empty_active_info()
+        if index < 0 or index >= program.active_uniforms.len():
+            self.last_error = WEBGL_INVALID_VALUE
+            return webgl_empty_active_info()
+        program.active_uniforms[index]
+
+    me get_uniform(program_id: i32, location: i32) -> WebGLParameterValue:
+        if not self.ensure_context_available():
+            return webgl_parameter_int(0)
+        val program_index = self.find_program_index(program_id)
+        if program_index < 0:
+            self.last_error = WEBGL_INVALID_VALUE
+            return webgl_parameter_int(0)
+        val program = self.programs[program_index]
+        if not program.linked:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return webgl_parameter_int(0)
+        if location < 0:
+            self.last_error = WEBGL_INVALID_VALUE
+            return webgl_parameter_int(0)
+        var uniform_index = 0
+        while uniform_index < program.active_uniforms.len():
+            val info = program.active_uniforms[uniform_index]
+            if info.location == location:
+                var value_index = 0
+                while value_index < self.uniform_values.len():
+                    val value = self.uniform_values[value_index]
+                    if value.program_id == program_id and value.location == location:
+                        return webgl_uniform_parameter_value(value)
+                    value_index = value_index + 1
+                return webgl_default_uniform_parameter_value(info.data_type)
+            uniform_index = uniform_index + 1
+        self.last_error = WEBGL_INVALID_OPERATION
+        webgl_parameter_int(0)
+
+    me use_program(program_id: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        val program_index = self.find_program_index(program_id)
+        if program_index < 0:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return false
+        if not self.programs[program_index].valid:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        if not self.programs[program_index].linked:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return false
+        self.current_program_id = program_id
+        self.render_commands.push(webgl_render_command_use_program(program_id))
+        true
+
+    me uniform_1i(location: i32, value: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        val info = self.current_program_uniform(location)
+        if location < 0:
+            return true
+        if info.location < 0:
+            return false
+        if info.data_type != WEBGL_SAMPLER_2D and info.data_type != WEBGL_SAMPLER_CUBE and info.data_type != WEBGL_INT and info.data_type != WEBGL_BOOL:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return false
+        self.set_uniform_value(WebGLUniformValue(program_id: self.current_program_id, location: location, data_type: info.data_type, int_value: value, int_values: [value], float_values: []))
+        self.render_commands.push(webgl_render_command_uniform_1i(self.current_program_id, location, value))
+        true
+
+    me uniform_2i(location: i32, x: i32, y: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        val info = self.current_program_uniform(location)
+        if location < 0:
+            return true
+        if info.location < 0:
+            return false
+        if info.data_type != WEBGL_INT_VEC2 and info.data_type != WEBGL_BOOL_VEC2:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return false
+        self.set_uniform_value(WebGLUniformValue(program_id: self.current_program_id, location: location, data_type: info.data_type, int_value: 0, int_values: [x, y], float_values: []))
+        self.render_commands.push(webgl_render_command_uniform_2i(self.current_program_id, location, x, y))
+        true
+
+    me uniform_3i(location: i32, x: i32, y: i32, z: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        val info = self.current_program_uniform(location)
+        if location < 0:
+            return true
+        if info.location < 0:
+            return false
+        if info.data_type != WEBGL_INT_VEC3 and info.data_type != WEBGL_BOOL_VEC3:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return false
+        self.set_uniform_value(WebGLUniformValue(program_id: self.current_program_id, location: location, data_type: info.data_type, int_value: 0, int_values: [x, y, z], float_values: []))
+        self.render_commands.push(webgl_render_command_uniform_3i(self.current_program_id, location, x, y, z))
+        true
+
+    me uniform_4i(location: i32, x: i32, y: i32, z: i32, w: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        val info = self.current_program_uniform(location)
+        if location < 0:
+            return true
+        if info.location < 0:
+            return false
+        if info.data_type != WEBGL_INT_VEC4 and info.data_type != WEBGL_BOOL_VEC4:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return false
+        self.set_uniform_value(WebGLUniformValue(program_id: self.current_program_id, location: location, data_type: info.data_type, int_value: 0, int_values: [x, y, z, w], float_values: []))
+        self.render_commands.push(webgl_render_command_uniform_4i(self.current_program_id, location, x, y, z, w))
+        true
+
+    me uniform_1iv(location: i32, values: [i32]) -> bool:
+        if not self.ensure_context_available():
+            return false
+        val info = self.current_program_uniform(location)
+        if location < 0:
+            return true
+        if info.location < 0:
+            return false
+        if info.data_type != WEBGL_INT and info.data_type != WEBGL_BOOL and info.data_type != WEBGL_SAMPLER_2D and info.data_type != WEBGL_SAMPLER_CUBE:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return false
+        if values.len() != 1:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        val copied = webgl_copy_i32(values)
+        self.set_uniform_value(WebGLUniformValue(program_id: self.current_program_id, location: location, data_type: info.data_type, int_value: values[0], int_values: copied, float_values: []))
+        self.render_commands.push(webgl_render_command_uniform_1iv(self.current_program_id, location, values))
+        true
+
+    me uniform_2iv(location: i32, values: [i32]) -> bool:
+        if not self.ensure_context_available():
+            return false
+        val info = self.current_program_uniform(location)
+        if location < 0:
+            return true
+        if info.location < 0:
+            return false
+        if info.data_type != WEBGL_INT_VEC2 and info.data_type != WEBGL_BOOL_VEC2:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return false
+        if values.len() != 2:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        val copied = webgl_copy_i32(values)
+        self.set_uniform_value(WebGLUniformValue(program_id: self.current_program_id, location: location, data_type: info.data_type, int_value: 0, int_values: copied, float_values: []))
+        self.render_commands.push(webgl_render_command_uniform_2iv(self.current_program_id, location, values))
+        true
+
+    me uniform_3iv(location: i32, values: [i32]) -> bool:
+        if not self.ensure_context_available():
+            return false
+        val info = self.current_program_uniform(location)
+        if location < 0:
+            return true
+        if info.location < 0:
+            return false
+        if info.data_type != WEBGL_INT_VEC3 and info.data_type != WEBGL_BOOL_VEC3:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return false
+        if values.len() != 3:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        val copied = webgl_copy_i32(values)
+        self.set_uniform_value(WebGLUniformValue(program_id: self.current_program_id, location: location, data_type: info.data_type, int_value: 0, int_values: copied, float_values: []))
+        self.render_commands.push(webgl_render_command_uniform_3iv(self.current_program_id, location, values))
+        true
+
+    me uniform_4iv(location: i32, values: [i32]) -> bool:
+        if not self.ensure_context_available():
+            return false
+        val info = self.current_program_uniform(location)
+        if location < 0:
+            return true
+        if info.location < 0:
+            return false
+        if info.data_type != WEBGL_INT_VEC4 and info.data_type != WEBGL_BOOL_VEC4:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return false
+        if values.len() != 4:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        val copied = webgl_copy_i32(values)
+        self.set_uniform_value(WebGLUniformValue(program_id: self.current_program_id, location: location, data_type: info.data_type, int_value: 0, int_values: copied, float_values: []))
+        self.render_commands.push(webgl_render_command_uniform_4iv(self.current_program_id, location, values))
+        true
+
+    me uniform_1f(location: i32, value: f64) -> bool:
+        if not self.ensure_context_available():
+            return false
+        val info = self.current_program_uniform(location)
+        if location < 0:
+            return true
+        if info.location < 0:
+            return false
+        if info.data_type != WEBGL_FLOAT:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return false
+        self.set_uniform_value(WebGLUniformValue(program_id: self.current_program_id, location: location, data_type: info.data_type, int_value: 0, int_values: [], float_values: [value]))
+        self.render_commands.push(webgl_render_command_uniform_1f(self.current_program_id, location, value))
+        true
+
+    me uniform_2f(location: i32, x: f64, y: f64) -> bool:
+        if not self.ensure_context_available():
+            return false
+        val info = self.current_program_uniform(location)
+        if location < 0:
+            return true
+        if info.location < 0:
+            return false
+        if info.data_type != WEBGL_FLOAT_VEC2:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return false
+        self.set_uniform_value(WebGLUniformValue(program_id: self.current_program_id, location: location, data_type: info.data_type, int_value: 0, int_values: [], float_values: [x, y]))
+        self.render_commands.push(webgl_render_command_uniform_2f(self.current_program_id, location, x, y))
+        true
+
+    me uniform_3f(location: i32, x: f64, y: f64, z: f64) -> bool:
+        if not self.ensure_context_available():
+            return false
+        val info = self.current_program_uniform(location)
+        if location < 0:
+            return true
+        if info.location < 0:
+            return false
+        if info.data_type != WEBGL_FLOAT_VEC3:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return false
+        self.set_uniform_value(WebGLUniformValue(program_id: self.current_program_id, location: location, data_type: info.data_type, int_value: 0, int_values: [], float_values: [x, y, z]))
+        self.render_commands.push(webgl_render_command_uniform_3f(self.current_program_id, location, x, y, z))
+        true
+
+    me uniform_4f(location: i32, x: f64, y: f64, z: f64, w: f64) -> bool:
+        if not self.ensure_context_available():
+            return false
+        val info = self.current_program_uniform(location)
+        if location < 0:
+            return true
+        if info.location < 0:
+            return false
+        if info.data_type != WEBGL_FLOAT_VEC4:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return false
+        self.set_uniform_value(WebGLUniformValue(program_id: self.current_program_id, location: location, data_type: info.data_type, int_value: 0, int_values: [], float_values: [x, y, z, w]))
+        self.render_commands.push(webgl_render_command_uniform_4f(self.current_program_id, location, x, y, z, w))
+        true
+
+    me uniform_1fv(location: i32, values: [f64]) -> bool:
+        if not self.ensure_context_available():
+            return false
+        val info = self.current_program_uniform(location)
+        if location < 0:
+            return true
+        if info.location < 0:
+            return false
+        if info.data_type != WEBGL_FLOAT:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return false
+        if values.len() != 1:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        val copied = webgl_copy_f64(values)
+        self.set_uniform_value(WebGLUniformValue(program_id: self.current_program_id, location: location, data_type: info.data_type, int_value: 0, int_values: [], float_values: copied))
+        self.render_commands.push(webgl_render_command_uniform_1fv(self.current_program_id, location, values))
+        true
+
+    me uniform_2fv(location: i32, values: [f64]) -> bool:
+        if not self.ensure_context_available():
+            return false
+        val info = self.current_program_uniform(location)
+        if location < 0:
+            return true
+        if info.location < 0:
+            return false
+        if info.data_type != WEBGL_FLOAT_VEC2:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return false
+        if values.len() != 2:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        val copied = webgl_copy_f64(values)
+        self.set_uniform_value(WebGLUniformValue(program_id: self.current_program_id, location: location, data_type: info.data_type, int_value: 0, int_values: [], float_values: copied))
+        self.render_commands.push(webgl_render_command_uniform_2fv(self.current_program_id, location, values))
+        true
+
+    me uniform_3fv(location: i32, values: [f64]) -> bool:
+        if not self.ensure_context_available():
+            return false
+        val info = self.current_program_uniform(location)
+        if location < 0:
+            return true
+        if info.location < 0:
+            return false
+        if info.data_type != WEBGL_FLOAT_VEC3:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return false
+        if values.len() != 3:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        val copied = webgl_copy_f64(values)
+        self.set_uniform_value(WebGLUniformValue(program_id: self.current_program_id, location: location, data_type: info.data_type, int_value: 0, int_values: [], float_values: copied))
+        self.render_commands.push(webgl_render_command_uniform_3fv(self.current_program_id, location, values))
+        true
+
+    me uniform_4fv(location: i32, values: [f64]) -> bool:
+        if not self.ensure_context_available():
+            return false
+        val info = self.current_program_uniform(location)
+        if location < 0:
+            return true
+        if info.location < 0:
+            return false
+        if info.data_type != WEBGL_FLOAT_VEC4:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return false
+        if values.len() != 4:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        val copied = webgl_copy_f64(values)
+        self.set_uniform_value(WebGLUniformValue(program_id: self.current_program_id, location: location, data_type: info.data_type, int_value: 0, int_values: [], float_values: copied))
+        self.render_commands.push(webgl_render_command_uniform_4fv(self.current_program_id, location, values))
+        true
+
+    me uniform_matrix2fv(location: i32, transpose: bool, values: [f64]) -> bool:
+        if not self.ensure_context_available():
+            return false
+        if transpose:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        val info = self.current_program_uniform(location)
+        if location < 0:
+            return true
+        if info.location < 0:
+            return false
+        if info.data_type != WEBGL_FLOAT_MAT2:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return false
+        if values.len() != 4:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        self.set_uniform_value(WebGLUniformValue(program_id: self.current_program_id, location: location, data_type: info.data_type, int_value: 0, int_values: [], float_values: webgl_copy_f64(values)))
+        self.render_commands.push(webgl_render_command_uniform_matrix2fv(self.current_program_id, location, values))
+        true
+
+    me uniform_matrix3fv(location: i32, transpose: bool, values: [f64]) -> bool:
+        if not self.ensure_context_available():
+            return false
+        if transpose:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        val info = self.current_program_uniform(location)
+        if location < 0:
+            return true
+        if info.location < 0:
+            return false
+        if info.data_type != WEBGL_FLOAT_MAT3:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return false
+        if values.len() != 9:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        self.set_uniform_value(WebGLUniformValue(program_id: self.current_program_id, location: location, data_type: info.data_type, int_value: 0, int_values: [], float_values: webgl_copy_f64(values)))
+        self.render_commands.push(webgl_render_command_uniform_matrix3fv(self.current_program_id, location, values))
+        true
+
+    me uniform_matrix4fv(location: i32, transpose: bool, values: [f64]) -> bool:
+        if not self.ensure_context_available():
+            return false
+        if transpose:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        val info = self.current_program_uniform(location)
+        if location < 0:
+            return true
+        if info.location < 0:
+            return false
+        if info.data_type != WEBGL_FLOAT_MAT4:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return false
+        if values.len() != 16:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        self.set_uniform_value(WebGLUniformValue(program_id: self.current_program_id, location: location, data_type: info.data_type, int_value: 0, int_values: [], float_values: webgl_copy_f64(values)))
+        self.render_commands.push(webgl_render_command_uniform_matrix4fv(self.current_program_id, location, values))
+        true
+
+    me supports_extension(name: text) -> bool:
+        val canonical = webgl_canonical_extension_name(name)
+        if canonical == "":
+            return false
+        var i = 0
+        while i < self.supported_extensions.len():
+            if self.supported_extensions[i] == canonical:
+                return true
+            i = i + 1
+        false
+
+    me is_extension_enabled(name: text) -> bool:
+        val canonical = webgl_canonical_extension_name(name)
+        if canonical == "":
+            return false
+        webgl_text_list_contains(self.enabled_extensions, canonical)
+
+    me get_extension(name: text) -> WebGLExtensionHandle:
+        if not self.ensure_context_available():
+            return WebGLExtensionHandle(name: webgl_canonical_extension_name(name), valid: false, enabled: false, error: "context lost")
+        val canonical = webgl_canonical_extension_name(name)
+        if canonical == "" or not self.supports_extension(canonical):
+            return WebGLExtensionHandle(name: canonical, valid: false, enabled: false, error: "extension not supported")
+        if not webgl_text_list_contains(self.enabled_extensions, canonical):
+            self.enabled_extensions.push(canonical)
+        WebGLExtensionHandle(name: canonical, valid: true, enabled: true, error: "")

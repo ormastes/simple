@@ -160,3 +160,33 @@ pulls in the same `std.test_runner.*` modules and resolves everything (rc=0, zer
 
 Do not use `bin/simple check` (>600s). Do not bisect with `head -N` — cutting mid-block
 manufactures its own error so every prefix appears broken.
+
+## Fix (2026-11-09, Rust seed) — status `fix-implemented-verification-pending`
+
+Root cause, read out of the resolver source (closes the UNPROVEN note above):
+`find_project_root` in `src/compiler_rust/compiler/src/module_resolver/types.rs`
+(HIR/run lane) and `src/compiler_rust/compiler/src/interpreter_module/path_resolution.rs`
+(interpreter lane) returns the NEAREST ancestor that has a `src/` dir or a
+`Cargo.toml`. `src/lib/nogc_sync_mut/` carries its own nested `src/`
+(`src/lib/nogc_sync_mut/src/`, which even has an `app/` child), so for any entry
+under `src/lib/nogc_sync_mut/**` the project root became the package and
+`source_root` = `src/lib/nogc_sync_mut/src`. Strategy 4 (`source_root/app/...`)
+then probed `src/lib/nogc_sync_mut/src/app/test_daemon` — absent — and E1034
+followed. `std.*` kept working because `detect_stdlib_root` climbs independently
+to the workspace `src/lib`. `lsp/main.spl` passed because `app.lsp` resolves
+importer-relative through the `src/app/lsp` symlink. `src/app/**` entries never
+hit this because no `src/app/*/src/` exists on their climb.
+
+Fix: when the nearest `src/`-bearing dir is itself inside the enclosing
+workspace's (`.git`/`.jj`) `src/` tree, it is a nested library package, not a
+project — use the workspace root. Cargo crates (`Cargo.toml`) and spec-mirror
+roots outside the workspace `src/` (`test/**/src/`) are unchanged.
+
+Evidence: cargo unit tests `module_resolver::types::project_root_tests`
+(`lib_entry_inside_workspace_src_uses_workspace_root` RED before —
+`left: <ws>/src/lib/pkg, right: <ws>` — GREEN after;
+`nearest_src_root_kept_outside_workspace_src` pins the spec-mirror behaviour).
+Spec: `test/01_unit/compiler/module_resolver/lib_entry_app_prefix_import_spec.spl`
+(child `simple run` on a fixture workspace). Verification on a rebuilt,
+deployed seed is pending. The fate of `test_runner/main.spl` + its facades is
+still a separate decision (not part of this fix).

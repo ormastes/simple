@@ -242,6 +242,7 @@ static void simple_tls_connection_free(SimpleTlsConnection *connection) {
         if (!connection->broken) {
             SimpleTlsSigpipeMask sigpipe;
             if (simple_tls_sigpipe_begin(&sigpipe)) {
+                ERR_clear_error();
                 (void)SSL_shutdown(connection->ssl);
                 simple_tls_sigpipe_end(&sigpipe);
             }
@@ -370,6 +371,8 @@ static int64_t simple_tls_connect_impl(
         if (!simple_tls_sigpipe_begin(&sigpipe)) goto cleanup;
         int connected = 0;
         while (!connected) {
+            /* SSL_get_error in OpenSSL 3.x requires an empty thread queue. */
+            ERR_clear_error();
             int result = SSL_connect(connection->ssl);
             int ssl_error;
             if (result == 1) {
@@ -468,6 +471,7 @@ static int64_t simple_tls_write(
                 offset = -1;
                 break;
             }
+            ERR_clear_error();
             int written = SSL_write(connection->ssl, bytes + offset,
                                     (int)(length - offset));
             if (written <= 0) {
@@ -547,6 +551,7 @@ static int64_t simple_tls_read_core(
         while (1) {
             int64_t now_ms = simple_tls_now_ms();
             if (now_ms < 0 || now_ms >= deadline_ms) break;
+            ERR_clear_error();
             read_count = SSL_read(connection->ssl, buffer, (int)max_bytes);
             if (read_count > 0) break;
             ssl_error = SSL_get_error(connection->ssl, read_count);

@@ -47,3 +47,39 @@ sibling, not a body), or track that the only lines between the header and the
 next token were comments and require Indent then. Error text should say
 `empty block: use pass("reason")`. Add a regression spec covering `if`, `elif`,
 `else`, `while`, `for`, `match` arms, `fn`, `class`.
+
+## Resolution (2026-11-02, lane a6dffc9c/p12-1)
+
+Checked against current policy/design: still valid as written (parser behavior;
+no policy item makes comment-only bodies legal). Fixed in the pure-Simple parser:
+`parse_block_lexical_body` records the header Newline token's line and rejects
+the flat body when the next token is more than one line below it (blank or
+comment-only lines in between), reporting `expected Indent`. A flat body on the
+immediately following line is unchanged. A repo scan of `src/` and `test/` found
+no source relying on a gap flat body (only doc-string false positives).
+
+Evidence (bin/simple run, SIMPLE_LIB=src): before, `if/while/for/else` with a
+comment-only body followed by a sibling parsed with no error; after, all report
+`expected Indent` while a real indented body and `pass` still parse clean.
+Regression spec: `test/01_unit/compiler/parser/comment_only_block_body_spec.spl`
+(the `bin/simple test` runner on the current binary fails with
+`unknown extern function: rt_tuple_len`, so evidence was gathered with a driver
+calling `parse_module`/`parser_has_errors`).
+
+Rust seed (`parser_impl/core.rs` `parse_block_after_newline_allowing_empty`) is
+left unchanged: the rule above allows the seed to tolerate it; not rebuilt here.
+
+## Seed note (2026-11-02, lane a6dffc9c/p12-5)
+
+Checked against current policy/design: still valid as written (seed parity with
+PR #5893). The Rust seed had the same defect, confirmed red:
+`if false:\n    # c\nprint(1)` parsed OK with `print(1)` as the `if` body.
+Fixed in `src/compiler_rust/parser/src/parser_impl/core.rs`
+`parse_block_after_newline_allowing_empty`: the flat body is taken only when
+the first body token is on the line immediately after the header Newline;
+otherwise it falls through to `expect(Indent)` ("expected indented block").
+Gate: `src/compiler_rust/parser/tests/comment_only_block_gate.rs` (6 tests).
+A scan of `src/compiler`, `src/lib`, `src/app` (14,991 .spl files) found no
+gapped flat body. Four other parser test targets fail identically with and
+without this change (error_recovery_test, expression_tests,
+kernel_relocation_consumers_strict_parse, test_decorator_helpers): pre-existing.

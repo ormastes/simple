@@ -1,0 +1,77 @@
+#!/bin/sh
+# Shared rt_ map checks: the one implementation behind the bootstrap must-check row
+# and `buildrunner rt-map-checks`. Usage: sh scripts/check/run-rt-map-checks.shs
+#
+# Blocking: check-rt-pointer-ref-map.py and check-rt-host-map.py. Exit 1 only when
+# either one reports a new finding (its own exit 1).
+# Report-only: check-rt-c-contract-compile.py. Its FAIL rows never change the exit status.
+#
+# Per-checker status: PASS (exit 0), FAIL (exit 1), ERROR (any other exit: nothing checked),
+# UNTESTED (prerequisite absent: python3, or cc for the compile probe). UNTESTED is never PASS,
+# FAIL exits 1 and ERROR exits 2, so a broken checker never looks green; a host without python3 or cc does not break a build.
+#
+# Test seams: RT_MAP_ROOT (tree to check, default: this checkout), RT_MAP_PYTHON, RT_MAP_CC.
+set -u
+
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd) || exit 2
+ROOT=${RT_MAP_ROOT:-$(cd "$SCRIPT_DIR/../.." && pwd)} || exit 2
+PY=${RT_MAP_PYTHON:-python3}
+CC=${RT_MAP_CC:-cc}
+TMP=$(mktemp -d) || { echo "RT_MAP_CHECKS verdict=ERROR reason=mktemp-failed"; exit 2; }
+trap 'rm -rf "$TMP"' EXIT INT TERM
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# run_blocking SCRIPT OUT: sets STATUS and LAST (the checker's final stdout line).
+run_blocking() {
+  "$PY" -I "$SCRIPT_DIR/$1" --root "$ROOT" > "$2" 2>&1
+  case $? in
+    0) STATUS=PASS ;;
+    1) STATUS=FAIL ;;
+    *) STATUS=ERROR ;;
+  esac
+  LAST=$(tail -n 1 "$2")
+}
+
+# rank: FAIL over ERROR over UNTESTED over PASS.
+worse() {
+  case "$1:$2" in
+    FAIL:*|*:FAIL) echo FAIL ;;
+    ERROR:*|*:ERROR) echo ERROR ;;
+    UNTESTED:*|*:UNTESTED) echo UNTESTED ;;
+    *) echo PASS ;;
+  esac
+}
+
+if have "$PY"; then
+  run_blocking check-rt-pointer-ref-map.py "$TMP/pointer.out"
+  PTR=$STATUS PTR_LAST=$LAST
+  run_blocking check-rt-host-map.py "$TMP/host.out"
+  HOST=$STATUS HOST_LAST=$LAST
+  if have "$CC"; then
+    "$PY" -I "$SCRIPT_DIR/check-rt-c-contract-compile.py" --root "$ROOT" --cc "$CC" > "$TMP/compile.out" 2>&1
+    CONTRACT=$(tail -n 1 "$TMP/compile.out")
+  else
+    CONTRACT="UNTESTED reason=no-cc"
+  fi
+else
+  PTR=UNTESTED PTR_LAST="reason=no-python3"
+  HOST=UNTESTED HOST_LAST="reason=no-python3"
+  CONTRACT="UNTESTED reason=no-python3"
+fi
+
+# A skipped compile probe (no python3 or cc) keeps the overall verdict off PASS.
+VERDICT=$(worse "$PTR" "$HOST")
+case $CONTRACT in UNTESTED*) VERDICT=$(worse "$VERDICT" UNTESTED) ;; esac
+if [ "$PTR" = FAIL ] || [ "$HOST" = FAIL ]; then
+  for f in "$TMP/pointer.out" "$TMP/host.out"; do
+    [ -f "$f" ] && head -n 200 "$f"
+  done
+fi
+echo "RT_MAP_CHECKS pointer-ref=$PTR :: $PTR_LAST"
+echo "RT_MAP_CHECKS host-map=$HOST :: $HOST_LAST"
+echo "RT_MAP_CHECKS c-contract(report-only) :: $CONTRACT"
+echo "RT_MAP_CHECKS verdict=$VERDICT"
+[ "$VERDICT" = FAIL ] && exit 1
+[ "$VERDICT" = ERROR ] && exit 2
+exit 0

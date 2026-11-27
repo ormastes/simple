@@ -119,6 +119,9 @@ pub fn filter_internal_flags(args: &[String]) -> Vec<String> {
     if args.len() >= 2 && args[0] == "run" {
         return args.to_vec();
     }
+    // lint/fix own their repair options; the driver must forward them to
+    // the application parser while still consuming GC/sandbox options.
+    let mut app_owns_fix_flags = false;
     let mut filtered_args = Vec::new();
     let mut skip_next = false;
 
@@ -136,7 +139,7 @@ pub fn filter_internal_flags(args: &[String]) -> Vec<String> {
             || arg == "--debug"
             || arg == "--sandbox"
             || arg == "--no-network"
-            || arg == "--fix"
+            || (!app_owns_fix_flags && (arg == "--fix"
             || arg == "--fix-all"
             || arg == "--fix-warnings"
             || arg == "--fix-errors"
@@ -145,7 +148,7 @@ pub fn filter_internal_flags(args: &[String]) -> Vec<String> {
             || arg == "--fix-dry-run"
             || arg.starts_with("--fix-id=")
             || arg.starts_with("--fix-code=")
-            || arg.starts_with("--fix-nth=")
+            || arg.starts_with("--fix-nth=")))
         {
             continue;
         }
@@ -165,6 +168,9 @@ pub fn filter_internal_flags(args: &[String]) -> Vec<String> {
             continue;
         }
 
+        if filtered_args.is_empty() {
+            app_owns_fix_flags = matches!(arg.as_str(), "fix" | "lint");
+        }
         filtered_args.push(arg.clone());
     }
 
@@ -205,6 +211,27 @@ mod tests {
     }
 
     #[test]
+    fn test_filter_preserves_delegated_repair_options() {
+        for command in ["fix", "lint"] {
+            let args: Vec<String> = [
+                "--gc-log", "--time-limit", "30", command, "sample.spl", "--fix-all", "--fix-id=L001",
+                "--fix-dry-run", "--gc-log", "--time-limit", "60",
+            ].into_iter().map(String::from).collect();
+            let expected: Vec<String> = [
+                command, "sample.spl", "--fix-all", "--fix-id=L001", "--fix-dry-run",
+            ].into_iter().map(String::from).collect();
+            assert_eq!(filter_internal_flags(&args), expected);
+        }
+    }
+
+    #[test]
+    fn test_filter_still_consumes_driver_repair_options() {
+        let args: Vec<String> = ["sample.spl", "--fix-all", "--fix-id=L001", "--fix-dry-run"]
+            .into_iter().map(String::from).collect();
+        assert_eq!(filter_internal_flags(&args), vec!["sample.spl"]);
+    }
+
+    #[test]
     fn test_filter_lang_flag() {
         let args = vec![
             "test.spl".to_string(),
@@ -225,3 +252,4 @@ mod tests {
         assert!(!simple_compiler::is_debug_mode());
     }
 }
+

@@ -19,6 +19,12 @@ struct NativeDependencyInputsV1:
     provider_paths: [text]
     error: text
 
+# Absent digest (missing/unreadable file) is a mismatch, never "".
+fn _native_dep_sha_matches_v1(path: text, expected: text) -> bool:
+    if val digest = file_hash_sha256(path):
+        return digest == expected
+    false
+
 fn native_dependency_inputs_empty_v1() -> NativeDependencyInputsV1:
     NativeDependencyInputsV1("", [], [], "")
 
@@ -33,7 +39,7 @@ fn native_dependency_inputs_copies_valid_v1(
         return false
     var i = 0
     while i < paths.len():
-        if file_hash_sha256(paths[i]) != inputs[i].artifact_digest:
+        if not _native_dep_sha_matches_v1(paths[i], inputs[i].artifact_digest):
             return false
         i = i + 1
     true
@@ -91,7 +97,7 @@ fn native_dependency_inputs_load_v1(
         val suffix = if item.artifact_kind == "archive": ".a" else: ".o"
         val copy_path = attempt_dir + "/" + i.to_text() + suffix
         if file_exists(copy_path) or not file_copy(repo_root + "/" + item.artifact_path, copy_path) or
-                file_size_raw(copy_path) <= 0 or file_hash_sha256(copy_path) != item.artifact_digest:
+                file_size_raw(copy_path) <= 0 or not _native_dep_sha_matches_v1(copy_path, item.artifact_digest):
             file_delete(copy_path)
             native_dependency_inputs_cleanup_v1(copies)
             result.error = "target-receipt-error: dependency-input-copy-mismatch: " + item.producer_target

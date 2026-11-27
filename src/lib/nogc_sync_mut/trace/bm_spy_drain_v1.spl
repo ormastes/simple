@@ -1,0 +1,55 @@
+# Bare-metal Spy drain adapter V1 (DHR P5): host-side bridge from the
+# bounded bare-metal Spy ring (std.spy.bm_spy_emitter) to the shared observer
+# contract's TraceEventV1 values.
+#
+# Dependency direction: this HOST module depends on the noalloc emitter's
+# record shape (its pop/last_* readers); the noalloc tree never imports this
+# module, so the emitter stays allocation-free. Draining allocates (it builds
+# a language-owned array) and is a cold, host-side operation, never a hook.
+#
+# Mapping, one TraceEventV1 per popped record, in pop order:
+#   Entry / Exit / TailExit -> same kind; the record's single site id becomes
+#     both function_id and site_id (the bare-metal ring carries one id per
+#     edge), its tick count becomes timestamp.
+#   Loss -> a Loss control event (function_id = site_id = 0, the contract's
+#     "control record without a site") with payload0 = the record's lost-event
+#     count, timestamp = the tick of the event that revealed the gap (0 for a
+#     loss reported at the end of the drain). Loss is a mandatory control
+#     diagnostic: it is always emitted, never filtered or folded away.
+# Every event gets the drain's generation, module_instance and context_id, and
+# a per-context sequence starting at next_sequence (raw edges: span_token 0).
+# A kind code the contract does not know fails the drain with InvalidArgument
+# rather than being skipped.
+use std.common.trace.observer_contract_v1.*
+use std.common.trace.observer_event_codec_v1.{trace_event_kind_from_code_v1}
+use std.spy.bm_spy_emitter.{bm_spy_pop, bm_spy_last_function_id, bm_spy_last_timestamp, bm_spy_last_lost}
+
+pub class BmSpyDrainV1:
+    generation: u64
+    module_instance: u64
+    context_id: u64
+    next_sequence: u64
+
+impl BmSpyDrainV1:
+    # Pop every buffered record (plus a trailing pending Loss) into events.
+    me drain() -> Result<[TraceEventV1], TraceFailureV1>:
+        var events: [TraceEventV1] = []
+        var code = bm_spy_pop()
+        while code != 0:
+            val kind = trace_event_kind_from_code_v1(code as u64)?
+            var id: u32 = 0
+            var lost: u64 = 0
+            if kind == TraceEventKindV1.Loss:
+                lost = bm_spy_last_lost() as u64
+            else:
+                id = bm_spy_last_function_id() as u32
+            events.push(TraceEventV1(kind: kind, flags: 0, generation: self.generation,
+                module_instance: self.module_instance, function_id: id, site_id: id,
+                context_id: self.context_id, sequence: self.next_sequence,
+                timestamp: bm_spy_last_timestamp() as u64, span_token: 0,
+                payload0: lost, payload1: 0, payload2: 0))
+            self.next_sequence = self.next_sequence + 1u64
+            code = bm_spy_pop()
+        Ok(events)
+
+export BmSpyDrainV1

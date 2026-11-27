@@ -1,0 +1,94 @@
+"""
+## Purpose and audience
+Purpose: Pin `rem` gradient stop positions against Chrome 159 at device scale
+4 (384 dpi) on the CPU raster, cpu_simd and Vulkan lanes. A `rem` stop
+resolves against the root (`<html>`) computed font-size, not the element's.
+Audience: browser-engine and Engine2D maintainers of the web renderer.
+"""
+
+"""
+Traceability: doc/08_tracking/bug/web_layout_cascade_selector_paint_chrome159_round4_divergences_2026-11-15.md
+(gradient `rem` stops).
+"""
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_software_pixels
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{gradient_rem_stops_to_px}
+
+# ---------------------------------------------------------------------------
+# Oracle: Chrome 159 (chromium-1255, linux-arm64)
+#   chrome --headless --no-sandbox --hide-scrollbars \
+#     --force-device-scale-factor=4 --window-size=48,16 --screenshot=<png> file://<html>
+# Pages gr_page(n, 1), n = 1, 2. Expected values are Chrome's own pixels at
+# device (4x + 2, 30) for x = 0, 3, .., 45, tolerance +-2 per channel (the
+# measured gradient tolerance).
+# Page 1: the default root font (16px): stops 0.5rem = 8px, 2rem = 32px.
+# Page 2: root 10px, element 20px: stops 1rem / 2rem / 4rem = 10 / 20 / 40px
+# (an `em` reading would put them at 20 / 40 / 80px).
+# The CPU raster has no device-scale entry: it lays the same page out at 4x
+# CSS px (k = 4), so every px value is multiplied by 4 there.
+# ---------------------------------------------------------------------------
+
+fn gr_px(n: i32, k: i32) -> text:
+    val v = n * k
+    "{v}px"
+
+fn gr_page(n: i32, k: i32) -> text:
+    val box = "width:" + gr_px(48, k) + ";height:" + gr_px(16, k) + ";"
+    if n == 1:
+        return "<!DOCTYPE html><html style='font-size:" + gr_px(16, k) + "'><body style='margin:0;background:#fff'><div style='" + box + "background:linear-gradient(to right, #ff0000 0.5rem, #0000ff 2rem)'></div></body></html>"
+    "<!DOCTYPE html><html style='font-size:" + gr_px(10, k) + "'><body style='margin:0;background:#fff'><div style='" + box + "font-size:" + gr_px(20, k) + ";background-image:linear-gradient(to right, #ff0000 1rem, #00ff00 2rem, #0000ff 4rem)'></div></body></html>"
+
+val GR_P1_CHROME: [u32] = [0xFF0000u32, 0xFF0000u32, 0xFF0000u32, 0xED0011u32, 0xCD0031u32, 0xAE0051u32, 0x8E0070u32, 0x6E0090u32, 0x4E00B0u32, 0x2E00D0u32, 0x0E00F0u32, 0x0000FFu32, 0x0000FFu32, 0x0000FFu32, 0x0000FFu32, 0x0000FFu32]
+val GR_P2_CHROME: [u32] = [0xFF0000u32, 0xFF0000u32, 0xFF0000u32, 0xFF0000u32, 0xBC4300u32, 0x6F8F00u32, 0x23DC00u32, 0x00EA14u32, 0x00C43Bu32, 0x009D61u32, 0x007787u32, 0x0051ADu32, 0x002BD4u32, 0x0004FAu32, 0x0000FFu32, 0x0000FFu32]
+
+fn gr_channel_dev(got: u32, want: u32) -> i32:
+    var worst = 0
+    var sh = 0u32
+    while sh <= 16u32:
+        val a = ((got >> sh) & 255u32) as i32
+        val b = ((want >> sh) & 255u32) as i32
+        val d = if a > b: a - b else: b - a
+        if d > worst:
+            worst = d
+        sh = sh + 8u32
+    worst
+
+fn gr_max_dev(px: [u32], want: [u32]) -> i32:
+    if px.len() < 192 * 64:
+        return 999
+    var worst = 0
+    var i = 0
+    # cpu-lane-loop-ok: test probe over 16 pinned points; bound 16
+    while i < want.len():
+        val d = gr_channel_dev(px[30 * 192 + 4 * (i * 3) + 2], want[i])
+        if d > worst:
+            worst = d
+        i = i + 1
+    worst
+
+fn gr_want(n: i32) -> [u32]:
+    if n == 1: GR_P1_CHROME else: GR_P2_CHROME
+
+describe "gradient rem stops (Chrome 159)":
+    it "resolves rem stops against the root font size on cpu_simd":
+        expect(gr_max_dev(simple_web_layout_render_html_pixels_engine2d_at_device_scale(gr_page(1, 1), 48, 16, 4, "cpu_simd"), GR_P1_CHROME)).to_be_less_than(3)
+        expect(gr_max_dev(simple_web_layout_render_html_pixels_engine2d_at_device_scale(gr_page(2, 1), 48, 16, 4, "cpu_simd"), GR_P2_CHROME)).to_be_less_than(3)
+
+    it "resolves rem stops against the root font size on the CPU raster":
+        expect(gr_max_dev(simple_web_layout_render_html_software_pixels(gr_page(1, 4), 192, 64, 600000), GR_P1_CHROME)).to_be_less_than(3)
+        expect(gr_max_dev(simple_web_layout_render_html_software_pixels(gr_page(2, 4), 192, 64, 600000), GR_P2_CHROME)).to_be_less_than(3)
+
+    it "resolves rem stops against the root font size on Vulkan":
+        expect(gr_max_dev(simple_web_layout_render_html_pixels_engine2d_at_device_scale(gr_page(1, 1), 48, 16, 4, "vulkan"), GR_P1_CHROME)).to_be_less_than(3)
+        expect(gr_max_dev(simple_web_layout_render_html_pixels_engine2d_at_device_scale(gr_page(2, 1), 48, 16, 4, "vulkan"), GR_P2_CHROME)).to_be_less_than(3)
+
+    it "rewrites only rem lengths inside gradient values":
+        expect(gradient_rem_stops_to_px("linear-gradient(red 0.5rem, blue 2.25rem)", 16)).to_equal("linear-gradient(red 8px, blue 36px)")
+        expect(gradient_rem_stops_to_px("linear-gradient(red -1rem, blue 1.5rem)", 10)).to_equal("linear-gradient(red -10px, blue 15px)")
+        expect(gradient_rem_stops_to_px("url(a2rem.png), linear-gradient(red, blue)", 16)).to_equal("url(a2rem.png), linear-gradient(red, blue)")
+        expect(gradient_rem_stops_to_px("url(x.png) 2rem", 16)).to_equal("url(x.png) 2rem")

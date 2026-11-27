@@ -1,0 +1,30 @@
+import OwnershipFlow
+
+#print axioms OwnershipFlow.elem_overlap_refl
+#print axioms OwnershipFlow.path_overlap_refl
+#print axioms OwnershipFlow.conflicts_refl
+#print axioms OwnershipFlow.different_base_no_conflict
+#print axioms OwnershipFlow.move_membership
+#print axioms OwnershipFlow.move_records_operand
+#print axioms OwnershipFlow.move_preserves_other_hazard
+#print axioms OwnershipFlow.revive_membership
+#print axioms OwnershipFlow.revive_preserves_uncovered
+#print axioms OwnershipFlow.revive_removes_covered
+#print axioms OwnershipFlow.whole_place_covers_descendant
+#print axioms OwnershipFlow.symbolic_write_not_definite
+#print axioms OwnershipFlow.symbolic_indices_may_conflict
+#print axioms OwnershipFlow.distinct_constant_indices_do_not_conflict
+#print axioms OwnershipFlow.read_rejects_moved_overlap
+#print axioms OwnershipFlow.move_rejects_moved_overlap
+#print axioms OwnershipFlow.read_after_move_rejected
+#print axioms OwnershipFlow.separate_base_read_accepted
+#print axioms OwnershipFlow.write_preserves_facts
+#print axioms OwnershipFlow.write_rejects_moved_strict_ancestor
+#print axioms OwnershipFlow.write_exact_moved_target_allowed
+#print axioms OwnershipFlow.whole_local_write_then_revive
+#print axioms OwnershipFlow.merge_membership
+#print axioms OwnershipFlow.merge_order_same_hazards
+#print axioms OwnershipFlow.reachable_join_preserves_left
+#print axioms OwnershipFlow.reachable_join_preserves_right
+#print axioms OwnershipFlow.terminal_predecessors_contribute_nothing
+#print axioms OwnershipFlow.reachable_join_read_rejects

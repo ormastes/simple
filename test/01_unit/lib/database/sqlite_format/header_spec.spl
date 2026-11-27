@@ -91,9 +91,9 @@ describe "sqlite_format header probe":
         buf[21] = 64u8
         buf[22] = 32u8
         buf[23] = 32u8
-        put_u32(buf, 28, 1)
-        put_u32(buf, 44, 4)
-        put_u32(buf, 56, 1)
+        buf = put_u32(buf, 28, 1)
+        buf = put_u32(buf, 44, 4)
+        buf = put_u32(buf, 56, 1)
         match sqlite_header_parse(buf):
             Ok(info):
                 expect(info.page_size).to_equal(65536)
@@ -117,8 +117,7 @@ describe "sqlite_format header probe":
     it "rejects a header whose page count exceeds the file":  # oracle: page_count field claims 99 pages
         match file_read_bytes_result(FIXTURE):
             Ok(raw):
-                val bytes = mutable_copy(raw)
-                put_u32(bytes, 28, 99)
+                val bytes = put_u32(raw, 28, 99)
                 match sqlite_header_parse(bytes):
                     Ok(info):
                         expect(info.page_count).to_equal(-1)
@@ -132,8 +131,7 @@ describe "sqlite_format header probe":
     it "rejects an unknown text encoding":  # oracle: encoding field 9 is not 1/2/3
         match file_read_bytes_result(FIXTURE):
             Ok(raw):
-                val bytes = mutable_copy(raw)
-                put_u32(bytes, 56, 9)
+                val bytes = put_u32(raw, 56, 9)
                 match sqlite_header_parse(bytes):
                     Ok(info):
                         expect(info.text_encoding).to_equal(-1)
@@ -168,8 +166,12 @@ fn char_code_at(s: text, i: i64) -> i64:
         return cps[i]
     0
 
-fn put_u32(buf: [u8], off: i64, v: i64):
-    buf[off] = ((v >> 24) & 0xFF) as u8
-    buf[off + 1] = ((v >> 16) & 0xFF) as u8
-    buf[off + 2] = ((v >> 8) & 0xFF) as u8
-    buf[off + 3] = (v & 0xFF) as u8
+# Returns the updated buffer: a callee's write cannot be relied on to reach the
+# caller on the seed interpreter (seed_interpreter_zeroize_not_guaranteed_2026_10_31).
+fn put_u32(buf: [u8], off: i64, v: i64) -> [u8]:
+    var out = mutable_copy(buf)
+    out[off] = ((v >> 24) & 0xFF) as u8
+    out[off + 1] = ((v >> 16) & 0xFF) as u8
+    out[off + 2] = ((v >> 8) & 0xFF) as u8
+    out[off + 3] = (v & 0xFF) as u8
+    out

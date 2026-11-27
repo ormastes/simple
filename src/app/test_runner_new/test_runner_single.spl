@@ -1,3 +1,4 @@
+use std.nogc_sync_mut.spec.evidence_result.{parse_test_result_evidence_v1}
 # Minimal pure-Simple child test runner.
 #
 # Used by daemon-owned child runs (`simple test <file> --no-session-daemon`).
@@ -19,16 +20,24 @@
 # for the repro and doc/08_tracking/bug/std_spec_package_shadows_file_print_summary_2026-07-17.md
 # for the underlying resolution defect (out of scope for the runner layer).
 #
-# Under `--assert-ran`, the child writes versioned pass/fail counts through
-# `SIMPLE_TEST_RESULT_FILE`; stdout markers remain only for legacy runs.
+# Every child writes versioned pass/fail counts through
+# `SIMPLE_TEST_RESULT_FILE`; stdout markers remain only as a legacy fallback
+# when no valid structured receipt was produced.
 
 use std.sffi.cli_args.{cli_get_args}
-use app.io.process_ops.{process_run_bounded}
+use app.io.process_ops.{process_run_bounded, process_run_bounded_spec_child, SIMPLE_TEST_CHILD_ENV_SCRUB_ENV}
 use app.io.mod.{env_get}
 use app.io.cli_ops.{cli_current_exe_path}
 use std.spec.in_development.{source_is_in_development, in_development_explicit_line}
+use std.spec.platform_os.{platform_os_skip_reason, platform_skip_line, platform_skip_summary_line}
+use std.test_runner.test_runner_files.{file_get_platform_tags}
+use std.io_runtime.{host_os}
+
+# Files skipped by a host-OS @platform tag in this process (directory summary).
+var _single_platform_skips: i64 = 0
 use std.test_runner.test_runner_types.{TEST_OUTPUT_CAPTURE_BYTES, TestRunOutcome, test_run_outcome_exit_code}
-use app.test_runner_new.client_arg_shape.{client_tag_value, client_select_tagged}
+use app.test_runner_new.client_arg_shape.{client_tag_value, client_select_tagged, client_dropped_execution_flags}
+use app.test_runner_new.timeout_budget.{client_default_timeout_secs}
 use std.test_runner.child_cwd.{spec_child_launch_plan, child_cwd_absolute, child_cwd_anchor_path}
 use std.sffi.env.{env_cwd_raw, env_set_cwd_raw}
 use std.nogc_sync_mut.test_runner.resource_policy.{test_max_procs_value_valid}
@@ -40,22 +49,36 @@ use std.nogc_sync_mut.test_runner.resource_policy.{test_max_procs_value_valid}
 # so a crash reported "no examples executed" instead of CRASHED. Reused rather
 # than reimplemented on purpose -- a second copy of this classification would
 # drift out of sync exactly as the duplicated composite-grammar parsers did.
-use std.test_runner.test_executor_parsing.{make_result_from_output, spec_source_has_raw_assert}
+use std.test_runner.compiler_select.{select_test_child_binary}
+use std.test_runner.test_runner_args.{parse_test_args}
+use std.test_runner.test_config.{load_test_config}
+use std.test_runner.test_runner_modes.{run_spl_doctest_mode}
+use std.test_runner.sdoctest.config.{load_sdoctest_config}
+use std.test_runner.sdoctest.runner.{run_sdoctest_mode, print_sdoctest_summary}
+use std.test_runner.test_executor_parsing.{make_result_from_output, parse_blocked_examples, spec_source_has_raw_assert, shell_safe_child_binary_path}
 use std.string_core.{char_code}
 use std.common.coverage_sdn.{parse_coverage_sdn, merge_coverage, render_coverage_sdn}
 use common.plugin.aspect_params.{aspect_coverage_cutover_policy_v1}
-use app.test_daemon.light_protocol.{timeout_verdict_line, has_verdict_line, exit_code_reason, unrun_verdict_line, unrun_reason}
+use app.test_daemon.light_protocol.{timeout_verdict_line, has_verdict_line, exit_code_reason, unrun_verdict_line, unrun_reason, ran_verdict_line, blocked_reason_line}
+use std.test_runner.test_runner_config.{resolve_effective_profile, apply_mcdc_mode_env, mcdc_mode_error_message}
+use std.test_runner.test_runner_execute.{run_test_file_interpreter, mcdc_compiler_lacks_probes, MCDC_UNAVAILABLE_REASON}
+use std.test_runner.test_runner_mcdc_report.{test_runner_mcdc_run_gate}
 
 use std.io_runtime.{file_exists, file_read_nullable}
+use std.io_runtime.{is_dir}
+use std.io_runtime.{dir_walk}
+use std.nogc_sync_mut.spec.dir_prevention.{DIR_PREVENTION_ENV, DIR_PREVENTION_SEP, dir_prevention_env_value}
 @unsafe(reason: "raw test-source/coverage text ABI; helper return types cannot carry I/O errors", capabilities: [ffi])
-extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_read_text(path: text) -> text?
 use std.io_runtime.{file_write}
 use std.io_runtime.{file_delete}
 use std.io_runtime.{env_set}
+use std.io_runtime.{env_remove_process}
 use std.io_runtime.{time_now_unix_micros}
 use std.io_runtime.{getpid}
 @unsafe(reason: "raw procfs path-resolution ABI", capabilities: [ffi])
-extern fn rt_path_absolute(path: text) -> text
+# Nil when a relative path cannot be resolved (cwd unreadable); never the input.
+extern fn rt_path_absolute(path: text) -> text?
 extern fn sys_get_args() -> [text]
 
 # --- Legacy word-infix matcher preprocessing (self-contained; this file is kept
@@ -176,27 +199,23 @@ fn _single_last_slash(s: text) -> i64:
         i = i + 1
     idx
 
-fn preprocess_infix_for_child(file_path: text) -> text:
-    if not file_path.ends_with("_spec.spl"):
+fn preprocess_infix_from_source(file_path: text, content: text) -> text:
+    """Rewrite legacy infix/paren-subject expectations in-memory using preloaded source."""
+    if not file_path.ends_with("_spec.spl") or content == "":
         return file_path
-    val content = unsafe(capabilities: [ffi]): rt_file_read_text(file_path)
-    if content == "":
+    if not content.contains("expect ") and not (content.contains("expect(") and content.contains(" to_")):
         return file_path
     val lines = content.split("\n")
-    var joined = ""
-    var first = true
+    var out_lines: [text] = []
     var changed = false
     for raw_line in lines:
         val rewritten = _single_rewrite_infix_expect_line(raw_line)
         if rewritten != raw_line:
             changed = true
-        if first:
-            joined = rewritten
-            first = false
-        else:
-            joined = joined + "\n" + rewritten
+        out_lines.push(rewritten)
     if not changed:
         return file_path
+    val joined = out_lines.join("\n")
     val slash = _single_last_slash(file_path)
     val dir = if slash >= 0: file_path.substring(0, slash + 1) else: ""
     val base = if slash >= 0: file_path.substring(slash + 1) else: file_path
@@ -206,12 +225,19 @@ fn preprocess_infix_for_child(file_path: text) -> text:
         return file_path
     tmp
 
+fn preprocess_infix_for_child(file_path: text) -> text:
+    if not file_path.ends_with("_spec.spl"):
+        return file_path
+    val content = unsafe(capabilities: [ffi]): rt_file_read_text(file_path) ?? ""
+    preprocess_infix_from_source(file_path, content)
+
 struct ChildRun:
     path: text
     timeout_secs: i64
     list_only: bool
     valid: bool
     error: text
+    compiler: text = ""
 
 fn _single_option_takes_value(arg: text) -> bool:
     """Whether a forwarded test option owns the following argv token.
@@ -253,11 +279,11 @@ fn _single_numeric_value_valid(value: text, decimal: bool) -> bool:
     var i = 0
     if value.starts_with("-"):
         i = 1
-    if i >= value.len():
+    if i >= value.byte_len():
         return false
     var digits = 0
     var dots = 0
-    while i < value.len():
+    while i < value.byte_len():
         val code = value.char_code_at(i)
         if code >= 48 and code <= 57:
             digits = digits + 1
@@ -296,7 +322,14 @@ fn clean_args() -> [text]:
         if arg == "test" or arg == "run":
             i = i + 1
             continue
-        if arg.ends_with("/simple") or arg.ends_with("simple.exe") or arg.ends_with("test_runner_single.spl"):
+        val is_worker_smf = arg.ends_with(".smf") and (
+            arg.ends_with("/test_runner_single.smf") or
+            arg.ends_with("\\test_runner_single.smf") or
+            arg.contains("/test_runner_single_") or
+            arg.contains("\\test_runner_single_") or
+            arg.starts_with("test_runner_single")
+        )
+        if arg.ends_with("/simple") or arg.ends_with("simple.exe") or arg.ends_with("test_runner_single.spl") or is_worker_smf:
             i = i + 1
             continue
         args.push(arg)
@@ -305,12 +338,28 @@ fn clean_args() -> [text]:
 
 fn parse_child_run(args: [text]) -> ChildRun:
     var path = ""
-    var timeout_secs = 120
+    # 2026-11-05: default raised 120 -> 900 via client_default_timeout_secs()
+    # (env-aware, matches KILL_SIMPLE_MIN_AGE_SECS). The 2026-08-17 raise
+    # covered the client path only; this lane still killed healthy long specs
+    # deterministically at 120s with no BDD summary. Bug:
+    # doc/08_tracking/bug/fetch_wasm_chain_spec_runner_premature_child_termination_2026-06-30.md
+    var timeout_secs = client_default_timeout_secs()
     var list_only = false
+    var compiler = ""
     var extra_paths: [text] = []
     var i = 0
     while i < args.len():
         val arg = args[i]
+        if arg.starts_with("--compiler="):
+            compiler = arg[11:]
+            i = i + 1
+            continue
+        if arg == "--compiler":
+            if i + 1 < args.len() and not args[i + 1].starts_with("-"):
+                compiler = args[i + 1]
+                i = i + 1
+            i = i + 1
+            continue
         if _single_option_takes_value(arg):
             if i + 1 >= args.len():
                 return ChildRun(path: path, timeout_secs: timeout_secs, list_only: list_only, valid: false, error: "missing value for " + arg)
@@ -361,31 +410,7 @@ fn parse_child_run(args: [text]) -> ChildRun:
         return ChildRun(path: path, timeout_secs: timeout_secs, list_only: list_only, valid: false, error: "expected .spl test file")
     if not file_exists(path):
         return ChildRun(path: path, timeout_secs: timeout_secs, list_only: list_only, valid: false, error: "test file not found")
-    ChildRun(path: path, timeout_secs: timeout_secs, list_only: list_only, valid: true, error: "")
-
-fn _shell_safe_child_binary_path(p: text) -> text:
-    """Publish SIMPLE_TEST_BINARY in a form a POSIX shell can execute.
-
-    On Windows, `rt_path_absolute` (via `find_simple_binary`) answers the
-    verbatim `\\\\?\\C:\\...` extended-length form with backslash separators.
-    Many specs forward SIMPLE_TEST_BINARY verbatim into
-    `process_run("sh", ["-c", "... " + bin + " run ..."])` (see
-    test/01_unit/compiler/interpreter/dict_class_value_identity_spec.spl and
-    its siblings). An unquoted backslash inside a `sh -c` command string is an
-    escape character, so `\\?\D:\wk-f1\bin\simple.exe` is silently corrupted
-    into `?D:wk-f1binsimple.exe` -- "command not found", read back by the spec
-    as an empty probe result rather than a real failure. Strip the prefix and
-    flip separators, the same idiom already used for this exact Windows
-    spelling in storage_roots/resolver.spl's `_strip_extended_length_prefix`
-    and compiler_entrypoint/admission.spl -- both docstrings on that path type
-    give the contract this rewrite relies on. A no-op on POSIX paths.
-    """
-    var out = p.replace("\\", "/")
-    if out.starts_with("//?/UNC/"):
-        return "//" + out.substring(8)
-    if out.starts_with("//?/"):
-        return out.substring(4)
-    out
+    ChildRun(path: path, timeout_secs: timeout_secs, list_only: list_only, valid: true, error: "", compiler: compiler)
 
 fn find_simple_binary() -> text:
     # Use the same cross-platform current-executable authority as the CLI.
@@ -395,11 +420,20 @@ fn find_simple_binary() -> text:
     val current_raw = cli_current_exe_path()
     var current = ""
     if current_raw != "" and file_exists(current_raw):
-        current = unsafe(capabilities: [ffi]): rt_path_absolute(current_raw) ?? ""
+        val current_abs = unsafe(capabilities: [ffi]): rt_path_absolute(current_raw)
+        if current_abs != nil:
+            current = current_abs.unwrap()
     if current == "":
-        val process_args = sys_get_args()
-        if process_args.len() > 0 and file_exists(process_args[0]):
-            current = unsafe(capabilities: [ffi]): rt_path_absolute(process_args[0]) ?? ""
+        val raw = sys_get_args()
+        # A source-mode argv[0] is a `.spl` path: never a binary candidate.
+        if raw.len() > 0 and not raw[0].ends_with(".spl") and file_exists(raw[0]):
+            val argv_abs = unsafe(capabilities: [ffi]): rt_path_absolute(raw[0])
+            if argv_abs != nil:
+                current = argv_abs.unwrap()
+        elif raw.len() > 0 and raw[0].ends_with(".spl"):
+            print "error: test-runner: argv[0] is a source file ({raw[0]}), not a binary"
+            print "error: this platform has no /proc; set SIMPLE_BINARY to the invoking compiler binary"
+            return ""
     if current == "" or not file_exists(current):
         return ""
     # Fail closed on a SOURCE file. A `.spl` candidate is never executable, and
@@ -416,10 +450,47 @@ fn find_simple_binary() -> text:
         return current
     if not file_exists(configured_raw):
         return ""
-    val configured = unsafe(capabilities: [ffi]): rt_path_absolute(configured_raw) ?? ""
+    val configured_abs = unsafe(capabilities: [ffi]): rt_path_absolute(configured_raw)
+    if configured_abs == nil:
+        print "error: test-runner: SIMPLE_BINARY ({configured_raw}) cannot be made absolute: current directory unreadable"
+        return ""
+    val configured = configured_abs.unwrap()
     if configured == "" or not file_exists(configured) or configured != current:
         return ""
     configured
+
+fn spec_platform_skip_from_source(content: text, os_name: text) -> text:
+    """Return skip reason when @platform tags in `content` exclude `os_name`, else empty."""
+    platform_os_skip_reason(file_get_platform_tags(content), os_name)
+
+fn spec_has_slow_it_from_source(content: text) -> bool:
+    """True when `content` declares a `slow_it ` block."""
+    content.contains("slow_it ")
+
+fn _single_parse_directive_i64(content: text, prefix: text) -> i64:
+    """Parse non-negative integer immediately following `prefix` (0 when absent/invalid)."""
+    val idx = find_raw(content, prefix)
+    if idx < 0:
+        return 0
+    var pos = idx + prefix.byte_len()
+    val n = content.byte_len()
+    var value: i64 = 0
+    var digits = 0
+    while pos < n:
+        val c = content.char_code_at(pos)
+        if c >= 48 and c <= 57:
+            value = value * 10 + (c - 48)
+            digits = digits + 1
+            pos = pos + 1
+        else:
+            break
+    if digits == 0:
+        return 0
+    value
+
+fn file_has_di_test_tag_from_source(content: text) -> bool:
+    """Pure variant of `file_has_di_test_tag` operating on preloaded source."""
+    content.contains("# @di_test")
 
 fn file_has_di_test_tag(file_path: text) -> bool:
     """Check if file has # @di_test tag, allowing DI modifications in system tests.
@@ -427,8 +498,12 @@ fn file_has_di_test_tag(file_path: text) -> bool:
     Mirrors std.test_runner.test_runner_files.file_has_di_test_tag. Duplicated
     here (rather than imported) so this child runner stays independent of
     std.test_runner.* per the file-level design note above."""
-    val content = unsafe(capabilities: [ffi]): rt_file_read_text(file_path)
-    content.contains("# @di_test")
+    val content = unsafe(capabilities: [ffi]): rt_file_read_text(file_path) ?? ""
+    file_has_di_test_tag_from_source(content)
+
+fn spec_exec_limit_from_source(content: text) -> i64:
+    """Pure variant of `spec_exec_limit_directive` operating on preloaded source."""
+    _single_parse_directive_i64(content, "# @exec_limit ")
 
 fn spec_exec_limit_directive(file_path: text) -> i64:
     """Parse `# @exec_limit <N>` from a spec header (0 when absent/invalid).
@@ -437,56 +512,52 @@ fn spec_exec_limit_directive(file_path: text) -> i64:
     10M-operation cap declare the cap they need; run_spec forwards it into
     the child env (raise-only) because the driver reads
     SIMPLE_EXECUTION_LIMIT once at startup and in-process arming is inert."""
-    val content = unsafe(capabilities: [ffi]): rt_file_read_text(file_path)
-    val idx = find_raw(content, "# @exec_limit ")
-    if idx < 0:
-        return 0
-    var pos = idx + 14
-    val n = content.len()
-    var value: i64 = 0
-    var digits = 0
-    while pos < n:
-        val c = content.char_code_at(pos)
-        if c >= 48 and c <= 57:
-            value = value * 10 + (c - 48)
-            digits = digits + 1
-            pos = pos + 1
-        else:
-            break
-    if digits == 0:
-        return 0
-    value
+    val content = unsafe(capabilities: [ffi]): rt_file_read_text(file_path) ?? ""
+    spec_exec_limit_from_source(content)
+
+fn spec_jit_spec_entry_from_source(content: text) -> bool:
+    """Pure variant of `spec_jit_spec_entry_directive` operating on preloaded source."""
+    content.starts_with("# @jit_spec_entry\n") or find_raw(content, "\n# @jit_spec_entry\n") >= 0
+
+fn spec_jit_spec_entry_directive(file_path: text) -> bool:
+    """True when the spec header carries `# @jit_spec_entry`.
+
+    Such a spec runs its module-level examples on the seed's Cranelift JIT
+    (SIMPLE_JIT_SPEC_ENTRY=1) instead of the pinned interpreter: a spec whose
+    honest interpreted run cannot fit the 900s cap (3M iterations of the core
+    interpreter, ~40 min tree-walked, ~2.5 min JIT'd) opts in per file.
+    SIMPLE_JIT_STRICT_ALL=1 makes a JIT refusal a fast named ERROR instead of a
+    silent full-length interpreter fallback. Spec entry is not the default
+    because JIT/interpreter verdict parity is only sampled, not proven; see
+    doc/08_tracking/bug/seed_jit_spec_entry_demoted_by_entry_reparse_2026-11-14.md.
+    The directive must be a whole line, so prose or a fixture string that
+    merely mentions it does not opt in. The two JIT pins are deliberately NOT
+    in the process-facade grandchild scrub (process_ops.spl): under the
+    light-daemon lane this runner is itself a scrub-marked descendant and
+    spawns its spec child through that facade, so scrubbing them silently
+    dropped the opt-in (measured). They therefore reach processes the spec
+    spawns: use the directive on self-contained specs only."""
+    val content = unsafe(capabilities: [ffi]): rt_file_read_text(file_path) ?? ""
+    spec_jit_spec_entry_from_source(content)
+
+fn spec_timeout_secs_from_source(content: text) -> i64:
+    """Pure variant of `spec_timeout_secs_directive` operating on preloaded source."""
+    _single_parse_directive_i64(content, "# @timeout_secs ")
 
 fn spec_timeout_secs_directive(file_path: text) -> i64:
     """Parse `# @timeout_secs <N>` from a spec header (0 when absent/invalid).
 
-    The per-spec child wall-clock budget defaults to 120s and the only other
-    lever is the `slow_it` 600s floor. A spec whose HONEST run exceeds 600s
+    The per-spec child wall-clock budget defaults to 900s (see
+    client_default_timeout_secs) and the only other lever is the `slow_it`
+    600s floor. A spec whose HONEST run exceeds 600s
     therefore had no way to ask for more: the child was killed mid-run and the
     outer runner printed "Process timed out" with NO verdict line at all — a
     fail-open hole, because a spec that cannot report a verdict can never
     report a failure either. Raise-only, same shape as @exec_limit."""
-    val content = unsafe(capabilities: [ffi]): rt_file_read_text(file_path)
-    val idx = find_raw(content, "# @timeout_secs ")
-    if idx < 0:
-        return 0
-    var pos = idx + 16
-    val n = content.len()
-    var value: i64 = 0
-    var digits = 0
-    while pos < n:
-        val c = content.char_code_at(pos)
-        if c >= 48 and c <= 57:
-            value = value * 10 + (c - 48)
-            digits = digits + 1
-            pos = pos + 1
-        else:
-            break
-    if digits == 0:
-        return 0
-    value
+    val content = unsafe(capabilities: [ffi]): rt_file_read_text(file_path) ?? ""
+    spec_timeout_secs_from_source(content)
 
-fn print_summary(path: text, passed: i64, failed: i64, skipped: i64, pending: i64, duration_ms: i64, unverified: text):
+fn print_test_file_summary(path: text, passed: i64, failed: i64, skipped: i64, pending: i64, duration_ms: i64, unverified: text, process_error: bool = false, blocked: i64 = 0, blocked_reason: text = "", all_skipped: bool = false):
     print ""
     print "========================================="
     print "Test Summary"
@@ -494,20 +565,28 @@ fn print_summary(path: text, passed: i64, failed: i64, skipped: i64, pending: i6
     print "Files: 1"
     print "Passed: {passed}"
     print "Failed: {failed}"
+    # Skips and blocked examples are appended to the AUTHORITATIVE results line,
+    # not left to a secondary line. A skip that is only visible on a secondary
+    # line is a skip the aggregate verdict does not carry, which is how
+    # capability-probe skips were laundered into passes. `total` stays
+    # passed + failed (the parsers' canonical-Results invariant).
+    var results = "Results: {passed + failed} total, {passed} passed, {failed} failed"
     if skipped > 0:
-        # Skips are appended to the AUTHORITATIVE results line, not left to the
-        # separate "Skipped:" line below. A skip that is only visible on a
-        # secondary line is a skip the aggregate verdict does not carry, which
-        # is how capability-probe skips were laundered into passes.
-        print "Results: {passed + failed} total, {passed} passed, {failed} failed, {skipped} skipped"
-    else:
-        print "Results: {passed + failed} total, {passed} passed, {failed} failed"
+        results = results + ", {skipped} skipped"
+    if blocked > 0:
+        results = results + ", {blocked} blocked"
+    print results
     if skipped > 0:
         print "Skipped: {skipped}"
     if pending > 0:
         print "Pending: {pending}"
+    if blocked > 0:
+        print "Blocked: {blocked}"
     print "Duration: {duration_ms}ms"
-    if failed > 0:
+    if process_error:
+        print ""
+        print "ERROR {path} (child process failed after reporting structured BDD counts)"
+    elif failed > 0:
         print ""
         print "FAIL {path}"
     elif unverified != "":
@@ -519,6 +598,15 @@ fn print_summary(path: text, passed: i64, failed: i64, skipped: i64, pending: i6
         # session pastes as evidence.
         print ""
         print "UNVERIFIED {path}: {unverified}"
+    elif blocked > 0:
+        # Environment missing: never a pass. Exit code 6 (BlockedScenario).
+        print ""
+        print "BLOCKED {path}: {blocked_reason}"
+    elif all_skipped:
+        # Every declared example deliberately skipped (skip_if/skip): not a
+        # pass (nothing executed) and not a failure (deferral by design).
+        print ""
+        print "SKIPPED {path} (all examples skipped)"
     else:
         print ""
         print "PASS {path}"
@@ -575,7 +663,7 @@ fn extract_number_after(s: text, keyword: text) -> i64:
     if idx < 0:
         return -1
     var pos = idx + keyword.len()
-    val n = s.len()
+    val n = s.byte_len()
     var value: i64 = 0
     var digits = 0
     while pos < n:
@@ -637,6 +725,20 @@ fn parse_spec_file_verdict(output: text) -> (i64, i64, i64, i64, i64):
         return (executed, passed, failed, d_out, 1)
     (0, 0, 0, 0, 0)
 
+fn parse_spec_verdict_outcome_clean(output: text) -> bool:
+    """True when the final SPEC FILE VERDICT line either omits `outcome=` (legacy)
+    or explicitly reports `outcome=OK`."""
+    var clean = true
+    val lines = output.split("\n")
+    for raw_line in lines:
+        val line = raw_line.trim()
+        if line.contains("SPEC FILE VERDICT:"):
+            if line.contains(" outcome="):
+                clean = line.contains(" outcome=OK ") or line.ends_with(" outcome=OK")
+            else:
+                clean = true
+    clean
+
 fn output_was_truncated(output: text) -> bool:
     """True when the bounded-capture reader discarded part of the child output.
 
@@ -669,6 +771,19 @@ fn count_real_examples(output: text) -> (i64, i64):
     val real_passed = _count_lines_containing(output, "✓") + _count_lines_containing(output, "... ok")
     val real_failed = _count_lines_containing(output, "✗") + _count_lines_containing(output, "... FAILED")
     (real_passed, real_failed)
+
+pub fn single_example_counts(output: text, evidence_passed: i64, evidence_failed: i64, has_evidence: i64) -> (i64, i64):
+    """Prefer authenticated child counts; glyph scraping is legacy fallback only.
+
+    Captured output can contain a nested test runner's own `✓`/`✗` rows inside
+    an outer assertion diagnostic. Those rows describe a different process and
+    must not inflate this file's result. The structured receipt is written by
+    the child that executed this file, so its counts win whenever valid.
+    """
+    if has_evidence == 1:
+        (evidence_passed, evidence_failed)
+    else:
+        count_real_examples(output)
 
 fn count_real_skips(output: text) -> (i64, i64):
     """Count REAL skipped / pending examples from the runner's own per-example
@@ -716,21 +831,16 @@ fn parse_child_example_summary(output: text) -> (i64, i64, i64):
 fn read_test_result_evidence(path: text) -> (i64, i64, i64):
     if path == "" or not file_exists(path):
         return (0, 0, 0)
-    val content = unsafe(capabilities: [ffi]): rt_file_read_text(path)
-    val parts = content.split("\n")
-    if parts.len() < 3 or parts[0] != "simple-bdd-v1":
-        return (0, 0, 0)
-    val passed_text = parts[1].trim()
-    val failed_text = parts[2].trim()
-    if passed_text == "" or failed_text == "":
-        return (0, 0, 0)
-    val passed = passed_text.to_i64() ?? -1
-    val failed = failed_text.to_i64() ?? -1
-    if passed < 0 or failed < 0 or passed.to_text() != passed_text or failed.to_text() != failed_text:
-        return (0, 0, 0)
-    if content != "simple-bdd-v1\n{passed_text}\n{failed_text}\n":
-        return (0, 0, 0)
-    (passed, failed, 1)
+    val content = unsafe(capabilities: [ffi]): rt_file_read_text(path) ?? ""
+    parse_test_result_evidence_v1(content)
+
+fn remove_structured_result_evidence(path: text):
+    if path == "":
+        return
+    if file_exists(path):
+        val _ = file_delete(path)
+    if file_exists(path + ".expectations"):
+        val _ = file_delete(path + ".expectations")
 
 # Expectation tally sidecar written by std.spec next to the v1 evidence file
 # (`<evidence>.expectations`, "simple-bdd-expectations-v1\n<n>\n"). Returns
@@ -921,7 +1031,7 @@ fn _cov_targets(spec_src: text) -> [text]:
             val sp = find_raw(module, " ")
             if sp >= 0:
                 module = module.substring(0, sp)
-            val brace = find_raw(module, ".{")
+            val brace = find_raw(module, ".{{")
             if brace >= 0:
                 module = module.substring(0, brace)
             var rel = ""
@@ -939,7 +1049,7 @@ fn _cov_targets(spec_src: text) -> [text]:
                 targets.push(path)
     targets
 
-fn _cov_fn_name(header: text) -> text:
+fn _app_tr_cov_fn_name(header: text) -> text:
     """Extract function name from a `fn `/`me `/`gen ` header line."""
     var rest = ""
     if header.starts_with("fn "):
@@ -950,7 +1060,7 @@ fn _cov_fn_name(header: text) -> text:
         rest = header.substring(4)
     var name = ""
     var i = 0
-    while i < rest.len():
+    while i < rest.byte_len():
         val ch = rest.substring(i, i + 1)
         if ch == "(" or ch == ":" or ch == " " or ch == "<":
             return name
@@ -958,7 +1068,7 @@ fn _cov_fn_name(header: text) -> text:
         i = i + 1
     name
 
-fn _cov_is_recordable(t: text) -> bool:
+fn _app_tr_cov_is_recordable(t: text) -> bool:
     """Approximate the statement kinds the interpreter collector records
     (Let/Assignment/If/While/For/Loop/Return/Break/Continue/Match/With).
     Bare expression statements, case arms, `elif`/`else` branch heads, prints,
@@ -1017,7 +1127,7 @@ fn _cov_recorded_file_for_target(path: text, files: [text]) -> text:
 
 fn _cov_report_for_file(path: text, hits: dict<text, bool>, called: dict<text, bool>,
                         files: [text]) -> text:
-    val content = unsafe(capabilities: [ffi]): rt_file_read_text(path)
+    val content = unsafe(capabilities: [ffi]): rt_file_read_text(path) ?? ""
     if content == "":
         return "coverage: {path} 0% (0/0 lines)"
     # Resolve which recorded module path denotes this target once, up front; a
@@ -1067,9 +1177,9 @@ fn _cov_report_for_file(path: text, hits: dict<text, bool>, called: dict<text, b
                 h = h.substring(7)
                 stripping = true
         if h.starts_with("fn ") or h.starts_with("me ") or h.starts_with("gen "):
-            current_fn = _cov_fn_name(h)
+            current_fn = _app_tr_cov_fn_name(h)
             continue
-        if not _cov_is_recordable(t):
+        if not _app_tr_cov_is_recordable(t):
             continue
         total = total + 1
         # The line must have been hit IN THIS FILE. The enclosing-function gate
@@ -1084,6 +1194,15 @@ fn _cov_report_for_file(path: text, hits: dict<text, bool>, called: dict<text, b
     "coverage: {path} {pct}% ({hit}/{total} lines)"
 
 fn _cov_print_report(spec_path: text, sdn: text):
+    val spec_src = unsafe(capabilities: [ffi]): rt_file_read_text(spec_path) ?? ""
+    _cov_print_report_from_source(spec_src, sdn)
+
+fn _cov_print_report_from_source(spec_src: text, sdn: text):
+    if spec_src == "":
+        return
+    val targets = _cov_targets(spec_src)
+    if targets.len() == 0:
+        return
     var hits: dict<text, bool> = {}
     var called: dict<text, bool> = {}
     var seen_files: dict<text, bool> = {}
@@ -1151,12 +1270,6 @@ fn _cov_print_report(spec_path: text, sdn: text):
                 if not seen_dec_files.contains_key(f):
                     seen_dec_files[f] = true
                     dec_files.push(f)
-    val spec_src = unsafe(capabilities: [ffi]): rt_file_read_text(spec_path)
-    if spec_src == "":
-        return
-    val targets = _cov_targets(spec_src)
-    if targets.len() == 0:
-        return
     print ""
     for tpath in targets:
         print _cov_report_for_file(tpath, hits, called, files)
@@ -1178,8 +1291,312 @@ fn _cov_branch_report_for_file(path: text, dec_total: dict<text, i64>,
     val pct = (hit * 100) / total
     "coverage-branch: {path} {pct}% ({hit}/{total} decisions)"
 
+# Runner-side TLDR refresh (opt-in SIMPLE_TLDR_ROOT=<dir>): the sources the
+# spec imports are refreshed through the SAME `simple tldr` producer contract
+# native-build uses (compiler.driver.cache.module_artifacts_v1). Advisory:
+# a refresh failure is reported and never changes the test verdict.
+fn _refresh_tldr_companions_from_source(binary: text, spec_src: text):
+    """Refresh TLDR companions using preloaded spec source."""
+    val root = env_get("SIMPLE_TLDR_ROOT") ?? ""
+    if root == "":
+        return
+    val targets = _cov_targets(spec_src)
+    if targets.len() == 0:
+        return
+    var args: [text] = ["tldr", "--out", root]
+    for target in targets:
+        args.push(target)
+    val (_out, err, code) = process_run_bounded(binary, args, 120000, TEST_OUTPUT_CAPTURE_BYTES)
+    if code != 0:
+        print "warning: test-runner: tldr refresh failed (exit {code}) {err.trim()}"
+
+fn _refresh_tldr_companions(binary: text, spec_path: text):
+    val root = env_get("SIMPLE_TLDR_ROOT") ?? ""
+    if root == "":
+        return
+    val spec_src = file_read_nullable(spec_path) ?? ""
+    _refresh_tldr_companions_from_source(binary, spec_src)
+
+fn _single_run_spl_doctest(args: [text]) -> i64:
+    # `--no-session-daemon` routes every `simple test` here (driver main.rs
+    # test_should_use_single_runner), so `--spl-doctest <file.spl>` used to be
+    # run as a plain spec: "no main function" / zero-examples, never a doctest.
+    val options = parse_test_args(args)
+    # Same refusal exit (2) as the spec lane when --compiler cannot be pinned.
+    match select_test_child_binary(options.compiler):
+        case Err(message):
+            print "error: test-runner: " + message
+            return 2
+        case Ok(_): ()
+    print "=== Running SPL Doctests ==="
+    print ""
+    val result = run_spl_doctest_mode(options, load_test_config())
+    print "SPL Doctest: {result.passed} passed, {result.failed} failed, {result.skipped} skipped"
+    if result.is_ok():
+        return 0
+    1
+
+# md test kind: a Markdown target (or --sdoctest) runs its sdoctest fences
+# here instead of being rejected as "expected .spl test file". Fences run on
+# the resolved --compiler; a compiler that cannot be pinned refuses (exit 2).
+fn _single_is_md_run(args: [text]) -> bool:
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--sdoctest":
+            return true
+        if arg == "--compiler" or _single_option_takes_value(arg):
+            i = i + 1
+        i = i + 1
+    _single_has_md_target(args)
+
+# True when a positional target ends in .md. Such a target runs only the md
+# lane, even with --spl-doctest (the comment lane is .spl-only).
+fn _single_has_md_target(args: [text]) -> bool:
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--compiler" or _single_option_takes_value(arg):
+            # The next token belongs to this option, even if it ends in .md.
+            i = i + 1
+        elif not arg.starts_with("-") and arg.ends_with(".md"):
+            return true
+        i = i + 1
+    false
+
+fn _single_run_md(args: [text]) -> i64:
+    val options = parse_test_args(args)
+    match select_test_child_binary(options.compiler):
+        case Err(message):
+            print "error: test-runner: " + message
+            return 2
+        case Ok(selected):
+            if selected != "":
+                env_set("SIMPLE_BINARY", selected)
+    val result = run_sdoctest_mode(options, load_sdoctest_config("config/sdoctest.sdn"))
+    print_sdoctest_summary(result)
+    if result.is_ok(): 0 else: 1
+
+# MC/DC attempt for the single lane. ADDITIVE: the normal lane body has
+# already run the spec with every lane feature (directives, env, identity,
+# infix rewrite, APK coverage) and owns the verdict. This only adds the MC/DC
+# outcome, printed on its own line whenever the lane reaches its verdict
+# (a lane error exit before that is already a red result) -- never a silent
+# skip:
+#   MC/DC: mode=<m> evidence=present|absent <path>
+#   MC/DC: mode=<m> evidence=absent DEGRADED <path>: <reason>
+# A compiler without probe emission (the Rust seed) is detected once from its
+# identity and degraded without the slow, doomed instrumented compile.
+# Returns false only when the instrumented run itself FAILED examples, so a
+# native-only failure cannot hide behind the interpreter lane's pass.
+fn _single_mcdc_attempt(args: [text], path: text, mcdc_mode: text, binary: text, timeout_secs: i64) -> bool:
+    if mcdc_compiler_lacks_probes(binary):
+        print "MC/DC: mode={mcdc_mode} evidence=absent DEGRADED {path}: {MCDC_UNAVAILABLE_REASON}"
+        return true
+    var options = parse_test_args(args)
+    options.path = path
+    # Same budget the lane granted (slow_it floor, @timeout_secs), not the
+    # 120s parse default.
+    options.timeout = timeout_secs
+    val r = run_test_file_interpreter(path, options)
+    if r.mcdc_skip_reason != "":
+        print "MC/DC: mode={mcdc_mode} evidence=absent DEGRADED {path}: {r.mcdc_skip_reason}"
+    elif r.timed_out:
+        print "MC/DC: mode={mcdc_mode} evidence=absent DEGRADED {path}: instrumented run timed out after {timeout_secs}s"
+        return true
+    elif r.mcdc_evidence_v1 != "":
+        print "MC/DC: mode={mcdc_mode} evidence=present {path}"
+    elif r.error != "":
+        print "MC/DC: mode={mcdc_mode} evidence=absent DEGRADED {path}: {r.error}"
+    else:
+        print "MC/DC: mode={mcdc_mode} evidence=absent {path}"
+    # Report only. This lane is also the daemon's per-file worker, and a
+    # decision's independence pair may span spec files, so the MC/DC gate
+    # verdict belongs to the aggregating run (test_runner_main), never to one
+    # file's exit code. Per-file DEGRADED/evidence lines are printed above.
+    val mcdc_gate = test_runner_mcdc_run_gate(mcdc_mode,
+        resolve_effective_profile(options), [r])
+    for mcdc_line in mcdc_gate.lines:
+        if not mcdc_line.starts_with("MC/DC: DEGRADED ") and
+                not mcdc_line.starts_with("MC/DC: NO EVIDENCE "):
+            print mcdc_line
+    if r.failed > 0:
+        print "error: test-runner: MC/DC instrumented run failed ({r.failed}): {r.error}"
+        return false
+    true
+
 fn main() -> i64:
     val args = clean_args()
+    # `--coverage` used to be ignored here: SIMPLE_COVERAGE stayed unset, the
+    # spec ran uninstrumented and exited 0 with no coverage line. Route the flag
+    # into the runtime-coverage lane, which publishes evidence or fails closed.
+    if args.contains("--coverage") and not _cov_enabled():
+        if not env_set("SIMPLE_COVERAGE", "1"):
+            print "error: test-runner: cannot enable coverage for --coverage"
+            return 1
+    val dir_at = _single_directory_target_index(args)
+    if dir_at >= 0:
+        return run_directory_target(args, args[dir_at], dir_at)
+    run_single_target(args)
+
+# --- Directory targets -------------------------------------------------------
+# This lane used to reject a directory target outright ("expected .spl test
+# file"), which forced every sweep onto either the daemon lane (a fresh
+# 252-module worker resolution per file) or one full process spawn per
+# enumerated spec. Both re-pay the runner's fixed module-load cost on EVERY
+# file, which is what capped directory sweeps (see doc/08_tracking/bug/
+# test_invocation_fixed_setup_cost_caps_every_sweep_2026-08-17.md). Accepting a
+# directory here keeps this process's already-resolved module graph warm and
+# runs each discovered spec through the identical per-file machinery below, so
+# a sweep pays the fixed setup cost ONCE per process instead of once per file.
+
+fn _single_directory_target_index(args: [text]) -> i64:
+    """Index of the single positional token when it is exactly one existing
+    directory, else -1. Mirrors the option-skipping rules of
+    parse_child_run so an option value is never mistaken for a target."""
+    var found = -1
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--compiler":
+            i = i + 2
+            continue
+        if _single_option_takes_value(arg):
+            i = i + 2
+            continue
+        val equals_at = arg.index_of("=")
+        if equals_at > 0 and _single_option_takes_value(arg[0:equals_at]):
+            i = i + 1
+            continue
+        if not arg.starts_with("-"):
+            if found >= 0:
+                return -1
+            found = i
+        i = i + 1
+    if found >= 0 and is_dir(args[found]):
+        return found
+    -1
+
+fn _single_text_lte(a: text, b: text) -> bool:
+    """Lexicographic a <= b via char_code — text `<`/`>` miscompiles to a raw
+    pointer compare on the native flat-HIR path (see extract_number_before)."""
+    val n = if a.byte_len() < b.byte_len(): a.byte_len() else: b.byte_len()
+    var i = 0
+    while i < n:
+        val ca = a.char_code_at(i)
+        val cb = b.char_code_at(i)
+        if ca != cb:
+            return ca < cb
+        i = i + 1
+    a.byte_len() <= b.byte_len()
+
+fn _single_sorted_texts(items: [text]) -> [text]:
+    """Deterministic sweep order (rt_dir_walk order is filesystem-dependent)."""
+    var out: [text] = []
+    for item in items:
+        var j = out.len()
+        while j > 0 and not _single_text_lte(out[j - 1], item):
+            j = j - 1
+        out.insert(j, item)
+    out
+
+fn _single_directory_specs(dir: text) -> [text]:
+    """Recursive *_spec.spl files under dir, sorted for deterministic order."""
+    var specs: [text] = []
+    for path in dir_walk(dir):
+        if path.ends_with("_spec.spl"):
+            specs.push(path)
+    _single_sorted_texts(specs)
+
+fn run_directory_target(args: [text], dir: text, dir_at: i64) -> i64:
+    """Run every spec under dir sequentially through run_single_target.
+
+    Per-file semantics (timeouts, tags, verdict lines, exit codes) are exactly
+    those of invoking this runner once per file; the only difference is that
+    the runner's own module graph is resolved once. Exit code 4
+    (EmptySelection, e.g. a --tag the file does not carry) is neutral, matching
+    how full-runner sweeps neutralise rather than fail unselected files."""
+    val specs = _single_directory_specs(dir)
+    if specs.len() == 0:
+        print "Simple Test Runner child"
+        print "error: no *_spec.spl files found under directory: {dir}"
+        return 1
+    if args.contains("--list"):
+        for spec in specs:
+            print spec
+        return 0
+    var files_passed = 0
+    var files_failed = 0
+    var files_neutral = 0
+    for spec in specs:
+        # Same invocation as `test <spec> --no-session-daemon` with the rest of
+        # the argument vector preserved: drop the directory positional by
+        # INDEX (an option value equal to the directory name must survive),
+        # append the concrete spec path.
+        var file_args: [text] = []
+        var i = 0
+        while i < args.len():
+            if i != dir_at:
+                file_args.push(args[i])
+            i = i + 1
+        file_args.push(spec)
+        if files_passed + files_failed + files_neutral > 0:
+            print ""
+        val code = run_single_target(file_args)
+        if code == 0:
+            files_passed = files_passed + 1
+        elif code == 4:
+            files_neutral = files_neutral + 1
+        else:
+            files_failed = files_failed + 1
+    print ""
+    print "========================================="
+    print "Directory Test Summary"
+    print "========================================="
+    if _single_platform_skips > 0:
+        print platform_skip_summary_line(_single_platform_skips)
+    print "Directory: {dir}"
+    print "Files: {specs.len()}"
+    print "Passed: {files_passed}"
+    print "Failed: {files_failed}"
+    if files_neutral > 0:
+        print "Neutral: {files_neutral}"
+    print "Results: {files_passed + files_failed} total, {files_passed} passed, {files_failed} failed"
+    if files_failed > 0:
+        1
+    else:
+        0
+
+fn _single_temp_dir_prefix() -> text:
+    """Resolve a writable temp directory prefix ending with `/` across POSIX and Windows."""
+    var temp_root = env_get("TMPDIR")
+    if temp_root == "":
+        temp_root = env_get("TMP")
+    if temp_root == "":
+        temp_root = env_get("TEMP")
+    if temp_root == "":
+        temp_root = "/tmp"
+    val sep = if temp_root.ends_with("/") or temp_root.ends_with("\\"): "" else: "/"
+    "{temp_root}{sep}"
+
+fn run_single_target(args: [text]) -> i64:
+    # --mode=<compiled lane> / --compile / --native-backend=<b>: this lane
+    # always interprets (SIMPLE_EXECUTION_MODE=interpret is pinned below), so
+    # `simple test <spec> --mode native --no-session-daemon` used to run the
+    # interpreter and report PASS for a lane that never ran. Refuse loudly,
+    # naming every dropped flag — same rule and helper as the client lane
+    # (test_runner_client.spl). Checked before parse_child_run, which would
+    # otherwise read the value of `--native-backend llvm` as a second spec
+    # path and fail with an unrelated message. Bug:
+    # test_runner_direct_lane_drops_mode_backend_flags_2026_11_09.
+    val dropped_exec_flags = client_dropped_execution_flags(args)
+    if dropped_exec_flags.len() > 0:
+        print "ERROR: test-runner: {dropped_exec_flags.join(", ")}: the --no-session-daemon single-spec lane always executes the interpreter; compiled lanes run via the directory runner (without --no-session-daemon): simple test <dir> {dropped_exec_flags.join(" ")} — refusing to run rather than silently downgrade"
+        return 2
+    if args.contains("--spl-doctest") and not _single_has_md_target(args):
+        return _single_run_spl_doctest(args)
+    if _single_is_md_run(args):
+        return _single_run_md(args)
     var run = parse_child_run(args)
     if not run.valid:
         print "Simple Test Runner child"
@@ -1195,14 +1612,45 @@ fn main() -> i64:
     if run.list_only:
         print run.path
         return 0
-    if unsafe(capabilities: [ffi]): rt_file_read_text(run.path).contains("slow_it ") and run.timeout_secs < 600:
+    val spec_source = unsafe(capabilities: [ffi]): rt_file_read_text(run.path) ?? ""
+    # Host-OS @platform tag: counted, reasoned skip, never a failure.
+    val os_skip = spec_platform_skip_from_source(spec_source, host_os())
+    if os_skip != "":
+        _single_platform_skips = _single_platform_skips + 1
+        print platform_skip_line(run.path, os_skip)
+        print "SPEC FILE VERDICT: {run.path} outcome=NOT_RUN declared>=0 executed=0 passed=0 failed=0 in_development=0 blocked=0 dropped=0 skipped=1 reason=platform-os-mismatch"
+        print "Results: 0 total, 0 passed, 0 failed, 1 skipped"
+        print platform_skip_summary_line(1)
+        return 0
+    # MC/DC: resolve the mode exactly like the full runner (same profile
+    # resolution, same waiver rules -- std.test_runner.test_runner_config).
+    # The attempt itself runs INSIDE the lane body below (_single_mcdc_attempt),
+    # after the child, so MC/DC never replaces a lane feature.
+    # `--no-session-daemon` only means "do not use the daemon"; it must never
+    # bypass required MC/DC. The daemon's per-file children run through this
+    # lane too, so this is also the daemon's enforcement point.
+    val mcdc_mode = apply_mcdc_mode_env(resolve_effective_profile(parse_test_args(args)))
+    val mcdc_error = mcdc_mode_error_message(mcdc_mode)
+    if mcdc_error != "":
+        print mcdc_error
+        return 2
+    if spec_has_slow_it_from_source(spec_source) and run.timeout_secs < 600:
         run.timeout_secs = 600
-    val declared_timeout = spec_timeout_secs_directive(run.path)
+    val declared_timeout = spec_timeout_secs_from_source(spec_source)
     if declared_timeout > run.timeout_secs:
         run.timeout_secs = declared_timeout
 
     env_set("SIMPLE_RUNTIME_MODE", "interpreter")
     env_set("SIMPLE_EXECUTION_MODE", "interpret")
+    if spec_jit_spec_entry_from_source(spec_source):
+        env_set("SIMPLE_RUNTIME_MODE", "jit")
+        env_set("SIMPLE_EXECUTION_MODE", "jit")
+        env_set("SIMPLE_JIT_SPEC_ENTRY", "1")
+        env_set("SIMPLE_JIT_STRICT_ALL", "1")
+    else:
+        # "0" is off for both; never leak a previous spec's opt-in.
+        env_set("SIMPLE_JIT_SPEC_ENTRY", "0")
+        env_set("SIMPLE_JIT_STRICT_ALL", "0")
     val monitor_timeout = env_get("SIMPLE_TIMEOUT_SECONDS") ?? ""
     # Converting an empty string must not become a valid timeout value.
     # split the unset case out before any to_int call (this condition broke
@@ -1216,7 +1664,7 @@ fn main() -> i64:
     # SIMPLE_EXECUTION_LIMIT once at startup (driver/src/cli/init.rs), so a
     # spec cannot raise its own op cap in-process — the runner must forward
     # it into the child env. Raise-only: an existing higher env value wins.
-    val exec_limit = spec_exec_limit_directive(run.path)
+    val exec_limit = spec_exec_limit_from_source(spec_source)
     if exec_limit > 0:
         val cur = env_get("SIMPLE_EXECUTION_LIMIT") ?? ""
         if cur == "" or (cur.to_i64() ?? 0) < exec_limit:
@@ -1226,12 +1674,21 @@ fn main() -> i64:
         env_set("SIMPLE_SYSTEM_TEST", "1")
     else:
         env_set("SIMPLE_SYSTEM_TEST", "0")
-    if is_system and file_has_di_test_tag(run.path):
+    if is_system and file_has_di_test_tag_from_source(spec_source):
         env_set("SIMPLE_DI_TEST", "1")
     else:
         env_set("SIMPLE_DI_TEST", "0")
 
-    val binary = find_simple_binary()
+    var binary = find_simple_binary()
+    # --compiler=phase2: execute the spec through the verified phase2 full CLI.
+    # Missing CLI/hash or a sha256 mismatch refuses to run (exit 2).
+    match select_test_child_binary(run.compiler):
+        case Err(message):
+            print "error: test-runner: " + message
+            return 2
+        case Ok(selected):
+            if selected != "":
+                binary = selected
     if binary == "":
         print "error: test-runner: canonical invoking candidate identity is unavailable or SIMPLE_BINARY does not match it"
         print "error: refusing to fall back to deployed bin/simple or a Rust seed"
@@ -1243,7 +1700,7 @@ fn main() -> i64:
     # this spec. Preserve an explicit caller override; otherwise publish the
     # resolved child authority instead of making specs guess `bin/simple`.
     if (env_get("SIMPLE_TEST_BINARY") ?? "") == "":
-        env_set("SIMPLE_TEST_BINARY", _shell_safe_child_binary_path(binary))
+        env_set("SIMPLE_TEST_BINARY", shell_safe_child_binary_path(binary))
     # Evidence must be self-describing: name the binary that executes the spec.
     print "child binary: {binary}"
     val timeout_ms = run.timeout_secs * 1000
@@ -1262,46 +1719,22 @@ fn main() -> i64:
         if env_get("SIMPLE_PHASE7_TRACE") == "1":
             print "phase7-coverage-source-rewrite=0"
     else:
-        exec_path = preprocess_infix_for_child(run.path)
+        exec_path = preprocess_infix_from_source(run.path, spec_source)
     val assert_ran = env_get("SIMPLE_TEST_ASSERT_RAN") == "1"
-    var evidence_path = ""
-    var previous_evidence_path = ""
-    if assert_ran:
-        var temp_root = env_get("TMPDIR")
-        if temp_root == "":
-            temp_root = env_get("TMP")
-        if temp_root == "":
-            temp_root = env_get("TEMP")
-        if temp_root == "":
-            temp_root = "/tmp"
-        val temp_sep = if temp_root.ends_with("/") or temp_root.ends_with("\\"): "" else: "/"
-        evidence_path = "{temp_root}{temp_sep}simple_bdd_result_{getpid()}_{time_now_unix_micros()}.txt"
-        if file_exists(evidence_path):
-            val _ = file_delete(evidence_path)
-        if file_exists(evidence_path):
-            if exec_path != run.path:
-                val _ = file_delete(exec_path)
-            print "error: test-runner: cannot prepare structured result evidence"
-            return 1
-        previous_evidence_path = env_get("SIMPLE_TEST_RESULT_FILE") ?? ""
-        if not env_set("SIMPLE_TEST_RESULT_FILE", evidence_path):
-            if exec_path != run.path and file_exists(exec_path):
-                val _ = file_delete(exec_path)
-            print "error: test-runner: cannot configure structured result evidence"
-            return 1
     var runtime_coverage_path = ""
     var previous_coverage_output = ""
     var runtime_evidence_is_child_owned = false
     # Captured before any chdir below: a caller-owned RELATIVE coverage path
     # must stay relative to the runner's cwd, not to the child's project root.
     val runner_cwd = env_cwd_raw()
+    val temp_prefix = _single_temp_dir_prefix()
     if cov_on:
         previous_coverage_output = env_get("SIMPLE_COVERAGE_OUTPUT") ?? ""
         if previous_coverage_output != "":
             runtime_coverage_path = child_cwd_anchor_path(previous_coverage_output, runner_cwd)
             runtime_evidence_is_child_owned = true
         else:
-            runtime_coverage_path = "/tmp/simple_apk_coverage_{getpid()}_{time_now_unix_micros()}.sdn"
+            runtime_coverage_path = "{temp_prefix}simple_apk_coverage_{getpid()}_{time_now_unix_micros()}.sdn"
         if file_exists(runtime_coverage_path):
             val _ = file_delete(runtime_coverage_path)
         if not env_set("SIMPLE_COVERAGE_OUTPUT", runtime_coverage_path):
@@ -1312,7 +1745,7 @@ fn main() -> i64:
     var previous_child_apk_receipt = ""
     var previous_no_bootstrap_delegate = ""
     if cov_on:
-        child_apk_receipt_path = "/tmp/simple_phase7_child_apk_{getpid()}_{time_now_unix_micros()}.env"
+        child_apk_receipt_path = "{temp_prefix}simple_phase7_child_apk_{getpid()}_{time_now_unix_micros()}.env"
         if file_exists(child_apk_receipt_path):
             val _ = file_delete(child_apk_receipt_path)
         previous_child_apk_required = env_get("SIMPLE_PHASE7_CHILD_APK_REQUIRED") ?? ""
@@ -1325,54 +1758,107 @@ fn main() -> i64:
             return 1
         if env_get("SIMPLE_PHASE7_TRACE") == "1":
             print "phase7-apk-runner: pid={getpid()}"
+    _refresh_tldr_companions_from_source(binary, spec_source)
     val start = time_now_unix_micros()
     # The child runs from the spec's project root so `src/...` reads resolve
     # the way its imports do, whatever directory the runner was started in.
     val (child_dir, child_exec_path) = spec_child_launch_plan(exec_path, runner_cwd)
+    # Every single-file child gets the canonical structured result transport.
+    # The non-asserted legacy fallback below remains available only when the
+    # child did not produce a valid receipt; valid counts must never be
+    # inflated by `✓`/`✗` glyphs inside captured nested-child transcripts.
+    val evidence_path = "{temp_prefix}simple_bdd_result_{getpid()}_{time_now_unix_micros()}.txt"
+    remove_structured_result_evidence(evidence_path)
+    if file_exists(evidence_path) or file_exists(evidence_path + ".expectations"):
+        if cov_on:
+            val _ = env_set("SIMPLE_COVERAGE_OUTPUT", previous_coverage_output)
+            val _ = env_set("SIMPLE_PHASE7_CHILD_APK_REQUIRED", previous_child_apk_required)
+            val _ = env_set("SIMPLE_PHASE7_CHILD_APK_RECEIPT", previous_child_apk_receipt)
+            val _ = env_set("SIMPLE_NO_BOOTSTRAP_DELEGATE", previous_no_bootstrap_delegate)
+        if exec_path != run.path:
+            val _ = file_delete(exec_path)
+        print "error: test-runner: cannot prepare structured result evidence"
+        return 1
+    val previous_evidence_path = env_get("SIMPLE_TEST_RESULT_FILE") ?? ""
+    if not env_set("SIMPLE_TEST_RESULT_FILE", evidence_path):
+        if cov_on:
+            val _ = env_set("SIMPLE_COVERAGE_OUTPUT", previous_coverage_output)
+            val _ = env_set("SIMPLE_PHASE7_CHILD_APK_REQUIRED", previous_child_apk_required)
+            val _ = env_set("SIMPLE_PHASE7_CHILD_APK_RECEIPT", previous_child_apk_receipt)
+            val _ = env_set("SIMPLE_NO_BOOTSTRAP_DELEGATE", previous_no_bootstrap_delegate)
+        if exec_path != run.path:
+            val _ = file_delete(exec_path)
+        print "error: test-runner: cannot configure structured result evidence"
+        return 1
     val child_moved = child_dir != "" and env_set_cwd_raw(child_dir)
     val child_binary = if child_moved: child_cwd_absolute(binary, runner_cwd) else: binary
     val child_spec = if child_moved: child_exec_path else: exec_path
-    val child_args = if assert_ran: ["run", child_spec, "--test-result-file={evidence_path}"] else: ["run", child_spec]
-    val (stdout, stderr, code) = process_run_bounded(child_binary, child_args, timeout_ms, TEST_OUTPUT_CAPTURE_BYTES)
+    val child_args = ["run", child_spec, "--test-result-file={evidence_path}"]
+    # Directory-wide prevention policy: hand the spec's `_prevention.sdn`
+    # chain (cached per directory) to the child, absolute when the child's
+    # cwd moved; restored afterwards so nothing leaks to a later lane.
+    val previous_dir_prevention = env_get(DIR_PREVENTION_ENV) ?? ""
+    var dir_prevention_value = dir_prevention_env_value(run.path)
+    if child_moved and dir_prevention_value != "":
+        var absolute_policies: [text] = []
+        for policy_path in dir_prevention_value.split(DIR_PREVENTION_SEP):
+            absolute_policies.push(child_cwd_absolute(policy_path, runner_cwd))
+        dir_prevention_value = absolute_policies.join(DIR_PREVENTION_SEP)
+    val _ = env_set(DIR_PREVENTION_ENV, dir_prevention_value)
+    # The spec child keeps the pinned execution/runtime modes (its engine is
+    # chosen at its own process start), but it must not leak those pins into
+    # the processes its examples spawn: mark the child so the process facade
+    # strips the pins (and the marker itself) from the example children's
+    # environment. The spawn deliberately goes through process_run_bounded_spec_child so the
+    # scrub does not remove the pins from the spec child itself. See
+    # std/nogc_sync_mut/io/process_ops.spl (SIMPLE_TEST_CHILD_ENV_SCRUB_ENV).
+    val _ = env_set(SIMPLE_TEST_CHILD_ENV_SCRUB_ENV, "1")
+    val (stdout, stderr, code) = process_run_bounded_spec_child(child_binary, child_args, timeout_ms, TEST_OUTPUT_CAPTURE_BYTES)
+    val _ = env_remove_process(SIMPLE_TEST_CHILD_ENV_SCRUB_ENV)
+    val _ = env_set(DIR_PREVENTION_ENV, previous_dir_prevention)
     if child_moved and not env_set_cwd_raw(runner_cwd):
+        val _ = env_set("SIMPLE_TEST_RESULT_FILE", previous_evidence_path)
+        remove_structured_result_evidence(evidence_path)
         print "error: test-runner: cannot restore working directory {runner_cwd}"
         return 1
     val duration_ms = (time_now_unix_micros() - start) / 1000
     var runtime_coverage_sdn = ""
     if runtime_coverage_path != "":
         if file_exists(runtime_coverage_path):
-            runtime_coverage_sdn = unsafe(capabilities: [ffi]): rt_file_read_text(runtime_coverage_path)
+            runtime_coverage_sdn = unsafe(capabilities: [ffi]): rt_file_read_text(runtime_coverage_path) ?? ""
             if not runtime_evidence_is_child_owned:
                 val _ = file_delete(runtime_coverage_path)
         if not env_set("SIMPLE_COVERAGE_OUTPUT", previous_coverage_output):
+            val _ = env_set("SIMPLE_TEST_RESULT_FILE", previous_evidence_path)
+            remove_structured_result_evidence(evidence_path)
             print "error: test-runner: cannot restore APK coverage output environment"
             return 1
     var child_apk_receipt = ""
     if child_apk_receipt_path != "" and file_exists(child_apk_receipt_path):
-        child_apk_receipt = unsafe(capabilities: [ffi]): rt_file_read_text(child_apk_receipt_path)
+        child_apk_receipt = unsafe(capabilities: [ffi]): rt_file_read_text(child_apk_receipt_path) ?? ""
         val _ = file_delete(child_apk_receipt_path)
     if cov_on:
         if not env_set("SIMPLE_PHASE7_CHILD_APK_REQUIRED", previous_child_apk_required) or
                 not env_set("SIMPLE_PHASE7_CHILD_APK_RECEIPT", previous_child_apk_receipt) or
                 not env_set("SIMPLE_NO_BOOTSTRAP_DELEGATE", previous_no_bootstrap_delegate):
+            val _ = env_set("SIMPLE_TEST_RESULT_FILE", previous_evidence_path)
+            remove_structured_result_evidence(evidence_path)
             print "error: test-runner: cannot restore child APK activation environment"
             return 1
         if not _phase7_child_receipt_valid(child_apk_receipt, getpid()):
+            val _ = env_set("SIMPLE_TEST_RESULT_FILE", previous_evidence_path)
+            remove_structured_result_evidence(evidence_path)
             print "error: spawned test process did not publish a valid child APK activation receipt"
             return 1
-    if assert_ran and not env_set("SIMPLE_TEST_RESULT_FILE", previous_evidence_path):
-        if evidence_path != "" and file_exists(evidence_path):
-            val _ = file_delete(evidence_path)
+    if not env_set("SIMPLE_TEST_RESULT_FILE", previous_evidence_path):
+        remove_structured_result_evidence(evidence_path)
         if exec_path != run.path and file_exists(exec_path):
             val _ = file_delete(exec_path)
         print "error: test-runner: cannot restore structured result environment"
         return 1
     val (evidence_passed, evidence_failed, has_evidence) = read_test_result_evidence(evidence_path)
     val evidence_expectations = read_test_result_expectations(evidence_path)
-    if evidence_path != "" and file_exists(evidence_path):
-        val _ = file_delete(evidence_path)
-    if evidence_path != "" and file_exists(evidence_path + ".expectations"):
-        val _ = file_delete(evidence_path + ".expectations")
+    remove_structured_result_evidence(evidence_path)
     if exec_path != run.path and file_exists(exec_path):
         val _ = file_delete(exec_path)
     val child_stdout = stdout
@@ -1400,7 +1886,7 @@ fn main() -> i64:
             # test run on a malformed pre-existing artifact.
             val new_cov = parse_coverage_sdn(cov_sdn)
             val to_write = if file_exists(cov_output_path):
-                val existing_raw = unsafe(capabilities: [ffi]): rt_file_read_text(cov_output_path)
+                val existing_raw = unsafe(capabilities: [ffi]): rt_file_read_text(cov_output_path) ?? ""
                 if existing_raw.trim().starts_with("# Coverage Report"):
                     render_coverage_sdn(merge_coverage(parse_coverage_sdn(existing_raw), new_cov))
                 else:
@@ -1413,8 +1899,15 @@ fn main() -> i64:
     if stderr != "":
         print stderr
     val combined = child_stdout + "\n" + stderr
-    val (real_passed, real_failed) = count_real_examples(combined)
+    val (real_passed, real_failed) = single_example_counts(combined,
+        evidence_passed, evidence_failed, has_evidence)
     val real_executed = real_passed + real_failed
+    # Real skip channel, counted up front so the all-skipped verdict branch
+    # below can distinguish deliberate deferral from a zero-example defect.
+    # These were hardcoded `0, 0` until 2026-08-20, which is why every spec on
+    # this path reported `skipped=0` even when it had plainly printed a skip
+    # marker -- see count_real_skips()'s docstring.
+    val (real_skipped, real_pending) = count_real_skips(combined)
     val (summary_passed, summary_failed, has_summary) = parse_child_example_summary(combined)
     val (verdict_executed, verdict_passed, verdict_failed, verdict_dropped, has_verdict) = parse_spec_file_verdict(combined)
     val was_truncated = output_was_truncated(combined)
@@ -1422,11 +1915,21 @@ fn main() -> i64:
         print "test-runner debug: code={code} assert_ran={assert_ran} has_evidence={has_evidence} ev_p={evidence_passed} ev_f={evidence_failed} real_p={real_passed} real_f={real_failed} has_sum={has_summary} sum_p={summary_passed} sum_f={summary_failed} has_v={has_verdict} v_e={verdict_executed} v_p={verdict_passed} v_f={verdict_failed} v_d={verdict_dropped} trunc={was_truncated}"
     var failed = 0
     var passed = 0
+    var process_error = false
     # Non-empty only for the UNVERIFIED classes (TERMINATED / TIMEOUT), which
     # carry failed: 0 by contract. Without it those two would collapse into
     # `failed == 0` -> exit 0, i.e. a silent green for a run that produced no
     # verified result at all.
     var unverified_error = ""
+    # True only for the all-examples-skipped verdict branch below; flips the
+    # human-facing tail from PASS to SKIPPED and nothing else.
+    var all_skipped = false
+    val (blocked_pending, blocked_failed, blocked_reason) = parse_blocked_examples(combined)
+    val blocked_total = blocked_pending + blocked_failed
+    val raw_failed = if has_verdict == 1 and verdict_failed > real_failed: verdict_failed else: real_failed
+    val nonblocked_failed = raw_failed - blocked_failed
+    val blocked_passed = if has_verdict == 1: verdict_passed else: real_passed
+    var blocked_count = 0
     if code == -1 or code == 143 or code == 144:
         # The runtime collapses timeout AND death-by-signal onto the one -1
         # sentinel; 143/144 arrive when an intermediate shell propagates a
@@ -1453,19 +1956,62 @@ fn main() -> i64:
                 print timeout_verdict_line(run.path, "child-timeout", timeout_ms)
             else:
                 print unrun_verdict_line(run.path, "child-died-by-signal")
-    elif code != 0 and assert_ran:
-        passed = if has_evidence == 1: evidence_passed else: 0
-        failed = if has_evidence == 1 and evidence_failed > 0: evidence_failed else: 1
-        print "error: test-runner: spec failed"
-    elif assert_ran and (has_evidence == 0 or evidence_passed + evidence_failed == 0):
+    elif blocked_total > 0 and nonblocked_failed <= 0 and not was_truncated:
+        # BLOCKED: every non-passing example is environment-gated
+        # (`pending("BLOCKED: ...")` / `Err("precondition: ...")`) and nothing
+        # else failed. Never a pass, never OK, never a bare failure -- counted
+        # on its own and exited 6. Checked before the zero-evidence branch: a
+        # blocked-only file has zero passes by construction and would
+        # otherwise read as "no examples executed".
+        # Bug: llm_caret_env_gated_specs_no_blocked_outcome_2026-11-12.
+        passed = blocked_passed
+        failed = 0
+        blocked_count = blocked_total
+    elif real_executed == 0 and real_failed == 0 and real_skipped > 0 and code == 0 and not was_truncated and (has_summary == 0 or summary_failed == 0) and (has_verdict == 0 or (verdict_executed == 0 and verdict_failed == 0 and verdict_dropped == 0)):
+        # ALL-SKIPPED: every declared example was deliberately deferred
+        # (skip_if / skip / `return "skip: ..."` -- the `... skipped (reason)`
+        # and `○ ... (skipped)` markers count_real_skips() recognises) and
+        # nothing ran, failed, or was dropped. This is the opposite of the
+        # zero-examples defect the fail-closed guards below exist for:
+        # intentional deferral -- the file flips to a real PASS with zero
+        # edits the day its hardware/build precondition lands -- versus an
+        # accidental no-op. Folding both into `reason=zero-examples` made a
+        # correctly-gated hardware spec read as broken
+        # (bug: single_example_hardware_gated_spec_reports_zero_examples_fail_2026-08-11).
+        # Deliberately NOT covered here: a pending()-only file. pending
+        # markers (`... pending`) stay in the fail-closed branch, because an
+        # unimplemented example is an authoring gap, not a deferral with a
+        # reason. The `code == 0`, no-truncation, clean-summary, and
+        # clean-or-absent-verdict conjuncts keep this from softening any run
+        # that carries real failure evidence. Placed ahead of the
+        # structured-evidence and --assert-ran branches so a deliberately
+        # all-skipped file reports the same SKIP verdict on every lane;
+        # --assert-ran still fails a file that ran nothing WITHOUT skip
+        # markers, which is the case that flag exists to catch.
+        passed = 0
+        failed = 0
+        all_skipped = true
+        if not has_verdict_line(combined):
+            # outcome=NOT_RUN matches the platform-os-mismatch skip precedent
+            # above; `reason=all-examples-skipped` plus `skipped=` carry the
+            # distinction sweeps need.
+            print "SPEC FILE VERDICT: {run.path} outcome=NOT_RUN declared>={real_skipped} executed=0 passed=0 failed=0 in_development=0 blocked=0 dropped=0 skipped={real_skipped} reason=all-examples-skipped"
+    elif has_evidence == 1 and evidence_passed + evidence_failed == 0:
         failed = 1
         passed = 0
-        print "error: --assert-ran: no BDD examples executed"
-    elif assert_ran:
+        print "error: test-runner: no BDD examples executed (structured evidence reports zero)"
+    elif has_evidence == 1:
         passed = evidence_passed
         failed = evidence_failed
+        if code != 0 and failed == 0:
+            process_error = true
+            print "error: test-runner: child exited {code} after an authenticated BDD pass"
         if failed > 0:
             print "error: test-runner: spec failed"
+    elif assert_ran:
+        failed = 1
+        passed = 0
+        print "error: --assert-ran: structured BDD evidence is unavailable"
     elif was_truncated and has_verdict == 1 and verdict_executed > 0 and verdict_dropped == 0 and real_executed == 0 and has_summary == 0:
         # BUG FIX (spec_harness_truncated_output_false_red): the bounded-capture
         # reader keeps the first and last 2MB of a >4MB child stream and DROPS
@@ -1499,7 +2045,10 @@ fn main() -> i64:
         # read as PASS just because the child process happened to exit 0 and
         # its aggregate "N examples, M failures" summary line looked clean
         # (that line counts pending() as an executed example — bug:
-        # zero-executed single-file greenwash). Skipped when the summary
+        # zero-executed single-file greenwash). A spec whose examples were
+        # ALL deliberately skipped never reaches this branch — the
+        # all-examples-skipped SKIP verdict above claims it first. Skipped
+        # when the summary
         # line ALREADY reports real failures (has_summary==1 and
         # summary_failed>0): that signal is trustworthy on its own even
         # without a corroborating ✓/✗ glyph (e.g. a non-interpreter child
@@ -1551,11 +2100,12 @@ fn main() -> i64:
         # 24cfc32db98 closed on the truncation bypass above. Same rule, same
         # reason: a verdict is positive evidence of completion only when it
         # accounts for every example the file declared.
-        val verdict_clean = has_verdict == 1 and verdict_executed > 0 and verdict_dropped == 0 and verdict_failed == 0
+        val verdict_outcome_clean = parse_spec_verdict_outcome_clean(combined)
+        val verdict_clean = has_verdict == 1 and verdict_executed > 0 and verdict_dropped == 0 and verdict_failed == 0 and verdict_outcome_clean
         val exit_code_spurious = code != 0 and verdict_clean and real_failed == 0 and (has_summary == 0 or summary_failed == 0)
         if exit_code_spurious:
             print "warning: test-runner: child exit {code} contradicted by a clean SPEC FILE VERDICT; trusting the verdict"
-        val exit_ok = code == 0 or exit_code_spurious
+        val exit_ok = (code == 0 or exit_code_spurious) and verdict_outcome_clean
         passed = if has_summary == 1: summary_passed else: (if exit_ok: 1 else: 0)
         failed = if has_summary == 1: summary_failed else: (if exit_ok: 0 else: 1)
         # Fail-closed: never let either counting method's LOWER failure count
@@ -1584,10 +2134,8 @@ fn main() -> i64:
             failed = 1
         if failed > 0:
             print "error: test-runner: spec failed"
-    # Real skip channel. These were hardcoded `0, 0` until 2026-08-20, which is
-    # why every spec on this path reported `skipped=0` even when it had plainly
-    # printed a skip marker -- see count_real_skips()'s docstring.
-    val (real_skipped, real_pending) = count_real_skips(combined)
+    # (real_skipped / real_pending are counted up front, next to
+    # real_executed, so the all-skipped verdict branch can see them.)
     # In-development advisory. This runner IS the explicit-path surface --
     # it is handed one named file -- so the verdict below stays HONEST: a
     # `# @tag:in-development` spec run this way fails red and exits nonzero,
@@ -1610,18 +2158,33 @@ fn main() -> i64:
     # it is fixed and removed from that file. Live only on this runner: the
     # Rust seed evaluates describe/it/expect as intrinsics and writes no
     # sidecar, so under the seed the tally is unknown and nothing fires.
-    if failed == 0 and passed > 0 and evidence_expectations == 0 and unverified_error == "" and not spec_source_has_raw_assert(file_read_nullable(run.path) ?? ""):
+    if failed == 0 and passed > 0 and evidence_expectations == 0 and unverified_error == "" and not spec_source_has_raw_assert(spec_source):
         print vacuous_verdict_line(run.path, passed)
         if vacuous_strict_enabled() and not vacuous_baselined(run.path):
             failed = 1
             print "error: test-runner: VACUOUS: {passed} example(s) executed, 0 expectations evaluated"
         else:
             print "warning: test-runner: VACUOUS: {passed} example(s) executed, 0 expectations evaluated (advisory; SIMPLE_TEST_VACUOUS_STRICT=1 fails it)"
-    if source_is_in_development(rt_file_read_text(run.path)):
+    if source_is_in_development(spec_source):
         print in_development_explicit_line(run.path)
-    print_summary(run.path, passed, failed, real_skipped, real_pending, duration_ms, if failed == 0: unverified_error else: "")
+    if mcdc_mode == "on" or mcdc_mode == "dynamic":
+        if not _single_mcdc_attempt(args, run.path, mcdc_mode, binary, run.timeout_secs) and failed == 0 and unverified_error == "":
+            failed = 1
+    val is_blocked = blocked_count > 0 and failed == 0 and unverified_error == "" and not process_error
+    if is_blocked:
+        # One verdict class for the file. The Rust seed child prints its own
+        # verdict line with `blocked=`; synthesize ours only when the child's
+        # line did not already carry outcome=BLOCKED, so a seed that predates the
+        # field still yields an honest, parseable BLOCKED line.
+        if not combined.contains("outcome=BLOCKED"):
+            print ran_verdict_line(run.path, passed, 0, 0, "", blocked_count)
+        print blocked_reason_line(run.path, blocked_count, blocked_reason)
+    val shown_pending = if is_blocked and real_pending >= blocked_pending: real_pending - blocked_pending else: real_pending
+    print_test_file_summary(run.path, passed, failed, real_skipped, shown_pending, duration_ms,
+        if failed == 0: unverified_error else: "", process_error,
+        if is_blocked: blocked_count else: 0, blocked_reason, all_skipped)
     if cov_on and cov_sdn != "":
-        _cov_print_report(run.path, cov_sdn)
+        _cov_print_report_from_source(spec_source, cov_sdn)
     if failed == 0 and unverified_error != "":
         # TERMINATED / TIMEOUT: not a failure (earlyoom is SIGTERMing `simple`
         # on this host, so a signal death says nothing about the code under
@@ -1635,6 +2198,10 @@ fn main() -> i64:
         # agree. Surveyed scripts/**: nothing branches on 2-vs-5 for
         # unverifiedness (all callers test rc == 0 only).
         return 5
-    if failed == 0:
+    if is_blocked:
+        # BLOCKED: environment missing. Neither pass (0) nor failure (1); 6 is
+        # TestRunOutcome.BlockedScenario so gates choose how to treat it.
+        return 6
+    if failed == 0 and not process_error:
         return 0
     1

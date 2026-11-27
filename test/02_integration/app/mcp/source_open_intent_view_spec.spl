@@ -1,0 +1,178 @@
+# @req REQ-MCP-7-1 REQ-MCP-7-2 REQ-MCP-7-3 REQ-MCP-7-4 REQ-MCP-8-1 REQ-MCP-8-2
+# Intent-based source views over the registered MCP `source_open` tool.
+# In-process routing through dispatch_tool plus one real stdio handshake.
+use std.spec.step
+use app.mcp.main_dispatch.{dispatch_tool}
+use std.common.string_core.{str_len}
+use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_field, json_value_text_or, json_value_items, json_value_has}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_create_exclusive}
+use std.nogc_sync_mut.io.dir_ops.{dir_remove_all}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.nogc_sync_mut.env.platform.{get_temp_dir, is_windows}
+use std.env.variables.{env_get}
+
+val FIXTURE = "test/fixture/source_view/intent.spl"
+
+fn intent_payload(response: text) -> JsonValue:
+    expect(str_len(response)).to_be_less_than(16385)
+    val wire = json_parse_value_strict(response).unwrap()
+    val result = json_value_field(wire, "result")
+    expect(json_value_field(result, "isError")).to_equal(JsonValue.Bool(false))
+    val content = json_value_items(json_value_field(result, "content"))
+    json_parse_value_strict(json_value_text_or(json_value_field(content[0], "text"), "")).unwrap()
+
+fn segment_named(payload: JsonValue, name: text) -> JsonValue:
+    for segment in json_value_items(json_value_field(payload, "segments")):
+        if json_value_text_or(json_value_field(segment, "name"), "") == name: return segment
+    JsonValue.Null
+
+# `}}` inside a string literal is an escaped `}` (W-STR-BRACE-001), so nested
+# JSON closers are appended one at a time.
+val CLOSE = "}"
+
+fn jsonl(body: text) -> text:
+    body + "\n"
+
+fn run_seed_mcp_server(messages: text) -> text:
+    # The seed runtime serves src/app/mcp/main.spl exactly as bin/simple_mcp_server.cmd does.
+    val scope = match secure_temp_dir(get_temp_dir(), "simple-mcp-intent-"):
+        Ok(path): path
+        Err(reason): return "error: temp scope: " + reason
+    val input_path = scope + "/input.jsonl"
+    if not file_create_exclusive(input_path, messages):
+        val removed = dir_remove_all(scope)
+        return "error: input creation failed; cleanup=" + removed.to_string()
+    val windows = is_windows()
+    val default_runtime = if windows: "bin/simple.exe" else: "bin/simple"
+    val configured = env_get("SIMPLE_MCP_TEST_RUNTIME") ?? ""
+    val runtime = if configured == "": default_runtime else: configured
+    # Windows: cmd.exe gets a script file, not an inline command — the process
+    # launcher re-quotes an argument containing spaces, which turned the inline
+    # form into a triple-quoted string cmd.exe could not recognise.
+    val script_path = scope + "/run.cmd"
+    val command = if windows:
+        "@\"" + runtime.replace("/", "\\") + "\" run src\\app\\mcp\\main.spl < \"" + input_path.replace("/", "\\") + "\"\r\n"
+    else:
+        "exec '" + runtime + "' run src/app/mcp/main.spl < '" + input_path + "'"
+    if windows and not file_create_exclusive(script_path, command):
+        val removed = dir_remove_all(scope)
+        return "error: script creation failed; cleanup=" + removed.to_string()
+    val shell = if windows: env_get("ComSpec") ?? "cmd.exe" else: "/bin/sh"
+    val args = if windows: ["/d", "/c", script_path.replace("/", "\\")] else: ["-c", command]
+    val (stdout, stderr, status) = process_run_bounded(shell, args, 600000, 16777216)
+    val removed = dir_remove_all(scope)
+    if status != 0:
+        return "error: status=" + status.to_string() + "; command=" + command + "; " + stderr
+    stdout
+
+describe "source_open first open without intent":
+    it "returns the compact folded outline with fold markers and no forced line numbers":
+        step("open a Simple source with path only")
+        val payload = intent_payload(dispatch_tool("1", "source_open", "{\"path\":\"" + FIXTURE + "\"}"))
+        expect(json_value_text_or(json_value_field(payload, "mode"), "")).to_equal("outline")
+        expect(json_value_text_or(json_value_field(payload, "footer"), "")).to_equal("[ess] [adv]")
+        step("every visible segment is a header; bodies stay folded")
+        val controller = segment_named(payload, "Controller")
+        expect(json_value_text_or(json_value_field(controller, "source_text"), "")).to_equal("class Controller:\n")
+        expect(json_value_field(controller, "expanded")).to_equal(JsonValue.Bool(false))
+        val rendered = json_value_text_or(json_value_field(payload, "rendered"), "")
+        expect(rendered).to_contain("| + imports (2)")
+        expect(rendered).to_contain("class Controller:")
+        expect(rendered).to_contain("| + 4 members")
+        expect(rendered).to_contain("fn create_controller() -> i64:  | + body")
+        expect(rendered.contains("-> i64: 5")).to_equal(false)
+        expect(rendered).to_contain("| [ess] [adv]")
+        expect(rendered.contains("val state = cmd")).to_equal(false)
+        expect(rendered.contains("1 | ")).to_equal(false)
+        step("help text is not pushed on a plain open")
+        expect(json_value_has(payload, "essential_help")).to_equal(false)
+        expect(json_value_has(payload, "intent_resolution")).to_equal(false)
+
+    it "keeps the second open identical and byte bounded":
+        # @capture(protocol_json): second plain open carries no help block and no settings chatter
+        step("open the same file twice")
+        val first = dispatch_tool("2", "source_open", "{\"path\":\"" + FIXTURE + "\"}")
+        val second = dispatch_tool("2", "source_open", "{\"path\":\"" + FIXTURE + "\"}")
+        expect(second).to_equal(first)
+        expect(str_len(second)).to_be_less_than(4096)
+        expect(second.contains("Essential:")).to_equal(false)
+
+describe "source_open intent expands only the resolved block":
+    it "resolves a qualified symbol from the intent and focuses it":
+        # @capture(protocol_json): intent resolution object names the target and reason
+        step("open with a free-text intent naming Controller.process")
+        val request = "{\"path\":\"" + FIXTURE + "\",\"intent\":\"Find possible writes to state inside Controller.process before return\"}"
+        val payload = intent_payload(dispatch_tool("3", "source_open", request))
+        expect(json_value_text_or(json_value_field(payload, "mode"), "")).to_equal("focused")
+        val resolution = json_value_field(payload, "intent_resolution")
+        expect(json_value_text_or(json_value_field(resolution, "status"), "")).to_equal("resolved")
+        expect(json_value_text_or(json_value_field(resolution, "target"), "")).to_equal("Controller.process")
+        expect(json_value_text_or(json_value_field(resolution, "reason"), "")).to_equal("intent_token_matches_unique_symbol")
+        step("the target body is open; sibling bodies remain folded")
+        val process = segment_named(payload, "Controller.process")
+        expect(json_value_field(process, "expanded")).to_equal(JsonValue.Bool(true))
+        expect(json_value_text_or(json_value_field(process, "source_text"), "")).to_contain("val state = cmd")
+        val submit = segment_named(payload, "Controller.submit")
+        expect(json_value_text_or(json_value_field(submit, "source_text"), "")).to_equal("    fn submit(cmd: i64):")
+        expect(json_value_field(submit, "expanded")).to_equal(JsonValue.Bool(false))
+        expect(json_value_items(json_value_field(payload, "omitted_ranges")).len()).to_be_greater_than(0)
+        val rendered = json_value_text_or(json_value_field(payload, "rendered"), "")
+        expect(rendered).to_contain("val state = cmd")
+        expect(rendered.contains("1 | ")).to_equal(false)
+
+    it "reports an unresolved intent as partial context instead of guessing":
+        step("open with an intent that names no symbol in the file")
+        val request = "{\"path\":\"" + FIXTURE + "\",\"intent\":\"where is the retry budget enforced\"}"
+        val payload = intent_payload(dispatch_tool("4", "source_open", request))
+        expect(json_value_text_or(json_value_field(payload, "mode"), "")).to_equal("outline")
+        val resolution = json_value_field(payload, "intent_resolution")
+        expect(json_value_text_or(json_value_field(resolution, "status"), "")).to_equal("unresolved")
+        expect(json_value_field(payload, "partial_context")).to_equal(JsonValue.Bool(true))
+
+    it "reports an ambiguous intent with its candidates":
+        step("open with an intent whose tokens match two symbols")
+        val request = "{\"path\":\"" + FIXTURE + "\",\"intent\":\"compare init and reset\"}"
+        val payload = intent_payload(dispatch_tool("5", "source_open", request))
+        expect(json_value_text_or(json_value_field(payload, "mode"), "")).to_equal("outline")
+        val resolution = json_value_field(payload, "intent_resolution")
+        expect(json_value_text_or(json_value_field(resolution, "status"), "")).to_equal("ambiguous")
+        val candidates = json_value_items(json_value_field(resolution, "candidates"))
+        expect(candidates.len()).to_equal(2)
+        expect(json_value_text_or(candidates[0], "")).to_equal("Controller.init")
+        expect(json_value_text_or(candidates[1], "")).to_equal("Controller.reset")
+
+describe "source_open compact help on demand":
+    it "returns the essential help only when ess is requested":
+        step("request help=ess")
+        val payload = intent_payload(dispatch_tool("6", "source_open", "{\"path\":\"" + FIXTURE + "\",\"help\":\"ess\"}"))
+        val help = json_value_text_or(json_value_field(payload, "essential_help"), "")
+        expect(help).to_contain("open <symbol>")
+        expect(help).to_contain("intent")
+        expect(help).to_contain("raw")
+        expect(help.split("\n").len()).to_be_less_than(4)
+        step("an unknown help topic is refused, not silently ignored")
+        val refused = dispatch_tool("7", "source_open", "{\"path\":\"" + FIXTURE + "\",\"help\":\"everything\"}")
+        expect(refused).to_contain("unsupported_help_topic")
+        expect(refused).to_contain("\"isError\":true")
+
+describe "source_open intent view over a real stdio MCP server":
+    slow_it "answers initialize then a source_open tools/call with intent on one stdin stream":
+        # @capture(protocol_json): stdio initialize + tools/call(source_open, intent) round trip
+        step("drive the seed-served MCP server with initialize, initialized and tools/call")
+        val init = "{\"jsonrpc\":\"2.0\",\"id\":\"1\",\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2025-06-18\",\"capabilities\":{},\"clientInfo\":{\"name\":\"intent-spec\",\"version\":\"1.0\"}" + CLOSE + CLOSE
+        val initialized = "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/initialized\",\"params\":{}" + CLOSE
+        val call = "{\"jsonrpc\":\"2.0\",\"id\":\"2\",\"method\":\"tools/call\",\"params\":{\"name\":\"source_open\",\"arguments\":{\"path\":\"" + FIXTURE + "\",\"intent\":\"open Controller.process\"}" + CLOSE + CLOSE
+        val output = run_seed_mcp_server(jsonl(init) + jsonl(initialized) + jsonl(call))
+        print "stdio transcript (" + str(str_len(output)) + " bytes): " + output
+        expect(output.starts_with("error:")).to_equal(false)
+        expect(output).to_contain("\"id\":\"1\"")
+        expect(output).to_contain("\"protocolVersion\":\"2025-06-18\"")
+        step("the tools/call reply carries the focused intent view")
+        var reply = ""
+        for line in output.split("\n"):
+            if line.contains("\"id\":\"2\""): reply = line.trim()
+        expect(reply == "").to_equal(false)
+        val payload = intent_payload(reply)
+        expect(json_value_text_or(json_value_field(payload, "mode"), "")).to_equal("focused")
+        expect(json_value_text_or(json_value_field(json_value_field(payload, "intent_resolution"), "target"), "")).to_equal("Controller.process")
+        expect(json_value_text_or(json_value_field(payload, "rendered"), "")).to_contain("val state = cmd")

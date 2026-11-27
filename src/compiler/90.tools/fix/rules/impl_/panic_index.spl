@@ -1,0 +1,34 @@
+# PANIC-W-INDEX — unguarded `xs[i]` outside `unsafe:` (rev-3 §17 thin slice).
+# Proposal: the total checked form `xs.get(i)` (returns `T?`). Confidence is
+# Uncertain so `simple fix` never applies it unattended; preview/LSP surface it.
+# Autofix never inserts `unsafe` (SAF rules), and `unsafe:` does not erase a
+# panic effect (ADR-006), so sites inside `unsafe:` are proposed too.
+use std.tooling.easy_fix.types.{EasyFix, Replacement, FixConfidence}
+use std.tooling.easy_fix.node_view.{NodeView}
+use compiler.tools.fix.producer.{FixUnit, fix_unit_views}
+
+pub val PANIC_W_INDEX = "PANIC-W-INDEX"
+
+fn _is_int_literal(s: text) -> bool:
+    val t = s.trim()
+    if t == "": return false
+    var i = 0
+    while i < t.len():
+        if t[i] < "0" or t[i] > "9": return false
+        i = i + 1
+    true
+
+pub fn check_panic_index(mut unit: FixUnit) -> [EasyFix]:
+    var fixes: [EasyFix] = []
+    for v in fix_unit_views(unit):
+        if v.kind != "index" or v.args_start < 0: continue
+        if _is_int_literal(v.args_text): continue      # constant index: left to range analysis
+        if v.args_text.contains(":"): continue        # slice, not an index
+        var fix = EasyFix.create(id: "{PANIC_W_INDEX}:{v.line}",
+            description: "replace unchecked `{v.text}` with `{v.receiver}.get({v.args_text})` (returns T?)",
+            confidence: FixConfidence.Uncertain)
+        fix.add_replacement(Replacement.create(file: v.file, start: v.start, end: v.end, line: v.line,
+            column: v.col, new_text: "{v.receiver}.get({v.args_text})"))
+        fixes.push(fix)
+    fixes
+

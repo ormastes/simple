@@ -213,6 +213,7 @@ impl<'a> Parser<'a> {
 
         // Check for empty class (no body)
         let previous_collection_owner = self.collection_owner_push(&name);
+        let outer_trait_aliases = std::mem::take(&mut self.class_trait_aliases);
         let (fields, methods, invariant, macro_invocations, mut mixins, doc_comment) =
             if self.check(&TokenKind::Newline) || self.is_at_end() {
                 // Empty class - no fields, methods, invariant, etc.
@@ -220,6 +221,9 @@ impl<'a> Parser<'a> {
             } else {
                 self.parse_class_body()?
             };
+        for (trait_name, field_name) in std::mem::replace(&mut self.class_trait_aliases, outer_trait_aliases) {
+            self.trait_alias_forwards.push((name.clone(), trait_name, field_name));
+        }
         self.collection_owner = previous_collection_owner;
 
         // Prepend explicit mixins from `with` clause
@@ -265,6 +269,17 @@ impl<'a> Parser<'a> {
 
         let _where_clause = self.parse_where_clause()?;
         let (fields, methods, _invariant, _macro_invocations, inner_mixins, doc_comment) = self.parse_class_body()?;
+        if let Some((trait_name, field_name)) = self.class_trait_aliases.drain(..).next() {
+            return Err(ParseError::SyntaxError {
+                message: format!(
+                    "alias {trait_name} = {field_name}: trait-alias forwarding is not supported in a mixin body"
+                ),
+                line: start_span.line,
+                column: start_span.column,
+                span: Some(start_span),
+                context: None,
+            });
+        }
 
         // Merge `use` declarations from mixin body into required_mixins
         let mut all_required_mixins = required_mixins;
@@ -361,8 +376,14 @@ impl<'a> Parser<'a> {
 
     pub(crate) fn parse_field(&mut self) -> Result<Field, ParseError> {
         let start_span = self.current.span;
-        let collection_algorithm = if self.check(&TokenKind::At) {
+        let mut collection_algorithm = None;
+        while self.check(&TokenKind::At) {
             let attribute = self.parse_at_as_attribute()?;
+            if attribute.name == "attr_storage" {
+                // Node-attribute storage tag: accepted and ignored by the seed.
+                self.skip_newlines();
+                continue;
+            }
             if attribute.name != "collection_algorithm" {
                 return Err(ParseError::contextual_error(
                     "field attribute",
@@ -370,15 +391,13 @@ impl<'a> Parser<'a> {
                     attribute.span,
                 ));
             }
-            let algorithm = self.collection_algorithm_attribute(&[attribute])?;
+            collection_algorithm = self.collection_algorithm_attribute(&[attribute])?;
             self.skip_newlines();
-            algorithm
-        } else {
-            None
-        };
-        let declaration_start = self.current.span.start;
-
+        }
         let visibility = self.parse_optional_visibility()?;
+        // The site hash covers the declaration after its visibility, matching
+        // the pure-Simple parser's field span.
+        let declaration_start = self.current.span.start;
 
         // Optional `var`/`val` mutability keyword prefix: class-field syntax
         // (`var name: Type` / `val name: Type`, optionally after `pub`).
@@ -485,7 +504,7 @@ impl<'a> Parser<'a> {
             None
         };
 
-        if let Some(algorithm) = collection_algorithm {
+        if let Some((algorithm, label)) = collection_algorithm {
             let value = default.take().ok_or_else(|| {
                 ParseError::contextual_error(
                     "collection algorithm",
@@ -497,7 +516,10 @@ impl<'a> Parser<'a> {
                 declaration_start, self.previous.span.end,
                 start_span.line, start_span.column,
             );
-            let site_id = self.collection_site_id(&name, declaration, true);
+            let site_id = match &label {
+                Some(label) => self.collection_label_site_id(label, start_span)?,
+                None => self.collection_site_id(&name, declaration, true),
+            };
             default = Some(self.collection_attributed_value(
                 value, &algorithm, &site_id, start_span, Some(&ty)
             )?);
@@ -680,7 +702,7 @@ impl<'a> Parser<'a> {
             } else if self.check(&TokenKind::Fn)
                 || self.check(&TokenKind::Me)  // Mutable method keyword
                 || self.check(&TokenKind::Async)
-                || (self.check(&TokenKind::At) && !self.is_at_collection_algorithm())
+                || (self.check(&TokenKind::At) && !self.is_at_field_annotation())
                 || self.check(&TokenKind::Hash)
                 || self.check(&TokenKind::Static)
                 || self.peek_visibility_target_is(&[TokenKind::Fn, TokenKind::Async, TokenKind::Me])
@@ -884,7 +906,7 @@ impl<'a> Parser<'a> {
             } else if self.check(&TokenKind::Fn)
                 || self.check(&TokenKind::Me)  // Mutable method keyword
                 || self.check(&TokenKind::Async)
-                || (self.check(&TokenKind::At) && !self.is_at_collection_algorithm())
+                || (self.check(&TokenKind::At) && !self.is_at_field_annotation())
                 || self.check(&TokenKind::Hash)
                 || self.check(&TokenKind::Static)
                 || self.peek_visibility_target_is(&[TokenKind::Fn, TokenKind::Async, TokenKind::Me, TokenKind::Static])
@@ -1048,6 +1070,20 @@ impl<'a> Parser<'a> {
             {
                 // pass_dn / pass_do_nothing / pass_todo as identifiers in class body: skip
                 self.advance();
+                self.skip_newlines();
+            } else if self.check(&TokenKind::Alias)
+                && matches!(&self.peek_next().kind, TokenKind::Identifier { name, .. }
+                    if name.starts_with(|c: char| c.is_ascii_uppercase()))
+                && self.peek_nth(2).kind == TokenKind::Assign
+            {
+                // `alias TraitName = field`: forward the trait's abstract methods to
+                // `self.field` (same contract as src/app/desugar/forwarding.spl Phase 3).
+                // Expanded in Parser::parse once the trait definitions are known.
+                self.advance();
+                let trait_name = self.expect_identifier()?;
+                self.expect(&TokenKind::Assign)?;
+                let field_name = self.expect_identifier()?;
+                self.class_trait_aliases.push((trait_name, field_name));
                 self.skip_newlines();
             } else {
                 fields.push(self.parse_field()?);

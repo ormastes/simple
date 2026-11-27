@@ -1,0 +1,190 @@
+# @req REQ-SSPEC-UNIT
+"""
+# Claude full API retry policy
+
+As a caret user hitting API errors, the client must retry the right failures
+with exponential backoff, fall back after repeated overload, and shrink the
+output budget on context overflow.
+"""
+
+use std.spec.step
+use std.spec.*
+use app.llm_caret.claude_full.services.api.withRetry.*
+
+fn overflowError(input: i64, maxTokens: i64, limit: i64) -> ApiError:
+    ApiError.new(400, "input length and `max_tokens` exceed context limit: " + input.to_text() + " + " + maxTokens.to_text() + " > " + limit.to_text())
+
+describe "Claude full API retry policy":
+    it "backs off exponentially up to the cap":
+        step("delay")
+        expect(getRetryDelay(1, "", 32000, 0)).to_equal(500)
+        expect(getRetryDelay(3, "", 32000, 0)).to_equal(2000)
+        expect(getRetryDelay(10, "", 32000, 0)).to_equal(32000)
+        expect(getRetryDelay(2, "", 32000, 250)).to_equal(1250)
+        expect(pow2(5)).to_equal(32)
+
+    it "obeys a retry-after header in seconds":
+        step("retry after")
+        expect(getRetryDelay(1, "7", 32000, 0)).to_equal(7000)
+        var e = ApiError.new(429, "slow down")
+        e.retryAfter = "3"
+        expect(getRetryAfterMs(e)).to_equal(3000)
+        expect(getRetryAfterMs(ApiError.new(429, "x"))).to_equal(0)
+
+    it "computes rate-limit reset delays with a cap":
+        step("reset")
+        var e = ApiError.new(429, "x")
+        expect(getRateLimitResetDelayMs(e, 0)).to_equal(0)
+        e.resetUnixSec = 100
+        expect(getRateLimitResetDelayMs(e, 40000)).to_equal(60000)
+        expect(getRateLimitResetDelayMs(e, 200000)).to_equal(0)
+        e.resetUnixSec = 999999999
+        expect(getRateLimitResetDelayMs(e, 0)).to_equal(persistentResetCapMs())
+
+    it "parses the context overflow numbers":
+        step("overflow parse")
+        val d = parseMaxTokensContextOverflowError(overflowError(188059, 20000, 200000))
+        expect(d.inputTokens).to_equal(188059)
+        expect(d.maxTokens).to_equal(20000)
+        expect(d.contextLimit).to_equal(200000)
+        expect(parseMaxTokensContextOverflowError(ApiError.new(500, "x")).contextLimit).to_equal(0)
+        expect(parseMaxTokensContextOverflowError(ApiError.new(400, "other")).contextLimit).to_equal(0)
+        expect(parseMaxTokensContextOverflowError(ApiError.new(400, "input length and `max_tokens` exceed context limit: 1 + 2")).contextLimit).to_equal(0)
+
+    it "classifies error kinds":
+        step("classify")
+        expect(is529Error(ApiError.new(529, ""))).to_equal(true)
+        expect(is529Error(ApiError.new(500, "{\"type\":\"overloaded_error\"}"))).to_equal(true)
+        expect(is529Error(ApiError.new(500, "boom"))).to_equal(false)
+        expect(isTransientCapacityError(ApiError.new(429, ""))).to_equal(true)
+        expect(isStaleConnectionError(ApiError.connection("EPIPE"))).to_equal(true)
+        expect(isStaleConnectionError(ApiError.connection("ETIMEDOUT"))).to_equal(false)
+        expect(isFastModeNotEnabledError(ApiError.new(400, "Fast mode is not enabled for this"))).to_equal(true)
+        expect(isOAuthTokenRevokedError(ApiError.new(403, "OAuth token has been revoked"))).to_equal(true)
+        expect(isBedrockAuthError(ApiError.new(403, ""), true, false)).to_equal(true)
+        expect(isBedrockAuthError(ApiError.new(403, ""), false, true)).to_equal(false)
+        expect(isVertexAuthError(ApiError.new(401, ""), true)).to_equal(true)
+        expect(isVertexAuthError(ApiError.new(500, "invalid_grant"), true)).to_equal(true)
+        expect(isVertexAuthError(ApiError.new(500, "other"), true)).to_equal(false)
+        expect(handleAwsCredentialError(ApiError.new(200, ""), true, true)).to_equal(true)
+        expect(handleGcpCredentialError(ApiError.new(401, ""), false)).to_equal(false)
+
+    it "retries server errors, timeouts, auth expiry and connection failures":
+        step("shouldRetry")
+        expect(shouldRetry(ApiError.new(500, ""))).to_equal(true)
+        expect(shouldRetry(ApiError.new(408, ""))).to_equal(true)
+        expect(shouldRetry(ApiError.new(409, ""))).to_equal(true)
+        expect(shouldRetry(ApiError.new(401, ""))).to_equal(true)
+        expect(shouldRetry(ApiError.connection("ECONNRESET"))).to_equal(true)
+        expect(shouldRetry(ApiError.new(429, ""))).to_equal(true)
+        expect(shouldRetry(ApiError.new(400, "bad request"))).to_equal(false)
+        expect(shouldRetry(ApiError.new(404, ""))).to_equal(false)
+
+    it "honours the should-retry header and subscriber rules":
+        step("header")
+        var never = ApiError.new(500, "")
+        never.shouldRetryHeader = "false"
+        expect(shouldRetry(never)).to_equal(false)
+        var ant = RetryOptions.new("m")
+        ant.antUser = true
+        expect(shouldRetryWithOptions(never, ant)).to_equal(true)
+        var yes = ApiError.new(400, "")
+        yes.shouldRetryHeader = "true"
+        expect(shouldRetryWithOptions(yes, RetryOptions.new("m"))).to_equal(true)
+        var sub = RetryOptions.new("m")
+        sub.claudeAiSubscriber = true
+        expect(shouldRetryWithOptions(yes, sub)).to_equal(false)
+        expect(shouldRetryWithOptions(ApiError.new(429, ""), sub)).to_equal(false)
+        sub.enterpriseSubscriber = true
+        expect(shouldRetryWithOptions(ApiError.new(429, ""), sub)).to_equal(true)
+        var mock = ApiError.new(500, "")
+        mock.mockRateLimit = true
+        expect(shouldRetry(mock)).to_equal(false)
+        var remote = RetryOptions.new("m")
+        remote.remote = true
+        expect(shouldRetryWithOptions(ApiError.new(403, ""), remote)).to_equal(true)
+
+    it "only retries overload for foreground query sources":
+        step("529 source")
+        expect(shouldRetry529("")).to_equal(true)
+        expect(shouldRetry529("repl_main_thread")).to_equal(true)
+        expect(shouldRetry529("background_summary")).to_equal(false)
+        expect(getDefaultMaxRetries("")).to_equal(10)
+        expect(getDefaultMaxRetries("4")).to_equal(4)
+
+    it "retries a plain server error with backoff":
+        step("handleError retry")
+        var m = WithRetryModel.new(RetryOptions.new("m"))
+        val out = m.handleError(ApiError.new(500, "boom"), 2)
+        expect(out.status).to_equal("retry")
+        expect(out.delayMs).to_equal(1000)
+        expect(m.logs).to_equal(["tengu_api_retry"])
+
+    it "gives up with a retry error after the retry budget":
+        step("exhausted")
+        var opts = RetryOptions.new("m")
+        opts.maxRetries = 2
+        var m = WithRetryModel.new(opts)
+        val out = m.handleError(ApiError.new(500, "boom"), 3)
+        expect(out.status).to_equal("fail")
+        expect(out.errorName).to_equal("RetryError")
+        expect(out.errorMessage).to_equal("boom")
+
+    it "does not retry a client error":
+        step("not retryable")
+        var m = WithRetryModel.new(RetryOptions.new("m"))
+        val out = m.handleError(ApiError.new(404, "missing"), 1)
+        expect(out.status).to_equal("fail")
+        expect(out.errorMessage).to_equal("missing")
+
+    it "drops overload errors from background query sources":
+        step("background 529")
+        var opts = RetryOptions.new("m")
+        opts.querySource = "background_summary"
+        var m = WithRetryModel.new(opts)
+        val out = m.handleError(ApiError.new(529, "busy"), 1)
+        expect(out.status).to_equal("fail")
+        expect(m.logs).to_equal(["tengu_api_529_background_dropped"])
+
+    it "triggers the model fallback after repeated overload":
+        step("fallback")
+        var opts = RetryOptions.new("opus")
+        opts.fallbackModel = "sonnet"
+        opts.initialConsecutive529Errors = 2
+        var m = WithRetryModel.new(opts)
+        val out = m.handleError(ApiError.new(529, "busy"), 1)
+        expect(out.errorName).to_equal("FallbackTriggeredError")
+        expect(out.errorMessage).to_equal("Model fallback triggered: opus -> sonnet")
+        expect(m.consecutive529Errors).to_equal(3)
+
+    it "shrinks the output budget when the context overflows":
+        step("overflow retry")
+        var m = WithRetryModel.new(RetryOptions.new("m"))
+        val out = m.handleError(overflowError(188059, 20000, 200000), 1)
+        expect(out.status).to_equal("retry")
+        expect(out.delayMs).to_equal(0)
+        expect(m.context.maxTokensOverride).to_equal(10941)
+        expect(m.logs).to_equal(["tengu_max_tokens_context_overflow_adjustment"])
+
+    it "fails when too little context remains for output":
+        step("overflow floor")
+        var m = WithRetryModel.new(RetryOptions.new("m"))
+        val out = m.handleError(overflowError(197000, 20000, 200000), 1)
+        expect(out.status).to_equal("fail")
+        expect(out.errorMessage).to_equal("availableContext below floor")
+
+    it "keeps retrying capacity errors in persistent mode with heartbeats":
+        step("persistent")
+        var opts = RetryOptions.new("m")
+        opts.persistentRetry = true
+        opts.maxRetries = 0
+        var m = WithRetryModel.new(opts)
+        val quick = m.handleError(ApiError.new(429, "limit"), 5)
+        expect(quick.status).to_equal("retry")
+        expect(quick.delayMs).to_equal(500)
+        var slow = ApiError.new(429, "limit")
+        slow.retryAfter = "100"
+        val long = m.handleError(slow, 5)
+        expect(long.delayMs).to_equal(100000)
+        expect(long.yieldedHeartbeats).to_equal(4)
+        expect(isPersistentRetryEnabled(true)).to_equal(true)

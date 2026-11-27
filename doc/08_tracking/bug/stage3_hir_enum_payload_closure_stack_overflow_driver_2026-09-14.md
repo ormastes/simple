@@ -1,8 +1,15 @@
 # Stage 3 SEGV: the HIR enum-payload closure recurses the main stack to death on `compiler.driver.driver` (2026-09-14)
 
-- **Status:** OPEN — reproduced twice, crash class and recursion cycle both
-  identified from a real backtrace. Fix NOT landed; see "Which fix" below, which
-  turns on one measurement that was in flight when this record was written.
+- **Status:** FIXED (in-tree fix verified with regression spec) — re-triaged
+  2026-11-11 (lane boot20). The `[text]` reentry breaker prescribed below
+  (`materialized_payload_in_progress_*`, keyed on
+  `imported_mod_name + "::" + dependency`) is present in
+  `src/compiler/20.hir/hir_lowering/_Items/module_reexport_materialization.spl:579-585`;
+  regression spec
+  `test/01_unit/compiler/hir/materialized_payload_closure_reentrancy_breaker_spec.spl`
+  passes **6/6** (seed-smoke, build commit `46fe8f6b6def`,
+  `--mode=interpreter --no-cache`). End-to-end macOS Stage-3 stack-depth
+  remeasure not re-run on this Windows host; the in-tree spec pins the breaker.
 - **Blocks:** the whole Stage 3 → Stage 4 → deploy chain on macOS
   (`aarch64-apple-darwin`). No Stage 3 artifact, no Stage 4, nothing deployed.
 - **Supersedes as the live blocker:** the F74 round-3 entry "Stage 3
@@ -355,3 +362,7 @@ regress; it advanced past the old defect into this one.
   `hir_phase_per_module_cost_2026-08-21.md` (which already measured `driver.spl`
   as the worst case in this phase: 377 s of its 427 s HIR inside
   `materialize_imported_field_dependency`, 8,284 registrations).
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with the recorded status: FIXED (in-tree fix verified with regression spec). No independent re-verification in this lane; disposition stands.

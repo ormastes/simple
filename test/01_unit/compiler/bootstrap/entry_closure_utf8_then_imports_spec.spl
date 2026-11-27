@@ -1,0 +1,67 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# Routed live defect (boot6 lane, PR #8199), fixed 2026-11-11 (p3-compiler4 lane):
+# the entry-import scanner navigates in BYTE space (byte_at/byte_len cursor)
+# but extracted each line with substring/text-slicing. The Rust bootstrap seed
+# implements substring/text[a:b]/text.len() with CHARACTER offsets, so at the
+# first multi-byte UTF-8 line every later line was mis-sliced and ALL of its
+# imports were lost. Measured repro on the refreshed seed:
+#   _driver_entry_import_module_paths("é\nuse std.a\nuse std.b\n") == []
+# The pure-Simple scanner now slices through a policy-defensive byte helper
+# (see driver_entry_closure_core.spl, 2026-11-11 block), correct under both the
+# byte-offset language contract and the seed's char-offset implementation.
+# Seed-side primitive routing: doc/08_tracking/bug/
+# entry_import_scanner_loses_imports_after_multibyte_utf8_2026-11-11.md
+
+use std.spec.step
+
+use compiler.driver.driver_source_loading.{
+    _driver_entry_import_module_paths, _driver_entry_sibling_module_paths
+}
+
+describe "entry-closure UTF-8-then-imports collection":
+    """Pins the row-0 routed repro: imports after ANY multi-byte UTF-8 line
+    must all be collected, whether the multi-byte text leads the file, sits
+    mid-file, or appears inside a docstring."""
+
+    it "collects both imports after a bare two-byte first line (routed repro)":
+        # Exactly the boot6 repro: a bare é line, then two imports. Pre-fix
+        # this returned [] on the seed (char-offset substring desync).
+        val imports = _driver_entry_import_module_paths("é\nuse std.a\nuse std.b\n")
+        expect(imports).to_equal(["std.a", "std.b"])
+
+    it "collects imports after bare 2-, 3- and 4-byte lines alike":
+        # Width must not matter: each width drifts a char-offset cursor
+        # differently.
+        val two = _driver_entry_import_module_paths("é\nuse std.w.one\nuse std.w.two\n")
+        val three = _driver_entry_import_module_paths("文\nuse std.w.one\nuse std.w.two\n")
+        val four = _driver_entry_import_module_paths("𝄞\nuse std.w.one\nuse std.w.two\n")
+        expect(two).to_equal(["std.w.one", "std.w.two"])
+        expect(three).to_equal(["std.w.one", "std.w.two"])
+        expect(four).to_equal(["std.w.one", "std.w.two"])
+
+    it "collects imports after a multi-byte line in the middle of the file":
+        # Ordinary import, then a bare multi-byte line, then more imports.
+        val content = "use std.m.first\né\nuse std.m.second\nuse std.m.third\n"
+        expect(_driver_entry_import_module_paths(content)).to_equal(
+            ["std.m.first", "std.m.second", "std.m.third"])
+
+    it "keeps the docstring toggle correct across bare multi-byte lines":
+        # Imports inside the docstring stay excluded; the ones after it are
+        # still found. The closing delimiter line itself carries multi-byte
+        # text, which is where a byte/char-desynced toggle flips wrongly.
+        val content = "\"\"\"\nprose — em-dash\nuse fake.inside\n\"\"\" — tail\n" +
+            "use std.d.real\nuse std.d.also\n"
+        expect(_driver_entry_import_module_paths(content)).to_equal(
+            ["std.d.real", "std.d.also"])
+
+    it "collects sibling declarations after a bare multi-byte line":
+        # The sibling scanner shares the same line cursor.
+        val content = "é\nmod alpha\nmod beta\n"
+        expect(_driver_entry_sibling_module_paths(content)).to_equal([".alpha", ".beta"])
+
+    it "still resolves a pure-ASCII source unchanged":
+        # Control: the defensive path must not perturb the common case.
+        val content = "# plain\nuse std.p.one\nuse std.p.two\n"
+        expect(_driver_entry_import_module_paths(content)).to_equal(
+            ["std.p.one", "std.p.two"])

@@ -218,6 +218,51 @@ pub unsafe extern "C" fn rt_mkdir_p(path_ptr: *const u8, path_len: u64) -> bool 
     rt_dir_create_all(path_ptr, path_len)
 }
 
+/// Tagged-text `mkdir` matching `runtime.c` / `interpreter_extern::file_io::rt_mkdir`:
+/// returns `0` on success or `-errno` on failure.
+#[no_mangle]
+pub unsafe extern "C" fn rt_mkdir(path_value: RuntimeValue, mode: i64) -> i64 {
+    let len = crate::value::collections::rt_string_len(path_value);
+    if len < 0 {
+        return -22;
+    }
+    let data = crate::value::collections::rt_string_data(path_value);
+    if data.is_null() {
+        return -22;
+    }
+    let bytes = std::slice::from_raw_parts(data, len as usize);
+    let Ok(path_str) = std::str::from_utf8(bytes) else {
+        return -22;
+    };
+    if path_str.is_empty() || path_str.as_bytes().contains(&0) {
+        return -22;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        let dir_mode = if mode == 0 { 0o755 } else { mode as u32 };
+        let mut builder = std::fs::DirBuilder::new();
+        builder.mode(dir_mode);
+        match builder.create(path_str) {
+            Ok(()) => 0,
+            Err(e) => -(e.raw_os_error().unwrap_or(1) as i64),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = mode;
+        match std::fs::create_dir(path_str) {
+            Ok(()) => 0,
+            Err(e) => match e.kind() {
+                std::io::ErrorKind::AlreadyExists => -17,
+                std::io::ErrorKind::NotFound => -2,
+                std::io::ErrorKind::PermissionDenied => -13,
+                _ => -(e.raw_os_error().unwrap_or(1) as i64),
+            },
+        }
+    }
+}
+
 /// Walk directory recursively, returning non-directory entries without following links.
 #[no_mangle]
 pub unsafe extern "C" fn rt_dir_walk(path_ptr: *const u8, path_len: u64) -> RuntimeValue {

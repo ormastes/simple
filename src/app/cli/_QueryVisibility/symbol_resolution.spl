@@ -5,29 +5,10 @@
 # Wraps the existing text-oriented query commands and enriches them with
 # lightweight visibility metadata derived from file/module boundaries.
 
-use app.cli.query_rich_common.{query_file_read_rich, query_file_exists, query_process_run, query_cli_get_args}
+use app.cli.query_rich_common.{query_process_run, query_cli_get_args}
+use app.cli._QueryVisibility.source_reader.{query_visibility_source_exists_v1, query_visibility_source_read_v1}
 use app.cli.query_sanitize.{sanitize_path, sanitize_symbol}
-use common.text_advanced.{escape_json}
-
-# Native bootstrap tail-range workaround; callers pass guarded starts1 or2.
-# Keep empty elements, including trailing separators, exactly as slice.join.
-# @workaround bug=query-native-array-tail-range-20261016 recover=5e9123a377ef9a6278ec1ae6e65954112b84a4de reason=native-range-lowering
-fn query_join_slash_tail_v1(parts: [text], start: i64) -> text:
-    var result = ""
-    var index = start
-    while index < parts.len():
-        if index > start: result = result + "/"
-        result = result + parts[index]
-        index = index + 1
-    result
-
-# Literal-dot suffix removal: preserve internal dots and remove every tail dot.
-# @workaround bug=query-native-trim-end-dot-20261016 recover=5e9123a377ef9a6278ec1ae6e65954112b84a4de reason=native-method-resolution
-fn query_trim_trailing_dots_v1(value: text) -> text:
-    var result = value
-    while result.ends_with("."):
-        result = result.substring(0, result.len() - 1)
-    result
+use app.io.env_ops.{cwd}
 
 # Declaration-text helpers (moved down from query_commands 2026-10-16):
 # symbol_resolution is the leaf of this package -- query_commands imports
@@ -39,9 +20,9 @@ fn query_trim_trailing_dots_v1(value: text) -> text:
 # through its existing `use app.cli._QueryVisibility.symbol_resolution.*`.
 
 fn declaration_line(symbol: text, owner_file: text) -> text:
-    if not query_file_exists(owner_file):
+    val content = query_visibility_source_read_v1(owner_file) ?? ""
+    if content == "":
         return ""
-    val content = query_file_read_rich(owner_file) ?? ""
     val lines = content.split("\n")
     for line in lines:
         val trimmed = line.trim()
@@ -85,26 +66,20 @@ fn declaration_name(line: text) -> text:
     declaration_token(trimmed)
 
 fn declaration_token(rest: text) -> text:
-    var token = rest.trim()
-    val space_parts = token.split(" ")
-    if space_parts.len() > 0:
-        token = space_parts[0]
-    val paren_parts = token.split("(")
-    if paren_parts.len() > 0:
-        token = paren_parts[0]
-    val colon_parts = token.split(":")
-    if colon_parts.len() > 0:
-        token = colon_parts[0]
-    val eq_parts = token.split("=")
-    if eq_parts.len() > 0:
-        token = eq_parts[0]
-    val dot_parts = token.split(".")
-    if dot_parts.len() > 0:
-        token = dot_parts[0]
-    token.trim()
+    val trimmed = rest.trim()
+    val n = trimmed.byte_len()
+    var i = 0
+    while i < n:
+        val b = trimmed.byte_at(i) as i64
+        if b == 32 or b == 40 or b == 58 or b == 61 or b == 46:
+            return trimmed.substring(0, i).trim()
+        i = i + 1
+    trimmed
 
 
-fn strip_visibility_prefix(line: text) -> text:
+pub fn strip_visibility_prefix(line: text) -> text:
+    if line.byte_len() < 4 or (line.byte_at(0) as i64) != 112:
+        return line
     var trimmed = line
     if trimmed.starts_with("pub(peer)"):
         return trimmed.substring(9).trim()
@@ -143,9 +118,9 @@ fn resolve_symbol_file(current_file: text, symbol: text) -> text:
     current_file
 
 fn parse_imported_modules(file_path: text) -> [text]:
-    if not query_file_exists(file_path):
+    val content = query_visibility_source_read_v1(file_path) ?? ""
+    if content == "":
         return []
-    val content = query_file_read_rich(file_path) ?? ""
     val lines = content.split("\n")
     var modules: [text] = []
     for line in lines:
@@ -154,13 +129,11 @@ fn parse_imported_modules(file_path: text) -> [text]:
             val rest = trimmed.substring(4)
             val end_idx = rest.index_of("{")
             if end_idx >= 0:
-                # @workaround bug=query-native-trim-end-dot-20261016 recover=5e9123a377ef9a6278ec1ae6e65954112b84a4de reason=native-method-resolution
-                modules = modules.push(query_trim_trailing_dots_v1(rest.substring(0, end_idx).trim()))
+                modules = modules.push(rest.substring(0, end_idx).trim().trim_end("."))
             else:
                 val star_idx = rest.index_of("*")
                 if star_idx >= 0:
-                    # @workaround bug=query-native-trim-end-dot-20261016 recover=5e9123a377ef9a6278ec1ae6e65954112b84a4de reason=native-method-resolution
-                    modules = modules.push(query_trim_trailing_dots_v1(rest.substring(0, star_idx).trim()))
+                    modules = modules.push(rest.substring(0, star_idx).trim().trim_end("."))
                 else:
                     modules = modules.push(rest.trim())
     modules
@@ -171,28 +144,27 @@ fn resolve_module_path(mod_path: text) -> text:
         if slash_parts.len() >= 2 and slash_parts[0].contains("-"):
             val owner_segment = slash_parts[0]
             val owner_domain = owner_segment.replace("-", "_")
-            # @workaround bug=query-native-array-tail-range-20261016 recover=5e9123a377ef9a6278ec1ae6e65954112b84a4de reason=native-range-lowering
-            val type_base = "src/type/" + owner_domain + "/" + query_join_slash_tail_v1(slash_parts, 1)
+            val type_base = "src/type/" + owner_domain + "/" + slash_parts[1..].join("/")
             val init_type_base = type_base + "/__init__.spl"
-            if query_file_exists(init_type_base):
+            if query_visibility_source_exists_v1(init_type_base):
                 return init_type_base
             val type_mod = type_base + "/mod.spl"
-            if query_file_exists(type_mod):
+            if query_visibility_source_exists_v1(type_mod):
                 return type_mod
             val type_direct = type_base + ".spl"
-            if query_file_exists(type_direct):
+            if query_visibility_source_exists_v1(type_direct):
                 return type_direct
 
     if not mod_path.contains("."):
         val type_base = "src/type/simple_lang/" + mod_path
         val init_type_base = type_base + "/__init__.spl"
-        if query_file_exists(init_type_base):
+        if query_visibility_source_exists_v1(init_type_base):
             return init_type_base
         val type_mod = type_base + "/mod.spl"
-        if query_file_exists(type_mod):
+        if query_visibility_source_exists_v1(type_mod):
             return type_mod
         val type_direct = type_base + ".spl"
-        if query_file_exists(type_direct):
+        if query_visibility_source_exists_v1(type_direct):
             return type_direct
 
     var path = mod_path
@@ -204,18 +176,35 @@ fn resolve_module_path(mod_path: text) -> text:
         path = "lib." + path
     val file_base = "src/" + path.split(".").join("/")
     val init_file_base = file_base + "/__init__.spl"
-    if query_file_exists(init_file_base):
+    if query_visibility_source_exists_v1(init_file_base):
         return init_file_base
     val mod_file = file_base + "/mod.spl"
-    if query_file_exists(mod_file):
+    if query_visibility_source_exists_v1(mod_file):
         return mod_file
     val direct_file = file_base + ".spl"
-    if query_file_exists(direct_file):
+    if query_visibility_source_exists_v1(direct_file):
         return direct_file
     ""
 
+fn _qv_utf8_char_byte_offset(value: text, char_idx: i64) -> i64:
+    val n = value.byte_len()
+    if char_idx <= 0:
+        return 0
+    var count = 0
+    var i = 0
+    while i < n:
+        val b = value.byte_at(i) as i64
+        if b < 128 or b >= 192:
+            if count == char_idx:
+                return i
+            count = count + 1
+        i = i + 1
+    if count == char_idx:
+        return n
+    -1
+
 fn extract_symbol_at(file: text, line_num: i64, col: i64) -> text:
-    val content = query_file_read_rich(file) ?? ""
+    val content = query_visibility_source_read_v1(file) ?? ""
     if content == "":
         return ""
     val lines = content.split("\n")
@@ -225,44 +214,39 @@ fn extract_symbol_at(file: text, line_num: i64, col: i64) -> text:
     val declared = declaration_name(target)
     if declared != "":
         return declared
-    val chars = text_chars(target)
-    if col > 0 and col <= chars.len():
-        var idx = col - 1
-        if idx >= chars.len():
-            idx = chars.len() - 1
-        if idx >= 0 and idx < chars.len() and not is_ident_char(chars[idx]) and idx > 0 and is_ident_char(chars[idx - 1]):
-            idx = idx - 1
-        if idx >= 0 and idx < chars.len() and is_ident_char(chars[idx]):
-            var start = idx
-            var end_pos = idx
-            while start > 0 and is_ident_char(chars[start - 1]):
-                start = start - 1
-            while end_pos + 1 < chars.len() and is_ident_char(chars[end_pos + 1]):
-                end_pos = end_pos + 1
-            var parts: [text] = []
-            var i = start
-            while i <= end_pos:
-                parts = parts.push(chars[i])
-                i = i + 1
-            return parts.join("")
-    return ""
+    val n = target.byte_len()
+    if col > 0 and n > 0:
+        var idx = _qv_utf8_char_byte_offset(target, col - 1)
+        if idx >= 0 and idx < n:
+            if not qv_is_ident_byte(target.byte_at(idx) as i64) and idx > 0 and qv_is_ident_byte(target.byte_at(idx - 1) as i64):
+                idx = idx - 1
+            if qv_is_ident_byte(target.byte_at(idx) as i64):
+                var start = idx
+                var end_pos = idx
+                while start > 0 and qv_is_ident_byte(target.byte_at(start - 1) as i64):
+                    start = start - 1
+                while end_pos + 1 < n and qv_is_ident_byte(target.byte_at(end_pos + 1) as i64):
+                    end_pos = end_pos + 1
+                return target.substring(start, end_pos + 1)
+    ""
 
 fn token_name_at(file: text, line_num: i64, col: i64, length: i64) -> text:
-    val content = query_file_read_rich(file) ?? ""
+    if col < 0 or length <= 0:
+        return ""
+    val content = query_visibility_source_read_v1(file) ?? ""
     if content == "":
         return ""
     val lines = content.split("\n")
     if line_num < 0 or line_num >= lines.len():
         return ""
-    val chars = text_chars(lines[line_num])
-    if col < 0 or col + length > chars.len():
+    val line = lines[line_num]
+    val b_start = _qv_utf8_char_byte_offset(line, col)
+    if b_start < 0:
         return ""
-    var parts: [text] = []
-    var i = col
-    while i < col + length:
-        parts = parts.push(chars[i])
-        i = i + 1
-    return parts.join("")
+    val b_end = _qv_utf8_char_byte_offset(line, col + length)
+    if b_end < b_start:
+        return ""
+    line.substring(b_start, b_end)
 
 fn semantic_token_type_number(name: text) -> i64:
     if name == "namespace":
@@ -324,7 +308,31 @@ fn parent_dir(path: text) -> text:
         return ""
     path.substring(0, idx)
 
-fn relative_to_src(path: text) -> text:
+# Normalise "\\" to "/" and make an absolute path repo-relative by stripping
+# the process cwd prefix (the repo root when run from it).
+fn repo_relative_path(raw: text) -> text:
+    val path = if raw.contains("\\"): raw.replace("\\", "/") else: raw
+    if path == "":
+        return ""
+    val b0 = path.byte_at(0) as i64
+    val is_abs = b0 == 47 or (path.byte_len() >= 2 and (path.byte_at(1) as i64) == 58)
+    if not is_abs:
+        return path
+    var root = cwd()
+    if root.contains("\\"):
+        root = root.replace("\\", "/")
+    if root == "":
+        return path
+    if not root.ends_with("/"):
+        root = root + "/"
+    if path.lower().starts_with(root.lower()):
+        return path.substring(root.len())
+    path
+
+fn relative_to_src(raw: text) -> text:
+    if raw.starts_with("src/"):
+        return raw.substring(4)
+    val path = repo_relative_path(raw)
     val idx = path.index_of("/src/")
     if idx >= 0:
         return path.substring(idx + 5)
@@ -332,25 +340,55 @@ fn relative_to_src(path: text) -> text:
         return path.substring(4)
     path
 
-fn contains_symbol_token(line: text, symbol: text) -> bool:
-    val chars = text_chars(line)
-    val symbol_chars = text_chars(symbol)
-    if symbol_chars.len() == 0 or chars.len() < symbol_chars.len():
+fn qv_is_ident_byte(b: i64) -> bool:
+    (b >= 97 and b <= 122) or (b >= 65 and b <= 90) or (b >= 48 and b <= 57) or b == 95
+
+fn is_ident_word(value: text) -> bool:
+    val n = value.byte_len()
+    if n == 0:
         return false
+    var i = 0
+    while i < n:
+        if not qv_is_ident_byte(value.byte_at(i) as i64):
+            return false
+        i = i + 1
+    true
+
+pub fn collect_ident_tokens_into(line: text, mut out: {text: bool}):
+    val n = line.byte_len()
+    var i = 0
+    while i < n:
+        if qv_is_ident_byte(line.byte_at(i) as i64):
+            val start = i
+            i = i + 1
+            while i < n and qv_is_ident_byte(line.byte_at(i) as i64):
+                i = i + 1
+            out[line.substring(start, i)] = true
+        else:
+            i = i + 1
+
+fn contains_symbol_token(line: text, symbol: text) -> bool:
+    val sym_len = symbol.byte_len()
+    val line_len = line.byte_len()
+    if sym_len == 0 or line_len < sym_len:
+        return false
+    val first_b = symbol.byte_at(0) as i64
     var pos = 0
-    while pos <= chars.len() - symbol_chars.len():
-        var matches = true
-        var j = 0
-        while j < symbol_chars.len():
-            if chars[pos + j] != symbol_chars[j]:
-                matches = false
-                break
-            j = j + 1
-        if matches:
-            val left_ok = if pos == 0: true else: not is_ident_char(chars[pos - 1])
-            val right_ok = if pos + symbol_chars.len() >= chars.len(): true else: not is_ident_char(chars[pos + symbol_chars.len()])
-            if left_ok and right_ok:
-                return true
+    while pos + sym_len <= line_len:
+        if (line.byte_at(pos) as i64) == first_b:
+            var matches = true
+            var j = 1
+            while j < sym_len:
+                if (line.byte_at(pos + j) as i64) != (symbol.byte_at(j) as i64):
+                    matches = false
+                    break
+                j = j + 1
+            if matches:
+                val left_ok = if pos == 0: true else: not qv_is_ident_byte(line.byte_at(pos - 1) as i64)
+                val right_pos = pos + sym_len
+                val right_ok = if right_pos >= line_len: true else: not qv_is_ident_byte(line.byte_at(right_pos) as i64)
+                if left_ok and right_ok:
+                    return true
         pos = pos + 1
     false
 
@@ -368,13 +406,61 @@ fn bool_json(value: bool) -> text:
         return "true"
     "false"
 
-fn json_text_array(items: [text]) -> text:
+val _QV_JSON_HEX = "0123456789abcdef"
+
+fn _qv_escape_json_ctrl(code: i64) -> text:
+    if code == 8:
+        return "\\b"
+    if code == 9:
+        return "\\t"
+    if code == 10:
+        return "\\n"
+    if code == 12:
+        return "\\f"
+    if code == 13:
+        return "\\r"
+    val hi = code / 16
+    val lo = code % 16
+    "\\u00" + _QV_JSON_HEX.substring(hi, hi + 1) + _QV_JSON_HEX.substring(lo, lo + 1)
+
+pub fn escape_json(s: text) -> text:
+    val n = s.byte_len()
+    var i = 0
+    while i < n:
+        val b = s.byte_at(i) as i64
+        if b < 32 or b == 34 or b == 92:
+            break
+        i = i + 1
+    if i == n:
+        return s
+    var parts: [text] = []
+    if i > 0:
+        parts.push(s.substring(0, i))
+    var span_start = i
+    while i < n:
+        val b = s.byte_at(i) as i64
+        if b < 32 or b == 34 or b == 92:
+            if i > span_start:
+                parts.push(s.substring(span_start, i))
+            if b == 34:
+                parts.push("\\\"")
+            elif b == 92:
+                parts.push("\\\\")
+            else:
+                parts.push(_qv_escape_json_ctrl(b))
+            span_start = i + 1
+        i = i + 1
+    if span_start < n:
+        parts.push(s.substring(span_start, n))
+    parts.join("")
+
+pub fn json_text_array(items: [text]) -> text:
     var encoded: [text] = []
     for item in items:
-        encoded = encoded.push(json_text(item))
+        encoded.push(json_text(item))
     encoded.join(",")
 
-fn json_text(value: text) -> text:
+pub fn json_text(value: text) -> text:
     "\"" + escape_json(value) + "\""
 
 fn find_spl_files(root: text) -> [text]:

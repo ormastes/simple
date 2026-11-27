@@ -1,0 +1,25 @@
+use app.mcpgdb.console_admission_v1.{console_admission_v1_validate}
+use app.mcpgdb.debug_rules.{classify_command}
+
+fn console_admission_v1_accepted(command: text) -> bool:
+    match console_admission_v1_validate(command):
+        Ok(value): value
+        Err(_): false
+
+describe "resident GDB restricted console source controls":
+    it "admits documented inspection and execution grammar":
+        for command in ["info threads", "info registers", "info registers rax", "help", "info functions", "info registers rax rbx", "info  threads", "print *pointer", "print object.field", "print object->field", "print array[0]", "p/x counter", "help print", "help info registers", "info functions ^main", "print -42", "print -0x10", "print &counter", "print **pointer", "print object.items[2].value", "info breakpoints", "info locals", "info args", "info frame", "info program", "info files", "info sharedlibrary", "print counter", "p $pc", "print 0x1234", "print 42", "output counter", "bt", "bt 12", "backtrace 3", "where", "frame 0", "up 1", "down 1", "continue", "c", "step", "s", "next", "n", "finish", "interrupt", "  info threads  "]:
+            expect(console_admission_v1_accepted(command)).to_equal(true)
+
+    it "rejects command escapes aliases unknown commands and expression effects":
+        # Strings are fixtures only: none is submitted to GDB or a shell.
+        for command in ["", " ", "!echo fixture", "! echo fixture", "shell echo fixture", "make fixture", "pipe info threads | echo fixture", "|info threads|echo fixture", "python pass", "pi pass", "guile 1", "compile code", "interpreter-exec console quit", "source fixture", "so fixture", "define fixture", "commands", "quit", "q", "unknown_fixture", "inf threads", "Info threads", "INFO THREADS", "info", "info threads | echo fixture", "info threads; quit", "info\tthreads", "info threads\nquit", "info threads\rquit", "print", "p", "print $", "print $_shell(\"echo fixture\")", "p $_shell (\"echo fixture\")", "print (int)$_shell(\"echo fixture\")", "print target_function()", "print array[function()]", "print object.method()", "help shell;quit", "info functions .* | echo fixture", "print + +counter++", "print - -counter--", "p/x $_shell(\"echo fixture\")", "print x=1", "print x++", "print ++x", "print {int}0=1", "print \"quoted\"", "print 'quoted'", "print 1,2", "print 1+2", "print $pc=1", "output $_shell(\"echo fixture\")", "bt -1", "bt 99999999999", "continue &", "c 2", "set $pc=1", "run", "attach 123", "monitor reset", "target remote fixture:1"]:
+            expect(console_admission_v1_accepted(command)).to_equal(false)
+        expect(console_admission_v1_accepted("print target_function")).to_equal(true)
+
+    it "preserves execution policy classification for admitted aliases":
+        for command in ["continue", "c", "step", "s", "next", "n", "finish", "interrupt"]:
+            expect(console_admission_v1_accepted(command)).to_equal(true)
+            expect(classify_command("gdb", command)).to_equal("execution_control")
+        expect(classify_command("gdb", "set $pc=1")).to_equal("target_mutation")
+        expect(classify_command("gdb", "run")).to_equal("session_topology")

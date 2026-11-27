@@ -1,0 +1,185 @@
+"""
+## Purpose and audience
+As the Linux host operator preparing an Enrolled Linux Host guest, I want every signed fixture the
+enrolled-host specs read to come from the same canonical encoders and signer the controller uses, so a
+fixture can never pass a spec that the real controller would refuse. Written for the orchestrator
+verification owner and whoever runs `check-linux-orchestrator-host-qemu.shs --run-specs`.
+## Operator workflow
+Run this one file and read `SPEC FILE VERDICT`. The guest wrapper runs the matching generator,
+`test/fixtures/orchestrator/enrolled_host_signed_fixture_gen.spl`, with the self-hosted binary before the
+enrolled-host specs, replacing the placeholder fixtures it can produce.
+## Compatibility and limitations
+Keys are fresh OS-entropy Ed25519 seeds written as OpenSSH private files by the canonical encoder; each
+run uses new keys under a private temp root and nothing is a real secret. Fixture classes that need a
+live enrolled Host (V6 attach/invoke/detach) or a producer not yet written (installer parent, profiles) report
+`pending("BLOCKED: ...")` with the exact missing input, never a skip.
+## Verification guidance and troubleshooting
+A refusal case that reports Ok means a forged, swapped or wrongly formatted fixture would be accepted by
+the controller or the Host; treat it as a security defect, not a fixture problem.
+"""
+use std.spec.{describe, it, expect, step, fail, pending}
+use std.common.crypto.sha256.sha256_text
+use std.common.base_encoding.base64.base64_encode_bytes
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_create_exclusive}
+use std.nogc_sync_mut.io_runtime.mkdir_p
+use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.distributed_verify_grant_approval_from_snapshot_v2
+use std.nogc_sync_mut.io.host_enrollment_v1.{HostEnrollmentCredentialV1, host_enrollment_credential_encode_v1,
+    host_enrollment_credential_decode_v1}
+use std.common.contracts.orchestration.host_linux_service_enrollment_v3.{host_linux_service_enrollment_encode_v3,
+    host_linux_service_enrollment_decode_v3}
+use app.orchestrator.host_identity_key_v1.host_identity_private_public_v1
+use app.orchestrator.controller_gateway_v1.controller_gateway_request_decode_v1
+use test.fixtures.orchestrator.enrolled_host_signed_fixture_v1.*
+
+fn fixture_inputs_v1(parent: text, host_root: text) -> EnrolledFixtureInputsV1:
+    EnrolledFixtureInputsV1(controller_id: "fixture-controller", approver_id: "fixture-approver",
+        principal: "fixture-operator", project: "fixture-project", physical_host_id: "simple-orch-host",
+        service_scope_id: "fixture-scope", native_machine_id: "0123456789abcdef0123456789abcdef",
+        provider_identity_digest: sha256_text("fixture-provider"), machine_parent: parent + "/machine-parent",
+        host_root: host_root, physical_cpu_millis: 8000, physical_memory_bytes: 8589934592,
+        reserved_cpu_millis: 1000, reserved_memory_bytes: 1073741824, now_ms: 1800000000000)
+
+fn fixture_verify_v1(authority: EnrolledFixtureAuthorityV1, credential: HostEnrollmentCredentialV1,
+        now: i64) -> Result<bool, text>:
+    val snapshot = authority.policy.snapshot
+    val _grant = distributed_verify_grant_approval_from_snapshot_v2(snapshot, credential.signed, credential.approval,
+        credential.operation, now, snapshot.generation, snapshot.policy_revision, snapshot.revocation_epoch,
+        authority.policy.session_generation)?
+    Ok(true)
+
+fn fixture_pins_dir_v1(parent: text, salt: text) -> text:
+    val dir = parent + "/input-" + salt
+    assert(mkdir_p(dir))
+    for name in ENROLLED_FIXTURE_PINNED_INPUTS_V1:
+        assert(file_create_exclusive(dir + "/" + name, "fixture: \"" + name + "-" + salt + "\"\n"))
+    dir
+
+struct FixtureIssuedV1:
+    authority: EnrolledFixtureAuthorityV1
+    inputs: EnrolledFixtureInputsV1
+    credential: HostEnrollmentCredentialV1
+
+fn fixture_issue_v1() -> Result<FixtureIssuedV1, text>:
+    val parent = secure_temp_dir("/tmp", "orch-signed-fixture-")?
+    val root = secure_temp_dir(parent, "dispatch-")?
+    val host_root = secure_temp_dir(parent, "host-")?
+    val inputs = fixture_inputs_v1(parent, host_root)
+    val authority = enrolled_fixture_authority_v1(inputs)?
+    val context = enrolled_fixture_dispatch_install_v1(root, inputs, authority.policy_bytes)?
+    val pins = enrolled_fixture_pins_v1(fixture_pins_dir_v1(parent, "a"))?
+    val binding = enrolled_fixture_binding_v1(inputs, authority.policy_bytes, pins)?
+    val credential = enrolled_fixture_issue_v1(context, enrolled_fixture_reader_v1(authority), inputs, binding)?
+    Ok(FixtureIssuedV1(authority: authority, inputs: inputs, credential: credential))
+
+describe "Enrolled Linux Host signed fixtures from the canonical encoders":
+    it "issues an enrollment credential that verifies against the generated authority policy":
+        step("Generate issuer and approver OpenSSH keys, the authority policy and the dispatch root")
+        val issued = fixture_issue_v1()
+        if issued.is_err():
+            fail("fixture issuance failed: " + issued.unwrap_err())
+            return
+        val fixture = issued.unwrap()
+        step("Decode the published credential bytes and verify both signatures from the installed snapshot")
+        val bytes = host_enrollment_credential_encode_v1(fixture.credential)
+        expect(bytes.is_ok()).to_equal(true)
+        val decoded = host_enrollment_credential_decode_v1(bytes.unwrap())
+        expect(decoded.is_ok()).to_equal(true)
+        val verified = fixture_verify_v1(fixture.authority, decoded.unwrap(), fixture.inputs.now_ms)
+        if verified.is_err(): fail("generated credential did not verify: " + verified.unwrap_err())
+        expect(verified.is_ok()).to_equal(true)
+
+    it "refuses a credential whose grant signature was altered":
+        val issued = fixture_issue_v1()
+        if issued.is_err():
+            fail("fixture issuance failed: " + issued.unwrap_err())
+            return
+        val fixture = issued.unwrap()
+        step("Flip one signature byte and verify again")
+        var credential = fixture.credential
+        var signed = credential.signed
+        var signature = signed.signature
+        signature[0] = (((signature[0] as i64) + 1) % 256) as u8
+        signed.signature = signature
+        credential.signed = signed
+        val refused = fixture_verify_v1(fixture.authority, credential, fixture.inputs.now_ms)
+        expect(refused.is_err()).to_equal(true)
+        if refused.is_err(): expect(refused.unwrap_err()).to_equal("ISSUER_SIGNATURE_INVALID")
+
+    it "refuses a credential checked against a policy that pins another issuer key":
+        val issued = fixture_issue_v1()
+        if issued.is_err():
+            fail("fixture issuance failed: " + issued.unwrap_err())
+            return
+        val fixture = issued.unwrap()
+        step("Generate an unrelated authority with the same identities and verify under its snapshot")
+        val other = enrolled_fixture_authority_v1(fixture.inputs)
+        expect(other.is_ok()).to_equal(true)
+        val refused = fixture_verify_v1(other.unwrap(), fixture.credential, fixture.inputs.now_ms)
+        expect(refused.is_err()).to_equal(true)
+        if refused.is_err(): expect(refused.unwrap_err()).to_equal("ISSUER_SIGNATURE_INVALID")
+
+    it "refuses to sign when the key store holds a key the policy does not pin":
+        val parent = secure_temp_dir("/tmp", "orch-signed-fixture-").unwrap()
+        val root = secure_temp_dir(parent, "dispatch-").unwrap()
+        val inputs = fixture_inputs_v1(parent, secure_temp_dir(parent, "host-").unwrap())
+        val authority = enrolled_fixture_authority_v1(inputs).unwrap()
+        val context = enrolled_fixture_dispatch_install_v1(root, inputs, authority.policy_bytes).unwrap()
+        val binding = enrolled_fixture_binding_v1(inputs, authority.policy_bytes,
+            enrolled_fixture_pins_v1(fixture_pins_dir_v1(parent, "b")).unwrap()).unwrap()
+        step("Swap the issuer key file for a freshly generated one and issue")
+        val stranger = enrolled_fixture_key_v1("simple-fixture-stranger").unwrap()
+        val swapped = EnrolledFixtureAuthorityV1(issuer: stranger, approver: authority.approver,
+            policy_bytes: authority.policy_bytes, policy: authority.policy, issuer_key: authority.issuer_key,
+            approver_key: authority.approver_key)
+        val refused = enrolled_fixture_issue_v1(context, enrolled_fixture_reader_v1(swapped), inputs, binding)
+        expect(refused.is_err()).to_equal(true)
+
+    it "refuses the openssl PKCS#8 key format the guest provisioned and accepts the canonical OpenSSH file":
+        val key = enrolled_fixture_key_v1("simple-fixture-format").unwrap()
+        step("The canonical OpenSSH private file decodes to the same public key")
+        val canonical = host_identity_private_public_v1(key.file)
+        expect(canonical.is_ok()).to_equal(true)
+        step("An `openssl genpkey -algorithm ed25519` PKCS#8 PEM of the same seed is refused")
+        var der: [u8] = [48u8, 46u8, 2u8, 1u8, 0u8, 48u8, 5u8, 6u8, 3u8, 43u8, 101u8, 112u8, 4u8, 34u8, 4u8, 32u8]
+        for byte in key.seed: der.push(byte)
+        val pem = "-----BEGIN PRIVATE KEY-----\n" + base64_encode_bytes(der) + "\n-----END PRIVATE KEY-----\n"
+        expect(host_identity_private_public_v1(pem.bytes()).is_err()).to_equal(true)
+
+    it "pins the five binding inputs and refuses a changed input or non-canonical binding bytes":
+        val parent = secure_temp_dir("/tmp", "orch-signed-fixture-").unwrap()
+        val inputs = fixture_inputs_v1(parent, parent + "/host")
+        val authority = enrolled_fixture_authority_v1(inputs).unwrap()
+        step("Encode the binding over the pinned inputs and decode it back byte-identical")
+        val pins = enrolled_fixture_pins_v1(fixture_pins_dir_v1(parent, "c")).unwrap()
+        val binding = enrolled_fixture_binding_v1(inputs, authority.policy_bytes, pins).unwrap()
+        val bytes = host_linux_service_enrollment_encode_v3(binding).unwrap()
+        val decoded = host_linux_service_enrollment_decode_v3(bytes)
+        expect(decoded.is_ok()).to_equal(true)
+        expect(decoded.unwrap().config_digest).to_equal(pins[0])
+        expect(decoded.unwrap().policy_digest).to_equal(sha256_text(authority.policy_bytes))
+        step("A different input set yields different pins, and padded binding bytes are refused")
+        val other = enrolled_fixture_pins_v1(fixture_pins_dir_v1(parent, "d")).unwrap()
+        expect(other[0] == pins[0]).to_equal(false)
+        expect(host_linux_service_enrollment_decode_v3(bytes + "\n").is_err()).to_equal(true)
+        step("A missing pinned input is reported by name")
+        val missing = enrolled_fixture_pins_v1(parent + "/no-such-input")
+        expect(missing.is_err()).to_equal(true)
+
+    it "writes the Caret SSH inspection request that the gateway decodes as read-only":
+        val request = enrolled_fixture_gateway_inspect_v1("ctrl-qual", "req-qual-1")
+        expect(request.is_ok()).to_equal(true)
+        val decoded = controller_gateway_request_decode_v1(request.unwrap())
+        expect(decoded.is_ok()).to_equal(true)
+        expect(decoded.unwrap().action).to_equal("inspect")
+        step("An unknown action and an inspection that carries a source are both refused")
+        expect(controller_gateway_request_decode_v1(request.unwrap().replace("inspect", "inspecx")).is_err()).to_equal(true)
+        expect(controller_gateway_request_decode_v1(request.unwrap().replace("source: \"\"", "source: \"x\"")).is_err()).to_equal(true)
+
+    it "reports the V6 attach, invoke and detach requests as blocked on a live enrolled Host":
+        pending("BLOCKED: no producer yet (todo 485); V6 attach/invoke/detach need a live enrolled Host's association digest, primary plan, signed helper request and pane binding (host_agent_attach_request_encode_v4 inputs) plus the route READY file")
+
+    it "reports the signed installer fixture parent as blocked on the binding's pinned inputs":
+        pending("BLOCKED: no producer yet (todo 486); the parent holds fixture-enrollment.sdn and fixture-credential.sdn (the binding and credential above) plus host-config, engine-policy, broker-policy and agent-helper-template, whose producers are todo 484")
+
+    it "reports the container profiles as blocked on an unwritten generator":
+        pending("BLOCKED: no profile generator yet (todo 481); machine_container_policy_bytes_v1, linux_oci_engine_policy_encode_v1 and linux_fresh_epoch_profile_decode_v1 exist, but the fresh-epoch and supervisor values pin the installed host's units, cgroups and broker executable")

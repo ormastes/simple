@@ -1,0 +1,210 @@
+"""
+Pure wrapper contracts for the configured native SSpec execution path.
+NOT_RUN: these structural cases do not prove native framework execution.
+The two real compiled framework fixtures are separate admission controls.
+"""
+# codex-system-test
+use std.spec.{describe, it, expect, step}
+use std.common.test_runner.native_framework_wrapper.{native_framework_wrapper_source, native_plain_wrapper_source, spipe_partition_source}
+use compiler.frontend.core.source_facts.{simple_code_lines, simple_string_continuation_lines, simple_string_byte_ranges}
+
+fn framework_wrap(source: text) -> text:
+    val result = native_framework_wrapper_source(source, simple_code_lines(source), simple_string_continuation_lines(source), simple_string_byte_ranges(source))
+    expect(result.is_ok()).to_equal(true)
+    result.unwrap()
+
+describe "complete configured native framework wrapper":
+    it "preserves wildcard framework imports and real matcher methods":
+        step("Wrap an actual framework call without substituting legacy intrinsics")
+        val source = "use std.spec.*\ndescribe \"suite\":\n    it \"case\":\n        expect(2 + 2).to_equal(4)\n"
+        val output = framework_wrap(source)
+        expect(output).to_contain("use std.spec.*\n")
+        expect(output).to_contain("expect(2 + 2).to_equal(4)")
+        expect(output.contains("rt_bdd_")).to_equal(false)
+        expect(output.contains("fn expect(")).to_equal(false)
+
+    it "retains named multiline imports including framework submodules":
+        step("Keep import braces and aliases outside generated main")
+        val source = "use std.spec.\{\n    describe, it, expect, step\n}\nuse std.spec.scenario_governance.\{ScenarioOmissionStatus}\ndescribe \"suite\":\n    it \"case\":\n        expect(3).to_equal(3)\n"
+        val output = framework_wrap(source)
+        expect(output).to_contain("use std.spec.{\n    describe, it, expect, step\n}")
+        expect(output).to_contain("use std.spec.scenario_governance.\{ScenarioOmissionStatus}")
+        expect(output.index_of("ScenarioOmissionStatus")).to_be_less_than(output.index_of("fn main() -> i64:"))
+
+    it "keeps hooks and nested closure bodies as framework calls":
+        step("Retain both lifecycle hooks and nested contexts")
+        val source = "use std.spec.*\nvar calls: i64 = 0\ndescribe \"outer\":\n    before_each():\n        calls = calls + 1\n    context \"inner\":\n        it \"body\":\n            expect(calls).to_equal(1)\n    after_each():\n        calls = calls + 1\n"
+        val output = framework_wrap(source)
+        expect(output).to_contain("    describe \"outer\":\n        before_each():\n            calls = calls + 1")
+        expect(output).to_contain("        context \"inner\":\n            it \"body\":")
+        expect(output).to_contain("        after_each():\n            calls = calls + 1")
+
+    it "preserves helper and sibling-local import aliases in their own scopes":
+        step("Do not hoist local aliases into a shared generated module namespace")
+        val source = "use std.spec.*\nfn helper(value: text) -> text:\n    use std.common.text.\{escape_json as helper_escape}\n    helper_escape(value)\ndescribe \"suite\":\n    it \"first\":\n        use std.common.text.\{escape_json as scoped}\n        expect(scoped(\"plain\")).to_equal(\"plain\")\n    it \"second\":\n        use std.common.crypto.sha256.\{sha256_text as scoped}\n        expect(scoped(\"plain\").len()).to_equal(64)\n"
+        val output = framework_wrap(source)
+        expect(output).to_contain("fn helper(value: text) -> text:\n    use std.common.text.\{escape_json as helper_escape}\n    helper_escape(value)")
+        expect(output).to_contain("        it \"first\":\n            use std.common.text.\{escape_json as scoped}")
+        expect(output).to_contain("        it \"second\":\n            use std.common.crypto.sha256.\{sha256_text as scoped}")
+        expect(output.contains("\nuse std.common.text.\{escape_json as scoped}\n")).to_equal(false)
+
+    it "retains structures public helpers and multiline globals at module scope":
+        step("Preserve declarations used by real Windows owner fixtures")
+        val source = "use std.spec.*\nstruct Reply:\n    code: i64\npub fn identity(value: i64) -> i64:\n    value\nval VALUES: [i64] = [\n    3,\n    5\n]\ndescribe \"suite\":\n    it \"case\":\n        expect(identity(VALUES[1])).to_equal(5)\n"
+        val output = framework_wrap(source)
+        val main_at = output.index_of("fn main() -> i64:")
+        expect(output.index_of("struct Reply:")).to_be_less_than(main_at)
+        expect(output.index_of("pub fn identity(")).to_be_less_than(main_at)
+        expect(output.index_of("\n]\n")).to_be_less_than(main_at)
+
+    it "does not rewrite matcher-like text inside multiline fixtures":
+        step("Use the compiler lexer facts rather than treating string payload as code")
+        val source = "use std.spec.*\nval FIXTURE = \"\"\"\nexpect 7 to_equal 8\nfn main():\n\"\"\"\ndescribe \"suite\":\n    it \"case\":\n        expect(FIXTURE.len()).to_be_greater_than(0)\n"
+        val output = framework_wrap(source)
+        expect(output).to_contain("expect 7 to_equal 8")
+        expect(output.contains("expect(7).to_equal(8)")).to_equal(false)
+        expect(output).to_contain("expect(FIXTURE.len()).to_be_greater_than(0)")
+
+    it "normalizes executable legacy infix assertions to real method calls":
+        step("Keep the existing infix spelling without reducing matcher semantics")
+        val output = framework_wrap("use std.spec.*\ndescribe \"suite\":\n    it \"case\":\n        expect 7 to_equal 7\n")
+        expect(output).to_contain("expect(7).to_equal(7)")
+        expect(output.contains("expect 7 == 7")).to_equal(false)
+
+    it "uses lexical matcher boundaries rather than quoted matcher text":
+        step("Keep a matcher-looking phrase inside both string operands unchanged")
+        val source = "use std.spec.*\ndescribe \"suite\":\n    it \"case\":\n        expect \"x to_equal y\" to_equal \"x to_equal y\"\n"
+        val output = framework_wrap(source)
+        expect(output).to_contain("expect(\"x to_equal y\").to_equal(\"x to_equal y\")")
+        expect(output.contains("expect(\"x).to_equal(")).to_equal(false)
+        val commented = framework_wrap("use std.spec.*\ndescribe \"suite\":\n    it \"case\":\n        expect 7 to_equal 7 # explanation\n")
+        expect(commented).to_contain("expect(7).to_equal(7) # explanation")
+        val unicode = framework_wrap("use std.spec.*\ndescribe \"suite\":\n    it \"case\":\n        expect \"한😀 # to_equal\" to_equal \"한😀 # to_equal\" # retained\n")
+        expect(unicode).to_contain("expect(\"한😀 # to_equal\").to_equal(\"한😀 # to_equal\") # retained")
+
+    it "uses framework summary executed count and exit status after the bodies":
+        step("Require real outcome owners and a zero-body refusal")
+        val output = framework_wrap("use std.spec.*\ndescribe \"suite\":\n    it \"body\":\n        expect(4).to_equal(4)\n")
+        expect(output).to_contain("use std.spec.{print_summary as __simple_native_spec_0_summary, get_executed_test_count as __simple_native_spec_0_executed, get_exit_code as __simple_native_spec_0_exit_code}")
+        expect(output.index_of("    __simple_native_spec_0_summary()")).to_be_greater_than(output.index_of("expect(4).to_equal(4)"))
+        expect(output).to_contain("if __simple_native_spec_0_executed() == 0:")
+        expect(output).to_contain("return 2")
+        expect(output).to_contain("return __simple_native_spec_0_exit_code()")
+
+    it "brings the scalar matcher trait into the entry scope for native dispatch":
+        step("Native MIR scalar-trait dispatch is consumer-scoped: the entry must import ExpectScalarMatcher")
+        val output = framework_wrap("use std.spec.{describe, it, expect}\ndescribe \"suite\":\n    it \"body\":\n        expect(4).to_equal(4)\n")
+        expect(output).to_contain("use std.spec.{{ExpectScalarMatcher as __simple_native_spec_0_matchers}}\n")
+        expect(output.index_of("ExpectScalarMatcher as __simple_native_spec_0_matchers")).to_be_less_than(output.index_of("describe \"suite\""))
+        expect(output.contains("fn expect(")).to_equal(false)
+
+    it "keeps skipped-only sources subject to the executed-example guard":
+        step("Preserve skip semantics without promoting skipped discovery to execution")
+        val output = framework_wrap("use std.spec.*\ndescribe \"suite\":\n    skip(\"disabled\", \"fixture reason\")\n")
+        expect(output).to_contain("skip(\"disabled\", \"fixture reason\")")
+        expect(output).to_contain("if __simple_native_spec_0_executed() == 0:")
+        expect(output.contains("fn skip(")).to_equal(false)
+
+    it "chooses a noncolliding result alias without renaming user declarations":
+        step("Keep user helpers and select the next bounded private alias")
+        val source = "use std.spec.*\nfn __simple_native_spec_0_summary() -> i64:\n    7\ndescribe \"suite\":\n    it \"case\":\n        expect(__simple_native_spec_0_summary()).to_equal(7)\n"
+        val output = framework_wrap(source)
+        expect(output).to_contain("print_summary as __simple_native_spec_1_summary")
+        expect(output).to_contain("fn __simple_native_spec_0_summary() -> i64:")
+
+    it "refuses an existing top-level main instead of hiding it":
+        step("Reject two entrypoint owners before native compilation")
+        val source = "fn main() -> i64:\n    0\n"
+        val result = native_framework_wrapper_source(source, simple_code_lines(source), simple_string_continuation_lines(source), simple_string_byte_ranges(source))
+        expect(result.is_err()).to_equal(true)
+        expect(result.unwrap_err()).to_equal("native-spec: source defines main")
+
+    it "allows a method named main without confusing it with the entrypoint":
+        step("Keep class methods distinct from the generated top-level main")
+        val source = "use std.spec.*\nclass Entry:\n    fn main() -> i64:\n        7\ndescribe \"suite\":\n    it \"case\":\n        expect(7).to_equal(7)\n"
+        val output = framework_wrap(source)
+        expect(output).to_contain("class Entry:\n    fn main() -> i64:")
+        expect(output).to_contain("\nfn main() -> i64:\n")
+
+    it "refuses empty source and mismatched lexical facts":
+        step("Fail before indexing inconsistent source mappings")
+        expect(native_framework_wrapper_source("", [], [], []).is_err()).to_equal(true)
+        expect(spipe_partition_source("x\ny", ["x"], ["x", "y"], [false, false], true).is_err()).to_equal(true)
+
+    it "preserves the legacy partition contract when native mode is not selected":
+        step("Keep legacy harness removal and governance imports separate from AOT")
+        val source = "use std.spec.*\nuse std.spec.scenario_governance.\{ScenarioOmissionStatus}\nval VALUES = [\n    1,\n    2\n]\ndescribe \"legacy\":\n    it \"case\":\n        expect 1 == 1\n"
+        val result = spipe_partition_source(source, source.split("\n"), simple_code_lines(source), simple_string_continuation_lines(source), false)
+        expect(result.is_ok()).to_equal(true)
+        val parts = result.unwrap()
+        expect(parts.imports.contains("use std.spec.*")).to_equal(false)
+        expect(parts.imports).to_contain("ScenarioOmissionStatus")
+        expect(parts.declarations).to_end_with("\n]")
+        expect(parts.body).to_contain("expect 1 == 1")
+
+
+describe "native invocation completion wrappers":
+    it "sets the child evidence path before real SSpec examples and finishes afterwards":
+        val source = "use std.spec.*\ndescribe \"suite\":\n    it \"case\":\n        expect(2 + 2).to_equal(4)\n"
+        val output = native_framework_wrapper_source(source, simple_code_lines(source), simple_string_continuation_lines(source), simple_string_byte_ranges(source), true).unwrap()
+        expect(output.index_of("set_path(__simple_native_spec_0_evidence_path)")).to_be_less_than(output.index_of("    describe"))
+        expect(output.index_of("finish(__simple_native_spec_0_evidence_path")).to_be_greater_than(output.index_of("expect(2 + 2)"))
+        expect(output.contains("env_set(")).to_equal(false)
+
+    it "preserves plain binding order without manufacturing BDD examples":
+        val source = "var value: i64 = 1\nvalue = value + 2\nval observed: i64 = value\nif observed != 3: panic(\"wrong order\")\n"
+        val output = native_plain_wrapper_source(source, simple_code_lines(source), simple_string_continuation_lines(source), simple_string_byte_ranges(source)).unwrap()
+        expect(output.starts_with(source)).to_equal(true)
+        expect(output.contains("fn main() -> i64:")).to_equal(false)
+        expect(output.index_of("value = value + 2")).to_be_less_than(output.index_of("val observed"))
+        expect(output.contains("use std.spec")).to_equal(false)
+        expect(output.contains("describe ")).to_equal(false)
+
+    it "wraps authored main with an entry-preserving completion wrapper":
+        val source = "fn main() -> i64:\n    print \"hello\"\n    0\n"
+        val result = native_plain_wrapper_source(source, simple_code_lines(source), simple_string_continuation_lines(source), simple_string_byte_ranges(source))
+        expect(result.is_ok()).to_equal(true)
+        val wrapped = result.unwrap()
+        expect(wrapped).to_contain("fn __simple_native_spec_0_user_main() -> i64:")
+        expect(wrapped).to_contain("fn main() -> i64:")
+        expect(wrapped).to_contain("__simple_native_spec_0_user_main()")
+        expect(wrapped).to_contain("native_execution_finish_v1")
+
+    it "wraps unit-returning and async top-level main while keeping nested main methods intact":
+        val unit_source = "fn main():\n    print \"hello\"\n"
+        val unit_wrapped = native_plain_wrapper_source(unit_source, simple_code_lines(unit_source), simple_string_continuation_lines(unit_source), simple_string_byte_ranges(unit_source)).unwrap()
+        expect(unit_wrapped).to_contain("fn __simple_native_spec_0_user_main():")
+        expect(unit_wrapped).to_contain("fn main() -> i64:")
+        val nested = "struct Worker:\n    fn main() -> i64:\n        7\nval worker = Worker()\nif worker.main() != 7: panic(\"nested main failed\")\n"
+        val allowed = native_plain_wrapper_source(nested, simple_code_lines(nested), simple_string_continuation_lines(nested), simple_string_byte_ranges(nested)).unwrap()
+        expect(allowed).to_contain("    fn main() -> i64:")
+        expect(allowed).to_contain("native_execution_finish_v1")
+        val entry = "pub async fn main () -> i64:\n    0\n"
+        val entry_wrapped = native_plain_wrapper_source(entry, simple_code_lines(entry), simple_string_continuation_lines(entry), simple_string_byte_ranges(entry)).unwrap()
+        expect(entry_wrapped).to_contain("pub async fn __simple_native_spec_0_user_main () -> i64:")
+        expect(entry_wrapped).to_contain("fn main() -> i64:")
+        val args_main = "fn main(args: [text]) -> i64:\n    args.len()\n"
+        val args_wrapped = native_plain_wrapper_source(args_main, simple_code_lines(args_main), simple_string_continuation_lines(args_main), simple_string_byte_ranges(args_main))
+        expect(args_wrapped.is_ok()).to_equal(true)
+        expect(args_wrapped.unwrap()).to_contain("__simple_native_spec_0_user_main([])")
+        val bad_main = "fn main(a: i64, b: i64) -> i64:\n    a + b\n"
+        val bad_wrapped = native_plain_wrapper_source(bad_main, simple_code_lines(bad_main), simple_string_continuation_lines(bad_main), simple_string_byte_ranges(bad_main))
+        expect(bad_wrapped.is_err()).to_equal(true)
+        expect(bad_wrapped.unwrap_err()).to_contain("main parameters not supported")
+
+    it "wraps declaration-only snippets so declarations compile with completion evidence":
+        val decl_only = "fn add(a: i64, b: i64) -> i64:\n    a + b\n"
+        val decl_wrapped = native_plain_wrapper_source(decl_only, simple_code_lines(decl_only), simple_string_continuation_lines(decl_only), simple_string_byte_ranges(decl_only))
+        expect(decl_wrapped.is_ok()).to_equal(true)
+        expect(decl_wrapped.unwrap()).to_contain("fn add(a: i64, b: i64) -> i64:")
+        expect(decl_wrapped.unwrap()).to_contain("native_execution_finish_v1")
+        val plain_body = "val x = 1 + 2\nprint \"x={{x}}\"\n"
+        expect(native_plain_wrapper_source(plain_body, simple_code_lines(plain_body), simple_string_continuation_lines(plain_body), simple_string_byte_ranges(plain_body)).is_ok()).to_equal(true)
+        val comments_only = "# just a comment\n"
+        expect(native_plain_wrapper_source(comments_only, simple_code_lines(comments_only), simple_string_continuation_lines(comments_only), simple_string_byte_ranges(comments_only)).is_err()).to_equal(true)
+
+    it "keeps module-global bindings visible to helpers":
+        val source = "val expected: i64 = 41\nfn check() -> bool:\n    expected == 41\nif not check(): panic(\"lost global\")\n"
+        val output = native_plain_wrapper_source(source, simple_code_lines(source), simple_string_continuation_lines(source), simple_string_byte_ranges(source)).unwrap()
+        expect(output.starts_with(source)).to_equal(true)
+        expect(output.index_of("native_execution_finish_v1")).to_be_greater_than(output.index_of("if not check()"))

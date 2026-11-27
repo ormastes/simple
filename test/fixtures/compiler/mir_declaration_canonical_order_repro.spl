@@ -1,0 +1,101 @@
+# Native fail-fast mechanics regression; does not issue final archive admission.
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule}
+use compiler.hir.hir_codec.{hir_module_encode, hir_module_decode}
+use compiler.mir.hir_declaration_summary_v1.*
+use compiler.mir.hir_declaration_types_v1.{MirHirModuleDeclarationsV1, MirHirFunctionDeclarationV1}
+use compiler.driver.cache.hir_owned_artifact_cache_v1.{hir_owned_artifact_context_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end}
+
+fn require(condition: bool, message: text):
+    if not condition: panic(message)
+
+fn require_order(declaration: MirHirModuleDeclarationsV1):
+    require(declaration.functions.len() >= 2, "fixture must exercise multiple functions")
+    var functions_index = 1
+    while functions_index < declaration.functions.len():
+        require(declaration.functions[functions_index - 1].symbol.id < declaration.functions[functions_index].symbol.id,
+            "functions projection must use canonical symbol order")
+        functions_index = functions_index + 1
+    require(declaration.structs.len() >= 2, "fixture must exercise multiple structs")
+    var structs_index = 1
+    while structs_index < declaration.structs.len():
+        require(declaration.structs[structs_index - 1].symbol.id < declaration.structs[structs_index].symbol.id,
+            "structs projection must use canonical symbol order")
+        structs_index = structs_index + 1
+    require(declaration.classes.len() >= 2, "fixture must exercise multiple classes")
+    var classes_index = 1
+    while classes_index < declaration.classes.len():
+        require(declaration.classes[classes_index - 1].symbol.id < declaration.classes[classes_index].symbol.id,
+            "classes projection must use canonical symbol order")
+        classes_index = classes_index + 1
+    require(declaration.enums.len() >= 2, "fixture must exercise multiple enums")
+    var enums_index = 1
+    while enums_index < declaration.enums.len():
+        require(declaration.enums[enums_index - 1].symbol.id < declaration.enums[enums_index].symbol.id,
+            "enums projection must use canonical symbol order")
+        enums_index = enums_index + 1
+    require(declaration.traits.len() >= 2, "fixture must exercise multiple traits")
+    var traits_index = 1
+    while traits_index < declaration.traits.len():
+        require(declaration.traits[traits_index - 1].symbol.id < declaration.traits[traits_index].symbol.id,
+            "traits projection must use canonical symbol order")
+        traits_index = traits_index + 1
+    require(declaration.bitfields.len() >= 2, "fixture must exercise multiple bitfields")
+    var bitfields_index = 1
+    while bitfields_index < declaration.bitfields.len():
+        require(declaration.bitfields[bitfields_index - 1].symbol.id < declaration.bitfields[bitfields_index].symbol.id,
+            "bitfields projection must use canonical symbol order")
+        bitfields_index = bitfields_index + 1
+    require(declaration.globals.len() >= 2, "fixture must exercise multiple globals")
+    var globals_index = 1
+    while globals_index < declaration.globals.len():
+        require(declaration.globals[globals_index - 1].symbol.id < declaration.globals[globals_index].symbol.id,
+            "globals projection must use canonical symbol order")
+        globals_index = globals_index + 1
+
+fn main():
+    val source = "struct Zebra:\n    value: i64\nstruct Alpha:\n    value: i64\nclass Zulu:\n    value: i64\nclass Able:\n    value: i64\nenum Zed:\n    One\nenum Aye:\n    Two\ntrait Zoom:\n    fn zoom() -> i64\ntrait Aim:\n    fn aim() -> i64\nbitfield ZFlags(u32):\n    flag: 32\nbitfield AFlags(u32):\n    flag: 32\nval zebra = 3\nval alpha = 5\nfn zulu() -> i64:\n    7\nfn able() -> i64:\n    9\n"
+    val parsed = parse_full_frontend(source, "declaration_order.spl", "declaration_order", Logger(level: 0))
+    var frontend = HirLowering.with_filename("declaration_order.spl")
+    val original = frontend.lower_module(parsed)
+    require(frontend.errors.len() == 0, "fixture HIR lowering failed")
+    val body = hir_module_encode(original)
+    require(body != "", "fixture complete HIR encoding failed")
+    val digest = sha256_text(body)
+    val authority = sha256_text("declaration-order-NOT-final-admission\n" + body)
+    val context = hir_owned_artifact_context_v1()
+    require(transient_scope_begin(), "projection scope unavailable")
+    val initial = mir_hir_project_module_in_owned_scope_v1(context, original, authority, digest, digest)
+    require(initial.is_ok(), "initial declaration projection failed")
+    val declaration = initial.unwrap()
+    require_order(declaration)
+    var round = 0
+    while round < 3:
+        val decoded = hir_module_decode(body)
+        require(decoded != nil, "independent complete body decode failed")
+        val module: HirModule = decoded.unwrap()
+        require(hir_module_encode(module) == body, "independent complete body changed")
+        val projected = mir_hir_project_module_in_owned_scope_v1(context, module, authority, digest, digest)
+        require(projected.is_ok(), "decoded declaration projection failed")
+        require_order(projected.unwrap())
+        require(projected.unwrap().declaration_digest == declaration.declaration_digest,
+            "equal complete bodies must have equal declaration seals")
+        round = round + 1
+    # A changed actual header must still alter the seal; canonical ordering
+    # must never hide a declaration/body disagreement.
+    var changed = declaration
+    var changed_function: MirHirFunctionDeclarationV1 = changed.functions[0]
+    changed_function.name = "tampered_header"
+    changed.functions[0] = changed_function
+    require(mir_hir_module_declaration_digest_v1(changed) != declaration.declaration_digest,
+        "changed header escaped declaration integrity")
+    require(not mir_hir_module_declarations_valid_v1(changed),
+        "changed header passed declaration validity")
+    require(transient_scope_pause(), "projection pause failed")
+    require(transient_scope_end(), "projection cleanup failed")
+    print "PASS: canonical MIR declaration ordering, independent decodes, changed-header control"

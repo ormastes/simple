@@ -1,6 +1,6 @@
 # Multi-arch AC-4/AC-6 specs assert on QEMU boot evidence that no lane ever produces
 
-Status: OPEN (P3)
+Status: LIVE (ARCHITECTURAL-OPEN) — re-verified fresh 2026-11-11, see dated addendum below
 Status re-verified 2026-08-17 by source inspection (triage shard 02).
 **Found:** 2026-08-04
 
@@ -155,3 +155,30 @@ Requires real multi-arch QEMU boot artifacts
 this environment can produce -- needs actual QEMU boots across
 multiple architectures. Out of scope. Leaving OPEN.
 
+## Triage 2026-11-11 (p3fix lane boot24)
+
+**Verdict: LIVE — both halves re-verified FRESH against the
+origin/release/1.0.0 tip (6233df4b9f9ea) in the boot24 worktree.**
+
+1. `--arch` dispatch is still absent from
+   `scripts/bootstrap/bootstrap-from-scratch.sh`
+   (`grep -c -- '--arch'` → 0). The flag the two specs document
+   (`bin/simple test --arch=<triple>`) still does not exist.
+2. `build/multiarch/` does not exist in a fresh checkout and the only
+   writers of `smoke_result.json` / `bootstrap_result.json` remain
+   `_write_smoke_result` / `_write_bootstrap_result` in
+   `src/os/_QemuRunner/runner_targets.spl:222,231`, reached solely from
+   the `os build` / `os run` QEMU serial-output lanes. No hosted lane
+   produces the artifacts; the specs stay honestly RED, not vacuous.
+3. Unblock condition unchanged and out of lane scope: implement
+   `--arch=<triple>` dispatch (six cross toolchains + per-arch loaders)
+   and run six real QEMU boots (plus board-runnable evidence per
+   `.claude/rules/board-runnable.md`). In-lane QEMU/bootstrap runs are
+   forbidden by campaign policy. Owner: bootstrap/stage-chain lane.
+
+
+
+## BF-10 Status Update (2026-11-26)
+
+- **Bounded fix landed inside BF-10 scope:** Repaired two-level `REPO_ROOT`/`ROOT` resolution (`/../..`) in `scripts/qemu/create-qemu-temp-layout.shs`, `scripts/qemu/cleanup-qemu-temp.shs` (with multi-match glob cleanup), and `scripts/qemu/linux_qemu_net_parity_bench.shs`; verified with `sh -n`, `simple-qemu-settings.shs --self-test` (`simple_qemu_settings_self_test=pass`), and `bf10_wm_pin_and_evidence_gates_spec.spl` (`4 passed, 0 failed`).
+- **Remains `ARCHITECTURAL-OPEN` (out of BF-10 file ownership):** `--arch` dispatch in `scripts/bootstrap/bootstrap-from-scratch.sh` and `src/app/test/`, plus executing six QEMU guest boots (`build/multiarch/<triple>/{smoke,bootstrap}_result.json`), sit outside BF-10 allowed paths and remain open.

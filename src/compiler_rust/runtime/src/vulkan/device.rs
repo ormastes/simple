@@ -476,16 +476,48 @@ impl VulkanDevice {
             })
             .collect();
 
-        // Required features
+        // Required features (only request shader_int64 when supported by the adapter)
+        let supported_features = unsafe {
+            instance
+                .instance()
+                .get_physical_device_features(physical_device.handle)
+        };
         let mut features = vk::PhysicalDeviceFeatures::default();
-        features.shader_int64 = vk::TRUE; // For 64-bit atomics
+        if supported_features.shader_int64 == vk::TRUE {
+            features.shader_int64 = vk::TRUE; // For 64-bit atomics
+        }
 
-        // Device extensions
+        // Device extensions — enumerate advertised extensions so mandatory
+        // portability subset (VUID-VkDeviceCreateInfo-pProperties-04451 on
+        // MoltenVK) is enabled whenever advertised and swapchain is only
+        // requested on adapters that expose it.
+        let available_dev_exts: Vec<std::ffi::CString> = unsafe {
+            instance
+                .instance()
+                .enumerate_device_extension_properties(physical_device.handle)
+                .map(|exts| {
+                    exts.iter()
+                        .map(|e| std::ffi::CStr::from_ptr(e.extension_name.as_ptr()).to_owned())
+                        .collect()
+                })
+                .unwrap_or_default()
+        };
+        let has_dev_ext =
+            |name: &std::ffi::CStr| available_dev_exts.iter().any(|e| e.as_c_str() == name);
+
         let mut extension_names_raw = vec![];
 
-        // Add swapchain extension for graphics/presentation
+        // Add swapchain extension for graphics/presentation when supported
         #[cfg(feature = "vulkan")]
-        extension_names_raw.push(ash::khr::swapchain::NAME.as_ptr());
+        if has_dev_ext(ash::khr::swapchain::NAME) {
+            extension_names_raw.push(ash::khr::swapchain::NAME.as_ptr());
+        }
+
+        let portability_subset_name =
+            std::ffi::CStr::from_bytes_with_nul(b"VK_KHR_portability_subset\0").unwrap();
+        if has_dev_ext(portability_subset_name) {
+            extension_names_raw.push(portability_subset_name.as_ptr());
+        }
 
         let extension_names: Vec<*const std::ffi::c_char> = extension_names_raw;
 
@@ -494,12 +526,31 @@ impl VulkanDevice {
             .enabled_features(&features)
             .enabled_extension_names(&extension_names);
 
-        let device = unsafe {
-            instance
-                .instance()
-                .create_device(physical_device.handle, &create_info, None)
-                .map_err(|e| VulkanError::DeviceCreationFailed(format!("{:?}", e)))?
-        };
+        // Bounded retry on VK_ERROR_INITIALIZATION_FAILED only (NVIDIA under
+        // concurrent device creation); one call and no sleep on success.
+        let (created, attempts) = crate::vulkan_create_device_retry::vk_create_device_with_retry(
+            || unsafe {
+                instance
+                    .instance()
+                    .create_device(physical_device.handle, &create_info, None)
+                    .map_err(|e| e.as_raw())
+            },
+            crate::vulkan_create_device_retry::vk_retry_sleep_ms,
+        );
+        let device = created.map_err(|r| {
+            let devices = instance.enumerate_devices().unwrap_or_default();
+            let index = devices
+                .iter()
+                .position(|d| d.handle == physical_device.handle)
+                .unwrap_or(0);
+            VulkanError::DeviceCreationFailed(crate::vulkan_create_device_retry::vk_create_device_error(
+                index,
+                devices.len(),
+                compute_family,
+                attempts,
+                r,
+            ))
+        })?;
         let mut build = VulkanDeviceBuildGuard::new(device);
         let device = build.handle().clone();
 

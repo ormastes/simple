@@ -25,7 +25,11 @@ import time
 
 ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_ROOTS = ("src/compiler", "src/app", "src/lib")
-TIME_BIN = Path("/usr/bin/time")
+# GNU time writes the per-batch high-water metrics. Production runs are Linux
+# build hosts; SIMPLE_CHECK_TIME_BIN exists so the orchestrator can be
+# exercised on hosts without /usr/bin/time (the metrics file is simply absent
+# there and read_metrics falls back to zeros).
+TIME_BIN = Path(os.environ.get("SIMPLE_CHECK_TIME_BIN", "/usr/bin/time"))
 
 
 def sha256_file(path: Path) -> str:
@@ -106,6 +110,8 @@ def run_checker(
     files: list[dict[str, str]],
     stem: Path,
     timeout_s: float,
+    max_rss_kib: int = 0,
+    rss_interval_s: float = 2.0,
 ) -> dict[str, object]:
     stdout_path = stem.with_suffix(".stdout.log")
     stderr_path = stem.with_suffix(".stderr.log")
@@ -123,6 +129,9 @@ def run_checker(
     ]
     started = time.monotonic()
     timed_out = False
+    rss_ceiling_exceeded = False
+    rss_sampler = "proc-tree" if Path("/proc").is_dir() else "unsupported"
+    rss_tree_peak_kib = 0
     with stdout_path.open("wb") as stdout, stderr_path.open("wb") as stderr:
         process = subprocess.Popen(
             command,
@@ -131,20 +140,48 @@ def run_checker(
             stderr=stderr,
             start_new_session=True,
         )
-        try:
-            exit_code = process.wait(timeout=timeout_s)
-        except subprocess.TimeoutExpired:
-            timed_out = True
+        # Memory ceiling (doc/08_tracking/bug/executable_checker_failed_only_retry_peak_rss_2026-08-02):
+        # sample the checker process TREE between wait slices and kill the
+        # process group when the summed resident set exceeds --max-rss-kib.
+        # A ceiling can only be enforced on a platform whose tree RSS it can
+        # measure: where /proc is unavailable the sampler reports
+        # "unsupported", records nothing, and NEVER claims enforcement.
+        deadline = started + timeout_s
+        while process.poll() is None:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                timed_out = True
+                break
+            if max_rss_kib > 0 and rss_sampler == "proc-tree":
+                sample = tree_rss_kib(process.pid)
+                if sample is not None:
+                    rss_tree_peak_kib = max(rss_tree_peak_kib, sample)
+                    if sample > max_rss_kib:
+                        rss_ceiling_exceeded = True
+                        break
+            try:
+                process.wait(timeout=min(rss_interval_s, max(remaining, 0.05)))
+            except subprocess.TimeoutExpired:
+                continue
+        if process.poll() is None:
+            # Timed out or hit the RSS ceiling: same bounded teardown as the
+            # original timeout path, so per-file isolation is preserved.
             os.killpg(process.pid, signal.SIGTERM)
             try:
                 exit_code = process.wait(timeout=2.0)
             except subprocess.TimeoutExpired:
                 os.killpg(process.pid, signal.SIGKILL)
                 exit_code = process.wait()
+        else:
+            exit_code = process.returncode
     metrics = read_metrics(metrics_path)
     return {
         "exit_code": exit_code,
         "timed_out": timed_out,
+        "rss_ceiling_exceeded": rss_ceiling_exceeded,
+        "rss_sampler": rss_sampler,
+        "rss_tree_peak_kib": rss_tree_peak_kib,
+        "rss_ceiling_kib": max_rss_kib,
         "elapsed_s": round(time.monotonic() - started, 6),
         "metrics": metrics,
         "stdout": str(stdout_path),
@@ -155,9 +192,63 @@ def run_checker(
     }
 
 
+def tree_rss_kib(pid: int) -> int | None:
+    """Summed VmRSS (KiB) of `pid` and all its descendants via /proc.
+
+    Returns None when /proc is unavailable or unreadable so callers can
+    distinguish "tree used X" from "this platform cannot be measured".
+    """
+    proc = Path("/proc")
+    if not proc.is_dir():
+        return None
+    try:
+        children: dict[int, list[int]] = {}
+        rss_by_pid: dict[int, int] = {}
+        for entry in proc.iterdir():
+            if not entry.name.isdigit():
+                continue
+            try:
+                status = (entry / "status").read_text(encoding="ascii", errors="replace")
+            except OSError:
+                continue
+            rss = 0
+            for line in status.splitlines():
+                if line.startswith("VmRSS:"):
+                    try:
+                        rss = int(line.split()[1])
+                    except (ValueError, IndexError):
+                        rss = 0
+                    break
+            try:
+                stat = (entry / "stat").read_text(encoding="ascii", errors="replace")
+                ppid = int(stat.rpartition(")")[2].split()[1])
+            except (OSError, ValueError, IndexError):
+                continue
+            children.setdefault(ppid, []).append(int(entry.name))
+            rss_by_pid[int(entry.name)] = rss
+        total = 0
+        stack = [pid]
+        seen: set[int] = set()
+        while stack:
+            current = stack.pop()
+            if current in seen:
+                continue
+            seen.add(current)
+            total += rss_by_pid.get(current, 0)
+            stack.extend(children.get(current, []))
+        return total
+    except OSError:
+        return None
+
+
 def diagnostic_family(result: dict[str, object]) -> tuple[str, str]:
     if result["timed_out"]:
         return "timeout", "checker invocation exceeded its bounded timeout"
+    if result.get("rss_ceiling_exceeded"):
+        return (
+            "rss_ceiling",
+            f"checker process tree exceeded the --max-rss-kib ceiling ({result.get('rss_ceiling_kib')} KiB)",
+        )
     exit_code = int(result["exit_code"])
     if exit_code < 0:
         return f"signal_{-exit_code}", f"checker terminated by signal {-exit_code}"
@@ -198,6 +289,8 @@ def run_tasks(
     workers: int,
     timeout_s: float,
     resume: bool,
+    max_rss_kib: int = 0,
+    rss_interval_s: float = 2.0,
 ) -> dict[str, dict[str, object]]:
     results: dict[str, dict[str, object]] = {}
     pending = []
@@ -209,7 +302,7 @@ def run_tasks(
             pending.append((task_id, rows, stem))
     with ThreadPoolExecutor(max_workers=workers) as pool:
         future_to_id = {
-            pool.submit(run_checker, checker, rows, stem, timeout_s): task_id
+            pool.submit(run_checker, checker, rows, stem, timeout_s, max_rss_kib, rss_interval_s): task_id
             for task_id, rows, stem in pending
         }
         stem_by_id = {task_id: stem for task_id, _, stem in pending}
@@ -228,6 +321,18 @@ def main() -> int:
     parser.add_argument("--workers", type=int, default=4)
     parser.add_argument("--batch-size", type=int, default=32)
     parser.add_argument("--timeout", type=float, default=120.0)
+    parser.add_argument(
+        "--max-rss-kib",
+        type=int,
+        default=0,
+        help="kill a checker batch whose process tree exceeds this RSS (KiB); 0 disables the ceiling",
+    )
+    parser.add_argument(
+        "--rss-interval-s",
+        type=float,
+        default=2.0,
+        help="process-tree RSS sampling interval while a checker batch runs",
+    )
     parser.add_argument("--max-files", type=int)
     parser.add_argument("--resume", action="store_true")
     args = parser.parse_args()
@@ -240,6 +345,10 @@ def main() -> int:
             raise ValueError("/usr/bin/time is required")
         if args.workers < 1 or args.batch_size < 1 or args.timeout <= 0:
             raise ValueError("workers, batch size, and timeout must be positive")
+        if args.max_rss_kib < 0:
+            raise ValueError("--max-rss-kib must be >= 0 (0 disables the ceiling)")
+        if args.rss_interval_s <= 0:
+            raise ValueError("--rss-interval-s must be positive")
         rows = discover(args.roots or list(DEFAULT_ROOTS), args.max_files)
         output = Path(args.output_dir).resolve()
         if output.exists() and not args.resume:
@@ -261,6 +370,8 @@ def main() -> int:
             "workers": args.workers,
             "batch_size": args.batch_size,
             "timeout_s": args.timeout,
+            "max_rss_kib": args.max_rss_kib,
+            "rss_interval_s": args.rss_interval_s,
             "manifest_digest": manifest_digest,
             "source_count": len(rows),
         }
@@ -277,7 +388,7 @@ def main() -> int:
         for index, batch in enumerate(batches, 1):
             batch_id = f"batch-{index:06d}"
             batch_tasks.append((batch_id, batch, output / "batch" / batch_id))
-        batch_results = run_tasks(checker, batch_tasks, args.workers, args.timeout, args.resume)
+        batch_results = run_tasks(checker, batch_tasks, args.workers, args.timeout, args.resume, args.max_rss_kib, args.rss_interval_s)
         with (output / "batch-results.jsonl").open("w", encoding="utf-8") as stream:
             for batch_id, _, _ in batch_tasks:
                 stream.write(json.dumps({"batch_id": batch_id, **batch_results[batch_id]}, sort_keys=True) + "\n")
@@ -285,7 +396,9 @@ def main() -> int:
         failed_batches = [
             (batch_id, batch, stem)
             for batch_id, batch, stem in batch_tasks
-            if batch_results[batch_id]["exit_code"] != 0 or batch_results[batch_id]["timed_out"]
+            if batch_results[batch_id]["exit_code"] != 0
+            or batch_results[batch_id]["timed_out"]
+            or batch_results[batch_id]["rss_ceiling_exceeded"]
         ]
         isolate_tasks = []
         row_by_id = {row["id"]: row for row in rows}
@@ -297,7 +410,7 @@ def main() -> int:
             for row in batch:
                 isolate_tasks.append((row["id"], [row], output / "file" / row["id"]))
         isolated = (
-            run_tasks(checker, isolate_tasks, args.workers, args.timeout, args.resume)
+            run_tasks(checker, isolate_tasks, args.workers, args.timeout, args.resume, args.max_rss_kib, args.rss_interval_s)
             if isolate_tasks
             else {}
         )
@@ -320,7 +433,11 @@ def main() -> int:
                 )
                 continue
             result = isolated[row["id"]]
-            if result["exit_code"] == 0 and not result["timed_out"]:
+            if (
+                result["exit_code"] == 0
+                and not result["timed_out"]
+                and not result.get("rss_ceiling_exceeded", False)
+            ):
                 status = "pass_individual_after_failed_batch"
                 family, diagnostic = "none", ""
                 classification = "not_applicable"

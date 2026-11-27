@@ -1,0 +1,24 @@
+# POSIX runtime-cache fingerprint command. This is an optional memo; inability
+# to identify a compiler or hash every runtime source must leave it uncached.
+
+fn runtime_cache_shell_quote_v1(value: text) -> text:
+    "'" + value.replace("'", "'\"'\"'") + "'"
+
+pub fn runtime_posix_cache_fingerprint_command_v1(rt_dir: text, cc: text, flags: text, os: text) -> text:
+    """Build ordered SHA-256 material with the host's native tool.
+
+    macOS supplies shasum, not GNU sha256sum. Each producing stage is checked
+    before the final digest so a failed source hash cannot publish a partial
+    inventory key. Sort complete digest/name rows, preserving every source
+    name and content while avoiding line-based filename argument splitting.
+    """
+    if rt_dir.contains("\n") or cc.contains("\n"):
+        return "exit 1"
+    val sha = if os == "macos" or os == "darwin": "shasum -a 256" else: "sha256sum"
+    var cmd = "version=$(" + runtime_cache_shell_quote_v1(cc) + " --version 2>/dev/null) || exit 1; "
+    cmd = cmd + "test -n \"$version\" || exit 1; "
+    cmd = cmd + "hashes=$(find " + runtime_cache_shell_quote_v1(rt_dir) + " -type f \\( -name '*.c' -o -name '*.h' \\) -exec " + sha + " -- {} + 2>/dev/null) || exit 1; "
+    cmd = cmd + "test -n \"$hashes\" || exit 1; "
+    cmd = cmd + "ordered=$(printf '%s\\n' \"$hashes\" | LC_ALL=C sort) || exit 1; "
+    cmd = cmd + "digest=$(printf '%s\\n%s\\n%s\\n' " + runtime_cache_shell_quote_v1(flags) + " \"$version\" \"$ordered\" | " + sha + ") || exit 1; "
+    cmd + "printf '%.40s' \"$digest\""

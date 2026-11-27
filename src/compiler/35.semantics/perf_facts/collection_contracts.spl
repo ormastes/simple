@@ -1,0 +1,443 @@
+# Collection semantic contracts, operation IDs, creation origins and the
+# operation-accounting oracle (adaptive collections plan, package C1).
+#
+# These records describe meaning only. They authorize no rewrite and select
+# no physical plan. Types are named by their canonical defining-module
+# identity, so a same-named user type never matches a stdlib contract.
+
+use std.io_runtime.{hash_text}
+use compiler.core.lexer_struct.{make_core_lexer, core_lexer_next_token, core_lexer_token_text}
+use compiler.core.tokens.{TOK_EOF, TOK_NEWLINE, tok_kind_name}
+use compiler.frontend.core.collection_feedback.{parser_collection_site_stem, parser_collection_declaration_hash, parser_collection_label_valid}
+
+val COLLECTION_TYPE_ADAPTIVE_MAP: text = "std.nogc_sync_mut.src.collections.adaptive_map.AdaptiveMap"
+val COLLECTION_TYPE_ADAPTIVE_SET: text = "std.nogc_sync_mut.src.collections.adaptive_set.AdaptiveSet"
+val COLLECTION_TYPE_ADAPTIVE_TEXT_MAP: text = "std.nogc_sync_mut.src.collections.adaptive_text_map.AdaptiveTextMap"
+val COLLECTION_TYPE_ADAPTIVE_TEXT_SET: text = "std.nogc_sync_mut.src.collections.adaptive_text_set.AdaptiveTextSet"
+val COLLECTION_TYPE_GENERIC_MAP: text = "std.nogc_sync_mut.src.map.Map"
+val COLLECTION_TYPE_BUILTIN_DICT: text = "builtin.Dict"
+
+# ===== Semantic contracts =====
+
+enum CollectionFamily:
+    Sequence
+    Set
+    Map
+
+enum CollectionIterationOrder:
+    Index
+    Insertion
+    KeySorted
+    # Sorted while every key has native order; stable insertion order otherwise.
+    KeySortedElseInsertion
+    # Bucket or slot order; may change after a resize.
+    Unspecified
+    # Builtin Dict: the interpreter sorts keys, the native runtime uses slot order.
+    BackendDependent
+
+enum CollectionKeyContract:
+    TextKey
+    HashEqOrd
+    HashEq
+    RuntimeKey
+
+struct CollectionSemanticContractV1:
+    type_name: text
+    family: CollectionFamily
+    order: CollectionIterationOrder
+    key_contract: CollectionKeyContract
+    duplicates: bool
+    # The insert method itself says whether it added a key or replaced a value.
+    reports_insert_outcome: bool
+    # The erase method itself says whether a key was present.
+    reports_erase_outcome: bool
+
+fn _collection_contract(type_name: text, family: CollectionFamily, order: CollectionIterationOrder,
+        key_contract: CollectionKeyContract, reports_insert: bool, reports_erase: bool) -> CollectionSemanticContractV1:
+    CollectionSemanticContractV1(
+        type_name: type_name, family: family, order: order, key_contract: key_contract,
+        duplicates: false, reports_insert_outcome: reports_insert,
+        reports_erase_outcome: reports_erase)
+
+fn collection_semantic_contract_v1(type_name: text) -> CollectionSemanticContractV1?:
+    if type_name == COLLECTION_TYPE_ADAPTIVE_MAP:
+        return Some(_collection_contract(type_name, CollectionFamily.Map,
+            CollectionIterationOrder.KeySortedElseInsertion, CollectionKeyContract.HashEqOrd, true, true))
+    if type_name == COLLECTION_TYPE_ADAPTIVE_SET:
+        return Some(_collection_contract(type_name, CollectionFamily.Set,
+            CollectionIterationOrder.KeySortedElseInsertion, CollectionKeyContract.HashEqOrd, true, true))
+    if type_name == COLLECTION_TYPE_ADAPTIVE_TEXT_MAP:
+        return Some(_collection_contract(type_name, CollectionFamily.Map,
+            CollectionIterationOrder.KeySorted, CollectionKeyContract.TextKey, true, true))
+    if type_name == COLLECTION_TYPE_ADAPTIVE_TEXT_SET:
+        return Some(_collection_contract(type_name, CollectionFamily.Set,
+            CollectionIterationOrder.KeySorted, CollectionKeyContract.TextKey, true, true))
+    if type_name == COLLECTION_TYPE_GENERIC_MAP:
+        return Some(_collection_contract(type_name, CollectionFamily.Map,
+            CollectionIterationOrder.Unspecified, CollectionKeyContract.HashEq, false, true))
+    if type_name == COLLECTION_TYPE_BUILTIN_DICT:
+        return Some(_collection_contract(type_name, CollectionFamily.Map,
+            CollectionIterationOrder.BackendDependent, CollectionKeyContract.RuntimeKey, false, false))
+    None
+
+# ===== Semantic operation IDs =====
+
+enum CollectionSemanticOp:
+    Lookup
+    Contains
+    InsertOrReplace
+    InsertIfAbsent
+    Erase
+    Clear
+    Len
+    Iterate
+
+fn collection_semantic_op_name(op: CollectionSemanticOp) -> text:
+    match op:
+        case CollectionSemanticOp.Lookup: "lookup"
+        case CollectionSemanticOp.Contains: "contains"
+        case CollectionSemanticOp.InsertOrReplace: "insert_or_replace"
+        case CollectionSemanticOp.InsertIfAbsent: "insert_if_absent"
+        case CollectionSemanticOp.Erase: "erase"
+        case CollectionSemanticOp.Clear: "clear"
+        case CollectionSemanticOp.Len: "len"
+        case CollectionSemanticOp.Iterate: "iterate"
+
+# Methods left unmapped on purpose: maintenance (`Map.rehash`, promotions),
+# unmeasured internal readers (`storage_get`, `storage_has_key`,
+# `storage_values`) and compound bulk edits (`Map.update`/`merge`, Dict
+# `merge`/`extend`/`update`/`fetch`/`dig`). A consumer must treat an unmapped
+# method as unknown and fail closed, never as "no operation".
+
+fn _collection_map_op(method: text) -> CollectionSemanticOp?:
+    # AdaptiveMap and AdaptiveTextMap share one public surface.
+    if method == "get": return Some(CollectionSemanticOp.Lookup)
+    if method == "contains_key": return Some(CollectionSemanticOp.Contains)
+    if method == "put": return Some(CollectionSemanticOp.InsertOrReplace)
+    if method == "remove": return Some(CollectionSemanticOp.Erase)
+    if method == "clear": return Some(CollectionSemanticOp.Clear)
+    if method == "len": return Some(CollectionSemanticOp.Len)
+    if method == "keys" or method == "entries": return Some(CollectionSemanticOp.Iterate)
+    None
+
+fn _collection_set_op(method: text) -> CollectionSemanticOp?:
+    if method == "contains": return Some(CollectionSemanticOp.Contains)
+    if method == "insert": return Some(CollectionSemanticOp.InsertIfAbsent)
+    if method == "remove": return Some(CollectionSemanticOp.Erase)
+    if method == "clear": return Some(CollectionSemanticOp.Clear)
+    if method == "len": return Some(CollectionSemanticOp.Len)
+    if method == "snapshot_values": return Some(CollectionSemanticOp.Iterate)
+    None
+
+fn _collection_generic_map_op(method: text) -> CollectionSemanticOp?:
+    # `rehash` is maintenance, not a user operation: it stays unmapped.
+    if method == "get" or method == "get_or_default": return Some(CollectionSemanticOp.Lookup)
+    if method == "has": return Some(CollectionSemanticOp.Contains)
+    if method == "insert": return Some(CollectionSemanticOp.InsertOrReplace)
+    if method == "insert_if_absent": return Some(CollectionSemanticOp.InsertIfAbsent)
+    if method == "remove": return Some(CollectionSemanticOp.Erase)
+    if method == "clear": return Some(CollectionSemanticOp.Clear)
+    if method == "len" or method == "is_empty": return Some(CollectionSemanticOp.Len)
+    if method == "keys" or method == "values" or method == "entries" or method == "for_each":
+        return Some(CollectionSemanticOp.Iterate)
+    None
+
+fn _collection_dict_op(method: text) -> CollectionSemanticOp?:
+    # `index_get` / `index_set` name the `d[k]` and `d[k] = v` forms.
+    if method == "get" or method == "get_or" or method == "index_get":
+        return Some(CollectionSemanticOp.Lookup)
+    if method == "has" or method == "contains" or method == "contains_key":
+        return Some(CollectionSemanticOp.Contains)
+    if method == "set" or method == "insert" or method == "index_set":
+        return Some(CollectionSemanticOp.InsertOrReplace)
+    if method == "setdefault": return Some(CollectionSemanticOp.InsertIfAbsent)
+    if method == "remove" or method == "delete": return Some(CollectionSemanticOp.Erase)
+    if method == "clear": return Some(CollectionSemanticOp.Clear)
+    if method == "len" or method == "length" or method == "is_empty":
+        return Some(CollectionSemanticOp.Len)
+    if method == "keys" or method == "values" or method == "entries" or method == "items" or
+            method == "for_each" or method == "each":
+        return Some(CollectionSemanticOp.Iterate)
+    None
+
+fn collection_semantic_op_v1(type_name: text, method: text) -> CollectionSemanticOp?:
+    """Map a method on a resolved collection type to its semantic operation."""
+    if type_name == COLLECTION_TYPE_ADAPTIVE_MAP or type_name == COLLECTION_TYPE_ADAPTIVE_TEXT_MAP:
+        return _collection_map_op(method)
+    if type_name == COLLECTION_TYPE_ADAPTIVE_SET or type_name == COLLECTION_TYPE_ADAPTIVE_TEXT_SET:
+        return _collection_set_op(method)
+    if type_name == COLLECTION_TYPE_GENERIC_MAP:
+        return _collection_generic_map_op(method)
+    if type_name == COLLECTION_TYPE_BUILTIN_DICT:
+        return _collection_dict_op(method)
+    None
+
+# ===== Creation origins =====
+
+enum CollectionCreationKind:
+    Local
+    Field
+
+fn _collection_creation_kind_name(kind: CollectionCreationKind) -> text:
+    match kind:
+        case CollectionCreationKind.Local: "local"
+        case CollectionCreationKind.Field: "field"
+
+struct CollectionOriginV1:
+    # The exact collection_feedback site ID, kept so .sprof feedback still binds.
+    legacy_site_id: text
+    module_key: text
+    owner_path: text
+    binding_name: text
+    creation_kind: CollectionCreationKind
+    # Hash of the declaration's tokens, by token name: spacing, line breaks
+    # and comments do not count; indentation structure does.
+    token_fingerprint: text
+    type_fingerprint: text
+    origin_id: text
+
+fn collection_declaration_token_fingerprint(declaration: text) -> text:
+    var lexer = make_core_lexer(declaration)
+    var parts: [text] = []
+    var steps = 0
+    val limit = declaration.len() * 4 + 16
+    while steps <= limit:
+        val scan = core_lexer_next_token(lexer)
+        lexer = scan[0]
+        val kind = scan[1]
+        if kind == TOK_EOF:
+            return "tok-v1-fnv64:{hash_text(parts.join("\n"))}"
+        if kind != TOK_NEWLINE:
+            parts.push("{tok_kind_name(kind)}:{core_lexer_token_text(lexer)}")
+        steps = steps + 1
+    # A stream that never reaches EOF cannot give a stable fingerprint.
+    "bytes-fnv64:{hash_text(declaration)}"
+
+fn collection_type_fingerprint_v1(type_name: text, type_args: [text]) -> text:
+    """Canonical identity of one generic specialization, independent of TypeIds."""
+    var canonical: [text] = []
+    for arg in type_args:
+        canonical.push(arg.replace(" ", "").replace("\t", ""))
+    "ctype-fnv64:{hash_text(type_name + "<" + canonical.join(",") + ">")}"
+
+fn collection_origin_v1(legacy_site_id: text, module_key: text, owner_path: text,
+        binding_name: text, creation_kind: CollectionCreationKind,
+        declaration: text, type_fingerprint: text) -> Result<CollectionOriginV1, text>:
+    """Build an origin for one collection_feedback site.
+
+    The site ID must be the one collection_feedback produces for these
+    components and this declaration's bytes. A site from another module,
+    owner or binding, or one whose hash is not this declaration's, is rejected.
+    """
+    if binding_name == "" or type_fingerprint == "":
+        return Err("collection origin needs a binding name and a type fingerprint")
+    val label_prefix = "ast://{module_key}/label/"
+    if legacy_site_id.starts_with(label_prefix):
+        # A user label is the identity: it survives any edit of the declaration.
+        val label = legacy_site_id.substring(label_prefix.len())
+        if not parser_collection_label_valid(label):
+            return Err("collection site {legacy_site_id} has an invalid label")
+        return Ok(CollectionOriginV1(
+            legacy_site_id: legacy_site_id, module_key: module_key, owner_path: owner_path,
+            binding_name: binding_name, creation_kind: creation_kind,
+            token_fingerprint: collection_declaration_token_fingerprint(declaration),
+            type_fingerprint: type_fingerprint,
+            origin_id: "corigin-v1:label:{hash_text(module_key + "\n" + label)}"))
+    val field = creation_kind == CollectionCreationKind.Field
+    val stem = parser_collection_site_stem(module_key, owner_path, binding_name, field) + "#"
+    if not legacy_site_id.starts_with(stem):
+        return Err("collection site {legacy_site_id} does not belong to {stem}")
+    val suffix = legacy_site_id.substring(stem.len())
+    # Drop the parse-order ordinal (`:1`, `:2`, ...) before comparing.
+    val hash_part = suffix.split(":")[0]
+    if hash_part != parser_collection_declaration_hash(declaration):
+        return Err("collection site {legacy_site_id} was not hashed from this declaration")
+    val token_fingerprint = collection_declaration_token_fingerprint(declaration)
+    val key = [module_key, owner_path, binding_name,
+        _collection_creation_kind_name(creation_kind), token_fingerprint, type_fingerprint].join("\n")
+    Ok(CollectionOriginV1(
+        legacy_site_id: legacy_site_id, module_key: module_key, owner_path: owner_path,
+        binding_name: binding_name, creation_kind: creation_kind,
+        token_fingerprint: token_fingerprint, type_fingerprint: type_fingerprint,
+        origin_id: "corigin-v1:{hash_text(key)}"))
+
+fn collection_origins_v1_number(origins: [CollectionOriginV1]) -> [CollectionOriginV1]:
+    """Give repeated origin IDs a parse-order ordinal, as site IDs do."""
+    var seen: Dict<text, i64> = {}
+    var numbered: [CollectionOriginV1] = []
+    for origin in origins:
+        val base = origin.origin_id
+        val ordinal = if seen.contains_key(base): seen[base] else: 0
+        seen[base] = ordinal + 1
+        var next = origin
+        if ordinal > 0:
+            next.origin_id = "{base}:{ordinal}"
+        numbered.push(next)
+    numbered
+
+enum CollectionOriginRemapV1:
+    Exact(origin_id: text)
+    Remapped(old_id: text, new_id: text)
+    Ambiguous(old_id: text, candidates: [text])
+    Lost(old_id: text)
+
+fn collection_origin_remap_kind(result: CollectionOriginRemapV1) -> text:
+    match result:
+        case CollectionOriginRemapV1.Exact(_): "exact"
+        case CollectionOriginRemapV1.Remapped(_, _): "remapped"
+        case CollectionOriginRemapV1.Ambiguous(_, _): "ambiguous"
+        case CollectionOriginRemapV1.Lost(_): "lost"
+
+fn collection_origin_remap_v1(old: CollectionOriginV1, previous: [CollectionOriginV1],
+        current: [CollectionOriginV1]) -> CollectionOriginRemapV1:
+    """Find `old` (one of `previous`) among the current origins.
+
+    More than one match is rejected. A current origin that exactly keeps
+    another previous origin's ID belongs to that origin, so a deleted
+    declaration never takes over a surviving sibling's identity.
+    """
+    var exact: [text] = []
+    for origin in current:
+        if origin.origin_id == old.origin_id:
+            exact.push(origin.origin_id)
+    if exact.len() == 1:
+        return CollectionOriginRemapV1.Exact(origin_id: old.origin_id)
+    if exact.len() > 1:
+        return CollectionOriginRemapV1.Ambiguous(old_id: old.origin_id, candidates: exact)
+    # The declaration text changed: match on everything except its tokens.
+    var candidates: [text] = []
+    var claimed: Dict<text, bool> = {}
+    for prior in previous:
+        if prior.origin_id != old.origin_id:
+            claimed[prior.origin_id] = true
+    for origin in current:
+        if claimed.contains_key(origin.origin_id):
+            continue
+        if origin.module_key == old.module_key and origin.owner_path == old.owner_path and
+                origin.binding_name == old.binding_name and
+                origin.creation_kind == old.creation_kind and
+                origin.type_fingerprint == old.type_fingerprint:
+            candidates.push(origin.origin_id)
+    if candidates.len() == 1:
+        return CollectionOriginRemapV1.Remapped(old_id: old.origin_id, new_id: candidates[0])
+    if candidates.len() > 1:
+        return CollectionOriginRemapV1.Ambiguous(old_id: old.origin_id, candidates: candidates)
+    CollectionOriginRemapV1.Lost(old_id: old.origin_id)
+
+# ===== Operation-accounting oracle =====
+
+enum CollectionOpOutcome:
+    Hit
+    Miss
+    NewKey
+    Replaced
+    # Insert-if-absent found the key already there; nothing changed.
+    Present
+    Removed
+    Absent
+    Done
+
+struct CollectionOperationCountsV1:
+    lookup_hit: i64
+    lookup_miss: i64
+    insert_attempt: i64
+    insert_new_key: i64
+    replace_value: i64
+    erase_attempt: i64
+    erase_existing_key: i64
+    clear_count: i64
+    scan_start: i64
+    maintenance_events: i64
+    maintenance_reinserted: i64
+    cardinality: i64
+
+fn collection_counts_new() -> CollectionOperationCountsV1:
+    CollectionOperationCountsV1(
+        lookup_hit: 0, lookup_miss: 0, insert_attempt: 0, insert_new_key: 0,
+        replace_value: 0, erase_attempt: 0, erase_existing_key: 0, clear_count: 0,
+        scan_start: 0, maintenance_events: 0, maintenance_reinserted: 0, cardinality: 0)
+
+fn _collection_outcome_error(op: CollectionSemanticOp, outcome: CollectionOpOutcome) -> Result<CollectionOperationCountsV1, text>:
+    Err("operation {collection_semantic_op_name(op)} cannot produce outcome {outcome}")
+
+fn _collection_count_lookup(counts: CollectionOperationCountsV1, op: CollectionSemanticOp,
+        outcome: CollectionOpOutcome) -> Result<CollectionOperationCountsV1, text>:
+    var next = counts
+    if outcome == CollectionOpOutcome.Hit:
+        next.lookup_hit = next.lookup_hit + 1
+    elif outcome == CollectionOpOutcome.Miss:
+        next.lookup_miss = next.lookup_miss + 1
+    else:
+        return _collection_outcome_error(op, outcome)
+    Ok(next)
+
+fn collection_counts_record(counts: CollectionOperationCountsV1, op: CollectionSemanticOp,
+        outcome: CollectionOpOutcome) -> Result<CollectionOperationCountsV1, text>:
+    """Count one user-visible operation. Only committed changes move cardinality."""
+    var next = counts
+    match op:
+        case CollectionSemanticOp.Lookup:
+            return _collection_count_lookup(next, op, outcome)
+        case CollectionSemanticOp.Contains:
+            return _collection_count_lookup(next, op, outcome)
+        case CollectionSemanticOp.InsertOrReplace:
+            next.insert_attempt = next.insert_attempt + 1
+            if outcome == CollectionOpOutcome.NewKey:
+                next.insert_new_key = next.insert_new_key + 1
+                next.cardinality = next.cardinality + 1
+            elif outcome == CollectionOpOutcome.Replaced:
+                next.replace_value = next.replace_value + 1
+            else:
+                return _collection_outcome_error(op, outcome)
+        case CollectionSemanticOp.InsertIfAbsent:
+            next.insert_attempt = next.insert_attempt + 1
+            if outcome == CollectionOpOutcome.NewKey:
+                next.insert_new_key = next.insert_new_key + 1
+                next.cardinality = next.cardinality + 1
+            elif outcome != CollectionOpOutcome.Present:
+                return _collection_outcome_error(op, outcome)
+        case CollectionSemanticOp.Erase:
+            next.erase_attempt = next.erase_attempt + 1
+            if outcome == CollectionOpOutcome.Removed:
+                if next.cardinality < 1:
+                    return Err("erase removed a key from an empty collection")
+                next.erase_existing_key = next.erase_existing_key + 1
+                next.cardinality = next.cardinality - 1
+            elif outcome != CollectionOpOutcome.Absent:
+                return _collection_outcome_error(op, outcome)
+        case CollectionSemanticOp.Clear:
+            if outcome != CollectionOpOutcome.Done:
+                return _collection_outcome_error(op, outcome)
+            next.clear_count = next.clear_count + 1
+            next.cardinality = 0
+        case CollectionSemanticOp.Len:
+            if outcome != CollectionOpOutcome.Done:
+                return _collection_outcome_error(op, outcome)
+        case CollectionSemanticOp.Iterate:
+            if outcome != CollectionOpOutcome.Done:
+                return _collection_outcome_error(op, outcome)
+            next.scan_start = next.scan_start + 1
+    Ok(next)
+
+fn collection_counts_record_maintenance(counts: CollectionOperationCountsV1,
+        reinserted: i64) -> CollectionOperationCountsV1?:
+    """Count a resize, rehash or representation rebuild. Not a user insertion."""
+    if reinserted < 0 or reinserted > counts.cardinality:
+        return None
+    var next = counts
+    next.maintenance_events = next.maintenance_events + 1
+    next.maintenance_reinserted = next.maintenance_reinserted + reinserted
+    Some(next)
+
+export COLLECTION_TYPE_ADAPTIVE_MAP, COLLECTION_TYPE_ADAPTIVE_SET
+export COLLECTION_TYPE_ADAPTIVE_TEXT_MAP, COLLECTION_TYPE_ADAPTIVE_TEXT_SET
+export COLLECTION_TYPE_GENERIC_MAP, COLLECTION_TYPE_BUILTIN_DICT
+export CollectionFamily, CollectionIterationOrder, CollectionKeyContract
+export CollectionSemanticContractV1, collection_semantic_contract_v1
+export CollectionSemanticOp, collection_semantic_op_name, collection_semantic_op_v1
+export CollectionCreationKind, CollectionOriginV1, CollectionOriginRemapV1
+export collection_declaration_token_fingerprint, collection_type_fingerprint_v1
+export collection_origin_v1, collection_origins_v1_number
+export collection_origin_remap_v1, collection_origin_remap_kind
+export CollectionOpOutcome, CollectionOperationCountsV1
+export collection_counts_new, collection_counts_record, collection_counts_record_maintenance

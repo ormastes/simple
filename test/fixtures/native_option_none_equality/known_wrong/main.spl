@@ -1,0 +1,147 @@
+# KNOWN-WRONG cells for the Option None matrix (../main.spl). Each line here is
+# wrong on the seed, on native, or both, for a reason OUTSIDE the
+# `opt == None` presence fix; both outputs are recorded so a later fix can
+# promote rows into ../main.spl. Build like ../main.spl.
+#
+# Row / correct answer / seed (seed-base) / native before fix (cranelift == llvm):
+#   array_get hit=false: eq=true ne=false | seed same | native eq=false ne=true
+#     (presence fix should flip it; kept here because `xs.get(i)` on `[F]` made
+#      the whole LLVM unit fail llc inside a larger fixture: '%l2' i64 vs ptr)
+#   i64_dict_index hit=false: match=none | seed match=some3 (seed decodes the
+#     miss nil word as 3) | native match=some0
+#   i64_ifval_* hit=false: ifval=none | seed same | native ifval=some3
+#     (if-val presence class: work/native-if-val-presence-20261115)
+#   cross: Option==Option across producers, all true | seed dict_get=false
+#     option_none=false dict_index=true | native dict_get=false option_none=true
+#     dict_index=false (two None encodings, NOT routed by the `== None` fix)
+#   scalar_control: x3_eq=false x3_ne=true x0_eq=false | seed x3_eq=true
+#     x3_ne=false (seed reads i64 3 as nil) | native correct
+#   i64_payload3 hit=false dict_get_eq=true | seed same | native false;
+#     hit=true dict_get_eq=false: a stored 3 IS the nil word in the decoded
+#     `d.get(k)` payload; only the producer presence bit (if-val branch) can
+#     answer it -- `o == nil` has the same limit today. PREDICTED after the
+#     `== None` presence fix: hit=false flips to true (right) and hit=true
+#     flips to dict_get_eq=true (wrong, same as `o == nil`); unverified native
+#   unbound_dict: `d[k] == None` typed as the record F, not F? | seed correct |
+#     native hit=false eq=false ne=true, hit=true SIGSEGV (record==None class:
+#     work/native-struct-eq-none-20261115)
+#
+# Seed stdout:
+#   array_get hit=false eq=true ne=false
+#   array_get hit=true eq=false ne=true
+#   i64_dict_index hit=false eq=false match=some3
+#   i64_dict_index hit=true eq=false match=some42
+#   i64_ifval_literal hit=false ifval=none
+#   i64_ifval_ret hit=false ifval=none
+#   i64_ifval_dict_get hit=false ifval=none
+#   i64_ifval_literal hit=true ifval=some42
+#   i64_ifval_ret hit=true ifval=some42
+#   i64_ifval_dict_get hit=true ifval=some42
+#   cross dict_get=false option_none=false dict_index=true
+#   scalar_control x3_eq=true x3_ne=false x0_eq=false
+#   i64_payload3 hit=false dict_get_eq=true literal_eq=true
+#   i64_payload3 hit=true dict_get_eq=false literal_eq=false
+#   unbound_dict hit=false eq=true ne=false
+#   unbound_dict hit=true eq=false ne=true
+#
+# Native stdout before the fix (cranelift == llvm; run ends rc=139):
+#   array_get hit=false eq=false ne=true
+#   array_get hit=true eq=false ne=true
+#   i64_dict_index hit=false eq=false match=some0
+#   i64_dict_index hit=true eq=false match=some42
+#   i64_ifval_literal hit=false ifval=some3
+#   i64_ifval_ret hit=false ifval=some3
+#   i64_ifval_dict_get hit=false ifval=some3
+#   i64_ifval_literal hit=true ifval=some42
+#   i64_ifval_ret hit=true ifval=some42
+#   i64_ifval_dict_get hit=true ifval=some42
+#   cross dict_get=false option_none=true dict_index=false
+#   scalar_control x3_eq=false x3_ne=true x0_eq=false
+#   i64_payload3 hit=false dict_get_eq=false literal_eq=true
+#   i64_payload3 hit=true dict_get_eq=false literal_eq=false
+#   unbound_dict hit=false eq=false ne=true
+
+fn i_ret(hit: bool) -> i64?:
+    if hit:
+        return Some(42)
+    None
+
+fn ifval_text(o: i64?) -> text:
+    var iv = "none"
+    if val v = o:
+        iv = "some{v}"
+    iv
+
+fn dict_index_i64(hit: bool):
+    var d: Dict<text, i64> = {}
+    d["a"] = 42
+    val k = if hit: "a" else: "zz"
+    val o: i64? = d[k]
+    val m = match o:
+        case Some(v): "some{v}"
+        case None: "none"
+    print "i64_dict_index hit={hit} eq={o == None} match={m}"
+
+fn ifval_rows(hit: bool):
+    val lit: i64? = if hit: Some(42) else: None
+    print "i64_ifval_literal hit={hit} ifval={ifval_text(lit)}"
+    print "i64_ifval_ret hit={hit} ifval={ifval_text(i_ret(hit))}"
+    var d: Dict<text, i64> = {}
+    d["a"] = 42
+    val k = if hit: "a" else: "zz"
+    val g: i64? = d.get(k)
+    print "i64_ifval_dict_get hit={hit} ifval={ifval_text(g)}"
+
+struct F:
+    id: i64
+    name: text
+
+fn array_get_struct(hit: bool):
+    val xs: [F] = [F(id: 8, name: "f")]
+    val i = if hit: 0 else: 5
+    val o: F? = xs.get(i)
+    print "array_get hit={hit} eq={o == None} ne={o != None}"
+
+fn main():
+    array_get_struct(false)
+    array_get_struct(true)
+    dict_index_i64(false)
+    dict_index_i64(true)
+    ifval_rows(false)
+    ifval_rows(true)
+    cross_rows()
+    scalar_never_none()
+    payload_three(false)
+    payload_three(true)
+    unbound_dict_index(false)
+    unbound_dict_index(true)
+
+fn ret_none_f() -> F?:
+    return None
+
+fn cross_rows():
+    var d: Dict<text, F> = {}
+    val a: F? = d.get("zz")
+    val b: F? = Option.None
+    val c: F? = d["zz"]
+    val n: F? = ret_none_f()
+    print "cross dict_get={a == n} option_none={b == n} dict_index={c == n}"
+
+fn scalar_never_none():
+    val x: i64 = 3
+    val z: i64 = 0
+    print "scalar_control x3_eq={x == None} x3_ne={x != None} x0_eq={z == None}"
+
+fn payload_three(hit: bool):
+    var d: Dict<text, i64> = {}
+    d["a"] = 3
+    val k = if hit: "a" else: "zz"
+    val o: i64? = d.get(k)
+    val lit: i64? = if hit: Some(3) else: None
+    print "i64_payload3 hit={hit} dict_get_eq={o == None} literal_eq={lit == None}"
+
+fn unbound_dict_index(hit: bool):
+    var d: Dict<text, F> = {}
+    d["a"] = F(id: 20, name: "f")
+    val k = if hit: "a" else: "zz"
+    print "unbound_dict hit={hit} eq={d[k] == None} ne={d[k] != None}"

@@ -47,3 +47,5 @@ The native scenario consumed the mandatory three verify/fix cycles. Continue in
 a fresh scoped session with a reference-stable owner (for example an Engine2D
 field or a boxed/shared renderer) and a one-assert state-retention probe before
 re-running the full system spec.
+
+**Revalidated 2026-11-02: still plausible because the report title (Self-hosted resolver reports class FontRenderer has no field ttf_rasterizer tho) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**

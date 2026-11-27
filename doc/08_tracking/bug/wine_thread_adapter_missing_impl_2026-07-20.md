@@ -1,6 +1,6 @@
 # Missing implementation: common.wine_thread_adapter module
 
-- **Status:** OPEN
+- **Status:** FIXED (verified 2026-11-13, lane p3-async-20261113) — `src/lib/common/wine_thread_adapter.spl` present on release/1.0.0; spec 8/8 PASS on the tracked seed
 - **Discovered:** 2026-07-20, whole-suite triage campaign
 - **Area:** `src/lib/common/` — Wine thread-adapter SFFI gate module
 - **Severity:** Medium — the only consumer (its own spec) can never run;
@@ -75,3 +75,18 @@ spec's own assertions — `wine_thread_adapter_required_apis`,
 `_sffi_binding`), or (b) if this was scratch/WIP work from a different lane
 that never shipped, remove the dead spec — that decision belongs to the
 feature owner, not this triage pass. Nothing in the spec was weakened here.
+
+
+## Resolution 2026-11-13 (lane p3-async-20261113, base 80a8116e5e2)
+
+The module gap this record tracked is closed on origin/release/1.0.0:
+`src/lib/common/wine_thread_adapter.spl` exists (4603 bytes) and exports the
+six-function adapter surface (`wine_thread_adapter_feature_string`,
+`_gate`, `_gate_with_wait_result`, `_missing_apis`, `_required_apis`,
+`_sffi_binding`) over the existing `wine_nt_thread_wait` primitives.
+
+Verified once on this base (seed `bin/simple.exe`, `--timeout 300`):
+`test/01_unit/lib/common/wine_thread_adapter_spec.spl` →
+`outcome=OK declared>=8 executed=8 passed=8 failed=0`. Header flipped OPEN →
+FIXED; the option (b) "remove the dead spec" owner decision is moot. No
+source change.

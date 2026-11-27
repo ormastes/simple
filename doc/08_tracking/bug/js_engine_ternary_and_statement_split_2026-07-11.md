@@ -1,6 +1,6 @@
 # JS subset parser: ternary dropped, statements after `}` never evaluated
 
-- **Status:** Open
+- **Status:** Closed (2026-11-25) — both defects fixed in source and verified not reproducible; see the dated verification note at the bottom.
 - **Date:** 2026-07-11
 - **Area:** lib / js engine (`src/lib/nogc_sync_mut/js/engine/parser.spl`)
 - **Severity:** P2 (silently wrong values on extremely common JS forms)
@@ -37,3 +37,39 @@ rt.eval("function f(x){ return x } f(3)")            # [function], want 3
 Google inline script idx1 (37KB) takes 200-550s to interpret through the
 subset parser — superlinear; needs its own profile pass once correctness
 lands.
+
+## Verification 2026-11-25 (p2w3-al lane, Windows) — both defects FIXED, closing
+
+Runtime: committed `bin/simple.exe` (Rust bootstrap seed v1.0.0-rc.1,
+38,403,072 bytes), `SIMPLE_LIB=src ... run`, Windows Git Bash, worktree at
+release/1.0.0 @ 1457ddaa176.
+
+**Defect 1 (ternary dropped):** fixed by 98d1ae9c64a (2026-08-17, "parser never
+emitted Ternary"), which added `_js_parser_find_ternary_question` /
+`_js_parser_find_ternary_colon` (with `??`/`?.` guards) to
+`src/lib/nogc_sync_mut/js/engine/parser.spl`. Regression specs exist:
+`test/01_unit/lib/js/ternary_expression_spec.spl`,
+`test/01_unit/lib/js/conditional_expression_class_spec.spl`,
+`test/01_unit/lib/js/ternary_rhs_precedence_spec.spl`.
+
+**Defect 2 (statement after `}` never runs):** `js_parse_program_subset`
+(parser.spl:13) now peels each leading brace-terminated construct off a
+`;`-split part via `_js_parser_leading_construct_end` before parsing the
+remainder — exactly the fix this doc prescribed.
+
+**Live re-verification** (the named specs cannot run here: release/1.0.0 HEAD
+is source/binary inconsistent — the pinned seed rejects
+`@representation_boundary`, so `bin/simple.exe test` fails repo-wide). Instead
+a standalone probe drove `JsRuntime.eval` with JS-side self-scoring (`throw` on
+a wrong value, so only Ok/Err crosses the module boundary). All four checks
+PASS on this binary:
+
+```
+ternary=PASS               # var x = 5 < 2 ? 1 : 2  -> x == 2
+ternary_nested=PASS        # 1 < 2 ? (3 > 2 ? 10 : 20) : 30 -> 10
+funcall_after_brace=PASS   # function f(x){ return x } var r = f(3) -> r == 3
+fib=PASS                   # function fib(n){...} fib(3) -> 2
+```
+
+The 200-550s inline-script perf note above is a separate, unverified perf
+concern and is not closed by this note.

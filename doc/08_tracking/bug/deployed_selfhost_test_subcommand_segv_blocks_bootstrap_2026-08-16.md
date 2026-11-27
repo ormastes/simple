@@ -2,7 +2,7 @@
 
 - **ID:** BUG-2026-08-16-selfhost-test-segv-blocks-bootstrap
 - **Date:** 2026-08-16
-- **Status:** open
+- **Status:** STALE 2026-11-11 — subject deployed binary and Stage-1 "bounded test ABI probe" gate no longer exist in-tree (verified by p3-boot12)
 - **Severity:** high — no pure-Simple self-hosted test evidence is obtainable
   in-tree, and the documented recovery path (re-bootstrap) is itself blocked
 - **Component:** `release/x86_64-unknown-linux-gnu/simple` (git-tracked),
@@ -124,3 +124,49 @@ init is the first place to look — compare
 Separately, consider whether Stage 1's bounded test ABI probe should be able to
 run against the *seed* when the deployed runtime is known-bad, so that a broken
 deployment can always be bootstrapped out of rather than being self-sealing.
+
+
+## Triage 2026-11-10 (p3-boot4 lane, assignment row 30)
+
+**Verdict: STALE — the recorded breakage's subjects no longer exist in-tree.**
+
+The bug's premise is a property of one deployed artifact plus one Stage-1
+gate, both gone at this lane's base (origin/release/1.0.0):
+
+- The subject binary `release/x86_64-unknown-linux-gnu/simple` (md5
+  `dcc9f8eae05d512f88d2f5f9fef6af0f`) was untracked from the repo by #1054
+  (`6b3e640c3fde`, "untrack committed binaries/build byproducts"); the path
+  does not exist in this worktree. The SIGSEGV condition therefore cannot be
+  re-run or re-observed.
+- The Stage-1 gate it was blocked by is rewritten: the string "bounded test
+  ABI probe" / "test ABI probe" appears nowhere in `scripts/` or
+  `src/app/cli/` at this base, and `scripts/bootstrap/bootstrap-from-scratch.sh`
+  now validates typed receipt reasons through `bootstrap_planner_v2`
+  (`:84-93`) with single-stage recovery options (`:106-118`).
+- The three-routes-closed recovery loop it described (deployed CLI test
+  SIGSEGV → planner refuses → from-scratch hard-requires receipt) is a
+  2026-08-16 deployment state; current deployment state is tracked by the
+  `deployed_bin_simple_*` family. No change made in this lane.
+
+
+## Triage 2026-11-11 (P3 boot12 lane, work/p3-boot12-20261111)
+
+**Verdict: STALE — confirms the 2026-11-10 p3-boot4 verdict with first-hand
+evidence on this base.**
+
+- Subject binary `release/x86_64-unknown-linux-gnu/simple` (md5
+  dcc9f8eae05d512f88d2f5f9fef6af0f) absent in this worktree (ls rc=2); the
+  SIGSEGV condition cannot be re-run, as boot4 recorded after #1054
+  (6b3e640c3fde) untracked it.
+- Stage-1 gate string "bounded test ABI probe" / "test ABI probe": zero hits
+  anywhere in `scripts/` or `src/app/cli/` (grep -rn, empty output).
+- `scripts/bootstrap/bootstrap-from-scratch.sh` now validates typed receipt
+  reasons through `bootstrap_planner_v2` (:92
+  `bootstrap_planner_v2_reason_allowed`; :806/:815 planner-verify comments) —
+  the self-sealing receipt loop the doc described is a 2026-08-16 state.
+
+No change made in this lane.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**STALE (confirmed)** — boot4/boot12: subject deployed binary and the Stage-1 "bounded test ABI probe" gate string no longer exist in-tree; current deployment state tracked by the deployed_bin_simple_* family.

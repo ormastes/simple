@@ -1,0 +1,60 @@
+use std.spec
+use std.spec.step
+use std.skia.entity.geometry.{SkRect}
+use std.skia.entity.paint.{sk_paint_fill}
+use std.skia.entity.color.{sk_color_argb}
+use std.skia.entity.picture.{sk_picture_recorder_new, SkPictureOp, SkPictureOpKind}
+use std.skia.bridge.engine2d_bridge.{skia_render_picture_on_engine2d_reported}
+
+"""
+## Purpose and audience
+
+The Skia->Engine2D bridge must convert float rects to integer device pixels
+with floor for the origin and ceil for the far edge (the convention of the
+Skia CPU backend's raster_prims: x0 = floor(left), x1 = ceil(right)), not
+truncate toward zero. Audience: skia bridge maintainers.
+Plan: doc/03_plan/ui/rendering/unified_rendering_qualification_plan_2026-11-13.md section 3.3 / P0.
+"""
+
+val BG: i64 = 0xFF000000
+val FG: i64 = 0xFFFF0000
+
+fn _render_rect(left: f64, top: f64, right: f64, bottom: f64) -> [u32]:
+    val full = SkRect(left: 0.0, top: 0.0, right: 8.0, bottom: 4.0)
+    val rec = sk_picture_recorder_new().begin_recording(full)
+    val op = SkPictureOp(
+        kind: SkPictureOpKind.DrawRect,
+        rect: SkRect(left: left, top: top, right: right, bottom: bottom),
+        rx: 0.0, ry: 0.0, path: None, image: None,
+        paint: sk_paint_fill(FG).with_anti_alias(false),
+        x: 0.0, y: 0.0
+    )
+    rec.record(op)
+    skia_render_picture_on_engine2d_reported(rec.finish_recording(), 8, 4, "software").pixels
+
+describe "engine2d bridge float rect conversion":
+    it "covers every pixel a fractional right edge touches":
+        step("Rect x in [1.5, 3.5): pixels 1, 2 and 3 are touched")
+        val px = _render_rect(1.5, 0.0, 3.5, 2.0)
+        expect(px[0 * 8 + 0]).to_equal(0xFF000000u32)
+        expect(px[0 * 8 + 1]).to_equal(0xFFFF0000u32)
+        expect(px[0 * 8 + 2]).to_equal(0xFFFF0000u32)
+        expect(px[0 * 8 + 3]).to_equal(0xFFFF0000u32)
+        expect(px[0 * 8 + 4]).to_equal(0xFF000000u32)
+
+    it "floors a negative fractional origin instead of truncating toward zero":
+        step("Rect x in [-0.5, 2.2): pixels 0, 1 and 2 are touched")
+        val px = _render_rect(-0.5, 0.0, 2.2, 2.0)
+        expect(px[0 * 8 + 0]).to_equal(0xFFFF0000u32)
+        expect(px[0 * 8 + 1]).to_equal(0xFFFF0000u32)
+        expect(px[0 * 8 + 2]).to_equal(0xFFFF0000u32)
+        expect(px[0 * 8 + 3]).to_equal(0xFF000000u32)
+
+    it "keeps integer rects exact":
+        step("Rect [2,0)-(4,2) covers exactly 2x2 pixels")
+        val px = _render_rect(2.0, 0.0, 4.0, 2.0)
+        expect(px[1 * 8 + 1]).to_equal(0xFF000000u32)
+        expect(px[1 * 8 + 2]).to_equal(0xFFFF0000u32)
+        expect(px[1 * 8 + 3]).to_equal(0xFFFF0000u32)
+        expect(px[1 * 8 + 4]).to_equal(0xFF000000u32)
+        expect(px[2 * 8 + 2]).to_equal(0xFF000000u32)

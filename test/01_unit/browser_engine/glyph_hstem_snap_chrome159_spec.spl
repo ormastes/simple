@@ -1,0 +1,90 @@
+"""
+## Purpose and audience
+Purpose: Pin horizontal-stem (crossbar) edge snapping of 16 px Liberation Sans on
+the Engine2D CPU text path against Chrome 159. Chrome on Linux rasterises with
+FreeType's "light" autohinter: besides the blue zones (see
+glyph_shape_vertical_hint_chrome159_spec) it fits the EDGES of horizontal stems.
+Stem width is not adjusted in light mode, only the stem's position: a stem of
+1..1.5 px puts its centre on k + 26/64, so the 1.31 px H crossbar occupies
+5.75..7.06 px above the baseline, i.e. one full row plus a quarter row below it.
+Unhinted, this engine placed the same bar a quarter row too low (rows 12/13 =
+0x3f3f3f / 0x878787 on the H).
+Audience: web renderer / font rasteriser maintainers.
+
+Chrome oracle (Chrome for Testing 159.0.8154.6, `--headless=new
+--disable-gpu --force-device-scale-factor=1`, Liberation Sans 16 px, `color:#000`
+on white, `<p style="margin:0;position:absolute;left:4px;top:4px;line-height:20px">`
+holding `Hxgl` (page 1) or `eA` (page 2)), interior crossbar pixels, where
+R = G = B so the open LCD filter / gamma class does not enter:
+
+| glyph | columns | row above | bar row 1 | bar row 2 | row below |
+|-------|---------|-----------|-----------|-----------|-----------|
+| H     | 8..11   | 11 white  | 12 000000 | 13 bfbfbf | 14 white  |
+| e     | 8..9    | 13 white  | 14 000000 | 15 bfbfbf | 16 white  |
+| A     | 18..19  | 13 white (x=18)  | 14 000000 | 15 bfbfbf | 16 white  |
+"""
+
+"""
+Traceability: REQ-WEB-TEXT-HINT-002 - Draw IR LCD text fits horizontal stem edges like Chrome's light autohinter.
+"""
+# @tag: unit, browser_engine, text, engine2d, chrome159
+# @cover src/lib/common/encoding/sfnt_glyf.spl 1%
+use std.spec.*
+use std.io_runtime.{file_exists}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend
+}
+
+val SANS: text = "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
+val W: i32 = 64
+val H: i32 = 32
+
+val PAGE_HXGL: text = "<!doctype html><html><body style=\"margin:0;background:#fff;font-family:sans-serif\"><p style=\"margin:0;position:absolute;left:4px;top:4px;font-size:16px;line-height:20px;color:#000\">Hxgl</p></body></html>"
+val PAGE_EA: text = "<!doctype html><html><body style=\"margin:0;background:#fff;font-family:sans-serif\"><p style=\"margin:0;position:absolute;left:4px;top:4px;font-size:16px;line-height:20px;color:#000\">eA</p></body></html>"
+
+fn _rgb(px: [u32], x: i32, y: i32) -> u32:
+    px[y * W + x] & 0xFFFFFFu32
+
+# Every column x0..x1 of row y holds exactly `want`.
+fn _row_is(px: [u32], y: i32, x0: i32, x1: i32, want: u32) -> bool:
+    var x = x0
+    while x <= x1:
+        if _rgb(px, x, y) != want:
+            return false
+        x = x + 1
+    true
+
+describe "horizontal stem edge snapping against Chrome 159 (light autohinter)":
+    it "AC-1: the H crossbar is one full row plus a quarter row, top edge on a row boundary":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(PAGE_HXGL, W, H, "cpu_simd")
+        expect(px.len()).to_equal((W * H).to_i64())
+        step("Chrome H interior x=8..11: row 11 ffffff, 12 000000, 13 bfbfbf, 14 ffffff")
+        expect(_row_is(px, 11, 8, 11, 0xffffffu32)).to_equal(true)
+        expect(_row_is(px, 12, 8, 11, 0x000000u32)).to_equal(true)
+        expect(_row_is(px, 13, 8, 11, 0xbfbfbfu32)).to_equal(true)
+        expect(_row_is(px, 14, 8, 11, 0xffffffu32)).to_equal(true)
+
+    it "AC-2: the e crossbar (curve-bounded glyph, anchored on the baseline overshoot) matches Chrome":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(PAGE_EA, W, H, "cpu_simd")
+        step("Chrome e interior x=8..9: row 13 ffffff, 14 000000, 15 bfbfbf, 16 ffffff")
+        expect(_row_is(px, 13, 8, 9, 0xffffffu32)).to_equal(true)
+        expect(_row_is(px, 14, 8, 9, 0x000000u32)).to_equal(true)
+        expect(_row_is(px, 15, 8, 9, 0xbfbfbfu32)).to_equal(true)
+        expect(_row_is(px, 16, 8, 9, 0xffffffu32)).to_equal(true)
+
+    it "AC-3: the A crossbar (diagonal legs) matches Chrome":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(PAGE_EA, W, H, "cpu_simd")
+        step("Chrome A interior x=18..19 (row 13: x=18): row 13 ffffff, 14 000000, 15 bfbfbf, 16 ffffff")
+        expect(_row_is(px, 13, 18, 18, 0xffffffu32)).to_equal(true)
+        expect(_row_is(px, 14, 18, 19, 0x000000u32)).to_equal(true)
+        expect(_row_is(px, 15, 18, 19, 0xbfbfbfu32)).to_equal(true)
+        expect(_row_is(px, 16, 18, 19, 0xffffffu32)).to_equal(true)

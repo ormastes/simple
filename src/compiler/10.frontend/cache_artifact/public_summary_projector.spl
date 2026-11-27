@@ -2,6 +2,7 @@
 
 use std.common.crypto.sha256.{sha256_text}
 use compiler.frontend.core.parser (parse_module_silent_checked)
+use compiler.core.types.{flat_pool_state_take, flat_pool_state_install}
 use compiler.common.cache_contract.public_summary_v1.{PublicSummaryEntryV1, PublicSummaryV1, public_summary_declaration_graph_digest_v1, public_summary_normalized_signature_v1, public_summary_sorted_dependencies_v1}
 use compiler.common.cache_contract.snapshot_contract_v1.{LogicalSourcePathV1}
 
@@ -333,7 +334,15 @@ pub fn project_public_summary_v1(input: PublicSummaryProjectionInputV1) -> Resul
         reverse_reference_roots,
     )
     val virtual_text_digest = sha256_text("simple.public.summary.text.v1\u0000" + virtual_text)
-    if parse_module_silent_checked(virtual_text, "simple-summary/generated/_tldr.spl"):
+    # Validate on fresh flat pools, then reinstate the caller's. The caller's
+    # pools belong to the retained file parse, whose transient scope has
+    # already reclaimed every owner it did not promote, so parsing on them
+    # read and wrote freed arrays (named_type_modules, span pools, ...):
+    # bug stage2_parse_shard_segv_named_type_find_2026-11-13.
+    val retained_pools = flat_pool_state_take()
+    val summary_invalid = parse_module_silent_checked(virtual_text, "simple-summary/generated/_tldr.spl")
+    flat_pool_state_install(retained_pools)
+    if summary_invalid:
         return Err("public summary rendering is not grammar-valid Simple")
 
     Ok(PublicSummaryV1(

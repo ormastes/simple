@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-- Status: OPEN (2026-09-13)
+- Status: SUPERSEDED (2026-09-13)
 - Binary: deployed seed `bin/release/aarch64-unknown-linux-gnu/simple`,
   sha256 `3d120a6f9ab5704b2225654e4f2773cdbdc787108bd21b67aab657ffe3da72ef`
 - Host: aarch64, 20 cores, shared box at load ~40
@@ -63,3 +63,44 @@ everyone is actually running. Whoever picks this up should start by diffing the
 deployed seed's provenance against `f26970e9d93` rather than by hunting the
 crash.
 
+
+## CLOSED 2026-11-09 — stale (not reproducible on the current seed)
+
+Re-checked on the current deployed seed (Windows x86_64, `bin/simple.exe`,
+sha256 prefix `8c7341592f4d47de`, release/1.0.0 at `f7e0be6779b`), host idle:
+
+| invocation | runs | rc >= 128 (crash) | observed rc |
+|---|---:|---:|---|
+| `lint probe.spl` (`fn main() -> i64:` / `0`, the record's probe) | 20 | 0 | 1 x20 (deterministic `STUB002` finding, verdict printed every run) |
+| `lint probe2.spl` (`fn main():` / `print("hi")`) | 30 | 0 | 0 x30, `Lint passed: all files clean` |
+| `lint src/lib/common/base_encoding.spl` | 10 | 0 | 0 x10, `Lint passed: all files clean` |
+
+Every run printed its verdict line; no empty-stdout exit and no signal exit in
+60 invocations. This matches the record's own finding that a seed rebuilt from
+`f26970e9d93` already ran 4/4 clean — the crash lived only in a stale deployed
+aarch64 artifact (`3d120a6f...`) that no longer exists as a tooling surface.
+The strace-amplified lane cannot be replayed on Windows, but the no-strace
+intermittent case (1/3 in the record) did not reproduce in 60 runs.
+
+Closed as stale; reopen with a fresh crash transcript against a named current
+binary if it recurs.
+
+---
+
+## Addendum 2026-11-11 — lane seed2 — verdict SUPERSEDED (re-verified on refreshed seed)
+
+Triage-first pass, batch 2. The row was closed 2026-11-09 as stale (crash lived
+only in the stale aarch64 artifact `3d120a6f...`). The seed was refreshed again
+today (build-commit `0791c2b7f4a7`, refresh #8184); this addendum spot-checks the
+closure against that newer binary.
+
+**Seed-smoke (this lane's proof):** on the refreshed `bin/simple.exe`, 5x
+`lint probe.spl` (the record's `fn main() -> i64: 0` probe) -> 5/5 rc=1 with
+the deterministic STUB002 verdict line printed (exactly as the 2026-11-09
+closure documented); 5x `lint probe2.spl` (`fn main(): print("hi")`) -> 5/5
+rc=0 with `Lint passed: all files clean`. 10/10 verdicts printed, zero
+empty-stdout exits, zero signal exits. The strace-amplified lane remains
+non-replayable on Windows; the no-strace intermittent case (1/3 in the
+record) stays non-reproducing.
+
+**Cycles:** 0. Evidence: `build/review/p3fix-seed2-20261111.sdn`.

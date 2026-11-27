@@ -1,0 +1,77 @@
+"""CU-006: TUI and GUI shells build their view list from ExtensionHost.visible_view_ids()."""
+# @req CU-006
+use std.spec.*
+use std.editor.core.session.{EditSession}
+use std.editor.extensions.manifest_sdn.{extension_manifest_decode}
+use app.editor.editor_controller.{EditorController}
+use app.editor.gui_shell.{gui_shell_new, gui_shell_apply_profile, gui_shell_view_ids}
+use app.editor.tui_shell.{editor_tui_apply_profile, editor_tui_view_ids}
+
+fn _sdn(id: text, event: text) -> text:
+    "extension:\n" +
+    "  schema: simple.ide.extension/2\n" +
+    "  id: {id}\n" +
+    "  display_name: Demo\n" +
+    "  version: 1.0.0\n" +
+    "  host: builtin\n" +
+    "activation:\n" +
+    '  events: ["' + event + '"]' + "\n" +
+    "contributes:\n" +
+    '  view_containers: [{id: "' + id + '.box", title: "Box", location: "activitybar", order: 9}]' + "\n" +
+    '  views: [{id: "' + id + '.view", kind: "list", container: "' + id + '.box", provider: "p.demo", when: "gated.on"}]' + "\n"
+
+fn _register(ctrl: EditorController):
+    ctrl.extension_host.register_manifest(extension_manifest_decode(_sdn("gated", "onProfile:caret")).manifest, "<test>")
+    ctrl.extension_host.register_manifest(extension_manifest_decode(_sdn("unrelated", "onProfile:other")).manifest, "<test>")
+
+fn _tui() -> EditorController:
+    var session = EditSession.new()
+    session.open_empty()
+    val ctrl = EditorController.new(session)
+    _register(ctrl)
+    ctrl
+
+fn _gui():
+    var session = EditSession.new()
+    session.open_empty()
+    val gui = gui_shell_new(session)
+    _register(gui.ctrl)
+    gui
+
+describe "shell visible view list":
+    it "TUI and GUI yield the same ordered view ids for the caret profile":
+        # @req CU-006
+        step("apply caret in both shells")
+        val tui = _tui()
+        editor_tui_apply_profile(tui, "caret")
+        val gui = _gui()
+        gui_shell_apply_profile(gui, "caret")
+        val a = editor_tui_view_ids(tui)
+        val b = gui_shell_view_ids(gui)
+        expect(a).to_equal(b)
+        expect(a.contains("caret.agent_roster")).to_equal(true)
+        expect(a).to_equal(tui.extension_host.visible_view_ids())
+
+    it "a false when hides the view in both shells; true shows it in both":
+        # @req CU-006
+        step("toggle context key gated.on")
+        val tui = _tui()
+        editor_tui_apply_profile(tui, "caret")
+        val gui = _gui()
+        gui_shell_apply_profile(gui, "caret")
+        expect(tui.extension_host.view_registered("gated.view")).to_equal(true)
+        expect(editor_tui_view_ids(tui).contains("gated.view")).to_equal(false)
+        expect(gui_shell_view_ids(gui).contains("gated.view")).to_equal(false)
+        tui.extension_host.set_context_keys(["gated.on"])
+        gui.ctrl.extension_host.set_context_keys(["gated.on"])
+        expect(editor_tui_view_ids(tui).contains("gated.view")).to_equal(true)
+        expect(gui_shell_view_ids(gui).contains("gated.view")).to_equal(true)
+        expect(editor_tui_view_ids(tui)).to_equal(gui_shell_view_ids(gui))
+
+    it "caret profile does not eagerly activate an unrelated extension":
+        # @req CU-006
+        step("apply caret; unrelated onProfile:other stays inactive")
+        val tui = _tui()
+        editor_tui_apply_profile(tui, "caret")
+        expect(tui.extension_host.is_active("unrelated")).to_equal(false)
+        expect(tui.extension_host.view_registered("unrelated.view")).to_equal(false)

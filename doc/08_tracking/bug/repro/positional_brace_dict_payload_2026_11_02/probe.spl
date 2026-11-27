@@ -1,0 +1,67 @@
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.core.parser.{parser_has_errors}
+use compiler.frontend.parser_types.{Variant, VariantKind}
+use compiler.frontend.parser_types_expr.{Type, TypeKind}
+
+fn require(condition: bool, message: text):
+    if not condition:
+        panic(message)
+
+fn type_name(value: Type) -> text:
+    match value.kind:
+        case TypeKind.Named(name, arguments):
+            if name == "Dict" and arguments.len() == 2:
+                return "dict<" + type_name(arguments[0]) + "," + type_name(arguments[1]) + ">"
+            name
+        case _: "other"
+
+fn require_named_dict(variant: Variant):
+    match variant.kind:
+        case VariantKind.Struct(fields):
+            require(fields.len() == 1, "Named field count")
+            require(fields[0].name == "map", "Named field name")
+            require(type_name(fields[0].type_) == "dict<text,i64>", "Named field dict type")
+        case _: panic("Named dictionary variant was not struct shaped")
+
+fn require_following_positional(variant: Variant):
+    match variant.kind:
+        case VariantKind.Tuple(types):
+            require(types.len() == 1, "Following variant payload count")
+            require(type_name(types[0]) == "i64", "Following variant payload type")
+        case _: panic("Following variant was not tuple shaped")
+
+fn main():
+    val source = "enum Memo:\n" +
+        "    IndexMap(\{text: i64\})\n" +
+        "    Named(map: \{text: i64\})\n" +
+        "    After(i64)\n"
+    val parsed = parse_full_frontend(source, "brace_payload.spl", "brace_payload", Logger(level: 0))
+    require(not parser_has_errors(), "Parser reported errors")
+    require(parsed.enums.contains_key("Memo"), "Memo enum missing")
+    val variants = parsed.enums["Memo"].variants
+    var found_positional = false
+    var found_named = false
+    var found_following = false
+    for variant in variants:
+        if variant.name == "IndexMap":
+            found_positional = true
+            match variant.kind:
+                case VariantKind.Tuple(types):
+                    print("IndexMap tuple count={types.len()} payload={type_name(types[0])}")
+                    require(types.len() == 1, "Positional payload count")
+                    require(type_name(types[0]) == "dict<text,i64>", "Positional dict key/value types")
+                case VariantKind.Struct(fields):
+                    print("IndexMap struct count={fields.len()} payload={fields[0].name}:{type_name(fields[0].type_)}")
+                    panic("Positional dict was parsed as named fields")
+                case _: panic("Positional dict variant had unsupported shape")
+        elif variant.name == "Named":
+            found_named = true
+            require_named_dict(variant)
+        elif variant.name == "After":
+            found_following = true
+            require_following_positional(variant)
+    require(found_positional, "Positional variant missing")
+    require(found_named, "Named variant missing")
+    require(found_following, "Following variant missing")
+    print("PASS parser retains positional dict, named dict, and following variant")

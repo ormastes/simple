@@ -1,0 +1,80 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+#
+# AES-GCM encrypt length guards (bug
+# aes_gcm_encrypt_length_unchecked_and_rewound_hardening_2026-11-13, Open
+# item 1). Every pure-Simple AES-GCM encrypt copy must fail closed on a
+# wrong-length key or nonce BEFORE key expansion reads any input byte:
+# rt_bytes_u8_at reads an out-of-range index as 0, so without the guard a
+# short key/nonce silently zero-extends to a weak key/IV and produces
+# valid-looking ciphertext.
+#
+# The guards panic (the copies return bare [u8]; a Result retrofit touches
+# ~60 call sites), and the spec runner cannot assert a panic, so this spec
+# pins the guards at source level: each encrypt function must check the key
+# and nonce lengths ahead of its first key-expansion call. Deleting or
+# reordering a guard fails this spec. Valid-input behavior is pinned by the
+# existing KAT specs (aes_gcm_common_kat_spec, aes128/192/256 *_kat /
+# nist_vectors), which must stay green.
+
+use std.spec.*
+use std.spec.step
+use std.nogc_sync_mut.io.file_ops.{file_read}
+
+# (file, encrypt fn, expected key length) for every pure-Simple copy.
+fn _guard_sites() -> [[text]]:
+    [
+        ["src/lib/nogc_async_mut_noalloc/tls/aes128_gcm.spl", "fn aes128_gcm_encrypt(", "16"],
+        ["src/os/crypto/aes256_gcm.spl", "fn aes256_gcm_encrypt(", "32"],
+        ["src/os/crypto/aes_gcm.spl", "fn aes256_gcm_encrypt(", "32"],
+        ["src/lib/common/crypto/aes_gcm.spl", "fn aes128_gcm_encrypt(", "16"],
+        ["src/lib/common/crypto/aes_gcm.spl", "fn aes192_gcm_encrypt(", "24"],
+        ["src/lib/common/crypto/aes_gcm.spl", "fn aes256_gcm_encrypt(", "32"]
+    ]
+
+# Body slice from the named fn to the next top-level fn (or EOF).
+fn _fn_body(source: text, fn_sig: text) -> text:
+    val start = source.index_of(fn_sig)
+    if start < 0:
+        return ""
+    val rest = source.substring(start, source.byte_len())
+    val next = rest.substring(1, rest.byte_len()).index_of("\nfn ")
+    if next < 0:
+        return rest
+    rest.substring(0, next + 1)
+
+fn _guard_precedes_expansion(body: text, key_len: text) -> bool:
+    val key_guard = body.index_of("if key.len() != {key_len}:")
+    val nonce_guard = body.index_of("if nonce.len() != 12:")
+    var expansion = body.index_of("key_expansion(")
+    if expansion < 0:
+        expansion = body.index_of("_gcm_encrypt(key, nonce")
+    if key_guard < 0 or nonce_guard < 0 or expansion < 0:
+        return false
+    key_guard < expansion and nonce_guard < expansion
+
+describe "AES-GCM encrypt copies fail closed on wrong-length key/nonce":
+    it "every encrypt copy checks key and nonce lengths before key expansion":
+        step("Source-contract pin for all six encrypt functions in four copies")
+        for site in _guard_sites():
+            val body = _fn_body(file_read(site[0]), site[1])
+            expect(body != "").to_equal(true)
+            expect(_guard_precedes_expansion(body, site[2])).to_equal(true)
+
+    it "guards panic with the canonical messages the decrypt side uses":
+        step("Message parity keeps the fail-closed contract greppable")
+        for site in _guard_sites():
+            val body = _fn_body(file_read(site[0]), site[1])
+            val key_bits = match site[2]:
+                case "16": "AES-128"
+                case "24": "AES-192"
+                case _: "AES-256"
+            expect(body).to_contain("panic(\"{key_bits} key must be {site[2]} bytes\")")
+            expect(body).to_contain("panic(\"GCM nonce must be 12 bytes\")")
+
+    it "the sshd delegating copy guards ahead of its std.common delegate call":
+        step("Delegator must fail closed before entering the shared core")
+        val body = _fn_body(file_read("src/os/crypto/aes256_gcm.spl"), "fn aes256_gcm_encrypt(")
+        val key_guard = body.index_of("if key.len() != 32:")
+        val delegate = body.index_of("_lib_aes256_gcm_encrypt(key, nonce")
+        expect(key_guard >= 0 and delegate >= 0 and key_guard < delegate).to_equal(true)

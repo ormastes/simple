@@ -148,3 +148,35 @@ where a guessed implementation is worse than a recorded gap.
    families are still wanted, or whether the importing `mod.spl` re-export lines
    should be deleted as dead.
 
+
+## Triage 2026-11-25 (p2w5-ag lane) — most entries now resolved; two clusters remain
+
+Definition-anchored re-check of the sampled entries at release/1.0.0 HEAD:
+
+RESOLVED since the 2026-08-10 re-verification:
+- `pbkdf2_sha1_bytes` — defined in `src/lib/common/crypto/pbkdf2.spl`.
+- `FeP256`/`fe_p256` — `src/lib/common/math/field/fe_p256.spl` exists;
+  `src/os/crypto/p256.spl:21` import now resolves.
+- `current_architecture` — defined in `src/os/kernel/hal/arch_context.spl`
+  and `src/os/kernel/arch_adapt/arch_surface.spl`.
+- `md5` — `src/lib/crypto/legacy_hash.spl`.
+- `FbCompositorBackend` — real class in `src/os/compositor/display_backend.spl:77`.
+- `spring_progress` — `src/lib/common/animation/spring.spl`.
+- `line_wrap`/`line_unwrap` (pem.spl) — resolved by refactoring:
+  `src/os/crypto/pem.spl` now uses local `_line_wrap64`/`_line_unwrap` (:30,:42).
+- `FileExplorer` — resolved by refactoring: `shell_ui_builders.spl` no longer
+  imports it; only `FileExplorerState` exists and is what the code uses.
+
+STILL DANGLING (sampled):
+- `TcpStateMachine` — imported at `_TcpConnection/{connection_struct,
+  data_and_segments,state_helpers,state_machine}.spl:34` from
+  `tcp_state_machine.spl`, which declares only `TcpState`, `SocketEntry`,
+  `AcceptQueue`, `TcpStateSocketTable`. In all four files the import line is
+  the ONLY occurrence of the name — these are dead imports of a
+  never-implemented type; either implement it or delete the four dead import
+  lines (owner decision; deleting is mechanical but this lane did not touch
+  netstack).
+
+Status stays OPEN for the remaining cluster(s); the security-relevant crypto
+gaps called out in "Suggested triage order" item 1 are now implemented, so
+the residual severity is lower than at filing.

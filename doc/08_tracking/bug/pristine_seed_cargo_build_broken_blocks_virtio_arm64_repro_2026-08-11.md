@@ -80,3 +80,17 @@ were modified in this session — the blocker is entirely upstream in the Rust
 runtime crate. Worktree `/mnt/data/build-virtio` was removed after this
 investigation; nothing was pushed (nothing to push — no fix produced).
 
+
+## Verification 2026-11-25 (work/p2w4-ak-20261125, release/1.0.0)
+
+Obsolete classification confirmed by source inspection at release/1.0.0 HEAD:
+
+- `WideInt` has zero hits in `src/compiler_rust/runtime/src/value/heap.rs`
+  and `src/compiler_rust/runtime/src/value/sffi/io_print.rs` — the
+  enum/match mismatch is gone from source.
+- `rt_array_each` and `rt_value_unbox_int` are exported from
+  `src/compiler_rust/runtime/src/value/mod.rs` (lines 172, 352), resolving
+  the E0432 unresolved-import group.
+- No cargo build was run (lane forbids Rust builds); the "Obsolete" header
+  stands on source evidence. The original blocker was a transient
+  mid-refactor state of the runtime crate, since completed.

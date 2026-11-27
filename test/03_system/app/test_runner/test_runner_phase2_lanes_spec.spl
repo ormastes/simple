@@ -1,0 +1,84 @@
+# @req REQ-TESTRUNNER-PHASE2-4FORMATS
+"""
+# Every runner lane honours --compiler=phase2
+
+**Feature IDs:** #test-runner-phase2-lanes
+**Category:** Tooling
+
+## Overview
+
+Two fail-open bugs let a phase2 run silently use the invoking binary.
+(A) Without `--no-session-daemon` the client lane dropped `--compiler`, so a
+single spec printed PASS while the phase2 CLI was never invoked, and an unset
+SIMPLE_PHASE2_FULL_CLI was not an error. (B) `--spl-doctest` children ran on a
+stale memoised binary. Each lane below must invoke the recording stand-in CLI
+named by SIMPLE_PHASE2_FULL_CLI.
+"""
+
+use std.spec.*
+use std.spec.step
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.file_ops.{file_write, file_read}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.io_runtime.{file_hash_sha256_or_empty}
+
+val DIR: text = "build/phase2_lanes"
+
+fn real_binary() -> text:
+    val b = env_get("SIMPLE_BINARY")
+    if b != "":
+        return b
+    "bin/simple"
+
+fn write_cli() -> text:
+    process_run_bounded("mkdir", ["-p", DIR], 10000, 65536)
+    val path = process_run_bounded("pwd", [], 10000, 65536).0.trim() + "/" + DIR + "/phase2_simple"
+    file_write(path, "#!/bin/sh\necho \"phase2-invoked $*\" >> \"{path}.log\"\nexec \"{real_binary()}\" \"$@\"\n")
+    process_run_bounded("chmod", ["+x", path], 10000, 65536)
+    file_write(path + ".log", "")
+    path
+
+fn run_phase2(cli: text, extra: [text]) -> (text, i64):
+    var args = ["SIMPLE_PHASE2_FULL_CLI=" + cli, "SIMPLE_PHASE2_FULL_CLI_SHA256=" + file_hash_sha256_or_empty(cli), real_binary(), "test", "--compiler=phase2", "--no-db"]
+    for a in extra:
+        args.push(a)
+    val (out, err, code) = process_run_bounded("env", args, 300000, 4194304)
+    (out + err, code)
+
+describe "phase2 in every lane":
+    # @capture(exec)
+    it "invokes phase2 for a single spec in the client lane":
+        val cli = write_cli()
+        val spec = DIR + "/client_lane_spec.spl"
+        file_write(spec, "use std.spec\ndescribe \"tiny\":\n    it \"checks\":\n        expect(6 * 7).to_equal(42)\n")
+        step("Run one spec without --no-session-daemon")
+        val (report, code) = run_phase2(cli, [spec])
+        expect(code).to_equal(0)
+        expect(file_read(cli + ".log")).to_contain("client_lane_spec.spl")
+
+    # @capture(exec)
+    it "fails closed in the client lane when SIMPLE_PHASE2_FULL_CLI is unset":
+        write_cli()
+        val spec = DIR + "/client_lane_spec.spl"
+        step("Run one spec with SIMPLE_PHASE2_FULL_CLI unset")
+        val (out, err, code) = process_run_bounded("env", ["-u", "SIMPLE_PHASE2_FULL_CLI", real_binary(), "test", "--compiler=phase2", "--no-db", spec], 300000, 4194304)
+        expect(code).to_equal(2)
+        expect(out + err).to_contain("SIMPLE_PHASE2_FULL_CLI")
+
+    # @capture(exec)
+    it "invokes phase2 for an md sdoctest":
+        val cli = write_cli()
+        val doc = DIR + "/lane.md"
+        file_write(doc, "# Doc\n\n```simple\nprint(6 * 7)\n```\n")
+        step("Run the md doctest")
+        run_phase2(cli, ["--sdoctest", doc])
+        expect(file_read(cli + ".log")).to_contain("phase2-invoked")
+
+    # @capture(exec)
+    it "invokes phase2 for a comment doctest":
+        val cli = write_cli()
+        val src = DIR + "/lane_doc.spl"
+        file_write(src, "## Answer.\n##\n## ```simple\n## print(6 * 7)\n## ```\nfn answer() -> i64:\n    42\n")
+        step("Run the comment doctest")
+        run_phase2(cli, ["--spl-doctest", src])
+        expect(file_read(cli + ".log")).to_contain("phase2-invoked")

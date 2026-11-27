@@ -1,9 +1,20 @@
 /* Compile baseline-only: optional instructions live in separate kernel TU. */
 #include "bitmap_kernel_private.h"
+#include "text_kernel_private.h"
 #include "provider_identity.h"
-#include <sys/auxv.h>
 #include <string.h>
 #include <stdatomic.h>
+#ifdef SIMPLE_VECTOR_LEVELLED
+/* Levelled DSO: vector_level_dispatch.c owns CPU/OS probing for every OS. */
+#include "vector_level_private.h"
+#else
+/* getauxval lives behind this header and is only used by the __aarch64__ /
+ * __riscv branches below; PE/mingw targets have no sys/auxv.h. */
+#if defined(__has_include)
+#if __has_include(<sys/auxv.h>)
+#include <sys/auxv.h>
+#endif
+#endif
 #if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
 #include <cpuid.h>
 #endif
@@ -13,11 +24,19 @@
 #error "select exactly one scalable-vector provider requirement"
 #endif
 #endif
+#endif
 #define EXPORT __attribute__((visibility("default")))
 #ifdef SIMPLE_VECTOR_ENABLE_HTTP
 #define SUPPORTED_CAPS UINT64_C(15)
 #else
 #define SUPPORTED_CAPS UINT64_C(3)
+#endif
+#ifdef SIMPLE_VECTOR_ENABLE_TEXT
+/* Additive text opcodes 5..12, owned by text_level_dispatch.c. */
+#define TEXT_CAPS SIMPLE_VECTOR_TEXT_CAPS
+int64_t simple_text_apply_v1(int64_t handle,int64_t req,int64_t res);
+#else
+#define TEXT_CAPS UINT64_C(0)
 #endif
 static atomic_uint_fast64_t vector_iterations;
 #ifdef SIMPLE_VECTOR_TEST_OBSERVER
@@ -32,7 +51,9 @@ extern void simple_vector_test_apply_event_v1(uint32_t opcode,
     uint32_t status, uint64_t executed_loops);
 #endif
 static int available(void) {
-#if defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
+#if defined(SIMPLE_VECTOR_LEVELLED)
+    return simple_vector_selected_level() > 0;
+#elif defined(__x86_64__) && (defined(__GNUC__) || defined(__clang__))
 #ifdef SIMPLE_VECTOR_FORCE_NO_AVX512
     return 0;
 #else
@@ -66,6 +87,8 @@ static int available(void) {
 static int http_available(void) {
 #if defined(SIMPLE_VECTOR_FORCE_NO_HTTP)
     return 0;
+#elif defined(SIMPLE_VECTOR_LEVELLED)
+    return available(); /* every level object carries an HTTP kernel */
 #elif defined(__x86_64__) && !defined(SIMPLE_VECTOR_FORCE_NO_AVX512BW)
     if(!available()) return 0;
     unsigned int a,b,c,d;
@@ -84,6 +107,18 @@ static int http_available(void) {
 EXPORT uint64_t simple_vector_executed_iterations_v1(void) {
     return atomic_load_explicit(&vector_iterations,memory_order_relaxed);
 }
+#ifdef SIMPLE_VECTOR_LEVELLED
+/* Diagnostic: admitted SIMD level (0 = refuses; see vector_level_private.h). */
+EXPORT int32_t simple_vector_selected_level_v1(void) {
+    return (int32_t)simple_vector_selected_level();
+}
+/* Diagnostic: why that level (code, see vector_level_private.h) plus text such
+ * as "max", "cap:3", "cpu-missing:avx512bw", "xcr0:0xe0", "os:sve-unprobed"
+ * written NUL-terminated into buf (truncated to size; buf may be NULL). */
+EXPORT int32_t simple_vector_level_reason_v1(char *buf,uint64_t size) {
+    return (int32_t)simple_vector_level_reason(buf,(size_t)size);
+}
+#endif
 EXPORT int32_t simple_provider_query_v1(uint64_t req,uint64_t res) {
     const uint8_t *q=(const uint8_t *)(uintptr_t)req;
     uint8_t *r=(uint8_t *)(uintptr_t)res;
@@ -94,7 +129,7 @@ EXPORT int32_t simple_provider_query_v1(uint64_t req,uint64_t res) {
     else if(simple_vector_rd32(q+12)!=1) status=2;
     else if(simple_vector_rd32(q+16)!=0) status=7;
     else if(simple_vector_rd64(q+20)!=1 || simple_vector_rd32(q+28) || simple_vector_rd32(q+32)) status=4;
-    else if(simple_vector_rd64(q+36)&~SUPPORTED_CAPS) status=5;
+    else if(simple_vector_rd64(q+36)&~(SUPPORTED_CAPS|TEXT_CAPS)) status=5;
     memset(r,0,84); simple_vector_wr32(r,status); simple_vector_wr32(r+12,84);
     if(status) return (int32_t)status;
     static const uint8_t digest[32]=SIMPLE_VECTOR_ABI_DIGEST_BYTES;
@@ -124,6 +159,10 @@ EXPORT int64_t simple_vector_apply_v1(int64_t handle,int64_t req,int64_t res) {
     const uint8_t *q=(const uint8_t *)(uintptr_t)req;
     uint8_t *r=(uint8_t *)(uintptr_t)res;
     uint32_t op=simple_vector_rd32(q+4),status=0;
+#ifdef SIMPLE_VECTOR_ENABLE_TEXT
+    if(op>=SIMPLE_VECTOR_TEXT_FIRST_OPCODE&&op<=SIMPLE_VECTOR_TEXT_LAST_OPCODE)
+        return simple_text_apply_v1(handle,req,res);
+#endif
     uint64_t a=simple_vector_rd64(q+8),n=simple_vector_rd64(q+16),
         b=simple_vector_rd64(q+24),bn=simple_vector_rd64(q+32),
         out=simple_vector_rd64(q+40),cap=simple_vector_rd64(q+48),written=0;

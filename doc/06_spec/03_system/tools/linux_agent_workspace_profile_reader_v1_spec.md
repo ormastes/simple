@@ -1,0 +1,13 @@
+# Actual fixed agent workspace profile reader v1
+
+Executable: test/03_system/tools/linux_agent_workspace_profile_reader_v1_spec.spl. Status AUTHORED_NOT_RUN; native/compiler/link/fault qualification NOT_COVERED. New functionality scope; no reset of earlier workload or identity repair counts.
+
+Provisioning is an explicit future administrator operation, not performed by this change. Use a disposable supported dedicated service-UID fixture with the existing root-protected /etc/simple/container ancestry, root-owned strict regular profile mode and predelegated service state. Install nonempty UTF8 SDN at the single fixed path /etc/simple/container/agent-workspace-profile.sdn. This fixture reads metadata only; it does not decode the future agent profile schema or authorize staging, workspace mutation, quota, admission or launch.
+
+1. Open the real zero-argument installed reader. Missing/unsafe provisioning fails rather than skipping or fabricating custody. Retain every cleanup-bearing result in the fixture owner array.
+2. Read current actual process context, call the new zero-argument fixed child method twice and compare exact returned text plus unchanged actual context. The existing owner retains the descriptor and pinned digest and performs root ownership/mode/no-follow/ancestry/process checks before and after reads.
+3. Close the actual reader once. A copied alias must fail subsequent fixed-child reads and report stale on later close. Consumed-error is conclusively closed with diagnostic, never a native descriptor retry. Retained/unconfirmed cleanup remains owned in the array.
+
+Required administrator-prepared negative reproductions, NOT_RUN here: absent child; child symlink; wrong owner or group/world-writable mode; invalid UTF8; replacement or byte mutation after first read; changed namespace/fork origin; descriptor-close fault. Expect fixed read refusal for unsafe provenance and exact linux-machine-agent-workspace-profile-utf8 on invalid UTF8 after genuine protected read. No caller-selected filename/root or invalid-byte replacement decoding is supported. Do not mutate the policy on a production Host to run these cases; use a separately prepared disposable fixture.
+
+The private fixed-child name set gains exactly one constant. The existing lazy missing-child behavior, cleanup registry, storage writer, other profile ports and actual_boot_id_v2 remain unchanged. Returning verified text is DATA, not an agent workspace or mount capability. Later source-owner/admission consumers require their own reviewed fixed profile decoder and actual effect/lease/containment proof.

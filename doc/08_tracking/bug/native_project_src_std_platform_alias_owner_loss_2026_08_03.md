@@ -78,3 +78,20 @@ or whether both filesystem variants should use their direct family platform
 facades. Either choice must keep exact owner selection and the strict runtime
 regressions above.
 
+
+## Resolution (2026-11-25, P2 ledger sweep) — STALE, fixed 2026-08-17
+
+The owner decision this entry reserved was taken in commit `9e78a1b9f9f`
+("fix(compiler): close canonical P2 source defects", 2026-08-17): both
+filesystem families now import their direct family platform facade —
+`use std.nogc_sync_mut.platform (...)` in
+`src/lib/nogc_sync_mut/fs/flat.spl:22` and `use std.nogc_async_mut.platform
+(...)` in `src/lib/nogc_async_mut/fs/flat.spl:22` (the files were later
+renamed `fs.spl` -> `fs/flat.spl`). The triggering `src.std.platform` shim
+spelling no longer occurs anywhere under `src/`, and both family facades
+re-export `normalize_path` / `is_absolute_path` / `join_path` from their own
+`nogc_*_mut.path` owner (e.g. `src/lib/nogc_sync_mut/platform.spl:17`),
+preserving exact owner selection with no suffix guess. Absence of the Stage 4
+unresolved-call warnings could not be re-run here (it needs the Rust
+native-project Stage 4 build, unavailable on this Windows host), so closure
+rests on the source evidence above. Closed.

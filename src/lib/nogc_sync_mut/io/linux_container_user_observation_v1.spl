@@ -1,0 +1,131 @@
+# Read-only primary-task observation. Native tokens use kind-tagged slots in
+# the existing workspace storage registry, never a serialized authority.
+use std.common.string_core.str_len
+
+@unsafe(reason: "pin pidfd before native namespace mapping observation", capabilities: [ffi])
+extern fn rt_linux_container_user_open_v1(pid: i64, cgroup: text, binding: text) -> i64
+@unsafe(reason: "refresh retained process identity and mapping", capabilities: [ffi])
+extern fn rt_linux_container_user_observe_v1(token: i64, binding: text) -> text
+@unsafe(reason: "release observation descriptors only, never signal or reap", capabilities: [ffi])
+extern fn rt_linux_container_user_close_v1(token: i64, binding: text) -> i64
+
+pub struct LinuxContainerUserObservationV1:
+    native_token: i64
+    pid: i64
+    process_start_ticks: i64
+    observer_effective_uid: i64
+    observer_effective_gid: i64
+    mapped_effective_uid: i64
+    mapped_effective_gid: i64
+    mapped_filesystem_uid: i64
+    mapped_filesystem_gid: i64
+    container_effective_uid: i64
+    container_effective_gid: i64
+    target_userns_device: i64
+    target_userns_inode: i64
+    observer_userns_device: i64
+    observer_userns_inode: i64
+    cgroup_path: text
+    uid_map_digest: text
+    gid_map_digest: text
+    observed_unix_ms: i64
+    binding_digest: text
+
+pub struct LinuxContainerUserObservationFailureV1:
+    error: text
+    retained_native_token: i64
+    binding_digest: text
+
+fn user_observation_digest_v1(value: text) -> bool:
+    if str_len(value) != 64: return false
+    for i in 0..64:
+        val c = value.byte_at(i) as i64
+        if not ((c >= 48 and c <= 57) or (c >= 97 and c <= 102)): return false
+    true
+
+fn user_observation_number_v1(value: text, maximum: i64) -> Result<i64, text>:
+    if str_len(value) == 0 or str_len(value) > 19 or (str_len(value) > 1 and value.starts_with("0")):
+        return Err("container-user-observation-integer")
+    var result: i64 = 0
+    for i in 0..str_len(value):
+        val digit = (value.byte_at(i) as i64) - 48
+        if digit < 0 or digit > 9 or result > (maximum - digit) / 10:
+            return Err("container-user-observation-integer")
+        result = result * 10 + digit
+    Ok(result)
+
+fn user_observation_decode_v1(token: i64, binding: text, payload: text) -> Result<LinuxContainerUserObservationV1, text>:
+    if str_len(payload) > 6143 or not payload.ends_with("\n") or payload.contains("\r") or
+            payload.contains("\t") or payload.contains("\u{0}"):
+        return Err("container-user-observation-unavailable")
+    val fields = payload.split("\n")
+    if fields.len() != 22 or fields[21] != "" or fields[0] != "linux-container-user-native-v1":
+        return Err("container-user-observation-schema")
+    val observed_token = user_observation_number_v1(fields[1], 9223372036854775807)?
+    val pid = user_observation_number_v1(fields[2], 2147483647)?
+    val ticks = user_observation_number_v1(fields[3], 9223372036854775807)?
+    val observer_uid = user_observation_number_v1(fields[4], 4294967294)?
+    val observer_gid = user_observation_number_v1(fields[5], 4294967294)?
+    val mapped_uid = user_observation_number_v1(fields[6], 4294967294)?
+    val mapped_gid = user_observation_number_v1(fields[7], 4294967294)?
+    val fsuid = user_observation_number_v1(fields[8], 4294967294)?
+    val fsgid = user_observation_number_v1(fields[9], 4294967294)?
+    val container_uid = user_observation_number_v1(fields[10], 4294967294)?
+    val container_gid = user_observation_number_v1(fields[11], 4294967294)?
+    val target_dev = user_observation_number_v1(fields[12], 9223372036854775807)?
+    val target_ino = user_observation_number_v1(fields[13], 9223372036854775807)?
+    val observer_dev = user_observation_number_v1(fields[14], 9223372036854775807)?
+    val observer_ino = user_observation_number_v1(fields[15], 9223372036854775807)?
+    val observed_ms = user_observation_number_v1(fields[19], 9223372036854775807)?
+    if token <= 0 or observed_token != token or pid <= 0 or ticks <= 0 or target_ino <= 0 or
+            observer_ino <= 0 or observed_ms <= 0 or fields[20] != binding or
+            not user_observation_digest_v1(binding) or not user_observation_digest_v1(fields[17]) or
+            not user_observation_digest_v1(fields[18]) or not fields[16].starts_with("/") or str_len(fields[16]) < 2:
+        return Err("container-user-observation-binding")
+    Ok(LinuxContainerUserObservationV1(native_token: token, pid: pid, process_start_ticks: ticks,
+        observer_effective_uid: observer_uid, observer_effective_gid: observer_gid,
+        mapped_effective_uid: mapped_uid, mapped_effective_gid: mapped_gid,
+        mapped_filesystem_uid: fsuid, mapped_filesystem_gid: fsgid,
+        container_effective_uid: container_uid, container_effective_gid: container_gid,
+        target_userns_device: target_dev, target_userns_inode: target_ino,
+        observer_userns_device: observer_dev, observer_userns_inode: observer_ino,
+        cgroup_path: fields[16], uid_map_digest: fields[17], gid_map_digest: fields[18],
+        observed_unix_ms: observed_ms, binding_digest: binding))
+
+pub fn linux_container_user_observe_v1(pid: i64, expected_cgroup_path: text,
+        binding_digest: text) -> Result<LinuxContainerUserObservationV1, LinuxContainerUserObservationFailureV1>:
+    if pid <= 0 or pid > 2147483647 or not user_observation_digest_v1(binding_digest):
+        return Err(LinuxContainerUserObservationFailureV1(error: "invalid-container-user-observation-request",
+            retained_native_token: 0, binding_digest: binding_digest))
+    val token = unsafe(capabilities: [ffi]):
+        rt_linux_container_user_open_v1(pid, expected_cgroup_path, binding_digest)
+    if token <= 0:
+        return Err(LinuxContainerUserObservationFailureV1(error: "container-user-observation-native-refused:{token}",
+            retained_native_token: 0, binding_digest: binding_digest))
+    val payload = unsafe(capabilities: [ffi]): rt_linux_container_user_observe_v1(token, binding_digest)
+    match user_observation_decode_v1(token, binding_digest, payload):
+        case Ok(observation): Ok(observation)
+        case Err(reason):
+            val closed = unsafe(capabilities: [ffi]): rt_linux_container_user_close_v1(token, binding_digest)
+            if closed != 0:
+                return Err(LinuxContainerUserObservationFailureV1(error: "container-user-observation-close-failed:{closed}",
+                    retained_native_token: token, binding_digest: binding_digest))
+            Err(LinuxContainerUserObservationFailureV1(error: reason,
+                retained_native_token: 0, binding_digest: binding_digest))
+
+pub fn linux_container_user_observation_refresh_v1(observation: LinuxContainerUserObservationV1) -> Result<LinuxContainerUserObservationV1, text>:
+    # Copied numeric facts are ignored; native baseline remains authoritative.
+    val payload = unsafe(capabilities: [ffi]):
+        rt_linux_container_user_observe_v1(observation.native_token, observation.binding_digest)
+    user_observation_decode_v1(observation.native_token, observation.binding_digest, payload)
+
+pub fn linux_container_user_observation_close_v1(observation: LinuxContainerUserObservationV1) -> Result<(), text>:
+    val result = unsafe(capabilities: [ffi]): rt_linux_container_user_close_v1(observation.native_token, observation.binding_digest)
+    if result != 0: return Err("container-user-observation-close-refused:{result}")
+    Ok(())
+
+pub fn linux_container_user_observation_failure_close_v1(failure: LinuxContainerUserObservationFailureV1) -> Result<(), text>:
+    if failure.retained_native_token <= 0: return Ok(())
+    val result = unsafe(capabilities: [ffi]): rt_linux_container_user_close_v1(failure.retained_native_token, failure.binding_digest)
+    if result != 0: return Err("container-user-observation-close-refused:{result}")
+    Ok(())

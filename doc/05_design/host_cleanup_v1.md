@@ -1,0 +1,17 @@
+# Host cleanup trace and ownership appendix
+
+Status: authored source design; NOT_RUN. This finite slice is explicit terminal cleanup, not expiry-triggered cancellation, service readiness or native platform qualification.
+
+| Requirement | Acceptance and owner |
+| --- | --- |
+| HOST-CLEANUP-01 | Derive `host_cleanup_v1` from the exact retained original operation without changing its ID/payload. Verify separate issuer and approver signatures using actual pinned protected public policy. Refresh context after verification and publication, reject clock/policy/session regression and exact expiry. Common control deadline carries original request/operation and destroy only. The shared verifier requires grant expiry no later than BOTH role key expiries, so min(grant,approval) bounds all key lifetimes at the native effect boundary. |
+| HOST-CLEANUP-02 | Resolve original packet and full runtime identity through existing host retained resolver. Require canonical qualified terminal WAIT using the single shared pure validator. Reject unsettled/ambiguous helper allocations, devices and workspace storage. Current exact terminal inspection precedes new destroy. Publish verified intent privately before effects. Use only common Container control, then independent exact absence, immutable receipt, and original journal completion marker. |
+| HOST-CLEANUP-03 | Lost/failed destroy is ambiguous; positive absence plus prior verified intent may reconcile it. Unknown absence, receipt failure, conflicting bytes or append/projection failure preserve latest owners and charged capacity. Reopen releases only exact completed digest plus revalidated original packet, observation, wait, archived cleanup proof/policy and absence. A receipt alone never means settlement. |
+
+`host_cleanup_v1(local,operation_id,signed,approval,context,refresh)` returns `HostCleanupTurnV1{local,receipt,recovery_required,error}` on every path. Capacity settlement returns its updated owner even when projection after journal append fails. The receipt has twelve typed fields; scope/runtime are encoded once by the common exact-absence codec with identical outer typed projections. `host_cleanup_settled_v1` is the canonical consumer check.
+
+A retained intent followed by expiry before native destroy remains uncertain. If the object is present, this version deliberately refuses another destroy rather than discarding evidence or replacing immutable authorization. A future separately proved no-effect-attempt classification is required for safe renewed cleanup. This liveness limitation is explicit; deadline expiry never kills or releases.
+
+Private persistence uses the existing Linux retained descriptor security capability. Native Windows ACL-backed owner integration is missing and fails closed before cleanup persistence; no chmod/stat substitute claims Windows privacy. Stage errors may leave a private orphan; retained final files are never overwritten, repaired or automatically deleted. Parent startup reconciliation uses the same evidence dispatcher rather than trusting prior Released rows. The shared journal remains its admitted process-crash profile; fsynced cleanup evidence alone does not prove power-loss journal durability.
+
+Executable scenarios: `test/03_system/app/orchestrator/feature/host_cleanup_spec.spl`; manual lists exact NOT_RUN inventory. Native controls, filesystem failure boundaries, helper settlement coupling and service restart require separate runtime verification under the global CPU allocation.

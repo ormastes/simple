@@ -35,3 +35,21 @@ Source controls exercise the actual parser, custom trait handlers, builtin regis
 ## Bounded desugared builtin presence repairs
 
 The actual declarations require explicit bool/text pairs:2 BlockOutlineInfo constructors,18 BlockExample constructors and6 SQL Completion constructors. Absent values now carry false/emptytext; existing Some literals carry true/exactpayload. All other code, descriptions, order and kinds remain unchanged. Actual-handler controls inspect math/opaque outline metadata, all builtin example absence fields and SQL present/absent completion fields including snippet placeholders. These source controls remain nativeUNRUN.
+
+## 2026-11-04 triage (n88b, opus-n88b): deferred, needs stage3 compile of 15.blocks
+
+The premise is a defect in the BAKED 0CD6 producer. Current-source trait default injection is
+covered and passing on the seed: `test/01_unit/compiler/traits/cross_module_trait_default_dispatch3_spec.spl`
+3/3 and `test/01_unit/compiler/bootstrap/trait_default_shared_binding_contract_spec.spl` 1/1. Stage3 repro:
+remove the `@workaround bug=outline_block_native_prerequisites_2026_10_16` adapters in
+`15.blocks/blocks/builtin_blocks_{data,math}.spl` and native-build the outline closure; expect
+equal table/signature lengths for `BlockDefinition`'s 17 slots. Status stays open until then.
+
+## 2026-11-05 status: fix-implemented-verification-pending
+
+Source repairs landed in c9de4bdeaf0 (explicit trait-default slots, typed JSON,
+qualified patterns, Unicode predicates). Native cycle UNRUN: needs a rebuilt
+stage3 compiling the 15.blocks modules. The baked-producer omission of trait
+default slots itself is not fixed in the producer; only worked around in source.
+
+Repro/prevention (added 2026-11-05): native fixture test/fixtures/compiler/outline_block_trait_default_slots/main.spl (stage3 repro in its header; UNRUN natively), interpreter spec test/01_unit/compiler/bootstrap_regressions/outline_block_trait_default_slots_spec.spl (passes on bin/simple.exe).

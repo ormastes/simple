@@ -1,0 +1,75 @@
+# System test: the NATIVE devhub binary against the encrypted (sqlcipher4) messenger fixture.
+# Binary comes from env DEVHUB_NATIVE_BIN; build command is in the blocked message.
+# Scope: doctor plus the read verbs rooms/messages, which decrypt the store inside the native binary.
+# @manual_section: messenger-native-binary
+
+"""
+## Purpose and audience
+Purpose: the natively compiled devhub binary resolves a sqlcipher4 target from a real messenger.sdn,
+runs doctor over the public dense fixture, and never echoes the passphrase.
+Audience: DevHub release reviewers. Passphrase is public synthetic data (dense_ground_truth.json).
+"""
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get_opt, file_write}
+use std.env.{env_set}
+use std.nogc_sync_mut.io.file_ops.{file_read}
+use test.support.devhub_messenger_dense.*
+use test.support.devhub_messenger_cli.*
+
+val BUILD_CMD: text = "SIMPLE_NATIVE_BUILD_RUST=1 SIMPLE_NATIVE_INCREMENTAL=1 bin/simple.exe native-build src/app/devhub/main.spl -o build/nb/devhub.exe --cache-dir build/nb/cache"
+
+fn native_bin() -> text:
+    match env_get_opt("DEVHUB_NATIVE_BIN"):
+        case Some(v): v
+        case None: ""
+
+fn blocked_msg() -> text:
+    "BLOCKED: DEVHUB_NATIVE_BIN is unset or missing; build it with: {BUILD_CMD}"
+
+val nb_bin = native_bin()
+val nb_truth = dense_truth()
+val nb_pass = truth_passphrase(nb_truth)
+val nb_home = "build/nb/home"
+val _home = cli_prepare_home(nb_home)
+val _s = env_set(DENSE_ENV, nb_pass)
+val nb_doctor = if nb_bin == "": ("", "", -1) else: process_run(nb_bin, ["messenger", "doctor", "--target", "dense", "--json"])
+val _s2 = env_set(DENSE_ENV, "wrong-passphrase-not-the-secret")
+val nb_wrong = if nb_bin == "": ("", "", -1) else: process_run(nb_bin, ["messenger", "doctor", "--target", "dense", "--json"])
+val nb_bad_rooms = if nb_bin == "": ("", "", -1) else: process_run(nb_bin, ["messenger", "rooms", "--target", "dense", "--json"])
+
+describe "native devhub binary over the sqlcipher4 messenger fixture":
+    it "is available through DEVHUB_NATIVE_BIN":
+        # @req REQ-MSGR-NATIVE-001
+        step("Require the native binary path; otherwise report blocked with the build command")
+        val msg = if nb_bin == "": blocked_msg() else: "available"
+        expect(msg).to_equal("available")
+
+    it "doctor resolves the sqlcipher4 target and reports its adapter ready":
+        # @req REQ-MSGR-NATIVE-002
+        step("Run `devhub messenger doctor --target dense --json` with the passphrase in the secret env")
+        expect(nb_doctor.2).to_equal(0)
+        step("Assert the machine record names the target, provider and ready adapter")
+        expect(nb_doctor.0.contains("\"read_provider\":\"sqlcipher4_database\"")).to_equal(true)
+        expect(nb_doctor.0.contains("\"adapter_status\":\"ready\"")).to_equal(true)
+        expect(nb_doctor.0.contains("\"read_only\":true")).to_equal(true)
+
+    it "never echoes the passphrase, even with a wrong one in the environment":
+        # @req REQ-MSGR-NATIVE-003
+        step("Run doctor again with a wrong passphrase in the secret env")
+        step("doctor does not decrypt pages, so exit stays 0; assert no secret text leaks")
+        expect(nb_wrong.2).to_equal(0)
+        expect(nb_wrong.0.contains(nb_pass)).to_equal(false)
+        expect(nb_wrong.0.contains("wrong-passphrase-not-the-secret")).to_equal(false)
+        expect(nb_doctor.0.contains(nb_pass)).to_equal(false)
+    it "a wrong passphrase exits non-zero with no row data and no passphrase":
+        # @req REQ-MSGR-NATIVE-006
+        # Only meaningful once the native read path works (see the in-development read spec): until then rooms fails for an unrelated reason.
+        step("Run rooms with a wrong passphrase in the secret env")
+        expect(nb_bad_rooms.2 != 0).to_equal(true)
+        step("Assert no room names and neither passphrase appear in stdout or stderr")
+        val all = nb_bad_rooms.0 + nb_bad_rooms.1
+        expect(all.contains("other room")).to_equal(false)
+        expect(all.contains("fresh general")).to_equal(false)
+        expect(all.contains(nb_pass)).to_equal(false)
+        expect(all.contains("wrong-passphrase-not-the-secret")).to_equal(false)

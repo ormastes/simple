@@ -1,0 +1,80 @@
+"""
+# Image SFFI Facade Parity & Live Handle Prevention Spec
+
+Prevention coverage for `image_wrapper_close_needs_live_handle_fixture_2026-08-07`:
+ensures live PNG handle loading, `Image.close()` idempotency, missing-file
+fail-closed handling, and `load_image` / `free_image` parity across all four
+runtime memory-model facades using `test/fixture/io/tiny_1x1.png`.
+"""
+
+use std.spec.*
+use std.nogc_sync_mut.io.image_sffi.{
+    Image,
+    LoadedImageData,
+    load_image,
+    free_image,
+    load_image_resource
+}
+use std.nogc_async_mut.io.image_sffi.{
+    load_image as nogc_async_load_image,
+    free_image as nogc_async_free_image
+}
+use std.gc_async_mut.io.image_sffi.{
+    load_image as gc_async_load_image,
+    free_image as gc_async_free_image
+}
+use std.gc_sync_mut.io.image_sffi.{
+    load_image as gc_sync_load_image,
+    free_image as gc_sync_free_image
+}
+
+val TINY_PNG: text = "test/fixture/io/tiny_1x1.png"
+
+describe "Image resource handle lifecycle and bounds":
+    """Verifies live fixture loading and idempotent close behavior."""
+
+    it "loads live 1x1x4 metadata, computes sizes, and invalidates on repeated close":
+        var img = load_image_resource(TINY_PNG)
+        expect(img.is_valid()).to_equal(true)
+        expect(img.width).to_equal(1)
+        expect(img.height).to_equal(1)
+        expect(img.channels).to_equal(4)
+        expect(img.pixel_count()).to_equal(1)
+        expect(img.size_bytes()).to_equal(4)
+        img.close()
+        expect(img.is_valid()).to_equal(false)
+        img.close()
+        expect(img.is_valid()).to_equal(false)
+
+    it "fails closed when loading a nonexistent image path":
+        val missing = load_image_resource("test/fixture/io/does_not_exist_1x1.png")
+        expect(missing.is_valid()).to_equal(false)
+        expect(missing.pixel_count()).to_equal(0)
+
+describe "Image SFFI memory-model facade parity":
+    """Verifies load_image and free_image across all four std.io.image_sffi facades."""
+
+    it "loads and frees live PNG handles consistently across nogc and gc facades":
+        val base_img = load_image(TINY_PNG)
+        expect(base_img.is_valid()).to_equal(true)
+        expect(base_img.pixel_count()).to_equal(1)
+        val freed_base = free_image(base_img)
+        expect(freed_base.is_valid()).to_equal(false)
+
+        val na_img = nogc_async_load_image(TINY_PNG)
+        expect(na_img.is_valid()).to_equal(true)
+        expect(na_img.channels).to_equal(4)
+        val freed_na = nogc_async_free_image(na_img)
+        expect(freed_na.is_valid()).to_equal(false)
+
+        val ga_img = gc_async_load_image(TINY_PNG)
+        expect(ga_img.is_valid()).to_equal(true)
+        expect(ga_img.width).to_equal(1)
+        val freed_ga = gc_async_free_image(ga_img)
+        expect(freed_ga.is_valid()).to_equal(false)
+
+        val gs_img = gc_sync_load_image(TINY_PNG)
+        expect(gs_img.is_valid()).to_equal(true)
+        expect(gs_img.height).to_equal(1)
+        val freed_gs = gc_sync_free_image(gs_img)
+        expect(freed_gs.is_valid()).to_equal(false)

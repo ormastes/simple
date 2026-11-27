@@ -1,0 +1,46 @@
+# Pure procfs text decoding only. These values cannot construct process,
+# supervisor, endpoint, cutoff or machine authority.
+pub fn linux_supervisor_process_decimal_v1(value: text) -> Result<i64, text>:
+    if value == "" or value.byte_len() > 10: return Err("supervisor-exclusion-proc-decimal")
+    var number = 0
+    for byte in value.bytes():
+        if byte < 48 or byte > 57: return Err("supervisor-exclusion-proc-decimal")
+        number = number * 10 + byte - 48
+        if number > 4294967295: return Err("supervisor-exclusion-proc-decimal")
+    Ok(number)
+
+pub fn linux_supervisor_process_status_uid_v1(source: text, uid: i64, all_uid: bool = false) -> Result<bool, text>:
+    var seen = false
+    var matches = false
+    for line in source.split("\n"):
+        if line.starts_with("Uid:"):
+            if seen: return Err("supervisor-exclusion-proc-uid-duplicate")
+            seen = true
+            var parts: [text] = []
+            val uid_tail = line.substring(4, line.byte_len())
+            val uid_normalized = uid_tail.replace("\t", " ")
+            for part in uid_normalized.split(" "):
+                if part != "": parts.push(part)
+            if parts.len() != 4: return Err("supervisor-exclusion-proc-uid-shape")
+            for part in parts:
+                val observed = linux_supervisor_process_decimal_v1(part)?
+                if all_uid and observed != uid: return Err("supervisor-exclusion-provider-unambiguous-uid-required")
+                if observed == uid: matches = true
+    if not seen: return Err("supervisor-exclusion-proc-uid-missing")
+    Ok(matches)
+
+pub fn linux_supervisor_process_start_ticks_v1(source: text, pid: i64) -> Result<i64, text>:
+    if not source.starts_with(str(pid) + " (") or not source.ends_with("\n"):
+        return Err("supervisor-exclusion-provider-native-stat")
+    # A comm may contain spaces and ')'; only the final ')' closes it.
+    var end = -1
+    for at in 0..source.byte_len():
+        if source.byte_at(at) == 41: end = at
+    if end < 0 or end + 2 >= source.byte_len(): return Err("supervisor-exclusion-provider-native-stat")
+    val tail = source.substring(end + 2, source.byte_len())
+    val normalized = tail.trim()
+    val fields = normalized.split(" ")
+    if fields.len() < 20: return Err("supervisor-exclusion-provider-native-stat")
+    val ticks = fields[19].to_int() ?? 0
+    if ticks <= 0 or str(ticks) != fields[19]: return Err("supervisor-exclusion-provider-native-start-time")
+    Ok(ticks)

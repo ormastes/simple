@@ -1,0 +1,75 @@
+"""
+## Purpose and audience
+For performance-minded users targeting AVX-512 servers. I want to select the
+LLVM CPU level `x86-64-v4` (the canonical spelling shared with the SIMD tier
+lane; `x86-64`, `x86-64-v2`, `x86-64-v3` are its siblings) and get an exe,
+object, static archive and DLL whose code generation actually used that level.
+## Operator workflow
+From the repository root: `SIMPLE_XC_BIN=<compiler> bin/simple test
+test/02_integration/compiler/cross/x86_64_v4_cross_spec.spl`.
+## Compatibility and limitations
+Proof that the CPU level reached LLVM is instruction selection: a variable
+shift lowers to BMI2 `shlx` on v3/v4 and to `shlq %cl` on the baseline. The
+fixture has no vectorisable loop, so zmm/EVEX use is not asserted. Running
+v4 code needs an AVX-512 host; the evidence host (Xeon E5-2673 v4,
+Broadwell) has none, so the run row only proves the v4-built exe loads.
+## Verification guidance and troubleshooting
+`SIMPLE_NATIVE_CPU=x86-64-v4` is honoured today; `--cpu=x86-64-v4` on the
+CLI is accepted but ignored (BUG-XC-CPU-FLAG-IGNORED), and the space form
+`--cpu x86-64-v4` fails source-inventory admission.
+"""
+# @manual_section: cross-compile-x86_64-v4
+# @req: REQ-XC-004
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.io_runtime.{process_run_timeout, env_set}
+use .cross_matrix_helpers.{xc_bin, xc_fixture, xc_out, xc_build, xc_check_format, xc_check_symbol, xc_check_entry, xc_check_export, xc_check_disasm}
+
+const T: text = "x86_64-pc-windows-gnu"
+const V4: text = "x86-64-v4"
+
+describe "x86_64 AVX-512 (x86-64-v4) cross-compile":
+    it "selects BMI2 shlx when the CPU level is x86-64-v4":
+        step("build fixture")
+        val out = xc_out(T, "v4.obj")
+        expect(xc_build(T, "obj", xc_fixture("shl"), out, V4)).to_equal("")
+        step("inspect artifact")
+        expect(xc_check_format(out, "COFF-x86-64", "IMAGE_FILE_MACHINE_AMD64")).to_equal("")
+        expect(xc_check_disasm(out, "shlx")).to_equal("")
+
+    it "honours --cpu=x86-64-v4 on the command line":
+        # NOTE: RED — BUG-XC-CPU-FLAG-IGNORED.
+        step("build fixture")
+        env_set("SIMPLE_NATIVE_CPU", "")
+        val out = xc_out(T, "cli-v4.obj")
+        val (stdout, stderr, rc) = process_run_timeout(xc_bin(), ["native-build", xc_fixture("shl"), "--target", T, "--cpu=" + V4, "--emit-object", "-o", out], 900000)
+        expect(rc).to_equal(0)
+        step("inspect artifact")
+        expect(xc_check_disasm(out, "shlx")).to_equal("")
+
+    it "emits a v4 static archive that defines xc_add":
+        step("build fixture")
+        val out = xc_out(T, "v4.a")
+        expect(xc_build(T, "ar", xc_fixture("lib"), out, V4)).to_equal("")
+        step("inspect artifact")
+        expect(xc_check_symbol(out, "xc_add")).to_equal("")
+
+    it "links a v4 DLL that exports xc_add":
+        # NOTE: RED — BUG-XC-SHARED-LINK-DFLAG.
+        step("build fixture")
+        val out = xc_out(T, "v4.dll")
+        expect(xc_build(T, "so", xc_fixture("lib"), out, V4)).to_equal("")
+        step("inspect artifact")
+        expect(xc_check_export(out, "xc_add")).to_equal("")
+
+    it "links a v4 executable that loads and prints xc-ok":
+        # NOTE: RED — BUG-XC-HOST-GNU-LINK (llvm-mingw clang: liboldnames.a not found / CC not admitted).
+        step("build fixture")
+        val out = xc_out(T, "v4.exe")
+        expect(xc_build(T, "exe", xc_fixture("hello"), out, V4)).to_equal("")
+        step("inspect artifact")
+        expect(xc_check_entry(out)).to_equal("")
+        step("run")
+        val (stdout, stderr, rc) = process_run_timeout(out, [], 30000)
+        expect(stdout).to_contain("xc-ok")

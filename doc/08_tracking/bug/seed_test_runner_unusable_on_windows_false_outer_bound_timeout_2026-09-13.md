@@ -6,7 +6,9 @@ evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-13 · **Severity:** high (removes all spec-level evidence on Windows) · **Area:** test runner / process layer / Windows host
 
-**Status:** OPEN (workaround verified: set `SIMPLE_BINARY`)
+**Status:** SUPERSEDED 2026-11-11 — absorbed by the seed-side
+`find_simple_binary()` `current_exe()` fallback; verified non-reproducing on the
+refreshed seed. See the dated addendum at the end of this file.
 
 ## Symptom
 
@@ -88,3 +90,32 @@ symlink to `bin/release/x86_64-pc-windows-msvc/simple.exe`, which may be why
 3. Until (1) lands, document `SIMPLE_BINARY` in the Windows tooling guide — this
    sweep lost most of its spec-level evidence for want of one env var.
 
+
+---
+
+## Addendum 2026-11-11 — lane runner7: SUPERSEDED (absorbed by seed-side fix, verified live)
+
+Reproduced the filing conditions on the refreshed Windows seed
+(`bin/simple.exe`, tracked regular file at HEAD `68ab3383080f`, 2026-11-11;
+this checkout's `bin/simple.exe` is mode 100644, not the `bin/release`
+symlink shape the doc hypothesised broke `current_exe()`):
+
+1. **Without `SIMPLE_BINARY`** (`env -u SIMPLE_BINARY bin/simple.exe test
+   build/p3-runner7-probes/identity_probe_spec.spl --mode=interpreter --no-cache`):
+   the child SPAWNED and the spec passed — `SPEC FILE VERDICT ... outcome=OK
+   executed=1 passed=1 failed=0`, rc=0, ~5 s wall. No `child-spawn-failure`,
+   no 13-minute failure churn (this doc's "Next step" item 2 is moot once the
+   spawn succeeds).
+2. **With `SIMPLE_BINARY`** set: identical green verdict, ~6 s wall.
+
+**Absorber:** the fix this doc's "Next step" item 1 asked for has landed in the
+seed: `find_simple_binary()` (`src/compiler_rust/driver/src/cli/test_runner/execution.rs:1780-1795`)
+honours `SIMPLE_BINARY` first and then falls back to
+`std::env::current_exe()` when the env var is absent. Item 3 (document the
+workaround) is also satisfied: `SIMPLE_BINARY` is documented in
+`doc/07_guide/tooling/deployed_binary_staleness_guard.md:248-252` and
+`doc/07_guide/tooling/bootstrap_phase1_whole_tests.md:43`.
+
+Verdict: SUPERSEDED — defect does not reproduce on current tip; no lane change
+made beyond this status flip. `SIMPLE_BINARY` remains the supported override
+for pinning children to a specific compiler binary.

@@ -1,0 +1,104 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# Bug: doc/08_tracking/bug/simpleos_initramfs_role_digest_validation_gap_2026-08-20.md
+# The kernel initramfs read path must run the role/digest validator before it
+# serves any byte from the archive.
+
+use std.spec
+use std.spec.step
+use os.port.initramfs_pack.{
+    SimpleToolchainRole,
+    NewcArchiveWriter,
+    compress_zstd,
+    simple_toolchain_manifest_text,
+}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use os.kernel.loader.executable_source.{set_initramfs_blob, _initramfs_read_file}
+use os.kernel.loader.cpio_newc.{CpioEntry}
+use os.port.initramfs_validate.{initramfs_role_gate_v1}
+
+val GATE_COMPILER_PATHS: [text] = [
+    "/bin/simple", "/bin/simple.smf", "/usr/bin/simple", "/usr/bin/simple.smf",
+    "/sys/apps/simple", "/sys/apps/simple.smf", "/sys/apps/simple_compiler",
+    "/sys/apps/simple_compiler.smf",
+]
+val GATE_INTERPRETER_PATHS: [text] = [
+    "/sys/apps/simple_interpreter", "/sys/apps/simple_interpreter.smf",
+]
+val GATE_LOADER_PATHS: [text] = [
+    "/sys/apps/simple_loader", "/sys/apps/simple_loader.smf",
+]
+
+fn _gate_text_bytes(value: text) -> [u8]:
+    var out: [u8] = []
+    for byte in value.bytes():
+        out.push(byte.to_u8())
+    out
+
+fn _gate_elf(marker: u8) -> [u8]:
+    var data: [u8] = [0u8; 64]
+    data[0] = 0x7Fu8
+    data[1] = 0x45u8
+    data[2] = 0x4Cu8
+    data[3] = 0x46u8
+    data[4] = 2u8
+    data[5] = 1u8
+    data[6] = 1u8
+    data[18] = 62u8
+    data[63] = marker
+    data
+
+fn _gate_blob(with_manifest: bool, tamper: bool) -> [u8]:
+    val compiler = _gate_elf(2u8)
+    val interpreter = _gate_elf(3u8)
+    val loader = _gate_elf(4u8)
+    var writer = NewcArchiveWriter(data: [], inode: 1)
+    writer.entry("sbin/init", 0x81ED, _gate_elf(1u8))
+    if with_manifest:
+        val manifest = simple_toolchain_manifest_text([
+            SimpleToolchainRole(name: "compiler", artifact_path: "f/c", artifact_digest: sha256_u8_hex(compiler), guest_paths: GATE_COMPILER_PATHS),
+            SimpleToolchainRole(name: "interpreter", artifact_path: "f/i", artifact_digest: sha256_u8_hex(interpreter), guest_paths: GATE_INTERPRETER_PATHS),
+            SimpleToolchainRole(name: "loader", artifact_path: "f/l", artifact_digest: sha256_u8_hex(loader), guest_paths: GATE_LOADER_PATHS),
+        ])
+        writer.entry("SYS/SIMPLETOOL.SDN", 0x81A4, _gate_text_bytes(manifest))
+    val served_compiler = if tamper: _gate_elf(9u8) else: compiler
+    for path in GATE_COMPILER_PATHS:
+        writer.entry(path.slice(1, path.len()), 0x81ED, served_compiler)
+    for path in GATE_INTERPRETER_PATHS:
+        writer.entry(path.slice(1, path.len()), 0x81ED, interpreter)
+    for path in GATE_LOADER_PATHS:
+        writer.entry(path.slice(1, path.len()), 0x81ED, loader)
+    writer.entry("TRAILER!!!", 0, [])
+    compress_zstd(writer.data)
+
+describe "SimpleOS kernel initramfs role/digest gate":
+    it "serves role binaries from an archive whose manifest verifies":
+        # @req REQ-SSPEC-UNIT
+        step("serves role binaries from an archive whose manifest verifies")
+        set_initramfs_blob(_gate_blob(true, false))
+        expect(_initramfs_read_file("/bin/simple").is_ok()).to_equal(true)
+        expect(_initramfs_read_file("/sbin/init").is_ok()).to_equal(true)
+
+    it "refuses every file of an archive whose role payload digest is tampered":
+        # @req REQ-SSPEC-UNIT
+        step("refuses every file of an archive whose role payload digest is tampered")
+        set_initramfs_blob(_gate_blob(true, true))
+        expect(_initramfs_read_file("/bin/simple").is_ok()).to_equal(false)
+        expect(_initramfs_read_file("/sbin/init").is_ok()).to_equal(false)
+
+    it "refuses toolchain role paths when the archive carries no role manifest":
+        # @req REQ-SSPEC-UNIT
+        step("refuses toolchain role paths when the archive carries no role manifest")
+        set_initramfs_blob(_gate_blob(false, false))
+        expect(_initramfs_read_file("/sbin/init").is_ok()).to_equal(true)
+        expect(_initramfs_read_file("/bin/simple").is_ok()).to_equal(false)
+        expect(_initramfs_read_file("/sys/apps/simple_loader").is_ok()).to_equal(false)
+
+    it "refuses a manifest-bearing archive that also carries a non-canonical entry":
+        # @req REQ-SSPEC-UNIT
+        step("refuses a manifest-bearing archive that also carries a non-canonical entry")
+        val entries: [CpioEntry] = [
+            CpioEntry(path: "../escape", mode: 0x81A4u32, data: [1u8]),
+            CpioEntry(path: "SYS/SIMPLETOOL.SDN", mode: 0x81A4u32, data: _gate_text_bytes("simple_toolchain {\n")),
+        ]
+        expect(initramfs_role_gate_v1(entries).is_ok()).to_equal(false)

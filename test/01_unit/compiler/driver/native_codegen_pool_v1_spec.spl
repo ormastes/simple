@@ -1,0 +1,335 @@
+# @cover src/compiler/80.driver/driver_build/native_codegen_pool_v1.spl 80%
+# @cover src/compiler/70.backend/backend/llvm_backend_tools.spl 5%
+# @req REQ-COMPILER-DRIVER-PARALLEL-002
+"""
+## Purpose and audience
+Purpose: specify the native codegen process pool's admission (worker count
+from cores, declared tree budget, live headroom minus the 24 GiB commit
+floor), its SDN receipt publication, and the shared llc argv that keeps a
+pooled object byte-identical to the serial lane's.
+Audience: compiler engineers who maintain native-build step 5.
+Plan: doc/03_plan/compiler/native_codegen/step5_real_parallelism_plan_2026-09-04.md (P2)
+"""
+
+use std.spec
+use compiler.driver.driver_build.native_codegen_pool_v1.{
+    native_codegen_pool_workers_v1, native_codegen_meminfo_available_kib_v1,
+    native_codegen_host_cpus_for_v1, native_codegen_worker_estimate_for_v1,
+    native_codegen_kib_field_v1, native_codegen_receipt_encode_v1,
+    native_codegen_receipt_publish_v1, native_codegen_receipt_path_v1,
+    native_codegen_job_ir_path_v1, native_codegen_job_object_path_v1,
+    native_codegen_command_line_v1, native_codegen_job_log_path_v1,
+    NATIVE_CODEGEN_WORKER_KIB_DEFAULT_V1,
+    NATIVE_CODEGEN_COMMIT_FLOOR_KIB_V1, NATIVE_CODEGEN_UNKNOWN_MEMORY_CAP_V1,
+    NATIVE_CODEGEN_SHARD_MIN_FLOOR_KIB_V1, NATIVE_CODEGEN_SHARD_MAX_FLOOR_KIB_V1,
+    native_codegen_shard_commit_floor_for_v1, native_codegen_live_peer_shards_v1,
+    native_codegen_cgroup_spare_kib_from_probe_v1, native_codegen_admission_summary_v1,
+    native_codegen_pool_run_v1, NATIVE_CODEGEN_JOB_TIMEOUT_ENV_V1, NATIVE_CODEGEN_JOB_FAILED_V1}
+use compiler.backend.llvm_backend_tools.{llvm_llc_object_argv_v1}
+use compiler.backend.llvm_target.{LlvmTargetConfig}
+use compiler.backend.backend.backend_types.{CodegenTarget, OptimizationLevel}
+use std.io_runtime.{dir_create_all, dir_exists, file_exists, file_read, getpid, thread_sleep}
+use std.nogc_sync_mut.io_runtime.{env_get_nullable, env_set, host_os}
+
+val GIB: i64 = 1048576
+
+fn pool_fixture(label: text) -> text:
+    val dir = "build/tmp/native_codegen_pool/{getpid()}-{label}"
+    expect(dir_exists(dir)).to_equal(false)
+    expect(dir_create_all(dir)).to_equal(true)
+    dir
+
+describe "native codegen pool worker admission":
+    it "uses every core when memory is plentiful":
+        step("80 cores, 100 jobs, 1 TiB budget and headroom, 2 GiB workers")
+        val n = native_codegen_pool_workers_v1(80, 0, 100, 1024 * GIB, 1024 * GIB, 2 * GIB)
+        expect(n).to_equal(80)
+
+    it "never admits more workers than jobs":
+        step("80 cores but only 3 uncached modules")
+        expect(native_codegen_pool_workers_v1(80, 0, 3, 1024 * GIB, 1024 * GIB, 2 * GIB)).to_equal(3)
+        expect(native_codegen_pool_workers_v1(80, 0, 0, 1024 * GIB, 1024 * GIB, 2 * GIB)).to_equal(0)
+
+    it "honours an explicit thread request as an upper bound and divides across peer shards":
+        step("--threads 6 on an 80-core host")
+        expect(native_codegen_pool_workers_v1(80, 6, 100, 1024 * GIB, 1024 * GIB, 2 * GIB)).to_equal(6)
+        step("--threads 40 on 64 CPUs across 2 peer shards admits 20 per shard (never 80 total)")
+        expect(native_codegen_pool_workers_v1(64, 40, 776, 1024 * GIB, 1024 * GIB, 524288,
+            8 * GIB, 0, 2, -1)).to_equal(20)
+        step("--threads 100 on 64 CPUs across 2 peer shards clamps to host_cpus / peers = 32")
+        expect(native_codegen_pool_workers_v1(64, 100, 776, 1024 * GIB, 1024 * GIB, 524288,
+            8 * GIB, 0, 2, -1)).to_equal(32)
+
+    it "clamps by the declared tree budget":
+        step("SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB = 20 GiB at 2 GiB per worker")
+        expect(native_codegen_pool_workers_v1(80, 0, 100, 20 * GIB, 0, 2 * GIB)).to_equal(10)
+
+    it "keeps the 24 GiB commit floor free":
+        step("40 GiB headroom leaves 16 GiB above the floor: 8 workers of 2 GiB")
+        expect(NATIVE_CODEGEN_COMMIT_FLOOR_KIB_V1).to_equal(24 * GIB)
+        expect(native_codegen_pool_workers_v1(80, 0, 100, 0, 40 * GIB, 2 * GIB)).to_equal(8)
+        step("Headroom below the floor admits only the serial lane")
+        expect(native_codegen_pool_workers_v1(80, 0, 100, 0, 20 * GIB, 2 * GIB)).to_equal(1)
+
+    it "takes the tightest of budget and headroom":
+        step("budget allows 10, headroom allows 4")
+        expect(native_codegen_pool_workers_v1(80, 0, 100, 20 * GIB, 32 * GIB, 2 * GIB)).to_equal(4)
+
+    it "prices workers with the per-worker estimate":
+        step("10 GiB per worker (heaviest measured module) under a 64 GiB budget")
+        expect(native_codegen_pool_workers_v1(80, 0, 100, 64 * GIB, 0, 10 * GIB)).to_equal(6)
+
+    it "never admits all cores when memory is unknown":
+        step("no budget and no measurable headroom")
+        val n = native_codegen_pool_workers_v1(80, 0, 100, 0, 0, 2 * GIB)
+        expect(n).to_equal(NATIVE_CODEGEN_UNKNOWN_MEMORY_CAP_V1)
+
+describe "native codegen pool default-config concurrency":
+    it "admits more than one worker for a multi-module build with default config":
+        step("driver default: requested threads 0, 8 detected cpus, no host limit, 12 uncached modules")
+        val cpus = native_codegen_host_cpus_for_v1(8, 0)
+        val est = native_codegen_worker_estimate_for_v1(0, 0)
+        step("memory unknown (no budget, no headroom): capped, never serial")
+        val unknown = native_codegen_pool_workers_v1(cpus, 0, 12, 0, 0, est)
+        expect(unknown > 1).to_equal(true)
+        step("memory known and plentiful (64 GiB headroom): cpu-bound")
+        val known = native_codegen_pool_workers_v1(cpus, 0, 12, 0, 64 * GIB, est)
+        expect(known > 1).to_equal(true)
+
+    it "stays serial for a single uncached module":
+        expect(native_codegen_pool_workers_v1(8, 0, 1, 0, 64 * GIB, 2 * GIB)).to_equal(1)
+
+describe "native codegen pool shard-aware and cgroup-aware admission":
+    it "prices llc workers at 512 MiB by default while respecting explicit overrides":
+        step("Default per-llc-child estimate is 512 MiB (524,288 KiB)")
+        expect(NATIVE_CODEGEN_WORKER_KIB_DEFAULT_V1).to_equal(524288)
+        expect(native_codegen_worker_estimate_for_v1(0, 0)).to_equal(524288)
+        step("Explicit SIMPLE_NATIVE_CODEGEN_WORKER_KIB overrides in either direction")
+        expect(native_codegen_worker_estimate_for_v1(262144, 0)).to_equal(262144)
+        expect(native_codegen_worker_estimate_for_v1(2 * GIB, 0)).to_equal(2 * GIB)
+        step("Host worker_mem_mib only tightens above the 512 MiB default")
+        expect(native_codegen_worker_estimate_for_v1(0, 256)).to_equal(524288)
+        expect(native_codegen_worker_estimate_for_v1(0, 1024)).to_equal(1024 * 1024)
+
+    it "admits parallel llc workers inside a 64 GiB shard budget without double-counting the 24 GiB floor":
+        step("Reproduce 64 GiB host: budget=44 GiB, headroom=25,149,248 KiB (~23.98 GiB), 2 peer shards, 6 GiB resident per shard")
+        val floor_kib = native_codegen_shard_commit_floor_for_v1("", 0, 64 * GIB)
+        expect(floor_kib).to_equal(8 * GIB)
+        val est = native_codegen_worker_estimate_for_v1(0, 0)
+        val workers = native_codegen_pool_workers_v1(8, 0, 677, 44 * GIB, 25149248, est,
+            floor_kib, 6 * GIB, 2, -1)
+        expect(workers).to_equal(4)
+        step("When two 22 GiB shards already exhaust the 44 GiB tree budget, clamps to 1 worker")
+        val saturated = native_codegen_pool_workers_v1(8, 0, 677, 44 * GIB, 25149248, est,
+            floor_kib, 22 * GIB, 2, -1)
+        expect(saturated).to_equal(1)
+
+    it "computes shard commit floor in [2 GiB, 8 GiB] and honours explicit reserves":
+        expect(native_codegen_shard_commit_floor_for_v1("", 0, 12 * GIB)).to_equal(NATIVE_CODEGEN_SHARD_MIN_FLOOR_KIB_V1)
+        expect(native_codegen_shard_commit_floor_for_v1("", 0, 24 * GIB)).to_equal(3 * GIB)
+        expect(native_codegen_shard_commit_floor_for_v1("", 0, 64 * GIB)).to_equal(8 * GIB)
+        expect(native_codegen_shard_commit_floor_for_v1("", 0, 128 * GIB)).to_equal(NATIVE_CODEGEN_SHARD_MAX_FLOOR_KIB_V1)
+        expect(native_codegen_shard_commit_floor_for_v1("4294967296", 0, 64 * GIB)).to_equal(4 * GIB)
+
+    it "counts concurrent peer shards bounded by active CPU or thread slots":
+        expect(native_codegen_live_peer_shards_v1("", "", "", 8, 0)).to_equal(1)
+        expect(native_codegen_live_peer_shards_v1("0/2", "", "", 8, 0)).to_equal(2)
+        expect(native_codegen_live_peer_shards_v1("1/8", "", "", 4, 0)).to_equal(4)
+        expect(native_codegen_live_peer_shards_v1("0/8", "", "", 8, 3)).to_equal(3)
+        expect(native_codegen_live_peer_shards_v1("0/1", "1", "4", 8, 0)).to_equal(4)
+        expect(native_codegen_live_peer_shards_v1("0/1", "1", "0/4", 8, 0)).to_equal(4)
+        expect(native_codegen_live_peer_shards_v1("0/250", "", "4", 64, 40)).to_equal(4)
+        expect(native_codegen_live_peer_shards_v1("0/250", "", "1", 64, 40)).to_equal(1)
+
+    it "prices a serial MIR shard owner as its own single peer, not the queued batch count":
+        # rb5 Windows P3->P3 (2026-11-24): `[mir-shard] shards=16 parallel=1`, yet each
+        # owner's codegen pool reported peer_shards=4 = min(16 batches, --threads 4) and
+        # divided its tree share by four. run_mir_shards now exports the live owner
+        # count the way the file-worker pool does; the explicit figure wins over the
+        # `--mir-shard=N/16` batch total and stays bounded by the thread slots.
+        expect(native_codegen_live_peer_shards_v1("3/16", "", "", 24, 4)).to_equal(4)
+        expect(native_codegen_live_peer_shards_v1("3/16", "", "1", 24, 4)).to_equal(1)
+        expect(native_codegen_live_peer_shards_v1("3/16", "", "2", 24, 4)).to_equal(2)
+        expect(native_codegen_live_peer_shards_v1("3/16", "", "8", 24, 4)).to_equal(4)
+
+    it "bounds admission by cgroup v2 and v1 hierarchy spare bytes":
+        step("Uncapped cgroup v2 ('max') answers -1")
+        val uncapped_files: {text: text} = {
+            "/sys/fs/cgroup/user.slice/memory.max": "max\n",
+            "/sys/fs/cgroup/user.slice/memory.current": "1048576\n"
+        }
+        expect(native_codegen_cgroup_spare_kib_from_probe_v1("0::/user.slice\n", uncapped_files)).to_equal(-1)
+
+        step("Parent cgroup tighter than leaf wins across the hierarchy")
+        val hierarchy_files: {text: text} = {
+            "/sys/fs/cgroup/build.slice/memory.max": "4294967296\n",
+            "/sys/fs/cgroup/build.slice/memory.current": "3221225472\n",
+            "/sys/fs/cgroup/build.slice/shard.scope/memory.max": "8589934592\n",
+            "/sys/fs/cgroup/build.slice/shard.scope/memory.current": "1073741824\n"
+        }
+        val spare_v2 = native_codegen_cgroup_spare_kib_from_probe_v1("0::/build.slice/shard.scope\n", hierarchy_files)
+        expect(spare_v2).to_equal(GIB)
+        val cgroup_workers = native_codegen_pool_workers_v1(8, 0, 100, 0, 64 * GIB, 524288,
+            8 * GIB, 0, 1, spare_v2)
+        expect(cgroup_workers).to_equal(2)
+
+        step("Exhausted cgroup v1 cap (including co-mounted controllers) answers 0 spare and admits only 1 worker")
+        val v1_files: {text: text} = {
+            "/sys/fs/cgroup/memory/ci/memory.limit_in_bytes": "2147483648\n",
+            "/sys/fs/cgroup/memory/ci/memory.usage_in_bytes": "2147483648\n"
+        }
+        val spare_v1 = native_codegen_cgroup_spare_kib_from_probe_v1("6:memory:/ci\n", v1_files)
+        expect(spare_v1).to_equal(0)
+        val spare_v1_comount_a = native_codegen_cgroup_spare_kib_from_probe_v1("6:cpu,memory:/ci\n", v1_files)
+        expect(spare_v1_comount_a).to_equal(0)
+        val spare_v1_comount_b = native_codegen_cgroup_spare_kib_from_probe_v1("6:memory,hugetlb:/ci\n", v1_files)
+        expect(spare_v1_comount_b).to_equal(0)
+        expect(native_codegen_pool_workers_v1(8, 0, 100, 0, 64 * GIB, 524288, 8 * GIB, 0, 1, spare_v1)).to_equal(1)
+
+    it "formats every admission input into the diagnostic banner summary":
+        val summary = native_codegen_admission_summary_v1(8, 44 * GIB, 6 * GIB, 25149248, -1, 8 * GIB, 524288, 2)
+        expect(summary).to_contain("cpus=8")
+        expect(summary).to_contain("resident_kib=")
+        expect(summary).to_contain("cgroup_spare_kib=-1")
+        expect(summary).to_contain("floor_kib=")
+        expect(summary).to_contain("worker_kib=524288")
+        expect(summary).to_contain("peer_shards=2")
+
+describe "native codegen pool memory probe parsing":
+    it "reads MemAvailable from /proc/meminfo text":
+        step("Parse a realistic meminfo body")
+        val body = "MemTotal:       131072000 kB\nMemFree:         1000 kB\nMemAvailable:   65536000 kB\nBuffers: 1 kB\n"
+        expect(native_codegen_meminfo_available_kib_v1(body)).to_equal(65536000)
+        expect(native_codegen_meminfo_available_kib_v1("MemTotal: 5 kB\n")).to_equal(0)
+
+    it "treats malformed KiB fields as unset":
+        step("Only positive integers count")
+        expect(native_codegen_kib_field_v1(" 4096 ")).to_equal(4096)
+        expect(native_codegen_kib_field_v1("")).to_equal(0)
+        expect(native_codegen_kib_field_v1("-5")).to_equal(0)
+        expect(native_codegen_kib_field_v1("lots")).to_equal(0)
+
+describe "native codegen pool receipts":
+    it "encodes an SDN receipt with the module name escaped":
+        step("Encode a PASS receipt")
+        val body = native_codegen_receipt_encode_v1("app.\"q\"", 3, "PASS", 0, 1234, 10, 99)
+        expect(body).to_start_with("native_codegen_receipt_v1:\n")
+        expect(body).to_contain("  module: \"app.\\\"q\\\"\"\n")
+        expect(body).to_contain("  worker: 3\n")
+        expect(body).to_contain("  status: \"PASS\"\n")
+        expect(body).to_contain("  object_bytes: 1234\n")
+
+    it "publishes receipts atomically and verifies the read-back":
+        step("Publish, then republish a different body over it")
+        val ledger = pool_fixture("receipt")
+        val first = native_codegen_receipt_encode_v1("m.a", 0, "PASS", 0, 1, 0, 1)
+        expect(native_codegen_receipt_publish_v1(ledger, "m.a", first)).to_equal(true)
+        expect(file_read(native_codegen_receipt_path_v1(ledger, "m.a"))).to_equal(first)
+        val second = native_codegen_receipt_encode_v1("m.a", 1, "FAILED", 1, -1, 0, 2)
+        expect(native_codegen_receipt_publish_v1(ledger, "m.a", second)).to_equal(true)
+        expect(file_read(native_codegen_receipt_path_v1(ledger, "m.a"))).to_equal(second)
+
+    it "keys staged files by job index":
+        step("IR and object paths are per job, never per process")
+        expect(native_codegen_job_ir_path_v1("/s", 7)).to_equal("/s/job-7.ll")
+        expect(native_codegen_job_object_path_v1("/s", 7)).to_equal("/s/job-7.o")
+
+describe "shared llc argv":
+    it "spells the serial default command's tokens":
+        step("Default lane: target arguments, then opt level, then -o out in")
+        val config = LlvmTargetConfig.for_target_portable_numeric(CodegenTarget.X86_64, nil)
+        val argv = llvm_llc_object_argv_v1(config, OptimizationLevel.Speed, false, false, "o.o", "i.ll")
+        expect(argv[0]).to_equal("--filetype=obj")
+        expect(argv[1]).to_equal("--relocation-model=pic")
+        expect(argv[2]).to_equal("--function-sections")
+        expect(argv[3]).to_equal("--data-sections")
+        expect(argv[4]).to_start_with("-mtriple=")
+        expect(argv[5]).to_start_with("-mcpu=")
+        expect(argv[argv.len() - 4]).to_equal("-O2")
+        expect(argv[argv.len() - 3]).to_equal("-o")
+        expect(argv[argv.len() - 2]).to_equal("o.o")
+        expect(argv[argv.len() - 1]).to_equal("i.ll")
+
+    it "omits target arguments in the bootstrap form":
+        step("Bootstrap lane: exactly the seven tokens the serial command used")
+        val config = LlvmTargetConfig.for_target_portable_numeric(CodegenTarget.X86_64, nil)
+        val argv = llvm_llc_object_argv_v1(config, OptimizationLevel.Speed, true, false, "o.o", "i.ll")
+        expect(argv.len()).to_equal(7)
+        expect(argv.join(" ")).to_equal("--filetype=obj --relocation-model=pic --function-sections --data-sections -o o.o i.ll")
+
+    it "places features after the input in the direct form":
+        step("Retained/SimpleOS lane: input precedes -mattr/-target-abi")
+        val config = LlvmTargetConfig.for_target_portable_numeric(CodegenTarget.X86_64, nil)
+        val argv = llvm_llc_object_argv_v1(config, OptimizationLevel.Speed, true, true, "o.o", "i.ll")
+        expect(argv[4]).to_start_with("-mtriple=")
+        expect(argv[6]).to_equal("-O2")
+        expect(argv[7]).to_equal("-o")
+        expect(argv[9]).to_equal("i.ll")
+
+describe "native codegen pool child command":
+    it "runs the serial lane's command line with output captured to the job log":
+        step("Same tokens as compile_ir_to_object's shell command, redirected")
+        val line = native_codegen_command_line_v1("llc", ["--filetype=obj", "-o", "o.o", "i.ll"], "s/job-0.log")
+        expect(line).to_equal("llc --filetype=obj -o o.o i.ll > s/job-0.log 2>&1")
+        expect(native_codegen_job_log_path_v1("/s", 2)).to_equal("/s/job-2.log")
+
+fn on_windows() -> bool:
+    host_os() == "windows"
+
+# A child that stays alive ~2 s and produces nothing (the job fails closed).
+fn sleeper_emit(index: i64, ir_path: text, obj_path: text) -> [text]:
+    if on_windows(): ["-n", "3", "127.0.0.1"] else: ["2"]
+
+fn sleeper_tool() -> text:
+    if on_windows(): "ping" else: "sleep"
+
+# The pool's shell runs `tool`; `tool` leaves a grandchild that writes the
+# marker after 4 s unless the whole tree is killed at the job timeout.
+fn tree_tool() -> text:
+    if on_windows(): "powershell.exe" else: "sh"
+
+fn tree_emit(index: i64, ir_path: text, obj_path: text) -> [text]:
+    val marker = env_get_nullable("SIMPLE_POOL_TREE_MARKER") ?? ""
+    if on_windows():
+        return ["-NoProfile", "-NonInteractive", "-Command",
+            "Start-Sleep 4; Set-Content -Path '{marker}' -Value alive"]
+    ["-c", "'(sleep 4; echo alive > {marker}) & wait'"]
+
+describe "native codegen pool child lifetime":
+    it "blocks on its children instead of polling while only children remain":
+        step("One ~2 s child on one worker, nothing left to translate")
+        val stage = pool_fixture("idle-wait")
+        val ledger = stage + "/ledger"
+        expect(dir_create_all(ledger)).to_equal(true)
+        val result = native_codegen_pool_run_v1(sleeper_tool(), ["idle.m"], 1, stage, ledger,
+            sleeper_emit(_1, _2, _3))
+        step("The child ran to completion and was reaped")
+        expect(result.peak_live).to_equal(1)
+        expect(result.passed + result.failed).to_equal(1)
+        expect(result.wall_ms).to_be_greater_than(1000)
+        step("Idle wakeups are bounded by the wait cap, not a 10-100 ms poll")
+        expect(result.idle_wakeups).to_be_greater_than(0)
+        expect(result.idle_wakeups).to_be_less_than(10)
+
+    it "kills the whole child tree when a job times out":
+        step("A 1.5 s job timeout over a tool whose grandchild outlives the shell")
+        val stage = pool_fixture("tree-kill")
+        val ledger = stage + "/ledger"
+        expect(dir_create_all(ledger)).to_equal(true)
+        val marker = stage + "/grandchild-survived.txt"
+        expect(env_set("SIMPLE_POOL_TREE_MARKER", marker)).to_equal(true)
+        expect(env_set(NATIVE_CODEGEN_JOB_TIMEOUT_ENV_V1, "1500")).to_equal(true)
+        val result = native_codegen_pool_run_v1(tree_tool(), ["tree.m"], 1, stage, ledger,
+            tree_emit(_1, _2, _3))
+        val cleared_timeout = env_set(NATIVE_CODEGEN_JOB_TIMEOUT_ENV_V1, "")
+        val cleared_marker = env_set("SIMPLE_POOL_TREE_MARKER", "")
+        expect(cleared_timeout and cleared_marker).to_equal(true)
+        step("The job timed out and fell back to the serial lane")
+        expect(result.failed).to_equal(1)
+        expect(result.states[0]).to_equal(NATIVE_CODEGEN_JOB_FAILED_V1)
+        expect(result.timed_out).to_equal(1)
+        expect(result.wall_ms).to_be_greater_than(1400)
+        expect(result.wall_ms).to_be_less_than(15000)
+        step("Wait past the grandchild's 4 s write: it must have been killed")
+        thread_sleep(6000)
+        expect(file_exists(marker)).to_equal(false)

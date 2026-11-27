@@ -89,7 +89,7 @@ fn vhdl_clock_domain_from_metadata(clocked: VhdlClockedMetadata) -> VhdlClockDom
     VhdlClockDomain(
         name: vhdl_clock_domain_name_from_metadata(clocked),
         clock_signal: clocked.clock_signal,
-        reset_signal: if clocked.has_reset: Some(clocked.reset_signal) else: nil,
+        reset_signal: if clocked.has_reset: Some(clocked.reset_signal) else: None,
         reset_polarity: clocked.reset_polarity,
         reset_synchrony: clocked.reset_synchrony,
         edge: VhdlClockEdge.Rising
@@ -245,9 +245,19 @@ enum AggregateKind:
     Struct(symbol: SymbolId)
     Enum(symbol: SymbolId, variant: i64)
 
+enum MirCallOrigin:
+    Source
+    Runtime
+    Foreign
+    Unknown
+
 struct MirOperand:
-    """Instruction operand."""
+    """Instruction operand, including the authority of a callable target."""
     kind: MirOperandKind
+    # Non-call operands and existing source constructors retain their meaning.
+    # Production callable lowering must classify its actual declaration owner;
+    # a runtime-looking name is not evidence that the runtime owns the call.
+    call_origin: MirCallOrigin = MirCallOrigin.Source
 
 """Operand kind."""
 enum MirOperandKind:
@@ -255,18 +265,61 @@ enum MirOperandKind:
     Move(local: LocalId)
     Const(value: MirConstValue, type_: MirType)
 
+fn mir_operand_with_call_origin(operand: MirOperand, origin: MirCallOrigin) -> MirOperand:
+    val result = MirOperand(kind: operand.kind, call_origin: origin)
+    return result
+
+fn mir_operand_runtime_function(name: text, type_: MirType) -> MirOperand:
+    val result = MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(name), type_),
+        call_origin: MirCallOrigin.Runtime)
+    return result
+
+fn mir_operand_foreign_function(name: text, type_: MirType) -> MirOperand:
+    val result = MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(name), type_),
+        call_origin: MirCallOrigin.Foreign)
+    return result
+
+pub fn mir_call_origin_uses_local_symbols(origin: MirCallOrigin) -> bool:
+    """Resolve callable authority without inferring it from a symbol prefix."""
+    match origin:
+        case MirCallOrigin.Source: true
+        case MirCallOrigin.Runtime: false
+        case MirCallOrigin.Foreign: false
+        case MirCallOrigin.Unknown:
+            panic("MIR call target lacks proven source/runtime/foreign origin")
+
+pub fn mir_call_origin_uses_local_symbols_named(origin: MirCallOrigin, callee: text) -> bool:
+    """Authority resolution that names the unproved callee in the abort.
+    Staged codegen kills the whole build on Unknown; the callee name turns
+    the signal-6 no-diagnostic abort into an actionable defect report
+    (unknown_call_origin_panics_codegen_worker_2026-11-12)."""
+    match origin:
+        case MirCallOrigin.Source: true
+        case MirCallOrigin.Runtime: false
+        case MirCallOrigin.Foreign: false
+        case MirCallOrigin.Unknown:
+            panic("MIR call target lacks proven source/runtime/foreign origin: callee=" + callee)
+
+pub fn mir_call_origin_text(origin: MirCallOrigin) -> text:
+    """Stable serialization identity, including unproved callable authority."""
+    match origin:
+        case MirCallOrigin.Source: "source"
+        case MirCallOrigin.Runtime: "runtime"
+        case MirCallOrigin.Foreign: "foreign"
+        case MirCallOrigin.Unknown: "unknown"
+
 # Free functions for MirOperand construction (workaround for bootstrap)
-fn mir_operand_copy(local: LocalId) -> MirOperand:
+pub fn mir_operand_copy(local: LocalId) -> MirOperand:
     # Explicit return: implicit-tail struct constructs can lose the tail
     # value on the stage4 native lane (returns 0 -> nil-receiver downstream).
     val op = MirOperand(kind: MirOperandKind.Copy(local))
     return op
 
-fn mir_operand_move(local: LocalId) -> MirOperand:
+pub fn mir_operand_move(local: LocalId) -> MirOperand:
     val op = MirOperand(kind: MirOperandKind.Move(local))
     return op
 
-fn mir_operand_const_int(value: i64) -> MirOperand:
+pub fn mir_operand_const_int(value: i64) -> MirOperand:
     val op = MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(value), MirType.i64()))
     return op
 

@@ -29,6 +29,8 @@
 
 @unsafe(reason: "raw libc allocation; zero is the allocation-failure sentinel", capabilities: [ffi, raw_ptr])
 extern fn malloc(size: i64) -> i64
+@unsafe(reason: "raw libc zeroed allocation ABI; zero is the allocation-failure sentinel", capabilities: [ffi, raw_ptr])
+extern fn calloc(count: i64, size: i64) -> i64
 @unsafe(reason: "raw libc release; pointer ownership is caller-established", capabilities: [ffi, raw_ptr])
 extern fn free(ptr: i64)
 @unsafe(reason: "raw libc reallocation; zero is failure and the input allocation remains owned", capabilities: [ffi, raw_ptr])
@@ -52,6 +54,8 @@ extern fn array_flags(array: i64) -> i64
 extern fn rt_array_free(array: i64)
 extern fn dict_is_valid(dict: i64) -> i64
 extern fn dict_reclaim_transient(ptr: i64)
+@unsafe(reason: "dictionary owner exact header allocation size", capabilities: [ffi])
+extern fn dict_header_bytes_v1() -> i64
 extern fn enum_is_valid(value: i64) -> i64
 extern fn enum_reclaim_transient(ptr: i64)
 extern fn rt_enum_payload(value: i64) -> i64
@@ -108,6 +112,55 @@ fn struct_table_unregister(ptr: i64):
         spl_store_i64(struct_alloc_items, idx * 16, spl_load_i64(struct_alloc_items, last * 16))
         spl_store_i64(struct_alloc_items, idx * 16 + 8, spl_load_i64(struct_alloc_items, last * 16 + 8))
     struct_alloc_len = last
+
+# ----------------------------------------------------------------------------
+# Persistent raw-allocation size registry (twin of C persistent_raw_registry_impl.h).
+# Tracks pre-scope, paused-scope, and promoted rt_alloc blocks across scope ends.
+# Linear table, stride 16: ptr @0, bytes @8.
+# ----------------------------------------------------------------------------
+
+var persistent_raw_items: i64 = 0
+var persistent_raw_len: i64 = 0
+var persistent_raw_cap: i64 = 0
+
+fn persistent_raw_find(ptr: i64) -> i64:
+    var i = 0
+    while i < persistent_raw_len:
+        if spl_load_i64(persistent_raw_items, i * 16) == ptr:
+            return i
+        i = i + 1
+    return -1
+
+fn persistent_raw_register(ptr: i64, bytes: i64) -> i64:
+    if ptr < 1:
+        return 0
+    val existing = persistent_raw_find(ptr)
+    if existing >= 0:
+        spl_store_i64(persistent_raw_items, existing * 16 + 8, bytes)
+        return 1
+    if persistent_raw_len >= persistent_raw_cap:
+        val next_cap = if persistent_raw_cap < 1: 64 else: persistent_raw_cap * 2
+        val next_items = realloc(persistent_raw_items, next_cap * 16)
+        if next_items < 1:
+            return 0
+        persistent_raw_items = next_items
+        persistent_raw_cap = next_cap
+    spl_store_i64(persistent_raw_items, persistent_raw_len * 16, ptr)
+    spl_store_i64(persistent_raw_items, persistent_raw_len * 16 + 8, bytes)
+    persistent_raw_len = persistent_raw_len + 1
+    return 1
+
+fn persistent_raw_unregister(ptr: i64):
+    if ptr < 1:
+        return
+    val idx = persistent_raw_find(ptr)
+    if idx < 0:
+        return
+    val last = persistent_raw_len - 1
+    if idx < last:
+        spl_store_i64(persistent_raw_items, idx * 16, spl_load_i64(persistent_raw_items, last * 16))
+        spl_store_i64(persistent_raw_items, idx * 16 + 8, spl_load_i64(persistent_raw_items, last * 16 + 8))
+    persistent_raw_len = last
 
 # ----------------------------------------------------------------------------
 # Transient array scope state (spec: runtime_native.c :1052-1069, :1286-:1324).
@@ -224,10 +277,11 @@ fn transient_raw_register(ptr: i64, bytes: i64, owned: i64) -> i64:
 # rt_core_transient_scope_for_new_object), 0 when there is nothing to note,
 # -1 when tracking failed (the caller must fail the allocation, mirroring
 # rt_core_register_scoped_immortal's failure contract).
+@export("C")
 pub fn rt_simple_core_transient_note(ptr: i64, kind: i64) -> i64:
-    if transient_scope_active < 1 or transient_scope_paused > 0:
-        return 0
-    if tobj_append(ptr, kind, transient_scope_id) < 1:
+    val owner = rt_allocation_owner_identity_v1()
+    if owner == 0: return 0
+    if tobj_append(ptr, kind, owner) < 1:
         return -1
     return 1
 
@@ -262,6 +316,19 @@ pub fn rt_transient_array_scope_state_v1() -> i64:
     if transient_scope_active < 1: return 0
     if transient_scope_paused > 0: return 2
     1
+
+# Observe the existing allocator's actual scope id. The begin counter retires
+# at u32 exhaustion; neither pause nor observation creates a new identity.
+pub fn rt_transient_array_scope_identity_v1() -> i64:
+    if transient_scope_active < 1: return 0
+    transient_scope_id
+
+# This provider owns only process/transient allocation, in its documented
+# single-thread lane. There is no session allocator here to invent or observe.
+# Reused directly by the actual heap registration hook above.
+pub fn rt_allocation_owner_identity_v1() -> i64:
+    if transient_scope_active < 1 or transient_scope_paused > 0: return 0
+    transient_scope_id
 
 pub fn rt_transient_array_scope_pause() -> i8:
     if transient_scope_active < 1:
@@ -320,12 +387,35 @@ var classify_bytes: i64 = 0
 # raw lookup, exactly as in C (:2018-2027): the selfcheck promotes a raw
 # carrier root passed as `ptr | 1`.
 fn transient_classify(value: i64) -> i64:
-    val rawp = if (value & 7) != 0: value & -8 else: value
-    val raw_idx = transient_raw_find(rawp)
-    if raw_idx >= 0:
-        classify_ptr = rawp
-        classify_bytes = spl_load_i64(transient_raw_items, raw_idx * 24 + 8)
-        return 7
+    if (value & 7) <= 1:
+        val rawp = value & -8
+        if rawp > 0:
+            val raw_idx = transient_raw_find(rawp)
+            if raw_idx >= 0:
+                classify_ptr = rawp
+                classify_bytes = spl_load_i64(transient_raw_items, raw_idx * 24 + 8)
+                return 7
+            val praw_idx = persistent_raw_find(rawp)
+            if praw_idx >= 0:
+                classify_ptr = rawp
+                classify_bytes = spl_load_i64(persistent_raw_items, praw_idx * 16 + 8)
+                return 7
+            val s_idx = struct_table_find(rawp)
+            if s_idx >= 0:
+                classify_ptr = rawp
+                classify_bytes = spl_load_i64(struct_alloc_items, s_idx * 16 + 8)
+                return 7
+    # Untagged text data pointer (rt_interp_cstr decode stored in a struct
+    # field): the header sits 16 bytes below it. Twin of C
+    # rt_core_transient_text_data_pointer; membership is checked before the
+    # header is read. string_transient_state is 0 for a persistent string.
+    if (value & 7) == 0 and value > 4096 + 16:
+        val text_ptr = string_transient_state((value - 16) | 1)
+        if text_ptr > 0:
+            classify_ptr = text_ptr
+            classify_bytes = 0
+            return 1
+        return 0
     # C rt_core_is_heap: only tag 1 is a heap reference.
     if (value & 7) != 1:
         return 0
@@ -417,7 +507,13 @@ fn transient_node_bytes(ptr: i64, kind: i64, raw_bytes: i64) -> i64:
         val elem = if (array_flags(ptr | 1) & 8) != 0: 1 else: 8
         return 40 + array_cap(ptr | 1) * elem
     if kind == 3:
-        return 40 + spl_load_i64(ptr, 8) * 16
+        val cap = spl_load_i64(ptr, 8)
+        var header = 0
+        unsafe(capabilities: [ffi]):
+            header = dict_header_bytes_v1()
+        if cap < 0 or cap > (9223372036854775807 - header) / 16:
+            return 9223372036854775807
+        return header + cap * 16
     if kind == 4:
         return 32
     if kind == 5:
@@ -523,9 +619,13 @@ pub fn rt_transient_heap_promote(value: i64) -> i8:
             elif node_kind == 7:
                 val ridx = transient_raw_find(node_ptr)
                 if ridx >= 0:
-                    if spl_load_i64(transient_raw_items, ridx * 24 + 16) != 0:
-                        promoted = 1
-                    spl_store_i64(transient_raw_items, ridx * 24 + 16, 0)
+                    val rbytes = spl_load_i64(transient_raw_items, ridx * 24 + 8)
+                    if persistent_raw_register(node_ptr, rbytes) > 0:
+                        if spl_load_i64(transient_raw_items, ridx * 24 + 16) != 0:
+                            promoted = 1
+                        spl_store_i64(transient_raw_items, ridx * 24 + 16, 0)
+                    else:
+                        ok = 0
             else:
                 val tidx = tobj_find(node_ptr)
                 if tidx >= 0 and spl_load_i64(transient_objects_items, tidx * 24 + 16) == transient_scope_id:
@@ -603,6 +703,7 @@ fn transient_reclaim_raw():
         val owned = spl_load_i64(transient_raw_items, i * 24 + 16)
         if owned != 0:
             struct_table_unregister(ptr)
+            persistent_raw_unregister(ptr)
             free(ptr)
         i = i + 1
     transient_raw_len = 0
@@ -612,50 +713,86 @@ fn transient_reclaim_raw():
 # ----------------------------------------------------------------------------
 
 pub fn rt_alloc(size: i64) -> i64:
-    val ptr = malloc(size)
+    if size < 0:
+        return 0
+    val ptr = calloc(1, size)
     if ptr < 1:
         return 0
     # Registered on EVERY rt_alloc while a scope is active; owned only when
     # the scope has not paused yet (spec rt_core_transient_raw_register).
+    # Outside an active scope or while paused, also track in persistent_raw
+    # so pre-scope / promoted structs survive scope clear cleanly.
     val owned = if transient_scope_paused > 0: 0 else: 1
     if transient_raw_register(ptr, size, owned) < 1:
         free(ptr)
         return 0
+    if transient_scope_active < 1 or transient_scope_paused > 0:
+        if persistent_raw_register(ptr, size) < 1:
+            transient_raw_erase(ptr)
+            free(ptr)
+            return 0
     return ptr
 
 pub fn rt_realloc(ptr: i64, size: i64) -> i64:
+    if size < 0:
+        return 0
+    if ptr == 0:
+        return rt_alloc(size)
     val idx = transient_raw_find(ptr)
+    val pidx = persistent_raw_find(ptr)
     if idx < 0:
+        if size == 0:
+            struct_table_unregister(ptr)
+            persistent_raw_unregister(ptr)
+            free(ptr)
+            return 0
         # Spec :5910 "if (!tracked) return realloc(ptr, size)": a block the
         # transient registry does not track — allocated before the scope, or
         # with no scope at all — stays UNTRACKED. Registering it here would
         # let scope-end free a pre-scope block (use-after-free).
-        return realloc(ptr, size)
+        val old_psize = if pidx >= 0: spl_load_i64(persistent_raw_items, pidx * 16 + 8) else: 0
+        val next = realloc(ptr, size)
+        if next > 0 and pidx >= 0:
+            if next != ptr:
+                persistent_raw_unregister(ptr)
+            val _preg = persistent_raw_register(next, size)
+            if size > old_psize:
+                memset(next + old_psize, 0, size - old_psize)
+        return next
     if size == 0:
         # Spec :5911-:5915.
+        persistent_raw_unregister(ptr)
         transient_raw_erase(ptr)
         free(ptr)
         return 0
-    # Tracked block: mirror the C malloc+register+copy+erase+free sequence
+    # Tracked block: mirror the C calloc+register+copy+erase+free sequence
     # (spec :5916-:5927) so the owned bit is preserved and a registration
     # failure leaves the ORIGINAL block alive and tracked.
     val old_size = spl_load_i64(transient_raw_items, idx * 24 + 8)
     val owned = spl_load_i64(transient_raw_items, idx * 24 + 16)
-    val next = malloc(size)
+    val next = calloc(1, size)
     if next < 1:
         return 0
     if transient_raw_register(next, size, owned) < 1:
         free(next)
         return 0
+    if (owned == 0 or pidx >= 0) and persistent_raw_register(next, size) < 1:
+        transient_raw_erase(next)
+        free(next)
+        return 0
     memcpy(next, ptr, if old_size < size: old_size else: size)
+    persistent_raw_unregister(ptr)
     transient_raw_erase(ptr)
     free(ptr)
     return next
 
 pub fn rt_free(ptr: i64) -> i64:
-    # Spec rt_free :5930: unregister any struct allocation, erase any
-    # transient raw entry, then release.
+    # Spec rt_free :5930: unregister any struct/persistent-raw entry, erase
+    # any transient raw entry, then release.
+    if ptr < 1:
+        return 0
     struct_table_unregister(ptr)
+    persistent_raw_unregister(ptr)
     transient_raw_erase(ptr)
     free(ptr)
     return 0

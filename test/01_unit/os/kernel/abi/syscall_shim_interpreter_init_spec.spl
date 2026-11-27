@@ -1,0 +1,40 @@
+# Purpose and audience: regression & prevention evidence for bug #123 (`shim_init` / keepalive interpreter safety).
+# @req REQ-SSPEC-OS
+
+"""Verify `os.kernel.abi.syscall_shim` loads cleanly and executes `shim_init` in interpreter mode."""
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.io_runtime.{file_read}
+use os.kernel.abi.syscall_shim.{shim_init, g_shim_scheduler, g_shim_ipc, g_shim_klog}
+use os.kernel.abi.syscall_shim_process.{spl_handle_getpid, spl_handle_debug_write}
+use os.kernel.scheduler.scheduler.{Scheduler}
+use os.kernel.scheduler.scheduler_types.{SCHED_RT_BASE_PRIORITY_UNSET}
+use os.kernel.ipc.ipc.{IpcManager}
+use os.kernel.log.klog.{KernelLog}
+use os.kernel.types.capability_types.{CapabilitySet}
+use os.kernel.types.task_types.{TaskPriority}
+
+describe "syscall_shim interpreter initialization (#123)":
+    it "loads syscall_shim and executes shim_init without MAX_TASKS or fn->u64 cast errors":
+        step("verify bootstrap scheduler sentinel types before shim_init, then initialize runtime state")
+        expect(g_shim_scheduler.rt_base_priority_by_slot.len()).to_equal(256)
+        expect(g_shim_scheduler.rt_base_priority_by_slot[0]).to_equal(SCHED_RT_BASE_PRIORITY_UNSET)
+        expect(g_shim_scheduler.executable_adoption_token_slot).to_equal(-1i64)
+        var sched = Scheduler.new()
+        val task_id = sched.create_task(0x400000u64, TaskPriority.Normal, CapabilitySet.empty())
+        expect(task_id.id).to_be_greater_than(0u64)
+        val expected_pid = sched.get_current().id as i64
+        shim_init(sched, IpcManager.new(), KernelLog.new(16))
+
+        expect(g_shim_klog.capacity).to_equal(16u64)
+        expect(g_shim_scheduler.get_current().id as i64).to_equal(expected_pid)
+        expect(spl_handle_getpid(0, 0, 0, 0, 0, 0)).to_equal(expected_pid)
+        val dbg_res = spl_handle_debug_write(0, 0, 0, 0, 0, 0)
+        expect(dbg_res).to_be_less_than(1i64)
+
+    it "gates _shim_keepalive fn->u64 casts for baremetal/simpleos builds":
+        step("verify _shim_keepalive gates fn->u64 casts behind @when(baremetal or simpleos)")
+        val src = file_read("src/os/kernel/abi/syscall_shim.spl")
+        expect(src).to_contain("@when(baremetal or simpleos):")
+        expect(src).to_contain("fn _shim_keepalive() -> u64:")

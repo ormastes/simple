@@ -1,0 +1,207 @@
+# Per-file child fan-out for `simple lint` / `simple fmt` (and the lint repo-gate scripts).
+#
+# One process per file is the right shape (batching files in one process is
+# superlinear, see .claude/rules/commands.md). Children are the SAME binary
+# re-executed on a single file, so they never fan out again (a single-file
+# command takes the in-process path). Each child's stdout/stderr go to private
+# temp files; the caller prints them in INPUT order so output is byte-identical
+# to the serial loop.
+
+use app.io.env_ops.{env_get}
+use app.io.process_ops.{process_spawn_async, process_wait}
+use app.io.sysinfo_ops.{getpid, cpu_count}
+use app.cli.shard_mem_clamp.{shard_threads_mem_cap, shard_mem_available_kb_from_field}
+use std.nogc_sync_mut.io.file_ops.{file_read, file_exists}
+use std.io_runtime.{file_delete}
+use std.nogc_sync_mut.io_runtime.{time_now_monotonic_ms}
+
+# Peak RSS of one `simple lint|fmt` child on a small file, rounded up
+# (measured ~85 MB/child tree at 4 concurrent files on Windows; 512 MiB leaves
+# a wide margin for large inputs).
+val CLI_CHILD_RSS_ESTIMATE_KB: i64 = 524288
+val CLI_CHILD_POLL_MS: i64 = 25
+
+struct CliChildResult:
+    stdout: text
+    stderr: text
+    exit: i64
+    spawned: bool
+
+# `--jobs N` / `--jobs=N` -> N (0 when absent or not a positive integer).
+# `bad` is true when the flag is present with an invalid value.
+pub fn cli_jobs_from_args(args: [text]) -> (i64, bool):
+    var jobs: i64 = 0
+    var bad = false
+    var expect_value = false
+    for arg in args:
+        if expect_value:
+            expect_value = false
+            val n = _cli_parse_positive(arg)
+            if n > 0: jobs = n else: bad = true
+            continue
+        if arg == "--jobs":
+            expect_value = true
+        elif arg.starts_with("--jobs="):
+            val n = _cli_parse_positive(arg[7:])
+            if n > 0: jobs = n else: bad = true
+    if expect_value:
+        bad = true
+    (jobs, bad)
+
+fn _cli_parse_positive(raw: text) -> i64:
+    if raw.len() > 6:
+        return 0
+    shard_mem_available_kb_from_field(raw)
+
+# Worker cap for `count` files. An explicit `--jobs N` (requested > 0) is
+# honoured as-is (bounded by the file count); otherwise min(cores, free memory
+# / per-child RSS estimate). Always >= 1; 1 means "stay in process".
+pub fn cli_parallel_workers(requested: i64, count: i64, cores: i64, mem_cap: i64) -> i64:
+    if count <= 1:
+        return 1
+    var n = if requested > 0: requested else: cores
+    if requested <= 0 and mem_cap > 0 and mem_cap < n:
+        n = mem_cap
+    if n > count:
+        n = count
+    if n < 1:
+        n = 1
+    n
+
+# A child re-pays process startup (~5-9 s on the seed under load: module load + parse), so
+# fan-out only wins when the work BEYOND the largest file exceeds that cost:
+# serial ~= startup + sum(w), fan-out ~= 2 * startup + max(w). Measured on the
+# seed: ~1 s fixed + ~2 ms/byte per file (2.4 KB/30-fn file ~= 7 s, cli_ops.spl 16 KB ~= 23 s).
+val CLI_CHILD_STARTUP_MS: i64 = 9000
+val CLI_FILE_FIXED_MS: i64 = 1000
+
+pub fn cli_fanout_worthwhile(sizes: [i64]) -> bool:
+    if sizes.len() < 2:
+        return false
+    var total: i64 = 0
+    var biggest: i64 = 0
+    for size in sizes:
+        val est = CLI_FILE_FIXED_MS + size * 2
+        total = total + est
+        if est > biggest:
+            biggest = est
+    total - biggest > CLI_CHILD_STARTUP_MS
+
+fn _cli_file_sizes(files: [text]) -> [i64]:
+    var sizes: [i64] = []
+    for path in files:
+        sizes.push(if file_exists(path): file_read(path).len() else: 0)
+    sizes
+
+# Explicit `--jobs N` always fans out (N>1); `--jobs 1` never does. Automatic
+# mode fans out only when cli_fanout_worthwhile says the startup cost pays off.
+pub fn cli_default_workers(requested: i64, files: [text]) -> i64:
+    if files.len() <= 1 or requested == 1:
+        return 1
+    if requested <= 0 and not cli_fanout_worthwhile(_cli_file_sizes(files)):
+        return 1
+    val cores = cpu_count()
+    val want = if cores > 0: cores else: 1
+    val mem_cap = if requested > 0: 0 else: shard_threads_mem_cap(want, CLI_CHILD_RSS_ESTIMATE_KB)
+    cli_parallel_workers(requested, files.len(), want, mem_cap)
+
+# Child stderr repeats the per-process module-load `[gc-warning]` banner; the
+# serial path prints it once (from the parent), so drop it from child copies.
+pub fn cli_strip_gc_warnings(text_in: text) -> text:
+    if not text_in.contains("[gc-warning]"):
+        return text_in
+    var lines = text_in.split("\n")
+    val trailing_nl = text_in.ends_with("\n")
+    if trailing_nl and lines.len() > 0:
+        lines = lines[0:lines.len() - 1]
+    var kept: [text] = []
+    for line in lines:
+        if not line.starts_with("[gc-warning]"):
+            kept.push(line)
+    val body = kept.join("\n")
+    if trailing_nl and kept.len() > 0: body + "\n" else: body
+
+pub fn cli_all_unique(items: [text]) -> bool:
+    var seen: {text: bool} = {}
+    for item in items:
+        if seen.contains_key(item):
+            return false
+        seen[item] = true
+    true
+
+fn _cli_tmp_dir() -> text:
+    var dir = env_get("TMPDIR") ?? ""
+    if dir == "":
+        dir = env_get("TEMP") ?? ""
+    if dir == "":
+        dir = env_get("TMP") ?? ""
+    if dir == "":
+        dir = "/tmp"
+    var norm = ""
+    var i = 0
+    while i < dir.len():
+        val ch = dir[i:i + 1]
+        norm = norm + (if ch == "\\": "/" else: ch)
+        i = i + 1
+    while norm.len() > 1 and norm.ends_with("/"):
+        norm = norm[0:norm.len() - 1]
+    norm
+
+# Run `exe <argv>` for every entry of `argvs`, at most `max_workers` at a time.
+# Results are index-aligned with `argvs` (input order), regardless of finish order.
+pub fn cli_run_children_ordered(exe: text, argvs: [[text]], max_workers: i64) -> [CliChildResult]:
+    val n = argvs.len()
+    val tmp = _cli_tmp_dir()
+    val stamp = "{getpid()}_{time_now_monotonic_ms()}"
+    var results: [CliChildResult] = []
+    var pids: [i64] = []
+    var outs: [text] = []
+    var errs: [text] = []
+    var done: [bool] = []
+    var i = 0
+    while i < n:
+        results.push(CliChildResult(stdout: "", stderr: "", exit: -1, spawned: false))
+        pids.push(0)
+        outs.push("{tmp}/simple_cli_fan_{stamp}_{i}.out")
+        errs.push("{tmp}/simple_cli_fan_{stamp}_{i}.err")
+        done.push(false)
+        i = i + 1
+    val cap = if max_workers < 1: 1 else: max_workers
+    var next = 0
+    var running = 0
+    var finished = 0
+    while finished < n:
+        while next < n and running < cap:
+            # sh -c 'o=$1; e=$2; shift 2; exec "$@" >"$o" 2>"$e"' sh OUT ERR EXE ARGS...
+            var sh_args: [text] = ["-c", "o=$1; e=$2; shift 2; exec \"$@\" >\"$o\" 2>\"$e\"", "sh", outs[next], errs[next], exe]
+            for a in argvs[next]:
+                sh_args.push(a)
+            val pid = process_spawn_async("sh", sh_args)
+            if pid > 0:
+                pids[next] = pid
+                running = running + 1
+            else:
+                done[next] = true
+                finished = finished + 1
+            next = next + 1
+        var k = 0
+        var reaped = false
+        while k < next:
+            if not done[k] and pids[k] > 0:
+                val code = process_wait(pids[k], CLI_CHILD_POLL_MS)
+                if code != -2:
+                    done[k] = true
+                    finished = finished + 1
+                    running = running - 1
+                    reaped = true
+                    var so = ""
+                    var se = ""
+                    if file_exists(outs[k]):
+                        so = file_read(outs[k])
+                        file_delete(outs[k])
+                    if file_exists(errs[k]):
+                        se = file_read(errs[k])
+                        file_delete(errs[k])
+                    results[k] = CliChildResult(stdout: so, stderr: cli_strip_gc_warnings(se), exit: code, spawned: true)
+            k = k + 1
+    results

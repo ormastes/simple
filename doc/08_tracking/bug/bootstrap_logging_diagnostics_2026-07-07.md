@@ -60,3 +60,14 @@ That does not say which MIR/HIR function or phase produced the bad receiver.
 ## Runtime verification (2026-07-17)
 
 No single deterministic repro exists for this issue as documented. Source grep confirms the "Done" items are present at tip: `SIMPLE_BOOTSTRAP_DIAG=1 SIMPLE_COMPILER_TRACE=1` rerun hint present at `src/app/cli/native_build_main.spl:213`, and `interp_call_dispatches_plain_io_externs` test exists at `interpreter_sffi.rs:837`. The "Remaining items" are open-ended and require a real failure to reproduce; status remains IN_PROGRESS.
+
+## 2026-11-25 triage (p3-bap lane, Windows worktree)
+
+The "Done" diagnostics are confirmed present at `origin/release/1.0.0`
+(47d6c5eddd5): the rerun hint `SIMPLE_BOOTSTRAP_DIAG=1 SIMPLE_COMPILER_TRACE=1`
+at `src/app/cli/native_build_main.spl:836`, and the seed test
+`interp_call_dispatches_plain_io_externs` at
+`src/compiler_rust/compiler/src/interpreter_sffi.rs:920`. The "Remaining
+items" are contingent on a future bootstrap failure repro (needs a full
+bootstrap run, not available in this lane), so there is no bounded fix to
+land. Left IN_PROGRESS — the status header is accurate.

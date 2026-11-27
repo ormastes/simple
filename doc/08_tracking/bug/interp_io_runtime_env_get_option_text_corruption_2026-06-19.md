@@ -93,3 +93,11 @@ runtime boundary localized but leaves the facade/import behavior open.
   `!= ""` (e.g. `SHOWCASE_PPM`, `SIMPLE_GUI`) appear to "work" because they never
   call `.len()` or interpolate the value — but if the variable is set, the `!= ""`
   branch may still misbehave for the same reason; not yet re-audited.
+
+## Verification 2026-11-25 (p2w2-ab lane) — closure re-confirmed
+
+Re-ran the minimal repro on the pinned Windows seed (`bin/simple.exe`
+v1.0.0-rc.1, release/1.0.0 @ ead200cb544) with
+`TRIAGE03_PROBE=hello_world_123`: `env_get("TRIAGE03_PROBE") ?? "<none>"`
+prints `len=15` and `val=[hello_world_123]` — exact value, no corruption, no
+blank-line collapse. The 2026-09-13 closure stands. No code change.

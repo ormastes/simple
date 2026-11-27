@@ -58,3 +58,133 @@ Template: [layer_skill.md](../../template/layer_skill.md)
   regenerate through `compiler_schema`, and bind both cache codec versions.
   This candidate has failing MIR/interpreter checks and P1 filter admission
   parity findings; see the collection-planner feature expert before resuming.
+
+- 2026-10-26 HIR keeps every `@cfg` arm: `HirExprKind.CfgSelect` is APPENDED
+  last (codec ordinals are positional) and the visitor/children/hash/codec files
+  are regenerated with `compiler_schema` (`visitors`, `codec`) - never hand-edit.
+  Hand-written exhaustive walkers (mono preflight 09, semantics checkers,
+  subst/rewrite passes) each need a `CfgSelect` arm that walks ALL arms. The
+  parser still strips arms unless the (not yet landed) opt-in emission exists;
+  declaration-level `@cfg` has no HIR carrier yet. Specs:
+  `test/01_unit/compiler/20.hir/hir_cfg_select_*_spec.spl`.
+
+## 2026-10-27 - cfg-select source path (SIMPLE_HIR_CFG_SELECT=1, default off)
+
+- Parser path for `HirExprKind.CfgSelect`: in flag mode `_pp_preprocess_conditionals`
+  (`10.frontend/core/parser_preprocessor.spl`) does NOT strip an indented (function-body)
+  `@when/@elif/@else/@end`; it rewrites it, line-count stable, to `if/elif/else` whose
+  conditions are the marker call `__cfg_when__("<cond>")` (arm bodies indented one level
+  per open marker). Top-level `@when` and target-receipt mode keep stripping.
+- No lexer/parser/AST change: `expression_core.spl` (`If`/`IfChain` cases) recognizes the
+  marker via `_Expressions/cfg_when_marker.spl` and `lower_cfg_when_chain` builds one
+  `CfgSelect(conds, arms, else_)`; MIR picks the arm per target. Empty `@when()` becomes an
+  unknown atom so MIR reports the fatal malformed-@cfg error. Per-declaration `@cfg` is out of
+  scope (needs a module-level node). The interpreter shares the preprocessor: do not set the flag
+  for interpreted runs. Spec: `test/01_unit/compiler/20.hir/hir_cfg_select_source_spec.spl`.
+- Marker mode is statement-only: a chain whose arm declares a `val`/`var`/`let` at the chain indent, has `{`/`}` in a condition, or has an empty/comment-only arm keeps flat-strip semantics (binding-declaring chains keep flat-strip semantics until a non-scoping CfgSelect design lands). Marker lowering is also gated on the flag and requires every arm to be a string-literal marker.
+
+### Frontend core RTI owner alias (2026-10-30)
+
+The native SSpec runner exposed mixed `compiler.core.types` /
+`compiler.frontend.core.types` declaration ownership. Shared HIR owner normalization
+now folds the loader alias; RTI mixed-provider rejection remains intact. Focused
+seed red/green tests pass. The matched native runner now clears HIR/MIR/AOP
+304/304 without E-RTI-006; later code generation hit a temporary RSS limit,
+so runner execution and HAL/SOSIX acceptance remain pending.
+See `doc/08_tracking/bug/rti_frontend_core_alias_owner_2026_10_30.md`.
+
+### Bootstrap native SSpec authority refresh (2026-10-30)
+
+The native runner emits `--refresh-source-authority` for generated source.
+The bootstrap CLI must route ordinary refresh intent to the canonical native
+coordinator before raw worker-option validation or stale-authority prepasses.
+Forward original argv; worker/profile/grouped refresh remains refused.
+Focused route cases and evidence are in
+`test/01_unit/app/cli/bootstrap_source_authority_refresh_spec.spl` and
+`doc/08_tracking/bug/bootstrap_refresh_source_authority_route_2026_10_30.md`.
+Native execution requires a rebuilt producer; seed diagnostics do not qualify it.
+
+## Packed encoder growing-buffer copies (2026-10-30)
+
+The packed frontend encoder uses private mutable destinations for scalar writes,
+appends and padding. Each destination is an owned construction buffer; do not
+pass an aliased input or its own tail. This avoids copying all accumulated bytes
+on each append without changing packed bytes, validation or authority. Keep
+format/input-preservation tests and native mutable-buffer ABI evidence separate
+from rebuilt-producer memory qualification. See
+`doc/08_tracking/bug/packed_encoder_repeated_buffer_copy_2026_10_30.md`.
+### Bootstrap native SSpec authority refresh (2026-10-30)
+
+The native runner emits `--refresh-source-authority` for generated source.
+The bootstrap CLI must route ordinary refresh intent to the canonical native
+coordinator before raw worker-option validation or stale-authority prepasses.
+Forward original argv; worker/profile/grouped refresh remains refused.
+Focused route cases and evidence are in
+`test/01_unit/app/cli/bootstrap_source_authority_refresh_spec.spl` and
+`doc/08_tracking/bug/bootstrap_refresh_source_authority_route_2026_10_30.md`.
+Native execution requires a rebuilt producer; seed diagnostics do not qualify it.
+
+## Exported module `var` visibility (2026-11-06)
+
+`[cranelift] imported non-public module static ... requires visibility-preserving
+accessor support` means the provider's HirConst is Private. Owner MirStatic
+(`module_lowering.spl`) and importer external MirStatic (`provider_globals.spl`)
+both read that HirConst visibility, so fix visibility in HIR, never by exporting
+private data addresses from the backend. `module_build.spl`
+`hir_const_with_export_visibility` lifts a Private `var` named in the `export`
+list to Public; immutable literals keep the private inline path. A `var`
+imported by a sibling but neither exported nor `pub` must be declared `pub var`.
+`declare_module_statics` reports only the FIRST refused static per unit —
+enumerate the import lists before claiming a unit is fixed. The seed's
+`cranelift: function address missing declaration` stderr line is a recovered
+first-probe miss, not a failure (fatal form: `Cranelift function address missing
+declaration:` panic). Bugs: `export_list_static_visibility_not_lifted_2026-11-06`,
+`cranelift_function_addr_probe_miss_diagnostic_2026-11-06`.
+
+## `[E-OPT-CAST-001]` on an unannotated optional-call local (2026-11-13)
+
+The self-hosted `T? as <numeric>` check (Cast arm, `expression_core.spl`)
+decides "optional" from the operand's HIR type, its declared symbol/return
+type, or the diagnostic-only side table `HirLowering.local_optional_call_init`.
+A generic `T?` call result is never substituted into a local's symbol slot
+(`hir_binding_direct_call_return_kind` bails on generics), so
+`val m = pick(..); m as i64` needs that table: `mark_optional_call_init` runs
+at all four val/var lowering sites in `statements.spl` and skips annotated and
+`if val`/`while val` (`bind_optional_payload`) binders. The table is keyed by
+module-local SymbolId — it MUST be cleared in `begin_module`/`lower_module`
+(ids restart at 0) or a mark leaks into the next module as a false positive.
+Not covered yet: method-call initialisers (`val m = o.get(k)`) and copies
+(`val n = m`). Spec: `test/01_unit/compiler/hir/optional_as_cast_rejected_spec.spl`.
+Bug: `pure_err01_untyped_local_of_optional_call_not_rejected_2026-11-13`.
+
+## `begin_module` must detach every module-local owner (2026-11-14)
+
+A HIR shard worker reuses one `HirLowering` for thousands of modules and
+reclaims each module's transient scope. Any field that survives `begin_module`
+and is not a promoted phase memo dangles after reclamation and is read as
+garbage by the next module. `lambda_param_hint` did this and ended bootstrap
+run 29's `compiler_cli_build` at module 2758/3145 with E-HIR-VISIT-UNHANDLED.
+When you add a field to `HirLowering`, either reset it in
+`context_helpers.spl::begin_module` or add it to
+`promote_phase_memo_transient_owners`. Order-dependent HIR failures reproduce in
+a few seconds with two modules and `native-build --threads 1`.
+Record: `doc/08_tracking/bug/hir_lambda_param_hint_outlives_module_scope_2026-11-14.md`.
+
+### Frontend node attribute layouts (2026-11-16)
+In `10.frontend/core/_AstExpr/nodes.spl`, `expr_attr_apply_config` accepts
+`extra|s_val|op=<direct|column|array_index|sparse_hash>` and `layout=<aos|soa>`.
+Mode ints are fixed: 0 direct, 1 column, 2 sparse_hash, 3 array_index.
+`array_ptr` / `hash_ptr` are rejected, which resets everything to off.
+Placement to enum goes through `expr_attr_placement_of` only.
+Store API: `00.common/data/attribute_schema_v1.spl`.
+Spec: `doc/07_guide/language/attributes/node_attribute_layouts.md`.
+
+## 2026-11-23 - enum-variant defaults are call-site constants (seed HIR)
+An omitted argument whose default is a payload-free enum variant
+(`E.V` or `E::V`) is filled at the call site by the seed
+(`is_unit_enum_variant` in `compiler_rust/.../hir/lower/expr/calls.rs`).
+`E` must resolve in the caller (type registry or `global_enum_defs`); unknown
+or payload variants still fail with "not a call-site constant". The
+pure-Simple compiler has no such rejection. Specs:
+`hir/lower/tests/const_default_callsite_tests.rs`,
+`test/01_unit/compiler/default_param_enum_variant_fill_spec.spl`.

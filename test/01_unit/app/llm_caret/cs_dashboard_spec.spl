@@ -31,9 +31,11 @@ measurements — treat that as a product defect, not a test artifact.
 use std.spec.*
 use app.llm_caret.cs_dashboard.{cs_resolve_exe, windows_executable_names,
     CsAgent, CsDashboard, cs_dashboard_new, cs_refresh, cs_render,
-    cs_handle_command, cs_help_text, cs_launch_argv, cs_apply_action, cs_fit_sgr
+    cs_handle_command, cs_help_text, cs_shell_words,
+    cs_launch_argv, cs_launch_argv_with_extras, cs_apply_action, cs_fit_sgr
 }
 use app.llm_caret.pane_backend.{pane_spawn, pane_kill}
+use app.llm_caret.cs_orchestrator_v1.{cs_orchestrator_dispatch_v1}
 
 fn _launched(session: text, specs: [text]) -> CsDashboard:
     var d = cs_dashboard_new(session)
@@ -154,6 +156,37 @@ describe "cs dashboard - launching agents":
         step("an invalid spec yields no command at all")
         expect(cs_launch_argv("claudee").len()).to_equal(0)  # oracle: an unparsable spec must produce no argv
 
+    it "passes extra words after the spec through to the agent argv":
+        # @req REQ-CSDASH-005
+        step("extras ride on the action string and the agent spec")
+        val d = cs_dashboard_new("caret")
+        val (after, answer) = cs_handle_command(d, "/launch caret:slang/m --config /tmp/a.sdn")
+        expect(answer.ends_with("--config /tmp/a.sdn")).to_equal(true)
+        expect(after.agents.len()).to_equal(1)
+        expect(after.agents[0].spec).to_contain("--config /tmp/a.sdn")
+
+        step("argv gets the extras appended verbatim, in order")
+        val argv = cs_launch_argv_with_extras("caret:slang/m", ["--config", "/tmp/a.sdn"])
+        expect(argv.len()).to_equal(cs_launch_argv("caret:slang/m").len() + 2)
+        expect(argv[argv.len() - 2]).to_equal("--config")
+        expect(argv[argv.len() - 1]).to_equal("/tmp/a.sdn")
+
+    it "keeps the no-extras launch action unchanged":
+        # @req REQ-CSDASH-005
+        step("plain launch")
+        val d = cs_dashboard_new("caret")
+        val (after, answer) = cs_handle_command(d, "/launch caret:slang/m")
+        expect(answer).to_equal("launch:a1 caret:slang/m")
+        expect(after.agents[0].spec).to_equal("caret:slang/m")
+
+    it "still rejects an invalid first word when extras follow":
+        # @req REQ-CSDASH-004
+        step("bad harness with extras")
+        val d = cs_dashboard_new("caret")
+        val (after, answer) = cs_handle_command(d, "/launch nope:x --config y")
+        expect(after.agents.len()).to_equal(0)
+        expect(answer).to_contain("unknown harness")
+
 describe "cs dashboard - selecting and maximizing panes":
     # @manual_section: cs-dashboard-panes
 
@@ -188,7 +221,7 @@ describe "cs dashboard - selecting and maximizing panes":
             pid: 222, pane_id: "%2", cpu_pct: 2.0, rss_mb: 20, detail: "two")
         val d = CsDashboard(session: base.session,
             manager_status: base.manager_status, agents: [a1, a2],
-            selected: 1, input: "", log: [], screen: [])
+            selected: 1, input: "", log: [], screen: [], pins: [], mru: [])
 
         step("/max targets the SELECTED agent's pane, not the first one")
         val (_after, answer) = cs_handle_command(d, "/max")
@@ -269,7 +302,7 @@ describe "cs dashboard - the rendered screen":
             detail: "pane %2 title a2")
         val d = CsDashboard(session: "caret",
             manager_status: "connected: tmux session caret, 2 agent(s), 2 running",
-            agents: [a1, a2], selected: 1, input: "hello there", log: [], screen: [])
+            agents: [a1, a2], selected: 1, input: "hello there", log: [], screen: [], pins: [], mru: [])
 
         step("render at 80x14")
         val out = cs_render(d, 80, 14)
@@ -309,7 +342,7 @@ describe "cs dashboard - the rendered screen":
                 detail: "d")]
             i = i + 1
         val d = CsDashboard(session: "caret", manager_status: "connected: tmux",
-            agents: agents, selected: 0, input: "tail", log: [], screen: [])
+            agents: agents, selected: 0, input: "tail", log: [], screen: [], pins: [], mru: [])
 
         step("render into fewer rows than the roster needs")
         val lines = _lines(cs_render(d, 60, 8))
@@ -326,7 +359,7 @@ describe "cs dashboard - the rendered screen":
             pid: 222, pane_id: "id4", cpu_pct: 2.0, rss_mb: 20, detail: "two")
         val d = CsDashboard(session: "caret", manager_status: "connected: smux",
             agents: [a1, a2], selected: 1, input: "draft",
-            log: [], screen: ["old line", "codex> thinking", "codex> hello from a2"])
+            log: [], screen: ["old line", "codex> thinking", "codex> hello from a2"], pins: [], mru: [])
 
         step("Render a 100x12 frame")
         val lines = _lines(cs_render(d, 100, 12))
@@ -367,7 +400,7 @@ describe "cs dashboard - the rendered screen":
         val a1 = CsAgent(agent_id: "a1", spec: "claude", status: "running",
             pid: 111, pane_id: "id3", cpu_pct: 1.0, rss_mb: 10, detail: "one")
         val d = CsDashboard(session: "caret", manager_status: "connected: smux",
-            agents: [a1], selected: 0, input: "x", log: [], screen: ["agent says hi"])
+            agents: [a1], selected: 0, input: "x", log: [], screen: ["agent says hi"], pins: [], mru: [])
         val out = cs_render(d, 50, 8)
         step("No split column below the header, and the agent screen is not squeezed in")
         val lines = _lines(out)
@@ -429,7 +462,7 @@ describe "cs dashboard - killing an agent":
         val a1 = CsAgent(agent_id: "a1", spec: "caret:glm/glm-4.6", status: "running",
             pid: first.pid, pane_id: first.pane_id, cpu_pct: -1.0, rss_mb: -1, detail: "")
         val d = CsDashboard(session: session, manager_status: "", agents: [a1],
-            selected: 0, input: "", log: [], screen: [])
+            selected: 0, input: "", log: [], screen: [], pins: [], mru: [])
 
         step("kill a1, then spawn another child that may reuse the same pane id")
         val (killed, outcome) = cs_apply_action(d, "pane:kill a1 " + first.pane_id)
@@ -452,3 +485,42 @@ describe "cs dashboard - agent screen colours":
         expect(row).to_equal("\x1b[0;32mok done\x1b[0m")
         step("A long styled row is cut at the visible width, escapes not counted")
         expect(cs_fit_sgr("\x1b[1mabcdef", 3)).to_equal("\x1b[1mabc\x1b[0m")
+
+describe "cs dashboard - orchestrator, containers, worktree, and agy commands":
+    it "parses quoted prompts and routes /orchestrator, /containers, /crashed, /relaunch, and /close":
+        step("cs_shell_words keeps multi-word quoted prompts intact")
+        val parsed = cs_shell_words("/orchestrator launch agy --container macos-seatbelt --worktree -p \"hello world\"")
+        expect(parsed.len()).to_equal(8)
+        expect(parsed[2]).to_equal("agy")
+        expect(parsed[7]).to_equal("hello world")
+
+        step("agy launch argv maps to agy CLI")
+        val agy_argv = cs_launch_argv("agy")
+        expect(agy_argv.len()).to_equal(1)
+        expect(agy_argv[0]).to_equal("agy")
+
+        step("/orchestrator, /containers, /crashed, /relaunch, and /close produce pure actions")
+        val d0 = cs_dashboard_new("caret")
+        val (d1, launch_act) = cs_handle_command(d0, "/launch agy --container macos-seatbelt --worktree -p \"hello world\"")
+        expect(launch_act).to_equal("launch:a1 agy --container macos-seatbelt --worktree -p \"hello world\"")
+        val (_c1, list_all) = cs_handle_command(d1, "/containers")
+        expect(list_all).to_equal("container:list-all")
+        val (_c2, list_crashed) = cs_handle_command(d1, "/crashed")
+        expect(list_crashed).to_equal("container:list-crashed")
+        val (_c3, relaunch_act) = cs_handle_command(d1, "/relaunch 1 -p \"hello again\"")
+        expect(relaunch_act).to_equal("container:relaunch a1 -p \"hello again\"")
+        val (_c4, close_act) = cs_handle_command(d1, "/close a1")
+        expect(close_act).to_equal("session:close a1")
+        val (_c5, orch_act) = cs_handle_command(d1, "/orchestrator status")
+        expect(orch_act).to_equal("orchestrator:status")
+        val (_c6, cleanup_act) = cs_handle_command(d1, "/orchestrator cleanup crashed-claude")
+        expect(cleanup_act).to_equal("orchestrator:cleanup crashed-claude")
+        expect(cs_orchestrator_dispatch_v1("caret", ["help"])).to_contain("cleanup <id>")
+        expect(cs_orchestrator_dispatch_v1("caret", ["cleanup"])).to_equal("usage: /orchestrator cleanup <id>")
+        expect(cs_orchestrator_dispatch_v1("caret", ["cleanup", "crashed-claude", "other-id"])).to_equal("usage: /orchestrator cleanup <id>")
+        val (_c7, preview_cleanup) = cs_handle_command(d1, "/cleanup-old")
+        val (_c8, apply_cleanup) = cs_handle_command(d1, "/cleanup-old --apply")
+        val (_c9, invalid_cleanup) = cs_handle_command(d1, "/cleanup-old --force")
+        expect(preview_cleanup).to_equal("container:cleanup-old-preview")
+        expect(apply_cleanup).to_equal("container:cleanup-old-apply")
+        expect(invalid_cleanup).to_equal("usage: /cleanup-old [--apply]")

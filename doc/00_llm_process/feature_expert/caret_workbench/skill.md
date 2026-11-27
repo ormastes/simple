@@ -182,3 +182,7 @@ When research, requirements, architecture, design, tests, implementation,
 verification, or release artifacts change for this feature, update this file
 with the new links and current handoff notes — in the same commit as the work,
 per `.claude/rules/vcs.md`.
+
+## Handoff 2026-10-31
+
+Windows seed-only sweep and remaining RED list, by cause: `.spipe/caret_suite_harden/state.md`. On Windows, the interpreter's descriptors 0..2 are the standard streams, shebang scripts spawn through the POSIX shell, and smux terminal input is `[u8]` until a complete scalar reaches the wire.

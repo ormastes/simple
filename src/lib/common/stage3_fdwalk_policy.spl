@@ -1,0 +1,150 @@
+# Pure-Simple twin of the decision logic in the pinned native helper
+# src/runtime/tools/stage3_fdwalk.c (Stage-3 shared runner, Darwin lane:
+# fd-relative walk + exec-by-held-fd where procfs magic links and fexecve
+# do not exist). No filesystem access, no extern. Policy:
+# doc/07_guide/os/hal/pure_simple_hal.md §2 (bootstrap C keeps a Simple twin).
+#
+# The C and Simple sides share ONE vector table (`twin-vectors:
+# stage3_fdwalk_v1`). `stage3_fdwalk --selftest` runs it in C;
+# test/01_unit/lib/common/stage3_fdwalk_policy_spec.spl runs it here and pins
+# both tables byte-identical. Verdict ordinals ARE the helper's contract:
+# the C `fdwalk_exec_verdict` returns these same integers.
+#
+# Bug: doc/08_tracking/bug/bootstrap_macos_blocked_seed_compile_and_linux_only_stage3_authority_2026-09-06.md
+
+val FDWALK_COMPONENT_MAX: i64 = 255
+val FDWALK_RELATIVE_MAX: i64 = 16384
+val FDWALK_PARTS_MAX: i64 = 256
+
+val FDWALK_VERDICT_ADMIT: i64 = 0
+val FDWALK_VERDICT_NOT_REGULAR: i64 = 1
+val FDWALK_VERDICT_UNLINKED: i64 = 2
+val FDWALK_VERDICT_REPATH_MISSING: i64 = 3
+val FDWALK_VERDICT_REPATH_SYMLINK: i64 = 4
+val FDWALK_VERDICT_IDENTITY_MISMATCH: i64 = 5
+
+# twin: C fdwalk_component_ok. One path component: 1..255 bytes, not "." or
+# "..", alphabet [A-Za-z0-9_.-]. Byte-based like the C side.
+fn fdwalk_component_ok(part: text) -> bool:
+    val n = part.byte_len()
+    if n == 0 or n > FDWALK_COMPONENT_MAX:
+        return false
+    if part == "." or part == "..":
+        return false
+    var i = 0
+    while i < n:
+        val b = part.byte_at(i)
+        val ok = (b >= 65 and b <= 90) or (b >= 97 and b <= 122) or (b >= 48 and b <= 57) or b == 95 or b == 46 or b == 45
+        if not ok:
+            return false
+        i = i + 1
+    return true
+
+# twin: C fdwalk_split_relative. Returns the components of a valid relative
+# path, or an EMPTY list when the path is rejected (no leading "/", at most
+# 16384 bytes, at most 256 components, every component fdwalk_component_ok).
+fn fdwalk_split_relative(rel: text) -> [text]:
+    val empty: [text] = []
+    if rel.byte_len() == 0 or rel.byte_len() > FDWALK_RELATIVE_MAX:
+        return empty
+    if rel.substring(0, 1) == "/":
+        return empty
+    val parts = rel.split("/")
+    if parts.len() > FDWALK_PARTS_MAX:
+        return empty
+    for part in parts:
+        if not fdwalk_component_ok(part):
+            return empty
+    return parts
+
+# (st_dev, st_ino) of an inode as observed through a descriptor or a path.
+struct FdIdentity:
+    dev: i64
+    ino: i64
+
+# What fstat() reports about the HELD executable descriptor.
+struct HeldExecutable:
+    regular: bool
+    nlink: i64
+    identity: FdIdentity
+
+# What lstat()/stat() report about the path F_GETPATH names for that
+# descriptor, immediately before exec.
+struct RepathObservation:
+    present: bool
+    symlink: bool
+    identity: FdIdentity
+
+# twin: C fdwalk_exec_verdict. The verify-by-fd decision taken immediately
+# before exec on Darwin: the HELD descriptor must be a regular, still-linked
+# file; the path F_GETPATH reports must still exist, must not have become a
+# symlink, and must resolve to the held (dev, ino). Priority order is fixed.
+fn fdwalk_exec_verdict(held: HeldExecutable, repath: RepathObservation) -> i64:
+    if not held.regular:
+        return FDWALK_VERDICT_NOT_REGULAR
+    if held.nlink == 0:
+        return FDWALK_VERDICT_UNLINKED
+    if not repath.present:
+        return FDWALK_VERDICT_REPATH_MISSING
+    if repath.symlink:
+        return FDWALK_VERDICT_REPATH_SYMLINK
+    if held.identity.dev != repath.identity.dev or held.identity.ino != repath.identity.ino:
+        return FDWALK_VERDICT_IDENTITY_MISMATCH
+    return FDWALK_VERDICT_ADMIT
+
+# twin-vectors: stage3_fdwalk_v1 (byte-identical in stage3_fdwalk.c)
+# component|<part>|<ok 0/1> ; relative|<rel>|<component count, 0 = rejected> ;
+# verdict|reg|nlink|hdev|hino|present|symlink|rdev|rino|<verdict>
+fn fdwalk_vectors() -> [text]:
+    return [
+        "component|bin|1",
+        "component|stage3-shared-runner.pl|1",
+        "component|a.b_c-d|1",
+        "component||0",
+        "component|.|0",
+        "component|..|0",
+        "component|a b|0",
+        "component|a/b|0",
+        "component|a\\b|0",
+        "component|-|1",
+        "component|...|1",
+        "relative|bin/simple|2",
+        "relative|/bin/simple|0",
+        "relative|bin//simple|0",
+        "relative|bin/./simple|0",
+        "relative|bin/../simple|0",
+        "relative|simple|1",
+        "relative||0",
+        "verdict|1|1|7|42|1|0|7|42|0",
+        "verdict|0|1|7|42|1|0|7|42|1",
+        "verdict|1|0|7|42|1|0|7|42|2",
+        "verdict|1|1|7|42|0|0|0|0|3",
+        "verdict|1|1|7|42|1|1|7|42|4",
+        "verdict|1|1|7|42|1|0|7|43|5",
+        "verdict|1|1|7|42|1|0|8|42|5",
+        "verdict|1|2|7|42|1|0|7|42|0",
+    ]
+# end twin-vectors
+
+fn fdwalk_vector_int(field: text) -> i64:
+    var n = 0
+    var i = 0
+    while i < field.byte_len():
+        n = n * 10 + (field.byte_at(i) - 48)
+        i = i + 1
+    return n
+
+# Runs one shared vector row through the twin; true when the twin agrees.
+fn fdwalk_run_vector(row: text) -> bool:
+    val f = row.split("|")
+    if f.len() == 0:
+        return false
+    if f[0] == "component" and f.len() == 3:
+        return fdwalk_component_ok(f[1]) == (f[2] == "1")
+    if f[0] == "relative" and f.len() == 3:
+        return fdwalk_split_relative(f[1]).len() == fdwalk_vector_int(f[2])
+    if f[0] == "verdict" and f.len() == 10:
+        val held = HeldExecutable(regular: f[1] == "1", nlink: fdwalk_vector_int(f[2]), identity: FdIdentity(dev: fdwalk_vector_int(f[3]), ino: fdwalk_vector_int(f[4])))
+        val repath = RepathObservation(present: f[5] == "1", symlink: f[6] == "1", identity: FdIdentity(dev: fdwalk_vector_int(f[7]), ino: fdwalk_vector_int(f[8])))
+        return fdwalk_exec_verdict(held, repath) == fdwalk_vector_int(f[9])
+    return false

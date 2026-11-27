@@ -4,7 +4,9 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** OPEN
+**Status:** FIXED (2026-11-11, lane boot17) — all five defects were verified
+fixed on a stage2 candidate 2026-11-05 (addenda below); re-confirmed at tip by
+source-guard checks and seed probes of every reproducer. See addendum.
 **Filed:** 2026-09-05
 **Host:** aarch64-unknown-linux-gnu (Ubuntu 24.04)
 **Severity:** HIGH — four of five defects return a *wrong value with exit 0*, no
@@ -167,3 +169,119 @@ a dict/map type**. Stage-2 compiles `src/lib` from source with the same
 still returned a value. The claim stands: this is an unresolved method silently
 producing `3`, not a real method computing the wrong number.
 
+
+## Defects 1-2 fixed at current source — verified 2026-11-05
+
+Same stage2 candidate as the f64 record (cranelift, aarch64, df48a86ff5a
+worktree) compiled and ran a probe combining the doc's first two reproducers:
+indirect call through a `fn(i64) -> i64` parameter (`apply(dbl, 7) == 14`) and
+`[1,2,3].map(...)` length check. Result: exit 0 — both the truncated-pointer
+indirect-call garbage and the empty-Array.map defects do not reproduce.
+Defects 3-5 of this doc were not re-exercised; the f64 arithmetic sibling is
+verified separately (stage2_native_f64_arithmetic_lowered_as_integer_ops
+record, 2026-11-05).
+
+## Defects 3-5 fixed at current source — verified 2026-11-05
+
+Same stage2 candidate as the defects 1-2 record. Combined probe (closure
+capture call `add_k(5) == 15`; `Dict.len()` 1 and 2 for insert-built and
+literal dicts): exit 0 — no SIGSEGV, correct values. Nonexistent-method probe
+(`{"a": 1}.size()`): build REFUSED with a fatal `unresolved method call:
+size` MIR lowering error (build rc=1, no binary emitted) — the seed's
+refusal-to-substitute mitigation now holds on the stage2 lane too, so all
+five recorded defects are verified fixed at current release/1.0.0 source.
+
+## Addendum 2026-11-11 (lane boot17) — FIXED, re-confirmed at tip (aarch64 host-limited)
+
+Prior verification: the 2026-11-05 addenda above ran the exact reproducers
+through a cranelift aarch64 stage2 candidate built from release/1.0.0-source
+(df48a86ff5a worktree) — defects 1-2 exit 0 with correct values, defects 3-5
+(closure call, Dict.len(), nonexistent-method refusal) exit 0 with correct
+values / build-refusal. This lane's branch is cut from origin/release/1.0.0
+tip, so that evidence covers this tree; per the no-green-rerun rule the
+aarch64 stage2 probes were not repeated (no aarch64 host here).
+
+**Source-guard + seed re-confirmation actually run** (worktree
+simple-p3-boot17-20261111, fresh seed 46fe8f6b6def):
+
+- Defect 5 refusal pinned in source: `mir_legacy_message_is_fatal`
+  (src/compiler/50.mir/mir_lowering_types.spl:1272-1274) classifies
+  `unresolved method call:` as FATAL, so a missing method is a build error,
+  not a silent plausible integer. Seed run of `{"a": 1}.size()`:
+  `Runtime error: Function 'Dict.size' not found ... Refusing to substitute a
+  placeholder value` — the seed's mitigation holds in current source.
+- Combined defects 1-4 probe under `bin/simple.exe run --mode=interpreter`:
+  `direct=14 indirect=14`, `ys_len=3 ys=[2, 4, 6]`, `clo=15`, `dict_len=1`,
+  `lit_len=2` — every interpreter-column value from the doc's tables matches.
+
+## 2026-11-11 — FIXED confirmed (lane p3-comp12, row 5)
+
+Independent confirmation at this lane's base (6233df4b9f9ea, tracked seed
+46fe8f6b6def — the same seed boot17 smoked today, so boot17's interpreter
+repro run was NOT repeated per the no-green-rerun rule):
+
+- Defect-5 refusal guard present at this base: `mir_legacy_message_is_fatal`
+  (src/compiler/50.mir/mir_lowering_types.spl:1272-1274) classifies
+  `unresolved method call:` as FATAL, so a missing method is a build error,
+  not a silent plausible integer.
+- Defects 1-4 were re-confirmed on this exact seed by boot17's combined probe
+  run today (all doc-table interpreter values match); the aarch64 stage2
+  candidate end-to-end verification of all five defects is the 2026-11-05
+  in-doc evidence (df48a86ff5a worktree, cranelift aarch64). No aarch64 host
+  exists in this lane and boot17 already declined to repeat those probes per
+  the no-green-rerun rule — no new rung added here.
+- No in-tree executable pin exists for these five reproducers
+  (test/01_unit/compiler/codegen/cross_engine_silent_divergence_spec.spl
+  belongs to three other rows: jit_if_nil / match_on_optional_enum_variant /
+  mutate_through_index). A stage2-chain pin for this row's combined probe
+  would require the forbidden in-lane native-build grant route.
+- Ledger note: master table row (doc/08_tracking/bug/bug_db.sdn) still reads
+  `fixing` (updated_at 2026-11-03) while this header and the per-row evidence
+  read FIXED — master-table sync gap for the bookkeeping pass, same shape as
+  the row-2 note in this lane's verdict file.
+
+## 2026-11-26: verified at tip on aarch64, with one new caveat
+
+**Compiler under test: an admitted Stage 2 built on this host** (aarch64 Linux,
+DGX GB10), using
+`COMPILER_BUILD_TIMEOUT_SECONDS=900 scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --stop-after-stage2 --backend=cranelift`.
+It ran detached under `systemd-run -p MemoryMax=40G`, with no other job of
+this lane running.
+
+- **Source and seed.** The tree was pinned at `4995f23e7ccd`, which is
+  origin/release/1.0.0 57e92cb68fc7 plus a docs and tests commit only. The
+  pinned seed's sha256 prefix is `27cfa68556a374c9`.
+- **Build.** The seed native-built the compiler:
+  `Build complete: 1620 compiled, 0 cached, 0 failed` (210.4s compile + 5.7s link).
+- **Admission.** `stage2-sanity.receipt` says `stage2-sanity: pass`, and both
+  frontend legs (`SIMPLE_BOOTSTRAP=0` and `=1`) report `status=complete raw_status=0`.
+  The admitted binary
+  (`stage3/aarch64-unknown-linux-gnu/stage2-admitted/simple`) has sha256
+  `53e9e2e7513658f1...` and is 58,552,816 bytes.
+- **Earlier run.** A first run at 57e92cb68fc7 compiled identically but its
+  admission sanity timed out (rc=124, 180s default) on the 1-module
+  `stage2-module-path-naming` smoke. That was the only difference. Probe
+  results were the same on both binaries.
+
+Probes were built with
+`SIMPLE_BOOTSTRAP=1 SIMPLE_NATIVE_GO_TO_END=1 SIMPLE_FILE_WORKERS=0 SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1 <stage2> native-build main.spl --backend=<cranelift|llvm> --entry-closure`.
+They were run and compared byte for byte with hand-checked expected output,
+which is identical to the 11-26 seed interpreter output. Scope: the probes
+themselves ran on the `SIMPLE_BOOTSTRAP=1` native-build leg only.
+
+Exact reproducers of the five defects, both backends:
+
+1. Indirect call `apply(dbl, 7)` -> `14` (PASS).
+2. `xs.map(_ * 2)` -> `ys_len=3` (PASS for the map result).
+3. Closure `add_k(5)` -> `15`, no SIGSEGV (PASS).
+4. `Dict.len()` -> `1` and `2` (PASS).
+5. `d.size()` -> build refused with `unresolved method call 'size' is a FATAL
+   lowering error` (PASS).
+
+Caveat: defect 2's reproducer still differs on its two print lines.
+`"ys={ys}"` and `"xs={xs}"` print `ys=` and `xs=`, where the September run
+printed `xs=[1, 2, 3]`. This is a separate, arch-neutral regression in string
+interpolation of arrays, filed as
+`native_interpolation_array_renders_empty_2026-11-26.md`. The map result
+itself is correct. The five recorded defects are verified fixed; status ->
+verified.

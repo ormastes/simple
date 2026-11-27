@@ -5,25 +5,66 @@ use super::lowering_di::builtin_type_name;
 use crate::hir::{BinOp, DispatchMode, HirExpr, HirExprKind, HirType, TypeId};
 use crate::mir::instructions::{MirInst, VReg};
 
+const TEXT_HASH_OWNERS: [&str; 4] = ["text", "str", "String", "string"];
+
 impl<'a> MirLowerer<'a> {
+    fn has_declared_text_hash_impl(&self) -> bool {
+        for owner in TEXT_HASH_OWNERS {
+            let qualified = format!("{owner}.hash");
+            if self
+                .function_param_types
+                .get(&qualified)
+                .is_some_and(|params| params.is_empty())
+            {
+                return true;
+            }
+            if self.imported_function_names.contains(&qualified) {
+                return true;
+            }
+        }
+        for owner in TEXT_HASH_OWNERS {
+            if self.find_trait_for_method_on_receiver("hash", Some(owner), 0).is_some() {
+                return true;
+            }
+        }
+        if let (Some(infos), Some(global_impls)) = (self.trait_infos, self.global_trait_impls) {
+            for (trait_name, info) in infos {
+                if info.get_method("hash").is_some_and(|sig| sig.param_types.is_empty())
+                    && global_impls
+                        .get(trait_name)
+                        .is_some_and(|impls| TEXT_HASH_OWNERS.iter().any(|o| impls.iter().any(|i| i == o)))
+                {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     fn box_method_args_for_any_params(
         &mut self,
         func_name: &str,
         args: &[HirExpr],
         arg_regs: &mut [VReg],
     ) -> MirLowerResult<()> {
-        let params = self.function_param_types.get(func_name).cloned().unwrap_or_default();
-        if params.is_empty() {
+        // Both directions, exactly like a direct call: box raw scalars into
+        // tagged (`any`/`T`/`T?`) params and UNBOX tagged words (erased field
+        // reads, generic results) into raw scalar params. See
+        // `coerce_args_for_param_slots` in lowering_expr_call.rs.
+        // A BARE `push`/`append` (erased receiver, e.g. `var b = bs[0]` from an
+        // `[Any]` slot) is always routed by codegen to the tag-dispatched
+        // builtin `rt_push` (`is_bare_builtin_collection_method`, checked
+        // before any name resolution), which stores its argument verbatim as a
+        // RuntimeValue. The typed-array path boxes native scalars before
+        // `rt_array_push`; this path did not, so a raw `99u8` was stored and
+        // later decoded as a tagged word (99 >> 3 == 12) under the JIT.
+        // Bug: doc/08_tracking/bug/seed_jit_untyped_to_u8_push_double_untag_2026-10-18.md
+        if matches!(func_name, "push" | "append") && args.len() == 1 && arg_regs.len() == 1 {
+            arg_regs[0] = self.box_arg_for_any_param(arg_regs[0], &args[0])?;
             return Ok(());
         }
-        for (i, arg_reg) in arg_regs.iter_mut().enumerate() {
-            if params.get(i).copied() == Some(TypeId::ANY) {
-                if let Some(arg_expr) = args.get(i) {
-                    *arg_reg = self.box_arg_for_any_param(*arg_reg, arg_expr)?;
-                }
-            }
-        }
-        Ok(())
+        let params = self.function_param_types.get(func_name).cloned().unwrap_or_default();
+        self.coerce_args_for_param_slots(&params, args, arg_regs, false)
     }
 
     fn builtin_method_receiver_name(&self, ty: TypeId) -> Option<&'static str> {
@@ -47,6 +88,14 @@ impl<'a> MirLowerer<'a> {
             || recovered_ty.is_some_and(|ty| matches!(registry.get(ty), Some(HirType::Array { .. })))
     }
 
+    fn receiver_is_tuple(&self, receiver: &HirExpr, recovered_ty: Option<TypeId>) -> bool {
+        let Some(registry) = self.type_registry else {
+            return false;
+        };
+        let is_tuple = |ty| matches!(registry.get(ty), Some(HirType::Tuple(_) | HirType::LabeledTuple(_)));
+        is_tuple(receiver.ty) || recovered_ty.is_some_and(is_tuple)
+    }
+
     /// Same shape as `receiver_is_array`, for `Dict<K, V>` receivers. Used to
     /// route `d.get(k)` through `lower_index_expr` — see the call site below
     /// (task: dict_value_read_returns_tag_boxed_word).
@@ -56,6 +105,95 @@ impl<'a> MirLowerer<'a> {
         };
         matches!(registry.get(receiver.ty), Some(HirType::Dict { .. }))
             || recovered_ty.is_some_and(|ty| matches!(registry.get(ty), Some(HirType::Dict { .. })))
+    }
+
+    /// `d.name(args)` on a dict, where `name` is no built-in method, calls the
+    /// function stored under key "name" -- what the interpreter does, and what
+    /// `d["name"](args)` already lowers to. It used to lower to the static
+    /// symbol `Dict.name` and abort with "Function 'Dict.name' not found".
+    /// `expr_ty` is the type the consumer of the method-call expression
+    /// expects: when it differs from the call's own result type (an untyped
+    /// method call is `ANY`) the raw result is boxed.
+    pub(super) fn try_lower_dict_stored_fn_call(
+        &mut self,
+        receiver: &HirExpr,
+        method: &str,
+        args: &[HirExpr],
+        expr_ty: TypeId,
+    ) -> MirLowerResult<Option<VReg>> {
+        let receiver_local_ty = self.recover_receiver_type(receiver);
+        let Some((value_ty, ret_ty)) = self.dict_value_call_types(receiver, receiver_local_ty) else {
+            return Ok(None);
+        };
+        // Any name a backend may resolve as a built-in keeps its existing
+        // route: every registered built-in method of any type (compiled code
+        // resolves built-ins by NAME), plus dict spellings outside the registry.
+        const DICT_EXTRA: &[&str] = &[
+            "contains_key",
+            "has",
+            "insert",
+            "length",
+            "delete",
+            "extend",
+            "entries",
+            "map_values",
+            "each",
+            "for_each",
+            "to_array",
+            "update",
+            "pop",
+            "copy",
+            "filter",
+            "map",
+        ];
+        let is_builtin_name = DICT_EXTRA.contains(&method)
+            || crate::method_registry::BUILTIN_METHODS
+                .iter()
+                .any(|(_, methods)| methods.iter().any(|m| m.name == method));
+        if is_builtin_name {
+            return Ok(None);
+        }
+        let key = HirExpr {
+            kind: HirExprKind::String(method.to_string()),
+            ty: TypeId::STRING,
+        };
+        let callee = HirExpr {
+            kind: HirExprKind::Index {
+                receiver: Box::new(receiver.clone()),
+                index: Box::new(key),
+            },
+            ty: value_ty,
+        };
+        let call = HirExpr {
+            kind: HirExprKind::Call {
+                func: Box::new(callee),
+                args: args.to_vec(),
+            },
+            ty: ret_ty,
+        };
+        let raw = self.lower_expr(&call)?;
+        if expr_ty == ret_ty {
+            return Ok(Some(raw));
+        }
+        Ok(Some(self.box_arg_for_any_param(raw, &call)?))
+    }
+
+    /// `(value type, call result type)` when the receiver is a `Dict`. A dict
+    /// whose values share one function type gives that type's return type; a
+    /// dict of several or mixed functions has an `ANY` value type and an
+    /// `ANY` call result, exactly as `d["name"](args)` lowers.
+    fn dict_value_call_types(&self, receiver: &HirExpr, recovered_ty: Option<TypeId>) -> Option<(TypeId, TypeId)> {
+        let registry = self.type_registry?;
+        let dict_value = |ty: TypeId| match registry.get(ty) {
+            Some(HirType::Dict { value, .. }) => Some(*value),
+            _ => None,
+        };
+        let value = dict_value(receiver.ty).or_else(|| recovered_ty.and_then(dict_value))?;
+        match registry.get(value) {
+            Some(HirType::Function { ret, .. }) => Some((value, *ret)),
+            _ if value == TypeId::ANY => Some((value, TypeId::ANY)),
+            _ => None,
+        }
     }
 
     /// Return the element type for a statically valid tuple index.
@@ -238,6 +376,17 @@ impl<'a> MirLowerer<'a> {
         args: &[HirExpr],
         dispatch: &DispatchMode,
     ) -> MirLowerResult<VReg> {
+        self.lower_method_call_expr_with_generics(receiver, method, args, dispatch, &[])
+    }
+
+    pub(super) fn lower_method_call_expr_with_generics(
+        &mut self,
+        receiver: &HirExpr,
+        method: &str,
+        args: &[HirExpr],
+        dispatch: &DispatchMode,
+        generic_args: &[TypeId],
+    ) -> MirLowerResult<VReg> {
         let receiver_local_ty: Option<TypeId> = self.recover_receiver_type(receiver);
 
         if args.is_empty() {
@@ -262,7 +411,7 @@ impl<'a> MirLowerer<'a> {
                     let args = [receiver.clone(), zero];
                     return self.lower_builtin_call_expr("rt_string_char_code_at", &args, TypeId::I64);
                 }
-                "hash" if effective_ty == TypeId::STRING => {
+                "hash" if effective_ty == TypeId::STRING && !self.has_declared_text_hash_impl() => {
                     // Text receivers are tagged RuntimeValues. rt_str_hash also
                     // names the raw C-string ABI in core-c-bootstrap, so using
                     // it hashes object metadata instead of the text bytes.
@@ -345,8 +494,22 @@ impl<'a> MirLowerer<'a> {
                         || self.enum_has_variant_for_method_receiver(effective_ty, variant_name)
                         || self.receiver_is_builtin_result_or_option(receiver.ty, Some(effective_ty))
                     {
+                        // #6953: a user enum declaring `Ok`/`Err` answers its
+                        // own index; the builtin Result its fixed ABI value.
+                        let owned = self.type_registry.and_then(|registry| {
+                            registry
+                                .owned_variant_discriminant(receiver.ty, None, variant_name)
+                                .or_else(|| registry.owned_variant_discriminant(effective_ty, None, variant_name))
+                        });
+                        let disc = owned.unwrap_or_else(|| {
+                            if self.receiver_is_builtin_result_or_option(receiver.ty, Some(effective_ty)) {
+                                Self::enum_variant_discriminant(variant_name)
+                            } else {
+                                crate::hir::name_only_variant_discriminant("mir is_ok/is_err", variant_name)
+                            }
+                        });
                         let expected = HirExpr {
-                            kind: crate::hir::HirExprKind::Integer(Self::enum_variant_discriminant(variant_name)),
+                            kind: crate::hir::HirExprKind::Integer(disc),
                             ty: TypeId::I64,
                         };
                         let expected_enum_id = HirExpr {
@@ -381,31 +544,16 @@ impl<'a> MirLowerer<'a> {
             }
         }
 
-        // `xs.get(i)` on an array is the SAME read as `xs[i]`, but the generic
-        // dotted-name path emitted a bare `rt_index_get` and fed the tag-boxed
-        // slot word (`rt_value_int(v) == v << 3`) straight into an int-typed
-        // VReg — so every `[i64].get(i)` came back exactly 8x too large,
-        // silently, exit 0. `xs[i]` is correct precisely because
-        // `lower_index_expr` pairs the read with an explicit
-        // `UnboxInt`/`UnboxFloat` (+ `UnitNarrow` for narrow element widths).
-        // Route `.get(i)` through that exact path. This sits BEFORE the receiver
-        // and args are lowered, so nothing is evaluated twice. Dict/String
-        // receivers are untouched — `receiver_is_array` gates it.
-        // See doc/08_tracking/bug/list_get_returns_tag_boxed_value_shifted_left_3_2026-07-28.md
-        if method == "get" && args.len() == 1 && self.receiver_is_array(receiver, receiver_local_ty) {
-            let element_ty = self
-                .type_registry
-                .and_then(|tr| {
-                    tr.get(receiver.ty)
-                        .or_else(|| receiver_local_ty.and_then(|ty| tr.get(ty)))
-                })
-                .and_then(|ty| match ty {
-                    HirType::Array { element, .. } => Some(*element),
-                    _ => None,
-                })
-                .unwrap_or(TypeId::ANY);
-            return self.lower_index_expr(receiver, &args[0], element_ty);
-        }
+        // `xs.get(i)` on an array used to be routed through `lower_index_expr`
+        // as the SAME read as `xs[i]` (list_get_returns_tag_boxed_value_shifted_left_3_2026-07-28).
+        // Owner decision 2026-11-09 (array_get_contract_drift_crypto_2026-10-18):
+        // `a.get(i)` returns `T?` on every lane and `a[i]` is the direct form,
+        // so array `get` now takes exactly the `at` path -- HIR types it as
+        // `T?` (hir/lower/expr/mod.rs, the `"at" | "get"` arm) and the generic
+        // dispatch below reaches the receiver-dispatched `rt_get`, which
+        // returns a real `Option` whose payload the `Some(v)` binding unboxes
+        // through the typed `rt_enum_payload` gate. Dict receivers keep their
+        // own Option path further down.
 
         // `d.get(k)` on a Dict<K, V> is the SAME read as `d[k]`, but the
         // generic dotted-name/dynamic-dispatch path emitted a bare
@@ -419,6 +567,59 @@ impl<'a> MirLowerer<'a> {
         // `lower_dict_expr`): boxing the value without unboxing `.get()` (or
         // vice versa) breaks the OTHER read path — see the comment there.
         // See task: dict_value_read_returns_tag_boxed_word.
+        // Policy: `Dict.get` returns `Option<V>` in every engine. HIR types
+        // `get` on a typed `Dict<K, V>` receiver (`receiver.ty` itself, the
+        // same test as `dict_kv` in hir/lower/expr/mod.rs) as `V?`, so build a
+        // canonical Option at runtime: a hit and a miss stay distinguishable
+        // (jit_dict_get_option_presence_in_string_interp_2026-11-03). The
+        // payload is the stored tagged word, the same shape `Some(v)` boxes.
+        if method == "get"
+            && args.len() == 1
+            && self.type_registry.is_some_and(
+                |tr| matches!(tr.get(receiver.ty), Some(HirType::Dict { value, .. }) if *value != TypeId::U64),
+            )
+        {
+            let value_ty = self
+                .type_registry
+                .and_then(|tr| match tr.get(receiver.ty) {
+                    Some(HirType::Dict { value, .. }) => Some(*value),
+                    _ => None,
+                })
+                .unwrap_or(TypeId::ANY);
+            let receiver_reg = self.lower_expr(receiver)?;
+            let key_reg = self.lower_expr(&args[0])?;
+            let key_ty = args[0].ty;
+            let boxed_key = if key_ty == TypeId::U64 {
+                self.box_u64_runtime_value(key_reg)?
+            } else if matches!(
+                key_ty,
+                TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32
+            ) {
+                self.with_func(|func, current_block| {
+                    let boxed = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::BoxInt {
+                        dest: boxed,
+                        value: key_reg,
+                    });
+                    boxed
+                })?
+            } else if key_ty == TypeId::BOOL {
+                self.with_func(|func, current_block| {
+                    let boxed = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::Call {
+                        dest: Some(boxed),
+                        target: crate::mir::effects::CallTarget::from_name("rt_value_bool"),
+                        args: vec![key_reg],
+                    });
+                    boxed
+                })?
+            } else {
+                key_reg
+            };
+            return self.lower_dict_get_option(receiver_reg, boxed_key, value_ty);
+        }
         if method == "get" && args.len() == 1 && self.receiver_is_dict(receiver, receiver_local_ty) {
             let value_ty = self
                 .type_registry
@@ -762,19 +963,27 @@ impl<'a> MirLowerer<'a> {
 
         // === JIT method-dispatch audit batch (jit_method_dispatch_audit_2026-07-29) ===
         // `arr.sum()` on an Array<T>: the interpreter
-        // (interpreter_method/collections.rs "sum") only accumulates Int
-        // elements (ignoring anything that isn't `Value::Int`) and always
-        // returns an Int — never a Float, even when the array holds floats.
-        // `rt_array_sum` (runtime/src/value/collections.rs) mixes floats in
-        // and can return a Float when the array holds any float element — a
-        // known, documented divergence from the interpreter for MIXED
-        // int/float arrays only; for a pure-Int array (the overwhelmingly
-        // common case) both agree exactly. `rt_array_sum` already returns a
+        // (interpreter_method/collections.rs "sum") and `rt_array_sum`
+        // (runtime/src/value/collections.rs) both sum signed and unsigned
+        // ints into an Int and promote to a Float when any element is a
+        // float. A `[f64]`/`[f32]` receiver unboxes the result as F64 (HIR
+        // types it F64); every other receiver as I64. An I64 unbox of the
+        // boxed float read the handle as an int:
+        // doc/08_tracking/bug/compiled_float_array_sum_reads_boxed_float_as_int_2026-11-24.md
+        // `rt_array_sum` already returns a
         // TAG-BOXED int (`RuntimeValue::from_int`), matching what `d[k]`/
         // `.get(k)` return for an Int value, so reuse the same tag-boxing-
         // safe unbox helper `unbox_dict_read_result` (lowering_expr_struct.rs)
         // `get_or` introduced.
         if method == "sum" && args.is_empty() && self.receiver_is_array(receiver, receiver_local_ty) {
+            let float_elements = self
+                .type_registry
+                .and_then(|tr| {
+                    tr.get(receiver.ty)
+                        .or_else(|| receiver_local_ty.and_then(|ty| tr.get(ty)))
+                })
+                .is_some_and(|ty| matches!(ty, HirType::Array { element, .. } if matches!(*element, TypeId::F32 | TypeId::F64)));
+            let result_ty = if float_elements { TypeId::F64 } else { TypeId::I64 };
             let receiver_reg = self.lower_expr(receiver)?;
             let raw_result = self.with_func(|func, current_block| {
                 let dest = func.new_vreg();
@@ -786,7 +995,7 @@ impl<'a> MirLowerer<'a> {
                 });
                 dest
             })?;
-            return self.unbox_dict_read_result(raw_result, TypeId::I64);
+            return self.unbox_dict_read_result(raw_result, result_ty);
         }
 
         // `arr.max()` / `arr.min()` on an Array<T>: mirrors the interpreter's
@@ -879,13 +1088,9 @@ impl<'a> MirLowerer<'a> {
         // (codegen/runtime_sffi.rs) or wired to a dispatch arm, so it fell
         // through to `rt_method_not_found`. Returns a fresh array pointer —
         // no unboxing needed, matching the existing `"items" | "entries" =>
-        // Some(TypeId::ANY)` table entry in hir/lower/expr/mod.rs. Known
-        // divergence, documented not fixed: the interpreter's `entries`
-        // iterates in canonical sorted-by-key order
-        // (`dict_entries_sorted`); `rt_dict_entries` returns raw hashmap
-        // order (the SAME already-known `dict.keys()`/`dict.values()`
-        // ordering gap the audit doc calls out separately) — the result SET
-        // matches, the SEQUENCE does not.
+        // Some(TypeId::ANY)` table entry in hir/lower/expr/mod.rs. Both
+        // engines return entries in INSERTION order (`dict_entries_ordered` /
+        // `RuntimeDict` insertion stamps).
         // `items` was originally left out of this `if` (only `entries` was
         // checked) even though the HIR type-inference table above already
         // treats them as aliases — that gap is
@@ -1202,8 +1407,16 @@ impl<'a> MirLowerer<'a> {
             })?;
             self.finalize_block_jump(merge_id)?;
 
-            // merge: load the result.
+            // merge: load the result. When the receiver is a local binding,
+            // write the new array back into it: the interpreter's
+            // `var a = [1, 3]; a.insert(1, 2)` leaves `a == [1, 2, 3]`, so a
+            // statement-form insert must update the binding, not drop the
+            // spliced copy. doc/08_tracking/bug/jit_primitive_method_parity_gaps_2026-11-13.md
             self.set_current_block(merge_id)?;
+            let write_back_local = match &receiver.kind {
+                HirExprKind::Local(idx) => Some(*idx),
+                _ => None,
+            };
             return self.with_func(|func, current_block| {
                 let dest = func.new_vreg();
                 let block = func.block_mut(current_block).unwrap();
@@ -1212,6 +1425,16 @@ impl<'a> MirLowerer<'a> {
                     addr: temp_addr,
                     ty: receiver.ty,
                 });
+                if let Some(local_index) = write_back_local {
+                    let addr = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::LocalAddr { dest: addr, local_index });
+                    block.instructions.push(MirInst::Store {
+                        addr,
+                        value: dest,
+                        ty: receiver.ty,
+                    });
+                }
                 dest
             });
         }
@@ -1463,10 +1686,13 @@ impl<'a> MirLowerer<'a> {
                 return self.lower_builtin_call_expr(runtime_name, std::slice::from_ref(receiver), TypeId::STRING);
             }
 
-            // Preserve the canonical substring ABI: rt_slice(text, start, end, 1).
-            // The one-bound form obtains `end` from rt_len; the two-bound form
-            // forwards its explicit end. This is STRING-gated so a user type
-            // declaring `substring` remains a direct user-method call.
+            // Canonical substring ABI: rt_slice_text_bytes(text, start, end, 1),
+            // BYTE offsets (owner decision 2026-11-07). The one-bound form
+            // passes i64::MAX, which the runtime clamps to `byte_len()`
+            // (`rt_len` counts code points and would cut non-ASCII text
+            // short); the two-bound form forwards its explicit end. This is
+            // STRING-gated so a user type declaring `substring` remains a
+            // direct user-method call.
             if method == "substring" && matches!(args.len(), 1 | 2) {
                 let receiver_reg = self.lower_expr(receiver)?;
                 let start_reg = self.lower_expr(&args[0])?;
@@ -1475,11 +1701,10 @@ impl<'a> MirLowerer<'a> {
                 } else {
                     self.with_func(|func, current_block| {
                         let dest = func.new_vreg();
-                        func.block_mut(current_block).unwrap().instructions.push(MirInst::Call {
-                            dest: Some(dest),
-                            target: crate::mir::effects::CallTarget::from_name("rt_len"),
-                            args: vec![receiver_reg],
-                        });
+                        func.block_mut(current_block)
+                            .unwrap()
+                            .instructions
+                            .push(MirInst::ConstInt { dest, value: i64::MAX });
                         dest
                     })?
                 };
@@ -1495,7 +1720,7 @@ impl<'a> MirLowerer<'a> {
                     let dest = func.new_vreg();
                     func.block_mut(current_block).unwrap().instructions.push(MirInst::Call {
                         dest: Some(dest),
-                        target: crate::mir::effects::CallTarget::from_name("rt_slice"),
+                        target: crate::mir::effects::CallTarget::from_name("rt_slice_text_bytes"),
                         args: vec![receiver_reg, start_reg, end_reg, step_reg],
                     });
                     dest
@@ -1535,15 +1760,12 @@ impl<'a> MirLowerer<'a> {
                 };
                 let is_callable_field = field_ty == TypeId::ANY || field_signature.is_some();
                 if is_callable_field {
+                    // Declared only for a function-typed field; an `any` field
+                    // carries no signature at all.
+                    let signature_declared = field_signature.is_some();
                     let (param_types, return_type) =
                         field_signature.unwrap_or_else(|| (vec![TypeId::ANY; args.len()], TypeId::ANY));
-                    for (i, arg_reg) in arg_regs.iter_mut().enumerate() {
-                        if param_types.get(i).copied() == Some(TypeId::ANY) {
-                            if let Some(arg_expr) = args.get(i) {
-                                *arg_reg = self.box_arg_for_any_param(*arg_reg, arg_expr)?;
-                            }
-                        }
-                    }
+                    self.coerce_args_for_param_slots(&param_types, args, &mut arg_regs, false)?;
                     let owner_name = self
                         .type_registry
                         .and_then(|registry| registry.get_type_name(owner_ty))
@@ -1570,6 +1792,7 @@ impl<'a> MirLowerer<'a> {
                             return_type,
                             args: arg_regs.clone(),
                             effect: crate::mir::effects::Effect::Io,
+                            signature_declared,
                         });
                         dest
                     });
@@ -1645,6 +1868,22 @@ impl<'a> MirLowerer<'a> {
             });
         }
 
+        // A tuple `.len()` otherwise lowers to the undefined `Tuple.len`, which
+        // the JIT answered with -1 (a u64 loop bounded by it never ended).
+        // Bug: seed_jit_len_bound_proof_accepts_non_array_receiver_2026-11-27
+        if method == "len" && args.is_empty() && self.receiver_is_tuple(receiver, receiver_local_ty) {
+            return self.with_func(|func, current_block| {
+                let dest = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::Call {
+                    dest: Some(dest),
+                    target: crate::mir::effects::CallTarget::from_name("rt_tuple_len"),
+                    args: vec![receiver_reg],
+                });
+                dest
+            });
+        }
+
         // `first` / `last` / `pop` hand back an array SLOT verbatim, and array
         // slots hold tag-boxed values (`rt_value_int(v) == v << 3`). The generic
         // dotted-name path fed that tagged word straight into an int-typed VReg,
@@ -1711,6 +1950,11 @@ impl<'a> MirLowerer<'a> {
                     } else {
                         vec![receiver_reg]
                     };
+                    // A checked `.unwrap()` wrapping this accessor must see the
+                    // RAW slot: unboxing first turns an absent nil (word 3) into
+                    // the native 3 and a present native 3 into a nil, so the
+                    // unbox is deferred to the `rt_unwrap_or_trap` builtin site.
+                    let defer_unbox = std::mem::replace(&mut self.defer_accessor_unbox, false);
                     return self.with_func(|func, current_block| {
                         let raw_result = func.new_vreg();
                         let unboxed = func.new_vreg();
@@ -1720,6 +1964,9 @@ impl<'a> MirLowerer<'a> {
                             target: crate::mir::effects::CallTarget::from_name(rt_name),
                             args: call_args,
                         });
+                        if defer_unbox {
+                            return raw_result;
+                        }
                         if needs_int_unbox {
                             block.instructions.push(MirInst::UnboxInt {
                                 dest: unboxed,
@@ -1900,6 +2147,11 @@ impl<'a> MirLowerer<'a> {
                 matches!(push_arg_ty, TypeId::F32 | TypeId::F64) && !receiver_element_is_function;
             if push_arg_ty == TypeId::U64 {
                 arg_regs[0] = self.box_u64_runtime_value(arg_regs[0])?;
+            } else if needs_push_boxing && push_arg_ty == TypeId::BOOL {
+                // Array literals and index stores encode typed bools as the
+                // canonical tagged bool RuntimeValue. Keep push consistent;
+                // BoxInt would encode true/false as integer values instead.
+                arg_regs[0] = self.box_scalar_for_tagged_slot(TypeId::ANY, push_arg_ty, arg_regs[0])?;
             } else if needs_push_boxing || needs_push_float_boxing {
                 let raw_arg = arg_regs[0];
                 let use_float = needs_push_float_boxing;
@@ -1952,6 +2204,11 @@ impl<'a> MirLowerer<'a> {
             let needs_needle_float_boxing = matches!(needle_ty, TypeId::F32 | TypeId::F64);
             if needle_ty == TypeId::U64 {
                 arg_regs[0] = self.box_u64_runtime_value(arg_regs[0])?;
+            } else if needs_needle_int_boxing && needle_ty == TypeId::BOOL {
+                // `rt_index_of` compares the needle against tagged array
+                // values, so a typed bool uses the same canonical RuntimeValue
+                // tag as array literals and stores (never BoxInt).
+                arg_regs[0] = self.box_scalar_for_tagged_slot(TypeId::ANY, needle_ty, arg_regs[0])?;
             } else if needs_needle_int_boxing || needs_needle_float_boxing {
                 let raw_arg = arg_regs[0];
                 let use_float = needs_needle_float_boxing;
@@ -2074,6 +2331,32 @@ impl<'a> MirLowerer<'a> {
                 });
                 receiver_reg
             });
+        }
+
+        // Native scalar conversions must not enter nominal suffix-based method
+        // resolution: an unrelated enum method such as SdnValue.to_text can
+        // capture a primitive conversion in the native linker. HIR has already
+        // canonicalized aliases to their underlying primitive TypeId. Reuse
+        // the shared helper to retain each scalar's established representation.
+        if args.is_empty()
+            && matches!(method, "to_text" | "to_string" | "str")
+            && matches!(
+                receiver.ty,
+                TypeId::I8
+                    | TypeId::I16
+                    | TypeId::I32
+                    | TypeId::I64
+                    | TypeId::U8
+                    | TypeId::U16
+                    | TypeId::U32
+                    | TypeId::U64
+                    | TypeId::BOOL
+                    | TypeId::F32
+                    | TypeId::F64
+                    | TypeId::CHAR
+            )
+        {
+            return self.emit_to_string(receiver_reg, receiver.ty);
         }
 
         // Builtin primitive .to_string()/.to_text()/.str() routes to
@@ -2334,6 +2617,99 @@ impl<'a> MirLowerer<'a> {
             method.to_string()
         };
 
+        // A `void.`/`Any.` qualifier is erasure, not a nominal owner: an
+        // unresolvable field type (e.g. a module-private dict alias seen from
+        // an importer) reaches here typed VOID. Qualifying a builtin-collection
+        // name with it lets backend suffix recovery bind an unrelated user
+        // method (`AdaptiveMap.contains_key` on a dict handle -> SEGV). Emit
+        // the bare name so every backend takes the tag-dispatched builtin.
+        // doc/08_tracking/bug/stage2_lower_trait_alias_dict_dispatch_segv_2026-10-24.md
+        let func_name = match func_name.split_once('.') {
+            Some(("void" | "Any" | "any", bare))
+                if bare == method
+                    && crate::codegen::instr::closures_structs::is_bare_builtin_collection_method(method, args.len()) =>
+            {
+                bare.to_string()
+            }
+            _ => func_name,
+        };
+        // `impl Trait for text` registers its methods as `text.m` (or the
+        // `String`/`string` spelling), but the builtin receiver name for
+        // TypeId::STRING is `str`, so `s.m()` emitted `str.m` and the JIT
+        // failed with "Function 'str.m' not found". Prefer the user impl
+        // when `str.m` itself is not a declared function.
+        let func_name = match func_name.split_once('.') {
+            Some(("str", bare)) if bare == method && !self.function_param_types.contains_key(&func_name) => {
+                TEXT_HASH_OWNERS
+                    .iter()
+                    .filter(|owner| **owner != "str")
+                    .map(|owner| format!("{}.{}", owner, method))
+                    .find(|candidate| {
+                        self.function_param_types
+                            .get(candidate)
+                            .is_some_and(|params| method != "hash" || params.len() == args.len())
+                    })
+                    .unwrap_or(func_name)
+            }
+            Some(("Array", bare)) if bare == method && !self.function_param_types.contains_key(&func_name) => {
+                let candidate = format!("array.{}", method);
+                if self.function_param_types.contains_key(&candidate) {
+                    candidate
+                } else {
+                    func_name
+                }
+            }
+            _ => func_name,
+        };
+        let func_name = self.specialize_named_call(
+            &func_name,
+            args,
+            receiver_local_ty.or(Some(receiver.ty)),
+            generic_args,
+        );
+        let is_specialized_method = func_name.contains("$__spec_");
+
+        // A numeric cast on an erased receiver that THIS lowering just boxed
+        // (`(crc & 255).to_u8()` with an untyped `crc`: the `&` is computed raw,
+        // then BoxInt'd because HIR types it `Any`) is a cast of a known raw
+        // integer. Codegen types every BoxInt dest as I64, so its erased-cast
+        // decode (`rt_any_to_int`, gated on an ANY/unknown vreg type) skipped
+        // it and narrowed the TAGGED word: gzip footer bytes came out as
+        // `(v << 3) & 0xff`. Cast the BoxInt's raw source as an `i64` instead.
+        // Bug: doc/08_tracking/bug/seed_jit_untyped_to_u8_push_double_untag_2026-10-18.md
+        let mut func_name = func_name;
+        if args.is_empty()
+            && !func_name.contains('.')
+            && matches!(
+                method,
+                "to_u8"
+                    | "to_u16"
+                    | "to_u32"
+                    | "to_u64"
+                    | "to_i8"
+                    | "to_i16"
+                    | "to_i32"
+                    | "to_i64"
+                    | "to_int"
+                    | "to_f32"
+                    | "to_f64"
+                    | "to_float"
+            )
+        {
+            let boxed_source = self.with_func(|func, current_block| {
+                func.block(current_block).and_then(|block| {
+                    block.instructions.iter().rev().find_map(|inst| match inst {
+                        MirInst::BoxInt { dest, value } if *dest == receiver_reg => Some(*value),
+                        _ => None,
+                    })
+                })
+            })?;
+            if let Some(raw) = boxed_source {
+                receiver_reg = raw;
+                func_name = format!("i64.{}", method);
+            }
+        }
+
         match dispatch {
             DispatchMode::Dynamic => {
                 // Try to find the method in a registered trait (vtable dispatch).
@@ -2343,15 +2719,29 @@ impl<'a> MirLowerer<'a> {
                 // get static dispatch instead of a bogus vtable load.
                 let recv_type_name: Option<&str> = func_name.rsplit_once('.').map(|(ty, _)| ty);
                 let declared_dispatch = match &receiver.kind {
-                    crate::hir::HirExprKind::Local(index) => self.local_trait_dispatch.get(index),
+                    crate::hir::HirExprKind::Local(index) => self.local_trait_dispatch.get(index).cloned(),
                     _ => None,
                 };
-                let trait_lookup = if let Some(dispatch) = declared_dispatch {
+                let trait_lookup = if is_specialized_method {
+                    None
+                } else if let Some(dispatch) = declared_dispatch.as_ref() {
                     let info = &dispatch.info;
                     // This signature was captured from the exact declaration
                     // owner, not re-resolved through a colliding bare name.
-                    info.get_method(method).filter(|sig| sig.param_types.len() == args.len())
-                        .map(|sig| (sig.vtable_slot, sig.param_types.clone(), sig.return_type))
+                    // A trait nothing in the unit implements puts no vtable on
+                    // any object. If exactly ONE class conforms to it
+                    // structurally (no `with`), the by-name bind below names
+                    // the only possible receiver class; take it instead of a
+                    // vtable load that such an object cannot satisfy. With
+                    // several such classes the vtable call stays (a bare name
+                    // would be refused as ambiguous), and the JIT guards it
+                    // (compile_method_call_virtual).
+                    let duck_conformed = !self.trait_has_implementation(&info.name)
+                        && self.structural_trait_conformers(info, recv_type_name).len() == 1;
+                    info.get_method(method).filter(|sig| sig.param_types.len() == args.len()).map(|sig| {
+                        let slot = if duck_conformed { crate::mir::DUCK_DISPATCH_UNSUPPORTED_SLOT } else { sig.vtable_slot };
+                        (slot, sig.param_types.clone(), sig.return_type)
+                    })
                 } else {
                     self.find_trait_for_method_on_receiver(method, recv_type_name, args.len())
                 };
@@ -2384,11 +2774,49 @@ impl<'a> MirLowerer<'a> {
                     .as_ref()
                     .is_some_and(|(slot, _, _)| *slot == crate::mir::DUCK_DISPATCH_UNSUPPORTED_SLOT)
                 {
-                    let bare = method.to_string();
+                    let mut bare = method.to_string();
+                    // When SEVERAL classes in the unit declare a method of
+                    // this name, the bare call is ambiguous and codegen
+                    // refuses the whole function
+                    // (`[CODEGEN-AMBIGUOUS-METHOD]`). But the receiver is
+                    // statically the trait, and a class can only stand in for
+                    // it if it provides EVERY method the trait declares; one
+                    // that merely shares this method name is not a candidate.
+                    //   - exactly one conforming class: bind it;
+                    //   - none or several: left bare, i.e. the compile-time
+                    //     refusal stays. With no conformer the call is dead in
+                    //     a fully linked unit, but turning it into a run-time
+                    //     "method not found" would be wrong the day an object
+                    //     of a conforming class defined OUTSIDE the unit can
+                    //     reach this code, and there is no by-name run-time
+                    //     method dispatch to send it to.
+                    // A single same-named class keeps the historical bind.
+                    // The trait is the receiver's static type when that is
+                    // known; a trait-typed FIELD erases to ANY, and then it is
+                    // the one trait in the unit declaring this method.
+                    let receiver_trait = declared_dispatch.as_ref().map(|dispatch| &dispatch.info).or_else(|| self.trait_infos.and_then(|infos| {
+                        recv_type_name.and_then(|name| infos.get(name)).or_else(|| {
+                            let mut declaring = infos.values().filter(|info| {
+                                info.get_method(method)
+                                    .is_some_and(|sig| sig.param_types.len() == args.len())
+                            });
+                            match (declaring.next(), declaring.next()) {
+                                (Some(only), None) => Some(only),
+                                _ => None,
+                            }
+                        })
+                    }));
+                    if let Some(trait_info) = receiver_trait {
+                        if self.method_owners(method, recv_type_name).len() > 1 {
+                            if let [only] = self.structural_trait_conformers(trait_info, recv_type_name).as_slice() {
+                                bare = format!("{only}.{method}");
+                            }
+                        }
+                    }
                     if std::env::var("SIMPLE_DEBUG_METHOD_DISPATCH").is_ok() {
                         eprintln!(
-                            "[MIR-METHOD-DISPATCH] '{}' on impl-less trait receiver: erased bare-name dispatch (was duck-dispatch trap)",
-                            method
+                            "[MIR-METHOD-DISPATCH] '{}' on impl-less trait receiver: erased dispatch to '{}' (was duck-dispatch trap)",
+                            method, bare
                         );
                     }
                     self.box_method_args_for_any_params(&bare, args, &mut arg_regs)?;
@@ -2412,6 +2840,7 @@ impl<'a> MirLowerer<'a> {
                             method, vtable_slot
                         );
                     }
+                    self.coerce_args_for_param_slots(&param_types, args, &mut arg_regs, false)?;
                     let dest = self.with_func(|func, current_block| {
                         let dest = func.new_vreg();
                         let block = func.block_mut(current_block).unwrap();
@@ -2532,18 +2961,155 @@ mod enum_discriminant_abi_tests {
         );
     }
 
-    /// TRUE-POSITIVE CONTROL for the numeric disagreement with the MIR `.spl`
-    /// lowering, which uses the DECLARED ORDINAL (first variant = 0). The seed
-    /// returns a 32-bit hash, so the two engines disagree numerically even for
-    /// enums that do not collide at all. Pinned so the divergence cannot be
-    /// quietly claimed to be resolved.
+    /// The builtin Result/Option discriminants now AGREE with the MIR `.spl`
+    /// lowering's DECLARED ORDINAL (`Ok`/`Some` = 0, `Err`/`None` = 1), closing
+    /// enum_discriminant_convention_split_hashed_seed_vs_positional_pure_simple_2026-08-08.
+    /// User variants remain name-derived in the seed (no enum order at every
+    /// lowering site) and must never alias the builtin slots.
     #[test]
-    fn seed_discriminant_is_a_hash_not_the_declared_ordinal() {
-        // `Ok` is the FIRST variant of Result, so the MIR lowering assigns it
-        // 0 and `Err` 1. The seed assigns neither.
-        assert_ne!(MirLowerer::enum_variant_discriminant("Ok"), 0);
-        assert_ne!(MirLowerer::enum_variant_discriminant("Err"), 1);
-        // Well above any plausible ordinal, i.e. unmistakably a hash.
-        assert!(MirLowerer::enum_variant_discriminant("Ok") > i64::from(u16::MAX));
+    fn seed_builtin_discriminants_are_the_declared_ordinal() {
+        assert_eq!(MirLowerer::enum_variant_discriminant("Ok"), 0);
+        assert_eq!(MirLowerer::enum_variant_discriminant("Err"), 1);
+        assert_eq!(MirLowerer::enum_variant_discriminant("Some"), 0);
+        assert_eq!(MirLowerer::enum_variant_discriminant("None"), 1);
+        assert!(MirLowerer::enum_variant_discriminant("Circle") > 1);
+    }
+}
+
+impl<'a> MirLowerer<'a> {
+    /// `Dict.get(k)` on a typed `Dict<K, V>`: a canonical `Option`
+    /// (`Some(v)` on a hit, `None` on a miss), built from the
+    /// existing `rt_dict_contains` / `rt_dict_get` runtime pair so a stored
+    /// value equal to the nil sentinel is still present
+    /// (jit_dict_get_option_presence_in_string_interp_2026-11-03).
+    fn lower_dict_get_option(&mut self, dict: VReg, key: VReg, value_ty: TypeId) -> MirLowerResult<VReg> {
+        use crate::mir::effects::{CallTarget, LocalKind};
+        use crate::mir::function::MirLocal;
+
+        let slot = self.with_func(|func, _| {
+            let index = func.params.len() + func.locals.len();
+            func.locals.push(MirLocal {
+                name: format!("$dict_get_option_{}", index),
+                ty: TypeId::ANY,
+                kind: LocalKind::Local,
+                is_ghost: false,
+            });
+            index
+        })?;
+        let (slot_addr, present) = self.with_func(|func, current_block| {
+            let addr = func.new_vreg();
+            let present = func.new_vreg();
+            let block = func.block_mut(current_block).unwrap();
+            block.instructions.push(MirInst::LocalAddr {
+                dest: addr,
+                local_index: slot,
+            });
+            block.instructions.push(MirInst::Call {
+                dest: Some(present),
+                target: CallTarget::from_name("rt_dict_contains"),
+                args: vec![dict, key],
+            });
+            (addr, present)
+        })?;
+        let (hit_id, miss_id, merge_id) = self.with_func(|func, current_block| {
+            let hit_id = func.new_block();
+            let miss_id = func.new_block();
+            let merge_id = func.new_block();
+            let block = func.block_mut(current_block).unwrap();
+            block.terminator = crate::mir::Terminator::Branch {
+                cond: present,
+                then_block: hit_id,
+                else_block: miss_id,
+            };
+            (hit_id, miss_id, merge_id)
+        })?;
+
+        self.set_current_block(hit_id)?;
+        let stored = self.with_func(|func, current_block| {
+            let stored = func.new_vreg();
+            let block = func.block_mut(current_block).unwrap();
+            block.instructions.push(MirInst::Call {
+                dest: Some(stored),
+                target: CallTarget::from_name("rt_dict_get"),
+                args: vec![dict, key],
+            });
+            stored
+        })?;
+        // Decode the stored word to V's native form exactly as `d[k]` does
+        // (lower_index_expr), then box it the way `Some(v)` boxes a V payload,
+        // so the Option matches what every Option consumer expects.
+        let decoded = if matches!(
+            value_ty,
+            TypeId::I8
+                | TypeId::I16
+                | TypeId::I32
+                | TypeId::I64
+                | TypeId::U8
+                | TypeId::U16
+                | TypeId::U32
+                | TypeId::BOOL
+        ) {
+            self.with_func(|func, current_block| {
+                let unboxed = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::UnboxInt {
+                    dest: unboxed,
+                    value: stored,
+                });
+                unboxed
+            })?
+        } else if matches!(value_ty, TypeId::F32 | TypeId::F64) {
+            self.with_func(|func, current_block| {
+                let unboxed = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::UnboxFloat {
+                    dest: unboxed,
+                    value: stored,
+                });
+                unboxed
+            })?
+        } else {
+            stored
+        };
+        let payload = self.box_enum_payload_if_needed(decoded, value_ty)?;
+        self.with_func(|func, current_block| {
+            let some = func.new_vreg();
+            let block = func.block_mut(current_block).unwrap();
+            block.instructions.push(MirInst::OptionSome {
+                dest: some,
+                value: payload,
+            });
+            block.instructions.push(MirInst::Store {
+                addr: slot_addr,
+                value: some,
+                ty: TypeId::ANY,
+            });
+        })?;
+        self.finalize_block_jump(merge_id)?;
+
+        self.set_current_block(miss_id)?;
+        self.with_func(|func, current_block| {
+            let none = func.new_vreg();
+            let block = func.block_mut(current_block).unwrap();
+            block.instructions.push(MirInst::OptionNone { dest: none });
+            block.instructions.push(MirInst::Store {
+                addr: slot_addr,
+                value: none,
+                ty: TypeId::ANY,
+            });
+        })?;
+        self.finalize_block_jump(merge_id)?;
+
+        self.set_current_block(merge_id)?;
+        self.with_func(|func, current_block| {
+            let dest = func.new_vreg();
+            let block = func.block_mut(current_block).unwrap();
+            block.instructions.push(MirInst::Load {
+                dest,
+                addr: slot_addr,
+                ty: TypeId::ANY,
+            });
+            dest
+        })
     }
 }

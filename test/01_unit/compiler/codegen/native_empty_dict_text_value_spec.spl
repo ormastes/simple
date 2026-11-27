@@ -1,0 +1,39 @@
+# @tag:in-development (native example needs a stage3 native-build producer; verification pending)
+# @req REQ-SSPEC-COMPILER
+"""
+Native-build: a text stored into an empty-literal `{}` dict must read back and
+compare correctly (bug native_empty_dict_text_value_sigsegv_2026-07-20).
+The interpreter is unaffected, so the native example shells out to native-build.
+Fix site: note_container_elem_type (50.mir/_MirLoweringExpr/expr_dispatch.spl)
+records the str value type so the read decodes via rt_interp_cstr.
+Repro: bin/simple native-build --entry repro.spl -o repro; ./repro (expect rc 30).
+"""
+use std.spec.*
+use std.io_runtime.{file_write, process_run, env_get}
+
+val REPRO: text = ("fn main() -> i64:\n" +
+    "    var d = {}\n" +
+    "    d[\"k\"] = \"hi\"\n" +
+    "    if d[\"k\"] == \"hi\":\n" +
+    "        return 30\n" +
+    "    return 40\n")
+
+describe "text value in an empty-literal dict":
+    it "reads back equal in the interpreter":
+        var d = {}
+        d["k"] = "hi"
+        expect(d["k"] == "hi").to_equal(true)
+
+    it "reads back equal under native-build (exit code 30, not SIGSEGV)":
+        val dir = "build/test-artifacts/native_empty_dict_text"
+        val src = dir + "/repro.spl"
+        val out_bin = dir + "/repro.bin"
+        var bin = env_get("SIMPLE_BIN")
+        if bin == "":
+            bin = "bin/simple"
+        process_run("sh", ["-c", "mkdir -p " + dir + " && rm -f " + out_bin])
+        file_write(src, REPRO)
+        val cmd = (bin + " native-build --source " + dir + " --entry " + src + " -o " + out_bin +
+            " >/dev/null 2>&1; test -x " + out_bin + " && { ./" + out_bin + "; echo rc=$?; } || echo BUILD-FAILED")
+        val out = process_run("sh", ["-c", cmd])
+        expect(out.0).to_contain("rc=30")

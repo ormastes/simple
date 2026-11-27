@@ -1,0 +1,134 @@
+"""
+# ScriptRunner & Page Script DOM + Storage Native Bridge Specification
+
+Covers OtherFix-10 (#75): projects `BeDomNode` trees and `BrowserStorage` into
+`JsRuntime` host objects with real `document.getElementById`,
+`document.querySelector`, `document.querySelectorAll`, `document.createElement`,
+`document.createTextNode`, element attribute/classList/style/tree APIs, event
+listener methods, and `localStorage` / `sessionStorage` native methods.
+"""
+use std.spec.*
+use std.spec.step
+use std.gc_async_mut.gpu.browser_engine.dom.{BeDomNode}
+use std.gc_async_mut.gpu.browser_engine.script.storage_api.{storage_set_item}
+use std.gc_async_mut.gpu.browser_engine.script.script_runner.{
+    ScriptRunner,
+    run_page_scripts_with_dom,
+    run_script_with_type,
+    script_runner_dom_dirty
+}
+
+fn _build_sample_dom() -> BeDomNode:
+    var doc = BeDomNode.document()
+    var html = BeDomNode.element("html")
+    var body = BeDomNode.element("body")
+
+    var main = BeDomNode.element("div")
+    main.set_attr("id", "main")
+    main.set_attr("class", "card")
+    main.set_attr("data-role", "hero")
+    main.set_style("display", "block")
+
+    var lbl = BeDomNode.element("span")
+    lbl.set_attr("class", "label")
+    var lbl_txt = BeDomNode.text("Hello")
+    lbl.children.push(lbl_txt)
+
+    var note = BeDomNode.element("p")
+    note.set_attr("class", "note")
+    var note_txt = BeDomNode.text("World")
+    note.children.push(note_txt)
+
+    main.children.push(lbl)
+    main.children.push(note)
+    body.children.push(main)
+    html.children.push(body)
+    doc.children.push(html)
+    doc
+
+fn _build_seeded_dom() -> BeDomNode:
+    var doc = BeDomNode.document()
+    var body = BeDomNode.element("body")
+    var seeded = BeDomNode.element("div")
+    seeded.set_attr("id", "seeded-el")
+    seeded.children.push(BeDomNode.text("Seeded"))
+    body.children.push(seeded)
+    doc.children.push(body)
+    doc
+
+describe "run_page_scripts_with_dom BeDomNode projection":
+    it "looks up projected BeDomNode elements via getElementById, querySelector, and querySelectorAll":
+        step("Query projected elements by id, descendant selector, and selector list")
+        val dom = _build_sample_dom()
+        val r = run_page_scripts_with_dom(dom, [
+            "document.getElementById('main').tagName",
+            "document.getElementById('main').getAttribute('data-role')",
+            "document.getElementById('main').hasAttribute('data-role')",
+            "document.getElementById('main').style.getPropertyValue('display')",
+            "document.querySelector('.card .label').textContent",
+            "document.querySelectorAll('span, p').length",
+            "document.getElementById('missing') === null"
+        ])
+        expect(r[0]).to_equal("DIV")
+        expect(r[1]).to_equal("hero")
+        expect(r[2]).to_equal("true")
+        expect(r[3]).to_equal("block")
+        expect(r[4]).to_equal("Hello")
+        expect(r[5]).to_equal("2.0")
+        expect(r[6]).to_equal("true")
+
+    it "supports createElement, createTextNode, attributes, classList, style, appendChild, and removeChild":
+        step("Mutate DOM tree via JS DOM bridge and verify queries reflect changes")
+        val dom = _build_sample_dom()
+        val r = run_page_scripts_with_dom(dom, [
+            "var s = document.createElement('section'); s.setAttribute('id', 'added'); s.setAttribute('data-x', '42'); s.classList.add('alpha'); s.classList.toggle('beta'); s.style.setProperty('width', '120px'); var t = document.createTextNode('NewText'); s.appendChild(t); document.body.appendChild(s); document.getElementById('added').textContent",
+            "document.getElementById('added').getAttribute('data-x')",
+            "document.getElementById('added').removeAttribute('data-x'); document.getElementById('added').hasAttribute('data-x')",
+            "document.getElementById('added').classList.contains('alpha')",
+            "document.getElementById('added').classList.toggle('beta'); document.getElementById('added').classList.contains('beta')",
+            "document.getElementById('added').style.removeProperty('width')",
+            "document.getElementById('added').style.getPropertyValue('width')",
+            "var added = document.getElementById('added'); document.body.removeChild(added); document.getElementById('added') === null"
+        ])
+        expect(r[0]).to_equal("NewText")
+        expect(r[1]).to_equal("42")
+        expect(r[2]).to_equal("false")
+        expect(r[3]).to_equal("true")
+        expect(r[4]).to_equal("false")
+        expect(r[5]).to_equal("120px")
+        expect(r[6]).to_equal("")
+        expect(r[7]).to_equal("true")
+
+    it "supports EventTarget addEventListener, removeEventListener, and dispatchEvent on DOM nodes":
+        step("Register, remove, and dispatch DOM event target methods without error")
+        val dom = _build_sample_dom()
+        val r = run_page_scripts_with_dom(dom, [
+            "var el = document.getElementById('main'); var fn1 = function() { return 1; }; el.addEventListener('click', fn1); var r1 = typeof el.addEventListener; var r2 = typeof el.removeEventListener; var r3 = String(el.dispatchEvent('click')); el.removeEventListener('click', fn1); r1 + '|' + r2 + '|' + r3"
+        ])
+        expect(r[0]).to_equal("function|function|false")
+
+describe "ScriptRunner run_script_with_type DOM and localStorage bridge":
+    it "exposes runner dom_root and persistent storage through run_script_with_type":
+        step("Run JS via ScriptRunner and verify DOM, persistent localStorage, and dirty flag")
+        var runner = ScriptRunner.new()
+        runner.dom_root = _build_seeded_dom()
+        runner.storage = storage_set_item(runner.storage, "seeded", "ok")
+
+        val txt = run_script_with_type(runner, "document.getElementById('seeded-el').textContent", "text/javascript")
+        expect(txt).to_equal("Seeded")
+        expect(script_runner_dom_dirty(runner)).to_equal(true)
+
+        val seeded_val = run_script_with_type(runner, "localStorage.getItem('seeded')", "text/javascript")
+        expect(seeded_val).to_equal("ok")
+
+        val stored_new = run_script_with_type(runner, "localStorage.setItem('newk', 'newv'); localStorage.getItem('newk')", "text/javascript")
+        expect(stored_new).to_equal("newv")
+
+        val len_and_key = run_script_with_type(runner, "localStorage.length + ':' + localStorage.key(0)", "text/javascript")
+        expect(len_and_key).to_equal("2:seeded")
+
+        val after_remove = run_script_with_type(runner, "localStorage.removeItem('seeded'); localStorage.length + ':' + localStorage.key(0)", "text/javascript")
+        expect(after_remove).to_equal("1:newk")
+
+        val cleared = run_script_with_type(runner, "localStorage.clear(); localStorage.length", "text/javascript")
+        expect(cleared).to_equal("0.0")

@@ -89,7 +89,29 @@ cp "${repo_root}/scripts/lib/host-executable.shs" .simple-host-executable.shs
 # explicit export), so that hazard no longer exists independent of the
 # exe-suffix guard below. Wrapper generation below is the part Windows
 # actually needs from this script and is unaffected either way.
+# A slot holding the BOOTSTRAP cli (`simple-bootstrap`, compile/native-build
+# only) must never become bin/simple: `bin/simple test` then fails with
+# "unknown command 'test'" (macos_test_runner_blocked_inline_unsafe_and_wrong_deploy_slot_2026-08-31).
+release_simple_is_bootstrap_cli=0
 if [ -x "release/${PLATFORM_TRIPLE}/simple" ]; then
+  case "$("release/${PLATFORM_TRIPLE}/simple" --version 2>/dev/null | head -1)" in
+    simple-bootstrap*)
+      release_simple_is_bootstrap_cli=1
+      _action="leaving bin/simple unchanged"
+      if [ -L simple ]; then
+        existing_simple_target=$(readlink simple 2>/dev/null || printf '')
+        case "${existing_simple_target}" in
+          "release/${PLATFORM_TRIPLE}/simple"|"release/${PLATFORM_TRIPLE}/launcher.simple")
+            rm -f simple
+            _action="removed stale bin/simple link"
+            ;;
+        esac
+      fi
+      echo "setup: release/${PLATFORM_TRIPLE}/simple is the bootstrap CLI, not the full CLI; ${_action} (redeploy Stage 4)" >&2
+      ;;
+  esac
+fi
+if [ -x "release/${PLATFORM_TRIPLE}/simple" ] && [ "${release_simple_is_bootstrap_cli}" -eq 0 ]; then
   ln -sf "release/${PLATFORM_TRIPLE}/simple" simple
 
   if [ -x "release/${PLATFORM_TRIPLE}/simple_seed" ]; then
@@ -432,7 +454,7 @@ if [ "$#" -eq 1 ] && [ "$1" = "--json" ]; then
   exit 0
 fi
 
-_LSP_MCP_PROBE_WRAPPER_VERSION="simple_lsp_mcp_server:0.9.14-declared-symbol-probe"
+_LSP_MCP_PROBE_WRAPPER_VERSION="simple_lsp_mcp_server:0.9.15-declared-symbol-visibility-probe"
 
 _lsp_mcp_probe_identity() {
   awk 'NR == 1 { print $1 }' "$1.sha256" 2>/dev/null || printf ''
@@ -481,7 +503,7 @@ mcp_probe_lsp_native() {
   printf '%s\n%s\n%s\n' \
     '{"jsonrpc":"2.0","id":"1","method":"initialize","params":{"protocolVersion":"2025-06-18","capabilities":{},"clientInfo":{"name":"wrapper-probe","version":"1"}}}' \
     '{"jsonrpc":"2.0","id":"2","method":"tools/list","params":{}}' \
-    '{"jsonrpc":"2.0","id":"3","method":"tools/call","params":{"name":"lsp_symbols","arguments":{"file":"src/app/simple_lsp_mcp/main.spl"}}}' \
+    '{"jsonrpc":"2.0","id":"3","method":"tools/call","params":{"name":"lsp_symbols","arguments":{"file":"src/app/simple_lsp_mcp/main.spl","visibility":"all"}}}' \
     | probe_timeout "${SIMPLE_LSP_MCP_NATIVE_PROBE_TIMEOUT:-30}" "${probe_native}" >"${probe_tmp}" 2>>"${log_dir}/simple_lsp_mcp_stderr.log" || probe_status=$?
   if [ "${probe_status}" -eq 0 ] \
     && grep -q '"id":"1".*"result"' "${probe_tmp}" \
@@ -514,9 +536,11 @@ if [ -n "${SIMPLE_LSP_MCP_NATIVE:-}" ]; then
   fi
 else
   for candidate in \
-    "${script_dir}/release/aarch64-apple-darwin/simple_lsp_mcp_server" \
-    "${script_dir}/release/x86_64-apple-darwin/simple_lsp_mcp_server" \
     "${script_dir}/release/${platform_dir}/simple_lsp_mcp_server${exe_suffix}" \
+    "${script_dir}/release/aarch64-apple-darwin-macho/simple_lsp_mcp_server" \
+    "${script_dir}/release/aarch64-apple-darwin/simple_lsp_mcp_server" \
+    "${script_dir}/release/x86_64-apple-darwin-macho/simple_lsp_mcp_server" \
+    "${script_dir}/release/x86_64-apple-darwin/simple_lsp_mcp_server" \
     "${script_dir}/release/aarch64-unknown-linux-gnu/simple_lsp_mcp_server" \
     "${script_dir}/release/linux-x86_64/simple_lsp_mcp_server" \
     "${script_dir}/release/x86_64-pc-windows-msvc/simple_lsp_mcp_server.exe" \
@@ -612,9 +636,11 @@ if [ -n "${T32_MCP_NATIVE:-}" ]; then
   fi
 else
   for candidate in \
-    "${script_dir}/release/aarch64-apple-darwin/t32_mcp_server" \
-    "${script_dir}/release/x86_64-apple-darwin/t32_mcp_server" \
     "${script_dir}/release/${platform_dir}/t32_mcp_server${exe_suffix}" \
+    "${script_dir}/release/aarch64-apple-darwin-macho/t32_mcp_server" \
+    "${script_dir}/release/aarch64-apple-darwin/t32_mcp_server" \
+    "${script_dir}/release/x86_64-apple-darwin-macho/t32_mcp_server" \
+    "${script_dir}/release/x86_64-apple-darwin/t32_mcp_server" \
     "${script_dir}/release/aarch64-unknown-linux-gnu/t32_mcp_server" \
     "${script_dir}/release/linux-x86_64/t32_mcp_server"
   do
@@ -630,36 +656,15 @@ if [ -n "${native}" ] && [ -x "${native}" ]; then
   exec "${native}" "$@" 2>>"${log_dir}/t32_mcp_stderr.log"
 fi
 
-# No admitted native artifact: run the real frontend from source through the
-# deployed runtime, exactly as bin/t32_mcp_server.cmd already does on Windows.
-# This is NOT a stub server -- it is the same t32_mcp/main.spl the native build
-# compiles, so every tool answers for real. Without this branch a POSIX host
-# with no native artifact exits 127 and MCP clients report ENOENT/closed, which
-# is what .mcp.json's t32-mcp note records as fixed on 2026-09-24.
-runtime="${SIMPLE_BINARY:-${repo_root}/bin/simple${exe_suffix}}"
-tools_dir="${repo_root}/examples/10_tooling/trace32_tools"
-entry="${tools_dir}/t32_mcp/main.spl"
-if [ ! -x "${runtime}" ] || [ ! -f "${entry}" ]; then
-  {
-    printf '%s\n' "error: no native t32_mcp_server and no usable source fallback"
-    printf '%s\n' "checked release directory: ${script_dir}/release"
-    printf '%s\n' "platform: ${platform_dir}"
-    printf '%s\n' "runtime: ${runtime}"
-    printf '%s\n' "entry: ${entry}"
-    printf '%s\n' "hint: rebuild with native-build for examples/10_tooling/trace32_tools/t32_mcp/main.spl"
-  } >&2
-  exit 127
-fi
-SIMPLE_LIB="${SIMPLE_LIB:-${tools_dir}}"
-SIMPLE_LOG="${SIMPLE_LOG:-error}"
-RUST_LOG="${RUST_LOG:-error}"
-SIMPLE_MEMORY_LIMIT_MB="${SIMPLE_MEMORY_LIMIT_MB:-512}"
-# The seed wall-clock-kills any entry under examples/ after 10s
-# (driver/src/cli/examples_safety.rs); a long-lived stdio server must opt out.
-SIMPLE_TIMEOUT_SECONDS=0
-export SIMPLE_LIB SIMPLE_LOG RUST_LOG SIMPLE_MEMORY_LIMIT_MB SIMPLE_TIMEOUT_SECONDS
-printf 'startup wrapper=t32_mcp_server mode=source entry=%s runtime=%s cwd=%s\n' "${entry}" "${runtime}" "$(pwd)" >>"${log_dir}/t32_mcp_startup.log"
-exec "${runtime}" "${entry}" "$@" 2>>"${log_dir}/t32_mcp_stderr.log"
+# No admitted native artifact: refuse. Cached-artifact-only contract — never
+# fall back to a raw-source launch; build the native artifact instead.
+{
+  printf '%s\n' "error: no admitted native t32_mcp_server (artifact missing or failed hash admission)"
+  printf '%s\n' "checked release directory: ${script_dir}/release"
+  printf '%s\n' "platform: ${platform_dir}"
+  printf '%s\n' "hint: rebuild with native-build for examples/10_tooling/trace32_tools/t32_mcp/main.spl"
+} >&2
+exit 127
 EOF
 chmod +x t32_mcp_server
 
@@ -725,9 +730,11 @@ if [ -n "${T32_LSP_MCP_NATIVE:-}" ]; then
   fi
 else
   for candidate in \
-    "${script_dir}/release/aarch64-apple-darwin/t32_lsp_mcp_server" \
-    "${script_dir}/release/x86_64-apple-darwin/t32_lsp_mcp_server" \
     "${script_dir}/release/${platform_dir}/t32_lsp_mcp_server${exe_suffix}" \
+    "${script_dir}/release/aarch64-apple-darwin-macho/t32_lsp_mcp_server" \
+    "${script_dir}/release/aarch64-apple-darwin/t32_lsp_mcp_server" \
+    "${script_dir}/release/x86_64-apple-darwin-macho/t32_lsp_mcp_server" \
+    "${script_dir}/release/x86_64-apple-darwin/t32_lsp_mcp_server" \
     "${script_dir}/release/aarch64-unknown-linux-gnu/t32_lsp_mcp_server" \
     "${script_dir}/release/linux-x86_64/t32_lsp_mcp_server"
   do
@@ -743,38 +750,21 @@ if [ -n "${native}" ] && [ -x "${native}" ]; then
   exec "${native}" "$@" 2>>"${log_dir}/t32_lsp_mcp_stderr.log"
 fi
 
-# Source fallback, mirroring bin/t32_lsp_mcp_server.cmd -- see the twin comment
-# in t32_mcp_server above. Same real frontend, no stub.
-runtime="${SIMPLE_BINARY:-${repo_root}/bin/simple${exe_suffix}}"
-tools_dir="${repo_root}/examples/10_tooling/trace32_tools"
-entry="${tools_dir}/t32_lsp_mcp/main.spl"
-if [ ! -x "${runtime}" ] || [ ! -f "${entry}" ]; then
-  {
-    printf '%s\n' "error: no native t32_lsp_mcp_server and no usable source fallback"
-    printf '%s\n' "checked release directory: ${script_dir}/release"
-    printf '%s\n' "platform: ${platform_dir}"
-    printf '%s\n' "runtime: ${runtime}"
-    printf '%s\n' "entry: ${entry}"
-    printf '%s\n' "hint: rebuild with native-build for examples/10_tooling/trace32_tools/t32_lsp_mcp/main.spl"
-  } >&2
-  exit 127
-fi
-SIMPLE_LIB="${SIMPLE_LIB:-${tools_dir}}"
-SIMPLE_LOG="${SIMPLE_LOG:-error}"
-RUST_LOG="${RUST_LOG:-error}"
-SIMPLE_MEMORY_LIMIT_MB="${SIMPLE_MEMORY_LIMIT_MB:-512}"
-T32_LSP_MCP_TOOL_RUNNER="${T32_LSP_MCP_TOOL_RUNNER:-examples/10_tooling/trace32_tools/t32_lsp_mcp/tool_runner.spl}"
-T32_LSP_MCP_TOOL_DAEMON="${T32_LSP_MCP_TOOL_DAEMON:-examples/10_tooling/trace32_tools/cmm_lsp/mcp_daemon.spl}"
-T32_LSP_MCP_TOOL_DAEMON_DIR="${T32_LSP_MCP_TOOL_DAEMON_DIR:-${TMPDIR:-/tmp}/t32_lsp_mcp_shared}"
-SIMPLE_TIMEOUT_SECONDS=0
-export SIMPLE_LIB SIMPLE_LOG RUST_LOG SIMPLE_MEMORY_LIMIT_MB SIMPLE_TIMEOUT_SECONDS
-export T32_LSP_MCP_TOOL_RUNNER T32_LSP_MCP_TOOL_DAEMON T32_LSP_MCP_TOOL_DAEMON_DIR
-printf 'startup wrapper=t32_lsp_mcp_server mode=source entry=%s runtime=%s cwd=%s\n' "${entry}" "${runtime}" "$(pwd)" >>"${log_dir}/t32_lsp_mcp_startup.log"
-exec "${runtime}" "${entry}" "$@" 2>>"${log_dir}/t32_lsp_mcp_stderr.log"
+# No admitted native artifact: refuse. Cached-artifact-only contract — never
+# fall back to a raw-source launch; build the native artifact instead.
+{
+  printf '%s\n' "error: no admitted native t32_lsp_mcp_server (artifact missing or failed hash admission)"
+  printf '%s\n' "checked release directory: ${script_dir}/release"
+  printf '%s\n' "platform: ${platform_dir}"
+  printf '%s\n' "hint: rebuild with native-build for examples/10_tooling/trace32_tools/t32_lsp_mcp/main.spl"
+} >&2
+exit 127
 EOF
 chmod +x t32_lsp_mcp_server
 
-echo "setup: bin/simple -> release/${PLATFORM_TRIPLE}/simple"
+if [ -x "release/${PLATFORM_TRIPLE}/simple" ] && [ "${release_simple_is_bootstrap_cli}" -eq 0 ]; then
+  echo "setup: bin/simple -> release/${PLATFORM_TRIPLE}/simple"
+fi
 
 # Staleness report (BUG-IT-1, 2026-10-10). On Windows `bin/simple.exe` is a
 # git-TRACKED binary, so a fresh worktree gets whatever bytes were last
@@ -793,9 +783,16 @@ case "${deployed_verdict}" in
     ;;
 esac
 
+sh "${repo_root}/scripts/setup/build-seed.shs" --check >&2 || echo "setup:   seed stale/unknown: run sh scripts/setup/build-seed.shs" >&2
+
 # Install and verify mandatory hooks through the worktree-aware helper. It owns
 # pre-push migration and fails setup when installation or wiring is unsafe.
 sh "${repo_root}/scripts/setup/setup-hooks.shs"
+
+# Merge driver for sealed SDN row tables (.gitattributes: bug_db.sdn merge=sdn-rows).
+# Without this config git ignores the attribute and does a plain text merge.
+git -C "${repo_root}" config merge.sdn-rows.name "SDN row-union merge + reseal"
+git -C "${repo_root}" config merge.sdn-rows.driver "sh scripts/vcs/sdn-rows-merge.shs %O %A %B %P"
 
 # ---------------------------------------------------------------------------
 # Host config (config/host/host_config.sdn documents the keys). Generate the

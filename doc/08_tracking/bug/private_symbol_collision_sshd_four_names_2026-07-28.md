@@ -1,10 +1,67 @@
 # private-symbol collision: sshd's four names — enumeration + mis-dispatch verdict
 
+## 2026-11-10 verified component repair — primitive return-only refusal
+
+**General C1 remains OPEN.** The Rust MIR signature collector now rejects
+co-compiled bare free functions whose identical parameter TypeIds have proven
+distinct canonical primitive returns, before either body can silently replace
+the other. This applies to public/private bare functions; methods keep their
+existing path. The diagnostic asks for unique definition names rather than
+selecting an arbitrary body. Argument-distinct mangling and identical-signature
+compatibility remain unchanged. C2's existing ambiguous-argument refusal is
+unchanged by this repair.
+
+Raw TypeId inequality does not prove that independently registered structural
+returns differ. The new refusal therefore excludes structural, nominal,
+refined, dynamic, bottom and unresolved return types. No shape-based nominal
+equivalence or general private-symbol isolation is claimed. The historical
+C1/C2 statements below describe earlier source, not completion of those gaps.
+
+The real Rust owner integration target `return_only_collision` constructs HIR
+fixtures and calls the production MIR lowerer. Its five unchanged tests cover
+primitive return-only refusal, identical-signature compatibility,
+parameter-distinct mangling and independently registered equivalent array and
+tuple returns. They model the flattened-name boundary; they do not exercise a
+complete cross-module import/JIT/native application pipeline.
+
+Actual execution on source `aedc3c43d6f1f562a1bfb3cb7370b6ae0072850f`, target
+`x86_64-pc-windows-gnullvm`, package `simple-compiler`, no default features:
+
+| Observation | Executed | Passed | Failed | Rust test exit |
+|---|---:|---:|---:|---:|
+| Pristine owner | 5 | 4 | 1 expected | 101 |
+| Reviewed primitive refusal | 5 | 5 | 0 | 0 |
+
+Only `return_only_collision_is_rejected_before_last_write_wins` failed on the
+baseline at its `return-only collision must fail` assertion. Both phases built
+the actual integration binary, selected it from Cargo JSON and listed exactly
+the five named tests; none were ignored/measured/filtered. The owned watchdog
+reported complete/exit0, RSS enforcement at 8,000,000 KiB and quiescent=1 for
+both phases. Sampled peak RSS was 3,156,604 KiB baseline and 3,145,612 KiB fixed.
+No Rust-seed Simple CLI fallback or test rerun supplied these observations.
+
+Exact public identities (SHA-256):
+
+- Baseline owner: `ff2cd0323dbbe46273c3b7994ef0fc3092b88879c01647d88e2deb095be355a1`.
+- Fixed raw LF owner: `8a3f5781b1ad5940445115c2be869a43250f6c631ea59622b72e5b6e1e8abdea`.
+- Unchanged five-test fixture: `083fe506a8c9e63fc1df68e485b88b276879d292c910c5d8c943abe72ee6b727`.
+- Preserved baseline executable: `38f41232aad75cc04777e99284db6f6153a6c1dd71c827ad576fbde396e8fe49`.
+- Preserved fixed executable: `0a9c63bf23004bf6be5f50a070001609bb707206daea7052e7a5c802e1fc2fa3`.
+
+Baseline/fixed inputs, actual executables, raw test logs and opaque linker
+captures are retained locally; private environments/captures are not published.
+Two prelaunch harness failures remain recorded and are not compiler test
+failures or passes. Independent Astra source, baseline and terminal component
+reviews passed. This is component evidence for the scoped refusal, not a
+self-hosted CLI admission, MCP smoke, full-suite or complete C1 qualification.
+
 - **ID:** private_symbol_collision_sshd_four_names_2026-07-28
 - **Date:** 2026-07-28
-- **Status:** PARTIALLY FIXED 2026-08-09 (source-side renames landed; compiler-side
-  C1/C2 still OPEN — compiler trees have live lanes). Re-verified: `_u8_at`,
-  `_cswap_pair`, and `_ladder_step` are **no longer present** in
+- **Status:** C1 and C2 LANDED in the Rust seed source (verified by inspection
+  2026-11-25 — see note at end); the "C1/C2 still OPEN" wording in the
+  2026-08-09 entry below is stale. Behavioral re-verification is blocked on
+  this host (no cargo/Rust build in this lane). Source-side renames landed
+  2026-08-09; `_u8_at`, `_cswap_pair`, and `_ladder_step` are **no longer present** in
   `curve25519_smalllimb.spl` at all (superseded by unrelated refactoring —
   `_u8_at_i`, `fe_cswap`; no separate `_ladder_step` helper remains), so those
   3 of 4 collision groups are already gone. The 4th (`_hex_digit`, 11
@@ -192,3 +249,30 @@ equivalent) triggers the flattening that exposes the bug.
 ## Host-environment classification (2026-09-18)
 
 Audited by the fix-pipeline classification review: **seed-owned** — seed-owned. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+## Verification 2026-11-25 (p2w4-al lane, Windows host) — C1/C2 landed in source
+
+Code inspection at release/1.0.0 HEAD shows both compiler-side remedies are
+present in the Rust seed source, superseding the "C1/C2 still OPEN" wording
+in the 2026-08-09 status entry:
+
+- **C1 (return type in the dedup key):** `lowering_core.rs:2098-2164` builds
+  `returns_by_signature` keyed on `(name, param TypeIds)` and computes a
+  `canonical_return_type_key` (structural key covering primitives, text,
+  char, int widths, arrays, tuples, pointers, and nominal struct/enum names;
+  dynamic/unknown types stay exempt), so return-type-only collisions no
+  longer fall through as "observably equivalent". The 2026-11-10 section
+  above documents the executed 5-test owner-integration evidence for the
+  primitive subset.
+- **C2 (silent `candidates.last()` fallback removed):**
+  `lowering_expr_call.rs:1016-1054` resolves a colliding call by exact
+  param-type match, then unique-arity match, then an extern decl of the same
+  name — and otherwise returns a hard `MirLowerError::Unsupported`
+  "ambiguous call to `<name>`" compile error (citing owner decision
+  2026-11-09), instead of the deliberate last-write-wins guess this record
+  documents.
+
+Behavioral verification is NOT claimed: this lane forbids cargo/Rust builds,
+so the seed could not be rebuilt or its test suite run here. The residual
+language-level items (general private-symbol isolation, structural-return
+coverage limits noted in the 2026-11-10 section) remain as recorded there.

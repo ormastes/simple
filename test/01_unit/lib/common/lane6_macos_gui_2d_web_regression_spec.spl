@@ -1,0 +1,344 @@
+# Lane 6 Regression Specification: macOS GUI, 2D Graphics, and Web Engine Fixes
+#
+# Verifies root-cause bug fixes across:
+# 1. 2D Color & Scene Graph Rasterizer (typed palette builders, abs, CSS color numeric guard, nested clip_push intersection)
+# 2. Blink HTML5 Tokenizer, CSS Selector Parser, Style/Paint Effects, and WHATWG URL UTF-8 Decoder
+# 3. Browser CORS Safelist Byte Scanning, Public Suffix IDN Binary Search & Domain Validation
+# 4. HTTP/1.1 Octet-Exact Chunked Framing, Async HTTP Proxy Dechunking, HPACK UTF-8, HTML Entities
+# 5. GUI / TUI / WM Theme CSS / UI Identity / RichText Unicode Preservation
+
+use std.spec.{describe, it, expect, assert_true, assert_false}
+use std.common.color.types.{Color, from_rgb}
+use std.common.color.convert.{abs, max3, min3}
+use std.common.color.blend.{average, triadic, analogous, split_complement, tetradic, monochromatic}
+use std.common.color.css.{parse_css_color}
+use common.render_scene.scene.{SceneCommand, RenderScene, scene_clip_push, scene_clip_pop, scene_fill_rect, scene_text}
+use common.render_scene.executor.{execute_scene_to_buffer}
+use std.blink.html_parser.tokenizer.{tokenize_html}
+use std.blink.css_parser.selector.{parse_selector, matches_complex}
+use std.blink.dom.node.{DomTree, dom_tree_new}
+use std.blink.url.url_parser.{percent_decode}
+use std.gc_async_mut.gpu.browser_engine.net.cors.{cors_unsafe_request_header_names}
+use common.web.public_suffix.{is_public_suffix, registrable_domain}
+use common.web.host_policy.{is_ip_host_literal}
+use std.nogc_sync_mut.http.http1.{ChunkedBodyWithTrailers, encode_chunked, decode_chunked, decode_chunked_with_trailers, resolve_authority}
+use std.nogc_sync_mut.text_layout.font_provider.{browser_font_dylib_candidates}
+use std.nogc_async_mut.http.headers.{chunked_body_end}
+use std.nogc_async_mut.http_server.proxy.{async_proxy_chunked_body_complete, async_proxy_dechunk_body, async_proxy_decode_available_chunks, async_proxy_remaining_after_send}
+use std.common.hpack.encoder.{HpackHeader, hpack_encoder_new, hpack_decoder_new, hpack_encode}
+use std.common.hpack.decoder.{hpack_decode}
+use common.html.entities.{encode_html_entities, decode_html_entities}
+use common.ui.wm_theme_css.{wm_theme_tokens_from_css, wm_theme_tokens_from_html}
+use common.ui.ui_identity.{ui_qualified_id_from_wire}
+use std.nogc_sync_mut.tui.widget.{pad_or_truncate}
+use common.rich_text.attributed_text.{RichDocument, DocBlock, BlockKind, TextSpan, InlineStyle, spans_to_plain_text}
+use common.rich_text.track_changes.{tracked_insert, tracked_delete, tracked_split_block, final_text}
+use std.skia.entity.color.{sk_color_argb, sk_color4f, sk_color4f_from_color, sk_color_alpha, sk_color_green}
+use std.skia.entity.path.{SkPath}
+use std.skia.entity.geometry.{SkRect}
+use std.skia.backend.cpu.raster_prims.{Bitmap, fill_path_aa}
+use std.nogc_sync_mut.http.h3.h3_frame.{h3_varint_encode, h3_varint_decode}
+use app.llm_caret.image_format.{inspect_webp_bytes_v1}
+use std.gc_async_mut.gpu.browser_engine.net.ws_handshake.{compute_accept_key, validate_upgrade_response}
+use std.blink.html_parser.token.{HtmlToken, HtmlTokenKind, HtmlAttribute}
+use std.blink.html_parser.tree_builder.{build_html_tree}
+use std.blink.css_parser.tokenizer.{tokenize_css}
+use std.blink.css_parser.parser.{parse_css}
+use std.blink.layout.style_bridge.{build_styled_layout}
+use std.blink.paint.border_paint.{paint_border_chunks_from_styled_layout}
+use std.blink.paint.style_paint.{paint_chunk_rows_from_styled_layout}
+use std.common.ui.draw_ir.{draw_ir_embedding_config, draw_ir_source_manual}
+use std.common.ui.render_opt.paint_chunk_draw_ir_lowerer.{paint_chunk_draw_ir_lower_composition}
+
+fn _make_rich_doc(content: text) -> RichDocument:
+    val span = TextSpan(text: content, style: InlineStyle.Normal, link_url: "", footnote_id: "", comment_id: "", revision_id: "")
+    RichDocument(title: "T", blocks: [DocBlock(kind: BlockKind.Paragraph, spans: [span])], comments: [], revisions: [])
+
+describe "2D Color & Scene Graph Rasterizer regressions":
+    it "restores convert.abs and typed palette harmonies in native AOT":
+        expect(abs(-42)).to_equal(42)
+        expect(abs(0)).to_equal(0)
+        expect(abs(19)).to_equal(19)
+        val red = from_rgb(255, 0, 0)
+        expect(triadic(red).len()).to_equal(3)
+        expect(analogous(red).len()).to_equal(3)
+        expect(split_complement(red).len()).to_equal(3)
+        expect(tetradic(red).len()).to_equal(4)
+        expect(monochromatic(red).len()).to_equal(5)
+        val avg = average([from_rgb(100, 20, 0), from_rgb(200, 60, 40)])
+        expect(avg.r).to_equal(150)
+        expect(avg.g).to_equal(40)
+        expect(avg.b).to_equal(20)
+
+    it "rejects non-ASCII trailing bytes in CSS color numeric arguments":
+        expect(parse_css_color("rgb(12é, 0, 0)")).to_be_nil()
+        val ok = parse_css_color("rgb(12, 34, 56)")
+        expect(ok.is_none()).to_equal(false)
+
+    it "intersects nested clip_push rects so child clips never escape parent bounds":
+        var buf: [u32] = []
+        var idx = 0
+        while idx < 100:
+            buf.push(0xFF000000u32)
+            idx = idx + 1
+        var sc = RenderScene.new(10, 10)
+        sc = sc.push(scene_clip_push(2, 2, 3, 3))
+        sc = sc.push(scene_clip_push(0, 0, 10, 10))
+        sc = sc.push(scene_fill_rect(0, 0, 10, 10, -1))
+        sc = sc.push(scene_clip_pop())
+        sc = sc.push(scene_clip_pop())
+        val out = execute_scene_to_buffer(sc, buf, 10, 10)
+        expect(out[0]).to_equal(0xFF000000u32)
+        expect(out[6 * 10 + 6]).to_equal(0xFF000000u32)
+        expect(out[3 * 10 + 3]).to_equal(0xFFFFFFFFu32)
+
+describe "Blink HTML5, CSS Selector, and URL UTF-8 regressions":
+    it "tokenizes closing tags after multi-byte UTF-8 text and attributes without truncation":
+        val tokens = tokenize_html("<div title=\"한글제목\">안녕하세요<span>끝</span></div>")
+        expect(tokens.len()).to_equal(7)
+        expect(tokens[0].name).to_equal("div")
+        expect(tokens[0].attributes[0].value).to_equal("한글제목")
+        expect(tokens[1].data).to_equal("안녕하세요")
+        expect(tokens[2].name).to_equal("span")
+        expect(tokens[3].data).to_equal("끝")
+        expect(tokens[4].name).to_equal("span")
+        expect(tokens[5].name).to_equal("div")
+
+    it "parses and matches non-ASCII UTF-8 CSS class and attribute selectors":
+        val sel_opt = parse_selector("div.café > span[data-한글]")
+        expect(sel_opt.is_none()).to_equal(false)
+        var tree = dom_tree_new()
+        val div_id = tree.create_element("div")
+        tree.set_attribute(div_id, "class", "lead café card")
+        tree.append_child(0, div_id)
+        val span_id = tree.create_element("span")
+        tree.set_attribute(span_id, "data-한글", "yes")
+        tree.append_child(div_id, span_id)
+        expect(matches_complex(tree, span_id, sel_opt.unwrap())).to_equal(true)
+
+    it "rejects overlong, surrogate, and out-of-range UTF-8 sequences in Blink percent_decode":
+        expect(percent_decode("%ED%95%9C%EA%B8%80")).to_equal("한글")
+        expect(percent_decode("%E0%80%AF").contains("/")).to_equal(false)
+        expect(percent_decode("%ED%A0%80").contains("\u{FFFD}")).to_equal(true)
+        expect(percent_decode("%F4%90%80%80").contains("\u{FFFD}")).to_equal(true)
+
+describe "CORS safelist, Public Suffix IDN, and Host Policy regressions":
+    it "flags unsafe CORS bytes appearing after multi-byte UTF-8 prefixes":
+        val unsafe_accept = cors_unsafe_request_header_names("Accept: text/plain; note=한글텍스트(\r\n")
+        expect(unsafe_accept).to_contain("accept")
+        val unsafe_range = cors_unsafe_request_header_names("Range: bytes=0-10é\r\n")
+        expect(unsafe_range).to_contain("range")
+
+    it "resolves internationalized UTF-8 public suffixes and rejects malformed trailing labels":
+        expect(is_public_suffix("한국")).to_equal(true)
+        expect(registrable_domain("sub.example.한국")).to_equal("example.한국")
+        expect(registrable_domain("한국.-bad")).to_equal("")
+        expect(is_ip_host_literal("127.0.0.1")).to_equal(true)
+        expect(is_ip_host_literal("0x7f000001")).to_equal(true)
+        expect(is_ip_host_literal("0x7f00é")).to_equal(false)
+
+describe "HTTP/1.1 chunked, Async Proxy, HPACK, and HTML Entities UTF-8 regressions":
+    it "encodes and decodes UTF-8 HTTP/1.1 chunked payloads using exact octet lengths":
+        val wire = encode_chunked("café")
+        expect(wire).to_equal("5\r\ncafé\r\n0\r\n\r\n")
+        val decoded = decode_chunked(wire)
+        expect(decoded.is_ok()).to_equal(true)
+        expect(decoded.unwrap()).to_equal("café")
+        val ko_wire = "6\r\n한글\r\n0\r\n\r\n"
+        expect(chunked_body_end(ko_wire)).to_equal(16)
+
+    it "completes and dechunks UTF-8 chunked streams in async HTTP proxy":
+        val ko_wire = "6\r\n한글\r\n0\r\n\r\n"
+        assert_true(async_proxy_chunked_body_complete(ko_wire))
+        val dechunked = async_proxy_dechunk_body(ko_wire)
+        expect(dechunked.is_none()).to_equal(false)
+        expect(dechunked.unwrap()).to_equal("한글")
+        val avail = async_proxy_decode_available_chunks(ko_wire)
+        assert_true(avail.valid)
+        assert_true(avail.complete)
+        expect(avail.decoded).to_equal("한글")
+        expect(async_proxy_remaining_after_send("한글", 3).byte_len()).to_equal(3)
+
+    it "preserves full UTF-8 byte length in HPACK encoding":
+        val enc = hpack_encoder_new(4096, false)
+        val dec = hpack_decoder_new(4096)
+        val hdrs = [HpackHeader(name: "x-greeting", value: "café", sensitive: false)]
+        val encoded_pair = hpack_encode(hdrs, enc)
+        val decoded_res = hpack_decode(encoded_pair.0, dec)
+        expect(decoded_res.is_ok()).to_equal(true)
+        val out_hdrs = decoded_res.unwrap().0
+        expect(out_hdrs.len()).to_equal(1)
+        expect(out_hdrs[0].value.byte_len()).to_be_greater_than(4)
+
+    it "escapes HTML tags after long UTF-8 prefixes without truncation or UTF-8 shredding":
+        val raw = "한글텍스트입니다안녕하세요반갑습니다<script>alert(1)</script>"
+        val escaped = encode_html_entities(raw)
+        assert_false(escaped.contains("<script>"))
+        expect(escaped).to_contain("&lt;script&gt;")
+        expect(escaped).to_start_with("한글텍스트")
+        expect(decode_html_entities("한글 &amp; 테스트 &lt;ok&gt;")).to_equal("한글 & 테스트 <ok>")
+
+describe "GUI, TUI, WM Theme CSS, UI Identity, and RichText Unicode regressions":
+    it "extracts --wm-* CSS variables after UTF-8 comments and HTML content":
+        val css = "/* 한국어 다크 테마 설명 */ :root { --wm-bg: #102030; --wm-accent: #405060; }"
+        val tok = wm_theme_tokens_from_css(css)
+        expect(tok.wtc_bg).to_equal("#102030")
+        expect(tok.wtc_accent).to_equal("#405060")
+        val html = "<div>안녕하세요 반갑습니다</div><STYLE>:root { --wm-surface: #abcdef; }</STYLE>"
+        val htok = wm_theme_tokens_from_html(html)
+        expect(htok.wtc_surface).to_equal("#abcdef")
+
+    it "splits UI qualified wire IDs and truncates TUI / RichText spans on Unicode boundaries":
+        val qid = ui_qualified_id_from_wire("메인패널화면#save_btn")
+        expect(qid.surface_id).to_equal("메인패널화면")
+        expect(qid.local_id).to_equal("save_btn")
+        expect(pad_or_truncate("한글테스트", 3)).to_equal("한글테")
+
+        val doc = _make_rich_doc("안녕하세요")
+        val split_doc = tracked_split_block(doc, 0, 2)
+        expect(spans_to_plain_text(split_doc.blocks[0].spans)).to_equal("안녕")
+        expect(spans_to_plain_text(split_doc.blocks[1].spans)).to_equal("하세요")
+        val ins_doc = tracked_insert(doc, 0, 2, "!", "tester")
+        expect(final_text(ins_doc)).to_equal("안녕!하세요")
+        val del_doc = tracked_delete(doc, 0, 1, 4, "tester")
+        expect(final_text(del_doc)).to_equal("안요")
+
+describe "macOS font dylib candidates and typed HTTP/1.1 tuple contracts":
+    it "includes macOS .dylib search paths in browser_font_dylib_candidates":
+        val cands = browser_font_dylib_candidates()
+        expect(cands).to_contain("build/lib/libspl_fonts.dylib")
+        expect(cands).to_contain("build/libspl_fonts.dylib")
+        expect(cands).to_contain("lib/libspl_fonts.dylib")
+        expect(cands).to_contain("build/lib/libspl_fonts.so")
+
+    it "returns typed ChunkedBodyWithTrailers and authority tuples from http1":
+        val res = decode_chunked_with_trailers("5\r\ncafé\r\n0\r\nX-Check: ok\r\n\r\n")
+        expect(res.is_ok()).to_equal(true)
+        val decoded_chunk: ChunkedBodyWithTrailers = res.unwrap()
+        expect(decoded_chunk.body).to_equal("café")
+        expect(decoded_chunk.trailers.len()).to_equal(1)
+        val auth = resolve_authority("https", "example.com")
+        expect(auth.0).to_equal("example.com")
+        expect(auth.1).to_equal(443)
+
+describe "Skia ARGB packing, AA interior rasterization, Blink border/DrawIR, H3 varint, WebP VP8, and WS 101 regressions":
+    it "packs 32-bit ARGB SkColor without shift-or precedence corruption, rounds fractional channels, and guards NaN":
+        val green = sk_color_argb(255, 0, 128, 0)
+        expect(sk_color_alpha(green)).to_equal(255)
+        expect(sk_color_green(green)).to_equal(128)
+        val c4 = sk_color4f_from_color(from_rgb(0, 128, 64))
+        val packed = c4.to_sk_color()
+        expect(sk_color_alpha(packed)).to_equal(255)
+        expect(sk_color_green(packed)).to_equal(128)
+        val half = sk_color4f(0.5, 0.5, 0.5, 0.5).to_sk_color()
+        expect(sk_color_alpha(half)).to_equal(128)
+        val nan_val: f64 = 0.0 / 0.0
+        val nan_color = sk_color4f(nan_val, nan_val, nan_val, 1.0).to_sk_color()
+        expect(sk_color_alpha(nan_color)).to_equal(255)
+        expect(sk_color_green(nan_color)).to_equal(0)
+
+    it "accumulates subpixel edge, thin-span, and interior supersample coverage in fill_path_aa without integer truncation":
+        val bmp = Bitmap.zeros(8, 8)
+        var path = SkPath.new()
+        path = path.add_rect(SkRect(left: 1.5, top: 1.0, right: 6.5, bottom: 7.0))
+        fill_path_aa(bmp, path, sk_color4f(1.0, 0.0, 0.0, 1.0))
+        val outside_left = (4 * 8 + 0) * 4
+        val left_edge = (4 * 8 + 1) * 4
+        val mid = (4 * 8 + 4) * 4
+        val right_edge = (4 * 8 + 6) * 4
+        val outside_right = (4 * 8 + 7) * 4
+        expect(bmp.pixels[outside_left] as i64).to_equal(0)
+        expect(bmp.pixels[outside_right] as i64).to_equal(0)
+        expect(bmp.pixels[left_edge] as i64).to_equal(127)
+        expect(bmp.pixels[left_edge + 3] as i64).to_equal(127)
+        expect(bmp.pixels[right_edge] as i64).to_equal(127)
+        expect(bmp.pixels[right_edge + 3] as i64).to_equal(127)
+        expect(bmp.pixels[mid] as i64).to_equal(255)
+        expect(bmp.pixels[mid + 3] as i64).to_equal(255)
+
+        val thin_bmp = Bitmap.zeros(4, 4)
+        var thin_path = SkPath.new()
+        thin_path = thin_path.add_rect(SkRect(left: 1.25, top: 0.0, right: 1.75, bottom: 4.0))
+        fill_path_aa(thin_bmp, thin_path, sk_color4f(1.0, 0.0, 0.0, 1.0))
+        val thin_px = (2 * 4 + 1) * 4
+        expect(thin_bmp.pixels[thin_px] as i64).to_equal(127)
+        expect(thin_bmp.pixels[thin_px + 3] as i64).to_equal(127)
+
+    it "advances RenderScene VGA fallback text by UTF-8 codepoint rather than raw byte":
+        var tbuf: [u32] = []
+        var ti = 0
+        while ti < 32 * 16:
+            tbuf.push(0xFF000000u32)
+            ti = ti + 1
+        var tsc = RenderScene.new(32, 16)
+        tsc = tsc.push(scene_text(0, 0, "한A", -1, 16))
+        val tout = execute_scene_to_buffer(tsc, tbuf, 32, 16)
+        # 'A' (0x41) row 2 has bit 0x10 (col 3), so at x=8 (1 codepoint after '한') pixel (11, 2) is white,
+        # while x=24..31 (byte-offset 3 * 8) stays untouched black.
+        expect(tout[2 * 32 + 11]).to_equal(0xFFFFFFFFu32)
+        expect(tout[2 * 32 + 27]).to_equal(0xFF000000u32)
+
+    it "paints Blink CSS borders and lowers retained StyledLayout chunks with zero-width root containers":
+        var empty_attrs: [HtmlAttribute] = []
+        val tokens = [
+            HtmlToken(kind: HtmlTokenKind.StartTag, name: "body", data: "", attributes: empty_attrs, self_closing: false),
+            HtmlToken(kind: HtmlTokenKind.StartTag, name: "div", data: "", attributes: empty_attrs, self_closing: false),
+            HtmlToken(kind: HtmlTokenKind.EndTag, name: "div", data: "", attributes: empty_attrs, self_closing: false),
+            HtmlToken(kind: HtmlTokenKind.EndTag, name: "body", data: "", attributes: empty_attrs, self_closing: false)
+        ]
+        val tree = build_html_tree(tokens)
+        val sheet = parse_css(tokenize_css("div { width: 40px; height: 20px; border: 4px solid green; background-color: red; }"))
+        val layout = build_styled_layout(tree, sheet, 800.0, 600.0)
+        val borders = paint_border_chunks_from_styled_layout(layout)
+        expect(borders.rect_count).to_equal(4)
+        val rows = paint_chunk_rows_from_styled_layout(layout)
+        val lowered = paint_chunk_draw_ir_lower_composition(
+            rows.chunks, rows.rects, rows.stable_command_ids,
+            "c1", "s1", "cpu", "b1",
+            draw_ir_embedding_config("surf", "root", 0, 0, 800, 600, 0, 1000, true),
+            draw_ir_source_manual())
+        expect(lowered.valid).to_equal(true)
+
+    it "round-trips 8-byte HTTP/3 varints, VP8 WebP dimensions, and WebSocket 101 upgrade headers":
+        val big: i64 = 4294967296 + 13579
+        val enc = h3_varint_encode(big)
+        expect(enc.len()).to_equal(8)
+        val dec = h3_varint_decode(enc, 0)
+        expect(dec.unwrap().value).to_equal(big)
+
+        val vp8_raw: [u8] = [
+            82u8, 73u8, 70u8, 70u8, 22u8, 0u8, 0u8, 0u8, 87u8, 69u8, 66u8, 80u8,
+            86u8, 80u8, 56u8, 32u8, 10u8, 0u8, 0u8, 0u8,
+            0u8, 0u8, 0u8, 157u8, 1u8, 42u8,
+            64u8, 1u8, 240u8, 0u8
+        ]
+        val info = inspect_webp_bytes_v1(vp8_raw)
+        expect(info.width).to_equal(320)
+        expect(info.height).to_equal(240)
+
+        val key = "dGhlIHNhbXBsZSBub25jZQ=="
+        val accept = compute_accept_key(key)
+        val resp = "HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: " + accept + "\r\n\r\n"
+        expect(validate_upgrade_response(resp, key)).to_equal(true)
+
+    it "enforces IEEE-754 NaN/Inf/scientific ordering, lexicographic non-numeric comparison, and exact array/nil matchers":
+        val nan_v: f64 = 0.0 / 0.0
+        val pos_inf: f64 = 1.0 / 0.0
+        val neg_inf: f64 = -1.0 / 0.0
+        expect(nan_v).not_().to_be_greater_than(0.0)
+        expect(nan_v).not_().to_be_less_than(0.0)
+        expect(nan_v).not_().to_be_at_least(0.0)
+        expect(nan_v).not_().to_be_at_most(0.0)
+        expect(nan_v).not_().to_be_at_least(nan_v)
+        expect(nan_v).not_().to_be_at_most(nan_v)
+        expect(pos_inf).to_be_greater_than(1000000.0)
+        expect(neg_inf).to_be_less_than(-1000000.0)
+        expect(1e-05).to_be_less_than(1e-04)
+        expect(1e+20).to_be_greater_than(1e+19)
+        expect("aa").to_be_less_than("zz")
+        expect("zz").to_be_greater_than("aa")
+        expect(["a, b", "c"]).not_().to_contain("a")
+        expect(["a, b", "c"]).to_contain("a, b")
+        expect("Option::None").not_().to_be_nil()
+        val absent: text? = None
+        expect(absent).to_be_nil()

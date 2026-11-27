@@ -1,0 +1,142 @@
+# @req REQ-WORKSPACE-NATIVE-AUTH REQ-WORKSPACE-NATIVE-WIRE
+# AUTHORED/NOT_RUN. Real Ed25519 verifier with explicit test keys; no actual
+# opaque source/selection/capsule or native start is fabricated by these tests.
+use test.fixtures.orchestration.agent_workspace_invocation_fixture_v1.*
+use std.common.contracts.orchestration.agent_workspace_invocation_packet_v1.*
+use std.common.contracts.orchestration.agent_workspace_invocation_packet_v2.*
+use std.common.contracts.orchestration.agent_workspace_invocation_v2.*
+use std.common.contracts.orchestration.agent_workspace_invocation_v1.agent_workspace_invocation_manifest_encode_v1
+use std.common.contracts.container.agent_executable_profile_v1.{AgentExecutableProfileV1, agent_executable_profile_minimum_memory_v1, agent_executable_profile_encode_v1}
+use std.nogc_sync_mut.orchestration.host_agent_workspace_execution_v1.host_agent_workspace_invocation_operation_v1
+use std.nogc_sync_mut.orchestration.host_agent_workspace_execution_v2.{host_agent_workspace_invocation_operation_v2, host_agent_workspace_cancel_operation_v2}
+use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.distributed_verify_grant_approval_from_snapshot_v2
+use std.common.sdn.value.SdnValue
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.crypto.sha256.sha256_text
+use test.fixtures.orchestration.host_authorized_execution_fixture_v2.*
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.host_capacity_owner_close_v1
+use std.nogc_sync_mut.orchestration.host_agent_workspace_execution_v2.host_agent_workspace_memory_check_v2
+use std.common.contracts.container.execution_v2.ContainerRequestProjectionV2
+use std.nogc_sync_mut.io_runtime.dir_remove
+
+fn native_packet_data_v2() -> AgentWorkspaceInvocationPacketV2:
+    val fixture = agent_workspace_invocation_fixture_v1()
+    val manifest = AgentWorkspaceInvocationManifestV2(base: fixture.packet.manifest, executable_profile: AgentExecutableProfileV1(
+        architecture: "linux-x86_64", image_size_bytes: 1, max_image_bytes: 1, bootstrap_memory_bytes: 1, agent_memory_bytes: 1))
+    val operation = host_agent_workspace_invocation_operation_v2(manifest, fixture.packet.host.operation,
+        fixture.policy, fixture.scope, fixture.context).unwrap()
+    val signed = agent_workspace_fixture_sign_v1(operation)
+    AgentWorkspaceInvocationPacketV2(host: fixture.packet.host, manifest: manifest, signed: signed,
+        approval: agent_workspace_fixture_approve_v1(operation, signed))
+
+fn native_wire_field_v2(source: text, key: text, value: SdnValue) -> text:
+    val document = sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 2097152,
+        max_depth: 3, max_nodes: 128, max_rows: 0, max_cells: 0, max_columns: 16)).unwrap()
+    var fields = match document.value:
+        case SdnValue.Dict(value): value
+        case _: fail("object fixture required")
+    fields[key] = value
+    sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+
+describe "explicit native V2 invocation permission":
+    it "round trips explicit full native V2 while preserving its V1 base bytes":
+        step("Keep compiled-bootstrap manifest compatibility explicit")
+        val packet = native_packet_data_v2()
+        val source = agent_workspace_invocation_packet_encode_v2(packet).unwrap()
+        val decoded = agent_workspace_invocation_packet_decode_v2(source).unwrap()
+        expect(agent_workspace_invocation_packet_encode_v2(decoded).unwrap()).to_equal(source)
+        expect(decoded.manifest.base.task.content).to_equal(packet.manifest.base.task.content)
+        expect(decoded.manifest.base.workspace_manifest).to_equal(packet.manifest.base.workspace_manifest)
+
+    it "rejects version-one packets in native decode and native packets in old decode":
+        step("Do not reinterpret the frozen staging-only packet")
+        val old = agent_workspace_invocation_fixture_v1().packet
+        expect(agent_workspace_invocation_packet_decode_v2(agent_workspace_invocation_packet_encode_v1(old).unwrap()).is_err()).to_equal(true)
+        expect(agent_workspace_invocation_packet_decode_v1(agent_workspace_invocation_packet_encode_v2(native_packet_data_v2()).unwrap()).is_err()).to_equal(true)
+
+    it "requires the exact native profile discriminator and strict canonical schema":
+        step("Reject permissive native opt-in descriptions")
+        val bytes = agent_workspace_invocation_packet_encode_v2(native_packet_data_v2()).unwrap()
+        expect(agent_workspace_invocation_packet_decode_v2(native_wire_field_v2(bytes, "nativeProfileVersion", SdnValue.Int(1))).is_err()).to_equal(true)
+        expect(agent_workspace_invocation_packet_decode_v2(native_wire_field_v2(bytes, "nativeProfileVersion", SdnValue.String("2"))).is_err()).to_equal(true)
+        expect(agent_workspace_invocation_packet_decode_v2(native_wire_field_v2(bytes, "version", SdnValue.Int(1))).is_err()).to_equal(true)
+        expect(agent_workspace_invocation_packet_decode_v2(native_wire_field_v2(bytes, "extra", SdnValue.Bool(true))).is_err()).to_equal(true)
+        expect(agent_workspace_invocation_packet_decode_v2(bytes + "\n").is_err()).to_equal(true)
+        expect(agent_workspace_invocation_packet_decode_v2(bytes + "version: 2\n").is_err()).to_equal(true)
+
+    it "uses distinct native authority even when the full manifest is unchanged":
+        step("Prevent a staging-only approval from becoming native launch permission")
+        val fixture = agent_workspace_invocation_fixture_v1()
+        val old = host_agent_workspace_invocation_operation_v1(fixture.packet.manifest, fixture.packet.host.operation,
+            fixture.policy, fixture.scope, fixture.context).unwrap()
+        val native = host_agent_workspace_invocation_operation_v2(native_packet_data_v2().manifest, fixture.packet.host.operation,
+            fixture.policy, fixture.scope, fixture.context).unwrap()
+        expect(native.payload_digest == old.payload_digest).to_equal(false)
+        expect(native.environment_digest == old.environment_digest).to_equal(false)
+        expect(native.id == old.id).to_equal(false)
+        val refused = distributed_verify_grant_approval_from_snapshot_v2(fixture.policy.snapshot, fixture.packet.signed,
+            fixture.packet.approval, native, fixture.context.grant_clock, fixture.policy.snapshot.generation,
+            fixture.context.policy_revision, fixture.context.revocation_epoch, fixture.context.session_generation)
+        expect(refused.is_err()).to_equal(true)
+
+    it "accepts explicit native fixture permission and rejects altered request or manifest":
+        step("Bind the complete native request and full invocation")
+        val fixture = agent_workspace_invocation_fixture_v1()
+        val packet = native_packet_data_v2()
+        val operation = host_agent_workspace_invocation_operation_v2(packet.manifest, packet.host.operation,
+            fixture.policy, fixture.scope, fixture.context).unwrap()
+        expect(distributed_verify_grant_approval_from_snapshot_v2(fixture.policy.snapshot, packet.signed, packet.approval,
+            operation, fixture.context.grant_clock, fixture.policy.snapshot.generation, fixture.context.policy_revision,
+            fixture.context.revocation_epoch, fixture.context.session_generation).is_ok()).to_equal(true)
+        var changed = packet
+        changed.manifest.base.task_use.model = "another-model"
+        val altered = host_agent_workspace_invocation_operation_v2(changed.manifest, changed.host.operation,
+            fixture.policy, fixture.scope, fixture.context).unwrap()
+        expect(distributed_verify_grant_approval_from_snapshot_v2(fixture.policy.snapshot, packet.signed, packet.approval,
+            altered, fixture.context.grant_clock, fixture.policy.snapshot.generation, fixture.context.policy_revision,
+            fixture.context.revocation_epoch, fixture.context.session_generation).is_err()).to_equal(true)
+
+    it "does not grant workload cancellation through an invocation approval":
+        step("Require independently issued WorkloadControl permission")
+        val fixture = agent_workspace_invocation_fixture_v1()
+        val packet = native_packet_data_v2()
+        val control = host_agent_workspace_cancel_operation_v2(packet, fixture.policy, fixture.scope, fixture.context).unwrap()
+        expect(control.operation).to_equal("host_workload_cancel_v1")
+        expect(distributed_verify_grant_approval_from_snapshot_v2(fixture.policy.snapshot, packet.signed, packet.approval,
+            control, fixture.context.grant_clock, fixture.policy.snapshot.generation, fixture.context.policy_revision,
+            fixture.context.revocation_epoch, fixture.context.session_generation).is_err()).to_equal(true)
+
+    it "requires an explicit bounded executable profile and checked complete memory minimum":
+        step("Keep executable pin and workload memory separate from a DATA grant")
+        val packet = native_packet_data_v2()
+        expect(agent_executable_profile_minimum_memory_v1(packet.manifest.executable_profile).unwrap()).to_equal(65539)
+        var changed = packet.manifest
+        changed.executable_profile.image_size_bytes = 290000000
+        changed.executable_profile.max_image_bytes = 536870912
+        changed.executable_profile.bootstrap_memory_bytes = 268435456
+        changed.executable_profile.agent_memory_bytes = 67108864
+        expect(agent_executable_profile_minimum_memory_v1(changed.executable_profile).unwrap()).to_equal(625609856)
+        changed.executable_profile.architecture = "linux-aarch64"
+        expect(agent_workspace_invocation_manifest_encode_v2(changed).is_ok()).to_equal(true)
+        changed.executable_profile.max_image_bytes = 1
+        expect(agent_workspace_invocation_manifest_encode_v2(changed).is_err()).to_equal(true)
+        expect(agent_workspace_invocation_manifest_decode_v2(agent_workspace_invocation_manifest_encode_v1(packet.manifest.base).unwrap()).is_err()).to_equal(true)
+
+    it "rejects an oversized caller request against the smaller actual retained Host allocation":
+        step("Use the real admitted journal allocation rather than request DATA")
+        # Actual Host journal/capacity fixture. Its provider is explicitly
+        # scripted and remains unused; no native/probe/source owner is faked.
+        val fixture = host_execution_fixture_v2("success")
+        var packet = native_packet_data_v2()
+        packet.host = fixture.envelope
+        val request = packet.host.execution.plan
+        val inflated = ContainerRequestProjectionV2(workload_uid: request.workload_uid, attempt: request.attempt,
+            operation_id: request.operation_id, request_digest: request.request_digest, cpu_millis: 1000,
+            memory_bytes: 1073741824, timeout_ms: 100, has_devices: false, has_workspace: true)
+        expect(host_agent_workspace_memory_check_v2(fixture.owner, packet, inflated,
+            packet.manifest.executable_profile, "admitted").unwrap_err()).to_equal("agent-workspace-native-original-allocation-insufficient")
+        expect(fixture.provider.scripted_cursor).to_equal(0)
+        expect(host_capacity_owner_close_v1(fixture.owner).unwrap()).to_equal(true)
+        expect(dir_remove(fixture.root, true)).to_equal(true)

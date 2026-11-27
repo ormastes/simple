@@ -1,0 +1,42 @@
+# Compiles a fixture to a Windows DLL with the LLVM backend for the ring-mode
+# end-to-end run (xray_win_ring_e2e_host.spl): the pure-Simple driver entry,
+# dev profile (release forbids XRay), XR_XRAY=1 toggling only xray_enabled.
+# SIMPLE_NATIVE_BUILD_EMIT_OBJECT=shared selects a shared library.
+use app.io._CliCompile.compile_opt_and_driver.{cli_compile_pure_simple}
+use compositions.kernel_llvm_cranelift.compiler.driver.bootstrap_k1_selected.{
+    install_selected_k1_backend_table_v1, selected_k1_backend_policy_v1}
+use plugins.backend_registry.full_static_backend_registry.{
+    install_full_static_backends_for_k1_policy_v1}
+use compiler.backend.native.elf_writer.{ElfSymbolBind, ElfSymbolType}
+
+# SEED WORKAROUND: the Rust seed keys struct definitions by bare name, so in
+# the full CLI module graph linker/elf_parser.spl's ElfSymbol shadows
+# backend/native/elf_writer.spl's and the ELF symtab write fails with "class
+# ElfSymbol has no field named sym_bind". A main-file twin with elf_writer's
+# exact fields wins. Bug: doc/08_tracking/bug/seed_struct_bare_name_shadowing_elf_symbol_2026-11-06.md
+struct ElfSymbol:
+    name: text
+    sym_bind: ElfSymbolBind
+    sym_type: ElfSymbolType
+    section_index: i64
+    value: i64
+    size: i64
+
+extern fn rt_env_get(key: text) -> text?
+
+fn main():
+    # Mirror the real CLI startup: install the backend table first.
+    if not install_selected_k1_backend_table_v1():
+        print "CLI-COMPILE k1 backend table install failed"
+        return
+    if not install_full_static_backends_for_k1_policy_v1(selected_k1_backend_policy_v1()):
+        print "CLI-COMPILE static backend install failed"
+        return
+    val src = rt_env_get("XR_SRC") ?? ""
+    val out = rt_env_get("XR_OUT") ?? ""
+    if (rt_env_get("XR_XRAY") ?? "") == "1":
+        print "CLI-COMPILE rc={cli_compile_pure_simple(src, out, "", "llvm", true, false, false, 3, "dev", "", false, "", 0, 0, true)}"
+    else:
+        print "CLI-COMPILE rc={cli_compile_pure_simple(src, out, "", "llvm", true, false, false, 3, "dev", "", false, "", 0, 0, false)}"
+
+main()

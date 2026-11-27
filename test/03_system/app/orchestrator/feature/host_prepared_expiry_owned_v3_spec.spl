@@ -1,0 +1,141 @@
+# @req HOST-HELPER-01 HOST-HELPER-02 HOST-HELPER-03
+# AUTHORED SOURCE-ONLY NOT_RUN. Actual signed helper/journal fixture;
+# generic Linux journal dispatch only, no native Windows or helper execution.
+use std.spec.*
+use test.fixtures.orchestration.host_helper_fixture_v1.*
+use std.nogc_sync_mut.orchestration.host_helper_owner_v1.{HostHelperPrepareTurnV1,
+    host_helper_prepare_v1, host_helper_begin_v1}
+use std.nogc_sync_mut.orchestration.host_helper_request_v1.{host_helper_request_encode_v1,
+    host_helper_request_decode_v1}
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.{HostCapacityOwnerV1,
+    host_capacity_owner_expire_prepared_owned_v3, host_capacity_owner_close_v1}
+use std.common.contracts.orchestration.host_capacity_v1.{HostReservationV1,
+    HostReservationStateV1, host_available_capacity_v1}
+use std.common.task_runner.distributed_operation_journal_v2.distributed_operation_journal_lookup_v2
+use std.nogc_sync_mut.io_runtime.dir_remove
+
+fn prepared_expiry_prepare_v3(fixture: HostHelperFixtureV1) -> HostHelperPrepareTurnV1:
+    val bytes = host_helper_request_encode_v1(fixture.request).unwrap()
+    val request = host_helper_request_decode_v1(bytes).unwrap()
+    host_helper_prepare_v1(fixture.owner, request, fixture.policy, fixture.scope,
+        host_helper_clock_v1(), host_helper_clock_v1)
+
+fn prepared_expiry_row_v3(owner: HostCapacityOwnerV1, operation_id: text) -> HostReservationV1:
+    for row in owner.ledger.reservations:
+        if row.operation_id == operation_id: return row
+    fail("actual retained reservation row missing: " + operation_id)
+
+fn prepared_expiry_same_owner_v3(actual: HostCapacityOwnerV1, expected: HostCapacityOwnerV1):
+    expect(actual.journal.root).to_equal(expected.journal.root)
+    expect(actual.journal.lease_digest).to_equal(expected.journal.lease_digest)
+    expect(actual.journal.sequence).to_equal(expected.journal.sequence)
+    expect(actual.journal.revision).to_equal(expected.journal.revision)
+    expect(actual.ledger.revision).to_equal(expected.ledger.revision)
+    expect(actual.ledger.reservations).to_equal(expected.ledger.reservations)
+
+describe "Owner-bearing prepared helper expiry V3":
+    it "refuses an admitted helper before its actual prepare deadline without mutation":
+        step("Prepare the real signed helper then retain its exact owner on an early timer observation")
+        val fixture = host_helper_fixture_v1()
+        val prepared = prepared_expiry_prepare_v3(fixture)
+        expect(prepared.error).to_equal("")
+        expect(prepared.receipt.?).to_equal(true)
+        val operation = fixture.request.operation.id
+        expect(distributed_operation_journal_lookup_v2(prepared.owner.journal, operation).unwrap().state).to_equal("admitted")
+        val deadline = fixture.request.intent.reservation.prepare_deadline_ms
+        val denied = host_capacity_owner_expire_prepared_owned_v3(prepared.owner, operation, deadline - 1)
+        expect(denied.settled).to_equal(false)
+        expect(denied.error).to_equal("prepare-not-expired")
+        prepared_expiry_same_owner_v3(denied.owner, prepared.owner)
+        expect(distributed_operation_journal_lookup_v2(denied.owner.journal, operation).unwrap().state).to_equal("admitted")
+        expect(prepared_expiry_row_v3(denied.owner, operation).state).to_equal(HostReservationStateV1.Prepared)
+        expect(host_available_capacity_v1(denied.owner.ledger).unwrap().cpu_millis).to_equal(
+            host_available_capacity_v1(prepared.owner.ledger).unwrap().cpu_millis)
+        expect(host_capacity_owner_close_v1(denied.owner).unwrap()).to_equal(true)
+        dir_remove(fixture.root, true)
+
+    it "expires only the selected prepared helper at its deadline and preserves parent and sibling charge":
+        step("Prepare two signed helpers and use the returned committed owner to check one exact release")
+        val fixture = host_helper_fixture_v1()
+        val first = prepared_expiry_prepare_v3(fixture)
+        expect(first.error).to_equal("")
+        val sibling = host_helper_sibling_fixture_v1(fixture, first.owner, "helper_2")
+        val second = prepared_expiry_prepare_v3(sibling)
+        expect(second.error).to_equal("")
+        val parent_id = fixture.request.parent_binding.host_operation.id
+        val parent_before = prepared_expiry_row_v3(second.owner, parent_id)
+        val sibling_before = prepared_expiry_row_v3(second.owner, sibling.request.operation.id)
+        val before = host_available_capacity_v1(second.owner.ledger).unwrap()
+        val deadline = fixture.request.intent.reservation.prepare_deadline_ms
+        val expired = host_capacity_owner_expire_prepared_owned_v3(second.owner, fixture.request.operation.id, deadline)
+        expect(expired.error).to_equal("")
+        expect(expired.settled).to_equal(true)
+        expect(expired.owner.journal.sequence).to_equal(second.owner.journal.sequence + 1)
+        expect(expired.owner.ledger.revision).to_equal(expired.owner.journal.sequence + 1)
+        expect(expired.owner.journal.root).to_equal(second.owner.journal.root)
+        expect(expired.owner.journal.lease_digest).to_equal(second.owner.journal.lease_digest)
+        expect(distributed_operation_journal_lookup_v2(expired.owner.journal,
+            fixture.request.operation.id).unwrap().state).to_equal("cancelled")
+        expect(prepared_expiry_row_v3(expired.owner, fixture.request.operation.id).state).to_equal(HostReservationStateV1.Released)
+        expect(prepared_expiry_row_v3(expired.owner, parent_id)).to_equal(parent_before)
+        expect(parent_before.state == HostReservationStateV1.Released).to_equal(false)
+        expect(prepared_expiry_row_v3(expired.owner, sibling.request.operation.id)).to_equal(sibling_before)
+        expect(sibling_before.state).to_equal(HostReservationStateV1.Prepared)
+        expect(distributed_operation_journal_lookup_v2(expired.owner.journal, parent_id).unwrap().state).to_equal("admitted")
+        expect(distributed_operation_journal_lookup_v2(expired.owner.journal,
+            sibling.request.operation.id).unwrap().state).to_equal("admitted")
+        val after = host_available_capacity_v1(expired.owner.ledger).unwrap()
+        expect(after.cpu_millis).to_equal(before.cpu_millis + fixture.request.intent.reservation.cpu_millis)
+        expect(after.memory_bytes).to_equal(before.memory_bytes + fixture.request.intent.reservation.memory_bytes)
+        expect(expired.owner.ledger.reservations.len()).to_equal(second.owner.ledger.reservations.len())
+        expect(host_capacity_owner_close_v1(expired.owner).unwrap()).to_equal(true)
+        dir_remove(fixture.root, true)
+
+    it "refuses expiry of an executing helper and keeps its actual charge":
+        step("Begin genuine signed execution ownership without launching a helper process then try the preparation timer")
+        val fixture = host_helper_fixture_v1()
+        val prepared = prepared_expiry_prepare_v3(fixture)
+        expect(prepared.error).to_equal("")
+        val executing = host_helper_begin_v1(prepared.owner, fixture.request, prepared.receipt.unwrap(),
+            fixture.execution_signed, fixture.execution_approval, fixture.policy, fixture.scope,
+            host_helper_clock_v1(), host_helper_clock_v1)
+        expect(executing.error).to_equal("")
+        expect(executing.lease.?).to_equal(true)
+        expect(distributed_operation_journal_lookup_v2(executing.owner.journal,
+            fixture.request.operation.id).unwrap().state).to_equal("executing")
+        val before = host_available_capacity_v1(executing.owner.ledger).unwrap()
+        val denied = host_capacity_owner_expire_prepared_owned_v3(executing.owner,
+            fixture.request.operation.id, fixture.request.intent.reservation.prepare_deadline_ms)
+        expect(denied.error).to_equal("execution-reconciliation-required")
+        expect(denied.settled).to_equal(false)
+        prepared_expiry_same_owner_v3(denied.owner, executing.owner)
+        expect(distributed_operation_journal_lookup_v2(denied.owner.journal,
+            fixture.request.operation.id).unwrap().state).to_equal("executing")
+        expect(prepared_expiry_row_v3(denied.owner, fixture.request.operation.id).state == HostReservationStateV1.Released).to_equal(false)
+        val after = host_available_capacity_v1(denied.owner.ledger).unwrap()
+        expect(after.cpu_millis).to_equal(before.cpu_millis)
+        expect(after.memory_bytes).to_equal(before.memory_bytes)
+        expect(host_capacity_owner_close_v1(denied.owner).unwrap()).to_equal(true)
+        dir_remove(fixture.root, true)
+
+    it "retains the unchanged owner for missing operations and invalid timer values":
+        step("Refuse lookup and clock failures while preserving the actual journal lease and charged ledger")
+        val fixture = host_helper_fixture_v1()
+        val prepared = prepared_expiry_prepare_v3(fixture)
+        expect(prepared.error).to_equal("")
+        var retained = prepared.owner
+        for operation in ["missing-helper", ""]:
+            val denied = host_capacity_owner_expire_prepared_owned_v3(retained, operation,
+                fixture.request.intent.reservation.prepare_deadline_ms)
+            expect(denied.error).to_equal("OPERATION_NOT_FOUND")
+            expect(denied.settled).to_equal(false)
+            prepared_expiry_same_owner_v3(denied.owner, retained)
+            retained = denied.owner
+        val invalid_clock = host_capacity_owner_expire_prepared_owned_v3(retained, fixture.request.operation.id, -1)
+        expect(invalid_clock.error).to_equal("invalid-clock")
+        expect(invalid_clock.settled).to_equal(false)
+        prepared_expiry_same_owner_v3(invalid_clock.owner, retained)
+        expect(distributed_operation_journal_lookup_v2(invalid_clock.owner.journal,
+            fixture.request.operation.id).unwrap().state).to_equal("admitted")
+        expect(host_capacity_owner_close_v1(invalid_clock.owner).unwrap()).to_equal(true)
+        dir_remove(fixture.root, true)

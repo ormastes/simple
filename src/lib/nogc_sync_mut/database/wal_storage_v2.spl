@@ -1,0 +1,27 @@
+# Storage selection is an owned capability, never a pathname-to-owner registry.
+# Windows callers retain the actual protected journal directory and writer.
+use std.nogc_sync_mut.io.windows_journal_store_v1.WindowsJournalStoreV1
+use std.nogc_sync_mut.io.file_ops.{file_read_regular_no_follow_bounded, file_exists}
+use std.nogc_sync_mut.io.journal_storage_backend_v3.*
+
+pub fn database_wal_read_stored_v2(root: text, relative: text, maximum: i64,
+        store: Option<WindowsJournalStoreV1>) -> Result<Option<text>, text>:
+    database_wal_read_stored_v3(root, relative, maximum, journal_storage_backend_windows_v3(store))
+
+pub fn database_wal_read_stored_v3(root: text, relative: text, maximum: i64,
+        backend: JournalStorageBackendV3) -> Result<Option<text>, text>:
+    if not journal_storage_is_legacy_v3(backend):
+        return journal_storage_read_v3(backend, "database-wal/" + relative, maximum)
+    val path = root + "/" + relative
+    if not file_exists(path): return Ok(nil)
+    Ok(Some(file_read_regular_no_follow_bounded(path, maximum)?))
+
+pub fn database_wal_read_required_v2(root: text, relative: text, maximum: i64,
+        store: Option<WindowsJournalStoreV1>) -> Result<text, text>:
+    database_wal_read_required_v3(root, relative, maximum, journal_storage_backend_windows_v3(store))
+
+pub fn database_wal_read_required_v3(root: text, relative: text, maximum: i64,
+        backend: JournalStorageBackendV3) -> Result<text, text>:
+    match database_wal_read_stored_v3(root, relative, maximum, backend)?:
+        case Some(bytes): Ok(bytes)
+        case nil: Err("committed WAL object missing")

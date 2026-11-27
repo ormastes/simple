@@ -8,7 +8,7 @@
 # doc/08_tracking/bug/stage2_closure_capture_write_silently_dropped_2026-10-11.md
 
 use compiler.core.ast.{DECL_FN, DECL_LAZY_VAL, DECL_VAL, DECL_VAR, decl_count, decl_get, expr_get, stmt_get}
-use compiler.core.ast.{arm_get_binding, arm_get_body, arm_get_guard, arm_get_pattern}
+use compiler.core.ast.{arm_get_binding, arm_get_body, arm_get_guard, arm_get_pattern, elif_get_body, elif_get_cond, elif_get_else}
 use compiler.core.ast_expr.{EXPR_ARRAY_LIT, EXPR_ASSIGN, EXPR_BINARY, EXPR_BLOCK, EXPR_CALL}
 use compiler.core.ast_expr.{EXPR_COMPOUND_ASSIGN, EXPR_DO_BLOCK, EXPR_FIELD_ACCESS, EXPR_FOR, EXPR_IDENT}
 use compiler.core.ast_expr.{EXPR_IF, EXPR_INDEX, EXPR_LAMBDA, EXPR_MATCH, EXPR_METHOD_CALL, EXPR_NULL_COALESCE}
@@ -36,6 +36,7 @@ var cw_error: text = ""
 var cw_error_line: i64 = 0
 var cw_error_col: i64 = 0
 var cw_globals: [text] = []
+var cw_warnings: [text] = []
 
 fn cw_is_global(name: text) -> bool:
     for g in cw_globals:
@@ -113,6 +114,22 @@ fn cw_note_assign(target_eid: i64, span_id: i64):
     elif kind == 0 and not cw_is_global(t.s_val):
         cw_declare(t.s_val)
 
+# W-CAPTURE-MUTATION (staged warning, twin of the seed MUTATING_METHODS): a
+# receiver-mutating builtin call on a captured local lands on the by-value
+# snapshot and is dropped. User `me` methods are not resolved here.
+fn cw_is_mutating_method(m: text) -> bool:
+    m == "push" or m == "insert" or m == "remove" or m == "pop" or m == "clear" or m == "set" or m == "sort" or m == "extend" or m == "append"
+
+fn cw_mutation_message(name: text, method: text, in_fn: text) -> text:
+    val site = if in_fn == "<closure>": "a closure" else: "nested fn `" + in_fn + "`"
+    "warning[W-CAPTURE-MUTATION]: `" + name + "." + method + "(...)` mutates captured variable `" + name + "` inside " + site + ": closures capture enclosing locals by value, so the mutation is dropped; return the new value or use a module-level `var`"
+
+fn cw_note_method_call(e: CoreExpr):
+    if e.left < 0 or not cw_is_mutating_method(e.s_val): return
+    val r: CoreExpr = expr_get(e.left)
+    if r.tag == EXPR_IDENT and cw_lookup(r.s_val) == 2:
+        cw_warnings.push(cw_mutation_message(r.s_val, e.s_val, cw_current_fn()))
+
 fn cw_declare_iter(iter_name: text):
     if iter_name == "": return
     if iter_name.starts_with("("):
@@ -178,6 +195,11 @@ fn cw_walk_stmt(sid: i64):
         cw_walk_expr(s.expr_idx)
         cw_walk_arms(s.body)
         return
+    if tag == STMT_IF and s.type_tag >= 0:
+        cw_walk_expr(elif_get_cond(s.type_tag))
+        cw_walk_stmts(elif_get_body(s.type_tag))
+        cw_walk_stmts(elif_get_else(s.type_tag))
+        return
     if tag == STMT_IF or tag == STMT_WHILE or tag == STMT_BLOCK:
         cw_walk_expr(s.expr_idx)
         cw_walk_stmts(s.body)
@@ -233,6 +255,7 @@ fn cw_walk_expr(eid: i64):
         cw_walk_expr(e.extra)
         return
     if tag == EXPR_CALL or tag == EXPR_METHOD_CALL or tag == EXPR_ARRAY_LIT or tag == EXPR_TUPLE:
+        if tag == EXPR_METHOD_CALL: cw_note_method_call(e)
         cw_walk_expr(e.left)
         for aid in e.args:
             cw_walk_expr(aid)
@@ -243,6 +266,7 @@ fn cw_walk_expr(eid: i64):
 
 # Returns "" when the module is clean, else the first diagnostic.
 fn capture_write_check_module() -> text:
+    cw_warnings = []
     cw_error = ""
     cw_error_line = 0
     cw_error_col = 0
@@ -280,4 +304,63 @@ fn capture_write_error_line() -> i64:
 fn capture_write_error_col() -> i64:
     cw_error_col
 
-export capture_write_check_module, capture_write_error_line, capture_write_error_col
+# W-CAPTURE-MUTATION warnings from the last capture_write_check_module().
+fn capture_write_warnings() -> [text]:
+    cw_warnings
+
+export capture_write_check_module, capture_write_error_line, capture_write_error_col, capture_write_warnings
+
+# ===== CaptureWriteCheckState snapshot (ParseContext stage 1) =====
+# See doc/05_design/compiler/frontend/parse_context_per_context_state.md.
+# take moves this file's parse state out and installs fresh initial
+# owners; install makes a taken snapshot active again.
+pub struct CaptureWriteCheckState:
+    cw_names: [text]
+    cw_name_frame: [i64]
+    cw_frame_boundary: [bool]
+    cw_frame_fn: [text]
+    cw_pending_fn: text
+    cw_error: text
+    cw_error_line: i64
+    cw_error_col: i64
+    cw_globals: [text]
+    cw_warnings: [text]
+
+pub fn capture_write_check_state_take() -> CaptureWriteCheckState:
+    val s = CaptureWriteCheckState(
+        cw_names: cw_names,
+        cw_name_frame: cw_name_frame,
+        cw_frame_boundary: cw_frame_boundary,
+        cw_frame_fn: cw_frame_fn,
+        cw_pending_fn: cw_pending_fn,
+        cw_error: cw_error,
+        cw_error_line: cw_error_line,
+        cw_error_col: cw_error_col,
+        cw_globals: cw_globals,
+        cw_warnings: cw_warnings
+    )
+    cw_names = []
+    cw_name_frame = []
+    cw_frame_boundary = []
+    cw_frame_fn = []
+    cw_pending_fn = ""
+    cw_error = ""
+    cw_error_line = 0
+    cw_error_col = 0
+    cw_globals = []
+    cw_warnings = []
+    s
+
+pub fn capture_write_check_state_install(s: CaptureWriteCheckState):
+    cw_names = s.cw_names
+    cw_name_frame = s.cw_name_frame
+    cw_frame_boundary = s.cw_frame_boundary
+    cw_frame_fn = s.cw_frame_fn
+    cw_pending_fn = s.cw_pending_fn
+    cw_error = s.cw_error
+    cw_error_line = s.cw_error_line
+    cw_error_col = s.cw_error_col
+    cw_globals = s.cw_globals
+    cw_warnings = s.cw_warnings
+
+export CaptureWriteCheckState, capture_write_check_state_take, capture_write_check_state_install

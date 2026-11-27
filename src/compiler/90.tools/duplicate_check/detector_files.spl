@@ -12,7 +12,7 @@ fn _detector_path_absolute_raw(path: text) -> text?:
         rt_path_absolute(path)
 
 fn collect_detector_files(path: text, config: DuplicationConfig) -> [text]:
-    if path.ends_with(".spl"):
+    if is_detector_source_path(path, config):
         if should_exclude_detector_path(path, config):
             return []
         return [path]
@@ -29,7 +29,7 @@ fn collect_detector_files(path: text, config: DuplicationConfig) -> [text]:
     var files = []
     for physical_path in dir_walk_native(scan_path):
         val file_path = detector_restore_caller_path(physical_path, scan_path, caller_root)
-        if not file_path.ends_with(".spl"):
+        if not is_detector_source_path(file_path, config):
             continue
         if should_exclude_detector_path(file_path, config):
             continue
@@ -37,10 +37,15 @@ fn collect_detector_files(path: text, config: DuplicationConfig) -> [text]:
 
     files
 
+fn is_detector_source_path(path: text, config: DuplicationConfig) -> bool:
+    if path.ends_with(".spl"):
+        return true
+    config.include_c_sources and (path.ends_with(".c") or path.ends_with(".h"))
+
 fn detector_caller_root(path: text) -> text:
     var root = path.replace("\\", "/")
     while root.len() > 1 and root.ends_with("/"):
-        root = root.substring(0, root.len() - 1)
+        root = root.substring(0, root.byte_len() - 1)
     root
 
 fn detector_restore_caller_path(physical_path: text, scan_path: text, caller_root: text) -> text:
@@ -48,7 +53,7 @@ fn detector_restore_caller_path(physical_path: text, scan_path: text, caller_roo
     val prefix = scan_path + "/"
     if not normalized.starts_with(prefix):
         return normalized
-    caller_root + "/" + normalized.substring(prefix.len(), normalized.len())
+    caller_root + "/" + normalized.substring(prefix.len(), normalized.byte_len())
 
 fn should_exclude_detector_path(path: text, config: DuplicationConfig) -> bool:
     for pattern in config.exclude_patterns:
@@ -70,7 +75,7 @@ fn matches_detector_exclude(path: text, pattern: text) -> bool:
             return true
 
         if trimmed_pattern.starts_with("**/"):
-            val suffix_pattern = trimmed_pattern.substring(3, trimmed_pattern.len())
+            val suffix_pattern = trimmed_pattern.substring(3, trimmed_pattern.byte_len())
             if wildcard_match(path, suffix_pattern):
                 return true
             return wildcard_match(base_name, suffix_pattern)
@@ -78,10 +83,11 @@ fn matches_detector_exclude(path: text, pattern: text) -> bool:
         return false
 
     if trimmed_pattern.ends_with("/"):
-        val segment = trimmed_pattern.substring(0, trimmed_pattern.len() - 1)
+        val segment = trimmed_pattern.substring(0, trimmed_pattern.byte_len() - 1)
         if segment.len() == 0:
             return false
-        return path.contains("/{segment}/") or path.starts_with("{segment}/") or path.contains("{segment}/")
+        # Anchored to a whole path segment: `vendor/` must not match `myvendor/`.
+        return path.contains("/{segment}/") or path.starts_with("{segment}/")
 
     path.contains(trimmed_pattern)
 
@@ -89,7 +95,7 @@ fn basename_text(path: text) -> text:
     var i = path.len() - 1
     while i >= 0:
         if path.substring(i, i + 1) == "/":
-            return path.substring(i + 1, path.len())
+            return path.substring(i + 1, path.byte_len())
         i = i - 1
     path
 

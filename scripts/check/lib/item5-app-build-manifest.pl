@@ -52,6 +52,7 @@ my $target_profile = $target_args{'target-profile'} // '';
 my $target = exists $manifest->{target} && ref($manifest->{target}) eq 'HASH'
     ? $manifest->{target} : {};
 my $is_target = length($target_profile) > 0;
+my $native_runtime;
 if ($is_target) {
     my $profile = Item5QemuProfile::profile($target_profile)
         or fail("unsupported fixed QEMU target profile");
@@ -102,6 +103,12 @@ if ($is_target) {
     ($manifest->{schema} // '') eq 'item5-simple-app-build-v2'
         or fail("native execution requires item5-simple-app-build-v2");
     keys(%target_args) == 0 or fail("target arguments require a target profile");
+    $native_runtime = $hello->{runtime_archive_sha256};
+    defined($native_runtime) && !ref($native_runtime) &&
+        $native_runtime =~ /\A[0-9a-f]{64}\z/
+        or fail("native Hello receipt lacks a valid runtime archive hash");
+    ($manifest->{runtime_archive_sha256} // '') eq $native_runtime
+        or fail("native app build manifest runtime differs from the Hello runtime");
 }
 my $app_source = $manifest->{app_source_commit} // '';
 my $app_tree = $manifest->{app_source_tree_oid} // '';
@@ -127,6 +134,9 @@ for my $entry (@roles) {
             ($app->{target_triple} // '') eq $target->{triple} &&
             ($app->{runtime_archive_sha256} // '') eq $target->{runtime_archive_sha256}
             or fail("target app manifest mismatch for $role");
+    } else {
+        ($app->{runtime_archive_sha256} // '') eq $native_runtime
+            or fail("native app runtime differs from the Hello runtime for $role");
     }
 }
 print join("\t", $compiler, $producer_source, $app_source, $app_tree), "\n";

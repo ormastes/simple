@@ -3,10 +3,29 @@
 REQ-EXTERNAL-IO-001 files;
 REQ-EXTERNAL-IO-003 symmetric output; REQ-EXTERNAL-IO-004 strict failure.
 Authored integration scenarios; execution and docgen require admitted runtime.
+
+## Compatibility and limitations
+
+All wire-byte, codec, positional and append oracles run on every host. Two
+examples assert POSIX semantics the Windows host honestly does not provide
+and are skipped on Windows with an explicit reason (oracles unchanged,
+qualified on POSIX hosts):
+
+- "keeps legacy positional writes write-only and does not widen creation
+  mode": POSIX mode bits. `set_permissions` (package_sffi) is documented
+  Unix-only and `rt_file_mode` reports the CRT approximation (0644) on
+  Windows, so the 0200 owner-write-only contract has no honest Windows
+  provider.
+- "keeps empty legacy appends successful without creating files or
+  parents": the Windows CRT append opens the absent path (creating the
+  file) before the empty write, so the POSIX no-create empty-append
+  contract has no honest Windows provider.
 """
 use std.spec.*
 use std.common.encoding.external_text.{Encoding, TextByteOrder, BomPolicy, ExternalFormat, utf8_format}
 use std.common.string_core.{text_to_bytes}
+use std.nogc_sync_mut.env.platform.{is_windows}
+use std.nogc_sync_mut.spec.{skip}
 use std.nogc_sync_mut.io_runtime.{file_write_bytes, file_read_bytes_result, file_read_result, file_delete, getpid, time_now_unix_micros}
 use std.io.types.{IoErrorKind, FileMode}
 use std.nogc_sync_mut.io.file_ops.{file_write, file_read_text_at, file_write_text_at, file_append}
@@ -23,6 +42,16 @@ fn external_io_utf16le() -> ExternalFormat:
 
 fn external_io_scratch() -> text:
     get_temp_dir() + "/external-text-io-{getpid()}-{time_now_unix_micros()}.bin"
+
+fn external_io_mode_bits_unsupported() -> text:
+    if is_windows():
+        return "Windows host has no POSIX mode bits: set_permissions (package_sffi) is documented Unix-only and rt_file_mode reports the CRT approximation (0644); the owner-write-only (0200) contract remains qualified on POSIX hosts"
+    ""
+
+fn external_io_empty_append_unsupported() -> text:
+    if is_windows():
+        return "Windows CRT append opens the absent path (creating the file) before the empty write; the POSIX no-create empty-append contract remains qualified on POSIX hosts"
+    ""
 
 describe "Declared external text on actual files":
     it "retains UTF-16 file bytes before decoding a non-BMP scalar and NUL":
@@ -159,33 +188,41 @@ describe "Declared external text on actual files":
         expect(file_read_bytes_result(path).unwrap()).to_equal([240u8, 159u8, 152u8, 128u8])
         expect(file_delete(path)).to_equal(true)
 
-    it "keeps legacy positional writes write-only and does not widen creation mode":
-        # @req: REQ-EXTERNAL-IO-003
-        step("Create a real file and restrict its mode to owner-write only")
-        val path = external_io_scratch()
-        expect(file_write_bytes(path, [65u8, 66u8, 67u8])).to_equal(true)
-        expect(set_permissions(path, 128)).to_equal(true)
-        expect(file_mode(path) & 511).to_equal(128)
-        step("Write through the legacy positional API without requiring read permission")
-        expect(file_write_text_at(path, 1, "Z")).to_equal(1)
-        expect(file_mode(path) & 511).to_equal(128)
-        expect(set_permissions(path, 384)).to_equal(true)
-        expect(file_read_bytes_result(path).unwrap()).to_equal([65u8, 90u8, 67u8])
-        expect(file_delete(path)).to_equal(true)
-        step("A newly created legacy positional file never grants group or other write")
-        expect(file_write_text_at(path, 0, "A")).to_equal(1)
-        expect(file_mode(path) & 18).to_equal(0)
-        expect(file_delete(path)).to_equal(true)
+    val mode_bits_unsupported = external_io_mode_bits_unsupported()
+    if mode_bits_unsupported != "":
+        skip("keeps legacy positional writes write-only and does not widen creation mode", mode_bits_unsupported)
+    else:
+        it "keeps legacy positional writes write-only and does not widen creation mode":
+            # @req: REQ-EXTERNAL-IO-003
+            step("Create a real file and restrict its mode to owner-write only")
+            val path = external_io_scratch()
+            expect(file_write_bytes(path, [65u8, 66u8, 67u8])).to_equal(true)
+            expect(set_permissions(path, 128)).to_equal(true)
+            expect(file_mode(path) & 511).to_equal(128)
+            step("Write through the legacy positional API without requiring read permission")
+            expect(file_write_text_at(path, 1, "Z")).to_equal(1)
+            expect(file_mode(path) & 511).to_equal(128)
+            expect(set_permissions(path, 384)).to_equal(true)
+            expect(file_read_bytes_result(path).unwrap()).to_equal([65u8, 90u8, 67u8])
+            expect(file_delete(path)).to_equal(true)
+            step("A newly created legacy positional file never grants group or other write")
+            expect(file_write_text_at(path, 0, "A")).to_equal(1)
+            expect(file_mode(path) & 18).to_equal(0)
+            expect(file_delete(path)).to_equal(true)
 
-    it "keeps empty legacy appends successful without creating files or parents":
-        # @req: REQ-EXTERNAL-IO-003
-        step("Append empty text to an absent path")
-        val path = external_io_scratch()
-        expect(file_exists_str(path)).to_equal(false)
-        expect(file_append(path, "")).to_equal(true)
-        expect(file_exists_str(path)).to_equal(false)
-        step("Append empty text under a missing parent without creating either entry")
-        val nested = path + "/missing-parent/file"
-        expect(file_append(nested, "")).to_equal(true)
-        expect(file_exists_str(path)).to_equal(false)
-        expect(file_exists_str(nested)).to_equal(false)
+    val empty_append_unsupported = external_io_empty_append_unsupported()
+    if empty_append_unsupported != "":
+        skip("keeps empty legacy appends successful without creating files or parents", empty_append_unsupported)
+    else:
+        it "keeps empty legacy appends successful without creating files or parents":
+            # @req: REQ-EXTERNAL-IO-003
+            step("Append empty text to an absent path")
+            val path = external_io_scratch()
+            expect(file_exists_str(path)).to_equal(false)
+            expect(file_append(path, "")).to_equal(true)
+            expect(file_exists_str(path)).to_equal(false)
+            step("Append empty text under a missing parent without creating either entry")
+            val nested = path + "/missing-parent/file"
+            expect(file_append(nested, "")).to_equal(true)
+            expect(file_exists_str(path)).to_equal(false)
+            expect(file_exists_str(nested)).to_equal(false)

@@ -1,0 +1,87 @@
+#!/bin/sh
+# check-xray-native-inprocess-e2e.shs — XRay PR5b: a real `--xray` native
+# AArch64 module is traced IN-PROCESS by the pure-Simple patcher.
+#
+# Design: doc/04_architecture/compiler/xray/xray_compiler_structural_change_2026-11-06.md
+# C.2-C.6 and the section F PR5b row. x86-64 counterpart:
+# scripts/check/check-xray-native-x86-64-inprocess-e2e.shs. The ISA-neutral
+# flow lives in scripts/check/lib/xray-inprocess-e2e-lib.shs.
+#
+# What it does (aarch64 Linux host; anywhere else the verdict is ERROR)
+#   1. Builds test/fixtures/xray/xray_inprocess_prog.spl through the pure-Simple
+#      CLI entry `cli_compile` (`compile --native --backend=native [--xray]`,
+#      shared-library intent) run under the given Simple binary: once with
+#      --xray, once without.
+#   2. Object/link inspection: the --xray module has `.simple_xray_map`, a
+#      PROTECTED __simple_xray_trampoline_v1, the two runtime entry points, and
+#      every sled BL lands on the trampoline (no PLT veneer). The OFF module has
+#      no xray section or symbol.
+#   3. Trampoline twin: the words of __simple_xray_trampoline_v1 in the built
+#      --xray module equal xray_native_trampoline_words_aarch64_v1 (Simple),
+#      and the handler makes no call and touches no FP/SIMD register.
+#   4. Runs test/fixtures/xray/xray_native_inprocess_host.spl under the Simple
+#      binary: dlopen, map location + PREL64 relocation, leaf admission,
+#      registration, aspect params -> selection -> PR4 control plane -> real
+#      rt_mprotect RW/RX + I-cache sync on the module's own text. Two sessions
+#      with different pointcuts: only the selected functions' sleds turn on,
+#      the handler records entry/exit per call, results equal the untraced
+#      baseline, request_stop restores every sled word and records stop.
+#
+# The Simple binary must be able to grant PROT_EXEC on aarch64 Linux (a seed
+# built from PR5b or later; older seeds refuse and the host fails closed).
+#
+# Verdict (last stdout line):
+#   PASS — <n> check(s) (...)              exit 0
+#   FAIL — <reason>                        exit 1
+#   ERROR — nothing was checked (<reason>) exit 2
+# --selftest runs before every scan and is fatal.
+#
+# Usage
+#   sh scripts/check/check-xray-native-inprocess-e2e.shs --simple <bin> [--keep]
+#   sh scripts/check/check-xray-native-inprocess-e2e.shs --selftest
+# Env: CLANG, LLVM_OBJDUMP, LLVM_READELF, XRAY_E2E_TIMEOUT (s, 1500).
+
+set -u
+
+XR_NAME=xray-inproc-e2e
+XR_UNAME_M=aarch64
+XR_TRIPLE=aarch64-unknown-linux-gnu
+
+# A sled is `B +32` immediately followed by the sled's `stp x16, x17`; a bare
+# 14000008 word can also occur in the runtime's own compiled code.
+xr_isa_sleds() {
+    sleds=$(grep -A1 -E '^ *[0-9a-f]+:\s+14000008\s+b\s' "$WORK/on.dis" | grep -cE '\sstp\s+x16, x17, \[sp, #-0x10\]!')
+    bl_tramp=$(grep -cE '\sbl\s+0x[0-9a-f]+ <__simple_xray_trampoline_v1>' "$WORK/on.dis")
+    [ "$sleds" -gt 0 ] && [ "$bl_tramp" -eq "$sleds" ] || { echo "$sleds sled(s) but $bl_tramp direct BL(s) to the trampoline"; return 1; }
+    echo "$sleds"
+}
+
+xr_isa_off_sleds() {
+    grep -cE '^ *[0-9a-f]+:\s+14000008\s+b\s' "$WORK/off.dis"
+}
+
+# No AArch64-only classifier fixtures beyond the shared session verdicts.
+XR_ISA_SELFTEST_CHECKS=0
+xr_isa_selftest() { return 0; }
+
+xr_isa_twin() {
+    "$OBJDUMP" -d --disassemble-symbols=__simple_xray_trampoline_v1 "$WORK/libon.so" \
+        | sed -n 's/^ *[0-9a-f]*:\s*\([0-9a-f]\{8\}\)\s.*/\1/p' > "$WORK/tramp.words"
+    bl_line=$(sed -n '36p' "$WORK/tramp.words")
+    bl_disp=$(( 0x$bl_line & 0x3FFFFFF ))
+    [ "$bl_disp" -ge 33554432 ] && bl_disp=$((bl_disp - 67108864))
+    XRAY_TWIN_BL=$bl_disp timeout "$STEP_TIMEOUT" "$SIMPLE_BIN" run test/fixtures/xray/xray_native_trampoline_twin_dump.spl \
+        2>/dev/null | grep -E '^([0-9a-f]{8}|TWIN-OK .*)$' > "$WORK/twin.out"
+    grep -q '^TWIN-OK 69$' "$WORK/twin.out" || { echo "Simple twin did not run"; return 2; }
+    grep -vE '^TWIN' "$WORK/twin.out" > "$WORK/twin.words"
+    cmp -s "$WORK/tramp.words" "$WORK/twin.words" || { echo "trampoline words differ from the Simple twin"; return 1; }
+    "$OBJDUMP" -d --no-show-raw-insn --disassemble-symbols=simple_xray_native_handler_v1 "$WORK/libon.so" > "$WORK/handler.dis"
+    grep -qE '<simple_xray_native_handler_v1>:' "$WORK/handler.dis" || { echo "handler not found"; return 2; }
+    if grep -qE '\s(bl|blr|br)\s|\s[qdsvh][0-9]+\b' "$WORK/handler.dis"; then
+        echo "handler calls out or touches FP/SIMD registers"; return 1
+    fi
+    return 0
+}
+
+. "$(dirname "$0")/lib/xray-inprocess-e2e-lib.shs"
+xr_main "$@"

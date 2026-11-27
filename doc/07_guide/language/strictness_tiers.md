@@ -70,6 +70,22 @@ families include: `unused_code` (W001-3), `style_convention` (ST001-3),
 is the configurable strict-lint + `@deny(non_exhaustive_match)` + proof-coverage
 realization that document prescribed — dialed by context, not asserted.
 
+## Compile-time value-match exhaustiveness (`E-MATCH-NONEXHAUSTIVE-VALUE`)
+
+User decision 2026-11-02: a `match` **used as a value** that is not exhaustive
+is a **compile-time error** in every profile, unless it has an unguarded `_`
+(or bare binder) arm. Statement matches are unaffected. Enum coverage is
+decided on the owner-qualified enum (never the bare-name registry); an
+unresolvable owner fails closed. Rollout is staged by
+`value_match_exhaustiveness = warn | error` (CLI
+`--value-match-exhaustiveness`, env `SIMPLE_VALUE_MATCH_EXHAUSTIVENESS`, SDN
+`[compiler]` key); default is `warn` until the tree is clean and phase 3 has
+passed, then `error`. `SIMPLE_SAFETY_PROFILE=critical` already implies
+`error`. This supersedes the "runtime warning by default" behaviour below for
+value-position matches; the runtime diagnostics remain as a backstop for
+statement matches and for code compiled in `warn` mode. Precise rule:
+`doc/05_design/exhaustive_value_match.md`.
+
 ## Runtime match-exhaustiveness diagnostics (`SIMPLE_SAFETY_PROFILE`)
 
 **Distinct from the lint-`profile` axis above.** The `[lints] profile=...` /
@@ -103,6 +119,14 @@ prior compile-time attempt at the same idea (`src/compiler/35.semantics/lint/mat
 `src/compiler/70.backend/backend/exhaustiveness_validator.spl`,
 `src/compiler/95.interp/interpreter/pattern.spl`) is dead code, uncalled,
 precisely because of this.
+
+**Scope of this table (2026-11-14).** It describes the pure-Simple **core
+interpreter** only. On the Rust seed (interpreter and JIT/native) a `match`
+that takes no arm is a hard runtime error under **every** profile — statement
+and expression form, any scrutinee type — per the owner decision recorded in
+`doc/08_tracking/bug/match_statement_no_arm_silent_noop_2026-11-14.md`. The
+core interpreter's warn-by-default row below is a tracked gap against that
+rule, not a second policy.
 
 Two independent diagnostics, both interpreter-tier, both landed in
 `src/compiler/10.frontend/core/interpreter/eval_tables.spl` and wired from

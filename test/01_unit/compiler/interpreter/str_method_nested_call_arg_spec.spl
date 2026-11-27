@@ -1,0 +1,81 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# @req REQ-INTERP-STR-NESTED-DISPATCH
+#
+# Reproducer for doc/08_tracking/bug/str_byte_len_not_found_in_nested_call_context_2026-11-12.md:
+# the diag-P5 lane reported `s.substring(a, s.byte_len())` failing on the
+# phase-1 seed interpreter with "method 'byte_len' not found on value of type
+# str in nested call context" while hoisting `s.byte_len()` to a `val` worked.
+# Every shape below is the un-hoisted form; the hoisted form is the oracle.
+# Similar-pattern cases cover the other str methods nested as call arguments
+# and chained on a method-call receiver (the path that goes through the
+# seed's chained-call dispatcher, interpreter_helpers/method_dispatch.rs).
+use std.spec.step
+
+struct Doc:
+    body: text
+impl Doc:
+    fn text_of(self) -> text:
+        self.body
+    fn text_len_of(self) -> i64:
+        self.text_of().byte_len()
+    fn tail(self) -> text:
+        self.text_of().substring(1, self.text_of().byte_len())
+
+struct Rep:
+    new_text: text
+struct Cand:
+    replacements: [Rep]
+
+fn apply_to_body(body: text, start: i64, end: i64, new_text: text) -> text:
+    var result = body
+    result = result.substring(0, start) + new_text + result.substring(end, result.byte_len())
+    result
+
+fn apply_hoisted(body: text, start: i64, end: i64, new_text: text) -> text:
+    var result = body
+    val n = result.byte_len()
+    result = result.substring(0, start) + new_text + result.substring(end, n)
+    result
+
+fn size_of(c: Cand) -> i64:
+    var size = 0
+    for r in c.replacements:
+        size = size + r.new_text.byte_len()
+    size
+
+describe "str methods nested as call arguments dispatch on the interpreter":
+    it "resolves byte_len inside a substring argument exactly like the hoisted form":
+        step("plain local receiver, multibyte text so byte_len != len")
+        val s = "héllo"
+        val hoisted = s.byte_len()
+        expect(s.substring(0, s.byte_len())).to_equal(s.substring(0, hoisted))
+        expect(s.substring(0, s.byte_len())).to_equal("héllo")
+
+        step("var receiver inside a + chain (diag-P5 apply_to_body shape)")
+        expect(apply_to_body("abcdef", 1, 3, "XY")).to_equal(apply_hoisted("abcdef", 1, 3, "XY"))
+        expect(apply_to_body("abcdef", 1, 3, "XY")).to_equal("aXYdef")
+
+    it "resolves byte_len on a struct-method call receiver (diag-P5 text_len_of shape)":
+        val d = Doc(body: " héllo ")
+        step("chained receiver: self.text_of().byte_len()")
+        expect(d.text_len_of()).to_equal(8)
+        step("chained receiver as the nested argument too")
+        expect(d.tail()).to_equal("héllo ")
+
+    it "resolves byte_len on a loop-bound struct field inside a binary op (diag-P5 rank_key shape)":
+        val c = Cand(replacements: [Rep(new_text: "ab "), Rep(new_text: "héllo")])
+        expect(size_of(c)).to_equal(9)
+
+    it "resolves the sibling str methods len, trim, char_at nested as call arguments":
+        val s = "  héllo  "
+        step("len nested in substring")
+        expect("abc".substring(0, "abc".len())).to_equal("abc")
+        step("trim then len nested in substring (two-deep chain in argument position)")
+        val a = "  hello  "
+        expect(a.trim().substring(0, a.trim().len())).to_equal("hello")
+        expect(s.trim().substring(0, s.trim().byte_len())).to_equal("héllo")
+        step("char_at result used as a nested receiver")
+        expect(s.trim().substring(0, s.trim().char_at(0).byte_len())).to_equal("h")
+        step("nested in a free-function argument")
+        expect(apply_to_body(s.trim(), 0, s.trim().char_at(0).len(), "H")).to_equal("Héllo")

@@ -134,3 +134,27 @@ affected spec to `check(<opt> != nil)` / `check(<opt> == nil)`, and one
 `check(<text> != "")`. All 21 examples pass after the rewrite; no assertion
 was weakened (`!= nil` / `== nil` / `!= ""` check the identical condition the
 original `.?` intended). Spec: same file as above.
+
+## Verification 2026-11-25 — closure re-confirmed (STALE, stays closed)
+
+Re-ran this entry's own program on the tree-walk lane with the pinned
+worktree binary (`bin/simple.exe`, Rust seed v1.0.0-rc.1, 38,403,072 bytes,
+Windows 11 / Git Bash):
+
+```
+SIMPLE_EXECUTION_MODE=interpreter bin/simple.exe run <repro>.spl
+EQ-true
+NEQ-true: false
+```
+
+Identical to the 2026-09-13 closure measurement: the `bool`-typed parameter
+receives a real boolean for both the Some and nil cases, passed directly as a
+call argument. The spec-level workaround in
+`test/02_integration/lib/.spipe_matchers_persistence_intensive_spec.spl`
+remains in place and remains correct. The split-out JIT-lane defect
+(`jit_dot_question_as_bool_call_arg_yields_special_value_2026-09-13.md`) is
+tracked separately and is unaffected by this note. Full-spec re-run was not
+possible on this host (release/1.0.0 HEAD is source/binary inconsistent: the
+pinned seed rejects `@representation_boundary`, so `bin/simple.exe test`
+fails repo-wide before any spec executes); the closure-relevant lane was
+verified directly with `run` instead.

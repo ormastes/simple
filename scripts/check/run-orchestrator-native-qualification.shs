@@ -1,0 +1,680 @@
+#!/bin/sh
+# Unattended native qualification of the Simple orchestrator specs.
+#
+#   sh scripts/check/run-orchestrator-native-qualification.shs <self-hosted simple>
+#   sh scripts/check/run-orchestrator-native-qualification.shs --selftest
+#
+# What one run does, in order, with no prompts:
+#   1. --selftest (fatal) against a fake binary.
+#   2. Runs every `cited` and `inventory` spec of
+#      scripts/check/orchestrator_native_qualification_specs.txt with
+#      `<bin> test <spec>`, one spec per invocation, sequentially.
+#   3. SSH round trip: builds (or reuses) a compiled `simple-orchestrator` peer
+#      with `<bin> native-build src/app/orchestrator/main.spl`, generates a
+#      throwaway key/profile/gateway fixture, starts a user sshd on
+#      127.0.0.1:2299, runs the `ssh` spec against it, and stops the sshd.
+#   4. If scripts/check/check-linux-orchestrator-host-qemu.shs exists, calls it
+#      with `--run-specs <bin>` and passes its result through.
+#   5. Writes every verdict to build/orch-native-qual/last-run.txt.
+#
+# Classes (one per spec, from the runner's last `SPEC FILE VERDICT:` line and
+# the exit status, which is read directly into a variable, never via a pipe):
+#   PASS       rc 0, outcome OK (or legacy, no outcome=), executed>0, passed>0, failed=0
+#   BLOCKED    outcome=BLOCKED with failed=0 (a `pending("BLOCKED: ...")` fixture gate)
+#   NOT_RUN    outcome=NOT_RUN (platform mismatch / all examples skipped)
+#   FAIL       failed>0, outcome=ERROR, or any other non-zero exit
+#   CRASH      rc 124 (timeout) or rc >= 128 (signal)          -> counts as FAIL
+#   NO_VERDICT rc 0 but no `SPEC FILE VERDICT:` line           -> counts as FAIL
+#   VACUOUS    rc 0, clean outcome, but executed=0 or passed=0 -> counts as FAIL
+#
+# Exit: 0 = no FAIL (BLOCKED / NOT_RUN are reported distinctly and do not fail),
+#       1 = at least one FAIL-class verdict, 2 = script error (nothing trusted).
+# The last stdout line is always the verdict: `PASS — ...`, `BLOCKED — ...`,
+# `FAIL — ...` or `ERROR — ...`.
+#
+# Options:
+#   --root DIR      repo root (default: two levels above this script)
+#   --list FILE     spec list (default: the .txt next to this script)
+#   --out-dir DIR   output directory (default: <root>/build/orch-native-qual)
+#   --peer PATH     use this compiled simple-orchestrator instead of building one
+#   --only GROUPS   comma list of groups to run (default: cited,inventory,ssh)
+#   --no-ssh        skip the SSH round trip
+#   --no-guest      skip the guest-VM wrapper
+# Environment:
+#   ORCH_QUAL_SSH_PORT (2299)            ORCH_QUAL_SPEC_TIMEOUT (1800 s)
+#   ORCH_QUAL_PEER_BUILD_TIMEOUT (14400) ORCH_QUAL_NATIVE_BUILD_ARGS ("--threads 4")
+#   ORCH_QUAL_MEM_MAX (60% of MemAvailable, min 30G; 0 = no cgroup cap;
+#                      needs `systemd-run --user`)
+#   ORCH_QUAL_CACHE_SCOPE (orch-native-qual)
+
+set -u
+
+SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd)
+ROOT=$(cd "$SCRIPT_DIR/../.." && pwd)
+LIST=""
+OUT_DIR=""
+PEER=""
+ONLY="cited,inventory,ssh"
+DO_SSH=1
+DO_GUEST=1
+SELFTEST_ONLY=0
+BIN=""
+
+GATEWAY_ENTRY="src/app/orchestrator/main.spl"
+GUEST_WRAPPER_REL="scripts/check/check-linux-orchestrator-host-qemu.shs"
+INTENT_FIXTURE="test/fixtures/orchestration/caret_agent_session.sdn"
+SSH_PORT="${ORCH_QUAL_SSH_PORT:-2299}"
+SPEC_TIMEOUT="${ORCH_QUAL_SPEC_TIMEOUT:-1800}"
+PEER_BUILD_TIMEOUT="${ORCH_QUAL_PEER_BUILD_TIMEOUT:-14400}"
+# Memory cap for each spec run and for the peer build. Measured 2026-11-27 with
+# a stage-2 compiler: under 30G the peer build either OOMs (more than 4 parse
+# shards, or forced parallel workers) or degrades to ONE serial worker at
+# ~75 s per unit (~20 h for 976 modules). So the default takes 60% of the
+# memory available at start, never below 30G; UNVERIFIED above 30G.
+default_mem_max() {
+    dm_kb=$(sed -n 's/^MemAvailable: *\([0-9]*\) kB/\1/p' /proc/meminfo 2>/dev/null)
+    case "$dm_kb" in ''|*[!0-9]*) echo 30G; return ;; esac
+    dm_g=$((dm_kb * 6 / 10 / 1048576))
+    if [ "$dm_g" -lt 30 ]; then dm_g=30; fi
+    echo "${dm_g}G"
+}
+MEM_MAX="${ORCH_QUAL_MEM_MAX:-$(default_mem_max)}"
+CACHE_SCOPE="${ORCH_QUAL_CACHE_SCOPE:-orch-native-qual}"
+# 8 default workers under a 30G cap were OOM-killed (rc=143) on 2026-11-27; 4 fit.
+PEER_BUILD_ARGS="${ORCH_QUAL_NATIVE_BUILD_ARGS---threads 4}"
+
+die() {
+    echo "ERROR — $*"
+    exit 2
+}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest) SELFTEST_ONLY=1 ;;
+        --root) [ $# -ge 2 ] || die "--root needs a value"; ROOT="$2"; shift ;;
+        --list) [ $# -ge 2 ] || die "--list needs a value"; LIST="$2"; shift ;;
+        --out-dir) [ $# -ge 2 ] || die "--out-dir needs a value"; OUT_DIR="$2"; shift ;;
+        --peer) [ $# -ge 2 ] || die "--peer needs a value"; PEER="$2"; shift ;;
+        --only) [ $# -ge 2 ] || die "--only needs a value"; ONLY="$2"; shift ;;
+        --no-ssh) DO_SSH=0 ;;
+        --no-guest) DO_GUEST=0 ;;
+        -h|--help) sed -n '2,48p' "$0"; exit 0 ;;
+        -*) die "unknown option: $1" ;;
+        *) [ -z "$BIN" ] || die "exactly one binary expected"; BIN="$1" ;;
+    esac
+    shift
+done
+
+[ -n "$LIST" ] || LIST="$SCRIPT_DIR/orchestrator_native_qualification_specs.txt"
+[ -n "$OUT_DIR" ] || OUT_DIR="$ROOT/build/orch-native-qual"
+
+# ---------------------------------------------------------------------------
+# Verdict parsing
+# ---------------------------------------------------------------------------
+
+verdict_line() {
+    grep 'SPEC FILE VERDICT:' "$1" 2>/dev/null | tail -n 1
+}
+
+verdict_field() {
+    # verdict_field <line> <name>  (handles `declared>=N` too)
+    printf '%s\n' "$1" | tr ' ' '\n' | sed -n "s/^$2>\{0,1\}=//p" | head -n 1
+}
+
+is_uint() {
+    case "$1" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac
+}
+
+classify() {
+    # classify <rc> <logfile> -> class on stdout
+    c_rc="$1"
+    c_line=$(verdict_line "$2")
+    if [ "$c_rc" -eq 124 ] || [ "$c_rc" -ge 128 ]; then echo CRASH; return; fi
+    if [ -z "$c_line" ]; then
+        if [ "$c_rc" -eq 0 ]; then echo NO_VERDICT; else echo FAIL; fi
+        return
+    fi
+    c_outcome=$(verdict_field "$c_line" outcome)
+    c_executed=$(verdict_field "$c_line" executed)
+    c_passed=$(verdict_field "$c_line" passed)
+    c_failed=$(verdict_field "$c_line" failed)
+    is_uint "$c_failed" || { echo FAIL; return; }
+    if [ "$c_failed" -gt 0 ]; then echo FAIL; return; fi
+    if [ "$c_outcome" = "BLOCKED" ]; then echo BLOCKED; return; fi
+    if [ "$c_outcome" = "NOT_RUN" ]; then echo NOT_RUN; return; fi
+    if [ "$c_rc" -ne 0 ]; then echo FAIL; return; fi
+    if [ -n "$c_outcome" ] && [ "$c_outcome" != "OK" ]; then echo FAIL; return; fi
+    is_uint "$c_executed" || { echo VACUOUS; return; }
+    is_uint "$c_passed" || { echo VACUOUS; return; }
+    if [ "$c_executed" -eq 0 ] || [ "$c_passed" -eq 0 ]; then echo VACUOUS; return; fi
+    echo PASS
+}
+
+# ---------------------------------------------------------------------------
+# Selftest (fake binary; no sshd, no compiler)
+# ---------------------------------------------------------------------------
+
+selftest_fail() {
+    echo "ERROR — selftest failed: $*"
+    exit 2
+}
+
+selftest_run() {
+    # selftest_run <want_rc> <label> <args...>; leaves $ST/out.txt
+    st_want="$1"; st_label="$2"; shift 2
+    ORCH_QUAL_IN_SELFTEST=1 ORCH_QUAL_MEM_MAX=0 sh "$0" "$@" > "$ST/out.txt" 2>&1
+    st_rc=$?
+    [ "$st_rc" -eq "$st_want" ] || {
+        sed 's/^/    /' "$ST/out.txt" | tail -n 12
+        selftest_fail "$st_label: exit $st_rc, wanted $st_want"
+    }
+}
+
+selftest_expect() {
+    grep -q -- "$2" "$1" || selftest_fail "$3: missing '$2' in $1"
+}
+
+selftest() {
+    ST=$(mktemp -d "${TMPDIR:-/tmp}/orch-qual-selftest.XXXXXX") || selftest_fail "mktemp"
+    mkdir -p "$ST/root/scripts/check" "$ST/root/t" "$ST/root/src/app/orchestrator"
+    : > "$ST/root/src/app/orchestrator/main.spl"
+    mkdir -p "$ST/root/$(dirname "$INTENT_FIXTURE")"
+    : > "$ST/root/$INTENT_FIXTURE"
+    for st_n in pass fail blocked crash silent vacuous notrun timeout ssh; do
+        : > "$ST/root/t/${st_n}_spec.spl"
+    done
+    cat > "$ST/fake" <<'FAKE'
+#!/bin/sh
+if [ "$1" = "native-build" ]; then
+    [ "${FAKE_BUILD_FAIL:-0}" = "1" ] && { echo "error: fake codegen failure"; exit 1; }
+    [ "${FAKE_BUILD_FAIL:-0}" = "oom" ] && { echo "Terminated"; exit 143; }
+    while [ $# -gt 0 ]; do [ "$1" = "-o" ] && out="$2"; shift; done
+    printf '#!/bin/sh\nexit 0\n' > "$out"; chmod +x "$out"; exit 0
+fi
+[ "$1" = "test" ] || exit 64
+v="SPEC FILE VERDICT: $2"
+case "$2" in
+    */pass_spec.spl) echo "$v outcome=OK declared>=2 executed=2 passed=2 failed=0 blocked=0 dropped=0"; exit 0 ;;
+    */fail_spec.spl) echo "$v outcome=ERROR declared>=2 executed=2 passed=1 failed=1 blocked=0 dropped=0"; exit 1 ;;
+    */blocked_spec.spl) echo "$v outcome=BLOCKED declared>=1 executed=1 passed=0 failed=0 skipped=0 blocked=1 dropped=0"; exit 6 ;;
+    */crash_spec.spl) echo "$v outcome=OK declared>=1 executed=1 passed=1 failed=0"; exit 139 ;;
+    */silent_spec.spl) echo "all good, trust me"; exit 0 ;;
+    */vacuous_spec.spl) echo "$v outcome=OK declared>=1 executed=0 passed=0 failed=0"; exit 0 ;;
+    */notrun_spec.spl) echo "$v outcome=NOT_RUN declared>=0 executed=0 passed=0 failed=0 skipped=1 reason=platform-os-mismatch"; exit 0 ;;
+    */timeout_spec.spl) exit 124 ;;
+esac
+exit 64
+FAKE
+    chmod +x "$ST/fake"
+    st_common="--root $ST/root --out-dir $ST/out --no-guest"
+
+    # 1. pass + blocked + not-run: exit 0, each class distinct, verdict BLOCKED.
+    printf 'cited t/pass_spec.spl\ncited t/blocked_spec.spl\ninventory t/notrun_spec.spl\n' > "$ST/l1"
+    # shellcheck disable=SC2086
+    selftest_run 0 "pass+blocked+notrun" $st_common --no-ssh --list "$ST/l1" "$ST/fake"
+    selftest_expect "$ST/out/last-run.txt" '^PASS t/pass_spec.spl' "case1"
+    selftest_expect "$ST/out/last-run.txt" '^BLOCKED t/blocked_spec.spl' "case1"
+    selftest_expect "$ST/out/last-run.txt" '^NOT_RUN t/notrun_spec.spl' "case1"
+    selftest_expect "$ST/out.txt" '^BLOCKED — .*pass=1 .*blocked=1 not_run=1' "case1"
+
+    # 2. pass only: verdict PASS.
+    printf 'cited t/pass_spec.spl\n' > "$ST/l2"
+    # shellcheck disable=SC2086
+    selftest_run 0 "pass only" $st_common --no-ssh --list "$ST/l2" "$ST/fake"
+    selftest_expect "$ST/out.txt" '^PASS — ' "case2"
+
+    # 3. every FAIL-class verdict fails the run and is named.
+    for st_c in fail:FAIL crash:CRASH silent:NO_VERDICT vacuous:VACUOUS timeout:CRASH; do
+        st_spec=${st_c%%:*}; st_class=${st_c##*:}
+        printf 'cited t/pass_spec.spl\ncited t/%s_spec.spl\n' "$st_spec" > "$ST/l3"
+        # shellcheck disable=SC2086
+        selftest_run 1 "$st_spec must fail" $st_common --no-ssh --list "$ST/l3" "$ST/fake"
+        selftest_expect "$ST/out/last-run.txt" "^$st_class t/${st_spec}_spec.spl" "case3 $st_spec"
+        selftest_expect "$ST/out.txt" '^FAIL — ' "case3 $st_spec"
+    done
+
+    # 4. a listed path that does not exist, and an empty selection, are ERRORs.
+    printf 'cited t/pass_spec.spl\ncited t/missing_spec.spl\n' > "$ST/l4"
+    # shellcheck disable=SC2086
+    selftest_run 2 "missing path" $st_common --no-ssh --list "$ST/l4" "$ST/fake"
+    printf '# nothing\n' > "$ST/l5"
+    # shellcheck disable=SC2086
+    selftest_run 2 "empty list" $st_common --no-ssh --list "$ST/l5" "$ST/fake"
+    # shellcheck disable=SC2086
+    selftest_run 2 "missing binary" $st_common --no-ssh --list "$ST/l2" "$ST/no-such-binary"
+
+    # 5. guest wrapper result is passed through: rc 0, BLOCKED line, failure.
+    st_guest="$ST/root/$GUEST_WRAPPER_REL"
+    printf '#!/bin/sh\n[ "$1" = "--run-specs" ] || exit 9\necho "PASS — guest ok"\nexit 0\n' > "$st_guest"
+    selftest_run 0 "guest pass" --root "$ST/root" --out-dir "$ST/out" --no-ssh --list "$ST/l2" "$ST/fake"
+    selftest_expect "$ST/out/last-run.txt" '^PASS guest-wrapper' "case5 pass"
+    printf '#!/bin/sh\necho "BLOCKED — no guest image"\nexit 3\n' > "$st_guest"
+    selftest_run 0 "guest blocked" --root "$ST/root" --out-dir "$ST/out" --no-ssh --list "$ST/l2" "$ST/fake"
+    selftest_expect "$ST/out/last-run.txt" '^BLOCKED guest-wrapper' "case5 blocked"
+    printf '#!/bin/sh\necho "FAIL — guest spec failed"\nexit 1\n' > "$st_guest"
+    selftest_run 1 "guest fail" --root "$ST/root" --out-dir "$ST/out" --no-ssh --list "$ST/l2" "$ST/fake"
+    selftest_expect "$ST/out/last-run.txt" '^FAIL guest-wrapper' "case5 fail"
+    rm -f "$st_guest"
+
+    # 6. a peer that cannot be built is a FAIL of the ssh row, never a pass.
+    #    (Only reachable when the ssh tools exist; otherwise the row is BLOCKED.)
+    printf 'cited t/pass_spec.spl\nssh t/ssh_spec.spl\n' > "$ST/l6"
+    if ssh_tools_missing >/dev/null; then
+        # shellcheck disable=SC2086
+        selftest_run 0 "ssh tools missing" $st_common --list "$ST/l6" "$ST/fake"
+        selftest_expect "$ST/out/last-run.txt" '^BLOCKED t/ssh_spec.spl' "case6 blocked"
+    else
+        FAKE_BUILD_FAIL=1 ORCH_QUAL_IN_SELFTEST=1 ORCH_QUAL_MEM_MAX=0 sh "$0" --root "$ST/root" \
+            --out-dir "$ST/out" --no-guest --list "$ST/l6" "$ST/fake" > "$ST/out.txt" 2>&1
+        st_rc=$?
+        [ "$st_rc" -eq 1 ] || selftest_fail "peer build failure: exit $st_rc, wanted 1"
+        selftest_expect "$ST/out/last-run.txt" '^FAIL t/ssh_spec.spl .*peer-build-failed' "case6 fail"
+        FAKE_BUILD_FAIL=oom ORCH_QUAL_IN_SELFTEST=1 ORCH_QUAL_MEM_MAX=0 sh "$0" --root "$ST/root" \
+            --out-dir "$ST/out" --no-guest --list "$ST/l6" "$ST/fake" > "$ST/out.txt" 2>&1
+        st_rc=$?
+        [ "$st_rc" -eq 0 ] || selftest_fail "peer build killed: exit $st_rc, wanted 0"
+        selftest_expect "$ST/out/last-run.txt" '^BLOCKED t/ssh_spec.spl .*peer-build-resource-limit' "case6 blocked"
+    fi
+
+    rm -rf "$ST"
+    echo "selftest: OK (classification, non-vacuity, missing path, guest pass-through, peer build failure)"
+}
+
+# ---------------------------------------------------------------------------
+# Helpers for a real run
+# ---------------------------------------------------------------------------
+
+find_tool() {
+    # find_tool <name> -> path on stdout, rc 1 when absent
+    ft=$(command -v "$1" 2>/dev/null) && { echo "$ft"; return 0; }
+    for ft_d in /usr/sbin /sbin /usr/local/sbin; do
+        [ -x "$ft_d/$1" ] && { echo "$ft_d/$1"; return 0; }
+    done
+    return 1
+}
+
+ssh_tools_missing() {
+    # prints the first missing tool and returns 0 when one is missing
+    for stm in ssh sshd ssh-keygen ssh-keyscan; do
+        find_tool "$stm" >/dev/null || { echo "$stm"; return 0; }
+    done
+    return 1
+}
+
+sha256_of() {
+    if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1
+    elif command -v sha256 >/dev/null 2>&1; then sha256 -q "$1"
+    else cksum "$1" | tr ' ' '-'
+    fi
+}
+
+WRAP=""
+setup_wrap() {
+    WRAP=""
+    [ "$MEM_MAX" = "0" ] && return 0
+    command -v systemd-run >/dev/null 2>&1 || return 0
+    systemd-run --user --scope -q true >/dev/null 2>&1 || return 0
+    WRAP="systemd-run --user --scope -q -p MemoryMax=$MEM_MAX"
+}
+
+N_PASS=0; N_FAIL=0; N_BLOCKED=0; N_NOT_RUN=0; N_TOTAL=0
+FAIL_NAMES=""
+
+record() {
+    # record <class> <name> <detail>
+    echo "$1 $2 $3" | tee -a "$RESULTS"
+    N_TOTAL=$((N_TOTAL + 1))
+    case "$1" in
+        PASS) N_PASS=$((N_PASS + 1)) ;;
+        BLOCKED) N_BLOCKED=$((N_BLOCKED + 1)) ;;
+        NOT_RUN) N_NOT_RUN=$((N_NOT_RUN + 1)) ;;
+        *) N_FAIL=$((N_FAIL + 1)); FAIL_NAMES="$FAIL_NAMES $2" ;;
+    esac
+}
+
+LOG_SEQ=0
+run_spec() {
+    # run_spec <spec>; honours the caller's environment. Sets RS_RC and RS_LOG.
+    LOG_SEQ=$((LOG_SEQ + 1))
+    RS_LOG="$OUT_DIR/logs/$(printf '%03d' "$LOG_SEQ")-$(basename "$1" .spl).log"
+    # shellcheck disable=SC2086
+    SIMPLE_CACHE_SCOPE="$CACHE_SCOPE" $WRAP timeout "$SPEC_TIMEOUT" "$BIN" test "$1" > "$RS_LOG" 2>&1
+    RS_RC=$?
+}
+
+run_and_record() {
+    run_spec "$1"
+    rr_class=$(classify "$RS_RC" "$RS_LOG")
+    rr_line=$(verdict_line "$RS_LOG")
+    [ -n "$rr_line" ] || rr_line="(no SPEC FILE VERDICT line)"
+    record "$rr_class" "$1" "rc=$RS_RC | $rr_line"
+}
+
+# --- SSH round trip --------------------------------------------------------
+
+FIX=""
+SSHD_PID=""
+
+ssh_teardown() {
+    if [ -n "$SSHD_PID" ]; then
+        kill "$SSHD_PID" 2>/dev/null
+        SSHD_PID=""
+    fi
+    if [ -n "$FIX" ] && [ -d "$FIX" ]; then
+        if [ "${ORCH_QUAL_KEEP_FIXTURE:-0}" = "1" ]; then
+            echo "note: fixture kept at $FIX"
+        else
+            rm -rf "$FIX"
+        fi
+    fi
+    FIX=""
+}
+
+ensure_peer() {
+    # Sets PEER to a compiled simple-orchestrator. Returns 1 with PEER_ERR set.
+    PEER_ERR=""
+    if [ -n "$PEER" ]; then
+        [ -x "$PEER" ] || { PEER_ERR="peer-not-executable: $PEER"; return 1; }
+        echo "peer: supplied $PEER sha256=$(sha256_of "$PEER")" | tee -a "$RESULTS"
+        return 0
+    fi
+    ep_out="$OUT_DIR/simple-orchestrator"
+    ep_id="$OUT_DIR/simple-orchestrator.identity"
+    ep_want="bin=$BIN_SHA src=$SRC_ID entry=$GATEWAY_ENTRY"
+    if [ -x "$ep_out" ] && [ -f "$ep_id" ] && [ "$(cat "$ep_id")" = "$ep_want" ]; then
+        PEER="$ep_out"
+        echo "peer: reused $PEER sha256=$(sha256_of "$PEER")" | tee -a "$RESULTS"
+        return 0
+    fi
+    rm -f "$ep_out" "$ep_id"
+    ep_log="$OUT_DIR/logs/peer-build.log"
+    echo "peer: building $GATEWAY_ENTRY with $BIN (timeout ${PEER_BUILD_TIMEOUT}s) ..."
+    # The build runs in the background so a compile error stops it at once: a
+    # failed native-build has been seen to keep respawning workers for more
+    # than 30 minutes after `phase 3 FAILED` instead of exiting.
+    # shellcheck disable=SC2086
+    SIMPLE_BOOTSTRAP=1 SIMPLE_CACHE_SCOPE="$CACHE_SCOPE-peer" $WRAP timeout "$PEER_BUILD_TIMEOUT" \
+        "$BIN" native-build "$GATEWAY_ENTRY" $PEER_BUILD_ARGS -o "$ep_out" > "$ep_log" 2>&1 &
+    ep_pid=$!
+    ep_stopped=""
+    while kill -0 "$ep_pid" 2>/dev/null; do
+        if grep -q 'first-compile-error\|phase 3 FAILED' "$ep_log" 2>/dev/null; then
+            kill "$ep_pid" 2>/dev/null
+            ep_stopped=" (stopped on first compile error)"
+            break
+        fi
+        sleep 5
+    done
+    wait "$ep_pid"
+    ep_rc=$?
+    if [ "$ep_rc" -ne 0 ] || [ -n "$ep_stopped" ] || [ ! -x "$ep_out" ]; then
+        ep_first=$(tr '\r' '\n' < "$ep_log" | grep -m 1 'first-compile-error' | cut -c1-300)
+        [ -n "$ep_first" ] || ep_first=$(tr '\r' '\n' < "$ep_log" | grep -m 1 '^error\|\[ERROR\]' | cut -c1-300)
+        rm -f "$ep_out"
+        # No compiler diagnostic and a timeout or signal: the build ran out of
+        # time or memory (cgroup OOM shows as rc 143/137). That is a resource
+        # limit of this host, reported as BLOCKED, not a verdict on the source.
+        if [ -z "$ep_first" ] && [ -z "$ep_stopped" ] && { [ "$ep_rc" -eq 124 ] || [ "$ep_rc" -ge 128 ]; }; then
+            PEER_BLOCKED=1
+            PEER_ERR="peer-build-resource-limit rc=$ep_rc (124=timeout ${PEER_BUILD_TIMEOUT}s, 137/143=killed, MemoryMax=$MEM_MAX) log=$ep_log"
+            return 1
+        fi
+        PEER_ERR="peer-build-failed rc=$ep_rc$ep_stopped log=$ep_log first-error: ${ep_first:-none}"
+        return 1
+    fi
+    printf '%s\n' "$ep_want" > "$ep_id"
+    PEER="$ep_out"
+    echo "peer: built $PEER sha256=$(sha256_of "$PEER")" | tee -a "$RESULTS"
+    return 0
+}
+
+ssh_round_trip() {
+    # ssh_round_trip <spec>
+    srt_spec="$1"
+    srt_missing=$(ssh_tools_missing) && {
+        record BLOCKED "$srt_spec" "ssh fixture unavailable: $srt_missing not installed"
+        return
+    }
+    [ -f "$ROOT/$INTENT_FIXTURE" ] || die "intent fixture missing: $INTENT_FIXTURE"
+    PEER_BLOCKED=0
+    ensure_peer || {
+        if [ "$PEER_BLOCKED" -eq 1 ]; then record BLOCKED "$srt_spec" "$PEER_ERR"
+        else record FAIL "$srt_spec" "$PEER_ERR"; fi
+        return
+    }
+
+    FIX=$(mktemp -d "${TMPDIR:-/tmp}/orch-qual-ssh.XXXXXX") || die "mktemp for the ssh fixture"
+    chmod 700 "$FIX"
+    srt_user=$(id -un)
+    srt_keygen=$(find_tool ssh-keygen); srt_sshd=$(find_tool sshd)
+    srt_ssh=$(find_tool ssh); srt_keyscan=$(find_tool ssh-keyscan)
+    "$srt_keygen" -q -t ed25519 -N "" -C orch-qual-host -f "$FIX/host_ed25519" || die "ssh-keygen (host key)"
+    "$srt_keygen" -q -t ed25519 -N "" -C orch-qual-client -f "$FIX/client_ed25519" || die "ssh-keygen (client key)"
+    cp "$FIX/client_ed25519.pub" "$FIX/authorized_keys"
+    printf 'orch-qual-controller %s\n' "$(cut -d' ' -f1,2 "$FIX/host_ed25519.pub")" > "$FIX/known_hosts"
+    chmod 600 "$FIX/authorized_keys" "$FIX/known_hosts"
+
+    # Controller state the gateway is pinned to, created by the peer itself.
+    mkdir -m 700 "$FIX/state"
+    "$PEER" local-init "$FIX/state" ctrl-qual > "$FIX/local-init.out" 2>&1
+    srt_rc=$?
+    srt_root=$(find "$FIX/state" -mindepth 1 -maxdepth 1 -type d -name 'simple-orchestrator-*' | head -n 1)
+    if [ "$srt_rc" -ne 0 ] || [ -z "$srt_root" ] || [ ! -f "$srt_root/controller.sdn" ]; then
+        record FAIL "$srt_spec" "peer-local-init-failed rc=$srt_rc: $(head -c 200 "$FIX/local-init.out" | tr '\n' ' ')"
+        ssh_teardown; return
+    fi
+
+    # Retain one intent so the read-only inspect has something to identify.
+    srt_ns=$(sed -n 's/^    namespace: *//p' "$ROOT/$INTENT_FIXTURE" | head -n 1)
+    srt_name=$(sed -n 's/^    name: *//p' "$ROOT/$INTENT_FIXTURE" | head -n 1)
+    "$PEER" submit "$srt_root" ctrl-qual req-qual-1 "$ROOT/$INTENT_FIXTURE" "$srt_ns" "$srt_name" \
+        > "$FIX/submit.out" 2>&1
+    srt_rc=$?
+    if [ "$srt_rc" -ne 0 ] || ! grep -q 'status: intent-retained' "$FIX/submit.out"; then
+        record FAIL "$srt_spec" "peer-submit-failed rc=$srt_rc: $(head -c 200 "$FIX/submit.out" | tr '\n' ' ')"
+        ssh_teardown; return
+    fi
+
+    cat > "$FIX/gateway.sdn" <<EOF
+version: 1
+stateRoot: $srt_root
+controllerId: ctrl-qual
+allowedActions: [inspect]
+EOF
+    cat > "$FIX/remote-orchestrator" <<EOF
+#!/bin/sh
+# Native peer wrapper: pins the installed gateway policy, then execs the binary.
+export SIMPLE_ORCHESTRATOR_GATEWAY_CONFIG=$FIX/gateway.sdn
+echo "\$(date +%s) peer \$*" >> $FIX/remote.log
+exec "$PEER" "\$@" 2>>$FIX/remote.stderr
+EOF
+    chmod 700 "$FIX/remote-orchestrator"
+    cat > "$FIX/sshd_config" <<EOF
+Port $SSH_PORT
+ListenAddress 127.0.0.1
+HostKey $FIX/host_ed25519
+PidFile $FIX/sshd.pid
+AuthorizedKeysFile $FIX/authorized_keys
+StrictModes no
+UsePAM no
+PasswordAuthentication no
+KbdInteractiveAuthentication no
+PubkeyAuthentication yes
+AllowUsers $srt_user
+AllowTcpForwarding no
+X11Forwarding no
+PermitTTY no
+LogLevel VERBOSE
+EOF
+    cat > "$FIX/profile.sdn" <<EOF
+kind: server-ssh-profile
+version: 1
+authRef: "secret://qual/login"
+trustRef: "trust://qual/host-key"
+user: $srt_user
+sshExecutable: $srt_ssh
+identityPath: $FIX/client_ed25519
+knownHostsPath: $FIX/known_hosts
+hostKeyAlias: orch-qual-controller
+EOF
+    cat > "$FIX/servers.sdn" <<EOF
+version: 1
+currentContext: qual
+servers:
+    qual:
+        transport: ssh
+        host: 127.0.0.1
+        port: $SSH_PORT
+        authRef: "secret://qual/login"
+        tlsRef: "trust://qual/host-key"
+        remoteExecutable: $FIX/remote-orchestrator
+contexts:
+    qual:
+        sharedServer: qual
+EOF
+    cat > "$FIX/req_inspect.sdn" <<EOF
+version: 1
+action: inspect
+controllerId: ctrl-qual
+requestUid: req-qual-1
+source: ""
+namespace: ""
+name: ""
+sourceDigest: ""
+EOF
+    chmod 600 "$FIX/gateway.sdn" "$FIX/profile.sdn" "$FIX/servers.sdn" "$FIX/req_inspect.sdn"
+
+    "$srt_sshd" -f "$FIX/sshd_config" -E "$FIX/sshd.log"
+    srt_rc=$?
+    srt_i=0
+    while [ ! -s "$FIX/sshd.pid" ] && [ "$srt_i" -lt 50 ]; do sleep 0.1; srt_i=$((srt_i + 1)); done
+    if [ "$srt_rc" -ne 0 ] || [ ! -s "$FIX/sshd.pid" ]; then
+        record BLOCKED "$srt_spec" "user sshd did not start on 127.0.0.1:$SSH_PORT (rc=$srt_rc; port in use?)"
+        ssh_teardown; return
+    fi
+    SSHD_PID=$(cat "$FIX/sshd.pid")
+    # Prove the listener on the port is OUR sshd before sending anything to it.
+    srt_seen=$("$srt_keyscan" -T 5 -t ed25519 -p "$SSH_PORT" 127.0.0.1 2>/dev/null | cut -d' ' -f2,3 | head -n 1)
+    if [ "$srt_seen" != "$(cut -d' ' -f1,2 "$FIX/host_ed25519.pub")" ]; then
+        record BLOCKED "$srt_spec" "127.0.0.1:$SSH_PORT is not answered by the fixture sshd"
+        ssh_teardown; return
+    fi
+
+    SIMPLE_CARET_SSH_ACCEPTANCE_CONFIG="$FIX/servers.sdn" \
+    SIMPLE_CARET_SSH_ACCEPTANCE_CONTEXT=qual \
+    SIMPLE_CARET_SSH_ACCEPTANCE_SERVER=qual \
+    SIMPLE_CARET_SSH_ACCEPTANCE_PROFILE="$FIX/profile.sdn" \
+    SIMPLE_CARET_SSH_ACCEPTANCE_REQUEST="$FIX/req_inspect.sdn" \
+        run_spec "$srt_spec"
+    srt_class=$(classify "$RS_RC" "$RS_LOG")
+    srt_line=$(verdict_line "$RS_LOG")
+    [ -n "$srt_line" ] || srt_line="(no SPEC FILE VERDICT line)"
+    srt_calls=0
+    [ -f "$FIX/remote.log" ] && srt_calls=$(grep -c . "$FIX/remote.log")
+    # Keep the peer-side evidence; the keys are deleted with the fixture.
+    for srt_f in remote.log remote.stderr sshd.log; do
+        [ -f "$FIX/$srt_f" ] && cp "$FIX/$srt_f" "$OUT_DIR/logs/ssh-$srt_f"
+    done
+    if [ "$srt_class" = "PASS" ] && [ "$srt_calls" -eq 0 ]; then
+        record VACUOUS "$srt_spec" "spec passed but the peer was never invoked over ssh | $srt_line"
+    else
+        record "$srt_class" "$srt_spec" "rc=$RS_RC peer_invocations=$srt_calls | $srt_line"
+    fi
+    ssh_teardown
+}
+
+# --- guest wrapper ---------------------------------------------------------
+
+run_guest_wrapper() {
+    gw="$ROOT/$GUEST_WRAPPER_REL"
+    [ -f "$gw" ] || { echo "guest-wrapper: $GUEST_WRAPPER_REL not present, skipped" | tee -a "$RESULTS"; return; }
+    gw_log="$OUT_DIR/logs/guest-wrapper.log"
+    sh "$gw" --run-specs "$BIN" > "$gw_log" 2>&1
+    gw_rc=$?
+    gw_last=$(grep -v '^[[:space:]]*$' "$gw_log" | tail -n 1 | cut -c1-240)
+    if [ "$gw_rc" -eq 0 ]; then gw_class=PASS
+    else
+        case "$gw_last" in BLOCKED*) gw_class=BLOCKED ;; *) gw_class=FAIL ;; esac
+    fi
+    record "$gw_class" guest-wrapper "rc=$gw_rc | $gw_last"
+}
+
+# ---------------------------------------------------------------------------
+# Main
+# ---------------------------------------------------------------------------
+
+if [ "$SELFTEST_ONLY" -eq 1 ]; then
+    selftest
+    exit 0
+fi
+[ -n "$BIN" ] || die "usage: $0 [options] <self-hosted simple> | --selftest"
+if [ "${ORCH_QUAL_IN_SELFTEST:-0}" != "1" ]; then
+    selftest
+fi
+
+case "$BIN" in /*) ;; *) BIN="$(pwd)/$BIN" ;; esac
+[ -x "$BIN" ] || die "nothing was checked (binary not executable: $BIN)"
+[ -f "$LIST" ] || die "nothing was checked (spec list missing: $LIST)"
+cd "$ROOT" || die "nothing was checked (cannot enter $ROOT)"
+command -v timeout >/dev/null 2>&1 || die "nothing was checked (timeout(1) not found)"
+
+# Validate the whole selection before running anything.
+SELECTED=$(mktemp "${TMPDIR:-/tmp}/orch-qual-list.XXXXXX") || die "mktemp"
+trap 'rm -f "$SELECTED"; ssh_teardown' EXIT
+trap 'exit 2' INT TERM HUP
+while read -r l_group l_path l_rest; do
+    case "$l_group" in ''|'#'*) continue ;; esac
+    case ",$ONLY," in *",$l_group,"*) ;; *) continue ;; esac
+    [ "$l_group" = "ssh" ] && [ "$DO_SSH" -eq 0 ] && continue
+    [ -n "$l_path" ] || die "nothing was checked (malformed list line: $l_group)"
+    [ -f "$l_path" ] || die "nothing was checked (listed spec does not exist: $l_path)"
+    echo "$l_group $l_path" >> "$SELECTED"
+done < "$LIST"
+[ -s "$SELECTED" ] || die "nothing was checked (0 specs selected from $LIST)"
+
+mkdir -p "$OUT_DIR/logs" || die "cannot create $OUT_DIR"
+rm -f "$OUT_DIR"/logs/*.log
+RESULTS="$OUT_DIR/last-run.txt"
+setup_wrap
+BIN_SHA=$(sha256_of "$BIN")
+SRC_ID=$(git -C "$ROOT" rev-parse HEAD 2>/dev/null || echo unknown)
+if [ -n "$(git -C "$ROOT" status --porcelain -- src 2>/dev/null | head -n 1)" ]; then SRC_ID="$SRC_ID-dirty"; fi
+{
+    echo "# orchestrator native qualification"
+    echo "# date: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "# runner binary: $BIN sha256=$BIN_SHA"
+    echo "# runner version: $("$BIN" --version 2>&1 | head -n 1)"
+    echo "# source: $SRC_ID"
+    echo "# selection: $(grep -c . "$SELECTED") spec(s) from $LIST (groups: $ONLY)"
+} > "$RESULTS"
+cat "$RESULTS"
+
+SSH_SPECS=""
+while read -r l_group l_path; do
+    if [ "$l_group" = "ssh" ]; then SSH_SPECS="$SSH_SPECS $l_path"; continue; fi
+    run_and_record "$l_path" < /dev/null
+done < "$SELECTED"
+
+for s_spec in $SSH_SPECS; do
+    ssh_round_trip "$s_spec"
+done
+
+if [ "$DO_GUEST" -eq 1 ]; then
+    run_guest_wrapper
+fi
+
+SUMMARY="$N_TOTAL verdict(s): pass=$N_PASS fail=$N_FAIL blocked=$N_BLOCKED not_run=$N_NOT_RUN (runner $BIN, source $SRC_ID; details $RESULTS)"
+if [ "$N_TOTAL" -eq 0 ]; then
+    echo "ERROR — nothing was checked (0 verdicts)" | tee -a "$RESULTS"
+    exit 2
+fi
+if [ "$N_FAIL" -gt 0 ]; then
+    echo "FAIL — $SUMMARY; failing:$FAIL_NAMES" | tee -a "$RESULTS"
+    exit 1
+fi
+if [ "$N_BLOCKED" -gt 0 ] || [ "$N_PASS" -eq 0 ]; then
+    echo "BLOCKED — $SUMMARY" | tee -a "$RESULTS"
+    exit 0
+fi
+echo "PASS — $SUMMARY" | tee -a "$RESULTS"
+exit 0

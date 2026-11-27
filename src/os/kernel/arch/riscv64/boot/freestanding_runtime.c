@@ -37,23 +37,9 @@ void rt_put_le32(spl_u8 *p, spl_u32 v);
 void rt_put_le64(spl_u8 *p, spl_u64 v);
 spl_u32 rt_get_le32(const spl_u8 *p);
 
-spl_i64 rt_riscv64_syscall(spl_u64 id, spl_u64 arg0, spl_u64 arg1,
-                           spl_u64 arg2, spl_u64 arg3, spl_u64 arg4)
-{
-    register spl_u64 a0 __asm__("a0") = arg0;
-    register spl_u64 a1 __asm__("a1") = arg1;
-    register spl_u64 a2 __asm__("a2") = arg2;
-    register spl_u64 a3 __asm__("a3") = arg3;
-    register spl_u64 a4 __asm__("a4") = arg4;
-    register spl_u64 a7 __asm__("a7") = id;
-    __asm__ volatile("ecall"
-                     : "+r"(a0)
-                     : "r"(a1), "r"(a2), "r"(a3), "r"(a4), "r"(a7)
-                     : "memory");
-    return (spl_i64)a0;
-}
+#include "rv64_cpu_primitives.inc.h"
+#include "../../../../../runtime/runtime_utf8_well_formed.h"
 
-void rt_riscv64_fence_i(void) { __asm__ volatile("fence.i" ::: "memory"); }
 void rt_riscv64_cbo_clean(spl_u64 addr) { __asm__ volatile(".option push\n.option arch,+zicbom\ncbo.clean 0(%0)\n.option pop" :: "r"(addr) : "memory"); }
 void rt_riscv64_cbo_inval(spl_u64 addr) { __asm__ volatile(".option push\n.option arch,+zicbom\ncbo.inval 0(%0)\n.option pop" :: "r"(addr) : "memory"); }
 void rt_riscv64_cbo_flush(spl_u64 addr) { __asm__ volatile(".option push\n.option arch,+zicbom\ncbo.flush 0(%0)\n.option pop" :: "r"(addr) : "memory"); }
@@ -61,32 +47,6 @@ void rt_riscv64_cbo_zero(spl_u64 addr) { __asm__ volatile(".option push\n.option
 void rt_riscv64_prefetch_r(spl_u64 addr) { __asm__ volatile(".option push\n.option arch,+zicbop\nprefetch.r 0(%0)\n.option pop" :: "r"(addr)); }
 void rt_riscv64_prefetch_w(spl_u64 addr) { __asm__ volatile(".option push\n.option arch,+zicbop\nprefetch.w 0(%0)\n.option pop" :: "r"(addr)); }
 void rt_riscv64_prefetch_i(spl_u64 addr) { __asm__ volatile(".option push\n.option arch,+zicbop\nprefetch.i 0(%0)\n.option pop" :: "r"(addr)); }
-
-typedef struct RtRiscv64SbiRet {
-    spl_i64 error;
-    spl_i64 value;
-} RtRiscv64SbiRet;
-
-RtRiscv64SbiRet rt_riscv64_sbi_call(spl_u64 ext, spl_u64 fid,
-                                     spl_u64 arg0, spl_u64 arg1,
-                                     spl_u64 arg2, spl_u64 arg3,
-                                     spl_u64 arg4, spl_u64 arg5)
-{
-    register spl_u64 a0 __asm__("a0") = arg0;
-    register spl_u64 a1 __asm__("a1") = arg1;
-    register spl_u64 a2 __asm__("a2") = arg2;
-    register spl_u64 a3 __asm__("a3") = arg3;
-    register spl_u64 a4 __asm__("a4") = arg4;
-    register spl_u64 a5 __asm__("a5") = arg5;
-    register spl_u64 a6 __asm__("a6") = fid;
-    register spl_u64 a7 __asm__("a7") = ext;
-    __asm__ volatile("ecall"
-                     : "+r"(a0), "+r"(a1)
-                     : "r"(a2), "r"(a3), "r"(a4), "r"(a5), "r"(a6), "r"(a7)
-                     : "memory");
-    RtRiscv64SbiRet result = {(spl_i64)a0, (spl_i64)a1};
-    return result;
-}
 
 #undef RV64_CSR_READ_CASE
 
@@ -173,15 +133,8 @@ static spl_u64 rt_align8(spl_u64 value) {
 void *rt_alloc(spl_i64 size) {
     spl_u64 next;
     spl_u64 bytes;
-    void *boot_alloc;
     if (size <= 0) {
         return (void *)0;
-    }
-    if (kernel__boot__riscv_noalloc_heap__riscv_noalloc_heap_alloc) {
-        boot_alloc = (void *)(spl_u64)kernel__boot__riscv_noalloc_heap__riscv_noalloc_heap_alloc(size);
-        if (boot_alloc) {
-            return boot_alloc;
-        }
     }
     bytes = rt_align8((spl_u64)size);
     next = rt_align8(g_freestanding_heap_next);
@@ -198,29 +151,6 @@ void rt_free(void *ptr) {
 
 spl_i64 rt_pool_safepoint(void) {
     return 0;
-}
-
-void *rt_memcpy(void *dst, const void *src, spl_i64 n) {
-    unsigned char *d = (unsigned char *)dst;
-    const unsigned char *s = (const unsigned char *)src;
-    if (n <= 0) {
-        return dst;
-    }
-    for (spl_i64 i = 0; i < n; i = i + 1) {
-        d[i] = s[i];
-    }
-    return dst;
-}
-
-void *rt_memset(void *dst, signed char val, spl_i64 n) {
-    unsigned char *d = (unsigned char *)dst;
-    if (n <= 0) {
-        return dst;
-    }
-    for (spl_i64 i = 0; i < n; i = i + 1) {
-        d[i] = (unsigned char)val;
-    }
-    return dst;
 }
 
 static spl_i64 rt_special(spl_u64 payload) {
@@ -284,6 +214,40 @@ static spl_i64 rt_index_arg(spl_i64 value) {
 
 #include "../../../../../runtime/startup/baremetal/atomic_runtime.inc.c"
 
+static void rt_heap_header_init(RtHeapHeader *header, spl_u8 object_type, spl_u64 size) {
+    header->object_type = object_type;
+    header->gc_flags = 0;
+    header->reserved = 0;
+    header->size = (spl_u32)size;
+}
+
+static void rt_fill_nil(spl_i64 *data, spl_u64 from, spl_u64 to) {
+    for (spl_u64 i = from; i < to; i = i + 1) {
+        data[i] = rt_nil();
+    }
+}
+
+/* Resolves a sequence index (negative counts from the end) against len.
+ * Returns the in-range index, or -1 when out of range. */
+static spl_i64 rt_seq_resolve_index(spl_i64 index, spl_u64 len) {
+    if (index < 0) {
+        index = (spl_i64)len + index;
+    }
+    if (index < 0 || (spl_u64)index >= len) {
+        return -1;
+    }
+    return index;
+}
+
+static spl_i64 rt_chars_equal(const char *a, const char *b, spl_u64 len) {
+    for (spl_u64 i = 0; i < len; i = i + 1) {
+        if (a[i] != b[i]) {
+            return 0;
+        }
+    }
+    return 1;
+}
+
 static void rt_write_decimal(char *buf, spl_u64 *len, spl_u64 value) {
     char tmp[20];
     spl_u64 count = 0;
@@ -310,10 +274,7 @@ spl_i64 rt_string_new(spl_i64 bytes_value, spl_i64 len_value) {
     if (!out) {
         return rt_nil();
     }
-    out->header.object_type = RT_HEAP_STRING;
-    out->header.gc_flags = 0;
-    out->header.reserved = 0;
-    out->header.size = (spl_u32)(sizeof(RtString) + len);
+    rt_heap_header_init(&out->header, RT_HEAP_STRING, sizeof(RtString) + len);
     out->len = len;
     out->hash = 0;
     for (spl_u64 i = 0; i < len; i = i + 1) {
@@ -378,10 +339,7 @@ spl_i64 rt_string_concat(spl_i64 left, spl_i64 right) {
     if (!out) {
         return rt_nil();
     }
-    out->header.object_type = RT_HEAP_STRING;
-    out->header.gc_flags = 0;
-    out->header.reserved = 0;
-    out->header.size = (spl_u32)(sizeof(RtString) + a->len + b->len);
+    rt_heap_header_init(&out->header, RT_HEAP_STRING, sizeof(RtString) + a->len + b->len);
     out->len = a->len + b->len;
     out->hash = 0;
     for (spl_u64 i = 0; i < a->len; i = i + 1) {
@@ -422,15 +380,10 @@ spl_i64 rt_array_new(spl_i64 capacity_value) {
     if (!array->data) {
         return rt_nil();
     }
-    array->header.object_type = RT_HEAP_ARRAY;
-    array->header.gc_flags = 0;
-    array->header.reserved = 0;
-    array->header.size = (spl_u32)sizeof(RtArray);
+    rt_heap_header_init(&array->header, RT_HEAP_ARRAY, sizeof(RtArray));
     array->len = 0;
     array->capacity = capacity;
-    for (spl_u64 i = 0; i < capacity; i = i + 1) {
-        array->data[i] = rt_nil();
-    }
+    rt_fill_nil(array->data, 0, capacity);
     return rt_heap(array);
 }
 
@@ -445,10 +398,8 @@ spl_i64 rt_array_get(spl_i64 collection, spl_i64 index_value) {
     if (!array) {
         return rt_nil();
     }
+    index = rt_seq_resolve_index(index, array->len);
     if (index < 0) {
-        index = (spl_i64)array->len + index;
-    }
-    if (index < 0 || (spl_u64)index >= array->len) {
         return rt_nil();
     }
     return array->data[index];
@@ -478,9 +429,7 @@ spl_i64 rt_array_push(spl_i64 array_value, spl_i64 value) {
         for (spl_u64 i = 0; i < array->len; i = i + 1) {
             new_data[i] = array->data[i];
         }
-        for (spl_u64 i = array->len; i < new_capacity; i = i + 1) {
-            new_data[i] = rt_nil();
-        }
+        rt_fill_nil(new_data, array->len, new_capacity);
         array->data = new_data;
         array->capacity = new_capacity;
     }
@@ -513,30 +462,24 @@ spl_i64 rt_index_get(spl_i64 collection, spl_i64 index_value) {
     RtString *string;
     spl_i64 index = rt_index_arg(index_value);
     if (array) {
+        index = rt_seq_resolve_index(index, array->len);
         if (index < 0) {
-            index = (spl_i64)array->len + index;
-        }
-        if (index < 0 || (spl_u64)index >= array->len) {
             return rt_nil();
         }
         return array->data[index];
     }
     tuple = rt_as_tuple(collection);
     if (tuple) {
+        index = rt_seq_resolve_index(index, tuple->len);
         if (index < 0) {
-            index = (spl_i64)tuple->len + index;
-        }
-        if (index < 0 || (spl_u64)index >= tuple->len) {
             return rt_nil();
         }
         return tuple->data[index];
     }
     string = rt_as_string(collection);
     if (string) {
+        index = rt_seq_resolve_index(index, string->len);
         if (index < 0) {
-            index = (spl_i64)string->len + index;
-        }
-        if (index < 0 || (spl_u64)index >= string->len) {
             return rt_nil();
         }
         return rt_string_new((spl_i64)(spl_u64)&string->data[index], 1);
@@ -550,10 +493,8 @@ spl_i64 rt_index_set(spl_i64 collection, spl_i64 index_value, spl_i64 value) {
     if (!array) {
         return 0;
     }
+    index = rt_seq_resolve_index(index, array->len);
     if (index < 0) {
-        index = (spl_i64)array->len + index;
-    }
-    if (index < 0 || (spl_u64)index >= array->len) {
         return 0;
     }
     array->data[index] = value;
@@ -662,14 +603,9 @@ spl_i64 rt_tuple_new(spl_i64 len_value) {
     if (!tuple) {
         return rt_nil();
     }
-    tuple->header.object_type = RT_HEAP_TUPLE;
-    tuple->header.gc_flags = 0;
-    tuple->header.reserved = 0;
-    tuple->header.size = (spl_u32)(sizeof(RtTuple) + len * sizeof(spl_i64));
+    rt_heap_header_init(&tuple->header, RT_HEAP_TUPLE, sizeof(RtTuple) + len * sizeof(spl_i64));
     tuple->len = len;
-    for (spl_u64 i = 0; i < len; i = i + 1) {
-        tuple->data[i] = rt_nil();
-    }
+    rt_fill_nil(tuple->data, 0, len);
     return rt_heap(tuple);
 }
 
@@ -697,10 +633,7 @@ spl_i64 rt_enum_new(spl_u32 enum_id, spl_u32 discriminant, spl_i64 payload) {
     if (!value) {
         return rt_nil();
     }
-    value->header.object_type = RT_HEAP_ENUM;
-    value->header.gc_flags = 0;
-    value->header.reserved = 0;
-    value->header.size = (spl_u32)sizeof(RtEnum);
+    rt_heap_header_init(&value->header, RT_HEAP_ENUM, sizeof(RtEnum));
     value->enum_id = enum_id;
     value->discriminant = discriminant;
     value->payload = payload;
@@ -772,12 +705,7 @@ spl_i64 rt_native_eq(spl_i64 lhs, spl_i64 rhs) {
         if (a->len != b->len) {
             return 0;
         }
-        for (spl_u64 i = 0; i < a->len; i = i + 1) {
-            if (a->data[i] != b->data[i]) {
-                return 0;
-            }
-        }
-        return 1;
+        return rt_chars_equal(a->data, b->data, a->len);
     }
     return lhs == rhs ? 1 : 0;
 }
@@ -788,12 +716,7 @@ spl_i64 rt_string_eq(spl_i64 lhs, spl_i64 rhs) {
     if (!a || !b || a->len != b->len) {
         return 0;
     }
-    for (spl_u64 i = 0; i < a->len; i = i + 1) {
-        if (a->data[i] != b->data[i]) {
-            return 0;
-        }
-    }
-    return 1;
+    return rt_chars_equal(a->data, b->data, a->len);
 }
 
 spl_i64 rt_string_char_code_at(spl_i64 value, spl_i64 index_value) {
@@ -802,10 +725,8 @@ spl_i64 rt_string_char_code_at(spl_i64 value, spl_i64 index_value) {
     if (!string) {
         return -1;
     }
+    index = rt_seq_resolve_index(index, string->len);
     if (index < 0) {
-        index = (spl_i64)string->len + index;
-    }
-    if (index < 0 || (spl_u64)index >= string->len) {
         return -1;
     }
     return (spl_i64)(spl_u8)string->data[index];
@@ -820,12 +741,7 @@ spl_i64 rt_string_starts_with(spl_i64 value, spl_i64 prefix_value) {
     if (prefix->len > string->len) {
         return 0;
     }
-    for (spl_u64 i = 0; i < prefix->len; i = i + 1) {
-        if (string->data[i] != prefix->data[i]) {
-            return 0;
-        }
-    }
-    return 1;
+    return rt_chars_equal(string->data, prefix->data, prefix->len);
 }
 
 spl_i64 rt_string_find(spl_i64 value, spl_i64 needle_value) {
@@ -999,10 +915,7 @@ spl_i64 rt_string_from_byte_array(spl_i64 array_value) {
     if (!out) {
         return rt_nil();
     }
-    out->header.object_type = RT_HEAP_STRING;
-    out->header.gc_flags = 0;
-    out->header.reserved = 0;
-    out->header.size = (spl_u32)(sizeof(RtString) + array->len);
+    rt_heap_header_init(&out->header, RT_HEAP_STRING, sizeof(RtString) + array->len);
     out->len = array->len;
     out->hash = 0;
     for (spl_u64 i = 0; i < array->len; i = i + 1) {
@@ -1175,20 +1088,6 @@ void rt_volatile_write_u32(spl_i64 addr, spl_i64 value) {
 void rt_volatile_write_u64(spl_i64 addr, spl_i64 value) {
     rt_mmio_write_u64(addr, value);
 }
-void rt_load_barrier(void) {
-    __atomic_thread_fence(__ATOMIC_ACQUIRE);
-}
-void rt_store_barrier(void) {
-    __atomic_thread_fence(__ATOMIC_RELEASE);
-}
-/* unsafe_addr_of: identity cast, no allocator/heap dependency — mirrors the
- * hosted implementation exactly (src/runtime/runtime_native.c:4853,
- * `return (uint64_t)value;`). Surfaced as undefined once the rt_volatile
- * family / rt_load_barrier fixes above let the linker get further into this
- * closure. */
-spl_u64 unsafe_addr_of(spl_i64 value) {
-    return (spl_u64)value;
-}
 
 #ifndef RT_RISCV_UART_BASE
 #define RT_RISCV_UART_BASE 0x10000000ULL
@@ -1338,10 +1237,7 @@ spl_i64 rt_string_join(spl_i64 array_value, spl_i64 separator_value) {
     if (!joined) {
         return rt_nil();
     }
-    joined->header.object_type = RT_HEAP_STRING;
-    joined->header.gc_flags = 0;
-    joined->header.reserved = 0;
-    joined->header.size = (spl_u32)(sizeof(RtString) + total_len);
+    rt_heap_header_init(&joined->header, RT_HEAP_STRING, sizeof(RtString) + total_len);
     joined->len = total_len;
     joined->hash = 0;
     for (spl_u64 i = 0; i < array->len; i = i + 1) {
@@ -1606,29 +1502,16 @@ static void rt_mmio_write32_raw(spl_u64 addr, spl_u32 value) {
     *(volatile spl_u32 *)addr = value;
 }
 
-static spl_u8 rt_io_read8(spl_u64 base, spl_u64 off) {
-    return *(volatile spl_u8 *)(base + off);
+static volatile void *rt_io_addr(spl_u64 base, spl_u64 off) {
+    return (volatile void *)(base + off);
 }
 
-static spl_u16 rt_io_read16(spl_u64 base, spl_u64 off) {
-    return *(volatile spl_u16 *)(base + off);
-}
-
-static spl_u32 rt_io_read32(spl_u64 base, spl_u64 off) {
-    return *(volatile spl_u32 *)(base + off);
-}
-
-static void rt_io_write8(spl_u64 base, spl_u64 off, spl_u8 value) {
-    *(volatile spl_u8 *)(base + off) = value;
-}
-
-static void rt_io_write16(spl_u64 base, spl_u64 off, spl_u16 value) {
-    *(volatile spl_u16 *)(base + off) = value;
-}
-
-static void rt_io_write32(spl_u64 base, spl_u64 off, spl_u32 value) {
-    *(volatile spl_u32 *)(base + off) = value;
-}
+static spl_u8 rt_io_read8(spl_u64 base, spl_u64 off) { return *(volatile spl_u8 *)rt_io_addr(base, off); }
+static spl_u16 rt_io_read16(spl_u64 base, spl_u64 off) { return *(volatile spl_u16 *)rt_io_addr(base, off); }
+static spl_u32 rt_io_read32(spl_u64 base, spl_u64 off) { return *(volatile spl_u32 *)rt_io_addr(base, off); }
+static void rt_io_write8(spl_u64 base, spl_u64 off, spl_u8 value) { *(volatile spl_u8 *)rt_io_addr(base, off) = value; }
+static void rt_io_write16(spl_u64 base, spl_u64 off, spl_u16 value) { *(volatile spl_u16 *)rt_io_addr(base, off) = value; }
+static void rt_io_write32(spl_u64 base, spl_u64 off, spl_u32 value) { *(volatile spl_u32 *)rt_io_addr(base, off) = value; }
 
 static void rt_memzero(void *ptr, spl_u64 bytes) {
     spl_u8 *data = (spl_u8 *)ptr;
@@ -1824,6 +1707,117 @@ static spl_i64 g_boot_tcp_response_kind = 0;
 static spl_u8 g_boot_tcp_rx_buf[4096];
 static spl_u64 g_boot_tcp_rx_len = 0;
 static spl_u64 g_boot_tcp_rx_off = 0;
+
+/* Bounded opaque handles over the singleton boot TCP transport.  A previous
+ * release-tree transplant retained the public registry entry points below but
+ * dropped their owner state and helpers, leaving the SimpleOS runtime unable
+ * to compile. */
+#define RT_BOOT_TCP_REGISTRY_CAPACITY 4U
+#define RT_BOOT_TCP_REGISTRY_FD_BASE 1073741824LL
+#define RT_BOOT_TCP_REGISTRY_FD_SLOT_BITS 3U
+#define RT_BOOT_TCP_REGISTRY_LISTENER 1U
+#define RT_BOOT_TCP_REGISTRY_CLIENT 2U
+
+typedef struct RtBootTcpRegistryEntry {
+    spl_u64 generation;
+    spl_u64 parent_generation;
+    spl_u8 active;
+    spl_u8 kind;
+    spl_u8 parent_slot;
+} RtBootTcpRegistryEntry;
+
+static RtBootTcpRegistryEntry g_boot_tcp_registry[RT_BOOT_TCP_REGISTRY_CAPACITY];
+static spl_u64 g_boot_tcp_registry_next_generation = 1ULL;
+
+static spl_i64 rt_boot_tcp_registry_encode_fd(spl_u64 slot, spl_u64 generation) {
+    if (slot >= RT_BOOT_TCP_REGISTRY_CAPACITY || generation == 0ULL ||
+        generation > ((0x7fffffffffffffffULL - (spl_u64)RT_BOOT_TCP_REGISTRY_FD_BASE) >> RT_BOOT_TCP_REGISTRY_FD_SLOT_BITS)) {
+        return -1;
+    }
+    return RT_BOOT_TCP_REGISTRY_FD_BASE + (spl_i64)((generation << RT_BOOT_TCP_REGISTRY_FD_SLOT_BITS) | slot);
+}
+
+static RtBootTcpRegistryEntry *rt_boot_tcp_registry_lookup(spl_i64 fd, spl_u64 *slot_out) {
+    spl_u64 encoded;
+    spl_u64 slot;
+    spl_u64 generation;
+    RtBootTcpRegistryEntry *entry;
+    if (fd < RT_BOOT_TCP_REGISTRY_FD_BASE) {
+        return 0;
+    }
+    encoded = (spl_u64)(fd - RT_BOOT_TCP_REGISTRY_FD_BASE);
+    slot = encoded & ((1ULL << RT_BOOT_TCP_REGISTRY_FD_SLOT_BITS) - 1ULL);
+    generation = encoded >> RT_BOOT_TCP_REGISTRY_FD_SLOT_BITS;
+    if (slot >= RT_BOOT_TCP_REGISTRY_CAPACITY || generation == 0ULL) {
+        return 0;
+    }
+    entry = &g_boot_tcp_registry[slot];
+    if (!entry->active || entry->generation != generation) {
+        return 0;
+    }
+    if (slot_out) {
+        *slot_out = slot;
+    }
+    return entry;
+}
+
+static spl_i64 rt_boot_tcp_registry_has_active(void) {
+    for (spl_u64 slot = 0ULL; slot < RT_BOOT_TCP_REGISTRY_CAPACITY; slot = slot + 1ULL) {
+        if (g_boot_tcp_registry[slot].active) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static spl_i64 rt_boot_tcp_registry_can_allocate(void) {
+    for (spl_u64 slot = 0ULL; slot < RT_BOOT_TCP_REGISTRY_CAPACITY; slot = slot + 1ULL) {
+        if (!g_boot_tcp_registry[slot].active) {
+            return rt_boot_tcp_registry_encode_fd(slot, g_boot_tcp_registry_next_generation) >= 0;
+        }
+    }
+    return 0;
+}
+
+static spl_i64 rt_boot_tcp_registry_has_child(spl_u64 parent_slot, spl_u64 parent_generation) {
+    for (spl_u64 slot = 0ULL; slot < RT_BOOT_TCP_REGISTRY_CAPACITY; slot = slot + 1ULL) {
+        RtBootTcpRegistryEntry *entry = &g_boot_tcp_registry[slot];
+        if (entry->active && entry->kind == RT_BOOT_TCP_REGISTRY_CLIENT &&
+            entry->parent_slot == parent_slot && entry->parent_generation == parent_generation) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+static spl_i64 rt_boot_tcp_registry_allocate(spl_u8 kind, spl_u64 parent_slot, spl_u64 parent_generation) {
+    for (spl_u64 slot = 0ULL; slot < RT_BOOT_TCP_REGISTRY_CAPACITY; slot = slot + 1ULL) {
+        RtBootTcpRegistryEntry *entry = &g_boot_tcp_registry[slot];
+        spl_u64 generation;
+        if (entry->active) {
+            continue;
+        }
+        generation = g_boot_tcp_registry_next_generation;
+        if (generation == 0ULL || rt_boot_tcp_registry_encode_fd(slot, generation) < 0) {
+            return -1;
+        }
+        g_boot_tcp_registry_next_generation = generation + 1ULL;
+        entry->generation = generation;
+        entry->parent_generation = parent_generation;
+        entry->active = 1U;
+        entry->kind = kind;
+        entry->parent_slot = (spl_u8)parent_slot;
+        return rt_boot_tcp_registry_encode_fd(slot, generation);
+    }
+    return -1;
+}
+
+static void rt_boot_tcp_registry_release(RtBootTcpRegistryEntry *entry) {
+    entry->active = 0U;
+    entry->kind = 0U;
+    entry->parent_slot = 0U;
+    entry->parent_generation = 0ULL;
+}
 
 /* RFC 4253: the complete SSH identification line, including LF, is at most
  * 255 wire bytes. Keep this at the raw C owner so an unauthenticated peer
@@ -2138,50 +2132,6 @@ static void rt_pci_scan_qemu_virt(void) {
         g_rt_pci_count = g_rt_pci_count + 1;
     }
 }
-
-static spl_i64 rt_pci_is_virtio_net(spl_i64 cls, spl_i64 sub, spl_i64 vendor, spl_i64 device_id) {
-    if (cls != 2 || sub != 0) {
-        return 0;
-    }
-    if (vendor != RT_VIRTIO_VENDOR_ID) {
-        return 0;
-    }
-    if (device_id == RT_VIRTIO_NET_LEGACY_DEVICE_ID ||
-        device_id == RT_VIRTIO_NET_MODERN_DEVICE_ID) {
-        return 1;
-    }
-    return 0;
-}
-
-static spl_i64 rt_pci_is_virtio_gpu(spl_i64 cls, spl_i64 sub, spl_i64 vendor, spl_i64 device_id) {
-    if (vendor != RT_VIRTIO_VENDOR_ID) {
-        return 0;
-    }
-    if (device_id == RT_VIRTIO_GPU_LEGACY_DEVICE_ID) {
-        return 1;
-    }
-    if (device_id == RT_VIRTIO_GPU_MODERN_DEVICE_ID) {
-        (void)cls;
-        (void)sub;
-        return 1;
-    }
-    return 0;
-}
-
-static spl_i64 rt_pci_is_virtio_blk(spl_i64 vendor, spl_i64 device_id) {
-    if (vendor != RT_VIRTIO_VENDOR_ID) {
-        return 0;
-    }
-    if (device_id == RT_VIRTIO_BLK_LEGACY_DEVICE_ID ||
-        device_id == RT_VIRTIO_BLK_MODERN_DEVICE_ID) {
-        return 1;
-    }
-    return 0;
-}
-
-static void rt_put_le32(spl_u8 *p, spl_u32 v);
-static void rt_put_le64(spl_u8 *p, spl_u64 v);
-static spl_u32 rt_get_le32(const spl_u8 *p);
 
 spl_i64 rt_pci_device_count(void) {
     if (g_rt_pci_count < 0) {
@@ -3081,7 +3031,16 @@ spl_i64 rt_boot_tcp_registry_close(spl_i64 fd) {
     if (!entry) {
         return -1;
     }
-    return rt_boot_tcp_read_bytes(max_len);
+    if (entry->kind == RT_BOOT_TCP_REGISTRY_LISTENER &&
+        rt_boot_tcp_registry_has_child(slot, entry->generation)) {
+        return -1;
+    }
+    legacy_fd = entry->kind == RT_BOOT_TCP_REGISTRY_CLIENT ? 200 : 100;
+    if (rt_boot_tcp_close(legacy_fd) != 0) {
+        return -1;
+    }
+    rt_boot_tcp_registry_release(entry);
+    return 0;
 }
 
 __attribute__((weak)) spl_i64 rt_io_tcp_bind(spl_i64 addr) {
@@ -3443,7 +3402,7 @@ spl_i64 rt_display_flush_test(void) {
     if (!g_rt_display_ready || !g_rt_gpu_fb) {
         return -1;
     }
-    rt_gpu_fill_test_pattern();
+    rt_gpu_fill_wm_scene();
     return rt_gpu_cmd_transfer_flush();
 }
 
@@ -3516,9 +3475,15 @@ spl_i64 rt_bytes_alloc(spl_i64 len_value) {
 }
 
 /* rt_bytes_to_text(bytes) -> text: convert a freestanding byte array handle
- * into a string handle. Identical contract to rt_string_from_byte_array. */
+ * into a string handle. STRICT like the hosted runtime: ill-formed UTF-8
+ * (spl_utf8_well_formed, Unicode Table 3-7) yields nil. */
 spl_i64 rt_bytes_to_text(spl_i64 array_value) {
-    return rt_string_from_byte_array(array_value);
+    spl_i64 out_value = rt_string_from_byte_array(array_value);
+    RtString *s = rt_as_string(out_value);
+    if (s && !spl_utf8_well_formed((const uint8_t *)s->data, (size_t)s->len)) {
+        return rt_nil();
+    }
+    return out_value;
 }
 
 /* rt_string_to_upper(str) -> str: ASCII-uppercase copy of the input string. */

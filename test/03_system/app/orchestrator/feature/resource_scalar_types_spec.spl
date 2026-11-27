@@ -1,0 +1,169 @@
+# @req CFG-01 CFG-02 REQ-ORCH-01-A
+# AUTHORED NOT_RUN: strict text and intentionally polymorphic quantity scalars.
+use std.spec.*
+use std.io_runtime.{file_read}
+use std.common.contracts.orchestration.resource_set_v1.*
+use std.common.contracts.orchestration.profile_v1.{decode_resource_profile}
+use std.common.contracts.orchestration.resource_v1.{ResourceV1, as_text, as_quantity_text}
+use std.common.sdn.value.{SdnValue, SdnSpan}
+use std.common.contracts.orchestration.linux_launch_plan_v1.{HostLinuxLaunchPlanV1, host_linux_launch_plan_bytes_v1}
+use std.common.contracts.orchestration.linux_launch_plan_codec_v1.{host_linux_launch_plan_decode_v1}
+
+fn scalar_profile_source(name_literal: text, namespace_literal: text, cpu_literal: text, memory_literal: text) -> text:
+    "apiVersion: orchestration.simple/v1alpha1\nkind: ResourceProfile\nmetadata:\n    name: " + name_literal + "\n    namespace: " + namespace_literal + "\nspec:\n    cpu:\n        min: " + cpu_literal + "\n    memory:\n        min: " + memory_literal + "\n"
+
+fn scalar_list_source(source: text) -> text:
+    val lines = source.trim().split("\n")
+    var out = "apiVersion: orchestration.simple/v1alpha1\nkind: ResourceList\nmetadata:\n    name: scalar-list\nspec:\n    items:\n        - " + lines[0] + "\n"
+    var index = 1
+    while index < lines.len():
+        out = out + "          " + lines[index] + "\n"
+        index = index + 1
+    out
+
+fn assert_scalar_rejection(source: text, path: text):
+    # Independent source oracle: locate the authored field, not decoder spans.
+    val components = path.split(".")
+    var key = components[components.len() - 1]
+    val array_element = key == "0"
+    if array_element:
+        key = components[components.len() - 2]
+    var expected_line = 0
+    var expected_col = 0
+    var line_number = 1
+    var quantity_section = ""
+    for line in source.split("\n"):
+        if line.trim() == "cpu:": quantity_section = "cpu"
+        if line.trim() == "memory:": quantity_section = "memory"
+        var matches = line.contains(key + ":")
+        if path == "spec.cpu.min": matches = matches and quantity_section == "cpu"
+        if path == "spec.memory.min": matches = matches and quantity_section == "memory"
+        if path == "metadata.name": matches = line.starts_with("    name:")
+        if path == "metadata.namespace": matches = line.starts_with("    namespace:")
+        if path == "spec.items.0.metadata.name": matches = line.starts_with("              name:")
+        if matches and expected_line == 0:
+            expected_line = line_number
+            expected_col = line.index_of(key + ":") + 1
+            if array_element: expected_col = line.index_of("123") + 1
+        line_number = line_number + 1
+    expect(expected_line).to_be_greater_than(0)
+    expect(expected_col).to_be_greater_than(0)
+    match decode_resource_set(source):
+        case Ok(_): fail("wrong scalar type unexpectedly accepted")
+        case Err(reason):
+            expect(reason.kind).to_equal("type")
+            expect(reason.path).to_equal(path)
+            expect(reason.line).to_equal(expected_line)
+            expect(reason.col).to_equal(expected_col)
+
+fn scalar_fixture(path: text) -> text:
+    file_read(path) ?? panic("missing scalar fixture " + path)
+
+describe "orchestration text scalars remain strict while quantities retain integers":
+    it "rejects every nontext metadata scalar with original field coordinates":
+        step("Vary SDN scalar and collection types independently of valid quantities")
+        for literal in ["123", "false", "true", "null", "1.5", "[]", "{}"]:
+            assert_scalar_rejection(scalar_profile_source(literal, "ci", "1", "1024"), "metadata.name")
+            assert_scalar_rejection(scalar_profile_source("scalar-profile", literal, "1", "1024"), "metadata.namespace")
+
+    it "keeps explicit text identities distinct from integer quantities":
+        step("Decode quoted numeric identity text and actual integer resource minima")
+        val profile = decode_resource_profile(scalar_profile_source("\"123\"", "\"456\"", "2", "1024")).unwrap()
+        expect(profile.meta.name).to_equal("123")
+        expect(profile.meta.ns).to_equal("456")
+        expect(profile.cpu.minimum).to_equal(2000)
+        expect(profile.memory.minimum).to_equal(1024)
+
+    it "preserves string and integer quantity equivalence without widening text fields":
+        step("Compare decoded quantity values for integer and quoted decimal spellings")
+        for amount in [0, 1, 2, 64]:
+            val raw = amount.to_text()
+            val quoted = "\"" + raw + "\""
+            val integer = decode_resource_profile(scalar_profile_source("matrix", "ci", raw, raw)).unwrap()
+            val textual = decode_resource_profile(scalar_profile_source("matrix", "ci", quoted, quoted)).unwrap()
+            expect(integer.cpu.minimum).to_equal(amount * 1000)
+            expect(integer.memory.minimum).to_equal(amount)
+            expect(integer.cpu.minimum).to_equal(textual.cpu.minimum)
+            expect(integer.memory.minimum).to_equal(textual.memory.minimum)
+
+    it "rejects nonquantity scalar types at quantity paths":
+        step("Keep booleans null floats and collections outside the quantity union")
+        for literal in ["false", "null", "1.5", "[]", "{}"]:
+            assert_scalar_rejection(scalar_profile_source("matrix", "ci", literal, "1024"), "spec.cpu.min")
+            assert_scalar_rejection(scalar_profile_source("matrix", "ci", "1", literal), "spec.memory.min")
+
+    it "preserves original ResourceList child spans for strict scalar errors":
+        step("Wrap an invalid child without serializing its parsed value")
+        val child = scalar_profile_source("123", "ci", "1", "1024")
+        assert_scalar_rejection(scalar_list_source(child), "spec.items.0.metadata.name")
+
+    it "rejects numeric Pod command elements and preserves valid command text":
+        step("Decode the same Pod through the shared resource dispatcher")
+        val job = scalar_fixture("test/fixtures/orchestration/ci_job_process.sdn")
+        val pod = "apiVersion: orchestration.simple/v1alpha1\nkind: Pod\nmetadata:\n    name: scalar-pod\nspec:\n" + job.substring(job.index_of("            os:"))
+        # Reindent the existing process template into a Pod spec.
+        var source = ""
+        for line in pod.split("\n"):
+            if line.starts_with("            "): source = source + line.substring(8) + "\n"
+            else: source = source + line + "\n"
+        expect(decode_resource_set(source).unwrap().items.len()).to_equal(1)
+        assert_scalar_rejection(source.replace("command: [\"/usr/bin/busybox\", \"echo\"]", "command: [123]"), "spec.containers.0.command.0")
+
+    it "rejects numeric Deployment artifact references and preserves text":
+        step("Keep a valid Deployment and reject its integer artifact reference")
+        val source = scalar_fixture("test/fixtures/orchestration/echo_deployment.sdn")
+        expect(decode_resource_set(source).unwrap().items.len()).to_equal(1)
+        assert_scalar_rejection(source.replace("artifactSetRef: ci-echo", "artifactSetRef: 123"), "spec.template.spec.containers.0.artifactSetRef")
+
+    it "rejects numeric CI commands and template references without changing valid CI":
+        step("Exercise shared strict text decoding from Job and Pipeline entrypoints")
+        val job = scalar_fixture("test/fixtures/orchestration/ci_job_process.sdn")
+        val valid_job = decode_resource_set(job).unwrap()
+        match valid_job.items[0]:
+            case ResourceSetItemV1.Job(actual):
+                expect(actual.meta.name).to_equal("echo-linux")
+                expect(actual.template.containers[0].command[0]).to_equal("/usr/bin/busybox")
+                expect(actual.template.containers[0].command[1]).to_equal("echo")
+            case _: fail("expected Job")
+        assert_scalar_rejection(job.replace("command: [\"/usr/bin/busybox\", \"echo\"]", "command: [123]"), "spec.template.spec.containers.0.command.0")
+        val pipeline = scalar_fixture("test/fixtures/orchestration/ci_pipeline.sdn")
+        expect(decode_resource_set(pipeline).unwrap().items.len()).to_equal(1)
+        assert_scalar_rejection(pipeline.replace("jobTemplateRef: echo-linux", "jobTemplateRef: 123"), "spec.jobs.0.jobTemplateRef")
+
+    it "keeps scalar conversion helpers disjoint for every nontext variant":
+        step("Test the shared boundary directly alongside public document decoding")
+        val spans: Dict<text, SdnSpan> = {}
+        expect(as_text(SdnValue.String("123"), "field", spans).unwrap()).to_equal("123")
+        expect(as_quantity_text(SdnValue.Int(123), "field", spans).unwrap()).to_equal("123")
+        for value in [SdnValue.Int(123), SdnValue.Bool(false), SdnValue.Null, SdnValue.Float(1.5), SdnValue.Array([]), SdnValue.Dict({})]:
+            match as_text(value, "field", spans):
+                case Ok(_): fail("nontext variant crossed strict text boundary")
+                case Err(reason):
+                    expect(reason.kind).to_equal("type")
+                    expect(reason.path).to_equal("field")
+
+    it "retains integer CPU and memory request and limit quantities in workloads":
+        step("Decode bare integers through the workload quantity boundary")
+        val original = scalar_fixture("test/fixtures/orchestration/echo_deployment.sdn")
+        val source = original.replace("cpu: \"250m\"", "cpu: 1").replace("cpu: \"1000m\"", "cpu: 2").replace("memory: \"64Mi\"", "memory: 1024").replace("memory: \"256Mi\"", "memory: 2048")
+        val decoded = decode_resource_set(source).unwrap()
+        match decoded.items[0]:
+            case ResourceSetItemV1.Workload(workload):
+                match workload:
+                    case ResourceV1.Deployment(deployment):
+                        val resources = deployment.template.spec.containers[0].resources
+                        expect(resources.cpu_request_millis).to_equal(1000)
+                        expect(resources.cpu_limit_millis).to_equal(2000)
+                        expect(resources.memory_request_bytes).to_equal(1024)
+                        expect(resources.memory_limit_bytes).to_equal(2048)
+                    case _: fail("expected Deployment workload")
+            case _: fail("expected decoded workload")
+
+    it "rejects an integer wire identity before canonical-byte validation":
+        step("Preserve valid launch-plan text while refusing numeric workload identity")
+        val plan = HostLinuxLaunchPlanV1(workload_uid: "work", attempt: 1,
+            runtime_class: "podman-rootless", service_scope_id: "user", request_digest: "1".repeat(64))
+        val source = host_linux_launch_plan_bytes_v1(plan).unwrap()
+        expect(host_linux_launch_plan_decode_v1(source).unwrap().workload_uid).to_equal("work")
+        val invalid = source.replace("workloadUid: \"work\"", "workloadUid: 123")
+        expect(host_linux_launch_plan_decode_v1(invalid).unwrap_err()).to_equal("launch-plan-invalid:type:workloadUid")

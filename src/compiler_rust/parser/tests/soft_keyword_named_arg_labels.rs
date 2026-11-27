@@ -31,6 +31,7 @@ fn flat_and_base_are_named_arg_labels() {
 fn every_soft_keyword_is_a_named_arg_label() {
     for kw in [
         "flat", "slice", "common", "comptime", "newtype", "bitfield", "extend", "asm", "out_err",
+        "admit", "assume",
     ] {
         parse_ok(&format!("struct S:\n    {kw}: i64\nval s = S({kw}: 1)\n"));
         parse_ok(&format!("val s = S(a: 0, {kw}: 1)\n"));

@@ -76,3 +76,17 @@ These tests cover the exact mixed combinational-to-sequential datapath and the
 adjacent standalone sequential/reset contract. No physical board is involved.
 GHDL remains qualification evidence for generated products, but it is not an
 unblock condition for closing this obsolete runtime-crash record.
+
+## Confirmation 2026-11-25 (release/1.0.0 @ 4c6024f8271) — remains Closed
+
+Source inspection on the current tree confirms the closure basis is intact:
+`src/compiler/50.mir/hwir/sequential.spl`,
+`src/compiler/70.backend/backend/hwir_to_vhdl.spl`,
+`test/01_unit/compiler/50.mir/hwir_mixed_sequential_datapath_spec.spl`, and
+`test/01_unit/compiler/50.mir/hwir_standalone_sequential_spec.spl` all exist
+at HEAD. The specs were not re-executed here: this Windows host has only the
+pinned Rust seed, which cannot run specs at HEAD (`unknown decorator
+'@representation_boundary'` seed/source skew), and the closure evidence above
+explicitly forbids the Rust seed as qualification evidence. No self-hosted
+Stage-4 CLI is deployed on this host, so the 2026-08-17 closure stands on its
+recorded evidence.

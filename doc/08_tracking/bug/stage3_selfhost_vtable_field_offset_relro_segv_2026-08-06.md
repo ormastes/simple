@@ -238,3 +238,103 @@ Left **OPEN**, unverified either way, per the wave rule that a wrong close loses
 a real defect permanently. The next lane should re-take the backtrace only after
 `sh scripts/check/check-no-call-zero.shs` reports `PASS` on the binaries under
 test; otherwise the measurement is not interpretable.
+
+## 2026-11-03 (lane p01-c): fail-closed at `compiler.rs` is not a safe local edit
+
+Re-read `native_project/compiler.rs` (~:2070-2120) at `origin/release/1.0.0`
+`0cf067f2871`. Line numbers moved; the two fail-open arms remain (unresolved
+named owner -> `Some(false)`; `owner_name: None` -> `Some(false)`). Ambiguous
+names already fail closed. No code change was made, for these reasons:
+
+- The `owner_name: None` arm cannot distinguish "erased/builtin/generic owner,
+  correctly header-less" from "class-typed local whose name inference lost". At
+  this pass `MirInst::FieldGet`/`FieldSet` carry only `owner_name`; the receiver's
+  type is not available. Turning the arm into an `Err` would reject every
+  legitimate erased access.
+- The discriminating information exists one step earlier, in
+  `mir/lower/lowering_expr_struct.rs` (~:329): `owner_name` comes from
+  `type_registry.get_type_name(receiver_ty)`. The fix belongs there: when
+  `receiver_ty` resolves to a class/struct in the registry but yields no name (or
+  is recovered via `recover_receiver_type`, as `lower_index_expr` does for ANY
+  receivers), derive the name from the recovered type, and only then fail closed
+  for a class-typed owner with no resolvable name.
+- Verification needs a rebuilt seed plus a stage3 self-host run
+  (`emit_module_header` write fault at ~394 s); no current stage3 binary is
+  available, so neither a red nor a green could be shown.
+
+Status: `fix-not-implemented`, still `open`. Repro for the next lane: build the
+seed in a private `CARGO_TARGET_DIR`, add a MIR-level spec where
+`var t = Cls.create(...)` (class with a trait impl, `static fn` constructor) then
+`t.field = v`, assert the emitted `FieldSet.owner_has_vtable == Some(true)`;
+then confirm with a stage3 native-build.
+
+## 2026-11-03 (lane p01-c): MIR-level repro does NOT reproduce; upstream owner-recovery hypothesis refuted for this shape
+
+Added `field_access_on_static_ctor_inferred_local_keeps_owner_identity`
+(`mir/lower/tests/branch_coverage/calls.rs`): `var t = Sq.create(3); t.side = 4; t.side`
+on a `class Sq with Shape`. Built test-only (own CARGO_TARGET_DIR, clang-cl): it
+PASSES on unmodified origin code, i.e. `FieldGet/FieldSet.owner_name == Some("Sq")`
+already holds for a static-constructor-inferred local at MIR lowering. A speculative
+fix (fall back to `erased_local_class_types` for the owner name) was therefore
+dropped as unproven. The `owner_name: None` path seen in stage2 must come from a
+different shape (cross-module `MirToLlvm.create(name, CodegenTarget.Host, nil)` with
+imported types, or an unnamed type id after module merge). Next step: dump
+`owner_name` for the two `translator` sites in `driver_bootstrap.spl` under a
+stage2 `SIMPLE_DEBUG` MIR print, then extend this test to that exact shape.
+Status stays `open`; test kept as a regression guard.
+
+## 2026-11-03 (lane vtoff-design): premise "importer does not count the vtable slot" is refuted; design for the real fix
+
+Status: `fix-not-implemented`, `open`. No code change; stopping at design.
+
+Evidence (`native_project/compiler.rs` ~:2020-2146): the native object layout pass
+runs ONCE over the merged project MIR. `vtable_type_owners` is the project-wide set
+of vtable-bearing classes and `resolve_exact_owner` maps any (possibly imported)
+name to the defining module's mangled owner. Every `FieldGet`/`FieldSet` with a
+resolvable `owner_name` therefore already gets `owner_has_vtable` from the SAME set
+the defining module's `StructInit` uses. There is no separate importer-side layout
+function, so a two-module Rust unit test over this pass would pass today (a
+resolvable owner is always right; ambiguous owners already fail closed).
+
+The only wrong-offset paths are the two fail-open arms: `owner_name: None` and
+unresolved named owner -> `Some(false)`. Both mean MIR lowering lost the class
+identity, which is upstream of this pass (`mir/lower/lowering_expr_struct.rs`
+~:329, `type_registry.get_type_name(receiver_ty)`).
+
+Design for the real fix (needs a stage2 observation first):
+1. Under stage2 `SIMPLE_DEBUG` MIR print, dump `owner_name` for the `translator`
+   FieldSet sites in `driver_bootstrap.spl` (`MirToLlvm.create(name,
+   CodegenTarget.Host, nil)` result) to learn which shape yields `None`/unresolved.
+2. In MIR lowering, recover the receiver type (`recover_receiver_type`, as
+   `lower_index_expr` does) before naming the owner; in this pass, fail closed
+   only for a named owner that is a known class absent from `all_mangled`.
+3. Red test = MIR-level spec of that exact shape (cross-module imported class
+   with trait impl, field N written via a call-result local), asserting
+   `owner_has_vtable == Some(true)`.
+Verification-pending: needs seed rebuild + stage3 native-build redeploy.
+
+## 2026-11-03 (lane vtoff-fix): fix-implemented, verification-pending
+
+Red spec (seed MIR, fails before / passes after):
+`mir::lower::tests::branch_coverage::calls::field_access_owner_identity_survives_driver_receiver_shapes`.
+Seven receiver shapes on a trait-bearing class; the one that lost identity was an
+erased-generic call result (`var t = idg(make())`, `fn idg<T>(x: T) -> T`):
+FieldGet/FieldSet `owner_name: None` -> native layout `Some(false)` -> field N
+written over vtable slot N-1.
+
+Fix:
+- HIR `refine_generic_identity_return` (`hir/lower/expr/mod.rs`): a generic
+  free fn whose return is a type param `T` also used by a param types the call
+  as that argument's class/struct (inference + call lowering).
+- MIR `field_owner_name` (`mir/lower/lowering_expr.rs`): owner = first NAMED of
+  recovered type, `receiver.ty`, structural recovery; used by all three
+  struct FieldGet/FieldSet sites (expr_struct, stmt assign, core store-back,
+  which previously used `object.ty` only).
+- Sibling paths checked: native pass `resolve_exact_owner` arms and
+  `AggregateFieldCopy` resolution unchanged (already owner-set based).
+
+Verification steps (needs seed rebuild + stage3):
+1. Rebuild seed, rerun bootstrap to stage3 native-build.
+2. `SIMPLE_DEBUG` MIR print of `driver_bootstrap.spl` `translator` FieldSet:
+   `owner_name` must be `MirToLlvm`'s mangled owner.
+3. stage3 native-build of hello world must not SEGV in RELRO.

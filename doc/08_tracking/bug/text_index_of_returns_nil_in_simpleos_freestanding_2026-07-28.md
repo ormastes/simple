@@ -1,6 +1,34 @@
 # `text.index_of` yields the `??` default for a genuine index of 3
 ## Open 2026-09-16 — needs owner triage
 
+## Triage 2026-11-25
+
+Still open as PARTIAL, per the 2026-08-21 audit in the update section below;
+the header is accurate. Re-checked on a Windows worktree at release/1.0.0
+HEAD (`f3fb8f24dc9`):
+
+- The erased-receiver fix chain remains in place in source: the cranelift
+  allowlist entry `("index_of", 1)` is at
+  `src/compiler_rust/compiler/src/codegen/instr/closures_structs.rs` and the
+  regression guard spec
+  `test/01_unit/os/kernel/boot/baremetal_rt_index_of_not_fabricated_spec.spl`
+  exists. (The freestanding C side could not be re-inspected from this
+  worktree — `examples/` is outside its sparse checkout — and the guard spec
+  itself is now UNRUNNABLE with the tracked seed: it fails to load with
+  `unknown decorator '@representation_boundary'`, the known release/1.0.0
+  source/binary inconsistency. No new execution evidence is claimed.)
+- The two items the 2026-08-21 audit left open are still open: (1) the
+  NON-erased-receiver route in
+  `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl` is
+  unchanged; (2) the fail-open fabricated-`rt_*` baseline gap. On item (2)
+  there is movement in the pure-Simple lane: `llvm_native_link.spl` now
+  carries a hosted-lane fence (`hosted_check_no_fabricated_extern_definitions`)
+  that refuses ANY weak empty extern definition rather than only baselined
+  ones, but the seed-lane baseline check the audit named was not re-verified
+  here.
+
+Left open for the compiler lane.
+
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 

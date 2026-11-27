@@ -1,0 +1,88 @@
+"""
+## Purpose and audience
+Purpose: Pin the column edges of an auto-layout table whose slack is shared in
+proportion to FRACTIONAL max-content widths, as Chrome 159 does, rounding only
+the final column edges. Max-content was rounded to whole px before the split,
+which moved the catalog `css-paint` table's inner rule from Chrome's x=416 to
+417 (1,595 differing px).
+Audience: browser-engine table layout maintainers.
+
+Chrome oracle (Chrome 159.0.8154.6 headless shell, `--hide-scrollbars
+--force-device-scale-factor=1 --window-size=900,400`, `body{margin:0;
+background:#fff}`, the table inside `<div style="margin-left:45px;width:Wpx">`,
+`table{width:100%;border-collapse:collapse}`, `th,td{padding:8px;border:1px solid
+#cbd5e1;text-align:left}`, screenshot pixels at y = 4, which crosses only
+borders, listed as `position:colour` wherever the colour changes; exact widths
+from getBoundingClientRect):
+
+Page 1: W=810, Feature/Expected header and one body row (the catalog table).
+Column widths 377.297 / 431.703 from x = 45.5.
+| probe     | Chrome |
+|-----------|--------|
+| row y = 4 | 45:cbd5e1 46:ffffff 422:cbd5e1 423:ffffff 854:cbd5e1 855:ffffff |
+
+Page 2: W=400, Name/Description/Id. Widths 122.750 / 207.031 / 69.219.
+| probe     | Chrome |
+|-----------|--------|
+| row y = 4 | 45:cbd5e1 46:ffffff 168:cbd5e1 169:ffffff 375:cbd5e1 376:ffffff 444:cbd5e1 445:ffffff |
+
+Page 3: W=500, Item/Longer heading text/Qty. Widths 99.250 / 313.031 / 86.719.
+| probe     | Chrome |
+|-----------|--------|
+| row y = 4 | 45:cbd5e1 46:ffffff 144:cbd5e1 145:ffffff 457:cbd5e1 458:ffffff 544:cbd5e1 545:ffffff |
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-TABLE-AUTO-MILLI-SPLIT-001 — auto table columns split slack by fractional max-content widths and round only the final edges.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_foundation.spl 1%
+# @cover src/lib/gc_async_mut/gpu/browser_engine/layout_table.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels_with_engine2d_backend}
+
+val HEAD: text = "<!doctype html><html><head><style>body{{margin:0;background:#fff}}table{{width:100%;border-collapse:collapse}}th,td{{padding:8px;border:1px solid #cbd5e1;text-align:left}}</style></head><body><div style=\"margin-left:45px;width:"
+
+val PAGE_TWO: text = HEAD + "810px\"><table><thead><tr><th>Feature</th><th>Expected</th></tr></thead><tbody><tr><td>Text</td><td>Visible</td></tr></tbody></table></div></body></html>"
+
+val PAGE_THREE: text = HEAD + "400px\"><table><thead><tr><th>Name</th><th>Description</th><th>Id</th></tr></thead><tbody><tr><td>Alpha</td><td>Visible</td><td>7</td></tr></tbody></table></div></body></html>"
+
+val PAGE_WIDE: text = HEAD + "500px\"><table><thead><tr><th>Item</th><th>Longer heading text</th><th>Qty</th></tr></thead><tbody><tr><td>Bolt</td><td>Visible</td><td>12</td></tr></tbody></table></div></body></html>"
+
+fn hex6(c: u32) -> text:
+    val digits = "0123456789abcdef"
+    var out = ""
+    var shift = 20
+    while shift >= 0:
+        val d = ((c >> (shift as u32)) & 15u32) as i32
+        out = out + digits.substring(d, d + 1)
+        shift = shift - 4
+    out
+
+# `position:colour` at every colour change along row y, from the first non-white pixel.
+fn row_runs(px: [u32], y: i32) -> text:
+    var out = ""
+    var prev = 0xFFFFFFu32
+    var x = 0
+    while x < 900:
+        val c = px[x + y * 900] & 0xFFFFFFu32
+        if c != prev:
+            out = out + " " + x.to_text() + ":" + hex6(c)
+            prev = c
+        x = x + 1
+    out
+
+describe "auto table fractional max-content column split":
+    it "AC-1: the Feature/Expected rule sits at Chrome's x=422":
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(PAGE_TWO, 900, 120, "cpu_simd")
+        step("Chrome 159: rules at x = 45, 422, 854 for an 810px table at x=45")
+        expect(row_runs(px, 4)).to_equal(" 45:cbd5e1 46:ffffff 422:cbd5e1 423:ffffff 854:cbd5e1 855:ffffff")
+
+    it "AC-2: a three-column table keeps Chrome's fractional edges":
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(PAGE_THREE, 900, 120, "cpu_simd")
+        step("Chrome 159: rules at x = 45, 168, 375, 444 for a 400px table")
+        expect(row_runs(px, 4)).to_equal(" 45:cbd5e1 46:ffffff 168:cbd5e1 169:ffffff 375:cbd5e1 376:ffffff 444:cbd5e1 445:ffffff")
+
+    it "AC-3: a wider three-column table keeps Chrome's fractional edges":
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(PAGE_WIDE, 900, 120, "cpu_simd")
+        step("Chrome 159: rules at x = 45, 144, 457, 544 for a 500px table")
+        expect(row_runs(px, 4)).to_equal(" 45:cbd5e1 46:ffffff 144:cbd5e1 145:ffffff 457:cbd5e1 458:ffffff 544:cbd5e1 545:ffffff")

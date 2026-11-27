@@ -158,3 +158,27 @@ concatenation; that is a valid spelling under this grammar and needs no
 rewrite (they may equally use `}}}}`). The LSP code-action emitter cited under
 "Impact" must emit `}}}}` or concatenate — its bug record, not the lexer, owns
 that fix.
+
+## Verification 2026-11-25 — RESOLVED (works as documented); the 2026-09-13 "STILL OPEN" triage is superseded
+
+The 2026-09-13 triage at the top of this file ("STILL OPEN, reproduced; fix is
+in string-literal lexing") was written without accounting for the 2026-08-25
+reclassification below, which established — with a pinned seed lexer test and
+executed specs — that the `{{`/`}}` collapse in every double-quoted literal is
+the documented grammar (option 2 of "Expected behavior"), not a lexer defect.
+
+Re-verified at release/1.0.0 (`64dfa6d980f`) with the pinned seed
+`bin/simple.exe` v1.0.0-rc.1 (Windows) via a `bin/simple.exe run` probe:
+
+- `"x}}y".len()` -> 3, `"p{{q".len()` -> 3, `"end}}"` -> `end}`,
+  `"{\"a\":{\"b\":1}}}}"` -> `{"a":{"b":1}}` — exactly the documented contract.
+- The pinned spec `test/01_unit/compiler/lexer_brace_escape_spec.spl` from the
+  08-25 evidence exists in-tree.
+- The self-hosted downstream collapse the reclassification names exists:
+  `decode_interpolation_brace_escapes` at
+  `src/compiler/10.frontend/core/string_interpolation_expand.spl:154`.
+
+`bin/simple.exe test` cannot execute the spec at HEAD (the seed rejects
+`@representation_boundary`, added repo-wide by cfd89933699), so the spec run
+is environment-blocked on this host; the probe above exercises the same lexer
+behavior directly. **Status: CLOSED — works as documented.**

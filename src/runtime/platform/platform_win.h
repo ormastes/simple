@@ -167,9 +167,15 @@ const char** rt_dir_list_cpath(const char* path, int64_t* out_count) {
     FindClose(hFind);
 
     if (count == 0) {
+        const char** empty = malloc(sizeof(char*));
         free(search_pattern);
+        if (!empty) {
+            *out_count = 0;
+            return NULL;
+        }
+        empty[0] = NULL;
         *out_count = 0;
-        return NULL;
+        return empty;
     }
 
     /* Second pass: collect entries */
@@ -203,94 +209,13 @@ const char** rt_dir_list_cpath(const char* path, int64_t* out_count) {
 }
 
 void rt_dir_list_free(const char** entries, int64_t count) {
-    if (!entries) return;
-    for (int64_t i = 0; i < count; i++) {
-        free((void*)entries[i]);
-    }
-    free((void*)entries);
+    rt__shared_dir_list_free(entries, count);
 }
 
-/* Helper: Recursively remove directory contents */
-#include "runtime_win_long_path.h"
-
-static bool rt_dir_remove_all_wide_impl(const wchar_t* path) {
-    if (!path) return false;
-    /* Remove a directory link itself; never enumerate a reparse target. This
-       applies at every recursive entry, including nested junctions. */
-    DWORD attributes = GetFileAttributesW(path);
-    if (attributes == INVALID_FILE_ATTRIBUTES) return false;
-    if (attributes & FILE_ATTRIBUTE_REPARSE_POINT) {
-        return (attributes & FILE_ATTRIBUTE_DIRECTORY)
-            ? RemoveDirectoryW(path) : DeleteFileW(path);
-    }
-
-    /* Build search pattern */
-    size_t path_len = wcslen(path);
-    wchar_t* search_pattern = malloc((path_len + 3) * sizeof(wchar_t));
-    if (!search_pattern) return false;
-    wcscpy(search_pattern, path);
-    if (path_len > 0 && path[path_len - 1] != '\\' && path[path_len - 1] != '/') {
-        wcscat(search_pattern, L"\\");
-    }
-    wcscat(search_pattern, L"*");
-
-    WIN32_FIND_DATAW find_data;
-    HANDLE hFind = FindFirstFileW(search_pattern, &find_data);
-    free(search_pattern);
-
-    if (hFind == INVALID_HANDLE_VALUE) {
-        return RemoveDirectoryW(path);
-    }
-
-    bool success = true;
-    do {
-        if (wcscmp(find_data.cFileName, L".") == 0 || wcscmp(find_data.cFileName, L"..") == 0) {
-            continue;
-        }
-
-        /* Build full path: path + L"\\" + filename */
-        size_t full_len = path_len + 1 + wcslen(find_data.cFileName) + 1;
-        wchar_t* full_path = malloc(full_len * sizeof(wchar_t));
-        if (!full_path) {
-            success = false;
-            continue;
-        }
-        wcscpy(full_path, path);
-        if (path_len > 0 && path[path_len - 1] != '\\' && path[path_len - 1] != '/') {
-            wcscat(full_path, L"\\");
-        }
-        wcscat(full_path, find_data.cFileName);
-
-        if (find_data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
-            /* Recursively remove subdirectory */
-            if (!rt_dir_remove_all_wide_impl(full_path)) {
-                success = false;
-            }
-        } else {
-            /* Delete file */
-            if (!DeleteFileW(full_path)) {
-                success = false;
-            }
-        }
-        free(full_path);
-    } while (FindNextFileW(hFind, &find_data));
-
-    FindClose(hFind);
-
-    /* Remove the directory itself */
-    if (!RemoveDirectoryW(path)) {
-        success = false;
-    }
-
-    return success;
-}
-
+/* Shared UTF-8/long-path cleanup; retain full-runtime absent-path failure. */
+#include "runtime_win_remove_tree.h"
 static bool rt_dir_remove_all_impl(const char* path) {
-    wchar_t* wide = rt_win_long_path_widen(path);
-    if (!wide) return false;
-    bool result = rt_dir_remove_all_wide_impl(wide);
-    free(wide);
-    return result;
+    return rt_win_remove_tree_utf8(path, false, false);
 }
 
 /* C-string worker. The public rt_dir_* entry point lives in runtime.c and
@@ -386,7 +311,7 @@ bool rt_file_unlock(int64_t handle) {
 const char* rt_file_read_text_at(const char* path, int64_t offset, int64_t size) {
     if (!path || size <= 0 || offset < 0) return "";
 
-    HANDLE hFile = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ, NULL,
+    HANDLE hFile = CreateFileA(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
                                OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (hFile == INVALID_HANDLE_VALUE) return "";
 
@@ -420,24 +345,7 @@ const char* rt_file_read_text_at(const char* path, int64_t offset, int64_t size)
 }
 
 static inline const char* rt_file_text_at_string_data(int64_t value, int64_t* len_out) {
-    const uint64_t tag_mask = 0x7ULL;
-    const uint64_t heap_tag = 0x1ULL;
-    uint64_t raw = (uint64_t)value;
-    if ((raw & tag_mask) == heap_tag) {
-        const uint8_t* data = rt_string_data(value);
-        int64_t len = rt_string_len(value);
-        if (data) {
-            *len_out = len;
-            return (const char*)data;
-        }
-    }
-    if (raw > 4096) {
-        const char* s = (const char*)(uintptr_t)raw;
-        *len_out = (int64_t)strlen(s);
-        return s;
-    }
-    *len_out = 0;
-    return NULL;
+    return rt__shared_file_text_at_string_data(value, len_out);
 }
 
 static inline int64_t rt_file_text_at_int(int64_t value) {
@@ -573,24 +481,7 @@ int64_t rt_munmap_raw(int64_t addr, int64_t length) {
 }
 
 int64_t rt_mprotect(int64_t addr, int64_t length, int64_t prot) {
-    if (!addr || length <= 0) return -1;
-    if ((prot & 0x6) == 0x6) return -1;  /* PROT_WRITE | PROT_EXEC */
-    DWORD protect;
-    if (prot == 0x0) protect = PAGE_NOACCESS;
-    else if (prot == 0x1) protect = PAGE_READONLY;
-    else if (prot == 0x2 || prot == 0x3) protect = PAGE_READWRITE;
-    else if (prot == 0x4) protect = PAGE_EXECUTE;
-    else if (prot == 0x5) protect = PAGE_EXECUTE_READ;
-    else return -1;
-    DWORD old_protect;
-    if (!VirtualProtect((void*)(uintptr_t)addr, (SIZE_T)length, protect, &old_protect)) return -1;
-    if ((prot & 0x4) != 0 &&
-        !FlushInstructionCache(GetCurrentProcess(), (void*)(uintptr_t)addr, (SIZE_T)length)) {
-        DWORD ignored;
-        (void)VirtualProtect((void*)(uintptr_t)addr, (SIZE_T)length, old_protect, &ignored);
-        return -1;
-    }
-    return 0;
+    return spl_windows_mprotect_raw(addr, length, prot);
 }
 
 int64_t rt_madvise_raw(int64_t addr, int64_t length, int64_t advice) {
@@ -798,14 +689,10 @@ int64_t rt_process_wait(int64_t pid, int64_t timeout_ms) {
 bool rt_process_is_running(int64_t pid) {
     if (pid <= 0) return false;
 
+    /* pid is the spawn handle. Not GetExitCodeProcess: a child that exits
+     * with code 259 (STILL_ACTIVE) would read as alive forever. */
     HANDLE hProcess = (HANDLE)pid;
-    DWORD exit_code = 0;
-
-    if (!GetExitCodeProcess(hProcess, &exit_code)) {
-        return false;
-    }
-
-    return exit_code == STILL_ACTIVE;
+    return WaitForSingleObject(hProcess, 0) == WAIT_TIMEOUT;
 }
 
 int64_t rt_process_start_identity(int64_t pid) {

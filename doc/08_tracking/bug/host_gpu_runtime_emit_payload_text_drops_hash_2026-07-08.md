@@ -14,9 +14,9 @@
   `engine2d_host_gpu_runtime_emit_payload_text`
   (`src/lib/gc_async_mut/gpu/engine2d/host_gpu_event_queue.spl:139,150,177-178,309-320`).
   Reproduced in interpreter mode on macOS aarch64.
-- **Status:** OPEN — found 2026-07-08 while wiring the #39 SOSIX GPU lane
-  (Gap #2). Worked around in Simple (see below). Fix is Rust-seed
-  (bootstrap-only), so not attempted here per the seed-is-bootstrap-only rule.
+- **Status:** FIXED (verified 2026-11-11, lane rt3) — the Rust seed runtime now
+  stores the emitted `payload_hash` and returns it after drain; verified on the
+  fresh seed (build 46fe8f6b6def). See the 2026-11-11 addendum at the end.
 
 ## Symptom
 
@@ -70,3 +70,36 @@ In the Rust seed, `rt_host_gpu_queue_emit_payload_text` should store the
 returns it after drain. If the root cause is arg-marshalling (scalar lost when a
 `text` arg follows), the ABI lowering for mixed scalar+text extern calls needs
 the fix instead.
+
+---
+
+## 2026-11-11 — Lane rt3 triage verdict: FIXED
+
+**Fixing change:** PR #7597 (merge `9e7e7a526edb`, 2026-11-07) added the full
+`payload_hash` plumbing to the Rust seed runtime
+(`src/compiler_rust/runtime/src/host_gpu_lane.rs`): the `payload_hash` field on
+`HostGpuQueuePacket`, its storage in `rt_host_gpu_queue_emit_payload_text`
+(which the non-text `rt_host_gpu_queue_emit_payload` now delegates to), its
+propagation to `last_payload_hash` in `complete_packet`, the
+`rt_host_gpu_queue_last_payload_hash()` getter, and a Rust unit test asserting
+`last_payload_hash() == 42`. The fix is an ancestor of the current seed build
+commit `46fe8f6b6def` (2026-11-10). The C runtime
+(`src/runtime/runtime_native.c:1316-1337,1437`) carries the same fix for the
+native lane.
+
+**Verification (seed-smoke, `SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe
+... --mode=interpreter --no-cache` on build 46fe8f6b6def):**
+- Direct extern repro (emit with `payload_hash=424242`/`777`/`555` on lane
+  HOST/GPU, submit, drain): `rt_host_gpu_queue_last_payload_hash()` returns the
+  emitted value every time (was 0 before the fix).
+- `test/01_unit/lib/gc_async_mut/gpu/engine2d/sosix_gpu_lane_route_spec.spl`
+  3/3 PASS (re-seals the drained bytes and matches the original hash).
+- `test/01_unit/lib/gc_async_mut/gpu/engine2d/draw_ir_runtime_queue_spec.spl`
+  4/4 PASS.
+
+**Residual note (not this bug):** on this seed, `simple run` mode marshals
+`text` extern args/returns as empty (payload text reads back `""`), while
+`simple test` mode round-trips text correctly (sosix asserts
+`drain_payload_text == payload` and passes). The `payload_hash` (i64) marshals
+correctly in BOTH modes. This run-mode text quirk is a separate seed
+marshalling defect and does not affect the hash fix above.

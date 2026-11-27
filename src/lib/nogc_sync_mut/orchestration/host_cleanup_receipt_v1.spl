@@ -1,0 +1,117 @@
+# Cleanup evidence is data, not permission to destroy or release. The original
+# journal completed marker must bind the canonical digest before settlement.
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.execution_evidence_v2.*
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.contracts.orchestration.host_terminal_wait_receipt_v2.*
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.crypto.sha256.sha256_text
+use std.common.string_core.str_len
+use std.nogc_sync_mut.orchestration.host_cleanup_store_v1.host_cleanup_private_read_v1
+
+pub struct HostCleanupReceiptV1:
+    operation_id: text
+    operation_digest: text
+    request_digest: text
+    plan_digest: text
+    scope: ContainerHostScopeV2
+    runtime: RuntimeIdentityV1
+    provider_identity_digest: text
+    wait_observation_digest: text
+    cleanup_intent_digest: text
+    absence: ContainerAbsenceReceiptV2
+    destroy_status: text
+    observed_unix_ms: i64
+
+pub fn host_cleanup_identity_equal_v1(a: RuntimeIdentityV1, b: RuntimeIdentityV1) -> bool:
+    a.pod_uid == b.pod_uid and a.attempt == b.attempt and a.operation_id == b.operation_id and a.engine == b.engine and a.native_id == b.native_id and a.node_boot_id == b.node_boot_id and a.provider_generation == b.provider_generation
+
+pub fn host_cleanup_receipt_encode_v1(value: HostCleanupReceiptV1) -> Result<text, text>:
+    for digest in [value.operation_digest, value.request_digest, value.plan_digest, value.provider_identity_digest, value.wait_observation_digest, value.cleanup_intent_digest]:
+        if str_len(digest) != 64 or not builder_digest_valid_v1(digest): return Err("host-cleanup-receipt-digest")
+    if not builder_identifier_valid_v1(value.operation_id): return Err("host-cleanup-receipt-operation")
+    if (not host_cleanup_identity_equal_v1(value.runtime, value.absence.identity) or
+            value.runtime.operation_id != value.operation_id or str_len(value.runtime.native_id) != 64 or
+            not builder_digest_valid_v1(value.runtime.native_id) or
+            container_scope_fence_id_v2(value.scope)? != container_scope_fence_id_v2(value.absence.scope)? or
+            value.request_digest != value.absence.request_digest or value.provider_identity_digest != value.absence.provider_identity_digest or
+            value.observed_unix_ms != value.absence.observed_unix_ms or
+            not ["ok", "unknown", "not-attempted"].contains(value.destroy_status)):
+        return Err("host-cleanup-receipt-correlation")
+    # Scope and runtime are encoded once by the strict common absence codec;
+    # their typed outer projections above MUST be identical, never independent.
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1), "kind": SdnValue.String("host-cleanup-receipt"),
+        "operationId": SdnValue.String(value.operation_id), "operationDigest": SdnValue.String(value.operation_digest),
+        "requestDigest": SdnValue.String(value.request_digest), "planDigest": SdnValue.String(value.plan_digest),
+        "providerIdentityDigest": SdnValue.String(value.provider_identity_digest),
+        "waitObservationDigest": SdnValue.String(value.wait_observation_digest),
+        "cleanupIntentDigest": SdnValue.String(value.cleanup_intent_digest),
+        "absence": SdnValue.String(container_absence_receipt_encode_v2(value.absence)?),
+        "destroyStatus": SdnValue.String(value.destroy_status), "observedUnixMs": SdnValue.Int(value.observed_unix_ms)}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+pub fn cleanup_fields_v1(source: text, names: [text], limit: i64) -> Result<Dict<text, SdnValue>, text>:
+    if str_len(source) == 0 or str_len(source) > limit: return Err("host-cleanup-source-size")
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: limit, max_depth: 2, max_nodes: 64, max_rows: 0, max_cells: 0, max_columns: 24)):
+        case Ok(value): value
+        case Err(issue): return Err("host-cleanup-syntax:" + issue.code)
+    val fields = match parsed.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("host-cleanup-object-required")
+    for name in fields.keys():
+        if not names.contains(name): return Err("host-cleanup-unknown-field:" + name)
+    for name in names:
+        if not fields.contains_key(name): return Err("host-cleanup-missing-field:" + name)
+    Ok(fields)
+
+pub fn cleanup_text_v1(fields: Dict<text, SdnValue>, name: text) -> Result<text, text>:
+    match fields[name]:
+        case SdnValue.String(value): Ok(value)
+        case _: Err("host-cleanup-text-required:" + name)
+
+pub fn host_cleanup_receipt_decode_v1(source: text) -> Result<HostCleanupReceiptV1, text>:
+    val fields = cleanup_fields_v1(source, ["version", "kind", "operationId", "operationDigest", "requestDigest", "planDigest", "providerIdentityDigest", "waitObservationDigest", "cleanupIntentDigest", "absence", "destroyStatus", "observedUnixMs"], 131072)?
+    if fields["version"] != SdnValue.Int(1) or cleanup_text_v1(fields, "kind")? != "host-cleanup-receipt": return Err("host-cleanup-version")
+    val absence = container_absence_receipt_decode_v2(cleanup_text_v1(fields, "absence")?)?
+    val observed = match fields["observedUnixMs"]:
+        case SdnValue.Int(value): value
+        case _: return Err("host-cleanup-time-required")
+    val value = HostCleanupReceiptV1(operation_id: cleanup_text_v1(fields, "operationId")?,
+        operation_digest: cleanup_text_v1(fields, "operationDigest")?, request_digest: cleanup_text_v1(fields, "requestDigest")?,
+        plan_digest: cleanup_text_v1(fields, "planDigest")?, scope: absence.scope, runtime: absence.identity,
+        provider_identity_digest: cleanup_text_v1(fields, "providerIdentityDigest")?,
+        wait_observation_digest: cleanup_text_v1(fields, "waitObservationDigest")?, cleanup_intent_digest: cleanup_text_v1(fields, "cleanupIntentDigest")?,
+        absence: absence, destroy_status: cleanup_text_v1(fields, "destroyStatus")?, observed_unix_ms: observed)
+    if host_cleanup_receipt_encode_v1(value)? != source: return Err("host-cleanup-noncanonical")
+    Ok(value)
+
+pub fn host_cleanup_receipt_digest_v1(value: HostCleanupReceiptV1) -> Result<text, text>:
+    Ok(sha256_text(host_cleanup_receipt_encode_v1(value)?))
+
+pub fn host_cleanup_receipt_load_v1(root: text, operation_id: text) -> Result<HostCleanupReceiptV1, text>:
+    if not builder_identifier_valid_v1(operation_id): return Err("host-cleanup-operation")
+    val bytes = host_cleanup_private_read_v1(root + "/host-cleanup-receipts-v1", sha256_text(operation_id) + ".sdn", 131072)?
+    val receipt = host_cleanup_receipt_decode_v1(bytes)?
+    if receipt.operation_id != operation_id: return Err("host-cleanup-operation-mismatch")
+    Ok(receipt)
+
+# Shared pure qualification consumes the exact immutable wait record; cleanup
+# never interprets destroy CLI success as terminal workload completion.
+pub fn host_cleanup_receipt_match_v1(value: HostCleanupReceiptV1, wait: HostTerminalWaitReceiptV2,
+        execution: ContainerExecutionPlanV2, expected_runtime: RuntimeIdentityV1,
+        operation_digest: text, original_plan_digest: text, provider_digest: text,
+        minimum_observed_unix_ms: i64) -> Result<bool, text>:
+    val valid = host_cleanup_receipt_encode_v1(value)?
+    val qualified = host_terminal_wait_receipt_validate_v2(wait, execution, expected_runtime, operation_digest, provider_digest, minimum_observed_unix_ms)?
+    if (value.operation_id != execution.operation_id or value.operation_digest != operation_digest or
+            value.request_digest != execution.request_digest or value.plan_digest != original_plan_digest or
+            not host_cleanup_identity_equal_v1(value.runtime, expected_runtime) or
+            container_scope_fence_id_v2(value.scope)? != expected_runtime.node_boot_id or
+            value.absence.backend != execution.backend or value.provider_identity_digest != provider_digest or
+            value.wait_observation_digest != wait.observation_digest or value.observed_unix_ms < wait.observed_unix_ms):
+        return Err("host-cleanup-original-evidence-mismatch")
+    Ok(true)

@@ -201,3 +201,27 @@ recreate the vacuity. The gap is tracked here instead.
 
 - `doc/08_tracking/bug/vacuous_spec_corpus_census_and_inert_assertion_forms_2026-08-02.md`
 - `doc/08_tracking/bug/gc_analysis_desugar_dropped_method_bodies_2026-08-02.md`
+
+## Verification 2026-11-25 — 2026-09-13 closure independently re-confirmed
+
+Re-ran the closure probe against release/1.0.0 (`64dfa6d980f`) with the pinned
+seed `bin/simple.exe` v1.0.0-rc.1 (Windows) via `bin/simple.exe run` (direct
+import of `compiler.core.type_inference`; `bin/simple.exe test` is blocked at
+HEAD by the seed's `@representation_boundary` rejection):
+
+```
+1 self-array   occurs=true unify=2      # v = [v]        -> OCCURS
+2 plain-bind                unify=0     # w = text       -> SUCCESS
+3 same-var                  unify=0     # x = x          -> SUCCESS
+4 self-option  occurs=true unify=2      # y = y?         -> OCCURS
+5 mismatch                  unify=1     # text = bool    -> MISMATCH
+6 self-dict-value occurs=true unify=2   # z = {text: z}  -> OCCURS
+```
+
+Identical to the closure table in the 2026-09-13 section above:
+`UNIFY_FAIL_OCCURS` is reachable through three different composite shapes and
+the guard did not become trigger-happy. The "Status: OPEN" line in the
+original body below is stale; the 2026-09-13 closure is correct.
+**Status: CLOSED (fixed).** The spec-vacuity half (retargeting
+`type_inference_v2_spec.spl`) remains a separate live defect exactly as the
+closure section records.

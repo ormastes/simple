@@ -1,0 +1,42 @@
+# Phase-2 production-owner check; these assertions are not SSpec case counts.
+use std.env.{env_get}
+use std.io_runtime.{read_file_text_result, file_exists}
+use app.devhub.editor_file.{prepare_editor_file, cleanup_editor_file}
+
+fn main() -> i64:
+    # The caller supplies a private existing parent. Never touch real HOME.
+    val parent = env_get("DEVHUB_EDITOR_PROBE_PARENT")
+    if parent == "":
+        print "FAIL explicit private DEVHUB_EDITOR_PROBE_PARENT required"
+        return 1
+    val first: (text, text) = match prepare_editor_file(parent, "héllo 日本 🙂", ".md"):
+        case Ok(value): value
+        case Err(reason):
+            print "FAIL first editor preparation: {reason}"
+            return 1
+    val second: (text, text) = match prepare_editor_file(parent, "", ".html"):
+        case Ok(value): value
+        case Err(reason):
+            val _cleaned = cleanup_editor_file(first.0)
+            print "FAIL second editor preparation: {reason}"
+            return 1
+    val first_text = read_file_text_result(first.1)
+    val second_text = read_file_text_result(second.1)
+    val distinct = first.0 != second.0 and first.1 != second.1
+    val invalid = prepare_editor_file(parent, "must not escape", "/../escaped")
+    val absent = prepare_editor_file(first.0 + "/missing", "must not create parents", ".md")
+    val escaped = file_exists(parent + "/escaped")
+    val clean_first = cleanup_editor_file(first.0)
+    val clean_second = cleanup_editor_file(second.0)
+    assert(clean_first and clean_second)
+    assert(not file_exists(first.0) and not file_exists(second.0))
+    assert(distinct)
+    assert(invalid.is_err() and absent.is_err() and not escaped)
+    match first_text:
+        case Ok(value): assert(value == "héllo 日本 🙂")
+        case Err(_): assert(false)
+    match second_text:
+        case Ok(value): assert(value == "")
+        case Err(_): assert(false)
+    print "PASS actual editor Unicode and empty payloads, distinct workspaces, rejected suffix/missing parent, cleanup"
+    0

@@ -1,0 +1,146 @@
+# Common, effect-free orchestration document loader (CFG-01, CFG-02).
+# Parses once, dispatches typed child values, and preserves original spans.
+# This is decoding, not reference resolution, authorization, or an apply plan.
+
+use std.common.sdn.value.{SdnValue, SdnSpan}
+use std.common.contracts.orchestration.resource_v1.{
+    ResourceV1, RejectionV1, ObjectMetaV1, ORCHESTRATION_API_VERSION_V1,
+    parse_resource_document, decode_resource_value, decode_resource_envelope,
+    resource_envelope_path, decode_meta, as_dict, as_array, as_text,
+    only_known, require, reject}
+use std.common.contracts.orchestration.ci_v1.{
+    JobV1, PipelineV1, CI_API_VERSION_V1, decode_job_value, decode_pipeline_value}
+use std.common.contracts.orchestration.profile_v1.{ResourceProfileV1, decode_resource_profile_value}
+use std.common.contracts.orchestration.agent_session_v1.{AgentSessionV1, decode_agent_session_value}
+use std.common.contracts.orchestration.execution_policy_v1.{HostPoolV1, RuntimeClassV1, decode_host_pool_value, decode_runtime_class_value}
+use std.common.contracts.orchestration.host_config_v1.{HostConfigV1, decode_host_config_value}
+
+pub const RESOURCE_SET_MAX_SOURCE_V1 = 1048576
+pub const RESOURCE_SET_MAX_NODES_V1 = 1024
+pub const RESOURCE_SET_MAX_DEPTH_V1 = 16
+
+pub enum ResourceSetItemV1:
+    Workload(ResourceV1)
+    Job(JobV1)
+    Pipeline(PipelineV1)
+    Profile(ResourceProfileV1)
+    AgentSession(AgentSessionV1)
+    HostPool(HostPoolV1)
+    RuntimeClass(RuntimeClassV1)
+    HostConfig(HostConfigV1)
+
+pub struct ResourceSetV1:
+    items: [ResourceSetItemV1]
+
+struct PendingResourceV1:
+    value: SdnValue
+    prefix: text
+    depth: i64
+
+# Length-delimited identity components avoid separator collisions in metadata.
+# API version is excluded: identity is group/kind/namespace/name.
+fn identity_key(group: text, kind: text, meta: ObjectMetaV1) -> text:
+    (group.len().to_text() + ":" + group + kind.len().to_text() + ":" + kind +
+        meta.ns.len().to_text() + ":" + meta.ns + meta.name.len().to_text() + ":" + meta.name)
+
+pub fn resource_set_item_identity(item: ResourceSetItemV1) -> text:
+    match item:
+        case ResourceSetItemV1.Workload(resource):
+            match resource:
+                case ResourceV1.Pod(p): identity_key("orchestration.simple", "Pod", p.meta)
+                case ResourceV1.Deployment(d): identity_key("orchestration.simple", "Deployment", d.meta)
+        case ResourceSetItemV1.Job(j): identity_key("ci.simple", "Job", j.meta)
+        case ResourceSetItemV1.Pipeline(p): identity_key("ci.simple", "Pipeline", p.meta)
+        case ResourceSetItemV1.Profile(p): identity_key("orchestration.simple", "ResourceProfile", p.meta)
+        case ResourceSetItemV1.AgentSession(s): identity_key("orchestration.simple", "AgentSession", s.meta)
+        case ResourceSetItemV1.HostPool(p): identity_key("orchestration.simple", "HostPool", p.meta)
+        case ResourceSetItemV1.RuntimeClass(r): identity_key("orchestration.simple", "RuntimeClass", r.meta)
+        case ResourceSetItemV1.HostConfig(h): identity_key("orchestration.simple", "HostConfig", h.meta)
+
+fn decode_item(value: SdnValue, spans: Dict<text, SdnSpan>, prefix: text,
+               version: text, kind: text) -> Result<ResourceSetItemV1, RejectionV1>:
+    if version == ORCHESTRATION_API_VERSION_V1:
+        if kind == "HostConfig":
+            val config = decode_host_config_value(value, spans, prefix)?
+            return Ok(ResourceSetItemV1.HostConfig(config))
+        if kind == "HostPool":
+            val pool = decode_host_pool_value(value, spans, prefix)?
+            return Ok(ResourceSetItemV1.HostPool(pool))
+        if kind == "RuntimeClass":
+            val runtime = decode_runtime_class_value(value, spans, prefix)?
+            return Ok(ResourceSetItemV1.RuntimeClass(runtime))
+        if kind == "AgentSession":
+            val session = decode_agent_session_value(value, spans, prefix)?
+            return Ok(ResourceSetItemV1.AgentSession(session))
+        if kind == "ResourceProfile":
+            val profile = decode_resource_profile_value(value, spans, prefix)?
+            return Ok(ResourceSetItemV1.Profile(profile))
+        val resource = decode_resource_value(value, spans, prefix)?
+        return Ok(ResourceSetItemV1.Workload(resource))
+    if version == CI_API_VERSION_V1:
+        if kind == "Job":
+            val job = decode_job_value(value, spans, prefix)?
+            return Ok(ResourceSetItemV1.Job(job))
+        if kind == "Pipeline":
+            val pipeline = decode_pipeline_value(value, spans, prefix)?
+            return Ok(ResourceSetItemV1.Pipeline(pipeline))
+        return Err(reject("unsupported_kind", prefix + "kind",
+            "unsupported CI kind '" + kind + "'", spans))
+    Err(reject("unsupported_api_version", prefix + "apiVersion",
+        "unsupported apiVersion '" + version + "'", spans))
+
+# Accept a singleton resource or nested ResourceLists in declaration order.
+# A malformed child rejects the whole set before a caller can observe any item.
+# Empty lists are valid no-op sets. List metadata is validated but never inherited.
+pub fn decode_resource_set(source: text) -> Result<ResourceSetV1, RejectionV1>:
+    if source.len() > RESOURCE_SET_MAX_SOURCE_V1:
+        return Err(RejectionV1(kind: "resource_set_limit", path: "",
+            message: "resource set source exceeds the input limit", line: 0, col: 0))
+    val parsed = parse_resource_document(source)?
+    val spans = parsed.1
+    var pending = [PendingResourceV1(value: parsed.0, prefix: "", depth: 0)]
+    var items: [ResourceSetItemV1] = []
+    var identities: Dict<text, bool> = {}
+    var admitted_nodes = 1
+    while pending.len() > 0:
+        val node = pending[pending.len() - 1]
+        pending.pop()
+        val prefix = node.prefix
+        val envelope = resource_envelope_path(prefix)
+        if node.depth > RESOURCE_SET_MAX_DEPTH_V1:
+            return Err(reject("resource_set_limit", envelope,
+                "ResourceList nesting exceeds the depth limit", spans))
+        val top = as_dict(node.value, envelope, spans)?
+        val av = require(top, "apiVersion", envelope, spans)?
+        val version = as_text(av, prefix + "apiVersion", spans)?
+        val kv = require(top, "kind", envelope, spans)?
+        val kind = as_text(kv, prefix + "kind", spans)?
+        if version == ORCHESTRATION_API_VERSION_V1 and kind == "ResourceList":
+            val checked = decode_resource_envelope(node.value, spans, prefix, version)?
+            val mv = require(checked, "metadata", envelope, spans)?
+            decode_meta(mv, prefix + "metadata", spans)?
+            val sv = require(checked, "spec", envelope, spans)?
+            val sf = as_dict(sv, prefix + "spec", spans)?
+            only_known(sf, ["items"], prefix + "spec", spans)?
+            val iv = require(sf, "items", prefix + "spec", spans)?
+            val children = as_array(iv, prefix + "spec.items", spans)?
+            if children.len() > RESOURCE_SET_MAX_NODES_V1 - admitted_nodes:
+                return Err(reject("resource_set_limit", prefix + "spec.items",
+                    "ResourceList exceeds the node limit", spans))
+            admitted_nodes = admitted_nodes + children.len()
+            # Reverse push gives depth-first declaration order without recursion.
+            var index = children.len()
+            while index > 0:
+                index = index - 1
+                pending.push(PendingResourceV1(value: children[index],
+                    prefix: prefix + "spec.items." + index.to_text() + ".",
+                    depth: node.depth + 1))
+        else:
+            val item = decode_item(node.value, spans, prefix, version, kind)?
+            val identity = resource_set_item_identity(item)
+            if identities.contains_key(identity):
+                return Err(reject("duplicate_resource", prefix + "metadata.name",
+                    "duplicate group/kind/namespace/name in resource set", spans))
+            identities[identity] = true
+            items.push(item)
+    Ok(ResourceSetV1(items: items))

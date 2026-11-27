@@ -58,6 +58,16 @@ fn driver_aot_uses_versioned_backend(configured_backend: text) -> bool:
         case "wasm" | "wasm32" | "wasm64": false
         case _: true
 
+# reason: backend name and explicit plugin path strings select versioned dynamic backend loading on --backend-plugin
+@allow(primitive_api)
+@allow(bare_bool)
+pub fn driver_aot_uses_versioned_backend_with_plugin_v1(
+    configured_backend: text, plugin_path: text
+) -> bool:
+    if plugin_path.trim() != "" and configured_backend != "cuda" and configured_backend != "ptx":
+        return true
+    driver_aot_uses_versioned_backend(configured_backend)
+
 pub fn driver_cuda_plugin_request_error_v1(configured_backend: text, plugin_path: text) -> text:
     cuda_backend_request_error_v1(installed_cuda_backend_mode_v1(), configured_backend, plugin_path)
 
@@ -67,12 +77,21 @@ fn driver_backend_plugin_target(configured_target: text) -> text:
     if configured_target == "native":
         return "native"
     val arch = configured_target.split("-")[0]
+    # RISC-V triples carry ISA extensions in the arch field (riscv64gc, riscv32imac).
+    if arch.starts_with("riscv64"):
+        return "riscv64"
+    if arch.starts_with("riscv32"):
+        return "riscv32"
+    # ARM triples carry the ISA profile too (armv7a, armv7r, armv8r, armv5te, thumbv7a).
+    if arch.starts_with("armv") or arch.starts_with("thumbv"):
+        return "arm"
     match arch:
         case "amd64": "x86_64"
         case "x64": "x86_64"
         case "arm64": "aarch64"
         case "i386" | "i486" | "i586" | "i686": "x86"
-        case "thumbv8m.main" | "thumbv8m.base" | "thumbv7em" | "thumbv7m" | "thumbv6m": "arm"
+        # Architecture selectors, not triples, are admitted by the builtin registry.
+        case "armv7" | "thumbv8m.main" | "thumbv8m.base" | "thumbv7em" | "thumbv7m" | "thumbv6m": "arm"
         case "x86_64" | "aarch64" | "riscv64" | "riscv32" | "x86" | "arm": arch
         case _: configured_target
 

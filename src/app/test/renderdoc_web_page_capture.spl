@@ -16,13 +16,16 @@
 
 use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
     simple_web_render_html_to_pixels_with_engine2d_backend}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use app.io.env_ops.{env_get}
 use std.io_runtime.{read_file, file_exists}
 use app.test.renderdoc_runtime_ops.{
     renderdoc_available, renderdoc_capture_file_path_template_from_env,
     renderdoc_configure_capture_file_path_template_from_env,
     renderdoc_is_frame_capturing, renderdoc_start_capture,
-    renderdoc_end_capture, renderdoc_num_captures}
+    renderdoc_end_capture, renderdoc_num_captures,
+    renderdoc_start_capture_for_device, renderdoc_end_capture_for_device,
+    vulkan_renderdoc_device_pointer}
 
 fn _int_env(key: text, fallback: i32) -> i32:
     val v = env_get(key) ?? ""
@@ -46,15 +49,32 @@ fn main():
         print("renderdoc_capture_template={capture_template}\n")
         print("renderdoc_capture_template_set={template_set}\n")
 
-    # The offscreen Vulkan renderer never presents, so a wildcard (device-less)
-    # start/end pair is the only trigger that brackets the frame.
-    val started = renderdoc_start_capture()
+    # RenderDoc can only bracket a frame for a device that already exists: a
+    # start issued before the first vkCreateDevice returns 1 and captures
+    # nothing (measured: capturing_after_start=0, num_captures=0). So bring up
+    # the shared Vulkan session first, exactly as renderdoc_vulkan_capture.spl
+    # does, then start device-scoped with the wildcard start as the fallback.
+    val eng = match Engine2D.create_requested_backend(w, h, "vulkan"):
+        Ok(value): value
+        Err(message):
+            print("renderdoc_web_capture=0 reason=backend-unavailable {message}\n")
+            return
+    print("backend={eng.backend_name()}\n")
+    val device = vulkan_renderdoc_device_pointer()
+    print("renderdoc_device={device}\n")
+    val started = renderdoc_start_capture_for_device(device)
     print("renderdoc_start={started}\n")
+    var use_wildcard = false
+    if renderdoc_is_frame_capturing() == 0:
+        val wildcard_started = renderdoc_start_capture()
+        print("renderdoc_wildcard_start={wildcard_started}\n")
+        use_wildcard = renderdoc_is_frame_capturing() != 0
     print("renderdoc_capturing_after_start={renderdoc_is_frame_capturing()}\n")
 
     val html = read_file(page)
     val pixels = simple_web_render_html_to_pixels_with_engine2d_backend(html, w, h, "vulkan")
 
     print("renderdoc_capturing_before_end={renderdoc_is_frame_capturing()}\n")
-    val ended = renderdoc_end_capture()
+    val ended = if use_wildcard: renderdoc_end_capture() else: renderdoc_end_capture_for_device(device)
     print("renderdoc_end={ended} pixels={pixels.len()} num_captures={renderdoc_num_captures()}\n")
+    print("renderdoc_device_backend={eng.backend_name()}\n")

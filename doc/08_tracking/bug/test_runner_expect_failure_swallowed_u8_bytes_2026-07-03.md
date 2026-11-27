@@ -2,7 +2,24 @@
 
 - **Date:** 2026-07-03
 - **Severity:** P1 (trust — second greenwash mode, distinct from the fixed summary-sum bug)
-- **Status:** open, needs minimal repro
+- **Status:** CLOSED 2026-11-25 — fixed; verified by execution (see below)
+
+## Verified fixed 2026-11-25 (Windows x86_64, pinned `bin/simple.exe` v1.0.0-rc.1)
+
+The swallow no longer reproduces. Sabotage repro of the filed shape: a copy
+of `test/01_unit/lib/common/audio/wav_encode_spec.spl` with both
+`expect(bytes[44]).to_equal(0u8)` sites changed to `99u8` (the exact filed
+sabotage). Run under `bin/simple.exe test <sabotaged copy> --mode=interpreter`
+at release/1.0.0 HEAD: `Results: 6 total, 4 passed, 2 failed`, exit 1, with
+`expected 0 to equal 99` reported for both sabotaged examples — the u8
+matcher failure is no longer swallowed. The unmodified spec passes 6/6 on
+the same binary.
+
+Method note: release/1.0.0 HEAD carries `@representation_boundary`
+annotations the pinned seed binary rejects, so for this probe the decorator
+lines were temporarily stripped from the 152 annotated files in the probe
+worktree and restored afterwards (nothing committed). The decorator is
+metadata-only and does not touch the matcher/runner path under test.
 
 ## Observed (by P0c encoder agent, worktree agent-a170cd9758e16d60e)
 

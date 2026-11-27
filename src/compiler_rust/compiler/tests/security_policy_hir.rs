@@ -40,6 +40,8 @@ fn hir_function_with_params(name: &str, params: Vec<hir::LocalVar>, body: Vec<hi
         is_ghost: false,
         is_sync: false,
         has_suspension: false,
+        generic_params: vec![],
+        generic_bounds: vec![],
     }
 }
 
@@ -928,6 +930,7 @@ fn sec301_uses_hir_resolved_authorization_calls_when_modules_are_available() {
                 method: "is_admin".to_string(),
                 args: vec![],
                 dispatch: hir::DispatchMode::Static,
+                generic_args: vec![],
             },
             ty: hir::TypeId::BOOL,
         })],
@@ -982,6 +985,7 @@ fn sec401_uses_hir_resolved_ambient_authority_calls_when_modules_are_available()
                 method: "open".to_string(),
                 args: vec![],
                 dispatch: hir::DispatchMode::Static,
+                generic_args: vec![],
             },
             ty: hir::TypeId::I64,
         })],
@@ -1031,6 +1035,7 @@ fn sec401_accepts_hir_resolved_explicit_capability_handles() {
                     method: "open".to_string(),
                     args: vec![],
                     dispatch: hir::DispatchMode::Static,
+                    generic_args: vec![],
                 },
                 ty: hir::TypeId::I64,
             }),
@@ -1043,6 +1048,7 @@ fn sec401_accepts_hir_resolved_explicit_capability_handles() {
                     method: "get".to_string(),
                     args: vec![],
                     dispatch: hir::DispatchMode::Static,
+                    generic_args: vec![],
                 },
                 ty: hir::TypeId::I64,
             }),

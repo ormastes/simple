@@ -9,3 +9,5 @@ Add both atomic variants to boxed_text_arg_indices at [0,1], retaining full byte
 Evidence: /mnt/c/Temp/simple-manual-lanes-20261011/p2-mir-progress-actual-logger/{env-diagnostic.log,persist-diagnostic.log,atomic-abi.log,platform-gc-run-receipt.json}. Regression fixtures exercise actual atomic write/readback including multiline content and empty replacement; native execution with a corrected compiler is pending. Registry SSpec is unexecuted because the qualified application test CLI is unavailable.
 
 Focused registry owner qualification: corrected element-wise eight native invariants PASS (compile0/23.98s/object42264/link0/run0), exact committed SCV bytes bound in /mnt/c/Temp/simple-manual-lanes-20261012/atomic-boxed-registry-elements. Initial array-comparison fixture run1 retained; no claim on native array equality semantics. This qualifies registry output only; changed compiler atomic-write roundtrip and required full CLI gates remain unqualified.
+
+**Revalidated 2026-11-02: still plausible because OPEN; source correction prepared, changed compiler provider unqualified; no merged fix commit with a passing regression is cited in this doc.**

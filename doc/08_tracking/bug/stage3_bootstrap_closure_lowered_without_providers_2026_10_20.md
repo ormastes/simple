@@ -56,3 +56,5 @@ last closure module's symbols.
   per module (25.0 GB at module 50, 27.8 GB at module 150), which projects
   to about 60 GB and 4.6 h for the 1,318-module closure. Tracked as
   `stage3_bootstrap_closure_provider_registration_cost_2026_10_20.md`.
+
+**Revalidated 2026-11-02: still plausible because FIX COMMITTED; probe validated (0 MIR errors), full-closure MIR result pending; no merged fix commit with a passing regression is cited in this doc.**

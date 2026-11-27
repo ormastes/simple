@@ -1,6 +1,6 @@
 # Baremetal image performance probe exits without a verdict
 
-Status: OPEN (2026-08-12)
+Status: OPEN — BLOCKED (2026-11-11, P3 lane ne2): receipt counters verified green on the refreshed seed; the p50/p95 timing verdict still needs a native or SimpleOS/QEMU host
 
 ## Symptom
 
@@ -27,3 +27,82 @@ Run the receipt-backed probe through a stable native or SimpleOS/QEMU timing
 entrypoint and record p50/p95, checksum, RSS, viewport, backend, binary
 revision, and fallback state. Do not use the 256x work-reduction ratio alone as
 an 8K/80 performance claim.
+
+## Fix attempt — 2026-11-05 (work/libbug-linux-imgprobe-20261105)
+
+Root cause: the work-receipt counters `last_image_source_pixels` and
+`last_image_examined_pixels` documented above as exposed by `BaremetalBackend`
+were absent from `src/lib/gc_async_mut/gpu/engine2d/backend_baremetal.spl`, so
+the retained receipt-backed probe
+`test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_baremetal_image_clip_spec.spl`
+failed semantic analysis with `class BaremetalBackend has no field named
+last_image_source_pixels` — the probe exited with an ERROR verdict recap and
+no usable example/file verdict semantics, and the outer runner returned no
+usable exit code, matching this report.
+
+Fix: restored both counters on `BaremetalBackend` (class fields, constructor
+init, and per-call accounting in `draw_image`; examined counts pixels passing
+the bounds/clip intersection before mask gating). Verified with the phase1
+snapshot CLI on aarch64 Linux: the clip spec now reports
+`SPEC FILE VERDICT ... outcome=OK declared>=3 executed=3 passed=3 failed=0`
+and exit 0.
+
+Environment limit: this host is aarch64 Linux; the x86_64 baremetal /
+SimpleOS QEMU p50/p95 benchmark required for full resolution was not run.
+
+
+## Verdict addendum — 2026-11-11 (P3 lane ne2)
+
+Verdict: **BLOCKED** (status stays OPEN) — the receipt-side defect is fixed and
+re-verified; the timing-verdict half of "Required resolution" cannot run in this
+lane's environment.
+
+Verified this lane on the refreshed seed (`bin/simple.exe`, build-commit
+`0791c2b7f4a7`, seed-smoke `--mode=interpreter --no-cache`, Windows x86_64 host):
+
+- `test/01_unit/lib/gc_async_mut/gpu/engine2d/backend_baremetal_image_clip_spec.spl`
+  → SPEC FILE VERDICT OK, 3/3 passed. The restored
+  `last_image_source_pixels` / `last_image_examined_pixels` counters emit example
+  and file verdicts with a usable exit code — extending the 2026-11-05 aarch64
+  Linux evidence to x86_64 Windows.
+
+Still missing (the actual subject of this record): p50/p95, checksum, RSS,
+viewport, backend, binary revision, and fallback state from a **stable native or
+SimpleOS/QEMU timing entrypoint**. This host has no `qemu-system-*` on PATH, and
+this lane is forbidden cargo/rustc and entry-closure native builds, so the timing
+probe cannot be produced here.
+
+Grant to unblock: on a Linux host with the self-hosted binary, run the
+receipt-backed bounded-scan vs full-scan probe through the SimpleOS x86_64 QEMU
+timing entrypoint (or a `native-build` probe with `SIMPLE_KEEP_NATIVE_OBJS=1`)
+and record the metrics above; until then this row remains OPEN-BLOCKED, not a
+performance claim.
+
+
+---
+
+## 2026-11-13 addendum — P3 gpu lane p3-gpu-20261113 (work/p3-gpu-20261113, base 6f4cb189867)
+
+**Verdict: BLOCKED stands (status stays OPEN) — no change from the 2026-11-11 ne2
+disposition; the timing-verdict half of "Required resolution" remains unproducible
+on this lane.**
+
+- Environment re-checked on this Windows x86_64 lane: no `qemu-system-*` on PATH,
+  and the lane remains forbidden `cargo`/`rustc` and entry-closure native builds,
+  so neither the SimpleOS x86_64 QEMU timing entrypoint nor a
+  `native-build`+`SIMPLE_KEEP_NATIVE_OBJS=1` probe can be produced here.
+- The receipt-side fix (`last_image_source_pixels` / `last_image_examined_pixels`
+  on `BaremetalBackend`) is present in source at this base
+  (`src/lib/gc_async_mut/gpu/engine2d/backend_baremetal.spl`); per the no-green-rerun
+  rule the already-verdicted 3/3 clip spec was not re-executed.
+- Grant unchanged: a Linux-hosted lane with the self-hosted binary runs the
+  bounded-scan vs full-scan probe through the SimpleOS x86_64 QEMU timing
+  entrypoint and records p50/p95, checksum, RSS, viewport, backend, binary
+  revision, and fallback state.
+
+
+---
+
+## 2026-11-13 triage (live-P3 lane l1, work/live-p3-l1-20261113, base f790f7f266e)
+
+**OPEN-BLOCKED (confirmed)** — Receipt-side fix present at this base (`last_image_source_pixels`/`last_image_examined_pixels`, 9 refs in `backend_baremetal.spl`, grep). No `qemu-system-*` on this Windows lane and native timing entrypoints are lane-forbidden, so the p50/p95 timing verdict half of "Required resolution" stays unproducible here; grant unchanged (Linux-hosted lane with the self-hosted binary).

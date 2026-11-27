@@ -1,0 +1,77 @@
+# Private fixed Host-reservation artifact plan. No caller-provided paths,
+# callbacks, native-owner loans, policy decisions or deletion capability.
+use std.common.contracts.distributed_operation_assessment_v3.*
+use std.common.contracts.distributed_operation_state_v2.DistributedOperationStateV2
+use std.common.contracts.distributed_control_codec_v2.distributed_decode_operation_v2
+use std.common.contracts.orchestration.host_reservation_codec_v1.{host_reservation_decode_intent_v1,
+    host_reservation_match_operation_v1, host_helper_reservation_match_operation_v1}
+use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.io.windows_journal_store_v1.WindowsJournalStoreV1
+use std.nogc_sync_mut.io.journal_storage_backend_v3.*
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_read_regular_no_follow_bounded}
+
+struct OperationAssessmentReferenceV3:
+    operation_id: text
+    relative: text
+    digest: text
+    maximum: i64
+
+struct OperationAssessmentPlanV3:
+    operations: Dict<text, DistributedOperationStateV2>
+    missing_operation_ids: [text]
+    references: [OperationAssessmentReferenceV3]
+
+fn operation_assessment_plan_v3(rows: Dict<text, DistributedOperationStateV2>,
+        request: DistributedOperationAssessmentRequestV3) -> Result<OperationAssessmentPlanV3, text>:
+    val bounded = operation_assessment_request_validate_v3(request)?
+    var selected: Dict<text, DistributedOperationStateV2> = {}
+    var missing: [text] = []
+    var references: [OperationAssessmentReferenceV3] = []
+    var total: i64 = 0
+    for id in request.operation_ids:
+        if not rows.contains_key(id):
+            missing.push(id)
+            continue
+        val row = rows[id]
+        val decoded = distributed_decode_operation_v2(row.envelope)
+        if decoded.is_err(): return Err("OPERATION_JOURNAL_INDEX_MISMATCH")
+        val operation = decoded.unwrap()
+        if (row.operation_id != id or operation.id != id or
+                row.envelope_digest != sha256_text(row.envelope)):
+            return Err("OPERATION_JOURNAL_INDEX_MISMATCH")
+        selected[id] = row
+        if ["host_reservation_v1", "host_helper_reservation_v1"].contains(operation.operation):
+            val maximum: i64 = 65536
+            if maximum > 1048576 - total: return Err("OPERATION_ASSESSMENT_BYTE_LIMIT")
+            total = total + maximum
+            references.push(OperationAssessmentReferenceV3(id,
+                "reservation-payloads/" + operation.payload_digest + ".sdn", operation.payload_digest, maximum))
+    Ok(OperationAssessmentPlanV3(selected, missing, references))
+
+fn operation_assessment_read_v3(root: text, store: Option<WindowsJournalStoreV1>,
+        reference: OperationAssessmentReferenceV3) -> Result<text, text>:
+    operation_assessment_read_stored_v3(root, journal_storage_backend_windows_v3(store), reference)
+
+fn operation_assessment_read_stored_v3(root: text, backend: JournalStorageBackendV3,
+        reference: OperationAssessmentReferenceV3) -> Result<text, text>:
+    var bytes: Result<text, text> = Err("OPERATION_ASSESSMENT_REFERENCED_PAYLOAD_MISSING")
+    if not journal_storage_is_legacy_v3(backend):
+        val retained = journal_storage_read_v3(backend, reference.relative, reference.maximum)
+        if retained.is_err(): return Err(retained.unwrap_err())
+        if val payload = retained.unwrap(): bytes = Ok(payload)
+    else:
+        val path = root + "/" + reference.relative
+        if file_exists(path): bytes = file_read_regular_no_follow_bounded(path, reference.maximum)
+    val payload = bytes?
+    if sha256_text(payload) != reference.digest: return Err("OPERATION_ASSESSMENT_REFERENCED_PAYLOAD_CHANGED")
+    Ok(payload)
+
+fn operation_assessment_payload_validate_v3(row: DistributedOperationStateV2,
+        payload: text) -> Result<bool, text>:
+    val operation = distributed_decode_operation_v2(row.envelope)?
+    val intent = host_reservation_decode_intent_v1(payload)?
+    if operation.operation == "host_reservation_v1":
+        return host_reservation_match_operation_v1(intent, operation)
+    if operation.operation == "host_helper_reservation_v1":
+        return host_helper_reservation_match_operation_v1(intent, operation)
+    Err("OPERATION_ASSESSMENT_UNSUPPORTED_ARTIFACT")

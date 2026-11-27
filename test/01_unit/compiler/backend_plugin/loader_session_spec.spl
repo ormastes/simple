@@ -4,12 +4,20 @@
 use std.spec
 use std.spec.step
 use std.io_runtime.{file_read}
-use compiler.common.backend_plugin.model.{BackendRole, BackendCapability,
-    BackendPluginRequestV1}
+use compiler.common.backend_plugin.model.{
+    BACKEND_PLUGIN_ABI_VERSION_V1, BACKEND_PLUGIN_DESCRIPTOR_MIN_SIZE_V1,
+    BackendRole, BackendCapability, BackendCapabilityAttestationKindV2,
+    BackendPluginRequestV1, BackendPluginDescriptorV1,
+    backend_plugin_vtable_v1_all_operations,
+    backend_capability_attestation_bridge_projected_v2,
+    backend_capability_attestation_confirmed_baseline_v2
+}
 use compiler.common.backend_plugin.receipt.{BackendPluginError}
-use compiler.backend_plugin.registry.{BUILTIN_MIR_ABI_DIGEST_V1}
+use compiler.backend_plugin.registry.{BUILTIN_MIR_ABI_DIGEST_V1, llvm_builtin_descriptor}
 use compiler.backend_plugin.session.{BackendSession}
-use compiler.backend_plugin.loader.{load_backend}
+use compiler.backend_plugin.loader.{
+    load_backend, load_dynamic_backend_v1, load_backend_with_descriptor_v2
+}
 # In-process, `compiler.driver.bootstrap_k1_selected` resolves to the fail-closed
 # stub (install returns false), so name the committed K1 composition directly,
 # as src/app/cli/native_build_worker.spl does. Without the installed table the
@@ -112,3 +120,41 @@ describe "built-in versioned backend loader":
             "is not available in the built-in loader")).to_equal(false)
         expect(session_source).to_contain("dynamic_adapter: DynamicBackendAdapter?")
         expect(session_source).to_contain("retained_dynamic.close()")
+
+    it "rejects unattested dynamic feature requests and synthetic bridge descriptor admission":
+        expect(install_selected_k1_backend_table_v1()).to_equal(true)
+        val dyn_feat_req = BackendPluginRequestV1(
+            BackendRole.CompilerAot, "dyn-v1", "host", "generic", ["avx2"],
+            "debug", BUILTIN_MIR_ABI_DIGEST_V1, [BackendCapability.ObjectEmit],
+            "/nonexistent/provider-v1.dll", true)
+        expect(loader_error_code(load_dynamic_backend_v1(dyn_feat_req))).to_equal(
+            "BACKEND_PLUGIN_PROVIDER_REJECTED")
+
+        val bridge_descriptor = BackendPluginDescriptorV1(
+            BACKEND_PLUGIN_ABI_VERSION_V1, BACKEND_PLUGIN_DESCRIPTOR_MIN_SIZE_V1,
+            "llvm", "dynamic-bridge-v1", "bridge-build", BUILTIN_MIR_ABI_DIGEST_V1,
+            [BackendRole.CompilerAot], ["host"], [BackendCapability.ObjectEmit],
+            backend_plugin_vtable_v1_all_operations(),
+            backend_capability_attestation_bridge_projected_v2())
+        val base_req = loader_test_request(
+            BackendRole.CompilerAot, "llvm", BUILTIN_MIR_ABI_DIGEST_V1,
+            [BackendCapability.ObjectEmit])
+        expect(loader_error_code(load_backend_with_descriptor_v2(
+            base_req, bridge_descriptor))).to_equal(
+            "BACKEND_PLUGIN_PROVIDER_REJECTED")
+
+        val builtin_desc = llvm_builtin_descriptor()
+        val attested_builtin = BackendPluginDescriptorV1(
+            builtin_desc.abi_version, builtin_desc.descriptor_size,
+            builtin_desc.provider_identity, builtin_desc.provider_version,
+            builtin_desc.build_id, builtin_desc.mir_abi_digest,
+            builtin_desc.roles, builtin_desc.targets,
+            builtin_desc.capabilities, builtin_desc.vtable,
+            backend_capability_attestation_confirmed_baseline_v2(
+                ["host"], ["generic"]))
+        var session = load_backend_with_descriptor_v2(
+            base_req, attested_builtin).ok().unwrap()
+        expect(session.receipt.feature_acceptance.name()).to_equal(
+            "confirmed_baseline")
+        expect(session.receipt.accepted_features.len()).to_equal(0)
+        expect(session.close()).to_equal(true)

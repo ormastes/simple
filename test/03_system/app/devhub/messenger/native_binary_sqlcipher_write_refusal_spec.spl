@@ -1,0 +1,62 @@
+# System test: the NATIVE devhub binary refuses every write-shaped verb on the
+# encrypted (sqlcipher4) messenger store and leaves the store byte-identical.
+# Binary comes from env DEVHUB_NATIVE_BIN.
+# Scope: rekey (no such verb on a read-only source) and send (policy-denied),
+# run against a private copy of the dense fixture, then compared with `cmp`.
+# @manual_section: messenger-native-binary
+
+"""
+## Purpose and audience
+Purpose: I can point the native devhub binary at a secured messenger database
+and be sure no command rekeys it, sends through it or otherwise changes a byte
+of it, while it still decrypts and reads the same rooms afterwards.
+Audience: DevHub release reviewers. Passphrase is public synthetic data (dense_ground_truth.json).
+"""
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get_opt}
+use std.env.{env_set}
+use test.support.devhub_messenger_dense.*
+use test.support.devhub_messenger_cli.*
+
+fn native_bin() -> text:
+    match env_get_opt("DEVHUB_NATIVE_BIN"):
+        case Some(v): v
+        case None: ""
+
+val wr_bin = native_bin()
+val wr_truth = dense_truth()
+val wr_pass = truth_passphrase(wr_truth)
+val wr_copy = "build/nb/write_refusal/dense_copy.sqlcipher4"
+val _mk = process_run("mkdir", ["-p", "build/nb/write_refusal"])
+val _cp = process_run("cp", [dense_path(DENSE_BASE), wr_copy])
+val _home = cli_prepare_home_for("build/nb/write_refusal/home", wr_copy)
+val _s = env_set(DENSE_ENV, wr_pass)
+val wr_rekey = if wr_bin == "": ("", "", -1) else: process_run(wr_bin, ["messenger", "rekey", "--target", "dense", "--json"])
+val wr_send = if wr_bin == "": ("", "", -1) else: process_run(wr_bin, ["messenger", "send", "--target", "dense", "--room", "1", "--text", "should-never-land", "--confirm", "--json"])
+val wr_cmp = process_run("cmp", [dense_path(DENSE_BASE), wr_copy])
+val wr_rooms = if wr_bin == "": ("", "", -1) else: process_run(wr_bin, ["messenger", "rooms", "--target", "dense", "--json"])
+
+describe "native devhub binary never writes to a secured messenger store":
+    it "rejects a rekey request without echoing the passphrase":
+        # @req REQ-MSGR-NATIVE-007
+        step("Run `devhub messenger rekey --target dense --json` on a private copy of the store")
+        expect(wr_rekey.2).to_equal(2)
+        expect(wr_rekey.0.contains("unknown messenger verb 'rekey'")).to_equal(true)
+        expect((wr_rekey.0 + wr_rekey.1).contains(wr_pass)).to_equal(false)
+
+    it "denies a confirmed send because the database source is read-only":
+        # @req REQ-MSGR-NATIVE-008
+        step("Run a confirmed `devhub messenger send` at the sqlcipher4 target")
+        expect(wr_send.2).to_equal(3)
+        expect(wr_send.0.contains("read-only")).to_equal(true)
+        expect((wr_send.0 + wr_send.1).contains(wr_pass)).to_equal(false)
+
+    it "leaves the store byte-identical to the fixture":
+        step("Compare the private copy with the committed fixture using cmp")
+        expect(wr_cmp.2).to_equal(0)
+
+    it "still decrypts the same rooms after the refused writes":
+        step("Run rooms on the same copy and compare with ground truth")
+        expect(wr_rooms.2).to_equal(0)
+        expect(wr_rooms.0.contains(tf(wr_truth, "rooms_payload"))).to_equal(true)

@@ -1,0 +1,63 @@
+# Seed interpreter cannot guarantee zeroization through a parameter
+
+Status: OPEN, accepted limit of the Phase 1 seed. Severity: P2. Date: 2026-10-31.
+
+## Symptom
+
+Under the Phase 1 seed interpreter, a wipe function can report success while the
+caller's array keeps its bytes. The wipe's readback checks the callee's copy, so
+its `true` result proves nothing about the owner.
+
+Measured with `SIMPLE_EXECUTION_MODE=interpret` on seed SHA-256
+`55be5e48ecd717a59cd7f0538768b22bbc832669025571c546d30fdf817dc0ec`:
+
+| Array built with | Byte after callee wipe |
+| --- | --- |
+| `o.push(128u8)` (literal) | 128, write lost |
+| `o.push((128).to_u8())` (computed) | 0, write visible |
+
+The same difference decides whether a `StorageReadView.image` or
+`CodecSessionV1.secret_material` owner is wiped. Fixture
+`test/fixtures/devhub/fresh_secured_db/main.spl` failed at
+`direct session close wipe` on real derived key material.
+
+## Cause
+
+Interpreter arrays are copy-on-write. `exec_assignment`
+(`src/compiler_rust/compiler/src/interpreter/node_exec.rs`) writes in place only
+when the `Arc` is unique, and otherwise clones with `Arc::make_mut` to preserve
+value semantics. A callee's write to a shared array therefore lands on a private
+copy. Why the computed form stays visible was not established.
+
+## Decision
+
+Seed array semantics are unchanged: the seed is bootstrap-only, and the change
+would affect all interpreted code. Wipe guarantees are judged natively.
+
+- `test/fixtures/devhub/native_storage_wipe_alias/main.spl` holds the owner claim
+  that was in `storage_port_spec.spl`. On Phase 2 the original array was wiped and
+  `val alias = image` was not, so the alias claim was dropped.
+- `fresh_secured_db` prints `UNVERIFIED wipe checks` when
+  `DEVHUB_FRESH_SEED_INTERPRETER=1`. `provision.py` sets it only with
+  `--seed-interpreter` and otherwise clears it.
+
+Do not cite a Phase 1 run as evidence that secrets or plaintext were erased.
+
+## Also seen in
+
+`test/01_unit/lib/database/sqlite_format/writer_spec.spl` fails 4 scenarios on the
+seed with `bad magic`. The writer fills its image through parameters
+(`page[off] = ... as u8`), which fits this cause but was not confirmed. The Messenger
+read path does not use the writer.
+
+### Confirmed (2026-10-31): sqlite_format writer
+
+Confirmed with a probe on the Phase 1 seed: an element write made through an array
+parameter (`fn put(page: [u8], ...): page[off] = ...`) is lost for the caller, for
+both `val` and `var` arguments; a returned buffer (`c = put2(c, ...)`) and local
+writes work. This was the cause of the `writer_spec.spl` `bad magic` failures:
+`_put_u16`, `_put_u32` and `_write_header` in
+`src/lib/nogc_sync_mut/database/sqlite_format/wimage.spl` wrote nothing into the
+caller's buffer. Fixed by returning the updated buffer from the helpers. After the
+fix `writer_spec.spl` is 7/7 on the seed, including the Python sqlite3 oracle
+(integrity_check ok and exact rows).

@@ -1,0 +1,302 @@
+# LSP Performance Analysis Presentation & Capability Negotiation V1
+#
+# Read-only editor presentation helpers for symbolic cost hover blocks,
+# multi-hop caller->callee relatedInformation provenance spans (C07),
+# PERF-* codeAction kind mapping, and client codeAction capability negotiation.
+# Never mutates editor buffers or disk files.
+
+use std.common.string_core.{char_from_code}
+use std.common.json.serializer.{json_escape_string}
+use std.common.json.value.{
+    JsonValue,
+    json_parse_value_strict,
+    json_value_field,
+    json_value_has,
+    json_value_items,
+    json_value_as_bool,
+    json_value_text_or
+}
+
+pub struct LspClientCodeActionCapsV1:
+    resolve_support: bool = false
+    disabled_support: bool = true
+    document_changes_support: bool = true
+
+pub struct LspPerfSizeBindingV1:
+    symbol: text
+    definition: text
+
+pub struct LspPerfCostHoverSummaryV1:
+    function_id: text
+    resource: text
+    expression: text
+    relation: text
+    regime: text
+    model_id: text
+    status: text
+    origin: text
+    sizes: [LspPerfSizeBindingV1] = []
+    assumptions: [text] = []
+    contributions: [text] = []
+
+pub struct LspPerfProvenanceSpanV1:
+    node_id: text
+    role: text
+    file: text
+    line: i64
+    col: i64
+    end_line: i64
+    end_col: i64
+    summary_line: text
+
+struct _ClientCapsEntryV1:
+    client_id: text
+    caps: LspClientCodeActionCapsV1
+
+struct _PerfHoverEntryV1:
+    client_id: text
+    uri: text
+    line0: i64
+    summary: LspPerfCostHoverSummaryV1
+
+var _CLIENT_CODE_ACTION_CAPS: [_ClientCapsEntryV1] = []
+var _PERF_HOVER_ENTRIES: [_PerfHoverEntryV1] = []
+
+fn _lb() -> text:
+    char_from_code(123)
+
+fn _rb() -> text:
+    char_from_code(125)
+
+fn _jstr(s: text) -> text:
+    "\"" + json_escape_string(s) + "\""
+
+fn _norm_client(client_id: text) -> text:
+    val t = client_id.trim()
+    if t == "": "default" else: t
+
+fn _file_to_uri(path: text) -> text:
+    if path.starts_with("file://"):
+        return path
+    val norm = path.replace("\\", "/")
+    if norm.starts_with("/"):
+        return "file://" + norm
+    "file:///" + norm
+
+# reason: negotiates LSP 3.17 codeAction resolveSupport, disabledSupport, and workspaceEdit.documentChanges from initialize JSON
+@allow(primitive_api)
+pub fn lsp_negotiate_client_code_action_caps_v1(init_body: text) -> LspClientCodeActionCapsV1:
+    val trimmed = init_body.trim()
+    if trimmed == "":
+        return LspClientCodeActionCapsV1(
+            resolve_support: false,
+            disabled_support: true,
+            document_changes_support: true
+        )
+    val parsed = json_parse_value_strict(trimmed)
+    if parsed.is_err():
+        return LspClientCodeActionCapsV1(
+            resolve_support: false,
+            disabled_support: true,
+            document_changes_support: true
+        )
+    val root = parsed.unwrap()
+    val container = if json_value_has(root, "params"): json_value_field(root, "params") else: root
+    val caps = json_value_field(container, "capabilities")
+    var resolve_edit = false
+    var disabled_ok = true
+    var doc_changes_ok = true
+
+    if json_value_has(caps, "textDocument"):
+        val td = json_value_field(caps, "textDocument")
+        if json_value_has(td, "codeAction"):
+            val ca = json_value_field(td, "codeAction")
+            match json_value_as_bool(json_value_field(ca, "disabledSupport")):
+                case Some(flag): disabled_ok = flag
+                case None: pass
+            if json_value_has(ca, "resolveSupport"):
+                val rs = json_value_field(ca, "resolveSupport")
+                match json_value_as_bool(rs):
+                    case Some(flag): resolve_edit = flag
+                    case None:
+                        for prop in json_value_items(json_value_field(rs, "properties")):
+                            if json_value_text_or(prop, "") == "edit":
+                                resolve_edit = true
+
+    if json_value_has(caps, "workspace"):
+        val ws = json_value_field(caps, "workspace")
+        if json_value_has(ws, "workspaceEdit"):
+            val we = json_value_field(ws, "workspaceEdit")
+            match json_value_as_bool(json_value_field(we, "documentChanges")):
+                case Some(flag): doc_changes_ok = flag
+                case None: pass
+
+    LspClientCodeActionCapsV1(
+        resolve_support: resolve_edit,
+        disabled_support: disabled_ok,
+        document_changes_support: doc_changes_ok
+    )
+
+# reason: records negotiated codeAction capabilities isolated to client_id
+@allow(primitive_api)
+pub fn lsp_set_client_code_action_caps_for_client_v1(client_id: text, caps: LspClientCodeActionCapsV1):
+    val norm = _norm_client(client_id)
+    var kept: [_ClientCapsEntryV1] = []
+    for e in _CLIENT_CODE_ACTION_CAPS:
+        if e.client_id != norm:
+            kept.push(e)
+    if kept.len() >= 64:
+        var trimmed: [_ClientCapsEntryV1] = []
+        var i = 1
+        while i < kept.len():
+            trimmed.push(kept[i])
+            i = i + 1
+        kept = trimmed
+    kept.push(_ClientCapsEntryV1(client_id: norm, caps: caps))
+    _CLIENT_CODE_ACTION_CAPS = kept
+
+# reason: retrieves negotiated codeAction capabilities for client_id or safe defaults
+@allow(primitive_api)
+pub fn lsp_get_client_code_action_caps_for_client_v1(client_id: text) -> LspClientCodeActionCapsV1:
+    val norm = _norm_client(client_id)
+    for e in _CLIENT_CODE_ACTION_CAPS:
+        if e.client_id == norm:
+            return e.caps
+    LspClientCodeActionCapsV1(
+        resolve_support: false,
+        disabled_support: true,
+        document_changes_support: true
+    )
+
+# reason: clears negotiated codeAction capabilities for client_id
+@allow(primitive_api)
+pub fn lsp_clear_client_code_action_caps_for_client_v1(client_id: text):
+    val norm = _norm_client(client_id)
+    var kept: [_ClientCapsEntryV1] = []
+    for e in _CLIENT_CODE_ACTION_CAPS:
+        if e.client_id != norm:
+            kept.push(e)
+    _CLIENT_CODE_ACTION_CAPS = kept
+
+# reason: maps diagnostic rule_code and fix_kind onto LSP CodeActionKind string
+@allow(primitive_api)
+pub fn lsp_perf_code_action_kind_v1(rule_code: text, fix_kind: text, is_style_only: bool) -> text:
+    if is_style_only or rule_code == "PERF-STYLE-001" or fix_kind == "refactor.rewrite":
+        return "refactor.rewrite"
+    if fix_kind == "Refactor" or fix_kind == "refactor":
+        if rule_code.starts_with("PERF-"):
+            return "refactor.rewrite"
+        return "refactor"
+    "quickfix"
+
+# reason: formats sparse markdown hover summary preserving multiple input size variables and assumptions
+@allow(primitive_api)
+pub fn lsp_format_perf_cost_hover_markdown_v1(summary: LspPerfCostHoverSummaryV1) -> text:
+    var lines: [text] = []
+    val fn_name = if summary.function_id != "": summary.function_id else: "<anonymous>"
+    lines.push("### Performance Cost Summary: `" + fn_name + "`")
+    if summary.sizes.len() > 0:
+        var size_parts: [text] = []
+        for s in summary.sizes:
+            size_parts.push(s.symbol + " = " + s.definition)
+        lines.push("- **Sizes:** " + size_parts.join(", "))
+    val res_label = if summary.resource != "": summary.resource else: "work"
+    val model_label = if summary.model_id != "": summary.model_id else: "default"
+    val st_label = if summary.status != "": summary.status else: "Unknown"
+    if st_label == "Unknown" or summary.expression.trim() == "":
+        lines.push("- **Modeled " + res_label + ":** unknown (status: " + st_label + ", model: `" + model_label + "`)")
+    else:
+        val rel = if summary.relation != "": summary.relation else: "UpperBound"
+        val reg = if summary.regime != "": summary.regime else: "WorstCase"
+        lines.push("- **Modeled " + res_label + ":** `" + summary.expression + "` (" + rel + ", " + reg + ", status: " + st_label + ", model: `" + model_label + "`)")
+    if summary.contributions.len() > 0:
+        lines.push("- **Contributions:** " + summary.contributions.join("; "))
+    if summary.assumptions.len() > 0:
+        lines.push("- **Assumptions:** " + summary.assumptions.join("; "))
+    lines.join("\n")
+
+# reason: renders LSP Hover JSON object from structured cost hover summary
+@allow(primitive_api)
+pub fn lsp_render_perf_cost_hover_json_v1(summary: LspPerfCostHoverSummaryV1) -> text:
+    val lb = _lb()
+    val rb = _rb()
+    val md = lsp_format_perf_cost_hover_markdown_v1(summary)
+    lb + "\"contents\":" + lb + "\"kind\":\"markdown\",\"value\":" + _jstr(md) + rb + rb
+
+# reason: registers read-only cost hover summary at 0-based line for client_id and URI
+@allow(primitive_api)
+pub fn lsp_perf_hover_register_for_client_v1(
+    client_id: text,
+    uri: text,
+    line0: i64,
+    summary: LspPerfCostHoverSummaryV1
+):
+    val norm = _norm_client(client_id)
+    var kept: [_PerfHoverEntryV1] = []
+    for e in _PERF_HOVER_ENTRIES:
+        if not (e.client_id == norm and e.uri == uri and e.line0 == line0):
+            kept.push(e)
+    if kept.len() >= 128:
+        var trimmed: [_PerfHoverEntryV1] = []
+        var i = 1
+        while i < kept.len():
+            trimmed.push(kept[i])
+            i = i + 1
+        kept = trimmed
+    kept.push(_PerfHoverEntryV1(client_id: norm, uri: uri, line0: line0, summary: summary))
+    _PERF_HOVER_ENTRIES = kept
+
+# reason: looks up read-only cost hover summary for client_id, URI, and 0-based line
+@allow(primitive_api)
+pub fn lsp_perf_hover_lookup_for_client_v1(
+    client_id: text,
+    uri: text,
+    line0: i64
+) -> Option<LspPerfCostHoverSummaryV1>:
+    val norm = _norm_client(client_id)
+    for e in _PERF_HOVER_ENTRIES:
+        if e.client_id == norm and e.uri == uri and e.line0 == line0:
+            return Some(e.summary)
+    None
+
+# reason: clears registered cost hover entries for client_id and URI
+@allow(primitive_api)
+pub fn lsp_perf_hover_clear_for_client_v1(client_id: text, uri: text):
+    val norm = _norm_client(client_id)
+    var kept: [_PerfHoverEntryV1] = []
+    for e in _PERF_HOVER_ENTRIES:
+        if not (e.client_id == norm and e.uri == uri):
+            kept.push(e)
+    _PERF_HOVER_ENTRIES = kept
+
+fn _pos_json(line0: i64, char0: i64) -> text:
+    val lb = _lb()
+    val rb = _rb()
+    lb + "\"line\":" + line0.to_text() + ",\"character\":" + char0.to_text() + rb
+
+# reason: renders caller->callee provenance chain (C07) onto LSP DiagnosticRelatedInformation JSON array
+@allow(primitive_api)
+pub fn lsp_render_perf_related_information_json_v1(chain: [LspPerfProvenanceSpanV1]) -> text:
+    val lb = _lb()
+    val rb = _rb()
+    var items: [text] = []
+    for p in chain:
+        val s_line = if p.line > 0: p.line - 1 else: 0
+        val s_col = if p.col > 0: p.col - 1 else: 0
+        val e_line = if p.end_line > 0: p.end_line - 1 else: s_line
+        val e_col = if p.end_col > 0: p.end_col - 1 else: s_col + 1
+        val range = lb + "\"start\":" + _pos_json(s_line, s_col) + ",\"end\":" + _pos_json(e_line, e_col) + rb
+        val loc = lb + "\"uri\":" + _jstr(_file_to_uri(p.file)) + ",\"range\":" + range + rb
+        val label = if p.role != "": "[" + p.role + "] " + p.summary_line else: p.summary_line
+        items.push(lb + "\"location\":" + loc + ",\"message\":" + _jstr(label) + rb)
+    "[" + items.join(",") + "]"
+
+export LspClientCodeActionCapsV1, LspPerfSizeBindingV1, LspPerfCostHoverSummaryV1, LspPerfProvenanceSpanV1
+export lsp_negotiate_client_code_action_caps_v1
+export lsp_set_client_code_action_caps_for_client_v1
+export lsp_get_client_code_action_caps_for_client_v1
+export lsp_clear_client_code_action_caps_for_client_v1
+export lsp_perf_code_action_kind_v1
+export lsp_format_perf_cost_hover_markdown_v1, lsp_render_perf_cost_hover_json_v1
+export lsp_perf_hover_register_for_client_v1, lsp_perf_hover_lookup_for_client_v1, lsp_perf_hover_clear_for_client_v1
+export lsp_render_perf_related_information_json_v1

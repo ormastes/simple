@@ -1,0 +1,466 @@
+# Pure read-only TestDB query model: typed rows, qualification and pagination.
+# Rows describe unverified framework observations; only a Passed status can
+# qualify, and every absent identity is an explicit Missing variant.
+use std.common.traceability.case_events.{TraceCaseEvent, TraceCaseFacts, TestFailureSummary, TestHostTriple, TestBackendName, TestFailureCode, TestDefinitionDigest, TestBinaryDigest, test_failure_code_name}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
+
+val TEST_QUERY_MAX_LIMIT: i64 = 1000
+
+pub struct TestCasePath:
+    value: text
+
+pub struct TestCaseName:
+    value: text
+
+pub struct TestCaseKey:
+    path: TestCasePath
+    name: TestCaseName
+
+pub struct TestRunId:
+    value: text
+
+pub struct TestPlannedCaseId:
+    value: text
+
+pub enum TestPlannedCaseIdentity:
+    Recorded(id: TestPlannedCaseId)
+    Missing
+
+pub struct TestAttemptOrdinal:
+    value: i64
+
+pub enum TestAttemptIdentity:
+    StreamOrder(ordinal: TestAttemptOrdinal)
+    Missing
+
+pub enum TestQueryStatus:
+    Passed
+    Failed
+    Skipped
+    Ignored
+    QualifiedIgnore
+    Pending
+    InDevelopment
+    FeatureGated
+    Blocked
+    NotFinished
+    Cached
+    Expired
+    Unknown(raw: text)
+
+pub enum TestQualification:
+    Pass
+    NotPass
+
+pub enum TestEvidenceProvenance:
+    UnverifiedFrameworkObservation
+
+pub struct TestQueryLimit:
+    value: i64
+
+# Opaque continuation token `tq1:<digest>:<offset>`. The digest binds it to the
+# query identity (case, run, limit) and to the row snapshot it was issued over.
+pub struct TestQueryCursor:
+    token: text
+
+pub struct TestQuery:
+    case_key: TestCaseKey
+    run_id: TestRunId?
+    limit: TestQueryLimit
+    cursor: TestQueryCursor?
+
+# Test level, derived from the numbered `test/NN_<level>/` tree of the case path.
+pub enum TestLevel:
+    Unit
+    Integration
+    System
+    Smoke
+    Perf
+    Security
+    Other
+
+pub struct TestScopeId:
+    value: text
+
+# Bug- or requirement-scoped query: the scope resolves to spec paths (see
+# app.traceability.test_query_scope_v1), `levels` narrows them, [] means all.
+pub enum TestQueryScope:
+    Bug(id: TestScopeId)
+    Requirement(id: TestScopeId)
+
+pub struct TestScopedQuery:
+    scope: TestQueryScope
+    levels: [TestLevel]
+    run_id: TestRunId?
+    limit: TestQueryLimit
+    cursor: TestQueryCursor?
+
+# Plan 3.5 attempt facts. Absent (None) for events recorded before the runner
+# captured them. Digests are stamped by the parent runner when it records events.
+pub struct TestStartedAtMicros:
+    value: i64
+
+pub struct TestDurationMicros:
+    value: i64
+
+pub struct TestQueryRow:
+    case_key: TestCaseKey
+    level: TestLevel
+    run_id: TestRunId
+    planned_case: TestPlannedCaseIdentity
+    attempt: TestAttemptIdentity
+    status: TestQueryStatus
+    qualification: TestQualification
+    provenance: TestEvidenceProvenance
+    started_at: TestStartedAtMicros? = None
+    duration: TestDurationMicros? = None
+    failure: TestFailureSummary? = None
+    host: TestHostTriple? = None
+    backend: TestBackendName? = None
+    failure_code: TestFailureCode? = None
+    definition_digest: TestDefinitionDigest? = None
+    binary_digest: TestBinaryDigest? = None
+
+pub enum TestQueryTruncation:
+    Complete
+    Truncated(next: TestQueryCursor)
+
+pub enum TestQueryCoverage:
+    Full
+    Partial
+
+pub struct TestQueryPage:
+    rows: [TestQueryRow]
+    truncation: TestQueryTruncation
+    coverage: TestQueryCoverage
+
+pub enum TestQueryErrorKind:
+    InvalidQuery
+    UnknownRun
+    StoreUnreadable
+
+pub struct TestQueryError:
+    kind: TestQueryErrorKind
+    detail: text
+
+pub fn parse_test_query_status(raw: text) -> TestQueryStatus:
+    match raw:
+        case "passed": TestQueryStatus.Passed
+        case "failed": TestQueryStatus.Failed
+        case "skipped": TestQueryStatus.Skipped
+        case "ignored": TestQueryStatus.Ignored
+        case "qualifiedignore": TestQueryStatus.QualifiedIgnore
+        case "pending": TestQueryStatus.Pending
+        case "in_development": TestQueryStatus.InDevelopment
+        case "in-development": TestQueryStatus.InDevelopment
+        case "feature_gated": TestQueryStatus.FeatureGated
+        case "blocked": TestQueryStatus.Blocked
+        case "not_finished": TestQueryStatus.NotFinished
+        case "cached": TestQueryStatus.Cached
+        case "expired": TestQueryStatus.Expired
+        case _: TestQueryStatus.Unknown(raw: raw)
+
+fn _slash_normalised(raw: text) -> text:
+    var out = ""
+    for ch in raw.chars():
+        if ch == "\\":
+            out = out + "/"
+        else:
+            out = out + ch
+    out
+
+pub fn test_level_of_path(path: TestCasePath) -> TestLevel:
+    val p = _slash_normalised(path.value)
+    val at = p.index_of("test/") ?? -1
+    if at < 0 or (at > 0 and p.substring(at - 1, at) != "/"):
+        return TestLevel.Other
+    val rest = p.substring(at + 5, p.byte_len())
+    if rest.starts_with("01_unit/") or rest.starts_with("00_unit/") or rest.starts_with("00_quick/"): TestLevel.Unit
+    elif rest.starts_with("02_integration/"): TestLevel.Integration
+    elif rest.starts_with("03_system/"): TestLevel.System
+    elif rest.starts_with("04_smoke/"): TestLevel.Smoke
+    elif rest.starts_with("05_perf/"): TestLevel.Perf
+    elif rest.starts_with("07_security/"): TestLevel.Security
+    else: TestLevel.Other
+
+pub fn parse_test_level(raw: text) -> TestLevel?:
+    match raw:
+        case "unit": Some(TestLevel.Unit)
+        case "integration": Some(TestLevel.Integration)
+        case "system": Some(TestLevel.System)
+        case "smoke": Some(TestLevel.Smoke)
+        case "perf": Some(TestLevel.Perf)
+        case "security": Some(TestLevel.Security)
+        case "other": Some(TestLevel.Other)
+        case _: None
+
+pub fn test_level_name(level: TestLevel) -> text:
+    match level:
+        case TestLevel.Unit: "unit"
+        case TestLevel.Integration: "integration"
+        case TestLevel.System: "system"
+        case TestLevel.Smoke: "smoke"
+        case TestLevel.Perf: "perf"
+        case TestLevel.Security: "security"
+        case TestLevel.Other: "other"
+
+# Comma-separated `--levels` / `levels` value; unknown names are rejected.
+pub fn parse_test_levels(raw: text) -> Result<[TestLevel], text>:
+    var levels: [TestLevel] = []
+    for part in raw.split(","):
+        val name = part.trim()
+        if name == "":
+            continue
+        match parse_test_level(name):
+            case Some(level):
+                if not levels.contains(level):
+                    levels.push(level)
+            case None: return Err("unknown test level: " + name + " (one of unit, integration, system, smoke, perf, security, other)")
+    if levels.len() == 0:
+        return Err("levels needs at least one level name")
+    Ok(levels)
+
+pub enum TestLevelMatch:
+    Inside
+    Outside
+
+pub fn test_path_in_levels(path: TestCasePath, levels: [TestLevel]) -> TestLevelMatch:
+    if levels.len() == 0 or levels.contains(test_level_of_path(path)):
+        TestLevelMatch.Inside
+    else:
+        TestLevelMatch.Outside
+
+# Synthetic exact-query identity that binds a scoped query's cursor to its
+# scope, levels and run, so pagination reuses the exact-query paginator.
+pub fn scoped_test_query_identity(scoped: TestScopedQuery) -> TestQuery:
+    val label = match scoped.scope:
+        case TestQueryScope.Bug(id): "scope:bug:" + id.value
+        case TestQueryScope.Requirement(id): "scope:requirement:" + id.value
+    var names: [text] = []
+    for level in scoped.levels:
+        names.push(test_level_name(level))
+    TestQuery(case_key: TestCaseKey(path: TestCasePath(value: label), name: TestCaseName(value: "levels:" + names.join(","))),
+        run_id: scoped.run_id, limit: scoped.limit, cursor: scoped.cursor)
+
+# Only an executed-and-passed observation qualifies; skipped, gated, blocked,
+# cached and unrecognised statuses are never PASS.
+pub fn qualify_test_query_status(status: TestQueryStatus) -> TestQualification:
+    match status:
+        case TestQueryStatus.Passed: TestQualification.Pass
+        case _: TestQualification.NotPass
+
+fn _fact_at(facts: TraceCaseFacts?) -> i64:
+    match facts:
+        case Some(found):
+            match found.at:
+                case Some(at): at.value
+                case None: -1
+        case None: -1
+
+# Started facts own host/backend; the finished event owns the failure summary.
+fn _row(key: TestCaseKey, run_id: TestRunId, planned: TestPlannedCaseIdentity,
+        attempt: TestAttemptIdentity, status: TestQueryStatus,
+        start: TraceCaseFacts? = None, finish: TraceCaseFacts? = None) -> TestQueryRow:
+    val began = _fact_at(start)
+    val ended = _fact_at(finish)
+    var started_at: TestStartedAtMicros? = None
+    if began >= 0:
+        started_at = Some(TestStartedAtMicros(value: began))
+    var duration: TestDurationMicros? = None
+    if began >= 0 and ended >= began:
+        duration = Some(TestDurationMicros(value: ended - began))
+    var failure: TestFailureSummary? = None
+    var host: TestHostTriple? = None
+    var failure_code: TestFailureCode? = None
+    var definition_digest: TestDefinitionDigest? = None
+    var binary_digest: TestBinaryDigest? = None
+    var backend: TestBackendName? = None
+    match finish:
+        case Some(facts):
+            failure = facts.failure
+            failure_code = facts.failure_code
+            definition_digest = facts.definition_digest
+            binary_digest = facts.binary_digest
+        case None: pass
+    match start:
+        case Some(facts):
+            host = facts.host
+            backend = facts.backend
+            match definition_digest:
+                case Some(_): pass
+                case None: definition_digest = facts.definition_digest
+            match binary_digest:
+                case Some(_): pass
+                case None: binary_digest = facts.binary_digest
+        case None: pass
+    TestQueryRow(started_at: started_at, duration: duration, failure: failure, host: host, backend: backend, failure_code: failure_code, definition_digest: definition_digest, binary_digest: binary_digest, case_key: key, level: test_level_of_path(key.path), run_id: run_id, planned_case: planned, attempt: attempt,
+        status: status, qualification: qualify_test_query_status(status),
+        provenance: TestEvidenceProvenance.UnverifiedFrameworkObservation)
+
+# Each started event opens an attempt, closed by the next finished event of the
+# same case. An unclosed attempt is NotFinished; a finished event without an
+# open attempt has a Missing attempt identity. Attempts never merge.
+pub fn project_run_case_rows(key: TestCaseKey, run_id: TestRunId,
+        planned: TestPlannedCaseIdentity, events: [TraceCaseEvent]) -> [TestQueryRow]:
+    var rows: [TestQueryRow] = []
+    var open = false
+    var open_facts: TraceCaseFacts? = None
+    var ordinal = 0
+    for event in events:
+        if event.case_name != key.name.value:
+            continue
+        if event.phase == "started":
+            if open:
+                rows.push(_row(key, run_id, planned, TestAttemptIdentity.StreamOrder(ordinal: TestAttemptOrdinal(value: ordinal)), TestQueryStatus.NotFinished, open_facts, None))
+                ordinal = ordinal + 1
+            open = true
+            open_facts = event.facts
+        else:
+            val status = parse_test_query_status(event.outcome)
+            if open:
+                rows.push(_row(key, run_id, planned, TestAttemptIdentity.StreamOrder(ordinal: TestAttemptOrdinal(value: ordinal)), status, open_facts, event.facts))
+                ordinal = ordinal + 1
+                open = false
+                open_facts = None
+            else:
+                rows.push(_row(key, run_id, planned, TestAttemptIdentity.Missing, status, None, event.facts))
+    if open:
+        rows.push(_row(key, run_id, planned, TestAttemptIdentity.StreamOrder(ordinal: TestAttemptOrdinal(value: ordinal)), TestQueryStatus.NotFinished, open_facts, None))
+    rows
+
+fn _fact_or_dash(value: text) -> text:
+    if value == "":
+        return "-"
+    var out = ""
+    for ch in value.chars():
+        if ch == "\n" or ch == "\r" or ch == "\t" or ch == "|" or ch == ",":
+            out = out + " "
+        else:
+            out = out + ch
+    out
+
+# CLI/MCP share these eight cells, in order: started_at_micros, duration_micros,
+# host, backend, failure, failure_code, definition_digest, binary_digest. "-" marks an absent fact.
+pub fn test_query_row_fact_cells(row: TestQueryRow) -> [text]:
+    var started = "-"
+    match row.started_at:
+        case Some(at): started = at.value.to_text()
+        case None: pass
+    var duration = "-"
+    match row.duration:
+        case Some(span): duration = span.value.to_text()
+        case None: pass
+    var host = "-"
+    match row.host:
+        case Some(found): host = _fact_or_dash(found.value)
+        case None: pass
+    var backend = "-"
+    match row.backend:
+        case Some(found): backend = _fact_or_dash(found.value)
+        case None: pass
+    var failure = "-"
+    match row.failure:
+        case Some(found): failure = _fact_or_dash(found.value)
+        case None: pass
+    var code = "-"
+    match row.failure_code:
+        case Some(found): code = test_failure_code_name(found)
+        case None: pass
+    var definition = "-"
+    match row.definition_digest:
+        case Some(found): definition = _fact_or_dash(found.value)
+        case None: pass
+    var binary = "-"
+    match row.binary_digest:
+        case Some(found): binary = _fact_or_dash(found.value)
+        case None: pass
+    [started, duration, host, backend, failure, code, definition, binary]
+
+fn _test_query_invalid(detail: text) -> TestQueryError:
+    TestQueryError(kind: TestQueryErrorKind.InvalidQuery, detail: detail)
+
+fn _row_is_partial(row: TestQueryRow) -> bool:
+    match row.status:
+        case TestQueryStatus.NotFinished: true
+        case _:
+            match row.attempt:
+                case TestAttemptIdentity.Missing: true
+                case TestAttemptIdentity.StreamOrder(_): false
+
+fn _status_label(status: TestQueryStatus) -> text:
+    match status:
+        case TestQueryStatus.Passed: "passed"
+        case TestQueryStatus.Failed: "failed"
+        case TestQueryStatus.Skipped: "skipped"
+        case TestQueryStatus.Ignored: "ignored"
+        case TestQueryStatus.QualifiedIgnore: "qualifiedignore"
+        case TestQueryStatus.Pending: "pending"
+        case TestQueryStatus.InDevelopment: "in_development"
+        case TestQueryStatus.FeatureGated: "feature_gated"
+        case TestQueryStatus.Blocked: "blocked"
+        case TestQueryStatus.NotFinished: "not_finished"
+        case TestQueryStatus.Cached: "cached"
+        case TestQueryStatus.Expired: "expired"
+        case TestQueryStatus.Unknown(raw): "unknown:" + raw
+
+fn _row_label(row: TestQueryRow) -> text:
+    val planned = match row.planned_case:
+        case TestPlannedCaseIdentity.Recorded(id): id.value
+        case TestPlannedCaseIdentity.Missing: "-"
+    val attempt = match row.attempt:
+        case TestAttemptIdentity.StreamOrder(ordinal): ordinal.value.to_text()
+        case TestAttemptIdentity.Missing: "-"
+    row.case_key.path.value + "::" + row.case_key.name.value + "|" + row.run_id.value + "|" + planned + "|" + attempt + "|" + _status_label(row.status)
+
+fn _cursor_prefix(rows: [TestQueryRow], query: TestQuery) -> text:
+    var labels: [text] = []
+    for row in rows:
+        labels.push(_row_label(row))
+    val run = match query.run_id:
+        case Some(id): id.value
+        case None: ""
+    val shape = SdnValue.Dict({
+        "schema": SdnValue.String("simple.test.query-cursor/v1"),
+        "path": SdnValue.String(query.case_key.path.value),
+        "name": SdnValue.String(query.case_key.name.value),
+        "run": SdnValue.String(run), "limit": SdnValue.Int(query.limit.value),
+        "rows": SdnValue.String(sha256_text(labels.join(";")))})
+    "tq1:" + sha256_text(sdn_encode_canonical(shape)) + ":"
+
+fn _cursor_offset(cursor: TestQueryCursor, prefix: text, rows: [TestQueryRow], limit: i64) -> Result<i64, TestQueryError>:
+    if not cursor.token.starts_with(prefix):
+        return Err(_test_query_invalid("cursor is not a token for this query and result snapshot; restart without --cursor"))
+    val digits = cursor.token.substring(prefix.byte_len(), cursor.token.byte_len())
+    if digits == "" or digits.len() > 9:
+        return Err(_test_query_invalid("cursor offset is malformed"))
+    for ch in digits.chars():
+        if not "0123456789".contains(ch):
+            return Err(_test_query_invalid("cursor offset is malformed"))
+    val offset = digits.to_int()
+    if digits != offset.to_text() or offset == 0 or offset >= rows.len() or offset % limit != 0:
+        return Err(_test_query_invalid("cursor is not a continuation page"))
+    Ok(offset)
+
+pub fn paginate_test_query_rows(rows: [TestQueryRow], query: TestQuery) -> Result<TestQueryPage, TestQueryError>:
+    val limit = query.limit.value
+    if limit < 1 or limit > TEST_QUERY_MAX_LIMIT:
+        return Err(_test_query_invalid("limit must be between 1 and 1000"))
+    val prefix = _cursor_prefix(rows, query)
+    val start = match query.cursor:
+        case Some(cursor): _cursor_offset(cursor, prefix, rows, limit)?
+        case None: 0
+    var end = start + limit
+    var truncation = TestQueryTruncation.Complete
+    if end < rows.len():
+        truncation = TestQueryTruncation.Truncated(next: TestQueryCursor(token: prefix + end.to_text()))
+    else:
+        end = rows.len()
+    var page: [TestQueryRow] = []
+    var coverage = TestQueryCoverage.Full
+    for i in start..end:
+        page.push(rows[i])
+        if _row_is_partial(rows[i]):
+            coverage = TestQueryCoverage.Partial
+    Ok(TestQueryPage(rows: page, truncation: truncation, coverage: coverage))

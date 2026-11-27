@@ -1,4 +1,19 @@
 # SimpleOS backend render receipt producer/parser missing
+
+## Triage 2026-11-25 (P2 sweep lane) — still OPEN; target verification needs QEMU multi-arch + admitted runtime
+
+The doc's own current state (2026-09-22/23) is authoritative: source repair is
+complete on the x86 receipt producer and per-launch identity boundary, but the
+bug stays open by its own acceptance criteria — the remaining work is target
+verification (`W/A/K` hold/capture/ACK exchange, correlated QMP pixel capture,
+x86_64/AArch64/RV64 guest runs) plus an admitted x86 Linux runtime for the
+three named compositor specs. None of that is exercisable from this Windows
+sweep lane (no QEMU SimpleOS lane, no admitted self-hosted runtime; the pinned
+seed also cannot run `test` at this HEAD — `@representation_boundary`
+inconsistency). The "Open 2026-09-16 — needs owner triage" banner is
+bookkeeping; the 2026-09-22/23 status paragraphs are the live state. Left
+**OPEN**, no code or status change made.
+
 ## Open 2026-09-16 — needs owner triage
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution

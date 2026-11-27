@@ -1,0 +1,74 @@
+# @tag: unit, gpu, engine2d, software, simd, perf
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_software.spl 5%
+#
+# A catalog section box at device scale 4 is 3408 x 50020 device px on a
+# 3600 x 3040 frame (css-layout). Its rounded fill went through ~9000 row
+# spans, and each span was a `write_span` on the `self.buf` FIELD, which the
+# interpreter turns into a copy of the whole surface (~1.8 ms here): 20 s for
+# one box. The pixels are pinned by a sampled hash measured on the base
+# implementation (release/1.0.0 ccb5a2ef29c), the cost by a wall budget.
+
+use std.spec.*
+use std.gc_async_mut.gpu.engine2d.backend_software.{SoftwareBackend}
+use std.gc_async_mut.gpu.engine2d_host_clock.{time_now_unix_micros}
+
+val FRAME_W = 3600
+val FRAME_H = 3040
+# Measured on the base implementation (release/1.0.0 ccb5a2ef29c).
+val TALL_HASH: i64 = 3447947131
+
+fn sampled_hash(pixels: [u32], w: i32, h: i32) -> i64:
+    var acc: i64 = 17
+    var y = 0
+    # cpu-lane-loop-ok: spec probe over a 1-in-8 row/column sample of one frame
+    while y < h:
+        var x = 0
+        while x < w:
+            acc = (acc * 31 + (pixels[y * w + x] as i64)) % 4294967291
+            x = x + 7
+        y = y + 8
+    acc
+
+fn paint_tall(simd: bool) -> ([u32], i64):
+    var backend = if simd:
+        SoftwareBackend.create_cpu_simd()
+    else:
+        SoftwareBackend.create()
+    expect(backend.init(FRAME_W, FRAME_H)).to_equal(true)
+    backend.clear(0xffeef0ffu32)
+    val t0 = time_now_unix_micros()
+    # The section box: opaque, rounded, far taller than the frame.
+    backend.draw_rounded_rect(96, 96, 3408, 50020, 48, 0xffffffffu32)
+    # A translucent tall strip (per-row blend path) crossing the frame.
+    backend.draw_rect_filled(40, -1000, 24, 60000, 0x80ff4000u32)
+    # Small rounded boxes: their cost is per call, not per pixel.
+    var i = 0
+    while i < 12:
+        backend.draw_rounded_rect(360, 2149 + i * 70, 20, 20, 8, 0xff1a2b33u32)
+        i = i + 1
+    val elapsed = time_now_unix_micros() - t0
+    val pixels = backend.read_pixels()
+    backend.shutdown()
+    (pixels, elapsed)
+
+describe "software backend fill of a box taller than the frame":
+    it "paints the measured pixels within a time budget (cpu_simd)":
+        val r = paint_tall(true)
+        val px = r.0
+        print "tall_fill simd elapsed_us={r.1} hash={sampled_hash(px, FRAME_W, FRAME_H)}"
+        expect(px.len()).to_equal(FRAME_W * FRAME_H)
+        # Corner arc, straight edge, interior, last row, strip blend.
+        expect(px[96 * FRAME_W + 96]).to_equal(0xffeef0ffu32)
+        expect(px[200 * FRAME_W + 96]).to_equal(0xffffffffu32)
+        expect(px[3039 * FRAME_W + 3503]).to_equal(0xffffffffu32)
+        expect(px[3039 * FRAME_W + 3504]).to_equal(0xffeef0ffu32)
+        expect(sampled_hash(px, FRAME_W, FRAME_H)).to_equal(TALL_HASH)
+        expect(r.1 < 3000000).to_equal(true)
+
+    it "matches the scalar backend pixel for pixel":
+        val simd = paint_tall(true)
+        val scalar = paint_tall(false)
+        print "tall_fill scalar elapsed_us={scalar.1}"
+        expect(sampled_hash(scalar.0, FRAME_W, FRAME_H)).to_equal(TALL_HASH)
+        expect(simd.0 == scalar.0).to_equal(true)
+        expect(scalar.1 < 3000000).to_equal(true)

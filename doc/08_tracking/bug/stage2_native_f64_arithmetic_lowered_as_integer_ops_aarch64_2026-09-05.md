@@ -6,7 +6,10 @@ evidence found in the body. This is bookkeeping, not verification.
 
 **Filed:** 2026-09-05
 **Severity:** high — silent wrong values, no diagnostic, no crash
-**Status:** open
+**Status:** FIXED (2026-11-11, lane boot17) — verified on a stage2 candidate
+2026-11-05 (addendum below) and hardened since by eda3b5103ca3 (2026-11-09)
+`local_is_float` discriminant-compare guard, verified present and effective
+at tip. See addendum.
 **Area:** Stage-2 native codegen (aarch64-unknown-linux-gnu)
 
 ## Summary
@@ -149,3 +152,107 @@ with a type at all, and where its MirType is assigned. A fix there repairs this
 defect and plausibly others in the same family, whereas special-casing the binop
 would leave the metadata gap intact.
 
+
+## Fixed at current source — verified 2026-11-05
+
+The current stage2 candidate (pure-Simple compiler built by the trust-root
+bootstrap, --backend=cranelift, aarch64-unknown-linux-gnu, worktree at
+df48a86ff5a) compiled and ran:
+
+    fn addf(a: f64, b: f64) -> f64: a + b
+    main: return 0 iff addf(1.5, 2.25) == 3.75
+
+Result: exit 0 — f64 addition is correct, no integer-bit-pattern lowering.
+The silent-wrong-value f64 arithmetic lowering does not reproduce at current
+release/1.0.0 source.
+
+## Addendum 2026-11-11 (lane boot17) — FIXED, guard verified at tip (aarch64 host-limited)
+
+Prior verification: the 2026-11-05 addendum above ran `addf(1.5, 2.25) ==
+3.75` through a cranelift aarch64 stage2 candidate built from release/1.0.0
+source — exit 0, correct f64 addition. This branch is cut from
+origin/release/1.0.0 tip; per the no-green-rerun rule the aarch64 stage2
+probe was not repeated (no aarch64 host here).
+
+**Source-guard + seed re-confirmation actually run** (worktree
+simple-p3-boot17-20261111, fresh seed 46fe8f6b6def):
+
+- `local_is_float` (src/compiler/50.mir/mir_lowering_stmts.spl:616-635) now
+  detects floats by `compiler_value_discriminant<MirTypeKind>` compare, not
+  `match type_.kind` arm dispatch — its comment names this bug
+  (stage2_native_f64_arithmetic_lowered_as_integer_ops) and explains the
+  stage2-native arm-dispatch mis-route. Landed in eda3b5103ca3 (2026-11-09),
+  after the 11-05 verification, as a hardening of the same guard the doc's
+  "Why it happens" section identified.
+- The binop dest-type override the doc prescribes is in place:
+  src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl:5761-5767 forces an
+  F64/F32 result type for Add|Sub|Mul|Div|Mod|Pow when either operand is
+  float, with a comment quoting this failure mode.
+- Full doc probe table under `bin/simple.exe run --mode=interpreter`:
+  `f+g=3.75`, `f-g=-0.75`, `f*g=3.375`, `f/g=0.6666666666666666`,
+  `addf(1.5, 2.25)=3.75`, `0.5+0.5=1.0`, `1.0+1.0=2.0`, `0.0-1.5=-1.5` —
+  every interpreter-column value matches the doc's evidence table (no
+  integer-bit-pattern lowering).
+
+## 2026-11-11 — FIXED confirmed (lane p3-comp12, row 6)
+
+Independent confirmation at this lane's base (6233df4b9f9ea, tracked seed
+46fe8f6b6def — the same seed boot17 smoked today, so the interpreter probe
+table was NOT repeated per the no-green-rerun rule):
+
+- Hardening commit eda3b5103ca3 (2026-11-09) is an ancestor of this base.
+- `local_is_float` (src/compiler/50.mir/mir_lowering_stmts.spl:616-635) is the
+  discriminant-compare form at this base — its comment names this bug
+  (stage2_native_f64_arithmetic_lowered_as_integer_ops) and explains the
+  stage2-native arm-dispatch mis-route. Read-only verification; the
+  compiler_value_discriminant visibility question is another lane's
+  known-live route and was not touched.
+- The float-directed binop dest-type path is present in
+  src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl (operand
+  f32/f64/i64 classification with a result_f64 arm in the binop lowering).
+- The aarch64 stage2-candidate end-to-end verification is the 2026-11-05
+  in-doc evidence (addf(1.5, 2.25) == 3.75, exit 0, df48a86ff5a worktree);
+  no aarch64 host in this lane and boot17 already declined to repeat it per
+  the no-green-rerun rule.
+- Ledger note: master table row (doc/08_tracking/bug/bug_db.sdn:3915) still
+  reads `fixing` (updated_at 2026-11-03) while this header reads FIXED
+  (2026-11-11) — master-table sync gap for the bookkeeping pass.
+
+## 2026-11-26: verified at tip on aarch64 (run, not source review)
+
+**Compiler under test: an admitted Stage 2 built on this host** (aarch64 Linux,
+DGX GB10), using
+`COMPILER_BUILD_TIMEOUT_SECONDS=900 scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --stop-after-stage2 --backend=cranelift`.
+It ran detached under `systemd-run -p MemoryMax=40G`, with no other job of
+this lane running.
+
+- **Source and seed.** The tree was pinned at `4995f23e7ccd`, which is
+  origin/release/1.0.0 57e92cb68fc7 plus a docs and tests commit only. The
+  pinned seed's sha256 prefix is `27cfa68556a374c9`.
+- **Build.** The seed native-built the compiler:
+  `Build complete: 1620 compiled, 0 cached, 0 failed` (210.4s compile + 5.7s link).
+- **Admission.** `stage2-sanity.receipt` says `stage2-sanity: pass`, and both
+  frontend legs (`SIMPLE_BOOTSTRAP=0` and `=1`) report `status=complete raw_status=0`.
+  The admitted binary
+  (`stage3/aarch64-unknown-linux-gnu/stage2-admitted/simple`) has sha256
+  `53e9e2e7513658f1...` and is 58,552,816 bytes.
+- **Earlier run.** A first run at 57e92cb68fc7 compiled identically but its
+  admission sanity timed out (rc=124, 180s default) on the 1-module
+  `stage2-module-path-naming` smoke. That was the only difference. Probe
+  results were the same on both binaries.
+
+Probes were built with
+`SIMPLE_BOOTSTRAP=1 SIMPLE_NATIVE_GO_TO_END=1 SIMPLE_FILE_WORKERS=0 SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1 <stage2> native-build main.spl --backend=<cranelift|llvm> --entry-closure`.
+They were run and compared byte for byte with hand-checked expected output,
+which is identical to the 11-26 seed interpreter output. Scope: the probes
+themselves ran on the `SIMPLE_BOOTSTRAP=1` native-build leg only.
+
+f64 probe (`f + g`, `-`, `*`, `/`, literal add, f64 param and return,
+`0.5 + 0.5`, `1.0 + 1.0`, `0.0 - 1.5`, unary minus, `< > == != <=`, a
+10-step `+ 0.25` loop and a branch on its result): **PASS on cranelift and
+llvm**, printing `add=3.75 sub=-0.75 mul=3.375 div=0.6666666666666666
+half=1.0 one=2.0 neg1=-1.5 acc=2.5 branch=gt`.
+Mixed int/float probe (`to_f64`, `/ 2.0`, `* 1.5`, `to_i64` round trip and
+truncation, int `/` and `%`, average of an `[i64]`, `i64.to_f64() + f64`,
+mixed compare): **PASS on both backends**. Also PASS on the 2026-11-22
+integ27 Stage 2. Status -> verified. No code change.

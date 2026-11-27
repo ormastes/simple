@@ -1,0 +1,140 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Cross-module MIR struct vs enum bare-name collision and module-owned struct value-copying
+
+Regression coverage for:
+1. Separating `compiler.blocks.value.BlockJsonValue` (`struct`) from `std.common.json.value.JsonValue` (`enum`).
+2. Ensuring `MirLowering` (`function_lowering.spl`, `mir_lowering_stmts.spl`, `module_lowering.spl`,
+   `switch_operators_calls.spl`, `expr_dispatch.spl`, `method_calls_literals.spl`, `native_trait_thunks.spl`)
+   never value-copies an `enum` parameter, `val`/`var` binding, `Option` unwrap/`!`, or `[Enum]` `for`-loop
+   element when another module in the prescan closure declares a `struct` with the same bare name.
+3. Ensuring `maybe_copy_struct_value` preserves Bug #177 value-copy isolation for module-owned `struct`s
+   whose `MirTypeKind.Struct(sym)` carries a minted canonical MIR type symbol ID (`>= 1000000000`).
+"""
+
+# @tag: unit, compiler, mir
+
+use std.spec.{describe, it, expect, step, fail}
+use compiler.blocks.value.{BlockValue, BlockJsonValue, JsonKind}
+use compiler.blocks.builtin_blocks_helpers.{parse_json}
+use compiler.blocks.validators.{validate_json_structure, json_depth, json_type_name}
+use compiler.backend.linker.macho.tbd_yaml.{tbd_yaml_documents}
+use compiler.backend.linker.macho.tbd_types.{MachOTbdLimitsV1}
+use std.common.json.value.{JsonValue}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.backend.mir_to_llvm.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+
+fn count_struct_aggregate_insts_in_fn(mir_mod: MirModule, target_fn_suffix: text) -> i64:
+    var count: i64 = 0
+    for sym_key in mir_mod.functions.keys():
+        val f = mir_mod.functions[sym_key]
+        if f.name == target_fn_suffix or f.name.ends_with(target_fn_suffix):
+            for blk in f.blocks:
+                for inst in blk.instructions:
+                    match inst.kind:
+                        case MirInstKind.Aggregate(_, AggregateKind.Struct(sym), ops):
+                            count = count + 1
+                        case _: ()
+    count
+
+describe "cross-module MIR struct vs enum collision and module-owned struct copy":
+    it "separates compiler.blocks BlockJsonValue from std.common.json JsonValue enum":
+        step("Parse JSON through compiler.blocks -> BlockJsonValue struct")
+        match parse_json("{{\"k\": [1, 2]}}"):
+            case Ok(block_val):
+                expect(json_type_name(block_val)).to_equal("object")
+                expect(json_depth(block_val, 0)).to_equal(2)
+                expect(validate_json_structure(block_val).len()).to_equal(0)
+            case Err(msg):
+                fail("unexpected parse_json error: " + msg)
+
+        step("Parse TBD YAML through tbd_yaml_documents -> std.common.json.value.JsonValue enum without discriminant corruption")
+        match tbd_yaml_documents("--- !tapi-tbd\ntbd-version: 4\ntargets: [ arm64-macos ]\n...\n", MachOTbdLimitsV1(max_bytes: 65536, max_tokens: 4096, max_depth: 16, max_libraries: 16, max_symbols: 1024, max_name_bytes: 256)):
+            case Ok(docs):
+                expect(docs.len()).to_equal(1)
+                val copied_enum: JsonValue = docs[0]
+                var matched_arm = ""
+                match copied_enum:
+                    case JsonValue.Object(_):
+                        matched_arm = "object"
+                    case _:
+                        matched_arm = "other"
+                expect(matched_arm).to_equal("object")
+            case Err(err):
+                fail("unexpected tbd_yaml_documents failure: " + err)
+
+    it "never value-copies an enum across params, aliases, Option unwrap, or [Enum] loops when a peer module defines a same-named struct, while still value-copying module-owned structs":
+        val log = Logger(level: 0)
+        val struct_src = "pub struct SharedVal:\n    pub tag_word: i64\n    pub extra_word: i64\n\npub struct OwnedPair:\n    pub left: i64\n    pub right: i64\n"
+        val enum_src = "pub enum SharedVal:\n    Empty\n    Count(n: i64)\n    Label(s: text)\n\npub fn make_shared(n: i64) -> SharedVal:\n    SharedVal.Count(n: n)\n\npub fn score_enum(v: SharedVal) -> i64:\n    val alias = v\n    match alias:\n        case SharedVal.Empty: 0\n        case SharedVal.Count(n): n\n        case SharedVal.Label(s): s.byte_len()\n\npub fn score_enum_list(items: [SharedVal], opt_item: SharedVal?) -> i64:\n    var total = 0\n    for item in items:\n        total = total + score_enum(item)\n    val unwrapped = opt_item!\n    total + score_enum(unwrapped)\n"
+        val caller_src = "use pkg.struct_owner.{{OwnedPair}}\nuse pkg.enum_owner.{{SharedVal, make_shared}}\n\npub struct EnumHolder:\n    pub pair: OwnedPair\n    pub ev: SharedVal\n\npub fn check_enum_return_and_eq() -> bool:\n    val a = make_shared(1)\n    val b = make_shared(2)\n    a == b\n\npub fn copy_and_eq_holder(h1: EnumHolder, h2: EnumHolder) -> bool:\n    var h_copy: EnumHolder = h1\n    h_copy == h2\n\npub fn copy_imported_struct(orig: OwnedPair, items: [OwnedPair]) -> i64:\n    var copy: OwnedPair = orig\n    copy.left = 77\n    var acc = 0\n    for elem in items:\n        acc = acc + elem.left\n    orig.left + copy.left + acc\n"
+
+        val struct_ast = parse_full_frontend(struct_src, "pkg/struct_owner.spl", "pkg.struct_owner", log)
+        val enum_ast = parse_full_frontend(enum_src, "pkg/enum_owner.spl", "pkg.enum_owner", log)
+        val caller_ast = parse_full_frontend(caller_src, "pkg/caller.spl", "pkg.caller", log)
+
+        var modules: Dict<text, Module> = {}
+        modules["pkg.struct_owner"] = struct_ast
+        modules["pkg.enum_owner"] = enum_ast
+        modules["pkg.caller"] = caller_ast
+        val sources = [
+            SourceFile(path: "pkg/struct_owner.spl", content: struct_src, module_name: "pkg.struct_owner"),
+            SourceFile(path: "pkg/enum_owner.spl", content: enum_src, module_name: "pkg.enum_owner"),
+            SourceFile(path: "pkg/caller.spl", content: caller_src, module_name: "pkg.caller")
+        ]
+        val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+
+        var hir_s = hirlowering_for_module(struct_ast.name, surfaces)
+        val struct_hir = hir_s.lower_module(struct_ast)
+        var hir_e = hirlowering_for_module(enum_ast.name, surfaces)
+        val enum_hir = hir_e.lower_module(enum_ast)
+        var hir_c = hirlowering_for_module(caller_ast.name, surfaces)
+        val caller_hir = hir_c.lower_module(caller_ast)
+
+        var prescan_mods: Dict<text, HirModule> = {}
+        prescan_mods["pkg.struct_owner"] = struct_hir
+        prescan_mods["pkg.enum_owner"] = enum_hir
+        prescan_mods["pkg.caller"] = caller_hir
+        val all_hirs = [struct_hir, enum_hir, caller_hir]
+
+        step("Lower pkg.enum_owner with pkg.struct_owner.SharedVal in prescan closure")
+        var mir_e = MirLowering.new(enum_hir.symbols)
+        mir_e.prescan_module_struct_names(prescan_mods, "pkg.struct_owner")
+        mir_e.prescan_module_struct_names(prescan_mods, "pkg.enum_owner")
+        mir_e.prescan_module_struct_names(prescan_mods, "pkg.caller")
+        val enum_mir = mir_e.lower_module(enum_hir, all_hirs)
+        if mir_e.errors.len() > 0:
+            print "MIR_E_ERRORS=" + mir_e.errors.join("; ")
+        expect(mir_e.errors.len()).to_equal(0)
+        expect(count_struct_aggregate_insts_in_fn(enum_mir, "score_enum")).to_equal(0)
+        expect(count_struct_aggregate_insts_in_fn(enum_mir, "score_enum_list")).to_equal(0)
+
+        var llvm_e = MirToLlvm.create("pkg.enum_owner", CodegenTarget.AArch64_MacOS, None)
+        val _enum_ir = llvm_e.translate_module(enum_mir)
+        expect(llvm_e.codegen_errors.len()).to_equal(0)
+
+        step("Lower pkg.caller and prove module-owned struct OwnedPair emits AggregateKind.Struct copies for Let and For")
+        var mir_c = MirLowering.new(caller_hir.symbols)
+        mir_c.prescan_module_struct_names(prescan_mods, "pkg.struct_owner")
+        mir_c.prescan_module_struct_names(prescan_mods, "pkg.enum_owner")
+        mir_c.prescan_module_struct_names(prescan_mods, "pkg.caller")
+        val caller_mir = mir_c.lower_module(caller_hir, all_hirs)
+        expect(mir_c.errors.len()).to_equal(0)
+        expect(count_struct_aggregate_insts_in_fn(caller_mir, "check_enum_return_and_eq")).to_equal(0)
+        expect(count_struct_aggregate_insts_in_fn(caller_mir, "copy_and_eq_holder")).to_be_greater_than(1)
+        expect(count_struct_aggregate_insts_in_fn(caller_mir, "copy_imported_struct")).to_be_greater_than(1)
+
+        var llvm_c = MirToLlvm.create("pkg.caller", CodegenTarget.AArch64_MacOS, None)
+        val _caller_ir = llvm_c.translate_module(caller_mir)
+        expect(llvm_c.codegen_errors.len()).to_equal(0)

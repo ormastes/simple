@@ -1,0 +1,105 @@
+# Integration layer, I/O: file-shape and format negatives through the server
+# storage port, on files derived from the dense encrypted database.
+#
+# Each rejection is decided from the file length or the first page, so the whole
+# file runs in seconds on the Phase 1 seed.  The structurally damaged inputs are
+# committed generator outputs whose sizes and hashes are recorded in
+# dense_ground_truth.json; the plaintext and older encrypted fixtures are the
+# existing sqlcipher4 fixture directory files.
+# Lifecycle: doc/01_research/app/tools/devhub/devhub_cli_wrapper_forwarding_2026-09-06.md ;
+# doc/03_plan/agent_tasks/devhub_messenger_master.md ;
+# doc/04_architecture/app/devhub/messenger_gateway.md ;
+# doc/05_design/app/devhub/messenger_sdn_and_api.md
+# @manual_section: storage-port-file-negatives
+
+"""
+## Purpose and audience
+Purpose: an empty, partial-page, short, missing or directory source, a plaintext
+SQLite file offered as encrypted, an encrypted file offered as plaintext, and an
+unsupported format name must each be rejected with a stable class, with no
+plaintext or secret in the error text, and with the source bytes unchanged.
+Audience: reviewers of the file and format edge of the Messenger read path.
+The passphrase is public synthetic test data from dense_ground_truth.json.
+"""
+
+use std.spec.*
+use test.support.devhub_messenger_dense.*
+use std.common.json.value.{JsonValue, json_value_field}
+
+val truth = dense_truth()
+val good = truth_passphrase(truth)
+val _secret_ready = dense_set_secret(good)
+val LEAKS: [text] = [good, "SQLite format", "tie-first", "fresh general", "general"]
+
+fn recorded(group: text, name: text) -> JsonValue:
+    json_value_field(json_value_field(truth, group), name)
+
+describe "source files that are not whole encrypted databases":
+    it "rejects an empty file as not a whole number of pages":
+        # @req REQ-MSGR-DENSE-FILE-001
+        step("Open the zero-byte committed file as sqlcipher4")
+        # @capture(protocol_json): storage-port error code and message for the empty file
+        expect(dense_file_bytes("dense_multipage_empty.dat").len()).to_equal(tn(recorded("files", "dense_multipage_empty.dat"), "bytes"))
+        val verdict = port_verdict(dense_path("dense_multipage_empty.dat"), "sqlcipher4", DENSE_REF)
+        expect(verdict_code(verdict)).to_equal("STORAGE_PORT_CORRUPT_SOURCE")
+
+    it "rejects a file with a partial trailing page":
+        # @req REQ-MSGR-DENSE-FILE-002
+        step("Open the 4219-byte committed file (one page plus 123 bytes) as sqlcipher4")
+        # @capture(protocol_json): storage-port error code and message for the partial page
+        expect(dense_file_bytes("dense_multipage_partial_page.dat").len()).to_equal(tn(recorded("files", "dense_multipage_partial_page.dat"), "bytes"))
+        val verdict = port_verdict(dense_path("dense_multipage_partial_page.dat"), "sqlcipher4", DENSE_REF)
+        expect(verdict_code(verdict)).to_equal("STORAGE_PORT_CORRUPT_SOURCE")
+
+    it "rejects a file shorter than one page":
+        # @req REQ-MSGR-DENSE-FILE-003
+        step("Open the 100-byte fixture as sqlcipher4")
+        # @capture(protocol_json): storage-port error code and message for the 100-byte file
+        val verdict = port_verdict(dense_path("not_page_multiple.dat"), "sqlcipher4", DENSE_REF)
+        expect(verdict_code(verdict)).to_equal("STORAGE_PORT_CORRUPT_SOURCE")
+
+    it "reports a missing file and a directory path as an I/O failure":
+        # @req REQ-MSGR-DENSE-FILE-004
+        step("Open a path that does not exist and a path that is a directory")
+        # @capture(protocol_json): storage-port error code for each unreadable path
+        val missing = port_verdict(dense_path("no_such_database.sqlcipher4"), "sqlcipher4", DENSE_REF)
+        val directory = port_verdict("test/fixtures/database/sqlcipher4", "sqlcipher4", DENSE_REF)
+        expect(verdict_code(missing)).to_equal("STORAGE_PORT_IO")
+        expect(verdict_code(directory)).to_equal("STORAGE_PORT_IO")
+
+describe "format declarations are explicit and never inferred":
+    it "rejects a plaintext SQLite file offered as sqlcipher4":
+        # @req REQ-MSGR-DENSE-FILE-005
+        step("Open the plaintext fixture declaring format sqlcipher4")
+        # @capture(protocol_json): storage-port error code and message for plaintext offered as encrypted
+        val verdict = port_verdict(dense_path("messenger_plain.sqlite"), "sqlcipher4", DENSE_REF)
+        expect(verdict_code(verdict)).to_equal("STORAGE_PORT_CORRUPT_SOURCE")
+        expect(leaks_none(verdict, LEAKS)).to_equal(true)
+
+    it "rejects an encrypted database offered as plaintext sqlite3":
+        # @req REQ-MSGR-DENSE-FILE-006
+        step("Open the dense encrypted file declaring format sqlite3 with no secret")
+        # @capture(protocol_json): storage-port error code and message for ciphertext offered as plaintext
+        val verdict = port_verdict(dense_path(DENSE_BASE), "sqlite3", "")
+        expect(verdict_code(verdict)).to_equal("STORAGE_PORT_CORRUPT_SOURCE")
+        expect(leaks_none(verdict, LEAKS)).to_equal(true)
+
+    it "refuses a secret reference on the plaintext format and an unknown format name":
+        # @req REQ-MSGR-DENSE-FILE-007
+        step("Open plaintext with a secret reference, then open with format sqlcipher3")
+        # @capture(protocol_json): storage-port error codes for the two unsupported declarations
+        val with_secret = port_verdict(dense_path("messenger_plain.sqlite"), "sqlite3", DENSE_REF)
+        val unknown = port_verdict(dense_path(DENSE_BASE), "sqlcipher3", DENSE_REF)
+        expect(verdict_code(with_secret)).to_equal("STORAGE_PORT_INVALID_FORMAT")
+        expect(verdict_code(unknown)).to_equal("STORAGE_PORT_UNSUPPORTED_FORMAT")
+
+describe "the sources stay untouched":
+    it "leaves every probed source byte-identical to the generator's hashlib digests":
+        # @req REQ-MSGR-DENSE-FILE-008
+        step("Hash each probed file after all rejections and compare with the recorded digests")
+        # @capture(statistics): sha256 of each probed file against dense_ground_truth.json
+        expect(dense_file_sha256("dense_multipage_empty.dat")).to_equal(tf(recorded("files", "dense_multipage_empty.dat"), "sha256"))
+        expect(dense_file_sha256("dense_multipage_partial_page.dat")).to_equal(tf(recorded("files", "dense_multipage_partial_page.dat"), "sha256"))
+        expect(dense_file_sha256(DENSE_BASE)).to_equal(tf(recorded("files", DENSE_BASE), "sha256"))
+        expect(dense_file_sha256("messenger_plain.sqlite")).to_equal(tf(recorded("external_files", "messenger_plain.sqlite"), "sha256"))
+        expect(dense_file_sha256("not_page_multiple.dat")).to_equal(tf(recorded("external_files", "not_page_multiple.dat"), "sha256"))

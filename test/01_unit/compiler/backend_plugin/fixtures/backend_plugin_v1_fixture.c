@@ -36,14 +36,23 @@ static int32_t diagnostics_(uint64_t s,simple_backend_owned_buffer_v1 *o){if(SBP
 static int32_t release_(uint64_t s,simple_backend_owned_buffer_v1 b){if(s!=0x51A7E||!b.data||b.owner_token!=(uint64_t)(uintptr_t)b.data)return 24;free((void*)b.data);releases++;return 0;}
 static int32_t close_(uint64_t s){if(s!=0x51A7E)return 25;closes++;return 0;}
 static const simple_backend_vtable_v1 vt={1,sizeof(vt),open_,compile_,finalize_,diagnostics_,close_,release_};
-static const uint8_t id[]="fixture",ver[]="1.0.0",build[]="fixture-build",digest[]="mir-v1",targets[]="4:host";
+#ifndef SBP_DESCRIPTOR_DIGEST
+#define SBP_DESCRIPTOR_DIGEST "mir-config-v1"
+#endif
+#ifndef SBP_DESCRIPTOR_ROLES
+#define SBP_DESCRIPTOR_ROLES 2
+#endif
+#ifndef SBP_DESCRIPTOR_CAPS
+#define SBP_DESCRIPTOR_CAPS 10
+#endif
+static const uint8_t id[]="fixture",ver[]="1.0.0",build[]="fixture-build",digest[]=SBP_DESCRIPTOR_DIGEST,targets[]="4:host";
 #ifndef SBP_DESCRIPTOR_ABI
 #define SBP_DESCRIPTOR_ABI 1
 #endif
 #ifndef SBP_DESCRIPTOR_SIZE
 #define SBP_DESCRIPTOR_SIZE sizeof(desc)
 #endif
-static const simple_backend_descriptor_v1 desc={SBP_DESCRIPTOR_ABI,SBP_DESCRIPTOR_SIZE,{id,sizeof(id)-1},{ver,sizeof(ver)-1},{build,sizeof(build)-1},{digest,sizeof(digest)-1},2,2,{targets,sizeof(targets)-1},&vt};
+static const simple_backend_descriptor_v1 desc={SBP_DESCRIPTOR_ABI,SBP_DESCRIPTOR_SIZE,{id,sizeof(id)-1},{ver,sizeof(ver)-1},{build,sizeof(build)-1},{digest,sizeof(digest)-1},SBP_DESCRIPTOR_ROLES,SBP_DESCRIPTOR_CAPS,{targets,sizeof(targets)-1},&vt};
 #ifdef _WIN32
 __declspec(dllexport)
 #endif

@@ -1,0 +1,52 @@
+# @req: REQ-COMP-MIR-CFG-TARGET-SELECT-001
+# bug: doc/08_tracking/bug/seed_cfg_on_top_level_use_ignored_2026-11-21.md
+"""
+## Purpose and audience
+Purpose: `@cfg(<arch>)` on a top-level `use`/`import` must drop that module
+edge for other targets, in both the pure-Simple preprocessor and the Rust seed
+(`cfg_strip.rs` text pass that runs before dependency collection). Before the
+fix the seed kept the line, leaking riscv/x86 modules into arm64/arm32 kernels.
+Audience: COMP / seed maintainers.
+"""
+use std.spec.step
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read_text}
+use compiler.frontend.core.parser_preprocessor.{_pp_preprocess_conditionals_target_receipted_v1}
+
+fn pp(source: text, arch: text) -> text:
+    val res = _pp_preprocess_conditionals_target_receipted_v1(source, "simpleos", arch)
+    if res.is_err():
+        return "ERR:" + res.unwrap_err()
+    res.unwrap().source
+
+val SRC = """@cfg(riscv64)
+use os.kernel.arch.riscv64.console.{serial_read_byte}
+@cfg(aarch64)
+use os.kernel.arch.arm.pl011_common.{
+    pl011_write_byte
+}
+fn keep() -> i64:
+    1
+"""
+
+describe "@cfg on top-level use (seed vs pure Simple)":
+    it "pure Simple drops the inactive-arch use for aarch64":
+        step("preprocess for aarch64")
+        val out = pp(SRC, "aarch64")
+        expect(out.contains("riscv64.console")).to_equal(false)
+        expect(out.contains("pl011_common")).to_equal(true)
+        expect(out.contains("    pl011_write_byte")).to_equal(true)
+
+    it "pure Simple drops the inactive-arch multi-line use for riscv64":
+        step("preprocess for riscv64")
+        val out = pp(SRC, "riscv64")
+        expect(out.contains("riscv64.console")).to_equal(true)
+        expect(out.contains("pl011_common")).to_equal(false)
+        expect(out.contains("pl011_write_byte")).to_equal(false)
+
+    it "seed cfg_strip treats top-level imports as cfg-gated declarations":
+        step("seed text pass must recognize use/import before dependency collection")
+        val src = file_read_text("src/compiler_rust/compiler/src/pipeline/cfg_strip.rs")
+        expect(src.contains("fn is_top_level_import_decl(")).to_equal(true)
+        expect(src.contains("|| is_top_level_import_decl(declaration)")).to_equal(true)
+        expect(src.contains("fn inactive_cfg_arch_top_level_use_is_blanked_before_dependency_collection")).to_equal(true)

@@ -48,3 +48,46 @@ A pending prerequisite yields DEPENDENCY_WAIT. An ordinary failed prerequisite b
 The initial bootstrap epoch is intended to contain both Phase2 hello checks, each backend's proper Phase3 build, its three subsystem test binaries (six across both backends), and early Phase4 diagnostic work. Actual produced Phase3 digests cannot be guessed in that epoch. Proper Phase4 requires a subsequent immutable expansion bound to the predecessor epoch, actual Phase3 artifact and hello evidence. Phase4 test work must bind its own produced artifacts rather than borrow Phase2 coverage. Expansion publication and default manifest generation are still pending implementation; the current N-task entrypoint alone does not complete bootstrap orchestration.
 
 Verification status: new native contract/DAG regressions are written but unrun. No process-overlap, crash-injection, full bootstrap or database recovery qualification is claimed by the extraction checkpoints.
+
+<!-- antigravity-early-defect-detection-2026-11-18 -->
+
+## Shared Analysis Tasks, Single-Flight Waiters, and Negative Witnesses (`WP-06`)
+
+Extended by [early_defect_detection_2026-11-18.md](../03_plan/compiler/early_defect_detection_2026-11-18.md) (`ED-05`, `ED-06`, `ED-07`, `ED-T09..ED-T12`, `ED-T24`, `ED-T25`) across `src/lib/common/task_runner/contracts.spl`, `src/lib/common/task_runner/analysis_single_flight.spl`, `src/lib/common/task_runner/scheduler.spl`, `src/lib/common/task_runner/__init__.spl`, `src/app/buildrunner/task_context.spl`, and `src/app/buildrunner/runner.spl`:
+
+### Three-Identity Separation (`snapshot_id` vs `AnalysisKeyV1` vs `lease_generation`)
+
+Analysis scheduling keeps three identities strictly distinct so cache reuse, client coordinate mapping, and retry fencing do not conflate:
+
+| Identity | Owner / Type | Bound Inputs and Role |
+|----------|--------------|-----------------------|
+| `snapshot_id` | `BuildRunner` / overlay context (`task_context.spl`) | Identifies the client's workspace, worktree, or unsaved editor overlay view used to map spans and authorize fix application |
+| `analysis_key` (`AnalysisKeyV1`) | `std.common.task_runner.contracts` (`contracts.spl:38-73`) | Length-prefixed SHA-256 digest (`SIMPLE-ANALYSIS-KEY-1`) binding `(snapshot_id, scope_id, target_id, policy_digest, analyzer_profile)` for single-flight deduplication and admitted diagnostic batch reuse while keeping `lease_generation` and owner/attempt nonces strictly outside `analysis_key` |
+| `lease_generation` | `AnalysisJobLeaseV1` / `TaskRunnerAttemptV1` / `compiler_artifact_service` | Monotonic per-attempt execution lease (paired with `owner_id` / attempt nonces outside `analysis_key`) fencing a single worker instance so retries or timed-out predecessors cannot overwrite or poison current state |
+
+### `"analysis"` Task Kind and Parent Output Admission
+
+Supplemental full-lint and explicit LSP/MCP diagnostic runs register under the `"analysis"` task kind on `std.common.task_runner.scheduler` and `BuildRunner`:
+
+- Shares the runner's measured-memory, CPU, and process-supervision budgets while prioritizing interactive/compiler work over background deep lint.
+- Enforces the same parent output admission as build artifacts (`ED-T24`): zero exit code is insufficient without current `lease_generation`, reaped worker closure, and verified digests for both the `DiagnosticBatchV1` payload and its coverage receipt sidecar.
+
+### Single-Flight Waiter Attach/Detach (`analysis_single_flight.spl`)
+
+Identical compatible `AnalysisKeyV1` requests from CLI, LSP, and MCP coordinate through `src/lib/common/task_runner/analysis_single_flight.spl` (`ED-T09..ED-T11`):
+
+1. The first admitted request claims producer execution under the authoritative lease; concurrent compatible requests attach lightweight waiter handles without holding a lock during analysis.
+2. When an LSP or MCP client cancels or disconnects, `analysis_single_flight` detaches **only that waiter** (`ED-T10`). The underlying producer is **never killed** while at least one other authorized waiter remains attached.
+3. Underlying producer cancellation triggers only when the active waiter count drops to zero.
+4. Producer crash, timeout, or lease retirement resolves every attached waiter with an explicit terminal `incomplete` / `failed` / `timed_out` receipt, and stale-generation completions are rejected before publication (`ED-T11`).
+
+### `NegativeDependencyWitnessV1` Absence Revalidation
+
+Failed symbol/import/library lookups are cached only alongside a complete `NegativeDependencyWitnessV1` (`src/lib/common/task_runner/contracts.spl`, `ED-T12`) recording the exact scope in which absence was proven:
+
+- Provider-set surface generation and exported-symbol membership.
+- Import resolution and library search-path order.
+- Watched directory or generated-file inventory digest.
+- Candidate overload/implementation set and active target/feature flags.
+
+Before reusing any cached negative finding, the runner revalidates every witness against the current snapshot; adding a formerly missing file, export, overload, or optional library invalidates the witness immediately. Unfinished or unscheduled providers remain `Pending` / `Unavailable` and never emit a `NegativeDependencyWitnessV1`.

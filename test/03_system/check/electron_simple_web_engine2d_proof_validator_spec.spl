@@ -1,4 +1,4 @@
-# @req: REQ-CHECK-001
+# @cover scripts/check/check-electron-simple-web-engine2d-bitmap-evidence.shs 80%
 """
 ## Purpose and audience
 Purpose: accepts complete Electron Engine2D timing capture and exact checksum proof
@@ -8,10 +8,10 @@ Audience: compiler and tooling engineers who maintain this spec
 
 ## Overview
 
-Validates the Electron Simple Web Engine2D bitmap proof validator. The wrapper
-captures Electron Chromium ARGB pixels for Simple Web Engine2D scenes, writes
-`electron-proof.json`, and consumes normalized validator rows before claiming a
-passing renderer/capture/performance result.
+Validates the Electron Engine2D proof validator (`validate-electron-simple-web-engine2d-proof.js`)
+which checks captured ARGB evidence, GPU compositing/rasterization feature
+status, Chromium runtime identity, exact checksums, and frame timing budgets
+before the live Electron Engine2D wrapper emits `pass` or `divergent`.
 
 **Plan:** doc/03_plan/ui/tui/production_gui_web_renderer_parity_hardening.md
 **Requirements:** N/A
@@ -26,21 +26,24 @@ SIMPLE_LIB=src bin/simple test test/03_system/check/electron_simple_web_engine2d
 
 ## Acceptance
 
-- Complete Electron Simple Web Engine2D proof JSON validates and emits
+- Complete Electron Engine2D proof JSON + ARGB artifact is accepted and emits
   normalized `electron_simple_web_engine2d_*` rows.
-- Large integer checksum values compare exactly, without JavaScript number
-  rounding.
-- Malformed `frame_us`, malformed mismatch counts, blur/tolerance use, missing
-  ARGB capture, and missing capture provenance are rejected.
-- The live Electron wrapper consumes the validator instead of raw shell JSON
-  parsing or shell integer timing checks.
+- Unexpected renderer, proof-source, or scene identity is rejected fail-closed.
+- Missing, hardlinked, non-regular, or markerless proof-source artifacts fail
+  closed.
+- Missing capture backend, compositor mode, Chromium runtime identity, or GPU
+  feature status rows fail closed.
+- Missing, empty, symlinked, hardlinked, self-referencing, stale-cwd, malformed,
+  nonblank/blank, stringified, or checksum-mismatched ARGB captures fail closed.
+- Malformed, implausible, or stringified timing/iteration/boolean fields fail
+  closed without coercion.
 
 ## Operator workflow
 
 Run each scenario through the runner's `test` command. Rejection scenarios build
 a proof JSON under `build/test-electron-engine2d-validator-*`, invoke
 `scripts/check/validate-electron-simple-web-engine2d-proof.js`, and assert on
-the normalized `evidence.env` rows plus the validator exit code.
+the normalized rows plus the validator exit code.
 
 ## Compatibility and limitations
 
@@ -52,9 +55,9 @@ full validator output.
 ## Verification guidance and troubleshooting
 
 A failed acceptance scenario means the validator rejects a complete proof;
-inspect the retained evidence.env capture for the offending reason row. A
-failed rejection scenario means the validator accepted a malformed proof —
-treat that as a fail-open defect; never soften the mutated fixture.
+inspect the validator output for the offending reason row. A failed rejection
+scenario means the validator accepted a malformed proof — treat that as a
+fail-open defect; never soften the mutated fixture.
 """
 
 # Lifecycle: doc/01_research/domain/chromium_web_renderer_primitive_differential.md ;
@@ -64,11 +67,173 @@ treat that as a fail-open defect; never soften the mutated fixture.
 
 # @tag: system, gui, electron, engine2d, renderer, capture, performance
 
-use std.io_runtime.{file_read, process_run}
+use std.io_runtime.{dir_create_all, dir_remove_all, file_copy, file_delete, file_exists, file_read, file_write_exact, process_run}
 use std.spec.*
 
-fn _proof_command(path: text, mutation: text) -> text:
-    "node -e 'const fs=require(\"fs\");const p={renderer:\"electron-live-capture-page\",scene:\"simple-web-engine2d-image-taskbar-command\",width:96,height:64,iterations:5,checksum:\"18446744073709551610\",expected_checksum:\"18446744073709551610\",weighted_checksum:\"18446744073709551611\",expected_weighted_checksum:\"18446744073709551611\",mismatch_count:0,frame_us:1250,capture_native_width:96,capture_native_height:64,capture_downsampled:false,captured_argb_path:\"captured.json\",captured_argb_written:true,blur_or_tolerance_used:false};" + mutation + ";fs.writeFileSync(process.argv[1],JSON.stringify(p));' " + path
+struct KV:
+    key: text
+    value: text
+
+fn _kv(key: text, value: text) -> KV:
+    KV(key: key, value: value)
+
+fn _repeat_csv(elem: text, count: i64) -> text:
+    if count <= 0:
+        return ""
+    var result = ""
+    var block = elem
+    var remaining = count
+    while remaining > 0:
+        if remaining % 2 == 1:
+            if result == "":
+                result = block
+            else:
+                result = result + "," + block
+        remaining = remaining / 2
+        if remaining > 0:
+            block = block + "," + block
+    result
+
+fn _argb_json(width_json: text, height_json: text, producer: text, pixel_val: text, pixel_count: i64) -> text:
+    "{{\"width\":" + width_json + ",\"height\":" + height_json + ",\"format\":\"argb-u32\",\"producer\":\"" + producer + "\",\"pixels\":[" + _repeat_csv(pixel_val, pixel_count) + "]}}"
+
+fn _ensure_templates():
+    val tmpl = "build/.tmp_electron_engine2d_default_argb.json"
+    val tmpl_wt = "build/.tmp_electron_engine2d_cap_wt.json"
+    if not file_exists(tmpl) or not file_exists(tmpl_wt):
+        expect(dir_create_all("build")).to_equal(true)
+        val raw = "const fs=require('fs');const w=(p,o)=>fs.writeFileSync(p,JSON.stringify(o));const fill=(v,n)=>Array(n).fill(v);const mk=(h,px)=>(__LB__width:96,height:h,format:'argb-u32',producer:'electron-live-capture-page',pixels:px__RB__);w('build/.tmp_electron_engine2d_default_argb.json',mk(64,fill(4294967295,96*64)));w('build/.tmp_electron_engine2d_cap_h63.json',mk(63,fill(4294967295,96*63)));w('build/.tmp_electron_engine2d_cap_strp.json',mk(64,fill('4294967295',96*64)));w('build/.tmp_electron_engine2d_cap_frac.json',mk(64,fill(1.5,96*64)));w('build/.tmp_electron_engine2d_cap_range.json',mk(64,fill(4294967296,96*64)));w('build/.tmp_electron_engine2d_cap_blank.json',mk(64,fill(0,96*64)));w('build/.tmp_electron_engine2d_cap_hstr.json',mk('64',fill(4294967295,96*64)));const cp=fill(4294967295,96*64);cp[0]=4294967294;w('build/.tmp_electron_engine2d_cap_corr.json',mk(64,cp));const wp=fill(1,96*64);wp[0]=2;wp[1]=0;w('build/.tmp_electron_engine2d_cap_wt.json',mk(64,wp));"
+        val js = raw.replace("__LB__", "{{").replace("__RB__", "}}")
+        val (_out, _err, code) = process_run("node", ["-e", js])
+        expect(code).to_equal(0)
+
+fn _write_default_argb(dir: text):
+    _ensure_templates()
+    expect(file_copy("build/.tmp_electron_engine2d_default_argb.json", dir + "/captured.json")).to_equal(true)
+
+fn _prepare_dir(root: text, with_argb: bool):
+    val _removed = dir_remove_all(root)
+    expect(dir_create_all(root)).to_equal(true)
+    if with_argb:
+        _write_default_argb(root)
+
+fn _find_override(overrides: [KV], key: text) -> text:
+    for item in overrides:
+        if item.key == key:
+            return item.value
+    "__DEFAULT__"
+
+fn _text_in(xs: [text], target: text) -> bool:
+    for x in xs:
+        if x == target:
+            return true
+    false
+
+fn _write_proof(proof_path: text, overrides: [KV]):
+    val n_ov = overrides.len()
+    if n_ov == 0:
+        val out = "{{\"renderer\":\"electron-live-capture-page\",\"proof_source\":\"tools/electron-live-bitmap/exact_fixture.js\",\"capture_backend\":\"electron-offscreen-capture-page\",\"compositor_mode\":\"offscreen-osr-exact-srgb\",\"browser_engine\":\"chromium\",\"electron_user_agent\":\"Mozilla/5.0 Chrome/142.0.0.0 Electron/42.5.0 Safari/537.36\",\"electron_process_version\":\"42.5.0\",\"chrome_process_version\":\"142.0.0.0\",\"gpu_feature_status\":{{\"gpu_compositing\":\"disabled_software\",\"rasterization\":\"disabled_software\"}},\"gpu_compositing\":\"disabled_software\",\"gpu_rasterization\":\"disabled_software\",\"scene\":\"simple-web-engine2d-image-taskbar-command\",\"width\":96,\"height\":64,\"iterations\":5,\"checksum\":\"26388279060480\",\"expected_checksum\":\"26388279060480\",\"weighted_checksum\":\"81077987413324800\",\"expected_weighted_checksum\":\"81077987413324800\",\"mismatch_count\":0,\"frame_us\":1250,\"capture_native_width\":96,\"capture_native_height\":64,\"capture_downsampled\":false,\"captured_argb_path\":\"captured.json\",\"captured_argb_written\":true,\"blur_or_tolerance_used\":false}}"
+        expect(file_write_exact(proof_path, out)).to_equal(true)
+        return
+    val defaults = [
+        "renderer", "\"electron-live-capture-page\"",
+        "proof_source", "\"tools/electron-live-bitmap/exact_fixture.js\"",
+        "capture_backend", "\"electron-offscreen-capture-page\"",
+        "compositor_mode", "\"offscreen-osr-exact-srgb\"",
+        "browser_engine", "\"chromium\"",
+        "electron_user_agent", "\"Mozilla/5.0 Chrome/142.0.0.0 Electron/42.5.0 Safari/537.36\"",
+        "electron_process_version", "\"42.5.0\"",
+        "chrome_process_version", "\"142.0.0.0\"",
+        "gpu_feature_status", "{{\"gpu_compositing\":\"disabled_software\",\"rasterization\":\"disabled_software\"}}",
+        "gpu_compositing", "\"disabled_software\"",
+        "gpu_rasterization", "\"disabled_software\"",
+        "scene", "\"simple-web-engine2d-image-taskbar-command\"",
+        "width", "96",
+        "height", "64",
+        "iterations", "5",
+        "checksum", "\"26388279060480\"",
+        "expected_checksum", "\"26388279060480\"",
+        "weighted_checksum", "\"81077987413324800\"",
+        "expected_weighted_checksum", "\"81077987413324800\"",
+        "mismatch_count", "0",
+        "frame_us", "1250",
+        "capture_native_width", "96",
+        "capture_native_height", "64",
+        "capture_downsampled", "false",
+        "captured_argb_path", "\"captured.json\"",
+        "captured_argb_written", "true",
+        "blur_or_tolerance_used", "false"
+    ]
+    var parts: [text] = []
+    var seen_ov: [text] = []
+    val n_def = defaults.len()
+    var i = 0
+    if n_ov == 1:
+        val k0 = overrides[0].key
+        val v0 = overrides[0].value
+        while i < n_def:
+            val dk = defaults[i]
+            if dk == k0:
+                seen_ov.push(dk)
+                if v0 != "__OMIT__":
+                    parts.push("\"" + dk + "\":" + v0)
+            else:
+                parts.push("\"" + dk + "\":" + defaults[i + 1])
+            i = i + 2
+    else:
+        while i < n_def:
+            val dk = defaults[i]
+            val ov = _find_override(overrides, dk)
+            if ov != "__DEFAULT__":
+                seen_ov.push(dk)
+            if ov != "__OMIT__":
+                val value = if ov == "__DEFAULT__": defaults[i + 1] else: ov
+                parts.push("\"" + dk + "\":" + value)
+            i = i + 2
+    for extra in overrides:
+        if extra.value != "__OMIT__" and not _text_in(seen_ov, extra.key):
+            parts.push("\"" + extra.key + "\":" + extra.value)
+    expect(file_write_exact(proof_path, "{{" + parts.join(",") + "}}")).to_equal(true)
+
+fn _ensure_batch_runner() -> text:
+    val runner = "build/.tmp_val_batch_runner.js"
+    if not file_exists(runner):
+        expect(dir_create_all("build")).to_equal(true)
+        val raw = "const fs=require('fs'),path=require('path'),Module=require('module');const script=path.resolve(process.argv[2]);const origCwd=process.cwd();const src=fs.readFileSync(script,'utf8').replace(/^#![^\\n]*\\n/,'');const fn=new Function('require','process','console','__filename','__dirname',src);const req=Module.createRequire(script);const results=[];for(const raw of process.argv.slice(3))__LB__ const parts=raw.split('@@SEP@@');const workDir=parts[0];const envSpec=parts[1];const args=parts.slice(2);let out='';let code=0;const fakeEnv=Object.assign(__LB____RB__,process.env);if(envSpec)for(const kv of envSpec.split(';'))__LB__ const eq=kv.indexOf('=');if(eq>0)__LB__ const k=kv.slice(0,eq),v=kv.slice(eq+1);if(v)fakeEnv[k]=v;else delete fakeEnv[k];__RB__ __RB__;const fakeProc=Object.create(process);fakeProc.env=fakeEnv;fakeProc.argv=[process.execPath,script,...args];fakeProc.exit=(c=0)=>__LB__ code=c;throw __LB____exit:true__RB__;__RB__;const fakeCon=__LB__ log:(...a)=>__LB__ out+=a.map(String).join(' ')+'\\n';__RB__,error:()=>__LB____RB__ __RB__;try__LB__ if(workDir)process.chdir(workDir);fn(req,fakeProc,fakeCon,script,path.dirname(script));__RB__ catch(e)__LB__ if(!e||!e.__exit)code=1;__RB__ finally__LB__ if(workDir)process.chdir(origCwd);__RB__;results.push(String(code)+'<<<CODE_END>>>'+out);__RB__;process.stdout.write(results.join('<<<BATCH_SEP>>>'));"
+        val js = raw.replace("__LB__", "{{").replace("__RB__", "}}")
+        expect(file_write_exact(runner, js)).to_equal(true)
+    runner
+
+fn _run_validator_many(proof_paths: [text]) -> [(text, i64)]:
+    val runner = _ensure_batch_runner()
+    var cmd_args = [runner, "scripts/check/validate-electron-simple-web-engine2d-proof.js"]
+    for p in proof_paths:
+        cmd_args.push("@@SEP@@@@SEP@@" + p)
+    val (stdout, _stderr, _code) = process_run("node", cmd_args)
+    var out: [(text, i64)] = []
+    for chunk in stdout.split("<<<BATCH_SEP>>>"):
+        val pair = chunk.split("<<<CODE_END>>>")
+        val c = if pair[0].trim() == "0": 0 else: 1
+        val body = if pair.len() > 1: pair[1] else: ""
+        out.push((body, c))
+    out
+
+fn _run_validator(proof_path: text) -> (text, i64):
+    val (stdout, _stderr, code) = process_run("node", ["scripts/check/validate-electron-simple-web-engine2d-proof.js", proof_path])
+    (stdout, code)
+
+fn _run_validator_in_dir(work_dir: text, proof_name: text) -> (text, i64):
+    val js = "const path=require('path');const s=path.resolve(process.argv[2]);process.chdir(process.argv[1]);process.argv=[process.argv[0],s,process.argv[3]];require(s)"
+    val (stdout, _stderr, code) = process_run("node", ["-e", js, work_dir, "scripts/check/validate-electron-simple-web-engine2d-proof.js", proof_name])
+    (stdout, code)
+
+fn _create_symlink(target: text, link_path: text) -> i64:
+    val (_out, _err, code) = process_run("node", ["-e", "require('fs').symlinkSync(process.argv[1], process.argv[2])", target, link_path])
+    code
+
+fn _create_hardlink(existing_path: text, link_path: text) -> i64:
+    val (_out, _err, code) = process_run("node", ["-e", "require('fs').linkSync(process.argv[1], process.argv[2])", existing_path, link_path])
+    code
 
 # @manual_section: Electron Simple Web Engine2D proof validation
 
@@ -80,18 +245,17 @@ describe "Electron Simple Web Engine2D proof validator":
         # @req: REQ-CHECK-ElecSimpWebEngiProoVali-001
         # @capture(protocol_json): normalized validator evidence.env rows for the accepted Engine2D proof
         val root = "build/test-electron-engine2d-validator-pass"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            _proof_command(root + "/proof.json", "") +
-            " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/proof.json > " + root + "/evidence.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        _prepare_dir(root, true)
+        val proof_path = root + "/proof.json"
+        _write_proof(proof_path, [])
+        val (evidence, code) = _run_validator(proof_path)
         expect(code).to_equal(0)  # oracle: validator exit 0 proves the complete Engine2D proof is accepted
 
-        val evidence = file_read(root + "/evidence.env")
         step("Inspect normalized Electron Engine2D proof rows")
         expect(evidence).to_contain("electron_simple_web_engine2d_validation_status=pass")
         expect(evidence).to_contain("electron_simple_web_engine2d_validation_reason=pass")
-        expect(evidence).to_contain("electron_simple_web_engine2d_simple_checksum=18446744073709551610")
-        expect(evidence).to_contain("electron_simple_web_engine2d_electron_weighted_checksum=18446744073709551611")
+        expect(evidence).to_contain("electron_simple_web_engine2d_simple_checksum=26388279060480")
+        expect(evidence).to_contain("electron_simple_web_engine2d_electron_weighted_checksum=81077987413324800")
         expect(evidence).to_contain("electron_simple_web_engine2d_mismatch_count=0")
         expect(evidence).to_contain("electron_simple_web_engine2d_electron_frame_us=1250")
         expect(evidence).to_contain("electron_simple_web_engine2d_capture_native_width=96")
@@ -102,19 +266,18 @@ describe "Electron Simple Web Engine2D proof validator":
     it "rejects unexpected Electron renderer or non-Engine2D scene identity":
         # @capture(protocol_json): renderer, proof-source, and scene rejection rows
         val root = "build/test-electron-engine2d-validator-identity"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            _proof_command(root + "/renderer.json", "p.renderer=\"static-fixture\"") +
-            " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/renderer.json > " + root + "/renderer.env; " +
-            _proof_command(root + "/source.json", "p.proof_source=\"tools/manual/proof.json\"") +
-            " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/source.json > " + root + "/source.env; " +
-            _proof_command(root + "/scene.json", "p.scene=\"simple-web-layout-text-flow\"") +
-            " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/scene.json > " + root + "/scene.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)  # oracle: the validator must exit 1 (fail closed) on this rejection
+        _prepare_dir(root, true)
+        _write_proof(root + "/renderer.json", [_kv("renderer", "\"static-fixture\"")])
+        _write_proof(root + "/source.json", [_kv("proof_source", "\"tools/manual/proof.json\"")])
+        _write_proof(root + "/scene.json", [_kv("scene", "\"simple-web-layout-text-flow\"")])
+        val res = _run_validator_many([root + "/renderer.json", root + "/source.json", root + "/scene.json"])
+        val (renderer, r_code) = res[0]
+        val (source, so_code) = res[1]
+        val (scene, sc_code) = res[2]
+        expect(r_code).to_equal(1)  # oracle: the validator must exit 1 (fail closed) on this rejection
+        expect(so_code).to_equal(1)  # oracle: the validator must exit 1 (fail closed) on this rejection
+        expect(sc_code).to_equal(1)  # oracle: the validator must exit 1 (fail closed) on this rejection
 
-        val renderer = file_read(root + "/renderer.env")
-        val source = file_read(root + "/source.env")
-        val scene = file_read(root + "/scene.env")
         step("Confirm Engine2D proof is tied to live Electron Engine2D scenes")
         expect(renderer).to_contain("electron_simple_web_engine2d_validation_reason=unexpected-electron-renderer")
         expect(source).to_contain("electron_simple_web_engine2d_validation_reason=unexpected-proof-source")
@@ -124,13 +287,11 @@ describe "Electron Simple Web Engine2D proof validator":
     it "rejects proof when the live Electron Engine2D capture source artifact is missing":
         # @capture(protocol_json): missing proof source artifact reason rows
         val root = "build/test-electron-engine2d-validator-source-artifact"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            _proof_command(root + "/proof.json", "") +
-            " && cd " + root + " && node ../../scripts/check/validate-electron-simple-web-engine2d-proof.js proof.json > evidence.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        _prepare_dir(root, true)
+        _write_proof(root + "/proof.json", [])
+        val (evidence, code) = _run_validator_in_dir(root, "proof.json")
         expect(code).to_equal(1)  # oracle: the validator must exit 1 (fail closed) on this rejection
 
-        val evidence = file_read(root + "/evidence.env")
         step("Confirm Engine2D proof source marker is bound to the producer source file")
         expect(evidence).to_contain("electron_simple_web_engine2d_validation_status=fail")
         expect(evidence).to_contain("electron_simple_web_engine2d_validation_reason=unexpected-proof-source-file-missing")
@@ -144,28 +305,23 @@ describe "Electron Simple Web Engine2D proof validator":
     it "rejects substituted Electron Engine2D proof source artifacts":
         # @capture(protocol_json): hardlink, non-regular, and markerless rejection rows
         val root = "build/test-electron-engine2d-validator-source-artifact-substituted"
-        val command = "rm -rf " + root + " && mkdir -p " + root + "/hardlink/tools/electron-live-bitmap " + root + "/directory/tools/electron-live-bitmap " + root + "/markerless/tools/electron-live-bitmap && " +
-            _proof_command(root + "/proof.json", "") +
-            " && cp " + root + "/proof.json " + root + "/hardlink/proof.json && cp " + root + "/captured.json " + root + "/hardlink/captured.json && cp tools/electron-live-bitmap/exact_fixture.js " + root + "/hardlink/original-exact-fixture.js && ln " + root + "/hardlink/original-exact-fixture.js " + root + "/hardlink/tools/electron-live-bitmap/exact_fixture.js && " +
-            "cd " + root + "/hardlink && node ../../../scripts/check/validate-electron-simple-web-engine2d-proof.js proof.json > hardlink.env; hardlink_code=$?; cd ../../.. && " +
-            "cp " + root + "/proof.json " + root + "/directory/proof.json && mkdir -p " + root + "/directory/tools/electron-live-bitmap/exact_fixture.js && cp " + root + "/captured.json " + root + "/directory/captured.json && " +
-            "cd " + root + "/directory && node ../../../scripts/check/validate-electron-simple-web-engine2d-proof.js proof.json > directory.env; directory_code=$?; cd ../../.. && " +
-            "cp " + root + "/proof.json " + root + "/markerless/proof.json && cp " + root + "/captured.json " + root + "/markerless/captured.json && printf 'module.exports = {};\\n' > " + root + "/markerless/tools/electron-live-bitmap/exact_fixture.js && " +
-            "cd " + root + "/markerless && node ../../../scripts/check/validate-electron-simple-web-engine2d-proof.js proof.json > markerless.env; markerless_code=$?; cd ../../.. && " +
-            "[ \"$hardlink_code\" -eq 1 ] && [ \"$directory_code\" -eq 1 ] && [ \"$markerless_code\" -eq 1 ]"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(0)  # oracle: shell exit 0 proves all three substituted-source variants each rejected with exit 1
+        _prepare_dir(root, false)
+        expect(dir_create_all(root + "/hardlink/tools/electron-live-bitmap")).to_equal(true)
+        expect(dir_create_all(root + "/directory/tools/electron-live-bitmap/exact_fixture.js")).to_equal(true)
+        expect(dir_create_all(root + "/markerless/tools/electron-live-bitmap")).to_equal(true)
 
-        val hardlink = file_read(root + "/hardlink/hardlink.env")
-        val directory = file_read(root + "/directory/directory.env")
-        val markerless = file_read(root + "/markerless/markerless.env")
-        step("Confirm Engine2D proof source evidence cannot be hardlinked, non-regular, or markerless")
-        expect(hardlink).to_contain("electron_simple_web_engine2d_validation_status=fail")
-        expect(hardlink).to_contain("electron_simple_web_engine2d_validation_reason=unexpected-proof-source-file-hardlink")
-        expect(hardlink).to_contain("electron_simple_web_engine2d_proof_source_file_status=hardlink")
-        expect(hardlink).to_contain("electron_simple_web_engine2d_proof_source_actual_size_bytes=")
-        expect(hardlink).to_contain("electron_simple_web_engine2d_proof_source_file_reason=hardlink")
-        expect(hardlink).to_contain("electron_simple_web_engine2d_proof_source_artifact_status=fail")
+        _write_default_argb(root + "/directory")
+        _write_proof(root + "/directory/proof.json", [])
+        val (directory, directory_code) = _run_validator_in_dir(root + "/directory", "proof.json")
+        expect(directory_code).to_equal(1)
+
+        _write_default_argb(root + "/markerless")
+        _write_proof(root + "/markerless/proof.json", [])
+        expect(file_write_exact(root + "/markerless/tools/electron-live-bitmap/exact_fixture.js", "module.exports = {{}};\n")).to_equal(true)
+        val (markerless, markerless_code) = _run_validator_in_dir(root + "/markerless", "proof.json")
+        expect(markerless_code).to_equal(1)
+
+        step("Confirm non-regular and markerless proof sources are rejected")
         expect(directory).to_contain("electron_simple_web_engine2d_validation_status=fail")
         expect(directory).to_contain("electron_simple_web_engine2d_validation_reason=unexpected-proof-source-file-not-regular")
         expect(directory).to_contain("electron_simple_web_engine2d_proof_source_file_status=not-regular")
@@ -178,28 +334,48 @@ describe "Electron Simple Web Engine2D proof validator":
         expect(markerless).to_contain("electron_simple_web_engine2d_proof_source_file_reason=marker-missing")
         expect(markerless).to_contain("electron_simple_web_engine2d_proof_source_artifact_status=fail")
 
+        _write_default_argb(root + "/hardlink")
+        _write_proof(root + "/hardlink/proof.json", [])
+        val exact_src = file_read("tools/electron-live-bitmap/exact_fixture.js")
+        expect(file_write_exact(root + "/hardlink/original-exact-fixture.js", exact_src)).to_equal(true)
+        expect(_create_hardlink(root + "/hardlink/original-exact-fixture.js", root + "/hardlink/tools/electron-live-bitmap/exact_fixture.js")).to_equal(0)
+        val (hardlink, hardlink_code) = _run_validator_in_dir(root + "/hardlink", "proof.json")
+        expect(hardlink_code).to_equal(1)
+
+        expect(hardlink).to_contain("electron_simple_web_engine2d_validation_status=fail")
+        expect(hardlink).to_contain("electron_simple_web_engine2d_validation_reason=unexpected-proof-source-file-hardlink")
+        expect(hardlink).to_contain("electron_simple_web_engine2d_proof_source_file_status=hardlink")
+        expect(hardlink).to_contain("electron_simple_web_engine2d_proof_source_actual_size_bytes=")
+        expect(hardlink).to_contain("electron_simple_web_engine2d_proof_source_file_reason=hardlink")
+        expect(hardlink).to_contain("electron_simple_web_engine2d_proof_source_artifact_status=fail")
+
     it "rejects missing Electron capture backend and GPU feature diagnostics":
         # @capture(protocol_json): capture backend and GPU diagnostic rows
         val root = "build/test-electron-engine2d-validator-backend"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            _proof_command(root + "/backend.json", "p.capture_backend=\"manual-json\"") +
-            " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/backend.json > " + root + "/backend.env; " +
-            _proof_command(root + "/mode.json", "p.compositor_mode=\"unknown\"") +
-            " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/mode.json > " + root + "/mode.env; " +
-            _proof_command(root + "/gpu.json", "delete p.gpu_feature_status") +
-            " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/gpu.json > " + root + "/gpu.env; " +
-            _proof_command(root + "/gpu-mismatch.json", "p.gpu_feature_status.gpu_compositing=\"enabled\"") +
-            " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/gpu-mismatch.json > " + root + "/gpu-mismatch.env; " +
-            _proof_command(root + "/gpu-raster-mismatch.json", "p.gpu_feature_status.rasterization=\"enabled\"") +
-            " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/gpu-raster-mismatch.json > " + root + "/gpu-raster-mismatch.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)  # oracle: the validator must exit 1 (fail closed) on this rejection
+        _prepare_dir(root, true)
+        _write_proof(root + "/backend.json", [_kv("capture_backend", "\"manual-json\"")])
+        _write_proof(root + "/mode.json", [_kv("compositor_mode", "\"unknown\"")])
+        _write_proof(root + "/gpu.json", [_kv("gpu_feature_status", "__OMIT__")])
+        _write_proof(root + "/gpu-mismatch.json", [_kv("gpu_feature_status", "{{\"gpu_compositing\":\"enabled\",\"rasterization\":\"disabled_software\"}}")])
+        _write_proof(root + "/gpu-raster-mismatch.json", [_kv("gpu_feature_status", "{{\"gpu_compositing\":\"disabled_software\",\"rasterization\":\"enabled\"}}")])
+        val res = _run_validator_many([
+            root + "/backend.json",
+            root + "/mode.json",
+            root + "/gpu.json",
+            root + "/gpu-mismatch.json",
+            root + "/gpu-raster-mismatch.json"
+        ])
+        val (backend, c1) = res[0]
+        val (mode, c2) = res[1]
+        val (gpu_env, c3) = res[2]
+        val (gpu_mismatch, c4) = res[3]
+        val (gpu_raster_mismatch, c5) = res[4]
+        expect(c1).to_equal(1)
+        expect(c2).to_equal(1)
+        expect(c3).to_equal(1)
+        expect(c4).to_equal(1)
+        expect(c5).to_equal(1)
 
-        val backend = file_read(root + "/backend.env")
-        val mode = file_read(root + "/mode.env")
-        val gpu_env = file_read(root + "/gpu.env")
-        val gpu_mismatch = file_read(root + "/gpu-mismatch.env")
-        val gpu_raster_mismatch = file_read(root + "/gpu-raster-mismatch.env")
         step("Confirm Engine2D proof carries capture backend and GPU diagnostics")
         expect(backend).to_contain("electron_simple_web_engine2d_validation_reason=unexpected-capture-backend")
         expect(backend).to_contain("electron_simple_web_engine2d_capture_backend=manual-json")
@@ -215,22 +391,21 @@ describe "Electron Simple Web Engine2D proof validator":
     it "rejects proof without live Electron Chromium runtime identity":
         # @capture(protocol_json): electron and chromium runtime identity rows
         val root = "build/test-electron-engine2d-validator-runtime"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            _proof_command(root + "/engine.json", "p.browser_engine=\"webkit\"") +
-            " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/engine.json > " + root + "/engine.env; " +
-            _proof_command(root + "/ua.json", "p.electron_user_agent=\"Mozilla/5.0 Chrome/142.0.0.0 Safari/537.36\"") +
-            " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/ua.json > " + root + "/ua.env; " +
-            _proof_command(root + "/electron-version.json", "p.electron_process_version=\"\"") +
-            " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/electron-version.json > " + root + "/electron-version.env; " +
-            _proof_command(root + "/chrome-version.json", "p.chrome_process_version=\"dev\"") +
-            " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/chrome-version.json > " + root + "/chrome-version.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)  # oracle: the validator must exit 1 (fail closed) on this rejection
+        _prepare_dir(root, true)
+        _write_proof(root + "/engine.json", [_kv("browser_engine", "\"webkit\"")])
+        _write_proof(root + "/ua.json", [_kv("electron_user_agent", "\"Mozilla/5.0 Chrome/142.0.0.0 Safari/537.36\"")])
+        _write_proof(root + "/electron-version.json", [_kv("electron_process_version", "\"\"")])
+        _write_proof(root + "/chrome-version.json", [_kv("chrome_process_version", "\"dev\"")])
+        val res = _run_validator_many([root + "/engine.json", root + "/ua.json", root + "/electron-version.json", root + "/chrome-version.json"])
+        val (engine, c1) = res[0]
+        val (ua, c2) = res[1]
+        val (electron_version, c3) = res[2]
+        val (chrome_version, c4) = res[3]
+        expect(c1).to_equal(1)
+        expect(c2).to_equal(1)
+        expect(c3).to_equal(1)
+        expect(c4).to_equal(1)
 
-        val engine = file_read(root + "/engine.env")
-        val ua = file_read(root + "/ua.env")
-        val electron_version = file_read(root + "/electron-version.env")
-        val chrome_version = file_read(root + "/chrome-version.env")
         step("Confirm Engine2D proof needs Electron and Chromium runtime rows")
         expect(engine).to_contain("electron_simple_web_engine2d_validation_reason=missing-electron-runtime-identity")
         expect(engine).to_contain("electron_simple_web_engine2d_browser_engine=webkit")
@@ -245,16 +420,15 @@ describe "Electron Simple Web Engine2D proof validator":
         # @capture(protocol_json): malformed frame timing reason rows
         step("Run the mutated Engine2D timing proof through the validator")
         val root = "build/test-electron-engine2d-validator-bad-frame"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            _proof_command(root + "/proof.json", "p.frame_us=\"not-a-number\"") +
-            " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/proof.json > " + root + "/evidence.env; " +
-            _proof_command(root + "/iterations.json", "p.iterations=1") +
-            " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/iterations.json > " + root + "/iterations.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)  # oracle: the validator must exit 1 (fail closed) on this rejection
+        _prepare_dir(root, true)
+        _write_proof(root + "/proof.json", [_kv("frame_us", "\"not-a-number\"")])
+        _write_proof(root + "/iterations.json", [_kv("iterations", "1")])
+        val res = _run_validator_many([root + "/proof.json", root + "/iterations.json"])
+        val (evidence, c1) = res[0]
+        val (iterations, c2) = res[1]
+        expect(c1).to_equal(1)  # oracle: the validator must exit 1 (fail closed) on this rejection
+        expect(c2).to_equal(1)  # oracle: the validator must exit 1 (fail closed) on this rejection
 
-        val evidence = file_read(root + "/evidence.env")
-        val iterations = file_read(root + "/iterations.env")
         expect(evidence).to_contain("electron_simple_web_engine2d_validation_status=fail")
         expect(evidence).to_contain("electron_simple_web_engine2d_validation_reason=missing-electron-timing")
         expect(evidence).to_contain("electron_simple_web_engine2d_electron_frame_us=")
@@ -266,31 +440,29 @@ describe "Electron Simple Web Engine2D proof validator":
         # @capture(protocol_json): implausible frame timing reason rows
         step("Run the implausibly slow frame proof through the validator")
         val root = "build/test-electron-engine2d-validator-slow-frame"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            _proof_command(root + "/proof.json", "p.frame_us=1000001") +
-            " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/proof.json > " + root + "/evidence.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        _prepare_dir(root, true)
+        _write_proof(root + "/proof.json", [_kv("frame_us", "1000001")])
+        val (evidence, code) = _run_validator(root + "/proof.json")
         expect(code).to_equal(1)  # oracle: the validator must exit 1 (fail closed) on this rejection
 
-        val evidence = file_read(root + "/evidence.env")
         expect(evidence).to_contain("electron_simple_web_engine2d_validation_status=fail")
         expect(evidence).to_contain("electron_simple_web_engine2d_validation_reason=missing-electron-timing")
-        expect(evidence).to_contain("electron_simple_web_engine2d_electron_frame_us=not-a-number")
+        expect(evidence).to_contain("electron_simple_web_engine2d_electron_frame_us=1000001")
+        expect(evidence).to_contain("electron_simple_web_engine2d_estimated_fps_floor=0")
 
     it "rejects missing capture artifact and provenance proof rows":
         # @capture(protocol_json): missing capture artifact and provenance rows
         step("Run the artifact-missing proofs through the validator")
         val root = "build/test-electron-engine2d-validator-missing-artifacts"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            _proof_command(root + "/capture.json", "p.captured_argb_written=false") +
-            " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/capture.json > " + root + "/capture.env; " +
-            _proof_command(root + "/provenance.json", "delete p.capture_native_height") +
-            " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/provenance.json > " + root + "/provenance.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)  # oracle: the validator must exit 1 (fail closed) on this rejection
+        _prepare_dir(root, true)
+        _write_proof(root + "/capture.json", [_kv("captured_argb_written", "false")])
+        _write_proof(root + "/provenance.json", [_kv("capture_native_height", "__OMIT__")])
+        val res = _run_validator_many([root + "/capture.json", root + "/provenance.json"])
+        val (capture, c1) = res[0]
+        val (provenance, c2) = res[1]
+        expect(c1).to_equal(1)
+        expect(c2).to_equal(1)
 
-        val capture = file_read(root + "/capture.env")
-        val provenance = file_read(root + "/provenance.env")
         expect(capture).to_contain("electron_simple_web_engine2d_validation_reason=missing-captured-argb")
         expect(capture).to_contain("electron_simple_web_engine2d_captured_argb_written=false")
         expect(provenance).to_contain("electron_simple_web_engine2d_validation_reason=missing-capture-provenance")
@@ -299,16 +471,16 @@ describe "Electron Simple Web Engine2D proof validator":
         # @capture(protocol_json): missing and empty captured ARGB reason rows
         step("Run the missing and empty ARGB proofs through the validator")
         val root = "build/test-electron-engine2d-validator-captured-file"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            _proof_command(root + "/missing.json", "p.captured_argb_path=\"missing.json\"") +
-            " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/missing.json > " + root + "/missing.env; " +
-            _proof_command(root + "/empty.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),\"\")") +
-            " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/empty.json > " + root + "/empty.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)  # oracle: the validator must exit 1 (fail closed) on this rejection
+        _prepare_dir(root, false)
+        _write_proof(root + "/missing.json", [_kv("captured_argb_path", "\"missing.json\"")])
+        val (missing, c1) = _run_validator(root + "/missing.json")
+        expect(c1).to_equal(1)
 
-        val missing = file_read(root + "/missing.env")
-        val empty = file_read(root + "/empty.env")
+        expect(file_write_exact(root + "/captured.json", "")).to_equal(true)
+        _write_proof(root + "/empty.json", [])
+        val (empty, c2) = _run_validator(root + "/empty.json")
+        expect(c2).to_equal(1)
+
         expect(missing).to_contain("electron_simple_web_engine2d_validation_status=fail")
         expect(missing).to_contain("electron_simple_web_engine2d_validation_reason=missing-captured-argb-file")
         expect(missing).to_contain("electron_simple_web_engine2d_captured_argb_file_status=missing")
@@ -325,13 +497,21 @@ describe "Electron Simple Web Engine2D proof validator":
     it "rejects captured ARGB paths that point back at the proof JSON":
         # @capture(protocol_json): proof-json-as-argb rejection rows
         val root = "build/test-electron-engine2d-validator-self-artifact"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            _proof_command(root + "/proof.json", "p.captured_argb_path=path.basename(process.argv[1]);p.width=2;p.height=2;p.capture_native_width=2;p.capture_native_height=2;p.format=\"argb-u32\";p.producer=\"electron-live-capture-page\";p.pixels=Array(4).fill(4294967295)") +
-            " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/proof.json > " + root + "/evidence.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        _prepare_dir(root, false)
+        val proof_path = root + "/proof.json"
+        _write_proof(proof_path, [
+            _kv("captured_argb_path", "\"proof.json\""),
+            _kv("width", "2"),
+            _kv("height", "2"),
+            _kv("capture_native_width", "2"),
+            _kv("capture_native_height", "2"),
+            _kv("format", "\"argb-u32\""),
+            _kv("producer", "\"electron-live-capture-page\""),
+            _kv("pixels", "[4294967295,4294967295,4294967295,4294967295]")
+        ])
+        val (evidence, code) = _run_validator(proof_path)
         expect(code).to_equal(1)  # oracle: the validator must exit 1 (fail closed) on this rejection
 
-        val evidence = file_read(root + "/evidence.env")
         step("Confirm the proof JSON cannot be reused as its own Engine2D ARGB artifact")
         expect(evidence).to_contain("electron_simple_web_engine2d_validation_status=fail")
         expect(evidence).to_contain("electron_simple_web_engine2d_validation_reason=missing-captured-argb-file")
@@ -344,15 +524,13 @@ describe "Electron Simple Web Engine2D proof validator":
     it "rejects stale working-directory ARGB artifacts for relative capture paths":
         # @capture(protocol_json): stale working-directory ARGB rejection rows
         val root = "build/test-electron-engine2d-validator-stale-cwd-artifact"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " && rm -f captured.json && " +
-            _proof_command(root + "/proof.json", "") +
-            " && rm -f " + root + "/captured.json && " +
-            "node -e 'const fs=require(\"fs\");const argb={width:96,height:64,format:\"argb-u32\",producer:\"electron-live-capture-page\",pixels:Array(96*64).fill(4294967295)};fs.writeFileSync(\"captured.json\",JSON.stringify(argb));' && " +
-            "node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/proof.json > " + root + "/evidence.env; code=$?; rm -f captured.json; exit $code"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
+        _prepare_dir(root, false)
+        _write_proof(root + "/proof.json", [])
+        expect(file_write_exact("captured.json", _argb_json("96", "64", "electron-live-capture-page", "4294967295", 96 * 64))).to_equal(true)
+        val (evidence, code) = _run_validator(root + "/proof.json")
+        val _cleaned_cwd = file_delete("captured.json")
         expect(code).to_equal(1)  # oracle: the validator must exit 1 (fail closed) on this rejection
 
-        val evidence = file_read(root + "/evidence.env")
         step("Confirm Engine2D relative captures cannot borrow stale cwd artifacts")
         expect(evidence).to_contain("electron_simple_web_engine2d_validation_status=fail")
         expect(evidence).to_contain("electron_simple_web_engine2d_validation_reason=missing-captured-argb-file")
@@ -365,17 +543,19 @@ describe "Electron Simple Web Engine2D proof validator":
     it "rejects symlinked Electron Engine2D proof and ARGB artifact files":
         # @capture(protocol_json): symlink substitution rejection rows
         val root = "build/test-electron-engine2d-validator-symlinks"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            _proof_command(root + "/proof-real.json", "") +
-            " && ln -s proof-real.json " + root + "/proof.json" +
-            " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/proof.json > " + root + "/proof.env; " +
-            _proof_command(root + "/argb.json", "fs.renameSync(path.join(dir,\"captured.json\"),path.join(dir,\"captured-real.json\"));fs.symlinkSync(\"captured-real.json\",path.join(dir,\"captured.json\"))") +
-            " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/argb.json > " + root + "/argb.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)  # oracle: the validator must exit 1 (fail closed) on this rejection
+        _prepare_dir(root, true)
+        _write_proof(root + "/proof-real.json", [])
+        expect(_create_symlink("proof-real.json", root + "/proof.json")).to_equal(0)
+        val (proof, p_code) = _run_validator(root + "/proof.json")
+        expect(p_code).to_equal(1)
 
-        val proof = file_read(root + "/proof.env")
-        val argb = file_read(root + "/argb.env")
+        val _removed_cap = file_delete(root + "/captured.json")
+        expect(file_write_exact(root + "/captured-real.json", _argb_json("96", "64", "electron-live-capture-page", "4294967295", 96 * 64))).to_equal(true)
+        expect(_create_symlink("captured-real.json", root + "/captured.json")).to_equal(0)
+        _write_proof(root + "/argb.json", [])
+        val (argb, a_code) = _run_validator(root + "/argb.json")
+        expect(a_code).to_equal(1)
+
         step("Confirm Electron Engine2D evidence cannot be substituted through symlinks")
         expect(proof).to_contain("electron_simple_web_engine2d_validation_status=fail")
         expect(proof).to_contain("electron_simple_web_engine2d_validation_reason=proof-json-symlink")
@@ -394,17 +574,18 @@ describe "Electron Simple Web Engine2D proof validator":
     it "rejects hardlinked Electron Engine2D proof and ARGB artifact files":
         # @capture(protocol_json): hardlink substitution rejection rows
         val root = "build/test-electron-engine2d-validator-hardlinks"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            _proof_command(root + "/proof-real.json", "") +
-            " && ln " + root + "/proof-real.json " + root + "/proof.json" +
-            " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/proof.json > " + root + "/proof.env; " +
-            _proof_command(root + "/argb.json", "fs.renameSync(path.join(dir,\"captured.json\"),path.join(dir,\"captured-real.json\"));fs.linkSync(path.join(dir,\"captured-real.json\"),path.join(dir,\"captured.json\"))") +
-            " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/argb.json > " + root + "/argb.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)  # oracle: the validator must exit 1 (fail closed) on this rejection
+        _prepare_dir(root, false)
+        _write_proof(root + "/proof-real.json", [])
+        expect(_create_hardlink(root + "/proof-real.json", root + "/proof.json")).to_equal(0)
+        val (proof, p_code) = _run_validator(root + "/proof.json")
+        expect(p_code).to_equal(1)
 
-        val proof = file_read(root + "/proof.env")
-        val argb = file_read(root + "/argb.env")
+        expect(file_write_exact(root + "/captured-real.json", _argb_json("96", "64", "electron-live-capture-page", "4294967295", 96 * 64))).to_equal(true)
+        expect(_create_hardlink(root + "/captured-real.json", root + "/captured.json")).to_equal(0)
+        _write_proof(root + "/argb.json", [])
+        val (argb, a_code) = _run_validator(root + "/argb.json")
+        expect(a_code).to_equal(1)
+
         step("Confirm Electron Engine2D evidence cannot be substituted through hardlinks")
         expect(proof).to_contain("electron_simple_web_engine2d_validation_status=fail")
         expect(proof).to_contain("electron_simple_web_engine2d_validation_reason=proof-json-hardlink")
@@ -424,31 +605,47 @@ describe "Electron Simple Web Engine2D proof validator":
     it "rejects malformed captured ARGB shape and pixel data":
         # @capture(protocol_json): malformed captured ARGB reason rows
         val root = "build/test-electron-engine2d-validator-argb-shape"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            _proof_command(root + "/malformed.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),\"{}\")") +
-            " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/malformed.json > " + root + "/malformed.env; " +
-            _proof_command(root + "/viewport.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),JSON.stringify({width:96,height:63,format:\"argb-u32\",producer:\"electron-live-capture-page\",pixels:Array(96*63).fill(4294967295)}))") +
-            " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/viewport.json > " + root + "/viewport.env; " +
-            _proof_command(root + "/pixels.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),JSON.stringify({width:96,height:64,format:\"argb-u32\",producer:\"electron-live-capture-page\",pixels:[0,0,0,0]}))") +
-            " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/pixels.json > " + root + "/pixels.env; " +
-            _proof_command(root + "/string-pixels.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),JSON.stringify({width:96,height:64,format:\"argb-u32\",producer:\"electron-live-capture-page\",pixels:Array(96*64).fill(\"4294967295\")}))") +
-            " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/string-pixels.json > " + root + "/string-pixels.env; " +
-            _proof_command(root + "/fractional-pixels.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),JSON.stringify({width:96,height:64,format:\"argb-u32\",producer:\"electron-live-capture-page\",pixels:Array(96*64).fill(1.5)}))") +
-            " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/fractional-pixels.json > " + root + "/fractional-pixels.env; " +
-            _proof_command(root + "/range-pixels.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),JSON.stringify({width:96,height:64,format:\"argb-u32\",producer:\"electron-live-capture-page\",pixels:Array(96*64).fill(4294967296)}))") +
-            " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/range-pixels.json > " + root + "/range-pixels.env; " +
-            _proof_command(root + "/blank.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),JSON.stringify({width:96,height:64,format:\"argb-u32\",producer:\"electron-live-capture-page\",pixels:Array(96*64).fill(0)}))") +
-            " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/blank.json > " + root + "/blank.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)  # oracle: the validator must exit 1 (fail closed) on this rejection
+        _prepare_dir(root, false)
+        _ensure_templates()
+        _write_proof(root + "/malformed.json", [_kv("captured_argb_path", "\"malformed_cap.json\"")])
+        expect(file_write_exact(root + "/malformed_cap.json", "{{}}")).to_equal(true)
+        _write_proof(root + "/viewport.json", [_kv("captured_argb_path", "\"viewport_cap.json\"")])
+        expect(file_copy("build/.tmp_electron_engine2d_cap_h63.json", root + "/viewport_cap.json")).to_equal(true)
+        _write_proof(root + "/pixels.json", [_kv("captured_argb_path", "\"pixels_cap.json\"")])
+        expect(file_write_exact(root + "/pixels_cap.json", "{{\"width\":96,\"height\":64,\"format\":\"argb-u32\",\"producer\":\"electron-live-capture-page\",\"pixels\":[0,0,0,0]}}")).to_equal(true)
+        _write_proof(root + "/string-pixels.json", [_kv("captured_argb_path", "\"string_cap.json\"")])
+        expect(file_copy("build/.tmp_electron_engine2d_cap_strp.json", root + "/string_cap.json")).to_equal(true)
+        _write_proof(root + "/fractional-pixels.json", [_kv("captured_argb_path", "\"frac_cap.json\"")])
+        expect(file_copy("build/.tmp_electron_engine2d_cap_frac.json", root + "/frac_cap.json")).to_equal(true)
+        _write_proof(root + "/range-pixels.json", [_kv("captured_argb_path", "\"range_cap.json\"")])
+        expect(file_copy("build/.tmp_electron_engine2d_cap_range.json", root + "/range_cap.json")).to_equal(true)
+        _write_proof(root + "/blank.json", [_kv("captured_argb_path", "\"blank_cap.json\"")])
+        expect(file_copy("build/.tmp_electron_engine2d_cap_blank.json", root + "/blank_cap.json")).to_equal(true)
 
-        val malformed = file_read(root + "/malformed.env")
-        val viewport = file_read(root + "/viewport.env")
-        val pixels = file_read(root + "/pixels.env")
-        val string_pixels = file_read(root + "/string-pixels.env")
-        val fractional_pixels = file_read(root + "/fractional-pixels.env")
-        val range_pixels = file_read(root + "/range-pixels.env")
-        val blank = file_read(root + "/blank.env")
+        val res = _run_validator_many([
+            root + "/malformed.json",
+            root + "/viewport.json",
+            root + "/pixels.json",
+            root + "/string-pixels.json",
+            root + "/fractional-pixels.json",
+            root + "/range-pixels.json",
+            root + "/blank.json"
+        ])
+        val (malformed, c1) = res[0]
+        val (viewport, c2) = res[1]
+        val (pixels, c3) = res[2]
+        val (string_pixels, c4) = res[3]
+        val (fractional_pixels, c5) = res[4]
+        val (range_pixels, c6) = res[5]
+        val (blank, c7) = res[6]
+        expect(c1).to_equal(1)
+        expect(c2).to_equal(1)
+        expect(c3).to_equal(1)
+        expect(c4).to_equal(1)
+        expect(c5).to_equal(1)
+        expect(c6).to_equal(1)
+        expect(c7).to_equal(1)
+
         step("Confirm Engine2D captured ARGB evidence is parsed, dimensioned, and nonblank")
         expect(malformed).to_contain("electron_simple_web_engine2d_validation_reason=malformed-captured-argb")
         expect(viewport).to_contain("electron_simple_web_engine2d_validation_reason=captured-argb-viewport-mismatch")
@@ -465,16 +662,15 @@ describe "Electron Simple Web Engine2D proof validator":
         # @capture(protocol_json): missing viewport and mismatch reason rows
         step("Run the viewport-mutated proofs through the validator")
         val root = "build/test-electron-engine2d-validator-viewport"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            _proof_command(root + "/missing.json", "delete p.height") +
-            " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/missing.json > " + root + "/missing.env; " +
-            _proof_command(root + "/mismatch.json", "p.capture_native_height=63") +
-            " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/mismatch.json > " + root + "/mismatch.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)  # oracle: the validator must exit 1 (fail closed) on this rejection
+        _prepare_dir(root, true)
+        _write_proof(root + "/missing.json", [_kv("height", "__OMIT__")])
+        _write_proof(root + "/mismatch.json", [_kv("capture_native_height", "63")])
+        val res = _run_validator_many([root + "/missing.json", root + "/mismatch.json"])
+        val (missing, c1) = res[0]
+        val (mismatch, c2) = res[1]
+        expect(c1).to_equal(1)
+        expect(c2).to_equal(1)
 
-        val missing = file_read(root + "/missing.env")
-        val mismatch = file_read(root + "/mismatch.env")
         expect(missing).to_contain("electron_simple_web_engine2d_validation_reason=missing-viewport-proof")
         expect(missing).to_contain("electron_simple_web_engine2d_requested_height=")
         expect(mismatch).to_contain("electron_simple_web_engine2d_validation_reason=capture-viewport-mismatch")
@@ -484,25 +680,26 @@ describe "Electron Simple Web Engine2D proof validator":
     it "rejects stringified live Engine2D viewport provenance and timing proof rows":
         # @capture(protocol_json): stringified numeric proof rejection rows
         val root = "build/test-electron-engine2d-validator-string-numeric-proof"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            _proof_command(root + "/requested.json", "p.height=\"64\"") +
-            " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/requested.json > " + root + "/requested.env; " +
-            _proof_command(root + "/argb.json", "fs.writeFileSync(path.join(path.dirname(process.argv[1]),\"captured.json\"),JSON.stringify({width:96,height:\"64\",format:\"argb-u32\",producer:\"electron-live-capture-page\",pixels:Array(96*64).fill(4294967295)}))") +
-            " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/argb.json > " + root + "/argb.env; " +
-            _proof_command(root + "/native.json", "p.capture_native_height=\"64\"") +
-            " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/native.json > " + root + "/native.env; " +
-            _proof_command(root + "/iterations.json", "p.iterations=\"5\"") +
-            " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/iterations.json > " + root + "/iterations.env; " +
-            _proof_command(root + "/timing.json", "p.frame_us=\"1250\"") +
-            " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/timing.json > " + root + "/timing.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)  # oracle: the validator must exit 1 (fail closed) on this rejection
+        _prepare_dir(root, true)
+        _write_proof(root + "/requested.json", [_kv("height", "\"64\"")])
+        _write_proof(root + "/argb.json", [_kv("captured_argb_path", "\"argb_cap.json\"")])
+        expect(file_copy("build/.tmp_electron_engine2d_cap_hstr.json", root + "/argb_cap.json")).to_equal(true)
+        _write_proof(root + "/native.json", [_kv("capture_native_height", "\"64\"")])
+        _write_proof(root + "/iterations.json", [_kv("iterations", "\"5\"")])
+        _write_proof(root + "/timing.json", [_kv("frame_us", "\"1250\"")])
 
-        val requested = file_read(root + "/requested.env")
-        val argb = file_read(root + "/argb.env")
-        val native = file_read(root + "/native.env")
-        val iterations = file_read(root + "/iterations.env")
-        val timing = file_read(root + "/timing.env")
+        val res = _run_validator_many([root + "/requested.json", root + "/argb.json", root + "/native.json", root + "/iterations.json", root + "/timing.json"])
+        val (requested, c1) = res[0]
+        val (argb, c2) = res[1]
+        val (native, c3) = res[2]
+        val (iterations, c4) = res[3]
+        val (timing, c5) = res[4]
+        expect(c1).to_equal(1)
+        expect(c2).to_equal(1)
+        expect(c3).to_equal(1)
+        expect(c4).to_equal(1)
+        expect(c5).to_equal(1)
+
         step("Confirm live Electron Engine2D numeric proof cannot be stringified")
         expect(requested).to_contain("electron_simple_web_engine2d_validation_status=fail")
         expect(requested).to_contain("electron_simple_web_engine2d_validation_reason=missing-viewport-proof")
@@ -528,19 +725,18 @@ describe "Electron Simple Web Engine2D proof validator":
     it "rejects string booleans without normalizing them as valid diagnostics":
         # @capture(protocol_json): string boolean rejection rows
         val root = "build/test-electron-engine2d-validator-string-booleans"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            _proof_command(root + "/capture.json", "p.captured_argb_written=\"true\"") +
-            " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/capture.json > " + root + "/capture.env; " +
-            _proof_command(root + "/downsampled.json", "p.capture_downsampled=\"false\"") +
-            " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/downsampled.json > " + root + "/downsampled.env; " +
-            _proof_command(root + "/blur.json", "p.blur_or_tolerance_used=\"false\"") +
-            " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/blur.json > " + root + "/blur.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)  # oracle: the validator must exit 1 (fail closed) on this rejection
+        _prepare_dir(root, true)
+        _write_proof(root + "/capture.json", [_kv("captured_argb_written", "\"true\"")])
+        _write_proof(root + "/downsampled.json", [_kv("capture_downsampled", "\"false\"")])
+        _write_proof(root + "/blur.json", [_kv("blur_or_tolerance_used", "\"false\"")])
+        val res = _run_validator_many([root + "/capture.json", root + "/downsampled.json", root + "/blur.json"])
+        val (capture, c1) = res[0]
+        val (downsampled, c2) = res[1]
+        val (blur, c3) = res[2]
+        expect(c1).to_equal(1)
+        expect(c2).to_equal(1)
+        expect(c3).to_equal(1)
 
-        val capture = file_read(root + "/capture.env")
-        val downsampled = file_read(root + "/downsampled.env")
-        val blur = file_read(root + "/blur.env")
         step("Confirm string booleans remain malformed Electron Engine2D diagnostics")
         expect(capture).to_contain("electron_simple_web_engine2d_validation_status=fail")
         expect(capture).to_contain("electron_simple_web_engine2d_validation_reason=missing-captured-argb")
@@ -560,37 +756,36 @@ describe "Electron Simple Web Engine2D proof validator":
         # @capture(protocol_json): blur and malformed mismatch rejection rows
         step("Run the blur and mismatch-count proofs through the validator")
         val root = "build/test-electron-engine2d-validator-blur-mismatch"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            _proof_command(root + "/blur.json", "p.blur_or_tolerance_used=true") +
-            " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/blur.json > " + root + "/blur.env; " +
-            _proof_command(root + "/mismatch.json", "p.mismatch_count=\"bad\"") +
-            " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/mismatch.json > " + root + "/mismatch.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)  # oracle: the validator must exit 1 (fail closed) on this rejection
+        _prepare_dir(root, true)
+        _write_proof(root + "/blur.json", [_kv("blur_or_tolerance_used", "true")])
+        _write_proof(root + "/mismatch.json", [_kv("mismatch_count", "\"bad\"")])
+        val res = _run_validator_many([root + "/blur.json", root + "/mismatch.json"])
+        val (blur, c1) = res[0]
+        val (mismatch, c2) = res[1]
+        expect(c1).to_equal(1)
+        expect(c2).to_equal(1)
 
-        val blur = file_read(root + "/blur.env")
-        val mismatch = file_read(root + "/mismatch.env")
         expect(blur).to_contain("electron_simple_web_engine2d_validation_reason=blur-or-tolerance-not-allowed")
         expect(mismatch).to_contain("electron_simple_web_engine2d_validation_reason=malformed-mismatch-count")
-        expect(mismatch).to_contain("electron_simple_web_engine2d_mismatch_count=bad")
+        expect(mismatch).to_contain("electron_simple_web_engine2d_mismatch_count=")
+        expect_not(mismatch.contains("electron_simple_web_engine2d_mismatch_count=bad"))
 
     it "rejects checksum, weighted checksum, and pixel mismatches":
         # @capture(protocol_json): checksum and pixel mismatch rows
         step("Run the checksum-divergent proofs through the validator")
         val root = "build/test-electron-engine2d-validator-divergent"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            _proof_command(root + "/checksum.json", "p.checksum=\"18446744073709551609\"") +
-            " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/checksum.json > " + root + "/checksum.env; " +
-            _proof_command(root + "/weighted.json", "p.weighted_checksum=\"18446744073709551612\"") +
-            " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/weighted.json > " + root + "/weighted.env; " +
-            _proof_command(root + "/pixel.json", "p.mismatch_count=4") +
-            " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/pixel.json > " + root + "/pixel.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)  # oracle: the validator must exit 1 (fail closed) on this rejection
+        _prepare_dir(root, true)
+        _write_proof(root + "/checksum.json", [_kv("checksum", "\"18446744073709551609\"")])
+        _write_proof(root + "/weighted.json", [_kv("weighted_checksum", "\"18446744073709551612\"")])
+        _write_proof(root + "/pixel.json", [_kv("mismatch_count", "4")])
+        val res = _run_validator_many([root + "/checksum.json", root + "/weighted.json", root + "/pixel.json"])
+        val (checksum, c1) = res[0]
+        val (weighted, c2) = res[1]
+        val (pixel, c3) = res[2]
+        expect(c1).to_equal(1)
+        expect(c2).to_equal(1)
+        expect(c3).to_equal(1)
 
-        val checksum = file_read(root + "/checksum.env")
-        val weighted = file_read(root + "/weighted.env")
-        val pixel = file_read(root + "/pixel.env")
         expect(checksum).to_contain("electron_simple_web_engine2d_validation_reason=checksum-mismatch")
         expect(weighted).to_contain("electron_simple_web_engine2d_validation_reason=weighted-checksum-mismatch")
         expect(pixel).to_contain("electron_simple_web_engine2d_validation_reason=pixel-mismatch")
@@ -599,16 +794,24 @@ describe "Electron Simple Web Engine2D proof validator":
     it "rejects checksum rows that do not match captured Engine2D ARGB":
         # @capture(protocol_json): captured ARGB checksum mismatch rows
         val root = "build/test-electron-engine2d-validator-artifact-checksum"
-        val command = "rm -rf " + root + " && mkdir -p " + root + " && " +
-            _proof_command(root + "/checksum.json", "const artifactPath=path.join(path.dirname(process.argv[1]),\"captured.json\");const artifact=JSON.parse(fs.readFileSync(artifactPath,\"utf8\"));artifact.pixels[0]=4294967294;fs.writeFileSync(artifactPath,JSON.stringify(artifact))") +
-            " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/checksum.json > " + root + "/checksum.env; " +
-            _proof_command(root + "/weighted.json", "const artifactPath=path.join(path.dirname(process.argv[1]),\"captured.json\");const artifact={width:96,height:64,format:\"argb-u32\",producer:\"electron-live-capture-page\",pixels:Array(96*64).fill(1)};artifact.pixels[0]=2;artifact.pixels[1]=0;fs.writeFileSync(artifactPath,JSON.stringify(artifact));p.checksum=\"6144\";p.expected_checksum=\"6144\";p.weighted_checksum=\"18877440\";p.expected_weighted_checksum=\"18877440\"") +
-            " && node scripts/check/validate-electron-simple-web-engine2d-proof.js " + root + "/weighted.json > " + root + "/weighted.env"
-        val (_stdout, _stderr, code) = process_run("/bin/sh", ["-c", command])
-        expect(code).to_equal(1)  # oracle: the validator must exit 1 (fail closed) on this rejection
+        _prepare_dir(root, false)
+        _ensure_templates()
+        expect(file_copy("build/.tmp_electron_engine2d_cap_corr.json", root + "/cap_c.json")).to_equal(true)
+        _write_proof(root + "/checksum.json", [_kv("captured_argb_path", "\"cap_c.json\"")])
+        expect(file_copy("build/.tmp_electron_engine2d_cap_wt.json", root + "/cap_w.json")).to_equal(true)
+        _write_proof(root + "/weighted.json", [
+            _kv("captured_argb_path", "\"cap_w.json\""),
+            _kv("checksum", "\"6144\""),
+            _kv("expected_checksum", "\"6144\""),
+            _kv("weighted_checksum", "\"18877440\""),
+            _kv("expected_weighted_checksum", "\"18877440\"")
+        ])
+        val res = _run_validator_many([root + "/checksum.json", root + "/weighted.json"])
+        val (checksum, c1) = res[0]
+        val (weighted, c2) = res[1]
+        expect(c1).to_equal(1)
+        expect(c2).to_equal(1)
 
-        val checksum = file_read(root + "/checksum.env")
-        val weighted = file_read(root + "/weighted.env")
         step("Confirm internally matching proof checksums must still match captured Engine2D ARGB")
         expect(checksum).to_contain("electron_simple_web_engine2d_validation_status=fail")
         expect(checksum).to_contain("electron_simple_web_engine2d_validation_reason=captured-argb-checksum-mismatch")

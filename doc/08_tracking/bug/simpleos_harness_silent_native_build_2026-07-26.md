@@ -2,7 +2,7 @@
 
 - **Date:** 2026-07-26
 - **Lane:** `scripts/check/check-simpleos-wm-fullscreen-evidence.shs`, macOS host
-- **Status:** root-caused (read-only analysis); zero-code-change mitigation identified; small fix set described
+- **Status:** fix-implemented-verification-pending (harness-honesty half + scripts/qemu phase profile fixed; compiler-side flush + runtime verification pending)
 
 ## Symptom
 During harness runs 3-8, both the harness stdout log and `$BUILD_DIR/native-build.out`
@@ -45,3 +45,62 @@ The alternate `native_build_main.spl` double-subprocess dispatch path buffers th
 child's entire output in a temp file and only prints after exit
 (`process_ops.spl:83-130`, `native_build_main.spl:231-233`) — if a long build ever
 routes through it, the same total-silence symptom returns with a different cause.
+
+## Fix applied 2026-11-09 (harness honesty half; work/p3-simpleos-silent-20261109)
+
+The stage-start echo, bounded heartbeat poller, and `SIMPLE_COMPILER_PHASE_PROFILE=1`
+from the fix set above were already present in `build.shs` ( landed with the
+`wm_native_build_with_progress` heartbeat). What was still missing — and is fixed
+now — is that the harness treated a live-but-0-byte build log as healthy:
+
+- The heartbeat and the post-build path now emit an explicit
+  `[WM-BUILD] WARNING ... produced zero output` when `native-build.out` is empty,
+  so the silent mode of this bug is surfaced instead of indistinguishable from a
+  healthy build.
+- `simpleos_wm_fullscreen_native_build_log_bytes` is recorded in `evidence.env`
+  and the report, so a silent build is visible in the retained evidence.
+- The wrapper now ends with the repo-conventional machine-readable verdict line
+  `STATUS: PASS|FAIL|ERROR simpleos-wm-fullscreen-evidence`; a run that checked
+  nothing (no kernel input hashed, no build attempted, no QEMU launch, no
+  validated external artifact) is `STATUS: ERROR` with exit 2, never FAIL/PASS.
+  `emit_failure` prints the verdict line and exits fail-closed (1=FAIL, 2=ERROR).
+
+Verified with a stubbed admitted-runtime fixture (`build/p3-wm-stub/`): a fake
+compiler whose native-build emits zero output and exits 0 is admitted as
+`current-source-built` but now produces the WARNING, `native_build_log_bytes=0`
+evidence, and a final verdict line; a failing native-build (exit 3) ends
+`STATUS: FAIL reason=wm-simple-web-build-failed` exit 1; a no-input run ends
+`STATUS: ERROR reason=simple-bin-missing checked=0` exit 2.
+
+Still open (out of scope here, seed/compiler scope): root cause #3 — per-line
+`rt_stdout_flush()` after `[NATIVE] compiling module:` prints in the compiler, and
+the `native_build_main.spl` double-subprocess buffering landmine.
+
+## Verification 2026-11-25 (P3 ledger lane, Windows host)
+
+STALE-CLOSED for the harness-honesty half. The 2026-11-09 fix is present in
+current source, confirmed by code inspection:
+
+- `scripts/check/lib/simpleos-wm-fullscreen/build.shs:154` — the
+  `[WM-BUILD] WARNING ... native-build produced zero output` line, citing
+  this bug doc.
+- `scripts/check/lib/simpleos-wm-fullscreen/report.shs:53` —
+  `simpleos_wm_fullscreen_native_build_log_bytes` recorded in evidence.
+- `scripts/check/lib/simpleos-wm-fullscreen/admission.shs:518-525` — the
+  machine-readable verdict lines `STATUS: PASS|FAIL|ERROR
+  simpleos-wm-fullscreen-evidence`, with `checked=0` on the ERROR path.
+
+Live QEMU execution is environment-blocked on this Windows host (macOS/QEMU
+lane), so verification is by inspection only. Still-open remainder (compiler
+`rt_stdout_flush()` after per-module prints; `native_build_main.spl`
+double-subprocess buffering landmine) is seed/compiler scope, unchanged.
+Status header updated to reflect the 2026-11-09 fix.
+
+
+## BF-10 Fix & Verification Status (2026-11-26)
+
+- **Code fix:** Updated `scripts/qemu/check_simpleos_arm64_clang_compile.shs` to default `SIMPLE_COMPILER_PHASE_PROFILE="${SIMPLE_COMPILER_PHASE_PROFILE:-1}"` and emit an explicit `[a64-clang] WARNING: kernel build produced zero-byte log ($OUT/kernel-build.log)` diagnostic instead of failing silently when native-build produces zero output, complementing the existing `scripts/check/lib/simpleos-wm-fullscreen/build.shs` harness-honesty fix. Compiler/runtime stdout flushing (`rt_stdout_flush()` in `src/compiler/` and `src/runtime/`) remains outside BF-10 file ownership.
+- **Host verification (`SIMPLE_LIB=src`):**
+  - `sh -n scripts/qemu/check_simpleos_arm64_clang_compile.shs` (exit 0)
+  - `test/01_unit/os/wm_bf10/bf10_wm_pin_and_evidence_gates_spec.spl`: `4 passed, 0 failed` (`outcome=OK`)
+- **Pending QEMU / native build verification:** Execute live ARM64/x86_64 kernel builds (`check_simpleos_arm64_clang_compile.shs`, `check-simpleos-wm-fullscreen-evidence.shs`) with an admitted compiler runtime and verify live `[BOOTSTRAP-PHASE]` / byte-count progress output.

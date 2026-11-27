@@ -1,0 +1,63 @@
+# AUTHORED_UNRUN: local fixture contracts; no mail process, credentials or network.
+use std.spec.*
+use app.devhub.email_support.{parse_email_shared_config, load_email_config_checked}
+
+extern fn rt_dir_create_all(path: text) -> bool
+extern fn rt_file_write_text(path: text, content: text) -> bool
+
+fn checked_email_fixture(name: text, content: text) -> text:
+    val directory = "build/test-devhub-email-contract-drift"
+    expect(rt_dir_create_all(directory)).to_equal(true)
+    val path = "{directory}/{name}"
+    expect(rt_file_write_text(path, content)).to_equal(true)
+    match load_email_config_checked(path):
+        case Ok(_): "ok"
+        case Err(code): code
+
+describe "REQ-DEVHUB-EMAIL-PROVIDER: legacy JSON and shared SDN preserve backend meaning":
+    it "should route legacy JSON Outlook through mail-cli IMAP":
+        step("Parse an explicit legacy JSON account without Graph protocol")
+        val config = parse_email_shared_config('{"accounts":{"work":{"provider":"outlook"}}}', "fixture.json")
+        expect(config.accounts.len()).to_equal(1)
+        expect(config.accounts[0].provider).to_equal("outlook_imap")
+
+    it "should honor an explicit IMAP protocol for an Outlook account":
+        step("Parse an Outlook account with the IMAP protocol")
+        val config = parse_email_shared_config('{"accounts":{"work":{"provider":"outlook","protocol":"imap"}}}', "fixture.json")
+        expect(config.accounts[0].provider).to_equal("outlook_imap")
+
+    it "should retain explicit Graph routing for legacy JSON":
+        step("Parse an Outlook account with the Graph protocol")
+        val config = parse_email_shared_config('{"accounts":{"work":{"provider":"outlook","protocol":"graph"}}}', "fixture.json")
+        expect(config.accounts[0].provider).to_equal("outlook")
+
+    it "should preserve the shared SDN Outlook Graph contract":
+        step("Parse the shared SDN account value through its production mapper")
+        val config = parse_email_shared_config('{"accounts":{"work":{"provider":"outlook"}}}', "fixture.sdn")
+        expect(config.accounts[0].provider).to_equal("outlook")
+
+describe "REQ-DEVHUB-EMAIL-CONFIG: checked shared JSON rejects malformed account shapes":
+    it "should reject a nonobject account instead of silently dropping it":
+        step("Load a local malformed account fixture through the checked loader")
+        expect(checked_email_fixture("account.json", '{"accounts":{"work":17}}')).to_equal("MAIL_CONFIG_ACCOUNT")
+
+    it "should reject a nontext default account":
+        step("Load a local malformed default-account fixture")
+        expect(checked_email_fixture("default.json", '{"default_account":[],"accounts":{}}')).to_equal("MAIL_CONFIG_DEFAULT")
+
+    it "should reject nontext provider and protocol fields":
+        step("Load malformed routing fields without invoking a provider")
+        expect(checked_email_fixture("provider.json", '{"accounts":{"work":{"provider":false}}}')).to_equal("MAIL_CONFIG_FIELD_TYPE")
+        expect(checked_email_fixture("protocol.json", '{"accounts":{"work":{"protocol":[]}}}')).to_equal("MAIL_CONFIG_FIELD_TYPE")
+
+    it "should reject a malformed credential command rather than erase it":
+        step("Load an array-valued credential policy without executing it")
+        expect(checked_email_fixture("credential.json", '{"accounts":{"work":{"password_cmd":["never-execute"]}}}')).to_equal("MAIL_CONFIG_FIELD_TYPE")
+
+    it "should retain a valid account with numeric port settings":
+        step("Load a valid legacy JSON account with its supported numeric port")
+        expect(checked_email_fixture("valid.json", '{"default_account":"work","accounts":{"work":{"provider":"outlook","imap_port":993}}}')).to_equal("ok")
+
+    it "should retain the existing malformed-root rejection":
+        step("Load a malformed accounts container")
+        expect(checked_email_fixture("accounts.json", '{"accounts":[]}')).to_equal("MAIL_CONFIG_ACCOUNTS")

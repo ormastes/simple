@@ -1,0 +1,108 @@
+# AUTHORED NOT_RUN: source coordinates and duplicate scopes for block lists.
+use std.spec.*
+use std.common.sdn.parser.{parse_with_spans_and_issues}
+use std.common.sdn.value.{SdnSpan}
+
+fn assert_block_span(spans: Dict<text, SdnSpan>, path: text, line: i64, column: i64):
+    expect(spans.contains_key(path)).to_equal(true)
+    expect(spans[path].line).to_equal(line)
+    expect(spans[path].column).to_equal(column)
+
+describe "SDN block sequence diagnostics preserve original indexed source positions":
+    it "indexes nested sequence and mapping keys at their original rows and columns":
+        step("Traverse nested item bodies without rebasing diagnostics onto copied text")
+        val source = "items:\n    - name: outer\n      child:\n          rows:\n              - name: inner\n                value: 123\n    - name: sibling\n"
+        val parsed = parse_with_spans_and_issues(source).unwrap()
+        assert_block_span(parsed.1, "items.0.name", 2, 7)
+        assert_block_span(parsed.1, "items.0.child", 3, 7)
+        assert_block_span(parsed.1, "items.0.child.rows.0.name", 5, 17)
+        assert_block_span(parsed.1, "items.0.child.rows.0.value", 6, 17)
+        assert_block_span(parsed.1, "items.1.name", 7, 7)
+        expect(parsed.2.len()).to_equal(0)
+        val items = parsed.0.as_dict().unwrap()["items"].as_array().unwrap()
+        expect(items.len()).to_equal(2)
+        expect(items[1].as_dict().unwrap()["name"].as_str().unwrap()).to_equal("sibling")
+
+    it "preserves ResourceList child prefixes and inline command element offsets":
+        step("Locate a nested child field and command element in the original resource document")
+        val source = "apiVersion: orchestration.simple/v1alpha1\nkind: ResourceList\nmetadata:\n    name: source-spans\nspec:\n    items:\n        - apiVersion: orchestration.simple/v1alpha1\n          kind: Pod\n          metadata:\n              name: 123\n          spec:\n              containers:\n                  - name: task\n                    command: [123, echo]\n"
+        val parsed = parse_with_spans_and_issues(source).unwrap()
+        assert_block_span(parsed.1, "spec.items.0.metadata.name", 10, 15)
+        assert_block_span(parsed.1, "spec.items.0.spec.containers.0.name", 13, 21)
+        assert_block_span(parsed.1, "spec.items.0.spec.containers.0.command.0", 14, 31)
+        assert_block_span(parsed.1, "spec.items.0.spec.containers.0.command.1", 14, 36)
+        expect(parsed.2.len()).to_equal(0)
+
+    it "reports repeated keys inside one item without comparing sibling scopes":
+        step("Report the second key at its actual item path while accepting the same sibling key")
+        val source = "items:\n    - name: first\n      name: repeated\n    - name: second\n      name: repeated-again\n"
+        val parsed = parse_with_spans_and_issues(source).unwrap()
+        expect(parsed.2.len()).to_equal(2)
+        expect(parsed.2[0].kind).to_equal("duplicate_key")
+        expect(parsed.2[0].path).to_equal("items.0.name")
+        expect(parsed.2[0].line).to_equal(3)
+        expect(parsed.2[0].col).to_equal(7)
+        expect(parsed.2[1].path).to_equal("items.1.name")
+        expect(parsed.2[1].line).to_equal(5)
+        expect(parsed.2[1].col).to_equal(7)
+        val siblings = parse_with_spans_and_issues("items:\n    - name: first\n    - name: second\n").unwrap()
+        expect(siblings.2.len()).to_equal(0)
+
+    it "keeps blank lines comments and extra spaces after a dash source accurate":
+        step("Retain actual first-key columns and ignore comment keys inside mapping bodies")
+        val source = "items:\n    -   name: first\n\n      # name: comment\n      values: [10, 20]\n    - name: second\n"
+        val parsed = parse_with_spans_and_issues(source).unwrap()
+        assert_block_span(parsed.1, "items.0.name", 2, 9)
+        assert_block_span(parsed.1, "items.0.values.0", 5, 16)
+        assert_block_span(parsed.1, "items.0.values.1", 5, 20)
+        assert_block_span(parsed.1, "items.1.name", 6, 7)
+        expect(parsed.2.len()).to_equal(0)
+        expect(parsed.1.contains_key("items.0.# name")).to_equal(false)
+
+    it "retains indexed inline child diagnostics and ordinary mapping controls":
+        step("Preserve inline dictionary duplicate coordinates beneath a block item")
+        val source = "items:\n" + r"    - {name: first, name: second}" + "\n"
+        val parsed = parse_with_spans_and_issues(source).unwrap()
+        assert_block_span(parsed.1, "items.0.name", 2, 21)
+        expect(parsed.2.len()).to_equal(1)
+        expect(parsed.2[0].path).to_equal("items.0.name")
+        expect(parsed.2[0].line).to_equal(2)
+        expect(parsed.2[0].col).to_equal(21)
+        val ordinary = parse_with_spans_and_issues("outer:\n    key: first\n    key: second\n").unwrap()
+        assert_block_span(ordinary.1, "outer.key", 3, 5)
+        expect(ordinary.2.len()).to_equal(1)
+        expect(ordinary.2[0].path).to_equal("outer.key")
+        expect(ordinary.2[0].line).to_equal(3)
+        expect(ordinary.2[0].col).to_equal(5)
+
+    it "normalizes extra dash spaces for nesting while restoring first-line columns":
+        step("Keep a mapping child nested despite extra spaces before its parent key")
+        val source = "items:\n  -   metadata:\n      name: first\n      name: repeated\n    tail: value\n  - metadata:\n      name: sibling\n"
+        val parsed = parse_with_spans_and_issues(source).unwrap()
+        val item = parsed.0.as_dict().unwrap()["items"].as_array().unwrap()[0].as_dict().unwrap()
+        expect(item["metadata"].as_dict().unwrap()["name"].as_str().unwrap()).to_equal("repeated")
+        expect(item["tail"].as_str().unwrap()).to_equal("value")
+        expect(item.contains_key("name")).to_equal(false)
+        assert_block_span(parsed.1, "items.0.metadata", 2, 7)
+        assert_block_span(parsed.1, "items.0.metadata.name", 4, 7)
+        assert_block_span(parsed.1, "items.0.tail", 5, 5)
+        assert_block_span(parsed.1, "items.1.metadata.name", 7, 7)
+        expect(parsed.2.len()).to_equal(1)
+        expect(parsed.2[0].path).to_equal("items.0.metadata.name")
+        expect(parsed.2[0].line).to_equal(4)
+        expect(parsed.2[0].col).to_equal(7)
+
+    it "matches root sequence admission without reinterpreting normalized item mappings":
+        step("Distinguish a root sequence from a dash-prefixed key inside its mapping body")
+        val root = parse_with_spans_and_issues("- name: first\n- name: second\n").unwrap()
+        expect(root.0.as_array().unwrap().len()).to_equal(2)
+        expect(root.0.as_array().unwrap()[0].as_dict().unwrap()["name"].as_str().unwrap()).to_equal("first")
+        assert_block_span(root.1, "0.name", 1, 3)
+        assert_block_span(root.1, "1.name", 2, 3)
+        expect(root.2.len()).to_equal(0)
+        val dash_key = parse_with_spans_and_issues("- - name: value\n").unwrap()
+        val item = dash_key.0.as_array().unwrap()[0].as_dict().unwrap()
+        expect(item["- name"].as_str().unwrap()).to_equal("value")
+        assert_block_span(dash_key.1, "0.- name", 1, 3)
+        expect(dash_key.1.contains_key("0.0.name")).to_equal(false)
+        expect(dash_key.2.len()).to_equal(0)

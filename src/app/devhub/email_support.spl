@@ -1,7 +1,7 @@
 # Shared email config, rows, credentials and process boundary.
-use std.nogc_async_mut.sosix.host_facade.{sosix_file_exists, sosix_file_read, sosix_env_get_opt}
+use std.sosix.host_facade.{sosix_file_exists, sosix_file_read, sosix_env_get_opt}
 use app.devhub.email_config_sdn.{parse_email_sdn_json}
-use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.io.process_ops.{process_run_bounded}
 use std.io_runtime.{time_now_unix_micros}
 use std.common.json.value.{JsonValue, json_value_parse_opt, json_value_type, json_value_field, json_value_has, json_value_keys, json_value_len, json_value_at, json_value_text_or, json_value_serialize, json_value_pretty, json_value_object_from}
 use app.devhub.flags.{_extract_flag, _has_flag, _positional_args}
@@ -95,9 +95,9 @@ fn email_expand_path(path: text) -> text:
 fn _email_json_text(obj: JsonValue, key: text) -> text:
     json_value_text_or(json_value_field(obj, key), "")
 
-fn parse_email_shared_config(content: text, path: text) -> EmailConfig:
+pub fn parse_email_shared_config(content: text, path: text) -> EmailConfig:
     val root = json_value_parse_opt(content)
-    if root == nil:
+    if root.is_none():
         return EmailConfig.default()
     parse_email_shared_config_value(root.unwrap(), path)
 
@@ -120,7 +120,9 @@ fn parse_email_shared_config_value(root: JsonValue, path: text) -> EmailConfig:
                 provider = "outlook"
             elif protocol == "" or protocol == "imap":
                 if configured_provider == "outlook":
-                    provider = "outlook"
+                    # Legacy mail-cli JSON uses outlook for IMAP; shared SDN
+                    # retains the facade's Outlook Graph provider spelling.
+                    provider = if path.ends_with(".json"): "outlook_imap" else: "outlook"
                 elif configured_provider == "gmail":
                     provider = "gmail"
             else:
@@ -159,7 +161,26 @@ fn load_email_config_from(path: text) -> EmailConfig:
         case Err(_):
             EmailConfig.default()
 
-fn load_email_config_checked(path: text) -> Result<EmailConfig, text>:
+fn _email_shared_json_shape_error(root: JsonValue) -> text:
+    if json_value_type(root) != "object":
+        return "MAIL_CONFIG_ROOT"
+    val entries = json_value_field(root, "accounts")
+    if json_value_type(entries) != "object":
+        return "MAIL_CONFIG_ACCOUNTS"
+    if json_value_has(root, "default_account") and json_value_type(json_value_field(root, "default_account")) != "string":
+        return "MAIL_CONFIG_DEFAULT"
+    for name in json_value_keys(entries):
+        val entry = json_value_field(entries, name)
+        if name == "" or json_value_type(entry) != "object":
+            return "MAIL_CONFIG_ACCOUNT"
+        for key in json_value_keys(entry):
+            val kind = json_value_type(json_value_field(entry, key))
+            val numeric_port = kind == "number" and (key == "imap_port" or key == "pop3_port" or key == "smtp_port")
+            if kind != "string" and not numeric_port:
+                return "MAIL_CONFIG_FIELD_TYPE"
+    ""
+
+pub fn load_email_config_checked(path: text) -> Result<EmailConfig, text>:
     if not sosix_file_exists(path):
         return Err("MAIL_CONFIG_MISSING")
     val content = sosix_file_read(path)
@@ -168,12 +189,11 @@ fn load_email_config_checked(path: text) -> Result<EmailConfig, text>:
     # Legacy JSON is selected explicitly by extension; SDN never falls back.
     if path.ends_with(".json"):
         val root = json_value_parse_opt(content)
-        if root == nil:
+        if root.is_none():
             return Err("MAIL_CONFIG_SYNTAX")
-        if json_value_type(root.unwrap()) != "object":
-            return Err("MAIL_CONFIG_ROOT")
-        if json_value_type(json_value_field(root.unwrap(), "accounts")) != "object":
-            return Err("MAIL_CONFIG_ACCOUNTS")
+        val shape_error = _email_shared_json_shape_error(root.unwrap())
+        if shape_error != "":
+            return Err(shape_error)
         return Ok(parse_email_shared_config_value(root.unwrap(), path))
     match parse_email_sdn_json(content):
         case Ok(root):
@@ -272,7 +292,7 @@ fn _parse_mailcli_json_rows(json_text: text) -> [EmailRow]:
     It carries no flags/labels today (doc §3's documented pre-existing
     bug) — labels/starred/unread are always empty/false here, honestly."""
     val parsed_opt = json_value_parse_opt(json_text)
-    if parsed_opt == nil:
+    if parsed_opt.is_none():
         return []
     val parsed = parsed_opt.unwrap()
     if json_value_type(parsed) != "array":

@@ -158,7 +158,7 @@ fn hygienescope_lookup(self: HygieneScope, name: text) -> has_MarkedIdent?:
         if self.bindings.contains_key(name):
             self.bindings[name]
         else:
-            nil
+            None
 
 
 # ============================================================================
@@ -204,11 +204,10 @@ class HygieneContext:
         # use contains_key + index read instead.
         if self.scopes.contains_key(self.current_scope):
             val scope = self.scopes[self.current_scope]
-            match scope.parent:
-                case parent_id:
-                    self.current_scope = parent_id
-                case nil:
-                    self.errors = self.errors.push("Cannot exit root scope")
+            if scope.has_parent:
+                self.current_scope = scope.parent
+            else:
+                self.errors = self.errors.push("Cannot exit root scope")
         else:
             self.errors = self.errors.push("Invalid current scope")
 
@@ -254,19 +253,17 @@ class HygieneContext:
             val scope = self.scopes[scope_id]
             # Check for binding in this scope
             match hygienescope_lookup(scope, ident.name):
-                case bound:
+                case Some(bound):
                     # Check marks match for hygiene
                     if self.marks_compatible(ident, bound, scope):
                         return bound
-                case nil:
+                case None:
                     pass
 
             # Move to parent scope
-            match scope.parent:
-                case parent_id:
-                    scope_id = parent_id
-                case nil:
-                    return nil  # Not found in any scope
+            if not scope.has_parent:
+                return nil  # Not found in any scope
+            scope_id = scope.parent
 
     fn marks_compatible(use_ident: MarkedIdent, def_ident: MarkedIdent, scope: HygieneScope) -> bool:
         """Check if marks are compatible for resolution.
@@ -302,21 +299,19 @@ class HygieneContext:
 
         while true:
             if not self.scopes.contains_key(scope_id):
-                return nil
+                return None
             val scope = self.scopes[scope_id]
             match hygienescope_lookup(scope, name):
-                case existing:
+                case Some(existing):
                     # Check if same expansion scope
                     if scope.has_expansion_mark:
                         return "Macro binding '{name}' shadows existing binding"
-                case nil:
+                case None:
                     pass
 
-            match scope.parent:
-                case parent_id:
-                    scope_id = parent_id
-                case nil:
-                    return nil  # No shadowing
+            if not scope.has_parent:
+                return None  # No shadowing
+            scope_id = scope.parent
 
 # ============================================================================
 # Hygiene Transformer

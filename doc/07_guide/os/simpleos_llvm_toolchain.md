@@ -278,6 +278,13 @@ is correct static-ELF linking, orthogonal to this deprecation.
 remain only as a legacy fallback until the FS-exec lane proves an ordinary
 on-disk toolchain ELF runs in ring-3, then are removed from the desktop lane.
 
+For that legacy fallback, `sh src/os/port/llvm/clang_static.shs` defaults to
+the Clang variant even when `TOOL` is unset or empty. `TOOL=llc` and `TOOL=lld`
+select the existing variants; other values fail before prerequisite checks or
+output creation. `sh scripts/check/check-simpleos-static-tool-selector.shs`
+checks this dispatch boundary only. It does not prove cross-build completion,
+artifact admission, or execution inside SimpleOS.
+
 ## Artifact build admission (v1)
 
 Path existence, a non-empty directory, `.bake_include_toolchain`, and a

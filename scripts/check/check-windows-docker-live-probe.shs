@@ -1,0 +1,91 @@
+#!/bin/sh
+# Windows Docker process-provider live probe (MANUAL, Windows host only).
+#
+# Usage:
+#   sh scripts/check/check-windows-docker-live-probe.shs <probe.exe> <image-ref>
+#
+#   <probe.exe>  native build of src/app/test/windows_docker_live_probe.spl
+#   <image-ref>  repo:tag or repo@sha256:<digest> of a locally pulled Windows image
+#
+# Env knobs:
+#   WDP_DOCKER   docker.exe, Windows form (default C:\Program Files\DockerCE\docker.exe)
+#   WDP_EXIT     exit code the workload must return (default 0)
+#
+# Observes the engine and image on the provider's ONLY admitted endpoint,
+# npipe:////./pipe/docker_engine, exports those observations as the probe's
+# pins, and prints host and image OS builds (process isolation never falls
+# back to Hyper-V; an incompatible pair fails at create/start).
+# Verdict (last stdout line): PASS exit 0 / FAIL exit 1 / BLOCKED|ERROR exit 2.
+set -u
+
+PROBE=${1:-}
+IMAGE=${2:-}
+if [ -z "$PROBE" ] || [ -z "$IMAGE" ]; then
+    echo "ERROR — usage: check-windows-docker-live-probe.shs <probe.exe> <image-ref>"
+    exit 2
+fi
+if [ ! -x "$PROBE" ]; then
+    echo "ERROR — probe binary not executable: $PROBE"
+    exit 2
+fi
+WIN_DOCKER=${WDP_DOCKER:-'C:\Program Files\DockerCE\docker.exe'}
+DOCKER=$(cygpath -u "$WIN_DOCKER" 2>/dev/null || printf '%s' "$WIN_DOCKER")
+HOST=npipe:////./pipe/docker_engine
+
+info=$("$DOCKER" --host "$HOST" info --format '{{.OSType}}|{{.ID}}|{{.KernelVersion}}' 2>&1)
+rc=$?
+if [ "$rc" -ne 0 ]; then
+    echo "engine: $info"
+    echo "BLOCKED — no Windows engine answers on $HOST (rc=$rc)"
+    exit 2
+fi
+os_type=${info%%|*}
+rest=${info#*|}
+engine_id=${rest%%|*}
+kernel=${rest#*|}
+echo "engine: os=$os_type id=$engine_id kernel=$kernel"
+if [ "$os_type" != "windows" ]; then
+    echo "BLOCKED — engine on $HOST is $os_type, not windows"
+    exit 2
+fi
+
+image_info=$("$DOCKER" --host "$HOST" image inspect --format '{{.Os}}|{{.Id}}|{{.OsVersion}}|{{index .RepoDigests 0}}' "$IMAGE" 2>&1)
+rc=$?
+if [ "$rc" -ne 0 ]; then
+    echo "image: $image_info"
+    echo "BLOCKED — image $IMAGE not present on $HOST (rc=$rc)"
+    exit 2
+fi
+image_id=$(printf '%s' "$image_info" | cut -d'|' -f2)
+image_os=$(printf '%s' "$image_info" | cut -d'|' -f3)
+image_ref=$(printf '%s' "$image_info" | cut -d'|' -f4)
+echo "image: id=$image_id os_version=$image_os ref=$image_ref"
+
+# Host build: CurrentBuild from the registry; image OsVersion is 10.0.<build>.<ubr>.
+host_build=$(reg query 'HKLM\SOFTWARE\Microsoft\Windows NT\CurrentVersion' //v CurrentBuild 2>/dev/null |
+    awk '/CurrentBuild/ {print $3}')
+image_build=$(printf '%s' "$image_os" | cut -d. -f3)
+# Informational only: the engine is the authority on process-isolation
+# compatibility (measured 2026-11-22: a 26100 ltsc2025 image runs process-isolated
+# on a 26300 host). An incompatible pair fails at create/start and the probe FAILs.
+echo "host_build=$host_build image_build=$image_build"
+
+SIMPLE_WDP_DOCKER=$WIN_DOCKER
+SIMPLE_WDP_ENGINE_ID=$engine_id
+SIMPLE_WDP_KERNEL=$kernel
+SIMPLE_WDP_IMAGE_OS=$image_os
+SIMPLE_WDP_IMAGE_ID=$image_id
+SIMPLE_WDP_IMAGE=$image_ref
+SIMPLE_WDP_TEMP=$(cygpath -w "${TEMP:-/tmp}" 2>/dev/null || printf '%s' "${TEMP:-C:\\Windows\\Temp}")
+SIMPLE_WDP_EXIT=${WDP_EXIT:-0}
+export SIMPLE_WDP_DOCKER SIMPLE_WDP_ENGINE_ID SIMPLE_WDP_KERNEL SIMPLE_WDP_IMAGE_OS
+export SIMPLE_WDP_IMAGE_ID SIMPLE_WDP_IMAGE SIMPLE_WDP_TEMP SIMPLE_WDP_EXIT
+
+"$PROBE"
+probe_rc=$?
+if [ "$probe_rc" -eq 0 ]; then
+    echo "PASS — live prepare/create/start/wait/logs/destroy on $image_ref (exit ${SIMPLE_WDP_EXIT})"
+    exit 0
+fi
+echo "FAIL — probe exited $probe_rc"
+exit 1

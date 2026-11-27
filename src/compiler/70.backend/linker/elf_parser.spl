@@ -13,25 +13,25 @@ use compiler.backend.linker.elf_inspect.{
     ET_NONE, ET_REL, ET_EXEC, ET_DYN,
     EM_X86_64, EM_ARM, EM_AARCH64, EM_RISCV
 }
-use std.common.text_bytes.{bytes_to_text}
+use compiler.backend.linker.name_text.{linker_name_text}
 
 # ============================================================================
 # Additional ELF Constants
 # ============================================================================
 
 # Additional sh_type values
-val SHT_RELA: i64 = 4
+pub val SHT_RELA: i64 = 4
 val SHT_HASH: i64 = 5
 val SHT_DYNAMIC: i64 = 6
 val SHT_NOTE: i64 = 7
-val SHT_NOBITS: i64 = 8
+pub val SHT_NOBITS: i64 = 8
 val SHT_REL: i64 = 9
 
 # Special section indices
-val SHN_UNDEF: i64 = 0
+pub val SHN_UNDEF: i64 = 0
 
 # Symbol binding (high nibble of st_info)
-val STB_LOCAL: i64 = 0
+pub val STB_LOCAL: i64 = 0
 val STB_GLOBAL: i64 = 1
 val STB_WEAK: i64 = 2
 
@@ -42,10 +42,10 @@ val STT_FUNC: i64 = 2
 val STT_SECTION: i64 = 3
 
 # ELF64 symbol entry size
-val ELF64_SYM_SIZE: i64 = 24
+pub val ELF64_SYM_SIZE: i64 = 24
 
 # ELF64 RELA entry size
-val ELF64_RELA_SIZE: i64 = 24
+pub val ELF64_RELA_SIZE: i64 = 24
 val ELF32_SYM_SIZE: i64 = 16
 val ELF32_REL_SIZE: i64 = 8
 val ELF32_RELA_SIZE: i64 = 12
@@ -74,8 +74,10 @@ struct ElfRelocation:
 
 struct ElfStringTable:
     """Raw string table data and file offset."""
-    data: [u8]         # raw bytes of string table section
+    data: [u8]         # backing bytes (the whole object file for parsed tables)
     offset: i64        # offset of this section in the file
+    win_start: i64 = 0 # first table byte inside `data`
+    win_len: i64 = -1  # table length; -1 = all of `data`
 
 struct ElfObject:
     """Complete parsed ELF object file."""
@@ -110,32 +112,41 @@ fn elf_parse_string_table(bytes: [u8], section: ElfSectionHeader) -> ElfStringTa
         val empty_data: [u8] = []
         return ElfStringTable(data: empty_data, offset: sh_offset)
 
-    # One native slice: per-byte copying here dominated large links.
-    val data: [u8] = bytes[sh_offset:end]
-    ElfStringTable(data: data, offset: sh_offset)
+    # A window over the file bytes: the object is already held whole, so
+    # the table is not copied a second time.
+    ElfStringTable(data: bytes, offset: sh_offset, win_start: sh_offset, win_len: sh_size)
 
-fn elf_strtab_get(strtab: ElfStringTable, index: i64) -> text:
+fn elf_strtab_len(strtab: ElfStringTable) -> i64:
+    """Byte length of the string table window."""
+    if strtab.win_len < 0: strtab.data.len() - strtab.win_start else: strtab.win_len
+
+fn elf_strtab_byte(strtab: ElfStringTable, index: i64) -> u8:
+    """Byte at table-relative `index` (caller bounds-checks against elf_strtab_len)."""
+    strtab.data[strtab.win_start + index]
+
+fn elf_strtab_get(strtab: ElfStringTable, index: i64) -> Result<text, text>:
     """Look up a NUL-terminated string at byte index in the string table.
 
     Returns empty string if index is out of range or table is empty.
     """
-    if index < 0 or index >= strtab.data.len():
-        return ""
+    if index < 0 or index >= elf_strtab_len(strtab):
+        return Ok("")
 
     # Find the NUL with native searches over growing windows, then convert
     # the name bytes once. Building names one character at a time dominated
     # links with millions of symbols.
-    val len = strtab.data.len()
+    val at = strtab.win_start + index
+    val len = strtab.win_start + elf_strtab_len(strtab)
     var window: i64 = 64
     while true:
-        val stop = if index + window < len: index + window else: len
-        val nul = strtab.data[index:stop].index_of(0u8)
+        val stop = if at + window < len: at + window else: len
+        val nul = strtab.data[at:stop].index_of(0u8)
         if nul >= 0:
-            return bytes_to_text(strtab.data[index:index + nul])
+            return linker_name_text(strtab.data[at:at + nul], "ELF string table offset {index}")
         if stop == len:
-            return bytes_to_text(strtab.data[index:len])
+            return linker_name_text(strtab.data[at:len], "ELF string table offset {index}")
         window = window * 4
-    ""
+    Ok("")
 
 # ============================================================================
 # Symbol Helpers
@@ -172,6 +183,25 @@ fn elf_sign_extend(value: i64, bits: i64) -> i64:
     val modulus = 1 << bits
     if value & sign != 0: value - modulus else: value
 
+fn elf_i386_rel_addend(bytes: [u8], target: ElfSectionHeader,
+    reloc: ElfRelocation) -> Result<i64, text>:
+    """Implicit SHT_REL addend of an i386 relocation: the signed field value."""
+    val rtype = elf_reloc_type(reloc)
+    if rtype == 0:
+        return Ok(0)
+    var width: i64 = 4
+    if rtype == 20 or rtype == 21: width = 2
+    elif rtype == 22 or rtype == 23: width = 1
+    val at = target.sh_addr + reloc.r_offset
+    if target.sh_type == SHT_NOBITS or reloc.r_offset < 0 or reloc.r_offset + width > target.sh_size or
+            at < 0 or at + width > bytes.len():
+        return Err("i386 REL relocation field extends beyond its target section")
+    if width == 1:
+        return Ok(elf_sign_extend(bytes[at] as i64, 8))
+    if width == 2:
+        return Ok(elf_sign_extend(elf_read_u16_le(bytes, at), 16))
+    Ok(elf_signed_u32(elf_read_u32_le(bytes, at)))
+
 fn elf_arm_rel_addend(bytes: [u8], target: ElfSectionHeader,
     reloc: ElfRelocation) -> Result<i64, text>:
     val at = target.sh_addr + reloc.r_offset
@@ -185,6 +215,10 @@ fn elf_arm_rel_addend(bytes: [u8], target: ElfSectionHeader,
 
     if rtype == 0:
         return Ok(0)
+    if rtype == 5:
+        return Ok(elf_sign_extend(elf_read_u16_le(bytes, at), 16))
+    if rtype == 8:
+        return Ok(elf_sign_extend(bytes[at].to_i64(), 8))
     if rtype == 102 or rtype == 103:
         val half = elf_read_u16_le(bytes, at)
         if rtype == 102:
@@ -194,12 +228,11 @@ fn elf_arm_rel_addend(bytes: [u8], target: ElfSectionHeader,
         val immediate = (elf_read_u16_le(bytes, at) & 0xff) << 2
         return Ok(((immediate + 4) & 0x3ff) - 4)
     val word = elf_read_u32_le(bytes, at)
-    if rtype == 2 or rtype == 3 or rtype == 38:
+    # 24 GOTOFF32, 25 BASE_PREL, 26 GOT_BREL, 96 GOT_PREL, 104 TLS_GD32, 105 TLS_LDM32,
+    # 106 TLS_LDO32, 107 TLS_IE32, 108 TLS_LE32: full-word data addends (hosted glibc crt/libc)
+    if rtype == 2 or rtype == 3 or rtype == 38 or rtype == 24 or rtype == 25 or rtype == 26 or rtype == 96 or
+            (rtype >= 104 and rtype <= 108):
         return Ok(elf_signed_u32(word))
-    if rtype == 5:
-        return Ok(elf_sign_extend(elf_read_u16_le(bytes, at), 16))
-    if rtype == 8:
-        return Ok(elf_sign_extend(bytes[at].to_i64(), 8))
     if rtype == 1 or rtype == 28 or rtype == 29:
         return Ok(elf_sign_extend((word & 0xffffff) << 2, 26))
     if rtype == 10 or rtype == 30:
@@ -211,23 +244,27 @@ fn elf_arm_rel_addend(bytes: [u8], target: ElfSectionHeader,
         val encoded = (sign << 24) | (i1 << 23) | (i2 << 22) |
             ((high & 0x3ff) << 12) | ((low & 0x7ff) << 1)
         return Ok(elf_sign_extend(encoded, 25))
+    if rtype == 51:
+        # THM_JUMP19 (B<cond>.W): S:J2:J1:imm6:imm11:0, J1/J2 not XORed
+        val high = elf_read_u16_le(bytes, at)
+        val low = elf_read_u16_le(bytes, at + 2)
+        val encoded = (((high >> 10) & 1) << 20) | (((low >> 11) & 1) << 19) |
+            (((low >> 13) & 1) << 18) | ((high & 0x3f) << 12) | ((low & 0x7ff) << 1)
+        return Ok(elf_sign_extend(encoded, 21))
     if rtype == 40:
         return Ok(0)
     if rtype == 42:
         return Ok(elf_sign_extend(word & 0x7fffffff, 31))
     if rtype >= 43 and rtype <= 46:
         val immediate = (((word >> 16) & 0xf) << 12) | (word & 0xfff)
-        if rtype == 44 or rtype == 46:
-            return Ok(immediate << 16)
-        return Ok(immediate)
+        # REL MOVW/MOVT addend = SignExtend(imm16) for both halves (AAELF, ld.lld)
+        return Ok(elf_sign_extend(immediate, 16))
     if rtype >= 47 and rtype <= 50:
         val high = elf_read_u16_le(bytes, at)
         val low = elf_read_u16_le(bytes, at + 2)
         val immediate = ((high & 0xf) << 12) | (((high >> 10) & 1) << 11) |
             (((low >> 12) & 0x7) << 8) | (low & 0xff)
-        if rtype == 48 or rtype == 50:
-            return Ok(immediate << 16)
-        return Ok(immediate)
+        return Ok(elf_sign_extend(immediate, 16))
     if rtype == 54:
         val high = elf_read_u16_le(bytes, at)
         val magnitude = elf_read_u16_le(bytes, at + 2) & 0xfff
@@ -243,13 +280,13 @@ fn elf_find_section_by_type(obj: ElfObject, sh_type: i64) -> ElfSectionHeader?:
     for sec in obj.sections:
         if sec.sh_type == sh_type:
             return sec
-    nil
+    None
 
 # ============================================================================
 # Symbol Table Parser
 # ============================================================================
 
-fn elf_parse_symbols(bytes: [u8], symtab_section: ElfSectionHeader, strtab: ElfStringTable) -> [ElfSymbol]:
+fn elf_parse_symbols(bytes: [u8], symtab_section: ElfSectionHeader, strtab: ElfStringTable) -> Result<[ElfSymbol], text>:
     """Parse all ELF64 symbol table entries from a SHT_SYMTAB section.
 
     ELF64 Sym entry layout (24 bytes):
@@ -266,11 +303,11 @@ fn elf_parse_symbols(bytes: [u8], symtab_section: ElfSectionHeader, strtab: ElfS
     val sec_size = symtab_section.sh_size
 
     if sec_size <= 0 or sec_offset < 0:
-        return symbols
+        return Ok(symbols)
 
     val end = sec_offset + sec_size
     if end > bytes.len():
-        return symbols
+        return Ok(symbols)
 
     val entry_size = if elf_is_32(bytes): ELF32_SYM_SIZE else: ELF64_SYM_SIZE
     val count = sec_size / entry_size
@@ -285,7 +322,15 @@ fn elf_parse_symbols(bytes: [u8], symtab_section: ElfSectionHeader, strtab: ElfS
         val st_value = if entry_size == ELF32_SYM_SIZE: elf_read_u32_le(bytes, base + 4) else: elf_read_u64_le(bytes, base + 8)
         val st_size = if entry_size == ELF32_SYM_SIZE: elf_read_u32_le(bytes, base + 8) else: elf_read_u64_le(bytes, base + 16)
 
-        val name = elf_strtab_get(strtab, st_name)
+        var name: text = match elf_strtab_get(strtab, st_name):
+            case Ok(v): v
+            case Err(e): return Err("ELF symbol {i}: {e}")
+        # `.symver x, name@@VER` in a relocatable: the default-version
+        # definition binds plain `name` references (ld.lld). `name@VER` stays.
+        if st_shndx != 0:
+            val vat = name.find("@@")
+            if vat > 0:
+                name = name.substring(0, vat)
 
         symbols = symbols.push(ElfSymbol(
             st_name: st_name,
@@ -298,7 +343,7 @@ fn elf_parse_symbols(bytes: [u8], symtab_section: ElfSectionHeader, strtab: ElfS
         ))
         i = i + 1
 
-    symbols
+    Ok(symbols)
 
 # ============================================================================
 # Relocation Table Parser
@@ -405,6 +450,13 @@ fn elf_section_addralign(obj: ElfObject, section_index: i64) -> i64:
     val base = obj.header.e_shoff + section_index * size
     if elf32: elf_read_u32_le(obj.raw, base + 32) else: elf_read_u64_le(obj.raw, base + 48)
 
+fn elf_section_link(obj: ElfObject, section_index: i64) -> i64:
+    """Read sh_link (not carried by ElfSectionHeader) from the raw bytes."""
+    val elf32 = elf_is_32(obj.raw)
+    val size = if elf32: ELF32_SHDR_SIZE else: ELF64_SHDR_SIZE
+    val base = obj.header.e_shoff + section_index * size
+    if elf32: elf_read_u32_le(obj.raw, base + 24) else: elf_read_u32_le(obj.raw, base + 40)
+
 fn elf_section_entsize(obj: ElfObject, section_index: i64) -> i64:
     """Read sh_entsize (not carried by ElfSectionHeader) from the raw bytes."""
     val elf32 = elf_is_32(obj.raw)
@@ -413,12 +465,34 @@ fn elf_section_entsize(obj: ElfObject, section_index: i64) -> i64:
     if elf32: elf_read_u32_le(obj.raw, base + 36) else: elf_read_u64_le(obj.raw, base + 56)
 
 fn elf_section_name(obj: ElfObject, section_index: i64) -> text:
-    """Resolve a section's name through .shstrtab."""
-    elf_strtab_get(obj.shstrtab, obj.sections[section_index].sh_name)
+    """Resolve a section's name through .shstrtab.
+
+    elf_parse_object rejects any section name that is not valid UTF-8, so the
+    Err arm is unreachable for parsed objects."""
+    match elf_strtab_get(obj.shstrtab, obj.sections[section_index].sh_name):
+        case Ok(name): name
+        case Err(_): ""
 
 # ============================================================================
 # Top-Level Parser
 # ============================================================================
+
+fn elf_group_signature(obj: ElfObject, section_index: i64) -> text:
+    """Signature symbol name of the SHT_GROUP (17) that lists `section_index`
+    as a member, or "" when no group lists it. Word 0 is the flag word."""
+    var gi = 0
+    while gi < obj.sections.len():
+        val g = obj.sections[gi]
+        if g.sh_type == 17:
+            val off = elf_shdr_offset(obj.raw, gi, obj.header.e_shoff)
+            var k = 1
+            while k < g.sh_size / 4:
+                if off + k * 4 + 4 <= obj.raw.len() and elf_read_u32_le(obj.raw, off + k * 4) == section_index:
+                    if g.sh_info > 0 and g.sh_info < obj.symbols.len(): return obj.symbols[g.sh_info].name
+                    return ""
+                k = k + 1
+        gi = gi + 1
+    ""
 
 fn elf_parse_object(bytes: [u8]) -> Result<ElfObject, text>:
     """Parse a complete ELF32 or ELF64 object file into an ElfObject.
@@ -489,6 +563,14 @@ fn elf_parse_object(bytes: [u8]) -> Result<ElfObject, text>:
     val shstrndx = header.e_shstrndx
     if shstrndx >= 0 and shstrndx < sections.len():
         shstrtab = elf_parse_string_table(bytes, sections[shstrndx])
+    # Section names must be valid UTF-8 (link error otherwise); checked once
+    # here so elf_section_name can stay infallible.
+    var ni: i64 = 0
+    while ni < sections.len():
+        match elf_strtab_get(shstrtab, sections[ni].sh_name):
+            case Ok(_): ()
+            case Err(e): return Err("ELF section {ni} name: {e}")
+        ni = ni + 1
 
     # Symbol names live in the string table named by the symtab's sh_link.
     # LLVM emits ONE combined .strtab that is also e_shstrndx, so "first
@@ -517,7 +599,9 @@ fn elf_parse_object(bytes: [u8]) -> Result<ElfObject, text>:
     var symbols: [ElfSymbol] = []
     for sec in sections:
         if sec.sh_type == SHT_SYMTAB:
-            symbols = elf_parse_symbols(bytes, sec, strtab)
+            symbols = match elf_parse_symbols(bytes, sec, strtab):
+                case Ok(v): v
+                case Err(e): return Err(e)
 
     # Find and parse all RELA sections, tagging each relocation with the
     # section index it came from (section_idx) so callers can attribute
@@ -531,10 +615,21 @@ fn elf_parse_object(bytes: [u8]) -> Result<ElfObject, text>:
             var k: i64 = 0
             while k < rela_relocs.len():
                 var reloc = rela_relocs[k]
-                if elf32 and header.e_machine == EM_ARM and sections[sec_i].sh_type == SHT_REL:
+                if header.e_type == ET_REL and elf32 and header.e_machine == EM_ARM and sections[sec_i].sh_type == SHT_REL:
                     if reloc.target_section_idx < 0 or reloc.target_section_idx >= sections.len():
                         return Err("ARM REL relocation names an invalid target section")
                     val addend = elf_arm_rel_addend(
+                        bytes, sections[reloc.target_section_idx], reloc)?
+                    reloc = ElfRelocation(
+                        r_offset: reloc.r_offset,
+                        r_info: reloc.r_info,
+                        r_addend: addend,
+                        section_idx: reloc.section_idx,
+                        target_section_idx: reloc.target_section_idx)
+                elif header.e_type == ET_REL and elf32 and header.e_machine == 3 and sections[sec_i].sh_type == SHT_REL:
+                    if reloc.target_section_idx < 0 or reloc.target_section_idx >= sections.len():
+                        return Err("i386 REL relocation names an invalid target section")
+                    val addend = elf_i386_rel_addend(
                         bytes, sections[reloc.target_section_idx], reloc)?
                     reloc = ElfRelocation(
                         r_offset: reloc.r_offset,
@@ -564,11 +659,11 @@ export ElfSymbol
 export ElfRelocation
 export ElfStringTable
 export ElfObject
-export elf_parse_object
+export elf_parse_object, elf_group_signature
 export elf_parse_symbols
 export elf_parse_relocations
 export elf_parse_string_table
-export elf_strtab_get
+export elf_strtab_get, elf_strtab_len, elf_strtab_byte
 export elf_symbol_binding
 export elf_symbol_type
 export elf_reloc_sym
@@ -578,7 +673,7 @@ export elf_find_section_by_type
 export elf_defined_symbols
 export elf_undefined_symbols
 export elf_make_empty_strtab
-export elf_section_addralign, elf_section_entsize, elf_section_name
+export elf_section_addralign, elf_section_entsize, elf_section_link, elf_section_name
 export SHT_RELA, SHT_HASH, SHT_DYNAMIC, SHT_NOTE, SHT_NOBITS, SHT_REL
 export SHN_UNDEF
 export STB_LOCAL, STB_GLOBAL, STB_WEAK

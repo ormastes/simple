@@ -70,6 +70,9 @@ impl<'a> MirLowerer<'a> {
             }
         }
         self.block_expr_tail = saved_tail;
+        if lowered.is_ok() {
+            lowered = self.emit_block_array_releases(stmts);
+        }
         lowered?;
         let result = if let Some(result) = self.last_expr_value {
             result

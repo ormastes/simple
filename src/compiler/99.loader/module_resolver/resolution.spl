@@ -8,12 +8,12 @@
 
 use compiler.frontend.ast.{Node}
 use compiler.common.dependency.visibility.{Visibility}
-use compiler.loader.module_resolver.types.{ModuleResolver, ResolvedModule, DirectoryManifest, ModulePath}
-use compiler.common.error.{CompileError}
+use compiler.loader.module_resolver.types.{ModuleResolver, ResolvedModule, DirectoryManifest, ModulePath, resolvedmodule_file, resolvedmodule_directory}
+use compiler.common.error.{CompileError, ErrorContext}
 use compiler.loader.module_resolver.fs_probe.{probe_file_exists, probe_dir_exists, clear_fs_probe_cache}
 use std.log.{debug}
 use std.nogc_sync_mut.path.{join_path as pure_path_join, parent_dir as pure_parent_dir}
-use std.nogc_sync_mut.io_runtime.{dir_list, env_get_nullable, file_read_nullable}
+use std.nogc_sync_mut.io_runtime.{dir_list_or_empty, env_get_nullable, file_read_nullable}
 
 # ============================================================================
 # Module Resolution
@@ -32,7 +32,7 @@ impl ModuleResolver:
         self.resolve_count = self.resolve_count + 1
 
         if segments.is_empty():
-            return CompileError.semantic("empty module path: provide at least one module path segment")
+            return Err(CompileError.semantic("empty module path: provide at least one module path segment"))
 
         # Check resolution cache. The active variant fingerprint is part of the
         # key so a `--var-profile` change cannot reuse a stale resolved path.
@@ -40,16 +40,15 @@ impl ModuleResolver:
         if self.resolution_cache.has(cache_key):
             self.cache_hit_count = self.cache_hit_count + 1
             val cached = self.resolution_cache[cache_key]
-            if cached.?:
-                val cached_path = cached ?? ""
-                return Ok(ResolvedModule.file(cached_path, path.clone()))
+            if val Some(resolved) = cached:
+                return Ok(resolved)
             else:
-                return CompileError.semantic("cannot resolve import: module not found (cached); module path was previously unresolvable")
+                return Err(CompileError.semantic("cannot resolve import: module not found (cached); module path was previously unresolvable"))
 
         # Determine base directory
         val (base_dir, remaining) = if segments[0] == "crate":
             # Absolute path from project root
-            (self.source_root.clone(), segments[1..])
+            (self.source_root, segments[1..])
         else:
             # Relative path from current file's directory
             val parent = path_parent(from_file)
@@ -58,7 +57,7 @@ impl ModuleResolver:
         # Try resolving from the base directory first
         match self.resolve_from_base(base_dir, remaining, path):
             Ok(resolved):
-                self.resolution_cache[cache_key] = Some(resolved.path)
+                self.resolution_cache[cache_key] = Some(resolved)
                 return Ok(resolved)
             Err(err):
                 # Variant overlay (`variants/`) roots — searched after relative
@@ -70,14 +69,15 @@ impl ModuleResolver:
                         val abs_root = path_join2(self.project_root, var_root)
                         match self.resolve_from_base(abs_root, segments, path):
                             Ok(resolved):
-                                self.resolution_cache[cache_key] = Some(resolved.path)
+                                self.resolution_cache[cache_key] = Some(resolved)
                                 return Ok(resolved)
                             Err(_):
                                 pass
 
                 # If relative resolution failed and stdlib is available, try stdlib
                 if segments[0] != "crate":
-                    if val Some(stdlib_root) = self.stdlib_root:
+                    if self.has_stdlib_root:
+                        val stdlib_root = self.stdlib_root
                         # If path starts with "std_lib", strip that prefix
                         val stdlib_segments = if segments.len() > 0 and segments[0] == "std_lib":
                             segments[1..]
@@ -87,7 +87,7 @@ impl ModuleResolver:
                         if not stdlib_segments.is_empty():
                             match self.resolve_from_base(stdlib_root, stdlib_segments, path):
                                 Ok(resolved):
-                                    self.resolution_cache[cache_key] = Some(resolved.path)
+                                    self.resolution_cache[cache_key] = Some(resolved)
                                     return Ok(resolved)
                                 Err(_):
                                     pass
@@ -99,23 +99,23 @@ impl ModuleResolver:
                     # Try direct lib/ path first
                     var lib_segments = ["lib"]
                     lib_segments.extend(inner_segments)
-                    match self.resolve_from_base(self.source_root.clone(), lib_segments, path):
+                    match self.resolve_from_base(self.source_root, lib_segments, path):
                         Ok(resolved):
                             # A tier-less path that resolves HERE landed on a
                             # root `src/lib/<name>/` module, shadowing any
                             # same-named tier module deterministically. Same
                             # diagnostic, same non-fatal contract.
-                            val root_lib_dir = path_join2(self.source_root.clone(), "lib")
+                            val root_lib_dir = path_join2(self.source_root, "lib")
                             if probe_dir_exists(root_lib_dir):
                                 self.maybe_warn_tier_ambiguity(root_lib_dir, inner_segments, from_file)
-                            self.resolution_cache[cache_key] = Some(resolved.path)
+                            self.resolution_cache[cache_key] = Some(resolved)
                             return Ok(resolved)
                         Err(_):
                             pass
                     # Try lib/*/ subdirectory search
                     # When allowed_families is non-empty (set by target presets),
                     # only search subdirectories in the allowed list.
-                    val lib_dir = path_join2(self.source_root.clone(), "lib")
+                    val lib_dir = path_join2(self.source_root, "lib")
                     if probe_dir_exists(lib_dir):
                         # Tier-less `use std.<path>`: which tier wins used to be
                         # decided by raw readdir order, i.e. by the filesystem.
@@ -140,27 +140,28 @@ impl ModuleResolver:
                                     continue
                             var sub_segments = ["lib", subdir]
                             sub_segments.extend(inner_segments)
-                            match self.resolve_from_base(self.source_root.clone(), sub_segments, path):
+                            match self.resolve_from_base(self.source_root, sub_segments, path):
                                 Ok(resolved):
                                     # Stage-1 tier-ambiguity diagnostic: a
                                     # tier-less std.<path> that also exists in
                                     # other tiers resolved by listing order.
                                     # Non-fatal; never alters resolution.
                                     self.maybe_warn_tier_ambiguity(lib_dir, inner_segments, from_file)
-                                    self.resolution_cache[cache_key] = Some(resolved.path)
+                                    self.resolution_cache[cache_key] = Some(resolved)
                                     return Ok(resolved)
                                 Err(_):
                                     pass
+
 
                 # Strategy: Try source_root as base for top-level module names
                 # e.g., "use app.sffi_gen.parser" → source_root/app/sffi_gen/parser.spl
                 # This handles cross-project imports declared in simple.sdn
                 if segments[0] != "crate" and segments.len() > 1:
-                    val top_dir = path_join2(self.source_root.clone(), segments[0])
+                    val top_dir = path_join2(self.source_root, segments[0])
                     if probe_dir_exists(top_dir):
                         match self.resolve_from_base(top_dir, segments[1..], path):
                             Ok(resolved):
-                                self.resolution_cache[cache_key] = Some(resolved.path)
+                                self.resolution_cache[cache_key] = Some(resolved)
                                 return Ok(resolved)
                             Err(_):
                                 pass
@@ -168,17 +169,31 @@ impl ModuleResolver:
                 # Strategy 5: Try project_root for top-level dirs not under source_root
                 # e.g., "use examples.browser.*" → project_root/examples/11_advanced/browser/
                 if segments[0] != "crate" and segments.len() > 1:
-                    val proj_dir = path_join2(self.project_root.clone(), segments[0])
+                    val proj_dir = path_join2(self.project_root, segments[0])
                     if probe_dir_exists(proj_dir):
                         match self.resolve_from_base(proj_dir, segments[1..], path):
                             Ok(resolved):
-                                self.resolution_cache[cache_key] = Some(resolved.path)
+                                self.resolution_cache[cache_key] = Some(resolved)
+                                return Ok(resolved)
+                            Err(_):
+                                pass
+
+                # Strategy bare-tier (LAST RESORT, after local, source_root, project_root): `use common.ui.draw_ir` (no `std.`) from a
+                # nested lib file when no stdlib_root is configured (entry-closure
+                # native builds). Bare tier names map to source_root/lib/<tier>.
+                # See native_entry_closure_common_import_type_loss_2026-07-27.
+                if segments[0] != "crate" and segments.len() > 1 and TIER_PRECEDENCE.contains(segments[0]):
+                    val tier_dir = path_join2(path_join2(self.source_root, "lib"), segments[0])
+                    if probe_dir_exists(tier_dir):
+                        match self.resolve_from_base(tier_dir, segments[1..], path):
+                            Ok(resolved):
+                                self.resolution_cache[cache_key] = Some(resolved)
                                 return Ok(resolved)
                             Err(_):
                                 pass
 
                 # Cache the miss
-                self.resolution_cache[cache_key] = nil
+                self.resolution_cache[cache_key] = None
                 return Err(err)
 
     fn cached_dir_list(dir_path: text) -> [text]:
@@ -186,7 +201,7 @@ impl ModuleResolver:
         if self.dir_cache.has(dir_path):
             return self.dir_cache[dir_path]
         self.dir_list_call_count = self.dir_list_call_count + 1
-        val entries = dir_list(dir_path)
+        val entries = dir_list_or_empty(dir_path)
         self.dir_cache[dir_path] = entries
         entries
 
@@ -211,7 +226,7 @@ impl ModuleResolver:
 
             var is_exact_source = false
             if entry.ends_with(".spl"):
-                val stem = entry.substring(0, entry.len() - 4)
+                val stem = entry.substring(0, entry.byte_len() - 4)
                 is_exact_source = stem != "__init__" and stem == dotted
 
             val prefix = "{entry}."
@@ -230,7 +245,7 @@ impl ModuleResolver:
                         return true
 
                 if dotted.starts_with(prefix):
-                    val remaining = dotted.substring(prefix.len(), dotted.len())
+                    val remaining = dotted.substring(prefix.len(), dotted.byte_len())
                     if self.pruned_tier_import_exists_v1(full, remaining, false):
                         return true
                 continue
@@ -288,7 +303,7 @@ impl ModuleResolver:
                 (self.cache_hit_count * 100) / self.resolve_count
             else:
                 0
-            print "[resolve-stats] calls={self.resolve_count} cache_hits={self.cache_hit_count} hit_rate={hit_rate}% dir_list={self.dir_list_call_count}"
+            print "[resolve-stats] calls={self.resolve_count} cache_hits={self.cache_hit_count} hit_rate={hit_rate}% dir_list_or_empty={self.dir_list_call_count}"
 
     # ------------------------------------------------------------------
     # Tier-ambiguity warning (stage 1, non-fatal)
@@ -355,7 +370,7 @@ impl ModuleResolver:
                     self.record_tier_module(child_rel, tier)
                 self.collect_tier_modules(full, child_rel, tier)
             elif entry.ends_with(".spl"):
-                val stem = entry.substring(0, entry.len() - 4)
+                val stem = entry.substring(0, entry.byte_len() - 4)
                 if stem != "" and stem != "__init__":
                     val dotted = if rel == "": "{stem}" else: "{rel}.{stem}"
                     self.record_tier_module(dotted, tier)
@@ -397,7 +412,7 @@ impl ModuleResolver:
                     self.record_tier_module(entry, "<lib-root>")
                 self.collect_tier_modules(full, entry, "<lib-root>")
             elif entry.ends_with(".spl"):
-                val stem = entry.substring(0, entry.len() - 4)
+                val stem = entry.substring(0, entry.byte_len() - 4)
                 if stem != "" and stem != "__init__":
                     self.record_tier_module(stem, "<lib-root>")
 
@@ -444,10 +459,10 @@ impl ModuleResolver:
         - Returns detailed error messages
         """
         if segments.is_empty():
-            return CompileError.semantic("empty module path segments: module path must contain at least one segment")
+            return Err(CompileError.semantic("empty module path segments: module path must contain at least one segment"))
 
         debug("resolver", "Resolving from base={base} segments={segments}")
-        var current = base.clone()
+        var current = base
 
         # Navigate through all but the last segment
         for segment in segments[0..segments.len()-1]:
@@ -468,9 +483,10 @@ impl ModuleResolver:
                     current = numbered ?? current
                 else:
                     # E1034 - Unresolved Import
-                    return CompileError.semantic(
-                        "cannot resolve import: module path segment `{segment}` not found; check that the module exists at {direct}"
-                    ).with_note("ensure the module file or __init__.spl exists")
+                    return Err(CompileError.semantic_with_context(
+                        "cannot resolve import: module path segment `{segment}` not found; check that the module exists at {direct}",
+                        ErrorContext.empty().with_note("ensure the module file or __init__.spl exists")
+                    ))
 
         # Resolve the last segment
         val last = segments[segments.len() - 1]
@@ -485,24 +501,25 @@ impl ModuleResolver:
 
         # File and directory forms for the same module path are ambiguous.
         if dir_exists and file_exists_direct:
-            return CompileError.semantic(
-                "ambiguous import: module `{last}` resolves to both a file and a directory module; choose one of {file_path} or {init_path}"
-            ).with_note("rename or remove one form so the module path is unambiguous")
+            return Err(CompileError.semantic_with_context(
+                "ambiguous import: module `{last}` resolves to both a file and a directory module; choose one of {file_path} or {init_path}",
+                ErrorContext.empty().with_note("rename or remove one form so the module path is unambiguous")
+            ))
 
         if dir_exists:
-            return Ok(ResolvedModule.directory(
+            return Ok(resolvedmodule_directory(
                 init_path,
                 original_path.clone(),
-                nil  # Will be loaded on demand
+                None  # Will be loaded on demand
             ))
 
         if file_exists_direct:
-            return Ok(ResolvedModule.file(file_path, original_path.clone()))
+            return Ok(resolvedmodule_file(file_path, original_path.clone()))
 
         # Try .shs file (Simple shell scripts)
         val ssh_path = path_join2(current, "{last}.shs")
         if file_exists(ssh_path) and is_file(ssh_path):
-            return Ok(ResolvedModule.file(ssh_path, original_path.clone()))
+            return Ok(resolvedmodule_file(ssh_path, original_path.clone()))
 
         # Try numbered directory fallback for the last segment
         val numbered_dir = self.find_numbered_dir(current, last)
@@ -510,21 +527,22 @@ impl ModuleResolver:
             val nd = numbered_dir ?? ""
             val nd_init = path_join2(nd, "__init__.spl")
             if file_exists(nd_init) and is_file(nd_init):
-                return Ok(ResolvedModule.directory(
+                return Ok(resolvedmodule_directory(
                     nd_init,
                     original_path.clone(),
-                    nil
+                    None
                 ))
 
         # E1034 - Unresolved Import
-        CompileError.semantic(
-            "cannot resolve import: module `{last}` not found; create either {file_path} or {init_path}"
-        ).with_note("check for typos in the import path")
+        Err(CompileError.semantic_with_context(
+            "cannot resolve import: module `{last}` not found; create either {file_path} or {init_path}",
+            ErrorContext.empty().with_note("check for typos in the import path")
+        ))
 
     fn find_numbered_dir(parent: text, segment: text) -> text?:
         """Find an NN.name directory through the resolver-owned listing cache."""
         if not probe_dir_exists(parent):
-            return nil
+            return None
 
         val entries = self.cached_dir_list(parent)
         for entry in entries:
@@ -543,7 +561,7 @@ impl ModuleResolver:
                             val full_path = path_join2(parent, entry)
                             if probe_dir_exists(full_path):
                                 return Some(full_path)
-        nil
+        None
 
     fn get_exports(resolved: ResolvedModule) -> [text] | CompileError:
         """Get all symbols exported by a module.
@@ -590,38 +608,39 @@ impl ModuleResolver:
         # Read the file
         val source = match file_read_opt(file_path):
             Some(content): content
-            nil:
-                return CompileError.io(
-                    "cannot extract exports: failed to read file {file_path}"
-                ).with_note("ensure the file exists and is readable")
+            None:
+                return Err(CompileError.io_with_context(
+                    "cannot extract exports: failed to read file {file_path}",
+                    ErrorContext.empty().with_note("ensure the file exists and is readable")
+                ))
 
         var exports: [text] = []
         for line in source.split("\n"):
             val trimmed = line.trim()
             if trimmed.starts_with("export "):
-                val rest = trimmed.substring(7, trimmed.len())
+                val rest = trimmed.substring(7, trimmed.byte_len())
                 for part in rest.split(","):
                     val name = part.trim().split(" ")[0].trim()
                     if name != "":
                         exports.push(name)
             elif trimmed.starts_with("fn "):
-                val name = trimmed.substring(3, trimmed.len()).split("(")[0].trim()
+                val name = trimmed.substring(3, trimmed.byte_len()).split("(")[0].trim()
                 if name != "":
                     exports.push(name)
             elif trimmed.starts_with("struct "):
-                val name = trimmed.substring(7, trimmed.len()).split(":")[0].split("<")[0].trim()
+                val name = trimmed.substring(7, trimmed.byte_len()).split(":")[0].split("<")[0].trim()
                 if name != "":
                     exports.push(name)
             elif trimmed.starts_with("class "):
-                val name = trimmed.substring(6, trimmed.len()).split(":")[0].split("<")[0].trim()
+                val name = trimmed.substring(6, trimmed.byte_len()).split(":")[0].split("<")[0].trim()
                 if name != "":
                     exports.push(name)
             elif trimmed.starts_with("enum "):
-                val name = trimmed.substring(5, trimmed.len()).split(":")[0].split("<")[0].trim()
+                val name = trimmed.substring(5, trimmed.byte_len()).split(":")[0].split("<")[0].trim()
                 if name != "":
                     exports.push(name)
             elif trimmed.starts_with("trait "):
-                val name = trimmed.substring(6, trimmed.len()).split(":")[0].split("<")[0].trim()
+                val name = trimmed.substring(6, trimmed.byte_len()).split(":")[0].split("<")[0].trim()
                 if name != "":
                     exports.push(name)
         Ok(exports)
@@ -685,7 +704,7 @@ fn file_exists(path: text) -> bool:
 
 fn file_read_opt(path: text) -> text?:
     if not probe_file_exists(path):
-        return nil
+        return None
     Some(file_read_nullable(path) ?? "")
 
 # ===== Tier Precedence for tier-less `use std.X` =====

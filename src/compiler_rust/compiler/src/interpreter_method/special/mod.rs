@@ -15,4 +15,5 @@ pub(crate) use execution::{
 };
 pub use mock::handle_mock_methods;
 pub use objects::{handle_constructor_methods, handle_trait_object_methods};
+pub(crate) use objects::primitive_default_value;
 pub use types::{handle_option_methods, handle_result_methods, handle_unit_methods};

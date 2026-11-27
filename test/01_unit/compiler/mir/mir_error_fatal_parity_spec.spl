@@ -1,0 +1,58 @@
+"""Executable specification for CompFix-2 (#5372): MIR error_fatal parity for high-risk abort sites."""
+
+# @req REQ-MIR-ERROR-FATAL-PARITY
+
+use std.spec.*
+use std.spec.step
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+
+extern fn rt_file_read_text(path: text) -> text?
+
+fn read_source(path: text) -> text:
+    rt_file_read_text(path) ?? ""
+
+fn lower_mir_errors(src: text, filename: text) -> [MirError]:
+    val module = parse_full_frontend(src, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(module)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val _mir = mir_lowering.lower_module(hir)
+    mir_lowering.errors
+
+val NON_EXHAUSTIVE_ASM_SRC = """
+fn probe_asm():
+    asm match:
+        case [x86_64]:
+            "nop"
+"""
+
+describe "CompFix-2 MIR error_fatal parity":
+    it "marks non-exhaustive asm match diagnostic fatal during MIR lowering":
+        step("Lower non-exhaustive asm match and inspect MirError.fatal")
+        val errors = lower_mir_errors(NON_EXHAUSTIVE_ASM_SRC, "compfix2_asm_match.spl")
+        expect(errors.len()).to_be_greater_than(0)
+        var saw_fatal_asm = false
+        for err in errors:
+            if err.message.contains("asm match is non-exhaustive") and err.fatal:
+                saw_fatal_asm = true
+        expect(saw_fatal_asm).to_equal(true)
+
+    it "uses self.error_fatal on all 4 high-risk MIR lowering abort sites":
+        step("Verify asm_and_targets.spl and expr_dispatch.spl use error_fatal on CompFix-2 sites")
+        val asm_src = read_source("src/compiler/50.mir/_MirLowering/asm_and_targets.spl")
+        val expr_src = read_source("src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl")
+
+        val s1 = "self.error_fatal(\"asm match is non-exhaustive"
+        val s2 = "self.error_fatal(\"enum-to-integer cast could not read runtime discriminant\", Some(span))"
+        val s3 = "self.error_fatal(\"catch pattern is not supported by recoverable MIR lowering\", Some(clause.span))"
+        val s4 = "self.error_fatal(\"typed catch uses a type without a collision-free runtime tag\", Some(clause.span))"
+
+        expect(asm_src).to_contain(s1)
+        expect(expr_src).to_contain(s2)
+        expect(expr_src).to_contain(s3)
+        expect(expr_src).to_contain(s4)

@@ -566,11 +566,26 @@ mod tests {
     fn checked_signing_distinguishes_success_from_bridge_failure() {
         let signed = rt_ed25519_sign_checked(&[bytes_to_value(ED25519_PKCS8_V1), bytes_to_value(MSG)])
             .expect("checked signing should not raise an interpreter error");
+        // P0 seed_checked_sign_array_arc_mismatch_2026-08-22: the checked pair
+        // must be a genuinely owned `Value::Array` (Arc-backed storage), exactly
+        // `[status, payload]` long, with the payload round-tripping the exact
+        // signature bytes.
         let Value::Array(pair) = signed else {
             panic!("expected checked pair")
         };
+        assert_eq!(pair.len(), 2);
         assert!(matches!(pair.first(), Some(Value::Int(0))));
+        let payload_bytes = pair[1]
+            .try_array_bytes()
+            .unwrap_or_else(|| panic!("payload must be a byte array, got {:?}", pair[1]));
+        assert_eq!(payload_bytes, ED25519_SIG_HELLO);
+        UnparsedPublicKey::new(&ED25519, ED25519_PUBKEY)
+            .verify(MSG, &payload_bytes)
+            .expect("checked payload must be the verifiable fixture signature");
 
+        // Missing bridge args -> Err(1); a well-formed key of the wrong family
+        // -> Err(2). Both failure shapes must still be owned 2-element
+        // `[status, Nil]` pairs.
         let malformed = [Value::Nil, Value::Nil];
         for result in [
             rt_rsa_sha256_sign_checked(&malformed),
@@ -581,7 +596,23 @@ mod tests {
             let Value::Array(pair) = result.expect("checked signer should return a status") else {
                 panic!("expected checked pair")
             };
+            assert_eq!(pair.len(), 2);
             assert!(matches!(pair.first(), Some(Value::Int(1))));
+            assert!(matches!(pair.get(1), Some(Value::Nil)));
+        }
+
+        let wrong_family = [bytes_to_value(ED25519_PKCS8_V1), bytes_to_value(MSG)];
+        for result in [
+            rt_rsa_sha256_sign_checked(&wrong_family),
+            rt_rsa_sha512_sign_checked(&wrong_family),
+            rt_ecdsa_p256_sign_checked(&wrong_family),
+        ] {
+            let Value::Array(pair) = result.expect("checked signer should return a status") else {
+                panic!("expected checked pair")
+            };
+            assert_eq!(pair.len(), 2);
+            assert!(matches!(pair.first(), Some(Value::Int(2))));
+            assert!(matches!(pair.get(1), Some(Value::Nil)));
         }
     }
 }

@@ -45,12 +45,18 @@ for number in "$cap" "$reserve" "$threads" "$disk" "$floor" "$poll"; do
   case "$number" in ''|0|0*|*[!0-9]*) die "positive resource bounds required" ;; esac
 done
 case "$lifetime" in 0) ;; ''|0*|*[!0-9]*) die "nonnegative work lifetime required" ;; esac
+phase4_profile=${PHASE4_PROFILE:-prod}
+case "$phase4_profile" in
+  prod) phase4_suffix= ;;
+  dev) phase4_suffix=-dev ;;
+  *) die "invalid PHASE4_PROFILE: $phase4_profile (expected prod or dev)" ;;
+esac
 overhead=268435456
 [ "$cap" -gt "$overhead" ] || die "phase cap cannot hold manager overhead"
 inner_cap=$((cap - overhead))
 aggregate=$((cap * 2 + overhead))
-phase_state="$root/parallel"
-stage="$root/driver-inputs"
+phase_state="$root/parallel$phase4_suffix"
+stage="$root/driver-inputs$phase4_suffix"
 [ ! -L "$stage" ] && [ ! -L "$phase_state" ] || die "phase state cannot be a symlink"
 mkdir -p "$stage/.managed" || die "private driver staging unavailable"
 publish_exact() {
@@ -89,7 +95,11 @@ quote() { printf "'"; printf '%s' "$1" | sed "s/'/'\\\\''/g"; printf "'"; }
 for phase in phase3 phase4; do
   command="$stage/.managed/$phase.shs.candidate.$$"
   {
-    printf '#!/bin/sh\nset -eu\nexec '
+    printf '#!/bin/sh\nset -eu\n'
+    if [ "$phase" = phase4 ] && [ "$phase4_profile" = dev ]; then
+      printf 'export PHASE4_PROFILE=dev\n'
+    fi
+    printf 'exec '
     quote "$shell"
     printf ' "$PWD/scripts/bootstrap/bootstrap-phase4-grouped.shs"'
     for arg in "$@"; do
@@ -113,7 +123,7 @@ compiler_bytes=$(perl -e 'my $r=shift; my $n=0; while (<>) {chomp; my $s=-s "$r/
 # Charge nested compiler staging as well as the small outer driver closure.
 source_bytes=$((driver_bytes + compiler_bytes))
 case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) commit=1 ;; Linux*) commit=0 ;; *) die "unsupported admission host" ;; esac
-policy="$root/phase-policy.sdn"
+policy="$root/phase-policy$phase4_suffix.sdn"
 host_cpus=$(getconf _NPROCESSORS_ONLN 2>/dev/null || nproc 2>/dev/null) || die "CPU ceiling unavailable"
 case "$host_cpus" in ''|0|*[!0-9]*) die "CPU ceiling invalid" ;; esac
 cpu_ceiling=$((threads * 2))
@@ -141,4 +151,4 @@ sh "$stage/scripts/bootstrap/lib/managed-phase-launch.shs" \
   }
 # Success means the aggregate owner verified results and reaped both trees.
 # Re-admit every inner output below; shell outcome markers confer no authority.
-"$shell" "$stage/scripts/bootstrap/bootstrap-phase4-grouped.shs" "$@" --finalize-only
+PHASE4_PROFILE="$phase4_profile" "$shell" "$stage/scripts/bootstrap/bootstrap-phase4-grouped.shs" "$@" --finalize-only

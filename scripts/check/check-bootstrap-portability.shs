@@ -40,6 +40,9 @@ case "$(uname -s 2>/dev/null || echo unknown)" in
       fail "Windows symlink materializer is not a portable non-Windows no-op"
     printf '%s\n' "${materializer_noop}" | grep -Fq 'this script is Windows-only' ||
       fail "Windows symlink materializer did not report its non-Windows no-op"
+    # The self-test builds symlink fixtures, so it runs only where ln -s is real.
+    sh scripts/check/check-portable-compute-toolchains.shs --vulkan-provenance-self-test ||
+      fail "portable-compute Vulkan provenance self-test"
     ;;
 esac
 perl -c scripts/check/lib/portable-hardlink-lock.pl >/dev/null ||
@@ -80,6 +83,8 @@ for authority_wiring in \
 done
 sh test/01_unit/scripts/portable_process_lock_test.shs ||
   fail "portable bootstrap process lock"
+sh test/01_unit/scripts/bootstrap_prune_lru_dirs_test.shs ||
+  fail "bounded compiler-tools cache retention"
 sh test/01_unit/scripts/bootstrap_from_scratch_rust_authority_contract_test.shs ||
   fail "immutable bootstrap authority publication"
 sh -n scripts/bootstrap/bootstrap-from-scratch.sh || fail "shell syntax: bootstrap-from-scratch.sh (windows-entry folded)"
@@ -87,6 +92,8 @@ sh test/01_unit/scripts/bootstrap_from_scratch_jobs_space_form_test.shs ||
   fail "bootstrap argument errors: --jobs space form / unknown argument"
 sh test/01_unit/scripts/bootstrap_from_scratch_arg_contract_test.shs ||
   fail "bootstrap argument parser contract"
+sh test/01_unit/scripts/bootstrap_stage3_config_knobs_test.shs ||
+  fail "Stage 3 config knobs: file workers, derived + attributed RSS cap, lane transport"
 sh test/02_integration/bootstrap_stage3_source_snapshot_test.shs ||
   fail "Stage 3 source snapshot symlinks"
 if command -v jj >/dev/null 2>&1; then
@@ -114,7 +121,7 @@ sh test/01_unit/scripts/linux_phase23_llvm23_archive_test.shs || fail "Linux LLV
 grep -q '^backend=""$' scripts/bootstrap/bootstrap-from-scratch.sh || fail "bootstrap still hides a backend selection"
 grep -Fq 'backend=llvm' scripts/bootstrap/bootstrap-from-scratch.sh || fail "LLVM+Cranelift authority does not derive its default backend"
 sh test/01_unit/scripts/bootstrap_k1_policy_selection_test.shs || fail "bootstrap canonical/alternate K1 authority behavior"
-grep -Fq 'simple-runtime = { path = "../runtime", features = ["runtime-symbol-table", "native-all-provider", "runtime-tls", "hosted-webgpu-provider"] }' src/compiler_rust/native_all/Cargo.toml || fail "native-all runtime symbol table or browser TLS is disabled"
+grep -Fq 'simple-runtime = { path = "../runtime", features = ["runtime-symbol-table", "native-all-provider", "runtime-tls", "hosted-webgpu-provider", "cuda"] }' src/compiler_rust/native_all/Cargo.toml || fail "native-all runtime symbol table, browser TLS or dlopen CUDA is disabled"
 grep -Fq 'runtime-tls = ["dep:rustls", "dep:rustls-platform-verifier", "dep:rustls-pemfile"]' src/compiler_rust/runtime/Cargo.toml || fail "browser TLS does not use platform trust"
 grep -Fq '.with_platform_verifier()' src/compiler_rust/runtime/src/value/net_tls.rs || fail "browser TLS platform verifier wiring missing"
 grep -Fq 'run_rust_authority_cargo rust-runtime-nolto-build off \' scripts/bootstrap/bootstrap-from-scratch.sh || fail "bootstrap runtime symbol-table rebuild missing"
@@ -130,7 +137,8 @@ backend_use_count=$(grep -F -- '--backend "${backend}"' scripts/bootstrap/bootst
 if grep -q -- '--backend cranelift' scripts/bootstrap/bootstrap-from-scratch.sh; then
   fail "bootstrap still hardcodes Cranelift"
 fi
-grep -q 'bootstrap_stage_sanity "${stage2_bin}"' scripts/bootstrap/bootstrap-from-scratch.sh || fail "missing Stage 2 compiler sanity"
+grep -Fq 'bootstrap_stage2_sanity_reserve_retry "${stage2_bin}"' scripts/bootstrap/bootstrap-from-scratch.sh || fail "missing Stage 2 compiler sanity"
+grep -Fq 'bootstrap_stage_sanity "$@" || bssr_status=$?' scripts/bootstrap/bootstrap-from-scratch.sh || fail "Stage 2 retry wrapper bypasses compiler sanity"
 grep -q 'bootstrap_stage_sanity "${stage3_bin}"' scripts/bootstrap/bootstrap-from-scratch.sh || fail "missing Stage 3 compiler sanity"
 sh test/01_unit/scripts/bootstrap_current_owner_contract_test.shs || fail "bootstrap current frontend milestone and dispatch behavior"
 grep -Fq 'vendored_sources_absolute=$(cygpath -m "${vendored_sources_absolute}")' scripts/bootstrap/bootstrap-from-scratch.sh || fail "Windows private Cargo config does not use a native vendor path"
@@ -143,10 +151,11 @@ grep -Fq 'unknown command '\''run'\''' scripts/bootstrap/bootstrap-from-scratch.
 grep -Fq 'stage4-essential-tools-smoke' scripts/bootstrap/bootstrap-from-scratch.sh || fail "Stage 4 essential-tools smoke hook missing"
 # Stage 4 now forwards the configured low-memory mode (NATIVE_LOW_MEMORY) instead of a literal 1.
 grep -Fq 'SIMPLE_BOOTSTRAP_LOW_MEMORY="${NATIVE_LOW_MEMORY}" \' scripts/bootstrap/bootstrap-from-scratch.sh || fail "Stage 4 structural low-memory ownership gate missing"
-grep -Fq 'jobs="${host_cpus}"' scripts/bootstrap/bootstrap-from-scratch.sh || fail "full-resource profiles do not use every detected CPU"
-grep -Fq '[ "${execution_profile}" = "clean-release" ]; then' scripts/bootstrap/bootstrap-from-scratch.sh || fail "clean release profile does not share full-resource scheduling"
+sh test/01_unit/scripts/bootstrap_startup_jobs_memory_policy_test.shs ||
+  fail "bootstrap full-count and memory-clamped scheduling policies"
+grep -Fq 'bootstrap_startup_jobs_apply_policy "${jobs_memory_policy}" "${cli_jobs}"' scripts/bootstrap/bootstrap-from-scratch.sh || fail "bootstrap does not apply the shared jobs policy"
 grep -Fq 'execution_profile=clean-release' scripts/bootstrap/bootstrap-from-scratch.sh || fail "clean release profile selection missing"
-grep -Fq 'clearing native cache (clean-release profile)' scripts/bootstrap/bootstrap-from-scratch.sh || fail "clean release profile does not clear batch caches"
+grep -Fq '[ "${execution_profile}" != clean-release ] || bootstrap_selected_action=clean' scripts/bootstrap/bootstrap-from-scratch.sh || fail "clean release profile does not select a fresh cache"
 grep -Fq -- '--low-memory' scripts/bootstrap/bootstrap-from-scratch.sh || fail "Stage 4 structural low-memory CLI flag missing"
 grep -Fq 'SIMPLE_BOOTSTRAP_DIAGNOSTICS_MODE:-off' scripts/bootstrap/bootstrap-from-scratch.sh || fail "diagnostics mode is not default-off"
 grep -Fq 'SIMPLE_KEEP_LLVM_IR=${SIMPLE_KEEP_LLVM_IR:-1}' scripts/bootstrap/bootstrap-from-scratch.sh || fail "debug mode does not preserve LLVM IR"
@@ -217,13 +226,17 @@ windows_workflow=.github/workflows/windows-build.yml
 release_workflow=.github/workflows/release.yml
 grep -Fq "group: \${{ github.workflow }}-\${{ github.event_name == 'workflow_dispatch' && github.run_id || github.ref }}" "${freebsd_workflow}" || fail "manual FreeBSD runs are not isolated"
 grep -Fq -- '--backend=cranelift' "${windows_workflow}" || fail "Windows strict bootstrap does not select Cranelift"
-grep -Fq 'uses: dtolnay/rust-toolchain@stable' "${windows_workflow}" || fail "Windows workflow does not install the policy Rust toolchain"
+policy_rust_toolchain=$(sed -n 's/^channel = "\([^"]*\)"$/\1/p' src/compiler_rust/rust-toolchain.toml)
+[ -n "$policy_rust_toolchain" ] && grep -Fq "toolchain: $policy_rust_toolchain" "${windows_workflow}" || fail "Windows workflow does not install the policy Rust toolchain"
 grep -Fq 'rustc --target "${{ matrix.rust-target }}" --print target-libdir' "${windows_workflow}" || fail "Windows workflow does not fail early on a missing policy target"
 for mingw_env in \
-  CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER \
-  CC_x86_64_pc_windows_gnu \
-  AR_x86_64_pc_windows_gnu; do
-  grep -Fq "${mingw_env}=" "${windows_workflow}" || fail "Windows MinGW environment missing: ${mingw_env}"
+  CARGO_TARGET_X86_64_PC_WINDOWS_GNULLVM_LINKER \
+  CC_x86_64_pc_windows_gnullvm \
+  AR_x86_64_pc_windows_gnullvm; do
+  # The workflow is YAML (KEY: value) and only selects Clang; the script owns the full set.
+  if [ "${mingw_env}" = CC_x86_64_pc_windows_gnullvm ]; then
+    grep -Eq "^[[:space:]]*${mingw_env}:" "${windows_workflow}" || fail "Windows MinGW environment missing: ${mingw_env}"
+  fi
   grep -Fq "${mingw_env}=" scripts/bootstrap/bootstrap-from-scratch.sh || fail "Rust authority drops MinGW environment: ${mingw_env}"
 done
 [ "$(grep -Fc -- '--target "${PLATFORM_RUST_TRIPLE}" -p simple-' scripts/bootstrap/bootstrap-from-scratch.sh)" -eq 4 ] ||
@@ -1241,7 +1254,7 @@ driver_mir_pipeline=src/compiler/80.driver/driver_pipeline_lowering.spl
 if grep -Ev '^[[:space:]]*#' "${driver_mir_pipeline}" | grep -Fq 'MirLowering('; then
   fail "driver bypasses canonical MIR lowering constructor"
 fi
-test "$(grep -Fc 'MirLowering.new_for_target(SymbolTable.new(), target_context)' "${driver_mir_pipeline}")" -eq 2 || fail "driver MIR lowering paths do not use canonical constructor"
+test "$(grep -Fc 'MirLowering.new_for_target(SymbolTable.new(),' "${driver_mir_pipeline}")" -eq 2 || fail "driver MIR lowering paths do not use canonical constructor"
 mir_lowering_constructor=src/compiler/50.mir/_MirLowering/module_lowering.spl
 for required in \
   'static fn new_for_target(symbols: SymbolTable, target_context: MirTargetContext) -> MirLowering:' \

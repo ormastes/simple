@@ -5,7 +5,7 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-06
-**Status:** OPEN
+**Status:** OPEN (re-verified LIVE 2026-11-11, lane ne15 — see addendum)
 **Found by:** orchestrator, while re-running the caret_workbench RED-before
 reproductions — a stale probe accessed `.content` on a `Result<MuxCapture,text>`
 and produced two FALSE test failures that looked like live defects.
@@ -74,3 +74,45 @@ Related family — silent-wrong-value defects found in the same session:
 (module-level `var` write discarded when the RHS reads `me`). All three fail in
 the same direction: the program keeps running and gives a plausible wrong answer.
 
+
+
+## Addendum 2026-11-11 (lane ne15) — LIVE; garbage sentinel still reproduces on the fresh seed
+
+**Verification actually run** (worktree simple-p3-ne15-20261111, tip
+f7640d20a458, fresh seed 46fe8f6b6def, seed-smoke):
+
+```sh
+SIMPLE_LIB=src SIMPLE_BINARY=$PWD/bin/simple.exe ./bin/simple.exe run \
+  build/p3-ne15/fixtures/probe_result_field.spl --mode=interpreter
+# ok_case_len=<value:0xffffffffffffffff>
+```
+
+The doc's verbatim repro still compiles and still prints the garbage sentinel
+on the fresh seed — no type error, no diagnostic. The unblock condition (a
+compile-time error naming the needed `match`/unwrap) is NOT met. Status stays
+OPEN.
+
+**Fix path / grant needed:** the guard belongs in the seed's semantic phase —
+a method/field access on a `Result<T,E>` receiver naming a member that is not
+declared on `Result` itself must be a fatal diagnostic instead of resolving to
+nothing — mirrored in the self-hosted compiler. This lane cannot rebuild the
+seed (no cargo/rustc) and has no self-hosted binary, so no code change was
+attempted. Grant for the fixing lane: rebuild the seed after the semantic
+guard lands (`cd src/compiler_rust && cargo build --release`, or the repo's
+seed-rebuild script), then re-run the repro above; expected output is a
+compile-time type error, not `<value:0xffffffffffffffff>`.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**LIVE (confirmed)** — ne15 re-verified verbatim on the fresh seed: still prints <value:0xffffffffffffffff>, no diagnostic. Fix belongs in the seed semantic phase (Result receiver member access must be a fatal error), mirrored self-hosted; seed-rebuild grant recorded.
+
+
+## Addendum 2026-11-13 (lane work/live-p3-l3-20261113 (worktree lp3-wt, base f790f7f266e = origin/release/1.0.0 tip, seed binary build-commit 46fe8f6b6def))
+
+Re-verified LIVE verbatim on this base: the doc's probe
+(`build/nb/fixtures/probe_result_field.spl` shape, `r.len()` on a
+`Result<i64, text>`) compiles with no diagnostic and prints
+`ok_case_len=<value:0xffffffffffffffff>` under `run --mode=interpret` as well
+as the default lane. The unblock condition (fatal compile-time error naming the
+needed match/unwrap) is still unmet. Guard belongs in the seed semantic phase,
+mirrored in the self-hosted compiler; no seed rebuild was performed in this lane.

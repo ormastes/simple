@@ -1,0 +1,67 @@
+#!/usr/bin/env bash
+set -euo pipefail
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+work=$(mktemp -d "${TMPDIR:-/tmp}/strict-hir-gate-test.XXXXXX")
+trap 'rm -rf -- "$work"' EXIT
+mkdir -p "$work/bin"
+cat >"$work/bin/cargo" <<'CARGO'
+#!/usr/bin/env bash
+set -eu
+[ "$*" != --version ] || { echo 'cargo 1.0.0 (fixture)'; exit 0; }
+name=hir::lower::tests::expression_tests::llvm_pipeline_optional_destination_keeps_narrow_unsafe_boundary
+[ "$*" = "test -p simple-compiler --lib $name -- --exact --list" ] ||
+[ "$*" = "test -p simple-compiler --lib $name -- --exact --nocapture --test-threads=1" ] || exit 41
+case " $* " in
+  *' --list '*)
+    case "$CASE" in
+      zero) echo '0 tests, 0 benchmarks' ;;
+      other) echo 'wrong::test: test' ;;
+      multiple) printf '%s: test\nwrong::test: test\n' "$name" ;;
+      *) printf '%s: test\n\n1 test, 0 benchmarks\n' "$name" ;;
+    esac ;;
+  *)
+    case "$CASE" in
+      failed) echo 'test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 7 filtered out;'; exit 101 ;;
+      ignored) echo 'test result: ok. 0 passed; 0 failed; 1 ignored; 0 measured; 7 filtered out;' ;;
+      run-zero) echo 'test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out;' ;;
+      forged) printf 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out;\ntest result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out;\n' ;;
+      timeout) sleep 12 ;;
+      *) echo 'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 7 filtered out;' ;;
+    esac ;;
+esac
+CARGO
+chmod +x "$work/bin/cargo"
+cat >"$work/bin/rustc" <<'RUSTC'
+#!/usr/bin/env bash
+if [ "${CASE:-}" = bad-version ]; then echo 'unavailable'; else echo 'rustc 1.0.0 (fixture)'; fi
+RUSTC
+chmod +x "$work/bin/rustc"
+passed=0
+for case_name in positive zero other multiple failed ignored run-zero forged timeout source-pin bad-version; do
+  code=0
+  deadline=60
+  if [ "$case_name" = timeout ]; then deadline=5; fi
+  pin=${GITHUB_SHA:-}
+  if [ "$case_name" = source-pin ]; then pin=invalid-source-pin; fi
+  CASE="$case_name" PATH="$work/bin:$PATH" GITHUB_SHA="$pin" STRICT_HIR_UNIT_DEADLINE_SECONDS="$deadline" \
+    bash "$root/scripts/ci/check-llvm-pipeline-strict-hir.shs" "$work/$case_name" >"$work/$case_name.log" 2>&1 || code=$?
+  if [ "$case_name" = positive ]; then
+    [ "$code" = 0 ]
+    grep -qx 'status: PASS' "$work/$case_name/result.sdn"
+    grep -qx 'verified_passed_tests: 1' "$work/$case_name/result.sdn"
+    grep -Eq '^test_source_sha256: [0-9a-f]{64}$' "$work/$case_name/result.sdn"
+    grep -Eq '^plugin_source_sha256: [0-9a-f]{64}$' "$work/$case_name/result.sdn"
+  else
+    [ "$code" != 0 ]
+    grep -qx 'status: FAIL' "$work/$case_name/result.sdn"
+    grep -qx 'verified_passed_tests: 0' "$work/$case_name/result.sdn"
+    if [ "$case_name" = timeout ]; then [ "$code" = 124 ]; fi
+    if [ "$case_name" = source-pin ]; then grep -qx 'reason: source-pin' "$work/$case_name/result.sdn"; fi
+    if [ "$case_name" = bad-version ]; then grep -qx 'reason: tool-identity' "$work/$case_name/result.sdn"; fi
+  fi
+  for key in test_source_file test_source_sha256 plugin_source_file plugin_source_sha256 cargo_version rustc_version github_run_id; do
+    [ "$(grep -c "^$key:" "$work/$case_name/result.sdn")" = 1 ]
+  done
+  passed=$((passed + 1))
+done
+printf 'PASS: strict HIR runner %s guard fixtures (not Rust HIR execution)\n' "$passed"

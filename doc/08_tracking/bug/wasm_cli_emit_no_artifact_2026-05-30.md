@@ -1,3 +1,15 @@
+## Verification 2026-11-25 — resolution re-confirmed (Windows x86_64, pinned `bin/simple.exe` v1.0.0-rc.1)
+
+Re-ran the filed repro at release/1.0.0 HEAD:
+`bin/simple.exe compile scratch_w.spl --target wasm32-wasi -o scratch_w.wasm`
+exits 1, prints `error: WASM compilation failed: compile failed: codegen:
+WebAssembly targets require the LLVM/WASM backend; rebuild `simple-driver`
+with `--features wasm` or `--features wasm-wasi``, and writes no artifact.
+The silent-failure defect stays resolved; what remains is the
+build-configuration fact documented below.
+
+---
+
 ## Closed 2026-09-13 — silent-failure defect resolved, diagnostic now emitted
 
 Status: RESOLVED (silent-failure defect) — measured 2026-09-13 on Windows x86_64 with the seed `bin/simple` v1.0.0-rc.1. The filed defect was "EXIT=3, no artifact, NO diagnostic". Re-run: `bin/simple compile scratch_w.spl --target wasm32-wasi -o scratch_w.wasm` now exits 1 and prints an actionable diagnostic — `error: WASM compilation failed: compile failed: codegen: WebAssembly targets require the LLVM/WASM backend; rebuild `simple-driver` with `--features wasm` or `--features wasm-wasi``. So the silent-failure half is gone. The second repro arm (`bin/simple build <file> --target=... --wasm-backend=wat`, filed as "EXIT=0, no file") is STALE: `build` no longer accepts a source file at all (`error: unknown build subcommand: scratch_w.spl`, exit 1) — the CLI shape changed, see CLAUDE.md on `bin/simple build`. What remains is a build-configuration fact (this seed was compiled without the `wasm`/`wasm-wasi` cargo feature), not a compiler defect, and it now reports itself. Not reopened.

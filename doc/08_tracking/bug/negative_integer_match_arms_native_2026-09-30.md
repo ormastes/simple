@@ -13,3 +13,21 @@ Reproducer evidence: first compile log in
 The original five negative arms are retained in the diagnostic source snapshot
 `policy-attempt1.spl` beside it. The streaming route diagnostic uses explicit
 comparisons pending a compiler fix; this does not change the route decision.
+
+## Landed repair — 2026-11-05
+
+PR #6840 (merged into release/1.0.0, commit a180469b01b). The flat bridge
+already preserved `Unary(Neg, IntLit)` in pattern position; the missing link
+was `hir_normalize_integer_pattern_literal`, which only folded integer casts.
+It now folds `Unary(Neg, IntLit(n))` into `IntLit(-n)` with the operand type,
+so MIR scalar match dispatch accepts negative integer arms. The i64 minimum
+stays unfolded and fails at the ordinary unsupported-pattern diagnostic.
+Non-literal negation and cast normalization unchanged.
+
+Evidence: `test/01_unit/compiler/hir/negative_integer_match_pattern_spec.spl`
+(5 scenarios) PASS under the Rust seed interpreter on an aarch64 Linux host;
+manual at `doc/06_spec/01_unit/compiler/hir/negative_integer_match_pattern_spec.md`;
+neighbor `suffixed_integer_pattern_spec.spl` 5/5 unchanged. End-to-end
+native-build validation remains pending on an admitted self-hosted binary
+(seed native-build is additionally gated by an unrelated
+snapshot-index-drift admission error).

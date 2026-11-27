@@ -1,0 +1,469 @@
+"""
+## Purpose and audience
+
+MC/DC driver for `src/compiler/30.types/type_infer/core.spl` (`occurs`,
+`unify`). Each match guard and boolean expression is driven to both outcomes
+and every condition is shown to flip the outcome independently. For compiler
+engineers changing HM unification.
+
+## Operator workflow
+
+Run `bin/simple test test/01_unit/compiler/type_infer/coverage/core_mcdc_spec.spl`
+with the pure-Simple self-hosted binary. Execution status: UNRUN (no
+self-hosted binary existed when written, 2026-11-01).
+
+## Decision inventory
+
+| Line | Decision | Conditions | Vectors (it) |
+|---|---|---|---|
+| 38 | `match resolved.kind` in occurs (12 arms) | arm selector | "38 arm <Kind>" |
+| 40 | `id == var_id` | c1 | T "40 c1 true", F "40 c1 false" |
+| 43 | `if self.occurs(var_id, p)` (Function params loop) | c1 | T "43 c1 true", F "43 c1 false" (falls to ret) |
+| 48 | `if self.occurs(var_id, e)` (Tuple loop) | c1 | T "48 c1 true", F "48 c1 false" |
+| 54 | `occurs(key) or occurs(value)` | c1 key, c2 value | TF "54 c1", FT "54 c2", FF "54 both false" |
+| 60 | `occurs(ok) or occurs(err)` | c1 ok, c2 err | TF "60 c1", FT "60 c2", FF "60 both false" |
+| 63 | `if self.occurs(var_id, a)` (Named loop) | c1 | T "63 c1 true", F "63 c1 false" |
+| 84 | guard `b1 == b2 and s1 == s2` | c1 bits, c2 sign | TT "84 both true", FT "84 c1 false", TF "84 c2 false" |
+| 86 | guard `b1 == b2` | c1 | T/F "86 c1 ..." |
+| 88-96 | Bool/Char/Str/Unit/Never same-kind arms | arm selector | "88-96 arm <Kind>" |
+| 100 | guard `id1 == id2` | c1 | T "100 c1 true", F "100 c1 false" |
+| 103 | `if self.occurs(id, ty2)` | c1 | T "103 c1 true", F "103 c1 false" |
+| 109 | `if self.occurs(id, ty1)` | c1 | T "109 c1 true", F "109 c1 false" |
+| 116 | guard `p1.len() == p2.len()` | c1 | T/F "116 c1 ..." |
+| 118/119 | while loop + `case Err` early return | c1 | Err "119 param err", none "116 c1 true" |
+| 126 | guard `e1.len() == e2.len()` | c1 | T/F "126 c1 ..." |
+| 129 | `case Err` early return in tuple loop | c1 | "129 element err" |
+| 136/140/150 | Array/Slice/Optional arms | arm | "136 arm Array", "140 arm Slice", "150 arm Optional" |
+| 145 | Dict key `case Err` | c1 | key err "145 key err", ok-then-value "145 value err" |
+| 155 | Result ok `case Err` | c1 | "155 ok err", "155 err err" |
+| 160 | guard `m1 == m2` (Ref) | c1 | T/F "160 c1 ..." |
+| 162 | guard `m1 == m2` (Ptr) | c1 | T/F "162 c1 ..." |
+| 168-172 | Unique/Shared/Weak same-kind arms; cross pairing falls to 234 | arm | "168 arm Unique", "170 arm Shared", "172 arm Weak", "168 cross Unique/Shared" |
+| 176 | guard `s1.id == s2.id and a1.len() == a2.len()` | c1 id, c2 arity | TT, FT, TF |
+| 179 | `case Err` in Named loop | c1 | "179 arg err" |
+| 186 | guard `n1 == n2` | c1 | T/F "186 c1 ..." |
+| 192 | Tensor element `case Err` | c1 | "192 element err" |
+| 196 | `dims1.len() != dims2.len()` | c1 | T "196 c1 true", F "196 c1 false" (constraints added, 203 loop) |
+| 211 | `in1.len() != in2.len()` | c1 | T "211 c1 true" |
+| 217 | `out1.len() != out2.len()` | c1 | T "217 c1 true", F "217 c1 false" (224/228 loops) |
+| 234 | mismatch default | arm | "234 arm default" |
+
+Counts: 36 decisions, 41 conditions (two 2-condition `or`, two 2-condition
+`and` guards; rest single). Gaps: occurs arm line 68 (`Layer` -> false) and
+default line 70 are both `false` outcomes and are covered only for outcome,
+not distinguishable from each other by behavior (both return false).
+Regression (fixed by PR #5747): `unify` previously had no arm for `Union`, `Isolated`,
+`Projection`, `Error`, `Any`-style leaves, so two structurally identical Union
+types fall to the Mismatch default (line 234). Spec "234 Union self-unify"
+asserts the expected (OK) behavior.
+"""
+
+# @tag:in-development
+# Tracks: doc/03_plan/compiler/generics/generics_coverage_mcdc_plan_2026-11-01.md step 3
+# @manual_section: generics-coverage-mcdc-core
+
+use compiler.types.type_infer_types.*
+use compiler.types.type_infer.context.*
+use compiler.types.type_infer.core.*
+use compiler.types.type_infer.generalization.*
+use compiler.hir.hir.*
+use compiler.frontend.core.lexer.*
+use compiler.common.diagnostics.span.{Span}
+use std.spec.step
+
+fn cmc_sp() -> Span:
+    lex_span_empty()
+
+fn cmc_mk(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: cmc_sp())
+
+fn cmc_i64() -> HirType:
+    cmc_mk(HirTypeKind.Int(64, true))
+
+fn cmc_str() -> HirType:
+    cmc_mk(HirTypeKind.Str)
+
+fn cmc_bool() -> HirType:
+    cmc_mk(HirTypeKind.Bool)
+
+fn cmc_fn(params: [HirType], ret: HirType) -> HirType:
+    cmc_mk(HirTypeKind.Function(params, ret, []))
+
+fn cmc_named(id: i64, args: [HirType]) -> HirType:
+    cmc_mk(HirTypeKind.Named(SymbolId.new(id), args))
+
+fn cmc_dim(value: i64) -> DimExpr:
+    DimExpr(kind: DimExprKind.Literal(value), span: cmc_sp())
+
+fn cmc_id(ty: HirType) -> i64:
+    match ty.kind:
+        case Infer(id, _): id
+        case _: -1
+
+fn cmc_verdict(result: Result<(), TypeInferError>) -> text:
+    match result:
+        case Ok(_): "ok"
+        case Err(TypeInferError.Mismatch(_, _, _)): "mismatch"
+        case Err(TypeInferError.OccursCheck(_, _, _)): "occurs"
+        case Err(TypeInferError.Other(message, _)): message
+        case Err(_): "other-error"
+
+fn cmc_show(ty: HirType) -> text:
+    match ty.kind:
+        case Int(bits, _): "i{bits}"
+        case Str: "str"
+        case Bool: "bool"
+        case Infer(id, _): "?{id}"
+        case _: "leaf"
+
+fn cmc_unify(a: HirType, b: HirType) -> text:
+    var ctx = HmInferContext.new()
+    cmc_verdict(ctx.unify(a, b))
+
+describe "core.spl occurs":
+    it "core.spl:40 c1 true: variable occurs in itself":
+        # @req REQ-GEN-COV-CORE-001
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(cmc_sp())
+        expect(ctx.occurs(cmc_id(v), v)).to_equal(true)
+
+    it "core.spl:40 c1 false: different variable does not occur":
+        # @req REQ-GEN-COV-CORE-002
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(cmc_sp())
+        val w = ctx.fresh_var(cmc_sp())
+        expect(ctx.occurs(cmc_id(v), w)).to_equal(false)
+
+    it "core.spl:43 c1 true: occurs in a function parameter":
+        # @req REQ-GEN-COV-CORE-003
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(cmc_sp())
+        expect(ctx.occurs(cmc_id(v), cmc_fn([cmc_i64(), v], cmc_str()))).to_equal(true)
+
+    it "core.spl:43 c1 false: params miss so the return decides (38 arm Function)":
+        # @req REQ-GEN-COV-CORE-004
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(cmc_sp())
+        expect(ctx.occurs(cmc_id(v), cmc_fn([cmc_i64()], v))).to_equal(true)
+        expect(ctx.occurs(cmc_id(v), cmc_fn([cmc_i64()], cmc_str()))).to_equal(false)
+
+    it "core.spl:48 c1 true: occurs in a tuple element":
+        # @req REQ-GEN-COV-CORE-005
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(cmc_sp())
+        expect(ctx.occurs(cmc_id(v), cmc_mk(HirTypeKind.Tuple([cmc_i64(), v])))).to_equal(true)
+
+    it "core.spl:48 c1 false: absent from every tuple element":
+        # @req REQ-GEN-COV-CORE-006
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(cmc_sp())
+        expect(ctx.occurs(cmc_id(v), cmc_mk(HirTypeKind.Tuple([cmc_i64(), cmc_str()])))).to_equal(false)
+
+    it "core.spl:54 c1 true c2 false: occurs in dict key only":
+        # @req REQ-GEN-COV-CORE-007
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(cmc_sp())
+        expect(ctx.occurs(cmc_id(v), cmc_mk(HirTypeKind.Dict(v, cmc_i64())))).to_equal(true)
+
+    it "core.spl:54 c1 false c2 true: occurs in dict value only":
+        # @req REQ-GEN-COV-CORE-008
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(cmc_sp())
+        expect(ctx.occurs(cmc_id(v), cmc_mk(HirTypeKind.Dict(cmc_str(), v)))).to_equal(true)
+
+    it "core.spl:54 both false: absent from dict":
+        # @req REQ-GEN-COV-CORE-009
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(cmc_sp())
+        expect(ctx.occurs(cmc_id(v), cmc_mk(HirTypeKind.Dict(cmc_str(), cmc_i64())))).to_equal(false)
+
+    it "core.spl:60 c1 true c2 false: occurs in result ok only":
+        # @req REQ-GEN-COV-CORE-010
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(cmc_sp())
+        expect(ctx.occurs(cmc_id(v), cmc_mk(HirTypeKind.Result(v, cmc_str())))).to_equal(true)
+
+    it "core.spl:60 c1 false c2 true: occurs in result err only":
+        # @req REQ-GEN-COV-CORE-011
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(cmc_sp())
+        expect(ctx.occurs(cmc_id(v), cmc_mk(HirTypeKind.Result(cmc_i64(), v)))).to_equal(true)
+
+    it "core.spl:60 both false: absent from result":
+        # @req REQ-GEN-COV-CORE-012
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(cmc_sp())
+        expect(ctx.occurs(cmc_id(v), cmc_mk(HirTypeKind.Result(cmc_i64(), cmc_str())))).to_equal(false)
+
+    it "core.spl:63 c1 true: occurs in a named type argument":
+        # @req REQ-GEN-COV-CORE-013
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(cmc_sp())
+        expect(ctx.occurs(cmc_id(v), cmc_named(9, [cmc_i64(), v]))).to_equal(true)
+
+    it "core.spl:63 c1 false: absent from named type arguments":
+        # @req REQ-GEN-COV-CORE-014
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(cmc_sp())
+        expect(ctx.occurs(cmc_id(v), cmc_named(9, [cmc_i64()]))).to_equal(false)
+
+    it "core.spl:38 arms Array Slice Optional Ref Ptr Unique Shared Weak Tensor reach the inner type":
+        # @req REQ-GEN-COV-CORE-015
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(cmc_sp())
+        val id = cmc_id(v)
+        expect(ctx.occurs(id, cmc_mk(HirTypeKind.Array(v, nil)))).to_equal(true)
+        expect(ctx.occurs(id, cmc_mk(HirTypeKind.Slice(v)))).to_equal(true)
+        expect(ctx.occurs(id, cmc_mk(HirTypeKind.Optional(v)))).to_equal(true)
+        expect(ctx.occurs(id, cmc_mk(HirTypeKind.Ref(v, false)))).to_equal(true)
+        expect(ctx.occurs(id, cmc_mk(HirTypeKind.Ptr(v, true)))).to_equal(true)
+        expect(ctx.occurs(id, cmc_mk(HirTypeKind.Unique(v)))).to_equal(true)
+        expect(ctx.occurs(id, cmc_mk(HirTypeKind.Shared(v)))).to_equal(true)
+        expect(ctx.occurs(id, cmc_mk(HirTypeKind.Weak(v)))).to_equal(true)
+        expect(ctx.occurs(id, cmc_mk(HirTypeKind.Tensor(v, [], nil)))).to_equal(true)
+
+    it "core.spl:38 arms Layer and default yield false":
+        # @req REQ-GEN-COV-CORE-016
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(cmc_sp())
+        expect(ctx.occurs(cmc_id(v), cmc_mk(HirTypeKind.Layer([cmc_dim(1)], [cmc_dim(2)])))).to_equal(false)
+        expect(ctx.occurs(cmc_id(v), cmc_bool())).to_equal(false)
+
+describe "core.spl unify primitive guards":
+    it "core.spl:84 both true: identical ints unify":
+        # @req REQ-GEN-COV-CORE-017
+        expect(cmc_unify(cmc_mk(HirTypeKind.Int(32, true)), cmc_mk(HirTypeKind.Int(32, true)))).to_equal("ok")
+
+    it "core.spl:84 c1 false: different bit widths mismatch":
+        # @req REQ-GEN-COV-CORE-018
+        expect(cmc_unify(cmc_mk(HirTypeKind.Int(32, true)), cmc_mk(HirTypeKind.Int(64, true)))).to_equal("mismatch")
+
+    it "core.spl:84 c2 false: different signedness mismatches":
+        # @req REQ-GEN-COV-CORE-019
+        expect(cmc_unify(cmc_mk(HirTypeKind.Int(32, true)), cmc_mk(HirTypeKind.Int(32, false)))).to_equal("mismatch")
+
+    it "core.spl:86 c1 true: same float width unifies":
+        # @req REQ-GEN-COV-CORE-020
+        expect(cmc_unify(cmc_mk(HirTypeKind.Float(64)), cmc_mk(HirTypeKind.Float(64)))).to_equal("ok")
+
+    it "core.spl:86 c1 false: different float widths mismatch":
+        # @req REQ-GEN-COV-CORE-021
+        expect(cmc_unify(cmc_mk(HirTypeKind.Float(32)), cmc_mk(HirTypeKind.Float(64)))).to_equal("mismatch")
+
+    it "core.spl:88-96 arms Bool Char Str Unit Never unify with themselves":
+        # @req REQ-GEN-COV-CORE-022
+        expect(cmc_unify(cmc_bool(), cmc_bool())).to_equal("ok")
+        expect(cmc_unify(cmc_mk(HirTypeKind.Char), cmc_mk(HirTypeKind.Char))).to_equal("ok")
+        expect(cmc_unify(cmc_str(), cmc_str())).to_equal("ok")
+        expect(cmc_unify(cmc_mk(HirTypeKind.Unit), cmc_mk(HirTypeKind.Unit))).to_equal("ok")
+        expect(cmc_unify(cmc_mk(HirTypeKind.Never), cmc_mk(HirTypeKind.Never))).to_equal("ok")
+
+    it "core.spl:234 arm default: different primitive kinds mismatch":
+        # @req REQ-GEN-COV-CORE-023
+        expect(cmc_unify(cmc_bool(), cmc_str())).to_equal("mismatch")
+
+describe "core.spl unify variables":
+    it "core.spl:100 c1 true: same variable unifies without binding":
+        # @req REQ-GEN-COV-CORE-024
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(cmc_sp())
+        expect(cmc_verdict(ctx.unify(v, v))).to_equal("ok")
+        expect(cmc_show(ctx.resolve(v))).to_equal("?{cmc_id(v)}")
+
+    it "core.spl:100 c1 false: two variables bind left to right":
+        # @req REQ-GEN-COV-CORE-025
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(cmc_sp())
+        val w = ctx.fresh_var(cmc_sp())
+        expect(cmc_verdict(ctx.unify(v, w))).to_equal("ok")
+        expect(cmc_show(ctx.resolve(v))).to_equal("?{cmc_id(w)}")
+
+    it "core.spl:103 c1 true: left variable inside right type fails occurs check":
+        # @req REQ-GEN-COV-CORE-026
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(cmc_sp())
+        expect(cmc_verdict(ctx.unify(v, cmc_mk(HirTypeKind.Optional(v))))).to_equal("occurs")
+
+    it "core.spl:103 c1 false: left variable binds to concrete right":
+        # @req REQ-GEN-COV-CORE-027
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(cmc_sp())
+        expect(cmc_verdict(ctx.unify(v, cmc_i64()))).to_equal("ok")
+        expect(cmc_show(ctx.resolve(v))).to_equal("i64")
+
+    it "core.spl:109 c1 true: right variable inside left type fails occurs check":
+        # @req REQ-GEN-COV-CORE-028
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(cmc_sp())
+        expect(cmc_verdict(ctx.unify(cmc_mk(HirTypeKind.Slice(v)), v))).to_equal("occurs")
+
+    it "core.spl:109 c1 false: right variable binds to concrete left":
+        # @req REQ-GEN-COV-CORE-029
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(cmc_sp())
+        expect(cmc_verdict(ctx.unify(cmc_str(), v))).to_equal("ok")
+        expect(cmc_show(ctx.resolve(v))).to_equal("str")
+
+describe "core.spl unify structural guards":
+    it "core.spl:116 c1 true: equal-arity functions unify params and return":
+        # @req REQ-GEN-COV-CORE-030
+        var ctx = HmInferContext.new()
+        val v = ctx.fresh_var(cmc_sp())
+        val w = ctx.fresh_var(cmc_sp())
+        expect(cmc_verdict(ctx.unify(cmc_fn([v], w), cmc_fn([cmc_i64()], cmc_str())))).to_equal("ok")
+        expect(cmc_show(ctx.resolve(v))).to_equal("i64")
+        expect(cmc_show(ctx.resolve(w))).to_equal("str")
+
+    it "core.spl:116 c1 false: different-arity functions mismatch":
+        # @req REQ-GEN-COV-CORE-031
+        expect(cmc_unify(cmc_fn([cmc_i64()], cmc_str()), cmc_fn([], cmc_str()))).to_equal("mismatch")
+
+    it "core.spl:119 param err returns before the return type is unified":
+        # @req REQ-GEN-COV-CORE-032
+        var ctx = HmInferContext.new()
+        val w = ctx.fresh_var(cmc_sp())
+        expect(cmc_verdict(ctx.unify(cmc_fn([cmc_bool()], w), cmc_fn([cmc_str()], cmc_i64())))).to_equal("mismatch")
+        expect(cmc_show(ctx.resolve(w))).to_equal("?{cmc_id(w)}")
+
+    it "core.spl:126 c1 true: equal-arity tuples unify":
+        # @req REQ-GEN-COV-CORE-033
+        expect(cmc_unify(cmc_mk(HirTypeKind.Tuple([cmc_i64(), cmc_str()])), cmc_mk(HirTypeKind.Tuple([cmc_i64(), cmc_str()])))).to_equal("ok")
+
+    it "core.spl:126 c1 false: different-arity tuples mismatch":
+        # @req REQ-GEN-COV-CORE-034
+        expect(cmc_unify(cmc_mk(HirTypeKind.Tuple([cmc_i64()])), cmc_mk(HirTypeKind.Tuple([cmc_i64(), cmc_str()])))).to_equal("mismatch")
+
+    it "core.spl:129 element err returns early":
+        # @req REQ-GEN-COV-CORE-035
+        expect(cmc_unify(cmc_mk(HirTypeKind.Tuple([cmc_bool(), cmc_str()])), cmc_mk(HirTypeKind.Tuple([cmc_i64(), cmc_str()])))).to_equal("mismatch")
+
+    it "core.spl:136 arm Array, 140 arm Slice, 150 arm Optional unify inner":
+        # @req REQ-GEN-COV-CORE-036
+        expect(cmc_unify(cmc_mk(HirTypeKind.Array(cmc_i64(), nil)), cmc_mk(HirTypeKind.Array(cmc_i64(), nil)))).to_equal("ok")
+        expect(cmc_unify(cmc_mk(HirTypeKind.Slice(cmc_i64())), cmc_mk(HirTypeKind.Slice(cmc_str())))).to_equal("mismatch")
+        expect(cmc_unify(cmc_mk(HirTypeKind.Optional(cmc_str())), cmc_mk(HirTypeKind.Optional(cmc_str())))).to_equal("ok")
+
+    it "core.spl:145 key err stops before the value":
+        # @req REQ-GEN-COV-CORE-037
+        var ctx = HmInferContext.new()
+        val w = ctx.fresh_var(cmc_sp())
+        expect(cmc_verdict(ctx.unify(cmc_mk(HirTypeKind.Dict(cmc_bool(), w)), cmc_mk(HirTypeKind.Dict(cmc_str(), cmc_i64()))))).to_equal("mismatch")
+        expect(cmc_show(ctx.resolve(w))).to_equal("?{cmc_id(w)}")
+
+    it "core.spl:145 key ok then value decides":
+        # @req REQ-GEN-COV-CORE-038
+        expect(cmc_unify(cmc_mk(HirTypeKind.Dict(cmc_str(), cmc_bool())), cmc_mk(HirTypeKind.Dict(cmc_str(), cmc_i64())))).to_equal("mismatch")
+        expect(cmc_unify(cmc_mk(HirTypeKind.Dict(cmc_str(), cmc_i64())), cmc_mk(HirTypeKind.Dict(cmc_str(), cmc_i64())))).to_equal("ok")
+
+    it "core.spl:155 ok err stops before the error type":
+        # @req REQ-GEN-COV-CORE-039
+        var ctx = HmInferContext.new()
+        val w = ctx.fresh_var(cmc_sp())
+        expect(cmc_verdict(ctx.unify(cmc_mk(HirTypeKind.Result(cmc_bool(), w)), cmc_mk(HirTypeKind.Result(cmc_str(), cmc_i64()))))).to_equal("mismatch")
+        expect(cmc_show(ctx.resolve(w))).to_equal("?{cmc_id(w)}")
+
+    it "core.spl:155 ok unifies then err decides":
+        # @req REQ-GEN-COV-CORE-040
+        expect(cmc_unify(cmc_mk(HirTypeKind.Result(cmc_str(), cmc_bool())), cmc_mk(HirTypeKind.Result(cmc_str(), cmc_i64())))).to_equal("mismatch")
+        expect(cmc_unify(cmc_mk(HirTypeKind.Result(cmc_str(), cmc_i64())), cmc_mk(HirTypeKind.Result(cmc_str(), cmc_i64())))).to_equal("ok")
+
+    it "core.spl:160 c1 true: refs with equal mutability unify":
+        # @req REQ-GEN-COV-CORE-041
+        expect(cmc_unify(cmc_mk(HirTypeKind.Ref(cmc_i64(), true)), cmc_mk(HirTypeKind.Ref(cmc_i64(), true)))).to_equal("ok")
+
+    it "core.spl:160 c1 false: refs with different mutability mismatch":
+        # @req REQ-GEN-COV-CORE-042
+        expect(cmc_unify(cmc_mk(HirTypeKind.Ref(cmc_i64(), true)), cmc_mk(HirTypeKind.Ref(cmc_i64(), false)))).to_equal("mismatch")
+
+    it "core.spl:162 c1 true: ptrs with equal mutability unify":
+        # @req REQ-GEN-COV-CORE-043
+        expect(cmc_unify(cmc_mk(HirTypeKind.Ptr(cmc_i64(), false)), cmc_mk(HirTypeKind.Ptr(cmc_i64(), false)))).to_equal("ok")
+
+    it "core.spl:162 c1 false: ptrs with different mutability mismatch":
+        # @req REQ-GEN-COV-CORE-044
+        expect(cmc_unify(cmc_mk(HirTypeKind.Ptr(cmc_i64(), false)), cmc_mk(HirTypeKind.Ptr(cmc_i64(), true)))).to_equal("mismatch")
+
+    it "core.spl:168 arm Unique, 170 arm Shared, 172 arm Weak unify the pointee":
+        # @req REQ-GEN-COV-CORE-045
+        expect(cmc_unify(cmc_mk(HirTypeKind.Unique(cmc_i64())), cmc_mk(HirTypeKind.Unique(cmc_i64())))).to_equal("ok")
+        expect(cmc_unify(cmc_mk(HirTypeKind.Shared(cmc_i64())), cmc_mk(HirTypeKind.Shared(cmc_i64())))).to_equal("ok")
+        expect(cmc_unify(cmc_mk(HirTypeKind.Weak(cmc_i64())), cmc_mk(HirTypeKind.Weak(cmc_str())))).to_equal("mismatch")
+
+    it "core.spl:168 cross Unique/Shared falls to the mismatch default":
+        # @req REQ-GEN-COV-CORE-046
+        expect(cmc_unify(cmc_mk(HirTypeKind.Unique(cmc_i64())), cmc_mk(HirTypeKind.Shared(cmc_i64())))).to_equal("mismatch")
+
+    it "core.spl:176 both true: same symbol and arity unify":
+        # @req REQ-GEN-COV-CORE-047
+        expect(cmc_unify(cmc_named(5, [cmc_i64()]), cmc_named(5, [cmc_i64()]))).to_equal("ok")
+
+    it "core.spl:176 c1 false: different symbols mismatch":
+        # @req REQ-GEN-COV-CORE-048
+        expect(cmc_unify(cmc_named(5, [cmc_i64()]), cmc_named(6, [cmc_i64()]))).to_equal("mismatch")
+
+    it "core.spl:176 c2 false: same symbol different arity mismatch":
+        # @req REQ-GEN-COV-CORE-049
+        expect(cmc_unify(cmc_named(5, [cmc_i64()]), cmc_named(5, [cmc_i64(), cmc_str()]))).to_equal("mismatch")
+
+    it "core.spl:179 arg err returns early":
+        # @req REQ-GEN-COV-CORE-050
+        expect(cmc_unify(cmc_named(5, [cmc_bool()]), cmc_named(5, [cmc_i64()]))).to_equal("mismatch")
+
+    it "core.spl:186 c1 true: same type parameter name unifies":
+        # @req REQ-GEN-COV-CORE-051
+        expect(cmc_unify(cmc_mk(HirTypeKind.TypeParam("T", [])), cmc_mk(HirTypeKind.TypeParam("T", [])))).to_equal("ok")
+
+    it "core.spl:186 c1 false: different type parameter names mismatch":
+        # @req REQ-GEN-COV-CORE-052
+        expect(cmc_unify(cmc_mk(HirTypeKind.TypeParam("T", [])), cmc_mk(HirTypeKind.TypeParam("U", [])))).to_equal("mismatch")
+
+describe "core.spl unify tensor and layer":
+    it "core.spl:192 element err returns before dims are compared":
+        # @req REQ-GEN-COV-CORE-053
+        var ctx = HmInferContext.new()
+        val left = cmc_mk(HirTypeKind.Tensor(cmc_bool(), [cmc_dim(1)], nil))
+        val right = cmc_mk(HirTypeKind.Tensor(cmc_i64(), [cmc_dim(1), cmc_dim(2)], nil))
+        expect(cmc_verdict(ctx.unify(left, right))).to_equal("mismatch")
+        expect(ctx.dim_solver.constraints.len()).to_equal(0)
+
+    it "core.spl:196 c1 true: dimension count mismatch":
+        # @req REQ-GEN-COV-CORE-054
+        val left = cmc_mk(HirTypeKind.Tensor(cmc_i64(), [cmc_dim(1)], nil))
+        val right = cmc_mk(HirTypeKind.Tensor(cmc_i64(), [cmc_dim(1), cmc_dim(2)], nil))
+        expect(cmc_unify(left, right)).to_equal("tensor dimension count mismatch: 1 vs 2")
+
+    it "core.spl:196 c1 false: equal dims add one constraint per dimension":
+        # @req REQ-GEN-COV-CORE-055
+        var ctx = HmInferContext.new()
+        val left = cmc_mk(HirTypeKind.Tensor(cmc_i64(), [cmc_dim(1), cmc_dim(2)], nil))
+        val right = cmc_mk(HirTypeKind.Tensor(cmc_i64(), [cmc_dim(1), cmc_dim(2)], nil))
+        expect(cmc_verdict(ctx.unify(left, right))).to_equal("ok")
+        expect(ctx.dim_solver.constraints.len()).to_equal(2)
+
+    it "core.spl:211 c1 true: layer input count mismatch":
+        # @req REQ-GEN-COV-CORE-056
+        val left = cmc_mk(HirTypeKind.Layer([cmc_dim(1)], [cmc_dim(2)]))
+        val right = cmc_mk(HirTypeKind.Layer([cmc_dim(1), cmc_dim(3)], [cmc_dim(2)]))
+        expect(cmc_unify(left, right)).to_equal("layer input dimension count mismatch: 1 vs 2")
+
+    it "core.spl:217 c1 true: layer output count mismatch":
+        # @req REQ-GEN-COV-CORE-057
+        val left = cmc_mk(HirTypeKind.Layer([cmc_dim(1)], [cmc_dim(2)]))
+        val right = cmc_mk(HirTypeKind.Layer([cmc_dim(1)], []))
+        expect(cmc_unify(left, right)).to_equal("layer output dimension count mismatch: 1 vs 0")
+
+    it "core.spl:217 c1 false: matching layers add input and output constraints":
+        # @req REQ-GEN-COV-CORE-058
+        var ctx = HmInferContext.new()
+        val left = cmc_mk(HirTypeKind.Layer([cmc_dim(1)], [cmc_dim(2), cmc_dim(3)]))
+        val right = cmc_mk(HirTypeKind.Layer([cmc_dim(1)], [cmc_dim(2), cmc_dim(3)]))
+        expect(cmc_verdict(ctx.unify(left, right))).to_equal("ok")
+        expect(ctx.dim_solver.constraints.len()).to_equal(3)
+
+describe "core.spl unify missing arms":
+    it "core.spl:234 Union self-unify should succeed":
+        # @req REQ-GEN-COV-CORE-059
+        step("Unify two structurally identical unions (Union arm added by PR #5747)")
+        val left = cmc_mk(HirTypeKind.Union([cmc_i64(), cmc_str()]))
+        val right = cmc_mk(HirTypeKind.Union([cmc_i64(), cmc_str()]))
+        expect(cmc_unify(left, right)).to_equal("ok")

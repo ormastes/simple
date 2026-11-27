@@ -1,7 +1,7 @@
 # Seed accepts a bodyless `if` block that native-build rejects (front-end divergence)
 
 - **Filed:** 2026-08-22
-- **Status:** OPEN — evidence complete, fix proposed but NOT landed (seed change, see "Why not fixed here")
+- **Status:** FIX-IMPLEMENTED-VERIFICATION-PENDING (2026-11-09) — the proposed seed fix landed 2026-08-23 in `544b1b73411` (`allow_empty_body` threaded through `parse_block_after_newline_allowing_empty`; `parse_condition_block` passes `false`), pinned by `src/compiler_rust/parser/tests/bodyless_condition_block_gate.rs`. This record was never updated. Re-verified 2026-11-09: `cargo test -p simple-parser --test bodyless_condition_block_gate` 5/5 green; the deployed seed rejects shape A with `Unexpected token: expected Indent, found Dedent`; pure-Simple parity spec `test/01_unit/compiler/parser/parser_bodyless_block_header_parity_spec.spl` 4/4 green (seed-interpreted). Native verification of the self-hosted binary is still pending. Residual (out of scope, opposite direction): the seed accepts an empty trailing `case nil:` match arm, the pure-Simple front end rejects it (`expected Indent, got Dedent`); owned code has 0 such sites per the scan below, so it is a dead seed leniency — file separately if it ever matters.
 - **Class:** seed-lenient / stage1-strict front-end divergence. Same family as
   `hir_unresolved_name_import_reachability_2026-08-22.md` and the
   function-body-local `use` case: source that the seed's Rust parser accepts is

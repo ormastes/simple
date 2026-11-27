@@ -8,6 +8,7 @@ use compiler.backend.cranelift_retained_params_v2.{
     CRANELIFT_RETAINED_OPTIMIZATION_V2, cranelift_retained_params_encode_v2,
     cranelift_retained_params_decode_v2}
 use compiler.common.driver_core_types.{CompileResult}
+use common.plugin.iface_id.{ParamExt}
 
 fn _codegen_error_text(result: CompileResult) -> text:
     match result:
@@ -42,7 +43,7 @@ describe "retained Cranelift V2 params across the K1 port":
             Some("x86_64-pc-windows-msvc"), Some("x86-64-v3"), ["avx2", "bmi2"])
         expect(params.optimization).to_equal(CRANELIFT_RETAINED_OPTIMIZATION_V2)
         expect(params.ext.len()).to_equal(3)
-        val decoded = cranelift_retained_params_decode_v2(params)
+        val decoded = cranelift_retained_params_decode_v2(params).unwrap()
         expect(decoded.target_triple ?? "").to_equal("x86_64-pc-windows-msvc")
         expect(decoded.cpu ?? "").to_equal("x86-64-v3")
         expect(decoded.features.len()).to_equal(2)
@@ -51,7 +52,20 @@ describe "retained Cranelift V2 params across the K1 port":
     it "decodes an unretained request as absent values":
         val options = compileoptions_default_options()
         val decoded = cranelift_retained_params_decode_v2(
-            cranelift_retained_params_encode_v2(options, nil, nil, []))
+            cranelift_retained_params_encode_v2(options, nil, nil, [])).unwrap()
         expect(decoded.target_triple == nil).to_equal(true)
         expect(decoded.cpu == nil).to_equal(true)
         expect(decoded.features.len()).to_equal(0)
+
+    it "rejects a retained payload with invalid UTF-8 instead of substituting U+FFFD":
+        val options = compileoptions_default_options()
+        var params = cranelift_retained_params_encode_v2(options, nil, nil, [])
+        params.ext = [ParamExt("simple.codegen.cranelift.retained_cpu.v2", 2,
+            [0x78u8, 0xFFu8, 0x36u8], "sha256:simple.codegen.cranelift.retained_text_utf8.v2")]
+        match cranelift_retained_params_decode_v2(params):
+            case Ok(_):
+                expect("decoded").to_equal("rejected")
+            case Err(message):
+                expect(message.contains("retained_cpu.v2")).to_equal(true)
+                expect(message.contains("invalid UTF-8")).to_equal(true)
+                expect(message.contains("byte offset 1")).to_equal(true)

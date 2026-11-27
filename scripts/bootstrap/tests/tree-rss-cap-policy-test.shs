@@ -64,30 +64,32 @@ fixture() { # NAME -> the two variables a TEST needs to substitute host memory
 
 # 2a. Job-scaled ceiling and refusal reporting (monitor mode: fixtures are
 #     refused while enforcing, and the ceiling check is mode-independent).
+#     Constants follow the eighth widening (static ceiling 58720256 KiB; 80 jobs
+#     on the 134 GB fixture: 3145728 + 80 x 1048576 = 87031808 KiB).
 guard over.env $(fixture meminfo.big) -- --rss-cap-mode=monitor \
-    --compiler-jobs=80 --max-rss-kib=33554432 --cap-source=explicit-env --cap-bound=explicit
-[ "$guard_status" -eq 125 ] || fail "32 GiB cap for 80 jobs: exit $guard_status, want 125"
+    --compiler-jobs=80 --max-rss-kib=90000000 --cap-source=explicit-env --cap-bound=explicit
+[ "$guard_status" -eq 125 ] || fail "90000000 KiB cap for 80 jobs: exit $guard_status, want 125"
 [ "$(field over.env status)" = policy-refused ] || fail 'refusal receipt has no status=policy-refused'
-[ "$(field over.env budget_ceiling_kib)" = 24117248 ] || fail "80-job ceiling: $(field over.env budget_ceiling_kib)"
+[ "$(field over.env budget_ceiling_kib)" = 87031808 ] || fail "80-job ceiling: $(field over.env budget_ceiling_kib)"
 [ "$(field over.env host_total_source)" = fixture ] || fail 'refusal receipt does not attribute host memory'
 [ "$(field over.env cap_source)" = explicit-env ] && [ "$(field over.env cap_bound)" = explicit ] ||
     fail 'refusal receipt does not record the cap source'
 case "$(field over.env refusal_reason)" in
-    'cap 33554432 KiB must be between 1 and 24117248 KiB'*) ;;
+    'cap 90000000 KiB must be between 1 and 87031808 KiB'*) ;;
     *) fail "refusal reason missing from receipt: $(field over.env refusal_reason)" ;;
 esac
-grep -Fq 'rss-guard: cap 33554432 KiB must be between 1 and 24117248 KiB' "$scratch/over.env.out" ||
+grep -Fq 'rss-guard: cap 90000000 KiB must be between 1 and 87031808 KiB' "$scratch/over.env.out" ||
     fail 'refusal reason missing from stderr'
 ok
 
 guard unknown.env $(fixture meminfo.none) -- --rss-cap-mode=monitor \
-    --compiler-jobs=80 --max-rss-kib=17000000
-[ "$guard_status" -eq 125 ] && [ "$(field unknown.env budget_ceiling_kib)" = 16777216 ] ||
+    --compiler-jobs=80 --max-rss-kib=59000000
+[ "$guard_status" -eq 125 ] && [ "$(field unknown.env budget_ceiling_kib)" = 58720256 ] ||
     fail "unreadable host RAM must not widen the ceiling (exit $guard_status)"
 ok
 
-guard undeclared.env -- --max-rss-kib=17000000
-[ "$guard_status" -eq 125 ] && [ "$(field undeclared.env budget_ceiling_kib)" = 16777216 ] &&
+guard undeclared.env -- --max-rss-kib=59000000
+[ "$guard_status" -eq 125 ] && [ "$(field undeclared.env budget_ceiling_kib)" = 58720256 ] &&
     [ "$(field undeclared.env host_total_source)" = undeclared ] ||
     fail "an undeclared worker count must keep the fixed ceiling (exit $guard_status)"
 ok
@@ -122,12 +124,14 @@ guard admit.env $(fixture meminfo.big) -- --rss-cap-mode=monitor \
 ok
 
 # 2b. The fixture hook must not be able to size an ENFORCED cap.
-#     (i) the review's exact replay: fake MemTotal, 128 jobs, 36,000,000 KiB.
+#     (i) the review's exact replay: fake MemTotal, 128 jobs, a cap above the
+#         static ceiling (36,000,000 KiB then; 60,000,000 KiB since the 48 GiB
+#         widening).
 guard exploit.env "SIMPLE_PROCESS_TREE_RSS_MEMINFO_PATH=$scratch/meminfo.fake" -- \
-    --compiler-jobs=128 --max-rss-kib=36000000
+    --compiler-jobs=128 --max-rss-kib=60000000
 [ "$guard_status" -eq 125 ] || fail "fixture without its switch: exit $guard_status, want 125"
 [ "$(field exploit.env host_total_source)" = fixture ] &&
-    [ "$(field exploit.env budget_ceiling_kib)" = 16777216 ] ||
+    [ "$(field exploit.env budget_ceiling_kib)" = 58720256 ] ||
     fail 'unswitched fixture moved the ceiling or was not attributed'
 case "$(field exploit.env refusal_reason)" in
     *'requires SIMPLE_PROCESS_TREE_RSS_TEST_FIXTURE=1'*) ;;
@@ -137,9 +141,9 @@ ok
 #     (ii) with the switch it is still refused while the cap is enforced,
 #          both by default and when enforce is spelled out.
 for mode in '' --rss-cap-mode=enforce; do
-    guard enforce.env $(fixture meminfo.fake) -- $mode --compiler-jobs=128 --max-rss-kib=36000000
+    guard enforce.env $(fixture meminfo.fake) -- $mode --compiler-jobs=128 --max-rss-kib=60000000
     [ "$guard_status" -eq 125 ] || fail "fixture under enforce ($mode): exit $guard_status, want 125"
-    [ "$(field enforce.env budget_ceiling_kib)" = 16777216 ] ||
+    [ "$(field enforce.env budget_ceiling_kib)" = 58720256 ] ||
         fail 'fixture under enforce moved the ceiling'
     case "$(field enforce.env refusal_reason)" in
         *'refused while the RSS cap is enforced'*) ;;
@@ -170,8 +174,264 @@ guard realhost.env -- --compiler-jobs=80 --max-rss-kib="$real_cap"
     fail 'enforced real-host receipt is wrong'
 ok
 
+# 2c. Whole-build phase plan (Stage 2 compiler tests) end to end on the REAL
+#     host, enforce mode: the plan's cap/ceiling pair for 8 requested threads
+#     is what the campaign watchdog receives (--compiler-jobs = the fitted
+#     worker count, --compiler-ceiling-kib only when elevated). Admitted when
+#     3/4 of MemAvailable covers the cap at admission time, refused with the
+#     headroom reason otherwise, and a host too small for one worker is a
+#     policy refusal naming the 18 GiB floor. No branch is a skip.
+plan_status=0
+# Serial tool rows, as both Stage 2 entry points pin them (required by the
+# compiler_cli_build row cap).
+plan=$(BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=1 sh "$policy" --whole-build-plan 8 "" 2>"$scratch/plan.err") || plan_status=$?
+if [ "$plan_status" -eq 0 ]; then
+    plan_workers=$(printf '%s\n' "$plan" | sed -n 's/^workers=//p')
+    plan_cap=$(printf '%s\n' "$plan" | sed -n 's/^cap_kib=//p')
+    plan_ceiling=$(printf '%s\n' "$plan" | sed -n 's/^ceiling_kib=//p')
+    plan_bound=$(printf '%s\n' "$plan" | sed -n 's/^bound=//p')
+    case "$plan_bound" in
+        small-host-one-worker*)
+            # Small-host mode: exactly one worker under the host budget.
+            [ "$plan_workers" -eq 1 ] && printf '%s\n' "$plan" | grep -Fq 'SMALL-HOST MODE' ||
+                fail "small-host plan is not one logged worker: $plan" ;;
+        *)
+            [ "$plan_workers" -ge 1 ] && [ "$plan_workers" -le 8 ] &&
+                [ $((plan_cap / plan_workers)) -ge 18874368 ] ||
+                fail "whole-build plan does not price >= 18 GiB per worker: $plan" ;;
+    esac
+    plan_ceiling_arg=
+    [ "$plan_ceiling" -eq 0 ] || plan_ceiling_arg=--compiler-ceiling-kib=$plan_ceiling
+    plan_avail=$(awk '/^MemAvailable:/ { print $2; exit }' /proc/meminfo 2>/dev/null || :)
+    guard plan.env -- --compiler-jobs="$plan_workers" --max-rss-kib="$plan_cap" $plan_ceiling_arg \
+        --cap-source=phase-policy --cap-bound="${plan_bound:-worker-floor}"
+    if [ "$guard_status" -eq 7 ]; then
+        [ "$(field plan.env status)" = complete ] && [ "$(field plan.env rss_limit_kib)" = "$plan_cap" ] &&
+            [ "$(field plan.env compiler_jobs)" = "$plan_workers" ] &&
+            [ "$(field plan.env cap_source)" = phase-policy ] ||
+            fail "whole-build plan receipt is wrong: $(cat "$scratch/plan.env")"
+        if [ -n "$plan_ceiling_arg" ]; then
+            [ "$(field plan.env compiler_ceiling_admission)" = elevated ] &&
+                [ "$(field plan.env compiler_ceiling_admitted_kib)" = "$plan_ceiling" ] ||
+                fail "elevated whole-build ceiling not recorded: $(cat "$scratch/plan.env")"
+        fi
+    elif [ "$guard_status" -eq 125 ] && [ -n "$plan_ceiling_arg" ]; then
+        # Only a real headroom shortfall may refuse the pair the plan sized
+        # under 3/4 of MemAvailable moments earlier.
+        case "$(field plan.env refusal_reason)" in
+            *available_bound=*) ;;
+            *) fail "whole-build plan refused for a non-headroom reason: $(field plan.env refusal_reason)" ;;
+        esac
+        [ -n "$plan_avail" ] && [ $((plan_avail / 4 * 3)) -lt "$plan_cap" ] ||
+            fail "whole-build plan refused although 3/4 of MemAvailable ($plan_avail KiB) covers $plan_cap KiB"
+    else
+        fail "whole-build plan pair not admitted: exit $guard_status: $(tail -3 "$scratch/plan.env.out")"
+    fi
+elif grep -Fq 'compiler_cli_build row needs 62914560 KiB' "$scratch/plan.err"; then
+    : # host budget holds 2 workers but not the run-11 cli row: refused up front
+else
+    grep -Fq 'cannot fit one full-CLI build worker' "$scratch/plan.err" &&
+        grep -Fq 'worker floor 18874368 KiB' "$scratch/plan.err" ||
+        fail "whole-build plan failed on this host for a reason other than its size: $(cat "$scratch/plan.err")"
+fi
+ok
+
+# 2d. Row-owner provenance (run-process-group-timeout.shs, the real watchdog):
+#     a user-set diagnostic cap is attributed explicit-env/explicit in the row
+#     receipt; the same cap published by the phase policy carries
+#     phase-policy/worker-floor; a malformed attribution is refused (125).
+row() { # RECEIPT [ENV=VALUE ...] -> row_status
+    row_receipt=$1; shift
+    row_status=0
+    env SIMPLE_PROCESS_TREE_RSS_RECEIPT="$scratch/$row_receipt" SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=5859375 "$@" \
+        sh "$root/scripts/bootstrap/run-process-group-timeout.shs" 30 2 /bin/sh -c 'exit 7' \
+        >"$scratch/$row_receipt.out" 2>&1 || row_status=$?
+}
+row diag.env
+[ "$row_status" -eq 7 ] && [ "$(field diag.env cap_source)" = explicit-env ] &&
+    [ "$(field diag.env cap_bound)" = explicit ] ||
+    fail "diagnostic pair not attributed explicit-env in the row receipt (exit $row_status): $(cat "$scratch/diag.env" 2>/dev/null | head -5)"
+row policy.env SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE=phase-policy SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND=worker-floor
+[ "$row_status" -eq 7 ] && [ "$(field policy.env cap_source)" = phase-policy ] &&
+    [ "$(field policy.env cap_bound)" = worker-floor ] && [ "$(field policy.env rss_limit_kib)" = 5859375 ] ||
+    fail "published phase-policy attribution missing from the row receipt (exit $row_status): $(cat "$scratch/policy.env" 2>/dev/null | head -5)"
+row bad.env SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE='Phase Policy' SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND=worker-floor
+[ "$row_status" -eq 125 ] && grep -Fq 'invalid published cap attribution' "$scratch/bad.env.out" ||
+    fail "malformed attribution was not refused by the row owner (exit $row_status)"
+ok
+
+# 2e. Phase C tool-build rows (compiler_cli_build / test_runner_build) through
+#     the REAL argv builder (phase-c-backend-commands.shs) and the REAL owner.
+#     Run 6 (2026-11-06, release/1.0.0 a89f4c436db): PR #7037 prefixed the
+#     argv with `env SIMPLE_FILE_WORKERS=0`, so the owner no longer saw
+#     argv[1]=native-build, unset the published cap+ceiling pair and killed
+#     the full-CLI build at the default budget (cap_source=default
+#     cap_bound=budget rss_limit_kib=13631488) under a 54525952 KiB phase plan.
+#     published pair -> row cap = phase cap, cap_source=phase-policy;
+#     nothing published -> default; user cap without the pair -> explicit-env.
+#     The SIMPLE_FILE_WORKERS=1 default (and explicit 0 opt-out) must reach the compiler.
+printf '#!/bin/sh\nprintf "%%s\\n" "${SIMPLE_FILE_WORKERS:-unset}" >"%s"\nexit 7\n' \
+    "$scratch/fakec.fw" >"$scratch/fakec"
+chmod +x "$scratch/fakec"
+tool_row() { # RECEIPT [ENV=VALUE ...] -> tool_status (subshell keeps env local)
+    tool_receipt=$1; shift
+    rm -f "$scratch/fakec.fw"
+    tool_status=0
+    (
+        unset SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB SIMPLE_FILE_WORKERS native_internal_timeout
+        for tool_kv in "$@"; do export "$tool_kv"; done
+        source_root=$root
+        . "$root/scripts/bootstrap/phase-c-backend-commands.shs"
+        run_matrix_task() {
+            shift 2 # task, --verification-expect-executable=
+            SIMPLE_PROCESS_TREE_RSS_RECEIPT="$scratch/$tool_receipt" \
+                sh "$root/scripts/bootstrap/run-process-group-timeout.shs" 30 2 "$@"
+        }
+        bootstrap_phase_c_run_tool_build llvm "${tool_task:-compiler_cli_build}" "$scratch/fakec" entry.spl \
+            "$scratch/out" "$scratch/cache" 2
+    ) >"$scratch/$tool_receipt.out" 2>&1 || tool_status=$?
+}
+tool_row tool-policy.env SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=5859375 \
+    SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE=phase-policy SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND=worker-floor
+[ "$tool_status" -eq 7 ] && [ "$(field tool-policy.env cap_source)" = phase-policy ] &&
+    [ "$(field tool-policy.env cap_bound)" = worker-floor ] &&
+    [ "$(field tool-policy.env rss_limit_kib)" = 5859375 ] &&
+    [ "$(field tool-policy.env compiler_jobs)" = 2 ] &&
+    [ "$(cat "$scratch/fakec.fw" 2>/dev/null)" = 1 ] ||
+    fail "tool-build row did not inherit the published phase-policy cap (exit $tool_status): $(grep -E '^(cap_|rss_limit|compiler_jobs)' "$scratch/tool-policy.env" 2>/dev/null | tr '\n' ' ') $(tail -2 "$scratch/tool-policy.env.out")"
+ok
+tool_row tool-optout.env SIMPLE_FILE_WORKERS=0
+[ "$tool_status" -eq 7 ] && [ "$(cat "$scratch/fakec.fw" 2>/dev/null)" = 0 ] ||
+    fail "tool-build row did not forward explicit SIMPLE_FILE_WORKERS=0 opt-out"
+ok
+tool_row tool-default.env
+[ "$tool_status" -eq 7 ] && [ "$(field tool-default.env cap_source)" = default ] &&
+    [ "$(field tool-default.env compiler_jobs)" = 2 ] &&
+    [ "$(cat "$scratch/fakec.fw" 2>/dev/null)" = 1 ] ||
+    fail "tool-build row without a published cap is not default (exit $tool_status): $(tail -2 "$scratch/tool-default.env.out")"
+ok
+tool_row tool-explicit.env SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=5859375
+[ "$tool_status" -eq 7 ] && [ "$(field tool-explicit.env cap_source)" = explicit-env ] &&
+    [ "$(field tool-explicit.env cap_bound)" = explicit ] &&
+    [ "$(field tool-explicit.env rss_limit_kib)" = 5859375 ] ||
+    fail "tool-build row user cap not attributed explicit-env (exit $tool_status): $(tail -2 "$scratch/tool-explicit.env.out")"
+ok
+# Run-6 replay with the real elevated pair for 2 build threads. Admitted ->
+# the row runs at the plan cap under the elevated ceiling; refused -> only for
+# real headroom (125). Never the default budget.
+if replay_plan=$(BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=1 sh "$policy" --whole-build-plan 2 "" 2>/dev/null); then
+    replay_cap=$(printf '%s\n' "$replay_plan" | sed -n 's/^cap_kib=//p')
+    replay_ceiling=$(printf '%s\n' "$replay_plan" | sed -n 's/^ceiling_kib=//p')
+    replay_bound=$(printf '%s\n' "$replay_plan" | sed -n 's/^bound=//p')
+    replay_ceiling_kv=SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE=phase-policy
+    [ "$replay_ceiling" -eq 0 ] || replay_ceiling_kv=SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB=$replay_ceiling
+    tool_row tool-replay.env SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB="$replay_cap" "$replay_ceiling_kv" \
+        SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE=phase-policy SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND="${replay_bound:-worker-floor}"
+    [ "$(field tool-replay.env cap_source)" != default ] ||
+        fail "run-6 replay: tool-build row fell back to the default budget: $(cat "$scratch/tool-replay.env")"
+    if [ "$tool_status" -eq 7 ]; then
+        [ "$(field tool-replay.env cap_source)" = phase-policy ] &&
+            [ "$(field tool-replay.env rss_limit_kib)" = "$replay_cap" ] ||
+            fail "run-6 replay: row cap is not the phase cap $replay_cap: $(grep -E '^(cap_|rss_limit)' "$scratch/tool-replay.env" | tr '\n' ' ')"
+        [ "$replay_ceiling" -eq 0 ] || [ "$(field tool-replay.env compiler_ceiling_admission)" = elevated ] ||
+            fail "run-6 replay: elevated ceiling $replay_ceiling not admitted: $(cat "$scratch/tool-replay.env")"
+    else
+        [ "$tool_status" -eq 125 ] && grep -Fq 'available_bound=' "$scratch/tool-replay.env.out" ||
+            fail "run-6 replay refused for a non-headroom reason (exit $tool_status): $(tail -3 "$scratch/tool-replay.env.out")"
+    fi
+else
+    : # host too small for one full-CLI worker: 2c already pins that refusal
+fi
+ok
+
+# 2f. compiler_cli_build row cap (run 11, 2026-11-06, Stage 2 7daae128...):
+#     with SIMPLE_MIR_SHARD_COUNT=8 the row was killed at the 54525952 KiB
+#     phase cap (two MIR shard workers at 24.0 + 25.2 GiB + 1.1 GiB
+#     coordinator, peak 54579388). The phase policy publishes a separate
+#     row cap for compiler_cli_build ONLY; the real argv builder scopes it
+#     around that row, every other row keeps the phase cap, and the
+#     environment is restored afterwards. Small numbers keep this under the
+#     default ceiling (no host headroom needed); the plan numbers
+#     (62914560 on the run-11 host) are pinned by the policy selftest.
+tool_row_cap_env="BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=1
+SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=5859375
+SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE=phase-policy
+SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND=worker-floor
+SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CAP_KIB=6291456
+SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CEILING_KIB=0
+SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_BOUND=cli-row-mir-shards"
+# shellcheck disable=SC2086
+tool_row tool-cli-row.env $tool_row_cap_env
+[ "$tool_status" -eq 7 ] && [ "$(field tool-cli-row.env cap_source)" = phase-policy ] &&
+    [ "$(field tool-cli-row.env cap_bound)" = cli-row-mir-shards ] &&
+    [ "$(field tool-cli-row.env rss_limit_kib)" = 6291456 ] ||
+    fail "compiler_cli_build did not get its published row cap (exit $tool_status): $(grep -E '^(cap_|rss_limit)' "$scratch/tool-cli-row.env" 2>/dev/null | tr '\n' ' ') $(tail -2 "$scratch/tool-cli-row.env.out")"
+ok
+tool_task=test_runner_build
+# shellcheck disable=SC2086
+tool_row tool-runner-row.env $tool_row_cap_env
+tool_task=
+[ "$tool_status" -eq 7 ] && [ "$(field tool-runner-row.env cap_bound)" = worker-floor ] &&
+    [ "$(field tool-runner-row.env rss_limit_kib)" = 5859375 ] ||
+    fail "test_runner_build did not keep the phase cap (exit $tool_status): $(grep -E '^(cap_|rss_limit)' "$scratch/tool-runner-row.env" 2>/dev/null | tr '\n' ' ') $(tail -2 "$scratch/tool-runner-row.env.out")"
+ok
+# Scoped: after the cli row returns, the phase pair is back for the next row.
+tool_restore_status=0
+(
+    for tool_kv in $tool_row_cap_env; do export "$tool_kv"; done
+    source_root=$root
+    . "$root/scripts/bootstrap/phase-c-backend-commands.shs"
+    run_matrix_task() { :; }
+    bootstrap_phase_c_run_tool_build llvm compiler_cli_build "$scratch/fakec" entry.spl "$scratch/out" "$scratch/cache" 2
+    [ "$SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:$SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND:${SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB-unset}" = \
+        5859375:worker-floor:unset ]
+) || tool_restore_status=$?
+[ "$tool_restore_status" -eq 0 ] || fail "compiler_cli_build row cap leaked into the phase environment"
+ok
+# Fail closed: a malformed published row cap refuses the row, never runs it
+# at the phase cap or the default budget.
+# shellcheck disable=SC2086
+tool_row tool-cli-bad.env $tool_row_cap_env SIMPLE_BOOTSTRAP_TREE_RSS_CLI_ROW_CAP_KIB=60g
+[ "$tool_status" -ne 0 ] && [ "$tool_status" -ne 7 ] && [ ! -f "$scratch/fakec.fw" ] &&
+    grep -Fq 'CLI_ROW_CAP_KIB' "$scratch/tool-cli-bad.env.out" ||
+    fail "malformed compiler_cli_build row cap was not refused (exit $tool_status): $(tail -2 "$scratch/tool-cli-bad.env.out")"
+ok
+# Run-11 replay, deterministic: the plan priced from an injected run-11 host
+# (MemTotal 127600812, MemAvailable 99095224 at row start; fixture hooks are
+# honoured only in monitor mode) publishes the 60 GiB compiler_cli_build row
+# beside the 58 GiB two-worker phase cap (60817408 KiB at the 18 GiB floor,
+# 2026-11-21); a host whose budget holds the two
+# workers but not the row is refused up front, naming both numbers.
+printf 'MemTotal:       127600812 kB\nMemFree:        90000000 kB\nMemAvailable:    99095224 kB\n' >"$scratch/meminfo.run11"
+printf 'MemTotal:       127600812 kB\nMemFree:        70000000 kB\nMemAvailable:    82000000 kB\n' >"$scratch/meminfo.tight"
+run11_plan() { # MEMINFO WORKERS [ENV=VALUE ...] -> stdout of --whole-build-plan, status
+    run11_mem=$1 run11_workers=$2; shift 2
+    env SIMPLE_BOOTSTRAP_RSS_CAP_MODE=monitor BOOTSTRAP_TREE_RSS_TEST_FIXTURE=1 \
+        BOOTSTRAP_TREE_RSS_MEMINFO_PATH="$scratch/$run11_mem" BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=1 "$@" \
+        sh "$policy" --whole-build-plan "$run11_workers" "" 2>&1
+}
+replay_plan=$(run11_plan meminfo.run11 8) || fail "run-11 replay plan refused: $replay_plan"
+[ "$(printf '%s\n' "$replay_plan" | sed -n 's/^cap_kib=//p')" = 60817408 ] &&
+    [ "$(printf '%s\n' "$replay_plan" | sed -n 's/^workers=//p')" = 2 ] &&
+    [ "$(printf '%s\n' "$replay_plan" | sed -n 's/^cli_row_cap_kib=//p')" = 62914560 ] &&
+    [ "$(printf '%s\n' "$replay_plan" | sed -n 's/^cli_row_ceiling_kib=//p')" = 62914560 ] &&
+    [ "$(printf '%s\n' "$replay_plan" | sed -n 's/^cli_row_bound=//p')" = cli-row-mir-shards ] ||
+    fail "run-11 replay: unexpected plan: $(printf '%s\n' "$replay_plan" | grep -v '^summary' | tr '\n' ' ')"
+ok
+replay_status=0
+replay_plan=$(run11_plan meminfo.tight 8) || replay_status=$?
+[ "$replay_status" -ne 0 ] && printf '%s' "$replay_plan" | grep -Fq 'compiler_cli_build row needs 62914560 KiB' ||
+    fail "tight host was not refused up front (status $replay_status): $replay_plan"
+ok
+replay_status=0
+replay_plan=$(run11_plan meminfo.run11 8 BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=2) || replay_status=$?
+[ "$replay_status" -ne 0 ] && printf '%s' "$replay_plan" | grep -Fq 'BOOTSTRAP_VERIFY_TOOL_BUILD_CONCURRENCY=1' ||
+    fail "concurrent tool rows were not refused under the row cap (status $replay_status): $replay_plan"
+ok
+
 # 3. Transcribed runner: an over-ceiling explicit cap is refused BEFORE
 #    execution with the reason in <log>.refusal and on stderr (it was silent).
+. "$root/scripts/check/lib/bootstrap-stage3/authority.shs"
 . "$root/scripts/check/lib/bootstrap-stage3/command-snapshot.shs"
 runner() { # LOG [ENV=VALUE ...]   -> runner_status, <LOG>.out/.err
     runner_log=$1
@@ -184,13 +444,13 @@ runner() { # LOG [ENV=VALUE ...]   -> runner_status, <LOG>.out/.err
     ) >"$scratch/$runner_log.out" 2>"$scratch/$runner_log.err" || runner_status=$?
 }
 runner build.log "BOOTSTRAP_TREE_RSS_MEMINFO_PATH=$scratch/meminfo.big" BOOTSTRAP_TREE_RSS_TEST_FIXTURE=1 \
-    SIMPLE_BOOTSTRAP_RSS_CAP_MODE=monitor SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=33554432
+    SIMPLE_BOOTSTRAP_RSS_CAP_MODE=monitor SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=90000000
 [ "$runner_status" -ne 0 ] || fail 'over-ceiling cap was not refused by the transcribed runner'
 [ ! -e "$scratch/build.log" ] || fail 'refused run still produced a build log'
 ! grep -q executed "$scratch/build.log.out" || fail 'refused run executed its command'
-grep -Fq 'SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=33554432 KiB exceeds the hard ceiling 24117248 KiB for 80 worker(s)' \
+grep -Fq 'SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB=90000000 KiB exceeds the hard ceiling 87031808 KiB for 80 worker(s)' \
     "$scratch/build.log.refusal" || fail "refusal file lacks the reason: $(cat "$scratch/build.log.refusal" 2>/dev/null)"
-grep -Fq 'exceeds the hard ceiling 24117248 KiB' "$scratch/build.log.err" ||
+grep -Fq 'exceeds the hard ceiling 87031808 KiB' "$scratch/build.log.err" ||
     fail 'refusal reason missing from runner stderr'
 ok
 # The runner's fixture hook is gated the same way: with enforcement on (the
@@ -226,6 +486,48 @@ grep -Fq 'bootstrap_abort_reason=tree-rss-cap-refused' "$entry" &&
     grep -Fq 'bootstrap_abort_reason=stage2-pre-exec-refusal' "$entry" &&
     grep -Fq 'bootstrap_abort_reason=stage2-rss-cap-exceeded' "$entry" ||
     fail 'bootstrap entry does not record RSS refusal reasons'
+ok
+
+# 6. Worker-fit timeout scaling (run 4, 2026-11-05: the plan fitted 2 of 8
+#    workers but the 1800 s native internal timeout was not scaled, so both MIR
+#    shard workers were killed with 596 of 3010 modules claimed). The real
+#    policy: 8 -> 2 scales x4, the bound holds, no reduction and explicit
+#    values are unchanged; both Stage 2 test owners publish through it and the
+#    verifier records the attribution in its summary receipt.
+. "$policy"
+[ "$(bootstrap_tree_rss_timeout_scale 8 2)" = 4 ] || fail 'timeout scale 8 -> 2 is not x4'
+[ "$(bootstrap_tree_rss_timeout_scale 8 8)" = 1 ] || fail 'timeout scale without reduction is not x1'
+[ "$(bootstrap_tree_rss_timeout_scale 64 1)" = "$BOOTSTRAP_TREE_RSS_TIMEOUT_SCALE_MAX" ] &&
+    [ "$BOOTSTRAP_TREE_RSS_TIMEOUT_SCALE_MAX" -eq 4 ] || fail 'timeout scale bound not respected'
+ok
+got=$(
+    unset BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT BOOTSTRAP_VERIFY_TIMEOUT_SOURCE
+    bootstrap_tree_rss_plan_timeout_scale=4
+    bootstrap_tree_rss_scaled_timeout BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT 1800 || exit 1
+    printf '%s:%s' "$BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT" "$BOOTSTRAP_VERIFY_TIMEOUT_SOURCE"
+)
+[ "$got" = '7200:BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT:phase-policy-scaled' ] ||
+    fail "default native internal timeout not scaled x4: $got"
+got=$(
+    unset BOOTSTRAP_VERIFY_TIMEOUT_SOURCE
+    BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT=900
+    bootstrap_tree_rss_plan_timeout_scale=4
+    bootstrap_tree_rss_scaled_timeout BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT 1800 || exit 1
+    printf '%s:%s' "$BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT" "$BOOTSTRAP_VERIFY_TIMEOUT_SOURCE"
+)
+[ "$got" = '900:BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT:explicit' ] ||
+    fail "explicit native internal timeout not kept: $got"
+ok
+for owner in "$entry" "$root/scripts/bootstrap/admit-built-stage2-compiler-tests.shs"; do
+    for budget in 'BOOTSTRAP_VERIFY_NATIVE_INTERNAL_TIMEOUT' 'BOOTSTRAP_VERIFY_TIMEOUT_SECONDS' \
+        'BOOTSTRAP_VERIFY_CAMPAIGN_TIMEOUT_SECONDS'; do
+        grep -Fq "bootstrap_tree_rss_scaled_timeout $budget " "$owner" ||
+            fail "${owner##*/} does not publish $budget through the worker-fit scaling"
+    done
+done
+grep -Fq 'echo "timeout_source=${BOOTSTRAP_VERIFY_TIMEOUT_SOURCE:-default}"' \
+    "$root/scripts/bootstrap/bootstrap-phase-verification.shs" ||
+    fail 'verifier summary does not record timeout_source'
 ok
 
 echo "PASS — $checks tree RSS cap policy case(s) checked"

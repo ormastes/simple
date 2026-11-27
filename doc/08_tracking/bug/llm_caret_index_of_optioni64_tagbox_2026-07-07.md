@@ -1,6 +1,28 @@
 # Bug: `text.index_of` returns `nil` for a present substring (Option<i64> mangled)
 
-- **Filed:** 2026-07-07
+- ## Status 2026-11-05 — not reproducible on release/1.0.0 @ c3b2271c310
+
+Runtime: committed `bin/simple.exe` (bootstrap seed, expected warning),
+`--mode=interpreter`, Windows Git Bash.
+
+- `test/01_unit/app/llm_caret/index_of_present_substring_spec.spl`: 5/5 PASS.
+  `text.index_of` now returns a raw usable `i64` (3 for a present substring at
+  index 3, 0 at index 0) directly and across the `json_helpers` module
+  boundary, matching `json_find`.
+- `"7".to_int() ?? -1` → 7 and `("42".to_int() ?? -1) + 7` → 49 under the
+  interpreter (probe run 2026-11-05). The `Option<i64>` mangling described in
+  the symptom is not reproducible; the current compiler contract is the raw
+  `i64` form recorded in the 2026-11-03 owner audit.
+- The `json_helpers.spl` workaround (`json_find`, `json_parse_int`,
+  `_digit_val`) is intentionally retained: it is correct under both JIT and
+  interpreter, and the residual cross-module JIT boxing of the composite
+  `extract_json_int` chain is a deeper compiler defect outside the app lane.
+
+Conclusion: the P1 symptom is fixed upstream on this branch; the workaround
+stays as the conservative parsing path until the JIT residual is repaired in
+the compiler. Closing as not reproducible.
+
+**Filed:** 2026-07-07
 - **Severity:** P1 (silent data loss in any Option<i64>-returning stdlib call)
 - **Component:** self-hosted interpreter — string/Option value boxing
 - **Status:** open; worked around in `src/app/llm_caret/json_helpers.spl`
@@ -79,3 +101,71 @@ llm_caret logic. Tracked here; fix belongs in the compiler, not this app.
 Root-cause and repair the interpreter's `Option<i64>` boxing so `index_of` /
 `to_int` are usable directly. Until then, prefer bare-`i64` scans over the
 Option-returning stdlib forms in hot parsing paths.
+
+
+## Current-owner audit — 2026-11-03 (UNRUN, not a closure)
+
+Source baseline: d591d1df36f4bad9692c8eeab65c1a3a7ba69e6e. The historical
+statement that `index_of` / `to_int` return `Option<i64>` is not the current
+compiler contract. Both are raw `i64`; a search miss is `-1`. `parse_int`
+is the strict optional conversion. Do not introduce an application workaround
+or classify every integer search miss as `None` based on the old title.
+
+Existing production repairs are present:
+
+- `src/compiler/10.frontend/core/interpreter/_EvalOps/access_literal_assign_eval.spl`
+  passes raw `s.index_of(...)` directly to `val_make_int`, without the prior
+  `?? -1` that mistook raw index three for the nil sentinel.
+- `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl` remembers
+  non-optional `i64` HIR type for search and `to_int` results, while marking
+  `parse_int` separately as a runtime-valued optional integer.
+- `test/01_unit/compiler/codegen/probe_coalesce_sentinel_collision_jit.spl`
+  already checks the same-module search/coalesce shape. The app's
+  `json_helpers_spec.spl` exercises the actual manual-scan workaround; that
+  is not proof of the compiler method's correctness.
+
+Missing qualification is now specified across an imported function boundary:
+`test/02_integration/compiler/llm_caret_option_i64_owner_spec.spl`, with fixture
+`test/02_integration/compiler/fixtures/llm_caret_option_i64_owner.spl` and authored
+manual `doc/06_spec/02_integration/compiler/llm_caret_option_i64_owner_spec.md`.
+No copied text scanner/parser is used.
+
+- REQ-CARET-TEXT-BOX-001: imported actual search returns 0/3/-1 intact, including
+  non-optional coalescing at the method's module boundary.
+- REQ-CARET-TEXT-BOX-002: imported actual `to_int` returns decimal 7/42 as usable
+  integers, including arithmetic result 49.
+- REQ-CARET-TEXT-BOX-003: genuine optional `parse_int` distinguishes Some(0),
+  Some(3), and absent invalid input with an explicit fallback.
+
+TDD disposition: regressions authored before any proposed repair; runtime RED
+and GREEN are both UNRUN because no admitted source-matched producer was
+available. No speculative production change, bootstrap, or seed fallback.
+Native LLVM, Cranelift and self-hosted interpreter qualification remain required;
+these tests do not claim to qualify the historical cross-module `char.to_i64`
+or composite `extract_json_int` residuals. Keep the canonical shared SDN row
+open, with the compiler boxing/coalescing family as the underlying ownership.
+No new failure has been demonstrated and no coverage percentage is claimed.
+
+## Confirmation 2026-11-25 (p2w3-al lane, Windows) — closure stands
+
+Runtime: committed `bin/simple.exe` (Rust bootstrap seed v1.0.0-rc.1,
+38,403,072 bytes), `SIMPLE_LIB=src ... run`, Windows Git Bash, worktree at
+release/1.0.0 @ 1457ddaa176. The named indicator spec cannot run here
+(release/1.0.0 HEAD is source/binary inconsistent — the pinned seed rejects
+`@representation_boundary`, so `bin/simple.exe test` fails repo-wide), so the
+2026-11-05 probe results were re-measured directly:
+
+```
+val s = "abc:def"
+s.index_of(":")   -> 3     (was: nil)
+s.index_of("abc") -> 0
+s.index_of("zzz") -> -1
+"42".to_int()     -> 42    (was: boxed handle / float-mangled)
+"7".to_int() ?? -1        -> 7
+("42".to_int() ?? -1) + 7 -> 49
+```
+
+All values are usable raw `i64`s under the interpreter, matching the 2026-11-05
+audit. The Option<i64> mangling is not reproducible on this binary; the closure
+above stands. The cross-module JIT `char.to_i64`/`extract_json_int` residual
+remains compiler-owned and unverified here, as already recorded.

@@ -1,0 +1,53 @@
+# Purpose: keep bounded GUI wheel deltas from reversing scroll direction.
+# Runtime execution intentionally deferred under the 2026-11-03 user waiver.
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.tiny.common.event.{TinyEvent, TINY_EVENT_WHEEL}
+use std.tiny.common.types.{TinyHandle, TinyPoint, TinyRect}
+use std.tiny.gui.component.{TINY_COMPONENT_SCROLL_PANE, TINY_COMPONENT_TEXT}
+use std.tiny.gui.state.{TinyGuiState}
+use std.tiny.gui.event_dispatch.{tiny_gui_dispatch}
+
+fn scroll_fixture() -> TinyGuiState:
+    var state = TinyGuiState.bounded(2)
+    state.add(TinyHandle.invalid(), TINY_COMPONENT_SCROLL_PANE, TinyRect(x: 0, y: 0, width: 20, height: 2), "")
+    state.add(state.handle_at(0), TINY_COMPONENT_TEXT, TinyRect(x: 0, y: 0, width: 10, height: 10), "content")
+    state
+
+fn wheel(delta: i32) -> TinyEvent:
+    TinyEvent(kind: TINY_EVENT_WHEEL, point: TinyPoint(x: 1, y: 1), code: 0, value: delta)
+
+describe "GUI wheel delta bounds":
+    it "saturates a maximum positive delta from a nonzero offset":
+        step("Start one row down, then request the largest positive i32 delta")
+        val first = tiny_gui_dispatch(scroll_fixture(), wheel(1))
+        expect(first.state.nodes[0].value).to_equal(1)
+        val bottom = tiny_gui_dispatch(first.state, wheel(2147483647))
+        expect(bottom.status.is_ok()).to_be(true)
+        expect(bottom.target_index).to_equal(0)
+        expect(bottom.state.nodes[0].value).to_equal(8)
+        expect(bottom.changed).to_be(true)
+        val still_bottom = tiny_gui_dispatch(bottom.state, wheel(2147483647))
+        expect(still_bottom.state.nodes[0].value).to_equal(8)
+        expect(still_bottom.changed).to_be(false)
+
+    it "clamps the minimum negative delta at the top":
+        step("Move to the bottom, then request the largest negative i32 delta")
+        val bottom = tiny_gui_dispatch(scroll_fixture(), wheel(8))
+        val top = tiny_gui_dispatch(bottom.state, wheel(-2147483647 - 1))
+        expect(top.status.is_ok()).to_be(true)
+        expect(top.state.nodes[0].value).to_equal(0)
+        expect(top.changed).to_be(true)
+        val still_top = tiny_gui_dispatch(top.state, wheel(-2147483647 - 1))
+        expect(still_top.state.nodes[0].value).to_equal(0)
+        expect(still_top.changed).to_be(false)
+
+    it "preserves ordinary movement and zero delta receipts":
+        step("Scroll within the viewport range and check unchanged receipts")
+        val forward = tiny_gui_dispatch(scroll_fixture(), wheel(4))
+        expect(forward.state.nodes[0].value).to_equal(4)
+        val backward = tiny_gui_dispatch(forward.state, wheel(-2))
+        expect(backward.state.nodes[0].value).to_equal(2)
+        val stationary = tiny_gui_dispatch(backward.state, wheel(0))
+        expect(stationary.state.nodes[0].value).to_equal(2)
+        expect(stationary.changed).to_be(false)

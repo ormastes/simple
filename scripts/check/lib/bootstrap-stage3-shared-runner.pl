@@ -18,6 +18,17 @@ my $O_TMPFILE = 020200000;
 my $AT_SYMLINK_FOLLOW = 0x400;
 my ($SYS_OPENAT, $SYS_LINKAT) = $Config{archname} =~ /(?:aarch64|riscv64)/
     ? (56, 37) : $Config{archname} =~ /x86_64/ ? (257, 265) : (0, 0);
+# Darwin lane: no procfs magic links, no usable raw syscall(), no fexecve.
+# Directory-relative opens go through an fchdir-anchored openat equivalent
+# (openat_fd) and every exec-by-held-descriptor goes through the pinned native
+# helper src/runtime/tools/stage3_fdwalk.c (verify-by-fd before execve). The
+# Linux arms are unchanged. Pieces with no Darwin equivalent die by name via
+# darwin_unported() — never a path-based fallback. See
+# doc/08_tracking/bug/bootstrap_macos_blocked_seed_compile_and_linux_only_stage3_authority_2026-09-06.md
+my $darwin = $^O eq 'darwin';
+my $F_GETPATH_DARWIN = 50;
+($SYS_OPENAT || $darwin)
+    or die "stage3 shared runner: unsupported syscall architecture\n";
 my @original_argv = @ARGV;
 my %o;
 GetOptions(
@@ -55,9 +66,14 @@ GetOptions(
     'candidate-builder-sha256=s' => \$o{candidate_builder_sha256},
     'runner-sha256=s' => \$o{runner_sha256},
     'provenance-verifier-sha256=s' => \$o{provenance_verifier_sha256},
+    'fdwalk-helper-fd=i' => \$o{fdwalk_helper_fd},
+    'fdwalk-helper-sha256=s' => \$o{fdwalk_helper_sha256},
 ) or die "stage3 shared runner: invalid options\n";
 
 my $parent_pid = $$;
+my $fdwalk_helper_fh;
+my $fdwalk_helper_identity;
+my $cwd_anchor_fh;
 my $candidate_builder_pid;
 my $active_pid;
 my $active_pgid;
@@ -68,6 +84,33 @@ my %held;
 my $verifier_scratch_parent;
 my $verifier_scratch_path;
 my $terminal_signal_set = POSIX::SigSet->new(SIGTERM, SIGINT, SIGHUP, SIGQUIT);
+
+# Darwin helper admission. The pinned helper arrives as an inherited
+# descriptor plus its expected sha256 (both required on Darwin, both refused
+# elsewhere so the Linux contract is unchanged). Its identity is re-checked by
+# exec_held immediately before every launch. The cwd anchor is what openat_fd
+# fchdir()s back to after each directory-relative open.
+if ($darwin) {
+    defined($o{fdwalk_helper_fd}) && defined($o{fdwalk_helper_sha256})
+        or die "stage3 shared runner: darwin: --fdwalk-helper-fd and "
+             . "--fdwalk-helper-sha256 are required\n";
+    valid_sha($o{fdwalk_helper_sha256})
+        or die "stage3 shared runner: darwin: malformed fdwalk helper sha256\n";
+    $fdwalk_helper_fh = descriptor_handle(0 + $o{fdwalk_helper_fd}, 'fdwalk helper');
+    my @helper_st = stat($fdwalk_helper_fh);
+    @helper_st && -f _ && ($helper_st[2] & 0111)
+        or die "stage3 shared runner: darwin: fdwalk helper is not a regular executable\n";
+    my $helper_sha = hash_fh($fdwalk_helper_fh);
+    $helper_sha eq $o{fdwalk_helper_sha256}
+        or die "stage3 shared runner: darwin: fdwalk helper hash mismatch\n";
+    $fdwalk_helper_identity = { dev => $helper_st[0], ino => $helper_st[1],
+        sha256 => $helper_sha };
+    sysopen($cwd_anchor_fh, '.', O_RDONLY | O_DIRECTORY | $O_CLOEXEC)
+        or die "stage3 shared runner: darwin: open cwd anchor: $!\n";
+    set_cloexec($cwd_anchor_fh);
+} elsif (defined($o{fdwalk_helper_fd}) || defined($o{fdwalk_helper_sha256})) {
+    die "stage3 shared runner: fdwalk helper options are Darwin-only\n";
+}
 
 sub now_ms { int(clock_gettime(CLOCK_MONOTONIC) * 1000) }
 sub valid_sha { defined($_[0]) && $_[0] =~ /\A[0-9a-f]{64}\z/ }
@@ -112,9 +155,125 @@ sub descriptor_handle {
     set_cloexec($fh);
     return $fh;
 }
+sub darwin_unported {
+    my ($what) = @_;
+    die "stage3 shared runner: darwin: $what has no Darwin equivalent yet "
+      . "(fail-closed; bootstrap_macos_blocked_seed_compile_and_linux_only_"
+      . "stage3_authority_2026-09-06)\n";
+}
+# Local-descriptor path spellings. Linux: procfs magic links, also valid for a
+# child looking at this process. Darwin: fdescfs, valid only inside THIS
+# process (a child sees its own table) and only for files, never for a
+# directory walk — which is why directory handoff to a child is unported.
+sub local_fd_path { my ($fd) = @_; return $darwin ? "/dev/fd/$fd" : "/proc/self/fd/$fd"; }
+sub local_descriptor_number {
+    # Returns the fd number when $path names a descriptor of THIS process in
+    # the host's spelling, else undef. Dies on a foreign-pid procfd path.
+    my ($path) = @_;
+    if ($path =~ m{\A/proc/([1-9][0-9]*|self)/fd/([1-9][0-9]*)\z}) {
+        ($1 eq 'self' || $1 == $$)
+            or die "stage3 shared runner: foreign procfd authority\n";
+        return 0 + $2;
+    }
+    return 0 + $1 if $darwin && $path =~ m{\A/dev/fd/([1-9][0-9]*)\z};
+    return;
+}
+# openat(2) equivalent: open $name relative to the held directory $dir_fh.
+# Linux: the real openat syscall. Darwin: fchdir to the held directory,
+# open the single component (O_NOFOLLOW, never a path with '/'), fchdir back
+# to the process cwd anchor. The prefix is never re-resolved by name.
+sub openat_fd {
+    my ($dir_fh, $name, $flags, $mode) = @_;
+    $name !~ m{/} && length($name)
+        or die "stage3 shared runner: openat component contains a separator\n";
+    return syscall($SYS_OPENAT, fileno($dir_fh), $name, $flags, $mode // 0)
+        unless $darwin;
+    $cwd_anchor_fh or die "stage3 shared runner: darwin: cwd anchor missing\n";
+    chdir($dir_fh) or die "stage3 shared runner: darwin: fchdir held directory: $!\n";
+    my $fd = -1;
+    my $error = 0;
+    if (sysopen(my $fh, $name, $flags, $mode // 0)) {
+        $fd = fcntl($fh, $F_DUPFD_CLOEXEC, 3);
+        defined($fd) or $error = 0 + $!;
+        $fd = -1 unless defined($fd);
+        close($fh);
+    } else {
+        $error = 0 + $!;
+    }
+    chdir($cwd_anchor_fh)
+        or die "stage3 shared runner: darwin: fchdir cwd anchor: $!\n";
+    $! = $error if $fd < 0;
+    return $fd;
+}
+# link/unlink relative to a held directory (both names are single components).
+sub link_in_dir {
+    my ($dir_fh, $from, $to) = @_;
+    unless ($darwin) {
+        my $base = '/proc/self/fd/' . fileno($dir_fh);
+        return link("$base/$from", "$base/$to");
+    }
+    chdir($dir_fh) or die "stage3 shared runner: darwin: fchdir link directory: $!\n";
+    my $ok = link($from, $to);
+    my $error = 0 + $!;
+    chdir($cwd_anchor_fh) or die "stage3 shared runner: darwin: fchdir cwd anchor: $!\n";
+    $! = $error unless $ok;
+    return $ok;
+}
+sub unlink_in_dir {
+    my ($dir_fh, $name) = @_;
+    return unlink('/proc/self/fd/' . fileno($dir_fh) . "/$name") unless $darwin;
+    chdir($dir_fh) or die "stage3 shared runner: darwin: fchdir unlink directory: $!\n";
+    my $ok = unlink($name);
+    my $error = 0 + $!;
+    chdir($cwd_anchor_fh) or die "stage3 shared runner: darwin: fchdir cwd anchor: $!\n";
+    $! = $error unless $ok;
+    return $ok;
+}
+# Exec the HELD executable descriptor. Linux: exec through the magic link
+# (the kernel resolves it to the open file description — pathname swaps are
+# irrelevant). Darwin: the pinned helper does verify-by-fd (fstat, F_GETPATH,
+# lstat, stat dev/ino compare) and execve in one native step. The helper
+# itself is launched by the same verify-by-fd rule done here in Perl, which
+# is the one place on Darwin where an interpreter sits inside the window.
+sub exec_held {
+    my ($exec_fh, @argv) = @_;
+    unless ($darwin) {
+        my $path = exec_fd_path($exec_fh);
+        exec {$path} @argv;
+        return;
+    }
+    $fdwalk_helper_fh or die "stage3 shared runner: darwin: fdwalk helper not admitted\n";
+    my $helper_path = "\0" x 1024;
+    fcntl($fdwalk_helper_fh, $F_GETPATH_DARWIN, $helper_path)
+        or die "stage3 shared runner: darwin: F_GETPATH helper: $!\n";
+    $helper_path =~ s/\0.*\z//s;
+    my @held = stat($fdwalk_helper_fh);
+    my @link = lstat($helper_path);
+    my @repath = stat($helper_path);
+    @held && @link && !-l _ && @repath && $held[0] == $repath[0] && $held[1] == $repath[1]
+        && $held[3] > 0 && -f $fdwalk_helper_fh
+        && $held[0] == $fdwalk_helper_identity->{dev}
+        && $held[1] == $fdwalk_helper_identity->{ino}
+        or die "stage3 shared runner: darwin: helper identity drifted before exec\n";
+    my $exec_flags = fcntl($exec_fh, F_GETFD, 0);
+    defined($exec_flags) && fcntl($exec_fh, F_SETFD, $exec_flags & ~FD_CLOEXEC)
+        or die "stage3 shared runner: darwin: clear cloexec on executable: $!\n";
+    exec {$helper_path} 'stage3_fdwalk', 'exec', '--exec-fd', fileno($exec_fh), '--', @argv;
+    return;
+}
 sub open_local_procfd_directory {
     my ($path) = @_;
-    return unless $path =~ m{\A/proc/};
+    return unless $path =~ m{\A/proc/} || ($darwin && $path =~ m{\A/dev/fd/});
+    if ($darwin && $path =~ m{\A/dev/fd/}) {
+        my $fd = local_descriptor_number($path);
+        defined($fd) or die "stage3 shared runner: darwin: malformed fdesc directory authority\n";
+        open(my $anchor, '<&', $fd)
+            or die "stage3 shared runner: duplicate local fdesc directory: $!\n";
+        set_cloexec($anchor);
+        my @st = stat($anchor);
+        @st && -d _ or die "stage3 shared runner: fdesc anchor is not a directory\n";
+        return $anchor;
+    }
     $path =~ m{\A/proc/([1-9][0-9]*|self)/fd/([1-9][0-9]*)(?:/(.*))?\z}
         or die "stage3 shared runner: malformed procfd directory authority\n";
     my ($owner, $fd, $suffix) = ($1, 0 + $2, $3);
@@ -131,7 +290,7 @@ sub open_local_procfd_directory {
         $_ !~ /\A[A-Za-z0-9_.-]+\z/ } @part
         or die "stage3 shared runner: unsafe procfd descendant component\n";
     for my $part (@part) {
-        my $next_fd = syscall($SYS_OPENAT, fileno($current), $part,
+        my $next_fd = openat_fd($current, $part,
             O_RDONLY | O_DIRECTORY | O_NOFOLLOW | $O_CLOEXEC, 0);
         my $next = descriptor_handle(
             $next_fd, "open procfd directory component $part");
@@ -145,14 +304,13 @@ sub open_directory_walk {
     my ($path) = @_;
     normalized_absolute($path)
         or die "stage3 shared runner: noncanonical directory path\n";
-    $SYS_OPENAT or die "stage3 shared runner: unsupported syscall architecture\n";
     my $procfd = open_local_procfd_directory($path);
     return $procfd if defined($procfd);
     sysopen(my $current, '/', O_RDONLY | O_DIRECTORY | O_NOFOLLOW | $O_CLOEXEC)
         or die "stage3 shared runner: open root directory: $!\n";
     set_cloexec($current);
     for my $part (split m{/}, substr($path, 1), -1) {
-        my $fd = syscall($SYS_OPENAT, fileno($current), $part,
+        my $fd = openat_fd($current, $part,
             O_RDONLY | O_DIRECTORY | O_NOFOLLOW | $O_CLOEXEC, 0);
         my $next = descriptor_handle($fd, "open directory component $part");
         close($current)
@@ -181,17 +339,17 @@ sub open_regular {
     normalized_absolute($path)
         or die "stage3 shared runner: noncanonical file path\n";
     my $fh;
-    if ($path =~ m{\A/proc/([1-9][0-9]*)/fd/([1-9][0-9]*)\z}) {
-        $1 == $$ or die "stage3 shared runner: foreign procfd file authority\n";
-        open($fh, '<&', 0 + $2)
-            or die "stage3 shared runner: duplicate local procfd $path: $!\n";
+    my $local_fd = local_descriptor_number($path);
+    if (defined($local_fd)) {
+        open($fh, '<&', $local_fd)
+            or die "stage3 shared runner: duplicate local descriptor $path: $!\n";
         set_cloexec($fh);
     } else {
         my $parent = open_directory_walk(dirname($path));
         my $leaf = substr($path, length(dirname($path)) +
             (dirname($path) eq '/' ? 0 : 1));
         $leaf =~ /\A[^\/]+\z/ or die "stage3 shared runner: invalid file leaf\n";
-        my $fd = syscall($SYS_OPENAT, fileno($parent), $leaf,
+        my $fd = openat_fd($parent, $leaf,
             O_RDONLY | O_NOFOLLOW | $O_CLOEXEC, 0);
         $fh = descriptor_handle($fd, "open $path");
         close($parent) or die "stage3 shared runner: close file parent: $!\n";
@@ -233,15 +391,16 @@ sub open_root_relative {
     my $current = $root_fh;
     my @opened;
     for my $index (0 .. $#part - 1) {
-        my $next = open_directory_descriptor(
-            '/proc/self/fd/' . fileno($current) . '/' . $part[$index]);
+        my $next = descriptor_handle(openat_fd($current, $part[$index],
+            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | $O_CLOEXEC, 0),
+            "open helper ancestor $part[$index]");
+        my @dst = stat($next);
+        @dst && -d _ or die "stage3 shared runner: helper ancestor is not a directory\n";
         push @opened, $next;
         $current = $next;
     }
-    my $leaf = '/proc/self/fd/' . fileno($current) . '/' . $part[-1];
-    sysopen(my $fh, $leaf, O_RDONLY | O_NOFOLLOW | $O_CLOEXEC)
-        or die "stage3 shared runner: open helper $relative: $!\n";
-    set_cloexec($fh);
+    my $fh = descriptor_handle(openat_fd($current, $part[-1],
+        O_RDONLY | O_NOFOLLOW | $O_CLOEXEC, 0), "open helper $relative");
     my @st = stat($fh);
     @st && -f _ or die "stage3 shared runner: helper is not regular $relative\n";
     my $identity = {
@@ -264,11 +423,14 @@ sub open_optional_root_relative {
     my $current = $root_fh;
     my @opened;
     for my $index (0 .. $#part - 1) {
-        my $next = open_directory_descriptor(
-            '/proc/self/fd/' . fileno($current) . '/' . $part[$index]);
+        my $next = descriptor_handle(openat_fd($current, $part[$index],
+            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | $O_CLOEXEC, 0),
+            "open optional ancestor $part[$index]");
+        my @dst = stat($next);
+        @dst && -d _ or die "stage3 shared runner: optional ancestor is not a directory\n";
         push @opened, $next; $current = $next;
     }
-    my $fd = syscall($SYS_OPENAT, fileno($current), $part[-1],
+    my $fd = openat_fd($current, $part[-1],
         O_RDONLY | O_NOFOLLOW | $O_CLOEXEC, 0);
     if ($fd < 0) {
         my $missing = $! == ENOENT;
@@ -297,8 +459,11 @@ sub open_relative_directory {
     my $current = $root_fh;
     my @opened;
     for my $part (@part) {
-        my $next = open_directory_descriptor(
-            '/proc/self/fd/' . fileno($current) . '/' . $part);
+        my $next = descriptor_handle(openat_fd($current, $part,
+            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | $O_CLOEXEC, 0),
+            "open relative directory $part");
+        my @dst = stat($next);
+        @dst && -d _ or die "stage3 shared runner: relative component is not a directory\n";
         push @opened, $next;
         $current = $next;
     }
@@ -313,11 +478,20 @@ sub open_relative_directory {
 }
 sub procfd_directory {
     my ($path, $kind) = @_;
-    defined($path) && $path =~ m{\A/proc/[1-9][0-9]*/fd/[1-9][0-9]*\z}
+    defined($path) && ($path =~ m{\A/proc/[1-9][0-9]*/fd/[1-9][0-9]*\z} ||
+        ($darwin && $path =~ m{\A/dev/fd/[1-9][0-9]*\z}))
         or die "stage3 shared runner: $kind is not a procfd directory\n";
-    sysopen(my $fh, "$path/.",
-        O_RDONLY | O_DIRECTORY | O_NOFOLLOW | $O_CLOEXEC)
-        or die "stage3 shared runner: open $kind ingress directory: $!\n";
+    my $fh;
+    if ($darwin) {
+        # fdescfs has no "/." suffix form; dup the inherited descriptor.
+        my $fd = local_descriptor_number($path);
+        defined($fd) && open($fh, '<&', $fd)
+            or die "stage3 shared runner: open $kind ingress directory: $!\n";
+    } else {
+        sysopen($fh, "$path/.",
+            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | $O_CLOEXEC)
+            or die "stage3 shared runner: open $kind ingress directory: $!\n";
+    }
     set_cloexec($fh);
     my @st = stat($fh);
     @st && -d _
@@ -335,14 +509,26 @@ sub absent_output_leaf {
         (dirname($path) eq '/' ? 0 : 1));
     $leaf =~ /\A[A-Za-z0-9_.-]+\z/
         or die "stage3 shared runner: invalid $name output leaf\n";
+    # The returned spelling is resolved THROUGH the directory descriptor by a
+    # child; fdescfs cannot do that.
+    $darwin and darwin_unported("$name output leaf through a directory descriptor");
     return ($parent, '/proc/' . $$ . '/fd/' . fileno($parent) . "/$leaf");
 }
 sub open_exec_reference {
     my ($reference, $regular_path, $expected_sha) = @_;
-    $reference =~ m{\A/proc/[1-9][0-9]*/fd/[0-9]+\z}
-        or die "stage3 shared runner: executable is not a retained descriptor\n";
-    sysopen(my $exec_fh, $reference, O_RDONLY | $O_CLOEXEC)
-        or die "stage3 shared runner: open executable descriptor: $!\n";
+    my $exec_fh;
+    if ($darwin) {
+        my $fd = local_descriptor_number($reference);
+        defined($fd) && $reference =~ m{\A/dev/fd/}
+            or die "stage3 shared runner: executable is not a retained descriptor\n";
+        open($exec_fh, '<&', $fd)
+            or die "stage3 shared runner: duplicate executable descriptor: $!\n";
+    } else {
+        $reference =~ m{\A/proc/[1-9][0-9]*/fd/[0-9]+\z}
+            or die "stage3 shared runner: executable is not a retained descriptor\n";
+        sysopen($exec_fh, $reference, O_RDONLY | $O_CLOEXEC)
+            or die "stage3 shared runner: open executable descriptor: $!\n";
+    }
     set_cloexec($exec_fh);
     my ($regular_fh, $identity) = open_regular($regular_path, $expected_sha);
     my @est = stat($exec_fh);
@@ -400,7 +586,7 @@ sub publish_exclusive_at {
     $leaf =~ /\A[A-Za-z0-9._-]+\z/
         or die "stage3 shared runner: invalid publication leaf\n";
     my $tmp = ".$leaf.tmp.$parent_pid." . int(rand(1_000_000_000));
-    my $fd = syscall($SYS_OPENAT, fileno($dir_fh), $tmp,
+    my $fd = openat_fd($dir_fh, $tmp,
         O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | $O_CLOEXEC, $mode // 0600);
     my $fh = descriptor_handle($fd, "create $tmp", 1);
     my $offset = 0;
@@ -415,21 +601,21 @@ sub publish_exclusive_at {
     @st && -f _ or die "stage3 shared runner: publication inode invalid\n";
     my $identity = { dev => $st[0], ino => $st[1], sha256 => hash_fh($fh) };
     close($fh) or die "stage3 shared runner: close $tmp: $!\n";
-    my $base = '/proc/self/fd/' . fileno($dir_fh);
-    link("$base/$tmp", "$base/$leaf") or do {
+    link_in_dir($dir_fh, $tmp, $leaf) or do {
         my $error = "$!";
-        unlink("$base/$tmp")
+        unlink_in_dir($dir_fh, $tmp)
             or die "stage3 shared runner: rollback $tmp: $!\n";
         $dir_fh->sync or die "stage3 shared runner: fsync collision rollback: $!\n";
         die "stage3 shared runner: publication collision: $error\n";
     };
     $dir_fh->sync or die "stage3 shared runner: fsync publication directory: $!\n";
-    unlink("$base/$tmp") or die "stage3 shared runner: remove $tmp: $!\n";
+    unlink_in_dir($dir_fh, $tmp) or die "stage3 shared runner: remove $tmp: $!\n";
     $dir_fh->sync or die "stage3 shared runner: fsync publication cleanup: $!\n";
     return $identity;
 }
 sub anonymous_pass_inode {
     my ($dir_fh, $text, $mode) = @_;
+    $darwin and darwin_unported('anonymous PASS inode (O_TMPFILE)');
     my $dot = '.';
     my $fd = syscall($SYS_OPENAT, fileno($dir_fh), $dot,
         $O_TMPFILE | O_RDWR | $O_CLOEXEC, $mode // 0600);
@@ -448,6 +634,7 @@ sub link_anonymous_final {
     my ($file_fh, $dir_fh, $leaf) = @_;
     $leaf =~ /\A[A-Za-z0-9._-]+\z/
         or die "stage3 shared runner: invalid canonical PASS leaf\n";
+    $darwin and darwin_unported('linkat from an anonymous inode');
     my $source = '/proc/self/fd/' . fileno($file_fh);
     my $result = syscall($SYS_LINKAT, -100, $source, fileno($dir_fh),
         $leaf, $AT_SYMLINK_FOLLOW);
@@ -485,8 +672,7 @@ sub open_regular_at {
     my ($dir_fh, $leaf) = @_;
     $leaf =~ /\A[A-Za-z0-9._-]+\z/
         or die "stage3 shared runner: invalid recovery leaf\n";
-    my $fd = syscall($SYS_OPENAT, fileno($dir_fh), $leaf,
-        O_RDONLY | O_NOFOLLOW | $O_CLOEXEC, 0);
+    my $fd = openat_fd($dir_fh, $leaf, O_RDONLY | O_NOFOLLOW | $O_CLOEXEC, 0);
     my $fh = descriptor_handle($fd, "open recovery $leaf");
     my @st = stat($fh);
     @st && -f _ or die "stage3 shared runner: recovery leaf not regular\n";
@@ -823,8 +1009,8 @@ $held{facade_source} = [$facade_source_fh, $facade_source_identity];
 my @service_environment = map { "$_=$ENV{$_}" } @environment_keys;
 $unit_plan->{environment_sha256} eq vector_hash(@service_environment)
     or die "stage3 shared runner: unit environment vector mismatch\n";
-$o{payload_exec} =~ m{\A/proc/[1-9][0-9]*/fd/[0-9]+\z} &&
-    $o{runner_exec} =~ m{\A/proc/[1-9][0-9]*/fd/[0-9]+\z} &&
+defined(local_descriptor_number($o{payload_exec})) &&
+    defined(local_descriptor_number($o{runner_exec})) &&
     $0 eq $o{runner_exec}
     or die "stage3 shared runner: payload executable vector mismatch\n";
 $unit_plan->{payload_argv_sha256} eq
@@ -1401,6 +1587,7 @@ $held{stage3_plan} = [$plan_fh, $plan_identity];
 
 sub proc_start_ticks {
     my ($pid) = @_;
+    $darwin and darwin_unported('process start-tick identity (/proc/<pid>/stat)');
     open(my $fh, '<', "/proc/$pid/stat")
         or die "stage3 shared runner: open process identity: $!\n";
     local $/;
@@ -1502,10 +1689,14 @@ sub wait_child {
 }
 sub exec_fd_path {
     my ($fh) = @_;
+    $darwin and die "stage3 shared runner: darwin: exec must go through exec_held\n";
     return '/proc/self/fd/' . fileno($fh);
 }
 sub parent_fd_path {
     my ($fh) = @_;
+    # A child resolving this process's descriptor table by pid is procfs-only;
+    # on Darwin descriptors would have to be inherited at fixed numbers.
+    $darwin and darwin_unported('descriptor handoff to a child by parent pid');
     return "/proc/$parent_pid/fd/" . fileno($fh);
 }
 sub open_console {
@@ -1526,8 +1717,7 @@ sub run_bound_child {
         $SIG{HUP} = $SIG{INT} = $SIG{QUIT} = $SIG{TERM} = $SIG{CHLD} = 'DEFAULT';
         setpgrp(0, 0) or POSIX::_exit(125);
         redirect_console();
-        my $path = exec_fd_path($exec_fh);
-        exec {$path} @argv;
+        exec_held($exec_fh, @argv);
         POSIX::_exit(126);
     }
     establish_child_group($pid);
@@ -1710,7 +1900,7 @@ sub capture_verifier {
             defined($stdio_flags) && !($stdio_flags & FD_CLOEXEC)
                 or $verifier_child_fail->('stdio-flags', 125);
         }
-        !-e '/proc/self/fd/159'
+        !-e local_fd_path(159)
             or $verifier_child_fail->('phase-status-fd', 125);
         POSIX::dup2(fileno($setup_write_fh), 159) == 159
             or $verifier_child_fail->('phase-status-fd', 125);
@@ -1730,7 +1920,7 @@ sub capture_verifier {
             $verifier_open_max > $verifier_staging_min
             or $verifier_child_fail->('fd-limit', 125);
         for my $reserved_fd ($verifier_next_fd .. $verifier_last_fd) {
-            !-e "/proc/self/fd/$reserved_fd"
+            !-e local_fd_path($reserved_fd)
                 or $verifier_child_fail->('fd-collision', 125);
         }
         my $verifier_local_path = sub {
@@ -1752,12 +1942,14 @@ sub capture_verifier {
                 or $verifier_child_fail->('fd-dup2', 125);
             POSIX::close($staged_fd) == 0
                 or $verifier_child_fail->('fd-stage-close', 125);
-            my @local_st = stat("/proc/self/fd/$target_fd");
+            my @local_st = stat(local_fd_path($target_fd));
             @local_st && $local_st[0] == $source_st[0] &&
                 $local_st[1] == $source_st[1] &&
                 $local_st[2] == $source_st[2]
                 or $verifier_child_fail->('fd-identity', 125);
-            return "/proc/$$/fd/$target_fd";
+            # Linux: by-pid spelling the exec'd verifier re-resolves as self.
+            # Darwin: the descriptor is inherited at this exact number.
+            return $darwin ? "/dev/fd/$target_fd" : "/proc/$$/fd/$target_fd";
         };
         my %verifier_local = (
             script => $verifier_local_path->($held{'role:provenance_verifier'}[0]),
@@ -1794,11 +1986,16 @@ sub capture_verifier {
         );
         my $verifier_self_path = sub {
             my ($path) = @_;
+            return $path if $darwin && $path =~ m{\A/dev/fd/[1-9][0-9]*\z};
             $path =~ s{\A/proc/\Q$$\E/fd/}{/proc/self/fd/}
                 or $verifier_child_fail->('fd-identity', 125);
             return $path;
         };
         my $dash = $verifier_self_path->($verifier_local{dash});
+        my $dash_local_fd = local_descriptor_number($dash);
+        defined($dash_local_fd) or $verifier_child_fail->('fd-identity', 125);
+        open(my $dash_local_fh, '<&=', $dash_local_fd)
+            or $verifier_child_fail->('dash-descriptor', 125);
         my $verifier_script_self =
             $verifier_self_path->($verifier_local{script});
         my @verifier_script_st = stat($verifier_local{script});
@@ -1833,7 +2030,7 @@ sub capture_verifier {
             or $verifier_child_fail->('script-offset', 125);
         syswrite($setup_write_fh, 'R', 1) == 1
             or $verifier_child_fail->('dash-exec', 125);
-        exec {$dash} 'dash', '-s', '--', '--phase-status-fd=159',
+        exec_held($dash_local_fh, 'dash', '-s', '--', '--phase-status-fd=159',
             "--verifier-script-descriptor=$verifier_local{script}",
             "--run-id=$o{run_id}",
             "--manifest=$verifier_local{manifest}",
@@ -1900,7 +2097,7 @@ sub capture_verifier {
                 $verifier_local{inventory},
             "--helper-capsule-inventory-sha256=" .
                 $helper_capsule_inventory_identity->{sha256},
-            "--helper-capsule-entry-parity-sha256=$capsule_parity_sha256";
+            "--helper-capsule-entry-parity-sha256=$capsule_parity_sha256");
         $verifier_child_fail->('dash-exec', 126);
     }
     close($setup_write_fh)
@@ -2111,9 +2308,8 @@ if (!$candidate_builder_pid) {
     $byte eq 'G' or POSIX::_exit(125);
     setpgrp(0, 0) or POSIX::_exit(125);
     redirect_console();
-    my $dash = exec_fd_path($dash_exec_fh);
     my @root_st = stat($root_dir_fh);
-    exec {$dash} 'dash', parent_fd_path($helper_capsule_fh), 'stage3',
+    exec_held($dash_exec_fh, 'dash', parent_fd_path($helper_capsule_fh), 'stage3',
         '--jobs=1', '--supervised-stage3', "--platform=$o{architecture}",
         "--repository-root=$o{root}", "--root-dir=" . parent_fd_path($root_dir_fh),
         "--root-dev=$root_st[0]", "--root-ino=$root_st[1]",
@@ -2159,7 +2355,7 @@ if (!$candidate_builder_pid) {
         "--descriptor-map=" . parent_fd_path($descriptor_map_fh),
         "--descriptor-map-sha256=$descriptor_map_identity->{sha256}",
         "--stage3-display-root=" . dirname($o{candidate_output}),
-        "--result-descriptor-map=$builder_output_leaf{result_descriptor_map}";
+        "--result-descriptor-map=$builder_output_leaf{result_descriptor_map}");
     POSIX::_exit(126);
 }
 close($candidate_builder_gate_r);

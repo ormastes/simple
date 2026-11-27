@@ -192,7 +192,7 @@ fn any_emit(self: AnyEscapeState, profile: AnyEscapeProfile, kind: AnyEscapeKind
 fn any_emit_001(self: AnyEscapeState, profile: AnyEscapeProfile, what: text, span: Span):
     """E-MC-ANY-001 -- §17.1."""
     val cap = type_erasure_capability_name()
-    val msg = "`Any` is unavailable in safe critical code: {what}; replace with a monomorphized generic, a closed sum type, a typed interface, or an `unsafe(capabilities: [{cap}])` boundary with checked conversion"
+    val msg = "`Any` is unavailable in safe critical code: {what}; replace with a generic, a closed sum type, a typed interface, or an `unsafe(capabilities: [{cap}])` boundary with checked conversion"
     any_emit(self, profile, AnyEscapeKind.OutsideUnsafe, msg, "", span)
 
 fn any_emit_002(self: AnyEscapeState, profile: AnyEscapeProfile, kind: AnyEscapeKind,
@@ -247,24 +247,21 @@ fn any_check_expr(self: AnyEscapeState, profile: AnyEscapeProfile, e: HirExpr):
             self.unsafe_depth = self.unsafe_depth - 1
 
         case Return(value):
-            if value != nil:
-                val v = value!
+            if val v = value:
                 if any_expr_is_any(self, v):
                     any_emit_002(self, profile, AnyEscapeKind.EscapeReturn,
                                  "`return` carries an erased value out of the region", v.span)
                 any_check_expr(self, profile, v)
 
         case Yield(value):
-            if value != nil:
-                val v = value!
+            if val v = value:
                 if any_expr_is_any(self, v):
                     any_emit_002(self, profile, AnyEscapeKind.EscapeReturn,
                                  "`yield` carries an erased value out of the region", v.span)
                 any_check_expr(self, profile, v)
 
         case Break(label, value):
-            if value != nil:
-                val v = value!
+            if val v = value:
                 if any_expr_is_any(self, v):
                     any_emit_002(self, profile, AnyEscapeKind.EscapeReturn,
                                  "`break` carries an erased value out of the region", v.span)
@@ -357,14 +354,14 @@ fn any_check_expr(self: AnyEscapeState, profile: AnyEscapeProfile, e: HirExpr):
         case If(cond, then_, else_):
             any_check_expr(self, profile, cond)
             any_check_block(self, profile, then_)
-            if else_ != nil:
+            if else_.is_some():
                 any_check_block(self, profile, else_!)
 
         case IfChain(arms, else_):
             for arm in arms:
                 any_check_expr(self, profile, arm.cond)
                 any_check_block(self, profile, arm.then_)
-            if else_ != nil:
+            if else_.is_some():
                 any_check_block(self, profile, else_!)
 
         case MatchCase(scrutinee, arms):
@@ -417,6 +414,13 @@ fn any_check_expr(self: AnyEscapeState, profile: AnyEscapeProfile, e: HirExpr):
         case ExistsCheck(base):
             any_check_expr(self, profile, base)
 
+        case CfgSelect(conds, arms, else_):
+            for arm in arms:
+                any_check_block(self, profile, arm)
+            if else_.is_some():
+                val cfg_else_block: HirBlock = else_
+                any_check_block(self, profile, cfg_else_block)
+
         case LossBlock(body):
             any_check_block(self, profile, body)
 
@@ -435,7 +439,7 @@ fn any_check_expr(self: AnyEscapeState, profile: AnyEscapeProfile, e: HirExpr):
             any_check_expr(self, profile, count)
 
         case StringLit(value, interpolations):
-            if interpolations != nil:
+            if interpolations.is_some():
                 val interps: [HirInterpolation] = interpolations!
                 for interp in interps:
                     if any_expr_is_any(self, interp.expr):
@@ -444,7 +448,7 @@ fn any_check_expr(self: AnyEscapeState, profile: AnyEscapeProfile, e: HirExpr):
                     any_check_expr(self, profile, interp.expr)
 
         case EnumLit(type_, variant, payload):
-            if payload != nil:
+            if payload.is_some():
                 any_check_enum_payload(self, profile, payload!, variant, e.span)
 
         case Range(start, end, inclusive, step):
@@ -454,7 +458,7 @@ fn any_check_expr(self: AnyEscapeState, profile: AnyEscapeProfile, e: HirExpr):
                 any_check_expr(self, profile, start_expr)
             if val end_expr = end:
                 any_check_expr(self, profile, end_expr)
-            if step != nil:
+            if step.is_some():
                 any_check_expr(self, profile, step!)
 
         case Comprehension(kind, expr, clauses):
@@ -463,6 +467,16 @@ fn any_check_expr(self: AnyEscapeState, profile: AnyEscapeProfile, e: HirExpr):
                 match cl.kind:
                     case For(var_, iter): any_check_expr(self, profile, iter)
                     case If(cond): any_check_expr(self, profile, cond)
+
+        case TypeTest(value, type_name):
+            any_check_expr(self, profile, value)
+
+        case TryCatch(body, clauses, finally_):
+            any_check_block(self, profile, body)
+            for clause in clauses:
+                any_check_block(self, profile, clause.body)
+            if val fin = finally_:
+                any_check_block(self, profile, fin)
 
         # Leaves: no sub-expression, and no `Any` can be introduced by the
         # node itself. Listed one by one rather than swallowed by a wildcard
@@ -523,6 +537,7 @@ fn any_origin_kind(e: HirExpr) -> bool:
         case For(var_, iter, body, label): false
         case With(items, body): false
         case UnsafeBlock(body): false
+        case CfgSelect(conds, arms, else_): false
         case Return(value): false
         case Break(label, value): false
         case Continue(label): false
@@ -538,7 +553,7 @@ fn any_callee_name(self: AnyEscapeState, callee: HirExpr) -> text:
             if symbol == nil:
                 return ""
             val sym = self.symbols.get_symbol(symbol)
-            if sym == nil:
+            if sym.is_none():
                 return ""
             sym!.name
         case _: ""
@@ -644,7 +659,11 @@ fn any_target_is_storage(target: HirExpr) -> bool:
 
 fn any_check_function(self: AnyEscapeState, profile: AnyEscapeProfile, f: HirFunction):
     self.function_name = f.name
-    self.te_granted = profile.grants_type_erasure(f.name)
+    # The grant is read off the HIR node (`@unsafe(capabilities: [type_erasure])`
+    # lowered onto HirFunction.unsafe_caps); the profile list remains only for
+    # lanes that still pass a textual grant.
+    self.te_granted = unsafe_capability_set_contains(f.unsafe_caps, UnsafeCapability.TypeErasure) or
+        profile.grants_type_erasure(f.name)
     self.any_symbols = []
     self.live_any = 0
     self.unsafe_depth = 0

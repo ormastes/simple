@@ -25,9 +25,20 @@ doc/05_design/REQ-APP-SVLLM-PACK-001.md
 
 use std.spec.{describe, it, expect}
 use app.slang_pack.core.{run}
+use app.io.mod.{dir_remove_all}
+use std.io_runtime.{file_write_bytes, file_delete}
 
 fn _tmp_path(name: text) -> text:
     "/tmp/svllm_a2_cli_" + name
+
+# Minimal valid safetensors: 8-byte little-endian header length, JSON header, 4 data bytes.
+fn _write_tiny_safetensors(path: text) -> bool:
+    val header = "{\"w\":{\"dtype\":\"F32\",\"shape\":[1],\"data_offsets\":[0,4]}}"
+    val hb = header.bytes()
+    var data: [u8] = [hb.len() as u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8]
+    for b in hb: data.push(b)
+    for i in 0..4: data.push(0u8)
+    file_write_bytes(path, data)
 
 use std.spec.step
 
@@ -51,12 +62,19 @@ describe "svllm_pack CLI (A2)":
     it "exits 1 on malformed safetensors input":
         # @req: REQ-APP-SVLLM-PACK-001
         step("Verify: exits 1 on malformed safetensors input")
-        # Write a tiny garbage file and hand it to the CLI.
+        # Write >= 8 bytes (LE u64 header len = 4 followed by non-JSON "BAD!") so
+        # _do_pack reaches parse_safetensors_header and fails with MalformedJson.
         val bad_path = _tmp_path("bad.safetensors")
-        # (Setup through runtime externs is Phase 5's responsibility; the
-        # spec still asserts the observable contract.)
-        val argv: [text] = ["svllm-pack", bad_path, _tmp_path("out_bad")]
+        val out_bad = _tmp_path("out_bad")
+        val bad_bytes: [u8] = [
+            4u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8, 0u8,
+            0x42u8, 0x41u8, 0x44u8, 0x21u8
+        ]
+        expect(file_write_bytes(bad_path, bad_bytes)).to_equal(true)
+        val argv: [text] = ["svllm-pack", bad_path, out_bad]
         val code = run(argv)
+        val _del_bad = file_delete(bad_path)
+        val _del_out_bad = dir_remove_all(out_bad)
         expect(code).to_equal(1)
 
     it "exits 0 when help is requested":
@@ -65,3 +83,16 @@ describe "svllm_pack CLI (A2)":
         val argv: [text] = ["svllm-pack", "--help"]
         val code = run(argv)
         expect(code).to_equal(0)  # oracle: 0 — named expected value from the requirement
+
+    it "exits 0 on a valid tiny safetensors and produces manifest.sdn":
+        # @req: REQ-APP-SVLLM-001
+        step("Verify: exits 0 on a valid tiny safetensors and produces manifest.sdn")
+        # The test writes its own one-tensor fixture: valid input => exit 0.
+        val good_path = _tmp_path("good.safetensors")
+        val out_dir = _tmp_path("out_good")
+        expect(_write_tiny_safetensors(good_path)).to_equal(true)
+        val argv: [text] = ["slang-pack", good_path, out_dir]
+        val code = run(argv)
+        val _del_good = file_delete(good_path)
+        val _del_out = dir_remove_all(out_dir)
+        expect(code).to_equal(0) # oracle: pinned expected value documenting the asserted outcome

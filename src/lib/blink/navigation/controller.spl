@@ -1,0 +1,91 @@
+# Blink NavigationController — URL history stack with back/forward traversal.
+#
+# Provides: NavigationEntry, NavigationController,
+#           navigation_entry_new, navigation_controller_new.
+
+use std.blink.url.url_parser.{ParsedUrl, parse_url}
+use std.blink.network.fetch.{fetch_text}
+
+class NavigationEntry:
+    url: ParsedUrl
+    title: text
+    timestamp: f64
+
+fn navigation_entry_new(url: ParsedUrl, title: text, timestamp: f64) -> NavigationEntry:
+    NavigationEntry(url: url, title: title, timestamp: timestamp)
+
+fn _parse_navigation_url(url_str: text) -> ParsedUrl:
+    if url_str.starts_with("file://"):
+        val path = url_str[7:url_str.len()]
+        if path.len() == 0:
+            return ParsedUrl(scheme: "", host: "", port: 0, path: "", query: "", fragment: "", is_valid: false)
+        return ParsedUrl(scheme: "file", host: "", port: 0, path: path, query: "", fragment: "", is_valid: true)
+    parse_url(url_str)
+
+class NavigationController:
+    entries: [NavigationEntry]
+    current_index: i64
+
+    me navigate(url_str: text, timestamp: f64) -> NavigationEntry?:
+        val parsed = _parse_navigation_url(url_str)
+        if not parsed.is_valid:
+            return None
+
+        var truncated: [NavigationEntry] = []
+        var i: i64 = 0
+        while i <= me.current_index and i < me.entries.len():
+            truncated.push(me.entries[i])
+            i = i + 1
+
+        val entry = navigation_entry_new(parsed, "", timestamp)
+        truncated.push(entry)
+        me.entries = truncated
+        me.current_index = me.entries.len() - 1
+        Some(entry)
+
+    me goto(url_str: text, timestamp: f64) -> Result<NavigationEntry, text>:
+        match fetch_text(url_str):
+            case Err(msg):
+                Err(msg)
+            case Ok(_resp):
+                match me.navigate(url_str, timestamp):
+                    case Some(entry):
+                        Ok(entry)
+                    case None:
+                        Err("invalid URL: {url_str}")
+
+    fn can_go_back() -> bool:
+        self.current_index > 0
+
+    fn can_go_forward() -> bool:
+        self.current_index >= 0 and (self.current_index + 1) < self.entries.len()
+
+    me go_back() -> NavigationEntry?:
+        if not me.can_go_back():
+            return None
+        me.current_index = me.current_index - 1
+        Some(me.entries[me.current_index])
+
+    me go_forward() -> NavigationEntry?:
+        if not me.can_go_forward():
+            return None
+        me.current_index = me.current_index + 1
+        Some(me.entries[me.current_index])
+
+    fn history_count() -> i64:
+        self.entries.len()
+
+    fn current_entry() -> NavigationEntry?:
+        if self.current_index < 0 or self.current_index >= self.entries.len():
+            return None
+        Some(self.entries[self.current_index])
+
+    me set_current_title(new_title: text):
+        if me.current_index >= 0 and me.current_index < me.entries.len():
+            me.entries[me.current_index].title = new_title
+
+fn navigation_controller_new() -> NavigationController:
+    NavigationController(entries: [], current_index: -1)
+
+export NavigationEntry, NavigationController
+export navigation_entry_new, navigation_controller_new

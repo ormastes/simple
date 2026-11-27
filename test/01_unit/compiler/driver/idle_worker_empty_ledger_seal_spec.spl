@@ -1,0 +1,71 @@
+"""
+# Idle Per-File Worker Seals an Empty Ledger as 0, Not a Listing Failure
+
+Regression for integ26 Stage 2 (release d0e85c05181) bootstrap sanity: the
+1-module p2_add smoke started 3 file workers; owner 0 took the only unit,
+owner 2 logged `done units=0`, but owner 1 logged
+`unit exit=0 hir_claimed=0 mir_claimed=0 closure_incomplete=false orphan_picks=0`
+then `status=BLOCKED exit=1`. Owner 1 sealed while the MIR ledger directory
+existed but was still EMPTY (owner 0's MIR child had not published anything
+yet). e0aea49c8e9 (PR #10717) rewrote `listing == nil` as `not listing.?`
+on `dir_list_optional` results; `.?` is presence (not None AND not empty), so
+an empty directory read as a provider failure and the seal returned -1.
+Owner 2 sealed later, after the ledger had entries, and passed.
+
+The contract: `dir_list_optional` distinguishes failure (None) from an empty
+directory (Some([])); only None is a failure.
+"""
+# @req REQ-COMPILER-DRIVER-LOCKFREE-PARALLEL-001
+# @cover src/compiler/80.driver/driver_hir_recovery.spl 30%
+# @cover src/compiler/80.driver/driver_worker_surface_closure_v1.spl 10%
+
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use std.io_runtime.{dir_create_all, getpid}
+use std.nogc_sync_mut.io_runtime.{time_now_unix_micros}
+use compiler.driver.driver_hir_recovery.{
+    HIR_SHARD_FORK_OWNER_MARK_V1,
+    hir_shard_recovery_inventory,
+    hir_shard_recovery_claim,
+    hir_shard_recovery_seal,
+    hir_shard_recovery_progress
+}
+use compiler.driver.driver_worker_surface_closure_v1.{worker_unit_pick_seal_v1}
+
+fn idle_ledger_dir(tag: text) -> text:
+    val dir = "build/test_tmp/idle_worker_seal_{tag}_{getpid()}_{time_now_unix_micros()}"
+    expect(dir_create_all(dir)).to_equal(true)
+    dir
+
+describe "idle per-file worker seal over an empty ledger":
+    it "seals an existing but empty MIR ledger (no owners/ index yet) as 0, not -1":
+        val mir_queue = idle_ledger_dir("mir_empty")
+        val mir_owner = "1/3@0{HIR_SHARD_FORK_OWNER_MARK_V1}-m0"
+        expect(hir_shard_recovery_seal(mir_queue, mir_owner, "PASS")).to_equal(0)
+
+    it "seals 0 for the idle owner after a peer claimed the only HIR row":
+        val hir_queue = idle_ledger_dir("hir_peer")
+        expect(hir_shard_recovery_inventory(hir_queue, "p2", ["src/p2_add.spl"])).to_equal(true)
+        expect(hir_shard_recovery_claim(hir_queue, "0/3@0~h0", "src/p2_add.spl", "k")).to_equal(1)
+        expect(hir_shard_recovery_seal(hir_queue, "1/3@0~h0", "PASS")).to_equal(0)
+        val mir_queue = idle_ledger_dir("mir_peer")
+        expect(hir_shard_recovery_seal(mir_queue, "1/3@0{HIR_SHARD_FORK_OWNER_MARK_V1}-m0", "PASS")).to_equal(0)
+
+    it "treats an empty per-owner index directory as zero claims":
+        val queue = idle_ledger_dir("owner_empty")
+        expect(hir_shard_recovery_inventory(queue, "p2", ["src/p2_add.spl"])).to_equal(true)
+        val owner = "1/3@0~h0"
+        expect(dir_create_all("{queue}/owners/{sha256_text(owner)}")).to_equal(true)
+        expect(hir_shard_recovery_seal(queue, owner, "PASS")).to_equal(0)
+        expect(hir_shard_recovery_progress(queue, owner)).to_equal(0)
+
+    it "drops 0 orphan picks from an empty ledger or an empty per-owner pick index":
+        val queue = idle_ledger_dir("picks_empty")
+        expect(worker_unit_pick_seal_v1(queue, "1/3@0~h0")).to_equal(0)
+        expect(dir_create_all("{queue}/owner_picks/{sha256_text("1/3@0~h0")}")).to_equal(true)
+        expect(worker_unit_pick_seal_v1(queue, "1/3@0~h0")).to_equal(0)
+
+    it "still fails closed on a missing ledger directory":
+        val queue = idle_ledger_dir("missing")
+        expect(hir_shard_recovery_seal("{queue}/absent", "1/3@0~h0", "PASS")).to_equal(-1)
+        expect(worker_unit_pick_seal_v1("{queue}/absent", "1/3@0~h0")).to_equal(-1)

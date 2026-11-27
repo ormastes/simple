@@ -101,3 +101,39 @@ expectation is a consequence of today's shadowing behaviour, and it must move
 only when the decision above is taken, not as a side effect of a test-triage
 pass.
 
+
+
+## Addendum 2026-11-11 — lane ne3: LIVE — language question still undecided
+
+Traversed on work/p3-ne3-20261111 (origin/release/1.0.0 tip 93490a99c5d8).
+
+- `.claude/rules/language.md` at this tip still lists only the short KEYWORD
+  reserved-word list; no built-in TYPE name (`text`, `String`) has been added,
+  and no entry records a decision on built-in type-name shadowing since this
+  bug was filed. (`git log` on the file since 2026-08-22 shows only the
+  unrelated nil/Option rules update.)
+- The three deliberately-red contract tests are unchanged at this tip,
+  including the position-3 fixture (`struct text:` with its own `data: i64`
+  field plus `impl text: fn replace`, asserting `.rfind` still takes the
+  built-in static string path) —
+  `src/compiler_rust/compiler/src/hir/lower/tests/expression_tests.rs:421-443`.
+- No E-code for redeclaring a built-in exists anywhere in the tree.
+- Not runtime-reverified here: this lane is under a no-cargo/rustc grant, so
+  the seed `cargo test` red state could not be re-executed; the source-level
+  facts above are the evidence.
+
+Verdict: nothing has moved. The decision among the three documented positions
+still belongs to a language ruling, not a patch. Status stays OPEN.
+
+
+---
+
+## 2026-11-13 triage (live-P3 lane l1, work/live-p3-l1-20261113, base f790f7f266e)
+
+**OPEN (confirmed)** — Language ruling still undecided; the three deliberately-red contract tests remain in `src/compiler_rust/compiler/src/hir/lower/tests/expression_tests.rs` (position-3 fixture intact, verified by record read at this base). No E-code for built-in redeclaration exists. Not closeable by a patch lane; decision among the three documented positions belongs to a language ruling.
+
+## Triage 2026-11-13 (P3 tools lane)
+No code change this lane; per the record header this is an undecided language
+question (shadowing the built-in string type), not a compiler patch. Needs the
+language-owner decision the record calls for.
+

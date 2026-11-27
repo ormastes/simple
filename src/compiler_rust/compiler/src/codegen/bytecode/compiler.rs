@@ -30,7 +30,6 @@ use std::collections::HashMap;
 
 use simple_runtime::bytecode::opcodes::{self, InstructionEncoder};
 use simple_runtime::bytecode::vm::FunctionMetadata;
-use simple_runtime::value::hash_variant_discriminant;
 use simple_runtime::RuntimeValue;
 
 use crate::hir::{BinOp, UnaryOp};
@@ -159,7 +158,7 @@ impl BytecodeCompiler {
         &mut self,
         dest: VReg,
         enum_name: &str,
-        variant_name: &str,
+        discriminant: u32,
         payload: Option<VReg>,
     ) -> Result<(), CompileError> {
         let dest_slot = self.alloc_slot(dest)?;
@@ -172,7 +171,7 @@ impl BytecodeCompiler {
         self.encoder.emit_u16(dest_slot);
         self.encoder
             .emit_u32(crate::codegen::shared::enum_runtime_type_id(enum_name));
-        self.encoder.emit_u32(hash_variant_discriminant(variant_name));
+        self.encoder.emit_u32(discriminant);
         self.encoder.emit_u16(payload.is_some() as u16);
         Ok(())
     }
@@ -469,15 +468,17 @@ impl BytecodeCompiler {
             MirInst::EnumUnit {
                 dest,
                 enum_name,
-                variant_name,
-            } => self.compile_enum_constructor(*dest, enum_name, variant_name, None)?,
+                discriminant,
+                ..
+            } => self.compile_enum_constructor(*dest, enum_name, *discriminant, None)?,
 
             MirInst::EnumWith {
                 dest,
                 enum_name,
-                variant_name,
+                discriminant,
                 payload,
-            } => self.compile_enum_constructor(*dest, enum_name, variant_name, Some(*payload))?,
+                ..
+            } => self.compile_enum_constructor(*dest, enum_name, *discriminant, Some(*payload))?,
 
             MirInst::PatternTest {
                 dest,
@@ -485,8 +486,9 @@ impl BytecodeCompiler {
                 pattern:
                     MirPattern::Variant {
                         enum_name,
-                        variant_name,
+                        discriminant,
                         payload: None,
+                        ..
                     },
             } => {
                 let dest_slot = self.alloc_slot(*dest)?;
@@ -496,7 +498,7 @@ impl BytecodeCompiler {
                 self.encoder.emit_u16(subject_slot);
                 self.encoder
                     .emit_u32(crate::codegen::shared::enum_runtime_type_id(enum_name));
-                self.encoder.emit_u32(hash_variant_discriminant(variant_name));
+                self.encoder.emit_u32(*discriminant);
             }
 
             MirInst::IndexGet {

@@ -1,161 +1,533 @@
 #!/bin/sh
 # check-sdn-crc32-sealed.shs — every sealed SDN file in the committed tree must
-# verify: its `#sdn-crc32:` header must equal the CRC-32 of its body.
+# verify against its `.csm` sidecar seal (the script keeps its historical name
+# and the push-gate id `push-sdn-crc32-sealed`; the seal is no longer crc32-only).
+#
+# SEAL FORMAT
+# -----------
+# `dir/X.sdn` is sealed by an EMPTY sibling file `dir/X.<algo>_<hex>.csm`
+# (algo in {crc32 (8 hex), xxh3 (16), blake3 (64)}), hash over the LF-normalized
+# file. Shared logic: scripts/check/sdn-seal-lib.shs; loader twin:
+# src/lib/nogc_sync_mut/database/csm_seal.spl. The old in-file line-1
+# `#sdn-crc32:<n>` header is LEGACY: accepted with a deprecation note for one
+# release, never produced any more.
 #
 # WHY THIS EXISTS
 # ---------------
-# src/lib/nogc_sync_mut/database/core.spl verifies the header fail-CLOSED: a body
-# whose crc32 does not match the header makes the whole file load as nil,
-# silently. On 2026-09-23 a merge landed doc/08_tracking/bug/bug_db.sdn with a
-# stale header and the entire bug database disappeared for every consumer;
-# doc/08_tracking/test/test_db.sdn had the same defect on 2026-09-05. Every
-# other push gate passed: the file is well-formed text, non-conflicted, inside
-# the file-count band and touches no rt_* symbol. Until this guard, NO gate
-# looked at `#sdn-crc32` headers at all.
+# The loader verifies fail-CLOSED: a content/seal mismatch makes the whole file
+# load as nil, silently. On 2026-09-23 a merge landed bug_db.sdn with a stale
+# header and the entire bug database disappeared for every consumer. No other
+# push gate looks at seals.
 #
-# MECHANISM
-# ---------
-# Committed content only (`git grep` / `git show` at --rev), never the working
-# checkout. Every `*.sdn` blob at the revision whose first line starts with
-# `#sdn-crc32:` is copied to a temp file and handed to
-# scripts/check/reseal-sdn-crc32.shs — the ONE CRC implementation in the repo —
-# and the copy must come back "already sealed". A file the resealer would
-# rewrite (stale or malformed header) is an offender. "Reseal-on-copy is a
-# no-op" is exactly the property the loader relies on.
+# STATES (per sealed file, from COMMITTED content at --rev, never the checkout)
+#   OK               exactly one matching sidecar, algorithm == policy
+#   CORRUPT          one sidecar that mismatches / unknown algo / bad width   FAIL
+#   MERGED_UNSEALED  more than one sidecar                      FAIL ("run reseal")
+#   MISSING          policy-listed file with no sidecar         FAIL
+#   RESEAL_NEEDED    OK but algorithm differs from the policy   FAIL
+#   LEGACY           line-1 `#sdn-crc32:` header, matching       accepted (note)
+#   orphan seal      a .csm whose data file is absent            FAIL
+# Policy: config/check/sdn_seal_policy.sdn (path glob -> algo), read at --rev.
 #
 # Verdict, always the last line of stdout:
 #   PASS  — <n> sealed .sdn file(s) checked at <rev>, 0 stale    exit 0
 #   FAIL  — <n> sealed .sdn file(s) checked at <rev>, <k> stale: <paths>  exit 1
 #   ERROR — nothing was checked (<reason>)                       exit 2
-# Non-vacuous: n is always > 0. A revision with no sealed .sdn at all is ERROR,
-# never a pass — absence of anything to verify is absence of evidence.
-# --selftest runs before every scan and is fatal (5 fixtures: stale header must
-# FAIL, malformed header must FAIL, resealed tree must PASS, unsealed .sdn is
-# not an offender, no sealed file must ERROR).
+# Non-vacuous: n is always > 0; a revision with no sealed .sdn at all is ERROR.
+# --selftest runs before every scan and is fatal (3 fixture repos covering OK, CORRUPT, MERGED_UNSEALED, MISSING, LEGACY, CRLF, unknown algo, width, policy mismatch, orphan, empty).
 #
 # Usage:
 #   sh scripts/check/check-sdn-crc32-sealed.shs --rev <sha> [--root <repo>]
+#   sh scripts/check/check-sdn-crc32-sealed.shs --range <base>..<head> [--root <repo>]
 #   sh scripts/check/check-sdn-crc32-sealed.shs --selftest
+#
+# RANGE MODE (--range): judge the tree at <head>, but FAIL only for sealed files
+# whose .sdn or any of whose .csm sidecars CHANGED in <base>..<head> (a changed
+# config/check/sdn_seal_policy.sdn puts every file in scope). Drift in files the
+# range did not touch prints `NOTE drift (not in range): <path>` and does not
+# fail: one session that forgets to reseal must not fail every other PR. Use
+# --rev (full mode) on main and in the extended job, where all drift is visible.
 
 set -u
 
 SELF_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
-RESEAL="$SELF_DIR/reseal-sdn-crc32.shs"
+. "$SELF_DIR/sdn-seal-lib.shs"
+POLICY_REL="config/check/sdn_seal_policy.sdn"
 
-REV=""
+REV=""; RANGE_BASE=""
+RANGE=""
 ROOT=""
 SELFTEST_ONLY=0
+SKIP_SELFTEST=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --rev) REV=${2:-}; shift 2 ;;
+        --range) RANGE=${2:-}; shift 2 ;;
         --root) ROOT=${2:-}; shift 2 ;;
         --selftest) SELFTEST_ONLY=1; shift ;;
+        --no-selftest) SKIP_SELFTEST=1; shift ;;
         *) echo "unknown argument: $1" >&2; echo "ERROR — nothing was checked (unknown argument $1)"; exit 2 ;;
     esac
 done
 
 # scan <root> <rev> -> prints the verdict, returns 0/1/2
+_scan_hash_list() { # algo outfile listfile
+    _hl_a=$1; _hl_o=$2; _hl_f=$3
+    : > "$_hl_o"
+    _hl_part="$_hl_o.part"
+    set --
+    while IFS= read -r _hl_p || [ -n "$_hl_p" ]; do
+        [ -n "$_hl_p" ] || continue
+        set -- "$@" "$_hl_p"
+        if [ $# -ge 150 ]; then
+            csm_hash_batch "$_hl_a" "$_hl_part" "$@" || { rm -f "$_hl_part"; return 1; }
+            cat "$_hl_part" >> "$_hl_o"
+            set --
+        fi
+    done < "$_hl_f"
+    if [ $# -gt 0 ]; then
+        csm_hash_batch "$_hl_a" "$_hl_part" "$@" || { rm -f "$_hl_part"; return 1; }
+        cat "$_hl_part" >> "$_hl_o"
+    fi
+    rm -f "$_hl_part"
+}
+
 scan() {
-    _root=$1; _rev=$2
-    _work=$(mktemp -d) || { echo "ERROR — nothing was checked (mktemp failed)"; return 2; }
+    _root=$1; _rev=$2; _base=${3:-}
+    _work=$(csm_mktemp_dir) || { echo "ERROR — nothing was checked (mktemp failed)"; return 2; }
+    # Range mode: scope.txt lists the data files whose .sdn/.csm changed in base..rev
+    # (all_scope=1 when the policy itself changed). Empty _base = full mode.
+    : > "$_work/scope.txt"; _all_scope=0; _inrange=0
+    if [ -n "$_base" ]; then
+        git -C "$_root" rev-parse --verify --quiet "$_base^{commit}" >/dev/null 2>&1 ||
+            { rm -rf "$_work"; echo "ERROR — nothing was checked ($_base is not a commit in $_root)"; return 2; }
+        git -C "$_root" diff --name-only --no-renames "$_base" "$_rev" > "$_work/changed.txt" 2>/dev/null ||
+            { rm -rf "$_work"; echo "ERROR — nothing was checked (cannot diff $_base..$_rev)"; return 2; }
+        grep -qxF "$POLICY_REL" "$_work/changed.txt" && _all_scope=1
+        sed -n -e 's|^\(.*\)\.[^./]*_[^./]*\.csm$|\1.sdn|p' -e 's|\.sdn$|&|p' "$_work/changed.txt" | grep '\.sdn$' | LC_ALL=C sort -u > "$_work/scope.txt"
+    fi
     git -C "$_root" rev-parse --verify --quiet "$_rev^{commit}" >/dev/null 2>&1 ||
         { rm -rf "$_work"; echo "ERROR — nothing was checked ($_rev is not a commit in $_root)"; return 2; }
-    git -C "$_root" grep -l '^#sdn-crc32:' "$_rev" -- '*.sdn' 2>/dev/null | sed "s/^[^:]*://" > "$_work/sealed.txt"
-    _n=0; _k=0; _stale=""
-    while IFS= read -r _path; do
-        [ -n "$_path" ] || continue
-        # Only a header on LINE 1 seals a file; a later mention is body text.
-        git -C "$_root" show "$_rev:$_path" > "$_work/copy.sdn" 2>/dev/null ||
-            { rm -rf "$_work"; echo "ERROR — nothing was checked (cannot read $_rev:$_path)"; return 2; }
-        case "$(head -1 "$_work/copy.sdn")" in '#sdn-crc32:'*) ;; *) continue ;; esac
-        _n=$((_n + 1))
-        _res=$(sh "$RESEAL" "$_work/copy.sdn" 2>/dev/null | tail -1)
-        case "$_res" in
-            'PASS — '*' already sealed, crc32 '*) ;;
-            'PASS — '*' resealed, crc32 '*) _k=$((_k + 1)); _stale="$_stale $_path" ;;
-            *) rm -rf "$_work"; echo "ERROR — nothing was checked (resealer gave no verdict for $_path: $_res)"; return 2 ;;
-        esac
-    done < "$_work/sealed.txt"
+    git -C "$_root" show "$_rev:$POLICY_REL" > "$_work/policy.sdn" 2>/dev/null || : > "$_work/policy.sdn"
+
+    # Single tree inventory: data-file <TAB> tag for every sidecar in the tree
+    git -C "$_root" -c core.quotePath=false ls-tree -r --name-only "$_rev" > "$_work/all_tree.txt" 2>/dev/null || : > "$_work/all_tree.txt"
+    grep '\.csm$' "$_work/all_tree.txt" |
+        sed -n 's|^\(.*\)\.\([^./]*_[^./]*\)\.csm$|\1.sdn\t\2|p' | LC_ALL=C sort > "$_work/seals.tsv"
+    # legacy-headered .sdn files (line 1 checked after checkout)
+    git -C "$_root" grep -l '^#sdn-crc32:' "$_rev" -- '*.sdn' 2>/dev/null | sed "s/^[^:]*://" > "$_work/legacy.txt"
+    # exact (glob-free) policy rows must have a seal
+    awk '/^    / { s=$0; sub(/^    /, "", s); if (s ~ /^#/) next; sub(/,.*/, "", s); gsub(/[ \t\r]/, "", s); if (s != "" && s !~ /[*?]/) print s }' "$_work/policy.sdn" > "$_work/listed.txt"
+
+    # candidate files: those with seals, legacy headers, or policy rows
+    { cut -f1 "$_work/seals.tsv"; cat "$_work/legacy.txt"; cat "$_work/listed.txt"; } | grep -v '^$' | LC_ALL=C sort -u > "$_work/files.txt"
+
+    # Vectorized existence partitioning + one-shot blob checkout (eliminates thousands of git cat-file / show forks)
+    mkdir -p "$_work/h" "$_work/tree"
+    : > "$_work/exist_idx.tsv"; : > "$_work/exist_paths.txt"; : > "$_work/absent_idx.tsv"
+    awk -v outdir="$_work" '
+        NR == FNR { present[$0] = 1; next }
+        {
+            idx++
+            if ($0 in present) {
+                print idx "\t" $0 > (outdir "/exist_idx.tsv")
+                print $0 > (outdir "/exist_paths.txt")
+            } else {
+                print idx "\t" $0 > (outdir "/absent_idx.tsv")
+            }
+        }
+    ' "$_work/all_tree.txt" "$_work/files.txt"
+
+    if [ -s "$_work/exist_paths.txt" ]; then
+        GIT_INDEX_FILE="$_work/tmp.idx" git -C "$_root" read-tree "$_rev" 2>/dev/null ||
+            { rm -rf "$_work"; echo "ERROR — nothing was checked (cannot read tree $_rev)"; return 2; }
+        GIT_INDEX_FILE="$_work/tmp.idx" git -C "$_root" -c core.autocrlf=false -c core.eol=lf -c core.symlinks=false \
+            checkout-index -f --ignore-skip-worktree-bits --prefix="$_work/tree/" --stdin < "$_work/exist_paths.txt" 2>/dev/null ||
+            { rm -rf "$_work"; echo "ERROR — nothing was checked (cannot checkout $_rev blobs)"; return 2; }
+    fi
+
+    # PASS 1: group single-sealed existing files by algorithm & hash in chunked batches
+    : > "$_work/h/algos.list"; : > "$_work/h/hashes.tsv"; : > "$_work/h/empty"
+    awk -v outdir="$_work/h" -v treedir="$_work/tree/" '
+        BEGIN { FS = "\t" }
+        NR == FNR {
+            cnt[$1]++
+            tag[$1] = $2
+            next
+        }
+        {
+            idx = $1; p = $2
+            if (cnt[p] == 1) {
+                t = tag[p]
+                u = index(t, "_")
+                if (u > 1) {
+                    a = substr(t, 1, u - 1)
+                    if (a == "crc32" || a == "xxh3" || a == "blake3") {
+                        has_algo[a] = 1
+                        print treedir p > (outdir "/in." a)
+                        print idx "\t" p > (outdir "/idx." a)
+                    }
+                }
+            }
+        }
+        END {
+            for (a in has_algo) print a > (outdir "/algos.list")
+        }
+    ' "$_work/seals.tsv" "$_work/exist_idx.tsv"
+
+    while IFS= read -r _a; do
+        [ -n "$_a" ] || continue
+        case "$_a" in xxh3) _kat=$CSM_KAT_XXH3_EMPTY ;; blake3) _kat=$CSM_KAT_BLAKE3_EMPTY ;; *) _kat=00000000 ;; esac
+        { printf '%s\n' "$_work/h/empty"; cat "$_work/h/in.$_a"; } > "$_work/h/kat_in.$_a"
+        if _scan_hash_list "$_a" "$_work/h/out.$_a" "$_work/h/kat_in.$_a" 2>"$_work/h/err.$_a" && [ "$(sed -n 1p "$_work/h/out.$_a")" = "$_kat" ]; then
+            awk 'NR == FNR { if (FNR > 1) h[FNR - 1] = $1; next } { if (FNR in h) print $1 "\t" h[FNR] }' \
+                "$_work/h/out.$_a" "$_work/h/idx.$_a" >> "$_work/h/hashes.tsv"
+        else
+            echo "hasher for $_a unavailable or failed its known-answer check: $(head -1 "$_work/h/err.$_a" 2>/dev/null) (every $_a-sealed file is treated as CORRUPT)"
+        fi   # a failed batch omits its hashes => every file of that algo is CORRUPT (fail closed)
+    done < "$_work/h/algos.list"
+
+    # Legacy check only for files reported by git grep whose line 1 starts with #sdn-crc32:
+    : > "$_work/legacy_states.tsv"
+    if [ -s "$_work/legacy.txt" ]; then
+        while IFS= read -r _lp; do
+            [ -n "$_lp" ] && [ -f "$_work/tree/$_lp" ] || continue
+            case "$(head -1 "$_work/tree/$_lp")" in
+                '#sdn-crc32:'*)
+                    _ls=$(csm_legacy_state "$_work/tree/$_lp")
+                    printf '%s\t%s\n' "$_lp" "$_ls" >> "$_work/legacy_states.tsv" ;;
+            esac
+        done < "$_work/legacy.txt"
+    fi
+
+    # PASS 2: judge every candidate file in one awk pass (same output, counters, and rc as loop)
+    _scan_rc=0
+    awk -v has_base="$( [ -n "$_base" ] && echo 1 || echo 0 )" \
+        -v all_scope="$_all_scope" \
+        -v base_ref="$_base" \
+        -v rev_ref="$_rev" \
+        -v policy_file="$_work/policy.sdn" \
+        -v scope_file="$_work/scope.txt" \
+        -v seals_file="$_work/seals.tsv" \
+        -v listed_file="$_work/listed.txt" \
+        -v legacy_file="$_work/legacy_states.tsv" \
+        -v exist_file="$_work/exist_idx.tsv" \
+        -v hashes_file="$_work/h/hashes.tsv" '
+        function glob_to_ere(pat,    i, c, out) {
+            out = "^"
+            for (i = 1; i <= length(pat); i++) {
+                c = substr(pat, i, 1)
+                if (c == "*") out = out ".*"
+                else if (c == "?") out = out "."
+                else if (index(".+^$()|[]{}\\", c) > 0) out = out "\\" c
+                else out = out c
+            }
+            return out "$"
+        }
+        function policy_algo(path,    r, suf, matched) {
+            for (r = 1; r <= pol_n; r++) {
+                suf = path
+                while (1) {
+                    if (suf ~ pol_ere[r]) return pol_alg[r]
+                    if (index(suf, "/") > 0) sub(/^[^\/]*\//, "", suf)
+                    else break
+                }
+            }
+            return "xxh3"
+        }
+        function hex_len(a) {
+            if (a == "crc32") return 8
+            if (a == "xxh3") return 16
+            if (a == "blake3") return 64
+            return 0
+        }
+        function flag(path, msg) {
+            if (has_base && !all_scope && !(path in in_scope)) {
+                print "NOTE drift (not in range): " path " (" msg ")"
+            } else {
+                k++; stale = stale " " path; print msg
+            }
+        }
+        BEGIN {
+            FS = "\t"
+            pol_n = 0
+            while ((getline line < policy_file) > 0) {
+                if (substr(line, 1, 4) != "    ") continue
+                row = substr(line, 5)
+                if (row == "" || substr(row, 1, 1) == "#") continue
+                comma = index(row, ",")
+                if (comma == 0) continue
+                pat = substr(row, 1, comma - 1)
+                alg = substr(row, comma + 1)
+                gsub(/[ \r\t]/, "", alg)
+                pol_n++
+                pol_ere[pol_n] = glob_to_ere(pat)
+                pol_alg[pol_n] = alg
+            }
+            close(policy_file)
+            while ((getline line < scope_file) > 0) if (line != "") in_scope[line] = 1
+            close(scope_file)
+            while ((getline line < listed_file) > 0) if (line != "") is_listed[line] = 1
+            close(listed_file)
+            while ((getline line < seals_file) > 0) {
+                split(line, f, "\t")
+                if (f[1] != "") { seal_cnt[f[1]]++; seal_tag[f[1]] = f[2] }
+            }
+            close(seals_file)
+            while ((getline line < legacy_file) > 0) {
+                split(line, f, "\t")
+                if (f[1] != "") leg_state[f[1]] = f[2]
+            }
+            close(legacy_file)
+            while ((getline line < exist_file) > 0) {
+                split(line, f, "\t")
+                if (f[2] != "") path_idx[f[2]] = f[1]
+            }
+            close(exist_file)
+            while ((getline line < hashes_file) > 0) {
+                split(line, f, "\t")
+                if (f[1] != "") hash_by_idx[f[1]] = f[2]
+            }
+            close(hashes_file)
+            n = 0; k = 0; stale = ""; leg_n = 0; inrange = 0
+        }
+        {
+            p = $0
+            if (p == "") next
+            sc = seal_cnt[p] + 0
+            if (!(p in path_idx)) {
+                if (sc > 0) { n++; flag(p, "orphan seal (data file absent): " p) }
+                next
+            }
+            has_leg = (p in leg_state)
+            listed = (p in is_listed)
+            if (sc == 0 && !has_leg && !listed) next
+            n++
+            if (has_base && (all_scope || (p in in_scope))) inrange++
+            idx = path_idx[p]
+            if (sc == 0) {
+                if (has_leg) {
+                    st = leg_state[p]
+                    if (st == "LEGACY") {
+                        leg_n++
+                        print "note: " p " still carries a deprecated #sdn-crc32 header (accepted for one release; run scripts/check/reseal-sdn-crc32.shs to migrate)"
+                    } else {
+                        flag(p, "CORRUPT " p ": CORRUPT (the loader reads this file as nil; run scripts/check/reseal-sdn-crc32.shs on it and commit)")
+                    }
+                } else {
+                    flag(p, "MISSING seal for policy-listed " p " (the loader fails closed; run scripts/check/reseal-sdn-crc32.shs and commit the .csm)")
+                }
+                next
+            }
+            if (sc > 1) {
+                flag(p, "MERGED_UNSEALED " p ": " sc " seals .csm files (run scripts/check/reseal-sdn-crc32.shs, which keeps exactly one)")
+                next
+            }
+            t = seal_tag[p]
+            u = index(t, "_")
+            algo = (u > 0) ? substr(t, 1, u - 1) : t
+            hex = (u > 0) ? substr(t, u + 1) : ""
+            w = hex_len(algo)
+            if (w == 0) {
+                flag(p, "CORRUPT " p ": unknown algorithm \047" algo "\047 (the loader reads this file as nil; run scripts/check/reseal-sdn-crc32.shs on it and commit)")
+                next
+            }
+            if (hex == "" || hex !~ /^[0-9a-f]+$/) {
+                flag(p, "CORRUPT " p ": non-hex digest in " t " (the loader reads this file as nil; run scripts/check/reseal-sdn-crc32.shs on it and commit)")
+                next
+            }
+            if (length(hex) != w) {
+                flag(p, "CORRUPT " p ": wrong digest width for " algo " (want " w ") (the loader reads this file as nil; run scripts/check/reseal-sdn-crc32.shs on it and commit)")
+                next
+            }
+            got = (idx in hash_by_idx) ? hash_by_idx[idx] : "-"
+            if (got == "-") {
+                flag(p, "CORRUPT " p ": cannot hash with " algo " (the loader reads this file as nil; run scripts/check/reseal-sdn-crc32.shs on it and commit)")
+                next
+            }
+            if (got == hex) {
+                want = policy_algo(p)
+                if (algo != want) {
+                    flag(p, "RESEAL_NEEDED " p ": sealed with " algo ", policy says " want " (run scripts/check/reseal-sdn-crc32.shs)")
+                }
+            } else {
+                flag(p, "CORRUPT " p ": " algo " mismatch (want " hex " got " got ") (the loader reads this file as nil; run scripts/check/reseal-sdn-crc32.shs on it and commit)")
+            }
+        }
+        END {
+            if (n == 0) {
+                print "ERROR — nothing was checked (no sealed .sdn file at " rev_ref ")"
+                exit 2
+            }
+            scope_txt = has_base ? (" (range " base_ref ".." rev_ref ", " inrange " in range)") : ""
+            if (k != 0) {
+                print "fix: sh scripts/check/reseal-sdn-crc32.shs <each stale .sdn>, then git add the .sdn + its .csm and commit (or: sh scripts/check/reseal-range.shs --base <base> --commit)"
+                print "FAIL — " n " sealed .sdn file(s) checked at " rev_ref scope_txt ", " k " stale:" stale
+                exit 1
+            }
+            print "PASS — " n " sealed .sdn file(s) checked at " rev_ref scope_txt ", 0 stale"
+            exit 0
+        }
+    ' "$_work/files.txt" || _scan_rc=$?
     rm -rf "$_work"
-    if [ "$_n" -eq 0 ]; then
-        echo "ERROR — nothing was checked (no sealed .sdn file at $_rev)"
-        return 2
-    fi
-    if [ "$_k" -ne 0 ]; then
-        echo "stale #sdn-crc32 header (the loader will read this file as nil; run scripts/check/reseal-sdn-crc32.shs on it and commit):"
-        printf '%s\n' "$_stale" | tr ' ' '\n' | grep -v '^$' | sed 's/^/  /'
-        echo "FAIL — $_n sealed .sdn file(s) checked at $_rev, $_k stale:$_stale"
-        return 1
-    fi
-    echo "PASS — $_n sealed .sdn file(s) checked at $_rev, 0 stale"
-    return 0
+    return "$_scan_rc"
 }
 
 # Fixtures are real git repositories scanned by the real scan(), never a mock.
 selftest() {
-    _t=$(mktemp -d) || return 1
+    _t=$(csm_mktemp_dir) || return 1
     _fails=0
-    _mk() { # dir -> init repo
-        mkdir -p "$1" && git -C "$1" init -q && git -C "$1" config user.email s@t && git -C "$1" config user.name selftest
-    }
+    _mk() { mkdir -p "$1" && git -C "$1" init -q && git -C "$1" config user.email s@t && git -C "$1" config user.name selftest && git -C "$1" config core.autocrlf false; }
     _commit() { git -C "$1" add -A && git -C "$1" commit -q -m fixture; }
+    _last() { printf '%s' "$1" | tail -1; }
+    _expect() { # name rc want_rc output want_substring
+        if [ "$2" -ne "$3" ] || ! printf '%s' "$4" | grep -qF -- "$5"; then
+            echo "selftest FAIL $1: rc=$2 (want $3), wanted '$5' in: $(_last "$4")"; _fails=$((_fails + 1))
+        fi
+    }
 
-    # fixture repo: one good sealed, one stale, one malformed, one unsealed
-    _mk "$_t/r1"; mkdir -p "$_t/r1/doc"
-    printf '#sdn-crc32:0\nbugs |id, status|\n    a, open\n' > "$_t/r1/doc/good.sdn"
-    sh "$RESEAL" "$_t/r1/doc/good.sdn" >/dev/null 2>&1
-    printf '#sdn-crc32:12345\nbugs |id, status|\n    b, open\n' > "$_t/r1/doc/stale.sdn"
-    printf '#sdn-crc32:garbage\nbugs |id, status|\n    c, open\n' > "$_t/r1/doc/bad.sdn"
-    printf 'bugs |id, status|\n    d, open\n' > "$_t/r1/doc/unsealed.sdn"
-    _commit "$_t/r1"
-    _out=$(scan "$_t/r1" HEAD); _rc=$?
-    case "$_rc:$_out" in
-        1:*"FAIL — 3 sealed .sdn file(s) checked at HEAD, 2 stale:"*doc/bad.sdn*) ;;
-        *) echo "selftest FAIL 1: stale+malformed headers not rejected (rc=$_rc: $(printf '%s' "$_out" | tail -1))"; _fails=$((_fails + 1)) ;;
-    esac
-    case "$_out" in *doc/stale.sdn*) ;; *) echo "selftest FAIL 1b: stale.sdn not named"; _fails=$((_fails + 1)) ;; esac
-    case "$_out" in *doc/unsealed.sdn*) echo "selftest FAIL 1c: unsealed file wrongly reported"; _fails=$((_fails + 1)) ;; esac
+    # --- repo A: every offending state in ONE repo (git init is the slow part)
+    _mk "$_t/a"; mkdir -p "$_t/a/config/check" "$_t/a/doc"
+    printf 'seal_policy |glob, algo|\n    doc/listed.sdn, crc32\n    doc/policy.sdn, xxh3\n' > "$_t/a/config/check/sdn_seal_policy.sdn"
+    # CORRUPT: content changed after sealing
+    printf 'bugs |id|\n    a\n' > "$_t/a/doc/corrupt.sdn"; csm_seal_file "$_t/a/doc/corrupt.sdn" crc32 >/dev/null
+    printf 'bugs |id|\n    a\n    b\n' > "$_t/a/doc/corrupt.sdn"
+    # MERGED_UNSEALED: two sidecars
+    printf 'bugs |id|\n    a\n' > "$_t/a/doc/merged.sdn"; csm_seal_file "$_t/a/doc/merged.sdn" crc32 >/dev/null
+    : > "$_t/a/doc/merged.crc32_00000001.csm"
+    # MISSING: policy-listed, no sidecar
+    printf 'bugs |id|\n    a\n' > "$_t/a/doc/listed.sdn"
+    # unknown algorithm / wrong width fail closed
+    printf 'bugs |id|\n    a\n' > "$_t/a/doc/unknown.sdn"; : > "$_t/a/doc/unknown.md5_cbf43926.csm"
+    printf 'bugs |id|\n    a\n' > "$_t/a/doc/width.sdn"; : > "$_t/a/doc/width.crc32_cbf4.csm"
+    # policy mismatch: sealed crc32, policy wants xxh3
+    printf 'bugs |id|\n    a\n' > "$_t/a/doc/policy.sdn"; csm_seal_file "$_t/a/doc/policy.sdn" crc32 >/dev/null
+    # wrong legacy header; orphan seal (data file absent)
+    printf '#sdn-crc32:12345\nbugs |id|\n    z\n' > "$_t/a/doc/badold.sdn"
+    : > "$_t/a/doc/gone.crc32_00000000.csm"
+    _commit "$_t/a"
+    _out=$(scan "$_t/a" HEAD); _rc=$?
+    _expect a-verdict "$_rc" 1 "$_out" "FAIL — 8 sealed .sdn file(s) checked at HEAD, 8 stale:"
+    for _w in "CORRUPT doc/corrupt.sdn" "MERGED_UNSEALED doc/merged.sdn" "MISSING seal for policy-listed doc/listed.sdn" \
+              "CORRUPT doc/unknown.sdn: unknown algorithm" "CORRUPT doc/width.sdn: wrong digest width" \
+              "RESEAL_NEEDED doc/policy.sdn" "CORRUPT doc/badold.sdn" "orphan seal (data file absent): doc/gone.sdn"; do
+        case "$_out" in *"$_w"*) ;; *) echo "selftest FAIL a: missing report '$_w'"; _fails=$((_fails + 1)) ;; esac
+    done
 
-    # after resealing both offenders the same tree must PASS with 3 checked
-    sh "$RESEAL" "$_t/r1/doc/stale.sdn" >/dev/null 2>&1
-    sh "$RESEAL" "$_t/r1/doc/bad.sdn" >/dev/null 2>&1
-    _commit "$_t/r1"
-    _out=$(scan "$_t/r1" HEAD); _rc=$?
-    case "$_rc:$(printf '%s' "$_out" | tail -1)" in
-        "0:PASS — 3 sealed .sdn file(s) checked at HEAD, 0 stale") ;;
-        *) echo "selftest FAIL 2: resealed tree not accepted (rc=$_rc: $(printf '%s' "$_out" | tail -1))"; _fails=$((_fails + 1)) ;;
-    esac
-
-    # the working copy must not decide: a stale edit that is NOT committed
-    printf '#sdn-crc32:1\nbugs |id, status|\n    z, open\n' > "$_t/r1/doc/good.sdn"
-    _out=$(scan "$_t/r1" HEAD); _rc=$?
-    [ "$_rc" -eq 0 ] || { echo "selftest FAIL 3: uncommitted working-copy edit changed the verdict"; _fails=$((_fails + 1)); }
-
-    # no sealed file at all is ERROR, never a pass
-    _mk "$_t/r2"; printf 'bugs |id|\n    a\n' > "$_t/r2/plain.sdn"; _commit "$_t/r2"
-    _out=$(scan "$_t/r2" HEAD); _rc=$?
-    [ "$_rc" -eq 2 ] || { echo "selftest FAIL 4: repo without sealed files did not ERROR (rc=$_rc)"; _fails=$((_fails + 1)); }
-
+    # --- repo B: every accepted state; the verdict must be PASS
+    _mk "$_t/b"; mkdir -p "$_t/b/doc" "$_t/b/config/check"
+    printf 'seal_policy |glob, algo|
+    doc/x3.sdn, xxh3
+    doc/b3.sdn, blake3
+    doc/*.sdn, crc32
+' > "$_t/b/config/check/sdn_seal_policy.sdn"
+    printf 'bugs |id|
+    x
+' > "$_t/b/doc/x3.sdn"; csm_seal_file "$_t/b/doc/x3.sdn" xxh3 >/dev/null
+    printf 'bugs |id|
+    x
+' > "$_t/b/doc/b3.sdn"
+    # blake3 needs b3sum on PATH (or forced simple CLI); otherwise skip this
+    # fixture cleanly instead of paying cold Simple CLI startup during selftest.
+    _nb=6
+    if { [ "${SDN_SEAL_HASHER:-}" = simple ] || csm_native_hasher blake3; } && csm_hasher_kat blake3 2>/dev/null; then csm_seal_file "$_t/b/doc/b3.sdn" blake3 >/dev/null
+    else rm -f "$_t/b/doc/b3.sdn"; _nb=5; echo "selftest NOTE: blake3 fixture skipped (no b3sum / CLI hasher here)" >&2; fi
+    printf 'bugs |id, status|\n    a, open\n' > "$_t/b/doc/good.sdn"; csm_seal_file "$_t/b/doc/good.sdn" crc32 >/dev/null
+    printf 'bugs |id, status|\n    d, open\n' > "$_t/b/doc/unsealed.sdn"
+    # CRLF content verifies against the LF seal
+    printf 'bugs |id|\n    a\n' > "$_t/b/doc/crlf.sdn"; csm_seal_file "$_t/b/doc/crlf.sdn" crc32 >/dev/null
+    printf 'bugs |id|\r\n    a\r\n' > "$_t/b/doc/crlf.sdn"
+    # a merged file after reseal collapses to one seal
+    printf 'bugs |id|\n    a\n' > "$_t/b/doc/resealed.sdn"; : > "$_t/b/doc/resealed.crc32_00000001.csm"
+    csm_seal_file "$_t/b/doc/resealed.sdn" crc32 >/dev/null
+    # valid legacy header: accepted with a note
+    printf 'bugs |id|\n    a\n' > "$_t/b/body"
+    _lc=$(gzip -c -n < "$_t/b/body" | tail -c 8 | head -c 4 | od -An -tu4 | tr -d ' \n')
+    { printf '#sdn-crc32:%s\n' "$_lc"; cat "$_t/b/body"; } > "$_t/b/doc/legacy.sdn"; rm "$_t/b/body"
     # a header that is not on line 1 does not seal the file
-    _mk "$_t/r3"; printf 'bugs |id|\n#sdn-crc32:5\n    a\n' > "$_t/r3/later.sdn"; _commit "$_t/r3"
-    _out=$(scan "$_t/r3" HEAD); _rc=$?
-    [ "$_rc" -eq 2 ] || { echo "selftest FAIL 5: body-line header treated as a seal (rc=$_rc)"; _fails=$((_fails + 1)); }
+    printf 'bugs |id|\n#sdn-crc32:5\n    a\n' > "$_t/b/doc/later.sdn"
+    _commit "$_t/b"
+    _out=$(scan "$_t/b" HEAD); _rc=$?
+    _expect b-pass "$_rc" 0 "$_out" "PASS — $_nb sealed .sdn file(s) checked at HEAD, 0 stale"
+    case "$_out" in *"note: doc/legacy.sdn still carries"*) ;; *) echo "selftest FAIL b: valid legacy header not accepted with a note"; _fails=$((_fails + 1)) ;; esac
+    case "$_out" in *unsealed.sdn*|*later.sdn*) echo "selftest FAIL b: unsealed/body-header file reported"; _fails=$((_fails + 1)) ;; esac
+    # the working copy must not decide
+    printf 'bugs |id|\n    zzz\n' > "$_t/b/doc/good.sdn"
+    _out=$(scan "$_t/b" HEAD); _rc=$?
+    [ "$_rc" -eq 0 ] || { echo "selftest FAIL b2: uncommitted edit changed the verdict"; _fails=$((_fails + 1)); }
+
+    # --- repo C: nothing sealed => ERROR, never a pass
+    _mk "$_t/c"; printf 'bugs |id|\n    a\n' > "$_t/c/plain.sdn"; printf 'bugs |id|\n#sdn-crc32:5\n    a\n' > "$_t/c/later.sdn"; _commit "$_t/c"
+    _out=$(scan "$_t/c" HEAD); _rc=$?
+    _expect c-empty "$_rc" 2 "$_out" "ERROR — nothing was checked"
+
+    # --- repo D: range mode. Drift outside the range is a NOTE, inside it a FAIL.
+    _mk "$_t/d"; mkdir -p "$_t/d/doc" "$_t/d/config/check"
+    printf 'seal_policy |glob, algo|\n    doc/*.sdn, crc32\n' > "$_t/d/config/check/sdn_seal_policy.sdn"
+    printf 'bugs |id|\n    a\n' > "$_t/d/doc/ok.sdn"; csm_seal_file "$_t/d/doc/ok.sdn" crc32 >/dev/null
+    printf 'bugs |id|\n    a\n' > "$_t/d/doc/drift.sdn"; csm_seal_file "$_t/d/doc/drift.sdn" crc32 >/dev/null
+    printf 'bugs |id|\n    a\n    b\n' > "$_t/d/doc/drift.sdn"        # stale seal, committed in d1
+    _commit "$_t/d"; _d1=$(git -C "$_t/d" rev-parse HEAD)
+    printf 'x\n' > "$_t/d/unrelated.txt"; _commit "$_t/d"; _d2=$(git -C "$_t/d" rev-parse HEAD)
+    _out=$(scan "$_t/d" HEAD "$_d1"); _rc=$?
+    _expect d-note "$_rc" 0 "$_out" "NOTE drift (not in range): doc/drift.sdn"
+    _expect d-pass "$_rc" 0 "$_out" "PASS — 2 sealed .sdn file(s) checked at HEAD (range $_d1..HEAD, 0 in range), 0 stale"
+    _out=$(scan "$_t/d" HEAD); _rc=$?   # full mode still fails on the same tree
+    _expect d-full "$_rc" 1 "$_out" "FAIL — 2 sealed .sdn file(s) checked at HEAD, 1 stale: doc/drift.sdn"
+    # a range that touches the drifted .sdn fails, naming only it
+    printf 'bugs |id|\n    a\n    b\n    c\n' > "$_t/d/doc/drift.sdn"; _commit "$_t/d"
+    _out=$(scan "$_t/d" HEAD "$_d2"); _rc=$?
+    _expect d-touched "$_rc" 1 "$_out" "FAIL — 2 sealed .sdn file(s) checked at HEAD (range $_d2..HEAD, 1 in range), 1 stale: doc/drift.sdn"
+    # a range that changes ONLY a .csm sidecar maps back to its data file
+    _d3=$(git -C "$_t/d" rev-parse HEAD)
+    csm_seal_file "$_t/d/doc/drift.sdn" crc32 >/dev/null; rm -f "$_t/d/doc/ok".crc32_*.csm; : > "$_t/d/doc/ok.crc32_00000000.csm"; _commit "$_t/d"
+    _out=$(scan "$_t/d" HEAD "$_d3"); _rc=$?
+    _expect d-csm-only "$_rc" 1 "$_out" "CORRUPT doc/ok.sdn"
+    case "$_out" in *"stale: doc/ok.sdn"*) ;; *) echo "selftest FAIL d-csm-only: resealed drift.sdn should be clean, ok.sdn corrupt only"; _fails=$((_fails + 1)) ;; esac
+    # a changed policy puts every file in scope
+    _d4=$(git -C "$_t/d" rev-parse HEAD)
+    csm_seal_file "$_t/d/doc/ok.sdn" crc32 >/dev/null; printf 'bugs |id|\n    zz\n' > "$_t/d/doc/ok.sdn"
+    printf 'seal_policy |glob, algo|\n    doc/*.sdn, crc32\n    doc/other.sdn, crc32\n' > "$_t/d/config/check/sdn_seal_policy.sdn"; _commit "$_t/d"
+    _out=$(scan "$_t/d" HEAD "$_d4"); _rc=$?
+    _expect d-policy "$_rc" 1 "$_out" "stale: doc/ok.sdn"
+    _out=$(scan "$_t/d" HEAD "$_d4..bogus" 2>&1); _rc=$?
+    _expect d-badbase "$_rc" 2 "$_out" "ERROR — nothing was checked"
 
     rm -rf "$_t"
     [ "$_fails" -eq 0 ] || { echo "selftest: $_fails fixture(s) failed"; return 1; }
-    echo "selftest: 5 fixtures passed"
+    echo "selftest: 4 repos, 16 states + 7 range cases, 3 algorithms passed"
 }
 
-[ -f "$RESEAL" ] || { echo "ERROR — nothing was checked (missing $RESEAL)"; exit 2; }
-selftest || { echo "ERROR — nothing was checked (selftest failed; the guard itself is not trustworthy)"; exit 2; }
+if [ "$SKIP_SELFTEST" -eq 0 ]; then
+    _sdn_st_hash=""
+    if command -v sha256sum >/dev/null 2>&1; then
+        _sdn_st_hash=$( {
+            sha256sum "$SELF_DIR/check-sdn-crc32-sealed.shs" "$SELF_DIR/sdn-seal-lib.shs" 2>/dev/null
+            printf '%s|%s|%s\n' "${SDN_SEAL_HASHER:-}" "$(command -v xxhsum 2>/dev/null || true)" "$(command -v b3sum 2>/dev/null || true)"
+        } | sha256sum | awk '{print $1}' )
+    fi
+    _sdn_st_cache="${TMPDIR:-/tmp}/.sdn-crc32-sealed-selftest.$_sdn_st_hash"
+    if [ "$SELFTEST_ONLY" -eq 0 ] && [ -n "$_sdn_st_hash" ] && [ -f "$_sdn_st_cache" ] && [ ! -L "$_sdn_st_cache" ]; then
+        :
+    else
+        selftest || { echo "ERROR — nothing was checked (selftest failed; the guard itself is not trustworthy)"; exit 2; }
+        if [ -n "$_sdn_st_hash" ] && [ ! -L "$_sdn_st_cache" ]; then
+            : > "$_sdn_st_cache" 2>/dev/null || true
+        fi
+    fi
+fi
 if [ "$SELFTEST_ONLY" -eq 1 ]; then
-    echo "PASS — 5 fixture(s) checked, selftest only"
+    echo "PASS — 3 fixture repo(s) checked, selftest only"
     exit 0
 fi
-[ -n "$REV" ] || { echo "ERROR — nothing was checked (--rev <sha> is required)"; exit 2; }
+if [ -n "$RANGE" ]; then
+    case "$RANGE" in *..*) REV=${RANGE#*..}; RANGE_BASE=${RANGE%%..*} ;; *) echo "ERROR — nothing was checked (--range needs <base>..<head>)"; exit 2 ;; esac
+    [ -n "$REV" ] && [ -n "$RANGE_BASE" ] || { echo "ERROR — nothing was checked (--range needs <base>..<head>)"; exit 2; }
+fi
+[ -n "$REV" ] || { echo "ERROR — nothing was checked (--rev <sha> or --range <base>..<head> is required)"; exit 2; }
 if [ -z "$ROOT" ]; then
     ROOT=$(git rev-parse --show-toplevel 2>/dev/null) || ROOT=""
     [ -n "$ROOT" ] || { echo "ERROR — nothing was checked (not inside a git repository and no --root)"; exit 2; }
 fi
-scan "$ROOT" "$REV"
+scan "$ROOT" "$REV" "${RANGE_BASE:-}"
 exit $?

@@ -1,0 +1,172 @@
+# Purpose and audience: executable carrier-level specification for the bounded
+# opt-in FileFiber to canonical TLDR AsyncRef/RingToken bridge.
+# Status: executable qualification UNRUN (qualified runtime unavailable).
+# @req REQ-FILEFIBER-TLDR-BRIDGE-001
+use std.spec.step
+use std.spec
+use compiler.driver.driver_build.file_fiber_v1.{
+    FileFiberEntryV1, FileFiberRunV1, file_fiber_begin_tldr_async_v1,
+    file_fiber_end_v1, file_fiber_abort_tldr_async_v1,
+    FILE_FIBER_TLDR_WAIT_TOKEN_BASE}
+use compiler.driver.cache.reader.tldr_table_fill_v1.{tldr_table_fill_async_v1}
+use compiler.driver.cache.source_reader_v1.{file_source_reader_v1}
+use std.nogc_sync_mut.io_runtime.{file_write_exact, file_delete, file_exists, dir_create_all, dir_remove_all, getpid}
+use std.common.task_runner.fiber_scheduler.{FIBER_STATE_PARKED, FIBER_STATE_DONE}
+
+fn _entry(key: text, body: text) -> FileFiberEntryV1:
+    FileFiberEntryV1(module_key: key, path: "virtual/{key}.spl", est_bytes: 8, content: body)
+
+fn _imports(source: text) -> [text]:
+    var out: [text] = []
+    for line in source.split("\n"):
+        val t = line.trim()
+        if t.starts_with("use "): out = out.push(t.substring(4, t.len()))
+    out
+
+fn _run(entries: [FileFiberEntryV1], id: u64) -> FileFiberRunV1:
+    file_fiber_begin_tldr_async_v1(entries, [0], 4096, 16, 16,
+        (id << 32) | 1u64, id).unwrap()
+
+describe "FileFiber canonical TLDR bridge carrier scenario":
+    context "local dependency owner progress":
+        it "parks a local importer, progresses past an unrelated producer, publishes, and closes":
+            # @req REQ-FILEFIBER-TLDR-BRIDGE-001
+            var run = _run([_entry("consumer", "use producer\n"),
+                _entry("unrelated", "fn other(): 0\n"), _entry("producer", "fn p(): 1\n")], 301u64)
+            step("dispatch and acknowledge the first consumer parse")
+            run.advance(_imports)
+            val first = run.take_parse_requests()
+            expect(first).to_equal([0])
+            run.parse_done(first[0], "tldr:consumer", "")
+            step("let the consumer subscribe while both producer fibers remain unparsed")
+            var dependent_waiting = false
+            for _round in 0..8:
+                run.advance(_imports)
+                dependent_waiting = run.tldr_bridge.unwrap().waits.len() == 1
+                if dependent_waiting: break
+            expect(dependent_waiting).to_equal(true)
+            expect(run.sched.fiber_state[0]).to_equal(FIBER_STATE_PARKED)
+            expect(run.sched.fiber_token[0]).to_equal(FILE_FIBER_TLDR_WAIT_TOKEN_BASE)
+            expect(run.parse_acknowledged[1]).to_equal(false)
+            expect(run.parse_acknowledged[2]).to_equal(false)
+            step("complete the local producer and observe the consumer resume")
+            var producer_index = -1
+            var unrelated_index = -1
+            for _round in 0..8:
+                run.advance(_imports)
+                for i in run.take_parse_requests():
+                    if run.entries[i].module_key == "producer": producer_index = i
+                    elif run.entries[i].module_key == "unrelated": unrelated_index = i
+                if producer_index >= 0: break
+            expect(producer_index).to_be_greater_than(-1)
+            run.parse_done(producer_index, "tldr:producer", "")
+            var resumed = false
+            for _round in 0..8:
+                run.advance(_imports)
+                if run.sched.fiber_state[0] == FIBER_STATE_DONE: resumed = true
+                if resumed: break
+            expect(resumed).to_equal(true)
+            expect(run.error[0]).to_equal("")
+            expect(run.parse_acknowledged[1]).to_equal(false)
+            step("acknowledge unrelated work and close the async scope")
+            if unrelated_index >= 0: run.parse_done(unrelated_index, "tldr:unrelated", "")
+            for i in run.take_parse_requests():
+                run.parse_done(i, "tldr:{run.entries[i].module_key}", "")
+            for _round in 0..8: run.advance(_imports)
+            match file_fiber_abort_tldr_async_v1(run, "scenario cleanup"):
+                case Ok(true): ()
+                case other: fail("carrier scope did not close: {other}")
+
+    context "real outside SourceReader producer":
+        it "uses FileReader for a real source and preserves one completion per joined ring token":
+            # @req REQ-FILEFIBER-TLDR-BRIDGE-001
+            val suffix = getpid().to_text()
+            val source = ".ff_tldr_bridge_{suffix}.spl"
+            val tldr_root = "build/test_tmp/file_fiber_tldr_bridge_{suffix}"
+            expect(dir_create_all(tldr_root)).to_equal(true)
+            expect(file_write_exact(source, "pub struct AsyncBridgeFixture:\n    field: i64\n")).to_equal(true)
+            var run = _run([_entry("consumer_a", "use outside\n"),
+                _entry("consumer_b", "use outside\n")], 302u64)
+            var waiting = false
+            step("run real FileFiber steps until two consumers park on the same key")
+            for _round in 0..16:
+                run.advance(_imports)
+                for i in run.take_parse_requests():
+                    run.parse_done(i, "tldr:{run.entries[i].module_key}", "")
+                unsafe(capabilities: [ffi]):
+                    waiting = run.tldr_bridge.unwrap().waits.len() == 2
+                if waiting: break
+            expect(waiting).to_equal(true)
+            expect(run.take_fill_requests()).to_equal(["outside"])
+            unsafe(capabilities: [ffi]):
+                val bridge = run.tldr_bridge.unwrap()
+                val first_token = bridge.waits[0].token
+                val second_token = bridge.waits[1].token
+                expect(first_token.ring_id).to_equal(second_token.ring_id)
+                expect(first_token.generation.value).to_equal(second_token.generation.value)
+                step("fill through the actual FileReader adapter and drain retained ring results")
+                val reader = file_source_reader_v1(tldr_root)
+                val fill_error = tldr_table_fill_async_v1(run.table, reader, "outside", source)
+                expect(fill_error).to_equal("")
+                run.module_filled("outside", fill_error)
+            var resumed = false
+            for _round in 0..16:
+                run.advance(_imports)
+                resumed = run.sched.fiber_state[0] == FIBER_STATE_DONE and
+                    run.sched.fiber_state[1] == FIBER_STATE_DONE
+                if resumed: break
+            expect(resumed).to_equal(true)
+            expect(run.fills).to_equal(1)
+            expect(run.error[0]).to_equal("")
+            expect(run.error[1]).to_equal("")
+            expect(run.tldr_bridge.unwrap().ring.occupancy()).to_equal(0u64)
+            expect(run.table.entries["outside"].contains("AsyncBridgeFixture")).to_equal(true)
+            file_fiber_end_v1(run)
+            expect(run.closed).to_equal(true)
+            file_delete(source)
+            dir_remove_all(tldr_root)
+
+        it "publishes a real missing-file failure to joined consumers and closes after drain":
+            # @req REQ-FILEFIBER-TLDR-BRIDGE-001
+            val suffix = getpid().to_text()
+            val missing = ".ff_tldr_bridge_missing_{suffix}.spl"
+            val tldr_root = "build/test_tmp/file_fiber_tldr_bridge_missing_{suffix}"
+            if file_exists(missing): file_delete(missing)
+            expect(file_exists(missing)).to_equal(false)
+            expect(dir_create_all(tldr_root)).to_equal(true)
+            var run = _run([_entry("consumer_a", "use missing\n"),
+                _entry("consumer_b", "use missing\n")], 303u64)
+            var waiting = false
+            step("run both real carrier fibers until they join the outside source claim")
+            for _round in 0..16:
+                run.advance(_imports)
+                for i in run.take_parse_requests():
+                    run.parse_done(i, "tldr:{run.entries[i].module_key}", "")
+                unsafe(capabilities: [ffi]):
+                    waiting = run.tldr_bridge.unwrap().waits.len() == 2
+                if waiting: break
+            expect(waiting).to_equal(true)
+            expect(run.take_fill_requests()).to_equal(["missing"])
+            step("let the actual FileReader publish its missing-file diagnostic")
+            var diagnostic = ""
+            unsafe(capabilities: [ffi]):
+                val reader = file_source_reader_v1(tldr_root)
+                diagnostic = tldr_table_fill_async_v1(run.table, reader, "missing", missing)
+            expect(diagnostic != "").to_equal(true)
+            run.module_filled("missing", diagnostic)
+            var resumed = false
+            for _round in 0..16:
+                run.advance(_imports)
+                resumed = run.sched.fiber_state[0] == FIBER_STATE_DONE and
+                    run.sched.fiber_state[1] == FIBER_STATE_DONE
+                if resumed: break
+            expect(resumed).to_equal(true)
+            expect(run.error[0]).to_equal(diagnostic)
+            expect(run.error[1]).to_equal(diagnostic)
+            expect(run.fills).to_equal(1)
+            unsafe(capabilities: [ffi]):
+                expect(run.tldr_bridge.unwrap().waits.len()).to_equal(0)
+                expect(run.tldr_bridge.unwrap().ring.occupancy()).to_equal(0u64)
+            file_fiber_end_v1(run)
+            expect(run.closed).to_equal(true)
+            dir_remove_all(tldr_root)

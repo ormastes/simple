@@ -43,6 +43,7 @@ impl Lowerer {
         right: &Expr,
         ctx: &mut FunctionContext,
     ) -> LowerResult<HirExpr> {
+        self.check_unit_binary(op, left, right, ctx)?;
         let left_hir = Box::new(self.lower_expr(left, ctx)?);
         let right_hir = Box::new(self.lower_expr(right, ctx)?);
 
@@ -170,6 +171,47 @@ impl Lowerer {
             });
         }
 
+        // `opt == scalar` / `opt != scalar` where one side is an optional
+        // scalar (`bool?`/`i64?`, a tagged `Pointer<T>` slot, also what `.?`
+        // yields in value position) and the other a RAW scalar of the same
+        // width class. Comparing the tagged word against the raw one made
+        // `bool_false().? == false` and `ki() == 5` answer false under the JIT
+        // while the interpreter answers true (it bridges `Some(x)` vs `x`).
+        // Box the raw side into the tagged form and compare both as ANY via the
+        // runtime's tagged equality: absent (None) never equals a boxed
+        // scalar, so `None == false` stays false and `None != true` stays true.
+        // Bug: doc/08_tracking/bug/seed_optional_query_comparison_divergence_2026-08-16.md
+        if matches!(op, ast::BinOp::Eq | ast::BinOp::NotEq) {
+            let left_opt = self.optional_tagged_scalar_inner(left_hir.ty).is_some();
+            let right_opt = self.optional_tagged_scalar_inner(right_hir.ty).is_some();
+            if left_opt != right_opt {
+                let raw_ty = if left_opt {
+                    right_hir.ty
+                } else {
+                    left_hir.ty
+                };
+                if raw_ty == TypeId::BOOL || Self::is_int_scalar(raw_ty) {
+                    let normalize = |e: HirExpr| HirExpr {
+                        kind: HirExprKind::BuiltinCall {
+                            name: "rt_unwrap_or_self".to_string(),
+                            args: vec![e],
+                        },
+                        ty: TypeId::ANY,
+                    };
+                    let left_tagged = self.box_scalar_into_tagged_result(TypeId::ANY, *left_hir);
+                    let right_tagged = self.box_scalar_into_tagged_result(TypeId::ANY, *right_hir);
+                    return Ok(HirExpr {
+                        kind: HirExprKind::Binary {
+                            op: (*op).into(),
+                            left: Box::new(normalize(left_tagged)),
+                            right: Box::new(normalize(right_tagged)),
+                        },
+                        ty: TypeId::BOOL,
+                    });
+                }
+            }
+        }
+
         // Type is determined by operands
         // For SIMD vectors, comparison returns a SIMD bool vector
         let ty = match op {
@@ -195,6 +237,9 @@ impl Lowerer {
             // it decoded the raw 0/1 as a heap handle ("nil"/"0"). Branching
             // still worked, which is why this hid behind `if x not in y`.
             ast::BinOp::And | ast::BinOp::Or | ast::BinOp::Is | ast::BinOp::In | ast::BinOp::NotIn => TypeId::BOOL,
+            // `u8 << n` / `u16 << n` promote to a 64-bit int (as the
+            // interpreter does); typing it as the narrow LHS truncated `b0 << 8` to 0.
+            ast::BinOp::ShiftLeft if matches!(left_hir.ty, TypeId::U8 | TypeId::U16) => TypeId::I64,
             // `int * text` is repetition (MIR -> rt_string_repeat), so it is
             // TEXT; falling through to `left_hir.ty` typed `3 * "ab"` as i64.
             // (`text * int` already gets TEXT from the left operand.)
@@ -289,7 +334,14 @@ impl Lowerer {
         operand: &Expr,
         ctx: &mut FunctionContext,
     ) -> LowerResult<HirExpr> {
-        let operand_hir = Box::new(self.lower_expr(operand, ctx)?);
+        // `not x.?` negates PRESENCE, as the interpreter does; negating the
+        // value-position payload made `not Some(0).?` true on the JIT
+        // (seed_jit_dotq_coalesce_parity_2026-11-06).
+        let operand_hir = if matches!(op, ast::UnaryOp::Not) && matches!(operand, Expr::ExistsCheck(_)) {
+            Box::new(self.lower_condition(operand, ctx)?)
+        } else {
+            Box::new(self.lower_expr(operand, ctx)?)
+        };
         let ty = match op {
             ast::UnaryOp::Not => TypeId::BOOL,
             ast::UnaryOp::Ref | ast::UnaryOp::RefMut => {
@@ -370,9 +422,62 @@ impl Lowerer {
         let expr_hir = Box::new(self.lower_expr(expr, ctx)?);
         let target = self.resolve_type(target_type)?;
 
+        // `T? as <numeric>` outside `unsafe` is a type error, never a value.
+        // Both engines produced a silent wrong number for it: the interpreter
+        // cast the boxed `Option.Some` payload to its variant ORDINAL (0) and
+        // the JIT reinterpreted the heap word. Per nil-only-in-unsafe
+        // (ERR-01) an optional must be narrowed with `?? default`, `if val`,
+        // or `match` before it is used as `T`. The message carries the
+        // `SIMPLE_JIT_STRICT:` marker so the driver's JIT catch site cannot
+        // launder it into an interpreter fallback (exec_core.rs
+        // `jit_failure_must_propagate`).
+        // Bug: optional_as_cast_yields_zero_2026_11_09.
+        if ctx.unsafe_depth == 0 && Self::is_numeric_type_id(target) && self.is_optional_source_type(expr_hir.ty) {
+            return Err(LowerError::OptionalCast {
+                target: self.type_display_name(target),
+            });
+        }
+
         Ok(HirExpr {
             kind: HirExprKind::Cast { expr: expr_hir, target },
             ty: target,
         })
+    }
+
+    /// Primitive int / float target of an `as` cast.
+    fn is_numeric_type_id(ty: TypeId) -> bool {
+        matches!(
+            ty,
+            TypeId::I8
+                | TypeId::I16
+                | TypeId::I32
+                | TypeId::I64
+                | TypeId::U8
+                | TypeId::U16
+                | TypeId::U32
+                | TypeId::U64
+                | TypeId::F32
+                | TypeId::F64
+        )
+    }
+
+    /// `T?` in either of its two HIR spellings: the registry's optional id
+    /// (`register_optional`, from `T?`) or the builtin `Option<T>` enum.
+    pub(super) fn is_optional_source_type(&self, ty: TypeId) -> bool {
+        if self.module.types.optional_inner(ty).is_some() {
+            return true;
+        }
+        matches!(self.module.types.get(ty), Some(HirType::Enum { name, .. }) if name == "Option")
+    }
+
+    fn type_display_name(&self, ty: TypeId) -> String {
+        match self.module.types.get(ty) {
+            Some(HirType::Int { bits, signedness }) => {
+                format!("{}{bits}", if matches!(signedness, Signedness::Signed) { "i" } else { "u" })
+            }
+            Some(HirType::Float { bits }) => format!("f{bits}"),
+            Some(other) => format!("{other:?}"),
+            None => format!("{ty:?}"),
+        }
     }
 }

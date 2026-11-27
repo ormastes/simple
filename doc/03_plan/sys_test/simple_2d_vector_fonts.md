@@ -22,7 +22,7 @@
 | REQ-010 | generated zero-stub operator manual | missing: pure-Simple docgen blocked |
 | NFR-001 | 31-pair public-path perf: exact warm requests/hits and zero misses/rasterizations | pending pure-Simple run |
 | NFR-002 | public-path cold/warm p50/p95, exact <=75% threshold | pending pure-Simple run |
-| NFR-003 | detached HEAD/current bitmap probe, identical checksum, <=5% p50 | missing: pure-Simple baseline run blocked |
+| NFR-003 | detached HEAD/current bitmap probe, identical checksum, <=5% p50 | partial: bitmap face at scale 1 (size 7), probe p50 3,143,803 ns, p95 3,253,051 ns, checksum 772523490, 0 mismatches; perf spec bitmap p50 3,031,625 ns, checksum equal (2026-11-15, seed 59635056 B, load 2.6-3.4, Rust seed, not pure-Simple). Old size 24 (scale 3), same seed, load 4.7: p50 7,702,375 ns, checksum 751149086. Pre-feature HEAD run still pending. The spec row stays red on two vector-cache assertions: `doc/08_tracking/bug/vector_font_perf_spec_masked_reds_2026-11-15.md` |
 | NFR-004 | exact 513-insert and >32 MiB rejection unit; perf cache counters | ready, final run pending |
 | NFR-005 | report includes host/binary/fixture/backend/viewport/raw samples/checksum/RSS | pending pure-Simple run |
 | NFR-006 | invalid matrix/stat atomicity; Rust snapshot ownership test | ready; outer RSS evidence pending |

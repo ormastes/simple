@@ -1,0 +1,618 @@
+# @req REQ-GEN-COV-TRAITGHOST
+"""
+# MC/DC coverage: trait_impl_lowering.spl
+
+Target: src/compiler/20.hir/hir_lowering/_Items/trait_impl_lowering.spl
+Every compound decision drives each condition to independently flip the
+outcome; every single-condition decision takes both outcomes. Source-driven
+its lower a probe module through `parse_full_frontend` + `lower_module`;
+direct its call the `HirLowering` methods with hand-built parser values where
+the parser cannot produce the shape (bitfield fields, empty owner names,
+imported traits).
+
+## Decision inventory
+
+| Line | Decision | Conditions | Covering its |
+|------|----------|------------|--------------|
+| 33 | `not default_fn.is_static` | c1 | L33 T (instance default) / F (static default) |
+| 36 | `default_params.len() > 0` | c1 | T by every instance default; F gap (see below) |
+| 39 | `index < default_params.len()` | c1 | L39 extra-param default (T) / self-only (F) |
+| 57 | `f.has_bits` | c1 | L57 T / F |
+| 59 | `f.is_reserved` | c1 | L59 T / F |
+| 72 | `f.type_.?` | c1 | L72 T; F gap (`BitfieldField.type_` is a non-optional `Type`) |
+| 92 | `name == "bool"` | c1 | L92 T / F |
+| 95 | `primitive_bits > 0` | c1 | L95 T / F |
+| 130 | `method.is_static` | c1 | L130 T / F |
+| 145 | `type_params.len() > 0` | c1 | L145 direct re-lowering with a type param (T) / Show (F) |
+| 149 | `m.body.stmts.is_empty()` | c1 | abstract / default methods |
+| 182 | `not lowered_traits.contains_key` | c1 | L182 first lowering T / relowering F |
+| 195 | `not with_trait_candidate` | c1 | L195 T / F |
+| 197 | `trait_name == ""` | c1 | L197 T / F |
+| 199/203 | lowered / imported / neither | c1, c2 | L199, L203, L203 neither |
+| 207 | `imported.name != trait_name` | c1 | L207 alias T / F |
+| 209 | `method.body.stmts.is_empty()` | c1 | L209 required T / default F |
+| 214 | `not methods.contains_key(name)` | c1 | L214 missing T / complete F |
+| 226 | `owner_name != ""` | c1 | L226 T / F |
+| 233 | `owner_name == ""` | c1 | L233 T / F |
+| 237 | key match | c1 | L237 T / F |
+| 262, 265 | `local_impl_owner >= 0` | c1 | L262 local T / primitive owner F |
+| 323 | `type_params.len() > 0` | c1 | generic impl / plain impl |
+| 354 | `has_trait` | c1 | trait impl / inherent impl |
+| 367 | `imported_traits.contains_key` | c1 | L367 T (direct lower_impl) / F |
+| 379 | `_k != trait_name` | c1 | L379 T / F |
+| 382 | `lowered_traits.contains_key` | c1 | L382 T / F (unknown trait) |
+| 391 | `not contains and written_elsewhere` | c1, c2 | L391 TT / c1 F / c2 F |
+| 392 | `default_written_elsewhere` | c1 | L391 TT (T) / others (F) |
+| 397 | `written_symbol != nil` | c1 | T by L391 TT; F gap (`if val` already excludes nil) |
+| 400 | `not contains and not written` | c1, c2 | L400 TT / c1 F (override); c2 masked: after L398 binds, c1 is already false |
+| 408 | `default_fn.is_static` | c1 | L33 F (T) / instance (F) |
+| 427 | `not static and params > 0` | c1, c2 | TT / c1 F (static); c2 F gap |
+| 432 | `retyped_i == 0` | c1 | L39 extra-param default (T and F) |
+| 488 | `at.has_default` (decl) | c1 | L488 direct decls (T / F) |
+| 502 | `at.has_default` (impl) | c1 | L502 direct impls (T / F) |
+| 567 | `folds and left_int and right_int` | c1..c3 | L567 c3 F (int * float) + existing shape spec |
+| 596 | `has_type_ and settled` | c1, c2 | L596 enum ctor (TT) / literal arrays (c1 F) / typed Infer (c2 F) |
+| 600-604 | `suffix.?` | c1 | L600 direct IntLit/FloatLit/FloatLexeme with and without suffix |
+| 627-635 | Var Const Int / other | c1 | L627 const int / const str / function ref |
+| 643 | nongeneric record | c1 | L643 direct StructLit T / F / non-named |
+| 652 | `callee_raw < 0` | c1 | L652 direct non-Var callee (T); F by every call |
+| 655 | `not callee_info.?` | c1 | L655 direct unknown id (T); F by every call |
+| 664 | `no type args and nongeneric` | c1, c2 | L664 TT / c1 F (type args) / c2 F (generic Box) |
+| 671 | `call_type_args.len() > 0` | c1 | L671 explicit type args T / F |
+| 674 | `not callee_type_opt.?` | c1 | L674 untyped function (T) / typed (F) |
+| 680 | `hir_const_type_settled(ret)` | c1 | L680 T / F |
+| 687 | `array_elements.len() == 0` | c1 | L687 T / F |
+| 690 | first element unsettled | c1 | L690 T / F |
+| 693 | `elem_idx < len` | c1 | L693 one element / several |
+| 695 | element type mismatch | c1 | L695 T / F |
+| 703, 710 | `const_.has_type_` | c1 | annotated / unannotated |
+| 717 | `hir_const_type_settled(type_)` | c1 | settled / infer |
+| 718 | `definition.kind == Const` | c1 | L718 Const (T) / Variable (F) |
+
+Documented gaps (unreachable): L36 F and L427 c2 F (an instance method always
+carries the explicit receiver param, so its params are never empty), L72 F
+(non-optional field), L397 F (`if val` excludes nil), L400 c2 (masked by
+short-circuit once L398 binds the written symbol).
+Bug suspects: none in this file.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:hir
+# @tag:generics
+# @tag:coverage
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.common.dependency.visibility.{Visibility}
+
+val FILE = "trait_impl_cov_probe.spl"
+
+fn probe_parse(src: text) -> ParserModule:
+    parse_full_frontend(src, FILE, FILE, Logger(level: 0))
+
+fn lower_src(src: text) -> HirModule:
+    var lowering = HirLowering.with_filename(FILE)
+    lowering.lower_module(probe_parse(src))
+
+fn kind_name(t: HirType) -> text:
+    match t.kind:
+        case HirTypeKind.Int(_, _): "int"
+        case HirTypeKind.Float(_): "float"
+        case HirTypeKind.Str: "str"
+        case HirTypeKind.Bool: "bool"
+        case HirTypeKind.Array(_, _): "array"
+        case HirTypeKind.Named(_, _): "named"
+        case HirTypeKind.Infer(_, _): "infer"
+        case HirTypeKind.Error: "error"
+        case _: "other"
+
+fn const_kind(hir: HirModule, name: text) -> text:
+    for c in hir.constants.values():
+        if c.name == name:
+            return kind_name(c.type_)
+    "missing"
+
+fn trait_named(hir: HirModule, name: text) -> HirTrait?:
+    for t in hir.traits.values():
+        if t.name == name:
+            return Some(t)
+    None
+
+fn trait_impl_with(hir: HirModule, method: text) -> HirImpl?:
+    for i in hir.impls:
+        if i.has_trait_ and i.methods.contains_key(method):
+            return Some(i)
+    None
+
+fn inherent_impl_with(hir: HirModule, method: text) -> HirImpl?:
+    for i in hir.impls:
+        if not i.has_trait_ and i.methods.contains_key(method):
+            return Some(i)
+    None
+
+fn sp() -> Span:
+    Span.empty()
+
+fn named(name: text) -> Type:
+    Type(kind: TypeKind.Named(name, []), span: sp())
+
+fn infer_t() -> Type:
+    Type(kind: TypeKind.Infer, span: sp())
+
+fn bare_impl(owner: Type, trait_: Type, has_trait: bool, candidate: bool, methods: Dict<text, ParserFunction>) -> Impl:
+    Impl(type_: owner, has_trait_: has_trait, trait_: trait_, with_trait_candidate: candidate,
+        type_params: [], where_clause: [], methods: methods, assoc_types: [], span: sp())
+
+fn bf(name: text, has_bits: bool, bits: i64, reserved: bool, has_type: bool, type_: Type) -> BitfieldField:
+    BitfieldField(name: name, has_type_: has_type, type_: type_, has_bits: has_bits, bits: bits,
+        is_reserved: reserved, span: sp())
+
+val TRAIT_SRC = """
+struct P:
+    v: i64
+
+struct Q:
+    v: i64
+
+trait Greeter:
+    fn name() -> text
+    fn greet() -> text: "default"
+    fn shout(times: i64) -> i64: times
+    static fn zero() -> i64: 0
+    static fn build() -> i64
+
+trait Conv<T>:
+    fn conv() -> T
+
+trait Coll:
+    type Item
+    type Idx = i64
+    fn size() -> i64
+
+impl Greeter for P:
+    fn name() -> text: "p"
+    fn shout(times: i64) -> i64: times + 1
+    static fn build() -> i64: 1
+
+impl P:
+    fn greet() -> text: "inherent"
+
+impl Greeter for Q:
+    fn name() -> text: "q"
+    static fn build() -> i64: 2
+
+impl Coll for P:
+    type Item = text
+    fn size() -> i64: 1
+
+impl Coll for Q:
+    type Item
+    fn size() -> i64: 2
+
+trait Show:
+    fn show() -> text
+
+impl Show for i64:
+    fn show() -> text: "i64"
+
+impl Conv<i64> for P:
+    fn conv() -> i64: 3
+"""
+
+val CONST_SRC = """
+fn make_int() -> i64: 3
+fn ident<T>(v: T) -> T: v
+
+struct Pt:
+    x: i64
+
+struct Box<T>:
+    v: T
+
+val ANN: i64 = 5
+val NAME: text = "n"
+val CALL_INT = make_int()
+val CALL_PT = Pt(x: 1)
+val CALL_BOX = Box(v: 1)
+val CALL_GEN = ident<i64>(2)
+enum Color:
+    Red(i64)
+    Blue
+
+val ENUM_RED = Color.Red(1)
+val ARR_INT = [1, 2, 3]
+val ARR_ONE = [7]
+val ARR_EMPTY = []
+val ARR_MIX = [1, "a"]
+val ARR_SUFFIX = [1i32]
+val ARR_FLOAT = [1.5, 2.5]
+val ARR_FSUFFIX = [1.5f32]
+val ARR_CONST = [ANN, ANN]
+val ARR_STRCONST = [NAME]
+val ARR_FN = [make_int]
+val ARR_NEG = [-1, 2]
+val ARR_NOT = [~1]
+val ARR_STR = ["a", "b"]
+val MIXR = 2 * 1.5
+"""
+
+describe "trait_impl_lowering MC/DC: traits and impls":
+    it "trait_impl_lowering.spl:130 c1 static and instance trait methods":
+        # @req REQ-GEN-COV-TRAITGHOST-101
+        step("lower a trait with abstract, default, static and instance methods")
+        val hir = lower_src(TRAIT_SRC)
+        val t = trait_named(hir, "Greeter").unwrap()
+        var abstract_names: [text] = []
+        for m in t.methods:
+            abstract_names = abstract_names.push(m.name)
+        var default_names: [text] = []
+        for d in t.defaults:
+            default_names = default_names.push(d.name)
+        expect(abstract_names).to_contain("name")
+        expect(abstract_names).to_contain("build")
+        expect(default_names).to_contain("zero")
+        expect(default_names).to_contain("greet")
+
+    it "trait_impl_lowering.spl:145 c1 generic trait marks methods as templates (T) and plain trait does not (F)":
+        # @req REQ-GEN-COV-TRAITGHOST-102
+        step("the flat parser drops trait type params, so re-lower Show with one added")
+        val m = probe_parse(TRAIT_SRC)
+        var lowering = HirLowering.with_filename(FILE)
+        val hir = lowering.lower_module(m)
+        val show = trait_named(hir, "Show").unwrap()
+        expect(show.methods[0].is_generic_template).to_equal(false)
+        var generic_show: ParserTrait = m.traits["Show"]
+        generic_show.type_params = [ParserTypeParam(name: "T", bounds: [], has_default: false, default: infer_t(), span: sp())]
+        step("second lowering of the same trait name (L182 F)")
+        val relowered = lowering.lower_trait(generic_show)
+        expect(relowered.type_params.len()).to_equal(1)
+        expect(relowered.methods[0].is_generic_template).to_equal(true)
+
+    it "trait_impl_lowering.spl:488 c1 assoc type decl with and without default":
+        # @req REQ-GEN-COV-TRAITGHOST-103
+        step("the flat parser drops assoc types, so lower hand-built decls")
+        var lowering = HirLowering.with_filename(FILE)
+        val with_default = lowering.lower_assoc_type_decl(AssocTypeDecl(name: "Idx", bounds: [named("i64")], has_default: true, default: named("i64"), span: sp()))
+        expect(with_default.has_default).to_equal(true)
+        expect(kind_name(with_default.default.unwrap())).to_equal("int")
+        expect(with_default.bounds.len()).to_equal(1)
+        val bare = lowering.lower_assoc_type_decl(AssocTypeDecl(name: "Item", bounds: [], has_default: false, default: infer_t(), span: sp()))
+        expect(bare.has_default).to_equal(false)
+        expect(bare.default.?).to_equal(false)
+
+    it "trait_impl_lowering.spl:502 c1 impl assoc type concrete (T) and missing (F, Error type)":
+        # @req REQ-GEN-COV-TRAITGHOST-104
+        var lowering = HirLowering.with_filename(FILE)
+        val concrete = lowering.lower_assoc_type_impl(AssocTypeDecl(name: "Item", bounds: [], has_default: true, default: named("text"), span: sp()))
+        expect(kind_name(concrete.concrete_type)).to_equal("str")
+        val before = lowering.errors.len()
+        val missing = lowering.lower_assoc_type_impl(AssocTypeDecl(name: "Item", bounds: [], has_default: false, default: infer_t(), span: sp()))
+        expect(kind_name(missing.concrete_type)).to_equal("error")
+        expect(lowering.errors.len()).to_equal(before + 1)
+
+    it "trait_impl_lowering.spl:391 c1 c2 default written in a separate inherent impl binds that symbol":
+        # @req REQ-GEN-COV-TRAITGHOST-105
+        step("P overrides greet in `impl P:`, so the Greeter impl binds the inherent symbol")
+        val hir = lower_src(TRAIT_SRC)
+        val inherent_greet = inherent_impl_with(hir, "greet").unwrap().methods["greet"].id
+        var bound_to_inherent = 0
+        for i in hir.impls:
+            if i.has_trait_ and i.methods.contains_key("greet"):
+                if i.methods["greet"].id == inherent_greet:
+                    bound_to_inherent = bound_to_inherent + 1
+        step("only P's Greeter impl reuses the inherent symbol; Q gets an injected default")
+        expect(bound_to_inherent).to_equal(1)
+
+    it "trait_impl_lowering.spl:400 c1 override inside the impl keeps the impl method":
+        # @req REQ-GEN-COV-TRAITGHOST-106
+        step("P writes shout itself and Q inherits it; their symbols differ")
+        val hir = lower_src(TRAIT_SRC)
+        var shout_ids: [i64] = []
+        for i in hir.impls:
+            if i.has_trait_ and i.methods.contains_key("shout"):
+                shout_ids = shout_ids.push(i.methods["shout"].id)
+        expect(shout_ids.len()).to_equal(2)
+        expect(shout_ids[0] == shout_ids[1]).to_equal(false)
+
+    it "trait_impl_lowering.spl:39 c1 injected defaults (instance with extra param, static) for Q":
+        # @req REQ-GEN-COV-TRAITGHOST-107
+        step("Q writes only name/build, so greet, shout and zero are injected")
+        val hir = lower_src(TRAIT_SRC)
+        var q_impl_count = 0
+        for i in hir.impls:
+            if i.has_trait_ and i.methods.contains_key("name") and not i.methods.contains_key("v"):
+                if i.methods.contains_key("zero") and i.methods.contains_key("greet") and i.methods.contains_key("shout"):
+                    q_impl_count = q_impl_count + 1
+        expect(q_impl_count).to_equal(2)
+
+    it "trait_impl_lowering.spl:262 c1 primitive owner impl (no local owner)":
+        # @req REQ-GEN-COV-TRAITGHOST-108
+        val hir = lower_src(TRAIT_SRC)
+        val show_impl = trait_impl_with(hir, "show").unwrap()
+        expect(show_impl.has_trait_).to_equal(true)
+        expect(show_impl.methods.contains_key("show")).to_equal(true)
+
+describe "trait_impl_lowering MC/DC: with-trait candidates and textual keys":
+    it "trait_impl_lowering.spl:195 c1 a non-candidate never conforms":
+        # @req REQ-GEN-COV-TRAITGHOST-201
+        var lowering = HirLowering.with_filename(FILE)
+        expect(lowering.with_trait_candidate_conforms(bare_impl(named("P"), named("Greeter"), false, false, {}))).to_equal(false)
+
+    it "trait_impl_lowering.spl:197 c1 a candidate without a named trait is refused":
+        # @req REQ-GEN-COV-TRAITGHOST-202
+        var lowering = HirLowering.with_filename(FILE)
+        expect(lowering.with_trait_candidate_conforms(bare_impl(named("P"), infer_t(), false, true, {}))).to_equal(false)
+
+    it "trait_impl_lowering.spl:203 c1 an unknown trait name is refused":
+        # @req REQ-GEN-COV-TRAITGHOST-203
+        var lowering = HirLowering.with_filename(FILE)
+        expect(lowering.with_trait_candidate_conforms(bare_impl(named("P"), named("Nowhere"), false, true, {}))).to_equal(false)
+
+    it "trait_impl_lowering.spl:214 c1 locally lowered trait: complete (T) and missing (F)":
+        # @req REQ-GEN-COV-TRAITGHOST-204
+        val m = probe_parse(TRAIT_SRC)
+        var lowering = HirLowering.with_filename(FILE)
+        lowering.lower_module(m)
+        val show_fn = m.impls[5].methods
+        expect(lowering.with_trait_candidate_conforms(bare_impl(named("P"), named("Show"), false, true, show_fn))).to_equal(true)
+        expect(lowering.with_trait_candidate_conforms(bare_impl(named("P"), named("Show"), false, true, {}))).to_equal(false)
+
+    it "trait_impl_lowering.spl:207 c1 imported trait: alias refused, required methods checked":
+        # @req REQ-GEN-COV-TRAITGHOST-205
+        step("register Greeter as an imported trait under its own name and an alias")
+        val remote = probe_parse(TRAIT_SRC)
+        val greeter: ParserTrait = remote.traits["Greeter"]
+        var lowering = HirLowering.with_filename(FILE)
+        var imported: {text: ParserTrait} = {}
+        imported["Greeter"] = greeter
+        imported["Alias"] = greeter
+        lowering.imported_traits = imported
+        expect(lowering.with_trait_candidate_conforms(bare_impl(named("P"), named("Alias"), false, true, {}))).to_equal(false)
+        step("Greeter requires name and build; the default greet is not required")
+        var both: Dict<text, ParserFunction> = {}
+        both["name"] = remote.impls[0].methods["name"]
+        both["build"] = remote.impls[0].methods["build"]
+        expect(lowering.with_trait_candidate_conforms(bare_impl(named("P"), named("Greeter"), false, true, both))).to_equal(true)
+        var only_name: Dict<text, ParserFunction> = {}
+        only_name["name"] = remote.impls[0].methods["name"]
+        expect(lowering.with_trait_candidate_conforms(bare_impl(named("P"), named("Greeter"), false, true, only_name))).to_equal(false)
+
+    it "trait_impl_lowering.spl:226 c1 textual keys skip an unnamed owner":
+        # @req REQ-GEN-COV-TRAITGHOST-206
+        val remote = probe_parse(TRAIT_SRC)
+        var lowering = HirLowering.with_filename(FILE)
+        lowering.record_impl_textual_method_keys([
+            bare_impl(infer_t(), infer_t(), false, false, remote.impls[0].methods),
+            bare_impl(named("P"), infer_t(), false, false, remote.impls[1].methods)
+        ])
+        expect(lowering.impl_textual_method_keys).to_equal(["P::greet"])
+
+    it "trait_impl_lowering.spl:233 c1 key lookup: empty owner, hit and miss":
+        # @req REQ-GEN-COV-TRAITGHOST-207
+        var lowering = HirLowering.with_filename(FILE)
+        lowering.impl_textual_method_keys = ["P::a", "P::greet"]
+        expect(lowering.impl_textual_method_key_present("", "greet")).to_equal(false)
+        expect(lowering.impl_textual_method_key_present("P", "greet")).to_equal(true)
+        expect(lowering.impl_textual_method_key_present("P", "zzz")).to_equal(false)
+
+    it "trait_impl_lowering.spl:367 c1 imported trait is lowered on demand and dropped from the registry":
+        # @req REQ-GEN-COV-TRAITGHOST-208
+        step("lower a module with struct R, then lower an impl of an imported trait")
+        val remote = probe_parse(TRAIT_SRC)
+        var lowering = HirLowering.with_filename(FILE)
+        lowering.lower_module(probe_parse("struct R:\n    v: i64\n"))
+        var imported: {text: ParserTrait} = {}
+        imported["Greeter"] = remote.traits["Greeter"]
+        imported["Show"] = remote.traits["Show"]
+        lowering.imported_traits = imported
+        var written: Dict<text, ParserFunction> = {}
+        written["name"] = remote.impls[0].methods["name"]
+        val hir_impl = lowering.lower_impl(bare_impl(named("R"), named("Greeter"), true, false, written))
+        expect(hir_impl.methods.contains_key("greet")).to_equal(true)
+        expect(lowering.imported_traits.contains_key("Greeter")).to_equal(false)
+        expect(lowering.imported_traits.contains_key("Show")).to_equal(true)
+
+    it "trait_impl_lowering.spl:382 c1 trait impl of an unknown trait injects nothing":
+        # @req REQ-GEN-COV-TRAITGHOST-209
+        val remote = probe_parse(TRAIT_SRC)
+        var lowering = HirLowering.with_filename(FILE)
+        lowering.lower_module(probe_parse("struct R:\n    v: i64\n"))
+        var written: Dict<text, ParserFunction> = {}
+        written["name"] = remote.impls[0].methods["name"]
+        val hir_impl = lowering.lower_impl(bare_impl(named("R"), named("Ghost"), true, false, written))
+        expect(hir_impl.methods.len()).to_equal(1)
+
+describe "trait_impl_lowering MC/DC: bitfield fields":
+    it "trait_impl_lowering.spl:57 c1 explicit bits win":
+        # @req REQ-GEN-COV-TRAITGHOST-301
+        var lowering = HirLowering.with_filename(FILE)
+        val f = lowering.lower_bitfield_field(bf("op", true, 7, false, true, infer_t()), 3)
+        expect(f.bit_width).to_equal(7)
+        expect(f.bit_offset).to_equal(3)
+
+    it "trait_impl_lowering.spl:59 c1 reserved without bits is zero wide":
+        # @req REQ-GEN-COV-TRAITGHOST-302
+        var lowering = HirLowering.with_filename(FILE)
+        val f = lowering.lower_bitfield_field(bf("_reserved_1", false, 0, true, true, infer_t()), 0)
+        expect(f.bit_width).to_equal(0)
+        expect(f.is_reserved).to_equal(true)
+
+    it "trait_impl_lowering.spl:92 c1 inferred widths: bool, primitive, custom":
+        # @req REQ-GEN-COV-TRAITGHOST-303
+        var lowering = HirLowering.with_filename(FILE)
+        expect(lowering.lower_bitfield_field(bf("flag", false, 0, false, true, named("bool")), 0).bit_width).to_equal(1)
+        expect(lowering.lower_bitfield_field(bf("b", false, 0, false, true, named("u8")), 0).bit_width).to_equal(8)
+        expect(lowering.lower_bitfield_field(bf("c", false, 0, false, true, named("NotAnInt")), 0).bit_width).to_equal(0)
+        expect(lowering.lower_bitfield_field(bf("d", false, 0, false, true, infer_t()), 0).bit_width).to_equal(0)
+
+    it "trait_impl_lowering.spl:72 c1 field type present (T) and absent (F)":
+        # @req REQ-GEN-COV-TRAITGHOST-304
+        step("an absent Type? leaves the HIR field type empty and the width 0")
+        var lowering = HirLowering.with_filename(FILE)
+        expect(lowering.infer_bit_width(None)).to_equal(0)
+        val typed = lowering.lower_bitfield_field(bf("t", true, 4, false, true, named("u8")), 0)
+        expect(typed.type_.?).to_equal(true)
+
+describe "trait_impl_lowering MC/DC: module constant types":
+    it "trait_impl_lowering.spl:703 c1 annotated constants keep their declared type":
+        # @req REQ-GEN-COV-TRAITGHOST-401
+        val hir = lower_src(CONST_SRC)
+        expect(const_kind(hir, "ANN")).to_equal("int")
+        expect(const_kind(hir, "NAME")).to_equal("str")
+
+    it "trait_impl_lowering.spl:680 c1 call to a typed function settles to its return type":
+        # @req REQ-GEN-COV-TRAITGHOST-402
+        expect(const_kind(lower_src(CONST_SRC), "CALL_INT")).to_equal("int")
+
+    it "trait_impl_lowering.spl:664 c1 c2 record constructor: plain record (T) and generic record (F)":
+        # @req REQ-GEN-COV-TRAITGHOST-403
+        val hir = lower_src(CONST_SRC)
+        expect(const_kind(hir, "CALL_PT")).to_equal("named")
+        expect(const_kind(hir, "CALL_BOX")).to_equal("infer")
+
+    it "trait_impl_lowering.spl:671 c1 explicit type arguments stay Infer":
+        # @req REQ-GEN-COV-TRAITGHOST-404
+        expect(const_kind(lower_src(CONST_SRC), "CALL_GEN")).to_equal("infer")
+
+    it "trait_impl_lowering.spl:596 c1 c2 an HIR-typed enum constructor settles from has_type_":
+        # @req REQ-GEN-COV-TRAITGHOST-405
+        expect(const_kind(lower_src(CONST_SRC), "ENUM_RED")).to_equal("named")
+
+    it "trait_impl_lowering.spl:687 c1 arrays: empty, one, several, mismatched":
+        # @req REQ-GEN-COV-TRAITGHOST-406
+        val hir = lower_src(CONST_SRC)
+        expect(const_kind(hir, "ARR_EMPTY")).to_equal("infer")
+        expect(const_kind(hir, "ARR_ONE")).to_equal("array")
+        expect(const_kind(hir, "ARR_INT")).to_equal("array")
+        expect(const_kind(hir, "ARR_STR")).to_equal("array")
+        expect(const_kind(hir, "ARR_MIX")).to_equal("infer")
+
+    it "trait_impl_lowering.spl:600 c1 suffixed literals leave the element unsettled":
+        # @req REQ-GEN-COV-TRAITGHOST-407
+        val hir = lower_src(CONST_SRC)
+        expect(const_kind(hir, "ARR_SUFFIX")).to_equal("infer")
+        expect(const_kind(hir, "ARR_FSUFFIX")).to_equal("infer")
+        expect(const_kind(hir, "ARR_FLOAT")).to_equal("array")
+
+    it "trait_impl_lowering.spl:627 c1 const references: int const, str const, function ref":
+        # @req REQ-GEN-COV-TRAITGHOST-408
+        val hir = lower_src(CONST_SRC)
+        expect(const_kind(hir, "ARR_CONST")).to_equal("array")
+        expect(const_kind(hir, "ARR_STRCONST")).to_equal("infer")
+        expect(const_kind(hir, "ARR_FN")).to_equal("infer")
+
+    it "trait_impl_lowering.spl:613 c1 unary elements: negation and bit-not":
+        # @req REQ-GEN-COV-TRAITGHOST-409
+        val hir = lower_src(CONST_SRC)
+        expect(const_kind(hir, "ARR_NEG")).to_equal("array")
+        expect(const_kind(hir, "ARR_NOT")).to_equal("array")
+
+    it "trait_impl_lowering.spl:567 c3 int * float does not fold to int":
+        # @req REQ-GEN-COV-TRAITGHOST-410
+        expect(const_kind(lower_src(CONST_SRC), "MIXR") == "int").to_equal(false)
+
+fn hx(kind: HirExprKind) -> HirExpr:
+    HirExpr(kind: kind, has_type_: false, type_: hinfer(), span: sp())
+
+fn hinfer() -> HirType:
+    HirType(kind: HirTypeKind.Infer(0, 0), span: sp())
+
+fn hint() -> HirType:
+    HirType(kind: HirTypeKind.Int(64, true), span: sp())
+
+fn hcall(callee: HirExpr, type_args: [HirType]) -> HirExpr:
+    hx(HirExprKind.Call(callee, [], type_args))
+
+fn value_kind(lowering: HirLowering, e: HirExpr) -> text:
+    var l = lowering
+    kind_name(l.lowered_const_value_type(e, sp()))
+
+fn pconst(name: text, has_type: bool, t: Type) -> ParserConst:
+    ParserConst(name: name, has_type_: has_type, type_: t, value: Expr(kind: ExprKind.IntLit(5), span: sp()),
+        is_mutable: false, visibility: Visibility.Public, is_public: true, is_volatile: false,
+        has_fixed_address: false, fixed_address: 0, span: sp())
+
+describe "trait_impl_lowering MC/DC: lowered const value shapes (direct)":
+    it "trait_impl_lowering.spl:600 c1 suffixed int/float/lexeme literals stay Infer, plain ones settle":
+        # @req REQ-GEN-COV-TRAITGHOST-501
+        val lowering = HirLowering.with_filename(FILE)
+        expect(value_kind(lowering, hx(HirExprKind.IntLit(1, Some("i32"))))).to_equal("infer")
+        expect(value_kind(lowering, hx(HirExprKind.IntLit(1, None)))).to_equal("int")
+        expect(value_kind(lowering, hx(HirExprKind.FloatLit(1.5, Some("f32"))))).to_equal("infer")
+        expect(value_kind(lowering, hx(HirExprKind.FloatLit(1.5, None)))).to_equal("float")
+        expect(value_kind(lowering, hx(HirExprKind.FloatLexeme("1.5", Some("f32"))))).to_equal("infer")
+        expect(value_kind(lowering, hx(HirExprKind.FloatLexeme("1.5", None)))).to_equal("float")
+
+    it "trait_impl_lowering.spl:596 c2 has_type_ with an unsettled type falls through to the shape":
+        # @req REQ-GEN-COV-TRAITGHOST-502
+        val lowering = HirLowering.with_filename(FILE)
+        val typed_infer = HirExpr(kind: HirExprKind.StringLit("s", None), has_type_: true, type_: hinfer(), span: sp())
+        expect(value_kind(lowering, typed_infer)).to_equal("str")
+
+    it "trait_impl_lowering.spl:643 c1 struct literal: non-generic record (T), unknown record (F), non-named type":
+        # @req REQ-GEN-COV-TRAITGHOST-503
+        var lowering = HirLowering.with_filename(FILE)
+        val pt = lowering.symbols.define("Pt", SymbolKind.Struct, None, sp(), Visibility.Public, false, None)
+        lowering.nongeneric_record_owners[pt.id] = true
+        val pt_t = HirType(kind: HirTypeKind.Named(pt, []), span: sp())
+        val other_t = HirType(kind: HirTypeKind.Named(SymbolId(id: pt.id + 1000), []), span: sp())
+        expect(value_kind(lowering, hx(HirExprKind.StructLit(pt_t, [])))).to_equal("named")
+        expect(value_kind(lowering, hx(HirExprKind.StructLit(other_t, [])))).to_equal("infer")
+        expect(value_kind(lowering, hx(HirExprKind.StructLit(hint(), [])))).to_equal("infer")
+
+    it "trait_impl_lowering.spl:652 c1 call through a non-variable callee stays Infer":
+        # @req REQ-GEN-COV-TRAITGHOST-504
+        val lowering = HirLowering.with_filename(FILE)
+        expect(value_kind(lowering, hcall(hx(HirExprKind.IntLit(1, None)), []))).to_equal("infer")
+
+    it "trait_impl_lowering.spl:655 c1 call to an unknown symbol id stays Infer":
+        # @req REQ-GEN-COV-TRAITGHOST-505
+        val lowering = HirLowering.with_filename(FILE)
+        expect(value_kind(lowering, hcall(hx(HirExprKind.Var(SymbolId(id: 987654))), []))).to_equal("infer")
+
+    it "trait_impl_lowering.spl:664 c1 record constructor with explicit type args stays Infer":
+        # @req REQ-GEN-COV-TRAITGHOST-506
+        var lowering = HirLowering.with_filename(FILE)
+        val pt = lowering.symbols.define("Pt", SymbolKind.Struct, None, sp(), Visibility.Public, false, None)
+        lowering.nongeneric_record_owners[pt.id] = true
+        expect(value_kind(lowering, hcall(hx(HirExprKind.Var(pt)), []))).to_equal("named")
+        expect(value_kind(lowering, hcall(hx(HirExprKind.Var(pt)), [hint()]))).to_equal("infer")
+
+    it "trait_impl_lowering.spl:674 c1 function callee without type, with unsettled return, with settled return":
+        # @req REQ-GEN-COV-TRAITGHOST-507
+        var lowering = HirLowering.with_filename(FILE)
+        val untyped = lowering.symbols.define("untyped_fn", SymbolKind.Function, None, sp(), Visibility.Public, false, None)
+        val loose = lowering.symbols.define("loose_fn", SymbolKind.Function,
+            Some(HirType(kind: HirTypeKind.Function([], hinfer(), []), span: sp())), sp(), Visibility.Public, false, None)
+        val tight = lowering.symbols.define("tight_fn", SymbolKind.Function,
+            Some(HirType(kind: HirTypeKind.Function([], hint(), []), span: sp())), sp(), Visibility.Public, false, None)
+        expect(value_kind(lowering, hcall(hx(HirExprKind.Var(untyped)), []))).to_equal("infer")
+        expect(value_kind(lowering, hcall(hx(HirExprKind.Var(loose)), []))).to_equal("infer")
+        expect(value_kind(lowering, hcall(hx(HirExprKind.Var(tight)), []))).to_equal("int")
+
+    it "trait_impl_lowering.spl:710 c1 annotated const whose type lowers to Infer keeps Infer":
+        # @req REQ-GEN-COV-TRAITGHOST-508
+        var lowering = HirLowering.with_filename(FILE)
+        lowering.symbols.define("AINF", SymbolKind.Const, None, sp(), Visibility.Public, false, None)
+        val c = lowering.lower_hir_const_decl(pconst("AINF", true, infer_t()))
+        expect(kind_name(c.type_)).to_equal("infer")
+
+    it "trait_impl_lowering.spl:718 c1 settled type on a non-const binding leaves the symbol untouched":
+        # @req REQ-GEN-COV-TRAITGHOST-509
+        step("a Variable symbol named like the const: the type is settled but not registered")
+        var lowering = HirLowering.with_filename(FILE)
+        val v = lowering.symbols.define("VLIKE", SymbolKind.Variable, None, sp(), Visibility.Public, false, None)
+        val c = lowering.lower_hir_const_decl(pconst("VLIKE", false, infer_t()))
+        expect(kind_name(c.type_)).to_equal("int")
+        expect(lowering.symbols.get_symbol_raw(v.id).unwrap().type_.?).to_equal(false)
+        step("a Const symbol gets the settled type registered")
+        val k = lowering.symbols.define("KLIKE", SymbolKind.Const, None, sp(), Visibility.Public, false, None)
+        lowering.lower_hir_const_decl(pconst("KLIKE", false, infer_t()))
+        expect(lowering.symbols.get_symbol_raw(k.id).unwrap().type_.?).to_equal(true)

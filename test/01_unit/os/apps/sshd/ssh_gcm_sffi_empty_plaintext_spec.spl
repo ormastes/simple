@@ -1,0 +1,181 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+#
+# SSH AES-256-GCM SFFI decrypt — empty-plaintext path.
+#   -> doc/08_tracking/bug/sffi_ssh_aes256_gcm_decrypt_empty_failure_2026-08-27.md
+#
+# Two defects are pinned here:
+#   1. Frame alignment: RFC 5647 requires the whole frame (4-byte length
+#      field + encrypted body) to be a multiple of 16 bytes, and
+#      `_validate_gcm_wire_packet` enforces exactly that on admission — but
+#      the encrypt side padded only the body, so every frame it produced was
+#      rejected by the decrypt side with "encrypted packet block alignment
+#      invalid" before any crypto ran. The encrypt padding target now
+#      includes the 4-byte length field.
+#   2. Empty-payload off-by-one: the decrypt-side padding check used
+#      `2 + padding_len >= result.len()`, which rejects the legitimate
+#      degenerate body where padding exactly consumes the plaintext
+#      (payload_len == 0). It now rejects only a strict overrun.
+#
+# Coverage: NIST SP 800-38D B.13 empty-plaintext known-answer tag on the
+# provider path, frame alignment invariant, empty/1-byte/multi-block payload
+# round trips (aes256-gcm SFFI, aes256-gcm v2 packet carrier, aes128-gcm),
+# tamper rejection, and graceful rejection of empty input.
+
+use std.spec.step
+
+use std.spec.{describe, it, assert_equal, assert_true}
+use os.apps.sshd.ssh_cipher_live.{
+    ssh_encrypt_packet_aes_gcm, ssh_decrypt_packet_aes_gcm,
+    ssh_encrypt_packet_aes128_gcm, ssh_decrypt_packet_aes128_gcm,
+    ssh_decrypt_packet_aes256_gcm_payload_direct}
+use os.crypto.aes256_gcm.{aes256_gcm_encrypt, aes256_gcm_decrypt}
+
+fn _key32() -> [u8]:
+    var k: [u8] = []
+    var i = 0
+    while i < 32:
+        k.push((i + 1).to_u8())
+        i = i + 1
+    k
+
+fn _key16() -> [u8]:
+    var k: [u8] = []
+    var i = 0
+    while i < 16:
+        k.push((i + 1).to_u8())
+        i = i + 1
+    k
+
+fn _iv12() -> [u8]:
+    var iv: [u8] = []
+    var i = 0
+    while i < 12:
+        iv.push((0xA0 + i).to_u8())
+        i = i + 1
+    iv
+
+fn _zeros(n: i64) -> [u8]:
+    var z: [u8] = []
+    var i = 0
+    while i < n:
+        z.push(0u8)
+        i = i + 1
+    z
+
+fn _seq_bytes() -> [u8]:
+    var p: [u8] = []
+    var i = 0
+    while i < 40:
+        p.push((0x30 + (i % 10)).to_u8())
+        i = i + 1
+    p
+
+fn _frame_packet_length(frame: [u8]) -> u64:
+    (_u8v(frame, 0) << 24) | (_u8v(frame, 1) << 16) | (_u8v(frame, 2) << 8) | _u8v(frame, 3)
+
+fn _u8v(a: [u8], i: u64) -> u64:
+    a[i].to_u64()
+
+describe "SSH AES-GCM SFFI decrypt — empty-plaintext path":
+    it "POSITIVE CONTROL: provider decrypts empty plaintext (NIST 800-38D B.13 KAT)":
+        # @req REQ-SSPEC-UNIT
+        step("POSITIVE CONTROL: provider decrypts empty plaintext (NIST 800-38D B.13 KAT)")
+        # All-zero 32-byte key, all-zero 12-byte nonce, empty PT, empty AAD;
+        # the tag is the published NIST SP 800-38D Appendix B test case 13
+        # value — a known answer, not a round-trip.
+        val sealed = aes256_gcm_encrypt(_zeros(32), _zeros(12), [], [])
+        assert_equal(sealed.len(), 16u64)
+        var tag: [u8] = []
+        var i = 0u64
+        while i < 16:
+            tag.push(sealed[i])
+            i = i + 1
+        # NIST 800-38D B.13 tag, hex-encoded byte by byte.
+        val expected = [0x53u8, 0x0fu8, 0x8au8, 0xfbu8, 0xc7u8, 0x45u8, 0x36u8, 0xb9u8,
+                        0xa9u8, 0x63u8, 0xb4u8, 0xf1u8, 0xc4u8, 0xcbu8, 0x73u8, 0x8bu8]
+        assert_equal(tag, expected)
+        val opened = aes256_gcm_decrypt(_zeros(32), _zeros(12), [], [], tag)
+        match opened:
+            Aes256GcmResult.Ok(data):
+                assert_equal(data.len(), 0u64)
+            Aes256GcmResult.Err(msg):
+                fail("empty-plaintext decrypt failed: {msg}")
+
+    it "RFC 5647 frame invariant: (packet_length + 4) is a 16-byte multiple, empty and non-empty":
+        # @req REQ-SSPEC-UNIT
+        step("RFC 5647 frame invariant: (packet_length + 4) is a 16-byte multiple, empty and non-empty")
+        # This is the alignment the decrypt admission rule requires; the
+        # encrypt side must produce it or every frame dies pre-crypto.
+        val f0 = ssh_encrypt_packet_aes_gcm([], 0u32, _key32(), _iv12())
+        val pl0 = _frame_packet_length(f0)
+        assert_equal((pl0 + 4u64) % 16u64, 0u64)
+        assert_equal(f0.len(), 4u64 + pl0 + 16u64)
+        val f1 = ssh_encrypt_packet_aes_gcm([0x42u8], 0u32, _key32(), _iv12())
+        val pl1 = _frame_packet_length(f1)
+        assert_equal((pl1 + 4u64) % 16u64, 0u64)
+        assert_equal(f1.len(), 4u64 + pl1 + 16u64)
+
+    it "aes256-gcm SFFI round-trips an empty payload":
+        # @req REQ-SSPEC-UNIT
+        step("aes256-gcm SFFI round-trips an empty payload")
+        # The exact failure the bug doc tracks: this returned
+        # "invalid padding in decrypted packet" before the off-by-one fix.
+        val frame = ssh_encrypt_packet_aes_gcm([], 0u32, _key32(), _iv12())
+        val opened = ssh_decrypt_packet_aes_gcm(frame, 0u32, _key32(), _iv12())
+        match opened:
+            Result.Ok(payload):
+                assert_equal(payload.len(), 0u64)
+            Result.Err(msg):
+                fail("ssh gcm empty-payload round-trip failed: {msg}")
+
+    it "aes256-gcm SFFI round-trips 1-byte and multi-block payloads":
+        # @req REQ-SSPEC-UNIT
+        step("aes256-gcm SFFI round-trips 1-byte and multi-block payloads")
+        val f1 = ssh_encrypt_packet_aes_gcm([0x42u8], 0u32, _key32(), _iv12())
+        match ssh_decrypt_packet_aes_gcm(f1, 0u32, _key32(), _iv12()):
+            Result.Ok(payload):
+                assert_equal(payload, [0x42u8])
+            Result.Err(msg):
+                fail("1-byte round-trip failed: {msg}")
+        val msg = _seq_bytes()
+        val f40 = ssh_encrypt_packet_aes_gcm(msg, 7u32, _key32(), _iv12())
+        match ssh_decrypt_packet_aes_gcm(f40, 7u32, _key32(), _iv12()):
+            Result.Ok(payload):
+                assert_equal(payload, msg)
+            Result.Err(msg_err):
+                fail("multi-block round-trip failed: {msg_err}")
+
+    it "aes256-gcm v2 packet carrier round-trips an empty payload":
+        # @req REQ-SSPEC-UNIT
+        step("aes256-gcm v2 packet carrier round-trips an empty payload")
+        val frame = ssh_encrypt_packet_aes_gcm([], 3u32, _key32(), _iv12())
+        match ssh_decrypt_packet_aes256_gcm_payload_direct(frame, 3u32, _key32(), _iv12()):
+            Result.Ok(payload):
+                assert_equal(payload.len(), 0u64)
+            Result.Err(msg):
+                fail("v2 carrier empty-payload round-trip failed: {msg}")
+
+    it "aes128-gcm round-trips an empty payload":
+        # @req REQ-SSPEC-UNIT
+        step("aes128-gcm round-trips an empty payload")
+        val frame = ssh_encrypt_packet_aes128_gcm([], 0u32, _key16(), _iv12())
+        match ssh_decrypt_packet_aes128_gcm(frame, 0u32, _key16(), _iv12()):
+            Result.Ok(payload):
+                assert_equal(payload.len(), 0u64)
+            Result.Err(msg):
+                fail("aes128 empty-payload round-trip failed: {msg}")
+
+    it "tampered tag is rejected with an authentication error, not an empty payload":
+        # @req REQ-SSPEC-UNIT
+        step("tampered tag is rejected with an authentication error, not an empty payload")
+        val frame = ssh_encrypt_packet_aes_gcm([0x42u8], 0u32, _key32(), _iv12())
+        frame[frame.len() - 1u64] = frame[frame.len() - 1u64] ^ 0x01u8
+        val opened = ssh_decrypt_packet_aes_gcm(frame, 0u32, _key32(), _iv12())
+        assert_equal(opened.is_err(), true)
+
+    it "decrypt rejects empty input gracefully with a typed error":
+        # @req REQ-SSPEC-UNIT
+        step("decrypt rejects empty input gracefully with a typed error")
+        val opened = ssh_decrypt_packet_aes_gcm([], 0u32, _key32(), _iv12())
+        assert_equal(opened.is_err(), true)

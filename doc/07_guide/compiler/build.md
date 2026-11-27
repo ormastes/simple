@@ -28,6 +28,16 @@ The Simple language build system is fully self-hosted, written in Simple and con
 > problem in pure-Simple (`src/compiler`, `src/lib`, `src/app`) and re-deploy —
 > don't make the seed the default. See `.claude/rules/bootstrap.md`.
 
+On Windows, `bin/simple.cmd lint` selects the deployed runtime from
+`bin/release`, even when a bootstrap seed is present. If no nonempty deployed
+runtime exists, lint fails with a deployment diagnostic instead of using the
+seed. An explicit `SIMPLE_BINARY` still takes precedence for operator-selected
+diagnostics. This selection rule does not itself establish runtime admission;
+use the bootstrap provenance checks before accepting compiler evidence.
+The wrapper contract can be checked without a compiler bootstrap using
+`powershell -NoProfile -File scripts/check/check-simple-cmd-lint-routing.ps1
+-OutputDirectory <fresh-directory>`.
+
 | Command | Description |
 |---------|-------------|
 | `bin/simple build` | Build the project |
@@ -186,6 +196,13 @@ The compiler supports multiple code generation backends:
 - **Linux:** LLVM most commonly available. Install `libllvm-18-dev` for `llvm-lib` backend. Preferred linker: `mold`.
 - **macOS:** Needs Homebrew LLVM (`brew install llvm`) for LLVM backend. Without it, all builds use Cranelift. Linker: system `ld` (ld64).
 - **Windows MSVC C builds:** configure a validated LLVM 23.1.x driver from `C:/dev/tool/clang+llvm-23.1.1-x86_64-pc-windows-msvc`; use `clang-cl.exe` for MSVC C (or the validated `clang.exe` C driver where required), and leave `CXX` unset. `cl.exe`, GCC, G++, MinGW, and `clang++` are not admitted C compiler selections. Cargo may use `link.exe` only as its MSVC Rust linker. Static lint rule `W-WIN-CC-001` checks Windows-specific compiler selection files.
+  When sourcing `scripts/setup/windows-msvc-bootstrap-env.shs`, an explicit
+  `LLVM_SYS_231_PREFIX` takes precedence over `SIMPLE_LLVM_WIN_ROOT_23`. A selected
+  prefix without `bin/clang-cl.exe` fails setup; discovery from the local toolchain
+  store runs only when neither prefix was supplied. This prevents a missing or
+  mistyped pin from silently selecting another compiler. The toolchain contract
+  runs `scripts/check/check-windows-msvc-prefix-selection.shs` to cover both
+  explicit selection and unpinned discovery.
 
 For a pinned macOS bootstrap, Stage 2 forwards `CC`, `CXX`, `AR`, `LD`,
 `LLVM_CONFIG`, and `SIMPLE_LLVM_REQUIRED_VERSION` through its scrubbed child
@@ -236,23 +253,60 @@ The Simple compiler is self-hosted. To build from scratch, a bootstrap process p
 Stage 1: Rust Seed Binary
   cargo build --profile bootstrap -p simple-driver
   -> src/compiler_rust/target/bootstrap/simple
-  -> Rust bootstrap authority (not a future stage-default selection)
+  -> Rust bootstrap authority (bootstrap-only; never a production tool default)
 
-Stage 2: Canonical pure-Simple compiler (compiled by Rust seed)
-  seed native-build --entry bootstrap_main.spl
+Stage 2: Canonical pure-Simple bootstrap compiler (compiled by Rust seed)
+  seed native-build --entry src/app/cli/bootstrap_main.spl
   -> build/bootstrap/stage2/<triple>/simple
-  -> Backend: llvm-lib (default)
+  -> Backend: selected K1 host backend (`llvm` or `cranelift` per platform policy, not `llvm-lib` P-static plugin)
 
-Stage 3: Self-Hosted (compiled by Stage 2)
-  stage2 native-build --entry bootstrap_main.spl
+Stage 3 (Phase 3): Host-only self-hosted debug compiler (compiled by admitted Stage 2)
+  stage2 native-build --entry src/app/cli/bootstrap_main.spl \
+    --managed-build-phase=phase3 --profile=dev
   -> build/bootstrap/stage3/<triple>/simple
-  -> Backend: llvm-lib (default)
+  -> Backend & closure: proven host K1 baseline (`SIMPLE_BACKEND_COMPOSITION=host-only` / K1 kernel or `backends_host_only` overlay; optional GPU/VHDL/Wasm backends excluded)
 
-Stage 4: Full CLI (compiled by verified stage)
-  stage3 native-build --entry main.spl
-  -> build/bootstrap/full/<triple>/simple
-  -> Backend: llvm-lib (default)
+Stage 4 (Phase 4): Full CLI & provider distribution (compiled by verified pure-Simple stage)
+  stage3 native-build --entry src/app/cli/main.spl \
+    --managed-build-phase=phase4 --profile=prod|dev
+  -> build/bootstrap/full/<triple>/simple (Release `prod` default; Diagnosis `dev` in isolated `-dev` namespace)
+  -> Backend: selected K1 host core + explicitly built/admitted static or `simple_backend_plugin_v1` dynlib providers
 ```
+
+### Managed Bootstrap Phases, Host-Only Closure, and Phase-4 Profiles
+
+Managed bootstrap builds separate **phase**, **profile**, **backend composition/linkage**, and **host ABI vs emitted target** (see `doc/03_plan/compiler/phase3_first_dynlib_architecture_bootstrap_2026-11-18.md`):
+
+- **Phase 3 (`--managed-build-phase=phase3`):**
+  - Strictly `dev`-only (`--profile=dev`, unstripped debug/diagnosis symbols; `--profile=prod` or `--release` is rejected with `TARGET-PROFILE-E-CONFLICT`).
+  - Uses `--stop-after-stage3` on `scripts/bootstrap/bootstrap-from-scratch.sh` (delegated through `scripts/bootstrap/run-managed-from-admitted.shs`) to qualify the host self-hosted compiler (`G-P3-HOST`) without implying Phase-4 completion or release deployment.
+  - Defaults to **host-only composition** (`SIMPLE_BACKEND_COMPOSITION=host-only` when `SIMPLE_BOOTSTRAP_STAGE3=1`, or `--source src/compositions/backends_host_only` / `src/compositions/kernel_llvm{,_cranelift}`), excluding optional GPU/VHDL/Wasm static backend closures while preserving explicit `--backend-plugin=PATH` dynamic provider qualification (`G-DYN-ONE`).
+  - While Bug `#8504` native overlap qualification (`G-FILE`) remains open, `config/bootstrap.sdn` scopes `stage3_file_workers: 0` specifically to Stage 3 even though the general compiler default is per-file `src → obj` (`NATIVE_PER_FILE_PIPELINE_DEFAULT_V1 = "1"`).
+- **Phase 4 (`--managed-build-phase=phase4`):**
+  - Supports orthogonal `--profile=prod` (Release, default when `--profile` is omitted) and `--profile=dev` (Diagnosis unstripped full CLI, selectable via `PHASE4_PROFILE=dev` in `scripts/bootstrap/build-phase4-direct-product.shs` and `scripts/bootstrap/bootstrap-phase4-grouped.shs`).
+  - `phase4` `dev` and `prod` use isolated cache, `ConfigVariantKeyV1`, and receipt namespaces (`focused_native_build_profile_cache_dir_v1`, `focused_native_build_profile_receipt_namespace_v1`) so Debug and Release builds never cross-contaminate.
+  - Optional and mandatory `simple_backend_plugin_v1` dynlib providers record separate auditable statuses (`built`, `loaded`, `emitted`, `linked`, `executed`, `unavailable`, `not_run`); `--mode=dynload` SMF packaging alone is never treated as proof that a dynamic codegen provider was built or executed.
+
+### Unified Cross-Platform Phase 3 & Phase 4 Build (`build-phase3-phase4.sh` & `.bat`)
+
+All hosts (**Linux, macOS, FreeBSD, Windows (Git-Bash/MSYS2), and SimpleOS**) share one phased build script for Phase 3 and Phase 4 (see [phase3_phase4_shared_build.md](../tooling/phase3_phase4_shared_build.md) and [bootstrap_options.md](../tooling/bootstrap_options.md)):
+
+1. **Shared Cross-Platform Script & Interactive Menu:**
+   - `scripts/bootstrap/build-phase3-phase4.sh` opens an **interactive Phased Build Menu** when invoked interactively without `--phase=...` (or with `--menu`), and accepts non-interactive `--phase=p3a|p3|p4|all`.
+   - On Windows, `scripts/bootstrap/build-phase3-phase4.bat` delegates to the same `.sh` script with 2 configs: **`mingw` is DEFAULT** (`--win-config=mingw`, `llvm-mingw` clang + `ld.lld`), and **`msvc` is optional** (`--win-config=msvc`, `clang-cl`).
+   - Old standalone Phase 3/4 scripts (`p3-selfbuild-stage3.shs`, `p3-manual-link-stage3.shs`, `p3-smoke-stage3.shs`, `p3-targeted-stage2-build.shs`, `p3-entry-groups.shs`, etc.) are deprecated — invoking them directly pauses with migration instructions for `build-phase3-phase4.sh` (including phased/shard mode) and returns without building.
+2. **Default Bootstrap Skips Phase 1 & Phase 2 Once Phase 3+ Exists:**
+   - In `scripts/bootstrap/bootstrap-from-scratch.sh --bootstrap-receipt=<receipt>`, when a working native pure-Simple Phase 3+ host compiler already exists (`bin/release/<triple>/simple` or `bin/simple` without the Rust-seed banner), **default bootstrap skips Phase 1 (Cargo Rust seed) and Phase 2 (`seed -> stage2`)** and delegates directly to `scripts/bootstrap/build-phase3-phase4.sh` (`P3 -> P4`; `sh scripts/bootstrap/build-phase3-phase4.sh` is the direct interactive/CLI phased entrypoint for Stage 3 & Stage 4).
+   - Pass `--from-seed` / `--cold-bootstrap` (or `--full-bootstrap` in CI) ONLY when intentionally rebuilding Phase 1 & Phase 2 from the Rust seed; pass `--skip-seed` to require an existing Phase 3+ compiler without seed fallback.
+3. **Compile Mode (`shard` Default, `file` Optional) & `native_host_match` Unit Link:**
+   - **`--compile-mode=shard` is DEFAULT** in `build-phase3-phase4.sh` (phase-based HIR/MIR shard build: `SIMPLE_FILE_WORKERS=0`, `SIMPLE_HIR_SHARDING=1`, `SIMPLE_MIR_SHARDING=1`); **`--compile-mode=file` is optional** (parallel per-file worker pool: `SIMPLE_FILE_WORKERS=1`).
+   - **Platform & CPU Link Policy (`scripts/bootstrap/stage3-native-host-link-policy.{sdn,shs}`):** Enforces mandatory **`native_host_match` tag check** (`target (platform, cpu) == host (os, arch)`), minimizing `simple` to link **only** thin entry + `(platform, cpu)` static primitive archive (`libsimple-primitive-<platform>-<cpu>.a`) + dead-stripped primitive C core statically, while linking `lib/libsimple-{std,compiler-common,compiler,app}.dylib` (`.so`) dynamically.
+   - **Phase 3 builds ONLY native host targets** — non-native backends (other CPUs, VHDL, GPU/CUDA/Vulkan, Wasm) are NOT built during Phase 3, **but if a `.dylib` already exists on disk, `simple` can load and use it** (`--backend-plugin <existing.dylib>`).
+4. **Phase 4 Dual-Mode Build (`--xray` + Optimized Release):**
+   - Phase 4 builds **both** the optimized production binary (`simple`: `--profile=prod --release --strip`) AND the XRay-instrumented debug binary (`simple-debug`: `--profile=dev --debug --no-strip --xray`), plus Stage 5 essentials (`simple_test_runner`, `simple_build_runner`, `simple_mcp_server`, `simple_lsp_mcp_server`).
+5. **Zero-Compile `--path-check` Alive Verification & Protected Script Guard:**
+   - Every core bootstrap script carries a top-of-file `PROTECTED BOOTSTRAP SCRIPT — DO NOT MODIFY UNLESS EXPLICITLY REQUESTED BY USER` banner.
+   - Run `sh scripts/check/fast-verify-bootstrap-scripts.shs` for a sub-second check of sealed `.sdn` SHA-256 digests, protected banners, syntax, and `check-bootstrap-path-matrix-all.shs` across Unix/Windows/SimpleOS using extensible `PATH_ACTION|...|status=ALIVE` superset records without running actual compilation.
 
 After the fresh Stage 4 full CLI passes candidate admission, bootstrap runs
 `scripts/check/check-bootstrap-essential-tools-smoke.shs` against that exact
@@ -383,15 +437,28 @@ hosted linker returns. The normalizer zeroes the COFF `TimeDateStamp` and PE
 optional-header `CheckSum` fields so repeated stripped native-build and
 bootstrap outputs can be compared by SHA256.
 
-Use `scripts/bootstrap/bootstrap-from-scratch.sh` for the host bootstrap wrapper.
-Normal runs reuse the existing Rust seed/runtime and rebuild only the
-pure-Simple stages. Rust seed/runtime rebuilds happen only with
-`--full-bootstrap`.
+Use `scripts/bootstrap/bootstrap-from-scratch.sh --bootstrap-receipt=<receipt>`
+for planner-admitted host bootstrap wrapper runs, or use
+`sh scripts/bootstrap/build-phase3-phase4.sh` as the direct interactive/CLI
+phased entrypoint for Stage 3 & Stage 4. When a working native pure-Simple
+Phase 3+ host compiler already exists (`bin/release/<triple>/simple` or
+`bin/simple` without the Rust-seed banner), normal runs skip Phase 1 (Cargo Rust
+seed) and Phase 2 (`seed -> stage2`) and delegate directly to
+`scripts/bootstrap/build-phase3-phase4.sh` (`P3 -> P4`). Pass `--from-seed` /
+`--cold-bootstrap` (or `--full-bootstrap` in CI) only when intentionally
+rebuilding Phase 1 & Phase 2 from the Rust seed; pass `--skip-seed` to require
+an existing Phase 3+ compiler without seed fallback.
 
 ```bash
-scripts/bootstrap/bootstrap-from-scratch.sh --mode=dynload
-scripts/bootstrap/bootstrap-from-scratch.sh --mode=one-binary
-scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap
+scripts/bootstrap/bootstrap-from-scratch.sh --bootstrap-receipt=<receipt>
+scripts/bootstrap/bootstrap-from-scratch.sh --bootstrap-receipt=<receipt> --skip-seed
+scripts/bootstrap/bootstrap-from-scratch.sh --bootstrap-receipt=<receipt> --from-seed
+scripts/bootstrap/bootstrap-from-scratch.sh --bootstrap-receipt=<receipt> --mode=dynload
+scripts/bootstrap/bootstrap-from-scratch.sh --bootstrap-receipt=<receipt> --mode=one-binary
+scripts/bootstrap/bootstrap-from-scratch.sh --bootstrap-receipt=<receipt> --full-bootstrap
+sh scripts/bootstrap/build-phase3-phase4.sh --menu
+sh scripts/bootstrap/build-phase3-phase4.sh --phase=all --compile-mode=shard
+sh scripts/check/fast-verify-bootstrap-scripts.shs
 ```
 
 `dynload` is the default fast-iteration mode. It preserves compiler-owned

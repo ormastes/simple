@@ -1,0 +1,96 @@
+# Behaviour spec for the admitted section-10 extension router and the
+# composition-to-section builder (SCI extension routing).
+
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.composition.{parse_composition_source_v1, composition_cli_extension_routes_v1, sci_compile_extension_config_v1, decode_composition_image_v1, cli_option_route_view_from_bytes_v1, sci_route_admitted_extension_token_v1, SciCliOptionRouteViewV1}
+use std.nogc_sync_mut.composition.cli_option_route.{SCI_ROUTE_KIND_EXTENSION_NAMESPACE_V1, CLI_MISSING_WARN_SKIP, CLI_MISSING_ERROR, CLI_AVAILABILITY_OPTIONAL, CLI_AVAILABILITY_REQUIRED}
+use std.nogc_sync_mut.composition.sci_generator.{SciRouteSourceV1, sci_generate_route_section_v1}
+
+val ABI = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+val SHA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+val PREFIX = "schema: simple.composition/1\nprofile: test\ninterface_groups:\n  - id: cli.command\n    major: 1\n    minor: 0\n    abi_digest: " + ABI + "\nproviders:\n  - id: cli.format\n    artifact: build/providers/format.smf\n    kind: smf\n    artifact_digest: " + SHA + "\n    interface_groups: [cli.command]\n    required_capability_bits: 0\nbindings:\n  - service: cli.format\n    interface_group: cli.command\n    provider: cli.format\n"
+val SOURCE = PREFIX + "cli_extensions:\n  - namespace: format\n    provider: cli.format\n    availability: optional\n    missing_policy: warn_skip\n"
+
+fn _source_with_extension(namespace: text, provider: text) -> text:
+    PREFIX + "cli_extensions:\n  - namespace: " + namespace + "\n    provider: " + provider + "\n    availability: optional\n    missing_policy: warn_skip\n"
+
+fn _extension_config(namespace: text) -> text:
+    "schema: simple.cli_extension/1\nnamespaces:\n  - namespace: " + namespace + "\n    provider_id: cli.format\n    availability: optional\n    missing_policy: warn_skip\n"
+
+fn _view_two_routes() -> SciCliOptionRouteViewV1:
+    val routes = [
+        SciRouteSourceV1(key: "llvm", route_kind: SCI_ROUTE_KIND_EXTENSION_NAMESPACE_V1, command_id: CLI_MISSING_WARN_SKIP, target: "provider.llvm", component_count: CLI_AVAILABILITY_OPTIONAL, flags: 1),
+        SciRouteSourceV1(key: "office", route_kind: SCI_ROUTE_KIND_EXTENSION_NAMESPACE_V1, command_id: CLI_MISSING_ERROR, target: "provider.office", component_count: CLI_AVAILABILITY_REQUIRED, flags: 3)
+    ]
+    cli_option_route_view_from_bytes_v1(sci_generate_route_section_v1(routes, 1).bytes)
+
+fn _view_corrupted() -> SciCliOptionRouteViewV1:
+    val routes = [
+        SciRouteSourceV1(key: "llvm", route_kind: SCI_ROUTE_KIND_EXTENSION_NAMESPACE_V1, command_id: CLI_MISSING_WARN_SKIP, target: "provider.llvm", component_count: CLI_AVAILABILITY_OPTIONAL, flags: 1)
+    ]
+    val bytes = sci_generate_route_section_v1(routes, 1).bytes
+    val last = bytes.len() - 1
+    bytes[last] = (bytes[last] + 1) % 256
+    cli_option_route_view_from_bytes_v1(bytes)
+
+fn _routes_fail(source: text) -> bool:
+    match composition_cli_extension_routes_v1(source):
+        case Ok(_): false
+        case Err(_): true
+
+describe "SCI extension router":
+    it "resolves an admitted namespace token to its route record":
+        val route = sci_route_admitted_extension_token_v1(_view_two_routes(), "--xllvm-pass=gvn")
+        expect(route.ok).to_equal(true)
+        expect(route.namespace).to_equal("llvm")
+        expect(route.key).to_equal("pass")
+        expect(route.value).to_equal("gvn")
+        expect(route.has_value).to_equal(true)
+        expect(route.provider_id).to_equal("provider.llvm")
+        expect(route.flags).to_equal(1)
+        expect(route.availability).to_equal(CLI_AVAILABILITY_OPTIONAL)
+        expect(route.missing_policy).to_equal(CLI_MISSING_WARN_SKIP)
+        expect(route.records_examined).to_equal(1)
+
+    it "reports an unknown namespace without examining records":
+        val route = sci_route_admitted_extension_token_v1(_view_two_routes(), "--xnope-k")
+        expect(route.ok).to_equal(false)
+        expect(route.error).to_equal("CLI_EXTENSION_NAMESPACE_UNKNOWN")
+        expect(route.records_examined).to_equal(0)
+
+    it "rejects an extension token without a key":
+        val route = sci_route_admitted_extension_token_v1(_view_two_routes(), "--xllvm")
+        expect(route.ok).to_equal(false)
+        expect(route.error).to_equal("CLI_EXTENSION_TOKEN_MALFORMED")
+
+    it "fails closed when the section digest does not verify":
+        val route = sci_route_admitted_extension_token_v1(_view_corrupted(), "--xllvm-pass=gvn")
+        expect(route.ok).to_equal(false)
+        expect(route.error).to_equal("CLI_EXTENSION_SECTION_UNVERIFIED")
+
+describe "SCI extension route builder":
+    it "derives one namespace route from a composition source":
+        val routes = composition_cli_extension_routes_v1(SOURCE).unwrap()
+        expect(routes.len()).to_equal(1)
+        expect(routes[0].key).to_equal("format")
+        expect(routes[0].target).to_equal("cli.format")
+        expect(routes[0].flags).to_equal(1)
+        expect(routes[0].command_id).to_equal(CLI_MISSING_WARN_SKIP)
+        expect(routes[0].component_count).to_equal(CLI_AVAILABILITY_OPTIONAL)
+
+    it "rejects a namespace bound to a provider the image does not declare":
+        expect(_routes_fail(_source_with_extension("format", "cli.ghost"))).to_equal(true)
+
+    it "rejects a malformed namespace shape":
+        expect(_routes_fail(_source_with_extension("Bad-Name", "cli.format"))).to_equal(true)
+
+    it "gives the same config digest but a new artifact digest for a new generation":
+        val image = parse_composition_source_v1(SOURCE).unwrap()
+        val cfg = _extension_config("format")
+        val first = sci_compile_extension_config_v1(image, cfg, 41)
+        val second = sci_compile_extension_config_v1(image, cfg, 42)
+        expect(first.ok).to_equal(true)
+        expect(second.ok).to_equal(true)
+        expect(first.config_sha256).to_equal(second.config_sha256)
+        expect(first.artifact_sha256 == second.artifact_sha256).to_equal(false)
+        expect(decode_composition_image_v1(first.bytes).ok).to_equal(true)

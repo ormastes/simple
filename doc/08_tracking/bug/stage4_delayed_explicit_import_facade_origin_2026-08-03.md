@@ -1,5 +1,33 @@
 # Stage 4 delayed explicit-import facade origin loses precedence
-## Open 2026-09-16 — needs owner triage
+
+## Closed 2026-11-25 — fix and regression spec confirmed in-tree
+
+Verified at release/1.0.0 HEAD (`ae1572aeb67`, worktree `wt-p2w5-al`) by
+code inspection:
+
+- The root-cause gap named below is repaired in
+  `src/compiler/20.hir/hir_lowering/module_surface_export_index.spl`:
+  `module_surface_explicit_import_origin` (line 75) now resolves an
+  already-resolved `owner.export_origin_index` hop (lines 130-137) when the
+  imported owner does not directly declare the item — exactly the
+  "recognizes only a direct declaration, not an already-resolved
+  export_origins hop" defect this entry describes. The qualified-export
+  sibling `module_surface_qualified_export_origin` (line 50) does the same.
+- The focused regression surface
+  `test/01_unit/compiler/hir/resolve_import_symbols_spec.spl` contains the
+  acceptance examples: "follows all seven Stage 4 app io delayed explicit
+  imports" (line 464) and "follows an aliased delayed explicit import in
+  reverse discovery order" (line 491), plus the fail-closed sibling
+  control.
+- **limit:** re-executing the spec is blocked at this HEAD repo-wide
+  (pinned seed rejects the `@representation_boundary` decorator from
+  cfd89933699 — known source/binary inconsistency), so this closure rests
+  on the in-tree fix + spec presence and the fix-owner's recorded
+  post-repair evidence below, not a fresh spec run. The pre-existing
+  25/1 directory-sibling `to_be_truthy()` oracle issue noted below is a
+  separate test-oracle matter, not this bug.
+
+## Open 2026-09-16 — needs owner triage (superseded by 2026-11-25 closure above)
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.

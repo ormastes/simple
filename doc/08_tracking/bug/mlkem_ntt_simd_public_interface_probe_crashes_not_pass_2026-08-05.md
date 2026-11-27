@@ -1,6 +1,6 @@
 # AC-4 SIMD byte-identity probe crashes on reproduction — reported PASS does not hold
 
-Status: OPEN (P2)
+Status: CLOSED (2026-11-06, see bottom section; header updated 2026-11-25 — previously still read "OPEN (P2)", which was stale)
 Status re-verified 2026-08-17 by source inspection (triage shard 02).
 at the `simple-runtime` source level, verified at the Rust-crate/unit level
 only — NOT yet verified end-to-end against the named `.spl` probe, which does
@@ -326,3 +326,29 @@ fixture. No code touched.
 ## Triage 2026-09-13
 
 Confirmed the missing probe is still missing: `test/09_baselines/crypto/x25519mlkem768/mlkem_ntt_simd_public_interface_probe.spl` does not exist (directory holds only `mlkem_avx2_reduce_selfcheck.c` and `mlkem_ntt_simd_c_test.c`). The alignment fix itself is already landed per the 2026-08-17 split. Writing the missing probe correctly (verdict line, `mlkem_ntt_simd_receipt().chunk_hits` SIMD-arm counting, GDB-instrument-equivalent discrimination) needs AVX2/x86-SIMD domain knowledge and a from-scratch spec beyond this pass's per-bug budget. Leaving OPEN for the missing probe only, no code change made.
+
+## Closed 2026-11-06 (work/x86-simd-bugs)
+
+The missing probe now exists:
+`test/09_baselines/crypto/x25519mlkem768/mlkem_ntt_simd_public_interface_probe.spl`
+— drives public `simd_{mul,add,sub}_i32x8` over 64 rounds of fresh `Vec8i`
+values (ML-KEM residues x zetas, plus i32-wrap cases) against a scalar i32
+reference. Host: Xeon E5-2673 v4, AVX2=yes, AVX-512F=no (so the AVX2 lane is
+the one exercised). Result on the seed interpreter (`bin/simple.exe run`):
+3/3 runs `ac4_x86_simd_public_interface_verdict=PASS checks=1536 checks_failed=0`,
+no crash. Combined with the 2026-08-06 `read_unaligned` fix this closes the row.
+Not run: native lane — stage3 `s3_fable46.exe` native-build fails before the
+probe, in `lib.nogc_sync_mut.simd` MIR (8x "unresolved method call: to..."),
+a separate native-stdlib defect, not this crash.
+
+## Note 2026-11-25 (p2w3-af lane, release/1.0.0)
+
+Header updated to match the 2026-11-06 closure (it still read "OPEN (P2)").
+Spot-check at current HEAD: the probe fixture exists in-tree and the
+`read_unaligned`/`write_unaligned` fix is present throughout
+`src/compiler_rust/runtime/src/value/simd_int_ops.rs` (120 `read_unaligned`
+occurrences). Re-running the probe here is environment-blocked: the probe
+source at HEAD itself uses `@representation_boundary` (line 61), which the
+pinned Windows seed rejects (`unknown decorator`), the known repo-wide
+seed/source inconsistency — so the 2026-11-06 PASS measurement on the AVX2
+host remains the authoritative run evidence. Status remains **CLOSED**.

@@ -1,0 +1,94 @@
+#!/bin/sh
+# check-xray-native-win64-inprocess-e2e.shs — XRay stage 3 (Windows x64):
+# build a `--xray --backend=llvm` DLL of test/fixtures/xray/xray_inprocess_prog.spl
+# and trace it in-process (ring mode: load, enable slots, call, drain the ring).
+#
+# What it does (Windows x64 host only; llvm-mingw UCRT clang + lld, never GCC):
+#   1. Runs test/fixtures/xray/xray_win_llvm_compile_driver.spl under --simple
+#      (pure-Simple CLI compile entry, dev profile — release forbids XRay) with
+#      XR_XRAY=1 and SIMPLE_NATIVE_BUILD_EMIT_OBJECT=shared -> <work>/xray_on.dll.
+#   2. Runs test/fixtures/xray/xray_win_ring_e2e_host.spl under --simple with
+#      XR_DLL=<dll>; it requires edges E:traced,E:add1,X:add1,X:traced, 4 drained
+#      and prints `RING-E2E PASS`.
+#
+# Verdict (last stdout line):
+#   PASS — <n> check(s) (...)              exit 0
+#   FAIL — <reason>                        exit 1
+#   ERROR — nothing was checked (<reason>) exit 2   (non-Windows host, no toolchain, no binary)
+#
+# Usage
+#   sh scripts/check/check-xray-native-win64-inprocess-e2e.shs --simple <bin> [--keep]
+# Env: CLANG (default ~/.simple/toolchains/llvm-mingw-*-ucrt-x86_64/bin/clang.exe),XRAY_WIN64_STEP_TIMEOUT_S (default 900).
+
+set -u
+
+ROOT=$(cd "$(dirname "$0")/../.." && pwd)
+SIMPLE_BIN=${SIMPLE_BIN:-}
+KEEP=0
+CC=${CLANG:-}
+STEP_TIMEOUT=${XRAY_WIN64_STEP_TIMEOUT_S:-900}
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --simple) SIMPLE_BIN=${2:-}; shift 2 ;;
+        --keep) KEEP=1; shift ;;
+        -h|--help) sed -n '2,21p' "$0"; exit 0 ;;
+        *) echo "ERROR — nothing was checked (unknown argument: $1)"; exit 2 ;;
+    esac
+done
+
+case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*) ;;
+    *) echo "ERROR — nothing was checked (needs a Windows x64 host; uname=$(uname -s 2>/dev/null))"; exit 2 ;;
+esac
+case "$(uname -m 2>/dev/null)" in
+    x86_64|amd64) ;;
+    *) echo "ERROR — nothing was checked (needs x86_64; uname -m=$(uname -m 2>/dev/null))"; exit 2 ;;
+esac
+[ -n "$SIMPLE_BIN" ] || { echo "ERROR — nothing was checked (no --simple binary)"; exit 2; }
+if [ -z "$CC" ]; then
+    # The Windows GNU DLL link requires the bootstrap-owned llvm-mingw clang in CC
+    # (shared_linking.spl _link_shared_mingw); never a system/GCC driver.
+    for cand in "$HOME"/.simple/toolchains/llvm-mingw-*-ucrt-x86_64/bin/clang.exe; do
+        [ -x "$cand" ] && CC=$cand
+    done
+fi
+[ -n "$CC" ] || { echo "ERROR — nothing was checked (no llvm-mingw UCRT clang under ~/.simple/toolchains; run scripts/setup/bootstrap-prereqs.shs install)"; exit 2; }
+for tool in "$SIMPLE_BIN" "$CC"; do
+    command -v "$tool" >/dev/null 2>&1 || { echo "ERROR — nothing was checked (missing tool: $tool)"; exit 2; }
+done
+CC=$(cygpath -m "$CC" 2>/dev/null || echo "$CC")
+
+cd "$ROOT" || { echo "ERROR — nothing was checked (cannot cd $ROOT)"; exit 2; }
+WORK=$(mktemp -d "${TMPDIR:-/tmp}/xray-win64-inproc.XXXXXX") || { echo "ERROR — nothing was checked (mktemp)"; exit 2; }
+if [ "$KEEP" = 1 ]; then echo "kept: $WORK" >&2; else trap 'rm -rf "$WORK"' EXIT; fi
+DLL=$WORK/xray_on.dll
+
+# 1. Build the traced DLL. SIMPLE_MCDC_MODE must not reach the module
+#    (doc/08_tracking/bug/native_shared_mcdc_probes_undefined_2026-11-13.md).
+(
+    unset SIMPLE_MCDC_MODE SIMPLE_MCDC_MODE_ERROR
+    CC=$CC XR_SRC=test/fixtures/xray/xray_inprocess_prog.spl XR_OUT=$DLL XR_XRAY=1 SIMPLE_NATIVE_BUILD_EMIT_OBJECT=shared \
+        timeout "$STEP_TIMEOUT" "$SIMPLE_BIN" run test/fixtures/xray/xray_win_llvm_compile_driver.spl > "$WORK/build.log" 2>&1
+)
+build_rc=$?
+if [ "$build_rc" -ne 0 ] || ! grep -q '^CLI-COMPILE rc=0' "$WORK/build.log" || [ ! -s "$DLL" ]; then
+    echo "FAIL — --xray DLL build failed (rc=$build_rc): $(grep -m1 -E '^error' "$WORK/build.log" || grep -m1 'CLI-COMPILE' "$WORK/build.log" | cut -c1-240)"
+    exit 1
+fi
+
+# 2. Trace it in-process.
+XR_DLL=$(cygpath -w "$DLL" 2>/dev/null || echo "$DLL") \
+    timeout "$STEP_TIMEOUT" "$SIMPLE_BIN" run test/fixtures/xray/xray_win_ring_e2e_host.spl > "$WORK/host.log" 2>&1
+host_rc=$?
+grep '^RING-E2E' "$WORK/host.log" | sed 's/^/INFO /'
+if [ "$host_rc" -ne 0 ]; then
+    echo "FAIL — ring host exited rc=$host_rc: $(grep -m1 -E 'RING-E2E FAIL|rror' "$WORK/host.log" | cut -c1-240)"
+    exit 1
+fi
+if ! grep -q '^RING-E2E PASS$' "$WORK/host.log"; then
+    echo "FAIL — ring host: $(grep -m1 -E 'RING-E2E FAIL|rror' "$WORK/host.log" | cut -c1-240)"
+    exit 1
+fi
+echo "PASS — 3 check(s) (DLL built, exports+ring bound, edges E:traced,E:add1,X:add1,X:traced drained in-process with nonzero monotonic ns ts)"
+exit 0

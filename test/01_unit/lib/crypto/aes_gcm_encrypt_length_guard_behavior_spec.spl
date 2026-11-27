@@ -1,0 +1,163 @@
+# @timeout_secs 1200 (35 child `simple run` processes; interpreted crypto fixture compiles are slow)
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+#
+# AES-GCM encrypt fail-closed length guards — BEHAVIORAL half (bug
+# aes_gcm_encrypt_length_unchecked_and_rewound_hardening_2026-11-13, Open
+# item 1). The sibling aes_gcm_encrypt_length_guard_spec.spl pins the guards
+# at source level; this spec proves the runtime behavior end to end.
+#
+# Mechanism: rt_bytes_u8_at reads an out-of-range index as 0, so before the
+# guards a short key/nonce silently zero-extended and encrypt returned
+# valid-looking ciphertext under a weak key/IV.
+#
+# BEFORE (pristine origin/release/1.0.0 extract, seed interpreter):
+#   enc(key = zeros(15)) exited 0 with an 18-byte ciphertext byte-identical
+#   to enc(key = zeros(16)) (silent zero-extension), and enc(nonce = zeros(11))
+#   was accepted the same way. AFTER (this branch) the same calls die before
+#   key expansion with the exact message the copy's decrypt returns as Err
+#   for the same input (child exit != 0, message on stderr).
+#
+# The guards panic because every copy returns bare [u8] (a Result retrofit
+# touches ~60 call sites; tracked as a follow-up in the bug doc), and the
+# spec runner cannot assert a panic in-process, so each reject case runs in
+# a child `simple run <fixture>` process. Each fixture imports exactly ONE
+# copy module: importing several copies into one program trips the
+# cross-module same-signature collision fallback, and a call may then run a
+# different copy's body than the one it imported.
+#
+# The noalloc TLS copy (src/lib/nogc_async_mut_noalloc/tls/aes128_gcm.spl)
+# keeps its fns private to its package, so no external fixture can call it;
+# its guard is pinned at source level by aes_gcm_encrypt_length_guard_spec.spl
+# and its valid-input behavior by the tls/record specs.
+
+use std.spec.step
+use std.io.{env_get, file_write, dir_create_all, file_exists}
+use std.io_runtime.{getpid, time_now_unix_micros}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.nogc_sync_mut.env.platform.{is_windows}
+
+val COMMON_MOD: text = "std.common.crypto.aes_gcm"
+val OS256_MOD: text = "os.crypto.aes256_gcm"
+val SSHD_MOD: text = "os.crypto.aes_gcm"
+val NONCE_MSG: text = "GCM nonce must be 12 bytes"
+val CHILD_TIMEOUT_MS: i64 = 180000
+val CHILD_MAX_OUTPUT: i64 = 4000000
+
+fn _simple_binary() -> text:
+    """The binary the children run; honours the same SIMPLE_BINARY override
+    the runner itself uses, falling back to the repo CLI."""
+    val configured = env_get("SIMPLE_BINARY") ?? ""
+    if configured != "" and file_exists(configured):
+        return configured
+    if is_windows():
+        return "bin/simple.exe"
+    "bin/simple"
+
+fn _fixture_dir() -> text:
+    """Private per-process fixture dir so parallel lanes cannot collide."""
+    val d = "build/test_fixtures/aesgcm_encrypt_guard_{getpid()}_{time_now_unix_micros()}"
+    dir_create_all(d)
+    d
+
+fn _use_line(module_path: text, enc: text, dec: text, result: text) -> text:
+    "use " + module_path + "." + "{" + enc + " as probe_enc, " + dec + " as probe_dec, " + result + " as ProbeResult" + "}" + "\n"
+
+fn _zeros_fn() -> text:
+    "fn _zeros(n: i64) -> [u8]:\n" +
+    "    var out: [u8] = []\n" +
+    "    var i = 0\n" +
+    "    while i < n:\n" +
+    "        out.push(0x00u8)\n" +
+    "        i = i + 1\n" +
+    "    out\n"
+
+fn _msg_fn(ok_label: text) -> text:
+    "fn _msg(r: ProbeResult) -> text:\n" +
+    "    match r:\n" +
+    "        ProbeResult.Ok(pt): \"" + ok_label + "\"\n" +
+    "        ProbeResult.Err(m): m\n"
+
+# Reject fixture: prints the decrypt-side reference error for the same bad
+# input, then calls encrypt. Post-fix the encrypt call panics with the same
+# message; pre-fix it prints ENCRYPT_ACCEPTED and exits 0.
+fn _reject_fixture(module_path: text, enc: text, dec: text, result: text, dec_args: text, enc_args: text) -> text:
+    _use_line(module_path, enc, dec, result) + "\n" +
+    _zeros_fn() + "\n" +
+    _msg_fn("UNEXPECTED_OK") + "\n" +
+    "fn main():\n" +
+    "    print(\"DECRYPT_ERR=\" + _msg(probe_dec(" + dec_args + ")))\n" +
+    "    val out = probe_enc(" + enc_args + ")\n" +
+    "    print(\"ENCRYPT_ACCEPTED\")\n"
+
+# Round-trip fixture: exact-length key + 12-byte nonce, once with plaintext
+# and aad and once with both empty.
+fn _roundtrip_fixture(module_path: text, enc: text, dec: text, result: text, key_len: text) -> text:
+    _use_line(module_path, enc, dec, result) + "\n" +
+    _zeros_fn() + "\n" +
+    _msg_fn("Ok") + "\n" +
+    "fn main():\n" +
+    "    val aad = [0x09u8]\n" +
+    "    val ct = probe_enc(_zeros(" + key_len + "), _zeros(12), [0x01u8, 0x02u8, 0x03u8], aad)\n" +
+    "    print(\"ROUNDTRIP=\" + _msg(probe_dec(_zeros(" + key_len + "), _zeros(12), ct.substring(0, ct.len() - 16), aad, ct.substring(ct.len() - 16, ct.len()))))\n" +
+    "    val ct2 = probe_enc(_zeros(" + key_len + "), _zeros(12), [], [])\n" +
+    "    print(\"EMPTY_ROUNDTRIP=\" + _msg(probe_dec(_zeros(" + key_len + "), _zeros(12), ct2.substring(0, ct2.len() - 16), [], ct2.substring(ct2.len() - 16, ct2.len()))))\n"
+
+fn _run_fixture(dir: text, name: text, source: text) -> (text, text, i64):
+    val path = dir + "/" + name
+    if not file_write(path, source):
+        return ("", "fixture write failed: " + path, 125)
+    process_run_bounded(_simple_binary(), ["run", path], CHILD_TIMEOUT_MS, CHILD_MAX_OUTPUT)
+
+fn _check_reject(dir: text, name: text, module_path: text, enc: text, dec: text, result: text, dec_args: text, enc_args: text, expected_msg: text):
+    val (out, err, code) = _run_fixture(dir, name, _reject_fixture(module_path, enc, dec, result, dec_args, enc_args))
+    # Fail closed: nonzero exit, the decrypt-class message on stderr, and no
+    # ciphertext accepted. Pre-fix this child exited 0 with ENCRYPT_ACCEPTED.
+    expect(code != 0).to_equal(true)
+    expect(err).to_contain(expected_msg)
+    expect(out).to_contain("DECRYPT_ERR=" + expected_msg)
+    expect(out.contains("ENCRYPT_ACCEPTED")).to_equal(false)
+
+fn _exercise_copy(tag: text, module_path: text, enc: text, dec: text, result: text, exact_key: text, key_msg: text, wrong_keys: [text]):
+    val d = _fixture_dir()
+    for w in wrong_keys:
+        step("key length " + w + " is rejected before key expansion")
+        _check_reject(d, tag + "_key" + w + ".spl", module_path, enc, dec, result,
+            "_zeros(" + w + "), _zeros(12), [], [], _zeros(16)",
+            "_zeros(" + w + "), _zeros(12), [0x01u8, 0x02u8], []", key_msg)
+    for n in ["11", "0"]:
+        step("nonce length " + n + " is rejected before key expansion")
+        _check_reject(d, tag + "_nonce" + n + ".spl", module_path, enc, dec, result,
+            "_zeros(" + exact_key + "), _zeros(" + n + "), [], [], _zeros(16)",
+            "_zeros(" + exact_key + "), _zeros(" + n + "), [0x01u8, 0x02u8], []", NONCE_MSG)
+
+fn _check_roundtrip(tag: text, module_path: text, enc: text, dec: text, result: text, key_len: text):
+    val d = _fixture_dir()
+    val (out, _err, code) = _run_fixture(d, tag + "_roundtrip.spl", _roundtrip_fixture(module_path, enc, dec, result, key_len))
+    expect(code).to_equal(0)
+    expect(out).to_contain("ROUNDTRIP=Ok")
+    expect(out).to_contain("EMPTY_ROUNDTRIP=Ok")
+
+describe "AES-GCM encrypt copies fail closed behaviorally on wrong-length key/nonce":
+    it "std.common aes128_gcm_encrypt rejects key 15/24/32/empty and nonce 11/empty":
+        _exercise_copy("c128", COMMON_MOD, "aes128_gcm_encrypt", "aes128_gcm_decrypt", "AesGcmResult", "16", "AES-128 key must be 16 bytes", ["15", "24", "32", "0"])
+
+    it "std.common aes192_gcm_encrypt rejects key 15/16/32/empty and nonce 11/empty":
+        _exercise_copy("c192", COMMON_MOD, "aes192_gcm_encrypt", "aes192_gcm_decrypt", "AesGcmResult", "24", "AES-192 key must be 24 bytes", ["15", "16", "32", "0"])
+
+    it "std.common aes256_gcm_encrypt rejects key 15/16/24/empty and nonce 11/empty":
+        _exercise_copy("c256", COMMON_MOD, "aes256_gcm_encrypt", "aes256_gcm_decrypt", "AesGcmResult", "32", "AES-256 key must be 32 bytes", ["15", "16", "24", "0"])
+
+    it "os.crypto.aes256_gcm delegating encrypt rejects bad lengths ahead of the delegate":
+        _exercise_copy("os256", OS256_MOD, "aes256_gcm_encrypt", "aes256_gcm_decrypt", "Aes256GcmResult", "32", "AES-256 key must be 32 bytes", ["15", "16", "24", "0"])
+
+    it "sshd os.crypto.aes_gcm aes256_gcm_encrypt rejects bad lengths fail closed":
+        _exercise_copy("sshd256", SSHD_MOD, "aes256_gcm_encrypt", "aes256_gcm_decrypt", "AesGcmResult", "32", "AES-256 key must be 32 bytes", ["15", "16", "24", "0"])
+
+    it "valid boundary keys and nonce 12 round-trip unchanged in every copy":
+        step("exact key 16/24/32 + nonce 12, with plaintext/aad and with both empty")
+        _check_roundtrip("c128", COMMON_MOD, "aes128_gcm_encrypt", "aes128_gcm_decrypt", "AesGcmResult", "16")
+        _check_roundtrip("c192", COMMON_MOD, "aes192_gcm_encrypt", "aes192_gcm_decrypt", "AesGcmResult", "24")
+        _check_roundtrip("c256", COMMON_MOD, "aes256_gcm_encrypt", "aes256_gcm_decrypt", "AesGcmResult", "32")
+        _check_roundtrip("os256", OS256_MOD, "aes256_gcm_encrypt", "aes256_gcm_decrypt", "Aes256GcmResult", "32")
+        _check_roundtrip("sshd256", SSHD_MOD, "aes256_gcm_encrypt", "aes256_gcm_decrypt", "Aes256GcmResult", "32")

@@ -234,6 +234,28 @@ cranelift_only_test!(shared_method_static_split, |f: &mut MirFunction| {
     dest
 });
 
+// Regression for text_split_limit_ignored_2026-07-20 (seed JIT lane): a
+// two-argument `split(sep, limit)` must lower to `rt_string_split_limit` so the
+// bound is honored; the old unconditional `rt_string_split` mapping dropped the
+// limit and returned the full split under the JIT.
+cranelift_only_test!(shared_method_static_split_with_limit, |f: &mut MirFunction| {
+    let recv = f.new_vreg();
+    let sep = f.new_vreg();
+    let limit = f.new_vreg();
+    let dest = f.new_vreg();
+    let block = f.block_mut(BlockId(0)).unwrap();
+    block.instructions.push(MirInst::ConstInt { dest: recv, value: 0 });
+    block.instructions.push(MirInst::ConstInt { dest: sep, value: 0 });
+    block.instructions.push(MirInst::ConstInt { dest: limit, value: 2 });
+    block.instructions.push(MirInst::MethodCallStatic {
+        dest: Some(dest),
+        receiver: recv,
+        func_name: "split".to_string(),
+        args: vec![sep, limit],
+    });
+    dest
+});
+
 cranelift_only_test!(shared_method_static_replace, |f: &mut MirFunction| {
     let recv = f.new_vreg();
     let a = f.new_vreg();

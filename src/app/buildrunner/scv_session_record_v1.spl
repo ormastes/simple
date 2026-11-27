@@ -1,0 +1,65 @@
+"""Exact immutable source-session metadata; native SDN, no artifact authority."""
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use std.common.sdn.strict_v1.{sdn_parse_strict_bytes_v1}
+use std.common.sdn.strict_types_v1.{sdn_strict_limits_v1}
+use std.scv.scv_config_fields_v1.{scv_config_dict_v1, scv_config_text_v1,
+    scv_config_int_v1, scv_config_bool_v1}
+use std.scv.snapshot_v1_adapter.{CompileSnapshotV1Adapter}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.build_manager.contracts.{builder_digest_valid_v1}
+
+pub struct BuildRunnerScvRecordV1:
+    plan_sha256: text
+    checkout_root: text
+    snapshot_root: text
+    revision_id: text
+    commit_id: text
+    tree_id: text
+    inventory_digest: text
+    source_inventory_digest: text
+    inventory_generation: i64
+
+pub fn build_runner_scv_record_parse_v1(bytes: [u8]) -> Result<BuildRunnerScvRecordV1, text>:
+    var value = SdnValue.Null
+    match sdn_parse_strict_bytes_v1(bytes, sdn_strict_limits_v1()):
+        case Ok(parsed): value = parsed.value
+        case Err(issue): return Err("scv-session-record-" + issue.code)
+    val fields = scv_config_dict_v1(value, "scv_session_record", ["schema_version", "plan_sha256", "checkout_root", "cache_root", "source_scopes", "snapshot_root", "revision_id", "commit_id", "tree_id", "inventory_digest", "source_inventory_digest", "inventory_generation", "task_bindings", "source_only", "full_artifact_authorized", "session_digest"])?
+    scv_config_int_v1(fields["schema_version"], "schema_version", 1, 1)?
+    if not scv_config_bool_v1(fields["source_only"], "source_only")?: return Err("scv-session-source-only-required")
+    if scv_config_bool_v1(fields["full_artifact_authorized"], "full_artifact_authorized")?: return Err("scv-session-cannot-authorize-artifact")
+    val pointer = scv_config_text_v1(fields["source_inventory_digest"], "source_inventory_digest")?
+    if not builder_digest_valid_v1(pointer): return Err("scv-session-source-inventory-pointer-must-be-raw-sha256")
+    Ok(BuildRunnerScvRecordV1(plan_sha256: scv_config_text_v1(fields["plan_sha256"], "plan_sha256")?,
+        checkout_root: scv_config_text_v1(fields["checkout_root"], "checkout_root")?,
+        snapshot_root: scv_config_text_v1(fields["snapshot_root"], "snapshot_root")?,
+        revision_id: scv_config_text_v1(fields["revision_id"], "revision_id")?,
+        commit_id: scv_config_text_v1(fields["commit_id"], "commit_id")?,
+        tree_id: scv_config_text_v1(fields["tree_id"], "tree_id")?,
+        inventory_digest: scv_config_text_v1(fields["inventory_digest"], "inventory_digest")?,
+        source_inventory_digest: pointer,
+        inventory_generation: scv_config_int_v1(fields["inventory_generation"], "inventory_generation", 0, 9223372036854775807)?))
+
+pub fn build_runner_scv_record_encode_v1(plan_sha256: text, checkout_root: text, cache_root: text,
+        scopes: [text], adapter: CompileSnapshotV1Adapter, source_inventory_digest: text, task_bindings: Dict<text, text>) -> text:
+    var scope_values: [SdnValue] = []
+    for scope in scopes: scope_values.push(SdnValue.String(scope))
+    var bindings: Dict<text, SdnValue> = {}
+    for name in task_bindings.keys(): bindings[name] = SdnValue.String(task_bindings[name])
+    val legacy = adapter.legacy
+    var fields: Dict<text, SdnValue> = {
+        "schema_version": SdnValue.Int(1), "plan_sha256": SdnValue.String(plan_sha256),
+        "checkout_root": SdnValue.String(checkout_root), "cache_root": SdnValue.String(cache_root),
+        "source_scopes": SdnValue.Array(scope_values), "snapshot_root": SdnValue.String(legacy.snapshot_root),
+        "revision_id": SdnValue.String(legacy.revision_id), "commit_id": SdnValue.String(legacy.commit_id),
+        "tree_id": SdnValue.String(legacy.tree_id), "inventory_digest": SdnValue.String(legacy.inventory_digest),
+        "source_inventory_digest": SdnValue.String(source_inventory_digest),
+        "inventory_generation": SdnValue.Int(adapter.source_inventory_generation),
+        "task_bindings": SdnValue.Dict(bindings), "source_only": SdnValue.Bool(true),
+        "full_artifact_authorized": SdnValue.Bool(false)
+    }
+    fields["session_digest"] = SdnValue.String(sha256_text("simple/buildrunner-scv-session/v1\n" + sdn_encode_canonical(SdnValue.Dict(fields))))
+    sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+
+export BuildRunnerScvRecordV1, build_runner_scv_record_parse_v1, build_runner_scv_record_encode_v1

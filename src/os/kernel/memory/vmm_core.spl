@@ -33,7 +33,7 @@ use os.kernel.types.task_types.{AddressSpace}
 use os.kernel.types.vmspace_types.{
     VmArea, ProcessVmSpace,
 }
-use os.kernel.boot.mmio.{mmio_read8, mmio_write8, mmio_read64, mmio_write64, mmio_test_mode_enabled, mmio_invalidate_tlb}
+use os.kernel.boot.mmio.{mmio_read8, mmio_write8, mmio_read64, mmio_write64, mmio_test_mode_enabled}
 use os.kernel.memory.pmm.{PhysMemManager, pmm_alloc_page, pmm_free_page, pmm_alloc_page_raw, pmm_free_page_raw, pmm_ref_page, pmm_unref_page}
 
 # ============================================================================
@@ -85,12 +85,12 @@ val VMM_KERNEL_SPACE_START: u64 = 0xC0000000
 # Virtual Memory Manager
 # ============================================================================
 
-struct VirtMemManager:
+struct VmmCoreVirtMemManager:
     """4-level x86_64 page table manager."""
     pml4_phys: u64          # Physical address of kernel PML4
     hhdm_offset: u64        # HHDM offset for phys-to-virt conversion
 
-impl VirtMemManager:
+impl VmmCoreVirtMemManager:
     fn pml4_address() -> u64:
         """Get physical address of PML4 (for CR3)."""
         self.pml4_phys
@@ -165,7 +165,7 @@ fn _pte_phys_addr(entry: u64) -> u64:
 # ============================================================================
 
 # Global VMM instance
-var g_vmm: VirtMemManager = VirtMemManager(
+var g_vmm: VmmCoreVirtMemManager = VmmCoreVirtMemManager(
     pml4_phys: 0,
     hhdm_offset: 0
 )
@@ -203,8 +203,8 @@ fn vmm_bootstrap_pd_entry0() -> u64:
         return 0
     _read_pte(_phys_to_virt(_pte_phys_addr(pdpt_entry)), 0)
 
-fn vmm_manager_snapshot() -> VirtMemManager:
-    VirtMemManager(pml4_phys: _vmm_pml4_phys, hhdm_offset: _vmm_hhdm_offset)
+fn vmm_manager_snapshot() -> VmmCoreVirtMemManager:
+    VmmCoreVirtMemManager(pml4_phys: _vmm_pml4_phys, hhdm_offset: _vmm_hhdm_offset)
 
 fn vmm_phys_to_virt(phys: u64) -> u64:
     _phys_to_virt(phys)
@@ -526,7 +526,7 @@ fn vmm_translate(virt: VirtAddr) -> PhysAddr?:
 # CPU Primitives (inline assembly)
 # ============================================================================
 
-use os.kernel.arch.x86_64.runtime_hal.{hal_x86_64_read_cr3_raw, hal_x86_64_write_cr3_raw}
+use os.kernel.hal.runtime_hal.{hal_x86_64_read_cr3_raw, hal_x86_64_write_cr3_raw, hal_x86_64_invalidate_page}
 
 var _vmm_fallback_cr3: u64 = 0
 fn rt_read_cr3_raw__fallback() -> u64: _vmm_fallback_cr3
@@ -535,7 +535,9 @@ fn rt_write_cr3_raw__fallback(value: u64):
 
 fn _vmm_invalidate_tlb(vaddr: u64):
     """Invalidate TLB entry for a virtual address."""
-    mmio_invalidate_tlb(vaddr)
+    if mmio_test_mode_enabled():
+        return
+    hal_x86_64_invalidate_page(vaddr)
 
 fn _load_cr3(pml4_phys: u64):
     """Load CR3 register with a new PML4 physical address."""

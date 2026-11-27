@@ -1,0 +1,36 @@
+use std.spec.*
+use std.common.task_runner.scheduler.{task_runner_decode_v1, task_runner_host_slots}
+use test.support.buildrunner_recovery_capacity.{recovery_capacity_run, recovery_capacity_journal}
+
+describe "recovered task reservations respect host capacity":
+    it "rejects two active leases on a one-slot host":
+        val run = recovery_capacity_run()
+        val journal = recovery_capacity_journal(run, ["RUNNING", "RUNNING"], ["local", "local"])
+        expect(journal.len()).to_be_greater_than(0)
+        val decoded = task_runner_decode_v1(run, journal)
+        expect(decoded.is_err()).to_equal(true)
+        expect(decoded.unwrap_err()).to_equal("manager journal reservations exceed host slots: local")
+
+    it "counts reaped and unresolved leases before recovering them as running":
+        val run = recovery_capacity_run()
+        for status in ["REAPED", "UNRESOLVED"]:
+            val journal = recovery_capacity_journal(run, ["RUNNING", status], ["local", "local"])
+            expect(journal.len()).to_be_greater_than(0)
+            val decoded = task_runner_decode_v1(run, journal)
+            expect(decoded.is_err()).to_equal(true)
+            expect(decoded.unwrap_err()).to_equal("manager journal reservations exceed host slots: local")
+
+    it "accepts exactly one lease without reserving pending historical host labels":
+        val run = recovery_capacity_run()
+        val journal = recovery_capacity_journal(run, ["RUNNING", "PENDING"], ["local", "local"])
+        val decoded = task_runner_decode_v1(run, journal).unwrap()
+        expect(decoded.statuses).to_equal(["RUNNING", "PENDING"])
+        expect(task_runner_host_slots(decoded, "local")).to_equal(0)
+
+    it "keeps independent host limits independent":
+        val run = recovery_capacity_run(true)
+        val journal = recovery_capacity_journal(run, ["RUNNING", "REAPED"], ["local", "other"])
+        val decoded = task_runner_decode_v1(run, journal).unwrap()
+        expect(decoded.statuses).to_equal(["RUNNING", "RUNNING"])
+        expect(task_runner_host_slots(decoded, "local")).to_equal(0)
+        expect(task_runner_host_slots(decoded, "other")).to_equal(0)

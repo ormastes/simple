@@ -1,0 +1,103 @@
+# Static Complexity Baseline Compare CLI Adapter
+#
+# Supports `simple perf compare --baseline <file> --current <file> [--format sdn|json|text]`
+# and `simple perf static-compare ...` (design §11.3, §12.5, C16).
+# Uses `app.io.file_ops` facades exclusively (zero raw rt_env_* or rt_process_*).
+
+use app.io.file_ops.{file_exists, file_read_text}
+use compiler.semantics.perf.complexity_baseline_diff_v1.{
+    parse_baseline_auto_v1, compare_complexity_baselines_v1,
+    format_diff_report_sdn_v1, format_diff_report_json_v1,
+    format_diff_report_text_v1
+}
+
+fn _scc_has_flag(args: [text], exact_flag: text, prefix_flag: text) -> bool:
+    for arg in args:
+        if arg == exact_flag or arg.starts_with(prefix_flag):
+            return true
+    false
+
+fn is_static_complexity_compare_args(args: [text]) -> bool:
+    if args.len() == 0:
+        return false
+    if _scc_has_flag(args, "--current", "--current="):
+        return true
+    if _scc_has_flag(args, "--run", "--run=") or _scc_has_flag(args, "--db", "--db="):
+        return false
+    if _scc_has_flag(args, "--baseline", "--baseline="):
+        return true
+    false
+
+fn _scc_usage_text() -> text:
+    "Usage: simple perf compare --baseline <baseline-file> --current <current-file> [--format sdn|json|text]"
+
+fn execute_static_complexity_compare(args: [text]) -> (i64, text):
+    var baseline_path = ""
+    var current_path = ""
+    var format_name = "sdn"
+    var i = 0
+    while i < args.len():
+        val arg = args[i]
+        if arg == "--baseline":
+            if i + 1 >= args.len():
+                return (2, "perf-error: --baseline requires a file path\n" + _scc_usage_text())
+            baseline_path = args[i + 1].trim()
+            i = i + 2
+        elif arg.starts_with("--baseline="):
+            baseline_path = arg.slice(11, arg.byte_len()).trim()
+            i = i + 1
+        elif arg == "--current":
+            if i + 1 >= args.len():
+                return (2, "perf-error: --current requires a file path\n" + _scc_usage_text())
+            current_path = args[i + 1].trim()
+            i = i + 2
+        elif arg.starts_with("--current="):
+            current_path = arg.slice(10, arg.byte_len()).trim()
+            i = i + 1
+        elif arg == "--format":
+            if i + 1 >= args.len():
+                return (2, "perf-error: --format requires one of sdn|json|text\n" + _scc_usage_text())
+            format_name = args[i + 1].trim()
+            i = i + 2
+        elif arg.starts_with("--format="):
+            format_name = arg.slice(9, arg.byte_len()).trim()
+            i = i + 1
+        else:
+            return (2, "perf-error: unrecognized static compare option '" + arg + "'\n" + _scc_usage_text())
+
+    if baseline_path == "" or current_path == "":
+        return (2, "perf-error: both --baseline and --current file paths are required\n" + _scc_usage_text())
+    if format_name != "sdn" and format_name != "json" and format_name != "text":
+        return (2, "perf-error: unsupported --format '" + format_name + "' (expected sdn|json|text)")
+    if not file_exists(baseline_path):
+        return (2, "perf-error: baseline snapshot file not found: " + baseline_path)
+    if not file_exists(current_path):
+        return (2, "perf-error: current snapshot file not found: " + current_path)
+
+    val baseline_raw = file_read_text(baseline_path)
+    val baseline_snap = match parse_baseline_auto_v1(baseline_raw, baseline_path):
+        case Ok(snap): snap
+        case Err(reason): return (2, "perf-error: invalid baseline snapshot (" + baseline_path + "): " + reason)
+
+    val current_raw = file_read_text(current_path)
+    val current_snap = match parse_baseline_auto_v1(current_raw, current_path):
+        case Ok(snap): snap
+        case Err(reason): return (2, "perf-error: invalid current snapshot (" + current_path + "): " + reason)
+
+    val report = compare_complexity_baselines_v1(baseline_snap, current_snap)
+    val rendered = match format_name:
+        case "json": format_diff_report_json_v1(report)
+        case "text": format_diff_report_text_v1(report)
+        case _: format_diff_report_sdn_v1(report)
+
+    val exit_code = if report.source_regression_count > 0: 1 else: 0
+    (exit_code, rendered)
+
+fn run_static_complexity_compare_cli(args: [text]) -> i64:
+    val (exit_code, output) = execute_static_complexity_compare(args)
+    print output
+    exit_code
+
+export is_static_complexity_compare_args
+export execute_static_complexity_compare
+export run_static_complexity_compare_cli

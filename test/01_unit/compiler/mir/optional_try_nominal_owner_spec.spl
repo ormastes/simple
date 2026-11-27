@@ -1,0 +1,55 @@
+# Optional `?` must retain the payload declaration without a leaf annotation.
+# bug=optional_try_nominal_owner_missing_2026_10_21
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.hir.hir_types.{HirType, HirTypeKind, SymbolId, SymbolTable, HirSymbol, SymbolKind, ScopeId}
+use compiler.hir.hir_definitions.{HirExpr, HirExprKind}
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLowering.function_lowering.*
+use compiler.mir._MirLoweringExpr.expr_dispatch.*
+use compiler.mir._MirLoweringExpr.switch_operators_calls.*
+use compiler.mir._MirLoweringExpr.enum_constructor_payload.*
+
+fn optional_try_owner_metadata(kind: SymbolKind) -> (i64, i64, text):
+    val span = Span.empty()
+    val owner = SymbolId(id: 77)
+    val record = HirType(kind: HirTypeKind.Named(owner, []), span: span)
+    val optional = HirType(kind: HirTypeKind.Optional(record), span: span)
+    var symbols = SymbolTable.new()
+    symbols.register_preserved_symbol(HirSymbol(id: owner, name: "Record",
+        kind: kind, type_: nil, scope: ScopeId(id: 0), span: span,
+        visibility: Visibility.Public, is_public: true, is_mutable: false,
+        defining_module: Some("provider")))
+    var lowering = MirLowering.new(symbols)
+    var builder = lowering.builder
+    builder.begin_function(SymbolId(id: 90), "probe", MirSignature(params: [],
+        return_type: MirType.i64(), is_variadic: false), span)
+    val input = builder.new_temp(MirType.i64())
+    lowering.builder = builder
+    lowering.bind_local(20, input)
+    lowering.remember_local_hir_type(input.id, optional, 0, 0)
+    val base = HirExpr(kind: HirExprKind.Var(SymbolId(id: 20)),
+        has_type_: true, type_: optional, span: span)
+    val result = lowering.lower_try_expr(base)
+    var retained_owner = -1
+    if val retained = lowering.find_local_hir_type(result.id):
+        match retained.kind:
+            case HirTypeKind.Named(symbol, _): retained_owner = symbol.id
+            case _: ()
+    val layout = lowering.struct_value_syms.get(result.id) ?? ""
+    (lowering.errors.len(), retained_owner, layout)
+
+describe "Optional try nominal payload metadata":
+    it "retains the imported class identity on an inferred payload":
+        val result = optional_try_owner_metadata(SymbolKind.Class)
+        expect(result.0).to_equal(0)
+        expect(result.1).to_equal(77)
+        expect(result.2).to_equal("provider.Record")
+
+    it "retains a struct declaration through the same payload decoder":
+        val result = optional_try_owner_metadata(SymbolKind.Struct)
+        expect(result.0).to_equal(0)
+        expect(result.1).to_equal(77)
+        expect(result.2).to_equal("Record")

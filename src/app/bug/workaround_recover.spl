@@ -1,0 +1,2540 @@
+# Bug-linked @workaround commit discovery, Stage 2 safety gate, and narrow hunk recovery.
+# Reuses sanctioned host/store facades; never spawns blind `git checkout` or edits unrelated lines.
+
+use app.bug.workaround_index.{
+    WorkaroundIndex, WorkaroundLink, WorkaroundLineNumber, WorkaroundCheckV1,
+    parse_workaround_source, workaround_bug_id_valid, workaround_recovery_valid,
+    workaround_path_valid, workaround_sdn_quote
+}
+use app.bug.workaround_store.{
+    workaround_git, refresh_workarounds_at, load_workarounds_at, WorkaroundScanV1
+}
+use app.bug.workaround_revert.{workaround_is_stage2_gated_text}
+use std.nogc_async_mut.sosix.workaround_host.{
+    workaround_host_read, workaround_host_read_bytes, workaround_host_exists,
+    workaround_host_publish, workaround_host_cwd, workaround_host_process
+}
+use std.nogc_sync_mut.database.core.{
+    SdnTable, SdnRow, parse_sdn_table
+}
+use std.nogc_sync_mut.database.csm_seal.{
+    csm_verify_bytes, csm_strip_legacy_header, CSM_CORRUPT
+}
+use std.common.encoding.external_text.{bytes_to_text_checked}
+
+val WORKAROUND_RECOVER_MAX_FILE_BYTES: i64 = 8388608
+val WORKAROUND_RECOVER_MAX_DB_BYTES: i64 = 33554432
+val WORKAROUND_RECOVER_GIT_TIMEOUT_MS: i64 = 60000
+val WORKAROUND_RECOVER_GIT_MAX_BYTES: i64 = 16777216
+
+@allow(primitive_api)  # git diff -U0 1-based start/count line coordinates
+pub struct WorkaroundDiffHunk:
+    old_start: i64
+    old_count: i64
+    new_start: i64
+    new_count: i64
+    old_lines: [text]
+    new_lines: [text]
+
+pub struct WorkaroundNarrowPatch:
+    pre_expected: [text]
+    expected_body: [text]
+    recovered_body: [text]
+
+@allow(primitive_api)  # CLI/SDN/JSON report entry with 1-based line number
+pub struct WorkaroundRecoverEntry:
+    bug_id: text
+    path: text
+    line: i64
+    status: text
+    recover: text
+    fix_commit: text
+    action: text
+    detail: text
+
+@allow(primitive_api)  # CLI summary tally counts
+pub struct WorkaroundRecoverCounts:
+    recovered: i64
+    linked: i64
+    would_recover: i64
+    would_link: i64
+    skipped_stage2_gated: i64
+    conflict: i64
+    no_recover_ref: i64
+    skipped_pinned: i64
+    skipped_excluded: i64
+    not_eligible: i64
+    error: i64
+
+@allow(primitive_api)  # CLI option bag parsed from command-line flags
+pub struct WorkaroundRecoverOptions:
+    root: text
+    bug_ids: [text]
+    all_fixed: bool
+    link_recover: bool
+    list_only: bool
+    fix_commit: text
+    apply: bool
+    allow_stage2_gated: bool
+    allow_pinned: bool
+    excludes: [text]
+    bug_db_path: text
+    as_json: bool
+    paths_filter: [text]
+
+@allow(primitive_api)  # CLI recovery result status and counts
+pub struct WorkaroundRecoverResult:
+    ok: bool
+    mode: text
+    apply: bool
+    counts: WorkaroundRecoverCounts
+    entries: [WorkaroundRecoverEntry]
+    message: text
+
+pub fn default_workaround_recover_options() -> WorkaroundRecoverOptions:
+    WorkaroundRecoverOptions(
+        root: "",
+        bug_ids: [],
+        all_fixed: false,
+        link_recover: false,
+        list_only: false,
+        fix_commit: "",
+        apply: false,
+        allow_stage2_gated: false,
+        allow_pinned: false,
+        excludes: [],
+        bug_db_path: "",
+        as_json: false,
+        paths_filter: []
+    )
+
+fn _empty_counts() -> WorkaroundRecoverCounts:
+    WorkaroundRecoverCounts(
+        recovered: 0,
+        linked: 0,
+        would_recover: 0,
+        would_link: 0,
+        skipped_stage2_gated: 0,
+        conflict: 0,
+        no_recover_ref: 0,
+        skipped_pinned: 0,
+        skipped_excluded: 0,
+        not_eligible: 0,
+        error: 0
+    )
+
+fn _normalize_root(root: text) -> text:
+    val base = if root == "": workaround_host_cwd() else: root
+    var cleaned = base.replace("\\", "/")
+    while cleaned.byte_len() > 1 and cleaned.ends_with("/"):
+        cleaned = cleaned.substring(0, cleaned.byte_len() - 1)
+    cleaned
+
+fn _is_abs_path(path: text) -> bool:
+    if path.starts_with("/"):
+        return true
+    path.byte_len() >= 2 and path.substring(1, 2) == ":"
+
+fn _resolve_path(root: text, raw_path: text) -> text:
+    val normalized = raw_path.replace("\\", "/")
+    if _is_abs_path(normalized):
+        return normalized
+    root + "/" + normalized
+
+fn _parent_dir(path: text) -> text:
+    val normalized = path.replace("\\", "/")
+    val parts = normalized.split("/")
+    if parts.len() <= 1:
+        return "."
+    var kept: [text] = []
+    var i = 0
+    while i < parts.len() - 1:
+        kept.push(parts[i])
+        i = i + 1
+    val joined = kept.join("/")
+    if joined == "": "/" else: joined
+
+fn _recover_source_candidate(path: text) -> bool:
+    if workaround_path_valid(path) != WorkaroundCheckV1.Valid:
+        return false
+    if path.starts_with("src/compiler_rust/vendor/") or path.starts_with("src/runtime/vendor/"):
+        return false
+    if path == "src/runtime/miniaudio.h" or path == "src/runtime/stb_image.h" or path == "src/runtime/stb_truetype.h":
+        return false
+    for suffix in [".spl", ".c", ".h", ".rs", ".sh", ".shs", ".ps1", ".py", ".js", ".ts", ".cpp", ".hpp"]:
+        if path.ends_with(suffix):
+            return true
+    false
+
+fn _recover_pathspecs() -> [text]:
+    var specs: [text] = ["--"]
+    for suffix in [".spl", ".c", ".h", ".rs", ".sh", ".shs", ".ps1", ".py", ".js", ".ts", ".cpp", ".hpp"]:
+        specs.push("*" + suffix)
+    for dir in ["build", ".simple", ".worktrees", "src/compiler_rust/vendor", "src/runtime/vendor"]:
+        specs.push(":(exclude)" + dir)
+    specs
+
+fn _is_marker_line(line: text) -> bool:
+    val trimmed = line.trim()
+    var body = ""
+    if trimmed.starts_with("#"):
+        body = trimmed.substring(1).trim()
+    elif trimmed.starts_with("//"):
+        body = trimmed.substring(2).trim()
+    body.starts_with("@workaround ")
+
+fn _marker_bug_id(line: text) -> text:
+    val trimmed = line.trim()
+    var body = ""
+    if trimmed.starts_with("#"):
+        body = trimmed.substring(1).trim()
+    elif trimmed.starts_with("//"):
+        body = trimmed.substring(2).trim()
+    if not body.starts_with("@workaround "):
+        return ""
+    for raw_field in body.substring(12).replace("\t", " ").split(" "):
+        val field: text = raw_field
+        if field == "":
+            continue
+        if field.starts_with("bug="):
+            return field.substring(4)
+        return ""
+    ""
+
+fn _leading_indent(line: text) -> i64:
+    var i = 0
+    for ch in line.chars():
+        if ch == " ":
+            i = i + 1
+        elif ch == "\t":
+            i = i + 4
+        else:
+            break
+    i
+
+fn _brace_delta(line: text) -> i64:
+    var delta: i64 = 0
+    var quote = ""
+    var escaped = false
+    var prev_slash = false
+    for ch in line.chars():
+        if quote != "":
+            if ch == quote and not escaped:
+                quote = ""
+            escaped = ch == "\\" and not escaped
+            prev_slash = false
+            continue
+        if ch == "/" and prev_slash:
+            break
+        prev_slash = ch == "/"
+        if ch == "#":
+            break
+        elif ch == "\"" or ch == "'":
+            quote = ch
+        elif ch == r"{":
+            delta = delta + 1
+        elif ch == r"}":
+            delta = delta - 1
+    delta
+
+fn _is_code_line(line: text) -> bool:
+    val t = line.trim()
+    t != "" and not t.starts_with("#") and not t.starts_with("//")
+
+fn _lines_slice(lines: [text], start: i64, end_excl: i64) -> [text]:
+    var out: [text] = []
+    var i = if start < 0: 0 else: start
+    val limit = if end_excl > lines.len(): lines.len() else: end_excl
+    while i < limit:
+        out.push(lines[i])
+        i = i + 1
+    out
+
+fn _lines_equal(a: [text], b: [text]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
+fn _lines_match_at(lines: [text], pos: i64, expected: [text]) -> bool:
+    if pos < 0 or pos + expected.len() > lines.len():
+        return false
+    var i = 0
+    while i < expected.len():
+        if lines[pos + i] != expected[i]:
+            return false
+        i = i + 1
+    true
+
+fn _parse_int_strict(raw: text) -> Result<i64, text>:
+    if raw == "":
+        return Err("empty integer")
+    for ch in raw.chars():
+        if not "0123456789".contains(ch):
+            return Err("invalid integer: {raw}")
+    Ok(raw.to_i64())
+
+fn _parse_range_pair(spec: text) -> Result<(i64, i64), text>:
+    val comma = spec.find(",")
+    if comma < 0:
+        val start_num = _parse_int_strict(spec)?
+        return Ok((start_num, 1))
+    val start_str = spec.substring(0, comma)
+    val count_str = spec.substring(comma + 1)
+    val start_num = _parse_int_strict(start_str)?
+    val count_num = _parse_int_strict(count_str)?
+    Ok((start_num, count_num))
+
+@allow(primitive_api)  # CLI/library boundary: raw git diff -U0 output string in, parsed hunks out
+pub fn workaround_parse_unified_diff_u0(diff_text: text) -> Result<[WorkaroundDiffHunk], text>:
+    """Parse unified diff (`git diff -U0`) output into typed hunks."""
+    val normalized = diff_text.replace("\r\n", "\n")
+    val lines = normalized.split("\n")
+    var hunks: [WorkaroundDiffHunk] = []
+    var active = false
+    var old_start: i64 = 0
+    var old_count: i64 = 0
+    var new_start: i64 = 0
+    var new_count: i64 = 0
+    var old_lines: [text] = []
+    var new_lines: [text] = []
+    for raw_line in lines:
+        val line: text = raw_line
+        if line.starts_with("@@ "):
+            if active:
+                hunks.push(WorkaroundDiffHunk(
+                    old_start: old_start, old_count: old_count,
+                    new_start: new_start, new_count: new_count,
+                    old_lines: old_lines, new_lines: new_lines
+                ))
+            val close = line.substring(3).find(" @@")
+            if close < 0:
+                return Err("malformed diff hunk header: {line}")
+            val header_body = line.substring(3, 3 + close).trim()
+            val parts = header_body.split(" ")
+            if parts.len() != 2 or not parts[0].starts_with("-") or not parts[1].starts_with("+"):
+                return Err("malformed diff range: {line}")
+            val (os, oc) = _parse_range_pair(parts[0].substring(1))?
+            val (ns, nc) = _parse_range_pair(parts[1].substring(1))?
+            old_start = os
+            old_count = oc
+            new_start = ns
+            new_count = nc
+            old_lines = []
+            new_lines = []
+            active = true
+        elif active:
+            if line.starts_with("-"):
+                old_lines.push(line.substring(1))
+            elif line.starts_with("+"):
+                new_lines.push(line.substring(1))
+            elif line.starts_with("\\"):
+                pass
+            elif line.starts_with("diff ") or line.starts_with("index ") or line.starts_with("--- ") or line.starts_with("+++ "):
+                hunks.push(WorkaroundDiffHunk(
+                    old_start: old_start, old_count: old_count,
+                    new_start: new_start, new_count: new_count,
+                    old_lines: old_lines, new_lines: new_lines
+                ))
+                active = false
+            elif line.starts_with(" "):
+                val ctx = line.substring(1)
+                old_lines.push(ctx)
+                new_lines.push(ctx)
+    if active:
+        hunks.push(WorkaroundDiffHunk(
+            old_start: old_start, old_count: old_count,
+            new_start: new_start, new_count: new_count,
+            old_lines: old_lines, new_lines: new_lines
+        ))
+    Ok(hunks)
+
+@allow(primitive_api)  # 0-based line index boundary helper tested directly by unit specs
+pub fn workaround_affected_block_end(lines: [text], body_start: i64) -> i64:
+    """Return inclusive 0-based end index of the single affected block starting at body_start."""
+    if body_start < 0 or body_start >= lines.len():
+        return body_start
+    val first = lines[body_start]
+    val first_trim = first.trim()
+    val base_indent = _leading_indent(first)
+    var brace_depth = _brace_delta(first)
+    var has_indented_child = false
+    var probe = body_start + 1
+    while probe < lines.len():
+        val pt = lines[probe].trim()
+        if pt == "":
+            probe = probe + 1
+            continue
+        if _is_marker_line(lines[probe]):
+            break
+        if pt.starts_with("#") or pt.starts_with("//"):
+            if _leading_indent(lines[probe]) > base_indent:
+                has_indented_child = true
+                break
+            probe = probe + 1
+            continue
+        if _leading_indent(lines[probe]) > base_indent:
+            has_indented_child = true
+        break
+    if not first_trim.ends_with(":") and brace_depth <= 0 and not has_indented_child:
+        return body_start
+    var end_idx = body_start
+    var i = body_start + 1
+    while i < lines.len():
+        val cur = lines[i]
+        val cur_trim = cur.trim()
+        if cur_trim == "":
+            i = i + 1
+            continue
+        if _is_marker_line(cur):
+            break
+        val ind = _leading_indent(cur)
+        if (cur_trim.starts_with("#") or cur_trim.starts_with("//")) and ind <= base_indent and brace_depth <= 0:
+            break
+        brace_depth = brace_depth + _brace_delta(cur)
+        if ind > base_indent:
+            end_idx = i
+            i = i + 1
+            continue
+        if brace_depth > 0:
+            end_idx = i
+            i = i + 1
+            continue
+        if cur_trim.starts_with("}") or cur_trim == "fi" or cur_trim == "done" or cur_trim == "esac":
+            end_idx = i
+            if cur_trim.contains("else"):
+                i = i + 1
+                continue
+            break
+        if cur_trim.starts_with("elif ") or cur_trim.starts_with("else:") or cur_trim.starts_with("else ") or cur_trim.starts_with("except") or cur_trim.starts_with("finally:"):
+            end_idx = i
+            i = i + 1
+            continue
+        break
+    while end_idx > body_start and lines[end_idx].trim() == "":
+        end_idx = end_idx - 1
+    end_idx
+
+fn _hunk_idx_start(h: WorkaroundDiffHunk) -> i64:
+    if h.old_count > 0: h.old_start - 1 else: h.old_start
+
+fn _hunk_idx_end(h: WorkaroundDiffHunk) -> i64:
+    _hunk_idx_start(h) + h.old_count
+
+fn _insertion_belongs_to_block(new_lines: [text], base_indent: i64) -> bool:
+    for line in new_lines:
+        val t = line.trim()
+        if t == "":
+            continue
+        if _leading_indent(line) > base_indent:
+            return true
+        return false
+    false
+
+fn _sort_hunks_by_start(hunks: [WorkaroundDiffHunk]) -> [WorkaroundDiffHunk]:
+    var pending: [WorkaroundDiffHunk] = []
+    for h in hunks:
+        pending.push(h)
+    var sorted: [WorkaroundDiffHunk] = []
+    while pending.len() > 0:
+        var best = 0
+        var i = 1
+        while i < pending.len():
+            if _hunk_idx_start(pending[i]) < _hunk_idx_start(pending[best]):
+                best = i
+            i = i + 1
+        sorted.push(pending[best])
+        var rest: [WorkaroundDiffHunk] = []
+        var k = 0
+        while k < pending.len():
+            if k != best:
+                rest.push(pending[k])
+            k = k + 1
+        pending = rest
+    sorted
+
+@allow(primitive_api)  # 0-based commit line index into w_lines tested by unit specs
+pub fn workaround_extract_narrow_hunk(
+    w_lines: [text],
+    w_marker_idx: i64,
+    diff_hunks: [WorkaroundDiffHunk],
+    target_bug_id: text
+) -> Result<WorkaroundNarrowPatch, text>:
+    """Extract only the narrow replacement block corresponding to the marker at w_marker_idx."""
+    if w_marker_idx < 0 or w_marker_idx >= w_lines.len():
+        return Err("marker index out of range")
+    if _marker_bug_id(w_lines[w_marker_idx]) != target_bug_id:
+        return Err("marker mismatch at commit line {w_marker_idx + 1}")
+    var w_body_start = w_marker_idx + 1
+    while w_body_start < w_lines.len() and _is_marker_line(w_lines[w_body_start]):
+        w_body_start = w_body_start + 1
+    if w_body_start >= w_lines.len():
+        return Err("workaround marker has no affected block")
+    val w_block_end = workaround_affected_block_end(w_lines, w_body_start)
+    val base_indent = _leading_indent(w_lines[w_body_start])
+    var selected: [WorkaroundDiffHunk] = []
+    for raw_h in diff_hunks:
+        val h: WorkaroundDiffHunk = raw_h
+        val hs = _hunk_idx_start(h)
+        val he = _hunk_idx_end(h)
+        if h.old_count > 0:
+            if he > w_marker_idx and hs <= w_block_end:
+                selected.push(h)
+        else:
+            if hs >= w_marker_idx and (hs <= w_block_end or (hs == w_block_end + 1 and _insertion_belongs_to_block(h.new_lines, base_indent))):
+                selected.push(h)
+    if selected.len() == 0:
+        return Err("no diff hunk touches @workaround bug={target_bug_id}")
+    val ordered = _sort_hunks_by_start(selected)
+    var max_end = w_body_start + 1
+    for h in ordered:
+        val he = _hunk_idx_end(h)
+        if he > max_end:
+            max_end = he
+    if max_end > w_lines.len():
+        return Err("diff hunk extends beyond commit file lines")
+    val first_start = _hunk_idx_start(ordered[0])
+    var upper_idx = first_start
+    while upper_idx < w_marker_idx:
+        if _is_marker_line(w_lines[upper_idx]):
+            return Err("conflict: stacked sibling marker shares affected block")
+        upper_idx = upper_idx + 1
+    var check_idx = w_body_start
+    while check_idx < max_end:
+        if _is_marker_line(w_lines[check_idx]):
+            return Err("conflict: workaround hunk overlaps another @workaround marker")
+        check_idx = check_idx + 1
+    val pre_expected = if first_start < w_marker_idx: _lines_slice(w_lines, first_start, w_marker_idx) else: []
+    val expected_body = _lines_slice(w_lines, w_body_start, max_end)
+    var recovered: [text] = []
+    var cursor = if first_start < w_marker_idx: first_start else: w_marker_idx
+    for h in ordered:
+        val hs = _hunk_idx_start(h)
+        val he = _hunk_idx_end(h)
+        while cursor < hs:
+            if cursor >= w_body_start:
+                recovered.push(w_lines[cursor])
+            cursor = cursor + 1
+        for added in h.new_lines:
+            recovered.push(added)
+        if he > cursor:
+            cursor = he
+    var tail_cursor = if cursor > w_body_start: cursor else: w_body_start
+    while tail_cursor < max_end:
+        recovered.push(w_lines[tail_cursor])
+        tail_cursor = tail_cursor + 1
+    if w_body_start > w_marker_idx + 1 and not _lines_equal(expected_body, recovered):
+        return Err("conflict: stacked sibling marker shares affected block")
+    Ok(WorkaroundNarrowPatch(
+        pre_expected: pre_expected,
+        expected_body: expected_body,
+        recovered_body: recovered
+    ))
+
+@allow(primitive_api)  # 0-based working-tree marker line index into cur_lines tested by unit specs
+pub fn workaround_apply_narrow_patch(
+    cur_lines: [text],
+    cur_marker_idx: i64,
+    target_bug_id: text,
+    patch: WorkaroundNarrowPatch
+) -> Result<[text], text>:
+    """Remove the marker and restore the narrow block only if it matches uniquely at the site."""
+    if cur_marker_idx < 0 or cur_marker_idx >= cur_lines.len():
+        return Err("conflict: current marker line out of range")
+    if _marker_bug_id(cur_lines[cur_marker_idx]) != target_bug_id:
+        return Err("conflict: current marker line changed")
+    val has_upper_sibling = cur_marker_idx > 0 and _is_marker_line(cur_lines[cur_marker_idx - 1])
+    var cur_body_start = cur_marker_idx + 1
+    var kept_stacked: [text] = []
+    while cur_body_start < cur_lines.len() and _is_marker_line(cur_lines[cur_body_start]):
+        kept_stacked.push(cur_lines[cur_body_start])
+        cur_body_start = cur_body_start + 1
+    if cur_body_start >= cur_lines.len():
+        return Err("conflict: marker no longer precedes a code block")
+    if (has_upper_sibling or kept_stacked.len() > 0) and not _lines_equal(patch.expected_body, patch.recovered_body):
+        return Err("conflict: stacked sibling marker shares affected block")
+    var pre_len = patch.pre_expected.len()
+    if pre_len > 0:
+        val pre_start = cur_marker_idx - pre_len
+        if not _lines_match_at(cur_lines, pre_start, patch.pre_expected):
+            var non_blank = false
+            for pl in patch.pre_expected:
+                if pl.trim() != "":
+                    non_blank = true
+            if non_blank:
+                return Err("conflict: context immediately above marker changed")
+            pre_len = 0
+    var matched_len: i64 = -1
+    if _lines_match_at(cur_lines, cur_body_start, patch.expected_body):
+        matched_len = patch.expected_body.len()
+    elif patch.recovered_body.len() > 0 and _lines_match_at(cur_lines, cur_body_start, patch.recovered_body):
+        matched_len = patch.recovered_body.len()
+    else:
+        return Err("conflict: workaround block modified since introduction")
+    var body_chk = cur_body_start
+    while body_chk < cur_body_start + matched_len:
+        if _is_marker_line(cur_lines[body_chk]):
+            return Err("conflict: workaround hunk overlaps another @workaround marker")
+        body_chk = body_chk + 1
+    var out: [text] = []
+    var i = 0
+    val cut_start = cur_marker_idx - pre_len
+    while i < cut_start:
+        out.push(cur_lines[i])
+        i = i + 1
+    for stacked in kept_stacked:
+        out.push(stacked)
+    for rec_line in patch.recovered_body:
+        out.push(rec_line)
+    var after = cur_body_start + matched_len
+    while after < cur_lines.len():
+        out.push(cur_lines[after])
+        after = after + 1
+    Ok(out)
+
+fn _extract_stack_narrow_hunk(
+    w_lines: [text],
+    w_top: i64,
+    w_bottom: i64,
+    diff_hunks: [WorkaroundDiffHunk],
+    bug_ids: [text]
+) -> Result<WorkaroundNarrowPatch, text>:
+    if w_top < 0 or w_bottom < w_top or w_bottom >= w_lines.len():
+        return Err("stack marker indices out of range")
+    var idx = w_top
+    while idx <= w_bottom:
+        if _marker_bug_id(w_lines[idx]) != bug_ids[idx - w_top]:
+            return Err("stack marker mismatch at commit line {idx + 1}")
+        idx = idx + 1
+    if w_top > 0 and _is_marker_line(w_lines[w_top - 1]):
+        return Err("conflict: stacked sibling marker shares affected block")
+    var w_body_start = w_bottom + 1
+    if w_body_start < w_lines.len() and _is_marker_line(w_lines[w_body_start]):
+        return Err("conflict: stacked sibling marker shares affected block")
+    if w_body_start >= w_lines.len():
+        return Err("workaround stack has no affected block")
+    val w_block_end = workaround_affected_block_end(w_lines, w_body_start)
+    val base_indent = _leading_indent(w_lines[w_body_start])
+    var selected: [WorkaroundDiffHunk] = []
+    for raw_h in diff_hunks:
+        val h: WorkaroundDiffHunk = raw_h
+        val hs = _hunk_idx_start(h)
+        val he = _hunk_idx_end(h)
+        if h.old_count > 0:
+            if he > w_top and hs <= w_block_end:
+                selected.push(h)
+        else:
+            if hs >= w_top and (hs <= w_block_end or (hs == w_block_end + 1 and _insertion_belongs_to_block(h.new_lines, base_indent))):
+                selected.push(h)
+    if selected.len() == 0:
+        return Err("no diff hunk touches @workaround stack")
+    val ordered = _sort_hunks_by_start(selected)
+    var max_end = w_body_start + 1
+    for h in ordered:
+        val he = _hunk_idx_end(h)
+        if he > max_end:
+            max_end = he
+    if max_end > w_lines.len():
+        return Err("diff hunk extends beyond commit file lines")
+    val first_start = _hunk_idx_start(ordered[0])
+    var upper_idx = first_start
+    while upper_idx < w_top:
+        if _is_marker_line(w_lines[upper_idx]):
+            return Err("conflict: stacked sibling marker shares affected block")
+        upper_idx = upper_idx + 1
+    var check_idx = w_body_start
+    while check_idx < max_end:
+        if _is_marker_line(w_lines[check_idx]):
+            return Err("conflict: workaround hunk overlaps another @workaround marker")
+        check_idx = check_idx + 1
+    val pre_expected = if first_start < w_top: _lines_slice(w_lines, first_start, w_top) else: []
+    val expected_body = _lines_slice(w_lines, w_body_start, max_end)
+    var recovered: [text] = []
+    var cursor = if first_start < w_top: first_start else: w_top
+    for h in ordered:
+        val hs = _hunk_idx_start(h)
+        val he = _hunk_idx_end(h)
+        while cursor < hs:
+            if cursor >= w_body_start:
+                recovered.push(w_lines[cursor])
+            cursor = cursor + 1
+        for added in h.new_lines:
+            recovered.push(added)
+        if he > cursor:
+            cursor = he
+    var tail_cursor = if cursor > w_body_start: cursor else: w_body_start
+    while tail_cursor < max_end:
+        recovered.push(w_lines[tail_cursor])
+        tail_cursor = tail_cursor + 1
+    Ok(WorkaroundNarrowPatch(
+        pre_expected: pre_expected,
+        expected_body: expected_body,
+        recovered_body: recovered
+    ))
+
+fn _apply_stack_narrow_patch(
+    cur_lines: [text],
+    cur_top: i64,
+    bug_ids: [text],
+    patch: WorkaroundNarrowPatch
+) -> Result<[text], text>:
+    val stack_len = bug_ids.len()
+    if cur_top < 0 or cur_top + stack_len > cur_lines.len():
+        return Err("conflict: current stack marker range out of bounds")
+    var idx = 0
+    while idx < stack_len:
+        if _marker_bug_id(cur_lines[cur_top + idx]) != bug_ids[idx]:
+            return Err("conflict: stacked marker line changed")
+        idx = idx + 1
+    if cur_top > 0 and _is_marker_line(cur_lines[cur_top - 1]):
+        return Err("conflict: stacked sibling marker shares affected block")
+    val cur_body_start = cur_top + stack_len
+    if cur_body_start >= cur_lines.len():
+        return Err("conflict: stack no longer precedes a code block")
+    if _is_marker_line(cur_lines[cur_body_start]):
+        return Err("conflict: stacked sibling marker shares affected block")
+    var pre_len = patch.pre_expected.len()
+    if pre_len > 0:
+        val pre_start = cur_top - pre_len
+        if not _lines_match_at(cur_lines, pre_start, patch.pre_expected):
+            var non_blank = false
+            for pl in patch.pre_expected:
+                if pl.trim() != "":
+                    non_blank = true
+            if non_blank:
+                return Err("conflict: context immediately above stack changed")
+            pre_len = 0
+    var matched_len: i64 = -1
+    if _lines_match_at(cur_lines, cur_body_start, patch.expected_body):
+        matched_len = patch.expected_body.len()
+    elif patch.recovered_body.len() > 0 and _lines_match_at(cur_lines, cur_body_start, patch.recovered_body):
+        matched_len = patch.recovered_body.len()
+    else:
+        return Err("conflict: workaround block modified since introduction")
+    var out: [text] = []
+    var i = 0
+    val cut_start = cur_top - pre_len
+    while i < cut_start:
+        out.push(cur_lines[i])
+        i = i + 1
+    for rec_line in patch.recovered_body:
+        out.push(rec_line)
+    var after = cur_body_start + matched_len
+    while after < cur_lines.len():
+        out.push(cur_lines[after])
+        after = after + 1
+    Ok(out)
+
+pub fn workaround_replace_unique_hunk(
+    content: text,
+    old_lines: [text],
+    new_lines: [text]
+) -> Result<text, text>:
+    """Pure fail-closed unique block replacement: succeeds iff old_lines matches once."""
+    if old_lines.len() == 0:
+        return Err("empty old hunk")
+    val has_crlf = content.contains("\r\n")
+    val normalized = content.replace("\r\n", "\n")
+    val lines = normalized.split("\n")
+    var matches: [i64] = []
+    var i = 0
+    while i + old_lines.len() <= lines.len():
+        if _lines_match_at(lines, i, old_lines):
+            matches.push(i)
+        i = i + 1
+    if matches.len() == 0:
+        return Err("conflict: workaround hunk not found")
+    if matches.len() > 1:
+        return Err("conflict: ambiguous workaround hunk ({matches.len()} matches)")
+    val at = matches[0]
+    var out: [text] = []
+    var k = 0
+    while k < at:
+        out.push(lines[k])
+        k = k + 1
+    for repl in new_lines:
+        out.push(repl)
+    k = at + old_lines.len()
+    while k < lines.len():
+        out.push(lines[k])
+        k = k + 1
+    val joined = out.join("\n")
+    Ok(if has_crlf: joined.replace("\n", "\r\n") else: joined)
+
+pub fn workaround_insert_recover_into_line(
+    line: text,
+    bug_id: text,
+    recover_sha: text
+) -> Result<text, text>:
+    """Insert recover=<sha> right after bug=<id> while preserving indent, comment style and tail."""
+    if workaround_bug_id_valid(bug_id) != WorkaroundCheckV1.Valid:
+        return Err("invalid bug id: {bug_id}")
+    if workaround_recovery_valid(recover_sha) != WorkaroundCheckV1.Valid:
+        return Err("invalid recover SHA: {recover_sha}")
+    if line.contains("\n"):
+        return Err("marker line must be a single line")
+    val probe_line = line.replace("\r", "")
+    val parsed = parse_workaround_source("marker.spl", probe_line + "\npass_dn\n")
+    if parsed.is_err():
+        return Err("line is not a @workaround marker for bug={bug_id}: " + parsed.unwrap_err())
+    val plinks = parsed.unwrap()
+    if plinks.len() != 1:
+        return Err("line is not a @workaround marker for bug={bug_id}")
+    val plink: WorkaroundLink = plinks[0]
+    if plink.bug_id != bug_id:
+        return Err("line is not a @workaround marker for bug={bug_id}")
+    if plink.recover != "":
+        return Err("marker already carries recover=")
+    val wa_at = line.find("@workaround ")
+    if wa_at < 0:
+        return Err("line is not a @workaround marker for bug={bug_id}")
+    val needle = "bug=" + bug_id
+    val rel_at = line.substring(wa_at).find(needle)
+    if rel_at < 0:
+        return Err("bug field missing from marker line")
+    val at = wa_at + rel_at
+    val after_idx = at + needle.byte_len()
+    if after_idx < line.byte_len():
+        val next_ch = line.substring(after_idx, after_idx + 1)
+        if next_ch != " " and next_ch != "\t" and next_ch != "\r":
+            return Err("unexpected token immediately after bug={bug_id}")
+    val prefix = line.substring(0, after_idx)
+    val suffix = line.substring(after_idx)
+    Ok(prefix + " recover=" + recover_sha + suffix)
+
+@allow(primitive_api)  # shard SDN payload & bug_id text in, status text out
+pub fn workaround_parse_shard_bug_status(content: text, bug_id: text) -> Result<text, text>:
+    """Parse canonical bug status from a single sharded bug .sdn payload."""
+    val unsealed = csm_strip_legacy_header(content).replace("\r\n", "\n")
+    var found_status = ""
+    for raw_section in unsealed.split("\n\n"):
+        val section: text = raw_section
+        if section.trim() == "":
+            continue
+        match parse_sdn_table(section):
+            case Some(raw_table):
+                val table: SdnTable = raw_table
+                val tname: text = table.name
+                if tname == "bugs_active" or tname == "bugs":
+                    for raw_row in table.rows:
+                        val row: SdnRow = raw_row
+                        val rid = row.get("id") ?? ""
+                        if rid == bug_id:
+                            val valid_raw = (row.get("valid") ?? "true").lower()
+                            if valid_raw != "false":
+                                found_status = row.get("status") ?? ""
+                elif tname == "bugs_closed":
+                    for raw_row in table.rows:
+                        val row: SdnRow = raw_row
+                        val rid = row.get("id") ?? ""
+                        if rid == bug_id:
+                            val valid_raw = (row.get("valid") ?? "true").lower()
+                            if valid_raw != "false":
+                                found_status = "closed"
+            case None:
+                pass
+    Ok(found_status)
+
+@allow(primitive_api)  # markdown bug note payload text in, normalized status word out
+pub fn workaround_parse_md_bug_status(content: text) -> text:
+    """Extract declared Status from doc/08_tracking/bug/<id>.md."""
+    val normalized = content.replace("\r\n", "\n")
+    for raw_line in normalized.split("\n"):
+        val trimmed = raw_line.trim()
+        var rest = ""
+        if trimmed.starts_with("Status:"):
+            rest = trimmed.substring(7).trim()
+        elif trimmed.starts_with("**Status**:"):
+            rest = trimmed.substring(11).trim()
+        elif trimmed.starts_with("**Status:**"):
+            rest = trimmed.substring(11).trim()
+        elif trimmed.starts_with("- Status:"):
+            rest = trimmed.substring(9).trim()
+        elif trimmed.starts_with("- **Status**:"):
+            rest = trimmed.substring(13).trim()
+        else:
+            continue
+        if rest == "":
+            continue
+        val lower_rest = rest.lower()
+        val cleaned = lower_rest.replace(";", " ").replace(",", " ").replace("(", " ").replace(")", " ").replace("*", " ").replace("`", " ").trim()
+        val words = cleaned.split(" ")
+        var first_word = ""
+        for w in words:
+            if w != "":
+                first_word = w
+                break
+        if first_word == "":
+            continue
+        if first_word == "fixed" or first_word == "closed":
+            var qualified_unfinished = false
+            if lower_rest.contains("in source") or lower_rest.contains("pending") or
+                    lower_rest.contains("partial") or lower_rest.contains("verification") or
+                    lower_rest.contains("unverified") or lower_rest.contains("stage2") or
+                    lower_rest.contains("phase2") or lower_rest.contains("phase 2") or
+                    lower_rest.contains("reopen") or lower_rest.contains("blocked") or
+                    lower_rest.contains("wip") or lower_rest.contains("workaround"):
+                qualified_unfinished = true
+            else:
+                for w in words:
+                    if w == "open" or w == "confirmed" or w == "investigating" or w == "triage" or w == "partial" or w == "pending" or w == "source":
+                        qualified_unfinished = true
+            if qualified_unfinished:
+                return first_word + "-qualified"
+            return first_word
+        return first_word
+    ""
+
+@allow(primitive_api)  # bug status predicate boundary (raw status text in, bool out)
+pub fn workaround_status_is_resolved(raw_status: text) -> bool:
+    val lower = raw_status.trim().lower()
+    lower == "fixed" or lower == "closed"
+
+fn _is_bug_index_section(section: text) -> bool:
+    val trimmed = section.trim()
+    trimmed.starts_with("bugs |") or trimmed.starts_with("bugs|") or
+        trimmed.starts_with("bugs_active |") or trimmed.starts_with("bugs_active|") or
+        trimmed.starts_with("bugs_closed |") or trimmed.starts_with("bugs_closed|")
+
+fn _collect_bug_table_statuses(table: SdnTable) -> [(text, text)]:
+    var pairs: [(text, text)] = []
+    val tname: text = table.name
+    if tname == "bugs_closed":
+        for raw_row in table.rows:
+            val row: SdnRow = raw_row
+            val rid = row.get("id") ?? ""
+            if rid != "":
+                val valid_raw = (row.get("valid") ?? "true").lower()
+                if valid_raw != "false":
+                    pairs.push((rid, "closed"))
+        return pairs
+    if tname == "bugs" or tname == "bugs_active":
+        for raw_row in table.rows:
+            val row: SdnRow = raw_row
+            val rid = row.get("id") ?? ""
+            if rid != "":
+                val valid_raw = (row.get("valid") ?? "true").lower()
+                if valid_raw != "false":
+                    val st = row.get("status") ?? ""
+                    if st != "":
+                        pairs.push((rid, st))
+    pairs
+
+fn _find_section_start(full_text: text, table_name: text) -> i64:
+    if full_text.starts_with(table_name + " |") or full_text.starts_with(table_name + "|"):
+        return 0
+    val m1 = full_text.find("\n" + table_name + " |")
+    if m1 >= 0:
+        return m1 + 1
+    val m2 = full_text.find("\n" + table_name + "|")
+    if m2 >= 0:
+        return m2 + 1
+    -1
+
+fn _slice_sdn_table_section(full_text: text, table_name: text) -> text:
+    val start = _find_section_start(full_text, table_name)
+    if start < 0:
+        return ""
+    val tail = full_text.substring(start)
+    val end_lf = tail.find("\n\n")
+    val end_crlf = tail.find("\r\n\r\n")
+    var cut = tail.byte_len()
+    if end_lf >= 0 and end_lf < cut:
+        cut = end_lf
+    if end_crlf >= 0 and end_crlf < cut:
+        cut = end_crlf
+    tail.substring(0, cut).replace("\r\n", "\n")
+
+fn _collect_fast_bug_section_statuses(section: text, table_name: text) -> [(text, text)]:
+    var pairs: [(text, text)] = []
+    val lines = section.split("\n")
+    if lines.len() == 0:
+        return pairs
+    val header = lines[0].trim()
+    val pipe_idx = header.find("|")
+    if pipe_idx < 0:
+        return pairs
+    val tail_pipe = header.substring(pipe_idx + 1).find("|")
+    if tail_pipe < 0:
+        return pairs
+    val close_pipe = pipe_idx + 1 + tail_pipe
+    val col_str = header.substring(pipe_idx + 1, close_pipe)
+    var cols: [text] = []
+    for rc in col_str.split(","):
+        cols.push(rc.trim())
+    var id_col: i64 = -1
+    var status_col: i64 = -1
+    var valid_col: i64 = -1
+    var ci = 0
+    while ci < cols.len():
+        if cols[ci] == "id":
+            id_col = ci
+        elif cols[ci] == "status":
+            status_col = ci
+        elif cols[ci] == "valid":
+            valid_col = ci
+        ci = ci + 1
+    if id_col < 0:
+        return pairs
+    if table_name != "bugs_closed" and status_col < 0:
+        return pairs
+    val max_needed = if table_name == "bugs_closed": id_col else: (if status_col > id_col: status_col else: id_col)
+    var li = 1
+    while li < lines.len():
+        val raw_row = lines[li].trim()
+        li = li + 1
+        if raw_row == "" or raw_row.starts_with("#"):
+            continue
+        var fast_fields: [text] = []
+        var pos: i64 = 0
+        var used_fallback = false
+        while fast_fields.len() <= max_needed:
+            val rem = raw_row.substring(pos)
+            val comma = rem.find(",")
+            val seg = if comma >= 0: rem.substring(0, comma).trim() else: rem.trim()
+            if seg.contains("\""):
+                used_fallback = true
+                break
+            fast_fields.push(seg)
+            if comma < 0:
+                break
+            pos = pos + comma + 1
+        if used_fallback or fast_fields.len() <= max_needed:
+            match parse_sdn_table(header + "\n    " + raw_row):
+                case Some(t):
+                    for (kr, kv) in _collect_bug_table_statuses(t):
+                        pairs.push((kr, kv))
+                case None:
+                    pass
+            continue
+        val rid = fast_fields[id_col]
+        if rid == "":
+            continue
+        if valid_col >= 0 and valid_col == cols.len() - 1:
+            if raw_row.ends_with(", false") or raw_row.ends_with(",false"):
+                continue
+        elif valid_col >= 0:
+            match parse_sdn_table(header + "\n    " + raw_row):
+                case Some(t):
+                    for (kr, kv) in _collect_bug_table_statuses(t):
+                        pairs.push((kr, kv))
+                case None:
+                    pass
+            continue
+        if table_name == "bugs_closed":
+            pairs.push((rid, "closed"))
+        else:
+            val st = fast_fields[status_col]
+            if st != "":
+                pairs.push((rid, st))
+    pairs
+
+fn _load_bug_status_index(db_path: text) -> Result<Dict<text, text>, text>:
+    if not workaround_host_exists(db_path):
+        return Err("bug database not found: {db_path}")
+    if workaround_host_exists(db_path + ".wal"):
+        val wal = workaround_host_read(db_path + ".wal", WORKAROUND_RECOVER_MAX_DB_BYTES)?
+        if wal.trim() != "":
+            return Err("checkpoint canonical bug database WAL before recovery")
+    val full_text: text = workaround_host_read(db_path, WORKAROUND_RECOVER_MAX_DB_BYTES)?
+    if full_text.len() < 262144:
+        val raw_bytes: [u8] = workaround_host_read_bytes(db_path, WORKAROUND_RECOVER_MAX_DB_BYTES)?
+        val byte_text: text = match bytes_to_text_checked(raw_bytes):
+            case Ok(t): t
+            case Err(_): return Err("bug database is not valid UTF-8: {db_path}")
+        val seal = csm_verify_bytes(db_path, raw_bytes, byte_text)
+        if seal.state == CSM_CORRUPT:
+            return Err("bug database CRC mismatch: {db_path}")
+        val unsealed = csm_strip_legacy_header(full_text).replace("\r\n", "\n")
+        var bugs_tables: [SdnTable] = []
+        var active_tables: [SdnTable] = []
+        var closed_tables: [SdnTable] = []
+        for raw_section in unsealed.split("\n\n"):
+            val section: text = raw_section
+            if not _is_bug_index_section(section):
+                continue
+            match parse_sdn_table(section):
+                case Some(raw_table):
+                    val table: SdnTable = raw_table
+                    if table.name == "bugs":
+                        bugs_tables.push(table)
+                    elif table.name == "bugs_active":
+                        active_tables.push(table)
+                    elif table.name == "bugs_closed":
+                        closed_tables.push(table)
+                case None:
+                    pass
+        if bugs_tables.len() == 0 and active_tables.len() == 0 and closed_tables.len() == 0:
+            return Err("bug database has no bug table: {db_path}")
+        var small_index: Dict<text, text> = {}
+        for t in bugs_tables:
+            for (k, v) in _collect_bug_table_statuses(t):
+                small_index[k] = v
+        for t in active_tables:
+            for (k, v) in _collect_bug_table_statuses(t):
+                small_index[k] = v
+        for t in closed_tables:
+            for (k, v) in _collect_bug_table_statuses(t):
+                small_index[k] = v
+        return Ok(small_index)
+    val sec_bugs = _slice_sdn_table_section(full_text, "bugs")
+    val sec_active = _slice_sdn_table_section(full_text, "bugs_active")
+    val sec_closed = _slice_sdn_table_section(full_text, "bugs_closed")
+    if sec_bugs == "" and sec_active == "" and sec_closed == "":
+        return Err("bug database has no bug table: {db_path}")
+    var index: Dict<text, text> = {}
+    if sec_bugs != "":
+        for (k, v) in _collect_fast_bug_section_statuses(sec_bugs, "bugs"):
+            index[k] = v
+    if sec_active != "":
+        for (k, v) in _collect_fast_bug_section_statuses(sec_active, "bugs_active"):
+            index[k] = v
+    if sec_closed != "":
+        for (k, v) in _collect_fast_bug_section_statuses(sec_closed, "bugs_closed"):
+            index[k] = v
+    Ok(index)
+
+fn _lookup_bug_status(
+    root: text,
+    bug_id: text,
+    bug_db_override: text,
+    db_index: Dict<text, text>,
+    db_loaded: bool
+) -> (Result<text, text>, Dict<text, text>, bool):
+    val db_path = if bug_db_override != "": _resolve_path(root, bug_db_override) else: root + "/doc/08_tracking/bug/bug_db.sdn"
+    val db_dir = _parent_dir(db_path)
+    val shard_path = db_dir + "/db/" + bug_id + ".sdn"
+    if workaround_host_exists(shard_path):
+        match workaround_host_read_bytes(shard_path, 2097152):
+            case Err(e):
+                return (Err(e), db_index, db_loaded)
+            case Ok(raw_bytes):
+                val full_text: text = match bytes_to_text_checked(raw_bytes):
+                    case Ok(t): t
+                    case Err(_): return (Err("bug shard is not valid UTF-8: {shard_path}"), db_index, db_loaded)
+                val seal = csm_verify_bytes(shard_path, raw_bytes, full_text)
+                if seal.state == CSM_CORRUPT:
+                    return (Err("bug shard CRC mismatch: {shard_path}"), db_index, db_loaded)
+                val parsed = workaround_parse_shard_bug_status(full_text, bug_id)
+                return (parsed, db_index, db_loaded)
+    var next_index = db_index
+    var next_loaded = db_loaded
+    if not next_loaded and workaround_host_exists(db_path):
+        next_loaded = true
+        match _load_bug_status_index(db_path):
+            case Ok(loaded):
+                next_index = loaded
+            case Err(reason):
+                return (Err(reason), next_index, next_loaded)
+    if next_index.contains_key(bug_id):
+        val st = next_index[bug_id]
+        if st != "":
+            return (Ok(st), next_index, next_loaded)
+    if bug_db_override == "":
+        val md_path = db_dir + "/" + bug_id + ".md"
+        if workaround_host_exists(md_path):
+            match workaround_host_read(md_path, 2097152):
+                case Ok(md_text):
+                    val md_status = workaround_parse_md_bug_status(md_text)
+                    if md_status != "":
+                        return (Ok(md_status), next_index, next_loaded)
+                case Err(_):
+                    pass
+    (Ok(""), next_index, next_loaded)
+
+@allow(primitive_api)  # repository root path string in, pinned repo-relative paths out
+pub fn workaround_load_pinned_paths(root: text) -> [text]:
+    """Read paths pinned in src/verification/cache_protocol/source_bindings.txt."""
+    val bindings_path = root + "/src/verification/cache_protocol/source_bindings.txt"
+    if not workaround_host_exists(bindings_path):
+        return []
+    val content = match workaround_host_read(bindings_path, 2097152):
+        case Ok(v): v
+        case Err(_): return []
+    var paths: [text] = []
+    for raw_line in content.replace("\r\n", "\n").split("\n"):
+        val trimmed = raw_line.trim()
+        if trimmed == "" or trimmed.starts_with("#"):
+            continue
+        val parts = trimmed.split(" ")
+        for raw_part in parts:
+            val part: text = raw_part.trim()
+            if part == "":
+                continue
+            val hash_idx = part.find("#")
+            if hash_idx > 0:
+                val p = part.substring(0, hash_idx)
+                if p.contains("/") and not paths.contains(p):
+                    paths.push(p)
+                break
+    paths
+
+fn _is_path_excluded(path: text, excludes: [text]) -> bool:
+    for raw_ex in excludes:
+        var ex: text = raw_ex.replace("\\", "/").trim()
+        while ex.byte_len() > 1 and ex.ends_with("/"):
+            ex = ex.substring(0, ex.byte_len() - 1)
+        if ex == "":
+            continue
+        if ex == "." or path == ex or path.starts_with(ex + "/"):
+            return true
+    false
+
+fn _site_is_stage2_gated(root: text, path: text, cur_lines: [text], marker_idx: i64, link: WorkaroundLink) -> bool:
+    if workaround_is_stage2_gated_text(link.reason):
+        return true
+    var body_start = marker_idx + 1
+    while body_start < cur_lines.len() and _is_marker_line(cur_lines[body_start]):
+        body_start = body_start + 1
+    val block_end = if body_start < cur_lines.len(): workaround_affected_block_end(cur_lines, body_start) else: marker_idx
+    val win_start = if marker_idx >= 10: marker_idx - 10 else: 0
+    val win_end = if block_end + 2 < cur_lines.len(): block_end + 2 else: cur_lines.len()
+    var i = win_start
+    while i < win_end:
+        if i != marker_idx and _is_marker_line(cur_lines[i]):
+            i = i + 1
+            continue
+        if workaround_is_stage2_gated_text(cur_lines[i]):
+            return true
+        i = i + 1
+    var header_lines: [text] = []
+    var h_idx = 0
+    val h_limit = if cur_lines.len() < 30: cur_lines.len() else: 30
+    while h_idx < h_limit:
+        val t = cur_lines[h_idx].trim()
+        if t.starts_with("#") or t.starts_with("//") or t.starts_with("\"\"\"") or t == "":
+            header_lines.push(cur_lines[h_idx])
+            h_idx = h_idx + 1
+        else:
+            break
+    if workaround_is_stage2_gated_text(header_lines.join("\n")):
+        return true
+    val md_path = root + "/doc/08_tracking/bug/" + link.bug_id + ".md"
+    if workaround_host_exists(md_path):
+        match workaround_host_read(md_path, 524288):
+            case Ok(md_text):
+                val lower = md_text.lower()
+                if lower.contains("stage2-gated") or lower.contains("root-fixed+stage2-gated") or lower.contains("seed-gated"):
+                    return true
+            case Err(_):
+                pass
+    false
+
+@allow(primitive_api)  # repository root and commit SHA text boundary around git rev-parse/merge-base
+pub fn workaround_verify_fix_commit(root: text, fix_commit: text) -> Result<text, text>:
+    """Verify fix_commit is a valid commit in root AND an ancestor of HEAD."""
+    val trimmed = fix_commit.trim()
+    if trimmed == "":
+        return Err("empty --fix-commit")
+    val resolved = workaround_git(root, ["rev-parse", "--verify", trimmed + r"^{commit}"])?
+    val full_sha = resolved.trim()
+    if workaround_recovery_valid(full_sha) != WorkaroundCheckV1.Valid:
+        return Err("invalid resolved --fix-commit SHA: {full_sha}")
+    val anc = workaround_git(root, ["merge-base", "--is-ancestor", full_sha, "HEAD"])
+    if anc.is_err():
+        return Err("--fix-commit {trimmed} is not an ancestor of HEAD")
+    Ok(full_sha)
+
+fn _normalize_path_filter(raw_p: text) -> Result<text, text>:
+    var p = raw_p.replace("\\", "/").trim()
+    while p.byte_len() > 1 and p.ends_with("/"):
+        p = p.substring(0, p.byte_len() - 1)
+    if p == "":
+        return Err("unsafe path: empty")
+    if p == ".":
+        return Ok(".")
+    if p.starts_with("-") or p.starts_with("/") or p.contains(":") or p.contains("\0") or p.contains("\r") or p.contains("\n"):
+        return Err("unsafe path: {raw_p}")
+    for seg in p.split("/"):
+        if seg == "" or seg == "..":
+            return Err("unsafe path: {raw_p}")
+    Ok(p)
+
+fn _matches_path_filters(path: text, filters: [text]) -> bool:
+    if filters.len() == 0:
+        return true
+    for f in filters:
+        if f == "." or path == f or path.starts_with(f + "/"):
+            return true
+    false
+
+fn _discover_workaround_files(root: text, paths_filter: [text]) -> Result<[text], text>:
+    var normalized_filters: [text] = []
+    for raw_p in paths_filter:
+        val norm_res = _normalize_path_filter(raw_p)
+        if norm_res.is_err():
+            return Err(norm_res.unwrap_err())
+        val norm = norm_res.unwrap()
+        if not normalized_filters.contains(norm):
+            normalized_filters.push(norm)
+    var args = [
+        "-C", root, "grep", "-l", "-z", "--untracked", "--exclude-standard",
+        "-E", r"^[[:space:]]*(#|//|/\*|\*)[[:space:]]*@workaround"
+    ]
+    for spec in _recover_pathspecs():
+        args.push(spec)
+    val (out, err, code) = workaround_host_process("git", args, WORKAROUND_RECOVER_GIT_TIMEOUT_MS, WORKAROUND_RECOVER_GIT_MAX_BYTES)
+    if code != 0 and code != 1:
+        return Err("workaround Git grep failed ({code}): {err}")
+    var files: [text] = []
+    if code == 0:
+        for raw_p in out.split("\0"):
+            val p: text = raw_p.trim()
+            if p == "":
+                continue
+            if _recover_source_candidate(p) and _matches_path_filters(p, normalized_filters) and not files.contains(p):
+                files.push(p)
+    for f in normalized_filters:
+        if f != "." and not files.contains(f):
+            val abs = _resolve_path(root, f)
+            if workaround_host_exists(abs) and workaround_host_read(abs, 64).is_ok():
+                files.push(f)
+    files.sort()
+    Ok(files)
+
+fn _parse_commit_path_pairs(log_out: text) -> [(text, text)]:
+    var pairs: [(text, text)] = []
+    var cur_commit = ""
+    for raw_line in log_out.replace("\r\n", "\n").split("\n"):
+        val line: text = raw_line.trim()
+        if line == "":
+            continue
+        if line.starts_with("COMMIT:"):
+            cur_commit = line.substring(7).trim()
+        elif cur_commit != "":
+            pairs.push((cur_commit, line))
+    pairs
+
+fn _git_show_lines(root: text, rev: text, path: text) -> Result<[text], text>:
+    val out = workaround_git(root, ["show", rev + ":" + path])?
+    Ok(out.replace("\r\n", "\n").split("\n"))
+
+fn _parent_path_for_commit(root: text, commit_sha: text, parent_sha: text, path_at_commit: text) -> text:
+    if workaround_git(root, ["cat-file", "-e", parent_sha + ":" + path_at_commit]).is_ok():
+        return path_at_commit
+    match workaround_git(root, ["diff-tree", "--no-commit-id", "-M", "--name-status", "-z", "-r", commit_sha]):
+        case Err(_): ""
+        case Ok(out):
+            val parts = out.split("\0")
+            var i = 0
+            while i < parts.len():
+                val st = parts[i]
+                if st.starts_with("R") and i + 2 < parts.len():
+                    val old_p = parts[i + 1]
+                    val new_p = parts[i + 2]
+                    if new_p == path_at_commit:
+                        return old_p
+                    i = i + 3
+                elif st != "" and i + 1 < parts.len():
+                    i = i + 2
+                else:
+                    i = i + 1
+            ""
+
+fn _count_bug_links(links: [WorkaroundLink], bug_id: text) -> i64:
+    var c: i64 = 0
+    for l in links:
+        if l.bug_id == bug_id:
+            c = c + 1
+    c
+
+fn _matching_marker_idx_in_commit(
+    w_lines: [text],
+    w_links: [WorkaroundLink],
+    bug_id: text,
+    cur_lines: [text],
+    cur_marker_idx: i64
+) -> i64:
+    var candidates: [i64] = []
+    for l in w_links:
+        if l.bug_id == bug_id:
+            candidates.push(l.line.value - 1)
+    if candidates.len() == 0:
+        return -1
+    if candidates.len() == 1:
+        return candidates[0]
+    var cur_body_start = cur_marker_idx + 1
+    while cur_body_start < cur_lines.len() and _is_marker_line(cur_lines[cur_body_start]):
+        cur_body_start = cur_body_start + 1
+    val cur_sig = if cur_body_start < cur_lines.len(): cur_lines[cur_body_start] else: ""
+    for c_idx in candidates:
+        var b_idx = c_idx + 1
+        while b_idx < w_lines.len() and _is_marker_line(w_lines[b_idx]):
+            b_idx = b_idx + 1
+        if b_idx < w_lines.len() and w_lines[b_idx] == cur_sig:
+            return c_idx
+    candidates[0]
+
+struct _IntroCommitInfo:
+    w_sha: text
+    w_path: text
+    p_sha: text
+    p_path: text
+    w_idx: i64
+
+fn _find_introducing_commit(
+    root: text,
+    path: text,
+    bug_id: text,
+    range_start_sha: text,
+    cur_lines: [text],
+    cur_marker_idx: i64
+) -> Result<_IntroCommitInfo, text>:
+    val needle = "bug=" + bug_id
+    var pairs: [(text, text)] = []
+    var fast_args = ["log", "--name-only", "--format=COMMIT:%H", "-S", needle]
+    if range_start_sha != "":
+        fast_args.push(range_start_sha + "..HEAD")
+    fast_args.push("--")
+    fast_args.push(path)
+    match workaround_git(root, fast_args):
+        case Ok(out):
+            pairs = _parse_commit_path_pairs(out)
+        case Err(_):
+            pass
+    var tried_follow = false
+    if pairs.len() == 0:
+        tried_follow = true
+        var follow_args = ["log", "--follow", "-n", "20", "--name-only", "--format=COMMIT:%H", "-S", needle]
+        if range_start_sha != "":
+            follow_args.push(range_start_sha + "..HEAD")
+        follow_args.push("--")
+        follow_args.push(path)
+        match workaround_git(root, follow_args):
+            case Ok(out):
+                pairs = _parse_commit_path_pairs(out)
+            case Err(_):
+                pass
+    var pass_idx = 0
+    while pass_idx < 2:
+        for (c_sha, c_path) in pairs:
+            val p_res = workaround_git(root, ["rev-parse", "--verify", c_sha + "^"])
+            if p_res.is_err():
+                continue
+            val p_sha = p_res.unwrap().trim()
+            val p_path = _parent_path_for_commit(root, c_sha, p_sha, c_path)
+            if p_path == "":
+                continue
+            val w_res = _git_show_lines(root, c_sha, c_path)
+            if w_res.is_err():
+                continue
+            val w_lines = w_res.unwrap()
+            val p_lines_res = _git_show_lines(root, p_sha, p_path)
+            if p_lines_res.is_err():
+                continue
+            val p_lines = p_lines_res.unwrap()
+            val w_links_res = parse_workaround_source(c_path, w_lines.join("\n"))
+            if w_links_res.is_err():
+                continue
+            val w_links = w_links_res.unwrap()
+            val p_links_res = parse_workaround_source(p_path, p_lines.join("\n"))
+            if p_links_res.is_err():
+                continue
+            val p_links = p_links_res.unwrap()
+            if _count_bug_links(w_links, bug_id) > _count_bug_links(p_links, bug_id):
+                val w_idx = _matching_marker_idx_in_commit(w_lines, w_links, bug_id, cur_lines, cur_marker_idx)
+                if w_idx >= 0:
+                    return Ok(_IntroCommitInfo(
+                        w_sha: c_sha, w_path: c_path,
+                        p_sha: p_sha, p_path: p_path, w_idx: w_idx
+                    ))
+        if tried_follow:
+            break
+        tried_follow = true
+        var follow_args2 = ["log", "--follow", "-n", "20", "--name-only", "--format=COMMIT:%H", "-S", needle]
+        if range_start_sha != "":
+            follow_args2.push(range_start_sha + "..HEAD")
+        follow_args2.push("--")
+        follow_args2.push(path)
+        match workaround_git(root, follow_args2):
+            case Ok(out):
+                pairs = _parse_commit_path_pairs(out)
+            case Err(_):
+                pairs = []
+        pass_idx = pass_idx + 1
+    Err("could not locate introducing commit with pre-workaround parent for bug={bug_id} in {path}")
+
+fn _resolve_base_path(root: text, base_sha: text, w_sha: text, w_path: text, fallback_p_path: text) -> text:
+    if workaround_git(root, ["cat-file", "-e", base_sha + ":" + w_path]).is_ok():
+        return w_path
+    match workaround_git(root, ["diff", "--name-status", "-M", "-z", base_sha, w_sha]):
+        case Ok(out):
+            val parts = out.split("\0")
+            var i = 0
+            while i < parts.len():
+                val st = parts[i]
+                if st.starts_with("R") and i + 2 < parts.len():
+                    val old_p = parts[i + 1]
+                    val new_p = parts[i + 2]
+                    if new_p == w_path:
+                        return old_p
+                    i = i + 3
+                elif st != "" and i + 1 < parts.len():
+                    i = i + 2
+                else:
+                    i = i + 1
+            fallback_p_path
+        case Err(_):
+            fallback_p_path
+
+fn _recover_one_site(
+    root: text,
+    path: text,
+    link: WorkaroundLink,
+    cur_lines: [text],
+    cur_marker_idx: i64,
+    auto_link: bool
+) -> Result<([text], text, text), text>:
+    var recover_ref = link.recover
+    var range_start = ""
+    if recover_ref != "":
+        val verified_r = workaround_git(root, ["rev-parse", "--verify", recover_ref + r"^{commit}"])?
+        recover_ref = verified_r.trim()
+        if workaround_git(root, ["merge-base", "--is-ancestor", recover_ref, "HEAD"]).is_err():
+            return Err("recover commit {recover_ref} is not an ancestor of HEAD")
+        range_start = recover_ref
+    elif not auto_link:
+        return Err("no_recover_ref")
+    val info = _find_introducing_commit(
+        root, path, link.bug_id, range_start, cur_lines, cur_marker_idx)?
+    val w_sha = info.w_sha
+    val w_path = info.w_path
+    var base_sha = info.p_sha
+    var base_path = info.p_path
+    if recover_ref != "":
+        if recover_ref == w_sha:
+            return Err("recover commit {recover_ref} must precede workaround commit {w_sha}")
+        base_sha = recover_ref
+        if base_sha != info.p_sha:
+            base_path = _resolve_base_path(root, base_sha, w_sha, w_path, info.p_path)
+    else:
+        recover_ref = base_sha
+    val w_idx = info.w_idx
+    val w_lines = _git_show_lines(root, w_sha, w_path)?
+    val diff_out = workaround_git(root, [
+        "diff", "-U0", "--no-ext-diff", "--no-textconv",
+        w_sha + ":" + w_path, base_sha + ":" + base_path
+    ])?
+    val hunks = workaround_parse_unified_diff_u0(diff_out)?
+    val patch = workaround_extract_narrow_hunk(w_lines, w_idx, hunks, link.bug_id)?
+    val next_lines = workaround_apply_narrow_patch(cur_lines, cur_marker_idx, link.bug_id, patch)?
+    Ok((next_lines, recover_ref, "restored narrow block from {recover_ref[:7]} (workaround {w_sha[:7]})"))
+
+struct _StackMemberCommit:
+    link: WorkaroundLink
+    recover_ref: text
+    base_sha: text
+    base_path: text
+    info: _IntroCommitInfo
+
+fn _extract_member_in_stack(
+    w_lines: [text],
+    w_marker_idx: i64,
+    diff_hunks: [WorkaroundDiffHunk],
+    target_bug_id: text,
+    allowed_siblings: [text]
+) -> Result<WorkaroundNarrowPatch, text>:
+    if w_marker_idx < 0 or w_marker_idx >= w_lines.len():
+        return Err("marker index out of range")
+    if _marker_bug_id(w_lines[w_marker_idx]) != target_bug_id:
+        return Err("marker mismatch at commit line {w_marker_idx + 1}")
+    var w_body_start = w_marker_idx + 1
+    while w_body_start < w_lines.len() and _is_marker_line(w_lines[w_body_start]):
+        val sib = _marker_bug_id(w_lines[w_body_start])
+        if not allowed_siblings.contains(sib):
+            return Err("conflict: stacked sibling marker '{sib}' shares affected block")
+        w_body_start = w_body_start + 1
+    if w_body_start >= w_lines.len():
+        return Err("workaround marker has no affected block")
+    val w_block_end = workaround_affected_block_end(w_lines, w_body_start)
+    val base_indent = _leading_indent(w_lines[w_body_start])
+    var selected: [WorkaroundDiffHunk] = []
+    for raw_h in diff_hunks:
+        val h: WorkaroundDiffHunk = raw_h
+        val hs = _hunk_idx_start(h)
+        val he = _hunk_idx_end(h)
+        if h.old_count > 0:
+            if he > w_marker_idx and hs <= w_block_end:
+                selected.push(h)
+        else:
+            if hs >= w_marker_idx and (hs <= w_block_end or (hs == w_block_end + 1 and _insertion_belongs_to_block(h.new_lines, base_indent))):
+                selected.push(h)
+    if selected.len() == 0:
+        return Err("no diff hunk touches @workaround bug={target_bug_id}")
+    val ordered = _sort_hunks_by_start(selected)
+    var max_end = w_body_start + 1
+    for h in ordered:
+        val he = _hunk_idx_end(h)
+        if he > max_end:
+            max_end = he
+    if max_end > w_lines.len():
+        return Err("diff hunk extends beyond commit file lines")
+    val first_start = _hunk_idx_start(ordered[0])
+    var upper_idx = first_start
+    while upper_idx < w_marker_idx:
+        if _is_marker_line(w_lines[upper_idx]):
+            val up_sib = _marker_bug_id(w_lines[upper_idx])
+            if not allowed_siblings.contains(up_sib):
+                return Err("conflict: stacked sibling marker '{up_sib}' shares affected block")
+        upper_idx = upper_idx + 1
+    var check_idx = w_body_start
+    while check_idx < max_end:
+        if _is_marker_line(w_lines[check_idx]):
+            return Err("conflict: workaround hunk overlaps another @workaround marker")
+        check_idx = check_idx + 1
+    val pre_expected = if first_start < w_marker_idx: _lines_slice(w_lines, first_start, w_marker_idx) else: []
+    var clean_pre: [text] = []
+    for pl in pre_expected:
+        if not _is_marker_line(pl):
+            clean_pre.push(pl)
+    val expected_body = _lines_slice(w_lines, w_body_start, max_end)
+    var recovered: [text] = []
+    var cursor = if first_start < w_marker_idx: first_start else: w_marker_idx
+    for h in ordered:
+        val hs = _hunk_idx_start(h)
+        val he = _hunk_idx_end(h)
+        while cursor < hs:
+            if cursor >= w_body_start:
+                recovered.push(w_lines[cursor])
+            cursor = cursor + 1
+        for added in h.new_lines:
+            if not _is_marker_line(added):
+                recovered.push(added)
+        if he > cursor:
+            cursor = he
+    var tail_cursor = if cursor > w_body_start: cursor else: w_body_start
+    while tail_cursor < max_end:
+        recovered.push(w_lines[tail_cursor])
+        tail_cursor = tail_cursor + 1
+    Ok(WorkaroundNarrowPatch(
+        pre_expected: if clean_pre.len() == pre_expected.len(): clean_pre else: [],
+        expected_body: expected_body,
+        recovered_body: recovered
+    ))
+
+fn _apply_member_in_stack(
+    cur_lines: [text],
+    cur_marker_idx: i64,
+    target_bug_id: text,
+    allowed_siblings: [text],
+    patch: WorkaroundNarrowPatch
+) -> Result<[text], text>:
+    if cur_marker_idx < 0 or cur_marker_idx >= cur_lines.len():
+        return Err("conflict: current marker line out of range")
+    if _marker_bug_id(cur_lines[cur_marker_idx]) != target_bug_id:
+        return Err("conflict: current marker line changed")
+    var cur_body_start = cur_marker_idx + 1
+    var kept_stacked: [text] = []
+    while cur_body_start < cur_lines.len() and _is_marker_line(cur_lines[cur_body_start]):
+        val sib = _marker_bug_id(cur_lines[cur_body_start])
+        if not allowed_siblings.contains(sib):
+            return Err("conflict: stacked sibling marker '{sib}' shares affected block")
+        kept_stacked.push(cur_lines[cur_body_start])
+        cur_body_start = cur_body_start + 1
+    if cur_body_start >= cur_lines.len():
+        return Err("conflict: marker no longer precedes a code block")
+    var pre_len = patch.pre_expected.len()
+    if pre_len > 0:
+        val pre_start = cur_marker_idx - pre_len
+        if not _lines_match_at(cur_lines, pre_start, patch.pre_expected):
+            var non_blank = false
+            for pl in patch.pre_expected:
+                if pl.trim() != "":
+                    non_blank = true
+            if non_blank:
+                return Err("conflict: context immediately above marker changed")
+            pre_len = 0
+    var matched_len: i64 = -1
+    if _lines_match_at(cur_lines, cur_body_start, patch.expected_body):
+        matched_len = patch.expected_body.len()
+    elif patch.recovered_body.len() > 0 and _lines_match_at(cur_lines, cur_body_start, patch.recovered_body):
+        matched_len = patch.recovered_body.len()
+    else:
+        return Err("conflict: workaround block modified since introduction")
+    var out: [text] = []
+    var i = 0
+    val cut_start = cur_marker_idx - pre_len
+    while i < cut_start:
+        out.push(cur_lines[i])
+        i = i + 1
+    for stacked in kept_stacked:
+        out.push(stacked)
+    for rec_line in patch.recovered_body:
+        out.push(rec_line)
+    var after = cur_body_start + matched_len
+    while after < cur_lines.len():
+        out.push(cur_lines[after])
+        after = after + 1
+    Ok(out)
+
+fn _sort_stack_members_newest_first(root: text, items: [_StackMemberCommit]) -> Result<[_StackMemberCommit], text>:
+    var pending: [_StackMemberCommit] = []
+    for it in items:
+        pending.push(it)
+    var sorted: [_StackMemberCommit] = []
+    while pending.len() > 0:
+        var best = -1
+        var i = 0
+        while i < pending.len():
+            val cand = pending[i]
+            var is_newest = true
+            var j = 0
+            while j < pending.len():
+                if i != j:
+                    val other = pending[j]
+                    if cand.info.w_sha != other.info.w_sha:
+                        # cand is NOT newest if cand is an ancestor of other
+                        if workaround_git(root, ["merge-base", "--is-ancestor", cand.info.w_sha, other.info.w_sha]).is_ok():
+                            is_newest = false
+                            break
+                        if workaround_git(root, ["merge-base", "--is-ancestor", other.info.w_sha, cand.info.w_sha]).is_err():
+                            return Err("conflict: stacked commits {cand.info.w_sha[:7]} and {other.info.w_sha[:7]} are not linearly ordered")
+                j = j + 1
+            if is_newest:
+                best = i
+                break
+            i = i + 1
+        if best < 0:
+            return Err("conflict: cyclic commit ordering in workaround stack")
+        sorted.push(pending[best])
+        var rest: [_StackMemberCommit] = []
+        var k = 0
+        while k < pending.len():
+            if k != best:
+                rest.push(pending[k])
+            k = k + 1
+        pending = rest
+    Ok(sorted)
+
+fn _find_bug_marker_in_window(lines: [text], start_idx: i64, end_excl: i64, bug_id: text) -> i64:
+    var i = if start_idx < 0: 0 else: start_idx
+    val lim = if end_excl > lines.len(): lines.len() else: end_excl
+    while i < lim:
+        if _is_marker_line(lines[i]) and _marker_bug_id(lines[i]) == bug_id:
+            return i
+        i = i + 1
+    -1
+
+fn _recover_full_stack(
+    root: text,
+    path: text,
+    stack_links: [WorkaroundLink],
+    cur_lines: [text],
+    auto_link: bool
+) -> Result<([text], [(text, text, text)]), text>:
+    var members: [_StackMemberCommit] = []
+    var bug_ids: [text] = []
+    for raw_l in stack_links:
+        val l: WorkaroundLink = raw_l
+        bug_ids.push(l.bug_id)
+        val cur_idx = l.line.value - 1
+        var recover_ref = l.recover
+        var range_start = ""
+        if recover_ref != "":
+            val verified_r = workaround_git(root, ["rev-parse", "--verify", recover_ref + r"^{commit}"])?
+            recover_ref = verified_r.trim()
+            if workaround_git(root, ["merge-base", "--is-ancestor", recover_ref, "HEAD"]).is_err():
+                return Err("recover commit {recover_ref} is not an ancestor of HEAD")
+            range_start = recover_ref
+        elif not auto_link:
+            return Err("no_recover_ref")
+        val info = _find_introducing_commit(root, path, l.bug_id, range_start, cur_lines, cur_idx)?
+        var base_sha = info.p_sha
+        var base_path = info.p_path
+        if recover_ref != "":
+            if recover_ref == info.w_sha:
+                return Err("recover commit {recover_ref} must precede workaround commit {info.w_sha}")
+            base_sha = recover_ref
+            if base_sha != info.p_sha:
+                base_path = _resolve_base_path(root, base_sha, info.w_sha, info.w_path, info.p_path)
+        else:
+            recover_ref = base_sha
+        members.push(_StackMemberCommit(
+            link: l, recover_ref: recover_ref,
+            base_sha: base_sha, base_path: base_path, info: info
+        ))
+
+    var same_w = true
+    val first_w = members[0].info.w_sha
+    val first_base = members[0].base_sha
+    for m in members:
+        if m.info.w_sha != first_w or m.base_sha != first_base:
+            same_w = false
+            break
+
+    if same_w:
+        val cur_top = stack_links[0].line.value - 1
+        val w_lines = _git_show_lines(root, first_w, members[0].info.w_path)?
+        var w_top = members[0].info.w_idx
+        var w_bottom = members[0].info.w_idx
+        for m in members:
+            if m.info.w_idx < w_top:
+                w_top = m.info.w_idx
+            if m.info.w_idx > w_bottom:
+                w_bottom = m.info.w_idx
+        if w_bottom - w_top + 1 != stack_links.len():
+            return Err("conflict: stacked markers in commit {first_w[:7]} are not contiguous")
+        var w_bug_ids: [text] = []
+        var wi = w_top
+        while wi <= w_bottom:
+            val w_bid = _marker_bug_id(w_lines[wi])
+            if not bug_ids.contains(w_bid):
+                return Err("conflict: unexpected marker '{w_bid}' in commit stack")
+            w_bug_ids.push(w_bid)
+            wi = wi + 1
+        val diff_out = workaround_git(root, [
+            "diff", "-U0", "--no-ext-diff", "--no-textconv",
+            first_w + ":" + members[0].info.w_path, first_base + ":" + members[0].base_path
+        ])?
+        val hunks = workaround_parse_unified_diff_u0(diff_out)?
+        val patch = _extract_stack_narrow_hunk(w_lines, w_top, w_bottom, hunks, w_bug_ids)?
+        val next_lines = _apply_stack_narrow_patch(cur_lines, cur_top, bug_ids, patch)?
+        var receipts: [(text, text, text)] = []
+        for m in members:
+            receipts.push((m.link.bug_id, m.recover_ref, "restored stacked block from {m.recover_ref[:7]} (workaround {first_w[:7]})"))
+        return Ok((next_lines, receipts))
+
+    val ordered_members = _sort_stack_members_newest_first(root, members)?
+    var tmp_lines = cur_lines
+    val cur_top = stack_links[0].line.value - 1
+    var remaining_count = stack_links.len()
+    var receipts: [(text, text, text)] = []
+    for m in ordered_members:
+        val m_idx = _find_bug_marker_in_window(tmp_lines, cur_top, cur_top + remaining_count, m.link.bug_id)
+        if m_idx < 0:
+            return Err("conflict: stacked marker '{m.link.bug_id}' shifted unexpectedly")
+        val w_lines = _git_show_lines(root, m.info.w_sha, m.info.w_path)?
+        val diff_out = workaround_git(root, [
+            "diff", "-U0", "--no-ext-diff", "--no-textconv",
+            m.info.w_sha + ":" + m.info.w_path, m.base_sha + ":" + m.base_path
+        ])?
+        val hunks = workaround_parse_unified_diff_u0(diff_out)?
+        val patch = _extract_member_in_stack(w_lines, m.info.w_idx, hunks, m.link.bug_id, bug_ids)?
+        tmp_lines = _apply_member_in_stack(tmp_lines, m_idx, m.link.bug_id, bug_ids, patch)?
+        remaining_count = remaining_count - 1
+        receipts.push((m.link.bug_id, m.recover_ref, "restored stacked layer from {m.recover_ref[:7]} (workaround {m.info.w_sha[:7]})"))
+    Ok((tmp_lines, receipts))
+
+fn _link_one_site(
+    root: text,
+    path: text,
+    link: WorkaroundLink,
+    cur_lines: [text],
+    cur_marker_idx: i64
+) -> Result<(text, text, text), text>:
+    val info = _find_introducing_commit(
+        root, path, link.bug_id, "", cur_lines, cur_marker_idx)?
+    val p_sha = info.p_sha
+    val updated_line = workaround_insert_recover_into_line(cur_lines[cur_marker_idx], link.bug_id, p_sha)?
+    Ok((updated_line, p_sha, "linked recover={p_sha}"))
+
+fn _bump_count(counts: WorkaroundRecoverCounts, status: text) -> WorkaroundRecoverCounts:
+    var c = counts
+    if status == "recovered": c.recovered = c.recovered + 1
+    elif status == "linked": c.linked = c.linked + 1
+    elif status == "would_recover": c.would_recover = c.would_recover + 1
+    elif status == "would_link": c.would_link = c.would_link + 1
+    elif status == "skipped_stage2_gated": c.skipped_stage2_gated = c.skipped_stage2_gated + 1
+    elif status == "conflict": c.conflict = c.conflict + 1
+    elif status == "no_recover_ref": c.no_recover_ref = c.no_recover_ref + 1
+    elif status == "skipped_pinned": c.skipped_pinned = c.skipped_pinned + 1
+    elif status == "skipped_excluded": c.skipped_excluded = c.skipped_excluded + 1
+    elif status == "not_eligible": c.not_eligible = c.not_eligible + 1
+    elif status == "error": c.error = c.error + 1
+    c
+
+fn _sort_links_asc_by_line(links: [WorkaroundLink]) -> [WorkaroundLink]:
+    var pending: [WorkaroundLink] = []
+    for l in links:
+        pending.push(l)
+    var sorted: [WorkaroundLink] = []
+    while pending.len() > 0:
+        var best = 0
+        var i = 1
+        while i < pending.len():
+            if pending[i].line.value < pending[best].line.value:
+                best = i
+            i = i + 1
+        sorted.push(pending[best])
+        var rest: [WorkaroundLink] = []
+        var k = 0
+        while k < pending.len():
+            if k != best:
+                rest.push(pending[k])
+            k = k + 1
+        pending = rest
+    sorted
+
+fn _group_contiguous_stacks(links: [WorkaroundLink]) -> [[WorkaroundLink]]:
+    val asc = _sort_links_asc_by_line(links)
+    var stacks: [[WorkaroundLink]] = []
+    var cur: [WorkaroundLink] = []
+    for raw_l in asc:
+        val l: WorkaroundLink = raw_l
+        if cur.len() == 0:
+            cur.push(l)
+        else:
+            val prev: WorkaroundLink = cur[cur.len() - 1]
+            if l.line.value == prev.line.value + 1:
+                cur.push(l)
+            else:
+                stacks.push(cur)
+                cur = [l]
+    if cur.len() > 0:
+        stacks.push(cur)
+    stacks
+
+fn _sort_entries_asc(entries: [WorkaroundRecoverEntry]) -> [WorkaroundRecoverEntry]:
+    var pending: [WorkaroundRecoverEntry] = []
+    for e in entries:
+        pending.push(e)
+    var sorted: [WorkaroundRecoverEntry] = []
+    while pending.len() > 0:
+        var best = 0
+        var i = 1
+        while i < pending.len():
+            val a = pending[i]
+            val b = pending[best]
+            if a.path < b.path or (a.path == b.path and a.line < b.line):
+                best = i
+            i = i + 1
+        sorted.push(pending[best])
+        var rest: [WorkaroundRecoverEntry] = []
+        var k = 0
+        while k < pending.len():
+            if k != best:
+                rest.push(pending[k])
+            k = k + 1
+        pending = rest
+    sorted
+
+pub fn workaround_recover_run(opts: WorkaroundRecoverOptions) -> WorkaroundRecoverResult:
+    """Execute dry-run or applied recovery and/or recover-SHA linking."""
+    val root = _normalize_root(opts.root)
+    val recover_requested = opts.all_fixed or opts.bug_ids.len() > 0 or opts.fix_commit != ""
+    val mode = if opts.list_only:
+        "list"
+    elif opts.link_recover and recover_requested:
+        "link+recover"
+    elif opts.link_recover:
+        "link"
+    else:
+        "recover"
+    var counts = _empty_counts()
+    var entries: [WorkaroundRecoverEntry] = []
+
+    if opts.list_only and opts.apply:
+        counts.error = counts.error + 1
+        return WorkaroundRecoverResult(
+            ok: false, mode: mode, apply: opts.apply, counts: counts, entries: entries,
+            message: "--list cannot be combined with --apply"
+        )
+
+    var verified_fix_commit = ""
+    if opts.fix_commit != "":
+        if opts.bug_ids.len() == 0 and not opts.all_fixed:
+            counts.error = counts.error + 1
+            return WorkaroundRecoverResult(
+                ok: false, mode: mode, apply: opts.apply, counts: counts, entries: entries,
+                message: "--fix-commit requires --bug=<id> or --all-fixed"
+            )
+        match workaround_verify_fix_commit(root, opts.fix_commit):
+            case Ok(sha):
+                verified_fix_commit = sha
+            case Err(reason):
+                counts.error = counts.error + 1
+                return WorkaroundRecoverResult(
+                    ok: false, mode: mode, apply: opts.apply, counts: counts, entries: entries,
+                    message: reason
+                )
+
+    val files_res = _discover_workaround_files(root, opts.paths_filter)
+    if files_res.is_err():
+        counts.error = counts.error + 1
+        return WorkaroundRecoverResult(
+            ok: false, mode: mode, apply: opts.apply, counts: counts, entries: entries,
+            message: files_res.unwrap_err()
+        )
+    val files = files_res.unwrap()
+
+    val pinned_paths = workaround_load_pinned_paths(root)
+    var db_index: Dict<text, text> = {}
+    var db_loaded = false
+    var status_cache: Dict<text, text> = {}
+    var modified_paths: [text] = []
+
+    for raw_path in files:
+        val path: text = raw_path
+        val abs_path = _resolve_path(root, path)
+        if not workaround_host_exists(abs_path):
+            continue
+        val raw_res = workaround_host_read(abs_path, WORKAROUND_RECOVER_MAX_FILE_BYTES)
+        if raw_res.is_err():
+            if opts.paths_filter.len() > 0:
+                counts = _bump_count(counts, "error")
+                entries.push(WorkaroundRecoverEntry(
+                    bug_id: "", path: path, line: 0, status: "error",
+                    recover: "", fix_commit: verified_fix_commit, action: "none", detail: raw_res.unwrap_err()
+                ))
+            continue
+        val raw_content = raw_res.unwrap()
+        val had_crlf = raw_content.contains("\r\n")
+        val content_lf = raw_content.replace("\r\n", "\n")
+        val links_res = parse_workaround_source(path, content_lf)
+        if links_res.is_err():
+            val reason = links_res.unwrap_err()
+            var targeted_parse_err = opts.paths_filter.len() > 0
+            if not targeted_parse_err:
+                for bid in opts.bug_ids:
+                    if content_lf.contains("bug=" + bid):
+                        targeted_parse_err = true
+            if targeted_parse_err or not (path.starts_with("test/") or path.starts_with("scripts/")):
+                counts = _bump_count(counts, "error")
+                entries.push(WorkaroundRecoverEntry(
+                    bug_id: "", path: path, line: 0, status: "error",
+                    recover: "", fix_commit: verified_fix_commit, action: "none", detail: reason
+                ))
+            continue
+        val links = links_res.unwrap()
+        if links.len() == 0:
+            continue
+
+        var relevant_links: [WorkaroundLink] = []
+        for raw_link in links:
+            val link: WorkaroundLink = raw_link
+            if opts.bug_ids.len() > 0 and not opts.bug_ids.contains(link.bug_id):
+                continue
+            relevant_links.push(link)
+        if relevant_links.len() == 0:
+            continue
+
+        val excluded = _is_path_excluded(path, opts.excludes)
+        val pinned = (not opts.allow_pinned) and pinned_paths.contains(path)
+        var working_lines = content_lf.split("\n")
+        var file_changed = false
+        var file_had_error = false
+        var file_entries: [WorkaroundRecoverEntry] = []
+
+        # Process contiguous marker stacks from highest line down so earlier line offsets never shift.
+        val stacks = _group_contiguous_stacks(links)
+        var si = stacks.len() - 1
+        while si >= 0:
+            val stack_links: [WorkaroundLink] = stacks[si]
+            si = si - 1
+
+            var any_relevant = opts.bug_ids.len() == 0
+            if not any_relevant:
+                for raw_l in stack_links:
+                    val l: WorkaroundLink = raw_l
+                    if opts.bug_ids.contains(l.bug_id):
+                        any_relevant = true
+                        break
+            if not any_relevant:
+                continue
+
+            if excluded:
+                for raw_l in stack_links:
+                    val l: WorkaroundLink = raw_l
+                    if opts.bug_ids.len() > 0 and not opts.bug_ids.contains(l.bug_id):
+                        continue
+                    file_entries.push(WorkaroundRecoverEntry(
+                        bug_id: l.bug_id, path: path, line: l.line.value,
+                        status: "skipped_excluded", recover: l.recover,
+                        fix_commit: verified_fix_commit, action: "skip",
+                        detail: "path matched --exclude"
+                    ))
+                continue
+            if pinned:
+                for raw_l in stack_links:
+                    val l: WorkaroundLink = raw_l
+                    if opts.bug_ids.len() > 0 and not opts.bug_ids.contains(l.bug_id):
+                        continue
+                    file_entries.push(WorkaroundRecoverEntry(
+                        bug_id: l.bug_id, path: path, line: l.line.value,
+                        status: "skipped_pinned", recover: l.recover,
+                        fix_commit: verified_fix_commit, action: "skip",
+                        detail: "pinned in source_bindings.txt (pass --allow-pinned to modify)"
+                    ))
+                continue
+
+            var member_targeted: [bool] = []
+            var member_eligible: [bool] = []
+            var member_stage2: [bool] = []
+            var member_status: [text] = []
+            var member_err: [text] = []
+            for raw_l in stack_links:
+                val l: WorkaroundLink = raw_l
+                val cur_idx = l.line.value - 1
+                val targeted = opts.bug_ids.len() == 0 or opts.bug_ids.contains(l.bug_id)
+                var elig = false
+                var bst = ""
+                var err_msg = ""
+                if opts.list_only or recover_requested:
+                    if verified_fix_commit != "" and targeted:
+                        elig = true
+                    else:
+                        if status_cache.contains_key(l.bug_id):
+                            bst = status_cache[l.bug_id]
+                        else:
+                            val (st_res, next_index, next_loaded) = _lookup_bug_status(
+                                root, l.bug_id, opts.bug_db_path, db_index, db_loaded)
+                            db_index = next_index
+                            db_loaded = next_loaded
+                            match st_res:
+                                case Ok(st):
+                                    bst = st
+                                    status_cache[l.bug_id] = st
+                                case Err(reason):
+                                    err_msg = reason
+                        if err_msg == "":
+                            elig = workaround_status_is_resolved(bst)
+                val s2 = if err_msg == "": _site_is_stage2_gated(root, path, working_lines, cur_idx, l) else: false
+                member_targeted.push(targeted)
+                member_eligible.push(elig)
+                member_stage2.push(s2)
+                member_status.push(bst)
+                member_err.push(err_msg)
+
+            if opts.list_only:
+                var li = 0
+                while li < stack_links.len():
+                    val l: WorkaroundLink = stack_links[li]
+                    val cur_idx = l.line.value - 1
+                    val targeted = member_targeted[li]
+                    val elig = member_eligible[li]
+                    val s2 = member_stage2[li]
+                    val bst = member_status[li]
+                    val err_msg = member_err[li]
+                    li = li + 1
+                    if not targeted:
+                        continue
+                    if err_msg != "":
+                        file_entries.push(WorkaroundRecoverEntry(
+                            bug_id: l.bug_id, path: path, line: l.line.value,
+                            status: "error", recover: l.recover,
+                            fix_commit: verified_fix_commit, action: "none", detail: err_msg
+                        ))
+                        continue
+                    val st_desc = if bst == "": "unknown" else: bst
+                    val rec_desc = if l.recover == "": "missing" else: l.recover
+                    if elig:
+                        if (not opts.allow_stage2_gated) and s2:
+                            file_entries.push(WorkaroundRecoverEntry(
+                                bug_id: l.bug_id, path: path, line: l.line.value,
+                                status: "skipped_stage2_gated", recover: l.recover,
+                                fix_commit: verified_fix_commit, action: "list",
+                                detail: "bug={st_desc}; Stage 2 / Phase 2 / Seed gated"
+                            ))
+                        elif l.recover != "":
+                            file_entries.push(WorkaroundRecoverEntry(
+                                bug_id: l.bug_id, path: path, line: l.line.value,
+                                status: "would_recover", recover: l.recover,
+                                fix_commit: verified_fix_commit, action: "list",
+                                detail: "bug={st_desc}; recover={l.recover}"
+                            ))
+                        elif opts.link_recover:
+                            match _link_one_site(root, path, l, working_lines, cur_idx):
+                                case Ok((_u_line, discovered_sha, detail)):
+                                    file_entries.push(WorkaroundRecoverEntry(
+                                        bug_id: l.bug_id, path: path, line: l.line.value,
+                                        status: "would_link", recover: discovered_sha,
+                                        fix_commit: verified_fix_commit, action: "list",
+                                        detail: "bug={st_desc}; {detail}"
+                                    ))
+                                case Err(reason):
+                                    file_entries.push(WorkaroundRecoverEntry(
+                                        bug_id: l.bug_id, path: path, line: l.line.value,
+                                        status: "no_recover_ref", recover: "",
+                                        fix_commit: verified_fix_commit, action: "list",
+                                        detail: "bug={st_desc}; {reason}"
+                                    ))
+                        else:
+                            file_entries.push(WorkaroundRecoverEntry(
+                                bug_id: l.bug_id, path: path, line: l.line.value,
+                                status: "no_recover_ref", recover: "",
+                                fix_commit: verified_fix_commit, action: "list",
+                                detail: "bug={st_desc}; missing recover=<sha>"
+                            ))
+                    else:
+                        val s2_flag = if s2: "true" else: "false"
+                        file_entries.push(WorkaroundRecoverEntry(
+                            bug_id: l.bug_id, path: path, line: l.line.value,
+                            status: "listed", recover: l.recover,
+                            fix_commit: verified_fix_commit, action: "list",
+                            detail: "bug={st_desc}; stage2={s2_flag}; recover={rec_desc}"
+                        ))
+                continue
+
+            if stack_links.len() == 1:
+                val link: WorkaroundLink = stack_links[0]
+                val cur_idx = link.line.value - 1
+                val elig = member_eligible[0]
+                val s2 = member_stage2[0]
+                val bst = member_status[0]
+                val err_msg = member_err[0]
+                if err_msg != "":
+                    file_had_error = true
+                    file_entries.push(WorkaroundRecoverEntry(
+                        bug_id: link.bug_id, path: path, line: link.line.value,
+                        status: "error", recover: link.recover,
+                        fix_commit: verified_fix_commit, action: "none", detail: err_msg
+                    ))
+                    continue
+                if elig:
+                    if (not opts.allow_stage2_gated) and s2:
+                        file_entries.push(WorkaroundRecoverEntry(
+                            bug_id: link.bug_id, path: path, line: link.line.value,
+                            status: "skipped_stage2_gated", recover: link.recover,
+                            fix_commit: verified_fix_commit, action: "skip",
+                            detail: "Stage 2 / Phase 2 / Seed gated; pass --allow-stage2-gated to override"
+                        ))
+                        continue
+                    match _recover_one_site(root, path, link, working_lines, cur_idx, opts.link_recover):
+                        case Ok((next_lines, used_recover, detail)):
+                            val st = if opts.apply: "recovered" else: "would_recover"
+                            if opts.apply:
+                                working_lines = next_lines
+                                file_changed = true
+                            file_entries.push(WorkaroundRecoverEntry(
+                                bug_id: link.bug_id, path: path, line: link.line.value,
+                                status: st, recover: used_recover,
+                                fix_commit: verified_fix_commit,
+                                action: if opts.apply: "apply" else: "dry-run",
+                                detail: detail
+                            ))
+                        case Err(reason):
+                            val st = if reason == "no_recover_ref":
+                                "no_recover_ref"
+                            elif reason.starts_with("conflict:"):
+                                "conflict"
+                            else:
+                                "error"
+                            if st == "conflict" or st == "error" or (st == "no_recover_ref" and opts.bug_ids.len() > 0 and not opts.link_recover):
+                                file_had_error = true
+                            val msg = if st == "no_recover_ref":
+                                "missing recover=<sha>; pass --link-recover to discover from git history"
+                            else:
+                                reason
+                            file_entries.push(WorkaroundRecoverEntry(
+                                bug_id: link.bug_id, path: path, line: link.line.value,
+                                status: st, recover: link.recover,
+                                fix_commit: verified_fix_commit, action: "none", detail: msg
+                            ))
+                elif opts.link_recover:
+                    if link.recover == "":
+                        match _link_one_site(root, path, link, working_lines, cur_idx):
+                            case Ok((updated_line, discovered_sha, detail)):
+                                val st = if opts.apply: "linked" else: "would_link"
+                                if opts.apply:
+                                    working_lines[cur_idx] = updated_line
+                                    file_changed = true
+                                file_entries.push(WorkaroundRecoverEntry(
+                                    bug_id: link.bug_id, path: path, line: link.line.value,
+                                    status: st, recover: discovered_sha,
+                                    fix_commit: verified_fix_commit,
+                                    action: if opts.apply: "link" else: "dry-run-link",
+                                    detail: detail
+                                ))
+                            case Err(reason):
+                                file_entries.push(WorkaroundRecoverEntry(
+                                    bug_id: link.bug_id, path: path, line: link.line.value,
+                                    status: "no_recover_ref", recover: "",
+                                    fix_commit: verified_fix_commit, action: "none", detail: reason
+                                ))
+                elif opts.bug_ids.contains(link.bug_id):
+                    val st_desc = if bst == "": "unknown" else: bst
+                    file_entries.push(WorkaroundRecoverEntry(
+                        bug_id: link.bug_id, path: path, line: link.line.value,
+                        status: "not_eligible", recover: link.recover,
+                        fix_commit: verified_fix_commit, action: "none",
+                        detail: "bug '{link.bug_id}' status is '{st_desc}' (not Fixed/Closed and no --fix-commit)"
+                    ))
+                continue
+
+            # Stacked marker group (stack_links.len() > 1 sharing one affected code block)
+            var all_retire_ok = true
+            var any_retire_ok = false
+            var blocker_id = ""
+            var mi = 0
+            while mi < stack_links.len():
+                val l: WorkaroundLink = stack_links[mi]
+                val can_ret = member_err[mi] == "" and member_targeted[mi] and member_eligible[mi] and (opts.allow_stage2_gated or not member_stage2[mi])
+                if can_ret:
+                    any_retire_ok = true
+                else:
+                    all_retire_ok = false
+                    if blocker_id == "":
+                        blocker_id = l.bug_id
+                mi = mi + 1
+
+            if all_retire_ok:
+                match _recover_full_stack(root, path, stack_links, working_lines, opts.link_recover):
+                    case Ok((next_lines, receipts)):
+                        val st = if opts.apply: "recovered" else: "would_recover"
+                        if opts.apply:
+                            working_lines = next_lines
+                            file_changed = true
+                        var ri = 0
+                        while ri < stack_links.len():
+                            val l: WorkaroundLink = stack_links[ri]
+                            val (_bid, used_r, detail) = receipts[ri]
+                            file_entries.push(WorkaroundRecoverEntry(
+                                bug_id: l.bug_id, path: path, line: l.line.value,
+                                status: st, recover: used_r,
+                                fix_commit: verified_fix_commit,
+                                action: if opts.apply: "apply" else: "dry-run",
+                                detail: detail
+                            ))
+                            ri = ri + 1
+                    case Err(reason):
+                        val st = if reason == "no_recover_ref":
+                            "no_recover_ref"
+                        elif reason.starts_with("conflict:"):
+                            "conflict"
+                        else:
+                            "error"
+                        if st == "conflict" or st == "error" or (st == "no_recover_ref" and opts.bug_ids.len() > 0 and not opts.link_recover):
+                            file_had_error = true
+                        val msg = if st == "no_recover_ref":
+                            "missing recover=<sha>; pass --link-recover to discover from git history"
+                        else:
+                            reason
+                        for raw_l in stack_links:
+                            val l: WorkaroundLink = raw_l
+                            file_entries.push(WorkaroundRecoverEntry(
+                                bug_id: l.bug_id, path: path, line: l.line.value,
+                                status: st, recover: l.recover,
+                                fix_commit: verified_fix_commit, action: "none", detail: msg
+                            ))
+            else:
+                var ki = 0
+                while ki < stack_links.len():
+                    val l: WorkaroundLink = stack_links[ki]
+                    val cur_idx = l.line.value - 1
+                    val targeted = member_targeted[ki]
+                    val elig = member_eligible[ki]
+                    val s2 = member_stage2[ki]
+                    val bst = member_status[ki]
+                    val err_msg = member_err[ki]
+                    ki = ki + 1
+                    if not targeted:
+                        continue
+                    if err_msg != "":
+                        file_had_error = true
+                        file_entries.push(WorkaroundRecoverEntry(
+                            bug_id: l.bug_id, path: path, line: l.line.value,
+                            status: "error", recover: l.recover,
+                            fix_commit: verified_fix_commit, action: "none", detail: err_msg
+                        ))
+                        continue
+                    if elig and s2 and not opts.allow_stage2_gated:
+                        file_entries.push(WorkaroundRecoverEntry(
+                            bug_id: l.bug_id, path: path, line: l.line.value,
+                            status: "skipped_stage2_gated", recover: l.recover,
+                            fix_commit: verified_fix_commit, action: "skip",
+                            detail: "Stage 2 / Phase 2 / Seed gated; pass --allow-stage2-gated to override"
+                        ))
+                    elif elig:
+                        file_had_error = true
+                        file_entries.push(WorkaroundRecoverEntry(
+                            bug_id: l.bug_id, path: path, line: l.line.value,
+                            status: "conflict", recover: l.recover,
+                            fix_commit: verified_fix_commit, action: "none",
+                            detail: "conflict: stacked sibling marker '{blocker_id}' shares affected block"
+                        ))
+                    elif opts.link_recover and l.recover == "":
+                        match _link_one_site(root, path, l, working_lines, cur_idx):
+                            case Ok((updated_line, discovered_sha, detail)):
+                                val st = if opts.apply: "linked" else: "would_link"
+                                if opts.apply:
+                                    working_lines[cur_idx] = updated_line
+                                    file_changed = true
+                                file_entries.push(WorkaroundRecoverEntry(
+                                    bug_id: l.bug_id, path: path, line: l.line.value,
+                                    status: st, recover: discovered_sha,
+                                    fix_commit: verified_fix_commit,
+                                    action: if opts.apply: "link" else: "dry-run-link",
+                                    detail: detail
+                                ))
+                            case Err(reason):
+                                file_entries.push(WorkaroundRecoverEntry(
+                                    bug_id: l.bug_id, path: path, line: l.line.value,
+                                    status: "no_recover_ref", recover: "",
+                                    fix_commit: verified_fix_commit, action: "none", detail: reason
+                                ))
+                    elif opts.bug_ids.contains(l.bug_id):
+                        val st_desc = if bst == "": "unknown" else: bst
+                        file_entries.push(WorkaroundRecoverEntry(
+                            bug_id: l.bug_id, path: path, line: l.line.value,
+                            status: "not_eligible", recover: l.recover,
+                            fix_commit: verified_fix_commit, action: "none",
+                            detail: "bug '{l.bug_id}' status is '{st_desc}' (not Fixed/Closed and no --fix-commit)"
+                        ))
+
+        if opts.apply and file_changed:
+            if file_had_error:
+                var aborted_entries: [WorkaroundRecoverEntry] = []
+                for fe in file_entries:
+                    if fe.status == "recovered" or fe.status == "linked":
+                        aborted_entries.push(WorkaroundRecoverEntry(
+                            bug_id: fe.bug_id, path: fe.path, line: fe.line,
+                            status: "error", recover: fe.recover,
+                            fix_commit: fe.fix_commit, action: "aborted-atomic",
+                            detail: "aborted write for {path}: another site in the same file conflicted or failed"
+                        ))
+                    else:
+                        aborted_entries.push(fe)
+                file_entries = aborted_entries
+            else:
+                val updated_lf = working_lines.join("\n")
+                match parse_workaround_source(path, updated_lf):
+                    case Err(reason):
+                        var aborted_entries: [WorkaroundRecoverEntry] = []
+                        for fe in file_entries:
+                            if fe.status == "recovered" or fe.status == "linked":
+                                aborted_entries.push(WorkaroundRecoverEntry(
+                                    bug_id: fe.bug_id, path: fe.path, line: fe.line,
+                                    status: "error", recover: fe.recover,
+                                    fix_commit: fe.fix_commit, action: "aborted-atomic",
+                                    detail: "post-edit @workaround validation failed: {reason}"
+                                ))
+                            else:
+                                aborted_entries.push(fe)
+                        aborted_entries.push(WorkaroundRecoverEntry(
+                            bug_id: "", path: path, line: 0, status: "error",
+                            recover: "", fix_commit: verified_fix_commit, action: "abort-write",
+                            detail: "post-edit @workaround validation failed: {reason}"
+                        ))
+                        file_entries = aborted_entries
+                    case Ok(_):
+                        val final_text = if had_crlf: updated_lf.replace("\n", "\r\n") else: updated_lf
+                        if not workaround_host_publish(abs_path, final_text):
+                            var aborted_entries: [WorkaroundRecoverEntry] = []
+                            for fe in file_entries:
+                                if fe.status == "recovered" or fe.status == "linked":
+                                    aborted_entries.push(WorkaroundRecoverEntry(
+                                        bug_id: fe.bug_id, path: fe.path, line: fe.line,
+                                        status: "error", recover: fe.recover,
+                                        fix_commit: fe.fix_commit, action: "aborted-atomic",
+                                        detail: "failed to publish updated file: {path}"
+                                    ))
+                                else:
+                                    aborted_entries.push(fe)
+                            aborted_entries.push(WorkaroundRecoverEntry(
+                                bug_id: "", path: path, line: 0, status: "error",
+                                recover: "", fix_commit: verified_fix_commit, action: "abort-write",
+                                detail: "failed to publish updated file: {path}"
+                            ))
+                            file_entries = aborted_entries
+                        else:
+                            if not modified_paths.contains(path):
+                                modified_paths.push(path)
+
+        for fe in file_entries:
+            counts = _bump_count(counts, fe.status)
+            entries.push(fe)
+
+    var refresh_msg = ""
+    if opts.apply and modified_paths.len() > 0:
+        val has_index = workaround_host_exists(root + "/.simple/workarounds.sdn") or
+            workaround_host_exists(root + "/.simple/workarounds.d")
+        if has_index and workaround_host_exists(root + "/doc/08_tracking/bug/bug_db.sdn"):
+            match refresh_workarounds_at(root, WorkaroundScanV1.Incremental, modified_paths):
+                case Ok(_):
+                    refresh_msg = "index refreshed for {modified_paths.len()} file(s)"
+                case Err(reason):
+                    refresh_msg = "index refresh skipped: {reason}"
+
+    val sorted_entries = _sort_entries_asc(entries)
+    var ok = counts.error == 0 and counts.conflict == 0
+    if not opts.list_only and opts.bug_ids.len() > 0 and not opts.link_recover:
+        if counts.no_recover_ref > 0 or counts.not_eligible > 0:
+            ok = false
+    val summary_msg = if refresh_msg != "": refresh_msg else: "ok"
+    WorkaroundRecoverResult(
+        ok: ok,
+        mode: mode,
+        apply: opts.apply,
+        counts: counts,
+        entries: sorted_entries,
+        message: summary_msg
+    )
+
+@allow(primitive_api)  # serialized SDN report string output
+pub fn workaround_recover_render_sdn(res: WorkaroundRecoverResult) -> text:
+    val apply_str = if res.apply: "true" else: "false"
+    val c = res.counts
+    var out = "recover_summary |mode, apply, recovered, linked, would_recover, would_link, skipped_stage2_gated, conflict, no_recover_ref, skipped_pinned, error|\n    "
+    out = out + workaround_sdn_quote(res.mode) + ", " + apply_str
+    out = out + ", {c.recovered}, {c.linked}, {c.would_recover}, {c.would_link}, {c.skipped_stage2_gated}, {c.conflict}, {c.no_recover_ref}, {c.skipped_pinned}, {c.error}\n"
+    if res.message != "" and res.message != "ok":
+        out = out + "# " + res.message + "\n"
+    out = out + "recover_plan |bug_id, path, line, status, recover, fix_commit, action, detail|\n"
+    for e in res.entries:
+        out = out + "    " + workaround_sdn_quote(e.bug_id) + ", " +
+            workaround_sdn_quote(e.path) + ", {e.line}, " +
+            workaround_sdn_quote(e.status) + ", " +
+            workaround_sdn_quote(e.recover) + ", " +
+            workaround_sdn_quote(e.fix_commit) + ", " +
+            workaround_sdn_quote(e.action) + ", " +
+            workaround_sdn_quote(e.detail) + "\n"
+    out
+
+fn _recover_json_escape(s: text) -> text:
+    var out = s.replace("\\", "\\\\")
+    out = out.replace("\"", "\\\"")
+    out = out.replace("\n", "\\n")
+    out = out.replace("\r", "\\r")
+    out = out.replace("\t", "\\t")
+    out
+
+fn _json_str(s: text) -> text:
+    "\"" + _recover_json_escape(s) + "\""
+
+@allow(primitive_api)  # serialized JSON report string output
+pub fn workaround_recover_render_json(res: WorkaroundRecoverResult) -> text:
+    val lb = r"{"
+    val rb = r"}"
+    val c = res.counts
+    val ok_str = if res.ok: "true" else: "false"
+    val apply_str = if res.apply: "true" else: "false"
+    var counts_json = lb
+    counts_json = counts_json + "\"recovered\":{c.recovered},"
+    counts_json = counts_json + "\"linked\":{c.linked},"
+    counts_json = counts_json + "\"would_recover\":{c.would_recover},"
+    counts_json = counts_json + "\"would_link\":{c.would_link},"
+    counts_json = counts_json + "\"skipped_stage2_gated\":{c.skipped_stage2_gated},"
+    counts_json = counts_json + "\"conflict\":{c.conflict},"
+    counts_json = counts_json + "\"no_recover_ref\":{c.no_recover_ref},"
+    counts_json = counts_json + "\"skipped_pinned\":{c.skipped_pinned},"
+    counts_json = counts_json + "\"skipped_excluded\":{c.skipped_excluded},"
+    counts_json = counts_json + "\"not_eligible\":{c.not_eligible},"
+    counts_json = counts_json + "\"error\":{c.error}"
+    counts_json = counts_json + rb
+    var item_parts: [text] = []
+    for e in res.entries:
+        var obj = lb
+        obj = obj + "\"bug_id\":" + _json_str(e.bug_id) + ","
+        obj = obj + "\"path\":" + _json_str(e.path) + ","
+        obj = obj + "\"line\":{e.line},"
+        obj = obj + "\"status\":" + _json_str(e.status) + ","
+        obj = obj + "\"recover\":" + _json_str(e.recover) + ","
+        obj = obj + "\"fix_commit\":" + _json_str(e.fix_commit) + ","
+        obj = obj + "\"action\":" + _json_str(e.action) + ","
+        obj = obj + "\"detail\":" + _json_str(e.detail)
+        obj = obj + rb
+        item_parts.push(obj)
+    var root_json = lb
+    root_json = root_json + "\"command\":\"workaround-recover\","
+    root_json = root_json + "\"ok\":{ok_str},"
+    root_json = root_json + "\"mode\":" + _json_str(res.mode) + ","
+    root_json = root_json + "\"apply\":{apply_str},"
+    root_json = root_json + "\"message\":" + _json_str(res.message) + ","
+    root_json = root_json + "\"counts\":" + counts_json + ","
+    root_json = root_json + "\"items\":[" + item_parts.join(",") + "]"
+    root_json = root_json + rb
+    root_json

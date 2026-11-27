@@ -1,0 +1,40 @@
+"""Generic enum patterns over untyped subjects, through the real frontend.
+
+The parser's flat AST bridge hands a `_` inside an enum payload to HIR as
+`PatternKind.Binding("_", false)`, not `PatternKind.Wildcard`. The
+hand-built patterns in generic_enum_pattern_owner_substitution_spec.spl never
+exercised that shape, which is why #5557 passed its unit spec but stage2
+still rejected `case P.Ready(_)`. These cases parse real source.
+"""
+use std.spec
+use std.spec.step
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+
+fn untyped_subject_lowering_errors(src: text) -> [text]:
+    val parsed = parse_full_frontend(src, "testdata/generic_enum_untyped.spl", "generic_enum_untyped", Logger(level: 0))
+    var hl = HirLowering.with_filename("testdata/generic_enum_untyped.spl")
+    val hir = hl.lower_module(parsed)
+    var messages: [text] = []
+    for err in hl.errors:
+        messages.push(err.message)
+    messages
+
+describe "qualified generic enum patterns over untyped subjects (frontend)":
+    it "admits `_` over a type-parameter slot for unwrap, Ok binder and match-value subjects":
+        step("Lower the native fixture source end to end")
+        val errors = untyped_subject_lowering_errors("# Qualified generic-enum variant patterns over UNTYPED match subjects.\n#\n# The subject type is not inferred in these shapes (match-expression value,\n# `.unwrap()`, `Ok(x)` binder). Variants whose payload binds no type parameter\n# (`_`) must still lower; a binder over `T` keeps failing closed.\n#\n# Expected stdout is in generic_enum_pattern_untyped_subject_native.spl.expected.\n\nenum P<T>:\n    Ready(T)\n    Pending(i64)\n\nfn get() -> Result<P<i64>, text>:\n    Ok(P.Pending(3))\n\n# Shape 1: subject is a match-expression value.\nfn shape_match_value() -> i64:\n    val v = match get():\n        case Err(e): return 1\n        case Ok(x): x\n    match v:\n        case P.Ready(_): print \"p1 ready\"\n        case P.Pending(t): print \"p1 pending {t}\"\n    0\n\n# Shape 2: subject came from an Ok(x) binder.\nfn shape_ok_binder() -> i64:\n    val r = get()\n    match r:\n        case Ok(x):\n            match x:\n                case P.Ready(_): print \"p6 ready\"\n                case P.Pending(t): print \"p6 pending {t}\"\n        case Err(e): return 1\n    0\n\n# Shape 3: subject came from .unwrap().\nfn shape_unwrap() -> i64:\n    val v = get().unwrap()\n    match v:\n        case P.Ready(_): print \"p4 ready\"\n        case P.Pending(t): print \"p4 pending {t}\"\n    0\n\nfn main() -> i64:\n    if shape_match_value() != 0: return 1\n    if shape_ok_binder() != 0: return 2\n    if shape_unwrap() != 0: return 3\n    0\n")
+        for message in errors:
+            print "unexpected HIR error: " + message
+        expect(errors.len()).to_equal(0)
+
+    it "still refuses a named binder over a type-parameter slot":
+        step("Bind the generic Ready payload over an untyped subject")
+        val errors = untyped_subject_lowering_errors("# Qualified generic-enum variant patterns over UNTYPED match subjects.\n#\n# The subject type is not inferred in these shapes (match-expression value,\n# `.unwrap()`, `Ok(x)` binder). Variants whose payload binds no type parameter\n# (`_`) must still lower; a binder over `T` keeps failing closed.\n#\n# Expected stdout is in generic_enum_pattern_untyped_subject_native.spl.expected.\n\nenum P<T>:\n    Ready(T)\n    Pending(i64)\n\nfn get() -> Result<P<i64>, text>:\n    Ok(P.Pending(3))\n\n# Shape 1: subject is a match-expression value.\nfn shape_match_value() -> i64:\n    val v = match get():\n        case Err(e): return 1\n        case Ok(x): x\n    match v:\n        case P.Ready(v): print \"p1 ready\"\n        case P.Pending(t): print \"p1 pending {t}\"\n    0\n\n# Shape 2: subject came from an Ok(x) binder.\nfn shape_ok_binder() -> i64:\n    val r = get()\n    match r:\n        case Ok(x):\n            match x:\n                case P.Ready(_): print \"p6 ready\"\n                case P.Pending(t): print \"p6 pending {t}\"\n        case Err(e): return 1\n    0\n\n# Shape 3: subject came from .unwrap().\nfn shape_unwrap() -> i64:\n    val v = get().unwrap()\n    match v:\n        case P.Ready(_): print \"p4 ready\"\n        case P.Pending(t): print \"p4 pending {t}\"\n    0\n\nfn main() -> i64:\n    if shape_match_value() != 0: return 1\n    if shape_ok_binder() != 0: return 2\n    if shape_unwrap() != 0: return 3\n    0\n")
+        var owner_refusal = false
+        for message in errors:
+            if message.contains("generic enum pattern requires its declared subject owner"):
+                owner_refusal = true
+        expect(owner_refusal).to_equal(true)

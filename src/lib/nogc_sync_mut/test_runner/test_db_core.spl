@@ -7,7 +7,7 @@ use std.nogc_sync_mut.io.sysinfo_ops.{getpid, hostname}
 use std.nogc_sync_mut.io.time_ops.{timestamp_year, timestamp_month, timestamp_day, timestamp_hour, timestamp_minute, timestamp_second}
 use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
 use std.test_runner.string_interner.TestDbStringInterner
-use std.test_runner.test_db_types.{TestStatus, FileRecord, SuiteRecord, TestRecord, CounterRecord, TimingSummary, TimingRun, ChangeEvent, RunRecord, TimingConfig, status_to_str, change_type_str, is_flaky_change}
+use std.test_runner.test_db_types.{TestStatus, TrdFileRecord, TrdSuiteRecord, TrdTestRecord, TrdCounterRecord, TrdTimingSummary, TrdTimingRun, TrdChangeEvent, TrdRunRecord, TimingConfig, status_to_str, change_type_str, is_flaky_change}
 use std.test_runner.test_db_io.{DB_PATH, RUNS_PATH, read_db_file, write_db_file_locked}
 use std.test_runner.test_db_parser.{parse_stable_db, parse_volatile_db, ParsedStableDb, ParsedVolatileDb}
 use std.test_runner.test_db_serializer.{serialize_stable_db, serialize_volatile_db}
@@ -33,14 +33,14 @@ fn trim_to_last(runs: List<f64>, max_count: i64) -> List<f64>:
 
 struct RunnerTestDbCore:
     interner: TestDbStringInterner
-    files: List<FileRecord>
-    suites: List<SuiteRecord>
-    tests: List<TestRecord>
-    counters: List<CounterRecord>
-    timing: List<TimingSummary>
-    timing_runs: List<TimingRun>
-    changes: List<ChangeEvent>
-    test_runs: List<RunRecord>
+    files: List<TrdFileRecord>
+    suites: List<TrdSuiteRecord>
+    tests: List<TrdTestRecord>
+    counters: List<TrdCounterRecord>
+    timing: List<TrdTimingSummary>
+    timing_runs: List<TrdTimingRun>
+    changes: List<TrdChangeEvent>
+    test_runs: List<TrdRunRecord>
     dirty: bool
     # Perf indexes — O(1) lookups instead of linear scans
     _file_index: Dict<i64, i64>        # path_str -> file_id
@@ -231,7 +231,7 @@ impl RunnerTestDbCore:
             return self._file_index[path_str]
         # Create new file
         val file_id = self.files.len()
-        self.files.push(FileRecord(file_id: file_id, path_str: path_str))
+        self.files.push(TrdFileRecord(file_id: file_id, path_str: path_str))
         self._file_index[path_str] = file_id
         self.dirty = true
         file_id
@@ -245,7 +245,7 @@ impl RunnerTestDbCore:
             return self._suite_index[key]
         # Create new suite
         val suite_id = self.suites.len()
-        self.suites.push(SuiteRecord(suite_id: suite_id, file_id: file_id, name_str: name_str))
+        self.suites.push(TrdSuiteRecord(suite_id: suite_id, file_id: file_id, name_str: name_str))
         self._suite_index[key] = suite_id
         self.dirty = true
         suite_id
@@ -288,7 +288,7 @@ impl RunnerTestDbCore:
         if is_new:
             # Create new test record
             self._test_index["{suite_id}:{name_str}"] = self.tests.len()
-            self.tests.push(TestRecord(
+            self.tests.push(TrdTestRecord(
                 suite_id: suite_id,
                 name_str: name_str,
                 category_str: category_str,
@@ -313,7 +313,7 @@ impl RunnerTestDbCore:
 
             # Track change
             if change != "no_change":
-                self.changes.push(ChangeEvent(
+                self.changes.push(TrdChangeEvent(
                     test_id: name_str,
                     change_type: change,
                     run_id: ""
@@ -360,7 +360,7 @@ impl RunnerTestDbCore:
             val failed_count = if status == "failed": 1 else: 0
             val fail_rate = if status == "failed": 100.0 else: 0.0
             val idx = self.counters.len()
-            self.counters.push(CounterRecord(
+            self.counters.push(TrdCounterRecord(
                 test_id: name_str,
                 total_runs: 1,
                 passed: passed_count,
@@ -381,7 +381,7 @@ impl RunnerTestDbCore:
         val now_str = micros_to_rfc3339(time_now_unix_micros())
 
         # Add timing run
-        self.timing_runs.push(TimingRun(
+        self.timing_runs.push(TrdTimingRun(
             test_id: name_str,
             timestamp: now_str,
             duration_ms: duration_ms,
@@ -425,7 +425,7 @@ impl RunnerTestDbCore:
             self.timing[i] = ts
         else:
             val idx = self.timing.len()
-            self.timing.push(TimingSummary(
+            self.timing.push(TrdTimingSummary(
                 test_id: name_str,
                 last_ms: duration_ms,
                 p50: stats.p50,
@@ -483,7 +483,7 @@ impl RunnerTestDbCore:
         self._runs_overflow = 0
         if skip.len() == 0:
             return
-        var new_runs: List<TimingRun> = []
+        var new_runs: List<TrdTimingRun> = []
         for tr in self.timing_runs:
             if skip.has(tr.test_id) and skip[tr.test_id] > 0:
                 skip[tr.test_id] = skip[tr.test_id] - 1
@@ -509,7 +509,7 @@ impl RunnerTestDbCore:
         val pid = getpid()
         val host = hostname()
 
-        self.test_runs.push(RunRecord(
+        self.test_runs.push(TrdRunRecord(
             run_id: run_id,
             start_time: micros_to_rfc3339(now),
             end_time: "",
@@ -569,7 +569,7 @@ impl RunnerTestDbCore:
         if self.test_runs.len() <= keep_count:
             return
         val start = self.test_runs.len() - keep_count
-        var new_runs: List<RunRecord> = []
+        var new_runs: List<TrdRunRecord> = []
         var i = start
         while i < self.test_runs.len():
             new_runs.push(self.test_runs[i])
@@ -581,10 +581,10 @@ impl RunnerTestDbCore:
     # H3: List runs with status filter
     # -----------------------------------------------------------------
 
-    fn list_runs(status_filter: text) -> List<RunRecord>:
+    fn list_runs(status_filter: text) -> List<TrdRunRecord>:
         if status_filter == "" or status_filter == "all":
             return self.test_runs
-        var result: List<RunRecord> = []
+        var result: List<TrdRunRecord> = []
         for r in self.test_runs:
             if r.status == status_filter:
                 result.push(r)

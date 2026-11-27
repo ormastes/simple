@@ -1,0 +1,178 @@
+# RUN01/02 completion authority. AWAITING_VERIFICATION: no runtime claim.
+use std.spec.{describe, it, expect}
+use app.buildrunner.remote_authority_v1.*
+use test.fixtures.buildrunner.remote_authority_v1.*
+use test.fixtures.app.llm_caret.distributed_authority_verification_fixture_v2.verification_bytes
+
+fn remote_decode_error_v1(wire: text) -> text:
+    match remote_completion_decode_v1(wire):
+        case Ok(value): ""
+        case Err(reason): reason
+
+describe "signed remote completion authority":
+    it "authenticates three separate keys and independently specified signing bytes":
+        val fixture = remote_authority_fixture_v1()
+        match remote_completion_signature_message_v1(fixture.completion):
+            case Ok(message):
+                expect(message).to_equal(verification_bytes(
+                    remote_authority_golden_message_v1(fixture.completion)))
+            case Err(reason): expect(reason).to_equal("")
+        expect(remote_authority_error_v1(fixture)).to_equal("")
+
+    it "roundtrips one canonical bounded envelope and rejects wire ambiguity":
+        val wire = remote_authority_encode_v1(remote_authority_fixture_v1().completion)
+        match remote_completion_decode_v1(wire):
+            case Ok(value): expect(remote_authority_encode_v1(value)).to_equal(wire)
+            case Err(reason): expect(reason).to_equal("")
+        expect(remote_decode_error_v1(wire + "extra\n")).to_equal("COMPLETION_WIRE_INVALID")
+        expect(remote_decode_error_v1(wire.replace("\n1\n", "\n01\n"))).to_equal("COMPLETION_WIRE_INVALID")
+        expect(remote_decode_error_v1(wire.replace("\ntrue\n", "\n1\n"))).to_equal("COMPLETION_REAPED_INVALID")
+        expect(remote_decode_error_v1("x".repeat(4097))).to_equal("COMPLETION_WIRE_TOO_LARGE")
+
+    it "rejects invalid signature bytes even when every parent binding matches":
+        var fixture = remote_authority_fixture_v1()
+        var completion = fixture.completion
+        var signature = completion.signature
+        signature[0] = signature[0] ^ 1u8
+        completion.signature = signature
+        fixture.completion = completion
+        expect(remote_authority_error_v1(fixture)).to_equal("COMPLETION_SIGNATURE_INVALID")
+
+    it "rejects output and test claim mutation even if an expected binding is also changed":
+        var fixture = remote_authority_fixture_v1()
+        var completion = fixture.completion
+        var expected = fixture.expected
+        completion.output_inventory_digest = "6".repeat(64)
+        expected.output_inventory_digest = completion.output_inventory_digest
+        fixture.completion = completion
+        fixture.expected = expected
+        expect(remote_authority_error_v1(fixture)).to_equal("COMPLETION_SIGNATURE_INVALID")
+        fixture = remote_authority_fixture_v1()
+        completion = fixture.completion
+        expected = fixture.expected
+        completion.tests_digest = "6".repeat(64)
+        expected.tests_digest = completion.tests_digest
+        fixture.completion = completion
+        fixture.expected = expected
+        expect(remote_authority_error_v1(fixture)).to_equal("COMPLETION_SIGNATURE_INVALID")
+
+    it "requires independently observed output, result, process and test digests":
+        val base = remote_authority_fixture_v1()
+        var output = base.expected
+        output.output_inventory_digest = "6".repeat(64)
+        var result = base.expected
+        result.result_digest = "6".repeat(64)
+        var process = base.expected
+        process.process_digest = "6".repeat(64)
+        var tests = base.expected
+        tests.tests_digest = "6".repeat(64)
+        for expected in [output, result, process, tests]:
+            var fixture = base
+            fixture.expected = expected
+            expect(remote_authority_error_v1(fixture)).to_equal("COMPLETION_OBSERVATION_MISMATCH")
+
+    it "rejects wrong signer, rotated keys, revoked keys, wrong role and wrong scope":
+        val base = remote_authority_fixture_v1()
+        var signer = base.host_key
+        signer.identity = "other_signer"
+        var rotated = base.host_key
+        rotated.revision = 2
+        var role = base.host_key
+        role.role = "grant-issuer"
+        for key in [signer, rotated, role]:
+            var fixture = base
+            fixture.host_key = key
+            expect(remote_authority_error_v1(fixture)).to_equal("AUTHORITY_KEY_MISMATCH")
+        var fixture = base
+        var revoked = base.host_key
+        revoked.revoked = true
+        fixture.host_key = revoked
+        expect(remote_authority_error_v1(fixture)).to_equal("AUTHORITY_KEY_REVOKED")
+        var scope = base.host_key
+        scope.host_id = "worker_2"
+        fixture.host_key = scope
+        expect(remote_authority_error_v1(fixture)).to_equal("AUTHORITY_SCOPE_DENIED")
+
+    it "requires a host key distinct from both protected authority roles":
+        val base = remote_authority_fixture_v1()
+        for public_key in [base.issuer.public_key, base.approver.public_key]:
+            var fixture = base
+            var key = base.host_key
+            key.public_key = public_key
+            fixture.host_key = key
+            expect(remote_authority_error_v1(fixture)).to_equal("COMPLETION_ROLES_NOT_SEPARATE")
+
+    it "revalidates the original issuer and human signatures":
+        var fixture = remote_authority_fixture_v1()
+        var signed = fixture.signed
+        var signature = signed.signature
+        signature[0] = signature[0] ^ 1u8
+        signed.signature = signature
+        fixture.signed = signed
+        expect(remote_authority_error_v1(fixture)).to_equal("ISSUER_SIGNATURE_INVALID")
+        fixture = remote_authority_fixture_v1()
+        var approval = fixture.approval
+        signature = approval.signature
+        signature[0] = signature[0] ^ 1u8
+        approval.signature = signature
+        fixture.approval = approval
+        expect(remote_authority_error_v1(fixture)).to_equal("APPROVAL_SIGNATURE_INVALID")
+
+    it "rejects changed argv, source, toolchain, inputs, outputs and retry attempt":
+        val base = remote_authority_fixture_v1()
+        var argv = base.task
+        argv.args = ["compile", "substituted.spl"]
+        var source = base.task
+        source.source_digest = "6".repeat(64)
+        var toolchain = base.task
+        toolchain.toolchain_digest = "6".repeat(64)
+        var inputs = base.task
+        inputs.inputs = []
+        var outputs = base.task
+        outputs.outputs = ["other.o"]
+        var attempt = base.task
+        attempt.attempt = 2
+        for task in [argv, source, toolchain, inputs, outputs, attempt]:
+            var fixture = base
+            fixture.task = task
+            expect(remote_authority_error_v1(fixture)).to_equal("COMPLETION_TASK_MISMATCH")
+
+    it "rejects a signed completion under another parent assignment or controller epoch":
+        var fixture = remote_authority_fixture_v1()
+        var expected = fixture.expected
+        expected.controller_epoch = 8
+        fixture.expected = expected
+        expect(remote_authority_error_v1(fixture)).to_equal("COMPLETION_ASSIGNMENT_STALE")
+        expected.controller_epoch = 7
+        expected.assignment_digest = "6".repeat(64)
+        fixture.expected = expected
+        expect(remote_authority_error_v1(fixture)).to_equal("COMPLETION_ASSIGNMENT_STALE")
+
+    it "rejects operation replay, authorization replacement and changed host":
+        var fixture = remote_authority_fixture_v1()
+        var completion = fixture.completion
+        completion.operation_id = "operation_2"
+        fixture.completion = remote_authority_resign_v1(completion)
+        expect(remote_authority_error_v1(fixture)).to_equal("COMPLETION_OPERATION_MISMATCH")
+        fixture = remote_authority_fixture_v1()
+        completion = fixture.completion
+        completion.request_digest = "6".repeat(64)
+        fixture.completion = remote_authority_resign_v1(completion)
+        expect(remote_authority_error_v1(fixture)).to_equal("COMPLETION_AUTHORIZATION_MISMATCH")
+        fixture = remote_authority_fixture_v1()
+        completion = fixture.completion
+        completion.host_id = "worker_2"
+        fixture.completion = remote_authority_resign_v1(completion)
+        expect(remote_authority_error_v1(fixture)).to_equal("COMPLETION_HOST_MISMATCH")
+
+    it "rejects future completion time and a signed claim that leaves children alive":
+        var fixture = remote_authority_fixture_v1()
+        var completion = fixture.completion
+        completion.completed_at = 101
+        fixture.completion = remote_authority_resign_v1(completion)
+        expect(remote_authority_error_v1(fixture)).to_equal("COMPLETION_TIME_INVALID")
+        completion = fixture.completion
+        completion.completed_at = 99
+        completion.tree_reaped = false
+        fixture.completion = remote_authority_resign_v1(completion)
+        expect(remote_authority_error_v1(fixture)).to_equal("COMPLETION_TREE_NOT_REAPED")

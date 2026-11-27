@@ -237,3 +237,21 @@ only 20 000 pieces (quadratic) — at equal N the builder is ~520x faster.
 
 - `doc/03_plan/app/mcp/mcp_startup_perf_small_tasks_2026-06-12.md` — perf wave plan
 - `test/05_perf/mcp_json_perf_spec.spl` — existing perf benchmark
+
+## Re-verification 2026-11-25 (source inspection; spec run environment-blocked)
+
+Re-inspected at `release/1.0.0` tip `47d6c5eddd5`: the closed state still
+holds. `RtStringBuilder` + the `rt_string_builder_*` externs are present
+(`src/lib/common/string_builder.spl:56,62`), the `jo1`–`jo5` builders are in
+the collapsed single-expression form (e.g. `LB() + p1 + "," + p2 + RB()` at
+`src/lib/nogc_sync_mut/mcp_sdk/core/json.spl:35-43`), and
+`_slice_text`/`first_n_chars` use the O(1) 2-arg `substring`
+(`src/app/mcp/main_lazy_json.spl:10-21`).
+
+Limit: `test/01_unit/app/mcp_unit/mcp_sdk_json_builder_spec.spl` could not
+be re-executed on this Windows host — the tracked `bin/simple.exe` (seed,
+last refreshed 2026-11-17) cannot compile the current test-runner/lib
+source at any recent tree (details in
+`compiled_checker_multifile_rss_retention_2026-08-03.md`'s 2026-11-25
+note). The 2026-09-13 executed evidence (26/26 passed) remains the latest
+run; this pass is inspection-only.

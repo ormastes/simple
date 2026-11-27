@@ -1,0 +1,65 @@
+#!/bin/sh
+# Stress the HIR shard claim ledger with REAL concurrent child processes
+# (bug hir_shard_claim_failure_blocks_ledger_2026_10_27).
+# Per iteration: 8 claimers x 200 paths (rotated start offsets for maximum
+# contention) + 1 worker that dies holding the ledger lock with 0 claims, then
+# a coordinator reap of that crashed owner. Asserts: every path claimed exactly
+# once, no claim error code, no BLOCKED marker.
+# Usage: sh scripts/check/stress-hir-claim-ledger.shs [iterations=100] [claimers=8] [paths=200]
+# Verdict (last stdout line): PASS — <n>/<n> iterations ... (exit 0) | FAIL — ... (exit 1)
+set -u
+ITER=${1:-100}
+CLAIMERS=${2:-8}
+PATHS=${3:-200}
+SIMPLE=${SIMPLE_BIN:-bin/simple}
+WORKER=test/03_system/compiler/driver/fixtures/hir_claim_stress_worker.spl
+ROOT=build/stress/hir_claim_$$
+pass=0
+fail=0
+start=$(date +%s)
+i=1
+while [ "$i" -le "$ITER" ]; do
+    q="$ROOT/it$i"
+    mkdir -p "$q"
+    pids=""
+    w=0
+    while [ "$w" -lt "$CLAIMERS" ]; do
+        off=$(( w * PATHS / CLAIMERS ))
+        "$SIMPLE" run "$WORKER" --mode claim --queue "$q" --owner "w$w" --paths "$PATHS" --offset "$off" > "$q.w$w.out" 2>&1 &
+        pids="$pids $!"
+        w=$((w + 1))
+    done
+    "$SIMPLE" run "$WORKER" --mode crash --queue "$q" --owner crashed > "$q.crash.out" 2>&1 &
+    pids="$pids $!"
+    for p in $pids; do wait "$p"; done
+    "$SIMPLE" run "$WORKER" --mode reap --queue "$q" --owner crashed > "$q.reap.out" 2>&1
+    reap_rc=$?
+    claims=$(ls "$q" | grep -c '\.claim$')
+    total=$(cat "$q".w*.out | sed -n 's/^CLAIMED .* claimed=\([0-9]*\) .*/\1/p' | awk '{s+=$1} END {print s+0}')
+    errs=$(cat "$q".w*.out | grep -c '^ERR ')
+    done_lines=$(cat "$q".w*.out | grep -c '^CLAIMED ')
+    bad=0
+    reason=""
+    [ "$claims" -eq "$PATHS" ] || { bad=1; reason="$reason claims=$claims"; }
+    [ "$total" -eq "$PATHS" ] || { bad=1; reason="$reason claimed_sum=$total"; }
+    [ "$errs" -eq 0 ] || { bad=1; reason="$reason errors=$errs"; }
+    [ "$done_lines" -eq "$CLAIMERS" ] || { bad=1; reason="$reason finished=$done_lines"; }
+    [ ! -e "$q/BLOCKED" ] || { bad=1; reason="$reason BLOCKED=$(cat "$q/BLOCKED")"; }
+    [ "$reap_rc" -eq 0 ] || { bad=1; reason="$reason reap_rc=$reap_rc"; }
+    if [ "$bad" -eq 0 ]; then
+        pass=$((pass + 1))
+        rm -rf "$q" "$q".*.out
+    else
+        fail=$((fail + 1))
+        echo "iteration $i FAIL:$reason (kept $q)"
+    fi
+    echo "progress $i/$ITER pass=$pass fail=$fail elapsed=$(( $(date +%s) - start ))s"
+    i=$((i + 1))
+done
+wall=$(( $(date +%s) - start ))
+if [ "$fail" -eq 0 ] && [ "$pass" -gt 0 ]; then
+    echo "PASS — $pass/$ITER iterations, $CLAIMERS claimers x $PATHS paths + 1 lock-holding crash, wall ${wall}s"
+    exit 0
+fi
+echo "FAIL — $pass/$ITER iterations passed, $fail failed, wall ${wall}s"
+exit 1

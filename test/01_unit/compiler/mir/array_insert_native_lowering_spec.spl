@@ -1,0 +1,147 @@
+"""Pin builtin insert dispatch and guarded MIR generation; native qualification remains separate."""
+
+use std.spec.*
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+
+fn lower_function(src: text, target_name: text) -> text:
+    val filename = "array_insert_" + target_name + ".spl"
+    val module = parse_full_frontend(src, filename, filename, Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(module)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+    var result = ""
+    for error in hir_lowering.errors:
+        result = result + "HIR_ERROR:" + error.message + "\n"
+    for error in mir_lowering.errors:
+        result = result + "MIR_ERROR:" + error.message + "\n"
+    for function in mir.functions.values():
+        if function.name == target_name or function.name.ends_with("." + target_name):
+            result = result + serialize_mir_function(function)
+            result = result + insert_guard_evidence(function)
+    result
+
+fn insert_guard_evidence(function: MirFunction) -> text:
+    var retain_id: i64 = -1
+    var done_id: i64 = -1
+    var retained_value: i64 = -1
+    for block in function.blocks:
+        val label = block.label ?? ""
+        if label == "array_insert_retain_slot":
+            retain_id = block_id_value(block.id)
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case MirInstKind.Call(dest, _, _):
+                        if val value = dest: retained_value = local_id_value(value)
+                    case _: ()
+        if label == "array_insert_done": done_id = block_id_value(block.id)
+    var evidence = ""
+    for block in function.blocks:
+        val label = block.label ?? ""
+        if label == "array_insert_append":
+            match block.terminator:
+                case MirTerminator.If(_, success, failure):
+                    if retain_id >= 0 and done_id >= 0 and block_id_value(success) == retain_id and block_id_value(failure) == done_id:
+                        evidence = evidence + "PUSH_SUCCESS_GUARDS_SHIFT\n"
+                case _: ()
+        if label == "array_insert_store":
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case MirInstKind.Call(_, _, args):
+                        if args.len() == 3:
+                            match args[2].kind:
+                                case MirOperandKind.Copy(value):
+                                    if retained_value >= 0 and local_id_value(value) == retained_value:
+                                        evidence = evidence + "STORE_COPIES_RETAINED_SLOT\n"
+                                case _: ()
+                    case _: ()
+    evidence
+
+val INSERT_SRC = """
+fn insert_value(xs: [i64], index: i64, value: i64) -> [i64]:
+    xs.insert(index, value)
+"""
+
+val FIELD_SRC = """
+struct Holder:
+    values: [text]
+fn insert_field(holder: Holder, value: text):
+    holder.values.insert(0, value)
+"""
+
+val INVALID_SRC = """
+fn invalid_index(xs: [i64]):
+    xs.insert("bad", 2)
+"""
+
+describe "Native builtin Array.insert lowering":
+    it "emits guarded append and a reverse tagged-slot shift":
+        val mir = lower_function(INSERT_SRC, "insert_value")
+        expect(mir.contains("HIR_ERROR:")).to_be(false)
+        expect(mir.contains("MIR_ERROR:")).to_be(false)
+        expect(mir).to_contain("rt_array_len")
+        expect(mir).to_contain("rt_array_push")
+        expect(mir).to_contain("rt_array_get")
+        expect(mir).to_contain("rt_array_set")
+        expect(mir).to_contain("array_insert_clamp")
+        expect(mir).to_contain("array_insert_bounds")
+        expect(mir).to_contain("array_insert_shift_cond")
+        expect(mir).to_contain("array_insert_done")
+        expect(mir).to_contain("array_insert_retain_slot")
+        expect(mir).to_contain("PUSH_SUCCESS_GUARDS_SHIFT")
+        expect(mir).to_contain("STORE_COPIES_RETAINED_SLOT")
+        expect(mir.contains("rt_panic")).to_be(false)
+
+    it "lowers a text-array field through the same slot-preserving CFG":
+        val mir = lower_function(FIELD_SRC, "insert_field")
+        expect(mir.contains("MIR_ERROR:")).to_be(false)
+        expect(mir).to_contain("array_insert_store")
+        expect(mir).to_contain("rt_array_set")
+
+    it "rejects a noninteger index rather than inventing an array offset":
+        val mir = lower_function(INVALID_SRC, "invalid_index")
+        expect(mir).to_contain("array insert index must be an integer")
+
+    it "admits the original typed macro-local insertion shape":
+        val source = """
+fn sorted_unique(values: [text]) -> [text]:
+    var out: [text] = []
+    for value in values:
+        var index = 0
+        while index < out.len():
+            if value < out[index]:
+                break
+            index = index + 1
+        out.insert(index, value)
+    out
+"""
+        val mir = lower_function(source, "sorted_unique")
+        expect(mir.contains("MIR_ERROR:")).to_be(false)
+        expect(mir).to_contain("array_insert_append")
+
+    it "rejects u64 indices explicitly until unsigned bounds are qualified":
+        val source = """
+fn unsigned_index(xs: [i64], index: u64):
+    xs.insert(index, 2)
+"""
+        val mir = lower_function(source, "unsigned_index")
+        expect(mir).to_contain("array insert requires a signed-representable index")
+
+    it "preserves a custom insert implementation ahead of builtin dispatch":
+        val source = """
+class Custom:
+    value: i64
+impl Custom:
+    fn insert(self, index: i64, value: i64) -> i64:
+        value + index
+fn custom_insert(owner: Custom) -> i64:
+    owner.insert(1, 2)
+"""
+        val mir = lower_function(source, "custom_insert")
+        expect(mir.contains("MIR_ERROR:")).to_be(false)
+        expect(mir.contains("array_insert_append")).to_be(false)

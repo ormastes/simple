@@ -60,3 +60,10 @@ infra_mail refuses before connecting:
 "mail_send: smtp_port 587 needs STARTTLS: mail: port 587 needs STARTTLS, and
 the runtime has no in-place TLS upgrade (missing rt_tls_client_from_fd; ...)".
 
+
+
+---
+
+## Lane disposition 2026-11-13 (p3-misc-b)
+
+runtime feature gap (fd upgrade); owner: TLS facade lane.

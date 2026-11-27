@@ -3,8 +3,9 @@
 #
 # Ported 2026-08-15 onto the committed BeLayoutBox shape (layout_box.spl):
 # f64 geometry, `node_id`/`kind`/`tag_name`/`style` fields, and
-# content_x()/content_y()/content_width()/content_height() as METHODS.
-# See doc/08_tracking/bug/layout_core_incompatible_with_committed_belayoutbox_2026-08-15.md
+# content_x/content_y/content_width/content_height as METHODS deriving
+# per call, with stored content_* FIELDS on the class for pinned-geometry
+# constructors (spec fixtures); both initialised to the same values here.
 #
 #   layout_node       — dispatch by display type
 #   _layout_block_be  — block formatting context (CSS 2.1 §9.4.1, simplified)
@@ -49,22 +50,45 @@ fn _plain_box(node: BeDomNode, x: f64, y: f64, width: f64, height: f64) -> BeLay
         node_id: node.node_id,
         kind: BeBoxKind.Anonymous,
         x: x, y: y, width: width, height: height,
+        content_x: x, content_y: y, content_width: width, content_height: height,
         margin_top: 0.0, margin_right: 0.0, margin_bottom: 0.0, margin_left: 0.0,
         padding_top: 0.0, padding_right: 0.0, padding_bottom: 0.0, padding_left: 0.0,
-        border_width: 0.0,
+        node: node,
         text_content: "", tag_name: node.tag_name, style: node.style,
         children: []
     )
+
+fn _collapse_margins(a: f64, b: f64) -> f64:
+    """Collapse two adjoining vertical margins (CSS 2.2 §8.3.1): the larger
+    positive one, the most negative one, or their sum when the signs differ."""
+    if a >= 0.0 and b >= 0.0:
+        if a > b:
+            return a
+        return b
+    if a < 0.0 and b < 0.0:
+        if a < b:
+            return a
+        return b
+    a + b
 
 pub fn _layout_block_be(node: BeDomNode, container: BeLayoutBox, style: StyleProps, ctx: FloatContext) -> BeLayoutBox:
     """Lay out a block-level element with the CSS box model and child recursion."""
     val cw = container.content_width()
     val ch = container.content_height()
+    val border_box = style.box_sizing == "border-box"
+    val inset_x = style.padding_left + style.padding_right + style.border_left() + style.border_right()
+    val inset_y = style.padding_top + style.padding_bottom + style.border_top() + style.border_bottom()
 
-    # Resolve width (block fills container by default minus margins; 0 = auto)
+    # Resolve width (block fills container by default minus margins; 0 = auto).
+    # An explicit width is the content-box width unless box-sizing:border-box
+    # (CSS Box Sizing 3 §4); a border box never shrinks below its insets.
     var box_width = cw - style.margin_left - style.margin_right
     if style.width > 0.0:
         box_width = style.width
+        if not border_box:
+            box_width = style.width + inset_x
+        if box_width < inset_x:
+            box_width = inset_x
     if box_width < 0.0:
         box_width = 0.0
 
@@ -74,28 +98,49 @@ pub fn _layout_block_be(node: BeDomNode, container: BeLayoutBox, style: StylePro
     # Provisional box so content_* methods resolve against this node's insets
     var box_ = BeLayoutBox.block_for(node, box_x, box_y, box_width, 0.0)
 
+    # Adjoining sibling margins collapse in block flow only; flex items'
+    # margins never collapse (CSS Flexbox 1 §4.2). Parent/child collapse is
+    # not modelled: the first child's top and last child's bottom margins stay
+    # inside this box's content height.
+    val collapse = style.display != "flex" and style.display != "inline-flex"
     var child_boxes: [BeLayoutBox] = []
+    # cursor_y = bottom border edge of the previous in-flow child (or content top)
     var cursor_y = box_.content_y()
+    var prev_mb = 0.0
+    var has_prev = false
     val kids = be_dom_get_children(node)
     var i = 0
     while i < kids.len():
         val child = kids[i]
         i = i + 1
         if be_dom_get_display(child) != "none":
+            val child_style = be_dom_get_style(child)
+            var gap = prev_mb + child_style.margin_top
+            if has_prev and collapse:
+                gap = _collapse_margins(prev_mb, child_style.margin_top)
+            # The child adds its own margin_top to the container's y.
             val child_container = _plain_box(
-                child, box_.content_x(), cursor_y, box_.content_width(), 0.0)
+                child, box_.content_x(), cursor_y + gap - child_style.margin_top,
+                box_.content_width(), 0.0)
             val child_box = layout_node(child, child_container, style, ctx)
             child_boxes.push(child_box)
-            val child_style = be_dom_get_style(child)
-            cursor_y = cursor_y + child_box.height + child_style.margin_top + child_style.margin_bottom
+            cursor_y = cursor_y + gap + child_box.height
+            prev_mb = child_style.margin_bottom
+            has_prev = true
+    cursor_y = cursor_y + prev_mb
 
     var content_h = cursor_y - box_.content_y()
     if style.height > 0.0:
         content_h = style.height
+        if border_box:
+            content_h = style.height - inset_y
     if content_h < 0.0:
         content_h = 0.0
 
-    box_.height = content_h + style.padding_top + style.padding_bottom + style.border_width * 2.0
+    box_.height = content_h + inset_y
+    # block_for baked content_height in against the provisional 0.0 height;
+    # re-sync it with the resolved border-box height.
+    box_.content_height = content_h
     box_.children = child_boxes
     box_
 
@@ -122,7 +167,10 @@ pub fn layout_flex(node: BeDomNode, container: BeLayoutBox, style: StyleProps, c
             max_h = box_.children[i].height
         i = i + 1
     if style.height <= 0.0:
-        box_.height = max_h + style.padding_top + style.padding_bottom + style.border_width * 2.0
+        box_.height = max_h + style.padding_top + style.padding_bottom + style.border_top() + style.border_bottom()
+    # Re-derive content_height from the final border-box height (the baked
+    # value was computed against the provisional 0.0 height).
+    box_.content_height = box_.height - style.padding_top - style.padding_bottom - style.border_top() - style.border_bottom()
     box_
 
 pub fn flex_shift_boxes_x(boxes: [BeLayoutBox], offset: f64):

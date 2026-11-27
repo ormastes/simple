@@ -2,6 +2,15 @@
 use app.cli._CliMain.args_and_os_commands.{GlobalFlags, get_cli_args, get_version, parse_global_flags,
     apply_fault_detection, print_version, print_targets, print_linkers, run_lex_command,
     print_error, print_error_with_help, run_dashboard, run_llm_dashboard}
+use app.cli._CliMain.startup_policy.{str_eq,
+    CLI_STATIC_FAST_PATH_NONE, CLI_STATIC_FAST_PATH_HELP, CLI_STATIC_FAST_PATH_VERSION,
+    cli_static_fast_path_kind,
+    CLI_USAGE_ERROR_EXIT_CODE, cli_dispatch_fallthrough_exit_code}
+export use app.cli._CliMain.startup_policy.{str_eq,
+    CLI_STATIC_FAST_PATH_NONE, CLI_STATIC_FAST_PATH_HELP, CLI_STATIC_FAST_PATH_VERSION,
+    cli_static_fast_path_kind,
+    CLI_USAGE_ERROR_EXIT_CODE, cli_dispatch_fallthrough_exit_code}
+use app.cli.orchestrator_entry_v1.cli_orchestrator_entry_v1
 use std.cli.log_modes.{parse_log_options, log_options_help, render_progress}
 use app.io.env_ops.{env_get, env_set}
 use app.io.args_ops.{get_args}
@@ -11,7 +20,7 @@ use common.plugin.instrumentation_aspect_pack.{
     COVERAGE_RUNTIME_COLLECTOR_V1, activate_instrumentation_coverage_startup_v1}
 use std.sffi.coverage.{coverage_enabled}
 use std.io_runtime.{getpid}
-use app.io.file_ops.{file_write}
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
 use std.common.mem_infra.config.{resolve_mem_infra, mem_infra_env_assignments}
 use app.io.cli_ops.{cli_file_exists, _cli_eprint, _cli_print_raw}
 use app.io.cli_compile.{cli_compile, cli_native_build}
@@ -30,6 +39,7 @@ use app.cli.cli_helpers.{print_cli_help, handle_init, check_self_contained}
 use app.cli.startup_aspect_packs.{apply_startup_aspect_packs}
 use lazy app.cli.ast_link.{ast_link_command_v1}
 use lazy app.cli.doc_links.{doc_links_command_v1}
+use lazy app.traceability.query_main.{run_trace_query_v1}
 use app.cli.command_registry.{
     cli_registry_has_command_v1,
     cli_registry_direct_script_target_v1,
@@ -52,6 +62,7 @@ use app.play.main.{play_cli_main}
 use app.t32_cli.mod.{t32_cli_main}
 use app.stats.doc_coverage_dynamic.{run_doc_coverage}
 use app.cli.sbom_command.{run_sbom}
+use app.cli.robust_command.{run_robust}
 use app.stats.dynamic.{run_stats}
 use app.jj.main.{handle_jj}
 use app.devhub.main.{handle_itf}
@@ -69,7 +80,9 @@ use app.cli.bootstrap_internal_worker_routing.{
     bootstrap_internal_worker_run_v1, bootstrap_internal_worker_is_parse_v1,
     bootstrap_internal_worker_args_v1}
 use app.cli.parse_shard_main.{run_parse_shard}
-use app.cli.native_build_worker_entry.{run_native_build_worker_entry}
+use app.cli.native_build_worker_entry.{run_native_build_worker_entry,
+    native_build_worker_publish_failure_receipt_v1}
+use compiler.driver.driver_build.incremental.{native_build_declare_linked_worker_entry_v1}
 use app.startup.dynsmf_status.{run_product_dynsmf_status}
 use app.build_progress.cli.{run_build_progress_cli}
 use app.lock.main.{run_lock_command}
@@ -85,9 +98,8 @@ use app.update.main.{run_update_command}
 #   simple file.smf     - Run compiled binary
 #   simple -c "code"    - Run code string
 
-# Workaround: native codegen string == is broken (length-only comparison)
-fn str_eq(a: text, b: text) -> bool:
-    a.len() == b.len() and a.starts_with(b)
+# CLI entry, dispatch, and flag helpers (`str_eq`, fast-path, usage error
+# policy live in `app.cli._CliMain.startup_policy` and are re-exported above).
 
 fn apply_jit_env_vars(flags: GlobalFlags):
     # Preserve the caller's resolved request across a possible driver process
@@ -159,8 +171,10 @@ fn apply_mem_infra_flags(flags: GlobalFlags) -> i64:
     return 0
 
 fn run_native_build_bootstrap(args: [text]) -> i64:
-    _cli_eprint("Error: native-build requires --backend=llvm-lib|llvm|cranelift in the pure Simple command path")
+    val reason = "native-build requires --backend=llvm-lib|llvm|cranelift in the pure Simple command path"
+    _cli_eprint("Error: " + reason)
     _cli_eprint("The Rust seed is bootstrap-only; legacy CLI native-build fallback is disabled.")
+    val _r = native_build_worker_publish_failure_receipt_v1(args, 1, reason)
     return 1
 
 fn native_build_backend_supported(backend: text) -> bool:
@@ -195,19 +209,6 @@ fn cli_print_help_with_progress(progress_mode: text):
         print progress
     print_cli_help()
     cli_log_options_help()
-
-val CLI_STATIC_FAST_PATH_NONE: i32 = 0
-val CLI_STATIC_FAST_PATH_HELP: i32 = 1
-val CLI_STATIC_FAST_PATH_VERSION: i32 = 2
-
-fn cli_static_fast_path_kind(args: [text], phase7_child_apk_required: bool) -> i32:
-    if phase7_child_apk_required or args.len() != 1:
-        return CLI_STATIC_FAST_PATH_NONE
-    if str_eq(args[0], "-h") or str_eq(args[0], "--help"):
-        return CLI_STATIC_FAST_PATH_HELP
-    if str_eq(args[0], "-v") or str_eq(args[0], "--version"):
-        return CLI_STATIC_FAST_PATH_VERSION
-    CLI_STATIC_FAST_PATH_NONE
 
 fn cli_is_log_option(arg: text) -> bool:
     str_eq(arg, "--human") or str_eq(arg, "--llm") or str_eq(arg, "--json") or
@@ -280,7 +281,7 @@ fn activate_required_child_coverage_apk() -> bool:
         _cli_eprint("PLUG-E-APK-CHILD: child activation receipt path is required")
         return false
     val receipt_text = "schema=simple-phase7-child-apk-v1\npid={getpid()}\nactivation_count={receipt.activation_count}\ngeneration={receipt.generation}\npayload_bytes={receipt.payload_size}\nconsumer={receipt.consumer_mode}\nstatus=pass\n"
-    if not file_write(receipt_path, receipt_text):
+    if not file_atomic_write(receipt_path, receipt_text):
         _cli_eprint("PLUG-E-APK-CHILD: cannot publish child activation receipt")
         return false
     val _ = env_set("SIMPLE_PHASE7_CHILD_APK_RECEIPT", "")
@@ -290,9 +291,7 @@ fn activate_required_child_coverage_apk() -> bool:
 
 # Both native products use the same command, argument, error and receipt owner.
 export cli_interpreter_main
-
-fn main() -> i64:
-    cli_main_with_execution_mode(false)
+export cli_main_with_execution_mode
 
 fn cli_interpreter_main() -> i64:
     cli_main_with_execution_mode(true)
@@ -309,7 +308,9 @@ fn cli_main_with_execution_mode(force_interpreter: bool) -> i64:
     val requested_k1_policy = if requested_k1_raw == "": selected_k1_policy else: requested_k1_raw
     if (selected_k1_policy != "llvm-cranelift" and selected_k1_policy != "llvm") or
             requested_k1_policy != selected_k1_policy:
-        _cli_eprint("PLUG-E-K1-POLICY: binary composition does not match requested policy")
+        val policy_reason = "PLUG-E-K1-POLICY: binary composition does not match requested policy"
+        _cli_eprint(policy_reason)
+        val _r = native_build_worker_publish_failure_receipt_v1(get_args(), 1, policy_reason)
         return 1
     val raw_args = get_cli_args()
     val static_fast_path = cli_static_fast_path_kind(raw_args,
@@ -322,7 +323,9 @@ fn cli_main_with_execution_mode(force_interpreter: bool) -> i64:
         return 0
     if not install_selected_k1_backend_table_v1() or
             not install_full_static_backends_for_k1_policy_v1(selected_k1_policy):
-        _cli_eprint("PLUG-E-TABLE: invalid policy-bound full-CLI backend composition")
+        val table_reason = "PLUG-E-TABLE: invalid policy-bound full-CLI backend composition"
+        _cli_eprint(table_reason)
+        val _r = native_build_worker_publish_failure_receipt_v1(get_args(), 1, table_reason)
         return 1
 
     # Coordinator children keep their process boundary, but dispatch their two
@@ -338,9 +341,11 @@ fn cli_main_with_execution_mode(force_interpreter: bool) -> i64:
             val admission = compiler_entrypoint_admit_v1(["src"])
             if not admission.valid:
                 _cli_eprint("SCV-E-ADMISSION: " + admission.reason)
+                val _r = native_build_worker_publish_failure_receipt_v1(worker_payload, 1, "SCV-E-ADMISSION: " + admission.reason)
                 return 1
             if bootstrap_internal_worker_is_parse_v1(process_args, worker_marker):
                 return run_parse_shard(worker_payload)
+            native_build_declare_linked_worker_entry_v1()
             return run_native_build_worker_entry(worker_payload)
 
     # These app commands own option names also recognized by the shared CLI
@@ -390,7 +395,9 @@ fn cli_main_with_execution_mode(force_interpreter: bool) -> i64:
         val admission_roots = if str_eq(args[0], "test"): ["src", "test"] else: ["src"]
         val admission = compiler_entrypoint_admit_v1(admission_roots)
         if not admission.valid:
-            _cli_eprint("SCV-E-ADMISSION: " + admission.reason)
+            val admission_reason = "SCV-E-ADMISSION: " + admission.reason
+            _cli_eprint(admission_reason)
+            val _r = native_build_worker_publish_failure_receipt_v1(args, 1, admission_reason)
             return 1
 
     if args.len() == 0:
@@ -447,6 +454,9 @@ fn cli_main_with_execution_mode(force_interpreter: bool) -> i64:
 
     val registered_command = cli_registry_has_command_v1(first)
     val direct_script_target = cli_registry_direct_script_target_v1(first)
+
+    if str_eq(first, "orchestrator"):
+        return cli_orchestrator_entry_v1(_cli_args_from(filtered_args, 1))
 
     if str_eq(first, "-h") or str_eq(first, "--help"):
         cli_print_help_with_progress(log_opts.progress)
@@ -561,6 +571,8 @@ fn cli_main_with_execution_mode(force_interpreter: bool) -> i64:
         return run_check(check_args)
     elif str_eq(first, "doc-coverage"):
         return run_doc_coverage(_cli_args_from(filtered_args, 1))
+    elif str_eq(first, "robust"):
+        return run_robust(_cli_args_from(filtered_args, 1))
     elif str_eq(first, "sbom"):
         return run_sbom(_cli_args_from(filtered_args, 1))
     elif str_eq(first, "check-arch"):
@@ -613,6 +625,8 @@ fn cli_main_with_execution_mode(force_interpreter: bool) -> i64:
         return cli_info(filtered_args)
     elif str_eq(first, "spec-coverage"):
         return cli_run_spec_coverage(filtered_args)
+    elif str_eq(first, "trace"):
+        return run_trace_query_v1(_cli_args_from(filtered_args, 1)).value
     elif str_eq(first, "traceability-check"):
         return cli_run_file("src/app/traceability/main.spl", _cli_args_from(filtered_args, 1), flags.gc_log, flags.gc_off)
     elif str_eq(first, "tracking"):
@@ -645,6 +659,10 @@ fn cli_main_with_execution_mode(force_interpreter: bool) -> i64:
         return cli_run_file("src/app/bug_gen/main.spl", filtered_args, flags.gc_log, flags.gc_off)
     elif str_eq(first, "bug-resolve"):
         return cli_run_file("src/app/bug_resolve/main.spl", filtered_args, flags.gc_log, flags.gc_off)
+    elif str_eq(first, "bug-closure-check"):
+        return cli_run_file("src/app/bug_closure_check/main.spl", filtered_args, flags.gc_log, flags.gc_off)
+    elif str_eq(first, "workaround-recover"):
+        return cli_run_file("src/app/workaround_recover/main.spl", filter_internal_flags(raw_args), flags.gc_log, flags.gc_off)
     elif str_eq(first, "brief"):
         return cli_run_brief(filtered_args)
     elif str_eq(first, "stats"):
@@ -835,33 +853,5 @@ fn cli_main_with_execution_mode(force_interpreter: bool) -> i64:
         # code. See doc/08_tracking/bug/cli_unknown_subcommand_exits_zero_fail_open_2026-08-07.md
         print_error_with_help("file not found: {first}")
         return cli_dispatch_fallthrough_exit_code(first)
-
-# CLI_USAGE_ERROR_EXIT_CODE is the exit code for an unknown-token dispatch
-# fall-through: `first` matched no known subcommand and does not resolve as
-# an existing file to run. Distinct from the code a real-but-failing file
-# execution returns (that path returns cli_run_file's own exit code).
-val CLI_USAGE_ERROR_EXIT_CODE: i64 = 2
-
-fn cli_dispatch_fallthrough_exit_code(token: text) -> i64:
-    """Exit code for the dispatch fall-through path given `token`.
-
-    Only meaningful when `token` has already been ruled out as a known
-    subcommand name (the caller's elif chain does that). Returns
-    CLI_USAGE_ERROR_EXIT_CODE (2) when `token` also does not resolve to an
-    existing file (pure usage error: unknown/misspelled/unimplemented
-    subcommand). Returns -1 when `token` IS an existing file, signalling the
-    caller should run the file and use its own exit code instead — this
-    function is never authoritative for that case. In `main()`, the -1
-    sentinel is unreachable as a process exit code: the caller's
-    `elif cli_file_exists(first):` branch runs `cli_run_file` and returns
-    BEFORE this function is ever called, so the `else` branch that calls
-    `cli_dispatch_fallthrough_exit_code` only fires when `cli_file_exists`
-    is already known false, and this function always returns
-    CLI_USAGE_ERROR_EXIT_CODE (2) in that path.
-
-    See doc/08_tracking/bug/cli_unknown_subcommand_exits_zero_fail_open_2026-08-07.md
-    """
-    if cli_file_exists(token):
-        -1
-    else:
-        CLI_USAGE_ERROR_EXIT_CODE
+# CLI_USAGE_ERROR_EXIT_CODE and cli_dispatch_fallthrough_exit_code live in
+# app.cli._CliMain.startup_policy and are re-exported at top of module.

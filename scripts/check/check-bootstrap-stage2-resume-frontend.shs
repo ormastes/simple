@@ -1,0 +1,84 @@
+#!/bin/sh
+set -eu
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P)
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/stage2-resume-frontend.XXXXXX")
+scratch=$(CDPATH= cd -- "$scratch" && pwd -P)
+trap 'rm -rf -- "$scratch"' EXIT HUP INT TERM
+owner="$repo/scripts/bootstrap/resume-stage2-from-cache.sh"
+awk '/^usage\(\)/ { copy=1 } /^\[ "\$#" = 1 \]/ { copy=0 } copy' "$owner" > "$scratch/helpers"
+awk '/^expected_env_names=/ { copy=1 } /^# Replay exactly/ { copy=0 } copy' "$owner" > "$scratch/validate"
+grep -q 'ambient frontend budget conflicts' "$scratch/validate"
+. "$scratch/helpers"
+. "$repo/scripts/check/lib/bootstrap-stage3/authority.shs"
+. "$repo/scripts/check/lib/bootstrap-stage3/command-snapshot.shs"
+stage2_recorded_cold_init=
+stage2_recorded_compiler_ceiling=
+stage2_diagnostic_names=
+stage2_recorded_preflight_names=
+count=0
+run_case() {
+    platform=$1
+    variant=$2
+    expected=$3
+    budget=3000000
+    case "$variant" in zero) budget=0 ;; large) budget=3000001 ;; malformed) budget=bad ;; esac
+    names=$(bootstrap_stage3_stage2_canonical_env_names "$platform")
+    transcript="$scratch/transcript"
+    {
+        if [ "$variant" != legacy ]; then
+            for row in "SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB=$budget" \
+                SIMPLE_HIR_SHARD_WORKER_KB=3000000 SIMPLE_PARSE_SHARD_WORKER_KB=1650000 \
+                SIMPLE_PARSE_SHARD_MAX=1 SIMPLE_SHARD_MEM_CLAMP=1; do
+                case "$platform:$row" in
+                    *linux*:SIMPLE_SHARD_TREE*) ;;
+                    *linux*:*) continue ;;
+                esac
+                case "$variant:$row" in
+                    partial:SIMPLE_SHARD_MEM_CLAMP=*) continue ;;
+                    altered:SIMPLE_PARSE_SHARD_MAX=*) row=SIMPLE_PARSE_SHARD_MAX=2 ;;
+                esac
+                printf 'explicit-env:%s:%s\n' "${#row}" "$row"
+                if [ "$variant:$row" = duplicate:SIMPLE_SHARD_MEM_CLAMP=1 ]; then
+                    printf 'explicit-env:%s:%s\n' "${#row}" "$row"
+                fi
+            done
+        fi
+        for name in $names; do
+            row="$name=value"
+            printf 'explicit-env:%s:%s\n' "${#row}" "$row"
+        done
+        if [ "$variant" = unknown ]; then
+            row=SIMPLE_UNKNOWN_POLICY=1
+            printf 'explicit-env:%s:%s\n' "${#row}" "$row"
+        fi
+    } > "$transcript"
+    set +e
+    (
+        set -e
+        unset SIMPLE_BOOTSTRAP_FRONTEND_MEMORY_BUDGET_KIB
+        if [ "$variant" = ambient ]; then SIMPLE_BOOTSTRAP_FRONTEND_MEMORY_BUDGET_KIB=1; fi
+        stage2_recorded_env_names=$(transcript_explicit_env_names "$transcript")
+        . "$scratch/validate"
+        case "$platform:$variant" in
+            *windows*:canonical) [ "$SIMPLE_BOOTSTRAP_FRONTEND_MEMORY_BUDGET_KIB" = 3000000 ] ;;
+        esac
+    ) > "$scratch/result" 2>&1
+    result=$?
+    set -e
+    if { [ "$expected" = pass ] && [ "$result" != 0 ]; } ||
+       { [ "$expected" = fail ] && [ "$result" = 0 ]; }; then
+        printf 'FAIL: %s %s (%s)\n' "$platform" "$variant" "$result" >&2
+        cat "$scratch/result" >&2
+        exit 1
+    fi
+    count=$((count + 1))
+}
+for platform in x86_64-pc-windows-msvc x86_64-pc-windows-gnu; do
+    for variant in canonical legacy; do run_case "$platform" "$variant" pass; done
+    for variant in zero large malformed partial altered duplicate unknown ambient; do
+        run_case "$platform" "$variant" fail
+    done
+done
+for variant in canonical legacy zero large; do run_case x86_64-unknown-linux-gnu "$variant" pass; done
+for variant in malformed unknown; do run_case x86_64-unknown-linux-gnu "$variant" fail; done
+printf 'Stage 2 resume frontend policy: PASS (%s cases)\n' "$count"

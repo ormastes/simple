@@ -107,3 +107,16 @@ fn pool_fn_value_cranelift() {
 fn pool_fn_value_llvm() {
     build_and_run("llvm", "pool_fn.spl", "pool-fn PASS");
 }
+
+/// Fully-annotated nested fns in methods, nested-fn-calls-nested-fn, capture
+/// and f64. doc/08_tracking/bug/jit_lowering_clamp_f_engine_color_2026-07-02.md
+#[test]
+fn nested_fn_cranelift() {
+    build_and_run("cranelift", "nested_fn.spl", "nested-fn PASS");
+}
+
+#[cfg(feature = "llvm")]
+#[test]
+fn nested_fn_llvm() {
+    build_and_run("llvm", "nested_fn.spl", "nested-fn PASS");
+}

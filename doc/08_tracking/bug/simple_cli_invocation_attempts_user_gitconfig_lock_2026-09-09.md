@@ -64,3 +64,17 @@ access, capturing the exact argv per the record's own evidence bar.
 ## Host-environment classification (2026-09-18)
 
 Audited by the fix-pipeline classification review: **environment-blocked: windows** — [env-blocked:windows]. This row is not executable on the macOS aarch64 host fix lane; it resumes when the blocking condition clears.
+
+**Revalidated 2026-11-02: still plausible because the report title (Simple CLI invocation attempts to lock the user's .gitconfig during a read-only) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**
+
+## Windows triage 2026-11-03
+
+Run on Windows 11 with `bin/simple.exe` (v1.0.0-rc.1 seed). With `HOME`/`USERPROFILE` pointed at a scratch dir holding a `.gitconfig` and a pre-existing `.gitconfig.lock` (so any lock attempt would fail or alter it), `--version`, `--help` and `lint --help` all ran with no lock diagnostic, and both files kept identical sha256 before and after. `git grep` of `src/app/cli` and `src/compiler_rust/driver/src` on release/1.0.0 finds no `git config` invocation. Not reproduced for these argv; the original smoke argv/digest was never retained. No code change. Stays open pending the original invocation (tool-dispatch probe) with Process Monitor capture.
+
+## Fix 2026-11-03 (fix-implemented-verification-pending)
+
+The only in-tree writer of the user-global git config is `scripts/setup/setup-ci-receipt-key.shs:141`, which defaulted to `git config --global` for `simple.ciReceiptKey`/`simple.ciReceiptIdentity`; the CLI binary itself never touches git config. Default is now `--local`; `--global-config` is the explicit opt-in. Guard: `scripts/check/check-no-global-git-config-write.shs` (standalone, not push-wired: full scan ~2.5 min on Windows). Regression: `sh scripts/check/check-gitconfig-lock-untouched.shs` (locked HOME; before fix FAIL exit 1 "git config --global failed", after fix PASS). Verification pending: the original smoke argv was never retained, so a Windows session should re-run its smoke with HOME pointing at a locked scratch dir.
+
+## Closure 2026-11-03
+
+Fix landed in #6072 (setup no longer writes user-global gitconfig). Re-check with deployed bin/simple.exe: `--version`, `run`, `lint` under a 50 ms poll for `~/.gitconfig.lock`: no lock seen, `~/.gitconfig` sha256 unchanged. Startup git spawns in src/compiler/80.driver are `git -C <repo>` ancestry probes in cache promotion only (not on the plain startup path, no `git config`). Closed as fixed.

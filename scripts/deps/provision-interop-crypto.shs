@@ -1,0 +1,286 @@
+#!/bin/sh
+set -eu
+
+# Provision / detect the external crypto oracle for the devhub SQLCipher 4
+# decryption-algorithm interop legs (test/01_unit + test/02 interop specs that
+# cross-compare the pure-Simple codec against an open-source crypto library).
+#
+# Usage:
+#   sh scripts/deps/provision-interop-crypto.shs
+#       Detect, optionally provision, and write the status record. Run BEFORE
+#       the build/test lane that executes the interop specs.
+#   sh scripts/deps/provision-interop-crypto.shs --self-test
+#       Prove both gating paths in an isolated scratch area: lib present ->
+#       status=enabled; lib absent (SIMPLE_INTEROP_CRYPTO=skip, and a PATH
+#       without python3/openssl) -> status=skipped, exit 0; require mode with
+#       the lib absent -> nonzero refusal.
+#
+# The external crypto library is OPTIONAL for bootstrap: when no usable
+# library is detected (and provisioning fails or is disabled), the build is
+# NOT failed in the default `auto` mode — the status record says `skipped` and
+# the interop specs report their external-library legs as skipped-not-failed.
+# Only an explicit `SIMPLE_INTEROP_CRYPTO=require` makes the library a hard
+# build dependency (exit 1 when absent).
+#
+# Tools probed, best first:
+#   python3 + `cryptography` (pip-provisioned when missing and allowed)
+#   openssl CLI (>= 3.x; already present on most dev hosts)
+#
+# Env knobs:
+#   SIMPLE_INTEROP_CRYPTO          auto (default) | require | skip
+#   SIMPLE_INTEROP_CRYPTO_STATUS   status SDN path
+#                                  (default: build/interop/crypto_interop.sdn)
+#   SIMPLE_INTEROP_CRYPTO_NO_INSTALL=1   detection only, never pip-install
+# Per-host, untracked overrides (gitignored; repo-local wins over home), same
+# pattern as .simple/qemu-host.conf — use ': "${SIMPLE_INTEROP_CRYPTO:=skip}"'
+# inside the file so explicit env exports still win:
+#   ~/.simple/interop-crypto.conf
+#   .simple/interop-crypto.conf
+#
+# Status record (SDN; consumed by the interop specs and by build/review
+# verdicts; SDN is the repo default for structured output):
+#   build/interop/crypto_interop.sdn
+
+# Resolve the repo root without external dirname (the self-test runs this
+# script under a PATH that carries only mkdir/rm).
+case "$0" in
+    */*) script_dir=${0%/*} ;;
+    *) script_dir=. ;;
+esac
+# Two levels up: this script lives in scripts/deps/, repo root is above scripts/.
+ROOT_DIR="$(CDPATH= cd -- "$script_dir/../.." && pwd)"
+cd "$ROOT_DIR"
+
+# Per-host untracked config (gitignored): home first, repo-local wins.
+[ -f "${HOME}/.simple/interop-crypto.conf" ] && . "${HOME}/.simple/interop-crypto.conf"
+[ -f "${ROOT_DIR}/.simple/interop-crypto.conf" ] && . "${ROOT_DIR}/.simple/interop-crypto.conf"
+
+MODE="${SIMPLE_INTEROP_CRYPTO:-auto}"
+STATUS_FILE="${SIMPLE_INTEROP_CRYPTO_STATUS:-build/interop/crypto_interop.sdn}"
+NO_INSTALL="${SIMPLE_INTEROP_CRYPTO_NO_INSTALL:-0}"
+
+case "$MODE" in
+    auto|require|skip) ;;
+    *) printf '%s\n' "provision-interop-crypto: SIMPLE_INTEROP_CRYPTO must be auto|require|skip, got '$MODE'" >&2; exit 2 ;;
+esac
+
+# ---------------------------------------------------------------------------
+# Detection helpers (best-first). Output: "<tool> <version>" or empty.
+# ---------------------------------------------------------------------------
+
+detect_python_cryptography() {
+    # Intentionally avoids importing anything but `cryptography`: the oracle
+    # specs drive it through its documented AES-CBC / HMAC APIs. Exit status
+    # propagates (callers gate provisioning on it); stdout is the version.
+    python3 -c 'import cryptography; print(cryptography.__version__)' 2>/dev/null
+}
+
+detect_openssl() {
+    # `openssl version` prints "OpenSSL 3.5.9 ..."; take the second field via
+    # POSIX field splitting (no cut/awk dependency).
+    if command -v openssl >/dev/null 2>&1; then
+        set -- $(openssl version 2>/dev/null || true)
+        [ "${2:-}" != "" ] && printf '%s\n' "$2" || true
+    fi
+}
+
+python_version() {
+    python3 -c 'import platform; print(platform.python_version())' 2>/dev/null || printf '%s\n' "-"
+}
+
+write_status() {
+    # $1 status $2 tool $3 tool_version $4 python_version $5 openssl_version
+    # $6 reason $7 provision_attempted
+    status_dir=${STATUS_FILE%/*}
+    [ "$status_dir" != "$STATUS_FILE" ] && mkdir -p "$status_dir"
+    {
+        printf '%s\n' "# crypto_interop.sdn - external crypto interop oracle status."
+        printf '%s\n' "# Written by scripts/deps/provision-interop-crypto.shs before build/test"
+        printf '%s\n' "# lanes that run the devhub SQLCipher 4 interop legs. Consumers: interop"
+        printf '%s\n' "# specs gate external-library legs on status=enabled (legs are skipped,"
+        printf '%s\n' "# never failed, when the external crypto library is unavailable; it is"
+        printf '%s\n' "# optional for bootstrap, never a hard dependency unless mode=require)."
+        printf '%s\n' "status: $1"
+        printf '%s\n' "mode: $MODE"
+        printf '%s\n' "tool: $2"
+        printf '%s\n' "tool_version: $3"
+        printf '%s\n' "python_version: $4"
+        printf '%s\n' "openssl_version: $5"
+        printf '%s\n' "reason: $6"
+        printf '%s\n' "provision_attempted: $7"
+        printf '%s\n' "script: scripts/deps/provision-interop-crypto.shs"
+    } > "$STATUS_FILE"
+}
+
+select_tool() {
+    # Echoes "<tool> <version>" for the best usable library, or nothing.
+    pyver=$(detect_python_cryptography)
+    if [ "$pyver" != "" ]; then
+        printf '%s\n' "python-cryptography $pyver"
+        return 0
+    fi
+    ossver=$(detect_openssl)
+    if [ "$ossver" != "" ]; then
+        printf '%s\n' "openssl-cli $ossver"
+        return 0
+    fi
+    return 1
+}
+
+provision_attempted=false
+
+decide_and_record() {
+    if [ "$MODE" = "skip" ]; then
+        write_status skipped none "-" "$(python_version)" "$(detect_openssl || printf '%s\n' -)" \
+            "SIMPLE_INTEROP_CRYPTO=skip (external crypto interop legs disabled by config)" "$provision_attempted"
+        printf '%s\n' "crypto_interop=skipped reason=config-skip status_file=$STATUS_FILE"
+        return 0
+    fi
+    if selection=$(select_tool); then
+        set -- $selection
+        write_status enabled "$1" "$2" "$(python_version)" "$(detect_openssl || printf '%s\n' -)" \
+            "" "$provision_attempted"
+        printf '%s\n' "crypto_interop=enabled tool=$1 version=$2 status_file=$STATUS_FILE"
+        return 0
+    fi
+    # Nothing usable. In auto mode the external library stays optional:
+    # record skipped and let bootstrap continue; require mode refuses.
+    reason="no usable external crypto library (python3 cryptography import failed, openssl CLI not found"
+    if [ "$provision_attempted" = "true" ]; then
+        reason="$reason; pip provisioning attempted and failed"
+    else
+        reason="$reason; pip provisioning disabled or not attempted"
+    fi
+    reason="$reason)"
+    write_status skipped none "-" "$(python_version)" "-" "$reason" "$provision_attempted"
+    printf '%s\n' "crypto_interop=skipped reason=unavailable status_file=$STATUS_FILE"
+    if [ "$MODE" = "require" ]; then
+        printf '%s\n' "provision-interop-crypto: SIMPLE_INTEROP_CRYPTO=require but no usable external crypto library" >&2
+        return 1
+    fi
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# Main: skip -> detect -> (auto-provision) -> detect -> record.
+# ---------------------------------------------------------------------------
+
+if [ "${1:-}" = "--self-test" ]; then
+    shift
+    SELFTEST_DIR="build/interop/selftest"
+    mkdir -p "$SELFTEST_DIR/bin"
+    # Absence simulation: a PATH containing only the utilities this script
+    # itself needs (sh/mkdir/rm + their msys-2.0.dll runtime), deliberately
+    # WITHOUT python3 and openssl. Copies (not symlinks) so the restricted
+    # env works on hosts where /usr/bin holds an openssl build (Git Bash):
+    # MSYS exes resolve their DLL from the exe directory.
+    rm -f "$SELFTEST_DIR/bin/sh.exe" "$SELFTEST_DIR/bin/mkdir.exe" "$SELFTEST_DIR/bin/rm.exe" \
+        "$SELFTEST_DIR/bin/msys-2.0.dll"
+    for util in sh mkdir rm; do
+        for cand in /usr/bin /bin; do
+            if [ -x "$cand/$util.exe" ]; then
+                cp -f "$cand/$util.exe" "$SELFTEST_DIR/bin/$util.exe"
+                break
+            fi
+        done
+    done
+    for cand in /usr/bin /bin; do
+        if [ -f "$cand/msys-2.0.dll" ]; then
+            for dll in "$cand"/msys-*.dll; do
+                [ -f "$dll" ] && cp -f "$dll" "$SELFTEST_DIR/bin/"
+            done
+            break
+        fi
+    done
+    [ -x "$SELFTEST_DIR/bin/sh.exe" ] || {
+        printf '%s\n' "SELFTEST FAIL: could not assemble restricted sh in $SELFTEST_DIR/bin" >&2
+        exit 1
+    }
+
+    # Case 1: library present on the host (python-cryptography and/or
+    # openssl) -> enabled. No install attempt: prove pure detection.
+    if env SIMPLE_INTEROP_CRYPTO=auto SIMPLE_INTEROP_CRYPTO_NO_INSTALL=1 \
+        SIMPLE_INTEROP_CRYPTO_STATUS="$SELFTEST_DIR/present.sdn" \
+        sh "$ROOT_DIR/scripts/deps/provision-interop-crypto.shs" > "$SELFTEST_DIR/present.log" 2>&1; then
+        :
+    else
+        printf '%s\n' "SELFTEST FAIL: present-path run exited nonzero" >&2
+        cat "$SELFTEST_DIR/present.log" >&2
+        exit 1
+    fi
+    grep -q '^status: enabled$' "$SELFTEST_DIR/present.sdn" || {
+        printf '%s\n' "SELFTEST FAIL: present path did not record status: enabled" >&2
+        cat "$SELFTEST_DIR/present.sdn" >&2
+        exit 1
+    }
+
+    # Case 2: config-flag absence (SIMPLE_INTEROP_CRYPTO=skip) -> skipped,
+    # exit 0, bootstrap would continue.
+    if env SIMPLE_INTEROP_CRYPTO=skip SIMPLE_INTEROP_CRYPTO_NO_INSTALL=1 \
+        SIMPLE_INTEROP_CRYPTO_STATUS="$SELFTEST_DIR/flag_skip.sdn" \
+        sh "$ROOT_DIR/scripts/deps/provision-interop-crypto.shs" > "$SELFTEST_DIR/flag_skip.log" 2>&1; then
+        :
+    else
+        printf '%s\n' "SELFTEST FAIL: config-skip run exited nonzero" >&2
+        cat "$SELFTEST_DIR/flag_skip.log" >&2
+        exit 1
+    fi
+    grep -q '^status: skipped$' "$SELFTEST_DIR/flag_skip.sdn" || {
+        printf '%s\n' "SELFTEST FAIL: config-skip path did not record status: skipped" >&2
+        exit 1
+    }
+
+    # Case 3: PATH without python3/openssl, auto mode -> skipped, exit 0.
+    if env -i PATH="$ROOT_DIR/$SELFTEST_DIR/bin" HOME="$HOME" SIMPLE_INTEROP_CRYPTO=auto \
+        SIMPLE_INTEROP_CRYPTO_NO_INSTALL=1 \
+        SIMPLE_INTEROP_CRYPTO_STATUS="$SELFTEST_DIR/absent.sdn" \
+        sh "$ROOT_DIR/scripts/deps/provision-interop-crypto.shs" > "$SELFTEST_DIR/absent.log" 2>&1; then
+        :
+    else
+        printf '%s\n' "SELFTEST FAIL: absent-tools auto run exited nonzero" >&2
+        cat "$SELFTEST_DIR/absent.log" >&2
+        exit 1
+    fi
+    grep -q '^status: skipped$' "$SELFTEST_DIR/absent.sdn" || {
+        printf '%s\n' "SELFTEST FAIL: absent-tools path did not record status: skipped" >&2
+        cat "$SELFTEST_DIR/absent.sdn" >&2
+        exit 1
+    }
+
+    # Case 4: PATH without python3/openssl, require mode -> nonzero refusal.
+    if env -i PATH="$ROOT_DIR/$SELFTEST_DIR/bin" HOME="$HOME" SIMPLE_INTEROP_CRYPTO=require \
+        SIMPLE_INTEROP_CRYPTO_NO_INSTALL=1 \
+        SIMPLE_INTEROP_CRYPTO_STATUS="$SELFTEST_DIR/require_absent.sdn" \
+        sh "$ROOT_DIR/scripts/deps/provision-interop-crypto.shs" > "$SELFTEST_DIR/require_absent.log" 2>&1; then
+        printf '%s\n' "SELFTEST FAIL: require mode with absent tools must refuse (exit 1)" >&2
+        exit 1
+    else
+        rc=$?
+        [ "$rc" -eq 1 ] || {
+            printf '%s\n' "SELFTEST FAIL: require mode refusal exit code is $rc, expected 1" >&2
+            exit 1
+        }
+    fi
+    grep -q '^status: skipped$' "$SELFTEST_DIR/require_absent.sdn" || {
+        printf '%s\n' "SELFTEST FAIL: require-mode refusal did not record status: skipped" >&2
+        exit 1
+    }
+
+    printf '%s\n' "SELFTEST PASS provision-interop-crypto: present=enabled flag-skip=skipped absent-auto=skipped absent-require=refused"
+    printf '%s\n' "SELFTEST evidence: $SELFTEST_DIR/*.sdn"
+    exit 0
+fi
+
+# Preferred oracle is python-cryptography; when it is missing, try to
+# provision it before falling back to the openssl CLI (so a successful
+# provision upgrades the tool choice, not just the skip/fail decision).
+if ! detect_python_cryptography > /dev/null 2>&1 \
+    && [ "$MODE" != "skip" ] && [ "$NO_INSTALL" != "1" ] && command -v python3 >/dev/null 2>&1; then
+    # Provision attempt (best effort, logged). --user keeps it out of system
+    # site-packages; failure is recorded, never fatal in auto mode.
+    mkdir -p build/interop
+    provision_attempted=true
+    python3 -m pip install --user cryptography > build/interop/provision-pip.log 2>&1 || true
+fi
+
+decide_and_record

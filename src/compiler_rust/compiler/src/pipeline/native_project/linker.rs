@@ -10,11 +10,11 @@ use simple_common::target::{LinkerFlavor, Target, TargetOS};
 
 use super::{effective_target, inline_asm_emit, safe_canonicalize, ModuleImports, NativeProjectBuilder};
 use super::config::runtime_bundle_requests_core_c_bootstrap;
-use super::stubs::{generate_stub_object, generate_stub_object_freestanding};
+use super::stubs::generate_stub_object_freestanding;
 use super::tools::{
     archive_create_command, build_bootstrap_mutex_runtime_capsule_archive, build_compiler_backfill_archive,
     build_bootstrap_tools_sqlite_runtime, stage_sqlite_runtime_dll,
-    build_core_c_runtime_library, build_stage4_c_runtime_library, build_stage4_cli_c_provider_archives,
+    build_core_c_runtime_supplement_library, build_stage4_c_runtime_library, build_stage4_cli_c_provider_archives,
     build_stage4_runtime_capsule_archive, build_stage4_rust_runtime_projection_archive, find_archive_tool,
     find_c_compiler, find_compiler_rt_builtins, find_cxx_compiler, find_hosted_runtime_rlib,
     external_tool_path, find_msvc_compiler_rt_builtins, find_objcopy_tool, is_system_symbol, missing_llvm_tool_error,
@@ -26,6 +26,65 @@ use super::tools::{
 
 fn uses_msvc_flags(flavor: LinkerFlavor) -> bool {
     flavor == LinkerFlavor::Msvc
+}
+
+/// Quote one argument for a clang `@response` file. llvm's response-file
+/// tokenizer treats backslash as an escape character BOTH inside and outside
+/// double quotes (`\\` -> `\`, `\"` -> `"`), so a literal Windows path must
+/// double every backslash -- single-quoted posix rsp writers are NOT
+/// clang-parseable. Measured 2026-11-12: an unescaped
+/// `"/WHOLEARCHIVE:\\?\D:\...\libspl_objects.a"` line came back mangled
+/// (clang-cl: "no such file or directory: '/WHOLEARCHIVE:...'"), because
+/// every `\x` pair collapsed to `x` and a trailing `\"` swallowed the
+/// closing quote, gluing the next line into one token.
+fn quote_cl_response_arg(arg: &str) -> String {
+    format!("\"{}\"", arg.replace('\\', "\\\\").replace('"', "\\\""))
+}
+
+/// Windows CreateProcess rejects command lines over 32 KiB (os error 206). A
+/// freestanding kernel link passes ~800 object paths plus defsyms, so spill
+/// every argument, in order, into `@rsp` once the joined argv nears the limit.
+/// `direct_lld` adds `--rsp-quoting=posix` so ld.lld decodes the escaped
+/// backslashes the same way on every host; the clang driver already accepts
+/// this quoting (hosted owner-member link, measured 2026-11-13).
+const RESPONSE_FILE_ARGV_LIMIT: usize = 24 * 1024;
+
+fn spill_args_to_response_file(
+    cmd: &std::process::Command,
+    rsp_path: &Path,
+    direct_lld: bool,
+) -> Result<Option<std::process::Command>, String> {
+    let total: usize = cmd.get_args().map(|a| a.len() + 3).sum();
+    if total <= RESPONSE_FILE_ARGV_LIMIT {
+        return Ok(None);
+    }
+    let mut body = String::with_capacity(total * 2);
+    for arg in cmd.get_args() {
+        let arg = arg
+            .to_str()
+            .ok_or_else(|| format!("non-UTF-8 link argument {:?}", arg))?;
+        if arg.contains('\n') {
+            return Err(format!("unsupported newline in link argument {:?}", arg));
+        }
+        body.push_str(&quote_cl_response_arg(arg));
+        body.push(' ');
+    }
+    std::fs::write(rsp_path, body).map_err(|e| format!("write link response file {}: {e}", rsp_path.display()))?;
+    let mut spilled = std::process::Command::new(cmd.get_program());
+    if let Some(dir) = cmd.get_current_dir() {
+        spilled.current_dir(dir);
+    }
+    for (key, value) in cmd.get_envs() {
+        match value {
+            Some(v) => spilled.env(key, v),
+            None => spilled.env_remove(key),
+        };
+    }
+    if direct_lld {
+        spilled.arg("--rsp-quoting=posix");
+    }
+    spilled.arg(format!("@{}", rsp_path.display()));
+    Ok(Some(spilled))
 }
 
 fn hosted_elf_link_args(target: Target, exact_stage4: bool) -> &'static [&'static str] {
@@ -169,9 +228,43 @@ pub(super) fn archive_object_batches<'a>(
 
 fn generated_c_source_compiler(target: simple_common::target::Target) -> String {
     if target.os == simple_common::target::TargetOS::Windows {
-        target_c_compiler(target)
-    } else {
-        target_cxx_compiler(target)
+        return target_c_compiler(target);
+    }
+    // A hosted Linux cross target defaults to the GNU cross driver
+    // (`aarch64-linux-gnu-g++`, ...). When that driver is not installed, a
+    // clang on PATH can still emit the generated stubs for the target via
+    // `--target=<triple>` (see `generated_c_object_triple`), so prefer it over
+    // spawning a driver that does not exist.
+    if let Some(gnu) = super::tools::hosted_linux_cross_compiler(target, true) {
+        if !simple_common::platform::cc_detect::command_exists(gnu)
+            && simple_common::platform::cc_detect::command_exists("clang")
+        {
+            return "clang".to_string();
+        }
+    }
+    target_cxx_compiler(target)
+}
+
+/// Triple the generated C objects (`_main_stub.o`, `_init_all.o`) must be
+/// emitted for. `None` means the host: the compiler's default is correct.
+/// Without this, a hosted cross build (e.g. `--target x86_64-unknown-linux-gnu`
+/// on macOS arm64) emitted the stubs as host Mach-O next to target ELF module
+/// objects.
+pub(super) fn generated_c_object_triple(target: simple_common::target::Target) -> Option<&'static str> {
+    use simple_common::target::{TargetArch, TargetOS};
+    if target.is_host() {
+        return None;
+    }
+    if let Some(triple) = NativeProjectBuilder::freestanding_target_triple(target) {
+        return Some(triple);
+    }
+    match (target.arch, target.os) {
+        (TargetArch::X86_64, TargetOS::Linux) => Some("x86_64-unknown-linux-gnu"),
+        (TargetArch::Aarch64, TargetOS::Linux) => Some("aarch64-unknown-linux-gnu"),
+        (TargetArch::Riscv64, TargetOS::Linux) => Some("riscv64-unknown-linux-gnu"),
+        (TargetArch::Arm, TargetOS::Linux) => Some("armv7-unknown-linux-gnueabihf"),
+        (TargetArch::X86, TargetOS::Linux) => Some("i686-unknown-linux-gnu"),
+        _ => None,
     }
 }
 
@@ -207,12 +300,28 @@ pub(super) fn minimal_boot_source_allowed(stem: &str, ssh_live_boot: bool) -> bo
         || stem == "baremetal_runtime_core.inc"
         || stem == "rv64_display_backend"
         || (ssh_live_boot && stem == "full_networking_runtime")
+        || stem == "rv64_kernel_primitives"
         || stem == "curve25519_ring_helper"
         || stem == "ed25519_scalar_helper"
         || stem == "ed25519_sha512_helper"
         || stem == "tls13_aes256_gcm_helper"
         || stem == "tls13_sha256_helper"
         || stem == "ed25519_verify_helper"
+}
+
+pub(super) fn minimal_boot_asm_source_allowed(stem: &str) -> bool {
+    stem != "multiboot2_elf64_loader" && stem != "up2_dci_uefi_transition"
+}
+
+pub(super) fn freestanding_boot_dir(entry: &Path, source_dirs: &[PathBuf]) -> Option<PathBuf> {
+    let entry_boot = entry.parent().unwrap_or(Path::new(".")).join("boot");
+    if entry_boot.is_dir() {
+        return Some(entry_boot);
+    }
+    source_dirs
+        .iter()
+        .map(|root| root.join("boot"))
+        .find(|path| path.is_dir())
 }
 
 fn wrap_elf32_multiboot(output: &Path, objcopy_bin: &str) -> Result<(), String> {
@@ -377,7 +486,13 @@ pub(super) const STAGE4_CORE_C_ARGV_PROVIDER_SYMBOLS: &[&str] = &[
 /// The sibling `else if is_msvc` branches keep `-Wl,/WHOLEARCHIVE:`: those run
 /// the GNU-style `clang` driver against an MSVC target, where `-Wl,` is right.
 fn clang_cl_whole_archive_arg(path: &Path) -> String {
-    format!("/WHOLEARCHIVE:{}", path.display())
+    // Plain spelling, never verbatim `\\?\`: verbatim paths survive a direct
+    // command-line spawn but are re-escaped into broken tokens when clang-cl
+    // expands a response file and forwards the arg to lld (measured
+    // 2026-11-13: lld received doubled backslashes and reported "could not
+    // open '\\\\?\\D:\\...'"). Every whole-archive path is a build-tree path
+    // well under MAX_PATH, so plain is safe here.
+    format!("/WHOLEARCHIVE:{}", external_tool_path(path).display())
 }
 
 /// lld-link options for the MSVC stub-fallback lane (SIMPLE_NO_STUB_FALLBACK
@@ -416,6 +531,76 @@ fn link_failure_output(stdout: &[u8], stderr: &[u8]) -> String {
         Some(attribution) => format!("{raw}\n{attribution}"),
         None => raw,
     }
+}
+
+/// Archives for every `-l<name>` on a MinGW link line, plus the libraries the
+/// clang driver adds implicitly (`--unwindlib=libunwind`, mingw CRT). Each is
+/// looked up in the `-L` dirs first, then via the driver's own sysroot search
+/// (`-print-file-name`, i.e. llvm-mingw's x86_64-w64-mingw32/lib).
+fn gnu_link_line_libraries(cmd: &std::process::Command, cc: &str, driver_target: Option<&str>) -> Vec<PathBuf> {
+    let args: Vec<String> = cmd.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+    let search_dirs: Vec<PathBuf> = args.iter().filter_map(|a| a.strip_prefix("-L")).map(PathBuf::from).collect();
+    let mut names: Vec<&str> = args.iter().filter_map(|a| a.strip_prefix("-l")).collect();
+    names.extend(["unwind", "mingw32", "mingwex", "msvcrt", "kernel32"]);
+    resolve_gnu_link_libraries(&names, &search_dirs, |c| {
+        let out = std::process::Command::new(cc)
+            .args(driver_target)
+            .arg(format!("-print-file-name={c}"))
+            .output()
+            .ok()?;
+        if !out.status.success() {
+            return None;
+        }
+        Some(PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()))
+    })
+}
+
+/// Resolve `lib<name>.a` / `lib<name>.dll.a` for each name: `-L` dirs first,
+/// then sysroot dirs the driver already answered with, and only then a driver
+/// `-print-file-name` query. Measured 2026-11-18 on an aarch64-pc-windows-gnullvm
+/// cross link: one clang spawn per library (27 spawns, ~6 s each on a loaded
+/// Windows host, ~170 s of a 470 s "link") because none of the target's libs sit
+/// in the x64 `-L` dirs. llvm-mingw keeps every target import/CRT lib in one
+/// `<triple>/lib` dir, so the first answer's directory resolves the rest on disk.
+/// Names are deduplicated; the driver is asked at most once per candidate file.
+#[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+fn resolve_gnu_link_libraries(
+    names: &[&str],
+    search_dirs: &[PathBuf],
+    mut ask_driver: impl FnMut(&str) -> Option<PathBuf>,
+) -> Vec<PathBuf> {
+    let mut learned_dirs: Vec<PathBuf> = Vec::new();
+    let mut seen_names: Vec<&str> = Vec::new();
+    let mut found = Vec::new();
+    for &name in names {
+        if seen_names.contains(&name) {
+            continue;
+        }
+        seen_names.push(name);
+        let candidates = [format!("lib{name}.a"), format!("lib{name}.dll.a")];
+        let on_disk = search_dirs
+            .iter()
+            .chain(learned_dirs.iter())
+            .flat_map(|d| candidates.iter().map(move |c| d.join(c)))
+            .find(|p| p.is_file());
+        let path = on_disk.or_else(|| {
+            candidates.iter().find_map(|c| {
+                let p = ask_driver(c)?;
+                (p.is_absolute() && p.is_file()).then_some(p)
+            })
+        });
+        if let Some(p) = path {
+            if let Some(dir) = p.parent() {
+                if !search_dirs.iter().chain(learned_dirs.iter()).any(|d| d == dir) {
+                    learned_dirs.push(dir.to_path_buf());
+                }
+            }
+            if !found.contains(&p) {
+                found.push(p);
+            }
+        }
+    }
+    found
 }
 
 #[cfg(target_os = "macos")]
@@ -633,7 +818,7 @@ impl NativeProjectBuilder {
         }
     }
 
-    fn read_global_symbol_types(obj: &Path) -> Result<Vec<(String, String)>, String> {
+    pub(crate) fn read_global_symbol_types(obj: &Path) -> Result<Vec<(String, String)>, String> {
         let output = nm_command()?
             .arg("-g")
             .arg("-p")
@@ -751,7 +936,7 @@ impl NativeProjectBuilder {
         let mut undefined = HashSet::new();
         for obj in object_paths.iter().chain(boot_objects.iter()) {
             for (kind, name) in Self::read_global_symbol_types(obj)? {
-                if kind == "U" {
+                if matches!(kind.as_str(), "U" | "w" | "v") {
                     undefined.insert(name);
                 } else {
                     defined.insert(name);
@@ -1164,14 +1349,8 @@ impl NativeProjectBuilder {
         Ok(qualified_candidate)
     }
 
-    /// Compile the C main stub to an object file.
-    pub(crate) fn compile_main_stub(&self, temp_dir: &Path) -> Result<PathBuf, String> {
-        let main_c = temp_dir.join("_main_stub.c");
-        let target = effective_target();
-        let cc = generated_c_source_compiler(target);
-        let is_msvc = uses_msvc_flags(target.linker_flavor());
-
-        let stub_code = if is_msvc {
+    pub(super) fn main_stub_c_source(target: Target) -> &'static str {
+        if uses_msvc_flags(target.linker_flavor()) {
             r#"
 #include <wchar.h>
 
@@ -1212,6 +1391,32 @@ int wmain(int argc, wchar_t** argv) {
     return r;
 }
 "#
+        } else if target.os == TargetOS::Windows {
+            // PE/COFF weak externals bind `.weak.<sym>.default.<caller>` to
+            // absolute zero instead of extracting archive members. Keep the
+            // entry point, init caller, and argv setter strong so lazy COFF
+            // archive links pull them without forcing unused host modules.
+            r#"
+#ifdef __cplusplus
+extern "C" {
+#endif
+    int spl_main(void);
+    void __simple_call_module_inits(void);
+    void rt_set_args(int argc, char** argv);
+    void __attribute__((weak)) __simple_runtime_init(void);
+    void __attribute__((weak)) __simple_runtime_shutdown(void);
+#ifdef __cplusplus
+}
+#endif
+int main(int argc, char** argv) {
+    if (__simple_runtime_init) __simple_runtime_init();
+    __simple_call_module_inits();
+    rt_set_args(argc, argv);
+    int r = spl_main();
+    if (__simple_runtime_shutdown) __simple_runtime_shutdown();
+    return r;
+}
+"#
         } else {
             r#"
 #if defined(__APPLE__)
@@ -1231,10 +1436,10 @@ extern "C" {
 extern "C" {
 #endif
     int __attribute__((weak)) spl_main(void);
+    void __attribute__((weak)) __simple_call_module_inits(void);
     void rt_set_args(int argc, char** argv);
     void __attribute__((weak)) __simple_runtime_init(void);
     void __attribute__((weak)) __simple_runtime_shutdown(void);
-    void __attribute__((weak)) __simple_call_module_inits(void);
 #ifdef __cplusplus
 }
 #endif
@@ -1248,7 +1453,16 @@ int main(int argc, char** argv) {
     return r;
 }
 "#
-        };
+        }
+    }
+
+    /// Compile the C main stub to an object file.
+    pub(crate) fn compile_main_stub(&self, temp_dir: &Path) -> Result<PathBuf, String> {
+        let main_c = temp_dir.join("_main_stub.c");
+        let target = effective_target();
+        let cc = generated_c_source_compiler(target);
+        let is_msvc = uses_msvc_flags(target.linker_flavor());
+        let stub_code = Self::main_stub_c_source(target);
 
         std::fs::write(&main_c, stub_code).map_err(|e| format!("write main stub: {e}"))?;
 
@@ -1274,8 +1488,10 @@ int main(int argc, char** argv) {
         let argv: &[String] = if is_msvc { &clang_cl_args } else { &other_args };
         let mut cmd = std::process::Command::new(&cc);
         cmd.args(argv);
-        if let Some(flag) = windows_gnu_target_flag(target, &cc) {
-            cmd.arg(flag);
+        if !is_msvc {
+            if let Some(flag) = generated_c_target_flag(target, &cc, generated_c_object_triple(target)) {
+                cmd.arg(flag);
+            }
         }
         let output = cmd
             .output()
@@ -1351,11 +1567,7 @@ int main(int argc, char** argv) {
         let cc = generated_c_source_compiler(cross_target);
         let is_msvc = uses_msvc_flags(cross_target.linker_flavor());
         let use_llvm_backend = self.config.backend == "llvm";
-        let init_target_triple = if cross_target.is_host() {
-            None
-        } else {
-            Self::freestanding_target_triple(cross_target)
-        };
+        let init_target_triple = generated_c_object_triple(cross_target);
 
         let mut code = String::from("// Auto-generated: calls all __module_init_* functions\n");
         code.push_str("#ifdef __cplusplus\nextern \"C\" {\n#endif\n");
@@ -1370,6 +1582,17 @@ int main(int argc, char** argv) {
                      void {}(void) {{}}\n",
                     name, stub, stub
                 ));
+            }
+            code.push_str("void __simple_call_module_inits(void) {\n");
+            for name in &init_names {
+                code.push_str(&format!("    {}();\n", name));
+            }
+            code.push_str("}\n");
+        } else if cross_target.os == simple_common::target::TargetOS::Windows {
+            // Every name was scanned from a real definition. Strong references
+            // let GNU COFF lazily extract those members without zero weak aliases.
+            for name in &init_names {
+                code.push_str(&format!("    void {}(void);\n", name));
             }
             code.push_str("void __simple_call_module_inits(void) {\n");
             for name in &init_names {
@@ -1482,14 +1705,19 @@ int main(int argc, char** argv) {
     }
 
     /// Link object files into a native binary using LinkerBuilder.
-    pub(crate) fn link_objects(&self, object_paths: &[PathBuf], imports: &ModuleImports) -> Result<(), String> {
+    pub(crate) fn link_objects(
+        &self,
+        temp_dir: &Path,
+        object_paths: &[PathBuf],
+        imports: &ModuleImports,
+    ) -> Result<(), String> {
+        self.validate_piped_observer_lane()?;
         // Resolve the `SIMPLE_LINKER` preference FIRST, before any archive is
         // built or any object is projected: an unsupported or uninstallable
         // value is a configuration error, and reporting it after several
         // minutes of runtime-capsule work would be indistinguishable from the
         // silent-ignore behaviour this replaces.
         let requested_linker = requested_linker_driver_name()?;
-        let temp_dir = object_paths[0].parent().ok_or("no parent for object path")?;
 
         let cross_target = effective_target();
         let is_elf_target = matches!(cross_target.os, TargetOS::Linux | TargetOS::FreeBSD);
@@ -1516,7 +1744,10 @@ int main(int argc, char** argv) {
 
         let main_o = self.compile_main_stub(temp_dir)?;
         let (init_o, init_names) = self.generate_init_caller(temp_dir, object_paths, None)?;
-        let extra_link_objects = configured_extra_link_objects()?;
+        let mut extra_link_objects = configured_extra_link_objects()?;
+        if let Some(observer) = self.piped_observer.archive() {
+            extra_link_objects.push(observer.to_path_buf());
+        }
         let bootstrap_tools_authority = if self.resolve_runtime_lane() == super::NativeRuntimeLane::BootstrapTools {
             Some(self.bootstrap_tools_authority()?)
         } else {
@@ -1528,6 +1759,14 @@ int main(int argc, char** argv) {
             self.selected_runtime_library(temp_dir)?
         };
         self.reject_unexpected_native_all(selected_runtime.as_ref())?;
+        if self.piped_observer.is_rust() {
+            let core = &selected_runtime.as_ref().ok_or("observer C owner absent")?.0;
+            let mut providers = object_paths.to_vec();
+            providers.push(main_o.clone());
+            if let Some(init) = init_o.as_ref() { providers.push(init.clone()); }
+            providers.extend(extra_link_objects.iter().cloned());
+            self.piped_observer.verify_link_inputs(core, &providers)?;
+        }
         // SQLite's provider borrows the selected runtime owner's bounded string
         // ABI. It does not bring in the incompatible core-C value/array owner.
         let bootstrap_tools_sqlite = if bootstrap_tools_authority.is_some()
@@ -1546,7 +1785,7 @@ int main(int argc, char** argv) {
             // when supplying the C-only bootstrap runtime exports.
             && cfg!(any(all(target_os = "linux", target_env = "gnu"), target_os = "freebsd", target_os = "macos"))
         {
-            let core = build_core_c_runtime_library(&temp_dir.join("bootstrap_mutex_core_c_runtime"))
+            let core = build_core_c_runtime_supplement_library(&temp_dir.join("bootstrap_mutex_core_c_runtime"))
                 .ok_or_else(|| "failed to build the bootstrap mutex core-C authority".to_string())?;
             Some(build_bootstrap_mutex_runtime_capsule_archive(
                 &core,
@@ -1557,9 +1796,15 @@ int main(int argc, char** argv) {
             None
         };
         let host_gpu_lane = self.resolve_runtime_lane() == super::NativeRuntimeLane::HostGpu;
-        let host_gpu_core_runtime = if host_gpu_lane {
+        // host-gpu-native-all: the vulkan native_all archive is the primary
+        // runtime (linked first, so one owner holds the argv family); this
+        // supplement follows it for the C-only names. No hosted rlib: the
+        // archive already carries spl_hosted_runtime.
+        let host_gpu_native_all_lane =
+            self.resolve_runtime_lane() == super::NativeRuntimeLane::HostGpuNativeAll;
+        let host_gpu_core_runtime = if host_gpu_lane || host_gpu_native_all_lane {
             Some(
-                build_core_c_runtime_library(&temp_dir.join("host_gpu_core_c_runtime"))
+                build_core_c_runtime_supplement_library(&temp_dir.join("host_gpu_core_c_runtime"))
                     .ok_or_else(|| "failed to build the host-gpu core-C runtime supplement".to_string())?,
             )
         } else {
@@ -1627,6 +1872,17 @@ int main(int argc, char** argv) {
         if exact_stage4 && std::env::var("SIMPLE_NO_STUB_FALLBACK").as_deref() != Ok("1") {
             return Err("Stage4 exact provider profile requires SIMPLE_NO_STUB_FALLBACK=1".to_string());
         }
+        // The vulkan native_all closure carries ~36 dead pre-GC references
+        // (rt_metal_*, rt_oneapi_*, ...) that the nm preflight cannot tell from
+        // live ones, and stub fallback would weak-stub names the ICD needs. Only
+        // the strict, GC-aware final link is authoritative for this lane.
+        if host_gpu_native_all_lane && std::env::var("SIMPLE_NO_STUB_FALLBACK").as_deref() != Ok("1") {
+            return Err(
+                "host-gpu-native-all requires SIMPLE_NO_STUB_FALLBACK=1 (strict final link: no stubs, \
+                 every live undefined symbol fails the link)"
+                    .to_string(),
+            );
+        }
         let stage4_rust_runtime = if exact_stage4 {
             let runtime_path = self
                 .config
@@ -1674,7 +1930,8 @@ int main(int argc, char** argv) {
             let rust_runtime = stage4_rust_runtime.as_ref().expect("validated Stage4 Rust runtime");
             let mut provider_paths = vec![compiler.as_path(), core.as_path(), rust_runtime.as_path()];
             provider_paths.extend(stage4_c_providers.iter().map(PathBuf::as_path));
-            let alias_stub = generate_stub_object(temp_dir, object_paths, &main_o, &provider_paths, imports)?;
+            let alias_stub = super::stubs::generate_stub_object_with_policy(
+                temp_dir, object_paths, &main_o, &provider_paths, imports, &[], self.piped_observer.is_rust())?;
             let requested =
                 Self::stage4_live_runtime_requests(temp_dir, object_paths, &main_o, init_o.as_ref(), &alias_stub)?;
 
@@ -1967,7 +2224,14 @@ int main(int argc, char** argv) {
                             msvc_link_args.push(format!("/INCLUDE:{name}"));
                         }
                         msvc_link_args.push(clang_cl_whole_archive_arg(&archive_path));
+                    } else if cross_target.os == simple_common::target::TargetOS::Windows {
+                        // Entry/init callers use strong GNU COFF references.
+                        // Pull only members needed by those and actual calls;
+                        // forcing optional host wrappers imports other platforms.
+                        cmd.arg(external_tool_path(&archive_path));
                     } else {
+                        // This cfg is the Windows host, not necessarily its
+                        // target. Preserve other cross-target retention policy.
                         cmd.arg("-Wl,--whole-archive")
                             .arg(external_tool_path(&archive_path))
                             .arg("-Wl,--no-whole-archive");
@@ -1980,6 +2244,9 @@ int main(int argc, char** argv) {
             }
         }
         add_extra_link_objects(&mut cmd, &extra_link_objects);
+        let observer_roots = self.piped_observer.link_roots(is_msvc);
+        if is_msvc { msvc_link_args.extend(observer_roots); }
+        else { cmd.args(observer_roots); }
 
         #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))]
         if exact_stage4 {
@@ -2104,7 +2371,7 @@ int main(int argc, char** argv) {
                     // from inside the runtime. That is why this needs no
                     // `--allow-multiple-definition`, unlike the Windows
                     // native_all + core-C layering below.
-                    let core_c = build_core_c_runtime_library(&temp_dir.join("dynamic_runtime_core_c_supplement"))
+                    let core_c = build_core_c_runtime_supplement_library(&temp_dir.join("dynamic_runtime_core_c_supplement"))
                         .ok_or_else(|| {
                             "failed to build the core-C supplement for the dynamic-runtime lane".to_string()
                         })?;
@@ -2138,7 +2405,7 @@ int main(int argc, char** argv) {
                                 cmd.arg("-Wl,--no-whole-archive");
                             }
                         } else {
-                            let roots = Self::runtime_retention_symbols(
+                            let mut roots = Self::runtime_retention_symbols(
                                 object_paths,
                                 &main_o,
                                 init_o.as_ref(),
@@ -2158,15 +2425,202 @@ int main(int argc, char** argv) {
                                     runtime_lib.display()
                                 ));
                             }
+                            // core-c-bootstrap layering: native_all first, the
+                            // core-C supplement second, `--allow-multiple-definition`
+                            // (below). "First definition wins" is decided by
+                            // member EXTRACTION order, not archive order: a
+                            // shared rt_* symbol first needed after
+                            // runtime_native.obj is pulled (for a C-only
+                            // rt_iocp_*/rt_process_* root) resolves to the C
+                            // copy, whose rt_core_as_array/as_string registry
+                            // rejects every Rust-owned handle. Measured
+                            // 2026-11-12: the Windows Stage 2 compiler printed
+                            // "rejected invalid array handle before dereference"
+                            // at startup and spun to the sanity timeout; 774 of
+                            // its referenced rt_* symbols were defined by both
+                            // archives, 26 of them array-registry readers.
+                            // Root every symbol BOTH archives define so the
+                            // native_all members are extracted before the
+                            // supplement is scanned -- the same discipline the
+                            // Linux capsule branch applies ("force the actual
+                            // native-all member before weak fallback definitions
+                            // arrive in the supplement").
+                            if runtime_bundle_requests_core_c_bootstrap(&self.config.runtime_bundle) {
+                                let supplement = build_core_c_runtime_supplement_library(
+                                    &temp_dir.join("core_c_bootstrap_supplement"),
+                                )
+                                .ok_or_else(|| "failed to build the core-c-bootstrap runtime supplement".to_string())?;
+                                let owned = Self::read_defined_symbol_set(runtime_lib)?;
+                                let supplied = Self::read_defined_symbol_set(&supplement)?;
+                                if owned.is_empty() || supplied.is_empty() {
+                                    return Err(format!(
+                                        "core-c-bootstrap: could not read the defined symbol set of {} / {} -- refusing to link with an unknown runtime owner",
+                                        runtime_lib.display(),
+                                        supplement.display()
+                                    ));
+                                }
+                                let mut shared: Vec<String> = supplied
+                                    .iter()
+                                    .filter(|symbol| owned.contains(*symbol) && !roots.contains(*symbol))
+                                    .cloned()
+                                    .collect();
+                                shared.sort();
+                                // `-u`/`/include` roots are NOT enough on COFF: lld
+                                // handles them after the input-file resolution
+                                // loop, so by then runtime_native.obj (fetched for
+                                // a C-only reference) has already supplied the
+                                // first definition of every shared symbol it
+                                // carries. Measured 2026-11-12 on the rooted Stage 2
+                                // link: 181 shared symbols still resolved into the
+                                // supplement, rt_utf8_validate among them. Plain
+                                // OBJECTS are defined the moment they are read, so
+                                // extract the native_all members that define a
+                                // shared symbol and list them ahead of both archives.
+                                let shared_set: HashSet<&String> = shared.iter().collect();
+                                // `nm -A` echoes the archive argument verbatim as
+                                // "<archive-arg>:<member>: ..."; the prefix must be
+                                // the exact string passed to nm so member names
+                                // that themselves carry ':' (Windows drive letters
+                                // baked into vendored CI objects, e.g.
+                                // "C:\a\rust\rust\build\...") survive the parse.
+                                let nm_archive_arg = external_tool_path(runtime_lib);
+                                let nm_archive_prefix = format!("{}:", nm_archive_arg.display());
+                                let listing = nm_command()?
+                                    .arg("-A")
+                                    .arg("-g")
+                                    .arg("-p")
+                                    .arg("--defined-only")
+                                    .arg(&nm_archive_arg)
+                                    .output()
+                                    .map_err(|e| format!("nm -A {}: {e}", runtime_lib.display()))?;
+                                if !listing.status.success() {
+                                    return Err(format!("nm -A {} failed", runtime_lib.display()));
+                                }
+                                let mut members: Vec<String> = Vec::new();
+                                for line in String::from_utf8_lossy(&listing.stdout).lines() {
+                                    let parts: Vec<&str> = line.split_whitespace().collect();
+                                    if parts.len() < 3 {
+                                        continue;
+                                    }
+                                    let name = parts[parts.len() - 1].to_string();
+                                    if !shared_set.contains(&name) {
+                                        continue;
+                                    }
+                                    // Strip the KNOWN "<archive-arg>:" prefix; the
+                                    // old last-colon split truncated members
+                                    // containing a drive letter ("C:\a\...").
+                                    let member = parts[0]
+                                        .strip_prefix(nm_archive_prefix.as_str())
+                                        .map(|rest| rest.trim_end_matches(':'))
+                                        .unwrap_or_else(|| {
+                                            parts[0].trim_end_matches(':').rsplit(':').next().unwrap_or("")
+                                        });
+                                    if !member.is_empty() && !members.iter().any(|m| m == member) {
+                                        members.push(member.to_string());
+                                    }
+                                }
+                                if members.is_empty() {
+                                    return Err(format!(
+                                        "core-c-bootstrap: no native_all member defines any of the {} shared rt_* symbols ({})",
+                                        shared.len(),
+                                        runtime_lib.display()
+                                    ));
+                                }
+                                let extract_dir = temp_dir.join("native_all_owner_members");
+                                std::fs::create_dir_all(&extract_dir)
+                                    .map_err(|e| format!("create {}: {e}", extract_dir.display()))?;
+                                let archive_abs = if runtime_lib.is_absolute() {
+                                    runtime_lib.to_path_buf()
+                                } else {
+                                    std::env::current_dir().map_err(|e| e.to_string())?.join(runtime_lib)
+                                };
+                                let ar = super::tools::find_archive_tool()?;
+                                let status = std::process::Command::new(&ar)
+                                    .current_dir(&extract_dir)
+                                    .arg("x")
+                                    .arg(external_tool_path(&archive_abs))
+                                    .args(&members)
+                                    .status()
+                                    .map_err(|e| format!("{ar} x: {e}"))?;
+                                if !status.success() {
+                                    return Err(format!("{ar} x {} failed extracting {} owner member(s)", archive_abs.display(), members.len()));
+                                }
+                                // Hundreds of owner members on deep worktrees
+                                // bust two Windows limits at once: each
+                                // verbatim path can exceed MAX_PATH, and the
+                                // joined command line exceeds CreateProcess's
+                                // 32 KiB (os error 206 observed 2026-11-12).
+                                // Stuff the verbatim spellings into a clang
+                                // response file: clang-cl/lld-link lift
+                                // MAX_PATH for "\\?\" paths, the @file keeps
+                                // the args off the command line, and @file
+                                // expands inline so link ORDER is unchanged.
+                                // clang-cl's response-file tokenizer does NOT
+                                // split tokens on newlines: an interior '\n'
+                                // is attached to the token (measured
+                                // 2026-11-13 with clang-cl 23.1.1:
+                                // newline-separated `/WHOLEARCHIVE:...`
+                                // lines die with "no such file or
+                                // directory: '/WHOLEARCHIVE:...'", while the
+                                // identical space-separated single line
+                                // links fine). Space-join the whole rsp.
+                                let mut owner_rsp_body = String::new();
+                                for (index, member) in members.iter().enumerate() {
+                                    let obj = extract_dir.join(member);
+                                    // llvm-ar cannot materialize a member whose
+                                    // baked-in name is not a relative path (the
+                                    // CI-built compiler_builtins "C:\a\rust\..."
+                                    // objects): it sanitizes to the basename.
+                                    let obj = if obj.is_file() {
+                                        obj
+                                    } else {
+                                        let base = member.rsplit(['/', '\\']).next().unwrap_or(member);
+                                        let alt = extract_dir.join(base);
+                                        if alt.is_file() { alt } else { obj }
+                                    };
+                                    if !obj.is_file() {
+                                        return Err(format!("owner member {} was not extracted from {}", member, archive_abs.display()));
+                                    }
+                                    // Flat hard link under a short plain name.
+                                    // Verbatim `\\?\` spellings and deep member
+                                    // relpaths both break inside a clang
+                                    // response file: clang re-escapes verbatim
+                                    // paths when forwarding to lld (measured
+                                    // 2026-11-13), and plain member relpaths
+                                    // can exceed MAX_PATH on deep worktrees.
+                                    // owner_NNNN.o under extract_dir is short
+                                    // and plain; hard-linking stays on volume.
+                                    let flat = extract_dir.join(format!("owner_{index:04}.o"));
+                                    std::fs::hard_link(&obj, &flat).map_err(|e| {
+                                        format!("hard link {} -> {}: {e}", obj.display(), flat.display())
+                                    })?;
+                                    owner_rsp_body.push_str(&quote_cl_response_arg(
+                                        &external_tool_path(&flat).display().to_string(),
+                                    ));
+                                    owner_rsp_body.push(' ');
+                                }
+                                owner_rsp_body.push('\n');
+                                let owners_rsp = temp_dir.join("native_all_owner_members.rsp");
+                                std::fs::write(&owners_rsp, owner_rsp_body)
+                                    .map_err(|e| format!("write {}: {e}", owners_rsp.display()))?;
+                                cmd.arg(format!("@{}", external_tool_path(&owners_rsp).display()));
+                                roots.extend(shared);
+                            }
                             // x64 `extern "C"` names are undecorated -- measured
                             // with nm on the real archive (`T rt_api_surface_extract`,
                             // `I __IMPORT_DESCRIPTOR_kernel32`, both bare).
-                            for root in &roots {
-                                if is_msvc {
+                            // Hundreds of roots exceed CreateProcess's 32 KiB
+                            // command line; clang expands `@file`.
+                            if is_msvc {
+                                for root in &roots {
                                     msvc_link_args.push(format!("/INCLUDE:{root}"));
-                                } else {
-                                    cmd.arg(format!("-Wl,-u,{root}"));
                                 }
+                            } else {
+                                let rsp_path = temp_dir.join("native_all_roots.rsp");
+                                let body: String = roots.iter().map(|root| format!("-Wl,-u,{root}\n")).collect();
+                                std::fs::write(&rsp_path, body)
+                                    .map_err(|e| format!("write {}: {e}", rsp_path.display()))?;
+                                cmd.arg(format!("@{}", rsp_path.display()));
                             }
                             cmd.arg(external_tool_path(runtime_lib));
                         }
@@ -2244,7 +2698,7 @@ int main(int argc, char** argv) {
                         //     detection for the WHOLE link, permanently masking
                         //     the ~475-symbol collision class instead of
                         //     surfacing it.
-                        //   * any platform: build_core_c_runtime_library
+                        //   * any platform: build_core_c_runtime_supplement_library
                         //     returning None now aborts a previously-working
                         //     build.
                         // The Windows lane needs this supplement because
@@ -2280,7 +2734,7 @@ int main(int argc, char** argv) {
                         // build" attempt failed with 475 collisions: compiling
                         // it INTO the crate gives the linker no such choice.
                         let core_c_runtime =
-                            build_core_c_runtime_library(&temp_dir.join("core_c_bootstrap_supplement"))
+                            build_core_c_runtime_supplement_library(&temp_dir.join("core_c_bootstrap_supplement"))
                                 .ok_or_else(|| "failed to build the core-c-bootstrap runtime supplement".to_string())?;
                         cmd.arg(external_tool_path(core_c_runtime));
                         // TODO: [driver][P2] Establish which runtime actually wins a hosted link: native_all and the core-C supplement both define the ~514 overlapping rt_* symbols counted below and archive order alone decides, but no nm dump over a produced link artifact has ever been inspected -- that dump is the missing evidence, and until it exists the precedence claimed here is asserted, not measured
@@ -2386,10 +2840,13 @@ int main(int argc, char** argv) {
                 .is_some_and(|(_, is_native_all)| !is_native_all)
             && self.runtime_bundle_prefers_core_lane();
         let require_openssl = is_linux_target && Self::entry_objects_require_openssl(object_paths)?;
+        // host-gpu-native-all never puts the external libsqlite3 on the line
+        // (CLAUDE.md "No external SQLite") unless the entry itself asks for it.
         let omit_sqlite = is_linux_target
-            && selected_runtime
-                .as_ref()
-                .is_some_and(|(_, is_native_all)| !is_native_all)
+            && (host_gpu_native_all_lane
+                || selected_runtime
+                    .as_ref()
+                    .is_some_and(|(_, is_native_all)| !is_native_all))
             && !Self::entry_objects_require_sqlite(object_paths)?;
         if is_msvc {
             for lib in &link_config.libraries {
@@ -2450,6 +2907,17 @@ int main(int argc, char** argv) {
                 }
             }
         }
+        // MinGW (gnu) lane: same dynamic LLVM-C dependency, satisfied by the
+        // MinGW-ABI import lib of MSYS2 CLANG64's libLLVM-23.dll, which
+        // platform-detect.shs exports as LLVM_SYS_231_PREFIX on that lane.
+        #[cfg(target_os = "windows")]
+        let gnu_llvm_import_lib = std::env::var_os("LLVM_SYS_231_PREFIX")
+            .map(|prefix| PathBuf::from(prefix).join("lib").join("libLLVM-23.dll.a"))
+            .filter(|lib| !is_msvc && has_native_all && lib.is_file());
+        #[cfg(target_os = "windows")]
+        if let Some(import_lib) = gnu_llvm_import_lib.as_ref() {
+            cmd.arg(import_lib);
+        }
         #[cfg(target_os = "macos")]
         if macos_runtime_host_support_required(selected_runtime.is_some(), host_gpu_lane, exact_stage4) {
             add_macos_runtime_host_support(&mut cmd);
@@ -2482,7 +2950,21 @@ int main(int argc, char** argv) {
                     provider_paths.push(mutex_runtime.as_path());
                 }
                 provider_paths.extend(extra_link_objects.iter().map(PathBuf::as_path));
-                let stubs_o = generate_stub_object(temp_dir, object_paths, &main_o, &provider_paths, imports)?;
+                // Provider ownership follows the output target, not the build
+                // host. A Linux -> Windows link must scan the same MinGW
+                // import archives as a native Windows link before generating
+                // bootstrap shims (in particular the ToolHelp process APIs).
+                let system_libs = if cross_target.os == TargetOS::Windows && !is_msvc && !is_clang_cl {
+                    gnu_link_line_libraries(
+                        &cmd,
+                        &cc,
+                        windows_gnu_target_flag(cross_target, &cc),
+                    )
+                } else {
+                    Vec::new()
+                };
+                let stubs_o = super::stubs::generate_stub_object_with_policy(
+                    temp_dir, object_paths, &main_o, &provider_paths, imports, &system_libs, self.piped_observer.is_rust())?;
                 cmd.arg(&stubs_o);
                 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
                 if let Some((runtime_lib, _)) = selected_runtime.as_ref() {
@@ -2512,10 +2994,29 @@ int main(int argc, char** argv) {
                 provider_paths.push(runtime.as_path());
             }
             provider_paths.extend(extra_link_objects.iter().map(PathBuf::as_path));
-            let stubs_o = generate_stub_object(temp_dir, object_paths, &main_o, &provider_paths, &imports)?;
+            // LLVM-C comes from the import lib; never fabricate trap stubs for it.
+            provider_paths.extend(gnu_llvm_import_lib.as_deref());
+            // System libraries named by `-l` (plus the driver's implicit
+            // mingw/unwind libs) are real providers: never trap-stub their
+            // imports (WriteFile, sockets, _Unwind_*).
+            let system_libs = gnu_link_line_libraries(
+                &cmd,
+                &cc,
+                windows_gnu_target_flag(cross_target, &cc),
+            );
+            let stubs_o = super::stubs::generate_stub_object_with_policy(
+                temp_dir,
+                object_paths,
+                &main_o,
+                &provider_paths,
+                &imports,
+                &system_libs,
+                self.piped_observer.is_rust(),
+            )?;
             cmd.arg(external_tool_path(&stubs_o));
         }
-        let strict_no_stub_fallback = std::env::var("SIMPLE_NO_STUB_FALLBACK").as_deref() == Ok("1");
+        let strict_no_stub_fallback = self.piped_observer.is_rust()
+            || std::env::var("SIMPLE_NO_STUB_FALLBACK").as_deref() == Ok("1");
         if !strict_no_stub_fallback {
             for flag in &link_config.unresolved_symbol_flags {
                 cmd.arg(flag);
@@ -2550,7 +3051,7 @@ int main(int argc, char** argv) {
             msvc_link_args.extend(msvc_stub_fallback_link_args().iter().map(|s| s.to_string()));
         }
 
-        if self.config.strip {
+        if self.config.strip && !self.piped_observer.is_rust() {
             #[cfg(target_os = "macos")]
             cmd.arg("-Wl,-S");
             #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -2569,6 +3070,10 @@ int main(int argc, char** argv) {
         #[cfg(target_os = "windows")]
         if is_msvc {
             msvc_link_args.push("/errorlimit:0".to_string());
+        } else if !strict_no_stub_fallback {
+            // ld.lld (mingw flavor) resolves before section GC exactly like
+            // lld-link; the parity retry below needs its complete list too.
+            cmd.arg("-Wl,--error-limit=0");
         }
 
         // Single `/link` group, last: everything after it belongs to the
@@ -2581,6 +3086,70 @@ int main(int argc, char** argv) {
         if self.config.verbose {
             eprintln!("Link command: {:?}", cmd);
         }
+
+        // Windows: CreateProcess caps the command line at 32,767 chars and
+        // fails the spawn with os error 206 (ERROR_FILENAME_EXCED_RANGE) --
+        // measured 2026-11-12 on the Stage 2 MSVC link, whose hundreds of
+        // /INCLUDE roots and long paths overflow the cap even after the
+        // owner-member objects moved into their own response file.
+        // clang-cl expands `@file` inline before option processing (the same
+        // mechanism the GNU roots rsp relies on), so when the assembled line
+        // approaches the cap, swap the WHOLE argument vector -- /link group
+        // included -- into one double-quoted response file. Single-quote
+        // posix rsp writers are NOT usable here: clang's tokenizer only
+        // honors double quotes.
+        #[cfg(target_os = "windows")]
+        let cmd = {
+            let mut final_cmd = cmd;
+            let args: Vec<std::ffi::OsString> =
+                final_cmd.get_args().map(|arg| arg.to_os_string()).collect();
+            let assembled: usize = args
+                .iter()
+                .map(|arg| arg.to_string_lossy().len() + 3)
+                .sum::<usize>()
+                + final_cmd.get_program().to_string_lossy().len();
+            const COMMAND_LINE_CHAR_CAP: usize = 28_000;
+            if is_msvc && assembled > COMMAND_LINE_CHAR_CAP {
+                eprintln!(
+                    "[link] command line {assembled} chars exceeds {COMMAND_LINE_CHAR_CAP}; using clang response file"
+                );
+                let rsp_path = temp_dir.join("clang_cl_link_full.rsp");
+                let mut body = String::new();
+                for arg in &args {
+                    // Plain-spell every arg: verbatim `\\?\` paths are
+                    // re-escaped into broken tokens when clang-cl expands a
+                    // response file and forwards to lld (measured
+                    // 2026-11-13). Link inputs and /WHOLEARCHIVE archives
+                    // are build-tree paths well under MAX_PATH once the
+                    // verbatim prefix is stripped.
+                    let plain = external_tool_path(std::path::Path::new(arg));
+                    body.push_str(&quote_cl_response_arg(&plain.to_string_lossy()));
+                    body.push(' ');
+                }
+                body.push('\n');
+                std::fs::write(&rsp_path, body)
+                    .map_err(|e| format!("write {}: {e}", rsp_path.display()))?;
+                let mut short_cmd = std::process::Command::new(final_cmd.get_program());
+                short_cmd.arg(format!("@{}", external_tool_path(&rsp_path).display()));
+                if let Some(dir) = final_cmd.get_current_dir() {
+                    short_cmd.current_dir(dir);
+                }
+                for (key, value) in final_cmd.get_envs() {
+                    match value {
+                        Some(value) => {
+                            short_cmd.env(key, value);
+                        }
+                        None => {
+                            short_cmd.env_remove(key);
+                        }
+                    };
+                }
+                final_cmd = short_cmd;
+            }
+            final_cmd
+        };
+        #[cfg(not(target_os = "windows"))]
+        let cmd = cmd;
 
         // GNU ld truncates a Windows verbatim path to its last component; see
         // tools::respell_args_for_external_tool.
@@ -2595,8 +3164,14 @@ int main(int argc, char** argv) {
         // rejects them. Retry once with loud trap stubs for exactly the
         // reported names (Rust std internals are never stubbed), print the
         // count and write the list beside the binary.
+        //
+        // Both COFF lanes: ld.lld `-m i386pep` (llvm-mingw) has the same
+        // resolve-before-GC order as lld-link, so the gnu lane needs the same
+        // retry -- with stubs built by the gnu clang, never clang-cl (an MSVC
+        // object drags /DEFAULTLIB:libcmt and __security_check_cookie into a
+        // mingw link). Stage2 on windows-gnu: 112 dead-code rt_* references.
         #[cfg(target_os = "windows")]
-        if !output_result.status.success() && is_msvc && !strict_no_stub_fallback {
+        if !output_result.status.success() && !strict_no_stub_fallback {
             let diagnostics = link_failure_output(&output_result.stdout, &output_result.stderr);
             let undefined = super::stubs::lld_link_undefined_symbols(&diagnostics);
             if !undefined.is_empty() {
@@ -2612,11 +3187,20 @@ int main(int argc, char** argv) {
                         diagnostics
                     ));
                 }
-                let stubs_o = super::stubs::compile_coff_gc_parity_stubs(temp_dir, &stubbable)?;
-                if msvc_link_args.is_empty() {
-                    cmd.arg("/link");
+                let toolchain = if is_msvc {
+                    super::stubs::CoffStubToolchain::Msvc
+                } else {
+                    super::stubs::CoffStubToolchain::Gnu
+                };
+                let stubs_o = super::stubs::compile_coff_gc_parity_stubs(temp_dir, &stubbable, toolchain)?;
+                if is_msvc {
+                    if msvc_link_args.is_empty() {
+                        cmd.arg("/link");
+                    }
+                    cmd.arg(&stubs_o);
+                } else {
+                    cmd.arg(external_tool_path(&stubs_o));
                 }
-                cmd.arg(&stubs_o);
                 output_result = cmd.output().map_err(|e| format!("link ({cc}): {e}"))?;
                 if output_result.status.success() {
                     let list_path = PathBuf::from(format!("{}.stubbed_symbols.txt", self.output.display()));
@@ -2635,6 +3219,14 @@ int main(int argc, char** argv) {
         }
 
         if output_result.status.success() {
+            self.validate_piped_observer_lane()?;
+            self.piped_observer.verify_image(&self.output)?;
+            if self.config.strip && self.piped_observer.is_rust() {
+                let objcopy = find_objcopy_tool().ok_or_else(|| missing_llvm_tool_error("llvm-objcopy"))?;
+                let status = std::process::Command::new(objcopy).arg("--strip-all").arg(&self.output)
+                    .status().map_err(|e| format!("strip selected observer image: {e}"))?;
+                if !status.success() { return Err("strip selected observer image failed".into()); }
+            }
             if let Some(dll) = bootstrap_tools_sqlite.as_ref().and_then(|sqlite| sqlite.runtime_dll.as_ref()) {
                 stage_sqlite_runtime_dll(dll, &self.output)?;
             }
@@ -2693,10 +3285,10 @@ int main(int argc, char** argv) {
             #[cfg(target_os = "windows")]
             let diagnostics = {
                 let undefined = super::stubs::lld_link_undefined_symbols(&diagnostics);
-                if is_msvc && strict_no_stub_fallback && !undefined.is_empty() {
+                if strict_no_stub_fallback && !undefined.is_empty() {
                     format!(
                         "{} undefined symbol(s) with SIMPLE_NO_STUB_FALLBACK=1: {}\n\
-note: on Windows the module archive is /WHOLEARCHIVE'd and lld-link resolves before /OPT:REF, so an \
+note: on Windows the module archive is whole-archived and the COFF linker (lld-link / ld.lld) resolves before section GC, so an \
 extern declared by ANY module in the closure must be defined even if nothing calls it (ELF/Mach-O drop \
 the dead section first). Define the symbol in the runtime lane this link uses, or keep the declaring \
 module out of the closure.\n{}",
@@ -2832,13 +3424,14 @@ select a supported specialized lane; removed rust-hosted/hosted/all bundles are 
                     .and_then(|name| name.to_str())
                     .map(|name| name == "desktop_service_entry.spl")
                     .unwrap_or(false);
-            let boot_dir = entry.parent().unwrap_or(std::path::Path::new(".")).join("boot");
+            let boot_dir = freestanding_boot_dir(entry, &self.source_dirs);
+            let minimal_boot = std::env::var("SIMPLE_BOOT_MINIMAL").is_ok();
             let debug_boot_sources = self.config.verbose || std::env::var("SIMPLE_LINKER_DEBUG").is_ok();
             if skip_boot_autodiscovery && debug_boot_sources {
                 eprintln!("  Boot autodiscovery skipped for {}", entry.display());
             }
             let proof_runtime_stem = "ghdl_boot_info_runtime";
-            if boot_dir.is_dir() {
+            if let Some(boot_dir) = boot_dir {
                 if debug_boot_sources {
                     eprintln!("  Boot directory: {}", boot_dir.display());
                 }
@@ -2868,6 +3461,9 @@ select a supported specialized lane; removed rust-hosted/hosted/all bundles are 
                                     continue;
                                 }
                                 let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+                                if minimal_boot && !minimal_boot_asm_source_allowed(&stem) {
+                                    continue;
+                                }
                                 let out = temp_dir.join(format!("_boot_{}.o", stem));
                                 let mut assembled = false;
                                 let mut last_stderr = String::new();
@@ -2934,7 +3530,6 @@ select a supported specialized lane; removed rust-hosted/hosted/all bundles are 
                             if skip_boot_autodiscovery && stem != proof_runtime_stem {
                                 continue;
                             }
-                            let minimal_boot = std::env::var("SIMPLE_BOOT_MINIMAL").is_ok();
                             let ssh_live_boot = std::env::var("SIMPLE_SSH_LIVE_BUILD_MARKER").is_ok();
                             if rv64_desktop_service_boot
                                 && stem != "full_networking_runtime"
@@ -2965,6 +3560,12 @@ select a supported specialized lane; removed rust-hosted/hosted/all bundles are 
                                 c_cmd
                                     .args([
                                         "-c",
+                                        // `cc` is also the final link driver and may
+                                        // therefore be clang++. Boot `.c` owners are
+                                        // C ABI translation units; force their language
+                                        // so exported runtime names are never mangled.
+                                        "-x",
+                                        "c",
                                         "-ffreestanding",
                                         "-nostdlib",
                                         "-fno-pie",
@@ -3419,6 +4020,11 @@ select a supported specialized lane; removed rust-hosted/hosted/all bundles are 
         }
 
         let mut cmd = super::tools::respell_args_for_external_tool(&cmd);
+        if let Some(spilled) =
+            spill_args_to_response_file(&cmd, &temp_dir.join("freestanding_link.rsp"), use_direct_lld.is_some())?
+        {
+            cmd = spilled;
+        }
         let output_result = cmd.output().map_err(|e| format!("link ({cc}): {e}"))?;
 
         if output_result.status.success() {
@@ -3518,8 +4124,114 @@ pub(crate) fn normalize_windows_pe_metadata(path: &Path) -> Result<(), String> {
 mod linker_tests {
     use super::*;
 
+    // Bug: doc/08_tracking/bug/windows_seed_freestanding_link_cmdline_too_long_2026-11-19.md
+    #[test]
+    fn freestanding_link_spills_long_argv_into_response_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut cmd = std::process::Command::new("ld.lld");
+        cmd.arg("--gc-sections");
+        let long_dir = "C:\\dev\\wt\\deep\\worktree\\.simple\\native-objects-XXXXXX";
+        for i in 0..800 {
+            cmd.arg(format!("{long_dir}\\mod_{i:04}.o"));
+        }
+        cmd.arg("with space.o");
+        let rsp = temp.path().join("freestanding_link.rsp");
+        let spilled = spill_args_to_response_file(&cmd, &rsp, true).unwrap().expect("argv over limit must spill");
+        let args: Vec<String> = spilled.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert_eq!(args, vec!["--rsp-quoting=posix".to_string(), format!("@{}", rsp.display())]);
+        assert_eq!(spilled.get_program(), "ld.lld");
+        let body = std::fs::read_to_string(&rsp).unwrap();
+        // Order preserved, every arg quoted, backslashes escaped for posix quoting.
+        assert!(body.starts_with("\"--gc-sections\" \"C:\\\\dev\\\\wt"));
+        assert!(body.trim_end().ends_with("\"with space.o\""));
+        assert_eq!(body.matches(".o\"").count(), 801);
+    }
+
+    #[test]
+    fn freestanding_link_keeps_short_argv_inline() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut cmd = std::process::Command::new("clang");
+        cmd.arg("-o").arg("k.elf").arg("a.o");
+        let rsp = temp.path().join("freestanding_link.rsp");
+        assert!(spill_args_to_response_file(&cmd, &rsp, false).unwrap().is_none());
+        assert!(!rsp.exists());
+    }
+
+    #[test]
+    fn freestanding_link_clang_spill_has_no_lld_quoting_flag() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut cmd = std::process::Command::new("clang");
+        for i in 0..2000 {
+            cmd.arg(format!("obj_with_a_reasonably_long_name_{i:05}.o"));
+        }
+        let rsp = temp.path().join("freestanding_link.rsp");
+        let spilled = spill_args_to_response_file(&cmd, &rsp, false).unwrap().unwrap();
+        let args: Vec<String> = spilled.get_args().map(|a| a.to_string_lossy().into_owned()).collect();
+        assert_eq!(args, vec![format!("@{}", rsp.display())]);
+    }
+
     use crate::pipeline::native_project::tools::hosted_linux_cross_compiler;
     use simple_common::target::{Target, TargetArch, TargetOS};
+
+    /// Fake llvm-mingw sysroot: every lib in one `<triple>/lib` dir, plus one
+    /// lib only reachable through a second driver dir.
+    fn fake_mingw_sysroot() -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        let lib = root.path().join("aarch64-w64-mingw32").join("lib");
+        let other = root.path().join("resource").join("lib");
+        std::fs::create_dir_all(&lib).unwrap();
+        std::fs::create_dir_all(&other).unwrap();
+        for name in ["kernel32", "ws2_32", "ole32", "unwind", "mingw32", "mingwex", "msvcrt"] {
+            std::fs::write(lib.join(format!("lib{name}.a")), b"!<arch>\n").unwrap();
+        }
+        std::fs::write(other.join("libspecial.a"), b"!<arch>\n").unwrap();
+        (root, lib, other)
+    }
+
+    // Repro (2026-11-18, aarch64-pc-windows-gnullvm cross link): one driver
+    // `-print-file-name` spawn per library made the link ~170 s slower.
+    #[test]
+    fn gnu_link_libraries_ask_driver_once_per_sysroot_dir() {
+        let (_root, lib, other) = fake_mingw_sysroot();
+        let mut calls = 0usize;
+        let names = ["kernel32", "ws2_32", "ole32", "unwind", "mingw32", "mingwex", "msvcrt", "kernel32", "msvcrt"];
+        let found = resolve_gnu_link_libraries(&names, &[], |file| {
+            calls += 1;
+            [lib.join(file), other.join(file)].into_iter().find(|p| p.is_file())
+        });
+        assert_eq!(calls, 1, "driver must be asked once, not once per library");
+        let expected: Vec<PathBuf> = ["kernel32", "ws2_32", "ole32", "unwind", "mingw32", "mingwex", "msvcrt"]
+            .iter()
+            .map(|n| lib.join(format!("lib{n}.a")))
+            .collect();
+        assert_eq!(found, expected);
+    }
+
+    // Similar pattern: a lib outside the learned dir still reaches the driver,
+    // and `-L` dirs keep precedence over driver-learned dirs.
+    #[test]
+    fn gnu_link_libraries_keep_l_dir_precedence_and_fall_back_to_driver() {
+        let (_root, lib, other) = fake_mingw_sysroot();
+        let user = tempfile::tempdir().unwrap();
+        std::fs::write(user.path().join("libws2_32.a"), b"!<arch>\n").unwrap();
+        let mut asked: Vec<String> = Vec::new();
+        let found = resolve_gnu_link_libraries(
+            &["kernel32", "ws2_32", "special", "missing"],
+            &[user.path().to_path_buf()],
+            |file| {
+                asked.push(file.to_string());
+                [lib.join(file), other.join(file)].into_iter().find(|p| p.is_file())
+            },
+        );
+        assert_eq!(
+            found,
+            vec![lib.join("libkernel32.a"), user.path().join("libws2_32.a"), other.join("libspecial.a")]
+        );
+        assert_eq!(
+            asked,
+            vec!["libkernel32.a", "libspecial.a", "libmissing.a", "libmissing.dll.a"]
+        );
+    }
 
     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
     #[test]
@@ -3715,6 +4427,11 @@ mod linker_tests {
             generated_c_target_flag(mingw, "clang", None).as_deref(),
             Some("--target=x86_64-w64-windows-gnu")
         );
+        let mingw32 = Target::parse("i686-pc-windows-gnu").unwrap();
+        assert_eq!(
+            generated_c_target_flag(mingw32, "clang", None).as_deref(),
+            Some("--target=i686-w64-windows-gnu")
+        );
 
         let linux = Target::parse("x86_64-unknown-linux-gnu").unwrap();
         assert_eq!(
@@ -3817,6 +4534,50 @@ mod linker_tests {
             hosted_linux_cross_compiler(Target::new(TargetArch::Aarch64, TargetOS::None), false),
             None
         );
+    }
+
+    #[test]
+    fn generated_c_objects_target_hosted_cross_triples() {
+        let x86_linux = Target::new(TargetArch::X86_64, TargetOS::Linux);
+        let arm_linux = Target::new(TargetArch::Aarch64, TargetOS::Linux);
+        for (target, triple) in [(x86_linux, "x86_64-unknown-linux-gnu"), (arm_linux, "aarch64-unknown-linux-gnu")] {
+            if target.is_host() {
+                assert_eq!(generated_c_object_triple(target), None);
+                continue;
+            }
+            assert_eq!(generated_c_object_triple(target), Some(triple));
+            assert_eq!(
+                generated_c_target_flag(target, "clang", generated_c_object_triple(target)),
+                Some(format!("--target={triple}"))
+            );
+        }
+        assert_eq!(
+            generated_c_object_triple(Target::new(TargetArch::Riscv64, TargetOS::None)),
+            Some("riscv64-unknown-elf")
+        );
+    }
+
+    #[test]
+    fn hosted_cross_runtime_requires_sysroot_or_gnu_driver() {
+        use super::super::tools::hosted_cross_c_setup_with;
+        let target = if Target::new(TargetArch::X86_64, TargetOS::Linux).is_host() {
+            Target::new(TargetArch::Aarch64, TargetOS::Linux)
+        } else {
+            Target::new(TargetArch::X86_64, TargetOS::Linux)
+        };
+        let triple = generated_c_object_triple(target).unwrap();
+        let err = hosted_cross_c_setup_with(target, |_| false, None).unwrap_err();
+        assert!(err.contains("SIMPLE_CROSS_SYSROOT") && err.contains(triple), "{err}");
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().display().to_string();
+        let (cc, flags) = hosted_cross_c_setup_with(target, |tool| tool == "clang", Some(root.clone()))
+            .unwrap()
+            .unwrap();
+        assert_eq!(cc, "clang");
+        assert_eq!(flags, vec![format!("--target={triple}"), format!("--sysroot={root}")]);
+        if let Some(gnu) = super::super::tools::hosted_linux_cross_compiler(target, false) {
+            assert!(hosted_cross_c_setup_with(target, |tool| tool == gnu, None).unwrap().is_none());
+        }
     }
 
     #[test]
@@ -3975,5 +4736,144 @@ mod linker_tests {
 
         assert!(!NativeProjectBuilder::entry_objects_require_sqlite(&[plain_o]).unwrap());
         assert!(NativeProjectBuilder::entry_objects_require_sqlite(&[sqlite_o]).unwrap());
+    }
+
+    #[test]
+    fn main_stub_c_source_selects_strong_coff_entry_and_init_for_windows_gnu() {
+        for triple in ["x86_64-pc-windows-gnu", "aarch64-pc-windows-gnullvm"] {
+            let target = Target::parse(triple).unwrap();
+            let code = NativeProjectBuilder::main_stub_c_source(target);
+            assert!(code.contains("int spl_main(void);"), "{triple}: {code}");
+            assert!(code.contains("void __simple_call_module_inits(void);"), "{triple}: {code}");
+            assert!(code.contains("int r = spl_main();"), "{triple}: {code}");
+            assert!(code.contains("__simple_call_module_inits();"), "{triple}: {code}");
+            assert!(!code.contains("__attribute__((weak)) spl_main"), "{triple}: {code}");
+            assert!(
+                !code.contains("__attribute__((weak)) __simple_call_module_inits"),
+                "{triple}: {code}"
+            );
+            assert!(!code.contains("/ALTERNATENAME:"), "{triple}: {code}");
+        }
+
+        let msvc = Target::parse("x86_64-pc-windows-msvc").unwrap();
+        let msvc_code = NativeProjectBuilder::main_stub_c_source(msvc);
+        assert!(msvc_code.contains("int wmain("));
+        assert!(msvc_code.contains("/ALTERNATENAME:spl_main="));
+
+        let linux = Target::parse("x86_64-unknown-linux-gnu").unwrap();
+        let linux_code = NativeProjectBuilder::main_stub_c_source(linux);
+        assert!(linux_code.contains("__attribute__((weak)) spl_main"));
+        assert!(linux_code.contains("__attribute__((weak)) __simple_call_module_inits"));
+        assert!(!linux_code.contains("_WIN32"));
+    }
+
+    #[test]
+    fn windows_gnu_main_stub_extracts_entry_and_init_without_pulling_unused_host_members() {
+        let clang_ok = std::process::Command::new("clang")
+            .arg("--version")
+            .output()
+            .is_ok_and(|out| out.status.success());
+        let lld_ok = std::process::Command::new("lld")
+            .args(["-flavor", "gnu", "--version"])
+            .output()
+            .is_ok_and(|out| out.status.success());
+        let Ok(ar_tool) = find_archive_tool() else {
+            return;
+        };
+        if !clang_ok || !lld_ok || nm_command().is_err() {
+            return;
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let target = Target::parse("x86_64-pc-windows-gnu").unwrap();
+        let target_flag = windows_gnu_target_flag(target, "clang").unwrap();
+
+        let main_c = temp.path().join("_main_stub.c");
+        let main_o = temp.path().join("_main_stub.o");
+        let init_c = temp.path().join("_init_all.c");
+        let init_o = temp.path().join("_init_all.o");
+        let entry_c = temp.path().join("entry.c");
+        let entry_o = temp.path().join("entry.o");
+        let host_c = temp.path().join("unused_host.c");
+        let host_o = temp.path().join("unused_host.o");
+        let rt_c = temp.path().join("rt.c");
+        let rt_o = temp.path().join("rt.o");
+        let objects_a = temp.path().join("libspl_objects.a");
+        let exe = temp.path().join("probe.exe");
+
+        std::fs::write(&main_c, NativeProjectBuilder::main_stub_c_source(target)).unwrap();
+        std::fs::write(
+            &init_c,
+            "extern void __module_init_entry(void);\nvoid __simple_call_module_inits(void) { __module_init_entry(); }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &entry_c,
+            "static int initialized = 0;\nvoid __module_init_entry(void) { initialized = 7; }\nint spl_main(void) { return initialized; }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &host_c,
+            "extern int rt_host_only_missing(void);\nint unused_host_wrapper(void) { return rt_host_only_missing(); }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            &rt_c,
+            "void __main(void) {}\nvoid rt_set_args(int argc, char** argv) { (void)argc; (void)argv; }\nvoid __simple_runtime_init(void) {}\nvoid __simple_runtime_shutdown(void) {}\n",
+        )
+        .unwrap();
+
+        for (src, obj) in [
+            (&main_c, &main_o),
+            (&init_c, &init_o),
+            (&entry_c, &entry_o),
+            (&host_c, &host_o),
+            (&rt_c, &rt_o),
+        ] {
+            let status = std::process::Command::new("clang")
+                .args([target_flag, "-c", "-Os", "-ffunction-sections", "-fdata-sections"])
+                .arg(src)
+                .arg("-o")
+                .arg(obj)
+                .status()
+                .unwrap();
+            assert!(status.success(), "clang failed for {}", src.display());
+        }
+
+        let ar_status = archive_create_command(&ar_tool, &objects_a, &[entry_o, host_o], false, false)
+            .status()
+            .unwrap();
+        assert!(ar_status.success(), "archive creation failed");
+
+        let link_status = std::process::Command::new("lld")
+            .args(["-flavor", "gnu", "-m", "i386pep", "-e", "main"])
+            .arg(&main_o)
+            .arg(&init_o)
+            .arg(&objects_a)
+            .arg(&rt_o)
+            .arg("-o")
+            .arg(&exe)
+            .status()
+            .unwrap();
+        assert!(
+            link_status.success(),
+            "lazy COFF link must extract spl_main and __module_init_entry without pulling unused_host"
+        );
+
+        let nm_out = nm_command().unwrap().arg("-g").arg(&exe).output().unwrap();
+        assert!(nm_out.status.success());
+        let symbols = String::from_utf8_lossy(&nm_out.stdout);
+        assert!(
+            symbols.lines().any(|line| line.contains(" T spl_main")),
+            "spl_main must be linked as code, not zero weak fallback:\n{symbols}"
+        );
+        assert!(
+            symbols.lines().any(|line| line.contains(" T __module_init_entry")),
+            "__module_init_entry must be linked as code:\n{symbols}"
+        );
+        assert!(
+            !symbols.contains("unused_host_wrapper"),
+            "unused host archive member must not be extracted:\n{symbols}"
+        );
     }
 }

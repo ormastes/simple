@@ -1,0 +1,53 @@
+# Scoped user owner for the syscall-13 argv-preserving spawn ABI.
+use os.userlib.execve_plan_v1.{execve_plan_v1}
+use os.userlib.syscall_raw.{syscall}
+use os.kernel.types.syscall_types.{SYSCALL13_SPAWN_ARGV_ABI_V1}
+use std.nogc_sync_mut.ptr.raw.{raw_alloc, raw_free, raw_write_i64}
+
+pub fn user_spawn(path: text, argv: [text], priority: u8) -> i64:
+    """Submit argv-preserving spawn through the installed syscall owner."""
+    _user_spawn_invoke_v1(path, argv, priority, syscall)
+
+fn _user_spawn_invoke_v1(path: text, argv: [text], priority: u8,
+    invoke: fn(u64, u64, u64, u64, u64, u64) -> i64) -> i64:
+    """Spawn with bounded UTF-8 argv copies and the caller's priority.
+
+    The synchronous kernel entry copies every argument before creating a child.
+    This owner frees its raw block on every syscall return; request tables and
+    children retain no pointers into the caller's texts or allocation.
+    """
+    val prepared = execve_plan_v1(path, argv, [])
+    if prepared.is_err():
+        return prepared.unwrap_err()
+    val plan = prepared.unwrap()
+    val size = plan.bytes.len() as i64
+    val allocation = unsafe(capabilities: [ffi, raw_ptr]): raw_alloc(size)
+    if allocation <= 0:
+        return -12
+    if allocation > 0x7FFFFFFFFFFFFFFF - size:
+        unsafe(capabilities: [ffi, raw_ptr]): raw_free(allocation, size)
+        return -14
+
+    # Materialize actual machine bytes and u64 pointers, never tagged arrays.
+    var offset: i64 = 0
+    while offset < size:
+        var word: u64 = 0
+        var lane: i64 = 0
+        while lane < 8:
+            word = word | ((plan.bytes[offset + lane] as u64) << (lane * 8))
+            lane = lane + 1
+        unsafe(capabilities: [ffi, raw_ptr]): raw_write_i64(allocation, offset, word as i64)
+        offset = offset + 8
+    var index: i64 = 0
+    while index < plan.argv_offsets.len() as i64:
+        unsafe(capabilities: [ffi, raw_ptr]):
+            raw_write_i64(allocation, index * 8, allocation + plan.argv_offsets[index])
+        index = index + 1
+
+    val result = invoke(13, (allocation + plan.path_offset) as u64,
+        plan.path_length as u64,
+        priority as u64, allocation as u64, SYSCALL13_SPAWN_ARGV_ABI_V1)
+    unsafe(capabilities: [ffi, raw_ptr]): raw_free(allocation, size)
+    result
+
+export user_spawn

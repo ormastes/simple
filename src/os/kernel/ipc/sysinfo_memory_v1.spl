@@ -1,0 +1,20 @@
+# SysInfo(Memory) copy-out words (syscall 95, kind 0). Pure so a host spec can
+# pin the layout without a kernel: the handler in syscall_log_time_sysinfo.spl
+# reads the PMM and writes these words to the caller's MemInfoBuf.
+#
+# MemInfoBuf (@repr("C"), os.kernel.types.syscall_types) is u64 total_pages @0,
+# u64 free_pages @8, u64 used_pages @16, u32 page_size @24, then 4 bytes of tail
+# padding: 32 bytes. Before 2026-11-13 the handler answered status 0 without
+# writing it, so mem_info() saw zeroed pages and the compiler's worker pool
+# read 0 free memory and refused every parallel build.
+
+pub val SYSINFO_MEMORY_BUF_BYTES_V1: u64 = 32
+
+# [total_pages, free_pages, used_pages, page_size] from the PMM page-frame
+# counts and its tracked byte total. Free is clamped to total so used never
+# underflows. An uninitialised PMM (0 frames) reports page size 0, which
+# readers classify as unknown rather than as 0 bytes free.
+pub fn sysinfo_memory_words_v1(total_pages: u64, free_pages: u64, total_bytes: u64) -> [u64]:
+    val free = if free_pages > total_pages: total_pages else: free_pages
+    val page_size = if total_pages == 0u64: 0u64 else: total_bytes / total_pages
+    [total_pages, free, total_pages - free, page_size]

@@ -1,0 +1,81 @@
+# Main-image registration owner. Native accessors return facts from one bounded
+# retained snapshot, not arbitrary process pointers. This is cold preparation,
+# never a handler operation and not public target/profile admission.
+use std.common.trace.observer_contract_v1.*
+use std.common.trace.observer_native_map_v1.{TraceImageRangeV1}
+use std.common.trace.xray_llvm_semantic_map_v1.*
+
+extern fn simple_xray_image_snapshot_create_v1(max_bytes: i64, max_functions: i64) -> i64
+extern fn simple_xray_image_snapshot_word_v1(handle: i64, field: i64) -> i64
+extern fn simple_xray_image_snapshot_section_byte_v1(handle: i64, index: i64) -> i64
+extern fn simple_xray_image_snapshot_build_id_byte_v1(handle: i64, index: i64) -> i64
+extern fn simple_xray_image_snapshot_range_word_v1(handle: i64, index: i64, field: i64) -> i64
+extern fn simple_xray_image_snapshot_function_word_v1(handle: i64, index: i64, field: i64) -> i64
+
+pub struct XrayLlvmRegisteredImageV1:
+    manifest: XrayLlvmBoundManifestV1
+    # Association input checked against native retained state, NOT authority
+    # by possession/secrecy. This public structural integer can be forged;
+    # the actual public selection API never exposes the registered image.
+    native_snapshot: i64
+    native_snapshot_bytes: i64
+    # Peak representation budget, reserved separately from native transport.
+    # Qualification must measure the actual compiler/runtime carrier layout.
+    cold_metadata_budget: i64
+
+fn xray_image_failure_v1(status: i64) -> TraceFailureV1:
+    if status == -1: return TraceFailureV1.InstrumentationAbsent
+    if status == -3: return TraceFailureV1.ResourceExhausted
+    if status == -4: return TraceFailureV1.UnsupportedProfile
+    TraceFailureV1.InvalidMap
+
+# The caller holds process control serialization and proves runtime-ready.
+# Limits constrain this admitted pilot, not all possible compiler-rt maps.
+pub fn xray_llvm_register_main_image_v1(budget: i64, module_instance: u64,
+        incarnation: u64) -> Result<XrayLlvmRegisteredImageV1, TraceFailureV1>:
+    if budget <= 0 or budget > 33554432: return Err(TraceFailureV1.ResourceExhausted)
+    val handle = simple_xray_image_snapshot_create_v1(budget, 4096)
+    if handle <= 0: return Err(xray_image_failure_v1(handle))
+    val schema = simple_xray_image_snapshot_word_v1(handle, 0)
+    val origin = simple_xray_image_snapshot_word_v1(handle, 1)
+    val size = simple_xray_image_snapshot_word_v1(handle, 2)
+    val range_count = simple_xray_image_snapshot_word_v1(handle, 3)
+    val function_count = simple_xray_image_snapshot_word_v1(handle, 4)
+    val identity_size = simple_xray_image_snapshot_word_v1(handle, 5)
+    val native_bytes = simple_xray_image_snapshot_word_v1(handle, 6)
+    if (schema != 1 or origin <= 0 or size <= 0 or range_count <= 0 or range_count > 128 or
+            function_count <= 0 or function_count > 4096 or identity_size != 20 or native_bytes <= 0):
+        return Err(TraceFailureV1.InvalidMap)
+    # Conservative pilot bound prevents a valid giant image from triggering
+    # unbounded Simple byte-array/dictionary/string preparation allocations.
+    if size > 131072 or native_bytes > budget: return Err(TraceFailureV1.ResourceExhausted)
+    val metadata_budget = size * 64 + function_count * 512 + range_count * 128
+    if metadata_budget > budget - native_bytes: return Err(TraceFailureV1.ResourceExhausted)
+    var bytes: [u8] = []
+    for index in 0..size:
+        val byte = simple_xray_image_snapshot_section_byte_v1(handle, index)
+        if byte < 0 or byte > 255: return Err(TraceFailureV1.InvalidMap)
+        bytes.push(byte as u8)
+    var identity: [u8] = []
+    for index in 0..identity_size:
+        val byte = simple_xray_image_snapshot_build_id_byte_v1(handle, index)
+        if byte < 0 or byte > 255: return Err(TraceFailureV1.InvalidMap)
+        identity.push(byte as u8)
+    var ranges: [TraceImageRangeV1] = []
+    for index in 0..range_count:
+        val address = simple_xray_image_snapshot_range_word_v1(handle, index, 0)
+        val extent = simple_xray_image_snapshot_range_word_v1(handle, index, 1)
+        val flags = simple_xray_image_snapshot_range_word_v1(handle, index, 2)
+        if address < 0 or extent <= 0 or flags < 0 or flags > 7: return Err(TraceFailureV1.InvalidMap)
+        ranges.push(TraceImageRangeV1(offset: address as u64, size: extent as u64,
+            readable: (flags & 1) != 0, writable: (flags & 2) != 0, executable: (flags & 4) != 0))
+    val rows = xray_llvm_semantic_decode_v1(bytes, origin as u64, ranges)?
+    var actual: [XrayLlvmFunctionAddressV1] = []
+    for index in 0..function_count:
+        val id = simple_xray_image_snapshot_function_word_v1(handle, index, 0)
+        val address = simple_xray_image_snapshot_function_word_v1(handle, index, 1)
+        if id <= 0 or address <= 0: return Err(TraceFailureV1.InvalidMap)
+        actual.push(XrayLlvmFunctionAddressV1(llvm_id: id, address: address as u64))
+    val manifest = xray_llvm_semantic_bind_v1(rows, actual, identity, module_instance, incarnation)?
+    Ok(XrayLlvmRegisteredImageV1(manifest: manifest, native_snapshot: handle, native_snapshot_bytes: native_bytes,
+        cold_metadata_budget: metadata_budget))

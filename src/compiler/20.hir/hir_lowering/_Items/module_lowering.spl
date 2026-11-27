@@ -21,7 +21,8 @@ use compiler.hir.hir_lowering.module_surface_types.{ModuleSurfacesByName}  # exp
 # ModuleSurfaceCallable) :298, hir_surface_trait_to_trait(surface_trait:
 # ModuleSurfaceTrait, ...) :313, hir_surface_enum_to_enum(surface_enum:
 # ModuleSurfaceEnum) :327.
-use compiler.hir.hir_lowering.module_surface_types.{ModuleSurfaceEnum, ModuleSurfaceCallable, ModuleSurfaceParam, ModuleSurfaceTrait}
+use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface, ModuleSurfaceEnum, ModuleSurfaceCallable, ModuleSurfaceParam, ModuleSurfaceTrait, ModuleSurfaceExportOriginLookup, ModuleSurfaceExportCategoryV1, ModuleSurfaceExportSelectionStateV1, module_surface_export_origin_index_lookup}
+use compiler.hir.hir_lowering.module_surface_selected_exports_v1.{module_surface_selected_export_lookup_v1}
 use compiler.hir.hir_lowering.module_surface_registry_index.{module_surface_route_arrays_aligned}
 use compiler.hir.hir_lowering.expressions.*
 use compiler.common.attributes.{parse_layout_attrs, parse_function_attrs, parse_export_attrs, parse_driver_manifest_attrs, parse_platform_attrs, parse_vhdl_hardware_attrs, vhdl_hardware_metadata_default, FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind, VhdlHardwareMetadata}
@@ -32,7 +33,7 @@ use compiler.core.{decl_get_body, decl_get_name, decl_get_param_names, decl_get_
 use compiler.core.{STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_RETURN, stmt_get_tag, stmt_get_expr, stmt_get_name, stmt_get_type}
 
 extern fn rt_enum_discriminant<T>(value: T) -> i64
-extern fn rt_enum_payload(value: StmtKind) -> Expr
+extern fn rt_enum_payload(value: StmtKind) -> Expr?
 use compiler.core.{EXPR_INT_LIT, EXPR_STRING_LIT, EXPR_INTERPOLATED_STRING, EXPR_BOOL_LIT, EXPR_NIL_LIT, EXPR_IDENT, EXPR_BINARY, EXPR_CALL, EXPR_FIELD_ACCESS, EXPR_METHOD_CALL, EXPR_BLOCK, EXPR_RETURN, expr_get_tag, expr_get_int, expr_get_str, expr_get_left, expr_get_right, expr_get_args, expr_get_arg_names, expr_get_stmts}
 use compiler.frontend.core._AstExpr.accessors.{expr_get_arg_names}
 use compiler.core.{TOK_MINUS, TOK_STAR, TOK_SLASH, TOK_PERCENT, TOK_EQ, TOK_NOT_EQ, TOK_LT, TOK_LT_EQ, TOK_GT, TOK_GT_EQ}
@@ -44,6 +45,18 @@ use std.nogc_sync_mut.io.process_ops.{eprint}
 
 extern fn rt_env_get(key: text) -> text?
 extern fn rt_string_len(value: text) -> i64
+extern fn rt_transient_array_scope_state_v1() -> i64
+extern fn rt_transient_array_scope_identity_v1() -> i64
+extern fn rt_transient_heap_promote<T>(value: T) -> bool
+extern fn rt_session_heap_id() -> u32
+extern fn rt_session_alloc_begin() -> bool
+extern fn rt_session_alloc_end() -> bool
+
+use compiler.hir.hir_lowering.phase_memo_ownership.{
+    hir_phase_memo_stage_surface_cache,
+    hir_phase_memo_clear_surface_staging,
+    hir_phase_memo_surface_scope_promoted
+}
 
 # `rt_env_get` yields nil for an UNSET variable, so both the extern and this
 # wrapper are OPTIONAL — every call site below already uses the optional-safe
@@ -158,6 +171,22 @@ struct HirMaterializedPayloadOrigin:
     # collision/cycle identity always uses physical module_name above.
     module_key: text
 
+var _hir_surface_name_gen: i64 = -1
+var _hir_surface_name_len: i64 = -1
+var _hir_surface_name_surf_len: i64 = -1
+var _hir_surface_name_first_hash: i64 = 0
+var _hir_surface_name_mid_hash: i64 = 0
+var _hir_surface_name_last_hash: i64 = 0
+var _hir_surface_name_scope_id: i64 = 0
+var _hir_surface_name_session_id: u32 = 0u32
+var _hir_surface_name_buckets: [i64] = []
+var _hir_surface_name_next: [i64] = []
+var _hir_surface_name_mask: i64 = 0
+var _hir_surface_name_build_count: i64 = 0
+
+fn hir_surface_name_index_build_count() -> i64:
+    _hir_surface_name_build_count
+
 fn hir_module_surface_index(surfaces: ModuleSurfacesByName, name: text) -> i64:
     # Native optional class returns and Dict bracket reads can preserve the
     # success discriminator while dropping the ModuleSurface payload. Resolve
@@ -165,15 +194,157 @@ fn hir_module_surface_index(surfaces: ModuleSurfacesByName, name: text) -> i64:
     # explicitly.  Do not materialize Dict keys/values in this hot path.
     val names = surfaces.ordered_names
     val indices = surfaces.ordered_indices
-    var position = 0
-    while position < names.len() and position < indices.len():
-        if names[position] == name:
-            val index = indices[position]
-            if index >= 0 and index < surfaces.surfaces.len():
+    val count = if names.len() < indices.len(): names.len() else: indices.len()
+    if count == 0:
+        return -1
+    if not surfaces.frozen or surfaces.generation <= 0:
+        var position = 0
+        while position < count:
+            if names[position] == name:
+                val index = indices[position]
+                if index >= 0 and index < surfaces.surfaces.len():
+                    return index
+                return -1
+            position = position + 1
+        return -1
+
+    val cur_scope = rt_transient_array_scope_identity_v1()
+    val cur_sess: u32 = rt_session_heap_id()
+    var scope_valid = true
+    if _hir_surface_name_session_id != 0u32 and cur_sess != _hir_surface_name_session_id:
+        scope_valid = false
+    if _hir_surface_name_scope_id != 0:
+        if hir_phase_memo_surface_scope_promoted(_hir_surface_name_scope_id):
+            _hir_surface_name_scope_id = 0
+        elif _hir_surface_name_scope_id != cur_scope:
+            hir_phase_memo_clear_surface_staging(_hir_surface_name_scope_id)
+            scope_valid = false
+    if not scope_valid:
+        _hir_surface_name_gen = -1
+        _hir_surface_name_len = -1
+        _hir_surface_name_surf_len = -1
+        _hir_surface_name_scope_id = 0
+        _hir_surface_name_session_id = 0u32
+        _hir_surface_name_buckets = []
+        _hir_surface_name_next = []
+        _hir_surface_name_mask = 0
+
+    val surf_len = surfaces.surfaces.len()
+    val first_hash = hash_text(names[0])
+    val mid_hash = hash_text(names[count / 2])
+    val last_hash = hash_text(names[count - 1])
+    val cache_hit = (
+        _hir_surface_name_gen == surfaces.generation and
+        _hir_surface_name_len == count and
+        _hir_surface_name_surf_len == surf_len and
+        _hir_surface_name_first_hash == first_hash and
+        _hir_surface_name_mid_hash == mid_hash and
+        _hir_surface_name_last_hash == last_hash and
+        _hir_surface_name_buckets.len() > 0
+    )
+    if not cache_hit:
+        var bucket_count: i64 = 64
+        while bucket_count < count * 2:
+            bucket_count = bucket_count * 2
+        val mask = bucket_count - 1
+        val scope_state = rt_transient_array_scope_state_v1()
+        val sess_active = scope_state == 1 and cur_sess != 0u32
+        if sess_active:
+            rt_session_alloc_begin()
+        var buckets: [i64] = []
+        var fill = 0
+        while fill < bucket_count:
+            buckets = buckets.push(-1)
+            fill = fill + 1
+        var next: [i64] = []
+        var fill_next = 0
+        while fill_next < count:
+            next = next.push(-1)
+            fill_next = fill_next + 1
+        # Insert in reverse order so bucket heads preserve first-occurrence-wins
+        # on duplicate entries in ordered_names.
+        var pos = count - 1
+        while pos >= 0:
+            val bucket = hash_text(names[pos]) & mask
+            next[pos] = buckets[bucket]
+            buckets[bucket] = pos
+            pos = pos - 1
+        var new_scope_id: i64 = 0
+        var new_sess_id: u32 = 0u32
+        if sess_active:
+            rt_session_alloc_end()
+            new_sess_id = cur_sess
+        elif scope_state == 2:
+            val ok_b = rt_transient_heap_promote(buckets)
+            val ok_n = rt_transient_heap_promote(next)
+            if not (ok_b and ok_n):
+                new_scope_id = cur_scope
+        elif scope_state == 1:
+            new_scope_id = cur_scope
+            hir_phase_memo_stage_surface_cache(cur_scope, buckets, next)
+        _hir_surface_name_gen = surfaces.generation
+        _hir_surface_name_len = count
+        _hir_surface_name_surf_len = surf_len
+        _hir_surface_name_first_hash = first_hash
+        _hir_surface_name_mid_hash = mid_hash
+        _hir_surface_name_last_hash = last_hash
+        _hir_surface_name_scope_id = new_scope_id
+        _hir_surface_name_session_id = new_sess_id
+        _hir_surface_name_buckets = buckets
+        _hir_surface_name_next = next
+        _hir_surface_name_mask = mask
+        _hir_surface_name_build_count = _hir_surface_name_build_count + 1
+
+    var slot = _hir_surface_name_buckets[hash_text(name) & _hir_surface_name_mask]
+    while slot >= 0:
+        if names[slot] == name:
+            val index = indices[slot]
+            if index >= 0 and index < surf_len:
                 return index
             return -1
-        position = position + 1
+        slot = _hir_surface_name_next[slot]
     -1
+
+fn hir_export_origin_lookup_v1(
+    surfaces: ModuleSurfacesByName, surface: ModuleSurface, name: text
+) -> ModuleSurfaceExportOriginLookup:
+    """Resolve one facade export origin from legacy index or unique typed selection."""
+    val direct = module_surface_export_origin_index_lookup(surface.export_origin_index, name)
+    if direct.found:
+        return direct
+    if surface.exports.len() == 0 or not surfaces.frozen or not surfaces.selected_exports_v1.frozen:
+        return direct
+    var selected_surface = -1
+    var selected_source = ""
+    var found_selected = false
+    for category in [
+        ModuleSurfaceExportCategoryV1.Function,
+        ModuleSurfaceExportCategoryV1.Class,
+        ModuleSurfaceExportCategoryV1.Struct,
+        ModuleSurfaceExportCategoryV1.Enum,
+        ModuleSurfaceExportCategoryV1.Trait,
+        ModuleSurfaceExportCategoryV1.TypeAlias,
+        ModuleSurfaceExportCategoryV1.Constant
+    ]:
+        val selection = module_surface_selected_export_lookup_v1(
+            surfaces, surface.physical_index, category, name)
+        if selection.state == ModuleSurfaceExportSelectionStateV1.Selected:
+            if found_selected:
+                if selection.terminal_surface != selected_surface or selection.terminal_name != selected_source:
+                    return direct
+            else:
+                selected_surface = selection.terminal_surface
+                selected_source = selection.terminal_name
+                found_selected = true
+        elif selection.state != ModuleSurfaceExportSelectionStateV1.Missing:
+            return direct
+    if not found_selected or selected_surface < 0 or selected_surface >= surfaces.surfaces.len():
+        return direct
+    ModuleSurfaceExportOriginLookup(
+        found: true,
+        owner_module: surfaces.surfaces[selected_surface].preferred_registry_name,
+        source_name: selected_source,
+        resolution_kind: "selected-typed-v1")
 
 fn hir_export_origin_surface_index(
     surfaces: ModuleSurfacesByName, owner_name: text
@@ -214,7 +385,7 @@ fn hir_export_origin_surface_index(
 fn hir_module_declares_item(m: ModuleSurface, name: text) -> bool:
     """True when module `m` itself declares `name` as any importable decl
     kind register_imported_symbol knows how to register (functions covers
-    `extern fn` too — the parser stores externs in ParserModule.functions with
+    `extern fn` too — the parser stores externs in Module.functions with
     is_extern=true)."""
     if module_surface_name_position(m.callable_names, name) >= 0:
         return true
@@ -284,7 +455,7 @@ fn hir_payload_kind_is_type(kind: text) -> bool:
     """
     kind == "class" or kind == "struct" or kind == "enum" or kind == "trait" or kind == "type_alias"
 
-fn hir_payload_terminal_identity(module_name: text, item_name: text, item_kind: text) -> text:
+pub fn hir_payload_terminal_identity(module_name: text, item_name: text, item_kind: text) -> text:
     val canonical_module = hir_pkg_canonical_module_name(module_name)
     val canonical_item_owner = if canonical_module == "compiler.tools.lint._LintMain.config_and_model" and (item_name == "LintLevel" or item_name == "LintCategory"):
         # Keep these two lint contract enums logically canonical across
@@ -300,7 +471,7 @@ fn hir_payload_terminal_identity(module_name: text, item_name: text, item_kind: 
 
 fn hir_surface_param_to_param(param: ModuleSurfaceParam) -> Param:
     Param(name: param.name, has_type_: param.has_type_, type_: param.type_,
-        has_default: false, default: Expr(kind: ExprKind.NilLit, span: param.span),
+        has_default: param.has_default, default: Expr(kind: ExprKind.NilLit, span: param.span),
         span: param.span, is_mutable: param.is_mutable)
 
 fn hir_surface_callable_to_header(callable: ModuleSurfaceCallable) -> ParserFunction:
@@ -348,7 +519,7 @@ fn _hir_text_index_of(value: text, needle: text) -> i64:
         return -1
     rt_string_len(value.split(needle)[0])
 
-fn hir_module_logical_name_from_path(path: text) -> text:
+pub fn hir_module_logical_name_from_path(path: text) -> text:
     # Delegates to the single shared derivation in 00.common — see
     # module_path_naming.spl for history (this used to be one of four
     # hand-duplicated copies; a 70a29867bc2 drift between copies broke the
@@ -392,46 +563,11 @@ impl HirLowering:
         indices (ascending, one entry per surface even when the same name is
         declared in several of that surface's decl kinds)."""
         self.surface_decl_index_build_count = self.surface_decl_index_build_count + 1
-        var owners: {text: [i64]} = {}
-        var surface_index = 0
-        while surface_index < self.module_surfaces.surfaces.len():
-            val surface: ModuleSurface = self.module_surfaces.surfaces[surface_index]
-            var kind_index = 0
-            while kind_index < 6:
-                val names: [text] = match kind_index:
-                    case 0: surface.callables.keys()
-                    case 1: surface.composites.keys()
-                    case 2: surface.enums.keys()
-                    case 3: surface.traits.keys()
-                    case 4: surface.type_aliases.keys()
-                    case _: surface.constants.keys()
-                var name_index = 0
-                while name_index < names.len():
-                    val decl_name = names[name_index]
-                    if owners.contains_key(decl_name):
-                        # `var`, not `val`: the seed lane rejects any
-                        # ARRAY_MUTATING_METHODS call on a `val`-bound name even
-                        # in pure style (`existing.push(x)` whose result is
-                        # stored elsewhere), which made every native-build die
-                        # in this hir lowering path with "cannot call mutating
-                        # method 'push' on immutable array 'existing'".
-                        # doc/08_tracking/bug/bootstrap_stage2_backend_object_path_status_2026-09-08.md
-                        var existing: [i64] = owners[decl_name]
-                        # Ascending insertion order makes the duplicate check a
-                        # single tail comparison rather than a membership scan.
-                        if existing.len() == 0 or existing[existing.len() - 1] != surface_index:
-                            owners[decl_name] = existing.push(surface_index)
-                    else:
-                        owners[decl_name] = [surface_index]
-                    name_index = name_index + 1
-                kind_index = kind_index + 1
-            surface_index = surface_index + 1
-        self.surface_decl_owners = owners
         # BOOT-20 read authority (restores b488a271c48, lost in a later
         # restore while its fields stayed): one (name, surface) pair per
         # frozen decl name -- the same six arrays module_surface_declares_item
         # reads -- with scalar hash chains over the pairs. No class-field Dict
-        # membership is trusted, so the miss path needs no registry sweep.
+        # is built or trusted on this path.
         var pair_names: [text] = []
         var pair_surfaces: [i64] = []
         var pair_surface = 0

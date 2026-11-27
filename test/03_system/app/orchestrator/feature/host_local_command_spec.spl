@@ -1,0 +1,87 @@
+# @req HOST-LOCAL-01 HOST-LOCAL-02 HOST-LOCAL-03
+# NOT_RUN. Real filesystem and signatures; no simulated native identity accepted.
+use std.nogc_sync_mut.orchestration.host_local_command_v1.*
+use std.nogc_sync_mut.orchestration.host_local_root_v1.*
+use std.nogc_sync_mut.orchestration.host_enrollment_v1.*
+use std.nogc_sync_mut.orchestration.host_enrollment_claim_v1.*
+use test.fixtures.orchestration.host_enrollment_claim_fixture_v1.*
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_read_regular_no_follow_bounded}
+use std.nogc_sync_mut.sffi.fs.file_atomic_write_mode
+use std.nogc_sync_mut.io_runtime.dir_remove
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+fn host_local_test_ready_v1(claim: HostEnrollmentClaimV1) -> bool:
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(2), "kind": SdnValue.String("host-local-runtime"),
+        "root": SdnValue.String(claim.root), "bindingDigest": SdnValue.String(claim.binding_digest),
+        "claimDigest": SdnValue.String(claim.claim_digest), "containerPolicyDigest": SdnValue.String("a".repeat(64)),
+        "providerGeneration": SdnValue.Int(1)}
+    file_atomic_write_mode(claim.root + "/runtime-ready.sdn", sdn_encode_canonical(SdnValue.Dict(fields)) + "\n", 0o600)
+
+describe "Finite local host command boundary":
+    it "refuses unknown commands and incomplete arguments before opening an owner":
+        val bad = host_local_command_v1(["host-run-unchecked", "/does-not-exist"])
+        expect(bad.exit_code).to_equal(1)
+        expect(bad.output).to_contain("host-local-action-invalid")
+        val missing = host_local_command_v1(["host-execute"])
+        expect(missing.exit_code).to_equal(1)
+        expect(missing.output).to_contain("host-local-argument-count")
+
+    it "rejects an invalid execute packet without creating a journal or provider directory":
+        val fixture = host_claim_fixture_v1()
+        val packet = fixture.parent + "/invalid-packet.sdn"
+        assert(file_atomic_write_mode(packet, "version: 1\nkind: unchecked\n", 0o600))
+        val reply = host_local_command_v1(["host-execute", fixture.parent, packet])
+        expect(reply.exit_code).to_equal(1)
+        assert(not file_exists(fixture.parent + "/journal"))
+        assert(not file_exists(fixture.parent + "/provider"))
+        dir_remove(fixture.parent, true)
+
+    it "retains the exact claim and refuses ready publication when policy publication fails":
+        val fixture = host_claim_fixture_v1()
+        val claim = host_enrollment_claim_with_clock_v1(fixture.enrollment.binding, fixture.enrollment.credential,
+            fixture.configuration_bytes, host_claim_clock_v1).unwrap()
+        val path = claim.root + "/container-policy.sdn"
+        assert(file_atomic_write_mode(path, "existing interrupted publication\n", 0o600))
+        expect(host_local_publish_runtime_v1(claim, "new policy bytes\n").unwrap_err()).to_equal("host-local-object-already-present-or-unavailable")
+        expect(file_read_regular_no_follow_bounded(path, 1048576).unwrap()).to_equal("existing interrupted publication\n")
+        assert(not file_exists(claim.root + "/runtime-ready.sdn"))
+        expect(sha256_text(file_read_regular_no_follow_bounded(claim.claim_path, 1048576).unwrap())).to_equal(claim.claim_digest)
+        dir_remove(fixture.parent, true)
+
+    it "round trips only the exact canonical enrollment binding":
+        val fixture = host_claim_fixture_v1()
+        val bytes = host_enrollment_payload_bytes_v1(fixture.enrollment.binding).unwrap()
+        val decoded = host_local_binding_decode_v1(bytes).unwrap()
+        expect(host_enrollment_payload_bytes_v1(decoded).unwrap()).to_equal(bytes)
+        assert(host_local_binding_decode_v1(bytes + "\n").is_err())
+        assert(host_local_binding_decode_v1(bytes.replace("host-enrollment-binding", "host-runtime-proof")).is_err())
+        dir_remove(fixture.parent, true)
+
+    it "refuses changed Container policy despite an enrolled claim and ready record":
+        val fixture = host_claim_fixture_v1()
+        val claim = host_enrollment_claim_with_clock_v1(fixture.enrollment.binding, fixture.enrollment.credential,
+            fixture.configuration_bytes, host_claim_clock_v1).unwrap()
+        assert(host_local_test_ready_v1(claim))
+        assert(file_atomic_write_mode(claim.root + "/container-policy.sdn", "changed policy\n", 0o600))
+        # Ready-file presence cannot bypass the retained policy digest before
+        # the common Container factory observes native platform state.
+        expect(host_local_root_open_v1(claim.root, 1000).unwrap_err()).to_equal("host-local-engine-policy-changed")
+        assert(not file_exists(claim.root + "/journal"))
+        assert(not file_exists(claim.root + "/provider"))
+        expect(sha256_text(file_read_regular_no_follow_bounded(claim.claim_path, 1048576).unwrap())).to_equal(claim.claim_digest)
+        dir_remove(fixture.parent, true)
+
+    it "retains an interrupted enrollment and rejects edited configuration before opening capacity":
+        val fixture = host_claim_fixture_v1()
+        val claim = host_enrollment_claim_with_clock_v1(fixture.enrollment.binding, fixture.enrollment.credential,
+            fixture.configuration_bytes, host_claim_clock_v1).unwrap()
+        assert(host_local_root_open_v1(claim.root, 1000).is_err())
+        assert(not file_exists(claim.root + "/journal"))
+        assert(host_local_test_ready_v1(claim))
+        assert(file_atomic_write_mode(claim.root + "/host-config.sdn", fixture.configuration_bytes + "\n", 0o600))
+        expect(host_local_root_open_v1(claim.root, 1000).unwrap_err()).to_equal("host-local-config-digest-mismatch")
+        expect(sha256_text(file_read_regular_no_follow_bounded(claim.claim_path, 1048576).unwrap())).to_equal(claim.claim_digest)
+        assert(not file_exists(claim.root + "/journal"))
+        dir_remove(fixture.parent, true)

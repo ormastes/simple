@@ -19,7 +19,7 @@ impl TokenCacheManager:
             val cached = self.cache[file_path]
             if cached.source_hash == current_hash:
                 return cached.tokens
-        nil
+        None
 
     fn content(file_path: text) -> text:
         if self.cache.has(file_path):
@@ -27,9 +27,14 @@ impl TokenCacheManager:
         ""
 
     me tokens(file_path: text, tokenize_fn: fn(text) -> [SimpleToken]) -> [SimpleToken]:
-        val current_hash = file_hash_sha256(file_path)
+        val current_hash_opt = file_hash_sha256(file_path)
+        if current_hash_opt.is_none():
+            # Unhashable file: cache miss, and nothing is cached for it.
+            self.invalidate(file_path)
+            return tokenize_fn(file_path)
+        val current_hash = current_hash_opt.unwrap()
         val cached_tokens = self.fresh_tokens(file_path, current_hash)
-        if cached_tokens != nil:
+        if cached_tokens.is_some():
             return cached_tokens
 
         val result = tokenize_fn(file_path)
@@ -45,24 +50,35 @@ impl TokenCacheManager:
     fn cached_tokens(file_path: text) -> [SimpleToken]?:
         if self.cache.has(file_path):
             val cached = self.cache[file_path]
-            if cached.source_hash == file_hash_sha256(file_path):
-                return cached.tokens
-        nil
+            if val current_hash = file_hash_sha256(file_path):
+                if cached.source_hash == current_hash:
+                    return cached.tokens
+        None
 
     me store(file_path: text, tokens: [SimpleToken]):
+        val source_hash_opt = file_hash_sha256(file_path)
+        if source_hash_opt.is_none():
+            # Unhashable file: never cache it under an absent digest.
+            self.invalidate(file_path)
+            return
         self.cache[file_path] = TokenCache(
             file_path: file_path,
             mtime: get_file_mtime(file_path),
-            source_hash: file_hash_sha256(file_path),
+            source_hash: source_hash_opt.unwrap(),
             tokens: tokens,
             content: self.content(file_path)
         )
 
     me store_with_content(file_path: text, tokens: [SimpleToken], content: text):
+        val source_hash_opt = file_hash_sha256(file_path)
+        if source_hash_opt.is_none():
+            # Unhashable file: never cache it under an absent digest.
+            self.invalidate(file_path)
+            return
         self.cache[file_path] = TokenCache(
             file_path: file_path,
             mtime: get_file_mtime(file_path),
-            source_hash: file_hash_sha256(file_path),
+            source_hash: source_hash_opt.unwrap(),
             tokens: tokens,
             content: content
         )
@@ -79,10 +95,11 @@ impl TokenCacheManager:
         self.cache = {}
 
     fn stats() -> text:
+        val cache_keys = self.cache.keys()
         var total_tokens = 0
-        for key in self.cache.keys():
+        for key in cache_keys:
             total_tokens = total_tokens + self.cache[key].tokens.len()
-        "Cache: {self.cache.keys().len()} files, {total_tokens} tokens"
+        "Cache: {cache_keys.len()} files, {total_tokens} tokens"
 
 fn new_token_cache_manager() -> TokenCacheManager:
     TokenCacheManager(cache: {})

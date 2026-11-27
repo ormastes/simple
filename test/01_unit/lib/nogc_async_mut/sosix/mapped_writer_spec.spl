@@ -1,0 +1,75 @@
+"""
+## Purpose and audience
+Purpose: Verify the SOSIX mapped writer (create, map, fill, flush, rename).
+Audience: compiler and tooling engineers who maintain build-cache writers.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines.
+## Compatibility and limitations
+Uses a temp file in the working directory and deletes it afterwards.
+Design: doc/05_design/compiler/incremental_build/build_runner_fiber_scheduler_v1.md §5
+"""
+use std.nogc_async_mut.sosix.file_map.{sosix_mapped_writer_create, sosix_mapped_writer_ok, sosix_mapped_writer_put_u8, sosix_mapped_writer_put_i64, sosix_mapped_writer_put_bytes, sosix_mapped_writer_finish, sosix_mapped_writer_abort}
+use std.nogc_sync_mut.io_runtime.{file_exists, file_read_bytes, file_delete, getpid}
+
+fn _mw_path(tag: text) -> text:
+    ".mapped_writer_spec_{getpid()}_{tag}.bin"
+
+describe "sosix mapped writer":
+    it "publishes exactly the bytes written through the mapping":
+        val path = _mw_path("ok")
+        file_delete(path)
+        val w = sosix_mapped_writer_create(path, 16)
+        expect(sosix_mapped_writer_ok(w)).to_be(true)
+        expect(file_exists(path)).to_be(false)
+        expect(sosix_mapped_writer_put_i64(w, 0, 0x0807060504030201)).to_be(true)
+        expect(sosix_mapped_writer_put_bytes(w, 8, [9u8, 10u8, 11u8])).to_be(true)
+        expect(sosix_mapped_writer_put_u8(w, 15, 255)).to_be(true)
+        expect(sosix_mapped_writer_finish(w)).to_be(true)
+        expect(file_exists(w.temp_path)).to_be(false)
+        val got = file_read_bytes(path)
+        expect(got.len()).to_equal(16)
+        expect(got[0] as i64).to_equal(1)
+        expect(got[7] as i64).to_equal(8)
+        expect(got[8] as i64).to_equal(9)
+        expect(got[10] as i64).to_equal(11)
+        expect(got[11] as i64).to_equal(0)
+        expect(got[15] as i64).to_equal(255)
+        file_delete(path)
+
+    it "refuses out-of-bounds stores":
+        val path = _mw_path("oob")
+        val w = sosix_mapped_writer_create(path, 8)
+        expect(sosix_mapped_writer_put_u8(w, 8, 1)).to_be(false)
+        expect(sosix_mapped_writer_put_u8(w, -1, 1)).to_be(false)
+        expect(sosix_mapped_writer_put_i64(w, 1, 1)).to_be(false)
+        expect(sosix_mapped_writer_put_bytes(w, 6, [1u8, 2u8, 3u8])).to_be(false)
+        expect(sosix_mapped_writer_abort(w)).to_be(true)
+
+    it "abort leaves neither temp nor final file":
+        val path = _mw_path("abort")
+        file_delete(path)
+        val w = sosix_mapped_writer_create(path, 32)
+        expect(sosix_mapped_writer_ok(w)).to_be(true)
+        expect(sosix_mapped_writer_abort(w)).to_be(true)
+        expect(file_exists(w.temp_path)).to_be(false)
+        expect(file_exists(path)).to_be(false)
+
+    it "replaces an existing final file atomically":
+        val path = _mw_path("replace")
+        val first = sosix_mapped_writer_create(path, 4)
+        sosix_mapped_writer_put_bytes(first, 0, [1u8, 1u8, 1u8, 1u8])
+        expect(sosix_mapped_writer_finish(first)).to_be(true)
+        val second = sosix_mapped_writer_create(path, 2)
+        sosix_mapped_writer_put_bytes(second, 0, [7u8, 7u8])
+        expect(sosix_mapped_writer_finish(second)).to_be(true)
+        val got = file_read_bytes(path)
+        expect(got.len()).to_equal(2)
+        expect(got[0] as i64).to_equal(7)
+        file_delete(path)
+
+    it "rejects a non-positive size without creating anything":
+        val path = _mw_path("zero")
+        val w = sosix_mapped_writer_create(path, 0)
+        expect(sosix_mapped_writer_ok(w)).to_be(false)
+        expect(sosix_mapped_writer_finish(w)).to_be(false)
+        expect(file_exists(path)).to_be(false)

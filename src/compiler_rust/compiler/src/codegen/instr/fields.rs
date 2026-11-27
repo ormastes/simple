@@ -27,11 +27,16 @@ fn guard_nonnull_receiver<M: Module>(
     byte_offset: usize,
     access_width: usize,
 ) -> InstrResult<()> {
-    // LOCAL BUILD NEUTRALIZATION (not committed): the receiver guard calls
-    // rt_struct_receiver_valid, which lives only in runtime_native.c — a TU
-    // the seed crate cannot link (duplicate rt_host_gpu_* symbols). Until the
-    // guard lane lands the seed-side symbol, emit no guard so the JIT keeps
-    // the pre-guard behavior. Revert via /tmp/fields_rs_guarded.rs.
+    // OFF BY DEFAULT (opt in with SIMPLE_SEED_FIELD_GUARD=1). The predicate
+    // is linkable: rt_struct_receiver_valid is compiled into the seed runtime
+    // from runtime_memory.c and resolves under the JIT. The blocker is
+    // semantic: it only accepts pointers registered by rt_struct_alloc, while
+    // seed codegen allocates structs with plain rt_alloc (compile_struct_init,
+    // the struct copy path, GcAlloc), so enabling it traps on every valid
+    // field access ("runtime error: invalid field receiver", SIGILL). Turning
+    // it on needs every seed struct producer moved to rt_struct_alloc, plus a
+    // cost check of a locked hash lookup per field access.
+    // doc/08_tracking/bug/seed_field_receiver_guard_neutralized_and_predicate_unlinkable_2026-10-24.md
     if std::env::var("SIMPLE_SEED_FIELD_GUARD").is_err() {
         return Ok(());
     }

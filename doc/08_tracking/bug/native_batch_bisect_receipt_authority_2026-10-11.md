@@ -31,3 +31,9 @@ prove no compiler/native/bootstrap coverage.
 Evidence: `build/native_probe/phase3-whole-20261011-c06/reviews/native-batch-authority-child-9a95/`
 contains exact parent/file/patch bindings and synthetic-control-receipt.json.
 Full merged-source/native/Phase3 acceptance remains pending.
+
+**Revalidated 2026-11-02: still plausible because OPEN; isolated metadata controls pass, independent repair review and; no merged fix commit with a passing regression is cited in this doc.**
+
+## Resolution (2026-11-03)
+
+Fixed in source: validate_pass in scripts/bootstrap/native-batch-bisect.pl calls NativeAdapterEvidence::previous_build_evidence for strict build evidence.

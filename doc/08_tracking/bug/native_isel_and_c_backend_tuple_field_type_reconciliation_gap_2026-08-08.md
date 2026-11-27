@@ -133,3 +133,24 @@ filed native-isel float-register-class gap (x86_64/aarch64/riscv64/riscv32
 have no float value representation at all) is architectural and unrelated to
 the moved file; nothing suggests it has been addressed. No change made.
 Leaving OPEN pending a re-audit against the current C-backend module location.
+
+## Triage 2026-11-25 (release/1.0.0 @ 4c6024f8271)
+
+Re-audit resolving the 2026-09-13 "re-locate the successor module" action:
+
+- **C backend: lane removed, fix claim moot.** `_CBackendTranslate` was
+  deleted in the `88aac2ffe28` tree transplant; no C-emitting backend exists
+  anywhere under `src/compiler/70.backend` at HEAD (no `CBackend*` class, no
+  C++ `Aggregate`/`GetField` emission). The "C backend — FIXED
+  (static-verified)" row refers to code that no longer ships; there is
+  nothing left to native-run-verify on that lane.
+- **Native isel float gap: unchanged, still open.** The four isel lanes
+  (`isel_x86_64.spl`, `isel_aarch64.spl`, `isel_riscv64.spl`,
+  `isel_riscv32.spl`) still have no float register class; per this record's
+  own verdict that is a separate architectural program ("do not attempt a
+  GetField-only patch"), out of scope for a bounded bugfix. Pointer fields
+  remain correct as-is.
+
+Status is therefore: C-backend row closed-by-removal; the isel float-field
+gap remains the single open item and stays tracked here as blocked on the
+float-register-class program.

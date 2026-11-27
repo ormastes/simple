@@ -320,6 +320,24 @@ use lib.database.core.{StringInterner}       # From core.spl
 use lib.database.bug.{BugDatabase}           # From bug.spl
 ```
 
+### File vs Package With the Same Name
+
+`X.spl` next to a package `X/__init__.spl` (or `X/mod.spl`) is **ambiguous**:
+the resolution model in `src/compiler/00.common/dependency/resolution.spl`
+returns `ResolutionResult.Ambiguous` for it and `is_well_formed` rejects it.
+
+- **Do not create new pairs.** `sh scripts/check/check-module-file-dir-ambiguity.shs`
+  fails on any pair not in `scripts/check/module_file_dir_ambiguity_baseline.txt`
+  (grandfathered pairs; the list only shrinks — a removed pair must be dropped
+  from it).
+- **Grandfathered pairs resolve FILE-FIRST in every loader and for every import
+  form** (`use X`, `use X.{a, b}`, `use X.*`, `export use`): the compiler's
+  static resolvers, the pure-Simple interpreter, and the Rust seed all load
+  `X.spl`. The package is reached only through `X.spl` re-exporting it. (The
+  seed used to redirect group/glob imports to `X/__init__.spl`, so the
+  interpreter and compiler loaded different code; spec:
+  `test/01_unit/compiler/module_resolver/file_dir_same_name_spec.spl`.)
+
 ### Relative Imports
 
 ```text

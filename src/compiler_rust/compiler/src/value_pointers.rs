@@ -160,17 +160,21 @@ macro_rules! impl_borrow_wrapper {
         pub struct $name {
             /// The borrowed value (shared via Arc + RwLock for thread-safe runtime checking)
             inner: Arc<RwLock<Value>>,
+            /// The caller's place when it contains an index, resolved once at
+            /// the borrow so a write-back cannot re-run the index expression.
+            place: Option<Arc<crate::interpreter::place::Place>>,
         }
 
         impl $name {
             pub fn new(value: Value) -> Self {
                 Self {
                     inner: Arc::new(RwLock::new(value)),
+                    place: None,
                 }
             }
 
             pub fn from_arc(arc: Arc<RwLock<Value>>) -> Self {
-                Self { inner: arc }
+                Self { inner: arc, place: None }
             }
 
             pub fn inner(&self) -> std::sync::RwLockReadGuard<'_, Value> {
@@ -187,6 +191,7 @@ macro_rules! impl_borrow_wrapper {
                 // Cloning a borrow shares the same underlying reference
                 Self {
                     inner: self.inner.clone(),
+                    place: self.place.clone(),
                 }
             }
         }
@@ -213,6 +218,17 @@ impl_borrow_wrapper!(
 
 // Additional method only for mutable borrows
 impl BorrowMutValue {
+    pub(crate) fn at_place(value: Value, place: crate::interpreter::place::Place) -> Self {
+        Self {
+            inner: Arc::new(RwLock::new(value)),
+            place: Some(Arc::new(place)),
+        }
+    }
+
+    pub(crate) fn place(&self) -> Option<&crate::interpreter::place::Place> {
+        self.place.as_deref()
+    }
+
     pub fn inner_mut(&self) -> std::sync::RwLockWriteGuard<'_, Value> {
         self.inner.write().unwrap()
     }
@@ -404,6 +420,16 @@ impl PartialEq for Value {
                 },
             ) => na == nb && da == db && ea == eb,
             (Value::Object { class: ca, fields: fa }, Value::Object { class: cb, fields: fb }) => ca == cb && fa == fb,
+            // Reference-semantics class values: same cell is trivially equal;
+            // otherwise structural (class + fields), as for `Value::Object`, so
+            // `==` is unchanged by the storage flip (only identity/aliasing
+            // differs — class_instance_reference_storage_2026-11-03.md).
+            (Value::ClassInstance(a), Value::ClassInstance(b)) => {
+                Arc::ptr_eq(a, b) || (a.class() == b.class() && a.fields_snapshot() == b.fields_snapshot())
+            }
+            (Value::ClassInstance(a), Value::Object { class, fields }) | (Value::Object { class, fields }, Value::ClassInstance(a)) => {
+                a.class() == class && a.fields_snapshot() == **fields
+            }
             (
                 Value::Enum {
                     enum_name: ea,

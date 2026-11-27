@@ -1,0 +1,106 @@
+"""`Array.fill_span(dst_off, count, value) -> i64` -- the compiler-owned
+in-place volatile fill behind every secure-memory wipe.
+
+Prevention guard for
+doc/08_tracking/bug/secure_memory_interpreter_raw_pointer_aliasing_2026-08-24.md:
+the general shape, not the reported case. Every example runs the same fill
+on both `[u8]` interpreter representations (boxed literal and packed
+`rt_bytes_alloc`) and on every receiver place the mutating-method channel
+knows -- local, class field, nested place -- and requires identical count,
+length and elements. A regression that reintroduces a copy (fill lands on a
+clone, place unchanged) or a raw-pointer write (fill lands outside the
+place) fails here before it can reach the secure-memory owner.
+
+## Operator workflow
+bin/simple test test/01_unit/lib/crypto/secure_memory_fill_span_prevention_spec.spl
+
+## Compatibility and limitations
+Interpreter lane; the JIT/native twin is pinned by
+test/fixtures/engine_differential/fill_span_secure_wipe.spl.
+"""
+# @manual_section: secure-memory-fill-span
+use std.spec.*
+
+extern fn rt_bytes_alloc(n: i64) -> [u8]
+
+class ByteHolder:
+    data: [u8]
+    me wipe(off: i64, n: i64, v: u8) -> i64:
+        self.data.fill_span(off, n, v)
+
+class ByteRows:
+    rows: [[u8]]
+    me wipe_row(r: i64, v: u8) -> i64:
+        self.rows[r].fill_span(1, 2, v)
+
+fn _packed(xs: [u8]) -> [u8]:
+    var out = rt_bytes_alloc(xs.len())
+    var i: i64 = 0
+    while i < xs.len():
+        out[i] = xs[i]
+        i = i + 1
+    out
+
+fn _show(xs: [u8]) -> text:
+    "{xs}"
+
+describe "fill_span on packed and boxed [u8]":
+    it "fills a local in place and returns the count":
+        var boxed: [u8] = [9u8, 9u8, 9u8, 9u8]
+        var packed = _packed([9u8, 9u8, 9u8, 9u8])
+        val nb = boxed.fill_span(1, 2, 0u8)
+        val np = packed.fill_span(1, 2, 0u8)
+        expect(nb).to_equal(2)
+        expect(np).to_equal(nb)
+        expect(_show(packed)).to_equal(_show(boxed))
+        expect(_show(packed)).to_equal("[9, 0, 0, 9]")
+
+    it "overwrites with a non-zero byte (overwrite, not only zero)":
+        var boxed: [u8] = [1u8, 2u8, 3u8]
+        var packed = _packed([1u8, 2u8, 3u8])
+        expect(boxed.fill_span(0, 3, 0xAAu8)).to_equal(3)
+        expect(packed.fill_span(0, 3, 0xAAu8)).to_equal(3)
+        expect(_show(packed)).to_equal(_show(boxed))
+        expect(_show(packed)).to_equal("[170, 170, 170]")
+
+    it "fills a class field through the field place":
+        var hb = ByteHolder(data: [5u8, 5u8, 5u8, 5u8])
+        var hp = ByteHolder(data: _packed([5u8, 5u8, 5u8, 5u8]))
+        expect(hp.wipe(2, 2, 0u8)).to_equal(hb.wipe(2, 2, 0u8))
+        expect(_show(hp.data)).to_equal(_show(hb.data))
+        expect(_show(hp.data)).to_equal("[5, 5, 0, 0]")
+
+    it "fills through a nested place":
+        var rb = ByteRows(rows: [[7u8, 7u8, 7u8, 7u8], [7u8, 7u8, 7u8, 7u8]])
+        var rp = ByteRows(rows: [_packed([7u8, 7u8, 7u8, 7u8]), _packed([7u8, 7u8, 7u8, 7u8])])
+        expect(rp.wipe_row(1, 0u8)).to_equal(rb.wipe_row(1, 0u8))
+        expect(_show(rp.rows[1])).to_equal(_show(rb.rows[1]))
+        expect(_show(rp.rows[1])).to_equal("[7, 0, 0, 7]")
+        expect(_show(rp.rows[0])).to_equal("[7, 7, 7, 7]")
+
+    it "treats a zero count as a no-op that writes nothing":
+        var boxed: [u8] = [1u8, 2u8]
+        var packed = _packed([1u8, 2u8])
+        expect(boxed.fill_span(0, 0, 0u8)).to_equal(0)
+        expect(packed.fill_span(0, 0, 0u8)).to_equal(0)
+        expect(_show(packed)).to_equal("[1, 2]")
+        expect(_show(boxed)).to_equal("[1, 2]")
+
+    it "keeps a value-semantics copy of the receiver unchanged":
+        var packed = _packed([3u8, 3u8, 3u8])
+        val snapshot = packed
+        expect(packed.fill_span(0, 3, 0u8)).to_equal(3)
+        expect(_show(packed)).to_equal("[0, 0, 0]")
+        expect(_show(snapshot)).to_equal("[3, 3, 3]")
+
+describe "fill_span on slot arrays":
+    it "fills i64, u32 and u64 slot arrays in place":
+        var ws: [i64] = [1, 2, 3]
+        var w32: [u32] = [1u32, 2u32, 3u32]
+        var w64: [u64] = [1u64, 2u64, 3u64]
+        expect(ws.fill_span(0, 3, 0)).to_equal(3)
+        expect(w32.fill_span(1, 2, 0u32)).to_equal(2)
+        expect(w64.fill_span(0, 2, 0u64)).to_equal(2)
+        expect(ws).to_equal([0, 0, 0])
+        expect(w32).to_equal([1u32, 0u32, 0u32])
+        expect(w64).to_equal([0u64, 0u64, 3u64])

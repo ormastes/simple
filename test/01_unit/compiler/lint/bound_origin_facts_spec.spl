@@ -1,0 +1,160 @@
+"""
+## Purpose and audience
+Purpose: Prove the boundary origin-facts scan records, for each bound value in
+a module, where it came from (literal, param, extern return, cast, copy, call)
+and that the `simple robust inventory` text rendering is deterministic.
+Audience: compiler and tooling engineers maintaining robust-boundary lints.
+## Operator workflow
+Run this spec with the test runner and read the per-scenario verdict lines.
+## Compatibility and limitations
+Text-level facts (same slice as SPL-BOUND-001..003); typed HIR facts remain open.
+"""
+# @req: REQ-DIAG-POLICY-001
+
+use std.spec.*
+use std.spec.step
+use compiler.semantics.lint.bound_origin_facts.{bound_origin_facts, bound_origin_inventory_text, bound_origin_inventory_sdn, bound_origin_boundaries_text, BoundOriginFact}
+use app.cli.robust_command.{run_robust}
+
+val SRC = "extern fn c_read() -> i32\n@unsafe(reason: \"adapter\", capabilities: [ffi])\nfn adapter(n: i64) -> i32:\n    val raw = c_read()\n    val k = 5\n    val c = raw as i64\n    val d = raw\n    val e = helper(k)\n    raw\n"
+
+fn origin_of(fs: [BoundOriginFact], subject: text) -> text:
+    for f in fs:
+        if f.subject == subject:
+            return f.origin
+    ""
+
+# @manual_section: bound_origin_facts
+describe "boundary origin facts":
+    """Each boundary value records its origin kind."""
+
+    it "classifies extern, param, literal, cast, copy and call origins":
+        # @req: REQ-DIAG-POLICY-001
+        step("Scan the sample module")
+        val fs = bound_origin_facts(SRC, "m.spl")
+        expect(origin_of(fs, "c_read")).to_equal("extern_decl")
+        expect(origin_of(fs, "n")).to_equal("param")
+        expect(origin_of(fs, "raw")).to_equal("extern_return")
+        expect(origin_of(fs, "k")).to_equal("literal")
+        expect(origin_of(fs, "c")).to_equal("cast")
+        expect(origin_of(fs, "d")).to_equal("copy")
+        expect(origin_of(fs, "e")).to_equal("call")
+
+    it "marks facts inside an ffi adapter as boundary":
+        # @req: REQ-DIAG-POLICY-001
+        step("Scan and check the boundary flag")
+        val fs = bound_origin_facts(SRC, "m.spl")
+        var adapter_facts = 0
+        for f in fs:
+            if f.function == "adapter" and f.boundary:
+                adapter_facts = adapter_facts + 1
+        expect(adapter_facts > 0).to_equal(true)
+
+    it "renders a deterministic inventory":
+        # @req: REQ-DIAG-POLICY-001
+        step("Render twice")
+        val a = bound_origin_inventory_text(SRC, "m.spl")
+        val b = bound_origin_inventory_text(SRC, "m.spl")
+        expect(a).to_equal(b)
+        expect(a.contains("m.spl:4 adapter raw extern_return boundary")).to_equal(true)
+        expect(a.contains("summary: ")).to_equal(true)
+
+describe "simple robust inventory":
+    """The CLI entry validates arguments and prints the inventory."""
+
+    it "fails with usage on missing args and missing files":
+        # @req: REQ-DIAG-POLICY-001
+        step("Call run_robust with bad input")
+        expect(run_robust([])).to_equal(2)
+        expect(run_robust(["inventory"])).to_equal(2)
+        expect(run_robust(["inventory", "no/such/file.spl"])).to_equal(2)
+
+    it "succeeds on a real file":
+        # @req: REQ-DIAG-POLICY-001
+        step("Inventory the origin-facts module itself")
+        expect(run_robust(["inventory", "src/compiler/35.semantics/lint/bound_origin_facts.spl"])).to_equal(0)
+
+val MULTI_SRC = "fn wide(\n    a: i64,\n    b: i64,\n) -> i64:\n    val (x, y) = pair(a, b)\n    val (p, _) = pair(1, 2)\n    x\n"
+
+describe "boundary origin facts: multi-line signatures and tuple bindings":
+    """Parameters on continuation lines and tuple-bound names are not dropped."""
+
+    it "records params of a multi-line signature":
+        # @req: REQ-DIAG-POLICY-001
+        step("Scan a signature split over several lines")
+        val fs = bound_origin_facts(MULTI_SRC, "m.spl")
+        expect(origin_of(fs, "a")).to_equal("param")
+        expect(origin_of(fs, "b")).to_equal("param")
+
+    it "records every name of a tuple binding":
+        # @req: REQ-DIAG-POLICY-001
+        step("Scan tuple bindings")
+        val fs = bound_origin_facts(MULTI_SRC, "m.spl")
+        expect(origin_of(fs, "x")).to_equal("call")
+        expect(origin_of(fs, "y")).to_equal("call")
+        expect(origin_of(fs, "p")).to_equal("call")
+        expect(origin_of(fs, "_")).to_equal("")
+
+fn subjects_of(fs: [BoundOriginFact], origin: text) -> [text]:
+    var out: [text] = []
+    for f in fs:
+        if f.origin == origin:
+            out.push(f.subject)
+    out
+
+describe "boundary origin facts: splitter edge cases":
+    """Top-level comma splitting honours string literals; nested tuple patterns bind every name."""
+
+    it "does not split parameters on a comma inside a string default":
+        # @req: REQ-DIAG-POLICY-001
+        step("Scan a signature whose default value contains commas and parens")
+        val src = "fn greet(sep: text = \"a, b), c\", n: i64):\n    n\n"
+        val fs = bound_origin_facts(src, "m.spl")
+        val params = subjects_of(fs, "param")
+        expect(params.len()).to_equal(2)
+        expect(params[0]).to_equal("sep")
+        expect(params[1]).to_equal("n")
+
+    it "binds every name of a nested tuple pattern":
+        # @req: REQ-DIAG-POLICY-001
+        step("Scan a nested tuple destructure")
+        val src = "fn f():\n    val ((a, b), c) = pair()\n    c\n"
+        val fs = bound_origin_facts(src, "m.spl")
+        expect(origin_of(fs, "a")).to_equal("call")
+        expect(origin_of(fs, "b")).to_equal("call")
+        expect(origin_of(fs, "c")).to_equal("call")
+
+# @manual_section: bound_origin_inventory_multi
+describe "robust inventory across files":
+    """Directory walk, cross-file totals, SDN output and boundary site listing."""
+
+    it "aggregates facts across files into one SDN document":
+        # @req: REQ-DIAG-POLICY-001
+        step("Render SDN for two sources")
+        val sdn = bound_origin_inventory_sdn(["a.spl", "b.spl"], [SRC, "fn f(x: i64):\n    x\n"])
+        expect(sdn).to_contain("files: 2")
+        expect(sdn).to_contain("facts: 8")
+        expect(sdn).to_contain("boundary: 6")
+        expect(sdn).to_contain("{file: \"a.spl\", line: 4, function: \"adapter\", subject: \"raw\", origin: \"extern_return\", boundary: true}")
+        expect(sdn).to_contain("{file: \"b.spl\", line: 1, function: \"f\", subject: \"x\", origin: \"param\", boundary: false}")
+
+    it "lists only boundary sites":
+        # @req: REQ-DIAG-POLICY-001
+        step("List boundary sites for two sources")
+        val out = bound_origin_boundaries_text(["a.spl", "b.spl"], [SRC, "fn f(x: i64):\n    x\n"])
+        expect(out).to_contain("a.spl:4 adapter raw extern_return")
+        expect(out).to_contain("boundaries: files=2 sites=6")
+        expect(out.contains("b.spl")).to_equal(false)
+
+    it "walks a directory for the inventory subcommand":
+        # @req: REQ-DIAG-POLICY-001
+        step("Run inventory and boundaries on a directory")
+        # The large-directory walk is source-independent: use the text source.
+        # The HIR source parses + lowers every file (linear, ~0.1-0.2 s/line
+        # under the seed interpreter), so 16k lines blew the 900 s budget.
+        expect(run_robust(["inventory", "--sdn", "--source", "text", "test/01_unit/compiler/lint"])).to_equal(0)
+        expect(run_robust(["boundaries", "--source", "text", "test/01_unit/compiler/lint"])).to_equal(0)
+        # HIR (default) path on a small fixture directory.
+        expect(run_robust(["inventory", "--sdn", "test/01_unit/compiler/lint/fixtures/bound_graph"])).to_equal(0)
+        expect(run_robust(["boundaries", "test/01_unit/compiler/lint/fixtures/bound_graph"])).to_equal(0)
+        expect(run_robust(["boundaries", "no/such/dir"])).to_equal(2)

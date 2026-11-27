@@ -103,6 +103,29 @@ fn test_string_literals() {
     );
 }
 
+/// seed_escaped_backslash_n_lexes_as_newline_2026-11-23: an escaped backslash
+/// is consumed once, so the following letter stays a plain letter.
+#[test]
+fn test_escaped_backslash_before_escape_letter_is_consumed_once() {
+    use crate::token::FStringToken;
+    let cases = [
+        (r#""\\n""#, "\\n"),
+        (r#""a\\nb""#, "a\\nb"),
+        (r#""\\t""#, "\\t"),
+        (r#""\\r""#, "\\r"),
+        (r#""\\\\""#, "\\\\"),
+        (r#""\\N""#, "\\N"),
+        (r#""\\\n""#, "\\\n"),
+    ];
+    for (src, want) in cases {
+        assert_eq!(
+            tokenize(src),
+            vec![TokenKind::FString(vec![FStringToken::Literal(want.to_string())]), TokenKind::Eof],
+            "source {src}"
+        );
+    }
+}
+
 #[test]
 fn test_string_escape_octal_null() {
     use crate::token::FStringToken;
@@ -153,6 +176,64 @@ fn test_string_escape_octal_max_byte() {
             TokenKind::Eof
         ]
     );
+}
+
+#[test]
+fn test_unknown_escape_preserves_backslash() {
+    // Pure-Simple lexer contract (lexer_struct.spl scan_string): only
+    // n/t/r/\\/"/'/x/u/octal are escapes; every other `\X` keeps BOTH bytes.
+    // Regression: lexer_drops_backslash_escape_in_string_literal_2026-09-02 —
+    // the default arm used to drop the backslash, so "a\b" measured 2
+    // ("a" + backspace via the removed 'b' arm) and `C:\Users` lost its
+    // separators entirely.
+    use crate::token::FStringToken;
+    assert_eq!(
+        tokenize(r#""a\b""#),
+        vec![
+            TokenKind::FString(vec![FStringToken::Literal("a\\b".to_string())]),
+            TokenKind::Eof
+        ]
+    );
+    assert_eq!(
+        tokenize(r#""C:\Users""#),
+        vec![
+            TokenKind::FString(vec![FStringToken::Literal("C:\\Users".to_string())]),
+            TokenKind::Eof
+        ]
+    );
+    assert_eq!(
+        tokenize(r#""x\Ty""#),
+        vec![
+            TokenKind::FString(vec![FStringToken::Literal("x\\Ty".to_string())]),
+            TokenKind::Eof
+        ]
+    );
+    // Non-escape punctuation keeps the backslash too (\: \/. \. \- are NOT
+    // escapes in the pure-Simple lexer; the seed's extra arms were removed).
+    assert_eq!(
+        tokenize(r#""a\:b\/c\.d\-e""#),
+        vec![
+            TokenKind::FString(vec![FStringToken::Literal("a\\:b\\/c\\.d\\-e".to_string())]),
+            TokenKind::Eof
+        ]
+    );
+    // Known escapes still collapse to one char.
+    assert_eq!(
+        tokenize(r#""a\nb\tc\rd\\e\"f\0g""#),
+        vec![
+            TokenKind::FString(vec![FStringToken::Literal("a\nb\tc\rd\\e\"f\0g".to_string())]),
+            TokenKind::Eof
+        ]
+    );
+}
+
+#[test]
+fn test_unknown_escape_in_char_literal_is_error() {
+    // `\b` is two scalars (backslash + b), which a char literal cannot hold
+    // under the pure-Simple contract.
+    let kinds = tokenize_char_mode(r"'\b'", true);
+    let msg = first_error(&kinds).unwrap_or_else(|| panic!("'\\b' must be a lex error: {kinds:?}"));
+    assert!(msg.contains("more than one Unicode scalar"), "{msg}");
 }
 
 #[test]
@@ -792,6 +873,13 @@ mod fstring_brace_escape_tests {
 
     #[test]
     fn css_like_brace_region_stays_literal_after_parsing() {
+        let mut hint_parser = crate::parser_impl::core::Parser::new_expression(r#""{ color: red; }""#);
+        let _ = hint_parser.parse_expression();
+        assert!(
+            hint_parser.error_hints().iter().any(|h| h.message.contains("W-STR-BRACE-001")),
+            "non-expression hole must warn: {:?}",
+            hint_parser.error_hints()
+        );
         let parts = fstring_ast_parts(r#""{ color: red; }""#);
         for part in &parts {
             assert!(
@@ -819,4 +907,264 @@ mod fstring_brace_escape_tests {
             "the valid `{{a}}` hole must survive: {parts:?}"
         );
     }
+}
+
+// === ADR-005 char-literal lexer gate (char_literal_lexer_switch_staged_2026-11-03) ===
+
+fn tokenize_char_mode(source: &str, on: bool) -> Vec<TokenKind> {
+    Lexer::new(source)
+        .with_char_literals(on)
+        .tokenize()
+        .into_iter()
+        .map(|t| t.kind)
+        .collect()
+}
+
+fn first_error(kinds: &[TokenKind]) -> Option<String> {
+    kinds.iter().find_map(|k| match k {
+        TokenKind::Error(m) => Some(m.clone()),
+        _ => None,
+    })
+}
+
+#[test]
+fn test_char_gate_on_single_scalars() {
+    for (src, ch) in [("'a'", 'a'), ("'é'", 'é'), ("'한'", '한'), ("'😀'", '😀'), ("' '", ' ')] {
+        assert_eq!(tokenize_char_mode(src, true), vec![TokenKind::CharLit(ch), TokenKind::Eof], "{src}");
+    }
+}
+
+#[test]
+fn test_char_gate_on_escapes() {
+    for (src, ch) in [
+        (r"'\n'", '\n'),
+        (r"'\t'", '\t'),
+        (r"'\0'", '\0'),
+        (r"'\\'", '\\'),
+        (r"'\''", '\''),
+        (r"'\u{1F600}'", '😀'),
+    ] {
+        assert_eq!(tokenize_char_mode(src, true), vec![TokenKind::CharLit(ch), TokenKind::Eof], "{src}");
+    }
+}
+
+#[test]
+fn test_char_gate_on_errors_point_at_raw_text() {
+    for src in ["'ab'", "'hello world'", "''", "'1"] {
+        let kinds = tokenize_char_mode(src, true);
+        let msg = first_error(&kinds).unwrap_or_else(|| panic!("{src} must be a lex error: {kinds:?}"));
+        assert!(msg.contains("r\"...\""), "{src}: {msg}");
+    }
+    // Decomposed e + U+0301 is two scalars: not a char literal.
+    assert!(first_error(&tokenize_char_mode("'e\u{301}'", true)).is_some());
+}
+
+#[test]
+fn test_char_gate_on_label_unchanged() {
+    let kinds = tokenize_char_mode("break 'outer", true);
+    assert!(kinds.contains(&TokenKind::Label("outer".to_string())), "{kinds:?}");
+}
+
+#[test]
+fn test_char_gate_off_keeps_legacy_raw_strings() {
+    assert_eq!(
+        tokenize_char_mode("'a'", false),
+        vec![TokenKind::RawString("a".to_string()), TokenKind::Eof]
+    );
+    assert_eq!(
+        tokenize_char_mode("'hello world'", false),
+        vec![TokenKind::RawString("hello world".to_string()), TokenKind::Eof]
+    );
+    assert_eq!(
+        tokenize_char_mode(r"'\n'", false),
+        vec![TokenKind::RawString("\\n".to_string()), TokenKind::Eof]
+    );
+    let kinds = tokenize_char_mode("break 'outer", false);
+    assert!(kinds.contains(&TokenKind::Label("outer".to_string())), "{kinds:?}");
+}
+
+// === Brace-escape parity (interp_brace_literal_collides_with_string_interpolation_2026-07-03) ===
+// Owner rule: in a double-quoted literal `{expr}` interpolates, `{{` is a literal `{`,
+// `}}` is a literal `}`; a `{...}` that is not a valid expression is an ERROR that
+// suggests `{{`/`}}` -- never silently literal text.
+mod brace_escape_strict {
+    use crate::ast::{Expr, FStringPart};
+    use crate::lexer::Lexer;
+    use crate::parser_impl::core::Parser;
+    use crate::token::{FStringToken, TokenKind};
+
+    fn lex(source: &str) -> TokenKind {
+        Lexer::new(source).tokenize().into_iter().next().expect("token").kind
+    }
+
+    fn lex_parts(source: &str) -> Vec<FStringToken> {
+        match lex(source) {
+            TokenKind::FString(p) => p,
+            TokenKind::String(s) => vec![FStringToken::Literal(s)],
+            other => panic!("expected string token for {source}: {other:?}"),
+        }
+    }
+
+    fn lit(s: &str) -> FStringToken {
+        FStringToken::Literal(s.to_string())
+    }
+
+    fn ast_parts(source: &str) -> Result<Vec<FStringPart>, String> {
+        let mut parser = Parser::new_expression(source);
+        match parser.parse_expression() {
+            Ok(Expr::FString { parts, .. }) => Ok(parts),
+            Ok(Expr::String(s)) => Ok(vec![FStringPart::Literal(s)]),
+            Ok(other) => panic!("unexpected {other:?}"),
+            Err(e) => Err(format!("{e:?}")),
+        }
+    }
+
+    #[test]
+    fn escaped_braces_collapse_around_real_holes() {
+        assert_eq!(
+            lex_parts(r#""css {{margin:0}} then {name}""#),
+            vec![lit("css {margin:0} then "), FStringToken::Expr("name".into())]
+        );
+        assert_eq!(
+            lex_parts(r#""{{ {inner} }}""#),
+            vec![lit("{ "), FStringToken::Expr("inner".into()), lit(" }")]
+        );
+        assert_eq!(
+            lex_parts(r#""N1:{{ {inner} }}|END""#),
+            vec![lit("N1:{ "), FStringToken::Expr("inner".into()), lit(" }|END")]
+        );
+        assert_eq!(
+            lex_parts(r#""a {{ b }} {name} c""#),
+            vec![lit("a { b } "), FStringToken::Expr("name".into()), lit(" c")]
+        );
+        assert_eq!(lex_parts(r#""{{}}""#), vec![lit("{}")]);
+        assert_eq!(lex_parts(r#""{{ only }}""#), vec![lit("{ only }")]);
+    }
+
+    fn lex_warnings(source: &str) -> Vec<String> {
+        let mut lexer = Lexer::new(source);
+        let _ = lexer.tokenize();
+        lexer.brace_warnings.clone()
+    }
+
+    fn assert_warned(warnings: &[String], what: &str) {
+        assert!(
+            warnings.iter().any(|w| w.contains("W-STR-BRACE-001") && w.contains("`{{`")),
+            "{what}: expected a W-STR-BRACE-001 warning with the `{{{{` hint, got {warnings:?}"
+        );
+    }
+
+    #[test]
+    fn unmatched_open_brace_warns_and_stays_literal() {
+        for src in [r#""x { y""#, r#""{v: ""#, r#""open {""#] {
+            assert_warned(&lex_warnings(src), src);
+            assert!(matches!(lex(src), TokenKind::FString(_) | TokenKind::String(_)), "{src}");
+        }
+        assert_eq!(lex_parts(r#""x { y""#), vec![lit("x { y")]);
+    }
+
+    #[test]
+    fn empty_hole_warns_and_stays_literal() {
+        assert_warned(&lex_warnings(r#""m{} block""#), "empty hole");
+        let joined: String = lex_parts(r#""m{} block""#)
+            .iter()
+            .map(|p| match p {
+                FStringToken::Literal(s) => s.clone(),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(joined, "m{} block");
+    }
+
+    #[test]
+    fn well_formed_escapes_and_holes_do_not_warn() {
+        for src in [r#""css {{margin:0}} then {name}""#, r#""{{ {inner} }}""#, r#""{{{x}}}""#, r#""{{}}""#] {
+            assert!(lex_warnings(src).is_empty(), "{src}: {:?}", lex_warnings(src));
+        }
+    }
+
+    #[test]
+    fn triple_brace_is_escape_hole_escape() {
+        assert_eq!(
+            lex_parts(r#""{{{x}}}""#),
+            vec![lit("{"), FStringToken::Expr("x".into()), lit("}")]
+        );
+    }
+
+    #[test]
+    fn non_expression_hole_warns_in_parser_and_stays_literal() {
+        for src in [r#""{ color: red; }""#, r#""before {a} then { color: red; }""#, r#""{k: 1, d: 2}""#] {
+            let mut parser = Parser::new_expression(src);
+            let _ = parser.parse_expression().expect(src);
+            assert!(
+                parser
+                    .error_hints()
+                    .iter()
+                    .any(|h| h.message.contains("W-STR-BRACE-001") && h.message.contains("`{{`")),
+                "{src}: {:?}",
+                parser.error_hints()
+            );
+        }
+    }
+
+    #[test]
+    fn valid_holes_and_escapes_parse_to_expected_parts() {
+        let parts = ast_parts(r#""{{ {inner} }}""#).expect("parse");
+        assert_eq!(parts.len(), 3, "{parts:?}");
+        assert!(matches!(&parts[0], FStringPart::Literal(s) if s == "{ "));
+        assert!(matches!(&parts[1], FStringPart::Expr(_)));
+        assert!(matches!(&parts[2], FStringPart::Literal(s) if s == " }"));
+    }
+}
+
+/// Corpus scan (run manually): lists every `.spl` string literal the strict brace rule rejects.
+/// `BRACE_SCAN_ROOTS=src,test cargo test -p simple-parser --lib brace_corpus_scan -- --ignored --nocapture`
+#[test]
+#[ignore]
+fn brace_corpus_scan() {
+    fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+        let Ok(rd) = std::fs::read_dir(dir) else { return };
+        for e in rd.flatten() {
+            let p = e.path();
+            let name = e.file_name().to_string_lossy().to_string();
+            if p.is_dir() {
+                if name == "vendor" || name == "compiler_rust" || name == ".git" || name == "build" { continue; }
+                walk(&p, out);
+            } else if name.ends_with(".spl") {
+                out.push(p);
+            }
+        }
+    }
+    let root = std::env::var("BRACE_SCAN_BASE").unwrap_or_else(|_| "../../..".into());
+    let roots = std::env::var("BRACE_SCAN_ROOTS").unwrap_or_else(|_| "src,test".into());
+    let mut files = Vec::new();
+    for r in roots.split(',') { walk(&std::path::Path::new(&root).join(r), &mut files); }
+    let mut bad = 0;
+    for f in &files {
+        let Ok(src) = std::fs::read_to_string(f) else { continue };
+        let mut lexer = Lexer::new(&src);
+        let tokens = lexer.tokenize();
+        for w in &lexer.brace_warnings {
+            bad += 1;
+            println!("BRACE {}: {}", f.display(), w.chars().take(100).collect::<String>());
+        }
+        for tok in tokens {
+            let msg = match &tok.kind {
+                TokenKind::FString(parts) => parts.iter().find_map(|p| match p {
+                    crate::token::FStringToken::Expr(e) => {
+                        let mut ps = crate::parser_impl::core::Parser::new_expression(e);
+                        let ok = ps.parse_expression().is_ok() && (ps.is_at_end() || matches!(ps.current.kind, TokenKind::Eof));
+                        if ok { None } else { Some(format!("bad hole {{{e}}}")) }
+                    }
+                    _ => None,
+                }),
+                _ => None,
+            };
+            if let Some(m) = msg {
+                bad += 1;
+                println!("BRACE {}:{}: {}", f.display(), tok.span.line, m.chars().take(100).collect::<String>());
+            }
+        }
+    }
+    println!("BRACE_TOTAL files={} offenders={}", files.len(), bad);
 }

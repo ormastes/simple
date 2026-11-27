@@ -9,6 +9,9 @@
 #   check                 → parser/type-check pass
 #   simpleos [arch...]    → build per-arch SimpleOS Simple toolchain (opt-in)
 #   submodule-verify      → verify selected exact parent gitlinks
+#   sources [dir]         → print library unit source inventory
+#   units list|show       → library unit registry from simple.sdn manifests
+#   doctor --source-ownership [--robust] [dir...] → source ownership findings
 
 use app.io.cli_compile.{cli_native_build}
 use app.io.cli_commands.{cli_run_lint, cli_run_fmt}
@@ -20,6 +23,9 @@ use std.io_runtime.{getpid}
 use std.common.perf.execution_metrics.{ResourceUsage, ResourceEvidenceQuality, evaluate_resource_budget, resource_evidence_quality_name, termination_cause_name, decision_status_name}
 use app.build.bootstrap_receipt_planner.{plan_bootstrap_authorization}
 use app.build.submodule_cli.{run_submodule_verify}
+use app.build.sources_cli.{run_build_sources}
+use app.build.units_cli.{run_build_units}
+use app.build.doctor_cli.{run_build_doctor}
 use app.build.targets.targets_cli.{
     target_arg, build_explain_requested, run_target_explain,
     run_target_execution
@@ -50,9 +56,12 @@ fn build_simpleos_targets(arches: [text]) -> i64:
     return rc
 
 fn _build_arg_value(args: [text], name: text) -> text:
+    val prefix = name + "="
     var i = 0
-    while i + 1 < args.len():
-        if args[i] == name:
+    while i < args.len():
+        if args[i].starts_with(prefix):
+            return args[i].substring(prefix.len())
+        if args[i] == name and i + 1 < args.len():
             return args[i + 1]
         i = i + 1
     ""
@@ -122,12 +131,24 @@ fn _build_metrics_finish(args: [text], run_id: text, spans_path: text, previous_
     val _restore_run = env_set("SIMPLE_EVIDENCE_RUN_ID", previous_run_id)
     if spans_path == "":
         return
-    val output_path = _build_arg_value(args, "--output")
-    val spans_digest = if file_exists(spans_path): file_hash_sha256(spans_path) else: "unavailable"
-    val artifact_digest = if output_path != "" and file_exists(output_path): file_hash_sha256(output_path) else: "unavailable"
+    var output_path = _build_arg_value(args, "--output")
+    if output_path == "":
+        output_path = _build_arg_value(args, "-o")
+    var spans_digest = "unavailable"
+    if file_exists(spans_path):
+        if val d = file_hash_sha256(spans_path):
+            spans_digest = d
+        else:
+            spans_digest = "unreadable"
+    var artifact_digest = "unavailable"
+    if output_path != "" and file_exists(output_path):
+        if val d = file_hash_sha256(output_path):
+            artifact_digest = d
+        else:
+            artifact_digest = "unreadable"
     val cohort_id = hash_sha256(_build_args_identity(args))
     val status_name = if status == 0: "complete" else: "failure"
-    val line = "    {run_id}, broad-native-build, {cohort_id}, {started}, {ended}, {status_name}, {usage.wall_ms}, {usage.user_cpu_ms}, {usage.system_cpu_ms}, {usage.peak_tree_charge_bytes}, {usage.pids_peak}, {resource_evidence_quality_name(usage.evidence_quality)}, {termination_cause_name(usage.termination)}, {budget_status}, {_build_sdn_text(budget_reason)}, {spans_digest}, {_build_sdn_text(output_path)}, {artifact_digest}\n"
+    val line = "    {run_id}, broad-native-build, {cohort_id}, {started}, {ended}, {status_name}, {usage.wall_ms.value}, {usage.user_cpu_ms.value}, {usage.system_cpu_ms.value}, {usage.peak_tree_charge_bytes.value}, {usage.pids_peak.value}, {resource_evidence_quality_name(usage.evidence_quality)}, {termination_cause_name(usage.termination)}, {budget_status}, {_build_sdn_text(budget_reason)}, {spans_digest}, {_build_sdn_text(output_path)}, {artifact_digest}\n"
     val _ = file_append("build/perf/build_runs.sdn", line)
 
 fn handle_build(args: [text]) -> i64:
@@ -149,6 +170,10 @@ fn handle_build(args: [text]) -> i64:
         print("  lint           Run the pure-Simple linter")
         print("  fmt            Run the pure-Simple formatter")
         print("  check          Parse/validate Simple sources")
+        print("  sources [dir]  Print library unit source inventory")
+        print("  units list|show  Library unit registry (simple.sdn dependency closure)")
+        print("  doctor --source-ownership [--robust] [dir...]  Check source ownership (SPL-BUILD-SRC-001)")
+        print("  doctor --roles [--robust] [dir...]  Check boundary role grants (SPL-BUILD-ROLE-001)")
         print("  simpleos       Build the SimpleOS targets")
         print("  --target <t>   Build one named target closure (--explain to plan only)")
         print("  help           Show this help")
@@ -170,6 +195,15 @@ fn handle_build(args: [text]) -> i64:
 
     if subcmd == "bootstrap":
         return plan_bootstrap_authorization(args[1:])
+
+    if subcmd == "doctor":
+        return run_build_doctor(args[1:])
+
+    if subcmd == "units":
+        return run_build_units(args[1:])
+
+    if subcmd == "sources":
+        return run_build_sources(args[1:])
 
     if subcmd == "submodule-verify":
         return run_submodule_verify(args[1:])

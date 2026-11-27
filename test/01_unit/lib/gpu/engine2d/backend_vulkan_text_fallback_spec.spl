@@ -25,3 +25,60 @@ describe "Engine2D Vulkan text fallback":
         expect(backend.dirty).to_equal(true)
 
         backend.shutdown()
+
+    it "marks dirty and full damage in direct _gpu_draw_text_fallback when uninitialized":
+        var backend = VulkanBackend.create()
+        backend.host_mirror_frame_fresh = true
+
+        backend._gpu_draw_text_fallback(0, 0, "A", 0xff112233u32, 7)
+
+        expect(backend.initialized).to_equal(false)
+        expect(backend.dirty).to_equal(true)
+        expect(backend.host_mirror_frame_fresh).to_equal(false)
+        expect(backend.frame_damage_valid).to_equal(true)
+        expect(backend.frame_damage_full).to_equal(true)
+        expect(backend.last_text_path).to_equal("cpu-raster-blit")
+        expect(backend.last_text_fallback_reason).to_equal("backend-uninitialized")
+
+        backend.shutdown()
+
+    it "preserves rendered host_buf text across readback and present when GPU upload fails":
+        var backend = VulkanBackend.create()
+        backend.w = 16
+        backend.h = 16
+        backend.host_buf = [0xff000000u32; 256]
+        backend.d_framebuffer = 999999
+        backend.initialized = true
+        backend.dirty = false
+
+        backend._gpu_draw_text_fallback(0, 0, "A", 0xff112233u32, 7)
+
+        expect(backend.cpu_fallback_host_surface).to_equal(true)
+        expect(backend.host_mirror_valid).to_equal(true)
+        expect(backend.host_mirror_frame_fresh).to_equal(true)
+        expect(backend.dirty).to_equal(true)
+        expect(backend.last_text_path).to_equal("cpu-raster-blit")
+        expect(backend.last_text_fallback_reason).to_equal("legacy-text-host-framebuffer-fallback")
+
+        val rb = backend.read_pixels_with_source()
+        expect(rb.source).to_equal("cpu_fallback")
+        expect(rb.pixels.len()).to_equal(256)
+        var fg_count = 0
+        var i = 0
+        while i < rb.pixels.len():
+            if rb.pixels[i] == 0xff112233u32:
+                fg_count = fg_count + 1
+            i = i + 1
+        expect(fg_count > 0).to_equal(true)
+
+        backend.present()
+        expect(backend.dirty).to_equal(false)
+        var mirror_fg_count = 0
+        i = 0
+        while i < backend.host_buf.len():
+            if backend.host_buf[i] == 0xff112233u32:
+                mirror_fg_count = mirror_fg_count + 1
+            i = i + 1
+        expect(mirror_fg_count).to_equal(fg_count)
+        backend.d_framebuffer = 0
+        backend.shutdown()

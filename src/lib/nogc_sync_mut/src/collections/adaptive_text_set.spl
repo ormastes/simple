@@ -76,7 +76,7 @@ struct AdaptiveSetFeedbackContext:
 
 # A runner installs one fully validated, immutable catalog before attributed
 # containers are constructed. Replacing it is a run-boundary operation.
-var _adaptive_set_feedback_context: AdaptiveSetFeedbackContext? = nil
+var _adaptive_set_feedback_context: AdaptiveSetFeedbackContext? = None
 
 fn adaptive_set_install_feedback(target_profile_id: text, profiles: [AdaptiveSetWorkloadProfile]) -> bool:
     """Install admitted profiles once per run; reject malformed or duplicate sites."""
@@ -106,7 +106,7 @@ fn adaptive_set_clear_feedback():
 fn adaptive_set_feedback_for_site(site_id: text, target_profile_id: text) -> AdaptiveSetWorkloadProfile?:
     if val context = _adaptive_set_feedback_context:
         if context.target_profile_id != target_profile_id:
-            return nil
+            return None
         val raw_position = context.positions.get(site_id) ?? ""
         val position = raw_position.to_i64() ?? -1
         if position >= 0 and position < context.profiles.len():
@@ -201,7 +201,7 @@ class AdaptiveTextSet:
             attribute: AdaptiveSetAttribute.Auto,
             algorithm: AdaptiveSetAlgorithm.Linear,
             linear_values: [],
-            hash_values: HashSet.with_capacity(1),
+            hash_values: HashSet.empty(),
             ordered_values: OrderedTextSet.new(),
             site_id: site_id,
             target_profile_id: target_profile_id,
@@ -351,6 +351,21 @@ class AdaptiveTextSet:
             case AdaptiveSetAlgorithm.Ordered: return self.ordered_values.keys()
         []
 
+    fn storage_contains(value: text) -> bool:
+        """Membership in the active storage without counters, capture or promotion."""
+        if self.algorithm == AdaptiveSetAlgorithm.Hash:
+            return self.hash_values.contains(value)
+        if self.algorithm == AdaptiveSetAlgorithm.Ordered:
+            return self.ordered_values.contains_key(value)
+        for item in self.linear_values:
+            if item == value:
+                return true
+        false
+
+    fn frozen_lookup() -> AdaptiveTextSetFrozenLookup:
+        """Read-only lookup for shared readers; it never promotes or migrates (COL-09)."""
+        AdaptiveTextSetFrozenLookup(source: self)
+
     me contains(value: text) -> bool:
         self.observed_lookups = self.observed_lookups + 1
         self.lookups_since_switch = self.lookups_since_switch + 1
@@ -479,7 +494,7 @@ class AdaptiveTextSet:
 
     me clear():
         self.linear_values = []
-        self.hash_values = HashSet.with_capacity(1)
+        self.hash_values = HashSet.empty()
         self.ordered_values = OrderedTextSet.new()
         self.size = 0
         # Keep lifetime measurements so clearing before profile capture cannot
@@ -600,7 +615,7 @@ class AdaptiveTextSet:
             rebuilt.insert(item)
         self.ordered_values = rebuilt
         self.linear_values = []
-        self.hash_values = HashSet.with_capacity(1)
+        self.hash_values = HashSet.empty()
         self.algorithm = AdaptiveSetAlgorithm.Ordered
         self.lookups_since_switch = 0
         self.live_hash_lookups = 0
@@ -618,14 +633,28 @@ class AdaptiveTextSet:
             case AdaptiveSetAlgorithm.Hash: ()
             case AdaptiveSetAlgorithm.Ordered: ()
         self.linear_values = self.storage_values()
-        self.hash_values = HashSet.with_capacity(1)
+        self.hash_values = HashSet.empty()
         self.ordered_values = OrderedTextSet.new()
         self.algorithm = AdaptiveSetAlgorithm.Linear
         self.lookups_since_switch = 0
         self.live_hash_lookups = 0
         self.live_high_collision_lookups = 0
 
+struct AdaptiveTextSetFrozenLookup:
+    """Read-only live view of one AdaptiveTextSet (a class reference, not a
+    snapshot: owner writes are visible, so it is race-free only while the owner
+    is quiescent). It exposes no `me` method, so a holder cannot promote,
+    migrate or count; reads are not profile-captured."""
+    source: AdaptiveTextSet
+
+    fn contains(value: text) -> bool:
+        self.source.storage_contains(value)
+
+    fn len() -> i64:
+        self.source.len()
+
 export AdaptiveSetAlgorithm
+export AdaptiveTextSetFrozenLookup
 export AdaptiveSetAttribute
 export AdaptiveSetProfile
 export AdaptiveSetObservation

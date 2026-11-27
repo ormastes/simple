@@ -1,0 +1,166 @@
+# begin_module must detach every module-local owner held by the retained
+# lowerer. A HIR shard worker lowers thousands of modules with ONE HirLowering;
+# each module's HIR is allocated in a transient scope that is reclaimed after
+# the module (driver_hir_pipeline_lowering.spl, "Reset all module-local owners
+# while allocations are paused"). A field that survives begin_module and still
+# points into the reclaimed scope is read as garbage by the next module.
+#
+# Incident (bootstrap run 29, compiler_cli_build, 2026-11-14): lambda_param_hint
+# kept the previous module's HirType. watcher_client.spl's first lambda
+# `fn(p: text) -> i64: 0` sits in a plain call (no hint staged in this module)
+# and its parameter annotation is discarded by the parser, so the parameter
+# took the stale hint as its type: a HirTypeKind no arm names. The HIR cache
+# codec refused it and walk_hir_type exited 1 with E-HIR-VISIT-UNHANDLED at
+# module 2758/3145 after 4279 s.
+#
+# @req: REQ-SSPEC-LOCAL-001 — behavior under test holds under execution.
+"""
+## Purpose and audience
+
+Purpose: pin that begin_module detaches the lambda parameter hint and the two
+generic-owner prescan maps, so HIR lowering of a module does not depend on the
+modules a shard worker lowered before it.  Audience: engineers changing
+HirLowering state or the shard worker's per-module reset.
+
+## Operator workflow
+
+1. Run `bin/simple test test/01_unit/compiler/hir/hir_lowering/begin_module_detaches_module_owners_spec.spl`.
+2. Every scenario must pass; a failure means a module-local owner outlives its
+   transient scope again.
+
+## Compatibility and limitations
+
+The interpreter keeps the stale value alive, so this checks the reset itself,
+not native reclamation. The native reproduction is recorded in
+doc/08_tracking/bug/hir_lambda_param_hint_outlives_module_scope_2026-11-14.md.
+"""
+
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_new}
+use compiler.hir.hir_lowering.context_helpers.*
+use compiler.hir.hir_types.*
+use compiler.common.config.{TypeInferenceConfig, TypeDefault}
+use compiler.common.dependency.visibility.{Visibility}
+use std.spec.step
+use std.spec.{describe, it, expect}
+
+fn type_label(type_: HirType) -> text:
+    match type_.kind:
+        case HirTypeKind.Unit: "unit"
+        case HirTypeKind.Bool: "bool"
+        case HirTypeKind.Int(bits, signed):
+            if signed: "int{bits}" else: "uint{bits}"
+        case HirTypeKind.Float(bits): "float{bits}"
+        case HirTypeKind.Str: "str"
+        case HirTypeKind.Any: "any"
+        case _: "other"
+
+fn hint_is_unset(lowering: HirLowering) -> bool:
+    match lowering.lambda_param_hint.kind:
+        case HirTypeKind.Error: true
+        case _: false
+
+fn int_type() -> HirType:
+    HirType(kind: HirTypeKind.Int(64, true), span: Span.empty())
+
+describe("begin_module detaches module-local owners", fn():
+    it("clears a lambda parameter hint left by the previous module", fn():
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: stale hint does not reach the next module")
+        var lowering = hirlowering_new()
+        lowering.begin_module("app/a.spl")
+        lowering.lambda_param_hint = int_type()
+        expect(hint_is_unset(lowering)).to_equal(false)
+        lowering.begin_module("app/b.spl")
+        expect(hint_is_unset(lowering)).to_equal(true)
+    )
+
+    it("clears generic owner method return types and type parameter names", fn():
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: prescan maps are module-local")
+        var lowering = hirlowering_new()
+        lowering.begin_module("app/a.spl")
+        lowering.class_method_return_types_by_name["Box::get"] = int_type()
+        lowering.class_method_return_types_by_name["app/a.spl.Box::get"] = int_type()
+        lowering.struct_type_param_names_by_name["Box"] = ["T"]
+        lowering.struct_type_param_names_by_name["app/a.spl.Box"] = ["T"]
+        lowering.begin_module("app/b.spl")
+        expect(lowering.class_method_return_types_by_name.len()).to_equal(0)
+        expect(lowering.struct_type_param_names_by_name.len()).to_equal(0)
+    )
+
+    it("unwinds the re-entrancy stacks by key and begin_module empties them", fn():
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: in-progress stacks are module-local")
+        var lowering = hirlowering_new()
+        lowering.begin_module("app/a.spl")
+        lowering.imported_type_methods_in_progress_push("pkg.A")
+        lowering.imported_type_methods_in_progress_push("pkg.B")
+        lowering.materialized_payload_in_progress_push("pkg.E")
+        expect(lowering.imported_type_methods_in_progress_has("pkg.A")).to_equal(true)
+        expect(lowering.materialized_payload_in_progress_has("pkg.E")).to_equal(true)
+        expect(lowering.materialized_payload_in_progress_has("pkg.F")).to_equal(false)
+        lowering.imported_type_methods_in_progress_pop("pkg.A")
+        lowering.materialized_payload_in_progress_pop("pkg.E")
+        expect(lowering.imported_type_methods_in_progress_has("pkg.A")).to_equal(false)
+        expect(lowering.imported_type_methods_in_progress_has("pkg.B")).to_equal(true)
+        expect(lowering.materialized_payload_in_progress_has("pkg.E")).to_equal(false)
+        lowering.begin_module("app/b.spl")
+        expect(lowering.imported_type_methods_in_progress_has("pkg.B")).to_equal(false)
+    )
+
+    it("maps every empty-array default and the strictness flag", fn():
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: configuration accessors")
+        var lowering = hirlowering_new()
+        expect(lowering.is_strict_empty_collections()).to_equal(false)
+        expect(type_label(lowering.get_empty_array_default())).to_equal("int32")
+        val defaults: [TypeDefault] = [TypeDefault.Void, TypeDefault.Bool, TypeDefault.I8,
+            TypeDefault.I16, TypeDefault.I32, TypeDefault.I64, TypeDefault.U8, TypeDefault.U16,
+            TypeDefault.U32, TypeDefault.U64, TypeDefault.F32, TypeDefault.F64,
+            TypeDefault.String, TypeDefault.Nil, TypeDefault.Any]
+        var labels: [text] = []
+        for default_type in defaults:
+            var config = TypeInferenceConfig.default()
+            config.empty_array_default = default_type
+            config.strict_empty_collections = true
+            lowering.set_type_inference_config(config)
+            labels = labels.push(type_label(lowering.get_empty_array_default()))
+        expect(labels.join(",")).to_equal("unit,bool,int8,int16,int32,int64,uint8,uint16,uint32,uint64,float32,float64,str,unit,any")
+        expect(lowering.is_strict_empty_collections()).to_equal(true)
+    )
+
+    it("projects diagnostics and keeps them per module", fn():
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: diagnostic projections")
+        var lowering = hirlowering_new()
+        lowering.begin_module("app/a.spl")
+        lowering.error("first", Span.empty())
+        lowering.recovered("second", Span.empty())
+        expect(lowering.lowering_error_count()).to_equal(2)
+        expect(lowering.lowering_error_message_at(0, "app.a")).to_contain("first")
+        expect(lowering.lowering_error_is_recovered_at(0)).to_equal(false)
+        expect(lowering.lowering_error_is_recovered_at(1)).to_equal(true)
+        lowering.begin_module("app/b.spl")
+        expect(lowering.lowering_error_count()).to_equal(0)
+    )
+
+    it("keeps explicit visibility and derives the private default", fn():
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: visibility derivation")
+        var lowering = hirlowering_new()
+        lowering.begin_module("widget.spl")
+        expect(lowering.compute_visibility("Widget", Visibility.Public) == Visibility.Public).to_equal(true)
+        expect(lowering.compute_visibility("Widget", Visibility.Private) == Visibility.Public).to_equal(true)
+        expect(lowering.compute_visibility("Helper", Visibility.Private) == Visibility.Private).to_equal(true)
+    )
+
+    it("keeps a fresh lowerer's hint unset", fn():
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: initial state matches the reset state")
+        var lowering = hirlowering_new()
+        expect(hint_is_unset(lowering)).to_equal(true)
+        lowering.begin_module("app/a.spl")
+        expect(hint_is_unset(lowering)).to_equal(true)
+    )
+)

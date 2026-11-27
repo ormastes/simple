@@ -6,7 +6,7 @@ use app.svim.core.*
 # This v1 foundation keeps editing logic in the core so host TUI and
 # future shells can reuse the same state and command surface.
 
-extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_read_text(path: text) -> text?
 extern fn rt_file_write_text(path: text, content: text) -> bool
 
 
@@ -54,7 +54,10 @@ impl SvimSession:
         buffer_id
 
     me open_path(path: text) -> CommandResult:
-        val content = rt_file_read_text(path) ?? ""
+        var content = ""
+        if val read_text = rt_file_read_text(path):
+            content = read_text
+        # absent: opening a path that does not exist yet starts an empty buffer
         val buffer_id = self.open_text(path, content)
         self.focus_buffer(buffer_id)
         CommandResult(ok: true, message: "opened {path}", events: [EditorEvent(kind: "buffer-opened", message: path)])
@@ -150,7 +153,7 @@ impl SvimSession:
         window.cursor_row = clamped_row
         window.cursor_col = clamped_col
         self.windows[window_idx] = window
-        if self.mode_state.mode == SvimMode.Visual and self.selection != nil:
+        if self.mode_state.mode == SvimMode.Visual and self.selection.is_some():
             var selection = self.selection
             selection.end = Cursor(row: clamped_row, col: clamped_col)
             self.selection = selection
@@ -205,7 +208,7 @@ impl SvimSession:
 
     me new_tab_from_current_buffer() -> CommandResult:
         val window = self.active_window()
-        if window == nil:
+        if window.is_none():
             return CommandResult(ok: false, message: "no active window", events: [])
         val tab_id = self.focus_buffer_in_new_tab(window.buffer_id)
         CommandResult(ok: true, message: "new tab {tab_id.value}", events: [EditorEvent(kind: "tab-opened", message: str(tab_id.value))])
@@ -282,7 +285,7 @@ impl SvimSession:
                 self._move_vertical(count)
                 CommandResult(ok: true, message: "down", events: [])
             "delete-line":
-                if self.mode_state.mode == SvimMode.Visual and self.selection != nil:
+                if self.mode_state.mode == SvimMode.Visual and self.selection.is_some():
                     self._delete_selection(request.register_name)
                 else:
                     var i = 0
@@ -291,7 +294,7 @@ impl SvimSession:
                         i = i + 1
                 CommandResult(ok: true, message: "deleted line", events: [])
             "yank-line":
-                if self.mode_state.mode == SvimMode.Visual and self.selection != nil:
+                if self.mode_state.mode == SvimMode.Visual and self.selection.is_some():
                     self._yank_selection(request.register_name)
                 else:
                     var i = 0
@@ -300,7 +303,7 @@ impl SvimSession:
                         i = i + 1
                 CommandResult(ok: true, message: "yanked line", events: [])
             "put-after":
-                if self.mode_state.mode == SvimMode.Visual and self.selection != nil:
+                if self.mode_state.mode == SvimMode.Visual and self.selection.is_some():
                     self._put_selection(request.register_name)
                 else:
                     var i = 0
@@ -397,11 +400,11 @@ impl SvimSession:
         if commandline == "cprev" or commandline == "cp":
             return self.execute(CommandRequest(name: "quickfix-prev", count: 1, register_name: "", payload: ""))
         if commandline.starts_with("w "):
-            return self.save_current_buffer_as(commandline.slice(2, commandline.len()).trim())
+            return self.save_current_buffer_as(commandline.slice(2, commandline.byte_len()).trim())
         if commandline.starts_with("e "):
-            return self.open_path(commandline.slice(2, commandline.len()).trim())
+            return self.open_path(commandline.slice(2, commandline.byte_len()).trim())
         if commandline.starts_with("search "):
-            return self.execute(CommandRequest(name: "search-forward", count: 1, register_name: "", payload: commandline.slice(7, commandline.len()).trim()))
+            return self.execute(CommandRequest(name: "search-forward", count: 1, register_name: "", payload: commandline.slice(7, commandline.byte_len()).trim()))
         CommandResult(ok: false, message: "unknown commandline: {commandline}", events: [])
 
     me handle_rpc(request: RpcRequest) -> RpcResponse:
@@ -496,7 +499,7 @@ impl SvimSession:
 
     me _yank_selection(register_name: text):
         val buffer_idx = self.active_buffer_index()
-        if buffer_idx < 0 or self.selection == nil:
+        if buffer_idx < 0 or self.selection.is_none():
             return
         val bounds = _svim_selection_bounds(self.buffers[buffer_idx].line_starts, self.selection)
         self._yank_range(register_name, bounds.0, bounds.1)
@@ -504,7 +507,7 @@ impl SvimSession:
 
     me _delete_selection(register_name: text):
         val buffer_idx = self.active_buffer_index()
-        if buffer_idx < 0 or self.selection == nil:
+        if buffer_idx < 0 or self.selection.is_none():
             return
         val bounds = _svim_selection_bounds(self.buffers[buffer_idx].line_starts, self.selection)
         if bounds.1 <= bounds.0:

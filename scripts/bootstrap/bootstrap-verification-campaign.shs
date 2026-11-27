@@ -35,6 +35,20 @@ bootstrap_verification_campaign_child() {
     kill -0 "$bcc_pid" 2>/dev/null
 }
 
+# bootstrap_verification_campaign_record_cap_kill STATUS ATTEMPT WORK
+# W21 (2026-11-22): the campaign cap killed the phase tree and the only trace
+# was exit 88 plus timeout_signal=job-terminate in a 100-line receipt body.
+# When ATTEMPT/process.env records a cap kill, append a campaign_rss_cap row
+# naming cap and peak to WORK/summary.env and say so on stderr; else return 1.
+# Needs tree-rss-policy.shs (bootstrap_tree_rss_cap_kill_line) sourced.
+bootstrap_verification_campaign_record_cap_kill() {
+  bcr_kill=$(bootstrap_tree_rss_cap_kill_line "$2/process.env") || return 1
+  printf 'task=campaign_rss_cap|result=FAIL|status=%s|kill_cause=%s|log=%s\noverall=FAIL\n' \
+    "$1" "$bcr_kill" "$2/process.env" >>"$3/summary.env"
+  printf 'bootstrap-phase-verification: campaign process-tree RSS cap fired: %s (not a timeout); evidence preserved: %s\n' \
+    "$bcr_kill" "$2" >&2
+}
+
 bootstrap_verification_campaign_run() {
   bc_seconds=$1 bc_work=$2 bc_script=$3 bc_owner=$4; shift 4
   bc_owner=$(CDPATH= cd -- "$bc_owner" && pwd -P)
@@ -59,7 +73,8 @@ bootstrap_verification_campaign_run() {
   if [ "${SIMPLE_BOOTSTRAP_SESSION_ID+x}${SIMPLE_BOOTSTRAP_SESSION_EXEC+x}" != "" ]; then
     bc_session_mode=inherit
   fi
-  bc_campaign_rss_cap=${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB:-5859375}
+  # The cap/ceiling/bound come from the tree RSS policy's campaign envelope
+  # below (the largest published row cap; rows run serially inside it).
   # The campaign watchdog wraps the whole phase tree directly (rows nest
   # inside it), so it must declare the phase worker count itself: without
   # --compiler-jobs its ceiling stays at the static 8 GiB, which the full
@@ -80,14 +95,34 @@ bootstrap_verification_campaign_run() {
   # lines below the same pattern): the watchdog admits it only under 3/4 of
   # real total AND available host memory, with enforced scope and declared
   # jobs. Non-build rows unset the pair and keep the default policy.
+  # The envelope is the phase pair, or the published compiler_cli_build row
+  # cap/ceiling when one is published (tree-rss-policy.shs
+  # bootstrap_tree_rss_campaign_envelope); a malformed one is refused.
+  . "$bc_owner/lib/tree-rss-policy.shs"
+  bootstrap_tree_rss_campaign_envelope || {
+    echo "campaign: $bootstrap_tree_rss_refusal" >&2
+    exit 125
+  }
+  bc_campaign_rss_cap=$bootstrap_tree_rss_campaign_cap_kib
   bc_campaign_ceiling_arg=
-  if [ -n "${SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB:-}" ]; then
-    case "$SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB" in
-      ''|0*|*[!0-9]*) ;;
-      *) [ -n "$bc_campaign_jobs_arg" ] &&
-           bc_campaign_ceiling_arg=--compiler-ceiling-kib="$SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB" ;;
-    esac
-  fi
+  case "$bootstrap_tree_rss_campaign_ceiling_kib" in
+    ''|0*|*[!0-9]*) ;;
+    *) [ -n "$bc_campaign_jobs_arg" ] &&
+         bc_campaign_ceiling_arg=--compiler-ceiling-kib="$bootstrap_tree_rss_campaign_ceiling_kib" ;;
+  esac
+  # Receipt attribution of the campaign cap. The whole-build phase owner
+  # publishes phase-policy / worker-floor[-elevated] (tree-rss-policy.shs
+  # bootstrap_tree_rss_whole_build_export); a diagnostic pair sets neither and
+  # stays `unspecified` here (explicit-env in the row owners). A malformed
+  # spelling is refused, the same as the row owners' policy refusal, never
+  # laundered to another label.
+  bc_campaign_cap_source=${SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE:-unspecified}
+  bc_campaign_cap_bound=$bootstrap_tree_rss_campaign_bound
+  bootstrap_tree_rss_attribution_valid "$bc_campaign_cap_source" &&
+    bootstrap_tree_rss_attribution_valid "$bc_campaign_cap_bound" || {
+    echo "campaign: invalid published cap attribution SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE='$bc_campaign_cap_source' _BOUND='$bc_campaign_cap_bound' (want [a-z][a-z-]{0,31})" >&2
+    exit 125
+  }
   # The canonical watchdog validates this cap against its compiler ceiling.
   # Campaign and rows keep the caller's actual enforcement policy.
   bc_status=0 bc_guard=
@@ -99,6 +134,7 @@ bootstrap_verification_campaign_run() {
     --session-mode="$bc_session_mode" --rss-cap-mode="$bc_row_rss_mode" --max-rss-kib="$bc_campaign_rss_cap" \
     $bc_campaign_jobs_arg \
     $bc_campaign_ceiling_arg \
+    --cap-source="$bc_campaign_cap_source" --cap-bound="$bc_campaign_cap_bound" \
     --timeout-seconds="$bc_seconds" --term-grace-seconds=2 \
     --receipt="$bc_attempt/process.env" -- \
     env "SIMPLE_BOOTSTRAP_RSS_CAP_MODE=$bc_row_rss_mode" sh "$bc_script" "$@" &
@@ -137,6 +173,8 @@ bootstrap_verification_campaign_run() {
   elif [ "$bc_reason" = interrupted ]; then
     printf 'task=campaign_interrupted|result=FAIL|status=%s|log=%s\noverall=FAIL\n' \
       "$bc_status" "$bc_attempt/process.env" >>"$bc_work/summary.env"
+  else
+    bootstrap_verification_campaign_record_cap_kill "$bc_status" "$bc_attempt" "$bc_work" || :
   fi
   return "$bc_status"
 }

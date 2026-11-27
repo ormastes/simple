@@ -1,0 +1,22 @@
+# Guards e606125a541 (source shape): the generated HIR decoder must store dict
+# values through a presence bind, never the decoded optional itself. Storing
+# the optional left nil HirFunction values after a cache-hit decode (stage2
+# p2_add SIGSEGV). Runtime round trip: hir_codec_dict_decode_roundtrip_spec.spl.
+# Kept as a source check on purpose: the defect only shows on the native
+# stage2 lane; the seed stores a T? into Dict<K,T> transparently, so a
+# behaviour spec run on the seed passes even with the broken decoder.
+use std.spec.*
+
+extern fn rt_file_read_text(path: text) -> text?
+
+describe "HIR codec decoder source shape":
+    it "stores module.functions through a presence bind":
+        val generated = rt_file_read_text("src/compiler/20.hir/generated/hir_codec.spl") ?? ""
+        # Key and value are both required entries, so both go through a bind.
+        expect(generated).to_contain("f_functions[present_k6] = present_v6")
+        expect(generated.contains("f_functions[dk6] = dv6")).to_equal(false)
+        expect(generated.contains("f_functions[present_k6] = dv6")).to_equal(false)
+        expect(generated.contains("f_functions[dk6] = present_v6")).to_equal(false)
+    it "keeps the generator emitting the presence bind":
+        val generator = rt_file_read_text("src/app/compiler_schema/codec_gen.spl") ?? ""
+        expect(generator).to_contain("if val present_v")

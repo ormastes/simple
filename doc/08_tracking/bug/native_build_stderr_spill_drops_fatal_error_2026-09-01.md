@@ -5,7 +5,7 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 **Date:** 2026-09-01
-**Status:** OPEN — measured, not fixed
+**Status:** SUPERSEDED — measured, not fixed
 **Site:** `src/app/cli/native_build_main.spl` (~lines 280-330, the truncation/spill path)
 
 ## Symptom
@@ -62,3 +62,31 @@ truncation logic runs on Linux and macOS. The earlier hardcoded-`/tmp` spill
 bug in this same function (fixed, `15523fad2c4`) was Windows-only, but this
 byte-count mismatch is not.
 
+
+---
+
+## Addendum 2026-11-11 (lane boot7) — SUPERSEDED
+
+The truncation/spill path in `src/app/cli/native_build_main.spl` (`eprint_bounded`,
+lines ~598-677 at release tip) no longer has the reported defect:
+
+- The spill writes the FULL untruncated stderr via `file_write(spill_path, output)`
+  and reports `output.len()` — the announced byte count and the written text are
+  the same string, so the 413555-announced/211505-written mismatch is structurally
+  gone (src/app/cli/native_build_main.spl:658-659).
+- Before the head+tail view is printed, EVERY diagnostic line in the full stream is
+  re-emitted (`native_build_collect_diagnostics`, lines 583-596, 664-671), so the
+  fatal error — emitted last — survives even if it falls in the dropped middle.
+- The head+tail view keeps the TAIL (`head_len = OUTPUT_LIMIT/2`, lines 672-676),
+  matching the fix direction requested here and in a53e5c2f2ba.
+
+Fixing commit on the release tip: 820631c6e5c7 (merge of PR #7545
+`work/tcp-spill-signedness-20261107`, 2026-11-07) — blame and `-S` pickaxe both
+place the full-spill + preserved-diagnostics mechanism at this commit.
+
+Seed-smoke verification (2026-11-11, seed 0791c2b7f4a7, interpreter mode):
+`bin/simple.exe test test/01_unit/app/cli_native_build_main_contract_spec.spl
+--mode=interpreter --no-cache` — the spill-related case "routes the
+worker-failure relay through the unambiguous stderr_write" PASSED. (Note: 11 of
+17 content-matching cases in that spec fail on unrelated source regions —
+VHDL/simpleos text drift on the release tip, pre-existing, not this bug.)

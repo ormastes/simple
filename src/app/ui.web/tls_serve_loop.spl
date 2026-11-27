@@ -78,7 +78,7 @@ class ConnStream:
     open: bool
 
     static fn from_tls(handle: i64) -> ConnStream:
-        ConnStream(kind: "tls", tls_handle: handle, tcp_stream: nil, buffer: "", open: true)
+        ConnStream(kind: "tls", tls_handle: handle, tcp_stream: None, buffer: "", open: true)
 
     static fn from_tcp(stream: TcpStream) -> ConnStream:
         ConnStream(kind: "tcp", tls_handle: -1, tcp_stream: stream, buffer: "", open: true)
@@ -87,12 +87,21 @@ class ConnStream:
         return self.open
 
     me read_line() -> Result<text, text>:
-        """Read one line (terminated by \\n) from the stream.
+        self.read_line_bounded(8192)
+
+    me read_line_bounded(max_bytes: i64) -> Result<text, text>:
+        """Read one bounded line (terminated by \\n) from the stream.
 
         Buffers partial reads internally. Returns the line without the
-        trailing \\r\\n or \\n.
+        trailing \\r\\n or \\n, or fails closed once max_bytes is crossed.
         """
+        if max_bytes < 0:
+            self.open = false
+            return Err("invalid line bound")
         loop:
+            if self.buffer.len() > max_bytes:
+                self.open = false
+                return Err("line exceeds max_bytes ({max_bytes})")
             # Scan existing buffer for a newline
             val nl = self.buffer.find("\n")
             if nl >= 0:
@@ -110,7 +119,7 @@ class ConnStream:
 
             if self.kind == "tcp":
                 val tcp = self.tcp_stream.unwrap()
-                match tcp.read_line():
+                match tcp.read_line_bounded(max_bytes):
                     Err(e):
                         self.open = false
                         return Err(e)
@@ -118,7 +127,7 @@ class ConnStream:
                         return Ok(line)
             else:
                 val chunk = tls_serve_loop_read(self.tls_handle, 4096)
-                if chunk == nil:
+                if chunk.is_none():
                     self.open = false
                     return Err("TLS read failed")
                 val chunk_text = chunk!
@@ -126,6 +135,9 @@ class ConnStream:
                     self.open = false
                     return Err("connection closed")
                 self.buffer = self.buffer + chunk_text
+                if self.buffer.len() > max_bytes:
+                    self.open = false
+                    return Err("line exceeds max_bytes ({max_bytes})")
                 if not ui_web_request_head_allowed(self.buffer.len()):
                     self.open = false
                     return Err("request_head_too_large")
@@ -151,7 +163,7 @@ class ConnStream:
                     return Err("connection closed")
 
                 val chunk = tls_serve_loop_read(self.tls_handle, 4096)
-                if chunk == nil:
+                if chunk.is_none():
                     self.open = false
                     return Err("TLS read failed")
                 val chunk_text = chunk!
@@ -250,7 +262,7 @@ class TlsWebServer:
                 var session = UISession.new(tree)
                 session.set_active_backend("web")
                 val store = ui_access_store_runtime_open_with_override(access_db_path, file_path, "web")
-                if store != nil:
+                if store.is_some():
                     session.attach_access_store(store)
                 val content = if file_exists(file_path):
                     read_file(file_path)
@@ -309,7 +321,7 @@ class TlsWebServer:
 
     me handle_connection(conn: ConnStream):
         """Handle a single incoming TLS HTTP connection."""
-        match conn.read_line():
+        match conn.read_line_bounded(8192):
             Err(_):
                 conn.close()
                 return
@@ -329,7 +341,7 @@ class TlsWebServer:
                 var headers = ""
                 var is_ws_upgrade = false
                 loop:
-                    match conn.read_line():
+                    match conn.read_line_bounded(8192):
                         Ok(header_line):
                             if header_line.trim() == "":
                                 break
@@ -408,7 +420,7 @@ class TlsWebServer:
         """Drain pending events from the event channel."""
         loop:
             val msg = self.event_channel.try_recv()
-            if msg == nil:
+            if msg.is_none():
                 break
             val event = msg as UIEvent
             if event != nil:

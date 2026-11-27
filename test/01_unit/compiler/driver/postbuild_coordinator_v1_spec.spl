@@ -1,0 +1,98 @@
+use std.spec
+use compiler.driver.cache.postbuild_coordinator_v1.{postbuild_record_v1, postbuild_load_v1,
+    postbuild_wait_required_v1, postbuild_path_v1}
+use std.io_runtime.{file_write, file_exists, file_read}
+use std.nogc_sync_mut.io_runtime.{dir_create_all, dir_remove_all}
+
+val ROOT: text = "build/test_tmp/postbuild_coordinator_v1"
+val GEN_A: text = "gen-aaaa"
+val GEN_B: text = "gen-bbbb"
+
+describe "postbuild coordinator v1":
+    it "starts pending and settles through immutable per-kind files":
+        val r = ROOT + "/settle"
+        val _c = dir_remove_all(r)
+        val v0 = postbuild_load_v1(r, GEN_A)
+        expect(v0.binary).to_equal("pending")
+        expect(v0.tldr).to_equal("pending")
+        expect(v0.tests).to_equal("pending")
+        expect(postbuild_record_v1(r, GEN_A, GEN_A, "binary", "ready", "sha256:bin1")).to_equal("")
+        val v1 = postbuild_load_v1(r, GEN_A)
+        expect(v1.binary).to_equal("ready")
+        expect(v1.binary_digest).to_equal("sha256:bin1")
+        expect(v1.tldr).to_equal("pending")
+        expect(file_exists(postbuild_path_v1(r, GEN_A, "binary"))).to_equal(true)
+
+    it "keeps binary=ready when a late tldr or test result fails":
+        val r = ROOT + "/late"
+        val _c = dir_remove_all(r)
+        val _b = postbuild_record_v1(r, GEN_A, GEN_A, "binary", "ready", "sha256:bin2")
+        val _t = postbuild_record_v1(r, GEN_A, GEN_A, "tldr", "failed", "")
+        val _x = postbuild_record_v1(r, GEN_A, GEN_A, "tests", "failed", "")
+        val v = postbuild_load_v1(r, GEN_A)
+        expect(v.binary).to_equal("ready")
+        expect(v.tldr).to_equal("failed")
+        expect(v.tests).to_equal("failed")
+
+    it "refuses a stale job stamping a newer generation":
+        val r = ROOT + "/stale"
+        val _c = dir_remove_all(r)
+        val err = postbuild_record_v1(r, GEN_B, GEN_A, "binary", "ready", "sha256:old")
+        expect(err != "").to_equal(true)
+        expect(file_exists(postbuild_path_v1(r, GEN_B, "binary"))).to_equal(false)
+        expect(postbuild_load_v1(r, GEN_B).binary).to_equal("pending")
+
+    it "ignores a record file carrying a foreign generation":
+        val r = ROOT + "/foreign"
+        val _c = dir_remove_all(r)
+        val _d = dir_create_all(r + "/postbuild/" + GEN_B)
+        val _w = file_write(postbuild_path_v1(r, GEN_B, "binary"),
+            "schema: simple.postbuild/1\ngeneration: " + GEN_A + "\nkind: binary\nstate: ready\ndigest: x\n")
+        expect(postbuild_load_v1(r, GEN_B).binary).to_equal("pending")
+
+    it "wait_required is not qualified while pending or missing":
+        val r = ROOT + "/wait"
+        val _c = dir_remove_all(r)
+        expect(postbuild_wait_required_v1(r, GEN_A, "binary")).to_equal(false)
+        val _b = postbuild_record_v1(r, GEN_A, GEN_A, "binary", "ready", "sha256:b")
+        expect(postbuild_wait_required_v1(r, GEN_A, "binary")).to_equal(true)
+        expect(postbuild_wait_required_v1(r, GEN_A, "verified")).to_equal(false)
+        val _t = postbuild_record_v1(r, GEN_A, GEN_A, "tldr", "verified", "")
+        expect(postbuild_wait_required_v1(r, GEN_A, "verified")).to_equal(true)
+        expect(postbuild_wait_required_v1(r, GEN_A, "full")).to_equal(false)
+        val _x = postbuild_record_v1(r, GEN_A, GEN_A, "tests", "passed", "")
+        expect(postbuild_wait_required_v1(r, GEN_A, "full")).to_equal(true)
+
+    it "wait_required is not qualified when a mandatory kind failed":
+        val r = ROOT + "/failed"
+        val _c = dir_remove_all(r)
+        val _b = postbuild_record_v1(r, GEN_A, GEN_A, "binary", "ready", "sha256:b")
+        val _t = postbuild_record_v1(r, GEN_A, GEN_A, "tldr", "stale", "")
+        expect(postbuild_wait_required_v1(r, GEN_A, "verified")).to_equal(false)
+        expect(postbuild_wait_required_v1(r, GEN_A, "binary")).to_equal(true)
+        expect(postbuild_wait_required_v1(r, GEN_A, "nonsense")).to_equal(false)
+
+    it "treats not_requested tests as satisfied for the full tier":
+        val r = ROOT + "/notreq"
+        val _c = dir_remove_all(r)
+        val _b = postbuild_record_v1(r, GEN_A, GEN_A, "binary", "ready", "sha256:b")
+        val _t = postbuild_record_v1(r, GEN_A, GEN_A, "tldr", "verified", "")
+        val _x = postbuild_record_v1(r, GEN_A, GEN_A, "tests", "not_requested", "")
+        expect(postbuild_wait_required_v1(r, GEN_A, "full")).to_equal(true)
+
+    it "never replaces a settled record":
+        val r = ROOT + "/immutable"
+        val _c = dir_remove_all(r)
+        expect(postbuild_record_v1(r, GEN_A, GEN_A, "binary", "ready", "sha256:one")).to_equal("")
+        expect(postbuild_record_v1(r, GEN_A, GEN_A, "binary", "ready", "sha256:one")).to_equal("")
+        val err = postbuild_record_v1(r, GEN_A, GEN_A, "binary", "failed", "")
+        expect(err != "").to_equal(true)
+        val v = postbuild_load_v1(r, GEN_A)
+        expect(v.binary).to_equal("ready")
+        expect(v.binary_digest).to_equal("sha256:one")
+
+    it "rejects an invalid state for a kind":
+        val r = ROOT + "/invalid"
+        val _c = dir_remove_all(r)
+        expect(postbuild_record_v1(r, GEN_A, GEN_A, "binary", "verified", "") != "").to_equal(true)
+        expect(postbuild_record_v1(r, GEN_A, GEN_A, "bogus", "ready", "") != "").to_equal(true)

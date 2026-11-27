@@ -1,0 +1,501 @@
+# Standalone Pure-Simple native Mach-O + seed qualification smoke across Waves A and B1-B5.
+# Compiled with `phase2-aarch64-apple-darwin/simple native-build --entry-closure` and also runnable on `bin/simple run`.
+
+use std.io_runtime.{cwd, file_read}
+use std.nogc_sync_mut.io.time_ops.{time_now_micros}
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{engine2d_draw_ir_adv_composition_owner_with_images}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_engine2d_presenter.{
+    simple_web_layout_render_html_readback,
+    web_presenter_engine_cache_drain
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_web_layout_element_geometry_lines}
+use os.hosted.hosted_web_content_session.{HostedWebContentSession}
+use std.skia.entity.color.{sk_color_argb}
+use std.skia.entity.geometry.{SkRect, sk_rect_make_xywh, sk_rrect_make}
+use std.skia.entity.paint.{sk_paint_fill}
+use std.skia.entity.path.{SkPath, sk_path_new}
+use std.skia.entity.font.{sk_font_with_ttf}
+use std.skia.entity.canvas.{SkCanvas, sk_canvas_make}
+use std.skia.entity.picture.{SkPicture}
+use std.skia.backend.cpu.backend.{cpu_backend_new}
+use std.skia.backend.cpu.raster_prims.{Bitmap}
+use std.skia.bridge.engine2d_bridge.{
+    SkEngine2DSession,
+    SkVulkanEngine2DSession,
+    skia_engine2d_session_create,
+    skia_vulkan_session_create,
+    skia_picture_to_vulkan_base
+}
+use common.ui.interactive_desktop_scene.{InteractiveDesktopScene, render_interactive_desktop}
+use common.ui.wm_chrome_theme.{reset_wm_chrome_theme}
+use common.ui.window_scene.{
+    WM_CHROME_KIND_TITLED,
+    simple_gui_internal_window_scene,
+    simple_gui_internal_window_with_chrome_kind
+}
+use common.ui.window_scene_draw_ir.{shared_wm_scene_aqua_draw_ir_composition}
+use std.editor.core.session.{EditSession}
+use app.editor.gui_shell_render.{IdeGuiFrame, ide_render_gui_frame}
+use app.office.gui.{OfficeGuiFrame, office_gui_render_engine2d_frame}
+use app.llm_caret.cs_gui.{CsAgent, CsDashboard, CsGuiFrame, cs_render_gui_frame}
+
+val SCENE_W: i64 = 800
+val SCENE_H: i64 = 600
+val FONT_PATH: text = "assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf"
+
+struct SmokePixelDiff:
+    mismatch_count: i64
+    max_channel_delta: i64
+    near_match_count: i64
+
+struct SmokeGeomBox:
+    key: text
+    x: i32
+    y: i32
+    w: i32
+    h: i32
+
+fn _smoke_abs_i64(v: i64) -> i64:
+    if v < 0: -v else: v
+
+fn _smoke_fps(avg_us: i64) -> f64:
+    if avg_us <= 0:
+        return 0.0
+    1000000.0 / avg_us.to_f64()
+
+fn _smoke_star_path(cx: f64, cy: f64, r_outer: f64, r_inner: f64) -> SkPath:
+    val p0 = sk_path_new().move_to(cx, cy - r_outer)
+    val p1 = p0.line_to(cx + r_inner * 0.58778525, cy - r_inner * 0.80901699)
+    val p2 = p1.line_to(cx + r_outer * 0.95105652, cy - r_outer * 0.30901699)
+    val p3 = p2.line_to(cx + r_inner * 0.95105652, cy + r_inner * 0.30901699)
+    val p4 = p3.line_to(cx + r_outer * 0.58778525, cy + r_outer * 0.80901699)
+    val p5 = p4.line_to(cx, cy + r_inner)
+    val p6 = p5.line_to(cx - r_outer * 0.58778525, cy + r_outer * 0.80901699)
+    val p7 = p6.line_to(cx - r_inner * 0.95105652, cy + r_inner * 0.30901699)
+    val p8 = p7.line_to(cx - r_outer * 0.95105652, cy - r_outer * 0.30901699)
+    val p9 = p8.line_to(cx - r_inner * 0.58778525, cy - r_inner * 0.80901699)
+    p9.close()
+
+fn _smoke_build_picture() -> SkPicture:
+    val bounds = sk_rect_make_xywh(0.0, 0.0, 800.0, 600.0)
+    val font_title = sk_font_with_ttf(FONT_PATH, 28.0)
+    val font_sub = sk_font_with_ttf(FONT_PATH, 18.0)
+    var c = sk_canvas_make(SCENE_W, SCENE_H).begin_recording(bounds)
+    c = c.clear(sk_color_argb(255, 15, 23, 42))
+    c = c.draw_rect(sk_rect_make_xywh(24.0, 24.0, 752.0, 88.0), sk_paint_fill(sk_color_argb(255, 30, 41, 59)))
+    c = c.draw_rect(sk_rect_make_xywh(24.0, 132.0, 368.0, 220.0), sk_paint_fill(sk_color_argb(255, 23, 37, 84)))
+    c = c.draw_rect(sk_rect_make_xywh(408.0, 132.0, 368.0, 220.0), sk_paint_fill(sk_color_argb(255, 31, 41, 55)))
+    val footer_rr = sk_rrect_make(sk_rect_make_xywh(24.0, 372.0, 752.0, 200.0), 14.0, 14.0)
+    c = c.draw_rrect(footer_rr, sk_paint_fill(sk_color_argb(220, 51, 65, 85)))
+    c = c.draw_circle(168.0, 242.0, 58.0, sk_paint_fill(sk_color_argb(235, 56, 189, 248)))
+    c = c.draw_circle(268.0, 242.0, 38.0, sk_paint_fill(sk_color_argb(220, 244, 114, 182)))
+    val star = _smoke_star_path(592.0, 242.0, 72.0, 30.0)
+    c = c.draw_path(star, sk_paint_fill(sk_color_argb(240, 250, 204, 21)))
+    val badge = sk_path_new().move_to(-88.0, -26.0).line_to(88.0, -26.0).line_to(88.0, 26.0).line_to(-88.0, 26.0).close()
+    c = c.save()
+    c = c.translate(600.0, 480.0)
+    c = c.rotate(18.0)
+    c = c.draw_path(badge, sk_paint_fill(sk_color_argb(230, 34, 197, 94)))
+    c = c.restore()
+    c = c.draw_string("Skia Vulkan 800x600 Full-AA Parity", 44.0, 78.0, font_title, sk_paint_fill(sk_color_argb(255, 248, 250, 252)))
+    c = c.draw_string("SFNT AA + Rotated Transforms + Star Path", 44.0, 434.0, font_sub, sk_paint_fill(sk_color_argb(255, 165, 243, 252)))
+    c.end_recording()
+
+fn _smoke_draw_engine2d_equiv(eng: Engine2D):
+    eng.clear(0xFF0F172Au32)
+    eng.draw_rect_filled(24, 24, 752, 88, 0xFF1E293Bu32)
+    eng.draw_rect_filled(24, 132, 368, 220, 0xFF172554u32)
+    eng.draw_rect_filled(408, 132, 368, 220, 0xFF1F2937u32)
+    eng.draw_rect_filled(24, 372, 752, 200, 0xFF334155u32)
+    eng.draw_circle_filled(168, 242, 58, 0xFF38BDF8u32)
+    eng.draw_circle_filled(268, 242, 38, 0xFFF472B6u32)
+    eng.draw_triangle_filled(592, 170, 524, 300, 660, 300, 0xFFFACC15u32)
+    eng.draw_triangle_filled(512, 468, 678, 438, 690, 502, 0xFF22C55Eu32)
+    eng.draw_text_sfnt_baseline_aa(44, 78, "Skia Vulkan 800x600 Full-AA Parity", 0xFFF8FAFCu32, 28.0, FONT_PATH)
+    eng.draw_text_sfnt_baseline_aa(44, 434, "SFNT AA + Rotated Transforms + Star Path", 0xFFA5F3FCu32, 18.0, FONT_PATH)
+
+fn _smoke_bitmap_to_argb(bmp: Bitmap) -> [u32]:
+    val total = bmp.width * bmp.height
+    var out = [0u32; total]
+    var i: i64 = 0
+    while i < total:
+        val base = i * 4
+        val a = bmp.pixels[base + 3] as i64
+        if a == 255:
+            val r = (bmp.pixels[base] as i64) & 0xFF
+            val g = (bmp.pixels[base + 1] as i64) & 0xFF
+            val b = (bmp.pixels[base + 2] as i64) & 0xFF
+            out[i] = (((0xFF << 24) | (r << 16) | (g << 8) | b) as u32)
+        elif a > 0:
+            val pr = bmp.pixels[base] as i64
+            val pg = bmp.pixels[base + 1] as i64
+            val pb = bmp.pixels[base + 2] as i64
+            var r = (pr * 255 + (a / 2)) / a
+            var g = (pg * 255 + (a / 2)) / a
+            var b = (pb * 255 + (a / 2)) / a
+            if r > 255: r = 255
+            if g > 255: g = 255
+            if b > 255: b = 255
+            out[i] = ((((a & 0xFF) << 24) | (r << 16) | (g << 8) | b) as u32)
+        i = i + 1
+    out
+
+fn _smoke_compare_argb(a: [u32], b: [u32]) -> SmokePixelDiff:
+    val n = if a.len() < b.len(): a.len() else: b.len()
+    var mismatches: i64 = if a.len() != b.len(): 1 else: 0
+    var max_delta: i64 = 0
+    var near_matches: i64 = 0
+    var i: i64 = 0
+    while i < n:
+        val pa = a[i]
+        val pb = b[i]
+        if pa != pb:
+            mismatches = mismatches + 1
+            val ada = _smoke_abs_i64((((pa >> 24) & 0xFFu32) as i64) - (((pb >> 24) & 0xFFu32) as i64))
+            val adr = _smoke_abs_i64((((pa >> 16) & 0xFFu32) as i64) - (((pb >> 16) & 0xFFu32) as i64))
+            val adg = _smoke_abs_i64((((pa >> 8) & 0xFFu32) as i64) - (((pb >> 8) & 0xFFu32) as i64))
+            val adb = _smoke_abs_i64(((pa & 0xFFu32) as i64) - ((pb & 0xFFu32) as i64))
+            var d = ada
+            if adr > d: d = adr
+            if adg > d: d = adg
+            if adb > d: d = adb
+            if d > max_delta: max_delta = d
+            if d <= 2: near_matches = near_matches + 1
+        i = i + 1
+    SmokePixelDiff(mismatch_count: mismatches, max_channel_delta: max_delta, near_match_count: near_matches)
+
+fn _smoke_agree_per_mille(a: [u32], b: [u32], tol: i64) -> i64:
+    val total = if a.len() < b.len(): a.len() else: b.len()
+    if total <= 0:
+        return 0
+    var matched: i64 = 0
+    var i: i64 = 0
+    while i < total:
+        val pa = a[i]
+        val pb = b[i]
+        if pa == pb:
+            matched = matched + 1
+        else:
+            val adr = _smoke_abs_i64((((pa >> 16) & 0xFFu32) as i64) - (((pb >> 16) & 0xFFu32) as i64))
+            val adg = _smoke_abs_i64((((pa >> 8) & 0xFFu32) as i64) - (((pb >> 8) & 0xFFu32) as i64))
+            val adb = _smoke_abs_i64(((pa & 0xFFu32) as i64) - ((pb & 0xFFu32) as i64))
+            if adr <= tol and adg <= tol and adb <= tol:
+                matched = matched + 1
+        i = i + 1
+    (matched * 1000) / total
+
+fn _smoke_find_geom(lines: [text], key: text) -> SmokeGeomBox:
+    val prefix = "GEOM|" + key + "|"
+    for line in lines:
+        if line.starts_with(prefix):
+            val parts = line.split("|")
+            if parts.len() >= 7:
+                return SmokeGeomBox(
+                    key: parts[1],
+                    x: parts[3].trim().to_i32(),
+                    y: parts[4].trim().to_i32(),
+                    w: parts[5].trim().to_i32(),
+                    h: parts[6].trim().to_i32()
+                )
+    SmokeGeomBox(key: key, x: -1, y: -1, w: 0, h: 0)
+
+fn _smoke_run_b1() -> bool:
+    val pic = _smoke_build_picture()
+    val bounds = sk_rect_make_xywh(0.0, 0.0, 800.0, 600.0)
+    val expected_pixels: i64 = SCENE_W * SCENE_H
+
+    var cpu_backend = cpu_backend_new()
+    val _ = cpu_backend.render_picture(pic, bounds)
+    val cpu_t0 = time_now_micros()
+    val cpu_bmp = cpu_backend.render_picture(pic, bounds)
+    val cpu_t1 = time_now_micros()
+    val cpu_avg_us = cpu_t1 - cpu_t0
+    if cpu_bmp.width != SCENE_W or cpu_bmp.height != SCENE_H:
+        print "FAIL B1: cpu_bmp size mismatch"
+        return false
+    val cpu_argb = _smoke_bitmap_to_argb(cpu_bmp)
+    print "B1_CPU_SKIA: avg_us={cpu_avg_us} avg_ms={cpu_avg_us.to_f64() / 1000.0} fps={_smoke_fps(cpu_avg_us)}"
+
+    val sw_sess_res = skia_engine2d_session_create(SCENE_W, SCENE_H, "software")
+    if sw_sess_res.is_err():
+        print "FAIL B1: skia sw session create failed"
+        return false
+    var sw_sess = sw_sess_res.unwrap()
+    val sw_t0 = time_now_micros()
+    val sw_rb_res = sw_sess.render_picture_readback(pic)
+    val sw_t1 = time_now_micros()
+    sw_sess.shutdown()
+    if sw_rb_res.is_err():
+        print "FAIL B1: skia sw render failed"
+        return false
+    val sw_px = sw_rb_res.unwrap().pixels
+    if sw_px.len() != expected_pixels:
+        print "FAIL B1: skia sw pixel count mismatch"
+        return false
+    val sw_avg_us = sw_t1 - sw_t0
+    val cpu_sw_diff = _smoke_compare_argb(cpu_argb, sw_px)
+    print "B1_SW_BRIDGE: avg_us={sw_avg_us} avg_ms={sw_avg_us.to_f64() / 1000.0} fps={_smoke_fps(sw_avg_us)} max_delta={cpu_sw_diff.max_channel_delta}"
+    if cpu_sw_diff.max_channel_delta > 1:
+        print "FAIL B1: cpu vs sw delta too high"
+        return false
+
+    val e2d_vk_res = Engine2D.create_vulkan_backend(SCENE_W as i32, SCENE_H as i32)
+    if e2d_vk_res.is_err():
+        print "FAIL B1: Engine2D Vulkan backend unavailable"
+        return false
+
+    var e2d_vk = e2d_vk_res.unwrap()
+
+    var w = 0
+    while w < 2:
+        _smoke_draw_engine2d_equiv(e2d_vk)
+        if not e2d_vk.finalize_compute_frame_no_readback():
+            e2d_vk.shutdown()
+            print "FAIL B1: Engine2D Vulkan warmup no-readback failed"
+            return false
+        w = w + 1
+
+    val bench_frames: i64 = 20
+    val e2d_t0 = time_now_micros()
+    var fi: i64 = 0
+    while fi < bench_frames:
+        _smoke_draw_engine2d_equiv(e2d_vk)
+        if not e2d_vk.finalize_compute_frame_no_readback():
+            e2d_vk.shutdown()
+            print "FAIL B1: Engine2D Vulkan steady frame failed"
+            return false
+        fi = fi + 1
+    val e2d_t1 = time_now_micros()
+    val e2d_avg_us = (e2d_t1 - e2d_t0) / bench_frames
+    print "B1_ENGINE2D_VK_STEADY: frames={bench_frames} avg_us={e2d_avg_us} avg_ms={e2d_avg_us.to_f64() / 1000.0} fps={_smoke_fps(e2d_avg_us)}"
+
+    _smoke_draw_engine2d_equiv(e2d_vk)
+    val e2d_vk_rb = e2d_vk.read_pixels_with_source()
+    e2d_vk.shutdown()
+    if e2d_vk_rb.source != "device_readback" or e2d_vk_rb.pixels.len() != expected_pixels:
+        print "FAIL B1: Engine2D Vulkan readback invalid source={e2d_vk_rb.source}"
+        return false
+
+    var e2d_sw = Engine2D.create_with_backend(SCENE_W as i32, SCENE_H as i32, "software")
+    _smoke_draw_engine2d_equiv(e2d_sw)
+    val e2d_sw_rb = e2d_sw.read_pixels_with_source()
+    e2d_sw.present()
+    e2d_sw.shutdown()
+    val e2d_diff = _smoke_compare_argb(e2d_sw_rb.pixels, e2d_vk_rb.pixels)
+    print "B1_PARITY_E2D_SW_VK: mismatches={e2d_diff.mismatch_count} max_delta={e2d_diff.max_channel_delta}"
+    if e2d_diff.mismatch_count != 0:
+        print "FAIL B1: Engine2D SW vs VK pixel mismatch"
+        return false
+
+    val sk_vk_res = skia_vulkan_session_create(SCENE_W, SCENE_H)
+    if sk_vk_res.is_err():
+        print "FAIL B1: Skia Vulkan backend unavailable"
+        return false
+    var sk_vk = sk_vk_res.unwrap()
+
+    var sw_i = 0
+    while sw_i < 2:
+        if sk_vk.render_picture_frame(pic).is_err():
+            sk_vk.shutdown()
+            print "FAIL B1: Skia Vulkan warmup frame failed"
+            return false
+        sw_i = sw_i + 1
+
+    val sk_t0 = time_now_micros()
+    var si: i64 = 0
+    while si < bench_frames:
+        if sk_vk.render_picture_frame(pic).is_err():
+            sk_vk.shutdown()
+            print "FAIL B1: Skia Vulkan steady frame failed"
+            return false
+        si = si + 1
+    val sk_t1 = time_now_micros()
+    val sk_avg_us = (sk_t1 - sk_t0) / bench_frames
+    print "B1_SKIA_VK_STEADY: frames={bench_frames} avg_us={sk_avg_us} avg_ms={sk_avg_us.to_f64() / 1000.0} fps={_smoke_fps(sk_avg_us)}"
+    if sk_vk.device_finalize_no_readback_count() != bench_frames + 2:
+        sk_vk.shutdown()
+        print "FAIL B1: Skia Vulkan did not stay on device finalize path"
+        return false
+
+    val sk_rb_res = sk_vk.render_picture_readback(pic)
+    sk_vk.shutdown()
+    if sk_rb_res.is_err():
+        print "FAIL B1: Skia Vulkan readback failed"
+        return false
+    val sk_rb = sk_rb_res.unwrap()
+    val sk_diff = _smoke_compare_argb(sw_px, sk_rb.pixels)
+    val cpu_sk_diff = _smoke_compare_argb(cpu_argb, sk_rb.pixels)
+    print "B1_PARITY_SKIA_SW_VK: mismatches={sk_diff.mismatch_count} source={sk_rb.report.readback_source} cpu_delta={cpu_sk_diff.max_channel_delta}"
+    if sk_rb.report.readback_source != "device_readback" or sk_diff.mismatch_count != 0 or cpu_sk_diff.max_channel_delta > 1:
+        print "FAIL B1: Skia SW/CPU vs Vulkan parity check failed"
+        return false
+
+    val os_t0 = time_now_micros()
+    val os1 = skia_picture_to_vulkan_base(pic, SCENE_W as i32, SCENE_H as i32)
+    val os_t1 = time_now_micros()
+    if os1.is_err():
+        print "FAIL B1: Skia Vulkan one-shot failed"
+        return false
+    val os_us = os_t1 - os_t0
+    print "B1_SKIA_VK_ONESHOT: avg_us={os_us} avg_ms={os_us.to_f64() / 1000.0} fps={_smoke_fps(os_us)}"
+    true
+
+fn _smoke_render_b2_vk(scene: InteractiveDesktopScene) -> [u32]:
+    val created = Engine2D.create_with_backend_strict(640, 420, "vulkan")
+    if created.is_err():
+        return []
+    var eng = created.unwrap()
+    render_interactive_desktop(scene, eng)
+    val rb = eng.read_pixels_with_source()
+    var ok = rb.source == "device_readback" and eng.vulkan_cpu_fallback_reason() == ""
+    if val Some(vk) = eng.vulkan_backend:
+        if vk.cpu_fallback_used:
+            ok = false
+    eng.present()
+    eng.shutdown()
+    if not ok:
+        return []
+    rb.pixels
+
+fn _smoke_render_b2_sw(scene: InteractiveDesktopScene) -> [u32]:
+    var eng = Engine2D.create_with_backend(640, 420, "software")
+    render_interactive_desktop(scene, eng)
+    val rb = eng.read_pixels_with_source()
+    eng.present()
+    eng.shutdown()
+    rb.pixels
+
+fn _smoke_run_b2() -> bool:
+    var scene = InteractiveDesktopScene.create(640, 420)
+    val init_sw = _smoke_render_b2_sw(scene)
+    val init_vk = _smoke_render_b2_vk(scene)
+    if init_sw.len() != 640 * 420 or init_vk.len() != 640 * 420:
+        print "FAIL B2: invalid buffer length"
+        return false
+    val d0 = _smoke_compare_argb(init_sw, init_vk)
+    if d0.mismatch_count != 0:
+        print "FAIL B2: initial SW vs VK mismatch={d0.mismatch_count}"
+        return false
+    scene.pointer_down(100, 288)
+    scene.pointer_up(100, 288)
+    if scene.button.click_count != 1 or scene.button.active_label != "clicks: 1":
+        print "FAIL B2: click event did not update widget state"
+        return false
+    val post_sw = _smoke_render_b2_sw(scene)
+    val post_vk = _smoke_render_b2_vk(scene)
+    val d1 = _smoke_compare_argb(post_sw, post_vk)
+    val d_click = _smoke_compare_argb(init_vk, post_vk)
+    print "B2_WIDGETS_640x420: init_mismatch={d0.mismatch_count} post_mismatch={d1.mismatch_count} click_changed_px={d_click.mismatch_count}"
+    d1.mismatch_count == 0 and d_click.mismatch_count > 50
+
+fn _smoke_run_b3() -> bool:
+    val html_path = cwd() + "/examples/06_io/ui/complex_layered_desktop_web.html"
+    val html = file_read(html_path)
+    if html == "":
+        print "FAIL B3: empty complex HTML"
+        return false
+    val web_vk = simple_web_layout_render_html_readback(html, 800, 600, "vulkan")
+    web_presenter_engine_cache_drain()
+    if web_vk.pixels.len() != 800 * 600:
+        print "FAIL B3: web_vk buffer len={web_vk.pixels.len()}"
+        return false
+    val g0 = simple_web_layout_element_geometry_lines(html, 800, 600)
+    val btn_box = _smoke_find_geom(g0, "path:0/1/1")
+    val ctx_box = _smoke_find_geom(g0, "path:1/1/1/0")
+    if btn_box.w <= 0 or ctx_box.w <= 0:
+        print "FAIL B3: missing button or context zone geometry"
+        return false
+    var session = HostedWebContentSession.create_document(1, "file://" + html_path, html, 800, 600)
+    if session.failure_reason != "":
+        print "FAIL B3: session failure={session.failure_reason}"
+        return false
+    val bx = btn_box.x + btn_box.w / 2
+    val by = btn_box.y + btn_box.h / 2
+    val _d = session.dispatch_pointer_at(1, bx, by, true)
+    val _u = session.dispatch_pointer_at(2, bx, by, false)
+    val click_title = session.browser.current_title
+    val _ctx = session.dispatch_context_menu_at(ctx_box.x + 84, ctx_box.y + 76)
+    val ctx_title = session.browser.current_title
+    print "B3_WEB_800x600: source={web_vk.source} click_title={click_title} ctx_title={ctx_title} ctx_prevented={session.last_context_menu_default_prevented}"
+    click_title == "action:1" and ctx_title.starts_with("ctx:") and session.last_context_menu_default_prevented
+
+fn _smoke_run_b4() -> bool:
+    reset_wm_chrome_theme()
+    val win1 = simple_gui_internal_window_with_chrome_kind(
+        "surf-1", "win-1", 101u64, "terminal", "Terminal",
+        70, 70, 380, 280, "", false, false, 0, WM_CHROME_KIND_TITLED
+    )
+    val win2 = simple_gui_internal_window_with_chrome_kind(
+        "surf-2", "win-2", 102u64, "finder", "Finder",
+        220, 130, 440, 300, "", false, true, 1, WM_CHROME_KIND_TITLED
+    )
+    val scene = simple_gui_internal_window_scene(800, 600, "aqua-parity", [win1, win2])
+    val sw_comp = shared_wm_scene_aqua_draw_ir_composition(scene, "software")
+    val sw_eng = Engine2D.create_with_backend(800, 600, "software")
+    val sw_owned = engine2d_draw_ir_adv_composition_owner_with_images(sw_eng, sw_comp, false, [])
+    val sw_px = sw_owned.result.pixels
+    sw_owned.engine.shutdown()
+
+    val vk_comp = shared_wm_scene_aqua_draw_ir_composition(scene, "vulkan")
+    val vk_eng = Engine2D.create_with_backend(800, 600, "vulkan")
+    val vk_owned = engine2d_draw_ir_adv_composition_owner_with_images(vk_eng, vk_comp, true, [])
+    val vk_px = vk_owned.result.pixels
+    var vk_fallback = true
+    if val Some(vk) = vk_owned.engine.vulkan_backend:
+        vk_fallback = vk.cpu_fallback_used
+    val fb_req = vk_owned.result.fallback_required
+    val dev_id = vk_owned.result.device_identity
+    val rb_src = vk_owned.result.readback_source
+    vk_owned.engine.shutdown()
+
+    val agree = _smoke_agree_per_mille(sw_px, vk_px, 4)
+    print "B4_WM_AQUA_800x600: sw_vs_vk={agree}/1000 source={rb_src} fallback_req={fb_req} cpu_fallback={vk_fallback}"
+    not fb_req and dev_id > 0 and rb_src != "cpu_fallback" and not vk_fallback and agree >= 995
+
+fn _smoke_run_b5() -> bool:
+    var ed = EditSession.new()
+    ed.open_file("src/app/ide/main.spl")
+    val ide_vk = ide_render_gui_frame(ed, "editor", 960, 600, "vulkan")
+    val word_vk = office_gui_render_engine2d_frame("word", 960, 600, "vulkan")
+    val a1 = CsAgent(
+        agent_id: "agent-alpha",
+        spec: "claude",
+        status: "running",
+        pid: 4101,
+        pane_id: "%1",
+        cpu_pct: 12.5,
+        rss_mb: 184,
+        detail: "streaming"
+    )
+    val dash = CsDashboard(
+        session: "caret-suite",
+        manager_status: "running",
+        agents: [a1],
+        selected: 0,
+        input: "verify vulkan",
+        log: ["agent-alpha online"],
+        screen: ["Ready for review."],
+        pins: ["agent-alpha"],
+        mru: ["agent-alpha"]
+    )
+    val cs_vk = cs_render_gui_frame(dash, 960, 600, "vulkan")
+    print "B5_GUI_APPS_960x600: ide_src={ide_vk.readback_source} ide_cs={ide_vk.checksum} word_src={word_vk.readback_source} word_cs={word_vk.checksum} cs_src={cs_vk.readback_source} cs_cs={cs_vk.checksum}"
+    val ide_ok = ide_vk.resolved_backend == "vulkan" and ide_vk.readback_source == "device_readback" and not ide_vk.cpu_fallback_used and ide_vk.pixels.len() == 960 * 600 and ide_vk.checksum != 0
+    val word_ok = word_vk.resolved_backend == "vulkan" and word_vk.readback_source == "device_readback" and not word_vk.cpu_fallback_used and word_vk.pixels.len() == 960 * 600 and word_vk.checksum != 0
+    val cs_ok = cs_vk.resolved_backend == "vulkan" and cs_vk.readback_source == "device_readback" and not cs_vk.cpu_fallback_used and cs_vk.pixels.len() == 960 * 600 and cs_vk.checksum != 0
+    ide_ok and word_ok and cs_ok
+
+fn main() -> i64:
+    if not _smoke_run_b1():
+        return 1
+    if not _smoke_run_b2():
+        return 1
+    if not _smoke_run_b3():
+        return 1
+    if not _smoke_run_b4():
+        return 1
+    if not _smoke_run_b5():
+        return 1
+    print "PURE_SIMPLE_NATIVE_FULL_SMOKE: PASS"
+    0

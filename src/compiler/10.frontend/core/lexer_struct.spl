@@ -13,7 +13,7 @@
 use compiler.core.tokens.{keyword_lookup, token_requires_rhs, token_can_end_expr}
 use compiler.core.lexer_chars.{is_digit, is_hex_digit, is_alpha, is_ident_char, is_space}
 use std.string_core.{char_code, char_from_code}
-use std.nogc_sync_mut.io_runtime.{env_set}
+use std.nogc_sync_mut.io_runtime.{env_set, env_get_nullable}
 
 # Token text is immutable. Reuse common identifier/literal spellings before
 # join allocates another permanently registered no-GC string.
@@ -86,7 +86,7 @@ fn env_value_nul_free(value: text) -> bool:
     # single-byte heap string PER SOURCE BYTE on every lex_init_with_path
     # (13 M allocations across the 717-file bootstrap closure).
     var i: i64 = 0
-    val n: i64 = value.len()
+    val n: i64 = value.byte_len()
     while i < n:
         if (value.byte_at(i) as i64) == 0:
             return false
@@ -169,8 +169,26 @@ struct CoreLexer:
     # call's parentheses needs real NEWLINE/INDENT/DEDENT tokens for its own
     # body even though paren_depth > 0 there. See is_forced_indentation_active.
     force_indent_bracket_depths: [i64]
+    # Stack of match-arm columns (indent_stack top when a `match` block
+    # opens), pushed/popped by parse_match_arms_common. A line starting with
+    # `|` at or left of the innermost column begins a `| Pat -> expr` arm, so
+    # its Newline/Indent survive; see pipe_line_continues.
+    match_arm_columns: [i64]
+    # ADR-005 char-literal lexer gate (SIMPLE_CHAR_LITERAL_LEXER=1; default OFF).
+    # OFF: `'...'` keeps its legacy string meaning. ON: `'x'` is a char literal.
+    char_literal_mode: bool
 
 # ===== Constructor (free function) =====
+
+fn char_literal_lexer_enabled() -> bool:
+    val v: text = env_get_nullable("SIMPLE_CHAR_LITERAL_LEXER") ?? ""
+    v == "1" or v == "true" or v == "on"
+
+# Explicit gate override for specs and callers that must not depend on the env.
+fn make_core_lexer_char_mode(source: text, on: bool) -> CoreLexer:
+    var lexer = make_core_lexer(source)
+    lexer.char_literal_mode = on
+    lexer
 
 fn make_core_lexer(source: text) -> CoreLexer:
     CoreLexer(
@@ -190,7 +208,9 @@ fn make_core_lexer(source: text) -> CoreLexer:
         cur_col: 0,
         cur_start: 0,
         cur_no_interp: false,
-        force_indent_bracket_depths: []
+        force_indent_bracket_depths: [],
+        match_arm_columns: [],
+        char_literal_mode: char_literal_lexer_enabled()
     )
 
 # ===== CoreLexer Methods =====
@@ -339,15 +359,28 @@ impl CoreLexer:
             return false
         self.line_starts_binary_op(p)
 
-    fn chars_match(start: i64, end: i64, value: text) -> bool:
-        if value.len() != end - start:
+    # A line whose first non-blank char is `|` continues the previous logical
+    # line (pattern alternative `case 1 | 2` NEWLINE `| 3:`, or a leading
+    # BitOr operand) unless it begins a `| Pat -> expr` match arm: inside a
+    # `match` block that is a `|` at or left of the arm column. Outside match
+    # blocks the historical rule (prev token can end an expression) holds, so
+    # same-indent BitOr continuation lines keep parsing.
+    fn pipe_line_continues(indent_level: i64) -> bool:
+        if not token_can_end_expr(self.cur_kind):
             return false
-        var i = start
-        while i < end:
-            if self.source_chars[i] != value[i - start:i - start + 1]:
-                return false
-            i = i + 1
+        val n: i64 = self.match_arm_columns.len()
+        if n > 0 and indent_level <= self.match_arm_columns[n - 1]:
+            return false
         true
+
+    me push_match_arm_column():
+        val stack_len: i64 = self.indent_stack.len()
+        self.match_arm_columns.push(self.indent_stack[stack_len - 1])
+
+    me pop_match_arm_column():
+        if self.match_arm_columns.len() > 0:
+            self.match_arm_columns.pop()
+
 
     # Token-text extraction over a [start,end) char range: O(span) via indexed
     # collection + one join, replacing `source[start:end]` which was O(N) per call.
@@ -355,23 +388,33 @@ impl CoreLexer:
     # Reads self.source_chars directly (never passed as an argument: under the
     # tree-walk interpreter an array argument is deep-copied per call, which
     # made this O(source) per token). PERF (2026-08-28): byte compare instead
-    # of allocating a one-byte slice of `value` per character; same outcome --
-    # a multi-byte codepoint never equals a one-byte slice, and a one-byte
-    # codepoint equals it exactly when the bytes match.
+    # of allocating a one-byte slice of `value` per character. Units
+    # (2026-11-07, design text_len_counts_characters): source_chars holds one
+    # CODE POINT per slot while `value` is walked by BYTE offset, so the
+    # token length is `value.byte_len()` consumed one code point's width at a
+    # time; the old `len() != end - start` / `ch.len() != 1` form rejected
+    # every multi-byte token.
     fn chars_match(start: i64, end: i64, value: text) -> bool:
-        if value.len() != end - start:
-            return false
+        val vlen: i64 = value.byte_len()
+        var off: i64 = 0
         var i = start
         while i < end:
             val ch: text = self.source_chars[i]
-            if ch.len() != 1:
+            val w: i64 = ch.byte_len()
+            if off + w > vlen:
                 return false
-            if (ch.byte_at(0) as i64) != (value.byte_at(i - start) as i64):
+            if w == 1:
+                if (ch.byte_at(0) as i64) != (value.byte_at(off) as i64):
+                    return false
+            elif value.substring(off, off + w) != ch:
                 return false
+            off = off + w
             i = i + 1
-        true
+        off == vlen
 
     fn char_slice(start: i64, end: i64) -> text:
+        # Reusing slice_parts is safe: that caller has already made the value copy.
+        # The fn receiver's local snapshot cannot alias the caller's scratch buffer.
         var s: i64 = start
         if s < 0:
             s = 0
@@ -797,6 +840,136 @@ impl CoreLexer:
 
     # ----- String Scanning -----
 
+    # ----- ADR-005 char literal (gate: SIMPLE_CHAR_LITERAL_LEXER, default OFF) -----
+    # Called with the opening `'` still unconsumed. Emits kind 9 (CharLit) whose
+    # text is the decoded scalar, or kind 191 with a message naming r"...".
+    # Mirrors seed scan_char_literal (src/compiler_rust/parser/src/lexer/strings.rs).
+    me scan_char_literal():
+        val start_line: i64 = self.line
+        val start_col: i64 = self.col
+        self.cur_start = self.pos
+        self.cur_no_interp = true
+        self.advance()
+        val hint: text = "; use r\"...\" for raw text"
+        if self.at_end() or self.peek() == "\n":
+            self.make_token(191, "unterminated char literal" + hint, start_line, start_col)
+            return
+        var value: text = ""
+        val first: text = self.advance()
+        if first == "'":
+            self.make_token(191, "empty char literal ''" + hint, start_line, start_col)
+            return
+        if first == "\\":
+            if self.at_end():
+                self.make_token(191, "unterminated char literal" + hint, start_line, start_col)
+                return
+            val esc: text = self.advance()
+            if esc == "n":
+                value = "\n"
+            elif esc == "t":
+                value = "\t"
+            elif esc == "r":
+                value = "\r"
+            elif esc == "\\" or esc == "'" or esc == "\"":
+                value = esc
+            elif esc == "x":
+                # \xNN: one or two hex digits, as scan_string and the seed's
+                # process_hex_escape accept.
+                var hv: i64 = 0
+                var hn: i64 = 0
+                while hn < 2 and lex_escape_hex_value(self.peek()) >= 0:
+                    hv = hv * 16 + lex_escape_hex_value(self.advance())
+                    hn = hn + 1
+                if hn == 0:
+                    self.make_token(191, "invalid escape \\x in char literal" + hint, start_line, start_col)
+                    return
+                value = char_from_code(hv)
+            elif lex_escape_octal_value(esc) >= 0:
+                # \N, \NN, \NNN octal (covers \0), as scan_string and the seed accept.
+                var ov: i64 = lex_escape_octal_value(esc)
+                var on: i64 = 0
+                while on < 2 and lex_escape_octal_value(self.peek()) >= 0:
+                    ov = ov * 8 + lex_escape_octal_value(self.advance())
+                    on = on + 1
+                value = char_from_code(ov)
+            elif esc == "u" and self.peek() == "{{":
+                self.advance()
+                var cp: i64 = 0
+                var nd: i64 = 0
+                while not self.at_end() and lex_escape_hex_value(self.peek()) >= 0 and nd < 6:
+                    cp = cp * 16 + lex_escape_hex_value(self.advance())
+                    nd = nd + 1
+                val is_surrogate: bool = cp >= 0xD800 and cp <= 0xDFFF
+                if self.peek() != "}" or nd == 0 or cp > 0x10FFFF or is_surrogate:
+                    self.make_token(191, "invalid unicode escape in char literal" + hint, start_line, start_col)
+                    return
+                self.advance()
+                value = char_from_code(cp)
+            else:
+                self.make_token(191, "invalid escape \\" + esc + " in char literal" + hint, start_line, start_col)
+                return
+        else:
+            value = first
+        if self.peek() == "'":
+            self.advance()
+            self.make_token(9, value, start_line, start_col)
+            self.cur_text = value
+            core_token_text_save(value)
+            return
+        # More than one scalar: consume to the closing quote on this line.
+        var closed: bool = false
+        while not self.at_end() and self.peek() != "\n":
+            val c: text = self.advance()
+            if c == "'":
+                closed = true
+                break
+        if closed:
+            self.make_token(191, "char literal holds more than one Unicode scalar" + hint, start_line, start_col)
+        else:
+            self.make_token(191, "unterminated char literal" + hint, start_line, start_col)
+
+    # True when `'` at pos starts a label-like `'ident` with no closing tick on
+    # this line. Those keep the legacy scan path in both gate modes.
+    fn squote_is_label_like() -> bool:
+        val n: i64 = self.source_chars.len()
+        var p: i64 = self.pos + 1
+        if p >= n:
+            return false
+        val c0: text = self.source_chars[p]
+        if not (is_alpha(c0) or c0 == "_"):
+            return false
+        while p < n:
+            val c: text = self.source_chars[p]
+            if c == "\n":
+                return true
+            if c == "'":
+                return false
+            p = p + 1
+        true
+
+    # Called just after the u in a double-quoted string escape. Negative means
+    # malformed syntax or a non-scalar; zero is a valid embedded NUL. Consume
+    # bounded hex digits, never a surrogate pair or a following source token.
+    me scan_double_quoted_unicode_escape_v1() -> i64:
+        val braced = self.peek() == "{{"
+        if braced: self.advance()
+        val limit = if braced: 6 else: 4
+        var count: i64 = 0
+        var value: i64 = 0
+        while count < limit:
+            val digit = lex_escape_hex_value(self.peek())
+            if digit < 0: break
+            value = value * 16 + digit
+            self.advance()
+            count = count + 1
+        if braced:
+            if count == 0 or self.peek() != "}": return -1
+            self.advance()
+        elif count != 4:
+            return -1
+        if value > 0x10FFFF or (value >= 0xD800 and value <= 0xDFFF): return -1
+        value
+
     me scan_string_suffix() -> text:
         if self.peek() != "_" or not is_alpha(self.peek_next()):
             return ""
@@ -874,6 +1047,9 @@ impl CoreLexer:
                 self.advance()
                 done = true
             elif c == "\\":
+                val escape_start = self.pos
+                val escape_line = self.line
+                val escape_col = self.col
                 self.advance()
                 val esc: text = self.advance()
                 if esc == "n":
@@ -888,6 +1064,12 @@ impl CoreLexer:
                     parts.push("\"")
                 elif esc == "'":
                     parts.push("'")
+                elif (esc == "{{" or esc == "}}") and not self.cur_no_interp:
+                    # `\{` / `\}` is a bare brace (seed parity). Emit the
+                    # doubled `{{` / `}}` escape so the interpolation pass
+                    # keeps it literal (native_string_backslash_brace_escape_kept_2026-11-26).
+                    parts.push(esc)
+                    parts.push(esc)
                 elif esc == "x":
                     var hv: i64 = 0
                     var hn: i64 = 0
@@ -905,7 +1087,15 @@ impl CoreLexer:
                         parts.push("\\")
                         parts.push("x")
                 elif esc == "u":
-                    if self.peek() == "{":
+                    if quote == "\"":
+                        val scalar = self.scan_double_quoted_unicode_escape_v1()
+                        if scalar < 0:
+                            self.cur_start = escape_start
+                            self.make_token(191, "invalid unicode escape in string literal", escape_line, escape_col)
+                            return
+                        if scalar == 0: has_nul = true
+                        parts.push(char_from_code(scalar))
+                    elif self.peek() == "{{":
                         self.advance()
                         var uv: i64 = 0
                         for j in 0..8:
@@ -934,7 +1124,7 @@ impl CoreLexer:
                 else:
                     parts.push("\\")
                     parts.push(esc)
-            elif c == "{":
+            elif c == "{{":
                 # G38: "{expr}" interpolation may contain nested strings whose
                 # quotes must not terminate the outer string (seed
                 # scan_fstring_impl parity). `{` immediately followed by a
@@ -946,8 +1136,23 @@ impl CoreLexer:
                 # for the downstream interpolation re-parse).
                 val la_next: text = self.peek_next()
                 val la_is_quote: bool = la_next == "\"" or la_next == "'"
+                # `{{`, `{` followed by an escape, and `{` followed by a quote
+                # are literal braces (seed parity: strings.rs, "`{` followed by
+                # an escape" / "`{` followed by a quote"). Emit the `{{` escape
+                # and keep scanning, so the escapes that follow are decoded and
+                # `{` + quote cannot re-open an interpolation hole. Copying the
+                # region verbatim left escapes raw: a native `"a) {\n}"`
+                # carried `\` `n` (native_text_literal_brace_escape_unprocessed_
+                # 2026-11-26).
+                val la_literal_brace: bool = (la_next == "{{" or la_next == "\\" or la_is_quote) and not self.cur_no_interp
                 var la_found: i64 = -1
-                if not la_is_quote:
+                if la_literal_brace:
+                    self.advance()
+                    if la_next == "{{":
+                        self.advance()
+                    parts.push("{{")
+                    parts.push("{{")
+                elif not la_is_quote:
                     var la: i64 = self.pos + 1
                     val src_len: i64 = self.source_chars.len()
                     var la_depth: i64 = 1
@@ -982,7 +1187,7 @@ impl CoreLexer:
                                 la_str = lc
                             elif lc == "'":
                                 la_str = lc
-                            elif lc == "{":
+                            elif lc == "{{":
                                 la_depth = la_depth + 1
                             elif lc == "(" or lc == "[":
                                 la_paren = la_paren + 1
@@ -999,7 +1204,7 @@ impl CoreLexer:
                         if self.pos > la_found:
                             break
                         parts.push(self.advance())
-                else:
+                elif not la_literal_brace:
                     parts.push(self.advance())
             else:
                 parts.push(self.advance())
@@ -1211,6 +1416,18 @@ impl CoreLexer:
                 self.scan_raw_string(start_line, start_col)
                 return
 
+        # `s{` set literal opener (TOK_SET_LIT_START). Only an `s` IMMEDIATELY
+        # followed by `{`; `s {`, `sx{` and a plain `s` lex as before. The `{`
+        # is consumed here, so track it like scan_token does for a bare `{`
+        # (the matching `}` decrements paren_depth).
+        if ident_text == "s":
+            val set_next: text = if pos < src_len then self.source_chars[pos] else ""
+            if set_next == "{{":
+                self.advance()
+                self.paren_depth = self.paren_depth + 1
+                self.make_token(174, "s{{", start_line, start_col)
+                return
+
         # Check for keyword
         val kw_kind: i64 = keyword_lookup(ident_text)
         if kw_kind != 6:
@@ -1349,12 +1566,22 @@ impl CoreLexer:
         val line_first: text = self.peek()
         self.at_line_start = false
 
-        # Leading-dot method-chain / leading-pipe pattern-alternative
-        # continuation: a line starting with `.` or `|` continues the
-        # previous expression — suppress Indent/Dedent.
-        if line_first == "." or line_first == "|":
+        # Leading-dot method-chain continuation: a line starting with `.`
+        # continues the previous expression — suppress Indent/Dedent.
+        if line_first == ".":
             self.scan_token()
             return
+
+        # Leading-pipe: a pattern-alternative continuation (`case 1 | 2`
+        # NEWLINE deeper `| 3:`) only when the previous token can end an
+        # expression AND this line is indented strictly deeper. A `|` at the
+        # block's own column after `match s:` or after a previous arm body is
+        # the start of a `| Pat -> expr` match arm and keeps its Indent /
+        # Newline (bug readme_arrow_match_arm_syntax_does_not_parse_2026-09-19).
+        if line_first == "|":
+            if self.pipe_line_continues(indent_level):
+                self.scan_token()
+                return
 
         # G27b: leading-operator continuation — suppress the Indent the same
         # way. self.pos is already at the first non-blank char of this line,
@@ -1427,10 +1654,22 @@ impl CoreLexer:
             self.skip_spaces()
 
         if self.at_end():
-            # Emit pending dedents for remaining indentation
+            # EOF and dedent tokens consume no source, but their recorded
+            # start must still name the true consume point: span owners read
+            # cur_start for declaration ends, and a stale value (the previous
+            # token's start) shortened a trailing declaration's span on
+            # UTF-8 sources (module_expression_source_span spec).
+            self.cur_start = self.pos
+            # Emit pending dedents for remaining indentation. Drain the whole
+            # stack here: one dedent is emitted now and the remaining slen-2
+            # via pending_dedents (slen-1 total, matching the slen-1 indents).
+            # Draining upfront is required because the pending_dedents path in
+            # next_token() does not pop; a single pop left slen>1 on re-entry
+            # and at_end() emitted one spurious extra dedent (3 for 2 indents).
             val slen: i64 = self.indent_stack.len()
             if slen > 1:
-                self.indent_stack.pop()
+                while self.indent_stack.len() > 1:
+                    self.indent_stack.pop()
                 self.pending_dedents = slen - 2
                 val tl: i64 = self.line
                 val tc: i64 = self.col
@@ -1468,14 +1707,20 @@ impl CoreLexer:
                 else:
                     break
             val la_c: text = if dot_la < self.source_chars.len() then self.source_chars[dot_la] else ""
-            if la_c == "." or la_c == "|":
+            if la_c == ".":
                 self.scan_token_rescan()
                 return
+            val la_indent: i64 = self.measure_indent_from(self.pos)
+            val la_first: i64 = self.skip_indent_from(self.pos)
+            # Leading `|`: same guards as the Indent site (handle_indentation)
+            # — a `| Pat -> expr` arm at the block column keeps its Newline.
+            if la_c == "|":
+                if self.pipe_line_continues(la_indent):
+                    self.scan_token_rescan()
+                    return
             # G27b: leading-operator continuation — suppress the Newline. The
             # matching Indent suppression lives in handle_indentation; both
             # sites must agree, or the parser sees a half-continued line.
-            val la_indent: i64 = self.measure_indent_from(self.pos)
-            val la_first: i64 = self.skip_indent_from(self.pos)
             if self.leading_op_continues(la_indent, la_first):
                 self.scan_token_rescan()
                 return
@@ -1509,7 +1754,10 @@ impl CoreLexer:
             self.scan_string()
             return
         if is_squote:
-            self.scan_string()
+            if self.char_literal_mode and not self.squote_is_label_like():
+                self.scan_char_literal()
+            else:
+                self.scan_string()
             return
 
         # Number literal
@@ -1586,7 +1834,7 @@ impl CoreLexer:
 
         if c == "/":
             if self.match_char("/"):
-                self.make_token(191, "use # for comments", start_line, start_col)
+                self.make_token(191, "`//` is not a comment in Simple (and `///` is not a doc comment): use # for comments and doc comments", start_line, start_col)
             elif self.match_char("="):
                 self.make_token(104, "/=", start_line, start_col)
             else:
@@ -1692,9 +1940,9 @@ impl CoreLexer:
             self.make_token(145, "]", start_line, start_col)
             return
 
-        if c == "{":
+        if c == "{{":
             self.paren_depth = self.paren_depth + 1
-            self.make_token(142, "{", start_line, start_col)
+            self.make_token(142, "{{", start_line, start_col)
             return
 
         if c == "}":
@@ -1721,6 +1969,31 @@ impl CoreLexer:
 
         if c == "\\":
             self.make_token(220, "\\", start_line, start_col)
+            return
+
+        if c == "`":
+            val atom_start: i64 = self.pos
+            while not self.at_end():
+                val ac: text = self.peek()
+                if ac == "`":
+                    val atom_text: text = self.char_slice(atom_start, self.pos)
+                    self.advance()
+                    if atom_text == "":
+                        self.make_token(191, "Empty backtick atom literal", start_line, start_col)
+                        return
+                    self.make_token(193, atom_text, start_line, start_col)
+                    self.cur_text = atom_text
+                    core_token_text_save(atom_text)
+                    return
+                elif is_ident_char(ac):
+                    self.advance()
+                else:
+                    break
+            val partial_atom: text = self.char_slice(atom_start, self.pos)
+            if partial_atom == "":
+                self.make_token(191, "Empty backtick atom literal", start_line, start_col)
+            else:
+                self.make_token(191, "Unclosed backtick atom literal (missing closing '`')", start_line, start_col)
             return
 
         # Unknown character
@@ -1783,15 +2056,23 @@ impl CoreLexer:
         if self.indent_stack.len() > 1:
             self.indent_stack.pop()
 
-# Keep method dispatch in its declaration module until imported instance-method
-# ownership transport is qualified. Preserve the existing value-copy/writeback
-# contract used by core_lexer_next_token; do not weaken MIR owner validation.
-# @workaround bug=lexer_imported_instance_methods_2026_10_06
+# Free-function CoreLexer facade mirroring `core_lexer_next_token`, preserving
+# the explicit value-copy/writeback contract across the lexer module boundary.
 fn core_lexer_char_at_pos(lexer: CoreLexer, pos: i64) -> text:
     lexer.char_at_pos(pos)
 
 fn core_lexer_char_slice(lexer: CoreLexer, start: i64, end: i64) -> text:
     lexer.char_slice(start, end)
+
+fn core_lexer_push_match_arm_column(lexer: CoreLexer) -> CoreLexer:
+    var updated: CoreLexer = lexer
+    updated.push_match_arm_column()
+    updated
+
+fn core_lexer_pop_match_arm_column(lexer: CoreLexer) -> CoreLexer:
+    var updated: CoreLexer = lexer
+    updated.pop_match_arm_column()
+    updated
 
 fn core_lexer_enable_forced_indentation(lexer: CoreLexer) -> CoreLexer:
     var updated: CoreLexer = lexer
@@ -1822,10 +2103,10 @@ fn core_lexer_next_token(lexer: CoreLexer) -> (CoreLexer, i64):
 fn core_lexer_token_text(lexer: CoreLexer) -> text:
     lexer.token_text()
 
-fn core_lexer_token_line(lexer: CoreLexer) -> i64:
+pub fn core_lexer_token_line(lexer: CoreLexer) -> i64:
     lexer.token_line()
 
-fn core_lexer_token_col(lexer: CoreLexer) -> i64:
+pub fn core_lexer_token_col(lexer: CoreLexer) -> i64:
     lexer.token_col()
 
 fn core_lexer_token_start(lexer: CoreLexer) -> i64:
@@ -1858,9 +2139,9 @@ fn core_reference_tokens_v1(source: text, max_tokens: i64) -> Result<[CoreRefere
     var offsets: [i64] = [0]
     var byte_position = 0
     for character in lexer.source_chars:
-        byte_position = byte_position + character.len()
+        byte_position = byte_position + character.byte_len()
         offsets.push(byte_position)
-    if byte_position != source.len():
+    if byte_position != source.byte_len():
         return Err("invalid_span: original UTF8 coordinate map disagrees with source")
     var tokens: [CoreReferenceTokenV1] = []
     var scanned = 0
@@ -1883,9 +2164,40 @@ fn core_reference_tokens_v1(source: text, max_tokens: i64) -> Result<[CoreRefere
         val end = lexer.pos
         if start < 0 or end <= start or end >= offsets.len():
             return Err("invalid_span: lexer emitted an unmapped token")
-        val spelling = source[offsets[start]:offsets[end]]
+        val spelling = source[start:end]   # codepoint slice; offsets[] carries the byte span
         if spelling == "":
             return Err("invalid_span: empty original-source token")
         tokens.push(CoreReferenceTokenV1(codepoint_start: start, codepoint_end: end,
             byte_start: offsets[start], byte_end: offsets[end], line: lexer.cur_line,
             column: lexer.cur_col, kind: kind, spelling: spelling))
+
+# ===== CoreTokenSlotState snapshot (ParseContext stage 1) =====
+# See doc/05_design/compiler/frontend/parse_context_per_context_state.md.
+# take moves this file's parse state out and installs fresh initial
+# owners; install makes a taken snapshot active again.
+pub struct CoreTokenSlotState:
+    core_last_token_text_slot: [text]
+    core_last_token_line_slot: [i64]
+    core_last_token_col_slot: [i64]
+    core_last_token_suffix_slot: [text]
+
+pub fn core_token_slot_state_take() -> CoreTokenSlotState:
+    val s = CoreTokenSlotState(
+        core_last_token_text_slot: core_last_token_text_slot,
+        core_last_token_line_slot: core_last_token_line_slot,
+        core_last_token_col_slot: core_last_token_col_slot,
+        core_last_token_suffix_slot: core_last_token_suffix_slot
+    )
+    core_last_token_text_slot = [""]
+    core_last_token_line_slot = [0]
+    core_last_token_col_slot = [0]
+    core_last_token_suffix_slot = [""]
+    s
+
+pub fn core_token_slot_state_install(s: CoreTokenSlotState):
+    core_last_token_text_slot = s.core_last_token_text_slot
+    core_last_token_line_slot = s.core_last_token_line_slot
+    core_last_token_col_slot = s.core_last_token_col_slot
+    core_last_token_suffix_slot = s.core_last_token_suffix_slot
+
+export CoreTokenSlotState, core_token_slot_state_take, core_token_slot_state_install

@@ -29,6 +29,11 @@ pub fn llvm_ir_builder_set_simpleos_header(enabled: bool):
 # Re-import from split module for re-export (backward compatibility)
 use compiler.backend.llvm_passes.{LlvmPass, passes_for_level}
 
+# Fixed metadata id layout: !0-!5 debug-info header, !6-!7 bare-metal
+# attributes, !10-!20 TBAA, DISubprograms from !21 (next_debug_id).
+val LLVM_TBAA_FIRST_ID: i64 = 10
+val LLVM_DEBUG_FIRST_SUBPROGRAM_ID: i64 = 21
+
 # ============================================================================
 # LLVM IR Builder
 # ============================================================================
@@ -72,6 +77,8 @@ class LlvmIRBuilder:
     # definitions, or it fails with "expected top-level entity" on the header
     # line. See doc/08_tracking/bug/nvme_rv32_smp_flatten_seed_object_to_int_2026-07-19.md.
     pending_baremetal_attrs: [text]
+    current_mir_block_id: i64
+    block_exit_labels: Dict<i64, text>
 
     static fn create(name: text, target: LlvmTargetTriple) -> LlvmIRBuilder:
         LlvmIRBuilder.create_with_header_policy(name, target, true)
@@ -100,13 +107,14 @@ class LlvmIRBuilder:
             Some(value):
                 target_env = value
                 target_has_env = value != ""
-            nil:
+            None:
                 ()
         LlvmIRBuilder.create_from_target_scalars(
             name, target.arch, target.vendor, target.os,
             target_env, target_has_env, target.datalayout(),
             allow_ambient_header_policy)
 
+    @representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in create_from_target_scalars", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
     static fn create_from_target_scalars(
         name: text,
         target_arch: text,
@@ -128,11 +136,11 @@ class LlvmIRBuilder:
         LlvmIRBuilder(
             module_name: name,
             sb: builder_handle,
-            current_function: nil,
+            current_function: None,
             local_counter: 0,
-            debug_counter: 10,
+            debug_counter: LLVM_DEBUG_FIRST_SUBPROGRAM_ID,
             size_type: st,
-            tbaa_counter: 100,
+            tbaa_counter: LLVM_TBAA_FIRST_ID,
             target_arch: target_arch,
             target_vendor: target_vendor,
             target_os: target_os,
@@ -141,11 +149,16 @@ class LlvmIRBuilder:
             target_datalayout: target_datalayout,
             allow_ambient_header_policy: allow_ambient_header_policy,
             header_emitted: false,
-            pending_baremetal_attrs: []
+            pending_baremetal_attrs: [],
+            current_mir_block_id: -1,
+            block_exit_labels: {}
         )
 
+    @representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in emit", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
     me emit(line: text):
         """Emit an IR line."""
+        if line.starts_with("define "):
+            self.reset_mir_block_tracking()
         unsafe(capabilities: [ffi]):
             if rt_string_builder_len(self.sb) > 0:
                 rt_string_builder_push(self.sb, "\n")
@@ -198,8 +211,8 @@ class LlvmIRBuilder:
         # string is truthy, so `!"no-builtins"` -> `false`), silently
         # rewriting the emitted line to the invalid `!0 = !false`. See
         # doc/08_tracking/bug/nvme_rv32_smp_flatten_seed_object_to_int_2026-07-19.md.
-        lines = lines.push("!0 = !{{!\"no-builtins\"}}")
-        lines = lines.push("!1 = !{{!\"trap-func-name\", !\"abort\"}}")
+        lines = lines.push("!6 = !{{!\"no-builtins\"}}")
+        lines = lines.push("!7 = !{{!\"trap-func-name\", !\"abort\"}}")
         lines = lines.push("")
         if self.header_emitted:
             for line in lines:
@@ -210,11 +223,13 @@ class LlvmIRBuilder:
 
     me start_function(name: text, params: [text], return_type: text):
         """Start a function definition with nounwind (Simple has no exceptions)."""
+        self.reset_mir_block_tracking()
         val param_str = params.join(", ")
         llvm_ir_builder_push_line("define {return_type} @{name}({param_str}) nounwind {{", self.sb)
 
     me start_function_with_attrs(name: text, params: [text], return_type: text, func_attr: FunctionAttr):
         """Start a function definition with attributes."""
+        self.reset_mir_block_tracking()
         val param_str = params.join(", ")
         var attrs = ""
         if func_attr.is_naked:
@@ -228,7 +243,7 @@ class LlvmIRBuilder:
         match func_attr.section:
             Some(section):
                 section_str = " section \"{section}\""
-            nil:
+            None:
                 ()
         llvm_ir_builder_push_line("{prefix} {return_type} @{name}({param_str}){attrs}{section_str} {{", self.sb)
 
@@ -236,6 +251,18 @@ class LlvmIRBuilder:
         """End a function definition."""
         llvm_ir_builder_push_line("}", self.sb)
         llvm_ir_builder_push_line("", self.sb)
+        self.reset_mir_block_tracking()
+
+    me reset_mir_block_tracking():
+        """Clear per-function MIR block exit-label mappings."""
+        self.current_mir_block_id = -1
+        self.block_exit_labels = {}
+
+    fn mir_block_exit_label(block_id: i64) -> text:
+        """Return the final LLVM block label reached before `block_id` exits."""
+        if self.block_exit_labels.contains_key(block_id):
+            return self.block_exit_labels[block_id]
+        "bb{block_id}"
 
     me fresh_local() -> text:
         """Generate a fresh local name.
@@ -250,6 +277,12 @@ class LlvmIRBuilder:
         val id = self.local_counter
         self.local_counter = self.local_counter + 1
         "%t{id}"
+
+    me fresh_label(prefix: text) -> text:
+        """Generate a unique basic-block label that cannot collide with %tN locals."""
+        val id = self.local_counter
+        self.local_counter = self.local_counter + 1
+        "{prefix}_{id}"
 
     me emit_alloca(dest: text, ty: text):
         """Emit alloca instruction with natural alignment."""
@@ -473,7 +506,7 @@ class LlvmIRBuilder:
         match dest:
             Some(name):
                 self.emit("  {name} = call {ret_ty} @{func}({args_str})")
-            nil:
+            None:
                 self.emit("  call {ret_ty} @{func}({args_str})")
 
     me emit_call_indirect(dest: text?, ret_ty: text, func_ptr: text, args: [text]):
@@ -482,7 +515,7 @@ class LlvmIRBuilder:
         match dest:
             Some(name):
                 self.emit("  {name} = call {ret_ty} {func_ptr}({args_str})")
-            nil:
+            None:
                 self.emit("  call {ret_ty} {func_ptr}({args_str})")
 
     me emit_ret(ty: text, value: text):
@@ -510,7 +543,15 @@ class LlvmIRBuilder:
         self.emit("  ]")
 
     me emit_label(name: text):
-        """Emit a label."""
+        """Emit a label and track the active exit label for the enclosing MIR block."""
+        val mir_id = llvm_parse_bb_label_id(name)
+        if mir_id >= 0:
+            if self.block_exit_labels.contains_key(mir_id):
+                self.block_exit_labels = {}
+            self.current_mir_block_id = mir_id
+            self.block_exit_labels[mir_id] = name
+        elif self.current_mir_block_id >= 0:
+            self.block_exit_labels[self.current_mir_block_id] = name
         self.emit("{name}:")
 
     # === Debug Info (DWARF) ===
@@ -599,7 +640,10 @@ class LlvmIRBuilder:
         # Emitting verifier-clean metadata is the resolution the old comment
         # asked for, and it keeps llvm_opt_pipeline_spec's "Simple TBAA"
         # expectation honest instead of green-by-accident.
-        val base = self.tbaa_counter
+        # Reserved ids (LLVM_TBAA_FIRST_ID): the old base 100 collided with
+        # DISubprogram ids in any module over 90 functions (llc: "Metadata id
+        # is already used", compiler.mir.mir_data, 2026-11-16).
+        val base = LLVM_TBAA_FIRST_ID
         val lb = "{"
         val rb = "}"
         self.emit("")
@@ -620,7 +664,7 @@ class LlvmIRBuilder:
 
     fn tbaa_tag_for_type(ty: text) -> i64:
         """Get TBAA access tag metadata ID for a given LLVM type."""
-        val base = 100  # Must match tbaa_counter initial value
+        val base = LLVM_TBAA_FIRST_ID
         if ty == "i64" or ty == "i32" or ty == "i16" or ty == "i8":
             return base + 6
         if ty == "double" or ty == "float":
@@ -642,6 +686,7 @@ class LlvmIRBuilder:
         val alignment = natural_alignment(ty)
         self.emit("  store {ty} {value}, ptr {ptr}, align {alignment}")
 
+    @representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in build", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
     me build() -> text:
         """Build final IR string."""
         unsafe(capabilities: [ffi]):
@@ -651,6 +696,7 @@ class LlvmIRBuilder:
 # Helper Functions
 # ============================================================================
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in llvm_ir_builder_push_line", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 pub fn llvm_ir_builder_push_line(line: text, handle: i64):
     """Append one LLVM IR line through the scalar builder handle."""
     unsafe(capabilities: [ffi]):
@@ -662,12 +708,64 @@ pub fn llvm_ir_builder_handle(builder: LlvmIRBuilder) -> i64:
     """Project the scalar accumulator handle in the builder owner module."""
     builder.sb
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in llvm_ir_builder_build", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 pub fn llvm_ir_builder_build(builder: LlvmIRBuilder) -> text:
     """Build final IR without relying on receiver-method dispatch."""
     unsafe(capabilities: [ffi]):
         return rt_string_builder_finish(builder.sb)
 
-fn natural_alignment(ty: text) -> i64:
+pub struct LlvmIRTextAccum:
+    """Opaque O(1)-append LLVM IR fragment accumulator wrapping an FFI string-builder handle."""
+    sb: i64
+
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in llvm_ir_text_accum_new", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn llvm_ir_text_accum_new() -> LlvmIRTextAccum:
+    """Allocate a runtime string builder handle for O(N) IR text assembly."""
+    var handle: i64 = 0
+    unsafe(capabilities: [ffi]):
+        handle = rt_string_builder_new()
+    LlvmIRTextAccum(sb: handle)
+
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in llvm_ir_text_accum_push", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn llvm_ir_text_accum_push(accum: LlvmIRTextAccum, chunk: text):
+    """Append an IR fragment to a runtime string builder handle."""
+    unsafe(capabilities: [ffi]):
+        rt_string_builder_push(accum.sb, chunk)
+
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in llvm_ir_text_accum_finish", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn llvm_ir_text_accum_finish(accum: LlvmIRTextAccum) -> text:
+    """Finalize and release a runtime string builder handle into text."""
+    var out = ""
+    unsafe(capabilities: [ffi]):
+        out = rt_string_builder_finish(accum.sb)
+    out
+
+fn llvm_parse_bb_label_id(name: text) -> i64:
+    """Parse a canonical MIR block label `bb<id>` into its non-negative id, or -1."""
+    if not name.starts_with("bb"):
+        return -1
+    val suffix = name.substring(2)
+    if suffix == "":
+        return -1
+    var acc = 0
+    for ch in suffix:
+        var digit = -1
+        if ch == "0": digit = 0
+        elif ch == "1": digit = 1
+        elif ch == "2": digit = 2
+        elif ch == "3": digit = 3
+        elif ch == "4": digit = 4
+        elif ch == "5": digit = 5
+        elif ch == "6": digit = 6
+        elif ch == "7": digit = 7
+        elif ch == "8": digit = 8
+        elif ch == "9": digit = 9
+        if digit < 0:
+            return -1
+        acc = acc * 10 + digit
+    acc
+
+pub fn natural_alignment(ty: text) -> i64:
     """Return natural alignment in bytes for an LLVM type."""
     if ty == "i1":
         return 1
@@ -682,17 +780,17 @@ fn natural_alignment(ty: text) -> i64:
     # Default for structs/arrays
     8
 
-fn is_integer_type(ty: text) -> bool:
+pub fn is_integer_type(ty: text) -> bool:
     """Check if an LLVM type is an integer type (for nsw/nuw flags)."""
     if ty == "i8" or ty == "i16" or ty == "i32" or ty == "i64":
         return true
     false
 
-fn is_signed_int_type(ty: text) -> bool:
+pub fn is_signed_int_type(ty: text) -> bool:
     """Check if type is used as signed integer (i32/i64 in Simple)."""
     ty == "i32" or ty == "i64"
 
-fn is_float_type(ty: text) -> bool:
+pub fn is_float_type(ty: text) -> bool:
     """Check if an LLVM type is a floating-point type."""
     ty == "float" or ty == "double"
 

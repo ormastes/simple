@@ -1,0 +1,126 @@
+# @cover src/compiler/10.frontend/core/types.spl 70%
+# @cover src/compiler/10.frontend/core/_ParserDecls/enum_module_body.spl 30%
+"""
+# Module-keyed `unit_decl_*` isolation and same-module conflict detection
+
+Bug: doc/08_tracking/bug/selfhosted_unit_decl_same_name_overwrites_2026-11-26.md
+When two modules declare `unit X` with distinct underlying types or suffixes,
+the canonical `unit_decl_*` pool must key rows by `(declaring_module, name)`
+instead of overwriting the earlier module's entry in place. Same-module
+conflicting redeclarations must report a diagnostic and leave the prior row intact.
+"""
+
+# @tag: unit, compiler, frontend, units
+
+use std.spec.{describe, it, expect}
+use compiler.core.types.{
+    reset_all_pools, TYPE_I64, TYPE_F64, TYPE_U64, type_tag_name,
+    unit_decl_count, unit_decl_find, unit_decl_find_in_module,
+    unit_decl_find_by_suffix, unit_decl_find_by_suffix_in_module,
+    unit_decl_name_at, unit_decl_role_at, unit_decl_short_symbol_at,
+    unit_decl_underlying_tag_at, unit_decl_alias_of_at, unit_decl_module_at,
+    unit_decl_set_current_module, unit_decl_register_origin, unit_decl_last_conflict_error
+}
+use compiler.core.parser.{
+    parser_has_errors, parser_get_errors, parser_init_with_path,
+    parse_module_file, parser_warnings_clear
+}
+use compiler.core.parser_decls.{parse_module_body}
+
+describe "unit_decl module-keyed isolation":
+    it "keeps same-named unit declarations across modules isolated without overwriting":
+        reset_all_pools()
+        parser_init_with_path("unit Span: i64 as px\n", "mod_a.spl")
+        parser_warnings_clear()
+        parse_module_body()
+        expect(parser_has_errors()).to_equal(false)
+
+        parse_module_file("unit Span: f64 as sp\n", "mod_b.spl")
+        expect(parser_has_errors()).to_equal(false)
+        expect(unit_decl_count()).to_equal(2)
+
+        val idx_a = unit_decl_find_in_module("mod_a.spl", "Span")
+        val idx_b = unit_decl_find_in_module("mod_b.spl", "Span")
+        expect(idx_a >= 0).to_equal(true)
+        expect(idx_b >= 0).to_equal(true)
+        expect(idx_a == idx_b).to_equal(false)
+
+        expect(unit_decl_module_at(idx_a)).to_equal("mod_a.spl")
+        expect(unit_decl_short_symbol_at(idx_a)).to_equal("px")
+        expect(type_tag_name(unit_decl_underlying_tag_at(idx_a))).to_equal("i64")
+        expect(unit_decl_role_at(idx_a)).to_equal("nominal")
+
+        expect(unit_decl_module_at(idx_b)).to_equal("mod_b.spl")
+        expect(unit_decl_short_symbol_at(idx_b)).to_equal("sp")
+        expect(type_tag_name(unit_decl_underlying_tag_at(idx_b))).to_equal("f64")
+        expect(unit_decl_role_at(idx_b)).to_equal("nominal")
+
+        unit_decl_set_current_module("mod_a.spl")
+        expect(unit_decl_find("Span")).to_equal(idx_a)
+        unit_decl_set_current_module("mod_b.spl")
+        expect(unit_decl_find("Span")).to_equal(idx_b)
+
+    it "resolves unit_decl_find_by_suffix per active module while keeping unqualified fallback":
+        reset_all_pools()
+        unit_decl_set_current_module("mod_a.spl")
+        val idx_a = unit_decl_register_origin("Alpha", "nominal", "u", TYPE_I64, "", "")
+        unit_decl_set_current_module("mod_b.spl")
+        val idx_b = unit_decl_register_origin("Beta", "nominal", "u", TYPE_F64, "", "")
+
+        expect(unit_decl_count()).to_equal(2)
+        expect(unit_decl_find_by_suffix_in_module("mod_a.spl", "u")).to_equal(idx_a)
+        expect(unit_decl_find_by_suffix_in_module("mod_b.spl", "u")).to_equal(idx_b)
+
+        unit_decl_set_current_module("mod_a.spl")
+        expect(unit_decl_find_by_suffix("u")).to_equal(idx_a)
+        unit_decl_set_current_module("mod_b.spl")
+        expect(unit_decl_find_by_suffix("u")).to_equal(idx_b)
+
+        # Unqualified caller from a module without its own suffix declaration
+        # still falls back cleanly.
+        unit_decl_set_current_module("mod_c.spl")
+        expect(unit_decl_find_by_suffix("u") >= 0).to_equal(true)
+
+    it "reports conflict and preserves original declaration when same module redeclares conflicting unit":
+        reset_all_pools()
+        parser_init_with_path("unit Distance: i64 as m\nunit Distance: f64 as km\n", "conflict.spl")
+        parser_warnings_clear()
+        parse_module_body()
+
+        expect(parser_has_errors()).to_equal(true)
+        var saw_conflict = false
+        for err in parser_get_errors():
+            if err.contains("conflicting unit declaration") and err.contains("Distance"):
+                saw_conflict = true
+        expect(saw_conflict).to_equal(true)
+
+        val idx = unit_decl_find_in_module("conflict.spl", "Distance")
+        expect(idx >= 0).to_equal(true)
+        expect(unit_decl_count()).to_equal(1)
+        expect(unit_decl_short_symbol_at(idx)).to_equal("m")
+        expect(type_tag_name(unit_decl_underlying_tag_at(idx))).to_equal("i64")
+
+    it "preserves in-place derived unit refinement within the same module":
+        reset_all_pools()
+        parser_init_with_path("unit Meter: i64 as m\nunit Second: i64 as s\nunit Speed = Meter / Second\n", "derived.spl")
+        parser_warnings_clear()
+        parse_module_body()
+
+        expect(parser_has_errors()).to_equal(false)
+        expect(unit_decl_last_conflict_error()).to_equal("")
+        val spd = unit_decl_find_in_module("derived.spl", "Speed")
+        expect(spd >= 0).to_equal(true)
+        expect(unit_decl_role_at(spd)).to_equal("derived")
+        expect(unit_decl_alias_of_at(spd)).to_equal("Meter/Second")
+
+    it "emits only one parser error when a derived unit conflicts with an earlier base unit":
+        reset_all_pools()
+        parser_init_with_path("unit Speed: i64 as spd\nunit Meter: i64 as m\nunit Second: i64 as s\nunit Speed = Meter / Second\n", "derived_conflict.spl")
+        parser_warnings_clear()
+        parse_module_body()
+
+        expect(parser_has_errors()).to_equal(true)
+        val errors = parser_get_errors()
+        expect(errors.len()).to_equal(1)
+        expect(errors[0].contains("conflicting unit declaration")).to_equal(true)
+        expect(errors[0].contains("Speed")).to_equal(true)

@@ -58,6 +58,30 @@ impl<'a> MirLowerer<'a> {
             // entry-closure defect C3).
             self.lower_short_circuit_logical(op, left, right)
         } else if matches!(op, BinOp::Eq | BinOp::NotEq)
+            && ((matches!(right.kind, HirExprKind::Nil) && self.is_tagged_optional_slot(left.ty))
+                || (matches!(left.kind, HirExprKind::Nil) && self.is_tagged_optional_slot(right.ty)))
+        {
+            // OPTIONAL-VS-NIL COMPARISON. A tagged `T?` slot may hold either the
+            // nil sentinel or a canonical `Option::None` (typed `Dict.get` builds
+            // a real Option since 9d21958ee39). A word compare against the
+            // sentinel only saw the former, so `d.get(k) == nil` was false and
+            // `!= nil` true on a miss -- the pure-Simple HIR SymbolTable then
+            // returned a garbage id for every fresh struct name ("own struct has
+            // a stale declaration"). Use the same presence predicate as `??`.
+            let value_expr = if matches!(right.kind, HirExprKind::Nil) { left } else { right };
+            let value_reg = self.lower_expr(value_expr)?;
+            let predicate = if op == BinOp::Eq { "rt_is_none" } else { "rt_is_some" };
+            self.with_func(|func, current_block| {
+                let dest = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::Call {
+                    dest: Some(dest),
+                    target: crate::mir::effects::CallTarget::from_name(predicate),
+                    args: vec![value_reg],
+                });
+                dest
+            })
+        } else if matches!(op, BinOp::Eq | BinOp::NotEq)
             && ((matches!(right.kind, HirExprKind::Nil) && matches!(left.ty, TypeId::F32 | TypeId::F64))
                 || (matches!(left.kind, HirExprKind::Nil) && matches!(right.ty, TypeId::F32 | TypeId::F64)))
         {
@@ -131,6 +155,7 @@ impl<'a> MirLowerer<'a> {
                             .and_then(|tr| tr.get(right.ty))
                             .is_some_and(|ty| matches!(ty, HirType::Enum { .. }));
                     if let (true, Some((enum_name, variant_name))) = (is_enum_rhs, enum_variant) {
+                        let discriminant = self.owned_variant_discriminant(enum_name, variant_name, right.ty);
                         let left_reg = self.lower_expr(left)?;
                         return self.with_func(|func, current_block| {
                             let dest = func.new_vreg();
@@ -141,6 +166,7 @@ impl<'a> MirLowerer<'a> {
                                 pattern: crate::mir::MirPattern::Variant {
                                     enum_name: enum_name.to_string(),
                                     variant_name: variant_name.to_string(),
+                                    discriminant,
                                     payload: None,
                                 },
                             });
@@ -153,6 +179,12 @@ impl<'a> MirLowerer<'a> {
             // Non-coverage path or non-boolean operations
             let mut left_reg = self.lower_expr(left)?;
             let mut right_reg = self.lower_expr(right)?;
+
+            if matches!(op, BinOp::Eq | BinOp::NotEq) && left.ty == right.ty {
+                if let Some(result) = self.lower_struct_field_equality(op, left, left_reg, right_reg)? {
+                    return Ok(result);
+                }
+            }
 
             // Mixed ANY/concrete arithmetic operand: an ANY-typed operand
             // (e.g. an element read off a `list`-typed parameter — its
@@ -213,6 +245,60 @@ impl<'a> MirLowerer<'a> {
                             _ => None,
                         };
                         if let Some(helper) = helper {
+                            return self.with_func(|func, current_block| {
+                                let dest = func.new_vreg();
+                                let block = func.block_mut(current_block).unwrap();
+                                block.instructions.push(MirInst::Call {
+                                    dest: Some(dest),
+                                    target: crate::mir::CallTarget::from_name(helper),
+                                    args: vec![left_reg, right_reg],
+                                });
+                                dest
+                            });
+                        }
+                    }
+                    // Exactly one `ANY` side in a float-capable op: the any
+                    // operand may be an int OR a float at run time, so no
+                    // static decode is right for it. Decoding by the concrete
+                    // side's type read a tagged int as a float (`v + 0.5` with
+                    // `v = 2` answered 0.5) and a tagged float as an int. Box
+                    // the concrete numeric side and dispatch on the tags, as
+                    // ANY+ANY does.
+                    if left_is_any != right_is_any
+                        && !Self::is_raw_literal_typed_any(left)
+                        && !Self::is_raw_literal_typed_any(right)
+                    {
+                        let concrete = if left_is_any { right } else { left };
+                        let numeric = matches!(
+                            concrete.ty,
+                            TypeId::I8
+                                | TypeId::I16
+                                | TypeId::I32
+                                | TypeId::I64
+                                | TypeId::U8
+                                | TypeId::U16
+                                | TypeId::U32
+                                | TypeId::F32
+                                | TypeId::F64
+                        );
+                        let helper = match op {
+                            BinOp::Add => Some("rt_any_add"),
+                            BinOp::Sub => Some("rt_any_sub"),
+                            BinOp::Mul => Some("rt_any_mul"),
+                            BinOp::Div => Some("rt_any_div"),
+                            BinOp::Mod => Some("rt_any_mod"),
+                            BinOp::Lt => Some("rt_any_lt"),
+                            BinOp::Gt => Some("rt_any_gt"),
+                            BinOp::LtEq => Some("rt_any_le"),
+                            BinOp::GtEq => Some("rt_any_ge"),
+                            _ => None,
+                        };
+                        if let (true, Some(helper)) = (numeric, helper) {
+                            if left_is_any {
+                                right_reg = self.box_arg_for_any_param(right_reg, right)?;
+                            } else {
+                                left_reg = self.box_arg_for_any_param(left_reg, left)?;
+                            }
                             return self.with_func(|func, current_block| {
                                 let dest = func.new_vreg();
                                 let block = func.block_mut(current_block).unwrap();
@@ -336,6 +422,36 @@ impl<'a> MirLowerer<'a> {
                 });
             }
 
+            // Statically typed text can arrive either as a tagged runtime
+            // string (for example, a literal) or as a raw C string from an
+            // extern such as stdin_read_line. Compare through the runtime's
+            // representation-aware helper only when both operands are known
+            // text. Keep identity (`is`), ANY dispatch, and all other types on
+            // their existing paths.
+            if matches!(op, BinOp::Eq | BinOp::NotEq) && left.ty == TypeId::STRING && right.ty == TypeId::STRING {
+                return self.with_func(|func, current_block| {
+                    let equal = func.new_vreg();
+                    func.block_mut(current_block).unwrap().instructions.push(MirInst::Call {
+                        dest: Some(equal),
+                        target: crate::mir::CallTarget::from_name("rt_text_eq_any"),
+                        args: vec![left_reg, right_reg],
+                    });
+                    if op == BinOp::Eq {
+                        return equal;
+                    }
+                    let one = func.new_vreg();
+                    func.block_mut(current_block).unwrap().instructions.push(MirInst::ConstInt { dest: one, value: 1 });
+                    let dest = func.new_vreg();
+                    func.block_mut(current_block).unwrap().instructions.push(MirInst::BinOp {
+                        dest,
+                        op: BinOp::BitXor,
+                        left: equal,
+                        right: one,
+                    });
+                    dest
+                });
+            }
+
             // When both operands are ANY-typed (untyped fn params), dispatch
             // to rt_any_add which does a runtime tag check: string operands
             // go through rt_string_concat, integers use arithmetic addition.
@@ -411,12 +527,16 @@ impl<'a> MirLowerer<'a> {
                 // Convert non-string side to string. Native scalars must be
                 // boxed first (BoxInt/BoxFloat/rt_value_bool) — passing a raw
                 // i64/f64 to rt_to_string prints "<value:0xN>" (#66).
-                let left_str = if left.ty != TypeId::STRING && left.ty != TypeId::ANY {
+                let left_needs_conv = left.ty != TypeId::STRING && left.ty != TypeId::ANY;
+                let left_fresh = left_needs_conv || super::array_move::is_fresh_string_expr(left);
+                let left_str = if left_needs_conv {
                     self.emit_to_string(left_reg, left.ty)?
                 } else {
                     left_reg
                 };
-                let right_str = if right.ty != TypeId::STRING && right.ty != TypeId::ANY {
+                let right_needs_conv = right.ty != TypeId::STRING && right.ty != TypeId::ANY;
+                let right_fresh = right_needs_conv || super::array_move::is_fresh_string_expr(right);
+                let right_str = if right_needs_conv {
                     self.emit_to_string(right_reg, right.ty)?
                 } else {
                     right_reg
@@ -429,6 +549,18 @@ impl<'a> MirLowerer<'a> {
                         target: crate::mir::CallTarget::from_name("rt_string_concat"),
                         args: vec![left_str, right_str],
                     });
+                    if left_fresh {
+                        block.instructions.push(MirInst::Drop {
+                            value: left_str,
+                            ty: TypeId::STRING,
+                        });
+                    }
+                    if right_fresh {
+                        block.instructions.push(MirInst::Drop {
+                            value: right_str,
+                            ty: TypeId::STRING,
+                        });
+                    }
                     dest
                 })
             } else if is_array_add {
@@ -579,6 +711,29 @@ impl<'a> MirLowerer<'a> {
             self.lower_expr(operand)?
         };
 
+        // `-v` on a tagged `ANY` word: a raw negate is right for a tagged int
+        // only by coincidence and wrong for a float box (`-anyf(2.5)` printed
+        // `<value:0x...>`). Lower it as the run-time dispatched `0 - v`.
+        if op == UnaryOp::Neg && operand.ty == TypeId::ANY && !Self::is_raw_literal_typed_any(operand) {
+            return self.with_func(|func, current_block| {
+                let zero = func.new_vreg();
+                let boxed_zero = func.new_vreg();
+                let dest = func.new_vreg();
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::ConstInt { dest: zero, value: 0 });
+                block.instructions.push(MirInst::BoxInt {
+                    dest: boxed_zero,
+                    value: zero,
+                });
+                block.instructions.push(MirInst::Call {
+                    dest: Some(dest),
+                    target: crate::mir::CallTarget::from_name("rt_any_sub"),
+                    args: vec![boxed_zero, operand_reg],
+                });
+                dest
+            });
+        }
+
         self.with_func(|func, current_block| {
             let dest = func.new_vreg();
             let block = func.block_mut(current_block).unwrap();
@@ -602,17 +757,124 @@ impl<'a> MirLowerer<'a> {
             return self.emit_to_string(source_reg, inner.ty);
         }
 
+        // `T? as <numeric>` (only admitted inside `unsafe:`, see the HIR
+        // gate in hir/lower/expr/operators.rs): the source register holds the
+        // boxed `Option.Some` carrier (or a flat-nullable payload), and a
+        // plain MirInst::Cast bit-copies that heap word — `r as u64` printed
+        // 6219716837105 for Some(4275044352). Unwrap the payload through the
+        // checked helper (None traps, like `.unwrap()`), decode it to its
+        // native payload type, and only then apply the numeric conversion.
+        // Bug: doc/08_tracking/bug/jit_unsafe_optional_as_cast_garbage_2026_11_09.md
+        let (source_reg, from_ty) = if Self::is_native_scalar(target) && target != TypeId::BOOL && target != TypeId::CHAR
+        {
+            match self.optional_payload_type(inner.ty) {
+                Some(payload_ty) => {
+                    let payload = self.with_func(|func, current_block| {
+                        let dest = func.new_vreg();
+                        func.block_mut(current_block).unwrap().instructions.push(MirInst::Call {
+                            dest: Some(dest),
+                            target: crate::mir::CallTarget::from_name("rt_unwrap_or_trap"),
+                            args: vec![source_reg],
+                        });
+                        dest
+                    })?;
+                    let decoded = self.unbox_scalar_for_raw_slot(payload_ty, TypeId::ANY, payload)?;
+                    (decoded, payload_ty)
+                }
+                None => (source_reg, inner.ty),
+            }
+        } else {
+            (source_reg, inner.ty)
+        };
+
+        // `v as <numeric>` with `v: any`: the source is a tagged word, and
+        // `MirInst::Cast` converts raw bits (`v as f64` with `v = 3` answered
+        // 24.0). For a float target the value may be an int or a float box, so
+        // promote through the run-time dispatched `v * 1.0` and decode the
+        // float; for an integer target decode the tagged integer.
+        let (source_reg, from_ty) = if from_ty == TypeId::ANY
+            && !Self::is_raw_literal_typed_any(inner)
+            && Self::is_native_scalar(target)
+            && target != TypeId::BOOL
+            && target != TypeId::CHAR
+        {
+            if matches!(target, TypeId::F32 | TypeId::F64) {
+                let one = self.lower_float_expr(1.0)?;
+                let decoded = self.with_func(|func, current_block| {
+                    let boxed_one = func.new_vreg();
+                    let product = func.new_vreg();
+                    let decoded = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::BoxFloat {
+                        dest: boxed_one,
+                        value: one,
+                    });
+                    block.instructions.push(MirInst::Call {
+                        dest: Some(product),
+                        target: crate::mir::CallTarget::from_name("rt_any_mul"),
+                        args: vec![source_reg, boxed_one],
+                    });
+                    block.instructions.push(MirInst::UnboxFloat {
+                        dest: decoded,
+                        value: product,
+                    });
+                    decoded
+                })?;
+                (decoded, TypeId::F64)
+            } else {
+                // Integer target: decode through `rt_any_cast_int`, not
+                // `UnboxInt`. `rt_value_unbox_int` passes a heap value through
+                // verbatim, so an `any` holding a heap-boxed FLOAT cast to the
+                // box address (`41.75 as i64` == 4244870612817). `rt_any_cast_int`
+                // truncates a float and is otherwise the same tag-aware decode
+                // (tagged int, true/false -> 1/0, wide int).
+                // doc/08_tracking/bug/jit_any_float_cast_to_int_reads_heap_word_2026-11-13.md
+                // Text takes the CAST contract (one code point -> that code
+                // point), NOT `rt_any_to_int`'s `.to_i64()` parse: `char_at`
+                // is ANY-typed, so `s.char_at(i) as i64` parsed "6" to 6.
+                // doc/08_tracking/bug/char_at_as_i64_parses_digit_jit_ppm_header_2026-11-23.md
+                let decoded = self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    func.block_mut(current_block).unwrap().instructions.push(MirInst::Call {
+                        dest: Some(dest),
+                        target: crate::mir::CallTarget::from_name("rt_any_cast_int"),
+                        args: vec![source_reg],
+                    });
+                    dest
+                })?;
+                (decoded, TypeId::I64)
+            }
+        } else {
+            (source_reg, from_ty)
+        };
+
         self.with_func(|func, current_block| {
             let dest = func.new_vreg();
             let block = func.block_mut(current_block).unwrap();
             block.instructions.push(MirInst::Cast {
                 dest,
                 source: source_reg,
-                from_ty: inner.ty,
+                from_ty,
                 to_ty: target,
             });
             dest
         })
+    }
+
+    /// Payload type of an optional source in either HIR spelling: the
+    /// registry optional id (`T?`) or the builtin `Option<T>` enum (its `T`
+    /// binding, or ANY when unbound). None for every non-optional type.
+    fn optional_payload_type(&self, ty: TypeId) -> Option<TypeId> {
+        let tr = self.type_registry?;
+        if let Some(inner) = tr.optional_inner(ty) {
+            return Some(inner);
+        }
+        match tr.get(ty) {
+            Some(HirType::Enum { name, type_bindings, .. }) if name == "Option" => {
+                Some(type_bindings.get("T").copied().unwrap_or(TypeId::ANY))
+            }
+            _ => None,
+        }
     }
 
     /// True for types whose runtime representation is a raw machine scalar
@@ -654,6 +916,15 @@ impl<'a> MirLowerer<'a> {
                 });
                 dest
             });
+        }
+
+        // A flat struct/class value is a raw `rt_alloc` block with no runtime
+        // type header, so `rt_value_to_string` cannot render it (it printed
+        // `<invalid-heap:0x..>`). Render `Name(f: v, ...)` like the
+        // interpreter, field by field.
+        // doc/08_tracking/bug/jit_class_equality_false_and_invalid_heap_print_2026-11-06.md
+        if let Some(rendered) = self.emit_struct_to_string(reg, ty)? {
+            return Ok(rendered);
         }
 
         // U64 must not go through BoxInt (sign issues); use the raw helper.
@@ -730,6 +1001,226 @@ impl<'a> MirLowerer<'a> {
                 dest: Some(dest),
                 target: crate::mir::CallTarget::from_name("rt_value_to_string"),
                 args: vec![boxed],
+            });
+            dest
+        })
+    }
+}
+
+impl<'a> MirLowerer<'a> {
+    /// A tagged `T?` slot (same test as the `??` presence check in
+    /// hir/lower/expr): a shared/unique/weak/handle pointer type.
+    fn is_tagged_optional_slot(&self, ty: TypeId) -> bool {
+        self.type_registry.is_some_and(|tr| {
+            matches!(
+                tr.get(ty),
+                Some(HirType::Pointer {
+                    kind: crate::hir::PointerKind::Shared
+                        | crate::hir::PointerKind::Unique
+                        | crate::hir::PointerKind::Weak
+                        | crate::hir::PointerKind::Handle,
+                    ..
+                })
+            )
+        })
+    }
+}
+
+impl<'a> MirLowerer<'a> {
+    /// Structural `==` / `!=` for two operands of the same flat struct/class
+    /// type whose fields are all scalar or text.
+    ///
+    /// A class value is a raw `rt_alloc` block with the heap tag in bit 0 and
+    /// no runtime type header, so the generic `rt_native_eq` fallback can only
+    /// compare the two pointers (always false for two distinct allocations).
+    /// The tree-walk interpreter compares fields; expand to the same
+    /// field-wise comparison here so both engines agree.
+    /// doc/08_tracking/bug/jit_class_equality_false_and_invalid_heap_print_2026-11-06.md
+    fn lower_struct_field_equality(
+        &mut self,
+        op: BinOp,
+        operand: &HirExpr,
+        left_reg: VReg,
+        right_reg: VReg,
+    ) -> MirLowerResult<Option<VReg>> {
+        let Some(registry) = self.type_registry else {
+            return Ok(None);
+        };
+        let Some(HirType::Struct {
+            name,
+            fields,
+            is_generic_template,
+            ..
+        }) = registry.get(operand.ty)
+        else {
+            return Ok(None);
+        };
+        let scalar = |t: TypeId| {
+            matches!(
+                t,
+                TypeId::I8
+                    | TypeId::I16
+                    | TypeId::I32
+                    | TypeId::I64
+                    | TypeId::U8
+                    | TypeId::U16
+                    | TypeId::U32
+                    | TypeId::U64
+                    | TypeId::BOOL
+                    | TypeId::STRING
+            )
+        };
+        if *is_generic_template || fields.is_empty() || !fields.iter().all(|(_, t)| scalar(*t)) {
+            return Ok(None);
+        }
+        let name = name.clone();
+        let field_types: Vec<TypeId> = fields.iter().map(|(_, t)| *t).collect();
+        let mut acc = self.with_func(|func, current_block| {
+            let dest = func.new_vreg();
+            func.block_mut(current_block)
+                .unwrap()
+                .instructions
+                .push(MirInst::ConstInt { dest, value: 1 });
+            dest
+        })?;
+        for (index, field_ty) in field_types.into_iter().enumerate() {
+            acc = self.with_func(|func, current_block| {
+                let byte_offset = (index as u32) * 8;
+                let l = func.new_vreg();
+                let r = func.new_vreg();
+                let eq = func.new_vreg();
+                let both = func.new_vreg();
+                for (dest, object) in [(l, left_reg), (r, right_reg)] {
+                    func.block_mut(current_block).unwrap().instructions.push(MirInst::FieldGet {
+                        dest,
+                        object,
+                        owner_name: Some(name.clone()),
+                        owner_has_vtable: None,
+                        byte_offset,
+                        field_type: field_ty,
+                    });
+                }
+                let block = func.block_mut(current_block).unwrap();
+                block.instructions.push(MirInst::BinOp {
+                    dest: eq,
+                    op: BinOp::Eq,
+                    left: l,
+                    right: r,
+                });
+                block.instructions.push(MirInst::BinOp {
+                    dest: both,
+                    op: BinOp::BitAnd,
+                    left: acc,
+                    right: eq,
+                });
+                both
+            })?;
+        }
+        if op == BinOp::Eq {
+            return Ok(Some(acc));
+        }
+        let zero = self.with_func(|func, current_block| {
+            let dest = func.new_vreg();
+            func.block_mut(current_block)
+                .unwrap()
+                .instructions
+                .push(MirInst::ConstInt { dest, value: 0 });
+            dest
+        })?;
+        let dest = self.with_func(|func, current_block| {
+            let dest = func.new_vreg();
+            func.block_mut(current_block).unwrap().instructions.push(MirInst::BinOp {
+                dest,
+                op: BinOp::Eq,
+                left: acc,
+                right: zero,
+            });
+            dest
+        })?;
+        Ok(Some(dest))
+    }
+}
+
+impl<'a> MirLowerer<'a> {
+    pub(super) fn emit_struct_to_string(&mut self, reg: VReg, ty: TypeId) -> MirLowerResult<Option<VReg>> {
+        let Some(registry) = self.type_registry else {
+            return Ok(None);
+        };
+        let Some(HirType::Struct {
+            name,
+            fields,
+            is_generic_template,
+            ..
+        }) = registry.get(ty)
+        else {
+            return Ok(None);
+        };
+        let scalar = |t: TypeId| {
+            matches!(
+                t,
+                TypeId::I8
+                    | TypeId::I16
+                    | TypeId::I32
+                    | TypeId::I64
+                    | TypeId::U8
+                    | TypeId::U16
+                    | TypeId::U32
+                    | TypeId::U64
+                    | TypeId::BOOL
+                    | TypeId::STRING
+            )
+        };
+        if *is_generic_template || !fields.iter().all(|(_, t)| scalar(*t)) {
+            return Ok(None);
+        }
+        let name = name.clone();
+        let fields: Vec<(String, TypeId)> = fields.clone();
+        let mut acc = self.emit_const_string(format!("{name}("))?;
+        for (index, (field_name, field_ty)) in fields.into_iter().enumerate() {
+            let label = if index == 0 {
+                format!("{field_name}: ")
+            } else {
+                format!(", {field_name}: ")
+            };
+            let label_reg = self.emit_const_string(label)?;
+            acc = self.emit_string_concat(acc, label_reg)?;
+            let value = self.with_func(|func, current_block| {
+                let dest = func.new_vreg();
+                func.block_mut(current_block).unwrap().instructions.push(MirInst::FieldGet {
+                    dest,
+                    object: reg,
+                    owner_name: Some(name.clone()),
+                    owner_has_vtable: None,
+                    byte_offset: (index as u32) * 8,
+                    field_type: field_ty,
+                });
+                dest
+            })?;
+            let text = self.emit_to_string(value, field_ty)?;
+            acc = self.emit_string_concat(acc, text)?;
+        }
+        let close = self.emit_const_string(")".to_string())?;
+        Ok(Some(self.emit_string_concat(acc, close)?))
+    }
+
+    fn emit_const_string(&mut self, value: String) -> MirLowerResult<VReg> {
+        self.with_func(|func, current_block| {
+            let dest = func.new_vreg();
+            func.block_mut(current_block)
+                .unwrap()
+                .instructions
+                .push(MirInst::ConstString { dest, value });
+            dest
+        })
+    }
+
+    fn emit_string_concat(&mut self, a: VReg, b: VReg) -> MirLowerResult<VReg> {
+        self.with_func(|func, current_block| {
+            let dest = func.new_vreg();
+            func.block_mut(current_block).unwrap().instructions.push(MirInst::Call {
+                dest: Some(dest),
+                target: crate::mir::CallTarget::from_name("rt_string_concat"),
+                args: vec![a, b],
             });
             dest
         })

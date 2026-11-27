@@ -20,7 +20,16 @@ simulation/testbench support.
 
 ## Agent Assignments
 
+<!-- rtl_riscv_mdsoc_reorg capsule mapping (AC-4, doc/05_design/app/riscv/rtl_riscv_mdsoc_capsules.md):
+     Agent 1 primary capsule: vhdl.emit.metadata; Agent 2: vhdl.emit.control;
+     Agent 3: vhdl.emit.data; Agent 4: vhdl.emit.control; Agent 5:
+     vhdl.emit.data (secondary vhdl.emit.state); Agent 6: vhdl.emit.state;
+     Agent 7: vhdl.emit.data; Agent 8: vhdl.emit.metadata. Labels are
+     advisory only -- no task reassignment. -->
+
 ### Agent 1: Typed Hardware Metadata and Return Labels
+
+<!-- capsule: vhdl.emit.metadata (secondary: vhdl.emit.control) -->
 
 Owns parser, HIR, MIR metadata propagation.
 
@@ -36,6 +45,8 @@ Acceptance:
 
 ### Agent 2: Hardware Call Lowering and Virtual Aggregates
 
+<!-- capsule: vhdl.emit.control (secondary: vhdl.emit.data) -->
+
 Owns MIR-to-VHDL direct hardware call composition.
 
 - Lower direct calls to `@hardware` functions into entity instances.
@@ -49,6 +60,8 @@ Acceptance:
   elaborate, and synth.
 
 ### Agent 3: Fixed-Width Bit Semantics for RV32I
+
+<!-- capsule: vhdl.emit.data (secondary: vhdl.emit.control) -->
 
 Owns typed bit operations.
 
@@ -66,6 +79,8 @@ Acceptance:
 
 ### Agent 4: Decode and Control Lowering
 
+<!-- capsule: vhdl.emit.control -->
+
 Owns `match`/case and enum-like control representation.
 
 - Lower constant `match`/case trees to synthesizable VHDL `case` or priority
@@ -78,6 +93,8 @@ Acceptance:
 - Opcode decode and ALU-control fixtures pass GHDL analyze/elaborate/synth.
 
 ### Agent 5: Register File, ROM, and RAM Inference
+
+<!-- capsule: vhdl.emit.data (secondary: vhdl.emit.state) -->
 
 Owns array/indexed storage and memory templates.
 
@@ -93,6 +110,8 @@ Acceptance:
 
 ### Agent 6: Clock Domains, Reset, and Sequential State
 
+<!-- capsule: vhdl.emit.state (secondary: vhdl.emit.control) -->
+
 Owns process/domain correctness.
 
 - Lower clocked registers from typed IR, not facade strings.
@@ -105,6 +124,8 @@ Acceptance:
 
 ### Agent 7: Composite Ports and Bus Bundles
 
+<!-- capsule: vhdl.emit.data (secondary: vhdl.emit.control) -->
+
 Owns structured external interfaces.
 
 - Flatten typed structs/tuples for VHDL ports with deterministic names.
@@ -116,6 +137,8 @@ Acceptance:
 - Instruction/data memory bundle fixtures emit stable, synthesizable VHDL.
 
 ### Agent 8: Simulation, Testbench, and Source Maps
+
+<!-- capsule: vhdl.emit.metadata (secondary: vhdl.emit.control) -->
 
 Owns verification artifacts.
 

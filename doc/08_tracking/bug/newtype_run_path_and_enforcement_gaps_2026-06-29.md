@@ -1,6 +1,32 @@
 # Bug: `newtype` run-path + enforcement gaps
 ## Open 2026-09-16 — needs owner triage
 
+## Triage 2026-11-25 (p2w4-ac lane, release/1.0.0)
+
+Fresh probes on the pinned Rust seed (`bin/simple.exe` v1.0.0-rc.1, Windows,
+`SIMPLE_LIB=src`; note the 2026-07-17 verification below used the
+self-hosted binary, so seed-vs-self-hosted parity is not guaranteed):
+
+- **Item #1, argument-position half — STILL REPRODUCES:** `takes_lba(Ppn(value: 5))`
+  runs and prints `5`; no nominal-distinctness error on parameter passing.
+- **Item #1, mixed-arithmetic half — NOW REJECTED:** `fn mix(a: Lba, b: Ppn): (a + b).value`
+  fails semantic analysis with `SPL-UNIT-002: Lba + Ppn: distinct units never
+  mix implicitly is not an approved unit operation`. The new unit system
+  closes the arithmetic half of #1; every numeric `newtype` now also emits
+  `SPL-UNIT-003` advising migration to `unit X: i64 as <suffix>`.
+- **Item #2 (arithmetic erases wrapper) — still FIXED:** `(l + Lba(value:1)).value`
+  prints `6`.
+- **Item #3 (JIT cannot lower newtypes) — STILL REPRODUCES:** the same probe
+  logs `HIR lowering error: Unsupported feature: cannot infer field type
+  while lowering takes_lba: struct 'ANY' field 'value'` and falls back to the
+  interpreter (message shape changed from `Unknown type: Lba`, same class).
+- **Item #4 — not re-tested** (needs a genuine cross-module import lane).
+
+Remaining work (nominal distinctness at call sites, JIT lowering of
+newtypes) is compiler-wide and intersects the in-flight `unit` migration
+(`SPL-UNIT-003`), i.e. owner-direction territory, not a bounded P2 fix.
+Left OPEN with the refined per-item state above.
+
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 

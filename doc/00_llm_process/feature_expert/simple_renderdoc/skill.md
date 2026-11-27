@@ -79,3 +79,192 @@ or live RenderDoc/native-host artifact is unavailable.
 When record schema, facade capture, QEMU receipts, external bridges, or
 acceptance rules change, update this entry and the canonical guide in the same
 SPipe lane. Never replace explicit fail placeholders with false-green passes.
+
+## Linux aarch64, no root — 2026-11-14
+
+- RenderDoc v1.36 builds without root (clang/lld 23, Ninja; only
+  `libx11-xcb-dev` and `libxcb-keysyms1-dev` needed `apt-get download` +
+  `dpkg-deb -x`; lld 23 needs `-Wl,--undefined-version`). `renderdoccmd` then
+  drives `scripts/check/check-renderdoc-web-capture-lane.shs`.
+- **The lanes expect an INSTALLED tree.** `rdoc_capture_simple_vulkan` sets
+  `VK_LAYER_PATH`, which replaces loader discovery, from
+  `$RDOC_HOME/etc/vulkan/implicit_layer.d/renderdoc_capture.json`. A build tree
+  has no `etc/`, the layer never loads, and the in-app API still answers
+  `available=1 start=1` — the run ends `num_captures=0` with no cause named.
+  The helper now reports `missing-renderdoc-layer-manifest:<path>`.
+- **Start the capture after the device exists.** A start issued before the
+  first `vkCreateDevice` returns 1 and captures nothing (re-verified with the
+  layer loaded: original program `num_captures=0`). Dropping the warm-up
+  engine afterwards is harmless — the shared session keeps the device.
+  `renderdoc_web_page_capture.spl` now follows `renderdoc_vulkan_capture.spl`.
+- **NVIDIA GB10 (driver 580.173.02): `vkCreateDevice` under the RenderDoc
+  layer fails INTERMITTENTLY with `VK_ERROR_INITIALIZATION_FAILED` (-3) — it is
+  not a hard rejection** (corrected 2026-11-18; the 2026-11-14 note said 5 of 5).
+  Re-measured with a bare instance+device probe: no layer 6/6 ok; layer via
+  `ENABLE_VULKAN_RENDERDOC_CAPTURE=1` 2/6 ok; under `renderdoccmd capture` 0/6
+  in one batch and 6/6 in the next. Cause not established (two other processes
+  held ~21 GB of GPU memory at the time — a correlation only). The Engine2D
+  capture lane (`rdoc_capture_simple_vulkan`, `renderdoc_vulkan_capture.spl`,
+  `VK_DRIVER_FILES=/usr/share/vulkan/icd.d/nvidia_icd.json`) failed all 5
+  Engine2D retries on try 1, then **passed on tries 2 and 3**: `num_captures=1`,
+  `.rdc` 7457/7616 bytes, and the converted XML names vendor 0x10de, device
+  0x2e12, `NVIDIA GB10`, driver `580.173.02`. So GB10 captures ARE possible;
+  rerun on -3. llvmpipe (`lvp_icd.json`) remains the deterministic fallback
+  (`overview.simple.rdc` 486756 bytes at 900x760, 2026-11-14).
+- GB10 identity (2026-11-18): integrated GPU, Vulkan API 1.4.312, deviceUUID
+  `1883ff9c30a91b8abc50ef34ac2f5a89`, driverUUID
+  `6d5e1e1841115cbdae1ec369f9e3c390`. The process loader on this host is
+  `/home/yoon/.local/lib/libvulkan.so.1` (1.4.328, via `LD_LIBRARY_PATH`), not
+  the system one; there is no `libvulkan.so` dev symlink and no
+  `/usr/include/vulkan` — link `-l:libvulkan.so.1` and use Skia's in-tree headers.
+- The N2 qualification runner and `provider.cpp` do not call the RenderDoc
+  in-app start/end API, and the workers never present, so the N2 case workers
+  cannot be captured as-is; only the generic Engine2D capture scene can.
+- The interpreter can report a "value is not callable" error at the wrong
+  line. In the N2 runner it named `main.spl:67`, `_sha256_matches`, but the real
+  call was a same-named private helper in `scene_contract.spl:209`, which had
+  `scene_reference_sha)(kind)`. To find the real site, bisect with `print`
+  traces rather than trusting the reported line. A second case reported
+  `main.spl:2258` in an 864-line file.
+- Web admission: `background-position-*` uses the encoding `-1000 - pct`,
+  so `-1000` means CSS initial 0%. Only `0` and `-1000` are neutral.
+- Engine2D strict capture on release/1.0.0 is missing
+  `submission_generation` on the `draw_ir_adv` result structs. Merge
+  `e5b290e42a0` dropped the producer half of wip `ef35100f1d4`. The seed
+  interpreter also lacks `rt_gpu_provider_loaded`. See
+  `doc/08_tracking/bug/linux_gb10_n2_qualification_executable_blockers_2026-11-18.md`,
+  Blockers 4 and 5.
+- The `submission_generation` producer is restored. The seed interpreter
+  never attests `rt_vulkan_selected_device_identity_v1` (by design), so the
+  N2 Engine2D capture always blocks under `simple run`, and physical N2 pixels
+  need the native executable. On lavapipe the capture refuses device type
+  `cpu`; that is also correct.
+- The fractional and affine strict-Vulkan wiring from the same merge is
+  restored too. The affine SPIR-V and shader had landed; only the session
+  pipeline, backend dispatch, the 60-byte push-constant pack and the
+  `draw_ir_adv` preflight and executor branches were lost. Pinned by
+  `strict_vulkan_fractional_rect_spec` and `strict_vulkan_affine_coverage_spec`.
+- Pinned Skia (`35d5edfa…`) builds on this aarch64 host with
+  `tools/upstream-skia-ganesh-vulkan/build-linux.shs` in ~2 min at `-j6`
+  (`SIMPLE_UPSTREAM_SKIA_NINJA_JOBS`). The full dependency sync is ~7 GB
+  (`unicodetools` 3.2 GB, `swiftshader` 1.4 GB, neither used by the provider);
+  `out/.../obj` is ~1 GB and safe to delete once `libskia.a` exists.
+- `RDOC_WEB_CHROME_BIN` was honoured only in `RDOC_WEB_TOOL_SEARCH=isolated`
+  mode; fixed. The Chrome side still ends `vulkan-angle-unavailable` on a host
+  with no display and no Xvfb.
+- **The replay inspector reads command names from `<chunk …>` opening tags
+  only** (`_chunk_tags`, one `split` pass). It used to count `name="vkCmd…"`
+  anywhere, so `<metadata name="vkCmdDispatch">` passed as a dispatch.
+  Real capture check (web7 `overview.simple.rdc` → 1.8 MB XML, 1637 chunks):
+  pass, 205 dispatches, 5 pipelines, 5 shaders, 33 resources, 8.8 s wall.
+- `renderdoc_simple_gate_spec` needs a runnable inspector binary to exercise
+  a real replay: in a worktree with no `bin/simple` set
+  `RDOC_REPLAY_SIMPLE_BIN`. Since 2026-11-15 the gate checks `renderdoccmd`
+  BEFORE the inspector binary (as `inspect_renderdoc_capture` does), so a host
+  with no RenderDoc reports `renderdoccmd-missing` in any checkout; before
+  that, the "synthetic magic file" case failed in every worktree with
+  `simple-replay-inspector-missing` (10/11 -> 11/11 without the env var).
+  `renderdoc_replay_inspect_spec` is 8/8 at `fa2dd425635` (default mode and
+  `--mode=interpreter`); the earlier 7/8 did not reproduce.
+
+## Finding which dispatch wrote a pixel — Vulkan text clip, 2026-11-15
+
+Bug `web_vulkan_lane_control_text_one_row_past_clip_2026-11-15.md`: llvmpipe
+painted `<input value="Simple">` glyph rows below the control box that the CPU
+lane clips. Captured the 300x120 repro with the fix and with the base
+`backend_vulkan_font.spl`, same seed, lvp ICD.
+
+- **Installed-tree shim for a RenderDoc build tree** (no `etc/`, so the
+  layer never loads): make a directory with `bin -> $RDOC_BUILD/bin`,
+  `lib -> $RDOC_BUILD/lib` and
+  `etc/vulkan/implicit_layer.d/renderdoc_capture.json` copied from the
+  build's layer manifest, and pass it as the RenderDoc home.
+- Capture: source `scripts/lib/renderdoc-evidence-common.shs`, set
+  `RDOC_SIMPLE_PROG=src/app/test/renderdoc_web_page_capture.spl`,
+  `RDOC_HTML_PATH`, `PAGE_W`/`PAGE_H`, `RDOC_SIMPLE_BIN`,
+  `VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json`, and call
+  `rdoc_capture_simple_vulkan "$ROOT" "$SHIM" "$OUT"` under
+  `systemd-run --user --scope -p MemoryMax=8G`. Both runs: `num_captures=1`,
+  `rdoc_capture_status=pass`, ~91 KB `.rdc`.
+- `renderdoccmd convert -f X.rdc -c zip.xml -o cap.zip.xml` gives the chunk
+  XML plus a zip of buffer contents. Before vs after: identical chunk
+  structure (34 `vkCmdDispatch`, same pipelines and group counts); only two
+  114720-byte buffer payloads differ, 7 bytes each.
+- **Identify the dispatch by role, not by id** (ids differ per capture): the
+  font-atlas composite pipeline is the one whose dispatch is
+  `(ceil(max_quad_px/64), glyph_count, 1)`; here the last dispatch, groups
+  `(2,6,1)` for the six glyphs of `Simple`. Its params buffer is
+  `vulkan_font_packed_params`: 8 header words (`max_pixels` at byte 28), then
+  7 words per glyph `atlas_x, atlas_y, w, h, dst_x, dst_y, color`.
+
+| glyph | before (h, rows)  | after (h, rows) |
+|-------|-------------------|-----------------|
+| S     | 10, y 23-32       | 9, y 23-31      |
+| i     | 10, y 23-32       | 9, y 23-31      |
+| m     | 7, y 26-32        | 6, y 26-31      |
+| p     | 10, y 26-35       | 6, y 26-31      |
+| l     | 10, y 23-32       | 9, y 23-31      |
+| e     | 8, y 25-32        | 7, y 25-31      |
+
+  Header `max_pixels` 80 -> 72. So the vector-face composite dispatched whole
+  glyph quads through a clip whose bottom is y 31: the clip was ignored
+  entirely ('p' was 4 rows over), not off by one edge.
+- The other font batchers do not share the defect by construction: CUDA,
+  OpenCL, ROCm and Metal `draw_font_batch` return 0 (CPU fallback) whenever a
+  clip or mask is set (source read only; no such device on this host).
+  Vulkan now bakes the clip into the quads (`composite_font_batch`) and
+  reports a fully clipped batch as the admitted status `clipped-out`.
+
+## Replay inspection of the Simple capture — 2026-11-22
+
+`scripts/check/check-simple-renderdoc-capture.shs` proves a Simple `.rdc` is a
+replayable record of the render, not only a file with `RDOC` magic. It is the
+step chained after `check-renderdoc-web-capture-lane.shs --simple-only`.
+
+```sh
+export RDOC_HOME=/home/yoon/toolchains/renderdoc/build      # build tree is fine
+export RDOC_SIMPLE_BIN=<seed or release simple>
+export VK_DRIVER_FILES=/usr/share/vulkan/icd.d/lvp_icd.json  # lavapipe
+sh scripts/check/check-simple-renderdoc-capture.shs --page overview --out <dir>
+```
+
+It renders the page with plain Vulkan (`web_render_page_ppm.spl`), captures the
+same page under the RenderDoc layer (`renderdoc_web_page_capture.spl`), replays
+the `.rdc` headless, and requires > 0 draw/dispatch actions and a replayed
+framebuffer equal to the plain render at tolerance 0. No root, no Chrome, no
+native build; the tool is built with clang++ and lld. The run re-executes
+itself under `systemd-run -p MemoryMax=8G` (`RDOC_CAPTURE_MEMORY_MAX`).
+
+- Measured on lavapipe, 900x760 `overview`, seed interpreter: `.rdc` 828580
+  bytes, 199 actions (0 draw, 196 dispatch, one `vkQueueSubmit`), 43 buffers,
+  one of 2736000 bytes; 684000 pixels compared, 0 differ. 59.8 s wall, 1.1 GB
+  peak RSS. A one-byte change in the reference gives
+  `compare_mismatch_pixels=1` and exit 1.
+- **Engine2D is compute-only**: a capture holds no `vkCmdDraw*`. Count
+  `Dispatch` actions as its draw calls.
+- **`renderdoccmd convert -c zip.xml` cannot give the final framebuffer.** It
+  holds only what the application wrote: initial contents and
+  `Coherent Mapped Memory Write` chunks serialised before `vkQueueSubmit`. What
+  the GPU wrote exists only after a replay. `renderdoccmd` has no headless
+  replay-and-save command (`replay` opens a preview window), so the check uses
+  `scripts/tool/renderdoc-replay-buffer-dump.cpp` on the replay API:
+  `OpenCapture`, `SetFrameEvent(last, true)`, `GetBufferData` for every buffer
+  of `W*H*4` bytes; `--compare <buffer.bin> <ref.ppm>` does the pixel compare.
+- **A replay program must export the replay marker**: link with `-rdynamic`.
+  Without it `REPLAY_PROGRAM_MARKER()` is not visible, librenderdoc logs
+  "Initialising replay within non-replaying app", and the replay segfaults in
+  `WrappedVulkan::ContextReplayLog` (`m_Device != 0` assertion).
+  `ResultDetails::Message()` also needs a `DoStringise<ResultCode>` the shared
+  library does not export; print `(uint32_t)result.code`.
+- The framebuffer buffer is u32 `0xAARRGGBB`, so bytes are B,G,R,A. A PPM has
+  no alpha, so alpha is not compared.
+- Replay headers come from the RenderDoc source tree (`RDOC_SOURCE_DIR`,
+  default `$RDOC_HOME/../src`); a binary-only RenderDoc install answers
+  `ERROR — nothing was checked (renderdoc-replay-headers-unavailable:…)`.
+- The Simple side was never blocked on the native build: the capture runs on
+  the interpreter. Only the N2 Skia/Engine2D qualification runner needs a
+  native executable. The Chrome side is still `vulkan-angle-unavailable` on
+  this host (ANGLE Vulkan init -3, no Xvfb).
+- Not done: only `overview` was run through the replay check; GB10 was not
+  tried (lavapipe only); the replay tool is Linux-only
+  (`RENDERDOC_PLATFORM_LINUX`).

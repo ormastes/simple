@@ -2,6 +2,13 @@
 
 ## Closed 2026-09-13 — the 219-byte stub behaviour is gone; the SMF path now carries real object content
 
+## 2026-11-25 — re-verified on release/1.0.0 (0819b116ecb)
+
+Ran `SIMPLE_LIB=src bin/simple.exe compile probe_emit.spl --emit-smf -o probe_emit.smf`
+(pinned seed v1.0.0-rc.1, Windows): a 45-byte trivial module produced a
+6,710-byte `.smf` — not the 219-byte constant stub. The filed P1 (content
+silently dropped) remains fixed.
+
 - **measured** `bin/simple compile <module>.spl --emit-smf -o out.smf` (Rust seed
   v1.0.0-rc.1, Windows) no longer silently emits a 219-byte stub. It now runs a real
   import/relocation preservation step and reports

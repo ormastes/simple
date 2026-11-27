@@ -1,8 +1,8 @@
 # Imported constructor-expression default blocks Lean bootstrap owner
 
 - Canonical ID: `lean_native_constructor_default_argument_2026_10_21`
-- Status: OPEN; source workaround active. Bug DB reconciliation pending because
-  the available exact compiler is bootstrap-only, not a qualified full CLI.
+- Status: FIXED in pure-Simple `50.mir` (`resident_default_global_owner.spl`);
+  workaround retired in `src/plugins/backend_lean/lean_backend.spl`.
 - Original source/recovery commit: `0bfa8039acd`.
 - Owner: imported default-expression lowering in the bootstrap producer;
   `src/plugins/backend_lean/lean_backend.spl:769` is the affected consumer.
@@ -82,3 +82,91 @@ The attempted `--emit-object` option is unsupported by this seed and is absent
 from both successful scoped native commands above. This full-checkout startup
 performance issue remains unqualified; tiny-checkout negative/positive builds
 completed in seconds. No canonical parent cache was modified.
+
+## Fix (2026-11-09, seed HIR lowering)
+
+`is_fillable_default` (`src/compiler_rust/compiler/src/hir/lower/expr/calls.rs`)
+now admits an omitted imported default of the form `T(const, ...)` and lowers it
+in the caller when `T` is imported by the caller (`own_imported_names`), is not
+declared by the caller (`own_declared_type_names`), resolves to a struct/class,
+and every constructor argument is itself fillable. Non-constant ctor arguments,
+unimported types, and caller-shadowed types still raise the loud diagnostic.
+Tests: `imported_constructor_default_lowers_in_caller` and
+`constructor_default_with_nonconstant_args_or_unresolved_type_still_errors` in
+`imported_default_metadata_tests.rs` (14/14 green). Status
+fix-implemented-verification-pending: native verification of the original
+omitted `lean_plan_type_declarations` form against a rebuilt producer remains.
+
+## Re-check (2026-11-13) — the seed fix does not fire on the `run`/JIT path
+
+Seed `bin/simple.exe` is the pinned seed from `163943c5a77`, which is a descendant
+of the fix `6bbc33cf2c4`. It still rejects both forms with the same diagnostic.
+The repro is a private copy of `policy.spl` with `pub` added, since the committed
+fixture's `policy_signature` is private and now fails visibility first:
+
+- `use policy.{Limits, policy_signature}`, then `policy_signature()`, run with `SIMPLE_JIT_STRICT=1 run`
+  -> `call to policy_signature omits argument 1 whose default is not a call-site constant`.
+- `use policy.{policy_signature}` (type not imported) -> same diagnostic.
+
+So the gate `is_fillable_default` (`calls.rs:594`) is not admitting even the
+imported case on this path. Either `own_imported_names` or `imported_type_owners` /
+`imported_fn_owners` (`ctor_type_matches_callee`, `calls.rs:582`) is unpopulated
+for the JIT module lowering, or `resolve_constructor_type` misses an imported
+struct. The not-imported form is out of scope by design.
+Repairing this means changing the Rust seed and running its unit tests with cargo,
+which was not possible on this host (no cargo builds allowed). The pure-Simple MIR path
+(`switch_operators_calls.spl` `pad_trailing_default_args`) lowers any default
+expression via `lower_expr`. Its cross-module behaviour needs a native run
+(`native-build` of the fixture on a rebuilt producer). The `lean_backend.spl:804`
+workaround must stay. Separately, the committed `omitted.spl`/`policy.spl` fixture needs
+`pub` on `Limits` and `policy_signature` to pass current visibility rules.
+
+## WA-S6 re-verification (2026-11-26): still OPEN in both Rust seed and pure-Simple `50.mir`
+
+1. On the shared post-`@representation_boundary` Rust seed (`03a407dabae`),
+   `SIMPLE_JIT_STRICT=1 run test/fixtures/compiler/lean_constructor_default_native/omitted.spl`
+   still exits `1` with `call to policy_signature omits argument 1 whose default is not a call-site constant; a cross-module/native call cannot evaluate it`.
+2. On pure-Simple `50.mir` (`switch_operators_calls.spl` `pad_trailing_default_args` ->
+   `resident_default_global_owner.spl:14-21`), `bind_resident_default_global_v1`
+   explicitly skips `HirExprKind.Call`, so omitted cross-module constructor
+   defaults (`Limits()`) fall back to consumer-local `SymbolTable` lookup of
+   the provider's `Limits` `SymbolId`, colliding and emitting broken LLVM IR
+   (`%l2 = call i64 @lean.decls.plan_decls()`, `%l3 = call i64 @lean.decls.plan_decls(ptr %l1, i64 %l2)`).
+
+## Pure-Simple `50.mir` fix & workaround retirement (2026-11-26)
+
+1. `src/compiler/50.mir/_MirLowering/resident_default_global_owner.spl`
+   (`bind_resident_default_global_v1` / `bind_resident_default_expr_v1`) now
+   recursively relocates cross-module parameter default expressions (`Call`,
+   `StructLit`, `Var`/`NamedVar`, and nested provider expressions/types) against
+   `bootstrap_default_provider_symbols(owner)` via `relocate_provider_default` /
+   `relocate_provider_type`, while continuing to bind resident globals for
+   `Const`/`Variable` references and failing closed on missing provider symbols.
+2. Retired `# @workaround bug=lean_native_constructor_default_argument_2026_10_21`
+   from `src/plugins/backend_lean/lean_backend.spl` so
+   `lean_plan_type_declarations(module, "{self.module_prefix}.{module.name}")?`
+   uses the default `LeanRecursiveArrayLimitsV1()` directly.
+3. Unit specs updated/added:
+   - `test/01_unit/compiler/mir/resident_default_ctor_relocate_spec.spl`
+   - `test/01_unit/compiler/backend/wa_src_lane6_lean_default_spec.spl`
+
+## 2026-11-26 — Rust Seed HIR/JIT Default-Arg Fix (WA-P6)
+
+- Fixed Rust seed omitted constructor default-argument lowering across cross-module,
+  flattened, and JIT scopes in `src/compiler_rust/compiler/src/hir/lower/expr/calls.rs`,
+  `src/compiler_rust/compiler/src/hir/lower/import_loader.rs`,
+  `src/compiler_rust/compiler/src/hir/lower/module_lowering/module_pass.rs`,
+  and `src/compiler_rust/compiler/src/hir/lower/lowerer.rs`
+  (`is_fillable_default`, `ctor_type_matches_callee`,
+  `flattened_ctor_type_matches_callee`, `lower_default_expr_in_callee_scope`,
+  and cross-module/flattened struct ctor registration for unimported default constructor types).
+- Added unit tests in `src/compiler_rust/compiler/src/hir/lower/tests/imported_default_metadata_tests.rs`.
+- Pure-Simple `50.mir` relocation and `lean_backend.spl` retirement already landed
+  upstream in `#11848` (`8f38effacc1`), so those files were left untouched.
+- Verified:
+  - `cargo test -p simple-compiler --lib -j 4 hir::lower::tests`: `405 passed; 0 failed` (default & `--features llvm`)
+  - `cargo test -p simple-compiler --lib -j 4 mir::lower::tests`: `660 passed; 0 failed`
+  - `test/01_unit/compiler/mir/resident_default_ctor_relocate_spec.spl --mode=interpreter`: `3 passed, 0 failed`
+  - `test/01_unit/compiler/backend/lean_backend_spec.spl --mode=interpreter`: `10 passed, 0 failed`
+  - Note: `test/01_unit/compiler/backend/wa_src_lane6_lean_default_spec.spl` currently fails `1/1` (`semantic: variable 'self' not found`) on `origin/release/1.0.0` due to unescaped `{self.module_prefix}` introduced in upstream commit `8f38effacc1`.
+

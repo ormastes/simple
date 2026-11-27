@@ -1,0 +1,139 @@
+# Shared real-filesystem checks for the Linux retained directory owner.
+use std.nogc_sync_mut.io.dir_ops.{dir_create_all, dir_remove_all}
+use std.nogc_sync_mut.io.file_ops.{file_delete, file_rename, file_write_bytes, secure_temp_dir}
+use std.nogc_sync_mut.io.retained_file.{RetainedDirectoryOwnerV1,
+    retained_directory_open_trusted_v1}
+use std.nogc_sync_mut.io.snapshot_links.{snapshot_symlink_create_nofollow_v1}
+use std.nogc_sync_mut.package_sffi.{set_permissions}
+
+fn _owner_rejects_v1(path: text) -> bool:
+    match retained_directory_open_trusted_v1(path):
+        case Err(_): true
+        case Ok(owner):
+            var retained = owner
+            retained.close()
+            false
+
+fn _file_rejects_v1(owner: RetainedDirectoryOwnerV1, name: text) -> bool:
+    match owner.open_file(name, 128u64):
+        case Err(_): true
+        case Ok(file):
+            var retained = file
+            retained.close()
+            false
+
+fn _bytes_equal_v1(left: [u8], right: [u8]) -> bool:
+    if left.len() != right.len(): return false
+    var index = 0
+    while index < left.len():
+        if left[index] != right[index]: return false
+        index = index + 1
+    true
+
+fn _owner_survives_rename_v1(root: text, path: text, key: [u8]) -> bool:
+    match retained_directory_open_trusted_v1(path):
+        case Err(_): false
+        case Ok(owner):
+            var directory = owner
+            val moved = root + "/renamed-replay"
+            if not file_rename(path, moved):
+                directory.close()
+                return false
+            var read_matches = false
+            match directory.open_file("root.pub", 128u64):
+                case Err(_):
+                    read_matches = false
+                case Ok(file):
+                    var retained = file
+                    match retained.read_all_bounded_v1(128):
+                        case Err(_):
+                            read_matches = false
+                        case Ok(bytes):
+                            read_matches = _bytes_equal_v1(bytes, key)
+                    if not retained.close(): read_matches = false
+            val owner_closed = directory.close()
+            val restored = file_rename(moved, path)
+            read_matches and owner_closed and restored
+
+pub fn retained_directory_owner_fixture_checks_v1(diagnostic: bool = false) -> i64:
+    val key: [u8] = [0u8, 1u8, 2u8, 3u8, 4u8, 5u8, 6u8, 7u8,
+        8u8, 9u8, 10u8, 11u8, 12u8, 13u8, 14u8, 15u8,
+        16u8, 17u8, 18u8, 19u8, 20u8, 21u8, 22u8, 23u8,
+        24u8, 25u8, 26u8, 27u8, 28u8, 29u8, 30u8, 31u8]
+    val root = match secure_temp_dir("/tmp", "simple-retained-dir-owner-"):
+        case Err(_): return -256
+        case Ok(path): path
+    val owner_root = root + "/owner"
+    val simple_root = owner_root + "/simple"
+    val verification_root = simple_root + "/verification"
+    val policy_root = verification_root + "/replay"
+    if not dir_create_all(policy_root) or not set_permissions(owner_root, 448) or
+            not set_permissions(simple_root, 493) or
+            not set_permissions(verification_root, 493) or
+            not set_permissions(policy_root, 493):
+        val owner_removed = dir_remove_all(owner_root)
+        val root_removed = dir_remove_all(root)
+        return if owner_removed and root_removed: -256 else: -768
+    if not file_write_bytes(policy_root + "/root.pub", key):
+        val owner_removed = dir_remove_all(owner_root)
+        val root_removed = dir_remove_all(root)
+        return if owner_removed and root_removed: -256 else: -768
+
+    var failures = 0
+    var cleanup_ok = true
+    match retained_directory_open_trusted_v1(policy_root):
+        case Err(reason):
+            failures = failures + 1
+            if diagnostic: print "RETAINED_DIRECTORY_OWNER_ADMISSION_ERROR|{reason}"
+        case Ok(owner):
+            var retained = owner
+            if not retained.close():
+                failures = failures + 1
+                if diagnostic: print "RETAINED_DIRECTORY_OWNER_ADMISSION_ERROR|SCVDB_DIR_CLOSE_FAILED"
+    if not _owner_rejects_v1(policy_root + "/../replay"): failures = failures + 2
+    val final_link = owner_root + "/final-link"
+    val final_created = snapshot_symlink_create_nofollow_v1(owner_root,
+        final_link, "simple/verification/replay", 2)
+    if not final_created or not _owner_rejects_v1(final_link): failures = failures + 4
+    val ancestor_link = owner_root + "/ancestor-link"
+    val ancestor_created = snapshot_symlink_create_nofollow_v1(owner_root,
+        ancestor_link, "simple", 2)
+    if not ancestor_created or not _owner_rejects_v1(ancestor_link + "/verification/replay"):
+        failures = failures + 8
+    match retained_directory_open_trusted_v1(policy_root):
+        case Err(_):
+            failures = failures + 16
+        case Ok(owner):
+            var retained = owner
+            val closed = retained.close()
+            if not closed or not _file_rejects_v1(retained, "root.pub"):
+                failures = failures + 16
+    val made_writable = set_permissions(policy_root, 511)
+    val writable_rejected = _owner_rejects_v1(policy_root)
+    val permissions_restored = set_permissions(policy_root, 493)
+    if not made_writable or not writable_rejected or not permissions_restored:
+        failures = failures + 32
+    if not _owner_survives_rename_v1(owner_root, policy_root, key): failures = failures + 64
+    match retained_directory_open_trusted_v1(policy_root):
+        case Err(_):
+            failures = failures + 128
+        case Ok(owner):
+            var retained = owner
+            if not _file_rejects_v1(retained, "../root.pub"):
+                failures = failures + 128
+            if not retained.close(): cleanup_ok = false
+
+    val final_removed_call = file_delete(final_link)
+    val ancestor_removed_call = file_delete(ancestor_link)
+    val final_removed = final_removed_call or not final_created
+    val ancestor_removed = ancestor_removed_call or not ancestor_created
+    if not final_removed or not ancestor_removed:
+        return 0 - (failures + 512)
+    val tree_removed = dir_remove_all(owner_root)
+    val root_removed = dir_remove_all(root)
+    if not tree_removed or not root_removed or not cleanup_ok:
+        failures = failures + 512
+    if failures == 0: 8
+    else: 0 - failures
+
+export retained_directory_owner_fixture_checks_v1

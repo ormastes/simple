@@ -2,27 +2,30 @@
 #
 # Core operations for getting, setting, and managing environment variables.
 
-use std.env.types.{rt_env_get, rt_env_set, rt_env_remove, rt_env_vars}
+use std.env.types.{rt_env_get, rt_env_set, rt_env_remove}
+use std.nogc_sync_mut.sffi.system_env_core.{env_vars_nilable}
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _async_env_get_raw", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 @always_inline
-fn _env_get_raw(key: text) -> text?:
+fn _async_env_get_raw(key: text) -> text?:
     unsafe(capabilities: [ffi]):
         rt_env_get(key)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _async_env_set_raw", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 @always_inline
-fn _env_set_raw(key: text, value: text) -> bool:
+fn _async_env_set_raw(key: text, value: text) -> bool:
     unsafe(capabilities: [ffi]):
         rt_env_set(key, value)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _async_env_remove_raw", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 @always_inline
-fn _env_remove_raw(key: text) -> bool:
+fn _async_env_remove_raw(key: text) -> bool:
     unsafe(capabilities: [ffi]):
         rt_env_remove(key)
 
 @always_inline
-fn _env_vars_raw() -> [(text, text)]?:
-    unsafe(capabilities: [ffi]):
-        rt_env_vars()
+fn _async_env_vars_raw() -> [(text, text)]?:
+    env_vars_nilable()
 
 # ============================================================================
 # Core Environment Variable Operations
@@ -35,11 +38,7 @@ fn env_get(key: text) -> text:
         env_get("HOME")  # "/home/user"
         env_get("NONEXISTENT")  # ""
     """
-    val value = _env_get_raw(key)
-    if value == nil:
-        ""
-    else:
-        value
+    _async_env_get_raw(key) ?? ""
 
 fn env_get_or(key: text, default: text) -> text:
     """Get environment variable or return default if not set.
@@ -59,7 +58,7 @@ fn env_set(key: text, value: text) -> bool:
     Example:
         env_set("MY_VAR", "hello")  # true
     """
-    _env_set_raw(key, value)
+    _async_env_set_raw(key, value)
 
 fn env_unset(key: text) -> bool:
     """Remove environment variable.
@@ -67,7 +66,7 @@ fn env_unset(key: text) -> bool:
     Example:
         env_unset("MY_VAR")  # true
     """
-    _env_remove_raw(key)
+    _async_env_remove_raw(key)
 
 fn env_has(key: text) -> bool:
     """Check if environment variable exists.
@@ -76,7 +75,7 @@ fn env_has(key: text) -> bool:
         env_has("HOME")  # true
         env_has("NONEXISTENT")  # false
     """
-    val value = _env_get_raw(key)
+    val value = _async_env_get_raw(key)
     if value == nil:
         false
     else:
@@ -89,12 +88,12 @@ fn env_list() -> [(text, text)]:
     Example:
         env_list()  # [("HOME", "/home/user"), ("PATH", "/usr/bin"), ...]
     """
-    _env_vars_raw() ?? []
+    _async_env_vars_raw() ?? []
 
-fn env_list_checked() -> Result<[(text, text)], text>:
+pub fn env_list_checked() -> Result<[(text, text)], text>:
     # Bind the array payload, not the Optional carrier, into Result::Ok.
     # See native_env_snapshot_optional_payload_2026_10_30.md.
-    match _env_vars_raw():
+    match _async_env_vars_raw():
         case Some(values): Ok(values)
         case None: Err("rt_env_vars failed to allocate an environment snapshot")
 
@@ -394,7 +393,7 @@ fn expand_var(text: text) -> text:
         if start + 1 >= result.len():
             break
 
-        if result[start + 1] == "{":
+        if result[start + 1] == "{{":
             # Find closing brace
             val close_offset = result.substring(start + 2).find("}")
             if close_offset >= 0:
@@ -455,7 +454,7 @@ fn substitute_vars(text: text, vars: [(text, text)]) -> text:
 
     for pair in vars:
         val (name, value) = pair
-        val placeholder = "$" + "{" + name + "}"
+        val placeholder = "$" + "{{" + name + "}"
         result = result.replace(placeholder, value)
 
     result

@@ -51,6 +51,7 @@ use compiler.core.ast.{expr_int_lit, expr_float_lit, expr_string_lit}
 use compiler.core.ast.{expr_bool_lit, expr_nil_lit, expr_ident}
 use compiler.core.ast.{expr_binary, expr_unary, expr_call, expr_call_named, expr_index}
 use compiler.core.ast.{expr_field_access, expr_method_call, expr_method_call_named, expr_array_lit}
+use compiler.core.ast.{expr_optional_chain}
 use compiler.core.ast.{expr_struct_lit}
 use compiler.frontend.core.ast_expr.{expr_set_call_type_args}
 use compiler.core.ast.{expr_if_expr, expr_for_expr, expr_while_expr}
@@ -59,14 +60,16 @@ use compiler.core.ast.{expr_range, expr_assign, expr_compound_assign}
 use compiler.core.ast.{expr_unit, expr_pass, expr_pass_with_msg, expr_pass_todo, expr_pass_do_nothing, expr_pass_dn, expr_null_coalesce, expr_slice}
 use compiler.core.ast.{expr_dict_lit}
 use compiler.core.ast.{expr_match_expr, expr_block, expr_lambda}
-use compiler.core.ast.{expr_await, expr_yield, expr_spawn, expr_do_block, expr_atom, expr_spread, expr_asm, expr_asm_match, expr_asm_assert, EXPR_SPREAD, expr_exists_check, EXPR_EXISTS_CHECK, expr_force_unwrap, EXPR_FORCE_UNWRAP, expr_try, EXPR_TRY}
+use compiler.core.ast.{expr_await, expr_yield, expr_spawn, expr_do_block, expr_atom, expr_spread, expr_asm, expr_asm_match, expr_asm_assert, EXPR_SPREAD, expr_exists_check, EXPR_EXISTS_CHECK, expr_force_unwrap, EXPR_FORCE_UNWRAP, expr_try, EXPR_TRY, stmt_expr_stmt, stmt_val_decl}
 use compiler.core.ast.{expr_cast, EXPR_CAST}
 use compiler.core.tokens.{TOK_KW_AS}
-use compiler.core.ast.{asm_arm_new, asm_arm_is_compile_error, asm_arm_error_msg, asm_arm_asm_text}
-use compiler.core.ast.{expr_get_tag, expr_get_int, expr_get_str, expr_get_left, expr_get_args, expr_get_arg_names, expr_call_args_set, expr_get_span, expr_set_span}
-use compiler.frontend.core.lexer.{lex_cur_suffix_get, lex_token_start_get}
+use compiler.frontend.core._ParserPrimary.unit_literal_check.{parser_unit_literal_cast_check, parser_unit_literal_call_check}
+use compiler.core.ast.{asm_arm_new}
+use compiler.core.ast.{expr_get_tag, expr_get_int, expr_get_str, expr_get_left, expr_get_right, expr_get_args, expr_get_arg_names, expr_call_args_set, expr_get_span, expr_set_span}
+use compiler.core.ast.{expr_owner_int_set}
+use compiler.frontend.core.lexer.{lex_cur_suffix_get, lex_token_start_get, lex_token_end_get}
 use compiler.frontend.core.lexer.{lex_snapshot_save, lex_snapshot_commit, lex_snapshot_rollback}
-use compiler.core.parser.{par_kind_get, par_text_get, par_line_get, par_col_get, par_errors}
+use compiler.core.parser.{par_kind_get, par_text_get, par_line_get, par_col_get}
 use compiler.core.types.{flat_span_new, span_is_valid, span_start, span_line, span_col}
 use compiler.core.parser.{parser_tok_save, parser_tok_restore}
 use compiler.core.parser.{parser_advance, parser_expect, parser_error, parser_skip_newlines}
@@ -100,19 +103,18 @@ use compiler.frontend.core.parser_primary.{parse_primary_expr}
 # stays well under the measured crash threshold. ponytail: single choke-point
 # guard covers all downstream recursive passes; raise the limit if real code
 # ever legitimately nests deeper.
-var g_expr_nest_depth: i64 = 0
 val MAX_EXPR_NEST_DEPTH: i64 = 128
 
 fn parse_expr() -> i64:
     if parser_expr_trace_line_enabled():
         eprint("[parser-expr] expr:start kind={par_kind_get()} text={par_text_get()} line={par_line_get()} col={par_col_get()}")
-    g_expr_nest_depth = g_expr_nest_depth + 1
-    if g_expr_nest_depth > MAX_EXPR_NEST_DEPTH:
+    expr_nest_state.g_expr_nest_depth = expr_nest_state.g_expr_nest_depth + 1
+    if expr_nest_state.g_expr_nest_depth > MAX_EXPR_NEST_DEPTH:
         parser_error("expression nesting too deep (max 128 levels)")
-        g_expr_nest_depth = g_expr_nest_depth - 1
+        expr_nest_state.g_expr_nest_depth = expr_nest_state.g_expr_nest_depth - 1
         return expr_int_lit(0, 0)
     val result = parse_pipe()
-    g_expr_nest_depth = g_expr_nest_depth - 1
+    expr_nest_state.g_expr_nest_depth = expr_nest_state.g_expr_nest_depth - 1
     if parser_expr_trace_line_enabled():
         eprint("[parser-expr] expr:done result={result}")
     result
@@ -382,7 +384,7 @@ fn parser_range_endpoint_absent() -> bool:
 
 fn parse_range() -> i64:
     parser_expr_trace_step("range")
-    val left = parse_addition()
+    val left = parse_bit_or()
     if par_kind_get() == 165:
         parser_advance()
         # G43: open-ended range `start..` (e.g. `arr[1..]`). If `..` is followed
@@ -391,12 +393,39 @@ fn parse_range() -> i64:
         # negative bound and must remain distinct from an open-ended range.
         if parser_range_endpoint_absent():
             return expr_range(left, -1, 0, 0)
-        val right = parse_addition()
+        val right = parse_bit_or()
         return expr_range(left, right, 0, 0)
     if par_kind_get() == 166:
         parser_advance()
-        val right = parse_addition()
+        val right = parse_bit_or()
         return expr_range(left, right, 1, 0)
+    left
+
+fn parse_bit_or() -> i64:
+    parser_expr_trace_step("bit-or")
+    var left = parse_bit_xor()
+    while par_kind_get() == 121:
+        parser_advance()
+        val right = parse_bit_xor()
+        left = expr_binary(121, left, right, 0)
+    left
+
+fn parse_bit_xor() -> i64:
+    parser_expr_trace_step("bit-xor")
+    var left = parse_bit_and()
+    while par_kind_get() == 122:
+        parser_advance()
+        val right = parse_bit_and()
+        left = expr_binary(122, left, right, 0)
+    left
+
+fn parse_bit_and() -> i64:
+    parser_expr_trace_step("bit-and")
+    var left = parse_addition()
+    while par_kind_get() == 120:
+        parser_advance()
+        val right = parse_addition()
+        left = expr_binary(120, left, right, 0)
     left
 
 fn parse_addition() -> i64:
@@ -435,18 +464,6 @@ fn parse_multiplication() -> i64:
             parser_advance()
             val right = parse_unary()
             left = expr_binary(65, left, right, 0)
-        elif par_kind_get() == 120:
-            parser_advance()
-            val right = parse_unary()
-            left = expr_binary(120, left, right, 0)
-        elif par_kind_get() == 121:
-            parser_advance()
-            val right = parse_unary()
-            left = expr_binary(121, left, right, 0)
-        elif par_kind_get() == 122:
-            parser_advance()
-            val right = parse_unary()
-            left = expr_binary(122, left, right, 0)
         else:
             break
     left
@@ -486,6 +503,7 @@ fn parse_unary() -> i64:
         if par_kind_get() == TOK_KW_AS:
             parser_advance()
             val cast_type = parser_parse_cast_type()
+            parser_unit_literal_cast_check(cast_base, cast_type)
             cast_base = expr_cast(cast_base, cast_type, 0)
         else:
             break
@@ -501,6 +519,7 @@ fn parse_binary_from(base: i64) -> i64:
         if par_kind_get() == TOK_KW_AS:
             parser_advance()
             val cast_type = parser_parse_cast_type()
+            parser_unit_literal_cast_check(left, cast_type)
             left = expr_cast(left, cast_type, 0)
         else:
             break
@@ -522,18 +541,6 @@ fn parse_binary_from(base: i64) -> i64:
             parser_advance()
             val right = parse_unary()
             left = expr_binary(65, left, right, 0)
-        elif par_kind_get() == 120:
-            parser_advance()
-            val right = parse_unary()
-            left = expr_binary(120, left, right, 0)
-        elif par_kind_get() == 121:
-            parser_advance()
-            val right = parse_unary()
-            left = expr_binary(121, left, right, 0)
-        elif par_kind_get() == 122:
-            parser_advance()
-            val right = parse_unary()
-            left = expr_binary(122, left, right, 0)
         else:
             break
     # Addition level
@@ -550,14 +557,27 @@ fn parse_binary_from(base: i64) -> i64:
         else:
             break
     left = add_left
+    # Bitwise levels (looser than +/-, tighter than range/comparison): & then ^ then |
+    while par_kind_get() == 120:
+        parser_advance()
+        val bit_and_right = parse_addition()
+        left = expr_binary(120, left, bit_and_right, 0)
+    while par_kind_get() == 122:
+        parser_advance()
+        val bit_xor_right = parse_bit_and()
+        left = expr_binary(122, left, bit_xor_right, 0)
+    while par_kind_get() == 121:
+        parser_advance()
+        val bit_or_right = parse_bit_xor()
+        left = expr_binary(121, left, bit_or_right, 0)
     # Range
     if par_kind_get() == 165:
         parser_advance()
-        val right = if parser_range_endpoint_absent(): -1 else: parse_addition()
+        val right = if parser_range_endpoint_absent(): -1 else: parse_bit_or()
         left = expr_range(left, right, 0, 0)
     if par_kind_get() == 166:
         parser_advance()
-        val right = parse_addition()
+        val right = parse_bit_or()
         left = expr_range(left, right, 1, 0)
     # Null coalesce
     while true:
@@ -707,6 +727,20 @@ fn parse_call_arg_raw() -> (i64, text):
         parser_advance()
         val spread_inner = parse_expr()
         return (expr_spread(spread_inner, 0), "")
+    # `unsafe(...)` and `danger(...)` may be contextual block headers, but
+    # ordinary calls with those names and named labels must keep their usual
+    # parse. Let the existing primary parser decide after a restored lookahead.
+    if par_kind_get() == TOK_IDENT:
+        val contextual_name = par_text_get()
+        if contextual_name == "unsafe" or contextual_name == "danger":
+            val contextual_snap = lex_snapshot_save()
+            val (contextual_tok_nums, contextual_tok_text) = parser_tok_save()
+            parser_advance()
+            val has_parenthesized_header = par_kind_get() == TOK_LPAREN
+            lex_snapshot_rollback(contextual_snap)
+            parser_tok_restore(contextual_tok_nums, contextual_tok_text)
+            if has_parenthesized_header:
+                return (parse_expr(), "")
     if par_kind_get() == 6:
         val ident = par_text_get()
         # No `true_x`/`false_x` bool-suffix rule here: the Rust seed has no such
@@ -717,12 +751,16 @@ fn parse_call_arg_raw() -> (i64, text):
         # (-> "unresolved type: value"). See
         # doc/08_tracking/bug/parser_true_false_prefix_call_arg_2026-08-01.md
         # Named argument: retain the name beside the value in the call node.
+        # Capture the identifier's own source range before advancing: the
+        # positional path below rebuilds the ident node and must not leave it
+        # with the synthetic span 0 (hir_reference_snapshot_v1_spec).
+        val ident_span = flat_span_new(lex_token_start_get(), lex_token_end_get(), par_line_get(), par_col_get())
         parser_advance()
         if par_kind_get() == 161 or par_kind_get() == 100:
             parser_advance()
             return (parse_expr(), ident)
         # Not a named arg: already consumed ident, continue with postfix+binary
-        val ident_node = expr_ident(ident, 0)
+        val ident_node = expr_ident(ident, ident_span)
         val postfix_result = parse_postfix_on(ident_node)
         return (parse_binary_from(postfix_result), "")
     # Keywords are legal named-argument labels in the canonical parser. Check
@@ -1057,6 +1095,175 @@ fn pe_is_typed_empty_array_ctor(base: i64, argc: i64) -> bool:
         return false
     pe_is_array_element_type_expr(pe_tc_elems[0])
 
+# ===== Arrow functional update: `x->m(args)` == `x = x.m(args)` (ROB-ARR-01..07) =====
+# Seed parity: postfix.rs TokenKind::Arrow. The match-arm separator and guard
+# arrow share the token, so match patterns/guards parse with the arrow
+# suppressed (arrow_suppress_set); return-type arrows never reach postfix.
+# @allow(primitive_api) parser-internal flag/identifier-name hook, same raw-scalar parser API surface as the sibling parser_* helpers
+pub fn arrow_suppress_set(on: bool) -> bool:
+    val prev = expr_nest_state.g_arrow_suppressed
+    expr_nest_state.g_arrow_suppressed = on
+    prev
+
+# Lexically scoped `val` registry so `v->m()` on an immutable binding is a
+# named error. Innermost declaration wins (a `var` shadows an outer `val`);
+# block exit drops the block's names; a nested fn is a barrier that hides the
+# outer names (the outer list is restored, never cleared, on fn exit).
+pub fn arrow_scope_enter():
+    expr_nest_state.g_arrow_marks.push(expr_nest_state.g_arrow_names.len())
+
+pub fn arrow_scope_leave():
+    val n = expr_nest_state.g_arrow_marks.len()
+    if n == 0:
+        return
+    val mark = expr_nest_state.g_arrow_marks[n - 1]
+    expr_nest_state.g_arrow_marks.pop()
+    while expr_nest_state.g_arrow_names.len() > mark:
+        expr_nest_state.g_arrow_names.pop()
+        expr_nest_state.g_arrow_is_val.pop()
+
+pub fn arrow_fn_enter():
+    arrow_scope_enter()
+    expr_nest_state.g_arrow_names.push("")
+    expr_nest_state.g_arrow_is_val.push(false)
+
+# @allow(primitive_api) parser-internal flag/identifier-name hook, same raw-scalar parser API surface as the sibling parser_* helpers
+pub fn arrow_note_val(name: text):
+    expr_nest_state.g_arrow_names.push(name)
+    expr_nest_state.g_arrow_is_val.push(true)
+
+# @allow(primitive_api) parser-internal flag/identifier-name hook, same raw-scalar parser API surface as the sibling parser_* helpers
+pub fn arrow_note_var(name: text):
+    expr_nest_state.g_arrow_names.push(name)
+    expr_nest_state.g_arrow_is_val.push(false)
+
+# Destructured binding `(a,b)` / `(a, _)`: note every name.
+# @allow(primitive_api) parser-internal encoded tuple-binding text
+pub fn arrow_note_tuple(encoded: text, is_val: bool):
+    var inner = encoded
+    if inner.starts_with("("):
+        inner = inner[1:inner.len() - 1]
+    for part in inner.split(","):
+        val nm = part.trim()
+        if nm != "" and nm != "_":
+            if is_val:
+                arrow_note_val(nm)
+            else:
+                arrow_note_var(nm)
+
+fn arrow_is_val(name: text) -> bool:
+    var i = expr_nest_state.g_arrow_names.len() - 1
+    while i >= 0:
+        val n = expr_nest_state.g_arrow_names[i]
+        if n == "":
+            return false
+        if n == name:
+            return expr_nest_state.g_arrow_is_val[i]
+        i = i - 1
+    false
+
+# ROB-ARR-05 guard: the desugar shares the base node between the read and the
+# store, so only operands that are safe to evaluate twice are accepted.
+fn arrow_operand_simple(e: i64) -> bool:
+    val t = expr_get_tag(e)
+    if t == EXPR_IDENT or t == EXPR_INT_LIT or t == EXPR_STRING_LIT or t == EXPR_BOOL_LIT or t == EXPR_FLOAT_LIT:
+        return true
+    if t == EXPR_FIELD_ACCESS:
+        return arrow_operand_simple(expr_get_left(e))
+    if t == EXPR_INDEX:
+        return arrow_operand_simple(expr_get_left(e)) and arrow_operand_simple(expr_get_right(e))
+    false
+
+fn arrow_update_active() -> bool:
+    par_kind_get() == TOK_ARROW and not expr_nest_state.g_arrow_suppressed
+
+fn parse_arrow_update(base: i64) -> i64:
+    val start = lex_token_start_get()
+    val line = par_line_get()
+    val col = par_col_get()
+    parser_advance()
+    val name = declaration_identifier_text(par_kind_get(), par_text_get())
+    if name == "":
+        parser_error("expected method name after '->'")
+        return base
+    parser_advance()
+    if par_kind_get() != TOK_LPAREN:
+        parser_error("arrow update `x->{name}(...)` requires an argument list")
+        return base
+    parser_advance()
+    var args: [i64] = []
+    var arg_names: [text] = []
+    var k = par_kind_get()
+    if k != TOK_RPAREN:
+        val first_arg = parse_call_arg(placeholder_callee_name_is_higher_order(name))
+        args.push(first_arg.0)
+        arg_names.push(first_arg.1)
+        k = par_kind_get()
+        while k == TOK_COMMA:
+            parser_advance()
+            k = par_kind_get()
+            if k == TOK_RPAREN:
+                break
+            val next_arg = parse_call_arg(placeholder_callee_name_is_higher_order(name))
+            args.push(next_arg.0)
+            arg_names.push(next_arg.1)
+            k = par_kind_get()
+    parser_expect(TOK_RPAREN)
+    val tag = expr_get_tag(base)
+    if (tag != EXPR_IDENT and tag != EXPR_FIELD_ACCESS and tag != EXPR_INDEX) or not arrow_place_rooted_in_ident(base):
+        parser_error("arrow update `->{name}(...)` target must be a place rooted in a variable (identifier, field or index); a call result is not assignable")
+        return base
+    if tag == EXPR_IDENT and arrow_is_val(expr_get_str(base)):
+        parser_error("arrow update `{expr_get_str(base)}->{name}(...)` rebinds `{expr_get_str(base)}`, which is an immutable `val`; declare it with `var`")
+        return base
+    # ROB-ARR-05: bind non-simple operands (index expressions, fields of a
+    # var-rooted place) to fresh temps, left to right, so each evaluates once.
+    val span = flat_span_new(start, lex_token_start_get(), line, col)
+    val stab = arrow_stabilize(base, start, span, [])
+    val place = stab.0
+    var stmts: [i64] = stab.1
+    var call = expr_method_call_named(place, name, args, arg_names, span)
+    expr_owner_int_set(call, 1)  # arrow provenance, read by expr_is_arrow_update
+    # ROB-ARR-06: `x->f()?` is `x = (x.f())?`; propagation precedes the store.
+    while par_kind_get() == TOK_QUESTION:
+        parser_advance()
+        call = expr_try(call, span)
+    val assign = expr_assign(place, call, span)
+    if stmts.len() == 0:
+        return assign
+    stmts = stmts + [stmt_expr_stmt(assign, span)]
+    expr_block(stmts, 0, span)
+
+# The root of a place must be an identifier: `g().x` / `g()[i]` are rvalues.
+fn arrow_place_rooted_in_ident(e: i64) -> bool:
+    val t = expr_get_tag(e)
+    if t == EXPR_IDENT:
+        return true
+    if t == EXPR_FIELD_ACCESS or t == EXPR_INDEX:
+        return arrow_place_rooted_in_ident(expr_get_left(e))
+    false
+
+# Returns (place, pre): `place` with non-simple index operands replaced by
+# `__arrow_<start>_<n>` idents, `pre` the `val` temp bindings (threaded by value).
+fn arrow_stabilize(e: i64, start: i64, span: i64, pre: [i64]) -> (i64, [i64]):
+    if arrow_operand_simple(e):
+        return (e, pre)
+    val t = expr_get_tag(e)
+    if t == EXPR_FIELD_ACCESS:
+        val l = arrow_stabilize(expr_get_left(e), start, span, pre)
+        return (expr_field_access(l.0, expr_get_str(e), span), l.1)
+    if t == EXPR_INDEX:
+        val l = arrow_stabilize(expr_get_left(e), start, span, pre)
+        val r = arrow_temp_operand(expr_get_right(e), start, span, l.1)
+        return (expr_index(l.0, r.0, span), r.1)
+    (e, pre)
+
+fn arrow_temp_operand(e: i64, start: i64, span: i64, pre: [i64]) -> (i64, [i64]):
+    if arrow_operand_simple(e):
+        return (e, pre)
+    val tmp = "__arrow_{start}_{pre.len()}"
+    (expr_ident(tmp, span), pre + [stmt_val_decl(tmp, 0, e, span)])
+
 fn parser_postfix_span_from(base: i64) -> i64:
     """Span for a postfix node (`base.field`, `base[i]`): from the base's own
     start to the current token. Field-access and index nodes used to be
@@ -1083,6 +1290,15 @@ fn parse_postfix_on(base_expr: i64) -> i64:
             expr_set_call_type_args(base_expr, parsed_types)
     var base = base_expr
     while true:
+        # A block-bodied `match` value expression is COMPLETE once its arms
+        # close: a following `(` opens a new statement, never a call tail on
+        # the match value. Binding it mis-parsed
+        # `val a = match ...: case ...: v` + `(a > 0)` as calling the match
+        # result with `a` in its own initialiser (doc/08_tracking/bug/
+        # paren_tail_after_block_match_val_parsed_as_call_2026-08-18.md).
+        # `(match ...: ...)(args)` stays expressible with explicit parens.
+        if expr_get_tag(base) == EXPR_MATCH:
+            break
         val kind = par_kind_get()
         if kind == 164 or kind == 162:
             # G34: kind 162 (::) is treated identically to kind 164 (.) for member/variant access
@@ -1246,14 +1462,17 @@ fn parse_postfix_on(base_expr: i64) -> i64:
             if pe_is_typed_empty_array_ctor(base, call_args.len()):
                 base = expr_array_lit([], ppo_call_span)
             else:
+                parser_unit_literal_call_check(base, call_args)
                 base = expr_call_named(base, call_args, call_arg_names, ppo_call_span)
                 expr_set_call_type_args(base, explicit_call_types)
             explicit_call_types = []
+        elif kind == TOK_ARROW and arrow_update_active():
+            base = parse_arrow_update(base)
         elif kind == 131:
             parser_advance()
             val field_name = par_text_get()
             parser_expect(6)
-            base = expr_field_access(base, field_name, parser_postfix_span_from(base))
+            base = expr_optional_chain(base, field_name, parser_postfix_span_from(base))
         elif kind == 130:
             # Try/unwrap operator: expr? — propagate Err / None
             parser_advance()
@@ -1289,6 +1508,22 @@ fn parse_postfix_on(base_expr: i64) -> i64:
         return expr_compound_assign(61, base, right, 0)
     base
 
+# `f(n)_sfx` / `x.m(n)_sfx` / `a[i]_sfx`: a unit suffix glued to a call or
+# index result. Only a parenthesized group takes one (`(expr)_sfx`,
+# primary_expr.spl); otherwise `_sfx` became a confusing call argument.
+# Seed parity: postfix.rs reject_postfix_unit_suffix.
+# Bug: paren_expr_unit_suffix_parsed_as_call_2026-11-16.
+fn parser_expect_close_no_unit_suffix(close_kind: i64):
+    val close_line = par_line_get()
+    val close_col = par_col_get()
+    parser_expect(close_kind)
+    if par_kind_get() == 6 and par_line_get() == close_line and par_col_get() == close_col + 1:
+        val glued = par_text_get()
+        val g1 = if glued.len() > 1: glued[1:2] else: ""
+        val g1_alpha = (g1 >= "a" and g1 <= "z") or (g1 >= "A" and g1 <= "Z")
+        if glued.starts_with("_") and g1_alpha:
+            parser_error("unit suffix `{glued}` cannot follow a call, index or tuple result; wrap it in a group: `(...){glued}`")
+
 fn parse_postfix() -> i64:
     parser_expr_trace_step("postfix")
     var base = parse_primary_expr()
@@ -1302,6 +1537,12 @@ fn parse_postfix() -> i64:
         elif par_kind_get() == 164 or par_kind_get() == 162:
             expr_set_call_type_args(base, parsed_types)
     while true:
+        # A block-bodied `match` value expression is COMPLETE once its arms
+        # close: a following `(` opens a new statement, never a call tail on
+        # the match value (same guard as parse_postfix_on; see
+        # doc/08_tracking/bug/paren_tail_after_block_match_val_parsed_as_call_2026-08-18.md).
+        if expr_get_tag(base) == EXPR_MATCH:
+            break
         val kind = par_kind_get()
         if kind == 164 or kind == 162:
             # G34: kind 162 (::) is treated identically to kind 164 (.) for member/variant access
@@ -1410,7 +1651,7 @@ fn parse_postfix() -> i64:
                         call_args.push(next_arg.0)
                         call_arg_names.push(next_arg.1)
                         pp_after_lparen = par_kind_get()
-                parser_expect(141)
+                parser_expect_close_no_unit_suffix(141)
                 val pp_call_span = flat_span_new(pp_call_start, lex_token_start_get(), pp_call_line, pp_call_col)
                 base = expr_method_call_named(base, field_name, call_args, call_arg_names, pp_call_span)
             else:
@@ -1455,7 +1696,7 @@ fn parse_postfix() -> i64:
                         base = expr_slice(base, index_expr, end_idx, 0)
                 else:
                     if not validate_bracket_expr(index_expr, "index expression"): return base
-                    parser_expect(145)
+                    parser_expect_close_no_unit_suffix(145)
                     base = expr_index(base, index_expr, parser_postfix_span_from(base))
         elif kind == 140:
             # Function call: f(args)
@@ -1484,22 +1725,26 @@ fn parse_postfix() -> i64:
                     call_args.push(next_arg.0)
                     call_arg_names.push(next_arg.1)
                     pp_after_lparen = par_kind_get()
-            parser_expect(141)
+            parser_expect_close_no_unit_suffix(141)
             val pp_call_span = flat_span_new(pp_call_start, lex_token_start_get(), pp_call_line, pp_call_col)
             if pe_is_typed_empty_array_ctor(base, call_args.len()):
                 base = expr_array_lit([], pp_call_span)
             else:
+                parser_unit_literal_call_check(base, call_args)
                 base = expr_call_named(base, call_args, call_arg_names, pp_call_span)
                 expr_set_call_type_args(base, explicit_call_types)
             explicit_call_types = []
             if parser_expr_trace_line_enabled():
                 eprint("[parser-expr] call:done callee={expr_get_str(base)} argc={call_args.len()}")
+        elif kind == TOK_ARROW and arrow_update_active():
+            base = parse_arrow_update(base)
         elif kind == 131:
-            # Optional chaining: x?.field
+            # Optional chaining (safe navigation): x?.field / x?.method(args).
+            # Try-then-access is spelled (x?).field / (x?).method(args).
             parser_advance()
             val field_name = par_text_get()
             parser_expect(6)
-            base = expr_field_access(base, field_name, parser_postfix_span_from(base))
+            base = expr_optional_chain(base, field_name, parser_postfix_span_from(base))
         elif kind == 130:
             # Try/unwrap operator: expr? — propagate Err / None
             parser_advance()
@@ -1522,6 +1767,41 @@ use compiler.core.parser_primary.*
 # ===== Exports =====
 export parse_expr, parse_assignment, parse_or, parse_and, parse_not
 export parse_comparison, parse_null_coalesce, parse_range
-export parse_addition, parse_multiplication, parse_unary, parse_postfix
+export parse_bit_or, parse_addition, parse_multiplication, parse_unary, parse_postfix
 export parse_call_arg, parse_postfix_on, parse_binary_from
 export parse_int_text
+
+# ===== ExprNestState snapshot (ParseContext stage 1) =====
+# See doc/05_design/compiler/frontend/parse_context_per_context_state.md.
+# take moves this file's parse state out and installs fresh initial
+# owners; install makes a taken snapshot active again.
+pub struct ExprNestState:
+    g_expr_nest_depth: i64
+    g_arrow_suppressed: bool
+    g_arrow_names: [text]
+    g_arrow_is_val: [bool]
+    g_arrow_marks: [i64]
+
+fn expr_nest_state_fresh() -> ExprNestState:
+    ExprNestState(g_expr_nest_depth: 0, g_arrow_suppressed: false, g_arrow_names: [], g_arrow_is_val: [], g_arrow_marks: [])
+
+var expr_nest_state: ExprNestState = expr_nest_state_fresh()
+
+pub fn expr_nest_state_take() -> ExprNestState:
+    val s = expr_nest_state
+    expr_nest_state = expr_nest_state_fresh()
+    s
+
+pub fn expr_nest_state_install(s: ExprNestState):
+    expr_nest_state = s
+
+export ExprNestState, expr_nest_state_take, expr_nest_state_install, arrow_suppress_set, arrow_scope_enter, arrow_scope_leave, arrow_fn_enter, arrow_note_val, arrow_note_var, arrow_note_tuple
+
+# Arrow provenance: the METHOD_CALL that `x->m()` desugars to carries int 1
+# (method calls use no int slot otherwise), so the type checker can name `->`
+# instead of reporting a plain assignment mismatch.
+# @allow(primitive_api) flat AST node index, like every other expr_* accessor
+@allow(primitive_api)
+pub fn expr_is_arrow_update(e: i64) -> bool:
+    expr_get_tag(e) == EXPR_METHOD_CALL and expr_get_int(e) == 1
+export expr_is_arrow_update

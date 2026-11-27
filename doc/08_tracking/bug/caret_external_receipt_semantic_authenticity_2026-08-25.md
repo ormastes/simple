@@ -1,7 +1,10 @@
 # Caret external receipt semantic authenticity gap
 
-Status: open. The five external Caret must-check rows remain `TODO` and generic
-signed receipts are deliberately rejected until lane-specific validators land.
+Status: fixed 2026-11-11 (lane ne3) — fail-closed quarantine restored and
+re-verified live (regression test PASS: all five generic signed Caret receipts
+fail closed at the semantic quarantine). The five rows remain `TODO` pending
+the versioned validators below; that is deliberate tracked follow-up, not an
+open defect. See "Addendum 2026-11-11" at the end of this file.
 
 `check-external-must-check-receipt.shs` previously accepted a trusted signature
 over four generic blobs and exact `acceptance.*=PASS` labels for local Slang,
@@ -11,6 +14,40 @@ process reaping, concurrent supervision, or real PTY ownership. Provisioning a
 trusted key would therefore have enabled semantic fabrication. The importer now
 fails these gates closed after signature authentication and before generic
 attachments can promote a row.
+
+## Status 2026-11-05 — quarantine restored, regression fix verified
+
+The fail-closed quarantine for the five external Caret rows was lost when the
+main tree was transplanted onto release/1.0 (88aac2ffe28 removed both the
+quarantine and its test harness from the pre-transplant state at d55b54e548e),
+reopening the exact fabrication path this bug documents: a trusted signature
+plus well-formed generic `acceptance.*=PASS` labels reached evidence-attachment
+loading and would have promoted a row.
+
+Fix: restored the post-authentication, pre-attachment quarantine in
+`scripts/check/check-external-must-check-receipt.shs` (immediately after the
+reviewer-signature `openssl dgst` verification, before any evidence blob is
+loaded). All five rows
+(`caret-local-llm-launch`, `caret-installed-provider-launches`,
+`caret-agent-runtime-primitives`, `caret-production-multi-manager-launch`,
+`caret-smux-multi-launch`) now fail with
+`caret-semantic-validator-not-implemented-<gate>`.
+
+Coverage: new self-contained regression test
+`test/01_unit/scripts/caret_external_receipt_semantic_quarantine_test.shs`
+builds a fixture reviewer key + policy + committed evidence blobs, signs a
+generic artifact per Caret row, points the first attachment at a hostile path
+to prove quarantine ordering (after signature authentication, before
+attachment loading), and asserts the quarantine failure for all five rows.
+TDD evidence: RED — before the fix the validator admitted the signed receipt
+past authentication (test observed `unsafe-evidence-path` only because the
+attachment path was deliberately hostile); GREEN — after the fix all five rows
+fail closed (`PASS: all five generic signed Caret receipts fail closed at the
+semantic quarantine`).
+
+The versioned lane-specific validators listed below remain the follow-up work
+required to ever promote these rows; the quarantine stays until they land. The
+wrapper, messaging, and batch-adapter rows remain separate bootstrap checks.
 
 ## Required versioned validators
 
@@ -39,3 +76,97 @@ evidence attachments.
 The automated wrapper, messaging, and batch-adapter rows remain separate
 bootstrap checks and must never promote these production rows.
 
+
+
+## Addendum 2026-11-11 — lane ne3: FIXED — fabrication path closed; quarantine
+## re-verified live on this lane
+
+Traversed on work/p3-ne3-20261111 (origin/release/1.0.0 tip 93490a99c5d8).
+
+The 2026-11-05 regression fix was re-executed here, not just re-read:
+
+```
+$ sh test/01_unit/scripts/caret_external_receipt_semantic_quarantine_test.shs
+PASS: all five generic signed Caret receipts fail closed at the semantic quarantine
+(exit 0)
+```
+
+(log: `build/review/p3fix-ne3-20261111-logs/row7_quarantine_test.log`). The test
+builds a fixture reviewer key + policy, signs a generic artifact per Caret row
+(installed-provider, runtime-primitives, multi-manager, smux, and the local
+row's gate list in `check-external-must-check-receipt.shs:157`), points the
+first attachment at a hostile path to prove quarantine ordering, and asserts
+the post-authentication/pre-attachment failure for all five rows — all five
+fail closed as required.
+
+Residual, deliberately out of scope of the defect itself: the five external
+rows remain `TODO` until the versioned lane-specific validators listed above
+land (installed providers, runtime primitives, multi-manager, smux PTY,
+local-Slang generation endpoint). That follow-up is a feature effort, not an
+open security hole: with the quarantine in place, a trusted signature over
+generic blobs can no longer promote a row.
+
+## Addendum 2026-11-11 — lane p3-caret1: fixed status confirmed at tip; live re-run blocked by host
+
+Traversed on work/p3-caret1-20261111 (origin/release/1.0.0 tip 79d5af6723f6).
+
+The quarantined validator and this regression test are unchanged at tip, and the
+2026-11-11 lane-ne3 addendum above records a live re-executed PASS
+(`PASS: all five generic signed Caret receipts fail closed at the semantic
+quarantine`, exit 0, same day). This lane attempted its own live re-verification
+three times; all three runs of
+test/01_unit/scripts/caret_external_receipt_semantic_quarantine_test.shs stalled
+inside the external validator on this shared Windows host under concurrent lane
+build load (MSYS2 fork failure `fork: retry: Resource temporarily unavailable`,
+exit 0xC0000142; fixture temp-dir instability; logs:
+build/review/p3fix-caret1-20261111-logs/row2_*.log). The quarantine code path
+itself was additionally confirmed by source inspection at tip
+(scripts/check/check-external-must-check-receipt.shs:149-160: reviewer signature
+`openssl dgst` verification at :149, then the five caret gates fail closed with
+`caret-semantic-validator-not-implemented-<gate>` before any evidence attachment
+is loaded at :162-164).
+
+Verdict: fixed (lane ne3, same-day live PASS stands); this lane's live re-run is
+BLOCKED by host instability — do not re-run the quarantine test on this host
+under load. The five external rows remain deliberate TODO pending the versioned
+validators, as the header states.
+
+## Addendum 2026-11-11 — lane p3-caret2: quiet-host live re-run PASSES (second
+## independent live confirmation)
+
+Traversed on work/p3-caret2-20261111 (origin/release/1.0.0 tip
+66506fda143ca).
+
+The box was quiet (no concurrent lane builds). The bounded single attempt:
+
+```
+$ sh test/01_unit/scripts/caret_external_receipt_semantic_quarantine_test.shs
+PASS: all five generic signed Caret receipts fail closed at the semantic quarantine
+(exit 0)
+```
+
+(log: build/review/p3fix-caret2-20261111-logs/t4_quarantine_test.log). This
+is the second independent live execution of the quarantine regression (lane
+ne3 same-day PASS + this lane), in addition to lane p3-caret1's source
+confirmation at tip. The fabrication path stays closed: reviewer signature
+authentication succeeds, then all five caret gates fail closed with
+`caret-semantic-validator-not-implemented-<gate>` before any evidence
+attachment loads. The five external rows remain deliberate TODO pending the
+versioned validators, as the header states.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**FIXED (confirmed)** — Fail-closed quarantine restored; two independent live PASSes (ne3 + caret2 quiet-host re-run). Five external rows remain deliberate TODO pending versioned validators.
+
+
+---
+
+## 2026-11-13 triage (live-P3 lane l1, work/live-p3-l1-20261113, base f790f7f266e)
+
+**FIXED (confirmed)** — Fail-closed quarantine intact at this base; two independent live PASSes on record (ne3 + caret2 quiet-host). Five external rows remain deliberate TODO pending versioned validators.
+
+## 2026-11-13 resolution (P3 triage sweep, work/p3-triage-20261113) — row closed `fixed`
+
+Seed: scratchpad `vkinit/seed-fix`, runs capped `systemd-run MemoryMax=16G timeout 900`, cwd = this worktree at origin/release/1.0.0 `59caff4fd1b`.
+
+Evidence: `5fe5600c582` is an ancestor of origin/release/1.0.0. Live: `sh test/01_unit/scripts/caret_external_receipt_semantic_quarantine_test.shs` exit 0, `PASS: all five generic signed Caret receipts fail closed at the semantic quarantine` — signature-valid but semantically unvalidated receipts are rejected (`caret-semantic-validator-not-implemented-<gate>`), which closes the authenticity gap. Building the versioned semantic validators is feature work, not this defect.

@@ -1,0 +1,101 @@
+#!/bin/sh
+set -eu
+
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)
+POLICY="$ROOT/scripts/release/phase-ladder-release-manifest.shs"
+TMP=$(mktemp -d /tmp/simple-phase-ladder-release.XXXXXX)
+trap 'rm -rf "$TMP"' EXIT HUP INT TERM
+
+fail() {
+    echo "phase_ladder_release_manifest_test: FAIL: $*" >&2
+    exit 1
+}
+SOURCE=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+
+receipt() {
+    platform=$1 rung=$2 status=$3
+    dir="$TMP/receipts/bootstrap-ladder-receipts-$platform-r$rung"
+    mkdir -p "$dir"
+    cat > "$dir/attempt.sdn" <<EOF
+schema: phase-ladder-attempt-v1
+source_revision: $SOURCE
+platform: $platform
+role: planning
+exit_status: $status
+EOF
+}
+handoff() {
+    platform=$1 phase=$2 rung=$3
+    dir="$TMP/handoffs/ladder-$platform-r$rung/$platform-p$phase"
+    mkdir -p "$dir"
+    printf '%s\n' "$phase" > "$dir/PHASE"
+    printf 'compiler %s phase %s\n' "$platform" "$phase" > "$dir/simple"
+}
+package() {
+    version=$1 platform=$2 bytes=$3
+    asset="simple-bootstrap-$version-$platform.spk"
+    printf '%s\n' "$bytes" > "$TMP/packages/$asset"
+    (cd "$TMP/packages" && sha256sum "$asset" > "$asset.sha256")
+}
+
+mkdir -p "$TMP/handoffs" "$TMP/receipts" "$TMP/packages"
+handoff linux-riscv64 2 1
+receipt linux-riscv64 1 0
+package 1.0.0-rc.34 linux-riscv64 qualified-riscv
+receipt darwin-arm64 4 86
+sh "$POLICY" rc-1.0.0-rc.34 "$SOURCE" all \
+    "$TMP/handoffs" "$TMP/receipts" "$TMP/packages" "$TMP/package-failures" "$TMP/partial.sdn" \
+    > "$TMP/partial.out" || fail "one qualified platform did not admit an RC"
+grep -Fx 'tag: rc-1.0.0-rc.34' "$TMP/partial.sdn" >/dev/null || fail "manifest tag missing"
+grep -Fx 'version: 1.0.0-rc.34' "$TMP/partial.sdn" >/dev/null || fail "asset version not bound to RC tag"
+grep -Fx 'qualified_platform_count: 1' "$TMP/partial.sdn" >/dev/null || fail "partial count wrong"
+grep -A4 -F '  - platform: linux-riscv64' "$TMP/partial.sdn" | grep -Fx '    status: qualified' >/dev/null || fail "qualified lane missing"
+grep -A4 -F '  - platform: darwin-arm64' "$TMP/partial.sdn" | grep -Fx '    status: failed' >/dev/null || fail "failed lane not recorded"
+grep -A4 -F '  - platform: windows-x86_64' "$TMP/partial.sdn" | grep -Fx '    status: missing' >/dev/null || fail "missing lane not recorded"
+grep -A2 -F '  - platform: freebsd-x86_64' "$TMP/partial.sdn" | grep -Fx '    status: missing' >/dev/null || fail "unavailable lane not recorded"
+
+rm -rf "$TMP/handoffs" "$TMP/receipts" "$TMP/packages"
+mkdir -p "$TMP/handoffs" "$TMP/receipts" "$TMP/packages"
+handoff linux-x86_64 3 1
+receipt linux-x86_64 1 0
+sed -i 's/^source_revision: .*/source_revision: bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/' "$TMP/receipts/bootstrap-ladder-receipts-linux-x86_64-r1/attempt.sdn"
+package 1.0.0-rc.35 linux-x86_64 mismatched-source
+if sh "$POLICY" rc-1.0.0-rc.35 "$SOURCE" all \
+    "$TMP/handoffs" "$TMP/receipts" "$TMP/packages" "$TMP/package-failures" "$TMP/provenance.sdn" \
+    > "$TMP/provenance.out" 2>&1; then
+    fail "mismatched source receipt qualified a compiler"
+fi
+grep -Fx 'qualified_platform_count: 0' "$TMP/provenance.sdn" >/dev/null || fail "bad provenance counted as qualified"
+grep -A4 -F '  - platform: linux-x86_64' "$TMP/provenance.sdn" | grep -Fx '    status: failed_provenance' >/dev/null || fail "provenance failure missing from manifest"
+
+rm -rf "$TMP/handoffs" "$TMP/receipts" "$TMP/packages"
+mkdir -p "$TMP/handoffs" "$TMP/receipts" "$TMP/packages"
+if sh "$POLICY" rc-1.0.0-rc.35 "$SOURCE" all \
+    "$TMP/handoffs" "$TMP/receipts" "$TMP/packages" "$TMP/package-failures" "$TMP/zero.sdn" \
+    > "$TMP/zero.out" 2>&1; then
+    fail "zero-artifact RC accepted"
+fi
+grep -Fx 'qualified_platform_count: 0' "$TMP/zero.sdn" >/dev/null || fail "zero-artifact count missing"
+grep -Fx 'release_status: blocked' "$TMP/zero.sdn" >/dev/null || fail "zero-artifact release status missing"
+
+if sh "$POLICY" v1.0.0 "$SOURCE" all \
+    "$TMP/handoffs" "$TMP/receipts" "$TMP/packages" "$TMP/package-failures" "$TMP/stable.sdn" \
+    > "$TMP/stable.out" 2>&1; then
+    fail "stable tag passed prerelease partial policy"
+fi
+
+handoff linux-x86_64 3 1
+receipt linux-x86_64 1 0
+asset="simple-bootstrap-1.0.0-rc.36-linux-x86_64.spk"
+printf 'package bytes\n' > "$TMP/packages/$asset"
+printf '%s  %s\n' "$(printf 'different bytes\n' | sha256sum | awk '{print $1}')" "$asset" > "$TMP/packages/$asset.sha256"
+if sh "$POLICY" rc-1.0.0-rc.36 "$SOURCE" all \
+    "$TMP/handoffs" "$TMP/receipts" "$TMP/packages" "$TMP/package-failures" "$TMP/integrity.sdn" \
+    > "$TMP/integrity.out" 2>&1; then
+    fail "checksum failure was masked by an available compiler"
+fi
+grep -Fx 'qualified_platform_count: 0' "$TMP/integrity.sdn" >/dev/null || fail "failed integrity package counted as qualified"
+grep -A4 -F '  - platform: linux-x86_64' "$TMP/integrity.sdn" | grep -Fx '    status: failed_integrity' >/dev/null || fail "integrity failure missing from manifest"
+grep -Fx 'release_status: blocked' "$TMP/integrity.sdn" >/dev/null || fail "integrity failure did not block release"
+
+echo "phase_ladder_release_manifest_test: PASS"

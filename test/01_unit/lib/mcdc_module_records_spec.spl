@@ -1,0 +1,56 @@
+"""SDN manifest/record codec and shadow-tree path mapping for MC/DC module coverage."""
+# @req REQ-MCDC-MOD-006
+# design: doc/05_design/generics_coverage_mcdc.md
+
+use std.spec
+use std.nogc_sync_mut.mcdc.module_decisions.*
+use std.nogc_sync_mut.mcdc.module_records.*
+
+describe "mcdc module records":
+    it "maps source paths to de-numbered shadow paths":
+        step("SIMPLE_LIB lookups use the dotted module path verbatim")
+        val compiler = mcdc_shadow_rel_paths("src/compiler/30.types/type_infer/generic_calls.spl")
+        expect(compiler.len()).to_equal(1)
+        expect(compiler[0]).to_equal("compiler/types/type_infer/generic_calls.spl")
+        val lib = mcdc_shadow_rel_paths("src\\lib\\nogc_sync_mut\\mcdc\\x.spl")
+        expect(lib.len()).to_equal(2)
+        expect(lib[0]).to_equal("lib/nogc_sync_mut/mcdc/x.spl")
+        expect(lib[1]).to_equal("lib/mcdc/x.spl")
+        expect(mcdc_shadow_rel_paths("foo/bar.spl").len()).to_equal(0)
+
+    it "quotes and splits SDN cells with escapes":
+        expect(mcdc_sdn_quote("a, \"b\"\\n")).to_equal("\"a, \\\"b\\\"\\\\n\"")
+        val cells = mcdc_sdn_split_row("3, \"x, \\\"y\\\"\", true")
+        expect(cells.len()).to_equal(3)
+        expect(cells[0]).to_equal("3")
+        expect(cells[1]).to_equal("x, \"y\"")
+        expect(cells[2]).to_equal("true")
+
+    it "round-trips the manifest through SDN tables":
+        step("Instrument a header whose call argument contains a comma and quotes")
+        val res = mcdc_rewrite_logical_line("if a and f(\"q, \\\"z\\\"\"):", "src/m.spl", 3, 0)
+        expect(res.decisions.len()).to_equal(1)
+        val manifest = mcdc_manifest_encode(res.decisions)
+        val conditions = mcdc_conditions_encode(res.decisions)
+        expect(manifest).to_start_with("|id, file, line, col, kind, conditions, tree, expr|\n")
+        expect(conditions).to_start_with("|decision, index, line, col, expr|\n")
+        val back = mcdc_manifest_decode(manifest, conditions)
+        expect(back.len()).to_equal(1)
+        expect(back[0].id).to_equal(0)
+        expect(back[0].file).to_equal("src/m.spl")
+        expect(back[0].line).to_equal(3)
+        expect(back[0].kind).to_equal("if")
+        expect(back[0].conditions.len()).to_equal(2)
+        expect(back[0].conditions[1].expr).to_equal("f(\"q, \\\"z\\\"\")")
+        expect(mcdc_tree_to_postfix(back[0])).to_equal("c0 c1 &")
+        expect(back[0].root).to_equal(2)
+
+    it "decodes probe record tables":
+        val recs = mcdc_records_decode("|decision, values, evaluated, outcome|\n0, 3, 3, true\n7, 0, 1, false\n")
+        expect(recs.len()).to_equal(2)
+        expect(recs[0].decision).to_equal(0)
+        expect(recs[0].values).to_equal(3)
+        expect(recs[0].outcome).to_equal(true)
+        expect(recs[1].decision).to_equal(7)
+        expect(recs[1].evaluated).to_equal(1)
+        expect(recs[1].outcome).to_equal(false)

@@ -51,3 +51,12 @@ Watch wall time until the "timed out after 21600s" error appears (observed at
 - `native_build_fixed_cost_floor_hides_incrementality_2026-08-08`
 - `native_build_cache_scope_key_renders_corrupt_persistent_cache_2026-08-08`
 
+
+## Verification 2026-11-25 (fleet agent, worktree wt-p2w3-aj, release/1.0.0)
+
+The FIXED 2026-08-21 status is confirmed by content: the digit-value parse
+fix and the `pub` visibility this record names are present —
+`src/app/cli/native_build_main.spl:345` `pub fn native_build_parse_secs` and
+`:360` `pub fn native_build_timeout_ms`. No re-run of the multi-hour
+native-build repro was attempted (out of budget for this lane); closure
+rests on the in-file 2026-08-21 fix evidence plus this source check.

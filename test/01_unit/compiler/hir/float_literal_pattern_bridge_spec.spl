@@ -1,0 +1,93 @@
+# @cover src/compiler/10.frontend/_FlatAstBridge/convert_nodes.spl
+# @cover src/compiler/20.hir/hir_lowering/_Expressions/expression_components.spl
+use std.spec.*
+use compiler.core.ast.{ast_reset}
+use compiler.core.ast_expr.{expr_call, expr_field_access, expr_float_lit, expr_ident, expr_method_call, expr_unary}
+use compiler.frontend._FlatAstBridge.convert_nodes.{convert_flat_pattern}
+use compiler.frontend.parser_types_expr.{ExprKind, PatternKind}
+use compiler.hir.hir_definitions.{HirExprKind, HirPattern, HirPatternKind, HirPatternPayload}
+use compiler.hir.hir_lowering.types.{HirLowering}
+
+fn float_pattern_hir_expr(pattern: HirPattern) -> text:
+    match pattern.kind:
+        case HirPatternKind.Literal(value):
+            match value.kind:
+                case HirExprKind.FloatLexeme(lexeme, _): return lexeme
+                case _: fail("float match literal was not retained as a HIR float lexeme")
+        case _: fail("float match literal was not retained as a HIR literal pattern")
+
+fn nested_float_pattern_hir_expr(pattern: HirPattern) -> text:
+    match pattern.kind:
+        case HirPatternKind.Enum(_, variant, payload):
+            expect(variant).to_equal("Circle")
+            if val actual_payload = payload:
+                match actual_payload:
+                    case HirPatternPayload.Tuple(elements):
+                        expect(elements.len()).to_equal(1)
+                        return float_pattern_hir_expr(elements[0])
+                    case _: fail("float enum payload was not a tuple")
+            else:
+                fail("float enum payload was absent")
+        case _: fail("float enum payload was not retained as an enum pattern")
+
+describe "float literal patterns survive the flat AST bridge and HIR lowering":
+    it "keeps distinct positive float literal values as literals instead of wildcards":
+        step("Preserve float lexemes through frontend pattern conversion and HIR lowering")
+        ast_reset()
+        val pattern = convert_flat_pattern(expr_float_lit("1.5", 0))
+        match pattern.kind:
+            case PatternKind.Literal(value):
+                match value.kind:
+                    case ExprKind.FloatLexeme(lexeme): expect(lexeme).to_equal("1.5")
+                    case _: fail("frontend float pattern did not retain its float lexeme")
+            case _: fail("frontend converted a float literal pattern to a non-literal")
+        var lowering = HirLowering.new()
+        expect(float_pattern_hir_expr(lowering.lower_pattern(pattern))).to_equal("1.5")
+
+        ast_reset()
+        val distinct = convert_flat_pattern(expr_float_lit("2.5", 0))
+        var other_lowering = HirLowering.new()
+        expect(float_pattern_hir_expr(other_lowering.lower_pattern(distinct))).to_equal("2.5")
+
+    it "keeps a negative float literal as a literal pattern":
+        step("Preserve the already-supported unary-minus float pattern")
+        ast_reset()
+        val negative = expr_unary(61, expr_float_lit("1.5", 0), 0)
+        val pattern = convert_flat_pattern(negative)
+        match pattern.kind:
+            case PatternKind.Literal(value):
+                match value.kind:
+                    case ExprKind.Unary(_, operand):
+                        match operand.kind:
+                            case ExprKind.FloatLexeme(lexeme): expect(lexeme).to_equal("1.5")
+                            case _: fail("negative float pattern lost its float lexeme")
+                    case _: fail("negative float pattern lost its unary operator")
+            case _: fail("negative float pattern became a wildcard")
+
+    it "keeps a float literal nested in an enum payload":
+        step("Preserve a float sub-pattern inside Shape.Circle")
+        ast_reset()
+        val shape = expr_ident("Shape", 0)
+        val circle = expr_field_access(shape, "Circle", 0)
+        val call = expr_call(circle, [expr_float_lit("1.0", 0)], 0)
+        val pattern = convert_flat_pattern(call)
+        var lowering = HirLowering.new()
+        expect(nested_float_pattern_hir_expr(lowering.lower_pattern(pattern))).to_equal("1.0")
+
+        ast_reset()
+        val method_pattern = convert_flat_pattern(expr_method_call(
+            expr_ident("Shape", 0), "Circle", [expr_float_lit("2.0", 0)], 0))
+        var method_lowering = HirLowering.new()
+        expect(nested_float_pattern_hir_expr(method_lowering.lower_pattern(method_pattern))).to_equal("2.0")
+
+    it "leaves an explicit fallback wildcard intact":
+        step("Keep the wildcard fallback distinct from float literal arms")
+        ast_reset()
+        val pattern = convert_flat_pattern(expr_ident("_", 0))
+        match pattern.kind:
+            case PatternKind.Wildcard: ()
+            case _: fail("explicit wildcard fallback changed shape")
+        var lowering = HirLowering.new()
+        match lowering.lower_pattern(pattern).kind:
+            case HirPatternKind.Wildcard: ()
+            case _: fail("explicit wildcard fallback was not preserved in HIR")

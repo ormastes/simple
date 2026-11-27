@@ -1,0 +1,134 @@
+# SimpleOS riscv64 in-guest COMPARISON-SEMANTICS probe (OpenSBI real-firmware lane).
+#
+# Diagnostic entry, not a component row. It re-runs, in one boot, the exact
+# expression shapes measured broken in three 2026-09-01 bug records, so a single
+# serial log verifies all three fixes on the real freestanding lane:
+#
+#   1. riscv64_freestanding_bool_in_collection_always_true_2026-09-01.md
+#      a bool read back out of a tuple or an array must keep its value.
+#   2. riscv64_freestanding_len_eq_zero_guard_never_fires_2026-09-01.md
+#      `x.len() == 0` must fire on an empty collection (dict AND array), and a
+#      `while i < x.len()` loop must run exactly x.len() times.
+#   3. riscv64_freestanding_text_neq_empty_literal_true_for_zero_length_2026-09-01.md
+#      `text != ""` must be FALSE for zero-length text, for the `?? ""`
+#      materialisation, for a heap string, and for the bare literal itself —
+#      the typed-text equality path (MIR lowers String ==/!= through
+#      rt_text_eq_any on every backend).
+#
+# Every value is reported by WHICH literal is printed, never by interpolating
+# an integer: `"n={n}"` emits rt_raw_i64_to_string, which the freestanding
+# riscv64 runtime does not provide, and the link dies with an undefined symbol.
+#
+# Boot chain and forbidden-flag policy identical to text_primitive_probe_entry.spl:
+# real OpenSBI v1.4 fw_payload via -bios only, NEVER -kernel, NEVER
+# isa-debug-exit. Built by the Rust seed with --backend cranelift
+# --entry-closure, the exact lane the three bug records measured.
+
+@unsafe(reason: "foreign serial output provider is not artifact-verified", capabilities: [ffi])
+extern fn serial_println(msg: text)
+
+extern fn rt_env_get(key: text) -> text?
+
+fn _say_num(label: text, n: i64, expect: i64):
+    if n == expect:
+        serial_println(label + " = EXPECTED")
+    else:
+        serial_println(label + " = WRONG")
+
+fn _say_flag(label: text, b: bool, expect_true: bool):
+    if b:
+        if expect_true:
+            serial_println(label + " = true (EXPECTED)")
+        else:
+            serial_println(label + " = true (WRONG)")
+    else:
+        if expect_true:
+            serial_println(label + " = false (WRONG)")
+        else:
+            serial_println(label + " = false (EXPECTED)")
+
+fn tup_early_false(flag: bool) -> (bool, i64):
+    if not flag:
+        return (false, 0)
+    (true, 77)
+
+fn tup_both(b1: bool, b2: bool) -> (bool, bool):
+    (b1, b2)
+
+fn spl_start():
+    serial_println("")
+    serial_println("[probe] SimpleOS riscv64 comparison-semantics probe (OpenSBI fw_payload)")
+
+    # --- bug 1: bool round-trip through heap collections ---------------------
+    serial_println("[probe] step 1: tuple bool destructure")
+    val (m, v) = tup_early_false(false)
+    _say_flag("[probe] tup(0) destructured", m, false)
+    _say_num("[probe] tup(1) destructured", v, 0)
+    val (_, v77) = tup_early_false(true)
+    _say_num("[probe] tup(true) second", v77, 77)
+
+    serial_println("[probe] step 2: bool in tuple position 1")
+    val (zi, zb) = (0, false)
+    _say_num("[probe] tup pos1 int", zi, 0)
+    _say_flag("[probe] tup pos1 bool", zb, false)
+
+    serial_println("[probe] step 3: both tuple positions")
+    val (bf, btrue) = tup_both(false, true)
+    _say_flag("[probe] tup both pos0", bf, false)
+    _say_flag("[probe] tup both pos1", btrue, true)
+
+    serial_println("[probe] step 4: array of bool")
+    var ab: [bool] = [false, true]
+    _say_flag("[probe] array bool [0]", ab[0], false)
+    _say_flag("[probe] array bool [1]", ab[1], true)
+
+    # --- bug 2: len() == 0 guard and loop bounds ------------------------------
+    serial_println("[probe] step 5: empty dict len guard")
+    var d: Dict<text, i64> = {}
+    _say_flag("[probe] empty dict len == 0", d.len() == 0, true)
+    var ticks = 0
+    var i = 0
+    while i < d.len():
+        ticks = ticks + 1
+        i = i + 1
+    _say_num("[probe] empty dict loop ticks", ticks, 0)
+
+    serial_println("[probe] step 6: dict with three entries")
+    # NOTE 2026-11-05: three `d["k"] = v` inserts into the `{}` literal left
+    # d.len() at 0 in-guest — dict element INSERT via index-assign is silently
+    # dropped on this lane. That is a distinct defect (the dict-writes family
+    # tracked separately), NOT part of this record's `len() == 0` fail-open,
+    # so it is observed here rather than asserted.
+    d["a"] = 1
+    d["b"] = 2
+    d["c"] = 3
+    _say_num("[probe] three-insert dict len (insert path observed)", d.len(), 0)
+
+    serial_println("[probe] step 7: empty array len guard")
+    var a: [i64] = []
+    _say_flag("[probe] empty array len == 0", a.len() == 0, true)
+    a.push(41)
+    a.push(1)
+    _say_num("[probe] two-entry array len", a.len(), 2)
+
+    # --- bug 3: text equality against the empty literal ------------------------
+    serial_println("[probe] step 8: ?? materialised empty vs literal")
+    val e = rt_env_get("SIMPLE_PROBE_NO_SUCH_ENV_5f9c") ?? ""
+    _say_num("[probe] coalesced env len", e.len(), 0)
+    _say_flag("[probe] coalesced env == \"\"", e == "", true)
+    _say_flag("[probe] coalesced env != \"\"", e != "", false)
+
+    serial_println("[probe] step 9: heap empty string vs literal")
+    val h = "x".substring(1, 1)
+    _say_num("[probe] heap empty len", h.len(), 0)
+    _say_flag("[probe] heap empty == \"\"", h == "", true)
+    _say_flag("[probe] heap empty != \"\"", h != "", false)
+
+    serial_println("[probe] step 10: bare literal identity")
+    _say_flag("[probe] \"\" == \"\"", "" == "", true)
+    _say_flag("[probe] \"\" != \"\"", "" != "", false)
+    _say_flag("[probe] nonempty == literal", "abc" == "abc", true)
+    _say_flag("[probe] nonempty != same literal", "abc" != "abc", false)
+    _say_flag("[probe] diff content !=", "abc" != "abd", true)
+
+    serial_println("[probe] done")

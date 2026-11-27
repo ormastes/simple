@@ -1,0 +1,230 @@
+# Representation boundary binding for impl-block methods.
+#
+# E-MC-REP-001 root fix: a method declared in an `impl T:` block must bind as
+# a `method` owned by the impl frame named `T` (never a `nested_callable`
+# barrier), so its `@representation_boundary` manifest validates and exempts
+# exactly that method. Genuinely nested `fn` declarations (inside function
+# bodies or inside impl methods) stay fail-closed `nested_callable` rows, and
+# an unannotated impl method with an unsafe region still requires a manifest.
+
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.config.{Logger}
+use compiler.common.assurance.policy_schema.{AssuranceStrictness}
+use compiler.common.assurance.representation_context_v1.{
+    RepresentationProjectContextV1, representation_context_from_project_v1,
+    representation_source_context_v1}
+use compiler.common.assurance.representation_manifest_v1.{RepresentationDeclarationV1}
+use compiler.common.module_path_naming.{module_logical_name_from_path}
+use compiler.frontend.core.representation_declarations_v1.{parse_representation_source_v1}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_types.{HirModule}
+use compiler.driver.hir_semantic_consumer_v1.{collect_module_representation_receipt_v1}
+use compiler.driver.hir_typecheck_consumer_v1.{HirTypecheckReceiptV1}
+use compiler.semantics.representation_boundary.hir_binding.{representation_bind_hir_v1}
+use compiler.semantics.representation_boundary.source_binding.{representation_bind_source_v1}
+use compiler.semantics.representation_boundary.validation.{
+    representation_index_build_v1, representation_manifest_validate_v1}
+
+val IMPL_PROJECT_PATH = "/tmp/rep_impl_method_project.sdn"
+val IMPL_PROJECT_SOURCE = "project:\n  name: fixture_pkg\n"
+
+fn impl_fixture_project_v1() -> RepresentationProjectContextV1:
+    val project = representation_context_from_project_v1(IMPL_PROJECT_SOURCE, IMPL_PROJECT_PATH)
+    expect(project.error).to_equal("")
+    project
+
+fn parse_impl_fixture_v1(source: text, path: text, module_path: text) -> [RepresentationDeclarationV1]:
+    parse_representation_source_v1(source, path, "fixture_pkg", module_path)
+
+fn lower_impl_fixture_v1(source: text, path: text, module_name: text) -> HirModule:
+    val parsed = parse_full_frontend(source, path, module_name, Logger(level: 0))
+    var lowering = HirLowering.with_filename(path)
+    var module: HirModule = lowering.lower_module(parsed)
+    expect(lowering.errors.len()).to_equal(0)
+    module
+
+fn compile_impl_fixture_v1(source: text, path: text, module_name: text,
+        strictness: AssuranceStrictness) -> HirTypecheckReceiptV1:
+    val module = lower_impl_fixture_v1(source, path, module_name)
+    collect_module_representation_receipt_v1(module_name, module, strictness)
+
+fn impl_method_boundary_v1() -> text:
+    "class ImplWord:\n" +
+    "    bits: u32\n" +
+    "\n" +
+    "impl ImplWord:\n" +
+    "    @representation_boundary(kind: \"layout\", reason: \"Encode a device word\", reviewers: [\"layout-owner\"], capabilities: [])\n" +
+    "    fn encode(self):\n" +
+    "        val raw = 7\n" +
+    "        raw\n"
+
+describe "representation boundary impl-method owner binding":
+    it "binds an annotated impl-block method as a method owned by the impl target":
+        step("Parse the impl fixture and inspect the declaration rows")
+        val declarations = parse_impl_fixture_v1(impl_method_boundary_v1(),
+            "src/app/impl_word.spl", "fixture_pkg.impl_word")
+        var impl_owner_id = ""
+        var method_row: RepresentationDeclarationV1? = None
+        for declaration in declarations:
+            if declaration.components.item_kind == "impl" and declaration.components.name == "ImplWord":
+                impl_owner_id = declaration.declaration_id
+                expect(declaration.manifest.is_some()).to_be(false)
+                expect(declaration.requires_manifest).to_be(false)
+            if declaration.components.name == "encode":
+                method_row = Some(declaration)
+        expect(impl_owner_id != "").to_be(true)
+        match method_row:
+            Some(row):
+                expect(row.components.item_kind).to_equal("method")
+                expect(row.components.owner_id).to_equal(impl_owner_id)
+                expect(row.local_symbol_id).to_be_greater_than(-1)
+                expect(row.metadata_errors.len()).to_equal(0)
+                expect(row.manifest.is_some()).to_be(true)
+                val admitted = representation_manifest_validate_v1(row,
+                    AssuranceStrictness.Critical)
+                expect(admitted.diagnostics.len()).to_equal(0)
+                expect(admitted.primitive_internal_exempt).to_be(true)
+            None:
+                assert(false)
+
+    it "admits the annotated impl method through the lint source binding and index":
+        step("Bind parsed rows to the selected project source context")
+        val source = impl_method_boundary_v1()
+        val parsed = parse_impl_fixture_v1(source,
+            "src/app/impl_word.spl", "fixture_pkg.impl_word")
+        val source_context = representation_source_context_v1(
+            impl_fixture_project_v1(), "fixture_pkg.impl_word", sha256_text(source))
+        val bound = representation_bind_source_v1(parsed, source_context)
+        var method_seen = false
+        for declaration in bound:
+            if declaration.components.name == "encode":
+                method_seen = true
+                expect(declaration.components.item_kind).to_equal("method")
+                expect(declaration.components.package).to_equal("fixture_pkg")
+                expect(declaration.components.owner_id.len()).to_equal(32)
+                expect(declaration.local_symbol_id).to_be_greater_than(-1)
+                expect(declaration.metadata_errors.len()).to_equal(0)
+        expect(method_seen).to_be(true)
+        val index = representation_index_build_v1(bound, AssuranceStrictness.Critical)
+        expect(index.diagnostics.len()).to_equal(0)
+
+    it "binds the annotated impl method exactly like a class-body method":
+        step("Lower class-body and impl-body twins and compare HIR binding")
+        val class_source = "class ImplWord:\n" +
+            "    @representation_boundary(kind: \"layout\", reason: \"Encode a device word\", reviewers: [\"layout-owner\"], capabilities: [])\n" +
+            "    fn encode(self):\n" +
+            "        val raw = 7\n" +
+            "        raw\n"
+        val impl_source = impl_method_boundary_v1()
+        var outcomes: [text] = []
+        for (label, source) in [("class", class_source), ("impl", impl_source)]:
+            val path = "src/app/impl_parity_{label}.spl"
+            val module_name = "fixture_pkg.impl_parity_{label}"
+            var module = lower_impl_fixture_v1(source, path, module_name)
+            # module_assembly copies representation_parser_metadata_v1() into
+            # the module; bridge the same parser rows here so the HIR symbol
+            # binding is exercised without a second parse entry.
+            module.representation_declarations = parse_impl_fixture_v1(source,
+                path, module_name)
+            val source_context = representation_source_context_v1(
+                impl_fixture_project_v1(), module_logical_name_from_path(path),
+                sha256_text(source))
+            module.representation_declarations = representation_bind_hir_v1(module,
+                source_context)
+            var outcome = "missing"
+            for declaration in module.representation_declarations:
+                if declaration.components.name == "encode":
+                    outcome = "{declaration.components.item_kind}|{declaration.local_symbol_id >= 0}|{declaration.metadata_errors.len()}"
+            val receipt = collect_module_representation_receipt_v1(module.name,
+                module, AssuranceStrictness.Critical)
+            var codes: [text] = []
+            for message in receipt.errors:
+                if message.contains("E-MC-REP-001"):
+                    codes.push("E-MC-REP-001")
+                if message.contains("E-MC-REP-002"):
+                    codes.push("E-MC-REP-002")
+            outcomes.push("{outcome}|{codes.join(",")}")
+        expect(outcomes.len()).to_equal(2)
+        expect(outcomes[1]).to_equal(outcomes[0])
+
+    it "still requires a manifest for an unannotated impl method with an unsafe region":
+        step("The E-MC-REP-001 lint must keep firing for impl methods")
+        val source = "class ImplUnsafe:\n" +
+            "    bits: u32\n" +
+            "\n" +
+            "impl ImplUnsafe:\n" +
+            "    fn read(self):\n" +
+            "        unsafe(capabilities: [ffi]):\n" +
+            "            val raw = 9\n" +
+            "            raw\n"
+        val receipt = compile_impl_fixture_v1(source, "src/app/impl_unsafe.spl",
+            "fixture_pkg.impl_unsafe", AssuranceStrictness.Critical)
+        expect(receipt.errors.join("\n")).to_contain("E-MC-REP-001")
+
+    it "keeps rejecting an annotated fn nested inside a function body":
+        step("Nested callables stay fail-closed barriers")
+        val source = "fn outer_word():\n" +
+            "    @representation_boundary(kind: \"layout\", reason: \"Encode a word\", reviewers: [\"layout-owner\"], capabilities: [])\n" +
+            "    fn nested_word():\n" +
+            "        val raw = 2\n" +
+            "        raw\n" +
+            "    nested_word()\n"
+        val declarations = parse_impl_fixture_v1(source,
+            "src/app/nested_word.spl", "fixture_pkg.nested_word")
+        var nested_seen = false
+        for declaration in declarations:
+            if declaration.components.name == "nested_word":
+                nested_seen = true
+                expect(declaration.components.item_kind).to_equal("nested_callable")
+                val admitted = representation_manifest_validate_v1(declaration,
+                    AssuranceStrictness.Critical)
+                expect(admitted.diagnostics.len()).to_be_greater_than(0)
+                expect(admitted.primitive_internal_exempt).to_be(false)
+        expect(nested_seen).to_be(true)
+
+    it "keeps rejecting an annotated fn nested inside an impl method":
+        step("Impl owner binding must not leak onto doubly nested callables")
+        val source = "class ImplNested:\n" +
+            "    bits: u32\n" +
+            "\n" +
+            "impl ImplNested:\n" +
+            "    fn outer(self):\n" +
+            "        @representation_boundary(kind: \"layout\", reason: \"Encode a word\", reviewers: [\"layout-owner\"], capabilities: [])\n" +
+            "        fn nested():\n" +
+            "            val raw = 2\n" +
+            "            raw\n" +
+            "        nested()\n"
+        val declarations = parse_impl_fixture_v1(source,
+            "src/app/impl_nested_word.spl", "fixture_pkg.impl_nested_word")
+        var nested_seen = false
+        for declaration in declarations:
+            if declaration.components.name == "nested":
+                nested_seen = true
+                expect(declaration.components.item_kind).to_equal("nested_callable")
+                val admitted = representation_manifest_validate_v1(declaration,
+                    AssuranceStrictness.Critical)
+                expect(admitted.diagnostics.len()).to_be_greater_than(0)
+                expect(admitted.primitive_internal_exempt).to_be(false)
+        expect(nested_seen).to_be(true)
+
+    it "rejects a manifest placed on the impl block instead of a method":
+        step("Impl blocks are owners, not annotation targets")
+        val source = "@representation_boundary(kind: \"layout\", reason: \"Describe the impl\", reviewers: [\"layout-owner\"], capabilities: [])\n" +
+            "impl ImplWord:\n" +
+            "    fn encode(self):\n" +
+            "        val raw = 7\n" +
+            "        raw\n"
+        val declarations = parse_impl_fixture_v1(source,
+            "src/app/impl_annotated_block.spl", "fixture_pkg.impl_annotated_block")
+        var rejected = false
+        var method_inherited = false
+        for declaration in declarations:
+            if declaration.components.name == "" and declaration.metadata_errors.len() > 0:
+                rejected = true
+            if declaration.components.name == "encode" and
+                    (declaration.manifest.is_some() or declaration.metadata_errors.len() > 0):
+                method_inherited = true
+        expect(rejected).to_be(true)
+        expect(method_inherited).to_be(false)

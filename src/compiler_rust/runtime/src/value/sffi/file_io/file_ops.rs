@@ -210,8 +210,24 @@ pub(crate) unsafe fn bytes_to_runtime_array(bytes: &[u8]) -> RuntimeValue {
     array_handle
 }
 
-/// Normalize/canonicalize a file path
-/// Returns the absolute path with all symbolic links resolved
+/// Canonicalize a file path: the ONE cross-engine contract.
+///
+/// Returns the real absolute path with every symlink resolved (realpath(3)
+/// semantics; on Windows `GetFinalPathNameByHandleW`, which also expands 8.3
+/// short names, with the `\\?\` verbatim prefix stripped). The path must
+/// exist. Failure (missing path, unreadable component, invalid UTF-8, null
+/// pointer) returns `NIL` -- the same explicit failure value on every engine.
+///
+/// The interpreter twin (compiler/src/interpreter_extern/file_io.rs) and the
+/// C runtime (src/runtime/runtime_native.c) implement this identical contract;
+/// the pure-Simple owner (src/runtime/simple_core/core_fs.spl) delegates to
+/// libc realpath and therefore reports NIL on SimpleOS, whose libc returns
+/// ENOSYS by design. This used to be a lexical "join cwd, drop . and .."
+/// normalization that never touched the filesystem, so `/tmp` stayed `/tmp`
+/// on a native macOS build but became `/private/tmp` under the interpreter.
+/// The comment justifying that ("libc::realpath segfaults in self-hosted
+/// binaries") is refuted in-tree: `rt_path_absolute` in path.rs has always
+/// called `Path::canonicalize`, and the C `rt_path_absolute` calls realpath.
 #[no_mangle]
 pub unsafe extern "C" fn rt_file_canonicalize(path_ptr: *const u8, path_len: u64) -> RuntimeValue {
     if path_ptr.is_null() {
@@ -223,32 +239,16 @@ pub unsafe extern "C" fn rt_file_canonicalize(path_ptr: *const u8, path_len: u64
         Ok(s) => s,
         Err(_) => return RuntimeValue::NIL,
     };
+    if path_str.is_empty() {
+        return RuntimeValue::NIL;
+    }
 
-    // Avoid std::fs::canonicalize (libc::realpath segfaults in self-hosted binaries).
-    // Make absolute and normalize . / .. components instead.
-    {
-        let p = std::path::Path::new(path_str);
-        let abs = if p.is_absolute() {
-            p.to_path_buf()
-        } else {
-            match std::env::current_dir() {
-                Ok(cwd) => cwd.join(p),
-                Err(_) => return RuntimeValue::NIL,
-            }
-        };
-        let mut out = std::path::PathBuf::new();
-        for comp in abs.components() {
-            match comp {
-                std::path::Component::ParentDir => {
-                    out.pop();
-                }
-                std::path::Component::CurDir => {}
-                c => out.push(c),
-            }
+    match std::fs::canonicalize(Path::new(path_str)) {
+        Ok(canonical) => {
+            let text = super::path::strip_verbatim_prefix(canonical.to_string_lossy().into_owned());
+            rt_string_new(text.as_ptr(), text.len() as u64)
         }
-        let canonical_str = out.to_string_lossy();
-        let bytes = canonical_str.as_bytes();
-        rt_string_new(bytes.as_ptr(), bytes.len() as u64)
+        Err(_) => RuntimeValue::NIL,
     }
 }
 
@@ -475,6 +475,26 @@ pub unsafe extern "C" fn rt_file_read_regular_no_follow_bounded(
     value
 }
 
+/// Raw pointer/length ABI twin of [`rt_file_read_text`] for the low-level sffi
+/// tier (`src/compiler/70.backend/sffi_minimal.spl`). Distinct name so the raw
+/// `(ptr, len) -> i64?` view never shares a name with the typed
+/// `(text) -> text?` view: the seed keys extern return types by bare name.
+#[no_mangle]
+pub unsafe extern "C" fn rt_file_read_text_raw(path_ptr: *const u8, path_len: u64) -> RuntimeValue {
+    rt_file_read_text(path_ptr, path_len)
+}
+
+/// Raw pointer/length ABI twin of [`rt_file_read_regular_no_follow_bounded`];
+/// see [`rt_file_read_text_raw`].
+#[no_mangle]
+pub unsafe extern "C" fn rt_file_read_regular_no_follow_bounded_raw(
+    path_ptr: *const u8,
+    path_len: u64,
+    max_bytes: i64,
+) -> RuntimeValue {
+    rt_file_read_regular_no_follow_bounded(path_ptr, path_len, max_bytes)
+}
+
 /// Byte-array sibling of `rt_file_read_regular_no_follow_bounded` for binary
 /// payloads (images, archives). Identical admission arms and bound (O_NOFOLLOW
 /// open, regular-file check via metadata, hard byte cap, EINTR-safe bounded
@@ -535,8 +555,48 @@ pub unsafe extern "C" fn rt_file_read_text_rv(path: RuntimeValue) -> RuntimeValu
 /// (doc/08_tracking/bug/native_link_missing_rt_file_atomic_write_2026-08-17.md).
 #[no_mangle]
 pub unsafe extern "C" fn rt_file_atomic_write(path: RuntimeValue, content: RuntimeValue) -> i64 {
+    rt_file_atomic_write_impl(path, content, None)
+}
+
+/// Explicit-mode core-C twin. Windows owner-only writes use a protected
+/// DACL on the staging file before content is written.
+#[no_mangle]
+pub unsafe extern "C" fn rt_file_atomic_write_mode(path: RuntimeValue, content: RuntimeValue, mode: i32) -> i64 {
+    rt_file_atomic_write_impl(path, content, Some(mode))
+}
+
+fn atomic_write_staging_file(temp_path: &Path, content: &[u8], mode: Option<i32>) -> std::io::Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(if mode.is_some() { 0o600 } else { 0o666 }); // plain writes take the umask
+    // A failed exclusive open never transfers ownership of an existing path.
+    let mut file = options.open(temp_path)?;
+    let write_result = (|| -> std::io::Result<()> {
+        file.write_all(content)?;
+        #[cfg(unix)]
+        if let Some(mode) = mode {
+            use std::os::unix::fs::PermissionsExt;
+            file.set_permissions(std::fs::Permissions::from_mode((mode as u32) & 0o7777))?;
+        }
+        #[cfg(windows)]
+        if let Some(mode) = mode {
+            let mut permissions = file.metadata()?.permissions();
+            permissions.set_readonly(mode & 0o200 == 0);
+            file.set_permissions(permissions)?;
+        }
+        file.sync_all()?;
+        Ok(())
+    })();
+    drop(file);
+    if write_result.is_err() {
+        let _ = std::fs::remove_file(temp_path);
+    }
+    write_result
+}
+
+unsafe fn rt_file_atomic_write_impl(path: RuntimeValue, content: RuntimeValue, mode: Option<i32>) -> i64 {
     use crate::value::collections::{rt_string_data, rt_string_len};
-    use std::io::Write;
 
     let decode = |v: RuntimeValue| -> Option<Vec<u8>> {
         if v.is_nil() || v.0 == 0 {
@@ -561,7 +621,11 @@ pub unsafe extern "C" fn rt_file_atomic_write(path: RuntimeValue, content: Runti
         Some(b) => b,
         None => return 0,
     };
-    let path_str = match std::str::from_utf8(&path_bytes) {
+    atomic_write_path_bytes(&path_bytes, &content_bytes, mode)
+}
+
+unsafe fn atomic_write_path_bytes(path_bytes: &[u8], content_bytes: &[u8], mode: Option<i32>) -> i64 {
+    let path_str = match std::str::from_utf8(path_bytes) {
         Ok(s) => s.to_string(),
         Err(_) => return 0,
     };
@@ -579,6 +643,16 @@ pub unsafe extern "C" fn rt_file_atomic_write(path: RuntimeValue, content: Runti
         }
     }
 
+    #[cfg(windows)]
+    if let Some(private_mode) = mode.filter(|value| value & 0o77 == 0) {
+        extern "C" {
+            fn rt_hosted_fs_private_atomic_write_utf8(path: *const u8, path_len: u64,
+                content: *const u8, content_len: u64, mode: i32) -> i32;
+        }
+        return i64::from(rt_hosted_fs_private_atomic_write_utf8(path_bytes.as_ptr(),
+            path_bytes.len() as u64, content_bytes.as_ptr(), content_bytes.len() as u64, private_mode) != 0);
+    }
+
     static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let temp_path = std::path::PathBuf::from(format!(
         "{}.tmp.{}.{}",
@@ -587,22 +661,12 @@ pub unsafe extern "C" fn rt_file_atomic_write(path: RuntimeValue, content: Runti
         SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
     ));
 
-    let write_result = (|| -> std::io::Result<()> {
-        let mut file = std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&temp_path)?;
-        file.write_all(&content_bytes)?;
-        file.sync_all()?;
-        Ok(())
-    })();
-    if write_result.is_err() {
-        let _ = std::fs::remove_file(&temp_path);
+    if atomic_write_staging_file(&temp_path, content_bytes, mode).is_err() {
         return 0;
     }
 
     #[cfg(unix)]
-    if let Some(mode) = existing_mode {
+    if let Some(mode) = existing_mode.filter(|_| mode.is_none()) {
         use std::os::unix::fs::PermissionsExt;
         if std::fs::set_permissions(&temp_path, std::fs::Permissions::from_mode(mode)).is_err() {
             let _ = std::fs::remove_file(&temp_path);
@@ -610,11 +674,42 @@ pub unsafe extern "C" fn rt_file_atomic_write(path: RuntimeValue, content: Runti
         }
     }
 
-    if std::fs::rename(&temp_path, &target).is_err() {
+    // Uncoordinated same-path writers are allowed; a Windows replace can fail
+    // transiently while the target is held, so retry here, never in callers.
+    let attempts = if cfg!(windows) { 8 } else { 1 };
+    let mut moved = false;
+    for attempt in 0..attempts {
+        moved = std::fs::rename(&temp_path, &target).is_ok();
+        if moved {
+            break;
+        }
+        if attempt + 1 < attempts {
+            std::thread::sleep(std::time::Duration::from_millis(1 << attempt));
+        }
+    }
+    if !moved {
         let _ = std::fs::remove_file(&temp_path);
         return 0;
     }
     1
+}
+
+/// Byte twin of `rt_file_atomic_write`; C twin in `runtime_native.c`.
+#[no_mangle]
+pub extern "C" fn rt_file_atomic_write_bytes_array(path: RuntimeValue, data: RuntimeValue) -> bool {
+    let path_ptr = rt_string_data(path);
+    let path_len = rt_string_len(path);
+    if path_ptr.is_null() || path_len <= 0 {
+        return false;
+    }
+    let Some(bytes) = crate::value::collections::byte_array_bytes(data) else {
+        return false;
+    };
+    let path_bytes = unsafe { std::slice::from_raw_parts(path_ptr, path_len as usize) };
+    if path_bytes.contains(&0) {
+        return false;
+    }
+    unsafe { atomic_write_path_bytes(path_bytes, &bytes, None) != 0 }
 }
 
 /// Write text to file
@@ -647,6 +742,121 @@ pub unsafe extern "C" fn rt_file_write_text(
     invalidate_file_caches(path_str);
     std::fs::write(path_str, content_str).is_ok()
 }
+#[cfg(windows)]
+mod win_excl {
+    //! Windows twin of the POSIX `O_EXCL|O_NOFOLLOW` copy and `link()`+inode
+    //! recheck: C counterpart is `src/runtime/platform/runtime_win_excl_file.h`.
+    use std::fs::{File, OpenOptions};
+    use std::io::{Read, Write};
+    use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
+    use std::os::windows::io::AsRawHandle;
+    use std::path::{Path, PathBuf};
+    use windows_sys::Win32::Storage::FileSystem::{GetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION};
+
+    const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
+    const FILE_ATTRIBUTE_DIRECTORY: u32 = 0x10;
+    const FILE_ATTRIBUTE_REPARSE_POINT: u32 = 0x400;
+    const SHARE_ALL: u32 = 0x7;
+
+    pub unsafe fn paths(sp: *const u8, sl: u64, dp: *const u8, dl: u64) -> Option<(PathBuf, PathBuf)> {
+        if sp.is_null() || dp.is_null() || sl == 0 || dl == 0 {
+            return None;
+        }
+        let s = std::slice::from_raw_parts(sp, sl as usize);
+        let d = std::slice::from_raw_parts(dp, dl as usize);
+        if s.contains(&0) || d.contains(&0) {
+            return None;
+        }
+        Some((PathBuf::from(std::str::from_utf8(s).ok()?), PathBuf::from(std::str::from_utf8(d).ok()?)))
+    }
+
+    fn file_id(f: &File) -> Option<(u32, u32, u32)> {
+        let mut info: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+        if unsafe { GetFileInformationByHandle(f.as_raw_handle() as _, &mut info) } == 0 {
+            return None;
+        }
+        Some((info.dwVolumeSerialNumber, info.nFileIndexHigh, info.nFileIndexLow))
+    }
+
+    /// Open `p` without following a reparse point; it must be a regular file.
+    fn open_regular_no_follow(p: &Path) -> Option<File> {
+        let f = OpenOptions::new()
+            .read(true)
+            .share_mode(SHARE_ALL)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(p)
+            .ok()?;
+        let attrs = f.metadata().ok()?.file_attributes();
+        if attrs & (FILE_ATTRIBUTE_REPARSE_POINT | FILE_ATTRIBUTE_DIRECTORY) != 0 {
+            return None;
+        }
+        Some(f)
+    }
+
+    pub fn copy_create_excl_no_follow(src: &Path, dst: &Path) -> bool {
+        let mut input = match open_regular_no_follow(src) {
+            Some(f) => f,
+            None => return false,
+        };
+        let mut output = match OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .share_mode(0)
+            .custom_flags(FILE_FLAG_OPEN_REPARSE_POINT)
+            .open(dst)
+        {
+            Ok(f) => f,
+            Err(_) => return false,
+        };
+        let mut buf = vec![0u8; 65536];
+        let mut ok = true;
+        loop {
+            match input.read(&mut buf) {
+                Ok(0) => break,
+                Ok(n) => {
+                    if output.write_all(&buf[..n]).is_err() {
+                        ok = false;
+                        break;
+                    }
+                }
+                Err(_) => {
+                    ok = false;
+                    break;
+                }
+            }
+        }
+        ok = ok && output.sync_all().is_ok();
+        drop(output);
+        drop(input);
+        if !ok {
+            let _ = std::fs::remove_file(dst);
+        }
+        ok
+    }
+
+    pub fn link_create_excl_no_follow(src: &Path, dst: &Path) -> bool {
+        let input = match open_regular_no_follow(src) {
+            Some(f) => f,
+            None => return false,
+        };
+        let src_id = match file_id(&input) {
+            Some(id) => id,
+            None => return false,
+        };
+        if std::fs::hard_link(src, dst).is_err() {
+            return false;
+        }
+        let ok = match open_regular_no_follow(dst) {
+            Some(f) => file_id(&f) == Some(src_id),
+            None => false,
+        };
+        if !ok {
+            let _ = std::fs::remove_file(dst);
+        }
+        ok
+    }
+}
+
 
 /// Copy `source` to `destination`, refusing to overwrite an existing
 /// destination and refusing to follow a symlink at either path.
@@ -664,7 +874,7 @@ pub unsafe extern "C" fn rt_file_write_text(
 /// regular file or symlink — fails with `EEXIST`/`ELOOP` before any data is
 /// touched); the bytes are copied and `fsync`ed; any failure along the way
 /// removes the partially-written destination before returning `false`.
-/// Unsupported on Windows, matching the C `#if defined(_WIN32)` branch.
+/// On Windows: source opened with FILE_FLAG_OPEN_REPARSE_POINT must be a regular file, destination is CREATE_NEW (`win_excl`), matching the C `runtime_win_excl_file.h`.
 #[no_mangle]
 pub unsafe extern "C" fn rt_file_copy_create_excl_no_follow(
     source_ptr: *const u8,
@@ -672,7 +882,14 @@ pub unsafe extern "C" fn rt_file_copy_create_excl_no_follow(
     destination_ptr: *const u8,
     destination_len: u64,
 ) -> bool {
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        match win_excl::paths(source_ptr, source_len, destination_ptr, destination_len) {
+            Some((s, d)) => win_excl::copy_create_excl_no_follow(&s, &d),
+            None => false,
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (source_ptr, source_len, destination_ptr, destination_len);
         false
@@ -740,7 +957,7 @@ pub unsafe extern "C" fn rt_file_copy_create_excl_no_follow(
 /// (`lstat`, i.e. `symlink_metadata`, never following) and must be a regular
 /// file with the SAME device/inode as the originally-opened source — a
 /// mismatch (e.g. `source` was swapped between the open and the link) removes
-/// the destination and fails. Unsupported on Windows, matching the C `#if`.
+/// the destination and fails. On Windows the link is made with `CreateHardLinkW` and the file id is rechecked (`win_excl`).
 #[no_mangle]
 pub unsafe extern "C" fn rt_file_link_create_excl_no_follow(
     source_ptr: *const u8,
@@ -748,7 +965,14 @@ pub unsafe extern "C" fn rt_file_link_create_excl_no_follow(
     destination_ptr: *const u8,
     destination_len: u64,
 ) -> bool {
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        match win_excl::paths(source_ptr, source_len, destination_ptr, destination_len) {
+            Some((s, d)) => win_excl::link_create_excl_no_follow(&s, &d),
+            None => false,
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (source_ptr, source_len, destination_ptr, destination_len);
         false
@@ -934,6 +1158,88 @@ pub unsafe extern "C" fn rt_file_fsync(path_ptr: *const u8, path_len: u64) -> bo
     }
 }
 
+/// Make directory-entry changes durable (`rt_dir_sync(path) -> bool`).
+/// Unix: open the directory and fsync it. Windows/NTFS has no portable
+/// directory fsync and journals metadata, so report whether `path` is an
+/// existing directory. Missing path or non-directory is false.
+#[no_mangle]
+pub unsafe extern "C" fn rt_dir_sync(path_ptr: *const u8, path_len: u64) -> bool {
+    if path_ptr.is_null() {
+        return false;
+    }
+    let path_bytes = std::slice::from_raw_parts(path_ptr, path_len as usize);
+    let path = match std::str::from_utf8(path_bytes) {
+        Ok(s) => Path::new(s),
+        Err(_) => return false,
+    };
+    if !path.is_dir() {
+        return false;
+    }
+    #[cfg(windows)]
+    {
+        true
+    }
+    #[cfg(not(windows))]
+    {
+        std::fs::File::open(path).and_then(|dir| dir.sync_all()).is_ok()
+    }
+}
+
+/// Read `rel` under the trusted `root`, refusing a reparse point/symlink at
+/// every component at open time (see `under_root`). Returns a `[u8]` value, or
+/// NIL with the arm recorded for `rt_file_read_regular_no_follow_last_failure`.
+#[no_mangle]
+pub unsafe extern "C" fn rt_file_read_under_root_bytes(
+    root_ptr: *const u8,
+    root_len: u64,
+    rel_ptr: *const u8,
+    rel_len: u64,
+    max_bytes: i64,
+) -> RuntimeValue {
+    if !runtime_capability_allowed(READ_FILE_CAPABILITY_ID) {
+        return read_no_follow_fail(READ_NF_CAPABILITY);
+    }
+    if root_ptr.is_null() || rel_ptr.is_null() {
+        return read_no_follow_fail(READ_NF_BAD_ARGS);
+    }
+    let root = std::str::from_utf8(std::slice::from_raw_parts(root_ptr, root_len as usize));
+    let rel = std::str::from_utf8(std::slice::from_raw_parts(rel_ptr, rel_len as usize));
+    let (Ok(root), Ok(rel)) = (root, rel) else {
+        return read_no_follow_fail(READ_NF_BAD_UTF8_PATH);
+    };
+    match super::under_root::read_under_root(root, rel, max_bytes) {
+        Ok(raw) => {
+            let value = bytes_to_runtime_array(&raw);
+            READ_NO_FOLLOW_LAST_FAILURE.with(|cell| cell.set(READ_NF_OK));
+            value
+        }
+        Err(code) => read_no_follow_fail(code),
+    }
+}
+
+/// Write `data` to `rel` under the trusted `root` through a verified directory
+/// chain (todo 479); atomic temp-and-rename inside the held parent.
+#[no_mangle]
+pub extern "C" fn rt_file_write_under_root_bytes(root: RuntimeValue, rel: RuntimeValue, data: RuntimeValue) -> bool {
+    if !runtime_capability_allowed(WRITE_FILE_CAPABILITY_ID) {
+        return false;
+    }
+    let (root_ptr, root_len) = (rt_string_data(root), rt_string_len(root));
+    let (rel_ptr, rel_len) = (rt_string_data(rel), rt_string_len(rel));
+    if root_ptr.is_null() || root_len <= 0 || rel_ptr.is_null() || rel_len <= 0 {
+        return false;
+    }
+    let Some(bytes) = crate::value::collections::byte_array_bytes(data) else {
+        return false;
+    };
+    let root = std::str::from_utf8(unsafe { std::slice::from_raw_parts(root_ptr, root_len as usize) });
+    let rel = std::str::from_utf8(unsafe { std::slice::from_raw_parts(rel_ptr, rel_len as usize) });
+    match (root, rel) {
+        (Ok(root), Ok(rel)) => super::under_root::write_under_root(root, rel, &bytes),
+        _ => false,
+    }
+}
+
 /// Synchronize the cached write-at handle when it matches `path`.
 ///
 /// Falls back to `rt_file_fsync` when the current thread has no matching
@@ -1080,15 +1386,11 @@ pub unsafe extern "C" fn rt_file_lock(path_ptr: *const u8, path_len: u64, timeou
         }
 
         if timeout_secs <= 0 {
-            loop {
-                if unsafe { libc::flock(fd, libc::LOCK_EX) } == 0 {
-                    return i64::from(fd);
-                }
-                if std::io::Error::last_os_error().raw_os_error() != Some(libc::EINTR) {
-                    unsafe { libc::close(fd) };
-                    return -1;
-                }
+            if unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) } == 0 {
+                return i64::from(fd);
             }
+            unsafe { libc::close(fd) };
+            return -1;
         }
 
         let timeout = std::time::Duration::from_secs(timeout_secs as u64);
@@ -1143,11 +1445,10 @@ pub unsafe extern "C" fn rt_file_lock(path_ptr: *const u8, path_len: u64, timeou
 
         let mut overlapped = OVERLAPPED::default();
         if timeout_secs <= 0 {
-            // Blocking lock.
             let locked = unsafe {
                 LockFileEx(
                     handle,
-                    LOCK_FILE_FLAGS(LOCKFILE_EXCLUSIVE_LOCK.0),
+                    LOCK_FILE_FLAGS(LOCKFILE_EXCLUSIVE_LOCK.0 | LOCKFILE_FAIL_IMMEDIATELY.0),
                     0,
                     u32::MAX,
                     u32::MAX,
@@ -1444,7 +1745,11 @@ pub extern "C" fn rt_file_mode(path: i64) -> i64 {
     }
     #[cfg(not(unix))]
     {
-        (metadata.file_attributes() as i64) & 0o7777
+        if metadata.permissions().readonly() {
+            0o444
+        } else {
+            0o644
+        }
     }
 }
 
@@ -1665,6 +1970,34 @@ pub extern "C" fn rt_mmap(_path: i64, _size: i64, _offset: i64, _readonly: i64) 
     0
 }
 
+/// Writer-side twin of `rt_mmap`: create (or truncate) `path`, set its length
+/// to exactly `size` bytes, and return a read-write shared mapping of the
+/// whole file (0 on any failure). The caller fills the view, `rt_msync` +
+/// `rt_munmap`, then publishes with an atomic rename (temp+rename).
+#[no_mangle]
+pub extern "C" fn rt_mmap_create(path: i64, size: i64) -> i64 {
+    let Some(path_str) = tagged_text_to_str(path) else {
+        return 0;
+    };
+    if size <= 0 || !runtime_capability_allowed(WRITE_FILE_CAPABILITY_ID) {
+        return 0;
+    }
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path_str);
+    let Ok(file) = file else {
+        return 0;
+    };
+    if file.set_len(size as u64).is_err() {
+        return 0;
+    }
+    drop(file);
+    rt_mmap(path, size, 0, 0)
+}
+
 #[cfg(unix)]
 #[no_mangle]
 pub extern "C" fn rt_munmap(addr: i64, size: i64) -> bool {
@@ -1777,9 +2110,7 @@ pub unsafe extern "C" fn rt_file_rename(from_ptr: *const u8, from_len: u64, to_p
         // widening, same MAX_PATH-capped defect as rt_file_fsync above (and
         // the same reason fixing only the C-side rt_file_rename twin did not
         // clear the bootstrap blocker: this Rust definition is the one that
-        // links). Prefer the widened, extended-length-prefixed call with no
-        // replace flag -- matching std::fs::rename's Windows behavior of
-        // failing when the destination already exists -- falling back to the
+        // links). Prefer the widened, extended-length-prefixed call, falling back to the
         // original (possibly un-widened) path only when a path cannot be
         // widened.
         use windows::core::PCWSTR;
@@ -1809,7 +2140,12 @@ pub unsafe extern "C" fn rt_file_rename(from_ptr: *const u8, from_len: u64, to_p
                 PCWSTR(to_narrow.as_ptr())
             }
         };
-        return MoveFileExW(from_ptr, to_ptr, MOVE_FILE_FLAGS(0)).is_ok();
+        // Atomic replace of an existing FILE destination (POSIX rename(2),
+        // the C twin's rt_win_long_path_rename); a directory destination is
+        // never replaced, as on POSIX.
+        let to_is_dir = std::fs::metadata(to_str).map(|m| m.is_dir()).unwrap_or(false);
+        let flags = if to_is_dir { 0 } else { 0x1 /* MOVEFILE_REPLACE_EXISTING */ };
+        return MoveFileExW(from_ptr, to_ptr, MOVE_FILE_FLAGS(flags)).is_ok();
     }
     #[cfg(not(windows))]
     std::fs::rename(from_str, to_str).is_ok()
@@ -1890,9 +2226,39 @@ pub unsafe extern "C" fn rt_file_read_bytes(path_ptr: *const u8, path_len: u64) 
         Err(_) => return RuntimeValue::NIL,
     };
 
-    match std::fs::read(path_str) {
+    match read_bytes_retrying(path_str) {
         Ok(bytes) => bytes_to_runtime_array(&bytes),
         Err(_) => RuntimeValue::NIL,
+    }
+}
+
+/// `fs::read` with a bounded retry on Windows sharing/lock violations
+/// (`ERROR_SHARING_VIOLATION` 32 / `ERROR_LOCK_VIOLATION` 33: an on-access
+/// scanner briefly holding a freshly written file) and the OS error surfaced
+/// under `SIMPLE_FILE_IO_DEBUG=1`. Twin of the interpreter extern in
+/// `compiler/src/interpreter_extern/file_io.rs` (bug doc
+/// seed_file_read_bytes_nil_after_in_process_write_2026-11-12.md).
+pub(crate) fn read_bytes_retrying(path: &str) -> std::io::Result<Vec<u8>> {
+    const MAX_ATTEMPTS: u32 = 10;
+    let mut attempt = 0u32;
+    loop {
+        match std::fs::read(path) {
+            Ok(bytes) => return Ok(bytes),
+            Err(err)
+                if attempt + 1 < MAX_ATTEMPTS
+                    && (err.kind() == std::io::ErrorKind::Interrupted
+                        || matches!(err.raw_os_error(), Some(32) | Some(33))) =>
+            {
+                attempt += 1;
+                std::thread::sleep(std::time::Duration::from_millis(5 * u64::from(attempt)));
+            }
+            Err(err) => {
+                if std::env::var_os("SIMPLE_FILE_IO_DEBUG").is_some() {
+                    eprintln!("rt_file_read_bytes: read failed for {path:?} after {} attempt(s): {err}", attempt + 1);
+                }
+                return Err(err);
+            }
+        }
     }
 }
 
@@ -2076,8 +2442,9 @@ pub extern "C" fn rt_text_to_bytes(text: RuntimeValue) -> RuntimeValue {
     crate::value::collections::rt_string_bytes(text)
 }
 
-/// Convert bytes to UTF-8 text, replacing malformed sequences with U+FFFD.
-/// Invalid array representations/elements still return NIL; binary callers
+/// Convert bytes to UTF-8 text. STRICT (owner decision 2026-11-23): malformed
+/// UTF-8 returns NIL, never U+FFFD, matching the C runtime twin.
+/// Invalid array representations/elements also return NIL; binary callers
 /// must retain their [u8] arrays instead of passing them through text.
 #[no_mangle]
 pub extern "C" fn rt_bytes_to_text(bytes: RuntimeValue) -> RuntimeValue {
@@ -2104,10 +2471,12 @@ pub extern "C" fn rt_bytes_to_text(bytes: RuntimeValue) -> RuntimeValue {
     // elements still yield NIL exactly as before.
     // See doc/08_tracking/bug/codegen_lane_still_slow_base64url_utf8_time_utils_2026-08-18.md
     if let Some(packed) = crate::value::collections::packed_byte_array_bytes(bytes) {
-        // Text is UTF-8, not an unchecked binary carrier. Cow borrows valid
-        // input; malformed sequences use the documented U+FFFD text policy.
-        let text = String::from_utf8_lossy(&packed);
-        return rt_string_new(text.as_ptr(), text.len() as u64);
+        // Text is UTF-8, not an unchecked binary carrier: malformed input is
+        // rejected (NIL) rather than repaired.
+        return match std::str::from_utf8(&packed) {
+            Ok(text) => rt_string_new(text.as_ptr(), text.len() as u64),
+            Err(_) => RuntimeValue::NIL,
+        };
     }
 
     let mut out = Vec::with_capacity(len as usize);
@@ -2123,8 +2492,50 @@ pub extern "C" fn rt_bytes_to_text(bytes: RuntimeValue) -> RuntimeValue {
         out.push(byte as u8);
     }
 
-    let text = String::from_utf8_lossy(&out);
-    rt_string_new(text.as_ptr(), text.len() as u64)
+    match std::str::from_utf8(&out) {
+        Ok(text) => rt_string_new(text.as_ptr(), text.len() as u64),
+        Err(_) => RuntimeValue::NIL,
+    }
+}
+
+/// TLS wire carrier: preserve exact bytes in counted text without changing
+/// the public strict (UTF-8-rejecting) bytes-to-text contract.
+#[no_mangle]
+pub extern "C" fn rt_tls_wire_from_bytes(bytes: RuntimeValue) -> RuntimeValue {
+    if !bytes.is_heap() || bytes.as_heap_ptr().is_null() {
+        return RuntimeValue::NIL;
+    }
+    if let Some(packed) = crate::value::collections::packed_byte_array_bytes(bytes) {
+        return rt_string_new(packed.as_ptr(), packed.len() as u64);
+    }
+    let len = crate::value::collections::rt_array_len(bytes);
+    if len < 0 { return RuntimeValue::NIL; }
+    let mut out = Vec::with_capacity(len as usize);
+    for i in 0..len {
+        let value = crate::value::collections::rt_array_get(bytes, i);
+        if !value.is_int() || !(0..=255).contains(&value.as_int()) {
+            return RuntimeValue::NIL;
+        }
+        out.push(value.as_int() as u8);
+    }
+    rt_string_new(out.as_ptr(), out.len() as u64)
+}
+
+/// Managed text-to-byte-array facade over the existing conversion owner.
+#[no_mangle]
+pub extern "C" fn rt_string_to_byte_array(text: RuntimeValue) -> RuntimeValue {
+    rt_text_to_bytes(text)
+}
+
+/// Non-optional text facade: invalid byte arrays retain the empty-text fallback.
+#[no_mangle]
+pub extern "C" fn rt_string_from_byte_array(bytes: RuntimeValue) -> RuntimeValue {
+    let text = rt_bytes_to_text(bytes);
+    if text.is_nil() {
+        rt_string_new(std::ptr::null(), 0)
+    } else {
+        text
+    }
 }
 
 /// Write raw bytes to file
@@ -2166,6 +2577,55 @@ pub extern "C" fn rt_file_write_bytes_array(path: RuntimeValue, data: RuntimeVal
         return false;
     };
     unsafe { rt_file_write_bytes(path_ptr, path_len as u64, bytes.as_ptr(), bytes.len() as u64) }
+}
+
+/// Bytes available to the caller on the volume holding `path` (Simple text).
+/// Rust twin of runtime_disk_headroom.c `rt_host_disk_headroom_bytes_v1`; 0 when
+/// unknown (callers treat 0 as "cannot measure", never as "disk full").
+#[no_mangle]
+pub extern "C" fn rt_host_disk_headroom_bytes_v1(path: RuntimeValue) -> i64 {
+    let path_ptr = rt_string_data(path);
+    let path_len = rt_string_len(path);
+    if path_ptr.is_null() || path_len <= 0 || path_len >= 4096 {
+        return 0;
+    }
+    let bytes = unsafe { std::slice::from_raw_parts(path_ptr, path_len as usize) };
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        return 0;
+    };
+    if text.contains('\0') {
+        return 0;
+    }
+    host_disk_headroom(text)
+}
+
+#[cfg(windows)]
+fn host_disk_headroom(path: &str) -> i64 {
+    use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
+    let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+    let mut available: u64 = 0;
+    if unsafe { GetDiskFreeSpaceExW(wide.as_ptr(), &mut available, std::ptr::null_mut(), std::ptr::null_mut()) } == 0 {
+        return 0;
+    }
+    i64::try_from(available).unwrap_or(i64::MAX)
+}
+
+#[cfg(unix)]
+fn host_disk_headroom(path: &str) -> i64 {
+    let Ok(c_path) = std::ffi::CString::new(path) else {
+        return 0;
+    };
+    let mut stat: libc::statvfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statvfs(c_path.as_ptr(), &mut stat) } != 0 {
+        return 0;
+    }
+    let available = (stat.f_bavail as u128) * (stat.f_frsize as u128);
+    i64::try_from(available).unwrap_or(i64::MAX)
+}
+
+#[cfg(not(any(windows, unix)))]
+fn host_disk_headroom(_path: &str) -> i64 {
+    0
 }
 
 /// Wrap a host native shared library in a role-2 SMF envelope.
@@ -2307,6 +2767,60 @@ mod tests {
     use crate::value::collections::{rt_string_data, rt_string_len};
     use std::fs;
     use tempfile::TempDir;
+
+    fn canonicalize_text(path: &str) -> Option<String> {
+        let value = unsafe { rt_file_canonicalize(path.as_ptr(), path.len() as u64) };
+        if value.is_nil() {
+            return None;
+        }
+        let len = rt_string_len(value) as usize;
+        let data = rt_string_data(value);
+        let bytes = unsafe { std::slice::from_raw_parts(data, len) };
+        Some(String::from_utf8(bytes.to_vec()).expect("utf8"))
+    }
+
+    /// Cross-engine contract: realpath semantics, NIL on failure. The
+    /// interpreter twin's `canonicalize_tests` and the .spl spec
+    /// test/01_unit/lib/platform/file_canonicalize_cross_engine_spec.spl pin
+    /// the same cases for the other engines.
+    #[test]
+    fn canonicalize_resolves_symlinks_and_fails_closed() {
+        let dir = TempDir::new().expect("tempdir");
+        let real = dir.path().join("real.txt");
+        fs::write(&real, "x").expect("write");
+        let expected = fs::canonicalize(&real).expect("std canonicalize");
+        let expected = expected.to_string_lossy().into_owned();
+
+        // Existing file: equals std's answer and is absolute.
+        let got = canonicalize_text(real.to_str().unwrap()).expect("existing file canonicalizes");
+        assert_eq!(got, expected);
+        assert!(Path::new(&got).is_absolute());
+
+        // Symlink: resolved to the target, not kept lexically.
+        #[cfg(unix)]
+        {
+            let link = dir.path().join("link.txt");
+            std::os::unix::fs::symlink(&real, &link).expect("symlink");
+            let via_link = canonicalize_text(link.to_str().unwrap()).expect("symlink canonicalizes");
+            assert_eq!(via_link, expected, "symlink must resolve to its target");
+            assert!(!via_link.ends_with("link.txt"));
+        }
+
+        // Missing path: explicit NIL, never a lexical guess.
+        let missing = dir.path().join("does-not-exist.txt");
+        assert!(canonicalize_text(missing.to_str().unwrap()).is_none());
+        // Dot segments through a missing component also fail closed.
+        let missing_dots = dir.path().join("nope").join("..").join("real.txt");
+        assert!(canonicalize_text(missing_dots.to_str().unwrap()).is_none());
+
+        // Empty path and null pointer fail closed.
+        assert!(canonicalize_text("").is_none());
+        assert!(unsafe { rt_file_canonicalize(std::ptr::null(), 0) }.is_nil());
+
+        // Windows: no verbatim prefix leaks.
+        let verbatim: String = [char::from(92u8), char::from(92u8), '?'].iter().collect();
+        assert!(!got.starts_with(&verbatim), "verbatim prefix leaked: {got}");
+    }
 
     #[test]
     fn text_to_bytes_preserves_exact_utf8_nul_and_block_boundaries() {
@@ -2493,6 +3007,62 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn file_lock_nonpositive_timeouts_are_bounded_and_nonblocking() {
+        struct UnlockOnDrop(i64);
+        impl Drop for UnlockOnDrop {
+            fn drop(&mut self) {
+                if self.0 >= 0 {
+                    let _ = unsafe { rt_file_unlock(self.0) };
+                }
+            }
+        }
+
+        let temp_dir = TempDir::new().unwrap();
+        let lock_path = temp_dir.path().join("nonblocking.lock");
+        let path = lock_path.to_str().unwrap();
+        for timeout_secs in [0, -1] {
+            let handle = unsafe { rt_file_lock(path.as_ptr(), path.len() as u64, timeout_secs) };
+            assert!(handle >= 0);
+            let mut holder = UnlockOnDrop(handle);
+            let contender_path = path.to_owned();
+            let (sender, receiver) = std::sync::mpsc::channel();
+            let _contender = std::thread::spawn(move || {
+                let started = std::time::Instant::now();
+                let result =
+                    unsafe { rt_file_lock(contender_path.as_ptr(), contender_path.len() as u64, timeout_secs) };
+                let elapsed = started.elapsed();
+                if result >= 0 {
+                    assert!(unsafe { rt_file_unlock(result) });
+                }
+                sender.send((result, elapsed)).unwrap();
+            });
+
+            // A blocking implementation is released after the bound so its
+            // thread can finish and every descriptor is cleaned up before the
+            // assertion fails.
+            let outcome = receiver.recv_timeout(std::time::Duration::from_secs(2));
+            assert!(unsafe { rt_file_unlock(holder.0) });
+            holder.0 = -1;
+            match outcome {
+                Ok((contended, elapsed)) => {
+                    assert_eq!(contended, -1);
+                    assert!(elapsed < std::time::Duration::from_secs(1));
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    let late = receiver.recv_timeout(std::time::Duration::from_secs(2));
+                    panic!("timeout_secs={timeout_secs} blocked; outcome after unlock: {late:?}");
+                }
+                Err(error) => panic!("contender failed: {error}"),
+            }
+
+            let reacquired = unsafe { rt_file_lock(path.as_ptr(), path.len() as u64, timeout_secs) };
+            assert!(reacquired >= 0);
+            assert!(unsafe { rt_file_unlock(reacquired) });
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn test_shared_mmap_cross_process_visibility() {
         let temp_dir = TempDir::new().unwrap();
         let file_path = temp_dir.path().join("shared.bin");
@@ -2569,6 +3139,35 @@ mod tests {
         }
     }
 
+    /// Raw-ABI twins (sffi_minimal tier) are pure forwarders: identical
+    /// content for an existing file, identical NIL for a missing one, and the
+    /// same bound/refusal behaviour for the no-follow bounded read.
+    #[test]
+    fn test_file_read_raw_twins_match_typed_entrypoints() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("raw-twin.txt");
+        let content = "raw twin\nline two\n";
+        fs::write(&file_path, content.as_bytes()).unwrap();
+        let path = file_path.to_str().unwrap();
+        let (ptr, len) = str_to_ptr(path);
+        let missing = temp_dir.path().join("missing.txt");
+        let missing = missing.to_str().unwrap();
+        let (mptr, mlen) = str_to_ptr(missing);
+        unsafe {
+            assert_eq!(extract_string(rt_file_read_text_raw(ptr, len)), content);
+            assert_eq!(extract_string(rt_file_read_text(ptr, len)), content);
+            assert!(rt_file_read_text_raw(mptr, mlen).is_nil());
+            assert!(rt_file_read_text(mptr, mlen).is_nil());
+            let max = content.len() as i64;
+            assert_eq!(
+                extract_string(rt_file_read_regular_no_follow_bounded_raw(ptr, len, max)),
+                extract_string(rt_file_read_regular_no_follow_bounded(ptr, len, max))
+            );
+            assert!(rt_file_read_regular_no_follow_bounded_raw(ptr, len, max - 1).is_nil());
+            assert!(rt_file_read_regular_no_follow_bounded_raw(mptr, mlen, max).is_nil());
+        }
+    }
+
     #[test]
     fn test_file_read_text_preserves_crlf_and_carriage_returns() {
         let temp_dir = TempDir::new().unwrap();
@@ -2614,6 +3213,24 @@ mod tests {
 
     #[test]
     fn sandbox_capability_table_gates_file_text_io() {
+        const ISOLATED_CHILD: &str = "SIMPLE_FILE_OPS_SANDBOX_CAPABILITY_CHILD";
+        if std::env::var_os(ISOLATED_CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .arg("--exact")
+                .arg("value::sffi::file_io::file_ops::tests::sandbox_capability_table_gates_file_text_io")
+                .arg("--nocapture")
+                .env(ISOLATED_CHILD, "1")
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "isolated sandbox capability test failed:\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            return;
+        }
+
         let temp_dir = TempDir::new().unwrap();
         let file_path = temp_dir.path().join("sandboxed.txt");
         fs::write(&file_path, "allowed").unwrap();
@@ -3159,6 +3776,83 @@ sandbox_lowering:
 
     // Similar-problem test: edge semantics shared with the C definition —
     // missing parent directories are created; an empty path is rejected.
+    #[cfg(windows)]
+    fn assert_owner_only_acl(path: &std::path::Path) {
+        use std::os::windows::ffi::OsStrExt;
+        use windows_sys::Win32::Security::{GetFileSecurityW, GetSecurityDescriptorControl,
+            GetSecurityDescriptorDacl, GetAce, IsWellKnownSid, WinCreatorOwnerRightsSid,
+            WinLocalSystemSid, ACCESS_ALLOWED_ACE,
+            DACL_SECURITY_INFORMATION, INHERITED_ACE, SE_DACL_PROTECTED};
+        let wide: Vec<u16> = path.as_os_str().encode_wide().chain(Some(0)).collect();
+        unsafe {
+            let mut required = 0;
+            GetFileSecurityW(wide.as_ptr(), DACL_SECURITY_INFORMATION, std::ptr::null_mut(), 0, &mut required);
+            assert!(required > 0);
+            let mut storage = vec![0u64; (required as usize + 7) / 8];
+            let descriptor = storage.as_mut_ptr().cast();
+            assert_ne!(GetFileSecurityW(wide.as_ptr(), DACL_SECURITY_INFORMATION, descriptor,
+                required, &mut required), 0);
+            let mut control = 0;
+            let mut revision = 0;
+            assert_ne!(GetSecurityDescriptorControl(descriptor, &mut control, &mut revision), 0);
+            assert_ne!(control & SE_DACL_PROTECTED, 0);
+            let mut present = 0;
+            let mut defaulted = 0;
+            let mut acl = std::ptr::null_mut();
+            assert_ne!(GetSecurityDescriptorDacl(descriptor, &mut present, &mut acl, &mut defaulted), 0);
+            assert!(present != 0 && !acl.is_null());
+            assert_eq!((*acl).AceCount, 2);
+            for index in 0..(*acl).AceCount {
+                let mut raw = std::ptr::null_mut();
+                assert_ne!(GetAce(acl, u32::from(index), &mut raw), 0);
+                let ace = &*raw.cast::<ACCESS_ALLOWED_ACE>();
+                // winnt.h ACCESS_ALLOWED_ACE_TYPE = 0; avoid enabling the
+                // unrelated SystemServices feature just for this constant.
+                assert_eq!(ace.Header.AceType, 0);
+                assert_eq!(u32::from(ace.Header.AceFlags) & INHERITED_ACE, 0);
+                let sid = std::ptr::addr_of!(ace.SidStart).cast_mut().cast();
+                assert!(IsWellKnownSid(sid, WinLocalSystemSid) != 0 ||
+                    IsWellKnownSid(sid, WinCreatorOwnerRightsSid) != 0);
+            }
+        }
+    }
+
+    #[test]
+    fn test_rt_file_atomic_write_mode_collision_preserves_foreign_staging() {
+        let temp_dir = TempDir::new().unwrap();
+        let staged = temp_dir.path().join("occupied.tmp");
+        fs::write(&staged, "foreign sentinel").unwrap();
+        assert!(atomic_write_staging_file(&staged, b"must not replace", Some(0o600)).is_err());
+        assert_eq!(fs::read_to_string(&staged).unwrap(), "foreign sentinel");
+    }
+
+    #[test]
+    fn test_rt_file_atomic_write_mode_private_replacement_and_failures() {
+        let temp_dir = TempDir::new().unwrap();
+        let file_path = temp_dir.path().join("private-token.txt");
+        fs::write(&file_path, "old inherited value").unwrap();
+        let path = rv_text(file_path.to_str().unwrap());
+        unsafe {
+            assert_eq!(rt_file_atomic_write_mode(path, rv_text("first synthetic token"), 0o600), 1);
+            assert_eq!(fs::read_to_string(&file_path).unwrap(), "first synthetic token");
+            #[cfg(windows)]
+            assert_owner_only_acl(&file_path);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                assert_eq!(fs::metadata(&file_path).unwrap().permissions().mode() & 0o7777, 0o600);
+            }
+            assert_eq!(rt_file_atomic_write_mode(path, rv_text("second synthetic token"), 0o600), 1);
+            assert_eq!(fs::read_to_string(&file_path).unwrap(), "second synthetic token");
+            #[cfg(windows)]
+            assert_owner_only_acl(&file_path);
+            assert_eq!(rt_file_atomic_write_mode(rv_text(""), rv_text("refused"), 0o600), 0);
+            assert_eq!(rt_file_atomic_write_mode(rv_text(temp_dir.path().to_str().unwrap()), rv_text("refused"), 0o600), 0);
+        }
+        assert!(fs::read_dir(temp_dir.path()).unwrap().filter_map(Result::ok)
+            .all(|entry| !entry.file_name().to_string_lossy().contains(".tmp.")));
+    }
+
     #[test]
     fn test_rt_file_atomic_write_creates_parents_and_rejects_empty_path() {
         let temp_dir = TempDir::new().unwrap();
@@ -3212,23 +3906,112 @@ mod byte_text_utf8_invariant_tests {
         assert_eq!(actual.chars().count(), expected.chars().count());
     }
 
+    fn assert_raw(value: RuntimeValue, expected: &[u8]) {
+        assert!(!value.is_nil());
+        let length = rt_string_len(value);
+        let data = rt_string_data(value);
+        assert_eq!(length as usize, expected.len());
+        let actual = unsafe { std::slice::from_raw_parts(data, length as usize) };
+        assert_eq!(actual, expected);
+    }
+
     #[test]
-    fn malformed_packed_and_boxed_bytes_become_valid_replacement_text() {
-        let cases: &[(&[u8], &str)] = &[
-            (&[0x80, 0xff, 0xc3], "\u{fffd}\u{fffd}\u{fffd}"),
-            (&[0xc0, 0xaf], "\u{fffd}\u{fffd}"),
-            (&[0xed, 0xa0, 0x80], "\u{fffd}\u{fffd}\u{fffd}"),
-            (&[0xf4, 0x90, 0x80, 0x80], "\u{fffd}\u{fffd}\u{fffd}\u{fffd}"),
-            (&[0xe2, 0x82], "\u{fffd}"),
-            (&[0xf0, 0x9f, 0x98], "\u{fffd}"),
-            (&[b'a', 0xe2, 0x82, b'b'], "a\u{fffd}b"),
-            (&[0xe1, 0x80, 0xff], "\u{fffd}\u{fffd}"),
-            (&[0, 0xff, 0], "\0\u{fffd}\0"),
+    fn tls_wire_carrier_preserves_all_bytes_and_nul() {
+        let all: Vec<u8> = (0..=255).collect();
+        assert_raw(rt_tls_wire_from_bytes(unsafe { bytes_to_runtime_array(&all) }), &all);
+        assert_raw(rt_tls_wire_from_bytes(boxed(&all)), &all);
+        let mixed = [0xc2, 0x80, 0, 0xe2, 0x82, 0xac, 0xff];
+        assert_raw(rt_tls_wire_from_bytes(unsafe { bytes_to_runtime_array(&mixed) }), &mixed);
+    }
+
+    #[test]
+    fn text_byte_facade_roundtrip_copies_utf8_and_embedded_nul() {
+        use crate::value::collections::{rt_array_free, rt_string_free};
+        for expected in ["", "ASCII", "A\0B", "한글😀e\u{301}"] {
+            let input = rt_string_new(expected.as_ptr(), expected.len() as u64);
+            let bytes = rt_string_to_byte_array(input);
+            rt_string_free(input);
+            assert_eq!(crate::value::collections::rt_array_len(bytes), expected.len() as i64);
+            for (index, byte) in expected.bytes().enumerate() {
+                assert_eq!(crate::value::collections::rt_array_get(bytes, index as i64),
+                           RuntimeValue::from_int(i64::from(byte)));
+            }
+            let output = rt_string_from_byte_array(bytes);
+            rt_array_free(bytes);
+            assert_decoded(output, expected);
+            rt_string_free(output);
+        }
+    }
+
+    #[test]
+    fn text_byte_facade_packed_boxed_and_strict_rejection_contract() {
+        use crate::value::collections::{rt_array_free, rt_string_free};
+        for (input, expected) in [(&b"A\0B"[..], "A\0B"),
+                                  (&[0, 0xff, 0xe2, 0x82][..], ""), // invalid UTF-8 rejected -> facade ""
+                                  (&b""[..], "")] {
+            for array in [unsafe { bytes_to_runtime_array(input) }, boxed(input)] {
+                let text = rt_string_from_byte_array(array);
+                rt_array_free(array);
+                assert_decoded(text, expected);
+                rt_string_free(text);
+            }
+        }
+    }
+
+    #[test]
+    fn text_byte_facade_invalid_inputs_retain_empty_fallback_and_helper_nil() {
+        use crate::value::collections::{rt_array_free, rt_string_free};
+        for input in [RuntimeValue::NIL, RuntimeValue::from_int(7)] {
+            let bytes = rt_string_to_byte_array(input);
+            assert!(!bytes.is_nil());
+            assert_eq!(crate::value::collections::rt_array_len(bytes), 0);
+            rt_array_free(bytes);
+        }
+        for receiver in [RuntimeValue::NIL, RuntimeValue::from_int(0), RuntimeValue::from_bool(false)] {
+            assert!(rt_bytes_to_text(receiver).is_nil());
+            let text = rt_string_from_byte_array(receiver);
+            assert_decoded(text, "");
+            rt_string_free(text);
+        }
+        for invalid in [RuntimeValue::from_int(-1), RuntimeValue::from_int(256),
+                        RuntimeValue::from_bool(true), RuntimeValue::NIL] {
+            let array = rt_array_new(2);
+            assert!(rt_array_push(array, RuntimeValue::from_int(65)));
+            assert!(rt_array_push(array, invalid));
+            assert!(rt_bytes_to_text(array).is_nil());
+            let text = rt_string_from_byte_array(array);
+            rt_array_free(array);
+            assert_decoded(text, "");
+            rt_string_free(text);
+        }
+    }
+
+    #[test]
+    fn malformed_packed_and_boxed_bytes_are_rejected_with_nil() {
+        // Owner decision 2026-11-23 (utf8 rejection part 2): never U+FFFD.
+        // Must match the C runtime (rt_bytes_to_text_layouts_selfcheck.c).
+        let cases: &[&[u8]] = &[
+            &[0xc0, 0xaf],                // overlong 2-byte
+            &[0xe0, 0x80, 0xaf],          // overlong 3-byte
+            &[0xf0, 0x80, 0x80, 0xaf],    // overlong 4-byte
+            &[0x80],                      // lone continuation
+            &[b'a', 0xbf, b'b'],          // continuation between ASCII
+            &[0xed, 0xa0, 0x80],          // encoded high surrogate
+            &[0xed, 0xbf, 0xbf],          // encoded low surrogate
+            &[0xe2, 0x82],                // truncated 3-byte
+            &[0xf0, 0x9f, 0x98],          // truncated 4-byte
+            &[b'a', 0xe2, 0x82, b'b'],    // truncated mid-text
+            &[0xe1, 0x80, 0xff],          // bad continuation
+            &[0, 0xff, 0],                // invalid lead
+            &[0xf4, 0x90, 0x80, 0x80],    // above U+10FFFF
         ];
-        for (input, expected) in cases {
+        for input in cases {
             let packed = unsafe { bytes_to_runtime_array(input) };
-            assert_decoded(rt_bytes_to_text(packed), expected);
-            assert_decoded(rt_bytes_to_text(boxed(input)), expected);
+            assert!(rt_bytes_to_text(packed).is_nil(), "packed {:x?} must be rejected", input);
+            assert!(rt_bytes_to_text(boxed(input)).is_nil(), "boxed {:x?} must be rejected", input);
+            // Non-optional facade keeps its empty-text fallback.
+            let text = rt_string_from_byte_array(boxed(input));
+            assert_decoded(text, "");
         }
     }
 

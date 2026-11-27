@@ -16,13 +16,44 @@ class SimpleTheme:
         )
 
     fn resolve_token(key: text) -> text:
-        val normalized = if key.starts_with("--"): key else: "--{key}"
-        if self.token_map.contains_key(normalized):
-            return self.token_map[normalized]
+        var normalized = if key.starts_with("--"): key else: "--{key}"
+        var depth = 0
+        while depth < 4:
+            depth = depth + 1
+            var raw = ""
+            if self.token_map.contains_key(normalized):
+                raw = self.token_map[normalized]
+            else:
+                raw = _simple_theme_fallback_token(normalized, self.tokens)
+            val trimmed = raw.trim()
+            if not trimmed.starts_with("var("):
+                return raw
+            val inner_start = trimmed.index_of("var(")
+            val inner_rest = trimmed.substring(inner_start + 4, trimmed.byte_len())
+            val close_idx = inner_rest.index_of(")")
+            if close_idx < 0:
+                return raw
+            val inside = inner_rest.substring(0, close_idx).trim()
+            val comma_idx = inside.index_of(",")
+            val ref_name = if comma_idx >= 0: inside.substring(0, comma_idx).trim() else: inside
+            val fallback = if comma_idx >= 0: inside.substring(comma_idx + 1, inside.byte_len()).trim() else: ""
+            if not ref_name.starts_with("--"):
+                return if fallback != "": fallback else: raw
+            if ref_name == normalized:
+                return if fallback != "": fallback else: raw
+            normalized = ref_name
+            if not self.token_map.contains_key(normalized) and _simple_theme_fallback_token(normalized, self.tokens) == "":
+                if fallback != "":
+                    return fallback
+                return raw
         return _simple_theme_fallback_token(normalized, self.tokens)
 
 fn _simple_theme_tokens_for_name(name: text) -> GlassDesignTokens:
     val lower = name.to_lower()
+    if lower == "fluid_light" or lower == "fluid" or lower == "liquid" or lower == "liquid_light" or lower == "simple_liquid_light":
+        return GlassDesignTokens.fluid_light()
+    if lower == "fluid_dark" or lower == "liquid_dark" or lower == "simple_liquid_dark":
+        return GlassDesignTokens.fluid_dark()
     if lower == "light" or lower == "ios_light" or lower == "obsidian_light":
         return GlassDesignTokens.obsidian_light()
     if lower == "dark" or lower == "ios_dark":
@@ -39,7 +70,7 @@ fn _simple_theme_token_map_from_css(css: text) -> Dict<text, text>:
                 val key = parts[0].trim()
                 var value = parts[1].trim()
                 if value.ends_with(";"):
-                    value = value.substring(0, value.len() - 1).trim()
+                    value = value.substring(0, value.byte_len() - 1).trim()
                 out[key] = value
     out
 

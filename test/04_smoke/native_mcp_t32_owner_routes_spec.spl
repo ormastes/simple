@@ -1,0 +1,111 @@
+"""
+## Purpose and audience
+Executable specification for the TRACE32 MCP owner routes in
+`app.mcp_t32` (examples/10_tooling/trace32_tools/t32_mcp). Written for the
+engineers who own the TRACE32 MCP server and for reviewers of
+doc/08_tracking/bug/mcp_t32_module_owner_omissions_2026-10-05.md: every
+route below must resolve its shared owner module and answer a malformed or
+empty request with a structured error instead of crashing.
+
+## Operator workflow
+Run `bin/simple test test/04_smoke/native_mcp_t32_owner_routes_spec.spl`.
+No scenario connects to TRACE32, launches a backend, mutates session state,
+or creates a window.
+
+## Compatibility and limitations
+The scenarios exercise the empty-argument paths only; live TRACE32 behaviour
+is covered by the t32 system specs. Session inventory and AREA state are
+module globals, so the spec asserts they stay untouched by failed requests.
+
+## Verification guidance and troubleshooting
+A failure here names the owner route that no longer resolves or no longer
+returns its error envelope. Re-read the matching `*_tools.spl` module under
+examples/10_tooling/trace32_tools/t32_mcp before changing the expectation.
+"""
+
+# @manual_section: TRACE32 MCP owner routes
+use std.spec.step
+use app.mcp_t32.json_helpers.{t32_LB, t32_RB, t32_jp, t32_js, t32_extract_field}
+use app.mcp_t32.action_tools.{t32_dispatch_tool}
+use app.mcp_t32.session_tools.{handle_t32_session_resume}
+use app.mcp_t32.session_list_tools.{handle_t32_sessions_list}
+use app.mcp_t32.gap_tools.{handle_t32_session_info}
+use app.mcp_t32.headless_tools.{handle_t32_setup_headless}
+use app.mcp_t32.ctypes_bridge.{t32_ctypes_available}
+use app.mcp_t32.tool_common.{t32_mcp_session_ids}
+use app.mcp_t32.session_state.{MCP_T32_AREA_READY, MCP_T32_AREA_NAME}
+use app.mcp_t32.window_tools.{t32_parse_action_sdn}
+
+fn empty_args() -> text:
+    t32_LB() + t32_RB()
+
+describe "TRACE32 MCP owner routes: session state":
+
+    it "starts with an empty session inventory":
+        # @req REQ-MCP-T32-OWNER-001
+        step("Read the session inventory from tool_common in a fresh process")
+        val ids: [text] = t32_mcp_session_ids()
+        expect(ids.len()).to_equal(0)
+
+    it "reports ctypes unavailable without loading a provider":
+        # @req REQ-MCP-T32-OWNER-001
+        step("Ask the ctypes bridge whether a TRACE32 provider is loaded")
+        expect(t32_ctypes_available()).to_equal(false)
+
+describe "TRACE32 MCP owner routes: JSON helpers":
+
+    it "extracts a string field and escapes embedded quotes":
+        # @req REQ-MCP-T32-OWNER-002
+        step("Build {\"value\":\"alpha\"} and extract the value field")
+        val json = t32_LB() + t32_jp("value", t32_js("alpha")) + t32_RB()
+        expect(t32_extract_field(json, "value")).to_equal("alpha")
+        step("Quote a string that contains a double quote")
+        expect(t32_js("a\"b")).to_equal("\"a\\\"b\"")
+
+describe "TRACE32 MCP owner routes: error envelopes for empty requests":
+
+    it "dispatch reports a missing tool name as -32602":
+        # @req REQ-MCP-T32-OWNER-003
+        step("Dispatch a tool call with no name")
+        val reply = t32_dispatch_tool("1", empty_args())
+        expect(reply).to_contain("-32602")
+        expect(reply).to_contain("error")
+
+    it "session resume reports a missing session as a tool error":
+        # @req REQ-MCP-T32-OWNER-003
+        step("Resume a session without a session id")
+        val reply = handle_t32_session_resume("2", empty_args())
+        expect(reply).to_contain("isError")
+        expect(reply).to_contain("true")
+
+    it "session info rejects an absent session":
+        # @req REQ-MCP-T32-OWNER-003
+        step("Request session info without a session id")
+        val reply = handle_t32_session_info("3", empty_args())
+        expect(reply).to_contain("isError")
+        expect(reply).to_contain("true")
+
+    it "headless setup rejects an absent session and keeps AREA state":
+        # @req REQ-MCP-T32-OWNER-003
+        step("Run headless setup without a session id")
+        val reply = handle_t32_setup_headless("4", empty_args())
+        expect(reply).to_contain("isError")
+        expect(reply).to_contain("true")
+        step("Confirm the failed setup did not mark the AREA window ready")
+        expect(MCP_T32_AREA_READY).to_equal(false)
+        expect(MCP_T32_AREA_NAME).to_equal("")
+
+    it "sessions list resolves its owner and returns a result":
+        # @req REQ-MCP-T32-OWNER-003
+        step("List sessions through session_list_tools")
+        val reply = handle_t32_sessions_list("5", empty_args())
+        expect(reply).to_contain("result")
+
+describe "TRACE32 MCP owner routes: window action catalog":
+
+    it "parses one action and keeps its command and target":
+        # @req REQ-MCP-T32-OWNER-004
+        step("Parse a one-action SDN catalog")
+        val actions: [text] = t32_parse_action_sdn("action refresh\n  label: Refresh\n  type: execute\n  command: Register.view\n  target: register_view\n")
+        expect(actions.len()).to_equal(1)
+        expect(actions[0]).to_equal("refresh|Refresh|execute|Register.view|register_view")

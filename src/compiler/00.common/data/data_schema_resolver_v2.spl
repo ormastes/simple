@@ -1,0 +1,79 @@
+# V2 compatibility wrapper. Its nominal conversion/output/digest remain frozen;
+# common normalized reconciliation and property checks are shared with V3.
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.data.data_schema_contracts.*
+use compiler.common.data.data_schema_contracts_v2.*
+use compiler.common.data.data_schema_core_v1.*
+use compiler.common.data.data_schema_resolver.{data_schema_resolve_v1}
+export use compiler.common.data.data_schema_property_resolver_v1.{data_schema_name_valid_v2, data_schema_sorted_names_v2, data_schema_invalid_v2, data_property_normalize_v2, data_property_canonical_v2}
+use compiler.common.data.data_schema_property_resolver_v1.{DataSchemaPropertyDeclV1, data_property_contract_error_v2, data_schema_view_error_v2, data_schema_resolved_views_v2, data_schema_properties_resolve_v2}
+
+fn data_schema_lp_v2(value: text) -> text:
+    "{value.len()}:{value}"
+
+fn data_property_shape_v2(decl: DataAttrDeclV2) -> text:
+    if decl.base.type_ref.args.len() > DATA_SCHEMA_MAX_PROPERTY_ITEMS_V2:
+        return "generic argument limit exceeded"
+    if decl.base.default_value.byte_len() > 65536:
+        return "default expression exceeds 64 KiB"
+    if not data_schema_name_valid_v2(decl.base.type_ref.path):
+        return "type path must be a canonical flat nominal name"
+    for arg in decl.base.type_ref.args:
+        if not data_schema_name_valid_v2(arg):
+            return "generic arguments must be canonical flat nominal names"
+    if not data_schema_name_valid_v2(decl.base.tree) or not data_schema_name_valid_v2(decl.base.view) or not data_schema_name_valid_v2(decl.base.name):
+        return "tree, view and attribute must be canonical names"
+    data_property_contract_error_v2(decl.property, decl.base.requiredness, decl.base.default_value)
+
+pub fn data_schema_digest_v2(base: DataSchemaSurfaceV1, views: [DataResolvedViewV2], properties: [DataResolvedPropertyV2]) -> text:
+    var canonical = DATA_SCHEMA_DIGEST_DOMAIN_V2 + "\nbase=" + data_schema_lp_v2(base.schema_digest) + "\n"
+    for view in views:
+        canonical = canonical + "view=" + data_schema_lp_v2(view.name) + "\n"
+    for property in properties:
+        canonical = canonical + "attr={property.attr_id.ordinal}|" + data_property_canonical_v2(property.property) + "\n"
+    sha256_text(canonical)
+
+pub fn data_schema_resolve_v2(authority: DataSchemaAuthorityV1, views: [DataViewDeclV2],
+                              decls: [DataAttrDeclV2], aliases: [DataTypeAliasV1]) -> Result<DataSchemaSurfaceV2, [DataSchemaDiagnosticV1]>:
+    val nowhere = data_decl_provenance_v1(DataDeclOriginV1.Spl, "", 0, "")
+    if views.len() > DATA_SCHEMA_MAX_VIEWS_V2 or decls.len() > DATA_SCHEMA_MAX_DECLS_V2 or aliases.len() > DATA_SCHEMA_MAX_DECLS_V2 or authority.owners.len() > DATA_SCHEMA_MAX_VIEWS_V2:
+        return Err([data_schema_invalid_v2(authority.tree, nowhere, "schema input limit exceeded")])
+    if not data_schema_name_valid_v2(authority.tree) or authority.owners.len() == 0:
+        return Err([data_schema_invalid_v2(authority.tree, nowhere, "schema needs a canonical tree and explicit owner authority")])
+    var diags: [DataSchemaDiagnosticV1] = []
+    for owner in authority.owners:
+        if not data_schema_name_valid_v2(owner):
+            diags.push(data_schema_invalid_v2(owner, nowhere, "schema authority owner must be canonical"))
+    for alias in aliases:
+        if not data_schema_name_valid_v2(alias.alias) or not data_schema_name_valid_v2(alias.target):
+            diags.push(data_schema_invalid_v2(alias.alias, nowhere, "alias names and targets must be canonical flat nominal names"))
+    var view_names: [text] = []
+    for view in views:
+        if val diagnostic = data_schema_view_error_v2(authority, view):
+            diags.push(diagnostic)
+        else:
+            view_names.push(view.name)
+    var base_decls: [DataAttrDeclV1] = []
+    var property_decls: [DataSchemaPropertyDeclV1] = []
+    for decl in decls:
+        val shape = data_property_shape_v2(decl)
+        if shape != "":
+            diags.push(data_schema_invalid_v2(decl.base.name, decl.base.provenance, shape))
+        if not view_names.contains(decl.base.view):
+            diags.push(data_schema_invalid_v2(decl.base.name, decl.base.provenance, "attribute view was not explicitly declared"))
+        base_decls.push(decl.base)
+        property_decls.push(DataSchemaPropertyDeclV1(name: decl.base.name,
+            property: decl.property, provenance: decl.base.provenance))
+    if diags.len() > 0:
+        return Err(diags)
+    val base = data_schema_resolve_v1(authority, base_decls, aliases)?
+    val resolved_views = data_schema_resolved_views_v2(views)
+    var core_attrs: [DataSchemaCoreAttrV1] = []
+    for attr in base.attrs:
+        core_attrs.push(DataSchemaCoreAttrV1(id: attr.id, name: attr.name, type_key: attr.type_canonical,
+            requiredness: attr.requiredness, default_value: attr.default_value,
+            views: attr.views, provenances: attr.provenances))
+    val properties = data_schema_properties_resolve_v2(core_attrs, property_decls)?
+    Ok(DataSchemaSurfaceV2(contract_version: DATA_SCHEMA_CONTRACT_V2, base: base,
+        views: resolved_views, properties: properties,
+        schema_digest: data_schema_digest_v2(base, resolved_views, properties)))

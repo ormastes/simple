@@ -1,0 +1,68 @@
+# Purpose and audience: executable evidence that a Caret pane is only treated as the selected agent's when an explicit (session, generation) -> (pane, generation) binding exists.
+
+"""
+Caret workbench pane binding.
+
+An operator looking at a terminal pane must be able to tell whether it belongs
+to the selected agent, and input aimed at a stale generation must be refused.
+"""
+
+use std.spec.*
+use app.llm_caret.workbench.session_contract.{SessionId, new_session_id, next_generation}
+use app.llm_caret.workbench.pane_binding.{PaneBinding, PaneBindingResult,
+    resolve_pane_binding, input_target_allowed, pane_binding_label}
+
+fn _binding(id: SessionId, pane: text, pane_gen: i64) -> PaneBinding:
+    PaneBinding(session: id, pane_id: pane, pane_generation: pane_gen)
+
+fn _bound_pane(r: PaneBindingResult) -> text:
+    match r:
+        case PaneBindingResult.Bound(b): b.pane_id
+        case PaneBindingResult.Unbound(reason): ""
+
+describe "pane binding":
+    it "resolves a bound (session, generation) pair to its pane":
+        # @req REQ-CARET-UI-001
+        step("bind a1@1 to pane p1@1")
+        val a1 = new_session_id("a1")
+        val r = resolve_pane_binding([_binding(a1, "p1", 1)], a1, 1)
+        expect(_bound_pane(r)).to_equal("p1")
+        expect(pane_binding_label(r)).to_equal("terminal p1")
+
+    it "reports an unknown session as unbound":
+        # @req REQ-CARET-UI-001
+        step("ask for a session that has no binding")
+        val r = resolve_pane_binding([_binding(new_session_id("a1"), "p1", 1)], new_session_id("zz"), 1)
+        expect(_bound_pane(r)).to_equal("")
+        expect(pane_binding_label(r)).to_equal("unbound terminal")
+
+    it "reports a pane generation mismatch as unbound":
+        # @req REQ-CARET-UI-001
+        step("pane was respawned: observed generation 2, binding says 1")
+        val a1 = new_session_id("a1")
+        val r = resolve_pane_binding([_binding(a1, "p1", 1)], a1, 2)
+        expect(pane_binding_label(r)).to_equal("unbound terminal")
+
+    it "refuses input aimed at an older generation of a bound session":
+        # @req REQ-CARET-UI-002
+        step("binding is for a1@2, draft was captured against a1@1")
+        val a1g2 = next_generation(new_session_id("a1"))
+        val r = resolve_pane_binding([_binding(a1g2, "p1", 1)], a1g2, 1)
+        expect(input_target_allowed(r, "a1", 2)).to_equal(true)
+        expect(input_target_allowed(r, "a1", 1)).to_equal(false)
+
+    it "refuses an old draft target after the child restarts":
+        # @req REQ-CARET-UI-002
+        step("restart bumps a1 to generation 2; old binding a1@1 no longer resolves")
+        val a1 = new_session_id("a1")
+        val restarted = next_generation(a1)
+        val r = resolve_pane_binding([_binding(a1, "p1", 1)], restarted, 1)
+        expect(input_target_allowed(r, "a1", 1)).to_equal(false)
+        expect(input_target_allowed(r, "a1", 2)).to_equal(false)
+
+    it "refuses input when the pane is unbound":
+        # @req REQ-CARET-UI-002
+        step("no bindings at all")
+        val none: [PaneBinding] = []
+        val r = resolve_pane_binding(none, new_session_id("a1"), 1)
+        expect(input_target_allowed(r, "a1", 1)).to_equal(false)

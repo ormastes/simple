@@ -15,12 +15,13 @@ use std.nogc_sync_mut.compression.gzip.crc.{
     crc32_calculate, crc32_verify, crc32_update, crc32_finalize, crc32_chunked
 }
 use std.nogc_sync_mut.compression.gzip.header.{
-    gzip_header_create, gzip_header_parse, gzip_header_parse_at, gzip_header_size,
-    gzip_footer_create, gzip_footer_parse, gzip_footer_validate
+    gzip_header_create, gzip_header_parse, gzip_header_size,
+    gzip_footer_create, gzip_footer_parse
 }
 use std.nogc_sync_mut.compression.gzip.lz77.{lz77_compress}
 use std.nogc_sync_mut.compression.gzip.deflate.{deflate_block_stored, deflate_block_fixed}
-use std.nogc_sync_mut.compression.gzip.inflate.{inflate_member}
+use std.nogc_sync_mut.compression.gzip.inflate.{inflate_member, InflateOut}
+use std.nogc_sync_mut.compression.gzip.decompress.{gzip_decompress as gzip_decode_members}
 
 # =============================================================================
 # GZIP COMPRESSION
@@ -40,13 +41,10 @@ fn gzip_compress(data: [u8], level: i64) -> [u8]:
             deflate_empty = deflate_block_fixed(tokens_empty, true)
         val footer_empty = gzip_footer_create(crc_empty, 0)
         var result_empty = header_empty
+        # WA-P3-generic-recv: for-in instead of .len() on a var assigned from untyped-param fns
+        for de_byte in deflate_empty:
+            result_empty.push(de_byte)
         var ei = 0
-        loop:
-            if ei >= deflate_empty.len():
-                break
-            result_empty.push(deflate_empty[ei])
-            ei = ei + 1
-        ei = 0
         loop:
             if ei >= footer_empty.len():
                 break
@@ -81,14 +79,11 @@ fn gzip_compress(data: [u8], level: i64) -> [u8]:
 
     # Combine header + compressed data + footer
     var result = header
-    var i = 0
-    loop:
-        if i >= compressed.len():
-            break
-        result.push(compressed[i])
-        i = i + 1
+    # WA-P3-generic-recv: for-in instead of .len() on a var assigned from untyped-param fns
+    for c_byte in compressed:
+        result.push(c_byte)
 
-    i = 0
+    var i = 0
     loop:
         if i >= footer.len():
             break
@@ -97,35 +92,8 @@ fn gzip_compress(data: [u8], level: i64) -> [u8]:
 
     return result
 
-# Decompress a GZIP file: a series of one or more members (RFC 1952 2.2), each
-# with its own header, DEFLATE stream and CRC-32 + ISIZE trailer. The output is the
-# concatenation of the members' data. Any malformed member, and any bytes after the
-# last member that do not form another member, fail the whole file (nil).
 fn gzip_decompress(data: [u8]) -> [u8]?:
-    if data.len() < 18:
-        return nil
-    var result: [u8] = []
-    var pos = 0
-    while pos < data.len():
-        # Extract declared payloads explicitly on older native producers.
-        # @workaround bug=gzip_optional_collection_payload_provenance_2026_10_21
-        val header_info: [i64] = match gzip_header_parse_at(data, pos):
-            case Some(info): info
-            case nil: return nil
-        val body: [Any] = match inflate_member(data, gzip_header_size(header_info)):
-            case Some(info): info
-            case nil: return nil
-        val member: [u8] = body[0]
-        # A missing (truncated) trailer follows the same nil failure path.
-        val footer_info: [i64] = match gzip_footer_parse(data, body[1]):
-            case Some(info): info
-            case nil: return nil
-        if not gzip_footer_validate(footer_info, member, member.len()):
-            return nil
-        for b in member:
-            result.push(b)
-        pos = body[1] + 8
-    return result
+    gzip_decode_members(data)
 
 # Compress with default level
 fn gzip_compress_default(data):
@@ -152,7 +120,7 @@ fn gzip_compress_none(data):
 fn gzip_validate(data):
     if data == nil:
         return false
-    return gzip_decompress(data) != nil
+    return gzip_decompress(data).is_some()
 
 # Get metadata of the FIRST member: [timestamp, os, extra_flags, crc32, isize] (nil if malformed)
 fn gzip_get_metadata(data):
@@ -160,13 +128,13 @@ fn gzip_get_metadata(data):
         return nil
     val header_info: [i64] = match gzip_header_parse(data):
         case Some(info): info
-        case nil: return nil
-    val body: [Any] = match inflate_member(data, gzip_header_size(header_info)):
+        case None: return nil
+    val body: InflateOut = match inflate_member(data, gzip_header_size(header_info)):
         case Some(info): info
-        case nil: return nil
-    val footer_info: [i64] = match gzip_footer_parse(data, body[1]):
+        case None: return nil
+    val footer_info: [i64] = match gzip_footer_parse(data, body.end):
         case Some(info): info
-        case nil: return nil
+        case None: return nil
     return [header_info[1], header_info[3], header_info[2], footer_info[0], footer_info[1]]
 
 # Check if data is already GZIP compressed
@@ -185,14 +153,14 @@ fn gzip_extract_payload(data):
         return nil
     val header_info: [i64] = match gzip_header_parse(data):
         case Some(info): info
-        case nil: return nil
+        case None: return nil
     val header_size = gzip_header_size(header_info)
-    val body: [Any] = match inflate_member(data, header_size):
+    val body: InflateOut = match inflate_member(data, header_size):
         case Some(info): info
-        case nil: return nil
+        case None: return nil
     var payload: [u8] = []
     var i = header_size
-    while i < body[1]:
+    while i < body.end:
         payload.push(data[i])
         i = i + 1
     return payload

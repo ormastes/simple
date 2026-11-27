@@ -1,0 +1,278 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-BROWSER_ENGINE
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl 1%
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_core.spl 1%
+# @tag: unit, browser_engine, layout, cascade, table, grid, abspos, chrome159
+#
+# Box geometry of text-free pages, second batch: table captions, spacing,
+# sections and auto columns; grid fr / minmax / auto rows; absolutely and
+# relatively positioned boxes; flex shrink, order, space-evenly, column
+# alignment, align-self, wrap-reverse, max-width; floats, inline-blocks,
+# margin collapsing, box-sizing, overflow; and the cascade (inline vs rule,
+# !important, specificity, source order, custom properties, inherit, @media,
+# @supports, min()/max()/clamp(), em and vw lengths).
+#
+# Oracle: Chrome 159.0.8154.6 headless shell, 900x2000 viewport, each page
+# `<html><head><style>body{margin:0;font:16px/1 sans-serif}</style></head>
+# <body>...` with the markup below, `getBoundingClientRect()` of each id as
+# `x,y,w,h`, run 2026-11-15. No box holds text, so every value is
+# font-independent. Rows whose Chrome value is fractional are not used.
+#
+# Rows where this renderer disagrees with Chrome are filed, not asserted:
+# doc/08_tracking/bug/web_layout_cascade_selector_paint_chrome159_round4_divergences_2026-11-15.md.
+
+use std.spec.{describe, it, expect}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_web_layout_debug_layout_by_id}
+
+fn _box(body: text, id: text) -> text:
+    val p = "<html><head><style>body{{margin:0;font:16px/1 sans-serif}}</style></head><body>" + body + "</body></html>"
+    simple_web_layout_debug_layout_by_id(p, 900, 2000, id, "x") + "," + simple_web_layout_debug_layout_by_id(p, 900, 2000, id, "y") + "," + simple_web_layout_debug_layout_by_id(p, 900, 2000, id, "w") + "," + simple_web_layout_debug_layout_by_id(p, 900, 2000, id, "h")
+
+describe "Layout boxes":
+
+    it "tbl caption top":
+        val page = "<table id=t style=\"border-spacing:0\"><caption id=c style=\"height:10px;padding:0\"></caption><tr><td id=a style=\"width:40px;height:20px;padding:0\"></td></tr></table>"
+        expect(_box(page, "t")).to_equal("0,0,40,30")
+        expect(_box(page, "c")).to_equal("0,0,40,10")
+        expect(_box(page, "a")).to_equal("0,10,40,20")
+
+    it "tbl caption bottom":
+        val page = "<table id=t style=\"border-spacing:0;caption-side:bottom\"><caption id=c style=\"height:10px;padding:0\"></caption><tr><td id=a style=\"width:40px;height:20px;padding:0\"></td></tr></table>"
+        expect(_box(page, "t")).to_equal("0,0,40,30")
+        expect(_box(page, "c")).to_equal("0,20,40,10")
+        expect(_box(page, "a")).to_equal("0,0,40,20")
+
+    it "tbl spacing":
+        val page = "<table id=t style=\"border-spacing:4px 6px\"><tr><td id=a style=\"width:20px;height:10px;padding:0\"></td><td id=b style=\"width:30px;height:10px;padding:0\"></td></tr><tr><td id=d style=\"width:20px;height:10px;padding:0\"></td><td style=\"width:30px;height:10px;padding:0\"></td></tr></table>"
+        expect(_box(page, "t")).to_equal("0,0,62,38")
+        expect(_box(page, "a")).to_equal("4,6,20,10")
+        expect(_box(page, "b")).to_equal("28,6,30,10")
+        expect(_box(page, "d")).to_equal("4,22,20,10")
+
+    it "tbl width auto cols":
+        val page = "<table id=t style=\"border-spacing:0;width:300px\"><tr><td id=a style=\"height:10px;padding:0\"><div style=\"width:50px\"></div></td><td id=b style=\"height:10px;padding:0\"><div style=\"width:150px\"></div></td></tr></table>"
+        expect(_box(page, "t")).to_equal("0,0,300,10")
+        expect(_box(page, "a")).to_equal("0,0,75,10")
+        expect(_box(page, "b")).to_equal("75,0,225,10")
+
+    it "grid fr":
+        val page = "<div id=g style=\"display:grid;grid-template-columns:1fr 2fr;width:90px\"><div id=a style=\"height:5px\"></div><div id=b style=\"height:5px\"></div></div>"
+        expect(_box(page, "a")).to_equal("0,0,30,5")
+        expect(_box(page, "b")).to_equal("30,0,60,5")
+
+    it "grid fixed fr":
+        val page = "<div id=g style=\"display:grid;grid-template-columns:30px 1fr;width:100px;column-gap:10px\"><div id=a style=\"height:5px\"></div><div id=b style=\"height:5px\"></div></div>"
+        expect(_box(page, "a")).to_equal("0,0,30,5")
+        expect(_box(page, "b")).to_equal("40,0,60,5")
+
+    it "grid minmax":
+        val page = "<div id=g style=\"display:grid;grid-template-columns:minmax(40px, 1fr) 60px;width:200px\"><div id=a style=\"height:5px\"></div><div id=b style=\"height:5px\"></div></div>"
+        expect(_box(page, "a")).to_equal("0,0,140,5")
+        expect(_box(page, "b")).to_equal("140,0,60,5")
+
+    it "grid row auto height":
+        val page = "<div id=g style=\"display:grid;grid-template-columns:20px 20px\"><div id=a style=\"height:15px\"></div><div id=b style=\"height:25px\"></div><div id=d style=\"height:5px\"></div></div>"
+        expect(_box(page, "g")).to_equal("0,0,900,30")
+        expect(_box(page, "a")).to_equal("0,0,20,15")
+        expect(_box(page, "b")).to_equal("20,0,20,25")
+        expect(_box(page, "d")).to_equal("0,25,20,5")
+
+    it "abs offsets":
+        val page = "<div id=p style=\"position:relative;width:200px;height:100px\"><div id=a style=\"position:absolute;left:10px;top:20px;width:30px;height:40px\"></div></div>"
+        expect(_box(page, "p")).to_equal("0,0,200,100")
+        expect(_box(page, "a")).to_equal("10,20,30,40")
+
+    it "abs right bottom":
+        val page = "<div id=p style=\"position:relative;width:200px;height:100px\"><div id=a style=\"position:absolute;right:10px;bottom:20px;width:30px;height:40px\"></div></div>"
+        expect(_box(page, "a")).to_equal("160,40,30,40")
+
+    it "abs padding box":
+        val page = "<div id=p style=\"position:relative;width:200px;height:100px;padding:10px;border:5px solid\"><div id=a style=\"position:absolute;left:0;top:0;width:10px;height:10px\"></div></div>"
+        expect(_box(page, "p")).to_equal("0,0,230,130")
+        expect(_box(page, "a")).to_equal("5,5,10,10")
+
+    it "rel offset":
+        val page = "<div id=a style=\"position:relative;left:12px;top:8px;width:30px;height:10px\"></div><div id=b style=\"width:30px;height:10px\"></div>"
+        expect(_box(page, "a")).to_equal("12,8,30,10")
+        expect(_box(page, "b")).to_equal("0,10,30,10")
+
+    it "flex shrink":
+        val page = "<div style=\"display:flex;width:100px\"><div id=a style=\"width:80px;height:10px;flex-shrink:1\"></div><div id=b style=\"width:80px;height:10px;flex-shrink:3\"></div></div>"
+        expect(_box(page, "a")).to_equal("0,0,65,10")
+        expect(_box(page, "b")).to_equal("65,0,35,10")
+
+    it "flex order":
+        val page = "<div style=\"display:flex\"><div id=a style=\"order:2;width:20px;height:10px\"></div><div id=b style=\"order:1;width:30px;height:10px\"></div></div>"
+        expect(_box(page, "a")).to_equal("30,0,20,10")
+        expect(_box(page, "b")).to_equal("0,0,30,10")
+
+    it "flex evenly":
+        val page = "<div style=\"display:flex;width:100px;justify-content:space-evenly\"><div id=a style=\"width:20px;height:10px\"></div><div id=b style=\"width:20px;height:10px\"></div></div>"
+        expect(_box(page, "a")).to_equal("20,0,20,10")
+        expect(_box(page, "b")).to_equal("60,0,20,10")
+
+    it "flex col evenly":
+        val page = "<div style=\"display:flex;flex-direction:column;height:100px;justify-content:space-evenly\"><div id=a style=\"height:20px\"></div><div id=b style=\"height:20px\"></div></div>"
+        expect(_box(page, "a")).to_equal("0,20,900,20")
+        expect(_box(page, "b")).to_equal("0,60,900,20")
+
+    it "flex col around":
+        val page = "<div style=\"display:flex;flex-direction:column;height:100px;justify-content:space-around\"><div id=a style=\"height:20px\"></div><div id=b style=\"height:20px\"></div></div>"
+        expect(_box(page, "a")).to_equal("0,15,900,20")
+        expect(_box(page, "b")).to_equal("0,65,900,20")
+
+    it "flex col center":
+        val page = "<div style=\"display:flex;flex-direction:column;height:100px;justify-content:center;align-items:center;width:100px\"><div id=a style=\"height:20px;width:30px\"></div></div>"
+        expect(_box(page, "a")).to_equal("35,40,30,20")
+
+    it "flex col end":
+        val page = "<div style=\"display:flex;flex-direction:column;height:100px;justify-content:flex-end;align-items:flex-end;width:100px\"><div id=a style=\"height:20px;width:30px\"></div></div>"
+        expect(_box(page, "a")).to_equal("70,80,30,20")
+
+    it "flex align self":
+        val page = "<div style=\"display:flex;height:50px\"><div id=a style=\"width:20px;height:10px;align-self:center\"></div><div id=b style=\"width:20px;height:10px;align-self:flex-end\"></div><div id=d style=\"width:20px\"></div></div>"
+        expect(_box(page, "a")).to_equal("0,20,20,10")
+        expect(_box(page, "b")).to_equal("20,40,20,10")
+        expect(_box(page, "d")).to_equal("40,0,20,50")
+
+    it "flex wrap reverse":
+        val page = "<div style=\"display:flex;flex-wrap:wrap-reverse;width:50px\"><div id=a style=\"width:40px;height:10px\"></div><div id=b style=\"width:40px;height:20px\"></div></div>"
+        expect(_box(page, "a")).to_equal("0,20,40,10")
+        expect(_box(page, "b")).to_equal("0,0,40,20")
+
+    it "flex max w":
+        val page = "<div style=\"display:flex;width:100px\"><div id=a style=\"flex:1;max-width:20px;height:10px\"></div><div id=b style=\"flex:1;height:10px\"></div></div>"
+        expect(_box(page, "a")).to_equal("0,0,20,10")
+        expect(_box(page, "b")).to_equal("20,0,80,10")
+
+    it "float left right":
+        val page = "<div style=\"width:200px\"><div id=a style=\"float:left;width:30px;height:10px\"></div><div id=b style=\"float:right;width:40px;height:20px\"></div><div id=d style=\"clear:both;height:5px\"></div></div>"
+        expect(_box(page, "a")).to_equal("0,0,30,10")
+        expect(_box(page, "b")).to_equal("160,0,40,20")
+        expect(_box(page, "d")).to_equal("0,20,200,5")
+
+    it "float stack":
+        val page = "<div style=\"width:100px\"><div id=a style=\"float:left;width:60px;height:10px\"></div><div id=b style=\"float:left;width:60px;height:10px\"></div></div>"
+        expect(_box(page, "a")).to_equal("0,0,60,10")
+        expect(_box(page, "b")).to_equal("0,10,60,10")
+
+    it "inline block row":
+        val page = "<div><div id=a style=\"display:inline-block;width:30px;height:10px;vertical-align:top\"></div><div id=b style=\"display:inline-block;width:40px;height:20px;vertical-align:top\"></div></div>"
+        expect(_box(page, "a")).to_equal("0,0,30,10")
+        expect(_box(page, "b")).to_equal("30,0,40,20")
+
+    it "block margin collapse":
+        val page = "<div id=a style=\"margin-bottom:20px;height:10px\"></div><div id=b style=\"margin-top:30px;height:10px\"></div>"
+        expect(_box(page, "a")).to_equal("0,0,900,10")
+        expect(_box(page, "b")).to_equal("0,40,900,10")
+
+    it "block auto margins":
+        val page = "<div id=a style=\"width:100px;margin:0 auto;height:10px\"></div>"
+        expect(_box(page, "a")).to_equal("400,0,100,10")
+
+    it "block box sizing":
+        val page = "<div id=a style=\"width:100px;padding:10px;border:5px solid;box-sizing:border-box;height:50px\"></div>"
+        expect(_box(page, "a")).to_equal("0,0,100,50")
+
+    it "overflow hidden child":
+        val page = "<div id=p style=\"width:50px;height:20px;overflow:hidden\"><div id=a style=\"width:100px;height:60px\"></div></div>"
+        expect(_box(page, "p")).to_equal("0,0,50,20")
+        expect(_box(page, "a")).to_equal("0,0,100,60")
+
+    it "svg sized":
+        val page = "<svg id=s width=\"40\" height=\"30\"></svg>"
+        expect(_box(page, "s")).to_equal("0,0,40,30")
+
+    it "svg unsized block":
+        val page = "<svg id=s style=\"display:block\"></svg>"
+        expect(_box(page, "s")).to_equal("0,0,300,150")
+
+describe "Cascade":
+
+    it "casc inline beats rule":
+        val page = "<style>#a{{width:50px}}</style><div id=a style=\"width:20px;height:5px\"></div>"
+        expect(_box(page, "a")).to_equal("0,0,20,5")
+
+    it "casc important beats inline":
+        val page = "<style>#a{{width:50px !important}}</style><div id=a style=\"width:20px;height:5px\"></div>"
+        expect(_box(page, "a")).to_equal("0,0,50,5")
+
+    it "casc inline important wins":
+        val page = "<style>#a{{width:50px !important}}</style><div id=a style=\"width:20px !important;height:5px\"></div>"
+        expect(_box(page, "a")).to_equal("0,0,20,5")
+
+    it "casc id beats class":
+        val page = "<style>#a{{width:30px}} .k{{width:60px}}</style><div id=a class=k style=\"height:5px\"></div>"
+        expect(_box(page, "a")).to_equal("0,0,30,5")
+
+    it "casc later wins":
+        val page = "<style>.k{{width:30px}} .k{{width:60px}}</style><div id=a class=k style=\"height:5px\"></div>"
+        expect(_box(page, "a")).to_equal("0,0,60,5")
+
+    it "casc important low spec":
+        val page = "<style>div{{width:40px !important}} #a{{width:60px}}</style><div id=a style=\"height:5px\"></div>"
+        expect(_box(page, "a")).to_equal("0,0,40,5")
+
+    it "casc custom prop":
+        val page = "<style>:root{{--w:45px}} #a{{width:var(--w)}}</style><div id=a style=\"height:5px\"></div>"
+        expect(_box(page, "a")).to_equal("0,0,45,5")
+
+    it "casc custom prop inherit":
+        val page = "<style>section{{--w:35px}} #a{{width:var(--w)}}</style><section><div id=a style=\"height:5px\"></div></section>"
+        expect(_box(page, "a")).to_equal("0,0,35,5")
+
+    it "casc custom fallback":
+        val page = "<style>#a{{width:var(--nope, 25px)}}</style><div id=a style=\"height:5px\"></div>"
+        expect(_box(page, "a")).to_equal("0,0,25,5")
+
+    it "casc hidden attr":
+        val page = "<div id=a hidden style=\"height:5px\"></div><div id=b style=\"height:5px\"></div>"
+        expect(_box(page, "b")).to_equal("0,0,900,5")
+
+    it "casc display none rule":
+        val page = "<style>.x{{display:none}}</style><div class=x style=\"height:9px\"></div><div id=b style=\"height:5px\"></div>"
+        expect(_box(page, "b")).to_equal("0,0,900,5")
+
+    it "casc inherit kw":
+        val page = "<style>section{{width:70px}} #a{{width:inherit}}</style><section><div id=a style=\"height:5px\"></div></section>"
+        expect(_box(page, "a")).to_equal("0,0,70,5")
+
+    it "casc initial kw":
+        val page = "<style>#a{{width:30px}} #a{{width:initial}}</style><div id=a style=\"height:5px\"></div>"
+        expect(_box(page, "a")).to_equal("0,0,900,5")
+
+    it "casc media max":
+        val page = "<style>@media (max-width:1000px){{#a{{width:33px}}}}</style><div id=a style=\"height:5px\"></div>"
+        expect(_box(page, "a")).to_equal("0,0,33,5")
+
+    it "casc media min miss":
+        val page = "<style>@media (min-width:1000px){{#a{{width:33px}}}}</style><div id=a style=\"height:5px\"></div>"
+        expect(_box(page, "a")).to_equal("0,0,900,5")
+
+    it "casc supports":
+        val page = "<style>@supports (display:grid){{#a{{width:44px}}}}</style><div id=a style=\"height:5px\"></div>"
+        expect(_box(page, "a")).to_equal("0,0,44,5")
+
+    it "casc supports not":
+        val page = "<style>@supports not (display:grid){{#a{{width:44px}}}}</style><div id=a style=\"height:5px\"></div>"
+        expect(_box(page, "a")).to_equal("0,0,900,5")
+
+    it "casc min fn":
+        val page = "<style>#a{{width:min(100px, 30%)}}</style><div style=\"width:200px\"><div id=a style=\"height:5px\"></div></div>"
+        expect(_box(page, "a")).to_equal("0,0,60,5")
+
+    it "casc max fn":
+        val page = "<style>#a{{width:max(100px, 30%)}}</style><div style=\"width:200px\"><div id=a style=\"height:5px\"></div></div>"
+        expect(_box(page, "a")).to_equal("0,0,100,5")
+
+    it "casc clamp":
+        val page = "<style>#a{{width:clamp(50px, 10%, 80px)}}</style><div style=\"width:200px\"><div id=a style=\"height:5px\"></div></div>"
+        expect(_box(page, "a")).to_equal("0,0,50,5")
+
+    it "casc em width":
+        val page = "<style>#a{{font-size:10px;width:3em}}</style><div id=a style=\"height:5px\"></div>"
+        expect(_box(page, "a")).to_equal("0,0,30,5")
+
+    it "casc vw width":
+        val page = "<style>#a{{width:10vw}}</style><div id=a style=\"height:5px\"></div>"
+        expect(_box(page, "a")).to_equal("0,0,90,5")

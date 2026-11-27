@@ -30,6 +30,16 @@ impl<'a> Parser<'a> {
         // Expect 'on'
         self.expect(&TokenKind::On)?;
 
+        // `on` is reserved for advice declarations; a non-pointcut follower
+        // almost always means it was used as a variable name.
+        if !matches!(self.current.kind, TokenKind::Pointcut(_)) {
+            return Err(ParseError::syntax_error_with_span(
+                "`on` is a reserved keyword and cannot be used as an identifier \
+                 (it introduces AOP advice: `on pc{...} use X`); rename the variable",
+                start,
+            ));
+        }
+
         // Parse pointcut predicate
         let pointcut = self.parse_pointcut()?;
 

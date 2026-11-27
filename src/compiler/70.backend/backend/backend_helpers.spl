@@ -13,13 +13,23 @@
 
 use compiler.mir.mir_data.*
 use compiler.mir.mir_instructions.{MirModule, MirFunction}
+use compiler.mir.mir_lowering.{bootstrap_llvm_name_index_ensure}
 use compiler.backend.backend.backend_types.{BackendKind, CodegenTarget, BuildMode, OptimizationLevel, BackendCompileOptions, CompiledModule, CompileError,
     compileerror_backend_error}
 use compiler.backend.aot_path_diagnostic.{backend_aot_write_diagnostic}
 use compiler.mir_opt.mod.{TargetOptContext, target_opt_context_default, optimize_module_for_backend, OptLevel}
+use compiler.mir_opt.simd_opt_metadata.{reset_provider_report}
 use compiler.backend.feature_caps.{TargetCapsKind, x86_caps_from_target}
 use compiler.backend.llvm_codegen_adapter.{llvm_compile_module_direct,
-    llvm_compile_module_direct_compiled, llvm_compile_module_direct_to_path}
+    llvm_compile_module_direct_compiled, llvm_compile_module_direct_to_path,
+    llvm_translate_module_direct_ir, llvm_translate_module_bootstrap_ir_v1,
+    llvm_codegen_target_config_for, llvm_codegen_bare_metal_requested,
+    llvm_codegen_module_scope_enabled_v1}
+use compiler.backend._MirToLlvm.asm_constraints_helpers.{llvm_bootstrap_string_globals_retain_for_scope}
+use compiler.backend.llvm_backend_tools.{llvm_object_argv_v1,
+    compile_ir_to_object_path, llvm_object_tool_v1}
+use compiler.backend.llvm_ir_builder.{llvm_codegen_error_from_ir}
+use std.nogc_sync_mut.io.file_ops.{file_write}
 use compiler.backend.codegen_types.{CodegenOutput}
 use compiler.backend.codegen_factory.{CodegenFactory}
 use compiler.backend.llvm_target.{LlvmTargetConfig}
@@ -39,6 +49,10 @@ use compiler.mir_opt.storage_projection_lowering.{
 use compiler.mir_opt.typed_storage_view_declaration.{MirTypedStorageViewDeclarationV1}
 use compiler.mir_opt.typed_storage_view_producer.{produce_mir_typed_storage_views_v1}
 use std.io_runtime.{env_get_opt}
+use std.nogc_sync_mut.io.process_ops.{eprint}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause,
+    transient_scope_end, transient_promote}
 use std.simd.{has_avx2}
 
 # ============================================================================
@@ -79,7 +93,7 @@ pub fn backend_helper_native_target_for(target: text) -> CodegenTarget:
 fn backend_helper_native_target() -> CodegenTarget:
     backend_helper_native_target_for(env_get_opt("SIMPLE_NATIVE_BUILD_TARGET") ?? "")
 
-fn backend_helper_target_opt_context(
+pub fn backend_helper_target_opt_context(
     configured_target: text,
     target_cpu: text,
     host_avx2_available: bool
@@ -147,12 +161,12 @@ fn format_mir_module(module: MirModule) -> text:
     # Would include more detailed MIR dump
     output
 
-fn select_backend(target: CodegenTarget, preferred: BackendKind?) -> BackendKind:
+pub fn select_backend(target: CodegenTarget, preferred: BackendKind?) -> BackendKind:
     """
     Select the best backend for a target (legacy API).
     For new code, use select_backend_with_mode().
     """
-    if preferred != nil:
+    if preferred.is_some():
         val preferred_backend = preferred.unwrap()
         if preferred_value_supports_target(preferred_backend, target):
             return preferred_backend
@@ -175,7 +189,7 @@ fn select_backend(target: CodegenTarget, preferred: BackendKind?) -> BackendKind
     else:
         BackendKind.Llvm
 
-fn select_backend_with_mode(
+pub fn select_backend_with_mode(
     target: CodegenTarget,
     mode: BuildMode,
     preferred: BackendKind?
@@ -199,7 +213,7 @@ fn select_backend_with_mode(
         select_backend_with_mode(X86_64, Test, nil)     # -> Interpreter (no compile)
     """
     # 1. User preference overrides everything
-    if preferred != nil:
+    if preferred.is_some():
         val backend = preferred.unwrap()
         if backend == BackendKind.Wasm:
             if target == CodegenTarget.Wasm32 or target == CodegenTarget.Wasm64:
@@ -239,17 +253,17 @@ fn select_backend_with_mode(
         case Test:
             BackendKind.Interpreter  # Already handled above
 
-fn available_backends() -> [BackendKind]:
+pub fn available_backends() -> [BackendKind]:
     """Get list of available backends."""
     val first = BackendKind.Cranelift
     [first, BackendKind.Llvm, BackendKind.LlvmLib, BackendKind.Native, BackendKind.Wasm, BackendKind.Lean, BackendKind.Byl, BackendKind.Interpreter, BackendKind.Cuda, BackendKind.Hip, BackendKind.OpenCl, BackendKind.Vulkan, BackendKind.CCodegen, BackendKind.Vhdl, BackendKind.IrTc]
 
-fn gpu_backends() -> [BackendKind]:
+pub fn gpu_backends() -> [BackendKind]:
     """Get list of GPU backends."""
     val first = BackendKind.Cuda
     [first, BackendKind.Hip, BackendKind.OpenCl, BackendKind.Vulkan]
 
-fn backend_for_name(name: text) -> has_BackendKind?:
+pub fn backend_for_name(name: text) -> has_BackendKind?:
     """Get backend by name."""
     if name == "cranelift":
         return Some(BackendKind.Cranelift)
@@ -283,7 +297,7 @@ fn backend_for_name(name: text) -> has_BackendKind?:
         return Some(BackendKind.IrTc)
     if name == "lua":
         return Some(BackendKind.Lua)
-    nil
+    None
 
 # ============================================================================
 # Convenience Functions for Driver Integration
@@ -312,8 +326,8 @@ fn codegen_output_to_compiled_module(output: CodegenOutput) -> CompiledModule:
 pub fn cranelift_compile_module_via_k1_v1(
     options: BackendCompileOptions,
     module: MirModule,
-    retained_target_triple: text? = nil,
-    retained_cpu_v2: text? = nil,
+    retained_target_triple: text? = None,
+    retained_cpu_v2: text? = None,
     retained_features_v2: [text] = []
 ) -> Result<CodegenOutput, CompileError>:
     """Compile through the K1 table's Cranelift entry, or refuse by name.
@@ -334,7 +348,7 @@ pub fn cranelift_compile_module_via_k1_v1(
             entry.plugin.run(cranelift_retained_params_encode_v2(options,
                 retained_target_triple, retained_cpu_v2, retained_features_v2), module)
 
-fn compile_module_with_backend(
+pub fn compile_module_with_backend(
     backend_name: text,
     module: MirModule,
     is_release: bool,
@@ -353,7 +367,7 @@ fn compile_module_with_backend_target_cpu(
     compile_module_with_backend_target_cpu_storage_bindings(
         backend_name, module, is_release, opt_level_i64, target_cpu, [])
 
-fn compile_module_with_backend_target_cpu_storage_declarations(
+pub fn compile_module_with_backend_target_cpu_storage_declarations(
     backend_name: text,
     module: MirModule,
     is_release: bool,
@@ -372,7 +386,7 @@ fn compile_module_with_backend_target_cpu_storage_declarations(
         produced.sites)
 
 pub fn backend_helper_aot_opt_level(
-    opt_level_i64: i64, retained_options: BackendCompileOptions? = nil
+    opt_level_i64: i64, retained_options: BackendCompileOptions? = None
 ) -> OptimizationLevel:
     if val retained = retained_options: return retained.opt_level
     if opt_level_i64 <= 0: OptimizationLevel.None_
@@ -380,17 +394,74 @@ pub fn backend_helper_aot_opt_level(
     elif opt_level_i64 == 2: OptimizationLevel.Speed
     else: OptimizationLevel.Aggressive
 
-fn compile_module_with_backend_target_cpu_storage_bindings(
+# Per-module scope policy for compile_module_with_backend_scoped_v1. Cranelift:
+# on unless SIMPLE_CODEGEN_MODULE_SCOPE=0. Any other backend: only with =1.
+pub fn codegen_module_scope_enabled_for_v1(backend_name: text, knob: text) -> bool:
+    if backend_name == "cranelift":
+        return knob != "0"
+    knob == "1"
+
+# Bug native_codegen_unscoped_rss_growth_2026_10_24: one module's AOT compile
+# (storage-projection lowering, the backend MIR optimization copy, Cranelift
+# translation scratch, the object byte read) in its own transient scope.
+# Default-on for Cranelift (bootstrap run 14: ~13 MiB/module never reclaimed,
+# 335 modules/worker); opt-in (=1) for the other backends, whose in-memory
+# lanes (SIMPLE_BOOTSTRAP=1 LLVM string cache) are not qualified for it.
+# See codegen_module_scope_enabled_for_v1. Only the returned Result is
+# promoted. The scope wraps this pure call and nothing else: the backend
+# session authority mutates its persistent records (uses/results/kept) around
+# it, and a scope over those writes freed records still linked into the
+# authority (Stage 2 p2shard-5: lease promotion refused, then SIGSEGV).
+# Promotion cannot rescue that shape: the walk stops at persistent nodes.
+# Every argument is explicit; the bootstrap producer drops computed defaults.
+pub fn compile_module_with_backend_scoped_v1(
+    backend_name: text, module: MirModule, is_release: bool,
+    opt_level_i64: i64, target_cpu: text,
+    storage_bindings: [MirStorageViewSiteBindingV1],
+    retained_options: BackendCompileOptions?,
+    retained_llvm_config: LlvmTargetConfig?,
+    retained_cranelift_triple: text?, retained_cranelift_cpu_v2: text?,
+    retained_cranelift_features_v2: [text]
+) -> Result<CompiledModule, CompileError>:
+    var scoped = codegen_module_scope_enabled_for_v1(backend_name,
+        env_get_opt("SIMPLE_CODEGEN_MODULE_SCOPE") ?? "")
+    if scoped:
+        # Warm the module-global bootstrap LLVM name index before the scope;
+        # built inside it, scope end frees the tables that later modules still
+        # trust (see llvm_codegen_adapter.spl, same warm-up).
+        bootstrap_llvm_name_index_ensure()
+    if scoped and (transient_array_scope_state_v1() != 0 or not transient_scope_begin()):
+        eprint("[codegen-scope] WARNING transient scope refused; compiling UNSCOPED, arena retained: module={module.name}")
+        scoped = false
+    val compiled = compile_module_with_backend_target_cpu_storage_bindings(
+        backend_name, module, is_release, opt_level_i64, target_cpu,
+        storage_bindings, retained_options, retained_llvm_config,
+        retained_cranelift_triple, retained_cranelift_cpu_v2,
+        retained_cranelift_features_v2)
+    if not scoped:
+        return compiled
+    val paused = transient_scope_pause()
+    if paused:
+        reset_provider_report()
+    val kept = paused and transient_promote<Result<CompiledModule, CompileError>>(compiled)
+    val ended = transient_scope_end()
+    if paused and kept and ended:
+        return compiled
+    eprint("[codegen-scope] WARNING result promotion failed (paused={paused} kept={kept} ended={ended}): module={module.name}")
+    Err(compileerror_backend_error(BackendKind.Compiler,
+        "codegen-scope-promotion-failed (object not written)"))
+
+pub fn compile_module_with_backend_target_cpu_storage_bindings(
     backend_name: text,
     module: MirModule,
     is_release: bool,
     opt_level_i64: i64,
     target_cpu: text,
     storage_bindings: [MirStorageViewSiteBindingV1],
-    retained_options: BackendCompileOptions? = nil,
-    retained_llvm_config: LlvmTargetConfig? = nil,
-    retained_cranelift_triple: text? = nil,
-    retained_cranelift_cpu_v2: text? = nil,
+    retained_options: BackendCompileOptions? = None,
+    retained_llvm_config: LlvmTargetConfig? = None,
+    retained_cranelift_triple: text? = None,
+    retained_cranelift_cpu_v2: text? = None,
     retained_cranelift_features_v2: [text] = []
 ) -> Result<CompiledModule, CompileError>:
     """Compile a MIR module using the named backend.
@@ -477,7 +548,7 @@ fn compile_module_with_backend_target_cpu_storage_bindings(
         emit_mir: false,
         verify_output: true,
         target_opt_ctx: target_opt_ctx,
-        backend_kind: nil
+        backend_kind: None
     )
     if trace:
         print "[backend-helper] options ready"
@@ -521,37 +592,34 @@ fn compile_module_with_backend_target_cpu_storage_bindings(
             print "[backend-helper] direct llvm"
         if (env_get_opt("SIMPLE_BOOTSTRAP") ?? "") == "1":
             return llvm_compile_module_direct_compiled(options, backend_module, retained_llvm_config)
-        val result = llvm_compile_module_direct(options, backend_module, retained_llvm_config)
-        match result:
+        match llvm_compile_module_direct(options, backend_module, retained_llvm_config):
             case Ok(output):
                 return Ok(codegen_output_to_compiled_module(output))
             case Err(err):
                 return Err(err)
 
     if kind == BackendKind.Cranelift:
-        val result = cranelift_compile_module_via_k1_v1(
+        match cranelift_compile_module_via_k1_v1(
             options, backend_module, retained_cranelift_triple,
-            retained_cranelift_cpu_v2, retained_cranelift_features_v2)
-        match result:
+            retained_cranelift_cpu_v2, retained_cranelift_features_v2):
             case Ok(output):
                 return Ok(codegen_output_to_compiled_module(output))
             case Err(err):
                 return Err(err)
 
     val codegen = CodegenFactory.create(kind, options)
-    val result = codegen.compile_module(backend_module)
-    match result:
+    match codegen.compile_module(backend_module):
         case Ok(output):
             Ok(codegen_output_to_compiled_module(output))
         case Err(err):
             Err(err)
 
-fn compile_llvm_module_to_object_path(
+pub fn compile_llvm_module_to_object_path(
     module: MirModule, is_release: bool, opt_level_i64: i64, target_cpu: text,
     storage_bindings: [MirStorageViewSiteBindingV1], object_path: text,
     diagnostic_path: text,
-    retained_options: BackendCompileOptions? = nil,
-    retained_llvm_config: LlvmTargetConfig? = nil
+    retained_options: BackendCompileOptions? = None,
+    retained_llvm_config: LlvmTargetConfig? = None
 ) -> i64:
     """Builtin LLVM AOT path with no aggregate result or object-byte return."""
     val opt = backend_helper_aot_opt_level(opt_level_i64, retained_options)
@@ -565,22 +633,83 @@ fn compile_llvm_module_to_object_path(
         opt_level: opt,
         debug_info: backend_helper_debug_info(is_release),
         emit_assembly: false, emit_llvm_ir: false, emit_mir: false,
-        verify_output: true, target_opt_ctx: target_opt_ctx, backend_kind: nil)
-    val storage_lowered = lower_mir_storage_project_fields_v1(
-        module, storage_bindings)
-    if not storage_lowered.ok:
-        backend_aot_write_diagnostic(diagnostic_path,
-            "storage projection lowering failed: {storage_lowered.reason}")
-        return 1
-    if storage_lowered.rewritten_count > 0:
-        backend_aot_write_diagnostic(diagnostic_path,
-            "typed storage projections require the custom native backend")
-        return 1
+        verify_output: true, target_opt_ctx: target_opt_ctx, backend_kind: None)
     if not backend_helper_llc_available():
         backend_aot_write_diagnostic(diagnostic_path, "llc not found")
         return 1
+    # ONE transient scope per module covers storage lowering, the backend MIR
+    # optimization copy, IR translation and object emission. The result is a
+    # scalar status, so nothing is promoted and scope end frees all of it --
+    # the shape llvm_module_ir_to_path_v1 already has. The two-scope lane below
+    # promoted the optimized MIR out of an optimization-only scope, which made
+    # it persistent: with no collector every module's copy stayed live for the
+    # whole build (bug serial_codegen_retains_optimized_mir_2026-11-21). That
+    # lane remains only for the two cases llvm_compile_module_direct_to_path
+    # itself keeps unscoped (SIMPLE_CODEGEN_MODULE_SCOPE=0, bitcode debug).
+    val one_scope = llvm_codegen_module_scope_enabled_v1() and
+        (env_get_opt("SIMPLE_LLVM_BITCODE_DEBUG") ?? "") != "1"
+    val bare_metal = if val config = retained_llvm_config:
+        config.triple.os == "none" or config.triple.os == "simpleos"
+    else:
+        llvm_codegen_bare_metal_requested()
+    val llvm_config = retained_llvm_config ?? llvm_codegen_target_config_for(options, bare_metal)
+    if one_scope:
+        # Process-lifetime caches must not be first built inside the scope
+        # (same warm-ups as llvm_compile_module_direct_to_path).
+        val _warm_tool = llvm_object_tool_v1()
+        bootstrap_llvm_name_index_ensure()
+    var scoped = transient_array_scope_state_v1() == 0 and transient_scope_begin()
+    val storage_lowered = lower_mir_storage_project_fields_v1(
+        module, storage_bindings)
+    if not storage_lowered.ok or storage_lowered.rewritten_count > 0:
+        val diag_msg = if not storage_lowered.ok:
+            "storage projection lowering failed: {storage_lowered.reason}"
+        else:
+            "typed storage projections require the custom native backend"
+        if scoped:
+            val paused = transient_scope_pause()
+            if paused:
+                reset_provider_report()
+            val _ended = transient_scope_end()
+        else:
+            reset_provider_report()
+        backend_aot_write_diagnostic(diagnostic_path, diag_msg)
+        return 1
     val backend_module = optimize_module_for_backend(
         storage_lowered.module, backend_helper_mir_opt_level(opt), "llvm")
+    if scoped and one_scope:
+        val llvm_ir = llvm_translate_module_direct_ir(
+            options, backend_module, retained_llvm_config)
+        val status = compile_ir_to_object_path(
+            llvm_ir, llvm_config, options.opt_level, object_path, diagnostic_path,
+            retained_llvm_config.?)
+        val paused = transient_scope_pause()
+        if paused:
+            reset_provider_report()
+        # The bootstrap translator publishes heap text into the exported
+        # string-global cache; retain it before scope end so it never dangles.
+        val strings_kept = paused and llvm_bootstrap_string_globals_retain_for_scope()
+        val ended = transient_scope_end()
+        if not paused or not strings_kept or not ended:
+            panic("LLVM codegen scope ownership failed")
+        return status
+    if scoped:
+        val paused = transient_scope_pause()
+        if paused:
+            reset_provider_report()
+        val promoted = paused and transient_promote<MirModule>(backend_module)
+        val ended = transient_scope_end()
+        if not paused or not promoted or not ended:
+            eprint("[codegen-scope] WARNING llvm opt promotion failed (paused={paused} promoted={promoted} ended={ended}): module={module.name}")
+            val fallback_lowered = lower_mir_storage_project_fields_v1(
+                module, storage_bindings)
+            val fallback_module = optimize_module_for_backend(
+                fallback_lowered.module, backend_helper_mir_opt_level(opt), "llvm")
+            reset_provider_report()
+            return llvm_compile_module_direct_to_path(
+                options, fallback_module, object_path, diagnostic_path, retained_llvm_config)
+    else:
+        reset_provider_report()
     llvm_compile_module_direct_to_path(
         options, backend_module, object_path, diagnostic_path, retained_llvm_config)
 
@@ -595,7 +724,7 @@ fn backend_helper_mir_opt_level(level: OptimizationLevel) -> OptLevel:
         case Speed: OptLevel.Speed
         case Aggressive: OptLevel.Aggressive
 
-fn compile_bootstrap_module_with_backend(
+pub fn compile_bootstrap_module_with_backend(
     backend_name: text,
     is_release: bool,
     opt_level_i64: i64
@@ -621,7 +750,7 @@ fn compile_bootstrap_module_with_backend(
         emit_mir: false,
         verify_output: true,
         target_opt_ctx: target_opt_context_default(),
-        backend_kind: nil
+        backend_kind: None
     )
     if not backend_helper_llc_available():
         return Err(compileerror_backend_error(BackendKind.Llvm,
@@ -631,13 +760,19 @@ fn compile_bootstrap_module_with_backend(
         functions: {},
         statics: {},
         constants: {},
-        types: {}
+        types: {},
+        external_layout_traces: [],
+        collection_plan_explanations: [],
+        enum_semantic_declarations: [],
+        attr_sites: [],
+        initializer_plan_v1: None,
+        xray_ring_wrap: false
     )
     if trace:
         print "[backend-helper] bootstrap direct llvm"
     llvm_compile_module_direct_compiled(options, module)
 
-fn get_effective_backend_name(backend_name: text, is_release: bool) -> text:
+pub fn get_effective_backend_name(backend_name: text, is_release: bool) -> text:
     """Get the effective backend name after auto-resolution."""
     if backend_name == "llvm":
         "llvm"
@@ -674,3 +809,109 @@ fn mode_default_optimization(mode: BuildMode) -> OptimizationLevel:
         case Debug: OptimizationLevel.Debug
         case Test: OptimizationLevel.None_
         case Bootstrap: OptimizationLevel.Debug
+
+# ============================================================================
+# Process-parallel native codegen pool hooks
+# (doc/03_plan/compiler/native_codegen/step5_real_parallelism_plan_2026-09-04.md P2)
+# ============================================================================
+#
+# The built-in `llvm` lane of compile_module_with_backend_target_cpu_storage_bindings
+# is "translate MIR to IR text in process, then run llc on a file". The pool
+# splits it at that file: the parent translates serially (same order, same
+# helpers as the serial lane) and N llc child processes turn the IR files into
+# objects concurrently, each exiting and returning its memory to the OS. These
+# two hooks are the serial lane's own prelude and argv, so a pooled object is
+# byte-identical to the serial one. Only valid with no retained options/config
+# (the frozen-capsule driver lane passes nil for both).
+
+fn backend_helper_llvm_pool_options_v1(is_release: bool, opt_level_i64: i64,
+        target_cpu: text) -> BackendCompileOptions:
+    val opt = backend_helper_aot_opt_level(opt_level_i64, None)
+    val target_opt_ctx = backend_helper_target_opt_context(
+        env_get_opt("SIMPLE_NATIVE_BUILD_TARGET") ?? "", target_cpu, has_avx2())
+    BackendCompileOptions(
+        target: backend_helper_native_target(),
+        opt_level: opt,
+        debug_info: backend_helper_debug_info(is_release),
+        emit_assembly: false,
+        emit_llvm_ir: false,
+        emit_mir: false,
+        verify_output: true,
+        target_opt_ctx: target_opt_ctx,
+        backend_kind: None
+    )
+
+# Translate one module exactly as the serial `llvm` lane does and write the IR
+# to `ir_path`. "" on success, else the failure reason (the caller then
+# compiles the module through the serial lane, which reports it in full).
+#
+# One transient scope per module covers storage lowering, the backend MIR
+# optimization copy, IR translation and the IR file write, so scope end frees
+# all of it -- exactly what the serial lane frees across
+# compile_llvm_module_to_object_path + llvm_compile_module_direct_to_path.
+# Unscoped, every module's IR text and scratch stayed live for the whole shard
+# (~20 GB over 115 modules on Stage 3 --backend llvm; bug
+# stage3_c_runtime_worker_memory_2x_2026-11-20). Only the failure reason, if
+# any, is promoted. SIMPLE_CODEGEN_MODULE_SCOPE=0 keeps the unscoped lane.
+pub fn llvm_module_ir_to_path_v1(module: MirModule, is_release: bool,
+        opt_level_i64: i64, target_cpu: text,
+        storage_bindings: [MirStorageViewSiteBindingV1], ir_path: text) -> text:
+    val options = backend_helper_llvm_pool_options_v1(is_release, opt_level_i64, target_cpu)
+    var scoped = llvm_codegen_module_scope_enabled_v1()
+    if scoped:
+        # Module-global name index: built inside the scope, scope end would
+        # free tables the next module trusts (same warm-up as the serial lane).
+        bootstrap_llvm_name_index_ensure()
+    if scoped and (transient_array_scope_state_v1() != 0 or not transient_scope_begin()):
+        eprint("[codegen-scope] WARNING codegen pool scope refused; translating UNSCOPED: module={module.name}")
+        scoped = false
+    val reason = _llvm_module_ir_to_path_body_v1(options, module, storage_bindings, ir_path)
+    if not scoped:
+        return reason
+    val paused = transient_scope_pause()
+    if paused:
+        reset_provider_report()
+    # The bootstrap translator publishes heap text into the exported
+    # string-global cache; retain it before scope end so it never dangles.
+    val retained = paused and llvm_bootstrap_string_globals_retain_for_scope()
+    val kept = paused and (reason == "" or transient_promote<text>(reason))
+    val ended = transient_scope_end()
+    if not paused or not retained or not ended:
+        panic("LLVM codegen pool scope ownership failed")
+    if not kept:
+        return "codegen pool scope: failure reason promotion failed"
+    reason
+
+fn _llvm_module_ir_to_path_body_v1(options: BackendCompileOptions, module: MirModule,
+        storage_bindings: [MirStorageViewSiteBindingV1], ir_path: text) -> text:
+    val storage_lowered = lower_mir_storage_project_fields_v1(module, storage_bindings)
+    if not storage_lowered.ok:
+        return "storage projection lowering failed: {storage_lowered.reason}"
+    if storage_lowered.rewritten_count > 0:
+        return "typed storage projections require the custom native backend"
+    val backend_module = optimize_module_for_backend(storage_lowered.module,
+        backend_helper_mir_opt_level(options.opt_level), "llvm")
+    val bootstrap = (env_get_opt("SIMPLE_BOOTSTRAP") ?? "") == "1"
+    val llvm_ir = if bootstrap:
+        llvm_translate_module_bootstrap_ir_v1(options, backend_module)
+    else:
+        llvm_translate_module_direct_ir(options, backend_module, None)
+    val codegen_error = llvm_codegen_error_from_ir(llvm_ir)
+    if codegen_error != "":
+        return codegen_error
+    if not file_write(ir_path, llvm_ir):
+        return "failed to write LLVM IR to {ir_path}"
+    ""
+
+# The object-tool argv (without argv[0]; clang by default, llc as the fallback
+# -- llvm_object_tool_v1) the serial lane's compile_ir_to_object runs for this
+# build's options, retargeted at `ir_path` -> `obj_path`. `llc` is the caller's
+# ONE llvm_object_llc_v1() answer for the whole pool run ("" = clang).
+pub fn llvm_module_llc_argv_v1(is_release: bool, opt_level_i64: i64,
+        target_cpu: text, obj_path: text, ir_path: text, llc: text) -> [text]:
+    val options = backend_helper_llvm_pool_options_v1(is_release, opt_level_i64, target_cpu)
+    val config = llvm_codegen_target_config_for(options, llvm_codegen_bare_metal_requested())
+    val bootstrap_io = (env_get_opt("SIMPLE_BOOTSTRAP") ?? "") == "1"
+    val direct_argv = (env_get_opt("SIMPLE_NATIVE_BUILD_TARGET") ?? "").ends_with("-simpleos")
+    llvm_object_argv_v1(llc, config, options.opt_level,
+        bootstrap_io, direct_argv, obj_path, ir_path)

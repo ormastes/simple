@@ -1,0 +1,74 @@
+# Initial desired AgentSession input. This is not an admitted execution plan.
+use std.common.contracts.orchestration.resource_set_v1.{decode_resource_set, resource_set_item_identity, ResourceSetItemV1}
+use std.common.contracts.orchestration.resource_v1.{parse_resource_document, as_dict, as_text, as_int, require, only_known}
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+pub struct ControllerDesiredInputV1:
+    controller_id: text
+    workload_uid: text
+    source_digest: text
+    resource_identity: text
+
+pub fn controller_desired_input_encode_v1(input: ControllerDesiredInputV1) -> Result<text, text>:
+    if not builder_identifier_valid_v1(input.controller_id) or not builder_identifier_valid_v1(input.workload_uid) or
+            not builder_digest_valid_v1(input.source_digest) or input.resource_identity.len() == 0 or input.resource_identity.len() > 1024:
+        return Err("desired-input-invalid")
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(1),
+        "controllerId": SdnValue.String(input.controller_id), "workloadUid": SdnValue.String(input.workload_uid),
+        "sourceDigest": SdnValue.String(input.source_digest), "resourceIdentity": SdnValue.String(input.resource_identity)}
+    Ok(sdn_encode_canonical(SdnValue.Dict(fields)) + "\n")
+
+pub fn controller_desired_input_decode_v1(bytes: text) -> Result<ControllerDesiredInputV1, text>:
+    if bytes.len() > 8192: return Err("desired-input-record-too-large")
+    val parsed = parse_resource_document(bytes)
+    if parsed.is_err(): return Err("desired-input-record-invalid")
+    val spans = parsed.unwrap().1
+    val mapping = as_dict(parsed.unwrap().0, "", spans)
+    if mapping.is_err(): return Err("desired-input-record-invalid")
+    val fields = mapping.unwrap()
+    if only_known(fields, ["version", "controllerId", "workloadUid", "sourceDigest", "resourceIdentity"], "", spans).is_err():
+        return Err("desired-input-record-invalid")
+    for key in ["version", "controllerId", "workloadUid", "sourceDigest", "resourceIdentity"]:
+        if not fields.contains_key(key): return Err("desired-input-record-invalid")
+    val version = as_int(fields["version"], "version", spans)
+    if version.is_err(): return Err("desired-input-version-invalid")
+    if version.unwrap() != 1: return Err("desired-input-version-invalid")
+    val controller = as_text(fields["controllerId"], "controllerId", spans)
+    val uid = as_text(fields["workloadUid"], "workloadUid", spans)
+    val digest = as_text(fields["sourceDigest"], "sourceDigest", spans)
+    val identity = as_text(fields["resourceIdentity"], "resourceIdentity", spans)
+    if controller.is_err() or uid.is_err() or digest.is_err() or identity.is_err(): return Err("desired-input-record-invalid")
+    val input = ControllerDesiredInputV1(controller_id: controller.unwrap(), workload_uid: uid.unwrap(),
+        source_digest: digest.unwrap(), resource_identity: identity.unwrap())
+    if controller_desired_input_encode_v1(input)? != bytes: return Err("desired-input-record-not-canonical")
+    Ok(input)
+
+pub fn controller_desired_input_select_v1(controller_id: text, uid: text, source: text,
+        ns: text, name: text) -> Result<ControllerDesiredInputV1, text>:
+    val decoded = decode_resource_set(source)
+    if decoded.is_err(): return Err("desired-input-schema:" + decoded.unwrap_err().path)
+    for item in decoded.unwrap().items:
+        match item:
+            case ResourceSetItemV1.AgentSession(session):
+                if session.meta.ns == ns and session.meta.name == name:
+                    val input = ControllerDesiredInputV1(controller_id: controller_id, workload_uid: uid,
+                        source_digest: sha256_text(source), resource_identity: resource_set_item_identity(item))
+                    val checked = controller_desired_input_encode_v1(input)?
+                    return Ok(input)
+            case _: ()
+    Err("desired-agent-session-not-found")
+
+pub fn controller_desired_input_matches_v1(input: ControllerDesiredInputV1, source: text) -> Result<bool, text>:
+    val checked = controller_desired_input_encode_v1(input)?
+    if source.len() > 1048576 or sha256_text(source) != input.source_digest: return Err("desired-input-source-mismatch")
+    val decoded = decode_resource_set(source)
+    if decoded.is_err(): return Err("desired-input-schema-invalid")
+    for item in decoded.unwrap().items:
+        match item:
+            case ResourceSetItemV1.AgentSession(_):
+                if resource_set_item_identity(item) == input.resource_identity: return Ok(true)
+            case _: ()
+    Err("desired-agent-session-not-found")

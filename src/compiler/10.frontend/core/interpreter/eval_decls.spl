@@ -12,23 +12,24 @@
 # the pure-Simple HIR resolves per module and reported them as unresolved.
 use compiler.core.ast.{DECL_CE, DECL_CLI, DECL_ENUM, DECL_EXPORT, DECL_EXTERN_FN}
 use compiler.core.ast.{DECL_FN, DECL_IMPL, DECL_STRUCT, DECL_USE, DECL_VAL}
-use compiler.core.ast.{DECL_VAR, decl_get, decl_get_is_lazy, decl_name, expr_get}
-use compiler.core.ast.{module_get_decls, module_get_path, stmt_get}
+use compiler.core.ast.{DECL_VAR, decl_get, decl_get_is_lazy, expr_get}
+use compiler.core.ast.{module_get_decls, module_get_path}
+use compiler.core.{stmt_get_body, stmt_get_expr, stmt_get_name, stmt_get_tag}
 use compiler.core.interpreter.cli_eval.{cli_parse_argv}
 use compiler.core.interpreter.env.{env_define, env_define_global, env_init, env_pop_scope, env_push_scope}
 use compiler.core.interpreter.eval.{EVAL_DECL_LAZY_VAL, EVAL_STMT_BIND, eval_break_label, eval_breaking, eval_continue_label}
 use compiler.core.interpreter.eval.{eval_continuing, eval_expr, eval_had_error, eval_label_stack, eval_reset}
-use compiler.core.interpreter.eval.{eval_returning, eval_set_error, eval_yield_stack}
-use compiler.core.interpreter.eval_calls.{eval_function_call}
+use compiler.core.interpreter.eval.{eval_entry_file, eval_returning, eval_set_error, eval_yield_stack}
+use compiler.core.interpreter.eval_calls.{eval_function_call, val_copy_if_value_struct}
 use compiler.core.interpreter.eval_stmts.{eval_stmt}
-use compiler.core.interpreter.eval_tables.{enum_table_register, func_register_return_type, func_table_lookup, func_table_register, func_table_register_owned}
+use compiler.core.interpreter.eval_tables.{enum_table_register_in, func_register_return_type, func_table_lookup, func_table_register, func_table_register_owned}
 use compiler.core.interpreter.eval_tables.{func_table_reset, init_functions, match_fallthrough_set_abort, match_wildcard_catch_set_enabled, struct_table_register}
 use compiler.core.interpreter.eval_tables.{struct_table_reset, teardown_functions, when_disabled_decls}
 use compiler.core.interpreter.module_loader_core.{import_admission_set_deny, load_module, load_module_selective, load_module_selective_with_unbraced_alias, module_bind_exports_for_caller}
 use compiler.core.interpreter.module_loader_core.{module_loader_init, register_deferred_module}
+use compiler.core.unit_scope.{unit_scope_record_use_in, unit_scope_reset}
 use compiler.core.interpreter.value.{val_get_kind, val_make_array, val_make_int, val_make_nil, val_make_text}
 use compiler.core.interpreter.value.{val_make_thunk, val_reset}
-use compiler.core.monomorphize.{mono_cache_init}
 use compiler.core.ast_types.{CoreExpr, CoreStmt, CoreDecl}
 use compiler.core.enum_discriminant_eval.{eval_enum_discriminant_expr}
 use compiler.common.assurance.policy_names.normalize_profile_name
@@ -87,8 +88,9 @@ fn eval_decl(did: i64) -> i64:
         if body.len() > 0:
             init_val = eval_expr(body[0])
             if eval_had_error: return -1
-        env_define_global(name, init_val)
-        return init_val
+        val snapshot = val_copy_if_value_struct(init_val)
+        env_define_global(name, snapshot)
+        return snapshot
 
     if tag == EVAL_DECL_LAZY_VAL:
         val lv_name = d_node.name
@@ -106,8 +108,9 @@ fn eval_decl(did: i64) -> i64:
         if body.len() > 0:
             init_val = eval_expr(body[0])
             if eval_had_error: return -1
-        env_define_global(name, init_val)
-        return init_val
+        val snapshot = val_copy_if_value_struct(init_val)
+        env_define_global(name, snapshot)
+        return snapshot
 
     if tag == DECL_ENUM:
         # Register enum variants as constants
@@ -141,7 +144,7 @@ fn eval_decl(did: i64) -> i64:
             next_discriminant = discriminant + 1
             vi = vi + 1
         # Register enum in registry for exhaustiveness checking
-        enum_table_register(name, variants)
+        enum_table_register_in(module_get_path(), name, variants)
         return val_make_nil()
 
     if tag == DECL_USE:
@@ -154,6 +157,9 @@ fn eval_decl(did: i64) -> i64:
         # this declaration was appended.
         val declared_owner = decl_owner_file_get(did)
         val current_file = if declared_owner != "": declared_owner else: module_get_path()
+        # Unit scope is per file: the import is recorded under the file that
+        # wrote it, the same key eval_caller_file() yields at suffix-use time.
+        unit_scope_record_use_in(if current_file != "": current_file else: "<entry>", module_path, imported_names)
 
         # Check if this is a lazy import — defer loading
         val is_lazy = decl_get_is_lazy(did)
@@ -211,12 +217,11 @@ fn eval_decl(did: i64) -> i64:
             if eval_had_error: break
             if eval_returning: break
             if ce_short_circuit: break
-            val ce_stmt_tag = stmt_get(ce_sid).tag
+            val ce_stmt_tag = stmt_get_tag(ce_sid)
             if ce_stmt_tag == EVAL_STMT_BIND and not ce_is_seq:
                 # Monadic bind: eval rhs, short-circuit on nil
-                val ce_bind_node = stmt_get(ce_sid)
-                val ce_bind_name = ce_bind_node.name
-                val ce_bind_rhs = eval_expr(ce_bind_node.expr_idx)
+                val ce_bind_name = stmt_get_name(ce_sid)
+                val ce_bind_rhs = eval_expr(stmt_get_expr(ce_sid))
                 if eval_had_error:
                     ce_last = -1
                 else:
@@ -225,8 +230,9 @@ fn eval_decl(did: i64) -> i64:
                         ce_last = ce_bind_rhs
                         ce_short_circuit = true
                     else:
-                        env_define(ce_bind_name, ce_bind_rhs)
-                        ce_last = ce_bind_rhs
+                        val snapshot = val_copy_if_value_struct(ce_bind_rhs)
+                        env_define(ce_bind_name, snapshot)
+                        ce_last = snapshot
             else:
                 ce_last = eval_stmt(ce_sid)
         if ce_is_seq:
@@ -257,6 +263,7 @@ fn eval_decl(did: i64) -> i64:
 fn eval_module() -> i64:
     val decls = module_get_decls()
     val entry_path = module_get_path()
+    eval_entry_file = entry_path
 
     # Establish provenance before evaluating any use declaration. Recursive
     # module loads append more declarations to this same arena.
@@ -417,9 +424,9 @@ fn eval_init():
     env_init()
     func_table_reset()
     struct_table_reset()
-    mono_cache_init()
     eval_reset()
     module_loader_init()
+    unit_scope_reset()
     # BUG-2026-08-01-match-fallthrough: promote the warn-only match
     # fall-through diagnostic to a hard interpreter-tier error when the
     # assurance profile resolves to Deny severity. The env var is the DEFAULT
@@ -451,7 +458,7 @@ fn eval_yield_expr(eid: i64) -> i64:
     if eval_had_error: return -1
     if eval_yield_stack.len() > 0:
         val top_idx = eval_yield_stack.len() - 1
-        eval_yield_stack[top_idx].push(result)
+        eval_yield_stack[top_idx].push(val_copy_if_value_struct(result))
     result
 
 fn eval_spawn_expr(eid: i64) -> i64:
@@ -470,9 +477,8 @@ fn eval_spawn_expr(eid: i64) -> i64:
 fn eval_labeled_loop(sid: i64) -> i64:
     # Evaluate a labeled loop: push label, run inner loop, pop label
     # If break/continue targets this label, consume the break state
-    val s_node = stmt_get(sid)
-    val my_label = s_node.name
-    val body_stmts = s_node.body
+    val my_label = stmt_get_name(sid)
+    val body_stmts = stmt_get_body(sid)
     eval_label_stack.push(my_label)
     # Execute the inner loop stmt
     var result = val_make_nil()

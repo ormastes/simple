@@ -1,0 +1,70 @@
+# @req REQ-MIR-OPTIONAL-NARROWING
+# @cover src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl
+# @cover src/compiler/50.mir/mir_lowering_stmts.spl
+# Regression spec for optional_array_payload_narrowing_native_2026_10_21.
+
+use std.spec.{describe, it, expect}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_serialization.{serialize_mir_module}
+use compiler.mir._MirLowering.module_lowering.*
+use app.io.native_build_cache.{native_build_cache_snapshot, native_build_cache_bind, native_build_cache_restore}
+use app.io.native_build_output_mode.{native_build_output_mode_snapshot, native_build_output_mode_bind, native_build_output_mode_restore}
+
+fn lower_optional_narrow_probe(src: text, tag: text) -> (text, [text]):
+    val module = parse_full_frontend(src, "opt_narrow_" + tag + ".spl", "opt_narrow_" + tag, Logger(level: 0))
+    var hir_owner = HirLowering.with_filename("opt_narrow_" + tag + ".spl")
+    val hir = hir_owner.lower_module(module)
+    expect(hir_owner.errors.len()).to_equal(0)
+    var mir_owner = MirLowering.new(hir.symbols)
+    val mir = mir_owner.lower_module(hir)
+    var errs: [text] = []
+    for err in mir_owner.errors:
+        errs = errs.push(err.message)
+    (serialize_mir_module(mir), errs)
+
+describe "optional non-scalar payload narrowing in MIR":
+    it "unwraps nil-guarded text? passed to plain text parameter with rt_unwrap_or_self":
+        val src = """fn sink_text(s: text) -> i64:
+    s.len()
+
+fn restore_text(previous: text?) -> i64:
+    if previous == nil:
+        return 0
+    sink_text(previous)
+"""
+        val (mir, errs) = lower_optional_narrow_probe(src, "text_param")
+        expect(errs.len()).to_equal(0)
+        expect(mir).to_contain("rt_unwrap_or_self")
+
+    it "unwraps nil-guarded [i64]? passed to plain [i64] parameter and for-loop iteration":
+        val src = """fn take_arr(xs: [i64]) -> i64:
+    xs.len()
+
+fn sum_opt_arr(xs: [i64]?) -> i64:
+    if xs == nil:
+        return 0
+    var total = take_arr(xs)
+    for item in xs:
+        total = total + item
+    total
+"""
+        val (mir, errs) = lower_optional_narrow_probe(src, "array_param")
+        expect(errs.len()).to_equal(0)
+        expect(mir).to_contain("rt_unwrap_or_self")
+
+    it "restores env variables cleanly in native_build_cache_restore and native_build_output_mode_restore":
+        val prev_cache = native_build_cache_snapshot()
+        expect(native_build_cache_bind("D:/t/probe_cache_dir")).to_equal(true)
+        expect(native_build_cache_restore(Some("D:/t/restored_cache_dir"))).to_equal(true)
+        expect(native_build_cache_snapshot()).to_equal(Some("D:/t/restored_cache_dir"))
+        expect(native_build_cache_restore(prev_cache)).to_equal(true)
+
+        val prev_mode = native_build_output_mode_snapshot()
+        expect(native_build_output_mode_bind("entry")).to_equal(true)
+        expect(native_build_output_mode_restore(Some("archive"))).to_equal(true)
+        expect(native_build_output_mode_snapshot()).to_equal(Some("archive"))
+        expect(native_build_output_mode_restore(prev_mode)).to_equal(true)

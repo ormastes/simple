@@ -1,0 +1,56 @@
+use std.spec
+use app.cli.file_worker_pool_refusal.{file_worker_pool_phase_price_kb_v1,
+    file_worker_pool_price_explicit_v1, file_worker_pool_mir_default_price_kb_v1,
+    file_worker_pool_scaled_budget_kb_v1, file_worker_pool_usable_kb_v1,
+    FILE_WORKER_POOL_PER_FILE_WORKER_KB_V1}
+use app.cli.shard_mem_clamp.{SHARD_HIR_WORKER_KB_V1, shard_host_worker_budget_kb}
+
+"""
+# Host key worker_mem_mib is a MIR-shard figure
+
+On the Windows phase-3 host, `~/.config/simple/host.sdn` sets
+`worker_mem_mib: 26624` (the measured MIR SHARD worker peak). That key was
+applied to EVERY phase price, and counted as explicit (never scaled), so the
+per-file pool priced HIR and MIR workers at 27262976 kB (26 GiB) and refused
+with 28 GB free. A per-file worker peaks at 5.04-5.65 GiB.
+
+Rule: a SIMPLE_*_SHARD_WORKER_KB env value always wins; the host key applies
+only to the shard mode; the per-file pool uses the per-file price.
+
+Bug: doc/08_tracking/bug/phase3_per_file_pool_refused_26gib_worker_price_windows_2026-11-15.md
+"""
+describe "per-file pool ignores the shard host key":
+    # @req NB-POOL-HOSTKEY-001
+    it "prices a per-file worker at the per-file figure despite worker_mem_mib=26624":
+        step("host key alone, per-file pool (shard_mode=false)")
+        val hir = file_worker_pool_phase_price_kb_v1("", "26624", SHARD_HIR_WORKER_KB_V1, false)
+        expect(hir).to_equal(SHARD_HIR_WORKER_KB_V1)
+        val mir = file_worker_pool_phase_price_kb_v1("", "26624", file_worker_pool_mir_default_price_kb_v1(3134, true), false)
+        expect(mir).to_equal(FILE_WORKER_POOL_PER_FILE_WORKER_KB_V1)
+        step("the host key does not make the per-file price explicit, so it still scales")
+        expect(file_worker_pool_price_explicit_v1("", "26624", false)).to_equal(false)
+
+    # @req NB-POOL-HOSTKEY-002
+    it "admits 2 workers at the reported 28703588 kB free":
+        val usable = file_worker_pool_usable_kb_v1(28703588, 0)
+        val price = file_worker_pool_phase_price_kb_v1("", "26624", FILE_WORKER_POOL_PER_FILE_WORKER_KB_V1, false)
+        val scaled = file_worker_pool_scaled_budget_kb_v1(price, usable, file_worker_pool_price_explicit_v1("", "26624", false))
+        expect(usable / scaled >= 2).to_equal(true)
+        expect(scaled < 27262976).to_equal(true)
+
+describe "phase price generalisation":
+    # @req NB-POOL-HOSTKEY-003
+    it "the shard mode still honours the host key and treats it as explicit":
+        expect(file_worker_pool_phase_price_kb_v1("", "26624", 9000000, true)).to_equal(shard_host_worker_budget_kb("26624"))
+        expect(file_worker_pool_price_explicit_v1("", "26624", true)).to_equal(true)
+        step("no host key: default in both modes")
+        expect(file_worker_pool_phase_price_kb_v1("", "", 9000000, true)).to_equal(9000000)
+        expect(file_worker_pool_price_explicit_v1("", "", true)).to_equal(false)
+
+    # @req NB-POOL-HOSTKEY-004
+    it "a SIMPLE_*_SHARD_WORKER_KB env value wins in both modes and is explicit":
+        for shard in [true, false]:
+            expect(file_worker_pool_phase_price_kb_v1("6815744", "26624", 9000000, shard)).to_equal(6815744)
+            expect(file_worker_pool_price_explicit_v1("6815744", "26624", shard)).to_equal(true)
+        step("an invalid env value falls through")
+        expect(file_worker_pool_phase_price_kb_v1("abc", "", 9000000, false)).to_equal(9000000)

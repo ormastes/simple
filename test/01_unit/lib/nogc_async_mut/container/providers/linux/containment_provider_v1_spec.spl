@@ -1,0 +1,138 @@
+# AUTHORED/NOT_RUN. Actual common dispatch with explicit scripted policy provider.
+use std.spec.*
+use std.common.contracts.container.runtime_v1.*
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.effect_deadline_v1.container_effect_deadline_v1
+use std.nogc_async_mut.container.api_v2.*
+use std.nogc_async_mut.container.providers.linux.oci_runtime_v1.*
+use std.nogc_async_mut.container.providers.linux.request_v1.*
+use std.nogc_async_mut.container.providers.linux.containment_profile_v1.*
+use std.nogc_async_mut.container.providers.linux.containment_observer_v1.*
+use std.nogc_async_mut.container.providers.linux.containment_inspect_v1.*
+use std.nogc_async_mut.container.providers.linux.containment_v1.*
+use test.fixtures.container.linux_engine_exec_fixture_v3.*
+use std.nogc_async_mut.container.providers.linux.simple_container_adapter_v2.*
+use test.fixtures.orchestration.simple_container_linux_adapter_fixture_v2.*
+use test.fixtures.orchestration.containment_provider_fixture_v1.*
+use test.fixtures.container.simple_container_api_fixture_v2.simple_container_scripted_linux_fixture_v2
+
+fn _configured_leaf_v1() -> LinuxOciRequestV1:
+    var request = linux_container_leaf_fixture_v2()
+    request.containment_profile_digest = linux_oci_containment_profile_digest_v1(containment_installed_fixture_v1().profile).unwrap()
+    request
+
+fn _configured_expected_create_v1() -> [text]:
+    ["--remote=false", "--root", "/home/test/storage", "--runroot", "/run/user/1000/storage",
+        "--storage-driver", "overlay", "--storage-opt=", "--runtime", "/usr/bin/crun", "--cgroup-manager", "systemd",
+        "create", "--name", "simpleorch-workload-1-1", "--label", "io.simpleorch.pod_uid=workload-1",
+        "--label", "io.simpleorch.attempt=1", "--label", "io.simpleorch.node_boot_id=" + container_scope_fence_id_v2(linux_container_scope_fixture_v2()).unwrap(),
+        "--label", "io.simpleorch.provider_generation=7", "--label", "io.simpleorch.operation_id=create-api",
+        "--cpu-period", "100000", "--cpu-quota", "100000", "--memory", "268435456", "--pids-limit", "64",
+        "--network", "none", "--read-only", "--security-opt", "no-new-privileges", "--cap-drop", "ALL", "--http-proxy=false",
+        "--cgroups=enabled", "--cgroupns=private", "--pid=private", "--privileged=false",
+        "example/agent@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "/agent", "literal"]
+
+fn _configured_owner_v1(results: [ScriptedCommandResultV1], drift: bool = false) -> SimpleContainerOwnerV2:
+    val installed = containment_installed_fixture_v1()
+    val baseline = linux_oci_containment_capture_observation_v1(installed, containment_capture_fixture_v1(),
+        "a".repeat(64), "b".repeat(64)).unwrap()
+    var current = baseline
+    if drift:
+        current.runtime_version = "changed-runtime-version"
+        current.identity_digest = linux_oci_containment_identity_digest_v1(current)
+    val scope = linux_container_scope_fixture_v2()
+    val provider = LinuxOciRuntimeProviderV1.scripted_with_containment_policy_v1("/unused/configured",
+        container_scope_fence_id_v2(scope).unwrap(), 7, installed, baseline, current, results).unwrap()
+    provider.set_scripted_effect_clock_v1([1, 2, 3, 4]).unwrap()
+    val observed = ContainerHostObservationV2(backend: "linux-podman", native_machine_id: scope.native_machine_id,
+        native_boot_id: scope.boot_id, provider_identity_digest: baseline.cli_observation.identity_digest,
+        execution_os: "linux", architecture: "x86_64", continuity_assurance: scope.continuity_mode,
+        boot_observation: scope.continuity_id)
+    val adapter = LinuxSimpleContainerAdapterV2.scripted_fixture_v2(scope, provider, observed, 3000).unwrap()
+    simple_container_scripted_linux_fixture_v2(scope, adapter)
+
+fn _configured_create_result_v1() -> ScriptedCommandResultV1:
+    ScriptedCommandResultV1(operation: "create", program: "/usr/bin/podman", args: _configured_expected_create_v1(),
+        stdout: "c".repeat(64) + "\n", stderr: "", exit_code: 0)
+
+describe "configured containment actual common dispatch":
+    it "creates the bound request with exact global and create flags and truthful receipt":
+        val request = linux_container_request_fixture_v2(_configured_leaf_v1())
+        val deadline = container_effect_deadline_v1(request.plan.request_digest, request.plan.operation_id, ["create"], 100).unwrap()
+        val turn = simple_container_apply_v2(_configured_owner_v1([_configured_create_result_v1()]), "create", request, deadline)
+        expect(turn.operation.status).to_equal(RUNTIME_STATUS_OK)
+        expect(turn.operation.command.program).to_equal("/usr/bin/podman")
+        expect(turn.operation.command.args).to_equal(_configured_expected_create_v1())
+        match turn.owner:
+            case SimpleContainerOwnerV2.Linux(_, adapter):
+                expect(adapter.provider.scripted_cursor).to_equal(1)
+                expect(adapter.provider.executor_call_count()).to_equal(1)
+                expect(adapter.provider.retained_state_count()).to_equal(1)
+            case _: assert(false, "expected retained Linux owner")
+
+    it "refuses missing and wrong profile before command execution":
+        for selector in ["", "d".repeat(64)]:
+            var leaf = _configured_leaf_v1()
+            leaf.containment_profile_digest = selector
+            val request = linux_container_request_fixture_v2(leaf)
+            val deadline = container_effect_deadline_v1(request.plan.request_digest, request.plan.operation_id, ["create"], 100).unwrap()
+            val turn = simple_container_apply_v2(_configured_owner_v1([_configured_create_result_v1()]), "create", request, deadline)
+            expect(turn.operation.status).to_equal(RUNTIME_STATUS_REJECTED)
+            match turn.owner:
+                case SimpleContainerOwnerV2.Linux(_, adapter):
+                    expect(adapter.provider.scripted_cursor).to_equal(0)
+                    expect(adapter.provider.executor_call_count()).to_equal(0)
+                    expect(adapter.provider.retained_state_count()).to_equal(0)
+                case _: assert(false, "expected retained Linux owner")
+
+    it "refuses changed configured runtime identity without consuming create fixture":
+        val request = linux_container_request_fixture_v2(_configured_leaf_v1())
+        val deadline = container_effect_deadline_v1(request.plan.request_digest, request.plan.operation_id, ["create"], 100).unwrap()
+        val turn = simple_container_apply_v2(_configured_owner_v1([_configured_create_result_v1()], true), "create", request, deadline)
+        expect(turn.operation.status).to_equal(RUNTIME_STATUS_REJECTED)
+        match turn.owner:
+            case SimpleContainerOwnerV2.Linux(_, adapter): expect(adapter.provider.scripted_cursor).to_equal(0)
+            case _: assert(false, "expected retained Linux owner")
+
+    it "refuses configured output and exec routes that have no containment installation":
+        match _configured_owner_v1([]):
+            case SimpleContainerOwnerV2.Linux(_, adapter):
+                val leaf = _configured_leaf_v1()
+                val expected = RuntimeIdentityV1(pod_uid: leaf.pod_uid, attempt: leaf.attempt, provider_generation: 7,
+                    operation_id: leaf.operation_id, engine: "podman", native_id: "c".repeat(64),
+                    node_boot_id: container_scope_fence_id_v2(linux_container_scope_fixture_v2()).unwrap())
+                expect(adapter.provider.output_engine_observation_v2(leaf, expected, "a".repeat(64))).to_equal(
+                    Err("containment-output-profile-not-admitted"))
+                val rejected = adapter.exec_inspect_v3(linux_container_request_fixture_v2(leaf),
+                    linux_engine_exec_installation_fixture_v3(), linux_engine_exec_admission_fixture_v3())
+                expect(rejected.error).to_equal("containment-exec-control-not-installed")
+                expect(rejected.owner.?).to_equal(false)
+                expect(adapter.provider.executor_call_count()).to_equal(0)
+                expect(adapter.provider.scripted_cursor).to_equal(0)
+            case _: assert(false, "expected retained Linux owner")
+
+    it "never fabricates a native capture owner from scripted inspect data":
+        val leaf = _configured_leaf_v1()
+        val request = linux_container_request_fixture_v2(leaf)
+        val scope = linux_container_scope_fixture_v2()
+        val fence = container_scope_fence_id_v2(scope).unwrap()
+        val command = linux_oci_containment_inspect_command_v1("c".repeat(64)).unwrap()
+        val prefix = ["--remote=false", "--root", "/home/test/storage", "--runroot", "/run/user/1000/storage",
+            "--storage-driver", "overlay", "--storage-opt=", "--runtime", "/usr/bin/crun", "--cgroup-manager", "systemd"]
+        val query = ScriptedCommandResultV1(operation: "containment-inspect", program: "/usr/bin/podman",
+            args: prefix + command.args, stdout: containment_inspect_payload_fixture_v1().replace("boot-1", fence), stderr: "", exit_code: 0)
+        val deadline = container_effect_deadline_v1(request.plan.request_digest, request.plan.operation_id, ["create"], 100).unwrap()
+        val turn = simple_container_apply_v2(_configured_owner_v1([_configured_create_result_v1(), query]), "create", request, deadline)
+        expect(turn.operation.status).to_equal(RUNTIME_STATUS_OK)
+        match turn.owner:
+            case SimpleContainerOwnerV2.Linux(_, adapter):
+                val baseline = adapter.provider.containment_baseline.unwrap()
+                val captured = adapter.provider.capture_containment_v1(scope, leaf, turn.operation.state.identity,
+                    baseline.cli_observation.identity_digest, baseline.identity_digest)
+                match captured:
+                    case LinuxOciContainmentOutcomeV1.Rejected(reason):
+                        expect(reason).to_equal("containment-scripted-native-capture-forbidden")
+                    case _: assert(false, "scripted capture must not publish any native owner")
+                expect(adapter.provider.scripted_cursor).to_equal(2)
+                expect(adapter.provider.executor_call_count()).to_equal(2)
+            case _: assert(false, "expected retained Linux owner")

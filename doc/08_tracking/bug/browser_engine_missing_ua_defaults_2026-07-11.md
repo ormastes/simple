@@ -56,3 +56,18 @@ None in this session.
 
 PARTIALLY FIXED (haiku fix lane F2, opus-reviewed APPROVE): h4/h5/h6 UA default branches added to tag_defaults (16/13/11px, bold, symmetric margins). The doc's remaining wishlist items are NOT covered by this change.
 
+## Resolution (2026-11-09, p3-browser sweep)
+
+FIXED with executed evidence. `tag_defaults` carries h4/h5/h6 (16/13/11px,
+bold, margins), blockquote/figure (40px inline), pre (monospace +
+white-space:pre), fieldset, dl/dd etc. — re-verified by c0a0ce86b5c and
+confirmed again this sweep via computed-style probes (h4 font_size=16,
+h5=13, pre white_space_nowrap=true). The one live defect was downstream:
+Draw-IR text emission used `text_trimmed` for pre/nowrap runs, so `<pre>`
+drew its text at the left edge of a box sized for the preserved whitespace;
+fixed in simple_web_html_layout_renderer_paint_layout.spl (emit
+`text_data` when white_space_nowrap). `browser_renderer_ua_defaults_spec`
+2/2 PASS on the seed interpreter. Adjacent finding: bold is computed but
+not rasterized engine-wide (inline font-weight:bold is pixel-identical to
+normal in both lanes) — needs the font/text raster lane, separate row.
+

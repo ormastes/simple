@@ -1,0 +1,209 @@
+# Strict host capacity projection (HOST-02, ORCH-02).
+# No I/O or journal writer: the authenticated host owner serializes transitions
+# and persists them with distributed-operation V2 before publishing a receipt.
+# Values supplied here are not proof of authority, continuity or native absence.
+use std.common.build_manager.contracts.{builder_identifier_valid_v1, builder_digest_valid_v1}
+
+pub enum HostReservationStateV1:
+    Prepared
+    Executing
+    Uncertain
+    Released
+
+pub struct HostCapacityV1:
+    physical_host_id: text
+    authority_id: text
+    boot_id: text
+    provider_generation: i64
+    cpu_millis: i64
+    memory_bytes: i64
+    exclusive_devices: [text]
+
+pub struct HostLedgerFenceV1:
+    authority_id: text
+    boot_id: text
+    provider_generation: i64
+    revision: i64
+
+pub struct HostReservationV1:
+    id: text
+    operation_id: text
+    payload_digest: text
+    service_scope_id: text
+    assignment_generation: i64
+    nonce: text
+    cpu_millis: i64
+    memory_bytes: i64
+    exclusive_devices: [text]
+    prepare_deadline_ms: i64
+    state: HostReservationStateV1
+
+pub struct HostCapacityLedgerV1:
+    capacity: HostCapacityV1
+    revision: i64
+    continuity_proven: bool
+    reservations: [HostReservationV1]
+
+pub struct HostAvailableCapacityV1:
+    cpu_millis: i64
+    memory_bytes: i64
+    exclusive_devices: [text]
+
+fn host_device_ids_valid_v1(devices: [text]) -> bool:
+    if devices.len() > 256:
+        return false
+    var seen: {text: bool} = {}
+    for device in devices:
+        if not builder_identifier_valid_v1(device) or seen.contains_key(device):
+            return false
+        seen[device] = true
+    true
+
+pub fn host_reservation_valid_v1(row: HostReservationV1) -> bool:
+    builder_identifier_valid_v1(row.id) and
+        builder_identifier_valid_v1(row.operation_id) and
+        builder_digest_valid_v1(row.payload_digest) and
+        builder_identifier_valid_v1(row.service_scope_id) and
+        builder_identifier_valid_v1(row.nonce) and row.assignment_generation > 0 and
+        row.cpu_millis >= 0 and row.memory_bytes >= 0 and row.prepare_deadline_ms > 0 and
+        host_device_ids_valid_v1(row.exclusive_devices)
+
+# Revalidate replayed and programmatically constructed projections. Prepared,
+# executing and uncertain rows all remain charged; elapsed time alone frees none.
+pub fn host_available_capacity_v1(ledger: HostCapacityLedgerV1) -> Result<HostAvailableCapacityV1, text>:
+    val cap = ledger.capacity
+    if not builder_identifier_valid_v1(cap.physical_host_id) or
+            not builder_identifier_valid_v1(cap.authority_id) or
+            not builder_identifier_valid_v1(cap.boot_id) or cap.provider_generation <= 0 or
+            cap.cpu_millis < 0 or cap.memory_bytes < 0 or ledger.revision <= 0 or
+            not host_device_ids_valid_v1(cap.exclusive_devices):
+        return Err("invalid-host-capacity")
+    if ledger.reservations.len() > 4096:
+        return Err("reservation-history-full")
+    var cpu = cap.cpu_millis
+    var memory = cap.memory_bytes
+    var ids: {text: bool} = {}
+    var operations: {text: bool} = {}
+    var nonces: {text: bool} = {}
+    var devices: {text: bool} = {}
+    for row in ledger.reservations:
+        if not host_reservation_valid_v1(row):
+            return Err("invalid-reservation")
+        if ids.contains_key(row.id) or operations.contains_key(row.operation_id) or nonces.contains_key(row.nonce):
+            return Err("duplicate-reservation-identity")
+        ids[row.id] = true
+        operations[row.operation_id] = true
+        nonces[row.nonce] = true
+        if row.state != HostReservationStateV1.Released:
+            # Subtract only after comparison: no overflowing aggregate sums.
+            if row.cpu_millis > cpu or row.memory_bytes > memory:
+                return Err("capacity-exceeded")
+            cpu = cpu - row.cpu_millis
+            memory = memory - row.memory_bytes
+            for device in row.exclusive_devices:
+                if not cap.exclusive_devices.contains(device):
+                    return Err("device-outside-authority")
+                if devices.contains_key(device):
+                    return Err("exclusive-device-already-reserved")
+                devices[device] = true
+    var available: [text] = []
+    for device in cap.exclusive_devices:
+        if not devices.contains_key(device):
+            available.push(device)
+    Ok(HostAvailableCapacityV1(cpu_millis: cpu, memory_bytes: memory, exclusive_devices: available))
+
+fn host_fence_scope_valid_v1(ledger: HostCapacityLedgerV1, fence: HostLedgerFenceV1) -> bool:
+    fence.authority_id == ledger.capacity.authority_id and
+        fence.boot_id == ledger.capacity.boot_id and
+        fence.provider_generation == ledger.capacity.provider_generation
+
+fn host_same_reservation_request_v1(a: HostReservationV1, b: HostReservationV1) -> bool:
+    if a.exclusive_devices.len() != b.exclusive_devices.len():
+        return false
+    var i = 0
+    while i < a.exclusive_devices.len():
+        if a.exclusive_devices[i] != b.exclusive_devices[i]:
+            return false
+        i = i + 1
+    a.id == b.id and a.operation_id == b.operation_id and a.payload_digest == b.payload_digest and
+        a.service_scope_id == b.service_scope_id and a.assignment_generation == b.assignment_generation and
+        a.nonce == b.nonce and a.cpu_millis == b.cpu_millis and a.memory_bytes == b.memory_bytes and
+        a.prepare_deadline_ms == b.prepare_deadline_ms
+
+# Pure candidate transition. The host must compare/commit the revision under
+# its single writer; two successful speculative calls are not two committed grants.
+pub fn host_prepare_reservation_v1(ledger: HostCapacityLedgerV1, fence: HostLedgerFenceV1,
+        request: HostReservationV1, now_ms: i64) -> Result<HostCapacityLedgerV1, text>:
+    val available = host_available_capacity_v1(ledger)?
+    if not host_fence_scope_valid_v1(ledger, fence):
+        return Err("host-fence-stale")
+    if now_ms < 0 or not host_reservation_valid_v1(request) or request.state != HostReservationStateV1.Prepared:
+        return Err("invalid-prepare-request")
+    for existing in ledger.reservations:
+        if existing.id == request.id or existing.operation_id == request.operation_id:
+            if not host_same_reservation_request_v1(existing, request):
+                return Err("reservation-payload-mismatch")
+            # Retained state is authoritative, including Released. No relaunch.
+            return Ok(ledger)
+    if not ledger.continuity_proven:
+        return Err("host-reconciliation-required")
+    if fence.revision != ledger.revision:
+        return Err("ledger-revision-stale")
+    if ledger.revision == 9223372036854775807 or ledger.reservations.len() == 4096:
+        return Err("reservation-history-full")
+    if request.prepare_deadline_ms <= now_ms:
+        return Err("prepare-expired")
+    if request.cpu_millis > available.cpu_millis or request.memory_bytes > available.memory_bytes:
+        return Err("capacity-exceeded")
+    var rows: [HostReservationV1] = []
+    for existing in ledger.reservations:
+        rows.push(existing)
+    rows.push(request)
+    val next = HostCapacityLedgerV1(capacity: ledger.capacity, revision: ledger.revision + 1,
+        continuity_proven: ledger.continuity_proven, reservations: rows)
+    val checked = host_available_capacity_v1(next)?
+    Ok(next)
+
+fn host_reservation_with_state_v1(row: HostReservationV1, state: HostReservationStateV1) -> HostReservationV1:
+    HostReservationV1(id: row.id, operation_id: row.operation_id, payload_digest: row.payload_digest,
+        service_scope_id: row.service_scope_id, assignment_generation: row.assignment_generation,
+        nonce: row.nonce, cpu_millis: row.cpu_millis, memory_bytes: row.memory_bytes,
+        exclusive_devices: row.exclusive_devices, prepare_deadline_ms: row.prepare_deadline_ms, state: state)
+
+# Commit consumes a still-live preparation. Abort can release only a prepared
+# row: executing/uncertain work needs provider absence evidence in the host owner.
+pub fn host_transition_prepared_v1(ledger: HostCapacityLedgerV1, fence: HostLedgerFenceV1,
+        reservation_id: text, nonce: text, assignment_generation: i64,
+        now_ms: i64, execute: bool) -> Result<HostCapacityLedgerV1, text>:
+    val available = host_available_capacity_v1(ledger)?
+    if not host_fence_scope_valid_v1(ledger, fence):
+        return Err("host-fence-stale")
+    if now_ms < 0:
+        return Err("invalid-clock")
+    var found = false
+    var rows: [HostReservationV1] = []
+    val target = if execute: HostReservationStateV1.Executing else: HostReservationStateV1.Released
+    for row in ledger.reservations:
+        if row.id == reservation_id:
+            found = true
+            if row.nonce != nonce or row.assignment_generation != assignment_generation:
+                return Err("reservation-fence-stale")
+            if row.state == target:
+                return Ok(ledger)
+            if row.state != HostReservationStateV1.Prepared:
+                return Err("reservation-not-prepared")
+            # Rollback may leave an older Prepared row while a newer native
+            # execution survives. Do not release it until reconciliation either.
+            if not ledger.continuity_proven:
+                return Err("host-reconciliation-required")
+            if execute and row.prepare_deadline_ms <= now_ms:
+                return Err("execution-authorization-expired")
+            rows.push(host_reservation_with_state_v1(row, target))
+        else:
+            rows.push(row)
+    if not found:
+        return Err("reservation-unknown")
+    if fence.revision != ledger.revision or ledger.revision == 9223372036854775807:
+        return Err("ledger-revision-stale")
+    Ok(HostCapacityLedgerV1(capacity: ledger.capacity, revision: ledger.revision + 1,
+        continuity_proven: ledger.continuity_proven, reservations: rows))

@@ -1,6 +1,6 @@
 # Auto-vectorization never runs in a production compile (`AnalysisOnly`)
 
-- **Status:** open — blocks every downstream SIMD-automation claim
+- **Status:** fixed (2026-11-11, P3 lane ne2) — pass `Active` and wired in production pipeline; verified on release/1.0.0 tip
 - **Found:** 2026-09-13 (adversarial review of `34b96e29837`)
 
 ## The gate
@@ -88,3 +88,55 @@ status must NOT be flipped without the alias oracle from `55.borrow` that
 `rewrite.spl:64-69` already lists as the follow-up. Flipping it is an owner
 decision gated on that proof — the same proof `PatternIdiom` and
 `PredicatePromote` are also waiting on.
+
+
+## Verdict addendum — 2026-11-11 (P3 lane ne2)
+
+Verdict: **FIXED** (superseded by a same-day follow-up the record body predates).
+
+The gate this record demanded — an execution-level differential test, not
+structural inspection — passed on 2026-09-13 and the status flipped. Current
+`release/1.0.0` tip:
+
+- `pass_status(PassKind.AutoVectorize)` returns `PassStatus.Active`
+  (`src/compiler/60.mir_opt/mir_opt/mod.spl:364-390`, with the landed rationale
+  comment naming the four fixed revert-forcers and the R4b refusal + width-ladder
+  narrowing). Landed via merge `9e7e7a526edb` (PR #7597).
+- `run_pass_on_module` dispatches `case AutoVectorize: result_module = run_auto_vectorize(result_module)`
+  (`mod.spl:1911-1914`), and `pipeline_optimize` admits it through
+  `pass_status_allows_transform` — the pass runs in production compiles.
+- The "one remaining hard gate: no alias oracle" is also closed: the oracle
+  lives in `compiler.mir_opt.auto_vectorize_alias`
+  (`alias_pair_decision` / `decide_recipe_aliasing`, verdicts
+  `ExactAliasOnly`/`ProvenDisjoint`/`Unsafe`/`NeedsRuntimeGuard` with a runtime
+  range-guard path). Verified this lane on the refreshed seed (build-commit
+  `0791c2b7f4a7`, seed-smoke): `test/01_unit/compiler/mir_opt/auto_vectorize_alias_spec.spl`
+  → 15/15 passed.
+
+`@must(simd)` enforcement, `@simd(disable)`, and AVX-512 recipe planning are
+therefore live in real builds within the deliberately narrow scope the landed
+comment documents (static trip count, whole chunks, alias-oracle-cleared or
+runtime-guarded); widening still means extending the differential sweep first.
+
+## Triage 2026-11-11 (lane p3-ne20) — verdict: SUPERSEDED (absorber named)
+
+Lane ne2 triaged this row FIXED earlier today on this base and already flipped
+the header; this lane confirms their central structural claim fresh on
+origin/release/1.0.0 (worktree @9202f187777):
+`src/compiler/60.mir_opt/mir_opt/mod.spl:390` returns `PassStatus.Active`
+for `PassKind.AutoVectorize` with the landed rationale comment (R4b refusal +
+width-ladder narrowing, alias-oracle/runtime-guard scope) — identical to what
+ne2 recorded. Their `auto_vectorize_alias_spec.spl` 15/15 seed-smoke is
+same-day and same-branch; per the no-rerun rule it is not re-executed.
+Absorber: P3 lane ne2 verdict addendum above (FIXED 2026-11-11). Lane
+evidence: `build/review/p3fix-ne20-20261111.sdn`.
+
+## 2026-11-13 triage (P3 misc-a lane, work/p3-misc-a-20261113)
+
+**FIXED (confirmed)** — Source-checked fresh: `src/compiler/60.mir_opt/mir_opt/mod.spl:390` returns `PassStatus.Active` for AutoVectorize; alias oracle (`compiler.mir_opt.auto_vectorize_alias`) present. Absorber: lane ne2 addendum.
+
+## 2026-11-13 resolution (P3 triage sweep, work/p3-triage-20261113) — row closed `fixed`
+
+Seed: scratchpad `vkinit/seed-fix`, runs capped `systemd-run MemoryMax=16G timeout 900`, cwd = this worktree at origin/release/1.0.0 `59caff4fd1b`.
+
+Evidence: merge `9e7e7a526edb` (PR #7597) is an ancestor of origin/release/1.0.0. `src/compiler/60.mir_opt/mir_opt/mod.spl:390` returns `PassStatus.Active` for AutoVectorize; the pass is in the pipeline descriptor list (`mod.spl:933`) and dispatched at `mod.spl:1914` (`run_auto_vectorize`). Live: `test/01_unit/compiler/mir_opt/auto_vectorize_alias_spec.spl` executed=15 passed=15 failed=0 (alias oracle gate).

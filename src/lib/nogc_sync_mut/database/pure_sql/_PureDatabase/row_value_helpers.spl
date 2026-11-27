@@ -104,7 +104,7 @@ fn _resolve_col_in_names(names: [text], name: text) -> i32:
         return direct
     val dot = name.last_index_of(".")
     if dot >= 0 and dot + 1 < name.len() as i32:
-        return _find_idx(names, name.slice(dot + 1, name.len() as i32))
+        return _find_idx(names, name.slice(dot + 1, name.byte_len() as i32))
     -1
 
 fn _col_idx(m: Dict<text, i32>, name: text) -> i32:
@@ -116,7 +116,7 @@ fn _col_idx(m: Dict<text, i32>, name: text) -> i32:
     # `SELECT products.name` resolve to nothing and silently yield NULL / no rows.
     val dot = name.last_index_of(".")
     if dot >= 0 and dot + 1 < name.len() as i32:
-        val bare = name.slice(dot + 1, name.len() as i32)
+        val bare = name.slice(dot + 1, name.byte_len() as i32)
         if m.has(bare):
             return m[bare]
     -1
@@ -162,26 +162,31 @@ fn _pdb_v2_escape(value: text) -> text:
 
 fn _pdb_v2_unescape(value: text) -> text?:
     if value.contains("|") or value.contains("\t") or value.contains("\r") or value.contains("\n"):
-        return nil
+        return None
+    # Byte scan bounded by byte_len(); unescaped runs are copied whole so a
+    # multi-byte UTF-8 character is never cut ('%' is ASCII, so run ends are
+    # always character boundaries).
+    val n = value.byte_len() as i32
     var out = ""
+    var run_start: i32 = 0
     var i: i32 = 0
-    while i < value.len() as i32:
-        val ch = value.slice(i, i + 1)
-        if ch != "%":
-            out = out + ch
+    while i < n:
+        if value.byte_at(i) != 37:
             i = i + 1
             continue
-        if i + 3 > value.len() as i32:
-            return nil
+        out = out + value.slice(run_start, i)
+        if i + 3 > n:
+            return None
         val escape = value.slice(i, i + 3)
         if escape == "%25": out = out + "%"
         elif escape == "%7C": out = out + "|"
         elif escape == "%09": out = out + "\t"
         elif escape == "%0D": out = out + "\r"
         elif escape == "%0A": out = out + "\n"
-        else: return nil
+        else: return None
         i = i + 3
-    Some(out)
+        run_start = i
+    Some(out + value.slice(run_start, n))
 
 fn _serialize_row_v2(values: [DbValue]) -> text:
     var result = ""
@@ -208,63 +213,83 @@ fn _serialize_row_v2(values: [DbValue]) -> text:
                 # length was stored and reopen produced an empty Blob.
                 kind = "X"
                 payload = inner.len().to_text()
-        result = result + kind + payload.len().to_text() + ":" + payload
+        result = result + kind + payload.byte_len().to_text() + ":" + payload
     result
 
-fn _pdb_v2_decimal_length(value: text) -> i32?:
-    if value == "": return nil
-    if value.len() > 1 and value.starts_with("0"): return nil
-    var i: i32 = 0
-    while i < value.len() as i32:
+# Strict, fallible decimal parse over char_code_at only. This deliberately does
+# NOT route through `text.parse_int`: the seed JIT lowers that method to
+# rt_string_parse_int and boxes the tagged result into Option incorrectly
+# (`"87".parse_int()` is Some(nil) under JIT, Some(87) under the interpreter —
+# measured 2026-11-13, see
+# doc/08_tracking/bug/pure_sql_reopen_checkpointed_file_stack_overflow_2026-08-25.md
+# addendum). Every op here is total with identical interpreter/JIT behavior, so
+# checkpoint reload is engine-independent. Accepts exactly what the persisted
+# `to_text` spelling of an i32 can be: optional '-', then 1..=10 digits, in
+# [-2147483648, 2147483647]; leading zeros rejected (canonicality).
+fn _pdb_decimal_parse_strict(value: text) -> i32?:
+    if value == "": return None
+    var start: i32 = 0
+    var negative = false
+    if value.starts_with("-"):
+        negative = true
+        start = 1
+    val digits: i32 = value.byte_len() as i32 - start
+    if digits < 1 or digits > 10: return None
+    if digits > 1 and value.char_code_at(start) == 48: return None
+    var magnitude: i64 = 0
+    var i: i32 = start
+    while i < value.byte_len() as i32:
         val code = value.char_code_at(i)
-        if code < 48 or code > 57: return nil
+        if code < 48 or code > 57: return None
+        magnitude = magnitude * 10 + (code - 48) as i64
         i = i + 1
-    # bug=pure_database_total_conversion_as_optional_2026_10_11
-    # Lengths require a strict, fallible parse before the i32 bounds check.
-    val parsed = value.parse_int()
-    match parsed:
-        case Some(length):
-            if length < 0 or length > 2147483647: nil
-            else: Some(length as i32)
-        case nil: nil
+    if negative:
+        if magnitude > 2147483648: return None
+        Some((-magnitude) as i32)
+    else:
+        if magnitude > 2147483647: return None
+        Some(magnitude as i32)
+
+fn _pdb_v2_decimal_length(value: text) -> i32?:
+    _pdb_decimal_parse_strict(value)
 
 fn _deserialize_row_v2(data: text) -> [DbValue]?:
     var result: [DbValue] = []
     var cursor: i32 = 0
-    while cursor < data.len() as i32:
+    while cursor < data.byte_len() as i32:
         val kind = data.slice(cursor, cursor + 1)
         cursor = cursor + 1
         val length_start = cursor
-        while cursor < data.len() as i32 and data.slice(cursor, cursor + 1) != ":":
+        while cursor < data.byte_len() as i32 and data.slice(cursor, cursor + 1) != ":":
             cursor = cursor + 1
-        if cursor >= data.len() as i32: return nil
+        if cursor >= data.byte_len() as i32: return None
         val length = _pdb_v2_decimal_length(data.slice(length_start, cursor))
-        if length.is_none(): return nil
+        if length.is_none(): return None
         cursor = cursor + 1
         val payload_length = length.unwrap()
-        if payload_length > data.len() as i32 - cursor: return nil
+        if payload_length > data.byte_len() as i32 - cursor: return None
         val payload = data.slice(cursor, cursor + payload_length)
         cursor = cursor + payload_length
         if kind == "I":
-            if not _is_numeric_text(payload): return nil
+            if not _is_numeric_text(payload): return None
             result.push(DbValue.Integer(value: payload.to_int()))
         elif kind == "R":
             match payload.parse_f64():
                 case Some(value): result.push(DbValue.Real(value: value))
-                case nil: return nil
+                case None: return None
         elif kind == "T":
             result.push(DbValue.Text(value: payload))
         elif kind == "N":
-            if payload != "": return nil
+            if payload != "": return None
             result.push(DbValue.Null)
         elif kind == "B":
-            if payload != "0" and payload != "1": return nil
+            if payload != "0" and payload != "1": return None
             result.push(DbValue.Bool(value: payload == "1"))
         elif kind == "X":
-            if not _is_numeric_text(payload): return nil
+            if not _is_numeric_text(payload): return None
             result.push(DbValue.Blob(value: []))
         else:
-            return nil
+            return None
     Some(result)
 
 # V3 accepts only the exact spelling emitted by _serialize_row_v2. This is
@@ -273,30 +298,34 @@ fn _deserialize_row_v2(data: text) -> [DbValue]?:
 # the decoded empty Blob value.
 fn _pdb_v3_row_encoding_is_canonical(data: text) -> bool:
     var cursor: i32 = 0
-    while cursor < data.len() as i32:
+    while cursor < data.byte_len() as i32:
         val kind = data.slice(cursor, cursor + 1)
         cursor = cursor + 1
         val length_start = cursor
-        while cursor < data.len() as i32 and data.slice(cursor, cursor + 1) != ":":
+        while cursor < data.byte_len() as i32 and data.slice(cursor, cursor + 1) != ":":
             cursor = cursor + 1
-        if cursor >= data.len() as i32:
+        if cursor >= data.byte_len() as i32:
             return false
         val length = _pdb_v2_decimal_length(data.slice(length_start, cursor))
         if length.is_none():
             return false
         cursor = cursor + 1
         val payload_length = length.unwrap()
-        if payload_length > data.len() as i32 - cursor:
+        if payload_length > data.byte_len() as i32 - cursor:
             return false
         val payload = data.slice(cursor, cursor + payload_length)
         cursor = cursor + payload_length
         if kind == "I":
-            val parsed = payload.parse_int()
+            # Canonicality via the engine-independent strict parser (the JIT
+            # `.parse_int()` boxing is broken — see _pdb_decimal_parse_strict).
+            val parsed = _pdb_decimal_parse_strict(payload)
             if parsed.is_none() or parsed.unwrap().to_text() != payload:
                 return false
         elif kind == "R":
-            val parsed = payload.parse_f64()
-            if parsed.is_none() or parsed.unwrap().to_text() != payload:
+            # Same engine-independence reason; `to_f64` is total (0.0 on
+            # failure) and JIT-correct, so the round-trip text check rejects
+            # non-canonical payloads exactly like parse_float+to_text did.
+            if payload.to_f64().to_text() != payload:
                 return false
         elif kind == "T":
             pass
@@ -320,18 +349,18 @@ fn _deserialize_row(data: text) -> [DbValue]:
     while i < parts.len() as i32:
         val p = parts[i]
         if p.starts_with("I:"):
-            val ns = p.slice(2, p.len())
+            val ns = p.slice(2, p.byte_len())
             # V1 compatibility deliberately keeps the total conversion.
             val n = ns.to_int()
             result.push(DbValue.Integer(value: n))
         elif p.starts_with("R:"):
-            val fs = p.slice(2, p.len())
+            val fs = p.slice(2, p.byte_len())
             result.push(DbValue.Real(value: fs.to_float()))
         elif p.starts_with("T:"):
-            val txt = p.slice(2, p.len())
+            val txt = p.slice(2, p.byte_len())
             result.push(DbValue.Text(value: txt))
         elif p.starts_with("B:"):
-            val bv = p.slice(2, p.len())
+            val bv = p.slice(2, p.byte_len())
             result.push(DbValue.Bool(value: bv == "1"))
         elif p.starts_with("X:"):
             result.push(DbValue.Blob(value: []))
@@ -703,7 +732,7 @@ fn _like_prefix_str(where_expr: SqlExpr?) -> text:
     # Remove surrounding quotes if present
     var pat = pattern
     if pat.starts_with("'") and pat.ends_with("'"):
-        pat = pat.slice(1, pat.len() - 1)
+        pat = pat.slice(1, pat.byte_len() - 1)
     # Find first % and take everything before it as the prefix
     # Reject if any _ wildcard appears before the %
     var i: i64 = 0
@@ -731,7 +760,7 @@ fn _like_any_prefix(where_expr: SqlExpr?) -> text:
     val pattern = expr.right.value
     var pat = pattern
     if pat.starts_with("'") and pat.ends_with("'"):
-        pat = pat.slice(1, pat.len() - 1)
+        pat = pat.slice(1, pat.byte_len() - 1)
     var i: i64 = 0
     while i < pat.len():
         # byte-consistent scan (see _like_starts_with_prefix): slice(i, i+1) keeps i
@@ -774,7 +803,7 @@ fn _extract_like_pattern(where_expr: SqlExpr?) -> text:
     val pattern = expr.right.value
     var pat = pattern
     if pat.starts_with("'") and pat.ends_with("'"):
-        pat = pat.slice(1, pat.len() - 1)
+        pat = pat.slice(1, pat.byte_len() - 1)
     pat
 
 # Extract a single-sided integer comparison from a WHERE clause.
@@ -1116,7 +1145,7 @@ fn _eval_expr(expr: SqlExpr, cols: [text], vals: [DbValue], params: [DbValue]) -
                 if end_i > st.len():
                     end_i = st.len()
                 return DbValue.Text(value: st.slice(start_i, end_i))
-            return DbValue.Text(value: st.slice(start_i, st.len()))
+            return DbValue.Text(value: st.slice(start_i, st.byte_len()))
         if fname == "replace":
             if expr.args.len() < 3:
                 return DbValue.Null
@@ -1395,7 +1424,7 @@ fn _eval_expr_fast(expr: SqlExpr, cm: Dict<text, i32>, vals: [DbValue], params: 
                 if end_i > st.len():
                     end_i = st.len()
                 return DbValue.Text(value: st.slice(start_i, end_i))
-            return DbValue.Text(value: st.slice(start_i, st.len()))
+            return DbValue.Text(value: st.slice(start_i, st.byte_len()))
         if fname == "replace":
             if expr.args.len() < 3:
                 return DbValue.Null
@@ -1514,6 +1543,14 @@ fn _like_match(pattern: text, value: text) -> bool:
 fn _expr_to_dbvalue(expr: SqlExpr, params: [DbValue]) -> DbValue:
     if expr.kind == SqlExprKind.Literal:
         return _parse_literal(expr.value)
+    if expr.kind == SqlExprKind.UnaryOp and expr.value == "-":
+        # bug=pure_database_total_conversion_as_optional_2026_10_11
+        # A negative literal parses as unary minus over a literal; negate it
+        # instead of falling through to Text("-").
+        match _expr_to_dbvalue(expr.left, params):
+            DbValue.Integer(value): return DbValue.Integer(value: 0 - value)
+            DbValue.Real(value): return DbValue.Real(value: 0.0 - value)
+            _: return DbValue.Null
     if expr.kind == SqlExprKind.Placeholder:
         if _param_idx < params.len():
             val v = params[_param_idx]
@@ -1700,15 +1737,15 @@ fn _parse_drop_table(sql: text) -> [text]:
     val upper = trimmed.to_upper()
     if not upper.starts_with("DROP TABLE"):
         return []
-    var rest = trimmed.slice(10, trimmed.len()).trim()
+    var rest = trimmed.slice(10, trimmed.byte_len()).trim()
     val rest_up = rest.to_upper()
     var if_exists = "false"
     if rest_up.starts_with("IF EXISTS"):
         if_exists = "true"
-        rest = rest.slice(9, rest.len()).trim()
+        rest = rest.slice(9, rest.byte_len()).trim()
     # Strip trailing semicolon
     if rest.ends_with(";"):
-        rest = rest.slice(0, rest.len() - 1).trim()
+        rest = rest.slice(0, rest.byte_len() - 1).trim()
     if rest == "":
         return []
     var out: [text] = []
@@ -1724,24 +1761,24 @@ fn _parse_create_index(sql: text) -> [text]:
     val trimmed = sql.trim()
     var upper = trimmed.to_upper()
     if upper.ends_with(";"):
-        upper = upper.slice(0, upper.len() - 1).trim()
+        upper = upper.slice(0, upper.byte_len() - 1).trim()
     var is_unique = "false"
     var rest = trimmed
     if upper.starts_with("CREATE UNIQUE INDEX"):
         is_unique = "true"
-        rest = trimmed.slice(19, trimmed.len()).trim()
+        rest = trimmed.slice(19, trimmed.byte_len()).trim()
     elif upper.starts_with("CREATE INDEX"):
-        rest = trimmed.slice(12, trimmed.len()).trim()
+        rest = trimmed.slice(12, trimmed.byte_len()).trim()
     else:
         return []
     # Strip trailing semicolon from rest too
     if rest.ends_with(";"):
-        rest = rest.slice(0, rest.len() - 1).trim()
+        rest = rest.slice(0, rest.byte_len() - 1).trim()
     # Optional IF NOT EXISTS guard, e.g. "CREATE INDEX IF NOT EXISTS i ON t (c)"
     var if_not_exists = "false"
     if rest.to_upper().starts_with("IF NOT EXISTS"):
         if_not_exists = "true"
-        rest = rest.slice(13, rest.len()).trim()
+        rest = rest.slice(13, rest.byte_len()).trim()
     # rest = "idx_name ON table (col1, col2)"
     val parts = rest.split(" ")
     if parts.len() < 3:
@@ -1792,13 +1829,13 @@ fn _parse_drop_index(sql: text) -> [text]:
     val upper = trimmed.to_upper()
     if not upper.starts_with("DROP INDEX"):
         return []
-    var rest = trimmed.slice(10, trimmed.len()).trim()
+    var rest = trimmed.slice(10, trimmed.byte_len()).trim()
     if rest.ends_with(";"):
-        rest = rest.slice(0, rest.len() - 1).trim()
+        rest = rest.slice(0, rest.byte_len() - 1).trim()
     var if_exists = "false"
     if rest.to_upper().starts_with("IF EXISTS"):
         if_exists = "true"
-        rest = rest.slice(9, rest.len()).trim()
+        rest = rest.slice(9, rest.byte_len()).trim()
     if rest == "":
         return []
     var out: [text] = []
@@ -1811,7 +1848,7 @@ fn _parse_txn_command(sql: text) -> text:
     var low = trimmed.to_lower()
     # Strip trailing semicolon
     if low.ends_with(";"):
-        low = low.slice(0, low.len() - 1).trim()
+        low = low.slice(0, low.byte_len() - 1).trim()
     if low == "begin" or low == "begin transaction":
         return "BEGIN"
     if low == "commit" or low == "end transaction":
@@ -1825,10 +1862,10 @@ fn _parse_alter_table(sql: text) -> [text]:
     val upper = trimmed.to_upper()
     if not upper.starts_with("ALTER TABLE"):
         return []
-    var rest = trimmed.slice(11, trimmed.len()).trim()
+    var rest = trimmed.slice(11, trimmed.byte_len()).trim()
     # Strip trailing semicolon
     if rest.ends_with(";"):
-        rest = rest.slice(0, rest.len() - 1).trim()
+        rest = rest.slice(0, rest.byte_len() - 1).trim()
     # Extract table name (first token)
     val parts = rest.split(" ")
     if parts.len() < 4:

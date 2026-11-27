@@ -1,0 +1,260 @@
+# CMM diagnostic unification: typed parser errors with stable CMM codes,
+# bounded panic-mode recovery, analyzer code assignment at creation,
+# UTF-16 LSP spans, versioned publishDiagnostics, reviewable code actions and
+# the DiagnosticV1 bridge used by the T32 MCP `cmm_diagnostics_v1` tool.
+# @req REQ-DIAG-004
+# @req REQ-DIAG-007
+use std.spec
+use app.cmm_lsp.cmm_ast.{CmmProgram, CmmStmt}
+use app.cmm_lsp.cmm_parser_source.{parse_cmm_source, parse_cmm_source_with_policy}
+use app.cmm_lsp.cmm_diagnostics.{CmmDiagnostic, CmmDiagnosticKind}
+use app.cmm_lsp.cmm_error_codes.{register_cmm_explanations, cmm_to_diagnostic_v1, cmm_batch_status}
+use app.cmm_lsp.cmm_source_index.{CmmSourceIndex, build_source_index}
+use app.cmm_lsp.cmm_analyzer.{analyze_program}
+use app.cmm_lsp.lsp_document.{DocumentStore}
+use app.cmm_lsp.lsp_handlers.{build_versioned_diagnostics_notification, handle_code_action}
+use app.cmm_lsp.lsp_json.{json_get_raw, json_get_int, json_get_string}
+use compiler.common.error_explanations.{ErrorRegistry, ErrorExplanation}
+use std.common.diagnostics.diagnostic_v1.{render_diagnostic_v1_json}
+
+fn count_of(haystack: text, needle: text) -> i64:
+    var count = 0
+    var i = 0
+    val n = needle.len()
+    while i + n <= haystack.len():
+        if haystack[i:i + n] == needle:
+            count = count + 1
+            i = i + n
+        else:
+            i = i + 1
+    count
+
+fn has_code(codes: [text], code: text) -> bool:
+    for c in codes:
+        if c == code:
+            return true
+    false
+
+fn codes_of(diags: [CmmDiagnostic]) -> [text]:
+    var out: [text] = []
+    for d in diags:
+        out = out.push(d.code)
+    out
+
+fn first_with_code(diags: [CmmDiagnostic], code: text) -> CmmDiagnostic:
+    for d in diags:
+        if d.code == code:
+            return d
+    diags[0]
+
+fn non_blank_kinds(program: CmmProgram) -> [text]:
+    var kinds: [text] = []
+    for statement in program.statements:
+        val kind = match statement:
+            case CmmStmt.Command(_, _, _): "Command"
+            case CmmStmt.PrintStmt(_, _): "PrintStmt"
+            case CmmStmt.Block(_, _): "Block"
+            case CmmStmt.IfElse(_, _, _, _): "IfElse"
+            case CmmStmt.LocalDecl(_, _): "LocalDecl"
+            case CmmStmt.Goto(_, _): "Goto"
+            case CmmStmt.ErrorNode(_, _): "ErrorNode"
+            case CmmStmt.EmptyLine(_): "EmptyLine"
+            case CmmStmt.CommentLine(_, _): "CommentLine"
+            case _: "Other"
+        if kind != "EmptyLine" and kind != "CommentLine":
+            kinds = kinds.push(kind)
+    kinds
+
+describe "CMM parser typed errors and bounded recovery [importance=critical; importance_weight=3]":
+    it "reports LOCAL without names on line 2 with CMM1004 on the keyword span":
+        step("Parse a script whose second line is a bare LOCAL")
+        val program = parse_cmm_source("PRINT 1\nLOCAL\nPRINT 2\n")
+        # @capture(protocol_json): parse_diagnostics for the bare LOCAL line
+        expect(program.parse_diagnostics.len()).to_equal(1)
+        val d = program.parse_diagnostics[0]
+        expect(d.code).to_equal("CMM1004")
+        expect(d.line).to_equal(2)
+        expect(d.column).to_equal(1)
+        expect(d.end_column).to_equal(6)
+        expect(d.expected.len()).to_be_greater_than(0)
+        step("Valid statements before and after the error are preserved")
+        expect(non_blank_kinds(program)).to_equal(["PrintStmt", "ErrorNode", "PrintStmt"])
+
+    it "reports ELSE without IF as CMM1101 and keeps parsing":
+        val program = parse_cmm_source("ELSE\nPRINT 1\n")
+        expect(codes_of(program.parse_diagnostics)).to_equal(["CMM1101"])
+        expect(program.parse_diagnostics[0].end_column).to_equal(5)
+        expect(non_blank_kinds(program)).to_equal(["ErrorNode", "PrintStmt"])
+
+    it "does not turn an unknown command into a syntax error":
+        val program = parse_cmm_source("FooBar.NotACommand 0x10 /Flag\nPRINT 1\n")
+        expect(program.parse_diagnostics.len()).to_equal(0)
+        expect(program.errors.len()).to_equal(0)
+        expect(non_blank_kinds(program)).to_equal(["Command", "PrintStmt"])
+
+    it "reports an unexpected ) at top level as CMM1001 instead of skipping it silently":
+        val program = parse_cmm_source("PRINT 1\n)\nPRINT 2\n")
+        expect(codes_of(program.parse_diagnostics)).to_equal(["CMM1001"])
+        val d = program.parse_diagnostics[0]
+        expect(d.line).to_equal(2)
+        expect(d.column).to_equal(1)
+        expect(d.end_column).to_equal(2)
+        expect(non_blank_kinds(program)).to_equal(["PrintStmt", "ErrorNode", "PrintStmt"])
+
+    it "collects nested malformed statements without consuming the closing )":
+        step("A bad statement inside an IF block must not swallow the block's )")
+        val program = parse_cmm_source("IF 1\n(\n  LOCAL\n  PRINT 2\n)\nPRINT 3\n")
+        expect(codes_of(program.parse_diagnostics)).to_equal(["CMM1004"])
+        expect(program.parse_diagnostics[0].line).to_equal(3)
+        expect(non_blank_kinds(program)).to_equal(["IfElse", "PrintStmt"])
+
+    it "reports an unterminated ( after earlier recoverable errors at the opening paren":
+        val program = parse_cmm_source("ELSE\nIF 1\n(\n  PRINT 2\n")
+        val codes = codes_of(program.parse_diagnostics)
+        expect(codes).to_equal(["CMM1101", "CMM1002"])
+        val unterminated = first_with_code(program.parse_diagnostics, "CMM1002")
+        expect(unterminated.line).to_equal(3)
+        expect(unterminated.column).to_equal(1)
+        expect(unterminated.expected).to_equal([")"])
+
+    it "reports a missing body at EOF as CMM1003":
+        val program = parse_cmm_source("PRINT 1\nIF 1\n")
+        expect(codes_of(program.parse_diagnostics)).to_equal(["CMM1003"])
+        expect(non_blank_kinds(program)).to_equal(["PrintStmt", "ErrorNode"])
+
+    it "terminates on adversarial delimiters and records each stray close":
+        val program = parse_cmm_source(")))\n(((\n)\n((\n")
+        expect(program.parse_diagnostics.len()).to_be_greater_than(0)
+        expect(count_of(codes_of(program.parse_diagnostics).join(","), "CMM1001")).to_equal(3)
+        expect(count_of(codes_of(program.parse_diagnostics).join(","), "CMM1002")).to_be_greater_than(0)
+
+    it "tolerant policy keeps the same codes and reports recovery as errors, not zero":
+        val program = parse_cmm_source_with_policy("IF 1\n(\n  PRINT 2\n", true)
+        expect(codes_of(program.parse_diagnostics)).to_equal(["CMM1002"])
+        expect(program.parse_diagnostics[0].kind == CmmDiagnosticKind.Warning).to_equal(true)
+        expect(non_blank_kinds(program)).to_equal(["IfElse"])
+
+describe "CMM analyzer assigns codes at creation [importance=critical; importance_weight=3]":
+    it "reports GOTO missing_label as CMM1102 on the target token with related label candidates":
+        val program = parse_cmm_source("start:\nGOTO missing_label\nPRINT 1\n")
+        val analysis = analyze_program(program)
+        val d = first_with_code(analysis.diagnostics, "CMM1102")
+        expect(d.code).to_equal("CMM1102")
+        expect(d.line).to_equal(2)
+        expect(d.column).to_equal(6)
+        expect(d.end_column).to_equal(19)
+        expect(d.related.len()).to_equal(1)
+        expect(d.related[0].line).to_equal(1)
+
+    it "merges parser diagnostics into the analysis so three independent findings survive":
+        step("Journey B source: unresolved GOTO on line 2, malformed inner block, valid trailing statement")
+        val source = "start:\nGOTO missing_label\nIF 1\n(\n  LOCAL\n  PRINT 2\n)\nPRINT 3\n"
+        val program = parse_cmm_source(source)
+        val analysis = analyze_program(program)
+        var errors = 0
+        for d in analysis.diagnostics:
+            if d.kind == CmmDiagnosticKind.Error:
+                errors = errors + 1
+        expect(errors).to_equal(2)
+        expect(has_code(codes_of(analysis.diagnostics), "CMM1004")).to_equal(true)
+        expect(has_code(codes_of(analysis.diagnostics), "CMM1102")).to_equal(true)
+        expect(cmm_batch_status(program)).to_equal("partial_recovery")
+        expect(cmm_batch_status(parse_cmm_source("PRINT 1\n"))).to_equal("complete")
+
+    it "assigns a CMM12xx code to every analyzer warning":
+        val program = parse_cmm_source("LOCAL &unused\nEND\nPRINT 1\n")
+        val analysis = analyze_program(program)
+        expect(analysis.diagnostics.len()).to_be_greater_than(0)
+        for d in analysis.diagnostics:
+            expect(d.code.starts_with("CMM1")).to_equal(true)
+            expect(d.code.len()).to_equal(7)
+
+describe "CMM codes resolve in the shared ErrorRegistry [importance=critical; importance_weight=3]":
+    it "registers CMM1000-1004, 1101-1103, 1200, 1999 without touching the E namespace":
+        var reg = ErrorRegistry.create()
+        val before = reg.get("E0001")
+        expect(before.?).to_equal(true)
+        register_cmm_explanations(reg)
+        for code in ["CMM1000", "CMM1001", "CMM1002", "CMM1003", "CMM1004", "CMM1101", "CMM1102", "CMM1103", "CMM1200", "CMM1999"]:
+            val exp = reg.get(code)
+            expect(exp.?).to_equal(true)
+            expect((exp ?? ErrorExplanation.create("", "")).code).to_equal(code)
+        val after = reg.get("E0001")
+        expect((after ?? ErrorExplanation.create("", "")).title).to_equal((before ?? ErrorExplanation.create("", "")).title)
+
+describe "CMM source index: UTF-16 and byte positions [importance=critical; importance_weight=3]":
+    it "maps astral, combining, CRLF and EOF columns to UTF-16 characters":
+        val index = build_source_index("a\u{1F600}b e\u{0301}x\r\nlast")
+        step("Astral character counts as two UTF-16 units")
+        expect(index.utf16_character(1, 1)).to_equal(0)
+        expect(index.utf16_character(1, 3)).to_equal(3)
+        step("Combining mark is one unit")
+        expect(index.utf16_character(1, 7)).to_equal(7)
+        step("CRLF ends the line before the CR")
+        expect(index.line_count()).to_equal(2)
+        expect(index.utf16_character(2, 1)).to_equal(0)
+        step("EOF column clamps to the end of the last line")
+        expect(index.utf16_character(2, 99)).to_equal(4)
+        step("Byte offsets follow UTF-8 lengths")
+        expect(index.byte_offset(1, 3)).to_equal(5)
+        expect(index.byte_offset(2, 1)).to_equal(13)
+
+describe "CMM LSP publishes versioned UTF-16 diagnostics [importance=critical; importance_weight=3]":
+    it "publishes version, code, UTF-16 range and related information after open":
+        var store = DocumentStore(documents: [])
+        store.open_document("file:///t.cmm", "start:\n\u{1F600} GOTO missing_label\nPRINT 1\n", 7)
+        val notif = build_versioned_diagnostics_notification("file:///t.cmm", store, 7) ?? ""
+        # @capture(protocol_json): publishDiagnostics notification for version 7
+        expect(notif.contains("\"method\":\"textDocument/publishDiagnostics\"")).to_equal(true)
+        val params = json_get_raw(notif, "params") ?? ""
+        expect(json_get_int(params, "version") ?? -1).to_equal(7)
+        expect(notif.contains("\"code\":\"CMM1102\"")).to_equal(true)
+        step("GOTO target starts after the astral char (2 units) and a space: character 8")
+        expect(notif.contains("\"start\":{\"line\":1,\"character\":8}")).to_equal(true)
+        expect(notif.contains("\"end\":{\"line\":1,\"character\":21}")).to_equal(true)
+        expect(notif.contains("\"relatedInformation\"")).to_equal(true)
+
+    it "drops a stale version and never publishes a cleared list for it":
+        var store = DocumentStore(documents: [])
+        store.open_document("file:///t.cmm", "ELSE\n", 1)
+        store.update_document("file:///t.cmm", "PRINT 1\n", 2)
+        val stale = build_versioned_diagnostics_notification("file:///t.cmm", store, 1)
+        expect(stale.?).to_equal(false)
+        val current = build_versioned_diagnostics_notification("file:///t.cmm", store, 2) ?? ""
+        expect(current.contains("\"diagnostics\":[]")).to_equal(true)
+        expect(json_get_int(json_get_raw(current, "params") ?? "", "version") ?? -1).to_equal(2)
+
+    it "offers a reviewable Likely code action for an unexpected ) that is never auto-applied":
+        var store = DocumentStore(documents: [])
+        store.open_document("file:///t.cmm", "PRINT 1\n)\nPRINT 2\n", 3)
+        # `}}` inside a Simple string literal is the escape for one `}`, so the
+        # two closing braces of the range object are written as `}}}}`.
+        val params = "{\"textDocument\":{\"uri\":\"file:///t.cmm\"},\"range\":{\"start\":{\"line\":1,\"character\":0},\"end\":{\"line\":1,\"character\":1}}}},\"context\":{\"diagnostics\":[]}}}}"
+        val actions = handle_code_action(params, store)
+        # @capture(protocol_json): codeAction response for the stray ) diagnostic
+        expect(count_of(actions, "\"kind\":\"quickfix\"")).to_equal(1)
+        expect(actions.contains("\"isPreferred\":false")).to_equal(true)
+        expect(actions.contains("\"confidence\":\"likely\"")).to_equal(true)
+        expect(actions.contains("\"autoApply\":false")).to_equal(true)
+        expect(actions.contains("\"version\":3")).to_equal(true)
+        expect(actions.contains("\"newText\":\"\"")).to_equal(true)
+        expect(actions.contains("\"start\":{\"line\":1,\"character\":0}")).to_equal(true)
+
+describe "CMM to DiagnosticV1 bridge [importance=critical; importance_weight=3]":
+    it "projects code, severity, span and related labels into the canonical record":
+        val source = "start:\nGOTO missing_label\n"
+        val program = parse_cmm_source(source)
+        val analysis = analyze_program(program)
+        val d = first_with_code(analysis.diagnostics, "CMM1102")
+        val v1 = cmm_to_diagnostic_v1(d, "t.cmm", build_source_index(source))
+        expect(v1.code).to_equal("CMM1102")
+        val json = render_diagnostic_v1_json(v1)
+        # @capture(protocol_json): DiagnosticV1 JSON for the unresolved GOTO
+        expect(json.contains("CMM1102")).to_equal(true)
+        expect(json.contains("missing_label")).to_equal(true)
+        expect(v1.labels.len()).to_equal(2)
+        expect(v1.labels[0].primary).to_equal(true)
+        expect(v1.labels[0].span.line).to_equal(2)
+        expect(v1.labels[0].span.col).to_equal(6)
+        expect(v1.labels[0].span.start).to_equal(12)
+        expect(v1.labels[0].span.end).to_equal(25)

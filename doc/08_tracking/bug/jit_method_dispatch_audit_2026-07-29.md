@@ -1,8 +1,17 @@
 # Bug: Cranelift JIT builtin-method dispatch audit — what's left after the index_of/first/last/pop/... fixes
-## Open 2026-09-16 — needs owner triage
+## OPEN — triaged 2026-11-25: Rust-seed-only audit; blocked on a cargo seed rebuild
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
+
+**Triage 2026-11-25:** the audit target is entirely `src/compiler_rust/**`
+(Cranelift codegen dispatch + interpreter method sets) and its probe method
+requires a freshly cargo-built Rust seed — cargo builds are out of scope for
+the pure-Simple P3 lanes, so the remaining dispatch-gap/wrong-value tables
+can be neither re-probed nor fixed from those lanes. Classification: route to
+a Rust-seed lane (cheap dispatch arms first, per the recommended fix order
+below); the landed 2026-07-29 batches (3fbf9c1/7c5792c/725337d/ee4800f)
+already cover part of tier 1. Left OPEN, no code change.
 
 **Date:** 2026-07-29
 **Component:** `src/compiler_rust/compiler/src/codegen/instr/{calls,closures_structs,methods}.rs`,

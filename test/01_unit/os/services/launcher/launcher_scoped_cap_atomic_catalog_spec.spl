@@ -1,0 +1,111 @@
+# Purpose and audience: reproducer specification for bug #119 (SCI typed scoped-capability projection, launcher_bind_process_app_id_v1, and atomic catalog replacement).
+# @req REQ-SSPEC-OS
+
+"""Reproduce missing typed path-scoped capability projection and atomic catalog/identity APIs in SCI launcher."""
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.nogc_sync_mut.composition.{parse_composition_source_v1, encode_composition_image_v1, decode_composition_image_v1}
+use os.kernel.types.capability_types.{CAP_RIGHT_READ, CAP_RIGHT_WRITE}
+use os.kernel.loader.artifact_manifest.{
+    ManifestScopedCapabilityV1,
+    manifest_parse_scoped_capability_v1,
+    manifest_scoped_capability_admitted_v1
+}
+use os.services.launcher.launcher.{launcher_init}
+use os.services.launcher.launcher_composition.{launcher_load_composition_bytes_v1, composition_app_ids_v1}
+use os.services.launcher.launcher_catalog_projection.{
+    launcher_composition_projection_active_v1,
+    launcher_composition_app_slot_v1
+}
+use os.services.launcher.launcher_app_launch_wire.{encode_launcher_app_launch_v1}
+use os.services.launcher.launcher_app_launch_consumer.{
+    SCI_APP_LAUNCH_OK,
+    SCI_APP_LAUNCH_SCOPED_CAPABILITY_REQUIRED,
+    launcher_validate_app_launch_arena_v1
+}
+use os.services.launcher.launcher_registry.{
+    app_count,
+    _app_index_by_name,
+    launcher_record_process,
+    launcher_bind_process_app_id_v1,
+    launcher_process_app_id_v1,
+    launcher_configure_scoped_capability_ceiling_v1,
+    launcher_app_scoped_capabilities_v1,
+    launcher_app_capability_mask_v1
+}
+
+fn _compile_sci_image(source: text):
+    match parse_composition_source_v1(source):
+        case Err(_): decode_composition_image_v1([]).image
+        case Ok(parsed): decode_composition_image_v1(encode_composition_image_v1(parsed)).image
+
+describe "SCI launcher typed scoped-capability and atomic catalog reproducer (#119)":
+    it "projects typed path-scoped capabilities from SCI through SimpleArtifactManifest and enforces prefix boundary":
+        step("verify typed capability parsing/boundary containment and project admitted SCI capabilities")
+        val p_home = manifest_parse_scoped_capability_v1("FileRead(/home)")
+        expect(p_home.ok).to_equal(true)
+        val p_notes = manifest_parse_scoped_capability_v1("FileRead(/home/notes)")
+        val p_escape = manifest_parse_scoped_capability_v1("FileRead(/homework/notes)")
+        expect(p_notes.ok).to_equal(true)
+        expect(p_escape.ok).to_equal(true)
+        expect(manifest_scoped_capability_admitted_v1(p_notes.capability, [p_home.capability])).to_equal(true)
+        expect(manifest_scoped_capability_admitted_v1(p_escape.capability, [p_home.capability])).to_equal(false)
+
+        launcher_init()
+        expect(launcher_configure_scoped_capability_ceiling_v1("scoped-notes", ["FileRead(/home)", "FileWrite(/home)"])).to_equal(true)
+        val good_img = _compile_sci_image("schema: simple.composition/1\napps:\n  - id: scoped-notes\n    name: Scoped Notes\n    artifact: /sys/apps/scoped_notes.smf\n    capabilities: [FileRead(/home)]\n")
+        val res = launcher_load_composition_bytes_v1(good_img.bytes)
+        expect(res.ok).to_equal(true)
+        expect(res.code).to_equal("SCI_LAUNCHER_OK")
+        expect(launcher_composition_projection_active_v1()).to_equal(true)
+        expect(launcher_app_scoped_capabilities_v1("scoped-notes")).to_contain("FileRead(/home)")
+        expect(launcher_app_capability_mask_v1("scoped-notes")).to_equal(CAP_RIGHT_READ)
+
+        val before_reject = app_count
+        val over_img = _compile_sci_image("schema: simple.composition/1\napps:\n  - id: scoped-notes\n    name: Scoped Notes\n    artifact: /sys/apps/scoped_notes.smf\n    capabilities: [FileWrite(/etc)]\n")
+        val reject = launcher_load_composition_bytes_v1(over_img.bytes)
+        expect(reject.ok).to_equal(false)
+        expect(reject.code).to_equal("SCI_LAUNCHER_CAPABILITY_EXCEEDS_CEILING")
+        expect(app_count).to_equal(before_reject)
+        expect(launcher_app_capability_mask_v1("scoped-notes")).to_equal(CAP_RIGHT_READ)
+
+    it "wires atomic catalog replacement and launcher_bind_process_app_id_v1":
+        step("load SCI catalog, bind PID to app_id, rename atomically, and verify slot and identity preservation")
+        launcher_init()
+        val first = _compile_sci_image("schema: simple.composition/1\napps:\n  - id: notes-v1\n    name: Notes One\n    artifact: /sys/apps/notes_one.smf\n")
+        val first_res = launcher_load_composition_bytes_v1(first.bytes)
+        expect(first_res.ok).to_equal(true)
+        expect(launcher_composition_projection_active_v1()).to_equal(true)
+        val slot1 = launcher_composition_app_slot_v1("notes-v1")
+        expect(slot1 >= 0).to_equal(true)
+        expect(launcher_record_process(5101u64, slot1, "running", 0, 0u64, true)).to_equal(true)
+        expect(launcher_bind_process_app_id_v1(5101u64, "notes-v1")).to_equal(true)
+        expect(launcher_process_app_id_v1(5101u64)).to_equal("notes-v1")
+        expect(launcher_bind_process_app_id_v1(0u64, "notes-v1")).to_equal(false)
+
+        val second = _compile_sci_image("schema: simple.composition/1\napps:\n  - id: notes-v1\n    name: Notes Two\n    artifact: /sys/apps/notes_two.smf\n")
+        val second_res = launcher_load_composition_bytes_v1(second.bytes)
+        expect(second_res.ok).to_equal(true)
+        expect(_app_index_by_name("Notes One")).to_equal(-1)
+        expect(launcher_composition_app_slot_v1("notes-v1") >= 0).to_equal(true)
+        expect(composition_app_ids_v1[0]).to_equal("notes-v1")
+
+    it "admits projected launch capability words and rejects escalation beyond projected ceiling":
+        step("validate launch arena words against projected capability mask and reject ungranted bits")
+        launcher_init()
+        expect(launcher_configure_scoped_capability_ceiling_v1("scoped-launch", ["FileRead(/home)", "FileWrite(/home)"])).to_equal(true)
+        val img = _compile_sci_image("schema: simple.composition/1\napps:\n  - id: scoped-launch\n    name: Scoped Launch\n    artifact: /sys/apps/scoped_launch.smf\n    capabilities: [FileRead(/home)]\n")
+        expect(launcher_load_composition_bytes_v1(img.bytes).ok).to_equal(true)
+
+        val ok_wire = encode_launcher_app_launch_v1("scoped-launch", "/sys/apps/scoped_launch.smf", "launch", [], [CAP_RIGHT_READ.to_u64()])
+        val ok_plan = launcher_validate_app_launch_arena_v1(ok_wire.bytes)
+        expect(ok_plan.ok).to_equal(true)
+        expect(ok_plan.status).to_equal(SCI_APP_LAUNCH_OK)
+
+        val bad_mask = (CAP_RIGHT_READ | CAP_RIGHT_WRITE).to_u64()
+        val bad_wire = encode_launcher_app_launch_v1("scoped-launch", "/sys/apps/scoped_launch.smf", "launch", [], [bad_mask])
+        val bad_plan = launcher_validate_app_launch_arena_v1(bad_wire.bytes)
+        expect(bad_plan.ok).to_equal(false)
+        expect(bad_plan.status).to_equal(SCI_APP_LAUNCH_SCOPED_CAPABILITY_REQUIRED)
+        expect(bad_plan.code).to_equal("SCI_APP_LAUNCH_CAPABILITY_EXCEEDS_CEILING")

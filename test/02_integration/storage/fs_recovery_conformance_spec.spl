@@ -84,12 +84,12 @@ impl RecoveryDevice:
         RecoveryDevice(bank_id: _new_bank(flush_allowed))
 
 impl BlockDevice for RecoveryDevice:
-    fn read_sector(lba: u64) -> Result<[u8], text>:
+    me fn read_sector(lba: u64) -> Result<[u8], text>:
         if lba >= 128u64:
             return Err("recovery device read out of range")
         Ok(_bank_sector(self.bank_id, lba as i32))
 
-    fn write_sector(lba: u64, data: [u8]) -> Result<bool, text>:
+    me fn write_sector(lba: u64, data: [u8]) -> Result<bool, text>:
         if lba >= 128u64:
             return Err("recovery device write out of range")
         _bank_write(self.bank_id, lba as i32, data)
@@ -98,7 +98,7 @@ impl BlockDevice for RecoveryDevice:
     fn sector_size() -> u32:
         512u32
 
-    fn flush() -> Result<bool, text>:
+    me fn flush() -> Result<bool, text>:
         Ok(_bank_flush(self.bank_id))
 
 fn _put_u16(buf: [u8], off: i32, value: u16) -> [u8]:
@@ -144,6 +144,18 @@ describe "portable filesystem recovery and durability matrix":
         val handle = core.alloc_file_handle(2u32, 0, false).unwrap()
         core.sync_durable(handle).unwrap()
         expect(_bank_flush_count(device.bank_id)).to_equal(2)
+
+    it "FAT32 sync flushes dirty clusters without requiring durable flush support":
+        val device = RecoveryDevice.new(false)
+        _seed_fat32(device.bank_id)
+        var core = Fat32Core.new(device)
+        core.mount().unwrap()
+        expect(core.durable_flush_supported).to_be(false)
+        core.write_cluster(3, _zeros(512)).unwrap()
+        expect(core.dirty_cluster_count_for_test()).to_equal(1)
+        core.sync().unwrap()
+        expect(core.dirty_cluster_count_for_test()).to_equal(0)
+        expect(_bank_flush_count(device.bank_id)).to_equal(0)
 
     it "FAT32 rejects stale recycled handles and unavailable durability":
         val durable_device = RecoveryDevice.new(true)
@@ -209,10 +221,10 @@ describe "portable filesystem recovery and durability matrix":
     it "NVFS-POSIX preserves portable names and fails closed on sync":
         var driver = NvfsPosixDriver.new("nvfs-posix")
         val handle = driver.open_path(Path(raw: "portable/name"), OpenFlags.create_write()).unwrap()
-        expect(driver.write(handle, 0, [0x61u8, 0x62u8])).to_equal(2)
+        expect(driver.write(handle, 0, [0x61u8, 0x62u8]).unwrap()).to_equal(2)
         expect(driver.fsync(handle).unwrap_err()).to_equal(FsError.Unsupported)
         driver.close_handle(handle).unwrap()
         val reopened = driver.open_path(Path(raw: "portable/name"), OpenFlags.read_only()).unwrap()
         var read_buf = _zeros(2)
-        expect(driver.read(reopened, 0, read_buf)).to_equal(2)
+        expect(driver.read(reopened, 0, read_buf).unwrap()).to_equal(2)
         expect(driver.open_path(Path(raw: "portable/../escape"), OpenFlags.read_only()).unwrap_err()).to_equal(FsError.InvalidArg)

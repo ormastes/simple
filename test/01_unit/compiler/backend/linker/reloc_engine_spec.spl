@@ -20,7 +20,7 @@ use compiler.backend.linker.reloc_engine.{
 
     RelocArch, RelocTarget, RelocResult,
     reloc_apply, reloc_apply_x86_64, reloc_apply_arm32, reloc_apply_aarch64, reloc_apply_riscv,
-    reloc_patch_bytes, reloc_patch_width, reloc_patch_range_valid, reloc_arch_from_machine,
+    reloc_patch_bytes, reloc_patch_width, reloc_patch_range_valid, reloc_arch_from_machine, reloc_arch_from_machine_checked,
     patch_u32_le, patch_u64_le, read_u16_le, read_u32_le,
     R_X86_64_NONE, R_X86_64_64, R_X86_64_PC32, R_X86_64_PC64,
     R_X86_64_16, R_X86_64_PC16, R_X86_64_8, R_X86_64_PC8, R_X86_64_PLT32,
@@ -35,7 +35,7 @@ use compiler.backend.linker.reloc_engine.{
     R_ARM_TARGET1, R_ARM_V4BX, R_ARM_PREL31,
     R_ARM_MOVW_ABS_NC, R_ARM_MOVT_ABS, R_ARM_MOVW_PREL_NC, R_ARM_MOVT_PREL,
     R_ARM_THM_MOVW_ABS_NC, R_ARM_THM_MOVT_ABS, R_ARM_THM_MOVW_PREL_NC, R_ARM_THM_MOVT_PREL, R_ARM_THM_PC12,
-    R_ARM_THM_JUMP11, R_ARM_THM_JUMP8,
+    R_ARM_THM_JUMP11, R_ARM_THM_JUMP8, R_ARM_THM_JUMP19,
     R_AARCH64_NONE, R_AARCH64_ABS64, R_AARCH64_ABS32, R_AARCH64_ABS16,
     R_AARCH64_PREL16, R_AARCH64_PREL32, R_AARCH64_PLT32,
     R_AARCH64_TSTBR14, R_AARCH64_CONDBR19, R_AARCH64_CALL26, R_AARCH64_JUMP26,
@@ -170,6 +170,24 @@ describe "reloc_engine - reloc_arch_from_machine":
         val arch = reloc_arch_from_machine(243)
         expect(arch == RelocArch.Riscv64).to_equal(true)
 
+    it "routes i686 (EM_386) to I386 instead of x86_64 formulas":
+        # @req: REQ-SSPEC-LOCAL-001
+        step("Verify: machine 3 (EM_386) maps to I386, not X86_64")
+        expect(reloc_arch_from_machine_checked(3).unwrap() == RelocArch.I386).to_equal(true)
+
+    it "rejects EM_MIPS fail-closed":
+        step("Verify: machine 8 (EM_MIPS) is refused, not routed to X86_64")
+        expect(reloc_arch_from_machine_checked(8).is_err()).to_equal(true)
+
+    it "rejects an unknown machine fail-closed":
+        step("Verify: machine 999 is refused")
+        expect(reloc_arch_from_machine_checked(999).is_err()).to_equal(true)
+
+    it "checked lookup still accepts the supported machines":
+        step("Verify: machine 62 and 243 resolve through the checked lookup")
+        expect(reloc_arch_from_machine_checked(62).is_ok()).to_equal(true)
+        expect(reloc_arch_from_machine_checked(243).is_ok()).to_equal(true)
+
 # ============================================================================
 # ARM32 relocations
 # ============================================================================
@@ -251,6 +269,40 @@ describe "reloc_engine - ARM32 relocations":
             unconditional, 0, R_ARM_THM_JUMP11, 0x1801, 0, 0x1000).success).to_equal(false)
         expect(reloc_apply_arm32(
             conditional, 0, R_ARM_THM_JUMP8, 0x1101, 0, 0x1000).success).to_equal(false)
+
+    it "encodes Thumb-2 conditional B.W (R_ARM_THM_JUMP19) forward and backward":
+        # repro: armv7 glibc libc.a clone.o "unsupported ARM REL implicit-addend relocation type 51"
+        val beq: [i64] = [0x00, 0xf0, 0x00, 0x80]
+        expect(reloc_patch_bytes(RelocArch.Arm32, beq, 0, R_ARM_THM_JUMP19, 0x1101, -4, 0x1000)).to_equal([0x00, 0xf0, 0x7e, 0x80])
+        expect(reloc_patch_bytes(RelocArch.Arm32, beq, 0, R_ARM_THM_JUMP19, 0x0f01, -4, 0x1000)).to_equal([0x3f, 0xf4, 0x7e, 0xaf])
+        expect(reloc_apply_arm32(beq, 0, R_ARM_THM_JUMP19, 0x201001, 0, 0x1000).success).to_equal(false)
+
+    it "rejects Thumb-2 conditional B.W (R_ARM_THM_JUMP19) to an ARM-mode (even) target":
+        # follow-up to PR #10225 review: lld errors, it cannot interwork a conditional branch
+        val beq: [u8] = [0x00, 0xf0, 0x00, 0x80]
+        expect(reloc_apply_arm32(beq, 0, R_ARM_THM_JUMP19, 0x1100, -4, 0x1000).success).to_equal(false)
+
+    it "interworks R_ARM_CALL to a Thumb function as BLX with the H bit":
+        # repro: armv7 hello_libc.o (ARM) BL strlen (Thumb glibc): "branch target is not 4-byte aligned"
+        val bl: [i64] = [0x00, 0x00, 0x00, 0xeb]
+        expect(reloc_patch_bytes(RelocArch.Arm32, bl, 0, R_ARM_CALL, 0x2001, -8, 0x1000)).to_equal([0xfe, 0x03, 0x00, 0xfa])
+        expect(reloc_patch_bytes(RelocArch.Arm32, bl, 0, R_ARM_CALL, 0x2003, -8, 0x1000)).to_equal([0xfe, 0x03, 0x00, 0xfb])
+        expect(reloc_patch_bytes(RelocArch.Arm32, bl, 0, R_ARM_CALL, 0x2000, -8, 0x1000)).to_equal([0xfe, 0x03, 0x00, 0xeb])
+        # follow-up to PR #10183 review item 3: an existing BLX to an ARM-mode target becomes BL
+        val blx: [i64] = [0x00, 0x00, 0x00, 0xfb]
+        expect(reloc_patch_bytes(RelocArch.Arm32, blx, 0, R_ARM_CALL, 0x2000, -8, 0x1000)).to_equal([0xfe, 0x03, 0x00, 0xeb])
+
+    it "interworks R_ARM_THM_CALL to an ARM function as BLX from Align(P,4)":
+        # repro: armv7 static glibc _dl_aux_init (Thumb) BL memset (ARM) ran memset in Thumb state
+        val bl: [i64] = [0x00, 0xf0, 0x00, 0xf8]
+        expect(reloc_patch_bytes(RelocArch.Arm32, bl, 0, R_ARM_THM_CALL, 0x2000, -4, 0x1002)).to_equal([0x00, 0xf0, 0xfe, 0xef])
+        # an existing BLX to a Thumb target becomes BL
+        val blx: [i64] = [0x00, 0xf0, 0x00, 0xe8]
+        expect(reloc_patch_bytes(RelocArch.Arm32, blx, 0, R_ARM_THM_CALL, 0x2001, -4, 0x1002)).to_equal([0x00, 0xf0, 0xfd, 0xff])
+        # BLX is decided on S + A (ld.lld), not S alone: odd S + A stays BL
+        expect(reloc_patch_bytes(RelocArch.Arm32, bl, 0, R_ARM_THM_CALL, 0x2000, -3, 0x1000)).to_equal([0x00, 0xf0, 0xfe, 0xff])
+        # a backward Thumb->Thumb BL stays BL (negative displacement is not the BLX marker)
+        expect(reloc_patch_bytes(RelocArch.Arm32, bl, 0, R_ARM_THM_CALL, 0x1001, -4, 0x2000)).to_equal([0xfe, 0xf7, 0xfe, 0xff])
 
     it "encodes an aligned Thumb literal or ADR PC8 displacement":
         val ldr = reloc_patch_bytes(

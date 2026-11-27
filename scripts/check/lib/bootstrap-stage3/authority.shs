@@ -198,6 +198,20 @@ bootstrap_stage3_hash_stdin() {
     fi
 }
 
+# Identity calculation only. Callers first verify planner and admitted Stage 3
+# provenance; the continuation re-verifies both and checks this exact binding.
+bootstrap_stage3_stage4_binding_sha256() {
+    [ "$#" -eq 4 ] || return 1
+    bootstrap_stage4_binding_planner=$(bootstrap_stage3_hash_file "$1") || return 1
+    bootstrap_stage4_binding_candidate=$(bootstrap_stage3_hash_file "$2") || return 1
+    bootstrap_stage4_binding_source=$(bootstrap_stage3_manifest_value source_fingerprint "$3") || return 1
+    printf '%s\n' \
+        "planner_sha256=$bootstrap_stage4_binding_planner" \
+        "candidate_sha256=$bootstrap_stage4_binding_candidate" \
+        "source_fingerprint=$bootstrap_stage4_binding_source" \
+        "backend=$4" | bootstrap_stage3_hash_stdin
+}
+
 bootstrap_stage3_hash_stream() {
     if command -v sha256sum >/dev/null 2>&1; then
         sha256sum | awk '{print $1}'
@@ -243,6 +257,146 @@ bootstrap_stage3_vector_frame() {
     done
 }
 
+# Inherited-descriptor protocol (portable Stage-3 hand-off, 2026-11-04).
+#
+# The Linux protocol hands a child `/proc/<owner>/fd/N` and the child re-opens
+# the OWNER's descriptor through procfs. Hosts without procfs cannot address
+# another process's descriptor at all, so the portable spelling is `fd:N`: the
+# parent opens the input, leaves it without close-on-exec, and the validating
+# child INHERITS descriptor N. Identity and content come from fstat(2)/pread(2)
+# on the inherited descriptor itself -- never from a pathname, never from
+# /dev/fd/N (Darwin fdesc reports its own st_dev; FreeBSD needs fdescfs) -- via
+# the pinned python3 the portable lane already requires. pread at explicit
+# offsets makes the hash independent of the offset shared with the parent.
+# Exit convention for every helper: 0 = match, 1 = mismatch, 2 = cannot
+# determine (unknown OS, missing tool, closed fd). 2 is never a pass.
+bootstrap_stage3_inherited_fd_os_supported() {
+    case "$(uname -s 2>/dev/null)" in
+        Linux|Darwin|FreeBSD|NetBSD|OpenBSD|DragonFly) return 0 ;;
+    esac
+    return 1
+}
+
+bootstrap_stage3_inherited_fd_number() {
+    case "$1" in
+        fd:[0-9]*) bootstrap_stage3_ifd_n=${1#fd:} ;;
+        *) return 1 ;;
+    esac
+    case "$bootstrap_stage3_ifd_n" in ''|*[!0-9]*) return 1 ;; esac
+    printf '%s\n' "$bootstrap_stage3_ifd_n"
+}
+
+# $1=fd $2=dev $3=ino $4=mode (decimal st_mode, as the map records it)
+# $5=sha256 of a regular file, or identity-only for a directory. A regular
+# file whose size/mtime/ctime moved while it was being hashed is a mismatch.
+bootstrap_stage3_inherited_fd_verify() {
+    [ "$#" = 5 ] || return 2
+    case "$1" in ''|*[!0-9]*) return 2 ;; esac
+    bootstrap_stage3_inherited_fd_os_supported || return 2
+    "${bootstrap_stage3_inherited_fd_tool:-${bootstrap_stage3_portable_python:-python3}}" \
+        -I -c 'import hashlib, os, stat, sys
+fd = int(sys.argv[1])
+try:
+    st = os.fstat(fd)
+except (OSError, ValueError):
+    sys.exit(2)
+if (str(st.st_dev), str(st.st_ino), str(st.st_mode)) != tuple(sys.argv[2:5]):
+    sys.exit(1)
+want = sys.argv[5]
+if stat.S_ISDIR(st.st_mode):
+    sys.exit(0 if want == "identity-only" else 1)
+if not stat.S_ISREG(st.st_mode):
+    sys.exit(1)
+digest = hashlib.sha256()
+offset = 0
+try:
+    while True:
+        block = os.pread(fd, 1 << 20, offset)
+        if not block:
+            break
+        digest.update(block)
+        offset += len(block)
+    after = os.fstat(fd)
+except OSError:
+    sys.exit(2)
+if offset != st.st_size or (after.st_size, after.st_mtime_ns, after.st_ctime_ns) != \
+        (st.st_size, st.st_mtime_ns, st.st_ctime_ns):
+    sys.exit(1)
+sys.exit(0 if digest.hexdigest() == want else 1)' "$@" 2>/dev/null
+    bootstrap_stage3_ifd_status=$?
+    case "$bootstrap_stage3_ifd_status" in 0|1) return "$bootstrap_stage3_ifd_status" ;; esac
+    return 2
+}
+
+# Copy the full content of inherited regular-file descriptor $1 to the
+# already-created private file $2 (pread from offset 0).
+bootstrap_stage3_inherited_fd_copy() {
+    [ "$#" = 2 ] || return 2
+    case "$1" in ''|*[!0-9]*) return 2 ;; esac
+    bootstrap_stage3_inherited_fd_os_supported || return 2
+    "${bootstrap_stage3_inherited_fd_tool:-${bootstrap_stage3_portable_python:-python3}}" \
+        -I -c 'import os, stat, sys
+fd = int(sys.argv[1])
+try:
+    st = os.fstat(fd)
+    if not stat.S_ISREG(st.st_mode):
+        sys.exit(1)
+    offset = 0
+    with open(sys.argv[2], "wb") as out:
+        while True:
+            block = os.pread(fd, 1 << 20, offset)
+            if not block:
+                break
+            out.write(block)
+            offset += len(block)
+except (OSError, ValueError):
+    sys.exit(2)
+sys.exit(0 if offset == st.st_size else 1)' "$1" "$2" 2>/dev/null
+    bootstrap_stage3_ifd_status=$?
+    case "$bootstrap_stage3_ifd_status" in 0|1) return "$bootstrap_stage3_ifd_status" ;; esac
+    return 2
+}
+
+# Launch stamp of process $1. Linux: /proc/<pid>/stat field 20 (start time in
+# clock ticks) -- byte-identical to the historical descriptor_owner_start_ticks.
+# Darwin/BSD: process start time in epoch seconds from `ps -o lstart=`.
+# 0 = printed, 1 = no such process, 2 = cannot determine.
+bootstrap_stage3_process_start_stamp() {
+    [ "$#" = 1 ] || return 2
+    case "$1" in ''|0*|*[!0-9]*) return 2 ;; esac
+    if [ -r /proc/self/stat ]; then
+        [ -r "/proc/$1/stat" ] || return 1
+        bootstrap_stage3_pss=$(sed 's/^.*) //' "/proc/$1/stat" | awk '{print $20}') || return 2
+    else
+        case "$(uname -s 2>/dev/null)" in
+            Darwin|FreeBSD|NetBSD|OpenBSD|DragonFly) ;;
+            *) return 2 ;;
+        esac
+        kill -0 "$1" 2>/dev/null || return 1
+        bootstrap_stage3_pss=$(LC_ALL=C "${bootstrap_stage3_process_ps_tool:-ps}" -o lstart= -p "$1" 2>/dev/null) || return 1
+        [ -n "$bootstrap_stage3_pss" ] || return 1
+        bootstrap_stage3_pss=$(LC_ALL=C "${bootstrap_stage3_inherited_fd_tool:-${bootstrap_stage3_portable_python:-python3}}" \
+            -I -c 'import calendar, sys, time
+print(calendar.timegm(time.strptime(" ".join(sys.argv[1].split()), "%a %b %d %H:%M:%S %Y")))' \
+            "$bootstrap_stage3_pss" 2>/dev/null) || return 2
+    fi
+    case "$bootstrap_stage3_pss" in ''|*[!0-9]*) return 2 ;; esac
+    printf '%s\n' "$bootstrap_stage3_pss"
+}
+
+# Is descriptor owner $1 alive AND the same process whose launch stamp $2 was
+# recorded? 0 = yes; 1 = dead, or the pid was reused by a later process;
+# 2 = cannot determine. Non-Linux stamps have one-second resolution: a reuse of
+# the same pid within the owner's own start second is the residual window
+# (documented in the bug record); the inherited descriptor itself pins content.
+bootstrap_stage3_owner_matches() {
+    [ "$#" = 2 ] || return 2
+    case "$2" in ''|*[!0-9]*) return 2 ;; esac
+    bootstrap_stage3_om_live=$(bootstrap_stage3_process_start_stamp "$1")
+    case $? in 0) ;; 1) return 1 ;; *) return 2 ;; esac
+    [ "$bootstrap_stage3_om_live" = "$2" ] || return 1
+}
+
 bootstrap_stage3_validate_descriptor_map() (
     [ "$#" -eq 6 ] || return 1
     bootstrap_stage3_dm_snapshot_dir=
@@ -260,16 +414,30 @@ bootstrap_stage3_validate_descriptor_map() (
     bootstrap_stage3_dm_file=$1 bootstrap_stage3_dm_external_sha=$2
     bootstrap_stage3_dm_schema=$3 bootstrap_stage3_dm_run=$4
     bootstrap_stage3_dm_arch=$5 bootstrap_stage3_dm_roles=$6
-    expr "$bootstrap_stage3_dm_file" : \
-        '/proc/[1-9][0-9]*/fd/[1-9][0-9]*$' >/dev/null || return 1
-    [ -f "$bootstrap_stage3_dm_file" ] || return 1
+    # The map itself arrives either as the owner's procfs descriptor (Linux) or
+    # as an inherited descriptor `fd:N` (any supported host, procfs or not).
+    bootstrap_stage3_dm_map_fd=
+    if bootstrap_stage3_dm_map_fd=$(bootstrap_stage3_inherited_fd_number "$bootstrap_stage3_dm_file"); then
+        :
+    else
+        bootstrap_stage3_dm_map_fd=
+        expr "$bootstrap_stage3_dm_file" : \
+            '/proc/[1-9][0-9]*/fd/[1-9][0-9]*$' >/dev/null || return 1
+        [ -f "$bootstrap_stage3_dm_file" ] || return 1
+    fi
     printf '%s\n' "$bootstrap_stage3_dm_external_sha" | grep -Eq '^[0-9a-f]{64}$' || return 1
-    [ "$(bootstrap_stage3_hash_file "$bootstrap_stage3_dm_file")" = "$bootstrap_stage3_dm_external_sha" ] || return 1
+    [ -n "$bootstrap_stage3_dm_map_fd" ] ||
+        [ "$(bootstrap_stage3_hash_file "$bootstrap_stage3_dm_file")" = "$bootstrap_stage3_dm_external_sha" ] || return 1
     bootstrap_stage3_dm_snapshot_dir=$(mktemp -d "${TMPDIR:-/tmp}/stage3-dmap.XXXXXX") || return 1
     chmod 0700 "$bootstrap_stage3_dm_snapshot_dir" || return 1
     bootstrap_stage3_dm_snapshot="$bootstrap_stage3_dm_snapshot_dir/map"
     (umask 077; set -C; : >"$bootstrap_stage3_dm_snapshot") || return 1
-    dd if="$bootstrap_stage3_dm_file" of="$bootstrap_stage3_dm_snapshot" bs=65536 2>/dev/null || return 1
+    if [ -n "$bootstrap_stage3_dm_map_fd" ]; then
+        bootstrap_stage3_inherited_fd_copy "$bootstrap_stage3_dm_map_fd" \
+            "$bootstrap_stage3_dm_snapshot" || return 1
+    else
+        dd if="$bootstrap_stage3_dm_file" of="$bootstrap_stage3_dm_snapshot" bs=65536 2>/dev/null || return 1
+    fi
     chmod 0400 "$bootstrap_stage3_dm_snapshot" || return 1
     [ "$(bootstrap_stage3_hash_file "$bootstrap_stage3_dm_snapshot")" = "$bootstrap_stage3_dm_external_sha" ] || return 1
     bootstrap_stage3_dm_file=$bootstrap_stage3_dm_snapshot
@@ -280,9 +448,9 @@ bootstrap_stage3_validate_descriptor_map() (
     bootstrap_stage3_dm_owner=$(bootstrap_stage3_manifest_value descriptor_owner_pid "$bootstrap_stage3_dm_file") || return 1
     bootstrap_stage3_dm_start=$(bootstrap_stage3_manifest_value descriptor_owner_start_ticks "$bootstrap_stage3_dm_file") || return 1
     case "$bootstrap_stage3_dm_owner:$bootstrap_stage3_dm_start" in *[!0-9:]*|:*|*:) return 1 ;; esac
-    [ -r "/proc/$bootstrap_stage3_dm_owner/stat" ] || return 1
-    bootstrap_stage3_dm_live_start=$(sed 's/^.*) //' "/proc/$bootstrap_stage3_dm_owner/stat" | awk '{print $20}') || return 1
-    [ "$bootstrap_stage3_dm_live_start" = "$bootstrap_stage3_dm_start" ] || return 1
+    # Linux: the same /proc/<owner>/stat field-20 comparison as before.
+    # Darwin/BSD: kill -0 plus the launch stamp (pid reuse => mismatch).
+    bootstrap_stage3_owner_matches "$bootstrap_stage3_dm_owner" "$bootstrap_stage3_dm_start" || return 1
     set -- $bootstrap_stage3_dm_roles
     [ "$(bootstrap_stage3_manifest_value entry_count "$bootstrap_stage3_dm_file")" = "$#" ] || return 1
     bootstrap_stage3_dm_actual=$(sed -n 's/^\([a-z0-9_]*\)_descriptor=.*/\1/p' "$bootstrap_stage3_dm_file" | tr '\n' ' ' | sed 's/ $//')
@@ -325,6 +493,14 @@ bootstrap_stage3_validate_descriptor_map() (
         if [ "$bootstrap_stage3_dm_descriptor" = descriptor-absent ]; then
             [ "$bootstrap_stage3_dm_role" = compiler_backfill ] || return 1
             [ "$bootstrap_stage3_dm_dev:$bootstrap_stage3_dm_ino:$bootstrap_stage3_dm_mode:$bootstrap_stage3_dm_sha" = absent:absent:absent:absent ] || return 1
+        elif bootstrap_stage3_dm_fd=$(bootstrap_stage3_inherited_fd_number "$bootstrap_stage3_dm_descriptor"); then
+            case "$bootstrap_stage3_dm_sha" in
+                identity-only) ;;
+                *) printf '%s\n' "$bootstrap_stage3_dm_sha" | grep -Eq '^[0-9a-f]{64}$' || return 1 ;;
+            esac
+            bootstrap_stage3_inherited_fd_verify "$bootstrap_stage3_dm_fd" \
+                "$bootstrap_stage3_dm_dev" "$bootstrap_stage3_dm_ino" \
+                "$bootstrap_stage3_dm_mode" "$bootstrap_stage3_dm_sha" || return 1
         else
             case "$bootstrap_stage3_dm_descriptor" in "/proc/$bootstrap_stage3_dm_owner/fd/"[0-9]*) ;; *) return 1 ;; esac
             bootstrap_stage3_dm_fd=${bootstrap_stage3_dm_descriptor##*/}; case "$bootstrap_stage3_dm_fd" in ''|*[!0-9]*) return 1 ;; esac
@@ -429,9 +605,8 @@ bootstrap_stage3_hash_path_list() {
         fi
     fi
     if [ -n "$bootstrap_stage3_hash_tool" ]; then
-        bootstrap_stage3_hash_lines=$(wc -l <"$bootstrap_stage3_hash_paths") ||
+        bootstrap_stage3_hash_lines=$(wc -l <"$bootstrap_stage3_hash_paths" | tr -d ' ') ||
             return 1
-        bootstrap_stage3_hash_lines=${bootstrap_stage3_hash_lines# }
         bootstrap_stage3_hash_workers=$(
             bootstrap_stage3_hash_worker_count "$bootstrap_stage3_hash_lines"
         ) || return 1
@@ -802,7 +977,8 @@ bootstrap_stage3_diagnostic_env() {
         SIMPLE_MIRB_TRACE \
         SIMPLE_MIR_DEFAULT_PAD_TRACE \
         SIMPLE_MIR_FIELD_TRACE \
-        SIMPLE_MIR_RET_TRACE; do
+        SIMPLE_MIR_RET_TRACE \
+        SIMPLE_BUILD_SESSION_END; do
         [ "$bootstrap_stage3_diag_name" != "${1:-}" ] || continue
         bootstrap_stage3_diag_value=$(
             eval "printf '%s' \"\${${bootstrap_stage3_diag_name}-}\""
@@ -1194,7 +1370,10 @@ bootstrap_stage3_target_c_compiler() {
             # Windows bootstrap is a Clang C-driver lane. Do not let an ambient
             # compiler selection change the admitted C ABI owner.
             if [ -n "${CC:-}" ]; then
-                case "${CC##*/}" in
+                # CI exports native paths (D:\...\clang-cl.exe): take the
+                # basename across both separators.
+                bootstrap_stage3_windows_cc_base=$(printf '%s' "$CC" | tr '\\' '/')
+                case "${bootstrap_stage3_windows_cc_base##*/}" in
                     clang-cl|clang-cl.exe) ;;
                     *) return 1 ;;
                 esac
@@ -1204,7 +1383,7 @@ bootstrap_stage3_target_c_compiler() {
             ;;
         x86_64-pc-windows-gnu)
             bootstrap_stage3_windows_gnu_clang_path \
-                "${CC_x86_64_pc_windows_gnu:-clang}" || return 1
+                "${CC_x86_64_pc_windows_gnullvm:-clang}" || return 1
             "$bootstrap_stage3_gnu_tool_path" \
                 --target=x86_64-w64-windows-gnu --version >/dev/null 2>&1
             ;;
@@ -1291,19 +1470,44 @@ bootstrap_stage3_target_c_compiler() {
 }
 
 bootstrap_stage3_windows_gnu_tool_path() {
-    bootstrap_stage3_gnu_tool_selected=$(command -v "$1" 2>/dev/null) || return 1
+    bootstrap_stage3_gnu_tool_request=$1
+    # The bootstrap exports CC/LD in native drive-letter spelling
+    # (`C:/.../bin/clang.exe`) because Cargo and the native compiler consume
+    # it; `command -v` echoes that verbatim and the canonical-path helper only
+    # accepts POSIX `/...` input, so the admitted llvm-mingw clang was rejected
+    # ("Windows GNU phase requires CC to be llvm-mingw clang"). Normalize the
+    # spelling first, then bind the physical `.exe` when the extensionless
+    # alias was recorded.
+    case "$bootstrap_stage3_gnu_tool_request" in
+        [A-Za-z]:[\/]*)
+            bootstrap_stage3_gnu_tool_request=$(cygpath -u "$bootstrap_stage3_gnu_tool_request" \
+                2>/dev/null) || return 1 ;;
+    esac
+    bootstrap_stage3_gnu_tool_selected=$(command -v "$bootstrap_stage3_gnu_tool_request" \
+        2>/dev/null) || return 1
+    case "$bootstrap_stage3_gnu_tool_selected" in
+        *.exe) ;;
+        *) [ -f "$bootstrap_stage3_gnu_tool_selected.exe" ] &&
+            bootstrap_stage3_gnu_tool_selected=$bootstrap_stage3_gnu_tool_selected.exe ;;
+    esac
     bootstrap_stage3_gnu_tool_path=$(bootstrap_stage3_canonical_file \
         "$bootstrap_stage3_gnu_tool_selected") || return 1
     [ -x "$bootstrap_stage3_gnu_tool_path" ] || return 1
     printf '%s\n' "$bootstrap_stage3_gnu_tool_path"
 }
 
+# llvm-mingw identity is the driver's default target, not its file name: a
+# stock LLVM clang.exe (Target: x86_64-pc-windows-msvc) must not satisfy the
+# GNU lane just because ambient PATH found it first.
 bootstrap_stage3_windows_gnu_clang_path() {
     bootstrap_stage3_gnu_tool_path=$(bootstrap_stage3_windows_gnu_tool_path "$1") || return 1
     case "${bootstrap_stage3_gnu_tool_path##*/}" in
-        clang|clang.exe) printf '%s\n' "$bootstrap_stage3_gnu_tool_path" ;;
+        clang|clang.exe) ;;
         *) return 1 ;;
     esac
+    "$bootstrap_stage3_gnu_tool_path" --version 2>/dev/null |
+        grep -Eq '^Target: [A-Za-z0-9_]+-w64-(windows-gnu|mingw32)' || return 1
+    printf '%s\n' "$bootstrap_stage3_gnu_tool_path"
 }
 
 bootstrap_stage3_windows_gnu_llvm_ar_path() {
@@ -1325,13 +1529,13 @@ bootstrap_stage3_windows_gnu_cargo_tools() {
     bootstrap_stage3_gnu_cc=$(bootstrap_stage3_windows_gnu_clang_path \
         "$bootstrap_stage3_gnu_cc") || return 1
     bootstrap_stage3_gnu_linker=$(bootstrap_stage3_windows_gnu_clang_path \
-        "${CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER:-$bootstrap_stage3_gnu_cc}" \
+        "${CARGO_TARGET_X86_64_PC_WINDOWS_GNULLVM_LINKER:-$bootstrap_stage3_gnu_cc}" \
         ) || return 1
     bootstrap_stage3_gnu_target_cc=$(bootstrap_stage3_windows_gnu_clang_path \
-        "${CC_x86_64_pc_windows_gnu:-$bootstrap_stage3_gnu_cc}" \
+        "${CC_x86_64_pc_windows_gnullvm:-$bootstrap_stage3_gnu_cc}" \
         ) || return 1
     bootstrap_stage3_gnu_ar=$(bootstrap_stage3_windows_gnu_llvm_ar_path \
-        "${AR_x86_64_pc_windows_gnu:-llvm-ar}") || return 1
+        "${AR_x86_64_pc_windows_gnullvm:-llvm-ar}") || return 1
     [ -x "$bootstrap_stage3_gnu_linker" ] || return 1
     [ -x "$bootstrap_stage3_gnu_target_cc" ] || return 1
     [ -x "$bootstrap_stage3_gnu_ar" ] || return 1
@@ -1339,6 +1543,30 @@ bootstrap_stage3_windows_gnu_cargo_tools() {
         "$bootstrap_stage3_gnu_linker" \
         "$bootstrap_stage3_gnu_target_cc" \
         "$bootstrap_stage3_gnu_ar"
+}
+
+# Print the Cargo environment (KEY=VALUE lines, native drive-letter paths) for
+# the x86_64-pc-windows-gnullvm target: the admitted llvm-mingw UCRT clang as
+# linker/CC driving lld, its own MinGW CRT bound first, never MSVC or GCC. This
+# is the same tool authority and link contract bootstrap-from-scratch.sh binds
+# for its Windows GNU seed build; `simple test --kind=rust` consumes it.
+bootstrap_stage3_windows_gnu_cargo_env() {
+    bswgce_tools=$(bootstrap_stage3_windows_gnu_cargo_tools "$1") || return 1
+    bswgce_linker=$(printf '%s\n' "$bswgce_tools" | sed -n 's/^linker=//p')
+    bswgce_cc=$(printf '%s\n' "$bswgce_tools" | sed -n 's/^cc=//p')
+    bswgce_ar=$(printf '%s\n' "$bswgce_tools" | sed -n 's/^ar=//p')
+    bswgce_target=x86_64-w64-windows-gnu
+    bswgce_crt=$("$bswgce_linker" --target="$bswgce_target" \
+        --print-file-name=libmingw32.a) || return 1
+    bswgce_crt=$(cygpath -m "$(printf '%s\n' "$bswgce_crt" | tr -d '\r')") || return 1
+    bswgce_libdir=$(dirname "$bswgce_crt")
+    [ -s "$bswgce_crt" ] && [ -s "$bswgce_libdir/libmingwex.a" ] || return 1
+    printf 'CARGO_TARGET_X86_64_PC_WINDOWS_GNULLVM_LINKER=%s\n' "$(cygpath -m "$bswgce_linker")"
+    printf 'CC_x86_64_pc_windows_gnullvm=%s\n' "$(cygpath -m "$bswgce_cc")"
+    printf 'AR_x86_64_pc_windows_gnullvm=%s\n' "$(cygpath -m "$bswgce_ar")"
+    printf 'CFLAGS_x86_64_pc_windows_gnullvm=--target=%s\n' "$bswgce_target"
+    printf 'CARGO_TARGET_X86_64_PC_WINDOWS_GNULLVM_RUSTFLAGS=-Lnative=%s -C link-arg=--target=%s -C link-arg=-fuse-ld=lld\n' \
+        "$bswgce_libdir" "$bswgce_target"
 }
 
 bootstrap_stage3_windows_msvc_candidate_path() {
@@ -1683,12 +1911,14 @@ bootstrap_stage3_native_metadata_probe() (
 # `rustup show active-toolchain` / `RUSTUP_TOOLCHAIN=<channel> rustc` would
 # also resolve correctly, but only by executing rustup/rustc; this reads the
 # filesystem the same way the rest of this file already does. Requires
-# EXACTLY one non-symlink "<channel>-*" directory -- zero or several (e.g. a
-# dated nightly alongside a plain one) is ambiguous and fails closed.
+# EXACTLY one non-symlink "<channel>-*" directory, optionally restricted to
+# the host suffix of a fully qualified default toolchain. Zero or several
+# matches remain ambiguous and fail closed.
 bootstrap_stage3_channel_toolchain_host() (
-    [ "$#" -eq 2 ] || return 1
+    [ "$#" -eq 2 ] || [ "$#" -eq 3 ] || return 1
     bootstrap_stage3_scan_home=$1
     bootstrap_stage3_scan_channel=$2
+    bootstrap_stage3_scan_default=${3-}
     case "$bootstrap_stage3_scan_channel" in
         ''|*[!A-Za-z0-9._-]*) return 1 ;;
     esac
@@ -1700,6 +1930,17 @@ bootstrap_stage3_channel_toolchain_host() (
     do
         [ -d "$bootstrap_stage3_scan_dir" ] || continue
         [ ! -L "$bootstrap_stage3_scan_dir" ] || continue
+        # A different default channel still names the authoritative host.
+        # Match its full host suffix rather than guessing an ABI or accepting
+        # an ambient RUSTUP_TOOLCHAIN that the execution path does not use.
+        if [ -n "$bootstrap_stage3_scan_default" ]; then
+            bootstrap_stage3_scan_candidate=${bootstrap_stage3_scan_dir##*/}
+            bootstrap_stage3_scan_host=${bootstrap_stage3_scan_candidate#"$bootstrap_stage3_scan_prefix"}
+            case "$bootstrap_stage3_scan_default" in
+                *-"$bootstrap_stage3_scan_host") ;;
+                *) continue ;;
+            esac
+        fi
         bootstrap_stage3_scan_count=$((bootstrap_stage3_scan_count + 1))
         bootstrap_stage3_scan_match=$bootstrap_stage3_scan_dir
     done
@@ -1814,7 +2055,7 @@ ${bootstrap_stage3_installed_frontend%/.cargo/bin/rustc.exe}
                     # no host at all) does not and stays a hard parse-fail.
                     modern_dashes = modern
                     dash_count = gsub(/-/, "-", modern_dashes)
-                    if (dash_count >= 2) exit 3
+                    if (dash_count >= 2) { print modern; exit 3 }
                     exit 1
                 }
                 host = substr(modern, length(prefix) + 1)
@@ -1831,7 +2072,8 @@ ${bootstrap_stage3_installed_frontend%/.cargo/bin/rustc.exe}
         bootstrap_stage3_installed_host=$(
             bootstrap_stage3_channel_toolchain_host \
                 "$bootstrap_stage3_installed_home" \
-                "$bootstrap_stage3_installed_channel"
+                "$bootstrap_stage3_installed_channel" \
+                "$bootstrap_stage3_installed_host"
         ) || {
             bootstrap_stage3_rust_toolchain_trace settings-host=channel-toolchain-absent
             return 1
@@ -2218,10 +2460,20 @@ bootstrap_stage3_resolve_llvm_build_authority() (
                 *) echo "llvm authority: Windows bootstrap requires LLVM 23.x, found ${bootstrap_stage3_llvm_version}" >&2
                    return 1 ;;
             esac
+            # The gnu lane (MSYS2 CLANG64) ships libLLVM-<major> instead of
+            # LLVM-C and no clang-cl; its C compiler is llvm-mingw clang.
+            bootstrap_stage3_llvm_windows_abi=${SIMPLE_WINDOWS_ABI:-${MSYSTEM:+gnu}}
+            if [ "$bootstrap_stage3_llvm_windows_abi" = gnu ]; then
+                bootstrap_stage3_llvm_c_import_requested=\
+"$bootstrap_stage3_llvm_prefix/lib/libLLVM-${bootstrap_stage3_llvm_major}.dll.a"
+                bootstrap_stage3_llvm_c_runtime_requested=\
+"$bootstrap_stage3_llvm_prefix/bin/libLLVM-${bootstrap_stage3_llvm_major}.dll"
+            else
             bootstrap_stage3_llvm_c_import_requested=\
 "$bootstrap_stage3_llvm_prefix/lib/LLVM-C.lib"
             bootstrap_stage3_llvm_c_runtime_requested=\
 "$bootstrap_stage3_llvm_prefix/bin/LLVM-C.dll"
+            fi
             bootstrap_stage3_llvm_c_import=$(
                 bootstrap_stage3_canonical_file \
                     "$bootstrap_stage3_llvm_c_import_requested"
@@ -2236,6 +2488,7 @@ bootstrap_stage3_resolve_llvm_build_authority() (
                 echo "llvm authority: LLVM 23.1.1 Windows package is missing its C API runtime DLL: ${bootstrap_stage3_llvm_c_runtime_requested}" >&2
                 return 1
             }
+            if [ "$bootstrap_stage3_llvm_windows_abi" != gnu ]; then
             bootstrap_stage3_llvm_clang_cl_requested=\
 "$bootstrap_stage3_llvm_prefix/bin/clang-cl.exe"
             if [ ! -f "$bootstrap_stage3_llvm_clang_cl_requested" ]; then
@@ -2268,6 +2521,7 @@ bootstrap_stage3_resolve_llvm_build_authority() (
                 *) echo "llvm authority: Windows bootstrap requires clang-cl 23.x, found ${bootstrap_stage3_llvm_clang_cl_version:-unknown}" >&2
                    return 1 ;;
             esac
+            fi
             printf 'llvm-build-status=enabled\nllvm-version=%s\nllvm-major=%s\n' \
                 "$bootstrap_stage3_llvm_version" \
                 "$bootstrap_stage3_llvm_major"
@@ -2284,6 +2538,7 @@ bootstrap_stage3_resolve_llvm_build_authority() (
                 "$bootstrap_stage3_llvm_c_runtime" \
                 "$(bootstrap_stage3_hash_file \
                     "$bootstrap_stage3_llvm_c_runtime")"
+            [ "$bootstrap_stage3_llvm_windows_abi" = gnu ] ||
             printf 'llvm-clang-cl-path=%s\nllvm-clang-cl-sha256=%s\nllvm-clang-cl-version=%s\n' \
                 "$bootstrap_stage3_llvm_clang_cl" \
                 "$(bootstrap_stage3_hash_file \
@@ -2609,7 +2864,7 @@ bootstrap_stage3_resolve_llvm_build_authority() (
                     # what actually linked -- the same guarantee as the
                     # MSVC/LIB branch, for hosts without an MSVC SDK.
                     bootstrap_stage3_llvm_gnu_base=$(printf '%s' "$bootstrap_stage3_llvm_system_token" | sed 's/\.[Ll][Ii][Bb]$//')
-                    bootstrap_stage3_llvm_gnu_resolved=$("${CC_x86_64_pc_windows_gnu:-clang}" --target=x86_64-w64-windows-gnu -print-file-name="lib${bootstrap_stage3_llvm_gnu_base}.a" 2>/dev/null || true)
+                    bootstrap_stage3_llvm_gnu_resolved=$("${CC_x86_64_pc_windows_gnullvm:-clang}" --target=x86_64-w64-windows-gnu -print-file-name="lib${bootstrap_stage3_llvm_gnu_base}.a" 2>/dev/null || true)
                     case "$bootstrap_stage3_llvm_gnu_resolved" in
                         /*|[A-Za-z]:[\\/]*)
                             # gcc answers with a native Windows path, which
@@ -2731,11 +2986,81 @@ bootstrap_stage3_tool_requested_path() {
     fi
 }
 
+# One recorded spelling per file for the tool-authority snapshot. Windows
+# hosts reach one executable as C:/x or /c/x, and as lld-link or lld-link.exe
+# (MSYS resolves the bare name to the .exe), depending only on how PATH or a
+# Cargo linker variable was spelled -- windows-msvc-bootstrap-env.shs exports
+# an absolute C:/.../lld-link.exe. Same bytes must give the same line, or an
+# admitted Stage 3 resume refuses with "tool authority changed". Only an alias
+# that IS the same file (-ef) gains .exe, so a distinct extensionless sibling
+# keeps its own identity; sha256 still binds the bytes. $1 is the host
+# platform (computed once by the caller), $2 the path; the result is left in
+# bootstrap_stage3_tool_identity (no subshell: MSYS forks are slow).
+# Non-Windows platforms pass the path through unchanged.
+bootstrap_stage3_tool_identity_path() {
+    bootstrap_stage3_tool_identity=$2
+    case "$1" in
+        *-pc-windows-*) ;;
+        *) return 0 ;;
+    esac
+    case "$bootstrap_stage3_tool_identity" in
+        [A-Za-z]:[\\/]*)
+            bootstrap_stage3_tool_identity=$(cygpath -u \
+                "$bootstrap_stage3_tool_identity") || return 1 ;;
+    esac
+    case "$bootstrap_stage3_tool_identity" in
+        *.[Ee][Xx][Ee]) ;;
+        *)
+            if [ -f "$bootstrap_stage3_tool_identity.exe" ] &&
+                [ "$bootstrap_stage3_tool_identity" -ef \
+                    "$bootstrap_stage3_tool_identity.exe" ]; then
+                bootstrap_stage3_tool_identity=$bootstrap_stage3_tool_identity.exe
+            fi ;;
+    esac
+}
+
+# EXE OUT ATTEMPTS: run `EXE --version` under a scrubbed env into OUT and set
+# bootstrap_stage3_tool_version_status. Only env(1)'s own exec-failure class
+# (125 env failed, 126 cannot execute, 127 not found) is retried, at most
+# ATTEMPTS times: on Windows/MSYS under memory pressure the SAME lld-link (same
+# sha256, same version text) returned 125 on one probe and 0 on the next, and
+# binding that transient status made the Stage 3 resume refuse "Stage-2 tool
+# authority changed since admission" (W11,
+# doc/08_tracking/bug/windows_msvc_release_bootstrap_lane_gaps_2026-11-22.md).
+# Any other status (BSD tools exit 1 on --version) is a stable binding and is
+# never retried. A failure that persists past the bound is recorded as-is, so
+# a genuinely unrunnable tool still mismatches; sha256 still binds the bytes.
+bootstrap_stage3_tool_version_probe() {
+    bootstrap_stage3_tool_probe_attempt=1
+    while :; do
+        bootstrap_stage3_tool_version_status=0
+        env -i PATH="$PATH" LC_ALL=C LANG=C \
+            "$1" --version >"$2" 2>&1 ||
+            bootstrap_stage3_tool_version_status=$?
+        case "$bootstrap_stage3_tool_version_status" in
+            125|126|127) ;;
+            *) return 0 ;;
+        esac
+        [ "$bootstrap_stage3_tool_probe_attempt" -lt "$3" ] || return 0
+        printf 'bootstrap-stage3: %s --version exec status %s (attempt %s of %s); retrying\n' \
+            "$1" "$bootstrap_stage3_tool_version_status" \
+            "$bootstrap_stage3_tool_probe_attempt" "$3" >&2
+        sleep "$bootstrap_stage3_tool_probe_attempt"
+        bootstrap_stage3_tool_probe_attempt=$((bootstrap_stage3_tool_probe_attempt + 1))
+    done
+}
+
 bootstrap_stage3_tool_authority_snapshot() (
     bootstrap_stage3_tool_output=$1
     bootstrap_stage3_tool_path=$2
     bootstrap_stage3_tool_root=$3
     bootstrap_stage3_tool_tmp="${bootstrap_stage3_tool_output}.tmp.$$"
+    # Version-probe exec-failure retries are Windows-only (W11); other hosts
+    # keep one probe. Resolved once: every MSYS fork is costly per tool.
+    bootstrap_stage3_tool_probe_attempts=1
+    case "$(bootstrap_stage3_host_platform)" in
+        *-windows-*) bootstrap_stage3_tool_probe_attempts=5 ;;
+    esac
     trap 'rm -f "$bootstrap_stage3_tool_tmp" \
         "${bootstrap_stage3_tool_tmp}.version" \
         "${bootstrap_stage3_tool_tmp}.arch"' EXIT
@@ -2821,6 +3146,8 @@ bootstrap_stage3_tool_authority_snapshot() (
     bootstrap_stage3_tool_c_name=$(basename \
         "$bootstrap_stage3_tool_c_path")
     bootstrap_stage3_tool_c_name=${bootstrap_stage3_tool_c_name%.exe}
+    bootstrap_stage3_tool_identity_host=$(bootstrap_stage3_host_platform) ||
+        return 1
     bootstrap_stage3_tool_archive_tools='ld ar ranlib'
     case "$(bootstrap_stage3_host_platform)" in
         *-pc-windows-msvc)
@@ -2855,6 +3182,9 @@ bootstrap_stage3_tool_authority_snapshot() (
         bootstrap_stage3_tool_requested=$(bootstrap_stage3_tool_requested_path \
             "$bootstrap_stage3_tool_name" "$bootstrap_stage3_tool_c_name" \
             "$bootstrap_stage3_tool_c_path") || return 1
+        bootstrap_stage3_tool_identity_path "$bootstrap_stage3_tool_identity_host" \
+            "$bootstrap_stage3_tool_requested" || return 1
+        bootstrap_stage3_tool_requested=$bootstrap_stage3_tool_identity
         case "$bootstrap_stage3_tool_requested" in
             /*) ;;
             *) return 1 ;;
@@ -2864,7 +3194,38 @@ bootstrap_stage3_tool_authority_snapshot() (
                 'my $p = abs_path($ARGV[0]); defined($p) or exit 1; print $p' \
                 "$bootstrap_stage3_tool_requested"
         ) || return 1
+        bootstrap_stage3_tool_identity_path "$bootstrap_stage3_tool_identity_host" \
+            "$bootstrap_stage3_tool_canonical" || return 1
+        bootstrap_stage3_tool_canonical=$bootstrap_stage3_tool_identity
         [ -f "$bootstrap_stage3_tool_canonical" ] || return 1
+        # macOS /usr/bin/{ld,ar,ranlib} are one xcrun trampoline binary (same
+        # sha256 for all three) that dispatches through xcode-select or
+        # DEVELOPER_DIR at run time, so pinning it pins no linker. Bind the
+        # managed archive/link roles to the real toolchain executable the
+        # trampoline would run, located once via the documented xcrun locator.
+        case "$(bootstrap_stage3_host_platform):$bootstrap_stage3_tool_name" in
+            *-apple-darwin*:ld|*-apple-darwin*:ar|*-apple-darwin*:ranlib)
+                case "$bootstrap_stage3_tool_canonical" in
+                    /usr/bin/*)
+                        bootstrap_stage3_tool_located=$(
+                            /usr/bin/xcrun --find "$bootstrap_stage3_tool_name"
+                        ) || return 1
+                        # xcrun returns the toolchain's own name, which may be
+                        # a symlink (ranlib -> libtool); the authority loader
+                        # opens pins no-follow, so bind the real file.
+                        bootstrap_stage3_tool_canonical=$(
+                            perl -MCwd=abs_path -e \
+                                'my $p = abs_path($ARGV[0]); defined($p) or exit 1; print $p' \
+                                "$bootstrap_stage3_tool_located"
+                        ) || return 1
+                        case "$bootstrap_stage3_tool_canonical" in
+                            /usr/bin/*|'') return 1 ;;
+                            /*) ;;
+                            *) return 1 ;;
+                        esac
+                        [ -f "$bootstrap_stage3_tool_canonical" ] || return 1 ;;
+                esac ;;
+        esac
         # BSD userland tools such as macOS sed(1) and ld(1) do not implement
         # GNU-style --version.  The executable bytes remain authoritative; bind
         # the probe status and first diagnostic line without requiring success.
@@ -2879,10 +3240,10 @@ bootstrap_stage3_tool_authority_snapshot() (
             rustc) bootstrap_stage3_tool_version_executable=$bootstrap_stage3_real_rustc ;;
             cargo) bootstrap_stage3_tool_version_executable=$bootstrap_stage3_real_cargo ;;
         esac
-        env -i PATH="$PATH" LC_ALL=C LANG=C \
-            "$bootstrap_stage3_tool_version_executable" --version \
-            >"$bootstrap_stage3_tool_version_output" 2>&1 ||
-            bootstrap_stage3_tool_version_status=$?
+        bootstrap_stage3_tool_version_probe \
+            "$bootstrap_stage3_tool_version_executable" \
+            "$bootstrap_stage3_tool_version_output" \
+            "$bootstrap_stage3_tool_probe_attempts"
         # First line via the read builtin, not $(sed -n 1p): on MSYS every
         # fork costs 1-8 s under load and this loop runs per tool. The EXIT
         # trap removes both scratch files; each probe truncates its own.
@@ -2920,7 +3281,16 @@ bootstrap_stage3_tool_authority_snapshot() (
                 "$bootstrap_stage3_tool_c_name") bootstrap_stage3_managed_role=cc ;;
                 ld|lld-link) bootstrap_stage3_managed_role=linker ;;
                 ar|llvm-ar) bootstrap_stage3_managed_role=ar ;;
-                ranlib|llvm-ranlib) bootstrap_stage3_managed_role=ranlib ;;
+                ranlib|llvm-ranlib)
+                    # Every darwin ranlib is an argv[0]-dispatched multicall
+                    # binary (Xcode ranlib -> libtool, Homebrew llvm-ranlib ->
+                    # llvm-ar); its canonical file run by path is NOT ranlib.
+                    # Apple ar writes the archive table itself, so darwin
+                    # admits no ranlib role rather than pinning a wrong tool.
+                    case "$(bootstrap_stage3_host_platform)" in
+                        *-apple-darwin*) ;;
+                        *) bootstrap_stage3_managed_role=ranlib ;;
+                    esac ;;
                 llvm-nm) bootstrap_stage3_managed_role=nm ;;
                 llc|llvm-as|opt|llvm-readobj) bootstrap_stage3_managed_role=$bootstrap_stage3_tool_name ;;
             esac
@@ -2966,11 +3336,17 @@ bootstrap_stage3_tool_authority_snapshot() (
     if command -v "${LLVM_CONFIG:-llvm-config}" >/dev/null 2>&1; then
         bootstrap_stage3_tool_llvm_requested=$(command -v "${LLVM_CONFIG:-llvm-config}") ||
             return 1
+        bootstrap_stage3_tool_identity_path "$bootstrap_stage3_tool_identity_host" \
+            "$bootstrap_stage3_tool_llvm_requested" || return 1
+        bootstrap_stage3_tool_llvm_requested=$bootstrap_stage3_tool_identity
         bootstrap_stage3_tool_llvm_canonical=$(
             perl -MCwd=abs_path -e \
                 'my $p = abs_path($ARGV[0]); defined($p) or exit 1; print $p' \
                 "$bootstrap_stage3_tool_llvm_requested"
         ) || return 1
+        bootstrap_stage3_tool_identity_path "$bootstrap_stage3_tool_identity_host" \
+            "$bootstrap_stage3_tool_llvm_canonical" || return 1
+        bootstrap_stage3_tool_llvm_canonical=$bootstrap_stage3_tool_identity
         [ -f "$bootstrap_stage3_tool_llvm_canonical" ] || return 1
         bootstrap_stage3_tool_llvm_version=$(
             bootstrap_stage3_native_metadata_probe llvm-config-tool-version \
@@ -3380,11 +3756,10 @@ bootstrap_stage3_directory_snapshot() (
     ' "$bootstrap_stage3_directory_snapshot_scan" \
         "$bootstrap_stage3_directory_snapshot_paths" \
         "$bootstrap_stage3_directory_snapshot_meta" || exit 1
-    wc -l <"$bootstrap_stage3_directory_snapshot_meta" \
+    wc -l <"$bootstrap_stage3_directory_snapshot_meta" | tr -d ' ' \
         >"$bootstrap_stage3_directory_snapshot_work/line-count" || exit 1
     IFS=' ' read -r bootstrap_stage3_directory_snapshot_lines \
         <"$bootstrap_stage3_directory_snapshot_work/line-count" || exit 1
-    bootstrap_stage3_directory_snapshot_lines=${bootstrap_stage3_directory_snapshot_lines# }
     bootstrap_stage3_hash_worker_count \
         "$bootstrap_stage3_directory_snapshot_lines" \
         >"$bootstrap_stage3_directory_snapshot_work/worker-count" || exit 1
@@ -4310,6 +4685,43 @@ bootstrap_stage3_stage_windows_llvm_import() (
     chmod 400 "$llvm_destination" "$llvm_receipt"
 )
 
+# Check the actual publication filesystem before spending time building Cargo.
+# Keep the final tuple freeze checks: this is capability preflight, not admission.
+bootstrap_stage3_preflight_generation_storage() (
+    [ "$#" -eq 1 ] || return 1
+    mkdir -p -- "$1" || return 1
+    perl - "$1" <<'PERL_GENERATION_STORAGE'
+use strict;
+use warnings;
+use File::Temp qw(tempfile);
+use Fcntl qw(S_IMODE);
+my ($root) = @ARGV;
+my ($fh, $path) = tempfile('.mode-preflight.XXXXXXXX', DIR => $root, UNLINK => 1);
+my $ok = eval {
+    for my $wanted (0500, 0400) {
+        chmod($wanted, $fh) or die "chmod probe: $!\n";
+        my @stat = stat($fh);
+        @stat or die "stat probe: $!\n";
+        my $got = S_IMODE($stat[2]);
+        unless ($got == $wanted) {
+            # Identical to the final tuple-freeze host policy. WSL is Linux.
+            die sprintf("wanted %04o, observed %04o\n", $wanted, $got)
+                unless $^O =~ /^(?:MSWin32|msys|cygwin)$/
+                    && ($got & 0222) == 0;
+        }
+    }
+    1;
+};
+my $error = $@;
+chmod(0600, $fh) or die "restore probe for cleanup: $!\n";
+close($fh) or die "close probe: $!\n";
+unlink($path) or die "remove probe: $!\n";
+die "generation storage cannot preserve immutable file modes at $root: $error" .
+    "Choose a filesystem with supported permissions (for WSL, a POSIX or metadata-enabled mount). No Cargo build was started by this check.\n"
+    unless $ok;
+PERL_GENERATION_STORAGE
+)
+
 bootstrap_stage3_prepare_seed_generation() {
     { [ "$#" -eq 7 ] || [ "$#" -eq 8 ] || [ "$#" -eq 9 ]; } || { echo "bootstrap_stage3_prepare_seed_generation: failed check 1" >&2; return 1; }
     bootstrap_stage3_generation_source=$1
@@ -5005,13 +5417,16 @@ public static class Stage3MaterializedConsumer {
     // its previous per-list ceiling and handle-retention bound.
     const int MaxUntracked = 100000;
     const int MaxOutput = 16 * 1024 * 1024;
+    // Full tracked-tree inventories exceed 16 MiB on the real checkout. Keep
+    // their separate finite bound; ordinary commands and stderr stay at 16 MiB.
+    const int MaxTreeOutput = 64 * 1024 * 1024;
     // The tracked HEAD diff is hashed, never parsed, and on a dirty tree with
     // rebuilt binaries it far exceeds any memory buffer (a full-index binary
     // diff of a ~100 MB seed is ~130 MB). Stream it through the hasher; this
     // bound is a runaway guard only, not a buffer size.
     static readonly long MaxDiffBytes = (long)Budget("BOOTSTRAP_STAGE3_GIT_MAX_DIFF_BYTES", 1024UL * 1024 * 1024);
     static readonly ulong MaxBytes = Budget("BOOTSTRAP_STAGE3_GIT_MAX_BYTES", 512UL * 1024 * 1024);
-    static readonly int MaxMillis = (int)Budget("BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS", 300000);
+    static readonly int MaxMillis = (int)Budget("BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS", 1200000);
     static ulong bytes;
     static int entries;
     static System.Diagnostics.Process ActiveChild;
@@ -5045,16 +5460,40 @@ public static class Stage3MaterializedConsumer {
         b.Append('\\', slash * 2); return b.Append('"').ToString();
     }
     static byte[] ReadBound(Stream stream) {
+        return ReadBound(stream, MaxOutput);
+    }
+    static byte[] ReadBound(Stream stream, int maxOutput) {
         using (var mem = new MemoryStream()) {
             byte[] buffer = new byte[65536]; int n;
             while ((n = stream.Read(buffer, 0, buffer.Length)) != 0) {
-                if (mem.Length + n > MaxOutput) throw new IOException("bound.command-output");
+                if (mem.Length + n > maxOutput) throw new IOException("bound.command-output max=" + maxOutput);
                 mem.Write(buffer, 0, n);
             }
             return mem.ToArray();
         }
     }
     static byte[] Command(string root, string tool, byte[] input, params string[] args) {
+        return CommandBound(root, tool, input, MaxOutput, args);
+    }
+    static void CheckCommandIo(System.Threading.Tasks.Task stdout, System.Threading.Tasks.Task stderr, System.Threading.Tasks.Task stdin) {
+        var tasks = new System.Threading.Tasks.Task[] {stdout, stderr, stdin};
+        var names = new string[] {"stdout", "stderr", "stdin"};
+        for (int n = 0; n < tasks.Length; n++) {
+            if (tasks[n].IsFaulted) {
+                var cause = tasks[n].Exception.GetBaseException();
+                throw new IOException("command." + names[n] + ":" + cause.Message, cause);
+            }
+        }
+    }
+    static void FinishCommandIo(System.Threading.Tasks.Task stdout, System.Threading.Tasks.Task stderr, System.Threading.Tasks.Task stdin) {
+        try {
+            if (!System.Threading.Tasks.Task.WaitAll(new System.Threading.Tasks.Task[] {stdout, stderr, stdin}, Math.Max(1, MaxMillis - (int)Clock.ElapsedMilliseconds))) throw new IOException("bound.command");
+        } catch (AggregateException) {
+            CheckCommandIo(stdout, stderr, stdin);
+            throw;
+        }
+    }
+    static byte[] CommandBound(string root, string tool, byte[] input, int maxOutput, params string[] args) {
         Tick(); var start = new System.Diagnostics.ProcessStartInfo(tool);
         start.WorkingDirectory = root; start.UseShellExecute = false; start.CreateNoWindow = true;
         start.RedirectStandardOutput = true; start.RedirectStandardError = true; start.RedirectStandardInput = true;
@@ -5066,19 +5505,25 @@ public static class Stage3MaterializedConsumer {
         using (var process = System.Diagnostics.Process.Start(start)) {
             ActiveChild = process;
             try {
-                var stdout = System.Threading.Tasks.Task.Factory.StartNew(() => ReadBound(process.StandardOutput.BaseStream));
+                var stdout = System.Threading.Tasks.Task.Factory.StartNew(() => ReadBound(process.StandardOutput.BaseStream, maxOutput));
                 var stderr = System.Threading.Tasks.Task.Factory.StartNew(() => ReadBound(process.StandardError.BaseStream));
                 var stdin = System.Threading.Tasks.Task.Factory.StartNew(() => { if (input != null) process.StandardInput.BaseStream.Write(input, 0, input.Length); process.StandardInput.Close(); });
-                while (!process.WaitForExit(20)) { Tick(); if (stdout.IsFaulted || stderr.IsFaulted || stdin.IsFaulted) throw new IOException("command.io"); }
-                if (!System.Threading.Tasks.Task.WaitAll(new System.Threading.Tasks.Task[] {stdout, stderr, stdin}, Math.Max(1, MaxMillis - (int)Clock.ElapsedMilliseconds))) throw new IOException("bound.command");
+                while (!process.WaitForExit(20)) { Tick(); CheckCommandIo(stdout, stderr, stdin); }
+                FinishCommandIo(stdout, stderr, stdin);
                 if (process.ExitCode != 0) throw new IOException("command.failed:" + process.ExitCode);
                 return stdout.Result;
             } finally { if (!process.HasExited) process.Kill(); ActiveChild = null; }
         }
     }
     static byte[] Git(string root, params string[] args) {
+        return GitBound(root, MaxOutput, args);
+    }
+    static byte[] GitTree(string root, params string[] args) {
+        return GitBound(root, MaxTreeOutput, args);
+    }
+    static byte[] GitBound(string root, int maxOutput, params string[] args) {
         var all = new List<string>(new string[] {"-c", "core.quotePath=false", "-c", "core.fsmonitor=false", "-c", "core.untrackedCache=false"});
-        all.AddRange(args); return Command(root, Environment.GetEnvironmentVariable("STAGE3_GIT"), null, all.ToArray());
+        all.AddRange(args); return CommandBound(root, Environment.GetEnvironmentVariable("STAGE3_GIT"), null, maxOutput, all.ToArray());
     }
     // The tracked HEAD diff can exceed any memory buffer on a dirty tree
     // (rebuilt seed binaries produce 100+ MB full-index binary diffs); only
@@ -5111,8 +5556,8 @@ public static class Stage3MaterializedConsumer {
                 });
                 var stderr = System.Threading.Tasks.Task.Factory.StartNew(() => ReadBound(process.StandardError.BaseStream));
                 var stdin = System.Threading.Tasks.Task.Factory.StartNew(() => { process.StandardInput.Close(); });
-                while (!process.WaitForExit(20)) { Tick(); if (stdout.IsFaulted || stderr.IsFaulted || stdin.IsFaulted) throw new IOException("command.io"); }
-                if (!System.Threading.Tasks.Task.WaitAll(new System.Threading.Tasks.Task[] {stdout, stderr, stdin}, Math.Max(1, MaxMillis - (int)Clock.ElapsedMilliseconds))) throw new IOException("bound.command");
+                while (!process.WaitForExit(20)) { Tick(); CheckCommandIo(stdout, stderr, stdin); }
+                FinishCommandIo(stdout, stderr, stdin);
                 if (process.ExitCode != 0) throw new IOException("command.failed:" + process.ExitCode);
                 return stdout.Result;
             } finally { if (!process.HasExited) process.Kill(); ActiveChild = null; }
@@ -5168,7 +5613,7 @@ public static class Stage3MaterializedConsumer {
         // -r recurses so links at every depth are seen; without it only root
         // children are listed and the receipt row count check below can never
         // match a real checkout (all 66 materialized links live below root).
-        foreach (string row in Nul(Git(root, "ls-tree", "-rz", "-r", "--full-tree", head))) {
+        foreach (string row in Nul(GitTree(root, "ls-tree", "-rz", "-r", "--full-tree", head))) {
             if (++entries > MaxEntries) throw new IOException("bound.entries count=" + entries + " max=" + MaxEntries);
             int tab = row.IndexOf('\t'); if (tab < 0) throw new IOException("git.tree-format");
             string path = row.Substring(tab + 1); CheckPath(path);
@@ -5691,6 +6136,50 @@ STAGE3_NATIVE
 
 # Three-argument v2 entry; its caller supplies the wrapper environment default.
 # Private temporary directory, no stdout and no destination change on refusal.
+# Host-scaled stage3 git-state budget in ms: 300s x (1 + load1/ncpu), capped at
+# 4x. Where /proc/loadavg is absent (Windows Git Bash) load is unknown, so the
+# 4x cap applies rather than the bare 300s that fails a full-checkout walk.
+bootstrap_stage3_git_budget_ms() {
+    stage3_loadavg=${STAGE3_LOADAVG_FILE:-/proc/loadavg}
+    stage3_ncpu=
+    for stage3_ncpu_src in env getconf sysctl nproc; do
+        case "$stage3_ncpu_src" in
+            env) stage3_ncpu_probe=${STAGE3_NCPU:-} ;;
+            getconf) stage3_ncpu_probe=$(getconf _NPROCESSORS_ONLN 2>/dev/null || :) ;;
+            sysctl)
+                if command -v sysctl >/dev/null 2>&1; then
+                    stage3_ncpu_probe=$(sysctl -n hw.ncpu 2>/dev/null || :)
+                elif [ -x /usr/sbin/sysctl ]; then
+                    stage3_ncpu_probe=$(/usr/sbin/sysctl -n hw.ncpu 2>/dev/null || :)
+                else
+                    stage3_ncpu_probe=
+                fi
+                ;;
+            nproc) stage3_ncpu_probe=$(nproc 2>/dev/null || :) ;;
+        esac
+        case "$stage3_ncpu_probe" in
+            ''|*[!0-9]*) continue ;;
+        esac
+        if [ "$stage3_ncpu_probe" -ge 1 ] 2>/dev/null; then
+            stage3_ncpu=$stage3_ncpu_probe
+            break
+        fi
+    done
+    [ -n "$stage3_ncpu" ] || stage3_ncpu=1
+    if [ -r "$stage3_loadavg" ]; then
+        stage3_load=
+        IFS=' .' read -r stage3_load _ <"$stage3_loadavg" 2>/dev/null || :
+        case "$stage3_load" in
+            ''|*[!0-9]*) stage3_load=0 ;;
+        esac
+        stage3_scale=$(( 1 + stage3_load / stage3_ncpu ))
+    else
+        stage3_scale=4
+    fi
+    [ "$stage3_scale" -le 4 ] || stage3_scale=4
+    echo $((300000 * stage3_scale))
+}
+
 bootstrap_stage3_materialized_git_state() (
     [ "$#" -eq 3 ] || exit 1
     case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) ;; *) exit 1 ;; esac
@@ -5708,11 +6197,29 @@ bootstrap_stage3_materialized_git_state() (
     STAGE3_GIT=$(cygpath -aw "$(command -v git)") || exit 1
     STAGE3_SH=$(cygpath -aw /usr/bin/sh.exe) || exit 1
     export STAGE3_ROOT STAGE3_ROOT_B64 STAGE3_RECEIPT STAGE3_RESULT STAGE3_OUTPUT STAGE3_GIT STAGE3_SH
-    # The C# watchdog budget (MaxMillis, default 300s after the 2026-09-16
-    # full-checkout measurement) must win the race against this outer kill:
-    # a too-tight timeout here reports a healthy, still-walking consumer as a
-    # generic bind failure.
-    /usr/bin/timeout -k 2s 330s powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$(cygpath -aw "$work/api.ps1")" >/dev/null || exit 1
+    # The C# watchdog budget (MaxMillis) must win the race against this outer
+    # kill: a too-tight timeout here reports a healthy, still-walking consumer
+    # as a generic bind failure. Unset -> the native ceiling (1200s). The old
+    # 300s x (1 + load1/ncpu) default stayed at 300s on an 80-thread host and
+    # killed a valid receipt whose walk measured 489s (2026-11-15). The outer
+    # kill adds 120s for PowerShell startup + Add-Type compile, which run
+    # before the C# clock starts.
+    if [ -z "${BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS:-}" ]; then
+        BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS=1200000
+        export BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS
+    fi
+    case "$BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS" in ''|*[!0-9]*) exit 1 ;; esac
+    stage3_outer_s=$((BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS / 1000 + 120))
+    /usr/bin/timeout -k 2s "${stage3_outer_s}s" powershell -NoProfile -NonInteractive -ExecutionPolicy Bypass -File "$(cygpath -aw "$work/api.ps1")" >/dev/null
+    stage3_rc=$?
+    case "$stage3_rc" in
+        0) ;;
+        # 124 = timeout(1) fired, 137 = -k SIGKILL: the receipt was NOT judged.
+        124|137)
+            echo "stage3-materialized-consumer: timed out after ${stage3_outer_s}s (budget ${BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS}ms); receipt not judged; raise BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS (ceiling 1200000)" >&2
+            exit 3 ;;
+        *) exit 1 ;;
+    esac
 )
 
 bootstrap_stage3_git_state() {
@@ -5760,6 +6267,14 @@ bootstrap_stage3_git_state() {
                 >"$bootstrap_stage3_git_diff" \
                 2>"$bootstrap_stage3_jj_stderr" || exit 1
             [ ! -s "$bootstrap_stage3_jj_stderr" ] || exit 1
+            # The immutable diff stays readable even if another jj command
+            # snapshots a newer working copy during the read.
+            bootstrap_stage3_jj_current=$(
+                jj --no-pager --color=never log -r @ --no-graph \
+                    -T 'commit_id ++ "\n"' 2>"$bootstrap_stage3_jj_stderr"
+            ) || exit 1
+            [ ! -s "$bootstrap_stage3_jj_stderr" ] || exit 1
+            [ "$bootstrap_stage3_jj_current" = "$bootstrap_stage3_git_head" ] || exit 1
             printf 'jj-working-copy-diff-sha256=%s\n' \
                 "$(bootstrap_stage3_hash_file "$bootstrap_stage3_git_diff")" \
                 >"$bootstrap_stage3_git_records" || exit 1
@@ -5870,10 +6385,10 @@ bootstrap_stage3_git_state() {
                 >"$bootstrap_stage3_git_file_shas" || exit 1
             rm -f "${bootstrap_stage3_git_file_shas}.raw"
             bootstrap_stage3_git_sha_count=$(
-                wc -l <"$bootstrap_stage3_git_file_shas"
+                wc -l <"$bootstrap_stage3_git_file_shas" | tr -d ' '
             ) || exit 1
             bootstrap_stage3_git_path_count=$(
-                wc -l <"$bootstrap_stage3_git_files_only"
+                wc -l <"$bootstrap_stage3_git_files_only" | tr -d ' '
             ) || exit 1
             [ "$bootstrap_stage3_git_sha_count" -eq \
                 "$bootstrap_stage3_git_path_count" ] || exit 1
@@ -6125,23 +6640,76 @@ bootstrap_stage3_seed_inputs_fingerprint() (
         return 1
     }
     (
+        bootstrap_stage3_seed_find_literal_path() {
+            [ "$#" -eq 1 ] || return 1
+            printf '%s\n' "$1" | awk '
+                {
+                    escaped = ""
+                    for (position = 1; position <= length($0); position++) {
+                        character = substr($0, position, 1)
+                        if (character == "\\")
+                            escaped = escaped "\\\\"
+                        else if (character == "*")
+                            escaped = escaped "[*]"
+                        else if (character == "?")
+                            escaped = escaped "[?]"
+                        else if (character == "[")
+                            escaped = escaped "[[]"
+                        else if (character == "]")
+                            escaped = escaped "[]]"
+                        else
+                            escaped = escaped character
+                    }
+                    print escaped
+                }
+            '
+        }
+        bootstrap_stage3_seed_root_has_symlink() (
+            bootstrap_stage3_seed_scan_root=$1
+            bootstrap_stage3_seed_scan_dependencies=$2
+            bootstrap_stage3_seed_scan_compiler_root=$3
+            set -- "$bootstrap_stage3_seed_find" \
+                "$bootstrap_stage3_seed_scan_root"
+            bootstrap_stage3_seed_scan_prune_count=0
+            if [ "$bootstrap_stage3_seed_scan_compiler_root" = yes ]; then
+                bootstrap_stage3_seed_scan_target=$(
+                    bootstrap_stage3_seed_find_literal_path \
+                        "$bootstrap_stage3_seed_scan_root/target"
+                ) || return 1
+                set -- "$@" \( -type d \( -path \
+                    "$bootstrap_stage3_seed_scan_target"
+                bootstrap_stage3_seed_scan_prune_count=1
+            fi
+            while IFS= read -r bootstrap_stage3_seed_scan_dependency; do
+                [ -n "$bootstrap_stage3_seed_scan_dependency" ] || continue
+                case "$bootstrap_stage3_seed_scan_dependency" in
+                    "$bootstrap_stage3_seed_scan_root"|\
+                    "$bootstrap_stage3_seed_scan_root"/*)
+                        if [ "$bootstrap_stage3_seed_scan_prune_count" -gt 0 ]; then
+                            set -- "$@" -o
+                        else
+                            set -- "$@" \( -type d \(
+                        fi
+                        bootstrap_stage3_seed_scan_target=$(
+                            bootstrap_stage3_seed_find_literal_path \
+                                "$bootstrap_stage3_seed_scan_dependency/target"
+                        ) || return 1
+                        set -- "$@" -path \
+                            "$bootstrap_stage3_seed_scan_target"
+                        bootstrap_stage3_seed_scan_prune_count=$((
+                            bootstrap_stage3_seed_scan_prune_count + 1
+                        ))
+                        ;;
+                esac
+            done <"$bootstrap_stage3_seed_scan_dependencies"
+            if [ "$bootstrap_stage3_seed_scan_prune_count" -gt 0 ]; then
+                set -- "$@" \) -prune \) -o
+            fi
+            set -- "$@" -type l -print -quit
+            "$@" | grep -q .
+        )
         cd "$bootstrap_stage3_seed_root" || exit 1
         bootstrap_stage3_seed_trace reject-symlink-inputs
-        if "$bootstrap_stage3_seed_find" src/compiler_rust src/runtime \
-            \( -type d -name target -prune \) -o \
-            -type l -print -quit | grep -q .; then
-            exit 1
-        fi
-        bootstrap_stage3_seed_trace collect-compiler-inputs
-        "$bootstrap_stage3_seed_find" src/compiler_rust \
-            \( -type d -name target \) -prune -o \
-            -type f -print 2>/dev/null \
-            >"$bootstrap_stage3_seed_tmp/compiler.unsorted" || exit 1
-        LC_ALL=C "$bootstrap_stage3_seed_sort" -u "$bootstrap_stage3_seed_tmp/compiler.unsorted" \
-            >"$bootstrap_stage3_seed_tmp/compiler.paths" || exit 1
-        bootstrap_stage3_hash_path_list \
-            "$bootstrap_stage3_seed_tmp/compiler.paths" \
-            >>"$bootstrap_stage3_seed_records" || exit 1
         # Cargo path dependencies may live outside src/compiler_rust (the
         # hosted runtime currently does). Discover them from dependency
         # sections instead of maintaining a partial hand-written allowlist.
@@ -6149,7 +6717,7 @@ bootstrap_stage3_seed_inputs_fingerprint() (
         # traverse a symlink, and must contribute all Cargo.toml/Rust inputs.
         bootstrap_stage3_seed_trace collect-cargo-path-dependencies
         "$bootstrap_stage3_seed_find" src/compiler_rust \
-            \( -type d -name target -prune \) -o \
+            \( -type d -path src/compiler_rust/target -prune \) -o \
             \( -name Cargo.toml -type f -print \) \
             >"$bootstrap_stage3_seed_tmp/cargo-manifests" || exit 1
         : >"$bootstrap_stage3_seed_tmp/path-deps.unsorted" || exit 1
@@ -6181,14 +6749,54 @@ bootstrap_stage3_seed_inputs_fingerprint() (
         done <"$bootstrap_stage3_seed_tmp/path-dep-pairs"
         LC_ALL=C "$bootstrap_stage3_seed_sort" -u "$bootstrap_stage3_seed_tmp/path-deps.unsorted" \
             >"$bootstrap_stage3_seed_tmp/path-deps" || exit 1
+        # Reject symlinks before accepting any collected inputs. Only the
+        # compiler's actual generated target root and each discovered Cargo
+        # dependency's direct target root are excluded from this walk.
+        if bootstrap_stage3_seed_root_has_symlink \
+            src/compiler_rust "$bootstrap_stage3_seed_tmp/path-deps" yes; then
+            exit 1
+        fi
+        if bootstrap_stage3_seed_root_has_symlink \
+            src/runtime "$bootstrap_stage3_seed_tmp/path-deps" no; then
+            exit 1
+        fi
+        while IFS= read -r bootstrap_stage3_seed_dep_root; do
+            [ -n "$bootstrap_stage3_seed_dep_root" ] || continue
+            case "$bootstrap_stage3_seed_dep_root" in
+                */target|*/target/*) exit 1 ;;
+            esac
+            bootstrap_stage3_seed_dep_target=$(
+                bootstrap_stage3_seed_find_literal_path \
+                    "$bootstrap_stage3_seed_dep_root/target"
+            ) || exit 1
+            if "$bootstrap_stage3_seed_find" "$bootstrap_stage3_seed_dep_root" \
+                \( -type d -path "$bootstrap_stage3_seed_dep_target" -prune \) -o \
+                -type l -print -quit | grep -q .; then
+                exit 1
+            fi
+        done <"$bootstrap_stage3_seed_tmp/path-deps"
+        bootstrap_stage3_seed_trace collect-compiler-inputs
+        "$bootstrap_stage3_seed_find" src/compiler_rust \
+            \( -type d -path src/compiler_rust/target -prune \) -o \
+            -type f -print 2>/dev/null \
+            >"$bootstrap_stage3_seed_tmp/compiler.unsorted" || exit 1
+        LC_ALL=C "$bootstrap_stage3_seed_sort" -u "$bootstrap_stage3_seed_tmp/compiler.unsorted" \
+            >"$bootstrap_stage3_seed_tmp/compiler.paths" || exit 1
+        bootstrap_stage3_hash_path_list \
+            "$bootstrap_stage3_seed_tmp/compiler.paths" \
+            >>"$bootstrap_stage3_seed_records" || exit 1
         bootstrap_stage3_seed_trace hash-cargo-path-dependencies
         while IFS= read -r bootstrap_stage3_seed_dep_root; do
             [ -n "$bootstrap_stage3_seed_dep_root" ] || continue
             case "$bootstrap_stage3_seed_dep_root" in
                 */target|*/target/*) exit 1 ;;
             esac
+            bootstrap_stage3_seed_dep_target=$(
+                bootstrap_stage3_seed_find_literal_path \
+                    "$bootstrap_stage3_seed_dep_root/target"
+            ) || exit 1
             "$bootstrap_stage3_seed_find" "$bootstrap_stage3_seed_dep_root" \
-                \( -type d -name target -prune \) -o \
+                \( -type d -path "$bootstrap_stage3_seed_dep_target" -prune \) -o \
                 -type f -print \
                 >"$bootstrap_stage3_seed_tmp/path-dep-files.unsorted" ||
                 exit 1
@@ -6238,11 +6846,11 @@ bootstrap_stage3_seed_inputs_fingerprint() (
         if [ "$bootstrap_stage3_seed_target" = \
             x86_64-pc-windows-gnu ]; then
             printf 'target-linker=%s\ntarget-cc=%s\ntarget-ar=%s\ntarget-cflags=%s\ntarget-rustflags=%s\n' \
-                "${CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER:-clang}" \
-                "${CC_x86_64_pc_windows_gnu:-clang}" \
-                "${AR_x86_64_pc_windows_gnu:-llvm-ar}" \
-                "${CFLAGS_x86_64_pc_windows_gnu:---target=x86_64-w64-windows-gnu}" \
-                "${CARGO_TARGET_X86_64_PC_WINDOWS_GNU_RUSTFLAGS:--C link-arg=--target=x86_64-w64-windows-gnu}" \
+                "${CARGO_TARGET_X86_64_PC_WINDOWS_GNULLVM_LINKER:-clang}" \
+                "${CC_x86_64_pc_windows_gnullvm:-clang}" \
+                "${AR_x86_64_pc_windows_gnullvm:-llvm-ar}" \
+                "${CFLAGS_x86_64_pc_windows_gnullvm:---target=x86_64-w64-windows-gnu}" \
+                "${CARGO_TARGET_X86_64_PC_WINDOWS_GNULLVM_RUSTFLAGS:--C link-arg=--target=x86_64-w64-windows-gnu}" \
                 >>"$bootstrap_stage3_seed_records" || exit 1
         elif [ "$bootstrap_stage3_seed_target" = \
             x86_64-pc-windows-msvc ]; then

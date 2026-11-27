@@ -6,6 +6,23 @@ use crate::mir::effects::CallTarget;
 use crate::mir::instructions::{MirInst, UnitOverflowBehavior, VReg};
 
 impl<'a> MirLowerer<'a> {
+    /// Renderer for a flat primitive optional (`T?` lowered to
+    /// `HirType::Pointer { inner: T }`, a raw payload or the nil sentinel).
+    /// Returns None for every other type, including heap optionals.
+    fn flat_opt_to_string_fn(&self, ty: TypeId) -> Option<&'static str> {
+        let Some(HirType::Pointer { inner, .. }) = self.type_registry?.get(ty) else {
+            return None;
+        };
+        match *inner {
+            TypeId::BOOL => Some("rt_opt_bool_to_string"),
+            TypeId::I64 | TypeId::U64 | TypeId::I32 | TypeId::U32 | TypeId::I16 | TypeId::U16 | TypeId::U8 => {
+                Some("rt_opt_i64_to_string")
+            }
+            TypeId::F32 | TypeId::F64 => Some("rt_opt_f64_to_string"),
+            _ => None,
+        }
+    }
+
     /// Materialize `if cond_reg: then_reg else: else_reg` from already-lowered
     /// VRegs (not `HirExpr`s). Mirrors the block/temp-local machinery of
     /// `lower_if_expr` (temp local -> branch -> per-arm store -> merge ->
@@ -280,6 +297,30 @@ impl<'a> MirLowerer<'a> {
             return result;
         }
 
+        // The BDD matcher builtins take tagged `RuntimeValue`s, but a typed
+        // scalar operand reaches MIR raw. `expect(x).to_equal(0)` with `x: any`
+        // compared a tagged word against a raw `0`, so equal values failed and
+        // the message rendered nonsense ("Expected nil to equal 0"). Box each
+        // operand by its static type, the same rule as an `any` parameter.
+        // Bug: doc/08_tracking/bug/seed_jit_spec_files_never_jit_2026-11-04.md
+        if matches!(name, "rt_bdd_expect_eq_rv" | "rt_bdd_expect_truthy_rv") {
+            let mut regs = Vec::with_capacity(args.len());
+            for arg in args {
+                let reg = self.lower_expr(arg)?;
+                regs.push(self.box_arg_for_any_param(reg, arg)?);
+            }
+            let name = name.to_string();
+            return self.with_func(|func, current_block| {
+                let dest = func.new_vreg();
+                func.block_mut(current_block).unwrap().instructions.push(MirInst::Call {
+                    dest: Some(dest),
+                    target: CallTarget::from_name(&name),
+                    args: regs,
+                });
+                dest
+            });
+        }
+
         // Optional bool payloads use rt_value_bool, not BoxInt. After HIR
         // peels bool? for an if-val binding, decode the tagged payload into
         // a native bool. Do not use rt_is_some: Some(false) is present.
@@ -287,7 +328,7 @@ impl<'a> MirLowerer<'a> {
             && args.len() == 1
             && expr_ty == TypeId::BOOL
             && args[0].ty != TypeId::ANY
-            && self.slot_holds_tagged_value(args[0].ty)
+            && self.slot_holds_tagged_optional(args[0].ty)
         {
             let arg_reg = self.lower_expr(&args[0])?;
             return self.with_func(|func, current_block| {
@@ -322,7 +363,7 @@ impl<'a> MirLowerer<'a> {
         if name == "rt_unwrap_or_self"
             && args.len() == 1
             && args[0].ty != TypeId::ANY
-            && self.slot_holds_tagged_value(args[0].ty)
+            && self.slot_holds_tagged_optional(args[0].ty)
             && matches!(
                 expr_ty,
                 TypeId::I8 | TypeId::I16 | TypeId::I32 | TypeId::I64 | TypeId::U8 | TypeId::U16 | TypeId::U32
@@ -381,8 +422,8 @@ impl<'a> MirLowerer<'a> {
         if name == "rt_unwrap_or_self"
             && args.len() == 1
             && args[0].ty != TypeId::ANY
-            && self.slot_holds_tagged_value(args[0].ty)
-            && matches!(expr_ty, TypeId::BOOL | TypeId::F32 | TypeId::F64)
+            && self.slot_holds_tagged_optional(args[0].ty)
+            && matches!(expr_ty, TypeId::BOOL | TypeId::F32 | TypeId::F64 | TypeId::U64)
         {
             let arg_reg = self.lower_expr(&args[0])?;
             let raw_result = self.with_func(|func, current_block| {
@@ -394,6 +435,13 @@ impl<'a> MirLowerer<'a> {
                 });
                 dest
             })?;
+            // `u64` payloads (BoxInt or `rt_value_u64`-tagged) are decoded by
+            // `rt_value_as_u64`. The explicit `Option<u64>` enum slot is not
+            // `slot_holds_tagged_value`, so `unbox_scalar_for_raw_slot` would
+            // skip the decode and leave the tagged word (5 printed as 40).
+            if expr_ty == TypeId::U64 {
+                return self.unbox_u64_runtime_value(raw_result);
+            }
             return self.unbox_scalar_for_raw_slot(expr_ty, args[0].ty, raw_result);
         }
 
@@ -401,7 +449,26 @@ impl<'a> MirLowerer<'a> {
         // the runtime's tagged slot. Decode a native scalar only after the
         // checked helper has had the chance to trap on None/Err.
         if matches!(name, "rt_enum_payload" | "rt_unwrap_or_trap") && args.len() == 1 {
-            let arg_reg = self.lower_expr(&args[0])?;
+            // `xs.pop().unwrap()` (and first/last/remove): the typed accessor
+            // lowering unboxes scalar elements right after the runtime call,
+            // which would hand this checked helper a NATIVE word — a present 3
+            // reads as nil and an absent nil reads as 3. Ask the accessor to
+            // return the raw slot; the unbox below then runs on the checked
+            // payload. Only a direct (non-call) receiver is deferred so the
+            // flag cannot be consumed by an inner accessor first.
+            // doc/08_tracking/bug/stage2_unwrap_on_array_pop_yields_nil_2026-09-13.md
+            let defers_accessor_unbox = name == "rt_unwrap_or_trap"
+                && matches!(
+                    &args[0].kind,
+                    crate::hir::HirExprKind::MethodCall { receiver, method, args: accessor_args, .. }
+                        if !matches!(receiver.kind, crate::hir::HirExprKind::MethodCall { .. })
+                            && ((accessor_args.is_empty() && matches!(method.as_str(), "first" | "last" | "pop"))
+                                || (accessor_args.len() == 1 && method == "remove"))
+                );
+            let previous = std::mem::replace(&mut self.defer_accessor_unbox, defers_accessor_unbox);
+            let arg_reg = self.lower_expr(&args[0]);
+            self.defer_accessor_unbox = previous;
+            let arg_reg = arg_reg?;
             let raw_result = self.with_func(|func, current_block| {
                 let dest = func.new_vreg();
                 let block = func.block_mut(current_block).unwrap();
@@ -548,6 +615,12 @@ impl<'a> MirLowerer<'a> {
             let arg = &args[0];
             let arg_reg = self.lower_expr(arg)?;
 
+            // Flat struct/class values have no runtime type header; render
+            // them field by field (see emit_struct_to_string).
+            if let Some(rendered) = self.emit_struct_to_string(arg_reg, arg.ty)? {
+                return Ok(rendered);
+            }
+
             // U64 and I64 must both bypass BoxInt: it packs the payload as
             // `(value << 3) | TAG_INT`, so only a signed 61-bit magnitude
             // survives (i64::MAX -> -1, 2^62 -> 0). Same reasoning as the
@@ -565,6 +638,25 @@ impl<'a> MirLowerer<'a> {
                     block.instructions.push(MirInst::Call {
                         dest: Some(dest),
                         target: CallTarget::from_name(raw_fn),
+                        args: vec![arg_reg],
+                    });
+                    dest
+                });
+            }
+
+            // Flat primitive optional (`i64?`/`f64?`/`bool?`, HirType::Pointer):
+            // render as `Option::Some(v)` / `Option::None` (seed optional
+            // semantics = pure Simple). At this sink the value is already a
+            // TAGGED RuntimeValue (measured: stored 3 arrives as word 24), so
+            // the raw-payload rt_opt_* helpers do not apply. Bug:
+            // doc/08_tracking/bug/parse_family_strips_option_jit_native_2026-08-02.md
+            if self.flat_opt_to_string_fn(arg.ty).is_some() {
+                return self.with_func(|func, current_block| {
+                    let dest = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::Call {
+                        dest: Some(dest),
+                        target: CallTarget::from_name("rt_opt_value_to_string"),
                         args: vec![arg_reg],
                     });
                     dest
@@ -694,8 +786,13 @@ impl<'a> MirLowerer<'a> {
             "print" | "println" | "eprint" | "eprintln" | "print_raw" | "eprint_raw" | "dprint"
         ) {
             let mut boxed_arg_regs = Vec::new();
+            let mut fresh_print_strings = Vec::new();
             for arg in args {
                 let arg_reg = self.lower_expr(arg)?;
+                if let Some(rendered) = self.emit_struct_to_string(arg_reg, arg.ty)? {
+                    boxed_arg_regs.push(rendered);
+                    continue;
+                }
                 // BoxInt/BoxFloat pack a value into the 61-bit tagged-int
                 // RuntimeValue payload (`(value << 3) | TAG_INT`); any i64/u64
                 // magnitude outside that range silently loses its top bits
@@ -719,6 +816,7 @@ impl<'a> MirLowerer<'a> {
                         });
                         stringified
                     })?;
+                    fresh_print_strings.push(stringified);
                     boxed_arg_regs.push(stringified);
                     continue;
                 }
@@ -739,28 +837,35 @@ impl<'a> MirLowerer<'a> {
                 // fixed here (full tagging was scoped out as a 7-site,
                 // hot-path, bootstrap-only-engine change). See
                 // doc/08_tracking/bug/interp_index_of_digit_leading_literal_2026-07-22.md.
+                // Exception: `parse_int`/`parse_i32`/`parse_i64` are typed as the
+                // flat `i64?` (hir/lower/expr/mod.rs) but `rt_string_parse_int`
+                // returns a TAGGED int or NIL, so the raw renderer printed
+                // `Option::Some(984)` for `"123".parse_int()`. Render that
+                // producer with the tagged renderer, as interpolation already
+                // does. doc/08_tracking/bug/jit_primitive_method_parity_gaps_2026-11-13.md
+                let tagged_flat_opt = matches!(
+                    &arg.kind,
+                    crate::hir::HirExprKind::MethodCall { method, .. }
+                        if matches!(method.as_str(), "parse_int" | "parse_i32" | "parse_i64")
+                );
+                if tagged_flat_opt && self.flat_opt_to_string_fn(arg.ty).is_some() {
+                    let stringified = self.with_func(|func, current_block| {
+                        let stringified = func.new_vreg();
+                        let block = func.block_mut(current_block).unwrap();
+                        block.instructions.push(MirInst::Call {
+                            dest: Some(stringified),
+                            target: CallTarget::from_name("rt_opt_value_to_string"),
+                            args: vec![arg_reg],
+                        });
+                        stringified
+                    })?;
+                    fresh_print_strings.push(stringified);
+                    boxed_arg_regs.push(stringified);
+                    continue;
+                }
                 if let Some(registry) = self.type_registry {
-                    if let Some(HirType::Pointer { inner, .. }) = registry.get(arg.ty) {
-                        let inner = *inner;
-                        let opt_to_string_fn = if inner == TypeId::BOOL {
-                            Some("rt_opt_bool_to_string")
-                        } else if matches!(
-                            inner,
-                            TypeId::I64
-                                | TypeId::U64
-                                | TypeId::I32
-                                | TypeId::U32
-                                | TypeId::I16
-                                | TypeId::U16
-                                | TypeId::U8
-                        ) {
-                            Some("rt_opt_i64_to_string")
-                        } else if matches!(inner, TypeId::F32 | TypeId::F64) {
-                            Some("rt_opt_f64_to_string")
-                        } else {
-                            None
-                        };
-                        if let Some(fn_name) = opt_to_string_fn {
+                    if let Some(HirType::Pointer { .. }) = registry.get(arg.ty) {
+                        if let Some(fn_name) = self.flat_opt_to_string_fn(arg.ty) {
                             let stringified = self.with_func(|func, current_block| {
                                 let stringified = func.new_vreg();
                                 let block = func.block_mut(current_block).unwrap();
@@ -771,6 +876,7 @@ impl<'a> MirLowerer<'a> {
                                 });
                                 stringified
                             })?;
+                            fresh_print_strings.push(stringified);
                             boxed_arg_regs.push(stringified);
                             continue;
                         }
@@ -832,10 +938,14 @@ impl<'a> MirLowerer<'a> {
                     };
                     boxed_arg_regs.push(boxed);
                 } else {
+                    if super::array_move::is_fresh_string_expr(arg) {
+                        fresh_print_strings.push(arg_reg);
+                    }
                     boxed_arg_regs.push(arg_reg);
                 }
             }
             let target = CallTarget::from_name(name);
+            let drop_print_temps = self.block_array_release && !fresh_print_strings.is_empty();
             return self.with_func(|func, current_block| {
                 let dest = func.new_vreg();
                 let block = func.block_mut(current_block).unwrap();
@@ -844,6 +954,14 @@ impl<'a> MirLowerer<'a> {
                     target,
                     args: boxed_arg_regs,
                 });
+                if drop_print_temps {
+                    for temp in fresh_print_strings {
+                        block.instructions.push(MirInst::Drop {
+                            value: temp,
+                            ty: TypeId::STRING,
+                        });
+                    }
+                }
                 dest
             });
         }
@@ -853,6 +971,19 @@ impl<'a> MirLowerer<'a> {
         for arg in args {
             arg_regs.push(self.lower_expr(arg)?);
         }
+
+        let fresh_string_args: Vec<VReg> = if self.block_array_release
+            && matches!(
+                name,
+                "rt_string_concat" | "rt_value_to_string" | "rt_value_format_string"
+            ) {
+            args.iter()
+                .zip(arg_regs.iter())
+                .filter_map(|(arg, reg)| super::array_move::is_fresh_string_expr(arg).then_some(*reg))
+                .collect()
+        } else {
+            Vec::new()
+        };
 
         // Create a call to the builtin function
         let target = CallTarget::from_name(name);
@@ -864,6 +995,12 @@ impl<'a> MirLowerer<'a> {
                 target,
                 args: arg_regs,
             });
+            for reg in fresh_string_args {
+                block.instructions.push(MirInst::Drop {
+                    value: reg,
+                    ty: TypeId::STRING,
+                });
+            }
             dest
         })
     }

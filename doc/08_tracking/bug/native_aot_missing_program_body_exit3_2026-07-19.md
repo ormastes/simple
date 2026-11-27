@@ -84,3 +84,29 @@ SIMPLE_RUNTIME_PATH="$PWD/build/simple-core" SIMPLE_LINKER=ld \
 SHOWCASE_RESOLUTION=320x240 /tmp/g2d ; echo $?   # -> silent, 3
 ```
 
+
+## Re-verification 2026-11-25 (release/1.0.0, work/p2w3-ac-20261125) — fix confirmed in source; native execution blocked by unrelated Windows linker defect
+
+Source inspection at release/1.0.0 confirms both halves of the resolution are
+present:
+
+1. **Fail-loud fix:** `src/compiler_rust/compiler/src/pipeline/execution.rs:1170-1219`
+   hard-errors with `UNSUPPORTED_FEATURE`, listing every interpreter-required
+   function with its `FallbackReasons`, unless `SIMPLE_NATIVE_ALLOW_INTERP_CALLS=1`
+   or bootstrap mode — exactly the fix this doc records. The comment at :1175
+   cites this doc.
+2. **The follow-up FString narrowing also landed:**
+   `src/compiler_rust/compiler/src/compilability.rs:81-85,767+` — FString
+   constructs proven to lower to native calls (`MirInst::FStringFormat` in
+   `codegen/llvm/functions.rs`) no longer force interpreter routing, so plain
+   string interpolation no longer trips the classifier.
+
+Execution limit, stated plainly: a native-compile smoke on this Windows host
+(`bin/simple.exe compile --native` on a 5-line interpolation repro) could not
+reach the link step — the seed driver passes Unix-style `-o <path>` to
+`lld-link`, which ignores it and then fails with
+`lld-link: error: could not open '<output>': No such file or directory`.
+That is a separate, unrelated Windows-lane driver/linker-argument defect in
+the Rust seed (not this bug, not fixed here per the no-Rust-builds rule). The
+interp-call fail-loud path itself was therefore verified by code inspection
+only. Status: CLOSED (unchanged).

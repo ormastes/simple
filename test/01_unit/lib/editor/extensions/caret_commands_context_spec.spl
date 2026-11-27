@@ -1,0 +1,54 @@
+"""caret.* commands route to cs commands; keybinding `when` clauses go through context_keys."""
+# @req REQ-CARET-EXT-003
+use std.spec.*
+use std.editor.extensions.host.*
+use std.editor.extensions.manifest.*
+use std.editor.extensions.builtin.caret_workbench_ext.{caret_command_cs_line}
+
+fn when_manifest() -> ExtensionManifest:
+    var m = extension_manifest_basic("when-demo", "1.0.0", "", ["onCommand:when.demo.go"],
+        [ExtensionCommand(id: "when.demo.go", title: "Go", category: "Demo")], [])
+    m.contributes_keybindings = [ExtensionKeybinding(command: "when.demo.go", key: "Ctrl+Alt+G", when: "caret.composerFocus && !caret.terminalFocus")]
+    m
+
+describe "caret command routing":
+    it "maps caret.agent.quick_switch to the cs /switch command":
+        step("pure mapping")
+        expect(caret_command_cs_line("caret.agent.quick_switch", "2")).to_equal("/switch 2")
+        expect(caret_command_cs_line("caret.agent.next_attention", "")).to_equal("")
+        expect(caret_command_cs_line("other.cmd", "2")).to_equal("")
+
+    it "the production host dispatches caret.agent.quick_switch to the cs line":
+        step("dispatch through extension_host_with_builtin_handlers")
+        val host = extension_host_with_builtin_handlers()
+        match host.dispatch_command("caret.agent.quick_switch", "2"):
+            case Ok(line): expect(line).to_equal("/switch 2")
+            case Err(e): expect(e).to_equal("")
+
+    it "quick_switch without a target is an error, not a bare /switch":
+        step("empty payload")
+        val host = extension_host_with_builtin_handlers()
+        match host.dispatch_command("caret.agent.quick_switch", ""):
+            case Ok(line): expect(line).to_equal("<error expected>")
+            case Err(e): expect(e.contains("target")).to_equal(true)
+
+describe "when clauses via context keys":
+    it "a contributed keybinding resolves only while its when clause holds":
+        step("activate and toggle context keys")
+        val host = ExtensionHost.new()
+        host.register_manifest(when_manifest(), "<test>")
+        expect(host.activate("when-demo")).to_equal(true)
+        expect(host.contributed_keybinding_command("Ctrl+Alt+G", "normal")).to_equal("")
+        host.set_context_keys(["caret.composerFocus"])
+        expect(host.contributed_keybinding_command("Ctrl+Alt+G", "normal")).to_equal("when.demo.go")
+        host.set_context_keys(["caret.composerFocus", "caret.terminalFocus"])
+        expect(host.contributed_keybinding_command("Ctrl+Alt+G", "normal")).to_equal("")
+
+    it "an empty when clause always resolves":
+        step("empty when")
+        val host = ExtensionHost.new()
+        var m = when_manifest()
+        m.contributes_keybindings = [ExtensionKeybinding(command: "when.demo.go", key: "Ctrl+Alt+G", when: "")]
+        host.register_manifest(m, "<test>")
+        host.activate("when-demo")
+        expect(host.contributed_keybinding_command("Ctrl+Alt+G", "normal")).to_equal("when.demo.go")

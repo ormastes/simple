@@ -1,11 +1,12 @@
+use compiler.core.interpreter._EvalOps.call_method_eval.{bdd_nil_matcher_receiver, eval_bdd_nil_matcher}
 # Interpreter eval: field/index/slice access, literals, assignment, comprehensions.
 # Explicit owners for names the seed resolved through its flat namespace;
 # the pure-Simple HIR resolves per module and reported them as unresolved.
 use compiler.core.ast.{decl_fn, expr_get}
-use compiler.core.ast_expr.{EXPR_FIELD_ACCESS, EXPR_IDENT, EXPR_INDEX, EXPR_RANGE, expr_i_val}
+use compiler.core.ast_expr.{EXPR_FIELD_ACCESS, EXPR_IDENT, EXPR_INDEX, EXPR_RANGE, expr_owner_int, expr_owner_int_set}
 use compiler.core.ast_stmt.{stmt_expr_stmt}
 use compiler.core.interpreter.eval.{coverage_owner_file, eval_current_decl_id, eval_expr, eval_had_error, eval_return_value}
-use compiler.core.interpreter.eval.{eval_returning, eval_set_error}
+use compiler.core.interpreter.eval.{eval_option_binding_value, eval_returning, eval_set_error}
 use compiler.core.interpreter.eval_tables.{decl_owner_file_set, enum_table_lookup, func_table_lookup, func_table_register}
 use compiler.frontend.core.interpreter.eval_ops.*
 # Core Interpreter — Complex Expression Evaluators
@@ -23,11 +24,11 @@ use compiler.frontend.core.interpreter.eval_ops.*
 # All evaluation returns a value_id (i64). Errors indicated by -1 (VAL_NONE).
 
 use compiler.core.types.{TYPE_VOID, TYPE_BOOL, TYPE_I64, TYPE_F64, TYPE_TEXT, TYPE_ANY}
-use compiler.core.monomorphize.{mono_cache_init, mono_cache_lookup, mono_cache_register, mono_specialize}
 use compiler.core.interpreter.env.*
 use compiler.core.interpreter.value.*
 use compiler.core.interpreter.ops.*
-use compiler.core.interpreter.eval_calls.{val_copy_if_value_struct}
+use compiler.core.interpreter.eval_calls.{val_copy_if_value_struct, val_make_array_snapshot}
+use compiler.core.interpreter.value_places.{eval_mutable_value_place, eval_prepare_value_place}
 use compiler.core.interpreter.resolve.{resolve_is_fast_local}
 
 # Raw O(1) byte read out of the text buffer. Registered for this engine in
@@ -54,11 +55,29 @@ extern fn rt_string_byte_at(s: text, index: i64) -> i64
 # in sync was already attempted once (113f0864c7a fixed char_code_at in both)
 # and is precisely what let the drift persist. Do not re-add a second copy;
 # text_byte_at_dispatch_spec.spl now asserts eval_methods.spl does not exist.
+fn _core_eval_trim_matches(s: text, pat: text, from_end: bool) -> text:
+    val pat_bytes = pat.byte_len()
+    if pat_bytes <= 0:
+        return s
+    var out = s
+    if from_end:
+        while out.ends_with(pat):
+            out = out.substring(0, out.byte_len() - pat_bytes)
+    else:
+        while out.starts_with(pat):
+            out = out.substring(pat_bytes, out.byte_len())
+    out
+
 fn eval_text_method(receiver: i64, method_name: text, arg_eids: [i64]) -> i64:
     val s = val_get_text(receiver)
 
-    if method_name == "len":
+    if method_name == "len" or method_name == "length" or method_name == "char_count":
         return val_make_int(s.len())
+
+    # Explicit byte count (design text_len_counts_characters_2026-11-07);
+    # the core lane had no arm, so every migrated stdlib caller hit "no method".
+    if method_name == "byte_len":
+        return val_make_int(s.byte_len())
 
     if method_name == "repeat":
         if arg_eids.len() == 0:
@@ -140,7 +159,7 @@ fn eval_text_method(receiver: i64, method_name: text, arg_eids: [i64]) -> i64:
             var s_start = start
             var s_end = end
             if s_start < 0: s_start = 0
-            if s_end > s.len(): s_end = s.len()
+            if s_end > s.byte_len(): s_end = s.byte_len()
             if s_start > s_end: s_start = s_end
             return val_make_text(s.substring(s_start, s_end))
         elif arg_eids.len() == 1:
@@ -149,8 +168,8 @@ fn eval_text_method(receiver: i64, method_name: text, arg_eids: [i64]) -> i64:
             val start = val_get_int(start_val)
             var s_start = start
             if s_start < 0: s_start = 0
-            if s_start > s.len(): s_start = s.len()
-            return val_make_text(s.substring(s_start, s.len()))
+            if s_start > s.byte_len(): s_start = s.byte_len()
+            return val_make_text(s.substring(s_start, s.byte_len()))
         return val_make_text(s)
 
     # slice is a byte-offset alias of substring, with the same clamping. Kept
@@ -174,7 +193,7 @@ fn eval_text_method(receiver: i64, method_name: text, arg_eids: [i64]) -> i64:
             var sl1_start = val_get_int(sl1_start_val)
             if sl1_start < 0: sl1_start = 0
             if sl1_start > s.len(): sl1_start = s.len()
-            return val_make_text(s.substring(sl1_start, s.len()))
+            return val_make_text(s.substring(sl1_start, s.byte_len()))
         return val_make_text(s)
 
     if method_name == "starts_with":
@@ -190,7 +209,11 @@ fn eval_text_method(receiver: i64, method_name: text, arg_eids: [i64]) -> i64:
             val suffix_val = eval_expr(arg_eids[0])
             if eval_had_error: return -1
             val suffix = val_get_text(suffix_val)
-            return val_make_bool(s.ends_with(suffix))
+            # bug=pin_ends_with_i64_bool_arg_2026-11-21: the frozen native Phase 2 types
+            # rt_string_ends_with as i64; a direct bool arg fails llc (i64 vs i1).
+            if s.ends_with(suffix):
+                return val_make_bool(true)
+            return val_make_bool(false)
         return val_make_bool(false)
 
     if method_name == "replace":
@@ -238,7 +261,7 @@ fn eval_text_method(receiver: i64, method_name: text, arg_eids: [i64]) -> i64:
             var result: [i64] = []
             for p in limited:
                 result.push(val_make_text(p))
-            return val_make_array(result)
+            return val_make_array_snapshot(result)
         return val_make_array([val_make_text(s)])
 
     if method_name == "split_lines" or method_name == "lines":
@@ -256,10 +279,26 @@ fn eval_text_method(receiver: i64, method_name: text, arg_eids: [i64]) -> i64:
         var result: [i64] = []
         for p in parts:
             result.push(val_make_text(p))
-        return val_make_array(result)
+        return val_make_array_snapshot(result)
 
     if method_name == "trim" or method_name == "strip":
         return val_make_text(s.trim())
+
+    if method_name == "trim_start" or method_name == "trim_left" or method_name == "trim_start_matches":
+        if arg_eids.len() >= 1:
+            val pat_val = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            return val_make_text(_core_eval_trim_matches(s, val_get_text(pat_val), false))
+        if method_name != "trim_start_matches":
+            return val_make_text(s.trim_start())
+
+    if method_name == "trim_end" or method_name == "trim_right" or method_name == "trim_end_matches":
+        if arg_eids.len() >= 1:
+            val pat_val = eval_expr(arg_eids[0])
+            if eval_had_error: return -1
+            return val_make_text(_core_eval_trim_matches(s, val_get_text(pat_val), true))
+        if method_name != "trim_end_matches":
+            return val_make_text(s.trim_end())
 
     # `find` / `find_str` are aliases of index_of and carry the SAME two-arg
     # `(needle, start)` form. They used to ignore the start argument and answer
@@ -384,10 +423,17 @@ fn eval_text_method(receiver: i64, method_name: text, arg_eids: [i64]) -> i64:
 
 # ===== Field Access =====
 
-fn eval_field_access(eid: i64) -> i64:
+pub fn eval_field_access(eid: i64) -> i64:
     val e_node = expr_get(eid)
     val base_eid = e_node.left
     val field_name = e_node.s_val
+
+    # Bare BDD nil matchers are assertions, not fields of the expect handle.
+    # Restrict the interception to the matcher-chain syntax; ordinary user
+    # objects with identically named fields continue through field lookup.
+    if field_name == "to_be_nil" or field_name == "to_not_be_nil":
+        if bdd_nil_matcher_receiver(base_eid) >= 0:
+            return eval_bdd_nil_matcher(base_eid, field_name)
 
     # Check for enum variant access: EnumType.Variant (no-arg)
     val base_node2 = expr_get(base_eid)
@@ -408,7 +454,7 @@ fn eval_field_access(eid: i64) -> i64:
 
     if val_is_struct(base_val):
         # Fast path: cached field index from previous access
-        val cached_idx = expr_i_val[eid]
+        val cached_idx = expr_owner_int(eid)
         if cached_idx >= 0:
             val ok = val_struct_check_field_idx(base_val, cached_idx, field_name)
             if ok:
@@ -416,7 +462,7 @@ fn eval_field_access(eid: i64) -> i64:
         # Slow path: linear search + cache index
         val fi = val_struct_find_field_idx(base_val, field_name)
         if fi >= 0:
-            expr_i_val[eid] = fi
+            expr_owner_int_set(eid, fi)
             return val_struct_get_field_idx(base_val, fi)
         eval_set_error("no field '" + field_name + "' on struct " + val_get_struct_name(base_val))
         return -1
@@ -426,7 +472,7 @@ fn eval_field_access(eid: i64) -> i64:
 
 # ===== Index Expression =====
 
-fn eval_index_expr(eid: i64) -> i64:
+pub fn eval_index_expr(eid: i64) -> i64:
     val e_node = expr_get(eid)
     val base_eid = e_node.left
     val index_eid = e_node.right
@@ -437,15 +483,14 @@ fn eval_index_expr(eid: i64) -> i64:
     if eval_had_error: return -1
 
     if val_is_array(base_val):
-        val elements = val_get_array(base_val)
         if not val_is_int(index_val):
             eval_set_error("type error: array index must be int, got " + val_kind_name(val_get_kind(index_val)))
             return -1
         val idx = val_get_int(index_val)
         if idx >= 0:
-            val len = elements.len()
+            val len = val_array_len(base_val)
             if idx < len:
-                return elements[idx]
+                return val_array_at(base_val, idx)
         eval_set_error("array index out of bounds: " + "{idx}")
         return -1
 
@@ -471,7 +516,7 @@ fn eval_index_expr(eid: i64) -> i64:
 
 # ===== Slice Expression =====
 
-fn eval_slice_expr(eid: i64) -> i64:
+pub fn eval_slice_expr(eid: i64) -> i64:
     """Evaluate slice expression: base[start:end]
 
     Handles string and array slicing with support for:
@@ -553,37 +598,37 @@ fn eval_slice_expr(eid: i64) -> i64:
             for i in start_idx..end_idx:
                 result.push(elements[i])
 
-        return val_make_array(result)
+        return val_make_array_snapshot(result)
 
     eval_set_error("cannot slice " + val_kind_name(val_get_kind(base_val)))
     -1
 
 # ===== Array Literal =====
 
-fn eval_array_lit(eid: i64) -> i64:
+pub fn eval_array_lit(eid: i64) -> i64:
     val elem_eids = expr_get(eid).args
     var elements: [i64] = []
     for e_eid in elem_eids:
         val ev = eval_expr(e_eid)
         if eval_had_error: return -1
-        elements.push(ev)
+        elements.push(val_copy_if_value_struct(ev))
     val_make_array(elements)
 
 # ===== Tuple Literal =====
 # Tuples are evaluated as arrays in the interpreter
 
-fn eval_tuple_lit(eid: i64) -> i64:
+pub fn eval_tuple_lit(eid: i64) -> i64:
     val elem_eids = expr_get(eid).args
     var elements: [i64] = []
     for e_eid in elem_eids:
         val ev = eval_expr(e_eid)
         if eval_had_error: return -1
-        elements.push(ev)
+        elements.push(val_copy_if_value_struct(ev))
     val_make_array(elements)
 
 # ===== Struct Literal =====
 
-fn eval_struct_lit(eid: i64) -> i64:
+pub fn eval_struct_lit(eid: i64) -> i64:
     val e_node = expr_get(eid)
     val type_name = e_node.s_val
     val field_name_eids = e_node.args
@@ -598,12 +643,12 @@ fn eval_struct_lit(eid: i64) -> i64:
     for fv_eid in field_value_eids:
         val fv = eval_expr(fv_eid)
         if eval_had_error: return -1
-        field_values.push(fv)
+        field_values.push(val_copy_if_value_struct(fv))
 
     val_make_struct(type_name, field_names, field_values)
 
 # Dict literals use the existing dynamic-field struct representation.
-fn eval_dict_lit(eid: i64) -> i64:
+pub fn eval_dict_lit(eid: i64) -> i64:
     val e_node = expr_get(eid)
     val key_eids = e_node.args
     val value_eids = e_node.stmts
@@ -616,19 +661,20 @@ fn eval_dict_lit(eid: i64) -> i64:
         val value = eval_expr(value_eids[i])
         if eval_had_error: return -1
         field_names.push(val_to_text(key))
-        field_values.push(value)
+        field_values.push(val_copy_if_value_struct(value))
         i = i + 1
     val_make_struct("__dict", field_names, field_values)
 
 # ===== Assignment Expression =====
 
-fn eval_assign_expr(eid: i64) -> i64:
+pub fn eval_assign_expr(eid: i64) -> i64:
     val e_node = expr_get(eid)
     val target_eid = e_node.left
     val value_eid = e_node.right
 
-    val new_val = eval_expr(value_eid)
+    val incoming = eval_expr(value_eid)
     if eval_had_error: return -1
+    val new_val = val_copy_if_value_struct(incoming)
 
     val target_node = expr_get(target_eid)
     val target_tag = target_node.tag
@@ -636,12 +682,18 @@ fn eval_assign_expr(eid: i64) -> i64:
         val name = target_node.s_val
         val ok = env_assign(name, new_val)
         if ok == false:
+            val self_vid = env_lookup("self")
+            if self_vid >= 0 and val_is_struct(self_vid) and val_struct_find_field_idx(self_vid, name) >= 0:
+                val cls_name = val_get_struct_name(self_vid)
+                if cls_name != "" and cls_name != "__dict" and cls_name != "List" and cls_name != "Option" and cls_name != "Result" and not cls_name.starts_with("Option::") and not cls_name.starts_with("Result::"):
+                    eval_set_error("invalid assignment: `" + name + "` is a field of `" + cls_name + "`; write `self." + name + " = ...` to assign the field")
+                    return -1
             eval_set_error("undefined variable: " + name)
             return -1
         # LOAD_FAST: the resolver gave this target the same fast-local slot
         # eval_ident reads; update it too, or the next read returns the stale
         # pre-assignment value (eval_stmt_assign does the same).
-        var fast_slot = expr_i_val[target_eid]
+        var fast_slot = expr_owner_int(target_eid)
         if fast_slot < 0 and eval_current_decl_id >= 0:
             fast_slot = resolve_is_fast_local(eval_current_decl_id, name)
         if fast_slot >= 0 and env_has_frame():
@@ -651,7 +703,7 @@ fn eval_assign_expr(eid: i64) -> i64:
     if target_tag == EXPR_FIELD_ACCESS:
         val base_eid2 = target_node.left
         val field_name = target_node.s_val
-        val base_val = eval_expr(base_eid2)
+        val base_val = eval_mutable_value_place(base_eid2)
         if eval_had_error: return -1
         if val_is_struct(base_val):
             # S1 copy-site 4 (struct field store). THIS is the live path for
@@ -660,9 +712,9 @@ fn eval_assign_expr(eid: i64) -> i64:
             # eval_stmts.spl's STMT_ASSIGN handler. Storing a value-type struct
             # stores a SNAPSHOT; class values fall through the gate unchanged
             # and stay aliased.
-            val store_val = val_copy_if_value_struct(new_val)
+            val store_val = new_val
             # Fast path: cached field index
-            val cached_idx = expr_i_val[target_eid]
+            val cached_idx = expr_owner_int(target_eid)
             if cached_idx >= 0:
                 val ok = val_struct_check_field_idx(base_val, cached_idx, field_name)
                 if ok:
@@ -672,7 +724,7 @@ fn eval_assign_expr(eid: i64) -> i64:
             val fi = val_struct_find_field_idx(base_val, field_name)
             if fi >= 0:
                 val_struct_set_field_idx(base_val, fi, store_val)
-                expr_i_val[target_eid] = fi
+                expr_owner_int_set(target_eid, fi)
                 return store_val
             eval_set_error("no field '" + field_name + "' on struct " + val_get_struct_name(base_val))
             return -1
@@ -680,9 +732,11 @@ fn eval_assign_expr(eid: i64) -> i64:
         return -1
 
     if target_tag == EXPR_INDEX:
-        val base_val = eval_expr(target_node.left)
+        val base_place = eval_prepare_value_place(target_node.left)
         if eval_had_error: return -1
         val key_val = eval_expr(target_node.right)
+        if eval_had_error: return -1
+        val base_val = base_place.mutable_value()
         if eval_had_error: return -1
         if val_is_struct(base_val) and val_get_struct_name(base_val) == "__dict":
             val_struct_upsert_field(base_val, val_to_text(key_val), new_val)
@@ -697,11 +751,18 @@ fn eval_assign_expr(eid: i64) -> i64:
     eval_set_error("invalid assignment target")
     -1
 
-fn eval_compound_assign_expr(eid: i64) -> i64:
+pub fn eval_compound_assign_expr(eid: i64) -> i64:
     val e_node = expr_get(eid)
     val op = e_node.i_val
     val target_eid = e_node.left
     val value_eid = e_node.right
+
+    # Evaluation order contract (owner decision 2026-11-06, data plan W2a):
+    # the right-hand side first, then the place (receiver, then index
+    # subexpressions outer to inner), each exactly once; then one read and
+    # one write of that place.
+    val rhs_val = eval_expr(value_eid)
+    if eval_had_error: return -1
 
     val target_node = expr_get(target_eid)
     val target_tag = target_node.tag
@@ -711,8 +772,6 @@ fn eval_compound_assign_expr(eid: i64) -> i64:
         if old_val < 0:
             eval_set_error("undefined variable: " + name)
             return -1
-        val rhs_val = eval_expr(value_eid)
-        if eval_had_error: return -1
         val new_val = val_compound_op(op, old_val, rhs_val)
         if new_val < 0:
             val err = ops_get_error()
@@ -720,6 +779,15 @@ fn eval_compound_assign_expr(eid: i64) -> i64:
                 eval_set_error(err)
             return -1
         env_assign(name, new_val)
+        # LOAD_FAST: eval_ident reads the resolver's fast-local slot before the
+        # scope map, so the slot must take the new value too (as plain
+        # assignment does). Without it `x += 1` on a function local was a
+        # silent no-op and every counted `while` loop spun forever.
+        var fast_slot = expr_owner_int(target_eid)
+        if fast_slot < 0 and eval_current_decl_id >= 0:
+            fast_slot = resolve_is_fast_local(eval_current_decl_id, name)
+        if fast_slot >= 0 and env_has_frame():
+            env_set_local(fast_slot, new_val)
         return new_val
 
     # Field place: base.f op= rhs. The base sub-expression is evaluated ONCE and
@@ -728,12 +796,10 @@ fn eval_compound_assign_expr(eid: i64) -> i64:
     # it does not rebuild a copy), so this works at ARBITRARY hop depth:
     # `root.mid.inner.n += 1` resolves `root.mid.inner` to the real inner struct
     # and writes through it. Same place model as eval_assign_expr.
-    # Kept byte-identical to the copy in ../eval_access.spl — both definitions
-    # land in the same flat symbol registry, so they must not diverge.
     if target_tag == EXPR_FIELD_ACCESS:
         val fa_base_eid = target_node.left
         val fa_field = target_node.s_val
-        val fa_base = eval_expr(fa_base_eid)
+        val fa_base = eval_mutable_value_place(fa_base_eid)
         if eval_had_error: return -1
         if val_is_struct(fa_base) == false:
             eval_set_error("cannot compound-assign field on " + val_kind_name(val_get_kind(fa_base)))
@@ -743,8 +809,7 @@ fn eval_compound_assign_expr(eid: i64) -> i64:
             eval_set_error("no field '" + fa_field + "' on struct " + val_get_struct_name(fa_base))
             return -1
         val fa_old = val_struct_get_field_idx(fa_base, fa_idx)
-        val fa_rhs = eval_expr(value_eid)
-        if eval_had_error: return -1
+        val fa_rhs = rhs_val
         val fa_new = val_compound_op(op, fa_old, fa_rhs)
         if fa_new < 0:
             val fa_err = ops_get_error()
@@ -758,25 +823,25 @@ fn eval_compound_assign_expr(eid: i64) -> i64:
     # the element is updated through the base handle, so array value semantics are
     # unchanged (the base is whatever place the sub-expression already resolved to).
     if target_tag == EXPR_INDEX:
-        val ix_base = eval_expr(target_node.left)
+        val ix_place = eval_prepare_value_place(target_node.left)
         if eval_had_error: return -1
         val ix_key = eval_expr(target_node.right)
+        if eval_had_error: return -1
+        val ix_base = ix_place.mutable_value()
         if eval_had_error: return -1
 
         if val_is_array(ix_base):
             if val_is_int(ix_key):
-                val ix_elems = val_get_array(ix_base)
                 val ix_i = val_get_int(ix_key)
                 var ix_in_range = false
                 if ix_i >= 0:
-                    if ix_i < ix_elems.len():
+                    if ix_i < val_array_len(ix_base):
                         ix_in_range = true
                 if ix_in_range == false:
                     eval_set_error("array index out of bounds: " + "{ix_i}")
                     return -1
-                val ix_old = ix_elems[ix_i]
-                val ix_rhs = eval_expr(value_eid)
-                if eval_had_error: return -1
+                val ix_old = val_array_at(ix_base, ix_i)
+                val ix_rhs = rhs_val
                 val ix_new = val_compound_op(op, ix_old, ix_rhs)
                 if ix_new < 0:
                     val ix_err = ops_get_error()
@@ -793,8 +858,7 @@ fn eval_compound_assign_expr(eid: i64) -> i64:
                 eval_set_error("no key '" + ix_name + "' on " + val_get_struct_name(ix_base))
                 return -1
             val ix_sold = val_struct_get_field_idx(ix_base, ix_fi)
-            val ix_srhs = eval_expr(value_eid)
-            if eval_had_error: return -1
+            val ix_srhs = rhs_val
             val ix_snew = val_compound_op(op, ix_sold, ix_srhs)
             if ix_snew < 0:
                 val ix_serr = ops_get_error()
@@ -812,7 +876,7 @@ fn eval_compound_assign_expr(eid: i64) -> i64:
 
 # ===== Return Expression =====
 
-fn eval_return_expr(eid: i64) -> i64:
+pub fn eval_return_expr(eid: i64) -> i64:
     val value_eid = expr_get(eid).left
     var ret_val = val_make_nil()
     if value_eid >= 0:
@@ -832,8 +896,8 @@ fn eval_interpolation_segments(value: text) -> [text]:
     var escaped = false
     var i = 0
     while i < value.len():
-        val ch = value[i:i + 1]
-        val next = if i + 1 < value.len(): value[i + 1:i + 2] else: ""
+        val ch = value.substring(i, i + 1)
+        val next = if i + 1 < value.byte_len(): value.substring(i + 1, i + 2) else: ""
         if depth == 0 and ch == "{" and next == "{":
             current = current + "{"
             i = i + 1
@@ -865,7 +929,7 @@ fn eval_interpolation_segments(value: text) -> [text]:
     segments.push(current)
     segments
 
-fn eval_interpolated_string(eid: i64) -> i64:
+pub fn eval_interpolated_string(eid: i64) -> i64:
     val node = expr_get(eid)
     val parts = node.args
     val segments = eval_interpolation_segments(node.s_val)
@@ -885,29 +949,40 @@ fn eval_interpolated_string(eid: i64) -> i64:
 
 # ===== Null Coalesce =====
 
-fn eval_null_coalesce(eid: i64) -> i64:
+pub fn eval_null_coalesce(eid: i64) -> i64:
     val e_node = expr_get(eid)
     val left = eval_expr(e_node.left)
     if eval_had_error: return -1
-    if val_is_nil(left) == false: return left
-    eval_expr(e_node.right)
+    if val_is_nil(left): return eval_expr(e_node.right)
+    # Constructed `Option::*` / `Result::*` structs: None/Err (and a nil
+    # Some/Ok payload) take the fallback, Some/Ok unwrap — same as the seed.
+    # Kept identical to eval_access.spl (this copy wins the co-compiled
+    # name collision). core_interp_option_coalesce_and_presence_gaps_2026-11-06
+    if val_is_struct(left):
+        val variant_name = val_get_struct_name(left)
+        if variant_name.starts_with("Option::") or variant_name.starts_with("Result::"):
+            val unwrapped = eval_option_binding_value(left)
+            if val_is_nil(unwrapped): return eval_expr(e_node.right)
+            return unwrapped
+    left
 
 # ===== Enum Variant Construction =====
 
-fn eval_enum_variant_call(type_name: text, variant_name: text, arg_eids: [i64]) -> i64:
+pub fn eval_enum_variant_call(type_name: text, variant_name: text, arg_eids: [i64]) -> i64:
     # EnumType.Variant(payload) → struct with __tag and __payload fields
     val tag_val = val_make_text(variant_name)
     var payload_val = val_make_nil()
     if arg_eids.len() == 1:
         payload_val = eval_expr(arg_eids[0])
         if eval_had_error: return -1
+        payload_val = val_copy_if_value_struct(payload_val)
     elif arg_eids.len() > 1:
         # Multiple args → tuple payload
         var payload_elems: [i64] = []
         for aeid in arg_eids:
             val av = eval_expr(aeid)
             if eval_had_error: return -1
-            payload_elems.push(av)
+            payload_elems.push(val_copy_if_value_struct(av))
         payload_val = val_make_array(payload_elems)
     val full_name = type_name + "::" + variant_name
     var field_names: [text] = []
@@ -918,7 +993,7 @@ fn eval_enum_variant_call(type_name: text, variant_name: text, arg_eids: [i64]) 
     field_values.push(payload_val)
     val_make_struct(full_name, field_names, field_values)
 
-fn eval_enum_variant_access(type_name: text, variant_name: text) -> i64:
+pub fn eval_enum_variant_access(type_name: text, variant_name: text) -> i64:
     # EnumType.Variant (no parens) → struct with __tag, no payload
     val tag_val = val_make_text(variant_name)
     val full_name = type_name + "::" + variant_name
@@ -936,7 +1011,7 @@ fn eval_enum_variant_access(type_name: text, variant_name: text) -> i64:
 
 var lambda_counter: i64 = 0
 
-fn eval_lambda(eid: i64) -> i64:
+pub fn eval_lambda(eid: i64) -> i64:
     val e_node = expr_get(eid)
     val param_idents = e_node.args
     val body_exprs = e_node.stmts
@@ -973,7 +1048,7 @@ fn eval_lambda(eid: i64) -> i64:
 # ===== List Comprehension =====
 # EXPR_LIST_COMP: s_val=iter_var, left=iterable, right=body, extra=cond (-1 if none)
 
-fn eval_list_comp(eid: i64) -> i64:
+pub fn eval_list_comp(eid: i64) -> i64:
     val e_node = expr_get(eid)
     val iter_name = e_node.s_val
     val iterable_eid = e_node.left
@@ -989,11 +1064,11 @@ fn eval_list_comp(eid: i64) -> i64:
 
     val iterable_array = val_iterable_array(iterable_val)
     if iterable_array >= 0:
-        val elements = val_get_array(iterable_array)
+        val elements = val_get_array(val_copy_if_value_struct(iterable_array))
         for elem_vid in elements:
             if eval_had_error: break
             env_push_scope()
-            env_define(iter_name, elem_vid)
+            env_define(iter_name, val_copy_if_value_struct(elem_vid))
             # Check condition if present
             var include = true
             if cond_eid >= 0:
@@ -1007,7 +1082,7 @@ fn eval_list_comp(eid: i64) -> i64:
                 if eval_had_error:
                     env_pop_scope()
                     return -1
-                result_elements.push(body_val)
+                result_elements.push(val_copy_if_value_struct(body_val))
             env_pop_scope()
         return val_make_array(result_elements)
 
@@ -1024,8 +1099,10 @@ fn eval_list_comp(eid: i64) -> i64:
             val start_n = val_get_int(start_val)
             val end_n = val_get_int(end_val)
             var current = start_n
-            var _iter: i64 = 0
-            while _iter < 1000001:
+            # No iteration cap (unreachable via core_interpret — the iterable is
+            # evaluated first and eval_range returns an array — but the same silent
+            # 1,000,001 pattern is removed for consistency; see the caps bug doc).
+            while current <= end_n:
                 val should_stop = current > end_n
                 val at_limit = current == end_n
                 if inclusive != 0:
@@ -1047,10 +1124,11 @@ fn eval_list_comp(eid: i64) -> i64:
                     if eval_had_error:
                         env_pop_scope()
                         return -1
-                    result_elements.push(body_val)
+                    result_elements.push(val_copy_if_value_struct(body_val))
                 env_pop_scope()
+                # Same checked-increment parity guard as eval_for_expr.
+                if current == 9223372036854775807: break
                 current = current + 1
-                _iter = _iter + 1
             return val_make_array(result_elements)
 
     eval_set_error("comprehension: cannot iterate over " + val_kind_name(kind))
@@ -1059,7 +1137,7 @@ fn eval_list_comp(eid: i64) -> i64:
 # ===== Dict Comprehension =====
 # EXPR_DICT_COMP: s_val=iter_var, left=iterable, args=[key_body, val_body], extra=cond
 
-fn eval_dict_comp(eid: i64) -> i64:
+pub fn eval_dict_comp(eid: i64) -> i64:
     # Dict comprehension not supported in tree-walking interpreter (no dict value type)
     # Works via compiled path (HIR/MIR)
     eval_set_error("dict comprehension not supported in interpreter mode")

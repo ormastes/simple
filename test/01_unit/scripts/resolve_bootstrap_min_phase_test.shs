@@ -1,0 +1,238 @@
+#!/bin/sh
+# Unit contract test for scripts/bootstrap/resolve-bootstrap-compiler.shs --min-phase
+# and config/bootstrap/windows-msvc.sdn P3+ policy.
+set -eu
+
+repo=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+resolver="$repo/scripts/bootstrap/resolve-bootstrap-compiler.shs"
+msvc_cfg="$repo/config/bootstrap/windows-msvc.sdn"
+
+fx=$(mktemp -d) || { echo "ERROR — mktemp failed" >&2; exit 2; }
+trap 'rm -rf "$fx"' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+fail() {
+  echo "FAIL — $*" >&2
+  exit 1
+}
+
+sdn_key() {
+  awk -v key="$2" '
+    /^[[:space:]]*#/ { next }
+    { line=$0; sub(/[[:space:]]*#.*/, "", line)
+      if (line ~ "^[[:space:]]*" key "[[:space:]]*:") {
+        sub(/^[[:space:]]*[^:]+:[[:space:]]*/, "", line); sub(/[[:space:]]*$/, "", line)
+        print line; exit } }' "$1"
+}
+
+# 1. Verify config/bootstrap/windows-msvc.sdn required policy fields.
+[ -f "$msvc_cfg" ] || fail "missing $msvc_cfg"
+[ "$(sdn_key "$msvc_cfg" min_phase)" = "3" ] || fail "windows-msvc.sdn min_phase must be 3"
+[ "$(sdn_key "$msvc_cfg" target)" = "x86_64-pc-windows-msvc" ] || fail "windows-msvc.sdn target mismatch"
+[ "$(sdn_key "$msvc_cfg" runtime_bundle)" = "core-c-bootstrap" ] || fail "windows-msvc.sdn runtime_bundle mismatch"
+[ "$(sdn_key "$msvc_cfg" stack_reserve)" = "67108864" ] || fail "windows-msvc.sdn stack_reserve mismatch"
+[ "$(sdn_key "$msvc_cfg" allow_seed_fallback)" = "false" ] || fail "windows-msvc.sdn allow_seed_fallback must be false"
+[ "$(sdn_key "$msvc_cfg" linker_flavor)" = "msvc" ] || fail "windows-msvc.sdn linker_flavor must be msvc"
+[ "$(sdn_key "$msvc_cfg" windows_abi)" = "msvc" ] || fail "windows-msvc.sdn windows_abi must be msvc"
+[ "$(sdn_key "$msvc_cfg" stage3_cli_role)" = "bootstrap_only" ] || fail "windows-msvc.sdn stage3_cli_role must be bootstrap_only"
+
+# Set up an isolated git repo so SCV probe sources stay inside $fx/repo.
+mkdir -p "$fx/repo/config/bootstrap" "$fx/lane/stage1" "$fx/lane/stage2" "$fx/lane/stage3" "$fx/work" "$fx/fakebin"
+git -C "$fx/repo" init -q
+cp "$repo/config/bootstrap.sdn" "$fx/repo/config/bootstrap.sdn"
+cp "$msvc_cfg" "$fx/repo/config/bootstrap/windows-msvc.sdn"
+
+make_mock_compiler() {
+  dst=$1
+  marker=$2
+  cat > "$dst" <<EOF
+#!/bin/sh
+set -eu
+printf '%s\n' "$marker" >> "$fx/invoked.log"
+if [ "\${1:-}" = "--version" ]; then
+  echo "mock-simple-$marker"
+  exit 0
+fi
+if [ "\${1:-}" = "native-build" ] && [ "\${3:-}" = "-o" ]; then
+  cat > "\$4" <<'PROG'
+#!/bin/sh
+echo "bootstrap-compiler-probe"
+PROG
+  chmod +x "\$4"
+  exit 0
+fi
+exit 9
+EOF
+  chmod +x "$dst"
+}
+
+make_mock_compiler "$fx/lane/stage1/simple.exe" "stage1"
+make_mock_compiler "$fx/lane/stage2/simple.exe" "stage2"
+
+# 2. --help exits 0.
+sh "$resolver" --help >/dev/null 2>&1 || fail "--help failed"
+
+# 3. Invalid --min-phase values exit 2.
+for bad in 0 abc -1; do
+  set +e
+  sh "$resolver" --platform windows-x86_64 --min-phase "$bad" >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail "expected exit 2 for --min-phase $bad, got $rc"
+done
+set +e
+sh "$resolver" --platform windows-x86_64 --min-phase >/dev/null 2>&1
+rc=$?
+set -e
+[ "$rc" -eq 2 ] || fail "expected exit 2 for missing --min-phase value, got $rc"
+
+# 4. Local lane with only stage1+stage2: default config picks stage2 (backwards compat).
+: > "$fx/invoked.log"
+out=$(cd "$fx/repo" && env -u SIMPLE_BOOTSTRAP_COMPILER -u SIMPLE_BOOTSTRAP_MIN_PHASE \
+  SIMPLE_BOOTSTRAP_COMPILER=local \
+  sh "$resolver" --platform windows-x86_64 --config config/bootstrap.sdn \
+  --lane-dir "$fx/lane" --work-dir "$fx/work")
+[ "$out" = "$fx/lane/stage2/simple.exe 2" ] || fail "expected stage2 with default config, got '$out'"
+
+# 5. Same lane (only stage1+stage2) with --min-phase 3 MUST refuse without invoking stage1/stage2.
+: > "$fx/invoked.log"
+set +e
+out=$(cd "$fx/repo" && env -u SIMPLE_BOOTSTRAP_COMPILER -u SIMPLE_BOOTSTRAP_MIN_PHASE \
+  SIMPLE_BOOTSTRAP_COMPILER=local \
+  sh "$resolver" --platform windows-x86_64 --config config/bootstrap.sdn --min-phase 3 \
+  --lane-dir "$fx/lane" --work-dir "$fx/work" 2>"$fx/err5")
+rc=$?
+set -e
+[ "$rc" -eq 1 ] || fail "expected exit 1 with --min-phase 3 on stage1+stage2 lane, got $rc"
+[ -z "$out" ] || fail "expected empty stdout on refusal, got '$out'"
+[ ! -s "$fx/invoked.log" ] || fail "stage1/stage2 must not be invoked when min_phase=3"
+grep -Fq "phase >= 3" "$fx/err5" || fail "expected min_phase diagnostic in stderr"
+
+# 6. Same lane with --config config/bootstrap/windows-msvc.sdn MUST refuse (min_phase: 3).
+: > "$fx/invoked.log"
+set +e
+out=$(cd "$fx/repo" && env -u SIMPLE_BOOTSTRAP_COMPILER -u SIMPLE_BOOTSTRAP_MIN_PHASE \
+  SIMPLE_BOOTSTRAP_COMPILER=local \
+  sh "$resolver" --platform windows-x86_64 --config config/bootstrap/windows-msvc.sdn \
+  --lane-dir "$fx/lane" --work-dir "$fx/work" 2>"$fx/err6")
+rc=$?
+set -e
+[ "$rc" -eq 1 ] || fail "expected exit 1 with windows-msvc.sdn on stage1+stage2 lane, got $rc"
+[ ! -s "$fx/invoked.log" ] || fail "stage1/stage2 must not be invoked under windows-msvc.sdn"
+
+# 7. Auto-select windows-msvc.sdn when --platform x86_64-pc-windows-msvc and --config omitted.
+: > "$fx/invoked.log"
+set +e
+out=$(cd "$fx/repo" && env -u SIMPLE_BOOTSTRAP_COMPILER -u SIMPLE_BOOTSTRAP_MIN_PHASE \
+  SIMPLE_BOOTSTRAP_COMPILER=local \
+  sh "$resolver" --platform x86_64-pc-windows-msvc \
+  --lane-dir "$fx/lane" --work-dir "$fx/work" 2>"$fx/err7")
+rc=$?
+set -e
+[ "$rc" -eq 1 ] || fail "expected exit 1 when platform=x86_64-pc-windows-msvc and only P1/P2 exist, got $rc"
+[ ! -s "$fx/invoked.log" ] || fail "stage1/stage2 must not be invoked for x86_64-pc-windows-msvc"
+
+# 8. Add stage3: now --platform x86_64-pc-windows-msvc and --min-phase 3 MUST pick stage3.
+make_mock_compiler "$fx/lane/stage3/simple.exe" "stage3"
+: > "$fx/invoked.log"
+out=$(cd "$fx/repo" && env -u SIMPLE_BOOTSTRAP_COMPILER -u SIMPLE_BOOTSTRAP_MIN_PHASE \
+  SIMPLE_BOOTSTRAP_COMPILER=local \
+  sh "$resolver" --platform x86_64-pc-windows-msvc \
+  --lane-dir "$fx/lane" --work-dir "$fx/work")
+[ "$out" = "$fx/lane/stage3/simple.exe 3" ] || fail "expected stage3 for x86_64-pc-windows-msvc, got '$out'"
+grep -Fq "stage3" "$fx/invoked.log" || fail "expected stage3 invocation"
+if grep -Fq "stage2" "$fx/invoked.log"; then fail "stage2 should not have been invoked"; fi
+
+# 9. --min-phase 4 rejects stage3.
+: > "$fx/invoked.log"
+set +e
+out=$(cd "$fx/repo" && env -u SIMPLE_BOOTSTRAP_COMPILER -u SIMPLE_BOOTSTRAP_MIN_PHASE \
+  SIMPLE_BOOTSTRAP_COMPILER=local \
+  sh "$resolver" --platform x86_64-pc-windows-msvc --min-phase 4 \
+  --lane-dir "$fx/lane" --work-dir "$fx/work" 2>"$fx/err9")
+rc=$?
+set -e
+[ "$rc" -eq 1 ] || fail "expected exit 1 with --min-phase 4 when only stage3 exists, got $rc"
+[ ! -s "$fx/invoked.log" ] || fail "stage3 must not be invoked when min_phase=4"
+
+# 10. Explicit compiler path with phase 2 (or unset phase) refused under min_phase=3; phase 3 accepted.
+: > "$fx/invoked.log"
+set +e
+(cd "$fx/repo" && env -u SIMPLE_BOOTSTRAP_MIN_PHASE \
+  SIMPLE_BOOTSTRAP_COMPILER="$fx/lane/stage2/simple.exe" SIMPLE_BOOTSTRAP_COMPILER_PHASE=2 \
+  sh "$resolver" --platform x86_64-pc-windows-msvc --work-dir "$fx/work") >/dev/null 2>"$fx/err10a"
+rc=$?
+set -e
+[ "$rc" -eq 1 ] || fail "expected exit 1 for explicit phase 2 compiler under min_phase=3, got $rc"
+[ ! -s "$fx/invoked.log" ] || fail "explicit phase 2 compiler must not be invoked"
+
+set +e
+(cd "$fx/repo" && env -u SIMPLE_BOOTSTRAP_MIN_PHASE -u SIMPLE_BOOTSTRAP_COMPILER_PHASE \
+  SIMPLE_BOOTSTRAP_COMPILER="$fx/lane/stage2/simple.exe" \
+  sh "$resolver" --platform x86_64-pc-windows-msvc --work-dir "$fx/work") >/dev/null 2>"$fx/err10b"
+rc=$?
+set -e
+[ "$rc" -eq 1 ] || fail "expected exit 1 for unlabelled explicit compiler under min_phase=3, got $rc"
+
+out=$(cd "$fx/repo" && env -u SIMPLE_BOOTSTRAP_MIN_PHASE \
+  SIMPLE_BOOTSTRAP_COMPILER="$fx/lane/stage3/simple.exe" SIMPLE_BOOTSTRAP_COMPILER_PHASE=3 \
+  sh "$resolver" --platform x86_64-pc-windows-msvc --work-dir "$fx/work")
+[ "$out" = "$fx/lane/stage3/simple.exe 3" ] || fail "expected explicit phase 3 compiler accepted, got '$out'"
+
+# 11. seed mode refused with diagnostic under windows-msvc.sdn.
+set +e
+(cd "$fx/repo" && SIMPLE_BOOTSTRAP_COMPILER=seed \
+  sh "$resolver" --platform x86_64-pc-windows-msvc --work-dir "$fx/work") >/dev/null 2>"$fx/err11"
+rc=$?
+set -e
+[ "$rc" -eq 1 ] || fail "expected exit 1 for seed mode under windows-msvc.sdn, got $rc"
+grep -Fq "refusing seed mode" "$fx/err11" || fail "expected seed refusal diagnostic"
+
+# 12. Release mode skips PHASE=2 SPK and selects PHASE=3 SPK under --min-phase 3.
+mkdir -p "$fx/spks"
+for p in 2 3; do
+  pkg_dir="$fx/spks/simple-bootstrap-1.0.0-rc.${p}-windows-x86_64"
+  mkdir -p "$pkg_dir/bin"
+  make_mock_compiler "$pkg_dir/bin/simple.exe" "rel-phase$p"
+  printf '%s\n' "$p" > "$pkg_dir/PHASE"
+  (cd "$fx/spks" && tar -czf "rc-1.0.0-rc.${p}.spk" "simple-bootstrap-1.0.0-rc.${p}-windows-x86_64")
+done
+
+cat > "$fx/fakebin/gh" <<EOF
+#!/bin/sh
+if [ "\${1:-}" = "release" ] && [ "\${2:-}" = "list" ]; then
+  printf 'rc-1.0.0-rc.2\nrc-1.0.0-rc.3\n'
+  exit 0
+fi
+if [ "\${1:-}" = "release" ] && [ "\${2:-}" = "download" ]; then
+  tag=\$3
+  dir=
+  shift 3
+  while [ \$# -gt 0 ]; do
+    case "\$1" in
+      -D) dir=\$2; shift 2 ;;
+      *) shift ;;
+    esac
+  done
+  cp "$fx/spks/\${tag}.spk" "\$dir/simple-bootstrap-\${tag#rc-}-windows-x86_64.spk"
+  exit 0
+fi
+exit 1
+EOF
+chmod +x "$fx/fakebin/gh"
+
+: > "$fx/invoked.log"
+out=$(cd "$fx/repo" && PATH="$fx/fakebin:$PATH" env -u SIMPLE_BOOTSTRAP_MIN_PHASE \
+  SIMPLE_BOOTSTRAP_COMPILER=release \
+  sh "$resolver" --platform windows-x86_64 --config config/bootstrap/windows-msvc.sdn \
+  --work-dir "$fx/work" 2>"$fx/err12")
+case "$out" in
+  *"/release-rc-1.0.0-rc.3/"*" 3") ;;
+  *) fail "expected release phase 3 selected, got '$out'" ;;
+esac
+grep -Fq "rel-phase3" "$fx/invoked.log" || fail "expected release phase 3 probed"
+if grep -Fq "rel-phase2" "$fx/invoked.log"; then fail "release phase 2 must be skipped before probing"; fi
+grep -Fq "phase 2 < min_phase 3" "$fx/err12" || fail "expected phase 2 skip diagnostic"
+
+echo "PASS — resolve-bootstrap-compiler --min-phase and windows-msvc.sdn contracts verified (12 checks)"

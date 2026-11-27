@@ -1,6 +1,6 @@
 # Native closure walks bind imports differently (coordinator vs snapshot-root workers; spelling dedupe)
 
-- Status: OPEN
+- Status: fix-implemented-verification-pending (fixed by 7b595fe78d4, 2026-10-20; see bug_db description line 970)
 - Date: 2026-10-20
 - Platform: aarch64-unknown-linux-gnu
 - Severity: P2

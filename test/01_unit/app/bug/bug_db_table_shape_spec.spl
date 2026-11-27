@@ -1,0 +1,73 @@
+# Purpose and audience: executable specification evidence that the canonical
+# bug database keeps every row under a table of matching width.
+# @req REQ-SSPEC-LIB
+#
+# Incident: 18 ten-field `bugs`-shaped rows were appended under the 4-column
+# `bug_scope` table. SdnTable.parse folds the extra fields into the last
+# column, so the file still loaded but those bugs were invisible to
+# bugs/bugs_active consumers. Prevention script:
+# scripts/check/check-bug-db-table-shape.shs
+
+use std.spec.{describe, it, expect, step}
+use std.nogc_sync_mut.io.file_ops.{file_read}
+use std.nogc_sync_mut.database.core.{split_sdn_row}
+
+val MOVED_IDS: [text] = [
+    "stage2_var_hir_module_field_access_offset0_2026-11-03",
+    "stage2_if_val_struct_option_binding_as_int_wide_2026-11-03",
+    "stage2_inline_env_get_boxed_extern_abi_2026-11-03",
+    "scv_frozen_entry_outside_src_never_native_entry_2026-11-03",
+    "coverage_test_flag_times_out_and_mcdc_no_probes_windows_2026-11-03",
+    "stage2_local_symbol_index_bucket_tagged_id_2026-11-03",
+    "scv_cold_entry_admission_root_not_canonical_scope_git_2026-11-03",
+    "scv_concurrent_open_snapshot_open_provenance_invalid_2026-11-03",
+    "light_daemon_cannot_serve_pinned_native_exec_2026-11-03",
+    "stage2_symbol_display_name_option_transport_2026-11-03",
+    "stage2_rejects_nil_in_optional_enum_payload_2026-11-05",
+    "hir_codec_present_flagged_attr_option_word_2026-11-05"]
+
+fn table_of_line(line: text) -> text:
+    # "name |c1, c2|" -> "name"; "" for a data row
+    val t = line.trim()
+    if t.starts_with("#") or not t.ends_with("|") or t.contains("\"") or not t.contains(" |"):
+        return ""
+    t.split("|")[0].trim()
+
+fn data_lines_under(content: text, table: text) -> [text]:
+    var out: [text] = []
+    var cur = ""
+    for raw in content.split("\n"):
+        val t = raw.trim()
+        if t == "" or t.starts_with("#"):
+            continue
+        val h = table_of_line(t)
+        if h != "":
+            cur = h
+            continue
+        if cur == table:
+            out.push(t)
+    out
+
+describe "canonical bug database table shape":
+    it "keeps bugs-shaped rows out of the 4-column bug_scope table and files them in bugs_active":
+        # @req REQ-SSPEC-LIB
+        step("load doc/08_tracking/bug/bug_db.sdn")
+        val content = file_read("doc/08_tracking/bug/bug_db.sdn")
+        expect(content.len() > 0).to_equal(true)
+        step("no bug_scope row has more than 4 fields or a P0..P3 severity in field 2")
+        var bad: [text] = []
+        for line in data_lines_under(content, "bug_scope"):
+            val parts = split_sdn_row(line)
+            val sev = parts[1].trim()
+            if parts.len() > 4 or sev == "P0" or sev == "P1" or sev == "P2" or sev == "P3":
+                bad.push(parts[0].trim())
+        expect(bad.len()).to_equal(0)
+        step("the 12 refiled ids are 10-field rows in bugs_active")
+        val active = data_lines_under(content, "bugs_active")
+        for id in MOVED_IDS:
+            var found = 0
+            for line in active:
+                val parts = split_sdn_row(line)
+                if parts[0].trim() == id and parts.len() == 10:
+                    found = found + 1
+            expect(found).to_equal(1)

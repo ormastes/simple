@@ -1,0 +1,89 @@
+# Bug smf_header_wire_layout_diverges_rust_vs_simple_2026-08-10: the outer
+# aspect-pack SMF parser must accept the v1.3 96-byte trailer (the writers'
+# default), the Rust seed's 1.1-stamped form of it, and the legacy packed
+# 128-byte trailer.
+use std.spec.{describe, it, expect}
+use std.common.aspect_pack.{ApkModuleSourceV2, apk_build_pack_v2}
+use os.smf.aspect_pack_directory.{aspect_pack_directory_parse_from_outer_smf_bytes}
+use compiler.backend.linker.smf_header.{SMF_HEADER_SIZE, SMF_PACKED_HEADER_SIZE, smf_header_from_bytes}
+use compiler.backend.linker.smf_writer.{SmfWriter, SmfWriterSymbol, SmfWriterSymbolBinding, SmfWriterSymbolType, smf_build_aspect_pack_image}
+
+fn nested_module_bytes(code: [u8]) -> [u8]:
+    var writer = SmfWriter.create()
+    var words: [i64] = []
+    for byte in code:
+        words.push(byte as i64)
+    writer.add_code_section("code", words)
+    writer.add_symbol(SmfWriterSymbol(
+        name: "trace_facet_v1",
+        binding: SmfWriterSymbolBinding.Global,
+        sym_type: SmfWriterSymbolType.Function,
+        section_index: 0,
+        value: 0,
+        size: words.len(),
+        layout_phase: 0,
+        is_event_loop_anchor: false,
+        layout_pinned: false
+    ))
+    val built = writer.write()
+    if built.is_err():
+        return []
+    var bytes: [u8] = []
+    for word in built.unwrap():
+        bytes.push(word as u8)
+    bytes
+
+fn v13_outer() -> [u8]:
+    val modules = [
+        ApkModuleSourceV2(
+            module_id: "trace.module",
+            aspect_id: "trace.aspect",
+            module_abi_hash: "module-abi-7",
+            required_core_public_abi_hash: "core-abi-3",
+            variant_fingerprint: "linux-x86_64",
+            payload: nested_module_bytes([195 as u8])
+        )
+    ]
+    smf_build_aspect_pack_image(apk_build_pack_v2(modules).bytes).unwrap()
+
+fn body_of(image: [u8]) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < image.len() - SMF_HEADER_SIZE:
+        out.push(image[i])
+        i = i + 1
+    out
+
+# The Rust seed stamps 1.1 on the same 96-byte layout.
+fn to_seed_stamp(image: [u8]) -> [u8]:
+    var out = image
+    out[out.len() - SMF_HEADER_SIZE + 5] = 1
+    out
+
+# Legacy packed 128-byte trailer (v1.1) built from the same header fields.
+fn to_packed_trailer(image: [u8]) -> [u8]:
+    var header = smf_header_from_bytes(image).unwrap()
+    header.version_minor = 1
+    val packed = header.to_packed_bytes()
+    var out = body_of(image)
+    var i = 0
+    while i < SMF_PACKED_HEADER_SIZE:
+        out.push(packed[i])
+        i = i + 1
+    out
+
+describe "aspect pack outer SMF header layouts":
+    it "parses the v1.3 96-byte default trailer":
+        val parsed = aspect_pack_directory_parse_from_outer_smf_bytes(v13_outer())
+        expect(parsed.ok).to_equal(true)
+        expect(parsed.directory.entries[0].module_id).to_equal("trace.module")
+
+    it "parses the legacy packed 128-byte trailer":
+        val parsed = aspect_pack_directory_parse_from_outer_smf_bytes(to_packed_trailer(v13_outer()))
+        expect(parsed.ok).to_equal(true)
+        expect(parsed.directory.entries[0].module_id).to_equal("trace.module")
+
+    it "parses the Rust seed 96-byte repr(C) trailer":
+        val parsed = aspect_pack_directory_parse_from_outer_smf_bytes(to_seed_stamp(v13_outer()))
+        expect(parsed.ok).to_equal(true)
+        expect(parsed.directory.entries[0].module_id).to_equal("trace.module")

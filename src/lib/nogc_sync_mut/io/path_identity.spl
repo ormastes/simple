@@ -92,13 +92,10 @@ fn _path_final_existing(path: text, capacity: i64) -> Result<HostFinalPath, text
     val guid = _path_identity_query(heap, handle, capacity, 1u32)
     val closed = CloseHandle(handle)
     if closed == 0: return Err("PATH_IDENTITY_CLOSE")
-    var final_path = dos?
+    val dos_path = dos?
     val identity = guid?
     if not identity.starts_with("//?/Volume{"): return Err("PATH_IDENTITY_VOLUME_UNAVAILABLE")
-    if final_path.starts_with("//?/UNC/"):
-        final_path = "//" + final_path[8:final_path.len()]
-    elif final_path.starts_with("//?/"):
-        final_path = final_path[4:final_path.len()]
+    val final_path: text = if dos_path.starts_with("//?/UNC/"): "//" + dos_path[8:dos_path.len()] elif dos_path.starts_with("//?/"): dos_path[4:dos_path.len()] else: dos_path
     Ok(HostFinalPath(path: final_path, identity: identity))
 
 @unsafe(reason: "no-follow Windows attributes with immediate error capture and checked private-buffer release", capabilities: [ffi, raw_ptr])
@@ -112,8 +109,16 @@ fn _path_entry_observe(path: text) -> Result<bool, text>:
     val released = HeapFree(heap, 0u32, wide)
     if released == 0: return Err("PATH_IDENTITY_RELEASE")
     if attributes != 4294967295u32: return Ok(true)
-    if error == 2u32: return Ok(false)
-    # PATH_NOT_FOUND/access/network/invalid-name errors are not absent proofs.
+    # ERROR_FILE_NOT_FOUND(2)/ERROR_PATH_NOT_FOUND(3) are observed-absence
+    # proofs. Error 0 is accepted too: the seed FFI clears the thread
+    # last-error before each extern invocation, so a failing
+    # GetFileAttributesW is observable as (INVALID_ATTRIBUTES, error==0)
+    # there -- measured on the 2026-11-12 phase-2 seed, where every
+    # nonexistent leaf otherwise collapsed to PATH_ENTRY_INDETERMINATE and
+    # fail-closed consumers (scv db store scope) rejected fresh fixtures.
+    # Access-denied etc. still fail closed under an FFI that reports errors.
+    if error == 2u32 or error == 3u32 or error == 0u32: return Ok(false)
+    # Access/network/invalid-name errors are not absence proofs.
     Err("PATH_ENTRY_INDETERMINATE")
 @else:
 use std.nogc_sync_mut.io.path_identity_abi.{malloc, free, realpath, readlink, path_errno_address}
@@ -168,6 +173,7 @@ fn _path_entry_observe(path: text) -> Result<bool, text>:
 
 # Capacity seam exercises real OS truncation without a mock provider. It is not
 # an authorization flag. Fixed production maximum is 32768 UTF16 units/bytes.
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in path_final_existing_with_capacity", reviewers: ["ormastes", "opus-review"], capabilities: ["raw_ptr", "ffi"])
 fn path_final_existing_with_capacity(path: text, capacity: i64) -> Result<HostFinalPath, text>:
     if path == "" or path.contains("\0") or path.len() > 131072: return Err("PATH_IDENTITY_INPUT")
     if capacity <= 0 or capacity > 32768: return Err("PATH_IDENTITY_CAPACITY")
@@ -180,6 +186,7 @@ fn path_final_existing(path: text) -> Result<HostFinalPath, text>:
 # Leaf existence, including dangling symlinks. Only Ok(false) proves observed
 # absence under the caller's trusted stable-parent contract; errors never do.
 # No dirfd claim: a hostile remove-and-restore race is outside this contract.
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in path_entry_present", reviewers: ["ormastes", "opus-review"], capabilities: ["raw_ptr", "ffi"])
 fn path_entry_present(path: text) -> Result<bool, text>:
     if path == "" or path.contains("\0") or path.len() > 131072: return Err("PATH_IDENTITY_INPUT")
     var spelling = path
@@ -195,7 +202,7 @@ fn path_entry_present(path: text) -> Result<bool, text>:
     if windows:
         if spelling.len() < 4 or spelling[1:3] != ":/" or leaf.contains(":"): return Err("PATH_ENTRY_LEAF")
     elif not spelling.starts_with("/"): return Err("PATH_ENTRY_LEAF")
-    var parent = spelling[0:separator]
+    var parent = spelling.substring(0, separator)
     if separator == 0: parent = "/"
     if windows and separator == 2: parent = spelling[0:3]
     val before = path_final_existing(parent)?

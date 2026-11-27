@@ -1,0 +1,230 @@
+# @req REQ-WBF-001 REQ-WBF-002 REQ-WBF-003 REQ-WBF-004
+# AUTHORED NOT_RUN. Real pure codec calls; no native/auth/authority qualification.
+use std.spec.*
+use std.nogc_async_mut.container.providers.windows.docker_broker_frame_v3.*
+use std.common.structural.transfer.process_frame_codec.{process_transfer_frame_header_len,
+    process_transfer_frame_v1, encode_process_transfer_frame, decode_process_transfer_frame}
+use std.common.structural.transfer.transfer_contracts.ParallelExecutionDomain
+use std.common.structural.transfer.transfer_codec.transfer_envelope_wire_len
+use std.common.structural.wire.{wire_get_u64, wire_put_u64}
+use std.common.crypto.sha256.sha256_u8_hex
+use std.common.text_bytes.{text_to_bytes, bytes_to_text, utf8_bytes_valid}
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+
+fn input_frame() -> WindowsDockerBrokerFrameV3:
+    val body = [0u8, 255u8, 128u8, 195u8, 40u8]
+    WindowsDockerBrokerFrameV3(kind: "input",
+        target_digest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        control_kind: "input", nonce_digest: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        revision: 1, frame_sequence: 1, payload_digest: sha256_u8_hex(body), payload_bytes: body.len(),
+        accepted_prefix: 0, rows: 0, cols: 0, stream: "", byte_offset: 0,
+        complete: false, unknown: false, body: body)
+
+fn slice(bytes: [u8], offset: i64, count: i64) -> [u8]:
+    var out = [0u8; count]
+    for index in 0..count: out[index] = bytes[offset + index]
+    out
+
+fn concatenate(first: [u8], second: [u8]) -> [u8]:
+    var out = [0u8; first.len() + second.len()]
+    for index in 0..first.len(): out[index] = first[index]
+    for index in 0..second.len(): out[first.len() + index] = second[index]
+    out
+
+fn metadata_fields(wire: [u8]) -> Dict<text, SdnValue>:
+    val actual = decode_process_transfer_frame(wire, ParallelExecutionDomain.Process)
+    val length = wire_get_u64(actual.value.payload, 0)
+    val source = bytes_to_text(slice(actual.value.payload, 8, length))
+    val parsed = sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 4096,
+        max_depth: 2, max_nodes: 64, max_rows: 0, max_cells: 0, max_columns: 32)).unwrap()
+    match parsed.value:
+        case SdnValue.Dict(value): value
+        case _: fail("fixture metadata dictionary required")
+
+fn rewire_payload(reference: [u8], payload: [u8]) -> [u8]:
+    val decoded = decode_process_transfer_frame(reference, ParallelExecutionDomain.Process)
+    encode_process_transfer_frame(process_transfer_frame_v1(decoded.value.envelope, payload))
+
+fn rewire(reference: [u8], source: text, body: [u8]) -> [u8]:
+    val encoded = text_to_bytes(source)
+    var payload = wire_put_u64([], encoded.len())
+    payload = concatenate(payload, encoded)
+    payload = concatenate(payload, body)
+    rewire_payload(reference, payload)
+
+fn changed_metadata(reference: [u8], fields: Dict<text, SdnValue>) -> [u8]:
+    rewire(reference, sdn_encode_canonical(SdnValue.Dict(fields)), input_frame().body)
+
+describe "Windows private broker bounded binary frame codec":
+    it "REQ-WBF-001 roundtrips raw nonUTF8 bytes and reuses exact supplied correlation":
+        step("Encode binary input and require the retained region, generation and direction on decode")
+        val frame = input_frame()
+        expect(utf8_bytes_valid(frame.body)).to_equal(false)
+        val wire = windows_docker_broker_frame_encode_v3(frame, 7, 19, true).unwrap()
+        val decoded = windows_docker_broker_frame_decode_v3(wire, 7, 19, true).unwrap()
+        expect(decoded.body).to_equal(frame.body)
+        expect(decoded.target_digest).to_equal(frame.target_digest)
+        expect(decoded.payload_digest).to_equal(frame.payload_digest)
+        expect(windows_docker_broker_frame_encode_v3(decoded, 7, 19, true).unwrap()).to_equal(wire)
+        expect(windows_docker_broker_frame_decode_v3(wire, 8, 19, true).is_err()).to_equal(true)
+        expect(windows_docker_broker_frame_decode_v3(wire, 7, 20, true).is_err()).to_equal(true)
+        expect(windows_docker_broker_frame_decode_v3(wire, 7, 19, false).is_err()).to_equal(true)
+        expect(windows_docker_broker_frame_encode_v3(frame, 7, 19, false).is_err()).to_equal(true)
+        expect(WindowsDockerBrokerFrameReaderV3.create_v3(0, 19, true).is_err()).to_equal(true)
+        expect(WindowsDockerBrokerFrameReaderV3.create_v3(7, 0, true).is_err()).to_equal(true)
+
+    it "REQ-WBF-002 decodes every header and body split and leaves coalesced remainder unconsumed":
+        step("Feed every split boundary and consume exactly one frame from coalesced input")
+        val wire = windows_docker_broker_frame_encode_v3(input_frame(), 7, 19, true).unwrap()
+        for split in 0..(wire.len() + 1):
+            var reader = WindowsDockerBrokerFrameReaderV3.create_v3(7, 19, true).unwrap()
+            val first = reader.feed(slice(wire, 0, split))
+            expect(first.error).to_equal("")
+            expect(first.consumed).to_equal(split)
+            val second = reader.feed(slice(wire, split, wire.len() - split))
+            expect(second.error).to_equal("")
+            expect(second.consumed).to_equal(wire.len() - split)
+            if split == wire.len():
+                expect(first.frame.unwrap().body).to_equal(input_frame().body)
+                expect(second.frame.?).to_equal(false)
+            else:
+                expect(first.frame.?).to_equal(false)
+                expect(second.frame.unwrap().body).to_equal(input_frame().body)
+        var reader = WindowsDockerBrokerFrameReaderV3.create_v3(7, 19, true).unwrap()
+        val joined = concatenate(wire, wire)
+        val first = reader.feed(joined)
+        expect(first.consumed).to_equal(wire.len())
+        expect(first.frame.unwrap().body).to_equal(input_frame().body)
+        val next = reader.feed(slice(joined, first.consumed, joined.len() - first.consumed))
+        expect(next.consumed).to_equal(wire.len())
+        expect(next.frame.unwrap().body).to_equal(input_frame().body)
+
+    it "REQ-WBF-002 refuses advertised oversize before payload growth and keeps errors sticky":
+        step("Reject oversized announcements while retaining only the fixed header buffer")
+        val wire = windows_docker_broker_frame_encode_v3(input_frame(), 7, 19, true).unwrap()
+        val header = process_transfer_frame_header_len()
+        for size in [65537, -1]:
+            var announcement = slice(wire, 0, header)
+            val encoded = wire_put_u64([], size)
+            for index in 0..8: announcement[transfer_envelope_wire_len() + index] = encoded[index]
+            var reader = WindowsDockerBrokerFrameReaderV3.create_v3(7, 19, true).unwrap()
+            expect(reader.buffer_capacity_v3()).to_equal(header)
+            val turn = reader.feed(concatenate(announcement, [1u8, 2u8, 3u8]))
+            expect(turn.consumed).to_equal(header)
+            expect(turn.frame.?).to_equal(false)
+            expect(turn.error).to_equal("windows-broker-advertised-payload-bound")
+            expect(reader.buffer_capacity_v3()).to_equal(header)
+            val later = reader.feed(wire)
+            expect(later.consumed).to_equal(0)
+            expect(later.error).to_equal(turn.error)
+            expect(reader.finish_v3().unwrap_err()).to_equal(turn.error)
+        var reader = WindowsDockerBrokerFrameReaderV3.create_v3(7, 19, true).unwrap()
+        expect(reader.feed([0u8; 65537]).error).to_equal("windows-broker-reader-chunk-bound")
+        expect(reader.buffer_capacity_v3()).to_equal(header)
+        expect(windows_docker_broker_frame_decode_v3(slice(wire, 0, header - 1), 7, 19, true).is_err()).to_equal(true)
+
+    it "REQ-WBF-002 rejects EOF at every partial header/payload and never accepts bytes after finish":
+        step("Finish each partial frame at EOF and refuse subsequent bytes after stream closure")
+        val wire = windows_docker_broker_frame_encode_v3(input_frame(), 7, 19, true).unwrap()
+        for split in 1..wire.len():
+            var reader = WindowsDockerBrokerFrameReaderV3.create_v3(7, 19, true).unwrap()
+            val turn = reader.feed(slice(wire, 0, split))
+            expect(turn.error).to_equal("")
+            expect(turn.frame.?).to_equal(false)
+            expect(reader.finish_v3().unwrap_err()).to_equal("windows-broker-reader-truncated-at-eof")
+            expect(reader.feed(slice(wire, split, wire.len() - split)).consumed).to_equal(0)
+        var reader = WindowsDockerBrokerFrameReaderV3.create_v3(7, 19, true).unwrap()
+        expect(reader.feed(wire).frame.?).to_equal(true)
+        expect(reader.finish_v3().unwrap()).to_equal(true)
+        expect(reader.feed(wire).error).to_equal("windows-broker-reader-already-finished")
+        var empty = WindowsDockerBrokerFrameReaderV3.create_v3(7, 19, true).unwrap()
+        expect(empty.finish_v3().unwrap()).to_equal(true)
+
+    it "REQ-WBF-003 refuses unknown, duplicate, noncanonical and mistyped metadata":
+        step("Mutate canonical metadata and binary integrity fields without changing the expected correlation")
+        val wire = windows_docker_broker_frame_encode_v3(input_frame(), 7, 19, true).unwrap()
+        var fields = metadata_fields(wire)
+        fields["unknownField"] = SdnValue.Int(1)
+        expect(windows_docker_broker_frame_decode_v3(changed_metadata(wire, fields), 7, 19, true).is_err()).to_equal(true)
+        fields = metadata_fields(wire)
+        fields["version"] = SdnValue.Int(2)
+        expect(windows_docker_broker_frame_decode_v3(changed_metadata(wire, fields), 7, 19, true).is_err()).to_equal(true)
+        fields = metadata_fields(wire)
+        fields["complete"] = SdnValue.Int(0)
+        expect(windows_docker_broker_frame_decode_v3(changed_metadata(wire, fields), 7, 19, true).is_err()).to_equal(true)
+        fields = metadata_fields(wire)
+        val source = sdn_encode_canonical(SdnValue.Dict(fields))
+        expect(windows_docker_broker_frame_decode_v3(rewire(wire, source + "\n", input_frame().body), 7, 19, true).unwrap_err()).to_equal("windows-broker-metadata-not-canonical")
+        val duplicate = source.replace("version: 3", "version: 3, version: 3")
+        expect(duplicate == source).to_equal(false)
+        expect(windows_docker_broker_frame_decode_v3(rewire(wire, duplicate, input_frame().body), 7, 19, true).is_err()).to_equal(true)
+        var absent: Dict<text, SdnValue> = {}
+        for key in fields.keys():
+            if key != "nonceDigest": absent[key] = fields[key]
+        expect(windows_docker_broker_frame_decode_v3(changed_metadata(wire, absent), 7, 19, true).is_err()).to_equal(true)
+        val bad_utf8 = concatenate(wire_put_u64([], 1), [255u8])
+        expect(windows_docker_broker_frame_decode_v3(rewire_payload(wire, bad_utf8), 7, 19, true).unwrap_err()).to_equal("windows-broker-metadata-utf8")
+        expect(windows_docker_broker_frame_decode_v3(rewire_payload(wire, wire_put_u64([], 4097)), 7, 19, true).unwrap_err()).to_equal("windows-broker-metadata-length")
+        val changed_body = [1u8, 255u8, 128u8, 195u8, 40u8]
+        expect(windows_docker_broker_frame_decode_v3(rewire(wire, source, changed_body), 7, 19, true).unwrap_err()).to_equal("windows-broker-input-body-integrity")
+
+    it "REQ-WBF-004 validates request, geometry and progress fields without granting an effect":
+        step("Validate input prefixes, geometry digests and progress flags as transport facts")
+        var frame = input_frame()
+        frame.accepted_prefix = frame.payload_bytes + 1
+        expect(windows_docker_broker_frame_validate_v3(frame).is_err()).to_equal(true)
+        frame = input_frame()
+        frame.complete = true
+        expect(windows_docker_broker_frame_validate_v3(frame).is_err()).to_equal(true)
+        frame = input_frame()
+        frame.kind = "progress"
+        frame.body = []
+        frame.complete = true
+        expect(windows_docker_broker_frame_validate_v3(frame).is_err()).to_equal(true)
+        frame.accepted_prefix = frame.payload_bytes
+        expect(windows_docker_broker_frame_validate_v3(frame).unwrap()).to_equal(true)
+        frame.unknown = true
+        expect(windows_docker_broker_frame_validate_v3(frame).is_err()).to_equal(true)
+        frame.complete = false
+        expect(windows_docker_broker_frame_validate_v3(frame).unwrap()).to_equal(true)
+        val progress_wire = windows_docker_broker_frame_encode_v3(frame, 7, 19, false).unwrap()
+        expect(windows_docker_broker_frame_decode_v3(progress_wire, 7, 19, false).unwrap().unknown).to_equal(true)
+        frame = input_frame()
+        frame.kind = "geometry"
+        frame.control_kind = "geometry"
+        frame.body = []
+        frame.payload_bytes = 0
+        frame.rows = 24
+        frame.cols = 80
+        frame.payload_digest = windows_docker_broker_geometry_digest_v3(24, 80).unwrap()
+        val geometry = windows_docker_broker_frame_encode_v3(frame, 7, 19, true).unwrap()
+        expect(windows_docker_broker_frame_decode_v3(geometry, 7, 19, true).unwrap().rows).to_equal(24)
+        frame.cols = 81
+        expect(windows_docker_broker_frame_validate_v3(frame).is_err()).to_equal(true)
+        expect(windows_docker_broker_geometry_digest_v3(0, 80).is_err()).to_equal(true)
+        expect(windows_docker_broker_geometry_digest_v3(24, 32768).is_err()).to_equal(true)
+
+    it "REQ-WBF-004 treats output completion as bounded stream EOF only":
+        step("Decode binary output and require bounded offsets and explicit empty-stream EOF")
+        var frame = input_frame()
+        frame.kind = "output"
+        frame.control_kind = ""
+        frame.nonce_digest = ""
+        frame.revision = 0
+        frame.stream = "stdout"
+        val wire = windows_docker_broker_frame_encode_v3(frame, 7, 19, false).unwrap()
+        expect(windows_docker_broker_frame_decode_v3(wire, 7, 19, false).unwrap().body).to_equal(frame.body)
+        frame.byte_offset = 9223372036854775807
+        expect(windows_docker_broker_frame_validate_v3(frame).is_err()).to_equal(true)
+        frame.byte_offset = 5
+        frame.body = []
+        frame.payload_bytes = 0
+        frame.payload_digest = sha256_u8_hex([])
+        expect(windows_docker_broker_frame_validate_v3(frame).is_err()).to_equal(true)
+        frame.complete = true
+        expect(windows_docker_broker_frame_validate_v3(frame).unwrap()).to_equal(true)
+        frame.unknown = true
+        expect(windows_docker_broker_frame_validate_v3(frame).is_err()).to_equal(true)

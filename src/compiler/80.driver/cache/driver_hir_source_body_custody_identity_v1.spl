@@ -5,6 +5,7 @@ use compiler.driver.cache.hir_body_typecheck_lease_v1.{HirBodyArchiveV1, HirBody
 use compiler.hir.hir_codec_support.{HirCodecWriter}
 use compiler.frontend.frontend_advisory_preprocess_port_v1.{FrontendAdvisoryPreprocessPolicyV1}
 use compiler.frontend.frontend_target_cfg_receipt_v1.{frontend_cfg_receipt_valid_v1}
+use compiler.common.assurance.policy_schema.{AssuranceStrictness}
 use std.common.crypto.sha256.{sha256_text}
 use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
 
@@ -24,7 +25,7 @@ fn driver_hir_source_body_frontend_policy_v1(driver: CompilerDriver) -> text:
 
 fn driver_hir_source_body_lowerer_context_v1(driver: CompilerDriver,
         input: HirBodyArchiveInputV1, explicit_semantic_policy: bool, forbid_written_any: bool) -> text:
-    if not driver.streaming_surface_owner_ready: return ""
+    if not driver.streaming_surface_owner_ready or input.library_mode != driver.ctx.options.library_mode: return ""
     if val Some(schedule) = driver.hir_archive_schedule:
         if input.closure_digest != schedule.closure_digest or schedule.source_binding == "" or
                 schedule.schedule_digest == "": return ""
@@ -41,13 +42,18 @@ fn driver_hir_source_body_lowerer_context_v1(driver: CompilerDriver,
         writer.put_text(input.runtime_provider_digest)
         writer.put_text(driver.ctx.native_target)
         writer.put_text(driver_hir_source_body_frontend_policy_v1(driver))
-        writer.put_bool(driver.ctx.runtime_std_full_inventory_selection != nil)
+        writer.put_bool(driver.ctx.runtime_std_full_inventory_selection.is_some())
         writer.put_text(driver.ctx.environment_variant_frontend_cache_identity)
         writer.put_text(driver.ctx.environment_variant_frontend_owner_id.to_text())
         writer.put_text(driver.ctx.environment_variant_frontend_session_id.to_text())
         writer.put_text(driver.ctx.environment_variant_frontend_generation.to_text())
         writer.put_bool(explicit_semantic_policy)
         writer.put_bool(forbid_written_any)
+        if driver.ctx.assurance_policy.strictness.at_least(AssuranceStrictness.Robust):
+            writer.put_text("require-declared-return-v1")
+        if driver.ctx.options.library_mode != "":
+            writer.put_text("library-mode-v1")
+            writer.put_text(driver.ctx.options.library_mode)
         sha256_text("driver-private-source-lowerer-v1\n" + writer.finish())
     else:
         ""
@@ -94,12 +100,17 @@ fn driver_hir_source_body_context_in_owned_scope_v1(driver: CompilerDriver,
         writer.put_text(ctx.native_target)
         writer.put_bool(explicit_semantic_policy)
         writer.put_bool(forbid_written_any)
+        if driver.ctx.assurance_policy.strictness.at_least(AssuranceStrictness.Robust):
+            writer.put_text("require-declared-return-v1")
+        if driver.ctx.options.library_mode != "":
+            writer.put_text("library-mode-v1")
+            writer.put_text(driver.ctx.options.library_mode)
         writer.put_text(driver_hir_source_body_frontend_policy_v1(driver))
         writer.put_text(ctx.environment_variant_frontend_cache_identity)
         writer.put_text(ctx.environment_variant_frontend_owner_id.to_text())
         writer.put_text(ctx.environment_variant_frontend_session_id.to_text())
         writer.put_text(ctx.environment_variant_frontend_generation.to_text())
-        if ctx.runtime_std_full_inventory_selection != nil:
+        if ctx.runtime_std_full_inventory_selection.is_some():
             if not ctx.runtime_std_cfg_source_identity_by_path.has(input.source_path) or
                     not ctx.runtime_std_cfg_source_digest_by_path.has(input.source_path): return ""
             val identity = ctx.runtime_std_cfg_source_identity_by_path[input.source_path]

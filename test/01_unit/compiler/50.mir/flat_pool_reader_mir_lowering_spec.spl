@@ -1,0 +1,80 @@
+# Purpose and audience: compiler engineers owning cross-module MIR method dispatch.
+# @req REQ-SSPEC-COMPILER
+"""
+# FlatPoolReader constructor and method calls lower through MIR
+
+Regression spec for phase2_subsystem_helper_mir_failures_2026-10-05: the Phase 2
+generator/verdict helpers failed MIR lowering on `FlatPoolReader` constructor and
+method resolution in `src/compiler/10.frontend/core/flat_pool_codec.spl`. This
+lowers the REAL codec file plus a consumer in a 2-module closure (codec deps
+std.common.encoding.utf8 / std.io_runtime are deliberately absent, so their
+unresolved-name diagnostics are filtered; FlatPoolReader rows must be clean).
+"""
+# @cover src/compiler/10.frontend/core/flat_pool_codec.spl
+# @tag:unit
+# @tag:compiler
+# @tag:mir
+
+use std.spec.{describe, it, expect, step}
+use std.nogc_sync_mut.io.file_ops.{file_read}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+val consumer_src = "use compiler.frontend.core.flat_pool_codec.\{FlatPoolReader, flat_pool_dec_i64\}\n\nfn main():\n    var r = FlatPoolReader.new(\"1 2\")\n    val xs = flat_pool_dec_i64(r)\n    val ok = r.ok\n    r.reject_malformed(\"x\")\n    val b = FlatPoolReader.new_bounded(\"1\", 10, 10, 10, 10)\n"
+
+fn probe(lower_codec: bool, extra: text) -> text:
+    val log = Logger(level: 0)
+    val codec_src = file_read("src/compiler/10.frontend/core/flat_pool_codec.spl")
+    val codec_ast = parse_full_frontend(codec_src, "src/compiler/10.frontend/core/flat_pool_codec.spl", "compiler.frontend.core.flat_pool_codec", log)
+    val main_ast = parse_full_frontend(consumer_src + extra, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["compiler.frontend.core.flat_pool_codec"] = codec_ast
+    modules["app.main"] = main_ast
+    val sources = [SourceFile(path: "src/compiler/10.frontend/core/flat_pool_codec.spl", content: codec_src, module_name: "compiler.frontend.core.flat_pool_codec"), SourceFile(path: "app/main.spl", content: consumer_src + extra, module_name: "app.main")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var cl = hirlowering_for_module("compiler.frontend.core.flat_pool_codec", surfaces)
+    var ml = hirlowering_for_module("app.main", surfaces)
+    val codec_hir = cl.lower_module(codec_ast)
+    val main_hir = ml.lower_module(main_ast)
+    var errors = ""
+    for e in cl.errors:
+        errors = errors + "chir: " + e.message + "\n"
+    for e in ml.errors:
+        errors = errors + "mhir: " + e.message + "\n"
+    if lower_codec:
+        var m1 = MirLowering.new(codec_hir.symbols)
+        m1.lower_module(codec_hir, [main_hir, codec_hir], false)
+        for e in m1.errors:
+            errors = errors + "cmir: " + e.message + "\n"
+    var m2 = MirLowering.new(main_hir.symbols)
+    m2.lower_module(main_hir, [codec_hir])
+    for e in m2.errors:
+        errors = errors + "mmir: " + e.message + "\n"
+    errors
+
+fn reader_defects(errors: text) -> text:
+    var out = ""
+    for line in errors.split("\n"):
+        if line.contains("FlatPoolReader") or line.contains("unresolved method") or line.contains("unresolved static") or line.starts_with("mhir:") or line.starts_with("mmir:"):
+            out = out + line + "\n"
+    out
+
+describe "FlatPoolReader MIR lowering (phase2 helper regression)":
+    it "consumer of FlatPoolReader.new / new_bounded / methods lowers clean":
+        expect(reader_defects(probe(false, ""))).to_equal("")
+
+    it "the codec module itself has no FlatPoolReader ctor/method lowering defects":
+        expect(reader_defects(probe(true, ""))).to_equal("")
+
+    it "harness detects a genuinely missing method (non-vacuity)":
+        val errors = probe(false, "    r.nope_missing(1)\n")
+        expect(errors.contains("unresolved method call")).to_equal(true)

@@ -3,7 +3,7 @@
 use crate::error::{codes, CompileError, ErrorContext};
 use crate::semantics::{cast_float_to_numeric, cast_int_to_numeric, CastNumericResult, NumericType};
 use crate::value::{format_f32_display, format_f64_display, Env, OptionVariant, ResultVariant, Value, METHOD_MISSING};
-use simple_parser::ast::{ClassDef, EnumDef, Expr, FunctionDef};
+use simple_parser::ast::{Argument, ClassDef, EnumDef, Expr, FunctionDef};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -41,6 +41,63 @@ pub(crate) fn call_method_on_value(
     _enums: &Enums,
     _impl_methods: &ImplMethods,
 ) -> Result<Value, CompileError> {
+    call_method_on_value_with_args(
+        recv_val,
+        method,
+        _args,
+        None,
+        _env,
+        _functions,
+        _classes,
+        _enums,
+        _impl_methods,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn exec_method_with_values_and_self_checked(
+    func: &FunctionDef,
+    args: &[Value],
+    arg_exprs: Option<&[Argument]>,
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+    self_ctx: Option<(&str, &Arc<HashMap<String, Value>>)>,
+) -> Result<Value, CompileError> {
+    if let Some(exprs) = arg_exprs {
+        crate::interpreter::interpreter_call::reject_bool_literal_args_with_self(
+            &func.params,
+            exprs,
+            self_ctx.is_some(),
+        )
+        .map_err(|e| crate::interpreter::interpreter_call::name_callee(e, func))?;
+    }
+    exec_function_with_values_and_self(
+        func,
+        args,
+        env,
+        functions,
+        classes,
+        enums,
+        impl_methods,
+        self_ctx,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn call_method_on_value_with_args(
+    recv_val: Value,
+    method: &str,
+    _args: &[Value],
+    arg_exprs: Option<&[Argument]>,
+    _env: &mut Env,
+    _functions: &mut HashMap<String, Arc<FunctionDef>>,
+    _classes: &mut HashMap<String, Arc<ClassDef>>,
+    _enums: &Enums,
+    _impl_methods: &ImplMethods,
+) -> Result<Value, CompileError> {
     let recv_val = recv_val.deref_pointer();
 
     // Packed `[u8]` in chained position (e.g. `result.unwrap().len()`): answer
@@ -66,10 +123,11 @@ pub(crate) fn call_method_on_value(
         } else {
             Value::array(elements)
         };
-        return call_method_on_value(
+        return call_method_on_value_with_args(
             widened,
             method,
             _args,
+            arg_exprs,
             _env,
             _functions,
             _classes,
@@ -83,9 +141,22 @@ pub(crate) fn call_method_on_value(
         // String methods
         Value::Str(s) => match method {
             "len" | "length" => return Ok(Value::Int(s.chars().count() as i64)),
+            // Mirrors interpreter_method/string.rs: UTF-8 byte count. Missing here,
+            // `x.f().byte_len()` hit METHOD_NOT_FOUND "in nested call context".
+            "byte_len" => return Ok(Value::Int(s.len() as i64)),
+            "char_at" | "at" => {
+                let idx = _args.first().and_then(|v| v.as_int().ok()).unwrap_or(-1);
+                if idx < 0 {
+                    return Ok(Value::text(String::new()));
+                }
+                return Ok(Value::text(s.chars().nth(idx as usize).map(|c| c.to_string()).unwrap_or_default()));
+            }
             "is_empty" => return Ok(Value::Bool(s.is_empty())),
             "to_string" => return Ok(Value::shared_text(s.clone())),
             "chars" => return Ok(Value::array(s.chars().map(|c| Value::text(c.to_string())).collect::<Vec<Value>>())),
+            // Same shape as the direct-receiver arm (interpreter_method/string.rs)
+            // and `rt_string_bytes`: one Int per UTF-8 byte, never per char.
+            "bytes" | "to_bytes" => return Ok(Value::array(s.bytes().map(|b| Value::Int(b as i64)).collect::<Vec<Value>>())),
             "trim" | "strip" => return Ok(Value::text(s.trim().to_string())),
             "to_upper" | "upper" | "uppercase" => return Ok(Value::text(s.to_uppercase())),
             "to_lower" | "lower" | "lowercase" => return Ok(Value::text(s.to_lowercase())),
@@ -183,6 +254,16 @@ pub(crate) fn call_method_on_value(
                 }
                 return Ok(Value::text_from_bytes(bytes[start..end].to_vec()));
             }
+            "last_index_of" | "rfind" => {
+                // Match `interpreter_method/string.rs` (`seed_nested_call_rfind_missing_2026-11-15`):
+                // return the last UTF-8 byte offset or -1 so chained receivers like
+                // `entry.replace("\\", "/").rfind("/")` do not fall through to METHOD_NOT_FOUND.
+                let needle = _args.first().map(Value::to_key_string).unwrap_or_default();
+                return Ok(match s.rfind(&needle) {
+                    Some(idx) => Value::Int(idx as i64),
+                    None => Value::Int(-1),
+                });
+            }
             "to_i64" | "to_int" => {
                 return Ok(s.trim().parse::<i64>().map(Value::Int).unwrap_or(Value::Nil));
             }
@@ -212,6 +293,21 @@ pub(crate) fn call_method_on_value(
                         "called unwrap on None".to_string(),
                         ctx,
                     ));
+                }
+                "expect" => {
+                    if opt_variant == Some(OptionVariant::Some) {
+                        if let Some(val) = payload {
+                            return Ok(val.as_ref().clone());
+                        }
+                    }
+                    let msg = _args
+                        .first()
+                        .map(Value::to_display_string)
+                        .unwrap_or_else(|| "Option was None".to_string());
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::INDEX_OUT_OF_BOUNDS)
+                        .with_help("check that the Option contains Some before calling expect");
+                    return Err(CompileError::semantic_with_context(msg, ctx));
                 }
                 "unwrap_or" => {
                     if opt_variant == Some(OptionVariant::Some) {
@@ -284,6 +380,21 @@ pub(crate) fn call_method_on_value(
                         "called unwrap on Err".to_string(),
                         ctx,
                     ));
+                }
+                "expect" => {
+                    if res_variant == Some(ResultVariant::Ok) {
+                        if let Some(val) = payload {
+                            return Ok(val.as_ref().clone());
+                        }
+                    }
+                    let msg = _args
+                        .first()
+                        .map(Value::to_display_string)
+                        .unwrap_or_else(|| "Result was Err".to_string());
+                    let ctx = ErrorContext::new()
+                        .with_code(codes::INDEX_OUT_OF_BOUNDS)
+                        .with_help("check that the Result is Ok before calling expect");
+                    return Err(CompileError::semantic_with_context(msg, ctx));
                 }
                 "unwrap_err" => {
                     if res_variant == Some(ResultVariant::Err) {
@@ -365,6 +476,7 @@ pub(crate) fn call_method_on_value(
                         body,
                         env: captured,
                     }) => {
+                        let _closure_origin = crate::interpreter::interpreter_module::ClosureOriginGuard::enter_closure(&captured);
                         let mut result = Vec::new();
                         for item in arr.iter() {
                             let mut local_env = Env::clone(captured);
@@ -406,6 +518,7 @@ pub(crate) fn call_method_on_value(
                         body,
                         env: captured,
                     }) => {
+                        let _closure_origin = crate::interpreter::interpreter_module::ClosureOriginGuard::enter_closure(&captured);
                         let mut result = Vec::new();
                         for item in arr.iter() {
                             let mut local_env = Env::clone(captured);
@@ -451,6 +564,7 @@ pub(crate) fn call_method_on_value(
                         body,
                         env: captured,
                     }) => {
+                        let _closure_origin = crate::interpreter::interpreter_module::ClosureOriginGuard::enter_closure(&captured);
                         let mut result = Vec::new();
                         for item in arr.iter() {
                             let mut local_env = Env::clone(captured);
@@ -496,31 +610,7 @@ pub(crate) fn call_method_on_value(
                 return Ok(Value::array(sorted));
             }
             "sum" => {
-                let mut total = 0i64;
-                let mut is_float = false;
-                let mut ftotal = 0.0f64;
-                for item in arr.iter() {
-                    match item {
-                        Value::Int(n) => {
-                            total += *n;
-                            ftotal += *n as f64;
-                        }
-                        Value::UInt { value, .. } => {
-                            total += *value as i64;
-                            ftotal += *value as f64;
-                        }
-                        Value::Float(f) => {
-                            is_float = true;
-                            ftotal += *f;
-                        }
-                        _ => {}
-                    }
-                }
-                return Ok(if is_float {
-                    Value::Float(ftotal)
-                } else {
-                    Value::Int(total)
-                });
+                return Ok(crate::interpreter::interpreter_method::collections::sum_array_values(arr));
             }
             "any" => {
                 match _args.first() {
@@ -547,6 +637,7 @@ pub(crate) fn call_method_on_value(
                         body,
                         env: captured,
                     }) => {
+                        let _closure_origin = crate::interpreter::interpreter_module::ClosureOriginGuard::enter_closure(&captured);
                         for item in arr.iter() {
                             let mut local_env = Env::clone(captured);
                             if let Some(param) = params.first() {
@@ -588,6 +679,7 @@ pub(crate) fn call_method_on_value(
                         body,
                         env: captured,
                     }) => {
+                        let _closure_origin = crate::interpreter::interpreter_module::ClosureOriginGuard::enter_closure(&captured);
                         for item in arr.iter() {
                             let mut local_env = Env::clone(captured);
                             if let Some(param) = params.first() {
@@ -640,7 +732,9 @@ pub(crate) fn call_method_on_value(
             "to_string" | "to_text" => return Ok(Value::text(n.to_string())),
             "to_float" | "to_f64" => return Ok(Value::Float(*n as f64)),
             "to_f32" => return Ok(Value::Float32(*n as f32)),
-            "to_i8" | "to_i16" | "to_i32" | "to_i64" | "to_u8" | "to_u16" | "to_u32" | "to_u64" => {
+            // Unsigned view; see interpreter_method/primitives.rs.
+            "to_u64" => return Ok(Value::UInt { value: *n as u64, width: 64 }),
+            "to_i8" | "to_i16" | "to_i32" | "to_i64" | "to_u8" | "to_u16" | "to_u32" => {
                 let tname = &method[3..];
                 let nt = NumericType::from_name(tname).expect("handled above");
                 return Ok(match cast_int_to_numeric(*n, nt) {
@@ -661,7 +755,8 @@ pub(crate) fn call_method_on_value(
             "to_string" | "to_text" => return Ok(Value::text(value.to_string())),
             "to_float" | "to_f64" => return Ok(Value::Float(*value as f64)),
             "to_f32" => return Ok(Value::Float32(*value as f32)),
-            "to_i8" | "to_i16" | "to_i32" | "to_i64" | "to_u8" | "to_u16" | "to_u32" | "to_u64" => {
+            "to_u64" => return Ok(Value::UInt { value: *value, width: 64 }),
+            "to_i8" | "to_i16" | "to_i32" | "to_i64" | "to_u8" | "to_u16" | "to_u32" => {
                 let tname = &method[3..];
                 let nt = NumericType::from_name(tname).expect("handled above");
                 return Ok(match cast_int_to_numeric(*value as i64, nt) {
@@ -680,9 +775,12 @@ pub(crate) fn call_method_on_value(
             "round" => return Ok(Value::Float(f.round())),
             "to_string" | "to_text" => return Ok(Value::text(format_f64_display(*f))),
             "to_int" | "truncate" => return Ok(Value::Int(f.trunc() as i64)),
-            "to_f64" => return Ok(Value::Float(*f)),
+            "to_float" | "to_f64" => return Ok(Value::Float(*f)),
             "to_f32" => return Ok(Value::Float32(*f as f32)),
-            "to_i8" | "to_i16" | "to_i32" | "to_i64" | "to_u8" | "to_u16" | "to_u32" | "to_u64" => {
+            // HIR types `to_u64()` as U64 for every receiver; the result must be a
+            // `UInt` so it matches unsigned patterns and compares as unsigned.
+            "to_u64" => return Ok(Value::UInt { value: *f as u64, width: 64 }),
+            "to_i8" | "to_i16" | "to_i32" | "to_i64" | "to_u8" | "to_u16" | "to_u32" => {
                 let tname = &method[3..];
                 let nt = NumericType::from_name(tname).expect("handled above");
                 return Ok(match cast_float_to_numeric(*f, nt) {
@@ -690,7 +788,16 @@ pub(crate) fn call_method_on_value(
                     CastNumericResult::Float(v) => Value::Float(v),
                 });
             }
-            _ => {}
+            // Zero-arg and 1-2 arg float methods (`sqrt`, `pow`, `min`, `max`,
+            // `atan2`, `clamp`, ...): delegate via `handle_float_method_values`
+            // so chained calls match direct calls cleanly.
+            _ => {
+                if let Some(v) =
+                    crate::interpreter::interpreter_method::primitives::handle_float_method_values(*f, method, _args)?
+                {
+                    return Ok(v);
+                }
+            }
         },
 
         // Float32 methods (mirror W5-I UInt arm — preserve f32 precision through
@@ -702,9 +809,10 @@ pub(crate) fn call_method_on_value(
             "round" => return Ok(Value::Float32(f.round())),
             "to_string" | "to_text" => return Ok(Value::text(format_f32_display(*f))),
             "to_int" | "truncate" => return Ok(Value::Int(f.trunc() as i64)),
-            "to_f64" => return Ok(Value::Float(*f as f64)),
+            "to_float" | "to_f64" => return Ok(Value::Float(*f as f64)),
             "to_f32" => return Ok(Value::Float32(*f)),
-            "to_i8" | "to_i16" | "to_i32" | "to_i64" | "to_u8" | "to_u16" | "to_u32" | "to_u64" => {
+            "to_u64" => return Ok(Value::UInt { value: *f as u64, width: 64 }),
+            "to_i8" | "to_i16" | "to_i32" | "to_i64" | "to_u8" | "to_u16" | "to_u32" => {
                 let tname = &method[3..];
                 let nt = NumericType::from_name(tname).expect("handled above");
                 return Ok(match cast_float_to_numeric(*f as f64, nt) {
@@ -712,18 +820,31 @@ pub(crate) fn call_method_on_value(
                     CastNumericResult::Float(v) => Value::Float(v),
                 });
             }
-            _ => {}
+            // Same delegation as the f64 arm, re-narrowed like the direct path.
+            _ => {
+                if let Some(v) = crate::interpreter::interpreter_method::primitives::handle_float_method_values(
+                    *f as f64, method, _args,
+                )? {
+                    return Ok(match v {
+                        Value::Float(x) => Value::Float32(x as f32),
+                        other => other,
+                    });
+                }
+            }
         },
 
         // Custom class methods - enable method chaining on user-defined classes
         Value::Object { class, fields } => {
-            // Search for method in class definition
-            if let Some(class_def) = _classes.get(class).cloned() {
+            // Search for method in class definition. The instance carries only
+            // its bare class name; when same-named classes are loaded, the
+            // definition whose fields are exactly this instance's fields wins.
+            if let Some(class_def) = crate::interpreter::resolve_class_for_instance(_classes, class, fields) {
                 if let Some(func) = class_def.methods.iter().find(|m| m.name == method) {
                     // Call method with self context
-                    return exec_function_with_values_and_self(
+                    return exec_method_with_values_and_self_checked(
                         func,
                         _args,
+                        arg_exprs,
                         _env,
                         _functions,
                         _classes,
@@ -734,12 +855,13 @@ pub(crate) fn call_method_on_value(
                 }
             }
 
-            // Search for method in impl blocks
+            // Search for method in impl blocks (local first, then GLOBAL_IMPL_METHODS fallback)
             if let Some(methods) = _impl_methods.get(class) {
                 if let Some(func) = methods.iter().find(|m| m.name == method) {
-                    return exec_function_with_values_and_self(
+                    return exec_method_with_values_and_self_checked(
                         func,
                         _args,
+                        arg_exprs,
                         _env,
                         _functions,
                         _classes,
@@ -748,6 +870,24 @@ pub(crate) fn call_method_on_value(
                         Some((class, fields)),
                     );
                 }
+            }
+            let global_impl = crate::interpreter::GLOBAL_IMPL_METHODS.with(|cell| {
+                cell.borrow()
+                    .get(class)
+                    .and_then(|methods| methods.iter().find(|m| m.name == method).cloned())
+            });
+            if let Some(func) = global_impl {
+                return exec_method_with_values_and_self_checked(
+                    &func,
+                    _args,
+                    arg_exprs,
+                    _env,
+                    _functions,
+                    _classes,
+                    _enums,
+                    _impl_methods,
+                    Some((class, fields)),
+                );
             }
 
             // Method not found, fall through to error
@@ -765,9 +905,10 @@ pub(crate) fn call_method_on_value(
                     let mut enum_fields = HashMap::new();
                     enum_fields.insert("self".to_string(), recv_val.clone());
                     let enum_fields = Arc::new(enum_fields);
-                    return exec_function_with_values_and_self(
+                    return exec_method_with_values_and_self_checked(
                         func,
                         _args,
+                        arg_exprs,
                         _env,
                         _functions,
                         _classes,
@@ -786,9 +927,10 @@ pub(crate) fn call_method_on_value(
                     let mut enum_fields = HashMap::new();
                     enum_fields.insert("self".to_string(), recv_val.clone());
                     let enum_fields = Arc::new(enum_fields);
-                    return exec_function_with_values_and_self(
+                    return exec_method_with_values_and_self_checked(
                         func,
                         _args,
+                        arg_exprs,
                         _env,
                         _functions,
                         _classes,
@@ -848,9 +990,10 @@ pub(crate) fn call_method_on_value(
                 let mut self_fields = HashMap::new();
                 self_fields.insert("self".to_string(), recv_val.clone());
                 let self_fields = Arc::new(self_fields);
-                return exec_function_with_values_and_self(
+                return exec_method_with_values_and_self_checked(
                     method_def.as_ref(),
                     _args,
+                    arg_exprs,
                     _env,
                     _functions,
                     _classes,
@@ -863,6 +1006,16 @@ pub(crate) fn call_method_on_value(
         }
 
         _ => {}
+    }
+
+    // Postfix BDD matchers on a chained-call receiver (`xs.len().to_equal(3)`,
+    // `xs.len().to_be_greater_than(2)`, `s.trim().to_contain(...)`, etc.):
+    // must run BEFORE TRAIT_IMPLS / UFCS so spec.spl's synthetic
+    // `ExpectScalarMatcher for i64` (which indexes `_expect_helper_slots[0]`)
+    // does not hijack bare chained `xs.len().to_*()` calls.
+    // Bug: ml_kem_postfix_to_equal_chained_call_not_found_2026-07-20.
+    if let Some(res) = crate::interpreter::eval_bdd_matcher_on_values(&recv_val, method, _args.first())? {
+        return Ok(res);
     }
 
     // Trait impl dispatch fallback for built-in types in chained calls.
@@ -900,9 +1053,10 @@ pub(crate) fn call_method_on_value(
                 self_fields.insert("self".to_string(), recv_val.clone());
                 let self_fields = Arc::new(self_fields);
                 let type_name = type_names[0];
-                return exec_function_with_values_and_self(
+                return exec_method_with_values_and_self_checked(
                     &func,
                     _args,
+                    arg_exprs,
                     _env,
                     _functions,
                     _classes,
@@ -928,9 +1082,10 @@ pub(crate) fn call_method_on_value(
                 self_fields.insert("self".to_string(), recv_val.clone());
                 let self_fields = Arc::new(self_fields);
                 let type_name = type_names[0];
-                return exec_function_with_values_and_self(
+                return exec_method_with_values_and_self_checked(
                     &func,
                     _args,
+                    arg_exprs,
                     _env,
                     _functions,
                     _classes,
@@ -945,6 +1100,10 @@ pub(crate) fn call_method_on_value(
     // UFCS Fallback: Try to find a free function with the method name
     // This allows both len(x) and x.len() syntax to work in chained calls
     if let Some(func) = _functions.get(method).cloned() {
+        if let (Some(rest), Some(exprs)) = (func.params.get(1..), arg_exprs) {
+            crate::interpreter::interpreter_call::reject_bool_literal_args_for_slice(rest, exprs)
+                .map_err(|e| crate::interpreter::interpreter_call::name_callee(e, &func))?;
+        }
         // Prepend receiver to the arguments
         let mut arg_values = vec![recv_val.clone()];
         arg_values.extend(_args.iter().cloned());
@@ -966,6 +1125,62 @@ pub(crate) fn call_method_on_value(
             "is_some" | "is_ok" => return Ok(Value::Bool(true)),
             "is_none" | "is_err" => return Ok(Value::Bool(false)),
             _ => {}
+        }
+    }
+
+    // Unit receivers in chained position (`opt.unwrap().value()`): mirror the
+    // value/suffix/family/to_string/to_text arms of handle_unit_methods and
+    // forward builtin numeric methods (`to_i64`, `abs`, ...) to the inner value.
+    if let Value::Unit { value, suffix, family } = &recv_val {
+        match method {
+            "value" => return Ok((**value).clone()),
+            "suffix" => return Ok(Value::text(suffix.to_string())),
+            "family" => return Ok(family.clone().map_or(Value::Nil, Value::text_owned)),
+            "to_string" => return Ok(Value::text(format!("{}_{}", value.to_display_string(), suffix))),
+            "to_text" => return Ok(Value::text(value.to_display_string())),
+            // Unit-to-unit `to_<suffix>` (e.g. `opt.unwrap().to_mps()`): reuse the
+            // direct-receiver conversion path. It returns None for builtin numeric
+            // targets (`to_i64`, `to_f64`, ...), which fall through to the inner value.
+            other if other.starts_with("to_") && _args.is_empty() => {
+                if let Some(converted) = crate::interpreter::interpreter_method::special::handle_unit_methods(
+                    value,
+                    suffix,
+                    family,
+                    other,
+                    &[],
+                    _env,
+                    _functions,
+                    _classes,
+                    _enums,
+                    _impl_methods,
+                )? {
+                    return Ok(converted);
+                }
+                return call_method_on_value_with_args(
+                    (**value).clone(),
+                    method,
+                    _args,
+                    arg_exprs,
+                    _env,
+                    _functions,
+                    _classes,
+                    _enums,
+                    _impl_methods,
+                );
+            }
+            _ => {
+                return call_method_on_value_with_args(
+                    (**value).clone(),
+                    method,
+                    _args,
+                    arg_exprs,
+                    _env,
+                    _functions,
+                    _classes,
+                    _enums,
+                    _impl_methods,
+                );
+            }
         }
     }
 
@@ -1023,7 +1238,7 @@ fn find_method_and_exec(
     impl_methods: &ImplMethods,
 ) -> Result<Option<Value>, CompileError> {
     // Check class methods
-    if let Some(class_def) = classes.get(class).cloned() {
+    if let Some(class_def) = crate::interpreter::resolve_class_for_receiver(classes, class, fields) {
         if let Some(func) = class_def.methods.iter().find(|m| m.name == method_name) {
             return Ok(Some(exec_function(
                 func,
@@ -1037,7 +1252,7 @@ fn find_method_and_exec(
             )?));
         }
     }
-    // Check impl methods
+    // Check impl methods (local first, then GLOBAL_IMPL_METHODS fallback)
     if let Some(methods) = impl_methods.get(class) {
         if let Some(func) = methods.iter().find(|m| m.name == method_name) {
             return Ok(Some(exec_function(
@@ -1051,6 +1266,23 @@ fn find_method_and_exec(
                 Some((class, fields)),
             )?));
         }
+    }
+    let global_impl = crate::interpreter::GLOBAL_IMPL_METHODS.with(|cell| {
+        cell.borrow()
+            .get(class)
+            .and_then(|methods| methods.iter().find(|m| m.name == method_name).cloned())
+    });
+    if let Some(func) = global_impl {
+        return Ok(Some(exec_function(
+            &func,
+            args,
+            env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+            Some((class, fields)),
+        )?));
     }
 
     // Check trait implementations - search TRAIT_IMPLS for this specific type
@@ -1198,6 +1430,57 @@ mod tests {
     }
 
     #[test]
+    fn nested_rfind_and_last_index_of_dispatch_on_temporary_text() {
+        let mut env = Env::new();
+        let mut functions = HashMap::new();
+        let mut classes = HashMap::new();
+        let enums = HashMap::new();
+        let impl_methods = HashMap::new();
+        let mut call = |recv: Value, method: &str, args: &[Value]| {
+            call_method_on_value(recv, method, args, &mut env, &mut functions, &mut classes, &enums, &impl_methods)
+                .expect("nested rfind/last_index_of should dispatch")
+        };
+
+        let normalized = call(
+            Value::text(r"src\compiler\50.mir\mod.spl".to_string()),
+            "replace",
+            &[Value::text(r"\".to_string()), Value::text("/".to_string())],
+        );
+        assert_eq!(call(normalized.clone(), "rfind", &[Value::text("/".to_string())]), Value::Int(19));
+        assert_eq!(
+            call(normalized.clone(), "last_index_of", &[Value::text("/".to_string())]),
+            Value::Int(19)
+        );
+        assert_eq!(call(normalized, "rfind", &[Value::text(":".to_string())]), Value::Int(-1));
+        assert_eq!(call(Value::text("café/a/b".to_string()), "rfind", &[Value::text("/".to_string())]), Value::Int(7));
+    }
+
+    #[test]
+    fn nested_text_bytes_and_to_bytes_return_utf8_byte_ints() {
+        let mut env = Env::new();
+        let mut functions = HashMap::new();
+        let mut classes = HashMap::new();
+        let enums = HashMap::new();
+        let impl_methods = HashMap::new();
+        // 3 chars, 4 UTF-8 bytes: a C3 A9 z.
+        let expected = Value::array(vec![Value::Int(97), Value::Int(195), Value::Int(169), Value::Int(122)]);
+        for method in ["bytes", "to_bytes"] {
+            let got = call_method_on_value(
+                Value::text("a\u{E9}z"),
+                method,
+                &[],
+                &mut env,
+                &mut functions,
+                &mut classes,
+                &enums,
+                &impl_methods,
+            )
+            .expect("nested text byte view should dispatch");
+            assert_eq!(got, expected, "nested `{method}` must return one int per UTF-8 byte");
+        }
+    }
+
+    #[test]
     fn string_split_honors_limit_and_unicode_empty_separator() {
         let mut env = Env::new();
         let mut functions = HashMap::new();
@@ -1230,6 +1513,85 @@ mod tests {
         )
         .expect("unicode character split should dispatch");
         assert_eq!(unicode, Value::array(vec![Value::text("한"), Value::text("글끝")]));
+    }
+
+    #[test]
+    fn option_and_result_expect_win_over_ufcs_free_function() {
+        let mut env = Env::new();
+        let mut functions = HashMap::new();
+        let span = simple_parser::Span::new(0, 0, 1, 1);
+        functions.insert(
+            "expect".to_string(),
+            Arc::new(FunctionDef {
+                span,
+                name: "expect".to_string(),
+                generic_params: vec![],
+                where_clause: vec![],
+                params: vec![],
+                return_type: None,
+                return_constraint: None,
+                body: simple_parser::ast::Block { span, statements: vec![] },
+                effects: vec![],
+                decorators: vec![],
+                visibility: simple_parser::ast::Visibility::Public,
+                bounds_block: None,
+                attributes: vec![],
+                doc_comment: None,
+                is_static: false,
+                is_abstract: false,
+                is_me_method: false,
+                is_sync: false,
+                is_generator: false,
+                contract: None,
+                is_generic_template: false,
+                specialization_of: None,
+                type_bindings: HashMap::new(),
+            }),
+        );
+        let mut classes = HashMap::new();
+        let enums = HashMap::new();
+        let impl_methods = HashMap::new();
+
+        let opt_some = Value::some(Value::Int(42));
+        let got_opt = call_method_on_value(
+            opt_some,
+            "expect",
+            &[Value::text("valid".to_string())],
+            &mut env,
+            &mut functions,
+            &mut classes,
+            &enums,
+            &impl_methods,
+        )
+        .expect("Option.Some.expect should dispatch before UFCS");
+        assert_eq!(got_opt, Value::Int(42));
+
+        let res_ok = Value::ok(Value::Int(7));
+        let got_res = call_method_on_value(
+            res_ok,
+            "expect",
+            &[Value::text("valid".to_string())],
+            &mut env,
+            &mut functions,
+            &mut classes,
+            &enums,
+            &impl_methods,
+        )
+        .expect("Result.Ok.expect should dispatch before UFCS");
+        assert_eq!(got_res, Value::Int(7));
+
+        let err = call_method_on_value(
+            Value::none(),
+            "expect",
+            &[Value::text("missing value".to_string())],
+            &mut env,
+            &mut functions,
+            &mut classes,
+            &enums,
+            &impl_methods,
+        )
+        .expect_err("Option.None.expect should error");
+        assert!(format!("{err:?}").contains("missing value"));
     }
 }
 
@@ -1292,5 +1654,132 @@ mod is_condition_present_tests {
         let cond = Expr::Integer(0);
         assert!(!is_condition_present(&cond, &Value::Int(0)));
         assert!(is_condition_present(&cond, &Value::Int(1)));
+    }
+}
+
+#[cfg(test)]
+mod chained_sum_and_float_tests {
+    use super::*;
+
+    #[test]
+    fn chained_array_sum_matches_direct_sum_for_wrapping_and_float32() {
+        let mut env = Env::new();
+        let mut functions = HashMap::new();
+        let mut classes = HashMap::new();
+        let enums = HashMap::new();
+        let impl_methods = HashMap::new();
+
+        let wrapped = call_method_on_value(
+            Value::array(vec![Value::Int(i64::MAX), Value::Int(1)]),
+            "sum",
+            &[],
+            &mut env,
+            &mut functions,
+            &mut classes,
+            &enums,
+            &impl_methods,
+        )
+        .expect("chained int wrapping sum");
+        assert_eq!(wrapped, Value::Int(i64::MIN));
+
+        let mixed = call_method_on_value(
+            Value::array(vec![Value::Int(2), Value::Float32(1.5)]),
+            "sum",
+            &[],
+            &mut env,
+            &mut functions,
+            &mut classes,
+            &enums,
+            &impl_methods,
+        )
+        .expect("chained mixed float32 sum");
+        assert_eq!(mixed, Value::Float(3.5));
+    }
+
+    #[test]
+    fn chained_float_and_float32_methods_accept_one_and_two_args() {
+        let mut env = Env::new();
+        let mut functions = HashMap::new();
+        let mut classes = HashMap::new();
+        let enums = HashMap::new();
+        let impl_methods = HashMap::new();
+
+        let p = call_method_on_value(
+            Value::Float(2.0),
+            "pow",
+            &[Value::Float(3.0)],
+            &mut env,
+            &mut functions,
+            &mut classes,
+            &enums,
+            &impl_methods,
+        )
+        .expect("chained Float.pow");
+        assert_eq!(p, Value::Float(8.0));
+
+        let c = call_method_on_value(
+            Value::Float(5.0),
+            "clamp",
+            &[Value::Float(0.0), Value::Float(2.5)],
+            &mut env,
+            &mut functions,
+            &mut classes,
+            &enums,
+            &impl_methods,
+        )
+        .expect("chained Float.clamp");
+        assert_eq!(c, Value::Float(2.5));
+
+        let f32_min = call_method_on_value(
+            Value::Float32(4.0),
+            "min",
+            &[Value::Float32(1.5)],
+            &mut env,
+            &mut functions,
+            &mut classes,
+            &enums,
+            &impl_methods,
+        )
+        .expect("chained Float32.min");
+        assert_eq!(f32_min, Value::Float32(1.5));
+
+        let f32_clamp = call_method_on_value(
+            Value::Float32(10.0),
+            "clamp",
+            &[Value::Float32(1.0), Value::Float32(3.5)],
+            &mut env,
+            &mut functions,
+            &mut classes,
+            &enums,
+            &impl_methods,
+        )
+        .expect("chained Float32.clamp");
+        assert_eq!(f32_clamp, Value::Float32(3.5));
+
+        let f32_pow = call_method_on_value(
+            Value::Float32(3.0),
+            "pow",
+            &[Value::Float32(2.0)],
+            &mut env,
+            &mut functions,
+            &mut classes,
+            &enums,
+            &impl_methods,
+        )
+        .expect("chained Float32.pow");
+        assert_eq!(f32_pow, Value::Float32(9.0));
+
+        let f64_atan2 = call_method_on_value(
+            Value::Float(0.0),
+            "atan2",
+            &[Value::Float(1.0)],
+            &mut env,
+            &mut functions,
+            &mut classes,
+            &enums,
+            &impl_methods,
+        )
+        .expect("chained Float.atan2");
+        assert_eq!(f64_atan2, Value::Float(0.0));
     }
 }

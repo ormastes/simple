@@ -2,7 +2,7 @@
 //!
 //! This module contains the Parser struct, constructor methods, and main parse entry point.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::ast::*;
 use crate::error::ParseError;
@@ -55,6 +55,7 @@ pub struct Parser<'a> {
     pub(crate) collection_module_path: String,
     pub(crate) collection_owner: String,
     pub(crate) collection_site_ordinals: HashMap<String, usize>,
+    pub(crate) collection_site_labels: HashSet<String>,
     /// Buffer for lookahead tokens (used for multi-token peek operations)
     pub(crate) pending_tokens: VecDeque<Token>,
     /// Parser mode (Normal or Strict)
@@ -88,11 +89,20 @@ pub struct Parser<'a> {
     /// TsArrowFunction hints. Matches nest (a match inside an arm body), so
     /// this is a counter rather than a flag.
     pub(crate) match_arm_depth: usize,
+    /// Column of the innermost arm being parsed. A next-line `|` at this
+    /// boundary starts another arm rather than continuing bitwise OR.
+    pub(crate) match_arm_column: Option<usize>,
+    // Only the top-level expression of a pipe-arm guard owns its separator.
+    pub(crate) match_guard_arrow_depth: Option<u32>,
     /// When true, postfix parsing won't consume `{ ... }` after field access.
     /// Used to prevent ambiguity in `if cond { body }` syntax.
     pub(crate) no_brace_postfix: bool,
     /// Buffer for statements produced by multi-node desugaring (e.g., structured_export)
     pub(crate) pending_statements: Vec<Node>,
+    /// `alias TraitName = field` lines seen in the class body being parsed.
+    pub(crate) class_trait_aliases: Vec<(String, String)>,
+    /// (class, trait, field) trait-alias forwards, expanded after the module parse.
+    pub(crate) trait_alias_forwards: Vec<(String, String, String)>,
     /// Count of INDENT tokens consumed during binary expression line continuation
     /// that need matching DEDENTs consumed after the expression.
     pub(crate) binary_indent_count: usize,
@@ -102,6 +112,15 @@ pub struct Parser<'a> {
     /// this counter tracks how many should be consumed at a later point (e.g., after
     /// an if-block before checking for elif/else).
     pub(crate) deferred_dedent_count: usize,
+    /// Set by `parse_block_body` when the body loop ended on a same-line
+    /// trailing `else:`/`elif` (at the body's own column, no closing Dedent
+    /// in between) instead of the block's own `Dedent`. The still-open INDENT
+    /// is closed by the DEDENT that trails the else/elif arm, so an `if` chain
+    /// reader must consume it once the whole chain is parsed. Always assigned
+    /// (true or false) by `parse_block_body`; consumers clear it before
+    /// parsing the branch they want to interrogate. See doc/08_tracking/bug/
+    /// riscv_scalar_product_vhdl_else_parse_2026-08-12.md.
+    pub(crate) block_body_ended_on_else: bool,
     /// `Some(call_arg_depth)` while parsing the INLINE then-branch of an `if`
     /// expression. At that depth an `else:` after `expr as Type` belongs to the
     /// `if`, not to the `CastElse` form: `if c: x as i64 else: 0` is an if/else
@@ -112,6 +131,12 @@ pub struct Parser<'a> {
     /// transformed for the direct argument expression and deferred for nested
     /// ordinary call arguments so outer callbacks can own the placeholder scope.
     pub(crate) call_arg_depth: usize,
+    /// Number of enclosing higher-order-callee arguments being parsed. Only
+    /// those defer nested ordinary calls' placeholders to the outer lambda.
+    pub(crate) ho_arg_depth: usize,
+    /// Set by a call site just before `parse_arguments` when the callee is
+    /// higher-order; consumed (cleared) by `parse_arguments`.
+    pub(crate) next_args_higher_order: bool,
     /// Recursive-descent nesting depth for expression/type parsing. Bounded by
     /// `MAX_PARSE_RECURSION_DEPTH` so a non-advancing misparse yields a located
     /// `parse error (recovery limit)` instead of a native stack overflow / SIGABRT.
@@ -135,6 +160,13 @@ impl<'a> Parser<'a> {
         Self::from_lexer(source, Lexer::new_for_target(source, os, arch))
     }
 
+    /// Test hook: parse with the ADR-005 char-literal lexer forced on/off,
+    /// independent of `SIMPLE_CHAR_LITERAL_LEXER`.
+    #[cfg(test)]
+    pub(crate) fn new_with_char_literals(source: &'a str, on: bool) -> Self {
+        Self::from_lexer(source, Lexer::new(source).with_char_literals(on))
+    }
+
     fn from_lexer(source: &'a str, mut lexer: Lexer<'a>) -> Self {
         let cond_diagnostics = std::mem::take(&mut lexer.cond_diagnostics);
         let cond_structural_error = (!lexer.cond_balanced).then(|| {
@@ -154,6 +186,7 @@ impl<'a> Parser<'a> {
             collection_module_path: String::new(),
             collection_owner: String::new(),
             collection_site_ordinals: HashMap::new(),
+            collection_site_labels: HashSet::new(),
             pending_tokens: VecDeque::new(),
             mode: ParserMode::Normal,
             no_paren_depth: 0,
@@ -165,12 +198,19 @@ impl<'a> Parser<'a> {
             cond_structural_error: None,
             pattern_indent_count: 0,
             match_arm_depth: 0,
+            match_arm_column: None,
+            match_guard_arrow_depth: None,
             no_brace_postfix: false,
             pending_statements: Vec::new(),
+            class_trait_aliases: Vec::new(),
+            trait_alias_forwards: Vec::new(),
             binary_indent_count: 0,
             deferred_dedent_count: 0,
+            block_body_ended_on_else: false,
             inline_if_then_call_depth: None,
             call_arg_depth: 0,
+            ho_arg_depth: 0,
+            next_args_higher_order: false,
             parse_recursion_depth: 0,
             grid_row_depth: 0,
         };
@@ -247,6 +287,7 @@ impl<'a> Parser<'a> {
             collection_module_path: String::new(),
             collection_owner: String::new(),
             collection_site_ordinals: HashMap::new(),
+            collection_site_labels: HashSet::new(),
             pending_tokens: VecDeque::new(),
             mode: ParserMode::Normal,
             no_paren_depth: 0,
@@ -258,12 +299,19 @@ impl<'a> Parser<'a> {
             cond_structural_error: None,
             pattern_indent_count: 0,
             match_arm_depth: 0,
+            match_arm_column: None,
+            match_guard_arrow_depth: None,
             no_brace_postfix: false,
             pending_statements: Vec::new(),
+            class_trait_aliases: Vec::new(),
+            trait_alias_forwards: Vec::new(),
             binary_indent_count: 0,
             deferred_dedent_count: 0,
+            block_body_ended_on_else: false,
             inline_if_then_call_depth: None,
             call_arg_depth: 0,
+            ho_arg_depth: 0,
+            next_args_higher_order: false,
             parse_recursion_depth: 0,
             grid_row_depth: 0,
         }
@@ -408,6 +456,10 @@ impl<'a> Parser<'a> {
             items.append(&mut self.pending_statements);
         }
 
+        if !self.trait_alias_forwards.is_empty() {
+            let forwards = std::mem::take(&mut self.trait_alias_forwards);
+            expand_trait_alias_forwards(&mut items, &forwards)?;
+        }
         self.debug_trace(&format!("Finished parse(), {} items", items.len()));
         if std::env::var_os("SIMPLE_TRY_PROBE").is_some() {
             let dump = format!("{:?}", items);
@@ -576,13 +628,23 @@ impl<'a> Parser<'a> {
             && matches!(self.peek_next().kind, TokenKind::Identifier { .. });
         let is_capability_policy_decl = matches!(&self.current.kind, TokenKind::Identifier { name, .. } if name == "capability")
             && matches!(self.peek_next().kind, TokenKind::Identifier { .. });
+        let is_resource_decl = matches!(&self.current.kind, TokenKind::Identifier { name, .. } if name == "resource")
+            && matches!(self.peek_next().kind, TokenKind::Identifier { .. });
+        // `sandbox Name:` / `ui_policy Name:` declarations; any other use of
+        // those identifiers is an ordinary expression/assignment.
+        let is_named_policy_decl = matches!(&self.current.kind, TokenKind::Identifier { name, .. } if name == "sandbox" || name == "ui_policy")
+            && matches!(self.peek_next().kind, TokenKind::Identifier { .. })
+            && matches!(self.peek_nth(2).kind, TokenKind::Colon);
         match &self.current.kind {
             // Route @ and legacy #[...] to attributed_item.
             TokenKind::At | TokenKind::Hash => self.parse_attributed_item_with_doc(doc_comment),
             TokenKind::Async => {
-                // `async fn` — skip async keyword, parse as regular function
-                self.advance();
-                self.parse_function_with_doc(doc_comment)
+                // `async fn` — route through the async parser so the
+                // Effect::Async marker is recorded. Parsing as a regular
+                // function here dropped the effect, so interpreted no-await
+                // async calls returned their raw body value instead of a
+                // ready future (no_await_future_behavior_spec).
+                self.parse_async_function_with_doc(doc_comment)
             }
             TokenKind::Fn => {
                 // Disambiguate: fn name(...) is function definition,
@@ -689,6 +751,7 @@ impl<'a> Parser<'a> {
                         | TokenKind::String(_)
                         | TokenKind::FString(_)
                         | TokenKind::RawString(_)
+                        | TokenKind::CharLit(_)
                         | TokenKind::TypedString(_, _)
                         | TokenKind::TypedRawString(_, _)
                 ) || matches!(&next.kind, TokenKind::Identifier { name, .. } if name == "volatile")
@@ -816,6 +879,8 @@ impl<'a> Parser<'a> {
                     | TokenKind::Mod    // used as module name in failsafe/__init__.spl
                     | TokenKind::Shared // used as module root in shared/contracts.spl
                     | TokenKind::Dot // from .module import (relative import)
+                    | TokenKind::DoubleDot // from ..pkg import (parent-relative import)
+                    | TokenKind::Ellipsis // from ...pkg import (grandparent-relative import)
                 ) {
                     self.parse_from_import() // Python-style: from module import {...}
                 } else {
@@ -838,18 +903,66 @@ impl<'a> Parser<'a> {
             TokenKind::On if soft_kw_stmt_as_ident => self.parse_expression_or_assignment(),
             TokenKind::On => self.parse_aop_advice().map(Node::AopAdvice),
             TokenKind::Identifier { .. } if is_inject_graph_decl => self.parse_inject_graph().map(Node::InjectGraph),
-            TokenKind::Identifier { name, .. } if name == "security" => {
-                let next = self.peek_next();
-                if matches!(&next.kind, TokenKind::Identifier { name, .. } if name == "gate") {
-                    self.parse_top_level_security_gate().map(Node::SecurityGate)
+            // `security` is contextual: a declaration only for `security:`,
+            // `security <name>:` or `security gate ...`; anything else
+            // (`security.x = v`, `security = s`, `security(...)`) is an
+            // ordinary expression/assignment.
+            // Module-level package/export/layer directives matching the
+            // pure-Simple frontend (`enum_module_body.spl`):
+            // `friend <pkg.path>`, `internal_export <name>`, `layer <name> [uses ..]`.
+            // Keeps the word usable as an ordinary variable/call identifier
+            // unless followed by a directive target.
+            TokenKind::Identifier { name, .. } if name == "friend" => {
+                if matches!(self.peek_next().kind, TokenKind::Identifier { .. }) {
+                    self.parse_friend_decl()
                 } else {
-                    self.parse_security_policy().map(Node::SecurityPolicy)
+                    self.parse_expression_or_assignment()
                 }
             }
-            TokenKind::Identifier { name, .. } if name == "sandbox" => {
+            TokenKind::Identifier { name, .. } if name == "internal_export" => {
+                if matches!(self.peek_next().kind, TokenKind::Identifier { .. } | TokenKind::LBrace) {
+                    self.parse_internal_export_decl()
+                } else {
+                    self.parse_expression_or_assignment()
+                }
+            }
+            TokenKind::Identifier { name, .. } if name == "layer" => {
+                if matches!(self.peek_next().kind, TokenKind::Identifier { .. }) {
+                    self.parse_layer_decl()
+                } else {
+                    self.parse_expression_or_assignment()
+                }
+            }
+            TokenKind::Identifier { name, .. } if name == "security" => {
+                let next = self.peek_next();
+                match &next.kind {
+                    TokenKind::Identifier { name, .. } if name == "gate" => {
+                        self.parse_top_level_security_gate().map(Node::SecurityGate)
+                    }
+                    TokenKind::Colon => self.parse_security_policy().map(Node::SecurityPolicy),
+                    TokenKind::Identifier { .. }
+                        if matches!(self.peek_nth(2).kind, TokenKind::Colon) =>
+                    {
+                        self.parse_security_policy().map(Node::SecurityPolicy)
+                    }
+                    _ => self.parse_expression_or_assignment(),
+                }
+            }
+            // `resource Name` (soft keyword): bare form is rejected inside
+            // parse_resource_decl because `@sffi(prefix: ...)` is required.
+            TokenKind::Identifier { .. } if is_resource_decl => self.parse_resource_decl(Vec::new(), Visibility::Private),
+            // `sandbox` / `ui_policy` are contextual too: declaration only for
+            // `<kw> <Name>:`.
+            TokenKind::Identifier { name, .. }
+                if name == "sandbox" && is_named_policy_decl =>
+            {
                 self.parse_sandbox_policy().map(Node::SandboxPolicy)
             }
-            TokenKind::Identifier { name, .. } if name == "ui_policy" => self.parse_ui_policy().map(Node::UiPolicy),
+            TokenKind::Identifier { name, .. }
+                if name == "ui_policy" && is_named_policy_decl =>
+            {
+                self.parse_ui_policy().map(Node::UiPolicy)
+            }
             TokenKind::Identifier { .. } if is_capability_policy_decl => {
                 self.parse_capability_policy().map(Node::CapabilityPolicy)
             }
@@ -926,6 +1039,12 @@ impl<'a> Parser<'a> {
                         | TokenKind::MinusAssign
                         | TokenKind::StarAssign
                         | TokenKind::SlashAssign
+                        | TokenKind::Plus
+                        | TokenKind::Star
+                        | TokenKind::Slash
+                        | TokenKind::Percent
+                        | TokenKind::And
+                        | TokenKind::Or
                         | TokenKind::Dot
                         | TokenKind::LParen
                         | TokenKind::String(_)
@@ -1206,12 +1325,22 @@ impl<'a> Parser<'a> {
         // Handle by checking if next token is a valid statement-start token
         // instead of an Indent. If so, parse a single-statement body.
         if !self.check(&TokenKind::Indent) {
+            // Line of the header's terminating Newline (already consumed by
+            // the caller). A flat body is only legal on the very next line:
+            // comment-only / blank lines emit no Indent, so a sibling
+            // statement after them must NOT be taken as the body. See
+            // doc/08_tracking/bug/
+            // comment_only_block_swallows_next_statement_2026-10-04.md
+            let header_line = self.previous.span.line;
+
             // Skip blank lines before checking
             while self.check(&TokenKind::Newline) {
                 self.advance();
             }
 
-            if self.is_statement_start() {
+            let flat_body_adjacent = self.current.span.line <= header_line + 1;
+
+            if flat_body_adjacent && self.is_statement_start() {
                 let start_span = self.current.span;
                 let stmt = self.parse_item()?;
                 let mut statements = vec![stmt];
@@ -1319,6 +1448,7 @@ impl<'a> Parser<'a> {
                 | TokenKind::String(_)
                 | TokenKind::FString(_)
                 | TokenKind::RawString(_)
+                | TokenKind::CharLit(_)
                 | TokenKind::TypedString(_, _)
                 | TokenKind::TypedRawString(_, _)
                 | TokenKind::Bool(_)
@@ -1363,6 +1493,15 @@ impl<'a> Parser<'a> {
         let mut statements = Vec::new();
         let mut iterations = 0usize;
 
+        // A block body statement may be followed by a same-line trailing
+        // `else:`/`elif` at the body's own column (no Dedent in between) —
+        // e.g. `if c:\n    stmt else: stmt`. The self-hosted grammar accepts
+        // that form; without the Else/Elif break below the loop fed the
+        // `else` to `parse_item` and died with "expected expression, found
+        // Else". The body's INDENT is still open in that case (its Dedent
+        // only follows the else/elif arm), so flag it for the if-chain
+        // reader. See doc/08_tracking/bug/
+        // riscv_scalar_product_vhdl_else_parse_2026-08-12.md.
         while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
             self.check_loop_limit(iterations, "parse_block_body")?;
             iterations += 1;
@@ -1371,7 +1510,11 @@ impl<'a> Parser<'a> {
             while self.check(&TokenKind::Newline) {
                 self.advance();
             }
-            if self.check(&TokenKind::Dedent) || self.is_at_end() {
+            if self.check(&TokenKind::Dedent)
+                || self.is_at_end()
+                || self.check(&TokenKind::Else)
+                || self.check(&TokenKind::Elif)
+            {
                 break;
             }
 
@@ -1383,6 +1526,8 @@ impl<'a> Parser<'a> {
                 self.advance();
             }
         }
+
+        self.block_body_ended_on_else = self.check(&TokenKind::Else) || self.check(&TokenKind::Elif);
 
         if self.check(&TokenKind::Dedent) {
             self.advance();
@@ -1578,4 +1723,80 @@ impl<'a> Parser<'a> {
 
         Ok(Node::Pass(PassStmt { span: start_span }))
     }
+}
+
+/// Expand `alias TraitName = field` declarations recorded during class-body
+/// parsing into real forwarding methods, mirroring
+/// src/app/desugar/forwarding.spl Phase 3: each abstract method of the trait
+/// becomes `fn m(params) -> R: self.field.m(params)` (`me` kept). A method the
+/// class already defines explicitly is NOT forwarded (explicit beats
+/// forwarded). Because the result is ordinary AST, the interpreter, HIR/JIT
+/// and native paths all see the same methods.
+fn expand_trait_alias_forwards(items: &mut [Node], forwards: &[(String, String, String)]) -> Result<(), ParseError> {
+    let syntax_error = |message: String, span: Span| ParseError::SyntaxError {
+        message,
+        line: span.line,
+        column: span.column,
+        span: Some(span),
+        context: None,
+    };
+    for (class_name, trait_name, field_name) in forwards {
+        let trait_methods: Vec<FunctionDef> = items
+            .iter()
+            .find_map(|n| match n {
+                Node::Trait(t) if &t.name == trait_name => Some(t.methods.clone()),
+                _ => None,
+            })
+            .unwrap_or_default();
+        let Some(class) = items.iter_mut().find_map(|n| match n {
+            Node::Class(c) if &c.name == class_name => Some(c),
+            _ => None,
+        }) else {
+            return Err(syntax_error(
+                format!("alias {trait_name} = {field_name}: trait-alias forwarding is only supported in a top-level class (class {class_name} is nested)"),
+                Span::new(0, 0, 0, 0),
+            ));
+        };
+        if trait_methods.is_empty() {
+            return Err(syntax_error(
+                format!("alias {trait_name} = {field_name} in class {class_name}: trait `{trait_name}` is not defined in this module"),
+                class.span,
+            ));
+        }
+        if !class.fields.iter().any(|f| &f.name == field_name) {
+            return Err(syntax_error(
+                format!("alias {trait_name} = {field_name} in class {class_name}: `{field_name}` is not a field of {class_name}"),
+                class.span,
+            ));
+        }
+        for tm in trait_methods.into_iter().filter(|m| m.is_abstract) {
+            if class.methods.iter().any(|m| m.name == tm.name) {
+                continue;
+            }
+            let span = tm.span;
+            let args = tm
+                .params
+                .iter()
+                .filter(|p| p.name != "self")
+                .map(|p| Argument::new(None, Expr::Identifier(p.name.clone())))
+                .collect();
+            let call = Expr::MethodCall {
+                receiver: Box::new(Expr::FieldAccess {
+                    receiver: Box::new(Expr::Identifier("self".to_string())),
+                    field: field_name.clone(),
+                }),
+                method: tm.name.clone(),
+                args,
+                generic_args: vec![],
+            };
+            let mut forwarded = tm;
+            forwarded.is_abstract = false;
+            forwarded.body = Block {
+                span,
+                statements: vec![Node::Expression(call)],
+            };
+            class.methods.push(forwarded);
+        }
+    }
+    Ok(())
 }

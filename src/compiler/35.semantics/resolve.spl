@@ -1,6 +1,6 @@
-# @workaround bug=phase3_compiler_unit_or_workaround_2026-10-10 reason= preserve explicit enum owners until bare-pattern inference is repaired.
 use compiler.hir.hir_types.{SymbolKind}
 # Method Resolution Pass (UFCS Support)
+use compiler.hir.binding_annotation_provenance.{hir_local_annotation_copy}
 #
 # Resolves method calls using UFCS (Uniform Function Call Syntax) rules:
 #   1. Instance method on receiver's type (highest priority)
@@ -98,7 +98,7 @@ struct TypeChecker:
         """Get the symbol ID for a named type."""
         match ty.kind:
             case Named(sym, _): sym
-            case _: nil
+            case _: None
 
     static fn primitive_type_key(kind: HirTypeKind) -> i64?:
         """Stable synthetic key for primitive Self types (i64, f32, bool, ...),
@@ -119,7 +119,7 @@ struct TypeChecker:
             case Char: -4002
             case Str: -4003
             case Unit: -4004
-            case _: nil
+            case _: None
 
 # ============================================================================
 # Method Resolver
@@ -171,7 +171,7 @@ class MethodResolver:
             errors: [],
             trait_impls: {},
             trait_solver: TraitSolver.create_with_symbols(symbols),
-            current_fn_sym: nil,
+            current_fn_sym: None,
             module_functions: {},
             quiet: false,
             local_value_types: {}
@@ -185,7 +185,7 @@ class MethodResolver:
             errors: [],
             trait_impls: {},
             trait_solver: solver,
-            current_fn_sym: nil,
+            current_fn_sym: None,
             module_functions: {},
             quiet: false,
             local_value_types: {}
@@ -205,7 +205,7 @@ fn create_trait_solver_for_resolution() -> TraitSolver:
         # bailed on nil receiver types before try_trait_method_with_solver
         # could read it; the quiet typed mode reaches it on every miss.
         trait_methods: {},
-        reverse_symbols: nil
+        reverse_symbols: None
     )
 
 fn create_method_resolver(symbols: SymbolTable) -> MethodResolver:
@@ -215,7 +215,7 @@ fn create_method_resolver(symbols: SymbolTable) -> MethodResolver:
         errors: [],
         trait_impls: {},
         trait_solver: TraitSolver.create_with_symbols(symbols),
-        current_fn_sym: nil,
+        current_fn_sym: None,
         module_functions: {},
         quiet: false,
         local_value_types: {}
@@ -246,7 +246,19 @@ impl MethodResolver:
         # that could contain a resolvable method call still takes the rebuild
         # path.)
         var resolved_functions: Dict<SymbolId, HirFunction> = module.functions
-        if module.impls.len() > 0 or module.classes.len() > 0:
+        # Quiet mode is never a field-identical copy: its whole purpose is
+        # side effects on modules with no method candidates — the Let
+        # local_value_types backfill, receiver attach_inferred_type, and the
+        # candidate-free builtin collection admission
+        # (resolve_builtin_collection_operation, resolve_strategies.spl:102).
+        # A bare `val items: [i64] = ...; items.map(\x: ...)` module has no
+        # impls and no classes, so gating the walk on those alone silently
+        # skipped every one of them and the map call never reached builtin
+        # admission (collection_builtin_typed_array_resolution_2026-11-12).
+        # The cycle-132 corruption that motivated the reuse path was the
+        # staged-native rebuild transport; the quiet walk is needed on every
+        # lane, so it opts back in here.
+        if module.impls.len() > 0 or module.classes.len() > 0 or self.quiet:
             resolved_functions = {}
             for func in module.functions.values():
                 val resolved_func = self.resolve_function(func)
@@ -273,6 +285,7 @@ impl MethodResolver:
 
         # Return resolved module
         HirModule(
+            local_annotation_provenance: hir_local_annotation_copy(module.local_annotation_provenance),
             name: module.name,
             path: module.path,
             imports: module.imports,
@@ -316,9 +329,9 @@ impl MethodResolver:
                                             if not self.trait_impls[type_id].?:
                                                 self.trait_impls[type_id] = []
                                             self.trait_impls[type_id] = self.trait_impls[type_id].push(trait_symbol)
-                                    case nil:
+                                    case None:
                                         pass
-                        case nil:
+                        case None:
                             # Self type carries no SymbolId — a primitive
                             # (i64, f32, bool, ...). Register under the
                             # synthetic primitive key instead of dropping the
@@ -330,9 +343,9 @@ impl MethodResolver:
                                             if not self.trait_impls[prim_key].?:
                                                 self.trait_impls[prim_key] = []
                                             self.trait_impls[prim_key] = self.trait_impls[prim_key].push(trait_symbol)
-                                    case nil:
+                                    case None:
                                         pass
-                case nil:
+                case None:
                     pass
 
     # ========================================================================
@@ -372,7 +385,8 @@ impl MethodResolver:
             is_gpu_kernel: func.is_gpu_kernel,
             gpu_target: func.gpu_target,
             gpu_backend_order: func.gpu_backend_order,
-            verification_contract: self.resolve_verification_contract(func.verification_contract)
+            verification_contract: self.resolve_verification_contract(func.verification_contract),
+            extern_runtime_value_abi: func.extern_runtime_value_abi
         )
 
     # ========================================================================
@@ -388,13 +402,22 @@ impl MethodResolver:
         val resolved_value = match block.value:
             case Some(value):
                 Some(self.resolve_expr(value))
-            case nil:
+            case None:
                 nil
 
+        # `has` must survive the rebuild: eval_block gates the trailing
+        # expression on it (interpreter.spl:438), and an omitted bool field
+        # rebuilds as false, so every resolved block silently lost its tail
+        # value (a quiet-resolved `fn main(): ... expr` then returned Nil
+        # instead of the expr's value; collection builtin execution probe,
+        # 2026-11-13). `unsafe_caps` rides along for the same faithfulness
+        # (mirrors aspect_weave.spl / param_effects/infer.spl rebuilds).
         HirBlock(
             stmts: resolved_stmts,
+            has: block.has,
             value: resolved_value,
-            span: block.span
+            span: block.span,
+            unsafe_caps: block.unsafe_caps
         )
 
     me resolve_stmt(stmt: HirStmt) -> HirStmt:
@@ -427,11 +450,33 @@ impl MethodResolver:
             case Block(inner_block):
                 HirStmtKind.Block(self.resolve_block(inner_block))
 
+            case AsmAssert(spec):
+                # Compile-time target guard: carries no expressions to resolve.
+                HirStmtKind.AsmAssert(spec)
+
         HirStmt(kind: kind, span: stmt.span)
 
     # ========================================================================
     # Expression Resolution
     # ========================================================================
+
+    me resolve_asm(asm_node: HirAsm) -> HirAsm:
+        """Resolve method calls inside inline-assembly operand expressions."""
+        var out = asm_node
+        var resolved_constraints: [HirAsmConstraint] = []
+        for constraint in asm_node.constraints:
+            val typed_constraint: HirAsmConstraint = constraint
+            var resolved_constraint = typed_constraint
+            resolved_constraint.value = self.resolve_expr(typed_constraint.value)
+            val resolved_output = match typed_constraint.output_value:
+                case Some(output_expr):
+                    Some(self.resolve_expr(output_expr))
+                case None:
+                    None
+            resolved_constraint.output_value = resolved_output
+            resolved_constraints = resolved_constraints.push(resolved_constraint)
+        out.constraints = resolved_constraints
+        out
 
     me resolve_expr(expr: HirExpr) -> HirExpr:
         """Resolve method calls in an expression."""
@@ -550,10 +595,10 @@ impl MethodResolver:
                     case TraitMethod(_, method_id): method_id.id
                     case FreeFunction(func_id): func_id.id
                     case StaticMethod(_, method_id): method_id.id
-                    case Unresolved: nil
-                    case BuiltinCollection(_): nil
+                    case Unresolved: None
+                    case BuiltinCollection(_): None
 
-                var fallback_type: HirType? = nil
+                var fallback_type: HirType? = None
                 # `!= nil` cannot screen this slot: the nil sentinel is raw 3,
                 # while an aggregate that lost its field stores is a well-formed
                 # heap block whose fields are all raw 0. Require a populated
@@ -583,7 +628,7 @@ impl MethodResolver:
                             resolved_has_type = true
                         else:
                             resolved_has_type = false
-                    case nil:
+                    case None:
                         resolved_has_type = false
                 HirExprKind.MethodCall(resolved_receiver, method, self.fill_resolved_method_defaults(new_resolution, resolved_args, expr.span), new_resolution)
 
@@ -597,6 +642,11 @@ impl MethodResolver:
                     self.fill_call_defaults(resolved_callee, resolved_args, expr.span),
                     type_args
                 )
+
+            # Static calls - resolution was fixed at HIR lowering; only the
+            # argument expressions need recursive resolution.
+            case StaticCall(type_, method, call_args, resolution):
+                HirExprKind.StaticCall(type_, method, self.resolve_call_args(call_args), resolution)
 
             # Literals - no resolution needed
             case IntLit(_, _): expr.kind
@@ -613,7 +663,7 @@ impl MethodResolver:
                                 span: interp.span
                             ))
                         HirExprKind.StringLit(value, Some(resolved_interps))
-                    case nil:
+                    case None:
                         expr.kind
             case BoolLit(_): expr.kind
             case CharLit(_): expr.kind
@@ -662,6 +712,12 @@ impl MethodResolver:
                     resolved = resolved.push((self.resolve_expr(k), self.resolve_expr(v)))
                 HirExprKind.DictLit(resolved, key_type, value_type)
 
+            case SetLit(elements, elem_type):
+                var resolved: [HirExpr] = []
+                for e in elements:
+                    resolved = resolved.push(self.resolve_expr(e))
+                HirExprKind.SetLit(resolved, elem_type)
+
             # Optional operations
             case OptionalChain(base, field):
                 HirExprKind.OptionalChain(self.resolve_expr(base), field)
@@ -687,8 +743,8 @@ impl MethodResolver:
                 val resolved_else = match else_:
                     case Some(else_block):
                         Some(self.resolve_block(else_block))
-                    case nil:
-                        nil
+                    case None:
+                        None
                 HirExprKind.If(self.resolve_expr(cond), self.resolve_block(then_), resolved_else)
 
             case IfChain(arms, else_):
@@ -702,7 +758,7 @@ impl MethodResolver:
                     ))
                 val resolved_else = match else_:
                     case Some(else_block): Some(self.resolve_block(else_block))
-                    case nil: nil
+                    case None: None
                 HirExprKind.IfChain(resolved_arms, resolved_else)
 
             case MatchCase(scrutinee, arms):
@@ -731,6 +787,18 @@ impl MethodResolver:
             case For(var_, iter, body, label):
                 HirExprKind.For(var_, self.resolve_expr(iter), self.resolve_block(body), label)
 
+            case With(items, body):
+                var resolved_items: [HirWithItem] = []
+                for item in items:
+                    val typed_item: HirWithItem = item
+                    resolved_items = resolved_items.push(HirWithItem(
+                        context_expr: self.resolve_expr(typed_item.context_expr),
+                        has_target: typed_item.has_target,
+                        target: typed_item.target,
+                        span: typed_item.span
+                    ))
+                HirExprKind.With(resolved_items, self.resolve_block(body))
+
             # Closures
             case Lambda(params, body, captures):
                 HirExprKind.Lambda(params, self.resolve_expr(body), captures)
@@ -751,16 +819,16 @@ impl MethodResolver:
                 val resolved_value = match value:
                     case Some(expr_):
                         Some(self.resolve_expr(expr_))
-                    case nil:
-                        nil
+                    case None:
+                        None
                 HirExprKind.Return(resolved_value)
 
             case Break(label, value):
                 val resolved_value = match value:
                     case Some(expr_):
                         Some(self.resolve_expr(expr_))
-                    case nil:
-                        nil
+                    case None:
+                        None
                 HirExprKind.Break(label, resolved_value)
 
             case Continue(label):
@@ -772,6 +840,25 @@ impl MethodResolver:
             case Try(e):
                 HirExprKind.Try(self.resolve_expr(e))
 
+            case TryCatch(body, clauses, finally_):
+                var resolved_clauses: [HirCatchClause] = []
+                for clause in clauses:
+                    val typed_clause: HirCatchClause = clause
+                    resolved_clauses = resolved_clauses.push(HirCatchClause(
+                        has_pattern: typed_clause.has_pattern,
+                        pattern: typed_clause.pattern,
+                        has_type_: typed_clause.has_type_,
+                        type_: typed_clause.type_,
+                        body: self.resolve_block(typed_clause.body),
+                        span: typed_clause.span
+                    ))
+                val resolved_finally = match finally_:
+                    case Some(finally_block):
+                        Some(self.resolve_block(finally_block))
+                    case None:
+                        None
+                HirExprKind.TryCatch(self.resolve_block(body), resolved_clauses, resolved_finally)
+
             # Async
             case Await(e):
                 HirExprKind.Await(self.resolve_expr(e))
@@ -780,8 +867,8 @@ impl MethodResolver:
                 val resolved_value = match value:
                     case Some(expr_):
                         Some(self.resolve_expr(expr_))
-                    case nil:
-                        nil
+                    case None:
+                        None
                 HirExprKind.Yield(resolved_value)
 
             # Construction
@@ -805,8 +892,8 @@ impl MethodResolver:
                                 for (name, value) in fields:
                                     resolved = resolved.push((name, self.resolve_expr(value)))
                                 Some(HirEnumPayload.Struct(resolved))
-                    case nil:
-                        nil
+                    case None:
+                        None
                 HirExprKind.EnumLit(type_, variant, resolved_payload)
 
             # Casts
@@ -819,23 +906,26 @@ impl MethodResolver:
             case ConvertCall(e, target):
                 HirExprKind.ConvertCall(self.resolve_expr(e), target)
 
+            case TypeTest(value, type_name):
+                HirExprKind.TypeTest(self.resolve_expr(value), type_name)
+
             # Range
             case Range(start, end, inclusive, step):
                 val resolved_start = match start:
                     case Some(expr_):
                         Some(self.resolve_expr(expr_))
-                    case nil:
-                        nil
+                    case None:
+                        None
                 val resolved_end = match end:
                     case Some(expr_):
                         Some(self.resolve_expr(expr_))
-                    case nil:
-                        nil
+                    case None:
+                        None
                 val resolved_step = match step:
                     case Some(expr_):
                         Some(self.resolve_expr(expr_))
-                    case nil:
-                        nil
+                    case None:
+                        None
                 HirExprKind.Range(resolved_start, resolved_end, inclusive, resolved_step)
 
             # Comprehension
@@ -856,10 +946,41 @@ impl MethodResolver:
             case NogradBlock(body):
                 HirExprKind.NogradBlock(self.resolve_block(body))
 
+            case UnsafeBlock(body):
+                HirExprKind.UnsafeBlock(self.resolve_block(body))
+
+            # Inline assembly - operand expressions can name methods too.
+            case InlineAsm(asm_node):
+                HirExprKind.InlineAsm(self.resolve_asm(asm_node))
+
+            case InlineAsmMatch(arms):
+                var resolved_asm_arms: [HirAsmMatchArm] = []
+                for asm_arm in arms:
+                    val typed_arm: HirAsmMatchArm = asm_arm
+                    var resolved_arm = typed_arm
+                    if typed_arm.has_asm_body:
+                        resolved_arm.asm_body = self.resolve_asm(typed_arm.asm_body)
+                    resolved_asm_arms = resolved_asm_arms.push(resolved_arm)
+                HirExprKind.InlineAsmMatch(resolved_asm_arms)
+
+            # Target-neutral cfg select: every arm is kept with its condition
+            # text; resolve each arm body (HIR never selects).
+            case CfgSelect(conds, arms, else_):
+                var resolved_arms: [HirBlock] = []
+                for arm in arms:
+                    resolved_arms = resolved_arms.push(self.resolve_block(arm))
+                val resolved_else = match else_:
+                    case Some(else_block):
+                        Some(self.resolve_block(else_block))
+                    case None:
+                        None
+                HirExprKind.CfgSelect(conds, resolved_arms, resolved_else)
+
             # Error
             case Error: expr.kind
 
-        HirExpr(kind: kind, has_type_: resolved_has_type, type_: resolved_type, span: expr.span)
+        HirExpr(kind: kind, has_type_: resolved_has_type, type_: resolved_type, span: expr.span,
+            bracket_slice: expr.bracket_slice, arrow_update: expr.arrow_update)
 
     # ========================================================================
     # Method Resolution Logic (UFCS)
@@ -891,7 +1012,7 @@ impl ResolveError:
 # The tuple is kept for call-site compatibility; callers that PERSIST the
 # module must read `resolve_methods_module_owner.?` instead of the tuple
 # slot. Assigned on every entry before return; single-threaded per lane.
-var resolve_methods_module_owner: HirModule? = nil
+pub var resolve_methods_module_owner: HirModule? = nil
 
 export resolve_methods_module_owner
 

@@ -1,0 +1,39 @@
+# Exact public-API persistence boundary; no local actor/runtime doubles.
+# TEST_BLOCKED until executed with an admitted self-hosted test runtime.
+use std.spec
+use std.spec.step
+use std.nogc_async_mut.actors.actor.{make_handlers, spawn_actor, get_actor_runtime}
+
+fn persistence_named_handler(args: [text]) -> text:
+    "done"
+
+describe "Actor singleton closure persistence":
+    it "retains a named handler actor across independent singleton accessors":
+        step("Spawn through the public facade and reacquire the runtime")
+        val before = get_actor_runtime().actor_count()
+        var handlers = make_handlers()
+        handlers.register("process", persistence_named_handler)
+        val worker = spawn_actor(handlers)
+        expect(get_actor_runtime().actor_count()).to_equal(before + 1)
+        val stats = get_actor_runtime().get_actor_stats(worker.actor_id.value)
+        expect(stats.contains("not found")).to_equal(false)
+        expect(stats.contains("process")).to_equal(true)
+
+    it "retains a lambda handler actor across independent singleton accessors":
+        step("Exercise the closure-literal sibling-field trigger")
+        val before = get_actor_runtime().actor_count()
+        var handlers = make_handlers()
+        handlers.register("lambda_process", \args: "lambda done")
+        val worker = spawn_actor(handlers)
+        expect(get_actor_runtime().actor_count()).to_equal(before + 1)
+        val stats = get_actor_runtime().get_actor_stats(worker.actor_id.value)
+        expect(stats.contains("not found")).to_equal(false)
+        expect(stats.contains("lambda_process")).to_equal(true)
+
+    it "retains an actor without handler closures as an adjacent control":
+        step("Exercise the same singleton path with an empty handler table")
+        val before = get_actor_runtime().actor_count()
+        val worker = spawn_actor(make_handlers())
+        expect(get_actor_runtime().actor_count()).to_equal(before + 1)
+        val stats = get_actor_runtime().get_actor_stats(worker.actor_id.value)
+        expect(stats.contains("not found")).to_equal(false)

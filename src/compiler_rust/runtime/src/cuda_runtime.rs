@@ -1584,8 +1584,16 @@ pub extern "C" fn rt_cuda_device_compute_capability(device: i64) -> i64 {
     unsafe {
         let mut major = 0i32;
         let mut minor = 0i32;
-        cuDeviceGetAttribute(&mut major, 75, device as CUdevice);
-        cuDeviceGetAttribute(&mut minor, 76, device as CUdevice);
+        let r_major = cuDeviceGetAttribute(&mut major, 75, device as CUdevice);
+        let r_minor = cuDeviceGetAttribute(&mut minor, 76, device as CUdevice);
+        // A failing driver call reports -(CUresult) so it can never be read as
+        // a packed capability; matches the seed interpreter's dlopen arm.
+        if r_major != 0 {
+            return -(r_major as i64);
+        }
+        if r_minor != 0 {
+            return -(r_minor as i64);
+        }
         (major * 10 + minor) as i64
     }
 }
@@ -1661,6 +1669,11 @@ pub extern "C" fn rt_cuda_ctx_set_current(_ctx: i64) -> i64 {
 #[no_mangle]
 #[cfg(feature = "cuda")]
 pub extern "C" fn rt_cuda_ctx_destroy(ctx: i64) -> i64 {
+    // 0 is no context and a negative value is the CUresult of a failed
+    // create; neither is a handle cuCtxDestroy may be given.
+    if ctx <= 0 {
+        return -1;
+    }
     unsafe {
         let err = cuCtxDestroy_v2(ctx as CUcontext);
         if err != 0 {
@@ -2525,8 +2538,14 @@ pub extern "C" fn rt_cuda_module_load_data(ptx_ptr: *const u8, ptx_len: u64) -> 
     }
     unsafe {
         let bytes = std::slice::from_raw_parts(ptx_ptr, ptx_len as usize);
+        // The span is not NUL-terminated, but cuModuleLoadData parses PTX as a
+        // C string: copy and terminate it, as rt_cuda_module_load_data_bytes does.
+        let mut image: Vec<u8> = bytes.to_vec();
+        if image.last() != Some(&0) {
+            image.push(0);
+        }
         let mut module: CUmodule = ptr::null_mut();
-        let err = cuModuleLoadData(&mut module, bytes.as_ptr() as *const c_void);
+        let err = cuModuleLoadData(&mut module, image.as_ptr() as *const c_void);
         if err != 0 {
             return -(err as i64);
         }
@@ -2593,6 +2612,9 @@ pub extern "C" fn rt_cuda_module_load_data_array(data: RuntimeValue) -> i64 {
 #[no_mangle]
 #[cfg(feature = "cuda")]
 pub extern "C" fn rt_cuda_module_unload(module: i64) -> i64 {
+    if module <= 0 {
+        return -1;
+    }
     if let Err(err) = ensure_default_context_current() {
         return -(err as i64);
     }
@@ -2615,7 +2637,7 @@ pub extern "C" fn rt_cuda_module_unload(_module: i64) -> i64 {
 #[no_mangle]
 #[cfg(feature = "cuda")]
 pub extern "C" fn rt_cuda_module_get_function(module: i64, func_name: *const c_char) -> i64 {
-    if func_name.is_null() {
+    if func_name.is_null() || module <= 0 {
         return -1;
     }
     if let Err(err) = ensure_default_context_current() {
@@ -2654,7 +2676,7 @@ pub extern "C" fn rt_cuda_launch_kernel(
     block_z: i64,
     args_ptr: i64,
 ) -> i64 {
-    if func_name_ptr.is_null() || func_name_len == 0 {
+    if func_name_ptr.is_null() || func_name_len == 0 || module <= 0 {
         return -1;
     }
     if let Err(err) = ensure_default_context_current() {
@@ -3039,14 +3061,16 @@ pub extern "C" fn rt_cuda_memcpy_dtoh_async(_dst: i64, _src: i64, _size: i64, _s
 }
 
 /// `rt_cuda_launch_kernel` plus dynamic shared memory and a stream slot.
-/// Same `(ptr, len)` function-name and `args_ptr` param-block contract.
+/// `func_name` is ONE NUL-terminated C string, unlike `rt_cuda_launch_kernel`:
+/// this name has no `text_extern_abi.spl` row, so native codegen passes its
+/// `text` argument as the single `rt_interp_cstr` word
+/// (cuda_launch_kernel_ex_text_abi_unregistered_2026-11-26).
 #[no_mangle]
 #[cfg(feature = "cuda")]
 #[allow(clippy::too_many_arguments)]
 pub extern "C" fn rt_cuda_launch_kernel_ex(
     module: i64,
-    func_name_ptr: *const u8,
-    func_name_len: u64,
+    func_name: *const c_char,
     grid_x: i64,
     grid_y: i64,
     grid_z: i64,
@@ -3057,19 +3081,15 @@ pub extern "C" fn rt_cuda_launch_kernel_ex(
     stream: i64,
     args_ptr: i64,
 ) -> i64 {
-    if func_name_ptr.is_null() || func_name_len == 0 || shared_bytes < 0 || stream < 0 {
+    if func_name.is_null() || module <= 0 || shared_bytes < 0 || stream < 0 {
         return -1;
     }
     if let Err(err) = ensure_default_context_current() {
         return -(err as i64);
     }
     unsafe {
-        let bytes = std::slice::from_raw_parts(func_name_ptr, func_name_len as usize);
-        let Ok(func_name) = CString::new(bytes) else {
-            return -1;
-        };
         let mut func: CUfunction = ptr::null_mut();
-        let err = cuModuleGetFunction(&mut func, module as CUmodule, func_name.as_ptr());
+        let err = cuModuleGetFunction(&mut func, module as CUmodule, func_name);
         if err != 0 {
             return -(err as i64);
         }
@@ -3094,8 +3114,7 @@ pub extern "C" fn rt_cuda_launch_kernel_ex(
 #[allow(clippy::too_many_arguments)]
 pub extern "C" fn rt_cuda_launch_kernel_ex(
     _module: i64,
-    _func_name_ptr: *const u8,
-    _func_name_len: u64,
+    _func_name: *const c_char,
     _grid_x: i64,
     _grid_y: i64,
     _grid_z: i64,
@@ -3580,5 +3599,13 @@ mod tests {
         assert_eq!(rt_cuda_mem_free(values_dev), 0);
         assert_eq!(rt_cuda_mem_free(out_1d_dev), 0);
         assert_eq!(rt_cuda_mem_free(out_2d_dev), 0);
+    }
+
+    #[test]
+    #[cfg(feature = "cuda")]
+    fn ctx_destroy_refuses_failed_create_status() {
+        // A negative value is the CUresult of a failed create, never a handle.
+        assert_eq!(rt_cuda_ctx_destroy(0), -1);
+        assert_eq!(rt_cuda_ctx_destroy(-2), -1);
     }
 }

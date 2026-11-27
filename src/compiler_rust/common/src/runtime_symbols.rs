@@ -173,6 +173,7 @@ pub const CORE_REQUIRED_RUNTIME_SYMBOLS: &[&str] = &[
     "rt_native_neq",
     "rt_native_cmp",
     "rt_slice",
+    "rt_slice_text_bytes",
     "rt_string_contains",
     "rt_string_starts_with",
     "rt_string_ends_with",
@@ -332,6 +333,7 @@ pub fn symbol_tier_of(name: &str) -> RuntimeSymbolTier {
         || name.starts_with("rt_utf8_")
         || name == "rt_text_count_codepoints"
         || name == "rt_text_cmp_any"
+        || name == "rt_text_eq_any"
         // rt_native_cmp is the ordering counterpart of rt_native_eq; it can
         // strcmp tagged heap strings, so it belongs in the same tier as
         // rt_text_cmp_any rather than the pure-scalar tier.
@@ -397,6 +399,16 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "print_raw",
     "rt_time_now_unix",
     "rt_entropy_hardware_ready",
+    // Contract checks (runtime/src/value/sffi/contracts.rs; emitted by codegen
+    // as RuntimeFuncSpec in compiler/src/codegen/runtime_sffi.rs, tier Core).
+    // Without these entries the generated static runtime-symbol table never
+    // contained them, so the seed JIT hit "can't resolve symbol
+    // simple_contract_check" at finalize and dropped the whole module to the
+    // interpreter — reproduced 2026-11-05 with the pure-Simple native-build
+    // app under SIMPLE_EXECUTION_MODE=jit while re-triaging
+    // doc/08_tracking/bug/seed_codegen_interp_native_divergence_2026-10-12.md.
+    "simple_contract_check",
+    "simple_contract_check_msg",
     // AOP runtime operations
     "rt_aop_invoke_around",
     "rt_aop_proceed",
@@ -410,7 +422,18 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_transient_heap_promote",
     "rt_transient_heap_promote_share_begin",
     "rt_transient_heap_promote_share_end",
+    "rt_session_heap_begin",
+    "rt_session_heap_end",
+    "rt_session_alloc_begin",
+    "rt_session_alloc_end",
+    "rt_transient_heap_adopt",
+    "rt_session_heap_id",
     "rt_transient_array_scope_end",
+    "rt_rc_share",
+    "rt_rc_retain",
+    "rt_rc_release",
+    "rt_rc_count",
+    "rt_heap_graph_bytes",
     // Unconditionally defined in value/heap.rs and emitted by codegen; absent
     // from this list until 2026-08-01, so any module tagging heap ownership
     // silently fell back to the interpreter.
@@ -429,7 +452,39 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     // was wired into CI and reported them.
     "rt_array_at",
     "rt_at",
+    // rt_get backs the `.get()` Option accessor on arrays (receiver-dispatched;
+    // non-array receivers defer to rt_index_get). Added 2026-11-09 with the
+    // `a.get(i) -> T?` contract (array_get_contract_drift_crypto_2026-10-18).
+    "rt_get",
     "rt_array_data_ptr_text",
+    // [u8] packed-backing validation + checked-copy providers
+    // (runtime/src/value/collections.rs; contracts in
+    // compiler/src/codegen/runtime_sffi.rs since 8ba019e7781). Without these
+    // names the JIT cannot resolve the symbols, demotes every call to the
+    // hybrid interp splice, and the bridge re-decodes a packed `[u8]` heap
+    // array into a boxed element array — which the rt_array_bytes_* twins
+    // reject with -22, so stdlib byte writes (std.io_runtime.file_write_bytes
+    // via nogc_sync_mut.sffi.file_bytes) silently no-op'd under the seed.
+    // See doc/08_tracking/bug/seed_parser_nondeterminism_and_array_bytes_gap_2026-10-23.md
+    // and the seed_file_write_bytes no-op record.
+    "rt_array_bytes_validate",
+    "rt_array_bytes_copy_checked",
+    "rt_array_bytes_basis_len",
+    "rt_array_bytes_basis_ptr",
+    // FileTextSession descriptor family (std.nogc_sync_mut.io file sessions):
+    // the Rust runtime exports these (value/sffi/file_io/io_file.rs) but the
+    // JIT provider could not resolve them without table entries, so session
+    // reads were spliced through the interp bridge and returned nil — the seed
+    // half of the file_read/timeout-directive gap (see the bug record dated
+    // 2026-10-24 in doc/08_tracking/bug/). The rt_io_file_open_read/_write/
+    // _append names landed with the seed-file-read-twins lane (#4283); the
+    // descriptor members below are the ones this change adds.
+    "rt_io_file_read",
+    "rt_io_file_read_all",
+    "rt_io_file_close",
+    "rt_io_file_seek",
+    "rt_io_file_flush",
+    "rt_io_file_meta_size",
     "rt_array_set",
     "rt_array_set_text",
     "rt_array_set_len_known_text",
@@ -463,6 +518,11 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_dict_clear",
     "rt_dict_keys",
     "rt_dict_values",
+    "rt_dict_scope_read_bound_v1",
+    "rt_dict_scope_read_owner_v1",
+    "rt_dict_scope_read_epoch_v1",
+    "rt_dict_scope_read_meta_v1",
+    "rt_dict_scope_read_slot_v1",
     // for-in iteration over dicts/arrays (cranelift for-loop lowering)
     "rt_dict_entries",
     "rt_for_iterable",
@@ -501,10 +561,12 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_index_get",
     "rt_index_set",
     "rt_slice",
+    "rt_slice_text_bytes",
     "rt_contains",
     "rt_len",
     "rt_to_int_dynamic",
     "rt_any_to_int",
+    "rt_any_cast_int",
     // ANY+ANY dynamic add (tag-dispatched string-concat vs. integer add).
     // Emitted by MIR lowering (lowering_expr_ops.rs) whenever both operands are
     // ANY-typed (untyped params / erased receivers, e.g. inside the Simple Web
@@ -548,6 +610,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_string_is_alnum",
     "rt_string_is_whitespace",
     "rt_string_char_count",
+    "rt_string_to_digit",
     "rt_string_capitalize",
     "rt_string_swapcase",
     "rt_string_title",
@@ -597,6 +660,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_utf8_find_invalid",
     "rt_text_count_codepoints",
     "rt_text_cmp_any",
+    "rt_text_eq_any",
     // Time operations backed by runtime_time.c and runtime_timestamp.c.
     "rt_time_now_nanos",
     "rt_time_now_micros",
@@ -681,6 +745,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_enum_check_variant",
     "rt_try_is_absent",
     "rt_enum_new",
+    "rt_enum_register_name",
     "rt_enum_id",
     "rt_enum_discriminant",
     "rt_enum_payload",
@@ -778,6 +843,9 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_memory_barrier",
     "rt_load_barrier",
     "rt_store_barrier",
+    "rt_read_cr3",
+    "rt_write_cr3",
+    "rt_invlpg",
     "rt_actor_spawn",
     "rt_actor_send",
     "rt_actor_stop",
@@ -817,6 +885,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_capture_stderr_start",
     // Environment & Process operations
     "rt_env_get",
+    "rt_env_get_raw",
     "rt_env_get_i64",
     "rt_lexer_source_set",
     "rt_lexer_source_slice",
@@ -840,7 +909,39 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_process_spawn_inherit",
     "rt_process_is_running",
     "rt_process_wait",
+    // rt_process_kill(pid) -> bool. THE contract (one symbol, four engines):
+    //   * Signals the one process `pid`, never its descendants. A caller that
+    //     needs the tree uses rt_process_kill_tree on a session-owned pid.
+    //   * pid <= 0 is false. A pid that is already gone is NOT an error on the
+    //     C/core owners (ESRCH -> true: the goal state holds).
+    //   * Ownership: the C and core owners signal any pid the caller may
+    //     signal (SIGTERM on POSIX, TerminateProcess on Windows) and do not
+    //     reap. The Rust (env_process.rs) and interpreter (system.rs) twins
+    //     kill-and-reap only pids in their own spawn table and answer false
+    //     for every other pid. That divergence is recorded, not endorsed: the
+    //     conformance surface every engine meets is "an owned pid, killed, is
+    //     not running afterwards and its wait returns"; see
+    //     src/runtime/test/process_tree_selfcheck.c and
+    //     test/01_unit/lib/test_runner/runner_timeout_kills_tree_spec.spl.
+    //     Making the twins delegate to one table is owned by the env_process.rs
+    //     lane.
     "rt_process_kill",
+    // Session-owned process trees (src/runtime/runtime_process_tree.c), the
+    // one mechanism by which a timed-out test kills everything it started.
+    // rt_process_spawn_session forks + setsid + exec, so pid == session id and
+    // every descendant inherits it; rt_process_kill_tree(pid) SIGKILLs every
+    // process whose session id is pid and reaps the leader. Hosts without an
+    // arm (Windows: the Job object owns capture children; SimpleOS) answer
+    // RT_PTREE_UNSUPPORTED (-100000), never success.
+    "rt_process_tree_support",
+    "rt_process_spawn_session",
+    "rt_process_spawn_session_value",
+    "rt_process_session_wait",
+    "rt_process_session_is_running",
+    "rt_process_kill_session",
+    "rt_process_kill_tree",
+    "rt_child_set_pdeathsig",
+    "rt_proc_start_time",
     "rt_process_owned_cancel",
     "rt_process_owned_cancel_value",
     "rt_process_owned_terminate",
@@ -863,10 +964,23 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_process_owned_v3_start_pinned_value",
     // Process Observation V4: exact native provider; interpreter registers an
     // explicit unavailable capability receipt and rejects authority methods.
+    "rt_sosix_darwin_snapshot_v1_capabilities_value",
+    "rt_sosix_darwin_snapshot_v1_start_value",
+    "rt_sosix_darwin_snapshot_v1_poll_value",
+    "rt_sosix_darwin_snapshot_v1_cancel_value",
+    "rt_sosix_darwin_snapshot_v1_output_value",
+    "rt_sosix_darwin_snapshot_v1_ack_value",
     "rt_process_observation_v4_capabilities_value",
     "rt_process_observation_v4_pin_cwd_value",
     "rt_process_observation_v4_cwd_digest_value",
     "rt_process_observation_v4_close_cwd_value",
+    "rt_process_observation_v4_reserved_matches_value",
+    "rt_process_observation_v4_reserve_value",
+    "rt_process_observation_v4_reserved_state_value",
+    "rt_process_observation_v4_reserved_start_pinned_value",
+    "rt_process_observation_v4_reserved_observe_value",
+    "rt_process_observation_v4_reserved_ack_value",
+    "rt_process_observation_v4_reserved_confirm_release_value",
     "rt_process_observation_v4_start_value",
     "rt_process_observation_v4_start_pinned_value",
     "rt_process_observation_v4_poll_value",
@@ -885,6 +999,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_io_tcp_connect",
     "rt_io_tcp_connect_timeout",
     "rt_dns_lookup",
+    "rt_dns_lookup_timeout_ms",
     "rt_browser_http_job_start",
     "rt_browser_http_job_start_public_limited",
     "rt_browser_http_job_poll",
@@ -1094,6 +1209,8 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_file_canonicalize",
     "rt_file_read_text",
     "rt_file_read_regular_no_follow_bounded",
+    "rt_file_read_regular_no_follow_bounded_raw",
+    "rt_file_read_text_raw",
     "rt_file_read_regular_no_follow_bounded_bytes",
     "rt_file_read_regular_no_follow_last_failure",
     "rt_file_read_text_rv",
@@ -1101,6 +1218,9 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_file_fsync",
     "rt_file_fsync_cached",
     "rt_file_sync",
+    "rt_dir_sync",
+    "rt_file_read_under_root_bytes",
+    "rt_file_write_under_root_bytes",
     "rt_file_create_excl",
     "rt_file_view_open_beneath_no_follow_v1",
     "rt_file_view_mapping_supported_v1",
@@ -1124,6 +1244,9 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_file_hash_sha256",
     "rt_file_lock",
     "rt_file_unlock",
+    "rt_file_lock_owned_acquire_v2",
+    "rt_file_lock_owned_state_v2",
+    "rt_file_lock_owned_release_v2",
     "rt_file_rename",
     "rt_file_read_lines",
     "rt_file_append_text",
@@ -1149,6 +1272,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_simple_sandbox_section_start",
     "rt_simple_sandbox_section_end",
     "rt_bytes_to_text",
+    "rt_tls_wire_from_bytes",
     "rt_char_from_code",
     "rt_text_to_bytes",
     "rt_file_write_bytes",
@@ -1156,6 +1280,11 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_file_extract_smf_dynlib",
     "rt_file_move",
     "rt_mmap",
+    "rt_mmap_create",
+    "rt_cpu_topology_count",
+    "rt_cpu_topology_field",
+    "rt_thread_pin_current",
+    "rt_thread_current_cpu",
     "rt_munmap",
     "rt_madvise",
     "rt_msync",
@@ -1233,13 +1362,18 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_path_stem",
     "rt_path_relative",
     "rt_path_join",
+    "rt_path_normalize",
     // File locking
     "rt_file_lock",
     "rt_file_unlock",
+    "rt_file_lock_owned_acquire_v2",
+    "rt_file_lock_owned_state_v2",
+    "rt_file_lock_owned_release_v2",
     // System info
     "rt_getpid",
     "rt_process_exists",
     "rt_hostname",
+    "rt_black_box",
     "rt_system_cpu_count",
     "rt_time_now_monotonic_ms",
     // High-performance collections (HashMap)
@@ -1517,6 +1651,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_array_fill",
     "rt_array_flatten",
     "rt_array_write_span",
+    "rt_array_fill_span",
     "rt_array_free",
     "rt_array_header_ptr",
     "rt_string_free",
@@ -1604,16 +1739,21 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_bdd_describe_end",
     "rt_bdd_describe_start",
     "rt_bdd_describe_start_rv",
+    "rt_bdd_executed_total",
     "rt_bdd_expect_eq",
     "rt_bdd_expect_eq_rv",
     "rt_bdd_expect_fail",
     "rt_bdd_expect_truthy",
     "rt_bdd_expect_truthy_rv",
+    "rt_bdd_fail_rv",
+    "rt_bdd_failed_total",
     "rt_bdd_format_results",
     "rt_bdd_has_failure",
     "rt_bdd_it_end",
     "rt_bdd_it_start",
     "rt_bdd_it_start_rv",
+    "rt_bdd_note_skip",
+    "rt_bdd_record_result",
     "rt_bytes_u8_set",
     "rt_cargo_build",
     "rt_cargo_check",
@@ -1994,6 +2134,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_pool_release",
     "rt_process_run_timeout",
     "rt_process_run_bounded",
+    "rt_process_run_bounded_bytes",
     "rt_process_run_owned_bounded_value",
     "rt_process_run_owned_observed_bounded_value",
     "rt_process_run_with_limits",
@@ -2003,6 +2144,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_ps_torch_tensor_from_bits_1d",
     "rt_read_file_str",
     "rt_read_stdin_line",
+    "rt_stdin_read_line",
     "rt_resource_registry_clear",
     "rt_resource_registry_close_all",
     "rt_resource_registry_count",
@@ -2145,6 +2287,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_tls_server_create_from_der",
     "rt_tls_server_read_checked",
     "rt_tls_server_shutdown",
+    "rt_tls_server_upgrade_tcp",
     "rt_tls_server_write",
     "rt_tls_server_write_bytes",
     "rt_tls_set",
@@ -2357,6 +2500,10 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_io_file_delete",
     "rt_io_file_exists",
     "rt_io_file_open",
+    "rt_io_file_open_append",
+    "rt_io_file_open_read",
+    "rt_io_file_open_write",
+    "rt_io_file_close_value",
     "rt_mem_snapshot_close",
     "rt_mem_snapshot_open",
     "rt_mem_snapshot_record",
@@ -2446,6 +2593,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "spl_fonts_call_init_path",
     "spl_fonts_call_layout_text",
     "spl_ordered_key_cmp",
+    "spl_erased_key_hash",
     "spl_collection_capture_begin",
     "spl_collection_capture_note_size",
     "spl_collection_capture_note_lookup",
@@ -2461,11 +2609,14 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_opt_bool_to_string",
     "rt_opt_f64_to_string",
     "rt_opt_i64_to_string",
+    "rt_i64_to_hex",
+    "rt_opt_value_to_string",
     "rt_file_delete", // -> rt_file_remove
     "rt_neighbor_load",
     "rt_print",   // -> rt_print_value
     "rt_println", // -> rt_println_value
     "rt_sleep_ms",
+    "rt_sleep_nanos",
     "rt_str_hash",
     "rt_value_as_int",
     "rt_value_as_u64",
@@ -2484,6 +2635,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_vulkan_discard_graphics_command",
     "rt_vulkan_end_graphics",
     "rt_vulkan_selected_device_name",
+    "rt_vulkan_selected_device_identity_v1",
     "rt_vulkan_submit_graphics_and_wait_fence",
     "rt_write_file",
     // Native socket / HTTP externs. These use the no_mangle C ABI in
@@ -2552,6 +2704,136 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_io_udp_set_multicast_loop",
     "rt_io_udp_set_nonblocking",
     "rt_io_udp_set_read_timeout",
+    // Caret JIT extern wave 1 (jit_caret_392_unregistered_externs_hybrid_splice_2026-11-13):
+    // Rust-runtime `#[no_mangle] extern "C"` exports that were never in this manifest, so
+    // `run_file_jit` spliced every call through the interpreter bridge. Each has an exact
+    // `RuntimeFuncSpec` in codegen/runtime_sffi.rs checked against its Rust definition.
+    "rt_arm_array_get_byte_u32",
+    "rt_arm_array_len_u32",
+    "rt_debug_exit_success",
+    "rt_fd_stat_snapshot_v1",
+    "rt_file_atomic_write",
+    "rt_file_atomic_write_mode",
+    "rt_file_atomic_write_bytes_array",
+    "rt_file_mode",
+    "rt_file_modified",
+    "rt_file_modified_time",
+    "rt_heap_array_capacity_bytes",
+    "rt_heap_aux_live_bytes",
+    "rt_mem_attr_enabled",
+    "rt_io_file_meta_created",
+    "rt_io_file_meta_flags",
+    "rt_io_file_meta_modified",
+    "rt_io_file_set_permissions",
+    "rt_io_file_write",
+    "rt_io_file_write_all",
+    "rt_par_atomic_i64_is_lock_free",
+    "rt_par_atomic_load_i64",
+    "rt_path_extension",
+    "rt_path_filename",
+    "rt_print_err",
+    "rt_process_hwm_kib",
+    "rt_process_last_child_cpu_ms",
+    "rt_process_last_child_peak_rss_kib",
+    "rt_process_run_tuple",
+    "rt_process_run_bounded_tuple",
+    "rt_process_run_bounded_observed_tuple_v1",
+    "rt_process_run_bounded_environment_tuple_v1",
+    "rt_process_run_bounded_admitted_tuple_v1",
+    "rt_process_spawn_async_environment_v1",
+    "rt_pty_close",
+    "rt_pty_exit_code_v1",
+    "rt_pty_hangup",
+    "rt_pty_is_running",
+    "rt_pty_read",
+    "rt_pty_resize",
+    "rt_pty_write",
+    "rt_pty_write_bytes_v1",
+    "rt_random_randint",
+    "rt_random_uniform",
+    "rt_shell_exec",
+    "rt_stdin_read",
+    "rt_stdin_read_all",
+    "rt_string_from_byte_array",
+    "rt_string_to_byte_array",
+    "rt_term_flush",
+    "rt_term_write",
+    "rt_text_validate_utf8",
+    "rt_transient_array_scope_identity_v1",
+    "rt_transient_array_scope_state_v1",
+    "spl_dlclose",
+    "spl_dlopen",
+    "spl_dlsym",
+    "spl_wffi_call_i64",
+    // Caret JIT extern wave 2: scalar-ABI C exports of TUs linked into the seed archive.
+    "rt_alloc_probe_count_v1",
+    "rt_alloc_probe_coverage_v1",
+    "rt_alloc_probe_reset_v1",
+    "rt_mem_guard_stats",
+    "rt_mem_harden_check_native",
+    "rt_time_now_seconds",
+    "rt_time_now_seconds_f64",
+    "rt_linux_group_cancel_v1",
+    "rt_linux_group_parent_release_v1",
+    "rt_linux_group_stream_release_inherited_v2",
+    "rt_windows_private_alloc_v1",
+    "rt_windows_private_free_v1",
+    "rt_windows_private_root_open_v1",
+    "rt_windows_private_root_ready_v1",
+    "rt_windows_private_directory_v1",
+    "rt_windows_private_file_v1",
+    "rt_windows_private_check_v1",
+    "rt_windows_private_file_write_v1",
+    "rt_windows_private_file_seal_v1",
+    "rt_windows_private_file_size_v1",
+    "rt_windows_private_file_read_v1",
+    "rt_windows_private_publish_v1",
+    "rt_windows_private_root_close_v1",
+    "rt_windows_private_file_close_v1",
+    "rt_windows_private_read_root_open_v2",
+    "rt_windows_private_read_root_ready_v2",
+    "rt_windows_private_read_directory_v2",
+    "rt_windows_private_read_file_open_v2",
+    "rt_windows_private_read_file_check_v2",
+    "rt_windows_private_read_file_size_v2",
+    "rt_windows_private_read_file_read_v2",
+    "rt_windows_private_read_root_close_v2",
+    "rt_windows_private_read_file_close_v2",
+    "rt_windows_private_roots_same_directory_v2",
+    "rt_windows_private_adopt_published_read_v2",
+    "rt_windows_private_stage_discard_v2",
+    "rt_windows_journal_open_v1",
+    "rt_windows_journal_live_v1",
+    "rt_windows_journal_read_v1",
+    "rt_windows_journal_publish_v1",
+    "rt_windows_journal_replace_v1",
+    "rt_windows_journal_compare_replace_v1",
+    "rt_windows_journal_consumption_claim_v1",
+    "rt_windows_journal_close_v1",
+    "rt_file_publish_noreplace",
+    "rt_host_memory_headroom_bytes_v1",
+    "rt_linux_container_containment_capture_v1",
+    "rt_linux_container_containment_close_v1",
+    "rt_linux_container_containment_kernel_observe_v1",
+    "rt_linux_container_containment_observe_v1",
+    "rt_linux_container_user_close_v1",
+    "rt_linux_container_user_observe_v1",
+    "rt_linux_container_user_open_v1",
+    "rt_mkdir",
+    "rt_secure_temp_dir",
+    "rt_secure_temp_dir_make",
+    "rt_secure_temp_dir_set_parent",
+    "rt_secure_temp_dir_set_prefix",
+    "rt_win_compare_object_handles",
+    "rt_windows_pipe_file_mode_v1",
+    "rt_windows_pty_owner_thread_guard_v1",
+    "rt_workspace_storage_close_retained_v1",
+    "rt_workspace_storage_forget_released_v1",
+    "rt_workspace_storage_observe_v1",
+    "rt_workspace_storage_open_v1",
+    "rt_workspace_storage_prepare_executable_v1",
+    "rt_workspace_storage_release_if_absent_v1",
+    "spl_thread_current_id",
     "sys_get_args", // -> rt_get_args
     "sys_exit",     // -> rt_exit
 ];
@@ -2565,6 +2847,25 @@ mod tests {
         for symbol in ["rt_struct_alloc", "rt_struct_receiver_valid"] {
             assert!(CORE_REQUIRED_RUNTIME_SYMBOLS.contains(&symbol));
             assert!(RUNTIME_SYMBOL_NAMES.contains(&symbol));
+        }
+    }
+
+    #[test]
+    fn contract_check_pair_is_present_in_full_manifest() {
+        // Both are defined in runtime/src/value/sffi/contracts.rs and emitted
+        // by codegen (RuntimeFuncSpec in compiler/src/codegen/runtime_sffi.rs,
+        // tier Core), but they were absent from this list, so the generated
+        // static runtime-symbol table never contained them and the seed JIT
+        // panicked at finalize ("can't resolve symbol simple_contract_check")
+        // and dropped the whole module to the interpreter. Reproduced
+        // 2026-11-05 while re-triaging
+        // doc/08_tracking/bug/seed_codegen_interp_native_divergence_2026-10-12.md:
+        // the pure-Simple native-build app de-JITed in full under
+        // SIMPLE_EXECUTION_MODE=jit. See also
+        // doc/08_tracking/bug/jit_silent_interpreter_fallback_on_unresolved_extern_2026-11-03.md.
+        for symbol in ["simple_contract_check", "simple_contract_check_msg"] {
+            assert!(RUNTIME_SYMBOL_NAMES.contains(&symbol));
+            assert_eq!(symbol_tier_of(symbol), RuntimeSymbolTier::Core);
         }
     }
 
@@ -2729,6 +3030,18 @@ mod tests {
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"rt_value_println"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"SCOPE_LEVELS_dot_has"));
         assert!(RUNTIME_SYMBOL_NAMES.contains(&"stdin_read_char"));
+    }
+
+    #[test]
+    fn tls_wire_provider_is_registered_exactly_once() {
+        assert_eq!(
+            RUNTIME_SYMBOL_NAMES
+                .iter()
+                .filter(|&&name| name == "rt_tls_wire_from_bytes")
+                .count(),
+            1
+        );
+        assert_eq!(symbol_tier_of("rt_tls_wire_from_bytes"), RuntimeSymbolTier::Core);
     }
 
     #[test]

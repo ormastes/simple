@@ -368,18 +368,55 @@ impl<'a> Parser<'a> {
                         let stmt = self.parse_item()?;
                         Some(Box::new(Expr::DoBlock(vec![stmt])))
                     } else {
-                        Some(Box::new(self.parse_expression()?))
+                        // Same no-paren call grammar as the then-branch
+                        // (`parse_expression_or_assignment`): plain
+                        // `parse_expression` stopped at `print`, leaking the
+                        // argument (`"b"`) as a stray tail statement. See
+                        // doc/08_tracking/bug/seed_run_main_tail_if_print_coerced_to_exit_code_2026-11-06.md.
+                        //
+                        // The else body may also be an ASSIGNMENT
+                        // (`if c: xs.push(v)` / `else: xs[i] = v`), exactly
+                        // as after an assignment then-body.
+                        match self.parse_expression_or_assignment()? {
+                            Node::Expression(else_expr) => Some(Box::new(else_expr)),
+                            stmt => Some(Box::new(Expr::DoBlock(vec![stmt]))),
+                        }
                     }
                 }
             } else {
                 None
             };
 
-            return Ok(Node::Expression(Expr::If {
+            // Statement position: build the same `IfStmt` the block form and
+            // the assignment-bodied inline form (`finish_inline_statement_if`)
+            // produce, so the statement keeps its span. `Expr` carries no
+            // span, and a `Node::Expression(Expr::If)` here was invisible to
+            // the line-coverage collector (extract_node_location) and to
+            // error positions — `if c: a else: b` lines ran but were scored
+            // missed (pinned by test/02_integration/app/coverage/
+            // spl_coverage_module_spec.spl and covtail_fixture.spl).
+            let branch_span = self.previous.span;
+            let else_block = else_branch.map(|else_expr| match *else_expr {
+                Expr::DoBlock(statements) => Block {
+                    span: branch_span,
+                    statements,
+                },
+                other => Block {
+                    span: branch_span,
+                    statements: vec![Node::Expression(other)],
+                },
+            });
+            return Ok(Node::If(IfStmt {
+                span: Span::new(start_span.start, branch_span.end, start_span.line, start_span.column),
                 let_pattern,
-                condition: Box::new(condition),
-                then_branch: Box::new(then_expr),
-                else_branch,
+                condition,
+                then_block: Block {
+                    span: branch_span,
+                    statements: vec![Node::Expression(then_expr)],
+                },
+                elif_branches: Vec::new(),
+                else_block,
+                is_suspend: false,
             }));
         }
 
@@ -390,13 +427,23 @@ impl<'a> Parser<'a> {
         // (shallow continuation) — see doc/08_tracking/bug/
         // seed_elif_while_condition_continuation_indent_ambiguity_2026-07-31.md.
         let then_block = self.parse_condition_block()?;
+        // A block body that ended on a same-line trailing `else:`/`elif`
+        // (see `parse_block_body`) left its INDENT open; the matching DEDENT
+        // trails the whole chain's final arm, so count it here and consume
+        // it after the chain. See doc/08_tracking/bug/
+        // riscv_scalar_product_vhdl_else_parse_2026-08-12.md.
+        let mut trailing_unclosed_indents = if self.block_body_ended_on_else { 1 } else { 0 };
 
         let mut elif_branches = Vec::new();
         while self.check(&TokenKind::Elif) {
             self.advance();
             let (elif_pattern, elif_condition) = self.parse_optional_let_pattern()?;
             self.expect(&TokenKind::Colon)?;
+            self.block_body_ended_on_else = false;
             let elif_block = self.parse_elif_or_else_if_body()?;
+            if self.block_body_ended_on_else {
+                trailing_unclosed_indents += 1;
+            }
             elif_branches.push((elif_pattern, elif_condition, elif_block));
             if self.check(&TokenKind::Newline)
                 && (self.peek_through_newlines_and_indents_is(&TokenKind::Elif)
@@ -419,7 +466,11 @@ impl<'a> Parser<'a> {
                 self.advance(); // consume 'if'
                 let (elif_pattern, elif_condition) = self.parse_optional_let_pattern()?;
                 self.expect(&TokenKind::Colon)?;
+                self.block_body_ended_on_else = false;
                 let elif_block = self.parse_elif_or_else_if_body()?;
+                if self.block_body_ended_on_else {
+                    trailing_unclosed_indents += 1;
+                }
                 elif_branches.push((elif_pattern, elif_condition, elif_block));
 
                 if self.check(&TokenKind::Newline) && self.peek_through_newlines_and_indents_is(&TokenKind::Else) {
@@ -442,7 +493,25 @@ impl<'a> Parser<'a> {
             // we need to parse the else block
             if self.check(&TokenKind::Colon) {
                 self.expect(&TokenKind::Colon)?;
+                self.block_body_ended_on_else = false;
                 else_block = Some(self.parse_inline_or_block()?);
+                if self.block_body_ended_on_else {
+                    trailing_unclosed_indents += 1;
+                }
+            }
+        }
+
+        // Close the INDENTs left open by block bodies that ended on a
+        // same-line trailing else:/elif: each matching DEDENT trails the
+        // chain's final arm. Defensive — only consume what is actually there.
+        // See doc/08_tracking/bug/
+        // riscv_scalar_product_vhdl_else_parse_2026-08-12.md.
+        for _ in 0..trailing_unclosed_indents {
+            if self.check(&TokenKind::Newline) && matches!(self.peek_next().kind, TokenKind::Dedent) {
+                self.advance(); // consume Newline
+                self.advance(); // consume Dedent
+            } else if self.check(&TokenKind::Dedent) {
+                self.advance(); // consume Dedent
             }
         }
 
@@ -880,6 +949,11 @@ impl<'a> Parser<'a> {
 
             if self.check(&TokenKind::Dedent) {
                 self.advance();
+            } else if !equal_column && self.at_enclosing_list_terminator() {
+                // A same-line list closer ends this physically indented arm
+                // block before the lexer emits its Dedent. Do not pop for the
+                // equal-column continuation shape, which consumed no Indent.
+                self.lexer.pop_indent();
             }
 
             let deferred = self.header_continuation_dedents_to_reconcile(deferred_before, equal_column);
@@ -1070,6 +1144,13 @@ impl<'a> Parser<'a> {
     }
 
     pub(crate) fn parse_match_arm(&mut self) -> Result<MatchArm, ParseError> {
+        let enclosing_column = self.match_arm_column.replace(self.current.span.column);
+        let result = self.parse_match_arm_body();
+        self.match_arm_column = enclosing_column;
+        result
+    }
+
+    fn parse_match_arm_body(&mut self) -> Result<MatchArm, ParseError> {
         let start_span = self.current.span;
 
         // Support both syntaxes:
@@ -1093,7 +1174,15 @@ impl<'a> Parser<'a> {
 
         let guard = if self.check(&TokenKind::If) {
             self.advance();
-            Some(self.parse_expression()?)
+            // Traditional case-colon guards retain their functional-update
+            // grammar. Only pipe arms require an unparenthesized arrow delimiter.
+            let enclosing_depth = self.match_guard_arrow_depth;
+            if is_pipe_syntax {
+                self.match_guard_arrow_depth = Some(self.parse_recursion_depth + 1);
+            }
+            let result = self.parse_expression();
+            self.match_guard_arrow_depth = enclosing_depth;
+            Some(result?)
         } else {
             None
         };
@@ -1158,14 +1247,20 @@ impl<'a> Parser<'a> {
         // `parse_condition_block` reconciles any DEDENT deferred by a
         // multi-line condition continuation — see doc/08_tracking/bug/
         // seed_elif_while_condition_continuation_indent_ambiguity_2026-07-31.md.
+        self.block_body_ended_on_else = false;
         let then_block = self.parse_condition_block()?;
+        let mut trailing_unclosed_indents = if self.block_body_ended_on_else { 1 } else { 0 };
 
         let mut elif_branches = Vec::new();
         while self.check(&TokenKind::Elif) {
             self.advance();
             let (elif_pattern, elif_condition) = self.parse_optional_let_pattern()?;
             self.expect(&TokenKind::Colon)?;
+            self.block_body_ended_on_else = false;
             let elif_block = self.parse_condition_block()?;
+            if self.block_body_ended_on_else {
+                trailing_unclosed_indents += 1;
+            }
             elif_branches.push((elif_pattern, elif_condition, elif_block));
         }
 
@@ -1176,7 +1271,11 @@ impl<'a> Parser<'a> {
                 self.advance();
                 let (elif_pattern, elif_condition) = self.parse_optional_let_pattern()?;
                 self.expect(&TokenKind::Colon)?;
+                self.block_body_ended_on_else = false;
                 let elif_block = self.parse_condition_block()?;
+                if self.block_body_ended_on_else {
+                    trailing_unclosed_indents += 1;
+                }
                 elif_branches.push((elif_pattern, elif_condition, elif_block));
 
                 if self.check(&TokenKind::Else) {
@@ -1188,7 +1287,22 @@ impl<'a> Parser<'a> {
 
             if self.check(&TokenKind::Colon) {
                 self.expect(&TokenKind::Colon)?;
+                self.block_body_ended_on_else = false;
                 else_block = Some(self.parse_condition_block()?);
+                if self.block_body_ended_on_else {
+                    trailing_unclosed_indents += 1;
+                }
+            }
+        }
+
+        // Close INDENTs left open by block bodies that ended on a same-line
+        // trailing else:/elif — see `parse_if` above.
+        for _ in 0..trailing_unclosed_indents {
+            if self.check(&TokenKind::Newline) && matches!(self.peek_next().kind, TokenKind::Dedent) {
+                self.advance(); // consume Newline
+                self.advance(); // consume Dedent
+            } else if self.check(&TokenKind::Dedent) {
+                self.advance(); // consume Dedent
             }
         }
 

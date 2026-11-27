@@ -152,3 +152,37 @@ Consumer workaround (correct with or without a fix): the self-hosted
 array-move analysis (`src/compiler/50.mir/array_move/mir_array_move.spl`, `ArrayMoveScan`
 `ctor_arg_syms` / `ctor_dep_targets`) keeps insertion-ordered key lists
 instead of iterating `Dict<i64, _>.keys()`.
+
+## Verified FIXED 2026-11-05 on release/1.0.0 (`c3b2271c310`) — all three engines
+
+The typed-key fix (`2babf02208f fix(seed-interp): Dict keeps non-text keys
+typed through iteration` + review follow-up `015d40bfa30`) is in the
+release/1.0.0 ancestry. Re-verified today with a seed built from this exact
+branch point (`CARGO_TARGET_DIR=/private/tmp/rel100-cargo-a cargo build
+--release`), using the doc's 2026-10-19 repro program (local dict, struct
+field dict, key sum, and a text-keyed control):
+
+| mode | command | output |
+|---|---|---|
+| `SIMPLE_EXECUTION_MODE=interpret` | `simple run bug1_dict_keys.spl` | `k+1=6 k==5=true get=1`, `k==7=true get=2`, `k>=0=true`, `sum=3`, text concat `ab` |
+| `SIMPLE_EXECUTION_MODE=jit` | same | identical, all numeric |
+| native default | same | identical, all numeric |
+
+Before the fix era (per the 2026-10-19 re-confirmation above): interpret gave
+`k+1=51 k==5=false` and died on `k>=0` with a string/integer mismatch; jit
+was already correct.
+
+Rust regression tests pinning the behavior (all PASS, run with
+`cargo test -p simple-compiler --release --lib`):
+- `value::dict_composite_key_tests::typed_scalar_keys_round_trip_through_iteration`
+  — Int/UInt/Bool/Float keys recover their original typed `Value` through
+  `.keys()`-style blind iteration (this bug), while `get()` with a text probe
+  still reaches the same entry (lookup semantics unchanged).
+- `value::dict_composite_key_tests::wrap_dict_entry_is_a_noop_for_self_describing_keys`
+  — text/symbol/nil keys stay stored bit-for-bit (no marker tuple), so
+  text-keyed dicts are unchanged.
+- `value::dict_composite_key_tests::wrap_dict_entry_round_trips_composite_key_through_get_and_iteration`
+  — struct keys still round-trip (the older 2026-06-13 defect class).
+
+`+`, `==`, ordered compares, and `get(k)` on iterated i64 keys are all
+correct under `interpret`, `jit`, and native. Status: FIXED.

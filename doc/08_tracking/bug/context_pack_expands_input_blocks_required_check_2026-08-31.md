@@ -72,3 +72,6 @@ the presence of a label.
 Do not wire the guard before the tool is fixed: that trades an orphan-guard
 failure for a real-defect failure and leaves the repo just as blocked.
 
+
+## Round 8 note 2026-11-06 (already-fixed)
+`sh scripts/check/check-context-pack-reduces.shs` now: `PASS — 5 file(s) packed, worst reduction 88.0% (floor 10%)` (was -1.3%). Guard is wired in `.github/workflows/aot-lane-fences.yml:159`; `context_generate_spec.spl` has 16 `it(` blocks (18 examples pass).

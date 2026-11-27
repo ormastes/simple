@@ -1,0 +1,168 @@
+# Native contract fixture for the real library; no SSpec runner dependency.
+# Nonzero exit is failure. This sequential fixture proves API and ring-owner
+# transitions only; it does not qualify multicore interleavings or noalloc.
+use std.nogc_async_mut.concurrent.lockless_map_i64.{LocklessMapI64, MapError}
+use std.nogc_async_mut.async.async_ref.{AsyncRefError, AsyncRefStateI64, AsyncWakeScanI64}
+use std.nogc_async_mut.async_ring.async_ref.{async_ref_deliver_wake_i64}
+use std.common.contracts.execution.simple_ring_async_v1.{TaskPollResult}
+use std.nogc_async_mut.async_ring.simple_ring.{SimpleRing, SimpleRingError}
+use std.nogc_async_mut.async_ring.software_provider.{SoftwareRingProvider}
+
+@unsafe(reason: "fixture exercises experimental copyable raw map and AsyncRef handles", capabilities: [ffi])
+fn native_contract() -> i64:
+    val map = match LocklessMapI64.create(8, 8, 8, 4):
+        case Ok(value): value
+        case Err(_): return 1
+    val first = match map.request(0, 91):
+        case Ok(value): value
+        case Err(_): return 2
+    val duplicate = match map.request(0, 91):
+        case Ok(value): value
+        case Err(_): return 3
+    if not first.same_reference(duplicate): return 4
+    match map.request(0, 92):
+        case Err(MapError.RecipeConflict): ()
+        case _: return 5
+    val collision = match map.request(8, 93):
+        case Ok(value): value
+        case Err(_): return 6
+    if first.same_reference(collision): return 7
+    val minimum = -9223372036854775807i64 - 1i64
+    val minimum_ref = match map.request(minimum, 94):
+        case Ok(value): value
+        case Err(_): return 8
+    val maximum_ref = match map.request(9223372036854775807i64, 95):
+        case Ok(value): value
+        case Err(_): return 9
+    match map.find(minimum):
+        case Some(found):
+            if not found.same_reference(minimum_ref): return 10
+        case _: return 11
+    match map.find(9223372036854775807i64):
+        case Some(found):
+            if not found.same_reference(maximum_ref): return 12
+        case _: return 13
+    match map.find(16):
+        case nil: ()
+        case _: return 14
+
+    # The original requester need not own start: another joined handle starts.
+    if not duplicate.try_start(): return 15
+    if first.try_start(): return 16
+    match first.try_ready():
+        case AsyncRefStateI64.Pending: ()
+        case _: return 17
+
+    val ring = match SimpleRing<i64, i64>.create(1001u64, 1002u64, 2):
+        case Ok(value): value
+        case Err(_): return 18
+    val provider = match SoftwareRingProvider<i64, i64>.create(1003u64, 2):
+        case Ok(value): value
+        case Err(_): return 19
+    val reservation = match ring.reserve(1002u64, 1004u64):
+        case Ok(value): value
+        case Err(_): return 20
+    match ring.commit(1002u64, reservation, 77):
+        case Ok(_): ()
+        case Err(_): return 21
+    val subscription = match first.subscribe(reservation.token):
+        case Ok(value): value
+        case Err(_): return 22
+    # Retained compiler regression: imported generic enum payload binding.
+    # BUG-2026-10-27-PHASE2-COMPACT-RTI-IMPORTED-OPTIONAL-RESULT
+    match subscription.poll():
+        case TaskPollResult.Pending(token):
+            if token.ring_id != reservation.token.ring_id: return 23
+            if token.slot != reservation.token.slot: return 24
+            if token.generation.value != reservation.token.generation.value: return 25
+        case _: return 26
+
+    match first.complete(123):
+        case Ok(accepted):
+            if not accepted: return 27
+        case Err(_): return 28
+    match duplicate.complete(456):
+        case Ok(accepted):
+            if accepted: return 29
+        case Err(_): return 30
+    match duplicate.fail(789):
+        case Ok(accepted):
+            if accepted: return 31
+        case Err(_): return 32
+    match subscription.poll():
+        case TaskPollResult.Ready(outcome):
+            match outcome:
+                case Ok(value):
+                    if value != 123: return 33
+                case Err(_): return 34
+        case _: return 35
+
+    # Delivery fails while Committed, retaining the same wake for retry.
+    val cursor = match first.wake_cursor():
+        case Some(value): value
+        case _: return 36
+    val wake = match cursor.next_pending(1):
+        case AsyncWakeScanI64.Wake(value): value
+        case _: return 37
+    match async_ref_deliver_wake_i64<i64>(ring, wake):
+        case Err(SimpleRingError.NotInFlight): ()
+        case _: return 38
+    match provider.take_one(ring):
+        case Ok(Some(submission)):
+            if submission.token.slot != reservation.token.slot: return 39
+        case _: return 40
+    val after = match async_ref_deliver_wake_i64<i64>(ring, wake):
+        case Ok(value): value
+        case Err(_): return 41
+    match after.next_pending(1):
+        case AsyncWakeScanI64.Done: ()
+        case _: return 42
+    match ring.take_completion(1002u64):
+        case Ok(Some(completion)):
+            if completion.task_key != 1004u64: return 43
+            if completion.token.generation.value != reservation.token.generation.value: return 44
+            match completion.value:
+                case Some(value):
+                    if value != 123: return 45
+                case _: return 46
+        case _: return 47
+    match ring.take_completion(1002u64):
+        case Ok(nil): ()
+        case _: return 48
+
+    val tiny = match LocklessMapI64.create(1, 1, 1, 1):
+        case Ok(value): value
+        case Err(_): return 49
+    val only = match tiny.request(11, 11):
+        case Ok(value): value
+        case Err(_): return 50
+    match tiny.request(12, 12):
+        case Err(MapError.Full): ()
+        case _: return 51
+    match tiny.request(11, 11):
+        case Ok(value):
+            if not only.same_reference(value): return 52
+        case Err(_): return 53
+    if not only.try_start(): return 54
+    match only.fail(-701):
+        case Ok(accepted):
+            if not accepted: return 55
+        case Err(_): return 56
+    match only.try_ready():
+        case AsyncRefStateI64.Failed(code):
+            if code != -701: return 57
+        case _: return 58
+
+    # No live worker exists and no handle is used after this point.
+    unsafe(capabilities: [ffi]):
+        tiny.close_quiescent()
+        map.close_quiescent()
+    0
+
+fn main() -> i64:
+    val result = unsafe(capabilities: [ffi]): native_contract()
+    if result != 0:
+        print "LOCKLESS_MAP_NATIVE_CONTRACT_FAIL:{result}"
+        return result
+    print "LOCKLESS_MAP_NATIVE_CONTRACT_PASS"
+    0

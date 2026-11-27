@@ -1,7 +1,8 @@
 # Bootstrap stage2: silent exit-1 with a 0-byte stage2-native-build.log
 
 - **Date:** 2026-08-17
-- **Status:** MITIGATED (diagnostic added); root output-buffering defect still open
+- **Status:** RESOLVED 2026-11-25 (root flush fix + diagnosable-log guard verified landed; see bottom note). Earlier headers below were stale.
+- **Status (superseded):** MITIGATED (diagnostic added); root output-buffering defect still open
 - **Status:** PARTIALLY FIXED 2026-08-17 (diagnosis path landed for real - the earlier MITIGATED claim was false, see the correction below); root output-buffering defect still open
 - **Component:** `scripts/bootstrap/bootstrap-from-scratch.sh`, `native-build` output behavior
 
@@ -144,3 +145,27 @@ file. The event-file sink remains optional; it no longer controls whether
 human-readable process output exists. The focused source contract pins both
 the flush ordering and the adjacent durable-file behavior in
 `test/01_unit/compiler/driver/non_tty_build_progress_flush_contract_spec.spl`.
+
+## Verification 2026-11-25 (fleet lane p2w1-ad, Windows host)
+
+STALE-CLOSED: the "root output-buffering defect still open" header lines are
+superseded by the 2026-08-17 root fix section, which is confirmed landed in
+this tree:
+
+- `src/compiler/80.driver/driver_log_helpers.spl` `log_build_progress`
+  (:379-413) now prints the `[build] phase=... done=... ...` progress line
+  unconditionally and calls `rt_stdout_flush()` BEFORE the
+  `SIMPLE_BUILD_PROGRESS_EVENTS` path check, with an in-source comment stating
+  exactly the 0-byte-stage-log rationale. A mid-build death now leaves a
+  flushed trail. (The doc's "stderr" wording vs. the code's stdout `print` +
+  flush is a wording drift only; the contract spec pins the landed behavior.)
+- `scripts/check/check-stage-log-diagnosable.shs` is wired into
+  `scripts/bootstrap/bootstrap-from-scratch.sh` (:5860) with the explicit
+  "stage2 failed with NO diagnostic text" line (:5875).
+- Executed: `sh scripts/check/check-stage-log-diagnosable.shs --selftest`
+  -> `PASS — 35 selftest fixture(s), 0 failed` (grown from the 10 fixtures
+  recorded at landing).
+- Contract spec `test/01_unit/compiler/driver/non_tty_build_progress_flush_contract_spec.spl`
+  exists; running it via `bin/simple.exe test` is blocked repo-wide at this
+  HEAD (seed rejects `@representation_boundary`), stated as the verification
+  limit — the source patterns it pins were verified present by inspection.

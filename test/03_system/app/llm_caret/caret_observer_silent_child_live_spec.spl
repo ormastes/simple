@@ -1,0 +1,108 @@
+# @timeout_secs 1200
+# @cover src/app/llm_caret/observer/observer_log.spl 40%
+# @cover src/app/llm_caret/observer/stall_classifier.spl 40%
+# Purpose and audience: executable specification evidence for the caret observer team.
+
+"""
+CU-008: a real child that is silent for 10 minutes while the job emits a
+heartbeat every 30 s is never classified as a confirmed hang.
+
+The child runs on a real smux pane and prints one line, then nothing. The
+observer folds process-alive and heartbeat events (the provider hook path,
+`observer_record_hook`, has no heartbeat mapping, so heartbeats are built with
+`observer_event` and folded by the production `observe_session`). The status
+must stay active/quiet (WorkingQuiet) and must never become SuspectedStall,
+Failure or StateUnknown, and the inbox must stay empty.
+
+Slow: ~10 minutes of wall time, so it is `slow_it` and skipped by normal runs.
+"""
+
+use std.spec.*
+use std.nogc_sync_mut.io.{thread_sleep_ms}
+use std.io_runtime.{time_now_monotonic_ms}
+use std.sffi.io.{file_write_text}
+use std.nogc_sync_mut.io.file_ops.{file_read_text}
+use app.llm_caret.observer.observation_builder.{ObserverEvent, ObserverEventKind,
+    observer_event, observe_session}
+use app.llm_caret.observer.observer_log.{observer_reset, observer_record_hook,
+    observer_events, observer_inbox}
+use app.llm_caret.observer.attention_inbox.{attention_inbox_new, attention_unread}
+use app.llm_caret.observer.stall_classifier.{ClassKind, policy_default}
+use app.llm_caret.observer.status_text.{classification_status_text}
+use os.apps.smux.api.{smux_reset_for_test, smux_create_session,
+    smux_list_windows, smux_list_panes, smux_pane_spawn, smux_pane_alive,
+    smux_capture, smux_close_pane}
+
+val SESS: text = "caret-silent-live"
+val SILENT_MS: i64 = 600000
+val POLL_MS: i64 = 5000
+val BEATS: text = "build/caret_cu008_beats.txt"
+
+describe "Caret observer with a silent but heartbeating real child":
+    slow_it "never reports a confirmed hang across 10 silent minutes":
+        # @req: REQ-CARET-UI-CU008
+        step("Start a real child that prints one line then stays silent")
+        smux_reset_for_test()
+        observer_reset()
+        val s = smux_create_session(SESS)
+        val w = smux_list_windows(s.id)[0]
+        val p = smux_list_panes(s.id, w.id)[0]
+        # The child owns the heartbeat: it appends a beat line to a side file
+        # every 30 s and prints NOTHING on its pane after the first line.
+        val _rm = file_write_text(BEATS, "")
+        val spawned = smux_pane_spawn(s.id, w.id, p.id, "bash",
+            ["-c", "echo SILENT-START; while :; do sleep 30; echo beat >> " + BEATS + "; done"])
+        expect(spawned.is_ok()).to_equal(true)
+        thread_sleep_ms(2000)
+
+        step("Record a tool start through the production hook path")
+        val t0 = time_now_monotonic_ms()
+        observer_record_hook("claude", SESS, 1, "op-long", t0, "PreToolUse")
+        expect(observer_events().len()).to_equal(1)
+
+        step("Fold a heartbeat every 30 s for 10 minutes; the status never confirms a hang")
+        var events: [ObserverEvent] = observer_events()
+        events.push(observer_event(SESS, 1, "out-0", 100, t0, ObserverEventKind.OutputActivity, "child printed"))
+        var inbox = attention_inbox_new()
+        var seq = 200
+        var saw_quiet = false
+        var last_text = ""
+        var beats_seen = 0
+        var tick = 0
+        while tick <= 140:
+            val now = time_now_monotonic_ms()
+            val alive = smux_pane_alive(s.id, w.id, p.id)
+            expect(alive.is_ok() and alive.unwrap()).to_equal(true)
+            seq = seq + 1
+            events.push(observer_event(SESS, 1, "alive-" + tick.to_text(), seq, now, ObserverEventKind.ProcessAlive, "pane child alive"))
+            # A heartbeat is recorded only when the CHILD wrote a new beat.
+            val beats = file_read_text(BEATS).split("beat").len() - 1
+            if beats > beats_seen:
+                beats_seen = beats
+                seq = seq + 1
+                events.push(observer_event(SESS, 1, "hb-" + beats.to_text(), seq, now, ObserverEventKind.JobHeartbeat, "child beat"))
+            val obs = observe_session(inbox, events, SESS, 1, now, policy_default())
+            inbox = obs.inbox
+            last_text = classification_status_text(obs.classification)
+            expect(obs.classification.kind != ClassKind.SuspectedStall).to_equal(true)
+            expect(obs.classification.kind != ClassKind.Failure).to_equal(true)
+            expect(obs.classification.kind != ClassKind.StateUnknown).to_equal(true)
+            if obs.classification.kind == ClassKind.WorkingQuiet:
+                saw_quiet = true
+            if now - t0 >= SILENT_MS:
+                break
+            tick = tick + 1
+            thread_sleep_ms(POLL_MS)
+
+        step("The child stayed silent, the status ended quiet, and nothing needs the user")
+        val cap = smux_capture(s.id, w.id, p.id, 50)
+        expect(cap.is_ok()).to_equal(true)
+        expect(cap.unwrap().content).to_contain("SILENT-START")
+        expect(beats_seen >= 18).to_equal(true)
+        expect(saw_quiet).to_equal(true)
+        expect(last_text).to_start_with("quiet")
+        expect(attention_unread(inbox).len()).to_equal(0)
+        expect(attention_unread(observer_inbox()).len()).to_equal(0)
+        val _closed = smux_close_pane(s.id, w.id, p.id)
+        smux_reset_for_test()
+        observer_reset()

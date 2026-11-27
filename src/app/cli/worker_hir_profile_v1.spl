@@ -1,0 +1,418 @@
+# Parent admission for the first, HIR-only worker profile. This is not an
+# arbitrary-tool sandbox. Unknown configuration is rejected, never sanitized.
+use app.io._CliCompile.native_build_closure_request_admit.{native_build_closure_request_admit_v1}
+use compiler.driver.driver_build.native_entry_closure_owner.{NativeEntryClosureRequestV1,
+    native_entry_closure_request_open_v1}
+use std.nogc_sync_mut.env.variables.{env_list_checked}
+use std.common.process.observation_v4.{ProcessObservationEnvironmentV4}
+use std.common.crypto.sha256.{sha256_text}
+use app.cli.environment_variant_policy_handoff_owner_v1.{
+    environment_variant_policy_handoff_extract_v1,
+    environment_variant_policy_handoff_owner_error_label_v1}
+use app.cli.native_build_output_plan.{native_build_entry_and_sources_v1}
+
+pub struct WorkerHirProfileV1:
+    argv: [text]
+    environment: [ProcessObservationEnvironmentV4]
+    closure: NativeEntryClosureRequestV1
+    configuration_digest: text
+    deadline_ms: i64
+
+pub const WORKER_HIR_NO_FROZEN_CLOSURE_V1: text = "HIR worker requires an explicit frozen entry closure"
+
+# Deliberately literal: a new compiler switch requires profile review.
+pub fn worker_hir_argument_error_v1(args: [text]) -> text:
+    val switches: [text] = ["--entry-closure", "--strip", "--no-strip", "--debug", "-g",
+        "--release", "--release-optimized", "--xray", "--xray-startup-consumer",
+        "--fail-fast", "--go-to-end", "--keep-going", "--verbose", "--low-memory",
+        "--keep-intermediates", "--no-incremental", "--no-mangle", "--no-borrow-check",
+        "--library-units", "--library-units-dynlib", "--no-library-units",
+        "--emit-object", "--emit-entry-object", "--emit-archive", "--emit-shared", "--emit-smf"]
+    val values: [text] = ["--entry", "--source", "--output", "--cache-dir", "--backend",
+        "--target", "--cpu", "--opt-level", "--profile", "--managed-build-phase", "--jobs", "--threads", "--timeout",
+        "--host-cpu-max", "--collection-policy", "--collection-memory-budget",
+        "--collection-profile", "--collection-target", "--collection-workload",
+        "--runtime-bundle", "--runtime-owner", "--runtime-path", "--log", "-o"]
+    var index = 0
+    var has_closure = false
+    var positional = ""
+    while index < args.len():
+        val arg = args[index]
+        if arg == "--entry-closure": has_closure = true
+        if positional == "" and arg.ends_with(".spl") and not arg.starts_with("-"):
+            # The canonical positional form (`native-build <entry>.spl --backend=...
+            # -o <out>`, phase C tool builds and the Stage 2 sanity probes) names
+            # its entry closure by construction; the coordinator already
+            # resolved it through native_build_entry_and_sources_v1. Rejecting it
+            # as an unknown switch refused every matrix tool build
+            # (bootstrap-fable-10, 2026-11-12).
+            positional = arg
+            has_closure = true
+            index = index + 1
+            continue
+        if switches.contains(arg):
+            index = index + 1
+            continue
+        # `--mode` selects the native output layout; only the two native-build
+        # modes are admitted (`--mode=jit` stays a mixed-route refusal).
+        # build-phase4-direct-product.shs passes `--mode dynload --threads N`.
+        if arg == "--mode" or arg.starts_with("--mode="):
+            var mode = ""
+            var width = 1
+            if arg == "--mode":
+                width = 2
+                if index + 1 < args.len():
+                    mode = args[index + 1]
+            else:
+                mode = arg.substring(7)
+            if mode != "dynload" and mode != "one-binary":
+                return "unsupported HIR worker mode: " + mode
+            index = index + width
+            continue
+        var matched = false
+        for name in values:
+            if arg == name:
+                if index + 1 >= args.len() or args[index + 1].starts_with("--"):
+                    return "missing HIR profile option value"
+                index = index + 1
+                matched = true
+            elif arg.starts_with(name + "="):
+                if arg == name + "=": return "empty HIR profile option value"
+                matched = true
+        if not matched: return "unsupported HIR worker option: " + arg
+        index = index + 1
+    if not has_closure: return WORKER_HIR_NO_FROZEN_CLOSURE_V1
+    ""
+
+# An ordinary (auto) HIR warm-up pool over a build that names no frozen entry
+# closure is skipped, so the coordinator lowers HIR in process -- the same
+# route a 0-worker memory clamp already takes. Before this, whether such a
+# build succeeded depended on free memory: an admitted pool was refused here
+# and the refusal blocked the whole build. An explicit SIMPLE_HIR_SHARDING=1
+# request (which includes the HIR-only route) stays fail-closed, as does every
+# other argument refusal.
+pub fn worker_hir_pool_skip_without_closure_v1(user_args: [text], hir_sharding: text) -> bool:
+    if hir_sharding == "1": return false
+    worker_hir_argument_error_v1(user_args) == WORKER_HIR_NO_FROZEN_CLOSURE_V1
+
+# Exact environment is retained. Unknown names cannot acquire configuration
+# authority just because their values were included in a request digest.
+pub fn worker_hir_base_environment_keys_v1() -> [text]:
+    ["HOME", "USER", "LOGNAME", "SHELL", "PATH", "TMPDIR", "TMP", "TEMP",
+        "LANG", "LC_ALL", "LC_CTYPE", "TZ", "TERM", "CI", "PWD", "OLDPWD", "SHLVL", "_",
+        # Injected in-process before main() by Darwin CoreFoundation _CFInitialize()
+        # on every macOS binary linked against CoreFoundation, even under `env -i`.
+        "__CF_USER_TEXT_ENCODING",
+        "SIMPLE_BIN", "SIMPLE_BINARY", "SIMPLE_LIB", "SIMPLE_EXECUTION_MODE",
+        # Set to "1" by bootstrap_main run_bootstrap_stage3_process_route for
+        # every threads>1 bootstrap native-build; it is live (set, non-empty)
+        # when the coordinator admits its HIR pool (2026-11-12).
+        "SIMPLE_BOOTSTRAP_INTERNAL_NATIVE_BUILD_ROUTING",
+        # Set to "1" by every top-level coordinator before its HIR pool is
+        # admitted (native_build_cache_scope_retention_at_start_v1); read only
+        # by that gate, HIR workers inherit and ignore it. Unadmitted, it
+        # refused the HIR pool of every coordinator build.
+        "SIMPLE_NATIVE_CACHE_SCOPE_RETENTION_DONE",
+        "SIMPLE_NATIVE_BUILD_WORKER", "SIMPLE_HIR_WORKER_PROFILE_V1", "SIMPLE_BUILD_PROGRESS_EVENTS",
+        "SIMPLE_COMPILE_FAIL_FAST", "SIMPLE_FRONTEND_CACHE_DIR", "SIMPLE_FRONTEND_CACHE_SCOPE",
+        "SIMPLE_HIR_CACHE", "SIMPLE_HIR_CACHE_DIR", "SIMPLE_CACHE_SCOPE",
+        "SIMPLE_USER_STORAGE_ROOT", "SIMPLE_GLOBAL_DATASET_MAX_BYTES",
+        "SIMPLE_HIR_SHARD_QUEUE", "SIMPLE_HIR_SHARD_OWNER", "SIMPLE_HIR_SHARD_CLAIM_LIMIT",
+        "SIMPLE_PARSE_CLOSURE_REQUEST", "SIMPLE_PARSE_CLOSURE_REQUEST_DIGEST",
+        "SIMPLE_PARSE_CLOSURE_CONSUMER", "SIMPLE_PARSE_CLOSURE_SELECTED_COUNT",
+        "SIMPLE_SCV_COMMIT_ID", "SIMPLE_SCV_INVENTORY_DIGEST", "SIMPLE_SCV_INVENTORY_GENERATION",
+        "SIMPLE_SCV_REVISION_ID", "SIMPLE_SCV_SNAPSHOT_ROOT", "SIMPLE_SCV_SOURCE_DRIFTED",
+        "SIMPLE_SCV_SOURCE_INVENTORY_DIGEST", "SIMPLE_SCV_TREE_ID",
+        "SIMPLE_COMPILER_PHASE_PROFILE_FILE", "SIMPLE_MEM_SNAPSHOT_FILE",
+        "SIMPLE_PHASE_RSS", "SIMPLE_ICE_CRASH_RETRIES",
+        "SIMPLE_NATIVE_BUILD_CACHE_DIR", "SIMPLE_RT_OBJ_CACHE_DIR", "SIMPLE_NO_STUB_FALLBACK",
+        "SIMPLE_NATIVE_ARENA_DECLS",
+        "SIMPLE_HIR_SHARDING", "SIMPLE_PARSE_SHARDING", "SIMPLE_SHARD_SMALL_CLOSURE_MAX",
+        "SIMPLE_HIR_SHARD_WORKER_KB", "SIMPLE_MANAGED_NATIVE_TOOLS",
+        "SIMPLE_MANAGED_NATIVE_TOOL_AUTHORITY_PATH", "SIMPLE_MANAGED_NATIVE_TOOL_AUTHORITY_SHA256",
+        "SIMPLE_MANAGED_PHASE4_SOURCE_AUTHORITY_PATH", "SIMPLE_MANAGED_PHASE4_SOURCE_AUTHORITY_SHA256",
+        "SIMPLE_MANAGED_PHASE4_SOURCE_ROOT", "SIMPLE_MANAGED_RUNTIME_AUTHORITY_PATH",
+        "SIMPLE_MANAGED_RUNTIME_SNAPSHOT_PATH", "SIMPLE_MANAGED_RUNTIME_SNAPSHOT_SHA256"]
+
+pub fn worker_hir_environment_key_admitted_v1(key: text) -> bool:
+    worker_hir_base_environment_keys_v1().contains(key) or worker_hir_stage3_capsule_environment_keys_v1().contains(key) or
+        worker_hir_tool_build_environment_keys_v1().contains(key)
+
+# Exact launch environment of the Stage 3 capsule: the Stage 3 block of
+# bootstrap-from-scratch.sh / resume-stage3-from-admitted.sh, the transcribed
+# runner (scripts/check/lib/bootstrap-stage3/command-snapshot.shs) and the keys
+# process-tree-rss-watchdog.pl exports to its tree. Until 2026-11-12 the
+# capsule never reached this profile (it was refused on its base before
+# admission), so none of these had been reviewed.
+pub fn worker_hir_stage3_capsule_environment_keys_v1() -> [text]:
+    ["RUST_LOG", "LIBRARY_PATH", "LLVM_DISABLE_ABI_BREAKING_CHECKS_ENFORCING",
+        "MALLOC_ARENA_MAX", "MALLOC_TRIM_THRESHOLD_", "MSYS2_ENV_CONV_EXCL",
+        "SIMPLE_BOOTSTRAP", "SIMPLE_BOOTSTRAP_STAGE3", "SIMPLE_BOOTSTRAP_WHOLE_PROGRAM",
+        "SIMPLE_BOOTSTRAP_LINK_COMPAT_SHA256", "SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB",
+        "SIMPLE_BOOTSTRAP_RSS_CAP_MODE", "SIMPLE_BOOTSTRAP_SESSION_ID", "SIMPLE_BOOTSTRAP_SESSION_EXEC",
+        "SIMPLE_BOOTSTRAP_PROCESS_OBSERVER", "SIMPLE_BOOTSTRAP_PROCESS_OBSERVER_SHA256",
+        "SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB", "SIMPLE_FILE_WORKERS",
+        "SIMPLE_ABI_POLICY", "SIMPLE_ABI_ADMISSION_RECEIPT", "SIMPLE_PLUGIN_MANIFEST_POLICY",
+        "SIMPLE_KERNEL_K1_POLICY", "SIMPLE_COVERAGE_CUTOVER_STATE", "SIMPLE_K1_COMPOSITION_SHA256_BEFORE",
+        "SIMPLE_NO_DEPRECATED_WARNINGS", "SIMPLE_STAGE3_STREAMING_SURFACES",
+        "SIMPLE_NATIVE_STAGED_CODEGEN_BATCH", "SIMPLE_NATIVE_GO_TO_END", "SIMPLE_KEEP_SOURCE_CONTENTS",
+        "SIMPLE_MIR_SHARDING", "SIMPLE_MIR_RETRACT_PROVIDER_TYPES",
+        "SIMPLE_MIR_TAG_PROBE", "SIMPLE_FRONTEND_CACHE", "SIMPLE_PHASE2_COMPATIBILITY_MANIFEST_READ",
+        "SIMPLE_PHASE3_COMPATIBILITY_CACHE_ROOT", "SIMPLE_PACKAGE_INDEX_COLD_INIT",
+        "SIMPLE_SAFETY_PROFILE", "SIMPLE_ASSURANCE_WARNING_PHASE", "SIMPLE_COMPILER_PHASE_PROFILE",
+        "SIMPLE_EVIDENCE_RUN_ID", "SIMPLE_NATIVE_BUILD_TARGET", "SIMPLE_NATIVE_BUILD_THREADS",
+        "SIMPLE_RUNTIME_PATH", "SIMPLE_NATIVE_RUNTIME_BUNDLE",
+        # MIR shard HIR residency opt-in (driver_mir_shard_hir_residency_v1.spl),
+        # forwarded by the Stage 3 launchers; HIR workers inherit and ignore it.
+        "SIMPLE_MIR_SHARD_INTERFACE_HIR",
+        # MIR fork-workers opt-in (native_mir_fork_v1.spl): operator-set, not
+        # forwarded by any launcher; read by the MIR shard coordinator and the
+        # fork root only, HIR workers inherit and ignore it. Its batch and
+        # per-child memory budget knobs are read only by the fork root/children.
+        "SIMPLE_MIR_FORK_WORKERS", "SIMPLE_MIR_FORK_BATCH", "SIMPLE_MIR_FORK_CHILD_KB",
+        # Worker memory reserve (std.nogc_sync_mut.io.host_capacity): read by the
+        # fork root and the opt-in live shard thread count only.
+        "SIMPLE_WORKER_MEMORY_RESERVE_KB",
+        # Set by the MIR fork root in each fork child only (solo retry rows).
+        "SIMPLE_MIR_FORK_SOLO_ROWS",
+        # Stage 3 route policy (lib/stage3-direct-parallel.shs), always set by
+        # lib/stage3-native-build-worker.sh on the resume route. Read only by the
+        # top-level bootstrap_main dispatch (REQUESTED; FALLBACK has no compiler
+        # reader); HIR workers inherit and ignore both, and their exact values
+        # are hashed into configuration_digest like every admitted key. Refusing
+        # them forced HIR into one process (run 28, 2026-11-14).
+        "SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE", "SIMPLE_BOOTSTRAP_STAGE3_FALLBACK_ROUTE",
+        "SIMPLE_STAGE3_LIB_DYNLIB", "SIMPLE_NATIVE_LIBRARY_UNITS",
+        "SIMPLE_LIBRARY_UNITS_DYNLIB_EXPLICIT", "SIMPLE_DYNLIB_EMBED_CACHE_RPATH",
+        "SIMPLE_NATIVE_BUILD_MODE",
+        "SIMPLE_STAGE3_HOST_TAG", "SIMPLE_STAGE3_NATIVE_HOST_MATCH",
+        "SIMPLE_STAGE3_STATIC_PRIMITIVE_ARCHIVE", "SIMPLE_STAGE3_MINIMAL_STATIC_PRIMITIVES",
+        "SIMPLE_STAGE3_BUILD_EXTRA_DYNLIBS", "SIMPLE_STAGE3_ALLOW_EXISTING_DYNLIBS",
+        "STAGE3_RESOLVED_TARGET", "STAGE3_RESOLVED_COMPILE_MODE", "STAGE3_POLICY_SOURCE_ARGS",
+        "STAGE3_POLICY_SDN",
+        "SIMPLE_BACKEND_COMPOSITION", "SIMPLE_NATIVE_CODEGEN_WORKER_KIB", "SIMPLE_NATIVE_FILE_WORKERS",
+        "SIMPLE_LINKER", "SIMPLE_VECTOR_PROVIDER_DEFAULT_SHA256",
+        # Safe host headroom, RSS-cap, and thread-budget knobs (host_limits.spl /
+        # shard_mem_clamp.spl / tree-rss-policy.shs / run-process-group-timeout.shs).
+        "SIMPLE_HOST_MEM_RESERVE_FREE_MIB", "SIMPLE_HOST_WORKER_MEM_MIB",
+        "SIMPLE_HOST_MAX_THREADS", "SIMPLE_BOOTSTRAP_WORKER_MEM_MIB",
+        "SIMPLE_STAGE3_DIRECT_THREADS",
+        "SIMPLE_BUILD_MEMORY_RESERVE_BYTES", "SIMPLE_BUILD_MEMORY_ALLOW_COMMIT_WITNESS",
+        "SIMPLE_PROCESS_TREE_RSS_CAP_KIB", "SIMPLE_PROCESS_TREE_RSS_INTERVAL_MS",
+        "LLVM_PREFIX", "LLVM_SYS_231_PREFIX", "SIMPLE_LLVM_PATH",
+        "HOMEBREW_PREFIX", "CPATH", "CFLAGS",
+        "SIMPLE_WINDOWS_ABI", "SIMPLE_LINKER_FLAVOR", "CC", "CL", "INCLUDE", "LIB", "LIBPATH", "OS"]
+
+# Exact launch environment of the Phase 4 direct product build (the `env -i`
+# block of build-phase4-direct-product.shs plus run-build.shs and
+# run-process-group-timeout.shs) and the phase C tool-build pins
+# (phase-c-backend-commands.shs, product-frontend-policy.shs). Phase C rows
+# launch through `env -i` plus bootstrap_phase_c_tool_row_environment_keys
+# (phase-c-tool-row-exec.shs, since bootstrap-fable-17 2026-11-12, when the
+# inherited caller shell was refused here with 111 keys); the last six are
+# that chain's own pins (bootstrap_phase_run_command exports CXX and
+# SIMPLE_CC, run_task pins SIMPLE_NO_BOOTSTRAP_DELEGATE and
+# SIMPLE_RUNTIME_RISCV64_VECTOR, the product frontend policy exports
+# SIMPLE_SHARD_MEM_CLAMP, the campaign sets the watchdog's observation
+# budget). The contract test of that script cross-checks its list against
+# these allowlists.
+pub fn worker_hir_tool_build_environment_keys_v1() -> [text]:
+    ["SIMPLE_FILE_WORKERS", "SIMPLE_MIR_SHARDING", "SIMPLE_MIR_SHARD_COUNT", "SIMPLE_MIR_RETRACT_PROVIDER_TYPES",
+        "SIMPLE_MIR_SHARD_WORKER_KB", "SIMPLE_PARSE_SHARD_WORKER_KB",
+        "SIMPLE_PARSE_SHARD_MAX", "SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB",
+        "SIMPLE_NATIVE_BUILD_RUST", "SIMPLE_BOOTSTRAP_STAGE3", "SIMPLE_BOOTSTRAP_STAGE4",
+        "SIMPLE_NATIVE_BUILD_TARGET", "SIMPLE_NATIVE_BUILD_THREADS", "SIMPLE_NATIVE_RUNTIME_BUNDLE",
+        "SIMPLE_RUNTIME_PATH", "SIMPLE_RUNTIME_OWNER", "SIMPLE_PROJECT_ROOT", "SIMPLE_CACHE_PROJECT", "SIMPLE_CACHE",
+        "XDG_CACHE_HOME", "SIMPLE_PROCESS_TREE_RSS_SCOPE_GROUP", "SIMPLE_PROCESS_TREE_RSS_DECLARED_JOBS",
+        "SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB", "SIMPLE_BOOTSTRAP_RSS_CAP_MODE",
+        "SIMPLE_PROCESS_TREE_RSS_RECEIPT", "SIMPLE_TOOLCHAINS_ROOT", "SIMPLE_HOST_CONFIG",
+        "SIMPLE_BOOTSTRAP_SESSION_ID", "SIMPLE_BOOTSTRAP_SESSION_EXEC",
+        "SIMPLE_BOOTSTRAP_PROCESS_OBSERVER", "SIMPLE_BOOTSTRAP_PROCESS_OBSERVER_SHA256",
+        "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT",
+        "CXX", "SIMPLE_CC", "SIMPLE_NO_BOOTSTRAP_DELEGATE", "SIMPLE_RUNTIME_RISCV64_VECTOR",
+        "SIMPLE_LINKER_FLAVOR",
+        "SIMPLE_SHARD_MEM_CLAMP", "SIMPLE_PROCESS_TREE_OBSERVATION_BUDGET_MS",
+        # Host memory reserve (shard_mem_clamp.spl); the pool refusal text names it.
+        "SIMPLE_BUILD_MEMORY_RESERVE_BYTES",
+        # Safe host headroom, RSS-cap, and thread-budget knobs (host_limits.spl /
+        # shard_mem_clamp.spl / tree-rss-policy.shs / run-process-group-timeout.shs).
+        "SIMPLE_HOST_MEM_RESERVE_FREE_MIB", "SIMPLE_HOST_WORKER_MEM_MIB",
+        "SIMPLE_HOST_MAX_THREADS", "SIMPLE_BOOTSTRAP_WORKER_MEM_MIB",
+        "SIMPLE_BUILD_MEMORY_ALLOW_COMMIT_WITNESS",
+        "SIMPLE_PROCESS_TREE_RSS_CAP_KIB", "SIMPLE_PROCESS_TREE_RSS_INTERVAL_MS",
+        # Darwin toolchain / SDK pins required by _publish_and_admit_darwin_native_action_v1.
+        "MACOSX_DEPLOYMENT_TARGET", "SDKROOT", "DEVELOPER_DIR",
+        # Phase 4 unified build pins (build-phase3-phase4.sh): streaming HIR surfaces,
+        # XRay instrumentation toggle, linker selection, and vector provider pin;
+        # HIR workers inherit and ignore link-time pins.
+        "SIMPLE_STAGE4_STREAMING_SURFACES", "SIMPLE_XRAY", "LDFLAGS",
+        "SIMPLE_LINKER", "SIMPLE_VECTOR_PROVIDER_DEFAULT_SHA256", "CL"]
+
+fn _worker_hir_is_lower_hex_64_v1(s: text) -> bool:
+    if s.byte_len() != 64:
+        return false
+    var i = 0
+    while i < 64:
+        val b = s.byte_at(i)
+        val ok = (b >= 48 and b <= 57) or (b >= 97 and b <= 102)
+        if not ok:
+            return false
+        i = i + 1
+    true
+
+# Value gates for admitted keys whose value selects a route. "" when admitted.
+pub fn worker_hir_environment_value_error_v1(key: text, value: text) -> text:
+    # Match runtime_owner_select_v1: empty selects c, case is normalized, and
+    # whitespace is not trimmed. Preserve the exact captured value for identity.
+    if key == "SIMPLE_RUNTIME_OWNER" and value != "" and value.lower() != "c" and value.lower() != "rust":
+        return "HIR profile requires SIMPLE_RUNTIME_OWNER to be empty, c, or rust (case-insensitive)"
+    if key == "SIMPLE_EXECUTION_MODE" and value != "" and value != "native":
+        return "HIR profile requires compiled internal worker dispatch"
+    # A HIR-profile worker belongs to the two-pass route; the per-file unit
+    # lane spawns its own children and never comes through this profile.
+    if key == "SIMPLE_FILE_WORKERS" and value != "0":
+        return "HIR profile requires SIMPLE_FILE_WORKERS=0"
+    if key == "SIMPLE_BOOTSTRAP_INTERNAL_NATIVE_BUILD_ROUTING" and value != "1":
+        return "HIR profile requires the internal routing marker to be 1"
+    if key == "SIMPLE_BOOTSTRAP_STAGE3_REQUESTED_ROUTE" and value != "direct" and value != "coordinator":
+        return "HIR profile requires a Stage 3 requested route of direct or coordinator"
+    if key == "SIMPLE_BOOTSTRAP_STAGE3_FALLBACK_ROUTE" and value != "none" and value != "direct":
+        return "HIR profile requires a Stage 3 fallback route of none or direct"
+    if key == "SIMPLE_STAGE3_LIB_DYNLIB" and value != "" and value != "0" and value != "1":
+        return "HIR profile requires SIMPLE_STAGE3_LIB_DYNLIB to be empty, 0, or 1"
+    if key == "SIMPLE_NATIVE_LIBRARY_UNITS" and value != "" and value != "0" and value != "1":
+        return "HIR profile requires SIMPLE_NATIVE_LIBRARY_UNITS to be empty, 0, or 1"
+    if key == "SIMPLE_LIBRARY_UNITS_DYNLIB_EXPLICIT" and value != "" and value != "0" and value != "1":
+        return "HIR profile requires SIMPLE_LIBRARY_UNITS_DYNLIB_EXPLICIT to be empty, 0, or 1"
+    if key == "SIMPLE_DYNLIB_EMBED_CACHE_RPATH" and value != "" and value != "0" and value != "1":
+        return "HIR profile requires SIMPLE_DYNLIB_EMBED_CACHE_RPATH to be empty, 0, or 1"
+    if key == "SIMPLE_STAGE4_STREAMING_SURFACES" and value != "" and value != "0" and value != "1":
+        return "HIR profile requires SIMPLE_STAGE4_STREAMING_SURFACES to be empty, 0, or 1"
+    if key == "SIMPLE_XRAY" and value != "" and value != "0" and value != "1":
+        return "HIR profile requires SIMPLE_XRAY to be empty, 0, or 1"
+    if key == "STAGE3_RESOLVED_COMPILE_MODE" and value != "" and value != "shard" and value != "phase" and value != "file":
+        return "HIR profile requires STAGE3_RESOLVED_COMPILE_MODE to be empty, shard, phase, or file"
+    if (key == "SIMPLE_LINKER" and value != "" and value != "internal" and value != "mold" and
+            value != "lld" and value != "ld.lld" and value != "lld-link" and
+            value != "ld" and value != "gnu" and value != "bfd"):
+        return "HIR profile requires SIMPLE_LINKER to be empty, internal, mold, lld, ld.lld, lld-link, ld, gnu, or bfd"
+    if key == "SIMPLE_VECTOR_PROVIDER_DEFAULT_SHA256" and value != "" and not _worker_hir_is_lower_hex_64_v1(value):
+        return "HIR profile requires SIMPLE_VECTOR_PROVIDER_DEFAULT_SHA256 to be empty or 64 lowercase hex digits"
+    if key == "CL" and value != "" and value != "/TC":
+        return "HIR profile requires CL to be empty or /TC"
+    if ((key == "LDFLAGS" or key == "STAGE3_POLICY_SDN" or key == "STAGE3_RESOLVED_TARGET" or
+            key == "STAGE3_POLICY_SOURCE_ARGS") and (value.contains("\n") or value.contains("\r"))):
+        return "HIR profile rejects multiline control characters in " + key
+    ""
+
+# Every captured key the profile does not admit, in capture order, without
+# duplicates. Empty when all are admitted.
+pub fn worker_hir_unsupported_environment_keys_v1(captured: [(text, text)]) -> [text]:
+    var out: [text] = []
+    for pair in captured:
+        if not worker_hir_environment_key_admitted_v1(pair.0) and not out.contains(pair.0):
+            out.push(pair.0)
+    out
+
+# Environment step of profile admission over the coordinator's captured
+# environment, in capture order. Every admitted pair is copied to the worker
+# exactly and later hashed into configuration_digest.
+pub fn worker_hir_environment_admit_v1(
+        captured: [(text, text)]) -> Result<[ProcessObservationEnvironmentV4], text>:
+    if captured.len() > 256: return Err("HIR worker environment exceeds profile bound")
+    # Name EVERY unsupported key in one refusal: reporting only the first one
+    # turned discovery into one Stage 2 rebuild per key (2026-11-12).
+    val unsupported = worker_hir_unsupported_environment_keys_v1(captured)
+    if unsupported.len() > 0:
+        return Err("unsupported HIR worker environment key: " + unsupported.join(", "))
+    var environment: [ProcessObservationEnvironmentV4] = []
+    var seen: {text: bool} = {}
+    var bytes: i64 = 0
+    for pair in captured:
+        if seen.has(pair.0): return Err("duplicate HIR worker environment key")
+        val value_error = worker_hir_environment_value_error_v1(pair.0, pair.1)
+        if value_error != "": return Err(value_error)
+        seen[pair.0] = true
+        bytes = bytes + pair.0.byte_len() + pair.1.byte_len()
+        if bytes > 65536: return Err("HIR worker environment exceeds byte bound")
+        environment.push(ProcessObservationEnvironmentV4(key: pair.0, value: pair.1))
+    Ok(environment)
+
+# The production identity calculation, exposed for focused native policy
+# regressions without manufacturing a frozen source-closure receipt. Keep the
+# original field order, exact environment bytes, and argv hashes unchanged.
+# reason: byte-exact profile identity hashes captured protocol text and the parent's absolute millisecond deadline
+@allow(primitive_api)
+pub fn worker_hir_configuration_digest_v1(closure_receipt_digest: text,
+        policy_digest: text, producer_digest: text, deadline_ms: i64,
+        environment: [ProcessObservationEnvironmentV4], args: [text]) -> text:
+    var parts: [text] = ["worker-hir-profile-v1", closure_receipt_digest,
+        policy_digest, producer_digest, "{deadline_ms}"]
+    for pair in environment:
+        parts.push(sha256_text(pair.key))
+        parts.push(sha256_text(pair.value))
+    for arg in args: parts.push(sha256_text(arg))
+    sha256_text(parts.join("\n"))
+
+pub fn worker_hir_profile_admit_v1(args: [text], entry: text,
+        sources: [text], deadline_ms: i64) -> Result<WorkerHirProfileV1, text>:
+    val opened = match environment_variant_policy_handoff_extract_v1(args):
+        case Ok(value): value
+        case Err(reason): return Err(environment_variant_policy_handoff_owner_error_label_v1(reason))
+    val argument_error = worker_hir_argument_error_v1(opened.user_args)
+    if argument_error != "": return Err(argument_error)
+    if args.len() > 256: return Err("HIR worker argv exceeds profile bound")
+    var argv_bytes: i64 = 0
+    for arg in args:
+        argv_bytes = argv_bytes + arg.byte_len()
+        if argv_bytes > 262144: return Err("HIR worker argv exceeds byte bound")
+    if deadline_ms <= 0: return Err("HIR worker requires a parent absolute deadline")
+    val closure = native_build_closure_request_admit_v1(entry, sources)?
+    # Bind source selection to the real canonical policy handoff, rather than
+    # accepting whichever policy digest the closure request claims for itself.
+    val selected = native_entry_closure_request_open_v1(closure, opened.handoff.policy_digest)?
+    if selected.identities.is_empty(): return Err("HIR worker frozen closure is empty")
+    val environment = worker_hir_environment_admit_v1(env_list_checked()?)?
+    val digest = worker_hir_configuration_digest_v1(closure.receipt_digest,
+        closure.binding.policy_digest, closure.binding.producer_digest,
+        deadline_ms, environment, args)
+    Ok(WorkerHirProfileV1(argv: args, environment: environment, closure: closure,
+        configuration_digest: digest, deadline_ms: deadline_ms))
+
+pub fn worker_hir_profile_for_owner_v1(profile: WorkerHirProfileV1,
+        ledger_owner: text, dataset_bytes: i64) -> WorkerHirProfileV1:
+    var environment: [ProcessObservationEnvironmentV4] = []
+    for pair in profile.environment:
+        if pair.key != "SIMPLE_HIR_SHARD_OWNER" and pair.key != "SIMPLE_GLOBAL_DATASET_MAX_BYTES":
+            environment.push(pair)
+    environment.push(ProcessObservationEnvironmentV4(key: "SIMPLE_HIR_SHARD_OWNER", value: ledger_owner))
+    environment.push(ProcessObservationEnvironmentV4(key: "SIMPLE_GLOBAL_DATASET_MAX_BYTES", value: "{dataset_bytes}"))
+    WorkerHirProfileV1(argv: profile.argv, environment: environment, closure: profile.closure,
+        configuration_digest: sha256_text(profile.configuration_digest + "\n" +
+            sha256_text(ledger_owner) + "\n{dataset_bytes}"), deadline_ms: profile.deadline_ms)
+
+pub fn worker_hir_child_validate_v1(args: [text]) -> Result<bool, text>:
+    var forwarded: [text] = []
+    var shard_count = 0
+    for arg in args:
+        if arg.starts_with("--hir-shard="):
+            shard_count = shard_count + 1
+            val pieces = arg.substring(12).split("/")
+            if pieces.len() != 2: return Err("invalid HIR shard selection")
+            val ordinal = pieces[0].to_i64() ?? -1
+            val count = pieces[1].to_i64() ?? 0
+            if ordinal < 0 or count <= 0 or ordinal >= count or count > 128:
+                return Err("invalid HIR shard bounds")
+        else:
+            forwarded.push(arg)
+    # The entry is derived exactly as the coordinator derived it when it
+    # admitted this profile (native_build_hir_ledger_run_in_v1 ->
+    # native_build_entry_and_sources_v1): `--entry X` or the canonical
+    # positional `<entry>.spl` form. The one-shard + named-entry requirement
+    # itself is unchanged.
+    val selection = native_build_entry_and_sources_v1(forwarded)
+    if shard_count != 1 or selection.is_empty(): return Err("HIR profile requires one shard and entry")
+    # This validates canonical source/configuration input, not child claims of
+    # launch containment. Only the parent's retained pin/lease supplies that.
+    val _profile = worker_hir_profile_admit_v1(forwarded, selection[0], selection[1:], 1)?
+    Ok(true)

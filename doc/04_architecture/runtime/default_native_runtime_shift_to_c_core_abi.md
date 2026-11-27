@@ -104,3 +104,51 @@ that library up the caveat is discharged, and the `-L`/`-l` form is correct
 either way.
 
 Gate: `scripts/check/check-stage4-dynamic-runtime-lane.shs`.
+
+## Amendment (2026-11-23, accepted by the owner): `host-gpu-native-all`
+
+**Status: accepted (owner decision 2026-11-23).** Implemented in the seed and
+the pure-Simple linker's bundle table so the GB10 qualification evidence has a
+sanctioned build path. It admits `libsimple_native_all.a` for a non-bootstrap
+entry, but only when the bundle is named explicitly (never inferred).
+
+**Problem.** Blocker 8 in
+`doc/08_tracking/bug/linux_gb10_n2_qualification_executable_blockers_2026-11-18.md`:
+an ordinary GPU entry such as `src/app/test/vulkan_2d_qualification` calls the
+synchronous Rust Vulkan runtime (`rt_vulkan_*`, `rt_engine2d_*`) and the C
+provider registry (`rt_gpu_provider_*`, `runtime_dynload.c`). No sanctioned
+lane links either of them.
+
+- `core-c-bootstrap` links only `runtime_native.c`'s weak stubs. Measured: a
+  3-line probe links cleanly and reports `vk_devices=0` on the GB10. The value
+  is silently wrong.
+- `host-gpu` is the core-C loader plus the hosted rlib. The Vulkan provider DSO
+  path (`SIMPLE_VULKAN_PROVIDER_PATH`, `runtime_dynload.c`) has a 47-name
+  required list (`simple_vulkan_required`). The qualification calls 84
+  `rt_vulkan_*`, and `rt_vulkan_selected_device_identity_v1` is not in that
+  list.
+- `dynamic-runtime` is limited to the Stage4 entry. Two problems, *expected but
+  not measured*:
+  - the executable's weak C stubs would win over the `.so`;
+  - without `native-all-provider`, the `.so` registry is the fail-closed Rust
+    twins (`gpu_provider_twins.rs`, `runtime/build.rs`).
+
+**What the lane is.** `--runtime-bundle host-gpu-native-all` (also accepted
+through `SIMPLE_NATIVE_RUNTIME_BUNDLE`) links two archives, in this order:
+
+1. `<runtime-path>/libsimple_native_all.a`, built with
+   `cargo build --release -p simple-native-all --features vulkan`.
+2. The core-C supplement, for the C-only names.
+
+Native-all goes first so that one owner holds the argv family. The lane fails
+closed when the archive does not define `rt_vulkan_init` and
+`rt_gpu_provider_loaded`. It omits the external `libsqlite3` unless the entry
+references sqlite. It needs no `-z muldefs`: the 12 `rt_vk_*` noop stubs in
+`native_all` are compiled out under `vulkan`.
+
+**What is preserved.** The lane is never inferred. `auto`, `simple-core`,
+`core-c-bootstrap`, `host-gpu` and `dynamic-runtime` resolve exactly as before.
+Rule 5 still holds for the two core lanes.
+
+**Exit.** The lane retires when the Vulkan provider DSO covers the whole
+synchronous surface and `host-gpu` can link these entries through the loader.

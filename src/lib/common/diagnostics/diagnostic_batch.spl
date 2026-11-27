@@ -1,0 +1,579 @@
+# Diagnostic Batch V1 + Action Index
+#
+# Adjacent to `DiagnosticV1` (diagnostic_v1.spl) — NOT a rewrite of it. A
+# producer (Simple driver, CMM LSP, Markdown LSP) publishes one
+# `DiagnosticBatchV1` per analysed document snapshot. The batch carries:
+#   - snapshot identity: producer, file_id, uri, document_version,
+#     source_hash (XXH3-128 hex, computed by the producer), analysis_generation
+#   - `status`, which is SEPARATE from severity (a batch with zero
+#     diagnostics and status `partial_recovery` is NOT a clean document)
+#   - `incomplete_reason` for every non-`complete` status
+#   - `diagnostics`: (stable id, DiagnosticV1) pairs
+#   - `related_files` the analysis consulted
+#
+# Stable ids (`diagnostic_stable_id`) derive from rule code + canonical file id
+# + structural node identity + occurrence — never line/col or message text,
+# which both change under edits. A consumer must still check the batch's
+# document_version/source_hash (`matches_document`) before trusting an id.
+#
+# `DiagnosticActionIndex` maps a diagnostic id to ORDERED `FixCandidate`s
+# (producer ranks: correctness first, then scope, confidence, edit size). Each
+# candidate carries exact preconditions (expected old text per replacement),
+# the snapshot version it was computed against and an optional disabled
+# reason. `compat_fix_for` projects the first ENABLED candidate onto the legacy
+# single `DiagnosticFix` so `DiagnosticV1.fix` consumers keep working.
+#
+# Data-shape description for tooling: diagnostic_batch_v1_schema.sdn.
+
+use std.common.diagnostics.span.{Span}
+use std.common.diagnostics.diagnostic_v1.{
+    DiagnosticV1, DiagnosticFix, FixReplacement, DiagnosticFixConfidence, FixApplicability, FixPrecondition,
+    render_diagnostic_v1_json, render_span_json,
+    json_object, json_array, json_pair, json_string, json_int, json_bool, json_null_or_string
+}
+
+# --- Batch result status (separate from diagnostic severity) ---
+
+enum BatchStatus:
+    Complete          # Analysis finished; diagnostics may contain errors/warnings
+    PartialRecovery   # Parsing/indexing recovered enough to return useful facts
+    Stale             # Input version/hash no longer matches the active document
+    Cancelled         # Superseded/cancelled computation; do not publish a cleared list
+    Unsupported       # The requested analysis is not implemented for this surface
+    InternalError     # Execution/transport/index failure; keep last valid evidence
+    TimedOut          # Per-unit or per-rule deadline expired before completion
+    BudgetExhausted   # Run-level wall-clock or unit budget expired before completion
+
+impl BatchStatus:
+    fn name() -> text:
+        match self:
+            BatchStatus.Complete: "complete"
+            BatchStatus.PartialRecovery: "partial_recovery"
+            BatchStatus.Stale: "stale"
+            BatchStatus.Cancelled: "cancelled"
+            BatchStatus.Unsupported: "unsupported"
+            BatchStatus.InternalError: "internal_error"
+            BatchStatus.TimedOut: "timed_out"
+            BatchStatus.BudgetExhausted: "budget_exhausted"
+
+fn batch_status_parse(name: text) -> BatchStatus?:
+    if name == "complete": Some(BatchStatus.Complete)
+    elif name == "partial_recovery": Some(BatchStatus.PartialRecovery)
+    elif name == "stale": Some(BatchStatus.Stale)
+    elif name == "cancelled": Some(BatchStatus.Cancelled)
+    elif name == "unsupported": Some(BatchStatus.Unsupported)
+    elif name == "internal_error": Some(BatchStatus.InternalError)
+    elif name == "timed_out": Some(BatchStatus.TimedOut)
+    elif name == "budget_exhausted": Some(BatchStatus.BudgetExhausted)
+    else: None
+
+# --- Stable diagnostic identity ---
+
+# `code`: rule code ("CMM0001"); `file_id`: canonical file id (not the path);
+# `node_identity`: structural identity of the offending node (e.g.
+# "stmt:block0/3", "link:7"); `occurrence`: disambiguator when the same rule
+# fires more than once on the same node.
+fn diagnostic_stable_id(code: text, file_id: text, node_identity: text, occurrence: i64) -> text:
+    code + "@" + file_id + "#" + node_identity + "/" + occurrence.to_text()
+
+# --- A diagnostic as published inside a batch ---
+
+struct BatchDiagnostic:
+    id: text
+    diagnostic: DiagnosticV1
+
+# --- Target/profile metadata and rule coverage receipt ---
+
+struct BatchTargetProfileV1:
+    target: text
+    profile: text
+    scope: text
+    policy_digest: text
+
+impl BatchTargetProfileV1:
+    static fn new(target: text, profile: text, scope: text, policy_digest: text) -> BatchTargetProfileV1:
+        BatchTargetProfileV1(
+            target: target,
+            profile: profile,
+            scope: scope,
+            policy_digest: policy_digest
+        )
+
+    fn is_valid() -> bool:
+        self.target.trim() != "" and self.profile.trim() != "" and self.scope.trim() != "" and self.policy_digest.trim() != ""
+
+    fn admits_fast_lint_skips() -> bool:
+        self.scope == "fast_lint" or self.scope == "FastLint"
+
+    fn to_json() -> text:
+        render_target_profile_json(self)
+
+struct CoverageReceiptV1:
+    requested_rules: i64
+    executed_rules: i64
+    skipped_rules: i64
+    exempted_rules: i64
+    unsupported_rules: i64
+    timed_out_rules: i64
+    budget_exhausted: bool
+
+impl CoverageReceiptV1:
+    static fn new(
+        requested_rules: i64,
+        executed_rules: i64,
+        skipped_rules: i64,
+        exempted_rules: i64,
+        unsupported_rules: i64,
+        timed_out_rules: i64,
+        budget_exhausted: bool
+    ) -> CoverageReceiptV1:
+        CoverageReceiptV1(
+            requested_rules: requested_rules,
+            executed_rules: executed_rules,
+            skipped_rules: skipped_rules,
+            exempted_rules: exempted_rules,
+            unsupported_rules: unsupported_rules,
+            timed_out_rules: timed_out_rules,
+            budget_exhausted: budget_exhausted
+        )
+
+    static fn complete(requested_rules: i64, executed_rules: i64, exempted_rules: i64 = 0) -> CoverageReceiptV1:
+        CoverageReceiptV1(
+            requested_rules: requested_rules,
+            executed_rules: executed_rules,
+            skipped_rules: 0,
+            exempted_rules: exempted_rules,
+            unsupported_rules: 0,
+            timed_out_rules: 0,
+            budget_exhausted: false
+        )
+
+    fn accounted_rules() -> i64:
+        self.executed_rules + self.skipped_rules + self.exempted_rules + self.unsupported_rules + self.timed_out_rules
+
+    fn has_non_negative_counts() -> bool:
+        self.requested_rules >= 0 and self.executed_rules >= 0 and self.skipped_rules >= 0 and self.exempted_rules >= 0 and self.unsupported_rules >= 0 and self.timed_out_rules >= 0
+
+    fn counts_conserved() -> bool:
+        self.has_non_negative_counts() and self.accounted_rules() == self.requested_rules
+
+    fn to_json() -> text:
+        render_coverage_receipt_json(self)
+
+# --- The batch ---
+
+struct DiagnosticBatchV1:
+    schema_version: i64
+    producer: text
+    file_id: text
+    uri: text
+    document_version: i64
+    source_hash: text
+    analysis_generation: i64
+    status: BatchStatus
+    incomplete_reason: text?
+    diagnostics: [BatchDiagnostic]
+    related_files: [text]
+    target_profile: BatchTargetProfileV1? = None
+    coverage: CoverageReceiptV1? = None
+    finalized: bool = false
+
+impl DiagnosticBatchV1:
+    static fn new(producer: text, file_id: text, uri: text, document_version: i64, source_hash: text, analysis_generation: i64) -> DiagnosticBatchV1:
+        DiagnosticBatchV1(
+            schema_version: 1,
+            producer: producer,
+            file_id: file_id,
+            uri: uri,
+            document_version: document_version,
+            source_hash: source_hash,
+            analysis_generation: analysis_generation,
+            status: BatchStatus.Complete,
+            incomplete_reason: None,
+            diagnostics: [],
+            related_files: [],
+            target_profile: None,
+            coverage: None,
+            finalized: false
+        )
+
+    static fn complete(producer: text, file_id: text, uri: text, document_version: i64, source_hash: text, analysis_generation: i64) -> DiagnosticBatchV1:
+        DiagnosticBatchV1.new(producer, file_id, uri, document_version, source_hash, analysis_generation)
+
+    static fn incomplete(
+        producer: text,
+        file_id: text,
+        uri: text,
+        document_version: i64,
+        source_hash: text,
+        analysis_generation: i64,
+        status: BatchStatus,
+        reason: text
+    ) -> DiagnosticBatchV1:
+        DiagnosticBatchV1.new(producer, file_id, uri, document_version, source_hash, analysis_generation)
+            .with_status(status, reason)
+
+    fn push(id: text, diagnostic: DiagnosticV1) -> DiagnosticBatchV1:
+        var result = self
+        result.diagnostics.push(BatchDiagnostic(id: id, diagnostic: diagnostic))
+        result
+
+    fn with_status(status: BatchStatus, reason: text) -> DiagnosticBatchV1:
+        var result = self
+        result.status = status
+        result.incomplete_reason = Some(reason)
+        result
+
+    fn with_related_file(path: text) -> DiagnosticBatchV1:
+        var result = self
+        result.related_files.push(path)
+        result
+
+    fn with_target_profile(profile: BatchTargetProfileV1) -> DiagnosticBatchV1:
+        var result = self
+        result.target_profile = Some(profile)
+        result
+
+    fn with_coverage(receipt: CoverageReceiptV1) -> DiagnosticBatchV1:
+        var result = self
+        result.coverage = Some(receipt)
+        result
+
+    fn has_fast_lint_scope_admission() -> bool:
+        match self.target_profile:
+            case Some(tp): tp.admits_fast_lint_skips()
+            case None: false
+
+    fn is_full_clean() -> bool:
+        if self.status != BatchStatus.Complete or self.diagnostics.len() > 0 or self.incomplete_reason.?:
+            return false
+        match self.coverage:
+            case Some(cov):
+                cov.requested_rules > 0 and cov.counts_conserved() and cov.executed_rules > 0 and not cov.budget_exhausted and cov.timed_out_rules == 0 and cov.unsupported_rules == 0 and cov.skipped_rules == 0
+            case None:
+                false
+
+    fn is_clean() -> bool:
+        if self.status != BatchStatus.Complete or self.diagnostics.len() > 0 or self.incomplete_reason.?:
+            return false
+        match self.coverage:
+            case Some(cov):
+                if cov.requested_rules <= 0 or not cov.counts_conserved() or cov.executed_rules <= 0:
+                    return false
+                if cov.budget_exhausted or cov.timed_out_rules > 0 or cov.unsupported_rules > 0:
+                    return false
+                cov.skipped_rules == 0
+            case None:
+                true
+
+    fn verdict_name() -> text:
+        if self.status != BatchStatus.Complete:
+            return self.status.name()
+        if self.diagnostics.len() > 0:
+            return "findings"
+        match self.coverage:
+            case Some(cov):
+                if cov.timed_out_rules > 0:
+                    return "timed_out"
+                if cov.budget_exhausted:
+                    return "budget_exhausted"
+                if cov.unsupported_rules > 0:
+                    return "unsupported"
+                if cov.skipped_rules > 0:
+                    if self.has_fast_lint_scope_admission():
+                        return "fast_clean"
+                    return "incomplete"
+                "clean"
+            case None:
+                "clean"
+
+    # Fail-closed canonical batch sealer:
+    # - Rejects invalid target_profile or non-conserved CoverageReceiptV1 counts.
+    # - Never allows status == Complete when budget_exhausted, timed_out_rules > 0,
+    #   unsupported_rules > 0, or skipped_rules > 0 without explicit fast_lint scope.
+    # - Requires every non-Complete batch to carry a non-empty incomplete_reason.
+    fn finalize() -> Result<DiagnosticBatchV1, text>:
+        match self.target_profile:
+            case Some(tp):
+                if not tp.is_valid():
+                    return Err("invalid target_profile: target, profile, scope, and policy_digest must be non-empty")
+            case None:
+                val _ = 0
+        match self.coverage:
+            case Some(cov):
+                if not cov.has_non_negative_counts():
+                    return Err("invalid coverage receipt: rule counts must be non-negative")
+                if not cov.counts_conserved():
+                    return Err("invalid coverage receipt: executed + skipped + exempted + unsupported + timed_out must equal requested_rules")
+            case None:
+                val _ = 0
+        if self.status == BatchStatus.Complete:
+            match self.incomplete_reason:
+                case Some(reason):
+                    if reason.trim() != "":
+                        return Err("complete batch must not carry an incomplete_reason")
+                case None:
+                    val _ = 0
+            match self.coverage:
+                case Some(cov):
+                    if cov.requested_rules <= 0:
+                        return Err("cannot finalize batch as complete with zero requested_rules")
+                    if cov.budget_exhausted:
+                        return Err("cannot finalize batch as complete when budget_exhausted is true")
+                    if cov.timed_out_rules > 0:
+                        return Err("cannot finalize batch as complete when timed_out_rules > 0")
+                    if cov.unsupported_rules > 0:
+                        return Err("cannot finalize batch as complete when unsupported_rules > 0")
+                    if cov.skipped_rules > 0 and not self.has_fast_lint_scope_admission():
+                        return Err("cannot finalize batch as complete with skipped_rules > 0 without fast_lint scope admission")
+                    if cov.executed_rules <= 0 and cov.exempted_rules <= 0:
+                        return Err("cannot finalize batch as complete with zero executed_rules")
+                case None:
+                    val _ = 0
+            var sealed = self
+            sealed.incomplete_reason = None
+            sealed.finalized = true
+            return Ok(sealed)
+
+        match self.incomplete_reason:
+            case Some(reason):
+                if reason.trim() == "":
+                    return Err("non-complete batch (" + self.status.name() + ") requires a non-empty incomplete_reason")
+            case None:
+                return Err("non-complete batch (" + self.status.name() + ") requires a non-empty incomplete_reason")
+        var sealed_incomplete = self
+        sealed_incomplete.finalized = true
+        Ok(sealed_incomplete)
+
+    fn finalize_checked() -> Result<DiagnosticBatchV1, text>:
+        self.finalize()
+
+    fn len() -> i64:
+        self.diagnostics.len()
+
+    # True when this batch still describes the active document snapshot.
+    fn matches_document(document_version: i64, source_hash: text) -> bool:
+        self.document_version == document_version and self.source_hash == source_hash
+
+    fn to_json() -> text:
+        render_diagnostic_batch_json(self)
+
+# --- Fix candidates and the action index ---
+
+# FixPrecondition now lives in diagnostic_v1 (shared by DiagnosticFix.preconditions);
+# re-exported below so existing importers are unchanged.
+
+struct FixCandidate:
+    id: text
+    title: text
+    explanation: text
+    confidence: DiagnosticFixConfidence
+    replacements: [FixReplacement]
+    preconditions: [FixPrecondition]     # one per replacement, same order
+    required_document_version: i64        # snapshot the candidate was computed against
+    disabled_reason: text?                # Some(reason) = advertised but not applicable
+
+impl FixCandidate:
+    static fn new(id: text, title: text, explanation: text, confidence: DiagnosticFixConfidence, required_document_version: i64) -> FixCandidate:
+        FixCandidate(
+            id: id,
+            title: title,
+            explanation: explanation,
+            confidence: confidence,
+            replacements: [],
+            preconditions: [],
+            required_document_version: required_document_version,
+            disabled_reason: None
+        )
+
+    # Add one replacement together with the exact text it expects to replace.
+    fn with_replacement(file: text, span: Span, new_text: text, expected_text: text) -> FixCandidate:
+        var result = self
+        result.replacements.push(FixReplacement.new(file, span, new_text))
+        result.preconditions.push(FixPrecondition(file: file, span: span, expected_text: expected_text))
+        result
+
+    fn disabled(reason: text) -> FixCandidate:
+        var result = self
+        result.disabled_reason = Some(reason)
+        result
+
+    fn is_enabled() -> bool:
+        not self.disabled_reason.?
+
+    # Distinct files touched, in first-seen order.
+    fn affected_files() -> [text]:
+        var files: [text] = []
+        for r in self.replacements:
+            if not files.contains(r.file):
+                files.push(r.file)
+        files
+
+    # Legacy single-fix projection (`DiagnosticV1.fix` shape).
+    fn to_compat_fix() -> DiagnosticFix:
+        var fix = DiagnosticFix.new(self.id, self.title, self.confidence)
+        for r in self.replacements:
+            fix = fix.with_replacement(r.file, r.span, r.new_text)
+        fix
+
+    # Full multi-fix projection (`DiagnosticV1.fixes[]` entry) at a 1-based rank.
+    # Disabled -> Unavailable; Safe -> Automatic; otherwise ReviewRequired.
+    fn to_ranked_fix(rank: i64) -> DiagnosticFix:
+        var fix = self.to_compat_fix()
+        fix.title = self.title
+        fix.description = self.explanation
+        fix.rank = rank
+        fix.preconditions = self.preconditions
+        fix.applicability = FixApplicability.for_confidence(self.confidence, self.is_enabled())
+        fix
+
+struct ActionEntry:
+    diagnostic_id: text
+    candidates: [FixCandidate]
+
+struct DiagnosticActionIndex:
+    entries: [ActionEntry]
+
+impl DiagnosticActionIndex:
+    static fn new() -> DiagnosticActionIndex:
+        DiagnosticActionIndex(entries: [])
+
+    # Append a candidate for `diagnostic_id`; producer order is preserved.
+    fn add(diagnostic_id: text, candidate: FixCandidate) -> DiagnosticActionIndex:
+        var result = self
+        var i = 0
+        while i < result.entries.len():
+            if result.entries[i].diagnostic_id == diagnostic_id:
+                result.entries[i].candidates.push(candidate)
+                return result
+            i = i + 1
+        result.entries.push(ActionEntry(diagnostic_id: diagnostic_id, candidates: [candidate]))
+        result
+
+    fn candidates_for(diagnostic_id: text) -> [FixCandidate]:
+        for e in self.entries:
+            if e.diagnostic_id == diagnostic_id:
+                return e.candidates
+        []
+
+    # First ENABLED candidate projected onto the legacy single DiagnosticFix.
+    fn compat_fix_for(diagnostic_id: text) -> DiagnosticFix?:
+        for c in self.candidates_for(diagnostic_id):
+            if c.is_enabled():
+                return Some(c.to_compat_fix())
+        None
+
+    fn to_json() -> text:
+        render_action_index_json(self)
+
+# === JSON rendering (same brace policy as diagnostic_v1.spl) ===
+
+fn render_optional_text_json(value: text?) -> text:
+    json_null_or_string(value)
+
+fn render_target_profile_json(tp: BatchTargetProfileV1) -> text:
+    json_object([
+        json_pair("target", json_string(tp.target)),
+        json_pair("profile", json_string(tp.profile)),
+        json_pair("scope", json_string(tp.scope)),
+        json_pair("policy_digest", json_string(tp.policy_digest))
+    ])
+
+fn render_optional_target_profile_json(value: BatchTargetProfileV1?) -> text:
+    match value:
+        case Some(tp): render_target_profile_json(tp)
+        case None: "null"
+
+fn render_coverage_receipt_json(cov: CoverageReceiptV1) -> text:
+    json_object([
+        json_pair("requested_rules", json_int(cov.requested_rules)),
+        json_pair("executed_rules", json_int(cov.executed_rules)),
+        json_pair("skipped_rules", json_int(cov.skipped_rules)),
+        json_pair("exempted_rules", json_int(cov.exempted_rules)),
+        json_pair("unsupported_rules", json_int(cov.unsupported_rules)),
+        json_pair("timed_out_rules", json_int(cov.timed_out_rules)),
+        json_pair("budget_exhausted", json_bool(cov.budget_exhausted))
+    ])
+
+fn render_optional_coverage_receipt_json(value: CoverageReceiptV1?) -> text:
+    match value:
+        case Some(cov): render_coverage_receipt_json(cov)
+        case None: "null"
+
+fn render_batch_diagnostic_json(bd: BatchDiagnostic) -> text:
+    json_object([
+        json_pair("id", json_string(bd.id)),
+        json_pair("diagnostic", render_diagnostic_v1_json(bd.diagnostic))
+    ])
+
+fn render_diagnostic_batch_json(b: DiagnosticBatchV1) -> text:
+    var items: [text] = []
+    for d in b.diagnostics:
+        items.push(render_batch_diagnostic_json(d))
+    var related: [text] = []
+    for f in b.related_files:
+        related.push(json_string(f))
+    json_object([
+        json_pair("schema_version", json_int(b.schema_version)),
+        json_pair("producer", json_string(b.producer)),
+        json_pair("file_id", json_string(b.file_id)),
+        json_pair("uri", json_string(b.uri)),
+        json_pair("document_version", json_int(b.document_version)),
+        json_pair("source_hash", json_string(b.source_hash)),
+        json_pair("analysis_generation", json_int(b.analysis_generation)),
+        json_pair("status", json_string(b.status.name())),
+        json_pair("incomplete_reason", render_optional_text_json(b.incomplete_reason)),
+        json_pair("diagnostics", json_array(items)),
+        json_pair("related_files", json_array(related)),
+        json_pair("target_profile", render_optional_target_profile_json(b.target_profile)),
+        json_pair("coverage", render_optional_coverage_receipt_json(b.coverage))
+    ])
+
+fn render_precondition_json(p: FixPrecondition) -> text:
+    json_object([
+        json_pair("file", json_string(p.file)),
+        json_pair("span", render_span_json(p.span)),
+        json_pair("expected_text", json_string(p.expected_text))
+    ])
+
+fn render_candidate_json(c: FixCandidate) -> text:
+    var reps: [text] = []
+    for r in c.replacements:
+        reps.push(json_object([
+            json_pair("file", json_string(r.file)),
+            json_pair("span", render_span_json(r.span)),
+            json_pair("new_text", json_string(r.new_text))
+        ]))
+    var pres: [text] = []
+    for p in c.preconditions:
+        pres.push(render_precondition_json(p))
+    json_object([
+        json_pair("id", json_string(c.id)),
+        json_pair("title", json_string(c.title)),
+        json_pair("explanation", json_string(c.explanation)),
+        json_pair("confidence", json_string(c.confidence.name())),
+        json_pair("replacements", json_array(reps)),
+        json_pair("preconditions", json_array(pres)),
+        json_pair("required_document_version", json_int(c.required_document_version)),
+        json_pair("enabled", json_bool(c.is_enabled())),
+        json_pair("disabled_reason", render_optional_text_json(c.disabled_reason))
+    ])
+
+fn render_action_index_json(index: DiagnosticActionIndex) -> text:
+    var entries: [text] = []
+    for e in index.entries:
+        var cands: [text] = []
+        for c in e.candidates:
+            cands.push(render_candidate_json(c))
+        entries.push(json_object([
+            json_pair("diagnostic_id", json_string(e.diagnostic_id)),
+            json_pair("candidates", json_array(cands))
+        ]))
+    json_object([json_pair("entries", json_array(entries))])
+
+export BatchStatus, batch_status_parse, diagnostic_stable_id
+export BatchTargetProfileV1, CoverageReceiptV1
+export BatchDiagnostic, DiagnosticBatchV1
+export FixPrecondition, FixCandidate, ActionEntry, DiagnosticActionIndex
+export render_diagnostic_batch_json, render_action_index_json
+export render_target_profile_json, render_coverage_receipt_json

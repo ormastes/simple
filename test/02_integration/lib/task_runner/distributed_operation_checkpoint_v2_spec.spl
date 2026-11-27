@@ -1,0 +1,624 @@
+# @req DAE-05-A DAE-05-B DAE-05-C DAE-05-D DAE-05-E DAE-05-F DAE-05-O
+# NOT_RUN: actual filesystem/owned journal scenarios, no runtime qualification.
+use std.spec.{describe, it, expect, fail}
+use std.spec.step
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.common.contracts.distributed_operation_retention_v2.DistributedOperationRetentionProfileV2
+use std.common.task_runner.distributed_operation_journal_v2.*
+use std.common.task_runner.distributed_operation_checkpoint_v2.*
+use std.common.task_runner.distributed_operation_checkpoint_schema_v2.checkpoint_parse_v2
+use std.common.task_runner.distributed_operation_owner_health_v2.{OperationJournalHealthTurnV2,
+    OPERATION_JOURNAL_HEALTH_LIMIT_V2, operation_health_reserve_v2,
+    operation_health_cancel_v2, operation_health_end_v2}
+use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.{daemon_operation_admit_v2,
+    daemon_operation_begin_v2, daemon_operation_record_outcome_v2}
+use std.nogc_sync_mut.database.wal_segmented.{database_wal_current_v1,
+    database_wal_revision_open_v1, database_wal_segment_read_strict_v1,
+    database_wal_publish_v1, database_wal_checkpoint_commit_v1}
+use std.nogc_sync_mut.database.wal_checkpoint_format_v1.{DatabaseWalCheckpointMarkerV1,
+    database_wal_checkpoint_marker_encode_v1}
+use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_atomic_write,
+    file_read_regular_no_follow_bounded, file_exists, file_create_exclusive}
+use std.nogc_sync_mut.io_runtime.{dir_remove, file_delete}
+
+fn checkpoint_request_v2(id: text) -> OperationEnvelopeV2:
+    OperationEnvelopeV2(2, id, "b".repeat(64), "user", "project", "host", "build",
+        "c".repeat(64), 1, 0, 1, 1, 1)
+
+fn checkpoint_open_owned_v2(root: text, lifetime: i64, tail: i64) -> DistributedOperationJournalV2:
+    match distributed_operation_journal_open_owned_v2(root, "a".repeat(64), "d".repeat(64), lifetime,
+            Some(DistributedOperationRetentionProfileV2(1, lifetime, tail))):
+        case DistributedOperationJournalOpenV2.Ready(owner): owner
+        case DistributedOperationJournalOpenV2.Rejected(reason): fail(reason)
+        case DistributedOperationJournalOpenV2.CleanupRequired(cleanup, reason):
+            val closed = distributed_operation_journal_open_cleanup_v2(cleanup)
+            assert(closed.closed and closed.cleanup.is_none() and closed.error == "")
+            fail(reason)
+
+fn checkpoint_close_owned_v2(owner: DistributedOperationJournalV2):
+    val closed = distributed_operation_journal_close_owned_v2(owner)
+    assert(closed.closed and closed.cleanup.is_none() and closed.error == "" and closed.health_pending_id == 0)
+
+fn checkpoint_capture_history_v2(owner: DistributedOperationJournalV2) -> DistributedOperationJournalHistoryBatchV2:
+    distributed_operation_journal_history_batch_v2(owner).unwrap()
+
+fn checkpoint_encode_owner_v2(owner: DistributedOperationJournalV2) -> OperationCheckpointObjectsV2:
+    distributed_operation_checkpoint_encode_v2(OperationCheckpointSnapshotV2(
+        owner.authority_digest, owner.revision, owner.sequence, owner.retention_profile.unwrap(),
+        owner.operations, checkpoint_capture_history_v2(owner))).unwrap()
+
+fn checkpoint_expect_same_projection_v2(before: DistributedOperationJournalHistoryBatchV2,
+        after: DistributedOperationJournalHistoryBatchV2):
+    expect(after.authority_digest).to_equal(before.authority_digest)
+    expect(after.head_sequence).to_equal(before.head_sequence)
+    expect(after.operations.len()).to_equal(before.operations.len())
+    expect(after.revision_endpoints.len()).to_equal(before.revision_endpoints.len() + 1)
+    for id in before.operations.keys():
+        assert(after.operations.contains_key(id))
+        val a = before.operations[id]
+        val b = after.operations[id]
+        expect(b.envelope_digest).to_equal(a.envelope_digest)
+        expect(b.admitted_sequence).to_equal(a.admitted_sequence)
+        expect(b.last_from_state).to_equal(a.last_from_state)
+        expect(b.last_to_state).to_equal(a.last_to_state)
+        expect(b.last_outcome_digest).to_equal(a.last_outcome_digest)
+        expect(b.last_sequence).to_equal(a.last_sequence)
+        expect(b.last_commit_digest).to_equal(a.last_commit_digest)
+    for digest in before.revision_endpoints.keys():
+        expect(after.revision_endpoints[digest]).to_equal(before.revision_endpoints[digest])
+
+fn checkpoint_rejection_v2(opened: DistributedOperationJournalOpenV2) -> text:
+    match opened:
+        case DistributedOperationJournalOpenV2.Rejected(reason): reason
+        case DistributedOperationJournalOpenV2.Ready(owner):
+            checkpoint_close_owned_v2(owner)
+            fail("expected checkpoint policy rejection")
+        case DistributedOperationJournalOpenV2.CleanupRequired(cleanup, reason):
+            val closed = distributed_operation_journal_open_cleanup_v2(cleanup)
+            assert(closed.closed and closed.cleanup.is_none() and closed.error == "")
+            fail("open rejection unexpectedly retained cleanup: " + reason)
+
+describe "Owned operation checkpoint publication and replay":
+    it "retains every operation state and historical receipt endpoint across reopen":
+        step("Open the actual owned journal")
+        val root = secure_temp_dir("/tmp", "operation-checkpoint").unwrap()
+        var owner = checkpoint_open_owned_v2(root, 50, 30)
+        step("Commit representative V2 operation states")
+        for id in ["admitted", "executing", "unknown", "completed", "failed", "cancelled"]:
+            val request = checkpoint_request_v2(id)
+            owner = daemon_operation_admit_v2(owner, request).unwrap().journal
+            if id != "admitted": owner = daemon_operation_begin_v2(owner, request).unwrap()
+            if id == "unknown": owner = distributed_operation_journal_recover_execution_v2(owner, id).unwrap()
+            if id == "completed" or id == "failed" or id == "cancelled":
+                owner = daemon_operation_record_outcome_v2(owner, request, id, "e".repeat(64)).unwrap()
+        val never_began = checkpoint_request_v2("cancelled-admitted")
+        owner = daemon_operation_admit_v2(owner, never_began).unwrap().journal
+        owner = daemon_operation_record_outcome_v2(owner, never_began, "cancelled", "e".repeat(64)).unwrap()
+        step("Capture canonical history and pinned evidence")
+        val before = checkpoint_capture_history_v2(owner)
+        val original_rows = owner.operations
+        val prior_revision = file_read_regular_no_follow_bounded(root + "/database-wal/objects/" + owner.revision, 1048576).unwrap()
+        step("Publish the checkpoint through CURRENT")
+        val checkpointed = distributed_operation_journal_checkpoint_v2(owner).unwrap()
+        expect(checkpointed.sequence).to_equal(owner.sequence)
+        expect(checkpointed.checkpoint_sequence).to_equal(owner.sequence)
+        expect(distributed_operation_journal_history_batch_v2(owner).unwrap_err()).to_equal("OPERATION_JOURNAL_REVISION_STALE")
+        val repeated = distributed_operation_journal_checkpoint_v2(checkpointed).unwrap()
+        expect(repeated.revision).to_equal(checkpointed.revision)
+        expect(file_read_regular_no_follow_bounded(root + "/database-wal/objects/" + owner.revision, 1048576).unwrap()).to_equal(prior_revision)
+        checkpoint_close_owned_v2(checkpointed)
+        step("Reopen and compare retained identities")
+        val reopened = checkpoint_open_owned_v2(root, 50, 30)
+        checkpoint_expect_same_projection_v2(before, checkpoint_capture_history_v2(reopened))
+        for id in original_rows.keys():
+            val actual = distributed_operation_journal_lookup_v2(reopened, id).unwrap()
+            expect(actual.envelope).to_equal(original_rows[id].envelope)
+            expect(actual.state).to_equal(original_rows[id].state)
+            expect(actual.outcome_digest).to_equal(original_rows[id].outcome_digest)
+        expect(reopened.operations["unknown"].state).to_equal("outcome-unknown")
+        val reopened_history = checkpoint_capture_history_v2(reopened)
+        val cancelled = reopened_history.operations["cancelled-admitted"]
+        expect(cancelled.last_from_state).to_equal("admitted")
+        expect(cancelled.last_to_state).to_equal("cancelled")
+        checkpoint_close_owned_v2(reopened)
+        assert(dir_remove(root, true))
+
+    it "resets only explicit tail budget and never extends the lifetime cap":
+        val root = secure_temp_dir("/tmp", "operation-checkpoint-cap").unwrap()
+        var owner = checkpoint_open_owned_v2(root, 3, 2)
+        val request = checkpoint_request_v2("bounded")
+        owner = daemon_operation_admit_v2(owner, request).unwrap().journal
+        owner = daemon_operation_begin_v2(owner, request).unwrap()
+        expect(daemon_operation_record_outcome_v2(owner, request, "completed", "e".repeat(64)).unwrap_err()).to_equal("OPERATION_JOURNAL_TAIL_FULL")
+        owner = distributed_operation_journal_checkpoint_v2(owner).unwrap()
+        val control = database_wal_revision_open_v1(root + "/database-wal", owner.revision).unwrap()
+        expect(control.first_sequence).to_equal(2)
+        expect(control.last_sequence).to_equal(2)
+        expect(database_wal_segment_read_strict_v1(root + "/database-wal", control).unwrap_err()).to_equal("WAL_CHECKPOINT_NOT_EVENT_SEGMENT")
+        owner = daemon_operation_record_outcome_v2(owner, request, "completed", "e".repeat(64)).unwrap()
+        expect(owner.sequence).to_equal(3)
+        val tail = database_wal_revision_open_v1(root + "/database-wal", owner.revision).unwrap()
+        expect(tail.parent).to_equal(control.digest)
+        expect(tail.first_sequence).to_equal(3)
+        owner = distributed_operation_journal_checkpoint_v2(owner).unwrap()
+        expect(daemon_operation_admit_v2(owner, checkpoint_request_v2("extra")).unwrap_err()).to_equal("OPERATION_JOURNAL_FULL")
+        checkpoint_close_owned_v2(owner)
+        val reopened = checkpoint_open_owned_v2(root, 3, 2)
+        expect(reopened.sequence).to_equal(3)
+        expect(daemon_operation_admit_v2(reopened, checkpoint_request_v2("extra")).unwrap_err()).to_equal("OPERATION_JOURNAL_FULL")
+        checkpoint_close_owned_v2(reopened)
+        assert(dir_remove(root, true))
+
+    it "requires the identical explicit profile on checkpoint reopen":
+        val root = secure_temp_dir("/tmp", "operation-checkpoint-policy").unwrap()
+        var owner = checkpoint_open_owned_v2(root, 8, 3)
+        owner = daemon_operation_admit_v2(owner, checkpoint_request_v2("policy")).unwrap().journal
+        owner = distributed_operation_journal_checkpoint_v2(owner).unwrap()
+        val current = owner.revision
+        checkpoint_close_owned_v2(owner)
+        val missing = distributed_operation_journal_open_owned_v2(root, "a".repeat(64), "d".repeat(64), 8)
+        expect(checkpoint_rejection_v2(missing)).to_equal("OPERATION_CHECKPOINT_PROFILE_REQUIRED")
+        val changed = distributed_operation_journal_open_owned_v2(root, "a".repeat(64), "d".repeat(64), 8,
+            Some(DistributedOperationRetentionProfileV2(1, 8, 4)))
+        expect(checkpoint_rejection_v2(changed)).to_equal("OPERATION_CHECKPOINT_PROFILE_MISMATCH")
+        expect(database_wal_current_v1(root + "/database-wal", "a".repeat(64)).unwrap()).to_equal(current)
+        val reopened = checkpoint_open_owned_v2(root, 8, 3)
+        expect(reopened.operations["policy"].state).to_equal("admitted")
+        checkpoint_close_owned_v2(reopened)
+        assert(dir_remove(root, true))
+
+    it "keeps legacy no-profile admission and refuses checkpoint publication":
+        val root = secure_temp_dir("/tmp", "operation-checkpoint-legacy").unwrap()
+        val initial = distributed_operation_journal_open_owned_v2(root, "a".repeat(64), "d".repeat(64), 2)
+        var owner = match initial:
+            case DistributedOperationJournalOpenV2.Ready(ready): ready
+            case _: fail("legacy owned open failed")
+        owner = daemon_operation_admit_v2(owner, checkpoint_request_v2("legacy")).unwrap().journal
+        val before = owner.revision
+        expect(distributed_operation_journal_checkpoint_v2(owner).unwrap_err()).to_equal("OPERATION_CHECKPOINT_PROFILE_REQUIRED")
+        expect(database_wal_current_v1(root + "/database-wal", "a".repeat(64)).unwrap()).to_equal(before)
+        owner = daemon_operation_begin_v2(owner, checkpoint_request_v2("legacy")).unwrap()
+        expect(daemon_operation_admit_v2(owner, checkpoint_request_v2("extra")).unwrap_err()).to_equal("OPERATION_JOURNAL_FULL")
+        checkpoint_close_owned_v2(owner)
+        assert(dir_remove(root, true))
+
+    it "rejects invalid profiles before publishing a lease or CURRENT":
+        val root = secure_temp_dir("/tmp", "operation-checkpoint-invalid").unwrap()
+        val invalid = distributed_operation_journal_open_owned_v2(root, "a".repeat(64), "d".repeat(64), 8,
+            Some(DistributedOperationRetentionProfileV2(2, 8, 3)))
+        expect(checkpoint_rejection_v2(invalid) != "").to_equal(true)
+        expect(file_exists(root + "/parent.lease")).to_equal(false)
+        expect(file_exists(root + "/database-wal/CURRENT")).to_equal(false)
+        val empty = checkpoint_open_owned_v2(root, 8, 3)
+        expect(distributed_operation_journal_checkpoint_v2(empty).unwrap_err()).to_equal("OPERATION_CHECKPOINT_EMPTY")
+        checkpoint_close_owned_v2(empty)
+        assert(dir_remove(root, true))
+
+    it "quarantines corrupted published checkpoint bytes instead of recreating IDs":
+        step("Reject corrupt or exhausted storage before effects")
+        val root = secure_temp_dir("/tmp", "operation-checkpoint-corrupt").unwrap()
+        var owner = checkpoint_open_owned_v2(root, 8, 3)
+        owner = daemon_operation_admit_v2(owner, checkpoint_request_v2("retained")).unwrap().journal
+        owner = distributed_operation_journal_checkpoint_v2(owner).unwrap()
+        val revision = database_wal_revision_open_v1(root + "/database-wal", owner.revision).unwrap()
+        val object = root + "/database-wal/objects/" + revision.checkpoint_digest
+        assert(file_atomic_write(object, "corrupt checkpoint\n"))
+        expect(daemon_operation_admit_v2(owner, checkpoint_request_v2("retained")).is_err()).to_equal(true)
+        expect(daemon_operation_admit_v2(owner, checkpoint_request_v2("new")).is_err()).to_equal(true)
+        expect(daemon_operation_begin_v2(owner, checkpoint_request_v2("retained")).is_err()).to_equal(true)
+        checkpoint_close_owned_v2(owner)
+        val rejected = distributed_operation_journal_open_owned_v2(root, "a".repeat(64), "d".repeat(64), 8,
+            Some(DistributedOperationRetentionProfileV2(1, 8, 3)))
+        expect(checkpoint_rejection_v2(rejected)).to_equal("committed WAL object corrupted")
+        expect(file_read_regular_no_follow_bounded(object, 1048576).unwrap()).to_equal("corrupt checkpoint\n")
+        expect(file_read_regular_no_follow_bounded(root + "/database-wal/CURRENT", 128).unwrap()).to_equal(owner.revision + "\n")
+        assert(dir_remove(root, true))
+
+    it "replays only the checkpoint suffix while retaining historical endpoints":
+        val root = secure_temp_dir("/tmp", "operation-checkpoint-suffix").unwrap()
+        var owner = checkpoint_open_owned_v2(root, 12, 3)
+        val request = checkpoint_request_v2("suffix")
+        owner = daemon_operation_admit_v2(owner, request).unwrap().journal
+        owner = daemon_operation_begin_v2(owner, request).unwrap()
+        val historical_commit = owner.revision
+        owner = distributed_operation_journal_checkpoint_v2(owner).unwrap()
+        val checkpoint_commit = owner.revision
+        owner = daemon_operation_record_outcome_v2(owner, request, "completed", "e".repeat(64)).unwrap()
+        owner = daemon_operation_admit_v2(owner, checkpoint_request_v2("later")).unwrap().journal
+        val head = owner.revision
+        checkpoint_close_owned_v2(owner)
+        # Deliberate fixture sabotage proves bounded replay, not production GC.
+        assert(file_delete(root + "/database-wal/objects/" + historical_commit))
+        var reopened = checkpoint_open_owned_v2(root, 12, 3)
+        expect(reopened.revision).to_equal(head)
+        expect(reopened.sequence).to_equal(4)
+        expect(reopened.checkpoint_sequence).to_equal(2)
+        expect(reopened.operations["suffix"].state).to_equal("completed")
+        expect(reopened.operations["later"].state).to_equal("admitted")
+        val history = checkpoint_capture_history_v2(reopened)
+        expect(history.revision_endpoints[historical_commit]).to_equal(2)
+        expect(history.revision_endpoints[checkpoint_commit]).to_equal(2)
+        expect(history.operations["suffix"].admitted_sequence).to_equal(1)
+        expect(history.operations["suffix"].last_sequence).to_equal(3)
+        reopened = distributed_operation_journal_checkpoint_v2(reopened).unwrap()
+        expect(reopened.checkpoint_sequence).to_equal(4)
+        checkpoint_close_owned_v2(reopened)
+        assert(dir_remove(root, true))
+
+    it "permits first checkpoint of legacy history larger than an opted-in tail":
+        val root = secure_temp_dir("/tmp", "operation-checkpoint-opt-in").unwrap()
+        var owner = match distributed_operation_journal_open_owned_v2(root, "a".repeat(64), "d".repeat(64), 8):
+            case DistributedOperationJournalOpenV2.Ready(ready): ready
+            case _: fail("legacy owned open failed")
+        for id in ["one", "two", "three"]:
+            owner = daemon_operation_admit_v2(owner, checkpoint_request_v2(id)).unwrap().journal
+        checkpoint_close_owned_v2(owner)
+        owner = checkpoint_open_owned_v2(root, 8, 1)
+        expect(owner.sequence).to_equal(3)
+        expect(daemon_operation_begin_v2(owner, checkpoint_request_v2("one")).unwrap_err()).to_equal("OPERATION_JOURNAL_TAIL_FULL")
+        owner = distributed_operation_journal_checkpoint_v2(owner).unwrap()
+        owner = daemon_operation_begin_v2(owner, checkpoint_request_v2("one")).unwrap()
+        expect(owner.sequence).to_equal(4)
+        checkpoint_close_owned_v2(owner)
+        val reopened = checkpoint_open_owned_v2(root, 8, 1)
+        expect(reopened.sequence).to_equal(4)
+        expect(reopened.checkpoint_sequence).to_equal(3)
+        expect(reopened.operations.len()).to_equal(3)
+        checkpoint_close_owned_v2(reopened)
+        assert(dir_remove(root, true))
+
+    it "keeps CURRENT unchanged for interrupted page manifest and control prefixes":
+        val root = secure_temp_dir("/tmp", "operation-checkpoint-prefix").unwrap()
+        var owner = checkpoint_open_owned_v2(root, 8, 3)
+        owner = daemon_operation_admit_v2(owner, checkpoint_request_v2("prefix")).unwrap().journal
+        val original = owner.revision
+        val encoded = checkpoint_encode_owner_v2(owner)
+        for object in encoded.objects:
+            expect(database_wal_publish_v1(root + "/database-wal", object.payload).unwrap()).to_equal(object.digest)
+            checkpoint_close_owned_v2(owner)
+            owner = checkpoint_open_owned_v2(root, 8, 3)
+            expect(owner.revision).to_equal(original)
+            expect(owner.operations["prefix"].state).to_equal("admitted")
+        val marker = DatabaseWalCheckpointMarkerV1(owner.authority_digest, original, 1, encoded.manifest_digest)
+        val unreachable = database_wal_publish_v1(root + "/database-wal",
+            database_wal_checkpoint_marker_encode_v1(marker)).unwrap()
+        expect(database_wal_current_v1(root + "/database-wal", owner.authority_digest).unwrap()).to_equal(original)
+        checkpoint_close_owned_v2(owner)
+        owner = checkpoint_open_owned_v2(root, 8, 3)
+        expect(owner.revision).to_equal(original)
+        owner = distributed_operation_journal_checkpoint_v2(owner).unwrap()
+        expect(owner.revision).to_equal(unreachable)
+        expect(file_read_regular_no_follow_bounded(root + "/database-wal/CURRENT", 128).unwrap()).to_equal(unreachable + "\n")
+        checkpoint_close_owned_v2(owner)
+        assert(dir_remove(root, true))
+
+    it "rejects a stale checkpoint CURRENT compare without losing the newer event":
+        val root = secure_temp_dir("/tmp", "operation-checkpoint-cas").unwrap()
+        var owner = checkpoint_open_owned_v2(root, 8, 3)
+        val request = checkpoint_request_v2("cas")
+        owner = daemon_operation_admit_v2(owner, request).unwrap().journal
+        val original = owner.revision
+        val encoded = checkpoint_encode_owner_v2(owner)
+        for object in encoded.objects:
+            expect(database_wal_publish_v1(root + "/database-wal", object.payload).unwrap()).to_equal(object.digest)
+        owner = daemon_operation_begin_v2(owner, request).unwrap()
+        val current = owner.revision
+        expect(database_wal_checkpoint_commit_v1(root + "/database-wal", owner.authority_digest,
+            original, encoded.manifest_digest).unwrap_err()).to_equal("stale or corrupt WAL commit parent")
+        expect(database_wal_current_v1(root + "/database-wal", owner.authority_digest).unwrap()).to_equal(current)
+        checkpoint_close_owned_v2(owner)
+        val reopened = checkpoint_open_owned_v2(root, 8, 3)
+        expect(reopened.revision).to_equal(current)
+        expect(reopened.sequence).to_equal(2)
+        expect(reopened.operations["cas"].state).to_equal("executing")
+        checkpoint_close_owned_v2(reopened)
+        assert(dir_remove(root, true))
+
+    it "rejects a damaged immutable publication winner before changing CURRENT":
+        val root = secure_temp_dir("/tmp", "operation-checkpoint-winner").unwrap()
+        var owner = checkpoint_open_owned_v2(root, 8, 3)
+        owner = daemon_operation_admit_v2(owner, checkpoint_request_v2("winner")).unwrap().journal
+        val original = owner.revision
+        val encoded = checkpoint_encode_owner_v2(owner)
+        val damaged = root + "/database-wal/objects/" + encoded.objects[0].digest
+        assert(file_create_exclusive(damaged, "damaged unreachable winner\n"))
+        expect(distributed_operation_journal_checkpoint_v2(owner).unwrap_err()).to_equal("committed WAL object corrupted")
+        expect(database_wal_current_v1(root + "/database-wal", owner.authority_digest).unwrap()).to_equal(original)
+        expect(file_read_regular_no_follow_bounded(damaged, 1048576).unwrap()).to_equal("damaged unreachable winner\n")
+        checkpoint_close_owned_v2(owner)
+        val reopened = checkpoint_open_owned_v2(root, 8, 3)
+        expect(reopened.operations["winner"].state).to_equal("admitted")
+        expect(reopened.revision).to_equal(original)
+        checkpoint_close_owned_v2(reopened)
+        assert(dir_remove(root, true))
+
+    it "keeps detected historical corruption sticky across copied owners until close and reopen":
+        # Actual native generation + shared production registry; no fake owner
+        # or fixture-local poisoned flag. Execution and review remain NOT_RUN.
+        val root = secure_temp_dir("/tmp", "operation-checkpoint-sticky").unwrap()
+        var owner = checkpoint_open_owned_v2(root, 8, 3)
+        val request = checkpoint_request_v2("sticky")
+        owner = daemon_operation_admit_v2(owner, request).unwrap().journal
+        owner = distributed_operation_journal_checkpoint_v2(owner).unwrap()
+        val control = database_wal_revision_open_v1(root + "/database-wal", owner.revision).unwrap()
+        val manifest = file_read_regular_no_follow_bounded(root + "/database-wal/objects/" + control.checkpoint_digest, 1048576).unwrap()
+        val value = checkpoint_parse_v2(manifest).unwrap()
+        val record = value.as_dict().unwrap()
+        val pages = record["pages"].as_array().unwrap()
+        val descriptor = pages[0].as_dict().unwrap()
+        val page_digest = descriptor["digest"].as_str().unwrap()
+        val path = root + "/database-wal/objects/" + page_digest
+        val original_page = file_read_regular_no_follow_bounded(path, 1048576).unwrap()
+        owner = daemon_operation_begin_v2(owner, request).unwrap()
+        val alias = owner
+        val before = owner.revision
+        assert(file_atomic_write(path, "corrupt committed historical page\n"))
+        expect(distributed_operation_journal_history_batch_v2(owner).unwrap_err()).to_equal("committed WAL object corrupted")
+        # Repairing bytes is not authoritative reopen of the affected owner.
+        assert(file_atomic_write(path, original_page))
+        val outcome = daemon_operation_record_outcome_v2(alias, request, "completed", "e".repeat(64))
+        expect(outcome.is_err()).to_equal(true)
+        expect(outcome.unwrap_err()).to_start_with("OPERATION_JOURNAL_QUARANTINED:committed WAL object corrupted:")
+        expect(outcome.unwrap_err()).to_end_with(page_digest)
+        expect(database_wal_current_v1(root + "/database-wal", owner.authority_digest).unwrap()).to_equal(before)
+        checkpoint_close_owned_v2(owner)
+        var reopened = checkpoint_open_owned_v2(root, 8, 3)
+        expect(reopened.health_id > owner.health_id).to_equal(true)
+        expect(reopened.operations["sticky"].state).to_equal("executing")
+        reopened = daemon_operation_record_outcome_v2(reopened, request, "completed", "e".repeat(64)).unwrap()
+        expect(reopened.operations["sticky"].state).to_equal("completed")
+        checkpoint_close_owned_v2(reopened)
+        assert(dir_remove(root, true))
+
+    it "does not quarantine the canonical owner for ordinary stale or missing operations":
+        val root = secure_temp_dir("/tmp", "operation-health-normal").unwrap()
+        var owner = checkpoint_open_owned_v2(root, 8, 3)
+        val request = checkpoint_request_v2("normal")
+        owner = daemon_operation_admit_v2(owner, request).unwrap().journal
+        val stale = owner
+        owner = daemon_operation_begin_v2(owner, request).unwrap()
+        expect(distributed_operation_journal_lookup_v2(stale, request.id).unwrap_err()).to_equal("OPERATION_JOURNAL_REVISION_STALE")
+        expect(distributed_operation_journal_lookup_v2(owner, "absent").unwrap_err()).to_equal("OPERATION_NOT_FOUND")
+        expect(distributed_operation_journal_lookup_v2(owner, request.id).unwrap().state).to_equal("executing")
+        owner = daemon_operation_record_outcome_v2(owner, request, "failed", "e".repeat(64)).unwrap()
+        expect(owner.operations[request.id].state).to_equal("failed")
+        checkpoint_close_owned_v2(owner)
+        assert(dir_remove(root, true))
+
+    it "excludes copied-owner entrypoints continuously while an actual production ticket is held":
+        val root = secure_temp_dir("/tmp", "operation-health-busy").unwrap()
+        var owner = checkpoint_open_owned_v2(root, 8, 3)
+        val request = checkpoint_request_v2("busy")
+        owner = daemon_operation_admit_v2(owner, request).unwrap().journal
+        val before = owner.revision
+        val acquired = operation_turn_begin_v2(owner).unwrap()
+        val turn = acquired.unwrap()
+        expect(distributed_operation_journal_lookup_v2(owner, request.id).unwrap_err()).to_equal("OPERATION_JOURNAL_OWNER_BUSY")
+        expect(distributed_operation_journal_history_batch_v2(owner).unwrap_err()).to_equal("OPERATION_JOURNAL_OWNER_BUSY")
+        expect(distributed_operation_journal_checkpoint_v2(owner).unwrap_err()).to_equal("OPERATION_JOURNAL_OWNER_BUSY")
+        expect(distributed_operation_journal_recover_execution_v2(owner, request.id).unwrap_err()).to_equal("OPERATION_JOURNAL_OWNER_BUSY")
+        expect(daemon_operation_begin_v2(owner, request).unwrap_err()).to_equal("OPERATION_JOURNAL_OWNER_BUSY")
+        expect(distributed_operation_journal_read_v3(owner, "retained.sdn", 128).unwrap_err()).to_equal("OPERATION_JOURNAL_OWNER_BUSY")
+        expect(distributed_operation_journal_read_required_v3(owner, "retained.sdn", 128).unwrap_err()).to_equal("OPERATION_JOURNAL_OWNER_BUSY")
+        expect(distributed_operation_journal_publish_v3(owner, "retained.sdn", "evidence\n").unwrap_err()).to_equal("OPERATION_JOURNAL_OWNER_BUSY")
+        expect(distributed_operation_journal_consume_primary_v3(owner, request, "evidence\n").unwrap_err()).to_equal("OPERATION_JOURNAL_OWNER_BUSY")
+        val closed = distributed_operation_journal_close_owned_v2(owner)
+        expect(closed.closed).to_equal(false)
+        expect(closed.error).to_equal("OPERATION_JOURNAL_OWNER_BUSY")
+        expect(closed.cleanup.is_some()).to_equal(true)
+        expect(distributed_operation_journal_close_v2(owner).unwrap_err()).to_equal("OPERATION_JOURNAL_OWNED_CLOSE_REQUIRED")
+        expect(database_wal_current_v1(root + "/database-wal", owner.authority_digest).unwrap()).to_equal(before)
+        expect(file_exists(root + "/retained.sdn")).to_equal(false)
+        assert(operation_health_end_v2(turn).unwrap())
+        # The same actual owner remains usable once its complete turn ends.
+        owner = daemon_operation_begin_v2(owner, request).unwrap()
+        expect(owner.operations[request.id].state).to_equal("executing")
+        checkpoint_close_owned_v2(owner)
+        assert(dir_remove(root, true))
+
+    it "refuses missing and foreign health IDs without changing either real owner":
+        val root = secure_temp_dir("/tmp", "operation-health-missing").unwrap()
+        val other_root = secure_temp_dir("/tmp", "operation-health-foreign").unwrap()
+        var owner = checkpoint_open_owned_v2(root, 8, 3)
+        var other = checkpoint_open_owned_v2(other_root, 8, 3)
+        owner = daemon_operation_admit_v2(owner, checkpoint_request_v2("one")).unwrap().journal
+        other = daemon_operation_admit_v2(other, checkpoint_request_v2("two")).unwrap().journal
+        var missing = owner
+        missing.health_id = 0
+        expect(distributed_operation_journal_lookup_v2(missing, "one").unwrap_err()).to_equal("OPERATION_JOURNAL_HEALTH_UNKNOWN")
+        val missing_close = distributed_operation_journal_close_owned_v2(missing)
+        expect(missing_close.error).to_equal("OPERATION_JOURNAL_HEALTH_UNKNOWN")
+        expect(missing_close.closed).to_equal(false)
+        expect(missing_close.cleanup.is_some()).to_equal(true)
+        var foreign = owner
+        foreign.health_id = other.health_id
+        expect(distributed_operation_journal_lookup_v2(foreign, "one").unwrap_err()).to_equal("OPERATION_JOURNAL_HEALTH_IDENTITY_INVALID")
+        expect(distributed_operation_journal_lookup_v2(owner, "one").unwrap().state).to_equal("admitted")
+        expect(distributed_operation_journal_lookup_v2(other, "two").unwrap().state).to_equal("admitted")
+        checkpoint_close_owned_v2(owner)
+        checkpoint_close_owned_v2(other)
+        assert(dir_remove(root, true))
+        assert(dir_remove(other_root, true))
+
+    it "prevents an old copied cleanup from retiring or deleting a fresh native generation":
+        val root = secure_temp_dir("/tmp", "operation-health-reopen").unwrap()
+        var old = checkpoint_open_owned_v2(root, 8, 3)
+        old = daemon_operation_admit_v2(old, checkpoint_request_v2("generation")).unwrap().journal
+        val alias = old
+        checkpoint_close_owned_v2(old)
+        val fresh = checkpoint_open_owned_v2(root, 8, 3)
+        expect(fresh.health_id > alias.health_id).to_equal(true)
+        val lease = file_read_regular_no_follow_bounded(root + "/parent.lease", 512).unwrap()
+        val stale_close = distributed_operation_journal_close_owned_v2(alias)
+        expect(stale_close.closed).to_equal(false)
+        expect(stale_close.cleanup.is_none()).to_equal(true)
+        expect(stale_close.error).to_equal("OPERATION_JOURNAL_OWNER_STALE")
+        expect(file_read_regular_no_follow_bounded(root + "/parent.lease", 512).unwrap()).to_equal(lease)
+        expect(distributed_operation_journal_lookup_v2(fresh, "generation").unwrap().state).to_equal("admitted")
+        checkpoint_close_owned_v2(fresh)
+        assert(dir_remove(root, true))
+
+    it "bounds actual opening reservations and cancels only slots without native resources":
+        # These are production opening reservations, not fabricated journal or
+        # native owners. The isolated focused runner must have no other owners.
+        var reserved: [OperationJournalHealthTurnV2] = []
+        var exhausted = ""
+        for index in 0..OPERATION_JOURNAL_HEALTH_LIMIT_V2 + 1:
+            val result = operation_health_reserve_v2(nil, "a".repeat(64))
+            if result.is_err():
+                exhausted = result.unwrap_err()
+                break
+            reserved.push(result.unwrap())
+        for turn in reserved:
+            assert(operation_health_cancel_v2(turn).unwrap())
+        expect(reserved.len()).to_equal(OPERATION_JOURNAL_HEALTH_LIMIT_V2)
+        expect(exhausted).to_equal("OPERATION_JOURNAL_HEALTH_LIMIT")
+
+    it "binds POSIX I/O roots and recomputes altered cleanup metadata before touching either real owner":
+        val root = secure_temp_dir("/tmp", "operation-health-root-a").unwrap()
+        val other_root = secure_temp_dir("/tmp", "operation-health-root-b").unwrap()
+        var owner = checkpoint_open_owned_v2(root, 8, 3)
+        var other = checkpoint_open_owned_v2(other_root, 8, 3)
+        owner = daemon_operation_admit_v2(owner, checkpoint_request_v2("root-a")).unwrap().journal
+        other = daemon_operation_admit_v2(other, checkpoint_request_v2("root-b")).unwrap().journal
+        # Actual independent roots intentionally share authority and nonce.
+        val lease = file_read_regular_no_follow_bounded(other_root + "/parent.lease", 512).unwrap()
+        val current = file_read_regular_no_follow_bounded(other_root + "/database-wal/CURRENT", 128).unwrap()
+        var redirected = owner
+        redirected.root = other_root
+        expect(distributed_operation_journal_read_v3(redirected, "parent.lease", 512).unwrap_err()).to_equal("OPERATION_JOURNAL_HEALTH_IDENTITY_INVALID")
+        expect(distributed_operation_journal_publish_v3(redirected, "isolated.sdn", "wrong root\n").unwrap_err()).to_equal("OPERATION_JOURNAL_HEALTH_IDENTITY_INVALID")
+        val acquired = operation_turn_begin_v2(owner).unwrap()
+        val turn = acquired.unwrap()
+        val busy_close = distributed_operation_journal_close_owned_v2(owner)
+        assert(busy_close.cleanup.is_some())
+        assert(operation_health_end_v2(turn).unwrap())
+        val cleanup = busy_close.cleanup.unwrap()
+        var wrong_root = cleanup
+        wrong_root.root = other_root
+        # Keeping the original health_binding cannot authorize changed fields.
+        val denied_root = distributed_operation_journal_open_cleanup_v2(wrong_root)
+        expect(denied_root.error).to_equal("OPERATION_JOURNAL_HEALTH_IDENTITY_INVALID")
+        expect(denied_root.closed).to_equal(false)
+        expect(denied_root.cleanup.is_some()).to_equal(true)
+        var wrong_authority = cleanup
+        wrong_authority.authority_digest = "e".repeat(64)
+        expect(distributed_operation_journal_open_cleanup_v2(wrong_authority).error).to_equal("OPERATION_JOURNAL_HEALTH_IDENTITY_INVALID")
+        var wrong_lease = cleanup
+        wrong_lease.lease_digest = "f".repeat(64)
+        expect(distributed_operation_journal_open_cleanup_v2(wrong_lease).error).to_equal("OPERATION_JOURNAL_HEALTH_IDENTITY_INVALID")
+        expect(file_exists(other_root + "/isolated.sdn")).to_equal(false)
+        expect(file_read_regular_no_follow_bounded(other_root + "/parent.lease", 512).unwrap()).to_equal(lease)
+        expect(file_read_regular_no_follow_bounded(other_root + "/database-wal/CURRENT", 128).unwrap()).to_equal(current)
+        expect(distributed_operation_journal_lookup_v2(owner, "root-a").unwrap().state).to_equal("admitted")
+        expect(distributed_operation_journal_lookup_v2(other, "root-b").unwrap().state).to_equal("admitted")
+        checkpoint_close_owned_v2(owner)
+        checkpoint_close_owned_v2(other)
+        assert(dir_remove(root, true))
+        assert(dir_remove(other_root, true))
+
+    it "quarantines every failed authoritative page read including oversized bytes after restoration":
+        val root = secure_temp_dir("/tmp", "operation-health-large-page").unwrap()
+        var owner = checkpoint_open_owned_v2(root, 8, 3)
+        val request = checkpoint_request_v2("oversized")
+        owner = daemon_operation_admit_v2(owner, request).unwrap().journal
+        owner = distributed_operation_journal_checkpoint_v2(owner).unwrap()
+        val control = database_wal_revision_open_v1(root + "/database-wal", owner.revision).unwrap()
+        val manifest = file_read_regular_no_follow_bounded(root + "/database-wal/objects/" + control.checkpoint_digest, 1048576).unwrap()
+        val value = checkpoint_parse_v2(manifest).unwrap()
+        val fields = value.as_dict().unwrap()
+        val pages = fields["pages"].as_array().unwrap()
+        val descriptor = pages[0].as_dict().unwrap()
+        val digest = descriptor["digest"].as_str().unwrap()
+        val path = root + "/database-wal/objects/" + digest
+        val original = file_read_regular_no_follow_bounded(path, 1048576).unwrap()
+        owner = daemon_operation_begin_v2(owner, request).unwrap()
+        val alias = owner
+        val before = owner.revision
+        assert(file_atomic_write(path, "x".repeat(1048577)))
+        expect(distributed_operation_journal_history_batch_v2(owner).is_err()).to_equal(true)
+        assert(file_atomic_write(path, original))
+        val outcome = daemon_operation_record_outcome_v2(alias, request, "completed", "e".repeat(64))
+        expect(outcome.unwrap_err()).to_start_with("OPERATION_JOURNAL_QUARANTINED:")
+        expect(outcome.unwrap_err()).to_end_with(digest)
+        expect(database_wal_current_v1(root + "/database-wal", owner.authority_digest).unwrap()).to_equal(before)
+        checkpoint_close_owned_v2(owner)
+        val reopened = checkpoint_open_owned_v2(root, 8, 3)
+        expect(reopened.operations[request.id].state).to_equal("executing")
+        checkpoint_close_owned_v2(reopened)
+        assert(dir_remove(root, true))
+
+    it "keeps disappearance of required CURRENT sticky after its exact bytes are restored":
+        val root = secure_temp_dir("/tmp", "operation-health-current-missing").unwrap()
+        var owner = checkpoint_open_owned_v2(root, 8, 3)
+        val request = checkpoint_request_v2("current-missing")
+        owner = daemon_operation_admit_v2(owner, request).unwrap().journal
+        owner = daemon_operation_begin_v2(owner, request).unwrap()
+        val alias = owner
+        val pointer = root + "/database-wal/CURRENT"
+        val bytes = file_read_regular_no_follow_bounded(pointer, 128).unwrap()
+        assert(file_delete(pointer))
+        expect(distributed_operation_journal_lookup_v2(owner, request.id).unwrap_err()).to_equal("OPERATION_WAL_CURRENT_MISSING")
+        assert(file_atomic_write(pointer, bytes))
+        val outcome = daemon_operation_record_outcome_v2(alias, request, "completed", "e".repeat(64))
+        expect(outcome.unwrap_err()).to_start_with("OPERATION_JOURNAL_QUARANTINED:OPERATION_WAL_CURRENT_MISSING:")
+        expect(file_read_regular_no_follow_bounded(pointer, 128).unwrap()).to_equal(bytes)
+        checkpoint_close_owned_v2(owner)
+        val reopened = checkpoint_open_owned_v2(root, 8, 3)
+        expect(reopened.operations[request.id].state).to_equal("executing")
+        checkpoint_close_owned_v2(reopened)
+        assert(dir_remove(root, true))
+
+    it "quarantines an unreadable authoritative lease across exact restoration and copied completion":
+        val root = secure_temp_dir("/tmp", "operation-health-lease-read").unwrap()
+        var owner = checkpoint_open_owned_v2(root, 8, 3)
+        val request = checkpoint_request_v2("lease-read")
+        owner = daemon_operation_admit_v2(owner, request).unwrap().journal
+        owner = distributed_operation_journal_checkpoint_v2(owner).unwrap()
+        owner = daemon_operation_begin_v2(owner, request).unwrap()
+        val alias = owner
+        val path = root + "/parent.lease"
+        val original = file_read_regular_no_follow_bounded(path, 512).unwrap()
+        assert(file_atomic_write(path, "x".repeat(513)))
+        expect(distributed_operation_journal_lookup_v2(owner, request.id).is_err()).to_equal(true)
+        assert(file_atomic_write(path, original))
+        val outcome = daemon_operation_record_outcome_v2(alias, request, "completed", "e".repeat(64))
+        expect(outcome.unwrap_err()).to_start_with("OPERATION_JOURNAL_QUARANTINED:")
+        expect(outcome.unwrap_err()).to_end_with(owner.lease_digest)
+        expect(database_wal_current_v1(root + "/database-wal", owner.authority_digest).unwrap()).to_equal(owner.revision)
+        checkpoint_close_owned_v2(owner)
+        val reopened = checkpoint_open_owned_v2(root, 8, 3)
+        expect(reopened.operations[request.id].state).to_equal("executing")
+        checkpoint_close_owned_v2(reopened)
+        assert(dir_remove(root, true))
+
+    it "preserves failed lease cleanup and quarantines copied owners before a later exact close":
+        val root = secure_temp_dir("/tmp", "operation-health-lease-cleanup").unwrap()
+        var owner = checkpoint_open_owned_v2(root, 8, 3)
+        val request = checkpoint_request_v2("lease-cleanup")
+        owner = daemon_operation_admit_v2(owner, request).unwrap().journal
+        owner = daemon_operation_begin_v2(owner, request).unwrap()
+        val alias = owner
+        val path = root + "/parent.lease"
+        val original = file_read_regular_no_follow_bounded(path, 512).unwrap()
+        assert(file_atomic_write(path, "x".repeat(513)))
+        val failed = distributed_operation_journal_close_owned_v2(owner)
+        expect(failed.closed).to_equal(false)
+        expect(failed.error).to_equal("OPERATION_JOURNAL_LEASE_READ_FAILED")
+        expect(failed.cleanup.is_some()).to_equal(true)
+        val pending = failed.cleanup.unwrap()
+        expect(pending.lease_published).to_equal(true)
+        expect(pending.health_id).to_equal(owner.health_id)
+        assert(file_atomic_write(path, original))
+        val outcome = daemon_operation_record_outcome_v2(alias, request, "completed", "e".repeat(64))
+        expect(outcome.unwrap_err()).to_start_with("OPERATION_JOURNAL_QUARANTINED:")
+        expect(outcome.unwrap_err()).to_end_with(owner.lease_digest)
+        val released = distributed_operation_journal_open_cleanup_v2(pending)
+        expect(released.closed).to_equal(true)
+        expect(released.cleanup.is_none()).to_equal(true)
+        expect(released.error).to_equal("")
+        expect(released.health_pending_id).to_equal(0)
+        val reopened = checkpoint_open_owned_v2(root, 8, 3)
+        expect(reopened.operations[request.id].state).to_equal("executing")
+        checkpoint_close_owned_v2(reopened)
+        assert(dir_remove(root, true))

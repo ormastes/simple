@@ -1,0 +1,189 @@
+#!/bin/sh
+# Fixture gate for the Stage-3 open-fd identity helpers in
+# scripts/check/lib/bootstrap-stage3/manifest-verify.shs
+# (bootstrap_stage3_fd_identity / bootstrap_stage3_fd_matches_path).
+#
+#   sh scripts/check/check-bootstrap-fd-identity.shs [--selftest]
+#
+# Runs on the CURRENT host's arm (Linux procfs, or fstat(2) on Darwin/BSD).
+# Verdict is the last stdout line:
+#   PASS — <n> fixture(s) checked ...   exit 0
+#   FAIL — <fixture> ...                 exit 1
+#   ERROR — nothing was checked (...)    exit 2
+set -u
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd -P) || {
+    echo "ERROR — nothing was checked (cannot resolve repo root)"
+    exit 2
+}
+case "${1:-}" in ''|--selftest) ;; *) echo "usage: $0 [--selftest]" >&2; exit 2 ;; esac
+
+# The module only defines functions; it needs a provenance-fail hook in scope.
+bootstrap_stage3_provenance_fail() { return 1; }
+. "$repo_root/scripts/check/lib/bootstrap-stage3/manifest-verify.shs" || {
+    echo "ERROR — nothing was checked (cannot load manifest-verify.shs)"
+    exit 2
+}
+
+work=$(mktemp -d "${TMPDIR:-/tmp}/fd-identity.XXXXXX") || {
+    echo "ERROR — nothing was checked (mktemp failed)"
+    exit 2
+}
+trap 'exec 5<&- 2>/dev/null; rm -rf "$work"' EXIT HUP INT TERM
+checked=0
+
+fail() { echo "FAIL — $1"; exit 1; }
+
+expect() { # name expected-status actual-status
+    [ "$2" = "$3" ] || fail "$1: expected exit $2, got $3"
+    checked=$((checked + 1))
+}
+
+fresh() { # (re)create $work/f with content $1, hold it on fd 5, stamp it
+    exec 5<&- 2>/dev/null
+    printf '%s\n' "$1" >"$work/f" || fail "fixture write"
+    exec 5<"$work/f" || fail "fixture open"
+    stamp=$(bootstrap_stage3_fd_stamp 5) || fail "fixture stamp"
+}
+
+# 1. Same, unchanged file -> PASS (0); identity is "dev ino mode_hex size".
+fresh same
+bootstrap_stage3_fd_matches_path 5 "$work/f" "$stamp"; expect same-file 0 $?
+id=$(bootstrap_stage3_fd_identity 5); expect fd-identity 0 $?
+set -- $id
+[ "$#" = 4 ] && [ "$4" = 5 ] || fail "fd-identity shape: '$id'"
+case "$3" in 81[0-9a-f][0-9a-f]) ;; *) fail "fd-identity mode not regular hex: '$3'" ;; esac
+checked=$((checked + 1))
+
+# 2. Path replaced by rename after open -> FAIL (1), fd identity unchanged.
+fresh original
+printf 'replacement\n' >"$work/g"
+mv -f "$work/g" "$work/f"
+bootstrap_stage3_fd_matches_path 5 "$work/f" "$stamp"; expect renamed-over 1 $?
+[ "$(bootstrap_stage3_fd_identity 5)" = "$id" ] && fail "renamed-over: fd identity must track the held inode, not the path"
+checked=$((checked + 1))
+
+# 3. Same inode modified in place after open (same size) -> FAIL (1).
+fresh aaaa
+sleep 1
+printf 'bbbb\n' >"$work/f"
+bootstrap_stage3_fd_matches_path 5 "$work/f" "$stamp"; expect modified-after-open 1 $?
+
+# 4. Path removed after open -> FAIL (1).
+fresh gone
+rm -f "$work/f"
+bootstrap_stage3_fd_matches_path 5 "$work/f" "$stamp"; expect path-removed 1 $?
+
+# 5. Missing stat tool -> ERROR (2), never PASS.
+fresh tool
+bootstrap_stage3_fd_stamp 5 >/dev/null; expect stamp-ok 0 $?
+bootstrap_stage3_fd_identity_tool="$work/no-such-stat-tool"
+bootstrap_stage3_fd_matches_path 5 "$work/f" "$stamp"; expect missing-tool-match 2 $?
+bootstrap_stage3_fd_identity 5 >/dev/null; expect missing-tool-identity 2 $?
+bootstrap_stage3_fd_stamp 5 >/dev/null; expect missing-tool-stamp 2 $?
+unset bootstrap_stage3_fd_identity_tool
+
+# 6. fd not open / malformed fd -> ERROR (2).
+exec 5<&-
+bootstrap_stage3_fd_matches_path 5 "$work/f" "$stamp"; expect closed-fd 2 $?
+bootstrap_stage3_fd_identity 'x' >/dev/null; expect malformed-fd 2 $?
+bootstrap_stage3_fd_matches_path 5 "$work/f" ''; expect empty-stamp 2 $?
+
+# ---- Inherited-descriptor protocol (authority.shs) -------------------------
+# The parent opens each input; a CHILD process inherits the descriptor and
+# verifies it with fstat/pread -- no procfs, no /dev/fd, no path re-open.
+. "$repo_root/scripts/check/lib/bootstrap-stage3/command-snapshot.shs" 2>/dev/null &&
+. "$repo_root/scripts/check/lib/bootstrap-stage3/authority.shs" || {
+    echo "ERROR — nothing was checked (cannot load authority.shs)"
+    exit 2
+}
+bootstrap_stage3_provenance_fail() { return 1; }
+fstat_fields() { # fd -> "dev ino mode_decimal"
+    python3 -I -c 'import os,sys; s=os.fstat(int(sys.argv[1])); print(s.st_dev, s.st_ino, s.st_mode)' "$1"
+}
+sha_of() { bootstrap_stage3_hash_file "$1"; }
+child() { # run a verification in a child that only has the INHERITED fd 6/7
+    sh -c '. "$1/scripts/check/lib/bootstrap-stage3/command-snapshot.shs" &&
+           . "$1/scripts/check/lib/bootstrap-stage3/authority.shs" || exit 3
+           shift; "$@"' child "$repo_root" "$@"
+}
+
+printf 'inherited payload\n' >"$work/in"
+exec 6<"$work/in" || fail "inherit open"
+set -- $(fstat_fields 6); ih_dev=$1 ih_ino=$2 ih_mode=$3
+ih_sha=$(sha_of "$work/in")
+
+# 7. Child verifies the inherited fd: identity + content -> PASS (0).
+child bootstrap_stage3_inherited_fd_verify 6 "$ih_dev" "$ih_ino" "$ih_mode" "$ih_sha"; expect inherited-fd-match 0 $?
+# 8. Parent advanced the SHARED offset -> child still hashes from byte 0.
+dd bs=1 count=5 <&6 >/dev/null 2>&1
+child bootstrap_stage3_inherited_fd_verify 6 "$ih_dev" "$ih_ino" "$ih_mode" "$ih_sha"; expect inherited-fd-shared-offset 0 $?
+# 9. Wrong recorded digest / wrong inode -> FAIL (1).
+child bootstrap_stage3_inherited_fd_verify 6 "$ih_dev" "$ih_ino" "$ih_mode" "$(printf '%064d' 0)"; expect inherited-fd-wrong-sha 1 $?
+child bootstrap_stage3_inherited_fd_verify 6 "$ih_dev" 1 "$ih_mode" "$ih_sha"; expect inherited-fd-wrong-ino 1 $?
+# 10. Renamed over after open: the inherited fd still pins the original inode
+#     (content-safe), and the path check reports the swap -> FAIL (1).
+in_stamp=$(bootstrap_stage3_fd_stamp 6) || fail "inherit stamp"
+printf 'swapped\n' >"$work/in2"; mv -f "$work/in2" "$work/in"
+child bootstrap_stage3_inherited_fd_verify 6 "$ih_dev" "$ih_ino" "$ih_mode" "$ih_sha"; expect inherited-fd-pins-inode 0 $?
+bootstrap_stage3_fd_matches_path 6 "$work/in" "$in_stamp"; expect inherited-renamed-over 1 $?
+# 11. Modified in place after open (same size) -> FAIL (1).
+exec 6<&-
+printf 'aaaa\n' >"$work/mod"; exec 6<"$work/mod"
+set -- $(fstat_fields 6); m_sha=$(sha_of "$work/mod")
+sleep 1; printf 'bbbb\n' >"$work/mod"
+child bootstrap_stage3_inherited_fd_verify 6 "$1" "$2" "$3" "$m_sha"; expect inherited-modified-after-open 1 $?
+# 12. Directory: identity-only PASS, a digest claim FAIL.
+exec 7<"$work" 2>/dev/null || exec 7<&-
+if python3 -I -c 'import os,sys; os.fstat(7)' 2>/dev/null; then
+    set -- $(fstat_fields 7)
+    child bootstrap_stage3_inherited_fd_verify 7 "$1" "$2" "$3" identity-only; expect inherited-dir-identity 0 $?
+    child bootstrap_stage3_inherited_fd_verify 7 "$1" "$2" "$3" "$m_sha"; expect inherited-dir-digest-claim 1 $?
+fi
+# 13. Descriptor not inherited (closed before exec) -> ERROR (2).
+exec 6<&-
+child bootstrap_stage3_inherited_fd_verify 6 "$ih_dev" "$ih_ino" "$ih_mode" "$ih_sha"; expect inherited-fd-not-inherited 2 $?
+# 14. Unsupported OS -> ERROR (2), never PASS.
+uname() { echo Plan9; }
+bootstrap_stage3_inherited_fd_verify 0 1 1 1 identity-only; expect unknown-os 2 $?
+unset -f uname
+
+# 15. Owner liveness: live + matching launch stamp PASS; dead pid FAIL;
+#     a different stamp (pid reuse) FAIL.
+own_stamp=$(bootstrap_stage3_process_start_stamp $$); expect owner-stamp 0 $?
+bootstrap_stage3_owner_matches $$ "$own_stamp"; expect owner-live 0 $?
+bootstrap_stage3_owner_matches $$ "$((own_stamp + 1))"; expect owner-reused 1 $?
+sh -c 'exit 0' & dead_pid=$!; wait "$dead_pid"
+bootstrap_stage3_owner_matches "$dead_pid" "$own_stamp"; expect owner-dead 1 $?
+
+# 16. End to end: bootstrap_stage3_validate_descriptor_map in a CHILD with the
+#     map on inherited fd 8 and a file + directory input on fds 6/7.
+printf 'payload two\n' >"$work/in"
+exec 6<"$work/in" 7<"$work"
+set -- $(fstat_fields 6); f_dev=$1 f_ino=$2 f_mode=$3; f_sha=$(sha_of "$work/in")
+set -- $(fstat_fields 7); d_dev=$1 d_ino=$2 d_mode=$3
+vec="$work/vec"; : >"$vec"
+bootstrap_stage3_vector_frame payload fd:6 /fixture/payload "$f_dev" "$f_ino" "$f_mode" "$f_sha" >>"$vec"
+bootstrap_stage3_vector_frame workdir fd:7 /fixture/workdir "$d_dev" "$d_ino" "$d_mode" identity-only >>"$vec"
+write_map() { # $1 = owner stamp, $2 = payload sha
+    {
+        printf 'schema=fixture-v1\nstatus=ready\nrun_id=r1\narchitecture=fixture\n'
+        printf 'descriptor_owner_pid=%s\ndescriptor_owner_start_ticks=%s\nentry_count=2\n' $$ "$1"
+        printf 'map_vector_sha256=%s\n' "$(sha_of "$vec")"
+        printf 'payload_descriptor=fd:6\npayload_display_token=/fixture/payload\npayload_dev=%s\npayload_ino=%s\npayload_mode=%s\npayload_sha256=%s\n' "$f_dev" "$f_ino" "$f_mode" "$2"
+        printf 'workdir_descriptor=fd:7\nworkdir_display_token=/fixture/workdir\nworkdir_dev=%s\nworkdir_ino=%s\nworkdir_mode=%s\nworkdir_sha256=identity-only\n' "$d_dev" "$d_ino" "$d_mode"
+    } >"$work/map"
+}
+validate() {
+    exec 8<&- 2>/dev/null; exec 8<"$work/map"
+    child bootstrap_stage3_validate_descriptor_map fd:8 "$(sha_of "$work/map")" fixture-v1 r1 fixture 'payload workdir'
+}
+write_map "$own_stamp" "$f_sha"; validate; expect map-inherited-pass 0 $?
+write_map "$((own_stamp + 1))" "$f_sha"; validate; expect map-owner-reused 1 $?
+write_map "$own_stamp" "$(printf '%064d' 0)"; validate; expect map-payload-digest 1 $?
+write_map "$own_stamp" "$f_sha"; exec 8<&- ; exec 8<"$work/map"
+child bootstrap_stage3_validate_descriptor_map fd:8 "$(printf '%064d' 0)" fixture-v1 r1 fixture 'payload workdir'; expect map-external-sha 1 $?
+exec 6<&- 7<&- 8<&-
+
+echo "PASS — $checked fixture(s) checked on $(uname -s) arm"
+exit 0

@@ -459,3 +459,32 @@ fixtures `test/fixtures/image/{jpeg,webp_lossless,webp_lossy,svg}/` (kept out of
 
 ## HTTP Content-Encoding (h1_client)
 `build_request_bytes` sends `Accept-Encoding: gzip, deflate` unless the caller set one. `parse_http_response_bytes` decodes `Content-Encoding` after chunked/length framing (list decoded in reverse; identity no-op; deflate = zlib first, raw fallback), then drops `content-encoding`/`content-length` from the returned header text. Unknown tokens (`br`, `zstd`: not advertised) and decode failures are parse errors, never a pass-through. Cap: decoded size > `BROWSER_MAX_RESOURCE_BYTES` errors, but the check is post-decode (decoders buffer fully). zstd is held back only because `std.common.compress.zstd` costs ~29 MB RSS per interpreted process (the decoder handles predefined/repeat tables since #3739) (gzip+deflate cost ~6 MB). Spec: `h1_content_encoding_spec.spl`.
+
+## Form-control geometry vs Chrome 159 (2026-11-14)
+
+Spec: `test/01_unit/browser_engine/form_control_chrome159_geometry_spec.spl`
+(every number is a Chrome 159 `getBoundingClientRect`). Residue:
+`doc/08_tracking/bug/web_form_control_chrome159_residue_2026-11-14.md`.
+
+- **`web_glyph_scale(fs)` is `fs / 8`, so "scale 1" means 8..15 px, not 8.**
+  The bitmap-cell inked-width clamp in the style stage keyed on the scale and
+  widened real-face advances at 13 px (`l` 3 -> 4). It is now gated on
+  `font_size <= 8`. Any other `scale == 1` test in this engine deserves the
+  same suspicion.
+- **A constant fitted on one label hides text under-measure.** The select
+  "arrow" was 22 only because `Alpha` measured 33 instead of ceil(34.09) = 35;
+  Chrome's interior is 20. Sweep the EMPTY control and several labels before
+  believing an intercept.
+- **The UA control font is 40/3 px.** `Style.font_size` is integer (13), so
+  labels are measured by resolving the run at `40/3 * 30 = 400 px` and
+  dividing (`form_control_label_width_px`). A control with an author
+  `font-size:13px` is indistinguishable and measures 2.5 % wide.
+- **Text-control widths are FACE metrics**: `(size-1)*round(xAvgCharWidth) +
+  round(bbox width)` for input, `cols*round(avg) + 15` for textarea. Keyed by
+  resolved face identity (Liberation Sans / DejaVu Sans Mono vs the
+  Helvetica/Menlo numbers) because nothing reads OS/2 or `head` here.
+- **Anything that reads an ATTRIBUTE before the author cascade must be in the
+  cascade memo key** (`ua_control_decls`, like `nested_list_ua`): the key is
+  per tag, so a checkbox copied the text `<input>`'s cached style.
+- **No-doctype fixtures are quirks mode in Chrome**: `form` gets
+  `margin-bottom: 1em`. Do not assert a y BELOW a `<form>` from such a fixture.

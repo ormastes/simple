@@ -1,0 +1,188 @@
+# @cover scripts/bootstrap/phase3-test-inventory.shs 80%
+# @req REQ-P3-TEST-INVENTORY-001
+"""
+## Purpose and audience
+Exercises `scripts/bootstrap/phase3-test-inventory.shs` (`discover`, `validate`,
+`summarize`, `check-results`) against real temporary Git-initialized fixture
+trees verifying canonical `test/01_unit|02_integration|03_system` admission,
+legacy `test/unit|integration|system` exclusion, embedded `src/lib` `describe`
+detection, `PASS` requires `executed > 0`, and `SKIP` requires `executed == 0`.
+
+Audience: Phase-3 test verification and inventory owners.
+
+## Compatibility and limitations
+Uses `get_temp_dir()` + `resolve_shell_argv` for OS portability and initializes
+each synthetic fixture tree with `phase3-nested-test-inventory.shs` + `git init`.
+
+## Examples
+```sh
+bin/simple test test/01_unit/scripts/phase3_test_inventory_spec.spl
+```
+"""
+
+# @tag: unit, scripts, bootstrap, phase3, inventory
+
+use std.spec.*
+use std.spec.{step}
+use app.io.mod.{cwd, dir_create_all, dir_remove_all, file_atomic_write, file_copy, file_read, getpid, time_now_unix_micros}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+use std.nogc_sync_mut.io.process_ops.{process_run, resolve_shell_argv}
+
+val INVENTORY_SCRIPT = "scripts/bootstrap/phase3-test-inventory.shs"
+val NESTED_SCRIPT = "scripts/bootstrap/phase3-nested-test-inventory.shs"
+
+fn _inv_make_root(tag: text) -> text:
+    val base = get_temp_dir().replace("\\", "/")
+    val root = base + "/p3-inv-" + tag + "-" +
+        getpid().to_text() + "-" + time_now_unix_micros().to_text()
+    expect(dir_create_all(root)).to_be(true)
+    root
+
+fn _inv_sh(cmd: text) -> (text, text, i64):
+    val prefix = "case \"$(uname -s 2>/dev/null)\" in MINGW*|MSYS*|CYGWIN*) PATH=\"/usr/bin:/bin:$PATH\"; export PATH ;; esac; "
+    val (sh_bin, sh_args) = resolve_shell_argv(prefix + cmd)
+    process_run(sh_bin, sh_args)
+
+fn _inv_setup_fixture_tree(tree: text):
+    val repo_root = cwd().replace("\\", "/")
+    expect(dir_create_all(tree + "/test/01_unit/lib/alpha")).to_be(true)
+    expect(dir_create_all(tree + "/test/02_integration/lib/beta")).to_be(true)
+    expect(dir_create_all(tree + "/test/03_system/tools/gamma")).to_be(true)
+    expect(dir_create_all(tree + "/test/unit/lib/legacy")).to_be(true)
+    expect(dir_create_all(tree + "/test/integration/lib/legacy")).to_be(true)
+    expect(dir_create_all(tree + "/test/system/lib/legacy")).to_be(true)
+    expect(dir_create_all(tree + "/src/lib/demo")).to_be(true)
+    expect(dir_create_all(tree + "/tools/cli_helper/tests")).to_be(true)
+    expect(dir_create_all(tree + "/scripts/bootstrap")).to_be(true)
+
+    expect(file_atomic_write(tree + "/test/01_unit/lib/alpha/unit_spec.spl", "describe \"u\":\n    it \"a\":\n        expect(1).to_equal(1)\n")).to_be(true)
+    expect(file_atomic_write(tree + "/test/02_integration/lib/beta/int_spec.spl", "describe \"i\":\n    it \"b\":\n        expect(1).to_equal(1)\n")).to_be(true)
+    expect(file_atomic_write(tree + "/test/03_system/tools/gamma/sys_test.spl", "describe \"s\":\n    it \"c\":\n        expect(1).to_equal(1)\n")).to_be(true)
+    expect(file_atomic_write(tree + "/test/unit/lib/legacy/old_spec.spl", "describe \"old\":\n    it \"d\":\n        expect(1).to_equal(1)\n")).to_be(true)
+    expect(file_atomic_write(tree + "/test/integration/lib/legacy/old_int_spec.spl", "describe \"old_i\":\n    it \"e\":\n        expect(1).to_equal(1)\n")).to_be(true)
+    expect(file_atomic_write(tree + "/test/system/lib/legacy/old_sys_spec.spl", "describe \"old_s\":\n    it \"f\":\n        expect(1).to_equal(1)\n")).to_be(true)
+
+    # Embedded src/lib files: one space-style describe, one paren-style describe, one non-test helper.
+    expect(file_atomic_write(tree + "/src/lib/demo/embedded_space.spl", "describe \"space\":\n    it \"ok\":\n        expect(1).to_equal(1)\n")).to_be(true)
+    expect(file_atomic_write(tree + "/src/lib/demo/embedded_paren.spl", "describe(\"paren\"):\n    it \"ok\":\n        expect(1).to_equal(1)\n")).to_be(true)
+    expect(file_atomic_write(tree + "/src/lib/demo/plain_mod_test.spl", "fn helper() -> i64:\n    42\n")).to_be(true)
+
+    expect(file_atomic_write(tree + "/tools/cli_helper/tests/sample_spec.spl", "describe \"tool\":\n    it \"ok\":\n        expect(1).to_equal(1)\n")).to_be(true)
+    expect(file_copy(repo_root + "/" + NESTED_SCRIPT, tree + "/scripts/bootstrap/phase3-nested-test-inventory.shs")).to_be(true)
+    expect(file_atomic_write(tree + "/scripts/bootstrap/phase3-nested-test-policy.tsv", "category\tpath\treason\n")).to_be(true)
+
+    val (_out, _err, git_rc) = _inv_sh("git -C '" + tree + "' init -q")
+    expect(git_rc).to_equal(0)
+
+describe "phase3-test-inventory.shs contract":
+    it "discovers authoritative trees and embedded src/lib describes while excluding legacy test/* mirrors":
+        step("Build fixture tree with canonical, legacy, embedded, and tool specs")
+        val root = _inv_make_root("discover")
+        val tree = root + "/repo"
+        _inv_setup_fixture_tree(tree)
+
+        val (inv_out, inv_err, code) = _inv_sh("sh " + INVENTORY_SCRIPT + " discover '" + tree + "'")
+        expect(code).to_equal(0)
+        expect(inv_err).to_equal("")
+        expect(inv_out).to_contain("surface\tcategory\trunner\tdisposition\tpath\treason")
+        expect(inv_out).to_contain("library\tunit\tsimple-spec\texecute\ttest/01_unit/lib/alpha/unit_spec.spl\t-")
+        expect(inv_out).to_contain("library\tintegration\tsimple-spec\texecute\ttest/02_integration/lib/beta/int_spec.spl\t-")
+        expect(inv_out).to_contain("tool\tsystem\tsimple-spec\texecute\ttest/03_system/tools/gamma/sys_test.spl\t-")
+        expect(inv_out).to_contain("library\tembedded\tsimple-spec\texecute\tsrc/lib/demo/embedded_space.spl\t-")
+        expect(inv_out).to_contain("library\tembedded\tsimple-spec\texecute\tsrc/lib/demo/embedded_paren.spl\t-")
+        expect(inv_out).to_contain("tool\tcli_helper\tsimple-spec\texecute\ttools/cli_helper/tests/sample_spec.spl\t-")
+
+        step("Confirm legacy mirrors and non-describe src/lib modules are excluded")
+        expect(inv_out.contains("test/unit/")).to_equal(false)
+        expect(inv_out.contains("test/integration/")).to_equal(false)
+        expect(inv_out.contains("test/system/")).to_equal(false)
+        expect(inv_out.contains("plain_mod_test.spl")).to_equal(false)
+
+        val inv_file = root + "/inventory.tsv"
+        expect(file_atomic_write(inv_file, inv_out)).to_be(true)
+        val (sum_out, sum_err, sum_rc) = _inv_sh("sh " + INVENTORY_SCRIPT + " summarize '" + inv_file + "'")
+        expect(sum_rc).to_equal(0)
+        expect(sum_err).to_equal("")
+        expect(sum_out).to_contain("surface\tcategory_count\texecute_rows\tskip_rows\towner_count")
+        expect(sum_out).to_contain("library\t3\t4\t0\t4")
+        expect(sum_out).to_contain("tool\t2\t2\t0\t2")
+        expect(dir_remove_all(root)).to_be(true)
+
+    it "validates canonical TSV inventories and rejects malformed, traversal, or conflicting rows":
+        val root = _inv_make_root("validate")
+        val good = root + "/good.tsv"
+        val good_tsv =
+            "surface\tcategory\trunner\tdisposition\tpath\treason\n" +
+            "library\tunit\tsimple-spec\texecute\ttest/01_unit/lib/a_spec.spl\t-\n" +
+            "library\tembedded\tsimple-spec\tskip\tsrc/lib/b.spl\treason-x\n"
+        expect(file_atomic_write(good, good_tsv)).to_be(true)
+        val (_go, _ge, good_rc) = _inv_sh("sh " + INVENTORY_SCRIPT + " validate '" + good + "'")
+        expect(good_rc).to_equal(0)
+
+        val bad_hdr = root + "/bad_hdr.tsv"
+        expect(file_atomic_write(bad_hdr, "wrong\theader\n")).to_be(true)
+        val (_o1, err1, rc1) = _inv_sh("sh " + INVENTORY_SCRIPT + " validate '" + bad_hdr + "'")
+        expect(rc1).to_equal(1)
+        expect(err1).to_contain("invalid inventory header")
+
+        val bad_trav = root + "/bad_trav.tsv"
+        expect(file_atomic_write(bad_trav, "surface\tcategory\trunner\tdisposition\tpath\treason\nlibrary\tunit\tsimple-spec\texecute\ttest/../escape_spec.spl\t-\n")).to_be(true)
+        val (_o2, err2, rc2) = _inv_sh("sh " + INVENTORY_SCRIPT + " validate '" + bad_trav + "'")
+        expect(rc2).to_equal(1)
+        expect(err2).to_contain("path is not canonical repo-relative")
+
+        val bad_reason = root + "/bad_reason.tsv"
+        expect(file_atomic_write(bad_reason, "surface\tcategory\trunner\tdisposition\tpath\treason\nlibrary\tunit\tsimple-spec\texecute\ttest/01_unit/lib/a_spec.spl\tnot-dash\n")).to_be(true)
+        val (_o3, err3, rc3) = _inv_sh("sh " + INVENTORY_SCRIPT + " validate '" + bad_reason + "'")
+        expect(rc3).to_equal(1)
+        expect(err3).to_contain("invalid disposition reason")
+
+        val bad_conflict = root + "/bad_conflict.tsv"
+        expect(file_atomic_write(bad_conflict, "surface\tcategory\trunner\tdisposition\tpath\treason\nlibrary\tunit\tsimple-spec\texecute\ttest/01_unit/lib/a_spec.spl\t-\nlibrary\tembedded\tsimple-spec\tskip\ttest/01_unit/lib/a_spec.spl\tdev\n")).to_be(true)
+        val (_o4, err4, rc4) = _inv_sh("sh " + INVENTORY_SCRIPT + " validate '" + bad_conflict + "'")
+        expect(rc4).to_equal(1)
+        expect(err4).to_contain("physical owner has mixed dispositions")
+        expect(dir_remove_all(root)).to_be(true)
+
+    it "enforces PASS executed>0 and SKIP executed==0 in check-results":
+        val root = _inv_make_root("results")
+        val inv = root + "/inventory.tsv"
+        val inv_body =
+            "surface\tcategory\trunner\tdisposition\tpath\treason\n" +
+            "library\tunit\tsimple-spec\texecute\ttest/01_unit/lib/a_spec.spl\t-\n" +
+            "library\tembedded\tsimple-spec\texecute\tsrc/lib/b.spl\t-\n"
+        expect(file_atomic_write(inv, inv_body)).to_be(true)
+
+        step("Accept valid PASS (executed>0) + SKIP (executed==0, skipped>0)")
+        val ok_res = root + "/ok_results.tsv"
+        val ok_body =
+            "runner\tpath\tresult\texecuted\tskipped\n" +
+            "simple-spec\ttest/01_unit/lib/a_spec.spl\tPASS\t3\t0\n" +
+            "simple-spec\tsrc/lib/b.spl\tSKIP\t0\t2\n"
+        expect(file_atomic_write(ok_res, ok_body)).to_be(true)
+        val (ok_out, ok_err, ok_rc) = _inv_sh("sh " + INVENTORY_SCRIPT + " check-results '" + inv + "' '" + ok_res + "'")
+        expect(ok_rc).to_equal(0)
+        expect(ok_err).to_equal("")
+        expect(ok_out).to_contain("library\t2\t2\t0\t3\t2")
+
+        step("Reject PASS with executed==0")
+        val pass_zero = root + "/pass_zero.tsv"
+        expect(file_atomic_write(pass_zero, "runner\tpath\tresult\texecuted\tskipped\nsimple-spec\ttest/01_unit/lib/a_spec.spl\tPASS\t0\t2\nsimple-spec\tsrc/lib/b.spl\tPASS\t1\t0\n")).to_be(true)
+        val (_pz_out, pz_err, pz_rc) = _inv_sh("sh " + INVENTORY_SCRIPT + " check-results '" + inv + "' '" + pass_zero + "'")
+        expect(pz_rc).to_equal(1)
+        expect(pz_err).to_contain("non-terminal or empty result")
+
+        step("Reject SKIP with executed>0")
+        val skip_nonzero = root + "/skip_nonzero.tsv"
+        expect(file_atomic_write(skip_nonzero, "runner\tpath\tresult\texecuted\tskipped\nsimple-spec\ttest/01_unit/lib/a_spec.spl\tSKIP\t1\t2\nsimple-spec\tsrc/lib/b.spl\tPASS\t1\t0\n")).to_be(true)
+        val (_sn_out, sn_err, sn_rc) = _inv_sh("sh " + INVENTORY_SCRIPT + " check-results '" + inv + "' '" + skip_nonzero + "'")
+        expect(sn_rc).to_equal(1)
+        expect(sn_err).to_contain("non-terminal or empty result")
+
+        step("Reject missing owner result")
+        val missing_res = root + "/missing_res.tsv"
+        expect(file_atomic_write(missing_res, "runner\tpath\tresult\texecuted\tskipped\nsimple-spec\ttest/01_unit/lib/a_spec.spl\tPASS\t1\t0\n")).to_be(true)
+        val (_mr_out, mr_err, mr_rc) = _inv_sh("sh " + INVENTORY_SCRIPT + " check-results '" + inv + "' '" + missing_res + "'")
+        expect(mr_rc).to_equal(1)
+        expect(mr_err).to_contain("missing physical result for simple-spec src/lib/b.spl")
+        expect(dir_remove_all(root)).to_be(true)

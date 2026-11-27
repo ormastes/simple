@@ -1,0 +1,362 @@
+"""
+## Purpose and audience
+Purpose: A Chrome 159 measured corpus for Devanagari (OpenType `dev2`) shaping,
+written BEFORE the general shaper lands (TDD). Each `it` is one shaping rule
+group; for every word it compares, on the `cpu_simd` lane, Simple's layout
+width, rendered ink box and glyph ids with the Chrome values below.
+Audience: web renderer text maintainers; the GSUB lane (syllables, reordering,
+substitution) and the GPOS lane (mark positioning) use it as their target.
+
+EXPECTED RED: on the base this spec was written against (release/1.0.0
+ecff7320c13) only हिन्दी is admitted to the shaped path, so every group fails;
+AC-1 (shaped already) is red only on its 16px ink top (28 vs Chrome 30). The spec is tagged `@tag:in-development` so a whole-suite run skips
+and COUNTS it instead of turning red (doc/07_guide/infra/testing.md § Tags and
+Filtering). Nothing is skipped inside the file: an explicit-path run executes
+every group. Delete the tag in the commit that makes all groups green.
+
+Chrome oracle (Chrome for Testing 159.0.8154.6, `--headless=new --disable-gpu
+--force-device-scale-factor=1 --hide-scrollbars --window-size=400,300`,
+`<html lang="hi">`, body `margin:0;background:#fff;color:#000;
+font:<16|32>px Liberation Sans, <Noto Sans Devanagari via @font-face>` — the
+face the engine resolves for `lang="hi"`:
+`assets/fonts/google-fonts/ofl/notosansdevanagari/NotoSansDevanagari[wdth,wght].ttf`,
+default instance), text in
+`<div style="position:absolute;left:20px;top:30px;white-space:nowrap">`.
+- width: `Range.getBoundingClientRect().width` over the div's contents
+  (LayoutUnit, exact multiples of 1/64 px; the spec stores width*64).
+- ink: inclusive pixel box of pixels with any channel under 200 in the
+  screenshot. The engine renders 400x120 (the div is absolutely positioned, so
+  the viewport height does not move it; Chrome's lowest ink row is 68).
+- glyph ids: from Chrome's `--print-to-pdf` output (Skia Type3 fonts keep the
+  glyph id in the CharProc name), in visual order, at 16px. Glyph 3 (space) is
+  what HarfBuzz leaves for a hidden ZWJ/ZWNJ; it is dropped on both sides.
+The Range height is 17 (16px) / 36 (32px) and the div height 21 / 42 for every
+row.
+
+Tolerance: width within 1px (64/64), every ink edge within 1px, glyph ids
+exact. A failure message lists each deviating word as
+`<text>@<size> <what> got=<simple> want=<chrome>`.
+
+| group | text | codepoints | glyph ids | width@16 | ink@16 x0,y0..x1,y1 | width@32 | ink@32 x0,y0..x1,y1 |
+|---|---|---|---|---|---|---|---|
+| base | हिन्दी | 0939 093F 0928 094D 0926 0940 | 544 88 245 73 33 | 30.234375 | 19,30..50,45 | 60.453125 | 19,30..81,63 |
+| reph | र्म | 0930 094D 092E | 80 506 | 9.578125 | 19,29..29,43 | 19.140625 | 19,30..39,58 |
+| reph | धर्म | 0927 0930 094D 092E | 74 80 506 | 19.421875 | 20,29..39,43 | 38.828125 | 21,30..59,58 |
+| reph | कर्त्ता | 0915 0930 094D 0924 094D 0924 093E | 56 442 31 506 | 27.5 | 19,29..47,43 | 54.984375 | 19,30..75,59 |
+| prebase | किताब | 0915 093F 0924 093E 092C | 545 56 71 31 78 | 38.84375 | 19,30..59,43 | 77.671875 | 19,30..98,59 |
+| prebase | सिंह | 0938 093F 0902 0939 | 564 87 785 88 | 23.46875 | 19,29..43,45 | 46.921875 | 19,30..67,63 |
+| prebase | शक्ति | 0936 0915 094D 0924 093F | 85 555 232 71 | 32.734375 | 20,30..53,43 | 65.453125 | 20,30..86,59 |
+| conjunct | क्ष | 0915 094D 0937 | 90 | 11.484375 | 20,34..31,44 | 22.953125 | 21,38..43,61 |
+| conjunct | त्र | 0924 094D 0930 | 304 | 8.84375 | 19,34..29,43 | 17.671875 | 19,39..38,58 |
+| conjunct | ज्ञ | 091C 094D 091E | 91 | 10.265625 | 19,34..30,44 | 20.515625 | 19,39..41,60 |
+| conjunct | स्त्री | 0938 094D 0924 094D 0930 0940 | 256 304 33 | 19.203125 | 19,30..39,43 | 38.40625 | 19,30..58,59 |
+| conjunct | क्त | 0915 094D 0924 | 232 71 | 17.703125 | 19,34..38,43 | 35.40625 | 19,39..56,58 |
+| rakar | प्र | 092A 094D 0930 | 309 | 9.109375 | 19,34..29,43 | 18.21875 | 19,39..38,59 |
+| rakar | क्र | 0915 094D 0930 | 295 | 12.296875 | 19,34..32,43 | 24.578125 | 19,39..45,59 |
+| rakar | ट्र | 091F 094D 0930 | 66 508 | 8.078125 | 19,34..28,47 | 16.140625 | 19,39..36,65 |
+| rakar | द्र | 0926 094D 0930 | 306 | 8.5 | 19,34..28,44 | 17 | 19,39..37,60 |
+| nukta | क़ | 0915 093C | 221 | 12.296875 | 19,34..32,44 | 24.578125 | 19,39..45,60 |
+| nukta | ज़ | 091C 093C | 224 | 11.875 | 19,34..32,45 | 23.75 | 19,39..44,62 |
+| nukta | ज़रूर | 091C 093C 0930 0942 0930 | 224 494 82 | 30.859375 | 19,34..51,45 | 61.703125 | 19,39..82,62 |
+| halant | क् | 0915 094D | 56 103 | 12.296875 | 19,34..32,47 | 24.578125 | 19,39..45,66 |
+| halant | सत् | 0938 0924 094D | 87 71 103 | 19.9375 | 19,34..42,47 | 39.875 | 19,39..63,66 |
+| joiner | क्‍ष | 0915 094D 200D 0937 | 232 86 | 18.0625 | 19,34..38,43 | 36.109375 | 19,39..56,58 |
+| joiner | क्‌ष | 0915 094D 200C 0937 | 56 103 86 | 21.546875 | 19,34..41,47 | 43.078125 | 19,39..63,66 |
+| bindu | हँस | 0939 0901 0938 | 88 101 87 | 19.3125 | 19,30..39,45 | 38.625 | 19,30..59,63 |
+| bindu | दुःख | 0926 0941 0903 0916 | 490 102 57 | 24.828125 | 19,34..45,48 | 49.640625 | 19,39..70,68 |
+| bindu | हिंदी | 0939 093F 0902 0926 0940 | 559 88 785 73 33 | 25.28125 | 19,30..45,45 | 50.5625 | 19,30..71,63 |
+| vowel | कु | 0915 0941 | 56 34 | 12.296875 | 19,34..32,47 | 24.578125 | 19,39..45,67 |
+| vowel | कू | 0915 0942 | 56 35 | 12.296875 | 19,34..32,48 | 24.578125 | 19,39..45,67 |
+| vowel | के | 0915 0947 | 56 40 | 12.296875 | 19,30..32,43 | 24.578125 | 19,30..45,58 |
+| vowel | कै | 0915 0948 | 56 41 | 12.296875 | 19,30..32,43 | 24.578125 | 19,30..45,58 |
+| vowel | को | 0915 094B | 56 42 | 16.4375 | 19,30..36,43 | 32.875 | 19,30..53,58 |
+| vowel | कौ | 0915 094C | 56 43 | 16.4375 | 19,30..36,43 | 32.875 | 19,30..53,58 |
+| vowel | कृ | 0915 0943 | 56 36 | 12.296875 | 19,34..32,47 | 24.578125 | 19,39..45,67 |
+| digit | १२३ | 0967 0968 0969 | 114 115 116 | 24.96875 | 21,34..43,45 | 49.921875 | 23,39..67,62 |
+| digit | क। | 0915 0964 | 56 128 | 18.359375 | 19,34..36,43 | 36.71875 | 19,39..53,58 |
+| digit | ॥ | 0965 | 129 | 9.59375 | 22,34..28,43 | 19.171875 | 25,39..35,58 |
+"""
+
+"""
+Traceability: REQ-WEB-TEXT-DEVANAGARI-001 — Devanagari text is shaped (dev2 syllables, reordering, GSUB, GPOS) to Chrome's width, ink and glyphs.
+"""
+# @tag: unit, browser_engine, text, chrome159
+# @tag:in-development
+# Tracks: doc/00_llm_process/feature_expert/web_render_css_parity/skill.md ("Which text is shaped": Devanagari runs fall back to unshaped per-codepoint text); implemented by the work/webrender-devanagari-* lanes (GSUB in src/lib/skia/feature/shaper/, GPOS in ot_layout_gpos*.spl).
+# @cover src/lib/skia/feature/shaper/selected_devanagari.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_draw_ir
+}
+
+val W: i32 = 400
+val H: i32 = 120
+
+fn _page(txt: text, size: i32) -> text:
+    "<!doctype html><html lang=\"hi\"><body style=\"margin:0;background:#fff;font:{size}px Liberation Sans;color:#000\"><div style=\"position:absolute;left:20px;top:30px;white-space:nowrap\">" + txt + "</div></body></html>"
+
+fn _chan(px: u32, shift: u32) -> i32:
+    ((px >> shift) & 0xFFu32).to_i32()
+
+# Inclusive ink box [x0, y0, x1, y1]; an empty render gives [W, H, -1, -1].
+fn _ink(txt: text, size: i32) -> [i32]:
+    val px = simple_web_render_html_to_pixels_with_engine2d_backend(_page(txt, size), W, H, "cpu_simd")
+    var x0 = W
+    var y0 = H
+    var x1 = -1
+    var y1 = -1
+    var y = 0
+    while y < H:
+        var x = 0
+        while x < W:
+            val p = px[y * W + x]
+            if _chan(p, 16u32) < 200 or _chan(p, 8u32) < 200 or _chan(p, 0u32) < 200:
+                if x < x0: x0 = x
+                if x > x1: x1 = x
+                if y < y0: y0 = y
+                if y > y1: y1 = y
+            x = x + 1
+        y = y + 1
+    [x0, y0, x1, y1]
+
+# Layout width in px: the extent covered by the page's text commands.
+fn _width(txt: text, size: i32) -> i32:
+    val c = simple_web_layout_render_html_draw_ir(_page(txt, size), W, H)
+    var lo = 0
+    var hi = 0
+    var seen = false
+    for b in c.batches:
+        for cmd in b.commands:
+            if cmd.text_value != "":
+                if not seen or cmd.x < lo: lo = cmd.x
+                if not seen or cmd.x + cmd.width > hi: hi = cmd.x + cmd.width
+                seen = true
+    hi - lo
+
+# Glyph ids of the page's shaped runs at 16px, space-separated, glyph 3 dropped.
+# An unshaped run (glyph_run.valid == false) contributes "unshaped".
+fn _gids(txt: text) -> text:
+    val c = simple_web_layout_render_html_draw_ir(_page(txt, 16), W, H)
+    var out = ""
+    for b in c.batches:
+        for cmd in b.commands:
+            if cmd.text_value != "":
+                if cmd.glyph_run.valid:
+                    for g in cmd.glyph_run.glyph_ids:
+                        if g != 3u32:
+                            if out != "": out = out + " "
+                            out = out + "{g}"
+                else:
+                    if out != "": out = out + " "
+                    out = out + "unshaped"
+    out
+
+fn _off(got: i32, want: i32) -> bool:
+    got - want > 1 or want - got > 1
+
+# "" when width (want_w64 = Chrome width * 64) and all four ink edges are within 1px.
+fn _cmp(txt: text, size: i32, want_w64: i32, x0: i32, y0: i32, x1: i32, y1: i32) -> text:
+    var miss = ""
+    val w = _width(txt, size)
+    if w * 64 - want_w64 > 64 or want_w64 - w * 64 > 64:
+        miss = miss + " [{txt}@{size} width*64 got={w * 64} want={want_w64}]"
+    val k = _ink(txt, size)
+    if _off(k[0], x0) or _off(k[1], y0) or _off(k[2], x1) or _off(k[3], y1):
+        miss = miss + " [{txt}@{size} ink got={k[0]},{k[1]}..{k[2]},{k[3]} want={x0},{y0}..{x1},{y1}]"
+    miss
+
+fn _cmp_gids(txt: text, want: text) -> text:
+    val got = _gids(txt)
+    if got == want: "" else: " [{txt} gids got={got} want={want}]"
+
+describe "Devanagari shaping corpus against Chrome 159":
+    it "AC-1: control: हिन्दी, the one word the shaped path admits on base":
+        var miss = ""
+        # 0939 093F 0928 094D 0926 0940
+        miss = miss + _cmp("हिन्दी", 16, 1935, 19, 30, 50, 45)
+        miss = miss + _cmp("हिन्दी", 32, 3869, 19, 30, 81, 63)
+        miss = miss + _cmp_gids("हिन्दी", "544 88 245 73 33")
+        expect(miss).to_equal("")
+
+    it "AC-2: reph (RA+halant before a consonant moves to a mark after the syllable)":
+        var miss = ""
+        # 0930 094D 092E
+        miss = miss + _cmp("र्म", 16, 613, 19, 29, 29, 43)
+        miss = miss + _cmp("र्म", 32, 1225, 19, 30, 39, 58)
+        miss = miss + _cmp_gids("र्म", "80 506")
+        # 0927 0930 094D 092E
+        miss = miss + _cmp("धर्म", 16, 1243, 20, 29, 39, 43)
+        miss = miss + _cmp("धर्म", 32, 2485, 21, 30, 59, 58)
+        miss = miss + _cmp_gids("धर्म", "74 80 506")
+        # 0915 0930 094D 0924 094D 0924 093E
+        miss = miss + _cmp("कर्त्ता", 16, 1760, 19, 29, 47, 43)
+        miss = miss + _cmp("कर्त्ता", 32, 3519, 19, 30, 75, 59)
+        miss = miss + _cmp_gids("कर्त्ता", "56 442 31 506")
+        expect(miss).to_equal("")
+
+    it "AC-3: pre-base matra ि reorders before its consonant cluster":
+        var miss = ""
+        # 0915 093F 0924 093E 092C
+        miss = miss + _cmp("किताब", 16, 2486, 19, 30, 59, 43)
+        miss = miss + _cmp("किताब", 32, 4971, 19, 30, 98, 59)
+        miss = miss + _cmp_gids("किताब", "545 56 71 31 78")
+        # 0938 093F 0902 0939
+        miss = miss + _cmp("सिंह", 16, 1502, 19, 29, 43, 45)
+        miss = miss + _cmp("सिंह", 32, 3003, 19, 30, 67, 63)
+        miss = miss + _cmp_gids("सिंह", "564 87 785 88")
+        # 0936 0915 094D 0924 093F
+        miss = miss + _cmp("शक्ति", 16, 2095, 20, 30, 53, 43)
+        miss = miss + _cmp("शक्ति", 32, 4189, 20, 30, 86, 59)
+        miss = miss + _cmp_gids("शक्ति", "85 555 232 71")
+        expect(miss).to_equal("")
+
+    it "AC-4: conjuncts and half forms (akhn / half / cjct)":
+        var miss = ""
+        # 0915 094D 0937
+        miss = miss + _cmp("क्ष", 16, 735, 20, 34, 31, 44)
+        miss = miss + _cmp("क्ष", 32, 1469, 21, 38, 43, 61)
+        miss = miss + _cmp_gids("क्ष", "90")
+        # 0924 094D 0930
+        miss = miss + _cmp("त्र", 16, 566, 19, 34, 29, 43)
+        miss = miss + _cmp("त्र", 32, 1131, 19, 39, 38, 58)
+        miss = miss + _cmp_gids("त्र", "304")
+        # 091C 094D 091E
+        miss = miss + _cmp("ज्ञ", 16, 657, 19, 34, 30, 44)
+        miss = miss + _cmp("ज्ञ", 32, 1313, 19, 39, 41, 60)
+        miss = miss + _cmp_gids("ज्ञ", "91")
+        # 0938 094D 0924 094D 0930 0940
+        miss = miss + _cmp("स्त्री", 16, 1229, 19, 30, 39, 43)
+        miss = miss + _cmp("स्त्री", 32, 2458, 19, 30, 58, 59)
+        miss = miss + _cmp_gids("स्त्री", "256 304 33")
+        # 0915 094D 0924
+        miss = miss + _cmp("क्त", 16, 1133, 19, 34, 38, 43)
+        miss = miss + _cmp("क्त", 32, 2266, 19, 39, 56, 58)
+        miss = miss + _cmp_gids("क्त", "232 71")
+        expect(miss).to_equal("")
+
+    it "AC-5: below-base RA: rakar ligatures and the vattu mark":
+        var miss = ""
+        # 092A 094D 0930
+        miss = miss + _cmp("प्र", 16, 583, 19, 34, 29, 43)
+        miss = miss + _cmp("प्र", 32, 1166, 19, 39, 38, 59)
+        miss = miss + _cmp_gids("प्र", "309")
+        # 0915 094D 0930
+        miss = miss + _cmp("क्र", 16, 787, 19, 34, 32, 43)
+        miss = miss + _cmp("क्र", 32, 1573, 19, 39, 45, 59)
+        miss = miss + _cmp_gids("क्र", "295")
+        # 091F 094D 0930
+        miss = miss + _cmp("ट्र", 16, 517, 19, 34, 28, 47)
+        miss = miss + _cmp("ट्र", 32, 1033, 19, 39, 36, 65)
+        miss = miss + _cmp_gids("ट्र", "66 508")
+        # 0926 094D 0930
+        miss = miss + _cmp("द्र", 16, 544, 19, 34, 28, 44)
+        miss = miss + _cmp("द्र", 32, 1088, 19, 39, 37, 60)
+        miss = miss + _cmp_gids("द्र", "306")
+        expect(miss).to_equal("")
+
+    it "AC-6: nukta composes with its consonant":
+        var miss = ""
+        # 0915 093C
+        miss = miss + _cmp("क़", 16, 787, 19, 34, 32, 44)
+        miss = miss + _cmp("क़", 32, 1573, 19, 39, 45, 60)
+        miss = miss + _cmp_gids("क़", "221")
+        # 091C 093C
+        miss = miss + _cmp("ज़", 16, 760, 19, 34, 32, 45)
+        miss = miss + _cmp("ज़", 32, 1520, 19, 39, 44, 62)
+        miss = miss + _cmp_gids("ज़", "224")
+        # 091C 093C 0930 0942 0930
+        miss = miss + _cmp("ज़रूर", 16, 1975, 19, 34, 51, 45)
+        miss = miss + _cmp("ज़रूर", 32, 3949, 19, 39, 82, 62)
+        miss = miss + _cmp_gids("ज़रूर", "224 494 82")
+        expect(miss).to_equal("")
+
+    it "AC-7: explicit halant stays visible at the end of a word":
+        var miss = ""
+        # 0915 094D
+        miss = miss + _cmp("क्", 16, 787, 19, 34, 32, 47)
+        miss = miss + _cmp("क्", 32, 1573, 19, 39, 45, 66)
+        miss = miss + _cmp_gids("क्", "56 103")
+        # 0938 0924 094D
+        miss = miss + _cmp("सत्", 16, 1276, 19, 34, 42, 47)
+        miss = miss + _cmp("सत्", 32, 2552, 19, 39, 63, 66)
+        miss = miss + _cmp_gids("सत्", "87 71 103")
+        expect(miss).to_equal("")
+
+    it "AC-8: ZWJ keeps a half form, ZWNJ keeps an explicit halant":
+        var miss = ""
+        # 0915 094D 200D 0937
+        miss = miss + _cmp("क्‍ष", 16, 1156, 19, 34, 38, 43)
+        miss = miss + _cmp("क्‍ष", 32, 2311, 19, 39, 56, 58)
+        miss = miss + _cmp_gids("क्‍ष", "232 86")
+        # 0915 094D 200C 0937
+        miss = miss + _cmp("क्‌ष", 16, 1379, 19, 34, 41, 47)
+        miss = miss + _cmp("क्‌ष", 32, 2757, 19, 39, 63, 66)
+        miss = miss + _cmp_gids("क्‌ष", "56 103 86")
+        expect(miss).to_equal("")
+
+    it "AC-9: anusvara, chandrabindu and visarga":
+        var miss = ""
+        # 0939 0901 0938
+        miss = miss + _cmp("हँस", 16, 1236, 19, 30, 39, 45)
+        miss = miss + _cmp("हँस", 32, 2472, 19, 30, 59, 63)
+        miss = miss + _cmp_gids("हँस", "88 101 87")
+        # 0926 0941 0903 0916
+        miss = miss + _cmp("दुःख", 16, 1589, 19, 34, 45, 48)
+        miss = miss + _cmp("दुःख", 32, 3177, 19, 39, 70, 68)
+        miss = miss + _cmp_gids("दुःख", "490 102 57")
+        # 0939 093F 0902 0926 0940
+        miss = miss + _cmp("हिंदी", 16, 1618, 19, 30, 45, 45)
+        miss = miss + _cmp("हिंदी", 32, 3236, 19, 30, 71, 63)
+        miss = miss + _cmp_gids("हिंदी", "559 88 785 73 33")
+        expect(miss).to_equal("")
+
+    it "AC-10: vowel signs above, below and after the base":
+        var miss = ""
+        # 0915 0941
+        miss = miss + _cmp("कु", 16, 787, 19, 34, 32, 47)
+        miss = miss + _cmp("कु", 32, 1573, 19, 39, 45, 67)
+        miss = miss + _cmp_gids("कु", "56 34")
+        # 0915 0942
+        miss = miss + _cmp("कू", 16, 787, 19, 34, 32, 48)
+        miss = miss + _cmp("कू", 32, 1573, 19, 39, 45, 67)
+        miss = miss + _cmp_gids("कू", "56 35")
+        # 0915 0947
+        miss = miss + _cmp("के", 16, 787, 19, 30, 32, 43)
+        miss = miss + _cmp("के", 32, 1573, 19, 30, 45, 58)
+        miss = miss + _cmp_gids("के", "56 40")
+        # 0915 0948
+        miss = miss + _cmp("कै", 16, 787, 19, 30, 32, 43)
+        miss = miss + _cmp("कै", 32, 1573, 19, 30, 45, 58)
+        miss = miss + _cmp_gids("कै", "56 41")
+        # 0915 094B
+        miss = miss + _cmp("को", 16, 1052, 19, 30, 36, 43)
+        miss = miss + _cmp("को", 32, 2104, 19, 30, 53, 58)
+        miss = miss + _cmp_gids("को", "56 42")
+        # 0915 094C
+        miss = miss + _cmp("कौ", 16, 1052, 19, 30, 36, 43)
+        miss = miss + _cmp("कौ", 32, 2104, 19, 30, 53, 58)
+        miss = miss + _cmp_gids("कौ", "56 43")
+        # 0915 0943
+        miss = miss + _cmp("कृ", 16, 787, 19, 34, 32, 47)
+        miss = miss + _cmp("कृ", 32, 1573, 19, 39, 45, 67)
+        miss = miss + _cmp_gids("कृ", "56 36")
+        expect(miss).to_equal("")
+
+    it "AC-11: Devanagari digits, danda and double danda":
+        var miss = ""
+        # 0967 0968 0969
+        miss = miss + _cmp("१२३", 16, 1598, 21, 34, 43, 45)
+        miss = miss + _cmp("१२३", 32, 3195, 23, 39, 67, 62)
+        miss = miss + _cmp_gids("१२३", "114 115 116")
+        # 0915 0964
+        miss = miss + _cmp("क।", 16, 1175, 19, 34, 36, 43)
+        miss = miss + _cmp("क।", 32, 2350, 19, 39, 53, 58)
+        miss = miss + _cmp_gids("क।", "56 128")
+        # 0965
+        miss = miss + _cmp("॥", 16, 614, 22, 34, 28, 43)
+        miss = miss + _cmp("॥", 32, 1227, 25, 39, 35, 58)
+        miss = miss + _cmp_gids("॥", "129")
+        expect(miss).to_equal("")

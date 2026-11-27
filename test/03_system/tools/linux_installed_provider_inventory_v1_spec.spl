@@ -1,0 +1,84 @@
+# AUTHORED_NOT_RUN. Requires the real disposable root-installed supervisor
+# fixture as its MainPID, with one dedicated UID and one pinned Podman 5.2.5
+# store containing pre-existing STOPPED unowned containers/pods and noncompute
+# objects in all six classes. No self-installation, engine script or fake CLI.
+# @req REQ-LINUX-WHOLE-INVENTORY-001
+# @req REQ-LINUX-WHOLE-INVENTORY-002
+# @req REQ-LINUX-WHOLE-INVENTORY-003
+# @req REQ-LINUX-WHOLE-INVENTORY-004
+use std.spec.{describe, it, expect, step}
+use std.nogc_sync_mut.io.linux_installed_supervisor_owner_v1.*
+use std.nogc_sync_mut.container.linux_installed_provider_inventory_v1.*
+use std.nogc_async_mut.container.providers.linux.whole_inventory_http_v1.linux_whole_inventory_classes_v1
+
+var real_inventory_supervisors_v1: [LinuxInstalledSupervisorOwnerV1] = []
+var real_inventory_owners_v1: [LinuxInstalledProviderInventoryOwnerV1] = []
+
+fn inventory_fixture_supervisor_v1() -> Result<LinuxInstalledSupervisorOwnerV1, text>:
+    match linux_installed_supervisor_open_v1():
+        case LinuxInstalledSupervisorOpenV1.Ready(owner):
+            real_inventory_supervisors_v1.push(owner)
+            Ok(owner)
+        case LinuxInstalledSupervisorOpenV1.CleanupRequired(owner, reason):
+            real_inventory_supervisors_v1.push(owner)
+            Err("actual supervisor fixture refused; retained cleanup: " + reason)
+        case LinuxInstalledSupervisorOpenV1.Rejected(reason): Err("actual installed fixture required: " + reason)
+
+fn inventory_fixture_collect_v1(supervisor: LinuxInstalledSupervisorOwnerV1) -> Result<LinuxInstalledProviderInventoryOwnerV1, text>:
+    match linux_installed_provider_inventory_open_v1(supervisor):
+        case LinuxInstalledProviderInventoryOpenV1.Ready(owner):
+            real_inventory_owners_v1.push(owner)
+            Ok(owner)
+        case LinuxInstalledProviderInventoryOpenV1.CleanupRequired(owner, reason):
+            real_inventory_owners_v1.push(owner)
+            val observed = owner.current_v1()
+            Err("actual inventory refused with retained reader/socket/supervisor: " + reason)
+        case LinuxInstalledProviderInventoryOpenV1.Rejected(reason): Err("actual inventory fixture required: " + reason)
+
+describe "Actual whole installed Linux provider inventory component":
+    it "retains unowned execution and all noncompute identities without admitting machine genesis":
+        step("Retain actual root-installed producer exclusion and its sole rootless provider service incarnation")
+        val supervisor = inventory_fixture_supervisor_v1().unwrap()
+        val excluded = supervisor.current_v1().unwrap()
+        step("Query all six resource classes without labels, service scopes, pagination or running-only filters")
+        val owner = inventory_fixture_collect_v1(supervisor).unwrap()
+        val alias = owner
+        val first = owner.current_v1().unwrap()
+        expect(first.status).to_equal(LinuxInstalledProviderInventoryStatusV1.ExistingExecutionQuarantined)
+        expect(first.endpoint_count).to_equal(6)
+        expect(first.execution_candidates).to_be_greater_than(0)
+        expect(first.rows.len()).to_be_greater_than(5)
+        expect(first.rows.len()).to_be_less_than(first.aggregate_row_limit + 1)
+        expect(first.total_bytes).to_be_greater_than(0)
+        expect(first.total_bytes).to_be_less_than(first.aggregate_list_wire_byte_limit + 1)
+        expect(first.total_transport_bytes).to_be_greater_than(first.total_bytes)
+        for resource_class in linux_whole_inventory_classes_v1():
+            var found = false
+            for row in first.rows:
+                expect(row.quarantined).to_equal(true)
+                expect(row.native_identity.byte_len()).to_be_greater_than(0)
+                if row.resource_class == resource_class: found = true
+            expect(found).to_equal(true)
+        step("Bind observations to the actual supervisor generation, process and provider incarnation")
+        expect(first.profile_digest).to_equal(excluded.profile_digest)
+        expect(first.machine_policy_digest).to_equal(excluded.machine_policy_digest)
+        expect(first.supervisor_generation).to_equal(excluded.owner_generation)
+        expect(first.provider_process_id).to_equal(excluded.provider_process_id)
+        expect(first.provider_incarnation).to_equal(excluded.provider_incarnation)
+        expect(first.native_service_identity_digest.byte_len()).to_equal(64)
+        expect(first.service_store_digest.byte_len()).to_equal(64)
+        expect(first.query_digest.byte_len()).to_equal(64)
+        expect(first.response_digest.byte_len()).to_equal(64)
+        step("Keep in-flight provider drain and storage/endpoint obligations unresolved")
+        expect(first.provider_drain_proven).to_equal(false)
+        expect(first.unresolved_storage_and_endpoints).to_equal(true)
+        expect(first.machine_genesis_admitted).to_equal(false)
+        step("Close only the inventory reader and socket; invalidate aliases while retaining actual inhibition")
+        val closed = owner.close_v1()
+        val stale = alias.current_v1()
+        val still_excluded = supervisor.current_v1()
+        expect(closed).to_equal("released-inventory-only-supervisor-retained")
+        expect(owner.cleanup_diagnostic_v1().unwrap()).to_equal("")
+        expect(stale.is_err()).to_equal(true)
+        expect(still_excluded.is_ok()).to_equal(true)
+        expect(still_excluded.unwrap().provider_incarnation).to_equal(first.provider_incarnation)

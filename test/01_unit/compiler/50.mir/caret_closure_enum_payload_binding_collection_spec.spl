@@ -1,0 +1,137 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Caret closure: enum payload, local binding and collection-method shapes lower
+
+Bug caret_closure_enum_payload_binding_collection_gaps_2026_11_03 split the
+remaining Caret closure HIR/MIR diagnostics into three compiler classes:
+
+1. enum payload lowering inside capturing lambdas and collection contexts
+2. local binding (pattern / val) inside capturing lambdas
+3. collection / method owner resolution on values reached inside lambdas
+   (`then`, `is_open`, `close`, `trim`)
+
+Each `it` below drives the pure-Simple HIR -> MIR lowering on one concrete
+shape of the class and asserts that the lowering produces no diagnostic, the
+same lowering the native (caret) lane runs. Measured 2026-11-10 on
+release/1.0.0 before the fix: a captured `Dict` lost its collection type and
+dict marker inside the lifted lambda (`rt_closure_get_capture` returns a bare
+i64 word), so `d.get(k)` reported `unresolved method call: get
+route=runtime-fallback owner=` and the lift was refused ("cannot materialize
+lambda for its declared function slot"). The Option-parameter match, captured
+Option match and for-in over a captured array shapes were red on the older
+27e65c24371 tip and green on the release tip; they stay here as the
+sibling-pattern prevention lock.
+"""
+# @tag: unit, compiler, mir, hir, lambda, enum
+use std.spec.{describe, it, expect}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+fn lowering_errors(src: text) -> text:
+    val log = Logger(level: 0)
+    val ast = parse_full_frontend(src, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["app.main"] = ast
+    val sources = [SourceFile(path: "app/main.spl", content: src, module_name: "app.main")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var hl = hirlowering_for_module("app.main", surfaces)
+    val hir = hl.lower_module(ast)
+    var hm: Dict<text, HirModule> = {}
+    hm["app.main"] = hir
+    var ml = MirLowering.new(hir.symbols)
+    ml.prescan_module_struct_names(hm, "app.main")
+    ml.lower_module(hir)
+    var out = ""
+    for e in hl.errors:
+        out = out + "hir: " + e.message + "\n"
+    for e in ml.errors:
+        # Staged non-fatal warning (error severity only after phase 3).
+        if e.message.starts_with("non-exhaustive enum match on '"):
+            continue
+        out = out + "mir: " + e.message + "\n"
+    out
+
+val prelude = "struct Node:\n    v: i64\n\nenum Kind:\n    A\n    B\n    V(i64)\n    N(node: Node)\n    T(a: i64, b: i64)\n\nclass Box:\n    v: i64\n    static fn of(v: i64) -> Box:\n        Box(v: v)\n    fn then(f: fn(i64) -> Box) -> Box:\n        f(self.v)\n    fn then_k(f: fn(Kind) -> Box) -> Box:\n        f(Kind.V(self.v))\n    fn then_o(f: fn(i64?) -> Box) -> Box:\n        f(Some(self.v))\n\nclass Port:\n    open: bool\n    fn is_open() -> bool:\n        self.open\n    me close():\n        self.open = false\n\nclass Rd:\n    buf: i64\n    pos: i64\n    port: Port\n"
+
+fn in_go(body: text) -> text:
+    prelude + "    me go(size: i64) -> Box:\n" + body
+
+describe "class 1: enum payload lowering inside capturing lambdas":
+    it "matches a captured payload variant inside the lambda":
+        val e = lowering_errors(in_go("        val k = Kind.V(size)\n        Box.of(1).then(\\r:\n            match k:\n                case Kind.V(n):\n                    Box.of(n + r)\n                case _:\n                    Box.of(0)\n        )\n"))
+        expect(e).to_equal("")
+    it "matches an enum-typed lambda parameter payload":
+        val e = lowering_errors(in_go("        Box.of(1).then_k(\\k:\n            match k:\n                case Kind.V(n):\n                    Box.of(n + size)\n                case _:\n                    Box.of(0)\n        )\n"))
+        expect(e).to_equal("")
+    it "binds a multi-field payload from a captured variant inside the lambda":
+        val e = lowering_errors(in_go("        val k = Kind.T(size, 2)\n        Box.of(1).then(\\r:\n            match k:\n                case Kind.T(a, b):\n                    Box.of(a + b + r)\n                case _:\n                    Box.of(0)\n        )\n"))
+        expect(e).to_equal("")
+    it "constructs a record payload variant from a captured struct inside the lambda":
+        val e = lowering_errors(in_go("        val node = Node(v: size)\n        Box.of(1).then(\\r:\n            val k = Kind.N(node)\n            match k:\n                case Kind.N(n):\n                    Box.of(n.v + r)\n                case _:\n                    Box.of(0)\n        )\n"))
+        expect(e).to_equal("")
+    it "matches an Option-typed lambda parameter payload":
+        val e = lowering_errors(in_go("        Box.of(1).then_o(\\o:\n            match o:\n                case Some(n):\n                    Box.of(n + size)\n                case None:\n                    Box.of(0)\n        )\n"))
+        expect(e).to_equal("")
+    it "matches a captured Option payload inside the lambda":
+        val e = lowering_errors(in_go("        val o: i64? = Some(size)\n        Box.of(1).then(\\r:\n            match o:\n                case Some(n):\n                    Box.of(n + r)\n                case None:\n                    Box.of(0)\n        )\n"))
+        expect(e).to_equal("")
+    it "builds a collection of payload variants inside the lambda":
+        val e = lowering_errors(in_go("        Box.of(1).then(\\r:\n            val ks = [Kind.V(r), Kind.V(size)]\n            Box.of(ks.len())\n        )\n"))
+        expect(e).to_equal("")
+    it "maps a collection into payload variants with a capturing lambda":
+        val e = lowering_errors(in_go("        val xs = [1, 2, size]\n        val ks = xs.map(\\x: Kind.V(x + size))\n        Box.of(ks.len())\n"))
+        expect(e).to_equal("")
+    it "returns a payload variant wrapped in Some from the lambda":
+        val e = lowering_errors(in_go("        var slot: Kind? = None\n        Box.of(1).then(\\r:\n            slot = Some(Kind.V(r + size))\n            Box.of(r)\n        )\n"))
+        expect(e).to_equal("")
+
+describe "class 2: local binding inside capturing lambdas":
+    it "destructures a captured tuple with val inside the lambda":
+        val e = lowering_errors(in_go("        val t = (size, 2)\n        Box.of(1).then(\\r:\n            val (a, b) = t\n            Box.of(a + b + r)\n        )\n"))
+        expect(e).to_equal("")
+    it "destructures a tuple built from the lambda parameter":
+        val e = lowering_errors(in_go("        Box.of(1).then(\\r:\n            val (a, b) = (r, size)\n            Box.of(a + b)\n        )\n"))
+        expect(e).to_equal("")
+    it "mutates a lambda-local var across a for loop over a captured array":
+        val e = lowering_errors(in_go("        val xs = [1, 2, size]\n        Box.of(1).then(\\r:\n            var acc = r\n            for x in xs:\n                acc = acc + x\n            Box.of(acc)\n        )\n"))
+        expect(e).to_equal("")
+    it "shadows a captured name with a lambda-local val":
+        val e = lowering_errors(in_go("        Box.of(1).then(\\r:\n            val size = r * 2\n            Box.of(size)\n        )\n"))
+        expect(e).to_equal("")
+    it "binds a payload with val inside a nested lambda":
+        val e = lowering_errors(in_go("        val k = Kind.V(size)\n        Box.of(1).then(\\r:\n            Box.of(r).then(\\q:\n                val n = match k:\n                    case Kind.V(x): x\n                    case _: 0\n                Box.of(n + q)\n            )\n        )\n"))
+        expect(e).to_equal("")
+    it "binds a captured var by write inside the lambda":
+        val e = lowering_errors(in_go("        var total = 0\n        Box.of(1).then(\\r:\n            total = total + r + size\n            Box.of(total)\n        )\n"))
+        expect(e).to_equal("")
+
+describe "class 3: collection and method owners reached inside lambdas":
+    it "trims a text lambda parameter in a map over a collection":
+        val e = lowering_errors(in_go("        val names = [\" a \", \"b \"]\n        val cleaned = names.map(\\s: s.trim())\n        Box.of(cleaned.len() + size)\n"))
+        expect(e).to_equal("")
+    it "filters a collection by a trimmed text length inside the lambda":
+        val e = lowering_errors(in_go("        val names = [\" a \", \" \"]\n        val kept = names.filter(\\s: s.trim().len() > 0)\n        Box.of(kept.len() + size)\n"))
+        expect(e).to_equal("")
+    it "calls is_open and close on a captured class field inside the lambda":
+        val e = lowering_errors(in_go("        Box.of(1).then(\\r:\n            if self.port.is_open():\n                self.port.close()\n            Box.of(r + size)\n        )\n"))
+        expect(e).to_equal("")
+    it "calls is_open and close on a captured local class instance inside the lambda":
+        val e = lowering_errors(in_go("        val p = Port(open: true)\n        Box.of(1).then(\\r:\n            if p.is_open():\n                p.close()\n            Box.of(r + size)\n        )\n"))
+        expect(e).to_equal("")
+    it "chains then on a Box built inside the lambda":
+        val e = lowering_errors(in_go("        Box.of(1).then(\\r:\n            Box.of(r + size).then(\\q: Box.of(q))\n        )\n"))
+        expect(e).to_equal("")
+    it "reads a captured dict inside the lambda":
+        val e = lowering_errors(in_go("        var d: Dict<text, i64> = {}\n        d[\"a\"] = size\n        Box.of(1).then(\\r:\n            val got = d.get(\"a\")\n            match got:\n                case Some(n):\n                    Box.of(n + r)\n                case None:\n                    Box.of(r)\n        )\n"))
+        expect(e).to_equal("")
+    it "trims a text produced by a method call on a lambda parameter":
+        val e = lowering_errors(in_go("        Box.of(1).then(\\r:\n            val s = r.to_text().trim()\n            Box.of(s.len() + size)\n        )\n"))
+        expect(e).to_equal("")

@@ -87,13 +87,19 @@ set -eu
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
 cd "$ROOT_DIR"
 
-# Fail LOUD if the one tool the gate depends on is missing. Without this, every
-# `rg` invocation below is `2>/dev/null || true`, so an absent ripgrep would
-# yield zero hits and a false `cpu_lane_hotloop_ok=true` — a silently-passing
-# (i.e. decorative) gate. Exit 2 = gate could not run (distinct from exit 1 =
-# new violations found).
-if ! command -v rg >/dev/null 2>&1; then
-    echo "check-cpu-hotloop-idiom: ripgrep (rg) is required but was not found on PATH" >&2
+# Pick the search tool. ripgrep is preferred; when it is absent (e.g. a
+# Windows Git Bash where winget installed rg off PATH) fall back to grep -E,
+# which accepts the same -n/-H/-o/-e flags and every pattern below (POSIX
+# classes plus `\b`). Fail LOUD if neither can run the patterns: every search
+# below is `2>/dev/null || true`, so a broken tool would yield zero hits and a
+# false `cpu_lane_hotloop_ok=true` -- a silently-passing (decorative) gate.
+# Exit 2 = gate could not run (distinct from exit 1 = new violations found).
+if command -v rg >/dev/null 2>&1; then
+    HL_GREP="rg -n -H"
+elif printf 'while x:\n' | grep -E -q '^[[:space:]]*(while|for)\b.*:$' 2>/dev/null; then
+    HL_GREP="grep -n -H -E"
+else
+    echo "check-cpu-hotloop-idiom: neither ripgrep (rg) nor a working grep -E was found" >&2
     exit 2
 fi
 
@@ -182,11 +188,11 @@ byte_hits="$tmp_dir/byte_hits.txt"
 : >"$byte_hits"
 
 if [ -s "$existing" ]; then
-    xargs rg -n -H -e "$LOOP_PATTERN" <"$existing" >"$loop_single" 2>/dev/null || true
-    xargs rg -n -H -e "$LOOP_HEADER_PATTERN" <"$existing" >"$loop_all" 2>/dev/null || true
-    xargs rg -n -H -e "$SUBSTR_PATTERN" <"$existing" >"$substr_hits" 2>/dev/null || true
-    xargs rg -n -H -e "$CHAIN_PATTERN" <"$existing" >"$chain_hits" 2>/dev/null || true
-    xargs rg -n -H -o -e "$U8_DECL_PATTERN" <"$existing" >"$u8_decl_hits" 2>/dev/null || true
+    xargs $HL_GREP -e "$LOOP_PATTERN" <"$existing" >"$loop_single" 2>/dev/null || true
+    xargs $HL_GREP -e "$LOOP_HEADER_PATTERN" <"$existing" >"$loop_all" 2>/dev/null || true
+    xargs $HL_GREP -e "$SUBSTR_PATTERN" <"$existing" >"$substr_hits" 2>/dev/null || true
+    xargs $HL_GREP -e "$CHAIN_PATTERN" <"$existing" >"$chain_hits" 2>/dev/null || true
+    xargs $HL_GREP -o -e "$U8_DECL_PATTERN" <"$existing" >"$u8_decl_hits" 2>/dev/null || true
 fi
 
 # LOOP = single-line headers (end in `:`) PLUS multi-line headers (a
@@ -243,7 +249,7 @@ sed -E 's/^([^:]+):[0-9]+:.*[^A-Za-z0-9_]([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*:[[
 if [ -s "$u8_file_names" ]; then
     while IFS="$(printf '\t')" read -r file name; do
         [ -n "$file" ] && [ -n "$name" ] || continue
-        rg -n -H -e "\\b${name}\\[[A-Za-z0-9_]" "$file" 2>/dev/null || true
+        $HL_GREP -e "\\b${name}\\[[A-Za-z0-9_]" "$file" 2>/dev/null || true
     done <"$u8_file_names" >"$byte_hits"
 fi
 
@@ -253,20 +259,19 @@ fi
 # annotation does NOT reach a loop nested several lines below.
 is_annotated() {
     # $1 = file, $2 = line number
-    f="$1"
-    n="$2"
-    line_text=$(sed -n "${n}p" "$f" 2>/dev/null || true)
-    case "$line_text" in
-        *cpu-lane-loop-ok*) return 0 ;;
-    esac
-    if [ "$n" -gt 1 ]; then
-        prev=$((n - 1))
-        prev_text=$(sed -n "${prev}p" "$f" 2>/dev/null || true)
-        case "$prev_text" in
-            *cpu-lane-loop-ok*) return 0 ;;
-        esac
-    fi
-    return 1
+    # Exempt when the marker is on the hit line itself, or anywhere in the
+    # contiguous block of comment-only lines directly above it (bounded to 8).
+    # A marker wrapped onto two comment lines used to count only when the
+    # FIRST line held it right above the loop -- every wrapped annotation in
+    # engine2d/backend_software.spl was scored as an offender. Any non-comment
+    # line (code, a def line, a blank) still ends the walk, so a def-line or
+    # far-away annotation does not exempt a nested loop.
+    awk -v n="$2" '
+        NR < n - 8 { next }
+        NR < n { if ($0 ~ /^[ \t]*#/) { blk = blk "\n" $0 } else { blk = "" }; next }
+        NR == n { if ($0 ~ /cpu-lane-loop-ok/ || blk ~ /cpu-lane-loop-ok/) found = 1; exit }
+        END { exit(found ? 0 : 1) }
+    ' "$1" 2>/dev/null
 }
 
 # Filtered, un-annotated hits as `CLASS<TAB>file<TAB>lineno<TAB>rawcontent`.

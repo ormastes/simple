@@ -1,9 +1,17 @@
 # Canonical Shared WM -> Draw IR -> Engine2D production frame executor.
 
-use common.gpu.simpleos_host_gpu_draw_ir.{SimpleOsHostGpuImageResource, SimpleOsHostGpuImageResourceRevision, simpleos_host_gpu_image_resource}
+use common.gpu.simpleos_host_gpu_draw_ir.{
+    SimpleOsHostGpuImageResource,
+    SimpleOsHostGpuImageResourceRevision,
+    simpleos_host_gpu_draw_ir_encode,
+    simpleos_host_gpu_image_resource
+}
 use common.gpu.simpleos_host_gpu_protocol.{
     SIMPLEOS_HOST_GPU_PROTOCOL_VERSION,
+    SIMPLEOS_HOST_GPU_MAX_DRAW_IR_COMMANDS,
+    SIMPLEOS_HOST_GPU_MAX_PAYLOAD_BYTES,
     SIMPLEOS_HOST_GPU_NEGOTIATION_BUDGET_US,
+    SIMPLEOS_HOST_GPU_KIND_DRAW_IR,
     SIMPLEOS_HOST_GPU_STATUS_PASS,
     SIMPLEOS_HOST_GPU_STATUS_UNSUPPORTED,
     SIMPLEOS_HOST_GPU_REASON_INVALID_REQUEST,
@@ -19,8 +27,18 @@ use common.gpu.simpleos_host_gpu_protocol.{
     simpleos_host_gpu_guest_isa_name,
     simpleos_host_gpu_max_readback_bytes
 }
-use common.ui.draw_ir.{DRAW_IR_BACKEND_CPU, DrawIrComposition}
+use common.gpu.simpleos_host_gpu_stream_protocol.{
+    SIMPLEOS_HOST_GPU_STREAM_SUBMIT_REQUEST,
+    SimpleOsHostGpuStreamHeader,
+    simpleos_host_gpu_stream_checksum_step
+}
+use common.ui.draw_ir.{
+    DRAW_IR_BACKEND_CPU, DRAW_IR_BACKEND_GPU, DRAW_IR_COMMAND_IMAGE,
+    DRAW_IR_COMMAND_RECT, DRAW_IR_COMMAND_TEXT, DrawIrBatch, DrawIrCommand,
+    DrawIrComposition, draw_ir_batch_with_source, draw_ir_composition
+}
 use common.ui.taskbar_model.{TaskbarModel}
+use common.ui.wm_chrome_theme.{active_wm_theme_id, wm_chrome_colors_css_override, wm_chrome_theme}
 use common.ui.window_scene.{SharedWmScene, SharedWmWindow, WmContentFrame, wm_content_frame_web_provenance_valid}
 use common.ui.window_scene_draw_ir.{
     shared_wm_content_frame_for_window,
@@ -32,7 +50,9 @@ use common.ui.window_scene_draw_ir.{
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
     Engine2dResolvedDrawIrImage,
+    engine2d_draw_ir_adv_batch_owner_with_images,
     engine2d_draw_ir_adv_composition_present_with_images,
+    engine2d_draw_ir_command_samples_parent,
     engine2d_draw_ir_render_composition_damaged_with_images,
     engine2d_resolved_draw_ir_image
 }
@@ -50,6 +70,10 @@ use os.lib.gpu_bridge.host_gpu_ivshmem.{
     host_gpu_ivshmem_next_generation,
     host_gpu_ivshmem_submit_draw_ir,
     host_gpu_ivshmem_submit_draw_ir_retained
+}
+use os.drivers.virtio.virtio_console.{
+    VirtioConsoleRxResult,
+    VirtioSerialHostGpuPort
 }
 
 @unsafe(reason: "foreign serial output provider is not artifact-verified", capabilities: [ffi])
@@ -99,6 +123,368 @@ fn engine2d_wm_full_damage_plan(width: i64, height: i64) -> DamagePlan:
 fn engine2d_wm_background_key(scene: SharedWmScene) -> text:
     "{scene.background.kind}:{scene.background.color}:{scene.background.source}:{scene.background.fit}"
 
+fn engine2d_wm_clock_rect(composition: DrawIrComposition) -> [i64]:
+    # Screen boxes (x, y, w, h)* of every clock-label text the composition
+    # draws: the taskbar clock and the tray clock item label. Each is padded
+    # by 2px for glyph antialiasing; empty when no clock text is drawn.
+    var rects: [i64] = []
+    for batch in composition.batches:
+        for command in batch.commands:
+            val clock_text = command.component_id == "taskbar-clock" or command.component_id == "taskbar-tray-label-clock"
+            if clock_text and command.width > 0 and command.height > 0:
+                val x = batch.embedding.x.to_i64() + command.x.to_i64() - 2
+                val y = batch.embedding.y.to_i64() + command.y.to_i64() - 2
+                rects = rects + [if x > 0: x else: 0, if y > 0: y else: 0, command.width.to_i64() + 4, command.height.to_i64() + 4]
+    rects
+
+fn _engine2d_wm_key_field(value: text) -> text:
+    # Escape the layout key's separators so a title like "a|b" cannot alias
+    # two different taskbars to one key.
+    value.replace("%", "%25").replace("|", "%7C").replace(";", "%3B")
+
+fn engine2d_wm_taskbar_layout_key(taskbar: TaskbarModel) -> text:
+    # Everything the taskbar draws except the clock label (the tray clock
+    # item's label is the clock text itself; its id and icon still count).
+    var key = ""
+    for app in taskbar.pinned:
+        key = key + "p:{_engine2d_wm_key_field(app.app_id)}|{_engine2d_wm_key_field(app.display_name)}|{_engine2d_wm_key_field(app.icon)};"
+    for window in taskbar.running:
+        key = key + "r:{_engine2d_wm_key_field(window.window_id)}|{_engine2d_wm_key_field(window.app_id)}|{_engine2d_wm_key_field(window.title)}|{window.minimized};"
+    for item in taskbar.tray:
+        val label = if item.item_id == "clock": "" else: item.label
+        key = key + "t:{_engine2d_wm_key_field(item.item_id)}|{_engine2d_wm_key_field(item.icon)}|{_engine2d_wm_key_field(label)};"
+    key
+
+fn engine2d_wm_local_frame_key(scene: SharedWmScene, content_frames: [WmContentFrame], degraded_window_count: i32) -> text:
+    # Inputs a local retained replay depends on beyond the revisions: the
+    # lane, the active WM theme, and which windows' content resolved (ids: a
+    # content update damages its window rect, see retained_scene_damage_plan).
+    val theme_id = active_wm_theme_id()
+    val palette = wm_chrome_colors_css_override(wm_chrome_theme())
+    var key = "{engine2d_wm_background_key(scene)}|lane=local|theme={theme_id}:{palette}|degraded={degraded_window_count}"
+    for frame in content_frames:
+        key = key + "|{frame.window_id}"
+    key
+
+struct _WmRetainedParentReplay:
+    engine: Engine2D
+    ok: bool
+    ops_rendered: i32
+    ops_skipped: i32
+    reason: text
+
+fn _wm_rect_overlaps_bounds(
+    rx: i64, ry: i64, rw: i64, rh: i64,
+    bx: i64, by: i64, bw: i64, bh: i64
+) -> bool:
+    rw > 0 and rh > 0 and bw > 0 and bh > 0 and rx < bx + bw and bx < rx + rw and ry < by + bh and by < ry + rh
+
+fn _wm_rects_overlap_bounds(rects: [i64], bx: i64, by: i64, bw: i64, bh: i64) -> bool:
+    var i: i64 = 0
+    while i + 3 < rects.len():
+        if _wm_rect_overlaps_bounds(rects[i], rects[i + 1], rects[i + 2], rects[i + 3], bx, by, bw, bh):
+            return true
+        i = i + 4
+    false
+
+fn _wm_batch_samples_parent(batch: DrawIrBatch) -> bool:
+    for command in batch.commands:
+        if engine2d_draw_ir_command_samples_parent(command):
+            return true
+    false
+
+fn _wm_command_style_value(command: DrawIrCommand, key: text) -> text:
+    for prop in command.computed_style:
+        if prop.key == key:
+            return prop.value
+    ""
+
+fn _wm_parse_nonneg_i64_or(raw: text, fallback: i64) -> i64:
+    if raw.len() == 0:
+        return fallback
+    var value: i64 = 0
+    var seen = false
+    for b in raw.bytes():
+        if b >= 48 and b <= 57:
+            value = value * 10 + (b - 48).to_i64()
+            seen = true
+            if value > 64:
+                return 64
+        else:
+            break
+    if seen: value else: fallback
+
+fn _wm_batch_glass_padding(batch: DrawIrBatch) -> i64:
+    var total: i64 = 0
+    for command in batch.commands:
+        if engine2d_draw_ir_command_samples_parent(command):
+            val blur_raw = _wm_command_style_value(command, "backdrop-filter-realized-blur-radius-px")
+            val blur = _wm_parse_nonneg_i64_or(blur_raw, 4)
+            total = total + (if blur > 0: blur else: 4)
+    if total < 4: 4 elif total > 32: 32 else: total
+
+fn _wm_expand_and_coalesce_rects(rects: [i64], pad: i64, width: i64, height: i64) -> [i64]:
+    var expanded: [i64] = []
+    var i: i64 = 0
+    while i + 3 < rects.len():
+        var x0 = rects[i] - pad
+        var y0 = rects[i + 1] - pad
+        var x1 = rects[i] + rects[i + 2] + pad
+        var y1 = rects[i + 1] + rects[i + 3] + pad
+        if x0 < 0: x0 = 0
+        if y0 < 0: y0 = 0
+        if x1 > width: x1 = width
+        if y1 > height: y1 = height
+        if x1 > x0 and y1 > y0:
+            expanded.push(x0)
+            expanded.push(y0)
+            expanded.push(x1 - x0)
+            expanded.push(y1 - y0)
+        i = i + 4
+    var current = expanded
+    var merged = true
+    while merged:
+        merged = false
+        val n = current.len() / 4
+        var used: [bool] = [false; n.to_i32()]
+        var out: [i64] = []
+        var a: i64 = 0
+        while a < n:
+            if used[a.to_i32()]:
+                a = a + 1
+                continue
+            var ax0 = current[a * 4]
+            var ay0 = current[a * 4 + 1]
+            var ax1 = ax0 + current[a * 4 + 2]
+            var ay1 = ay0 + current[a * 4 + 3]
+            var b: i64 = a + 1
+            while b < n:
+                if not used[b.to_i32()]:
+                    val bx0 = current[b * 4]
+                    val by0 = current[b * 4 + 1]
+                    val bx1 = bx0 + current[b * 4 + 2]
+                    val by1 = by0 + current[b * 4 + 3]
+                    if ax0 < bx1 and bx0 < ax1 and ay0 < by1 and by0 < ay1:
+                        if bx0 < ax0: ax0 = bx0
+                        if by0 < ay0: ay0 = by0
+                        if bx1 > ax1: ax1 = bx1
+                        if by1 > ay1: ay1 = by1
+                        used[b.to_i32()] = true
+                        merged = true
+                b = b + 1
+            out.push(ax0)
+            out.push(ay0)
+            out.push(ax1 - ax0)
+            out.push(ay1 - ay0)
+            a = a + 1
+        current = out
+    current
+
+fn _wm_damage_rects_in_bounds(rects: [i64], width: i64, height: i64) -> bool:
+    if rects.len() == 0 or rects.len() % 4 != 0 or width <= 0 or height <= 0:
+        return false
+    var i: i64 = 0
+    while i < rects.len():
+        val rx = rects[i]
+        val ry = rects[i + 1]
+        val rw = rects[i + 2]
+        val rh = rects[i + 3]
+        if rx < 0 or ry < 0 or rw <= 0 or rh <= 0 or rw > width or rh > height or rx > width - rw or ry > height - rh:
+            return false
+        i = i + 4
+    true
+
+fn _wm_prune_non_parent_batch_for_rects(batch: DrawIrBatch, rects: [i64]) -> DrawIrBatch:
+    if batch.embedding.opacity_milli != 1000 or batch.commands.len() == 0:
+        return batch
+    val ox = batch.embedding.x.to_i64()
+    val oy = batch.embedding.y.to_i64()
+    var kept: [DrawIrCommand] = []
+    for cmd in batch.commands:
+        if cmd.clip_rect.present:
+            if not _wm_rects_overlap_bounds(
+                rects,
+                ox + cmd.clip_rect.x.to_i64(),
+                oy + cmd.clip_rect.y.to_i64(),
+                cmd.clip_rect.width.to_i64(),
+                cmd.clip_rect.height.to_i64()
+            ):
+                continue
+        elif cmd.kind == DRAW_IR_COMMAND_TEXT:
+            if cmd.width > 0 and cmd.height > 0:
+                if not _wm_rects_overlap_bounds(
+                    rects,
+                    ox + cmd.x.to_i64() - 4,
+                    oy + cmd.y.to_i64() - 4,
+                    cmd.width.to_i64() + 8,
+                    cmd.height.to_i64() + 8
+                ):
+                    continue
+        elif (cmd.kind == DRAW_IR_COMMAND_RECT or cmd.kind == DRAW_IR_COMMAND_IMAGE) and cmd.computed_style.len() == 0 and cmd.width > 0 and cmd.height > 0:
+            if not _wm_rects_overlap_bounds(
+                rects,
+                ox + cmd.x.to_i64(),
+                oy + cmd.y.to_i64(),
+                cmd.width.to_i64(),
+                cmd.height.to_i64()
+            ):
+                continue
+        kept.push(cmd)
+    draw_ir_batch_with_source(batch.batch_id, batch.backend_target, batch.embedding, kept, batch.source)
+
+fn _wm_replay_parent_sampling_composition(
+    engine: Engine2D,
+    local_composition: DrawIrComposition,
+    images: [Engine2dResolvedDrawIrImage],
+    damage_rects: [i64]
+) -> _WmRetainedParentReplay:
+    """Replay clipped local damage when batches include parent-sampling glass material.
+
+    Non-intersecting parent-sampling batches are culled directly; otherwise an
+    offscreen target paints the backdrop across damage rects padded by causal
+    blur radius, runs intersecting glass/foreground batches, and commits only the
+    unpadded damage rects back onto the retained target.
+    """
+    val w64 = engine.width().to_i64()
+    val h64 = engine.height().to_i64()
+    if not _wm_damage_rects_in_bounds(damage_rects, w64, h64):
+        return _WmRetainedParentReplay(engine: engine, ok: false, ops_rendered: 0, ops_skipped: 0, reason: "invalid-damage-plan")
+    var any_intersecting_parent = false
+    var causal_pad: i64 = 0
+    for batch in local_composition.batches:
+        if _wm_batch_samples_parent(batch):
+            val emb = batch.embedding
+            if _wm_rects_overlap_bounds(damage_rects, emb.x.to_i64(), emb.y.to_i64(), emb.width.to_i64(), emb.height.to_i64()):
+                any_intersecting_parent = true
+                causal_pad = causal_pad + _wm_batch_glass_padding(batch)
+    if not any_intersecting_parent:
+        var non_parent_batches: [DrawIrBatch] = []
+        for batch in local_composition.batches:
+            if not _wm_batch_samples_parent(batch):
+                non_parent_batches.push(batch)
+        val filtered = draw_ir_composition(
+            local_composition.composition_id,
+            local_composition.scene_key,
+            local_composition.backend_target,
+            non_parent_batches
+        )
+        val outcome = engine2d_draw_ir_render_composition_damaged_with_images(engine, filtered, images, damage_rects, false)
+        return _WmRetainedParentReplay(
+            engine: outcome.engine,
+            ok: outcome.unsupported_kinds == "none" and outcome.ops_rendered > 0,
+            ops_rendered: outcome.ops_rendered,
+            ops_skipped: outcome.ops_skipped,
+            reason: outcome.unsupported_kinds
+        )
+    if causal_pad < 4:
+        causal_pad = 4
+    elif causal_pad > 32:
+        causal_pad = 32
+    val padded_rects = _wm_expand_and_coalesce_rects(damage_rects, causal_pad, w64, h64)
+    if not _wm_damage_rects_in_bounds(padded_rects, w64, h64):
+        return _WmRetainedParentReplay(engine: engine, ok: false, ops_rendered: 0, ops_skipped: 0, reason: "invalid-padded-damage-plan")
+    var first_parent_idx: i64 = -1
+    var bi: i64 = 0
+    while bi < local_composition.batches.len():
+        val b = local_composition.batches[bi]
+        if _wm_batch_samples_parent(b):
+            val emb = b.embedding
+            if _wm_rects_overlap_bounds(padded_rects, emb.x.to_i64(), emb.y.to_i64(), emb.width.to_i64(), emb.height.to_i64()):
+                first_parent_idx = bi
+                break
+        bi = bi + 1
+    if first_parent_idx < 0:
+        return _WmRetainedParentReplay(engine: engine, ok: false, ops_rendered: 0, ops_skipped: 0, reason: "missing-parent-batch-index")
+    var pre_batches: [DrawIrBatch] = []
+    bi = 0
+    while bi < first_parent_idx:
+        val b = local_composition.batches[bi]
+        if not _wm_batch_samples_parent(b):
+            pre_batches.push(b)
+        bi = bi + 1
+    if pre_batches.len() == 0:
+        return _WmRetainedParentReplay(engine: engine, ok: false, ops_rendered: 0, ops_skipped: 0, reason: "missing-backdrop-batches")
+    var scratch = engine
+    match engine.draw_ir_create_offscreen_engine(w64.to_i32(), h64.to_i32()):
+        Err(reason):
+            return _WmRetainedParentReplay(engine: engine, ok: false, ops_rendered: 0, ops_skipped: 0, reason: "parent-material-offscreen-unavailable:{reason}")
+        Ok(created):
+            scratch = created
+    val active_font = engine.selected_font_identity()
+    if active_font != "":
+        val _font_ok = scratch.select_font_identity(active_font)
+    val pre_comp = draw_ir_composition(
+        local_composition.composition_id,
+        local_composition.scene_key,
+        local_composition.backend_target,
+        pre_batches
+    )
+    val pre_out = engine2d_draw_ir_render_composition_damaged_with_images(scratch, pre_comp, images, padded_rects, false)
+    scratch = pre_out.engine
+    if pre_out.unsupported_kinds != "none" or pre_out.ops_rendered <= 0:
+        scratch.shutdown()
+        return _WmRetainedParentReplay(engine: engine, ok: false, ops_rendered: 0, ops_skipped: 0, reason: "backdrop-replay:{pre_out.unsupported_kinds}")
+    var total_ops = pre_out.ops_rendered
+    bi = first_parent_idx
+    while bi < local_composition.batches.len():
+        val b = local_composition.batches[bi]
+        val emb = b.embedding
+        if not _wm_rects_overlap_bounds(padded_rects, emb.x.to_i64(), emb.y.to_i64(), emb.width.to_i64(), emb.height.to_i64()):
+            bi = bi + 1
+            continue
+        val batch_to_run = if _wm_batch_samples_parent(b): b else: _wm_prune_non_parent_batch_for_rects(b, padded_rects)
+        if batch_to_run.commands.len() == 0:
+            bi = bi + 1
+            continue
+        val b_res = engine2d_draw_ir_adv_batch_owner_with_images(scratch, batch_to_run, false, images)
+        scratch = b_res.engine
+        if b_res.result.fallback_required or b_res.result.skipped_command_count != 0 or b_res.result.rendered_command_count <= 0:
+            scratch.shutdown()
+            return _WmRetainedParentReplay(engine: engine, ok: false, ops_rendered: 0, ops_skipped: 0, reason: "parent-batch-replay:{b_res.result.fallback_reason}")
+        total_ops = total_ops + b_res.result.rendered_command_count
+        bi = bi + 1
+    val is_vulkan = engine.backend_name() == "vulkan"
+    var patches_x: [i32] = []
+    var patches_y: [i32] = []
+    var patches_w: [i32] = []
+    var patches_h: [i32] = []
+    var patches_pixels: [[u32]] = []
+    var ri: i64 = 0
+    while ri + 3 < damage_rects.len():
+        val rx = damage_rects[ri].to_i32()
+        val ry = damage_rects[ri + 1].to_i32()
+        val rw = damage_rects[ri + 2].to_i32()
+        val rh = damage_rects[ri + 3].to_i32()
+        val patch_rb = scratch.read_pixels_region(rx, ry, rw, rh)
+        if patch_rb.pixels.len() != rw.to_i64() * rh.to_i64():
+            scratch.shutdown()
+            return _WmRetainedParentReplay(engine: engine, ok: false, ops_rendered: 0, ops_skipped: 0, reason: "patch-readback-size-mismatch")
+        if is_vulkan and patch_rb.source != "device_readback":
+            scratch.shutdown()
+            return _WmRetainedParentReplay(engine: engine, ok: false, ops_rendered: 0, ops_skipped: 0, reason: "patch-readback-not-device")
+        patches_x.push(rx)
+        patches_y.push(ry)
+        patches_w.push(rw)
+        patches_h.push(rh)
+        patches_pixels.push(patch_rb.pixels)
+        ri = ri + 4
+    scratch.shutdown()
+    var eng = engine
+    if is_vulkan and not eng.stage_present_damage(damage_rects):
+        return _WmRetainedParentReplay(engine: eng, ok: false, ops_rendered: 0, ops_skipped: 0, reason: "vulkan-damage-stage-rejected")
+    var pi: i64 = 0
+    while pi < patches_x.len():
+        eng.draw_image(patches_x[pi], patches_y[pi], patches_w[pi], patches_h[pi], patches_pixels[pi])
+        pi = pi + 1
+    if is_vulkan:
+        if val Some(vk) = eng.vulkan_backend:
+            if vk.cpu_fallback_used or vk.completion_unknown:
+                val vk_reason = if vk.cpu_fallback_reason != "": vk.cpu_fallback_reason else: "vulkan-draw-image-fallback"
+                return _WmRetainedParentReplay(engine: eng, ok: false, ops_rendered: 0, ops_skipped: 0, reason: vk_reason)
+    if not eng.finalize_compute_frame_no_readback():
+        eng.present()
+    _WmRetainedParentReplay(engine: eng, ok: true, ops_rendered: total_ops, ops_skipped: 0, reason: "none")
+
 class Engine2dWmFrameExecutor:
     engine: Engine2D
     framebuffer: FramebufferDriver
@@ -107,6 +493,11 @@ class Engine2dWmFrameExecutor:
     host_gpu_backend: text
     host_gpu_backend_code: i64
     host_gpu_required: bool
+    host_gpu_transport_kind: text = "none"
+    virtio_serial_port: VirtioSerialHostGpuPort? = None
+    virtio_serial_generation: i64 = 0
+    virtio_serial_last_tx_frame: [u8] = []
+    virtio_serial_last_clock_us: i64 = 0
     draw_ir_backend_target: text
     # Immutable local material target. Host negotiation may change only the
     # host target above; this keeps the CPU/CPU-SIMD fallback contract intact.
@@ -138,6 +529,18 @@ class Engine2dWmFrameExecutor:
     # rather than replay a stale taskbar band (external review F4).
     last_successful_taskbar_revision: i64 = 0
     last_successful_clock_label: text = ""
+    # Taskbar clock text box (x, y, w, h) of the last presented frame; empty
+    # when unknown. Lets a clock-only tick replay just the old and new boxes.
+    last_successful_clock_rect: [i64] = []
+    # engine2d_wm_taskbar_layout_key of the last presented frame.
+    last_successful_taskbar_key: text = ""
+    # Which path presented the last frame: software, software-retained-damage
+    # or host-gpu.
+    last_present_path: text = ""
+    # Content URI per resolved window id of the last presented local frame;
+    # a changed URI damages only that window's rect.
+    last_successful_content_ids: [text] = []
+    last_successful_content_uris: [text] = []
     damage_tiles: DirtyTilePyramid
 
     static fn create(engine: Engine2D, framebuffer: FramebufferDriver, fb_w: i64 = 0, fb_h: i64 = 0, cpu_simd_enabled: bool = false) -> Engine2dWmFrameExecutor:
@@ -224,6 +627,7 @@ class Engine2dWmFrameExecutor:
                 executor.host_gpu_run_id_hash = generation
                 executor.host_gpu_backend = candidate
                 executor.host_gpu_backend_code = candidate_code
+                executor.host_gpu_transport_kind = "ivshmem"
                 executor.draw_ir_backend_target = engine2d_wm_draw_ir_backend_target(true, candidate, cpu_simd_enabled)
                 final_reason = 0
                 decision_elapsed = total_elapsed
@@ -238,6 +642,75 @@ class Engine2dWmFrameExecutor:
         _engine2d_wm_log("HOST_GPU_NEGOTIATION_DONE scope=production isa={guest_isa} result={result} backend={selected_backend} attempts={attempts} first_generation={first_generation} final_generation={final_generation} elapsed_us={elapsed} budget_us={SIMPLEOS_HOST_GPU_NEGOTIATION_BUDGET_US} reason={final_reason}")
         if executor.host_gpu_base != 0u64:
             _engine2d_wm_log("[wm-frame] host-gpu-ready backend={executor.host_gpu_backend} generation={executor.host_gpu_run_id_hash}")
+        executor
+
+    fn host_gpu_transport_active() -> text:
+        if self.host_gpu_transport_kind == "":
+            return "none"
+        self.host_gpu_transport_kind
+
+    static fn create_host_gpu_with_transport(
+        engine: Engine2D,
+        framebuffer: FramebufferDriver,
+        transport_kind: text,
+        base: u64,
+        virtio_port: VirtioSerialHostGpuPort?,
+        guest_isa_code: i64,
+        backend_code: i64,
+        fb_width: i64,
+        fb_height: i64,
+        negotiation_started_us: i64,
+        cpu_simd_enabled: bool = false,
+        backend_required: bool = false
+    ) -> Engine2dWmFrameExecutor:
+        if transport_kind == "ivshmem":
+            return Engine2dWmFrameExecutor.create_host_gpu(
+                engine, framebuffer, base, guest_isa_code, backend_code,
+                fb_width, fb_height, negotiation_started_us,
+                cpu_simd_enabled, backend_required
+            )
+        var executor = Engine2dWmFrameExecutor.create(
+            engine, framebuffer, fb_width, fb_height, cpu_simd_enabled
+        )
+        executor.host_gpu_required = backend_required
+        val unavailable_marker = if backend_required:
+            "host-gpu-required-rejected"
+        else:
+            "host-gpu-fallback"
+        if transport_kind != "virtio-serial-framed":
+            executor.host_gpu_transport_kind = "none"
+            _engine2d_wm_log("[wm-frame] {unavailable_marker} reason=unsupported-transport transport={transport_kind}")
+            return executor
+        if val Some(port) = virtio_port:
+            val guest_isa = simpleos_host_gpu_guest_isa_name(guest_isa_code)
+            val width = if fb_width > 0: fb_width else: framebuffer.width.to_i64()
+            val height = if fb_height > 0: fb_height else: framebuffer.height.to_i64()
+            val max_pixels = simpleos_host_gpu_max_readback_bytes() / 4
+            val valid_geometry = (
+                width > 0 and height > 0 and height <= max_pixels and
+                width <= max_pixels / height
+            )
+            if (port.is_open() and valid_geometry and
+                guest_isa != "unsupported" and backend_code != 0 and
+                simpleos_host_gpu_backend_mask(backend_code) != 0):
+                val selected = simpleos_host_gpu_backend_name(backend_code)
+                if selected != "" and selected != "unknown":
+                    executor.host_gpu_transport_kind = "virtio-serial-framed"
+                    executor.virtio_serial_port = Some(port)
+                    executor.host_gpu_run_id_hash = if negotiation_started_us > 0: negotiation_started_us else: 1
+                    executor.virtio_serial_last_clock_us = executor.host_gpu_run_id_hash
+                    executor.host_gpu_backend = selected
+                    executor.host_gpu_backend_code = backend_code
+                    executor.draw_ir_backend_target = engine2d_wm_draw_ir_backend_target(
+                        true, selected, cpu_simd_enabled
+                    )
+                    _engine2d_wm_log("[wm-frame] host-gpu-ready transport=virtio-serial-framed backend={selected} port={port.port_name}")
+                    return executor
+            executor.host_gpu_transport_kind = "none"
+            _engine2d_wm_log("[wm-frame] {unavailable_marker} reason=virtio-serial-not-ready open={port.is_open()}")
+            return executor
+        executor.host_gpu_transport_kind = "none"
+        _engine2d_wm_log("[wm-frame] {unavailable_marker} reason=virtio-serial-unimplemented")
         executor
 
     me _render_host_gpu(composition: DrawIrComposition, resources: [SimpleOsHostGpuImageResource], scene_revision: i64) -> bool:
@@ -268,26 +741,155 @@ class Engine2dWmFrameExecutor:
         _engine2d_wm_log("[wm-frame] host-gpu-device-evidence backend={self.host_gpu_backend} generation={generation} run={receipt.run_id_hash} frame={receipt.frame_id} submit_id={receipt.submit_id} fence_id={receipt.fence_id} fence_completed={receipt.fence_signaled} device_frame_id={receipt.device_frame_id} scene_revision={scene_revision} handle={receipt.native_handle} identity={receipt.device_identity} readback=device checksum={receipt.output_checksum} elapsed_us={receipt.elapsed_us}")
         true
 
+    fn _has_ready_virtio_serial_transport() -> bool:
+        if self.host_gpu_transport_kind != "virtio-serial-framed":
+            return false
+        match self.virtio_serial_port:
+            case Some(port): port.is_open()
+            case None: false
+
+    fn _wire_draw_ir_composition(composition: DrawIrComposition) -> DrawIrComposition:
+        var wire_batches: [DrawIrBatch] = []
+        for batch in composition.batches:
+            wire_batches.push(draw_ir_batch_with_source(
+                batch.batch_id,
+                DRAW_IR_BACKEND_GPU,
+                batch.embedding,
+                batch.commands,
+                batch.source
+            ))
+        draw_ir_composition(
+            composition.composition_id,
+            composition.scene_key,
+            DRAW_IR_BACKEND_GPU,
+            wire_batches
+        )
+
+    me _render_host_gpu_virtio_serial(composition: DrawIrComposition, scene_revision: i64) -> bool:
+        val failure_marker = if self.host_gpu_required: "host-gpu-required-rejected" else: "host-gpu-fallback"
+        if self.host_gpu_transport_kind != "virtio-serial-framed":
+            return false
+        match self.virtio_serial_port:
+            case Some(existing_port):
+                var port = existing_port
+                if not port.is_open():
+                    _engine2d_wm_log("[wm-frame] {failure_marker} reason=virtio-serial-not-open")
+                    return false
+                val wire_comp = self._wire_draw_ir_composition(composition)
+                val payload = simpleos_host_gpu_draw_ir_encode(
+                    wire_comp, SIMPLEOS_HOST_GPU_MAX_PAYLOAD_BYTES, SIMPLEOS_HOST_GPU_MAX_DRAW_IR_COMMANDS
+                )
+                if not payload.ok:
+                    _engine2d_wm_log("[wm-frame] {failure_marker} reason=virtio-serial-draw-ir-encode detail={payload.reason}")
+                    return false
+                val body = payload.bytes
+                var checksum: i64 = 0
+                var bi = 0
+                while bi < body.len():
+                    checksum = simpleos_host_gpu_stream_checksum_step(checksum, body[bi])
+                    if checksum < 0:
+                        _engine2d_wm_log("[wm-frame] {failure_marker} reason=virtio-serial-checksum-overflow")
+                        return false
+                    bi = bi + 1
+                val generation = self.virtio_serial_generation + 1
+                val run_id = if self.host_gpu_run_id_hash > 0: self.host_gpu_run_id_hash else: 1
+                val raw_now = boot_monotonic_now_us()
+                val now_us = if raw_now > self.virtio_serial_last_clock_us and raw_now > 0:
+                    raw_now
+                else:
+                    self.virtio_serial_last_clock_us + 1
+                self.virtio_serial_last_clock_us = now_us
+                val deadline_us = boot_monotonic_deadline_us(now_us, SIMPLEOS_HOST_GPU_NEGOTIATION_BUDGET_US)
+                if deadline_us <= now_us:
+                    _engine2d_wm_log("[wm-frame] {failure_marker} reason=virtio-serial-invalid-clock")
+                    return false
+                val req = SimpleOsHostGpuStreamHeader(
+                    message_type: SIMPLEOS_HOST_GPU_STREAM_SUBMIT_REQUEST,
+                    body_bytes: body.len().to_i64(),
+                    body_checksum: checksum,
+                    generation: generation,
+                    run_id_hash: run_id,
+                    frame_id: scene_revision,
+                    backend_code: self.host_gpu_backend_code,
+                    kind_or_status: SIMPLEOS_HOST_GPU_KIND_DRAW_IR
+                )
+                val framed = port.build_stream_request_frame(req, body, now_us, deadline_us)
+                if val Err(reason) = framed:
+                    self.virtio_serial_port = Some(port)
+                    _engine2d_wm_log("[wm-frame] {failure_marker} reason=virtio-serial-frame detail={reason}")
+                    return false
+                val frame_bytes = framed.unwrap()
+                val lease = port.acquire_data_tx(generation, frame_bytes.len().to_i64())
+                if not lease.admitted:
+                    val _ = port.fail_closed_reset("tx-queue-rejected", false)
+                    self.virtio_serial_port = Some(port)
+                    _engine2d_wm_log("[wm-frame] {failure_marker} reason=virtio-serial-tx-queue")
+                    return false
+                val _ = port.complete_lease(lease)
+                self.virtio_serial_port = Some(port)
+                self.virtio_serial_generation = generation
+                self.virtio_serial_last_tx_frame = frame_bytes
+                _engine2d_wm_log("[wm-frame] host-gpu-presented transport=virtio-serial-framed backend={self.host_gpu_backend} generation={generation} run={run_id} frame={scene_revision} payload_bytes={body.len()} checksum={checksum}")
+                return true
+            case None:
+                _engine2d_wm_log("[wm-frame] {failure_marker} reason=virtio-serial-missing")
+                return false
+
+    me push_virtio_serial_rx(chunk: [u8], now_us: i64) -> VirtioConsoleRxResult:
+        match self.virtio_serial_port:
+            case Some(existing_port):
+                var port = existing_port
+                val rx = port.push_rx_bytes(chunk, now_us)
+                self.virtio_serial_port = Some(port)
+                return rx
+            case None:
+                return VirtioConsoleRxResult(
+                    complete: false, rejected: true, reason: "virtio-serial-missing",
+                    header: None, body: [], body_checksum: -1
+                )
+
+    fn virtio_serial_last_tx_bytes() -> [u8]:
+        self.virtio_serial_last_tx_frame
+
+    fn virtio_serial_has_pending_request() -> bool:
+        match self.virtio_serial_port:
+            case Some(port): port.pending_header.is_some()
+            case None: false
+
     # Retained old/new damage plan. Admission requires a successful prior
     # frame and an unchanged background identity; a changed scene revision
     # marks BOTH the retained old window extents and the current extents
     # dirty so vacated pixels repaint without a full-frame fallback.
     # Anything unprovable returns the fail-closed full plan.
-    me retained_scene_damage_plan(scene: SharedWmScene, background_key: text, scene_revision: i64, taskbar_revision: i64 = 0, clock_label: text = "") -> DamagePlan:
+    me retained_scene_damage_plan(scene: SharedWmScene, background_key: text, scene_revision: i64, taskbar_revision: i64 = 0, clock_label: text = "", clock_rect: [i64] = [], taskbar_key: text = "", content_frames: [WmContentFrame] = []) -> DamagePlan:
         val width = if self.fb_w > 0: self.fb_w else: self.framebuffer.width.to_i64()
         val height = if self.fb_h > 0: self.fb_h else: self.framebuffer.height.to_i64()
         if not (self.last_successful_scene_revision > 0):
             return engine2d_wm_full_damage_plan(width, height)
         if background_key != self.last_successful_background_key:
             return engine2d_wm_full_damage_plan(width, height)
-        # The composition also consumes taskbar_revision and clock_label; a
-        # taskbar-only or clock-only change is not attributable to any window
-        # extent, so it fails closed to a full repaint (external review F4).
+        # A clock change is attributable when the presented and new clock
+        # text boxes are both known: repaint exactly those boxes.
+        val clock_changed = clock_label != self.last_successful_clock_label
+        # The composition also consumes taskbar_revision, which producers mix
+        # the clock into. A taskbar change is not attributable to any window
+        # extent, so it fails closed to a full repaint (external review F4)
+        # unless the clock-independent layout key proves only the clock moved.
         if taskbar_revision != self.last_successful_taskbar_revision:
-            return engine2d_wm_full_damage_plan(width, height)
-        if clock_label != self.last_successful_clock_label:
-            return engine2d_wm_full_damage_plan(width, height)
+            if not (clock_changed and taskbar_key != "" and taskbar_key == self.last_successful_taskbar_key):
+                return engine2d_wm_full_damage_plan(width, height)
+        if clock_changed:
+            val old_rects = self.last_successful_clock_rect
+            if (clock_rect.len() == 0 or clock_rect.len() % 4 != 0 or
+                old_rects.len() != clock_rect.len()):
+                return engine2d_wm_full_damage_plan(width, height)
         self.damage_tiles.begin_frame()
+        if clock_changed:
+            var r: i64 = 0
+            while r + 3 < clock_rect.len():
+                self.damage_tiles.mark_rect(self.last_successful_clock_rect[r], self.last_successful_clock_rect[r + 1], self.last_successful_clock_rect[r + 2], self.last_successful_clock_rect[r + 3])
+                self.damage_tiles.mark_rect(clock_rect[r], clock_rect[r + 1], clock_rect[r + 2], clock_rect[r + 3])
+                r = r + 4
         if scene_revision != self.last_successful_scene_revision:
             var old: i64 = 0
             while old + 4 < self.last_successful_window_rects.len():
@@ -307,11 +909,38 @@ class Engine2dWmFrameExecutor:
                     self.damage_tiles.mark_rect(
                         window.x.to_i64(), window.y.to_i64(),
                         window.width.to_i64(), window.height.to_i64())
+        # The frame key pins WHICH windows resolved content; an updated
+        # content frame (new content_revision or re-stamped URI) damages only
+        # its own window's full bounds.
+        for frame in content_frames:
+            val uri = shared_wm_content_frame_image_uri(frame)
+            var previous = ""
+            var p = 0
+            while p < self.last_successful_content_ids.len():
+                if self.last_successful_content_ids[p] == frame.window_id:
+                    previous = self.last_successful_content_uris[p]
+                p = p + 1
+            if uri != previous:
+                var marked = false
+                for window in scene.windows:
+                    if window.window_id == frame.window_id:
+                        self.damage_tiles.mark_rect(
+                            window.x.to_i64(), window.y.to_i64(),
+                            window.width.to_i64(), window.height.to_i64())
+                        marked = true
+                if not marked:
+                    return engine2d_wm_full_damage_plan(width, height)
         build_damage_plan(self.damage_tiles, 1, DamagePlanPolicy.create(64, 60))
 
     # Commit the retained extents only for a frame that actually presented.
     # Extents are the FULL window bounds (chrome included) — see F3 note above.
-    me record_successful_scene(scene: SharedWmScene, background_key: text, scene_revision: i64, taskbar_revision: i64 = 0, clock_label: text = ""):
+    # The host-gpu lane presents from shared memory and never paints
+    # self.engine, so its success must not seed a later local replay.
+    me record_host_lane_present():
+        self.last_successful_background_key = "lane=host-gpu"
+        self.last_present_path = "host-gpu"
+
+    me record_successful_scene(scene: SharedWmScene, background_key: text, scene_revision: i64, taskbar_revision: i64 = 0, clock_label: text = "", clock_rect: [i64] = [], taskbar_key: text = "", content_frames: [WmContentFrame] = []):
         var rects: [i64] = []
         for window in scene.windows:
             val valid = if window.minimized or window.width <= 0 or window.height <= 0: 0 else: 1
@@ -325,11 +954,22 @@ class Engine2dWmFrameExecutor:
         self.last_successful_scene_revision = scene_revision
         self.last_successful_taskbar_revision = taskbar_revision
         self.last_successful_clock_label = clock_label
+        self.last_successful_clock_rect = clock_rect
+        self.last_successful_taskbar_key = taskbar_key
+        var ids: [text] = []
+        var uris: [text] = []
+        for frame in content_frames:
+            ids.push(frame.window_id)
+            uris.push(shared_wm_content_frame_image_uri(frame))
+        self.last_successful_content_ids = ids
+        self.last_successful_content_uris = uris
 
     me render(scene: SharedWmScene, taskbar: TaskbarModel, content_frames: [WmContentFrame], scene_revision: i64, taskbar_revision: i64, clock_label: text) -> i64:
         if scene_revision <= 0 or taskbar_revision <= 0:
             return 0
-        if self.host_gpu_required and self.host_gpu_base == 0u64:
+        val has_ivshmem = self.host_gpu_base != 0u64
+        val has_virtio_serial = self._has_ready_virtio_serial_transport()
+        if self.host_gpu_required and not has_ivshmem and not has_virtio_serial:
             _engine2d_wm_log("[wm-frame] host-gpu-required-rejected reason=negotiation-or-mapping")
             return 0
 
@@ -402,24 +1042,40 @@ class Engine2dWmFrameExecutor:
         val filtered_scene = SharedWmScene(width: scene.width, height: scene.height, backend: scene.backend, windows: good_windows, background: scene.background)
         val nested_content_frames = shared_wm_nested_content_frames(filtered_scene, content_frames, good_content_frames, scene_revision, 28)
         for frame in nested_content_frames:
+            val nested_provenance_valid = wm_content_frame_web_provenance_valid(frame)
+            if not nested_provenance_valid:
+                _engine2d_wm_log("[wm-frame] content-provenance-rejected nested=true window_id={frame.window_id} status={frame.engine2d_status} backend={frame.engine2d_backend} fallback={frame.material_fallback_kind} material={frame.material_fallback_sha256} theme={frame.theme_id} source={frame.theme_source_manifest_sha256}")
             val image_uri = shared_wm_content_frame_image_uri(frame)
-            images.push(engine2d_resolved_draw_ir_image(image_uri, frame.width, frame.height, frame.pixels))
-            if self.host_gpu_base != 0u64:
-                host_images.push(simpleos_host_gpu_image_resource(image_uri, frame.width, frame.height, frame.pixels))
-            good_content_frames.push(frame)
+            if nested_provenance_valid and image_uri != "":
+                images.push(engine2d_resolved_draw_ir_image(image_uri, frame.width, frame.height, frame.pixels))
+                if self.host_gpu_base != 0u64:
+                    host_images.push(simpleos_host_gpu_image_resource(image_uri, frame.width, frame.height, frame.pixels))
+                good_content_frames.push(frame)
         if _WM_TRACE: _engine2d_wm_log("[wm-exec] at=composition-begin")
         val composition = shared_wm_scene_draw_ir_composition_with_content(filtered_scene, taskbar, good_content_frames, self.draw_ir_backend_target, 1000, clock_label, 0)
         if _WM_TRACE: _engine2d_wm_log("[wm-exec] at=composition-end")
-        if self.host_gpu_base != 0u64:
+        if has_ivshmem:
             if self._render_host_gpu(composition, host_images, scene_revision):
                 if degraded_window_count > 0:
                     _engine2d_wm_log("[wm-frame] frame-degraded degraded_window_count={degraded_window_count} path=host-gpu scene_revision={scene_revision}")
                 for frame in good_content_frames:
                     _engine2d_wm_log("[wm-frame] content-presented scene_revision={scene_revision} path=host-gpu window_id={frame.window_id} status={frame.engine2d_status} backend={frame.engine2d_backend} fallback={frame.material_fallback_kind} material={frame.material_fallback_sha256} theme={frame.theme_id} source={frame.theme_source_manifest_sha256}")
-                self.record_successful_scene(scene, engine2d_wm_background_key(scene), scene_revision, taskbar_revision, clock_label)
+                self.record_successful_scene(scene, engine2d_wm_background_key(scene), scene_revision, taskbar_revision, clock_label, engine2d_wm_clock_rect(composition))
+                self.record_host_lane_present()
                 return scene_revision
             if self.host_gpu_required:
                 _engine2d_wm_log("[wm-frame] host-gpu-required-rejected reason=device-receipt-or-readback")
+                return 0
+        elif has_virtio_serial:
+            if self._render_host_gpu_virtio_serial(composition, scene_revision):
+                if degraded_window_count > 0:
+                    _engine2d_wm_log("[wm-frame] frame-degraded degraded_window_count={degraded_window_count} path=virtio-serial-framed scene_revision={scene_revision}")
+                for frame in good_content_frames:
+                    _engine2d_wm_log("[wm-frame] content-presented scene_revision={scene_revision} path=virtio-serial-framed window_id={frame.window_id} status={frame.engine2d_status} backend={frame.engine2d_backend} fallback={frame.material_fallback_kind} material={frame.material_fallback_sha256} theme={frame.theme_id} source={frame.theme_source_manifest_sha256}")
+                self.record_successful_scene(scene, engine2d_wm_background_key(scene), scene_revision, taskbar_revision, clock_label)
+                return scene_revision
+            if self.host_gpu_required:
+                _engine2d_wm_log("[wm-frame] host-gpu-required-rejected reason=virtio-serial-submit")
                 return 0
         # The host composition is intentionally not reused after a failed
         # Metal/Vulkan request: its style metadata asks for that target's
@@ -434,22 +1090,46 @@ class Engine2dWmFrameExecutor:
         # only the damaged rects through the retained executor. Anything else
         # — FULL/NONE plans, empty rects, or a rejected/empty replay — falls
         # closed through to the unconditional full composition below.
-        val background_key = engine2d_wm_background_key(scene)
-        val retained_plan = self.retained_scene_damage_plan(scene, background_key, scene_revision, taskbar_revision, clock_label)
+        val background_key = engine2d_wm_local_frame_key(scene, good_content_frames, degraded_window_count)
+        val taskbar_key = engine2d_wm_taskbar_layout_key(taskbar)
+        val clock_rect = engine2d_wm_clock_rect(local_composition)
+        val retained_plan = self.retained_scene_damage_plan(scene, background_key, scene_revision, taskbar_revision, clock_label, clock_rect, taskbar_key, good_content_frames)
         if retained_plan.mode == DAMAGE_PLAN_LOCAL and retained_plan.rects.len() > 0:
-            val outcome = engine2d_draw_ir_render_composition_damaged_with_images(self.engine, local_composition, images, retained_plan.rects, false)
-            self.engine = outcome.engine
-            if outcome.unsupported_kinds == "none" and outcome.ops_rendered > 0:
-                if _WM_TRACE: _engine2d_wm_log("[wm-exec] at=retained-present rects={retained_plan.output_rect_count} ops={outcome.ops_rendered}")
+            var has_parent_material = false
+            for batch in local_composition.batches:
+                if _wm_batch_samples_parent(batch):
+                    has_parent_material = true
+                    break
+            var replay_ok = false
+            var replay_ops_rendered: i32 = 0
+            var replay_ops_skipped: i32 = 0
+            var replay_reason = "none"
+            if has_parent_material:
+                val parent_outcome = _wm_replay_parent_sampling_composition(self.engine, local_composition, images, retained_plan.rects)
+                self.engine = parent_outcome.engine
+                replay_ok = parent_outcome.ok
+                replay_ops_rendered = parent_outcome.ops_rendered
+                replay_ops_skipped = parent_outcome.ops_skipped
+                replay_reason = parent_outcome.reason
+            else:
+                val outcome = engine2d_draw_ir_render_composition_damaged_with_images(self.engine, local_composition, images, retained_plan.rects, false)
+                self.engine = outcome.engine
+                replay_ok = outcome.unsupported_kinds == "none" and outcome.ops_rendered > 0
+                replay_ops_rendered = outcome.ops_rendered
+                replay_ops_skipped = outcome.ops_skipped
+                replay_reason = outcome.unsupported_kinds
+            if replay_ok:
+                if _WM_TRACE: _engine2d_wm_log("[wm-exec] at=retained-present rects={retained_plan.output_rect_count} ops={replay_ops_rendered}")
                 if degraded_window_count > 0:
-                    _engine2d_wm_log("[wm-frame] frame-degraded degraded_window_count={degraded_window_count} skipped={outcome.ops_skipped} rendered={outcome.ops_rendered} scene_revision={scene_revision} reason=retained-damage")
+                    _engine2d_wm_log("[wm-frame] frame-degraded degraded_window_count={degraded_window_count} skipped={replay_ops_skipped} rendered={replay_ops_rendered} scene_revision={scene_revision} reason=retained-damage")
                 for frame in good_content_frames:
                     _engine2d_wm_log("[wm-frame] content-presented scene_revision={scene_revision} path=software-retained-damage window_id={frame.window_id} status={frame.engine2d_status} backend={frame.engine2d_backend} fallback={frame.material_fallback_kind} material={frame.material_fallback_sha256} theme={frame.theme_id} source={frame.theme_source_manifest_sha256}")
-                self.record_successful_scene(scene, background_key, scene_revision, taskbar_revision, clock_label)
+                self.record_successful_scene(scene, background_key, scene_revision, taskbar_revision, clock_label, clock_rect, taskbar_key, good_content_frames)
+                self.last_present_path = "software-retained-damage"
                 return scene_revision
             # Fail closed: an unsupported or empty retained replay must not
             # be presented; repaint everything through the full lane instead.
-            _engine2d_wm_log("[wm-frame] retained-damage-fallback reason={outcome.unsupported_kinds} rendered={outcome.ops_rendered} scene_revision={scene_revision}")
+            _engine2d_wm_log("[wm-frame] retained-damage-fallback reason={replay_reason} rendered={replay_ops_rendered} scene_revision={scene_revision}")
         val result = engine2d_draw_ir_adv_composition_present_with_images(self.engine, local_composition, false, images)
         if _WM_TRACE: _engine2d_wm_log("[wm-exec] at=present-end rendered={result.rendered_command_count} skipped={result.skipped_command_count}")
         # A partially-unsupported composition (e.g. one taskbar icon whose
@@ -466,5 +1146,6 @@ class Engine2dWmFrameExecutor:
             _engine2d_wm_log("[wm-frame] frame-degraded degraded_window_count={degraded_window_count} skipped={result.skipped_command_count} rendered={result.rendered_command_count} scene_revision={scene_revision} reason={result.fallback_reason}")
         for frame in good_content_frames:
             _engine2d_wm_log("[wm-frame] content-presented scene_revision={scene_revision} path=software window_id={frame.window_id} status={frame.engine2d_status} backend={frame.engine2d_backend} fallback={frame.material_fallback_kind} material={frame.material_fallback_sha256} theme={frame.theme_id} source={frame.theme_source_manifest_sha256}")
-        self.record_successful_scene(scene, engine2d_wm_background_key(scene), scene_revision, taskbar_revision, clock_label)
+        self.record_successful_scene(scene, background_key, scene_revision, taskbar_revision, clock_label, clock_rect, taskbar_key, good_content_frames)
+        self.last_present_path = "software"
         scene_revision

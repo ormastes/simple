@@ -116,3 +116,62 @@ other `draw_*` methods on `MetalBackend` (`draw_ellipse`, `draw_arc`,
 dual-algorithm) and outside this parity class by construction; nothing to
 prove there.
 
+
+## 2026-11-12 fix attempt (release/1.0.0 — coverage regression found and fixed)
+
+The 2026-07-07 `image` scene in
+`test/02_integration/rendering/engine2d_cpu_metal_parity_run.spl` — added by
+this very sweep — was **accidentally dropped on release/1.0.0**: transplant
+commit `88aac2ffe28` ("rebase(main): transplant current main tree onto
+release/1.0", 2026-11-04) replaced the 480-line harness with a 260-line
+version missing the `image`, `rect_blend`, `circle_filled_blend`,
+`triangle_filled_blend`, `degenerate_dims` and `clip_gpu_only` scenes, the
+`assert_uniform` helper, and the `_harness_is_macos` collision workaround
+(its replacement, a bare `std.nogc_sync_mut.env.platform.is_macos` import,
+is exactly the shadowing hazard the workaround's comment documents). The
+parity gate script still greps for `^image: `, so the gate's coverage
+silently regressed to "image: none". origin/main carries the same truncated
+file (via `bb3f6ab8ab2`); the last good content on both branches is
+`ae55a746719`.
+
+Fix (this PR): restored the full harness from `ae55a746719`
+(identical on both pre-transplant branches) with one minimal robustness
+tweak — `(env_get("OSTYPE") ?? "").lower()` — because `env_get` returns
+`text?` and the offload gate runs with `OSTYPE=""` exported.
+
+Verification status: **fix-implemented-verification-pending** — the `image`
+scene, `capability()` `OP_DRAW_IMAGE` honesty push, and the
+`engine2d_shared_raster_parity_spec.spl` draw_image oracle context are all
+confirmed present in source; native re-run of
+`check-engine2d-cpu-metal-parity-evidence.shs` (now matching its `image: `
+gate clause again) and `check-engine2d-gpu-offload-evidence.shs` awaits the
+admitted compiler from the in-flight bootstrap. `sh -n` / audit-guard
+checks pass; no other file touched.
+
+## Verification 2026-11-25 (release/1.0.0, Windows x86_64, worktree wt-p3-baj)
+
+Code-inspection re-verification of the 2026-11-12 restore on branch
+`work/p3-baj-20261125`:
+
+- **measured** The restore commit `2dfa58617ae` ("fix(engine2d): restore
+  parity harness scenes dropped by release transplant") is in this branch's
+  history and `test/02_integration/rendering/engine2d_cpu_metal_parity_run.spl`
+  is tracked and present; it contains the `image` scene
+  (`compare("image", c12, m12.read_pixels(), m12.gpu_frame_complete)` at
+  line 470).
+- **measured** Both gate scripts carry the `image` clauses again:
+  `check-engine2d-cpu-metal-parity-evidence.shs:165` greps `^image: `, and
+  `check-engine2d-gpu-offload-evidence.shs:177,183,206-208` gates `IMG_LINE`
+  on `MATCH` + `source=device_readback`.
+- **measured** `OP_DRAW_IMAGE = "draw_image"` is exported from
+  `backend_capability.spl:111-113` and pushed by `backend_metal.spl:940`;
+  `engine2d_shared_raster_parity_spec.spl` still carries the
+  "draw_image (blit) parity-sweep coverage close" context (line 922).
+
+**Limit:** the dynamic Metal evidence re-run
+(`check-engine2d-cpu-metal-parity-evidence.shs` /
+`check-engine2d-gpu-offload-evidence.shs`) requires a macOS Metal host and is
+not runnable on this Windows x86_64 worktree; the CPU-vs-Metal bit-exactness
+claim therefore remains verified by code inspection only, exactly as the
+2026-11-12 note left it. The coverage regression itself (missing `image`
+scene / gate clause) is confirmed repaired in source.

@@ -6,10 +6,12 @@
 # call Microsoft Graph under /users/{shared_mailbox_upn}/...
 
 use std.nogc_sync_mut.io.process_ops.{process_run}
-use std.nogc_sync_mut.file_system.file_ops.{file_read_text, file_write_text, file_exists, file_rename, file_delete}
+use std.nogc_sync_mut.file_system.file_ops.{file_write_text, file_exists, file_rename, file_delete}
+use std.nogc_sync_mut.io_runtime.{file_read_nullable}
 use std.nogc_sync_mut.file_system.permissions.{file_set_mode}
 use std.nogc_sync_mut.env.{env_get}
-use std.nogc_sync_mut.io.time_ops.{current_time_unix}
+use std.nogc_sync_mut.io.time_ops.{current_time_unix, time_now_nanos}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
 use std.nogc_sync_mut.http_client.types.{url_encode}
 use std.json.{json_parse, json_object_get, json_array_get, json_array_length, json_serialize}
 
@@ -81,7 +83,7 @@ fn outlook_curl_get_token_with_secret(tenant_id: text, client_id: text, client_s
     if status != 200:
         return (false, "")
     val parsed = json_parse(resp_body)
-    if parsed == nil:
+    if parsed.is_none():
         return (false, "")
     val token = _ostr(parsed, "access_token")
     if token == "":
@@ -119,10 +121,10 @@ fn outlook_curl_list_folders(client: OutlookCurlClient) -> (bool, [OutlookFolder
         if not _status_ok(status):
             return (false, folders, _status_message(status, body))
         val parsed = json_parse(body)
-        if parsed == nil:
+        if parsed.is_none():
             return (false, folders, "invalid JSON response")
         val arr = json_object_get(parsed, "value")
-        if arr != nil:
+        if arr.is_some():
             val n = json_array_length(arr)
             var i = 0
             while i < n:
@@ -146,10 +148,10 @@ fn outlook_curl_list_messages(client: OutlookCurlClient, folder_id: text, filter
         if not _status_ok(status):
             return (false, messages, _status_message(status, body))
         val parsed = json_parse(body)
-        if parsed == nil:
+        if parsed.is_none():
             return (false, messages, "invalid JSON response")
         val arr = json_object_get(parsed, "value")
-        if arr != nil:
+        if arr.is_some():
             val n = json_array_length(arr)
             var i = 0
             while i < n:
@@ -171,7 +173,7 @@ fn outlook_curl_get_message(client: OutlookCurlClient, msg_id: text) -> (bool, O
     if not _status_ok(status):
         return (false, empty, _status_message(status, body))
     val parsed = json_parse(body)
-    if parsed == nil:
+    if parsed.is_none():
         return (false, empty, "invalid JSON response")
     (true, _parse_message(parsed), body)
 
@@ -206,8 +208,8 @@ fn outlook_curl_parse_token_cache(content: text) -> (text, i64):
 fn outlook_curl_token_cache_load(path: text) -> (text, i64):
     if path == "" or not file_exists(path):
         return ("", 0)
-    val content = file_read_text(path)
-    if content == nil:
+    val content = file_read_nullable(path)
+    if content.is_none():
         return ("", 0)
     outlook_curl_parse_token_cache(content)
 
@@ -215,7 +217,8 @@ fn outlook_curl_token_cache_load(path: text) -> (text, i64):
 fn outlook_curl_token_cache_save(path: text, token: text, expires_at: i64) -> bool:
     if path == "":
         return false
-    val tmp_path = "{path}.tmp"
+    # Unique per-writer temp name: concurrent refreshers must not share a staging file.
+    val tmp_path = "{path}.tmp.{getpid()}.{time_now_nanos()}"
     val payload = outlook_curl_render_token_cache(token, expires_at)
     if not file_write_text(tmp_path, payload):
         return false
@@ -333,9 +336,9 @@ fn _parse_message(obj: any) -> OutlookMessage:
     var from_addr = ""
     var from_name = ""
     val from_obj = json_object_get(obj, "from")
-    if from_obj != nil:
+    if from_obj.is_some():
         val email_addr = json_object_get(from_obj, "emailAddress")
-        if email_addr != nil:
+        if email_addr.is_some():
             from_addr = _ostr(email_addr, "address")
             from_name = _ostr(email_addr, "name")
     OutlookMessage(
@@ -365,7 +368,7 @@ fn _obool(obj: any, key: text) -> bool:
     if obj == nil:
         return false
     val v = json_object_get(obj, key)
-    if v == nil:
+    if v.is_none():
         return false
     json_serialize(v).trim().to_lower() == "true"
 
@@ -374,8 +377,8 @@ fn _json_text(value: any) -> text:
     if value == nil:
         return ""
     val s = json_serialize(value)
-    if s.starts_with("\"") and s.ends_with("\"") and s.len() >= 2:
-        return s[1:s.len() - 1]
+    if s.starts_with("\"") and s.ends_with("\"") and s.byte_len() >= 2:
+        return s.substring(1, s.byte_len() - 1)
     s
 
 
@@ -398,8 +401,8 @@ fn _parse_i64(s: text) -> i64:
 
 fn _strip_sdn_value(raw: text) -> text:
     val s = raw.trim()
-    if s.starts_with("\"") and s.ends_with("\"") and s.len() >= 2:
-        return s[1:s.len() - 1]
+    if s.starts_with("\"") and s.ends_with("\"") and s.byte_len() >= 2:
+        return s.substring(1, s.byte_len() - 1)
     s
 
 
@@ -411,7 +414,7 @@ fn _escape_sdn_value(s: text) -> text:
 fn _url_form_encode(s: text) -> text:
     var out: [text] = []
     var i = 0
-    val len = s.length()
+    val len = s.byte_len()
     while i < len:
         val ch = s.char_at(i)
         val code = s.char_code_at(i)

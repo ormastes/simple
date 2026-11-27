@@ -185,6 +185,11 @@ fn check_expr(module: &HirModule, function: &str, expr: &HirExpr, in_unsafe: boo
                 check_expr(module, function, arg, in_unsafe, out);
             }
         }
+        HirExprKind::TypeParamStaticCall { args, .. } => {
+            for arg in args {
+                check_expr(module, function, arg, in_unsafe, out);
+            }
+        }
         HirExprKind::FieldAccess { receiver, .. } => check_expr(module, function, receiver, in_unsafe, out),
         HirExprKind::Index { receiver, index } => {
             check_expr(module, function, receiver, in_unsafe, out);
@@ -239,7 +244,8 @@ fn check_expr(module: &HirModule, function: &str, expr: &HirExpr, in_unsafe: boo
         | HirExprKind::Nil
         | HirExprKind::Local(_)
         | HirExprKind::Global(_)
-        | HirExprKind::ContractResult => {}
+        | HirExprKind::ContractResult
+        | HirExprKind::ConstGeneric(_) => {}
     }
 }
 

@@ -369,6 +369,9 @@ impl TypeChecker {
                 | Node::StructuredExportStmt(_)
                 | Node::AutoImportStmt(_)
                 | Node::RequiresCapabilities(_)
+                | Node::FriendDecl(_)
+                | Node::InternalExportDecl(_)
+                | Node::LayerDecl(_)
                 | Node::LeanBlock(_) => {
                     // Module system nodes and embedded lean blocks don't introduce type bindings directly
                 }
@@ -505,6 +508,26 @@ impl TypeChecker {
             Node::Static(static_stmt) => {
                 let ty = self.infer_expr(&static_stmt.value)?;
                 self.env.insert(static_stmt.name.clone(), ty);
+                Ok(())
+            }
+            Node::Extern(ext) => {
+                // The parser emits `Node::Extern` for `extern fn` declarations
+                // wherever they appear -- including INSIDE a function body
+                // (kernel loader files declare their arch externs inside
+                // `@cfg(<arch>)` bodies; see bug doc
+                // seed_cfg_strip_kernel_closure_undefined_externs). Without
+                // this arm a body-local declaration fell into the `_ => Ok(())`
+                // wildcard, so the very next call to the extern aborted the
+                // whole unit with `Undefined("undefined identifier: <name>")`.
+                // Bind it exactly like the top-level registration pass. The
+                // `contains_key` guard keeps the first-pass registration for
+                // module-level externs (this arm also runs for top-level items
+                // in the second pass), so only genuinely body-local names are
+                // newly bound here.
+                if !self.env.contains_key(&ext.name) {
+                    let ty = self.fresh_var();
+                    self.env.insert(ext.name.clone(), ty);
+                }
                 Ok(())
             }
             Node::Assignment(assign) => {

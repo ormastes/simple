@@ -1,5 +1,24 @@
 # Pure-Simple parser did not implement the pipe-lambda form `|x| ...` at all — latent Stage-3 self-host blocker
 
+## Verification addendum 2026-11-25 (P3 ledger lane, Windows x86_64)
+
+- **measured** (source inspection on release/1.0.0): the pipe-lambda
+  production is present in the pure-Simple parser —
+  `src/compiler/10.frontend/core/_ParserPrimary/primary_expr.spl:991-1012`
+  dispatches on `TOK_PIPE`/121 in prefix position (imported at line 29),
+  mirroring the seed's `parse_pipe_lambda_params` (referenced in the comment
+  at line 969). The permanent gate
+  `scripts/check/check-pure-simple-pipe-lambda-parse.shs` still exists.
+- **limit stated**: the gate itself could not be re-executed on this host —
+  it drives `bin/simple lint`, and lint currently dies loading its own entry
+  (`unknown decorator @representation_boundary`) because the tracked seed
+  binary (2026-11-17) predates seed fix `14a34acbe1e`. Verification is
+  inspection-only; the FIXED status rests on the 2026-08-08 both-directions
+  gate evidence recorded below, which this lane did not re-run.
+- The two Remaining gaps (per-param types dropped by the flat-AST bridge;
+  brace-block body `|x| { ... }` seed-only) are unchanged and still tracked
+  in the body below.
+
 - **Date filed:** 2026-08-08
 - **Status:** **FIXED 2026-08-08.** The pipe-lambda production is implemented in
   the pure-Simple parser and gated by

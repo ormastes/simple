@@ -1,0 +1,208 @@
+"""
+## Purpose and audience
+Purpose: Pin how an absolutely positioned box with a FRACTIONAL inset
+(`left`/`top`/`right` of 10.25 px, 40.5 px, 6.33em, ...) paints against Chrome
+159. Chrome keeps insets in LayoutUnits (1/64 px): the box's background is
+pixel-snapped (device px = round(k x exact edge)) and its text keeps the exact
+pen, painted at that pen's quarter phase. Before this spec the inset was read
+as a whole px (`_decl_signed_int_or_zero` / `parse_int`): `10.5px` painted at
+10, `6.33em` at 6 px, and every glyph sat at phase 0.
+Audience: web renderer layout (abspos insets, pen origin, device snapping).
+
+Chrome oracle (Chrome for Testing 159, `--headless=new --disable-gpu
+--hide-scrollbars --force-device-scale-factor=k --window-size=400,300
+--screenshot`, sans-serif = Liberation Sans 16 px, line-height 20 px,
+`color:#000` on white, 2026-11-23). Every box sits in a
+`position:relative;left:3px;top:2px` 390x140 container. Text probes are
+the ink centroid (weight 255 - green) of one `l`, minus the centroid of the
+reference `l` at the whole-px `left:10px` (x 13): it removes the raster's own
+glyph-shape offset, so only the pen moves the number.
+
+| probe (inset)                   | exact pen x | k=1 delta (px) | k=4 delta (device px) | base k=1 / k=4 |
+|---------------------------------|-------------|----------------|-----------------------|----------------|
+| `left:10.25px`                  | 13.25       | 0.261          | 1.000                 | -2.0 / -8.0 (the em probe lands at 6 px) |
+| `left:40.5px`                   | 43.5        | 30.469         | 122.000               | 30.000 / 120.0 |
+| `left:70.75px`                  | 73.75       | 60.730         | 243.000               | 60.000 / 240.0 |
+| `left:6.33em` (101.28 px)       | 104.28      | 91.261         | 365.000               | none (at 6 px) |
+| `right:300.25px` (auto width)   | 89.1875     | 76.261         | 304.776               | 76.000 / 304.0 |
+| `right:250.5px`                 | 138.9375    | 126.000        | 503.776               | 126.000 / 504.0 |
+| nested abspos 150.25 + 10.25    | 163.5       | 150.469        | 602.000               | 150.000 / 600.0 |
+| `<p>` in an abspos at 200.5     | 203.5       | 190.469        | 762.000               | 190.000 / 760.0 |
+| `top:30.5px` (vs `top:30px`)    | y 32.5      | +1 row         | +2 device rows        | 0 / 0          |
+
+Boxes (20x10 black; 40x20 #ccc with an `l`):
+
+| box                          | Chrome k=1 cols / rows | Chrome k=4 (device) | base k=1 / k=4  |
+|------------------------------|------------------------|---------------------|-----------------|
+| `left:10.5px`                | 14..33                 | 54..133             | 13..32 / 52..131 |
+| `left:40.3px;top:60.5px`     | col 43, rows 63..72    | col 173, rows 250..289 | 43, 62..71 / 172, 248..287 |
+| `right:70.5px`               | 303..322               | 1210..1289          | 303..322 / 1212..1291 |
+| `left:100.5px` #ccc + text   | 104..143               | 414..573            | 103..142 / 412..571 |
+
+Tolerance: text 0.08 px at k=1, 0.3 device px at k=4 (one quarter phase is
+0.25 px / 1 device px).
+"""
+
+"""
+Traceability: REQ-WEB-LAYOUT-ABSPOS-FRACTIONAL-001 - an absolutely positioned box snaps its fractional inset to device px and its text keeps the exact pen.
+"""
+# @tag: unit, browser_engine, layout, text, chrome159
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl 1%
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_decl_apply.spl 1%
+use std.spec.*
+use std.io_runtime.{file_exists}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+val SANS: text = "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
+val W: i32 = 400
+val H: i32 = 150
+val T: text = "font-size:16px;line-height:20px"
+val BOX: text = "width:20px;height:10px;background:#000"
+
+val PAGE: text = "<!doctype html><html><body style=\"margin:0;background:#fff;color:#000;font-family:sans-serif\"><div style=\"position:relative;left:3px;top:2px;width:390px;height:140px\">" +
+    "<span style=\"position:absolute;left:10.25px;top:4px;" + T + "\">l</span>" +
+    "<span style=\"position:absolute;left:40.5px;top:4px;" + T + "\">l</span>" +
+    "<span style=\"position:absolute;left:70.75px;top:4px;" + T + "\">l</span>" +
+    "<span style=\"position:absolute;left:6.33em;top:4px;" + T + "\">l</span>" +
+    "<span style=\"position:absolute;right:300.25px;top:30px;" + T + "\">l</span>" +
+    "<span style=\"position:absolute;right:250.5px;top:30px;" + T + "\">l</span>" +
+    "<span style=\"position:absolute;left:10px;top:30.5px;" + T + "\">l</span>" +
+    "<div style=\"position:absolute;left:150.25px;top:30px;" + T + "\"><div style=\"position:absolute;left:10.25px;top:0\">l</div></div>" +
+    "<div style=\"position:absolute;left:200.5px;top:30px;" + T + "\"><p style=\"margin:0\">l</p></div>" +
+    "<div style=\"position:absolute;left:10.5px;top:60px;" + BOX + "\"></div>" +
+    "<div style=\"position:absolute;left:40.3px;top:60.5px;" + BOX + "\"></div>" +
+    "<div style=\"position:absolute;right:70.5px;top:60px;" + BOX + "\"></div>" +
+    "<div style=\"position:absolute;left:100.5px;top:90px;width:40px;height:20px;background:#ccc;" + T + "\">l</div>" +
+    "</div></body></html>"
+
+fn _green(v: u32) -> i64:
+    ((v >> 8u32) & 0xFFu32).to_i64()
+
+# Ink centroid (milli px of the frame) of 255 - green over CSS rect y0..y1 x
+# x0..x1 scaled by k; axis 0 = x, 1 = y.
+fn _centroid(px: [u32], k: i32, y0: i32, y1: i32, x0: i32, x1: i32, axis: i32) -> i64:
+    val fw = W * k
+    var s: i64 = 0
+    var sp: i64 = 0
+    var y = y0 * k
+    while y < (y1 + 1) * k:
+        var x = x0 * k
+        while x < (x1 + 1) * k:
+            val ink = 255 - _green(px[y * fw + x])
+            s = s + ink
+            sp = sp + ink * (if axis == 0: x.to_i64() else: y.to_i64())
+            x = x + 1
+        y = y + 1
+    if s == 0: -1000000 else: sp * 1000 / s
+
+fn _ref_x(px: [u32], k: i32) -> i64:
+    _centroid(px, k, 26, 56, 5, 25, 0)
+
+fn _delta_ok(px: [u32], k: i32, y0: i32, y1: i32, x0: i32, x1: i32, want: i64) -> bool:
+    val got = _centroid(px, k, y0, y1, x0, x1, 0) - _ref_x(px, k)
+    val tol: i64 = if k == 1: 80 else: 300
+    got >= want - tol and got <= want + tol
+
+fn _g(px: [u32], k: i32, x: i32, y: i32) -> i64:
+    _green(px[y * W * k + x])
+
+describe "abspos fractional insets (Chrome 159)":
+    it "AC-1: k=1 text keeps the exact pen of a fractional left / em / right inset":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(PAGE, W, H, "cpu_simd")
+        expect(px.len()).to_equal((W * H).to_i64())
+        step("left 10.25 / 40.5 / 70.75 / 6.33em: deltas 0.261 / 30.469 / 60.730 / 91.261")
+        expect(_delta_ok(px, 1, 0, 30, 8, 30, 261)).to_equal(true)
+        expect(_delta_ok(px, 1, 0, 30, 38, 60, 30469)).to_equal(true)
+        expect(_delta_ok(px, 1, 0, 30, 68, 90, 60730)).to_equal(true)
+        expect(_delta_ok(px, 1, 0, 30, 98, 120, 91261)).to_equal(true)
+        step("right 300.25 / 250.5 (auto width): 76.261 / 126.000")
+        expect(_delta_ok(px, 1, 26, 56, 80, 100, 76261)).to_equal(true)
+        expect(_delta_ok(px, 1, 26, 56, 130, 150, 126000)).to_equal(true)
+
+    it "AC-2: k=1 the fraction reaches nested abspos and in-flow block text":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(PAGE, W, H, "cpu_simd")
+        step("nested 150.25 + 10.25: 150.469; <p> in abspos 200.5: 190.469")
+        expect(_delta_ok(px, 1, 26, 56, 155, 185, 150469)).to_equal(true)
+        expect(_delta_ok(px, 1, 26, 56, 195, 230, 190469)).to_equal(true)
+        step("top 30.5 paints one row below top 30")
+        val dy = _centroid(px, 1, 26, 56, 5, 25, 1) - _centroid(px, 1, 26, 56, 80, 100, 1)
+        expect(dy >= 920 and dy <= 1080).to_equal(true)
+
+    it "AC-3: k=1 boxes snap their fractional edges to whole px":
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(PAGE, W, H, "cpu_simd")
+        step("left 10.5: cols 14..33")
+        expect(_g(px, 1, 13, 64)).to_equal(255)
+        expect(_g(px, 1, 14, 64)).to_equal(0)
+        expect(_g(px, 1, 33, 64)).to_equal(0)
+        expect(_g(px, 1, 34, 64)).to_equal(255)
+        step("left 40.3 top 60.5: col 43, rows 63..72")
+        expect(_g(px, 1, 42, 64)).to_equal(255)
+        expect(_g(px, 1, 43, 64)).to_equal(0)
+        expect(_g(px, 1, 50, 62)).to_equal(255)
+        expect(_g(px, 1, 50, 63)).to_equal(0)
+        expect(_g(px, 1, 50, 72)).to_equal(0)
+        expect(_g(px, 1, 50, 73)).to_equal(255)
+        step("right 70.5: cols 303..322")
+        expect(_g(px, 1, 302, 64)).to_equal(255)
+        expect(_g(px, 1, 303, 64)).to_equal(0)
+        expect(_g(px, 1, 322, 64)).to_equal(0)
+        expect(_g(px, 1, 323, 64)).to_equal(255)
+        step("#ccc box at left 100.5: cols 104..143")
+        expect(_g(px, 1, 103, 108)).to_equal(255)
+        expect(_g(px, 1, 104, 108)).to_equal(204)
+        expect(_g(px, 1, 143, 108)).to_equal(204)
+        expect(_g(px, 1, 144, 108)).to_equal(255)
+
+    it "AC-4: k=4 boxes snap to round(4 x exact edge)":
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE, W, H, 4, "cpu_simd")
+        expect(px.len()).to_equal((W * H * 16).to_i64())
+        step("left 10.5: device 54..133; left 40.3: 173; top 60.5: rows 250..289")
+        expect(_g(px, 4, 53, 256)).to_equal(255)
+        expect(_g(px, 4, 54, 256)).to_equal(0)
+        expect(_g(px, 4, 133, 256)).to_equal(0)
+        expect(_g(px, 4, 134, 256)).to_equal(255)
+        expect(_g(px, 4, 172, 256)).to_equal(255)
+        expect(_g(px, 4, 173, 256)).to_equal(0)
+        expect(_g(px, 4, 200, 249)).to_equal(255)
+        expect(_g(px, 4, 200, 250)).to_equal(0)
+        expect(_g(px, 4, 200, 289)).to_equal(0)
+        expect(_g(px, 4, 200, 290)).to_equal(255)
+        step("right 70.5: device 1210..1289; #ccc box 414..573")
+        expect(_g(px, 4, 1209, 256)).to_equal(255)
+        expect(_g(px, 4, 1210, 256)).to_equal(0)
+        expect(_g(px, 4, 1289, 256)).to_equal(0)
+        expect(_g(px, 4, 1290, 256)).to_equal(255)
+        expect(_g(px, 4, 413, 432)).to_equal(255)
+        expect(_g(px, 4, 414, 432)).to_equal(204)
+        expect(_g(px, 4, 573, 432)).to_equal(204)
+        expect(_g(px, 4, 574, 432)).to_equal(255)
+
+    it "AC-5: k=4 text starts at the device-snapped exact pen":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE, W, H, 4, "cpu_simd")
+        step("left 10.25 / 40.5 / 70.75 / 6.33em: 1.0 / 122.0 / 243.0 / 365.0 device px")
+        expect(_delta_ok(px, 4, 0, 30, 8, 30, 1000)).to_equal(true)
+        expect(_delta_ok(px, 4, 0, 30, 38, 60, 122000)).to_equal(true)
+        expect(_delta_ok(px, 4, 0, 30, 68, 90, 243000)).to_equal(true)
+        expect(_delta_ok(px, 4, 0, 30, 98, 120, 365000)).to_equal(true)
+        step("right 300.25 / 250.5: 304.776 / 503.776; nested 602.0; <p> 762.0")
+        expect(_delta_ok(px, 4, 26, 56, 80, 100, 304776)).to_equal(true)
+        expect(_delta_ok(px, 4, 26, 56, 130, 150, 503776)).to_equal(true)
+        expect(_delta_ok(px, 4, 26, 56, 155, 185, 602000)).to_equal(true)
+        expect(_delta_ok(px, 4, 26, 56, 195, 230, 762000)).to_equal(true)
+        step("top 30.5 paints two device rows below top 30")
+        val dy = _centroid(px, 4, 26, 56, 5, 25, 1) - _centroid(px, 4, 26, 56, 80, 100, 1)
+        expect(dy >= 1700 and dy <= 2300).to_equal(true)

@@ -2,10 +2,10 @@
 
 use std.common.crypto.sha256.{sha256_text}
 use compiler.driver.cache.cache_text_join.{cache_text_join_v1}
-use std.nogc_sync_mut.io_runtime.{dir_list}
+use std.nogc_sync_mut.io_runtime.{dir_list_or_empty}
 use std.nogc_sync_mut.sffi.fs.{file_create_excl}
 use std.nogc_sync_mut.io.file_ops.{file_lock, file_unlock}
-use std.io_runtime.{process_is_running}
+use std.io_runtime.{dir_remove_all, process_is_running}
 use compiler.driver.cache.package_archive_types.{PackageActionKeyV1, PackageArchiveReceiptV1, package_action_key_digest_v1, package_archive_receipt_digest_v1, package_archive_receipt_action_digest_v1}
 
 extern fn rt_getpid() -> i64
@@ -19,6 +19,7 @@ extern fn rt_dir_create_all(path: text) -> bool
 
 val CAS_BATCH_SCHEMA_V1: text = "simple-cas-batch-v1"
 val CAS_BATCH_MAX_BYTES_V1: i64 = 16 * 1024 * 1024
+var _cas_batch_tx_seq: i64 = 0
 
 enum CasBatchTransactionErrorV1:
     transaction_exists
@@ -63,13 +64,13 @@ fn cas_batch_read_v1(path: text) -> text?:
     if val content = rt_file_read_regular_no_follow_bounded(
             path, CAS_BATCH_MAX_BYTES_V1):
         return Some(content)
-    nil
+    None
 
 fn cas_batch_current_v1(store_root: text) -> text:
     cas_batch_read_v1("{cas_batch_root_v1(store_root)}/CURRENT") ?? ""
 
 fn cas_batch_digest_valid_v1(value: text) -> bool:
-    if value.len() != 64:
+    if value.byte_len() != 64:
         return false
     var index = 0
     while index < 64:
@@ -135,33 +136,31 @@ fn cas_batch_lookup_receipt_digest_v1(
 ) -> text?:
     val current = cas_batch_current_v1(store_root)
     if not cas_batch_digest_valid_v1(current):
-        return nil
+        return None
     val generation = cas_batch_read_v1(
         "{cas_batch_root_v1(store_root)}/generations/{current}.generation")
-    if generation == nil:
-        return nil
+    if generation.is_none():
+        return None
     val lines = generation.unwrap().split("\n")
     if not cas_batch_generation_header_valid_v1(lines, current):
-        return nil
-    var found: text? = nil
+        return None
+    var found: text? = None
     for index in 5..lines.len():
         val fields = lines[index].split("|")
         if not cas_batch_mapping_valid_v1(fields):
-            return nil
+            return None
         if fields[0] == package_key and fields[1] == action_digest:
-            if found != nil:
-                return nil
+            if found.is_some():
+                return None
             found = Some(fields[2])
     found
 
-# Callers spell their Result success type until contextual mono inference is proven.
-# @workaround bug=mono_return_context_and_fixed_nominal_binding_2026-10-05
 fn cas_batch_error_v1<T>(error: CasBatchTransactionErrorV1) -> Result<T, CasBatchTransactionErrorV1>:
     Err(error)
 
 fn cas_batch_transaction_manifest_v1(transaction: CasBatchTransactionV1) -> text:
     val required = cache_text_join_v1(transaction.required_package_keys, ",")
-    if required == nil:
+    if required.is_none():
         return ""
     val required_value = required.unwrap()
     cache_text_join_v1([
@@ -182,31 +181,36 @@ fn cas_batch_begin_v1(
 ) -> Result<CasBatchTransactionV1, CasBatchTransactionErrorV1>:
     val required = cas_batch_sorted_unique_v1(required_package_keys)
     if store_root == "" or scc_id == "" or required.len() != required_package_keys.len() or required.len() == 0:
-        return cas_batch_error_v1<CasBatchTransactionV1>(CasBatchTransactionErrorV1.incomplete_scc)
+        return cas_batch_error_v1(CasBatchTransactionErrorV1.incomplete_scc)
     val current = cas_batch_current_v1(store_root)
     if (current != "" and not cas_batch_digest_valid_v1(current)) or
             (expected_current_generation != "" and
                 not cas_batch_digest_valid_v1(expected_current_generation)):
-        return cas_batch_error_v1<CasBatchTransactionV1>(CasBatchTransactionErrorV1.generation_corrupt)
+        return cas_batch_error_v1(CasBatchTransactionErrorV1.generation_corrupt)
     if current != expected_current_generation:
-        return cas_batch_error_v1<CasBatchTransactionV1>(CasBatchTransactionErrorV1.generation_changed)
+        return cas_batch_error_v1(CasBatchTransactionErrorV1.generation_changed)
     val root = cas_batch_root_v1(store_root)
     if not rt_dir_create_all("{root}/transactions") or not rt_dir_create_all("{root}/generations"):
-        return cas_batch_error_v1<CasBatchTransactionV1>(CasBatchTransactionErrorV1.fsync_failed)
+        return cas_batch_error_v1(CasBatchTransactionErrorV1.fsync_failed)
     val required_text = cache_text_join_v1(required, ",")
-    if required_text == nil:
-        return cas_batch_error_v1<CasBatchTransactionV1>(CasBatchTransactionErrorV1.fsync_failed)
+    if required_text.is_none():
+        return cas_batch_error_v1(CasBatchTransactionErrorV1.fsync_failed)
     val required_value = required_text.unwrap()
-    val seed = "{expected_current_generation}|{scc_id}|{required_value}|{rt_getpid()}|{rt_time_now_unix_micros()}"
+    _cas_batch_tx_seq = _cas_batch_tx_seq + 1
+    val seed = "{expected_current_generation}|{scc_id}|{required_value}|{rt_getpid()}|{rt_time_now_unix_micros()}|{_cas_batch_tx_seq}"
     val transaction_id = sha256_text(seed)
     val next_generation = sha256_text("generation|{expected_current_generation}|{scc_id}|{required_value}|{transaction_id}")
     val transaction = CasBatchTransactionV1(transaction_id, expected_current_generation, next_generation, scc_id, required, store_root)
     val directory = cas_batch_transaction_dir_v1(store_root, transaction_id)
-    if rt_file_exists(directory) or not rt_dir_create_all("{directory}/objects"):
-        return cas_batch_error_v1<CasBatchTransactionV1>(CasBatchTransactionErrorV1.transaction_exists)
+    if rt_file_exists(directory):
+        return cas_batch_error_v1(CasBatchTransactionErrorV1.transaction_exists)
+    if not rt_dir_create_all("{directory}/objects"):
+        val _cleaned = dir_remove_all(directory)
+        return cas_batch_error_v1(CasBatchTransactionErrorV1.transaction_exists)
     val manifest = cas_batch_transaction_manifest_v1(transaction)
     if manifest == "" or not file_create_excl("{directory}/TRANSACTION", manifest) or not rt_file_fsync("{directory}/TRANSACTION") or not rt_file_fsync(directory):
-        return cas_batch_error_v1<CasBatchTransactionV1>(CasBatchTransactionErrorV1.fsync_failed)
+        val _cleaned = dir_remove_all(directory)
+        return cas_batch_error_v1(CasBatchTransactionErrorV1.fsync_failed)
     Ok(transaction)
 
 fn cas_batch_stage_object_v1(
@@ -217,21 +221,21 @@ fn cas_batch_stage_object_v1(
 ) -> Result<(), CasBatchTransactionErrorV1>:
     val directory = cas_batch_transaction_dir_v1(transaction.store_root, transaction.transaction_id)
     if not rt_file_exists("{directory}/TRANSACTION") or rt_file_exists("{directory}/SEALED"):
-        return cas_batch_error_v1<()>(CasBatchTransactionErrorV1.transaction_closed)
+        return cas_batch_error_v1(CasBatchTransactionErrorV1.transaction_closed)
     if not transaction.required_package_keys.contains(package_key):
-        return cas_batch_error_v1<()>(CasBatchTransactionErrorV1.mapping_authority_mismatch)
+        return cas_batch_error_v1(CasBatchTransactionErrorV1.mapping_authority_mismatch)
     val action_digest = package_action_key_digest_v1(action_key)
     val receipt_digest = package_archive_receipt_digest_v1(archive_receipt)
     if action_digest == "" or receipt_digest == "":
-        return cas_batch_error_v1<()>(CasBatchTransactionErrorV1.object_digest_mismatch)
+        return cas_batch_error_v1(CasBatchTransactionErrorV1.object_digest_mismatch)
     if package_archive_receipt_action_digest_v1(archive_receipt) != action_digest:
-        return cas_batch_error_v1<()>(CasBatchTransactionErrorV1.mapping_authority_mismatch)
+        return cas_batch_error_v1(CasBatchTransactionErrorV1.mapping_authority_mismatch)
     val path = "{directory}/objects/{sha256_text(package_key)}.mapping"
     val mapping = "{package_key}|{action_digest}|{receipt_digest}"
     if not file_create_excl(path, mapping):
-        return cas_batch_error_v1<()>(CasBatchTransactionErrorV1.duplicate_mapping)
+        return cas_batch_error_v1(CasBatchTransactionErrorV1.duplicate_mapping)
     if not rt_file_fsync(path) or not rt_file_fsync("{directory}/objects"):
-        return cas_batch_error_v1<()>(CasBatchTransactionErrorV1.fsync_failed)
+        return cas_batch_error_v1(CasBatchTransactionErrorV1.fsync_failed)
     Ok(())
 
 fn cas_batch_publish_v1(
@@ -241,42 +245,41 @@ fn cas_batch_publish_v1(
             not cas_batch_digest_valid_v1(transaction.next_generation) or
             (transaction.expected_current_generation != "" and
                 not cas_batch_digest_valid_v1(transaction.expected_current_generation))):
-        return cas_batch_error_v1<text>(CasBatchTransactionErrorV1.generation_corrupt)
+        return cas_batch_error_v1(CasBatchTransactionErrorV1.generation_corrupt)
     val store_root = transaction.store_root
     val root = cas_batch_root_v1(store_root)
     val directory = cas_batch_transaction_dir_v1(store_root, transaction.transaction_id)
     if not rt_file_exists("{directory}/TRANSACTION") or rt_file_exists("{directory}/SEALED"):
-        return cas_batch_error_v1<text>(CasBatchTransactionErrorV1.transaction_closed)
+        return cas_batch_error_v1(CasBatchTransactionErrorV1.transaction_closed)
     var mappings: [text] = []
     for package_key in transaction.required_package_keys:
         val path = "{directory}/objects/{sha256_text(package_key)}.mapping"
         val mapping = cas_batch_read_v1(path)
-        if mapping == nil:
-            return cas_batch_error_v1<text>(CasBatchTransactionErrorV1.incomplete_scc)
+        if mapping.is_none():
+            return cas_batch_error_v1(CasBatchTransactionErrorV1.incomplete_scc)
         val mapping_value = mapping.unwrap()
         if not mapping_value.starts_with("{package_key}|"):
-            return cas_batch_error_v1<text>(CasBatchTransactionErrorV1.mapping_authority_mismatch)
+            return cas_batch_error_v1(CasBatchTransactionErrorV1.mapping_authority_mismatch)
         mappings = mappings.push(mapping_value)
-    if dir_list("{directory}/objects").len() != transaction.required_package_keys.len():
-        return cas_batch_error_v1<text>(CasBatchTransactionErrorV1.duplicate_mapping)
+    if dir_list_or_empty("{directory}/objects").len() != transaction.required_package_keys.len():
+        return cas_batch_error_v1(CasBatchTransactionErrorV1.duplicate_mapping)
     var inherited_mappings: [text] = []
     if transaction.expected_current_generation != "":
         val parent = cas_batch_read_v1(
             "{root}/generations/{transaction.expected_current_generation}.generation")
-        if parent == nil:
-            return cas_batch_error_v1<text>(CasBatchTransactionErrorV1.unstaged_object)
+        if parent.is_none():
+            return cas_batch_error_v1(CasBatchTransactionErrorV1.unstaged_object)
         val parent_lines = parent.unwrap().split("\n")
         if not cas_batch_generation_header_valid_v1(
                 parent_lines, transaction.expected_current_generation):
-            return cas_batch_error_v1<text>(CasBatchTransactionErrorV1.generation_corrupt)
+            return cas_batch_error_v1(CasBatchTransactionErrorV1.generation_corrupt)
         var parent_mappings: [text] = []
         for index in 5..parent_lines.len():
             parent_mappings = parent_mappings.push(parent_lines[index])
         val inherited = cas_batch_inherit_mappings_v1(
             parent_mappings, mappings)
-        # @workaround bug=native_result_enum_unwrap_err_2026_10_18 reason=preserve-enum-error-through-pattern-binding
-        if val Err(inherit_error) = inherited:
-            return cas_batch_error_v1<text>(inherit_error)
+        if inherited.is_err():
+            return cas_batch_error_v1(inherited.unwrap_err())
         inherited_mappings = inherited.unwrap()
     var generation_lines = [CAS_BATCH_SCHEMA_V1,
         "generation={transaction.next_generation}",
@@ -289,7 +292,7 @@ fn cas_batch_publish_v1(
         generation_lines = generation_lines.push(mapping)
     val generation_content = cache_text_join_v1(generation_lines, "\n") ?? ""
     if generation_content == "":
-        return cas_batch_error_v1<text>(CasBatchTransactionErrorV1.generation_corrupt)
+        return cas_batch_error_v1(CasBatchTransactionErrorV1.generation_corrupt)
     # Validate the serializer result before touching the filesystem. An exact
     # readback below then proves that the persisted bytes match these rows.
     val serialized_lines = generation_content.split("\n")
@@ -299,37 +302,37 @@ fn cas_batch_publish_v1(
             serialized_lines[2] != "parent={transaction.expected_current_generation}" or
             serialized_lines[3] != "scc={transaction.scc_id}" or
             serialized_lines[4] != "transaction={transaction.transaction_id}"):
-        return cas_batch_error_v1<text>(CasBatchTransactionErrorV1.generation_corrupt)
+        return cas_batch_error_v1(CasBatchTransactionErrorV1.generation_corrupt)
     for index in 5..serialized_lines.len():
         if serialized_lines[index] != generation_lines[index]:
-            return cas_batch_error_v1<text>(CasBatchTransactionErrorV1.generation_corrupt)
+            return cas_batch_error_v1(CasBatchTransactionErrorV1.generation_corrupt)
     val generation_path = "{root}/generations/{transaction.next_generation}.generation"
     if not file_create_excl(generation_path, generation_content) or not rt_file_fsync(generation_path) or not rt_file_fsync("{root}/generations"):
-        return cas_batch_error_v1<text>(CasBatchTransactionErrorV1.fsync_failed)
+        return cas_batch_error_v1(CasBatchTransactionErrorV1.fsync_failed)
     # A native concat/join regression once persisted three bytes while the
     # write returned success. Verify the actual bytes before sealing or
     # publishing CURRENT; a malformed generation must never become visible.
     val persisted = cas_batch_read_v1(generation_path)
-    if persisted == nil:
+    if persisted.is_none():
         rt_file_delete(generation_path)
-        return cas_batch_error_v1<text>(CasBatchTransactionErrorV1.generation_corrupt)
+        return cas_batch_error_v1(CasBatchTransactionErrorV1.generation_corrupt)
     val persisted_content = persisted.unwrap()
     if persisted_content != generation_content:
         rt_file_delete(generation_path)
-        return cas_batch_error_v1<text>(CasBatchTransactionErrorV1.generation_corrupt)
+        return cas_batch_error_v1(CasBatchTransactionErrorV1.generation_corrupt)
     if not file_create_excl("{directory}/SEALED", transaction.next_generation) or not rt_file_fsync("{directory}/SEALED") or not rt_file_fsync(directory):
-        return cas_batch_error_v1<text>(CasBatchTransactionErrorV1.fsync_failed)
+        return cas_batch_error_v1(CasBatchTransactionErrorV1.fsync_failed)
     val lock = file_lock("{root}/publication.lock", 5)
     if lock < 0:
-        return cas_batch_error_v1<text>(CasBatchTransactionErrorV1.publish_conflict)
+        return cas_batch_error_v1(CasBatchTransactionErrorV1.publish_conflict)
     if cas_batch_current_v1(store_root) != transaction.expected_current_generation:
         val _unlocked = file_unlock(lock)
-        return cas_batch_error_v1<text>(CasBatchTransactionErrorV1.current_compare_failed)
+        return cas_batch_error_v1(CasBatchTransactionErrorV1.current_compare_failed)
     val staged_current = "{root}/CURRENT.tmp.{transaction.transaction_id}"
     if not file_create_excl(staged_current, transaction.next_generation) or not rt_file_fsync(staged_current) or not rt_file_rename(staged_current, "{root}/CURRENT") or not rt_file_fsync(root):
         rt_file_delete(staged_current)
         val _unlocked = file_unlock(lock)
-        return cas_batch_error_v1<text>(CasBatchTransactionErrorV1.fsync_failed)
+        return cas_batch_error_v1(CasBatchTransactionErrorV1.fsync_failed)
     val _unlocked = file_unlock(lock)
     Ok(transaction.next_generation)
 
@@ -339,19 +342,23 @@ fn cas_batch_abort_v1(
     val store_root = transaction.store_root
     val directory = cas_batch_transaction_dir_v1(store_root, transaction.transaction_id)
     if rt_file_exists("{directory}/SEALED"):
-        return cas_batch_error_v1<()>(CasBatchTransactionErrorV1.transaction_closed)
-    for name in dir_list("{directory}/objects"):
-        rt_file_delete("{directory}/objects/{name}")
+        return cas_batch_error_v1(CasBatchTransactionErrorV1.transaction_closed)
+    for name in dir_list_or_empty("{directory}/objects"):
+        if name != "" and name != "." and name != "..":
+            rt_file_delete("{directory}/objects/{name}")
     rt_file_delete("{directory}/TRANSACTION")
+    val _cleaned = dir_remove_all(directory)
     Ok(())
 
 fn cas_batch_recover_v1(store_root: text) -> Result<i64, CasBatchTransactionErrorV1>:
     val root = cas_batch_root_v1(store_root)
     val lock = file_lock("{root}/publication.lock", 1)
     if lock < 0:
-        return cas_batch_error_v1<i64>(CasBatchTransactionErrorV1.publish_conflict)
+        return cas_batch_error_v1(CasBatchTransactionErrorV1.publish_conflict)
     var removed = 0
-    for transaction_id in dir_list("{root}/transactions"):
+    for transaction_id in dir_list_or_empty("{root}/transactions"):
+        if transaction_id == "" or transaction_id == "." or transaction_id == "..":
+            continue
         val directory = "{root}/transactions/{transaction_id}"
         val manifest = cas_batch_read_v1("{directory}/TRANSACTION") ?? ""
         var owner = -1
@@ -366,10 +373,12 @@ fn cas_batch_recover_v1(store_root: text) -> Result<i64, CasBatchTransactionErro
             continue
         if process_is_running(owner):
             val _unlocked = file_unlock(lock)
-            return cas_batch_error_v1<i64>(CasBatchTransactionErrorV1.recovery_owner_live)
-        for name in dir_list("{directory}/objects"):
-            rt_file_delete("{directory}/objects/{name}")
+            return cas_batch_error_v1(CasBatchTransactionErrorV1.recovery_owner_live)
+        for name in dir_list_or_empty("{directory}/objects"):
+            if name != "" and name != "." and name != "..":
+                rt_file_delete("{directory}/objects/{name}")
         rt_file_delete("{directory}/TRANSACTION")
+        val _cleaned = dir_remove_all(directory)
         removed = removed + 1
     val _unlocked = file_unlock(lock)
     Ok(removed)

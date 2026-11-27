@@ -5,24 +5,36 @@
 
 use compiler.mir.mir_data.{MirModule}
 use compiler.backend.native.mach_inst.{MachModule, EncodedFunction}
-use compiler.backend.native.elf_writer.{ElfWriter, ElfSection, ElfSectionKind, ElfSymbol, ElfSymbolBind, ElfSymbolType, ElfReloc, ElfRelocType, elf_writer_x86_64, elf_writer_aarch64, elf_writer_riscv64, elf_add_section, elf_add_symbol, new_text_section, new_data_section, new_data_section_aligned, new_rodata_section, new_rodata_section_aligned, section_add_reloc, new_func_symbol, new_extern_symbol, write_elf64}
+use compiler.backend.native.elf_writer.{ElfWriter, ElfSection, ElfSectionKind, ElfEmitterSymbol, ElfSymbolBind, ElfSymbolType, ElfReloc, ElfRelocType, elf_writer_x86_64, elf_writer_aarch64, elf_writer_riscv64, elf_add_section, elf_add_symbol, new_text_section, new_data_section, new_data_section_aligned, new_rodata_section, new_rodata_section_aligned, new_xray_map_section, section_add_reloc, new_func_symbol, new_weak_func_symbol, new_extern_symbol, write_elf64}
 use compiler.backend.native.layout_solver.{solve_layout, LayoutPlan}
-use compiler.backend.native.native_layout.{reorder_by_layout}
+use compiler.backend.native.native_layout.{reorder_by_layout, native_comdat_function_names}
 use compiler.backend.native.native_section_bytes.{collect_section_bytes, solve_native_data_layout}
+use compiler.backend.native.xray_sled_emit.{XraySledSite, xray_map_section_bytes, xray_map_section_bytes_for}
+use std.common.trace.xray_native_map_format_v1.{XRAY_MAP_ISA_X86_64_V1}
 
 # ============================================================================
 # ELF Emission - x86_64
 # ============================================================================
 
-fn emit_elf_x86_64(
+pub fn emit_elf_x86_64(
     encoded_funcs: [EncodedFunction],
     module: MachModule,
     mir_module: MirModule
 ) -> [i64]:
+    emit_elf_x86_64_xray(encoded_funcs, module, mir_module, [])
+
+# `xray_sites` non-empty only with --xray (native backend, PR6): adds the
+# `.simple_xray_map` section. Empty => byte-identical to the pre-XRay object.
+pub fn emit_elf_x86_64_xray(
+    encoded_funcs: [EncodedFunction],
+    module: MachModule,
+    mir_module: MirModule,
+    xray_sites: [XraySledSite]
+) -> [i64]:
     var writer = elf_writer_x86_64()
 
     # Phase 4a: Generate layout plan and reorder functions
-    val layout_plan = solve_layout(mir_module, nil)  # nil = no profile data yet
+    val layout_plan = solve_layout(mir_module, None)  # nil = no profile data yet
     val ordered_funcs = reorder_by_layout(encoded_funcs, layout_plan)
 
     # Track phase boundaries for padding
@@ -109,7 +121,10 @@ fn emit_elf_x86_64(
         func_offsets[func.name] = all_code.len()
 
         val code_start = all_code.len()
-        all_code = all_code + func.code
+        var fbi = 0
+        while fbi < func.code.len():
+            all_code.push(func.code[fbi])
+            fbi = fbi + 1
 
         # Adjust relocation offsets
         for reloc in func.relocations:
@@ -137,6 +152,9 @@ fn emit_elf_x86_64(
         text_section = section_add_reloc(text_section, reloc)
     writer = elf_add_section(writer, text_section)
 
+    if xray_sites.len() > 0:
+        writer = elf_add_section(writer, new_xray_map_section(xray_map_section_bytes_for(XRAY_MAP_ISA_X86_64_V1, xray_sites, func_offsets, all_code)))
+
     # Create .rodata section for string constants
     if rodata_layout.bytes.len() > 0:
         writer = elf_add_section(writer, new_rodata_section_aligned(rodata_layout.bytes, rodata_layout.max_alignment))
@@ -155,7 +173,7 @@ fn emit_elf_x86_64(
         if section_emitted and offsets.contains(entry.name):
             val bind = if entry.is_global: ElfSymbolBind.Global else: ElfSymbolBind.Local
             val section_index = if entry.is_readonly: rodata_section_index else: data_section_index
-            val sym = ElfSymbol(
+            val sym = ElfEmitterSymbol(
                 name: entry.name,
                 sym_bind: bind,
                 sym_type: ElfSymbolType.Object,
@@ -173,11 +191,12 @@ fn emit_elf_x86_64(
             writer = elf_add_symbol(writer, new_extern_symbol(ext_sym))
 
     # Add function symbols (defined, global) - use ordered functions
+    val comdat_names = native_comdat_function_names(mir_module)
     for func in ordered_funcs:
         var offset = 0
         if func_offsets.contains(func.name):
             offset = func_offsets[func.name]
-        val sym = new_func_symbol(func.name, 1, offset, func.code.len())
+        val sym = if comdat_names.has(func.name): new_weak_func_symbol(func.name, 1, offset, func.code.len()) else: new_func_symbol(func.name, 1, offset, func.code.len())
         writer = elf_add_symbol(writer, sym)
 
     write_elf64(writer)
@@ -186,15 +205,25 @@ fn emit_elf_x86_64(
 # ELF Emission - AArch64
 # ============================================================================
 
-fn emit_elf_aarch64(
+pub fn emit_elf_aarch64(
     encoded_funcs: [EncodedFunction],
     module: MachModule,
     mir_module: MirModule
 ) -> [i64]:
+    emit_elf_aarch64_xray(encoded_funcs, module, mir_module, [])
+
+# `xray_sites` non-empty only with --xray (native backend): adds the
+# `.simple_xray_map` section. Empty => byte-identical to the pre-XRay object.
+pub fn emit_elf_aarch64_xray(
+    encoded_funcs: [EncodedFunction],
+    module: MachModule,
+    mir_module: MirModule,
+    xray_sites: [XraySledSite]
+) -> [i64]:
     var writer = elf_writer_aarch64()
 
     # Phase 4a: Generate layout plan and reorder functions
-    val layout_plan = solve_layout(mir_module, nil)  # nil = no profile data yet
+    val layout_plan = solve_layout(mir_module, None)  # nil = no profile data yet
     val ordered_funcs = reorder_by_layout(encoded_funcs, layout_plan)
 
     # Track phase boundaries for padding
@@ -270,7 +299,10 @@ fn emit_elf_aarch64(
         func_offsets[func.name] = all_code.len()
 
         val code_start = all_code.len()
-        all_code = all_code + func.code
+        var fbi = 0
+        while fbi < func.code.len():
+            all_code.push(func.code[fbi])
+            fbi = fbi + 1
 
         # Adjust relocation offsets
         for reloc in func.relocations:
@@ -293,6 +325,9 @@ fn emit_elf_aarch64(
         text_section = section_add_reloc(text_section, reloc)
     writer = elf_add_section(writer, text_section)
 
+    if xray_sites.len() > 0:
+        writer = elf_add_section(writer, new_xray_map_section(xray_map_section_bytes(xray_sites, func_offsets, all_code)))
+
     # Create .rodata section
     if has_rodata_a:
         writer = elf_add_section(writer, new_rodata_section_aligned(rodata_layout_a.bytes, rodata_layout_a.max_alignment))
@@ -305,7 +340,7 @@ fn emit_elf_aarch64(
         val offsets = if entry.is_readonly: rodata_layout_a.offsets else: data_layout_a.offsets
         val section_emitted = if entry.is_readonly: has_rodata_a else: has_data_a
         if section_emitted and offsets.contains(entry.name):
-            writer = elf_add_symbol(writer, ElfSymbol(name: entry.name,
+            writer = elf_add_symbol(writer, ElfEmitterSymbol(name: entry.name,
                 sym_bind: if entry.is_global: ElfSymbolBind.Global else: ElfSymbolBind.Local,
                 sym_type: ElfSymbolType.Object,
                 section_index: native_object_section_index(entry.is_readonly, has_data_a),
@@ -315,11 +350,12 @@ fn emit_elf_aarch64(
     for ext_sym in module.extern_symbols:
         writer = elf_add_symbol(writer, new_extern_symbol(ext_sym))
 
+    val comdat_names = native_comdat_function_names(mir_module)
     for func in ordered_funcs:
         var offset = 0
         if func_offsets.contains(func.name):
             offset = func_offsets[func.name]
-        val sym = new_func_symbol(func.name, 1, offset, func.code.len())
+        val sym = if comdat_names.has(func.name): new_weak_func_symbol(func.name, 1, offset, func.code.len()) else: new_func_symbol(func.name, 1, offset, func.code.len())
         writer = elf_add_symbol(writer, sym)
 
     write_elf64(writer)
@@ -328,7 +364,7 @@ fn emit_elf_aarch64(
 # ELF Emission - RISC-V 64
 # ============================================================================
 
-fn emit_elf_riscv64(
+pub fn emit_elf_riscv64(
     encoded_funcs: [EncodedFunction],
     module: MachModule,
     mir_module: MirModule
@@ -336,7 +372,7 @@ fn emit_elf_riscv64(
     var writer = elf_writer_riscv64()
 
     # Phase 4a: Generate layout plan and reorder functions
-    val layout_plan = solve_layout(mir_module, nil)  # nil = no profile data yet
+    val layout_plan = solve_layout(mir_module, None)  # nil = no profile data yet
     val ordered_funcs = reorder_by_layout(encoded_funcs, layout_plan)
 
     # Track phase boundaries for padding
@@ -422,7 +458,10 @@ fn emit_elf_riscv64(
         func_offsets[func.name] = all_code.len()
 
         val code_start = all_code.len()
-        all_code = all_code + func.code
+        var fbi = 0
+        while fbi < func.code.len():
+            all_code.push(func.code[fbi])
+            fbi = fbi + 1
 
         # Adjust relocation offsets
         for reloc in func.relocations:
@@ -461,14 +500,14 @@ fn emit_elf_riscv64(
         writer = elf_add_section(writer, new_data_section_aligned(data_layout_r.bytes, data_layout_r.max_alignment))
 
     for anchor in anchor_names_r:
-        writer = elf_add_symbol(writer, ElfSymbol(name: anchor, sym_bind: ElfSymbolBind.Local,
+        writer = elf_add_symbol(writer, ElfEmitterSymbol(name: anchor, sym_bind: ElfSymbolBind.Local,
             sym_type: ElfSymbolType.NoType, section_index: 1, value: anchor_offsets_r[anchor], size: 0))
 
     for entry in module.data_sections:
         val offsets = if entry.is_readonly: rodata_layout_r.offsets else: data_layout_r.offsets
         val section_emitted = if entry.is_readonly: has_rodata_r else: has_data_r
         if section_emitted and offsets.contains(entry.name):
-            writer = elf_add_symbol(writer, ElfSymbol(name: entry.name,
+            writer = elf_add_symbol(writer, ElfEmitterSymbol(name: entry.name,
                 sym_bind: if entry.is_global: ElfSymbolBind.Global else: ElfSymbolBind.Local,
                 sym_type: ElfSymbolType.Object,
                 section_index: native_object_section_index(entry.is_readonly, has_data_r),
@@ -478,19 +517,20 @@ fn emit_elf_riscv64(
     for ext_sym in module.extern_symbols:
         writer = elf_add_symbol(writer, new_extern_symbol(ext_sym))
 
+    val comdat_names = native_comdat_function_names(mir_module)
     for func in ordered_funcs:
         var offset = 0
         if func_offsets.contains(func.name):
             offset = func_offsets[func.name]
-        val sym = new_func_symbol(func.name, 1, offset, func.code.len())
+        val sym = if comdat_names.has(func.name): new_weak_func_symbol(func.name, 1, offset, func.code.len()) else: new_func_symbol(func.name, 1, offset, func.code.len())
         writer = elf_add_symbol(writer, sym)
 
     write_elf64(writer)
 
-fn rv64_pcrel_low_anchor_valid(anchor_offset: i64) -> bool:
+pub fn rv64_pcrel_low_anchor_valid(anchor_offset: i64) -> bool:
     anchor_offset >= 0 and anchor_offset % 4 == 0
 
-fn native_object_section_index(is_readonly: bool, has_data: bool) -> i64:
+pub fn native_object_section_index(is_readonly: bool, has_data: bool) -> i64:
     if is_readonly and has_data: 3 else: 2
 
 # ============================================================================

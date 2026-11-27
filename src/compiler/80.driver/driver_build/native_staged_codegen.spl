@@ -12,8 +12,9 @@
 # surfaces), the frozen capsule (own MIR + storage snapshot) and object
 # emission. The link consumes object paths only. So the lowering loop flushes
 # a full batch through those stages, records what the final link/verdict
-# needs in this summary, and releases the batch's MirModules. The final
-# `compile_to_native` call handles the tail batch and merges this summary.
+# needs in this summary, and releases the batch's MirModules. Successful builds
+# send the tail through final `compile_to_native`; after a lowering failure,
+# the driver flushes it with its own verdict so later good modules still emit.
 #
 # What must persist across batches (and therefore lives here, not in MIR):
 # object paths, per-module outcomes (so ONE build still names every bad
@@ -21,17 +22,21 @@
 # receipt counts, cache hit/miss counts, witness-shadow evidence, the Phase-2
 # reuse ledger, and the whole schedule's module names (the frozen storage
 # registry must know modules that are lowered after it freezes).
-use compiler.driver.driver_build.build_outcome.{BuildOutcomeSet}
+use compiler.driver.driver_build.build_outcome.{BuildOutcomeSet,
+    build_outcome_abnormal_exit_label_v1, build_outcome_diagnostics_dir_v1,
+    build_outcome_write_diag_artifact_v1}
 use std.nogc_sync_mut.io_runtime.{env_get_nullable}
+use compiler.driver.driver_build.smf_object_spool_v1.{SmfObjectSpoolV1, smf_object_spool_begin_v1,
+    smf_object_spool_dir_v1}
 
 pub const NATIVE_STAGED_CODEGEN_BATCH_ENV_V1: text = "SIMPLE_NATIVE_STAGED_CODEGEN_BATCH"
-# Default OFF. Evicting a promoted MirModule only drops a reference: the
-# native runtime has no collector, so in-process staging reorders work but
-# does not lower peak RSS (driver_types.spl evict_mir_module comment, probe
-# P0: 0 of 2001 allocations reclaimed). Process-level MIR sharding
-# (SIMPLE_MIR_SHARDING) is the memory fix; this knob stays as an explicit
-# opt-in for diagnosis.
-pub const NATIVE_STAGED_CODEGEN_DEFAULT_BATCH_V1: i64 = 0
+# Default 8: objects stream out during MIR lowering (per-file src -> obj
+# default, bootstrap_options.md) instead of all at the end. Staging does not
+# lower peak RSS -- evicting a promoted MirModule only drops a reference and
+# the native runtime has no collector (probe P0: 0 of 2001 allocations
+# reclaimed); process-level MIR sharding (SIMPLE_MIR_SHARDING) is the memory
+# fix. `0` restores the unstaged whole-batch order.
+pub const NATIVE_STAGED_CODEGEN_DEFAULT_BATCH_V1: i64 = 8
 
 pub class NativeStagedCodegenStateV1:
     active: bool
@@ -41,9 +46,17 @@ pub class NativeStagedCodegenStateV1:
     scheduled_names: [text]
     batches_flushed: i64
     modules_flushed: i64
+    # Modules of batches that emitted no object (lowering/verify/borrow/codegen
+    # failure). Reported as the native_staged progress `failed` count; before
+    # this the progress line hard-coded failed=0 while whole batches were
+    # silently withheld (doc/08_tracking/bug/native_staged_progress_failed_zero_2026-11-16.md).
+    modules_withheld: i64
     lowering_failed: bool
     verify_failed: bool
     borrow_failed: bool
+    # Batches that failed on their own (gate or codegen). Later batches keep
+    # emitting; the build still fails at the end naming every entry.
+    failed_batches: [text]
     object_files: [text]
     collection_bindings: [text]
     module_outcomes: BuildOutcomeSet
@@ -64,17 +77,55 @@ pub class NativeStagedCodegenStateV1:
     shard_queue: text
     shard_claimed_names: [text]
     module_objects: {text: text}
+    module_functions: {text: i64}
+    module_statics: {text: i64}
+    # OutputFormat.Both: each emitted module's SMF object + driver-manifest
+    # bytes (driver_build/smf_staged_parts_v1.spl), so the SMF half does not
+    # re-read a MIR set this lane already released.
+    smf_part_objects: SmfObjectSpoolV1
+    smf_part_manifests: {text: [u8]}
 
 impl NativeStagedCodegenStateV1:
+    # The lowering verdict is per batch: a batch holding a failed module (whose
+    # broken MIR is still in ctx.mir_modules outside go-to-end) emits nothing,
+    # but must not withhold later batches. The build still fails at the end
+    # from the collected MIR errors, so the link stays blocked.
+    me record_batch_lowering_v1(batch_failed: bool):
+        self.lowering_failed = batch_failed
+
+    # Count the modules of one flushed batch that did not reach an object.
+    # `flushed_delta` is how far modules_flushed advanced for this batch.
+    me record_batch_withheld_v1(batch_module_count: i64, flushed_delta: i64):
+        self.modules_withheld = self.modules_withheld +
+            native_staged_withheld_count_v1(batch_module_count, flushed_delta)
+
+    # After the last shard claim the schedule may still contain unclaimed
+    # rows. The ordinary flush can therefore evict even the last survivor.
+    # Require named coverage so a missing claim cannot pass as a facade.
+    # reason: the go-to-end ledger and shard claims both use canonical text module names.
+    @allow(primitive_api)
+    fn shard_survivors_flushed_v1(excluded: [text]) -> bool:
+        if not self.active or self.shard_queue == "" or self.modules_flushed <= 0 or
+                self.modules_withheld != 0 or self.failed_batches.len() != 0 or
+                self.borrow_failed or self.verify_failed or self.lowering_failed:
+            return false
+        var flushed = 0
+        for name in self.shard_claimed_names:
+            if self.module_functions.contains_key(name):
+                flushed = flushed + 1
+            elif not excluded.contains(name):
+                return false
+        flushed == self.modules_flushed and flushed < self.shard_claimed_names.len()
+
     static fn inactive() -> NativeStagedCodegenStateV1:
         NativeStagedCodegenStateV1.begin(0)
 
     static fn begin(batch_size: i64) -> NativeStagedCodegenStateV1:
         NativeStagedCodegenStateV1(active: batch_size > 0,
             batch_size: batch_size, flushing: false, scheduled_names: [],
-            batches_flushed: 0, modules_flushed: 0,
+            batches_flushed: 0, modules_flushed: 0, modules_withheld: 0,
             lowering_failed: false, verify_failed: false, borrow_failed: false,
-            object_files: [], collection_bindings: [],
+            failed_batches: [], object_files: [], collection_bindings: [],
             module_outcomes: BuildOutcomeSet.empty(), module_unit_id: 0,
             lane_functions: 0, lane_statics: 0, lane_objectless: 0,
             cache_hit_count: 0, cache_miss_count: 0,
@@ -82,7 +133,16 @@ impl NativeStagedCodegenStateV1:
             witness_shadow_mismatch_lines: [],
             phase2_native_items_handled: {}, phase2_native_reuse_hits: 0,
             phase2_native_rejections: 0, shard_queue: "",
-            shard_claimed_names: [], module_objects: {})
+            shard_claimed_names: [], module_objects: {}, module_functions: {}, module_statics: {},
+            smf_part_objects: smf_object_spool_begin_v1(smf_object_spool_dir_v1()), smf_part_manifests: {})
+
+# Modules of a batch that emitted no object: the batch size minus how many
+# modules compile_to_native recorded as flushed for it, never negative.
+pub fn native_staged_withheld_count_v1(batch_module_count: i64, flushed_delta: i64) -> i64:
+    if batch_module_count <= 0: return 0
+    if flushed_delta <= 0: return batch_module_count
+    if flushed_delta >= batch_module_count: return 0
+    batch_module_count - flushed_delta
 
 # Strict decimal parse. Empty means "unset" (default batch); anything that is
 # not a plain non-negative decimal is -1 so the caller fails closed instead of
@@ -109,14 +169,87 @@ pub fn native_staged_codegen_batch_parse_v1(raw: text) -> i64:
         index = index + 1
     value
 
+# Scale default staged batch with requested --threads (`SIMPLE_NATIVE_BUILD_THREADS`)
+# when `SIMPLE_NATIVE_STAGED_CODEGEN_BATCH` is unset so multi-core codegen pools
+# stay saturated across full worker waves instead of draining every 8 modules.
+# reason: raw env string and requested thread count for staged batch sizing
+@allow(primitive_api)
+pub fn native_staged_codegen_batch_for_threads_v1(raw_batch: text, requested_threads: i64) -> i64:
+    val parsed = native_staged_codegen_batch_parse_v1(raw_batch)
+    if raw_batch != "" or parsed <= 0 or requested_threads <= 2:
+        return parsed
+    val scaled = requested_threads * 4
+    if scaled <= NATIVE_STAGED_CODEGEN_DEFAULT_BATCH_V1:
+        return NATIVE_STAGED_CODEGEN_DEFAULT_BATCH_V1
+    if scaled > 64: 64 else: scaled
+
 # Batch size for this process: 0 disables staging, -1 is a malformed knob.
 pub fn native_staged_codegen_batch_size_v1() -> i64:
-    native_staged_codegen_batch_parse_v1(
-        env_get_nullable(NATIVE_STAGED_CODEGEN_BATCH_ENV_V1) ?? "")
+    val raw = env_get_nullable(NATIVE_STAGED_CODEGEN_BATCH_ENV_V1) ?? ""
+    val threads = (env_get_nullable("SIMPLE_NATIVE_BUILD_THREADS") ?? "").trim().to_i64() ?? 0
+    native_staged_codegen_batch_for_threads_v1(raw, threads)
 
 # A batch is flushed only when it is full AND more modules remain to be
-# lowered, so the tail batch is always non-empty and goes through the
-# ordinary aot_compile pass chain + final compile_to_native (verdict, link).
+# lowered. A successful tail stays non-empty for the ordinary aot_compile
+# pass chain + final compile_to_native (verdict, link).
 pub fn native_staged_codegen_flush_due_v1(pending: i64, batch_size: i64,
         lowered: i64, scheduled: i64) -> bool:
     batch_size > 0 and pending >= batch_size and lowered < scheduled
+
+# Failure recovery must release the pending tail before the global MIR error
+# stops stage_emit_object. The tail still uses its own lowering verdict.
+pub fn native_staged_codegen_recovery_flush_due_v1(
+        active: bool, go_to_end: bool, pending: i64, failed_modules: i64) -> bool:
+    active and not go_to_end and pending > 0 and failed_modules > 0
+
+# The initializer object receipt (cache/initializer_object_capture_v1.spl) is
+# held only in memory and has one reader, the in-process link join
+# (cache/initializer_link_capture_v1.spl). A MIR shard worker never links: each
+# compile_to_native it runs is a flushing batch that returns before the link,
+# and the link child lowers nothing, so it cannot rebuild a receipt. The capture
+# is dead work there and costs about 5x the module's MIR in scratch per module
+# (doc/08_tracking/bug/native_build_cache_save_memory_blowup_2026-11-21.md).
+# reason: raw staged-state scalars (flushing flag, shard ledger queue path)
+@allow(primitive_api)
+pub fn native_staged_initializer_capture_dead_v1(flushing: bool, shard_queue: text) -> bool:
+    flushing and shard_queue != ""
+
+# Pending / in-flight module names for the active staged codegen batch:
+# covers unrecorded scheduled entries up to `batch_size` and any shard claims
+# not yet finalized in `module_objects`, so an abort names candidate modules.
+pub fn native_staged_codegen_pending_modules_v1(state: NativeStagedCodegenStateV1) -> [text]:
+    var pending: [text] = []
+    val recorded = state.module_outcomes.records.len()
+    val window = if state.batch_size > 0: state.batch_size else: state.scheduled_names.len()
+    var idx = recorded
+    while idx < state.scheduled_names.len() and pending.len() < window:
+        val candidate = state.scheduled_names[idx]
+        if candidate != "" and not pending.contains(candidate):
+            pending.push(candidate)
+        idx = idx + 1
+    for claimed in state.shard_claimed_names:
+        if claimed != "" and not state.module_objects.contains_key(claimed) and
+                not state.module_outcomes.has_path(claimed) and
+                not pending.contains(claimed):
+            pending.push(claimed)
+    pending
+
+# Attribute an abnormal exit during a staged codegen batch, naming the active
+# batch number, candidate modules, abort cause, and durable `diagnostics/` file.
+# reason: raw process exit status characterizes the abnormal staged batch termination
+@allow(primitive_api)
+pub fn native_staged_codegen_batch_attribute_v1(state: NativeStagedCodegenStateV1,
+        status: i64, stderr_text: text, diag_dir: text = "",
+        batch_modules: [text] = []) -> text:
+    val batch_num = state.batches_flushed + 1
+    val modules = if batch_modules.len() > 0:
+        batch_modules
+    else:
+        native_staged_codegen_pending_modules_v1(state)
+    val mod_text = if modules.len() == 0: "<unknown>" else: modules.join(", ")
+    val label = build_outcome_abnormal_exit_label_v1(status, false)
+    val target_dir = if diag_dir != "": diag_dir else: build_outcome_diagnostics_dir_v1(state.shard_queue)
+    val diag_path = build_outcome_write_diag_artifact_v1(
+        target_dir, "staged-batch-abort", mod_text, "staged-batch-{batch_num}",
+        status, false, "batch={batch_num} queue={state.shard_queue}", stderr_text)
+    "[staged-codegen] batch-abort batch={batch_num} {label} modules=[{mod_text}] diag={diag_path}"

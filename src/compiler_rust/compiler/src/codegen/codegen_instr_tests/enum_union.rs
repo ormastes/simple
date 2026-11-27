@@ -14,6 +14,7 @@ fn codegen_enum_unit() {
             dest,
             enum_name: "Color".to_string(),
             variant_name: "Red".to_string(),
+            discriminant: simple_runtime::value::hash_variant_discriminant("Red"),
         });
         dest
     }));
@@ -33,6 +34,7 @@ fn codegen_enum_with() {
             dest,
             enum_name: "Option".to_string(),
             variant_name: "Some".to_string(),
+            discriminant: simple_runtime::value::hash_variant_discriminant("Some"),
             payload,
         });
         dest
@@ -49,6 +51,7 @@ fn codegen_enum_discriminant() {
             dest: val,
             enum_name: "Color".to_string(),
             variant_name: "Red".to_string(),
+            discriminant: simple_runtime::value::hash_variant_discriminant("Red"),
         });
         block.instructions.push(MirInst::EnumDiscriminant { dest, value: val });
         dest
@@ -70,6 +73,7 @@ fn codegen_enum_payload() {
             dest: wrapped,
             enum_name: "Option".to_string(),
             variant_name: "Some".to_string(),
+            discriminant: simple_runtime::value::hash_variant_discriminant("Some"),
             payload,
         });
         block.instructions.push(MirInst::EnumPayload { dest, value: wrapped });

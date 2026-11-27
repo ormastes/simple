@@ -5,32 +5,50 @@
 
 use compiler.backend.native.mach_inst.{EncodedFunction}
 use compiler.backend.native.layout_solver.{LayoutPlan}
+use compiler.mir.mir_data.{MirModule}
 
 fn reorder_by_layout(
     encoded_funcs: [EncodedFunction],
     layout_plan: LayoutPlan
 ) -> [EncodedFunction]:
     """Reorder encoded functions according to layout plan."""
+    var index_by_name: Dict<text, i64> = {}
+    var idx: i64 = 0
+    while idx < encoded_funcs.len():
+        val name = encoded_funcs[idx].name
+        if not index_by_name.has(name):
+            index_by_name[name] = idx
+        idx = idx + 1
+
     var ordered: [EncodedFunction] = []
+    var placed_names: Dict<text, bool> = {}
 
     # Process each phase group in order
     for group in layout_plan.groups:
         for func_info in group.functions:
-            # Find matching encoded function
-            for enc_func in encoded_funcs:
-                if enc_func.name == func_info.name:
-                    ordered.push(enc_func)
-                    break
+            if index_by_name.has(func_info.name):
+                val match_idx = index_by_name[func_info.name]
+                ordered.push(encoded_funcs[match_idx])
+                placed_names[func_info.name] = true
 
     # Add any functions not in the plan (shouldn't happen)
     for enc_func in encoded_funcs:
-        var found = false
-        for ordered_func in ordered:
-            if ordered_func.name == enc_func.name:
-                found = true
-                break
-        if not found:
+        if not placed_names.has(enc_func.name):
             ordered.push(enc_func)
 
     ordered
 
+
+fn native_comdat_function_names(module: MirModule) -> Dict<text, bool>:
+    """Names of module-scoped instances (`MirFunction.is_comdat`).
+
+    Every object that instantiated one defines its own copy under the same
+    bare name, so the object writers bind these weak (ELF STB_WEAK, Mach-O
+    N_WEAK_DEF) and the linker keeps exactly one instead of reporting a
+    duplicate strong definition."""
+    var names: Dict<text, bool> = {}
+    for key in module.functions.keys():
+        val func = module.functions[key]
+        if func.is_comdat:
+            names[func.name] = true
+    names

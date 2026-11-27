@@ -1,0 +1,52 @@
+"""Bounded full-native SDN repository configuration loader.
+
+`validated` means syntax/schema validated, never policy accepted. The host must
+pin accepted bytes and policy before using the routing and effective APIs.
+Missing required input errors; callers explicitly choose any legacy profile.
+"""
+use std.common.sdn.strict_v1.{sdn_parse_strict_bytes_v1, sdn_strict_limits_valid_v1}
+use std.common.sdn.strict_types_v1.{SdnStrictLimitsV1}
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.io.read_only_file_view.{read_only_file_view_read_beneath_bounded_v1}
+use std.scv.scv_config_schema_v1.{scv_config_schema_v1}
+use std.scv.scv_config_fields_v1.{scv_config_text_v1}
+use std.scv.scv_config_routes_v1.{scv_config_routes_parse_v1}
+export use std.scv.scv_config_types_v1.{ScvConfigV1, ScvRouteV1, ScvAuthorityConstraintsV1, ScvEffectiveConfigV1}
+use std.common.sdn.value.{SdnValue}
+
+pub fn scv_config_parse_v1(bytes: [u8], limits: SdnStrictLimitsV1) -> Result<ScvConfigV1, text>:
+    match sdn_parse_strict_bytes_v1(bytes, limits):
+        case Err(issue): Err(issue.code + ": config line " + issue.line.to_text() + ": " + issue.message)
+        case Ok(document):
+            val settings = scv_config_schema_v1(document.value)?
+            Ok(ScvConfigV1(schema_version: 1, profile: "native_v1", validated: true,
+                source_sha256: sha256_u8_hex(bytes), routes_sha256: "", settings: settings, routes: []))
+
+pub fn scv_config_attach_routes_v1(config: ScvConfigV1, bytes: [u8], limits: SdnStrictLimitsV1) -> Result<ScvConfigV1, text>:
+    if not config.validated or config.schema_version != 1: return Err("unvalidated_config: routes require native_v1 schema")
+    var result = config
+    result.routes = scv_config_routes_parse_v1(bytes, limits)?
+    result.routes_sha256 = sha256_u8_hex(bytes)
+    Ok(result)
+
+pub fn scv_config_load_v1(root: text, limits: SdnStrictLimitsV1) -> Result<ScvConfigV1, text>:
+    if not sdn_strict_limits_valid_v1(limits): return Err("invalid_limits: config")
+    if root.len() == 0: return Err("unsafe_path: empty repository root")
+    val bytes = read_only_file_view_read_beneath_bounded_v1(root, "config/scv.sdn", limits.max_source_bytes)?
+    val config = scv_config_parse_v1(bytes, limits)?
+    val path = scv_config_routes_path_v1(config)?
+    val routes = read_only_file_view_read_beneath_bounded_v1(root, path, limits.max_source_bytes)?
+    scv_config_attach_routes_v1(config, routes, limits)
+
+pub fn scv_config_routes_path_v1(config: ScvConfigV1) -> Result<text, text>:
+    if not config.validated: return Err("unvalidated_config: no routes path")
+    match config.settings["solvers"]:
+        case Dict(fields): scv_config_text_v1(fields["routes_file"], "routes_file")
+        case _: Err("wrong_type: solvers")
+
+pub fn scv_config_legacy_v1() -> ScvConfigV1:
+    val settings: Dict<text, SdnValue> = {}
+    ScvConfigV1(schema_version: 0, profile: "legacy_default", validated: false,
+        source_sha256: "", routes_sha256: "", settings: settings, routes: [])
+
+export scv_config_parse_v1, scv_config_attach_routes_v1, scv_config_load_v1, scv_config_routes_path_v1, scv_config_legacy_v1

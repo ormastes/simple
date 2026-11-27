@@ -1,0 +1,50 @@
+# Self-hosted accessor / trait-alias forwarding: PR series (research, read-only)
+Tree: C:/dev/wt-mdsoc. Bug: doc/08_tracking/bug/selfhost_accessor_forwarding_missing_2026-10-26.md
+Seed ref: interpreter/expr/calls.rs:616, node_exec.rs:863, hir/lower/expr/access.rs:743, parser types_def/mod.rs:1072-1079 (class_trait_aliases), :216-225 (trait_alias_forwards).
+
+## Findings that shape the plan
+- There are TWO lowering routes for a field read; both need the fallback:
+  (a) full path: `20.hir/hir_lowering/_Expressions/expression_core.spl:661` `case ExprKind.Field(base, field)`; ends in `HirExprKind.Field(fld_lowered_base, fld_name_t, None)` at :749/:753.
+  (b) bootstrap flat path: `20.hir/hir_lowering/_Items/module_declarations_bootstrap.spl:561-562` (`EXPR_FIELD_ACCESS`, field name = `expr_get_str`). Bootstrap compiler source itself goes through (b); do (a) first, mirror in (b) only if the spec probe runs on (b).
+- Field existence oracle already exists: `field_type_for_hir_base(base, name)` (expression_core.spl:~735) returns `HirTypeKind.Error` when no field. That Error is today the silent fall-through to untyped `Field(...)` at :753 = where "undefined field" is not an error. Fallback hooks right there.
+- Method existence: use the same per-type tables lowering already has for method calls (symbol table `hir_symbol_table_methods.spl`); `struct_field_types_by_name` (types.spl:209) is fields only.
+- Assignment: flat parser emits `target = value` as expression stmt; routed at `20.hir/hir_lowering/statements.spl:740` `case ExprKind.Assign` -> `lower_hir_assignment_kind(target, op, value, span)`. Setter hook goes in that function (find with grep `fn lower_hir_assignment_kind`).
+- `hir_forward_lowering.spl:28-29,46-55` covers only `alias fn/me N = F.M` (Phase 2); Phase 3 (`alias Trait = field`) deliberately reported by `unrepresented_forward_forms` because it needs trait method signatures from outside (layering note). Compiler side HAS trait defs in `25.traits/trait_def.spl`, so no app.desugar import is needed.
+- Parser: `alias` is only treated as an "opaque declaration" keyword at `10.frontend/core/parser_stmts.spl:826`; no node produced for class-body `alias Trait = field`. Must confirm which function parses class bodies (grep `parse_class_body` in `10.frontend/core/`) and the flat-AST decl emitter.
+- MIR needs nothing: results lower to ordinary `Call`/`MethodCall`.
+
+## PR1 getter fallback for reads (~120 LOC)
+Files: expression_core.spl:661-753 (+ mirror 561-562 if needed). New helper `lower_accessor_read(base, name, span) -> HirExpr?` in a new `_Expressions/accessor_forwarding.spl` (keeps file small).
+Algorithm, at the `fld_field_type.kind == Error` branch: owner = receiver type name (via existing base-type recovery); if owner has method `get_<n>` -> `MethodCall(base,"get_n",[])`; elif `is_<n>` -> `is_n`; elif method `<n>` declared WITHOUT params -> `n()`; else emit diagnostic "no field `<n>` on `<T>`" (hard error, seed parity) ONLY when owner type is fully known; unknown/Infer owner keeps today's untyped Field (avoid breaking bootstrap).
+Edge: real field always wins (check field table first, as above). Struct and class both: methods looked up on the owner regardless of kind. Generic receiver `T`: resolve against bound/trait methods only if known; else defer (leave Field, mono re-lowers? no: record limitation, test with `Box<T>` concrete after mono). Tuple `.0` path (is_tuple_positional_field) stays before. `obj.x += 1` on forwarded name: error "compound assignment on forwarded accessor unsupported" (done in PR2).
+Red-first spec: accessor_forwarding_spec.spl `it "forwards getters and setters on the interpreter"` (:55) read half; self-hosted variant: add a new `describe "... on the self-hosted compiler"` that runs `SIMPLE_BIN=C:/dev/p3accept/out/fullcli.exe` over probe files (same `run_probe` helper, env SIMPLE_BIN already honoured). Run: `SIMPLE_BIN=C:/dev/p3accept/out/fullcli.exe bin/simple test test/01_unit/language/accessor_forwarding/accessor_forwarding_spec.spl` (runner is the harness; probe goes through fullcli). Undefined-field case: `it "rejects assignment to an undefined field..."` :71 plus new probe_undefined_read.spl.
+Bootstrap risk: see census below; the hard-error is the dangerous part, hence "known owner only" gate and a warn-only env switch (`SIMPLE_ACCESSOR_STRICT=0`) for the first landing only if census finds hits.
+
+## PR2 setter lowering (~90 LOC)
+Files: statements.spl:740 -> `lower_hir_assignment_kind`; helper in accessor_forwarding.spl `lower_accessor_write(target, value, span) -> HirStmtKind?`.
+Algorithm: target is `ExprKind.Field(base, n)`, op is None (plain `=`), field table lacks `n`, owner has `set_<n>` -> `HirStmtKind.Expr(MethodCall(base,"set_n",[value]))`. Real field wins. No setter and no field (owner known) -> hard error (was silent no-op on seed; bug seed_setter_forwarding_silent_noop). op is Some (`+=` etc.) on a name with no field but with get_/set_ -> error "unsupported", never half-lower.
+Edge: `me` receiver requirement: setter must be `me` method; if only `fn set_n` exists, still lower (method-call checker reports). Struct values: assignment through a copy base (`a.b.x = v` where `a.b` is struct field): lower receiver as lvalue path, same as existing Field assign (reuse, do not copy base).
+Spec: same file, `it ...:55` write half, `it ...:71` (undefined -> hard error); new probe `probe_compound.spl` expecting the unsupported diagnostic. Run same command as PR1.
+Bootstrap risk: lower than PR1 (assignment to missing field already unlikely to compile).
+
+## PR3 parse `alias Trait = field` (~110 LOC)
+Files: `10.frontend/core/parser_stmts.spl` (alias statement path near :826) or class-body parser (find `parse_class_body`/member loop in `10.frontend/core/parser_decls*.spl`); flat-AST bridge: add a decl tag + (trait_name, field_name) slots, then `flat_ast_to_module` bridge (grep `flat_ast_to_module`, parser_decls_use.spl:126 mentions it) to an AST `ClassDecl.trait_aliases: [(text,text)]`.
+Algorithm: in class/struct body, on `alias`, if next tokens are `IDENT(uppercase) = IDENT` and NOT `fn|me` => record (Trait, field), consume newline. Existing `alias fn/me` and `alias field_name` (Phase 4) untouched. Error on alias inside mixin body (seed: types_def/mod.rs:275).
+Edge: generic trait `alias Iterator<T> = items`: parse trait type with args; keep text form first, args deferred. Field must exist: validated in PR4, not parser.
+Spec: new `test/01_unit/compiler/parser/trait_alias_parse_spec.spl` (parse-only; asserts class decl carries alias list); red until parser lands. Run: `C:/dev/p3accept/out/fullcli.exe test <spec>` (or `bin/simple test` with SIMPLE_BIN as above).
+Bootstrap risk: zero unless source uses `alias X = y` today; census cmd below (expect 0).
+
+## PR4 HIR expansion of trait-alias (~150 LOC)
+Files: `20.hir/hir_forward_lowering.spl` (extend; `unrepresented_forward_forms` must stop reporting Phase 3), `25.traits/trait_def.spl` (abstract method list + signatures), `20.hir/hir_forward_decl.spl` (HirForwardDecl already carries is_me + params).
+Algorithm: for each (Trait, field) on class C: trait = lookup trait def; for each abstract method m (no default body) NOT defined explicitly on C (explicit wins, also over trait default impl if seed does - verify at calls.rs/node_exec) synthesize `fn/me m(params): self.field.m(params)` HirForwardDecl, `me` iff trait method is `me`; add to C's method table BEFORE trait-impl conformance check (`trait_impl_lowering.spl`) so `C: Trait` is satisfied. Spec: explicit `me`/`fn` override suppresses forwarding.
+Edge: struct vs class: forwarding to a class-typed field shares identity; struct field copies on `fn`, `me` forwards mutate in place (needs lvalue self.field). Generics: substitute trait type params from the alias's args; field type generic -> forward by name, mono resolves. Missing trait / missing field -> diagnostic naming alias.
+Spec: accessor_forwarding_spec.spl `it "forwards trait methods on the interpreter, explicit method wins"` (:82) retargeted via fullcli (new describe, probe_alias.spl exists). Run as PR1.
+Bootstrap risk: zero unless PR3 census nonzero.
+
+## PR5 LSP hover/definition for forwarded names (~100 LOC)
+Files: `src/app/lsp/main.spl` + `90.tools` query engine (`src/app/cli/query_engine.spl`); resolver should consume the HIR rewrite marker. Algorithm: when PR1/2 rewrite, record `forwarded_from: (span, target_method_symbol)` in a side table (do NOT mutate HirExpr shape: codec/hir_codec.spl would need changes); hover shows `obj.x -> get_x()`; definition jumps to `get_x`/`set_x`; for trait alias, definition goes to the field decl. Spec: new `test/01_unit/app/lsp/accessor_forwarding_lsp_spec.spl`. Risk: none for bootstrap; side table must not leak into HIR codec.
+
+## Bootstrap census (measured + to run)
+Measured: 1168 methods named get_/set_/is_* across 401 files in src/compiler (ripgrep, wt-mdsoc 2026-10-27). That is the surface where a same-named FIELD collides; real field wins by rule, so collisions are safe by construction. The actual risk is NOT collision but (1) code reading a name with no field and no accessor that currently compiles untyped -> PR1 hard error; (2) a rewrite silently re-routing a name that previously resolved via another path (e.g. enum variant payload `.x`, tuple `.0`).
+Census to run before PR1 lands (fast, no full build): after PR1 with error mode in WARN, run `fullcli.exe check src/compiler` and count `no field` diagnostics; expected small (<~20) if any. Also: `rg -n "alias [A-Z]\w* = \w+\s*$" src/compiler src/lib` -> PR3/4 exposure (expect 0). My grep-comm intersection script hung on Windows (120 s timeout), so a field-vs-accessor collision count is NOT measured; rg-based estimate: upper bound 1168 candidates, true collisions likely tens (e.g. a struct with `val name` and `fn get_name`), all harmless.
+Order of safety: PR3 < PR4 < PR2 < PR1. Land PR1 last among semantics if census is nonzero, or ship with the warn switch.

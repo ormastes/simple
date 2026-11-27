@@ -1,0 +1,104 @@
+"""
+## Purpose and audience
+Purpose: pin the snapped edges of auto-width row flex items whose content is
+one text run, against Chrome 159. Chrome lays each item out at its exact
+(LayoutUnit) max-content width and snaps only the edges: left = round(x),
+right = round(x + w). Simple sized every non-button item at the whole-px
+rounding of its text, so the error accumulated along the row: bordered 13px
+items ended at 110/215/254 where Chrome draws 111/216/255, bold 14px padded
+items one px short from the second edge on.
+Audience: browser-engine flex layout maintainers.
+
+Chrome oracle (Chrome 159.0.8154.6 headless, `--hide-scrollbars
+--force-device-scale-factor=1 --window-size=400,300`, host default sans-serif
+(DejaVu Sans), text `color:transparent` in rows 1-4 so only box backgrounds and
+borders are probed). Item right edges from getBoundingClientRect:
+
+| row | items                              | Chrome right edges (CSS px)                       |
+|-----|------------------------------------|---------------------------------------------------|
+| 1   | 16px, plain                        | 43.563 128.953 202.766 248.094 291.672 357.500    |
+| 2   | 16px, padding 0 8px, gap 6px       | 59.563 166.953 262.766 330.094 395.672            |
+| 3   | 13px, border 1px                   | 56.188 111.672 171.484 216.859 255.703            |
+| 4   | bold 14px, padding 0 3px           | 68.266 135.750 210.203 265.734 314.531            |
+| 5   | 16px `HTML` + `CSS Paint`, visible | 43.563 117.375                                    |
+
+Screenshot colour runs (`x:colour`, R/G/B/Y/C = the item backgrounds, k =
+border, w = page) are the `RUNS` table below. Row 5 is the fit case: `CSS
+Paint` is 73.8125 px at x = 43.5625, snapped to 44..117 (73 px) while its
+whole-px text is 74 px; Chrome keeps it on one line, so y = 105 (a second line)
+is page white.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-FLEX-TEXT-ITEM-MILLI-001 -- auto-width row flex items holding one text run are placed at their exact max-content width and snapped at the edges.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl 1%
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_foundation.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels_with_resolved_engine2d_backend}
+
+val FX_W: i32 = 400
+val FX_H: i32 = 300
+val FX_PAGE: text = "<!DOCTYPE html><html><body style=\"margin:0;background:#fff;font:16px sans-serif;color:transparent\">" +
+    "<div style=\"display:flex;height:20px\"><div style=\"background:#f00\">HTML</div><div style=\"background:#0f0\">CSS Layout</div><div style=\"background:#00f\">CSS Paint</div><div style=\"background:#ff0\">Forms</div><div style=\"background:#0ff\">Media</div><div style=\"background:#f00\">Evidence</div></div>" +
+    "<div style=\"display:flex;height:20px;gap:6px\"><div style=\"background:#f00;padding:0 8px\">HTML</div><div style=\"background:#0f0;padding:0 8px\">CSS Layout</div><div style=\"background:#00f;padding:0 8px\">CSS Paint</div><div style=\"background:#ff0;padding:0 8px\">Forms</div><div style=\"background:#0ff;padding:0 8px\">Media</div></div>" +
+    "<div style=\"display:flex;height:20px;font-size:13px\"><div style=\"background:#f00;border:1px solid #000\">Overview</div><div style=\"background:#0f0;border:1px solid #000\">Evidence</div><div style=\"background:#00f;border:1px solid #000\">Animation</div><div style=\"background:#ff0;border:1px solid #000\">Tab bar</div><div style=\"background:#0ff;border:1px solid #000\">Forms</div></div>" +
+    "<div style=\"display:flex;height:20px;font-size:14px;font-weight:bold\"><div style=\"background:#f00;padding:0 3px\">Overview</div><div style=\"background:#0f0;padding:0 3px\">Evidence</div><div style=\"background:#00f;padding:0 3px\">Animation</div><div style=\"background:#ff0;padding:0 3px\">Tab bar</div><div style=\"background:#0ff;padding:0 3px\">Forms</div></div>" +
+    "<div style=\"display:flex;color:#000\"><div style=\"background:#f00\">HTML</div><div style=\"background:#00f\">CSS Paint</div></div>" +
+    "</body></html>"
+
+val FX_ROWS: [i32] = [10, 30, 50, 70, 81, 105]
+# Chrome 159 colour runs at each probed row (see the docstring).
+val FX_RUNS: [text] = [
+    "0:R 44:G 129:B 203:Y 248:C 292:R 358:w",
+    "0:R 60:w 66:G 167:w 173:B 263:w 269:Y 330:w 336:C 396:w",
+    "0:k 1:R 55:k 57:G 111:k 113:B 170:k 172:Y 216:k 218:C 255:k 256:w",
+    "0:R 68:G 136:B 210:Y 266:C 315:w",
+    "0:R 44:B 117:w",
+    "0:w"
+]
+
+fn fx_key(p: u32) -> text:
+    val r = ((p >> 16) & 255u32) as i32
+    val g = ((p >> 8) & 255u32) as i32
+    val b = (p & 255u32) as i32
+    if r > 200 and g > 200 and b > 200: return "w"
+    if r > 200 and g > 200: return "Y"
+    if g > 200 and b > 200: return "C"
+    if r > 200: return "R"
+    if g > 200: return "G"
+    if b > 200: return "B"
+    if r < 60 and g < 60 and b < 60: return "k"
+    "?"
+
+fn fx_runs(px: [u32], y: i32) -> text:
+    var out = ""
+    var prev = ""
+    var x = 0
+    while x < FX_W:
+        val k = fx_key(px[y * FX_W + x])
+        if k != prev:
+            out = out + (if out == "": "" else: " ") + x.to_string() + ":" + k
+            prev = k
+        x = x + 1
+    out
+
+fn fx_mismatches(px: [u32]) -> i32:
+    if px.len() != FX_W * FX_H:
+        print "frame {px.len()} px"
+        return 99
+    var bad = 0
+    var i = 0
+    while i < FX_ROWS.len():
+        val got = fx_runs(px, FX_ROWS[i])
+        if got != FX_RUNS[i]:
+            print "y={FX_ROWS[i]}: {got}"
+            print "  Chrome {FX_RUNS[i]}"
+            bad = bad + 1
+        i = i + 1
+    bad
+
+describe "row flex text items at exact width (Chrome 159)":
+    it "AC-1: item edges snap from exact max-content widths and a 73 px box keeps its 73.8 px label on one line":
+        step("bordered 13px row ends 111/216/255, bold 14px row 136/210/266/315, CSS Paint ends at 117 on one line")
+        expect(fx_mismatches(simple_web_render_html_to_pixels_with_resolved_engine2d_backend(FX_PAGE, FX_W, FX_H, "cpu_simd"))).to_equal(0)

@@ -1,5 +1,7 @@
 # HIR item lowering - module, import, and bootstrap-flat lowering.
 use compiler.hir.hir_lowering._Items.module_lowering.*
+use compiler.common.library_mode_policy_v1.{library_mode_generic_import_v1,
+    library_mode_effective_family_v1, library_mode_import_key_v1}
 use compiler.hir.hir_lowering._Items.lowering_helpers.{imported_symbol_local_name}
 # HIR Lowering - Item Lowering
 #
@@ -8,7 +10,7 @@ use compiler.hir.hir_lowering._Items.lowering_helpers.{imported_symbol_local_nam
 use compiler.hir.hir_types.*
 use compiler.hir.hir_definitions.*
 use compiler.frontend.parser_types.*
-use compiler.frontend.parser_types.{ParserFunction, ParserModule, ParserImport, ImportItem, Param}
+use compiler.frontend.parser_types.{ParserFunction, ParserModule, ParserImport, ImportItem, Param, Export}
 use compiler.frontend.parser_types_expr.*
 use compiler.frontend.parser_types_expr.{StmtKind, Expr}
 use compiler.hir.hir_lowering.hir_phase_profile.{
@@ -24,16 +26,19 @@ use std.io_runtime.{hash_text}
 use compiler.hir.hir_lowering.types.HirLowering
 use compiler.hir.hir_lowering.context_helpers.*
 use compiler.hir.hir_lowering.module_surface.*
+use compiler.hir.hir_lowering.module_surface_source_identity.{module_surface_canonical_path, module_surface_scv_snapshot_split_v1, module_surface_package_name, module_surface_package_name_from_name}
+use compiler.hir.hir_lowering.module_surface_types.{module_surface_declaration_authority_lookup_typed_v1}
 use compiler.hir.hir_lowering.expressions.*
 use compiler.common.attributes.{parse_layout_attrs, parse_function_attrs, parse_export_attrs, parse_driver_manifest_attrs, parse_platform_attrs, parse_vhdl_hardware_attrs, vhdl_hardware_metadata_default, FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind, VhdlHardwareMetadata}
 use compiler.types.type_layout.{LayoutAttr, TypeLayoutKind, PlatformParseResult, PlatformDiagnosticLevel, PlatformLayoutDiagnostic}
+use compiler.common.dependency.{member_access_scope_for_modules}
 use compiler.common.dependency.visibility.{Visibility}
 use compiler.common.module_path_naming.{module_logical_name_from_path}
 use compiler.core.{decl_get_body, decl_get_name, decl_get_param_names, decl_get_param_types, decl_get_ret_type}
 use compiler.core.{STMT_EXPR, STMT_VAL_DECL, STMT_VAR_DECL, STMT_RETURN, stmt_get_tag, stmt_get_expr, stmt_get_name, stmt_get_type}
 
 extern fn rt_enum_discriminant<T>(value: T) -> i64
-extern fn rt_enum_payload(value: StmtKind) -> Expr
+extern fn rt_enum_payload(value: StmtKind) -> Expr?
 use compiler.core.{EXPR_INT_LIT, EXPR_STRING_LIT, EXPR_INTERPOLATED_STRING, EXPR_BOOL_LIT, EXPR_NIL_LIT, EXPR_IDENT, EXPR_BINARY, EXPR_CALL, EXPR_FIELD_ACCESS, EXPR_METHOD_CALL, EXPR_BLOCK, EXPR_RETURN, expr_get_tag, expr_get_int, expr_get_str, expr_get_left, expr_get_right, expr_get_args, expr_get_arg_names, expr_get_stmts}
 use compiler.frontend.core._AstExpr.accessors.{expr_get_arg_names}
 use compiler.core.{TOK_MINUS, TOK_STAR, TOK_SLASH, TOK_PERCENT, TOK_EQ, TOK_NOT_EQ, TOK_LT, TOK_LT_EQ, TOK_GT, TOK_GT_EQ}
@@ -42,6 +47,359 @@ use compiler.frontend.core.types.{is_dict_tag, dict_tag_to_id, dict_type_get_key
 use compiler.frontend.core.types.{primitive_integer_bit_width_from_name, custom_primitive_integer_bit_width_by_name}
 use compiler.core.{int_to_str}
 use std.nogc_sync_mut.io.process_ops.{eprint}
+use std.nogc_sync_mut.io_runtime.{file_exists, dir_exists, file_read_nullable}
+
+# Process-wide cache of scripts/check/private_import_baseline.txt (~20k
+# `rel|name` rows), keyed by the repository root it was read from. One
+# HirLowering exists per module, so the cache lives at module level (same
+# pattern as hir_phase_profile.spl). Scalar hash-chain table, never a Dict:
+# contains_key on a Dict mis-reports under Stage-2 native codegen (BOOT-20).
+extern fn rt_transient_array_scope_state_v1() -> i64
+extern fn rt_transient_array_scope_identity_v1() -> i64
+extern fn rt_transient_heap_promote<T>(value: T) -> bool
+extern fn rt_array_free<T>(array: [T])
+extern fn rt_session_heap_id() -> u32
+extern fn rt_session_alloc_begin() -> bool
+extern fn rt_session_alloc_end() -> bool
+
+use compiler.hir.hir_lowering.phase_memo_ownership.{
+    HirPhaseMemoRoot,
+    hir_phase_memo_promote_roots,
+    hir_phase_memo_stage_priv_base_cache,
+    hir_phase_memo_clear_priv_base_staging,
+    hir_phase_memo_priv_base_scope_promoted,
+    hir_phase_memo_stage_priv_dir_cache,
+    hir_phase_memo_clear_priv_dir_staging,
+    hir_phase_memo_priv_dir_scope_promoted
+}
+
+var _priv_import_baseline_root: text = ""
+var _priv_import_baseline_keys: [text] = []
+var _priv_import_baseline_buckets: [i64] = []
+var _priv_import_baseline_next: [i64] = []
+var _priv_import_baseline_scope_id: i64 = 0
+var _priv_import_baseline_session_id: u32 = 0u32
+val PRIV_IMPORT_BASELINE_REL = "scripts/check/private_import_baseline.txt"
+val PRIV_IMPORT_BASELINE_MASK: i64 = 32767
+
+var _priv_import_repo_root: text = ""
+var _priv_import_dir_cache_keys: [text] = []
+var _priv_import_dir_cache_roots: [text] = []
+var _priv_import_dir_cache_buckets: [i64] = []
+var _priv_import_dir_cache_next: [i64] = []
+var _priv_import_dir_cache_scope_id: i64 = 0
+var _priv_import_dir_cache_session_id: u32 = 0u32
+val PRIV_IMPORT_DIR_CACHE_MASK: i64 = 4095
+
+fn private_import_norm_path(path: text) -> text:
+    var norm = path.replace("\\", "/")
+    if norm.starts_with("//?/"):
+        norm = norm.substring(4)
+    norm
+
+fn private_import_dir_of(path: text) -> text:
+    # Strip the trailing segment across both `/` and `\`, preserving earlier
+    # separators so private_import_repo_root matches Windows `get_temp_dir() + "/..."`.
+    val slash_parts = path.split("/")
+    val last_seg = slash_parts[slash_parts.len() - 1]
+    if last_seg.contains("\\"):
+        val bs_parts = last_seg.split("\\")
+        val parent_tail = bs_parts[0:bs_parts.len() - 1].join("\\")
+        if slash_parts.len() == 1:
+            return parent_tail
+        val prefix = slash_parts[0:slash_parts.len() - 1].join("/")
+        if parent_tail == "":
+            return prefix
+        return prefix + "/" + parent_tail
+    slash_parts[0:slash_parts.len() - 1].join("/")
+
+fn private_import_flatten_export_items(exports: [Export]) -> [text]:
+    """Flatten `ModuleSurface.exports` / `ParserModule.exports` (`[Export]`) to `"mod.item"` strings."""
+    var items: [text] = []
+    for exp in exports:
+        for exp_item in exp.items:
+            items = items.push(exp_item)
+    items
+
+fn private_import_is_reexport_item(exports: [text], module_spec: text, item_name: text, has_alias: bool, alias_name: text) -> bool:
+    if exports.len() == 0 or module_spec == "":
+        return false
+    val base_key = module_spec + "." + item_name
+    val aliased_key = if has_alias and alias_name != "": base_key + ":" + alias_name else: ""
+    for exp_item in exports:
+        if exp_item == base_key or (aliased_key != "" and exp_item == aliased_key):
+            return true
+    false
+
+fn private_import_is_test_importer(importer_path: text) -> bool:
+    """Mirror of the seed's `is_test_caller` (interpreter_module/module_loader.rs),
+    shared by its import and call visibility rules: a path that starts with
+    `test/` or has a `/test/` component, after `\\` -> `/` and a leading `./`
+    is stripped."""
+    var norm = importer_path.replace("\\", "/")
+    while norm.starts_with("./"):
+        norm = norm.substring(2)
+    norm.starts_with("test/") or norm.contains("/test/")
+
+fn private_import_clone_text(value: text) -> text:
+    if value == "":
+        return ""
+    value + ""
+
+fn private_import_dir_cache_ensure_scope():
+    val cur_scope = rt_transient_array_scope_identity_v1()
+    val cur_sess: u32 = rt_session_heap_id()
+    var valid = true
+    if _priv_import_dir_cache_session_id != 0u32 and cur_sess != _priv_import_dir_cache_session_id:
+        valid = false
+    if _priv_import_dir_cache_scope_id != 0:
+        if hir_phase_memo_priv_dir_scope_promoted(_priv_import_dir_cache_scope_id):
+            _priv_import_dir_cache_scope_id = 0
+        elif _priv_import_dir_cache_scope_id != cur_scope:
+            hir_phase_memo_clear_priv_dir_staging(_priv_import_dir_cache_scope_id)
+            valid = false
+    if not valid:
+        val scope_state = rt_transient_array_scope_state_v1()
+        val sess_active = scope_state == 1 and cur_sess != 0u32
+        if sess_active:
+            rt_session_alloc_begin()
+        _priv_import_repo_root = ""
+        _priv_import_dir_cache_keys = []
+        _priv_import_dir_cache_roots = []
+        _priv_import_dir_cache_buckets = []
+        _priv_import_dir_cache_next = []
+        _priv_import_dir_cache_scope_id = 0
+        _priv_import_dir_cache_session_id = 0u32
+        if sess_active:
+            rt_session_alloc_end()
+            _priv_import_dir_cache_session_id = cur_sess
+        elif cur_sess != 0u32:
+            _priv_import_dir_cache_session_id = cur_sess
+        elif scope_state == 1:
+            _priv_import_dir_cache_scope_id = cur_scope
+
+fn private_import_dir_cache_lookup(dir: text) -> i64:
+    if _priv_import_dir_cache_buckets.len() == 0:
+        return -1
+    var index = _priv_import_dir_cache_buckets[hash_text(dir) & PRIV_IMPORT_DIR_CACHE_MASK]
+    while index >= 0:
+        if _priv_import_dir_cache_keys[index] == dir:
+            return index
+        index = _priv_import_dir_cache_next[index]
+    -1
+
+fn private_import_dir_cache_record(visited: [text], found_root: text):
+    if visited.len() == 0:
+        return
+    val scope_state = rt_transient_array_scope_state_v1()
+    val cur_scope = rt_transient_array_scope_identity_v1()
+    val cur_sess: u32 = rt_session_heap_id()
+    val sess_active = scope_state == 1 and cur_sess != 0u32
+    if sess_active:
+        rt_session_alloc_begin()
+    val owned_root = if sess_active: private_import_clone_text(found_root) else: found_root
+    if _priv_import_dir_cache_buckets.len() == 0:
+        var buckets: [i64] = []
+        var fill = 0
+        while fill <= PRIV_IMPORT_DIR_CACHE_MASK:
+            buckets = buckets.push(-1)
+            fill = fill + 1
+        _priv_import_dir_cache_buckets = buckets
+    var i = 0
+    while i < visited.len():
+        val dir = if sess_active: private_import_clone_text(visited[i]) else: visited[i]
+        val bucket = hash_text(dir) & PRIV_IMPORT_DIR_CACHE_MASK
+        _priv_import_dir_cache_next = _priv_import_dir_cache_next.push(_priv_import_dir_cache_buckets[bucket])
+        _priv_import_dir_cache_buckets[bucket] = _priv_import_dir_cache_keys.len()
+        _priv_import_dir_cache_keys = _priv_import_dir_cache_keys.push(dir)
+        _priv_import_dir_cache_roots = _priv_import_dir_cache_roots.push(owned_root)
+        i = i + 1
+    if owned_root != "":
+        _priv_import_repo_root = owned_root
+    if sess_active:
+        rt_session_alloc_end()
+        _priv_import_dir_cache_session_id = cur_sess
+    elif scope_state == 2:
+        val repo_box: [text] = [_priv_import_repo_root]
+        val dir_roots: [HirPhaseMemoRoot] = [
+            HirPhaseMemoRoot.Texts(repo_box),
+            HirPhaseMemoRoot.Texts(_priv_import_dir_cache_keys),
+            HirPhaseMemoRoot.Texts(_priv_import_dir_cache_roots),
+            HirPhaseMemoRoot.Ints(_priv_import_dir_cache_buckets),
+            HirPhaseMemoRoot.Ints(_priv_import_dir_cache_next),
+        ]
+        val ok = hir_phase_memo_promote_roots(dir_roots)
+        rt_array_free(repo_box)
+        if not ok:
+            _priv_import_dir_cache_scope_id = cur_scope
+        elif cur_sess != 0u32:
+            _priv_import_dir_cache_session_id = cur_sess
+    elif scope_state == 1:
+        _priv_import_dir_cache_scope_id = cur_scope
+        hir_phase_memo_stage_priv_dir_cache(
+            cur_scope,
+            _priv_import_repo_root,
+            _priv_import_dir_cache_keys,
+            _priv_import_dir_cache_roots,
+            _priv_import_dir_cache_buckets,
+            _priv_import_dir_cache_next)
+    elif cur_sess != 0u32:
+        _priv_import_dir_cache_session_id = cur_sess
+
+fn private_import_repo_root(module_path: text) -> text:
+    """First ancestor directory of `module_path` holding a `.git` entry (a
+    directory, or the file a worktree carries), or "" when there is none."""
+    private_import_dir_cache_ensure_scope()
+    var dir = private_import_dir_of(module_path)
+    var visited: [text] = []
+    var found_root: text = ""
+    while dir != "":
+        if _priv_import_repo_root != "" and dir == _priv_import_repo_root:
+            found_root = _priv_import_repo_root
+            break
+        val cached_slot = private_import_dir_cache_lookup(dir)
+        if cached_slot >= 0:
+            found_root = _priv_import_dir_cache_roots[cached_slot]
+            break
+        visited = visited.push(dir)
+        val marker = dir + "/.git"
+        if file_exists(marker) or dir_exists(marker):
+            found_root = dir
+            break
+        if not dir.contains("/") and not dir.contains("\\"):
+            break
+        dir = private_import_dir_of(dir)
+    if visited.len() > 0:
+        private_import_dir_cache_record(visited, found_root)
+    if found_root != "" and _priv_import_repo_root == found_root:
+        return _priv_import_repo_root
+    found_root
+
+fn private_import_baseline_ensure_scope():
+    val cur_scope = rt_transient_array_scope_identity_v1()
+    val cur_sess: u32 = rt_session_heap_id()
+    var valid = true
+    if _priv_import_baseline_session_id != 0u32 and cur_sess != _priv_import_baseline_session_id:
+        valid = false
+    if _priv_import_baseline_scope_id != 0:
+        if hir_phase_memo_priv_base_scope_promoted(_priv_import_baseline_scope_id):
+            _priv_import_baseline_scope_id = 0
+        elif _priv_import_baseline_scope_id != cur_scope:
+            hir_phase_memo_clear_priv_base_staging(_priv_import_baseline_scope_id)
+            valid = false
+    if not valid:
+        val scope_state = rt_transient_array_scope_state_v1()
+        val sess_active = scope_state == 1 and cur_sess != 0u32
+        if sess_active:
+            rt_session_alloc_begin()
+        _priv_import_baseline_root = ""
+        _priv_import_baseline_keys = []
+        _priv_import_baseline_buckets = []
+        _priv_import_baseline_next = []
+        _priv_import_baseline_scope_id = 0
+        _priv_import_baseline_session_id = 0u32
+        if sess_active:
+            rt_session_alloc_end()
+            _priv_import_baseline_session_id = cur_sess
+        elif cur_sess != 0u32:
+            _priv_import_baseline_session_id = cur_sess
+        elif scope_state == 1:
+            _priv_import_baseline_scope_id = cur_scope
+
+fn private_import_baseline_load(root: text):
+    private_import_baseline_ensure_scope()
+    if root == "" or _priv_import_baseline_root == root:
+        return
+    val scope_state = rt_transient_array_scope_state_v1()
+    val cur_scope = rt_transient_array_scope_identity_v1()
+    val cur_sess: u32 = rt_session_heap_id()
+    val sess_active = scope_state == 1 and cur_sess != 0u32
+    if sess_active:
+        rt_session_alloc_begin()
+    val local_root: text = if sess_active: private_import_clone_text(root) else: root
+    var local_keys: [text] = []
+    var local_next: [i64] = []
+    var local_buckets: [i64] = []
+    var fill = 0
+    while fill <= PRIV_IMPORT_BASELINE_MASK:
+        local_buckets = local_buckets.push(-1)
+        fill = fill + 1
+    val content = file_read_nullable(local_root + "/" + PRIV_IMPORT_BASELINE_REL) ?? ""
+    for raw_line in content.split("\n"):
+        val line = raw_line.trim()
+        if line == "":
+            continue
+        val bucket = hash_text(line) & PRIV_IMPORT_BASELINE_MASK
+        local_next = local_next.push(local_buckets[bucket])
+        local_buckets[bucket] = local_keys.len()
+        local_keys = local_keys.push(line)
+    var new_scope_id: i64 = 0
+    var new_sess_id: u32 = 0u32
+    if sess_active:
+        rt_session_alloc_end()
+        new_sess_id = cur_sess
+    elif scope_state == 2:
+        val root_box: [text] = [local_root]
+        val base_roots: [HirPhaseMemoRoot] = [
+            HirPhaseMemoRoot.Texts(root_box),
+            HirPhaseMemoRoot.Texts(local_keys),
+            HirPhaseMemoRoot.Ints(local_buckets),
+            HirPhaseMemoRoot.Ints(local_next),
+        ]
+        val promoted_ok = hir_phase_memo_promote_roots(base_roots)
+        rt_array_free(root_box)
+        if not promoted_ok:
+            new_scope_id = cur_scope
+        elif cur_sess != 0u32:
+            new_sess_id = cur_sess
+    elif scope_state == 1:
+        new_scope_id = cur_scope
+        hir_phase_memo_stage_priv_base_cache(
+            cur_scope, local_root, local_keys, local_buckets, local_next)
+    elif cur_sess != 0u32:
+        new_sess_id = cur_sess
+    _priv_import_baseline_root = local_root
+    _priv_import_baseline_keys = local_keys
+    _priv_import_baseline_buckets = local_buckets
+    _priv_import_baseline_next = local_next
+    _priv_import_baseline_scope_id = new_scope_id
+    _priv_import_baseline_session_id = new_sess_id
+
+fn private_import_is_baselined(module_path: text, name: text) -> bool:
+    """`rel|name` is frozen in the baseline at the repository root that
+    contains `module_path`. Only that root's baseline counts; a module outside
+    any repository (a scratch fixture) has none, so every pair is new."""
+    val norm_path = private_import_norm_path(module_path)
+    val (scv_checkout, scv_snapshot, scv_rel) = module_surface_scv_snapshot_split_v1(norm_path)
+    # Try `module_path` first so `_priv_import_dir_cache` keys match Windows
+    # `get_temp_dir() + "/..."` strings in memo tests; fall back to `norm_path` for UNC `//?/`.
+    var root = private_import_repo_root(module_path)
+    if root == "" and norm_path != module_path:
+        root = private_import_repo_root(norm_path)
+    if root == "" and scv_checkout != "":
+        root = private_import_repo_root(scv_checkout + "/_probe")
+    if root == "":
+        return false
+    private_import_baseline_load(root)
+    if _priv_import_baseline_keys.len() == 0:
+        return false
+    root = private_import_norm_path(root)
+    var rel = ""
+    if scv_snapshot != "" and scv_rel != "":
+        rel = scv_rel
+        while rel.starts_with("/"):
+            rel = rel.substring(1)
+    elif norm_path.starts_with(root + "/"):
+        rel = norm_path.substring(root.len() + 1)
+    else:
+        return false
+    val key = rel + "|" + name
+    var index = _priv_import_baseline_buckets[hash_text(key) & PRIV_IMPORT_BASELINE_MASK]
+    while index >= 0:
+        if _priv_import_baseline_keys[index] == key:
+            return true
+        index = _priv_import_baseline_next[index]
+    false
 
 impl HirLowering:
     me qualify_imported_function_symbol(sym_id: SymbolId, imported_mod_name: text, imported_name: text):
@@ -83,11 +441,118 @@ impl HirLowering:
         self.register_glob_imported_symbols_depth(imported_mod, imported_mod_name, import_span, 0, true, true)
         hir_phase_profile_add(HIR_PROF_GLOB, prof_glob_started)
 
+    fn _hir_surface_is_empty_placeholder_v1(surface: ModuleSurface) -> bool:
+        surface.composite_names.len() == 0 and
+            surface.enum_names.len() == 0 and
+            surface.trait_names.len() == 0 and
+            surface.callable_names.len() == 0 and
+            surface.type_alias_names.len() == 0 and
+            surface.constant_names.len() == 0 and
+            surface.exports.len() == 0 and
+            surface.imports.len() == 0
+
+    fn _hir_sibling_surface_item_targets_placeholder_v1(facade_mod: ModuleSurface,
+            wanted: text, depth: i64) -> bool:
+        if depth > 8:
+            return false
+        var saw_placeholder_hop = false
+        var import_idx = 0
+        while import_idx < facade_mod.imports.len():
+            if import_idx + 1 < facade_mod.import_item_offsets.len():
+                val item_start = facade_mod.import_item_offsets[import_idx]
+                val item_end = facade_mod.import_item_offsets[import_idx + 1]
+                var matches = item_start == item_end
+                var source_item = wanted
+                var item_idx = item_start
+                while item_idx < item_end:
+                    val item_name = facade_mod.import_item_names[item_idx]
+                    val local = if facade_mod.import_item_has_alias[item_idx]:
+                        facade_mod.import_item_aliases[item_idx]
+                    else:
+                        item_name
+                    if local == wanted or item_name == wanted:
+                        matches = true
+                        source_item = item_name
+                    item_idx = item_idx + 1
+                if matches and import_idx < facade_mod.import_target_indices.len():
+                    val next_idx = facade_mod.import_target_indices[import_idx]
+                    if next_idx >= 0 and next_idx < self.module_surfaces.surfaces.len() and
+                            next_idx != facade_mod.physical_index:
+                        val next_surf = self.module_surfaces.surfaces[next_idx]
+                        if self._hir_surface_is_empty_placeholder_v1(next_surf):
+                            saw_placeholder_hop = true
+                        elif hir_module_declares_item(next_surf, source_item):
+                            return false
+                        elif self._hir_sibling_surface_item_targets_placeholder_v1(
+                                next_surf, source_item, depth + 1):
+                            saw_placeholder_hop = true
+                        elif item_start < item_end:
+                            return false
+            import_idx = import_idx + 1
+        var r_idx = 0
+        while r_idx < facade_mod.export_route_sources.len():
+            if facade_mod.export_route_is_glob[r_idx]:
+                val sub_idx = if r_idx < facade_mod.export_route_target_indices.len():
+                    facade_mod.export_route_target_indices[r_idx]
+                else:
+                    -1
+                if sub_idx >= 0 and sub_idx < self.module_surfaces.surfaces.len() and
+                        sub_idx != facade_mod.physical_index:
+                    val sub_surf = self.module_surfaces.surfaces[sub_idx]
+                    if self._hir_surface_is_empty_placeholder_v1(sub_surf):
+                        saw_placeholder_hop = true
+                    elif hir_module_declares_item(sub_surf, wanted):
+                        return false
+                    elif self._hir_sibling_surface_item_targets_placeholder_v1(
+                            sub_surf, wanted, depth + 1):
+                        saw_placeholder_hop = true
+            elif depth > 0 and r_idx < facade_mod.export_route_locals.len() and
+                    facade_mod.export_route_locals[r_idx] == wanted:
+                val sub_idx = if r_idx < facade_mod.export_route_target_indices.len():
+                    facade_mod.export_route_target_indices[r_idx]
+                else:
+                    -1
+                val sub_src = facade_mod.export_route_sources[r_idx]
+                if sub_idx >= 0 and sub_idx < self.module_surfaces.surfaces.len() and
+                        sub_idx != facade_mod.physical_index:
+                    val sub_surf = self.module_surfaces.surfaces[sub_idx]
+                    if self._hir_surface_is_empty_placeholder_v1(sub_surf):
+                        saw_placeholder_hop = true
+                    elif hir_module_declares_item(sub_surf, sub_src):
+                        return false
+                    elif self._hir_sibling_surface_item_targets_placeholder_v1(
+                            sub_surf, sub_src, depth + 1):
+                        saw_placeholder_hop = true
+                    else:
+                        return false
+            r_idx = r_idx + 1
+        saw_placeholder_hop
+
+    fn _hir_sibling_reexport_targets_placeholder_v1(facade_mod: ModuleSurface, route_index: i64,
+            export_source: text, export_local: text) -> bool:
+        if route_index >= 0 and route_index < facade_mod.export_route_target_indices.len():
+            val direct_idx = facade_mod.export_route_target_indices[route_index]
+            if direct_idx >= 0 and direct_idx < self.module_surfaces.surfaces.len():
+                val direct_surf = self.module_surfaces.surfaces[direct_idx]
+                if self._hir_surface_is_empty_placeholder_v1(direct_surf):
+                    return true
+                if hir_module_declares_item(direct_surf, export_source):
+                    return false
+                return self._hir_sibling_surface_item_targets_placeholder_v1(
+                    direct_surf, export_source, 1)
+        if self._hir_sibling_surface_item_targets_placeholder_v1(facade_mod, export_source, 0):
+            return true
+        if export_local != export_source:
+            return self._hir_sibling_surface_item_targets_placeholder_v1(facade_mod, export_local, 0)
+        false
+
     me register_package_sibling_symbols(imported_mod: ModuleSurface, imported_mod_name: text, import_span: Span):
         # Directory siblings share declarations and explicit exports, but a
         # sibling relationship is not a user-written glob import. In
         # particular, private named imports and private nested globs remain
         # implementation details of the sibling that wrote them.
+        if self._hir_surface_is_empty_placeholder_v1(imported_mod):
+            return
         val fresh_memo: {text: i64} = {}
         self.glob_expand_memo = fresh_memo
         # BOOT-20 (2026-09-18): scalar read authority resets with the Dict.
@@ -142,6 +607,20 @@ impl HirLowering:
         self.glob_expand_memo_values = self.glob_expand_memo_values.push(depth)
         self.glob_expand_memo[key] = depth
 
+    fn glob_private_would_displace(local_name: text, imported_module_name: text) -> bool:
+        """True when `local_name` is already bound in the importer to a symbol
+        owned by a module other than `imported_module_name` -- a private glob
+        item must not overwrite that binding."""
+        val existing_id = self.import_binding_or_invalid(local_name)
+        if not existing_id.is_valid():
+            return false
+        if not self.symbols.symbols.has(existing_id.id):
+            return false
+        val existing: HirSymbol = self.symbols.symbols[existing_id.id]
+        if val existing_owner = existing.defining_module:
+            return existing_owner != imported_module_name
+        true
+
     me register_glob_imported_symbols_depth(imported_mod: ModuleSurface, imported_mod_name: text, import_span: Span, depth: i64, include_private_named_imports: bool, materialize_enums: bool):
         if depth > 8:
             return
@@ -179,7 +658,17 @@ impl HirLowering:
         keys = imported_mod.callable_names
         idx = 0
         while idx < keys.len():
-            self.register_imported_symbol(imported_mod.physical_index, imported_mod_name, keys[idx], keys[idx], import_span, materialize_enums)
+            # private_symbol_collision_sshd_four_names_2026-07-28: a private
+            # callable reached only through a glob is an implementation detail
+            # of its module. It may fill an unbound name (the tolerated leak
+            # tracked by interp_private_names_selfhost_check_2026-11-09) but
+            # must never displace a binding the importer already holds from a
+            # different module, or the bare name silently rebinds to whichever
+            # module was globbed last.
+            val callable_is_private = idx < imported_mod.callable_values.len() and
+                not imported_mod.callable_values[idx].is_public
+            if not (callable_is_private and self.glob_private_would_displace(keys[idx], imported_mod.module_name)):
+                self.register_imported_symbol(imported_mod.physical_index, imported_mod_name, keys[idx], keys[idx], import_span, materialize_enums)
             idx = idx + 1
 
         keys = imported_mod.type_alias_names
@@ -191,7 +680,11 @@ impl HirLowering:
         keys = imported_mod.constant_names
         idx = 0
         while idx < keys.len():
-            self.register_imported_symbol(imported_mod.physical_index, imported_mod_name, keys[idx], keys[idx], import_span, materialize_enums)
+            # Same module-local rule as private callables above.
+            val constant_is_private = idx < imported_mod.constant_values.len() and
+                not imported_mod.constant_values[idx].is_public
+            if not (constant_is_private and self.glob_private_would_displace(keys[idx], imported_mod.module_name)):
+                self.register_imported_symbol(imported_mod.physical_index, imported_mod_name, keys[idx], keys[idx], import_span, materialize_enums)
             idx = idx + 1
 
         # A split module can explicitly re-export names it imports. Register
@@ -205,12 +698,18 @@ impl HirLowering:
                 val export_surface_index = imported_mod.export_route_target_indices[route_index]
                 val export_key = imported_mod.export_route_target_names[route_index]
                 if export_surface_index >= 0 and export_surface_index != imported_mod.physical_index:
-                    self.register_glob_imported_symbols_depth(
-                        self.module_surfaces.surfaces[export_surface_index], export_key,
-                        import_span, depth + 1, include_private_named_imports,
-                        materialize_enums)
+                    val glob_target_surf = self.module_surfaces.surfaces[export_surface_index]
+                    if include_private_named_imports or not self._hir_surface_is_empty_placeholder_v1(glob_target_surf):
+                        self.register_glob_imported_symbols_depth(
+                            glob_target_surf, export_key,
+                            import_span, depth + 1, include_private_named_imports,
+                            materialize_enums)
             elif export_local != export_source or not hir_module_declares_item(imported_mod, export_source):
-                self.register_imported_symbol(imported_mod.physical_index, imported_mod_name, export_source, export_local, import_span, materialize_enums)
+                val skip_sibling_placeholder = not include_private_named_imports and
+                    self._hir_sibling_reexport_targets_placeholder_v1(
+                        imported_mod, route_index, export_source, export_local)
+                if not skip_sibling_placeholder:
+                    self.register_imported_symbol(imported_mod.physical_index, imported_mod_name, export_source, export_local, import_span, materialize_enums)
             route_index = route_index + 1
 
         # Facade globs: `use std.simd.*` can resolve to a tier FACADE (e.g.
@@ -299,12 +798,30 @@ impl HirLowering:
                     val glob_local = if imported_mod.import_item_has_alias[glob_it]:
                         imported_mod.import_item_aliases[glob_it]
                     else: glob_name
-                    self.register_imported_symbol(imported_mod.physical_index, imported_mod_name, glob_name, glob_local, import_span, materialize_enums)
+                    # `use std.path as path` is encoded as one aliased item whose
+                    # name IS the import's module. That row binds a module
+                    # namespace in the facade, not a symbol a glob can forward;
+                    # chasing it registered nothing and emitted
+                    # `[hir-reexport-chase-unresolved] item=std.path local=path`
+                    # for every `use app.io.jit_sffi.*` (census r3). Only a row
+                    # whose spelling resolves to a module surface is skipped:
+                    # `use a.b.Item as X` with no module `a.b.Item` keeps its
+                    # member fallback and still chases as before.
+                    var glob_row_is_module_alias = false
+                    if imported_mod.import_item_has_alias[glob_it] and glob_name == glob_imp.module:
+                        if glob_imp_idx < imported_mod.import_target_names.len() and
+                           imported_mod.import_target_names[glob_imp_idx] == glob_name:
+                            glob_row_is_module_alias = true
+                        elif self.surface_index_for_name(glob_name) >= 0:
+                            glob_row_is_module_alias = true
+                    if not glob_row_is_module_alias:
+                        self.register_imported_symbol(imported_mod.physical_index, imported_mod_name, glob_name, glob_local, import_span, materialize_enums)
                     glob_it = glob_it + 1
                 glob_imp_idx = glob_imp_idx + 1
 
     me resolve_import_symbols(module: ParserModule):
-        self.resolve_import_list(module.imports, module.name, false)
+        val module_exports = private_import_flatten_export_items(module.exports)
+        self.resolve_import_list(module.imports, module.name, false, module_exports)
 
     me resolve_lexical_import(path: text, names: [text], import_lazy: bool, span: Span):
         var items: [ImportItem] = []
@@ -322,7 +839,7 @@ impl HirLowering:
         self.registering_lexical_import = saved_lexical
         self.registering_import_symbols = saved_registering
 
-    me resolve_import_list(imports: [ParserImport], importer_name: text, lexical: bool):
+    me resolve_import_list(imports: [ParserImport], importer_name: text, lexical: bool, module_exports: [text] = []):
         # A module with NO imports has nothing to resolve, so it must not need a
         # registered surface of its own. Requiring one made
         # `HirLowering.with_filename(path).lower_module(parsed)` — the public
@@ -378,15 +895,31 @@ impl HirLowering:
         val importer_source_path = if importer_surface_index >= 0:
             self.module_surfaces.surfaces[importer_surface_index].canonical_path
         else: importer_name
+        val importer_owner = if importer_surface_index >= 0:
+            self.module_surfaces.surfaces[importer_surface_index].module_name
+        else: importer_name
+        val effective_exports: [text] = if module_exports.len() > 0:
+            module_exports
+        elif not lexical and importer_surface_index >= 0:
+            private_import_flatten_export_items(self.module_surfaces.surfaces[importer_surface_index].exports)
+        else: []
         if lexical:
             importer_surface_index = -1
         var import_idx = 0
         while import_idx < imports.len():
             val imp: ParserImport = imports[import_idx]
+            # Progress receipt (stage3_driver_hir_lowering_spins_after_parse_fix):
+            # the last line printed names the import a stalled run is inside.
+            hir_module_phase_probe("phase3:hir:imports:item {importer_name} {import_idx}/{imports.len()} {imp.module}")
             var fallback_item_name = ""
             # ParserStruct-valued Dict.get() corrupts native hit payloads. Track the
             # winning key and read the value only with bracket indexing.
-            var imported_key = if self.surface_index_for_name(imp.module) >= 0: imp.module else: ""
+            val selected_key = library_mode_import_key_v1(imp.module, self.library_mode, importer_owner)
+            var imported_key = if self.surface_index_for_name(selected_key) >= 0: selected_key else: ""
+            if self.library_mode != "" and library_mode_generic_import_v1(imp.module) and imported_key == "":
+                self.error("LIBRARY_MODE_OWNER_MISSING: configured import `{imp.module}` has no frozen scoped owner for `{importer_name}`", imp.span)
+                import_idx = import_idx + 1
+                continue
             # Symbols must register under the DEFINING module's canonical name:
             # a relative alias like ".helper" would otherwise be baked into the
             # call symbol (@.helper.helper_val) while the definition object
@@ -410,9 +943,10 @@ impl HirLowering:
                     if frozen_target != "" and self.surface_index_for_name(frozen_target) >= 0:
                         imported_key = frozen_target
                         resolved_module_name = frozen_target
-            if imported_key == "" and importer_surface_index < 0 and imp.items.len() == 1:
-                # Single-module embedders omit their own frozen surface. Keep
-                # their import behavior aligned with the registry freeze.
+            if imported_key == "" and imp.items.len() == 1:
+                # Single-module embedders omit their own frozen surface, and
+                # library-mode `use std.<pkg>.<item> as <alias>` imports cannot
+                # resolve `std.<pkg>` during unconfigured surface freeze.
                 val item = imp.items[0]
                 if item.has_alias and item.name == imp.module:
                     val path_parts = imp.module.split(".")
@@ -440,10 +974,17 @@ impl HirLowering:
                                 else: ""
                                 dot_index = dot_index + 1
                         if parent_lookup != "" and member_name != "":
-                            val parent_key = self.resolve_module_key_relative(parent_lookup, importer_name, importer_source_path)
+                            val selected_parent_key = library_mode_import_key_v1(parent_lookup, self.library_mode, importer_owner)
+                            val parent_key = if selected_parent_key != "" and self.surface_index_for_name(selected_parent_key) >= 0:
+                                selected_parent_key
+                            else:
+                                self.resolve_module_key_relative(parent_lookup, importer_name, importer_source_path)
                             if parent_key != "" and self.surface_index_for_name(parent_key) >= 0:
                                 imported_key = parent_key
-                                resolved_module_name = parent_key
+                                resolved_module_name = if self.library_mode != "" and library_mode_generic_import_v1(parent_lookup):
+                                    self.module_surfaces.surfaces[self.surface_index_for_name(parent_key)].module_name
+                                else:
+                                    parent_key
                                 fallback_item_name = member_name
             if imported_key != "":
                 val imported_index = self.surface_index_for_name(imported_key)
@@ -452,6 +993,8 @@ impl HirLowering:
                     import_idx = import_idx + 1
                     continue
                 val imported_surface = self.module_surfaces.surfaces[imported_index]
+                if self.library_mode != "" and library_mode_generic_import_v1(imp.module):
+                    resolved_module_name = imported_surface.module_name
                 # Per-import item rows: the frozen importer surface's flattened
                 # copy when the importing module has a registered surface, the
                 # live parser import decls otherwise (identical data and order;
@@ -461,7 +1004,7 @@ impl HirLowering:
                 var item_names: [text] = []
                 var item_aliases: [text] = []
                 var item_has_alias: [bool] = []
-                if importer_surface_index >= 0:
+                if importer_surface_index >= 0 and fallback_item_name == "":
                     val importer_surface: ModuleSurface = self.module_surfaces.surfaces[importer_surface_index]
                     item_start = importer_surface.import_item_offsets[import_idx]
                     item_end = importer_surface.import_item_offsets[import_idx + 1]
@@ -540,11 +1083,23 @@ impl HirLowering:
                         if module_alias != "" and not self.import_binding_or_invalid(module_alias).is_valid():
                             self.symbols.define(module_alias, SymbolKind.Module, nil, imp.span, Visibility.Private, false, Some(imported_surface.module_name))
                 else:
+                    # A dotted single `use m.name as alias` reaches this branch as
+                    # one aliased item whose source spells the whole path; the
+                    # seed's import-time visibility check fires on braced groups
+                    # only (`requested_group_import_names`), so mirror that.
+                    val braced_group = not (imp.items.len() == 1 and
+                        imp.items[0].has_alias and imp.items[0].name == imp.module)
                     var item_idx = item_start
                     while item_idx < item_end:
                         val item_name = item_names[item_idx]
                         val local_name = imported_symbol_local_name(
                             item_name, item_has_alias[item_idx], item_aliases[item_idx])
+                        val is_reexport = private_import_is_reexport_item(
+                            effective_exports, imp.module, item_name, item_has_alias[item_idx], item_aliases[item_idx])
+                        if braced_group and self.private_fn_import_denied(
+                                imported_surface, imp.module, item_name, importer_source_path, imp.span, is_reexport):
+                            item_idx = item_idx + 1
+                            continue
                         # An explicit named import is a declaration about its
                         # target surface.  Do not use the local symbol table
                         # as the oracle here: an unrelated local declaration
@@ -556,6 +1111,14 @@ impl HirLowering:
                         if not self.surface_declares_item_indexed(imported_surface, item_name):
                             val reexport = self.find_reexport_source(
                                 imported_surface.physical_index, item_name)
+                            if self.library_mode != "" and library_mode_generic_import_v1(imp.module) and
+                                    (not reexport.found or not self.reexport_walk_complete or
+                                     not self.reexport_walk_valid):
+                                val selected_family = library_mode_effective_family_v1(
+                                    self.library_mode, importer_owner)
+                                self.error("LIBRARY_MODE_SYMBOL_MISSING: configured '{self.library_mode}' selected '{selected_family}' for `{imp.module}`; frozen owner `{imported_surface.module_name}` does not prove export `{item_name}`", imp.span)
+                                item_idx = item_idx + 1
+                                continue
                             # A truncated or invalid walk is not proof that
                             # the frozen target lacks the requested export.
                             # Preserve the registration path in that case;
@@ -586,7 +1149,9 @@ impl HirLowering:
                                     # the target surface's actual declaration
                                     # arrays in THIS process.
                                     eprint("[no-exported-item] module={imp.module} item={item_name} resolved={resolved_module_name} surf_module={imported_surface.module_name} surf_idx={imported_surface.physical_index} reg_surfaces={self.module_surfaces.surfaces.len()} F={imported_surface.callable_names.len()} C={imported_surface.composite_names.len()} E={imported_surface.enum_names.len()} T={imported_surface.trait_names.len()} A={imported_surface.type_alias_names.len()} K={imported_surface.constant_names.len()} declares_linear={module_surface_declares_item(imported_surface, item_name)}")
-                        self.register_imported_symbol(imported_surface.physical_index, resolved_module_name, item_name, local_name, imp.span, true)
+                        val selected_category = self.register_imported_symbol_selected_v1(imported_surface.physical_index, resolved_module_name, item_name, local_name, imp.span, true)
+                        self.reject_explicit_private_selected_import_v1(imported_surface, item_name, selected_category, imp.span)
+                        self.reject_explicit_private_import_v1(local_name, imp.span)
                         item_idx = item_idx + 1
             else:
                 # Do not change unresolved module-only/glob behavior. Named
@@ -595,6 +1160,87 @@ impl HirLowering:
                 if imp.items.len() > 0:
                     self.error("missing module surface for {imp.module}", imp.span)
             import_idx = import_idx + 1
+
+    # This is a known-rejection check at an explicitly written selective
+    # import. Dependency materialization never calls this boundary. Positive
+    # access still requires the selected route/manifest policy consumer.
+    me reject_explicit_private_selected_import_v1(surface: ModuleSurface, name: text, category: text, span: Span):
+        val authority = module_surface_declaration_authority_lookup_typed_v1(surface.declaration_authority_index, name, category)
+        if not authority.found or authority.source_modifier != "pri": return
+        if authority.source_path == "" or self.module_filename == "":
+            self.error("explicit pri import has unavailable selected declaration authority: " + name, span)
+        elif module_surface_canonical_path(self.module_filename) != authority.source_path:
+            self.error("cannot import explicitly private declaration `" + name + "` from another file", span)
+
+    me reject_explicit_private_import_v1(local_name: text, span: Span):
+        val id = self.import_binding_or_invalid(local_name)
+        if not id.is_valid(): return
+        if val symbol = self.symbols.get_symbol_raw(id.id):
+            if symbol.declaration_modifier_v1 != "pri": return
+            if symbol.declaration_source_path_v1 == "" or self.module_filename == "":
+                self.error("explicit pri import has unavailable source authority: " + local_name, span)
+                return
+            if module_surface_canonical_path(self.module_filename) != symbol.declaration_source_path_v1:
+                self.error("cannot import explicitly private declaration `" + local_name + "` from another file", span)
+
+    me private_fn_import_denied(imported: ModuleSurface, module_label: text, name: text, importer_path: text, span: Span, is_reexport: bool = false) -> bool:
+        """interp_private_names_selfhost_check_2026-11-09: mirror of the seed
+        interpreter's import-time `check_private_use_names`
+        (src/compiler_rust/.../interpreter_module/module_loader.rs). A braced
+        `use m.{name}` that names a bare (non-pub) top-level `fn` of `m` from a
+        file in a DIFFERENT directory is a hard error [E-HIR-PRIVATE-IMPORT-001]
+        by default. A `rel|name` pair frozen in
+        scripts/check/private_import_baseline.txt at the repository root (with
+        SCV snapshot prefix normalization) is the seed's `[visibility-warning]`.
+        Exemptions matching seed & HIR visibility rules:
+        - test/** callers (`private_import_is_test_importer`)
+        - same-directory sibling files (with Windows backslash normalization)
+        - importer with no directory segment (logical name, no registered surface)
+        - target modules with any plain `export` list or glob re-export
+        - declared `friend` / same-package `internal_export` symbols
+        - `export use` re-export facades (warn `[W-HIR-PRIVATE-IMPORT-001]`,
+          matching seed `export_handler.rs`).
+        Returns true only when the import was rejected (nothing registered)."""
+        if private_import_is_test_importer(importer_path):
+            return false
+        val importer_norm = private_import_norm_path(importer_path)
+        if not importer_norm.contains("/"):
+            return false
+        val importer_canon = module_surface_canonical_path(importer_norm)
+        val imported_norm = private_import_norm_path(imported.canonical_path)
+        val imported_canon = module_surface_canonical_path(imported_norm)
+        val importer_dir = if importer_canon != "": private_import_dir_of(importer_canon) else: private_import_dir_of(importer_norm)
+        val imported_dir = if imported_canon != "": private_import_dir_of(imported_canon) else: private_import_dir_of(imported_norm)
+        if importer_dir == imported_dir:
+            return false
+        if imported.exports.len() > 0:
+            return false
+        for is_glob in imported.export_route_is_glob:
+            if is_glob:
+                return false
+        val pos = module_surface_name_position(imported.callable_names, name)
+        if pos < 0 or pos >= imported.callable_values.len():
+            return false
+        val callable: ModuleSurfaceCallable = imported.callable_values[pos]
+        if callable.visibility != Visibility.Private or callable.is_method or callable.is_extern:
+            return false
+        if imported.internal_exports.contains(name):
+            val requester_package = module_surface_package_name_from_name(module_logical_name_from_path(importer_norm))
+            val imported_package = module_surface_package_name(imported)
+            val scope = member_access_scope_for_modules(
+                importer_norm, requester_package, imported_norm, imported_package,
+                imported.friends, true)
+            if scope.same_package or (scope.declared_friend and scope.internally_exported):
+                return false
+        if private_import_is_baselined(imported.canonical_path, name):
+            self.warning("[visibility-warning] '{name}' is a private fn of module '{module_label}' ({imported.canonical_path}); mark it `pub` or `export` it (imported from {importer_path})", span)
+            return false
+        val message = "private fn `{name}` of module `{module_label}` ({imported.canonical_path}) is not visible to {importer_path}; mark it `pub` or `export` it"
+        if is_reexport:
+            self.warning("[W-HIR-PRIVATE-IMPORT-001] " + message, span)
+            return false
+        self.error("[E-HIR-PRIVATE-IMPORT-001] " + message, span)
+        true
 
     me resolve_package_sibling_symbols(module: ParserModule):
         """Directory-package semantics: files in one source directory share a
@@ -654,8 +1300,15 @@ impl HirLowering:
             canon_matched = canon_matched + 1
             val sibling_index = self.surface_index_for_name(sibling_name)
             if sibling_index >= 0:
+                # Implicit directory-package visibility is not a source `use`
+                # declaration: it has no original import span, so it must not
+                # reach the reference-origin sink (which fails closed on a
+                # synthetic span). Explicit imports re-enable it below.
+                val sink_was_enabled = self.reference_origins_v1.enabled
+                self.reference_origins_v1.enabled = false
                 self.register_package_sibling_symbols(
                     self.module_surfaces.surfaces[sibling_index], sibling_name, sibling_span)
+                self.reference_origins_v1.enabled = sink_was_enabled
         if trace:
             eprint("[hir-siblings] module={module.name} self={self_name} pkg={pkg_prefix} canon_self={self_canon} canon_pkg={canon_prefix} literal_matched={literal_matched} canon_matched={canon_matched}")
 

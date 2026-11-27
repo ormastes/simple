@@ -1,0 +1,559 @@
+#!/bin/sh
+# Split stage3 build into entry-closure groups (fallback to 32-shard whole-program run).
+#
+# Build the stage3 compiler (entry src/app/cli/bootstrap_main.spl) with the
+# frozen stage2 as K small entry-closure groups instead of one whole-program
+# worker, then link simple_stage3.exe from the deduped group objects.
+#
+# Usage: sh scripts/bootstrap/p3-entry-groups.shs <checkout> <out_dir> [first_group] [last_group]
+#
+#   <checkout>  git checkout whose HEAD tracks src/app/cli/p3_groups/group_<n>.spl
+#               (SCV: entry + every --source under the checkout root, entry tracked)
+#   <out_dir>   group archives, logs, merged object dir, simple_stage3.exe
+#
+# Groups (src/app/cli/p3_groups/group_<n>.spl) follow the layering:
+#   1 std lib   2 compiler 00.common (+scv)   3 frontend/hir   4 types/semantics/mir
+#   5 backend   6 driver (+plugins)           7 app/cli
+# Each group `use`s only the slice of the bootstrap_main closure not already
+# covered by earlier groups (<= 250 new modules each). Groups are strictly
+# layered (group n imports groups 1..n-1), so they run in order by default and
+# reuse one shared --cache-dir: lower layers compile once and are cache hits
+# later. P3G_WAVES may run groups of a wave concurrently, e.g. "1|2 3|4 5|6|7";
+# concurrent groups share deps and the cache dir, so only use it once the lower
+# waves are cached.
+#
+# Memory: every stage2 process runs under C:/dev/p3new/tools/measure.ps1, which
+# kills only its own process tree past P3G_CAP_GB (default 28). With at most 3
+# concurrent groups that is <= 84 GB, leaving >= 24 GB commit free on the host.
+#
+# Link (duplicate-symbol handling): every archive is extracted into ONE object
+# dir. Members are content/module-hash named (aot-<sha256>.o), so the same
+# module built by two groups collapses to one file by name. Group entry objects
+# (they define __simple_main) are dropped; then any remaining object whose
+# __module_init* symbol is already defined by an earlier object is dropped too
+# (reported). The bootstrap_main entry object (--emit-entry-object, last step)
+# supplies __simple_main. scripts/bootstrap/p3-manual-link-stage3.shs links the
+# list with the #5760 ptree-shadow runtime.
+# @workaround bug=stage2_whole_program_mir_memory_growth_2026-11-01 reason=entry_groups_split_whole_program_mir_memory_growth
+set -eu
+
+if [ "${SIMPLE_ALLOW_LEGACY_P3_SCRIPT:-0}" != "1" ]; then
+  cat >&2 <<'EOF_DEPRECATED'
+DEPRECATED: Do not use scripts/bootstrap/p3-entry-groups.shs directly.
+Use 'scripts/bootstrap/build-phase3-phase4.sh' (or 'scripts/bootstrap/build-phase3-phase4.bat' on Windows; default --win-config=mingw):
+  Default / phased shard build: sh scripts/bootstrap/build-phase3-phase4.sh --phase=p3 --compile-mode=shard
+  File-based parallel build:    sh scripts/bootstrap/build-phase3-phase4.sh --phase=p3 --compile-mode=file
+  Phase 4 (release + xray):     sh scripts/bootstrap/build-phase3-phase4.sh --phase=p4
+  Windows (mingw default):      scripts\bootstrap\build-phase3-phase4.bat --win-config=mingw --phase=p3
+EOF_DEPRECATED
+  if [ -t 0 ] && [ "${CI:-}" != "true" ] && [ "${SIMPLE_NONINTERACTIVE:-0}" != "1" ]; then
+    printf 'Press Enter to return...' >&2
+    if read -r _; then :; fi
+  fi
+  return 0 2>/dev/null || exit 0
+fi
+
+if [ "$#" -lt 2 ]; then
+    echo "usage: $0 <checkout> <out_dir> [first_group] [last_group]" >&2
+    exit 2
+fi
+checkout=${1%/}
+out=${2%/}
+first=${3:-1}
+last=${4:-7}
+here=$(cd "$(dirname "$0")" && pwd)
+stage2=${P3G_STAGE2:-C:/dev/p3new/stage2.exe}
+measure=${P3G_MEASURE:-}
+cache=${P3G_CACHE_DIR:-$out/cache}
+cap=${P3G_CAP_GB:-}
+threads=${P3G_THREADS:-}
+if [ -z "$cap" ] || [ -z "$threads" ]; then
+    caps=$(sh "$here/p3-host-caps.shs" 2>/dev/null || true)
+    if [ -z "$cap" ]; then
+        cap=$(printf '%s\n' "$caps" | awk -F= '$1=="heavy_cap_gb"{print $2; exit}')
+    fi
+    if [ -z "$threads" ]; then
+        threads=$(printf '%s\n' "$caps" | awk -F= '$1=="max_threads"{print $2; exit}')
+        case "$threads" in ''|*[!0-9]*) threads=24 ;; esac
+        if [ "$threads" -gt 32 ]; then threads=32; fi
+    fi
+fi
+case "$cap" in ''|*[!0-9]*) cap=48 ;; esac
+case "$threads" in ''|*[!0-9]*) threads=24 ;; esac
+limit=${P3G_LIMIT_S:-7200}
+ptree=${P3G_PTREE_SHADOW:-none}
+go_to_end_groups=${P3G_GO_TO_END_GROUPS:-1}
+go_to_end_flag=${P3G_GO_TO_END_FLAG:-1}
+full_backends=${P3G_FULL_BACKENDS:-0}
+streaming_surfaces=${P3G_STREAMING_SURFACES:-}
+interface_hir=${P3G_INTERFACE_HIR:-}
+parse_worker_kb=${P3G_PARSE_WORKER_KB:-}
+hir_worker_kb=${P3G_HIR_WORKER_KB:-}
+mir_worker_kb=${P3G_MIR_WORKER_KB:-}
+mir_shards=${P3G_MIR_SHARDS:-}
+low_memory=${P3G_LOW_MEMORY:-0}
+reserve_bytes=${P3G_RESERVE_BYTES:-${SIMPLE_BUILD_MEMORY_RESERVE_BYTES:-}}
+min_commit_gb=${P3G_MIN_FREE_COMMIT_GB:-8}
+case "$min_commit_gb" in ''|*[!0-9]*) min_commit_gb=8 ;; esac
+lm=${SIMPLE_LLVM_MINGW_ROOT:-${SIMPLE_MINGW_ROOT:-}}
+if [ -z "$lm" ]; then
+    _lm_home=${HOME:-}
+    if [ -z "$_lm_home" ] && [ -n "${USERPROFILE:-}" ]; then
+        _lm_home=$(cygpath -u "$USERPROFILE" 2>/dev/null || printf '%s' "$USERPROFILE" | tr '\\' '/')
+    fi
+    lm=$(
+        for _lm_base in "${_lm_home:+$_lm_home/.simple/toolchains}" "/c/dev/tool"; do
+            [ -n "$_lm_base" ] || continue
+            for _lm_cand in "$_lm_base"/llvm-mingw-*-ucrt-x86_64; do
+                [ -d "$_lm_cand/bin" ] || continue
+                printf '%s\t%s\n' "$(basename "$_lm_cand")" "$_lm_cand"
+            done
+        done | LC_ALL=C sort -t "$(printf '\t')" -k1,1 -r | head -n 1 | cut -f2-
+    )
+fi
+[ -n "$lm" ] || { echo "error: llvm-mingw toolchain not found (set SIMPLE_LLVM_MINGW_ROOT or SIMPLE_MINGW_ROOT)" >&2; exit 1; }
+ar="$lm/bin/llvm-ar.exe"; [ -x "$ar" ] || ar="$lm/bin/llvm-ar"
+nm="$lm/bin/llvm-nm.exe"; [ -x "$nm" ] || nm="$lm/bin/llvm-nm"
+ps=$(command -v pwsh || command -v powershell || true)
+[ -n "$ps" ] || { echo "error: pwsh/powershell not found" >&2; exit 1; }
+[ -f "$stage2" ] || { echo "error: stage2 missing: $stage2" >&2; exit 1; }
+mkdir -p "$out" "$cache" "$cache/hir"
+
+win_path() {
+    if command -v cygpath >/dev/null 2>&1; then
+        cygpath -m "$1"
+    else
+        printf '%s\n' "$1"
+    fi
+}
+
+checkout_win=$(win_path "$checkout")
+out_win=$(win_path "$out")
+cache_win=$(win_path "$cache")
+stage2_win=$(win_path "$stage2")
+lm_win=$(win_path "$lm")
+measure_win=""
+[ -n "$measure" ] && measure_win=$(win_path "$measure")
+
+if [ "$full_backends" = "1" ]; then
+    ps_sources="'--source','src/compositions/cuda_static','--source','src/compositions/kernel_llvm_cranelift','--source','src/compiler','--source','src/app','--source','src/lib','--source','src/plugins'"
+    backend_composition="full"
+else
+    ps_sources="'--source','src/compositions/backends_host_only','--source','src/compositions/kernel_llvm_cranelift','--source','src/compiler','--source','src/app','--source','src/lib'"
+    backend_composition="host-only"
+fi
+ps_low_mem=""
+if [ "$low_memory" = "1" ]; then
+    ps_low_mem="'--low-memory',"
+fi
+ps_go_to_end=""
+if [ "$go_to_end_flag" = "1" ]; then
+    ps_go_to_end="'--go-to-end',"
+fi
+
+ptree_env_line="Remove-Item Env:SIMPLE_PROJECT_ROOT -EA SilentlyContinue"
+if [ -n "$ptree" ] && [ "$ptree" != "none" ] && [ -d "$ptree" ]; then
+    ptree_win=$(win_path "$ptree")
+    ptree_env_line="\$env:SIMPLE_PROJECT_ROOT=\"$ptree_win\"; \$env:SIMPLE_RT_OBJ_CACHE_DIR=\"$ptree_win.rtcache\""
+fi
+
+# One stage2 run under the RSS-capped wrapper. $1=name $2=entry $3=emit flag $4=output
+run_stage2() {
+    name=$1; entry=$2; emit=$3; o=$4
+    work_dir="$out/work_$name"
+    stage_o="$work_dir/$(basename "$o")"
+    stage_o_win=$(win_path "$stage_o")
+    tree_budget_kib=$((cap * 1048576))
+    git -C "$checkout" ls-files --error-unmatch "$entry" >/dev/null 2>&1 ||
+        { echo "error: $entry is not tracked in $checkout (SCV needs a tracked entry)" >&2; return 1; }
+    rm -rf "$work_dir"
+    mkdir -p "$work_dir"
+    rm -f "$o" "$out/$name.result.txt"
+    ps1="$out/$name.run.ps1"
+    cat > "$ps1" <<EOF
+\$env:SIMPLE_P3_RUN="P3-GROUPS"
+\$env:P3_GROUP_NAME="$name"
+\$env:SIMPLE_BACKEND_COMPOSITION="$backend_composition"
+\$env:SIMPLE_HIR_CACHE_DIR="$cache_win\\hir"
+\$env:KEEP_CACHE="1"
+\$env:PATH="C:\\msys64\\clang64\\bin;"+\$env:PATH
+# Default to per-file worker pool (1); explicit SIMPLE_FILE_WORKERS=0 or
+# P3G_FILE_WORKERS=0 opts out to the two-pass shard route.
+\$env:SIMPLE_FILE_WORKERS="${P3G_FILE_WORKERS:-${SIMPLE_FILE_WORKERS:-1}}"; \$env:SIMPLE_FILE_FIBERS="0"; \$env:SIMPLE_PARSE_SHARDING="${P3G_PARSE_SHARDING:-0}"; \$env:SIMPLE_COMPILE_FAIL_FAST="0"; \$env:SIMPLE_NATIVE_BUILD_THREADS="$threads"
+\$env:SIMPLE_NATIVE_INCREMENTAL="1"; \$env:SIMPLE_COMPILER_TRACE="${P3G_TRACE:-0}"
+\$env:SIMPLE_SCV_INVENTORY_COLD_INIT="1"; \$env:SIMPLE_SCV_FREEZE_FALLBACK="1"
+\$env:SIMPLE_SHARD_TREE_MEMORY_BUDGET_KIB="$tree_budget_kib"
+EOF
+    if [ -n "$parse_worker_kb" ]; then
+        printf '$env:SIMPLE_PARSE_SHARD_WORKER_KB="%s"\n' "$parse_worker_kb" >> "$ps1"
+    fi
+    if [ -n "$hir_worker_kb" ]; then
+        printf '$env:SIMPLE_HIR_SHARD_WORKER_KB="%s"\n' "$hir_worker_kb" >> "$ps1"
+    fi
+    if [ -n "$mir_worker_kb" ]; then
+        printf '$env:SIMPLE_MIR_SHARD_WORKER_KB="%s"\n' "$mir_worker_kb" >> "$ps1"
+    fi
+    if [ -n "$reserve_bytes" ]; then
+        printf '$env:SIMPLE_BUILD_MEMORY_RESERVE_BYTES="%s"\n' "$reserve_bytes" >> "$ps1"
+    fi
+    if [ "$name" = "entry" ]; then
+        entry_mir_shards=${P3G_ENTRY_MIR_SHARDS:-0}
+        case "$entry_mir_shards" in ''|*[!0-9]*) entry_mir_shards=0 ;; esac
+        if [ "$entry_mir_shards" -ge 1 ]; then
+            printf '$env:SIMPLE_MIR_SHARD_COUNT="%s"\n' "$entry_mir_shards" >> "$ps1"
+        else
+            printf '%s\n' '$env:SIMPLE_MIR_SHARDING="0"' >> "$ps1"
+            printf '%s\n' 'Remove-Item Env:SIMPLE_MIR_SHARD_COUNT -EA SilentlyContinue' >> "$ps1"
+        fi
+    elif [ -n "$mir_shards" ]; then
+        printf '$env:SIMPLE_MIR_SHARD_COUNT="%s"\n' "$mir_shards" >> "$ps1"
+    fi
+    if [ "$streaming_surfaces" = "1" ]; then
+        printf '%s\n' '$env:SIMPLE_STAGE3_STREAMING_SURFACES="1"' >> "$ps1"
+    fi
+    if [ "$interface_hir" = "1" ]; then
+        printf '%s\n' '$env:SIMPLE_MIR_SHARD_INTERFACE_HIR="1"' >> "$ps1"
+    fi
+    cat >> "$ps1" <<EOF
+Remove-Item Env:LIB -EA SilentlyContinue
+Remove-Item Env:INCLUDE -EA SilentlyContinue
+Remove-Item Env:LIBPATH -EA SilentlyContinue
+\$lm="$lm_win"
+\$env:PATH=\$env:PATH+";\$lm\\bin"; \$env:CC="\$lm\\bin\\clang.exe"; \$env:SIMPLE_LLVM_MINGW_ROOT=\$lm; \$env:SIMPLE_MINGW_ROOT=\$lm
+# @workaround bug=stage2_runtime_list_missing_process_tree_2026_11_01 reason=frozen_stage2_runtime_c_list_shadow_5760
+$ptree_env_line
+Set-Location "$checkout_win"
+EOF
+    if [ -n "$measure" ] && [ -f "$measure" ]; then
+        cat >> "$ps1" <<EOF
+\$p3Res = & "$measure_win" -Exe "$stage2_win" -Cache "$cache_win" -Log "$out_win/$name.build.log" -Limit $limit -CapGB $cap -Rest @('native-build','--entry-closure','--entry','$entry','--runtime-bundle','core-c-bootstrap',$ps_sources,'--target','x86_64-pc-windows-gnu','--backend','llvm','--threads','$threads',$ps_low_mem'--keep-going',$ps_go_to_end'--cache-dir','$cache_win','$emit','-o','$stage_o_win')
+\$p3Rc = if (\$null -eq \$LASTEXITCODE) { 0 } else { [int]\$LASTEXITCODE }
+\$p3Lines = @(\$p3Res | Where-Object { \$null -ne \$_ } | ForEach-Object { \$_.ToString() })
+\$p3Text = if (\$p3Lines.Count -gt 0) { (\$p3Lines -join [char]10) + [char]10 } else { '' }
+[System.IO.File]::WriteAllText("$out_win/$name.result.txt", \$p3Text, [System.Text.UTF8Encoding]::new(\$false))
+Write-Output \$p3Res
+exit \$p3Rc
+EOF
+    else
+        cat >> "$ps1" <<EOF
+\$p3TreeSrc = @'
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Runtime.InteropServices;
+
+public static class P3ProcTree {
+    private const uint TH32CS_SNAPPROCESS = 0x00000002;
+    [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Auto)]
+    private struct PROCESSENTRY32 {
+        public uint dwSize;
+        public uint cntUsage;
+        public uint th32ProcessID;
+        public IntPtr th32DefaultHeapID;
+        public uint th32ModuleID;
+        public uint cntThreads;
+        public uint th32ParentProcessID;
+        public int pcPriClassBase;
+        public uint dwFlags;
+        [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 260)]
+        public string szExeFile;
+    }
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr CreateToolhelp32Snapshot(uint dwFlags, uint th32ProcessID);
+    [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+    private static extern bool Process32First(IntPtr hSnapshot, ref PROCESSENTRY32 lppe);
+    [DllImport("kernel32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+    private static extern bool Process32Next(IntPtr hSnapshot, ref PROCESSENTRY32 lppe);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool CloseHandle(IntPtr hObject);
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MEMORYSTATUSEX {
+        public uint dwLength;
+        public uint dwMemoryLoad;
+        public ulong ullTotalPhys;
+        public ulong ullAvailPhys;
+        public ulong ullTotalPageFile;
+        public ulong ullAvailPageFile;
+        public ulong ullTotalVirtual;
+        public ulong ullAvailVirtual;
+        public ulong ullAvailExtendedVirtual;
+    }
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GlobalMemoryStatusEx(ref MEMORYSTATUSEX lpBuffer);
+
+    public static long FreeCommitBytes() {
+        var ms = new MEMORYSTATUSEX();
+        ms.dwLength = (uint)Marshal.SizeOf(typeof(MEMORYSTATUSEX));
+        if (!GlobalMemoryStatusEx(ref ms)) return -1;
+        return (long)ms.ullAvailPageFile;
+    }
+
+    public static long TreeWorkingSet(int rootPid) {
+        var children = new Dictionary<int, List<int>>();
+        IntPtr snap = CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0);
+        if (snap != IntPtr.Zero && snap != new IntPtr(-1)) {
+            try {
+                var pe = new PROCESSENTRY32();
+                pe.dwSize = (uint)Marshal.SizeOf(typeof(PROCESSENTRY32));
+                if (Process32First(snap, ref pe)) {
+                    do {
+                        int pid = (int)pe.th32ProcessID;
+                        int ppid = (int)pe.th32ParentProcessID;
+                        List<int> list;
+                        if (!children.TryGetValue(ppid, out list)) {
+                            list = new List<int>();
+                            children[ppid] = list;
+                        }
+                        list.Add(pid);
+                    } while (Process32Next(snap, ref pe));
+                }
+            } finally {
+                CloseHandle(snap);
+            }
+        }
+        var seen = new HashSet<int>();
+        var queue = new Queue<int>();
+        seen.Add(rootPid);
+        queue.Enqueue(rootPid);
+        long total = 0;
+        while (queue.Count > 0) {
+            int pid = queue.Dequeue();
+            try {
+                using (var p = Process.GetProcessById(pid)) {
+                    total += p.WorkingSet64;
+                }
+            } catch {}
+            List<int> kids;
+            if (children.TryGetValue(pid, out kids)) {
+                foreach (int k in kids) {
+                    if (seen.Add(k)) queue.Enqueue(k);
+                }
+            }
+        }
+        return total;
+    }
+}
+'@
+if (-not ([System.Management.Automation.PSTypeName]'P3ProcTree').Type) {
+    Add-Type -TypeDefinition \$p3TreeSrc -ErrorAction SilentlyContinue
+}
+\$pOut = "$out_win/$name.build.log"
+\$pErr = "$out_win/$name.build.err"
+\$minCommitBytes = [int64]$min_commit_gb * 1073741824
+if (\$minCommitBytes -gt 0 -and (([System.Management.Automation.PSTypeName]'P3ProcTree').Type)) {
+    for (\$w = 0; \$w -lt 180; \$w++) {
+        \$freeCommit = [int64][P3ProcTree]::FreeCommitBytes()
+        if (\$freeCommit -lt 0 -or \$freeCommit -ge \$minCommitBytes) { break }
+        Start-Sleep -Seconds 10
+    }
+}
+\$stageArgs = @('native-build','--entry-closure','--entry','$entry','--runtime-bundle','core-c-bootstrap',$ps_sources,'--target','x86_64-pc-windows-gnu','--backend','llvm','--threads','$threads',$ps_low_mem'--keep-going',$ps_go_to_end'--cache-dir','$cache_win','$emit','-o','$stage_o_win')
+\$proc = Start-Process -FilePath "$stage2_win" -ArgumentList \$stageArgs -NoNewWindow -PassThru -RedirectStandardOutput \$pOut -RedirectStandardError \$pErr
+\$null = \$proc.Handle
+\$sw = [System.Diagnostics.Stopwatch]::StartNew()
+\$capBytes = [int64]$cap * 1073741824
+\$peakBytes = [int64]0
+\$killed = 0
+while (-not \$proc.HasExited) {
+    for (\$i = 0; \$i -lt 10 -and -not \$proc.HasExited; \$i++) { Start-Sleep -Seconds 1 }
+    if (\$proc.HasExited) { break }
+    try {
+        if (([System.Management.Automation.PSTypeName]'P3ProcTree').Type) {
+            \$sum = [int64][P3ProcTree]::TreeWorkingSet([int]\$proc.Id)
+        } else {
+            \$sum = [int64]0
+            try { \$sum = [int64](Get-Process -Id \$proc.Id -EA SilentlyContinue).WorkingSet64 } catch {}
+        }
+        if (\$sum -gt \$peakBytes) { \$peakBytes = \$sum }
+        if (\$sum -gt \$capBytes -or \$sw.Elapsed.TotalSeconds -gt $limit) {
+            \$killed = 1
+            & taskkill /T /F /PID \$proc.Id *> \$null
+            break
+        }
+    } catch {}
+}
+\$proc.WaitForExit()
+if (Test-Path \$pErr) {
+    \$errContent = Get-Content -Path \$pErr -Raw -EA SilentlyContinue
+    if (\$errContent) { Add-Content -Path \$pOut -Value \$errContent }
+}
+\$rc = if (\$killed -eq 1 -and \$null -eq \$proc.ExitCode) { 137 } elseif (\$null -eq \$proc.ExitCode) { 1 } else { [int]\$proc.ExitCode }
+\$peakGb = [math]::Floor(\$peakBytes / 1073741824)
+\$resLine = "peak_tree_GB=\$peakGb killed=\$killed rc=\$rc"
+[System.IO.File]::WriteAllText("$out_win/$name.result.txt", \$resLine + [char]10, [System.Text.UTF8Encoding]::new(\$false))
+Write-Output \$resLine
+exit \$rc
+EOF
+    fi
+    echo "[p3g] start $name ($entry $emit) $(date +%H:%M:%S)"
+    "$ps" -NoProfile -ExecutionPolicy Bypass -File "$ps1" > "$out/$name.wrapper.log" 2>&1 || true
+    echo "[p3g] done  $name: $(tail -n 1 "$out/$name.result.txt" 2>/dev/null)"
+    if [ -s "$stage_o" ] && grep -qE '(^| )rc=0($| )' "$out/$name.result.txt" 2>/dev/null; then
+        mv -f "$stage_o" "$o"
+        rm -rf "$work_dir"
+        return 0
+    fi
+    rm -f "$work_dir"/aot-*.o "$work_dir"/aot-*.o.capsule-receipt "$work_dir"/*.go-to-end-trial 2>/dev/null || true
+    echo "error: $name failed or produced incomplete $o" >&2
+    return 1
+}
+
+# ---- groups -----------------------------------------------------------------
+failed_groups=""
+waves=${P3G_WAVES:-}
+if [ -z "$waves" ]; then
+    waves=$(seq "$first" "$last" | tr '\n' '|' | sed 's/|$//')
+fi
+old_ifs=$IFS; IFS='|'
+for wave in $waves; do
+    IFS=$old_ifs
+    pids=""
+    for g in $wave; do
+        a="$out/group_$g.a"
+        if [ -s "$a" ] && grep -qE '(^| )rc=0($| )' "$out/group_$g.result.txt" 2>/dev/null && [ "${P3G_REBUILD:-0}" != 1 ]; then
+            echo "[p3g] reuse $a"
+            continue
+        fi
+        run_stage2 "group_$g" "src/app/cli/p3_groups/group_$g.spl" --emit-archive "$a" &
+        pids="$pids $!"
+    done
+    wave_failed=0
+    for p in $pids; do wait "$p" || wave_failed=1; done
+    if [ "$wave_failed" -ne 0 ]; then
+        failed_groups="$failed_groups wave($wave)"
+        if [ "$go_to_end_groups" != "1" ]; then
+            echo "error: wave '$wave' failed" >&2
+            exit 1
+        fi
+        echo "warning: wave '$wave' had failures; continuing remaining waves (P3G_GO_TO_END_GROUPS=1)" >&2
+    fi
+    IFS='|'
+done
+IFS=$old_ifs
+
+# ---- bootstrap_main entry object (all deps are cache hits by now) -----------
+entry_o="$out/bootstrap_main_entry.o"
+if [ ! -s "$entry_o" ] || ! grep -qE '(^| )rc=0($| )' "$out/entry.result.txt" 2>/dev/null || [ "${P3G_REBUILD:-0}" = 1 ]; then
+    if ! run_stage2 entry src/app/cli/bootstrap_main.spl --emit-entry-object "$entry_o"; then
+        failed_groups="$failed_groups entry"
+    fi
+fi
+
+if [ -n "$failed_groups" ]; then
+    echo "error: go-to-end group sweep completed with failures:$failed_groups (inspect $out/*.build.log)" >&2
+    exit 1
+fi
+
+# ---- merge + dedupe ---------------------------------------------------------
+objs="$out/objs"
+rm -rf "$objs"; mkdir -p "$objs"
+: > "$out/obj-list.txt"; : > "$out/dedupe.log"
+seen="$out/inits.seen"; : > "$seen"
+total=0
+for g in $(seq 1 7); do
+    a="$out/group_$g.a"
+    [ -s "$a" ] || { echo "error: missing $a" >&2; exit 1; }
+    "$ar" t "$a" | tr -d '\r' > "$out/group_$g.members"
+    g_n=$(wc -l < "$out/group_$g.members" | tr -d ' ')
+    total=$((total + g_n))
+    gtmp="$objs/.tmp_g$g"
+    rm -rf "$gtmp"; mkdir -p "$gtmp"
+    (cd "$gtmp" && "$ar" x "$a")
+    nm_out="$out/group_$g.nm"
+    sorted_members="$out/group_$g.members.sorted"
+    : > "$nm_out"
+    LC_ALL=C sort "$out/group_$g.members" > "$sorted_members"
+    if [ "$g_n" -gt 0 ]; then
+        (cd "$gtmp" && awk 'NF && /\.o$/' "$sorted_members" | tr '\n' '\0' |
+            xargs -0 "$nm" -A --defined-only --extern-only 2>/dev/null || true) > "$nm_out"
+    fi
+    keep_file="$out/group_$g.keep"
+    new_seen="$out/group_$g.new_seen"
+    : > "$keep_file"; : > "$new_seen"
+    awk -v dedupe_log="$out/dedupe.log" -v keep_out="$keep_file" -v new_seen_out="$new_seen" '
+        FILENAME == ARGV[1] {
+            gsub(/\r/, "", $0)
+            if (NF >= 1) seen[$1] = 1
+            next
+        }
+        FILENAME == ARGV[2] {
+            if (NF < 3) next
+            obj = $1
+            sub(/:$/, "", obj)
+            sub(/^.*[\/\\]/, "", obj)
+            sym = $NF
+            gsub(/\r/, "", sym)
+            if (sym ~ /^_{1,3}simple_main$/) sym = "__simple_main"
+            else if (sym ~ /^___module_init/) sub(/^___module_init/, "__module_init", sym)
+            else if (sym ~ /^_simple_empty_module_/) sub(/^_simple_empty_module_/, "simple_empty_module_", sym)
+            if (sym == "__simple_main") {
+                has_main[obj] = 1
+            } else if (sym ~ /^__module_init/ || sym ~ /^simple_empty_module_/) {
+                key = obj "\t" sym
+                if (!(key in obj_sym_seen)) {
+                    obj_sym_seen[key] = 1
+                    obj_syms[obj] = (obj in obj_syms ? obj_syms[obj] "\n" sym : sym)
+                }
+            }
+            next
+        }
+        {
+            gsub(/\r/, "", $0)
+            o = $0
+            if (o !~ /\.o$/) next
+            if (o in seen_member) next
+            seen_member[o] = 1
+            if (o in has_main) {
+                printf "drop %s: group entry (__simple_main)\n", o >> dedupe_log
+                next
+            }
+            dup = ""
+            if (o in obj_syms) {
+                n = split(obj_syms[o], arr, "\n")
+                for (i = 1; i <= n; i++) {
+                    if (arr[i] in seen) {
+                        dup = arr[i]
+                        break
+                    }
+                }
+                if (dup != "") {
+                    printf "drop %s: duplicate %s\n", o, dup >> dedupe_log
+                    next
+                }
+                for (i = 1; i <= n; i++) {
+                    seen[arr[i]] = 1
+                    print arr[i] >> new_seen_out
+                }
+            }
+            print o >> keep_out
+        }
+    ' "$seen" "$nm_out" "$sorted_members"
+    if [ -s "$new_seen" ]; then
+        cat "$new_seen" >> "$seen"
+    fi
+    if [ -s "$keep_file" ]; then
+        gtmp_win=$(win_path "$gtmp")
+        objs_win=$(win_path "$objs")
+        keep_win=$(win_path "$keep_file")
+        "$ps" -NoProfile -Command "
+            \$src = '$gtmp_win'
+            \$dst = '$objs_win'
+            foreach (\$f in [System.IO.File]::ReadAllLines('$keep_win')) {
+                \$t = \$f.Trim()
+                if (\$t) { [System.IO.File]::Move((Join-Path \$src \$t), (Join-Path \$dst ('g${g}_' + \$t))) }
+            }
+        "
+        sed "s/^/g${g}_/" "$keep_file" >> "$out/obj-list.txt"
+    fi
+    rm -rf "$gtmp" "$nm_out" "$sorted_members" "$keep_file" "$new_seen"
+done
+uniq_n=$(cat "$out"/group_*.members | sort -u | wc -l | tr -d ' ')
+echo "[p3g] archive members: $total total, $uniq_n unique by name ($((total - uniq_n)) shared deduped)"
+cp "$entry_o" "$objs/bootstrap_main_entry.o"
+echo bootstrap_main_entry.o >> "$out/obj-list.txt"
+echo "[p3g] link objects: $(wc -l < "$out/obj-list.txt" | tr -d ' '); dropped: $(wc -l < "$out/dedupe.log" | tr -d ' ') (see $out/dedupe.log)"
+
+# ---- link -------------------------------------------------------------------
+P3_OBJ_LIST="$out/obj-list.txt" SIMPLE_LLVM_MINGW_ROOT="$lm" \
+    sh "$here/p3-manual-link-stage3.shs" "$objs" "$checkout" "$out/simple_stage3.exe"
+rm -f "$out"/aot-*.o "$out"/aot-*.o.capsule-receipt "$out"/*.go-to-end-trial 2>/dev/null || true

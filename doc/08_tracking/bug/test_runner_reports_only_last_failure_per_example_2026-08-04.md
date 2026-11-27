@@ -1,8 +1,28 @@
 # `bin/simple test` reports only the LAST failure per example
-## Open 2026-09-16 — needs owner triage
+## Closed 2026-11-04 — seed BDD fixed; re-verified on the self-hosted binary 2026-11-25 (lane p3-bab)
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
+
+## Current-owner audit (2026-11-03)
+
+Status remains OPEN / verification pending. The historical reproduction below
+used the Rust seed's BDD interpreter, whose failure-message slot is scalar.
+The current pure-Simple framework in `src/lib/nogc_sync_mut/spec.spl` already
+appends failures to `current_test_errors`, joins all messages when `_execute_it`
+finishes, and increments the failed-example counter once. The other spec
+families re-export that owner. No duplicate owner repair is proposed.
+
+Regression: `test/fixtures/spec_failure_retention/two_failures.spl` and
+`scripts/check/check-spec-failure-retention.shs`. Supply an admitted self-hosted
+runtime path to the checker. It requires both independent assertion messages,
+continuation after the failures, the subsequent passing example, totals of two
+examples / one pass / one failure, and exit 1. The negative fixture is not an
+auto-discovered `_spec.spl`. No supplied runtime means UNRUN, not PASS, and the
+checker never discovers or falls back to a seed.
+
+Execution is AUTHORED_UNRUN until a qualified current runner is available;
+source accumulation alone does not establish output/count/exit behavior.
 
 **Found:** 2026-08-04, while sabotage-verifying the M6 gen-arena lane.
 **Severity:** measurement trap (not a product defect) — it makes sabotage logs
@@ -60,3 +80,53 @@ Related standing traps: bare `assert x == y` in an `it` block is inert (use
 at daemon start (pass `--no-session-daemon`); only the final
 `Results: N total, ...` line is an authoritative verdict.
 
+
+## Re-probe 2026-11-03 (tr-sspec lane)
+Still reproduces on the seed `bin/simple.exe test`: an `it` with two failing expects (1==2, 3==4)
+prints only `expected 3 to equal 4` (1 example, 1 failure). Root cause: scalar `BDD_FAILURE_MSG` in
+seed bdd.rs overwritten per failure. Fix needs seed Rust change (append/join in the matcher-fail
+sites) + seed rebuild; deferred. Pure-Simple framework already accumulates (see audit above).
+
+## Verification 2026-11-04 (g-lastfail lane)
+
+Ran `test/fixtures/spec_failure_retention/two_failures_block.spl` (new block-form
+fixture; the function-reference fixture is rejected by the Rust seed BDD with
+"BDD block expected a block or lambda") on the Rust seed `bin/simple.exe run`:
+example 1 prints only `expected 33 to equal 44`; the earlier `11 vs 22` failure is
+lost. So the defect persists in the **seed BDD interpreter** only
+(`src/compiler_rust/compiler/src/interpreter_call/bdd.rs`, scalar
+`BDD_FAILURE_MSG` overwritten by ~dozen matcher sites in `interpreter_method/mod.rs`).
+The pure-Simple framework (`src/lib/nogc_sync_mut/spec.spl`) already accumulates.
+Status: fix-implemented-partial. Seed is bootstrap-only and not redeployed in this
+lane; a seed fix (append to a bounded Vec) needs a seed rebuild to verify.
+Re-run the fixture on a self-hosted runtime to confirm both messages print.
+
+## Fixed 2026-11-04 (g-lastfail lane)
+
+Seed `BDD_FAILURE_MSG` is now a bounded `Vec<String>` (cap 16, then "+N more");
+all matcher sites push via `push_bdd_failure`; first-failure/pass semantics unchanged.
+Evidence: `cargo test -p simple-compiler --lib failure_retention_tests` 2 passed
+(old single-slot logic keeps only the last message, so the test cannot pass there);
+test-only seed release build (shared target, not deployed) running
+`test test/fixtures/spec_failure_retention/two_failures_block.spl` prints both
+`expected 11 to equal 22` and `expected 33 to equal 44`.
+Status: fixed.
+
+## Verification 2026-11-25 (lane p3-bab, worktree wt-p3-bab, release/1.0.0)
+
+The header still said "Open — needs owner triage" although the fix landed
+2026-11-04; header corrected. Re-ran the retention fixture on the current
+tracked self-hosted binary (`SIMPLE_LIB=src bin/simple.exe test
+test/fixtures/spec_failure_retention/two_failures_block.spl
+--mode=interpreter`). The single failing example prints BOTH independent
+failure messages:
+
+```
+  ✗ retains both independent failures
+    expected 11 to equal 22
+    expected 33 to equal 44
+```
+
+Totals `2 examples, 1 failure`, exit 1 — exactly the retention contract the
+2026-11-04 seed fix established (both messages retained, continuation to the
+passing example, one failed-example count). Closed.

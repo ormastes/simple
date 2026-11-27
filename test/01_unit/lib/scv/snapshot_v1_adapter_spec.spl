@@ -1,0 +1,82 @@
+use std.spec.*
+use std.scv.compile_snapshot.{ScvCompileSnapshotV1, scv_compile_snapshot_acquire_v1}
+use std.scv.compile_source_inventory.{CompileSourceInventoryV1,
+    CompileSourceInventoryEntryV1, compile_source_inventory_publish_v1}
+use std.scv.snapshot_v1_adapter.{scv_snapshot_from_compile_v1}
+use std.scv.snapshot_v2.{scv_snapshot_read_v2}
+use std.scv.source_witness_v1.{scv_snapshot_lookup_domain_v2}
+use std.scv.store.{scv_content_id_for_u8}
+use app.io.mod.{dir_create, file_delete}
+use app.io.file_ops.{path_absolute}
+use std.nogc_sync_mut.io_runtime.{getpid}
+use std.nogc_sync_mut.io.file_ops.{file_write_bytes}
+
+struct V1AdapterFixture:
+    root: text
+    legacy: ScvCompileSnapshotV1
+    inventory: CompileSourceInventoryV1
+    raw: [u8]
+
+fn adapter_fixture(label: text) -> V1AdapterFixture:
+    val root = path_absolute("build/test-artifacts/scv-v2-adapter-{getpid()}-{label}").replace("\\", "/")
+    val raw: [u8] = [239u8, 187u8, 191u8, 35u8, 32u8, 97u8, 13u8, 10u8]
+    val digest = scv_content_id_for_u8(raw).substring(7)
+    val entry = CompileSourceInventoryEntryV1(source_identity: "src/a.spl",
+        content_digest: digest, semantic_digest: digest, export_digest: digest,
+        initializer_digest: digest, provider_digest: digest, byte_count: raw.len())
+    val inventory = CompileSourceInventoryV1(schema_version: 1, generation: 7, entries: [entry])
+    assert(dir_create(root + "/src", true))
+    assert(file_write_bytes(root + "/src/a.spl", raw))
+    assert(compile_source_inventory_publish_v1(root + "/build/scv", inventory) != "")
+    val legacy = scv_compile_snapshot_acquire_v1(root, root + "/build/scv", ["src"])
+    assert(legacy.valid)
+    V1AdapterFixture(root: root, legacy: legacy, inventory: inventory, raw: raw)
+
+describe "Actual compile snapshot V1 adapter (REQ-009/010/014)":
+    it "opens an acquired V1 receipt and reads frozen bytes after the checkout changes":
+        val fixture = adapter_fixture("frozen-read")
+        expect(file_write_bytes(fixture.root + "/src/a.spl", [35u8, 10u8])).to_equal(true)
+        val adapter = scv_snapshot_from_compile_v1(fixture.root, fixture.legacy,
+            fixture.inventory, ["src"], 0).unwrap()
+        expect(scv_snapshot_read_v2(adapter.snapshot, "src/a.spl").unwrap()).to_equal(fixture.raw)
+        expect(adapter.legacy.inventory_digest).to_equal(fixture.legacy.inventory_digest)
+        expect(adapter.snapshot.namespace).to_equal("compile-inventory-v1")
+        expect(adapter.snapshot.capture_generation).to_equal(7)
+        expect(adapter.snapshot.acknowledged_generation).to_equal(0)
+        expect(adapter.snapshot.unsupported_inputs).to_contain("filesystem-event-coverage")
+        expect(adapter.snapshot.unsupported_inputs).to_contain("editor-overlays")
+        expect(scv_snapshot_lookup_domain_v2(adapter.snapshot, "src/new.spl", "filesystem-v1")).to_equal(Err("lookup-source-domain-unknown"))
+
+    it "refuses a missing frozen object even when the live checkout contains it":
+        val fixture = adapter_fixture("missing-object")
+        expect(file_delete(fixture.legacy.snapshot_root + "/src/a.spl")).to_equal(true)
+        expect(scv_snapshot_from_compile_v1(fixture.root, fixture.legacy,
+            fixture.inventory, ["src"], 0)).to_equal(Err("adapter-frozen-object-missing:src/a.spl"))
+
+    it "refuses corrupt frozen bytes instead of falling back to valid live bytes":
+        val fixture = adapter_fixture("corrupt-object")
+        expect(file_write_bytes(fixture.legacy.snapshot_root + "/src/a.spl", [35u8, 10u8])).to_equal(true)
+        expect(scv_snapshot_from_compile_v1(fixture.root, fixture.legacy,
+            fixture.inventory, ["src"], 0)).to_equal(Err("adapter-frozen-object-mismatch:src/a.spl"))
+
+    it "rejects a declared scope that would omit an immutable inventory row":
+        val fixture = adapter_fixture("scope-mismatch")
+        expect(scv_snapshot_from_compile_v1(fixture.root, fixture.legacy,
+            fixture.inventory, ["other"], 0)).to_equal(Err("adapter-declared-scope-inventory-mismatch"))
+        expect(scv_snapshot_from_compile_v1(fixture.root, fixture.legacy,
+            fixture.inventory, [], 0)).to_equal(Err("adapter-complete-scope-missing"))
+
+    it "rejects an incomplete supplied inventory instead of proving sparse absence":
+        val fixture = adapter_fixture("sparse-inventory")
+        val sparse = CompileSourceInventoryV1(schema_version: 1, generation: 7, entries: [])
+        expect(scv_snapshot_from_compile_v1(fixture.root, fixture.legacy,
+            sparse, ["src"], 0)).to_equal(Err("adapter-declared-scope-inventory-mismatch"))
+
+    it "refuses drifted legacy authority and fabricated event acknowledgements":
+        val fixture = adapter_fixture("drift")
+        var drifted = fixture.legacy
+        drifted.source_drifted = true
+        expect(scv_snapshot_from_compile_v1(fixture.root, drifted,
+            fixture.inventory, ["src"], 0)).to_equal(Err("adapter-source-drifted"))
+        expect(scv_snapshot_from_compile_v1(fixture.root, fixture.legacy,
+            fixture.inventory, ["src"], 7)).to_equal(Err("adapter-event-acknowledgement-unsupported"))

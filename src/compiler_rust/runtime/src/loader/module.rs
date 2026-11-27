@@ -13,6 +13,11 @@ pub struct LoadedModule {
     pub got_mem: Option<ExecutableMemory>,
     pub symbols: SymbolTable,
     pub version: u32,
+    /// Raw payload of the `.interp_snapshot` section (`SectionType::InterpSnapshot`),
+    /// when the SMF carries one: the entry source its interpreter-routed
+    /// functions must be re-seeded from before `main` runs. `None` for an SMF
+    /// whose every function compiled natively.
+    pub interp_snapshot: Option<Vec<u8>>,
 }
 
 impl LoadedModule {

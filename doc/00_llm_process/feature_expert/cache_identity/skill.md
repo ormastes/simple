@@ -51,3 +51,32 @@ text` — each carries the full generation double-check inline; callers
 needing pairing re-read the generation after (the atlas producer does).
 The double-read staleness guarantee is preserved per projection, not per
 pair. See `doc/07_guide/compiler/backends/freestanding_safe_channels.md`.
+
+- 2026-10-25: persisted digests are algorithm-tagged `DigestV1` (unknown tag = miss); live key declarations are pinned by `scripts/check/check-cache-formal-source-binding.shs`. See `doc/07_guide/tooling/bootstrap_options.md`.
+
+## Incremental TLDR freshness scope (2026-11-06)
+
+Freshness authority is the content digest only (design rule 4). For 1.0.0 the
+TLDR/SCV feature is reduced to: complete-inventory TLDR verifier, local
+immutable receipt (temp + atomic rename, optional `refs/notes/simple-tldr`
+adapter), byte-reconciled validated change, post-build pending/settled records,
+`simple tldr status/history`. Edit-event stores (SMET, SourceMetaStoreV1, WAL,
+editor adapters, SCV metadata v2) are NOT-NEEDED — see
+`doc/03_plan/compiler/incremental_build_tldr_scv_implementation_2026-10-10.md`
+§ "Stale-feature review — 2026-11-06".
+
+## PostBuildCoordinatorV1 (2026-11-06)
+
+`src/compiler/80.driver/cache/postbuild_coordinator_v1.spl`: per-build pending vs
+settled state for `binary` (ready|failed), `tldr` (verified|stale|failed) and
+`tests` (passed|failed|not_requested), keyed by generation = the frozen source
+inventory digest (`SIMPLE_SCV_SOURCE_INVENTORY_DIGEST`). One immutable SDN per
+kind at `<machine_cache_root>/postbuild/<generation>/<kind>.sdn` (temp + atomic
+rename; absent = pending; a settled file is never replaced; a wrong-generation
+job is refused and a foreign-generation file is ignored). Kinds are separate
+files, so a late TLDR/test failure leaves binary=ready.
+`postbuild_wait_required_v1(root, generation, tier)` (tiers binary | verified |
+full) is the qualification gate. Callers: `native_build_main.spl`
+(`native_build_record_postbuild_v1`, after the worker publishes or fails) and
+`tldr_entry.spl` (`status` / `--receipt`). Spec:
+`test/01_unit/compiler/driver/postbuild_coordinator_v1_spec.spl`.

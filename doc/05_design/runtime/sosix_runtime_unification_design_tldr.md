@@ -1,5 +1,9 @@
 # SOSIX Runtime Library Unification — TL;DR
 
+## 2026-10-29 host process coordination
+
+[Host contract](sosix_runtime_unification_design.md#2026-10-29-host-process-coordination-contract): one shared ABI/lifecycle owner, separate host adapters, coordinated shared-file integration. #5233/#5234 landed the explicit cooperative Mac snapshot runner/API; strict V4 remains unavailable. AMFI image and escaping-tree experiments are unlanded evidence, not production qualification. Each host/profile needs its own TDD and source-matched live receipt; P1/C gates do not establish deployed native Simple/P2 support.
+
 ## 2026-10-11 variation update
 
 [Current design](sosix_runtime_unification_design.md#2026-10-11-simdgpu-variation-boundary): reuse SOSIX/SimpleRing operation, wake, lease and retirement owners; bind existing GPU providers without a second runtime. Arithmetic remains direct with no ring hop. Cancellation is not retirement; live buffers and generations remain pinned. Current C CUDA execution is not environment-variant GPU/SOSIX-G admission. Historical platform and performance claims require their own exact receipts.

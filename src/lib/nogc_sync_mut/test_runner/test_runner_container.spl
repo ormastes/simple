@@ -1,53 +1,158 @@
-# Test Runner Container Backend
-#
-# Container-based test execution using Docker or Podman.
-# Provides isolation and resource limits via container runtime.
+# Legacy test runner container backend.
+# Process arguments remain separate values; this module never invokes a shell.
 
-use std.nogc_sync_mut.io.process_ops.{shell, shell_bool, shell_output_trimmed}
-use std.nogc_sync_mut.io.file_ops.{file_exists}
+use std.nogc_sync_mut.io.process_ops.process_run
+use std.io_runtime.{getpid, process_run_timeout, env_get}
+use std.nogc_sync_mut.io.file_ops.file_exists
+use std.nogc_sync_mut.io_runtime.time_now_monotonic_ms
 
-# =========================================================================
-# Container Detection
-# =========================================================================
+pub fn container_runtime_supported_v1(runtime: text) -> bool:
+    """Only the two supported CLI adapters may be executed."""
+    runtime == "docker" or runtime == "podman"
 
-fn container_detect_runtime() -> text:
-    """
-    Detect available container runtime (docker or podman).
+pub fn container_argument_valid_v1(value: text) -> bool:
+    value != "" and not value.contains("\u{0}")
 
-    Returns: "docker", "podman", or "none"
-    """
-    val docker_check = shell_bool("docker --version")
-    if docker_check:
+pub fn container_image_valid_v1(image: text) -> bool:
+    container_argument_valid_v1(image) and not image.starts_with("-")
+
+pub fn container_test_argv_v1(test_file: text, image: text, memory_mb: i64,
+        cpu_count: f64, network: text, readonly: bool, workspace: text) -> Result<[text], text>:
+    """Construct literal argv; reject option-like operands and ambiguous -v sources."""
+    if not container_image_valid_v1(image):
+        return Err("invalid-container-image")
+    if not container_argument_valid_v1(test_file) or test_file.starts_with("-"):
+        return Err("invalid-container-test-path")
+    if memory_mb <= 0 or not (cpu_count > 0.0):
+        return Err("invalid-container-resource-limit")
+    if network != "none" and network != "bridge" and network != "host":
+        return Err("unsupported-container-network")
+    if not container_argument_valid_v1(workspace) or workspace.contains(":"):
+        return Err("ambiguous-container-workspace")
+    val mount_flag = if readonly: "ro" else: "rw"
+    Ok(["run", "--rm", "--memory={memory_mb}m", "--cpus={cpu_count}",
+        "--network={network}", "-v", "{workspace}:/workspace:{mount_flag}",
+        "-w", "/workspace", image, "test", test_file])
+
+pub fn container_build_argv_v1(dockerfile_path: text, image_name: text) -> Result<[text], text>:
+    """Keep Dockerfile and tag in separate option values without shell expansion."""
+    if not container_argument_valid_v1(dockerfile_path):
+        return Err("invalid-container-dockerfile")
+    if not container_image_valid_v1(image_name):
+        return Err("invalid-container-image")
+    Ok(["build", "--file={dockerfile_path}", "--tag={image_name}", "."])
+
+pub fn container_detect_runtime() -> text:
+    val docker_check = process_run("docker", ["--version"])
+    if docker_check.2 == 0:
         return "docker"
-
-    val podman_check = shell_bool("podman --version")
-    if podman_check:
+    val podman_check = process_run("podman", ["--version"])
+    if podman_check.2 == 0:
         return "podman"
-
     "none"
 
-fn container_check_image(image: text, runtime: text) -> bool:
-    """
-    Check if a container image exists locally.
-
-    Args:
-        image: Image name (e.g., "simple-test-runner:latest")
-        runtime: Container runtime ("docker" or "podman")
-
-    Returns: true if image exists, false otherwise
-    """
-    if runtime == "docker":
-        return shell_bool("docker images -q {image} | grep -q .")
-    elif runtime == "podman":
-        return shell_bool("podman images -q {image} | grep -q .")
-    else:
+pub fn container_check_image(image: text, runtime: text) -> bool:
+    if not container_runtime_supported_v1(runtime) or not container_image_valid_v1(image):
         return false
+    val result = process_run(runtime, ["image", "inspect", image])
+    result.2 == 0
 
-# =========================================================================
-# Container Execution
-# =========================================================================
+# Ceiling for a caller that states no limit. `container_run_test` had no
+# timeout at all before it gained a kill path, and whole suites run under it,
+# so the default is a 24 h backstop against a hung engine, not a test budget.
+# SIMPLE_CONTAINER_TEST_TIMEOUT_MS sets a real per-run limit.
+pub const CONTAINER_TEST_DEFAULT_TIMEOUT_MS_V1: i64 = 86400000
 
-fn container_run_test(
+pub fn container_test_timeout_ms_v1(configured: text) -> i64:
+    """Positive decimal milliseconds from the environment text, else the 24 h default."""
+    if configured == "" or configured.len() > 12: return CONTAINER_TEST_DEFAULT_TIMEOUT_MS_V1
+    var value = 0
+    for index in 0..configured.len():
+        val byte = configured.byte_at(index)
+        if byte < 48 or byte > 57: return CONTAINER_TEST_DEFAULT_TIMEOUT_MS_V1
+        value = value * 10 + (byte - 48)
+    if value <= 0: return CONTAINER_TEST_DEFAULT_TIMEOUT_MS_V1
+    value
+
+pub fn container_test_absence_v1(exit_code: i64, stdout: text, stderr: text) -> text:
+    """
+    Classify `container inspect <name>`: "present", "gone" or "unknown".
+    Gone needs BOTH the engine's not-found exit (docker 1, podman 125 — measured
+    on podman 4.9.3) and its "no such container" text. Any other failure — a
+    dead daemon, a timeout, a permission error — is unknown, never gone.
+    """
+    if exit_code == 0: return "present"
+    val said = (stdout + "\n" + stderr).lower()
+    if (exit_code == 1 or exit_code == 125) and said.contains("no such container"): return "gone"
+    "unknown"
+
+fn container_test_name_valid_v1(name: text) -> bool:
+    """Engine container name: 1..63 of [A-Za-z0-9_.-], alphanumeric first."""
+    if name.len() < 1 or name.len() > 63: return false
+    for index in 0..name.len():
+        val byte = name.byte_at(index)
+        val alnum = (byte >= 48 and byte <= 57) or (byte >= 65 and byte <= 90) or (byte >= 97 and byte <= 122)
+        if index == 0 and not alnum: return false
+        if not alnum and byte != 95 and byte != 46 and byte != 45: return false
+    true
+
+pub fn container_test_named_argv_v1(argv: [text], name: text) -> Result<[text], text>:
+    """Insert `--name <name>` after `run --rm` so the container can be reaped by exact name."""
+    if argv.len() < 2 or argv[0] != "run" or argv[1] != "--rm": return Err("invalid-container-run-argv")
+    if not container_test_name_valid_v1(name): return Err("invalid-container-name")
+    var named = ["run", "--rm", "--name", name]
+    var index = 2
+    while index < argv.len():
+        named.push(argv[index])
+        index = index + 1
+    Ok(named)
+
+pub fn container_test_reap_argv_v1(name: text) -> [text]:
+    ["rm", "--force", "--volumes", name]
+
+pub fn container_test_absent_argv_v1(name: text) -> [text]:
+    ["container", "inspect", name]
+
+fn container_test_host_runner_v1(runtime: text, args: [text], timeout_ms: i64) -> (text, text, i64):
+    val result = process_run_timeout(runtime, args, timeout_ms)
+    (result.0, result.1, result.2 as i64)
+
+pub fn container_run_test_bounded_v1(test_file: text, runtime: text, image: text, memory_mb: i64,
+        cpu_count: f64, network: text, readonly: bool, workspace: text, name: text, timeout_ms: i64,
+        runner: fn(text, [text], i64) -> (text, text, i64)) -> (text, text, i64, i64):
+    """
+    Bounded run with a kill path. The engine client is killed at `timeout_ms`;
+    the container it started outlives the client (`--rm` only fires on a normal
+    exit), so it is force-removed by exact name after EVERY outcome and its
+    absence is checked. A container that cannot be proven gone is an error.
+    """
+    if not container_runtime_supported_v1(runtime):
+        return ("", "Unsupported container runtime: {runtime}", 1, 0)
+    if timeout_ms <= 0:
+        return ("", "invalid-container-timeout", 1, 0)
+    val base = container_test_argv_v1(test_file, image, memory_mb, cpu_count, network, readonly, workspace)
+    if base.is_err():
+        return ("", base.unwrap_err(), 1, 0)
+    val argv = container_test_named_argv_v1(base.unwrap(), name)
+    if argv.is_err():
+        return ("", argv.unwrap_err(), 1, 0)
+    val start_time = time_now_ms()
+    if start_time < 0:
+        return ("", "Container monotonic clock unavailable", 1, 0)
+    val result = runner(runtime, argv.unwrap(), timeout_ms)
+    val end_time = time_now_ms()
+    val removed = runner(runtime, container_test_reap_argv_v1(name), 30000)
+    val probe = runner(runtime, container_test_absent_argv_v1(name), 30000)
+    if end_time < start_time:
+        return (result.0, result.1 + "\nContainer monotonic clock failed", 1, 0)
+    val absence = container_test_absence_v1(probe.2, probe.0, probe.1)
+    if absence == "present":
+        return (result.0, result.1 + "\nContainer {name} still present after forced removal", 1, end_time - start_time)
+    if absence == "unknown":
+        return (result.0, result.1 + "\nContainer {name} removal unverified: inspect exit {probe.2}", 1, end_time - start_time)
+    (result.0, result.1, result.2, end_time - start_time)
+
+pub fn container_run_test(
     test_file: text,
     runtime: text,
     image: text,
@@ -57,112 +162,39 @@ fn container_run_test(
     readonly: bool,
     workspace: text
 ) -> (text, text, i64, i64):
-    """
-    Run a test file inside a container.
+    """Return stdout, stderr, exit code and elapsed ms; see CONTAINER_TEST_DEFAULT_TIMEOUT_MS_V1."""
+    val name = "simple-test-" + getpid().to_text() + "-" + time_now_ms().to_text()
+    container_run_test_bounded_v1(test_file, runtime, image, memory_mb, cpu_count, network, readonly,
+        workspace, name, container_test_timeout_ms_v1(env_get("SIMPLE_CONTAINER_TEST_TIMEOUT_MS") ?? ""),
+        container_test_host_runner_v1)
 
-    Args:
-        test_file: Path to test file (relative to workspace)
-        runtime: Container runtime ("docker" or "podman")
-        image: Container image name
-        memory_mb: Memory limit in MB
-        cpu_count: CPU limit (fractional allowed)
-        network: Network mode ("none", "bridge", "host")
-        readonly: Mount workspace as read-only
-        workspace: Workspace directory (usually current directory)
-
-    Returns: (stdout, stderr, exit_code, duration_ms)
-    """
-
-    if runtime != "docker" and runtime != "podman":
-        val error = "Container runtime '{runtime}' not supported. Use 'docker' or 'podman'."
-        return ("", error, 1, 0)
-
-    val mount_flag = if readonly: "ro" else: "rw"
-
-    var cmd = "{runtime} run --rm "
-    cmd = cmd + "--memory={memory_mb}m "
-    cmd = cmd + "--cpus={cpu_count} "
-    cmd = cmd + "--network={network} "
-    cmd = cmd + "-v {workspace}:/workspace:{mount_flag} "
-    cmd = cmd + "-w /workspace "
-    cmd = cmd + "{image} "
-    cmd = cmd + "test {test_file}"
-
-    val start_time = time_now_ms()
-    val result = shell(cmd)
-    val end_time = time_now_ms()
-    val duration = end_time - start_time
-
-    (result.stdout, result.stderr, result.exit_code, duration)
-
-fn container_build_test_image(runtime: text, dockerfile_path: text, image_name: text) -> bool:
-    """
-    Build container test image from Dockerfile.
-
-    Args:
-        runtime: Container runtime ("docker" or "podman")
-        dockerfile_path: Path to Dockerfile
-        image_name: Name for the built image
-
-    Returns: true on success, false on failure
-    """
+pub fn container_build_test_image(runtime: text, dockerfile_path: text, image_name: text) -> bool:
+    if not container_runtime_supported_v1(runtime):
+        return false
+    val argv = container_build_argv_v1(dockerfile_path, image_name)
+    if argv.is_err():
+        return false
     if not file_exists(dockerfile_path):
-        print "ERROR: Dockerfile not found: {dockerfile_path}"
         return false
-
-    val build_cmd = "{runtime} build -f {dockerfile_path} -t {image_name} ."
-    print "Building container image: {image_name}"
-
-    val result = shell(build_cmd)
-    if result.exit_code == 0:
-        print "Successfully built image: {image_name}"
-        return true
-    else:
-        print "Failed to build image: {result.stderr}"
-        return false
-
-# =========================================================================
-# Helper Functions
-# =========================================================================
+    val result = process_run(runtime, argv.unwrap())
+    result.2 == 0
 
 fn time_now_ms() -> i64:
-    """Get current time in milliseconds (stub for runtime compatibility)"""
-    # In real implementation, would use rt_time_now_unix_micros() / 1000
-    # For now, return 0 as placeholder
-    0
+    """Use the time owner; never synthesize an elapsed-time sample."""
+    time_now_monotonic_ms()
 
-fn container_get_version(runtime: text) -> text:
-    """
-    Get container runtime version.
-
-    Args:
-        runtime: Container runtime ("docker" or "podman")
-
-    Returns: Version string or empty string on error
-    """
-    if runtime == "docker":
-        return shell_output_trimmed("docker --version", "")
-    elif runtime == "podman":
-        return shell_output_trimmed("podman --version", "")
-    else:
+pub fn container_get_version(runtime: text) -> text:
+    if not container_runtime_supported_v1(runtime):
         return ""
+    val result = process_run(runtime, ["--version"])
+    if result.2 != 0:
+        return ""
+    result.0.trim()
 
-fn container_cleanup_volumes(runtime: text) -> bool:
+pub fn container_cleanup_volumes(runtime: text) -> bool:
     """
-    Clean up unused container volumes.
-
-    Args:
-        runtime: Container runtime ("docker" or "podman")
-
-    Returns: true on success, false on failure
+    Refuse deletion: this compatibility API has no exact volume identity or
+    ownership receipt. False is an explicit unsupported result with no effects.
+    Exact resource cleanup belongs to the typed provider ownership API.
     """
-    if runtime == "docker":
-        return shell_bool("docker volume prune -f")
-    elif runtime == "podman":
-        return shell_bool("podman volume prune -f")
-    else:
-        return false
-
-# =========================================================================
-# Exports
-# =========================================================================
+    false

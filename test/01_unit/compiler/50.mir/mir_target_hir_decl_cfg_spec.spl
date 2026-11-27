@@ -1,0 +1,65 @@
+use std.spec.*
+use compiler.hir.hir_types.{HirModule, SymbolTable}
+use compiler.common.mir_target_context.{mir_target_context_from_explicit}
+use compiler.mir.mir_cfg_select.{mir_cfg_item_enabled, mir_cfg_select_arm}
+use compiler.hir.target_hir.hir_freeze.{hir_snapshot_freeze}
+use compiler.hir.target_hir.target_hir.{target_hir_for_explicit}
+use compiler.mir.mir_target_hir_decl_cfg.{mir_target_hir_decl_cfg_enabled, mir_target_hir_live_decl_cfg}
+use compiler.mir.mir_target_hir_select.{mir_target_hir_live_select}
+
+val TRIPLES: [text] = ["x86-unknown-linux-gnu", "x86_64-unknown-linux-gnu", "x86-pc-windows-msvc",
+    "x86_64-pc-windows-msvc", "x86-unknown-simpleos", "x86_64-unknown-simpleos"]
+val GUARDS: [[text]] = [["os = \"linux\""], ["arch = \"x86_64\"", "os = \"windows\""], ["os = \"simpleos\""], ["arch = \"x86\""]]
+val GROUP: [text] = ["os = \"windows\"", "arch = \"x86_64\" and os = \"linux\"", ""]
+
+fn fixture(path: text) -> HirModule:
+    HirModule(name: "app.main", path: path, imports: [], exports: [],
+        domain_blocks: [], symbols: SymbolTable.new(), functions: {},
+        gpu_function_targets: {}, gpu_function_backend_orders: {}, classes: {},
+        structs: {}, enums: {}, bitfields: {}, traits: {}, impls: [], constants: {},
+        static_asserts: [], aop_advices: [], di_bindings: [], arch_rules: [],
+        mock_decls: [], types: [], extend_enums: [])
+
+describe "TargetHIR decl @cfg reader (P8 cfg_decl_predicate)":
+    it "keeps/drops exactly like the legacy reader on every target":
+        val snap = hir_snapshot_freeze(fixture("a.spl"), 0).unwrap()
+        val no_feat: [text] = []
+        for t in TRIPLES:
+            val view = target_hir_for_explicit(snap.id, t, "llvm", 23, "decl").unwrap()
+            val ctx = mir_target_context_from_explicit(t, "llvm", 23).unwrap()
+            for g in GUARDS:
+                val typed = mir_target_hir_decl_cfg_enabled(view, snap.id, g, no_feat).unwrap()
+                expect(typed).to_equal(mir_cfg_item_enabled(g, ctx, no_feat) == 1)
+
+    it "rejects a foreign snapshot and a malformed guard":
+        val no_feat: [text] = []
+        val a = hir_snapshot_freeze(fixture("a.spl"), 0).unwrap()
+        val b = hir_snapshot_freeze(fixture("b.spl"), 0).unwrap()
+        val view = target_hir_for_explicit(a.id, "x86_64-unknown-linux-gnu", "llvm", 23, "decl").unwrap()
+        expect(mir_target_hir_decl_cfg_enabled(view, b.id, ["os = \"linux\""], no_feat).unwrap_err()).to_start_with("target_hir_snapshot_mismatch:")
+        expect(mir_target_hir_decl_cfg_enabled(view, a.id, ["bogus_atom"], no_feat).unwrap_err()).to_equal("target_hir_malformed_cfg_condition")
+
+describe "live decl @cfg TargetHIR wiring (P8, SIMPLE_TARGET_HIR_MODE)":
+    it "shadow and typed agree with legacy for standalone guards, malformed included":
+        val no_feat: [text] = []
+        for t in TRIPLES:
+            val ctx = mir_target_context_from_explicit(t, "llvm", 23).unwrap()
+            for g in [["os = \"linux\""], ["arch = \"x86\""], ["bogus_atom"]]:
+                val legacy = mir_cfg_item_enabled(g, ctx, no_feat)
+                expect(mir_target_hir_live_decl_cfg("legacy", "m", g, ctx, no_feat, legacy).unwrap()).to_equal(legacy)
+                expect(mir_target_hir_live_decl_cfg("shadow", "m", g, ctx, no_feat, legacy).unwrap()).to_equal(legacy)
+                val want = if legacy == 1: 1 else: (if legacy == -2: -2 else: 0)
+                expect(mir_target_hir_live_decl_cfg("typed", "m", g, ctx, no_feat, legacy).unwrap()).to_equal(want)
+
+    it "fails fatally when the legacy verdict diverges in shadow":
+        val no_feat: [text] = []
+        val ctx = mir_target_context_from_explicit("x86_64-unknown-linux-gnu", "llvm", 23).unwrap()
+        expect(mir_target_hir_live_decl_cfg("shadow", "m", ["os = \"linux\""], ctx, no_feat, 0).unwrap_err()).to_start_with("target_hir_shadow_mismatch:")
+
+    it "group winners (cfg_decl_group) agree through the shared arm reader":
+        val no_feat: [text] = []
+        for t in TRIPLES:
+            val ctx = mir_target_context_from_explicit(t, "llvm", 23).unwrap()
+            val legacy = mir_cfg_select_arm(GROUP, ctx, no_feat)
+            expect(mir_target_hir_live_select("shadow", "m", GROUP, ctx, no_feat, legacy).unwrap()).to_equal(legacy)
+            expect(mir_target_hir_live_select("typed", "m", GROUP, ctx, no_feat, legacy).unwrap()).to_equal(legacy)

@@ -12,6 +12,7 @@ use app.build.scheduler.parent_staged_link.{ParentStagedLinkPlanV1,
     prepare_parent_staged_link_v1, run_parent_staged_link_v1}
 use app.build.scheduler.planner.{scheduler_action_digest_valid_v1}
 use std.common.crypto.sha256.{sha256_text}
+use app.build.host_path_policy.{build_host_abs_path_valid_v1}
 
 val STAGED_LINK_CLI_MAX_WORKERS_V1: i64 = 16
 
@@ -33,19 +34,7 @@ fn _staged_load_reject_v1(reason: text) -> ParentStagedLinkLoadV1:
     ParentStagedLinkLoadV1(false, reason, nil, "", [])
 
 fn _staged_cli_path_v1(value: text) -> bool:
-    if not value.starts_with("/") or value.len() < 2 or
-       value.len() > 4096 or value.ends_with("/") or
-       value.contains("//"):
-        return false
-    val parts = value.split("/")
-    var i: i64 = 1
-    while i < parts.len():
-        if parts[i] == "" or parts[i] == "." or parts[i] == ".." or
-           parts[i].contains("\n") or parts[i].contains("\r") or
-           parts[i].contains("\x00"):
-            return false
-        i = i + 1
-    true
+    build_host_abs_path_valid_v1(value, false, false, 4096, 4096)
 
 fn parent_staged_link_cli_selected_v1(args: [text]) -> bool:
     for item in args:
@@ -98,7 +87,7 @@ fn load_parent_staged_link_cli_v1(args: [text]) -> ParentStagedLinkLoadV1:
             return _staged_load_reject_v1("config-unreadable")
         val wire = read.unwrap()
         val parsed = parse_dist_build_config_v1(wire)
-        if parsed == nil or parsed.unwrap().graph_path == "":
+        if parsed.is_none() or parsed.unwrap().graph_path == "":
             return _staged_load_reject_v1("config-invalid-or-not-graph")
         configs.push(parsed.unwrap())
         config_wires.push(wire)
@@ -108,7 +97,7 @@ fn load_parent_staged_link_cli_v1(args: [text]) -> ParentStagedLinkLoadV1:
             return _staged_load_reject_v1("config-graph-path-mismatch")
     val loaded = load_pinned_parent_link_template_v1(
         command.template_path, command.template_digest)
-    if not loaded.valid or loaded.template == nil or loaded.attempt == nil:
+    if not loaded.valid or loaded.template.is_none() or loaded.attempt.is_none():
         return _staged_load_reject_v1("template-invalid")
     val manifest_read = file_read_regular_no_follow_bounded(graph_path,
         PARENT_GRAPH_MANIFEST_MAX_BYTES_V1)
@@ -139,7 +128,7 @@ fn load_parent_staged_link_cli_v1(args: [text]) -> ParentStagedLinkLoadV1:
 
 fn run_parent_staged_link_cli_v1(args: [text]) -> i64:
     val loaded = load_parent_staged_link_cli_v1(args)
-    if not loaded.valid or loaded.plan == nil:
+    if not loaded.valid or loaded.plan.is_none():
         val reason = loaded.reason.replace("\n", " ").replace("\r", " ")
         print("parent-staged-link: BLOCKED reason={reason}")
         if loaded.reason == "arguments-invalid": return 2

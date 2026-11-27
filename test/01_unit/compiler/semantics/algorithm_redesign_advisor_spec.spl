@@ -1,0 +1,496 @@
+"""
+## Purpose and audience
+Executable unit specification for Wave F2 algorithm redesign advisor
+(`src/compiler/35.semantics/perf/algorithm_redesign_advisor_v1.spl`) covering
+`§5.3`, `§5.4`, `§7.5`, complexity acceptance scenarios `C10..C12`, and semantic
+shape/duplicate/order preservation scenarios `S16` and `S17`.
+Audience: maintainers of `src/compiler/35.semantics/perf/`.
+
+## Operator workflow
+Run with `SIMPLE_LIB=C:/dev/wt/wave2-lanes/src` via the Simple test runner on
+`test/01_unit/compiler/semantics/algorithm_redesign_advisor_spec.spl`.
+
+## Compatibility and limitations
+Exercises both structured algorithm descriptors and typed HIR functions
+(including functional `.map(...filter(...)...)` nested scans).
+
+## Verification guidance and troubleshooting
+A failure indicates missed superlinear accumulator copying (`C10`), missed
+repeated lazy-view enumeration (`C11`), missing output cardinality `k` in
+`O(n + m + k)` (`C12`), accidental flat `join` flattening (`S16`), lost
+duplicate-key or stable-order guarantees (`S17`), or unsafe `VerifiedSafe`
+promotion of an algorithmic change.
+"""
+
+use std.spec.*
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.common.attributes.{
+    FunctionAttr, ExportAttr, DriverManifestAttr, DriverManifestAttrKind,
+    vhdl_hardware_metadata_default
+}
+use compiler.hir.hir_types.{
+    HirType, HirTypeKind, SymbolId, MethodResolution
+}
+use compiler.hir.hir_definitions.{
+    HirFunction, HirParam, HirBlock, HirStmt, HirStmtKind,
+    HirExpr, HirExprKind, HirCallArg, HirBinOp
+}
+use compiler.semantics.perf_facts.types.{
+    CollectionOperationRegistry, CollectionOperationSummary,
+    HirPerfReceiverKind, HirPerfOperationKind, HirPerfCostClass,
+    HirPerfCardinality, HirPerfEnumerationClass, HirPerfAllocationClass,
+    HirPerfEffectFacts
+}
+use compiler.semantics.perf.perf_analysis_contracts_v1.{
+    PerfResourceDimension, BoundRelation, BoundRegime, SizeMeasureKind,
+    CostExprV1, PerfFixKind, PerfFixApplicability
+}
+use compiler.semantics.perf.algorithm_redesign_advisor_v1.{
+    GrowingAccumulatorDescriptorV1, GrowingAccumulatorAdviceV1,
+    RepeatedLazyViewDescriptorV1, RepeatedLazyViewAdviceV1,
+    NestedScanSyntaxStyle, JoinResultShapeKind, RecommendedJoinStrategyKind,
+    NestedKeyJoinDescriptorV1, RedesignResourceTradeoffV1, NestedKeyJoinAdviceV1,
+    analyze_growing_accumulator_v1,
+    analyze_repeated_lazy_view_v1,
+    analyze_nested_key_join_v1,
+    detect_hir_growing_accumulators_v1,
+    detect_hir_repeated_lazy_views_v1,
+    detect_hir_nested_key_joins_v1,
+    analyze_hir_algorithm_redesigns_v1
+}
+
+val ITER_SYM_ID: i64 = 601
+val MAP_SYM_ID: i64 = 602
+val FILTER_SYM_ID: i64 = 603
+val COLLECT_SYM_ID: i64 = 604
+
+fn ar_span(line: i64) -> Span:
+    Span.new(line * 12, line * 12 + 10, line, 1)
+
+fn ar_unit_t() -> HirType:
+    HirType(kind: HirTypeKind.Unit, span: ar_span(1))
+
+fn ar_bool_t() -> HirType:
+    HirType(kind: HirTypeKind.Bool, span: ar_span(1))
+
+fn ar_i64_t() -> HirType:
+    HirType(kind: HirTypeKind.Int(64, true), span: ar_span(1))
+
+fn ar_arr_t(elem: HirType) -> HirType:
+    HirType(kind: HirTypeKind.Array(elem, None), span: ar_span(1))
+
+fn ar_expr(kind: HirExprKind, t: HirType, line: i64) -> HirExpr:
+    HirExpr(kind: kind, has_type_: true, type_: t, span: ar_span(line))
+
+fn ar_var(id: i64, name: text, t: HirType, line: i64) -> HirExpr:
+    ar_expr(HirExprKind.NamedVar(SymbolId(id: id), name), t, line)
+
+fn ar_param(id: i64, name: text, t: HirType, line: i64) -> HirParam:
+    HirParam(
+        symbol: SymbolId(id: id),
+        name: name,
+        type_: t,
+        has_default: false,
+        default: ar_expr(HirExprKind.UnitLit, ar_unit_t(), line),
+        span: ar_span(line),
+        is_mutable: false
+    )
+
+fn ar_wrap_fn(name: text, params: [HirParam], body: HirBlock, ret_t: HirType) -> HirFunction:
+    HirFunction(
+        symbol: SymbolId(id: 90),
+        name: name,
+        type_params: [],
+        params: params,
+        return_type: ret_t,
+        body: body,
+        effects: [],
+        visibility: Visibility.Private,
+        is_async: false,
+        is_static: false,
+        is_public: false,
+        is_method: false,
+        is_mutable: false,
+        is_const: false,
+        is_extern: false,
+        func_attr: FunctionAttr.default(),
+        has_export_attr: false,
+        export_attr: ExportAttr(is_export_c: false, export_name: ""),
+        has_driver_manifest_attr: false,
+        driver_manifest_attr: DriverManifestAttr(
+            kind: DriverManifestAttrKind.Driver,
+            driver_class: 0,
+            vendor: 0,
+            device_ids: []
+        ),
+        has_suspension: false,
+        has_vhdl_metadata: false,
+        vhdl_metadata: vhdl_hardware_metadata_default(),
+        has_doc_comment: false,
+        doc_comment: "",
+        span: ar_span(1),
+        is_gpu_kernel: false,
+        gpu_target: "",
+        gpu_backend_order: "",
+        verification_contract: None,
+        is_generic_template: false
+    )
+
+fn ar_pipeline_registry() -> CollectionOperationRegistry:
+    var reg = CollectionOperationRegistry.new("stdlib-perf-v1")
+    val pure_fx = HirPerfEffectFacts(
+        reads: true, writes: false, allocates: false, throws: false,
+        suspends: false, observable: false, unknown: false)
+    val alloc_fx = HirPerfEffectFacts(
+        reads: true, writes: false, allocates: true, throws: false,
+        suspends: false, observable: false, unknown: false)
+    reg.register(CollectionOperationSummary(
+        symbol_id: ITER_SYM_ID,
+        stable_name: "Array.iter",
+        operation: HirPerfOperationKind.Enumerate,
+        cost: HirPerfCostClass.Constant,
+        output_cardinality: HirPerfCardinality.SameAsReceiver,
+        enumeration: HirPerfEnumerationClass.Once,
+        expected_receiver: HirPerfReceiverKind.Array,
+        signature_fingerprint: "Array<T>.iter()->Iter<T>",
+        explicit_argument_count: 0,
+        effects: pure_fx,
+        allocation: HirPerfAllocationClass.None,
+        preserves_order: true,
+        materializes: false,
+        metadata_version: "stdlib-perf-v1",
+        provenance: "stdlib",
+        evidence_receipt: "receipt-iter-v1"
+    ))
+    reg.register(CollectionOperationSummary(
+        symbol_id: MAP_SYM_ID,
+        stable_name: "Array.map",
+        operation: HirPerfOperationKind.Map,
+        cost: HirPerfCostClass.LinearReceiver,
+        output_cardinality: HirPerfCardinality.SameAsReceiver,
+        enumeration: HirPerfEnumerationClass.Once,
+        expected_receiver: HirPerfReceiverKind.Array,
+        signature_fingerprint: "Array<T>.map(fn(T)->U)->Array<U>",
+        explicit_argument_count: 1,
+        effects: alloc_fx,
+        allocation: HirPerfAllocationClass.Unbounded,
+        preserves_order: true,
+        materializes: true,
+        metadata_version: "stdlib-perf-v1",
+        provenance: "stdlib",
+        evidence_receipt: "receipt-map-v1"
+    ))
+    reg.register(CollectionOperationSummary(
+        symbol_id: FILTER_SYM_ID,
+        stable_name: "Array.filter",
+        operation: HirPerfOperationKind.Filter,
+        cost: HirPerfCostClass.LinearReceiver,
+        output_cardinality: HirPerfCardinality.AtMostReceiver,
+        enumeration: HirPerfEnumerationClass.Once,
+        expected_receiver: HirPerfReceiverKind.Array,
+        signature_fingerprint: "Array<T>.filter(fn(T)->bool)->Array<T>",
+        explicit_argument_count: 1,
+        effects: alloc_fx,
+        allocation: HirPerfAllocationClass.Unbounded,
+        preserves_order: true,
+        materializes: true,
+        metadata_version: "stdlib-perf-v1",
+        provenance: "stdlib",
+        evidence_receipt: "receipt-filter-v1"
+    ))
+    reg.register(CollectionOperationSummary(
+        symbol_id: COLLECT_SYM_ID,
+        stable_name: "Array.collect",
+        operation: HirPerfOperationKind.CollectArray,
+        cost: HirPerfCostClass.LinearReceiver,
+        output_cardinality: HirPerfCardinality.SameAsReceiver,
+        enumeration: HirPerfEnumerationClass.Once,
+        expected_receiver: HirPerfReceiverKind.Array,
+        signature_fingerprint: "Array<T>.collect()->Array<T>",
+        explicit_argument_count: 0,
+        effects: alloc_fx,
+        allocation: HirPerfAllocationClass.Unbounded,
+        preserves_order: true,
+        materializes: true,
+        metadata_version: "stdlib-perf-v1",
+        provenance: "stdlib",
+        evidence_receipt: "receipt-collect-v1"
+    ))
+    reg
+
+describe "Wave F2 Algorithm Redesign Advisor (C10..C12, S16, S17)":
+    """Verifies superlinear growing-accumulator detection, repeated lazy-view enumeration, and nested key-join redesign guidance."""
+
+    context "C10: Growing-accumulator copy in ordered fold or loop":
+        """Checks superlinear 1 + 2 + ... + n work and alloc_bytes_total detection with PERF-ALLOC-001."""
+
+        it "emits PERF-ALLOC-001 with TriangularSum work and alloc_bytes_total bounds for a fold copying a growing accumulator (C10)":
+            """Verifies both descriptor and typed HIR detection of functional/loop accumulator concatenation."""
+            val desc = GrowingAccumulatorDescriptorV1(
+                function_id: "concat_all",
+                semantic_revision: "rev-1",
+                dependency_fingerprint: "dep-1",
+                file: "src/concat.spl",
+                primary_span: ar_span(10),
+                input_param: "items",
+                accumulator_var: "acc",
+                container_kind: "Array",
+                is_functional_fold: true,
+                copies_entire_accumulator_each_step: true,
+                expected_old_text: "items.iter().fold([], (acc, x) -> acc ++ [x])"
+            )
+            val advice_opt = analyze_growing_accumulator_v1(desc)
+            expect(advice_opt.?).to_equal(true)
+            val advice = advice_opt.unwrap()
+            expect(advice.finding.rule_code).to_equal("PERF-ALLOC-001")
+            expect(advice.alloc_bytes_bound.resource).to_equal(PerfResourceDimension.AllocBytesTotal)
+            expect(advice.work_bound.resource).to_equal(PerfResourceDimension.Work)
+            val is_triangular = match advice.alloc_bytes_bound.expression:
+                case CostExprV1.TriangularSum(_): true
+                case _: false
+            expect(is_triangular).to_be(true)
+            expect(advice.alloc_bytes_bound.rendered_expression).to_contain("1 + 2 + ... + n")
+            expect(advice.candidate.fix_kind).to_equal(PerfFixKind.AlgorithmChange)
+            expect(advice.candidate.applicability).to_equal(PerfFixApplicability.ReviewRequired)
+
+            # Typed HIR loop copying `acc = acc ++ [item]`
+            val arr_t = ar_arr_t(ar_i64_t())
+            val acc_var = ar_var(15, "acc", arr_t, 3)
+            val item_var = ar_var(16, "item", ar_i64_t(), 3)
+            val single_arr = ar_expr(HirExprKind.ArrayLit([item_var], None), arr_t, 3)
+            val concat_expr = ar_expr(HirExprKind.Binary(HirBinOp.Concat, acc_var, single_arr), arr_t, 3)
+            val loop_expr = ar_expr(
+                HirExprKind.For(
+                    SymbolId(id: 16),
+                    ar_var(14, "items", arr_t, 2),
+                    HirBlock(
+                        stmts: [HirStmt(kind: HirStmtKind.Assign(acc_var, None, concat_expr), span: ar_span(3))],
+                        has: false,
+                        value: ar_expr(HirExprKind.UnitLit, ar_unit_t(), 3),
+                        span: ar_span(3)
+                    ),
+                    None
+                ),
+                ar_unit_t(),
+                2
+            )
+            val hir_fn = ar_wrap_fn(
+                "hir_growing_copy",
+                [ar_param(14, "items", arr_t, 1)],
+                HirBlock(
+                    stmts: [
+                        HirStmt(kind: HirStmtKind.Let(SymbolId(id: 15), arr_t, ar_expr(HirExprKind.ArrayLit([], None), arr_t, 1)), span: ar_span(1)),
+                        HirStmt(kind: HirStmtKind.Expr(loop_expr), span: ar_span(2))
+                    ],
+                    has: true,
+                    value: acc_var,
+                    span: ar_span(1)
+                ),
+                arr_t
+            )
+            val hir_hits = detect_hir_growing_accumulators_v1(hir_fn, "rev-1", "dep-1", "src/concat.spl")
+            expect(hir_hits.len()).to_equal(1)
+            expect(hir_hits[0].finding.rule_code).to_equal("PERF-ALLOC-001")
+
+    context "C11: Repeated enumeration of a lazy iter()/view() pipeline":
+        """Checks repeated lazy stage recomputation charging and PERF-COST-001 / PERF-ALLOC-001 findings."""
+
+        it "charges repeated lazy-view computation and emits PERF-COST-001 and PERF-ALLOC-001 without blind VerifiedSafe promotion (C11)":
+            """Verifies fixed multi-pass and loop-nested lazy view enumeration detection across descriptors and typed HIR."""
+            val desc = RepeatedLazyViewDescriptorV1(
+                function_id: "reuse_lazy_view",
+                semantic_revision: "rev-1",
+                dependency_fingerprint: "dep-1",
+                file: "src/views.spl",
+                primary_span: ar_span(18),
+                view_binding: "expensive_view",
+                source_param: "records",
+                enumeration_count: 3,
+                enumerated_inside_loop_param: Some("queries"),
+                has_expensive_transform_or_filter: true,
+                stage_allocates_each_pass: true,
+                stage_has_observable_effects: false,
+                in_nogc_scope: false,
+                expected_old_text: "val expensive_view = records.iter().filter(heavy).map(parse)"
+            )
+            val advice_opt = analyze_repeated_lazy_view_v1(desc)
+            expect(advice_opt.?).to_equal(true)
+            val advice = advice_opt.unwrap()
+            expect(advice.findings.len()).to_equal(2)
+
+            var has_cost = false
+            var has_alloc = false
+            for f in advice.findings:
+                if f.rule_code == "PERF-COST-001":
+                    has_cost = true
+                if f.rule_code == "PERF-ALLOC-001":
+                    has_alloc = true
+            expect(has_cost).to_equal(true)
+            expect(has_alloc).to_equal(true)
+            expect(advice.recomputed_work_bound.rendered_expression).to_contain("queries")
+            expect(advice.recomputed_work_bound.rendered_expression).to_contain("records")
+            expect(advice.candidate.applicability).to_equal(PerfFixApplicability.ReviewRequired)
+
+            # Typed HIR: local binding from `.iter()` consumed twice via `.collect()`
+            val reg = ar_pipeline_registry()
+            val arr_t = ar_arr_t(ar_i64_t())
+            val iter_res = MethodResolution.InstanceMethod(SymbolId(id: 10), SymbolId(id: ITER_SYM_ID))
+            val collect_res = MethodResolution.InstanceMethod(SymbolId(id: 10), SymbolId(id: COLLECT_SYM_ID))
+            val view_init = ar_expr(
+                HirExprKind.MethodCall(ar_var(21, "records", arr_t, 2), "iter", [], iter_res),
+                arr_t,
+                2
+            )
+            val view_ref_a = ar_var(22, "lazy_view", arr_t, 3)
+            val view_ref_b = ar_var(22, "lazy_view", arr_t, 4)
+            val pass_a = ar_expr(HirExprKind.MethodCall(view_ref_a, "collect", [], collect_res), arr_t, 3)
+            val pass_b = ar_expr(HirExprKind.MethodCall(view_ref_b, "collect", [], collect_res), arr_t, 4)
+            val view_fn = ar_wrap_fn(
+                "hir_repeated_view",
+                [ar_param(21, "records", arr_t, 1)],
+                HirBlock(
+                    stmts: [
+                        HirStmt(kind: HirStmtKind.Let(SymbolId(id: 22), arr_t, view_init), span: ar_span(2)),
+                        HirStmt(kind: HirStmtKind.Expr(pass_a), span: ar_span(3)),
+                        HirStmt(kind: HirStmtKind.Expr(pass_b), span: ar_span(4))
+                    ],
+                    has: false,
+                    value: ar_expr(HirExprKind.UnitLit, ar_unit_t(), 4),
+                    span: ar_span(1)
+                ),
+                ar_unit_t()
+            )
+            val hir_views = detect_hir_repeated_lazy_views_v1(view_fn, "rev-1", "dep-1", "src/views.spl", reg)
+            expect(hir_views.len()).to_equal(1)
+
+    context "C12, S16, S17: Nested key-matching scan (users x orders) including functional .map(...filter(...)...) syntax":
+        """Checks PERF-ALG-001, ReviewRequired, grouped shape preservation (S16), duplicate/order preservation (S17), O(n + m + k) output cardinality (C12), auxiliary memory, and robust/critical collision cautions."""
+
+        it "detects functional users.map(u -> orders.filter(o -> o.user_id == u.id)) on typed HIR and preserves grouped shape, duplicates, order, and k term (C12, S16, S17)":
+            """Verifies functional HIR nested scan emits PERF-ALG-001 with AlgorithmChange + ReviewRequired, group_by/group_join (never flat join), and O(n + m + k)."""
+            val reg = ar_pipeline_registry()
+            val user_t = ar_i64_t()
+            val order_t = ar_i64_t()
+            val users_t = ar_arr_t(user_t)
+            val orders_t = ar_arr_t(order_t)
+            val grouped_t = ar_arr_t(orders_t)
+
+            val map_res = MethodResolution.InstanceMethod(SymbolId(id: 10), SymbolId(id: MAP_SYM_ID))
+            val filter_res = MethodResolution.InstanceMethod(SymbolId(id: 10), SymbolId(id: FILTER_SYM_ID))
+
+            val user_var = ar_var(31, "user", user_t, 3)
+            val order_var = ar_var(32, "order", order_t, 4)
+            val order_uid = ar_expr(HirExprKind.Field(order_var, "user_id", Some(SymbolId(id: 401))), ar_i64_t(), 4)
+            val user_id = ar_expr(HirExprKind.Field(user_var, "id", Some(SymbolId(id: 402))), ar_i64_t(), 4)
+            val eq_pred = ar_expr(HirExprKind.Binary(HirBinOp.Eq, order_uid, user_id), ar_bool_t(), 4)
+
+            val inner_lambda = ar_expr(
+                HirExprKind.Lambda([ar_param(32, "order", order_t, 4)], eq_pred, [SymbolId(id: 31)]),
+                ar_bool_t(),
+                4
+            )
+            val inner_filter = ar_expr(
+                HirExprKind.MethodCall(
+                    ar_var(30, "orders", orders_t, 4),
+                    "filter",
+                    [HirCallArg(has_name: false, name: "", value: inner_lambda, span: ar_span(4))],
+                    filter_res
+                ),
+                orders_t,
+                4
+            )
+            val outer_lambda = ar_expr(
+                HirExprKind.Lambda([ar_param(31, "user", user_t, 3)], inner_filter, [SymbolId(id: 30)]),
+                orders_t,
+                3
+            )
+            val outer_map = ar_expr(
+                HirExprKind.MethodCall(
+                    ar_var(29, "users", users_t, 3),
+                    "map",
+                    [HirCallArg(has_name: false, name: "", value: outer_lambda, span: ar_span(3))],
+                    map_res
+                ),
+                grouped_t,
+                3
+            )
+            val join_fn = ar_wrap_fn(
+                "matches_per_user",
+                [ar_param(29, "users", users_t, 1), ar_param(30, "orders", orders_t, 1)],
+                HirBlock(
+                    stmts: [],
+                    has: true,
+                    value: outer_map,
+                    span: ar_span(3)
+                ),
+                grouped_t
+            )
+
+            val advices = detect_hir_nested_key_joins_v1(join_fn, "rev-1", "dep-1", "src/joins.spl", "moderate", reg)
+            expect(advices.len()).to_equal(1)
+            val adv = advices[0]
+
+            expect(adv.finding.rule_code).to_equal("PERF-ALG-001")
+            expect(adv.candidate.fix_kind).to_equal(PerfFixKind.AlgorithmChange)
+            expect(adv.candidate.applicability).to_equal(PerfFixApplicability.ReviewRequired)
+            expect(adv.recommended_strategy).to_equal(RecommendedJoinStrategyKind.HashGroupByLookup)
+
+            # S16: Grouped per-user shape preserved via group_by / group_join; flat join explicitly rejected!
+            expect(adv.tradeoff.preserves_grouped_shape).to_equal(true)
+            expect(adv.tradeoff.flat_join_rejected_for_shape).to_equal(true)
+            expect(adv.candidate.replacement_preview).to_contain("group_by")
+            expect(adv.candidate.resource_tradeoff_note).to_contain("flat join")
+
+            # S17: Duplicate keys and deterministic stable order preserved!
+            expect(adv.tradeoff.preserves_duplicate_keys).to_equal(true)
+            expect(adv.tradeoff.preserves_stable_order).to_equal(true)
+
+            # C12: Includes output match count k in O(n + m + k); does NOT falsely promise O(n + m) linear total work!
+            expect(adv.tradeoff.includes_output_match_term_k).to_equal(true)
+            expect(adv.tradeoff.can_duplicate_keys_cause_quadratic_output).to_equal(true)
+            expect(adv.tradeoff.proposed_work_bound.rendered_expression).to_contain("O(n + m + k)")
+            expect(adv.tradeoff.extra_aux_memory_bound.rendered_expression).to_contain("distinct_keys")
+            expect(adv.tradeoff.hash_equality_assumptions.len()).to_be_greater_than(0)
+
+            val all_findings = analyze_hir_algorithm_redesigns_v1(join_fn, "rev-1", "dep-1", "src/joins.spl", "moderate", reg)
+            expect(all_findings.len()).to_be_greater_than(0)
+
+        it "cautions against worst-case hash collisions under robust and critical policies and pivots to sorted index or bounded scan (§7.5, C12, S16, S17)":
+            """Verifies robust/critical complexity policies reject unbounded worst-case hash assumptions and select SortedIndexLookup when orderable."""
+            val robust_desc = NestedKeyJoinDescriptorV1(
+                function_id: "embedded_match",
+                semantic_revision: "rev-2",
+                dependency_fingerprint: "dep-2",
+                file: "src/embedded.spl",
+                primary_span: ar_span(30),
+                outer_param: "users",
+                inner_param: "orders",
+                outer_key_expr: "user.id",
+                inner_key_expr: "order.user_id",
+                syntax_style: NestedScanSyntaxStyle.FunctionalMapFilter,
+                result_shape: JoinResultShapeKind.GroupedPerOuter,
+                duplicate_keys_possible: true,
+                requires_stable_order: true,
+                key_equality_consistent_with_hash: true,
+                key_orderable: true,
+                inputs_mutated_during_traversal: false,
+                key_extraction_has_effects: false,
+                complexity_policy: "critical",
+                in_nogc_or_fixed_memory_scope: false,
+                expected_old_text: "users.iter().map(u -> orders.iter().filter(o -> o.user_id == u.id).collect()).collect()"
+            )
+            val robust_adv = analyze_nested_key_join_v1(robust_desc).unwrap()
+            expect(robust_adv.finding.rule_code).to_equal("PERF-ALG-001")
+            expect(robust_adv.candidate.applicability).to_equal(PerfFixApplicability.ReviewRequired)
+            expect(robust_adv.tradeoff.hash_worst_case_collision_caution).to_equal(true)
+            expect(robust_adv.recommended_strategy).to_equal(RecommendedJoinStrategyKind.SortedIndexLookup)
+            expect(robust_adv.candidate.resource_tradeoff_note).to_contain("collision")
+            expect(robust_adv.tradeoff.proposed_work_bound.regime).to_equal(BoundRegime.WorstCase)
+            expect(robust_adv.tradeoff.includes_output_match_term_k).to_equal(true)
+
+            var mutated_desc = robust_desc
+            mutated_desc.inputs_mutated_during_traversal = true
+            val blocked_adv = analyze_nested_key_join_v1(mutated_desc).unwrap()
+            expect(blocked_adv.candidate.applicability).to_equal(PerfFixApplicability.Unavailable)
+            expect(blocked_adv.candidate.disabled_reason.?).to_equal(true)

@@ -1,0 +1,73 @@
+# Access snapshot: value vs accessible name per widget kind.
+#
+# text_value carries only a widget's editable/displayed VALUE. Labels, titles,
+# alt text and placeholders are accessible NAMES (ui_access_node_name) and must
+# never make a button/label/panel/image report a value.
+
+use std.spec
+use common.ui.widget.{UITree, UIState}
+use common.ui.builder.{button, label, text_widget, panel, text_field, image}
+use common.ui.access_snapshot.{ui_access_snapshot_from_state}
+use common.ui.access_query.{ui_access_node_name, ui_access_supports_value, ui_access_node_matches_text}
+use common.ui.access_types.{UiAccessNode}
+
+fn _node(root_id: text, kids_id: text) -> UiAccessNode:
+    val root = panel(root_id, "Settings", [
+        button("nb_btn", "Save", "save"),
+        label("nb_lbl", "Username"),
+        text_widget("nb_txt", "Hello world"),
+        text_field("nb_full", "alice", "enter name"),
+        text_field("nb_empty", "", "type here"),
+        image("nb_img", "logo.png", "Company logo")
+    ])
+    val snapshot = ui_access_snapshot_from_state(UIState.new(UITree.new(root)), [])
+    var found = snapshot.nodes[0]
+    for n in snapshot.nodes:
+        if n.widget_id == kids_id:
+            found = n
+    found
+
+describe "access value vs name per widget kind":
+    it "empty textfield: value is empty, name is the placeholder":
+        val n = _node("nb_r1", "nb_empty")
+        expect(n.text_value).to_equal("")
+        expect(ui_access_node_name(n)).to_equal("type here")
+
+    it "filled textfield: value is the content":
+        val n = _node("nb_r2", "nb_full")
+        expect(n.text_value).to_equal("alice")
+        expect(ui_access_supports_value(n)).to_equal(true)
+
+    it "button: label is the name, no value":
+        val n = _node("nb_r3", "nb_btn")
+        expect(n.text_value).to_equal("")
+        expect(ui_access_node_name(n)).to_equal("Save")
+        expect(ui_access_supports_value(n)).to_equal(false)
+
+    it "label: label is the name, no value":
+        val n = _node("nb_r4", "nb_lbl")
+        expect(n.text_value).to_equal("")
+        expect(ui_access_node_name(n)).to_equal("Username")
+        expect(ui_access_supports_value(n)).to_equal(false)
+
+    it "panel: title is the name, no value":
+        val n = _node("nb_r5", "nb_r5")
+        expect(n.text_value).to_equal("")
+        expect(ui_access_node_name(n)).to_equal("Settings")
+        expect(ui_access_supports_value(n)).to_equal(false)
+
+    it "image: alt is the name, no value":
+        val n = _node("nb_r6", "nb_img")
+        expect(n.text_value).to_equal("")
+        expect(ui_access_node_name(n)).to_equal("Company logo")
+        expect(ui_access_supports_value(n)).to_equal(false)
+
+    it "text widget: content is the value and the name":
+        val n = _node("nb_r7", "nb_txt")
+        expect(n.text_value).to_equal("Hello world")
+        expect(ui_access_node_name(n)).to_equal("Hello world")
+
+    it "text search still finds names held only in props":
+        expect(ui_access_node_matches_text(_node("nb_r8", "nb_btn"), "save")).to_equal(true)
+        expect(ui_access_node_matches_text(_node("nb_r9", "nb_empty"), "type here")).to_equal(true)
+        expect(ui_access_node_matches_text(_node("nb_r10", "nb_btn"), "zzz")).to_equal(false)

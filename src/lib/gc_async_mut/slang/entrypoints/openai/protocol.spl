@@ -9,13 +9,20 @@
 # lives in src/app/slang_server/, so every behaviour here is testable without
 # binding a port.
 
+use std.common.string_core.{bytes_to_text}
 use std.common.json.parser.{json_parse_with_error}
+use std.common.json.object_ops.{json_object_get}
+use std.common.json.array_ops.{json_array_get, json_array_length}
 
 # One HTTP answer: numeric status plus a JSON body. Carrying the status as a
-# plain i32 keeps this module free of any HTTP server dependency.
+# plain i32 keeps this module free of any HTTP server dependency. A binary
+# answer (wav, png) carries its bytes in `body_bytes` and names them in
+# `content_type`; non-empty `body_bytes` means the binary body is sent.
 struct ApiResponse:
     status: i32
     body: text
+    content_type: text = "application/json"
+    body_bytes: [u8] = []
 
 # A parsed /v1/chat/completions request. Only the fields slang can act on are
 # kept; unknown fields are accepted and ignored, as OpenAI clients expect.
@@ -24,6 +31,7 @@ struct ChatRequest:
     message_count: i64
     max_tokens: i64
     stream: bool
+    stop: [text]
 
 fn _escape_json_text(s: text) -> text:
     var out = ""
@@ -41,6 +49,10 @@ fn _escape_json_text(s: text) -> text:
         else:
             out = out + ch
     out
+
+# `s` as a quoted JSON string literal.
+fn json_text_literal(s: text) -> text:
+    "\"" + _escape_json_text(s) + "\""
 
 # Locate a top-level-ish key and return the offset just past its colon, or -1.
 # Whitespace between the key, the colon and the value is tolerated.
@@ -71,31 +83,57 @@ fn _skip_ws(source: text, from: i64) -> i64:
     i
 
 # Read a JSON string value for `key`. Returns "" when absent or not a string.
+# The four hex digits at source[i..i+4] as a number, or -1 when they are not
+# four hex digits (a \u escape that is not well formed is passed through).
+fn _hex4_at(source: text, i: i64) -> i64:
+    if i + 4 > source.len():
+        return -1
+    var value = 0
+    var k = 0
+    while k < 4:
+        val c = source.char_at(i + k)
+        var digit = -1
+        if c >= "0" and c <= "9":
+            digit = c.ord() - "0".ord()
+        elif c >= "a" and c <= "f":
+            digit = c.ord() - "a".ord() + 10
+        elif c >= "A" and c <= "F":
+            digit = c.ord() - "A".ord() + 10
+        if digit < 0:
+            return -1
+        value = (value * 16) + digit
+        k = k + 1
+    value
+
+# The UTF-8 text of one Unicode scalar value.
+fn _utf8_of(cp: i64) -> text:
+    var bytes: [u8] = []
+    if cp < 128:
+        bytes.push(cp as u8)
+    elif cp < 2048:
+        bytes.push((192 + (cp / 64)) as u8)
+        bytes.push((128 + (cp % 64)) as u8)
+    elif cp < 65536:
+        bytes.push((224 + (cp / 4096)) as u8)
+        bytes.push((128 + ((cp / 64) % 64)) as u8)
+        bytes.push((128 + (cp % 64)) as u8)
+    else:
+        bytes.push((240 + (cp / 262144)) as u8)
+        bytes.push((128 + ((cp / 4096) % 64)) as u8)
+        bytes.push((128 + ((cp / 64) % 64)) as u8)
+        bytes.push((128 + (cp % 64)) as u8)
+    bytes_to_text(bytes)
+
 fn json_string_field(source: text, key: text) -> text:
     val after = _value_start(source, key)
     if after < 0:
         return ""
-    var i = _skip_ws(source, after)
+    val i = _skip_ws(source, after)
     if i >= source.len():
         return ""
     if source.char_at(i) != "\"":
         return ""
-    i = i + 1
-    var out = ""
-    var escaped = false
-    while i < source.len():
-        val ch = source.char_at(i)
-        if escaped:
-            out = out + ch
-            escaped = false
-        elif ch == "\\":
-            escaped = true
-        elif ch == "\"":
-            return out
-        else:
-            out = out + ch
-        i = i + 1
-    ""
+    _read_json_string_at(source, i).0
 
 # Read a non-negative JSON integer for `key`, or `missing` when absent/invalid.
 fn json_int_field(source: text, key: text, missing: i64) -> i64:
@@ -125,7 +163,86 @@ fn json_bool_field_is_true(source: text, key: text) -> bool:
     if after < 0:
         return false
     val i = _skip_ws(source, after)
-    source.slice(i, source.len()).starts_with("true")
+    source.slice(i, source.byte_len()).starts_with("true")
+
+# The JSON string literal starting at `from` (which must be a quote), decoded
+# like json_string_field. Returns the text and the index just past the closing
+# quote, or ("", -1) when the literal is unterminated.
+fn _read_json_string_at(source: text, from: i64) -> (text, i64):
+    var i = from + 1
+    var out = ""
+    var escaped = false
+    while i < source.len():
+        val ch = source.char_at(i)
+        if escaped:
+            if ch == "n":
+                out = out + "\n"
+            elif ch == "t":
+                out = out + "\t"
+            elif ch == "r":
+                out = out + "\r"
+            elif ch == "u" and _hex4_at(source, i + 1) >= 0:
+                var cp = _hex4_at(source, i + 1)
+                i = i + 4
+                if cp >= 55296 and cp <= 56319:
+                    var low = -1
+                    if i + 2 < source.len() and source.char_at(i + 1) == "\\" and source.char_at(i + 2) == "u":
+                        low = _hex4_at(source, i + 3)
+                    if low >= 56320 and low <= 57343:
+                        cp = 65536 + ((cp - 55296) * 1024) + (low - 56320)
+                        i = i + 6
+                    else:
+                        cp = 65533
+                elif cp >= 56320 and cp <= 57343:
+                    cp = 65533
+                out = out + _utf8_of(cp)
+            else:
+                out = out + ch
+            escaped = false
+        elif ch == "\\":
+            escaped = true
+        elif ch == "\"":
+            return (out, i + 1)
+        else:
+            out = out + ch
+        i = i + 1
+    ("", -1)
+
+# The OpenAI `stop` field: a string or an array of strings. Empty strings are
+# dropped (they would match everywhere); anything else yields no sequences.
+fn json_stop_sequences(source: text) -> [text]:
+    var stops: [text] = []
+    val after = _value_start(source, "stop")
+    if after < 0:
+        return stops
+    var i = _skip_ws(source, after)
+    if i >= source.len():
+        return stops
+    if source.char_at(i) == "\"":
+        val one = _read_json_string_at(source, i)
+        if one.1 >= 0 and one.0 != "":
+            stops.push(one.0)
+        return stops
+    if source.char_at(i) != "[":
+        return stops
+    i = i + 1
+    while i < source.len():
+        i = _skip_ws(source, i)
+        if i >= source.len():
+            return stops
+        val ch = source.char_at(i)
+        if ch == "\"":
+            val item = _read_json_string_at(source, i)
+            if item.1 < 0:
+                return stops
+            if item.0 != "":
+                stops.push(item.0)
+            i = item.1
+        elif ch == "]":
+            return stops
+        else:
+            i = i + 1
+    stops
 
 # Count the objects directly inside the array value of `key`. Returns -1 when
 # `key` is absent or its value is not an array.
@@ -183,32 +300,241 @@ fn parse_chat_request(body: text) -> Result<ChatRequest, text>:
         return Err("missing required field: messages (must be an array)")
     if count == 0:
         return Err("field messages must contain at least one message")
-    if json_bool_field_is_true(body, "stream"):
-        return Err("streaming is not supported by this slang build; send stream=false")
     Ok(ChatRequest(
         model: model,
         message_count: count,
         max_tokens: json_int_field(body, "max_tokens", 0),
-        stream: false
+        stream: json_bool_field_is_true(body, "stream"),
+        stop: json_stop_sequences(body)
     ))
 
-# Read a JSON string value for the LAST occurrence of `key`, rather than the
-# first. Chat requests carry one "content" per message, so the last one is the
-# newest turn — which is the prompt the engine must answer. Reading the first
-# would answer the system prompt instead, silently and plausibly.
-fn json_string_field_last(source: text, key: text) -> text:
-    val marker = "\"" + key + "\""
-    var at = source.rfind(marker)
-    if at < 0:
-        return ""
-    json_string_field(source.slice(at, source.len()), key)
+# One typed piece of a message's content. `kind` is "text", "image", "audio"
+# or "video". Media parts carry the still-encoded payload: `data` is the
+# base64 text exactly as the client sent it (already checked to be strict
+# base64) and `format` is the subtype the client named ("jpeg", "png", "wav",
+# "mp3", "mp4", ...). Decoding is left to whoever can actually consume the
+# medium, so a part is never decoded only to be refused.
+struct ChatPart:
+    kind: text
+    text: text
+    data: text
+    format: text
+
+struct CompletionRequest:
+    model: text
+    prompt: text
+    max_tokens: i64
+    stream: bool
+    stop: [text]
+
+# Parse a /v1/completions body. `prompt` must be a JSON string; Err carries the
+# client-facing reason.
+fn parse_completion_request(body: text) -> Result<CompletionRequest, text>:
+    if body.trim() == "":
+        return Err("request body is empty")
+    val parsed = json_parse_with_error(body)
+    if parsed.1 != "":
+        return Err("request body is not valid JSON: " + parsed.1)
+    if not body.trim().starts_with("{"):
+        return Err("request body must be a JSON object")
+    val model = json_string_field(body, "model")
+    if model == "":
+        return Err("missing or empty required field: model")
+    val prompt = json_string_field(body, "prompt")
+    if prompt == "":
+        return Err("missing or empty required field: prompt (must be a string)")
+    Ok(CompletionRequest(model: model, prompt: prompt, max_tokens: json_int_field(body, "max_tokens", 0),
+        stream: json_bool_field_is_true(body, "stream"), stop: json_stop_sequences(body)))
+
+struct ChatMessage:
+    role: text
+    content: text
+    parts: [ChatPart]
+
+# Why a body's content parts were refused. `code` is the OpenAI error code the
+# HTTP layer reports, so the two cannot drift apart.
+struct ChatPartError:
+    code: text
+    message: text
+
+fn _part_error(code: text, message: text) -> ChatPartError:
+    ChatPartError(code: code, message: message)
+
+# String value of `key` in a parsed JSON object, or "" when absent or not a
+# string.
+fn _json_text(obj: any, key: text) -> text:
+    match json_object_get(obj, key):
+        case Some(value):
+            if value.0 == "string": value.1 else: ""
+        case None:
+            ""
+
+# Strict RFC 4648 base64: non-empty, a multiple of four, only the standard
+# alphabet, and '=' only as one or two trailing pad bytes. The std decoder is
+# deliberately lenient (it skips stray bytes), which would turn a truncated or
+# corrupted upload into a smaller, plausible-looking payload.
+fn base64_payload_is_strict(payload: text) -> bool:
+    val bytes = payload.bytes()
+    val n = bytes.len()
+    if n == 0 or n % 4 != 0:
+        return false
+    var i = 0
+    while i < n:
+        val c = bytes[i] as i64
+        val alpha = (c >= 65 and c <= 90) or (c >= 97 and c <= 122) or (c >= 48 and c <= 57) or c == 43 or c == 47
+        if not alpha:
+            if c != 61 or i < n - 2:
+                return false
+            if i == n - 2 and (bytes[n - 1] as i64) != 61:
+                return false
+        i = i + 1
+    true
+
+# A media part from `data:<kind>/<format>;base64,<payload>`. Remote URLs are
+# refused by name: slang has no network owner for fetching client media, and
+# answering without the medium would be the silent drop this parser removes.
+fn _media_part_from_url(kind: text, url: text) -> Result<ChatPart, ChatPartError>:
+    if url.starts_with("http://") or url.starts_with("https://"):
+        return Err(_part_error("unsupported_media_url", kind + " URLs are not fetched by slang; send the " + kind + " inline as a data:" + kind + "/<format>;base64,... URL"))
+    val prefix = "data:" + kind + "/"
+    val marker = ";base64,"
+    val at = url.find(marker)
+    if not url.starts_with(prefix) or at < 0:
+        return Err(_part_error("invalid_media", kind + " part must be a data:" + kind + "/<format>;base64,... URL"))
+    val format = url.slice(prefix.byte_len(), at)
+    val payload = url.slice(at + marker.byte_len(), url.byte_len())
+    if format == "" or not base64_payload_is_strict(payload):
+        return Err(_part_error("invalid_media", kind + " part carries malformed base64 data"))
+    Ok(ChatPart(kind: kind, text: "", data: payload, format: format))
+
+# The URL of an OpenAI `image_url` / `video_url` part, which may be a bare
+# string or an object with a "url" field.
+fn _part_url(part: any, field: text) -> text:
+    match json_object_get(part, field):
+        case Some(value):
+            if value.0 == "string":
+                value.1
+            elif value.0 == "object":
+                _json_text(value, "url")
+            else:
+                ""
+        case None:
+            ""
+
+fn _content_part(part: any) -> Result<ChatPart, ChatPartError>:
+    val kind = _json_text(part, "type")
+    if kind == "text" or (kind == "" and _json_text(part, "text") != ""):
+        return Ok(ChatPart(kind: "text", text: _json_text(part, "text"), data: "", format: ""))
+    if kind == "image_url":
+        return _media_part_from_url("image", _part_url(part, "image_url"))
+    if kind == "video_url":
+        return _media_part_from_url("video", _part_url(part, "video_url"))
+    if kind == "input_audio":
+        match json_object_get(part, "input_audio"):
+            case Some(audio):
+                val data = _json_text(audio, "data")
+                val format = _json_text(audio, "format")
+                if format == "" or not base64_payload_is_strict(data):
+                    return Err(_part_error("invalid_media", "input_audio part needs a format and strict base64 data"))
+                return Ok(ChatPart(kind: "audio", text: "", data: data, format: format))
+            case None:
+                return Err(_part_error("invalid_media", "input_audio part has no input_audio object"))
+    Err(_part_error("invalid_request", "unsupported content part type '" + kind + "'"))
+
+# Every message of the request, in order, through the std JSON parser (so
+# escapes including \uXXXX are decoded). `content` may be a string, null (read
+# as empty) or an array of typed parts. Text parts are joined into `content`;
+# every part, media included, is kept in `parts` in client order. A media part
+# that cannot be carried faithfully is an Err, never a dropped part. A body that
+# does not parse, or has no messages array, yields no messages.
+fn chat_messages_parse(body: text) -> Result<[ChatMessage], ChatPartError>:
+    var messages: [ChatMessage] = []
+    val parsed = json_parse_with_error(body)
+    if parsed.1 != "":
+        return Ok(messages)
+    val list = json_object_get(parsed.0, "messages")
+    if list == nil or list.0 != "array":
+        return Ok(messages)
+    val count = json_array_length(list)
+    var i = 0
+    while i < count:
+        val entry = json_array_get(list, i)
+        i = i + 1
+        if entry == nil or entry.0 != "object":
+            continue
+        val role = json_object_get(entry, "role")
+        if role == nil or role.0 != "string":
+            continue
+        val content = json_object_get(entry, "content")
+        var body_text = ""
+        var parts: [ChatPart] = []
+        if content != nil and content.0 == "string":
+            body_text = content.1
+            parts.push(ChatPart(kind: "text", text: body_text, data: "", format: ""))
+        elif content != nil and content.0 == "array":
+            val n_parts = json_array_length(content)
+            var p = 0
+            while p < n_parts:
+                val part = json_array_get(content, p)
+                p = p + 1
+                if part == nil or part.0 != "object":
+                    continue
+                match _content_part(part):
+                    Err(error):
+                        return Err(error)
+                    Ok(typed):
+                        if typed.kind == "text":
+                            body_text = body_text + typed.text
+                        parts.push(typed)
+        messages.push(ChatMessage(role: role.1, content: body_text, parts: parts))
+    Ok(messages)
+
+# Text-only view kept for callers that predate media parts. A body whose media
+# parts are refused yields no messages, so it can never be answered as text.
+fn chat_messages_from_body(body: text) -> [ChatMessage]:
+    match chat_messages_parse(body):
+        Ok(messages): messages
+        Err(_): []
+
+fn chat_message_media_count(message: ChatMessage) -> i64:
+    var n = 0
+    for part in message.parts:
+        if part.kind != "text":
+            n = n + 1
+    n
 
 # OpenAI chat-completion envelope. Only emitted for text that a model actually
 # produced: nothing in this file fabricates a completion, and the stub path in
 # serving_chat.spl still returns an error rather than calling this.
 fn openai_chat_completion_response(model: text, content: text, prompt_tokens: i64, completion_tokens: i64) -> ApiResponse:
-    val body = "{\"id\":\"chatcmpl-slang\",\"object\":\"chat.completion\",\"created\":0,\"model\":\"" + _escape_json_text(model) + "\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"" + _escape_json_text(content) + "\"},\"finish_reason\":\"stop\"}],\"usage\":{\"prompt_tokens\":" + prompt_tokens.to_text() + ",\"completion_tokens\":" + completion_tokens.to_text() + ",\"total_tokens\":" + (prompt_tokens + completion_tokens).to_text() + "}}"
+    openai_chat_completion_response_finish(model, content, prompt_tokens, completion_tokens, "stop")
+
+# Same envelope with the real stop cause: "stop" (end of turn or a stop
+# sequence) or "length" (the max_tokens cap ended generation).
+fn openai_chat_completion_response_finish(model: text, content: text, prompt_tokens: i64, completion_tokens: i64, finish_reason: text) -> ApiResponse:
+    val body = "{\"id\":\"chatcmpl-slang\",\"object\":\"chat.completion\",\"created\":0,\"model\":\"" + _escape_json_text(model) + "\",\"choices\":[{\"index\":0,\"message\":{\"role\":\"assistant\",\"content\":\"" + _escape_json_text(content) + "\"},\"finish_reason\":\"" + finish_reason + "\"}],\"usage\":{\"prompt_tokens\":" + prompt_tokens.to_text() + ",\"completion_tokens\":" + completion_tokens.to_text() + ",\"total_tokens\":" + (prompt_tokens + completion_tokens).to_text() + "}}}}"
     ApiResponse(status: 200, body: body)
+
+# OpenAI legacy text-completion envelope, with the real token counts the
+# runner reported.
+fn openai_text_completion_response(model: text, content: text, prompt_tokens: i64, completion_tokens: i64, finish_reason: text) -> ApiResponse:
+    val body = "{\"id\":\"cmpl-slang\",\"object\":\"text_completion\",\"created\":0,\"model\":\"" + _escape_json_text(model) + "\",\"choices\":[{\"text\":\"" + _escape_json_text(content) + "\",\"index\":0,\"logprobs\":null,\"finish_reason\":\"" + finish_reason + "\"}],\"usage\":{\"prompt_tokens\":" + prompt_tokens.to_text() + ",\"completion_tokens\":" + completion_tokens.to_text() + ",\"total_tokens\":" + (prompt_tokens + completion_tokens).to_text() + "}}}}"
+    ApiResponse(status: 200, body: body)
+
+# One server-sent-event frame of a streamed chat completion. `delta_json` is
+# the inside of the delta object (e.g. "\"content\":\"x\""); `finish_reason` ""
+# means null (generation continues).
+fn openai_chat_chunk_sse(model: text, delta_json: text, finish_reason: text) -> text:
+    val finish = if finish_reason == "": "null" else: "\"" + finish_reason + "\""
+    "data: {\"id\":\"chatcmpl-slang\",\"object\":\"chat.completion.chunk\",\"created\":0,\"model\":\"" + _escape_json_text(model) + "\",\"choices\":[{\"index\":0,\"delta\":{" + delta_json + "},\"finish_reason\":" + finish + "}]}\n\n"
+
+fn openai_chat_delta_json(content: text) -> text:
+    "\"content\":\"" + _escape_json_text(content) + "\""
+
+# One server-sent-event frame of a streamed legacy text completion.
+fn openai_text_chunk_sse(model: text, piece: text, finish_reason: text) -> text:
+    val finish = if finish_reason == "": "null" else: "\"" + finish_reason + "\""
+    "data: {\"id\":\"cmpl-slang\",\"object\":\"text_completion\",\"created\":0,\"model\":\"" + _escape_json_text(model) + "\",\"choices\":[{\"text\":\"" + _escape_json_text(piece) + "\",\"index\":0,\"logprobs\":null,\"finish_reason\":" + finish + "}]}\n\n"
 
 # OpenAI error envelope: {"error":{"message","type","param","code"}}.
 # `detail_json` is appended verbatim inside the error object when non-empty so
@@ -217,7 +543,7 @@ fn openai_error_response(status: i32, message: text, err_type: text, code: text,
     var inner = "\"message\":\"" + _escape_json_text(message) + "\",\"type\":\"" + _escape_json_text(err_type) + "\",\"param\":null,\"code\":\"" + _escape_json_text(code) + "\""
     if detail_json != "":
         inner = inner + "," + detail_json
-    ApiResponse(status: status, body: "{\"error\":{" + inner + "}}")
+    ApiResponse(status: status, body: "{\"error\":{" + inner + "}}}}")
 
 # OpenAI model-list envelope: {"object":"list","data":[{...}]}.
 fn openai_models_response(ids: [text], owner: text) -> ApiResponse:
@@ -232,5 +558,8 @@ fn openai_models_response(ids: [text], owner: text) -> ApiResponse:
 
 export ApiResponse, ChatRequest
 export json_string_field, json_int_field, json_bool_field_is_true, json_array_object_count
-export parse_chat_request, openai_error_response, openai_models_response
-export json_string_field_last, openai_chat_completion_response
+export parse_chat_request, openai_error_response, openai_models_response, json_text_literal
+export ChatMessage, chat_messages_from_body, openai_chat_completion_response
+export json_stop_sequences, openai_chat_completion_response_finish, openai_chat_chunk_sse, openai_chat_delta_json, openai_text_chunk_sse
+export ChatPart, ChatPartError, chat_messages_parse, chat_message_media_count, base64_payload_is_strict
+export CompletionRequest, parse_completion_request, openai_text_completion_response

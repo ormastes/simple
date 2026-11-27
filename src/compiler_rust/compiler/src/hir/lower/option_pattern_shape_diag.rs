@@ -1,4 +1,4 @@
-//! Warn-only shape check (DEFAULT OFF) for `Option`/`Result` patterns lowered
+//! Shape check (`SPL-PAT-001`, error by default for Some/None) for `Option`/`Result` patterns lowered
 //! against a scrutinee whose static type can never be one.
 //!
 //! Bug:
@@ -38,31 +38,56 @@
 //! is deliberately NOT reported -- an under-report is correct here, a false
 //! positive is not.
 //!
-//! ## Default OFF
+//! ## Staging (Ok/Err only)
 //!
-//! Promotion to a hard error must be staged: the tree carries ~2,746
+//! `Some`/`None` are a hard error by default (owner decision 2026-11-13).
+//! `Ok`/`Err` promotion is still staged: the tree carries ~2,746
 //! Option-shaped and ~4,211 Result-shaped pattern sites across 620 owned files.
 //! Enable with `SIMPLE_DIAG_OPTION_PATTERN_SHAPE=1` (the same switch the
 //! interpreter check uses, so one run instruments both engines) to measure the
 //! true fallout before any promotion. Do NOT make this quieter -- the silence is
 //! the bug.
 
+use crate::hir::lower::error::LowerError;
 use crate::hir::types::HirType;
 
-/// Is the default-off `SIMPLE_DIAG_OPTION_PATTERN_SHAPE` gate on?
-fn gate_on() -> bool {
-    std::env::var("SIMPLE_DIAG_OPTION_PATTERN_SHAPE").as_deref() == Ok("1")
+/// `SIMPLE_DIAG_OPTION_PATTERN_SHAPE`: unset/0 = off, `1`/`warn` = warn,
+/// `error` = hard error (stage-1 opt-in; the default flip is an owner decision).
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ShapeGate {
+    Off,
+    Warn,
+    Error,
 }
+
+pub(crate) fn shape_gate() -> ShapeGate {
+    match std::env::var("SIMPLE_DIAG_OPTION_PATTERN_SHAPE").as_deref() {
+        Ok("1") | Ok("warn") => ShapeGate::Warn,
+        Ok("error") | Ok("2") => ShapeGate::Error,
+        _ => ShapeGate::Off,
+    }
+}
+
+/// Stable diagnostic code (config/policy/diagnostic_policy.sdn `SPL-PAT-001`).
+pub const SHAPE_ERROR_CODE: &str = "SPL-PAT-001";
+
+/// Marker shared with `driver/src/exec_core.rs::jit_failure_must_propagate` so the
+/// error is NOT demoted to an interpreter run.
+pub const SHAPE_ERROR_TAG: &str = "error[SPL-PAT-001]";
 
 /// Static name for the subject type, or `None` when the type is one this check
 /// deliberately stays silent about.
-fn never_option_type_name(ty: &HirType) -> Option<&'static str> {
+pub(crate) fn never_option_type_name(ty: &HirType) -> Option<String> {
+    use crate::hir::Signedness;
     match ty {
-        HirType::Int { .. } => Some("int"),
-        HirType::Float { .. } => Some("float"),
-        HirType::Bool => Some("bool"),
-        HirType::Char => Some("char"),
-        HirType::String => Some("text"),
+        HirType::Int { bits, signedness } => Some(match signedness {
+            Signedness::Signed => format!("i{bits}"),
+            _ => format!("u{bits}"),
+        }),
+        HirType::Float { bits } => Some(format!("f{bits}")),
+        HirType::Bool => Some("bool".to_string()),
+        HirType::Char => Some("char".to_string()),
+        HirType::String => Some("text".to_string()),
         // Everything else is either a legitimate Option carrier
         // (`Pointer` == `T?`, `Enum` == a real Option/Result or a user enum),
         // or too weakly typed to judge (`Any`, `Unknown`, generics), or an
@@ -111,7 +136,12 @@ impl DiagLocation<'_> {
 }
 
 /// Report an `Option`/`Result` pattern lowered against a scrutinee whose static
-/// type can never be one. Warn-only and default off; see the module docs.
+/// type can never be one.
+///
+/// `Some`/`None` over a bare scalar/text subject is a hard compile error by
+/// default (owner decision 2026-11-13, as Rust E0308 / Swift): the #8675
+/// silent "flat bind" was removed. `Ok`/`Err` stay on the staged
+/// `SIMPLE_DIAG_OPTION_PATTERN_SHAPE` gate.
 ///
 /// `subject_ty` is the resolved `HirType` of the scrutinee, or `None` when the
 /// lowerer could not resolve it (in which case nothing is reported).
@@ -120,22 +150,31 @@ pub(crate) fn report_if_never_option(
     subject_ty: Option<&HirType>,
     form: &str,
     location: DiagLocation<'_>,
-) {
-    if !matches!(variant, "Some" | "None" | "Ok" | "Err") {
-        return;
+) -> Result<(), LowerError> {
+    let option_variant = matches!(variant, "Some" | "None");
+    if !option_variant && !matches!(variant, "Ok" | "Err") {
+        return Ok(());
     }
-    if !gate_on() {
-        return;
+    let gate = if option_variant { ShapeGate::Error } else { shape_gate() };
+    if gate == ShapeGate::Off {
+        return Ok(());
     }
-    let Some(ty) = subject_ty else { return };
+    let Some(ty) = subject_ty else { return Ok(()) };
     let Some(kind) = never_option_type_name(ty) else {
-        return;
+        return Ok(());
     };
     let at = location.render();
+    let shown = if variant == "None" { "None".to_string() } else { format!("{variant}(_)") };
+    let expects = if option_variant { "Option<T>" } else { "Result<T, E>" };
+    if gate == ShapeGate::Error {
+        return Err(LowerError::Unsupported(format!(
+            "{SHAPE_ERROR_TAG}: {at}: pattern `{shown}` expects {expects}, found {kind} ({form})\n  \
+             fix: a `{kind}` is never nil -- bind it directly (`val j = x`) or remove the pattern; \
+             if absence is intended, make the subject `{kind}?` and use `if val j = x:`"
+        )));
+    }
     eprintln!(
-        "warning[option-pattern-shape]: {at}: `{variant}(...)` pattern ({form}) tested against a \
-         scrutinee statically typed `{kind}`, which is never an Option/Result; this pattern \
-         can never legitimately match and the default (JIT) engine answers it silently by \
-         taking the arm and binding a corrupt value"
+        "warning[{SHAPE_ERROR_CODE}]: {at}: pattern `{shown}` expects {expects}, found {kind} ({form})"
     );
+    Ok(())
 }

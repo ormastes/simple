@@ -1,0 +1,112 @@
+# Two-process proof for the windowed host's remote application pump.
+#
+# Tracks: wm_host_external_content_owner_2026-07-29
+#
+# Three real processes: this spec (controller), a WM process running
+# hosted_entry.spl's per-frame pump call (hosted_remote_app_pump_step) over
+# the production HostCompositor built as hosted_entry main builds it, and the
+# unchanged wave-1 client process. Pixels reach the WM only through the
+# shared slot file and the present message.
+#
+# NOT proven here: hosted_entry.spl's own main loop (winit window, event
+# loop, Engine2d raster present) -- there is no display server on the proof
+# host, and the readback is the compositor's pure-Simple framebuffer, not
+# what a winit window showed.
+
+use std.spec.{describe, it, expect}
+use std.daemon_sdk.types.{DaemonConfig, DaemonResponse, daemon_config_new, daemon_request_new}
+use std.daemon_sdk.client.{daemon_submit_and_wait}
+use std.daemon_sdk.lock.{is_daemon_running}
+use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.io.sysinfo_ops.{getpid}
+use std.nogc_sync_mut.io.process_ops.{process_spawn_async, process_kill, process_wait, process_is_running}
+use std.nogc_sync_mut.sffi.system.{sleep_ms}
+use std.nogc_sync_mut.io_runtime.{file_exists, mkdir_p, file_write}
+use std.io_runtime.{host_os}
+use std.nogc_sync_mut.spec.engine_probe.{self_exe_path}
+use app.play.wm_daemon_client.{WMD_FRAME_PROBE}
+
+val KNOWN: i64 = 0xFF12AB34
+val CONTENT_PIXELS: i64 = 200 * 120
+
+fn simple_exe() -> text:
+    val configured = env_get("SIMPLE_BIN")
+    if configured != "":
+        return configured
+    self_exe_path() ?? "bin/simple"
+
+fn spawn_logged(fixture: text, log: text, base: text, enable: text) -> i64:
+    process_spawn_async("sh", [
+        "-c",
+        "exec env SIMPLE_WM_DAEMON_DIR=\"$3\" SIMPLE_HOSTED_WM_REMOTE_APPS=\"$4\" WM_REMOTE_CLIENT_CORRUPT=0 \"$0\" run \"$1\" > \"$2\" 2>&1",
+        simple_exe(), fixture, log, base, enable])
+
+fn probe(config: DaemonConfig, window_id: i64) -> DaemonResponse:
+    var req = daemon_request_new(WMD_FRAME_PROBE)
+    req.set_field("color", "{KNOWN}")
+    req.set_field("id", "{window_id}")
+    daemon_submit_and_wait(req, config, 60000)
+
+fn field(resp: DaemonResponse, key: text) -> i64:
+    resp.get_field(key).to_i64() ?? -1
+
+describe "windowed host remote application pump across processes":
+    it "serves a separate client's pixels through the hosted pump":
+        if host_os() != "linux":
+            return
+        val base = "/tmp/hosted_remote_app_pump_two_process_{getpid()}"
+        expect(mkdir_p(base)).to_equal(true)
+        val config = daemon_config_new("{base}/daemon.lock", "{base}/requests", "{base}/responses")
+
+        # Negative control: without SIMPLE_HOSTED_WM_REMOTE_APPS=1 the pump
+        # stays off and never takes the lock.
+        val off_pid = spawn_logged("test/fixtures/hosted_remote_app_pump_wm_probe.spl", "{base}/wm_off.log", base, "0")
+        process_wait(off_pid, 300000)
+        expect(process_is_running(off_pid)).to_equal(false)
+        expect(file_exists(config.lock_path)).to_equal(false)
+
+        val wm_pid = spawn_logged("test/fixtures/hosted_remote_app_pump_wm_probe.spl", "{base}/wm.log", base, "1")
+        var waited: i64 = 0
+        while not is_daemon_running(config.lock_path) and waited < 300000:
+            sleep_ms(500)
+            waited = waited + 500
+        expect(is_daemon_running(config.lock_path)).to_equal(true)
+        if not is_daemon_running(config.lock_path):
+            return
+
+        val empty = probe(config, 1)
+        expect(field(empty, "wm_pid")).to_equal(wm_pid)
+        expect(field(empty, "pixels")).to_equal(1024 * 720)
+        expect(field(empty, "count")).to_equal(0)
+
+        val client_pid = spawn_logged("test/fixtures/wm_remote_app_client_probe.spl", "{base}/client.log", base, "0")
+        var shown = probe(config, 1)
+        waited = 0
+        while field(shown, "content_count") != CONTENT_PIXELS and waited < 180000:
+            sleep_ms(500)
+            waited = waited + 500
+            shown = probe(config, 1)
+        print "evidence hosted-pump wm_pid={wm_pid} client_pid={client_pid} controller_pid={getpid()} count={shown.get_field("count")} content_count={shown.get_field("content_count")} surfaces={shown.get_field("surfaces")}"
+        expect(field(shown, "client_pid")).to_equal(client_pid)
+        expect(field(shown, "content_count")).to_equal(CONTENT_PIXELS)
+        expect(field(shown, "count")).to_equal(CONTENT_PIXELS)
+
+        # Client death is reaped by the pump's own cadence.
+        expect(process_kill(client_pid)).to_equal(true)
+        process_wait(client_pid, 5000)
+        var gone = probe(config, 1)
+        waited = 0
+        while field(gone, "surfaces") != 0 and waited < 30000:
+            sleep_ms(500)
+            waited = waited + 500
+            gone = probe(config, 1)
+        expect(field(gone, "surfaces")).to_equal(0)
+        expect(field(gone, "count")).to_equal(0)
+
+        # Exit releases the singleton lock.
+        expect(file_write("{base}/stop", "1")).to_equal(true)
+        process_wait(wm_pid, 30000)
+        expect(process_is_running(wm_pid)).to_equal(false)
+        expect(file_exists(config.lock_path)).to_equal(false)
+        val rm_pid = process_spawn_async("rm", ["-rf", base])
+        process_wait(rm_pid, 10000)

@@ -131,23 +131,36 @@ fn effective_delay_ms(attempt: i64, policy: RetryPolicy, retry_after_ms: i64) ->
 # (status_code, body, error, retry_after_ms). `error` non-empty means a
 # connection-level failure (status is meaningless / <= 0 by convention).
 # `retry_after_ms` should be 0 when the caller has no Retry-After hint.
-# The deadline is enforced before/after callbacks and before sleeps. The
-# current synchronous HTTP transport cannot interrupt a callback blocked
-# inside the runtime; callers still need a timeout-capable transport for hard
-# cancellation of a hung attempt.
+# Legacy callbacks retain their one-argument API. Transport owners should use
+# with_retry_timeout and enforce the supplied remaining budget inside I/O.
 fn with_retry(policy: RetryPolicy, call: fn(i64) -> (i64, text, text, i64)) -> RetryOutcome:
+    with_retry_timeout(policy, fn(attempt: i64, remaining_ms: i64) -> (i64, text, text, i64):
+        call(attempt)
+    )
+
+# -1 means exhausted; zero is reserved for an explicitly unbounded policy.
+fn retry_remaining_ms(timeout_ms: i64, elapsed_ms: i64) -> i64:
+    if timeout_ms <= 0:
+        return 0
+    if elapsed_ms >= timeout_ms:
+        return -1
+    if elapsed_ms < 0:
+        return timeout_ms
+    timeout_ms - elapsed_ms
+
+fn with_retry_timeout(policy: RetryPolicy, call: fn(i64, i64) -> (i64, text, text, i64)) -> RetryOutcome:
     val started_at_ms = current_time_ms()
     var attempt = 1
     while true:
-        if attempt > 1 and policy.timeout_ms > 0 and
-           current_time_ms() - started_at_ms >= policy.timeout_ms:
+        val remaining_ms = retry_remaining_ms(policy.timeout_ms, current_time_ms() - started_at_ms)
+        if remaining_ms < 0:
             return RetryOutcome(
                 status: 0,
                 body: "",
                 error: "retry timeout exceeded",
                 attempts: attempt - 1
             )
-        val result = call(attempt)
+        val result = call(attempt, remaining_ms)
         val status = result.0
         val body = result.1
         val err = result.2
@@ -185,4 +198,4 @@ fn with_retry(policy: RetryPolicy, call: fn(i64) -> (i64, text, text, i64)) -> R
 export RetryPolicy, RetryOutcome
 export default_retry_policy, retry_policy_from_env
 export is_retryable_status, should_retry, backoff_delay_ms, effective_delay_ms
-export with_retry
+export with_retry, with_retry_timeout, retry_remaining_ms

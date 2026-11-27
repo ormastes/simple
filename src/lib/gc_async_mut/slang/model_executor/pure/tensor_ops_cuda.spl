@@ -1,0 +1,205 @@
+# @gc — module uses GC runtime
+#
+# tensor_ops_cuda — CUDA (NVIDIA GPU) provider for the pure runner's compute seam.
+#
+# Mirrors the function shapes of tensor_ops.spl (the CPU `[f64]` provider) over
+# device-resident f32 tensors. Weights are uploaded once with
+# cuda_tensor_upload and stay resident; each op returns a new device tensor and
+# only cuda_tensor_download moves data back. Numerical contract per op is the
+# CPU op's, computed in f32 (compare with ~1e-4 relative tolerance). Every
+# status is surfaced as Result<_, text>.
+#
+# Also on the device: rope, kv_write (in place), row lookup, argmax (one i32
+# readback). Not on the device: standalone softmax.
+#
+# Kernel sources are shared with the ROCm provider (gpu_kernel_sources.spl) and
+# compiled by NVRTC. Not verified on NVIDIA hardware; see the CUDA system spec.
+
+use std.gc_async_mut.gpu.cuda.cuda_compute.{CudaDevice, cuda_open_at, cuda_close, cuda_bin_default, cuda_buffer_alloc, cuda_buffer_free, cuda_upload_f32, cuda_buffer_upload_bytes, cuda_buffer_download_bytes, cuda_kernel, cuda_launch, cuda_sync, cuda_f32_word}
+use std.gc_async_mut.slang.model_executor.pure.tensor_ops.{PureTensor, tensor_from_values, tensor_decode_f32_le}
+use std.gc_async_mut.slang.model_executor.pure.gpu_kernel_sources.{SLANG_SRC_MATVEC, SLANG_SRC_RMSNORM, SLANG_SRC_ADD, SLANG_SRC_MUL, SLANG_SRC_SILU, SLANG_SRC_ATTENTION, SLANG_SRC_ROPE, SLANG_SRC_KV_WRITE, SLANG_SRC_ROW, SLANG_SRC_ARGMAX}
+
+@allow(primitive_api)  # reason: raw CUDA device pointers, byte counts, positions and kernel parameters are untyped integers at the C ABI
+pub struct CudaTensor:
+    ptr: i64
+    n: i64
+    shape: [i64]
+
+@allow(primitive_api)  # reason: raw CUDA device pointers, byte counts, positions and kernel parameters are untyped integers at the C ABI
+pub class CudaOps:
+    dev: CudaDevice
+
+pub fn cuda_ops_open_at(bin_dir: text) -> Result<CudaOps, text>:
+    val dev = cuda_open_at(0, bin_dir)?
+    Ok(CudaOps(dev: dev))
+
+pub fn cuda_ops_open() -> Result<CudaOps, text>:
+    cuda_ops_open_at(cuda_bin_default())
+
+pub fn cuda_ops_device_name(ops: CudaOps) -> text:
+    ops.dev.name
+
+# Release the device (modules, primary context, scratch, libraries); `ops`
+# must not be used afterwards. Device tensors still allocated die with the context.
+pub fn cuda_ops_close(ops: CudaOps):
+    cuda_close(ops.dev)
+
+fn _numel(shape: [i64]) -> i64:
+    var n: i64 = 1
+    for d in shape:
+        n = n * d
+    n
+
+# Upload a host tensor (weights: call once, keep the handle).
+pub fn cuda_tensor_upload(ops: CudaOps, t: PureTensor) -> Result<CudaTensor, text>:
+    val n = t.data.len()
+    val ptr = cuda_buffer_alloc(ops.dev, n)?
+    cuda_upload_f32(ops.dev, ptr, t.data)?
+    Ok(CudaTensor(ptr: ptr, n: n, shape: t.shape))
+
+pub fn cuda_tensor_download(ops: CudaOps, t: CudaTensor) -> Result<PureTensor, text>:
+    cuda_sync(ops.dev)?
+    val raw = cuda_buffer_download_bytes(ops.dev, t.ptr, t.n * 4)?
+    Ok(tensor_decode_f32_le(raw, 0, t.n, t.shape))
+
+# Weight upload straight from little-endian F32 bytes (e.g. the file buffer):
+# `bytes[offset .. offset + numel*4]` goes to the device with one bulk copy and
+# no per-element staging.
+@allow(primitive_api)  # reason: tensor positions, head counts and argmax indices mirror the kernel launch parameters
+pub fn cuda_tensor_upload_f32_bytes(ops: CudaOps, bytes: [u8], offset: i64, shape: [i64]) -> Result<CudaTensor, text>:
+    val n = _numel(shape)
+    val ptr = cuda_buffer_alloc(ops.dev, n)?
+    cuda_buffer_upload_bytes(ops.dev, ptr, bytes, offset, n * 4)?
+    Ok(CudaTensor(ptr: ptr, n: n, shape: shape))
+
+@allow(primitive_api)  # reason: raw CUDA device pointers, byte counts, positions and kernel parameters are untyped integers at the C ABI
+pub fn cuda_tensor_free(ops: CudaOps, t: CudaTensor) -> Result<i64, text>:
+    cuda_buffer_free(ops.dev, t.ptr)
+
+@allow(primitive_api)  # reason: tensor positions, head counts and argmax indices mirror the kernel launch parameters
+pub fn cuda_tensor_numel(t: CudaTensor) -> i64:
+    t.n
+
+fn _out_like(ops: CudaOps, shape: [i64]) -> Result<CudaTensor, text>:
+    val n = _numel(shape)
+    val ptr = cuda_buffer_alloc(ops.dev, n)?
+    Ok(CudaTensor(ptr: ptr, n: n, shape: shape))
+
+# Launch into the freshly allocated `out`; on a failed launch `out` is freed so
+# an error path leaks no device memory.
+fn _launch_into(ops: CudaOps, k: i64, grid: i64, block: i64, ptrs: [i64], words: [i64], out: CudaTensor) -> Result<CudaTensor, text>:
+    val r = cuda_launch(ops.dev, k, grid, block, ptrs, words)
+    if r.is_err():
+        cuda_buffer_free(ops.dev, out.ptr)
+        return Err(r.unwrap_err())
+    Ok(out)
+
+# Uninitialised device tensor of `shape` (e.g. a KV row buffer).
+@allow(primitive_api)  # reason: raw CUDA device pointers, byte counts, positions and kernel parameters are untyped integers at the C ABI
+pub fn cuda_buffer_alloc_tensor(ops: CudaOps, shape: [i64]) -> Result<CudaTensor, text>:
+    _out_like(ops, shape)
+
+# y = W x for W stored [out, in].
+pub fn cuda_tensor_matvec(ops: CudaOps, w: CudaTensor, x: CudaTensor) -> Result<CudaTensor, text>:
+    if w.shape.len() != 2:
+        return Err("CUDA matvec: weight must be rank 2, got rank {w.shape.len()}")
+    val rows = w.shape[0]
+    val cols = w.shape[1]
+    if w.n != rows * cols or x.n != cols:
+        return Err("CUDA matvec: weight {rows}x{cols} (numel {w.n}) does not match input numel {x.n}")
+    val k = cuda_kernel(ops.dev, "sgemv_rows", SLANG_SRC_MATVEC)?
+    val out = _out_like(ops, [rows])?
+    _launch_into(ops, k, rows, 256, [w.ptr, x.ptr, out.ptr], [rows, cols], out)
+
+@allow(primitive_api)  # reason: tensor positions, head counts and argmax indices mirror the kernel launch parameters
+pub fn cuda_tensor_rmsnorm(ops: CudaOps, x: CudaTensor, w: CudaTensor, eps: f64) -> Result<CudaTensor, text>:
+    if w.n != x.n:
+        return Err("CUDA rmsnorm: weight numel {w.n} does not match input numel {x.n}")
+    val k = cuda_kernel(ops.dev, "rmsnorm_f32", SLANG_SRC_RMSNORM)?
+    val out = _out_like(ops, x.shape)?
+    _launch_into(ops, k, 1, 256, [x.ptr, w.ptr, out.ptr], [x.n, cuda_f32_word(eps)], out)
+
+fn _elementwise2(ops: CudaOps, name: text, src: text, a: CudaTensor, b: CudaTensor) -> Result<CudaTensor, text>:
+    if a.n != b.n:
+        return Err("CUDA {name}: operand numel {a.n} does not match {b.n}")
+    val k = cuda_kernel(ops.dev, name, src)?
+    val out = _out_like(ops, a.shape)?
+    _launch_into(ops, k, (a.n + 255) / 256, 256, [a.ptr, b.ptr, out.ptr], [a.n], out)
+
+pub fn cuda_tensor_add(ops: CudaOps, a: CudaTensor, b: CudaTensor) -> Result<CudaTensor, text>:
+    _elementwise2(ops, "add_f32", SLANG_SRC_ADD, a, b)
+
+pub fn cuda_tensor_mul(ops: CudaOps, a: CudaTensor, b: CudaTensor) -> Result<CudaTensor, text>:
+    _elementwise2(ops, "mul_f32", SLANG_SRC_MUL, a, b)
+
+pub fn cuda_tensor_silu(ops: CudaOps, x: CudaTensor) -> Result<CudaTensor, text>:
+    val k = cuda_kernel(ops.dev, "silu_f32", SLANG_SRC_SILU)?
+    val out = _out_like(ops, x.shape)?
+    _launch_into(ops, k, (x.n + 255) / 256, 256, [x.ptr, out.ptr], [x.n], out)
+
+# Causal multi-head attention for one query against KV rows [0, n_pos).
+@allow(primitive_api)  # reason: tensor positions, head counts and argmax indices mirror the kernel launch parameters
+pub fn cuda_tensor_attention(ops: CudaOps, q: CudaTensor, k_buf: CudaTensor, v_buf: CudaTensor, n_pos: i64, n_heads: i64, head_dim: i64) -> Result<CudaTensor, text>:
+    if n_pos > 1024 or n_pos < 1:
+        return Err("CUDA attention: n_pos {n_pos} outside 1..1024")
+    val dim = n_heads * head_dim
+    if n_heads < 1 or head_dim < 1 or q.n != dim or k_buf.n < n_pos * dim or v_buf.n < n_pos * dim:
+        return Err("CUDA attention: q numel {q.n}, K {k_buf.n}, V {v_buf.n} do not cover {n_pos} positions of {n_heads} heads x {head_dim}")
+    val k = cuda_kernel(ops.dev, "attention_f32", SLANG_SRC_ATTENTION)?
+    val out = _out_like(ops, [dim])?
+    _launch_into(ops, k, n_heads, 128, [q.ptr, k_buf.ptr, v_buf.ptr, out.ptr], [n_pos, head_dim, dim], out)
+
+# RoPE on a [n_heads * head_dim] vector at position `pos` (math of tensor_rope).
+@allow(primitive_api)  # reason: tensor positions, head counts and argmax indices mirror the kernel launch parameters
+pub fn cuda_tensor_rope(ops: CudaOps, x: CudaTensor, pos: i64, n_heads: i64, head_dim: i64, theta: f64) -> Result<CudaTensor, text>:
+    if n_heads < 1 or head_dim < 2 or head_dim % 2 != 0 or x.n != n_heads * head_dim:
+        return Err("CUDA rope: x numel {x.n} does not match {n_heads} heads x even head_dim {head_dim}")
+    val k = cuda_kernel(ops.dev, "rope_f32", SLANG_SRC_ROPE)?
+    val out = _out_like(ops, x.shape)?
+    val pairs = n_heads * (head_dim / 2)
+    _launch_into(ops, k, (pairs + 255) / 256, 256, [x.ptr, out.ptr], [pos, n_heads, head_dim, cuda_f32_word(theta)], out)
+
+# Copy the [dim] vector `row` into row `pos` of the [capacity, dim] buffer, in place.
+@allow(primitive_api)  # reason: tensor positions, head counts and argmax indices mirror the kernel launch parameters
+pub fn cuda_tensor_kv_write(ops: CudaOps, buf: CudaTensor, pos: i64, row: CudaTensor) -> Result<i64, text>:
+    if buf.shape.len() != 2:
+        return Err("CUDA kv_write: buffer must be rank 2, got rank {buf.shape.len()}")
+    val dim = buf.shape[1]
+    if pos < 0 or (pos + 1) * dim > buf.n or row.n != dim:
+        return Err("CUDA kv_write: pos {pos} / row size {row.n} does not fit buffer {buf.n} (dim {dim})")
+    val k = cuda_kernel(ops.dev, "kv_write_f32", SLANG_SRC_KV_WRITE)?
+    cuda_launch(ops.dev, k, (dim + 255) / 256, 256, [buf.ptr, row.ptr], [pos, dim])?
+    Ok(0)
+
+# Row `row` of a [rows, cols] device buffer as a new [cols] device tensor.
+@allow(primitive_api)  # reason: tensor positions, head counts and argmax indices mirror the kernel launch parameters
+pub fn cuda_tensor_row(ops: CudaOps, table: CudaTensor, row: i64) -> Result<CudaTensor, text>:
+    if table.shape.len() != 2:
+        return Err("CUDA row: table must be rank 2, got rank {table.shape.len()}")
+    val cols = table.shape[1]
+    if row < 0 or (row + 1) * cols > table.n:
+        return Err("CUDA row: index {row} outside table of {table.n / cols} rows")
+    val k = cuda_kernel(ops.dev, "row_f32", SLANG_SRC_ROW)?
+    val out = _out_like(ops, [cols])?
+    _launch_into(ops, k, (cols + 255) / 256, 256, [table.ptr, out.ptr], [row, cols], out)
+
+# Index of the largest element (lowest index on ties). Only 4 bytes come back.
+@allow(primitive_api)  # reason: raw CUDA device pointers, byte counts, positions and kernel parameters are untyped integers at the C ABI
+pub fn cuda_tensor_argmax(ops: CudaOps, x: CudaTensor) -> Result<i64, text>:
+    if x.n < 1:
+        return Err("CUDA argmax: empty tensor")
+    val k = cuda_kernel(ops.dev, "argmax_f32", SLANG_SRC_ARGMAX)?
+    val out = cuda_buffer_alloc(ops.dev, 1)?
+    val launched = cuda_launch(ops.dev, k, 1, 256, [x.ptr, out], [x.n])
+    if launched.is_err():
+        cuda_buffer_free(ops.dev, out)
+        return Err(launched.unwrap_err())
+    val got = cuda_buffer_download_bytes(ops.dev, out, 4)
+    cuda_buffer_free(ops.dev, out)
+    val raw = got?
+    Ok((raw[0] as i64) + (raw[1] as i64) * 256 + (raw[2] as i64) * 65536 + (raw[3] as i64) * 16777216)
+
+# Block until all launched kernels finished (ops are asynchronous).
+@allow(primitive_api)  # reason: raw CUDA device pointers, byte counts, positions and kernel parameters are untyped integers at the C ABI
+pub fn cuda_ops_sync(ops: CudaOps) -> Result<i64, text>:
+    cuda_sync(ops.dev)

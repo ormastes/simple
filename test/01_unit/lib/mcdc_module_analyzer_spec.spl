@@ -1,0 +1,91 @@
+"""CD and MC/DC (unique-cause + masking) analysis over recorded evaluation vectors."""
+# @req REQ-MCDC-MOD-003 REQ-MCDC-MOD-004
+# design: doc/05_design/generics_coverage_mcdc.md
+
+use std.spec
+use std.nogc_sync_mut.mcdc.module_decisions.*
+use std.nogc_sync_mut.mcdc.module_analyzer.*
+
+fn rec(values: i64, evaluated: i64, outcome: bool) -> McdcEvalRecord:
+    McdcEvalRecord(decision: 0, values: values, evaluated: evaluated, outcome: outcome)
+
+# a and (b or f(x)): bits a=1, b=2, f=4
+fn and_or_records() -> [McdcEvalRecord]:
+    [rec(3, 3, true), rec(0, 1, false), rec(5, 7, true), rec(1, 7, false)]
+
+describe "mcdc module analyzer":
+    it "finds unique-cause independence pairs for a and (b or f(x))":
+        step("Four vectors: (T,T,-)=T (F,-,-)=F (T,F,T)=T (T,F,F)=F")
+        val d = mcdc_parse_decision_expr("a and (b or f(x))")
+        val cov = mcdc_analyze_decision(d, and_or_records())
+        expect(cov.eval_count).to_equal(4)
+        expect(cov.seen_true).to_equal(true)
+        expect(cov.seen_false).to_equal(true)
+        expect(cov.conditions_mcdc).to_equal(3)
+        expect(cov.conditions_both).to_equal(3)
+        expect(cov.conditions[0].pair.kind).to_equal(MCDC_PAIR_UNIQUE_CAUSE)
+        expect(cov.conditions[0].pair.a).to_equal(0)
+        expect(cov.conditions[0].pair.b).to_equal(1)
+        expect(cov.conditions[1].pair.kind).to_equal(MCDC_PAIR_UNIQUE_CAUSE)
+        expect(cov.conditions[1].pair.a).to_equal(0)
+        expect(cov.conditions[1].pair.b).to_equal(3)
+        expect(cov.conditions[2].pair.kind).to_equal(MCDC_PAIR_UNIQUE_CAUSE)
+        expect(cov.conditions[2].pair.a).to_equal(2)
+        expect(cov.conditions[2].pair.b).to_equal(3)
+        expect(mcdc_uncovered_reasons(cov).len()).to_equal(0)
+
+    it "accepts a masking-only pair for c in (a and b) or c":
+        step("(T,F,F)=F vs (F,-,T)=T: a differs, but the (a and b) subtree is F in both")
+        val d = mcdc_parse_decision_expr("(a and b) or c")
+        expect(mcdc_tree_to_postfix(d)).to_equal("c0 c1 & c2 |")
+        val r0 = rec(1, 7, false)
+        val r1 = rec(4, 5, true)
+        expect(mcdc_pair_kind(d, 2, r0, r1)).to_equal(MCDC_PAIR_MASKING)
+        expect(mcdc_pair_kind(d, 0, r0, r1)).to_equal(MCDC_PAIR_NONE)
+        expect(mcdc_pair_kind(d, 1, r0, r1)).to_equal(MCDC_PAIR_NONE)
+        val cov = mcdc_analyze_decision(d, [r0, r1])
+        expect(cov.conditions_mcdc).to_equal(1)
+        expect(cov.conditions[2].pair.kind).to_equal(MCDC_PAIR_MASKING)
+        expect(mcdc_pair_kind_name(cov.conditions[2].pair.kind)).to_equal("masking")
+        val reasons = mcdc_uncovered_reasons(cov)
+        expect(reasons.len()).to_equal(2)
+        expect(reasons[0]).to_equal("c0 `a`: no independence pair")
+        expect(reasons[1]).to_equal("c1 `b`: only false; no independence pair")
+
+    it "evaluates subtree values with short-circuit masking":
+        val d = mcdc_parse_decision_expr("(a and b) or c")
+        expect(mcdc_node_value(d.nodes, 2, 1, 7)).to_equal(0)
+        expect(mcdc_node_value(d.nodes, 2, 4, 5)).to_equal(0)
+        expect(mcdc_node_value(d.nodes, 1, 4, 5)).to_equal(-1)
+        expect(mcdc_node_value(d.nodes, d.root, 4, 5)).to_equal(1)
+
+    it "covers single-condition decisions by both outcomes and explains gaps":
+        val d = mcdc_parse_decision_expr("x")
+        val partial = mcdc_analyze_decision(d, [rec(1, 1, true)])
+        expect(partial.seen_false).to_equal(false)
+        expect(partial.conditions_mcdc).to_equal(0)
+        val reasons = mcdc_uncovered_reasons(partial)
+        expect(reasons.len()).to_equal(2)
+        expect(reasons[0]).to_equal("decision outcome never false")
+        expect(reasons[1]).to_equal("c0 `x`: only true; no independence pair")
+        val full = mcdc_analyze_decision(d, [rec(1, 1, true), rec(0, 1, false)])
+        expect(full.conditions_mcdc).to_equal(1)
+        expect(full.conditions[0].pair.kind).to_equal(MCDC_PAIR_UNIQUE_CAUSE)
+        expect(mcdc_uncovered_reasons(full).len()).to_equal(0)
+        val never = mcdc_analyze_decision(d, [])
+        expect(mcdc_uncovered_reasons(never)[0]).to_equal("decision never evaluated")
+
+    it "summarizes CD and MC/DC percentages per file":
+        step("Fully covered 3-condition decision + a 3-condition decision with one masking pair")
+        val full = mcdc_analyze_decision(mcdc_parse_decision_expr("a and (b or f(x))"), and_or_records())
+        val part = mcdc_analyze_decision(mcdc_parse_decision_expr("(a and b) or c"), [rec(1, 7, false), rec(4, 5, true)])
+        val s = mcdc_summarize_file("src/m.spl", [full, part])
+        expect(s.decisions).to_equal(2)
+        expect(s.conditions).to_equal(6)
+        expect(s.decisions_both).to_equal(2)
+        expect(s.conditions_both).to_equal(5)
+        expect(s.conditions_mcdc).to_equal(4)
+        expect(s.cd_percent).to_equal(87.5)
+        expect(s.mcdc_percent).to_be_greater_than(66.6)
+        expect(s.mcdc_percent).to_be_less_than(66.7)
+        expect(mcdc_percent(0, 0)).to_equal(100.0)

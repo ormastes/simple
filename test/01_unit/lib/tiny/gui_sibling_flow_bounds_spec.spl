@@ -1,0 +1,65 @@
+"""Behavioral geometry cases for bounded Tiny sibling flow.
+
+Authored regression scenarios; execution is pending. The fallback fixture
+populates the public node array beyond the scratch capacity, selecting the
+existing full-scan route without modifying the geometry inputs.
+"""
+
+use std.spec.*
+use std.tiny.common.types.{TinyHandle, TinyRect}
+use std.tiny.gui.component.{TINY_COMPONENT_ROW, TINY_COMPONENT_COLUMN, TINY_COMPONENT_TEXT}
+use std.tiny.gui.state.{TinyGuiState}
+
+fn sibling_flow_fixture(class_id: i32, first_size: i32, indexed: bool) -> TinyGuiState:
+    var state = TinyGuiState.bounded(4)
+    state.add(TinyHandle.invalid(), class_id, TinyRect(x: 0, y: 0, width: 100, height: 100), "")
+    val parent = state.handle_at(0)
+    state.add(parent, TINY_COMPONENT_TEXT, TinyRect(x: 0, y: 0, width: first_size, height: first_size), "first")
+    state.add(parent, TINY_COMPONENT_TEXT, TinyRect(x: 0, y: 0, width: 1, height: 1), "second")
+    state.add(parent, TINY_COMPONENT_TEXT, TinyRect(x: 0, y: 0, width: 1, height: 1), "third")
+    if indexed: return state
+    var fallback = TinyGuiState.bounded(0)
+    fallback.nodes = state.nodes
+    fallback
+
+describe "Tiny sibling flow bounds":
+    it "saturates indexed row coordinates before child resolution":
+        val state = sibling_flow_fixture(TINY_COMPONENT_ROW, 2147483647, true)
+        val panes = state.resolved_panes(TinyRect(x: 0, y: 0, width: 100, height: 100))
+        expect(panes.len()).to_equal(4)
+        expect(panes[2].absolute.x).to_equal(2147483647)
+        expect(panes[3].absolute.x).to_equal(2147483647)
+        expect(panes[3].effective_clip.is_empty()).to_equal(true)
+
+    it "saturates fallback row coordinates with the same node geometry":
+        val state = sibling_flow_fixture(TINY_COMPONENT_ROW, 2147483647, false)
+        val panes = state.resolved_panes(TinyRect(x: 0, y: 0, width: 100, height: 100))
+        expect(state.metadata_valid()).to_equal(false)
+        expect(panes[2].absolute.x).to_equal(2147483647)
+        expect(panes[3].absolute.x).to_equal(2147483647)
+
+    it "saturates indexed column coordinates consistently with content extent":
+        val state = sibling_flow_fixture(TINY_COMPONENT_COLUMN, 2147483647, true)
+        val panes = state.resolved_panes(TinyRect(x: 0, y: 0, width: 100, height: 100))
+        expect(panes[2].absolute.y).to_equal(2147483647)
+        expect(panes[3].absolute.y).to_equal(2147483647)
+        expect(state.direct_child_extent_y(0)).to_equal(2147483647)
+
+    it "saturates fallback column coordinates consistently with content extent":
+        val state = sibling_flow_fixture(TINY_COMPONENT_COLUMN, 2147483647, false)
+        val panes = state.resolved_panes(TinyRect(x: 0, y: 0, width: 100, height: 100))
+        expect(state.metadata_valid()).to_equal(false)
+        expect(panes[3].absolute.y).to_equal(2147483647)
+        expect(state.direct_child_extent_y(0)).to_equal(2147483647)
+
+    it "preserves ordinary sibling spacing on both routes":
+        for indexed in [true, false]:
+            val row = sibling_flow_fixture(TINY_COMPONENT_ROW, 3, indexed)
+            val row_panes = row.resolved_panes(TinyRect(x: 0, y: 0, width: 100, height: 100))
+            expect(row_panes[2].absolute.x).to_equal(3)
+            expect(row_panes[3].absolute.x).to_equal(4)
+            val column = sibling_flow_fixture(TINY_COMPONENT_COLUMN, 3, indexed)
+            val column_panes = column.resolved_panes(TinyRect(x: 0, y: 0, width: 100, height: 100))
+            expect(column_panes[2].absolute.y).to_equal(3)
+            expect(column_panes[3].absolute.y).to_equal(4)
+            expect(column.direct_child_extent_y(0)).to_equal(5)

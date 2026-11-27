@@ -8,6 +8,8 @@ use std.common.ui.draw_ir.{DrawIrCommand, DrawIrStyleProp}
 use std.common.ui.native_scalar_text.{ui_native_i64_text}
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
 use std.gpu.engine2d.color.{color_a, color_b, color_g, color_r, rgba}
+use std.gc_async_mut.gpu.engine2d.gradient_tiles.{rounded_rect_coverage256}
+use std.common.math.math.{math_cos, math_sin, MATH_PI}
 
 val _E2D_BOX_MAX_STYLE_VALUE_BYTES: i64 = 65536
 val _E2D_BOX_MAX_SHADOW_LAYERS: i32 = 24
@@ -376,7 +378,9 @@ fn _e2d_box_shadow_call_safe(
     height: i64,
     offset_x: i64,
     offset_y: i64,
-    blur: i64
+    blur: i64,
+    frame_w: i64,
+    frame_h: i64
 ) -> bool:
     if (not _e2d_box_i32(x) or not _e2d_box_i32(y) or
         not _e2d_box_i32(width) or not _e2d_box_i32(height) or
@@ -398,6 +402,25 @@ fn _e2d_box_shadow_call_safe(
         not _e2d_box_i32(right) or not _e2d_box_i32(bottom) or
         expanded_width <= 0 or expanded_height <= 0):
         return false
+    # The painter reads and writes only the part of the shadow inside the
+    # frame, and its blur profiles are O(width + height). With a known frame
+    # the bound is that part, so a box far taller than the frame (a long page
+    # panel: 852 x 16939 CSS px is 231M px at device scale 4) keeps its shadow.
+    if frame_w > 0 and frame_h > 0:
+        if (expanded_width > _E2D_BOX_MAX_TRANSIENT_PIXELS or
+            expanded_height > _E2D_BOX_MAX_TRANSIENT_PIXELS):
+            return false
+        # The painter pads by 2 * blur a side.
+        val reach_left = if left - blur > 0: left - blur else: 0
+        val reach_top = if top - blur > 0: top - blur else: 0
+        val reach_right = if right + blur < frame_w: right + blur else: frame_w
+        val reach_bottom = if bottom + blur < frame_h: bottom + blur else: frame_h
+        if reach_right <= reach_left or reach_bottom <= reach_top:
+            return true
+        return (
+            (reach_right - reach_left) * (reach_bottom - reach_top) <=
+            _E2D_BOX_MAX_TRANSIENT_PIXELS
+        )
     val expanded_pixels = expanded_width * expanded_height
     (
         expanded_pixels > 0 and
@@ -409,7 +432,9 @@ fn engine2d_draw_ir_typed_shadow_geometry_safe(
     x: i32,
     y: i32,
     width: i32,
-    height: i32
+    height: i32,
+    frame_w: i32 = 0,
+    frame_h: i32 = 0
 ) -> bool:
     if width <= 0 or height <= 0:
         return false
@@ -429,7 +454,9 @@ fn engine2d_draw_ir_typed_shadow_geometry_safe(
                     shadow_height,
                     layer.offset_x as i64,
                     layer.offset_y as i64,
-                    layer.blur_radius as i64
+                    layer.blur_radius as i64,
+                    frame_w as i64,
+                    frame_h as i64
                 ):
                     return false
         elif layer.kind == "inset":
@@ -458,7 +485,9 @@ fn _e2d_box_legacy_shadow(
     x: i32,
     y: i32,
     width: i32,
-    height: i32
+    height: i32,
+    frame_w: i32,
+    frame_h: i32
 ) -> Engine2dDrawIrLegacyShadow:
     val value = _e2d_box_style_value(style, "box-shadow")
     if value == "" or value == "none":
@@ -501,7 +530,9 @@ fn _e2d_box_legacy_shadow(
         height as i64,
         offset_x,
         offset_y,
-        blur
+        blur,
+        frame_w as i64,
+        frame_h as i64
     )
     Engine2dDrawIrLegacyShadow(
         visible: visible,
@@ -517,9 +548,12 @@ fn engine2d_draw_ir_legacy_shadow_safe(
     x: i32,
     y: i32,
     width: i32,
-    height: i32
+    height: i32,
+    frame_w: i32 = 0,
+    frame_h: i32 = 0
 ) -> bool:
-    val shadow = _e2d_box_legacy_shadow(style, x, y, width, height)
+    val shadow = _e2d_box_legacy_shadow(
+        style, x, y, width, height, frame_w, frame_h)
     shadow.safe
 
 fn engine2d_draw_ir_render_legacy_shadow(
@@ -528,15 +562,23 @@ fn engine2d_draw_ir_render_legacy_shadow(
     x: i32,
     y: i32,
     width: i32,
-    height: i32
+    height: i32,
+    frame_w: i32 = 0,
+    frame_h: i32 = 0,
+    hole_x: i32 = 0,
+    hole_y: i32 = 0,
+    hole_w: i32 = 0,
+    hole_h: i32 = 0
 ) -> Engine2D:
     var eng = engine
-    val shadow = _e2d_box_legacy_shadow(style, x, y, width, height)
+    val shadow = _e2d_box_legacy_shadow(
+        style, x, y, width, height, frame_w, frame_h)
     if shadow.visible and shadow.safe:
-        eng.draw_shadow_rect(
+        eng.draw_shadow_rect_outside(
             x, y, width, height,
             shadow.offset_x, shadow.offset_y,
-            shadow.blur_radius, shadow.color)
+            shadow.blur_radius, shadow.color,
+            hole_x, hole_y, hole_w, hole_h)
     eng
 
 fn engine2d_draw_ir_render_typed_outer_shadows(
@@ -545,7 +587,13 @@ fn engine2d_draw_ir_render_typed_outer_shadows(
     x: i32,
     y: i32,
     width: i32,
-    height: i32
+    height: i32,
+    frame_w: i32 = 0,
+    frame_h: i32 = 0,
+    hole_x: i32 = 0,
+    hole_y: i32 = 0,
+    hole_w: i32 = 0,
+    hole_h: i32 = 0
 ) -> Engine2D:
     var eng = engine
     var index = layers.len()
@@ -562,8 +610,9 @@ fn engine2d_draw_ir_render_typed_outer_shadows(
                 _e2d_box_shadow_call_safe(
                     shadow_x, shadow_y, shadow_width, shadow_height,
                     layer.offset_x as i64, layer.offset_y as i64,
-                    layer.blur_radius as i64)):
-                eng.draw_shadow_rect(
+                    layer.blur_radius as i64,
+                    frame_w as i64, frame_h as i64)):
+                eng.draw_shadow_rect_outside(
                     shadow_x as i32,
                     shadow_y as i32,
                     shadow_width as i32,
@@ -571,9 +620,254 @@ fn engine2d_draw_ir_render_typed_outer_shadows(
                     layer.offset_x,
                     layer.offset_y,
                     layer.blur_radius,
-                    layer.color
+                    layer.color,
+                    hole_x, hole_y, hole_w, hole_h
                 )
     eng
+
+# True when a visible outer shadow will paint: a typed outer layer, or the
+# legacy aggregate when the typed list was not admitted.
+fn engine2d_draw_ir_has_outer_shadow(
+    layers: [Engine2dDrawIrBoxShadowLayer], typed_admitted: bool,
+    style: [DrawIrStyleProp], x: i32, y: i32, width: i32, height: i32,
+    frame_w: i32 = 0, frame_h: i32 = 0
+) -> bool:
+    if not typed_admitted:
+        val shadow = _e2d_box_legacy_shadow(
+            style, x, y, width, height, frame_w, frame_h)
+        return shadow.visible and shadow.safe
+    for layer in layers:
+        if layer.kind == "outer" and ((layer.color >> 24) & 0xFFu32) != 0u32:
+            return true
+    false
+
+# CSS Backgrounds 3 §7.1: an outer shadow is clipped to outside the border
+# box, so a translucent box shows what was under it, not its own shadow.
+# `pre` / `post` are the region (kx, ky, kw, kh) read before / after the
+# shadows; returns `post` with `pre` restored inside the rounded border box
+# (x, y, width, height). Corner pixels are mixed by their coverage of the
+# box (Chrome anti-aliases the clip), one span per row elsewhere.
+fn engine2d_draw_ir_shadow_knockout_pixels(
+    pre: [u32], post: [u32], kx: i32, ky: i32, kw: i32, kh: i32,
+    x: i32, y: i32, width: i32, height: i32,
+    corners: Engine2dDrawIrCornerRadii
+) -> [u32]:
+    var out = post
+    if kw <= 0 or kh <= 0 or pre.len() != post.len() or post.len() != (kw as i64) * (kh as i64):
+        return out
+    val tl = _e2d_box_corner_radius(corners.top_left, width, height)
+    val tr = _e2d_box_corner_radius(corners.top_right, width, height)
+    val br = _e2d_box_corner_radius(corners.bottom_right, width, height)
+    val bl = _e2d_box_corner_radius(corners.bottom_left, width, height)
+    val left = if tl > bl: tl else: bl
+    val right = if tr > br: tr else: br
+    var row = 0
+    # cpu-lane-loop-ok: one span copy per row of one shadowed translucent box; bound kh
+    while row < kh:
+        val py = ky + row
+        val off = (row as i64) * (kw as i64)
+        out.write_span(pre, off, off, kw as i64)
+        val top_band = py < y + (if tl > tr: tl else: tr)
+        val bottom_band = py >= y + height - (if bl > br: bl else: br)
+        if top_band or bottom_band:
+            var col = 0
+            # cpu-lane-loop-ok: coverage mix across the corner bands only; bound kw
+            while col < kw:
+                val px = kx + col
+                if px < x + left or px >= x + width - right:
+                    val cov = rounded_rect_coverage256(px, py, x, y, width, height, tl, tr, br, bl)
+                    if cov < 256:
+                        out[off + (col as i64)] = engine2d_mix256(pre[off + (col as i64)], post[off + (col as i64)], cov)
+                col = col + 1
+        row = row + 1
+    out
+
+# The rows [y0, y1) of the border box (y, width, height) below its top corner
+# bands and above its bottom ones, radii clamped as the knockout above clamps
+# them: every pixel of those rows is inside the rounded box, and the knockout
+# restores each of them whole.
+fn engine2d_draw_ir_box_straight_rows(
+    y: i32, width: i32, height: i32, corners: Engine2dDrawIrCornerRadii
+) -> [i32]:
+    val tl = _e2d_box_corner_radius(corners.top_left, width, height)
+    val tr = _e2d_box_corner_radius(corners.top_right, width, height)
+    val br = _e2d_box_corner_radius(corners.bottom_right, width, height)
+    val bl = _e2d_box_corner_radius(corners.bottom_left, width, height)
+    [y + (if tl > tr: tl else: tr), y + height - (if bl > br: bl else: br)]
+
+# a * cov / 256 + b * (256 - cov) / 256 per ARGB channel, rounded.
+# @allow(primitive_api): per-pixel ARGB mix by 8.8 coverage, shared with the raster knockout
+pub fn engine2d_mix256(a: u32, b: u32, cov: i32) -> u32:
+    var o = 0u32
+    var sh = 0u32
+    # cpu-lane-loop-ok: 4 channels; bound 4
+    while sh <= 24u32:
+        val ca = ((a >> sh) & 0xFFu32) as i32
+        val cb = ((b >> sh) & 0xFFu32) as i32
+        o = o | ((((ca * cov + cb * (256 - cov) + 128) / 256) as u32) << sh)
+        sh = sh + 8u32
+    o
+
+
+# The colour functions of a `backdrop-filter` value (grayscale, sepia,
+# saturate, hue-rotate, invert, opacity, brightness, contrast) as 4x5 sRGB
+# colour matrices in order, Filter Effects 1 section 10 as Chrome 159 applies
+# them. blur() and unknown functions are skipped; blur commutes with these
+# affine maps on opaque content and is applied first by the callers.
+# @allow(primitive_api): parses raw CSS filter text into colour matrices for the Draw IR and raster painters
+pub fn engine2d_backdrop_color_matrices(raw: text) -> [[f64]]:
+    var out: [[f64]] = []
+    var i = 0
+    val n = raw.byte_len() as i32
+    # cpu-lane-loop-ok: one CSS filter function per step; bound raw length
+    while i < n:
+        val open = raw.index_of("(", i) as i32
+        if open < 0:
+            return out
+        var depth = 1
+        var close = open + 1
+        # cpu-lane-loop-ok: matching parenthesis scan; bound raw length
+        while close < n and depth > 0:
+            val c = raw.slice(close, close + 1)
+            if c == "(":
+                depth = depth + 1
+            elif c == ")":
+                depth = depth - 1
+            close = close + 1
+        val name = raw.slice(i, open).trim().lower()
+        val arg = raw.slice(open + 1, close - 1).trim().lower()
+        val m = _e2d_color_matrix(name, arg)
+        if m.len() == 20:
+            out.push(m)
+        i = close
+    out
+
+fn _e2d_filter_amount(arg: text, clamp_one: bool) -> f64:
+    if arg == "":
+        return 1.0
+    var v = 1.0
+    if arg.ends_with("%"):
+        if val p = arg.slice(0, arg.byte_len() - 1).trim().parse_f64():
+            v = p / 100.0
+    elif val p = arg.parse_f64():
+        v = p
+    if v < 0.0:
+        v = 0.0
+    if clamp_one and v > 1.0:
+        v = 1.0
+    v
+
+fn _e2d_filter_angle_rad(arg: text) -> f64:
+    var unit = 1.0
+    var num = arg
+    if arg.ends_with("deg"):
+        unit = MATH_PI / 180.0
+        num = arg.slice(0, arg.byte_len() - 3)
+    elif arg.ends_with("grad"):
+        unit = MATH_PI / 200.0
+        num = arg.slice(0, arg.byte_len() - 4)
+    elif arg.ends_with("rad"):
+        num = arg.slice(0, arg.byte_len() - 3)
+    elif arg.ends_with("turn"):
+        unit = 2.0 * MATH_PI
+        num = arg.slice(0, arg.byte_len() - 4)
+    if val v = num.trim().parse_f64():
+        return v * unit
+    0.0
+
+fn _e2d_color_matrix(name: text, arg: text) -> [f64]:
+    if name == "grayscale":
+        val g = 1.0 - _e2d_filter_amount(arg, true)
+        return [0.2126 + 0.7874 * g, 0.7152 - 0.7152 * g, 0.0722 - 0.0722 * g, 0.0, 0.0,
+                0.2126 - 0.2126 * g, 0.7152 + 0.2848 * g, 0.0722 - 0.0722 * g, 0.0, 0.0,
+                0.2126 - 0.2126 * g, 0.7152 - 0.7152 * g, 0.0722 + 0.9278 * g, 0.0, 0.0,
+                0.0, 0.0, 0.0, 1.0, 0.0]
+    if name == "sepia":
+        val g = 1.0 - _e2d_filter_amount(arg, true)
+        return [0.393 + 0.607 * g, 0.769 - 0.769 * g, 0.189 - 0.189 * g, 0.0, 0.0,
+                0.349 - 0.349 * g, 0.686 + 0.314 * g, 0.168 - 0.168 * g, 0.0, 0.0,
+                0.272 - 0.272 * g, 0.534 - 0.534 * g, 0.131 + 0.869 * g, 0.0, 0.0,
+                0.0, 0.0, 0.0, 1.0, 0.0]
+    if name == "saturate":
+        val s = _e2d_filter_amount(arg, false)
+        return [0.213 + 0.787 * s, 0.715 - 0.715 * s, 0.072 - 0.072 * s, 0.0, 0.0,
+                0.213 - 0.213 * s, 0.715 + 0.285 * s, 0.072 - 0.072 * s, 0.0, 0.0,
+                0.213 - 0.213 * s, 0.715 - 0.715 * s, 0.072 + 0.928 * s, 0.0, 0.0,
+                0.0, 0.0, 0.0, 1.0, 0.0]
+    if name == "hue-rotate":
+        val a = _e2d_filter_angle_rad(arg)
+        val c = math_cos(a)
+        val s = math_sin(a)
+        return [0.213 + c * 0.787 - s * 0.213, 0.715 - c * 0.715 - s * 0.715, 0.072 - c * 0.072 + s * 0.928, 0.0, 0.0,
+                0.213 - c * 0.213 + s * 0.143, 0.715 + c * 0.285 + s * 0.140, 0.072 - c * 0.072 - s * 0.283, 0.0, 0.0,
+                0.213 - c * 0.213 - s * 0.787, 0.715 - c * 0.715 + s * 0.715, 0.072 + c * 0.928 + s * 0.072, 0.0, 0.0,
+                0.0, 0.0, 0.0, 1.0, 0.0]
+    if name == "invert":
+        val v = _e2d_filter_amount(arg, true)
+        val k = 1.0 - 2.0 * v
+        return [k, 0.0, 0.0, 0.0, v, 0.0, k, 0.0, 0.0, v, 0.0, 0.0, k, 0.0, v, 0.0, 0.0, 0.0, 1.0, 0.0]
+    if name == "opacity":
+        val v = _e2d_filter_amount(arg, true)
+        return [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0, v, 0.0]
+    if name == "brightness":
+        val v = _e2d_filter_amount(arg, false)
+        return [v, 0.0, 0.0, 0.0, 0.0, 0.0, v, 0.0, 0.0, 0.0, 0.0, 0.0, v, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0]
+    if name == "contrast":
+        val v = _e2d_filter_amount(arg, false)
+        val o = 0.5 - 0.5 * v
+        return [v, 0.0, 0.0, 0.0, o, 0.0, v, 0.0, 0.0, o, 0.0, 0.0, v, 0.0, o, 0.0, 0.0, 0.0, 1.0, 0.0]
+    []
+
+# Apply `mats` in order (each output clamped to 0..1) to the unpremultiplied
+# pixels `filtered`, then composite the result src-over `under` (the
+# unfiltered backdrop), as Chrome does for a backdrop filter.
+# @allow(primitive_api): raw ARGB pixel region shared by the Draw IR and raster painters
+pub fn engine2d_backdrop_color_filter_pixels(filtered: [u32], under: [u32], mats: [[f64]]) -> [u32]:
+    if mats.len() == 0 or filtered.len() != under.len():
+        return filtered
+    var out: [u32] = [0u32; filtered.len()]
+    var p: i64 = 0
+    # cpu-lane-loop-ok: one pixel of the filtered box region per step; bound region size
+    while p < filtered.len():
+        val c = filtered[p]
+        var v: [f64] = [(((c >> 16) & 0xFFu32) as i32).to_f64() / 255.0, (((c >> 8) & 0xFFu32) as i32).to_f64() / 255.0, ((c & 0xFFu32) as i32).to_f64() / 255.0, (((c >> 24) & 0xFFu32) as i32).to_f64() / 255.0]
+        for m in mats:
+            var nv: [f64] = [0.0, 0.0, 0.0, 0.0]
+            var r = 0
+            # cpu-lane-loop-ok: 4 matrix rows; bound 4
+            while r < 4:
+                var x = m[r * 5] * v[0] + m[r * 5 + 1] * v[1] + m[r * 5 + 2] * v[2] + m[r * 5 + 3] * v[3] + m[r * 5 + 4]
+                if x < 0.0:
+                    x = 0.0
+                if x > 1.0:
+                    x = 1.0
+                nv[r] = x
+                r = r + 1
+            v = nv
+        val sa = (v[3] * 255.0 + 0.5) as i32
+        val src = ((sa as u32) << 24) | ((((v[0] * 255.0 + 0.5) as i32) as u32) << 16) | ((((v[1] * 255.0 + 0.5) as i32) as u32) << 8) | (((v[2] * 255.0 + 0.5) as i32) as u32)
+        out[p] = if sa >= 255: src else: _e2d_src_over(src, under[p])
+        p = p + 1
+    out
+
+# Unpremultiplied src-over of one ARGB pixel onto another, rounded.
+fn _e2d_src_over(s: u32, d: u32) -> u32:
+    val sa = ((s >> 24) & 0xFFu32) as i32
+    val da = ((d >> 24) & 0xFFu32) as i32
+    val oa = sa + (da * (255 - sa) + 127) / 255
+    if oa <= 0:
+        return 0u32
+    var o = (oa as u32) << 24
+    var sh = 0u32
+    # cpu-lane-loop-ok: 3 colour channels; bound 3
+    while sh <= 16u32:
+        val sc = ((s >> sh) & 0xFFu32) as i32
+        val dc = ((d >> sh) & 0xFFu32) as i32
+        val num = sc * sa * 255 + dc * da * (255 - sa)
+        val den = oa * 255
+        o = o | ((((num + den / 2) / den) as u32) << sh)
+        sh = sh + 8u32
+    o
 
 fn _e2d_box_corner_radius(
     radius: i32, width: i32, height: i32
@@ -592,8 +886,10 @@ fn _e2d_box_inside_corner(
 ) -> bool:
     if radius <= 0:
         return true
-    val nx = dx.to_f64() / radius.to_f64()
-    val ny = dy.to_f64() / radius.to_f64()
+    # dx/dy index the pixel from the arc centre; test its centre, as Chrome's
+    # coverage does (an index test reaches half a pixel past the arc).
+    val nx = (dx.to_f64() + 0.5) / radius.to_f64()
+    val ny = (dy.to_f64() + 0.5) / radius.to_f64()
     nx * nx + ny * ny <= 1.0
 
 fn _e2d_box_inside_corners(
@@ -643,6 +939,192 @@ fn _e2d_box_gradient_row_color(
         color_a(top_color) +
             (color_a(bottom_color) - color_a(top_color)) * row / denominator
     )
+
+# Inside the padding box of a bordered box with per-corner radii: the inner
+# corner is an ellipse with radii (r - side width) on each axis, tested at
+# the pixel centre.
+fn _e2d_box_inside_inner(
+    px: i32, py: i32, width: i32, height: i32,
+    lw: i32, tw: i32, rw: i32, bw: i32,
+    corners: Engine2dDrawIrCornerRadii
+) -> bool:
+    if px < lw or py < tw or px >= width - rw or py >= height - bw:
+        return false
+    val cx = px.to_f64() + 0.5
+    val cy = py.to_f64() + 0.5
+    val tl = _e2d_box_corner_radius(corners.top_left, width, height)
+    val tr = _e2d_box_corner_radius(corners.top_right, width, height)
+    val br = _e2d_box_corner_radius(corners.bottom_right, width, height)
+    val bl = _e2d_box_corner_radius(corners.bottom_left, width, height)
+    if not _e2d_box_inner_corner_ok(cx, cy, tl.to_f64(), tl - lw, tl - tw):
+        return false
+    if not _e2d_box_inner_corner_ok(width.to_f64() - cx, cy, tr.to_f64(), tr - rw, tr - tw):
+        return false
+    if not _e2d_box_inner_corner_ok(width.to_f64() - cx, height.to_f64() - cy, br.to_f64(), br - rw, br - bw):
+        return false
+    _e2d_box_inner_corner_ok(cx, height.to_f64() - cy, bl.to_f64(), bl - lw, bl - bw)
+
+# (ux, uy): pixel centre measured from this corner of the border box. The
+# inner ellipse is centred at (r, r) with radii (rx, ry).
+fn _e2d_box_inner_corner_ok(ux: f64, uy: f64, r: f64, rx: i32, ry: i32) -> bool:
+    if rx <= 0 or ry <= 0 or ux >= r or uy >= r:
+        return true
+    val nx = (r - ux) / rx.to_f64()
+    val ny = (r - uy) / ry.to_f64()
+    nx * nx + ny * ny <= 1.0
+
+# Which side owns a ring pixel: in each quadrant the join runs from the outer
+# box corner to the inner box corner. (ux, uy) is the pixel centre measured
+# from that outer corner; hw / vw are the horizontal / vertical side widths.
+fn _e2d_box_horizontal_side(ux: f64, uy: f64, hw: i32, vw: i32) -> bool:
+    uy * vw.to_f64() < ux * hw.to_f64()
+
+# A border whose corner radii differ (or a rounded border whose sides differ):
+# the ring between the outer per-corner shape -- the same mask as
+# `engine2d_draw_ir_render_typed_background` -- and the inner one, each pixel
+# in its side's colour, composited once. Solid sides only.
+fn engine2d_draw_ir_render_typed_border_ring(
+    engine: Engine2D, x: i32, y: i32, width: i32, height: i32,
+    widths: [i32], colors: [u32], corners: Engine2dDrawIrCornerRadii
+) -> Engine2D:
+    var eng = engine
+    # The ring allocates only its strips, so a box taller than the framebuffer
+    # (a dpr4 page-long section, > 16.7M px) must still paint its border; the
+    # area cap applies only to the whole-box fallback below.
+    if width <= 0 or height <= 0 or not _e2d_box_i32((x as i64) + (width as i64)) or
+            not _e2d_box_i32((y as i64) + (height as i64)):
+        return eng
+    val tw = widths[0]
+    val rw = widths[1]
+    val bw = widths[2]
+    val lw = widths[3]
+    # Interior: past every side width and every corner radius a pixel is inside
+    # the inner shape (`_e2d_box_inner_corner_ok` is true once ux or uy >= r),
+    # so it is never ring. Only the four strips around it are classified and
+    # blended -- cost is the ring area, not the box area (the html catalog page
+    # went 41 s -> >1200 s when every rounded border took this path).
+    val r_tl = _e2d_box_corner_radius(corners.top_left, width, height)
+    val r_tr = _e2d_box_corner_radius(corners.top_right, width, height)
+    val r_br = _e2d_box_corner_radius(corners.bottom_right, width, height)
+    val r_bl = _e2d_box_corner_radius(corners.bottom_left, width, height)
+    val r_left = if r_tl > r_bl: r_tl else: r_bl
+    val r_right = if r_tr > r_br: r_tr else: r_br
+    val r_top = if r_tl > r_tr: r_tl else: r_tr
+    val r_bottom = if r_bl > r_br: r_bl else: r_br
+    val skip_x0 = if lw > r_left: lw else: r_left
+    val skip_x1 = width - (if rw > r_right: rw else: r_right)
+    val skip_y0 = if tw > r_top: tw else: r_top
+    val skip_y1 = height - (if bw > r_bottom: bw else: r_bottom)
+    if skip_x0 >= skip_x1 or skip_y0 >= skip_y1:
+        if not engine2d_draw_ir_mask_geometry_safe(x, y, width, height):
+            return eng
+        return _e2d_box_ring_strip(eng, x, y, width, height, widths, colors, corners, 0, 0, width, height)
+    # Corner blocks: per-pixel arcs and joins.
+    eng = _e2d_box_ring_strip(eng, x, y, width, height, widths, colors, corners, 0, 0, skip_x0, skip_y0)
+    eng = _e2d_box_ring_strip(eng, x, y, width, height, widths, colors, corners, skip_x1, 0, width - skip_x1, skip_y0)
+    eng = _e2d_box_ring_strip(eng, x, y, width, height, widths, colors, corners, 0, skip_y1, skip_x0, height - skip_y1)
+    eng = _e2d_box_ring_strip(eng, x, y, width, height, widths, colors, corners, skip_x1, skip_y1, width - skip_x1, height - skip_y1)
+    # Straight sides between the corner blocks: past the radii and the other
+    # side's width every ring pixel is its own side's colour (the join test
+    # `uy * vw < ux * hw` holds since uy < hw and ux > vw), so it is a rect.
+    eng = _e2d_box_ring_side(eng, x + skip_x0, y, skip_x1 - skip_x0, tw, colors[0])
+    eng = _e2d_box_ring_side(eng, x + skip_x0, y + height - bw, skip_x1 - skip_x0, bw, colors[2])
+    eng = _e2d_box_ring_side(eng, x, y + skip_y0, lw, skip_y1 - skip_y0, colors[3])
+    _e2d_box_ring_side(eng, x + width - rw, y + skip_y0, rw, skip_y1 - skip_y0, colors[1])
+
+fn _e2d_box_ring_side(engine: Engine2D, x: i32, y: i32, w: i32, h: i32, color: u32) -> Engine2D:
+    var eng = engine
+    # One colour, so only the rows inside the surface are built and blended:
+    # a side of a box taller than the frame was a 4 x 50000 image walked row
+    # by row (1.4 s at device scale 4); rows off the surface write nothing.
+    val y0 = if y > 0: y else: 0
+    val y1 = if y + h < eng.h: y + h else: eng.h
+    if w <= 0 or y1 <= y0:
+        return eng
+    val pixels: [u32] = [color; ((w as i64) * ((y1 - y0) as i64)) as i32]
+    eng.draw_image_blend(x, y0, w, y1 - y0, pixels)
+    eng
+
+# Classify and blend the ring pixels of the sub-rect (sx, sy, sw, sh) of the
+# border box (box-relative coordinates).
+fn _e2d_box_ring_strip(
+    engine: Engine2D, x: i32, y: i32, width: i32, height: i32,
+    widths: [i32], colors: [u32], corners: Engine2dDrawIrCornerRadii,
+    sx: i32, sy: i32, sw: i32, sh: i32
+) -> Engine2D:
+    var eng = engine
+    if sw <= 0 or sh <= 0:
+        return eng
+    # A strip wholly above or below the surface blends nothing: skip its
+    # per-pixel classification (the bottom corners of a box taller than the
+    # frame, ~0.4 s at device scale 4).
+    if y + sy >= eng.h or y + sy + sh <= 0:
+        return eng
+    val tw = widths[0]
+    val rw = widths[1]
+    val bw = widths[2]
+    val lw = widths[3]
+    val r_tl = _e2d_box_corner_radius(corners.top_left, width, height)
+    val r_tr = _e2d_box_corner_radius(corners.top_right, width, height)
+    val r_br = _e2d_box_corner_radius(corners.bottom_right, width, height)
+    val r_bl = _e2d_box_corner_radius(corners.bottom_left, width, height)
+    var pixels: [u32] = [0u32; ((sw as i64) * (sh as i64)) as i32]
+    # The per-pixel tests below are _e2d_box_inside_corners and
+    # _e2d_box_inside_inner with the radii resolved once, their row terms
+    # hoisted, and each corner helper called only inside its own corner square
+    # (~67 us a pixel at device scale 4 before); same predicates, same f64
+    # operations.
+    val wf = width.to_f64()
+    val hf = height.to_f64()
+    val tl_f = r_tl.to_f64()
+    val tr_f = r_tr.to_f64()
+    val br_f = r_br.to_f64()
+    val bl_f = r_bl.to_f64()
+    var row = sy
+    while row < sy + sh:
+        val cy = row.to_f64() + 0.5
+        val top_half = row * 2 < height
+        val uy = if top_half: cy else: hf - cy
+        val hw = if top_half: tw else: bw
+        val row_inner = row >= tw and row < height - bw
+        var column = sx
+        while column < sx + sw:
+            var outer = true
+            if column < r_tl and row < r_tl:
+                outer = _e2d_box_inside_corner(r_tl - 1 - column, r_tl - 1 - row, r_tl)
+            elif column >= width - r_tr and row < r_tr:
+                outer = _e2d_box_inside_corner(column - (width - r_tr), r_tr - 1 - row, r_tr)
+            elif column >= width - r_br and row >= height - r_br:
+                outer = _e2d_box_inside_corner(column - (width - r_br), row - (height - r_br), r_br)
+            elif column < r_bl and row >= height - r_bl:
+                outer = _e2d_box_inside_corner(r_bl - 1 - column, row - (height - r_bl), r_bl)
+            var inner = false
+            val cx = column.to_f64() + 0.5
+            if outer and row_inner and column >= lw and column < width - rw:
+                val rcx = wf - cx
+                val bcy = hf - cy
+                inner = true
+                if cx < tl_f and cy < tl_f:
+                    inner = _e2d_box_inner_corner_ok(cx, cy, tl_f, r_tl - lw, r_tl - tw)
+                if inner and rcx < tr_f and cy < tr_f:
+                    inner = _e2d_box_inner_corner_ok(rcx, cy, tr_f, r_tr - rw, r_tr - tw)
+                if inner and rcx < br_f and bcy < br_f:
+                    inner = _e2d_box_inner_corner_ok(rcx, bcy, br_f, r_br - rw, r_br - bw)
+                if inner and cx < bl_f and bcy < bl_f:
+                    inner = _e2d_box_inner_corner_ok(cx, bcy, bl_f, r_bl - lw, r_bl - bw)
+            if outer and not inner:
+                val left_half = column * 2 < width
+                val ux = if left_half: cx else: wf - cx
+                val vw = if left_half: lw else: rw
+                val horizontal = vw <= 0 or (hw > 0 and _e2d_box_horizontal_side(ux, uy, hw, vw))
+                pixels[(row - sy) * sw + (column - sx)] = if horizontal:
+                    (if top_half: colors[0] else: colors[2])
+                else:
+                    (if left_half: colors[3] else: colors[1])
+            column = column + 1
+        row = row + 1
+    eng.draw_image_blend(x + sx, y + sy, sw, sh, pixels)
+    eng
 
 fn engine2d_draw_ir_render_typed_background(
     engine: Engine2D,
@@ -766,6 +1248,7 @@ export engine2d_draw_ir_typed_corner_radii
 export engine2d_draw_ir_uniform_corner_radius
 export engine2d_draw_ir_clamp_uniform_radius
 export engine2d_draw_ir_uniform_corners
+export engine2d_draw_ir_render_typed_border_ring
 export engine2d_draw_ir_legacy_uniform_radius
 export engine2d_draw_ir_mask_geometry_safe
 export engine2d_draw_ir_typed_shadow_geometry_safe
@@ -775,3 +1258,316 @@ export engine2d_draw_ir_render_legacy_shadow
 export engine2d_draw_ir_render_typed_outer_shadows
 export engine2d_draw_ir_render_typed_background
 export engine2d_draw_ir_render_typed_inset_shadows
+
+# ---------------------------------------------------------------------------
+# A rounded border 1 device px wide, as Chrome 159 paints it: Blink strokes
+# the border box's rrect inset by half the width, and Skia draws a stroke at
+# most 1 device px wide as an anti-aliased HAIRLINE (SkScan_Antihair): each
+# corner's conic is split into quads (tolerance 1/4 px), each quad into
+# 2^level lines, and every line spreads its alpha over two pixel rows (or
+# columns) from its 16.16 position, end pixels scaled by their 26.6 length.
+# Measured on a 5 px radius #94a3b8 border on white: corner alphas 41 162 231
+# / 45 222 62 26, this model 39 161 231 / 42 220 61 24.
+
+# Index of pixel (px, py) in the `gw` x `gw` corner grid whose top-left is
+# (ox, oy), or -1 outside it.
+fn _e2d_hair_index(gw: i32, ox: i64, oy: i64, px: i64, py: i64) -> i32:
+    val gx = px - ox
+    val gy = py - oy
+    if gx < 0 or gy < 0 or gx >= (gw as i64) or gy >= (gw as i64):
+        return -1
+    (gy * (gw as i64) + gx) as i32
+
+# One anti-aliased hairline segment, endpoints in 26.6 fixed point.
+fn _e2d_hair_line(grid: [i32], gw: i32, ox: i64, oy: i64, ax: i64, ay: i64, bx: i64, by: i64) -> [i32]:
+    var g = grid
+    val horizontal = (if bx > ax: bx - ax else: ax - bx) > (if by > ay: by - ay else: ay - by)
+    # Major axis u, minor axis v (x, y for a mostly horizontal line).
+    var u0 = if horizontal: ax else: ay
+    var v0 = if horizontal: ay else: ax
+    var u1 = if horizontal: bx else: by
+    var v1 = if horizontal: by else: bx
+    if u0 == u1 and v0 == v1:
+        return g
+    if u0 > u1:
+        val tu = u0
+        u0 = u1
+        u1 = tu
+        val tv = v0
+        v0 = v1
+        v1 = tv
+    val istart = u0 >> 6
+    val istop = (u1 + 63) >> 6
+    var fv = v0 << 10
+    var slope: i64 = 0
+    if v0 != v1:
+        slope = ((v1 - v0) << 16) / (u1 - u0)
+        fv = fv + ((slope * (32 - (u0 & 63)) + 32) >> 6)
+    val scale_start = if istop - istart == 1: u1 - u0 else: 64 - (u0 & 63)
+    val scale_stop = if istop - istart == 1: 0 else: u1 & 63
+    var u = istart
+    var step = 0
+    # cpu-lane-loop-ok: pixels along one hairline segment of a corner arc (< radius + 2)
+    while u < istop:
+        val last = u == istop - 1 and scale_stop > 0
+        val m: i64 = if step == 0: scale_start elif last: scale_stop else: 64
+        val f = fv + 32768
+        val lower = f >> 16
+        val a = (f >> 8) & 255
+        val a_low = if m >= 64: a else: (a * m) >> 6
+        val a_up = if m >= 64: 255 - a else: ((255 - a) * m) >> 6
+        val i_up = if horizontal: _e2d_hair_index(gw, ox, oy, u, lower - 1) else: _e2d_hair_index(gw, ox, oy, lower - 1, u)
+        val i_low = if horizontal: _e2d_hair_index(gw, ox, oy, u, lower) else: _e2d_hair_index(gw, ox, oy, lower, u)
+        if i_up >= 0 and a_up > 0:
+            g[i_up] = ((g[i_up] as i64) * (255 - a_up) / 255) as i32
+        if i_low >= 0 and a_low > 0:
+            g[i_low] = ((g[i_low] as i64) * (255 - a_low) / 255) as i32
+        fv = fv + slope
+        u = u + 1
+        step = step + 1
+    g
+
+fn _e2d_hair_d6(v: f64) -> i64:
+    (v * 64.0).to_i64()
+
+fn _e2d_hair_ceil(v: f64) -> i64:
+    val t = v.to_i64()
+    if t.to_f64() < v: t + 1 else: t
+
+# A quad (p0, p1, p2) as Skia's hair_quad: 2^level lines, level from the
+# control point's distance to the chord midpoint.
+fn _e2d_hair_quad(grid: [i32], gw: i32, ox: i64, oy: i64, p: [f64]) -> [i32]:
+    var g = grid
+    var dx = (p[0] + p[4]) * 0.5 - p[2]
+    var dy = (p[1] + p[5]) * 0.5 - p[3]
+    if dx < 0.0:
+        dx = 0.0 - dx
+    if dy < 0.0:
+        dy = 0.0 - dy
+    val idx = _e2d_hair_ceil(dx)
+    val idy = _e2d_hair_ceil(dy)
+    val d = if idx > idy: idx + (idy >> 1) else: idy + (idx >> 1)
+    var bits: i64 = 0
+    var v = d
+    # cpu-lane-loop-ok: bit length of a small distance (<= 32 iterations)
+    while v > 0:
+        bits = bits + 1
+        v = v >> 1
+    var level = (bits + 1) >> 1
+    if level > 5:
+        level = 5
+    val lines = 1 << level
+    var px = p[0]
+    var py = p[1]
+    var i: i64 = 1
+    # cpu-lane-loop-ok: at most 32 lines per quad
+    while i <= lines:
+        val t = i.to_f64() / lines.to_f64()
+        val mt = 1.0 - t
+        val qx = if i == lines: p[4] else: mt * mt * p[0] + 2.0 * mt * t * p[2] + t * t * p[4]
+        val qy = if i == lines: p[5] else: mt * mt * p[1] + 2.0 * mt * t * p[3] + t * t * p[5]
+        g = _e2d_hair_line(g, gw, ox, oy, _e2d_hair_d6(px), _e2d_hair_d6(py), _e2d_hair_d6(qx), _e2d_hair_d6(qy))
+        px = qx
+        py = qy
+        i = i + 1
+    g
+
+# A conic (p0, p1, p2, weight w) chopped `level` times at t = 1/2, each leaf
+# drawn as the quad of its own points (SkConic::chopIntoQuadsPOW2).
+fn _e2d_hair_conic(grid: [i32], gw: i32, ox: i64, oy: i64, p: [f64], w: f64, level: i32) -> [i32]:
+    if level <= 0:
+        return _e2d_hair_quad(grid, gw, ox, oy, p)
+    val scale = 1.0 / (1.0 + w)
+    val mx = (p[0] + 2.0 * w * p[2] + p[4]) * scale * 0.5
+    val my = (p[1] + 2.0 * w * p[3] + p[5]) * scale * 0.5
+    val nw = (0.5 + w * 0.5).sqrt()
+    val first: [f64] = [p[0], p[1], (p[0] + w * p[2]) * scale, (p[1] + w * p[3]) * scale, mx, my]
+    val second: [f64] = [mx, my, (w * p[2] + p[4]) * scale, (w * p[3] + p[5]) * scale, p[4], p[5]]
+    val g = _e2d_hair_conic(grid, gw, ox, oy, first, nw, level - 1)
+    _e2d_hair_conic(g, gw, ox, oy, second, nw, level - 1)
+
+# One corner's arc of radius `r` - 1/2 (device px), centre-line endpoints
+# (sx, sy) -> (ex, ey) with control (cx, cy), blended into the corner block
+# whose top-left pixel is (bx, by).
+#
+# The four corners are mirror images (Chrome's measured corners mirror
+# exactly), so one top-left grid per radius serves every corner.
+fn _e2d_hair_corner_grid(r: i32) -> [i32]:
+    val gw = r + 1
+    val rf = r.to_f64()
+    val p: [f64] = [0.5, rf, 0.5, 0.5, rf, 0.5]
+    var grid: [i32] = [255; gw * gw]
+    val w = 0.70710678118654752
+    val a = w - 1.0
+    val k = a / (4.0 * (2.0 + a))
+    val ex = k * (p[0] - 2.0 * p[2] + p[4])
+    val ey = k * (p[1] - 2.0 * p[3] + p[5])
+    var err = (ex * ex + ey * ey).sqrt()
+    var pow2 = 0
+    # cpu-lane-loop-ok: SkConic::computeQuadPOW2, at most 4 halvings
+    while pow2 < 4 and err > 0.25:
+        err = err * 0.25
+        pow2 = pow2 + 1
+    _e2d_hair_conic(grid, gw, 0, 0, p, w, pow2)
+
+# Blend a top-left corner table (`gw` x `gw`, alpha scale `full`, 0 = none)
+# at (bx, by), mirrored for a right and/or bottom corner.
+fn _e2d_corner_table_blend(engine: Engine2D, color: u32, table: [i32], gw: i32, full: u32, bx: i32, by: i32, flip_x: bool, flip_y: bool) -> Engine2D:
+    var eng = engine
+    val ca = (color >> 24) & 0xFFu32
+    val rgb = color & 0x00FFFFFFu32
+    var pixels: [u32] = [0u32; gw * gw]
+    var py = 0
+    # cpu-lane-loop-ok: one corner block, gw^2 pixels
+    while py < gw:
+        val sy = if flip_y: gw - 1 - py else: py
+        var px = 0
+        while px < gw:
+            val sx = if flip_x: gw - 1 - px else: px
+            val cov = table[sy * gw + sx] as u32
+            if cov > 0u32:
+                pixels[py * gw + px] = (((cov * ca + full / 2u32) / full) << 24) | rgb
+            px = px + 1
+        py = py + 1
+    eng.draw_image_blend(bx, by, gw, gw, pixels)
+    eng
+
+# Hairline corner coverage (0..255) of radius `r`, top-left orientation.
+fn _e2d_hair_corner_cov(r: i32) -> [i32]:
+    var grid = _e2d_hair_corner_grid(r)
+    var i = 0
+    # cpu-lane-loop-ok: one corner block, (radius + 1)^2 pixels
+    while i < grid.len():
+        grid[i] = 255 - grid[i]
+        i = i + 1
+    grid
+
+# True when the border of a box is a Chrome hairline rrect: every side 1
+# device px in one colour and every corner rounded.
+# reason: device-px border widths and corner radii of one Draw IR box
+# @allow(primitive_api)
+pub fn engine2d_draw_ir_hairline_rrect_border(widths: [i32], colors: [u32], width: i32, height: i32, corners: Engine2dDrawIrCornerRadii) -> bool:
+    if widths[0] != 1 or widths[1] != 1 or widths[2] != 1 or widths[3] != 1:
+        return false
+    if colors[1] != colors[0] or colors[2] != colors[0] or colors[3] != colors[0]:
+        return false
+    if ((colors[0] >> 24) & 0xFFu32) == 0u32:
+        return false
+    _e2d_box_corner_radius(corners.top_left, width, height) >= 2 and
+        _e2d_box_corner_radius(corners.top_right, width, height) >= 2 and
+        _e2d_box_corner_radius(corners.bottom_right, width, height) >= 2 and
+        _e2d_box_corner_radius(corners.bottom_left, width, height) >= 2
+
+# Paint a hairline rrect border (see `engine2d_draw_ir_hairline_rrect_border`).
+fn engine2d_draw_ir_render_hairline_rrect_border(
+    engine: Engine2D, x: i32, y: i32, width: i32, height: i32,
+    color: u32, corners: Engine2dDrawIrCornerRadii
+) -> Engine2D:
+    var eng = engine
+    val tl = _e2d_box_corner_radius(corners.top_left, width, height)
+    val tr = _e2d_box_corner_radius(corners.top_right, width, height)
+    val br = _e2d_box_corner_radius(corners.bottom_right, width, height)
+    val bl = _e2d_box_corner_radius(corners.bottom_left, width, height)
+    # Straight sides: the centre line sits on a pixel centre, so each side is
+    # one full-coverage row or column between its corner blocks.
+    eng.draw_rect_filled(x + tl, y, width - tl - tr, 1, color)
+    eng.draw_rect_filled(x + bl, y + height - 1, width - bl - br, 1, color)
+    eng.draw_rect_filled(x, y + tl, 1, height - tl - bl, color)
+    eng.draw_rect_filled(x + width - 1, y + tr, 1, height - tr - br, color)
+    val t_tl = _e2d_hair_corner_cov(tl)
+    val t_tr = if tr == tl: t_tl else: _e2d_hair_corner_cov(tr)
+    val t_br = if br == tl: t_tl elif br == tr: t_tr else: _e2d_hair_corner_cov(br)
+    val t_bl = if bl == tl: t_tl elif bl == tr: t_tr elif bl == br: t_br else: _e2d_hair_corner_cov(bl)
+    eng = _e2d_corner_table_blend(eng, color, t_tl, tl + 1, 255u32, x, y, false, false)
+    eng = _e2d_corner_table_blend(eng, color, t_tr, tr + 1, 255u32, x + width - tr - 1, y, true, false)
+    eng = _e2d_corner_table_blend(eng, color, t_br, br + 1, 255u32, x + width - br - 1, y + height - br - 1, true, true)
+    _e2d_corner_table_blend(eng, color, t_bl, bl + 1, 255u32, x, y + height - bl - 1, false, true)
+
+# Coverage (0..256) of pixel (px, py) of a top-left corner block by the
+# quarter disc of radius `r` centred at (c, c) (sampled 16 x 16), only the
+# part right of x = 1/2 and below y = 1/2 (the half-pixel inset lines).
+fn _e2d_shrunk_corner_cov(px: i32, py: i32, c: f64, r: f64) -> i32:
+    # Whole-pixel answers first: only pixels the arc or an inset line
+    # crosses are sampled.
+    val x0 = px.to_f64()
+    val y0 = py.to_f64()
+    val fx = if x0 < c: c - x0 else: 0.0
+    val fy = if y0 < c: c - y0 else: 0.0
+    if x0 >= 0.5 and y0 >= 0.5 and fx * fx + fy * fy <= r * r:
+        return 256
+    val nx = if x0 + 1.0 < c: c - x0 - 1.0 else: 0.0
+    val ny = if y0 + 1.0 < c: c - y0 - 1.0 else: 0.0
+    if nx * nx + ny * ny >= r * r:
+        return 0
+    var n = 0
+    var sy = 0
+    # cpu-lane-loop-ok: 16 x 16 samples of one corner pixel
+    while sy < 16:
+        val yy = y0 + (sy.to_f64() + 0.5) / 16.0
+        val ddy = if yy < c: c - yy else: 0.0
+        var sx = 0
+        while sx < 16:
+            val xx = x0 + (sx.to_f64() + 0.5) / 16.0
+            val ddx = if xx < c: c - xx else: 0.0
+            if xx >= 0.5 and yy >= 0.5 and ddx * ddx + ddy * ddy <= r * r:
+                n = n + 1
+            sx = sx + 1
+        sy = sy + 1
+    n
+
+# The background of a box with a hairline rrect border, shrunk by half the
+# border width as Blink's bleed avoidance paints it (kBackgroundBleedShrink
+# Background): the rrect inset 1/2 px with radii r - 1/2, anti-aliased. The
+# border row/column itself is left to the opaque border painted over it.
+fn engine2d_draw_ir_render_shrunk_rrect_background(
+    engine: Engine2D, x: i32, y: i32, width: i32, height: i32,
+    color: u32, corners: Engine2dDrawIrCornerRadii
+) -> Engine2D:
+    var eng = engine
+    val tl = _e2d_box_corner_radius(corners.top_left, width, height)
+    val tr = _e2d_box_corner_radius(corners.top_right, width, height)
+    val br = _e2d_box_corner_radius(corners.bottom_right, width, height)
+    val bl = _e2d_box_corner_radius(corners.bottom_left, width, height)
+    # Interior rows between the corner blocks, then the bands beside them.
+    val top_band = if tl > tr: tl else: tr
+    val bottom_band = if bl > br: bl else: br
+    if height - top_band - bottom_band > 0:
+        eng.draw_rect_filled(x + 1, y + top_band, width - 2, height - top_band - bottom_band, color)
+    if top_band > 1:
+        eng.draw_rect_filled(x + tl, y + 1, width - tl - tr, top_band - 1, color)
+        if tl < top_band:
+            eng.draw_rect_filled(x + 1, y + tl, tl - 1, top_band - tl, color)
+        if tr < top_band:
+            eng.draw_rect_filled(x + width - tr, y + tr, tr - 1, top_band - tr, color)
+    if bottom_band > 1:
+        eng.draw_rect_filled(x + bl, y + height - bottom_band, width - bl - br, bottom_band - 1, color)
+        if bl < bottom_band:
+            eng.draw_rect_filled(x + 1, y + height - bottom_band, bl - 1, bottom_band - bl, color)
+        if br < bottom_band:
+            eng.draw_rect_filled(x + width - br, y + height - bottom_band, br - 1, bottom_band - br, color)
+    val t_tl = _e2d_shrunk_corner_table(tl)
+    val t_tr = if tr == tl: t_tl else: _e2d_shrunk_corner_table(tr)
+    val t_br = if br == tl: t_tl elif br == tr: t_tr else: _e2d_shrunk_corner_table(br)
+    val t_bl = if bl == tl: t_tl elif bl == tr: t_tr elif bl == br: t_br else: _e2d_shrunk_corner_table(bl)
+    eng = _e2d_corner_table_blend(eng, color, t_tl, tl, 256u32, x, y, false, false)
+    eng = _e2d_corner_table_blend(eng, color, t_tr, tr, 256u32, x + width - tr, y, true, false)
+    eng = _e2d_corner_table_blend(eng, color, t_br, br, 256u32, x + width - br, y + height - br, true, true)
+    _e2d_corner_table_blend(eng, color, t_bl, bl, 256u32, x, y + height - bl, false, true)
+
+# Shrunk-background coverage (0..256) of a top-left corner block of radius `r`.
+fn _e2d_shrunk_corner_table(r: i32) -> [i32]:
+    var table: [i32] = [0; r * r]
+    val rf = r.to_f64()
+    var py = 0
+    # cpu-lane-loop-ok: one corner block, radius^2 pixels
+    while py < r:
+        var px = 0
+        while px < r:
+            table[py * r + px] = _e2d_shrunk_corner_cov(px, py, rf, rf - 0.5)
+            px = px + 1
+        py = py + 1
+    table
+
+export engine2d_draw_ir_hairline_rrect_border
+export engine2d_draw_ir_render_hairline_rrect_border
+export engine2d_draw_ir_render_shrunk_rrect_background

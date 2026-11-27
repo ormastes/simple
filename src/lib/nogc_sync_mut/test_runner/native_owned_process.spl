@@ -11,7 +11,25 @@ struct ScopedChildRun:
     result: ProcessResult
     usage: ResourceUsage?
     budget_status: text
-    completion: Option<ProcessCompletionV1> = nil
+    completion: Option<ProcessCompletionV1> = None
+
+pub fn scoped_cpu_budget_ms(timeout_ms: i64, class_cpu_ms: i64) -> i64:
+    """CPU grant for a scoped child, kept consistent with its wall grant.
+
+    `run_scoped_child` overwrites the class wall budget with the caller's
+    per-file `timeout_ms`, but the CPU budget used to keep the (smaller) class
+    default. A single-threaded child legally using its full wall grant then
+    always exceeded the CPU budget and died as "Declared resource budget
+    exceeded" — the raised per-file timeout was a lie. The CPU grant is
+    therefore never below the wall grant. `class_cpu_ms <= 0` means the caller
+    disabled the CPU cap (inherit); `timeout_ms <= 0` keeps the class default.
+    Bug: doc/08_tracking/bug/fetch_wasm_chain_spec_runner_premature_child_termination_2026-06-30.md
+    """
+    if class_cpu_ms <= 0:
+        return 0
+    if timeout_ms > class_cpu_ms:
+        return timeout_ms
+    class_cpu_ms
 
 fn run_scoped_child(resource_class: ExecutionResourceClass, cmd: text, args: [text], timeout_ms: i64, memory_bytes: i64, cpu_ms: i64, max_fds: i64, max_pids: i64, enforce_class_defaults: bool, owned_test: bool = false) -> ScopedChildRun:
     val defaults = standard_resource_budget(resource_class)
@@ -22,7 +40,7 @@ fn run_scoped_child(resource_class: ExecutionResourceClass, cmd: text, args: [te
     # the host limit, including when the other class defaults remain enabled.
     val effective_pids = max_pids
     val budget = ResourceBudget(
-        max_wall_ms: timeout_ms, max_cpu_ms: effective_cpu,
+        max_wall_ms: timeout_ms, max_cpu_ms: scoped_cpu_budget_ms(timeout_ms, effective_cpu),
         max_tree_charge_bytes: effective_memory, max_direct_child_rss_bytes: effective_memory,
         max_io_read_bytes: if enforce_class_defaults: defaults.max_io_read_bytes else: 0,
         max_io_write_bytes: if enforce_class_defaults: defaults.max_io_write_bytes else: 0,
@@ -51,9 +69,15 @@ fn run_scoped_child(resource_class: ExecutionResourceClass, cmd: text, args: [te
         ""
     ScopedChildRun(
         result: ProcessResult(stdout: scoped.process.stdout, stderr: scoped.process.stderr,
-            exit_code: scoped.process.usage.exit_code, limit_exceeded: limit_type != "", limit_type: limit_type),
+            exit_code: scoped.process.usage.exit_code.value, limit_exceeded: limit_type != "", limit_type: limit_type),
         usage: scoped.process.usage,
         budget_status: decision_status_name(scoped.budget_decision.status),
         completion: scoped.process.completion)
 
-export ScopedChildRun, run_scoped_child
+pub fn scoped_child_usage(child: ScopedChildRun) -> ResourceUsage?:
+    child.usage
+
+fn scoped_child_budget_status(child: ScopedChildRun) -> text:
+    child.budget_status
+
+export ScopedChildRun, run_scoped_child, scoped_child_usage, scoped_child_budget_status, scoped_cpu_budget_ms

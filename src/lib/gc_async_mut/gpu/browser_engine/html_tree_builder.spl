@@ -37,6 +37,30 @@ class _TreeStack:
     fn root_or(fallback: BeDomNode) -> BeDomNode:
         if self.length > 0: self.nodes[0] else: fallback
 
+    fn in_foreign_content() -> bool:
+        """True when the current node is SVG or MathML content: the nearest
+        open `svg`/`math` is reached before an open HTML integration point,
+        whose children are HTML again (HTML 13.2.6.5): svg `foreignObject`
+        and `desc`, the MathML text integration points, and `annotation-xml`
+        with an HTML encoding. svg `title` is absent: the tokenizer reads
+        every `title` as RCDATA, so it never has element children here."""
+        var i = self.length - 1
+        while i >= 0:
+            val tag = be_dom_get_tag(self.nodes[i])
+            if (
+                tag == "foreignobject" or tag == "desc" or tag == "mi" or
+                tag == "mo" or tag == "mn" or tag == "ms" or tag == "mtext"
+            ):
+                return false
+            if tag == "annotation-xml":
+                val encoding = be_dom_get_attr(self.nodes[i], "encoding").trim().lower()
+                if encoding == "text/html" or encoding == "application/xhtml+xml":
+                    return false
+            if tag == "svg" or tag == "math":
+                return true
+            i = i - 1
+        false
+
     fn find_tag(tag: text) -> i32:
         var i = self.length - 1
         while i >= 0:
@@ -298,7 +322,7 @@ fn _token_would_create_node(
         val tag = tok.tag_name
         if tag == "html" or tag == "head" or tag == "body":
             return false
-        return tag != "style" and tag != "noscript"
+        return tag != "noscript"
     if tok.token_kind == HtmlTokenKind.EndTag:
         return tok.tag_name == "script" and in_script
     if tok.token_kind == HtmlTokenKind.Character:
@@ -425,6 +449,8 @@ pub fn html_tree_builder_build_with_parse_limits(
     var script_content = ""
     var script_src = ""
     var skipped_raw_text_tag = ""
+    var in_style = false
+    var style_content = ""
     var truncated = tokenized.truncated
 
     var ti = 0
@@ -512,7 +538,20 @@ pub fn html_tree_builder_build_with_parse_limits(
                 val script_node = _apply_attrs(script_el, tok.attrs)
                 stack.push_open(script_node)
 
-            elif t == "style" or t == "noscript":
+            elif t == "style":
+                # be_dom_event_path_family_arity_and_style_serialize_2026-08-19:
+                # <style> used to be entirely dropped (skipped_raw_text_tag),
+                # so it never became a DOM node and be_dom_serialize_html
+                # could not possibly emit it. Give it a real element node with
+                # its raw text content as a child, mirroring <script>/<title>.
+                val style_el_raw = BeDomNode.element_with_id(next_node_id, t)
+                next_node_id = next_node_id + 1
+                val style_node = _apply_attrs(style_el_raw, tok.attrs)
+                stack.push_open(style_node)
+                in_style = true
+                style_content = ""
+
+            elif t == "noscript":
                 skipped_raw_text_tag = t
 
             else:
@@ -561,7 +600,15 @@ pub fn html_tree_builder_build_with_parse_limits(
                 val in_table_ctx = _is_table_context(top_tag)
                 val is_table_content = _is_table_content(t)
 
-                if _is_void(t):
+                # A self-closing start tag (`<rect/>`) ends its element at
+                # once in FOREIGN content, and on the `svg`/`math` root itself
+                # (HTML §13.2.6.5: "if the token has its self-closing flag
+                # set, pop the current node"). On an HTML element the flag is
+                # ignored -- `<div/>` stays open, as in Chrome.
+                val foreign_self_closing = tok.self_closing and not _is_void(t) and (
+                    t == "svg" or t == "math" or stack.in_foreign_content()
+                )
+                if _is_void(t) or foreign_self_closing:
                     val vn_raw = BeDomNode.element_with_id(next_node_id, t)
                     next_node_id = next_node_id + 1
                     val vnode = _apply_attrs(vn_raw, tok.attrs)
@@ -602,6 +649,18 @@ pub fn html_tree_builder_build_with_parse_limits(
                 script_content = ""
                 script_src = ""
                 script_in_template = false
+            elif et == "style" and in_style:
+                # Store content as a real DOM text child, same shape as script.
+                var style_top = stack.top()
+                style_top.children = [
+                    BeDomNode.text_node(next_node_id, style_content)
+                ]
+                next_node_id = next_node_id + 1
+                stack.replace_top(style_top)
+                if stack.find_tag("style") >= 0:
+                    stack.close_top()
+                in_style = false
+                style_content = ""
             elif et == skipped_raw_text_tag:
                 skipped_raw_text_tag = ""
             elif et == "html" or et == "body" or et == "head":
@@ -614,6 +673,8 @@ pub fn html_tree_builder_build_with_parse_limits(
             # M15: Accumulate text inside <script> tags
             if in_script:
                 script_content = "{script_content}{data}"
+            elif in_style:
+                style_content = "{style_content}{data}"
             elif skipped_raw_text_tag != "":
                 pass_dn
             elif be_dom_get_tag(stack.top()) == "title":
@@ -656,13 +717,13 @@ pub fn html_tree_builder_build_with_parse_limits(
     )
 
 fn _flat_projection_attrs(node: BeDomNode) -> text:
-    var keys = node.attributes.keys()
+    var keys = node.attr_names()
     keys.sort()
     var normalized = ""
     for key in keys:
         if not key.starts_with("\u0000"):
             normalized = normalized + " " + key + "=\"" +
-                html_escape_core(node.attributes.get(key) ?? "") + "\""
+                html_escape_core(node.get_attr(key)) + "\""
     normalized
 
 pub fn html_tree_builder_flat_projection(

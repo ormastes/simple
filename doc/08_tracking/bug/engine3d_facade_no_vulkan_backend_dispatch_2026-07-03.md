@@ -1,7 +1,7 @@
 # Engine3D facade never dispatches to the Vulkan backend
 
 Date: 2026-07-03
-Status: open
+Status: SUPERSEDED
 Severity: P3
 Found by: W6d lane agent (game.rollball, G4.1 Vulkan leg)
 
@@ -50,3 +50,62 @@ and `rt_vk3d_available()`), forwarding the render methods to it. Separately,
 wire `VulkanBackend3D` to submit through the `rt_vk3d_*` device path (with a
 lavapipe software ICD for deterministic CI) so the Vulkan leg exercises a real
 device rather than a CPU reimplementation.
+
+---
+
+## Addendum 2026-11-11 — lane compiler2 — verdict STALE (premise outdated)
+
+Triage-first pass, batch 2. The filing's three literal claims no longer hold in
+`src/lib/gc_async_mut/gpu/engine3d/engine.spl`:
+
+- "ignores `backend_name` / always builds CPU" — OUTDATED. `create_with_backend`
+  (engine.spl:118-144) now reacts to `"vulkan"`/`"vulkan-font"` by calling
+  `install_vulkan_font_backend()` (engine.spl:154-166), which builds a
+  `VulkanFontAdapter3D` and, on success, sets `_backend_name = "vulkan-font"`.
+- "no field for / no dispatch to Vulkan" — OUTDATED for the font leg: the struct
+  now carries `_vulkan_font: VulkanFontAdapter3D?` (engine.spl:78) and dispatches
+  font composition to it. (`VulkanBackend3D` scene raster still lives in
+  `backend_vulkan.spl` and is reached by direct instantiation, not the facade.)
+- "`backend_name()` always returns `"cpu"`" — OUTDATED: it returns `"vulkan-font"`
+  when the adapter installs, else `"cpu"` (fail-closed).
+
+The CPU **scene renderer** remaining the default is now a deliberate, documented
+architecture decision (docstring engine.spl:104-107,124-126: "The CPU scene
+renderer remains the portable default"; Vulkan aliases "install the font adapter
+while retaining the CPU scene renderer") — not the accidental defect described.
+The residual ask (scene rasterization dispatched to a real Vulkan device through
+the facade) is an explicit scope decision, separate from this filing's framing.
+
+**Seed-smoke:** pin spec `test/01_unit/lib/gpu/engine3d/vulkan_font_adapter_branch_spec.spl`
+on the refreshed seed (interpreter, `--no-cache`) -> `outcome=OK, passed=5/5`.
+It pins exactly this behavior: adapter-install success yields
+`backend_name()=="vulkan-font"`; every fail-closed path (no device, invalid dims,
+inconsistent lifecycle, install-failure reason surfaced) keeps
+`backend_name()=="cpu"`. Evidence log: `build/review/p3c2-engine3d-seedsmoke.log`.
+
+**Cycles:** 0 (no live defect; no fix attempted). Not re-opened: the requested
+full scene-render dispatch is a design-scope matter, tracked separately.
+
+---
+
+## Addendum 2026-11-11 — lane comp11 — SUPERSEDED confirmed, header stands
+
+Lane: `work/p3-comp11-20261111` on `origin/release/1.0.0` (base `41935a5f61860`).
+Triage-first; the same-day lane-compiler2 addendum above already carries the
+seed-smoke pin (5/5), so per campaign no-green-rerun rule the pin was not
+re-executed. Fresh source re-verification only, at this base:
+`src/lib/gc_async_mut/gpu/engine3d/engine.spl` still carries the
+`_vulkan_font: VulkanFontAdapter3D? = nil` field, `create_with_backend`
+(:118) accepts `"cpu"` / `"vulkan"` / `"vulkan-font"` with the documented
+"CPU scene renderer remains the portable default" docstring, and
+`install_vulkan_font_backend` (:154) sets `_backend_name = "vulkan-font"` only
+on a ready adapter (fail-closed otherwise). The pin spec
+`test/01_unit/lib/gpu/engine3d/vulkan_font_adapter_branch_spec.spl` is present.
+The filing's literal claims (no field, no dispatch, always `"cpu"`) remain
+outdated; the residual scene-raster-to-device ask is a design-scope matter
+outside this row. Header (SUPERSEDED) unchanged; this addendum records the
+fresh re-verification.
+
+## Re-verified 2026-11-13 (Linux aarch64, lane uia)
+
+On release/1.0.0 35144b7f5e9, Linux aarch64 seed af717f53d6bce3e5: test/01_unit/lib/gpu/engine3d/vulkan_font_adapter_branch_spec.spl 5/5 passed. Scope unchanged: only the font leg dispatches through the facade; scene raster still uses the CPU renderer by design (engine.spl), and VulkanBackend3D has no device submission.

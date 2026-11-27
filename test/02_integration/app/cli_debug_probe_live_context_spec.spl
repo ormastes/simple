@@ -1,13 +1,44 @@
 use std.spec.{describe, it, expect}
-use std.io_runtime.{file_write}
+use std.io_runtime.{file_write, env_get, env_set, env_remove_process}
+use std.nogc_sync_mut.spec.{skip}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+use std.nogc_sync_mut.io.process_ops.{process_run}
 use app.mcpgdb.state.{reset_state, next_session_id, put_session, set_current_session, save_persisted_state}
 use app.mcpgdb.debug_backend_common.{make_session, create_debugger_process, run_session_command, stop_session_process, choose_workspace_root}
 use app.cli_debug.probe_executor_v1.{execute_cli_debug_probe_v1}
 
-val PROFILE = "/tmp/cli_debug_probe_live_context.sdn"
+# The runtime does not translate a POSIX "/tmp" prefix on Windows; anchor the
+# profile and the mcpgdb private root under the host temp dir instead.
+fn _fixture_base() -> text:
+    val raw = get_temp_dir().replace("\\", "/")
+    if raw.ends_with("/"): raw.substring(0, raw.len() - 1) else: raw
+
+fn _profile_path() -> text:
+    _fixture_base() + "/cli_debug_probe_live_context.sdn"
+
+# The backend's session root comes from MCPGDB_PRIVATE_ROOT; when it is unset
+# the session dir is built at the POSIX root ("/mcpgdb_<id>"), which no
+# Windows runtime can address. Anchor it beside the profile.
+fn _private_root() -> text:
+    _fixture_base() + "/mcpgdb-private-root"
+
+val PROFILE = _profile_path()
+
+# The example drives a real gdb backend; a host without a working gdb cannot
+# build the fixture, and a missing debugger would otherwise surface as a
+# false product RED. Mirrors the portal it_git capability gate.
+fn _gdb_available() -> bool:
+    val (_, _, code) = process_run("gdb", ["--version"])
+    code == 0
 
 describe "CLI probe lifecycle over a real persisted mcpgdb adapter":
     it "applies, lists, and removes the service-issued probe on the live backend":
+        if not _gdb_available():
+            skip("applies, lists, and removes the service-issued probe on the live backend",
+                "host has no working gdb for the mcpgdb live-context fixture")
+            return
+        val old_root = env_get("MCPGDB_PRIVATE_ROOT")
+        env_set("MCPGDB_PRIVATE_ROOT", _private_root())
         file_write(PROFILE + ".binding-v1", "")
         reset_state()
         val local_id = next_session_id()
@@ -41,3 +72,7 @@ describe "CLI probe lifecycle over a real persisted mcpgdb adapter":
             case Err(reason): expect(reason).to_equal("")
             case Ok(result): expect(result.probe_id).to_equal(issued_id)
         stop_session_process(session)
+        if old_root == "":
+            env_remove_process("MCPGDB_PRIVATE_ROOT")
+        else:
+            env_set("MCPGDB_PRIVATE_ROOT", old_root)

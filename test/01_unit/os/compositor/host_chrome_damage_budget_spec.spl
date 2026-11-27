@@ -1,0 +1,265 @@
+"""
+## Purpose and audience
+Purpose: Prevent regressions in cached chrome damage pixel budgets, z-order overlap, and disjoint dirty-rect compositing.
+Audience: compositor and GUI rendering engineers.
+## Operator workflow
+Run with `bin/simple test test/01_unit/os/compositor/host_chrome_damage_budget_spec.spl --mode=interpreter`.
+## Compatibility and limitations
+Covers both direct backend and native pixel buffer compositor lanes with synthetic workloads.
+"""
+# @manual: primary
+# @req REQ-OS-COMPOSITOR-001
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use common.window_protocol.geometry.{Size}
+use common.ui.glyph_bitmap_8x16.{get_glyph_8x16}
+use os.compositor.display_backend.{CompositorBackend, CompositorGlassCapable}
+use os.compositor.host_compositor_entry.{
+    HostCompositor,
+    host_wm_force_direct_chrome
+}
+use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW, COMP_MOVE}
+
+var _budget_clear_calls: i64 = 0
+var _budget_fill_pixels: i64 = 0
+var _budget_blit_pixels: i64 = 0
+var _budget_present_total: i64 = 0
+var _budget_last_present_w: i32 = 0
+var _budget_last_present_h: i32 = 0
+
+fn _reset_budget_counters():
+    _budget_clear_calls = 0
+    _budget_fill_pixels = 0
+    _budget_blit_pixels = 0
+    _budget_present_total = 0
+    _budget_last_present_w = 0
+    _budget_last_present_h = 0
+
+class DamageBudgetBackend:
+    w: i32
+    h: i32
+    pixels: [u32]
+
+    static fn new(width: i32, height: i32) -> DamageBudgetBackend:
+        DamageBudgetBackend(w: width, h: height, pixels: [0u32; width * height])
+
+impl CompositorBackend for DamageBudgetBackend:
+    fn width() -> i32:
+        self.w
+
+    fn height() -> i32:
+        self.h
+
+    me clear(color: u32):
+        _budget_clear_calls = _budget_clear_calls + 1
+        var i = 0
+        while i < self.pixels.len():
+            self.pixels[i] = color
+            i = i + 1
+
+    me fill_rect(x: i32, y: i32, w: i32, h: i32, color: u32):
+        if w > 0 and h > 0:
+            _budget_fill_pixels = _budget_fill_pixels + (w.to_i64() * h.to_i64())
+        var x0 = if x < 0: 0 else: x
+        var y0 = if y < 0: 0 else: y
+        var x1 = x + w
+        var y1 = y + h
+        if x1 > self.w:
+            x1 = self.w
+        if y1 > self.h:
+            y1 = self.h
+        var yy = y0
+        while yy < y1:
+            var idx = yy * self.w + x0
+            var xx = x0
+            while xx < x1:
+                self.pixels[idx] = color
+                idx = idx + 1
+                xx = xx + 1
+            yy = yy + 1
+
+    me draw_text(x: i32, y: i32, text_str: text, fg: u32, bg: u32):
+        val bg_opaque = ((bg >> 24) & 0xFFu32) != 0u32
+        var cx = x
+        for ch in text_str:
+            val glyph = get_glyph_8x16(ch.char_code_at(0).to_u8())
+            var row = 0
+            while row < 16:
+                val bits = glyph[row]
+                var col = 0
+                while col < 8:
+                    val px = cx + col
+                    val py = y + row
+                    if px >= 0 and py >= 0 and px < self.w and py < self.h:
+                        val mask = (0x80 >> col).to_u8()
+                        if (bits & mask) != 0u8:
+                            self.pixels[py * self.w + px] = fg
+                        elif bg_opaque:
+                            self.pixels[py * self.w + px] = bg
+                    col = col + 1
+                row = row + 1
+            cx = cx + 8
+
+    me draw_char_8x16(x: i32, y: i32, ch: u8, fg: u32, bg: u32):
+        val bg_opaque = ((bg >> 24) & 0xFFu32) != 0u32
+        val glyph = get_glyph_8x16(ch)
+        var row = 0
+        while row < 16:
+            val bits = glyph[row]
+            var col = 0
+            while col < 8:
+                val px = x + col
+                val py = y + row
+                if px >= 0 and py >= 0 and px < self.w and py < self.h:
+                    val mask = (0x80 >> col).to_u8()
+                    if (bits & mask) != 0u8:
+                        self.pixels[py * self.w + px] = fg
+                    elif bg_opaque:
+                        self.pixels[py * self.w + px] = bg
+                col = col + 1
+            row = row + 1
+
+    me put_pixel(x: i32, y: i32, color: u32):
+        if x >= 0 and y >= 0 and x < self.w and y < self.h:
+            self.pixels[y * self.w + x] = color
+
+    me blit_pixels(x: i32, y: i32, w: i32, h: i32, pixels: [u32]):
+        if w > 0 and h > 0:
+            _budget_blit_pixels = _budget_blit_pixels + (w.to_i64() * h.to_i64())
+        val src_len = pixels.len() as i32
+        var row: i32 = 0
+        while row < h:
+            val dy = y + row
+            if dy >= 0 and dy < self.h:
+                var col0 = if x < 0: 0 - x else: 0
+                var col1 = w
+                if x + col1 > self.w:
+                    col1 = self.w - x
+                var col = col0
+                var src_idx = row * w + col0
+                var dst_idx = dy * self.w + x + col0
+                while col < col1:
+                    if src_idx >= 0 and src_idx < src_len:
+                        self.pixels[dst_idx] = pixels[src_idx]
+                    src_idx = src_idx + 1
+                    dst_idx = dst_idx + 1
+                    col = col + 1
+            row = row + 1
+
+    me present():
+        _budget_present_total = _budget_present_total + 1
+
+    me present_rect(x: i32, y: i32, w: i32, h: i32):
+        _budget_present_total = _budget_present_total + 1
+        _budget_last_present_w = w
+        _budget_last_present_h = h
+
+    fn as_glass_capable() -> CompositorGlassCapable?:
+        nil
+
+fn _budget_pixels_equal(a: [u32], b: [u32]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
+describe "HostCompositor cached chrome damage budget prevention":
+    it "performs a single chrome clear on miss and zero clears or blits on clean frames":
+        step("Verify cold frame clears at most once and settled frame does zero pixel work")
+        host_wm_force_direct_chrome(true)
+        _reset_budget_counters()
+        val backend = DamageBudgetBackend.new(640, 480)
+        val comp = HostCompositor.new(backend, Size.wh(640, 480))
+        comp.apply_bridge_request(1, 1, COMP_CREATE_WINDOW.to_i64(), 0, "Main", 20, 60, 200, 140, "body", 1, "/sys/apps/main")
+
+        comp.render_frame()
+        expect(_budget_clear_calls <= 1).to_equal(true)
+        expect(_budget_present_total).to_equal(1)
+
+        _reset_budget_counters()
+        comp.render_frame()
+        host_wm_force_direct_chrome(false)
+        expect(_budget_clear_calls).to_equal(0)
+        expect(_budget_fill_pixels).to_equal(0)
+        expect(_budget_blit_pixels).to_equal(0)
+        expect(_budget_present_total).to_equal(0)
+
+    it "keeps disjoint partial dirty rects on a 1280x720 cached scene proportional to the dirty area":
+        step("Damage two far-apart 20x20 rects on 1280x720 and ensure bounding-box explosion does not occur")
+        host_wm_force_direct_chrome(true)
+        _reset_budget_counters()
+        val backend = DamageBudgetBackend.new(1280, 720)
+        val comp = HostCompositor.new(backend, Size.wh(1280, 720))
+        comp.apply_bridge_request(1, 2, COMP_CREATE_WINDOW.to_i64(), 0, "Left", 40, 70, 220, 140, "left", 1, "/sys/apps/left")
+        comp.apply_bridge_request(2, 3, COMP_CREATE_WINDOW.to_i64(), 0, "Right", 760, 400, 220, 140, "right", 2, "/sys/apps/right")
+        comp.render_frame()
+
+        _reset_budget_counters()
+        comp.dirty.add_rect(50, 110, 20, 20)
+        comp.dirty.add_rect(800, 460, 20, 20)
+        # Also verify out-of-bounds rect clamping does not fail or over-blit
+        comp.dirty.add_rect(-5, 50, 15, 20)
+        comp.render_frame()
+        host_wm_force_direct_chrome(false)
+
+        expect(_budget_clear_calls).to_equal(0)
+        expect(_budget_present_total).to_equal(1)
+        # Disjoint tiny rects total <= ~1,100 px chrome + <= ~1,100 px content, far below 780x400 bbox (~312k px) or 1280x720 (~921k px).
+        expect(_budget_fill_pixels + _budget_blit_pixels).to_be_less_than(20000)
+
+    it "preserves overlapping window z-order and updates chrome cache when geometry changes":
+        step("Update background window overlapping a foreground window, then move the window and verify pixel-exact output")
+        host_wm_force_direct_chrome(true)
+        val backend = DamageBudgetBackend.new(400, 260)
+        val comp = HostCompositor.new(backend, Size.wh(400, 260))
+        comp.apply_bridge_request(1, 10, COMP_CREATE_WINDOW.to_i64(), 0, "Back", 20, 60, 180, 120, "back-1", 1, "/sys/apps/back")
+        comp.apply_bridge_request(2, 11, COMP_CREATE_WINDOW.to_i64(), 0, "Front", 100, 90, 180, 120, "front-1", 2, "/sys/apps/front")
+        val back_id = comp.windows[0].id
+        comp.render_frame()
+
+        _reset_budget_counters()
+        expect(comp.update_window_content(back_id, "back-2")).to_equal(true)
+        comp.render_frame()
+        expect(_budget_clear_calls).to_equal(0)
+
+        val oracle1_backend = DamageBudgetBackend.new(400, 260)
+        val oracle1 = HostCompositor.new(oracle1_backend, Size.wh(400, 260))
+        oracle1.apply_bridge_request(1, 10, COMP_CREATE_WINDOW.to_i64(), 0, "Back", 20, 60, 180, 120, "back-2", 1, "/sys/apps/back")
+        oracle1.apply_bridge_request(2, 11, COMP_CREATE_WINDOW.to_i64(), 0, "Front", 100, 90, 180, 120, "front-1", 2, "/sys/apps/front")
+        oracle1.render_frame()
+        expect(_budget_pixels_equal(backend.pixels, oracle1_backend.pixels)).to_equal(true)
+
+        # Geometry change must invalidate chrome cache and match a cold render
+        comp.apply_bridge_request(3, 10, COMP_MOVE.to_i64(), back_id, "", 35, 65, 0, 0, "", 0, "")
+        comp.render_frame()
+
+        val oracle2_backend = DamageBudgetBackend.new(400, 260)
+        val oracle2 = HostCompositor.new(oracle2_backend, Size.wh(400, 260))
+        oracle2.apply_bridge_request(1, 10, COMP_CREATE_WINDOW.to_i64(), 0, "Back", 35, 65, 180, 120, "back-2", 1, "/sys/apps/back")
+        oracle2.apply_bridge_request(2, 11, COMP_CREATE_WINDOW.to_i64(), 0, "Front", 100, 90, 180, 120, "front-1", 2, "/sys/apps/front")
+        oracle2.render_frame()
+        host_wm_force_direct_chrome(false)
+        expect(_budget_pixels_equal(backend.pixels, oracle2_backend.pixels)).to_equal(true)
+
+    it "keeps native pixel buffer lane bit-exact across cached-chrome partial content updates":
+        step("Verify HostCompositor.new_headless native_pixel_lane on cached-chrome hit")
+        host_wm_force_direct_chrome(true)
+        val comp = HostCompositor.new_headless(Size.wh(320, 220))
+        comp.apply_bridge_request(1, 20, COMP_CREATE_WINDOW.to_i64(), 0, "NativeWin", 20, 60, 160, 100, "v1", 1, "/sys/apps/native")
+        val wid = comp.windows[0].id
+        comp.render_frame()
+        expect(comp.update_window_content(wid, "v2")).to_equal(true)
+        comp.render_frame()
+        val got_pixels = comp.pure_simple_pixel_buffer()
+
+        val oracle = HostCompositor.new_headless(Size.wh(320, 220))
+        oracle.apply_bridge_request(1, 20, COMP_CREATE_WINDOW.to_i64(), 0, "NativeWin", 20, 60, 160, 100, "v2", 1, "/sys/apps/native")
+        oracle.render_frame()
+        val expected_pixels = oracle.pure_simple_pixel_buffer()
+        host_wm_force_direct_chrome(false)
+        expect(_budget_pixels_equal(got_pixels, expected_pixels)).to_equal(true)

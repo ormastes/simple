@@ -1,0 +1,35 @@
+# Purpose: the LSP fast-query child must be launched from an app-rooted entry.
+# std.nogc_sync_mut.lsp.lsp_query imports app.cli.*, which does not resolve
+# when the std file itself is the entry (definition/references returned
+# null/[] for every request). Bug: lsp_fast_query_child_unresolvable_app_import_2026_11_07.
+use std.spec.*
+use std.nogc_sync_mut.lsp.lsp_query_command.{lsp_fast_query_command_v1}
+
+extern fn rt_file_read_text(path: text) -> text?
+
+describe "lsp fast query entry":
+    it "launches the app-rooted query entry":
+        val cmd = lsp_fast_query_command_v1(["definition", "x.spl", "1", "1"])
+        expect(cmd.args[0]).to_equal("src/app/lsp/lsp_query.spl")
+
+    it "app entry exists and runs the std query main":
+        val entry = rt_file_read_text("src/app/lsp/lsp_query.spl") ?? ""
+        expect(entry).to_contain("use std.nogc_sync_mut.lsp.lsp_query.")
+        expect(entry).to_contain("lsp_query_main()")
+
+    it "std query module has no import-time side effect":
+        val source = rt_file_read_text("src/lib/nogc_sync_mut/lsp/lsp_query.spl") ?? ""
+        expect(source.contains("\nlsp_query_main()")).to_equal(false)
+
+describe "lsp position parsing":
+    it "parses text positions with to_int, never int(text)":
+        # lsp_int_text_single_digit_position_2026_11_07: under the JIT engine
+        # int("6") yields 54 (char code), so every 0-9 line/column query missed.
+        for path in ["src/lib/nogc_sync_mut/lsp/lsp_handlers.spl", "src/lib/nogc_sync_mut/lsp/handlers/diagnostics.spl", "src/lib/nogc_sync_mut/lsp/lsp_protocol.spl"]:
+            val source = rt_file_read_text(path) ?? ""
+            expect(source.contains("int(line)")).to_equal(false)
+            expect(source.contains("int(col)")).to_equal(false)
+            expect(source.contains("int(line_str)")).to_equal(false)
+            expect(source.contains("int(col_str)")).to_equal(false)
+            expect(source.contains("int(len_str)")).to_equal(false)
+            expect(source.contains("int(hint_line)")).to_equal(false)

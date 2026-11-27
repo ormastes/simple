@@ -1,0 +1,117 @@
+"""
+## Purpose and audience
+Purpose: Pin exact pixels for two SoftwareBackend paths the engine2d coverage
+sweep (doc/10_metrics/gpu/render_coverage_2026-11-14.md) never reached:
+`draw_rounded_rect_outline` (edges + midpoint corner arcs, radius/thickness
+clamps, degenerate inputs) and the frame-persistent damage mirror
+`read_pixels_damaged` / `invalidate_damage_mirror`.
+Audience: Engine2D software-raster maintainers.
+
+Expected outline pixels are hand-derived from the midpoint arc in
+`sw_corner_arc`: radius 3 visits (3,0) (0,3) (3,1) (1,3) (2,2) from the corner
+centre, so the top-left corner of a box at (2,2) with r=3 (centre (5,5)) paints
+(2,5) (5,2) (2,4) (4,2) (3,3) and leaves the box corner (2,2) unpainted.
+"""
+
+"""
+Traceability: REQ-ENGINE2D-SOFTWARE-OUTLINE-DAMAGE-001 — software rounded outlines and damage readback paint exactly the documented pixels.
+"""
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_software.spl 3%
+use std.spec.*
+use std.gc_async_mut.gpu.engine2d.backend_software.{SoftwareBackend}
+
+val WHITE: u32 = 0xFFFFFFFFu32
+val RED: u32 = 0xFFFF0000u32
+val BLUE: u32 = 0xFF0000FFu32
+val S: i32 = 16
+
+fn fresh() -> SoftwareBackend:
+    var b = SoftwareBackend.create()
+    b.init(S, S)
+    b.clear(WHITE)
+    b
+
+fn at(p: [u32], x: i32, y: i32) -> u32:
+    p[x + y * S]
+
+fn painted(p: [u32]) -> i32:
+    var n = 0
+    for px in p:
+        if px != WHITE:
+            n = n + 1
+    n
+
+describe "SoftwareBackend.draw_rounded_rect_outline":
+    it "paints the four edges and midpoint corner arcs of a radius-3 outline":
+        var b = fresh()
+        b.draw_rounded_rect_outline(2, 2, 10, 10, 3, RED, 1)
+        val p = b.read_pixels()
+        step("top edge spans x=5..8 at y=2, bottom edge at y=11")
+        expect(at(p, 5, 2)).to_equal(RED)
+        expect(at(p, 8, 2)).to_equal(RED)
+        expect(at(p, 5, 11)).to_equal(RED)
+        step("left edge spans y=5..8 at x=2, right edge at x=11")
+        expect(at(p, 2, 6)).to_equal(RED)
+        expect(at(p, 11, 7)).to_equal(RED)
+        step("top-left arc around (5,5): (2,4) (4,2) (3,3); box corner stays clear")
+        expect(at(p, 2, 4)).to_equal(RED)
+        expect(at(p, 4, 2)).to_equal(RED)
+        expect(at(p, 3, 3)).to_equal(RED)
+        expect(at(p, 2, 2)).to_equal(WHITE)
+        step("top-right arc around (8,5): (9,2) (10,3) (11,4); corner (11,2) clear")
+        expect(at(p, 9, 2)).to_equal(RED)
+        expect(at(p, 10, 3)).to_equal(RED)
+        expect(at(p, 11, 4)).to_equal(RED)
+        expect(at(p, 11, 2)).to_equal(WHITE)
+        step("the interior is untouched")
+        expect(at(p, 6, 6)).to_equal(WHITE)
+        step("4 edges x 4 px + 4 corners x 5 px, shared end points counted once")
+        expect(painted(p)).to_equal(28)
+
+    it "clamps radius to half the box and thickness to radius + 1":
+        var b = fresh()
+        # radius 9 on a 6x4 box clamps to 2; thickness 9 clamps to 3,
+        # which fills the 6x4 box's rows 0..2 from both sides.
+        b.draw_rounded_rect_outline(4, 4, 6, 4, 9, RED, 9)
+        val p = b.read_pixels()
+        expect(at(p, 6, 4)).to_equal(RED)
+        expect(at(p, 6, 7)).to_equal(RED)
+        expect(at(p, 4, 6)).to_equal(RED)
+        step("nothing outside the 6x4 box")
+        expect(at(p, 3, 5)).to_equal(WHITE)
+        expect(at(p, 10, 5)).to_equal(WHITE)
+        expect(at(p, 6, 8)).to_equal(WHITE)
+
+    it "draws nothing for zero width, zero height or zero thickness":
+        var b = fresh()
+        b.draw_rounded_rect_outline(2, 2, 0, 8, 2, RED, 1)
+        b.draw_rounded_rect_outline(2, 2, 8, 0, 2, RED, 1)
+        b.draw_rounded_rect_outline(2, 2, 8, 8, 2, RED, 0)
+        expect(painted(b.read_pixels())).to_equal(0)
+
+describe "SoftwareBackend.read_pixels_damaged":
+    it "seeds the mirror on first read, then refreshes only damaged rects":
+        var b = fresh()
+        b.draw_rect_filled(1, 1, 2, 2, RED)
+        val first = b.read_pixels_damaged(8)
+        step("the first read is a full copy of the surface")
+        expect(first.len()).to_equal(S * S)
+        expect(at(first, 1, 1)).to_equal(RED)
+        expect(at(first, 0, 0)).to_equal(WHITE)
+        b.draw_rect_filled(10, 10, 3, 3, BLUE)
+        val second = b.read_pixels_damaged(8)
+        step("the damaged rect reaches the mirror and the earlier paint survives")
+        expect(at(second, 11, 11)).to_equal(BLUE)
+        expect(at(second, 1, 1)).to_equal(RED)
+        expect(second).to_equal(b.read_pixels())
+
+    it "reseeds after invalidate_damage_mirror and returns nothing for an empty surface":
+        var b = fresh()
+        val seeded = b.read_pixels_damaged(4)
+        expect(at(seeded, 5, 5)).to_equal(WHITE)
+        b.invalidate_damage_mirror()
+        b.draw_rect_filled(5, 5, 1, 1, RED)
+        val reseeded = b.read_pixels_damaged(4)
+        expect(at(reseeded, 5, 5)).to_equal(RED)
+        var empty = SoftwareBackend.create()
+        expect(empty.read_pixels_damaged(4).len()).to_equal(0)

@@ -5,6 +5,8 @@
 
 use std.io.sqlite_sffi.{SqliteConnection, sqlite_execute, sqlite_error_message, sqlite_begin, sqlite_commit, sqlite_rollback, sqlite_query_all, SqliteRow}
 use std.database.sql.types.{DbValue, DbRow, DbError}
+use std.database.sql.statement.{PreparedStatement}
+use std.io.sqlite_sffi.{sqlite_changes}
 use std.nogc_sync_mut.database.sql.escape.{quote_ident, validate_ident}
 
 # ============================================================================
@@ -140,6 +142,33 @@ class Transaction:
         # sqlite_execute returns bool; affected rows not directly available
         # from sqlite_execute wrapper. Return 0 to indicate success.
         Ok(0)
+
+    # Parameterized execute: values are bound, never spliced into SQL text.
+    me execute_params(sql: text, params: [DbValue]) -> Result<i64, DbError>:
+        if not self.is_active():
+            return Err(DbError.TransactionFailed("transaction not active"))
+        var stmt = PreparedStatement.prepare(self.conn, sql)?
+        val bound = stmt.bind_all(params)
+        if bound.is_err():
+            stmt.finalize_stmt()
+            return Err(bound.unwrap_err())
+        val executed = stmt.execute()
+        stmt.finalize_stmt()
+        if executed.is_err(): return Err(executed.unwrap_err())
+        Ok(sqlite_changes(self.conn))
+
+    # Parameterized query within this transaction.
+    fn query_params(sql: text, params: [DbValue]) -> Result<[DbRow], DbError>:
+        if not self.is_active():
+            return Err(DbError.TransactionFailed("transaction not active"))
+        var stmt = PreparedStatement.prepare(self.conn, sql)?
+        val bound = stmt.bind_all(params)
+        if bound.is_err():
+            stmt.finalize_stmt()
+            return Err(bound.unwrap_err())
+        val rows = stmt.query_rows()
+        stmt.finalize_stmt()
+        rows
 
     # ------------------------------------------------------------------
     # Query rows within this transaction (basic, no params).

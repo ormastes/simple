@@ -92,6 +92,7 @@ impl<M: Module> CodegenEmitter for CraneliftEmitter<'_, '_, M> {
         // FR-DRIVER-0002b: pass VRegs so compile_binop can dispatch sshr/ushr
         // and sextend/uextend from `ctx.vreg_types` signedness.
         let val = super::instr::core::compile_binop(self.ctx, self.builder, op, lhs, rhs, left, right)?;
+        let val = super::instr::core::wrap_narrow_unsigned_arith(self.ctx, self.builder, op, dest, right, rhs, val);
         self.ctx.vreg_values.insert(dest, val);
         Ok(())
     }
@@ -488,12 +489,19 @@ impl<M: Module> CodegenEmitter for CraneliftEmitter<'_, '_, M> {
     fn emit_enum_payload(&mut self, dest: VReg, value: VReg) -> Result<(), String> {
         super::instr::enum_union::compile_enum_payload(self.ctx, self.builder, dest, value)
     }
-    fn emit_enum_unit(&mut self, dest: VReg, enum_name: &str, variant_name: &str) -> Result<(), String> {
-        super::instr::pattern::compile_enum_unit(self.ctx, self.builder, dest, enum_name, variant_name);
+    fn emit_enum_unit(&mut self, dest: VReg, enum_name: &str, _variant_name: &str, discriminant: u32) -> Result<(), String> {
+        super::instr::pattern::compile_enum_unit(self.ctx, self.builder, dest, enum_name, discriminant);
         Ok(())
     }
-    fn emit_enum_with(&mut self, dest: VReg, enum_name: &str, variant_name: &str, payload: VReg) -> Result<(), String> {
-        super::instr::pattern::compile_enum_with(self.ctx, self.builder, dest, enum_name, variant_name, payload);
+    fn emit_enum_with(
+        &mut self,
+        dest: VReg,
+        enum_name: &str,
+        _variant_name: &str,
+        discriminant: u32,
+        payload: VReg,
+    ) -> Result<(), String> {
+        super::instr::pattern::compile_enum_with(self.ctx, self.builder, dest, enum_name, discriminant, payload);
         Ok(())
     }
     fn emit_union_discriminant(&mut self, dest: VReg, value: VReg) -> Result<(), String> {
@@ -689,9 +697,8 @@ impl<M: Module> CodegenEmitter for CraneliftEmitter<'_, '_, M> {
     // =========================================================================
     // Memory safety
     // =========================================================================
-    fn emit_drop(&mut self, _value: VReg, _ty: TypeId) -> Result<(), String> {
-        // Same no-op as existing compile_instruction
-        Ok(())
+    fn emit_drop(&mut self, value: VReg, ty: TypeId) -> Result<(), String> {
+        super::instr::compile_drop(self.ctx, self.builder, value, ty)
     }
     fn emit_end_scope(&mut self, _local_index: usize) -> Result<(), String> {
         Ok(())

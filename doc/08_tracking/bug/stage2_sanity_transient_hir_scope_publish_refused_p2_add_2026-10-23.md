@@ -128,3 +128,28 @@ which is admitted under the canonical K1 policy
 (`scripts/bootstrap/bootstrap-from-scratch.sh:861`). Whether the failure also
 occurs under the llvm backend is **not** established here and should not be
 assumed either way.
+
+## Update 2026-10-23: root cause isolated (use-after-free of the batch, not a refusal)
+
+Reproduced on the CI-rejected stage-2 candidate from run 39909713627 (head
+86cc59ef455) under gdb: `native-build src/compiler/bootstrap_admission/p2_add.spl`
+SIGSEGVs in `reverse_reference_module_publish_v1` (called from
+`driver_publish_reverse_reference_parse_scope_v1`) at `mov 0x8(%rcx),%r12`,
+with the dereferenced register holding ASCII (`_DECL_3_`): the batch's
+`known_families`/`facts`/`aliases` arrays had already been freed and reused.
+
+Why: `driver_publish_reverse_reference_parse_scope_v1` ends the transient
+scope BEFORE `reverse_reference_module_publish_v1` reads the batch, so the
+batch graph must survive via the promote in `reverse_reference_module_seal_v1`.
+That promote's root is a fresh `Some(batch)` built while the scope is PAUSED;
+the Rust runtime never tracks paused-scope allocations as scope-owned, and the
+Rust `rt_transient_heap_promote` returned `true` for any registered, unowned
+heap root without walking it. The batch and its arrays (allocated before the
+pause, scope-owned) were never promoted and were freed at scope end.
+
+Fix: `rt_transient_heap_promote` (Rust) walks an unowned registered root
+whenever a paused scope exists and the root has walkable children; it stays a
+no-op only with no paused scope or an opaque root (the C twin exempts only
+immortal roots). Regression test
+`transient_heap_promotion_walks_unowned_root_with_owned_children` fails
+without the fix and passes with it.

@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 use std::collections::HashMap;
-use simple_parser::ast::{Block, ClassDef, Expr, FunctionDef, Node};
+use simple_parser::ast::{Block, ClassDef, Expr, FunctionDef, Node, Type};
 use crate::error::CompileError;
 use crate::value::{strict_mem_enabled, Env, Value};
 
@@ -122,6 +122,23 @@ fn capture_block_scope_shadows<'a>(block: &'a Block, env: &mut Env) -> Vec<(&'a 
     capture_node_scope_shadows(&block.statements, env)
 }
 
+/// Bind pattern-match `bindings` as block-local names for the duration of one
+/// branch/iteration body. Returns the prior values for
+/// `restore_block_scope_shadows`. Unlike `Env::mark_local` (frame-permanent),
+/// this shadows an imported module of the same name only while the body runs.
+pub(crate) fn bind_block_scope_shadows(
+    bindings: std::collections::HashMap<String, Value>,
+    env: &mut Env,
+) -> Vec<(String, Option<Value>)> {
+    let mut saved = Vec::with_capacity(bindings.len());
+    for (name, val) in bindings {
+        saved.push((name.clone(), env.get(&name).cloned()));
+        env.enter_block_local(name.clone());
+        env.insert(name, val);
+    }
+    saved
+}
+
 /// Undo the shadowing captured by `capture_block_scope_shadows`: restore each
 /// name's pre-block value, or remove it entirely if it did not exist before
 /// the block ran (so a block-local `var` never leaks into the caller).
@@ -178,11 +195,15 @@ pub(crate) fn exec_block(
     // Catch module-init hangs and deep call chains that bypass loop-level checks.
     check_timeout!();
 
+    // Non-value statement blocks never forward an enclosing target type.
+    let _clear_expected = super::push_expected_target_type(None);
+
     // Enter block scope for tail injection tracking
     let _scope_depth = enter_block_scope();
     let shadows = capture_block_scope_shadows(block, env);
 
     for stmt in &block.statements {
+        super::interpreter_state::set_current_node_span(stmt.span().map(Into::into));
         match exec_node(stmt, env, functions, classes, enums, impl_methods)? {
             Control::Next => {}
             flow @ (Control::Return(_) | Control::Break(..) | Control::Continue(_)) => {
@@ -239,6 +260,8 @@ pub(crate) fn copy_back_block_writes(block_env: &Env, env: &mut Env) {
     // A subject/condition can leave an older owned-global aggregate in the
     // caller overlay. Repointing only the scope does not help because overlay
     // lookup wins; refresh bound overlay copies before applying block writes.
+    // Every caller ran `publish_before_block_clone` before cloning, so no
+    // unpublished write of this frame can be lost here.
     super::interpreter_call::refresh_live_bound_globals(env);
     // Off-path cost: one bool load (see `strict_mem_enabled()`); the check
     // itself is skipped entirely rather than called-and-short-circuited.
@@ -272,6 +295,7 @@ pub(crate) fn exec_unsafe_block(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<(Control, Option<Value>), CompileError> {
+    super::interpreter_call::publish_before_block_clone(env);
     let mut block_env = env.clone();
     // Dirty-only write-back (see interpreter/expr/control.rs if-closure path):
     // copying every shared key replays stale cloned values over newer writes.
@@ -285,8 +309,8 @@ pub(crate) fn exec_unsafe_block(
     Ok(result)
 }
 
-/// Execute a block in a function context, supporting implicit return.
-/// If the last statement is an expression, its value is captured and returned.
+/// Execute a block in a value-producing or branch context, forwarding the caller's
+/// expected target type to its tail expression.
 pub(crate) fn exec_block_fn(
     block: &Block,
     env: &mut Env,
@@ -294,6 +318,28 @@ pub(crate) fn exec_block_fn(
     classes: &mut HashMap<String, Arc<ClassDef>>,
     enums: &Enums,
     impl_methods: &ImplMethods,
+) -> Result<(Control, Option<Value>), CompileError> {
+    exec_block_fn_with_target(
+        block,
+        env,
+        functions,
+        classes,
+        enums,
+        impl_methods,
+        super::current_expected_target_type(),
+    )
+}
+
+/// Execute a block in a function or value context, applying `tail_expected_target`
+/// exclusively to its implicit-return tail statement while isolating non-tail statements.
+pub(crate) fn exec_block_fn_with_target(
+    block: &Block,
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+    tail_expected_target: Option<Type>,
 ) -> Result<(Control, Option<Value>), CompileError> {
     // Enter block scope for tail injection tracking
     let _scope_depth = enter_block_scope();
@@ -303,11 +349,21 @@ pub(crate) fn exec_block_fn(
     let mut last_expr_value: Option<Value> = None;
 
     for (i, stmt) in block.statements.iter().enumerate() {
+        super::interpreter_state::set_current_node_span(stmt.span().map(Into::into));
         // For the last statement, if it's an expression, capture its value
         let is_last = i == len - 1;
         if is_last {
+            // COVERAGE: the tail `match`/`if` below run through
+            // exec_match_core / exec_if_core, not exec_node, so the line hit
+            // exec_node records was never taken for a function's last
+            // statement. Recording here again for a tail that does fall
+            // through to exec_node is harmless: line hits are a set.
+            super::coverage_helpers::record_node_coverage(stmt);
             if let Node::Expression(Expr::UnsafeBlock(nodes, _)) = stmt {
-                let (flow, value) = exec_unsafe_block(nodes, env, functions, classes, enums, impl_methods)?;
+                let (flow, value) = {
+                    let _expected_guard = super::push_expected_target_type(tail_expected_target.clone());
+                    exec_unsafe_block(nodes, env, functions, classes, enums, impl_methods)?
+                };
                 match flow {
                     Control::Next => last_expr_value = value,
                     other @ (Control::Return(_) | Control::Break(..) | Control::Continue(_)) => {
@@ -324,8 +380,10 @@ pub(crate) fn exec_block_fn(
             if let simple_parser::ast::Node::Expression(expr) = stmt {
                 // Evaluate and capture the value for implicit return
                 // Use handle_method_call_with_self_update to properly track mutations
+                let _expected_guard = super::push_expected_target_type(tail_expected_target.clone());
                 let (val, update) =
                     handle_method_call_with_self_update(expr, env, functions, classes, enums, impl_methods)?;
+                drop(_expected_guard);
                 if let Some((name, new_self)) = update {
                     env.insert(name, new_self);
                 }
@@ -336,7 +394,10 @@ pub(crate) fn exec_block_fn(
             // Use exec_match_core (not exec_match_expr) so that explicit `return` statements
             // inside the arm body propagate up instead of being collapsed into a value.
             if let simple_parser::ast::Node::Match(match_stmt) = stmt {
-                let (flow, last_val) = exec_match_core(match_stmt, env, functions, classes, enums, impl_methods)?;
+                let (flow, last_val) = {
+                    let _expected_guard = super::push_expected_target_type(tail_expected_target.clone());
+                    exec_match_core(match_stmt, env, functions, classes, enums, impl_methods)?
+                };
                 match flow {
                     Control::Next => {
                         last_expr_value = last_val;
@@ -356,7 +417,10 @@ pub(crate) fn exec_block_fn(
             // Use exec_if_core (not exec_if_expr) so that explicit `return` statements
             // inside if branches propagate up instead of being collapsed into a value.
             if let simple_parser::ast::Node::If(if_stmt) = stmt {
-                let (flow, val) = exec_if_core(if_stmt, env, functions, classes, enums, impl_methods)?;
+                let (flow, val) = {
+                    let _expected_guard = super::push_expected_target_type(tail_expected_target.clone());
+                    exec_if_core(if_stmt, env, functions, classes, enums, impl_methods)?
+                };
                 match flow {
                     Control::Next => {
                         last_expr_value = Some(val);
@@ -374,7 +438,11 @@ pub(crate) fn exec_block_fn(
             }
         }
 
-        match exec_node(stmt, env, functions, classes, enums, impl_methods)? {
+        let node_ctrl = {
+            let _non_tail_expected = super::push_expected_target_type(None);
+            exec_node(stmt, env, functions, classes, enums, impl_methods)?
+        };
+        match node_ctrl {
             Control::Next => {}
             flow @ (Control::Return(_) | Control::Break(..) | Control::Continue(_)) => {
                 // Execute pending tail injections before exiting the block

@@ -1,0 +1,385 @@
+# SOSIX containment contract: fail-closed request check, one example per
+# refusal reason in the architecture order, plus the typed-refusal support.
+# Design: doc/04_architecture/platform/container/pure_simple_container.md 4.1
+use std.spec.{describe, it, expect}
+use std.common.contracts.sosix.containment_v1.{SosixContainBytesV1, SosixContainCountV1,
+    SosixContainCpuRateV1, SosixContainMillisV1, SosixContainFlagV1,
+    SosixContainLimitsV1, SosixContainRequestV1, SosixContainSupportV1,
+    SosixContainLeaseV1, SosixContainSlotV1, SosixContainAdmissionV1,
+    sosix_contain_request_reason_v1, sosix_contain_support_none_v1,
+    SosixContainCanaryV1, SosixContainQualifyRequestV1, SosixContainQualifyResultV1,
+    sosix_contain_canaries_pass_v1, sosix_contain_qualify_request_reason_v1,
+    SOSIX_CONTAIN_CANARY_OWN_WRITE_V1, SOSIX_CONTAIN_CANARY_LOWER_READ_EXEC_V1,
+    SOSIX_CONTAIN_CANARY_LOWER_WRITE_V1, SOSIX_CONTAIN_CANARY_USER_PRIVATE_WRITE_V1,
+    SOSIX_CONTAIN_CANARY_OTHER_SCOPE_WRITE_V1, SOSIX_CONTAIN_CANARY_OTHER_SCOPE_PROCESS_V1,
+    sosix_contain_canary_pass_v1, SOSIX_CONTAIN_CANARY_LAUNCH_EXIT_V1,
+    SOSIX_CONTAIN_CANARY_TREE_EMPTY_V1, SOSIX_CONTAIN_CANARY_PROCESS_LIMIT_V1,
+    SOSIX_CONTAIN_IDENTITY_INHERIT_V1, SOSIX_CONTAIN_IDENTITY_RESTRICTED_V1,
+    SOSIX_CONTAIN_NETWORK_HOST_V1, SOSIX_CONTAIN_NETWORK_NONE_V1}
+
+fn _no_limits() -> SosixContainLimitsV1:
+    SosixContainLimitsV1(memory: SosixContainBytesV1(0), processes: SosixContainCountV1(0),
+        cpu_rate: SosixContainCpuRateV1(0), wall: SosixContainMillisV1(0))
+
+fn _request() -> SosixContainRequestV1:
+    SosixContainRequestV1(program: "child.exe", program_digest: "a".repeat(64), args: [],
+        environment: [], directory: "work", stdout_path: "out.txt", stderr_path: "err.txt",
+        limits: _no_limits(), identity: SOSIX_CONTAIN_IDENTITY_INHERIT_V1, scope: "c1",
+        network: SOSIX_CONTAIN_NETWORK_HOST_V1, readonly_dirs: [], writable_dirs: [],
+        private_pids: SosixContainFlagV1(false), root_dir: "")
+
+fn _windows_support() -> SosixContainSupportV1:
+    var s = sosix_contain_support_none_v1("windows-job+restricted-token")
+    s.memory_accounting = "job-commit"
+    s.memory_hard_limit = SosixContainFlagV1(true)
+    s.process_limit = SosixContainFlagV1(true)
+    s.cpu_rate_limit = SosixContainFlagV1(true)
+    s.kill_all_descendants = SosixContainFlagV1(true)
+    s.write_confinement = SosixContainFlagV1(true)
+    s.unprivileged = SosixContainFlagV1(true)
+    s
+
+fn _with_limits(memory: i64, processes: i64, cpu: i64, wall: i64) -> SosixContainRequestV1:
+    var r = _request()
+    r.limits = SosixContainLimitsV1(memory: SosixContainBytesV1(memory),
+        processes: SosixContainCountV1(processes), cpu_rate: SosixContainCpuRateV1(cpu),
+        wall: SosixContainMillisV1(wall))
+    r
+
+describe "sosix_contain_request_reason_v1 admission":
+    it "admits a plain request on a Windows-shaped support":
+        expect(sosix_contain_request_reason_v1(_request(), _windows_support())).to_equal("")
+
+    it "admits every enforced axis together":
+        var r = _with_limits(1048576, 2, 5000, 1000)
+        r.identity = SOSIX_CONTAIN_IDENTITY_RESTRICTED_V1
+        r.readonly_dirs = ["lower"]
+        r.writable_dirs = ["upper"]
+        r.program_digest = "a".repeat(64)
+        expect(sosix_contain_request_reason_v1(r, _windows_support())).to_equal("")
+
+describe "sosix_contain_request_reason_v1 refusals in order":
+    it "refuses an invalid request first":
+        var r = _with_limits(1048576, 0, 0, 0)
+        r.program = ""
+        expect(sosix_contain_request_reason_v1(r, sosix_contain_support_none_v1("x")))
+            .to_equal("containment-request-invalid")
+
+    it "refuses unknown identity, unknown network and bad limits as invalid":
+        var a = _request()
+        a.identity = "root"
+        expect(sosix_contain_request_reason_v1(a, _windows_support())).to_equal("containment-request-invalid")
+        var b = _request()
+        b.network = "bridge"
+        expect(sosix_contain_request_reason_v1(b, _windows_support())).to_equal("containment-request-invalid")
+        expect(sosix_contain_request_reason_v1(_with_limits(-1, 0, 0, 0), _windows_support()))
+            .to_equal("containment-request-invalid")
+        expect(sosix_contain_request_reason_v1(_with_limits(0, 0, 10001, 0), _windows_support()))
+            .to_equal("containment-request-invalid")
+
+    it "refuses a malformed digest and an empty directory entry as invalid":
+        var a = _request()
+        a.program_digest = "ABC"
+        expect(sosix_contain_request_reason_v1(a, _windows_support())).to_equal("containment-request-invalid")
+        var b = _request()
+        b.program_digest = "G".repeat(64)
+        expect(sosix_contain_request_reason_v1(b, _windows_support())).to_equal("containment-request-invalid")
+        var c = _request()
+        c.writable_dirs = [""]
+        expect(sosix_contain_request_reason_v1(c, _windows_support())).to_equal("containment-request-invalid")
+
+    it "refuses an empty digest as invalid":
+        var r = _request()
+        r.program_digest = ""
+        expect(sosix_contain_request_reason_v1(r, _windows_support())).to_equal("containment-request-invalid")
+
+    it "refuses uppercase hex and a non-hex 64-char digest":
+        var a = _request()
+        a.program_digest = "A".repeat(64)
+        expect(sosix_contain_request_reason_v1(a, _windows_support())).to_equal("containment-request-invalid")
+        var b = _request()
+        b.program_digest = "z".repeat(64)
+        expect(sosix_contain_request_reason_v1(b, _windows_support())).to_equal("containment-request-invalid")
+        var c = _request()
+        c.program_digest = "a".repeat(65)
+        expect(sosix_contain_request_reason_v1(c, _windows_support())).to_equal("containment-request-invalid")
+
+    it "refuses negative processes, wall and cpu rate":
+        expect(sosix_contain_request_reason_v1(_with_limits(0, -1, 0, 0), _windows_support()))
+            .to_equal("containment-request-invalid")
+        expect(sosix_contain_request_reason_v1(_with_limits(0, 0, 0, -1), _windows_support()))
+            .to_equal("containment-request-invalid")
+        expect(sosix_contain_request_reason_v1(_with_limits(0, 0, -1, 0), _windows_support()))
+            .to_equal("containment-request-invalid")
+
+    it "bounds cpu rate at 10000 inclusive":
+        expect(sosix_contain_request_reason_v1(_with_limits(0, 0, 10000, 0), _windows_support())).to_equal("")
+        expect(sosix_contain_request_reason_v1(_with_limits(0, 0, 10001, 0), _windows_support()))
+            .to_equal("containment-request-invalid")
+
+    it "refuses an empty readonly entry":
+        var r = _request()
+        r.identity = SOSIX_CONTAIN_IDENTITY_RESTRICTED_V1
+        r.readonly_dirs = [""]
+        expect(sosix_contain_request_reason_v1(r, _windows_support())).to_equal("containment-request-invalid")
+
+    it "refuses environment entries without a name or an equals sign":
+        var a = _request()
+        a.environment = ["NOEQUALS"]
+        expect(sosix_contain_request_reason_v1(a, _windows_support())).to_equal("containment-request-invalid")
+        var b = _request()
+        b.environment = ["=value"]
+        expect(sosix_contain_request_reason_v1(b, _windows_support())).to_equal("containment-request-invalid")
+        var c = _request()
+        c.environment = ["K=", "PATH=a=b"]
+        expect(sosix_contain_request_reason_v1(c, _windows_support())).to_equal("")
+
+    it "refuses a directory both writable and readonly":
+        var r = _request()
+        r.identity = SOSIX_CONTAIN_IDENTITY_RESTRICTED_V1
+        r.readonly_dirs = ["shared"]
+        r.writable_dirs = ["shared"]
+        expect(sosix_contain_request_reason_v1(r, _windows_support())).to_equal("containment-request-invalid")
+
+    it "requires restricted identity for readonly dirs, checked right after invalid":
+        var a = _request()
+        a.readonly_dirs = ["lower"]
+        expect(sosix_contain_request_reason_v1(a, _windows_support()))
+            .to_equal("containment-readonly-requires-restricted")
+        expect(sosix_contain_request_reason_v1(a, sosix_contain_support_none_v1("x")))
+            .to_equal("containment-readonly-requires-restricted")
+        var b = _with_limits(1, 0, 0, 0)
+        b.readonly_dirs = ["lower"]
+        expect(sosix_contain_request_reason_v1(b, sosix_contain_support_none_v1("x")))
+            .to_equal("containment-readonly-requires-restricted")
+        var c = _request()
+        c.identity = SOSIX_CONTAIN_IDENTITY_RESTRICTED_V1
+        c.readonly_dirs = ["lower"]
+        expect(sosix_contain_request_reason_v1(c, _windows_support())).to_equal("")
+
+    it "requires a valid scope only for restricted identity":
+        var r = _request()
+        r.identity = SOSIX_CONTAIN_IDENTITY_RESTRICTED_V1
+        expect(sosix_contain_request_reason_v1(r, _windows_support())).to_equal("")
+        r.scope = ""
+        expect(sosix_contain_request_reason_v1(r, _windows_support())).to_equal("containment-request-invalid")
+        r.scope = "Has-Upper"
+        expect(sosix_contain_request_reason_v1(r, _windows_support())).to_equal("containment-request-invalid")
+        r.scope = "has space"
+        expect(sosix_contain_request_reason_v1(r, _windows_support())).to_equal("containment-request-invalid")
+        r.scope = "a/b"
+        expect(sosix_contain_request_reason_v1(r, _windows_support())).to_equal("containment-request-invalid")
+        r.scope = "a".repeat(65)
+        expect(sosix_contain_request_reason_v1(r, _windows_support())).to_equal("containment-request-invalid")
+        r.scope = "a".repeat(64)
+        expect(sosix_contain_request_reason_v1(r, _windows_support())).to_equal("")
+        var inherit = _request()
+        inherit.scope = ""
+        expect(sosix_contain_request_reason_v1(inherit, _windows_support())).to_equal("")
+
+    it "refuses a memory limit the variant cannot enforce":
+        expect(sosix_contain_request_reason_v1(_with_limits(1, 0, 0, 0), sosix_contain_support_none_v1("x")))
+            .to_equal("containment-memory-limit-unsupported")
+
+    it "refuses a process limit the variant cannot enforce":
+        expect(sosix_contain_request_reason_v1(_with_limits(0, 2, 0, 0), sosix_contain_support_none_v1("x")))
+            .to_equal("containment-process-limit-unsupported")
+
+    it "refuses a cpu rate the variant cannot enforce":
+        expect(sosix_contain_request_reason_v1(_with_limits(0, 0, 100, 0), sosix_contain_support_none_v1("x")))
+            .to_equal("containment-cpu-rate-unsupported")
+
+    it "refuses restricted identity or read-only dirs without write confinement":
+        var a = _request()
+        a.identity = SOSIX_CONTAIN_IDENTITY_RESTRICTED_V1
+        expect(sosix_contain_request_reason_v1(a, sosix_contain_support_none_v1("x")))
+            .to_equal("containment-write-confinement-unsupported")
+        var b = _request()
+        b.identity = SOSIX_CONTAIN_IDENTITY_RESTRICTED_V1
+        b.readonly_dirs = ["lower"]
+        expect(sosix_contain_request_reason_v1(b, sosix_contain_support_none_v1("x")))
+            .to_equal("containment-write-confinement-unsupported")
+
+    it "refuses network none where network isolation is absent":
+        var r = _request()
+        r.network = SOSIX_CONTAIN_NETWORK_NONE_V1
+        expect(sosix_contain_request_reason_v1(r, _windows_support()))
+            .to_equal("containment-network-isolation-unsupported")
+
+    it "refuses private pids where pid isolation is absent":
+        var r = _request()
+        r.private_pids = SosixContainFlagV1(true)
+        expect(sosix_contain_request_reason_v1(r, _windows_support()))
+            .to_equal("containment-pid-isolation-unsupported")
+
+    it "refuses a root remap where it is absent":
+        var r = _request()
+        r.root_dir = "root"
+        expect(sosix_contain_request_reason_v1(r, _windows_support()))
+            .to_equal("containment-root-remap-unsupported")
+
+    it "refuses a wall deadline without kill-all-descendants":
+        var support = _windows_support()
+        support.kill_all_descendants = SosixContainFlagV1(false)
+        expect(sosix_contain_request_reason_v1(_with_limits(0, 0, 0, 500), support))
+            .to_equal("containment-deadline-unsupported")
+
+    it "reports the earliest reason when several axes are refused":
+        var r = _with_limits(1, 2, 100, 500)
+        r.network = SOSIX_CONTAIN_NETWORK_NONE_V1
+        r.root_dir = "root"
+        expect(sosix_contain_request_reason_v1(r, sosix_contain_support_none_v1("x")))
+            .to_equal("containment-memory-limit-unsupported")
+
+describe "sosix_contain_support_none_v1":
+    it "affirms nothing":
+        val s = sosix_contain_support_none_v1("linux-unimplemented")
+        expect(s.mechanism).to_equal("linux-unimplemented")
+        expect(s.memory_hard_limit.value).to_equal(false)
+        expect(s.kill_all_descendants.value).to_equal(false)
+        expect(s.write_confinement.value).to_equal(false)
+        expect(s.unprivileged.value).to_equal(false)
+
+describe "SosixContainAdmissionV1":
+    it "carries the typed outcomes":
+        val started = SosixContainAdmissionV1.Started(SosixContainLeaseV1(slot: SosixContainSlotV1(3)))
+        val label = match started:
+            Started(lease): "started-" + lease.slot.value.to_string()
+            RejectedBeforeStart(reason): reason
+            FailedAfterCleanup(reason): reason
+            Unknown(reason): reason
+        expect(label).to_equal("started-3")
+        val rejected = SosixContainAdmissionV1.RejectedBeforeStart("no-child")
+        val rlabel = match rejected:
+            Started(lease): "started"
+            RejectedBeforeStart(reason): reason
+            FailedAfterCleanup(reason): reason
+            Unknown(reason): reason
+        expect(rlabel).to_equal("no-child")
+
+fn _canary(id: text, expected: text, observed: text, control: text) -> SosixContainCanaryV1:
+    SosixContainCanaryV1(id: id, expected: expected, observed: observed, control: control)
+
+fn _all_canaries() -> [SosixContainCanaryV1]:
+    [_canary(SOSIX_CONTAIN_CANARY_LAUNCH_EXIT_V1, "allow", "allow", "none"),
+        _canary(SOSIX_CONTAIN_CANARY_OWN_WRITE_V1, "allow", "allow", "none"),
+        _canary(SOSIX_CONTAIN_CANARY_LOWER_READ_EXEC_V1, "allow", "allow", "none"),
+        _canary(SOSIX_CONTAIN_CANARY_TREE_EMPTY_V1, "allow", "allow", "none"),
+        _canary(SOSIX_CONTAIN_CANARY_LOWER_WRITE_V1, "deny", "deny", "allow"),
+        _canary(SOSIX_CONTAIN_CANARY_USER_PRIVATE_WRITE_V1, "deny", "deny", "allow"),
+        _canary(SOSIX_CONTAIN_CANARY_OTHER_SCOPE_WRITE_V1, "deny", "deny", "allow"),
+        _canary(SOSIX_CONTAIN_CANARY_OTHER_SCOPE_PROCESS_V1, "deny", "deny", "allow"),
+        _canary(SOSIX_CONTAIN_CANARY_PROCESS_LIMIT_V1, "deny", "deny", "allow")]
+
+fn _result(canaries: [SosixContainCanaryV1], reason: text) -> SosixContainQualifyResultV1:
+    SosixContainQualifyResultV1(canaries: canaries, evidence_digest: "a".repeat(64), reason: reason)
+
+fn _without(index: i64) -> [SosixContainCanaryV1]:
+    var kept: [SosixContainCanaryV1] = []
+    var j = 0
+    for c in _all_canaries():
+        if j != index: kept.push(c)
+        j = j + 1
+    kept
+
+describe "sosix_contain_canaries_pass_v1":
+    it "passes when all nine ids are present once and observed equals expected":
+        expect(sosix_contain_canaries_pass_v1(_result(_all_canaries(), "")).value).to_equal(true)
+
+    it "fails on an empty canary list":
+        expect(sosix_contain_canaries_pass_v1(_result([], "")).value).to_equal(false)
+
+    it "fails on a non-empty reason even with all canaries as expected":
+        expect(sosix_contain_canaries_pass_v1(_result(_all_canaries(), "containment-qualify-unimplemented-linux")).value)
+            .to_equal(false)
+
+    it "fails when any one of the nine ids is missing":
+        var i = 0
+        while i < 9:
+            expect(sosix_contain_canaries_pass_v1(_result(_without(i), "")).value).to_equal(false)
+            i = i + 1
+
+    it "fails on a duplicated id even when the count is nine":
+        var list = _all_canaries()
+        list[8] = _canary(SOSIX_CONTAIN_CANARY_OWN_WRITE_V1, "allow", "allow", "none")
+        expect(sosix_contain_canaries_pass_v1(_result(list, "")).value).to_equal(false)
+
+    it "fails when any canary observed differs from expected":
+        var i = 0
+        while i < 9:
+            var list = _all_canaries()
+            val c = list[i]
+            list[i] = _canary(c.id, c.expected, if c.expected == "allow": "deny" else: "allow", c.control)
+            expect(sosix_contain_canaries_pass_v1(_result(list, "")).value).to_equal(false)
+            i = i + 1
+
+    it "fails a not-run canary":
+        var list = _all_canaries()
+        list[4] = _canary(SOSIX_CONTAIN_CANARY_LOWER_WRITE_V1, "deny", "not-run", "allow")
+        expect(sosix_contain_canaries_pass_v1(_result(list, "")).value).to_equal(false)
+
+    it "fails when a result flips the fixed expectation to match a bad observation":
+        var list = _all_canaries()
+        list[4] = _canary(SOSIX_CONTAIN_CANARY_LOWER_WRITE_V1, "allow", "allow", "allow")
+        expect(sosix_contain_canaries_pass_v1(_result(list, "")).value).to_equal(false)
+
+    it "fails an unknown id":
+        var list = _all_canaries()
+        list[0] = _canary("made-up", "allow", "allow", "none")
+        expect(sosix_contain_canaries_pass_v1(_result(list, "")).value).to_equal(false)
+
+    it "fails an extra tenth canary":
+        var list = _all_canaries()
+        list.push(_canary("extra", "allow", "allow", "none"))
+        expect(sosix_contain_canaries_pass_v1(_result(list, "")).value).to_equal(false)
+
+describe "sosix_contain_canary_pass_v1 control rule":
+    it "passes a deny canary only with control allow":
+        for control in ["deny", "not-run", "none", ""]:
+            var list = _all_canaries()
+            list[4] = _canary(SOSIX_CONTAIN_CANARY_LOWER_WRITE_V1, "deny", "deny", control)
+            val result = _result(list, "")
+            expect(sosix_contain_canary_pass_v1(result, SOSIX_CONTAIN_CANARY_LOWER_WRITE_V1).value).to_equal(false)
+            expect(sosix_contain_canaries_pass_v1(result).value).to_equal(false)
+
+    it "judges one id independently of the others":
+        var list = _all_canaries()
+        list[8] = _canary(SOSIX_CONTAIN_CANARY_PROCESS_LIMIT_V1, "deny", "allow", "allow")
+        val result = _result(list, "")
+        expect(sosix_contain_canary_pass_v1(result, SOSIX_CONTAIN_CANARY_PROCESS_LIMIT_V1).value).to_equal(false)
+        expect(sosix_contain_canary_pass_v1(result, SOSIX_CONTAIN_CANARY_LAUNCH_EXIT_V1).value).to_equal(true)
+        expect(sosix_contain_canary_pass_v1(result, SOSIX_CONTAIN_CANARY_TREE_EMPTY_V1).value).to_equal(true)
+
+    it "fails an unplanned id, a missing id and a run with a reason":
+        expect(sosix_contain_canary_pass_v1(_result(_all_canaries(), ""), "made-up").value).to_equal(false)
+        expect(sosix_contain_canary_pass_v1(_result(_without(3), ""), SOSIX_CONTAIN_CANARY_TREE_EMPTY_V1).value)
+            .to_equal(false)
+        expect(sosix_contain_canary_pass_v1(_result(_all_canaries(), "x"), SOSIX_CONTAIN_CANARY_LAUNCH_EXIT_V1).value)
+            .to_equal(false)
+
+describe "sosix_contain_qualify_request_reason_v1":
+    it "admits a valid qualify request and refuses invalid ones":
+        val ok = SosixContainQualifyRequestV1(probe_program: "probe.exe", probe_digest: "a".repeat(64),
+            probe_script: "probe.spl", work_dir: "work", scope: "c1", wall: SosixContainMillisV1(1000))
+        expect(sosix_contain_qualify_request_reason_v1(ok)).to_equal("")
+        var a = ok
+        a.probe_digest = ""
+        expect(sosix_contain_qualify_request_reason_v1(a)).to_equal("containment-request-invalid")
+        var b = ok
+        b.probe_digest = "A".repeat(64)
+        expect(sosix_contain_qualify_request_reason_v1(b)).to_equal("containment-request-invalid")
+        var c = ok
+        c.scope = "Bad Scope"
+        expect(sosix_contain_qualify_request_reason_v1(c)).to_equal("containment-request-invalid")
+        var d = ok
+        d.scope = ""
+        expect(sosix_contain_qualify_request_reason_v1(d)).to_equal("containment-request-invalid")
+        var e = ok
+        e.wall = SosixContainMillisV1(-1)
+        expect(sosix_contain_qualify_request_reason_v1(e)).to_equal("containment-request-invalid")
+        var g = ok
+        g.work_dir = ""
+        expect(sosix_contain_qualify_request_reason_v1(g)).to_equal("containment-request-invalid")
+        var h = ok
+        h.probe_script = ""
+        expect(sosix_contain_qualify_request_reason_v1(h)).to_equal("containment-request-invalid")

@@ -85,7 +85,14 @@ entity riscv_debug_module is
     sb_size_o  : out std_logic_vector(1 downto 0);
     sb_rdata_i : in  std_logic_vector(63 downto 0) := (others => '0');
     sb_ack_i   : in  std_logic := '0';
-    sb_err_i   : in  std_logic := '0'
+    sb_err_i   : in  std_logic := '0';
+
+    -- Debug authentication lifecycle (fuse/OTP-bound; see
+    -- debug_registers.vhd). Defaults fail closed: PROVISIONED with a
+    -- zero key keeps System Bus Access denied until the AUTHDATA
+    -- challenge succeeds.
+    lifecycle_i : in  std_logic_vector(1 downto 0)  := "01";
+    auth_key_i  : in  std_logic_vector(31 downto 0) := (others => '0')
   );
 end entity riscv_debug_module;
 
@@ -143,7 +150,10 @@ begin
 
       halted_i    => halted_i,
       running_i   => running_i,
-      resumeack_i => resumeack_r);
+      resumeack_i => resumeack_r,
+
+      lifecycle_i => lifecycle_i,
+      auth_key_i  => auth_key_i);
 
   -- Resume handshake: request -> wait for running -> ack.
   process (clk, rst_n)

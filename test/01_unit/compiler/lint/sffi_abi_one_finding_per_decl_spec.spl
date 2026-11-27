@@ -1,0 +1,37 @@
+"""
+## Purpose and audience
+Purpose: Pin that SPL-SFFI-ABI-001 reports exactly one finding per mismatched
+declaration through the lint row entry (`sffi_abi_check_with_triple`): the
+deprecated alias line must not get a second (deprecation) finding on top of its
+mismatch, while single-line, multi-line and `@c_abi` unit-decl forms each still
+report once. Regression: 4c34357a8b5 emitted [ABI-001, ABI-001] for one alias.
+Audience: compiler and tooling engineers maintaining robust-boundary lints.
+## Operator workflow
+Run with the test runner and read the per-scenario verdict lines.
+"""
+# @req: REQ-DIAG-POLICY-001
+
+use std.spec.*
+use compiler.tools.lint.lint_rule_api.{LintUnit}
+use compiler.tools.lint.rules.sffi_abi_mismatch_rule.{sffi_abi_check_with_triple}
+
+val LINUX = "x86_64-unknown-linux-gnu"
+
+fn abi_codes(src: text) -> [text]:
+    [f.code for f in sffi_abi_check_with_triple(LintUnit("src/app/ffi.spl", src), LINUX)]
+
+describe "SPL-SFFI-ABI-001: one finding per declaration":
+    it "alias form with a mismatch reports once (no extra deprecation finding)":
+        expect(abi_codes("unit Ticks: i32 as tk\n@c_abi(Ticks: \"int64_t\")\nextern fn c_ticks() -> Ticks\n")).to_equal(["SPL-SFFI-ABI-001"])
+
+    it "alias form that matches still reports its deprecation once":
+        expect(abi_codes("unit Ticks: i64 as tk\n@c_abi(Ticks: \"int64_t\")\nextern fn c_ticks() -> Ticks\n")).to_equal(["SPL-SFFI-ABI-001"])
+
+    it "single-line extern on a @c_abi unit reports once":
+        expect(abi_codes("@c_abi(\"int64_t\") unit Ticks: i32 as tk\nextern fn c_ticks(a: Ticks) -> Ticks\n")).to_equal(["SPL-SFFI-ABI-001"])
+
+    it "multi-line extern on a @c_abi unit reports once":
+        expect(abi_codes("@c_abi(\"int64_t\") unit Ticks: i32 as tk\nextern fn c_ticks(\n    a: Ticks,\n    b: Ticks\n) -> Ticks\n")).to_equal(["SPL-SFFI-ABI-001"])
+
+    it "@c_abi on the line above the unit reports once":
+        expect(abi_codes("@c_abi(\"int64_t\")\nunit Ticks: i32 as tk\nextern fn c_ticks() -> Ticks\n")).to_equal(["SPL-SFFI-ABI-001"])

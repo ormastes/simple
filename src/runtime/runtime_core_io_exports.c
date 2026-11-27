@@ -85,12 +85,15 @@
 #endif
 
 #include "runtime.h"
+#include "runtime_utf8_strict_private.h"
+#include "runtime_core_text_arg.h"
 
 #include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #ifdef _WIN32
 #include <windows.h>
@@ -98,6 +101,13 @@
 #include <fcntl.h>
 #include <sys/stat.h>
 #undef max
+#if !defined(_MSC_VER)
+/* MinGW has _lock_file but its configured CRT does not expose
+ * _fflush_nolock. Serialize this runtime's complete flush+WriteFile
+ * transaction independently; unrelated direct stdio users retain their CRT
+ * ordering contract but cannot be made atomic with borrowed-handle writes. */
+static SRWLOCK core_io_stdout_write_lock = SRWLOCK_INIT;
+#endif
 #else
 #include <dirent.h>
 #include <fcntl.h>
@@ -105,58 +115,17 @@
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <poll.h>
 #endif
 
 /* ---- shared decode/build helpers (all static) ---- */
 
-/* Copy a tagged text argument into buf as a NUL-terminated C string.
- * Returns 0 when the value is not a text or does not fit.
- * (Same shape as runtime_core_host_services.c's core_host_text_arg.) */
-static int core_io_text_arg(int64_t value, char* buf, size_t buf_size) {
-    int64_t len = rt_string_len(value);
-    if (len < 0 || (uint64_t)len >= buf_size) return 0;
-    const uint8_t* data = rt_string_data(value);
-    if (!data && len != 0) return 0;
-    if (len != 0) memcpy(buf, data, (size_t)len);
-    buf[(size_t)len] = '\0';
-    return 1;
-}
-
-/* Heap copy of a tagged text argument (for values too long for a stack
- * buffer, e.g. shell command lines). NULL on failure; caller frees. */
-static char* core_io_text_arg_dup(int64_t value) {
-    int64_t len = rt_string_len(value);
-    if (len < 0) return NULL;
-    const uint8_t* data = rt_string_data(value);
-    if (!data && len != 0) return NULL;
-    char* buf = (char*)malloc((size_t)len + 1u);
-    if (!buf) return NULL;
-    if (len != 0) memcpy(buf, data, (size_t)len);
-    buf[(size_t)len] = '\0';
-    return buf;
-}
 
 static int64_t core_io_empty_text(void) {
     return rt_string_new(NULL, 0);
 }
 
 #ifdef _WIN32
-/* Paths cross this ABI as UTF-8. The ANSI A-functions interpret bytes in
- * the active codepage, which only matches UTF-8 on hosts with ACP 65001 --
- * measured 2026-08-31: this exact mismatch made _stat64/FindFirstFileA
- * fail on non-ASCII names under a legacy ACP. Convert and use the W APIs
- * (same fix as runtime_core_exports.c). Malloc'd result, NULL on failure. */
-static wchar_t* core_io_utf8_to_wide(const char* utf8) {
-    int wlen = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, NULL, 0);
-    if (wlen <= 0) return NULL;
-    wchar_t* wide = (wchar_t*)malloc(sizeof(wchar_t) * (size_t)wlen);
-    if (!wide) return NULL;
-    if (MultiByteToWideChar(CP_UTF8, 0, utf8, -1, wide, wlen) <= 0) {
-        free(wide);
-        return NULL;
-    }
-    return wide;
-}
 
 /* UTF-16 -> UTF-8 into buf; returns 0 when it does not fit. */
 static int core_io_wide_to_utf8_buf(const wchar_t* wide, char* buf, size_t buf_size) {
@@ -219,6 +188,76 @@ int64_t rt_stdin_read(int64_t size) {
     return result;
 }
 
+/* Bounded poll + ONE partial read of up to `size` bytes -> [u8]. Empty on
+ * timeout, EOF or error; timeout clamped to 0..60000 ms. Windows refuses
+ * (empty) like the Rust lane: no Unix fd-0 console contract there. */
+int64_t rt_stdin_read_timeout_v1(int64_t size, int64_t timeout_ms) {
+    if (size <= 0) return (int64_t)(uintptr_t)rt_array_new(0);
+#ifdef _WIN32
+    (void)timeout_ms;
+    return (int64_t)(uintptr_t)rt_array_new(0);
+#else
+    if (size > (int64_t)(16u * 1024u * 1024u)) size = (int64_t)(16u * 1024u * 1024u);
+    if (timeout_ms < 0) timeout_ms = 0;
+    if (timeout_ms > 60000) timeout_ms = 60000;
+    struct timespec deadline;
+    if (clock_gettime(CLOCK_MONOTONIC, &deadline) != 0)
+        return (int64_t)(uintptr_t)rt_array_new(0);
+    int64_t seconds_to_add = timeout_ms / 1000;
+    long deadline_nsec = deadline.tv_nsec + (long)(timeout_ms % 1000) * 1000000L;
+    if (deadline_nsec >= 1000000000L) {
+        ++seconds_to_add;
+        deadline_nsec -= 1000000000L;
+    }
+    int64_t deadline_sec = (int64_t)deadline.tv_sec;
+    if (deadline_sec > INT64_MAX - seconds_to_add)
+        return (int64_t)(uintptr_t)rt_array_new(0);
+    int64_t deadline_sec_sum = deadline_sec + seconds_to_add;
+    time_t converted_deadline_sec = (time_t)deadline_sec_sum;
+    if ((int64_t)converted_deadline_sec != deadline_sec_sum)
+        return (int64_t)(uintptr_t)rt_array_new(0);
+    deadline.tv_sec = converted_deadline_sec;
+    deadline.tv_nsec = deadline_nsec;
+    struct pollfd pfd;
+    pfd.fd = 0;
+    pfd.events = POLLIN;
+    pfd.revents = 0;
+    int ready;
+    int wait_ms = (int)timeout_ms;
+    for (;;) {
+        ready = poll(&pfd, 1, wait_ms);
+        if (ready >= 0 || errno != EINTR) break;
+        struct timespec now;
+        if (clock_gettime(CLOCK_MONOTONIC, &now) != 0) {
+            ready = 0;
+            break;
+        }
+        int64_t remaining_ns =
+            (int64_t)(deadline.tv_sec - now.tv_sec) * INT64_C(1000000000) +
+            (int64_t)(deadline.tv_nsec - now.tv_nsec);
+        if (remaining_ns <= 0) {
+            ready = 0;
+            break;
+        }
+        /* Round up so poll does not report timeout before the deadline. */
+        wait_ms = (int)((remaining_ns + 999999) / 1000000);
+    }
+    if (ready <= 0 || (pfd.revents & (POLLIN | POLLHUP)) == 0)
+        return (int64_t)(uintptr_t)rt_array_new(0);
+    uint8_t* buf = (uint8_t*)malloc((size_t)size);
+    if (!buf) return (int64_t)(uintptr_t)rt_array_new(0);
+    ssize_t n;
+    do {
+        n = read(0, buf, (size_t)size);
+    } while (n < 0 && errno == EINTR);
+    int64_t result = (n > 0)
+        ? core_io_bytes_to_array(buf, (size_t)n)
+        : (int64_t)(uintptr_t)rt_array_new(0);
+    free(buf);
+    return result;
+#endif
+}
+
 /* Read stdin to EOF -> [u8]. */
 int64_t rt_stdin_read_all(void) {
     size_t cap = 65536, len = 0;
@@ -256,12 +295,20 @@ int64_t rt_term_write(int64_t text_value) {
     if (!data) return 0;
 #ifdef _WIN32
     if ((uint64_t)len > (uint64_t)SIZE_MAX) return 0;
-    /* Keep redirected stdout byte-exact without changing global CRT mode.
-     * This locks only the existing C FILE owner, not Rust std::io buffers. */
+    /* Keep redirected stdout byte-exact without changing global CRT mode. */
     int64_t written = 0;
+#if defined(_MSC_VER)
+    /* MSVC exposes the no-lock flush used while this FILE lock is held. */
     _lock_file(stdout);
     int fd = _fileno(stdout);
     if (fd >= 0 && _fflush_nolock(stdout) == 0) {
+#else
+    /* MinGW's ordinary fflush owns its FILE lock. The SRW lock preserves
+     * atomic rt_term_write transactions without recursively taking it. */
+    AcquireSRWLockExclusive(&core_io_stdout_write_lock);
+    int fd = _fileno(stdout);
+    if (fd >= 0 && fflush(stdout) == 0) {
+#endif
         intptr_t raw_handle = _get_osfhandle(fd); /* borrowed: never close */
         if (raw_handle != -1 && raw_handle != -2) {
             while (written < len) {
@@ -274,7 +321,11 @@ int64_t rt_term_write(int64_t text_value) {
             }
         }
     }
+#if defined(_MSC_VER)
     _unlock_file(stdout);
+#else
+    ReleaseSRWLockExclusive(&core_io_stdout_write_lock);
+#endif
     return written;
 #else
     size_t written = fwrite(data, 1, (size_t)len, stdout);
@@ -294,7 +345,7 @@ int32_t rt_term_flush(void) {
 /* st_mtime as whole seconds since the Unix epoch; -1 on failure. */
 static int64_t core_io_mtime_seconds(const char* path) {
 #ifdef _WIN32
-    wchar_t* wpath = core_io_utf8_to_wide(path);
+    wchar_t* wpath = core_utf8_to_wide(path);
     if (!wpath) return -1;
     struct __stat64 st;
     int rc = _wstat64(wpath, &st);
@@ -311,13 +362,13 @@ static int64_t core_io_mtime_seconds(const char* path) {
 /* Deliberately the same contract as rt_file_modified_time (see header). */
 int64_t rt_file_modified(int64_t path_value) {
     char path[4096];
-    if (!core_io_text_arg(path_value, path, sizeof(path))) return -1;
+    if (!core_text_arg(path_value, path, sizeof(path))) return -1;
     return core_io_mtime_seconds(path);
 }
 
 int64_t rt_file_modified_time(int64_t path_value) {
     char path[4096];
-    if (!core_io_text_arg(path_value, path, sizeof(path))) return -1;
+    if (!core_text_arg(path_value, path, sizeof(path))) return -1;
     return core_io_mtime_seconds(path);
 }
 
@@ -334,7 +385,7 @@ static void core_io_list_dir_impl(const char* path, const char* suffix, int64_t*
 #ifdef _WIN32
     char pattern[4096];
     if (snprintf(pattern, sizeof(pattern), "%s\\*", path) >= (int)sizeof(pattern)) return;
-    wchar_t* wpattern = core_io_utf8_to_wide(pattern);
+    wchar_t* wpattern = core_utf8_to_wide(pattern);
     if (!wpattern) return;
     WIN32_FIND_DATAW fd;
     HANDLE h = FindFirstFileW(wpattern, &fd);
@@ -383,8 +434,8 @@ int64_t rt_list_dir_recursive(int64_t path_value, int64_t ext_value) {
     int64_t result = (int64_t)(uintptr_t)rt_array_new(0);
     char path[4096];
     char ext[256];
-    if (!core_io_text_arg(path_value, path, sizeof(path))) return result;
-    if (!core_io_text_arg(ext_value, ext, sizeof(ext) - 1)) ext[0] = '\0';
+    if (!core_text_arg(path_value, path, sizeof(path))) return result;
+    if (!core_text_arg(ext_value, ext, sizeof(ext) - 1)) ext[0] = '\0';
     char suffix[260];
     if (ext[0] == '\0') {
         suffix[0] = '\0';
@@ -402,7 +453,7 @@ int64_t rt_list_dir_recursive(int64_t path_value, int64_t ext_value) {
  * ".." folded against a preceding real segment only. */
 int64_t rt_path_normalize(int64_t path_value) {
     char in[4096];
-    if (!core_io_text_arg(path_value, in, sizeof(in))) return core_io_empty_text();
+    if (!core_text_arg(path_value, in, sizeof(in))) return core_io_empty_text();
     size_t inlen = strlen(in);
     if (inlen == 0) return rt_string_new((const uint8_t*)".", 1);
 
@@ -468,7 +519,7 @@ int64_t rt_path_normalize(int64_t path_value) {
 /* Run cmd through the platform shell; return its exit code, -1 on failure
  * (shell unavailable, launch failure, or child killed by a signal). */
 int64_t rt_shell(int64_t cmd_value) {
-    char* cmd = core_io_text_arg_dup(cmd_value);
+    char* cmd = core_text_arg_dup(cmd_value);
     if (!cmd) return -1;
     int rc = system(cmd);
     free(cmd);
@@ -501,7 +552,7 @@ static int core_io_buf_append(char** buf, size_t* len, size_t* cap,
  * double quotes with embedded quotes backslash-escaped; best-effort on
  * cmd.exe, whose quoting rules are inherently lossy. */
 int64_t rt_process_output(int64_t cmd_value, int64_t args_value) {
-    char* cmd = core_io_text_arg_dup(cmd_value);
+    char* cmd = core_text_arg_dup(cmd_value);
     if (!cmd) return core_io_empty_text();
 
     size_t cap = 4096, len = 0;
@@ -601,7 +652,8 @@ int64_t rt_string_from_byte_array(int64_t array_value) {
         if (byte < 0 || byte > 255) { free(buf); return core_io_empty_text(); }
         buf[i] = (uint8_t)byte;
     }
-    int64_t result = rt_string_new(buf, (uint64_t)len);
+    int64_t result = spl_text_from_utf8_strict(buf, (size_t)len);
+    if (result == SPL_UTF8_TEXT_REJECTED) result = core_io_empty_text(); /* facade: invalid UTF-8 -> "" like Rust */
     free(buf);
     return result;
 }

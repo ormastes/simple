@@ -2,7 +2,10 @@
 # Extracted from mod.spl for modularity
 
 use std.nogc_sync_mut.io.process_governor (proc_slot_acquire, proc_slot_release)
-use std.nogc_sync_mut.fs.host_path.{host_path_native, host_is_windows_host}
+use std.nogc_sync_mut.fs.host_path.{host_path_native, host_is_windows_host, host_path_is_absolute}
+use std.nogc_sync_mut.sffi.process_capture.{process_capture_bounded_native}
+use std.nogc_sync_mut.sffi.process_environment_capture.{process_environment_capture_native_v1, process_environment_spawn_native_v1, process_capture_admitted_native_v1, process_capture_observed_native_v1}
+use std.nogc_sync_mut.io.time_ops.time_sample_unix_micros_or_failure
 use std.nogc_sync_mut.io.windows_redirected_process.{WINDOWS_REDIRECTED_TOKEN_BASE, windows_redirected_spawn, windows_redirected_wait, windows_redirected_is_running, windows_redirected_kill}
 use std.common.process.observation_v1.{
     ProcessObservationProviderV1, ObservedProcessStartStatusV1,
@@ -11,7 +14,8 @@ use std.common.process.observation_v1.{
     ObservedProcessRequestV1, ObservedProcessPollV1, ObservedProcessResultV1,
     ObservedProcessStreamV1, ObservedProcessRusageV1, ObservedExecutablePinV1,
     observed_process_empty_stream_v1, observed_process_empty_rusage_v1,
-    observed_process_empty_pin_v1, observed_process_result_status_v1
+    observed_process_empty_pin_v1, observed_process_result_status_v1,
+    observed_process_collect_retired_v1
 }
 use std.common.process.observation_v4.{
     PROCESS_OBSERVATION_V4_VERSION, PROCESS_OBSERVATION_V4_WORDS,
@@ -39,8 +43,16 @@ extern fn rt_stderr_write(s: text)
 extern fn rt_process_run(cmd: text, args: [text]) -> (text, text, i64)
 @unsafe(reason: "raw bounded process capture; exit_code -1 is the failure sentinel and output is contract-bounded", capabilities: [ffi])
 extern fn rt_process_run_bounded(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> (text, text, i64)
+@unsafe(reason: "select boxed interpreter capture or native pointer-and-length capture ABI", capabilities: [ffi])
+extern fn rt_is_interpreter_runtime() -> bool
+@unsafe(reason: "seed JIT retains the boxed process adapter even when native AOT uses the pointer-and-length ABI", capabilities: [ffi])
+extern fn rt_is_jit_runtime() -> bool
 @unsafe(reason: "raw bounded process bytes are admitted by the caller's explicit text codec", capabilities: [ffi])
 extern fn rt_process_run_bounded_bytes(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> ([u8], [u8], i64)
+@unsafe(reason: "raw peak-RSS ABI; -1 means the last child was not measured", capabilities: [ffi])
+extern fn rt_process_last_child_peak_rss_kib() -> i64
+@unsafe(reason: "raw child-CPU ABI; -1 means the last child was not measured", capabilities: [ffi])
+extern fn rt_process_last_child_cpu_ms() -> i64
 
 # Owned-process V3 opaque bridge declarations.  The runtime owns the adapter
 # table and the underlying RtOwnedProcessTokenV2; the only authority visible
@@ -65,7 +77,7 @@ extern fn rt_process_pin_executable_owned_value(path: text) -> i64
 @unsafe(reason: "native executable pin close; interpreter rejects this provider", capabilities: [ffi])
 extern fn rt_process_close_pinned_executable_owned_value(handle: i64) -> i32
 @unsafe(reason: "native executable image digest; interpreter rejects this provider", capabilities: [ffi])
-extern fn rt_process_pinned_executable_sha256_value(handle: i64) -> [u8]
+extern fn rt_process_pinned_executable_sha256_value(handle: i64) -> [u8]?
 @unsafe(reason: "native-owned opaque pinned process start; interpreter rejects this provider", capabilities: [ffi])
 extern fn rt_process_owned_v3_start_pinned_value(handle: i64, args: [text], input: [u8], timeout_ms: i64, term_grace_ms: i64, max_output_bytes: i64) -> [i64]
 @unsafe(reason: "native observation capability projection; query has no process side effect", capabilities: [ffi])
@@ -82,18 +94,34 @@ extern fn rt_process_observation_v4_pin_cwd_value(path: text) -> i64
 extern fn rt_process_observation_v4_cwd_digest_value(handle: i64) -> [u8]
 @unsafe(reason: "native sealed cwd identity close", capabilities: [ffi])
 extern fn rt_process_observation_v4_close_cwd_value(handle: i64) -> i32
+@unsafe(reason: "bounded native reservation before any child effect", capabilities: [ffi])
+extern fn rt_process_observation_v4_reserve_value() -> i64
+@unsafe(reason: "validate receipt identity against retained native reservation", capabilities: [ffi])
+extern fn rt_process_observation_v4_reserved_matches_value(token: i64, rh: i64, rl: i64, th: i64, tl: i64) -> i64
+@unsafe(reason: "query exact retained reservation state", capabilities: [ffi])
+extern fn rt_process_observation_v4_reserved_state_value(token: i64) -> i64
+@unsafe(reason: "at most one start under preexisting reservation authority", capabilities: [ffi])
+extern fn rt_process_observation_v4_reserved_start_pinned_value(token: i64, executable: i64, cwd: i64, binding: [u8]) -> i64
+@unsafe(reason: "same retained reservation with final Unix submission deadline admission", capabilities: [ffi])
+extern fn rt_process_observation_v5_reserved_start_admitted_value(token: i64, executable: i64, cwd: i64, binding: [u8], expires_at_unix_ms: i64) -> i64
+@unsafe(reason: "nullable observation cannot consume reservation authority", capabilities: [ffi])
+extern fn rt_process_observation_v4_reserved_observe_value(token: i64, wait_ns: i64, retire: i64) -> [[i64]]
+@unsafe(reason: "idempotent frozen acknowledgement retained until confirmation", capabilities: [ffi])
+extern fn rt_process_observation_v4_reserved_ack_value(token: i64, digest: [u8]) -> [[i64]]
+@unsafe(reason: "scalar explicit terminal reservation release", capabilities: [ffi])
+extern fn rt_process_observation_v4_reserved_confirm_release_value(token: i64) -> i64
 @unsafe(reason: "native V4 unpinned start is an explicit unavailable receipt", capabilities: [ffi])
-extern fn rt_process_observation_v4_start_value(binding: [u8]) -> ([u8], [u8], [u8], [i64])
+extern fn rt_process_observation_v4_start_value(binding: [u8]) -> [[i64]]
 @unsafe(reason: "native exact pinned V4 process start", capabilities: [ffi])
-extern fn rt_process_observation_v4_start_pinned_value(exec_handle: i64, cwd_handle: i64, binding: [u8]) -> ([u8], [u8], [u8], [i64])
+extern fn rt_process_observation_v4_start_pinned_value(exec_handle: i64, cwd_handle: i64, binding: [u8]) -> [[i64]]
 @unsafe(reason: "native V4 process observation poll", capabilities: [ffi])
-extern fn rt_process_observation_v4_poll_value(ticket: [i64], caller_wait_ns: i64) -> ([u8], [u8], [u8], [i64])
+extern fn rt_process_observation_v4_poll_value(ticket: [i64], caller_wait_ns: i64) -> [[i64]]
 @unsafe(reason: "native V4 absolute-deadline cancellation", capabilities: [ffi])
-extern fn rt_process_observation_v4_cancel_value(ticket: [i64], caller_wait_ns: i64) -> ([u8], [u8], [u8], [i64])
+extern fn rt_process_observation_v4_cancel_value(ticket: [i64], caller_wait_ns: i64) -> [[i64]]
 @unsafe(reason: "native V4 two-phase frozen collection", capabilities: [ffi])
-extern fn rt_process_observation_v4_collect_value(ticket: [i64], caller_wait_ns: i64) -> ([u8], [u8], [u8], [i64])
+extern fn rt_process_observation_v4_collect_value(ticket: [i64], caller_wait_ns: i64) -> [[i64]]
 @unsafe(reason: "native V4 exact frozen digest acknowledgement", capabilities: [ffi])
-extern fn rt_process_observation_v4_ack_collect_value(ticket: [i64], digest: [u8]) -> ([u8], [u8], [u8], [i64])
+extern fn rt_process_observation_v4_ack_collect_value(ticket: [i64], digest: [u8]) -> [[i64]]
 @unsafe(reason: "native exact pinned inspection start copies and binds stdin before spawn", capabilities: [ffi])
 extern fn rt_process_inspection_v1_start_pinned_value(exec_handle: i64, cwd_handle: i64, binding: [u8], input: [u8], expected_digest: [u8]) -> ([u8], [u8], [u8], [i64])
 @unsafe(reason: "native same-ticket input delivery and digest receipt", capabilities: [ffi])
@@ -145,6 +173,7 @@ pub class OwnedExecutablePin:
     handle: i64
     var closed: bool
 
+    @representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in pin", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
     pub static fn pin(path: text) -> Result<OwnedExecutablePin, text>:
         val handle = unsafe(capabilities: [ffi]):
             rt_process_pin_executable_owned_value(host_path_native(path))
@@ -152,20 +181,25 @@ pub class OwnedExecutablePin:
             return Err("owned executable pin was rejected")
         Ok(OwnedExecutablePin(handle: handle, closed: false))
 
+    @representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in digest", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
     pub fn digest(self) -> Result<[u8], text>:
         if self.closed:
             return Err("owned executable pin is closed")
-        val digest = unsafe(capabilities: [ffi]):
+        val digest: [u8]? = unsafe(capabilities: [ffi]):
             rt_process_pinned_executable_sha256_value(self.handle)
-        if digest.len() != OWNED_EXECUTABLE_SHA256_BYTES:
+        if digest == None:
+            return Err("owned executable pin has no digest (no pin or stale pin)")
+        val bytes = digest.unwrap()
+        if bytes.len() != OWNED_EXECUTABLE_SHA256_BYTES:
             return Err("owned executable pin returned an invalid SHA-256 digest")
-        Ok(digest)
+        Ok(bytes)
 
     pub fn start(self, args: [text], input: [u8], timeout_ms: i64, term_grace_ms: i64, max_output_bytes: i64) -> Result<OwnedProcessReceipt, text>:
         if self.closed:
             return Err("owned executable pin is closed")
         process_owned_start_pinned_v3(self, args, input, timeout_ms, term_grace_ms, max_output_bytes)
 
+    @representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in close", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
     me fn close() -> Result<bool, text>:
         if self.closed:
             return Ok(true)
@@ -255,6 +289,7 @@ pub class OwnedProcessLease:
     pub static fn start(command: text, args: [text], input: [u8], timeout_ms: i64, term_grace_ms: i64, max_output_bytes: i64) -> Result<OwnedProcessReceipt, text>:
         process_owned_start_v3(command, args, input, timeout_ms, term_grace_ms, max_output_bytes)
 
+    @representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in poll", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
     pub fn poll(self, wait_ms: i64, stdout_capacity: i64, stderr_capacity: i64) -> Result<OwnedProcessPoll, text>:
         val handle = _owned_v3_live_handle(self)?
         val (stdout, stderr, raw) = unsafe(capabilities: [ffi]):
@@ -270,6 +305,7 @@ pub class OwnedProcessLease:
             stderr_kept: words[13], stdout_delivered: words[14], stderr_delivered: words[15],
             runtime_error: words[16]))
 
+    @representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in input_receipt", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
     pub fn input_receipt(self) -> Result<OwnedProcessInputReceipt, text>:
         val handle = _owned_v3_live_handle(self)?
         val raw = unsafe(capabilities: [ffi]): rt_process_owned_v3_input_value(handle)
@@ -284,6 +320,7 @@ pub class OwnedProcessLease:
             stdin_closed: _owned_v3_bool(words[3]), terminal: _owned_v3_bool(words[4]),
             reaped: _owned_v3_bool(words[5]), runtime_error: words[6], digest: digest))
 
+    @representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in cancel", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
     pub fn cancel(self) -> Result<OwnedProcessCancelReceipt, text>:
         val handle = _owned_v3_live_handle(self)?
         val raw = unsafe(capabilities: [ffi]): rt_process_owned_v3_cancel_value(handle)
@@ -292,6 +329,7 @@ pub class OwnedProcessLease:
             version: words[0], accepted: _owned_v3_bool(words[1]),
             term_sent: _owned_v3_bool(words[2]), runtime_error: words[3]))
 
+    @representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in result", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
     pub fn result(self) -> Result<OwnedProcessResult, text>:
         val handle = _owned_v3_live_handle(self)?
         val raw = unsafe(capabilities: [ffi]): rt_process_owned_v3_result_value(handle)
@@ -300,6 +338,7 @@ pub class OwnedProcessLease:
 
     # Public owner acknowledgement: callers retain the lease and must collect
     # a reaped process before releasing its native record.
+    @representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in collect", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
     pub me fn collect() -> Result<OwnedProcessResult, text>:
         val handle = _owned_v3_live_handle(self)?
         val raw = unsafe(capabilities: [ffi]): rt_process_owned_v3_collect_value(handle)
@@ -312,6 +351,7 @@ pub class OwnedProcessLease:
 
     # Explicitly release a terminal lease. Running leases remain owned and
     # cannot be released until collection has reaped the child.
+    @representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in release", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
     pub me fn release() -> Result<bool, text>:
         if self.released:
             return Ok(true)
@@ -331,6 +371,7 @@ fn _owned_v3_result_from_words(words: [i64]) -> OwnedProcessResult:
         stderr_truncated: _owned_v3_bool(words[9]), stdout_seen: words[10], stderr_seen: words[11],
         stdout_kept: words[12], stderr_kept: words[13], runtime_error: words[14])
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in process_owned_start_v3", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 pub fn process_owned_start_v3(command: text, args: [text], input: [u8], timeout_ms: i64, term_grace_ms: i64, max_output_bytes: i64) -> Result<OwnedProcessReceipt, text>:
     val raw = unsafe(capabilities: [ffi]):
         rt_process_owned_v3_start_value(command, args, input, timeout_ms, term_grace_ms, max_output_bytes)
@@ -346,6 +387,7 @@ pub fn process_owned_start_v3(command: text, args: [text], input: [u8], timeout_
         lease: OwnedProcessLease(handle: words[0], released: false, collected: false),
         version: words[1], accepted: accepted, runtime_error: words[3]))
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in process_owned_start_pinned_v3", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 pub fn process_owned_start_pinned_v3(pin: OwnedExecutablePin, args: [text], input: [u8], timeout_ms: i64, term_grace_ms: i64, max_output_bytes: i64) -> Result<OwnedProcessReceipt, text>:
     if pin.closed:
         return Err("owned executable pin is closed")
@@ -363,6 +405,10 @@ pub fn process_owned_start_pinned_v3(pin: OwnedExecutablePin, args: [text], inpu
         lease: OwnedProcessLease(handle: words[0], released: false, collected: false),
         version: words[1], accepted: accepted, runtime_error: words[3]))
 
+pub enum ObservationPinMode:
+    Unpinned
+    Pinned
+
 # Process-observation V1 authority boundary. This owner deliberately has no
 # public constructor and never exposes the runtime handle.
 pub class ProcessObservationOwnerV1:
@@ -371,7 +417,7 @@ pub class ProcessObservationOwnerV1:
     pid: i64
     deadline_ms: i64
     term_grace_ms: i64
-    pinned: bool
+    pin_mode: ObservationPinMode
     pin_digest: [u8]
     var stdout_bytes: [u8]
     var stderr_bytes: [u8]
@@ -387,6 +433,12 @@ pub class ProcessObservationOwnerV1:
     var kill_sent: bool
     var reaped: bool
     var output_complete: bool
+    var output_complete_observed: bool = false
+    var stream_counts_observed: bool = false
+    var terminal_observed: Option<bool> = None
+    var identity_revalidated: Option<bool> = None
+    var cancel_requested: Option<bool> = None
+    var native_error: Option<i64> = None
     var eintr_retries: i64
     var consumed: bool
 
@@ -399,6 +451,29 @@ pub struct ObservedProcessStartV1:
     lease: ObservedProcessLeaseV1
     failure_reason: ObservedProcessFailureReasonV1
 
+fn _process_observation_owner_v1(
+    provider: ProcessObservationProviderV1,
+    handle: i64,
+    pid: i64,
+    deadline_ms: i64,
+    term_grace_ms: i64,
+    pin_mode: ObservationPinMode,
+    digest: [u8]
+) -> ProcessObservationOwnerV1:
+    ProcessObservationOwnerV1(
+        provider: provider, handle: handle, pid: pid,
+        deadline_ms: deadline_ms, term_grace_ms: term_grace_ms,
+        pin_mode: pin_mode, pin_digest: digest,
+        stdout_bytes: [], stderr_bytes: [], stdout_seen: 0, stderr_seen: 0,
+        stdout_kept: 0, stderr_kept: 0, stdout_truncated: false,
+        stderr_truncated: false, terminal: false, deadline_exceeded: false,
+        term_sent: false, kill_sent: false, reaped: false,
+        output_complete: false,
+        output_complete_observed: false, stream_counts_observed: false,
+        terminal_observed: None, identity_revalidated: None,
+        cancel_requested: None, native_error: None,
+        eintr_retries: 0, consumed: false)
+
 fn _process_observation_empty_start_v1(
     provider: ProcessObservationProviderV1,
     status: ObservedProcessStartStatusV1,
@@ -407,20 +482,13 @@ fn _process_observation_empty_start_v1(
     ObservedProcessStartV1(
         status: status,
         spawned: false, pid: 0,
-        lease: ProcessObservationOwnerV1(
-            provider: provider, handle: 0, pid: 0, deadline_ms: 0,
-            term_grace_ms: 0, pinned: false, pin_digest: [],
-            stdout_bytes: [], stderr_bytes: [], stdout_seen: 0,
-            stderr_seen: 0, stdout_kept: 0, stderr_kept: 0,
-            stdout_truncated: false, stderr_truncated: false,
-            terminal: false, deadline_exceeded: false, term_sent: false,
-            kill_sent: false, reaped: false, output_complete: false,
-            eintr_retries: 0,
-            consumed: false),
+        lease: _process_observation_owner_v1(
+            provider, 0, 0, 0, 0, ObservationPinMode.Unpinned, []),
         failure_reason: reason)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _process_observation_provider_available_v1", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 fn _process_observation_provider_available_v1() -> bool:
-    val words = unsafe(capabilities: [ffi]):
+    val words: [i64] = unsafe(capabilities: [ffi]):
         rt_process_owned_v3_capabilities_value()
     words.len() == PROCESS_OBSERVATION_CAPABILITIES_WORDS_V1 and
         words[0] == PROCESS_OBSERVATION_ADAPTER_VERSION_V1 and
@@ -468,40 +536,34 @@ fn _process_observation_live_owner_v1(
     request: ObservedProcessRequestV1,
     handle: i64,
     pid: i64,
-    pinned: bool,
+    pin_mode: ObservationPinMode,
     digest: [u8]
 ) -> ProcessObservationOwnerV1:
-    ProcessObservationOwnerV1(
-        provider: provider, handle: handle, pid: pid,
-        deadline_ms: request.deadline_ms, term_grace_ms: request.term_grace_ms,
-        pinned: pinned, pin_digest: digest,
-        stdout_bytes: [], stderr_bytes: [], stdout_seen: 0, stderr_seen: 0,
-        stdout_kept: 0, stderr_kept: 0, stdout_truncated: false,
-        stderr_truncated: false, terminal: false, deadline_exceeded: false,
-        term_sent: false, kill_sent: false, reaped: false,
-        output_complete: false, eintr_retries: 0,
-        consumed: false)
+    _process_observation_owner_v1(
+        provider, handle, pid, request.deadline_ms, request.term_grace_ms,
+        pin_mode, digest)
 
 fn _process_observation_cleanup_pending_start_v1(
     provider: ProcessObservationProviderV1,
     request: ObservedProcessRequestV1,
     handle: i64,
     pid: i64,
-    pinned: bool,
+    pin_mode: ObservationPinMode,
     digest: [u8]
 ) -> ObservedProcessStartV1:
     ObservedProcessStartV1(
         status: ObservedProcessStartStatusV1.CleanupPending,
         spawned: true, pid: pid,
         lease: _process_observation_live_owner_v1(
-            provider, request, handle, pid, pinned, digest),
+            provider, request, handle, pid, pin_mode, digest),
         failure_reason: ObservedProcessFailureReasonV1.CleanupIncomplete)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _process_observation_finish_start_v1", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 fn _process_observation_finish_start_v1(
     provider: ProcessObservationProviderV1,
     request: ObservedProcessRequestV1,
     words: [i64],
-    pinned: bool,
+    pin_mode: ObservationPinMode,
     digest: [u8]
 ) -> ObservedProcessStartV1:
     if words.len() != OWNED_PROCESS_V3_START_WORDS or words[1] != 1:
@@ -510,7 +572,7 @@ fn _process_observation_finish_start_v1(
             ObservedProcessFailureReasonV1.MalformedReceipt)
     if words[2] != 1 or words[0] <= 0:
         return _process_observation_start_failure_v1(provider, words[3])
-    val limits = unsafe(capabilities: [ffi]):
+    val limits: [i64] = unsafe(capabilities: [ffi]):
         rt_process_owned_v3_set_capture_limits_value(
             words[0], request.stdout_limit, request.stderr_limit)
     if limits.len() != PROCESS_OBSERVATION_LIMIT_WORDS_V1 or
@@ -519,8 +581,8 @@ fn _process_observation_finish_start_v1(
         val _cancel = unsafe(capabilities: [ffi]):
             rt_process_owned_v3_cancel_value(words[0])
         return _process_observation_cleanup_pending_start_v1(
-            provider, request, words[0], 0, pinned, digest)
-    val metadata = unsafe(capabilities: [ffi]):
+            provider, request, words[0], 0, pin_mode, digest)
+    val metadata: [i64] = unsafe(capabilities: [ffi]):
         rt_process_owned_v3_observation_value(words[0])
     if metadata.len() != PROCESS_OBSERVATION_METADATA_WORDS_V1 or
        metadata[0] != PROCESS_OBSERVATION_ADAPTER_VERSION_V1 or
@@ -529,9 +591,9 @@ fn _process_observation_finish_start_v1(
         val _cancel = unsafe(capabilities: [ffi]):
             rt_process_owned_v3_cancel_value(words[0])
         return _process_observation_cleanup_pending_start_v1(
-            provider, request, words[0], 0, pinned, digest)
+            provider, request, words[0], 0, pin_mode, digest)
     val owner = _process_observation_live_owner_v1(
-        provider, request, words[0], metadata[1], pinned, digest)
+        provider, request, words[0], metadata[1], pin_mode, digest)
     ObservedProcessStartV1(
         status: ObservedProcessStartStatusV1.Started, spawned: true,
         pid: metadata[1], lease: owner,
@@ -578,13 +640,13 @@ pub(package) fn process_observation_owner_start_v1(
                 request.stdout_limit + request.stderr_limit)
         val _closed: Result<bool, text> = pin.close()
         return _process_observation_finish_start_v1(
-            provider, request, raw, true, digest_result.unwrap())
+            provider, request, raw, ObservationPinMode.Pinned, digest_result.unwrap())
     val raw = unsafe(capabilities: [ffi]):
         rt_process_owned_v3_start_value(
             request.command, request.args, [], request.deadline_ms,
             request.term_grace_ms,
             request.stdout_limit + request.stderr_limit)
-    _process_observation_finish_start_v1(provider, request, raw, false, [])
+    _process_observation_finish_start_v1(provider, request, raw, ObservationPinMode.Unpinned, [])
 
 pub(package) fn process_observation_owner_start_pinned_v1(
     pin: OwnedExecutablePin,
@@ -610,7 +672,7 @@ pub(package) fn process_observation_owner_start_pinned_v1(
             request.term_grace_ms,
             request.stdout_limit + request.stderr_limit)
     _process_observation_finish_start_v1(
-        provider, request, raw, true, digest_result.unwrap())
+        provider, request, raw, ObservationPinMode.Pinned, digest_result.unwrap())
 
 fn _process_observation_append_v1(target: [u8], chunk: [u8]):
     var i = 0
@@ -646,34 +708,49 @@ fn _process_observation_poll_receipt_v1(
             lease.stderr_truncated))
 
 pub(package) fn process_observation_owner_poll_v1(
-    lease: ObservedProcessLeaseV1,
+    lease: ObservedProcessLeaseV1, wait_ms: i64,
+    stdout_capacity: i64, stderr_capacity: i64
+) -> ObservedProcessPollV1:
+    process_observation_owner_poll_turn_v1(lease, wait_ms, stdout_capacity, stderr_capacity).1
+
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in process_observation_owner_poll_turn_v1", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+fn process_observation_owner_poll_turn_v1(
+    initial: ObservedProcessLeaseV1,
     wait_ms: i64,
     stdout_capacity: i64,
     stderr_capacity: i64
-) -> ObservedProcessPollV1:
+) -> (ObservedProcessLeaseV1, ObservedProcessPollV1):
+    var lease = initial
     if lease.provider == ProcessObservationProviderV1.Unsupported:
-        return _process_observation_poll_receipt_v1(
+        return (lease, _process_observation_poll_receipt_v1(
             lease, ObservedProcessPollStatusV1.Unsupported,
-            ObservedProcessFailureReasonV1.None, [], [])
+            ObservedProcessFailureReasonV1.None, [], []))
     if lease.consumed or lease.handle <= 0:
-        return _process_observation_poll_receipt_v1(
+        return (lease, _process_observation_poll_receipt_v1(
             lease, ObservedProcessPollStatusV1.ReuseRejected,
-            ObservedProcessFailureReasonV1.None, [], [])
+            ObservedProcessFailureReasonV1.None, [], []))
     if wait_ms < 0 or wait_ms > PROCESS_OBSERVATION_MAX_POLL_MS_V1 or
        stdout_capacity < 0 or stdout_capacity > PROCESS_OBSERVATION_POLL_BYTES_V1 or
        stderr_capacity < 0 or stderr_capacity > PROCESS_OBSERVATION_POLL_BYTES_V1:
-        return _process_observation_poll_receipt_v1(
+        return (lease, _process_observation_poll_receipt_v1(
             lease, ObservedProcessPollStatusV1.Malformed,
-            ObservedProcessFailureReasonV1.InvalidRequest, [], [])
+            ObservedProcessFailureReasonV1.InvalidRequest, [], []))
     val (stdout_chunk, stderr_chunk, words) = unsafe(capabilities: [ffi]):
         rt_process_owned_v3_poll_value(
             lease.handle, wait_ms, stdout_capacity, stderr_capacity)
     if words.len() != OWNED_PROCESS_V3_POLL_WORDS or words[0] != 1:
-        return _process_observation_poll_receipt_v1(
+        return (lease, _process_observation_poll_receipt_v1(
             lease, ObservedProcessPollStatusV1.Malformed,
-            ObservedProcessFailureReasonV1.MalformedReceipt, [], [])
-    _process_observation_append_v1(lease.stdout_bytes, stdout_chunk)
-    _process_observation_append_v1(lease.stderr_bytes, stderr_chunk)
+            ObservedProcessFailureReasonV1.MalformedReceipt, [], []))
+    for byte in stdout_chunk: lease.stdout_bytes.push(byte)
+    for byte in stderr_chunk: lease.stderr_bytes.push(byte)
+    lease.native_error = Some(words[16])
+    lease.stream_counts_observed = words[16] == 0
+    lease.terminal_observed = None
+    lease.cancel_requested = None
+    if words[16] == 0:
+        lease.terminal_observed = Some(words[2] != 0)
+        lease.cancel_requested = Some(words[3] != 0)
     lease.terminal = words[2] != 0
     lease.deadline_exceeded = words[4] != 0
     lease.term_sent = words[5] != 0
@@ -685,86 +762,114 @@ pub(package) fn process_observation_owner_poll_v1(
     lease.stderr_seen = words[11]
     lease.stdout_kept = words[12]
     lease.stderr_kept = words[13]
-    val metadata = unsafe(capabilities: [ffi]):
+    val metadata: [i64] = unsafe(capabilities: [ffi]):
         rt_process_owned_v3_observation_value(lease.handle)
     if metadata.len() == PROCESS_OBSERVATION_METADATA_WORDS_V1 and
        metadata[0] == PROCESS_OBSERVATION_ADAPTER_VERSION_V1:
         lease.eintr_retries = metadata[13]
         lease.output_complete =
             (metadata[4] & PROCESS_OBSERVATION_OUTPUT_EOF_V1) != 0
+        lease.output_complete_observed = metadata[14] == 0 or metadata[14] == PROCESS_OBSERVATION_EAGAIN_V1
     if words[16] == PROCESS_OBSERVATION_ESTALE_V1:
-        return _process_observation_poll_receipt_v1(
+        return (lease, _process_observation_poll_receipt_v1(
             lease, ObservedProcessPollStatusV1.ReuseRejected,
-            ObservedProcessFailureReasonV1.None, stdout_chunk, stderr_chunk)
+            ObservedProcessFailureReasonV1.None, stdout_chunk, stderr_chunk))
     if words[16] == PROCESS_OBSERVATION_ENOTSUP_V1:
-        return _process_observation_poll_receipt_v1(
+        return (lease, _process_observation_poll_receipt_v1(
             lease, ObservedProcessPollStatusV1.Unsupported,
-            ObservedProcessFailureReasonV1.None, stdout_chunk, stderr_chunk)
+            ObservedProcessFailureReasonV1.None, stdout_chunk, stderr_chunk))
     if words[16] != 0:
-        return _process_observation_poll_receipt_v1(
+        return (lease, _process_observation_poll_receipt_v1(
             lease, ObservedProcessPollStatusV1.ProviderFailed,
-            ObservedProcessFailureReasonV1.WaitFailed, stdout_chunk, stderr_chunk)
-    _process_observation_poll_receipt_v1(
+            ObservedProcessFailureReasonV1.WaitFailed, stdout_chunk, stderr_chunk))
+    (lease, _process_observation_poll_receipt_v1(
         lease, ObservedProcessPollStatusV1.Polled,
-        ObservedProcessFailureReasonV1.None, stdout_chunk, stderr_chunk)
+        ObservedProcessFailureReasonV1.None, stdout_chunk, stderr_chunk))
 
 pub(package) fn process_observation_owner_collect_v1(
     lease: ObservedProcessLeaseV1
 ) -> ObservedProcessResultV1:
+    process_observation_owner_capture_collect_v1(lease).1
+
+pub(package) fn process_observation_owner_capture_collect_v1(
+    initial: ObservedProcessLeaseV1
+) -> (ObservedProcessLeaseV1, ObservedProcessResultV1):
+    var lease = initial
     if lease.provider == ProcessObservationProviderV1.Unsupported:
-        return _process_observation_result_error_v1(
+        return (lease, _process_observation_result_error_v1(
             lease, ObservedProcessResultStatusV1.Unsupported,
-            ObservedProcessFailureReasonV1.None)
+            ObservedProcessFailureReasonV1.None))
     if lease.consumed or lease.handle <= 0:
-        return _process_observation_result_error_v1(
+        return (lease, _process_observation_result_error_v1(
             lease, ObservedProcessResultStatusV1.ReuseRejected,
-            ObservedProcessFailureReasonV1.None)
+            ObservedProcessFailureReasonV1.None))
     var turns = (lease.deadline_ms + lease.term_grace_ms +
         PROCESS_OBSERVATION_DRAIN_RESERVE_MS_V1) / 25 + 4
     var drained = false
     while turns > 0 and not drained:
-        val polled = process_observation_owner_poll_v1(
+        val advanced = process_observation_owner_poll_turn_v1(
             lease, 25, PROCESS_OBSERVATION_POLL_BYTES_V1,
             PROCESS_OBSERVATION_POLL_BYTES_V1)
+        lease = advanced.0
+        val polled = advanced.1
         if polled.status != ObservedProcessPollStatusV1.Polled:
-            return _process_observation_result_error_v1(
+            return (lease, _process_observation_result_error_v1(
                 lease, ObservedProcessResultStatusV1.ProviderFailed,
-                polled.failure_reason)
+                polled.failure_reason))
         drained = polled.terminal and
             lease.stdout_bytes.len() == lease.stdout_kept and
             lease.stderr_bytes.len() == lease.stderr_kept
         turns = turns - 1
     if not drained:
-        return _process_observation_result_error_v1(
+        return (lease, _process_observation_result_error_v1(
             lease, ObservedProcessResultStatusV1.CleanupPending,
-            ObservedProcessFailureReasonV1.CleanupIncomplete)
-    val metadata = unsafe(capabilities: [ffi]):
+            ObservedProcessFailureReasonV1.CleanupIncomplete))
+    val metadata: [i64] = unsafe(capabilities: [ffi]):
         rt_process_owned_v3_observation_value(lease.handle)
     if metadata.len() != PROCESS_OBSERVATION_METADATA_WORDS_V1 or
        metadata[0] != PROCESS_OBSERVATION_ADAPTER_VERSION_V1 or
        metadata[14] != 0:
-        return _process_observation_result_error_v1(
+        return (lease, _process_observation_result_error_v1(
             lease, ObservedProcessResultStatusV1.ProviderFailed,
-            ObservedProcessFailureReasonV1.MalformedReceipt)
-    val words = unsafe(capabilities: [ffi]):
+            ObservedProcessFailureReasonV1.MalformedReceipt))
+    val words: [i64] = unsafe(capabilities: [ffi]):
         rt_process_owned_v3_collect_value(lease.handle)
     if words.len() != OWNED_PROCESS_V3_RESULT_WORDS or words[0] != 1:
-        return _process_observation_result_error_v1(
+        return (lease, _process_observation_result_error_v1(
             lease, ObservedProcessResultStatusV1.Malformed,
-            ObservedProcessFailureReasonV1.MalformedReceipt)
+            ObservedProcessFailureReasonV1.MalformedReceipt))
+    lease.native_error = Some(words[14])
+    lease.identity_revalidated = Some(words[6] != 0)
+    lease.cancel_requested = Some(words[3] != 0)
+    lease.deadline_exceeded = words[2] != 0
+    lease.term_sent = words[4] != 0
+    lease.kill_sent = words[5] != 0
+    lease.reaped = words[7] != 0
+    lease.stdout_truncated = words[8] != 0
+    lease.stderr_truncated = words[9] != 0
+    lease.stdout_seen = words[10]
+    lease.stderr_seen = words[11]
+    lease.stdout_kept = words[12]
+    lease.stderr_kept = words[13]
+    # The existing V3 adapter retires exactly this terminal collect outcome,
+    # including a reaped terminal provider error (POSIX and Windows adapters).
+    # Preserve that actual consumption before returning an error receipt.
+    if observed_process_collect_retired_v1(words[7] != 0, words[14]):
+        lease.consumed = true
+    lease.stream_counts_observed = words[14] == 0 or lease.consumed
     if words[14] == PROCESS_OBSERVATION_EAGAIN_V1 or
        words[14] == PROCESS_OBSERVATION_EBUSY_V1:
-        return _process_observation_result_error_v1(
+        return (lease, _process_observation_result_error_v1(
             lease, ObservedProcessResultStatusV1.CleanupPending,
-            ObservedProcessFailureReasonV1.CleanupIncomplete)
+            ObservedProcessFailureReasonV1.CleanupIncomplete))
     if words[14] != 0:
-        return _process_observation_result_error_v1(
+        return (lease, _process_observation_result_error_v1(
             lease, ObservedProcessResultStatusV1.ProviderFailed,
-            ObservedProcessFailureReasonV1.WaitFailed)
+            ObservedProcessFailureReasonV1.WaitFailed))
     lease.consumed = true
     val rusage_available =
         (metadata[4] & PROCESS_OBSERVATION_DIRECT_RUSAGE_V1) != 0
-    ObservedProcessResultV1(
+    (lease, ObservedProcessResultV1(
         status: ObservedProcessResultStatusV1.Collected,
         pid: metadata[1],
         exit_code: if metadata[12] == 0: words[1] else: -1,
@@ -782,9 +887,13 @@ pub(package) fn process_observation_owner_collect_v1(
             user_cpu_ms: metadata[5], system_cpu_ms: metadata[6],
             max_rss_kib: metadata[7] / 1024, available: rusage_available),
         executable_pin: ObservedExecutablePinV1(
-            pinned: lease.pinned, replacement_known: false,
+            pinned: lease.pin_mode == ObservationPinMode.Pinned, replacement_known: false,
             replacement_detected: false, digest: lease.pin_digest),
-        failure_reason: ObservedProcessFailureReasonV1.None)
+        failure_reason: ObservedProcessFailureReasonV1.None,
+        output_complete_observed: true, stream_counts_observed: true,
+        terminal_observed: lease.terminal_observed,
+        identity_revalidated: Some(words[6] != 0), cancel_requested: Some(words[3] != 0),
+        native_error: Some(words[14]), native_retired: lease.consumed))
 
 fn _process_observation_result_error_v1(
     lease: ObservedProcessLeaseV1,
@@ -805,10 +914,55 @@ fn _process_observation_result_error_v1(
             lease.stderr_truncated),
         rusage: observed_process_empty_rusage_v1(),
         executable_pin: ObservedExecutablePinV1(
-            pinned: lease.pinned, replacement_known: false,
+            pinned: lease.pin_mode == ObservationPinMode.Pinned, replacement_known: false,
             replacement_detected: false, digest: lease.pin_digest),
-        failure_reason: reason)
-use std.io_runtime.{env_get, env_get_nullable, read_file_text_result}
+        failure_reason: reason, output_complete_observed: lease.output_complete_observed,
+        stream_counts_observed: lease.stream_counts_observed,
+        terminal_observed: lease.terminal_observed,
+        identity_revalidated: lease.identity_revalidated, cancel_requested: lease.cancel_requested,
+        native_error: lease.native_error, native_retired: lease.consumed)
+
+# Narrow same-owner cancellation for the receipt-preserving capture facade.
+# No new native export or executor; errors leave the actual owner retained.
+pub(package) fn process_observation_owner_capture_cancel_v1(initial: ProcessObservationOwnerV1
+) -> (ProcessObservationOwnerV1, Result<OwnedProcessCancelReceipt, text>):
+    var lease = initial
+    if lease.provider == ProcessObservationProviderV1.Unsupported: return (lease, Err("process capture observation provider unsupported"))
+    if lease.consumed or lease.handle <= 0: return (lease, Err("process capture observation owner retired"))
+    val raw: [i64] = unsafe(capabilities: [ffi]): rt_process_owned_v3_cancel_value(lease.handle)
+    val decoded = _owned_v3_words(raw, OWNED_PROCESS_V3_CANCEL_WORDS, "cancel")
+    if decoded.is_err(): return (lease, Err(decoded.unwrap_err()))
+    val words = decoded.unwrap()
+    lease.native_error = Some(words[3])
+    if words[1] != 0: lease.cancel_requested = Some(true)
+    if words[2] != 0: lease.term_sent = true
+    (lease, Ok(OwnedProcessCancelReceipt(version: words[0], accepted: words[1] != 0,
+        term_sent: words[2] != 0, runtime_error: words[3])))
+
+# Existing mode gates, no new runtime export. Called before facade registry
+# access, then the actual platform process/canonical-thread origin check runs.
+pub(package) fn process_capture_native_mode_check_v1() -> Result<(), text>:
+    val interpreted = unsafe(capabilities: [ffi]): rt_is_interpreter_runtime()
+    val jit = unsafe(capabilities: [ffi]): rt_is_jit_runtime()
+    if interpreted or jit: return Err("process-capture-native-provider-required")
+    Ok(())
+
+# True only when this code runs as an AOT-native image: neither the seed
+# interpreter nor the seed JIT is executing it from `.spl` source. Same two
+# probes as the gate above; no new runtime export.
+# reason: runtime-kind probe; a yes/no answer with no domain type
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in process_runtime_is_aot_native_v1", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+@allow(primitive_api)
+pub fn process_runtime_is_aot_native_v1() -> bool:
+    val interpreted = unsafe(capabilities: [ffi]): rt_is_interpreter_runtime()
+    val jit = unsafe(capabilities: [ffi]): rt_is_jit_runtime()
+    not interpreted and not jit
+use std.io_runtime.{env_get, env_get_nullable, read_file_text_result, file_size_signed, host_os}
+use std.io_runtime.{env_set_process, env_remove_process}
+use std.common.string_core.{str_len}
+use std.nogc_sync_mut.io.external_file.{external_file_read_bytes_at}
+use std.nogc_sync_mut.io.file_text_session.{file_default_text_codec, file_session_decode}
+use std.nogc_sync_mut.io.external_text_io.{TextIoError, io_text_error_message}
 @unsafe(reason: "raw owned-child liveness status; false sentinel means stopped, absent, or runtime failure", capabilities: [ffi])
 extern fn rt_process_is_running(pid: i64) -> bool
 @unsafe(reason: "raw owned-child spawn; positive PID is published ownership and -1 is the failure sentinel", capabilities: [ffi])
@@ -817,6 +971,21 @@ extern fn rt_process_spawn_async_value(cmd: text, args: [text]) -> i64
 extern fn rt_process_wait(pid: i64, timeout_ms: i64) -> i64
 @unsafe(reason: "raw owned-child termination status; false sentinel means absent or termination failure", capabilities: [ffi])
 extern fn rt_process_kill(pid: i64) -> bool
+# Session-owned process trees: ONE C implementation (src/runtime/runtime_process_tree.c)
+# behind every engine. Codes: >= 0 success, -errno failure, RT_PTREE_UNSUPPORTED
+# (-100000) when the host has no owner arm. Never a silent success.
+@unsafe(reason: "host capability probe; 0 means session ownership works, -100000 means no arm on this host", capabilities: [ffi])
+extern fn rt_process_tree_support() -> i64
+@unsafe(reason: "session-leader spawn; positive PID (== session id) is published ownership, negative is -errno or unsupported", capabilities: [ffi])
+extern fn rt_process_spawn_session_value(cmd: text, args: [text]) -> i64
+@unsafe(reason: "session-leader wait; -2 is timeout, -1 is not-our-child, -(128+signo) is signal death", capabilities: [ffi])
+extern fn rt_process_session_wait(pid: i64, timeout_ms: i64) -> i64
+@unsafe(reason: "session-leader liveness without reaping; 1 running, 0 exited or absent, -100000 unsupported", capabilities: [ffi])
+extern fn rt_process_session_is_running(pid: i64) -> i64
+@unsafe(reason: "SIGKILL every process in the leader's session and reap the leader; 0 success, else -errno / -100000 / -100001 / -100002 (leader reaped, second sweep failed)", capabilities: [ffi])
+extern fn rt_process_kill_tree(pid: i64) -> i64
+@unsafe(reason: "child-side parent-death signal; 0 armed, -errno failed, -100000 no arm on this host", capabilities: [ffi])
+extern fn rt_child_set_pdeathsig(signo: i32) -> i64
 @unsafe(reason: "raw piped-child spawn; positive PID is owned and -1 is the failure sentinel", capabilities: [ffi])
 extern fn rt_process_spawn_piped(cmd: text, args: [text]) -> i64
 extern fn rt_browser_renderer_spawn_sandboxed(cmd: text, args: [text]) -> i64
@@ -849,14 +1018,17 @@ extern fn rt_process_close_pinned_executable(handle: i64) -> bool
 @unsafe(reason: "raw pinned-executable spawn; positive PID is owned and -1 is the failure sentinel", capabilities: [ffi])
 extern fn rt_process_spawn_pinned_piped(executable_handle: i64, args: [text]) -> i64
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in process_pin_executable", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 pub fn process_pin_executable(canonical_path: text) -> i64:
     unsafe(capabilities: [ffi]):
         rt_process_pin_executable(canonical_path)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in process_close_pinned_executable", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 pub fn process_close_pinned_executable(handle: i64) -> bool:
     unsafe(capabilities: [ffi]):
         rt_process_close_pinned_executable(handle)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in process_spawn_pinned_piped", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 pub fn process_spawn_pinned_piped(executable_handle: i64, args: [text]) -> i64:
     unsafe(capabilities: [ffi]):
         rt_process_spawn_pinned_piped(executable_handle, args)
@@ -864,6 +1036,24 @@ pub fn process_spawn_pinned_piped(executable_handle: i64, args: [text]) -> i64:
 # Stdout drain state is independent of child liveness: 0=open/deferred,
 # 1=observed EOF with buffered tail delivered, -1=terminal read error/unknown.
 # Exited children retain their stdout owner until drain completion or close.
+# Additive native C ABI; requires a runtime built with the matching owner.
+@unsafe(reason: "versioned actual piped-child exit receipt before handle close", capabilities: [ffi])
+extern fn rt_process_piped_exit_status_value(pid: i64) -> [i64]
+
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in process_piped_exit_status_v1", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn process_piped_exit_status_v1(pid: i64) -> Result<i64?, text>:
+    val words = unsafe(capabilities: [ffi]): rt_process_piped_exit_status_value(pid)
+    if words.len() != 4 or words[0] != 1:
+        return Err("piped child exit receipt invalid")
+    if words[3] != 0 or words[1] < 0:
+        return Err("piped child exit query failed: " + str(words[3]))
+    if words[1] == 0:
+        if words[2] != 0: return Err("pending piped exit receipt contains a terminal code")
+        return Ok(None)
+    if words[1] != 1: return Err("piped child exit state invalid")
+    if words[2] < 0: return Err("piped child terminal exit code invalid")
+    Ok(Some(words[2]))
+
 pub fn process_read_stdout_result(pid: i64) -> Result<text?, text>:
     val chunk = process_read_stdout(pid)
     if chunk.len() > 0:
@@ -873,15 +1063,51 @@ pub fn process_read_stdout_result(pid: i64) -> Result<text?, text>:
         return Err("process_stdout_eof")
     if state < 0:
         return Err("process_stdout_read_failed")
-    Ok(nil)
+    Ok(None)
 
 use std.nogc_sync_mut.io.file_ops.{file_read_text}
+use std.nogc_sync_mut.shell.shebang_script.{shebang_interpreter_argv, shebang_is_posix_shell,
+    shebang_msys_safe_word, shebang_source_script}
 use std.io_runtime.{file_delete}
 use std.io_runtime.{file_exists}
 use std.io_runtime.{time_now_unix_micros}
 use std.io_runtime.{getpid}
 use std.nogc_sync_mut.io.pipe.{stdout_flush}
 extern fn rt_stderr_flush()
+
+fn _shebang_prefix(path: text) -> [text]:
+    if path.lower().ends_with(".exe") or not file_exists(path):
+        return []
+    # ponytail: whole read, a positioned read reports ENOSYS (-38) on the Windows
+    # seed. Read a bounded prefix once the seed has a working partial read.
+    shebang_interpreter_argv(file_read_text(path).split("\n")[0])
+
+# `shell` is the discovered POSIX shell; prefer its sibling for the interpreter
+# the script actually names. Plain words cross the Windows command line as they
+# are. Anything else goes through a single quoted `-c` word (see
+# shebang_script.spl), with the script path as `$0` unless MSYS would read its
+# apostrophe as a quote.
+fn _shebang_shell_invocation(shell: text, prefix: [text], script: text, args: [text]) -> (text, [text]):
+    val shell_norm = shell.replace("\\", "/")
+    val sibling = shell_norm.substring(0, shell_norm.rfind("/") + 1) + prefix[0] + ".exe"
+    val interpreter = if file_exists(sibling): sibling else: shell
+    var flags: [text] = []
+    var index = 1
+    while index < prefix.len():
+        flags = flags.push(prefix[index])
+        index = index + 1
+    var plain = shebang_msys_safe_word(script)
+    for word in flags + args:
+        plain = plain and shebang_msys_safe_word(word)
+    if plain:
+        return (interpreter, flags + [script] + args)
+    var script_path = script.replace("\\", "/")
+    if not script_path.contains("/"):
+        script_path = "./" + script_path
+    var invocation = flags + ["-c", shebang_source_script(script_path, args)]
+    if not script_path.contains("'"):
+        invocation = invocation.push(script_path)
+    (interpreter, invocation)
 
 pub fn _resolve_posix_tool(cmd: text, args: [text]) -> (text, [text]):
     # Test suites spawn POSIX tools by absolute path ("/bin/sh" 2000+, plus
@@ -895,6 +1121,16 @@ pub fn _resolve_posix_tool(cmd: text, args: [text]) -> (text, [text]):
     if not _is_windows_platform():
         return (cmd, args)
     val unix = cmd.replace("\\", "/")
+    # CreateProcess only runs PE images, so an existing shell script (a .shs
+    # fixture, or an extensionless wrapper like bin/caret) needs its interpreter
+    # named. A missing script or one for another interpreter passes through and
+    # fails at spawn.
+    val script_prefix = _shebang_prefix(cmd)
+    if script_prefix.len() > 0 and shebang_is_posix_shell(script_prefix[0]):
+        val script_shell = _windows_posix_shell_path()
+        if script_shell == "cmd.exe":
+            return (cmd, args)
+        return _shebang_shell_invocation(script_shell, script_prefix, cmd, args)
     if not unix.starts_with("/bin/") and not unix.starts_with("/usr/bin/"):
         return (cmd, args)
     val parts = unix.split("/")
@@ -905,9 +1141,9 @@ pub fn _resolve_posix_tool(cmd: text, args: [text]) -> (text, [text]):
     val sh_norm = sh.replace("\\", "/")
     var git_root = ""
     if sh_norm.ends_with("/usr/bin/sh.exe") or sh_norm.ends_with("/usr/bin/bash.exe"):
-        git_root = sh_norm.substring(0, sh_norm.len() - 15)
+        git_root = sh_norm.substring(0, sh_norm.byte_len() - 15)
     elif sh_norm.ends_with("/bin/sh.exe") or sh_norm.ends_with("/bin/bash.exe"):
-        git_root = sh_norm.substring(0, sh_norm.len() - 10)
+        git_root = sh_norm.substring(0, sh_norm.byte_len() - 10)
     if git_root != "":
         val candidate = "{git_root}/usr/bin/{name}.exe"
         if file_exists(candidate):
@@ -920,67 +1156,227 @@ pub fn _resolve_posix_tool(cmd: text, args: [text]) -> (text, [text]):
         sh_args = sh_args.push(a)
     (sh, sh_args)
 
-fn _process_run_raw(cmd: text, args: [text]) -> (text, text, i64):
-    val (rcmd, rargs) = _resolve_posix_tool(cmd, args)
-    # On Windows the C rt_process_run popen()s a POSIX single-quoted command
-    # line through cmd.exe and decodes _pclose's raw code with `>> 8`, so every
-    # command -- including one that cannot start -- reported exit 0
-    # (doc/08_tracking/bug/windows_rt_process_run_always_exit_zero_2026-09-26.md).
-    # The bounded owner uses CreateProcess and GetExitCodeProcess; timeout 0
-    # means none and -1 means unlimited output, the same as rt_process_run.
-    if _is_windows_platform():
+# ---------------------------------------------------------------------------
+# Test-runner child-env scrub (test_runner_mode_env_leak_2026_11_12)
+#
+# The test runner pins SIMPLE_EXECUTION_MODE/SIMPLE_RUNTIME_MODE in a spec
+# child's environment so the child's engine is chosen at ITS process start.
+# Those pins are process-start selectors only. When a spec's examples inherit
+# them into the processes they spawn, every grandchild is forced onto the
+# interpreter lane, whose module loader promotes non-baselined private imports
+# to a FATAL error (check_private_use_names in the seed's
+# src/compiler_rust/compiler/src/interpreter_module/module_loader.rs) on
+# compiles the JIT lane a clean invocation would use never checks. A spec
+# child therefore carries the SIMPLE_TEST_CHILD_ENV_SCRUB marker: while it is
+# set, children spawned through these facades inherit an environment with both
+# mode pins AND the marker removed, so a spawned child behaves like a fresh
+# top-level invocation no matter how deeply nested the spawn is. An example
+# that wants a specific mode for its child can still set the variable
+# explicitly (a shell `set`/`env` prefix lands after the scrub and wins).
+# The save/scrub/restore window mutates the process env and is not
+# thread-serialized -- the same contract the LSP server already relies on for
+# this exact variable (std/nogc_sync_mut/lsp/lsp_handlers.spl save/set/restore
+# around its subprocess hop).
+# ---------------------------------------------------------------------------
+
+pub val SIMPLE_TEST_CHILD_ENV_SCRUB_ENV: text = "SIMPLE_TEST_CHILD_ENV_SCRUB"
+
+struct TestChildEnvScrubSave:
+    exec_mode: text?
+    runtime_mode: text?
+    marker: text?
+
+fn _test_child_env_scrub_empty_save() -> TestChildEnvScrubSave:
+    TestChildEnvScrubSave(exec_mode: None, runtime_mode: None, marker: None)
+
+fn _test_child_env_scrub_active() -> bool:
+    (env_get(SIMPLE_TEST_CHILD_ENV_SCRUB_ENV) ?? "") == "1"
+
+fn _test_child_env_scrub_take() -> TestChildEnvScrubSave:
+    val saved = TestChildEnvScrubSave(
+        exec_mode: env_get("SIMPLE_EXECUTION_MODE"),
+        runtime_mode: env_get("SIMPLE_RUNTIME_MODE"),
+        marker: env_get(SIMPLE_TEST_CHILD_ENV_SCRUB_ENV))
+    val _ = env_remove_process("SIMPLE_EXECUTION_MODE")
+    val _ = env_remove_process("SIMPLE_RUNTIME_MODE")
+    val _ = env_remove_process(SIMPLE_TEST_CHILD_ENV_SCRUB_ENV)
+    saved
+
+fn _test_child_env_scrub_put_back(key: text, saved: text?):
+    match saved:
+        case Some(value):
+            val _ = env_set_process(key, value)
+        case None:
+            val _ = env_remove_process(key)
+
+fn _test_child_env_scrub_restore(saved: TestChildEnvScrubSave):
+    _test_child_env_scrub_put_back("SIMPLE_EXECUTION_MODE", saved.exec_mode)
+    _test_child_env_scrub_put_back("SIMPLE_RUNTIME_MODE", saved.runtime_mode)
+    _test_child_env_scrub_put_back(SIMPLE_TEST_CHILD_ENV_SCRUB_ENV, saved.marker)
+
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _process_run_raw", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn _process_run_raw(cmd: text, args: [text]) -> (text, text, i64):
+    val tool: (text, [text]) = _resolve_posix_tool(cmd, args)
+    val native_command: text = host_path_native(tool.0 + "")
+    val native_arguments: [text] = tool.1
+    val scrub_env = _test_child_env_scrub_active()
+    val saved_env = if scrub_env: _test_child_env_scrub_take() else: _test_child_env_scrub_empty_save()
+    val result: (text, text, i64) = if _is_windows_platform():
+        # On Windows the C rt_process_run popen()s a POSIX single-quoted command
+        # line through cmd.exe and decodes _pclose's raw code with `>> 8`, so every
+        # command -- including one that cannot start -- reported exit 0
+        # (doc/08_tracking/bug/windows_rt_process_run_always_exit_zero_2026-09-26.md).
+        # The bounded owner uses CreateProcess and GetExitCodeProcess; timeout 0
+        # means none and -1 means unlimited output, the same as rt_process_run.
         unsafe(capabilities: [ffi]):
-            return rt_process_run_bounded(host_path_native(rcmd), rargs, 0, -1)
-    unsafe(capabilities: [ffi]):
-        rt_process_run(host_path_native(rcmd), rargs)
+            rt_process_run_bounded(native_command, native_arguments, 0, -1)
+    else:
+        unsafe(capabilities: [ffi]):
+            rt_process_run(native_command, native_arguments)
+    if scrub_env:
+        _test_child_env_scrub_restore(saved_env)
+    result
 
-fn _process_run_bounded_raw(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> (text, text, i64):
-    val (rcmd, rargs) = _resolve_posix_tool(cmd, args)
-    unsafe(capabilities: [ffi]):
-        rt_process_run_bounded(host_path_native(rcmd), rargs, timeout_ms, max_output_bytes)
+pub fn _process_run_bounded_raw(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> (text, text, i64):
+    val scrub_env = _test_child_env_scrub_active()
+    val saved_env = if scrub_env: _test_child_env_scrub_take() else: _test_child_env_scrub_empty_save()
+    val result = process_run_bounded_spec_child(cmd, args, timeout_ms, max_output_bytes)
+    if scrub_env:
+        _test_child_env_scrub_restore(saved_env)
+    result
 
-fn _process_is_running_raw(pid: i64) -> bool:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in process_run_bounded_spec_child", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn process_run_bounded_spec_child(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> (text, text, i64):
+    """Bounded run that does NOT apply the test-child env scrub.
+
+    Only for a test runner spawning its OWN spec child: that child must keep
+    the SIMPLE_EXECUTION_MODE/SIMPLE_RUNTIME_MODE pins and the scrub marker
+    (it scrubs for its own grandchildren). Spawning it through the scrubbing
+    `_process_run_bounded_raw` silently dropped the pins, so the spec ran on
+    the default JIT engine and emitted no SPEC FILE VERDICT. Bug:
+    doc/08_tracking/bug/test_runner_spec_child_loses_mode_pins_2026-11-14.md"""
+    val tool: (text, [text]) = _resolve_posix_tool(cmd, args)
+    val native_command: text = host_path_native(tool.0 + "")
+    val native_arguments: [text] = tool.1
+    unsafe(capabilities: [ffi]):
+        rt_process_run_bounded(native_command, native_arguments, timeout_ms, max_output_bytes)
+
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _process_is_running_raw", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn _process_is_running_raw(pid: i64) -> bool:
     unsafe(capabilities: [ffi]):
         rt_process_is_running(pid)
 
-fn _process_spawn_async_raw(cmd: text, args: [text]) -> i64:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _process_spawn_async_raw", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn _process_spawn_async_raw(cmd: text, args: [text]) -> i64:
     val (rcmd, rargs) = _resolve_posix_tool(cmd, args)
-    unsafe(capabilities: [ffi]):
+    val scrub_env = _test_child_env_scrub_active()
+    val saved_env = if scrub_env: _test_child_env_scrub_take() else: _test_child_env_scrub_empty_save()
+    val pid = unsafe(capabilities: [ffi]):
         rt_process_spawn_async_value(host_path_native(rcmd), rargs)
+    if scrub_env:
+        _test_child_env_scrub_restore(saved_env)
+    pid
 
-fn _process_wait_raw(pid: i64, timeout_ms: i64) -> i64:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _process_wait_raw", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn _process_wait_raw(pid: i64, timeout_ms: i64) -> i64:
     unsafe(capabilities: [ffi]):
         rt_process_wait(pid, timeout_ms)
 
-fn _process_kill_raw(pid: i64) -> bool:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _process_kill_raw", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn _process_kill_raw(pid: i64) -> bool:
     unsafe(capabilities: [ffi]):
         rt_process_kill(pid)
 
+# --- session-owned tree: raw bridges -----------------------------------------
+# Same codes as runtime_process_tree.h.
+val RT_PTREE_UNSUPPORTED: i64 = -100000
+val RT_PTREE_NOT_SESSION_LEADER: i64 = -100001
+val RT_PTREE_SWEEP_FAILED_AFTER_REAP: i64 = -100002
+
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _process_tree_support_raw", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+fn _process_tree_support_raw() -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_process_tree_support()
+
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _process_spawn_session_raw", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+fn _process_spawn_session_raw(cmd: text, args: [text]) -> i64:
+    val (rcmd, rargs) = _resolve_posix_tool(cmd, args)
+    unsafe(capabilities: [ffi]):
+        rt_process_spawn_session_value(host_path_native(rcmd), rargs)
+
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _process_session_wait_raw", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+fn _process_session_wait_raw(pid: i64, timeout_ms: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_process_session_wait(pid, timeout_ms)
+
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _process_session_is_running_raw", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+fn _process_session_is_running_raw(pid: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_process_session_is_running(pid)
+
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _process_kill_tree_raw", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+fn _process_kill_tree_raw(pid: i64) -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_process_kill_tree(pid)
+
+fn _ptree_error_text(code: i64) -> text:
+    if code == RT_PTREE_UNSUPPORTED:
+        return "no process-tree ownership on host '{host_os()}': runtime_process_tree.c has no arm for it"
+    if code == RT_PTREE_NOT_SESSION_LEADER:
+        return "pid is alive but is not a session leader spawned by process_spawn_session"
+    if code == RT_PTREE_SWEEP_FAILED_AFTER_REAP:
+        return "leader reaped, but the second sweep of its session failed; late forks may survive"
+    if code < 0:
+        return "errno {0 - code}"
+    "unexpected code {code}"
+
+# Pids this module spawned as session leaders. Their wait / is_running / kill
+# route to the session owner, whose waitpid does not depend on any engine's
+# spawn table. Every other pid keeps the raw path.
+var _session_pids: [i64] = []
+
+fn _session_owned(pid: i64) -> bool:
+    _session_pids.contains(pid)
+
+fn _session_forget(pid: i64):
+    var kept: [i64] = []
+    for p in _session_pids:
+        if p != pid:
+            kept.push(p)
+    _session_pids = kept
+
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _process_spawn_piped_raw", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 fn _process_spawn_piped_raw(cmd: text, args: [text]) -> i64:
     val (rcmd, rargs) = _resolve_posix_tool(cmd, args)
     unsafe(capabilities: [ffi]):
         rt_process_spawn_piped(host_path_native(rcmd), rargs)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _process_write_stdin_raw", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 fn _process_write_stdin_raw(pid: i64, data: text) -> bool:
     unsafe(capabilities: [ffi]):
         rt_process_write_stdin(pid, data)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _process_write_stdin_some_raw", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 fn _process_write_stdin_some_raw(pid: i64, data: text, data_len: i64, offset: i64, max_bytes: i64) -> i64:
     unsafe(capabilities: [ffi]):
         rt_process_write_stdin_some(pid, data, data_len, offset, max_bytes)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _process_read_stdout_raw", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 fn _process_read_stdout_raw(pid: i64) -> text:
     unsafe(capabilities: [ffi]):
         rt_process_read_stdout(pid)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _process_stdout_state_raw", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 fn _process_stdout_state_raw(pid: i64) -> i64:
     unsafe(capabilities: [ffi]):
         rt_process_stdout_state(pid)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _process_is_alive_raw", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 fn _process_is_alive_raw(pid: i64) -> bool:
     unsafe(capabilities: [ffi]):
         rt_process_is_alive(pid)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _process_close_piped_raw", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 fn _process_close_piped_raw(pid: i64) -> bool:
     unsafe(capabilities: [ffi]):
         rt_process_close_piped(pid)
@@ -988,7 +1384,7 @@ fn _process_close_piped_raw(pid: i64) -> bool:
 use std.nogc_sync_mut.io.file_ops.{file_read_text_at, file_size}
 
 # Use the canonical runtime host decision even in sanitized environments.
-fn _is_windows_platform() -> bool:
+pub fn _is_windows_platform() -> bool:
     host_is_windows_host()
 
 # ============================================================================
@@ -1018,13 +1414,14 @@ pub class OwnedCwdPinV4:
     identity_digest: [u8]
     var closed: bool
 
+    @representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in pin", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
     pub static fn pin(canonical_path: text) -> Result<OwnedCwdPinV4, text>:
         val native_path = host_path_native(canonical_path)
         val handle = unsafe(capabilities: [ffi]):
             rt_process_observation_v4_pin_cwd_value(native_path)
         if handle <= 0:
             return Err("process observation V4 cwd pin was rejected")
-        val digest = unsafe(capabilities: [ffi]):
+        val digest: [u8] = unsafe(capabilities: [ffi]):
             rt_process_observation_v4_cwd_digest_value(handle)
         if digest.len() != PROCESS_OBSERVATION_V4_DIGEST_BYTES:
             val _closed = unsafe(capabilities: [ffi]):
@@ -1038,6 +1435,7 @@ pub class OwnedCwdPinV4:
             return Err("process observation V4 cwd pin is closed")
         Ok(self.identity_digest)
 
+    @representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in close", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
     me fn close() -> Result<bool, text>:
         if self.closed:
             return Ok(true)
@@ -1062,35 +1460,35 @@ pub class ProcessObservationLeaseV4:
             self.ticket[3] == packet.ticket_high and
             self.ticket[4] == packet.ticket_low
 
+    @representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in poll", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
     pub fn poll(self, caller_wait_ns: i64) -> Result<ProcessObservationReceiptV4, text>:
         if not self.active or self.acknowledged:
             return Err("process observation V4 lease is inactive")
-        val (stdout, stderr, binding, words) = unsafe(capabilities: [ffi]):
+        val wire = unsafe(capabilities: [ffi]):
             rt_process_observation_v4_poll_value(self.ticket, caller_wait_ns)
-        val receipt = decode_process_observation_v4(ProcessObservationWireV4(
-            words: words, stdout: stdout, stderr: stderr, binding: binding))?
+        val receipt = _process_observation_array_wire_v4(wire, "process observation unavailable; lease retained")?
         if not self.receipt_matches_ticket(receipt.packet):
             return Err("process observation V4 poll returned different ticket authority")
         Ok(receipt)
 
+    @representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in cancel", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
     pub fn cancel(self, caller_wait_ns: i64) -> Result<ProcessObservationReceiptV4, text>:
         if not self.active or self.acknowledged:
             return Err("process observation V4 lease is inactive")
-        val (stdout, stderr, binding, words) = unsafe(capabilities: [ffi]):
+        val wire = unsafe(capabilities: [ffi]):
             rt_process_observation_v4_cancel_value(self.ticket, caller_wait_ns)
-        val receipt = decode_process_observation_v4(ProcessObservationWireV4(
-            words: words, stdout: stdout, stderr: stderr, binding: binding))?
+        val receipt = _process_observation_array_wire_v4(wire, "process observation unavailable; lease retained")?
         if not self.receipt_matches_ticket(receipt.packet):
             return Err("process observation V4 cancel returned different ticket authority")
         Ok(receipt)
 
+    @representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in collect", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
     me fn collect(self, caller_wait_ns: i64) -> Result<ProcessObservationReceiptV4, text>:
         if not self.active or self.acknowledged:
             return Err("process observation V4 lease is inactive")
-        val (stdout, stderr, binding, words) = unsafe(capabilities: [ffi]):
+        val wire = unsafe(capabilities: [ffi]):
             rt_process_observation_v4_collect_value(self.ticket, caller_wait_ns)
-        val receipt = decode_process_observation_v4(ProcessObservationWireV4(
-            words: words, stdout: stdout, stderr: stderr, binding: binding))?
+        val receipt = _process_observation_array_wire_v4(wire, "process observation unavailable; lease retained")?
         if not self.receipt_matches_ticket(receipt.packet):
             return Err("process observation V4 collect returned different ticket authority")
         if receipt.packet.packet_kind == ProcessObservationPacketKindV4.Frozen or
@@ -1100,6 +1498,7 @@ pub class ProcessObservationLeaseV4:
             self.frozen_kind = receipt.packet.packet_kind
         Ok(receipt)
 
+    @representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in acknowledge", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
     me fn acknowledge(self, frozen_receipt: ProcessObservationFrozenReceiptV4) -> Result<ProcessObservationReceiptV4, text>:
         if not self.active or self.acknowledged or
                 self.frozen_kind != ProcessObservationPacketKindV4.Frozen or
@@ -1107,11 +1506,10 @@ pub class ProcessObservationLeaseV4:
                 frozen_receipt.packet.packet_kind != ProcessObservationPacketKindV4.Frozen or
                 not self.receipt_matches_ticket(frozen_receipt.packet):
             return Err("process observation V4 lease has no unacknowledged frozen snapshot")
-        val (stdout, stderr, binding, words) = unsafe(capabilities: [ffi]):
+        val wire = unsafe(capabilities: [ffi]):
             rt_process_observation_v4_ack_collect_value(
                 self.ticket, frozen_receipt.binding_digest)
-        val receipt = decode_process_observation_v4(ProcessObservationWireV4(
-            words: words, stdout: stdout, stderr: stderr, binding: binding))?
+        val receipt = _process_observation_array_wire_v4(wire, "process observation unavailable; lease retained")?
         if receipt.packet.packet_kind != ProcessObservationPacketKindV4.Ack or
                 not self.receipt_matches_ticket(receipt.packet) or
                 receipt.binding_digest != frozen_receipt.binding_digest:
@@ -1121,6 +1519,7 @@ pub class ProcessObservationLeaseV4:
         self.active = false
         Ok(receipt)
 
+    @representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in acknowledge_cleanup", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
     me fn acknowledge_cleanup(
         self, cleanup_receipt: ProcessObservationCleanupFrozenReceiptV4
     ) -> Result<ProcessObservationReceiptV4, text>:
@@ -1131,12 +1530,10 @@ pub class ProcessObservationLeaseV4:
                 cleanup_receipt.binding_digest.len() != PROCESS_OBSERVATION_V4_DIGEST_BYTES or
                 not self.receipt_matches_ticket(cleanup_receipt.packet):
             return Err("process observation V4 lease has no cleanup snapshot to acknowledge")
-        val (stdout, stderr, returned_binding, words) = unsafe(capabilities: [ffi]):
+        val wire = unsafe(capabilities: [ffi]):
             rt_process_observation_v4_ack_collect_value(
                 self.ticket, cleanup_receipt.binding_digest)
-        val receipt = decode_process_observation_v4(ProcessObservationWireV4(
-            words: words, stdout: stdout, stderr: stderr,
-            binding: returned_binding))?
+        val receipt = _process_observation_array_wire_v4(wire, "process observation unavailable; lease retained")?
         if receipt.packet.packet_kind != ProcessObservationPacketKindV4.CleanupAck or
                 not self.receipt_matches_ticket(receipt.packet) or
                 receipt.binding_digest != cleanup_receipt.binding_digest:
@@ -1146,9 +1543,173 @@ pub class ProcessObservationLeaseV4:
         self.active = false
         Ok(receipt)
 
+
+# The reservation, not a decoded receipt or PID, owns every post-start outcome.
+# Pins remain retained until confirm_release succeeds; close failures remain
+# on the original pin objects and must be retried by their owner.
+pub const PROCESS_OBSERVATION_RESERVED_READY_V4: i64 = 1
+pub const PROCESS_OBSERVATION_RESERVED_ATTEMPTING_V4: i64 = 2
+pub const PROCESS_OBSERVATION_RESERVED_NO_CHILD_V4: i64 = 3
+pub const PROCESS_OBSERVATION_RESERVED_OWNED_V4: i64 = 4
+pub const PROCESS_OBSERVATION_RESERVED_ACKED_V4: i64 = 5
+
+pub use std.common.process.launch_progress_v6.{ProcessLaunchProgressV6, PROCESS_RESERVATION_LAUNCH_PENDING_V6}
+use std.common.process.launch_progress_v6.process_launch_progress_decode_v6
+
+@unsafe(reason: "Linux-only same-reservation deferred ptrace launch; scalar progress, no pending V4 receipt", capabilities: [ffi])
+extern fn rt_process_observation_v6_reserved_start_deferred_admitted_value(token: i64, executable: i64,
+    cwd: i64, binding: [u8], expires_at_unix_ms: i64) -> i64
+@unsafe(reason: "same submitting thread; one zero-wait pending trace/error/cleanup step", capabilities: [ffi])
+extern fn rt_process_observation_v6_reserved_poll_launch_value(token: i64, retire: i64) -> i64
+
+pub enum LaunchRetirementMode:
+    KeepRunning
+    Retire
+
+pub class ProcessObservationReservationV4:
+    token: i64
+    executable: OwnedExecutablePin
+    cwd: OwnedCwdPinV4
+    var released: bool
+    var acknowledgement_validated: bool
+
+    @representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in validate_receipt", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+    fn validate_receipt(self, receipt: ProcessObservationReceiptV4) -> Result<ProcessObservationReceiptV4, text>:
+        val packet = receipt.packet
+        val matches = unsafe(capabilities: [ffi]):
+            rt_process_observation_v4_reserved_matches_value(self.token,
+                packet.request_id_high, packet.request_id_low,
+                packet.ticket_high, packet.ticket_low)
+        if matches != 1:
+            return Err("process receipt does not match retained reservation")
+        Ok(receipt)
+
+    @representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in state", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+    pub fn state(self) -> Result<i64, text>:
+        if self.released: return Err("process reservation already released")
+        val value = unsafe(capabilities: [ffi]):
+            rt_process_observation_v4_reserved_state_value(self.token)
+        if value < 0: return Err("process reservation state unavailable: {value}")
+        Ok(value)
+
+    @representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in start", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+    pub me fn start(self, request: ProcessObservationRequestV4) -> Result<i64, text>:
+        if self.released: return Err("process reservation already released")
+        val bound = _process_observation_bound_request_v4(self.executable, self.cwd, request)?
+        val encoded = canonical_encode_process_observation_request_v4(bound)?
+        val value = unsafe(capabilities: [ffi]):
+            rt_process_observation_v4_reserved_start_pinned_value(
+                self.token, self.executable.handle, self.cwd.handle, encoded)
+        if value < 0:
+            return Err("process reservation start refused; retain owner and query state: {value}")
+        Ok(value)
+
+    # Caller verifies the grant before passing its Unix-millisecond deadline.
+    # This deadline controls submission, never the running workload's lifetime.
+    # Errors preserve this reservation; query state and retire an actual child.
+    @representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in start_admitted", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+    pub me fn start_admitted(self, request: ProcessObservationRequestV4, expires_at_unix_ms: i64) -> Result<i64, text>:
+        if self.released: return Err("process reservation already released")
+        val bound = _process_observation_bound_request_v4(self.executable, self.cwd, request)?
+        val encoded = canonical_encode_process_observation_request_v4(bound)?
+        val value = unsafe(capabilities: [ffi]):
+            rt_process_observation_v5_reserved_start_admitted_value(
+                self.token, self.executable.handle, self.cwd.handle, encoded, expires_at_unix_ms)
+        if value < 0:
+            return Err("process reservation admission refused; retain owner and query state: {value}")
+        Ok(value)
+
+    # Additive Linux-only path. Preparation/encoding/pin validation still run
+    # synchronously; only exec-proof progression is deferred. No owner escapes.
+    @representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in start_deferred_admitted_v6", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+    pub me fn start_deferred_admitted_v6(self, request: ProcessObservationRequestV4,
+            expires_at_unix_ms: i64) -> Result<ProcessLaunchProgressV6, text>:
+        if self.released: return Err("process reservation already released")
+        val bound = _process_observation_bound_request_v4(self.executable, self.cwd, request)?
+        val encoded = canonical_encode_process_observation_request_v4(bound)?
+        val value = unsafe(capabilities: [ffi]):
+            rt_process_observation_v6_reserved_start_deferred_admitted_value(
+                self.token, self.executable.handle, self.cwd.handle, encoded, expires_at_unix_ms)
+        if value < 0: return Err("deferred process start refused; reservation retained: {value}")
+        process_launch_progress_decode_v6(value)
+
+    # Pending cancellation is not terminal proof. Keep polling on the SAME
+    # submitting OS thread until ObservationAvailable, then use existing observe
+    # and durable-before-ack flow. retire applies only while launch is pending.
+    @representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in poll_launch_v6", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+    pub fn poll_launch_v6(self, retire: LaunchRetirementMode = LaunchRetirementMode.KeepRunning) -> Result<ProcessLaunchProgressV6, text>:
+        if self.released: return Err("process reservation already released")
+        val retire_flag = if retire == LaunchRetirementMode.Retire: 1 else: 0
+        val value = unsafe(capabilities: [ffi]):
+            rt_process_observation_v6_reserved_poll_launch_value(self.token, retire_flag)
+        if value < 0: return Err("deferred process progress unavailable; reservation retained: {value}")
+        process_launch_progress_decode_v6(value)
+
+    @representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in observe", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+    pub fn observe(self, caller_wait_ns: i64, retire: LaunchRetirementMode) -> Result<ProcessObservationReceiptV4, text>:
+        if self.released: return Err("process reservation already released")
+        val retire_flag = if retire == LaunchRetirementMode.Retire: 1 else: 0
+        val wire = unsafe(capabilities: [ffi]):
+            rt_process_observation_v4_reserved_observe_value(
+                self.token, caller_wait_ns, retire_flag)
+        val receipt = _process_observation_array_wire_v4(wire, "process observation unavailable; reservation retained")?
+        self.validate_receipt(receipt)
+
+    @representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in acknowledge", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+    pub me fn acknowledge(self, digest: [u8]) -> Result<ProcessObservationReceiptV4, text>:
+        if self.released: return Err("process reservation already released")
+        if digest.len() != PROCESS_OBSERVATION_V4_DIGEST_BYTES:
+            return Err("process reservation acknowledgement digest malformed")
+        val wire = unsafe(capabilities: [ffi]):
+            rt_process_observation_v4_reserved_ack_value(self.token, digest)
+        val receipt = _process_observation_array_wire_v4(wire,
+            "process acknowledgement unavailable; retry with retained reservation")?
+        if (receipt.packet.packet_kind != ProcessObservationPacketKindV4.Ack and
+                receipt.packet.packet_kind != ProcessObservationPacketKindV4.CleanupAck) or
+                receipt.binding_digest != digest:
+            return Err("process reservation acknowledgement mismatch; retry retained owner")
+        val checked = self.validate_receipt(receipt)?
+        self.acknowledgement_validated = true
+        Ok(checked)
+
+    @representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in confirm_release", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+    pub me fn confirm_release(self) -> Result<bool, text>:
+        if self.released: return Ok(true)
+        val current = self.state()?
+        if current == PROCESS_OBSERVATION_RESERVED_ACKED_V4 and not self.acknowledgement_validated:
+            return Err("process reservation acknowledgement must be decoded before confirmation")
+        if current != PROCESS_OBSERVATION_RESERVED_READY_V4 and
+                current != PROCESS_OBSERVATION_RESERVED_NO_CHILD_V4 and
+                current != PROCESS_OBSERVATION_RESERVED_ACKED_V4:
+            return Err("process reservation still owns possible child; retirement required")
+        val result = unsafe(capabilities: [ffi]):
+            rt_process_observation_v4_reserved_confirm_release_value(self.token)
+        if result != 1: return Err("process reservation release failed; retain owner: {result}")
+        self.released = true
+        Ok(true)
+
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in process_observation_owner_reserve_v4", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn process_observation_owner_reserve_v4(
+    executable: OwnedExecutablePin, cwd: OwnedCwdPinV4
+) -> Result<ProcessObservationReservationV4, text>:
+    if executable.closed or cwd.closed:
+        return Err("process reservation requires live pins")
+    val token = unsafe(capabilities: [ffi]): rt_process_observation_v4_reserve_value()
+    if token <= 0: return Err("process reservation unavailable: {token}")
+    Ok(ProcessObservationReservationV4(token: token, executable: executable,
+        cwd: cwd, released: false, acknowledgement_validated: false))
+
 pub struct ProcessObservationStartV4:
     receipt: ProcessObservationReceiptV4
     lease: ProcessObservationLeaseV4
+
+# The native owner returns a nullable SplArray of four SplArray handles.
+# Read the outer container with the array ABI before validating its columns.
+fn _process_observation_array_wire_v4(wire: [[i64]], unavailable: text) -> Result<ProcessObservationReceiptV4, text>:
+    val columns = wire.len()
+    if columns == 0: return Err(unavailable)
+    if columns != 4: return Err("process observation V4 receipt has an invalid column count")
+    _process_observation_wire_v4(wire[0] as [u8], wire[1] as [u8], wire[2] as [u8], wire[3])
 
 fn _process_observation_wire_v4(
     stdout: [u8], stderr: [u8], binding: [u8], words: [i64]
@@ -1156,8 +1717,9 @@ fn _process_observation_wire_v4(
     decode_process_observation_v4(ProcessObservationWireV4(
         words: words, stdout: stdout, stderr: stderr, binding: binding))
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in process_observation_owner_capabilities_v4", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 pub fn process_observation_owner_capabilities_v4() -> Result<ProcessObservationCapabilitiesV4, text>:
-    val words = unsafe(capabilities: [ffi]):
+    val words: [i64] = unsafe(capabilities: [ffi]):
         rt_process_observation_v4_capabilities_value()
     if words.len() != 8 or words[0] != PROCESS_OBSERVATION_V4_VERSION or words[1] != 8:
         return Err("process observation V4 capability receipt is malformed")
@@ -1193,14 +1755,16 @@ fn _process_observation_bound_request_v4(
         descendant_policy: request.descendant_policy,
         max_clock_resolution_ns: request.max_clock_resolution_ns))
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in process_observation_owner_start_v4", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 pub fn process_observation_owner_start_v4(
     request: ProcessObservationRequestV4
 ) -> Result<ProcessObservationReceiptV4, text>:
     val encoded = canonical_encode_process_observation_request_v4(request)?
-    val (stdout, stderr, binding, words) = unsafe(capabilities: [ffi]):
+    val wire = unsafe(capabilities: [ffi]):
         rt_process_observation_v4_start_value(encoded)
-    _process_observation_wire_v4(stdout, stderr, binding, words)
+    _process_observation_array_wire_v4(wire, "process observation V4 start unavailable")
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in process_observation_owner_start_pinned_v4", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 pub fn process_observation_owner_start_pinned_v4(
     executable: OwnedExecutablePin,
     cwd: OwnedCwdPinV4,
@@ -1208,10 +1772,10 @@ pub fn process_observation_owner_start_pinned_v4(
 ) -> Result<ProcessObservationStartV4, text>:
     val bound = _process_observation_bound_request_v4(executable, cwd, request)?
     val encoded = canonical_encode_process_observation_request_v4(bound)?
-    val (stdout, stderr, binding, words) = unsafe(capabilities: [ffi]):
+    val wire = unsafe(capabilities: [ffi]):
         rt_process_observation_v4_start_pinned_value(
             executable.handle, cwd.handle, encoded)
-    val receipt = _process_observation_wire_v4(stdout, stderr, binding, words)?
+    val receipt = _process_observation_array_wire_v4(wire, "process observation V4 start unavailable")?
     var ticket: [i64] = []
     var active = false
     if receipt.packet.status == ProcessObservationStatusV4.Running or
@@ -1238,6 +1802,7 @@ pub class ProcessInspectionLeaseV1:
     expected_input_digest: [u8]
     expected_request_digest: [u8]
 
+    @representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in input_receipt", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
     pub fn input_receipt(self) -> Result<ProcessInspectionInputReceiptV1, text>:
         if not self.observation.active or self.observation.acknowledged:
             return Err("process inspection V1 lease is inactive")
@@ -1265,7 +1830,7 @@ pub class ProcessInspectionLeaseV1:
         if receipt.packet.packet_kind == ProcessObservationPacketKindV4.CleanupFrozen:
             return Err("process inspection V1 has only cleanup authority")
         if receipt.packet.packet_kind != ProcessObservationPacketKindV4.Frozen:
-            return Ok(nil)
+            return Ok(None)
         if not process_inspection_retirement_complete_v1(
                 self.expected_descendant_policy, receipt.packet):
             return Err("process inspection V1 has no requested descendant retirement proof")
@@ -1302,6 +1867,7 @@ pub struct ProcessInspectionStartV1:
     receipt: ProcessObservationReceiptV4
     lease: ProcessInspectionLeaseV1
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in process_inspection_owner_start_pinned_v1", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 pub fn process_inspection_owner_start_pinned_v1(
     executable: OwnedExecutablePin,
     cwd: OwnedCwdPinV4,
@@ -1365,7 +1931,7 @@ fn _windows_path_exts() -> [text]:
     """%PATHEXT% entries in order, or .COM;.EXE;.BAT;.CMD when unset."""
     var exts: [text] = []
     val raw = env_get("PATHEXT")
-    if raw != nil:
+    if raw != None:
         for e in raw.split(";"):
             if e.trim() != "":
                 exts.push(e.trim())
@@ -1393,7 +1959,7 @@ fn _windows_resolve_cmd(cmd: text) -> text:
         return cmd
     var dirs: [text] = ["."]
     val path_env = env_get("PATH")
-    if path_env != nil:
+    if path_env != None:
         for d in path_env.split(";"):
             val dir = d.trim().replace("\"", "")
             if dir != "":
@@ -1406,7 +1972,7 @@ fn _windows_resolve_cmd(cmd: text) -> text:
     cmd
 
 
-fn _resolve_process_cmd(cmd: text) -> text:
+pub fn _resolve_process_cmd(cmd: text) -> text:
     var resolved_cmd = cmd
     if _is_windows_platform():
         resolved_cmd = _windows_resolve_cmd(cmd)
@@ -1417,7 +1983,7 @@ fn _resolve_process_cmd(cmd: text) -> text:
                 resolved_cmd = check.0.trim()
     resolved_cmd
 
-fn process_run(cmd: text, args: [text]) -> (text, text, i64):
+pub fn process_run(cmd: text, args: [text]) -> (text, text, i64):
     val resolved_cmd = _resolve_process_cmd(cmd)
     proc_slot_acquire()
     val result = _process_run_raw(resolved_cmd, args)
@@ -1431,6 +1997,167 @@ pub fn process_run_bounded(cmd: text, args: [text], timeout_ms: i64, max_output_
     proc_slot_release()
     (stdout, stderr, exit_code)
 
+pub fn process_environment_key_valid_v1(key: text) -> bool:
+    if key.len() <= 0 or key.contains("\u{0}"): return false
+    if key.starts_with("="):
+        if key.len() != 3 or key.byte_at(2) != 58: return false
+        val drive = key.byte_at(1)
+        return (drive >= 65 and drive <= 90) or (drive >= 97 and drive <= 122)
+    not key.contains("=")
+
+# Exact copied child environment; no global environment mutation or shell.
+# Native C ordinary capture lifecycle only, not an observation-V4 capability.
+# command is a directly executable pinned path; only host_path_native applies.
+# Unlike process_run_bounded this API does not perform command lookup/routing.
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in process_run_bounded_environment_v1", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn process_run_bounded_environment_v1(command: text, args: [text], environment: [(text, text)], timeout_ms: i64, max_output_bytes: i64) -> Result<ProcessResult, text>:
+    if not host_is_windows_host(): return Err("explicit child environment capture is not implemented for this host")
+    val interpreted = unsafe(capabilities: [ffi]): rt_is_interpreter_runtime()
+    val jit = unsafe(capabilities: [ffi]): rt_is_jit_runtime()
+    if interpreted or jit: return Err("child environment capture requires the matching native C provider")
+    if command == "" or command.contains("\u{0}") or timeout_ms <= 0 or max_output_bytes <= 0 or max_output_bytes > 16777216:
+        return Err("child environment capture bounds/command invalid")
+    var flattened: [text] = []
+    var total = 0
+    if environment.len() > 65536: return Err("child environment entry bound exceeded")
+    for (key, value) in environment:
+        if not process_environment_key_valid_v1(key) or value.contains("\u{0}"): return Err("child environment contains an invalid name/value")
+        total = total + key.len() + value.len()
+        if total > 4194304: return Err("child environment byte bound exceeded")
+        flattened = flattened.push(key + "=" + value)
+    proc_slot_acquire()
+    val outcome = process_environment_capture_native_v1(host_path_native(command), args, flattened, 1, timeout_ms, max_output_bytes)
+    proc_slot_release()
+    val result = outcome?
+    val flags = result.3
+    if flags >= 8: return Err("native child environment capture failed: " + result.1)
+    val timeout = flags % 2 == 1
+    val output_limited = flags % 8 >= 2
+    val limit = if timeout: "timeout" else: if output_limited: "output" else: ""
+    Ok(ProcessResult(stdout: result.0, stderr: result.1, exit_code: result.2, limit_exceeded: timeout or output_limited, limit_type: limit))
+
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in process_spawn_environment_overlay_native_v1", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn process_spawn_environment_overlay_native_v1(command: text, args: [text], environment: [text]) -> i64:
+    if not host_is_windows_host(): return -95
+    val interpreted = unsafe(capabilities: [ffi]): rt_is_interpreter_runtime()
+    val jit = unsafe(capabilities: [ffi]): rt_is_jit_runtime()
+    if interpreted or jit: return -95
+    # Match _process_spawn_async_raw: retain the existing shebang/POSIX-tool
+    # routing policy; ordinary async does not call _resolve_process_cmd.
+    val (resolved_command, resolved_arguments) = _resolve_posix_tool(command, args)
+    process_environment_spawn_native_v1(host_path_native(resolved_command), resolved_arguments, environment, 0)
+
+# Exact executable admission, independent of the running process timeout.
+# No shell/tool lookup. Admission is sampled AFTER governor wait; native capture
+# rechecks pre-fork/pre-exec or pre-CreateProcess/pre-ResumeThread. This does not
+# turn ordinary capture into a ProcessOwnedV4 lifetime/cleanup capability.
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in process_admitted_capture_v1", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+fn process_admitted_capture_v1(command: text, args: [text], environment: [text], mode: i64,
+        timeout_ms: i64, max_output_bytes: i64, expires_at_unix_ms: i64) -> Result<ProcessResult, text>:
+    val interpreted = unsafe(capabilities: [ffi]): rt_is_interpreter_runtime()
+    val jit = unsafe(capabilities: [ffi]): rt_is_jit_runtime()
+    if interpreted or jit: return Err("launch-admission-requires-native-core-c-provider-before-effect")
+    if not host_path_is_absolute(command) or command.contains("\u{0}") or args.len() > 32768 or
+            timeout_ms <= 0 or max_output_bytes <= 0 or max_output_bytes > 16777216 or expires_at_unix_ms <= 0:
+        return Err("launch-admission-invalid-input-before-effect")
+    var size = command.len()
+    for arg in args:
+        if arg.contains("\u{0}") or arg.len() > 16777216: return Err("launch-admission-invalid-argument-before-effect")
+        size = size + arg.len()
+        if size > 4194304: return Err("launch-admission-argument-byte-limit-before-effect")
+    proc_slot_acquire()
+    val sampled_micros = time_sample_unix_micros_or_failure()
+    if sampled_micros <= 0:
+        proc_slot_release()
+        return Err("launch-admission-clock-unavailable-before-effect")
+    if sampled_micros / 1000 >= expires_at_unix_ms:
+        proc_slot_release()
+        return Err("launch-deadline-expired-before-effect")
+    val outcome = process_capture_admitted_native_v1(host_path_native(command), args,
+        environment, mode, timeout_ms, max_output_bytes, expires_at_unix_ms)
+    proc_slot_release()
+    val result = outcome?
+    val flags = result.3
+    if flags % 64 >= 32: return Err("launch-deadline-expired-before-effect")
+    if flags >= 64: return Err("launch-admission-provider-rejected-before-effect")
+    if flags % 32 >= 8: return Err("launch-admission-native-failure-effect-uncertain")
+    val timed_out = flags % 2 == 1
+    val output_limited = flags % 8 >= 2
+    Ok(ProcessResult(stdout: result.0, stderr: result.1, exit_code: result.2,
+        limit_exceeded: timed_out or output_limited,
+        limit_type: if timed_out: "timeout" else: if output_limited: "output" else: ""))
+
+# Linux/other POSIX capture inherits the trusted parent environment exactly as
+# the existing native capture owner does; mode2 never means empty environment.
+pub fn process_run_bounded_admitted_v1(command: text, args: [text], timeout_ms: i64,
+        max_output_bytes: i64, expires_at_unix_ms: i64) -> Result<ProcessResult, text>:
+    process_admitted_capture_v1(command, args, [], 2, timeout_ms, max_output_bytes, expires_at_unix_ms)
+
+# Ordinary native capture with authoritative timeout/output flags, inherited
+# trusted environment, and no launch deadline or fabricated expiration value.
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in process_run_bounded_observed_v1", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn process_run_bounded_observed_v1(command: text, args: [text], timeout_ms: i64,
+        max_output_bytes: i64) -> Result<ProcessResult, text>:
+    val interpreted = unsafe(capabilities: [ffi]): rt_is_interpreter_runtime()
+    val jit = unsafe(capabilities: [ffi]): rt_is_jit_runtime()
+    if interpreted or jit: return Err("observed-capture-requires-native-core-c-provider-before-effect")
+    if not host_path_is_absolute(command) or command.contains("\u{0}") or args.len() > 32768 or
+            timeout_ms <= 0 or max_output_bytes <= 0 or max_output_bytes > 16777216:
+        return Err("observed-capture-invalid-input-before-effect")
+    var size = command.len()
+    for arg in args:
+        if arg.contains("\u{0}") or arg.len() > 16777216: return Err("observed-capture-invalid-argument-before-effect")
+        size = size + arg.len()
+        if size > 4194304: return Err("observed-capture-argument-byte-limit-before-effect")
+    proc_slot_acquire()
+    val outcome = process_capture_observed_native_v1(host_path_native(command), args, timeout_ms, max_output_bytes)
+    proc_slot_release()
+    val result = outcome?
+    val flags = result.3
+    if flags >= 32: return Err("observed-capture-provider-rejected-before-effect")
+    if flags >= 8: return Err("observed-capture-native-failure-effect-uncertain")
+    val timed_out = flags % 2 == 1
+    val output_limited = flags % 8 >= 2
+    Ok(ProcessResult(stdout: result.0, stderr: result.1, exit_code: result.2,
+        limit_exceeded: timed_out or output_limited,
+        limit_type: if timed_out: "timeout" else: if output_limited: "output" else: ""))
+
+# Explicit clean copied environment remains Windows-only. No Linux empty-env
+# fallback and no overlay/inherited Docker selector variables are admitted.
+pub fn process_run_bounded_environment_admitted_v1(command: text, args: [text], environment: [(text, text)],
+        timeout_ms: i64, max_output_bytes: i64, expires_at_unix_ms: i64) -> Result<ProcessResult, text>:
+    if not host_is_windows_host(): return Err("launch-admission-explicit-environment-unsupported-before-effect")
+    if environment.len() > 65536: return Err("launch-admission-environment-count-before-effect")
+    var flattened: [text] = []
+    var size = 0
+    for (key, value) in environment:
+        if not process_environment_key_valid_v1(key) or value.contains("\u{0}"):
+            return Err("launch-admission-invalid-environment-before-effect")
+        size = size + key.len() + value.len()
+        if size > 4194304: return Err("launch-admission-environment-byte-limit-before-effect")
+        flattened.push(key + "=" + value)
+    process_admitted_capture_v1(command, args, flattened, 1, timeout_ms, max_output_bytes, expires_at_unix_ms)
+
+pub fn process_run_bounded_native(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> (text, text, i64):
+    """Native tuple compatibility entry with positive timeout/capture limits.
+
+    The ordinary interpreter-capable process API remains separate. Resolution,
+    command path conversion and process-governor slots keep their real owners.
+    """
+    if timeout_ms <= 0 or max_output_bytes <= 0:
+        return ("", "native bounded capture requires positive timeout and output limits", -1)
+    val resolved_command: text = _resolve_process_cmd(cmd + "")
+    val tool: (text, [text]) = _resolve_posix_tool(resolved_command, args)
+    val native_command: text = host_path_native(tool.0 + "")
+    val native_arguments: [text] = tool.1
+    if native_command == "":
+        return ("", "native bounded capture command resolution returned empty text", -1)
+    proc_slot_acquire()
+    val result: (text, text, i64) = process_capture_bounded_native(native_command, native_arguments, timeout_ms, max_output_bytes)
+    proc_slot_release()
+    result
+
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in process_run_bounded_bytes", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 pub fn process_run_bounded_bytes(cmd: text, args: [text], timeout_ms: i64, max_output_bytes: i64) -> ([u8], [u8], i64):
     proc_slot_acquire()
     val result = unsafe(capabilities: [ffi]):
@@ -1438,13 +2165,38 @@ pub fn process_run_bounded_bytes(cmd: text, args: [text], timeout_ms: i64, max_o
     proc_slot_release()
     result
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in process_last_child_peak_rss_kib", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn process_last_child_peak_rss_kib() -> i64:
+    """Peak RSS in KiB of the child reaped by the most recent bounded/timeout run.
+
+    Captured at the child's own reap (wait4 ru_maxrss on unix, PeakWorkingSetSize
+    on Windows), so it is per child, not a running maximum. Returns -1 when the
+    last run was not measured; 0 is never reported.
+    """
+    val peak_kib = unsafe(capabilities: [ffi]):
+        rt_process_last_child_peak_rss_kib()
+    peak_kib
+
+# @allow(primitive_api) — mirrors process_last_child_peak_rss_kib; -1 sentinel ABI
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in process_last_child_cpu_ms", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn process_last_child_cpu_ms() -> i64:
+    """User+system CPU time in ms of the child reaped by the most recent bounded/timeout run.
+
+    Captured at the same reap as process_last_child_peak_rss_kib (wait4
+    ru_utime+ru_stime on unix, GetProcessTimes on Windows). Returns -1 when the
+    last run was not measured; 0 is a real value (sub-millisecond child).
+    """
+    val cpu_ms = unsafe(capabilities: [ffi]):
+        rt_process_last_child_cpu_ms()
+    cpu_ms
+
 pub fn process_windows_executable(cmd: text) -> text?:
-    if not host_is_windows_host() or cmd == "": return nil
+    if not host_is_windows_host() or cmd == "": return None
     if cmd.contains("/") or cmd.contains("\\") or cmd.contains(":"):
         if file_exists(cmd): return Some(cmd)
         for suffix in _windows_path_exts():
             if file_exists(cmd + suffix): return Some(cmd + suffix)
-        return nil
+        return None
     var names: [text] = []
     var has_extension = false
     for suffix in _windows_path_exts():
@@ -1461,7 +2213,7 @@ pub fn process_windows_executable(cmd: text) -> text?:
         for name in names:
             val candidate = "{dir}\\{name}"
             if file_exists(candidate): return Some(candidate)
-    nil
+    None
 
 # --------------------------------------------------------------------------
 # Timeout-vs-kill discrimination for process_run_bounded results.
@@ -1508,6 +2260,331 @@ pub fn process_bounded_kill_signal(exit_code: i64) -> i64:
         return exit_code - 128
     0
 
+# Generation-bearing local handle over the canonical native piped registry.
+# Copying a Ref does not create another stdout reader or remote authority.
+use std.common.text_bytes.{boxed_text_bytes_checked}
+use std.common.string_core.{str_len}
+use std.common.build_manager.group_process_stream_protocol_v2.{GroupProcessStreamLaunchV2, group_process_stream_launch_validate_profiled_v3, group_process_stream_launch_encode_profiled_v3, group_process_stream_identity_profiled_v3}
+use std.nogc_sync_mut.io.group_process_owner.{GroupProcessStreamOwnerV2, group_process_stream_owner_validate_v2, group_process_stream_prepare_v2, group_process_stream_recover_v2, group_process_stream_confirm_v2, group_process_stream_probe_bound_v2, group_process_stream_cancel_v2, group_process_stream_cleanup_proof_v2}
+use std.nogc_sync_mut.io.linux_process_owner.{linux_process_stream_admit_profiled_v3, linux_process_launch_stream_broker_profiled_v3}
+
+struct PipedProcessRefV1:
+    pid: i64
+    generation: i64
+    group_root: text = ""
+    group_identity: text = ""
+
+struct PipedProcessOwnedTransferV2:
+    owner: GroupProcessStreamOwnerV2
+    reference: PipedProcessRefV1
+
+enum PipedProcessOwnedSpawnV2:
+    # Transfer availability only. This is not application/attach success or an
+    # attestation that child code executed; consumers remain opening until
+    # their own qualified provider/stream observation.
+    Ready(owner: GroupProcessStreamOwnerV2, reference: PipedProcessRefV1)
+    CleanupRequired(owner: GroupProcessStreamOwnerV2, reference: PipedProcessRefV1?, reason: text)
+    Rejected(reason: text)
+
+val PIPED_PROCESS_REF_V1_MAX_ARGS: i64 = 64
+
+@unsafe(reason: "spawn returns the exact reserved slot generation; command length and argv are checked before effects", capabilities: [ffi])
+extern fn rt_process_spawn_piped_generation_v1(cmd: text, cmd_len: i64, args: [text]) -> i64
+@unsafe(reason: "resolve PID only for the exact generation returned by spawn, never adopt a PID", capabilities: [ffi])
+extern fn rt_process_piped_pid_for_generation_v1(generation: i64) -> i64
+@unsafe(reason: "same-registry exact-reference read; empty text requires exact-reference state query", capabilities: [ffi])
+extern fn rt_process_read_stdout_ref_v1(pid: i64, generation: i64) -> text
+@unsafe(reason: "same-registry stdout state: 0 deferred, 1 drained EOF, -2 stale, -1 runtime failure", capabilities: [ffi])
+extern fn rt_process_stdout_state_ref_v1(pid: i64, generation: i64) -> i64
+@unsafe(reason: "same-registry exact-reference validation only; no read, wait, signal or close", capabilities: [ffi])
+extern fn rt_process_validate_piped_ref_v1(pid: i64, generation: i64) -> i64
+@unsafe(reason: "same-registry generation-checked partial write; >=0 progress, -2 stale, -1 failure", capabilities: [ffi])
+extern fn rt_process_write_stdin_some_ref_v1(pid: i64, generation: i64, data: text, data_len: i64, offset: i64, max_bytes: i64) -> i64
+@unsafe(reason: "same-registry exact-reference liveness: 0 stopped, 1 running, -2 stale, -3 POSIX unsupported, -1 failure", capabilities: [ffi])
+extern fn rt_process_is_piped_alive_ref_v1(pid: i64, generation: i64) -> i64
+@unsafe(reason: "same-registry exact-reference close claim: 0 success, -2 stale or duplicate, -3 POSIX unsupported, -1 cleanup failure", capabilities: [ffi])
+extern fn rt_process_close_piped_ref_v1(pid: i64, generation: i64) -> i64
+
+@unsafe(reason: "reserve only pipe descriptors and a unique generation in the existing registry", capabilities: [ffi])
+extern fn rt_process_stream_reserve_v2() -> i64
+@unsafe(reason: "bind a reserved generation to a pinned protected root and immutable request digest", capabilities: [ffi])
+extern fn rt_process_stream_bind_v2(generation: i64, root: text, root_len: i64, identity: text, identity_len: i64) -> i64
+@unsafe(reason: "release a ticket only when the canonical launcher proves no process was launched", capabilities: [ffi])
+extern fn rt_process_stream_abandon_unlaunched_v2(generation: i64, root: text, root_len: i64, identity: text, identity_len: i64) -> i64
+@unsafe(reason: "retrieve a PID only from the exact generation and immutable group binding", capabilities: [ffi])
+extern fn rt_process_stream_pid_v2(generation: i64, root: text, root_len: i64, identity: text, identity_len: i64) -> i64
+@unsafe(reason: "retire bound descriptors only when pinned-root terminal bytes match canonical verified proof", capabilities: [ffi])
+extern fn rt_process_stream_retire_v2(generation: i64, root: text, root_len: i64, identity: text, identity_len: i64, proof: text, proof_len: i64) -> i64
+@unsafe(reason: "read the sole native stream after atomic reference and group-binding validation", capabilities: [ffi])
+extern fn rt_process_read_stdout_owned_v2(pid: i64, generation: i64, root: text, root_len: i64, identity: text, identity_len: i64) -> text
+@unsafe(reason: "observe exact bound stream EOF without process polling or another reader", capabilities: [ffi])
+extern fn rt_process_stdout_state_owned_v2(pid: i64, generation: i64, root: text, root_len: i64, identity: text, identity_len: i64) -> i64
+@unsafe(reason: "validate exact bound registry ownership without read, wait or signal", capabilities: [ffi])
+extern fn rt_process_validate_piped_owned_v2(pid: i64, generation: i64, root: text, root_len: i64, identity: text, identity_len: i64) -> i64
+@unsafe(reason: "write bytes only after atomic reference and group-binding validation", capabilities: [ffi])
+extern fn rt_process_write_stdin_some_owned_v2(pid: i64, generation: i64, root: text, root_len: i64, identity: text, identity_len: i64, data: text, data_len: i64, offset: i64, max_bytes: i64) -> i64
+
+fn _piped_ref_input_error_v1(value: text) -> text:
+    match boxed_text_bytes_checked(value):
+        case Err(reason): return "process_input_encoding_failed"
+        case Ok(bytes):
+            for byte in bytes:
+                if byte == 0u8: return "process_input_contains_nul"
+    ""
+
+fn _piped_ref_valid_v1(process: PipedProcessRefV1) -> bool:
+    (process.pid > 0 and process.generation > 0 and ((process.group_root == "" and process.group_identity == "") or
+        (process.group_root != "" and process.group_identity != "")))
+
+pub fn process_piped_ref_equal_v1(left: PipedProcessRefV1, right: PipedProcessRefV1) -> bool:
+    (left.pid == right.pid and left.generation == right.generation and
+        left.group_root == right.group_root and left.group_identity == right.group_identity)
+
+pub fn process_validate_piped_owned_transfer_v2(transfer: PipedProcessOwnedTransferV2) -> Result<(), text>:
+    val owner = transfer.owner
+    val invalid = group_process_stream_owner_validate_v2(owner)
+    if invalid != "": return Err(invalid)
+    val reference = transfer.reference
+    if (reference.group_root != owner.launch.root or reference.group_identity != owner.identity_digest or
+            reference.generation != owner.launch.transport_generation):
+        return Err("process_owned_transfer_binding_mismatch")
+    process_validate_piped_ref_v1(reference)
+
+pub fn process_piped_owned_transfer_equal_v2(left: PipedProcessOwnedTransferV2,
+        right: PipedProcessOwnedTransferV2) -> bool:
+    if (group_process_stream_owner_validate_v2(left.owner) != "" or
+            group_process_stream_owner_validate_v2(right.owner) != ""): return false
+    (process_piped_ref_equal_v1(left.reference, right.reference) and
+        left.owner.identity_digest == right.owner.identity_digest and
+        group_process_stream_launch_encode_profiled_v3(left.owner.launch) == group_process_stream_launch_encode_profiled_v3(right.owner.launch))
+
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _process_stream_reference_v2", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+fn _process_stream_reference_v2(owner: GroupProcessStreamOwnerV2) -> PipedProcessRefV1?:
+    val launch = owner.launch
+    val pid = unsafe(capabilities: [ffi]):
+        rt_process_stream_pid_v2(launch.transport_generation, launch.root, str_len(launch.root),
+            owner.identity_digest, str_len(owner.identity_digest))
+    if pid <= 0: return None
+    Some(PipedProcessRefV1(pid: pid, generation: launch.transport_generation,
+        group_root: launch.root, group_identity: owner.identity_digest))
+
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _process_stream_reject_or_retain_v2", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+fn _process_stream_reject_or_retain_v2(owner: GroupProcessStreamOwnerV2, reason: text) -> PipedProcessOwnedSpawnV2:
+    val launch = owner.launch
+    val abandoned = unsafe(capabilities: [ffi]):
+        rt_process_stream_abandon_unlaunched_v2(launch.transport_generation, launch.root, str_len(launch.root),
+            owner.identity_digest, str_len(owner.identity_digest))
+    if abandoned == 0: return PipedProcessOwnedSpawnV2.Rejected(reason)
+    PipedProcessOwnedSpawnV2.CleanupRequired(owner, _process_stream_reference_v2(owner), reason)
+
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in process_spawn_piped_owned_v2", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn process_spawn_piped_owned_v2(launch: GroupProcessStreamLaunchV2) -> PipedProcessOwnedSpawnV2:
+    if launch.transport_generation != 0: return PipedProcessOwnedSpawnV2.Rejected("process_transport_already_assigned")
+    val invalid = group_process_stream_launch_validate_profiled_v3(launch)
+    if invalid != "": return PipedProcessOwnedSpawnV2.Rejected(invalid)
+    if group_process_stream_launch_encode_profiled_v3(launch) == "":
+        return PipedProcessOwnedSpawnV2.Rejected("process_stream_request_exceeds_wire_bound")
+    # Admission checks the actual platform and delegation before any ticket or fork.
+    match linux_process_stream_admit_profiled_v3(launch):
+        case Err(reason): return PipedProcessOwnedSpawnV2.Rejected(reason)
+        case Ok(_): pass
+    val now = time_now_unix_micros()
+    if now <= 0 or now / 1000 >= launch.request.launch_deadline_unix_ms:
+        return PipedProcessOwnedSpawnV2.Rejected("process_launch_authority_expired")
+    val generation = unsafe(capabilities: [ffi]): rt_process_stream_reserve_v2()
+    if generation <= 0: return PipedProcessOwnedSpawnV2.Rejected("process_stream_reservation_failed")
+    var prepared = launch
+    prepared.transport_generation = generation
+    val owner = GroupProcessStreamOwnerV2(launch: prepared, identity_digest: group_process_stream_identity_profiled_v3(prepared))
+    val bound = unsafe(capabilities: [ffi]):
+        rt_process_stream_bind_v2(generation, prepared.root, str_len(prepared.root),
+            owner.identity_digest, str_len(owner.identity_digest))
+    if bound != 0: return _process_stream_reject_or_retain_v2(owner, "process_stream_binding_failed")
+    match group_process_stream_prepare_v2(prepared):
+        case Err(reason): return _process_stream_reject_or_retain_v2(owner, reason)
+        case Ok(_): pass
+    match linux_process_launch_stream_broker_profiled_v3(prepared, owner.identity_digest):
+        case Err(reason): return _process_stream_reject_or_retain_v2(owner, reason)
+        case Ok(_): pass
+    val reference = _process_stream_reference_v2(owner)
+    match reference:
+        case None: return PipedProcessOwnedSpawnV2.CleanupRequired(owner, None, "process_stream_handoff_unknown")
+        case Some(exact):
+            match group_process_stream_confirm_v2(owner):
+                case Err(reason): return PipedProcessOwnedSpawnV2.CleanupRequired(owner, reference, reason)
+                case Ok(observed):
+                    if observed.terminal:
+                        return PipedProcessOwnedSpawnV2.CleanupRequired(owner, reference, "process_stream_already_terminal")
+                    return PipedProcessOwnedSpawnV2.Ready(owner, exact)
+
+fn _process_piped_owned_validate_retirement_v2(owner: GroupProcessStreamOwnerV2,
+        reference: PipedProcessRefV1?) -> Result<(), text>:
+    val invalid = group_process_stream_owner_validate_v2(owner)
+    if invalid != "": return Err(invalid)
+    match reference:
+        case Some(exact):
+            val _valid = process_validate_piped_owned_transfer_v2(PipedProcessOwnedTransferV2(owner: owner, reference: exact))?
+        case None: pass
+    Ok(())
+
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _process_piped_owned_retire_proven_v2", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+fn _process_piped_owned_retire_proven_v2(owner: GroupProcessStreamOwnerV2,
+        reference: PipedProcessRefV1?, proof: text) -> Result<(), text>:
+    val launch = owner.launch
+    val retired = unsafe(capabilities: [ffi]):
+        rt_process_stream_retire_v2(launch.transport_generation, launch.root, str_len(launch.root),
+            owner.identity_digest, str_len(owner.identity_digest), proof, str_len(proof))
+    if retired == -2:
+        match reference:
+            # Recovery after host loss has no native endpoint to retire. The
+            # exact durable cleanup proof was still required above; no slot
+            # with another generation or binding is touched by this outcome.
+            case None: return Ok(())
+            case Some(_): return Err("stale_process_reference")
+    if retired != 0: return Err("process_stream_retirement_failed")
+    # Durable owner/receipt files remain for the host ledger's separate reap ack.
+    Ok(())
+
+# Proof-only retirement never publishes a cancel action or retries proof IO.
+# Missing/malformed proof retains the caller's full owner/reference unchanged.
+pub fn process_retire_piped_owned_v2(owner: GroupProcessStreamOwnerV2,
+        reference: PipedProcessRefV1?) -> Result<(), text>:
+    _process_piped_owned_validate_retirement_v2(owner, reference)?
+    val proof = group_process_stream_cleanup_proof_v2(owner)?
+    _process_piped_owned_retire_proven_v2(owner, reference, proof)
+
+pub fn process_cleanup_piped_owned_v2(owner: GroupProcessStreamOwnerV2,
+        reference: PipedProcessRefV1?) -> Result<(), text>:
+    _process_piped_owned_validate_retirement_v2(owner, reference)?
+    # A bounded cancel turn is not proof. Only the canonical durable terminal
+    # receipt permits descriptor retirement; all failures retain the owner.
+    # A no-child admission receipt needs no control response from an exited
+    # broker. Otherwise request cancellation and require its collected proof.
+    val proof = match group_process_stream_cleanup_proof_v2(owner):
+        case Ok(value): value
+        case Err(_pending):
+            val _cancelled = group_process_stream_cancel_v2(owner)?
+            group_process_stream_cleanup_proof_v2(owner)?
+    _process_piped_owned_retire_proven_v2(owner, reference, proof)
+
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in process_spawn_piped_ref_v1", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn process_spawn_piped_ref_v1(cmd: text, args: [text]) -> Result<PipedProcessRefV1, text>:
+    if cmd == "": return Err("empty_process_command")
+    if args.len() > PIPED_PROCESS_REF_V1_MAX_ARGS: return Err("process_argv_too_large")
+    val command_error = _piped_ref_input_error_v1(cmd)
+    if command_error != "": return Err(command_error)
+    for arg in args:
+        val argument_error = _piped_ref_input_error_v1(arg)
+        if argument_error != "": return Err(argument_error)
+    if not host_path_is_absolute(cmd): return Err("process_command_not_absolute")
+    # Translate platform spelling only; no tool/script/PATH resolution.
+    val native_command = host_path_native(cmd)
+    val native_error = _piped_ref_input_error_v1(native_command)
+    if native_error != "": return Err(native_error)
+    if not host_path_is_absolute(native_command): return Err("process_command_not_absolute")
+    val command_bytes = str_len(native_command)
+    var generation: i64 = -1
+    unsafe(capabilities: [ffi]):
+        generation = rt_process_spawn_piped_generation_v1(native_command, command_bytes, args)
+    if generation <= 0: return Err("process_spawn_failed")
+    var pid: i64 = -1
+    unsafe(capabilities: [ffi]):
+        pid = rt_process_piped_pid_for_generation_v1(generation)
+    if pid == -2: return Err("stale_process_reference")
+    if pid <= 0: return Err("process_spawn_failed")
+    Ok(PipedProcessRefV1(pid: pid, generation: generation,
+        group_root: "", group_identity: ""))
+
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in process_validate_piped_ref_v1", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn process_validate_piped_ref_v1(process: PipedProcessRefV1) -> Result<(), text>:
+    if not _piped_ref_valid_v1(process): return Err("invalid_process_reference")
+    var validated: i64 = -1
+    unsafe(capabilities: [ffi]):
+        if process.group_root != "":
+            validated = rt_process_validate_piped_owned_v2(process.pid, process.generation,
+                process.group_root, str_len(process.group_root), process.group_identity, str_len(process.group_identity))
+        else:
+            validated = rt_process_validate_piped_ref_v1(process.pid, process.generation)
+    if validated == -2: return Err("stale_process_reference")
+    if validated != 0: return Err("process_reference_validation_failed")
+    Ok(())
+
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in process_read_stdout_ref_v1", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn process_read_stdout_ref_v1(process: PipedProcessRefV1) -> Result<text?, text>:
+    if not _piped_ref_valid_v1(process): return Err("invalid_process_reference")
+    var chunk: text = ""
+    unsafe(capabilities: [ffi]):
+        if process.group_root != "":
+            chunk = rt_process_read_stdout_owned_v2(process.pid, process.generation,
+                process.group_root, str_len(process.group_root), process.group_identity, str_len(process.group_identity))
+        else:
+            chunk = rt_process_read_stdout_ref_v1(process.pid, process.generation)
+    if chunk != "": return Ok(Some(chunk))
+    var state: i64 = -1
+    unsafe(capabilities: [ffi]):
+        if process.group_root != "":
+            state = rt_process_stdout_state_owned_v2(process.pid, process.generation,
+                process.group_root, str_len(process.group_root), process.group_identity, str_len(process.group_identity))
+        else:
+            state = rt_process_stdout_state_ref_v1(process.pid, process.generation)
+    if state == 0: return Ok(None)
+    if state == 1: return Err("process_stdout_eof")
+    if state == -2: return Err("stale_process_reference")
+    Err("process_stdout_failed")
+
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in process_write_stdin_some_ref_v1", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn process_write_stdin_some_ref_v1(process: PipedProcessRefV1, data: text,
+        offset: i64, max_bytes: i64) -> Result<i64, text>:
+    if not _piped_ref_valid_v1(process): return Err("invalid_process_reference")
+    val data_bytes = str_len(data)
+    if offset < 0 or offset > data_bytes or max_bytes <= 0:
+        return Err("invalid_process_write_range")
+    var written: i64 = -1
+    unsafe(capabilities: [ffi]):
+        if process.group_root != "":
+            written = rt_process_write_stdin_some_owned_v2(process.pid, process.generation,
+                process.group_root, str_len(process.group_root), process.group_identity, str_len(process.group_identity),
+                data, data_bytes, offset, max_bytes)
+        else:
+            written = rt_process_write_stdin_some_ref_v1(process.pid, process.generation,
+                data, data_bytes, offset, max_bytes)
+    if written == -2: return Err("stale_process_reference")
+    if written < 0: return Err("process_write_failed")
+    Ok(written)
+
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in process_is_piped_alive_ref_v1", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn process_is_piped_alive_ref_v1(process: PipedProcessRefV1) -> Result<bool, text>:
+    if not _piped_ref_valid_v1(process): return Err("invalid_process_reference")
+    if process.group_root != "":
+        val _valid = process_validate_piped_ref_v1(process)?
+        val observed = group_process_stream_probe_bound_v2(process.group_root, process.group_identity)?
+        # The owned workload remains live until the broker proves its tree empty;
+        # EOF and a reaped leader alone do not settle descendants or capacity.
+        return Ok(not observed.terminal)
+    var alive: i64 = -1
+    unsafe(capabilities: [ffi]):
+        alive = rt_process_is_piped_alive_ref_v1(process.pid, process.generation)
+    if alive == -2: return Err("stale_process_reference")
+    if alive == -3: return Err("process_liveness_unsupported")
+    if alive == 0: return Ok(false)
+    if alive == 1: return Ok(true)
+    Err("process_probe_failed")
+
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in process_close_piped_ref_v1", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn process_close_piped_ref_v1(process: PipedProcessRefV1) -> Result<(), text>:
+    if not _piped_ref_valid_v1(process): return Err("invalid_process_reference")
+    if process.group_root != "":
+        val _valid = process_validate_piped_ref_v1(process)?
+        val owner = group_process_stream_recover_v2(process.group_root, process.group_identity)?
+        return process_cleanup_piped_owned_v2(owner, Some(process))
+    var closed: i64 = -1
+    unsafe(capabilities: [ffi]):
+        closed = rt_process_close_piped_ref_v1(process.pid, process.generation)
+    if closed == -2: return Err("stale_process_reference")
+    if closed == -3: return Err("process_close_unsupported")
+    if closed != 0: return Err("process_close_failed")
+    Ok(())
+
 pub fn process_spawn_piped(cmd: text, args: [text]) -> i64:
     _process_spawn_piped_raw(cmd, args)
 
@@ -1520,8 +2597,13 @@ pub fn browser_renderer_sandbox_enter() -> bool:
 pub fn process_write_stdin(pid: i64, data: text) -> bool:
     _process_write_stdin_raw(pid, data)
 
+# Byte length of `data` for the text + byte-offset stdin ABI. The runtime
+# windows `[offset, data_len)`; a code-point count truncates multibyte input.
+pub fn process_stdin_data_len(data: text) -> i64:
+    str_len(data)
+
 pub fn process_write_stdin_some(pid: i64, data: text, offset: i64, max_bytes: i64) -> i64:
-    _process_write_stdin_some_raw(pid, data, data.len(), offset, max_bytes)
+    _process_write_stdin_some_raw(pid, data, process_stdin_data_len(data), offset, max_bytes)
 
 pub fn process_read_stdout(pid: i64) -> text:
     _process_read_stdout_raw(pid)
@@ -1556,12 +2638,12 @@ pub fn process_close_piped_result(pid: i64) -> Result<(), text>:
     if not _process_close_piped_raw(pid): return Err("process_close_failed")
     Ok(())
 
-fn process_run_timeout_unix(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
+pub fn process_run_timeout_unix(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
     """Unix implementation using the native async process facade."""
     val effective_timeout = if timeout_ms <= 0: 120000 else: timeout_ms
 
     var temp_dir = env_get("TMPDIR")
-    if temp_dir == nil or temp_dir == "":
+    if temp_dir == None or temp_dir == "":
         temp_dir = "/tmp"
 
     val pid_str = "{getpid()}"
@@ -1603,7 +2685,7 @@ fn process_run_timeout_unix(cmd: text, args: [text], timeout_ms: i64) -> (text, 
     else:
         (stdout, stderr, exit_code)
 
-fn process_run_timeout_windows(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
+pub fn process_run_timeout_windows(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
     """Windows implementation: direct argv bounded run.
 
     The old mechanism spawned `cmd /c "<cmd> <args> > out.txt 2> err.txt"`.
@@ -1620,14 +2702,71 @@ fn process_run_timeout_windows(cmd: text, args: [text], timeout_ms: i64) -> (tex
     proc_slot_release()
     (stdout, stderr, exit_code as i32)
 
-fn process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
+pub fn process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
     """Platform-agnostic timeout wrapper"""
     if _is_windows_platform():
         process_run_timeout_windows(cmd, args, timeout_ms)
     else:
         process_run_timeout_unix(cmd, args, timeout_ms)
 
-fn process_run_timeout_live(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
+# Private post-exit process spools retain the full-output API contract. The
+# snapshot bounds this operation; each strict UTF-8 decode stays within the
+# shared text-session budget. Size stability is not an immutability guarantee.
+fn _process_capture_owned_spool_checked(path: text) -> Result<text, text>:
+    val expected = file_size_signed(path)
+    if expected < 0:
+        return Err("capture size unavailable: {path}")
+    val codec = match file_default_text_codec():
+        case Ok(item): item
+        case Err(error): return Err(io_text_error_message(error))
+    if expected == 0:
+        val probe = match external_file_read_bytes_at(path, 0, 1):
+            case Ok(item): item
+            case Err(error): return Err(io_text_error_message(error))
+        if probe.len() != 0 or file_size_signed(path) != 0:
+            return Err("capture changed during empty read: {path}")
+        return Ok("")
+    var chunks: [text] = []
+    var offset: i64 = 0
+    while offset < expected:
+        val remaining = expected - offset
+        var count = if remaining > 1048576: 1048576 else: remaining
+        var decoded = false
+        var attempt = 0
+        while attempt < 4 and count > 0:
+            # offset + count <= expected, so positional arithmetic cannot wrap.
+            val bytes = match external_file_read_bytes_at(path, offset, count):
+                case Ok(item): item
+                case Err(error): return Err(io_text_error_message(error))
+            if bytes.len() != count:
+                return Err("capture returned a short byte extent: {path}")
+            match file_session_decode(bytes, codec, offset):
+                case Ok(chunk):
+                    if str_len(chunk) != count:
+                        return Err("capture decoded byte extent changed: {path}")
+                    chunks.push(chunk)
+                    offset = offset + count
+                    decoded = true
+                    break
+                case Err(error):
+                    match error:
+                        case TextIoError.Codec(_):
+                            # At most three trailing bytes can belong to the
+                            # next UTF-8 scalar. Every trimmed byte is revisited.
+                            if attempt == 3 or count == 1:
+                                return Err(io_text_error_message(error))
+                            count = count - 1
+                            attempt = attempt + 1
+                        case _:
+                            return Err(io_text_error_message(error))
+        if not decoded:
+            return Err("capture made no decoding progress: {path}")
+    val content = chunks.join("")
+    if offset != expected or str_len(content) != expected or file_size_signed(path) != expected:
+        return Err("capture byte extent changed during read: {path}")
+    Ok(content)
+
+pub fn process_run_timeout_live(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
     """
     Same contract and same timeout/kill semantics as process_run_timeout_unix,
     but relays the child's stdout/stderr to OUR stdout/stderr as they are
@@ -1663,7 +2802,7 @@ fn process_run_timeout_live(cmd: text, args: [text], timeout_ms: i64) -> (text, 
     val effective_timeout = if timeout_ms < 0: 120000 else: timeout_ms
 
     var temp_dir = env_get("TMPDIR")
-    if temp_dir == nil or temp_dir == "":
+    if temp_dir == None or temp_dir == "":
         temp_dir = "/tmp"
 
     val pid_str = "{getpid()}"
@@ -1702,9 +2841,9 @@ fn process_run_timeout_live(cmd: text, args: [text], timeout_ms: i64) -> (text, 
     # FreeBSD base has no setsid(1) and minimal hosts have no perl; there POSIX
     # sh job control (set -m) gives the background child its own process group
     # and `wait` returns its status, which is all the pgid kill path needs.
-    var sid_fn = "sid(){ if command -v setsid >/dev/null 2>&1; then exec setsid -w \"$@\"; elif command -v perl >/dev/null 2>&1; then exec perl -MPOSIX -e 'POSIX::setsid() >= 0 or exit 125; exec @ARGV or exit 127' -- \"$@\"; else set -m; \"$@\" & wait $!; exit $?; fi; }; "
-    if bootstrap_sid != nil or bootstrap_exec != nil:
-        sid_fn = "sid(){ case \"$SIMPLE_BOOTSTRAP_SESSION_EXEC\" in /*) ;; *) exit 125 ;; esac; exec \"$SIMPLE_BOOTSTRAP_SESSION_EXEC\" -- \"$@\"; }; "
+    var sid_fn = "sid(){{ if command -v setsid >/dev/null 2>&1; then exec setsid -w \"$@\"; elif command -v perl >/dev/null 2>&1; then exec perl -MPOSIX -e 'POSIX::setsid() >= 0 or exit 125; exec @ARGV or exit 127' -- \"$@\"; else set -m; \"$@\" & wait $!; exit $?; fi; }}; "
+    if bootstrap_sid != None or bootstrap_exec != None:
+        sid_fn = "sid(){{ case \"$SIMPLE_BOOTSTRAP_SESSION_EXEC\" in /*) ;; *) exit 125 ;; esac; exec \"$SIMPLE_BOOTSTRAP_SESSION_EXEC\" -- \"$@\"; }}; "
     val redirected_cmd = "{sid_fn}sid sh -c '{inner_cmd}' > '{stdout_path}' 2> '{stderr_path}'"
 
     proc_slot_acquire()
@@ -1784,12 +2923,27 @@ fn process_run_timeout_live(cmd: text, args: [text], timeout_ms: i64) -> (text, 
 
     var stdout = ""
     var stderr = ""
-    if file_exists(stdout_file):
-        stdout = file_read_text(stdout_file)
-        file_delete(stdout_file)
-    if file_exists(stderr_file):
-        stderr = file_read_text(stderr_file)
-        file_delete(stderr_file)
+    var capture_error = ""
+    match _process_capture_owned_spool_checked(stdout_file):
+        case Ok(content):
+            stdout = content
+            file_delete(stdout_file)
+        case Err(message):
+            capture_error = "stdout capture failed: {message}; retained spool: {stdout_file}"
+    match _process_capture_owned_spool_checked(stderr_file):
+        case Ok(content):
+            stderr = content
+            file_delete(stderr_file)
+        case Err(message):
+            capture_error = capture_error + "\nstderr capture failed: {message}; retained spool: {stderr_file}"
+
+    if capture_error != "":
+        if relay_error != "":
+            stderr = stderr + "\n[ERROR: {relay_error}]"
+        if timed_out:
+            val timeout_secs = (effective_timeout + 999) / 1000
+            stderr = stderr + "\n[TIMEOUT: Process killed after {timeout_secs}s]"
+        return (stdout, stderr + "\n[ERROR: {capture_error}]", -1)
 
     if relay_error != "":
         (stdout, stderr + "\n[ERROR: {relay_error}]", -1)
@@ -1799,7 +2953,7 @@ fn process_run_timeout_live(cmd: text, args: [text], timeout_ms: i64) -> (text, 
     else:
         (stdout, stderr, exit_code)
 
-fn _process_run_with_limits(cmd: text, args: [text], timeout_ms: i64, memory_bytes: i64, cpu_seconds: i64, max_fds: i64, max_procs: i64, max_output_bytes: i64) -> ProcessResult:
+pub fn _process_run_with_limits(cmd: text, args: [text], timeout_ms: i64, memory_bytes: i64, cpu_seconds: i64, max_fds: i64, max_procs: i64, max_output_bytes: i64) -> ProcessResult:
     """
     Execute a process with resource limits enforced via ulimit.
 
@@ -1989,10 +3143,10 @@ fn _mingwish_path(path: text) -> text:
     if unix.len() >= 3 and unix.starts_with("/") and unix.slice(2, 3) == "/":
         val drive = unix.slice(1, 2)
         if drive >= "a" and drive <= "z" or drive >= "A" and drive <= "Z":
-            return drive.lower() + ":/" + unix.slice(3, unix.len())
+            return drive.lower() + ":/" + unix.slice(3, unix.byte_len())
     unix
 
-fn _shell_command_args(command: text) -> (text, [text]):
+pub fn _shell_command_args(command: text) -> (text, [text]):
     if _is_windows_platform():
         val sh = _windows_posix_shell_path()
         if sh != "cmd.exe":
@@ -2076,7 +3230,7 @@ pub fn shell_int(command: text, default: i64) -> i64:
 # Async Process Management
 # ============================================================================
 
-fn process_spawn_async(cmd: text, args: [text]) -> i64:
+pub fn process_spawn_async(cmd: text, args: [text]) -> i64:
     """
     Spawn a process asynchronously (non-blocking).
 
@@ -2089,7 +3243,44 @@ fn process_spawn_async(cmd: text, args: [text]) -> i64:
     """
     _process_spawn_async_raw(cmd, args)
 
-fn process_spawn_redirected(cmd: text, args: [text], stdout_path: text,
+# Session ownership works on this host when Ok. Err carries the reason
+# (Windows: the Job object owns capture children instead; SimpleOS and any
+# host without an arm in runtime_process_tree.c: unsupported). The answer comes
+# from the C owner, never from a host-name allowlist: a host that misreports
+# its name (SimpleOS says "linux" today) still gets the truthful code.
+pub fn process_kill_tree_support() -> Result<(), text>:
+    if _is_windows_platform():
+        return Err("Windows capture children are owned by the Job object (process_spawn_redirected), not by a session")
+    val code = _process_tree_support_raw()
+    if code == 0:
+        return Ok(())
+    Err(_ptree_error_text(code))
+
+pub fn process_spawn_session(cmd: text, args: [text]) -> Result<i64, text>:
+    """
+    Spawn cmd as a SESSION LEADER (fork + setsid + exec), so that
+    process_kill(pid) and process_kill_tree(pid) reach every descendant, including
+    a `sh -c 'sleep 300 &'` grandchild that was reparented to init and sits in
+    its own process group. Only a descendant that calls setsid() itself escapes.
+
+    The pid is also the session id. process_wait / process_is_running /
+    process_kill route it to the session owner (runtime_process_tree.c), which
+    works on every engine because it does not depend on a spawn table.
+
+    Returns Ok(pid), or Err(reason) when the host has no session owner or the
+    spawn failed (-errno from the child's exec: the child never ran user code).
+    """
+    if _is_windows_platform():
+        return Err("process_spawn_session is POSIX-only; Windows uses process_spawn_redirected (Job object)")
+    val pid = _process_spawn_session_raw(cmd, args)
+    if pid > 1:
+        _session_pids.push(pid)
+        return Ok(pid)
+    if pid < 0:
+        return Err("process_spawn_session('{cmd}'): {_ptree_error_text(pid)}")
+    Err("process_spawn_session('{cmd}'): invalid pid {pid}")
+
+pub fn process_spawn_redirected(cmd: text, args: [text], stdout_path: text,
         stderr_path: text, timeout_ms: i64, capture_limit: i64) -> i64:
     """Windows exact argv/file capture with owned JobObject lifecycle.
 
@@ -2099,7 +3290,7 @@ fn process_spawn_redirected(cmd: text, args: [text], stdout_path: text,
     if not host_is_windows_host(): return -1
     windows_redirected_spawn(cmd, args, stdout_path, stderr_path, timeout_ms, capture_limit)
 
-fn process_wait(pid: i64, timeout_ms: i64) -> i64:
+pub fn process_wait(pid: i64, timeout_ms: i64) -> i64:
     """
     Wait for a process to complete.
 
@@ -2116,9 +3307,16 @@ fn process_wait(pid: i64, timeout_ms: i64) -> i64:
         return -1
     if pid >= WINDOWS_REDIRECTED_TOKEN_BASE:
         return windows_redirected_wait(pid, timeout_ms)
+    if _session_owned(pid):
+        val code = _process_session_wait_raw(pid, timeout_ms)
+        # -2 keeps ownership (still running); anything else means the leader is
+        # reaped or was never ours to wait for.
+        if code != -2:
+            _session_forget(pid)
+        return code
     _process_wait_raw(pid, timeout_ms)
 
-fn process_is_running(pid: i64) -> bool:
+pub fn process_is_running(pid: i64) -> bool:
     """
     Check if a process is still running.
 
@@ -2126,21 +3324,32 @@ fn process_is_running(pid: i64) -> bool:
     """
     if pid >= WINDOWS_REDIRECTED_TOKEN_BASE:
         return windows_redirected_is_running(pid)
+    if _session_owned(pid):
+        return _process_session_is_running_raw(pid) == 1
     _process_is_running_raw(pid)
 
-fn process_kill(pid: i64) -> bool:
+pub fn process_kill(pid: i64) -> bool:
     """
-    Terminate a running process.
+    Terminate a process.
 
-    Sends SIGTERM (Unix) or TerminateProcess (Windows).
-    On Unix, escalates to SIGKILL if process doesn't exit.
+    Plain pid: rt_process_kill, which signals ONLY that process (SIGTERM on the
+    C owner, kill-and-reap on the Rust/interp twins; see the contract in
+    runtime_symbols.rs). Its descendants are not reached.
 
-    Returns: true on success, false on failure
+    Owned tokens kill what they own: a Windows capture token terminates its Job
+    (every process in it), and a process_spawn_session pid kills its whole
+    session via process_kill_tree, because killing the leader alone would
+    orphan the tree the owner promised to contain.
+
+    Returns: true on success, false on failure (the reason is printed for a
+    session pid; see process_kill_tree).
     """
     if pid <= 1:
         return false
     if pid >= WINDOWS_REDIRECTED_TOKEN_BASE:
         return windows_redirected_kill(pid)
+    if _session_owned(pid):
+        return process_kill_tree(pid)
     _process_kill_raw(pid)
 
 # ============================================================================
@@ -2154,28 +3363,101 @@ fn process_kill(pid: i64) -> bool:
 # `prog > out.txt 2> err.log` put the errors in out.txt and left err.log empty.
 # It must write the real fd 2. Do NOT reintroduce a `print` fallback here.
 # See doc/08_tracking/bug/eprint_in_io_runtime_module_is_rerouted_to_stdout_2026-08-10.md
-fn eprint(msg: text):
+pub fn eprint(msg: text):
     rt_stderr_write("{msg}\n")
 
-fn _process_kill_group(pgid_file: text):
+# Kill `pid` and EVERYTHING it started, and say whether that could be
+# guaranteed. The only pids with that guarantee are the ones this module owns:
+#
+#   process_spawn_session pid   the pid is a session id; every descendant
+#                               inherited it (a pgid change cannot leave a
+#                               session). The C owner SIGKILLs every process in
+#                               the session and reaps the leader. An escaped
+#                               `sh -c 'sleep &'` grandchild in its own group,
+#                               reparented to init, is still in the session.
+#   Windows capture token       the Job object: process_kill terminates it.
+#   anything else               Err. The leader is still signalled (the old
+#                               behaviour), and the Err says descendants may
+#                               survive. Never reported as Ok.
+#
+# Known limit, same on every POSIX host: a descendant that itself calls setsid()
+# (a daemon) left the session and is not reached. Ok(()) means "the session was
+# enumerated and every member signalled", not "no descendant survives".
+#
+# Host status: macOS verified (C selfcheck + the specs under test/01_unit/lib).
+# Linux verified by the C selfcheck in a container (alpine/musl). FreeBSD arm
+# compile-checked by eye only. Windows: Job path unchanged. SimpleOS and other
+# hosts: Err (RT_PTREE_UNSUPPORTED from the C owner).
+pub fn process_kill_tree_result(pid: i64) -> Result<(), text>:
+    if pid <= 1:
+        return Err("invalid pid {pid}")
+    if pid >= WINDOWS_REDIRECTED_TOKEN_BASE:
+        if windows_redirected_kill(pid):
+            return Ok(())
+        return Err("Windows Job owner did not terminate capture token {pid}")
+    if _is_windows_platform():
+        _process_kill_raw(pid)
+        return Err("pid {pid} is not a Job-owned capture token: only the leader was signalled; descendants may survive")
+    if not _session_owned(pid):
+        _process_kill_raw(pid)
+        return Err("pid {pid} was not spawned by process_spawn_session: only the leader was signalled, through process_kill (which on the Rust/interp engines reaches only pids they spawned); descendants may survive")
+    val code = _process_kill_tree_raw(pid)
+    if code == 0:
+        _session_forget(pid)
+        return Ok(())
+    if code == RT_PTREE_SWEEP_FAILED_AFTER_REAP:
+        # The leader is gone and its pid may be recycled: stop owning it.
+        _session_forget(pid)
+        return Err("process_kill_tree({pid}): {_ptree_error_text(code)}")
+    # Otherwise ownership is kept so is_running/wait still route to the owner.
+    # This includes signal denial, reap timeout and wait/clock failure: none
+    # proves retirement. Do not retry a raw PID after the post-reap sentinel.
+    Err("process_kill_tree({pid}): {_ptree_error_text(code)}")
+
+# Bool view. The reason is printed, so false is never silent.
+pub fn process_kill_tree(pid: i64) -> bool:
+    match process_kill_tree_result(pid):
+        case Ok(_):
+            true
+        case Err(reason):
+            eprint("[process_kill_tree] {reason}")
+            false
+
+# Child side: ask the kernel to SIGKILL this process when the parent that
+# spawned it exits (Linux prctl(PR_SET_PDEATHSIG), FreeBSD procctl). The arm
+# survives exec but not fork, and a parent that died BEFORE the call never
+# triggers it, so the caller checks afterwards that the parent it expects is
+# still there. 0 armed, -errno failed, PROCESS_PARENT_DEATH_UNSUPPORTED when
+# this host has no arm (macOS, Windows): the caller keeps running unarmed.
+pub const PROCESS_PARENT_DEATH_UNSUPPORTED: i64 = -100000
+
+# @allow(primitive_api) — raw runtime_process_tree.c status code (0 / -errno / -100000 sentinel ABI)
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in process_arm_parent_death_kill", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn process_arm_parent_death_kill() -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_child_set_pdeathsig(9)
+
+pub fn _process_kill_group(pgid_file: text):
     # Best effort: the session leader recorded its pid (= the SESSION id of the
-    # whole spawned tree) in pgid_file. Kill by session (`pkill -s`), not by
-    # process group: GNU timeout 9.4 puts its command into a fresh group of
-    # its own, so a group kill on the leader pid misses the real worker.
-    # TERM first, then KILL.
+    # whole spawned tree) in pgid_file. Kill by that group id (the leader is
+    # also the group leader). TERM first, then KILL.
     if not file_exists(pgid_file):
         return
     val pgid = file_read_text(pgid_file).trim()
     if pgid == "":
         return
-    if env_get_nullable("SIMPLE_BOOTSTRAP_SESSION_ID") != nil or env_get_nullable("SIMPLE_BOOTSTRAP_SESSION_EXEC") != nil:
+    if env_get_nullable("SIMPLE_BOOTSTRAP_SESSION_ID") != None or env_get_nullable("SIMPLE_BOOTSTRAP_SESSION_EXEC") != None:
         # This is a nested PGID, never the enclosing guard SID. Whole-session
         # cleanup belongs to the outer guard when the bootstrap command fails.
         val cleanup = "case \"$1\" in ''|*[!0-9]*|0|1) exit 125 ;; esac; kill -TERM \"-$1\" 2>/dev/null; sleep 0.5; kill -KILL \"-$1\" 2>/dev/null; true"
         _process_run_bounded_raw("sh", ["-c", cleanup, "sh", pgid], 5000, 4096)
         return
-    _process_run_bounded_raw("pkill", ["-TERM", "-s", "{pgid}"], 2000, 4096)
-    _process_run_bounded_raw("sh", ["-c", "sleep 0.5; pkill -KILL -s {pgid} 2>/dev/null; true"], 5000, 4096)
+    # `pkill -s` is not portable: macOS pkill rejects -s, and the `set -m`
+    # fallback records a PGID, not a session id (audit item 6). The recorded id
+    # is a group leader's pid in every branch, so `kill -- -id` is the one form
+    # that reaches it everywhere.
+    val cleanup = "case \"$1\" in ''|*[!0-9]*|0|1) exit 125 ;; esac; kill -TERM -- \"-$1\" 2>/dev/null; sleep 0.5; kill -KILL -- \"-$1\" 2>/dev/null; true"
+    _process_run_bounded_raw("sh", ["-c", cleanup, "sh", pgid], 5000, 4096)
 
 # ============================================================================
 # App-twin surface parity (ported from src/app/io/process_ops.spl, 2026-09-19)
@@ -2198,72 +3480,78 @@ extern fn rt_process_exists(pid: i64) -> bool
 @unsafe(reason: "raw timeout process capture; exit_code -1 is the timeout or execution-failure sentinel", capabilities: [ffi])
 extern fn rt_process_run_timeout(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32)
 
-fn _process_run_inherit_raw(cmd: text, args: [text]) -> i64:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _process_run_inherit_raw", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn _process_run_inherit_raw(cmd: text, args: [text]) -> i64:
     unsafe(capabilities: [ffi]):
         rt_process_run_inherit(host_path_native(cmd), args)
 
-fn _process_spawn_inherit_raw() -> i64:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _process_spawn_inherit_raw", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn _process_spawn_inherit_raw() -> i64:
     unsafe(capabilities: [ffi]):
         rt_process_spawn_inherit()
 
-fn _process_exists_raw(pid: i64) -> bool:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _process_exists_raw", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn _process_exists_raw(pid: i64) -> bool:
     unsafe(capabilities: [ffi]):
         rt_process_exists(pid)
 
 @always_inline
-fn process_run_direct(cmd: text, args: [text]) -> (text, text, i64):
+pub fn process_run_direct(cmd: text, args: [text]) -> (text, text, i64):
     # Exact raw-command facade for callers that already own command lookup.
     # Unlike process_run, this deliberately performs no PATH preflight and
     # does not acquire the global process governor slot.
     _process_run_raw(cmd, args)
 
-fn process_run_inherit(cmd: text, args: [text]) -> i64:
+pub fn process_run_inherit(cmd: text, args: [text]) -> i64:
     # Foreground delegation: preserve the caller's stdin/stdout/stderr.
     _process_run_inherit_raw(cmd, args)
 
-fn process_spawn_inherit() -> i64:
+pub fn process_spawn_inherit() -> i64:
     # Spawn the canonical MCP wrapper as a transparent stdio child.
     _process_spawn_inherit_raw()
 
-fn process_exists(pid: i64) -> bool:
+pub fn process_exists(pid: i64) -> bool:
     # Arbitrary-PID probe. This is intentionally distinct from
     # process_is_running, whose provider contract is owned-child liveness.
     if pid <= 0:
         return false
     _process_exists_raw(pid)
 
-fn process_pid_exists(pid: i64) -> bool:
+pub fn process_pid_exists(pid: i64) -> bool:
     # Uniquely-named twin of process_exists, same semantics (kill(pid,0))
     # plus a `ps -p` fallback so hosts without /proc still see arbitrary
     # pids (piped children process_is_running cannot observe).
     if pid <= 0:
         return false
-    if _process_exists_raw(pid):
+    if process_exists(pid):
         return true
+    if _is_windows_platform():
+        return false
     val probe = process_run("/bin/ps", ["-p", pid.to_text()])
     probe.2 == 0
 
 @always_inline
-fn process_kill_unchecked(pid: i64) -> bool:
+pub fn process_kill_unchecked(pid: i64) -> bool:
     # Exact provider semantics for trusted supervisor PID receipts. Unlike
     # process_kill, this intentionally permits PID 1; never use arbitrary input.
     _process_kill_raw(pid)
 
 @always_inline
-fn _read_text_at_checked(path: text, offset: i64, size: i64) -> Result<text, text>:
+pub fn _read_text_at_checked(path: text, offset: i64, size: i64) -> Result<text, text>:
     file_read_text_at(path, offset, size)
 
 @always_inline
-fn _read_text_or_empty(path: text) -> text:
+pub fn _read_text_or_empty(path: text) -> text:
     match read_file_text_result(path):
         case Ok(content): content
         case Err(_): ""
 
-fn _process_run_timeout_raw(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _process_run_timeout_raw", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn _process_run_timeout_raw(cmd: text, args: [text], timeout_ms: i64) -> (text, text, i32):
     unsafe(capabilities: [ffi]):
         rt_process_run_timeout(cmd, args, timeout_ms)
 
-fn _shell_signed_int_or(value: text, default: i64) -> i64:
+pub fn _shell_signed_int_or(value: text, default: i64) -> i64:
     val trimmed = value.trim()
     if trimmed == "":
         return default

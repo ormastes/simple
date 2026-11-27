@@ -1,6 +1,29 @@
 # Prevention-mock deferred arming is impossible under this interpreter; `std.spec.*` also can't reach it
 ## Open 2026-09-16 — needs owner triage
 
+> **Triage 2026-11-25 (release/1.0.0):** the "no resolution evidence found in
+> the body" line above is stale — the 2026-11-04 re-verify sections below ARE
+> the resolution evidence. Current state by code inspection at `47d6c5eddd5`:
+> Defects 1 and 2 are GONE (class-ref interpreter default; 2026-11-04 probe
+> table below), and the directory-wide prevention policy that this record said
+> was unreachable has LANDED — `src/lib/nogc_sync_mut/spec.spl`
+> (`_dir_prevention_before`/`_dir_prevention_after` before/after_each pair,
+> `mock_auto_registry`, `SIMPLE_SPEC_DIR_PREVENTION` / `_prevention.sdn`
+> loading; see the "Directory-wide prevention policy" section ~line 1386).
+> `prevent`/`prevent_at_most`/`prevent_file` deliberately keep immediate-check
+> semantics; converting `prevent_file` to true auto-checked file scope is an
+> API-semantics owner decision, not a bug fix. Defect 3 (wildcard
+> `use std.spec.*` not exposing every pub fn) was not re-verified here:
+> interpreter re-verification on this host is environment-blocked — the
+> tracked `bin/simple.exe` (seed refreshed 2026-11-17, `41dbae93225`) predates
+> the seed's `@representation_boundary` directive-attribute fix
+> (`14a34acbe1e`, 2026-11-25), so loading today's annotated std-lib files
+> fails with `unknown decorator '@representation_boundary'` before any probe
+> can run. Defect 3 remains an open compiler import-resolution question;
+> everything else in this record is either resolved or an owner decision.
+> Status header left as-is for the owner; treat this note as the current
+> triage verdict.
+
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
@@ -157,3 +180,46 @@ identically (`semantic: function 'get_test_count' not found` via
 across `it` examples, wildcard-import symbol resolution) and out of scope for
 a local .spl patch, exactly as already concluded. No change made.
 
+
+## 2026-11-04 note (fix-classref lane)
+
+The interpreter limitation this record is blocked on — a class instance held
+in a field / dict / array being value-copied — is removed by the default flip
+of `SIMPLE_INTERP_CLASS_REF` (seed `Value::ClassInstance` carrier). Whether a
+deferred-arming `prevent` can now be built in pure Simple is unverified in
+this lane (no spec exercised it); re-triage on the rebuilt seed.
+
+## Re-verify 2026-11-04 — Defects 1 and 2 GONE on the class-ref seed (lane: work/feat-sspec-dir-prevention-20261104)
+
+Re-ran the Defect 1 probe shapes from this record plus the Defect 2 counter
+probe, as a throwaway `zz_probe_prevent_defect_spec.spl` under
+`D:/dev/wt/seed/simple.exe run` (seed from release tip, class-ref default on):
+
+| probe | 2026-08-07 | 2026-11-04 |
+|---|---|---|
+| array push `probe_mocks.push(m)`; `m.record_call`; `probe_mocks[0].call_count()` | 0 | **1** |
+| `ForbiddenCallGuard.new(m, ..)` built BEFORE the call; `check_guards` msgs | 0 | **1** |
+| closure `fn() -> i64: m.call_count()` captured before the call | 0 | **1** |
+| Defect 2: module `var` counter + mock mutated in example 1, read in example 2 | 0 / 0 | **1 / 1** |
+
+Results: `5 examples, 0 failures` (probe deleted after use, not landed).
+A deferred-arming prevention check is therefore buildable in pure Simple, and
+the directory-wide policy that landed the same day
+(`sspec_no_dir_wide_prevention_scope_2026-08-07.md`) IS exactly that: a
+before/after_each pair in `spec.spl` reading per-example call deltas off a
+`MockFunction` auto-registry. `prevent`/`prevent_at_most`/`prevent_file`
+keep their immediate-check semantics unchanged in that change; converting
+`prevent_file` to true auto-checked file scope is now unblocked but was not
+done (API-semantics change, separate decision). Defect 3 (wildcard
+`use std.spec.*` not exposing every pub fn) was not re-checked and is still
+assumed open — the new policy needs no import from the spec at all, so it
+is unaffected.
+
+Two engine facts learned on the way, recorded because they shape what a
+deferred check may do: (a) under the seed, `describe`/`it`/`before_each`/
+`after_each`/`fail_assertion` are intrinsics (`interpreter_call/bdd.rs`), so
+`spec.spl`'s `_execute_it` is NOT the live path under `simple run` — the
+only hook point is hook registration, which works from `spec.spl`'s own
+module initialiser; (b) a file read or a cross-module global write issued
+while `spec.spl` is still initialising silently does nothing, so such work
+must be deferred into the first hook invocation.

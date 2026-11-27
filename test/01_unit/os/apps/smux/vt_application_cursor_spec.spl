@@ -1,0 +1,151 @@
+"""
+## Purpose and audience
+Maintain the live DECCKM mode used by a future named-key encoder. These cases
+exercise the production VT parser and canonical accessor without a host PTY.
+## Evidence status
+Authored NOT_RUN. Compilation, case execution, SPipe generation and native
+compatibility remain unverified. This is not SendKeys or tmux compatibility proof.
+## Compatibility and limitations
+Mode changes and queries do not change visual capture content. Synchronized
+output freezes visuals but never freezes the current child input mode.
+"""
+# codex-system-test
+# @req REQ-CMUX-003
+# @manual_section: smux-vt-application-cursor
+use std.spec.{describe, it, expect, step}
+use std.common.text_bytes.{text_to_bytes}
+use os.apps.smux.vt_screen.{vt_new, vt_feed, vt_resize, vt_text,
+    vt_replies, vt_clear_replies, vt_application_cursor, vt_alt_screen}
+
+describe "Live VT application cursor mode":
+    it "should start reset and report exact reset reply bytes":
+        step("Create a terminal and query private mode one")
+        var screen = vt_new(2, 12)
+        expect(vt_application_cursor(screen)).to_equal(false)
+        screen = vt_feed(screen, "\x1b[?1$p")
+        expect(text_to_bytes(vt_replies(screen))).to_equal([27u8, 91u8, 63u8, 49u8, 59u8, 50u8, 36u8, 121u8])
+        expect(screen.capture_dirty).to_equal(false)
+        expect(vt_text(screen)).to_equal("")
+
+    it "should wait for fragmented set and reset terminators":
+        step("Split the set sequence at every character boundary")
+        var screen = vt_feed(vt_new(2, 12), "visible")
+        for fragment in ["\x1b", "[", "?", "1"]:
+            screen = vt_feed(screen, fragment)
+            expect(vt_application_cursor(screen)).to_equal(false)
+            expect(screen.capture_dirty).to_equal(false)
+        screen = vt_feed(screen, "h")
+        expect(vt_application_cursor(screen)).to_equal(true)
+        expect(screen.capture_dirty).to_equal(false)
+        step("Split the reset sequence before its terminator")
+        screen = vt_feed(screen, "\x1b[?1")
+        expect(vt_application_cursor(screen)).to_equal(true)
+        screen = vt_feed(screen, "l")
+        expect(vt_application_cursor(screen)).to_equal(false)
+        expect(screen.capture_dirty).to_equal(false)
+        expect(vt_text(screen)).to_equal("visible")
+
+    it "should answer fragmented queries with current set and reset state":
+        step("Set private mode one and feed an incomplete DECRQM query")
+        var screen = vt_feed(vt_new(2, 12), "\x1b[?1h\x1b[?1$")
+        expect(vt_replies(screen)).to_equal("")
+        screen = vt_feed(screen, "p")
+        expect(text_to_bytes(vt_replies(screen))).to_equal([27u8, 91u8, 63u8, 49u8, 59u8, 49u8, 36u8, 121u8])
+        step("Reset the mode and retain ordered replies until drained")
+        screen = vt_feed(screen, "\x1b[?1l\x1b[?1$p")
+        expect(vt_replies(screen)).to_equal("\x1b[?1;1$y\x1b[?1;2$y")
+        expect(vt_application_cursor(screen)).to_equal(false)
+        expect(screen.capture_dirty).to_equal(false)
+
+    it "should ignore nonprivate and unknown mode changes":
+        step("Send ordinary mode one and an unknown private mode")
+        var screen = vt_feed(vt_new(2, 12), "\x1b[1h\x1b[?9999h\x1b[?9999$p")
+        expect(vt_application_cursor(screen)).to_equal(false)
+        expect(vt_replies(screen)).to_equal("\x1b[?9999;0$y")
+        step("Keep a set application mode through unrelated resets")
+        screen = vt_feed(screen, "\x1b[?1h\x1b[1l\x1b[?9999l")
+        expect(vt_application_cursor(screen)).to_equal(true)
+        expect(screen.capture_dirty).to_equal(false)
+        expect(vt_text(screen)).to_equal("")
+
+    it "should reset application mode through RIS without inventing visual dirtiness":
+        step("Set the mode on an empty terminal and reset the terminal")
+        var screen = vt_feed(vt_new(2, 12), "\x1b[?1h")
+        expect(vt_application_cursor(screen)).to_equal(true)
+        screen = vt_feed(screen, "\x1bc")
+        expect(vt_application_cursor(screen)).to_equal(false)
+        expect(screen.capture_dirty).to_equal(false)
+        screen = vt_feed(screen, "\x1b[?1$p")
+        expect(vt_replies(screen)).to_equal("\x1b[?1;2$y")
+
+    it "should preserve copied mode values and mode state while clearing replies":
+        step("Copy a set mode and reset only the derived screen")
+        val original = vt_feed(vt_new(2, 12), "\x1b[?1h\x1b[?1$p")
+        val reset = vt_feed(original, "\x1b[?1l")
+        expect(vt_application_cursor(reset)).to_equal(false)
+        expect(vt_application_cursor(original)).to_equal(true)
+        step("Clear pending replies without changing the live mode")
+        val cleared = vt_clear_replies(original)
+        expect(vt_replies(cleared)).to_equal("")
+        expect(vt_application_cursor(cleared)).to_equal(true)
+        expect(vt_replies(original)).to_equal("\x1b[?1;1$y")
+
+    it "should preserve both set and reset state across resize":
+        step("Grow and shrink a screen with application cursor enabled")
+        var screen = vt_feed(vt_new(2, 12), "value\x1b[?1h")
+        screen = vt_resize(screen, 3, 16)
+        expect(vt_application_cursor(screen)).to_equal(true)
+        expect(vt_text(screen)).to_equal("value")
+        screen = vt_resize(screen, 1, 8)
+        expect(vt_application_cursor(screen)).to_equal(true)
+        expect(vt_text(screen)).to_equal("value")
+        step("Reset the mode before the next resize")
+        screen = vt_feed(screen, "\x1b[?1l")
+        screen = vt_resize(screen, 2, 12)
+        expect(vt_application_cursor(screen)).to_equal(false)
+
+    it "should keep one live mode across every supported alternate screen form":
+        for mode in [47, 1047, 1049]:
+            step("Enter an alternate screen with application cursor enabled")
+            var screen = vt_feed(vt_new(2, 12), "main\x1b[?1h")
+            screen = vt_feed(screen, "\x1b[?" + mode.to_text() + "h")
+            expect(vt_alt_screen(screen)).to_equal(true)
+            expect(vt_application_cursor(screen)).to_equal(true)
+            step("Reset inside the alternate screen then restore primary content")
+            screen = vt_feed(screen, "\x1b[?1l")
+            screen = vt_feed(screen, "\x1b[?" + mode.to_text() + "l")
+            expect(vt_alt_screen(screen)).to_equal(false)
+            expect(vt_application_cursor(screen)).to_equal(false)
+            expect(vt_text(screen)).to_equal("main")
+
+    it "should expose live input mode and replies while synchronized visuals stay frozen":
+        step("Freeze a visible frame then set the input mode during an update")
+        var screen = vt_feed(vt_new(2, 12), "old")
+        screen = vt_feed(screen, "\x1b[?2026h\rnew\x1b[?1h\x1b[?1$p")
+        expect(vt_text(screen)).to_equal("old")
+        expect(vt_application_cursor(screen)).to_equal(true)
+        expect(vt_replies(screen)).to_equal("\x1b[?1;1$y")
+        expect(screen.capture_dirty).to_equal(false)
+        step("Reset live mode before releasing the updated visual frame")
+        screen = vt_feed(vt_clear_replies(screen), "\x1b[?1l\x1b[?1$p")
+        expect(vt_application_cursor(screen)).to_equal(false)
+        expect(vt_text(screen)).to_equal("old")
+        expect(vt_replies(screen)).to_equal("\x1b[?1;2$y")
+        expect(screen.capture_dirty).to_equal(false)
+        screen = vt_feed(screen, "\x1b[?2026l")
+        expect(vt_application_cursor(screen)).to_equal(false)
+        expect(vt_text(screen)).to_equal("new")
+        expect(screen.capture_dirty).to_equal(true)
+
+    it "should keep synchronized mode-only publication visually clean":
+        step("Change input mode while holding an otherwise unchanged frame")
+        var screen = vt_feed(vt_new(2, 12), "same")
+        screen = vt_feed(screen, "\x1b[?2026h\x1b[?1h\x1b[?2026l")
+        expect(vt_application_cursor(screen)).to_equal(true)
+        expect(vt_text(screen)).to_equal("same")
+        expect(screen.capture_dirty).to_equal(false)
+        step("Resize during a second synchronization without losing the live mode")
+        screen = vt_feed(screen, "\x1b[?2026h")
+        screen = vt_resize(screen, 3, 16)
+        expect(vt_application_cursor(screen)).to_equal(true)
+        expect(vt_text(screen)).to_equal("same")

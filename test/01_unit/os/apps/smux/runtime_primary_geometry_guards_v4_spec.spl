@@ -1,0 +1,183 @@
+# Execution NOT_RUN. Actual pure guards and bounded metadata issuer only.
+# No native geometry owner/session, IO, effect, or cleanup carrier is fabricated.
+use std.spec.{describe, it, expect, step}
+use std.common.contracts.container.primary_geometry_v1.*
+use std.common.contracts.mux.session_runtime_control_v1.*
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, container_scope_fence_id_v2}
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.io.local_ipc_v1.LocalUnixPeerV1
+use std.nogc_async_mut.container.providers.linux.primary_geometry_owner_v1.{linux_primary_geometry_step_deadline_v1,
+    linux_primary_geometry_same_peer_v1, linux_primary_geometry_failure_disposition_v1}
+use os.apps.smux.runtime_primary_geometry_state_v4.*
+use os.apps.smux.runtime_primary_control_request_v4.*
+use os.apps.smux.runtime_control_request_v1.SmuxRuntimeControlRequestV1
+use os.apps.smux.runtime_control_policy_v1.SmuxRuntimeControlPolicyV1
+use os.apps.smux.smux_runtime_control_owner_v1.*
+
+fn geometry_guard_target_v4() -> SessionRuntimeControlTargetV1:
+    val scope = ContainerHostScopeV2(physical_host_id: "host-a", service_scope_id: "scope-a", boot_id: "boot-a",
+        provider_generation: 1, native_machine_id: "machine-a", continuity_mode: "native-boot-incarnation-v1", continuity_id: "boot-a")
+    val runtime = RuntimeIdentityV1(pod_uid: "pod-a", attempt: 1, operation_id: "workload-a", provider_generation: 1,
+        engine: "podman", native_id: "a".repeat(64), node_boot_id: container_scope_fence_id_v2(scope).unwrap())
+    SessionRuntimeControlTargetV1(scope: scope, runtime: runtime, workload_request_digest: "b".repeat(64),
+        binding_uid: "geometry-a", binding_digest: "c".repeat(64), service_incarnation: "d".repeat(32),
+        session_id: "s", window_id: "w", pane_id: "p", service_epoch: 1, child_incarnation: 2,
+        client_id: "client-a", attachment_generation: 1, execution_kind: "primary", native_exec_id: "", exec_request_digest: "")
+
+fn geometry_guard_control_v4() -> SmuxPrimaryControlRequestV4:
+    SmuxPrimaryControlRequestV4(control: SmuxRuntimeControlRequestV1(action: "resize", binding_uid: "geometry-a",
+        control_kind: SessionRuntimeControlKindV1.Geometry, client_id: "", attachment_token: "", expected_revision: 1,
+        nonce: "a".repeat(64), payload: "", columns: 80, rows: 24), attempt_sequence: 7, offset: 0, maximum: 0)
+
+fn geometry_guard_request_v4() -> ContainerPrimaryGeometryRequestV1:
+    val target = geometry_guard_target_v4()
+    val lease = SessionRuntimeControlLeaseV1(target: target, kind: SessionRuntimeControlKindV1.Geometry,
+        principal_id: "local-owner", nonce_digest: sha256_text("a".repeat(64)), revision: 1,
+        issued_monotonic_ms: 10, expires_monotonic_ms: 110)
+    ContainerPrimaryGeometryRequestV1(lease: lease, target: target, principal: "local-owner", nonce: "a".repeat(64),
+        attempt_sequence: 7, columns: 80, rows: 24, request_digest: smux_primary_control_request_digest_v4(geometry_guard_control_v4()).unwrap())
+
+fn geometry_guard_record_v4(disposition: text = "unknown") -> SmuxPrimaryGeometryRecordV4:
+    val control = geometry_guard_control_v4()
+    SmuxPrimaryGeometryRecordV4(binding_uid: "geometry-a", request_digest: smux_primary_control_request_digest_v4(control).unwrap(),
+        session_identity: "retained-session-a", revision: 1, sequence: 7, request: control,
+        phase: "cleanup", disposition: disposition, error: "unconfirmed-geometry-response")
+
+describe "smux primary geometry pure prevention guards V4":
+    it "checks current geometry lease authority expiry target nonce and dimension bounds":
+        step("checks current geometry lease authority expiry target nonce and dimension bounds")
+        val request = geometry_guard_request_v4()
+        expect(container_primary_geometry_request_check_v1(request, 10).is_ok()).to_equal(true)
+        expect(container_primary_geometry_request_check_v1(request, 109).is_ok()).to_equal(true)
+        for now in [9, 110, 111]:
+            expect(container_primary_geometry_request_check_v1(request, now).is_err()).to_equal(true)
+        for field in ["right", "principal", "nonce", "target", "attemptZero", "attemptOverflow", "columns", "rows", "area", "digest", "revision"]:
+            var changed = request
+            if field == "right": changed.lease.kind = SessionRuntimeControlKindV1.Input
+            if field == "principal": changed.principal = "another-owner"
+            if field == "nonce": changed.nonce = "b".repeat(64)
+            if field == "target": changed.target.child_incarnation = 3
+            if field == "attemptZero": changed.attempt_sequence = 0
+            if field == "attemptOverflow": changed.attempt_sequence = 1152921504606846976
+            if field == "columns": changed.columns = 513
+            if field == "rows": changed.rows = 257
+            if field == "area":
+                changed.columns = 512
+                changed.rows = 256
+            if field == "digest": changed.request_digest = "short"
+            if field == "revision": changed.lease.revision = 1152921504606846976
+            expect(container_primary_geometry_request_check_v1(changed, 11).is_err()).to_equal(true)
+        var boundary = request
+        boundary.columns = 500
+        boundary.rows = 120
+        expect(container_primary_geometry_request_check_v1(boundary, 11).is_ok()).to_equal(true)
+
+    it "requires the complete same geometry request including both targets and retained lease fields":
+        step("requires the complete same geometry request including both targets and retained lease fields")
+        val request = geometry_guard_request_v4()
+        expect(container_primary_geometry_request_same_v1(request, request).unwrap()).to_equal(true)
+        for field in ["digest", "attempt", "columns", "rows", "principal", "nonce", "right", "leasePrincipal", "revision", "leaseNonce", "issued", "expires", "target", "leaseTarget"]:
+            var changed = request
+            if field == "digest": changed.request_digest = "e".repeat(64)
+            if field == "attempt": changed.attempt_sequence = 8
+            if field == "columns": changed.columns = 81
+            if field == "rows": changed.rows = 25
+            if field == "principal": changed.principal = "another-owner"
+            if field == "nonce": changed.nonce = "b".repeat(64)
+            if field == "right": changed.lease.kind = SessionRuntimeControlKindV1.Input
+            if field == "leasePrincipal": changed.lease.principal_id = "another-owner"
+            if field == "revision": changed.lease.revision = 2
+            if field == "leaseNonce": changed.lease.nonce_digest = "e".repeat(64)
+            if field == "issued": changed.lease.issued_monotonic_ms = 11
+            if field == "expires": changed.lease.expires_monotonic_ms = 109
+            if field == "target": changed.target.client_id = "another-client"
+            if field == "leaseTarget": changed.lease.target.client_id = "another-client"
+            expect(container_primary_geometry_request_same_v1(request, changed).unwrap()).to_equal(false)
+
+    it "bounds every incremental deadline by current expiry and finite overflow safe budget":
+        step("bounds every incremental deadline by current expiry and finite overflow safe budget")
+        expect(linux_primary_geometry_step_deadline_v1(10, 100, 25).unwrap()).to_equal(35)
+        expect(linux_primary_geometry_step_deadline_v1(90, 100, 25).unwrap()).to_equal(100)
+        expect(linux_primary_geometry_step_deadline_v1(99, 100, 1).unwrap()).to_equal(100)
+        for limits in [(0, 100, 1), (-1, 100, 1), (100, 100, 1), (101, 100, 1), (10, 100, 0), (10, 100, 26),
+                (9223372036854775806, 9223372036854775807, 2)]:
+            expect(linux_primary_geometry_step_deadline_v1(limits.0, limits.1, limits.2).unwrap_err()).to_equal("primary-geometry-deadline")
+
+    it "correlates every peer field without promoting peer metadata to process incarnation proof":
+        step("correlates every peer field without promoting peer metadata to process incarnation proof")
+        val peer = LocalUnixPeerV1(uid: 1000, gid: 1001, pid: 42, socket_device: 5, socket_inode: 6)
+        expect(linux_primary_geometry_same_peer_v1(peer, peer)).to_equal(true)
+        for field in ["uid", "gid", "pid", "device", "inode"]:
+            var changed = peer
+            if field == "uid": changed.uid = 1002
+            if field == "gid": changed.gid = 1002
+            if field == "pid": changed.pid = 43
+            if field == "device": changed.socket_device = 7
+            if field == "inode": changed.socket_inode = 7
+            expect(linux_primary_geometry_same_peer_v1(peer, changed)).to_equal(false)
+
+    it "distinguishes prewrite rejection attempted uncertainty and preserved acknowledgement":
+        step("distinguishes prewrite rejection attempted uncertainty and preserved acknowledgement")
+        expect(linux_primary_geometry_failure_disposition_v1(false, "pending")).to_equal("rejected")
+        expect(linux_primary_geometry_failure_disposition_v1(true, "pending")).to_equal("unknown")
+        expect(linux_primary_geometry_failure_disposition_v1(true, "unknown")).to_equal("unknown")
+        expect(linux_primary_geometry_failure_disposition_v1(false, "acknowledged")).to_equal("acknowledged")
+        expect(linux_primary_geometry_failure_disposition_v1(true, "acknowledged")).to_equal("acknowledged")
+
+    it "caches exact unresolved replay and refuses changed old next lease and session attempts":
+        step("caches exact unresolved replay and refuses changed old next lease and session attempts")
+        for disposition in ["pending", "unknown"]:
+            val record = geometry_guard_record_v4(disposition)
+            expect(smux_primary_geometry_blocks_v4([record], record.binding_uid)).to_equal(true)
+            expect(smux_primary_geometry_blocks_v4([record], "other-binding")).to_equal(false)
+            expect(smux_primary_geometry_replay_v4(record, record.session_identity, 1, 7, record.request_digest).unwrap()).to_equal(true)
+            var changed = record.request
+            changed.control.columns = 81
+            val digest = smux_primary_control_request_digest_v4(changed).unwrap()
+            expect(smux_primary_geometry_replay_v4(record, record.session_identity, 1, 7, digest).unwrap_err()).to_equal("primary-geometry-attempt-changed")
+            expect(smux_primary_geometry_replay_v4(record, record.session_identity, 1, 6, record.request_digest).unwrap_err()).to_equal("primary-geometry-old-attempt")
+            expect(smux_primary_geometry_replay_v4(record, record.session_identity, 1, 8, record.request_digest).unwrap_err()).to_equal("primary-geometry-prior-unresolved")
+            expect(smux_primary_geometry_replay_v4(record, record.session_identity, 2, 1, record.request_digest).unwrap_err()).to_equal("primary-geometry-prior-unresolved")
+            expect(smux_primary_geometry_replay_v4(record, "another-session", 1, 1, record.request_digest).unwrap_err()).to_equal("primary-geometry-prior-unresolved")
+        val acknowledged = geometry_guard_record_v4("acknowledged")
+        expect(smux_primary_geometry_blocks_v4([acknowledged], acknowledged.binding_uid)).to_equal(false)
+        expect(smux_primary_geometry_replay_v4(acknowledged, acknowledged.session_identity, 1, 8, acknowledged.request_digest).unwrap()).to_equal(false)
+        expect(smux_primary_geometry_replay_v4(acknowledged, acknowledged.session_identity, 1, 9, acknowledged.request_digest).unwrap_err()).to_equal("primary-geometry-attempt-not-next")
+
+    it "retains unresolved Geometry through issuer revocation expiry and blocks rotation while Input stays independent":
+        step("retains unresolved Geometry through issuer revocation expiry and blocks rotation while Input stays independent")
+        val target = geometry_guard_target_v4()
+        val policy = SmuxRuntimeControlPolicyV1(principal_id: "local-owner",
+            allowed: [SessionRuntimeControlKindV1.Input, SessionRuntimeControlKindV1.Geometry], max_lease_ms: 100)
+        for retirement in ["revoke", "expiry"]:
+            val owner = smux_runtime_control_owner_new_v1(policy, target.service_incarnation).unwrap()
+            val issued = smux_runtime_control_issue_v1(owner, target, SessionRuntimeControlKindV1.Geometry,
+                "e".repeat(32) + ":1", 1000, 0, "a".repeat(64), 10)
+            expect(issued.error).to_equal("")
+            var current = issued.owner
+            current.geometry_records = [geometry_guard_record_v4()]
+            val now = if retirement == "expiry": 110 else: 11
+            if retirement == "revoke":
+                val revoked = smux_runtime_control_revoke_v1(current, target.binding_uid, SessionRuntimeControlKindV1.Geometry, 1, now)
+                expect(revoked.error).to_equal("")
+                current = revoked.owner
+            val denied = smux_runtime_control_check_v1(current, target.binding_uid, SessionRuntimeControlKindV1.Geometry,
+                issued.nonce, 1, target, now)
+            expect(denied.lease.?).to_equal(false)
+            expect(denied.error == "").to_equal(false)
+            expect(smux_runtime_control_find_v1(denied.owner, target.binding_uid, SessionRuntimeControlKindV1.Geometry).unwrap().active).to_equal(false)
+            expect(denied.owner.geometry_records).to_equal(current.geometry_records)
+            val rotated = smux_runtime_control_issue_v1(denied.owner, target, SessionRuntimeControlKindV1.Geometry,
+                "e".repeat(32) + ":1", 1000, 1, "b".repeat(64), now + 1)
+            expect(rotated.error).to_equal("primary-geometry-prior-unresolved")
+            expect(rotated.lease.?).to_equal(false)
+            val input = smux_runtime_control_issue_v1(rotated.owner, target, SessionRuntimeControlKindV1.Input,
+                "e".repeat(32) + ":1", 1000, 0, "c".repeat(64), now + 2)
+            expect(input.error).to_equal("")
+            expect(input.lease.unwrap().kind).to_equal(SessionRuntimeControlKindV1.Input)
+            expect(input.owner.geometry_records).to_equal(current.geometry_records)
+            val checked = smux_runtime_control_check_v1(input.owner, target.binding_uid, SessionRuntimeControlKindV1.Input,
+                input.nonce, input.lease.unwrap().revision, target, now + 3)
+            expect(checked.error).to_equal("")
+            expect(checked.status).to_equal("checked")

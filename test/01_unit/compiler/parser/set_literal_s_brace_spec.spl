@@ -1,0 +1,67 @@
+"""
+# `s{a, b, c}` set literal (self-hosted frontend)
+
+Owner decision 2026-11-09 (owner-decisions-20261106 item 14): IMPLEMENT the
+`s{...}` set literal in both parsers, lowering to the existing Set
+construction. The self-hosted core lexer emits TOK_SET_LIT_START for an `s`
+immediately followed by `{`, and the core parser lowers the literal to
+`Set.from([a, b, c])` — the same AST the Rust seed's parse_set_literal builds,
+so the two parsers agree by construction and no new HIR/MIR path is needed.
+
+Bug: doc/08_tracking/bug/set_literal_s_brace_unparsed_2026-09-06.md
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:parser
+# @tag:set_literal
+
+use std.spec.{describe, it, expect, step}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.core.parser.{parser_has_errors, parser_first_error_get}
+use compiler.frontend.parser_types_expr.{Expr, ExprKind, StmtKind}
+
+fn expr_shape(e: Expr) -> text:
+    match e.kind:
+        case ExprKind.MethodCall(receiver, name, args):
+            var parts: [text] = []
+            for a in args:
+                parts.push(expr_shape(a.value))
+            return expr_shape(receiver) + "." + name + "(" + parts.join(",") + ")"
+        case ExprKind.Ident(name): return "id:" + name
+        case ExprKind.ArrayLit(elems): return "array[{elems.len()}]"
+        case ExprKind.Binary(_, _, _): return "binary"
+        case _: return "other"
+
+# Shape of the initializer of the first `val` in `fn_name`.
+fn init_shape(source: text, fn_name: text) -> text:
+    val parsed = parse_full_frontend(source, "set_lit.spl", "set_lit", Logger(level: 0))
+    if parser_has_errors():
+        return "parse-error: " + parser_first_error_get()
+    if not parsed.functions.contains(fn_name):
+        return "no-fn"
+    val f = parsed.functions[fn_name]
+    match f.body.stmts[0].kind:
+        case StmtKind.Val(_, _, init): return expr_shape(init)
+        case _: return "not-val"
+
+describe "`s{...}` set literal parses in the self-hosted frontend":
+    it "lowers s{1, 2, 3} to Set.from([1, 2, 3])":
+        step("sugar")
+        val shape = init_shape("fn main():\n    val nums = s{1, 2, 3}\n    nums\n", "main")
+        expect(shape).to_equal("id:Set.from(array[3])")
+
+    it "produces the same AST as the explicit Set.from([...]) spelling":
+        step("parity with explicit construction")
+        val sugar = init_shape("fn main():\n    val nums = s{1, 2, 3}\n    nums\n", "main")
+        val explicit = init_shape("fn main():\n    val nums = Set.from([1, 2, 3])\n    nums\n", "main")
+        expect(sugar).to_equal(explicit)
+
+    it "accepts an empty literal, newlines and a trailing comma":
+        expect(init_shape("fn main():\n    val e = s{}\n    e\n", "main")).to_equal("id:Set.from(array[0])")
+        val multi = "fn main():\n    val t = s{\n        \"x\",\n        \"y\",\n    }\n    t\n"
+        expect(init_shape(multi, "main")).to_equal("id:Set.from(array[2])")
+
+    it "leaves a plain `s` identifier untouched":
+        expect(init_shape("fn main(s: i64):\n    val t = s + 1\n    t\n", "main")).to_equal("binary")

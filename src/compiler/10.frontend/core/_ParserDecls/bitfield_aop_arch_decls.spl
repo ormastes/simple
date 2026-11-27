@@ -45,7 +45,7 @@ use compiler.core.ast.{decl_use_import, decl_export_names, decl_enum_def, decl_s
 use compiler.core.ast.{decl_impl_block}
 use compiler.core.ast.{decl_set_comptime}
 use compiler.core.ast.{decl_set_visibility_text}
-use compiler.core.ast.{decl_is_gpu_kernel, decl_is_simd, decl_is_packed, decl_set_packed, decl_derives}
+use compiler.core.ast.{decl_set_packed}
 use compiler.core.ast.{decl_get_name, decl_get_fields, decl_get_derives, decl_set_derives}
 use compiler.core.ast.{module_set_path, module_add_decl}
 use compiler.frontend.core.lexer.{lex_source_char_at, lex_source_len, lex_source_slice}
@@ -56,7 +56,7 @@ use compiler.core.types.{int_to_str, type_tag_name}
 use compiler.core.types.{named_type_register, named_type_update, named_type_find, custom_primitive_register}
 use compiler.core.types.{primitive_integer_bit_width_from_name, primitive_backing_bits_from_name}
 use compiler.core.types.{custom_primitive_integer_bit_width_by_name, custom_primitive_backing_bits_by_name}
-use compiler.core.parser.{par_kind_get, par_text_get, par_line_get, par_col_get, par_errors, par_struct_names}
+use compiler.core.parser.{par_kind_get, par_text_get, par_line_get, par_col_get}
 use compiler.core.parser.{parser_advance, parser_expect, parser_error}
 use compiler.core.parser.{parser_skip_newlines, parser_skip_newlines_and_semicolons}
 use compiler.core.parser.{parser_parse_type, parser_parse_type_with_union}
@@ -70,7 +70,7 @@ use compiler.frontend.core.parser_decls_use.*
 
 # Import CLI parser
 use compiler.core.parser_cli.{parse_cli_decl}
-use compiler.frontend.core._Ast.decl_nodes.{decl_aop_advice, decl_arch_rule}
+use compiler.frontend.core._Ast.decl_nodes.{decl_aop_advice, decl_aop_advice_owned, decl_arch_rule}
 
 # ===== Helper Functions =====
 
@@ -122,6 +122,9 @@ fn parse_bitfield_decl() -> i64:
     var used_bits: i64 = 0
 
     var bf_i: i64 = 0 - 1
+    var bf_prev_kind: i64 = 0 - 1
+    var bf_prev_line: i64 = 0 - 1
+    var bf_prev_col: i64 = 0 - 1
     while true:
         bf_i = bf_i + 1
         parser_skip_newlines()
@@ -137,6 +140,16 @@ fn parse_bitfield_decl() -> i64:
             parser_skip_newlines_and_semicolons()
             continue
 
+        # Forward-progress guard: a malformed field that no arm consumes must
+        # not re-report the same error forever (hung module_surface spec,
+        # bug hir_unit_specs_hang_over_300s_2026-11-06).
+        if par_kind_get() == bf_prev_kind and par_line_get() == bf_prev_line and par_col_get() == bf_prev_col:
+            parser_error("bitfield '" + bf_name + "': parser made no forward progress at this field; aborting bitfield body")
+            break
+        bf_prev_kind = par_kind_get()
+        bf_prev_line = par_line_get()
+        bf_prev_col = par_col_get()
+
         # Field: name: type  OR  _: uN (reserved)
         val field_name = par_text_get()
         val is_underscore: bool = par_kind_get() == 169
@@ -145,8 +158,15 @@ fn parse_bitfield_decl() -> i64:
         else:
             parser_expect(6)
         parser_expect(161)
-        val field_type_name = par_text_get()
-        var field_type = parser_parse_type()
+        var field_type_name = par_text_get()
+        var field_type = TYPE_VOID
+        if par_kind_get() == TOK_INT_LIT:
+            # `name: N` bare bit width (seed parser parity, types_def/bitfield.rs):
+            # an unsigned N-bit field, same as `name: uN`.
+            field_type_name = "u" + field_type_name
+            parser_advance()
+        else:
+            field_type = parser_parse_type()
         val bit_count = bitfield_field_bits_from_name(field_type_name)
         if bit_count == 0:
             parser_error("bitfield field type must be bool, uN, or iN")
@@ -205,7 +225,7 @@ fn parse_pointcut_text() -> text:
             break
         if par_kind_get() == 142:
             depth = depth + 1
-            result = result + "{"
+            result = result + "{{"
             parser_advance()
         elif par_kind_get() == 143:
             depth = depth - 1
@@ -221,7 +241,8 @@ fn parse_pointcut_text() -> text:
             parser_advance()
     result
 
-fn parse_aop_advice_decl() -> i64:
+# @allow(primitive_api) core-parser AST arena handle: returns the raw i64 decl id like every parse_*_decl in this module
+pub fn parse_aop_advice_decl(aspect_name: text = "") -> i64:
     # on pc{...} use handler form [priority N]
     parser_advance()  # consume 'on'
     val pointcut = parse_pointcut_text()
@@ -237,6 +258,8 @@ fn parse_aop_advice_decl() -> i64:
             if par_kind_get() == 1 or par_kind_get() == 2:
                 priority_text = par_text_get()
                 parser_advance()
+    if aspect_name != "":
+        return decl_aop_advice_owned(pointcut, handler, form, priority_text, aspect_name, 0)
     decl_aop_advice(pointcut, handler, form, priority_text, 0)
 
 fn parse_arch_rule_decl(kind: text) -> i64:

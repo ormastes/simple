@@ -4,13 +4,18 @@ use std.spec.*
 use std.database.pure_sql.{PureDatabase}
 use nogc_sync_mut.database.sql.types.{DbValue}
 use std.common.crypto.sha256.{sha256_text}
+use std.env.{env_get}
 use std.io_runtime.{file_delete, file_read, file_write}
 
 extern fn rt_getpid() -> i64
 extern fn rt_time_now_unix_micros() -> i64
 
 fn numeric_path(suffix: text) -> text:
-    "/tmp/pure_db_numeric_{rt_getpid()}_{rt_time_now_unix_micros()}_{suffix}.db"
+    var parent = env_get("TMPDIR")
+    if parent == "": parent = env_get("TEMP")
+    if parent == "": parent = env_get("TMP")
+    if parent == "": parent = "/tmp"
+    "{parent}/pure_db_numeric_{rt_getpid()}_{rt_time_now_unix_micros()}_{suffix}.db"
 
 fn numeric_cleanup(path: text):
     file_delete(path)
@@ -45,11 +50,13 @@ fn main() -> ():
             expect(rows[1].values[1].as_real().unwrap()).to_equal(-3.25)
             expect(rows[2].values[0].as_int().unwrap()).to_equal(3)
             expect(rows[2].values[1].as_real().unwrap()).to_equal(2.5)
+            # A freshly loaded store is clean; checkpoint() only rewrites (as v3) after a mutation.
+            expect(db.exec_sql("INSERT INTO n VALUES (5, 1.5)").is_ok()).to_equal(true)
             expect(db.checkpoint().is_ok()).to_equal(true)
             expect(file_read(path).starts_with("simple-pure-db-v3\n")).to_equal(true)
             val reopened = PureDatabase.open_deferred(path).unwrap()
             val after = reopened.scan_all("n").unwrap()
-            expect(after.len()).to_equal(3)
+            expect(after.len()).to_equal(4)
             expect(after[0].values[0].as_int().unwrap()).to_equal(0)
             expect(after[0].values[1].as_real().unwrap()).to_equal(0.0)
             expect(after[1].values[1].as_real().unwrap()).to_equal(-3.25)

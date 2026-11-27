@@ -1,0 +1,127 @@
+# REQ-CMUX-003/008, NFR-CMUX-005/007. Authored NOT_RUN; no native effects.
+# codex-system-test
+use std.spec.{describe, it, expect, step}
+use std.common.contracts.mux.execution_v1.{MuxPasteV1}
+use os.apps.smux.input_queue.{PaneInput, pane_input_new, pane_input_enqueue,
+    pane_input_enqueue_bytes_v1, pane_input_remaining, pane_input_advance, pane_input_fail}
+use os.apps.smux.core_mux_input_codec.{core_mux_paste_bytes_v1}
+use os.apps.smux.pane_io_service.{pane_literal_admit_v1}
+use os.apps.smux.service.{ServiceState, PaneRecord}
+use os.apps.smux.contract.{MuxSession, MuxWindow, MuxPane}
+
+fn literal_input_setup() -> ServiceState:
+    var state = ServiceState.empty().add_session(MuxSession.create("s", "literal"))
+    state = state.add_window(MuxWindow.create("w", "s", "literal"))
+    # Synthetic owner tokens are inspected only by the PURE admission helper.
+    return state.add_pane(PaneRecord.create(MuxPane.create("p", "w", "s")).with_pty(123, 17))
+
+describe "Exact literal input queue and explicit paste":
+    it "should retain every octet including NUL and invalid UTF8":
+        step("Append exact channel bytes without a text carrier")
+        val queue = pane_input_enqueue_bytes_v1(pane_input_new(), [0u8, 128u8, 255u8, 192u8, 175u8]).unwrap()
+        expect(pane_input_remaining(queue)).to_equal([0u8, 128u8, 255u8, 192u8, 175u8])
+        expect(queue.literal_pty).to_equal(true)
+        expect(queue.original).to_equal("")
+
+    it "should preserve text reply and literal ordering on one stream":
+        step("Mix legacy text and literal input without decoding the literal suffix")
+        var queue = pane_input_enqueue(pane_input_new(), "한").unwrap()
+        queue = pane_input_enqueue_bytes_v1(queue, [0u8, 255u8]).unwrap()
+        queue = pane_input_enqueue(queue, "\x1b[0n").unwrap()
+        expect(queue.bytes).to_equal([237u8, 149u8, 156u8, 0u8, 255u8, 27u8, 91u8, 48u8, 110u8])
+        expect(queue.literal_pty).to_equal(true)
+        expect(queue.original).to_equal("")
+
+    it "should advance a byte prefix without replaying invalid scalars":
+        step("Consume a short prefix and retain the exact remaining offsets")
+        var queue = pane_input_enqueue_bytes_v1(pane_input_new(), [240u8, 159u8, 0u8, 255u8]).unwrap()
+        queue = pane_input_advance(queue, 1).unwrap()
+        expect(pane_input_remaining(queue)).to_equal([159u8, 0u8, 255u8])
+        expect(pane_input_advance(queue, 0).unwrap().offset).to_equal(1)
+        expect(queue.literal_pty).to_equal(true)
+        queue = pane_input_advance(queue, 3).unwrap()
+        expect(queue.bytes.len()).to_equal(0)
+        expect(queue.literal_pty).to_equal(false)
+
+    it "should expose no more than one 4096 byte flush chunk":
+        step("Bound the actual queue projection independently of scalar boundaries")
+        val queue = pane_input_enqueue_bytes_v1(pane_input_new(), [255u8; 4097]).unwrap()
+        expect(pane_input_remaining(queue).len()).to_equal(4096)
+        expect(pane_input_advance(queue, 4097).is_err()).to_equal(true)
+        val next = pane_input_advance(queue, 4096).unwrap()
+        expect(pane_input_remaining(next)).to_equal([255u8])
+
+    it "should count the consumed retained prefix against capacity":
+        step("Refuse growth until all original storage has drained")
+        var queue = pane_input_enqueue_bytes_v1(pane_input_new(), [128u8; 65536]).unwrap()
+        queue = pane_input_advance(queue, 4096).unwrap()
+        expect(pane_input_enqueue_bytes_v1(queue, [0u8]).is_err()).to_equal(true)
+        expect(pane_input_enqueue(queue, "x").is_err()).to_equal(true)
+        expect(queue.bytes.len()).to_equal(65536)
+        expect(queue.offset).to_equal(4096)
+
+    it "should retain sticky failures and refuse invalid queue offsets":
+        step("Keep failure-side bytes and transport identity for checked cleanup")
+        val queue = pane_input_enqueue_bytes_v1(pane_input_new(), [0u8, 255u8]).unwrap()
+        val failed = pane_input_fail(queue, "first error")
+        expect(pane_input_fail(failed, "later").error).to_equal("first error")
+        expect(failed.bytes).to_equal(queue.bytes)
+        expect(failed.literal_pty).to_equal(true)
+        expect(pane_input_enqueue_bytes_v1(failed, []).unwrap_err()).to_equal("first error")
+        val bad = PaneInput(original: "", bytes: [255u8], offset: 2, error: "", literal_pty: true)
+        expect(pane_input_enqueue_bytes_v1(bad, [0u8]).is_err()).to_equal(true)
+        expect(pane_input_advance(queue, -1).is_err()).to_equal(true)
+
+    it "should preserve empty enqueue as a queue no-op":
+        step("Avoid fabricating a transport switch or discarding pending bytes")
+        val queue = pane_input_enqueue(pane_input_new(), "x").unwrap()
+        val unchanged = pane_input_enqueue_bytes_v1(queue, []).unwrap()
+        expect(unchanged.original).to_equal("x")
+        expect(unchanged.bytes).to_equal([120u8])
+        expect(unchanged.literal_pty).to_equal(false)
+
+    it "should encode all explicit paste flag combinations exactly":
+        step("Keep literal bytes distinct from selected bracket and Enter framing")
+        val body = [0u8, 128u8, 255u8]
+        expect(core_mux_paste_bytes_v1(MuxPasteV1(bytes: body, bracketed: false, append_enter: false), 16).unwrap()).to_equal(body)
+        expect(core_mux_paste_bytes_v1(MuxPasteV1(bytes: body, bracketed: false, append_enter: true), 16).unwrap()).to_equal([0u8, 128u8, 255u8, 13u8])
+        expect(core_mux_paste_bytes_v1(MuxPasteV1(bytes: body, bracketed: true, append_enter: false), 16).unwrap()).to_equal([27u8, 91u8, 50u8, 48u8, 48u8, 126u8, 0u8, 128u8, 255u8, 27u8, 91u8, 50u8, 48u8, 49u8, 126u8])
+        expect(core_mux_paste_bytes_v1(MuxPasteV1(bytes: body, bracketed: true, append_enter: true), 16).unwrap()).to_equal([27u8, 91u8, 50u8, 48u8, 48u8, 126u8, 0u8, 128u8, 255u8, 27u8, 91u8, 50u8, 48u8, 49u8, 126u8, 13u8])
+
+    it "should reserve complete paste overhead before queue mutation":
+        step("Refuse one-over-limit paste and full-queue framing atomically")
+        val paste = MuxPasteV1(bytes: [255u8; 65523], bracketed: true, append_enter: true)
+        val encoded = core_mux_paste_bytes_v1(paste, 65536).unwrap()
+        expect(encoded.len()).to_equal(65536)
+        expect(core_mux_paste_bytes_v1(paste, 65535).is_err()).to_equal(true)
+        val queue = pane_input_enqueue(pane_input_new(), "x").unwrap()
+        expect(pane_input_enqueue_bytes_v1(queue, encoded).is_err()).to_equal(true)
+        expect(queue.bytes).to_equal([120u8])
+        expect(queue.literal_pty).to_equal(false)
+
+    it "should reject invalid paste budgets without silent truncation":
+        step("Validate bounded arithmetic before allocation")
+        val paste = MuxPasteV1(bytes: [0u8], bracketed: true, append_enter: true)
+        for size in [-1, 0, 12, 13, 65537]:
+            expect(core_mux_paste_bytes_v1(paste, size).is_err()).to_equal(true)
+        expect(core_mux_paste_bytes_v1(paste, 14).unwrap().len()).to_equal(14)
+
+    it "should admit only exact scoped live-owner records and installed byte support":
+        step("Call production pure admission without touching synthetic handles")
+        val state = literal_input_setup()
+        expect(pane_literal_admit_v1(state, false, "s", "w", "p", true).unwrap()).to_equal(0)
+        expect(pane_literal_admit_v1(state, true, "s", "w", "p", true).is_err()).to_equal(true)
+        expect(pane_literal_admit_v1(state, false, "s", "w", "p", false).is_err()).to_equal(true)
+        expect(pane_literal_admit_v1(state, false, "other", "w", "p", true).is_err()).to_equal(true)
+        expect(pane_literal_admit_v1(state, false, "s", "other", "p", true).is_err()).to_equal(true)
+        expect(pane_literal_admit_v1(state, false, "s", "w", "other", true).is_err()).to_equal(true)
+
+    it "should reject piped missing and deferred children before native writes":
+        step("Refuse any fallback from the exact-byte path to a text pipe")
+        val state = literal_input_setup()
+        val pipe = state.replace_pane(0, state.get_pane(0).with_pty(123, -1))
+        val pending = state.replace_pane(0, state.get_pane(0).with_pty(-1, 17))
+        val empty = state.replace_pane(0, state.get_pane(0).with_pty(-1, -1))
+        expect(pane_literal_admit_v1(pipe, false, "s", "w", "p", true).is_err()).to_equal(true)
+        expect(pane_literal_admit_v1(pending, false, "s", "w", "p", true).is_err()).to_equal(true)
+        expect(pane_literal_admit_v1(empty, false, "s", "w", "p", true).is_err()).to_equal(true)

@@ -1,6 +1,6 @@
 # Calculator canned WM content missing `[canned]` marker
 
-- **Status:** Open
+- **Status:** Resolved (verified 2026-11-25, lane p3-bac — see note below)
 - **Filed:** 2026-07-14
 - **Area:** gui / wm-compositor / anti-fake-evidence
 - **Severity:** minor (honesty-invariant violation, not a crash)
@@ -39,3 +39,14 @@ Found by the 2026-07-14 gui/web/2d dummy-impl audit. Related still-open fakes
 in adjacent lanes: `web_render_gpu_backend_provenance_fabricated_2026-06-17`
 (web pixel path stamps `engine2d_backend="vulkan"` with a synthetic queue
 handle while CPU-rasterizing) and `browser_demo_frozen_loading_placeholder_2026-07-12`.
+
+## Verification 2026-11-25 (lane p3-bac) — STALE, fix confirmed in-tree
+
+The fix prescribed above already landed: commit `7263487f401` ("fix(ui,blink):
+add the missing Calculator canned marker and the dangling
+blink_parse_declarations"). On `origin/release/1.0.0`
+(`src/lib/common/ui/window_scene_draw_ir.spl:1591-1597`) the Calculator branch
+now renders the same `[canned demo — no live content]` marker line as the
+Terminal/Editor/File Manager/Browser branches, appended after the 4 canned
+lines exactly as this doc's Fix section specified. Verified by source
+inspection; no code change needed. Status flipped Open → Resolved.

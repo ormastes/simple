@@ -1,5 +1,8 @@
 use std.spec.*
 use std.test_runner.test_executor_parsing.{make_result_from_output}
+use std.io_runtime.{env_get, env_set, env_remove_process}
+use app.test_runner_new.test_runner_client.{daemon_child_marker_set}
+use app.test_daemon.light_daemon.{enter_daemon_child_env, restore_daemon_child_env}
 
 extern fn rt_file_read_text(path: text) -> text?
 
@@ -70,3 +73,22 @@ describe "test runner failure precedence":
         expect(client).to_contain("return run_direct(run)")
         expect(daemon).to_contain("env_set(\"SIMPLE_TEST_DAEMON_CHILD\", \"1\")")
         expect(daemon).to_contain("env_set(\"SIMPLE_TEST_DAEMON_CHILD\", previous_child_marker)")
+
+    it "marks the served worker as a daemon child and restores the daemon environment":
+        val inherited_marker = env_get("SIMPLE_TEST_DAEMON_CHILD") ?? ""
+        env_remove_process("SIMPLE_TEST_DAEMON_CHILD")
+        expect(daemon_child_marker_set()).to_equal(false)
+        val unset_previous = enter_daemon_child_env()
+        expect(unset_previous).to_equal("")
+        expect(daemon_child_marker_set()).to_equal(true)
+        restore_daemon_child_env(unset_previous)
+        expect(env_get("SIMPLE_TEST_DAEMON_CHILD") ?? "").to_equal("")
+        expect(daemon_child_marker_set()).to_equal(false)
+
+        env_set("SIMPLE_TEST_DAEMON_CHILD", "outer")
+        val outer_previous = enter_daemon_child_env()
+        expect(outer_previous).to_equal("outer")
+        expect(daemon_child_marker_set()).to_equal(true)
+        restore_daemon_child_env(outer_previous)
+        expect(env_get("SIMPLE_TEST_DAEMON_CHILD") ?? "").to_equal("outer")
+        restore_daemon_child_env(inherited_marker)

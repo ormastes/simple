@@ -1,0 +1,158 @@
+# Purpose and audience: executable regression evidence for compiler type inference maintainers.
+# Bug: doc/08_tracking/bug/type_checker_accepts_struct_key_on_text_dict_2026-11-16.md
+#
+# The `case Index(base, index):` arm of `synthesize_expr`
+# (src/compiler/30.types/type_infer/inference_expr.spl) synthesized the index
+# type but discarded it for a `Dict` base (`case Dict(_, value): Ok(value)`),
+# so a struct (or any non-key) value was accepted as the key of a
+# `Dict<text, _>`. The write side (`case Assign` in inference_control.spl)
+# funnels through the same arm, so both reads and writes were unchecked; the
+# mismatch only surfaced later in native MIR (`E-MIR-STRUCT-DICT-KEY`).
+#
+# Note on aliases/subtypes: HirTypeKind has no alias variant -- `type A = B`
+# aliases are resolved to their target before HIR -- so key compatibility is
+# plain unification. The generic/rigid cases below use `Infer` (inferred key)
+# and `TypeParam` (generic key) instead.
+
+use std.spec.step
+use std.spec.*
+use compiler.types.type_infer_types.*
+use compiler.types.type_infer.inference.*
+use compiler.types.type_infer.context.*
+use compiler.types.type_infer.core.*
+use compiler.hir.hir.*
+use compiler.frontend.core.lexer.*
+
+fn dik_span() -> Span:
+    lex_span_empty()
+
+fn dik_ty(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: dik_span())
+
+fn dik_i64() -> HirType:
+    dik_ty(HirTypeKind.Int(64, true))
+
+fn dik_text() -> HirType:
+    dik_ty(HirTypeKind.Str)
+
+# A struct type as it appears to the checker: an 8-field struct like the
+# original HirSymbol victim is just `Named` here.
+fn dik_struct_ty() -> HirType:
+    dik_ty(HirTypeKind.Named(SymbolId(id: 7700), []))
+
+fn dik_dict(key: HirType, value: HirType) -> HirType:
+    dik_ty(HirTypeKind.Dict(key, value))
+
+fn dik_var(id: i64, ty: HirType) -> HirExpr:
+    HirExpr(
+        kind: HirExprKind.Var(SymbolId(id: id)),
+        has_type_: false,
+        type_: ty,
+        span: dik_span())
+
+fn dik_int_lit(v: i64) -> HirExpr:
+    HirExpr(
+        kind: HirExprKind.IntLit(v, nil),
+        has_type_: true,
+        type_: dik_i64(),
+        span: dik_span())
+
+fn dik_text_lit(v: text) -> HirExpr:
+    HirExpr(
+        kind: HirExprKind.StringLit(v, nil),
+        has_type_: true,
+        type_: dik_text(),
+        span: dik_span())
+
+fn dik_index(base: HirExpr, index: HirExpr) -> HirExpr:
+    HirExpr(
+        kind: HirExprKind.Index(base, index),
+        has_type_: false,
+        type_: dik_ty(HirTypeKind.Infer(0, 0)),
+        span: dik_span())
+
+# Fresh context with `base_id` bound to `base_ty` and `key_id` bound to
+# `key_ty`, then synthesize `base[key]`.
+fn dik_index_result(base_ty: HirType, key_ty: HirType) -> Result<HirType, TypeInferError>:
+    var ctx = HmInferContext.new()
+    ctx.bind_poly("100", TypeScheme(vars: [], ty: base_ty))
+    ctx.bind_poly("200", TypeScheme(vars: [], ty: key_ty))
+    ctx.synthesize_expr(dik_index(dik_var(100, base_ty), dik_var(200, key_ty)))
+
+# Fresh context with `base_id` bound to `base_ty`, then synthesize
+# `base[index]` where the index is a literal expression.
+fn dik_lit_index_result(base_ty: HirType, index: HirExpr) -> Result<HirType, TypeInferError>:
+    var ctx = HmInferContext.new()
+    ctx.bind_poly("100", TypeScheme(vars: [], ty: base_ty))
+    ctx.synthesize_expr(dik_index(dik_var(100, base_ty), index))
+
+fn dik_tag(result: Result<HirType, TypeInferError>) -> text:
+    match result:
+        case Ok(_): "ok"
+        case Err(TypeInferError.Mismatch(_, _, _)): "mismatch"
+        case Err(_): "other-error"
+
+fn dik_kind_tag(ty: HirType) -> text:
+    match ty.kind:
+        case Int(bits, signed): "i{bits}"
+        case Str: "text"
+        case Infer(_, _): "var"
+        case _: "other"
+
+describe "Dict index key type checking":
+    it "rejects a struct key on a Dict<text, i64> read":
+        # @req bug type_checker_accepts_struct_key_on_text_dict_2026-11-16
+        step("Synthesize (d: Dict<text, i64>)[k: Key] and require a mismatch")
+        expect(dik_tag(dik_index_result(dik_dict(dik_text(), dik_i64()), dik_struct_ty()))).to_equal("mismatch")
+
+    it "rejects an i64 key on a Dict<text, i64> read":
+        step("Synthesize (d: Dict<text, i64>)[1] and require a mismatch")
+        expect(dik_tag(dik_lit_index_result(dik_dict(dik_text(), dik_i64()), dik_int_lit(1)))).to_equal("mismatch")
+
+    it "accepts a text key on a Dict<text, i64> read":
+        step("Control: (d: Dict<text, i64>)['a'] stays accepted")
+        val result = dik_lit_index_result(dik_dict(dik_text(), dik_i64()), dik_text_lit("a"))
+        expect(dik_tag(result)).to_equal("ok")
+        match result:
+            case Ok(ty): expect(dik_kind_tag(ty)).to_equal("i64")
+            case Err(_): expect("unreachable").to_equal("ok")
+
+    it "rejects a text key on a Dict<Key, i64> struct-keyed dict read":
+        step("Synthesize (d: Dict<Key, i64>)['a'] and require a mismatch")
+        expect(dik_tag(dik_index_result(dik_dict(dik_struct_ty(), dik_i64()), dik_text()))).to_equal("mismatch")
+
+    it "rejects a struct key on a Dict<text, i64> write target":
+        # The Assign arm synthesizes the index target through the same
+        # synthesize_expr arm, so the read-side mismatch covers writes; this
+        # drives the write shape `d[k] = 5` end-to-end through infer_stmt.
+        step("Check Assign(Index(d, k), 5) for d: Dict<text, i64>, k: Key")
+        var ctx = HmInferContext.new()
+        ctx.bind_poly("100", TypeScheme(vars: [], ty: dik_dict(dik_text(), dik_i64())))
+        ctx.bind_poly("200", TypeScheme(vars: [], ty: dik_struct_ty()))
+        val target = dik_index(dik_var(100, dik_dict(dik_text(), dik_i64())), dik_var(200, dik_struct_ty()))
+        val stmt = HirStmt(
+            kind: HirStmtKind.Assign(target, nil, dik_int_lit(5)),
+            span: dik_span())
+        val result = ctx.infer_stmt(stmt)
+        expect(dik_tag(result)).to_equal("mismatch")
+
+    it "binds an inferred dict key type from the index (generic dict literal)":
+        step("Synthesize (d: Dict<?0, i64>)['a'] and resolve the key var to text")
+        var ctx = HmInferContext.new()
+        val key_var = ctx.fresh_var(dik_span())
+        val dict_ty = dik_dict(key_var, dik_i64())
+        ctx.bind_poly("100", TypeScheme(vars: [], ty: dict_ty))
+        ctx.bind_poly("200", TypeScheme(vars: [], ty: dik_text()))
+        val result = ctx.synthesize_expr(dik_index(dik_var(100, dict_ty), dik_var(200, dik_text())))
+        expect(dik_tag(result)).to_equal("ok")
+        expect(dik_kind_tag(ctx.resolve(key_var))).to_equal("text")
+
+    it "accepts a generic key matching the dict's type parameter":
+        step("Synthesize (d: Dict<K, i64>)[k: K] with rigid TypeParam K")
+        val k = dik_ty(HirTypeKind.TypeParam("K", []))
+        expect(dik_tag(dik_index_result(dik_dict(k, dik_i64()), k))).to_equal("ok")
+
+    it "rejects a text key on a Dict<K, i64> with rigid type parameter key":
+        step("Synthesize (d: Dict<K, i64>)['a'] and require a mismatch")
+        val k = dik_ty(HirTypeKind.TypeParam("K", []))
+        expect(dik_tag(dik_index_result(dik_dict(k, dik_i64()), dik_text()))).to_equal("mismatch")

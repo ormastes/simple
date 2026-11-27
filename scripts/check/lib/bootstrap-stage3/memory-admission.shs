@@ -111,6 +111,153 @@ bootstrap_stage3_memory_linux_actual_kind() {
 # Darwin cannot enforce the virtual-memory limit with ulimit -v. Keep its RSS
 # watchdog at or below both the validated Stage 3 process cap and the existing
 # process-tree cap. Reject an invalid tree cap instead of masking it with min().
+bootstrap_stage3_memory_darwin_default_cap_kib() {
+    bootstrap_stage3_darwin_floor_kib=11534336
+    bootstrap_stage3_darwin_ceil_kib=20971520
+    bootstrap_stage3_darwin_bytes=${1:-}
+    if [ -z "$bootstrap_stage3_darwin_bytes" ]; then
+        bootstrap_stage3_darwin_bytes=$(sysctl -n hw.memsize 2>/dev/null || printf '0\n')
+    fi
+    if bootstrap_stage3_memory_is_uint "$bootstrap_stage3_darwin_bytes"; then
+        while :; do
+            case "$bootstrap_stage3_darwin_bytes" in
+                0?*) bootstrap_stage3_darwin_bytes=${bootstrap_stage3_darwin_bytes#0} ;;
+                *) break ;;
+            esac
+        done
+        case "$bootstrap_stage3_darwin_bytes" in
+            0)
+                printf '%s\n' "$bootstrap_stage3_darwin_floor_kib"
+                return 0
+                ;;
+            ???????????????????*)
+                printf '%s\n' "$bootstrap_stage3_darwin_ceil_kib"
+                return 0
+                ;;
+        esac
+        if [ "$bootstrap_stage3_darwin_bytes" -gt 0 ]; then
+            bootstrap_stage3_darwin_scaled_kib=$((bootstrap_stage3_darwin_bytes / 1024 / 3))
+            if [ "$bootstrap_stage3_darwin_scaled_kib" -lt "$bootstrap_stage3_darwin_floor_kib" ]; then
+                bootstrap_stage3_darwin_scaled_kib=$bootstrap_stage3_darwin_floor_kib
+            elif [ "$bootstrap_stage3_darwin_scaled_kib" -gt "$bootstrap_stage3_darwin_ceil_kib" ]; then
+                bootstrap_stage3_darwin_scaled_kib=$bootstrap_stage3_darwin_ceil_kib
+            fi
+            printf '%s\n' "$bootstrap_stage3_darwin_scaled_kib"
+            return 0
+        fi
+    fi
+    printf '%s\n' "$bootstrap_stage3_darwin_floor_kib"
+}
+
+# Classify a non-Linux flattened ps args line by exact argv[0]/argv[1],
+# mirroring bootstrap_stage3_memory_linux_actual_kind: quote-aware tokenization,
+# login-shell (`-bash`/`-sh`/`-zsh`) safety via `--`, `env`/VAR=VAL unwrapping,
+# shell option-arg skipping (`-o`/`+o`/`-O`/`+O`/`--rcfile`/`--init-file`),
+# and `-c`/`--command`/non-shell (`grep`, etc.) exclusion.
+bootstrap_stage3_memory_posix_args_kind() {
+    [ "$#" -eq 1 ] || { printf 'none\n'; return 0; }
+    case "$1" in
+        *qemu-system-*|*native-build*|*bootstrap-from-scratch.sh*|*missing-build-log.json*) ;;
+        *) printf 'none\n'; return 0 ;;
+    esac
+    perl -e '
+        use strict; use warnings;
+        my ($cmd) = @ARGV;
+        $cmd =~ s/\A\s+//;
+        $cmd =~ s/\s+\z//;
+        my @args;
+        pos($cmd) = 0;
+        while (pos($cmd) < length($cmd)) {
+            $cmd =~ /\G\s+/gc;
+            last if pos($cmd) >= length($cmd);
+            my $tok = "";
+            while (pos($cmd) < length($cmd)) {
+                if ($cmd =~ /\G\s+/gc) {
+                    last;
+                } elsif ($cmd =~ /\G"([^"]*)"?/gc) {
+                    $tok .= $1;
+                } elsif ($cmd =~ /\G\x27([^\x27]*)\x27?/gc) {
+                    $tok .= $1;
+                } elsif ($cmd =~ /\G([^\s"\x27]+)/gc) {
+                    $tok .= $1;
+                } else {
+                    last;
+                }
+            }
+            push @args, $tok;
+        }
+        @args or do { print "none\n"; exit 0; };
+        my $arg0 = $args[0];
+        my $exe = $arg0;
+        $exe =~ s{.*/}{};
+        $exe =~ s/\A-//;
+        if ($exe eq "env") {
+            my $i = 1;
+            while ($i < @args) {
+                if ($args[$i] eq "--") {
+                    $i++; last;
+                } elsif ($args[$i] eq "-u" || $args[$i] eq "-C" ||
+                         $args[$i] eq "--unset" || $args[$i] eq "--chdir" ||
+                         $args[$i] =~ /\A-[i0S]+[uC]\z/) {
+                    $i += 2;
+                } elsif ($args[$i] =~ /\A-[i0S]+\z/ ||
+                         $args[$i] =~ /\A-[i0S]*[uC].+/ ||
+                         $args[$i] =~ /\A--(?:unset|chdir)=/ ||
+                         $args[$i] =~ /\A[A-Za-z_][A-Za-z0-9_]*=/) {
+                    $i++;
+                } else {
+                    last;
+                }
+            }
+            @args = $i < @args ? @args[$i .. $#args] : ();
+            @args or do { print "none\n"; exit 0; };
+            $arg0 = $args[0];
+            $exe = $arg0;
+            $exe =~ s{.*/}{};
+            $exe =~ s/\A-//;
+        }
+        if ($exe =~ /\Aqemu-system-[A-Za-z0-9_+-]+\z/) {
+            print "qemu\n";
+        } elsif ($exe =~ /\Asimple(?:[_-][A-Za-z0-9.+-]+)?(?:\.exe)?\z/ &&
+                 @args > 1 && $args[1] eq "native-build") {
+            print "native-build\n";
+        } elsif ($exe =~ /\Asimple(?:[_-][A-Za-z0-9.+-]+)?(?:\.exe)?\z/ &&
+                 @args > 2 && $args[1] eq "replay" &&
+                 $args[2] eq "missing-build-log.json") {
+            print "replay-chain\n";
+        } elsif ($arg0 =~ m{(?:^|/)scripts/bootstrap/bootstrap-from-scratch\.sh\z}) {
+            print "bootstrap\n";
+        } elsif ($exe =~ /\A(?:sh|bash|dash|zsh|ksh)\z/) {
+            my $i = 1;
+            while ($i < @args && $args[$i] =~ /\A[+-]/) {
+                if ($args[$i] eq "--") {
+                    $i++; last;
+                } elsif ($args[$i] =~ /\A-[A-Za-z]*c[A-Za-z]*\z/ ||
+                         $args[$i] eq "--command") {
+                    print "none\n"; exit 0;
+                } elsif ($args[$i] eq "-o" || $args[$i] eq "+o" ||
+                         $args[$i] eq "-O" || $args[$i] eq "+O" ||
+                         $args[$i] eq "--rcfile" || $args[$i] eq "--init-file") {
+                    $i += 2;
+                } elsif ($args[$i] =~ /\A-[eluxn]+\z/ ||
+                         $args[$i] =~ /\A--(?:login|noprofile|norc|posix)\z/) {
+                    $i++;
+                } else {
+                    $i++;
+                }
+            }
+            if ($i < @args &&
+                $args[$i] =~ m{(?:^|/)scripts/bootstrap/bootstrap-from-scratch\.sh\z}) {
+                print "bootstrap\n";
+            } else {
+                print "none\n";
+            }
+        } else {
+            print "none\n";
+        }
+    ' -- "$1"
+}
+
 bootstrap_stage3_memory_darwin_rss_cap_kib() {
     [ "$#" -eq 2 ] || return 1
     bootstrap_stage3_memory_is_uint "$1" && [ "$1" -gt 0 ] || return 1
@@ -593,6 +740,49 @@ ${SIMPLE_BOOTSTRAP_STAGE3_PROCESS_SNAPSHOT:-}
         rm -f "$bootstrap_stage3_memory_process_tmp"
         return 1
     fi
+    bootstrap_stage3_memory_ancestors=$(awk -F'|' \
+        -v self_pid="$$" \
+        -v parent_pid="${PPID:-}" \
+        -v process_source="$bootstrap_stage3_memory_process_source" '
+        {
+            p = $1; pp = $2
+            if (p ~ /^[0-9]+$/ && pp ~ /^[0-9]+$/) {
+                ppid[p] = pp
+                seen[p] = 1
+            }
+        }
+        END {
+            out = "|"
+            allow_self = (process_source == "ps") || !(self_pid in seen) || \
+                (self_pid + 0 > 200) || (parent_pid != "" && ppid[self_pid] == parent_pid)
+            if (allow_self && self_pid ~ /^[0-9]+$/) {
+                out = out self_pid "|"
+                cur = self_pid
+                for (i = 0; i < 256; i++) {
+                    if (!(cur in seen)) break
+                    nxt = ppid[cur]
+                    if (nxt == "" || nxt == "0" || nxt == "1") break
+                    if (index(out, "|" nxt "|") > 0) break
+                    out = out nxt "|"
+                    cur = nxt
+                }
+            }
+            if (parent_pid ~ /^[0-9]+$/ && parent_pid != "0" && parent_pid != "1" && !(self_pid in seen)) {
+                if (index(out, "|" parent_pid "|") == 0) out = out parent_pid "|"
+                cur = parent_pid
+                for (i = 0; i < 256; i++) {
+                    if (!(cur in seen)) break
+                    nxt = ppid[cur]
+                    if (nxt == "" || nxt == "0" || nxt == "1") break
+                    if (index(out, "|" nxt "|") > 0) break
+                    out = out nxt "|"
+                    cur = nxt
+                }
+            }
+            print out
+        }
+    ' "$bootstrap_stage3_memory_process_tmp") || {
+        rm -f "$bootstrap_stage3_memory_process_tmp"; return 1; }
     bootstrap_stage3_memory_process_count=0
     bootstrap_stage3_memory_bootstrap_count=0
     bootstrap_stage3_memory_native_count=0
@@ -626,7 +816,10 @@ ${SIMPLE_BOOTSTRAP_STAGE3_PROCESS_SNAPSHOT:-}
                     "$bootstrap_stage3_memory_pid") || {
                 rm -f "$bootstrap_stage3_memory_process_tmp"; return 1; }
             [ "$bootstrap_stage3_memory_kind" != none ] || continue
-        else
+        elif [ "$bootstrap_stage3_memory_process_source" = windows-cim ]; then
+            case "$bootstrap_stage3_memory_ancestors" in
+                *"|$bootstrap_stage3_memory_pid|"*) continue ;;
+            esac
             case "$bootstrap_stage3_memory_cmd" in
             *qemu-system-*)
                 bootstrap_stage3_memory_kind=qemu ;;
@@ -638,6 +831,18 @@ ${SIMPLE_BOOTSTRAP_STAGE3_PROCESS_SNAPSHOT:-}
                 bootstrap_stage3_memory_kind=native-build ;;
             *) continue ;;
             esac
+        else
+            case "$bootstrap_stage3_memory_cmd" in
+                *qemu-system-*|*native-build*|*bootstrap-from-scratch.sh*|*missing-build-log.json*) ;;
+                *) continue ;;
+            esac
+            case "$bootstrap_stage3_memory_ancestors" in
+                *"|$bootstrap_stage3_memory_pid|"*) continue ;;
+            esac
+            bootstrap_stage3_memory_kind=$(bootstrap_stage3_memory_posix_args_kind \
+                "$bootstrap_stage3_memory_cmd") || {
+                rm -f "$bootstrap_stage3_memory_process_tmp"; return 1; }
+            [ "$bootstrap_stage3_memory_kind" != none ] || continue
         fi
         case "$bootstrap_stage3_memory_kind" in
             qemu) bootstrap_stage3_memory_qemu_count=$((bootstrap_stage3_memory_qemu_count + 1)) ;;
@@ -699,7 +904,8 @@ ${SIMPLE_BOOTSTRAP_STAGE3_PROC_ROOT:-/proc}
 # coexist only when the final Linux sample covers the Stage 3 cgroup maximum
 # and all configured guest RAM. Whole-process RSS includes QEMU overhead, so
 # subtracting it would understate possible guest growth. One outer bootstrap
-# coordinator is allowed because it may exec this resume helper.
+# coordinator is allowed because it may exec this resume helper. Windows CIM
+# reports that coordinator's shell and exec wrapper as two entries.
 bootstrap_stage3_memory_require_exclusive_heavy() {
     [ "$#" -eq 2 ] || return 2
     bootstrap_stage3_memory_exclusive_evidence=$1
@@ -714,6 +920,8 @@ bootstrap_stage3_memory_require_exclusive_heavy() {
         concurrent_native_build_count "$bootstrap_stage3_memory_exclusive_evidence") || return 2
     bootstrap_stage3_memory_exclusive_bootstrap=$(bootstrap_stage3_manifest_value \
         concurrent_bootstrap_count "$bootstrap_stage3_memory_exclusive_evidence") || return 2
+    bootstrap_stage3_memory_exclusive_source=$(bootstrap_stage3_manifest_value \
+        process_scan_source "$bootstrap_stage3_memory_exclusive_evidence") || return 2
     bootstrap_stage3_memory_exclusive_qemu=$(bootstrap_stage3_manifest_value \
         concurrent_qemu_count "$bootstrap_stage3_memory_exclusive_evidence" 2>/dev/null || echo 0)
     for bootstrap_stage3_memory_exclusive_value in \
@@ -723,7 +931,10 @@ bootstrap_stage3_memory_require_exclusive_heavy() {
         bootstrap_stage3_memory_is_uint "$bootstrap_stage3_memory_exclusive_value" || return 2
     done
     if [ "$bootstrap_stage3_memory_exclusive_native" -gt 0 ] ||
-       [ "$bootstrap_stage3_memory_exclusive_bootstrap" -gt 1 ]; then
+       { [ "$bootstrap_stage3_memory_exclusive_source" != windows-cim ] &&
+         [ "$bootstrap_stage3_memory_exclusive_bootstrap" -gt 1 ]; } ||
+       { [ "$bootstrap_stage3_memory_exclusive_source" = windows-cim ] &&
+         [ "$bootstrap_stage3_memory_exclusive_bootstrap" -gt 2 ]; }; then
         echo "Stage 3 memory admission blocked: concurrent heavy work (native=$bootstrap_stage3_memory_exclusive_native bootstrap=$bootstrap_stage3_memory_exclusive_bootstrap qemu=$bootstrap_stage3_memory_exclusive_qemu)" >&2
         return 75
     fi

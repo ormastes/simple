@@ -1,0 +1,154 @@
+"""Seatbelt SBPL emitter: escaping, injection rejection, deny-by-default, determinism."""
+
+use std.spec.{describe, it, expect}
+use std.nogc_async_mut.container.providers.macos.seatbelt_profile_v1.{
+    SeatbeltFsGrantInputV1, SeatbeltPolicyInputV1, seatbelt_path_check_v1, seatbelt_literal_v1,
+    seatbelt_profile_compile_v1, seatbelt_profile_digest_v1,
+    SEATBELT_ACCESS_READ_DATA_V1, SEATBELT_ACCESS_READ_METADATA_V1, SEATBELT_ACCESS_WRITE_V1,
+    SEATBELT_ACCESS_EXECUTE_V1, SEATBELT_SCOPE_LITERAL_V1, SEATBELT_SCOPE_SUBPATH_V1,
+    SEATBELT_NETWORK_NONE_V1, SEATBELT_NETWORK_ENDPOINT_V1, SEATBELT_NETWORK_POD_IP_V1,
+    SEATBELT_PROFILE_MAX_BYTES_V1}
+
+fn _grant(path: text, scope: text, access: text) -> SeatbeltFsGrantInputV1:
+    SeatbeltFsGrantInputV1(path: path, scope: scope, access: access)
+
+fn _policy(grants: [SeatbeltFsGrantInputV1]) -> SeatbeltPolicyInputV1:
+    SeatbeltPolicyInputV1(grants: grants, protected_roots: ["/state/host-scope", "/state/attempts/a1/private"],
+        network_profile: SEATBELT_NETWORK_NONE_V1, direct_network: false, broker_endpoint: None)
+
+fn _basic() -> [SeatbeltFsGrantInputV1]:
+    [_grant("/state/attempts/a1/workspace", SEATBELT_SCOPE_SUBPATH_V1, SEATBELT_ACCESS_READ_DATA_V1),
+     _grant("/state/attempts/a1/output", SEATBELT_SCOPE_SUBPATH_V1, SEATBELT_ACCESS_WRITE_V1),
+     _grant("/opt-tools/bin/cc", SEATBELT_SCOPE_LITERAL_V1, SEATBELT_ACCESS_EXECUTE_V1)]
+
+fn _error_of(policy: SeatbeltPolicyInputV1) -> text:
+    val compiled = seatbelt_profile_compile_v1(policy)
+    if compiled.is_ok(): return ""
+    compiled.unwrap_err()
+
+describe "seatbelt profile v1 literal handling":
+    it "escapes quote and backslash into a single SBPL string literal":
+        val literal = seatbelt_literal_v1("/w/a\"b\\c")
+        expect(literal.is_ok()).to_equal(true)
+        expect(literal.unwrap()).to_equal("\"/w/a\\\"b\\\\c\"")
+
+    it "rejects NUL, control bytes and newline injection":
+        expect(seatbelt_path_check_v1("/w/a\0b").is_err()).to_equal(true)
+        expect(seatbelt_path_check_v1("/w/a\nb").is_err()).to_equal(true)
+        expect(seatbelt_path_check_v1("/w/a\tb").is_err()).to_equal(true)
+
+    it "rejects non-ASCII paths pending normalization qualification":
+        expect(seatbelt_path_check_v1("/w/caf\u{e9}").unwrap_err()).to_equal("path-non-ascii-rejected")
+
+    it "rejects relative, dot, dotdot, empty-segment and trailing-slash paths":
+        expect(seatbelt_path_check_v1("w/a").is_err()).to_equal(true)
+        expect(seatbelt_path_check_v1("/w/./a").is_err()).to_equal(true)
+        expect(seatbelt_path_check_v1("/w/../etc").is_err()).to_equal(true)
+        expect(seatbelt_path_check_v1("/w/..").is_err()).to_equal(true)
+        expect(seatbelt_path_check_v1("/w//a").is_err()).to_equal(true)
+        expect(seatbelt_path_check_v1("/w/a/").is_err()).to_equal(true)
+
+    it "enforces the path byte limit":
+        var long = "/"
+        var i = 0
+        while i < 1100:
+            long = long + "a"
+            i = i + 1
+        expect(seatbelt_path_check_v1(long).unwrap_err()).to_equal("path-length-invalid")
+
+describe "seatbelt profile v1 compile":
+    it "emits a deny-by-default versioned profile with separate capability classes":
+        val compiled = seatbelt_profile_compile_v1(_policy(_basic()))
+        expect(compiled.is_ok()).to_equal(true)
+        val body = compiled.unwrap().profile_text
+        expect(body.starts_with("(version 1)\n")).to_equal(true)
+        expect(body.contains("\n(deny default)\n")).to_equal(true)
+        expect(body.contains("\n(deny network*)\n")).to_equal(true)
+        expect(body.contains("(allow default")).to_equal(false)
+        expect(body.contains("(allow file-read-data (subpath \"/state/attempts/a1/workspace\"))")).to_equal(true)
+        expect(body.contains("(allow file-write-data file-write-create file-write-unlink (subpath \"/state/attempts/a1/output\"))")).to_equal(true)
+        expect(body.contains("(allow process-exec (literal \"/opt-tools/bin/cc\"))")).to_equal(true)
+        expect(body.contains("(deny file-read* file-write* process-exec (subpath \"/state/host-scope\"))")).to_equal(true)
+        expect(body.contains("network-outbound")).to_equal(false)
+        expect(body.contains("(import")).to_equal(false)
+        expect(body.contains("regex")).to_equal(false)
+
+    it "keeps an injection attempt inside one literal and never creates a form":
+        val evil = "/state/attempts/a1/workspace/x\") (allow default) (\""
+        val compiled = seatbelt_profile_compile_v1(_policy([
+            _grant(evil, SEATBELT_SCOPE_LITERAL_V1, SEATBELT_ACCESS_READ_DATA_V1)]))
+        expect(compiled.is_ok()).to_equal(true)
+        val body = compiled.unwrap().profile_text
+        expect(body.contains("\n(allow default")).to_equal(false)
+        expect(body.contains("(literal \"/state/attempts/a1/workspace/x\\\") (allow default) (\\\"\")")).to_equal(true)
+
+    it "is deterministic and order-independent with a stable digest":
+        val a = seatbelt_profile_compile_v1(_policy(_basic())).unwrap()
+        val reversed = [_basic()[2], _basic()[1], _basic()[0]]
+        val b = seatbelt_profile_compile_v1(_policy(reversed)).unwrap()
+        expect(a.profile_text).to_equal(b.profile_text)
+        expect(a.digest).to_equal(b.digest)
+        expect(a.digest.byte_len()).to_equal(64)
+        expect(a.digest).to_equal(seatbelt_profile_digest_v1(a.profile_text))
+        expect(a.byte_len).to_equal(a.profile_text.byte_len())
+
+    it "changes the digest when any grant changes":
+        val a = seatbelt_profile_compile_v1(_policy(_basic())).unwrap()
+        val changed = [_basic()[0], _basic()[1],
+            _grant("/opt-tools/bin/ld", SEATBELT_SCOPE_LITERAL_V1, SEATBELT_ACCESS_EXECUTE_V1)]
+        val b = seatbelt_profile_compile_v1(_policy(changed)).unwrap()
+        expect(a.digest == b.digest).to_equal(false)
+
+    it "rejects grants overlapping protected roots, including case aliases":
+        val inside = _error_of(_policy([_grant("/state/host-scope/keys", SEATBELT_SCOPE_LITERAL_V1, SEATBELT_ACCESS_READ_DATA_V1)]))
+        expect(inside.starts_with("SCMAC-FS-001 grant[0]")).to_equal(true)
+        val parent = _error_of(_policy([_grant("/state", SEATBELT_SCOPE_SUBPATH_V1, SEATBELT_ACCESS_READ_DATA_V1)]))
+        expect(parent.starts_with("SCMAC-FS-001")).to_equal(true)
+        val cased = _error_of(_policy([_grant("/STATE/Host-Scope", SEATBELT_SCOPE_SUBPATH_V1, SEATBELT_ACCESS_READ_DATA_V1)]))
+        expect(cased.starts_with("SCMAC-FS-001")).to_equal(true)
+
+    it "rejects blanket home, temp, root and device grants":
+        for path in ["/", "/Users", "/tmp", "/private/tmp", "/dev", "/private"]:
+            val err = _error_of(_policy([_grant(path, SEATBELT_SCOPE_SUBPATH_V1, SEATBELT_ACCESS_READ_DATA_V1)]))
+            expect(err.contains("blanket-grant-rejected")).to_equal(true)
+
+    it "rejects unknown access classes, scopes and duplicates with input index":
+        val access = _error_of(_policy([_basic()[0], _grant("/w1", SEATBELT_SCOPE_SUBPATH_V1, "all")]))
+        expect(access).to_equal("SCMAC-FS-001 grant[1] access-unsupported")
+        val scope = _error_of(_policy([_grant("/w1", "regex", SEATBELT_ACCESS_READ_DATA_V1)]))
+        expect(scope).to_equal("SCMAC-FS-001 grant[0] scope-unsupported")
+        val dup = _error_of(_policy([_basic()[0], _basic()[0]]))
+        expect(dup).to_equal("SCMAC-FS-001 grant[1] grant-duplicate")
+
+    it "rejects pod-ip-v1 and direct network before any profile is produced":
+        var pod = _policy(_basic())
+        pod.network_profile = SEATBELT_NETWORK_POD_IP_V1
+        expect(_error_of(pod).starts_with("SCMAC-NET-001")).to_equal(true)
+        var direct = _policy(_basic())
+        direct.direct_network = true
+        expect(_error_of(direct).starts_with("SCMAC-NET-002")).to_equal(true)
+
+    it "allows exactly one explicitly granted broker unix socket":
+        var policy = _policy(_basic())
+        policy.network_profile = SEATBELT_NETWORK_ENDPOINT_V1
+        policy.broker_endpoint = Some("/state/attempts/a1/ipc/broker.sock")
+        val body = seatbelt_profile_compile_v1(policy).unwrap().profile_text
+        expect(body.contains("(allow network-outbound (remote unix-socket (path-literal \"/state/attempts/a1/ipc/broker.sock\")))")).to_equal(true)
+        expect(body.contains("network-inbound")).to_equal(false)
+        expect(body.contains("(remote ip")).to_equal(false)
+
+    it "requires a broker endpoint for endpoint-v1 and forbids one for none":
+        var missing = _policy(_basic())
+        missing.network_profile = SEATBELT_NETWORK_ENDPOINT_V1
+        expect(_error_of(missing).contains("endpoint-v1-requires-broker-endpoint")).to_equal(true)
+        var extra = _policy(_basic())
+        extra.broker_endpoint = Some("/state/attempts/a1/ipc/broker.sock")
+        expect(_error_of(extra).contains("broker-endpoint-requires-endpoint-v1")).to_equal(true)
+        var protected_sock = _policy(_basic())
+        protected_sock.network_profile = SEATBELT_NETWORK_ENDPOINT_V1
+        protected_sock.broker_endpoint = Some("/state/host-scope/daemon.sock")
+        expect(_error_of(protected_sock).contains("overlaps-protected-root")).to_equal(true)
+
+    it "stays within the profile byte limit":
+        val profile = seatbelt_profile_compile_v1(_policy(_basic())).unwrap()
+        expect(profile.byte_len <= SEATBELT_PROFILE_MAX_BYTES_V1).to_equal(true)

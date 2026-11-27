@@ -116,3 +116,8 @@ with a control that must produce a hit.
 Every behavioural change here was sabotage-probed: break impl → observe RED →
 revert → observe GREEN. A GC/cache test that cannot fail proves nothing, because
 the failure mode is silent data loss.
+
+- 2026-10-24: authoritative build/cache design is `doc/05_design/compiler/incremental_build/src_based_tldr_build_v1.md` (per-file jobs, `SourceReader`, single-flight, no locks, cache limits); additive semantic-cache package `doc/03_plan/compiler/cache/generic_aop_macro_semantic_cache_plan_2026-10-24.md`.
+
+- 2026-10-25: DigestV1 hash agility, GuardIdV1, `.spab`, single-flight, ledger/eviction and Lean cache gates landed; summary in `doc/07_guide/tooling/bootstrap_options.md`.
+- 2026-10-25: Per-file src to obj is the DEFAULT (#4525 compiler, #4542 guide, scripts PR 2026-10-25): each module lowers to its own `aot-<hash>.o` in the per-module object cache under `SIMPLE_NATIVE_BUILD_CACHE_DIR`, codegen fans out over `SIMPLE_NATIVE_BUILD_THREADS` (scripts: host.sdn `max_build_jobs`), then all objects link into one binary. Stage 3 scripts pass `SIMPLE_BOOTSTRAP=` empty so the bootstrap_fixed shortcut is not forced; `SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1` opts back into the whole-program lane (hashed into the Stage 3 args). First-object proof: 9-module closure, 9 objects, first at 160 s, last at 174 s, binary runs.

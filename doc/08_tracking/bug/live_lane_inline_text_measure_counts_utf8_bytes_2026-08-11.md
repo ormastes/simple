@@ -1,7 +1,7 @@
 # Live browser lane measures inline text by UTF-8 BYTES, not characters
 
 - **Date:** 2026-08-11
-- Status: OPEN (P2)
+- Status: RESOLVED (verified 2026-08-17; re-confirmed in tree 2026-11-25 — see bottom note)
 - Status re-verified 2026-08-17 by source inspection (triage shard 02).
 - **Component:** `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout.spl`
 - **Found while:** closing blocker 1 (inline text measurement) of
@@ -193,3 +193,18 @@ Executed proof (`bin/simple run`, seed):
                                  # this doc asked for
 
 Status: RESOLVED. No source change was needed by this lane.
+
+## Re-confirmation 2026-11-25 (lane p2w3-ai)
+
+The RESOLVED status above still holds after the browser-engine file split.
+`simple_web_html_layout_renderer_layout.spl` is now a pure re-export facade;
+the text measurement moved to
+`simple_web_html_layout_renderer_layout_text.spl`, which measures through the
+codepoint-correct shared leaf (`text_cell_width` / `text_codepoints`, 13 use
+sites) in `intrinsic_text_width` / `inline_text_advance_width`. No
+byte-bounded `len()`-driven `char_code_at` measurement loop remains in the
+live lane. Fresh execution of
+`test/01_unit/lib/common/text_byte_len_vs_codepoint_index_spec.spl` is
+environment-blocked in this lane: the pinned `bin/simple.exe` seed rejects
+`@representation_boundary` tree-wide at HEAD, so no spec runs. Closure rests
+on the recorded 2026-08-17 execution evidence plus current source inspection.

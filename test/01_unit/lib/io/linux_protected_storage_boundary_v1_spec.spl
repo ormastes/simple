@@ -1,0 +1,31 @@
+# SOURCE_AUTHORED_NOT_RUN. Pure production guard calls only; no fabricated FD.
+use std.spec.*
+use std.nogc_sync_mut.io.linux_protected_storage_v1.linux_protected_relative_v1
+use std.nogc_sync_mut.io.journal_storage_backend_v3.*
+use std.common.task_runner.distributed_operation_journal_v2.*
+
+# @req REQ-LINUX-AUTH-BOUNDARY
+describe "protected Linux storage lexical and explicit-backend boundaries":
+    it "accepts fixed Host journal and setup leaves without normalizing components":
+        step("Exercise the production relative-name grammar")
+        expect(linux_protected_relative_v1("parent.lease")).to_equal(true)
+        expect(linux_protected_relative_v1("host-service-ready-v6/" + "a".repeat(64) + ".sdn")).to_equal(true)
+        expect(linux_protected_relative_v1("database-wal/objects/" + "b".repeat(64))).to_equal(true)
+        expect(linux_protected_relative_v1("reservation-payloads/" + "c".repeat(64) + ".sdn")).to_equal(true)
+
+    it "rejects traversal, alternative separators, NUL and bounded-name overflow":
+        for name in ["", "/absolute", "../parent.lease", "a/../b", "a//b", "a/./b", "a/", "a\\b", "a\0b", "x".repeat(241), "a/".repeat(8) + "a"]:
+            expect(linux_protected_relative_v1(name)).to_equal(false)
+        expect(linux_protected_relative_v1("x".repeat(240))).to_equal(true)
+
+    it "never makes a protected read or publication fall through LegacyPath":
+        val backend = JournalStorageBackendV3.LegacyPath
+        expect(journal_storage_read_v3(backend, "parent.lease", 512).unwrap_err()).to_equal("JOURNAL_PROTECTED_STORAGE_REQUIRED")
+        expect(journal_storage_publish_v3(backend, "parent.lease", "not-a-lease").unwrap_err()).to_equal("JOURNAL_PROTECTED_STORAGE_REQUIRED")
+        expect(journal_storage_compare_replace_v3(backend, "parent.lease", "not-a-lease", nil).unwrap_err()).to_equal("JOURNAL_PROTECTED_STORAGE_REQUIRED")
+
+    it "refuses a DATA-only journal with no genuine protected capability before IO":
+        # Invalid sentinel DATA exercises only the early capability guard, not
+        # any file/descriptor operation or successful authority construction.
+        val absent = DistributedOperationJournalV2("", "", "", 0, 1, -1, "", {})
+        expect(distributed_operation_journal_linux_current_v3(absent).unwrap_err()).to_equal("OPERATION_JOURNAL_LINUX_PROTECTED_REQUIRED")

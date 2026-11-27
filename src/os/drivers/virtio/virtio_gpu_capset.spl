@@ -185,6 +185,26 @@ fn gpu_find_venus(caps: List<GpuCapset>) -> GpuCapset?:
             return c
     nil
 
+fn gpu_capset_venus_bit(caps: List<GpuCapset>) -> u32:
+    """Return 1 when the Venus capset is present, else 0."""
+    if gpu_find_venus(caps).?:
+        1u32
+    else:
+        0u32
+
+fn gpu_capset_probe_report_line(caps: List<GpuCapset>) -> text:
+    """Format the canonical serial probe line checked by check-virtio-gpu-capset-qemu.shs."""
+    "VIRTIO_GPU_CAPSETS n={caps.len()} venus={gpu_capset_venus_bit(caps)}"
+
+fn gpu_capset_probe_admitted(caps: List<GpuCapset>) -> bool:
+    """True when at least one valid VirtIO-GPU capset was enumerated (n >= 1)."""
+    caps.len() >= 1
+
+fn gpu_probe_capset_summary(drv: VirtioGpuDriver, num_capsets: u32) -> text:
+    """Query capsets on an initialized VirtIO-GPU driver and return the probe line."""
+    val caps = gpu_query_capsets(drv, num_capsets)
+    gpu_capset_probe_report_line(caps)
+
 # ============================================================================
 # Device-facing capset walk — IMPURE (requires an initialized controlq)
 # ============================================================================
@@ -259,3 +279,23 @@ fn gpu_get_capset(drv: VirtioGpuDriver, capset_id: u32, capset_version: u32, max
         return Err("GET_CAPSET(id={capset_id}, v={capset_version}) failed (resp=0x{resp_type})")
     log_info("[virtio] " + "[virtio-gpu] GET_CAPSET id={capset_id} v={capset_version} bytes={max_size}")
     Ok(max_size)
+
+struct GpuCapsetQueryRequest:
+    """Bounded capset table walk budget."""
+    capset_budget: u32
+
+struct GpuCapsetProbeReport:
+    """Typed report line and admission decision for VirtIO-GPU capset discovery."""
+    line: text
+    admitted: bool
+
+pub fn gpu_query_capsets_bounded(drv: VirtioGpuDriver, req: GpuCapsetQueryRequest) -> List<GpuCapset>:
+    """Public bounded capset walk for cross-module VirtIO-GPU entrypoints."""
+    gpu_query_capsets(drv, req.capset_budget)
+
+pub fn gpu_capset_probe_report(caps: List<GpuCapset>) -> GpuCapsetProbeReport:
+    """Public typed report line + admission decision for VirtIO-GPU capset probes."""
+    GpuCapsetProbeReport(
+        line: gpu_capset_probe_report_line(caps),
+        admitted: gpu_capset_probe_admitted(caps)
+    )

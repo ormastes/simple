@@ -1,0 +1,66 @@
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.common.contracts.storage.workspace_storage_v1.{WorkspaceStorageRequestV1,
+    workspace_storage_request_valid_v1, workspace_storage_binding_v1}
+use std.nogc_sync_mut.storage_roots.workspace_storage_owner_v1.workspace_storage_decode_receipt_v1
+
+fn storage_request_v1(kind: text, leaf: text, quota: i64, hard: i64) -> WorkspaceStorageRequestV1:
+    WorkspaceStorageRequestV1(kind: kind, protected_parent: "/protected/pool", leaf_name: leaf,
+        expected_pool_id: "xfs:123:456:00000001:00000002", expected_workspace_id: "inode:123:789:1:0",
+        quota_id: quota, hard_bytes: hard,
+        policy_digest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+
+fn storage_native_receipt_v1(used: text, inodes: text, state: text) -> text:
+    "workspace-storage-native-v1\nlinux-xfs-project-v1\nxfs:123:456:00000001:00000002\ninode:123:789:1:0\n77\n65536\n" +
+        used + "\n" + inodes + "\naaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n" + state + "\n"
+
+describe "Workspace storage native contract correlation":
+    it "rejects traversal, unsupported kind, absent project and unenforceable byte alignment":
+        step("Validate actual production storage request contracts before native effects")
+        expect(workspace_storage_request_valid_v1(storage_request_v1("linux-xfs-project-v1", "work", 77, 65536))).to_equal(true)
+        expect(workspace_storage_request_valid_v1(storage_request_v1("linux-xfs-project-v1", "../work", 77, 65536))).to_equal(false)
+        expect(workspace_storage_request_valid_v1(storage_request_v1("fake-quota", "work", 77, 65536))).to_equal(false)
+        expect(workspace_storage_request_valid_v1(storage_request_v1("linux-xfs-project-v1", "work", 0, 65536))).to_equal(false)
+        expect(workspace_storage_request_valid_v1(storage_request_v1("linux-xfs-project-v1", "work", 77, 65537))).to_equal(false)
+
+    it "binds requested bytes and workspace separately while preserving measured usage":
+        step("Decode a native-shaped observation through the real owner decoder")
+        val request = storage_request_v1("linux-xfs-project-v1", "work", 77, 65536)
+        val receipt = workspace_storage_decode_receipt_v1(request, storage_native_receipt_v1("512", "1", "retained")).unwrap()
+        expect(receipt.used_bytes).to_equal(512)
+        expect(receipt.used_inodes).to_equal(1)
+        expect(receipt.state).to_equal("retained")
+        expect(receipt.binding_digest).to_equal(workspace_storage_binding_v1(request).unwrap())
+        expect(workspace_storage_decode_receipt_v1(storage_request_v1("linux-xfs-project-v1", "work", 77, 131072),
+            storage_native_receipt_v1("512", "1", "retained")).is_err()).to_equal(true)
+        expect(workspace_storage_binding_v1(request).unwrap() ==
+            workspace_storage_binding_v1(storage_request_v1("linux-xfs-project-v1", "other", 77, 65536)).unwrap()).to_equal(false)
+
+    it "never accepts a released projection with charged blocks or inodes":
+        step("Keep dirty or partially cleaned storage charged")
+        val request = storage_request_v1("linux-xfs-project-v1", "work", 77, 65536)
+        expect(workspace_storage_decode_receipt_v1(request, storage_native_receipt_v1("512", "0", "released")).is_err()).to_equal(true)
+        expect(workspace_storage_decode_receipt_v1(request, storage_native_receipt_v1("0", "1", "released")).is_err()).to_equal(true)
+        expect(workspace_storage_decode_receipt_v1(request, storage_native_receipt_v1("0", "0", "released")).unwrap().state).to_equal("released")
+
+    it "rejects truncated, extended and unknown-state native receipts":
+        step("Refuse uncorrelated or malformed provider data")
+        val request = storage_request_v1("linux-xfs-project-v1", "work", 77, 65536)
+        expect(workspace_storage_decode_receipt_v1(request, "").is_err()).to_equal(true)
+        expect(workspace_storage_decode_receipt_v1(request, storage_native_receipt_v1("0", "0", "clean") ).is_err()).to_equal(true)
+        expect(workspace_storage_decode_receipt_v1(request, storage_native_receipt_v1("0", "0", "retained") + "extra\n").is_err()).to_equal(true)
+        expect(workspace_storage_decode_receipt_v1(request, storage_native_receipt_v1("00", "0", "retained")).is_err()).to_equal(true)
+        expect(workspace_storage_decode_receipt_v1(request, storage_native_receipt_v1("9999999999999999", "0", "retained")).is_err()).to_equal(true)
+
+    it "keeps Windows inode usage unknown and refuses a released projection":
+        step("Distinguish a native volume bound from an inode or cleanup capability")
+        val request = WorkspaceStorageRequestV1(kind: "windows-dedicated-volume-v1",
+            protected_parent: "\\\\?\\Volume{01234567-0123-0123-0123-0123456789ab}\\", leaf_name: "workspace",
+            expected_pool_id: "windows-volume:exact", expected_workspace_id: "file:exact",
+            quota_id: 0, hard_bytes: 65536,
+            policy_digest: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        val prefix = "workspace-storage-native-v1\nwindows-dedicated-volume-v1\nwindows-volume:exact\nfile:exact\n0\n65536\n512\n"
+        val suffix = "\naaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\n"
+        expect(workspace_storage_decode_receipt_v1(request, prefix + "-1" + suffix + "retained\n").unwrap().used_inodes).to_equal(-1)
+        expect(workspace_storage_decode_receipt_v1(request, prefix + "0" + suffix + "retained\n").is_err()).to_equal(true)
+        expect(workspace_storage_decode_receipt_v1(request, prefix + "-1" + suffix + "released\n").is_err()).to_equal(true)

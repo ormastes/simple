@@ -1,0 +1,97 @@
+"""Comment doctest extraction: which comment markers and fences yield examples.
+
+An example is a fenced block (```simple, ```spl or ```sdoctest) inside a
+`///`, `##` or `#` comment. The extractor returns one Doctest per block with
+the fence line as `line_number`, the body with the marker stripped, and
+`should_fail` taken from the fence line.
+
+# @req REQ-TESTRUNNER-COMMENT-KIND
+"""
+
+use std.spec.*
+use std.nogc_sync_mut.io.file_ops.{file_write, secure_temp_dir}
+use std.test_runner.test_executor_parsing.{_tp_get_temp_dir}
+use std.test_runner.doctest_runner.{extract_doctests, Doctest}
+
+fn extract(source: text) -> [Doctest]:
+    val dir = secure_temp_dir(_tp_get_temp_dir(), "spl-doctest-unit-").unwrap().replace("\\", "/")
+    val path = dir + "/sample.spl"
+    file_write(path, source)
+    extract_doctests(path)
+
+describe "doc comment markers":
+    it "extracts a fenced example from a triple-slash comment":
+        val found = extract("/// ```simple\n/// val x = 1\n/// ```\nfn f():\n    1\n")
+        expect(found.len()).to_equal(1)
+        expect(found[0].code).to_equal("val x = 1")
+
+    it "extracts a fenced example from a double-hash comment":
+        val found = extract("## ```simple\n## val x = 2\n## ```\nfn f():\n    1\n")
+        expect(found.len()).to_equal(1)
+        expect(found[0].code).to_equal("val x = 2")
+
+    it "extracts a fenced example from a single-hash comment":
+        val found = extract("# ```simple\n# val x = 3\n# ```\nfn f():\n    1\n")
+        expect(found.len()).to_equal(1)
+        expect(found[0].code).to_equal("val x = 3")
+
+    it "extracts a fenced example from an indented single-hash comment":
+        val found = extract("class C:\n    # ```simple\n    # val x = 4\n    # ```\n    fn m():\n        1\n")
+        expect(found.len()).to_equal(1)
+        expect(found[0].code).to_equal("val x = 4")
+
+describe "fence languages":
+    it "accepts a spl fence":
+        val found = extract("## ```spl\n## val a = 1\n## ```\n")
+        expect(found.len()).to_equal(1)
+    it "accepts a sdoctest fence":
+        val found = extract("## ```sdoctest\n## val a = 1\n## ```\n")
+        expect(found.len()).to_equal(1)
+    it "ignores a text fence":
+        val found = extract("## ```text\n## not code\n## ```\n")
+        expect(found.len()).to_equal(0)
+    it "ignores a bare fence with no language":
+        val found = extract("## ```\n## val a = 1\n## ```\n")
+        expect(found.len()).to_equal(0)
+    it "ignores a rust fence":
+        val found = extract("## ```rust\n## let a = 1;\n## ```\n")
+        expect(found.len()).to_equal(0)
+
+describe "should_fail":
+    it "is false for a plain fence":
+        val found = extract("## ```simple\n## val a = 1\n## ```\n")
+        expect(found[0].should_fail).to_equal(false)
+    it "is true when the fence line says should_fail":
+        val found = extract("## ```simple should_fail\n## val a: i64 = \"x\"\n## ```\n")
+        expect(found[0].should_fail).to_equal(true)
+    it "applies only to its own block":
+        val found = extract("## ```simple should_fail\n## val a = 1\n## ```\n##\n## ```simple\n## val b = 2\n## ```\n")
+        expect(found.len()).to_equal(2)
+        expect(found[0].should_fail).to_equal(true)
+        expect(found[1].should_fail).to_equal(false)
+
+describe "marker stripping":
+    it "removes the marker and one following space":
+        val found = extract("## ```simple\n## val a = 1\n## ```\n")
+        expect(found[0].code).to_equal("val a = 1")
+    it "removes a triple-slash marker and one following space":
+        val found = extract("/// ```simple\n/// val a = 1\n/// ```\n")
+        expect(found[0].code).to_equal("val a = 1")
+    it "keeps indentation inside the example after the marker space":
+        val found = extract("# ```simple\n# if true:\n#     val a = 1\n# ```\n")
+        expect(found[0].code).to_equal("if true:\n    val a = 1")
+    it "accepts a marker with no space after it":
+        val found = extract("##```simple\n##val a = 1\n##```\n")
+        expect(found.len()).to_equal(1)
+        expect(found[0].code).to_equal("val a = 1")
+
+describe "expected output forms":
+    it "leaves expected_output empty because output matching is not supported":
+        val found = extract("## ```simple\n## print 1\n## ```\n")
+        expect(found[0].expected_output).to_equal("")
+    it "treats a triple-chevron line as plain example code":
+        val found = extract("## ```simple\n## >>> 1 + 1\n## 2\n## ```\n")
+        expect(found[0].code).to_equal(">>> 1 + 1\n2")
+    it "records the source file path":
+        val found = extract("## ```simple\n## val a = 1\n## ```\n")
+        expect(found[0].source_file.ends_with("sample.spl")).to_equal(true)

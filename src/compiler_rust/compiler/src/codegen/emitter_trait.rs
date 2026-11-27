@@ -84,7 +84,10 @@ pub trait CodegenEmitter {
         args: &[VReg],
         effect: Effect,
     ) -> Result<(), Self::Error>;
-    fn emit_inline_asm(&mut self, _instructions: &[String], _volatile: bool) -> Result<(), Self::Error> {
+    fn emit_inline_asm(&mut self, _instructions: &[String], _volatile: bool, dialect: crate::hir::AsmDialect) -> Result<(), Self::Error> {
+        if dialect != crate::hir::AsmDialect::Default {
+            return Err("E-ASM-DIALECT: this backend does not support explicit assembly syntax".to_string().into());
+        }
         Ok(())
     }
 
@@ -224,12 +227,15 @@ pub trait CodegenEmitter {
     // =========================================================================
     fn emit_enum_discriminant(&mut self, dest: VReg, value: VReg) -> Result<(), Self::Error>;
     fn emit_enum_payload(&mut self, dest: VReg, value: VReg) -> Result<(), Self::Error>;
-    fn emit_enum_unit(&mut self, dest: VReg, enum_name: &str, variant_name: &str) -> Result<(), Self::Error>;
+    /// `discriminant` is the owning enum's declared variant index (#6953).
+    fn emit_enum_unit(&mut self, dest: VReg, enum_name: &str, variant_name: &str, discriminant: u32)
+        -> Result<(), Self::Error>;
     fn emit_enum_with(
         &mut self,
         dest: VReg,
         enum_name: &str,
         variant_name: &str,
+        discriminant: u32,
         payload: VReg,
     ) -> Result<(), Self::Error>;
     fn emit_union_discriminant(&mut self, dest: VReg, value: VReg) -> Result<(), Self::Error>;

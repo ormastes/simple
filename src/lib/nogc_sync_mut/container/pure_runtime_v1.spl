@@ -1,0 +1,564 @@
+# Pure-Simple container runtime (architecture pure_simple_container 7, lane P4).
+# Composes the landed lanes: SOSIX containment (P2) and contained grants (P1), the
+# store-backed rootfs (P3), the shared lifecycle and attempt-dir modules (S0) and the
+# one capability-report builder (P0). It owns no state machine, directory layout,
+# grant model or evidence field: evidence comes only from pure_container_qualify_v1
+# (sosix_contain_qualify_v1 + pure_container_evidence_from_qualify_v1), and a run
+# never produces evidence for its own admission.
+#
+# Stages (non-pub, exported like the SOSIX variant cores) compose into the one-shot
+# pure_container_run_v1 and let a caller hold a prepared container, for example to
+# measure the shared store object while a second container exists.
+use std.common.contracts.container.capability_report_v1.{ContainerCapabilityReportV1, ContainerCapabilityRequirementV1, ContainerCapabilityFlagV1, container_capability_v1_admission_reason, CONTAINER_CLIENT_AUTHORITY_UNAVAILABLE_V1}
+use std.common.contracts.container.pure_backend_v1.{PureContainerEvidenceV1, PURE_CONTAINER_BACKEND_V1, PURE_CONTAINER_ROOT_VIEW_SPLIT_V1, pure_container_capability_report_v1, pure_container_evidence_from_qualify_v1}
+use std.common.contracts.container.lifecycle_journal_v1.{ContainerLifecycleJournalV1, ContainerJournalVersionV1, ContainerJournalGenerationV1, LIFECYCLE_JOURNAL_V1_VERSION, LIFECYCLE_PHASE_V1_CREATED, LIFECYCLE_PHASE_V1_STARTING, LIFECYCLE_PHASE_V1_RUNNING, LIFECYCLE_PHASE_V1_STOPPING, LIFECYCLE_PHASE_V1_STOPPED, LIFECYCLE_PHASE_V1_DESTROYED}
+use std.common.contracts.container.contained_lifecycle_v1.{contained_lifecycle_next_v1, contained_runtime_phase_v1, CONTAINED_STATE_VALIDATED_V1, CONTAINED_STATE_PREPARED_V1, CONTAINED_STATE_LAUNCH_PENDING_V1, CONTAINED_STATE_RUNNING_V1, CONTAINED_STATE_ABSENT_V1, CONTAINED_STATE_CLOSED_V1, CONTAINED_STATE_OUTCOME_UNKNOWN_V1, CONTAINED_STATE_QUARANTINED_V1}
+use std.common.contracts.container.runtime_v1.{RUNTIME_PHASE_UNKNOWN}
+use std.common.container_policy.attempt_dir_plan_v1.{ContainerAttemptNumberV1, ContainerAttemptDirPlanV1, container_attempt_key_v1, container_attempt_dir_plan_v1}
+use std.common.container_policy.filesystem_plan_v1.{PlannedGrantV1}
+use std.common.contracts.container.filesystem_policy_v1.{FilesystemOpV1}
+use std.common.contracts.sosix.containment_v1.{SosixContainRequestV1, SosixContainLimitsV1, SosixContainAdmissionV1, SosixContainLeaseV1, SosixContainBytesV1, SosixContainCountV1, SosixContainCpuRateV1, SosixContainExitCodeV1, SosixContainFlagV1, SosixContainMillisV1, SosixContainQualifyRequestV1, SosixContainQualifyResultV1, SOSIX_CONTAIN_IDENTITY_RESTRICTED_V1, sosix_contain_request_reason_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.sosix.containment_v1.{sosix_contain_support_v1, sosix_contain_start_v1, sosix_contain_poll_v1, sosix_contain_cancel_v1, sosix_contain_collect_v1, sosix_contain_qualify_v1, sosix_contain_memory_cap_evidence_v1, SosixContainMemoryProbeV1}
+use std.nogc_sync_mut.sosix.contained_write_v1.{sosix_fs_grant_contained_write_v1, sosix_fs_grant_contained_read_v1}
+use std.nogc_sync_mut.sosix.time.{sosix_time_now_monotonic_ms, sosix_sleep_ms}
+use std.nogc_sync_mut.storage.storage_view_v1.{StorageViewV1, ViewBytesV1, ViewFlagV1, storage_view_v1_create, storage_view_v1_destroy}
+use std.nogc_sync_mut.storage.immutable_store_v1.{StoreGenerationV1, immutable_store_v1_root_head}
+use std.nogc_sync_mut.storage.rootfs_materialize_v1.{rootfs_materialize_v1, rootfs_dematerialize_v1}
+use std.nogc_sync_mut.sosix.fs_v1.{is_dir, file_exists, dir_create_all, dir_create_new, dir_remove_all, dir_is_real_no_follow, file_read_regular_no_follow_bounded, sosix_fs_hardlink, sosix_fs_write_file, file_delete, sosix_fs_host_os, sosix_fs_host_arch}
+use std.nogc_sync_mut.sosix.host.{sosix_getpid}
+# Accepted by design: the reader ACE the read grant puts on store objects survives teardown.
+
+const _QUALIFY_SCOPE = "pure-container-qualify"
+const _QUALIFY_WALL_MS = 120000
+const _DEFAULT_BUDGET_MS = 600000
+const _GRACE_MS = 15000
+const _STDOUT_MAX_BYTES = 1048576
+const _ENV_OWNED = ["SIMPLE_CONTAINER_LOWER", "SIMPLE_CONTAINER_UPPER", "TEMP", "TMP", "TMPDIR", "USERPROFILE", "APPDATA", "LOCALAPPDATA", "HOME"]
+
+pub struct PureContainerSpecV1:
+    container_id: text
+    store: text
+    view_root: text
+    state_root: text                   # attempt scratch root, outside the view
+    base_root: text
+    quota: ViewBytesV1
+    program: text                      # host path, or "lower:<rel>" / "upper:<rel>"
+    program_digest: text
+    args: [text]
+    environment: [text]
+    limits: SosixContainLimitsV1
+    identity: text
+    network: text
+    requirement: ContainerCapabilityRequirementV1
+    evidence: PureContainerEvidenceV1  # from pure_container_qualify_v1; empty = unqualified
+    extra_grants: [PlannedGrantV1]     # shared filesystem_plan_v1 grants beyond lower/upper
+
+pub struct PureContainerRunV1:
+    status: text                       # "exited" | "rejected" | "cleanup-unproven"
+    reason: text
+    exit_code: SosixContainExitCodeV1
+    peak_memory: SosixContainBytesV1
+    report: ContainerCapabilityReportV1
+    journal: ContainerLifecycleJournalV1
+
+pub struct PureContainerQualifyV1:
+    state_root: text                   # canary scratch is created under it
+    view_root: text                    # the pair the evidence is bound to
+    probe_program: text
+    probe_digest: text
+    probe_script: text
+    memory_probe: SosixContainMemoryProbeV1
+
+struct PureLifecycleV1:
+    state: text
+    journal: ContainerLifecycleJournalV1
+
+# Everything one prepared container owns. Paths are fixed at layout time.
+struct PureContainerSessionV1:
+    spec: PureContainerSpecV1
+    view: StorageViewV1
+    request: SosixContainRequestV1
+    report: ContainerCapabilityReportV1
+    life: PureLifecycleV1
+    view_dir: text
+    attempt_root: text
+    stdout_path: text
+
+struct PurePreparedV1:
+    status: text                       # "ready" | "rejected" | "cleanup-unproven"
+    reason: text
+    session: PureContainerSessionV1
+
+struct PureExecV1:
+    status: text                       # "exited" | "rejected" | "cleanup-unproven"
+    reason: text
+    session: PureContainerSessionV1
+    exit_code: SosixContainExitCodeV1
+    peak_memory: SosixContainBytesV1
+    stdout: text
+
+struct PureTeardownV1:
+    reason: text                       # "" = lower, pin, view and scratch are gone
+    life: PureLifecycleV1
+
+struct PureLayoutV1:
+    view_dir: text
+    lower: text
+    upper: text
+    plan: ContainerAttemptDirPlanV1
+
+# ----------------------------------------------------------------- helpers
+
+fn _root_text_v1(root: text) -> text:
+    var out = root.replace("\\", "/")
+    while out.byte_len() > 1 and out.ends_with("/"):
+        out = out.substring(0, out.byte_len() - 1)
+    out
+
+# The one digest binding evidence to a root pair; qualify and run both use it.
+fn _roots_digest_v1(state_root: text, view_root: text) -> text:
+    sha256_text(state_root + "\n" + view_root)
+
+# Same rule as the SOSIX scope: it is the scope, the view id and the attempt-key stem.
+fn _container_id_ok_v1(id: text) -> bool:
+    if id.byte_len() < 1 or id.byte_len() > 64: return false
+    for byte in id.bytes():
+        if not ((byte >= 48 and byte <= 57) or (byte >= 97 and byte <= 122) or byte == 45): return false
+    true
+
+fn _rel_ok_v1(rel: text) -> bool:
+    if rel.byte_len() < 1 or rel.starts_with("/") or rel.starts_with("\\") or rel.contains(":"): return false
+    for segment in rel.replace("\\", "/").split("/"):
+        if segment == "" or segment == "." or segment == "..": return false
+    true
+
+fn _program_path_v1(program: text, lower: text, upper: text) -> Result<text, text>:
+    if program.starts_with("lower:"):
+        val rel = program.substring(6, program.byte_len())
+        if not _rel_ok_v1(rel): return Err("program-invalid")
+        return Ok(lower + "/" + rel)
+    if program.starts_with("upper:"):
+        val rel = program.substring(6, program.byte_len())
+        if not _rel_ok_v1(rel): return Err("program-invalid")
+        return Ok(upper + "/" + rel)
+    if program == "": return Err("program-invalid")
+    Ok(program)
+
+fn _env_name_v1(entry: text) -> text:
+    val at = entry.index_of("=")
+    if at < 0: return entry
+    entry.substring(0, at)
+
+# Caller environment minus the names the runtime owns, then the confined locations:
+# TEMP/TMP/TMPDIR at scratch tmp, the profile names at scratch home (both name sets,
+# so the runtime never branches on the host).
+fn _environment_v1(spec: PureContainerSpecV1, lower: text, upper: text, plan: ContainerAttemptDirPlanV1) -> [text]:
+    var out: [text] = []
+    for entry in spec.environment:
+        var owned = false
+        for name in _ENV_OWNED:
+            if _env_name_v1(entry) == name: owned = true
+        if not owned: out = out.push(entry)
+    out = out.push("SIMPLE_CONTAINER_LOWER=" + lower)
+    out = out.push("SIMPLE_CONTAINER_UPPER=" + upper)
+    for name in ["TEMP", "TMP", "TMPDIR"]:
+        out = out.push(name + "=" + plan.tmp)
+    for name in ["USERPROFILE", "APPDATA", "LOCALAPPDATA", "HOME"]:
+        out = out.push(name + "=" + plan.home)
+    out
+
+fn _grant_is_write_v1(grant: PlannedGrantV1) -> bool:
+    for op in grant.ops:
+        match op:
+            FilesystemOpV1.Write: return true
+            _: pass
+    false
+
+fn _layout_v1(spec: PureContainerSpecV1) -> Result<PureLayoutV1, text>:
+    val view_root = _root_text_v1(spec.view_root)
+    val key = container_attempt_key_v1(spec.container_id, ContainerAttemptNumberV1(1))?
+    val plan = container_attempt_dir_plan_v1(_root_text_v1(spec.state_root), key)?
+    val view_dir = view_root + "/" + spec.container_id
+    Ok(PureLayoutV1(view_dir: view_dir, lower: view_dir + "/lower", upper: view_dir + "/upper", plan: plan))
+
+fn _request_v1(spec: PureContainerSpecV1, layout: PureLayoutV1) -> Result<SosixContainRequestV1, text>:
+    val program = _program_path_v1(spec.program, layout.lower, layout.upper)?
+    val restricted = spec.identity == SOSIX_CONTAIN_IDENTITY_RESTRICTED_V1
+    var readonly_dirs: [text] = []
+    var writable_dirs: [text] = []
+    if restricted:
+        readonly_dirs = readonly_dirs.push(layout.lower)
+        writable_dirs = writable_dirs.push(layout.upper)
+        writable_dirs = writable_dirs.push(layout.plan.home)
+        writable_dirs = writable_dirs.push(layout.plan.tmp)
+    for grant in spec.extra_grants:
+        if _grant_is_write_v1(grant): writable_dirs = writable_dirs.push(grant.canonical_path) else: readonly_dirs = readonly_dirs.push(grant.canonical_path)
+    Ok(SosixContainRequestV1(program: program, program_digest: spec.program_digest, args: spec.args,
+        environment: _environment_v1(spec, layout.lower, layout.upper, layout.plan), directory: layout.upper,
+        stdout_path: layout.plan.output + "/stdout.txt", stderr_path: layout.plan.output + "/stderr.txt",
+        limits: spec.limits, identity: spec.identity, scope: spec.container_id, network: spec.network,
+        readonly_dirs: readonly_dirs, writable_dirs: writable_dirs,
+        private_pids: SosixContainFlagV1(false), root_dir: ""))
+
+# ------------------------------------------------------------ lifecycle
+
+fn _journal_phase_v1(state: text) -> text:
+    if state == CONTAINED_STATE_VALIDATED_V1 or state == CONTAINED_STATE_PREPARED_V1: return LIFECYCLE_PHASE_V1_CREATED
+    if state == CONTAINED_STATE_LAUNCH_PENDING_V1: return LIFECYCLE_PHASE_V1_STARTING
+    if state == CONTAINED_STATE_RUNNING_V1: return LIFECYCLE_PHASE_V1_RUNNING
+    if state == CONTAINED_STATE_ABSENT_V1: return LIFECYCLE_PHASE_V1_STOPPED
+    if state == CONTAINED_STATE_CLOSED_V1: return LIFECYCLE_PHASE_V1_DESTROYED
+    # stopping, retiring, outcome-unknown, quarantined: the tree is not proven gone.
+    LIFECYCLE_PHASE_V1_STOPPING
+
+fn _journal_with_v1(journal: ContainerLifecycleJournalV1, phase: text) -> ContainerLifecycleJournalV1:
+    ContainerLifecycleJournalV1(format_version: journal.format_version, container_id: journal.container_id,
+        generation: ContainerJournalGenerationV1(journal.generation.value + 1), provider_id: journal.provider_id,
+        phase: phase, owned_paths: journal.owned_paths, owned_objects: journal.owned_objects)
+
+fn _life_new_v1(container_id: text, owned_paths: [text]) -> PureLifecycleV1:
+    PureLifecycleV1(state: CONTAINED_STATE_VALIDATED_V1,
+        journal: ContainerLifecycleJournalV1(format_version: ContainerJournalVersionV1(LIFECYCLE_JOURNAL_V1_VERSION),
+            container_id: container_id, generation: ContainerJournalGenerationV1(0), provider_id: PURE_CONTAINER_BACKEND_V1,
+            phase: LIFECYCLE_PHASE_V1_CREATED, owned_paths: owned_paths, owned_objects: []))
+
+# One edge of the shared machine; the journal phase follows it and the runtime phase
+# projection must be known. An edge the machine lacks is an Err, never invented.
+fn _advance_v1(life: PureLifecycleV1, event: text) -> Result<PureLifecycleV1, text>:
+    val next = contained_lifecycle_next_v1(life.state, event)?
+    # outcome-unknown and quarantined project to the unknown phase on purpose: the tree is not proven gone.
+    if contained_runtime_phase_v1(next) == RUNTIME_PHASE_UNKNOWN and next != CONTAINED_STATE_OUTCOME_UNKNOWN_V1 and next != CONTAINED_STATE_QUARANTINED_V1:
+        return Err("lifecycle-phase-unknown")
+    Ok(PureLifecycleV1(state: next, journal: _journal_with_v1(life.journal, _journal_phase_v1(next))))
+
+# Teardown after a start that never produced a child leaves the machine where it was;
+# only the journal records the destroyed phase.
+fn _life_destroyed_v1(life: PureLifecycleV1) -> PureLifecycleV1:
+    if life.state == CONTAINED_STATE_ABSENT_V1:
+        match _advance_v1(life, "close"):
+            Ok(closed): return closed
+            Err(_reason): pass
+    PureLifecycleV1(state: life.state, journal: _journal_with_v1(life.journal, LIFECYCLE_PHASE_V1_DESTROYED))
+
+fn _chain_v1(life: PureLifecycleV1, events: [text]) -> Result<PureLifecycleV1, text>:
+    var current = life
+    for event in events:
+        current = _advance_v1(current, event)?
+    Ok(current)
+
+# ------------------------------------------------------------ admission
+
+fn _no_view_v1() -> StorageViewV1:
+    StorageViewV1(store: "", view_root: "", view_id: "", base_root: "", base_generation: StoreGenerationV1(0),
+        base_manifest_key: "", quota: ViewBytesV1(0), volumes: [])
+
+fn _no_request_v1() -> SosixContainRequestV1:
+    SosixContainRequestV1(program: "", program_digest: "", args: [], environment: [], directory: "", stdout_path: "",
+        stderr_path: "", limits: SosixContainLimitsV1(memory: SosixContainBytesV1(0), processes: SosixContainCountV1(0),
+            cpu_rate: SosixContainCpuRateV1(0), wall: SosixContainMillisV1(0)),
+        identity: "", scope: "", network: "", readonly_dirs: [], writable_dirs: [],
+        private_pids: SosixContainFlagV1(false), root_dir: "")
+
+fn _session_v1(spec: PureContainerSpecV1, report: ContainerCapabilityReportV1) -> PureContainerSessionV1:
+    PureContainerSessionV1(spec: spec, view: _no_view_v1(), request: _no_request_v1(), report: report,
+        life: _life_new_v1(if spec.container_id == "": "invalid" else: spec.container_id, []),
+        view_dir: "", attempt_root: "", stdout_path: "")
+
+fn _rejected_v1(spec: PureContainerSpecV1, report: ContainerCapabilityReportV1, reason: text) -> PurePreparedV1:
+    PurePreparedV1(status: "rejected", reason: reason, session: _session_v1(spec, report))
+
+# Admission wrapper. Order: any capability-* refusal (evidence missing first), then
+# roots mismatch, then the remaining mismatch reasons, then write confinement. The
+# read-only-reuse requirement is judged after materialization, so it is lifted here.
+fn _admission_reason_v1(spec: PureContainerSpecV1, report: ContainerCapabilityReportV1) -> text:
+    var gated = spec.requirement
+    gated.required_readonly_file_backing_reuse = ContainerCapabilityFlagV1(false)
+    val reason = container_capability_v1_admission_reason(report, gated)
+    if reason.starts_with("capability-"): return reason
+    val evidence = spec.evidence
+    if evidence.evidence_revision != "" and evidence.roots_digest != _roots_digest_v1(spec.state_root, spec.view_root):
+        return "evidence-roots-mismatch"
+    if reason != "": return reason
+    if spec.identity == SOSIX_CONTAIN_IDENTITY_RESTRICTED_V1 and
+            not (evidence.write_confinement_observed.value and evidence.evidence_revision != ""):
+        return "write-confinement-unqualified"
+    ""
+
+# ------------------------------------------------------------ stages
+
+fn _fail_prepare_v1(session: PureContainerSessionV1, reason: text) -> PurePreparedV1:
+    val down = _teardown_v1(session)
+    if down.reason != "":
+        return PurePreparedV1(status: "cleanup-unproven", reason: reason + "; " + down.reason,
+            session: PureContainerSessionV1(spec: session.spec, view: session.view, request: session.request,
+                report: session.report, life: down.life, view_dir: session.view_dir,
+                attempt_root: session.attempt_root, stdout_path: session.stdout_path))
+    PurePreparedV1(status: "rejected", reason: reason,
+        session: PureContainerSessionV1(spec: session.spec, view: session.view, request: session.request,
+            report: session.report, life: down.life, view_dir: session.view_dir,
+            attempt_root: session.attempt_root, stdout_path: session.stdout_path))
+
+# `view-exists` means another run with this id created the view: the view dir is not ours, so
+# teardown must not remove it and the journal must not claim it. The attempt root is ours (claimed
+# exclusively before create), so it stays owned and is removed.
+fn _after_create_refused_v1(session: PureContainerSessionV1, reason: text) -> PureContainerSessionV1:
+    if reason != "view-exists": return session
+    val journal = session.life.journal
+    val unowned = ContainerLifecycleJournalV1(format_version: journal.format_version, container_id: journal.container_id,
+        generation: journal.generation, provider_id: journal.provider_id, phase: journal.phase,
+        owned_paths: [session.attempt_root], owned_objects: journal.owned_objects)
+    PureContainerSessionV1(spec: session.spec, view: session.view, request: session.request, report: session.report,
+        life: PureLifecycleV1(state: session.life.state, journal: unowned), view_dir: "", attempt_root: session.attempt_root, stdout_path: session.stdout_path)
+
+# Admission, then every effect up to a launchable container: view, lower/, grants.
+fn _prepare_v1(spec: PureContainerSpecV1) -> PurePreparedV1:
+    val support = sosix_contain_support_v1()
+    val unadmitted = pure_container_capability_report_v1(support, spec.evidence)
+    if not _container_id_ok_v1(spec.container_id): return _rejected_v1(spec, unadmitted, "container-id-invalid")
+    if spec.store == "" or spec.view_root == "" or spec.state_root == "": return _rejected_v1(spec, unadmitted, "roots-invalid")
+    val admission = _admission_reason_v1(spec, unadmitted)
+    if admission != "": return _rejected_v1(spec, unadmitted, admission)
+    if unadmitted.client_authority == CONTAINER_CLIENT_AUTHORITY_UNAVAILABLE_V1:
+        return _rejected_v1(spec, unadmitted, "container-backend-unavailable")
+    val layout = match _layout_v1(spec):
+        Ok(value): value
+        Err(reason): return _rejected_v1(spec, unadmitted, reason)
+    val request = match _request_v1(spec, layout):
+        Ok(value): value
+        Err(reason): return _rejected_v1(spec, unadmitted, reason)
+    val refusal = sosix_contain_request_reason_v1(request, support)
+    if refusal != "": return _rejected_v1(spec, unadmitted, refusal)
+    var head_generation = StoreGenerationV1(0)
+    if spec.base_root != "":
+        val head = immutable_store_v1_root_head(spec.store, spec.base_root)
+        if head.status != "ok": return _rejected_v1(spec, unadmitted, "base-" + head.reason)
+        head_generation = head.generation
+    # Never adopt a directory this call did not create: a live or earlier container may own it.
+    if is_dir(layout.plan.attempt_root): return _rejected_v1(spec, unadmitted, "attempt-exists")
+    if is_dir(layout.view_dir) or file_exists(layout.view_dir): return _rejected_v1(spec, unadmitted, "view-exists")
+    # Effects begin: the journal is `created` from here and every failure walks teardown.
+    var session = PureContainerSessionV1(spec: spec, view: _no_view_v1(), request: request, report: unadmitted,
+        life: _life_new_v1(spec.container_id, [layout.view_dir, layout.plan.attempt_root]),
+        view_dir: layout.view_dir, attempt_root: layout.plan.attempt_root, stdout_path: request.stdout_path)
+    # The exclusive mkdir is the claim: after it the attempt root is provably this run's.
+    if not dir_create_all(layout.plan.state_root + "/attempts"): return _rejected_v1(spec, unadmitted, "scratch-create-failed")
+    val claimed = dir_create_new(layout.plan.attempt_root)
+    if claimed == "exists": return _rejected_v1(spec, unadmitted, "attempt-exists")
+    if claimed != "ok": return _rejected_v1(spec, unadmitted, "scratch-create-failed")
+    for dir in [layout.plan.home, layout.plan.tmp, layout.plan.output]:
+        if not dir_create_all(dir): return _fail_prepare_v1(session, "scratch-create-failed")
+    val created = storage_view_v1_create(spec.store, spec.view_root, spec.container_id, spec.base_root,
+        head_generation, spec.quota)
+    if created.status != "ok": return _fail_prepare_v1(_after_create_refused_v1(session, created.reason), "view-" + created.reason)
+    session = PureContainerSessionV1(spec: spec, view: created.view, request: request, report: unadmitted,
+        life: session.life, view_dir: created.view.view_root + "/" + created.view.view_id,
+        attempt_root: layout.plan.attempt_root, stdout_path: request.stdout_path)
+    if session.view_dir != layout.view_dir: return _fail_prepare_v1(session, "view-layout-mismatch")
+    val rootfs = rootfs_materialize_v1(created.view, ViewFlagV1(true))
+    if rootfs.status != "ok": return _fail_prepare_v1(session, "rootfs-" + rootfs.reason)
+    var evidence = spec.evidence
+    evidence.base_fully_linked = ContainerCapabilityFlagV1(rootfs.copied.value == 0 and rootfs.linked.value > 0)
+    val report = pure_container_capability_report_v1(support, evidence)
+    session = PureContainerSessionV1(spec: spec, view: created.view, request: request, report: report,
+        life: session.life, view_dir: layout.view_dir, attempt_root: layout.plan.attempt_root, stdout_path: request.stdout_path)
+    val final_reason = container_capability_v1_admission_reason(report, spec.requirement)
+    if final_reason != "": return _fail_prepare_v1(session, final_reason)
+    if spec.identity == SOSIX_CONTAIN_IDENTITY_RESTRICTED_V1:
+        val read = sosix_fs_grant_contained_read_v1(layout.lower)
+        if read != "": return _fail_prepare_v1(session, "grant-read: " + read)
+        for dir in [layout.upper, layout.plan.home, layout.plan.tmp]:
+            val write = sosix_fs_grant_contained_write_v1(dir, spec.container_id)
+            if write != "": return _fail_prepare_v1(session, "grant-write: " + write)
+    match _advance_v1(session.life, "prepare"):
+        Ok(next):
+            PurePreparedV1(status: "ready", reason: "", session: PureContainerSessionV1(spec: spec, view: created.view,
+                request: request, report: report, life: next, view_dir: layout.view_dir,
+                attempt_root: layout.plan.attempt_root, stdout_path: request.stdout_path))
+        Err(reason): _fail_prepare_v1(session, reason)
+
+fn _exec_stopped_v1(session: PureContainerSessionV1, life: PureLifecycleV1, status: text, reason: text,
+        exit_code: SosixContainExitCodeV1, peak: SosixContainBytesV1) -> PureExecV1:
+    val stdout = match file_read_regular_no_follow_bounded(session.stdout_path, _STDOUT_MAX_BYTES):
+        Ok(value): value
+        Err(_reason): ""
+    PureExecV1(status: status, reason: reason, stdout: stdout, exit_code: exit_code, peak_memory: peak,
+        session: PureContainerSessionV1(spec: session.spec, view: session.view, request: session.request,
+            report: session.report, life: life, view_dir: session.view_dir,
+            attempt_root: session.attempt_root, stdout_path: session.stdout_path))
+
+# The machine has an interrupted edge only from launch-pending; elsewhere the failed edge is
+# appended to the reason, never hidden.
+fn _exec_unknown_v1(session: PureContainerSessionV1, life: PureLifecycleV1, reason: text) -> PureExecV1:
+    match _advance_v1(life, "interrupted"):
+        Ok(unknown): _exec_stopped_v1(session, unknown, "cleanup-unproven", reason, SosixContainExitCodeV1(-1), SosixContainBytesV1(0))
+        Err(edge): _exec_stopped_v1(session, life, "cleanup-unproven", reason + "; " + edge, SosixContainExitCodeV1(-1), SosixContainBytesV1(0))
+
+# Cancel, wait for a terminal state and collect; true only when the tree is proven empty.
+fn _abort_lease_v1(lease: SosixContainLeaseV1) -> bool:
+    val _cancelled = sosix_contain_cancel_v1(lease)
+    val reap = sosix_time_now_monotonic_ms() + _GRACE_MS
+    while sosix_time_now_monotonic_ms() < reap:
+        match sosix_contain_poll_v1(lease):
+            Ok(observed):
+                if observed.terminal.value:
+                    match sosix_contain_collect_v1(lease):
+                        Ok(receipt): return receipt.tree_empty.value
+                        Err(_reason): return false
+            Err(_reason): return false
+        sosix_sleep_ms(20)
+    false
+
+# The run is over for an error that is not a process outcome: abort the tree first, so
+# teardown is safe only when it is proven gone.
+fn _exec_abort_v1(session: PureContainerSessionV1, life: PureLifecycleV1, lease: SosixContainLeaseV1, reason: text) -> PureExecV1:
+    if _abort_lease_v1(lease):
+        return _exec_stopped_v1(session, life, "rejected", reason, SosixContainExitCodeV1(-1), SosixContainBytesV1(0))
+    _exec_unknown_v1(session, life, reason + "; tree not proven empty")
+
+# Polls to terminal inside the budget; past it the tree is cancelled and reaped.
+# Err = the lease could not be driven (cleanup unproven).
+fn _wait_v1(lease: SosixContainLeaseV1, wall: SosixContainMillisV1) -> Result<text, text>:
+    val budget = if wall.value > 0: wall.value + _GRACE_MS else: _DEFAULT_BUDGET_MS
+    val deadline = sosix_time_now_monotonic_ms() + budget
+    while sosix_time_now_monotonic_ms() < deadline:
+        val observed = sosix_contain_poll_v1(lease)?
+        if observed.terminal.value: return Ok("")
+        sosix_sleep_ms(20)
+    val _cancelled = sosix_contain_cancel_v1(lease)?
+    val reap = sosix_time_now_monotonic_ms() + _GRACE_MS
+    while sosix_time_now_monotonic_ms() < reap:
+        val observed = sosix_contain_poll_v1(lease)?
+        if observed.terminal.value: return Ok("cancelled-at-deadline")
+        sosix_sleep_ms(20)
+    Err("cancel-did-not-reach-terminal")
+
+# launch -> admitted -> wait -> collect. `Unknown` admission, a lease that cannot be
+# driven and a non-empty tree after collect all return cleanup-unproven, which the
+# caller must not tear down.
+fn _execute_v1(session: PureContainerSessionV1) -> PureExecV1:
+    val pending = match _advance_v1(session.life, "launch"):
+        Ok(next): next
+        Err(reason): return _exec_stopped_v1(session, session.life, "rejected", reason, SosixContainExitCodeV1(-1), SosixContainBytesV1(0))
+    match sosix_contain_start_v1(session.request):
+        SosixContainAdmissionV1.RejectedBeforeStart(reason):
+            return _exec_stopped_v1(session, pending, "rejected", reason, SosixContainExitCodeV1(-1), SosixContainBytesV1(0))
+        SosixContainAdmissionV1.FailedAfterCleanup(reason):
+            return _exec_stopped_v1(session, pending, "rejected", reason, SosixContainExitCodeV1(-1), SosixContainBytesV1(0))
+        SosixContainAdmissionV1.Unknown(reason):
+            return _exec_unknown_v1(session, pending, reason)
+        SosixContainAdmissionV1.Started(lease):
+            val running = match _advance_v1(pending, "admitted"):
+                Ok(next): next
+                Err(edge): return _exec_abort_v1(session, pending, lease, "lifecycle: " + edge)
+            val waited = _wait_v1(lease, session.spec.limits.wall)
+            if waited.is_err(): return _exec_abort_v1(session, running, lease, "wait-failed: " + waited.unwrap_err())
+            val cancelled = waited.unwrap() != ""
+            val collected = sosix_contain_collect_v1(lease)
+            if collected.is_err(): return _exec_unknown_v1(session, running, collected.unwrap_err())
+            val receipt = collected.unwrap()
+            val retire = if cancelled: ["stop", "retire"] else: ["leader-exit"]
+            val closing = if receipt.tree_empty.value: retire + ["absence-proven"] else: retire + ["uncertain"]
+            val final_life = match _chain_v1(running, closing):
+                Ok(next): next
+                Err(edge):
+                    val status = if receipt.tree_empty.value: "rejected" else: "cleanup-unproven"
+                    return _exec_stopped_v1(session, running, status, "lifecycle: " + edge, receipt.exit_code, receipt.peak_memory)
+            if not receipt.tree_empty.value:
+                return _exec_stopped_v1(session, final_life, "cleanup-unproven", "tree-not-empty", receipt.exit_code, receipt.peak_memory)
+            _exec_stopped_v1(session, final_life, "exited", waited.unwrap(), receipt.exit_code, receipt.peak_memory)
+
+# Order matters: dematerialize first (destroy refuses while lower/ exists), then the
+# view, then the view directory and the attempt scratch.
+fn _teardown_v1(session: PureContainerSessionV1) -> PureTeardownV1:
+    var reason = ""
+    if session.view.view_id != "":
+        reason = rootfs_dematerialize_v1(session.view)
+        if reason != "": reason = "teardown-dematerialize: " + reason
+        if reason == "":
+            val destroyed = storage_view_v1_destroy(session.view)
+            if destroyed.status != "ok": reason = "teardown-view-destroy: " + destroyed.reason
+    if reason == "" and session.view_dir != "" and is_dir(session.view_dir):
+        if not dir_is_real_no_follow(session.view_dir) or not dir_remove_all(session.view_dir) or is_dir(session.view_dir):
+            reason = "teardown-view-dir-remove-failed"
+    if reason == "" and session.attempt_root != "" and is_dir(session.attempt_root):
+        if not dir_remove_all(session.attempt_root) or is_dir(session.attempt_root):
+            reason = "teardown-scratch-remove-failed"
+    if reason != "": return PureTeardownV1(reason: reason, life: session.life)
+    PureTeardownV1(reason: "", life: _life_destroyed_v1(session.life))
+
+fn _run_of_v1(status: text, reason: text, session: PureContainerSessionV1, life: PureLifecycleV1,
+        exit_code: SosixContainExitCodeV1, peak: SosixContainBytesV1) -> PureContainerRunV1:
+    PureContainerRunV1(status: status, reason: reason, exit_code: exit_code, peak_memory: peak,
+        report: session.report, journal: life.journal)
+
+# ----------------------------------------------------------------- public
+
+# Measures this host once and returns the only evidence the runtime accepts. The
+# canary scratch is created under state_root; the evidence is bound to the
+# state_root/view_root pair. Any refusal returns evidence that affirms nothing.
+pub fn pure_container_qualify_v1(request: PureContainerQualifyV1) -> PureContainerEvidenceV1:
+    val roots = _roots_digest_v1(request.state_root, request.view_root)
+    val state_root = _root_text_v1(request.state_root)
+    val tag = sosix_getpid().to_string() + "-" + sosix_time_now_monotonic_ms().to_string()
+    val work = state_root + "/qualify-" + tag
+    val no_memory = ContainerCapabilityFlagV1(false)
+    var result = SosixContainQualifyResultV1(canaries: [], evidence_digest: "", reason: "qualify-roots-invalid")
+    var memory_enforced = no_memory
+    var memory_digest = ""
+    if request.state_root != "" and request.view_root != "":
+        result = SosixContainQualifyResultV1(canaries: [], evidence_digest: "", reason: "qualify-work-dir-failed")
+        var owned = false
+        if is_dir(work):
+            result = SosixContainQualifyResultV1(canaries: [], evidence_digest: "", reason: "qualify-work-dir-exists")
+        elif not dir_create_all(work):
+            pass
+        elif _same_volume_v1(work, _root_text_v1(request.view_root), tag):
+            owned = true
+            result = sosix_contain_qualify_v1(SosixContainQualifyRequestV1(probe_program: request.probe_program,
+                probe_digest: request.probe_digest, probe_script: request.probe_script, work_dir: work,
+                scope: _QUALIFY_SCOPE, wall: SosixContainMillisV1(_QUALIFY_WALL_MS)))
+            val memory = sosix_contain_memory_cap_evidence_v1(request.memory_probe)
+            memory_enforced = ContainerCapabilityFlagV1(memory.enforced.value)
+            memory_digest = memory.evidence_digest
+        else:
+            result = SosixContainQualifyResultV1(canaries: [], evidence_digest: "", reason: "qualify-volume-mismatch")
+            owned = true
+        # Only a directory this call created is removed; an existing one was refused above.
+        if owned:
+            val _removed = dir_remove_all(work)
+    pure_container_evidence_from_qualify_v1(result, memory_enforced, memory_digest, sosix_fs_host_os(), sosix_fs_host_arch(), sosix_fs_host_os(),
+        PURE_CONTAINER_ROOT_VIEW_SPLIT_V1, roots)
+
+# Hard links need one volume, so evidence is only valid for roots on the scratch's
+# volume: a probe link from the scratch into the view root decides it. (No SOSIX op
+# reads a volume serial from host-neutral code; this is the link-based proxy.)
+fn _same_volume_v1(work: text, view_root: text, tag: text) -> bool:
+    if not dir_create_all(view_root): return false
+    val source = work + "/volume-probe.txt"
+    val link = view_root + "/.pure-volume-probe-" + tag
+    var same = false
+    if sosix_fs_write_file(source, "volume-probe"):
+        same = sosix_fs_hardlink(source, link)
+        val _unlinked = file_delete(link)
+        val _deleted = file_delete(source)
+    same
+
+pub fn pure_container_run_v1(spec: PureContainerSpecV1) -> PureContainerRunV1:
+    val prepared = _prepare_v1(spec)
+    if prepared.status != "ready":
+        return _run_of_v1(prepared.status, prepared.reason, prepared.session, prepared.session.life,
+            SosixContainExitCodeV1(-1), SosixContainBytesV1(0))
+    val executed = _execute_v1(prepared.session)
+    if executed.status == "cleanup-unproven":
+        return _run_of_v1("cleanup-unproven", executed.reason, executed.session, executed.session.life,
+            executed.exit_code, executed.peak_memory)
+    val down = _teardown_v1(executed.session)
+    if down.reason != "":
+        return _run_of_v1("cleanup-unproven", down.reason, executed.session, down.life, executed.exit_code, executed.peak_memory)
+    _run_of_v1(executed.status, executed.reason, executed.session, down.life, executed.exit_code, executed.peak_memory)
+
+export PureContainerSpecV1, PureContainerRunV1, PureContainerQualifyV1
+export pure_container_qualify_v1, pure_container_run_v1
+export PureContainerSessionV1, PurePreparedV1, PureExecV1, PureTeardownV1
+export _prepare_v1, _execute_v1, _teardown_v1

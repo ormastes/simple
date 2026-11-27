@@ -1,0 +1,56 @@
+# Acceptance layer: list_members for room 1 over the dense encrypted database.
+#
+# ONE production Messenger verb call over the dense encrypted database, made once
+# at load and shared by every scenario below.  A successful read decrypts all
+# nine pages (about 45 s each on the Phase 1 seed), so each success-path verb
+# lives in its own file to stay inside the per-spec time budget.  Expected
+# payloads are serialised by Python's json.dumps in the generator and parsed
+# back here; nothing is compared with a value the adapter produced itself.
+# Lifecycle: doc/01_research/app/tools/devhub/devhub_cli_wrapper_forwarding_2026-09-06.md ;
+# doc/03_plan/agent_tasks/devhub_messenger_master.md ;
+# doc/04_architecture/app/devhub/messenger_gateway.md ;
+# doc/05_design/app/devhub/messenger_sdn_and_api.md
+# @manual_section: messenger-list-members
+
+"""
+## Purpose and audience
+Purpose: list_members for one room returns exactly that room's members and none of another room's, as valid JSON.
+Audience: DevHub release reviewers who accept the encrypted Messenger read path.
+The passphrase is public synthetic test data from dense_ground_truth.json.
+"""
+
+use std.spec.*
+use test.support.devhub_messenger_dense.*
+use std.common.json.value.{JsonValue, json_value_field, json_value_items, json_value_len}
+use app.devhub.messenger.adapter.sqlcipher_reader.{
+    messenger_sqlcipher4_list_rooms, messenger_sqlcipher4_list_members,
+    messenger_sqlcipher4_history, messenger_sqlcipher4_fetch_message
+}
+
+val dn_truth = dense_truth()
+val dn_good = truth_passphrase(dn_truth)
+val _secret_ready = dense_set_secret(dn_good)
+val dn_target = dense_target_with(dense_path(DENSE_BASE), DENSE_REF, true)
+val dn_result = messenger_sqlcipher4_list_members(dn_target, "1", "user")
+
+describe "list_members through the production verb":
+    it "returns exactly the two members of room 1":
+        # @req REQ-MSGR-DENSE-ACC-MEMBERS-001
+        step("Call list_members for room 1 and compare the payload with the json.dumps ground truth")
+        # @capture(protocol_json): list_members status, exit code and payload against the ground-truth payload
+        expect(outcome_line(dn_result)).to_equal("ok:0:payload")
+        expect(dn_result.payload).to_equal(tf(json_value_field(dn_truth, "members_payload"), "1"))
+
+    it "keeps room 2's member out of room 1's listing":
+        # @req REQ-MSGR-DENSE-ACC-MEMBERS-002
+        step("Parse the payload and look for room 2's identity")
+        # @capture(statistics): room_id of every listed member and the count
+        val parsed = payload_json(dn_result.payload)
+        val members = json_value_items(json_value_field(parsed, "members"))
+        val other_room_identity = cell_at(json_value_field(json_value_field(dn_truth, "tables"), "room_member"), 2, 2)
+        expect(payload_is_json(dn_result.payload)).to_equal(true)
+        expect(json_value_len(json_value_field(parsed, "members"))).to_equal(tn(parsed, "count"))
+        expect(tf(members[0], "room_id")).to_equal("1")
+        expect(tf(members[1], "room_id")).to_equal("1")
+        expect(dn_result.payload.contains(other_room_identity)).to_equal(false)
+        expect(leaks_none(dn_result.payload, [dn_good, "SQLite format"])).to_equal(true)

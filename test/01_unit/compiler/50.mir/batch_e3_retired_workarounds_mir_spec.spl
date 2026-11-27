@@ -1,0 +1,113 @@
+# @req REQ-SSPEC-COMPILER
+# @cover src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl
+# @cover src/compiler/50.mir/_MirLoweringExpr/enum_constructor_payload.spl
+"""
+# MIR lowering regression coverage for Wave E Batch E3 retired workarounds
+
+Covers the three compiler/app workaround shapes retired after their MIR root
+causes landed on `release/1.0.0`:
+1. `native_result_enum_unwrap_err_2026_10_18`: `if r.is_err(): return Err(r.unwrap_err())`
+   and `generic_err<text>(r.unwrap_err())` on `Result<_, EnumErr>` (unit and
+   payload-bearing enum errors).
+2. `mir_bare_ok_imported_trait_method_return_2026_10_27`: `val report = linker.link(...)`
+   on a `Trait` parameter followed by `report.is_ok()` / `report.unwrap_err()`
+   and bare `Ok`/`Err` `match` with a competing `Ok`/`Err` enum imported.
+3. `phase2_mir_glob_import_dict_payload_2026-11-15`: `SdnVal.Dict({...})`
+   literals in a module that glob-imports a model module (`use lib.model.*`).
+"""
+
+use std.spec.{describe, it, expect}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+struct LowerCheckResult:
+    errors: text
+    lowered_target: bool
+    has_enum_payload_call: bool
+
+fn lower_two_modules_check(lib_src: text, main_src: text, target_fn: text) -> LowerCheckResult:
+    val log = Logger(level: 0)
+    val lib_ast = parse_full_frontend(lib_src, "lib/model.spl", "lib.model", log)
+    val main_ast = parse_full_frontend(main_src, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["lib.model"] = lib_ast
+    modules["app.main"] = main_ast
+    val sources = [
+        SourceFile(path: "lib/model.spl", content: lib_src, module_name: "lib.model"),
+        SourceFile(path: "app/main.spl", content: main_src, module_name: "app.main")
+    ]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var lib_hl = hirlowering_for_module("lib.model", surfaces)
+    var main_hl = hirlowering_for_module("app.main", surfaces)
+    val lib_hir = lib_hl.lower_module(lib_ast)
+    val main_hir = main_hl.lower_module(main_ast)
+    var errors = ""
+    for e in lib_hl.errors:
+        errors = errors + "lib-hir: " + e.message + "\n"
+    for e in main_hl.errors:
+        errors = errors + "main-hir: " + e.message + "\n"
+    var prescan_mods: Dict<text, HirModule> = {}
+    prescan_mods["lib.model"] = lib_hir
+    prescan_mods["app.main"] = main_hir
+    var ml = MirLowering.new(main_hir.symbols)
+    ml.trait_impl_closure_complete = true
+    ml.prescan_module_struct_names(prescan_mods, "lib.model")
+    ml.prescan_module_struct_names(prescan_mods, "app.main")
+    val mir = ml.lower_module(main_hir, [lib_hir, main_hir])
+    for e in ml.errors:
+        errors = errors + "mir: " + e.message + "\n"
+    var lowered_target = false
+    var has_enum_payload_call = false
+    for function in mir.functions.values():
+        if function.name == target_fn or function.name.ends_with(".{target_fn}"):
+            lowered_target = true
+            for block in function.blocks:
+                for inst in block.instructions:
+                    match inst.kind:
+                        case MirInstKind.Call(_, callee, _):
+                            match callee.kind:
+                                case MirOperandKind.Const(MirConstValue.Str(name), _):
+                                    if name == "rt_enum_payload":
+                                        has_enum_payload_call = true
+                                case _: ()
+                        case _: ()
+    LowerCheckResult(errors: errors, lowered_target: lowered_target, has_enum_payload_call: has_enum_payload_call)
+
+describe "Wave E Batch E3 retired workarounds MIR lowering":
+    it "lowers Result.is_err() + unwrap_err() for unit and payload enum errors":
+        val lib_src = "pub enum ArchiveErr:\n    Malformed\n    Mismatch(code: i64)\n\npub struct Payload:\n    count: i64\n\npub fn decode_one(flag: bool) -> Result<Payload, ArchiveErr>:\n    if flag:\n        return Err(ArchiveErr.Mismatch(code: 7))\n    Ok(Payload(count: 1))\n"
+        val main_src = "use lib.model.{ArchiveErr, Payload, decode_one}\n\nfn wrap_err<T>(err: ArchiveErr) -> Result<T, ArchiveErr>:\n    Err(err)\n\nfn probe(flag: bool) -> Result<i64, ArchiveErr>:\n    val res = decode_one(flag)\n    if res.is_err():\n        return wrap_err<i64>(res.unwrap_err())\n    Ok(res.unwrap().count)\n"
+        val checked = lower_two_modules_check(lib_src, main_src, "probe")
+        expect(checked.errors).to_equal("")
+        expect(checked.lowered_target).to_equal(true)
+        expect(checked.has_enum_payload_call).to_equal(true)
+
+    it "lowers trait-object call Result local with .is_ok() / .unwrap_err() and bare Ok/Err":
+        val lib_src = "pub enum CompetingProbe:\n    Ok\n    Err\n\npub trait TrialLinker:\n    fn link(objs: [text], out: text) -> Result<text, text>\n\npub struct HostedLinker:\n    tag: text\n\nimpl TrialLinker for HostedLinker:\n    fn link(objs: [text], out: text) -> Result<text, text>:\n        if objs.len() == 0:\n            return Err(\"no objects\")\n        Ok(out)\n"
+        val main_src = "use lib.model.{CompetingProbe, TrialLinker, HostedLinker}\n\nfn run_trial(linker: TrialLinker, objs: [text], out: text) -> text:\n    val report = linker.link(objs, out)\n    if report.is_ok():\n        return \"clean\"\n    val err_text = report.unwrap_err()\n    match linker.link(objs, out):\n        case Ok(ok_path): ok_path\n        case Err(msg): err_text + \":\" + msg\n"
+        val checked = lower_two_modules_check(lib_src, main_src, "run_trial")
+        expect(checked.errors).to_equal("")
+        expect(checked.lowered_target).to_equal(true)
+
+    it "lowers bare Ok/Err match on imported trait field self.codegen.compile_module and factory-created local codegen":
+        val lib_src = "pub enum CompetingProbe:\n    Ok\n    Err\n\npub struct CodegenOut:\n    code: i64\n\npub trait Codegen:\n    fn compile_module(tag: text) -> Result<CodegenOut, text>\n\npub struct SimpleCodegen:\n    bias: i64\n\nimpl Codegen for SimpleCodegen:\n    fn compile_module(tag: text) -> Result<CodegenOut, text>:\n        if tag == \"\":\n            return Err(\"empty\")\n        Ok(CodegenOut(code: self.bias))\n\npub struct CodegenFactory:\n    _unused: i64\n\nimpl CodegenFactory:\n    static fn create() -> Codegen:\n        SimpleCodegen(bias: 42)\n"
+        val main_src = "use lib.model.{CompetingProbe, CodegenOut, Codegen, CodegenFactory}\n\nstruct BackendWrap:\n    codegen: Codegen\n\nimpl BackendWrap:\n    fn compile_via_field(tag: text) -> Result<i64, text>:\n        match self.codegen.compile_module(tag):\n            case Ok(out): Ok(out.code)\n            case Err(e): Err(e)\n\nfn compile_both(tag: text) -> Result<i64, text>:\n    val cg = CodegenFactory.create()\n    val wrap = BackendWrap(codegen: cg)\n    val from_field = wrap.compile_via_field(tag)\n    if from_field.is_err():\n        return Err(from_field.unwrap_err())\n    match cg.compile_module(tag):\n        case Ok(out): Ok(out.code + from_field.unwrap())\n        case Err(err): Err(err)\n"
+        val checked = lower_two_modules_check(lib_src, main_src, "compile_both")
+        expect(checked.errors).to_equal("")
+        expect(checked.lowered_target).to_equal(true)
+
+    it "lowers SdnVal.Dict({...}) payload under a glob import":
+        val lib_src = "pub enum NodeKind:\n    Feature\n    Bug\n\npub fn kind_name(k: NodeKind) -> text:\n    match k:\n        case NodeKind.Feature: \"feature\"\n        case NodeKind.Bug: \"bug\"\n\npub enum SdnVal:\n    Null\n    Str(text)\n    Array([SdnVal])\n    Dict(Dict<text, SdnVal>)\n"
+        val main_src = "use lib.model.*\n\nfn render_row(k: NodeKind) -> SdnVal:\n    SdnVal.Dict({\"kind\": SdnVal.Str(kind_name(k)), \"items\": SdnVal.Array([])})\n"
+        val checked = lower_two_modules_check(lib_src, main_src, "render_row")
+        expect(checked.errors).to_equal("")
+        expect(checked.lowered_target).to_equal(true)

@@ -1,0 +1,76 @@
+# @req REQ-001, REQ-013
+# Versioned wrappers must retain their prior logical outputs and diagnostics
+# when using the shared normalized reducer. These are runtime assertions;
+# authored source alone does not establish compatibility PASS.
+use std.spec.*
+use compiler.common.data.data_schema_contracts.*
+use compiler.common.data.data_schema_contracts_v2.*
+use compiler.common.data.data_schema_resolver.*
+use compiler.common.data.data_schema_resolver_v2.*
+
+fn compat_at(line: i64 = 1, owner: text = "compiler.ast") -> DataDeclProvenanceV1:
+    data_decl_provenance_v1(DataDeclOriginV1.Spl, "compat.spl", line, owner)
+
+fn compat_attr(name: text, type_name: text, at: DataDeclProvenanceV1) -> DataAttrDeclV1:
+    data_attr_decl_v1("compiler.ast", "compiler.ast.Binary", name, data_type_ref_v1(type_name, []),
+        DataRequirednessV1.Required, "", at)
+
+fn compat_resolve(decls: [DataAttrDeclV1]) -> Result<DataSchemaSurfaceV1, [DataSchemaDiagnosticV1]>:
+    data_schema_resolve_v1(data_schema_authority_v1("compiler.ast", ["compiler.ast"]), decls, [])
+
+describe "Versioned data schema compatibility":
+    it "retains the frozen V1 serialization digest for an independent known fixture":
+        step("Verify canonical identities")
+        val surface = compat_resolve([compat_attr("span", "compiler.SourceSpan", compat_at())]).unwrap()
+        # SHA-256 of the literal frozen V1 serialization, independent of reducer
+        # implementation: tree=12:compiler.ast; span/SourceSpan/Required/Binary.
+        expect(surface.schema_digest).to_equal("6c9d0a1a1cbce71f4df27655cde5de03fb7f925c1e2e57cfc7a739f86cd21406")
+        expect(surface.attrs[0].id.ordinal).to_equal(1)
+        expect(surface.attrs[0].type_canonical).to_equal("compiler.SourceSpan")
+
+    it "retains canonical order, alias conversion and declaration provenance order":
+        val first = compat_attr("z", "Alias", compat_at(7))
+        val second = compat_attr("a", "compiler.SourceSpan", compat_at(8))
+        val third = compat_attr("z", "compiler.SourceSpan", compat_at(9))
+        val surface = data_schema_resolve_v1(data_schema_authority_v1("compiler.ast", ["compiler.ast"]),
+            [first, second, third], [data_type_alias_v1("Alias", "compiler.SourceSpan")]).unwrap()
+        expect(surface.attrs[0].name).to_equal("a")
+        expect(surface.attrs[1].name).to_equal("z")
+        expect(surface.attrs[1].provenances[0].line).to_equal(7)
+        expect(surface.attrs[1].provenances[1].line).to_equal(9)
+        expect(surface.attrs[1].type_canonical).to_equal("compiler.SourceSpan")
+
+    it "retains validation diagnostic ordering before reduction":
+        var malformed = compat_attr("bad", "", compat_at(2))
+        val unauthorized = compat_attr("foreign", "compiler.SourceSpan", compat_at(3, "foreign.owner"))
+        val diagnostics = compat_resolve([malformed, unauthorized]).unwrap_err()
+        expect(diagnostics.len()).to_equal(2)
+        expect(diagnostics[0].kind == DataSchemaErrorKindV1.InvalidDeclaration).to_equal(true)
+        expect(diagnostics[0].first.line).to_equal(2)
+        expect(diagnostics[1].kind == DataSchemaErrorKindV1.UnauthorizedInjection).to_equal(true)
+        expect(diagnostics[1].first.line).to_equal(3)
+
+    it "retains exact conflict text and type-before-requiredness precedence":
+        val first = compat_attr("span", "compiler.SourceSpan", compat_at(1))
+        var second = compat_attr("span", "compiler.RegionId", compat_at(4))
+        second.requiredness = DataRequirednessV1.Optional
+        val diagnostics = compat_resolve([first, second]).unwrap_err()
+        expect(diagnostics.len()).to_equal(1)
+        expect(diagnostics[0].kind == DataSchemaErrorKindV1.TypeConflict).to_equal(true)
+        expect(diagnostics[0].message).to_equal("attribute type 'span': 'compiler.SourceSpan' at spl:compat.spl:1 conflicts with 'compiler.RegionId' at spl:compat.spl:4")
+
+    it "retains V2 explicit views, properties and V1 projection digest":
+        val base = compat_attr("span", "compiler.SourceSpan", compat_at())
+        val property = DataPropertyContractV2(kind: DataPropertyKindV2.Stored,
+            visibility: DataVisibilityV2.Public, visibility_owner: "", writable: false,
+            mutation_owner: "", getter: "", setter: "", forward_attr: "", phase: "core",
+            read_effects: [], write_effects: [], dependencies: [])
+        val views = [DataViewDeclV2(tree: "compiler.ast", name: "compiler.ast.Empty", provenance: compat_at()),
+            DataViewDeclV2(tree: "compiler.ast", name: "compiler.ast.Binary", provenance: compat_at())]
+        val v2 = data_schema_resolve_v2(data_schema_authority_v1("compiler.ast", ["compiler.ast"]),
+            views, [DataAttrDeclV2(base: base, property: property)], []).unwrap()
+        expect(v2.contract_version).to_equal(2)
+        expect(v2.views[0].name).to_equal("compiler.ast.Binary")
+        expect(v2.views[1].name).to_equal("compiler.ast.Empty")
+        expect(v2.base.schema_digest).to_equal(compat_resolve([base]).unwrap().schema_digest)
+        expect(v2.properties[0].property.phase).to_equal("core")

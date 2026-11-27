@@ -1,0 +1,106 @@
+"""
+# MIR & Interpreter lowering for 1-arg `text.trim_end(chars)` / `text.trim_start(chars)`
+and `trim_end_matches` / `trim_start_matches`
+
+Bug: `query-native-trim-end-dot-20261016` — `method_calls_literals.spl` only
+admitted 0-arg `trim_start`/`trim_end`, so 1-arg `.trim_end(".")` failed native
+MIR lowering with `unresolved method call: trim_end`.
+"""
+
+use std.spec
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_serialization.{serialize_mir_module}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir.text_extern_abi.{tagged_text_value_arg_indices}
+use compiler.core.interpreter.mod.{core_interpret}
+use compiler.core.interpreter.eval.{eval_has_error, eval_get_error}
+use compiler.core.interpreter.value.{val_to_text}
+use compiler.backend.interpreter.{InterpreterBackendImpl}
+use compiler.backend.backend_types.{BackendResult, Value}
+
+fn lower_trim_source(source: text) -> (text, [text]):
+    val parsed = parse_full_frontend(source, "text_trim_probe.spl", "text_trim_probe", Logger(level: 0))
+    var hir_owner = HirLowering.with_filename("text_trim_probe.spl")
+    val hir = hir_owner.lower_module(parsed)
+    expect(hir_owner.errors.len()).to_equal(0)
+    var mir_owner = MirLowering.new(hir.symbols)
+    val module = mir_owner.lower_module(hir)
+    var errors: [text] = []
+    for error in mir_owner.errors:
+        errors = errors.push(error.message)
+    (serialize_mir_module(module), errors)
+
+fn core_eval_text(body: text) -> text:
+    val result = core_interpret("fn main() -> text:\n" + body, "text_trim_core_probe.spl")
+    if eval_has_error():
+        return "ERR:" + eval_get_error()
+    val_to_text(result)
+
+fn backend_eval_text(body: text) -> text:
+    val src = "fn main() -> text:\n" + body
+    val parsed = parse_full_frontend(src, "text_trim_backend_probe.spl", "text_trim_backend_probe", Logger(level: 0))
+    var hir_owner = HirLowering.with_filename("text_trim_backend_probe.spl")
+    val hir = hir_owner.lower_module(parsed)
+    expect(hir_owner.errors.len()).to_equal(0)
+    var backend = InterpreterBackendImpl.new()
+    match backend.interpret_hir_module(hir):
+        case Ok(res):
+            match res:
+                case BackendResult.Value(val_inner):
+                    match val_inner:
+                        case Value.String(s): s
+                        case _: "NON_STRING_VAL"
+                case _: "NON_VALUE"
+        case Err(err): "ERR:" + err.message
+
+describe "text trim_end / trim_start 0-arg and 1-arg lowering":
+    it "lowers 0-arg trim_start, trim_left, trim_end, and trim_right to whitespace runtime helpers":
+        val (mir, errors) = lower_trim_source("fn f(s: text) -> text:\n    s.trim_start().trim_left().trim_end().trim_right()\n")
+        expect(errors.len()).to_equal(0)
+        expect(mir).to_contain("rt_string_trim_start")
+        expect(mir).to_contain("rt_string_trim_end")
+
+    it "lowers 1-arg trim_end, trim_right, trim_start, and trim_left to matches runtime helpers":
+        val (mir, errors) = lower_trim_source("fn f(s: text) -> text:\n    s.trim().trim_end(\".\").trim_right(\"/\").trim_start(\".\").trim_left(\"_\")\n")
+        expect(errors.len()).to_equal(0)
+        expect(mir).to_contain("rt_string_trim")
+        expect(mir).to_contain("rt_string_trim_end_matches")
+        expect(mir).to_contain("rt_string_trim_start_matches")
+
+    it "lowers trim_start_matches and trim_end_matches with variable patterns and preserves Str provenance":
+        val (mir, errors) = lower_trim_source("fn f(s: text, pat: text) -> i64:\n    val a = s.trim_start_matches(pat)\n    val b = a.trim_end_matches(pat)\n    val c = b.trim_end(pat)\n    c.len()\n")
+        expect(errors.len()).to_equal(0)
+        expect(mir).to_contain("rt_string_trim_start_matches")
+        expect(mir).to_contain("rt_string_trim_end_matches")
+
+    it "preserves custom struct trim_end methods without hijacking to string runtime":
+        val (mir, errors) = lower_trim_source("struct Trimmer:\n    n: i64\nimpl Trimmer:\n    fn trim_end(pat: text) -> i64: self.n\nfn run_t(t: Trimmer) -> i64:\n    t.trim_end(\".\")\n")
+        expect(errors.len()).to_equal(0)
+        expect(mir.contains("rt_string_trim_end_matches")).to_equal(false)
+
+    it "rejects wrong arity (2 args) and numeric receiver":
+        val (_, arity_errors) = lower_trim_source("fn bad1(s: text) -> text:\n    s.trim_end(\"a\", \"b\")\n")
+        expect(arity_errors.len()).to_equal(1)
+        expect(arity_errors[0]).to_contain("unresolved method call: trim_end")
+        val (_, recv_errors) = lower_trim_source("fn bad2() -> i64:\n    val x = 7.trim_end(\".\")\n    0\n")
+        expect(recv_errors.len()).to_equal(1)
+        expect(recv_errors[0]).to_contain("unresolved method call: trim_end")
+
+    it "registers tagged text ABI indices for trim externs":
+        expect(tagged_text_value_arg_indices("rt_string_trim_start")).to_equal(Some([0]))
+        expect(tagged_text_value_arg_indices("rt_string_trim_end")).to_equal(Some([0]))
+        expect(tagged_text_value_arg_indices("rt_string_trim_start_matches")).to_equal(Some([0, 1]))
+        expect(tagged_text_value_arg_indices("rt_string_trim_end_matches")).to_equal(Some([0, 1]))
+
+describe "core_interpret and InterpreterBackendImpl 1-arg trim parity":
+    it "strips repeated prefix/suffix patterns in core_interpret":
+        val res = core_eval_text("    val a = \"  foo..bar..  \".trim().trim_end(\".\")\n    val b = \"..foo.bar\".trim_start(\".\")\n    val c = \"ababa\".trim_start_matches(\"ab\").trim_end_matches(\"ba\")\n    val d = \"unchanged\".trim_end(\"\")\n    \"{{a}}|{{b}}|{{c}}|{{d}}\"\n")
+        expect(res).to_equal("foo..bar|foo.bar|a|unchanged")
+
+    it "strips repeated prefix/suffix patterns in InterpreterBackendImpl":
+        val res = backend_eval_text("    val a = \"  foo..bar..  \".trim().trim_end(\".\")\n    val b = \"..foo.bar\".trim_start(\".\")\n    val c = \"ababa\".trim_start_matches(\"ab\").trim_end_matches(\"ba\")\n    val d = \"unchanged\".trim_end(\"\")\n    \"{{a}}|{{b}}|{{c}}|{{d}}\"\n")
+        expect(res).to_equal("foo..bar|foo.bar|a|unchanged")

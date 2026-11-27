@@ -8,7 +8,7 @@ use compiler.treesitter.{TreeSitter, OutlineModule, ParseError}
 # LIMITATION: Awaiting tree-sitter satellite SFFI
 import lsp.handlers.verification as verification
 
-use std.io_runtime.{process_run}
+use std.io_runtime.{process_run_timeout, env_set}
 use std.io_runtime.{env_get}
 use std.io_runtime.{file_exists}
 
@@ -19,7 +19,7 @@ fn find_error_nodes(tree: Tree) -> [Node]:
     # Helper function to traverse tree recursively
     fn traverse(node_id: NodeId):
         match tree.arena.get(node_id):
-            case nil:
+            case None:
                 return
             case Some(node):
                 # Check if this node is an error
@@ -78,11 +78,14 @@ fn generate_diagnostics(tree: Tree) -> [Dict]:
 fn collect_compiler_diagnostics(file_path: String) -> [Dict]:
     var diagnostics: [Dict] = []
     val bin = _find_simple_binary()
-    val cmd = "timeout 60 " + bin + " src/app/cli/query.spl check " + file_path + " --format=json"
+    # Run the checker directly: `/bin/sh -c "timeout 60 ..."` does not exist on
+    # Windows, which left push diagnostics silently empty there.
+    env_set("NO_COLOR", "1")
+    val args = ["src/app/cli/query.spl", "check", file_path, "--format=json"]
     var stdout = ""
     var stderr = ""
     var code: i64 = 0
-    (stdout, stderr, code) = process_run("/bin/sh", ["-c", "export NO_COLOR=1 TERM=dumb; " + cmd])
+    (stdout, stderr, code) = process_run_timeout(bin, args, 60000)
     if stdout.trim() == "":
         return diagnostics
     val lines = stdout.split("\n")
@@ -133,7 +136,7 @@ fn _parse_compiler_json_diagnostic(line: String) -> Option<Dict>:
     # Minimal JSON field extraction (no full JSON parser available here)
     val msg = _json_field(line, "message")
     if msg == "":
-        return nil
+        return None
     val sev_str = _json_field(line, "severity")
     val code_str = _json_field(line, "code")
     val source_str = _json_field(line, "source")
@@ -145,11 +148,11 @@ fn _parse_compiler_json_diagnostic(line: String) -> Option<Dict>:
     var diag_line = 0
     var diag_col = 0
     if line_str != "":
-        val ln = int(line_str)
+        val ln = (line_str.to_int() ?? 0)
         if ln > 0:
             diag_line = ln - 1
     if col_str != "":
-        val cn = int(col_str)
+        val cn = (col_str.to_int() ?? 0)
         if cn > 0:
             diag_col = cn - 1
     var severity = protocol.DiagnosticSeverity.Error
@@ -170,6 +173,10 @@ fn _parse_compiler_json_diagnostic(line: String) -> Option<Dict>:
     }
     if code_str != "":
         diag["code"] = code_str
+    # RB-DIAG-01: policy rule ID from config/policy/diagnostic_policy.sdn.
+    val policy_id = _json_field(line, "policy_id")
+    if policy_id != "":
+        diag["data"] = {"policy_id": policy_id}
     # Parse tags: Unnecessary=1, Deprecated=2
     var tag_list: [Int] = []
     if tags_str != "":
@@ -206,14 +213,14 @@ fn _parse_compiler_text_diagnostic(line: String) -> Option<Dict>:
         val ci2 = after.index_of(":")
         if ci2 >= 0:
             val line_str = after.substring(0, ci2).trim()
-            val line_num = int(line_str)
+            val line_num = (line_str.to_int() ?? 0)
             if line_num > 0:
                 diag_line = line_num - 1
                 val after2 = after.substring(ci2 + 1)
                 val ci3 = after2.index_of(":")
                 if ci3 >= 0:
                     val col_str = after2.substring(0, ci3).trim()
-                    val col_num = int(col_str)
+                    val col_num = (col_str.to_int() ?? 0)
                     if col_num > 0:
                         diag_col = col_num - 1
                     diag_msg = after2.substring(ci3 + 1).trim()

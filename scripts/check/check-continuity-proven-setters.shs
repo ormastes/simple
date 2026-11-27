@@ -1,0 +1,183 @@
+#!/bin/sh
+# check-continuity-proven-setters.shs — fail-closed ratchet on every place that
+# can make a host capacity ledger "continuity proven" (S54-B-F2, 2026-11-16).
+#
+# WHY: HostCapacityLedgerV1.continuity_proven gates admission, receipt replay
+# and prepared release. Simple does not enforce field privacy (E1040/E1046 are
+# declared, never emitted), so any module can assign the field, construct a
+# ledger with it, or open a journal through the boolean openers. Only reviewed
+# setters may do so; every other site is refused.
+#
+# Counted per src .spl line (comment lines skipped, test/vendor/spec excluded):
+#   (a) an assignment          `continuity_proven = <anything>`
+#   (b) a named value          `continuity_proven: <token>` for any token
+#                              other than `false` or the `bool` type, including
+#                              `(x)` / `!x` (a `.continuity_proven:` read in an
+#                              `if` is not a named value)
+#   (c) a boolean opener       `host_capacity_owner_open_v1` or
+#                              `host_capacity_owner_open_owned_v2` named on a
+#                              line that is not their own `fn` definition or an
+#                              import/export: a call or a bare reference
+#                              (known limit: a `)` inside a string literal can
+#                              skew the (d) paren scan)
+#   (d) a positional ledger    a `HostCapacityLedgerV1(` construction whose
+#                              argument list (followed across lines to its
+#                              closing paren) has no `continuity_proven:` named
+#                              field (its third positional field is it)
+# Each file's count must not exceed its cap in
+# scripts/check/continuity_proven_setter_allowlist.txt (absent = 0). In --rev
+# mode the counts must EQUAL the caps: a cap above the real count is a stale
+# allowlist and also FAILs. Changing the allowlist is the deliberate, reviewed
+# update path; do not edit it to make a FAIL go away without review.
+# Known limit: a call split across lines with the opener name on one line is
+# still counted (the name is enough); a setter hidden behind a whole-ledger
+# copy from an allowlisted producer is not a new site and is not counted.
+#
+# Usage: sh scripts/check/check-continuity-proven-setters.shs --changed BASE..HEAD
+#        sh scripts/check/check-continuity-proven-setters.shs --rev REV
+#        sh scripts/check/check-continuity-proven-setters.shs --selftest
+# Verdict (last stdout line): PASS — <n> ... / FAIL — ... / ERROR — nothing was checked (...)
+set -u
+
+ALLOW=scripts/check/continuity_proven_setter_allowlist.txt
+
+count_stdin() {
+  awk '
+    function trim(s) { sub(/^[ \t]+/, "", s); sub(/[ \t]+$/, "", s); return s }
+    {
+      sub(/\r$/, "")
+      t = trim($0)
+      if (t == "" || t ~ /^#/) next
+      s = t
+      while (match(s, /continuity_proven[ \t]*=[^=]/)) { n++; s = substr(s, RSTART + RLENGTH) }
+      s = t
+      while (match(s, /(^|[^.A-Za-z0-9_])continuity_proven:[ \t]*[^ \t,)}]+/)) {
+        v = substr(s, RSTART, RLENGTH)
+        sub(/^.*continuity_proven:[ \t]*/, "", v)
+        if (v != "false" && v != "bool") n++
+        s = substr(s, RSTART + RLENGTH)
+      }
+      if (t !~ /^(pub )?fn host_capacity_owner_open_(v1|owned_v2)\(/ && t !~ /^(pub )?(use|export) /) {
+        s = t
+        while (match(s, /(^|[^A-Za-z0-9_])host_capacity_owner_open_(v1|owned_v2)([^A-Za-z0-9_]|$)/)) { n++; s = substr(s, RSTART + RLENGTH) }
+      }
+      if (depth > 0) {
+        tail = t
+      } else if (match(t, /(^|[^A-Za-z0-9_])HostCapacityLedgerV1\(/)) {
+        tail = substr(t, RSTART + RLENGTH - 1)
+        named = 0
+      } else {
+        tail = ""
+      }
+      if (tail != "") {
+        if (tail ~ /continuity_proven:/) named = 1
+        for (i = 1; i <= length(tail); i++) {
+          c = substr(tail, i, 1)
+          if (c == "(") depth++
+          else if (c == ")") { depth--; if (depth == 0) { if (!named) n++; break } }
+        }
+      }
+    }
+    END { print n + 0 }'
+}
+
+# cap_of ALLOWLIST_TEXT_FILE PATH -> cap (0 when absent)
+cap_of() {
+  awk -v p="$2" '{ sub(/\r$/, "") } /^[ \t]*#/ || NF < 2 { next } $1 == p { c = $2 } END { print c + 0 }' "$1"
+}
+
+selftest() {
+  d=$(mktemp -d) || return 1
+  cat > "$d/a.spl" <<'EOT'
+fn f(ledger: HostCapacityLedgerV1, continuity_proven: bool) -> HostCapacityLedgerV1:
+    # ledger.continuity_proven = true   (comment: not counted)
+    ledger.continuity_proven = true
+    if ledger.continuity_proven == true: pass
+    if ledger.continuity_proven: return ledger
+    val a = HostCapacityLedgerV1(capacity: c, revision: 1, continuity_proven: false, reservations: [])
+    val b = HostCapacityLedgerV1(capacity: c, revision: 1, continuity_proven: reconciled, reservations: [])
+    val o = host_capacity_owner_open_owned_v2(root, capacity, nonce, 64, true)
+    val p = host_capacity_owner_open_quarantined_owned_v2(root, capacity, nonce, 64)
+    val q = HostCapacityLedgerV1(c, 1, true, [])
+    val m = HostCapacityLedgerV1(capacity: HostCapacityV1(a,
+        b), revision: 1,
+        continuity_proven: false, reservations: [])
+    val r = HostCapacityLedgerV1(capacity: c, revision: 1, continuity_proven: (reconciled), reservations: [])
+    val opener = host_capacity_owner_open_v1
+fn g() -> HostCapacityOwnerV1: host_capacity_owner_open_v1(root, capacity, nonce, 64, true).unwrap()
+    val z = {continuity_proven: false}
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.{host_capacity_owner_open_owned_v2}
+pub fn host_capacity_owner_open_v1(root: text, capacity: HostCapacityV1, nonce: text,
+EOT
+  got=$(count_stdin < "$d/a.spl")
+  printf 'src/x.spl 7 # fixture\n# comment\n' > "$d/allow"
+  cap=$(cap_of "$d/allow" src/x.spl)
+  none=$(cap_of "$d/allow" src/y.spl)
+  rm -rf "$d"
+  [ "$got" = 7 ] || { echo "selftest FAIL: expected 7 counted sites, got $got"; return 1; }
+  [ "$cap" = 7 ] && [ "$none" = 0 ] || { echo "selftest FAIL: allowlist parse cap=$cap none=$none"; return 1; }
+  return 0
+}
+
+mode=${1:-}
+[ "$mode" = "--selftest" ] && { selftest && echo "PASS — selftest ok (7 fixture sites, allowlist parse)" && exit 0; exit 1; }
+case "$mode" in
+  --changed|--rev) [ -n "${2:-}" ] || { echo "ERROR — nothing was checked (usage: --changed BASE..HEAD | --rev REV | --selftest)"; exit 2; } ;;
+  *) echo "ERROR — nothing was checked (usage: --changed BASE..HEAD | --rev REV | --selftest)"; exit 2 ;;
+esac
+selftest || { echo "ERROR — nothing was checked (selftest failed)"; exit 2; }
+
+root=$(cd "$(dirname "$0")/../.." && pwd)
+cd "$root" || exit 2
+tmp=$(mktemp -d) || exit 2
+trap 'rm -rf "$tmp"' EXIT
+
+if [ "$mode" = "--rev" ]; then
+  rev=$2
+  git rev-parse -q --verify "$rev^{commit}" >/dev/null || { echo "ERROR — nothing was checked (bad rev $rev)"; exit 2; }
+  git show "$rev:$ALLOW" > "$tmp/allow" 2>/dev/null || { echo "ERROR — nothing was checked (no $ALLOW at $rev)"; exit 2; }
+  git grep -l -E 'continuity_proven|host_capacity_owner_open_(v1|owned_v2)|HostCapacityLedgerV1\(' "$rev" -- 'src/*.spl' 2>/dev/null |
+    sed "s#^$rev:##" | grep -v '/vendor/\|/test/\|_spec\.spl$\|_test\.spl$' > "$tmp/files"
+  n=0; bad=0
+  : > "$tmp/seen"
+  while read -r f; do
+    [ -n "$f" ] || continue
+    n=$((n + 1))
+    got=$(git show "$rev:$f" | count_stdin)
+    cap=$(cap_of "$tmp/allow" "$f")
+    echo "$f" >> "$tmp/seen"
+    if [ "$got" -gt "$cap" ]; then echo "FAIL $f: $got continuity setter site(s) > allowlisted $cap"; bad=$((bad + 1));
+    elif [ "$got" -lt "$cap" ]; then echo "FAIL $f: $got continuity setter site(s) < allowlisted $cap (stale allowlist)"; bad=$((bad + 1)); fi
+  done < "$tmp/files"
+  for f in $(awk '{ sub(/\r$/, "") } /^[ \t]*#/ || NF < 2 { next } $2 > 0 { print $1 }' "$tmp/allow"); do
+    grep -qx "$f" "$tmp/seen" || { echo "FAIL $f: allowlisted but has no setter site at $rev (stale allowlist)"; bad=$((bad + 1)); }
+  done
+  [ "$n" -gt 0 ] || { echo "ERROR — nothing was checked (no candidate src .spl at $rev)"; exit 2; }
+  [ "$bad" -eq 0 ] || { echo "FAIL — $n file(s) checked at $rev, $bad file(s) off the continuity-setter allowlist"; exit 1; }
+  echo "PASS — $n file(s) checked at $rev, every continuity setter site is allowlisted (exact)"
+  exit 0
+fi
+
+range=$2
+base=${range%%..*}
+head=${range##*..}
+[ "$base" != "$range" ] || { echo "ERROR — nothing was checked (bare revision $range; use BASE..HEAD)"; exit 2; }
+git rev-parse -q --verify "$head^{commit}" >/dev/null || { echo "ERROR — nothing was checked (bad head $head)"; exit 2; }
+git rev-parse -q --verify "$base^{commit}" >/dev/null || { echo "ERROR — nothing was checked (bad base $base)"; exit 2; }
+mb=$(git merge-base "$base" "$head") || { echo "ERROR — nothing was checked (no merge-base of $base and $head)"; exit 2; }
+git show "$head:$ALLOW" > "$tmp/allow" 2>/dev/null || { echo "ERROR — nothing was checked (no $ALLOW at $head)"; exit 2; }
+files=$(git diff --name-only --diff-filter=AMR "$mb" "$head" -- 'src/*.spl' | grep -v '/vendor/\|/test/\|_spec\.spl$\|_test\.spl$')
+n=0; bad=0
+for f in $files; do
+  n=$((n + 1))
+  got=$(git show "$head:$f" | count_stdin)
+  cap=$(cap_of "$tmp/allow" "$f")
+  if [ "$got" -gt "$cap" ]; then
+    echo "FAIL $f: $got continuity setter site(s) > allowlisted $cap (only the reconcile flip and reviewed setters may set continuity)"
+    bad=$((bad + 1))
+  fi
+done
+if git diff --quiet "$mb" "$head" -- "$ALLOW"; then :; else echo "NOTE: $ALLOW changed in $range (reviewed allowlist update)"; fi
+if [ "$n" = 0 ]; then echo "PASS — 0 src .spl file(s) touched in $range, nothing to check (selftest ok)"; exit 0; fi
+[ "$bad" -eq 0 ] || { echo "FAIL — $n file(s) checked, $bad file(s) exceed the continuity-setter allowlist"; exit 1; }
+echo "PASS — $n file(s) checked, 0 continuity setter sites beyond the allowlist"

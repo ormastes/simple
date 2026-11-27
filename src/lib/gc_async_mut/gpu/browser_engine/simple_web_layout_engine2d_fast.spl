@@ -50,6 +50,8 @@ use std.gc_async_mut.gpu.engine2d.backend_probe.{BackendStatus}
 use std.gc_async_mut.gpu.engine2d.backend_vulkan.{vulkan_draw_census_line, vulkan_draw_census_reset, vulkan_readback_census_line, vulkan_readback_census_reset, vulkan_timing_table, vulkan_timing_reset}
 use common.ui.web_render_api.{WebRenderMaterialFallbackProvenance}
 use common.ui.draw_ir.{DrawIrComposition}
+use common.ui.draw_ir_device_scale.{draw_ir_composition_at_device_scale}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{layout_device_scale, layout_device_scale_set}
 use std.common.gpu.simpleos_host_gpu_draw_ir.{SimpleOsHostGpuImageResource}
 
 # Shared clock for the perf-instrumentation start/end pairs below (phase
@@ -68,6 +70,7 @@ class SimpleWebLayoutEngine2DExecutionResult:
     # (sans-serif/16px), so the reported identity and pixel size describe the
     # default face rather than the document's. Consumers gate on this FIRST.
     render_degraded: bool
+    resolved_backend: text
     vector_font_identity: text
     vector_font_pixel_size: i32
     vector_font_execution_target: text
@@ -493,7 +496,7 @@ fn _simple_web_layout_execute_draw_ir_composition(
     width: i32, height: i32, backend_name: text,
     image_resources: [SimpleOsHostGpuImageResource]
 ) -> SimpleWebLayoutEngine2DExecutionResult:
-    val render = _simple_web_layout_render_draw_ir_composition(
+    val (render, engine_backend) = _simple_web_layout_render_draw_ir_composition_with_backend(
         composition, width, height, backend_name, image_resources)
     # A caller that asked for an accelerated backend and got its pixels back
     # from a CPU fallback surface received a DEMOTED frame. Before 2026-08-02
@@ -515,12 +518,21 @@ fn _simple_web_layout_execute_draw_ir_composition(
         render.glass_backend_handle,
         render.glass_device_identity
     )
+    val actual_backend = if lane_demoted:
+        "software"
+    elif render.fallback_required and render.selected_backend != "":
+        render.selected_backend
+    elif engine_backend != "":
+        engine_backend
+    else:
+        backend_name
     SimpleWebLayoutEngine2DExecutionResult(
         render: render, material_fallback: material_fallback,
         # Captured AFTER the layout/style pass has run, so it reflects any
         # budget break in that pass; the vector_font_* fields below are only
         # trustworthy when this is false.
         render_degraded: simple_web_layout_last_render_degraded() or lane_demoted,
+        resolved_backend: actual_backend,
         vector_font_identity: render.font_identity,
         vector_font_pixel_size:
             _simple_web_draw_ir_last_text_font_pixel_size(
@@ -535,11 +547,12 @@ fn _simple_web_layout_execute_draw_ir_composition(
         vector_font_device_executed: render.font_device_executed,
         vector_font_promotion_ready: render.font_promotion_ready)
 
-fn _simple_web_layout_render_draw_ir_composition(
+fn _simple_web_layout_render_draw_ir_composition_with_backend(
     composition: DrawIrComposition, width: i32, height: i32,
     backend_name: text, image_resources: [SimpleOsHostGpuImageResource]
-) -> Engine2dDrawIrAdvResult:
+) -> (Engine2dDrawIrAdvResult, text):
     var slot = _web_fast_engine_acquire(width, height, backend_name)
+    val engine_backend = slot.engine.backend_name()
     slot.engine.clear(0u32)
     var images: [Engine2dResolvedDrawIrImage] = []
     for image in image_resources:
@@ -550,6 +563,15 @@ fn _simple_web_layout_render_draw_ir_composition(
         slot.engine, composition, true, images
     )
     _web_fast_engine_release(slot, width, height, backend_name)
+    (render, engine_backend)
+
+fn _simple_web_layout_render_draw_ir_composition(
+    composition: DrawIrComposition, width: i32, height: i32,
+    backend_name: text, image_resources: [SimpleOsHostGpuImageResource]
+) -> Engine2dDrawIrAdvResult:
+    val (render, _engine_backend) = _simple_web_layout_render_draw_ir_composition_with_backend(
+        composition, width, height, backend_name, image_resources
+    )
     render
 
 fn _simple_web_layout_draw_ir_once(
@@ -671,13 +693,20 @@ fn _web_document_cache_key(
         animation_time_ms.to_text() + ";retry=" + (if retry_degraded: "1" else: "0") +
         ";scroll=" + scroll_y.to_text() +
         ";floor=" + simple_web_layout_render_budget_floor_ms().to_text() +
-        # No device-scale or font-set term: `vector_fonts` is a hardcoded
-        # `true` at every entry this funnel reaches
+        # The device scale the layout ran at (`layout_device_scale`, set only
+        # by the at_device_scale entry): at k > 1 line metrics are device px,
+        # so a 4x composition must never be served to a 1x render.
+        ";dsf=" + layout_device_scale().to_text() +
+        # No font-set term: `vector_fonts` is a hardcoded `true` at every
+        # entry this funnel reaches
         # (simple_web_layout_render_html_draw_ir_result_with_images and its
-        # at_time siblings), and no device-scale input reaches the compose at
-        # all. Naming env vars nothing reads would be false coverage; a font
-        # set that IS swapped at runtime must call web_document_cache_drain().
+        # at_time siblings). Naming env vars nothing reads would be false
+        # coverage; a font set that IS swapped at runtime must call
+        # web_document_cache_drain().
         ";budget=" + _web_draw_ir_key_text(_web_draw_ir_env("SIMPLE_WEB_RENDER_BUDGET_MS")) +
+        # SIMPLE_WEB_HIDE_SCROLLBARS changes the cascade (scrollbar gutter and
+        # paint), so a hidden-scrollbar frame is a different document.
+        ";hidesb=" + _web_draw_ir_key_text(_web_draw_ir_env("SIMPLE_WEB_HIDE_SCROLLBARS")) +
         ";len=" + html_len_key.to_text()
     )
 
@@ -1332,6 +1361,48 @@ pub fn simple_web_layout_render_html_pixels_engine2d(html: text, width: i32, hei
         return []
     execution.render.pixels
 
+# Device-pixel-ratio twin of simple_web_layout_render_html_pixels_engine2d.
+# Layout (and the document cache key) stay in CSS px; the composed Draw IR is
+# scaled by the integer factor k (draw_ir_composition_at_device_scale) and
+# painted into a (css_width*k)x(css_height*k) target, so text is re-rasterized
+# at k x font-size. Used by the >=300-dpi Chrome-parity lane
+# (Chrome --force-device-scale-factor=k).
+pub fn simple_web_layout_render_html_pixels_engine2d_at_device_scale(
+    html: text, css_width: i32, css_height: i32, device_scale: i32, backend_name: text
+) -> [u32]:
+    if css_width <= 0 or css_height <= 0 or device_scale < 1:
+        return []
+    val _phase_on = (env_get("SIMPLE_WEB_PHASE_TRACE") ?? "") == "1"
+    # Layout and compose see k (device-px line metrics); restored before the
+    # paint so nothing after this call, and no 1x render, runs at k.
+    layout_device_scale_set(device_scale)
+    val layout_result = _simple_web_layout_draw_ir_cached(
+        html, css_width, css_height, -1, [], [], true)
+    layout_device_scale_set(1)
+    if _phase_on:
+        print "[web-phase] phase=document elapsed_ms={web_document_pipeline_ms()} cache_hit={web_document_cache_hit()}"
+    val _phase_scale_start_us = _fast_clock.now_micros()
+    val composition = draw_ir_composition_at_device_scale(
+        layout_result.composition, device_scale)
+    if _phase_on:
+        print "[web-phase] phase=device_scale k={device_scale} elapsed_ms={(_fast_clock.now_micros() - _phase_scale_start_us) / 1000}"
+    val width = css_width * device_scale
+    val height = css_height * device_scale
+    if (
+        web_gpu_paint_enabled() and
+        web_gpu_paint_backend_verdict(backend_name) == "gpu-paint-candidate"
+    ):
+        return _web_draw_ir_choose_route(composition, width, height, backend_name)
+    val _phase_paint_start_us = _fast_clock.now_micros()
+    val execution = _simple_web_layout_execute_draw_ir_composition(
+        composition, layout_result.material_witness,
+        width, height, backend_name, [])
+    if _phase_on:
+        print "[web-phase] phase=paint elapsed_ms={(_fast_clock.now_micros() - _phase_paint_start_us) / 1000}"
+    if execution.render.skipped_command_count != 0:
+        return []
+    execution.render.pixels
+
 pub fn simple_web_layout_render_html_pixels_engine2d_with_images(
     html: text, width: i32, height: i32, backend_name: text,
     images: [SimpleOsHostGpuImageResource]
@@ -1476,7 +1547,7 @@ fn _simple_web_layout_render_html_readback_engine2d_result_at_time(html: text, w
             readback: engine2d_readback([], "unavailable"),
             material_fallback: WebRenderMaterialFallbackProvenance.none(),
             render_degraded: false,
-            resolved_backend: backend_name,
+            resolved_backend: "",
             vector_font_identity: "", vector_font_pixel_size: 0,
             vector_font_execution_target: "", vector_font_batch_identity: "",
             vector_font_readback_source: "", vector_font_device_checksum: 0,
@@ -1493,7 +1564,7 @@ fn _simple_web_layout_render_html_readback_engine2d_result_at_time(html: text, w
             readback: engine2d_readback([], "unavailable"),
             material_fallback: execution.material_fallback,
             render_degraded: execution.render_degraded,
-            resolved_backend: backend_name,
+            resolved_backend: execution.resolved_backend,
             vector_font_identity: execution.vector_font_identity,
             vector_font_pixel_size: execution.vector_font_pixel_size,
             vector_font_execution_target: execution.vector_font_execution_target,
@@ -1513,7 +1584,7 @@ fn _simple_web_layout_render_html_readback_engine2d_result_at_time(html: text, w
     SimpleWebLayoutEngine2DReadbackResult(
         readback: readback, material_fallback: execution.material_fallback,
         render_degraded: execution.render_degraded,
-        resolved_backend: backend_name,
+        resolved_backend: execution.resolved_backend,
         vector_font_identity: execution.vector_font_identity,
         vector_font_pixel_size: execution.vector_font_pixel_size,
         vector_font_execution_target: execution.vector_font_execution_target,
@@ -1547,7 +1618,7 @@ pub fn engine2d_fast_metal_available() -> bool:
     val probe = Engine2D.probe_backend(1, 1, "metal")
     probe.status == BackendStatus.Initialized
 
-export simple_web_layout_render_html_pixels_engine2d
+export simple_web_layout_render_html_pixels_engine2d, simple_web_layout_render_html_pixels_engine2d_at_device_scale
 export simple_web_layout_render_html_readback_engine2d
 export simple_web_layout_render_html_readback_engine2d_result
 export simple_web_layout_render_html_engine2d_result

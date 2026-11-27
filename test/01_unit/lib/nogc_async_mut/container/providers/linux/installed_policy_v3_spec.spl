@@ -1,0 +1,61 @@
+use std.spec.*
+use std.common.string_core.str_len
+use std.nogc_async_mut.container.providers.linux.installed_policy_v3.*
+use std.nogc_async_mut.container.providers.linux.engine_policy_v1.*
+use test.fixtures.orchestration.simple_container_linux_adapter_fixture_v2.linux_container_policy_fixture_v2
+
+fn _installed_policy_fixture_v3() -> LinuxOciInstalledPolicyV3:
+    LinuxOciInstalledPolicyV3(cli_policy: linux_container_policy_fixture_v2(),
+        socket_path: "/run/user/1000/podman/podman.sock", expected_service_uid: 1000, api_version: "5.2.5")
+
+describe "protected installed Podman policy syntax":
+    it "roundtrips wrapper while preserving exact canonical V1 CLI policy bytes and digest":
+        val policy = _installed_policy_fixture_v3()
+        val cli_bytes = linux_oci_engine_policy_encode_v1(policy.cli_policy).unwrap()
+        val cli_digest = linux_oci_engine_policy_digest_v1(policy.cli_policy).unwrap()
+        val source = linux_oci_installed_policy_encode_v3(policy).unwrap()
+        val decoded = linux_oci_installed_policy_decode_v3(source).unwrap()
+        expect(linux_oci_engine_policy_encode_v1(decoded.cli_policy).unwrap()).to_equal(cli_bytes)
+        expect(linux_oci_engine_policy_digest_v1(decoded.cli_policy).unwrap()).to_equal(cli_digest)
+        expect(linux_oci_installed_policy_encode_v3(decoded).unwrap()).to_equal(source)
+        expect(decoded.socket_path).to_equal(policy.socket_path)
+        expect(linux_oci_installed_policy_digest_v3(decoded)).to_equal(linux_oci_installed_policy_digest_v3(policy))
+
+    it "binds endpoint version and embedded CLI changes without claiming ownership":
+        val policy = _installed_policy_fixture_v3()
+        val digest = linux_oci_installed_policy_digest_v3(policy).unwrap()
+        var changed = policy
+        changed.socket_path = "/run/user/1000/podman/other.sock"
+        expect(linux_oci_installed_policy_digest_v3(changed).unwrap() == digest).to_equal(false)
+        changed = policy
+        changed.cli_policy.expected_graph_root = "/home/test/other-storage"
+        expect(linux_oci_installed_policy_digest_v3(changed).unwrap() == digest).to_equal(false)
+        changed = policy
+        changed.api_version = "5.3.0"
+        expect(linux_oci_installed_policy_encode_v3(changed).is_err()).to_equal(true)
+
+    it "rejects network relative noncanonical endpoints UID mismatch and malformed canonical records":
+        for path in ["unix:///run/podman.sock", "tcp://localhost:1234", "relative.sock", "/", "/run//podman.sock", "/run/../podman.sock", "/run/podman.sock/", "/run/podman\nsock", "/" + "x".repeat(108), "/" + "x".repeat(256) + "/socket"]:
+            var policy = _installed_policy_fixture_v3()
+            policy.socket_path = path
+            expect(linux_oci_installed_policy_encode_v3(policy).is_err()).to_equal(true)
+        var mismatched = _installed_policy_fixture_v3()
+        mismatched.expected_service_uid = 1001
+        expect(linux_oci_installed_policy_encode_v3(mismatched).is_err()).to_equal(true)
+        val source = linux_oci_installed_policy_encode_v3(_installed_policy_fixture_v3()).unwrap()
+        for changed in [source + "\n", source.replace("version: 3", "version: 3, version: 3"),
+                source.replace("expectedServiceUid: 1000", "expectedServiceUid: \"1000\""),
+                source.replace("socketPath:", "unknownPath:"), "{unknown: true, " + source.substring(1),
+                source.replace("cliPolicyDigest:", "cliPolicyDigest: changed, oldDigest:")]:
+            expect(linux_oci_installed_policy_decode_v3(changed).is_err()).to_equal(true)
+
+    it "retains previously legal large CLI option inventories beyond 64KiB":
+        var policy = _installed_policy_fixture_v3()
+        var options: [text] = []
+        for index in 0..32: options.push("key" + index.to_text() + "=" + "x".repeat(3000))
+        policy.cli_policy.storage_options = options
+        val original = linux_oci_engine_policy_encode_v1(policy.cli_policy).unwrap()
+        val source = linux_oci_installed_policy_encode_v3(policy).unwrap()
+        expect(str_len(source)).to_be_greater_than(65536)
+        val decoded = linux_oci_installed_policy_decode_v3(source).unwrap()
+        expect(linux_oci_engine_policy_encode_v1(decoded.cli_policy).unwrap()).to_equal(original)

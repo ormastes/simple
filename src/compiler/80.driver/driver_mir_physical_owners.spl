@@ -48,3 +48,162 @@ pub fn driver_mir_physical_source_indices_v1(paths: [text], identities: [text],
         index = index + 1
     # Inventory order, not dictionary iteration, selects the representative.
     Ok(selected)
+
+
+pub fn driver_mir_retained_identities_by_path_v1(retained_paths: [text],
+        retained_identities: [text]) -> Result<Dict<text, text>, text>:
+    if retained_paths.len() != retained_identities.len():
+        return Err("MIR projected ownership inventory shape mismatch")
+    var identity_by_path: Dict<text, text> = {}
+    var index = 0
+    while index < retained_paths.len():
+        val path = retained_paths[index]
+        val identity = retained_identities[index]
+        if path == "" or not sha256_lower_hex_valid(identity):
+            return Err("MIR projected ownership lacks admitted identity at {index}")
+        if identity_by_path.has(path) and identity_by_path[path] != identity:
+            return Err("MIR projected ownership content conflict for {path}")
+        identity_by_path[path] = identity
+        index = index + 1
+    Ok(identity_by_path)
+
+pub fn driver_mir_projected_source_identities_v1(retained_paths: [text],
+        retained_identities: [text], selected_paths: [text]) -> Result<[text], text>:
+    """Join selected source order to retained full-content admission.
+    Returned positions belong to selected_paths, never retained receipt rows.
+    This does not reread released source text or infer identity from a basename.
+    """
+    val admission = driver_mir_retained_identities_by_path_v1(retained_paths, retained_identities)
+    if admission.is_err(): return Err(admission.unwrap_err())
+    val identity_by_path = admission.unwrap()
+    var selected_identities: [text] = []
+    for path in selected_paths:
+        if path == "" or not identity_by_path.has(path):
+            return Err("MIR projected ownership missing retained source: {path}")
+        selected_identities = selected_identities.push(identity_by_path[path])
+    Ok(selected_identities)
+
+
+pub fn driver_mir_entry_alias_projection_required_v1(source_count: i64,
+        retained_count: i64, entry_requested: bool,
+        bootstrap_shortcuts: bool, bootstrap_enabled: bool) -> bool:
+    # Streaming entry parsing can retain every logical alias, so equal source
+    # and receipt counts do not prove that the provider feed is physical.
+    source_count > 0 and entry_requested and
+        (source_count != retained_count or (bootstrap_shortcuts and bootstrap_enabled))
+
+
+# Ownership-gate disposition of one inventory row. A module-scoped per-file
+# unit (`scoped`: its HIR loads were restricted to its targets' load closure,
+# driver_worker_surface_closure_v1 worker_hir_restrict_loads_v1) legitimately
+# holds no HIR for rows it neither lowers nor imports. Such a row keeps its
+# inventory slot with its logical name standing in ("placeholder"; the unit's
+# SIMPLE_MIR_SHARD_ONLY_PATHS filter never lowers it). An unheld TARGET, or any
+# unheld row outside a scoped unit, still fails closed ("missing"). Bug:
+# doc/08_tracking/bug/per_file_lane_unit_mir_physical_ownership_missing_hir_2026-11-12.md
+pub fn driver_mir_owner_disposition_v1(scoped: bool, is_target: bool, has_hir: bool) -> text:
+    # A scoped unit lowers only its targets: a held non-target row (closure
+    # advice, or a PM3 import's interface-only HIR) is a placeholder too, so
+    # it is never fed to MIR and never emits functions or symbols.
+    if scoped and not is_target:
+        return "placeholder"
+    if has_hir:
+        return "hir"
+    "missing"
+
+# MIR ledger schedule name of one row. The ledger inventory is must-match
+# across every worker of one pool (hir_shard_recovery_inventory). A held row is
+# named by canonical(HirModule.name), and HirModule.name is the parsed file
+# path. In a scoped unit an unheld row is therefore named by its canonical ROW
+# PATH, so the inventory is identical whatever HIR subset a unit holds, entry-
+# closure alias rows included (their logical name is an import spelling that
+# need not canonicalise to the owner). Outside a scoped unit an unheld row
+# (go-to-end exclusion) keeps its raw logical name, as before.
+pub fn driver_mir_schedule_name_v1(scoped: bool, has_hir: bool, hir_name: text, logical: text,
+        row_path: text) -> text:
+    if has_hir:
+        return mir_layout_canonical_module_name(hir_name)
+    if scoped:
+        return mir_layout_canonical_module_name(row_path)
+    logical
+
+# Owner stand-in for a placeholder row: its row path, the same spelling a held
+# row's HirModule.name carries, so physical dedup canonicalises both alike.
+pub fn driver_mir_placeholder_owner_v1(row_path: text) -> text:
+    row_path
+
+# Owner stand-in for a go-to-end excluded row (dropped at HIR, or a dependent
+# of one). Exclusion is keyed by logical name, and one physical file can hold
+# several inventory rows (`app.io` and `app.io.__init__` both name
+# src/app/io/__init__.spl). Standing each row's own logical name in gave that
+# one path two owners and failed the whole MIR phase with "conflicting owners".
+# The row path folds every alias onto one owner, as a held row's HirModule.name
+# does. Bug:
+# doc/08_tracking/bug/go_to_end_excluded_alias_rows_conflicting_owners_2026-11-19.md
+pub fn driver_mir_excluded_owner_v1(row_path: text, logical: text) -> text:
+    if row_path == "":
+        return logical
+    row_path
+
+# go-to-end: inventory rows that alias a failed module. Exclusion is keyed by
+# logical name, but one physical file can be reached under several names
+# (`lib.X` and `std.X`, `pkg` and `pkg.__init__`). HIR poisons one spelling;
+# an alias left un-excluded has no HIR, and MIR setup then stopped the whole
+# phase with "MIR physical ownership missing HIR for <alias>". Returns, in row
+# order and once each, every row name whose physical key equals the key of a
+# `failed` row and that is not itself in `failed`. Rows with an empty key never
+# match. `row_names[i]` is held at `row_keys[i]` (already normalised).
+pub fn driver_go_to_end_alias_rows_v1(row_names: [text], row_keys: [text],
+        failed: [text]) -> [text]:
+    var failed_names: Dict<text, bool> = {}
+    for name in failed:
+        failed_names[name] = true
+    var failed_keys: Dict<text, bool> = {}
+    var row = 0
+    while row < row_names.len() and row < row_keys.len():
+        if row_keys[row] != "" and failed_names.contains_key(row_names[row]):
+            failed_keys[row_keys[row]] = true
+        row = row + 1
+    var seen: Dict<text, bool> = {}
+    var aliases: [text] = []
+    row = 0
+    while row < row_names.len() and row < row_keys.len():
+        val name = row_names[row]
+        if row_keys[row] != "" and failed_keys.contains_key(row_keys[row]) and
+                not failed_names.contains_key(name) and not seen.contains_key(name):
+            seen[name] = true
+            aliases = aliases.push(name)
+        row = row + 1
+    aliases
+
+# Placeholders are sound only because the unit's SIMPLE_MIR_SHARD_ONLY_PATHS
+# skip never lowers them, and that skip runs only with an active MIR shard
+# queue. Without one the gates keep their whole-inventory demand.
+pub fn driver_mir_unit_scoped_v1(hir_loads_restricted: bool, mir_shard_queue: text) -> bool:
+    hir_loads_restricted and mir_shard_queue != ""
+
+# Held HIR keys a scoped unit hands to lower_module as declaration providers
+# in addition to its feed. The feed schedules the unit's targets only, but an
+# imported module global binds through `providers`
+# (register_imported_global_bindings), so a held non-target row (a PM3 import's
+# interface HIR, closure HIR) must still provide or every such import fails
+# "missing provider declaration for imported global". One key per canonical
+# owner (alias rows share one HirModule; a second copy is a duplicate provider
+# declaration), never an owner the feed already carries. Bug:
+# doc/08_tracking/bug/per_file_unit_imported_global_missing_provider_2026-11-21.md
+pub fn driver_mir_unit_provider_keys_v1(scoped: bool, feed_owners: [text], held_keys: [text],
+        held_owners: [text]) -> [text]:
+    var extra: [text] = []
+    if not scoped or held_keys.len() != held_owners.len():
+        return extra
+    var seen: Dict<text, bool> = {}
+    for feed_owner in feed_owners:
+        seen[mir_layout_canonical_module_name(feed_owner)] = true
+    var index = 0
+    while index < held_keys.len():
+        val owner = mir_layout_canonical_module_name(held_owners[index])
+        if not seen.has(owner):
+            seen[owner] = true
+            extra = extra.push(held_keys[index])
+        index = index + 1
+    extra

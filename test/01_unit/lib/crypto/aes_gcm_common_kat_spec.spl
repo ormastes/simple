@@ -10,7 +10,8 @@ use std.common.crypto.aes_gcm.{
     aes128_key_expansion, aes256_key_expansion,
     aes128_decrypt_block, aes256_decrypt_block,
     aes128_gcm_encrypt, aes128_gcm_decrypt,
-    aes256_gcm_encrypt, aes256_gcm_decrypt, AesGcmResult
+    aes256_gcm_encrypt, aes256_gcm_decrypt,
+    aes192_gcm_encrypt, aes192_gcm_decrypt, AesGcmResult
 }
 
 extern fn rt_bytes_u8_at(arr: [u8], idx: i64) -> i64
@@ -123,3 +124,79 @@ describe "std.common.crypto.aes_gcm known-answer tests":
         expect(_to_i64(p128, 0, 16)).to_equal(_fips_pt())
         val p256 = aes256_decrypt_block(_to_u8(_fips_ct256()), aes256_key_expansion(_to_u8(_fips_key256())))
         expect(_to_i64(p256, 0, 16)).to_equal(_fips_pt())
+
+# ============================================================================
+# Fail-closed decrypt length profile (bug
+# aes_gcm_encrypt_length_unchecked_and_rewound_hardening_2026-11-13, item 3).
+# rt_bytes_u8_at reads an out-of-range index as 0, so before the guards an
+# EMPTY key or nonce zero-extended to the all-zero TC2/TC14 key/IV and
+# decrypted the vector to Ok. Restricted NIST SP 800-38D profile: AES key
+# 16/24/32 bytes, 96-bit IV, 128-bit tag; 7.2 step 1 returns FAIL otherwise.
+# ============================================================================
+
+fn _err_msg(r: AesGcmResult) -> text:
+    match r:
+        AesGcmResult.Ok(pt):
+            "Ok"
+        AesGcmResult.Err(msg):
+            msg
+
+fn _slice(arr: [u8], from: i64, n: i64) -> [u8]:
+    _to_u8(_to_i64(arr, from, n))
+
+describe "std.common.crypto.aes_gcm decrypt rejects wrong-length inputs":
+    it "AES-128: empty key that zero-extends to the TC2 key is rejected":
+        step("AES-128 empty key")
+        expect(_err_msg(aes128_gcm_decrypt(_zeros(0), _zeros(12), _to_u8(_ct128()), _zeros(0), _to_u8(_tag128())))).to_equal("AES-128 key must be 16 bytes")
+
+    it "AES-128: 32-byte key is rejected":
+        step("AES-128 long key")
+        expect(_err_msg(aes128_gcm_decrypt(_zeros(32), _zeros(12), _to_u8(_ct128()), _zeros(0), _to_u8(_tag128())))).to_equal("AES-128 key must be 16 bytes")
+
+    it "AES-128: empty nonce that zero-extends to the TC2 IV is rejected":
+        step("AES-128 empty nonce")
+        expect(_err_msg(aes128_gcm_decrypt(_zeros(16), _zeros(0), _to_u8(_ct128()), _zeros(0), _to_u8(_tag128())))).to_equal("GCM nonce must be 12 bytes")
+
+    it "AES-128: 13-byte nonce is rejected":
+        step("AES-128 long nonce")
+        expect(_err_msg(aes128_gcm_decrypt(_zeros(16), _zeros(13), _to_u8(_ct128()), _zeros(0), _to_u8(_tag128())))).to_equal("GCM nonce must be 12 bytes")
+
+    it "AES-128: 15-byte tag is rejected before the tag comparison":
+        step("AES-128 short tag")
+        expect(_err_msg(aes128_gcm_decrypt(_zeros(16), _zeros(12), _to_u8(_ct128()), _zeros(0), _slice(_to_u8(_tag128()), 0, 15)))).to_equal("GCM tag must be 16 bytes")
+
+    it "AES-256: empty key that zero-extends to the TC14 key is rejected":
+        step("AES-256 empty key")
+        expect(_err_msg(aes256_gcm_decrypt(_zeros(0), _zeros(12), _to_u8(_ct256()), _zeros(0), _to_u8(_tag256())))).to_equal("AES-256 key must be 32 bytes")
+
+    it "AES-256: 16-byte key is rejected":
+        step("AES-256 short key")
+        expect(_err_msg(aes256_gcm_decrypt(_zeros(16), _zeros(12), _to_u8(_ct256()), _zeros(0), _to_u8(_tag256())))).to_equal("AES-256 key must be 32 bytes")
+
+    it "AES-256: empty nonce that zero-extends to the TC14 IV is rejected":
+        step("AES-256 empty nonce")
+        expect(_err_msg(aes256_gcm_decrypt(_zeros(32), _zeros(0), _to_u8(_ct256()), _zeros(0), _to_u8(_tag256())))).to_equal("GCM nonce must be 12 bytes")
+
+    it "AES-256: 17-byte tag is rejected":
+        step("AES-256 long tag")
+        var long_tag = _to_u8(_tag256())
+        long_tag.push(0x00u8)
+        expect(_err_msg(aes256_gcm_decrypt(_zeros(32), _zeros(12), _to_u8(_ct256()), _zeros(0), long_tag))).to_equal("GCM tag must be 16 bytes")
+
+    it "AES-192: round trip still decrypts (guard constants are right)":
+        step("AES-192 positive control")
+        val sealed = aes192_gcm_encrypt(_zeros(24), _zeros(12), _zeros(16), _zeros(0))
+        match aes192_gcm_decrypt(_zeros(24), _zeros(12), _slice(sealed, 0, 16), _zeros(0), _slice(sealed, 16, 16)):
+            AesGcmResult.Ok(pt):
+                expect(_to_i64(pt, 0, 16)).to_equal(_to_i64(_zeros(16), 0, 16))
+            AesGcmResult.Err(msg):
+                fail("AES-192 round trip rejected: {msg}")
+
+    it "AES-192: empty key, empty nonce and short tag are rejected":
+        step("AES-192 wrong lengths")
+        val sealed = aes192_gcm_encrypt(_zeros(24), _zeros(12), _zeros(16), _zeros(0))
+        val ct = _slice(sealed, 0, 16)
+        val tag = _slice(sealed, 16, 16)
+        expect(_err_msg(aes192_gcm_decrypt(_zeros(0), _zeros(12), ct, _zeros(0), tag))).to_equal("AES-192 key must be 24 bytes")
+        expect(_err_msg(aes192_gcm_decrypt(_zeros(24), _zeros(0), ct, _zeros(0), tag))).to_equal("GCM nonce must be 12 bytes")
+        expect(_err_msg(aes192_gcm_decrypt(_zeros(24), _zeros(12), ct, _zeros(0), _slice(tag, 0, 12)))).to_equal("GCM tag must be 16 bytes")

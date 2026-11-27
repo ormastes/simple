@@ -1,0 +1,67 @@
+use std.spec.{describe, it, expect}
+use compiler.types.{TypeInferencer, DimSolver}
+use compiler.types.bidirectional_types.{BidirHirExpr}
+use compiler.backend.irdsl.parser.{IrDslParser}
+use compiler.driver.driver_api_core.{find_runtime_lib_dir}
+use compiler.common.assurance.nat_normalizer_receipt.{
+    BoundedNatNormalizerReceiptV1, BoundedNatNormalizerOutcomeV1,
+    nat_normalizer_cannot_close_replay_v1
+}
+use compiler.common.assurance.sha512_integrity_receipt.{
+    materialize_optional_sha512_integrity_receipt_v1
+}
+use std.common.crypto.sha256.{sha256_text}
+
+describe "August audit Batch 1 compiler restorations":
+    it "re-exports TypeInferencer from bidirectional_inferencer and DimSolver cleanly via 30.types facade":
+        val ctx = TypeInferencer.empty()
+        expect(ctx.synthesize_expr(BidirHirExpr.int_lit(7)).to_string()).to_equal("i64")
+        val solver = DimSolver.new()
+        expect(solver.errors.len()).to_equal(0)
+
+    it "parses colon-bearing params, backends, and category fields in IrDslParser without truncation":
+        val lines = [
+            "instruction add:",
+            "    params: lhs:i64, rhs:i64",
+            "    backends: llvm:aot, cranelift:jit",
+            "    category: arith:int",
+            ""
+        ]
+        var parser = IrDslParser(lines: lines, current_line: 0, instructions: [])
+        parser.parse()
+        expect(parser.instructions.len()).to_equal(1)
+        expect(parser.instructions[0].params.len()).to_equal(2)
+        expect(parser.instructions[0].params[0].param_type).to_equal("i64")
+        expect(parser.instructions[0].params[1].name).to_equal("rhs")
+        expect(parser.instructions[0].backends.len()).to_equal(2)
+        expect(parser.instructions[0].backends[0]).to_equal("llvm:aot")
+        expect(parser.instructions[0].category).to_equal("arith:int")
+
+    it "loads driver_api_core and constructs bounded assurance receipts with i64 fields":
+        val lib_dir = find_runtime_lib_dir()
+        expect(lib_dir.len() >= 0).to_equal(true)
+        val h0 = sha256_text("bin")
+        val h1 = sha256_text("src")
+        val h2 = sha256_text("norm")
+        val nat_receipt = BoundedNatNormalizerReceiptV1(
+            schema: "BoundedNatNormalizerReceipt-v1",
+            normalizer_name: "nat",
+            normalizer_version: "1",
+            normalizer_binary_hash: h0,
+            source_export_hash: h1,
+            normalized_export_hash: h2,
+            module_name: "m",
+            declaration_root: "r",
+            max_literal_bits: 16,
+            max_rewrite_steps: 4,
+            native_extensions_enabled: false,
+            outcome: BoundedNatNormalizerOutcomeV1.Normalized,
+            diagnostic: ""
+        )
+        expect(nat_receipt.max_literal_bits).to_equal(16)
+        expect(nat_receipt.max_rewrite_steps).to_equal(4)
+        expect(nat_normalizer_cannot_close_replay_v1(nat_receipt)).to_contain("NONPROMOTING")
+        val sha_receipt = materialize_optional_sha512_integrity_receipt_v1(
+            "artifact", "abc", sha256_text("abc"))
+        expect(sha_receipt.subject_length).to_equal(3)
+        expect(sha_receipt.diagnostic()).to_equal("")

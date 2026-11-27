@@ -62,9 +62,18 @@ earlier, differently-configured invocation is still alive.
 use std.spec.step
 
 use std.spec.*
-use std.io_runtime.process_run
+use std.io_runtime.{process_run, env_get}
+use std.nogc_sync_mut.io.process_ops.{resolve_shell_argv}
 
 val TARGET = "test/fixtures/mem_infra/env_override_target_spec.spl"
+
+# Only honor SIMPLE_BINARY (never SIMPLE_TEST_BINARY, which the scenarios below
+# explicitly override in the child environment to test passthrough).
+fn passthrough_runner_binary() -> text:
+    val bin_override = env_get("SIMPLE_BINARY")
+    if bin_override != "" and bin_override != nil:
+        return bin_override.replace("\\", "/")
+    "bin/simple"
 
 # @step: Run the target fixture with an explicit SIMPLE_TEST_BINARY value
 #
@@ -74,23 +83,29 @@ val TARGET = "test/fixtures/mem_infra/env_override_target_spec.spl"
 # directly on the `bin/simple test` process fails to reach the spec body, no
 # spec-side spelling of the lookup can rescue it.
 fn run_target_with(value: text) -> text:
-    val cmd = "SIMPLE_TEST_BINARY={value} bin/simple test '{TARGET}' --no-db 2>&1"
-    val (out, _err, _code) = process_run("/bin/sh", ["-c", cmd])
+    val bin = passthrough_runner_binary()
+    val cmd = "SIMPLE_TEST_BINARY={value} '{bin}' test '{TARGET}' --no-db 2>&1"
+    val (sh_bin, sh_args) = resolve_shell_argv(cmd)
+    val (out, _err, _code) = process_run(sh_bin, sh_args)
     out
 
 # Seeds a daemon whose environment carries NO override, so that a subsequent
 # overridden run has a stale daemon available to be wrongly reused.
 fn seed_daemon_without_override():
-    val cmd = "bin/simple test '{TARGET}' --no-db >/dev/null 2>&1"
-    val (_o, _e, _c) = process_run("/bin/sh", ["-c", cmd])
+    val bin = passthrough_runner_binary()
+    val cmd = "'{bin}' test '{TARGET}' --no-db >/dev/null 2>&1"
+    val (sh_bin, sh_args) = resolve_shell_argv(cmd)
+    val (_o, _e, _c) = process_run(sh_bin, sh_args)
 
 # The sibling-selector fixture reports one line per selector name, so a single
 # run answers the question for the whole family at once.
 val SIBLING_TARGET = "test/fixtures/mem_infra/env_selector_probe_spec.spl"
 
 fn run_siblings_with(value: text) -> text:
-    val cmd = "SIMPLE_MMU_DIRECT_BACKEND={value} LLVM_BUILD={value} T32_PYTHON_BINARY={value} SIMPLEOS_QEMU_SIMPLE_BIN={value} SIMPLE_HOSTED_BROWSER_EXECUTABLE={value} CPU_SIMD_RENDER_SCALE_TEST_SIMPLE_BIN={value} bin/simple test '{SIBLING_TARGET}' --no-db 2>&1"
-    val (out, _err, _code) = process_run("/bin/sh", ["-c", cmd])
+    val bin = passthrough_runner_binary()
+    val cmd = "SIMPLE_MMU_DIRECT_BACKEND={value} LLVM_BUILD={value} T32_PYTHON_BINARY={value} SIMPLEOS_QEMU_SIMPLE_BIN={value} SIMPLE_HOSTED_BROWSER_EXECUTABLE={value} CPU_SIMD_RENDER_SCALE_TEST_SIMPLE_BIN={value} '{bin}' test '{SIBLING_TARGET}' --no-db 2>&1"
+    val (sh_bin, sh_args) = resolve_shell_argv(cmd)
+    val (out, _err, _code) = process_run(sh_bin, sh_args)
     out
 
 fn sibling_observed(output: text, name: text, value: text) -> bool:

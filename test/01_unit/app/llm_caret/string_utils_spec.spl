@@ -1,0 +1,85 @@
+# @req REQ-SSPEC-UNIT
+"""
+# Claude full string utils
+
+As a caret user, truncated tool output, plural labels and escaped patterns must
+render exactly as expected.
+"""
+
+use std.spec.step
+use std.spec.*
+use app.llm_caret.claude_full.utils.stringUtils.*
+
+describe "Claude full string utils":
+    it "keeps output intact when the accumulator is under its limit":
+        step("append two chunks under the cap")
+        val acc = EndTruncatingAccumulator.new(10).append("abc").append("de")
+        expect(acc.toString()).to_equal("abcde")
+        expect(acc.truncated()).to_equal(false)
+        expect(acc.length()).to_equal(5)
+        expect(acc.totalBytes()).to_equal(5)
+
+    it "truncates at the cap and reports the removed kilobytes":
+        step("append past the cap")
+        val acc = EndTruncatingAccumulator.new(4).append("abcdef").append("ghijkl")
+        expect(acc.content).to_equal("abcd")
+        expect(acc.truncated()).to_equal(true)
+        expect(acc.totalBytes()).to_equal(12)
+        expect(acc.toString()).to_equal("abcd\n... [output truncated - 0KB removed]")
+
+    it "clears back to an empty accumulator with the same cap":
+        step("clear")
+        val acc = EndTruncatingAccumulator.new(4).append("abcdefgh").clear()
+        expect(acc.toString()).to_equal("")
+        expect(acc.truncated()).to_equal(false)
+        expect(acc.maxSize).to_equal(4)
+
+    it "escapes regex metacharacters":
+        step("escape")
+        expect(escapeRegExp("a.b*c")).to_equal("a\\.b\\*c")
+        expect(escapeRegExp("(x|y)[0]")).to_equal("\\(x\\|y\\)\\[0\\]")
+        expect(escapeRegExp("plain")).to_equal("plain")
+
+    it "capitalizes the first letter only":
+        step("capitalize")
+        expect(capitalize("hello world")).to_equal("Hello world")
+        expect(capitalize("")).to_equal("")
+
+    it "picks singular, explicit plural, or default plural":
+        step("plural")
+        expect(plural(1, "file", "")).to_equal("file")
+        expect(plural(2, "file", "")).to_equal("files")
+        expect(plural(0, "child", "children")).to_equal("children")
+
+    it "returns the first line of multi-line text":
+        step("firstLineOf")
+        expect(firstLineOf("one\ntwo\nthree")).to_equal("one")
+        expect(firstLineOf("solo")).to_equal("solo")
+
+    it "counts a character from a start offset":
+        step("countCharInString")
+        expect(countCharInString("a,b,c,d", ",", 0)).to_equal(3)
+        expect(countCharInString("a,b,c,d", ",", 4)).to_equal(1)
+
+    it "normalizes full-width digits and spaces":
+        step("normalize")
+        expect(normalizeFullWidthDigits("１２３０")).to_equal("1230")
+        expect(normalizeFullWidthSpace("a　b")).to_equal("a b")
+
+    it "joins lines under the size limit unchanged":
+        step("safeJoinLines fits")
+        expect(safeJoinLines(["ab", "cd"], ",", 10)).to_equal("ab,cd")
+
+    it "truncates the line that overflows and appends a marker":
+        step("safeJoinLines overflow")
+        expect(safeJoinLines(["ab", "cdefghijklmnopqrstuvwxyz"], ",", 22)).to_equal("ab,cdefg...[truncated]")
+
+    it "emits only the marker when no room remains for the line":
+        step("safeJoinLines no room")
+        expect(safeJoinLines(["ab", "cd"], ",", 4)).to_equal("ab...[truncated]")
+
+    it "keeps only the requested number of lines":
+        step("truncateToLines")
+        expect(truncateToLines("a\nb\nc\nd", 2)).to_equal("a\nb...")
+        expect(truncateToLines("a\nb", 5)).to_equal("a\nb")
+        expect(joinStringLines(["x", "y"])).to_equal("x\ny")

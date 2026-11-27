@@ -15,7 +15,7 @@ use crate::value::{Env, ExportTable, Value};
 use super::module_cache::{cache_partial_module_exports, normalize_path_key};
 use crate::interpreter::MODULE_ENV_BY_OWNER;
 
-mod evaluation_helpers;
+pub(crate) mod evaluation_helpers;
 use evaluation_helpers::{
     add_builtin_types, create_filtered_env, export_functions, process_bare_exports, process_imports_and_assignments,
     register_definitions,
@@ -58,6 +58,11 @@ pub fn evaluate_module_exports_with_preloaded(
     global_enums: &mut Enums,
     preloaded_env: Option<&HashMap<String, Value>>,
 ) -> Result<ModuleExports, CompileError> {
+    let _unit_scope = crate::units::scope::UnitScopeGuard::enter_module(
+        module_path.map(|p| super::module_cache::module_owner_key(p)).as_deref(),
+    );
+    let _module_origin =
+        super::ClosureOriginGuard::enter_module_top_level(module_path.map(|p| p.to_string_lossy()).as_deref());
     let mut env: Env = Env::new();
     let mut exports = ExportTable::new();
     let mut local_functions: HashMap<String, Arc<FunctionDef>> = HashMap::new();

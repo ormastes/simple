@@ -2,7 +2,11 @@
 
 - **Filed:** 2026-09-02 — found while reproducing
   `is_dir_always_false_shell_dependency_2026-09-02.md`
-- **Status:** OPEN (compiler defect; not fixed here)
+- **Status:** SUPERSEDED 2026-11-11 (lane p3-comp8) — FIXED at tip in seed source
+  (`abc4a53d3fca8`, patch-identical to lane p3-compiler3's `a8a1070724d7`);
+  tracked `bin/simple.exe` (build-commit `46fe8f6b6def`, built 19:13) predates
+  the fix (landed 19:29), so campaign specs still observe the old escape
+  behavior until the seed-fix lane rebuilds the seed binary.
 - **Host:** Windows 11, `bin/simple.exe` 16,347,136 bytes,
   md5 `d52d770724a9f8797e98ac7819709ab9`
 
@@ -97,3 +101,74 @@ literal. Two engine-independent routes exist: `char_from_code(92)` (used by
 `test/01_unit/lib/common/windows_path_*_spec.spl`), and a RAW string —
 `r"C:\Users\name"` — which `test/01_unit/lib/common/string_literals_spec.spl:68`
 already relies on and which is unaffected by this defect.
+
+## Addendum 2026-11-11 — P3 lane compiler3 verdict: LIVE — FIXED in seed lexer (commit a8a1070724d7)
+
+Triage on refreshed seed (build-commit 0791c2b7f4a7, bin/simple.exe 37577216 bytes)
+at release/1.0.0 tip 7d4140c1a6b3 (work/p3-compiler3-20261111).
+
+- LIVE confirmed: byte-level probe on the refreshed seed measured raw `"a\b"`
+  → `a`+0x08 (len 2), `"C:\Temp"` → len 6, `"C:\Windows\System32"` → len 17 —
+  backslashes deleted exactly as filed.
+- Root cause (measured, not inferred): the seed lexer
+  (`src/compiler_rust/parser/src/lexer/escapes.rs process_escape`) dropped the
+  backslash in its default arm (`\T` → `T`), and had non-authority arms
+  (`\b`→backspace, `\a`/`\f`/`\v`, `\:`/`\/`/`\.`/`\-`) that the pure-Simple
+  lexer (`lexer_struct.spl scan_string`, the semantic authority) does not have —
+  its `else` preserves `\` + char for every non-escape.
+- Fix (a8a1070724d7): new `EscapeResult::KeepBoth(char)` — unknown escapes keep
+  both bytes at all four call sites (f-string, ADR-005 char literal, i18n x2);
+  the non-authority arms were removed; `\{`/`\}` intentionally retained
+  (load-bearing JSON/CSS spec users — a residual divergence from the authority,
+  recorded here as follow-up).
+- Verification (seed-smoke labels throughout):
+  - `cargo test -p simple-parser` → 453 passed + 2 new pinning tests
+    (`test_unknown_escape_preserves_backslash`,
+    `test_unknown_escape_in_char_literal_is_error`), 0 failed.
+  - End-to-end on a debug seed rebuilt from this tree (cargo build, llvm-mingw
+    clang shim; NOT the tracked bin/simple.exe): probe spec 5/5 — raw
+    `"a\b"` len 3, `"C:\Temp"` len 7, `"C:\Windows\System32"` len 19 (byte
+    inspection: both backslashes present), escaped `"a\\b"` len 3,
+    `char_from_code(92)` oracle len 3.
+  - Regression spot-checks (fixed vs unfixed seed, identical results):
+    `string_literals_spec.spl` 24/24 PASS both; `json_unicode_escape_spec.spl`
+    6/11 both (5 pre-existing failures); `query_diagnostics_spec.spl` 11/15
+    both (4 pre-existing failures, `\{` behavior unchanged).
+- Correction to this doc: the expected length table's "20" for
+  `C:\Windows\System32` is a miscount — the literal is 19 characters
+  (C, :, \, W…s, \, S…2). The pre-fix JIT measurement of 19 was actually
+  correct; only the interpreter's 17 was the defect.
+- Note: the tracked refreshed seed bin/simple.exe does NOT contain the fix
+  (seed rebuild needed); the end-to-end evidence above comes from a debug build
+  of the same source tree. The pure-Simple self-hosted side needed no change —
+  it already implements the preserving contract.
+
+## Addendum 2026-11-11 — P3 lane comp8 verdict: SUPERSEDED (absorber: lane p3-compiler3 seed fix, re-verified)
+
+Disposition re-verified fresh on `origin/release/1.0.0` tip `dacccfc78fd10`
+(worktree `simple-p3-comp8-20261111`):
+
+- Fix commit `abc4a53d3fca8` ("fix(lexer): seed preserves backslash for
+  non-escape sequences", landed 2026-11-10 19:29) IS an ancestor of the
+  release tip; `src/compiler_rust/parser/src/lexer/escapes.rs` at tip carries
+  `EscapeResult::KeepBoth` and the removed non-authority arms, exactly as the
+  p3-compiler3 addendum above describes. `git patch-id` confirms
+  `abc4a53d3fca8` and the addendum's `a8a1070724d7` are the identical patch
+  (`6a244f7b834e`), re-landed via merge.
+- Pure-Simple lexer side needed no change (already preserving), per the
+  p3-compiler3 addendum.
+- The tracked campaign seed `bin/simple.exe` was refreshed to build-commit
+  `46fe8f6b6def` (2026-11-10 19:13) — BEFORE the fix landed (19:29) — so it
+  does not contain the fix. Behavioral probe on the tracked binary
+  (interpreter mode, seed-smoke): `"a\b".len()` measured 2 (expect 3),
+  `"a\T".len()` measured 2 (expect 3), `"a\n".len()` 2 and raw `r"a\b"` 3 both
+  correct — i.e. the tracked binary still exhibits exactly the filed defect.
+- Per the campaign's known-live routing, Rust seed fixes and the seed rebuild
+  belong to the seed-fix lane. No in-lane change: a regression spec cannot
+  PASS on the current tracked binary, and the p3-compiler3 addendum already
+  records the passing debug-build/cargo verification.
+- Status header flipped OPEN → SUPERSEDED.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lanes p3-compiler3/p3-comp8: SUPERSEDED — the fix (EscapeResult::KeepBoth, abc4a53d3fca8) is an ancestor of this lane base; this lane binary is the tracked bin/simple.exe (build 46fe8f6b6def), which predates the fix, so a behavioral probe here still shows the filed defect. Per the known-live routing, the seed rebuild belongs to the seed-fix lane. No in-lane change.

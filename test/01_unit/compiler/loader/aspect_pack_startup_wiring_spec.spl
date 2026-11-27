@@ -45,7 +45,8 @@ doc/05_design/REQ-APKS-01.md
 
 use std.spec.{describe, it}
 use std.common.aspect_pack.{ApkModuleSourceV1, apk_build_pack_v1,
-    apk_open_pack_v1, apk_load_module_v1}
+    apk_open_pack_v1, apk_validate_pack_directory_v1, apk_load_module_v1,
+    APK_FLAG_ASPECT_PACK}
 use std.common.string_core.{text_to_bytes, bytes_to_text}
 use std.io_runtime.{file_write_bytes, file_read, mkdir_p, platform_name}
 use compiler.loader.aspect_pack_io.{pack_read_range, pack_file_size}
@@ -168,6 +169,55 @@ describe "Startup fails closed on a bad pack":
         val r = startup_load_aspect_packs(bad)
         expect(r.exit_code).to_equal(1)
         expect(r.error.contains("not a valid SMFAPK1 container")).to_equal(true)
+
+    it "a header-valid pack with a corrupt directory is rejected before registration":
+        step("Verify: malformed directory geometry cannot be admitted")
+        # @req: REQ-APKS-01
+        val built = apk_build_pack_v1([
+            ApkModuleSourceV1(module_id: "custom.lib.bad_directory",
+                aspect_id: "aspect.bad_directory",
+                payload: _payload("bad_directory"))
+        ])
+        var malformed = built.bytes
+        # Keep the canonical header and payload but claim two directory rows;
+        # `apk_open_pack_v1` accepts the geometry while the full directory
+        # validator must reject the absent second row.
+        malformed[12] = 2u8
+        val handle = apk_open_pack_v1(malformed)
+        expect(handle.ok).to_equal(true)
+        expect(apk_validate_pack_directory_v1(malformed, handle)).to_contain(
+            "directory entry 1 is corrupt")
+        _ = mkdir_p(_pack_dir())
+        val path = _pack_path("bad_directory")
+        _ = file_write_bytes(path, malformed)
+        val r = startup_load_aspect_packs(path)
+        expect(r.exit_code).to_equal(1)
+        expect(r.packs_loaded).to_equal(0)
+        expect(r.error).to_contain("has an invalid directory")
+        # Replacing the rejected file and admitting it through the same loader
+        # proves the failed attempt did not publish the path in loader state.
+        _ = file_write_bytes(path, built.bytes)
+        expect(startup_register_aspect_pack(r.loader, path)).to_equal("")
+
+    it "a pack with noncanonical header flags is rejected before registration":
+        step("Verify: unknown aspect-pack header flags fail closed")
+        # @req: REQ-APKS-01
+        val built = apk_build_pack_v1([
+            ApkModuleSourceV1(module_id: "custom.lib.unknown_flags",
+                aspect_id: "aspect.unknown_flags",
+                payload: _payload("unknown_flags"))
+        ])
+        var malformed = built.bytes
+        malformed[10] = (APK_FLAG_ASPECT_PACK | 2) as u8
+        _ = mkdir_p(_pack_dir())
+        val path = _pack_path("unknown_flags")
+        _ = file_write_bytes(path, malformed)
+        val r = startup_load_aspect_packs(path)
+        expect(r.exit_code).to_equal(1)
+        expect(r.packs_loaded).to_equal(0)
+        expect(r.error).to_contain("has unsupported flags")
+        _ = file_write_bytes(path, built.bytes)
+        expect(startup_register_aspect_pack(r.loader, path)).to_equal("")
 
     it "a missing second pack rolls back the valid first registration":
         step("Verify: multi-pack startup failure removes its accepted prefix")

@@ -1,6 +1,6 @@
 # Architecture / structure rule audit of the 2026-08-10→11 landing window
 
-Status: OPEN (P3)
+Status: SUPERSEDED 2026-11-11 (lane p3-ne20) — F1/F2/F4/F7 verified resolved in-tree; F3/backlog/Perl/MDSOC items routed to owner by 2026-11-04 + 2026-11-10 addenda
 Status re-verified 2026-08-17 by source inspection (triage shard 00).
 **Window:** `45e486f0be6..276c61ed464` on `origin/main` — **272 commits, 761
 files changed**. `45e486f0be6` is the exact tip audited by the predecessor doc
@@ -237,3 +237,89 @@ re-routing to an architecture decision (ADR) rather than the bug queue.
 Reconfirmed: this is an audit-window record (structure/architecture rule
 compliance over a specific commit range on origin/main), not a single
 fixable defect. Left as-is, no code change attempted.
+
+## Triage 2026-11-04 (c28-w4)
+
+F2 (std.async manifest row) still live: runtime.spl:12-14 import std.async.* while src/lib/async/ does not exist and gc_boundary_check.spl:163 keeps the rank-3 async row whose comment claims nothing imports it - comment is wrong. F4 (class X(Y) inheritance) is RESOLVED: zero class X(Y) declarations remain under src/compiler (the 3 cited files moved or were rewritten). F1 still present: host_vulkan_lavapipe_provider.spl:97 imports std.gpu (nogc_sync_mut -> gc). F3 (fanout RED) not re-run this pass. QUESTIONS FOR OWNER: (1) F1 choose (a) read device name via rt_vulkan extern or (b) move vulkan_sffi_device_name to common/ ; (2) F2 retire the async manifest row or rewrite the 3 imports to std.nogc_async_mut.async.* ; (3) 389-violation runtime-family backlog: ratchet-only or burn-down?
+
+## F1/F2 scoped fix 2026-11-10 (work/p2fix-librt-20261110, seed-smoke only)
+
+No owner answer to the 2026-11-04 questions was on record; the fix therefore
+follows the decisions already written down in
+doc/04_architecture/runtime/runtime_family_support_matrix.md §2.6.1 (no-GC sync
+owns the Vulkan SFFI wrappers; GC/gpu copies are re-export facades) and
+doc/05_design/runtime/sosix_runtime_unification_design.md (`std.async.future`
+canonical implementation is `nogc_async_mut/async/future.spl`, rank 2).
+
+- F1 (std.gpu): `host_vulkan_lavapipe_provider.spl` now imports
+  `vulkan_sffi_device_name` from `std.nogc_sync_mut.gpu.engine2d.sffi_vulkan`
+  — the same-named one-line facade (`rt_vulkan_device_name(id)`) owned by the
+  importer's own family — instead of through the `std.gpu` gc_async_mut alias.
+  Evidence receipt behavior is unchanged. Guard:
+  test/01_unit/lib/runtime_family_forbidden_import_guard_spec.spl (fails on
+  reintroduction; seed-smoke PASS 3/3, negative test RED).
+- F2 (std.async): `nogc_async_mut/async/runtime.spl:12-14` now imports
+  `std.nogc_async_mut.async.{future,poll,combinators}` — the canonical family
+  path of the same sibling modules the search order already resolved to.
+  Chose the audit's option (b); option (a) (retiring the rank-3 "async"
+  manifest row at gc_boundary_check.spl:163) is compiler-owner work — it
+  changes diagnostics for every `std.async.*` importer at once and has three
+  Rust-side mirrors (module_loader.rs, checker_resources.rs family enums) that
+  must move together. REMAINING for the runtime-family owner: retire the
+  phantom "async" row + its now-proven-false "nothing imports async.*"
+  comment, in Simple and Rust mirrors together.
+
+Multi-finding audit scope (F3 fanout, 389-violation backlog ratchet, Perl
+scripts, MDSOC adoption) untouched. Runtime verification: Rust seed
+interpreter only; no self-hosted/native claim.
+
+## Triage 2026-11-11 (lane p3-ne20) — verdict: SUPERSEDED (addenda absorb the row)
+
+Fresh re-verification on origin/release/1.0.0 (worktree @9202f187777), not
+resting on the 2026-11-04/2026-11-10 addenda alone:
+
+- **F1 RESOLVED in-tree:** `host_vulkan_lavapipe_provider.spl:101` imports
+  `vulkan_sffi_device_name` from `std.nogc_sync_mut.gpu.engine2d.sffi_vulkan`
+  (own-family facade), not through the `std.gpu` gc alias — matches the
+  2026-11-10 p2fix-librt-20261110 fix.
+- **F2 RESOLVED in-tree:** `nogc_async_mut/async/runtime.spl:12-14` import
+  `std.nogc_async_mut.async.{future,poll,combinators}`; the phantom
+  `family: "async"` manifest row at `gc_boundary_check.spl:163` remains but
+  is now a deliberately documented reserved/no-op row with an accurate
+  dot-boundary-matching comment — the 2026-11-10 "retire the row" residual is
+  moot as filed.
+- **F4 RESOLVED:** zero `class X(Y)` declarations remain under `src/compiler/`
+  (fresh grep for the three cited names: no hits).
+- **F7 RESOLVED:** `rules.sdl` is committed at tip (9902 bytes; git log shows
+  `139fa13e7c9 fix(check): re-bind rules.sdl digest and lower rules_sdl_gates
+  floor to 19`) — the every-push-blocked condition is gone.
+- **F5/F6** were corrected in-doc at audit time.
+
+Remaining items are owner decisions already routed by this doc's own
+addenda, not defects: F3 fanout (split-vs-rebaseline + DO-NOT-REFACTOR tree
+exemption; a fresh `check-directory-fanout.shs` re-query was started in-lane
+and aborted at ~8 min as a nice-to-have — the 2026-11-04 addendum already
+recorded "F3 not re-run this pass" and routed it), the 389-violation
+runtime-family backlog ratchet question (2026-11-04 owner questions), the two
+Perl scripts (sibling row `architecture_rule_audit_2026-08-10`, BLOCKED with
+grant recorded by lane p3-ne20 same day), and MDSOC/ECS adoption (directory-
+wide migration, explicitly not unilateral). Status flipped to SUPERSEDED.
+Lane evidence: `build/review/p3fix-ne20-20261111.sdn`.
+
+## Verification 2026-11-25 (lane p3-bac) — SUPERSEDED status confirmed on release/1.0.0
+
+Fresh spot re-verification on `origin/release/1.0.0` (worktree @fcd95d41d60),
+confirming the 2026-11-11 triage rather than resting on it:
+
+- **F1:** `host_vulkan_lavapipe_provider.spl` imports
+  `vulkan_sffi_device_name` from `std.nogc_sync_mut.gpu.engine2d.sffi_vulkan`
+  (own-family facade) with an explicit comment citing this doc's F1 — no
+  `std.gpu` gc-alias import remains.
+- **F2:** `nogc_async_mut/async/runtime.spl:12-14` import
+  `std.nogc_async_mut.async.{future,poll,combinators}`.
+- **F7:** `rules.sdl` is committed at tip (`git ls-tree origin/release/1.0.0
+  rules.sdl` → blob present).
+- **F4:** grep for `class X(Y)` declaration shapes under `src/compiler/`
+  returns only comment/docstring mentions, no declarations.
+
+Status remains SUPERSEDED; no code change made by this lane.

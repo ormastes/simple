@@ -1,0 +1,95 @@
+# ACTUAL API-opened owners only. No fake adapter, nullable owner or skip-pass.
+# Platform owners can invoke route_checks from their full native lifecycle tests.
+use std.nogc_async_mut.container.api_v2.*
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.container.effect_deadline_v1.{ContainerEffectDeadlineV1, container_effect_deadline_v1}
+use std.common.contracts.container.runtime_v1.{RuntimeIntentV1, RUNTIME_STATUS_REJECTED}
+use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
+use std.nogc_sync_mut.sosix.time.sosix_time_now_unix_micros
+use std.common.contracts.orchestration.resource_v1.{parse_resource_document, as_dict, as_text, only_known}
+
+pub fn simple_container_api_route_checks_v2(owner: SimpleContainerOwnerV2,
+        request: ContainerExecutionRequestV2, deadline: ContainerEffectDeadlineV1):
+    assert(simple_container_backend_v2(owner) == request.plan.backend)
+    val owned_scope = simple_container_scope_v2(owner)
+    assert(owned_scope.physical_host_id == request.plan.physical_host_id)
+    assert(owned_scope.native_machine_id == request.plan.native_machine_id)
+    assert(owned_scope.continuity_id == request.plan.continuity_id)
+    val before = simple_container_project_v2(owner, request).unwrap()
+    assert(before.request_digest == request.plan.request_digest)
+    assert(before.operation_id == request.plan.operation_id)
+    val unsupported = simple_container_apply_v2(owner, "not-an-action", request, deadline)
+    assert(unsupported.operation.status == RUNTIME_STATUS_REJECTED)
+    assert(unsupported.operation.reason == "container-api-action-unsupported")
+    val preserved = simple_container_project_v2(unsupported.owner, request).unwrap()
+    assert(preserved.request_digest == before.request_digest)
+    assert(preserved.cpu_millis == before.cpu_millis)
+    assert(preserved.memory_bytes == before.memory_bytes)
+    var wrong = request
+    wrong.plan.backend = if request.plan.backend == "linux-podman": "windows-docker-process" else: "linux-podman"
+    val misrouted = simple_container_apply_v2(owner, "create", wrong, deadline)
+    assert(misrouted.operation.status == RUNTIME_STATUS_REJECTED)
+    assert(misrouted.operation.reason == "container-api-backend-mismatch")
+    assert(simple_container_project_v2(misrouted.owner, request).unwrap().request_digest == before.request_digest)
+    wrong = request
+    wrong.plan.boot_id = "other-native-boot"
+    wrong.plan.continuity_id = "other-native-boot"
+    val stale = simple_container_apply_v2(owner, "start", wrong, deadline)
+    assert(stale.operation.status == RUNTIME_STATUS_REJECTED)
+    assert(stale.operation.reason == "container-api-scope-mismatch")
+    wrong = request
+    wrong.plan.native_machine_id = "other-native-machine"
+    assert(simple_container_apply_v2(owner, "start", wrong, deadline).operation.reason == "container-api-scope-mismatch")
+    wrong = request
+    wrong.plan.physical_host_id = "other-authorized-alias"
+    assert(simple_container_apply_v2(owner, "start", wrong, deadline).operation.reason == "container-api-scope-mismatch")
+    val invalid_read = simple_container_read_v2(owner, "create", request)
+    assert(invalid_read.operation.reason == "container-api-read-action-unsupported")
+    val wrong_read = simple_container_read_v2(owner, "inspect", wrong)
+    assert(wrong_read.operation.reason == "container-api-scope-mismatch")
+    val scope = ContainerHostScopeV2(physical_host_id: request.plan.physical_host_id,
+        service_scope_id: request.plan.service_scope_id, boot_id: request.plan.boot_id,
+        provider_generation: request.plan.provider_generation, native_machine_id: request.plan.native_machine_id,
+        continuity_mode: request.plan.continuity_mode, continuity_id: request.plan.continuity_id)
+    val invalid_intent = RuntimeIntentV1(pod_uid: request.plan.workload_uid, attempt: request.plan.attempt,
+        provider_generation: request.plan.provider_generation, operation_id: "wrong-operation", engine: "invalid",
+        native_id: "", node_boot_id: container_scope_fence_id_v2(scope).unwrap(), phase: "prepared")
+    val refused_recovery = simple_container_recover_v2(owner, request, invalid_intent)
+    assert(refused_recovery.operation.reason == "container-api-intent-mismatch")
+
+pub fn simple_container_api_unsupported_checks_v2():
+    assert(simple_container_observe_v2("unsupported", "not-read").unwrap_err() == "container-api-backend-unsupported")
+    val scope = ContainerHostScopeV2(physical_host_id: "alias", service_scope_id: "service", boot_id: "boot",
+        provider_generation: 1, native_machine_id: "actual-machine", continuity_mode: "native-boot-incarnation-v1", continuity_id: "boot")
+    assert(simple_container_open_v2("unsupported", "not-read", "not-opened", scope, "a".repeat(64), 100).unwrap_err() == "container-api-backend-unsupported")
+
+pub fn simple_container_configured_route_checks_v2(backend: text, case_path: text):
+    val case_source = file_read_regular_no_follow_bounded(case_path, 65536).unwrap()
+    val parsed = parse_resource_document(case_source).unwrap()
+    val fields = as_dict(parsed.0, "", parsed.1).unwrap()
+    assert(only_known(fields, ["backend", "policyPath", "requestPath", "stateRoot", "providerIdentityDigest"], "", parsed.1).is_ok())
+    assert(as_text(fields["backend"], "backend", parsed.1).unwrap() == backend)
+    val policy_path = as_text(fields["policyPath"], "policyPath", parsed.1).unwrap()
+    val request_path = as_text(fields["requestPath"], "requestPath", parsed.1).unwrap()
+    val state_root = as_text(fields["stateRoot"], "stateRoot", parsed.1).unwrap()
+    val pin = as_text(fields["providerIdentityDigest"], "providerIdentityDigest", parsed.1).unwrap()
+    val policy = file_read_regular_no_follow_bounded(policy_path, 1048576).unwrap()
+    val request = container_execution_request_decode_v2(file_read_regular_no_follow_bounded(request_path, 2097152).unwrap()).unwrap()
+    assert(request.plan.backend == backend)
+    val observed = simple_container_observe_v2(backend, policy).unwrap()
+    # Weak boot counters must fail this native-only case until persistent service
+    # incarnation and quarantine have their own explicit owner and evidence.
+    assert(observed.continuity_assurance == "native-boot-incarnation-v1")
+    assert(observed.native_machine_id == request.plan.native_machine_id)
+    assert(observed.native_boot_id == request.plan.boot_id)
+    assert(observed.provider_identity_digest == pin)
+    val scope = ContainerHostScopeV2(physical_host_id: request.plan.physical_host_id,
+        service_scope_id: request.plan.service_scope_id, boot_id: request.plan.boot_id,
+        provider_generation: request.plan.provider_generation, native_machine_id: request.plan.native_machine_id,
+        continuity_mode: request.plan.continuity_mode, continuity_id: request.plan.continuity_id)
+    val owner = simple_container_open_v2(backend, policy, state_root, scope, pin, 20000).unwrap()
+    val now = sosix_time_now_unix_micros() / 1000
+    assert(now > 0)
+    val deadline = container_effect_deadline_v1(request.plan.request_digest, request.plan.operation_id,
+        ["create", "start", "exec", "attach"], now + 60000).unwrap()
+    simple_container_api_route_checks_v2(owner, request, deadline)

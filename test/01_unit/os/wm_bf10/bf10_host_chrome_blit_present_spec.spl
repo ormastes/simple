@@ -1,0 +1,34 @@
+# BF-10: HostCompositor native_pixel_lane cache-miss present & dirty-rect subrect blit
+# Covers Bug #11 (host_wm_cached_chrome_full_frame_blit_2026-07-06)
+
+use std.spec
+use common.window_protocol.geometry.{Size}
+use os.compositor.host_compositor_entry.{HostCompositor}
+use os.compositor.dirty_rect.{IRect}
+use os.userlib.ipc_protocol.{COMP_CREATE_WINDOW}
+
+describe "BF-10 HostCompositor cached chrome & native pixel present":
+    it "presents on native_pixel_lane cache miss, skips when clean, and presents dirty rects on cache hit":
+        var comp = HostCompositor.new_headless(Size(width: 320u64, height: 240u64))
+        expect(comp.native_pixel_lane).to_equal(true)
+        comp.apply_bridge_request(
+            1, 0, COMP_CREATE_WINDOW.to_i64(), 0, "Panel",
+            16, 16, 120, 100, "<p>alpha</p>", 1, "panel"
+        )
+        expect(comp.pixel_backend.present_count).to_equal(0)
+
+        # First frame (cache miss): renders full scene into pixel_backend AND presents
+        comp.render_frame()
+        expect(comp.pixel_backend.present_count).to_equal(1)
+
+        # Second frame with no damage: skips rendering without spurious present
+        comp.render_frame()
+        expect(comp.skipped_frame_count).to_equal(1)
+        expect(comp.pixel_backend.present_count).to_equal(1)
+
+        # Third frame with content update: hits chrome cache, blits dirty subrect, and presents
+        expect(comp.update_window_content(1, "<p>beta</p>")).to_equal(true)
+        comp.render_frame()
+        expect(comp.pixel_backend.present_count).to_equal(2)
+        expect(comp.pixel_backend.width()).to_equal(320)
+        expect(comp.pixel_backend.height()).to_equal(240)

@@ -1,0 +1,166 @@
+//! `x as <int>` where `x` is one-codepoint TEXT held in an `any` slot must
+//! yield that CODE POINT, like the interpreter (`"6" as i64 == 54`) and like
+//! the STRING-typed cast arm (`rt_value_as_int`). `char_at` has no static
+//! return type, so `s.char_at(i) as i64` is exactly this case. MIR lowered the
+//! `any -> <int>` arm through `rt_any_to_int`, whose text leg PARSES (it backs
+//! `.to_i64()`), so every ASCII digit became its numeric value and the
+//! web renderer's PPM header began `P\x06` under the JIT.
+//! doc/08_tracking/bug/char_at_as_i64_parses_digit_jit_ppm_header_2026-11-23.md
+
+use simple_compiler::codegen::JitCompiler;
+use simple_compiler::{hir, mir};
+use simple_parser::Parser;
+
+fn run(source: &str) -> i64 {
+    let ast = Parser::new(source).parse().expect("source must parse");
+    let hir_module = hir::lower(&ast).expect("source must lower to HIR");
+    let mir_module = mir::lower_to_mir(&hir_module).expect("source must lower to MIR");
+    let mut jit = JitCompiler::new_static().expect("static Cranelift JIT");
+    jit.compile_module(&mir_module).expect("module must JIT-compile");
+    unsafe { jit.call_i64_void("main").expect("main must execute") }
+}
+
+#[test]
+fn char_at_digit_as_i64_is_code_point() {
+    let src = r#"
+fn main() -> i64:
+    val header = "P6\n12 34\n255\n"
+    val d = header.char_at(1) as i64
+    d
+"#;
+    assert_eq!(run(src), 54);
+}
+
+#[test]
+fn char_at_header_bytes_match_code_points() {
+    // Whole PPM header: every byte must equal its code point. Folded as a
+    // checksum so `main` stays a small exit code.
+    let src = r#"
+fn main() -> i64:
+    val header = "P6\n12 34\n255\n"
+    var i = 0
+    var acc = 0
+    while i < header.len():
+        acc = acc + (header.char_at(i) as i64) * (i + 1)
+        i = i + 1
+    acc % 251
+"#;
+    let expected: i64 = b"P6\n12 34\n255\n"
+        .iter()
+        .enumerate()
+        .map(|(i, b)| (*b as i64) * (i as i64 + 1))
+        .sum::<i64>()
+        % 251;
+    assert_eq!(run(src), expected);
+}
+
+#[test]
+fn any_one_codepoint_text_as_int_is_code_point() {
+    let src = r#"
+fn box_any(v: any) -> any:
+    v
+
+fn main() -> i64:
+    val digit = box_any("6")
+    val letter = box_any("P")
+    val accent = box_any("é")
+    unsafe:
+        val a = digit as i64
+        val b = letter as i32
+        val c = accent as i64
+        var ok = 0
+        if a == 54:
+            ok = ok + 1
+        if b == 80:
+            ok = ok + 10
+        if c == 233:
+            ok = ok + 100
+        ok
+"#;
+    assert_eq!(run(src), 111);
+}
+
+#[test]
+fn to_i64_method_still_parses_text() {
+    // `.to_i64()` keeps PARSE semantics on typed and erased receivers; only
+    // the `as` cast takes the code point.
+    let src = r#"
+fn box_any(v: any) -> any:
+    v
+
+fn main() -> i64:
+    val s = "6"
+    val xs: [any] = [box_any("7")]
+    s.to_i64() * 10 + xs[0].to_i64()
+"#;
+    assert_eq!(run(src), 67);
+}
+
+#[test]
+fn any_float_int_bool_cast_legs_unchanged() {
+    let src = r#"
+fn box_any(v: any) -> any:
+    v
+
+fn main() -> i64:
+    val f = box_any(41.75)
+    val i = box_any(42)
+    val t = box_any(true)
+    unsafe:
+        val a = f as i64
+        val b = i as i64
+        val c = t as i64
+        a * 100 + b + c
+"#;
+    assert_eq!(run(src), 4143);
+}
+
+#[test]
+fn erased_any_numeric_float_conversions_dispatch_by_tag() {
+    let src = r#"
+fn box_any(v: any) -> any:
+    v
+
+fn main() -> i64:
+    val xs: [any] = [box_any(1.5), box_any(7), box_any(true), box_any("2.25"), box_any("bad")]
+    val a = (xs[0].to_f64() * 100.0).to_i64()
+    val b = (xs[1].to_float() * 10.0).to_i64()
+    val c = (xs[2].to_f32() * 10.0).to_i64()
+    val d = (xs[3].to_f64() * 100.0).to_i64()
+    val e = (xs[4].to_f64() * 100.0).to_i64()
+    val f = box_any(65).to_u8().to_i64()
+    a + b + c + d + e + f
+"#;
+    // 150 + 70 + 10 + 225 + 0 + 65 = 520
+    assert_eq!(run(src), 520);
+}
+
+#[test]
+fn erased_any_edge_cases_wide_signed_unsigned_nil_nan_saturation_and_str_f32() {
+    let wide_neg_and_pos = r#"
+fn box_any(v: any) -> any:
+    v
+
+fn main() -> i64:
+    val big_pos = 1 << 60
+    val big_neg = -(1 << 60) - 1
+    val small_neg = -7
+    val max_u = (-1).to_u64()
+    val a = if box_any(big_pos).to_f64() > 1e18: 1 else: 0
+    val b = if box_any(big_neg).to_f64() < -1e18: 2 else: 0
+    val c = if box_any(small_neg).to_f64() == -7.0: 4 else: 0
+    val d = if box_any(max_u).to_f64() > 1e19: 8 else: 0
+    val nil_xs: [any] = [box_any(nil)]
+    val e = if nil_xs[0].to_i64() == 0 and nil_xs[0].to_f64() == 0.0: 16 else: 0
+    val s1 = box_any(-5.5).to_u8().to_i64()
+    val s2 = box_any(300.0).to_u8().to_i64()
+    val s3 = box_any(-200.0).to_i8().to_i64()
+    val f_sat = if s1 == 0 and s2 == 255 and s3 == -128: 32 else: 0
+    val nan_any = box_any(0.0 / 0.0)
+    val n_i = if nan_any.to_i64() == 0: 64 else: 0
+    val str_f32 = box_any("2.25".to_f32()).to_f64()
+    val g = if (str_f32 * 100.0).to_i64() == 225: 128 else: 0
+    a + b + c + d + e + f_sat + n_i + g
+"#;
+    assert_eq!(run(wide_neg_and_pos), 255);
+}

@@ -10,7 +10,7 @@ use std.editor.view.wiki_panel.*
 use app.editor.editor_path_text_helpers.*
 
 use std.io_runtime.{file_exists}
-extern fn rt_file_read_text(path: text) -> text
+extern fn rt_file_read_text(path: text) -> text?
 use std.io_runtime.{read_file_text}
 use std.io_runtime.{dir_walk}
 
@@ -21,10 +21,10 @@ fn _editor_markdown_quickfix_line(line: text) -> text:
         while level < trimmed.len() and trimmed.char_at(level) == "#":
             level = level + 1
         if level < trimmed.len() and trimmed.char_at(level) != " ":
-            return trimmed.slice(0, level) + " " + trimmed.slice(level, trimmed.len())
+            return trimmed.slice(0, level) + " " + trimmed.slice(level, trimmed.byte_len())
     val empty_link = _editor_find_text(line, "[]()")
     if empty_link >= 0:
-        return line.slice(0, empty_link) + "[text](url)" + line.slice(empty_link + 4, line.len())
+        return line.slice(0, empty_link) + "[text](url)" + line.slice(empty_link + 4, line.byte_len())
     if line.ends_with(" ") or line.ends_with("\t"):
         return line.trim()
     line
@@ -43,7 +43,7 @@ fn _editor_markdown_heading_level(line: text) -> i64:
 fn _editor_resolve_markdown_link_path(raw_target: text, active_path: text, session: EditSession) -> text:
     var target = raw_target.trim()
     if target.starts_with("file://"):
-        target = target.slice(7, target.len())
+        target = target.slice(7, target.byte_len())
     val parsed = md_wiki_parse_link_target(target)
     target = parsed.0
     val heading = _editor_find_text(target, "#")
@@ -70,7 +70,7 @@ fn _editor_resolve_markdown_link_path(raw_target: text, active_path: text, sessi
 fn _editor_markdown_link_should_create_note(raw_target: text, path: text) -> bool:
     if path == "":
         return false
-    if rt_file_exists(path):
+    if file_exists(path):
         return false
     var target = raw_target.trim()
     if target.starts_with("file://"):
@@ -168,11 +168,13 @@ fn _editor_wiki_docs_has_path(docs: [MdWikiDocument], path: text) -> bool:
 
 fn _editor_markdown_vault_documents(root: text) -> [MdWikiDocument]:
     var docs: [MdWikiDocument] = []
-    val files = rt_dir_walk(root)
+    val files = dir_walk(root)
     for file in files:
         val lower = file.to_lower()
         if lower.ends_with(".md") or lower.ends_with(".markdown"):
-            docs.push(md_wiki_document(file, rt_file_read_text(file) ?? ""))
+            if val content = rt_file_read_text(file):
+                docs.push(md_wiki_document(file, content))
+            # absent: an unreadable file is left out of the vault index
     docs
 
 fn _editor_vault_search_cache_path(root: text) -> text:

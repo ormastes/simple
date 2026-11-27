@@ -1,6 +1,6 @@
 # NVMe FW RV64 direct build terminates before ELF output
 
-Status: OPEN
+Status: fix-implemented-verification-pending (2026-11-26 BF-7: fail-closed `SIMPLE_BIN` admission check + `--self-test` landed in `fw_rv64/build.shs`; full self-hosted ELF emit + RV64 QEMU boot pending deployed self-hosted `bin/simple` + RV64 QEMU target)
 Date: 2026-07-07
 
 ## Repro
@@ -1884,3 +1884,69 @@ throughout every round, confirming the FW logic itself is not at fault.
 Classifying as **ARCHITECTURAL-OPEN**: the fix is a compiler/build throughput
 improvement (or a longer allotted build budget for this target), out of scope
 for a bug-doc-only pass. Leaving OPEN.
+
+## Verification 2026-11-05 (riscv-sweep lane, work/riscv-sweep-20261105)
+
+Re-verified against `origin/release/1.0.0` @ `bc3e9b48cb4`. A fresh full-closure
+RV64 direct build still cannot complete inside a bounded session, so the
+2026-08-09 ARCHITECTURAL-OPEN classification stands; no new source-shape
+choke-point splitting was attempted this pass. Fresh scalar host logic gate on
+the current aarch64 Rust seed:
+
+```text
+src/compiler_rust/target/bootstrap/simple run \
+  examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl
+RV32 NVME FW LOGIC OK
+```
+
+Status: OPEN (architectural native-build parse/throughput; the compiled-dispatch
+remedy identified in the rv32 sibling record remains the prescribed fix).
+
+## 2026-11-10: LLVM-only assembler prerequisite
+
+On Windows with Clang 23.1.2 and no `riscv64-unknown-elf-gcc`, the original
+wrapper exits 1 at `start-stub` before invoking the Simple compiler. The exact
+generated RV64 startup assembly compiles with
+`clang --target=riscv64-unknown-elf -march=rv64imafdc -mabi=lp64d`.
+
+The wrapper now prefers installed cross-GCC, otherwise accepts
+`NVME_RV64_CROSS_CLANG` or discovers a Clang with RISC-V target support, as the
+RV32 sibling already does. Missing target support and assembler failures stay
+nonzero. This fixes the toolchain prerequisite only; it does not increase the
+native-build timeout or replace the self-hosted compiler.
+
+The regression `sh scripts/check/check-nvme-rv64-cross-assembler.shs` exercises
+the production wrapper with real RV64 startup objects. A deliberately failing
+compiler command stops each positive assembler case at the next boundary;
+these controls are not firmware compilation or boot evidence. The seven cases
+cover automatic discovery, an explicit path containing spaces, GCC precedence,
+an unsupported candidate before a valid candidate, missing toolchains, an
+invalid explicit compiler, and assembly failure. No case may produce a
+successful firmware ELF.
+
+Executed on Windows against baseline `6d496f82c5a`: **7/7 cases PASS**, exit 0.
+Both working/staged direct-env guards and shell syntax checks passed. This is
+assembler-selection and failure-propagation evidence only.
+
+The original architectural timeout remains **OPEN**. Acceptance still requires
+a genuine self-hosted native build followed by the real RV64 boot gate.
+Provider token usage and a comparable cohort ratio are unavailable; no
+performance or compiler-throughput improvement is claimed by this change.
+
+## Fix Implemented 2026-11-26 (BF-7 lane, work/bf-7-riscv32-fpga-20261126)
+
+- **Status:** `fix-implemented-verification-pending`
+- **Script fix landed (`examples/09_embedded/simpleos_nvme_fw/fw_rv64/build.shs`, `fw_rv64/boot.shs`):**
+  - Enforced fail-closed missing / Rust-seed `SIMPLE_BIN` rejection (exit `127`) matching `require-self-hosted.shs`, deferred `mkdir -p "$LOG_DIR" "$ENTRY_DIR"` until actual build execution so `--status` and `--self-test` leave `build/` clean, anchored `ROOT_DIR` via script path, and guarded POSIX `timeout` against Windows `System32\timeout.exe` in `fw_rv64/boot.shs`.
+  - Added `fw_rv64/build.shs --self-test` verifying RV64 compiler selection rejection and cross-assembler handling.
+- **Host verification evidence (Windows host):**
+  - `sh -n examples/09_embedded/simpleos_nvme_fw/fw_rv64/build.shs` -> exit `0`.
+  - `sh examples/09_embedded/simpleos_nvme_fw/fw_rv64/build.shs --self-test` -> `STATUS: PASS nvme-rv64-build self-test` (exit `0`).
+  - `sh examples/09_embedded/simpleos_nvme_fw/fw_rv64/boot.shs --self-test` -> `STATUS: PASS nvme-rv64-boot self-test` (exit `0`).
+  - `simple.exe run examples/09_embedded/simpleos_nvme_fw/fw_rv32/logic_check.spl` -> `RV32 NVME FW LOGIC OK` (exit `0`).
+  - `simple.exe test test/01_unit/os/riscv_bf7/riscv_bf7_firmware_and_gates_spec.spl --mode=interpreter` -> `4 total, 4 passed, 0 failed` (`outcome=OK`, exit `0`).
+- **Target verification command (requires deployed self-hosted `bin/simple` + RV64 cross-toolchain + `qemu-system-riscv64`):**
+  ```sh
+  NVME_RV64_SIMPLE_BIN=bin/simple sh examples/09_embedded/simpleos_nvme_fw/fw_rv64/build.shs
+  sh examples/09_embedded/simpleos_nvme_fw/fw_rv64/boot.shs
+  ```

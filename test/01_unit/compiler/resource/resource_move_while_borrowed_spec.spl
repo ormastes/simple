@@ -1,0 +1,48 @@
+"""
+# Move/Drop of a place that is still borrowed (live borrow) is rejected
+
+Pins the enforced half of `resource_borrow_pinning_not_enforced_2026-08-07`:
+moving or dropping a place while a borrow of it is later used is a diagnostic
+(NLL conflict, "cannot move out of ... because it is borrowed"). A borrow that
+is never used again is dead under NLL and is intentionally accepted; the
+foreign-call pinning half needs call markers and stays in
+`resource_borrow_pinning_spec.spl` (RED, architectural).
+"""
+
+use std.spec
+use compiler.borrow.borrow_check.mod.{BorrowChecker}
+use compiler.mir.mir_data.*
+
+fn mwb_inst(kind: MirInstKind) -> MirInst:
+    MirInst(kind: kind, span: nil)
+
+fn mwb_body(insts: [MirInst]) -> MirBody:
+    MirBody(name: "mwb", blocks: [MirBlock(id: BlockId.new(0), label: nil, instructions: insts, terminator: MirTerminator.Ret(nil))], locals: [], arg_count: 0, return_ty: MirType.i64())
+
+fn mwb_ref() -> MirInst:
+    mwb_inst(MirInstKind.Ref(LocalId(id: 1), MirBorrowKind.Shared, MirPlace(local: LocalId(id: 0), projection: [])))
+
+fn mwb_use() -> MirInst:
+    mwb_inst(MirInstKind.Copy(LocalId(id: 2), LocalId(id: 1)))
+
+fn mwb_messages(insts: [MirInst]) -> [text]:
+    var checker = BorrowChecker.create()
+    checker.check_function(mwb_body(insts))
+    var out: [text] = []
+    for e in checker.errors:
+        out = out.push(e.message)
+    out
+
+describe "move of a borrowed place":
+    it "rejects Drop of a place whose borrow is used afterwards":
+        val msgs = mwb_messages([mwb_ref(), mwb_inst(MirInstKind.Drop(LocalId(id: 0))), mwb_use()])
+        expect(msgs.len()).to_be_greater_than(0)
+        expect(msgs[0]).to_contain("borrowed")
+
+    it "rejects Move of a place whose borrow is used afterwards":
+        val msgs = mwb_messages([mwb_ref(), mwb_inst(MirInstKind.Move(LocalId(id: 3), LocalId(id: 0))), mwb_use()])
+        expect(msgs.len()).to_be_greater_than(0)
+
+    it "accepts Drop after the last use of the borrow":
+        val msgs = mwb_messages([mwb_ref(), mwb_use(), mwb_inst(MirInstKind.Drop(LocalId(id: 0)))])
+        expect(msgs.len()).to_equal(0)

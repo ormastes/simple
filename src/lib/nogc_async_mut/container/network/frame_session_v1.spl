@@ -1,0 +1,229 @@
+# Broker-side per-session `endpoint-frame-v1` state machine (design 11.4,
+# 11.9). Pure logic over decoded frames: no sockets, no buffering of bytes.
+# Rules:
+# - HELLO first, exactly once; nothing else is admitted before it.
+# - Per-channel strictly increasing sequences (channel 0 for control). A
+#   replayed or gapped frame is rejected and consumes nothing.
+# - Channel ids are single-use: a closed/reset id cannot be reopened.
+# - DATA respects receiver credit and the session queue cap; WINDOW credit
+#   may not exceed the window maximum.
+# - Control capacity is reserved: the data queue cap never applies to
+#   WINDOW/HALF_CLOSE/CLOSE/RESET/PING/UNREGISTER, so a saturated stream
+#   cannot block revocation or stop.
+# - After revocation only retirement/liveness frames are admitted; PING never
+#   renews revoked authority.
+# Rejections preserve all state; the transport owner decides on teardown.
+use std.common.contracts.container.endpoint_frame_v1.{
+    EndpointFrameV1, endpoint_frame_validate_v1, endpoint_frame_window_credit_v1,
+    ENDPOINT_FRAME_HELLO_V1, ENDPOINT_FRAME_OPEN_V1, ENDPOINT_FRAME_OPENED_V1,
+    ENDPOINT_FRAME_REJECTED_V1, ENDPOINT_FRAME_DATA_V1, ENDPOINT_FRAME_WINDOW_V1,
+    ENDPOINT_FRAME_HALF_CLOSE_V1, ENDPOINT_FRAME_CLOSE_V1, ENDPOINT_FRAME_RESET_V1,
+    ENDPOINT_FRAME_REGISTER_V1,
+    ENDPOINT_FRAME_MAX_PAYLOAD_V1, ENDPOINT_FRAME_MAX_SEQUENCE_V1}
+
+pub const ENDPOINT_CHANNEL_OPENING_V1 = "opening"
+pub const ENDPOINT_CHANNEL_OPEN_V1 = "open"
+pub const ENDPOINT_CHANNEL_CLOSED_V1 = "closed"
+pub const ENDPOINT_CHANNEL_RESET_V1 = "reset"
+
+pub struct EndpointFrameLimitsV1:
+    max_channels: i64
+    initial_window: i64
+    max_window: i64
+    max_queued_bytes: i64
+
+pub struct EndpointChannelV1:
+    id: i64
+    phase: text
+    next_sequence: i64
+    peer_write_open: bool
+    local_write_open: bool
+    recv_credit: i64
+    send_credit: i64
+    queued_bytes: i64
+
+pub fn endpoint_frame_limits_v1(max_channels: i64, initial_window: i64, max_window: i64,
+        max_queued_bytes: i64) -> Result<EndpointFrameLimitsV1, text>:
+    if max_channels < 1 or max_channels > 4096: return Err("endpoint-limits-channels-invalid")
+    if initial_window < 1 or initial_window > max_window: return Err("endpoint-limits-window-invalid")
+    if max_window > 16777216: return Err("endpoint-limits-window-invalid")
+    if max_queued_bytes < ENDPOINT_FRAME_MAX_PAYLOAD_V1 or max_queued_bytes > 268435456:
+        return Err("endpoint-limits-queue-invalid")
+    Ok(EndpointFrameLimitsV1(max_channels: max_channels, initial_window: initial_window,
+        max_window: max_window, max_queued_bytes: max_queued_bytes))
+
+fn _endpoint_live(channel: EndpointChannelV1) -> bool:
+    channel.phase == ENDPOINT_CHANNEL_OPENING_V1 or channel.phase == ENDPOINT_CHANNEL_OPEN_V1
+
+pub class EndpointFrameSessionV1:
+    limits: EndpointFrameLimitsV1
+    hello: bool
+    revoked: bool
+    control_next_sequence: i64
+    channels: [EndpointChannelV1]
+    index: Dict<text, i64>
+    live_channels: i64
+    queued_total: i64
+
+    pub static fn create(limits: EndpointFrameLimitsV1) -> Result<EndpointFrameSessionV1, text>:
+        val checked = endpoint_frame_limits_v1(limits.max_channels, limits.initial_window,
+            limits.max_window, limits.max_queued_bytes)?
+        Ok(EndpointFrameSessionV1(limits: checked, hello: false, revoked: false,
+            control_next_sequence: 1, channels: [], index: {}, live_channels: 0, queued_total: 0))
+
+    pub fn channel(id: i64) -> Option<EndpointChannelV1>:
+        val key = id.to_text()
+        if self.index.contains_key(key): return Some(self.channels[self.index[key]])
+        None
+
+    me _set(position: i64, channel: EndpointChannelV1):
+        self.channels[position] = channel
+
+    me _receive_control(frame: EndpointFrameV1) -> Result<EndpointFrameV1, text>:
+        if frame.sequence != self.control_next_sequence: return Err("endpoint-session-replay-or-sequence-gap")
+        if frame.kind == ENDPOINT_FRAME_HELLO_V1:
+            if self.hello: return Err("endpoint-session-hello-repeated")
+            self.hello = true
+        elif not self.hello:
+            return Err("endpoint-session-hello-required")
+        elif frame.kind == ENDPOINT_FRAME_REGISTER_V1 and self.revoked:
+            return Err("endpoint-session-revoked")
+        if frame.sequence == ENDPOINT_FRAME_MAX_SEQUENCE_V1: return Err("endpoint-session-sequence-exhausted")
+        self.control_next_sequence = frame.sequence + 1
+        Ok(frame)
+
+    me _receive_open(frame: EndpointFrameV1) -> Result<EndpointFrameV1, text>:
+        if self.index.contains_key(frame.channel.to_text()): return Err("endpoint-channel-reused")
+        if self.revoked: return Err("endpoint-session-revoked")
+        if frame.sequence != 1: return Err("endpoint-session-replay-or-sequence-gap")
+        if self.live_channels >= self.limits.max_channels: return Err("endpoint-channel-limit")
+        self.channels.push(EndpointChannelV1(id: frame.channel, phase: ENDPOINT_CHANNEL_OPENING_V1,
+            next_sequence: 2, peer_write_open: true, local_write_open: true,
+            recv_credit: self.limits.initial_window, send_credit: self.limits.initial_window,
+            queued_bytes: 0))
+        self.index[frame.channel.to_text()] = self.channels.len() - 1
+        self.live_channels = self.live_channels + 1
+        Ok(frame)
+
+    # Validates and applies one inbound peer frame.
+    pub me receive(frame: EndpointFrameV1) -> Result<EndpointFrameV1, text>:
+        val _shape = endpoint_frame_validate_v1(frame)?
+        val kind = frame.kind
+        if kind == ENDPOINT_FRAME_OPENED_V1 or kind == ENDPOINT_FRAME_REJECTED_V1:
+            return Err("endpoint-session-broker-only-frame")
+        if frame.channel == 0: return self._receive_control(frame)
+        if not self.hello: return Err("endpoint-session-hello-required")
+        if kind == ENDPOINT_FRAME_OPEN_V1: return self._receive_open(frame)
+        val key = frame.channel.to_text()
+        if not self.index.contains_key(key): return Err("endpoint-channel-unknown")
+        val position = self.index[key]
+        var channel = self.channels[position]
+        if frame.sequence != channel.next_sequence: return Err("endpoint-session-replay-or-sequence-gap")
+        if frame.sequence == ENDPOINT_FRAME_MAX_SEQUENCE_V1 and kind != ENDPOINT_FRAME_CLOSE_V1 and
+                kind != ENDPOINT_FRAME_RESET_V1:
+            return Err("endpoint-session-sequence-exhausted")
+        val live = _endpoint_live(channel)
+        if kind == ENDPOINT_FRAME_CLOSE_V1 or kind == ENDPOINT_FRAME_RESET_V1:
+            # Idempotent retirement: a repeated close of a retired id is a no-op.
+            if live:
+                self.queued_total = self.queued_total - channel.queued_bytes
+                channel.queued_bytes = 0
+                self.live_channels = self.live_channels - 1
+                if kind == ENDPOINT_FRAME_CLOSE_V1:
+                    channel.phase = ENDPOINT_CHANNEL_CLOSED_V1
+                else:
+                    channel.phase = ENDPOINT_CHANNEL_RESET_V1
+            channel.next_sequence = frame.sequence + 1
+            self._set(position, channel)
+            return Ok(frame)
+        if not live: return Err("endpoint-channel-retired")
+        if kind == ENDPOINT_FRAME_DATA_V1:
+            if self.revoked: return Err("endpoint-session-revoked")
+            if channel.phase != ENDPOINT_CHANNEL_OPEN_V1: return Err("endpoint-channel-not-open")
+            if not channel.peer_write_open: return Err("endpoint-channel-peer-write-closed")
+            val length = frame.payload.len()
+            if length > channel.recv_credit: return Err("endpoint-window-overflow")
+            if self.queued_total + length > self.limits.max_queued_bytes: return Err("endpoint-session-queue-full")
+            channel.recv_credit = channel.recv_credit - length
+            channel.queued_bytes = channel.queued_bytes + length
+            self.queued_total = self.queued_total + length
+        elif kind == ENDPOINT_FRAME_WINDOW_V1:
+            val credit = endpoint_frame_window_credit_v1(frame)?
+            if channel.send_credit + credit > self.limits.max_window: return Err("endpoint-window-credit-overflow")
+            channel.send_credit = channel.send_credit + credit
+        elif kind == ENDPOINT_FRAME_HALF_CLOSE_V1:
+            if channel.phase != ENDPOINT_CHANNEL_OPEN_V1: return Err("endpoint-channel-not-open")
+            # 1: the peer finished writing. 2: the peer stops reading our side.
+            if frame.payload[0] == 1:
+                if not channel.peer_write_open: return Err("endpoint-channel-half-close-repeated")
+                channel.peer_write_open = false
+            else:
+                if not channel.local_write_open: return Err("endpoint-channel-half-close-repeated")
+                channel.local_write_open = false
+        else:
+            return Err("endpoint-session-frame-not-admissible")
+        channel.next_sequence = frame.sequence + 1
+        self._set(position, channel)
+        Ok(frame)
+
+    me _transition_opening(id: i64, phase: text) -> Result<bool, text>:
+        val key = id.to_text()
+        if not self.index.contains_key(key): return Err("endpoint-channel-unknown")
+        val position = self.index[key]
+        var channel = self.channels[position]
+        if channel.phase != ENDPOINT_CHANNEL_OPENING_V1: return Err("endpoint-channel-not-opening")
+        if phase == ENDPOINT_CHANNEL_OPEN_V1 and self.revoked: return Err("endpoint-session-revoked")
+        channel.phase = phase
+        if phase != ENDPOINT_CHANNEL_OPEN_V1:
+            self.live_channels = self.live_channels - 1
+        self._set(position, channel)
+        Ok(true)
+
+    # Broker answered OPEN with OPENED after authorize_route succeeded.
+    pub me accept_open(id: i64) -> Result<bool, text>:
+        self._transition_opening(id, ENDPOINT_CHANNEL_OPEN_V1)
+
+    # Broker answered OPEN with REJECTED; the id is retired, never reusable.
+    pub me reject_open(id: i64) -> Result<bool, text>:
+        self._transition_opening(id, ENDPOINT_CHANNEL_CLOSED_V1)
+
+    # The local consumer drained `count` queued bytes; returns the WINDOW
+    # credit the broker should grant back to the peer.
+    pub me consume(id: i64, count: i64) -> Result<i64, text>:
+        val key = id.to_text()
+        if not self.index.contains_key(key): return Err("endpoint-channel-unknown")
+        val position = self.index[key]
+        var channel = self.channels[position]
+        if count < 1 or count > channel.queued_bytes: return Err("endpoint-consume-invalid")
+        channel.queued_bytes = channel.queued_bytes - count
+        channel.recv_credit = channel.recv_credit + count
+        self.queued_total = self.queued_total - count
+        self._set(position, channel)
+        Ok(count)
+
+    # Reserve outbound credit before the broker writes DATA to the peer.
+    pub me reserve_send(id: i64, count: i64) -> Result<bool, text>:
+        val key = id.to_text()
+        if not self.index.contains_key(key): return Err("endpoint-channel-unknown")
+        val position = self.index[key]
+        var channel = self.channels[position]
+        if self.revoked: return Err("endpoint-session-revoked")
+        if channel.phase != ENDPOINT_CHANNEL_OPEN_V1 or not channel.local_write_open:
+            return Err("endpoint-channel-not-writable")
+        if count < 1 or count > ENDPOINT_FRAME_MAX_PAYLOAD_V1: return Err("endpoint-send-size-invalid")
+        if count > channel.send_credit: return Err("endpoint-window-exhausted")
+        channel.send_credit = channel.send_credit - count
+        self._set(position, channel)
+        Ok(true)
+
+    # Revocation: stop all new authority and return the live channel ids the
+    # transport owner must RESET. Not evidence of process absence.
+    pub me revoke() -> [i64]:
+        self.revoked = true
+        var live: [i64] = []
+        for channel in self.channels:
+            if _endpoint_live(channel): live.push(channel.id)
+        live
+
+export EndpointFrameSessionV1, EndpointFrameLimitsV1, EndpointChannelV1, endpoint_frame_limits_v1
+export ENDPOINT_CHANNEL_OPENING_V1, ENDPOINT_CHANNEL_OPEN_V1, ENDPOINT_CHANNEL_CLOSED_V1, ENDPOINT_CHANNEL_RESET_V1

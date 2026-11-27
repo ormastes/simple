@@ -11,6 +11,11 @@ use std.common.contracts.execution.simpleos_target_v1.{
     simpleos_target_v1_abi_for_triple,
     simpleos_target_v1_is_userland_triple
 }
+use os.port.guest_toolchain_artifact_build_receipt.{
+    GuestToolchainArtifactRoleV1,
+    GuestToolchainArtifactBuildReceiptV1,
+    guest_toolchain_artifact_build_receipt_payload_sha256_v1
+}
 
 pub const GUEST_TOOLCHAIN_EXECUTION_RECEIPT_V1: i64 = 1
 pub const GUEST_TOOLCHAIN_EXECUTION_REQUIRED_ROLE_COUNT: i64 = 12
@@ -79,6 +84,16 @@ pub enum GuestToolchainExecutionReceiptError:
     ManifestContractDigestMismatch
     ReceiptPayloadDigestMismatch
 
+pub enum GuestToolchainExecutionWiringError:
+    EmptyBuildReceipts
+    DuplicateBuildRole
+    MissingBuildRole
+    TargetMismatch
+    AbiMismatch
+    BuildReceiptDigestMismatch
+    ToolArtifactDigestMismatch
+    ExecutionReceiptInvalid
+
 pub struct GuestToolchainRoleExecutionV1:
     role: GuestToolchainRole
     target_triple: text
@@ -132,13 +147,13 @@ pub struct GuestToolchainExecutionReceiptV1:
     # detects mutation but does not mint authority or a loader token.
     receipt_payload_sha256: text
 
-fn _safe_scalar(value: text) -> bool:
+fn _exec_safe_scalar(value: text) -> bool:
     value.len() > 0 and value.len() <= GUEST_TOOLCHAIN_EXECUTION_MAX_SCALAR_BYTES and
         not value.contains("\0") and not value.contains("\n") and
         not value.contains("\r")
 
 fn _absolute_guest_path(path: text) -> bool:
-    _safe_scalar(path) and path.starts_with("/") and not path.contains("//") and
+    _exec_safe_scalar(path) and path.starts_with("/") and not path.contains("//") and
         not path.contains("/./") and not path.contains("/../") and
         not path.ends_with("/.") and not path.ends_with("/..") and
         not path.contains("\\")
@@ -188,13 +203,13 @@ fn _alias_index(path: text) -> i64:
     if path == "/sys/apps/simple.smf": return 5
     0 - 1
 
-fn _argv_valid(argv: [text], executable: text, source_path: text) -> bool:
+fn _exec_argv_valid(argv: [text], executable: text, source_path: text) -> bool:
     if argv.len() != 2:
         return false
     if argv[0] != executable:
         return false
     for arg in argv:
-        if not _safe_scalar(arg):
+        if not _exec_safe_scalar(arg):
             return false
     argv[1] == source_path
 
@@ -203,7 +218,7 @@ fn _workflow_argv_valid(role: GuestToolchainRoleExecutionV1) -> bool:
        role.argv[0] != role.tool_artifact_path:
         return false
     for arg in role.argv:
-        if not _safe_scalar(arg):
+        if not _exec_safe_scalar(arg):
             return false
     if role.role == GuestToolchainRole.SimpleVersionWorkflow:
         return role.argv.len() == 2 and role.argv[1] == "--version"
@@ -217,7 +232,7 @@ fn _workflow_argv_valid(role: GuestToolchainRoleExecutionV1) -> bool:
        role.role == GuestToolchainRole.SimpleRerunAfterSourceDeleteWorkflow:
         return role.argv.len() == 2 and
             role.argv[1] == role.result_artifact_path
-    _argv_valid(role.argv, role.tool_artifact_path, role.source_path)
+    _exec_argv_valid(role.argv, role.tool_artifact_path, role.source_path)
 
 pub fn guest_toolchain_role_output_sha256(
     role: GuestToolchainRoleExecutionV1
@@ -291,7 +306,7 @@ fn _filesystem_name(filesystem: GuestToolchainFilesystem) -> text:
         GuestToolchainFilesystem.Dbfs: "dbfs"
         GuestToolchainFilesystem.Nvfs: "nvfs"
 
-fn _bool_name(value: bool) -> text:
+fn _exec_bool_name(value: bool) -> text:
     if value: "1" else: "0"
 
 pub fn guest_toolchain_manifest_contract_sha256_v1(
@@ -357,10 +372,10 @@ pub fn guest_toolchain_execution_receipt_payload_sha256_v1(
         canonical = canonical +
             "stdout-len={role.observed_stdout.len()}|stderr-len={role.observed_stderr.len()}|" +
             "exit={role.observed_exit_code}|output={role.observed_output_sha256}|" +
-            "guest={_bool_name(role.executed_in_guest)}|" +
-            "path={_bool_name(role.used_path_lookup)}|" +
-            "host={_bool_name(role.used_host_process)}|" +
-            "deleted={_bool_name(role.source_deleted_before_execution)}|"
+            "guest={_exec_bool_name(role.executed_in_guest)}|" +
+            "path={_exec_bool_name(role.used_path_lookup)}|" +
+            "host={_exec_bool_name(role.used_host_process)}|" +
+            "deleted={_exec_bool_name(role.source_deleted_before_execution)}|"
     canonical = canonical + "aliases={receipt.aliases.len()}|"
     for binding in receipt.aliases:
         canonical = canonical +
@@ -507,7 +522,7 @@ pub fn guest_toolchain_execution_receipt_v1_validate(
         return Err(GuestToolchainExecutionReceiptError.InvalidTarget)
     if receipt.target_abi != simpleos_target_v1_abi_for_triple(receipt.target_triple):
         return Err(GuestToolchainExecutionReceiptError.InvalidAbi)
-    if not _safe_scalar(receipt.receipt_id) or not _safe_scalar(receipt.nonce):
+    if not _exec_safe_scalar(receipt.receipt_id) or not _exec_safe_scalar(receipt.nonce):
         return Err(GuestToolchainExecutionReceiptError.InvalidReceiptIdentity)
     if not _nonzero_hash(receipt.image_sha256) or
        not _nonzero_hash(receipt.sysroot_sha256) or
@@ -584,8 +599,94 @@ pub fn guest_toolchain_execution_gate_detail(
         "authoritative target-native receipt producer and loader-owned consume-once token required"]
     "blocked: " + blockers.join("; ")
 
+fn _artifact_role_index(role: GuestToolchainArtifactRoleV1) -> i64:
+    match role:
+        GuestToolchainArtifactRoleV1.SimpleCompiler: 0
+        GuestToolchainArtifactRoleV1.SimpleInterpreter: 1
+        GuestToolchainArtifactRoleV1.SimpleLoader: 2
+        GuestToolchainArtifactRoleV1.Llvm: 3
+        GuestToolchainArtifactRoleV1.Clang: 4
+        GuestToolchainArtifactRoleV1.Clangxx: 5
+        GuestToolchainArtifactRoleV1.Lld: 6
+
+pub fn guest_toolchain_artifact_role_to_execution_role(
+    role: GuestToolchainArtifactRoleV1
+) -> GuestToolchainRole:
+    """Map a target artifact build role to its guest execution gate role."""
+    match role:
+        GuestToolchainArtifactRoleV1.SimpleCompiler: GuestToolchainRole.SimpleCompiler
+        GuestToolchainArtifactRoleV1.SimpleInterpreter: GuestToolchainRole.SimpleInterpreter
+        GuestToolchainArtifactRoleV1.SimpleLoader: GuestToolchainRole.SimpleLoader
+        GuestToolchainArtifactRoleV1.Llvm: GuestToolchainRole.Llvm
+        GuestToolchainArtifactRoleV1.Clang: GuestToolchainRole.Clang
+        GuestToolchainArtifactRoleV1.Clangxx: GuestToolchainRole.Clangxx
+        GuestToolchainArtifactRoleV1.Lld: GuestToolchainRole.Lld
+
+pub fn guest_toolchain_execution_role_to_artifact_role(
+    role: GuestToolchainRole
+) -> GuestToolchainArtifactRoleV1?:
+    """Map an executable toolchain role to its artifact build role."""
+    match role:
+        GuestToolchainRole.SimpleCompiler: Some(GuestToolchainArtifactRoleV1.SimpleCompiler)
+        GuestToolchainRole.SimpleInterpreter: Some(GuestToolchainArtifactRoleV1.SimpleInterpreter)
+        GuestToolchainRole.SimpleLoader: Some(GuestToolchainArtifactRoleV1.SimpleLoader)
+        GuestToolchainRole.Llvm: Some(GuestToolchainArtifactRoleV1.Llvm)
+        GuestToolchainRole.Clang: Some(GuestToolchainArtifactRoleV1.Clang)
+        GuestToolchainRole.Clangxx: Some(GuestToolchainArtifactRoleV1.Clangxx)
+        GuestToolchainRole.Lld: Some(GuestToolchainArtifactRoleV1.Lld)
+        GuestToolchainRole.SimpleVersionWorkflow: Some(GuestToolchainArtifactRoleV1.SimpleCompiler)
+        GuestToolchainRole.SimpleInterpretWorkflow: Some(GuestToolchainArtifactRoleV1.SimpleInterpreter)
+        GuestToolchainRole.SimpleCompileWorkflow: Some(GuestToolchainArtifactRoleV1.SimpleCompiler)
+        GuestToolchainRole.SimpleLoadWorkflow: Some(GuestToolchainArtifactRoleV1.SimpleLoader)
+        GuestToolchainRole.SimpleRerunAfterSourceDeleteWorkflow: Some(GuestToolchainArtifactRoleV1.SimpleLoader)
+
+pub fn guest_toolchain_execution_bind_build_receipts_v1(
+    exec_receipt: GuestToolchainExecutionReceiptV1,
+    build_receipts: [GuestToolchainArtifactBuildReceiptV1]
+) -> Result<(), GuestToolchainExecutionWiringError>:
+    """Verify build artifact receipts bind all 7 executable roles in guest execution."""
+    if guest_toolchain_execution_receipt_v1_validate(exec_receipt).is_err():
+        return Err(GuestToolchainExecutionWiringError.ExecutionReceiptInvalid)
+    if build_receipts.len() == 0:
+        return Err(GuestToolchainExecutionWiringError.EmptyBuildReceipts)
+    var seen = [false, false, false, false, false, false, false]
+    for build_receipt in build_receipts:
+        val idx = _artifact_role_index(build_receipt.role)
+        if seen[idx]:
+            return Err(GuestToolchainExecutionWiringError.DuplicateBuildRole)
+        seen[idx] = true
+        if build_receipt.target_triple != exec_receipt.target_triple:
+            return Err(GuestToolchainExecutionWiringError.TargetMismatch)
+        if build_receipt.target_abi != exec_receipt.target_abi:
+            return Err(GuestToolchainExecutionWiringError.AbiMismatch)
+        if not _nonzero_hash(build_receipt.receipt_payload_sha256) or
+           build_receipt.receipt_payload_sha256 !=
+               guest_toolchain_artifact_build_receipt_payload_sha256_v1(build_receipt):
+            return Err(GuestToolchainExecutionWiringError.BuildReceiptDigestMismatch)
+        val exec_role = guest_toolchain_artifact_role_to_execution_role(build_receipt.role)
+        val exec_digest = _role_digest(exec_receipt.roles, exec_role)
+        if not _nonzero_hash(build_receipt.output_sha256) or
+           exec_digest != build_receipt.output_sha256:
+            return Err(GuestToolchainExecutionWiringError.ToolArtifactDigestMismatch)
+    for present in seen:
+        if not present:
+            return Err(GuestToolchainExecutionWiringError.MissingBuildRole)
+    Ok(())
+
+pub fn guest_toolchain_real_payload_wiring_gate_detail(
+    exec_receipt: GuestToolchainExecutionReceiptV1,
+    build_receipts: [GuestToolchainArtifactBuildReceiptV1]
+) -> text:
+    """Summarize build-to-guest payload wiring while keeping QEMU acceptance fail-closed."""
+    if guest_toolchain_execution_receipt_v1_validate(exec_receipt).is_err():
+        return "BLOCKED: invalid target-native guest execution receipt"
+    if guest_toolchain_execution_bind_build_receipts_v1(exec_receipt, build_receipts).is_err():
+        return "BLOCKED: build artifact receipts do not bind real guest execution payloads"
+    "BLOCKED: build-to-guest real-payload wiring verified; authoritative QEMU guest execution receipt and loader-owned consume-once token required"
+
 export GuestToolchainRole, GuestToolchainFilesystem
 export GuestToolchainExecutionReceiptError
+export GuestToolchainExecutionWiringError
 export GuestToolchainRoleExecutionV1, GuestToolchainAliasBindingV1
 export GuestToolchainExecutionReceiptV1
 export guest_toolchain_role_canonical_path, guest_toolchain_role_output_sha256
@@ -595,6 +696,10 @@ export guest_toolchain_execution_receipt_v1_validate
 export guest_toolchain_execution_candidate_ready_for_evidence_admission
 export guest_toolchain_execution_receipt_gate_detail
 export guest_toolchain_execution_gate_detail
+export guest_toolchain_artifact_role_to_execution_role
+export guest_toolchain_execution_role_to_artifact_role
+export guest_toolchain_execution_bind_build_receipts_v1
+export guest_toolchain_real_payload_wiring_gate_detail
 export GUEST_TOOLCHAIN_EXECUTION_RECEIPT_V1
 export GUEST_TOOLCHAIN_EXECUTION_REQUIRED_ROLE_COUNT
 export GUEST_TOOLCHAIN_EXECUTION_REQUIRED_ALIAS_COUNT

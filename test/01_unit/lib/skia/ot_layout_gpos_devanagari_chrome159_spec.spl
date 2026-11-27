@@ -1,0 +1,128 @@
+"""
+## Purpose and audience
+Purpose: Pin GPOS positioning of shaped Devanagari (`dev2`) glyph sequences
+against Chrome 159 (HarfBuzz) for the bundled Noto Sans Devanagari face:
+`abvm` / `blwm` mark-to-base and mark-to-mark attachment, `dist` / `kern`.
+Audience: text shaping maintainers.
+
+The glyph sequences are the ones Chrome itself produced for each word (after
+its GSUB and reordering), so this spec isolates positioning from the syllable
+shaper: a record list in, pen-relative offsets out.
+
+Chrome oracle (Chrome for Testing 159, `--headless=new --print-to-pdf`,
+`<html lang="hi">`, `font:16px Liberation Sans, <the bundled face via
+@font-face>`). Skia's PDF backend writes every glyph as its own positioned
+`Tj` whose Type3 font `/Differences` name is the glyph id (`/g22A`), so the
+content stream is the HarfBuzz output: glyph id plus pen position. Positions
+below are in font units (1000/em; PDF px * 62.5) as `glyph:x:y`, y up.
+
+| word   | Chrome glyph:x:y                                  |
+|--------|---------------------------------------------------|
+| कुछ    | 56:0:0 34:547:0 62:768:0                          |
+| र्कं     | 56:0:0 510:547:0                                  |
+| हूँ     | 499:0:0 101:544:0                                 |
+| हँस    | 88:0:0 101:544:0 87:531:0                         |
+| र्कु     | 56:0:0 34:547:0 506:547:0                         |
+| टुँ     | 66:0:0 34:460:0 101:502:0                         |
+| ट्रुं    | 66:0:0 683:470:0 100:489:0                        |
+| ड़ुँ    | 68:0:0 672:558:0 702:436:-180 101:548:0           |
+| ट्टु    | 431:0:0 702:434:-193                              |
+| द्धू    | 448:0:0 35:847:-122                               |
+| क्ष़    | 90:0:0 104:445:65                                 |
+| ऴु     | 89:0:0 672:653:53 702:531:-127                    |
+| कं॑    | 56:0:0 100:547:0 108:679:0                        |
+| र्कं॑    | 56:0:0 510:547:0 108:754:0                        |
+| कु॒॑   | 56:0:0 34:547:0 732:683:0 108:547:0               |
+
+HarfBuzz rules this pins:
+- mark-to-base searches back for the nearest NON-MARK glyph whatever the
+  lookup flag says (Noto's `abvm`/`blwm` MarkBasePos lookups have flag 0, so
+  a reph after a below-base matra must still reach the consonant);
+- mark-to-mark attaches only to a preceding mark the lookup does not skip;
+- an attached mark's offset is resolved against the base's final position.
+"""
+
+"""
+Traceability: REQ-WEB-TEXT-DEVANAGARI-GPOS-001 — dev2 marks are positioned as Chrome 159 positions them.
+"""
+# @tag: unit, skia, text, chrome159
+# @cover src/lib/skia/feature/shaper/ot_layout_gpos.spl 1%
+use std.spec.*
+use std.skia.feature.glyph.ot_parser.{OtFont, parse_offset_table}
+use std.skia.feature.glyph.ot_parser_layout.{parse_gpos_skeleton, select_gpos_lookup_plan}
+use std.skia.feature.shaper.ot_layout_context.{LayoutGlyphRecord}
+use std.skia.feature.shaper.ot_layout_gpos.{gpos_apply}
+use std.skia.feature.shaper.ot_layout_shaper.{layout_tag}
+use std.skia.feature.shaper.selected_complex.{selected_bounded_hmtx}
+use std.nogc_sync_mut.sffi.io.{file_read_bytes}
+
+val DEVA_FONT: text = "assets/fonts/google-fonts/ofl/notosansdevanagari/NotoSansDevanagari[wdth,wght].ttf"
+
+fn _records(font: OtFont, glyphs: [u32]) -> [LayoutGlyphRecord]:
+    var out: [LayoutGlyphRecord] = []
+    var index: i64 = 0
+    for glyph in glyphs:
+        val advance = match selected_bounded_hmtx(font, glyph):
+            Some(value): value.advance_width as i64
+            None: -1
+        out.push(LayoutGlyphRecord(glyph_id: glyph, source_index: index, cluster: index,
+            feature_mask: 18446744073709551615u64,
+            x_advance_units: advance, y_advance_units: 0, x_offset_units: 0, y_offset_units: 0,
+            component_clusters: [index]))
+        index = index + 1
+    out
+
+# `glyph:x:y` per glyph: x is the pen (sum of earlier advances) plus the
+# glyph's x offset, y its y offset, in font units -- what Chrome's PDF shows.
+fn _positions(glyphs: [u32]) -> text:
+    val font = parse_offset_table(file_read_bytes(DEVA_FONT)).?
+    val tags = [layout_tag("abvm"), layout_tag("blwm"), layout_tag("dist"), layout_tag("kern"),
+        layout_tag("mark"), layout_tag("mkmk")]
+    val plan = select_gpos_lookup_plan(font, layout_tag("dev2"), layout_tag("HIN "), tags)
+    if not plan.valid: return "plan invalid"
+    val result = gpos_apply(font, plan.activations, parse_gpos_skeleton(font), _records(font, glyphs))
+    if not result.complete: return "incomplete"
+    var out = ""
+    var pen: i64 = 0
+    for record in result.glyphs:
+        if out != "": out = out + " "
+        out = out + "{record.glyph_id}:{pen + record.x_offset_units}:{record.y_offset_units}"
+        pen = pen + record.x_advance_units
+    out
+
+describe "dev2 GPOS positions against Chrome 159 (Noto Sans Devanagari)":
+    it "AC-1: a below-base matra and a reph ligature attach to the consonant stem":
+        step("Chrome: कुछ u-matra at 547 (ka advance 768, anchor -221); र्कं reph+anusvara at 547")
+        expect(_positions([56u32, 34u32, 62u32])).to_equal("56:0:0 34:547:0 62:768:0")
+        expect(_positions([56u32, 510u32])).to_equal("56:0:0 510:547:0")
+        expect(_positions([499u32, 101u32])).to_equal("499:0:0 101:544:0")
+        step("Chrome: हँस candrabindu pen 8.704 px = 544, past the ha advance 531, before sa at 531")
+        expect(_positions([88u32, 101u32, 87u32])).to_equal("88:0:0 101:544:0 87:531:0")
+
+    it "AC-2: a mark behind another mark still attaches to the base (flag-0 MarkBasePos skips marks)":
+        step("Chrome: र्कु reph at 547 behind the u-matra; टुँ candrabindu at 502; ट्रुं anusvara at 489")
+        expect(_positions([56u32, 34u32, 506u32])).to_equal("56:0:0 34:547:0 506:547:0")
+        expect(_positions([66u32, 34u32, 101u32])).to_equal("66:0:0 34:460:0 101:502:0")
+        expect(_positions([66u32, 683u32, 100u32])).to_equal("66:0:0 683:470:0 100:489:0")
+
+    it "AC-3: below-base marks take Chrome's y offsets":
+        step("Chrome: ट्टु u at 434,-193; द्धू uu at 847,-122; क्ष़ nukta at 445,+65")
+        expect(_positions([431u32, 702u32])).to_equal("431:0:0 702:434:-193")
+        expect(_positions([448u32, 35u32])).to_equal("448:0:0 35:847:-122")
+        expect(_positions([90u32, 104u32])).to_equal("90:0:0 104:445:65")
+
+    it "AC-4: a matra stacks under a nukta (mark-to-mark) and later marks still reach the base":
+        step("Chrome: ऴु nukta 653,53 then u 531,-127; ड़ुँ nukta 558,0, u 436,-180, candrabindu 548,0")
+        expect(_positions([89u32, 672u32, 702u32])).to_equal("89:0:0 672:653:53 702:531:-127")
+        expect(_positions([68u32, 672u32, 702u32, 101u32])).to_equal("68:0:0 672:558:0 702:436:-180 101:548:0")
+
+    it "AC-5: Vedic accents stack on the mark below them (mark-to-mark above and below)":
+        step("Chrome: कं॑ udatta at 679 beside the anusvara; र्कं॑ at 754; कु॒॑ anudatta 683, udatta 547")
+        expect(_positions([56u32, 100u32, 108u32])).to_equal("56:0:0 100:547:0 108:679:0")
+        expect(_positions([56u32, 510u32, 108u32])).to_equal("56:0:0 510:547:0 108:754:0")
+        expect(_positions([56u32, 34u32, 732u32, 108u32])).to_equal("56:0:0 34:547:0 732:683:0 108:547:0")
+
+    it "AC-6: words without attachment keep plain advances":
+        step("Chrome: हिन्दी 544 88 245 73 33 at 0 259 790 1099 1630; कमल 0 768 1366")
+        expect(_positions([544u32, 88u32, 245u32, 73u32, 33u32])).to_equal("544:0:0 88:259:0 245:790:0 73:1099:0 33:1630:0")
+        expect(_positions([56u32, 80u32, 83u32])).to_equal("56:0:0 80:768:0 83:1366:0")

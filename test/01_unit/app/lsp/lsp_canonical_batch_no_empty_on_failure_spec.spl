@@ -1,0 +1,363 @@
+# Canonical LSP Diagnostic Batch & Failure Suppression Specification (ED-T07)
+# @req REQ-DIAG-006
+# @req REQ-DIAG-011
+# @cover src/lib/nogc_sync_mut/lsp/lsp_handlers.spl
+# @cover src/lib/nogc_sync_mut/lsp/lsp_diag_action_store.spl
+"""
+## Purpose and audience
+
+Executable TDD specification for Wave E4 (`WP-03`, `[C10]`, `ED-T07`):
+verifies that `LspCheckBatchV1` carries explicit validity and status metadata,
+never turns malformed JSON, analyzer timeouts (`exit 124`), analyzer crashes,
+incomplete batches, or superseded document versions into a clean `diagnostics: []`
+batch, retains the last valid push snapshot across transient failures, and returns
+JSON-RPC failure/staleness errors (`-32803` / `-32801`) on pull diagnostics.
+"""
+
+use std.spec
+use std.spec.step
+use std.common.crypto.sha256.{sha256_text}
+use std.common.diagnostics.diagnostic_batch.{DiagnosticActionIndex}
+use std.common.json.value.{JsonValue, json_value_object_from, json_value_serialize}
+use std.nogc_sync_mut.lsp.lsp_document_sync.{
+    lsp_document_open_for_client_v1,
+    lsp_document_change_for_client_v1,
+    lsp_document_close_for_client_v1
+}
+use std.nogc_sync_mut.lsp.lsp_diag_action_store.{
+    lsp_diag_action_store_clear_for_client_v1,
+    lsp_diag_action_store_lookup_for_client_v1,
+    lsp_diag_action_store_last_valid_for_client_v1
+}
+use std.nogc_sync_mut.lsp.lsp_handlers.{
+    LspCheckBatchV1,
+    lsp_check_json_parse_v1,
+    lsp_evaluate_check_output_v1,
+    lsp_publish_batch_for_client_v1,
+    lsp_published_diagnostic_notifications_v1,
+    lsp_clear_published_diagnostic_notifications_v1,
+    lsp_pull_diagnostic_response_from_batch_v1
+}
+
+fn sample_diag_row(code: text, msg: text, line_no: i64, col_no: i64) -> JsonValue:
+    json_value_object_from([
+        ("severity", JsonValue.Int(1)),
+        ("code", JsonValue.Str(code)),
+        ("message", JsonValue.Str(msg)),
+        ("line", JsonValue.Int(line_no)),
+        ("col", JsonValue.Int(col_no)),
+        ("source", JsonValue.Str("simple"))
+    ])
+
+fn sample_file_entry_array_json(file: text, diags: [JsonValue]) -> text:
+    val entry = json_value_object_from([
+        ("file", JsonValue.Str(file)),
+        ("diagnostics", JsonValue.Array(diags))
+    ])
+    json_value_serialize(JsonValue.Array([entry]))
+
+fn sample_mcp_wrapper_json(diags: [JsonValue], is_err: bool) -> text:
+    val structured = json_value_object_from([
+        ("diagnostics", JsonValue.Array(diags)),
+        ("count", JsonValue.Int(diags.len()))
+    ])
+    json_value_serialize(json_value_object_from([
+        ("structuredContent", structured),
+        ("isError", JsonValue.Bool(is_err))
+    ]))
+
+fn sample_batch_object_json(status: text, reason: text, diags: [JsonValue]) -> text:
+    json_value_serialize(json_value_object_from([
+        ("schema_version", JsonValue.Int(1)),
+        ("status", JsonValue.Str(status)),
+        ("incomplete_reason", JsonValue.Str(reason)),
+        ("source_hash", JsonValue.Str("abc123")),
+        ("diagnostics", JsonValue.Array(diags))
+    ]))
+
+fn sample_structured_envelope_wrapper_json(
+    status: text,
+    completeness: text,
+    reason: text,
+    snap_hash: text,
+    policy: text,
+    diags: [JsonValue]
+) -> text:
+    val structured = json_value_object_from([
+        ("schema_version", JsonValue.Int(1)),
+        ("status", JsonValue.Str(status)),
+        ("completeness", JsonValue.Str(completeness)),
+        ("incomplete_reason", JsonValue.Str(reason)),
+        ("snapshot_hash", JsonValue.Str(snap_hash)),
+        ("policy_digest", JsonValue.Str(policy)),
+        ("diagnostics", JsonValue.Array(diags))
+    ])
+    json_value_serialize(json_value_object_from([
+        ("structuredContent", structured),
+        ("isError", JsonValue.Bool(false))
+    ]))
+
+describe "Canonical LSP check batch validity and failure suppression (ED-T07)":
+    """
+    Verifies batch parsing, child exit-status classification, push-diagnostics
+    retention on failure/staleness, and pull-diagnostics error reporting.
+    """
+
+    context "when parsing check --format=json payloads":
+        """
+        Distinguishes genuine complete batches from malformed or incomplete payloads.
+        """
+
+        it "marks valid array and MCP-wrapped check payloads as complete with diagnostics":
+            """
+            Both per-file array output and MCP structuredContent output produce valid complete batches.
+            """
+            step("Parse per-file array payload with one error diagnostic")
+            val row = sample_diag_row("E0101", "unexpected token", 3, 5)
+            val arr_batch = lsp_check_json_parse_v1(sample_file_entry_array_json("/w/mod.spl", [row]), "/w/mod.spl", 2)
+            expect(arr_batch.valid).to_equal(true)
+            expect(arr_batch.status).to_equal("complete")
+            expect(arr_batch.items.len()).to_equal(1)
+            expect(arr_batch.items[0]).to_contain("unexpected token")
+
+            step("Parse MCP structuredContent wrapper with one error diagnostic")
+            val mcp_batch = lsp_check_json_parse_v1(sample_mcp_wrapper_json([row], false), "/w/mod.spl", 2)
+            expect(mcp_batch.valid).to_equal(true)
+            expect(mcp_batch.status).to_equal("complete")
+            expect(mcp_batch.items.len()).to_equal(1)
+            expect(mcp_batch.items[0]).to_contain("E0101")
+
+        it "marks genuine empty check arrays and zero-count wrappers as complete clean batches":
+            """
+            Clean analysis output with zero diagnostics remains valid so fixed buffers clear errors.
+            """
+            step("Verify empty array and zero-diagnostic MCP wrapper are valid and complete")
+            val empty_arr = lsp_check_json_parse_v1("[]", "/w/clean.spl", 4)
+            expect(empty_arr.valid).to_equal(true)
+            expect(empty_arr.status).to_equal("complete")
+            expect(empty_arr.items.len()).to_equal(0)
+
+            val empty_mcp = lsp_check_json_parse_v1(sample_mcp_wrapper_json([], false), "/w/clean.spl", 4)
+            expect(empty_mcp.valid).to_equal(true)
+            expect(empty_mcp.status).to_equal("complete")
+            expect(empty_mcp.items.len()).to_equal(0)
+
+        it "marks malformed JSON, scalar payloads, and non-diagnostic objects as malformed and invalid":
+            """
+            Malformed or schema-invalid JSON never masquerades as a clean zero-diagnostic batch.
+            """
+            step("Reject empty, truncated, scalar, null-row, and non-batch object payloads")
+            val empty_raw = lsp_check_json_parse_v1("", "/w/bad.spl", 1)
+            expect(empty_raw.valid).to_equal(false)
+            expect(empty_raw.status).to_equal("malformed")
+
+            val truncated = lsp_check_json_parse_v1("[1, 2", "/w/bad.spl", 1)
+            expect(truncated.valid).to_equal(false)
+            expect(truncated.status).to_equal("malformed")
+
+            val scalar = lsp_check_json_parse_v1("42", "/w/bad.spl", 1)
+            expect(scalar.valid).to_equal(false)
+            expect(scalar.status).to_equal("malformed")
+
+            val null_row = lsp_check_json_parse_v1("[null]", "/w/bad.spl", 1)
+            expect(null_row.valid).to_equal(false)
+            expect(null_row.status).to_equal("malformed")
+
+            val bogus_obj = lsp_check_json_parse_v1(json_value_serialize(json_value_object_from([("oops", JsonValue.Int(1))])), "/w/bad.spl", 1)
+            expect(bogus_obj.valid).to_equal(false)
+            expect(bogus_obj.status).to_equal("malformed")
+
+        it "marks non-complete DiagnosticBatchV1 and error MCP wrappers as invalid":
+            """
+            Partial recovery or error-flagged wrapper payloads are marked invalid with reason preserved.
+            """
+            step("Verify partial_recovery batch with zero items is marked incomplete rather than clean")
+            val partial = lsp_check_json_parse_v1(sample_batch_object_json("partial_recovery", "lexer bailed early", []), "/w/p.spl", 5)
+            expect(partial.valid).to_equal(false)
+            expect(partial.status).to_equal("incomplete")
+            expect(partial.incomplete_reason).to_contain("lexer bailed early")
+
+            val err_mcp = lsp_check_json_parse_v1(sample_mcp_wrapper_json([], true), "/w/p.spl", 5)
+            expect(err_mcp.valid).to_equal(false)
+            expect(err_mcp.status).to_equal("failed")
+
+        it "enforces structuredContent status, completeness, hashes, and policy_digest so non-complete envelopes are invalid":
+            """
+            MCP structuredContent envelopes with timed_out, incomplete, unavailable, or failed status
+            or non-complete completeness must return valid == false and never publish empty diagnostics.
+            """
+            lsp_clear_published_diagnostic_notifications_v1()
+            val uri = "file:///w/sc_guard.spl"
+
+            step("Reject timed_out, incomplete, unavailable, and failed structuredContent envelopes even when isError is false")
+            val sc_timeout = lsp_check_json_parse_v1(
+                sample_structured_envelope_wrapper_json("timed_out", "timed_out", "deadline 10s", "snap-t", "pol-t", []),
+                "/w/sc_guard.spl", 1)
+            expect(sc_timeout.valid).to_equal(false)
+            expect(sc_timeout.status).to_equal("timed_out")
+            expect(sc_timeout.incomplete_reason).to_contain("deadline 10s")
+            expect(sc_timeout.source_hash).to_equal("snap-t")
+            expect(sc_timeout.policy_digest).to_equal("pol-t")
+            expect(lsp_publish_batch_for_client_v1("sc-client", uri, sc_timeout, true)).to_equal(false)
+
+            val sc_incomplete = lsp_check_json_parse_v1(
+                sample_structured_envelope_wrapper_json("incomplete", "incomplete", "syntax-only check", "snap-i", "pol-i", []),
+                "/w/sc_guard.spl", 1)
+            expect(sc_incomplete.valid).to_equal(false)
+            expect(sc_incomplete.status).to_equal("incomplete")
+            expect(sc_incomplete.incomplete_reason).to_contain("syntax-only")
+            expect(lsp_publish_batch_for_client_v1("sc-client", uri, sc_incomplete, true)).to_equal(false)
+
+            val sc_unavail = lsp_check_json_parse_v1(
+                sample_structured_envelope_wrapper_json("unavailable", "unavailable", "gate disabled", "snap-u", "pol-u", []),
+                "/w/sc_guard.spl", 1)
+            expect(sc_unavail.valid).to_equal(false)
+            expect(sc_unavail.status).to_equal("unavailable")
+            expect(lsp_publish_batch_for_client_v1("sc-client", uri, sc_unavail, true)).to_equal(false)
+
+            val sc_failed = lsp_check_json_parse_v1(
+                sample_structured_envelope_wrapper_json("failed", "fail", "worker crashed", "snap-f", "pol-f", []),
+                "/w/sc_guard.spl", 1)
+            expect(sc_failed.valid).to_equal(false)
+            expect(sc_failed.status).to_equal("failed")
+            expect(lsp_publish_batch_for_client_v1("sc-client", uri, sc_failed, true)).to_equal(false)
+
+            step("Reject status=complete when completeness is timed_out, incomplete, or unavailable")
+            val sc_comp_mismatch = lsp_check_json_parse_v1(
+                sample_structured_envelope_wrapper_json("complete", "incomplete", "partial rules", "snap-cm", "pol-cm", []),
+                "/w/sc_guard.spl", 1)
+            expect(sc_comp_mismatch.valid).to_equal(false)
+            expect(sc_comp_mismatch.status).to_equal("incomplete")
+            expect(lsp_publish_batch_for_client_v1("sc-client", uri, sc_comp_mismatch, true)).to_equal(false)
+            expect(lsp_published_diagnostic_notifications_v1().len()).to_equal(0)
+            val pull_err = lsp_pull_diagnostic_response_from_batch_v1("99", "", sc_unavail, true, 1)
+            expect(pull_err).to_contain("-32803")
+            expect(pull_err.contains("\"items\":[]")).to_equal(false)
+
+    context "when classifying check child process exit codes and stdout":
+        """
+        Ensures timeouts and crashes are classified distinctly and never fall through to empty items.
+        """
+
+        it "classifies exit code 124 as timed_out even when stdout contains a JSON array":
+            """
+            Bounded process timeout (124) always produces an invalid timed_out batch.
+            """
+            step("Evaluate exit code 124 with misleading clean JSON stdout")
+            val timed_out = lsp_evaluate_check_output_v1("[]", 124, "/w/t.spl", "/w/t.spl", 3, "hash3")
+            expect(timed_out.valid).to_equal(false)
+            expect(timed_out.status).to_equal("timed_out")
+            expect(timed_out.incomplete_reason).to_contain("124")
+
+        it "classifies crash exit codes, empty stdout, and zero-item error exits as invalid":
+            """
+            Crash exits (2, 139) and exit code 1 without diagnostics never produce valid clean batches.
+            """
+            step("Evaluate crash exits and empty error exits")
+            val crashed = lsp_evaluate_check_output_v1("Segmentation fault", 139, "/w/c.spl", "/w/c.spl", 3, "hash3")
+            expect(crashed.valid).to_equal(false)
+            expect(crashed.status).to_equal("failed")
+
+            val no_json = lsp_evaluate_check_output_v1("fatal: internal panic", 0, "/w/c.spl", "/w/c.spl", 3, "hash3")
+            expect(no_json.valid).to_equal(false)
+            expect(no_json.status).to_equal("failed")
+
+            val empty_err = lsp_evaluate_check_output_v1("[]", 1, "/w/c.spl", "/w/c.spl", 3, "hash3")
+            expect(empty_err.valid).to_equal(false)
+            expect(empty_err.status).to_equal("incomplete")
+
+        it "parses fallback plain-text diagnostic lines while rejecting diagnostic-free non-JSON output":
+            """
+            Plain-text diagnostic lines anchored to the analyzed file parse cleanly as fallback,
+            whereas non-JSON text without diagnostics never turns into a clean empty batch.
+            """
+            step("Parse anchored plain-text warning line and verify diagnostic-free non-JSON fails closed")
+            val text_warn = lsp_evaluate_check_output_v1(
+                "/w/fb.spl:4:7: warning[W0410]: unresolved import 'foo'\n",
+                0, "/w/fb.spl", "/w/fb.spl", 2, "hash-fb")
+            expect(text_warn.valid).to_equal(true)
+            expect(text_warn.status).to_equal("complete")
+            expect(text_warn.items.len()).to_equal(1)
+            expect(text_warn.items[0]).to_contain("W0410")
+            expect(text_warn.items[0]).to_contain("unresolved import")
+
+            val blank_non_json = lsp_evaluate_check_output_v1("", 0, "/w/fb.spl", "/w/fb.spl", 2, "hash-fb")
+            expect(blank_non_json.valid).to_equal(false)
+            expect(blank_non_json.status).to_equal("failed")
+
+    context "when publishing push diagnostics and answering pull diagnostics":
+        """
+        Verifies push suppression + last-valid snapshot retention and pull JSON-RPC error codes.
+        """
+
+        it "retains the last valid push snapshot and never emits empty diagnostics on failure or stale version":
+            """
+            Push diagnostics only publish complete current batches and preserve prior valid state on failure.
+            """
+            val client = "ed-t07-push"
+            val uri = "file:///w/ed_t07_push.spl"
+            val src_v1 = "val broken: = 1\n"
+            val src_v2 = "val fixed: i64 = 1\n"
+            lsp_clear_published_diagnostic_notifications_v1()
+            lsp_diag_action_store_clear_for_client_v1(client, uri)
+
+            step("Open v1 and publish a valid error batch")
+            expect(lsp_document_open_for_client_v1(client, uri, 1, src_v1)).to_equal(true)
+            val row = sample_diag_row("E0200", "expected type annotation", 1, 12)
+            val valid_v1 = lsp_evaluate_check_output_v1(
+                sample_file_entry_array_json("/w/ed_t07_push.spl", [row]),
+                1, "/w/ed_t07_push.spl", "/w/ed_t07_push.spl", 1, sha256_text(src_v1))
+            expect(lsp_publish_batch_for_client_v1(client, uri, valid_v1, true)).to_equal(true)
+            expect(lsp_published_diagnostic_notifications_v1().len()).to_equal(1)
+            expect(lsp_published_diagnostic_notifications_v1()[0]).to_contain("expected type annotation")
+
+            val retained_initial = lsp_diag_action_store_last_valid_for_client_v1(client, uri)
+            expect(retained_initial.?).to_equal(true)
+            expect(retained_initial.unwrap().source_hash).to_equal(sha256_text(src_v1))
+            expect(retained_initial.unwrap().items.len()).to_equal(1)
+
+            step("Feed malformed, timed_out, failed, and stale batches: zero new notifications emitted")
+            val malformed = lsp_check_json_parse_v1("not-json", "/w/ed_t07_push.spl", 1)
+            val timed_out = lsp_evaluate_check_output_v1("", 124, "/w/ed_t07_push.spl", "/w/ed_t07_push.spl", 1, sha256_text(src_v1))
+            val failed = lsp_evaluate_check_output_v1("", 2, "/w/ed_t07_push.spl", "/w/ed_t07_push.spl", 1, sha256_text(src_v1))
+            expect(lsp_publish_batch_for_client_v1(client, uri, malformed, true)).to_equal(false)
+            expect(lsp_publish_batch_for_client_v1(client, uri, timed_out, true)).to_equal(false)
+            expect(lsp_publish_batch_for_client_v1(client, uri, failed, true)).to_equal(false)
+            expect(lsp_publish_batch_for_client_v1(client, uri, valid_v1, false)).to_equal(false)
+            expect(lsp_published_diagnostic_notifications_v1().len()).to_equal(1)
+
+            val retained_after_failures = lsp_diag_action_store_last_valid_for_client_v1(client, uri)
+            expect(retained_after_failures.?).to_equal(true)
+            expect(retained_after_failures.unwrap().items.len()).to_equal(1)
+            expect(retained_after_failures.unwrap().version).to_equal(1)
+
+            step("Advance document to v2: v1 action lookup is invalidated, and genuine clean v2 clears diagnostics")
+            expect(lsp_document_change_for_client_v1(client, uri, 2, src_v2)).to_equal(true)
+            expect(lsp_diag_action_store_lookup_for_client_v1(client, uri, 2).?).to_equal(false)
+            val clean_v2 = lsp_evaluate_check_output_v1("[]", 0, "/w/ed_t07_push.spl", "/w/ed_t07_push.spl", 2, sha256_text(src_v2))
+            expect(lsp_publish_batch_for_client_v1(client, uri, clean_v2, true)).to_equal(true)
+            expect(lsp_published_diagnostic_notifications_v1().len()).to_equal(2)
+            expect(lsp_published_diagnostic_notifications_v1()[1]).to_contain("\"diagnostics\":[]")
+
+            expect(lsp_document_close_for_client_v1(client, uri)).to_equal(true)
+            lsp_diag_action_store_clear_for_client_v1(client, uri)
+
+        it "returns JSON-RPC -32803 on failed or timed_out pull and -32801 on stale pull rather than empty items":
+            """
+            Pull diagnostics surfaces explicit RequestFailed (-32803) and ContentModified (-32801) errors.
+            """
+            step("Check pull response envelopes for malformed, timed_out, failed, and stale batches")
+            val malformed = lsp_check_json_parse_v1("broken", "/w/pull.spl", 1)
+            val resp_malformed = lsp_pull_diagnostic_response_from_batch_v1("10", "", malformed, true, 1)
+            expect(resp_malformed).to_contain("-32803")
+            expect(resp_malformed.contains("\"items\":[]")).to_equal(false)
+
+            val timed_out = lsp_evaluate_check_output_v1("", 124, "/w/pull.spl", "/w/pull.spl", 1, "h1")
+            val resp_timeout = lsp_pull_diagnostic_response_from_batch_v1("11", "", timed_out, true, 1)
+            expect(resp_timeout).to_contain("-32803")
+            expect(resp_timeout).to_contain("timed out")
+
+            val clean = lsp_evaluate_check_output_v1("[]", 0, "/w/pull.spl", "/w/pull.spl", 1, "h1")
+            val resp_stale = lsp_pull_diagnostic_response_from_batch_v1("12", "", clean, false, 1)
+            expect(resp_stale).to_contain("-32801")
+            expect(resp_stale.contains("\"items\":[]")).to_equal(false)

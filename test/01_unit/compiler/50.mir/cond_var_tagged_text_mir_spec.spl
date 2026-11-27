@@ -1,0 +1,138 @@
+# @req REQ-SSPEC-COMPILER
+# @cover src/compiler/50.mir/mir_lowering_stmts.spl
+# @cover src/compiler/50.mir/mir_lowering_types.spl
+# @cover src/compiler/50.mir/_MirLoweringExpr/builtin_method_extras.spl
+"""
+# Conditional `var` text reassignment keeps runtime boxing probes across paths
+
+Regression spec for conditional `var` reassignment from raw text to tagged
+text (`substring`, `+`, `+=`, `chr`):
+```simple
+var name = parts[parts.len() - 1]
+if name.starts_with("_"):
+    name = name.substring(1)
+if kind == "T" and required.has(name): required[name] = true
+```
+When `name` starts as untagged raw text (`parts[parts.len() - 1]`), taking the
+conditional `name = name.substring(1)` branch previously marked `name`'s local
+in `tagged_text_locals` for the remainder of the function. Paths that skipped
+the `if` left a raw `char*` in `name`, while `required.has(name)` and
+`required[name] = true` skipped `box_text_identity_v1`'s `rt_string_data`
+runtime tag check and passed raw `char*` to `rt_dict_contains`/`rt_dict_set`.
+"""
+
+# @tag: unit, compiler, mir, text
+
+use std.spec.{describe, it, expect}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_types.{HirModule}
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.backend.mir_to_llvm.{MirToLlvm}
+use compiler.backend.backend.backend_types.{CodegenTarget}
+
+struct CondVarMirProbe:
+    mir_mod: MirModule
+    ir: text
+    errors: [text]
+
+fn lower_cond_var_probe(src: text, tag: text) -> CondVarMirProbe:
+    val file = "cond_var_probe_" + tag + ".spl"
+    val module = parse_full_frontend(src, file, "cond_var_probe_" + tag, Logger(level: 0))
+    var hl = HirLowering.with_filename(file)
+    val hir = hl.lower_module(module)
+    var errs: [text] = []
+    for e in hl.errors:
+        errs = errs.push("hir: " + e.message)
+    val m: HirModule = hir
+    var mir_owner = MirLowering.new_for_target(m.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    val mir = mir_owner.lower_module(m)
+    for e in mir_owner.errors:
+        errs = errs.push("mir: " + e.message)
+    val ir = MirToLlvm.create("cond_var_probe_" + tag, CodegenTarget.X86_64, None).translate_module(mir)
+    CondVarMirProbe(mir_mod: mir, ir: ir, errors: errs)
+
+fn find_cond_var_fn(mir_mod: MirModule, target_name: text) -> MirFunction?:
+    for function in mir_mod.functions.values():
+        if function.name == target_name or function.name.ends_with("." + target_name):
+            return Some(function)
+    None
+
+fn count_fn_calls(function: MirFunction, callee_name: text) -> i64:
+    var count = 0
+    for block in function.blocks:
+        for instruction in block.instructions:
+            match instruction.kind:
+                case MirInstKind.Call(_, callee, _):
+                    match callee.kind:
+                        case MirOperandKind.Const(MirConstValue.Str(name), _):
+                            if name == callee_name:
+                                count = count + 1
+                        case _: ()
+                case _: ()
+    count
+
+describe "conditional var tagged-text reassignment in MIR":
+    it "keeps rt_string_data runtime key probes on both has and index-set after if substring":
+        val src = """fn probe(parts: [text], kind: text) -> bool:
+    var d: {text: bool} = {"rt_tagged_add": false}
+    var name = parts[parts.len() - 1]
+    if name.starts_with("_"):
+        name = name.substring(1)
+    if kind == "T" and d.has(name):
+        d[name] = true
+    d["rt_tagged_add"]
+"""
+        val probe = lower_cond_var_probe(src, "if_substring")
+        expect(probe.errors.len()).to_equal(0)
+        val fn_opt = find_cond_var_fn(probe.mir_mod, "probe")
+        expect(fn_opt.?).to_equal(true)
+        if val func = fn_opt:
+            # One rt_string_data probe inside box_text_identity_v1 for d.has(name)
+            # and one for d[name] = true (each emits 2 rt_string_data calls:
+            # data check + owner probe = 0 since resolve_owner=false, so 1 per key site).
+            expect(count_fn_calls(func, "rt_string_data") >= 2).to_equal(true)
+            expect(count_fn_calls(func, "rt_dict_contains")).to_equal(1)
+            expect(count_fn_calls(func, "rt_dict_set") >= 2).to_equal(true)
+        expect(probe.ir).to_contain("@rt_string_data")
+
+    it "keeps rt_string_data runtime key probes after elif chain and while reassignment":
+        val src = """fn probe(parts: [text], mode: i64) -> bool:
+    var d: {text: bool} = {"rt_tagged_add": false}
+    var name = parts[parts.len() - 1]
+    if mode == 1:
+        name = name.substring(1)
+    elif mode == 2:
+        name = name + ""
+    while name.starts_with("_"):
+        name = name.substring(1)
+    d.has(name)
+"""
+        val probe = lower_cond_var_probe(src, "elif_while")
+        expect(probe.errors.len()).to_equal(0)
+        val fn_opt = find_cond_var_fn(probe.mir_mod, "probe")
+        expect(fn_opt.?).to_equal(true)
+        if val func = fn_opt:
+            expect(count_fn_calls(func, "rt_string_data") >= 1).to_equal(true)
+
+    it "normalizes untagged rhs when var starts as tagged i64 text":
+        val src = """fn probe(s: text, cond: bool) -> bool:
+    var d: {text: bool} = {"rt_tagged_add": false}
+    var name = s.substring(1)
+    if cond:
+        name = "rt_tagged_add"
+    d.has(name)
+"""
+        val probe = lower_cond_var_probe(src, "tagged_to_raw")
+        expect(probe.errors.len()).to_equal(0)
+        val fn_opt = find_cond_var_fn(probe.mir_mod, "probe")
+        expect(fn_opt.?).to_equal(true)
+        if val func = fn_opt:
+            expect(count_fn_calls(func, "rt_interp_cstr") >= 1).to_equal(true)
+            expect(count_fn_calls(func, "rt_dict_contains")).to_equal(1)

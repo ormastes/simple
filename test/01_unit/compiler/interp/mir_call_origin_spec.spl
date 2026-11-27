@@ -1,0 +1,222 @@
+# @bug mir_runtime_call_origin_ambiguity_2026-07-17
+# Behavioral tests of source/runtime authority, virtual arrays and both MIR tiers.
+use std.spec
+use compiler.interp.mir_interpreter.{MirInterpreter}
+use compiler.interp.execir.{execir_encode_call}
+use compiler.mir.mir_instructions.*
+use compiler.mir.mir_types.*
+use compiler.mir.mir_instruction_support.{MirCallOrigin}
+use compiler.hir.hir_types.{SymbolId}
+use compiler.common.attributes.{vhdl_hardware_metadata_default}
+
+fn origin_local(id: i64, kind: LocalKind) -> MirLocal:
+    MirLocal(id: LocalId(id: id), name: nil, type_: MirType.i64(), kind: kind, is_ghost: false)
+
+fn origin_fn(name: text, locals: [MirLocal], blocks: [MirBlock]) -> MirFunction:
+    MirFunction(symbol: SymbolId.new(-1), name: name,
+        signature: MirSignature(params: [], return_type: MirType.i64(), is_variadic: false),
+        locals: locals, blocks: blocks, entry_block: BlockId.new(0), span: nil,
+        generic_params: [], is_generic_template: false, specialization_of: nil,
+        type_bindings: {}, layout_phase: nil, is_kernel: false, gpu_target: "",
+        gpu_backend_order: "", is_export_c: false, export_name: "",
+        has_driver_manifest_attr: false, driver_manifest_attr: nil,
+        has_vhdl_metadata: false, vhdl_metadata: vhdl_hardware_metadata_default(),
+        has_fast_math: false, unroll_factor: 0, pipeline_ii: 0, memory_banks: 0,
+        verification_contract: nil)
+
+fn origin_inst(kind: MirInstKind) -> MirInst:
+    MirInst(kind: kind, span: nil)
+
+fn origin_block(id: i64, instructions: [MirInst], term: MirTerminator) -> MirBlock:
+    MirBlock(id: BlockId.new(id), label: nil, instructions: instructions, terminator: term)
+
+fn origin_lid(id: i64) -> LocalId:
+    LocalId(id: id)
+
+fn origin_target(name: text, origin: MirCallOrigin) -> MirOperand:
+    MirOperand(kind: MirOperandKind.Const(MirConstValue.Str(name), MirType.i64()), call_origin: origin)
+
+fn origin_call(dest: i64, name: text, origin: MirCallOrigin, args: [MirOperand]) -> MirInstKind:
+    MirInstKind.Call(Some(origin_lid(dest)), origin_target(name, origin), args)
+
+fn origin_constant_fn(name: text, value: i64) -> MirFunction:
+    origin_fn(name, [], [origin_block(0, [], MirTerminator.Ret(Some(mir_operand_const_int(value))))])
+
+fn p0_mir_retention_setup() -> MirInterpreter:
+    MirInterpreter.create()
+
+fn p0_mir_retention_check(interp: MirInterpreter, kind: MirInstKind):
+    expect(interp.execute_instruction(origin_inst(kind))).to_be_nil()
+
+describe "MIR calls preserve declaration authority":
+    it "keeps source runtime-looking names and runtime arrays separate":
+        var interp = p0_mir_retention_setup()
+        interp.set_function_table({"rt_array_len": origin_constant_fn("rt_array_len", 73)})
+        p0_mir_retention_check(interp, origin_call(0, "rt_array_new", MirCallOrigin.Runtime, [mir_operand_const_int(0)]))
+        p0_mir_retention_check(interp, origin_call(1, "rt_array_push", MirCallOrigin.Runtime, [mir_operand_copy(origin_lid(0)), mir_operand_const_int(19)]))
+        p0_mir_retention_check(interp, origin_call(2, "rt_array_len", MirCallOrigin.Source, [mir_operand_copy(origin_lid(0))]))
+        expect(interp.get_local(origin_lid(2))).to_equal(73)
+        p0_mir_retention_check(interp, origin_call(3, "rt_array_len", MirCallOrigin.Runtime, [mir_operand_copy(origin_lid(0))]))
+        expect(interp.get_local(origin_lid(3))).to_equal(1)
+
+    it "executes runtime array new push len get and set with actual values":
+        var interp = p0_mir_retention_setup()
+        p0_mir_retention_check(interp, origin_call(0, "rt_array_new", MirCallOrigin.Runtime, [mir_operand_const_int(2)]))
+        for value in [10, 20]:
+            p0_mir_retention_check(interp, origin_call(1, "rt_array_push", MirCallOrigin.Runtime, [mir_operand_copy(origin_lid(0)), mir_operand_const_int(value)]))
+            expect(interp.get_local(origin_lid(1))).to_equal(1)
+        p0_mir_retention_check(interp, origin_call(2, "rt_array_len", MirCallOrigin.Runtime, [mir_operand_copy(origin_lid(0))]))
+        expect(interp.get_local(origin_lid(2))).to_equal(2)
+        p0_mir_retention_check(interp, origin_call(3, "rt_array_get", MirCallOrigin.Runtime, [mir_operand_copy(origin_lid(0)), mir_operand_const_int(1)]))
+        expect(interp.get_local(origin_lid(3))).to_equal(20)
+        p0_mir_retention_check(interp, origin_call(4, "rt_array_set", MirCallOrigin.Runtime, [mir_operand_copy(origin_lid(0)), mir_operand_const_int(1), mir_operand_const_int(99)]))
+        expect(interp.get_local(origin_lid(4))).to_equal(1)
+        p0_mir_retention_check(interp, origin_call(5, "rt_array_get", MirCallOrigin.Runtime, [mir_operand_copy(origin_lid(0)), mir_operand_const_int(1)]))
+        expect(interp.get_local(origin_lid(5))).to_equal(99)
+
+    it "does not let source declarations intercept supported async hooks":
+        var interp = p0_mir_retention_setup()
+        interp.set_function_table({"__simple_runtime_await": origin_constant_fn("__simple_runtime_await", 73)})
+        p0_mir_retention_check(interp, origin_call(0, "__simple_runtime_await", MirCallOrigin.Runtime, [mir_operand_const_int(42)]))
+        expect(interp.get_local(origin_lid(0))).to_equal(42)
+        p0_mir_retention_check(interp, origin_call(1, "__simple_runtime_await", MirCallOrigin.Source, [mir_operand_const_int(42)]))
+        expect(interp.get_local(origin_lid(1))).to_equal(73)
+
+    it "rejects foreign and unknown authority without invoking a source collision":
+        var interp = p0_mir_retention_setup()
+        interp.set_function_table({"rt_array_len": origin_constant_fn("rt_array_len", 73)})
+        for origin in [MirCallOrigin.Foreign, MirCallOrigin.Unknown]:
+            interp.set_local(origin_lid(0), 444)
+            val error = interp.execute_instruction(origin_inst(origin_call(0, "rt_array_len", origin, [mir_operand_const_int(0)])))
+            expect(error.?).to_equal(true)
+            expect(interp.get_local(origin_lid(0))).to_equal(444)
+
+    it "refuses unresolved source runtime and malformed callees without writing zero":
+        var interp = p0_mir_retention_setup()
+        for origin in [MirCallOrigin.Source, MirCallOrigin.Runtime]:
+            interp.set_local(origin_lid(0), 555)
+            val error = interp.execute_instruction(origin_inst(origin_call(0, "missing_owner", origin, [])))
+            expect(error.?).to_equal(true)
+            expect(interp.get_local(origin_lid(0))).to_equal(555)
+        val malformed = MirInstKind.Call(Some(origin_lid(0)), mir_operand_const_int(0), [])
+        expect(interp.execute_instruction(origin_inst(malformed)).?).to_equal(true)
+        expect(interp.get_local(origin_lid(0))).to_equal(555)
+
+    it "rejects runtime arity before changing destination":
+        var interp = p0_mir_retention_setup()
+        interp.set_local(origin_lid(9), 321)
+        expect(interp.execute_instruction(origin_inst(origin_call(9, "rt_array_push", MirCallOrigin.Runtime, []))).?).to_equal(true)
+        expect(interp.get_local(origin_lid(9))).to_equal(321)
+
+    it "matches array negative indices and the owned ABI failure sentinels":
+        var interp = p0_mir_retention_setup()
+        p0_mir_retention_check(interp, origin_call(0, "rt_array_new", MirCallOrigin.Runtime, [mir_operand_const_int(-1)]))
+        expect(interp.get_local(origin_lid(0))).to_be_greater_than(0)
+        p0_mir_retention_check(interp, origin_call(1, "rt_array_push", MirCallOrigin.Runtime, [mir_operand_copy(origin_lid(0)), mir_operand_const_int(19)]))
+        p0_mir_retention_check(interp, origin_call(2, "rt_array_set", MirCallOrigin.Runtime, [mir_operand_copy(origin_lid(0)), mir_operand_const_int(-1), mir_operand_const_int(27)]))
+        expect(interp.get_local(origin_lid(2))).to_equal(1)
+        p0_mir_retention_check(interp, origin_call(3, "rt_array_get", MirCallOrigin.Runtime, [mir_operand_copy(origin_lid(0)), mir_operand_const_int(-1)]))
+        expect(interp.get_local(origin_lid(3))).to_equal(27)
+        p0_mir_retention_check(interp, origin_call(4, "rt_array_get", MirCallOrigin.Runtime, [mir_operand_copy(origin_lid(0)), mir_operand_const_int(1)]))
+        expect(interp.get_local(origin_lid(4))).to_equal(3)
+        p0_mir_retention_check(interp, origin_call(5, "rt_array_set", MirCallOrigin.Runtime, [mir_operand_copy(origin_lid(0)), mir_operand_const_int(1), mir_operand_const_int(9)]))
+        expect(interp.get_local(origin_lid(5))).to_equal(0)
+        p0_mir_retention_check(interp, origin_call(6, "rt_array_len", MirCallOrigin.Runtime, [mir_operand_const_int(0)]))
+        expect(interp.get_local(origin_lid(6))).to_equal(0)
+        p0_mir_retention_check(interp, origin_call(7, "rt_array_new", MirCallOrigin.Runtime, [mir_operand_const_int(100000001)]))
+        expect(interp.get_local(origin_lid(7))).to_equal(0)
+
+describe "MIR runtime arrays retain interpreter ownership":
+    it "preserves arrays across source calls and pooled frame reuse":
+        var interp = p0_mir_retention_setup()
+        val mutate = origin_fn("mutate", [origin_local(0, LocalKind.Arg(0)), origin_local(1, LocalKind.Temp)], [origin_block(0, [
+            origin_inst(origin_call(1, "rt_array_set", MirCallOrigin.Runtime, [mir_operand_copy(origin_lid(0)), mir_operand_const_int(0), mir_operand_const_int(42)]))
+        ], MirTerminator.Ret(Some(mir_operand_copy(origin_lid(0)))))])
+        interp.set_function_table({"mutate": mutate})
+        p0_mir_retention_check(interp, origin_call(0, "rt_array_new", MirCallOrigin.Runtime, [mir_operand_const_int(0)]))
+        p0_mir_retention_check(interp, origin_call(1, "rt_array_push", MirCallOrigin.Runtime, [mir_operand_copy(origin_lid(0)), mir_operand_const_int(7)]))
+        val original = interp.get_local(origin_lid(0))
+        for index in 0..2:
+            p0_mir_retention_check(interp, origin_call(2, "mutate", MirCallOrigin.Source, [mir_operand_copy(origin_lid(0))]))
+            expect(interp.get_local(origin_lid(2))).to_equal(original)
+        p0_mir_retention_check(interp, origin_call(3, "rt_array_get", MirCallOrigin.Runtime, [mir_operand_copy(origin_lid(0)), mir_operand_const_int(0)]))
+        expect(interp.get_local(origin_lid(3))).to_equal(42)
+
+    it "keeps constant array pointer reads stores and runtime mutations consistent":
+        var interp = p0_mir_retention_setup()
+        p0_mir_retention_check(interp, MirInstKind.Const(origin_lid(0), MirConstValue.Array([MirConstValue.Int(4), MirConstValue.Int(8)]), MirType.i64()))
+        p0_mir_retention_check(interp, origin_call(1, "rt_array_set", MirCallOrigin.Runtime, [mir_operand_copy(origin_lid(0)), mir_operand_const_int(1), mir_operand_const_int(9)]))
+        p0_mir_retention_check(interp, MirInstKind.GetElementPtr(origin_lid(2), mir_operand_copy(origin_lid(0)), [mir_operand_const_int(1)]))
+        p0_mir_retention_check(interp, MirInstKind.Load(origin_lid(3), mir_operand_copy(origin_lid(2))))
+        expect(interp.get_local(origin_lid(3))).to_equal(9)
+        p0_mir_retention_check(interp, MirInstKind.Store(mir_operand_copy(origin_lid(2)), mir_operand_const_int(17)))
+        p0_mir_retention_check(interp, origin_call(4, "rt_array_get", MirCallOrigin.Runtime, [mir_operand_copy(origin_lid(0)), mir_operand_const_int(1)]))
+        expect(interp.get_local(origin_lid(4))).to_equal(17)
+        p0_mir_retention_check(interp, origin_call(5, "rt_array_push", MirCallOrigin.Runtime, [mir_operand_copy(origin_lid(0)), mir_operand_const_int(23)]))
+        p0_mir_retention_check(interp, MirInstKind.GetElementPtr(origin_lid(6), mir_operand_copy(origin_lid(0)), [mir_operand_const_int(2)]))
+        p0_mir_retention_check(interp, MirInstKind.Load(origin_lid(7), mir_operand_copy(origin_lid(6))))
+        expect(interp.get_local(origin_lid(7))).to_equal(23)
+
+    it "permits a one-past array pointer but rejects dereferencing it":
+        var interp = p0_mir_retention_setup()
+        p0_mir_retention_check(interp, origin_call(0, "rt_array_new", MirCallOrigin.Runtime, [mir_operand_const_int(0)]))
+        p0_mir_retention_check(interp, MirInstKind.GetElementPtr(origin_lid(1), mir_operand_copy(origin_lid(0)), [mir_operand_const_int(0)]))
+        interp.set_local(origin_lid(2), 888)
+        expect(interp.execute_instruction(origin_inst(MirInstKind.Load(origin_lid(2), mir_operand_copy(origin_lid(1))))).?).to_equal(true)
+        expect(interp.get_local(origin_lid(2))).to_equal(888)
+
+    it "materializes aggregate arrays for runtime dispatch":
+        var interp = p0_mir_retention_setup()
+        p0_mir_retention_check(interp, MirInstKind.Aggregate(origin_lid(0), AggregateKind.Array(MirType.i64()), [mir_operand_const_int(5), mir_operand_const_int(12)]))
+        p0_mir_retention_check(interp, origin_call(1, "rt_array_get", MirCallOrigin.Runtime, [mir_operand_copy(origin_lid(0)), mir_operand_const_int(1)]))
+        expect(interp.get_local(origin_lid(1))).to_equal(12)
+
+describe "all MIR call execution routes enforce authority":
+    it "applies authority to a named indirect target":
+        var interp = p0_mir_retention_setup()
+        interp.set_function_table({"__simple_runtime_await": origin_constant_fn("__simple_runtime_await", 73)})
+        val sig = MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)
+        p0_mir_retention_check(interp, MirInstKind.CallIndirect(Some(origin_lid(0)), origin_target("__simple_runtime_await", MirCallOrigin.Runtime), [mir_operand_const_int(42)], sig))
+        expect(interp.get_local(origin_lid(0))).to_equal(42)
+
+    it "keeps origin faults out of both CallTerminator successor edges":
+        var interp = p0_mir_retention_setup()
+        interp.current_block = Some(9)
+        interp.set_local(origin_lid(0), 222)
+        val term = MirTerminator.CallTerminator(Some(origin_lid(0)), origin_target("rt_array_len", MirCallOrigin.Unknown), [mir_operand_const_int(0)], BlockId.new(1), Some(BlockId.new(2)), Some(origin_lid(3)), Some(origin_lid(4)))
+        expect(interp.execute_terminator(term).?).to_equal(true)
+        expect(interp.current_block).to_equal(Some(9))
+        expect(interp.get_local(origin_lid(0))).to_equal(222)
+
+    it "preserves the explicit language exception unwind path":
+        var interp = p0_mir_retention_setup()
+        val throwing = origin_fn("throwing", [], [origin_block(0, [], MirTerminator.Throw(mir_operand_const_int(64), mir_operand_const_int(9)))])
+        interp.set_function_table({"throwing": throwing})
+        interp.current_block = Some(0)
+        val term = MirTerminator.CallTerminator(nil, origin_target("throwing", MirCallOrigin.Source), [], BlockId.new(1), Some(BlockId.new(2)), Some(origin_lid(3)), Some(origin_lid(4)))
+        expect(interp.execute_terminator(term)).to_be_nil()
+        expect(interp.current_block).to_equal(Some(2))
+        expect(interp.get_local(origin_lid(3))).to_equal(64)
+        expect(interp.get_local(origin_lid(4))).to_equal(9)
+
+    it "invalidates an encoded source plan when a non-entry call changes origin":
+        var interp = p0_mir_retention_setup()
+        interp.execir_enabled = true
+        val table = {"__simple_runtime_await": origin_constant_fn("__simple_runtime_await", 73)}
+        interp.set_function_table(table)
+        val entry = origin_block(0, [], MirTerminator.Goto(BlockId.new(1)))
+        val source_fn = origin_fn("same_shape", [origin_local(0, LocalKind.Temp)], [entry, origin_block(1, [
+            origin_inst(origin_call(0, "__simple_runtime_await", MirCallOrigin.Source, [mir_operand_const_int(42)]))
+        ], MirTerminator.Ret(Some(mir_operand_copy(origin_lid(0)))))])
+        val runtime_fn = origin_fn("same_shape", [origin_local(0, LocalKind.Temp)], [entry, origin_block(1, [
+            origin_inst(origin_call(0, "__simple_runtime_await", MirCallOrigin.Runtime, [mir_operand_const_int(42)]))
+        ], MirTerminator.Ret(Some(mir_operand_copy(origin_lid(0)))))])
+        expect(execir_encode_call(source_fn, table).?).to_equal(true)
+        expect(execir_encode_call(runtime_fn, table)).to_be_nil()
+        val source_result = interp.execute_function(source_fn)
+        expect(source_result[1]).to_be_nil()
+        expect(source_result[0]).to_equal(Some(73))
+        val runtime_result = interp.execute_function(runtime_fn)
+        expect(runtime_result[1]).to_be_nil()
+        expect(runtime_result[0]).to_equal(Some(42))
+        expect(interp.execir_probe_count_value()).to_equal(2)

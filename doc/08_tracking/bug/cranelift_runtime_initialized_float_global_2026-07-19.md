@@ -1,6 +1,17 @@
 # Cranelift rejected runtime-initialized float globals
 
 - **Status:** FIXED (source/unit/cross-target contracts; fresh execution pending)
+
+**Verification 2026-11-25 (work/p2w1-af-20261125, release/1.0.0):** verified by
+code inspection. `cranelift_static_init_supported`
+(`src/compiler/70.backend/backend/cranelift_codegen_adapter.spl:450`) now has an
+explicit `case F32 | F64:` arm (:454) that accepts nil-backed
+(`not static_.init.?`), `Zero`, `Float(_)`, and `FloatLexeme(_)` initializers
+and fails closed on anything else — the "Cranelift rejects F32/F64 statics"
+defect this record describes no longer exists in the tree. Fresh Cranelift
+execution remains pending: no Cranelift native-build producer is available on
+this Windows host (cargo/rust builds are off-limits in this lane), so the
+execution half of the evidence could not be re-run here.
 - **Severity:** high
 - **Backend:** Cranelift
 

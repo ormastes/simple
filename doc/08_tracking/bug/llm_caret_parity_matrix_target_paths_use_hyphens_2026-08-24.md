@@ -1,7 +1,10 @@
 # LLM Caret parity matrices point at hyphenated `.spl` targets that repo convention forbids
 
 - **Date:** 2026-08-24
-- **Status:** OPEN
+- **Status:** FIXED (lane p3-caret2, 2026-11-11) — the 3 decoy files are deleted;
+  `hyphenated_spl_files=0` and `hyphenated_matrix_targets=0` on the gate. The
+  gate's remaining FAIL is the separate, honestly-unimplemented porting surface
+  (`target_files_missing=1156`), not this row.
 - **Component:** `doc/03_plan/trace/llm_caret_claude_cli_full_parity_{file,symbol}_matrix.tsv`,
   `scripts/check/check-llm-caret-full-parity-implementation.shs`
 - **Severity:** medium (gate reports work as unimplemented when it is implemented)
@@ -75,3 +78,63 @@ continue this port needs that tree restored first.
 Behavioral unit specs for the ink terminal-event cluster (the ports were
 verified real, not stubs), under
 `test/01_unit/app/llm_caret/claude_full/ink/`.
+
+## Addendum 2026-11-11 — lane p3-caret1: matrices verified fixed; row restored OPEN on 3 residual decoy files
+
+Traversed on work/p3-caret1-20261111 (origin/release/1.0.0 tip 79d5af6723f6).
+
+Fix commit 63629c406085 (PR #6438, "underscore parity-matrix targets + hyphen
+gate") IS an ancestor of tip, and the matrix half of the defect is verified
+fixed (fast targeted re-derivation; the full gate script is not runnable in the
+10-minute lane budget on this host because its awk performs one `wc -l`
+subprocess per matrix row):
+
+- `class_rows=124, exist=124, missing=0` — `class_target_files_missing` is 0;
+  all 15 originally-missing class targets now exist at their snake_case paths
+  (and all 13 snake_case paths from the table above verified present).
+- `hyphenated_matrix_targets=0` — no hyphenated `src/*.spl` target in either
+  matrix.
+- The matrices reference the snake_case ports; the hyphenated names only remain
+  as the TypeScript source basenames in the source column, as intended.
+
+Residual defect keeping the gate red: `hyphenated_spl_files=3` —
+
+- `src/app/llm_caret/claude_full/components/CustomSelect/use-multi-select-state.spl`
+- `src/app/llm_caret/claude_full/components/CustomSelect/use-select-navigation.spl`
+- `src/app/llm_caret/claude_full/components/permissions/AskUserQuestionPermissionRequest/use-multiple-choice-state.spl`
+
+These existed before PR #6438 and were not removed by it; each is a byte-identical
+twin of its snake_case port (`use_multi_select_state.spl`,
+`use_select_navigation.spl`, `use_multiple_choice_state.spl`), is not imported by
+any `.spl` module (verified by content grep over `src/` and `test/`; the only
+references are the `.ts` source basenames in matrices/specs), and is exactly the
+kind of convention-violating decoy this bug doc says must not satisfy the gate.
+The fix is to delete those 3 files (plus whatever reseal/regeneration the ledger
+requires) — left OPEN with this evidence rather than flipped, per
+fix-implemented-verification-pending → fail → restore-open process.
+
+## Addendum 2026-11-11 — lane p3-caret2: FIXED — 3 decoy files deleted
+
+Traversed on work/p3-caret2-20261111 (origin/release/1.0.0 tip
+66506fda143ca).
+
+- Each decoy re-verified byte-identical to its snake_case twin (`cmp`):
+  `use-multi-select-state.spl`/`use_multi_select_state.spl`,
+  `use-select-navigation.spl`/`use_select_navigation.spl`,
+  `use-multiple-choice-state.spl`/`use_multiple_choice_state.spl`.
+- Re-verified unreferenced: content grep over `src/` and `test/` `.spl` files
+  finds the hyphenated names only inside the decoys' own docstrings and the
+  twins' "parity ledger" comments (those name the `.ts` sources); no import
+  references. Nothing under `scripts/`, `config/`, or `tools/` references them
+  either. The parity matrices' target columns point at the snake_case paths.
+- Deleted the 3 decoys with `git rm`.
+- Gate re-run (full `sh scripts/check/check-llm-caret-full-parity-implementation.shs`,
+  ~23 min on this host; log build/review/p3fix-caret2-20261111-logs/parity_gate_after_delete.log):
+  `hyphenated_spl_files=0`, `hyphenated_matrix_targets=0`,
+  `class_rows=124, class_target_files_missing=0`. The script still exits FAIL
+  on the pre-existing unimplemented porting surface (`target_files_missing=1156`,
+  `target_loc_ge_required=518/1902`) — the gate is right about those per this
+  doc's own triage, and that surface belongs to the parity porting program,
+  not to this row.
+
+This row's acceptance (delete the 3 decoys; hyphen metrics 0) is met.

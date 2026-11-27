@@ -2,7 +2,7 @@
 
 - **Filed:** 2026-07-28
 - **Severity:** high — silent data loss, no error, no warning
-- **Status:** open
+- **Status:** CLOSED 2026-11-25 — not reproducible on the current seed (first shown 2026-09-06, re-verified 2026-11-25 below); header previously read "open", which was stale
 - **Found via:** SF4 mutex-guard lane (its `with_lock` signature is built on this)
 
 ## Symptom
@@ -142,3 +142,20 @@ One genuine finding survives regardless of the value bug: the JIT still
 **refuses** `fn(Any) -> Any` closures outright rather than compiling them, so
 every such call site silently drops to the interpreter. That is a performance
 cliff, not a wrong answer, and is not what this record tracks.
+
+## Re-verification 2026-11-25 (release/1.0.0 @ 0819b116ecb, worktree wt-p1w1-aa) — CLOSED
+
+Ran the record's own probe fixture verbatim (from `build/`) on the pinned
+`bin/simple.exe` (Rust seed v1.0.0-rc.1):
+
+- default (JIT) lane: `7` / `1` / `1`
+- `SIMPLE_EXECUTION_MODE=interpret`: `7` / `1` / `1`
+
+`g(7)` prints `7` (no undecoded `<value:0x7>` tagged box) and `apply_any(g)`
+prints `1` (no value destruction) on both engines, matching the 2026-09-06
+aarch64 re-reproduction. Neither filed defect reproduces on the current
+release binary. The residual noted on 2026-09-06 — the JIT refusing
+`fn(Any) -> Any` closures and silently dropping to the interpreter — is a
+performance cliff, not a wrong answer, and did not even trigger a diagnostic
+in this run; it is not what this record tracks. Status: CLOSED. No code
+change.

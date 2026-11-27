@@ -1,0 +1,82 @@
+# Policy transport only; AWAITING_VERIFICATION, no runtime evidence.
+use std.spec.{describe, it, expect}
+use std.common.build_manager.contracts.BuildInputV1
+use app.buildrunner.remote_evidence_v1.{RemoteEvidencePolicyV1,
+    remote_policy_encode_v1, remote_policy_decode_v1}
+
+fn policy_codec_fixture_v1(action: text) -> RemoteEvidencePolicyV1:
+    RemoteEvidencePolicyV1(host_id: "worker_a", assignment_digest: "1".repeat(64),
+        controller_epoch: 7, operation_id: "operation_a", action_kind: action,
+        expected_tests: if action == "test": ["case_alpha", "case_beta"] else: [],
+        test_report_path: if action == "test": "reports/tests.sdn" else: "",
+        maximum_bytes: 65536,
+        toolchain_inputs: [BuildInputV1(path: "tools/simple", digest: "2".repeat(64))])
+
+fn policy_codec_golden_v1() -> text:
+    "SIMPLE-REMOTE-POLICY-1\nworker_a\n" + "1".repeat(64) +
+        "\n7\noperation_a\ntest\nreports/tests.sdn\n65536\n2\ncase_alpha\ncase_beta\n1\ntools/simple\n" +
+        "2".repeat(64) + "\n"
+
+fn policy_codec_error_v1(payload: text) -> text:
+    match remote_policy_decode_v1(payload):
+        case Ok(policy): ""
+        case Err(reason): reason
+
+describe "strict remote policy codec V1":
+    it "matches an independent golden test policy and roundtrips build and test":
+        expect(remote_policy_encode_v1(policy_codec_fixture_v1("test"))).to_equal(Ok(policy_codec_golden_v1()))
+        for action in ["build", "test"]:
+            val policy = policy_codec_fixture_v1(action)
+            val wire = remote_policy_encode_v1(policy).unwrap()
+            val decoded = remote_policy_decode_v1(wire).unwrap()
+            expect(decoded.host_id).to_equal(policy.host_id)
+            expect(decoded.assignment_digest).to_equal(policy.assignment_digest)
+            expect(decoded.controller_epoch).to_equal(policy.controller_epoch)
+            expect(decoded.operation_id).to_equal(policy.operation_id)
+            expect(decoded.action_kind).to_equal(action)
+            expect(decoded.expected_tests).to_equal(policy.expected_tests)
+            expect(decoded.test_report_path).to_equal(policy.test_report_path)
+            expect(decoded.maximum_bytes).to_equal(policy.maximum_bytes)
+            expect(decoded.toolchain_inputs).to_equal(policy.toolchain_inputs)
+            expect(remote_policy_encode_v1(decoded)).to_equal(Ok(wire))
+
+    it "preserves full positive i64 epoch and escaped UTF-8 tool paths":
+        var policy = policy_codec_fixture_v1("build")
+        policy.controller_epoch = 9223372036854775807
+        policy.toolchain_inputs = [BuildInputV1(path: "tools/café%compiler", digest: "2".repeat(64))]
+        val decoded = remote_policy_decode_v1(remote_policy_encode_v1(policy).unwrap()).unwrap()
+        expect(decoded.controller_epoch).to_equal(9223372036854775807)
+        expect(decoded.toolchain_inputs[0].path).to_equal("tools/café%compiler")
+
+    it "rejects unknown versions, missing terminators, truncation and trailing fields":
+        val wire = policy_codec_golden_v1()
+        expect(policy_codec_error_v1(wire.replace("SIMPLE-REMOTE-POLICY-1", "SIMPLE-REMOTE-POLICY-2"))).to_equal("REMOTE_POLICY_WIRE_VERSION_INVALID")
+        expect(policy_codec_error_v1("SIMPLE-REMOTE-POLICY-1")).to_equal("REMOTE_POLICY_WIRE_INVALID")
+        expect(policy_codec_error_v1("SIMPLE-REMOTE-POLICY-1\nworker_a\n")).to_equal("REMOTE_POLICY_WIRE_INVALID")
+        expect(policy_codec_error_v1(wire + "extra\n")).to_equal("REMOTE_POLICY_WIRE_INVALID")
+
+    it "rejects noncanonical, signed, zero and overflowing epoch text":
+        for epoch in ["07", "+7", "-7", "0", "9223372036854775808", "18446744073709551616"]:
+            expect(policy_codec_error_v1(policy_codec_golden_v1().replace("\n7\n", "\n" + epoch + "\n")))
+                .to_equal("REMOTE_POLICY_INTEGER_INVALID")
+
+    it "bounds memory, case and tool counts before collection allocation":
+        val wire = policy_codec_golden_v1()
+        expect(policy_codec_error_v1(wire.replace("\n65536\n", "\n268435457\n"))).to_equal("REMOTE_POLICY_WIRE_INVALID")
+        expect(policy_codec_error_v1(wire.replace("\n65536\n", "\n0\n"))).to_equal("REMOTE_EVIDENCE_BOUND_INVALID")
+        expect(policy_codec_error_v1(wire.replace("\n2\ncase_alpha", "\n4097\ncase_alpha"))).to_equal("REMOTE_POLICY_WIRE_INVALID")
+        expect(policy_codec_error_v1(wire.replace("\n1\ntools/simple", "\n4097\ntools/simple"))).to_equal("REMOTE_POLICY_WIRE_INVALID")
+        expect(policy_codec_error_v1(wire.replace("\n65536\n", "\n065536\n"))).to_equal("REMOTE_POLICY_WIRE_INVALID")
+
+    it "reuses semantic validation for duplicate cases and unsafe or duplicate tools":
+        val wire = policy_codec_golden_v1()
+        expect(policy_codec_error_v1(wire.replace("case_beta", "case_alpha"))).to_equal("REMOTE_TEST_ID_INVALID")
+        expect(policy_codec_error_v1(wire.replace("tools/simple", "../outside"))).to_equal("REMOTE_TOOLCHAIN_INPUT_INVALID")
+        val tool = "tools/simple\n" + "2".repeat(64) + "\n"
+        expect(policy_codec_error_v1(wire.replace("\n1\n" + tool, "\n2\n" + tool + tool)))
+            .to_equal("REMOTE_TOOLCHAIN_INPUT_INVALID")
+        expect(policy_codec_error_v1(wire.replace("tools/simple", "tools%2Fsimple"))).to_equal("REMOTE_POLICY_WIRE_INVALID")
+
+    it "rejects payloads beyond one MiB and excessive field counts":
+        expect(policy_codec_error_v1("x".repeat(1048577))).to_equal("REMOTE_POLICY_WIRE_TOO_LARGE")
+        expect(policy_codec_error_v1("\n".repeat(12300))).to_equal("REMOTE_POLICY_WIRE_INVALID")

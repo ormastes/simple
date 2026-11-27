@@ -1,0 +1,41 @@
+# Pure exact geometry wire/control metadata. No native connection, adoption,
+# live issuer, lease installation, write attempt or effect is created here.
+use std.common.contracts.container.primary_connection_v2.{ContainerPrimaryConnectionPlanV2,
+    container_primary_connection_target_match_v2, container_primary_connection_binding_digest_v2}
+use std.common.contracts.container.primary_geometry_v1.{ContainerPrimaryGeometryRequestV1,
+    container_primary_geometry_request_check_v1}
+use std.common.contracts.mux.session_runtime_control_v1.session_runtime_control_target_digest_v1
+use std.common.process.windows_engine_control_v2.{WindowsEnginePipeControlBindingV2, WindowsEnginePipeControlV2}
+use std.common.crypto.sha256.{sha256_text, sha256_u8_hex}
+use std.nogc_async_mut.container.providers.windows.docker_engine_codec_v3.windows_engine_container_resize_v3
+use std.nogc_async_mut.container.providers.windows.docker_engine_exchange_v3.windows_docker_engine_exchange_serialize_v3
+
+pub struct WindowsPrimaryGeometryWireV2:
+    wire: [u8]
+    binding: WindowsEnginePipeControlBindingV2
+    control: WindowsEnginePipeControlV2
+
+pub fn windows_primary_geometry_wire_v2(plan: ContainerPrimaryConnectionPlanV2,
+        request: ContainerPrimaryGeometryRequestV1, now_ms: i64) -> Result<WindowsPrimaryGeometryWireV2, text>:
+    if request.nonce.byte_len() < 1 or request.nonce.byte_len() > 256:
+        return Err("windows-primary-geometry-nonce-bound")
+    if request.lease.expires_monotonic_ms < 1 or request.lease.expires_monotonic_ms > 9223372036854:
+        return Err("windows-primary-geometry-deadline-bound")
+    # This actual helper validates the complete canonical self-digest as well
+    # as exact current plan/runtime/scope and primary target correlation.
+    container_primary_connection_target_match_v2(plan, request.target)?
+    if plan.terminal_mode != "tty": return Err("windows-primary-geometry-tty-required")
+    container_primary_geometry_request_check_v1(request, now_ms)?
+    val resize = windows_engine_container_resize_v3("1.48", plan.runtime.native_id,
+        request.rows, request.columns, true)?
+    val wire = windows_docker_engine_exchange_serialize_v3(resize)?
+    val digest = sha256_u8_hex(wire)
+    if digest != request.request_digest: return Err("windows-primary-geometry-wire-digest")
+    val binding_digest = container_primary_connection_binding_digest_v2(request.target)?
+    val binding = WindowsEnginePipeControlBindingV2(target_digest: binding_digest,
+        kind: "geometry", payload_digest: digest)
+    val control = WindowsEnginePipeControlV2(
+        target_digest: session_runtime_control_target_digest_v1(request.target)?, binding_digest: binding_digest,
+        kind: "geometry", nonce_digest: sha256_text(request.nonce), revision: request.lease.revision,
+        expires_monotonic_ns: request.lease.expires_monotonic_ms * 1000000)
+    Ok(WindowsPrimaryGeometryWireV2(wire: wire, binding: binding, control: control))

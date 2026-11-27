@@ -19,6 +19,8 @@ use std.common.traceability.evidence.*
 use std.common.traceability.obligations.*
 use std.common.traceability.markdown.*
 use std.common.traceability.case_events.*
+use std.common.traceability.envelope_types_v1.*
+use std.common.traceability.trace_ids_v1.*
 
 fn evidence_graph() -> TraceGraph:
     TraceGraph(
@@ -33,10 +35,10 @@ fn evidence_graph() -> TraceGraph:
         claims: [], edges: [TraceEdge("decomposes", "req", TraceRelation.DecomposesTo, "ac"),
             TraceEdge("accepts", "ac", TraceRelation.AcceptedBy, "acceptance"),
             TraceEdge("verifies", "req", TraceRelation.VerifiedBy, "unit")],
-        edge_origins: [], origins: [], locators: [], diagnostics: [], generation_id: "generation", complete: true)
+        edge_origins: [], origins: [], locators: [], diagnostics: [], generation_id: "generation", complete: TraceCompletenessV1.Complete)
 
 fn evidence_observation() -> TraceObservation:
-    TraceObservation("obs-1", "run", "acceptance", 1, TraceOutcome.Passed, true, ["artifact-1"])
+    TraceObservation("obs-1", "run", "acceptance", TraceAttemptNumberV1(value: 1), TraceOutcome.Passed, TraceExecutionStateV1.Executed, ["artifact-1"])
 
 fn evidence_run() -> TraceRun:
     TraceRun("run", "snapshot", "inputs", "definitions", "config", "native", "binary", "expectation",
@@ -46,7 +48,7 @@ fn evidence_context(run: TraceRun) -> AdmissionContext:
     AdmissionContext("snapshot", "inputs", "definitions", "config", "native", "binary", "expectation", run.observations, [], [])
 
 fn evidence_obligation(id: text, cases: [text], kind: TraceTestKind) -> TraceObligation:
-    TraceObligation(id, "req", "ac", kind, cases, TraceApplicability.Required, TraceSatisfactionPolicy.All, false, false)
+    TraceObligation(id, "req", "ac", kind, cases, TraceApplicability.Required, TraceSatisfactionPolicy.All, TraceOverridePermissionV1.Denied, TraceOverridePermissionV1.Denied)
 
 describe "Traceability evidence kernel":
     it "Requires an admitted applicability review before excluding an obligation":
@@ -58,17 +60,17 @@ describe "Traceability evidence kernel":
         exempt.applicability = TraceApplicability.NotApplicable
         var context = evidence_context(run)
         val missing = evaluate_obligations(evidence_graph(), [required, exempt], run, context)
-        expect(missing.complete).to_equal(false)
-        expect(missing.execution_total).to_equal(2)
+        expect(missing.complete).to_equal(TraceCompletenessV1.Incomplete)
+        expect(missing.execution_total.value).to_equal(2)
         expect(missing.results[1].status).to_equal(TraceQualificationStatus.Incomplete)
         step("Supply the exact decision from the fixture's independent policy owner")
         val decision = TraceApplicabilityDecision("exempt", "req", "ac", TraceTestKind.Unit,
             "snapshot", "inputs", "config", "expectation", "review-1", "Reviewed scope has no unit obligation")
         context.reviewed_not_applicable = [decision]
         val admitted = evaluate_obligations(evidence_graph(), [required, exempt], run, context)
-        expect(admitted.complete).to_equal(true)
-        expect(admitted.execution_total).to_equal(1)
-        expect(admitted.execution_covered).to_equal(1)
+        expect(admitted.complete).to_equal(TraceCompletenessV1.Complete)
+        expect(admitted.execution_total.value).to_equal(1)
+        expect(admitted.execution_covered.value).to_equal(1)
         expect(admitted.results[1].status).to_equal(TraceQualificationStatus.NotApplicable)
         expect(admitted.results[1].selected_observation_ids.len()).to_equal(0)
         step("Reject a stale policy decision, mismatched kind and duplicate approval")
@@ -79,8 +81,8 @@ describe "Traceability evidence kernel":
         for rejected in [[stale], [wrong_kind], [decision, decision]]:
             context.reviewed_not_applicable = rejected
             val denied = evaluate_obligations(evidence_graph(), [required, exempt], run, context)
-            expect(denied.complete).to_equal(false)
-            expect(denied.execution_total).to_equal(2)
+            expect(denied.complete).to_equal(TraceCompletenessV1.Incomplete)
+            expect(denied.execution_total.value).to_equal(2)
             expect(denied.results[1].status).to_equal(TraceQualificationStatus.Incomplete)
 
     it "Rejects both duplicate obligations before awarding either execution credit":
@@ -89,9 +91,9 @@ describe "Traceability evidence kernel":
         val run = evidence_run()
         val obligation = evidence_obligation("duplicate", ["acceptance"], TraceTestKind.Acceptance)
         val result = evaluate_obligations(evidence_graph(), [obligation, obligation], run, evidence_context(run))
-        expect(result.complete).to_equal(false)
-        expect(result.execution_covered).to_equal(0)
-        expect(result.structural_covered).to_equal(0)
+        expect(result.complete).to_equal(TraceCompletenessV1.Incomplete)
+        expect(result.execution_covered.value).to_equal(0)
+        expect(result.structural_covered.value).to_equal(0)
         expect(result.results[0].status).to_equal(TraceQualificationStatus.Incomplete)
         expect(result.results[1].status).to_equal(TraceQualificationStatus.Incomplete)
 
@@ -104,10 +106,10 @@ describe "Traceability evidence kernel":
         exempt.applicability = TraceApplicability.NotApplicable
         val forward = evaluate_obligations(evidence_graph(), [required, exempt], run, evidence_context(run))
         val reverse = evaluate_obligations(evidence_graph(), [exempt, required], run, evidence_context(run))
-        expect(forward.complete).to_equal(false)
-        expect(reverse.complete).to_equal(false)
-        expect(forward.execution_covered).to_equal(0)
-        expect(reverse.execution_covered).to_equal(0)
+        expect(forward.complete).to_equal(TraceCompletenessV1.Incomplete)
+        expect(reverse.complete).to_equal(TraceCompletenessV1.Incomplete)
+        expect(forward.execution_covered.value).to_equal(0)
+        expect(reverse.execution_covered.value).to_equal(0)
         for result in forward.results:
             expect(result.status).to_equal(TraceQualificationStatus.Incomplete)
         for result in reverse.results:
@@ -120,16 +122,16 @@ describe "Traceability evidence kernel":
         var exempt = evidence_obligation("", [], TraceTestKind.Unit)
         exempt.applicability = TraceApplicability.NotApplicable
         val result = evaluate_obligations(evidence_graph(), [exempt], run, evidence_context(run))
-        expect(result.complete).to_equal(false)
+        expect(result.complete).to_equal(TraceCompletenessV1.Incomplete)
         expect(result.results[0].status).to_equal(TraceQualificationStatus.Incomplete)
-        expect(result.execution_covered).to_equal(0)
+        expect(result.execution_covered.value).to_equal(0)
 
     it "Refuses to relabel an acceptance definition as a unit verification":
         # @req REQ-TRC-003 REQ-TRC-013
         step("Bind a unit obligation to a case declared only as acceptance")
         val run = evidence_run()
         val result = evaluate_obligations(evidence_graph(), [evidence_obligation("wrong-kind", ["acceptance"], TraceTestKind.Unit)], run, evidence_context(run))
-        expect(result.structural_covered).to_equal(0)
+        expect(result.structural_covered.value).to_equal(0)
         expect(result.results[0].status).to_equal(TraceQualificationStatus.Incomplete)
 
     it "Keeps linked lower-level tests visibly not run after acceptance-only observations":
@@ -141,11 +143,11 @@ describe "Traceability evidence kernel":
             evidence_obligation("unit-obligation", ["unit"], TraceTestKind.Unit)]
         step("Evaluate the one actually observed acceptance case")
         val result = evaluate_obligations(evidence_graph(), obligations, run, evidence_context(run))
-        expect(result.structural_covered).to_equal(2)
-        expect(result.execution_covered).to_equal(1)
+        expect(result.structural_covered.value).to_equal(2)
+        expect(result.execution_covered.value).to_equal(1)
         expect(result.results[0].status).to_equal(TraceQualificationStatus.Verified)
         expect(result.results[1].status).to_equal(TraceQualificationStatus.NotRun)
-        expect(result.complete).to_equal(false)
+        expect(result.complete).to_equal(TraceCompletenessV1.Incomplete)
         step("Inspect the report's explicit unit not-run state")
         val report = render_trace_run_markdown(evidence_graph(), result, run)
         expect(report).to_contain("unit | not_run")
@@ -175,7 +177,7 @@ describe "Traceability evidence kernel":
         context.binary_id = "different-binary"
         val result = evaluate_obligations(evidence_graph(), [evidence_obligation("required", ["acceptance"], TraceTestKind.Acceptance)], run, context)
         expect(result.results[0].status).to_equal(TraceQualificationStatus.Stale)
-        expect(result.execution_covered).to_equal(0)
+        expect(result.execution_covered.value).to_equal(0)
 
     it "Rejects a forged outcome that reuses an admitted observation identifier":
         # @req REQ-TRC-011 REQ-TRC-013
@@ -198,13 +200,13 @@ describe "Traceability evidence kernel":
         first.outcome = TraceOutcome.Failed
         var second = evidence_observation()
         second.id = "obs-2"
-        second.attempt = 2
+        second.attempt = TraceAttemptNumberV1(value: 2)
         run.observations = [first, second]
         var obligation = evidence_obligation("required", ["acceptance"], TraceTestKind.Acceptance)
         val denied = evaluate_obligations(evidence_graph(), [obligation], run, evidence_context(run))
         expect(denied.results[0].status).to_equal(TraceQualificationStatus.Failed)
         step("Allow retry satisfaction while retaining the first failure in the report")
-        obligation.allow_retry_pass = true
+        obligation.allow_retry_pass = TraceOverridePermissionV1.Allowed
         val allowed = evaluate_obligations(evidence_graph(), [obligation], run, evidence_context(run))
         expect(allowed.results[0].status).to_equal(TraceQualificationStatus.Verified)
         expect(render_trace_run_markdown(evidence_graph(), allowed, run)).to_contain("attempt 1: failed")
@@ -218,7 +220,7 @@ describe "Traceability evidence kernel":
         observation.outcome = TraceOutcome.ExpectedFailure
         run.observations = [observation]
         var obligation = evidence_obligation("required", ["acceptance"], TraceTestKind.Acceptance)
-        obligation.allow_expected_failure = true
+        obligation.allow_expected_failure = TraceOverridePermissionV1.Allowed
         val expected = evaluate_obligations(evidence_graph(), [obligation], run, evidence_context(run))
         expect(expected.results[0].status).to_equal(TraceQualificationStatus.Verified)
         step("Change the actual outcome to an unexpected pass")
@@ -235,11 +237,11 @@ describe "Traceability evidence kernel":
         graph.test_definitions.push(TraceTestDefinition("unit", TraceTestKind.Acceptance, "unit", "", "unit-digest"))
         var obligation = evidence_obligation("required", ["acceptance", "unit"], TraceTestKind.Acceptance)
         val all = evaluate_obligations(graph, [obligation], run, evidence_context(run))
-        expect(all.complete).to_equal(false)
+        expect(all.complete).to_equal(TraceCompletenessV1.Incomplete)
         step("Select the explicit alternative policy")
         obligation.policy = TraceSatisfactionPolicy.Alternative
         val alternative = evaluate_obligations(graph, [obligation], run, evidence_context(run))
-        expect(alternative.complete).to_equal(true)
+        expect(alternative.complete).to_equal(TraceCompletenessV1.Complete)
 
     it "Does not treat skipped or interrupted observations as eligible execution":
         # @req REQ-TRC-012 REQ-TRC-013
@@ -248,7 +250,7 @@ describe "Traceability evidence kernel":
         var run = evidence_run()
         var skipped = evidence_observation()
         skipped.outcome = TraceOutcome.Skipped
-        skipped.executed = false
+        skipped.executed = TraceExecutionStateV1.NotExecuted
         run.observations = [skipped]
         val obligation = evidence_obligation("required", ["acceptance"], TraceTestKind.Acceptance)
         val result = evaluate_obligations(evidence_graph(), [obligation], run, evidence_context(run))

@@ -1,12 +1,9 @@
 # Bug: add_remove_log_modes_spec.spl Timeout Under Resource Limits
-## Open 2026-09-16 — needs owner triage
-
-Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
-evidence found in the body. This is bookkeeping, not verification.
+## Closed 2026-11-25 — slow-lane fix verified; Windows cmd caret-escape harness defect fixed
 
 **Date:** 2026-07-17  
 **Lane:** L5 (test/02_integration and test/integration)  
-**Status:** ROOT CAUSE IDENTIFIED - Interpreter load time with 600+ files under 120s runner limit
+**Status:** RESOLVED (2026-11-25) — see verification note at end of file
 
 ## Symptom
 Test runner times out after 120 seconds when attempting to run `test/02_integration/app/add_remove_log_modes_spec.spl` and `test/integration/app/add_remove_log_modes_spec.spl`.
@@ -65,3 +62,25 @@ section runs will no longer die on this spec; the slow lane gives the 16
 interpreter spawns adequate budget. Durable improvement (retarget spec to
 compiled binaries once redeploy lands) remains listed above as option 1.
 
+
+## Verification 2026-11-25 (Windows, worktree wt-p3-baa)
+
+Ran the surviving spec copy with the tracked self-hosted binary:
+
+```
+SIMPLE_LIB=src bin/simple.exe test test/02_integration/app/add_remove_log_modes_spec.spl --mode=interpreter
+```
+
+- **Timeout: RESOLVED.** The slow-lane conversion (`slow_it`, 2026-07-18) holds:
+  the full 8-example file completes in ~80 s wall clock with no resource-limit
+  timeout (previously 120 s timeout at 0/8). The twin
+  `test/integration/app/add_remove_log_modes_spec.spl` no longer exists in the
+  tree; `test/02_integration/app/` is the only copy.
+- **New defect found and fixed during verification:** the first run failed
+  1/8 — `supports add log-mode json` expected `"constraint":"^1.0.0"` but the
+  app received `1.0.0`. Root cause: the spec's Windows `_spawn_cli` branch
+  builds a `cmd.exe /c` command line, and cmd treats `^` as an escape
+  character, eating the caret in `beta@^1.0.0` before the child saw it. Fixed
+  in the spec harness by doubling `^` in the cmd branch
+  (`joined.replace("^", "^^")`); no assertion was changed. After the fix:
+  `executed=8 passed=8 failed=0`, exit 0, ~79 s.

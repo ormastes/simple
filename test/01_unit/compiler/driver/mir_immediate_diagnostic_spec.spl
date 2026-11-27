@@ -1,0 +1,32 @@
+# @req REQ-MIR-IMMEDIATE-DIAGNOSTIC
+use std.spec.{describe, it, expect}
+use compiler.mir.mir_lowering_types.{MirError}
+use compiler.driver.driver_mir_error_owner.{driver_mir_fatal_summary_v1}
+use compiler.driver.driver_mir_diagnostic_preview_v1.{driver_mir_diagnostic_field_v1}
+
+describe "Immediate MIR diagnostics":
+    it "reports a legacy fatal before final aggregation while excluding older errors":
+        val errors = [MirError(message: "old fatal", span: nil, fatal: true),
+            MirError(message: "advisory", span: nil, fatal: false),
+            MirError(message: "undefined variable: current", span: nil, fatal: false),
+            MirError(message: "second fatal", span: nil, fatal: true)]
+        val summary = driver_mir_fatal_summary_v1("provider", "src/provider.spl", errors, 1)
+        expect(summary).to_contain("fatal_count=2")
+        expect(summary).to_contain("undefined variable: current")
+        expect(summary.contains("old fatal")).to_equal(false)
+        expect(errors.len()).to_equal(4)
+        expect(errors[2].fatal).to_equal(false)
+
+    it "does not turn advisories or invalid new-error ranges into failures":
+        val errors = [MirError(message: "unsupported MIR type kind: Infer", span: nil, fatal: false)]
+        expect(driver_mir_fatal_summary_v1("m", "p", errors, 0)).to_equal("")
+        expect(driver_mir_fatal_summary_v1("m", "p", errors, -1)).to_equal("")
+        expect(driver_mir_fatal_summary_v1("m", "p", errors, 1)).to_equal("")
+
+    it "bounds and sanitizes fields without mutating retained messages":
+        expect(driver_mir_diagnostic_field_v1("a\nb\rc\td", 7)).to_equal("a?b?c?d")
+        expect(driver_mir_diagnostic_field_v1("abcdefgh", 4)).to_equal("abcd...")
+        val message = "fatal\nsecond line"
+        val errors = [MirError(message: message, span: nil, fatal: true)]
+        expect(driver_mir_fatal_summary_v1("m", "p", errors, 0).contains("\n")).to_equal(false)
+        expect(errors[0].message).to_equal(message)

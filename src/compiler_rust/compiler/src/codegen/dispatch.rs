@@ -75,8 +75,8 @@ pub fn dispatch_instruction<E: CodegenEmitter>(emitter: &mut E, inst: &MirInst) 
         } => emitter.emit_interp_call(dest, func_name, args, *boxed_result),
         MirInst::InterpEval { dest, expr_index } => emitter.emit_interp_eval(*dest, *expr_index as usize),
         MirInst::InlineAsm {
-            instructions, volatile, ..
-        } => emitter.emit_inline_asm(instructions, *volatile),
+            instructions, volatile, dialect, ..
+        } => emitter.emit_inline_asm(instructions, *volatile, *dialect),
         MirInst::IndirectCall {
             dest,
             callee,
@@ -84,6 +84,7 @@ pub fn dispatch_instruction<E: CodegenEmitter>(emitter: &mut E, inst: &MirInst) 
             return_type,
             args,
             effect,
+            ..
         } => emitter.emit_indirect_call(dest, *callee, param_types, *return_type, args, *effect),
 
         // =====================================================================
@@ -273,13 +274,15 @@ pub fn dispatch_instruction<E: CodegenEmitter>(emitter: &mut E, inst: &MirInst) 
             dest,
             enum_name,
             variant_name,
-        } => emitter.emit_enum_unit(*dest, enum_name, variant_name),
+            discriminant,
+        } => emitter.emit_enum_unit(*dest, enum_name, variant_name, *discriminant),
         MirInst::EnumWith {
             dest,
             enum_name,
             variant_name,
+            discriminant,
             payload,
-        } => emitter.emit_enum_with(*dest, enum_name, variant_name, *payload),
+        } => emitter.emit_enum_with(*dest, enum_name, variant_name, *discriminant, *payload),
         MirInst::UnionDiscriminant { dest, value } => emitter.emit_union_discriminant(*dest, *value),
         MirInst::UnionPayload {
             dest,

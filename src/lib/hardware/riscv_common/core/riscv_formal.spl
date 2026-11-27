@@ -139,23 +139,32 @@ fn verify_rv32_ghdl_return_zero_contract(code_start: i64, exit_code: i64) -> Res
     else:
         Err("RV32 return-zero contract violated: exit_code={exit_code}")
 
-fn verify_rv64_qemu_user_proof_contract(code_start: i64, exit_code: i64) -> Result<text, text>:
-    """Verify that an RV64 program under QEMU user-mode returned exit code 0.
+fn verify_rv64_qemu_user_proof_contract(output: text) -> Result<text, text>:
+    """Verify the RV64 user-mode proof markers in one QEMU serial transcript.
 
-    RUNTIME CHECK, not a proof: despite the legacy name, this validates the
-    exit code of one observed QEMU run only.
+    RUNTIME CHECK, not a proof: it validates the serial output of one observed
+    QEMU run only. Same signature, marker list and Err text as the
+    `src/hardware` module of the same path, so the `src/os` QEMU runner
+    compiles against either. The constant retire-event self-check stays in
+    `src/hardware` (it does not depend on `output`).
 
     Args:
-        code_start: Base address of the code segment.
-        exit_code:  Observed exit code from the QEMU run.
+        output: Combined serial output of the QEMU run.
 
-    Returns Ok("contract satisfied") if exit_code == 0, Err otherwise.
+    Returns Ok when every marker is present, Err naming the first missing one.
     """
-    val result = rt_ghdl_verify_return_zero_contract(code_start, exit_code, "rv64")
-    if result == 0:
-        Ok("contract satisfied")
-    else:
-        Err("RV64 QEMU user-mode contract violated: exit_code={exit_code}")
+    val required: [text] = [
+        "trap vector installed",
+        "trap runtime installed",
+        "spawned user task",
+        "entering U-mode",
+        "P",
+        "boot complete"
+    ]
+    for marker in required:
+        if not output.contains(marker):
+            return Err("[rv64-qemu] missing proof marker: {marker}")
+    Ok("[rv64-qemu] verified {required.len()} proof markers")
 
 fn probe_riscv_external_formal() -> CapabilityReport:
     """Probe the external RV32 formal lane through the shared capability model."""

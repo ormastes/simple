@@ -105,3 +105,26 @@ New real-API protocol scenarios:
 `test/03_system/compiler/incremental/artifact_owner_recovery_spec.spl` and its
 mirrored manual. They use filesystem broker-receipt fixtures and are UNRUN;
 they are not real OS death or descendant cleanup qualification.
+
+<!-- antigravity-early-defect-detection-2026-11-18 -->
+
+## Per-action waiter refcounting and CAS graph pointer fencing (`WP-06`, 2026-11-18)
+
+Extended by [early_defect_detection_2026-11-18.md](../03_plan/compiler/early_defect_detection_2026-11-18.md) (`ED-05`, `ED-06`, `ED-07`, `ED-T09`, `ED-T10`, `ED-T25`) across `src/lib/compiler_artifact_service/service.spl`, `src/compiler/80.driver/action_graph/coordinator.spl`, `src/compiler/80.driver/action_graph/artifact_service_bridge.spl`, and `src/compiler/80.driver/action_graph/persisted_graph.spl`:
+
+### Per-Action Waiter Refcounting vs. Global Cancellation
+
+Shared single-flight actions serving CLI, LSP, and MCP consumers separate individual waiter lifetime from producer lease cancellation:
+
+- `artifact_service_detach_waiter_v1` (`src/lib/compiler_artifact_service/service.spl`) detaches a single cancelling or disconnecting waiter token from the action's waiter set without revoking the active producer lease while `waiter_count > 0` (`ED-T10`).
+- `coordinator_cancel_action_v1` (`src/compiler/80.driver/action_graph/coordinator.spl`, bridged via `src/compiler/80.driver/action_graph/artifact_service_bridge.spl`) cancels the underlying action lease **only** when the per-action authorized waiter count drops to zero (or on explicit whole-session parent shutdown), preventing one aborted editor/agent request from tearing down compilation or lint work still needed by concurrent consumers (`ED-T09`, `ED-T10`).
+- Retired or cancelled action generations retain their monotonic lease fence so late completions from terminated attempts cannot publish (`ED-T11`).
+
+### Lockless `persisted_graph_publish_v1` CAS Claim Fencing
+
+Plain read-then-rename on a shared `CURRENT` pointer provides atomic file replacement, not multi-writer compare-and-swap (`[C22]`). `persisted_graph_publish_v1` in `src/compiler/80.driver/action_graph/persisted_graph.spl` enforces lockless CAS writer fencing (`ED-T25`):
+
+1. Read the current authoritative graph pointer epoch/digest `E_prev`.
+2. Write and fsync/validate the new immutable graph payload under its content-addressed staging path.
+3. Acquire the predecessor-bound transition claim marker via `file_publish_noreplace_raw` (atomic `create_new` / no-replace semantics keyed on `E_prev -> E_next`).
+4. Only the single writer whose `file_publish_noreplace_raw` claim succeeds advances the canonical persisted-graph pointer; losing concurrent writers receive an explicit CAS conflict without silently overwriting a sibling's committed graph update.

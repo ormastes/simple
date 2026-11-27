@@ -48,3 +48,64 @@ Owner: provider loader / bootstrap-core integration lane.
 Bootstrap reason for the current provider-boundary implementation: `none`.
 Only the new provider modules and focused tests are expected to rebuild.
 
+## Triage 2026-11-11 (p3fix-p2a-20261111 lane) — prerequisites landing; still blocked, LIVE
+
+Re-verified at release/1.0.0 tip (worktree @ 79d5af6723f6). The unblock
+condition is partially met — substantially more than the doc's "Current
+partial support" records — but the activation itself (removing the concrete
+driver import from `bootstrap_main.spl`) has NOT landed:
+
+- **Unblock item 1 (raw query-call bridge) — landed.**
+  `src/compiler/70.backend/linker/linker_pack_entry.spl:26,52` exports
+  `@export("C") simple_provider_query_v1(request_address, result_address)`
+  and `simple_cli_command_invoke_v1`, implementing the real linker-pack
+  command/query over the provider query wire format. The doc's "no raw
+  query-call bridge" no longer holds.
+- **Unblock item 3 (bootstrap-safe client) — landed, env-gated.**
+  `bootstrap_driver_provider_client_v1` exists with an opt-in route: default
+  stays on the direct driver; when the provider env is set it pins the
+  CompilerDriverV1 interface/ABI in the admission request and fails CLOSED —
+  missing artifact → diagnostic + exit code 3, artifact outside approved
+  roots → refused.
+- **Unblock items 2/4/5 (default activation) — NOT landed.**
+  `src/app/cli/bootstrap_main.spl:13` still imports
+  `compiler_driver.driver.{compiler_driver_create, compiler_driver_run_compile}`
+  and still calls both at :711-712 and :845-846. The independently built
+  compiler-provider artifact with link/run evidence that bootstrap_main has
+  no concrete driver import is still pending, and that proof needs native
+  builds of the bootstrap entrypoint — provider-loader / bootstrap-core
+  integration work owned by another lane.
+
+Fresh spec evidence (tracked seed binary, interpreter, --no-cache):
+`bootstrap_driver_provider_client_v1_spec.spl` 9/9,
+`provider_cli/compiler_driver_provider_v1_spec.spl` 5/5,
+`driver_provider_v1_spec.spl` 4/4, `driver_provider_compile_wire_v1_spec.spl`
+4/4 — all green at tip.
+
+Status stays open (LIVE): gated on the provider-loader/bootstrap-core lane's
+native activation evidence, not on further code from this lane.
+
+## Triage 2026-11-25 (p2w1-ab lane) — still blocked, unchanged
+
+Confirmed at release/1.0.0 tip (38265c7f249): the concrete driver import is
+still present in `src/app/cli/bootstrap_main.spl` (its header comment still
+records the undefined-`compiler_driver_create`/`run_compile` dynload dead
+end), so the 2026-11-11 triage verdict stands — activation is gated on the
+provider-loader / bootstrap-core lane's native build+link evidence, which
+this Windows lane cannot produce (pinned Rust seed only, and it rejects the
+`@representation_boundary` decorator tree-wide). No code change; status
+remains open.
+
+## Wave 5 Update (2026-11-27) — `fix-implemented-verification-pending`
+
+- **Wired callable driver provider loader into `src/app/cli/bootstrap_main.spl` (`w5-2-simpleos-kernel-boot`)**:
+  - Imported `BootstrapDriverProviderRouteV1`, `BootstrapDriverProviderOutcomeV1`, `bootstrap_driver_provider_route_v1`, `bootstrap_driver_provider_compile_v1` from `app.cli.bootstrap_driver_provider_client_v1` (backed by `os.smf.provider_loader`).
+  - Both positional native-build (`run_native_build_bootstrap` -> `run_native_build_bootstrap_leased`) and SMF compile (`run_compile_bootstrap`) now check `bootstrap_driver_provider_route_v1()` before creating `compiler_driver_create(options)`. When `provider_route.requested` is true (`SIMPLE_BOOTSTRAP_DRIVER_PROVIDER`), compilation dispatches through `bootstrap_driver_provider_compile_v1(provider_route, options)` and fails closed with `provider_outcome.exit_code` (`3`) on loader refusal without falling back to the statically linked driver.
+  - Default bootstrap builds keep the existing statically linked route until self-hosted bootstrap produces and verifies the live dynamically loaded `CompilerDriverV1` provider artifact.
+- **Host specs run post-edit (interpreter, 3-slot semaphore)**:
+  - `test/01_unit/app/cli/bootstrap_main_driver_provider_wiring_spec.spl` -> `2 examples, 0 failures`.
+  - `test/01_unit/app/cli/bootstrap_driver_provider_client_v1_spec.spl` -> `9 examples, 0 failures`.
+  - `test/01_unit/app/cli/native_build_bootstrap_lane_contract_spec.spl` -> `11 examples, 0 failures`.
+- **Verification pending**: `waiting-for: self-host bootstrap activation verification`.
+
+

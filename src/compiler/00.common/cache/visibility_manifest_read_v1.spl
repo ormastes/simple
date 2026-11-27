@@ -1,0 +1,134 @@
+use compiler.common.cache.visibility_manifest_policy_v1.{VisibilityManifestPolicyV1}
+use compiler.common.source_inventory_families_v1.{compiler_inventory_family_v1}
+# Source observations. A complete readset is issued only by an authenticated
+# inventory owner; neither an empty list nor live filesystem absence is proof.
+use std.common.build_manager.contracts.{builder_digest_valid_v1}
+
+pub struct VisibilityManifestReadV1:
+    source_path: text
+    directory_path: text
+    manifest_path: text
+    exists: bool
+    content_sha256: text
+    snapshot_id: text
+
+# Reference owner keeps evidence alive across streaming source record rebuilds.
+pub class VisibilityManifestEvidenceV1:
+    root: text = ""
+    snapshot_id: text = ""
+    complete: bool = false
+    reason: text = "authority-unavailable"
+    reads: [VisibilityManifestReadV1] = []
+    policies: [VisibilityManifestPolicyV1] = []
+
+# @allow(primitive_api) boolean path-shape predicate consumed by manifest readers
+pub fn visibility_manifest_path_valid_v1(path: text) -> bool:
+    if path == "" or path.contains("\\") or path.contains("\n") or path.contains("\r"):
+        return false
+    if path.ends_with("/"): return false
+    var relative_start = if path.starts_with("//"): 2 else: 1
+    if not path.starts_with("/"):
+        if path.byte_len() < 4 or path.substring(1, 3) != ":/" or
+                not "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz".contains(path.substring(0, 1)):
+            return false
+        relative_start = 3
+    if relative_start >= path.byte_len():
+        return false
+    val rel = path.substring(relative_start)
+    if rel == "" or rel.starts_with("/") or rel.contains("//"):
+        return false
+    if rel == "." or rel == ".." or rel.starts_with("./") or rel.starts_with("../") or
+            rel.ends_with("/.") or rel.ends_with("/..") or
+            rel.contains("/./") or rel.contains("/../"):
+        return false
+    true
+
+pub fn visibility_manifest_parent_v1(path: text) -> text:
+    val last = path.rfind("/")
+    if last < 0:
+        return ""
+    val last_slash = last
+    if last_slash <= 0:
+        return ""
+    val prefix = path.substring(0, last_slash)
+    if not prefix.contains("/"):
+        return ""
+    prefix
+
+fn _visibility_manifest_collect_reads_v1(source: text, snapshot_root: text,
+        snapshot_id: text, inventory: Dict<text, text>,
+        selected: Dict<text, text>) -> Result<VisibilityManifestEvidenceV1, text>:
+    # Routing selectors do not terminate visibility ancestry. The actual
+    # inventory producer guarantees complete observation through its canonical
+    # family root, including ancestors above a narrow --source selector.
+    val family = compiler_inventory_family_v1(source.substring(snapshot_root.byte_len() + 1))
+    if family == "":
+        return Ok(VisibilityManifestEvidenceV1(snapshot_id: snapshot_id,
+            complete: false, reason: "extra-family-coverage-unproven", reads: []))
+    val declared_root = snapshot_root + "/" + family
+    var reads: [VisibilityManifestReadV1] = []
+    var directory = visibility_manifest_parent_v1(source)
+    while directory != "":
+        val manifest = directory + "/__init__.spl"
+        val present = inventory.contains_key(manifest)
+        var digest = ""
+        if present:
+            digest = inventory[manifest]
+            if not builder_digest_valid_v1(digest) or not selected.contains_key(manifest) or selected[manifest] != digest:
+                return Err("visibility-manifest-present-source-not-selected:" + manifest)
+        reads.push(VisibilityManifestReadV1(source, directory, manifest, present, digest, snapshot_id))
+        if directory == declared_root:
+            return Ok(VisibilityManifestEvidenceV1(root: declared_root,
+                snapshot_id: snapshot_id, complete: true, reason: "ok", reads: reads))
+        directory = visibility_manifest_parent_v1(directory)
+    Err("visibility-manifest-root-not-reached")
+
+pub fn visibility_manifest_roots_valid_v1(snapshot_root: text, roots: [text]) -> text:
+    if not visibility_manifest_path_valid_v1(snapshot_root):
+        return "visibility-manifest-source-binding-invalid"
+    if roots.len() == 0:
+        return "visibility-manifest-source-root-missing"
+    val root_prefix = snapshot_root + "/"
+    for candidate in roots:
+        if not visibility_manifest_path_valid_v1(candidate) or
+                not candidate.starts_with(root_prefix):
+            return "visibility-manifest-root-invalid"
+    ""
+
+pub fn visibility_manifest_reads_prevalidated_v1(source: text, snapshot_root: text,
+        snapshot_id: text, inventory: Dict<text, text>,
+        selected: Dict<text, text>) -> Result<VisibilityManifestEvidenceV1, text>:
+    if not visibility_manifest_path_valid_v1(source) or snapshot_id == "" or
+            not source.starts_with(snapshot_root + "/") or not selected.contains_key(source):
+        return Err("visibility-manifest-source-binding-invalid")
+    if not inventory.contains_key(source) or inventory[source] != selected[source] or
+            not builder_digest_valid_v1(selected[source]):
+        return Err("visibility-manifest-source-inventory-mismatch")
+    _visibility_manifest_collect_reads_v1(source, snapshot_root, snapshot_id, inventory, selected)
+
+# Pure projection under a caller-owned complete inventory. Both maps use exact
+# canonical absolute spelling. `inventory` is the complete source universe;
+# `selected` only proves positive membership in this frozen snapshot.
+# Declared roots retain routing provenance. Observation always reaches the
+# complete canonical inventory family, including ancestors above those roots.
+pub fn visibility_manifest_reads_v1(source: text, snapshot_root: text,
+        roots: [text], snapshot_id: text, inventory: Dict<text, text>,
+        selected: Dict<text, text>) -> Result<VisibilityManifestEvidenceV1, text>:
+    if not visibility_manifest_path_valid_v1(source) or
+            not visibility_manifest_path_valid_v1(snapshot_root) or snapshot_id == "" or
+            not source.starts_with(snapshot_root + "/") or not selected.contains_key(source):
+        return Err("visibility-manifest-source-binding-invalid")
+    if not inventory.contains_key(source) or inventory[source] != selected[source] or
+            not builder_digest_valid_v1(selected[source]):
+        return Err("visibility-manifest-source-inventory-mismatch")
+    if roots.len() == 0: return Err("visibility-manifest-source-root-missing")
+    val root_prefix = snapshot_root + "/"
+    for candidate in roots:
+        if not visibility_manifest_path_valid_v1(candidate) or
+                not candidate.starts_with(root_prefix):
+            return Err("visibility-manifest-root-invalid")
+    _visibility_manifest_collect_reads_v1(source, snapshot_root, snapshot_id, inventory, selected)
+
+export VisibilityManifestReadV1, VisibilityManifestEvidenceV1
+export visibility_manifest_reads_v1, visibility_manifest_roots_valid_v1, visibility_manifest_reads_prevalidated_v1
+export visibility_manifest_parent_v1, visibility_manifest_path_valid_v1

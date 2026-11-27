@@ -1,0 +1,51 @@
+#!/bin/sh
+# Explicit bootstrap diagnostic only; never invoke raw Simple source or a seed.
+set -eu
+here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)
+repo=$(CDPATH= cd -- "$here/../../../.." && pwd -P)
+[ "$#" -eq 2 ] || { echo 'usage: run.shs ABS_NATIVE_EXE EXPECTED_SHA256' >&2; exit 2; }
+case "$1" in /*|[A-Za-z]:/*) ;; *) echo 'ERROR: native executable path must be absolute' >&2; exit 2 ;; esac
+[ -f "$1" ] && [ ! -L "$1" ] || { echo 'ERROR: native executable must be a regular non-symlink file' >&2; exit 2; }
+exe=$(realpath -e -- "$1")
+case "$exe" in "$repo"/build/verify/*) ;; *) echo 'ERROR: native diagnostic executable must be in this checkout build/verify' >&2; exit 2 ;; esac
+printf '%s\n' "$2" | grep -Eq '^[0-9a-f]{64}$' || { echo 'ERROR: expected native artifact SHA256 required' >&2; exit 2; }
+actual=$(sha256sum "$exe" | awk '{print $1}')
+[ "$actual" = "$2" ] || { echo 'ERROR: native executable does not match verified artifact' >&2; exit 2; }
+magic=$(od -An -tx1 -N4 "$exe" | tr -d ' \n')
+case "$magic" in 4d5a*|7f454c46) ;; *) echo 'ERROR: executable is not a PE/ELF native artifact' >&2; exit 2 ;; esac
+# No inherited fixture path may select data for mutation. Only this invocation's
+# canonical preparer result is accepted, and it always allocates via mktemp.
+unset SIMPLEOS_SDK_PROBE_FIXTURE SIMPLE_NATIVE_BUILD_TARGET SIMPLEOS_SYSROOT_I686
+unset SIMPLE_LINKER_SCRIPT SIMPLE_NATIVE_BUILD_LINKER_SCRIPT SIMPLE_SIMPLE_CORE_PATH
+prepared=$(sh "$here/prepare.shs")
+[ "$(printf '%s\n' "$prepared" | grep -c '^fixture=')" -eq 1 ] || exit 2
+fixture=$(printf '%s\n' "$prepared" | sed -n 's/^fixture=//p')
+[ -d "$fixture" ] && [ ! -L "$fixture" ] || exit 2
+fixture=$(realpath -e -- "$fixture")
+[ "$(dirname -- "$fixture")" = "$repo/build/verify" ] || { echo 'ERROR: prepared fixture escaped checkout build/verify' >&2; exit 2; }
+case "$(basename -- "$fixture")" in sysroot-receipt.*) ;; *) exit 2 ;; esac
+for directory in source sdk; do
+    [ -d "$fixture/$directory" ] && [ ! -L "$fixture/$directory" ] || exit 2
+    [ "$(realpath -e -- "$fixture/$directory")" = "$fixture/$directory" ] || exit 2
+done
+# A new marker directory prevents accidental reuse even if preparer behavior
+# changes later. Never accept a pre-existing run marker or a caller data path.
+mkdir "$fixture/bootstrap-owner-run"
+printf 'fresh-private-sdk-owner-native-probe\n' > "$fixture/bootstrap-owner-run/marker.txt"
+native_fixture=$fixture
+if command -v cygpath >/dev/null 2>&1; then native_fixture=$(cygpath -m "$fixture"); fi
+set +e
+(cd "$fixture/source" && SIMPLEOS_SDK_PROBE_FIXTURE="$native_fixture" "$exe") > "$fixture/bootstrap-owner-run/stdout.log" 2> "$fixture/bootstrap-owner-run/stderr.log"
+code=$?
+set -e
+# Detect executable replacement across the run as well as before it.
+after=$(sha256sum "$exe" | awk '{print $1}')
+printf 'simpleos-sdk-owner-native-ok assertions=31 qualification=none\n' > "$fixture/bootstrap-owner-run/expected-lf.txt"
+printf 'simpleos-sdk-owner-native-ok assertions=31 qualification=none\r\n' > "$fixture/bootstrap-owner-run/expected-crlf.txt"
+stdout_exact=false
+if cmp -s "$fixture/bootstrap-owner-run/stdout.log" "$fixture/bootstrap-owner-run/expected-lf.txt" || cmp -s "$fixture/bootstrap-owner-run/stdout.log" "$fixture/bootstrap-owner-run/expected-crlf.txt"; then stdout_exact=true; fi
+status=FAIL
+if [ "$code" -eq 0 ] && [ "$after" = "$actual" ] && [ "$stdout_exact" = true ]; then status=PASS; fi
+printf 'schema: simpleos-sdk-owner-bootstrap-probe-v1\nstatus: %s\nexit_code: %s\nexpected_assertions: 31\nartifact_sha256: "%s"\nruntime_qualification: none\n' "$status" "$code" "$actual" > "$fixture/bootstrap-owner-run/result.sdn"
+printf 'status=%s\nfixture=%s\nexit_code=%s\n' "$status" "$native_fixture" "$code"
+[ "$status" = PASS ]

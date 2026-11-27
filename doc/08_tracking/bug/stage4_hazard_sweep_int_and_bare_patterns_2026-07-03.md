@@ -95,3 +95,32 @@ Fix: Qualify to `case EnumName.Bare:` using enum name obvious from match scrutin
 3. **Follow-up:** Run full lint pass after stage4 fixes to catch any codegen fallout
 
 
+
+---
+
+## Verification 2026-11-25 (P2 sweep lane) — RESOLVED
+
+Verified by code inspection at release/1.0.0 HEAD (`64dfa6d980f`); the pinned
+`bin/simple.exe` cannot run `test` repo-wide at this HEAD
+(`@representation_boundary` seed/binary inconsistency), so no behavioral
+re-run was possible — this note states that limit.
+
+- **Sweep 2 (bare enum-variant patterns):** already FIXED in this doc (3/3
+  sites qualified; verified by the original lane). No action needed.
+- **Sweep 1 (int(text) → first char code):** the root-cause stage4 codegen
+  bug is FIXED in the seed HIR lowering that compiles stage4:
+  `src/compiler_rust/compiler/src/hir/lower/expr/calls.rs:1082`
+  (`lower_utility_builtin`) now lowers the CALL form `T(text)` as a parse
+  (like `text.to_int()` / `text.to_f64()`), not as the single-char-code
+  `x as T` Cast. See the linked resolution
+  `seed_jit_conversion_call_text_parse_2026-11-06.md` (FIXED 2026-11-06,
+  branch `work/seed-jit-batch3-20261106`, covers both Cranelift JIT and seed
+  LLVM, hence also seed-compiled stage4 codegen).
+- **Remainder:** the ~40 `parser_guarded_int_text()` / manual decimal-loop
+  workaround sites are now redundant cleanup, explicitly deferred by this
+  doc ("defer mass-rewrite pending stage4 fix"). That mass-rewrite is
+  optional hygiene, not a live bug; it should be scheduled as its own
+  cleanup task, not tracked as this P2 bug.
+
+Status: **RESOLVED** (root cause fixed; workaround mass-rewrite deferred as
+separate cleanup).

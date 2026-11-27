@@ -1,0 +1,17 @@
+# OCI execution options and action projection
+
+Status: AUTHORED / UNEXECUTED. Source review artifact; no native Podman conformance, build, performance or runtime qualification is claimed.
+
+The existing request codec and canonical digest already bind environment entries and working directory. The Linux provider now admits these fields for Podman and Docker create through `oci_execution_options_v1`: an explicit canonical absolute cwd becomes `--workdir PATH`; each validated unique portable environment name becomes `--env NAME=VALUE`. Empty values, spaces, newlines and metacharacters remain literal argv values. Name-only environment lookup, env files and a host shell are absent. Terminal mode remains refused; the standalone runc builder refuses nondefault execution options.
+
+Podman create includes `--http-proxy=false`, preventing the default implicit copying of proxy variables from the host. Docker compatibility argv receives no Podman-specific flag. The official [Podman create documentation](https://docs.podman.io/en/latest/markdown/podman-create.1.html) documents proxy inheritance and host lookup for a name-only `--env`. Image-defined environment remains image behavior; this change does not claim a complete empty environment.
+
+`LinuxSimpleContainerAdapterV2.action_project` validates the real canonical common request and leaf capability before reporting actual workload argv, cwd and mounts. Projection requires an explicit effective entrypoint (the request override or existing build mode), explicit cwd and no generic bundle workspace. Unknown image defaults produce an error. Empty leading arguments and tail arguments are preserved. The common facade is `simple_container_action_project_v2`; its integration is owned by the common API lane.
+
+Explicit nonempty entrypoint also suppresses image CMD when the workload tail is empty. This follows Podman's `makeCommand` condition: image CMD is used only when both command and entrypoint are empty. Primary source: [Podman v5.2.5 oci.go](https://github.com/podman-container-tools/podman/blob/v5.2.5/pkg/specgen/generate/oci.go), blob `5cec103fbedf9d3b40b39332b082d684a1e63136`; v4.9.5 blob `c5f643308b9df2d759e2fa048d815505c21a8570` has the same condition. This is source-grounded mapping, not an executed image conformance result.
+
+Build projection reports only the existing fixed mappings: input root to `/simple-build/inputs` read-only and output root to `/simple-build/outputs` writable. One shared provider-local lexical guard runs in validation and actual create construction, requiring both roots, canonical absolute paths and no comma, double quote, NUL, CR or LF. This closes the CSV mount ambiguity rather than inventing a general workspace framework. Spaces and Unicode remain literal. Host staging still owns path authorization, ownership and no-follow checks.
+
+Changed environment or cwd changes the bound request digest. The existing V2 retained binding rejects changed-payload replay before another executor attempt. No binding schema, lifecycle journal, engine observer, deadline or executor ownership changes belong to this slice.
+
+Evidence source: `test/03_system/app/orchestrator/feature/oci_execution_options_effects_spec.spl`, eleven authored scenarios over real builders, provider validation and the common API with explicit scripted engine fixtures. Existing argv and unsupported-field specifications are updated. All remain UNEXECUTED; native system acceptance and normal verification are pending an admitted toolchain/runtime.

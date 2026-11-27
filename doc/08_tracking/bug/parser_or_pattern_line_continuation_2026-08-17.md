@@ -4,7 +4,7 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** OPEN (P2)
+**Status:** FIXED (2026-11-11 lane compiler5: wrapped or-pattern case arm parses on the fresh seed — see addendum below)
 **Filed:** 2026-08-17
 **Component:** parser (pattern parsing)
 **Class:** grammar gap — a short, natural form is rejected, forcing a long-line workaround
@@ -71,3 +71,21 @@ pattern, mirroring how other continued expressions are handled.
   measured.
 - Whether a leading `|` on the continuation line (rather than trailing) parses.
 
+
+## Addendum 2026-11-11 — lane compiler5 (P3 batch-5 triage): FIXED
+
+The wrapped or-pattern case arm now parses and binds correctly. Verified on the
+fresh seed (build-commit 46fe8f6b6def, `SIMPLE_LIB=src`,
+`--mode=interpreter --no-cache`):
+
+- A wrapped alternation in the doc's shape —
+  `case A(inner) | B(inner) |\n        C(inner):` — parses, binds `inner`, and
+  `f(E.B(42))` returns 42. The single-line form still parses (no regression).
+- The fix is exactly this doc's "Fix direction": after a `|` the parser peeks
+  through newlines/indents and skips newline+indent before requiring the next
+  pattern (`src/compiler_rust/parser/src/parser_patterns.rs:97-114`,
+  `skip_newlines_and_indents_for_pattern`). Landed via merge `9e7e7a526edb`
+  (PR #7597, 2026-11-07).
+- This lane did NOT verify this doc's own "Not verified" list (leading-`|`
+  continuation line; `if let` / destructuring-bind positions) — no claim made
+  for those.

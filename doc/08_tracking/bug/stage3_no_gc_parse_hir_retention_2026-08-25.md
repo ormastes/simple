@@ -2,7 +2,32 @@
 
 Date: 2026-08-25
 
-Status: OPEN — measured bootstrap blocker; no source workaround is safe.
+Status: BLOCKED (stage-chain probe), re-confirmed 2026-11-11 (lane boot23); grant verbatim below.
+Measured bootstrap blocker; no source workaround is safe; verification requires a full
+dynload Stage-3 run with memory telemetry (not runnable on this Windows host — known
+native-build hang on the success path).
+
+## Triage 2026-11-11 (lane boot14) — BLOCKED, kept OPEN
+
+Verdict: **BLOCKED** (stage-chain probe). No safe in-scope source fix; the safety
+constraints (no untyped/deep free on aliased no-GC objects, Pure Simple only, deterministic
+parent-authority commit) rule out a blind change that cannot be measured.
+
+Evidence gathered this session (seed-smoke, build-commit `46fe8f6b6def`):
+- The parse pipeline has since been split; `driver_source_pipeline_parsing.spl` now
+  re-exports `driver_source_parse_retained.*` and streaming/reclaim owners exist
+  (`reclaim_streaming_source_contents_owner`, `evict_sources` at `driver_types.spl:1394`).
+  The documented zero-reclaim no-GC constraint on class-backed module objects is unchanged,
+  so a real RSS improvement cannot be asserted without measurement.
+
+Exact grant command (non-Windows host, sized RAM from the measured Stage-3 frontend/HIR
+peak — see also `stage3_selfhost_status_after_dedent_fix_2026-08-10.md`):
+```
+sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --stop-after-stage3 --mode=dynload --jobs=half --output=build/bootstrap --progress=build/bootstrap/mcdc-postfix-stage3.progress.log
+```
+Acceptance is the doc's own criteria: Stage-3 completes and publishes a valid candidate
+receipt, telemetry records peak tree RSS + per-phase progress, parse growth is bounded by a
+stated per-module budget, and the result is measured once against this baseline.
 
 ## Impact
 
@@ -136,3 +161,39 @@ accepted repair is the destination-owner design in the paired architecture and
 detail-design documents. Falling back to old HirStmt transport is containment
 only because it restores missing returns. Rewriting branch values into Return
 is rejected.
+
+## Addendum 2026-11-11 (lane boot23) — BLOCKED re-confirmed; disposition stands
+
+Re-verification at this lane's base (`41935a5f61860`, worktree
+simple-p3-boot23-20261111), source checks only (boot14 triaged this row today
+on the same tracked seed `bin/simple.exe` build `46fe8f6b6def`; no re-runs):
+
+- The parse-pipeline split boot14 recorded is present at this tip:
+  `src/compiler/80.driver/driver_source_pipeline_parsing.spl:6` re-exports
+  `driver_source_parse_retained.*`, and `evict_sources` is at
+  `src/compiler/80.driver/driver_types.spl:1394`.
+- The documented zero-reclaim no-GC constraint on class-backed module objects
+  is unchanged in `driver_types.spl` (measured zero-reclaim behavior; unsafe
+  deep free would corrupt aliased objects), so a real RSS improvement still
+  cannot be asserted without measurement.
+
+Disposition unchanged: **BLOCKED** (stage-chain probe). No safe in-scope source
+fix exists under the record's safety constraints (no untyped/deep free on
+aliased no-GC objects, Pure Simple only, deterministic parent-authority
+commit). In-lane bootstrap runs are forbidden by campaign policy, and the
+recorded defect requires a full dynload Stage-3 run with memory telemetry on a
+non-Windows host (known native-build hang on the success path here).
+
+Verbatim grant command (non-Windows host, sized RAM from the measured Stage-3
+frontend/HIR peak):
+```
+sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --stop-after-stage3 --mode=dynload --jobs=half --output=build/bootstrap --progress=build/bootstrap/mcdc-postfix-stage3.progress.log
+```
+Acceptance is the doc's own criteria: Stage-3 completes and publishes a valid
+candidate receipt, telemetry records peak tree RSS + per-phase progress, parse
+growth is bounded by a stated per-module budget, and the result is measured
+once against this baseline.
+
+## Addendum 2026-11-13 — lane p3-comp1 (worktree p3comp1-wt, branch work/p3-compiler-p1-20261113)
+
+Concurs with lane boot23: BLOCKED re-confirmed; disposition stands (no-GC parse/HIR retention exceeds the bootstrap memory budget; fix needs the sanctioned no-GC bootstrap run). No in-lane change.

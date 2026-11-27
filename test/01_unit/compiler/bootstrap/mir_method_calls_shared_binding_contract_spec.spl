@@ -6,6 +6,15 @@
 
 
 
+#
+# Retargeted 2026-11-12: instance-method resolution is statement-shaped over
+# a raw i64 sentinel `resolved_instance_method_raw` (-1 = unresolved) instead
+# of an Option-valued if/elif/else (7d2a779f9be, stage2 miscompiles that
+# shape); static factory resolution likewise carries `static_method_raw: i64`
+# instead of a `SymbolId?` accumulator (3901d1be287). Neither is an optional
+# reassignment; the declared record owner still comes first and the ordered
+# static fallback is unchanged.
+
 use std.spec.step
 
 use std.spec
@@ -23,11 +32,16 @@ describe "MIR method-call strict shared bindings":
         expect(source).to_contain("val result_err_type: HirType? = if method == \"unwrap_err\":")
         # e8417fc4054 put the exact declared record owner first; the
         # owner-qualified struct key remains the next `elif` arm.
-        expect(source).to_contain("val unresolved_method_id: SymbolId? = if declared_record_owner >= 0:")
-        expect(source).to_contain("elif self.struct_method_key_present_v1(unresolved_method_key):")
+        val instance_decl_at = source.find("var resolved_instance_method_raw: i64 = -1") ?? -1
+        val instance_owner_at = source.find("resolved_instance_method_raw = self.symbols.record_instance_method_scalar_raw(declared_record_owner, method)") ?? -1
+        val instance_key_at = source.find("elif self.struct_method_key_present_v1(unresolved_method_key):") ?? -1
+        expect(instance_decl_at).to_be_greater_than(-1)
+        expect(instance_owner_at).to_be_greater_than(instance_decl_at)
+        expect(instance_key_at).to_be_greater_than(instance_owner_at)
         expect(source).to_not_contain("var result_ok_type: HirType? = nil")
         expect(source).to_not_contain("var result_err_type: HirType? = nil")
         expect(source).to_not_contain("var unresolved_method_id: SymbolId? = nil")
+        expect(source).to_not_contain("var resolved_instance_method_raw: SymbolId?")
 
     it "resolves a static factory through an ordered owner fallback":
         # @req REQ-SSPEC-COMPILER
@@ -38,18 +52,20 @@ describe "MIR method-call strict shared bindings":
         step("resolves a static factory through an ordered owner fallback")
         val source = file_read("src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl")
 
-        val decl_at = source.find("var static_method_id: SymbolId? = nil") ?? -1
+        val decl_at = source.find("var static_method_raw: i64 = -1") ?? -1
         val exact_at = source.find("if static_receiver_name != \"\" and self.struct_method_key_present_v1(static_method_key):") ?? -1
-        val exact_set_at = source.find("static_method_id = Some(self.struct_method_syms[static_method_key])") ?? -1
+        val exact_set_at = source.find("static_method_raw = static_key_symbol.id") ?? -1
         # e8417fc4054: the module-unique fallback is also barred when the
         # receiver carries a known record owner.
-        val unique_gate_at = source.find("if static_method_id == nil and static_receiver_name == \"\" and known_record_owner < 0:") ?? -1
-        val unique_set_at = source.find("static_method_id = self.symbols.lookup_unique_static_method(method)") ?? -1
-        val use_at = source.find("if static_method_id != nil:") ?? -1
+        val unique_gate_at = source.find("if static_method_raw < 0 and static_receiver_name == \"\" and known_record_owner < 0 and not proven_scalar_receiver:") ?? -1
+        val unique_lookup_at = source.find("match self.symbols.lookup_unique_static_method(method):") ?? -1
+        val unique_set_at = source.find("static_method_raw = unique_static_method_raw") ?? -1
+        val use_at = source.find("if static_method_raw >= 0:") ?? -1
         expect(decl_at).to_be_greater_than(-1)
         expect(exact_at).to_be_greater_than(decl_at)
         expect(exact_set_at).to_be_greater_than(exact_at)
         expect(unique_gate_at).to_be_greater_than(exact_set_at)
-        expect(unique_set_at).to_be_greater_than(unique_gate_at)
+        expect(unique_lookup_at).to_be_greater_than(unique_gate_at)
+        expect(unique_set_at).to_be_greater_than(unique_lookup_at)
         expect(use_at).to_be_greater_than(unique_set_at)
         expect(source).to_not_contain("val static_method_id: SymbolId? = if static_receiver_name != \"\"")

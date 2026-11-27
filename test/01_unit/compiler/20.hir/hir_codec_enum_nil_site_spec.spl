@@ -1,0 +1,23 @@
+use std.spec
+use compiler.frontend.core.flat_pool_codec.{FlatPoolReader}
+use compiler.hir.hir_codec_support.{hc_restore_enum_nil}
+
+enum WireSiteProbe:
+    Pair(label: text, value: i64?)
+
+# A `reason=decode` store refusal raised by a nil-slot restore used to say only
+# `enum wire enum allocation failed`; the census had to guess which enum shape
+# failed (hir cache census 2026-11-13: 397 of 3134 modules refused, one logged).
+# The generated decoder now passes its schema site (`Type.Variant`) and the
+# support boundary appends it to the reader detail, so the log line alone names
+# the shape. The out-of-range slot path is lane-independent: it fails before any
+# runtime enum extern runs, so this holds on the seed interpreter too.
+describe "hc_restore_enum_nil names the schema site in its refusal":
+    it "appends site=Type.Variant to the enum_wire detail":
+        var r = FlatPoolReader.new("")
+        val prototype = WireSiteProbe.Pair("x", Some(1))
+        val restored = hc_restore_enum_nil<WireSiteProbe>(r, prototype, 2, [5], "WireSiteProbe.Pair")
+        expect(restored.is_none()).to_equal(true)
+        expect(r.ok).to_equal(false)
+        expect(r.failure_kind).to_equal("malformed")
+        expect(r.failure_detail).to_equal("enum wire slot out of range site=WireSiteProbe.Pair")

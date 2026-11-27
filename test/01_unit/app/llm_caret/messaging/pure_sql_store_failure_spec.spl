@@ -1,0 +1,49 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-APP
+"""As a messaging operator, when the backing database stops answering queries,
+store calls report an error I can handle instead of crashing the process."""
+
+use std.spec.*
+use app.llm_caret.messaging.domain.model.*
+use app.llm_caret.messaging.adapter.store.pure_sql_store.*
+
+fn closed_store() -> PureSqlMessagingStore:
+    var store = match PureSqlMessagingStore.open_memory():
+        case Ok(opened): opened
+        case Err(reason): panic("open_memory failed: " + reason)
+    store.close()
+    store
+
+fn sample_room() -> Room:
+    Room(room_id: messaging_id("room", "r1"), workspace_id: messaging_id("workspace", "w1"),
+        kind: RoomKind.Channel, name: "r1", topic: "t", visibility: "private", mode: "mention",
+        update_policy: "milestones", context_policy: "previous:2",
+        created_by: messaging_id("identity", "owner"), created_at: 10)
+
+describe "PureSqlMessagingStore on a closed database":
+    it "opens an in-memory store as Ok":
+        expect(PureSqlMessagingStore.open_memory().is_ok()).to_equal(true)
+
+    it "reports room_count as an error":
+        expect(closed_store().room_count().is_err()).to_equal(true)
+
+    it "reports canonical_events listing as an error":
+        expect(closed_store().canonical_events().is_err()).to_equal(true)
+
+    it "reports a workspace lookup as an error":
+        expect(closed_store().workspace("w1").is_err()).to_equal(true)
+
+    it "reports rooms listing as an error":
+        expect(closed_store().rooms().is_err()).to_equal(true)
+
+    it "rejects put_workspace with a failed write":
+        var store = closed_store()
+        val written = store.put_workspace(Workspace(workspace_id: messaging_id("workspace", "w1"), name: "w", created_at: 1))
+        expect(written.ok).to_equal(false)
+
+    it "rejects a transactional create_room with a failed write":
+        var store = closed_store()
+        expect(store.create_room(sample_room()).ok).to_equal(false)
+
+    it "is not ready once closed":
+        expect(closed_store().ready()).to_equal(false)

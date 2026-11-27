@@ -1,0 +1,42 @@
+# Link a bare-metal image with the in-house Simple linker (elf_boot_link)
+# instead of ld.lld. Used by check-baremetal-efi-boot.shs --linker simple and
+# check-simpleos-arm64-simple-link.shs.
+#
+# Usage: simple run scripts/check/baremetal-simple-link.spl -- \
+#            <x86_64|aarch64|riscv64> <script.ld> <out.elf> [options] <obj.o>...
+#   options: -L <dir>, --gc-sections, --defsym <a>=<b>, --archive <lib.a>
+#   (see src/compiler/70.backend/linker/elf/boot_link_cli.spl)
+# Exit 0 on success, 1 on a link error (message on stdout; one
+# "simple-link: undefined symbol: <name>" line per undefined symbol), 2 on bad usage.
+
+use compiler.backend.linker.elf.boot_link_cli.{boot_link_cli_parse, boot_link_cli_run}
+use std.io_runtime.{get_args, file_write_bytes, exit}
+
+fn _user_args() -> [text]:
+    # Everything after this script's own path (a leading "--" is dropped).
+    val all = get_args()
+    var out: [text] = []
+    var seen = false
+    for a in all:
+        if seen:
+            if not (out.len() == 0 and a == "--"): out = out.push(a)
+        elif a.ends_with("baremetal-simple-link.spl"):
+            seen = true
+    out
+
+fn main() -> i64:
+    val args = _user_args()
+    val r = boot_link_cli_run(args)
+    if r.rc != 0:
+        for line in r.lines: print(line)
+        return r.rc
+    val out = boot_link_cli_parse(args).output
+    var bytes: [u8] = []
+    for b in r.bytes: bytes = bytes.push((b & 0xff) as u8)
+    if not file_write_bytes(out, bytes):
+        print("simple-link: cannot write {out}")
+        return 1
+    for line in r.lines: print(line)
+    0
+
+exit(main())

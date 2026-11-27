@@ -1,0 +1,190 @@
+"""
+## Purpose and audience
+
+Regression specification for `parser_preprocessor.spl` byte-sliced `.substring(i, i + 1)`
+character scanning (replacing ADR-005 `text[i]` indexing across `_pp_tokenize_condition`,
+`_pp_extract_paren_condition`, `_pp_target_indent`, `_pp_leading_ws`, `_pp_line_brace_delta`,
+and `@cfg` skip paths).
+
+Audience: compiler engineers maintaining conditional compilation parity between the
+interpreter and compiled LLVM/Cranelift native engines.
+"""
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.nogc_sync_mut.io_runtime.{env_get, env_set}
+use compiler.frontend.core.parser_preprocessor.{
+    _pp_tokenize_condition,
+    _pp_extract_paren_condition,
+    _pp_target_indent,
+    _pp_leading_ws,
+    _pp_line_brace_delta,
+    _pp_preprocess_conditionals,
+    _pp_preprocess_conditionals_target_receipted_v1,
+    preprocess_conditionals
+}
+
+fn target_pp_text(source: text, os: text, arch: text) -> text:
+    val res = _pp_preprocess_conditionals_target_receipted_v1(source, os, arch)
+    if res.is_err():
+        return "ERR:" + res.unwrap_err()
+    res.unwrap().source
+
+fn ambient_pp_text(source: text, triple: text) -> text:
+    val old_triple = env_get("SIMPLE_NATIVE_BUILD_TARGET")
+    val old_os = env_get("SIMPLE_TARGET_OS")
+    val old_arch = env_get("SIMPLE_TARGET_ARCH")
+    env_set("SIMPLE_TARGET_OS", "")
+    env_set("SIMPLE_TARGET_ARCH", "")
+    env_set("SIMPLE_NATIVE_BUILD_TARGET", triple)
+    val out = _pp_preprocess_conditionals(source)
+    env_set("SIMPLE_NATIVE_BUILD_TARGET", old_triple)
+    env_set("SIMPLE_TARGET_OS", old_os)
+    env_set("SIMPLE_TARGET_ARCH", old_arch)
+    out
+
+describe "parser_preprocessor byte-slice character scanning":
+    it "tokenizes boolean operators, spacing, and nested parens without text[i]":
+        step("Tokenize complex condition with parens, &&, ||, !, ==, and UTF-8 value")
+        val toks = _pp_tokenize_condition("!(os = \"windows\" || arch==\"x86_64\") && feature=\"café\"")
+        expect(toks.len()).to_equal(14)
+        expect(toks[0]).to_equal("!")
+        expect(toks[1]).to_equal("(")
+        expect(toks[2]).to_equal("os")
+        expect(toks[3]).to_equal("=")
+        expect(toks[4]).to_equal("\"windows\"")
+        expect(toks[5]).to_equal("||")
+        expect(toks[6]).to_equal("arch")
+        expect(toks[7]).to_equal("==")
+        expect(toks[8]).to_equal("\"x86_64\"")
+        expect(toks[9]).to_equal(")")
+        expect(toks[10]).to_equal("&&")
+        expect(toks[11]).to_equal("feature")
+        expect(toks[12]).to_equal("=")
+        expect(toks[13]).to_equal("\"café\"")
+
+    it "extracts parenthesized conditions including nested parens, trailing comments, and UTF-8":
+        step("Extract condition across nested parentheses")
+        val nested = _pp_extract_paren_condition("    @when(not (os=\"windows\" and (arch=\"x86_64\" or arch=\"aarch64\"))):  # comment )")
+        expect(nested).to_equal("not (os=\"windows\" and (arch=\"x86_64\" or arch=\"aarch64\"))")
+
+        step("Handle empty, missing, and UTF-8-bearing parens")
+        expect(_pp_extract_paren_condition("@when():")).to_equal("")
+        expect(_pp_extract_paren_condition("@else:")).to_equal("")
+        expect(_pp_extract_paren_condition("@when(feature=\"café\"):")).to_equal("feature=\"café\"")
+
+    it "computes target indentation and leading whitespace across spaces, tabs, and UTF-8":
+        step("Measure spaces, tabs, mixed indentation, and non-ASCII text")
+        expect(_pp_target_indent("fn top():")).to_equal(0)
+        expect(_pp_target_indent("    fn indented():")).to_equal(4)
+        expect(_pp_target_indent("\tfn tabbed():")).to_equal(4)
+        expect(_pp_target_indent("  \t val x = 1")).to_equal(7)
+        expect(_pp_target_indent("é_non_ascii()")).to_equal(0)
+        expect(_pp_target_indent("   \t")).to_equal(7)
+
+        step("Extract exact leading whitespace prefix")
+        expect(_pp_leading_ws("  \t val x = 1")).to_equal("  \t ")
+        expect(_pp_leading_ws("    @when(os=\"windows\"):")).to_equal("    ")
+        expect(_pp_leading_ws("é_non_ascii()")).to_equal("")
+        expect(_pp_leading_ws("")).to_equal("")
+
+    it "counts brace deltas across ASCII and UTF-8 lines":
+        expect(_pp_line_brace_delta("use m.{{")).to_equal(1)
+        expect(_pp_line_brace_delta("}")).to_equal(-1)
+        expect(_pp_line_brace_delta("use m.{{a, b}}")).to_equal(0)
+        expect(_pp_line_brace_delta("# comment — café {{ a }}")).to_equal(0)
+
+    it "selects nested @when(os=\"windows\")/@else blocks with parens and preserves comments and strings":
+        step("Build source containing nested @when, @elif, @else, comments, and strings")
+        val src = (
+            "@when(os=\"windows\"):\n" +
+            "# win comment mentioning @when(linux): and (parens)\n" +
+            "val label = \"windows — café (한)\"\n" +
+            "@when(not (arch=\"x86\" or arch=\"arm\")):\n" +
+            "val bits = \"64-bit ()\"\n" +
+            "@else:\n" +
+            "val bits = \"32-bit\"\n" +
+            "@end\n" +
+            "@else:\n" +
+            "# posix comment\n" +
+            "val label = \"@when(windows): literal\"\n" +
+            "@when(os=\"linux\" and (arch=\"x86_64\" or arch=\"aarch64\")):\n" +
+            "val bits = \"linux-64\"\n" +
+            "@else:\n" +
+            "val bits = \"other\"\n" +
+            "@end\n" +
+            "@end\n"
+        )
+
+        step("Verify receipted and ambient preprocessing agree for Windows x86_64")
+        val win_t = target_pp_text(src, "windows", "x86_64")
+        val win_a = ambient_pp_text(src, "x86_64-pc-windows-gnu")
+        expect(win_a).to_equal(win_t)
+        expect(win_t).to_contain("# win comment mentioning @when(linux): and (parens)")
+        expect(win_t).to_contain("val label = \"windows — café (한)\"")
+        expect(win_t).to_contain("val bits = \"64-bit ()\"")
+        expect(win_t.contains("32-bit")).to_equal(false)
+        expect(win_t.contains("linux-64")).to_equal(false)
+        expect(win_t.contains("@when(windows): literal")).to_equal(false)
+        expect(win_t.split("\n").len()).to_equal(src.split("\n").len())
+
+        step("Verify receipted and ambient preprocessing agree for Linux x86_64")
+        val lin_t = target_pp_text(src, "linux", "x86_64")
+        val lin_a = ambient_pp_text(src, "x86_64-unknown-linux-gnu")
+        expect(lin_a).to_equal(lin_t)
+        expect(lin_t).to_contain("# posix comment")
+        expect(lin_t).to_contain("val label = \"@when(windows): literal\"")
+        expect(lin_t).to_contain("val bits = \"linux-64\"")
+        expect(lin_t.contains("windows — café")).to_equal(false)
+        expect(lin_t.contains("64-bit ()")).to_equal(false)
+        expect(lin_t.split("\n").len()).to_equal(src.split("\n").len())
+
+    it "preserves target indentation and comments in marker mode (SIMPLE_HIR_CFG_SELECT=1)":
+        step("Enable SIMPLE_HIR_CFG_SELECT=1 and preprocess indented @when/@else chain")
+        val src = (
+            "fn pick_msg() -> text:\n" +
+            "  \t@when(os=\"windows\"):\n" +
+            "  \t# kept windows comment\n" +
+            "  \treturn \"win — café\"\n" +
+            "  \t@else:\n" +
+            "  \t# kept posix comment\n" +
+            "  \treturn \"posix — 한\"\n" +
+            "  \t@end\n"
+        )
+        val old_flag = env_get("SIMPLE_HIR_CFG_SELECT")
+        env_set("SIMPLE_HIR_CFG_SELECT", "1")
+        val marked = preprocess_conditionals(src)
+        env_set("SIMPLE_HIR_CFG_SELECT", old_flag)
+
+        expect(marked).to_contain("  \tif __cfg_when__(\"os=\\\"windows\\\"\"):")
+        expect(marked).to_contain("      \t# kept windows comment")
+        expect(marked).to_contain("      \treturn \"win — café\"")
+        expect(marked).to_contain("  \telse:")
+        expect(marked).to_contain("      \t# kept posix comment")
+        expect(marked).to_contain("      \treturn \"posix — 한\"")
+        expect(marked.split("\n").len()).to_equal(src.split("\n").len())
+
+    it "handles @cfg(false) skips across tab indentation and multi-line brace imports":
+        step("Skip @cfg(false) multi-line use and tab-indented fn while keeping active sibling")
+        val src = (
+            "@cfg(arch=\"riscv32\")\n" +
+            "use dep.ignored.{{\n" +
+            "    alpha,\n" +
+            "    beta\n" +
+            "}\n" +
+            "@cfg(arch=\"riscv32\")\n" +
+            "\tfn hidden_tab() -> text:\n" +
+            "\t\t\"hidden — café\"\n" +
+            "@cfg(true)\n" +
+            "fn kept_fn() -> text:\n" +
+            "    # kept comment\n" +
+            "    \"kept — (ok)\"\n"
+        )
+        val out = target_pp_text(src, "windows", "x86_64")
+        expect(out.contains("alpha")).to_equal(false)
+        expect(out.contains("hidden_tab")).to_equal(false)
+        expect(out.contains("}")).to_equal(false)
+        expect(out).to_contain("fn kept_fn() -> text:")
+        expect(out).to_contain("    # kept comment")
+        expect(out).to_contain("    \"kept — (ok)\"")
+        expect(out.split("\n").len()).to_equal(src.split("\n").len())

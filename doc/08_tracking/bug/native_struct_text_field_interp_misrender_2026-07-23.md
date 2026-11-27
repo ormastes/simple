@@ -48,3 +48,22 @@ FreeBSD, AArch64/RISC-V64 execution, and ARM32/RV32/Windows-ARM64 object gates.
 A focused source contract pins both type-propagation steps. Rebuilt execution
 remains pending.
 
+
+## Confirmation 2026-11-25 (release/1.0.0 @ 4c6024f8271) — remains Closed
+
+Source inspection on the current tree confirms the Resolution section's claims
+are still present:
+
+- The GetField lowering in
+  `src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl` (~line 7566)
+  prefers the OWNER struct's declared field type
+  (`struct_field_hir_type` + `declared_field_type_in_current_table`) over the
+  unreliable `expr_value.type_` when computing the projection's dest MIR type,
+  so a text field projects as text and interpolation routes through text
+  conversion instead of `rt_raw_i64_to_string` on the pointer bits.
+- The `test/fixtures/native_crossmodule_result_u8` oracle fixture exists.
+
+Execution of the staged oracle remains pending (no self-hosted binary on this
+host; the pinned Rust seed cannot run specs at HEAD due to the
+`@representation_boundary` seed/source skew). No re-run of the repro was
+possible; this is a code-inspection confirmation only.

@@ -1,0 +1,147 @@
+# AUTHORED_NOT_RUN. Actual common API/scripted provider consumer; no engine,
+# runtime, namespace, immutable program or capture-completeness qualification.
+use std.spec.*
+use std.nogc_async_mut.container.api_v2.*
+use std.nogc_async_mut.container.service_v2.*
+use std.nogc_async_mut.container.shared.configuration_query_v1.*
+use std.nogc_async_mut.container.providers.windows.simple_container_adapter_v2.WindowsServiceInventorySampleV2
+use std.nogc_async_mut.container.providers.windows.docker_contract_v1.WindowsDockerScriptedResultV1
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.contracts.container.execution_configuration_v1.*
+use std.common.contracts.container.execution_v2.container_scope_fence_id_v2
+use std.common.json.value.{JsonValue, json_value_object_from, json_value_serialize}
+use test.fixtures.orchestration.simple_container_windows_adapter_fixture_v2.*
+
+fn configuration_identity_fixture_v1() -> RuntimeIdentityV1:
+    val request = windows_adapter_native_request_fixture_v2()
+    RuntimeIdentityV1(pod_uid: request.pod_uid, attempt: request.attempt, operation_id: request.operation_id,
+        native_id: windows_adapter_native_id_fixture_v2(), engine: "docker", provider_generation: 4,
+        node_boot_id: container_scope_fence_id_v2(windows_adapter_scope_fixture_v2()).unwrap())
+
+fn configuration_raw_fixture_v1(path: text = "C:\\actual\\probe.exe") -> text:
+    val request = windows_adapter_native_request_fixture_v2()
+    json_value_serialize(json_value_object_from([
+        ("id", JsonValue.Str(windows_adapter_native_id_fixture_v2())),
+        ("pod", JsonValue.Str(request.pod_uid)), ("attempt", JsonValue.Str("2")),
+        ("operation", JsonValue.Str(request.operation_id)), ("generation", JsonValue.Str("4")),
+        ("boot", JsonValue.Str("")), ("image", JsonValue.Str(windows_adapter_policy_fixture_v2().expected_image_id)),
+        ("path", JsonValue.Str(path)), ("args", JsonValue.Array([JsonValue.Str("two words"), JsonValue.Str(""), JsonValue.Str("λ")])),
+        ("workdir", JsonValue.Str("C:\\observed")), ("user", JsonValue.Str("ContainerUser")),
+        ("readonly", JsonValue.Bool(false)), ("environment", JsonValue.Array([JsonValue.Str("A=private-first"), JsonValue.Str("A=private-second")])),
+        ("mounts", JsonValue.Array([json_value_object_from([("kind", JsonValue.Str("bind")),
+            ("source", JsonValue.Str("C:\\source")), ("destination", JsonValue.Str("C:\\guest")), ("rw", JsonValue.Bool(true))])]))]))
+
+fn configuration_image_fixture_v1(repo: text = "") -> text:
+    val reference = if repo == "": windows_adapter_native_request_fixture_v2().image else: repo
+    json_value_serialize(json_value_object_from([("id", JsonValue.Str(windows_adapter_policy_fixture_v2().expected_image_id)),
+        ("repoDigests", JsonValue.Array([JsonValue.Str(reference)])),
+        ("environment", JsonValue.Array([JsonValue.Str("A=private-default")]))]))
+
+fn configuration_owner_fixture_v1(last: text = "", image: text = "") -> SimpleContainerOwnerV2:
+    val scope = windows_adapter_scope_fixture_v2()
+    val identity = configuration_identity_fixture_v1()
+    val query = configuration_container_command_v1(identity, true).unwrap()
+    val image_query = configuration_image_command_v1("docker", windows_adapter_policy_fixture_v2().expected_image_id).unwrap()
+    val original = windows_adapter_recovery_lifecycle_script_v2()
+    var script: [WindowsDockerScriptedResultV1] = []
+    for index in 0..9: script.push(original[index])
+    script.push(windows_adapter_engine_fixture_v2())
+    script.push(windows_adapter_inspect_fixture_v2("created"))
+    script.push(windows_adapter_response_fixture_v2(query.operation, query.args, configuration_raw_fixture_v1()))
+    script.push(windows_adapter_response_fixture_v2(image_query.operation, image_query.args,
+        if image == "": configuration_image_fixture_v1() else: image))
+    script.push(windows_adapter_response_fixture_v2(query.operation, query.args,
+        if last == "": configuration_raw_fixture_v1() else: last))
+    var owner = windows_adapter_owner_fixture_v2(script,
+        [WindowsServiceInventorySampleV2(entries: [], error: ""), WindowsServiceInventorySampleV2(entries: [], error: "")])
+    val inventory = simple_container_inventory_service_v2(owner)
+    expect(inventory.error).to_equal("")
+    val admitted = simple_container_complete_quarantine_v2(inventory.owner, windows_adapter_admission_fixture_v2([]))
+    expect(admitted.admitted).to_equal(true)
+    val request = windows_adapter_request_fixture_v2()
+    val prepared = simple_container_apply_v2(admitted.owner, "prepare", request, windows_adapter_deadline_fixture_v2())
+    expect(prepared.operation.status).to_equal("ok")
+    val created = simple_container_apply_v2(prepared.owner, "create", request, windows_adapter_deadline_fixture_v2())
+    expect(created.operation.status).to_equal("blocked")
+    val intent = simple_container_intent_v2(created.owner, request).unwrap()
+    val recovered = simple_container_recover_v2(created.owner, request, intent)
+    expect(recovered.operation.status).to_equal("ok")
+    recovered.owner
+
+describe "actual common Container configuration observation":
+    it "retains the actual owner and reports effective configuration without secret values":
+        step("Observe the admitted native ID through the common API and three fixed backend captures")
+        val turn = simple_container_configuration_observe_v1(configuration_owner_fixture_v1(), windows_adapter_request_fixture_v2())
+        expect(turn.error).to_equal("")
+        val observed = turn.observation.unwrap()
+        expect(observed.primary_argv).to_equal(["C:\\actual\\probe.exe", "two words", "", "λ"])
+        expect(observed.working_directory).to_equal("C:\\observed")
+        expect(observed.readonly_rootfs).to_equal(false)
+        expect(observed.environment_names).to_equal(["A", "A"])
+        expect(observed.image_default_environment_names).to_equal(["A"])
+        expect(observed.environment_digest == observed.image_default_environment_digest).to_equal(false)
+        expect(observed.mounts.len()).to_equal(1)
+        expect(observed.mounts[0].read_only).to_equal(false)
+        expect(observed.requested_image_ref == observed.image_config_id).to_equal(false)
+        val source = container_execution_configuration_encode_v1(observed).unwrap()
+        expect(source.contains("private-first")).to_equal(false)
+        expect(source.contains("private-default")).to_equal(false)
+        expect(container_execution_configuration_decode_v1(source).is_ok()).to_equal(true)
+        var altered = observed
+        altered.working_directory = "C:\\changed-wire"
+        expect(container_execution_configuration_decode_v1(container_execution_configuration_encode_v1(altered).unwrap()).unwrap_err()).to_equal("container-configuration-content-digest-mismatch")
+        expect(windows_adapter_consumed_fixture_v2(turn.owner)).to_equal(14)
+
+    it "rejects changed effective argv instead of replacing it with requested argv":
+        step("Change Path between the two actual container query completions")
+        val turn = simple_container_configuration_observe_v1(configuration_owner_fixture_v1(configuration_raw_fixture_v1("C:\\changed.exe")), windows_adapter_request_fixture_v2())
+        expect(turn.observation.?).to_equal(false)
+        expect(turn.error).to_equal("configuration-changed-during-observation")
+        expect(windows_adapter_consumed_fixture_v2(turn.owner)).to_equal(14)
+
+    it "rejects missing repository correspondence despite matching actual config ID":
+        step("Return the right image config ID with an unrelated manifest digest")
+        val turn = simple_container_configuration_observe_v1(configuration_owner_fixture_v1("", configuration_image_fixture_v1("repo@sha256:" + "e".repeat(64))), windows_adapter_request_fixture_v2())
+        expect(turn.observation.?).to_equal(false)
+        expect(turn.error).to_equal("configuration-requested-manifest-correspondence-unavailable")
+
+    it "rejects an altered original plan before any additional native query":
+        step("Supply a plan digest that does not match the original retained request")
+        var request = windows_adapter_request_fixture_v2()
+        request.plan.request_digest = "e".repeat(64)
+        val turn = simple_container_configuration_observe_v1(configuration_owner_fixture_v1(), request)
+        expect(turn.observation.?).to_equal(false)
+        expect(turn.error == "").to_equal(false)
+        expect(windows_adapter_consumed_fixture_v2(turn.owner)).to_equal(9)
+
+    it "rejects malformed duplicate JSON keys and excessive native nesting without exposing raw values":
+        step("Use the production strict parser through the retained owner")
+        val duplicate = configuration_raw_fixture_v1().replace("\"readonly\":false", "\"readonly\":false,\"readonly\":true")
+        val turn = simple_container_configuration_observe_v1(configuration_owner_fixture_v1(duplicate), windows_adapter_request_fixture_v2())
+        expect(turn.observation.?).to_equal(false)
+        expect(turn.error).to_equal("configuration-native-json")
+        expect(turn.error.contains("private")).to_equal(false)
+        val deep = configuration_container_parse_v1("[[[[\"private\"]]]]", configuration_identity_fixture_v1(), windows_adapter_scope_fixture_v2(), true)
+        expect(deep.unwrap_err()).to_equal("configuration-native-depth")
+
+    it "preserves every mount and rejects overflow instead of silently truncating the projection":
+        step("Use multiple native mount entries, including a read-only named volume")
+        val second = "{\"kind\":\"volume\",\"source\":\"volume-source\",\"destination\":\"C:\\\\cache\",\"rw\":false}"
+        val raw = configuration_raw_fixture_v1().replace("\"mounts\":[", "\"mounts\":[" + second + ",")
+        val parsed = configuration_container_parse_v1(raw, configuration_identity_fixture_v1(), windows_adapter_scope_fixture_v2(), true).unwrap()
+        expect(parsed.mounts.len()).to_equal(2)
+        expect(parsed.mounts[0].kind).to_equal("volume")
+        expect(parsed.mounts[0].read_only).to_equal(true)
+        var many: [text] = []
+        for index in 0..64: many.push(second)
+        val excess = configuration_raw_fixture_v1().replace("\"mounts\":[", "\"mounts\":[" + many.join(",") + ",")
+        val rejected = configuration_container_parse_v1(excess, configuration_identity_fixture_v1(), windows_adapter_scope_fixture_v2(), true)
+        expect(rejected.unwrap_err()).to_equal("configuration-native-mount-bound")
+
+    it "never mints log EOF evidence from a scripted provider or legacy log text":
+        step("Request actual full-log capture from the actual scripted common owner")
+        val turn = simple_container_logs_capture_v1(configuration_owner_fixture_v1(), windows_adapter_request_fixture_v2())
+        expect(turn.capture.?).to_equal(false)
+        expect(turn.observation.?).to_equal(false)
+        expect(turn.error).to_equal("container-logs-native-capture-unavailable")
+        expect(windows_adapter_consumed_fixture_v2(turn.owner)).to_equal(11)

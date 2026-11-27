@@ -22,6 +22,12 @@
 # §4.2). Data only; consumed by `expand_text_args` in
 # `_MirLoweringExpr/switch_operators_calls.spl`.
 #
+# Lockstep is now checked, not hand-kept: test/01_unit/compiler/mir/
+# text_extern_abi_seed_parity_spec.spl reads the seed tables from calls.rs and
+# requires every seed row here with equal indices. This side is a SUPERSET:
+# it also lists C-lane owners (runtime_native.c, runtime_cache_host_*.c, ...)
+# that seed-built binaries never meet because they link the Rust runtime.
+#
 # The Rust file's separate `text_cstr_arg_indices` table is now EMPTY (its
 # last occupants, the rt_db_* family, moved here), so nothing is missing from
 # this twin on that account.
@@ -39,6 +45,8 @@ fn text_arg_indices(func_name: text) -> [i64]?:
             return Some([0])
         case "rt_linux_group_parent_acquire_v1":
             return Some([0, 1])
+        case "rt_linux_group_parent_acquire_at_v2":
+            return Some([0, 1, 2])
         case "rt_linux_group_launch_broker_v1":
             return Some([0, 1])
         case "rt_linux_group_start_v1":
@@ -83,9 +91,9 @@ fn text_arg_indices(func_name: text) -> [i64]?:
             return Some([0])
         case "rt_package_copy_file" | "rt_package_create_symlink" | "rt_package_create_tarball" | "rt_package_extract_tarball":
             return Some([0, 1])
-        case "rt_crc32_text" | "rt_file_exists" | "rt_file_is_regular_no_follow" | "rt_file_is_char_device" | "rt_file_canonicalize" | "rt_file_read_text" | "rt_file_read_regular_no_follow_bounded" | "rt_file_read_regular_no_follow_bounded_bytes" | "rt_file_size" | "rt_file_hash_sha256" | "rt_file_fsync" | "rt_file_fsync_cached" | "rt_file_sync" | "rt_file_delete" | "rt_file_remove" | "rt_file_read_lines" | "rt_file_read_bytes" | "rt_file_mmap_read_text" | "rt_file_mmap_len" | "rt_file_mmap_read_bytes":
+        case "rt_crc32_text" | "rt_file_exists" | "rt_dir_sync" | "rt_file_is_regular_no_follow" | "rt_file_is_char_device" | "rt_file_canonicalize" | "rt_file_read_text" | "rt_file_read_regular_no_follow_bounded" | "rt_file_read_regular_no_follow_bounded_bytes" | "rt_file_size" | "rt_file_hash_sha256" | "rt_file_fsync" | "rt_file_fsync_cached" | "rt_file_sync" | "rt_file_delete" | "rt_file_remove" | "rt_file_read_lines" | "rt_file_read_bytes" | "rt_file_mmap_read_text" | "rt_file_mmap_len" | "rt_file_mmap_read_bytes":
             return Some([0])
-        case "rt_file_write_text" | "rt_file_append_text" | "rt_file_copy" | "rt_file_rename" | "rt_file_move" | "rt_file_wrap_smf_dynlib" | "rt_file_extract_smf_dynlib" | "rt_file_create_excl" | "rt_file_copy_create_excl_no_follow" | "rt_file_link_create_excl_no_follow" | "rt_secure_temp_dir" | "rt_file_publish_noreplace":
+        case "rt_file_read_under_root_bytes" | "rt_file_write_text" | "rt_file_append_text" | "rt_file_copy" | "rt_file_rename" | "rt_file_move" | "rt_file_wrap_smf_dynlib" | "rt_file_extract_smf_dynlib" | "rt_file_create_excl" | "rt_file_copy_create_excl_no_follow" | "rt_file_link_create_excl_no_follow" | "rt_secure_temp_dir" | "rt_file_publish_noreplace":
             return Some([0, 1])
         # NOT listed: the cycle-170 split setters rt_secure_temp_dir_set_parent
         # / _set_prefix take ONE boxed text RuntimeValue (runtime_native.c),
@@ -102,6 +110,22 @@ fn text_arg_indices(func_name: text) -> [i64]?:
         # rt_process_run_with_limits: cmd is (ptr, len) -- env_process.rs:1269.
         case "rt_process_run_with_limits" | "rt_process_run_bounded_bytes":
             return Some([0])
+        # Process-run owners whose C ABI is (cmd_ptr, cmd_len, SplArray* args,
+        # ...): runtime_native.c rt_process_run / rt_process_run_inherit,
+        # runtime_process.c rt_process_run_timeout / rt_process_run_bounded,
+        # runtime_process_owned.c rt_process_run_owned_{,observed_}bounded_value
+        # and rt_process_owned_v3_start_value. Twin of the seed's
+        # process_c_runtime_arg_indices (calls.rs), which expands cmd to
+        # (ptr, len) for exactly these. Missing here, the extern pointer bridge
+        # passed ONE word (rt_interp_cstr(cmd)) to the five-word
+        # rt_process_run_bounded: cmd_len got the args handle, args got
+        # timeout_ms, and every Stage-2-built child spawn returned status 4
+        # without forking (SCV-E-ADMISSION: git-event-source-unavailable).
+        # NOT listed: rt_process_spawn{,_async,_guarded} and
+        # rt_process_execute -- their C owners take (char*, char**, count) and
+        # native callers reach them through the *_value facades instead.
+        case "rt_process_run" | "rt_process_run_inherit" | "rt_process_run_timeout" | "rt_process_run_bounded" | "rt_process_run_owned_bounded_value" | "rt_process_run_owned_observed_bounded_value" | "rt_process_owned_v3_start_value":
+            return Some([0])
         case "rt_file_open":
             return Some([0])
         # FileHandle providers consume (path_ptr, path_len[, mode]), matching
@@ -117,7 +141,7 @@ fn text_arg_indices(func_name: text) -> [i64]?:
         # The Rust twin has had this row since calls.rs:2672; this table
         # was missing it, so pure-Simple codegen emitted TWO words for a
         # THREE-word C function (lockstep drift, found 2026-09-02).
-        case "rt_file_lock":
+        case "rt_file_lock" | "rt_file_lock_owned_acquire_v2":
             return Some([0])
         case "rt_file_write_bytes":
             return Some([0])
@@ -131,10 +155,26 @@ fn text_arg_indices(func_name: text) -> [i64]?:
             return Some([1])
         case "rt_dir_list" | "rt_dir_remove_all" | "rt_dir_walk" | "rt_set_current_dir" | "rt_dir_exists" | "rt_dir_is_real_no_follow":
             return Some([0])
-        # rt_dir_glob is (dir, pattern): its ONLY implementation
-        # (runtime/src/value/sffi/file_io/directory.rs:199) takes four words.
+        # rt_dir_glob is (dir, pattern) in the Rust runtime
+        # (runtime/src/value/sffi/file_io/directory.rs:199, four words) but
+        # (pattern_ptr, pattern_len) in runtime_native.c, and both arities are
+        # declared in .spl. Out-of-range indices are skipped (seed semantics),
+        # so the one-text facade splits index 0 only.
         case "rt_dir_glob":
             return Some([0, 1])
+        # C-lane (ptr, len) owners the seed never lists (it links the Rust
+        # providers): runtime_shared_parse_cell_private.h,
+        # runtime_native.c rt_host_dynlib_*, runtime_cache_host_authority_v1.c,
+        # runtime_process{,_owned}.c pin owners. Unlisted, the pointer bridge
+        # passed one word and every later argument shifted by one register.
+        case "rt_shared_parse_cell_read_v1" | "rt_host_dynlib_open" | "rt_cache_host_open_root_v1" | "rt_process_observation_v4_pin_cwd_value" | "rt_process_pin_executable_owned_value":
+            return Some([0])
+        case "rt_host_dynlib_symbol" | "rt_cache_host_open_read_v1" | "rt_cache_host_open_child_v1" | "rt_cache_host_open_cas_kind_v1" | "rt_cache_host_open_cas_shard_v1" | "rt_cache_host_open_cas_leaf_v1" | "rt_cache_host_publish_noreplace_v1" | "rt_cache_host_publish_retained_noreplace_v2":
+            return Some([1])
+        case "rt_cache_host_open_pinned_cas_v1":
+            return Some([1, 2])
+        case "rt_cache_host_quarantine_v1":
+            return Some([2])
         case "rt_dir_create" | "rt_dir_create_all" | "rt_dir_remove":
             return Some([0])
         case "rt_file_find":
@@ -190,7 +230,7 @@ fn text_arg_indices(func_name: text) -> [i64]?:
         case "rt_profiler_record_call":
             return Some([0])
         case _("every other extern name is either non-text or already uses the boxed/tagged single-word convention that the generic one-word-per-operand Call lowering already handles correctly"):
-            return nil
+            return None
 
 # Exact facade arity for symbols that are also invoked through raw machine-word
 # bridges. The symbol name and split indices alone cannot distinguish
@@ -204,12 +244,55 @@ fn text_extern_semantic_arity(func_name: text) -> i64?:
             Some(2)
         case "rt_file_write_bytes":
             Some(2)
+        # Process owners: the semantic facade arity. A different-arity
+        # declaration (e.g. the wasm backend's `rt_process_run(cmd) -> i64`
+        # import) is not this C owner and is left unsplit.
+        case "rt_process_run" | "rt_process_run_inherit":
+            Some(2)
+        case "rt_process_run_timeout":
+            Some(3)
+        case "rt_process_run_bounded" | "rt_process_run_owned_bounded_value" | "rt_process_run_owned_observed_bounded_value":
+            Some(4)
+        case "rt_process_owned_v3_start_value":
+            Some(6)
+        # Directory providers: a source-defined raw (path_ptr, path_len)
+        # body (core_fs.spl) calls itself with two integer words; splitting
+        # its first word again made a 3-operand call to a 2-parameter function.
+        case "rt_dir_exists" | "rt_dir_list" | "rt_dir_remove_all" | "rt_dir_walk" | "rt_set_current_dir" | "rt_dir_is_real_no_follow" | "rt_dir_create_all":
+            Some(1)
+        case "rt_dir_create" | "rt_dir_remove":
+            Some(2)
         case "rt_io_file_open":
             Some(2)
         case "rt_io_file_exists" | "rt_io_file_delete":
             Some(1)
         case _:
-            nil
+            None
+
+# Tuple-result facades: the ONE table both pure-Simple AOT backends (Cranelift,
+# LLVM) consult. These owners return a registered SplArray/tuple handle, but MIR
+# destructures a tuple call result with raw word loads (GetField 0/1/2), so a
+# non-source call is routed to the runtime facade that takes the same
+# post-split words and returns a raw rt_alloc result block (runtime_native.c /
+# env_process.rs). Keyed on the post-split word count: a different-arity import
+# of the same name (wasm `rt_process_run(cmd) -> i64`) keeps its callee.
+# Census: test/01_unit/compiler/backend/runtime_tuple_result_facade_census_spec.spl.
+fn runtime_tuple_result_facade(func_name: text, word_count: i64) -> text:
+    match func_name:
+        case "rt_process_run":
+            if word_count == 3: return "rt_process_run_tuple"
+        case "rt_process_run_timeout":
+            if word_count == 4: return "rt_process_run_timeout_tuple"
+        case "rt_process_run_bounded":
+            if word_count == 5: return "rt_process_run_bounded_tuple"
+        case "rt_process_run_bounded_bytes":
+            if word_count == 5: return "rt_process_run_bounded_bytes_tuple"
+        case "rt_process_run_owned_observed_bounded_value":
+            if word_count == 5: return "rt_process_run_owned_observed_bounded_text"
+        case "rt_cpuid_tuple":
+            if word_count == 2: return "rt_cpuid_tuple_block"
+        case _: ()
+    ""
 
 fn boxed_text_arg_indices(func_name: text) -> [i64]?:
     match func_name:
@@ -219,15 +302,22 @@ fn boxed_text_arg_indices(func_name: text) -> [i64]?:
         # Keep byte extents (including NUL) and the TCP address owner intact.
         case "rt_text_to_bytes" | "rt_io_tcp_bind": return Some([0])
         case "rt_io_tcp_write_text": return Some([1])
+        # Every other socket-address owner decodes the same tagged handle
+        # (runtime_native.c rt_extract_cstr). Unlisted, the default bridge
+        # handed rt_io_tcp_connect a bare char* and the Windows Stage 2
+        # loadgen failed every connect in 0 us before creating a socket.
+        case "rt_io_tcp_connect" | "rt_io_tcp_connect_timeout" | "rt_io_udp_bind": return Some([0])
+        case "rt_io_tcp_bind_fd" | "rt_io_udp_connect" | "rt_io_udp_join_multicast" | "rt_io_udp_leave_multicast": return Some([1])
+        case "rt_io_udp_send_to": return Some([2])
         # Atomic writers decode both operands as owned RuntimeValue text.
         # Without this registration the extern pointer bridge strips their
         # handles via rt_interp_cstr, so the writer can reject valid paths and
         # lose the diagnostic it was meant to preserve. The mode stays i32.
-        case "rt_file_atomic_write" | "rt_file_atomic_write_mode": return Some([0, 1])
+        case "rt_file_atomic_write" | "rt_file_atomic_write_mode" | "rt_file_write_under_root_bytes": return Some([0, 1])
         # `rt_file_write_bytes_array` consumes tagged path and byte-array
         # RuntimeValues. Re-box only the semantic text path; the array handle
         # is already the provider's expected representation.
-        case "rt_file_write_bytes_array": return Some([0])
+        case "rt_file_write_bytes_array" | "rt_file_atomic_write_bytes_array": return Some([0])
         # Tagged-RuntimeValue text ABI (runtime_sffi.rs:2215-2217: "path
         # RuntimeValue, offset, data RuntimeValue"; Rust impl file_ops.rs:1405
         # uses tagged_text_to_str — tagged ONLY, no raw-cstr fallback). The
@@ -245,7 +335,7 @@ fn boxed_text_arg_indices(func_name: text) -> [i64]?:
         case "rt_file_write_text_at": return Some([0, 2])
         case "rt_file_write_text_at_cached": return Some([1])
         case "rt_file_write_text_at_cached_repeat": return Some([1])
-        case _: return nil
+        case _: return None
 
 fn file_write_bytes_array_alias_target(func_name: text, signature: MirSignature, argument_count: i64) -> text?:
     """Return the tagged-value provider only for the exact imported facade.
@@ -256,9 +346,9 @@ fn file_write_bytes_array_alias_target(func_name: text, signature: MirSignature,
     """
     if func_name != "rt_file_write_bytes" or argument_count != 2 or
             signature.is_variadic or signature.params.len() != 2:
-        return nil
+        return None
     if signature.return_type.kind != MirTypeKind.Bool:
-        return nil
+        return None
     val path_is_text = match signature.params[0].kind:
         case MirTypeKind.Tuple(elements):
             if elements.len() != 2:
@@ -274,6 +364,80 @@ fn file_write_bytes_array_alias_target(func_name: text, signature: MirSignature,
         case _: false
     if path_is_text and data_is_u8_array:
         return "rt_file_write_bytes_array"
-    nil
+    None
+
+# Externs whose `text` argument(s) are consumed as a complete tagged
+# RuntimeValue and must cross the boundary UNCHANGED: no rt_interp_cstr
+# pointer bridge, no (ptr, len) split, no re-box. rt_stderr_write /
+# rt_stdout_write (runtime_native.c, `int64_t (int64_t value)`, and the Rust
+# twin io_print.rs) decode the value with rt_core_as_string; handed the bare
+# char* the bridge produced, the decode failed and the pointer was printed as
+# an integer. The seed lists neither name in any table, so it already passes
+# the value through. Only `text`-typed parameters are bridged, so the
+# `[u8]` / `i64` declarations of the same names are unaffected.
+#
+# Parity rule (audit 2026-10-25): the seed passes every UNLISTED `text`
+# argument as the tagged value, while this compiler's default is the char*
+# bridge. Every C-lane owner whose text parameter is an `int64_t` decoded as a
+# runtime value is therefore listed here. Strict decoders (rt_core_as_string,
+# rt_core_string_to_cpath, rt_core_string_bytes, simd_as_string,
+# rt_eprint_value) returned nil/0/""/-1 for the bridged char*, or printed it
+# as an integer (rt_print_err -> empty `panic:` + pointer-like numbers).
+# Raw-tolerant owners (rt_string_data/len, rt_interp_cstr, promote_raw)
+# are listed too: tagged is exactly what they accept, and it keeps the
+# length. True `const char*` owners (rt_print, rt_println, rt_eprintln,
+# rt_dir_delete, rt_process_spawn*, ...) stay on the bridge.
+fn tagged_text_value_arg_indices(func_name: text) -> [i64]?:
+    match func_name:
+        # The runtime RC graph C/Rust owners accept a tagged RuntimeValue
+        # handle (`int64_t`), not a char pointer. The shared foreign-call
+        # lowerer applies these rows only to text-typed arguments of a
+        # registry-proven extern declaration.
+        case "rt_rc_share" | "rt_rc_retain" | "rt_rc_release" | "rt_rc_count": return Some([0])
+        case "rt_stderr_write" | "rt_stdout_write": return Some([0])
+        # Storage scope identities must retain byte lengths, including NUL;
+        # the native owner rejects embedded NUL before path admission.
+        case "rt_workspace_storage_open_v1": return Some([0, 1, 2, 3, 4, 7])
+        case "rt_linux_container_user_open_v1" | "rt_linux_container_containment_capture_v1": return Some([1, 2])
+        case "rt_linux_container_user_observe_v1" | "rt_linux_container_user_close_v1" | "rt_linux_container_containment_observe_v1" | "rt_linux_container_containment_close_v1": return Some([1])
+        case "rt_linux_container_containment_kernel_observe_v1": return Some([1, 2, 3, 4])
+        case "rt_workspace_storage_prepare_executable_v1": return Some([2, 3, 5, 6, 7, 8])
+        # Strict tagged decoders (runtime_native.c, runtime_simd_utf8.c).
+        case "rt_file_read_text_at_checked" | "rt_file_mode" | "rt_file_exists_str" | "rt_file_hash" | "rt_file_list_dir" | "rt_file_read_text_rv" | "rt_fs_read_text": return Some([0])
+        case "rt_hash_text" | "rt_xxh3_128_text" | "rt_path_filename" | "rt_path_extension" | "rt_shell_exec" | "rt_shell_exec_tuple": return Some([0])
+        case "rt_print_err" | "rt_println_value" | "print_raw" | "rt_heap_ref_wellformed": return Some([0])
+        case "rt_string_bytes" | "rt_string_char_at" | "rt_string_to_int" | "rt_string_free": return Some([0])
+        case "rt_string_find" | "rt_string_rfind" | "rt_string_contains" | "rt_string_starts_with" | "rt_string_ends_with" | "rt_string_trim_start_matches" | "rt_string_trim_end_matches": return Some([0, 1])
+        case "rt_string_replace": return Some([0, 1, 2])
+        case "rt_text_is_ascii" | "rt_text_to_lower_ascii" | "rt_text_to_upper_ascii" | "rt_text_validate_utf8" | "rt_text_count_codepoints" | "rt_text_count_codepoints_cached": return Some([0])
+        case "rt_simd_str_search": return Some([0, 1])
+        # Raw-tolerant decoders: tagged matches the seed and keeps the length.
+        case "rt_string_data" | "rt_string_len" | "rt_string_byte_at" | "rt_string_char_code_at" | "rt_string_substr_from" | "rt_string_trim" | "rt_string_trim_start" | "rt_string_trim_end" | "rt_string_to_byte_array": return Some([0])
+        case "rt_file_modified" | "rt_file_modified_time" | "rt_mmap" | "rt_path_normalize" | "rt_process_output" | "rt_process_spawn_async_value": return Some([0])
+        case "rt_secure_temp_dir_set_parent" | "rt_secure_temp_dir_set_prefix" | "rt_sysctlbyname_i32" | "rt_shell" | "rt_shell_output" | "rt_term_write": return Some([0])
+        case "rt_timestamp_from_iso" | "rt_timestamp_parse" | "spl_dlopen" | "spl_dlopen_checked" | "spl_dlsym_process_checked" | "spl_dynlib_snapshot_linux" | "spl_collection_capture_begin": return Some([0])
+        case "rt_time_format" | "spl_dlsym" | "spl_dlsym_checked": return Some([1])
+        case "rt_list_dir_recursive" | "rt_file_view_open_beneath_no_follow_v1" | "rt_pinned_archive_open_beneath_v1": return Some([0, 1])
+        # Hosted HTTP client C owners (runtime_native.c) decode text args with
+        # rt_core_as_string; without these entries the pointer bridge passes raw
+        # char* via rt_interp_cstr so every native HTTP call rejects its inputs.
+        case "rt_http_get": return Some([0])
+        case "rt_http_request_v2" | "rt_http_download": return Some([0, 1])
+        case "rt_http_request": return Some([0, 1, 3])
+        case "rt_http_client_request": return Some([1, 2, 4])
+        case "spl_collection_capture_note_size" | "spl_collection_capture_note_lookup" | "spl_collection_capture_note_materialization" | "spl_collection_capture_note_hash_probe" | "spl_collection_capture_note_filter" | "spl_collection_capture_note_loop": return Some([0, 1])
+        case _: return None
+
+# Tagged-value externs that act on the operand's heap IDENTITY. Boxing a raw
+# char* for them would retain, release, free or probe a fresh copy, so their
+# operand crosses unchanged and a raw one is still rejected by the owner.
+fn tagged_text_value_arg_is_identity(func_name: text) -> bool:
+    match func_name:
+        case "rt_rc_share" | "rt_rc_retain" | "rt_rc_release" | "rt_rc_count": true
+        case "rt_string_free" | "rt_heap_ref_wellformed": true
+        case _: false
 
 export file_write_bytes_array_alias_target
+export tagged_text_value_arg_indices
+export tagged_text_value_arg_is_identity
+export runtime_tuple_result_facade

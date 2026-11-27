@@ -43,7 +43,7 @@ fn sample_macos_identity() -> NativeActionInputIdentityV1:
     file_write(MACOS_RECEIPT_ROOT + "/src/main.spl", "fn main(): 0\n")
     file_write(MACOS_RECEIPT_ROOT + "/build/tools/simple", "admitted-simple-tool\n")
     file_write(MACOS_RECEIPT_ROOT + "/sdk/SDKSettings.json", "{\"Version\":\"15.0\"}\n")
-    val tool_artifact = file_hash_sha256(MACOS_RECEIPT_ROOT + "/build/tools/simple")
+    val tool_artifact = file_hash_sha256(MACOS_RECEIPT_ROOT + "/build/tools/simple").unwrap()
     val tool_behavior = sha256_text("compiler-behavior-v1")
     val dependencies = publish_dependency_manifest_layer_v1(
         MACOS_RECEIPT_ROOT, cache_dir, "//app:main", []
@@ -51,7 +51,7 @@ fn sample_macos_identity() -> NativeActionInputIdentityV1:
     val closure = publish_imported_closure_layer_v1(
         MACOS_RECEIPT_ROOT, cache_dir, "//app:main", "src/main.spl",
         tool_behavior, dependencies, [ImportedClosureInputV1(
-            "src/main.spl", file_hash_sha256(MACOS_RECEIPT_ROOT + "/src/main.spl")
+            "src/main.spl", file_hash_sha256(MACOS_RECEIPT_ROOT + "/src/main.spl").unwrap()
         )]
     )
     val producer_abi = sha256_text("producer-abi-v1")
@@ -256,7 +256,14 @@ describe "Darwin linker policy":
     it "uses dead strip only on Darwin and excludes ELF hardening flags":
         step("Compare direct and compiler-driver flags for Darwin, Linux, and FreeBSD")
         expect(native_direct_platform_flags("darwin", "lld")).to_equal(["-dead_strip"])
-        expect(native_cc_platform_flags("Darwin")).to_equal(["-Wl,-dead_strip"])
+        val darwin_cc = native_cc_platform_flags("Darwin")
+        expect(darwin_cc[0]).to_equal("-Wl,-dead_strip")
+        if darwin_cc.len() > 1:
+            expect(darwin_cc.len()).to_equal(3)
+            expect(darwin_cc[1]).to_equal("-isysroot")
+        expect(darwin_cc.contains("-Wl,-z,relro")).to_equal(false)
+        expect(darwin_cc.contains("-Wl,-z,now")).to_equal(false)
+        expect(darwin_cc.contains("-Wl,--gc-sections")).to_equal(false)
         for os in ["linux", "freebsd"]:
             val direct = native_direct_platform_flags(os, "lld")
             val cc_os = if os == "linux": "Linux" else: "FreeBSD"

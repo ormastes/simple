@@ -1,6 +1,7 @@
 # `Bitmap.zeros(...)` call + a `u8`-typed function param in the same file breaks all `u8` resolution
 
-- **Status:** OPEN
+- **Status:** RESOLVED (verified 2026-11-25 — minimal repro passes on the
+  pinned seed; see verification note at end)
 - **Discovered:** 2026-07-20, whole-suite triage campaign
 - **Area:** compiler semantic analysis — primitive-type symbol resolution,
   interaction between `std.skia.backend.cpu.raster_prims.Bitmap` static
@@ -83,3 +84,18 @@ compiler defect triggered by this specific type combination, reproduced
 independently outside the test harness via plain `bin/simple run`. Not
 attempted here — root-causing requires reading the compiler's semantic
 analysis / symbol-table source, out of scope for a spec-only triage pass.
+
+## Verification 2026-11-25 (release/1.0.0, Windows host, pinned seed bin/simple.exe v1.0.0-rc.1)
+
+Re-ran the doc's exact minimal repro (Bitmap import + `_set_alpha(bmp: Bitmap,
+a: u8)` declaration + `Bitmap.zeros(4, 4)` call site) via
+`SIMPLE_LIB=src bin/simple.exe run`: it now compiles and prints `4`
+(`bmp.width`) with **no** `semantic: variable 'u8' not found` error. The
+compiler defect is fixed at release/1.0.0 HEAD.
+
+Limit: the named spec `test/01_unit/lib/skia/mask_filter_spec.spl` could not
+be re-run — `bin/simple.exe test` fails repo-wide at HEAD with
+`unknown decorator '@representation_boundary'` (known release/1.0.0
+seed/source inconsistency, tracked separately). The run-path repro exercises
+the same semantic-analysis defect (the doc confirmed it reproduces under both
+`run` and `test`), so closure rests on that evidence.

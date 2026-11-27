@@ -818,7 +818,12 @@ fn exec_cleanup_arm_native_dispatch_v1(
             empty_control, arming_control,
             MemoryOrdering.AcqRel, MemoryOrdering.Acquire):
         return false
-    cell.install_descriptor(dispatch.ticket)
+    # Mutate through the indexed mailbox place, not the `cell` binding: the
+    # interpreter snapshots a class element read into a local, so the text
+    # `mapping_id` written through `cell` was lost and every later outcome
+    # publish refused the descriptor (doc/08_tracking/bug/
+    # interpreter_binding_class_typed_field_snapshots_instead_of_aliasing_2026-08-10.md).
+    mailbox.cells[cell_index].install_descriptor(dispatch.ticket)
     val armed_control = _exec_cleanup_control_v1(
         dispatch.ticket.action_generation,
         _EXEC_CLEANUP_CONTROL_ARMED_V1, action)
@@ -893,11 +898,12 @@ fn exec_cleanup_publish_native_outcome_v1(
     false
 
 fn _exec_cleanup_clear_mailbox_cell_v1(
-        cell: ExecCleanupCompletionCellV1,
+        mailbox: ExecCleanupCompletionMailboxV1, cell_index: i64,
         draining_control: i64) -> bool:
     val generation = _exec_cleanup_control_generation_v1(draining_control)
-    cell.clear_descriptor()
-    cell.control.compare_exchange(
+    # Indexed place for the same reason as install_descriptor's call site.
+    mailbox.cells[cell_index].clear_descriptor()
+    mailbox.cells[cell_index].control.compare_exchange(
         draining_control,
         _exec_cleanup_control_v1(
             generation, _EXEC_CLEANUP_CONTROL_EMPTY_V1, 0),
@@ -997,7 +1003,7 @@ fn exec_cleanup_drain_native_outcomes_v1(
         if not completed.ok:
             return _exec_cleanup_native_drain_v1(
                 false, "construction-outcome-refused", state, 0, empty)
-        if not _exec_cleanup_clear_mailbox_cell_v1(cell, draining_control):
+        if not _exec_cleanup_clear_mailbox_cell_v1(mailbox, chosen, draining_control):
             return _exec_cleanup_native_drain_v1(
                 false, "native-outcome-clear-refused", state, 0, empty)
         if completed.permit_present:
@@ -1023,7 +1029,7 @@ fn exec_cleanup_drain_native_outcomes_v1(
             var retryable_slots = completed.slots
             retryable_slots[slot_index] = retryable
             completed.slots = retryable_slots
-        if not _exec_cleanup_clear_mailbox_cell_v1(cell, draining_control):
+        if not _exec_cleanup_clear_mailbox_cell_v1(mailbox, chosen, draining_control):
             return _exec_cleanup_native_drain_v1(
                 false, "native-outcome-clear-refused", state, 0, empty)
         return _exec_cleanup_native_drain_v1(
@@ -1053,7 +1059,7 @@ fn exec_cleanup_drain_native_outcomes_v1(
             MemoryOrdering.Release, MemoryOrdering.Acquire)
         return _exec_cleanup_native_drain_v1(
             false, "native-release-outcome-refused", state, 0, empty)
-    if not _exec_cleanup_clear_mailbox_cell_v1(cell, draining_control):
+    if not _exec_cleanup_clear_mailbox_cell_v1(mailbox, chosen, draining_control):
         return _exec_cleanup_native_drain_v1(
             false, "native-outcome-clear-refused", state, 0, empty)
     return _exec_cleanup_native_drain_v1(

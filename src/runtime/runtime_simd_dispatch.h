@@ -63,7 +63,12 @@ int64_t   rt_mlkem_modq_avx2_selfcheck(void);
 #endif
 
 /* x86_64 AVX2 — runtime-detected via cpuid */
-#if (defined(__x86_64__) || defined(_M_X64)) && !(defined(__clang__) && defined(_MSC_VER))
+/* SIMPLE_RUNTIME_DISABLE_AVX2 is a build-only test override that excludes
+ * AVX2 code. SIMPLE_RUNTIME_FORCE_NO_AVX2 keeps AVX2 code compiled but disables
+ * its runtime selection. */
+#if (defined(__x86_64__) || defined(_M_X64)) && \
+    !(defined(__clang__) && defined(_MSC_VER)) && \
+    !defined(SIMPLE_RUNTIME_DISABLE_AVX2)
 #  define SIMD_CAN_AVX2 1
 #else
 /* clang-cl (__clang__ AND _MSC_VER) is excluded deliberately.
@@ -233,23 +238,34 @@ static inline RtCoreStringSimd* simd_as_string(int64_t value) {
 }
 
 /* ================================================================
- * Reserved-Field Cache Bit Layout
+ * Reserved-Word Cache Bit Layout (shared contract, all runtime TUs)
  *
- *   Bits [31:30] = flags:
- *     00 = uncached
- *     01 = codepoint-count cached
- *     10 = is-ASCII (positive-only: string is all-ASCII)
- *     11 = both cached
- *   Bits [29:0]  = codepoint count (max ~1 billion)
+ * The low nibble of `reserved` is owned by RT_CORE_STRING_FLAG_*
+ * (SHARED=1, TRANSIENT=2, SESSION=4, ASCII=8), read and mutated with
+ * atomics; cache bits MUST NOT overlap them. The previous layout stored
+ * the cp count in bits [29:0], which collided with the flag bits: a
+ * cached count of 8 set the ASCII memo on a non-ASCII string, flag bits
+ * 1/2/4 corrupted the count, and a cache write (r &= ~mask) cleared the
+ * SHARED/TRANSIENT/SESSION flags. See doc/08_tracking/bug/
+ * rt_text_slice_cp_index_quadratic_scv_prime_hang_2026-11-12.md.
  *
- * Bit 31 = is-ASCII flag (set = all-ASCII; clear = unknown/non-ASCII)
- * Bit 30 = cp-count-cached flag
- * Bits [29:0] = codepoint count (meaningful only when bit 30 = 1)
+ *   Bit  3       = all-ASCII memo (== RT_CORE_STRING_FLAG_ASCII;
+ *                  positive-only: set once a scan proves all-ASCII)
+ *   Bit 30       = cp-count-valid
+ *   Bits [29:4]  = codepoint count, 26 bits (max 67,108,863 codepoints,
+ *                  ~256 MiB of 4-byte UTF-8). Strings at/above the cap
+ *                  simply never cache; they keep the pre-fix O(n) cost.
  * ================================================================ */
 
-#define SIMD_CACHE_FLAG_IS_ASCII      (1U << 31)
-#define SIMD_CACHE_FLAG_CPCOUNT_VALID (1U << 30)
-#define SIMD_CACHE_CPCOUNT_MASK       0x3FFFFFFFU  /* bits [29:0] */
+#define RT_STR_RESERVED_ASCII_MEMO    (1U << 3)
+#define RT_STR_CACHE_CP_VALID         (1U << 30)
+#define RT_STR_CACHE_CP_SHIFT         4
+#define RT_STR_CACHE_CP_FIELD         (0x3FFFFFFU << RT_STR_CACHE_CP_SHIFT)
+#define RT_STR_CACHE_CP_MAX           0x3FFFFFFU  /* 67,108,863 */
+
+/* Legacy aliases so existing call sites keep compiling with the same names. */
+#define SIMD_CACHE_FLAG_IS_ASCII      RT_STR_RESERVED_ASCII_MEMO
+#define SIMD_CACHE_FLAG_CPCOUNT_VALID RT_STR_CACHE_CP_VALID
 
 /* ================================================================
  * SimdTextDispatch — function-pointer table for text operations
@@ -269,6 +285,35 @@ typedef struct {
 extern SimdTextDispatch g_simd_text;
 
 void simd_text_init(void);
+
+/* Levelled text provider route (owner: runtime_simd_utf8.c). Text SIMD runs
+ * only inside the admitted per-CPU-level provider DSO; this binary keeps the
+ * scalar baseline. simd_text_provider_call returns 1 and stores the result
+ * when the provider ran the opcode (SIMPLE_VECTOR_TEXT_*), 0 when the caller
+ * must use its scalar path. Spans shorter than SIMD_TEXT_PROVIDER_MIN_BYTES
+ * stay scalar: the wire call costs more than the kernel saves there. */
+#define SIMD_TEXT_PROVIDER_MIN_BYTES 64u
+enum {
+    SIMD_TEXT_PROVIDER_ADMITTED = 0,
+    SIMD_TEXT_PROVIDER_NOT_CONFIGURED = 1,
+    SIMD_TEXT_PROVIDER_PATH_DENIED = 2,
+    SIMD_TEXT_PROVIDER_PIN_INVALID = 3,
+    SIMD_TEXT_PROVIDER_ARTIFACT_MISSING = 4,
+    SIMD_TEXT_PROVIDER_DIGEST_MISMATCH = 5,
+    SIMD_TEXT_PROVIDER_LOAD_FAILED = 6,
+    SIMD_TEXT_PROVIDER_DIGEST_UNSTABLE = 7,
+    SIMD_TEXT_PROVIDER_SYMBOL_MISSING = 8,
+    SIMD_TEXT_PROVIDER_QUERY_REFUSED = 9,
+    SIMD_TEXT_PROVIDER_NO_SIMD_LEVEL = 10,
+    SIMD_TEXT_PROVIDER_SELF_TEST_FAILED = 11,
+    SIMD_TEXT_PROVIDER_EXE_DIR_UNKNOWN = 12
+};
+int simd_text_provider_call(uint32_t op, const uint8_t* a, uint64_t n,
+                            const uint8_t* b, uint64_t bn, uint8_t* out,
+                            int64_t* result);
+/* Which route runs: admitted provider level (0 = scalar) and the reason. */
+int64_t simd_text_provider_level(void);
+int64_t simd_text_provider_status(void);
 
 /* ================================================================
  * SimdCryptoDispatch — function-pointer table for crypto operations

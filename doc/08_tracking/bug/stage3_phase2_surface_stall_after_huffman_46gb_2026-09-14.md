@@ -4,9 +4,36 @@
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-- Status: OPEN — root cause **localized** (Stage-2 native codegen/runtime, not
-  `src/compiler` algorithmically), exact defect not yet found. Filed as its
-  own site because the macOS chain never reached real Stage-3 compilation —
+- Status: LIVE (triaged 2026-11-11, lanes boot14/int10/int11) — **BLOCKED
+  (stage-chain probe).**
+  Root cause proven (Rust `rt_transient_heap_promote` O(N) `Vec::retain` per call); the
+  pure-Simple call-count batching mitigation **is present in-tree** (source-checked by
+  int11) and its regression spec
+  passes 4/4 (seed-smoke, boot14). Real-scale Stage-2→Stage-3 confirmation is pending (not runnable
+  on this Windows host — known native-build hang on the success path). The underlying Rust
+  data-structure defect remains LIVE (out of scope here: no cargo/rustc); owner Rust lane
+  with stage-chain confirmation grant.
+
+## Triage 2026-11-11 (lane boot14) — BLOCKED, kept OPEN
+
+Verdict: **BLOCKED** (stage-chain probe). Kept OPEN — the Rust `TransientHeapScope.objects:
+Vec<RuntimeValue>` linear-retain defect is real and out of this lane's reach (no cargo/rustc).
+
+Evidence gathered this session (seed-smoke, build-commit `46fe8f6b6def`):
+- The batching mitigation is present in-tree: `module_surface_promote_fields` collects roots
+  into one `[ModuleSurfaceRoot]` and calls `rt_transient_heap_promote` once
+  (`src/compiler/20.hir/hir_lowering/module_surface_registry.spl:566-590`); the per-commit
+  `9788f8341a8` is not in this tree by that hash but the change is (rebased/squashed).
+- Regression spec `test/01_unit/compiler/hir/module_surface_promote_field_batching_spec.spl`
+  **passes 4/4** (seed-smoke 2026-11-11), pinning calls/surface at ≤2.
+
+Exact grant command (non-Windows host) — rebuild Stage 2 with the mitigation, then run the
+real 832-surface Stage-3 closure to confirm the surface phase reaches HIR:
+```
+sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --stop-after-stage3 --mode=dynload --output=build/bootstrap
+```
+If the surface phase still stalls, the real fix must change `TransientHeapScope.objects` to a
+removable structure in `src/compiler_rust/runtime/src/value/collections.rs` (Rust lane).
   every macOS run stopped at the admission-receipt gate (site 20). This is
   the first time anyone has run the actual 832-file Stage-3 closure to
   completion or failure on either platform.
@@ -286,6 +313,25 @@ per-field and freeze-names promotes cuts calls/surface from 28 to 2 (23,296
 -> 1,664 across the real closure) without changing which values get
 promoted.
 
+## Addendum 2026-11-11 (lane int10) — LIVE concurrence; Status stays OPEN
+
+int10 re-read this record and lane boot14's same-day 2026-11-11 triage at base
+`1771ca481337` and concurs with its BLOCKED-kept-OPEN judgment: the root cause
+(Rust `rt_transient_heap_promote` O(N) `Vec::retain` per call over
+`TransientHeapScope.objects`, `src/compiler_rust/runtime/src/value/collections.rs`)
+is real, outside this lane (no cargo/rustc), and the pure-Simple batching
+mitigation (`module_surface_promote_fields` -> one `rt_transient_heap_promote`
+per surface) is present in-tree at this base
+(`src/compiler/20.hir/hir_lowering/module_surface_registry.spl:566-590`). No
+re-run of the 4/4 regression spec
+(`test/01_unit/compiler/hir/module_surface_promote_field_batching_spec.spl`):
+boot14 ran it today on this lane's exact tracked seed (`bin/simple.exe`
+build-commit `46fe8f6b6def`) — re-running would re-print a green check. The
+real-scale Stage-2 -> Stage-3 confirmation remains pending on a non-Windows
+host (known native-build hang on the success path here); the verbatim grant
+command boot14 recorded above stands. Owner: Rust lane
+(`TransientHeapScope.objects` data structure) with stage-chain confirmation.
+
 RED  `test/01_unit/compiler/hir/module_surface_promote_field_batching_spec.spl`
      4 examples, 2 failures (24 and 4 calls found; budget asserts <=2 — a
      call-count budget, not a timing bound: the interpreter stubs
@@ -310,3 +356,69 @@ run); if it is not enough, the real fix has to change
 `TransientHeapScope.objects`'s data structure in
 `src/compiler_rust/runtime/src/value/collections.rs`.
 
+## Addendum 2026-11-11 (lane int11) — header flipped LIVE; mitigation + defect site source-checked
+
+Sweep flip. boot14's same-day triage (root cause proven; batching mitigation
+in-tree; regression spec 4/4 green on the tracked seed) plus int10's LIVE
+concurrence recorded the verified disposition; the header still read OPEN.
+int11 quick re-verify at base `84f5076db138` (source checks only, no re-runs —
+boot14 ran the 4/4 spec today on this lane's exact tracked seed
+`bin/simple.exe` build `46fe8f6b6def`): the Rust defect site
+`src/compiler_rust/runtime/src/value/collections.rs` still carries the
+per-call `rt_transient_heap_promote` O(N) `Vec::retain` over
+`TransientHeapScope.objects`, and the pure-Simple batching mitigation
+(`module_surface_promote_fields`, `src/compiler/20.hir/hir_lowering/module_surface_registry.spl:566-590`)
+is present in-tree. Real-scale Stage-2→Stage-3 confirmation remains pending on
+a non-Windows host (known native-build hang on the success path); the verbatim
+grant command boot14 recorded above stands. Header flipped to LIVE, owner
+Rust lane (`TransientHeapScope.objects` data structure) with stage-chain
+confirmation.
+
+## Addendum 2026-11-11 (lane boot23) — LIVE re-confirmed; header disposition stands
+
+Concurrence with boot14/int10/int11, re-verified FRESH at this lane's base
+(`41935a5f61860`), source checks only (boot14 ran the 4/4 regression spec on
+this lane's exact tracked seed `bin/simple.exe` build `46fe8f6b6def` today;
+re-running would re-print a green check):
+
+- The Rust root cause is still present:
+  `src/compiler_rust/runtime/src/value/collections.rs:3431` still performs the
+  per-call `scope.objects.retain(|object| !promoted.contains(&object.0))` —
+  the O(N) `Vec::retain` over `TransientHeapScope.objects` per
+  `rt_transient_heap_promote` call.
+- The pure-Simple call-count batching mitigation is still present in-tree:
+  `src/compiler/20.hir/hir_lowering/module_surface_registry.spl` collects
+  roots into one `fields`/`names` array and promotes once per surface
+  (the `fields.push(ModuleSurfaceRoot.Texts(...))` shape, ~line 566-590).
+
+Disposition unchanged: **LIVE** — underlying Rust-runtime data-structure
+defect remains open (owner: Rust/seed-fix lane, `TransientHeapScope.objects`
+removable structure). Mitigation landed; real-scale Stage-2 -> Stage-3
+confirmation still pending on a non-Windows host. boot14's verbatim grant
+command stands:
+
+```
+sh scripts/bootstrap/bootstrap-from-scratch.sh --full-bootstrap --stop-after-stage3 --mode=dynload --output=build/bootstrap
+```
+
+## Triage 2026-11-13 (P3 tools lane)
+No code change this lane; the 2026-11-11 addenda (int10/int11/boot23) stand —
+LIVE, root cause confirmed in the seed (gdb backtraces on record), mitigation
+(call-count batching 9788f8341a8) landed. The remaining fix is seed-lane
+work, not a P3 tools patch; per runaway-guard rules the live concurrence is
+not re-measured here.
+
+## 2026-11-26 (Linux x86_64, Lane 1) — Rust root cause landed on `release/1.0.0`; moved to `fix-implemented-verification-pending`
+
+- Confirmed in `src/compiler_rust/runtime/src/value/collections.rs:97-193` that
+  the Rust `TransientHeapScope` O(N) `Vec::retain` defect is **already fixed** on
+  `release/1.0.0` via commits `627440328c2` ("perf(runtime): index transient scope
+  objects so promote is O(reachable)") and `7cfa794e2c2` ("perf(runtime): defer
+  Rust transient-scope compaction to scope end (BSM P0)"): `by_ptr` `HashMap`
+  index + `release_reachable()` O(reachable) tombstoning + single deferred
+  compaction at `rt_transient_array_scope_end`.
+- Confirmed `test/01_unit/compiler/hir/module_surface_promote_field_batching_spec.spl`
+  **PASS 5/5** on Linux x86_64 (`--mode=interpreter`).
+- Status updated in `bug_db.sdn` from `open` to `fix-implemented-verification-pending`:
+  full Stage-2 -> Stage-3 832-surface `bootstrap-from-scratch.sh --full-bootstrap --stop-after-stage3`
+  confirmation remains pending (cannot run `bootstrap-from-scratch.sh` here during P3a).

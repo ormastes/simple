@@ -10,6 +10,7 @@
 # drives load_sources_impl + parse_all_committing_impl directly, importing only
 # the parse lane (measured 383 modules / 0.88 GB for the lane's closure probe).
 # See doc/08_tracking/bug/memory_retention_compiler_and_interpreter_2026-08-21.md.
+use compiler.driver.cache.tldr_layout_v1.{tldr_dir_v1}
 use compiler.driver.driver_compiler_type.{CompilerDriver, compiler_driver_next_identity_v1}
 use compiler.driver.driver_types.{CompileContext}
 use compiler.common.driver_core_types.{
@@ -23,12 +24,34 @@ use compiler.common.structural_contracts.environment_variant_policy_collection_v
     EnvironmentVariantPolicyCollectionV1}
 use compiler.common.structural_contracts.environment_variant_policy_v1.{
     environment_variant_policy_resolve_v1}
+use compiler.common.structural_contracts.environment_variant_startup_port_v1.{
+    environment_variant_startup_reference_cache_identity_v2}
 use compiler.frontend.frontend_advisory_preprocess_port_v1.{
     frontend_advisory_policy_from_environment_decision_v1}
 use compiler.driver.driver_build.native_entry_closure_owner.{NativeEntryClosureRequestV1}
+use compiler.driver.driver_build.file_fiber_v1.{FileFiberEntryV1, FileFiberRunV1,
+    file_fiber_begin_v1, file_fiber_begin_tldr_async_v1,
+    file_fiber_finished_v1, file_fiber_end_v1}
+use compiler.driver.driver_build.file_fiber_tldr_bridge_v1.{FileFiberTldrBridgeErrorV1}
+use compiler.driver.driver_build.parse_fiber_claim_window_v1.{parse_fiber_claim_ring_window_v1}
+use compiler.driver.driver_source_pipeline_parsing.{driver_parse_shard_owns_v1, driver_parse_shard_strided_start_v1,
+    driver_publish_frontend_cache_scope_v1}
+use compiler.driver.driver_source_loading.{_driver_unique_physical_sources}
+use compiler.driver.driver_parse_diagnostic.{driver_parse_error_message}
+use compiler.driver.cache.module_artifacts_v1.{module_artifact_module_id_v1,
+    module_tldr_companion_path_v1, module_tldr_companion_render_sections_v1,
+    module_tldr_companion_view_sections_v1, module_artifact_publish_atomic_v1}
+use compiler.core.parser.{par_had_error_get, par_had_error_clear_v1}
+use compiler.core.types.{reset_all_pools}
+use compiler.frontend.frontend_parse_cache.{frontend_parse_cache_enabled, frontend_parse_cache_hits, frontend_parse_cache_misses}
+use compiler.driver.driver_phase_gates.{driver_streaming_surface_enabled}
+use compiler.driver.driver_hir_worker_surface_v1.{driver_hir_worker_skeleton_text_v1,
+    driver_parse_shard_skeleton_warm_v1, parse_shard_skeleton_env_v1}
+use std.nogc_sync_mut.io_runtime.{env_get}
+use compiler.driver.driver_log_helpers.{log_build_trace, build_trace_enabled}
 
 # Same slot layout as cli_native_build_add_bootstrap_input (compile_targets.spl):
-# the driver reads bootstrap_input_0..5 and bootstrap_input_count.
+# the driver reads bootstrap_input_0..6 and bootstrap_input_count.
 fn driver_options_add_bootstrap_input(options: CompileOptions, input_path: text) -> CompileOptions:
     var result = options
     val slot = result.bootstrap_input_count
@@ -44,16 +67,23 @@ fn driver_options_add_bootstrap_input(options: CompileOptions, input_path: text)
         result.bootstrap_input_4 = input_path
     elif slot == 5:
         result.bootstrap_input_5 = input_path
+    elif slot == 6:
+        result.bootstrap_input_6 = input_path
     result.bootstrap_input_count = slot + 1
     result
 
 # Runs phase 1 (load sources) and phase 2 (parse) only. In shard mode phase 2
 # exits the process itself; if it returns, the shard simply did not own any
 # module, and the caller treats that as success (sharding is best-effort).
-fn driver_parse_shard_apply_environment_variant_policy_v1(
+# reason: boolean policy-application verdict matching _driver_run_parse_shard
+@allow(primitive_api)
+pub fn driver_parse_shard_apply_environment_variant_policy_v1(
     driver: CompilerDriver, collection: EnvironmentVariantPolicyCollectionV1
 ) -> bool:
     val decision = match environment_variant_policy_resolve_v1(collection.policy_inputs):
+        case Ok(value): value
+        case Err(_): return false
+    val cache_identity: text = match environment_variant_startup_reference_cache_identity_v2(decision.policy_digest):
         case Ok(value): value
         case Err(_): return false
     driver.ctx.frontend_advisory_policy =
@@ -64,15 +94,32 @@ fn driver_parse_shard_apply_environment_variant_policy_v1(
     driver.ctx.environment_variant_frontend_owner_id = 0u64
     driver.ctx.environment_variant_frontend_session_id = 0u64
     driver.ctx.environment_variant_frontend_generation = 0u64
-    driver.ctx.environment_variant_frontend_cache_identity = decision.policy_digest
+    driver.ctx.environment_variant_frontend_cache_identity = cache_identity
     true
+
+# The admitted request was already bound to this child's --source roots
+# (native_build_closure_request_admit_v1). Hand its roots and snapshot to
+# load_sources exactly as the full build does (compile_targets.spl); without
+# them closure_source_roots falls back to [entry] and every preclosed parse
+# child fails "preclosed source root authority mismatch".
+pub fn driver_parse_child_bind_preclosed_roots_v1(options: CompileOptions,
+        preclosed: NativeEntryClosureRequestV1?) -> CompileOptions:
+    if preclosed.is_none(): return options
+    var bound = options
+    bound.native_source_roots = preclosed!.binding.source_roots
+    bound.native_source_snapshot_root = preclosed!.snapshot.snapshot_root
+    bound
 
 fn _driver_run_parse_shard(
     input_files: [text], low_memory: bool,
     collection: EnvironmentVariantPolicyCollectionV1?,
-    preclosed: NativeEntryClosureRequestV1? = nil
+    preclosed: NativeEntryClosureRequestV1? = None,
+    gc_off: bool = false, allowed_families: [text] = [], library_mode: text = ""
 ) -> bool:
     var options = driver_core_compile_options_default()
+    options.library_mode = library_mode
+    options.gc_off = gc_off
+    options.allowed_families = allowed_families
     for input in input_files:
         options = driver_options_add_bootstrap_input(options, input)
     options.input_files = input_files
@@ -81,6 +128,7 @@ fn _driver_run_parse_shard(
     options.output_format = driver_output_format_both()
     options.low_memory = low_memory
     options = compileoptions_normalize_mir_optimization(options)
+    options = driver_parse_child_bind_preclosed_roots_v1(options, preclosed)
     var driver = CompilerDriver(
         identity_id: compiler_driver_next_identity_v1(),
         ctx: CompileContext.create(options),
@@ -90,11 +138,13 @@ fn _driver_run_parse_shard(
     match collection:
         case Some(value):
             if not driver_parse_shard_apply_environment_variant_policy_v1(driver, value):
+                eprint "error: parse child: environment-variant policy could not be applied"
                 return false
         case None: ()
     val (loaded_ctx, load_ok) = driver.load_sources_impl(preclosed)
     driver.ctx = loaded_ctx
     if not load_ok:
+        _driver_parse_child_report_load_failure_v1(driver.ctx.errors)
         return false
     driver.parse_all_committing_impl()
 
@@ -104,6 +154,239 @@ fn driver_run_parse_shard(input_files: [text], low_memory: bool) -> bool:
 pub fn driver_run_parse_shard_with_environment_variant_policy_v1(
     input_files: [text], low_memory: bool,
     collection: EnvironmentVariantPolicyCollectionV1,
-    preclosed: NativeEntryClosureRequestV1? = nil
+    preclosed: NativeEntryClosureRequestV1? = None,
+    gc_off: bool = false, allowed_families: [text] = [], library_mode: text = ""
 ) -> bool:
-    _driver_run_parse_shard(input_files, low_memory, Some(collection), preclosed)
+    _driver_run_parse_shard(input_files, low_memory, Some(collection), preclosed, gc_off, allowed_families, library_mode)
+
+# ----- --parse-fibers=i/n child ------------------------------------------------
+# Same driver construction and source load as the parse shard above, then one
+# FileFiber per claimed source (claim queue shared with --parse-shard): the
+# fiber carries the pre-read content, the HOST does the one parse through the
+# driver's own parse_full_frontend_selected_v1 (identical parse-cache keys to
+# the real build), the TLDR is rendered from the just-parsed module, and a
+# fiber parks only on imports produced in this child. Design:
+# doc/05_design/compiler/incremental_build/build_runner_fiber_scheduler_v1.md §9.
+
+# Module keys produced by THIS child: imports outside it are skipped, never
+# filled (another child owns them; cross-child waits need the cache daemon).
+var _g_parse_fiber_keys: Dict<text, bool> = {}
+val _FILE_FIBER_TLDR_ASYNC_KEY_CAPACITY: i64 = 4096
+val _FILE_FIBER_TLDR_ASYNC_WAITER_CAPACITY: i64 = 65536
+
+fn _driver_parse_fiber_import_key(path: text) -> text:
+    var p = path
+    val brace = p.index_of(".{")
+    if brace > 0: p = p.substring(0, brace)
+    if p.ends_with(".*"): p = p.substring(0, p.byte_len() - 2)
+    val space = p.index_of(" ")
+    if space > 0: p = p.substring(0, space)
+    if _g_parse_fiber_keys.contains_key(p): return p
+    val dot = p.rfind(".")
+    if dot > 0 and _g_parse_fiber_keys.contains_key(p.substring(0, dot)):
+        return p.substring(0, dot)
+    ""
+
+fn driver_parse_fiber_imports_v1(source: text) -> [text]:
+    var out: [text] = []
+    for line in source.split("\n"):
+        val t = line.trim()
+        var rest = ""
+        if t.starts_with("use "): rest = t.substring(4, t.byte_len())
+        elif t.starts_with("export use "): rest = t.substring(11, t.byte_len())
+        if rest != "":
+            val key = _driver_parse_fiber_import_key(rest.trim())
+            if key != "": out = out.push(key)
+    out
+
+fn _driver_parse_fiber_budget_bytes() -> i64:
+    val mb = env_get("SIMPLE_PARSE_FIBER_BUDGET_MB").to_i64() ?? 0
+    if mb > 0: mb * 1048576 else: 2048 * 1048576
+
+fn _driver_parse_fiber_begin_v1(entries: [FileFiberEntryV1], budget: i64,
+        driver_identity: i64, window_ordinal: i64) -> Result<FileFiberRunV1, FileFiberTldrBridgeErrorV1>:
+    if env_get("SIMPLE_FILE_TLDR_ASYNC") != "1":
+        return Ok(file_fiber_begin_v1(entries, [0], budget))
+    if (driver_identity <= 0 or driver_identity > 4294967295 or
+        window_ordinal <= 0 or window_ordinal > 4294967295):
+        return Err(FileFiberTldrBridgeErrorV1.Capacity)
+    val owner_id = driver_identity.to_u64()
+    val ring_id = (owner_id << 32) | window_ordinal.to_u64()
+    file_fiber_begin_tldr_async_v1(entries, [0], budget,
+        _FILE_FIBER_TLDR_ASYNC_KEY_CAPACITY,
+        _FILE_FIBER_TLDR_ASYNC_WAITER_CAPACITY, ring_id, owner_id)
+
+fn _driver_run_parse_fibers(
+    input_files: [text], low_memory: bool,
+    collection: EnvironmentVariantPolicyCollectionV1?,
+    preclosed: NativeEntryClosureRequestV1? = None,
+    gc_off: bool = false, allowed_families: [text] = [], library_mode: text = ""
+) -> bool:
+    var options = driver_core_compile_options_default()
+    options.library_mode = library_mode
+    options.gc_off = gc_off
+    options.allowed_families = allowed_families
+    for input in input_files:
+        options = driver_options_add_bootstrap_input(options, input)
+    options.input_files = input_files
+    options.mode = CompileMode.Aot
+    options.cli_mode_text = "aot"
+    options.output_format = driver_output_format_both()
+    options.low_memory = low_memory
+    options = compileoptions_normalize_mir_optimization(options)
+    options = driver_parse_child_bind_preclosed_roots_v1(options, preclosed)
+    var driver = CompilerDriver(
+        identity_id: compiler_driver_next_identity_v1(),
+        ctx: CompileContext.create(options),
+        streaming_module_surfaces_owner: ModuleSurfacesByName.empty(),
+        streaming_surface_owner_ready: false,
+        streaming_entry_source_index_owner: -1)
+    match collection:
+        case Some(value):
+            if not driver_parse_shard_apply_environment_variant_policy_v1(driver, value):
+                eprint "error: parse child: environment-variant policy could not be applied"
+                return false
+        case None: ()
+    val (loaded_ctx, load_ok) = driver.load_sources_impl(preclosed)
+    driver.ctx = loaded_ctx
+    if not load_ok:
+        _driver_parse_child_report_load_failure_v1(driver.ctx.errors)
+        return false
+    val _scope = driver_publish_frontend_cache_scope_v1(driver.ctx)
+    val tldr_root = env_get("SIMPLE_FRONTEND_CACHE_DIR")
+    val tldr_dir = if tldr_root != "": tldr_dir_v1(tldr_root) else: ""
+    # Claim only a bounded window before doing useful work. Claiming the whole
+    # closure here let the first child reserve every module before peers had
+    # finished source loading (3024/3024 versus zero in six other children).
+    # Imports outside the current window are treated exactly like imports
+    # owned by another child: parse cache warming never waits across owners.
+    val sources = _driver_unique_physical_sources(driver.ctx.sources)
+    var paths: [text] = []
+    for source in sources:
+        paths.push(source.path)
+    val ring_offset = driver_parse_shard_strided_start_v1(sources.len())
+    var source_index = 0
+    var claimed = 0
+    var parsed = 0
+    var done = 0
+    var import_parks = 0
+    var errors = 0
+    var window_ordinal = 0
+    # Streaming HIR workers reuse the warm full-source frontend cache entry
+    # directly inside their per-file transient surface scope, so only retained
+    # non-streaming routes need a separate skeleton cache entry warmed here.
+    val streaming_reuses_full_fpc = driver_streaming_surface_enabled(driver.ctx) and frontend_parse_cache_enabled()
+    val warm_skeletons = (not streaming_reuses_full_fpc) and
+        driver_parse_shard_skeleton_warm_v1(env_get(parse_shard_skeleton_env_v1()) ?? "",
+            env_get("SIMPLE_HIR_WORKER_SKELETON") ?? "")
+    var skeletons = 0
+    var skeleton_failures = 0
+    while source_index < sources.len():
+        var entries: [FileFiberEntryV1] = []
+        _g_parse_fiber_keys = {}
+        val window = parse_fiber_claim_ring_window_v1(paths, ring_offset, source_index, driver_parse_shard_owns_v1)
+        source_index = window.next_index
+        for i in window.indices:
+            val source = sources[i]
+            entries = entries.push(FileFiberEntryV1(module_key: source.module_name, path: source.path,
+                est_bytes: source.content.len() * 64, content: source.content))
+            _g_parse_fiber_keys[source.module_name] = true
+        if entries.len() == 0: continue
+        claimed = claimed + entries.len()
+        window_ordinal = window_ordinal + 1
+        var run: FileFiberRunV1 = match _driver_parse_fiber_begin_v1(entries,
+                _driver_parse_fiber_budget_bytes(), driver.identity_id, window_ordinal):
+            case Ok(value): value
+            case Err(error):
+                eprint "error: FileFiber TLDR async mode refused: {error}"
+                return false
+        while not file_fiber_finished_v1(run):
+            run.advance(driver_parse_fiber_imports_v1)
+            for i in run.take_parse_requests():
+                val e: FileFiberEntryV1 = run.entries[i]
+                if build_trace_enabled():
+                    log_build_trace("parse-fibers:file:start n={parsed} path={e.path} bytes={e.content.len()}")
+                val selected = driver.parse_full_frontend_selected_v1(e.content, e.path, e.module_key)
+                if selected.is_err():
+                    run.parse_done(i, "", selected.unwrap_err())
+                elif par_had_error_get():
+                    run.parse_done(i, "", driver_parse_error_message(e.path))
+                else:
+                    parsed = parsed + 1
+                    val module_id = module_artifact_module_id_v1(e.path)
+                    # The AOT parse above ran in a per-file transient scope that has
+                    # already ended: the flat type/span pools reset inside it (spans,
+                    # named-type fields/modules, ...) are not promoted and now name
+                    # reclaimed storage. The public-summary projection below runs a
+                    # second low-level parse that pushes into those same globals
+                    # (parser_init_with_path does not reset them) -- an access
+                    # violation in flat_span_new / named_type_register on Windows.
+                    # The TLDR view reads only the ParserModule and the source, and
+                    # the next file's parse resets the pools again inside its own
+                    # scope, so give the summary parse fresh process-lived pools.
+                    if build_trace_enabled():
+                        log_build_trace("parse-fibers:file:parsed n={parsed} path={e.path}")
+                    reset_all_pools()
+                    val (sections, _refusal) = module_tldr_companion_view_sections_v1(selected.unwrap(),
+                        e.path, e.content, module_id)
+                    val tldr = module_tldr_companion_render_sections_v1(module_id, e.content, sections)
+                    if tldr_dir != "":
+                        val _published = module_artifact_publish_atomic_v1(
+                            module_tldr_companion_path_v1(tldr_dir, e.path), tldr)
+                    if build_trace_enabled():
+                        log_build_trace("parse-fibers:file:tldr-done n={parsed} path={e.path}")
+                    run.parse_done(i, tldr, "")
+                    # HIR shard workers parse the SKELETON of every module
+                    # (driver_surface_parse_text_v1), a different cache key from
+                    # the full source above, so without this every worker
+                    # re-parsed ~2,300 skeletons (cli-f25: 1,540-2,444 misses per
+                    # worker). Warm that key too, through the same selected parse,
+                    # after this module is already done: a skeleton Err is only a
+                    # later worker miss, never a failed full-source store. A
+                    # transient-scope panic inside the parse still kills the child;
+                    # the orphan reclaim in run_parse_shards_with_base reruns it.
+                    if warm_skeletons:
+                        val skeleton = driver_hir_worker_skeleton_text_v1(e.content)
+                        if skeleton != e.content:
+                            val warmed = driver.parse_full_frontend_selected_v1(skeleton, e.path, e.module_key)
+                            if warmed.is_ok() and not par_had_error_get():
+                                skeletons = skeletons + 1
+                            else:
+                                skeleton_failures = skeleton_failures + 1
+                            par_had_error_clear_v1()
+        file_fiber_end_v1(run)
+        if run.close_error != "":
+            eprint "error: parse child: FileFiber scope remains open: {run.close_error}"
+            errors = errors + 1
+        done = done + run.done_order.len()
+        import_parks = import_parks + run.dep_parks
+        var ei = 0
+        while ei < run.error.len():
+            val err = run.error[ei]
+            if err != "":
+                val err_entry: FileFiberEntryV1 = run.entries[ei]
+                if errors < 5: eprint "error: parse fiber {err_entry.path}: {err}"
+                errors = errors + 1
+            ei = ei + 1
+    _g_parse_fiber_keys = {}
+    print "[parse-fibers] files={claimed} parsed={parsed} done={done} errors={errors} import_parks={import_parks} cache_hits={frontend_parse_cache_hits()} cache_misses={frontend_parse_cache_misses()} skeletons={skeletons} skeleton_failures={skeleton_failures}"
+    # This result controls the parse-shard child's exit status.
+    errors == 0
+
+pub fn driver_run_parse_fibers_with_environment_variant_policy_v1(
+    input_files: [text], low_memory: bool,
+    collection: EnvironmentVariantPolicyCollectionV1,
+    preclosed: NativeEntryClosureRequestV1? = None,
+    gc_off: bool = false, allowed_families: [text] = [], library_mode: text = ""
+) -> bool:
+    _driver_run_parse_fibers(input_files, low_memory, Some(collection), preclosed, gc_off, allowed_families, library_mode)
+
+# A parse child that fails source loading used to exit 1 with no output (the
+# coordinator only saw `FAILED exit=1`). Name the failure and its first errors.
+fn _driver_parse_child_report_load_failure_v1(errors: [text]):
+    eprint "error: parse child: source load failed ({errors.len()} error(s))"
+    var shown = 0
+    for message in errors:
+        if shown < 5:
+            eprint "  {message}"
+            shown = shown + 1

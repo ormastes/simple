@@ -1,0 +1,191 @@
+# Portable sandbox capability contract (design simple_container_macos_seatbelt §7.1, §6.3, §18.2).
+#
+# Value-only. A provider leaf owns probing; this module only names what a
+# policy REQUIRES and what a provider has OBSERVED, so admission can refuse
+# before any effect. An observed value is not permission to launch: an
+# `Unqualified` observation, or one missing a required guarantee, always
+# refuses. No field here is a boolean "secure" flag.
+
+use std.common.contracts.container.filesystem_policy_v1.{FilesystemPolicyV1}
+use std.common.contracts.container.endpoint_policy_v1.{EndpointPolicyV1, EndpointLimitsV1}
+
+# ---- SCMAC diagnostic codes (§18.2) ----
+#
+# Reconciled 2026-11-13: no SCMAC-* rows existed in any repo registry, and the
+# container contracts otherwise use plain text reason tokens. These constants
+# are the single owner of the codes; SCMAC-SCHEMA-001 is added for strict SDN
+# decode refusals (§13.5), which §18.2 left unnamed.
+pub const SCMAC_SCHEMA_001 = "SCMAC-SCHEMA-001"
+pub const SCMAC_PLATFORM_001 = "SCMAC-PLATFORM-001"
+pub const SCMAC_ADMIT_001 = "SCMAC-ADMIT-001"
+pub const SCMAC_ADMIT_002 = "SCMAC-ADMIT-002"
+pub const SCMAC_SANDBOX_001 = "SCMAC-SANDBOX-001"
+pub const SCMAC_FS_001 = "SCMAC-FS-001"
+pub const SCMAC_FS_002 = "SCMAC-FS-002"
+pub const SCMAC_NET_001 = "SCMAC-NET-001"
+pub const SCMAC_NET_002 = "SCMAC-NET-002"
+pub const SCMAC_NET_003 = "SCMAC-NET-003"
+pub const SCMAC_NET_004 = "SCMAC-NET-004"
+pub const SCMAC_NET_005 = "SCMAC-NET-005"
+pub const SCMAC_RESOURCE_001 = "SCMAC-RESOURCE-001"
+pub const SCMAC_OWNER_001 = "SCMAC-OWNER-001"
+pub const SCMAC_IPC_001 = "SCMAC-IPC-001"
+pub const SCMAC_STREAM_001 = "SCMAC-STREAM-001"
+
+pub fn scmac_codes_v1() -> [text]:
+    [SCMAC_SCHEMA_001, SCMAC_PLATFORM_001, SCMAC_ADMIT_001, SCMAC_ADMIT_002,
+     SCMAC_SANDBOX_001, SCMAC_FS_001, SCMAC_FS_002, SCMAC_NET_001, SCMAC_NET_002,
+     SCMAC_NET_003, SCMAC_NET_004, SCMAC_NET_005, SCMAC_RESOURCE_001,
+     SCMAC_OWNER_001, SCMAC_IPC_001, SCMAC_STREAM_001]
+
+# ---- guarantees (ordered weakest -> strongest) ----
+
+pub enum SandboxFileGuaranteeV1:
+    NoFileGuarantee
+    PathAccessPolicy
+
+pub enum SandboxNetworkGuaranteeV1:
+    NoNetworkGuarantee
+    DirectDenied
+    DirectDeniedBrokered
+
+pub enum SandboxProcessGuaranteeV1:
+    LeaderOnly
+    ProcessGroup
+    StrictDescendantContainment
+
+pub enum SandboxCleanupGuaranteeV1:
+    NoCleanupGuarantee
+    LeaderAbsence
+    QualifiedTreeAbsence
+
+pub fn sandbox_file_rank_v1(g: SandboxFileGuaranteeV1) -> i64:
+    match g:
+        SandboxFileGuaranteeV1.NoFileGuarantee: 0
+        SandboxFileGuaranteeV1.PathAccessPolicy: 1
+
+pub fn sandbox_network_rank_v1(g: SandboxNetworkGuaranteeV1) -> i64:
+    match g:
+        SandboxNetworkGuaranteeV1.NoNetworkGuarantee: 0
+        SandboxNetworkGuaranteeV1.DirectDenied: 1
+        SandboxNetworkGuaranteeV1.DirectDeniedBrokered: 2
+
+pub fn sandbox_process_rank_v1(g: SandboxProcessGuaranteeV1) -> i64:
+    match g:
+        SandboxProcessGuaranteeV1.LeaderOnly: 0
+        SandboxProcessGuaranteeV1.ProcessGroup: 1
+        SandboxProcessGuaranteeV1.StrictDescendantContainment: 2
+
+pub fn sandbox_cleanup_rank_v1(g: SandboxCleanupGuaranteeV1) -> i64:
+    match g:
+        SandboxCleanupGuaranteeV1.NoCleanupGuarantee: 0
+        SandboxCleanupGuaranteeV1.LeaderAbsence: 1
+        SandboxCleanupGuaranteeV1.QualifiedTreeAbsence: 2
+
+# Precise file/network/process/cleanup guarantees (§7.1). Used both for what
+# a named evidence profile requires and for what a provider observed.
+pub struct SandboxEvidenceProfileV1:
+    name: text
+    file: SandboxFileGuaranteeV1
+    network: SandboxNetworkGuaranteeV1
+    process: SandboxProcessGuaranteeV1
+    cleanup: SandboxCleanupGuaranteeV1
+
+pub const SANDBOX_EVIDENCE_STRICT_OWNED_ATTEMPT_V1 = "strict-owned-attempt-v1"
+pub const SANDBOX_EVIDENCE_FINITE_PARENT_OWNED_V1 = "finite-parent-owned-v1"
+
+pub fn sandbox_evidence_profile_names_v1() -> [text]:
+    [SANDBOX_EVIDENCE_STRICT_OWNED_ATTEMPT_V1, SANDBOX_EVIDENCE_FINITE_PARENT_OWNED_V1]
+
+# Requirement implied by a named profile. Unknown names are refused by the
+# caller before reaching here (Err), never mapped to a weaker default.
+pub fn sandbox_evidence_profile_v1(name: text) -> Result<SandboxEvidenceProfileV1, text>:
+    if name == SANDBOX_EVIDENCE_STRICT_OWNED_ATTEMPT_V1:
+        return Ok(SandboxEvidenceProfileV1(name: name,
+            file: SandboxFileGuaranteeV1.PathAccessPolicy,
+            network: SandboxNetworkGuaranteeV1.DirectDeniedBrokered,
+            process: SandboxProcessGuaranteeV1.StrictDescendantContainment,
+            cleanup: SandboxCleanupGuaranteeV1.QualifiedTreeAbsence))
+    if name == SANDBOX_EVIDENCE_FINITE_PARENT_OWNED_V1:
+        return Ok(SandboxEvidenceProfileV1(name: name,
+            file: SandboxFileGuaranteeV1.PathAccessPolicy,
+            network: SandboxNetworkGuaranteeV1.DirectDenied,
+            process: SandboxProcessGuaranteeV1.ProcessGroup,
+            cleanup: SandboxCleanupGuaranteeV1.LeaderAbsence))
+    Err("sandbox-evidence-profile-unknown")
+
+# ---- observation ----
+
+pub enum SandboxSupportV1:
+    Unsupported
+    Qualified
+
+pub fn sandbox_support_qualified_v1(s: SandboxSupportV1) -> bool:
+    match s:
+        SandboxSupportV1.Unsupported: false
+        SandboxSupportV1.Qualified: true
+
+# `Qualified` carries the evidence reference recorded by a real-host run;
+# `Unqualified` carries the reason. A host with no native evidence (every
+# non-mac host, and a Mac before qualification) reports Unqualified.
+pub enum SandboxQualificationV1:
+    Unqualified(text)
+    Qualified(text)
+
+pub struct SandboxObservedCapabilityV1:
+    backend: text
+    engine: text
+    host_os: text
+    architecture: text
+    qualification: SandboxQualificationV1
+    guarantees: SandboxEvidenceProfileV1
+    network_profiles: [text]
+    direct_ip: SandboxSupportV1
+    host_listen: SandboxSupportV1
+    udp: SandboxSupportV1
+    hard_memory_limit: SandboxSupportV1
+    hard_cpu_limit: SandboxSupportV1
+
+# Fail-closed observation for a host with no native evidence for `backend`.
+pub fn sandbox_observed_unqualified_v1(backend: text, engine: text, host_os: text,
+                                       architecture: text, reason: text) -> SandboxObservedCapabilityV1:
+    SandboxObservedCapabilityV1(backend: backend, engine: engine, host_os: host_os,
+        architecture: architecture, qualification: SandboxQualificationV1.Unqualified(reason),
+        guarantees: SandboxEvidenceProfileV1(name: "observed",
+            file: SandboxFileGuaranteeV1.NoFileGuarantee,
+            network: SandboxNetworkGuaranteeV1.NoNetworkGuarantee,
+            process: SandboxProcessGuaranteeV1.LeaderOnly,
+            cleanup: SandboxCleanupGuaranteeV1.NoCleanupGuarantee),
+        network_profiles: [], direct_ip: SandboxSupportV1.Unsupported,
+        host_listen: SandboxSupportV1.Unsupported, udp: SandboxSupportV1.Unsupported,
+        hard_memory_limit: SandboxSupportV1.Unsupported, hard_cpu_limit: SandboxSupportV1.Unsupported)
+
+# ---- validated policy (schema simple-container-seatbelt-policy-v1) ----
+
+pub const SANDBOX_POLICY_SCHEMA_V1 = "simple-container-seatbelt-policy-v1"
+pub const SANDBOX_BACKEND_MACOS_SEATBELT_V1 = "macos-seatbelt-process"
+
+# A hard resource requirement. `NotRequired` is the explicit absence; a
+# `Required` value is refused unless the provider QUALIFIES enforcement
+# (monitored usage is not enforcement, §17.3).
+pub enum SandboxHardLimitV1:
+    NotRequired
+    Required(i64)
+
+pub enum SandboxOnUnknownV1:
+    Quarantine
+    Retain
+
+pub struct SandboxPolicyV1:
+    name: text
+    backend: text
+    execution_os: text
+    isolation: text
+    evidence: SandboxEvidenceProfileV1
+    filesystem: FilesystemPolicyV1
+    network: EndpointPolicyV1
+    limits: EndpointLimitsV1
+    hard_memory: SandboxHardLimitV1
+    hard_cpu: SandboxHardLimitV1
+    require_qualified_absence: bool
+    on_unknown: SandboxOnUnknownV1

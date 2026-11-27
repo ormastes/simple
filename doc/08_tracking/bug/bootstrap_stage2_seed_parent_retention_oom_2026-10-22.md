@@ -94,3 +94,64 @@ SIMPLE_BOOTSTRAP_RSS_CAP_MODE=monitor SIMPLE_NATIVE_FILE_TIMEOUT=1200 # same, la
   linked by the bootstrap's own stage2 failure warning.
 - Parallel lane docs: PR #4124 (`zero-sources` Windows repro), PR #4126
   (actual candidate read path is `rt_file_read_text`).
+
+## 2026-11-13 addendum: stage2-CANDIDATE (pure Simple) SCV surface phase retains far more, far earlier than the seed parent
+
+Lane: work/release-1.0.0-mcp-local, MSVC (`--msvc --full-bootstrap
+--stop-after-stage2 --mode=dynload --jobs=2`), tips 79201709202 (cycles 9-11)
+and 9f00edbbaaf (cycle 12). Host: DESKTOP-VMF96U6, Windows 11, 64 GiB RAM,
+Hyper-V dynamic-memory guest (see also
+windows_balloon_memory_headroom_false_refusal_2026-11-13.md for the
+AvailPhys side story on the same host).
+
+The seed parent retention above is NOT the binding constraint on this host.
+The stage-2 compiler-TESTS campaign (phase verification, profile=slim) fails
+earlier and larger:
+
+1. The main seed->stage2 native build COMPLETES under a 48 GiB tree cap
+   (1657 modules, ~28 MiB/module seed retention fits).
+2. The stage2-compiler-tests campaign then dies on the FIRST tool row
+   (compiler_cli_build), still inside its phase-2 SCV surface scan:
+   - cycle 9 (cap 36 GiB): peak 36.04 GiB, ~40 min, samples=24030
+   - cycle 10 (cap 45 GiB): peak 45.17 GiB, ~20 min, samples=11953
+   - cycle 11 (cap 48 GiB hard ceiling): peak 50.34 GiB, ~58 min,
+     samples=34992, killed mid-surface-scan at seq=271 of the per-file
+     `phase2:surface:file:parse-start/parse-done/surface-done/promote-done/
+     commit-done/released` cycle (row log:
+     stage2-compiler-tests/x86_64-pc-windows-msvc/verification/logs/
+     compiler_cli_build.log — the whole 361 KB log is ONLY this phase).
+3. Rate: 271 files / ~58 min ~= 13 s/file for the surface scan alone in the
+   pure-Simple candidate. At that rate the surface phase of a ~1300-file
+   closure cannot finish inside any campaign timeout even with unlimited RSS
+   (the rows already run SIMPLE_PARSE_SHARD_MAX=1: the pinned frontend does
+   all parse/HIR in the row parent, so the retention accumulates in ONE
+   process and nothing is spilled).
+4. The 48 GiB static ceiling (tree-rss-policy.shs
+   BOOTSTRAP_TREE_RSS_STATIC_CEILING_KIB, "sixth widening 2026-10-16: 48 GiB
+   measures the true plateau") now UNDER-measures the plateau: the merged
+   tree's surface phase alone exceeds 50 GiB. The elevated-ceiling ratchet
+   (SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB) is unreachable on this host:
+   it demands requested > previous (50331648) AND requested <= 3/4 host RAM
+   (50148945) — an empty range.
+
+Owner asks for the compiler lanes working the interface-closure / SCV
+surface and HIR-decode areas:
+
+- Stream or bound the phase-2 surface model per promoted file (the per-file
+  "released" marker exists but RSS grows ~190 MiB per processed file across
+  the phase — either the release is ineffective or the aggregate surface
+  model legitimately holds everything).
+- Explain/mitigate the 13 s/file surface-scan cost on the self-hosted
+  candidate (warm SCV snapshot, warm HIR caches did not help; cycles 9-11
+  shared one compiler sha so row caches were warm).
+- Until then the MSVC stage2 slim verification matrix cannot pass on 64 GiB
+  hosts, which blocks stage3/stage4 resume and the downstream MCP lane on
+  this machine class.
+
+Mitigations already applied and VERIFIED working on this lane (not the
+blocker): SIMPLE_BUILD_MEMORY_RESERVE_BYTES + host mem_reserve_free_mib
+(balloon false-refusal, #8931), SIMPLE_BUILD_MEMORY_RESERVE_BYTES /
+SIMPLE_HOST_CONFIG excluded from module cache identity (#8948, cycle 10
+reused 1655/1657 objects), explicit tree cap via
+SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_KIB (accepted up to the ceiling),
+SIMPLE_NATIVE_FILE_TIMEOUT=1200 (worker-timeout class).

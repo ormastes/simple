@@ -62,11 +62,74 @@ mod tests {
         );
     }
 
+    /// A generated module passed as `--source <gendir>` and imported by bare
+    /// name (`use rv64_auth_trust_config.{...}`) from a file in another root
+    /// must resolve: discovery already finds it via the source-root fallback,
+    /// so the resolver rejecting it (E1034) broke the riscv64 kernel build.
+    #[test]
+    fn single_segment_import_resolves_from_extra_source_root() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src = dir.path().join("src");
+        let gen = dir.path().join("gen");
+        fs::create_dir_all(src.join("os/loader")).unwrap();
+        fs::create_dir_all(&gen).unwrap();
+        let importer = src.join("os/loader/fixture.spl");
+        fs::write(&importer, "use trust_cfg.{key}\n").unwrap();
+        fs::write(gen.join("trust_cfg.spl"), "pub fn key() -> text: \"k\"\n").unwrap();
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone())
+            .with_extra_source_roots(vec![gen.clone()]);
+        let path = ModulePath::new(vec!["trust_cfg".to_string()]);
+        let resolved = resolver.resolve(&path, &importer).expect("bare generated import");
+        assert_eq!(resolved.path, gen.join("trust_cfg.spl"));
+    }
+
+    /// Bare names do NOT bind to top-level packages of the main source root
+    /// (`use app` stays unresolved; only extra `--source` roots are searched).
+    #[test]
+    fn single_segment_import_ignores_main_source_root_packages() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src = dir.path().join("src");
+        fs::create_dir_all(src.join("os")).unwrap();
+        fs::create_dir_all(src.join("app")).unwrap();
+        fs::write(src.join("app/__init__.spl"), "").unwrap();
+        let importer = src.join("os/a.spl");
+        fs::write(&importer, "use app\n").unwrap();
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone());
+        let path = ModulePath::new(vec!["app".to_string()]);
+        assert!(resolver.resolve(&path, &importer).is_err());
+    }
+
+    /// The importer's own directory still wins over a source root.
+    #[test]
+    fn single_segment_import_prefers_importer_directory() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let src = dir.path().join("src");
+        let gen = dir.path().join("gen");
+        fs::create_dir_all(src.join("os")).unwrap();
+        fs::create_dir_all(&gen).unwrap();
+        let importer = src.join("os/a.spl");
+        fs::write(&importer, "use b.{x}\n").unwrap();
+        fs::write(src.join("os/b.spl"), "pub fn x() -> i64: 1\n").unwrap();
+        fs::write(gen.join("b.spl"), "pub fn x() -> i64: 2\n").unwrap();
+        let resolver = ModuleResolver::new(dir.path().to_path_buf(), src.clone())
+            .with_extra_source_roots(vec![gen]);
+        let path = ModulePath::new(vec!["b".to_string()]);
+        let resolved = resolver.resolve(&path, &importer).expect("sibling import");
+        assert_eq!(resolved.path, src.join("os/b.spl"));
+    }
+
     #[test]
     fn test_single_file_mode() {
-        let resolver = ModuleResolver::single_file(Path::new("/tmp/test.spl"));
-        assert_eq!(resolver.project_root(), Path::new("/tmp"));
-        assert_eq!(resolver.source_root(), Path::new("/tmp"));
+        // Platform-portable: a hardcoded Unix-absolute path such as
+        // `/tmp/test.spl` is NOT `is_absolute()` on Windows (no drive prefix),
+        // so `normalize_input_path` re-anchors it and the old `/tmp` expectation
+        // failed on Windows. Use a real tempdir (like the sibling single-file
+        // tests) so the asserted parent is correct on every host.
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("test.spl");
+        let resolver = ModuleResolver::single_file(&file);
+        assert_eq!(resolver.project_root(), dir.path());
+        assert_eq!(resolver.source_root(), dir.path());
     }
 
     #[test]
@@ -303,6 +366,37 @@ mod tests {
         let resolved = resolver.resolve(&path, &src.join("compiler/main.spl")).unwrap();
 
         assert_eq!(resolved.path, native.join("mach_inst.spl"));
+    }
+
+    /// `use test.fixtures.x` names the WORKSPACE's `test/` tree. A spec below
+    /// a directory that itself contains a `src` folder (the test tree mirrors
+    /// `src/lib/nogc_async_mut/src` as `test/01_unit/lib/nogc_async_mut/src`)
+    /// gets that directory as its detected project root, where `test/` does
+    /// not exist. The top-level lookup must then try the enclosing roots:
+    /// the import was reported as `module path segment `test` not found`, a
+    /// hard error on the JIT lane, and the spec executed 0 examples.
+    #[test]
+    fn test_resolve_project_namespace_through_an_enclosing_root() {
+        let dir = create_test_project();
+        let fixtures = dir.path().join("test").join("fixtures").join("orchestration");
+        fs::create_dir_all(&fixtures).unwrap();
+        fs::write(fixtures.join("adapter_fixture.spl"), "fn fixture(): 0").unwrap();
+        // The nested "project": a test directory that mirrors a `src` folder.
+        let nested = dir.path().join("test").join("01_unit").join("lib").join("nogc_async_mut");
+        fs::create_dir_all(nested.join("src")).unwrap();
+        let spec_dir = nested.join("container");
+        fs::create_dir_all(&spec_dir).unwrap();
+
+        let resolver = ModuleResolver::new(nested.clone(), nested.join("src"));
+        let path = ModulePath::new(vec![
+            "test".into(),
+            "fixtures".into(),
+            "orchestration".into(),
+            "adapter_fixture".into(),
+        ]);
+        let resolved = resolver.resolve(&path, &spec_dir.join("codec_spec.spl")).unwrap();
+
+        assert_eq!(resolved.path, fixtures.join("adapter_fixture.spl"));
     }
 
     #[test]

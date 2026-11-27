@@ -1,0 +1,57 @@
+# @cover src/compiler/35.semantics/perf/collection_static_select_v1.spl
+# @req REQ-PROF-01
+"""
+# Static container selection from SDN `data_policy.rules` (B1)
+
+One entry point composes the existing W1 pieces (SDN rule loader ->
+`resolved_collection_policy_for_site_v1` -> `collection_policy_decide_v1` ->
+`collection_policy_apply_*_v1`) at a container creation site. Default OFF: an
+empty SDN source returns the container untouched.
+"""
+use std.spec.*
+use std.nogc_sync_mut.src.collections.adaptive_text_set.{AdaptiveSetAlgorithm, AdaptiveSetAttribute}
+use std.nogc_sync_mut.src.collections.adaptive_map.AdaptiveMap
+use std.nogc_sync_mut.src.collections.adaptive_set.AdaptiveSet
+use compiler.semantics.perf_facts.collection_contracts.{CollectionOriginV1, CollectionCreationKind}
+use compiler.semantics.perf.collection_static_select_v1.*
+
+fn site_origin() -> CollectionOriginV1:
+    CollectionOriginV1(legacy_site_id: "ast://compiler/resolve#symbols#1", module_key: "compiler.resolve",
+        owner_path: "resolve", binding_name: "symbols", creation_kind: CollectionCreationKind.Local,
+        token_fingerprint: "tok-v1-fnv64:1", type_fingerprint: "ctype-fnv64:2", origin_id: "corigin-v1:77")
+
+fn sdn_for(site: text, algorithm: text) -> text:
+    "data_policy:\n    rules:\n        symbols:\n            site: \"{site}\"\n            algorithm: \"{algorithm}\"\n            pin: true\n"
+
+fn attr_name(attribute: AdaptiveSetAttribute) -> text:
+    match attribute:
+        case AdaptiveSetAttribute.Auto: "auto"
+        case AdaptiveSetAttribute.Linear: "linear"
+        case AdaptiveSetAttribute.Hash: "hash"
+        case AdaptiveSetAttribute.Ordered: "ordered"
+
+describe "static container selection from SDN rules":
+    it "is off by default: an empty SDN source leaves the container untouched":
+        val map: AdaptiveMap<text, i64> = AdaptiveMap.new()
+        val out = collection_static_select_map_v1(map, site_origin(), "", "config/data_policy.sdn", "compiler.resolve", "next_instance").unwrap()
+        expect(attr_name(out.algorithm_attribute())).to_equal("auto")
+    it "a rule for another site changes nothing":
+        val map: AdaptiveMap<text, i64> = AdaptiveMap.new()
+        val sdn = sdn_for("ast://compiler/other#x#9", "hash")
+        val out = collection_static_select_map_v1(map, site_origin(), sdn, "config/data_policy.sdn", "compiler.resolve", "next_instance").unwrap()
+        expect(attr_name(out.algorithm_attribute())).to_equal("auto")
+    it "an SDN site pin flips an AdaptiveMap and an AdaptiveSet to the pinned representation":
+        for algorithm in ["linear", "hash", "ordered"]:
+            val sdn = sdn_for("ast://compiler/resolve#symbols#1", algorithm)
+            val map: AdaptiveMap<text, i64> = AdaptiveMap.new()
+            val set: AdaptiveSet<text> = AdaptiveSet.new()
+            val m = collection_static_select_map_v1(map, site_origin(), sdn, "config/data_policy.sdn", "compiler.resolve", "next_instance").unwrap()
+            val s = collection_static_select_set_v1(set, site_origin(), sdn, "config/data_policy.sdn", "compiler.resolve", "next_instance").unwrap()
+            expect(attr_name(m.algorithm_attribute())).to_equal(algorithm)
+            expect(attr_name(s.algorithm_attribute())).to_equal(algorithm)
+    it "fails closed with a message on a malformed rule or an unknown algorithm":
+        val map: AdaptiveMap<text, i64> = AdaptiveMap.new()
+        val bad = "data_policy:\n    rules:\n        symbols:\n            site: \"ast://compiler/resolve#symbols#1\"\n            algorithm: \"btree\"\n            pin: true\n"
+        expect(collection_static_select_map_v1(map, site_origin(), bad, "config/data_policy.sdn", "compiler.resolve", "next_instance").is_err()).to_equal(true)
+        val unsupported = "data_policy:\n    rules:\n        symbols:\n            site: \"ast://compiler/resolve#symbols#1\"\n            attribute: \"hash\"\n"
+        expect(collection_static_select_map_v1(map, site_origin(), unsupported, "config/data_policy.sdn", "compiler.resolve", "next_instance").is_err()).to_equal(true)

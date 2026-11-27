@@ -82,6 +82,7 @@ impl HirAbiInterfaceEncoderV1:
             case Mutates: canon_field("mutates", canon_seq([]))
             case Allocates: canon_field("allocates", canon_seq([]))
             case Custom(name): canon_field("custom", canon_str(name))
+            case Unknown: self.fail("unknown-effect")
 
     me effects_identity(effects: [Effect]) -> text:
         var rows: [text] = []
@@ -99,6 +100,7 @@ impl HirAbiInterfaceEncoderV1:
             case Char: canon_field("char", canon_seq([]))
             case Str: canon_field("text", canon_seq([]))
             case Unit: canon_field("unit", canon_seq([]))
+            case Nil: canon_field("nil", canon_seq([]))
             case Tuple(elements): canon_field("tuple", self.type_list_identity(elements))
             case Array(element, size): canon_field("array", canon_seq([
                 canon_field("element", self.type_identity(element)),
@@ -206,6 +208,7 @@ impl HirAbiInterfaceEncoderV1:
             canon_field("mutable", canon_nat(if function.is_mutable: 1 else: 0)),
             canon_field("const", canon_nat(if function.is_const: 1 else: 0)),
             canon_field("extern", canon_nat(if function.is_extern: 1 else: 0)),
+            canon_field("runtime_value_abi", canon_nat(function.extern_runtime_value_abi)),
             canon_field("naked", canon_nat(if function.func_attr.is_naked: 1 else: 0)),
             canon_field("noreturn", canon_nat(if function.func_attr.is_noreturn: 1 else: 0)),
             canon_field("interrupt", canon_nat(if function.func_attr.is_interrupt: 1 else: 0)),
@@ -337,12 +340,19 @@ pub fn hir_abi_interface_parts_v1(module: HirModule) -> Result<[text], text>:
         exports.push(canon_str(name))
     parts.push(canon_field("exports", canon_seq(canonical_identity_sort_texts(exports))))
     for dk_6 in module.functions.keys():
+        # Same false-nil draw the codec twins guard (hir_codec.spl
+        # codec_abi_*_parts_v1): a present key can read back nil on the
+        # shard-stage2 binary; skip rather than dereference.
+        if module.functions[dk_6] == nil:
+            continue
         val function: HirFunction = module.functions[dk_6]
         if function.is_public:
             parts.push(encoder.function_identity(function))
             if encoder.error != "":
                 return Err(encoder.error + ":declaration=function:" + function.name)
     for dk_5 in module.structs.keys():
+        if module.structs[dk_5] == nil:
+            continue
         val struct_: HirStruct = module.structs[dk_5]
         if struct_.is_public:
             parts.push(encoder.record_identity("struct", struct_.name,
@@ -351,6 +361,8 @@ pub fn hir_abi_interface_parts_v1(module: HirModule) -> Result<[text], text>:
             if encoder.error != "":
                 return Err(encoder.error + ":declaration=struct:" + struct_.name)
     for dk_4 in module.classes.keys():
+        if module.classes[dk_4] == nil:
+            continue
         val class_: HirClass = module.classes[dk_4]
         if class_.is_public:
             parts.push(encoder.record_identity("class", class_.name,
@@ -359,24 +371,32 @@ pub fn hir_abi_interface_parts_v1(module: HirModule) -> Result<[text], text>:
             if encoder.error != "":
                 return Err(encoder.error + ":declaration=class:" + class_.name)
     for dk_3 in module.enums.keys():
+        if module.enums[dk_3] == nil:
+            continue
         val enum_: HirEnum = module.enums[dk_3]
         if enum_.is_public:
             parts.push(encoder.enum_identity(enum_))
             if encoder.error != "":
                 return Err(encoder.error + ":declaration=enum:" + enum_.name)
     for dk_2 in module.bitfields.keys():
+        if module.bitfields[dk_2] == nil:
+            continue
         val bitfield: HirBitfield = module.bitfields[dk_2]
         if bitfield.is_public:
             parts.push(encoder.bitfield_identity(bitfield))
             if encoder.error != "":
                 return Err(encoder.error + ":declaration=bitfield:" + bitfield.name)
     for dk_1 in module.traits.keys():
+        if module.traits[dk_1] == nil:
+            continue
         val trait_: HirTrait = module.traits[dk_1]
         if trait_.is_public:
             parts.push(encoder.trait_identity(trait_))
             if encoder.error != "":
                 return Err(encoder.error + ":declaration=trait:" + trait_.name)
     for dk_0 in module.constants.keys():
+        if module.constants[dk_0] == nil:
+            continue
         val constant: HirConst = module.constants[dk_0]
         if constant.is_public:
             parts.push(canon_field("constant", canon_seq([

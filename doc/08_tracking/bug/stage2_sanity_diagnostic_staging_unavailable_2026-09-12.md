@@ -127,3 +127,5 @@ compiler. Compare the harness's exact argv and environment
 the frontend smoke driver it runs) against the working invocations tabled above.
 The unit it compiles is `scripts.check.cert.redeploy_gate.fixtures.hello_world`,
 reached through `--entry-closure`, which none of the probes above used.
+
+**Revalidated 2026-11-02: still plausible because the report title (Stage 2 sanity fails: secure_temp_dir returns """" during AOT diagnostic stagin) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**

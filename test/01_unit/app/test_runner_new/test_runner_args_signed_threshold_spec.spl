@@ -1,0 +1,78 @@
+"""Signed numeric runner values retain their sign through parsing."""
+
+use std.spec.{describe, it, expect}
+use std.test_runner.test_runner_args.{parse_test_args, test_args_validation_error}
+
+fn overflow_decimal() -> text:
+    var value = ""
+    var i = 0
+    while i < 400:
+        value = value + "9"
+        i = i + 1
+    value
+
+describe "test runner signed threshold arguments":
+    it "parses a separated negative CPU threshold as negative":
+        val args = ["--cpu-threshold", "-0.5"]
+        expect(test_args_validation_error(args)).to_equal("")
+
+        val options = parse_test_args(args)
+        expect(options.cpu_threshold).to_equal(-0.5)
+
+    it "parses a separated negative memory threshold as negative":
+        val args = ["--mem-threshold", "-2.75"]
+        expect(test_args_validation_error(args)).to_equal("")
+
+        val options = parse_test_args(args)
+        expect(options.mem_threshold).to_equal(-2.75)
+
+    it "preserves positive fractional thresholds":
+        val args = ["--cpu-threshold", "12.5"]
+        expect(test_args_validation_error(args)).to_equal("")
+
+        val options = parse_test_args(args)
+        expect(options.cpu_threshold).to_equal(12.5)
+
+    it "accepts zero thresholds in both argv forms":
+        val args = ["--cpu-threshold", "0", "--mem-threshold=0.0"]
+        expect(test_args_validation_error(args)).to_equal("")
+
+        val options = parse_test_args(args)
+        expect(options.cpu_threshold).to_equal(0.0)
+        expect(options.mem_threshold).to_equal(0.0)
+
+    it "preserves signed fractional values in equals syntax":
+        val args = ["--cpu-threshold=-0.75"]
+        expect(test_args_validation_error(args)).to_equal("")
+
+        val options = parse_test_args(args)
+        expect(options.cpu_threshold).to_equal(-0.75)
+
+    it "rejects malformed decimal values instead of dropping characters":
+        expect(test_args_validation_error(["--cpu-threshold", "12x.5"]))
+            .to_contain("invalid value for --cpu-threshold")
+        expect(test_args_validation_error(["--mem-threshold=1.2.3"]))
+            .to_contain("invalid value for --mem-threshold")
+        expect(test_args_validation_error(["--cpu-threshold", "+1.0"]))
+            .to_contain("invalid value for --cpu-threshold")
+        expect(test_args_validation_error(["--mem-threshold=1e2"]))
+            .to_contain("invalid value for --mem-threshold")
+
+    it "reports empty equals values as missing":
+        expect(test_args_validation_error(["--cpu-threshold="]))
+            .to_contain("missing value for --cpu-threshold")
+        expect(test_args_validation_error(["--mem-threshold="]))
+            .to_contain("missing value for --mem-threshold")
+
+    it "rejects thresholds that overflow finite f64":
+        val huge = overflow_decimal()
+        expect(test_args_validation_error(["--cpu-threshold", huge]))
+            .to_contain("finite f64 range")
+        expect(test_args_validation_error(["--mem-threshold=" + huge]))
+            .to_contain("finite f64 range")
+        expect(test_args_validation_error(["--cpu-threshold", "-" + huge]))
+            .to_contain("finite f64 range")
+
+    it "rejects a flag where a tag value is required":
+        expect(test_args_validation_error(["--tag", "--unit", "test/01_unit/"]))
+            .to_contain("missing value for --tag")

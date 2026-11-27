@@ -181,7 +181,7 @@ host_env_load() {
 #   4. versioned defaults config/host/host_config.sdn (values commented out)
 # Every layer uses the same "  key: value" two-space shape as host_env:.
 # ---------------------------------------------------------------------------
-HOST_CONFIG_KEYS="max_build_jobs max_threads worker_mem_mib tree_rss_base_mib tree_rss_per_job_mib tree_rss_host_pct cpu_family cpu_features os llvm_root llvm_version gpu cache_root cache_scope frontend_cache hir_cache hir_cache_selfcheck native_build_cache_dir cache_max_bytes cache_max_gb hwir assurance arm_baremetal"
+HOST_CONFIG_KEYS="max_build_jobs max_threads worker_mem_mib mem_reserve_free_mib probe_max_mib probe_max_parallel tree_rss_base_mib tree_rss_per_job_mib tree_rss_host_pct cpu_family cpu_features os llvm_root llvm_version server_config gpu cache_root cache_scope frontend_cache hir_cache hir_cache_selfcheck native_build_cache_dir cache_max_bytes cache_max_gb hwir assurance arm_baremetal cache_memory_max_bytes cache_storage_max_bytes cache_max_branches cache_kept_branches cache_versions_per_source cache_per_source_max_disk_bytes cache_per_source_max_memory_bytes stage3_tree_rss_cap_kib stage3_threads stage3_file_workers mir_sharding mir_shard_count mir_shard_worker_kib sanity_build_timeout_seconds"
 HOST_CONFIG_CACHE_KEYS="cache_root cache_scope frontend_cache hir_cache hir_cache_selfcheck native_build_cache_dir cache_max_bytes cache_max_gb"
 
 # host_config_cache_var KEY -> the EXISTING consumer variable a cache key is a
@@ -224,14 +224,39 @@ HOST_CONFIG_SCHEMA="simple-host-config-v1"
 host_config_valid() {
     [ -n "$2" ] || return 1
     case "$1" in
-        # A share of host RAM for one process tree: 1..75, same bound as the
+        # A share of host RAM for one process tree: 1..90, same bound as the
         # Simple schema and scripts/bootstrap/lib/tree-rss-policy.shs.
         tree_rss_host_pct)
             case "$2" in
                 *[!0-9]*|0*|???*) return 1 ;;
             esac
-            [ "$2" -le 75 ] ;;
-        max_build_jobs|max_threads|worker_mem_mib|tree_rss_base_mib|tree_rss_per_job_mib|llvm_version|cache_max_bytes|cache_max_gb)
+            [ "$2" -le 90 ] ;;
+        # Stage 3 bootstrap knobs (scripts/bootstrap/lib/host-bootstrap-settings.shs,
+        # bootstrap-jobs.shs): same bounds as their env-var readers.
+        stage3_file_workers) case "$2" in 0|1) return 0 ;; *) return 1 ;; esac ;;
+        stage3_threads)
+            case "$2" in
+                *[!0-9]*|0*|???*) return 1 ;;
+            esac
+            [ "$2" -le 64 ] ;;
+        # Stage 2 matrix / Stage 3 shard knobs (W27/W32/W36): same bounds as
+        # bootstrap_host_valid_matrix_value in host-bootstrap-settings.shs.
+        mir_sharding) case "$2" in 0|1) return 0 ;; *) return 1 ;; esac ;;
+        mir_shard_count)
+            case "$2" in
+                *[!0-9]*|0*|????*) return 1 ;;
+            esac
+            [ "$2" -le 128 ] ;;
+        mir_shard_worker_kib)
+            case "$2" in
+                *[!0-9]*|0*|???????????*) return 1 ;;
+            esac ;;
+        # Sanity-probe build cap in seconds (COMPILER_BUILD_TIMEOUT_SECONDS).
+        sanity_build_timeout_seconds)
+            case "$2" in
+                *[!0-9]*|0*|???????*) return 1 ;;
+            esac ;;
+        max_build_jobs|max_threads|worker_mem_mib|mem_reserve_free_mib|probe_max_mib|probe_max_parallel|tree_rss_base_mib|tree_rss_per_job_mib|stage3_tree_rss_cap_kib|llvm_version|cache_max_bytes|cache_max_gb|cache_memory_max_bytes|cache_storage_max_bytes|cache_max_branches|cache_versions_per_source|cache_per_source_max_disk_bytes|cache_per_source_max_memory_bytes)
             case "$2" in
                 *[!0-9]*) return 1 ;;
                 *[1-9]*) return 0 ;;
@@ -667,10 +692,10 @@ EOF
     _st_v=$(SIMPLE_HOST_MAX_BUILD_JOBS=lots host_config_get max_build_jobs "${_st_dir}" 2>"${_st_dir}/warn.err"); [ "${_st_v}" = 12 ] || _st_g_ok=0
     grep -q 'ignoring invalid max_build_jobs=lots from env' "${_st_dir}/warn.err" || _st_g_ok=0
     _st_v=$(SIMPLE_HOST_OS=plan9 host_config_get os "${_st_dir}" 2>/dev/null); [ "${_st_v}" = windows ] || _st_g_ok=0
-    # tree_rss_host_pct is a bounded share of host RAM: 1..75 only.
-    _st_v=$(SIMPLE_HOST_TREE_RSS_HOST_PCT=90 host_config_get tree_rss_host_pct "${_st_dir}" 2>"${_st_dir}/warn.err"); [ -z "${_st_v}" ] || _st_g_ok=0
-    grep -q 'ignoring invalid tree_rss_host_pct=90 from env' "${_st_dir}/warn.err" || _st_g_ok=0
-    _st_v=$(SIMPLE_HOST_TREE_RSS_HOST_PCT=75 host_config_get tree_rss_host_pct "${_st_dir}" 2>/dev/null); [ "${_st_v}" = 75 ] || _st_g_ok=0
+    # tree_rss_host_pct is a bounded share of host RAM: 1..90 only.
+    _st_v=$(SIMPLE_HOST_TREE_RSS_HOST_PCT=95 host_config_get tree_rss_host_pct "${_st_dir}" 2>"${_st_dir}/warn.err"); [ -z "${_st_v}" ] || _st_g_ok=0
+    grep -q 'ignoring invalid tree_rss_host_pct=95 from env' "${_st_dir}/warn.err" || _st_g_ok=0
+    _st_v=$(SIMPLE_HOST_TREE_RSS_HOST_PCT=90 host_config_get tree_rss_host_pct "${_st_dir}" 2>/dev/null); [ "${_st_v}" = 90 ] || _st_g_ok=0
     _st_v=$(SIMPLE_HOST_TREE_RSS_HOST_PCT=0 host_config_get tree_rss_host_pct "${_st_dir}" 2>/dev/null); [ -z "${_st_v}" ] || _st_g_ok=0
     _st_v=$(SIMPLE_HOST_MAX_THREADS=0 host_config_get max_threads "${_st_dir}" 2>/dev/null); [ "${_st_v}" = 2 ] || _st_g_ok=0
     printf 'host_config:\n  max_threads: 0\n  gpu: maybe\n' >"${_st_dir}/baduser.sdn"
@@ -688,6 +713,26 @@ EOF
         printf 'not ok - (e2) invalid values / foreign schema are rejected and fall through with a warning\n'
         _st_fail=$((_st_fail + 1))
     fi
+
+    # (e3) memory-limit keys: user file sets them, env wins, 0/text rejected.
+    printf 'host_config:\n  schema: simple-host-config-v1\n  mem_reserve_free_mib: 16384\n  probe_max_mib: 4096\n  probe_max_parallel: 3\n' >"${_st_dir}/memuser.sdn"
+    SIMPLE_HOST_CONFIG="${_st_dir}/memuser.sdn"
+    unset SIMPLE_HOST_MEM_RESERVE_FREE_MIB SIMPLE_HOST_PROBE_MAX_MIB SIMPLE_HOST_PROBE_MAX_PARALLEL
+    _st_m_ok=1
+    _st_v=$(host_config_get mem_reserve_free_mib "${_st_dir}"); [ "${_st_v}" = 16384 ] || _st_m_ok=0
+    _st_v=$(host_config_get probe_max_mib "${_st_dir}"); [ "${_st_v}" = 4096 ] || _st_m_ok=0
+    _st_v=$(host_config_get probe_max_parallel "${_st_dir}"); [ "${_st_v}" = 3 ] || _st_m_ok=0
+    _st_v=$(SIMPLE_HOST_MEM_RESERVE_FREE_MIB=8192 host_config_get mem_reserve_free_mib "${_st_dir}"); [ "${_st_v}" = 8192 ] || _st_m_ok=0
+    _st_v=$(SIMPLE_HOST_MEM_RESERVE_FREE_MIB=0 host_config_get mem_reserve_free_mib "${_st_dir}" 2>/dev/null); [ "${_st_v}" = 16384 ] || _st_m_ok=0
+    _st_v=$(SIMPLE_HOST_PROBE_MAX_PARALLEL=many host_config_get probe_max_parallel "${_st_dir}" 2>/dev/null); [ "${_st_v}" = 3 ] || _st_m_ok=0
+    if [ "${_st_m_ok}" -eq 1 ]; then
+        printf 'ok - (e3) memory-limit keys resolve env > user and reject invalid values\n'
+        _st_pass=$((_st_pass + 1))
+    else
+        printf 'not ok - (e3) memory-limit keys resolve env > user and reject invalid values\n'
+        _st_fail=$((_st_fail + 1))
+    fi
+    SIMPLE_HOST_CONFIG="${_st_dir}/user.sdn"
 
     # (g) cache keys: validation, consumer-var mapping (on/off -> 1/0), and a
     # SET consumer var always wins (it is never printed / never overridden).

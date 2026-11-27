@@ -1,0 +1,104 @@
+# DAE-02 / REQ-DAE02-SDK-SAFETY-001..003. Actual public SDK callback contract.
+# AUTHORED_NOT_RUN. No process is signalled, spawned or restarted by this suite.
+# A test-process PID is used only with a successful ping, or removed before a
+# failed ping returns; even the unsafe old source cannot kill that process.
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.daemon_sdk.client.{daemon_ensure_responsive as sdk_sync_responsive}
+use std.nogc_async_mut.daemon_sdk.client.{daemon_ensure_responsive as sdk_async_responsive}
+use std.nogc_sync_mut.daemon_sdk.types.{DaemonConfig, daemon_config_new}
+use std.nogc_sync_mut.daemon_sdk.lock.{try_acquire_daemon_lock, release_daemon_lock}
+use std.nogc_sync_mut.io.file_ops.secure_temp_dir
+use std.nogc_sync_mut.io_runtime.dir_remove
+use std.io_runtime.{getpid, file_exists}
+
+var sdk_safety_start_calls: i64 = 0
+var sdk_safety_ping_calls: i64 = 0
+var sdk_safety_lock: text = ""
+var sdk_safety_lock_pid: i64 = -1
+var sdk_safety_release_failed: bool = false
+
+fn sdk_safety_reset():
+    sdk_safety_start_calls = 0
+    sdk_safety_ping_calls = 0
+    sdk_safety_lock = ""
+    sdk_safety_lock_pid = -1
+    sdk_safety_release_failed = false
+
+fn sdk_safety_start_refused() -> bool:
+    sdk_safety_start_calls = sdk_safety_start_calls + 1
+    false
+
+fn sdk_safety_ping_ok() -> bool:
+    sdk_safety_ping_calls = sdk_safety_ping_calls + 1
+    true
+
+fn sdk_safety_disappearing_ping() -> bool:
+    sdk_safety_ping_calls = sdk_safety_ping_calls + 1
+    if not release_daemon_lock(sdk_safety_lock_pid, sdk_safety_lock):
+        sdk_safety_release_failed = true
+        # Never enter the old failed-probe branch if private cleanup failed.
+        return true
+    false
+
+fn sdk_safety_call(config: DaemonConfig, async_facade: bool, disappearing: bool) -> bool:
+    if async_facade:
+        if disappearing: return sdk_async_responsive(config, sdk_safety_start_refused, sdk_safety_disappearing_ping)
+        return sdk_async_responsive(config, sdk_safety_start_refused, sdk_safety_ping_ok)
+    if disappearing: return sdk_sync_responsive(config, sdk_safety_start_refused, sdk_safety_disappearing_ping)
+    sdk_sync_responsive(config, sdk_safety_start_refused, sdk_safety_ping_ok)
+
+fn sdk_safety_start_refusal_case(async_facade: bool):
+    sdk_safety_reset()
+    val root = secure_temp_dir("build", "dae02-sdk-refused").unwrap()
+    val config = daemon_config_new(root + "/lock", root + "/requests", root + "/responses")
+    val result = sdk_safety_call(config, async_facade, false)
+    val exists_after = file_exists(root + "/lock")
+    val cleaned = dir_remove(root, true)
+    expect(result).to_equal(false)
+    expect(sdk_safety_start_calls).to_equal(1)
+    expect(sdk_safety_ping_calls).to_equal(0)
+    expect(exists_after).to_equal(false)
+    expect(cleaned).to_equal(true)
+
+fn sdk_safety_disappearance_case(async_facade: bool):
+    sdk_safety_reset()
+    val root = secure_temp_dir("build", "dae02-sdk-disappeared").unwrap()
+    sdk_safety_lock = root + "/lock"
+    sdk_safety_lock_pid = try_acquire_daemon_lock(sdk_safety_lock)
+    expect(sdk_safety_lock_pid).to_equal(getpid())
+    val config = daemon_config_new(sdk_safety_lock, root + "/requests", root + "/responses")
+    val result = sdk_safety_call(config, async_facade, true)
+    val exists_after = file_exists(sdk_safety_lock)
+    val cleaned = dir_remove(root, true)
+    expect(result).to_equal(false)
+    expect(sdk_safety_release_failed).to_equal(false)
+    expect(sdk_safety_start_calls).to_equal(0)
+    expect(sdk_safety_ping_calls).to_equal(1)
+    expect(exists_after).to_equal(false)
+    expect(cleaned).to_equal(true)
+
+fn sdk_safety_success_case(async_facade: bool):
+    sdk_safety_reset()
+    val root = secure_temp_dir("build", "dae02-sdk-responsive").unwrap()
+    val lock = root + "/lock"
+    val pid = try_acquire_daemon_lock(lock)
+    expect(pid).to_equal(getpid())
+    val config = daemon_config_new(lock, root + "/requests", root + "/responses")
+    val result = sdk_safety_call(config, async_facade, false)
+    val exists_after = file_exists(lock)
+    val released = release_daemon_lock(pid, lock)
+    val cleaned = dir_remove(root, true)
+    expect(result).to_equal(true)
+    expect(sdk_safety_start_calls).to_equal(0)
+    expect(sdk_safety_ping_calls).to_equal(1)
+    expect(exists_after).to_equal(true)
+    expect(released).to_equal(true)
+    expect(cleaned).to_equal(true)
+
+describe "DAE-02 public SDK readiness callbacks":
+    it "sync refuses startup once without probing": sdk_safety_start_refusal_case(false)
+    it "async facade refuses startup once without probing": sdk_safety_start_refusal_case(true)
+    it "sync does not replace a daemon disappearing during a failed ping": sdk_safety_disappearance_case(false)
+    it "async facade does not replace a daemon disappearing during a failed ping": sdk_safety_disappearance_case(true)
+    it "sync preserves a responsive existing daemon": sdk_safety_success_case(false)
+    it "async facade preserves a responsive existing daemon": sdk_safety_success_case(true)

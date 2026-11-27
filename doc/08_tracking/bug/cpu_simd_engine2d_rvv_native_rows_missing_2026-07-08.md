@@ -1,6 +1,17 @@
 # CPU-SIMD Engine2D RVV native target proof missing
 ## Open 2026-09-16 — needs owner triage
 
+Triage 2026-11-25 (P3 fleet, worktree wt-p3-bas, Windows x86_64):
+still blocked, and not actionable from this host or lane. The required fix
+lives in the Rust runtime owner
+(`src/compiler_rust/runtime/src/value/engine2d_simd_ops.rs` — RVV row
+kernels), which the pure-Simple lane must not touch, and the evidence legs
+need riscv64/aarch64 `simple` target binaries plus qemu-user, none of which
+exist on this Windows host (`qemu-riscv64`, `riscv64-linux-gnu-gcc`,
+`aarch64-linux-gnu-gcc` all absent). The 2026-08-15 update's C-runtime
+NEON/RVV PASS evidence stands; only the pure-Simple `detect_simd_level()`
+Neon/Rvv arms remain unproven, blocked on per-arch binaries. Left open.
+
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 

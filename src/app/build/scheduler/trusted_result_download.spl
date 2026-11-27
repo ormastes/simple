@@ -23,6 +23,7 @@ use app.build.scheduler.planner.{scheduler_action_digest_valid_v1}
 use compiler.common.cache.canonical_identity.{canonical_identity_sort_texts}
 use std.common.crypto.sha256.{sha256_text}
 use std.io_runtime.{platform_name}
+use app.build.host_path_policy.{build_host_abs_path_valid_v1, build_posix_abs_path_valid_v1}
 
 struct BuildResultFetchPlanV1:
     valid: bool
@@ -79,16 +80,7 @@ fn _result_segment_v1(value: text) -> bool:
     true
 
 fn _result_path_v1(path: text) -> bool:
-    if not path.starts_with("/") or path.len() < 2 or path.len() > 4096 or
-       path.ends_with("/") or path.contains("//"):
-        return false
-    val parts = path.split("/")
-    var i: i64 = 1
-    while i < parts.len():
-        if not _result_segment_v1(parts[i]):
-            return false
-        i = i + 1
-    true
+    build_host_abs_path_valid_v1(path, true, true, 4096, 128)
 
 fn plan_build_result_sftp_v1(config: TrustedSftpConfigV1,
         request: BuildWorkerRequestV1, local_output_root: text) -> BuildResultFetchPlanV1:
@@ -103,7 +95,7 @@ fn plan_build_result_sftp_v1(config: TrustedSftpConfigV1,
        not _result_path_v1(config.sftp_executable) or
        not file_is_regular_no_follow(config.sftp_executable) or
        not scheduler_action_digest_valid_v1(config.sftp_digest) or
-       file_hash_sha256(config.sftp_executable) != config.sftp_digest:
+       not _file_sha256_matches_v1(config.sftp_executable, config.sftp_digest):
         return _result_fetch_reject_v1("transport-config-invalid")
     val outputs = request.action.output_paths
     if outputs.len() == 0 or outputs.len() > BUILD_OUTPUT_MAX_FILES_V1:
@@ -201,16 +193,16 @@ fn _result_get_metadata_v1(config: TrustedSftpConfigV1,
     var cap = protocol_cap
     if cap > limits.max_file_bytes: cap = limits.max_file_bytes
     if cap > remaining: cap = remaining
-    if cap <= 0: return nil
+    if cap <= 0: return None
     val path = output_root + "/" + name
     val batch = "get " + remote_root + "/" + name + " " + path + "\n"
     if not file_atomic_write(batch_file, batch) or
        not _run_result_batch_v1(config, batch_file, cap):
-        return nil
+        return None
     val read = file_read_regular_no_follow_bounded(path, cap)
     if read.is_err() or not file_is_regular_no_follow(path) or
        file_size_raw(path) != read.unwrap().bytes().len():
-        return nil
+        return None
     Some(read.unwrap())
 
 struct _ResultMetadataSetV1:
@@ -230,7 +222,7 @@ fn _result_read_metadata_v1(output_root: text, name: text,
     val read = file_read_regular_no_follow_bounded(path, cap)
     if read.is_err() or not file_is_regular_no_follow(path) or
        file_size_raw(path) != read.unwrap().bytes().len():
-        return nil
+        return None
     Some(read.unwrap())
 
 fn _result_metadata_set_v1(config: TrustedSftpConfigV1,
@@ -264,7 +256,7 @@ fn _result_metadata_set_v1(config: TrustedSftpConfigV1,
         else:
             _result_get_metadata_v1(config, remote_root, output_root,
                 batch_file, name, cap, remaining, limits)
-        if read == nil or read.unwrap().bytes().len() > remaining:
+        if read.is_none() or read.unwrap().bytes().len() > remaining:
             return _result_metadata_reject_v1()
         remaining = remaining - read.unwrap().bytes().len()
         values.push(read.unwrap())
@@ -364,7 +356,7 @@ fn fetch_build_result_sftp_limited_v1(config: TrustedSftpConfigV1,
         request.fence, request.cpu_tokens, request.fd_tokens)
     val reply = validate_build_worker_reply_v1(dispatch,
         metadata.result_wire)
-    if not reply.received or reply.result == nil or
+    if not reply.received or reply.result.is_none() or
        not reply.result.unwrap().candidate.success:
         return _result_download_failure_v1("candidate-invalid", root)
     val budget = plan_build_result_download_budget_limited_v1(request,
@@ -429,7 +421,7 @@ fn fetch_build_failure_sftp_limited_v1(config: TrustedSftpConfigV1,
         request.fence, request.cpu_tokens, request.fd_tokens)
     val reply = validate_build_worker_reply_v1(dispatch,
         metadata.result_wire)
-    if not reply.received or reply.result == nil or
+    if not reply.received or reply.result.is_none() or
        reply.result.unwrap().candidate.success or metadata.manifest_wire != "" or
        reply.result.unwrap().candidate.output_manifest_digest != "" or
        sha256_text(metadata.diagnostics) !=
@@ -437,7 +429,7 @@ fn fetch_build_failure_sftp_limited_v1(config: TrustedSftpConfigV1,
         return _result_download_failure_v1("failure-candidate-invalid", root)
     val proof = parse_build_worker_failure_proof_v1(
         metadata.failure_proof)
-    if proof == nil:
+    if proof.is_none():
         return _result_download_failure_v1("failure-proof-invalid", root)
     val confirmed = proof.unwrap()
     if confirmed.request_digest != sha256_text(
@@ -469,3 +461,9 @@ export plan_build_result_sftp_v1, plan_build_failure_sftp_v1
 export plan_build_result_metadata_sftp_v1
 export fetch_build_result_sftp_v1, fetch_build_failure_sftp_v1
 export fetch_build_result_sftp_limited_v1, fetch_build_failure_sftp_limited_v1
+
+# Absent/unreadable file == mismatch: a missing digest never matches.
+fn _file_sha256_matches_v1(path: text, expected: text) -> bool:
+    if val digest = file_hash_sha256(path):
+        return digest == expected
+    false

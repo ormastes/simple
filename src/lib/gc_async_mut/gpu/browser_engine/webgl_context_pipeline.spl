@@ -1,0 +1,1002 @@
+# WebGLContext binding, framebuffer, buffer, vertex-attribute, draw, pixel-store and
+# texture-upload methods. Split out of webgl_context.spl (impl extension; the class
+# and its fields stay there, and webgl_context.spl pulls this impl in with a trailing `use`).
+
+use std.gc_async_mut.gpu.browser_engine.webgl_context.{WebGLContext, WEBGL_NO_ERROR, WEBGL_INVALID_ENUM, WEBGL_INVALID_VALUE, WEBGL_INVALID_OPERATION, WEBGL_INVALID_FRAMEBUFFER_OPERATION, WEBGL_ARRAY_BUFFER, WEBGL_ELEMENT_ARRAY_BUFFER, WEBGL_BUFFER_SIZE, WEBGL_BUFFER_USAGE, WEBGL_NONE, WEBGL_BACK, WEBGL_TEXTURE_2D, WEBGL_TEXTURE_CUBE_MAP, WEBGL_TEXTURE0, WEBGL_MAX_COMBINED_TEXTURE_IMAGE_UNITS, WEBGL_TEXTURE_MIN_FILTER, WEBGL_TEXTURE_MAG_FILTER, WEBGL_TEXTURE_WRAP_S, WEBGL_TEXTURE_WRAP_T, WEBGL_NEAREST, WEBGL_LINEAR, WEBGL_TEXTURE, WEBGL_FRAMEBUFFER, WEBGL_RENDERBUFFER, WEBGL_RENDERBUFFER_WIDTH, WEBGL_RENDERBUFFER_HEIGHT, WEBGL_RENDERBUFFER_INTERNAL_FORMAT, WEBGL_COLOR_ATTACHMENT0, WEBGL_FRAMEBUFFER_COMPLETE, WEBGL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT, WEBGL_FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT, WEBGL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE, WEBGL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME, WEBGL_FRAMEBUFFER_ATTACHMENT_TEXTURE_LEVEL, WEBGL_FRAMEBUFFER_ATTACHMENT_TEXTURE_CUBE_MAP_FACE, WEBGL_PACK_ALIGNMENT, WEBGL_UNPACK_ALIGNMENT, WEBGL_UNSIGNED_BYTE, WEBGL_UNPACK_FLIP_Y_WEBGL, WEBGL_UNPACK_PREMULTIPLY_ALPHA_WEBGL, WEBGL_UNPACK_COLORSPACE_CONVERSION_WEBGL, WEBGL_BROWSER_DEFAULT_WEBGL, WEBGL_VERTEX_ATTRIB_ARRAY_ENABLED, WEBGL_VERTEX_ATTRIB_ARRAY_SIZE, WEBGL_VERTEX_ATTRIB_ARRAY_STRIDE, WEBGL_VERTEX_ATTRIB_ARRAY_TYPE, WEBGL_VERTEX_ATTRIB_ARRAY_NORMALIZED, WEBGL_VERTEX_ATTRIB_ARRAY_BUFFER_BINDING, WEBGL_VERTEX_ATTRIB_ARRAY_POINTER, WEBGL_CURRENT_VERTEX_ATTRIB, WEBGL_VERTEX_ATTRIB_ARRAY_DIVISOR, WebGLParameterValue, webgl_parameter_bool, webgl_parameter_int, webgl_parameter_float_list, webgl_vertex_attrib_type_bytes, webgl_default_vertex_attribs, webgl_copy_vertex_attribs, webgl_texture_cube_face_target, webgl_texture_binding_target, webgl_valid_attrib_index, webgl_valid_buffer_usage, webgl_valid_draw_mode, webgl_valid_texture_min_filter, webgl_valid_texture_wrap, webgl_valid_renderbuffer_format, webgl_valid_renderbuffer_attachment, webgl_framebuffer_has_attachment, webgl_framebuffer_attachment_object_type, webgl_framebuffer_attachment_object_name, webgl_set_renderbuffer_attachment, webgl_clear_renderbuffer_attachment, webgl_texture_pixel_bytes, webgl_supported_compressed_texture_format, webgl_required_texture_bytes_safe, webgl_zero_bytes, webgl_copy_bytes, webgl_copy_i32, webgl_replace_texture_region}
+use std.gc_async_mut.gpu.browser_engine.webgl_context.{WebGLCheck, WebGLTextureSize, webgl_texture_size_class}
+use std.gc_async_mut.gpu.browser_engine.webgl_render_commands.{webgl_render_command_bind_buffer, webgl_render_command_active_texture, webgl_render_command_bind_texture, webgl_render_command_tex_parameter, webgl_render_command_bind_sampler, webgl_render_command_sampler_parameter, webgl_render_command_tex_image_2d, webgl_render_command_tex_sub_image_2d, webgl_render_command_copy_tex_image_2d, webgl_render_command_copy_tex_sub_image_2d, webgl_render_command_generate_mipmap, webgl_render_command_pixel_store, webgl_render_command_read_pixels, webgl_render_command_bind_framebuffer, webgl_render_command_bind_renderbuffer, webgl_render_command_renderbuffer_storage, webgl_render_command_framebuffer_texture_2d, webgl_render_command_framebuffer_renderbuffer, webgl_render_command_draw_buffers, webgl_render_command_read_buffer, webgl_render_command_buffer_data, webgl_render_command_vertex_attrib_enable, webgl_render_command_vertex_attrib_pointer, webgl_render_command_vertex_attrib_divisor, webgl_render_command_vertex_attrib_4f, webgl_render_command_bind_vertex_array, webgl_render_command_draw_arrays, webgl_render_command_draw_elements, webgl_render_command_draw_arrays_instanced, webgl_render_command_draw_elements_instanced}
+
+impl WebGLContext:
+
+    me active_texture(texture: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        val unit_index = texture - WEBGL_TEXTURE0
+        if unit_index < 0 or unit_index >= WEBGL_MAX_COMBINED_TEXTURE_IMAGE_UNITS:
+            self.last_error = WEBGL_INVALID_ENUM
+            return false
+        self.active_texture_unit = unit_index
+        self.bound_texture_2d = self.texture_units[unit_index].texture_2d_id
+        self.bound_texture_cube_map = self.texture_units[unit_index].texture_cube_map_id
+        self.render_commands.push(webgl_render_command_active_texture(texture))
+        true
+
+    me bind_texture(target: i32, texture_id: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        if target != WEBGL_TEXTURE_2D and target != WEBGL_TEXTURE_CUBE_MAP:
+            self.last_error = WEBGL_INVALID_ENUM
+            return false
+        if texture_id == -1:
+            var texture_unit = self.texture_units[self.active_texture_unit]
+            if target == WEBGL_TEXTURE_2D:
+                self.bound_texture_2d = -1
+                texture_unit.texture_2d_id = -1
+            else:
+                self.bound_texture_cube_map = -1
+                texture_unit.texture_cube_map_id = -1
+            self.texture_units[self.active_texture_unit] = texture_unit
+            return true
+        val texture_index = self.find_texture_index(texture_id)
+        if texture_index < 0 or not self.textures[texture_index].valid:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        var texture = self.textures[texture_index]
+        if texture.target != 0 and texture.target != target:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return false
+        texture.target = webgl_texture_binding_target(target)
+        self.textures[texture_index] = texture
+        var texture_unit = self.texture_units[self.active_texture_unit]
+        if target == WEBGL_TEXTURE_2D:
+            self.bound_texture_2d = texture_id
+            texture_unit.texture_2d_id = texture_id
+        else:
+            self.bound_texture_cube_map = texture_id
+            texture_unit.texture_cube_map_id = texture_id
+        self.texture_units[self.active_texture_unit] = texture_unit
+        self.render_commands.push(webgl_render_command_bind_texture(target, texture_id))
+        true
+
+    me bind_framebuffer(target: i32, framebuffer_id: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        if target != WEBGL_FRAMEBUFFER:
+            self.last_error = WEBGL_INVALID_ENUM
+            return false
+        if framebuffer_id == -1:
+            self.bound_framebuffer = -1
+            return true
+        val framebuffer_index = self.find_framebuffer_index(framebuffer_id)
+        if framebuffer_index < 0 or not self.framebuffers[framebuffer_index].valid:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        self.bound_framebuffer = framebuffer_id
+        self.render_commands.push(webgl_render_command_bind_framebuffer(target, framebuffer_id))
+        true
+
+    me bind_renderbuffer(target: i32, renderbuffer_id: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        if target != WEBGL_RENDERBUFFER:
+            self.last_error = WEBGL_INVALID_ENUM
+            return false
+        if renderbuffer_id == -1:
+            self.bound_renderbuffer = -1
+            return true
+        val renderbuffer_index = self.find_renderbuffer_index(renderbuffer_id)
+        if renderbuffer_index < 0 or not self.renderbuffers[renderbuffer_index].valid:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        self.bound_renderbuffer = renderbuffer_id
+        self.render_commands.push(webgl_render_command_bind_renderbuffer(target, renderbuffer_id))
+        true
+
+    me renderbuffer_storage(target: i32, internal_format: i32, width: i32, height: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        if target != WEBGL_RENDERBUFFER:
+            self.last_error = WEBGL_INVALID_ENUM
+            return false
+        if width < 0 or height < 0:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        if not webgl_valid_renderbuffer_format(internal_format):
+            self.last_error = WEBGL_INVALID_ENUM
+            return false
+        val renderbuffer_index = self.bound_renderbuffer_index_for_target(target)
+        if renderbuffer_index < 0:
+            return false
+        var renderbuffer = self.renderbuffers[renderbuffer_index]
+        renderbuffer.internal_format = internal_format
+        renderbuffer.width = width
+        renderbuffer.height = height
+        renderbuffer.initialized = true
+        self.renderbuffers[renderbuffer_index] = renderbuffer
+        self.render_commands.push(webgl_render_command_renderbuffer_storage(target, internal_format, width, height))
+        true
+
+    me get_renderbuffer_parameter(target: i32, pname: i32) -> WebGLParameterValue:
+        if not self.ensure_context_available():
+            return webgl_parameter_int(0)
+        val renderbuffer_index = self.bound_renderbuffer_index_for_target(target)
+        if renderbuffer_index < 0:
+            return webgl_parameter_int(0)
+        val renderbuffer = self.renderbuffers[renderbuffer_index]
+        if pname == WEBGL_RENDERBUFFER_WIDTH:
+            return webgl_parameter_int(renderbuffer.width)
+        if pname == WEBGL_RENDERBUFFER_HEIGHT:
+            return webgl_parameter_int(renderbuffer.height)
+        if pname == WEBGL_RENDERBUFFER_INTERNAL_FORMAT:
+            return webgl_parameter_int(renderbuffer.internal_format)
+        self.last_error = WEBGL_INVALID_ENUM
+        webgl_parameter_int(0)
+
+    me framebuffer_texture_2d(target: i32, attachment: i32, textarget: i32, texture_id: i32, level: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        val framebuffer_index = self.bound_framebuffer_index_for_target(target)
+        if framebuffer_index < 0:
+            return false
+        if attachment != WEBGL_COLOR_ATTACHMENT0:
+            self.last_error = WEBGL_INVALID_ENUM
+            return false
+        if textarget != WEBGL_TEXTURE_2D and not webgl_texture_cube_face_target(textarget):
+            self.last_error = WEBGL_INVALID_ENUM
+            return false
+        if level != 0:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        var framebuffer = self.framebuffers[framebuffer_index]
+        if texture_id == -1:
+            framebuffer.color_texture_id = -1
+            framebuffer.color_texture_face = 0
+            self.framebuffers[framebuffer_index] = framebuffer
+            return true
+        val texture_index = self.find_texture_index(texture_id)
+        if texture_index < 0 or not self.textures[texture_index].valid:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        val expected_target = webgl_texture_binding_target(textarget)
+        if self.textures[texture_index].target != expected_target:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return false
+        framebuffer.color_texture_id = texture_id
+        framebuffer.color_texture_face = if webgl_texture_cube_face_target(textarget): textarget else: 0
+        framebuffer.color_renderbuffer_id = -1
+        self.framebuffers[framebuffer_index] = framebuffer
+        self.render_commands.push(webgl_render_command_framebuffer_texture_2d(target, attachment, textarget, texture_id, level))
+        true
+
+    me framebuffer_renderbuffer(target: i32, attachment: i32, renderbuffertarget: i32, renderbuffer_id: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        val framebuffer_index = self.bound_framebuffer_index_for_target(target)
+        if framebuffer_index < 0:
+            return false
+        if renderbuffertarget != WEBGL_RENDERBUFFER or not webgl_valid_renderbuffer_attachment(attachment):
+            self.last_error = WEBGL_INVALID_ENUM
+            return false
+        var framebuffer = self.framebuffers[framebuffer_index]
+        if renderbuffer_id == -1:
+            framebuffer = webgl_clear_renderbuffer_attachment(framebuffer, attachment)
+            self.framebuffers[framebuffer_index] = framebuffer
+            return true
+        val renderbuffer_index = self.find_renderbuffer_index(renderbuffer_id)
+        if renderbuffer_index < 0 or not self.renderbuffers[renderbuffer_index].valid:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        framebuffer = webgl_set_renderbuffer_attachment(framebuffer, attachment, renderbuffer_id)
+        self.framebuffers[framebuffer_index] = framebuffer
+        self.render_commands.push(webgl_render_command_framebuffer_renderbuffer(target, attachment, renderbuffertarget, renderbuffer_id))
+        true
+
+    me get_framebuffer_attachment_parameter(target: i32, attachment: i32, pname: i32) -> WebGLParameterValue:
+        if not self.ensure_context_available():
+            return webgl_parameter_int(0)
+        val framebuffer_index = self.bound_framebuffer_index_for_target(target)
+        if framebuffer_index < 0:
+            return webgl_parameter_int(0)
+        if not webgl_valid_renderbuffer_attachment(attachment):
+            self.last_error = WEBGL_INVALID_ENUM
+            return webgl_parameter_int(0)
+        val framebuffer = self.framebuffers[framebuffer_index]
+        val object_type = webgl_framebuffer_attachment_object_type(framebuffer, attachment)
+        if pname == WEBGL_FRAMEBUFFER_ATTACHMENT_OBJECT_TYPE:
+            return webgl_parameter_int(object_type)
+        if pname == WEBGL_FRAMEBUFFER_ATTACHMENT_OBJECT_NAME:
+            return webgl_parameter_int(webgl_framebuffer_attachment_object_name(framebuffer, attachment))
+        if pname == WEBGL_FRAMEBUFFER_ATTACHMENT_TEXTURE_LEVEL:
+            if object_type != WEBGL_TEXTURE:
+                self.last_error = WEBGL_INVALID_ENUM
+                return webgl_parameter_int(0)
+            return webgl_parameter_int(0)
+        if pname == WEBGL_FRAMEBUFFER_ATTACHMENT_TEXTURE_CUBE_MAP_FACE:
+            if object_type != WEBGL_TEXTURE:
+                self.last_error = WEBGL_INVALID_ENUM
+                return webgl_parameter_int(0)
+            return webgl_parameter_int(0)
+        self.last_error = WEBGL_INVALID_ENUM
+        webgl_parameter_int(0)
+
+    me check_framebuffer_status(target: i32) -> i32:
+        if not self.ensure_context_available():
+            return 0
+        if target != WEBGL_FRAMEBUFFER:
+            self.last_error = WEBGL_INVALID_ENUM
+            return 0
+        if self.bound_framebuffer < 0:
+            return WEBGL_FRAMEBUFFER_COMPLETE
+        val framebuffer_index = self.find_framebuffer_index(self.bound_framebuffer)
+        if framebuffer_index < 0:
+            self.last_error = WEBGL_INVALID_VALUE
+            return 0
+        val framebuffer = self.framebuffers[framebuffer_index]
+        if not webgl_framebuffer_has_attachment(framebuffer):
+            return WEBGL_FRAMEBUFFER_INCOMPLETE_MISSING_ATTACHMENT
+        if not self.framebuffer_attachments_are_complete(framebuffer):
+            return WEBGL_FRAMEBUFFER_INCOMPLETE_ATTACHMENT
+        WEBGL_FRAMEBUFFER_COMPLETE
+
+    me draw_buffers(buffers: [i32]) -> bool:
+        if not self.ensure_context_available():
+            return false
+        if self.version < 2 and not self.is_extension_enabled("WEBGL_draw_buffers"):
+            self.last_error = WEBGL_INVALID_OPERATION
+            return false
+        if buffers.len() == 0 or buffers.len() > 1:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        val buffer = buffers[0]
+        if self.bound_framebuffer < 0:
+            if buffer != WEBGL_BACK and buffer != WEBGL_NONE:
+                self.last_error = WEBGL_INVALID_OPERATION
+                return false
+        else:
+            if buffer != WEBGL_COLOR_ATTACHMENT0 and buffer != WEBGL_NONE:
+                self.last_error = WEBGL_INVALID_OPERATION
+                return false
+        self.draw_buffers = webgl_copy_i32(buffers)
+        self.render_commands.push(webgl_render_command_draw_buffers(buffers))
+        true
+
+    me read_buffer(src: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        if self.version < 2:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return false
+        if self.bound_framebuffer < 0:
+            if src != WEBGL_BACK and src != WEBGL_NONE:
+                self.last_error = WEBGL_INVALID_OPERATION
+                return false
+        else:
+            if src != WEBGL_COLOR_ATTACHMENT0 and src != WEBGL_NONE:
+                self.last_error = WEBGL_INVALID_OPERATION
+                return false
+        self.read_buffer = src
+        self.render_commands.push(webgl_render_command_read_buffer(src))
+        true
+
+    me bind_buffer(target: i32, buffer_id: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        if target != WEBGL_ARRAY_BUFFER and target != WEBGL_ELEMENT_ARRAY_BUFFER:
+            self.last_error = WEBGL_INVALID_ENUM
+            return false
+        if buffer_id == -1:
+            if target == WEBGL_ARRAY_BUFFER:
+                self.bound_array_buffer = -1
+            else:
+                self.bound_element_array_buffer = -1
+            return true
+        val buffer_index = self.find_buffer_index(buffer_id)
+        if buffer_index < 0 or not self.buffers[buffer_index].valid:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        var buffer = self.buffers[buffer_index]
+        if buffer.target != 0 and buffer.target != target:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return false
+        buffer.target = target
+        self.buffers[buffer_index] = buffer
+        if target == WEBGL_ARRAY_BUFFER:
+            self.bound_array_buffer = buffer_id
+        else:
+            self.bound_element_array_buffer = buffer_id
+        self.render_commands.push(webgl_render_command_bind_buffer(target, buffer_id))
+        true
+
+    me buffer_data_size(target: i32, byte_length: i32, usage: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        if byte_length < 0:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        if not webgl_valid_buffer_usage(usage):
+            self.last_error = WEBGL_INVALID_ENUM
+            return false
+        val buffer_index = self.bound_buffer_index_for_target(target)
+        if buffer_index < 0:
+            return false
+        var buffer = self.buffers[buffer_index]
+        buffer.target = target
+        buffer.byte_length = byte_length
+        buffer.usage = usage
+        buffer.initialized = true
+        self.buffers[buffer_index] = buffer
+        self.render_commands.push(webgl_render_command_buffer_data(target, byte_length, usage))
+        true
+
+    me get_buffer_parameter(target: i32, pname: i32) -> WebGLParameterValue:
+        if not self.ensure_context_available():
+            return webgl_parameter_int(0)
+        val buffer_index = self.bound_buffer_index_for_target(target)
+        if buffer_index < 0:
+            return webgl_parameter_int(0)
+        val buffer = self.buffers[buffer_index]
+        if pname == WEBGL_BUFFER_SIZE:
+            return webgl_parameter_int(buffer.byte_length)
+        if pname == WEBGL_BUFFER_USAGE:
+            return webgl_parameter_int(buffer.usage)
+        self.last_error = WEBGL_INVALID_ENUM
+        webgl_parameter_int(0)
+
+    me bind_vertex_array(vertex_array_id: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        self.save_bound_vertex_array_state()
+        if vertex_array_id == -1:
+            self.bound_vertex_array = -1
+            self.bound_element_array_buffer = -1
+            self.vertex_attribs = webgl_default_vertex_attribs()
+            self.render_commands.push(webgl_render_command_bind_vertex_array(-1))
+            return true
+        val vertex_array_index = self.find_vertex_array_index(vertex_array_id)
+        if vertex_array_index < 0 or not self.vertex_arrays[vertex_array_index].valid:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        val vertex_array = self.vertex_arrays[vertex_array_index]
+        self.bound_vertex_array = vertex_array_id
+        self.bound_element_array_buffer = vertex_array.element_array_buffer_id
+        self.vertex_attribs = webgl_copy_vertex_attribs(vertex_array.vertex_attribs)
+        self.render_commands.push(webgl_render_command_bind_vertex_array(vertex_array_id))
+        true
+
+    me enable_vertex_attrib_array(index: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        if not webgl_valid_attrib_index(index):
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        var attrib = self.vertex_attribs[index]
+        attrib.enabled = true
+        self.vertex_attribs[index] = attrib
+        self.render_commands.push(webgl_render_command_vertex_attrib_enable(index, true))
+        true
+
+    me disable_vertex_attrib_array(index: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        if not webgl_valid_attrib_index(index):
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        var attrib = self.vertex_attribs[index]
+        attrib.enabled = false
+        self.vertex_attribs[index] = attrib
+        self.render_commands.push(webgl_render_command_vertex_attrib_enable(index, false))
+        true
+
+    me get_vertex_attrib(index: i32, pname: i32) -> WebGLParameterValue:
+        if not self.ensure_context_available():
+            return webgl_parameter_int(0)
+        if not webgl_valid_attrib_index(index):
+            self.last_error = WEBGL_INVALID_VALUE
+            return webgl_parameter_int(0)
+        val attrib = self.vertex_attribs[index]
+        if pname == WEBGL_VERTEX_ATTRIB_ARRAY_ENABLED:
+            return webgl_parameter_bool(attrib.enabled)
+        if pname == WEBGL_VERTEX_ATTRIB_ARRAY_SIZE:
+            return webgl_parameter_int(attrib.size)
+        if pname == WEBGL_VERTEX_ATTRIB_ARRAY_STRIDE:
+            return webgl_parameter_int(attrib.stride)
+        if pname == WEBGL_VERTEX_ATTRIB_ARRAY_TYPE:
+            return webgl_parameter_int(attrib.data_type)
+        if pname == WEBGL_VERTEX_ATTRIB_ARRAY_NORMALIZED:
+            return webgl_parameter_bool(attrib.normalized)
+        if pname == WEBGL_VERTEX_ATTRIB_ARRAY_BUFFER_BINDING:
+            return webgl_parameter_int(attrib.buffer_id)
+        if pname == WEBGL_VERTEX_ATTRIB_ARRAY_POINTER:
+            return webgl_parameter_int(attrib.offset)
+        if pname == WEBGL_VERTEX_ATTRIB_ARRAY_DIVISOR:
+            return webgl_parameter_int(attrib.divisor)
+        if pname == WEBGL_CURRENT_VERTEX_ATTRIB:
+            return webgl_parameter_float_list([attrib.current_x, attrib.current_y, attrib.current_z, attrib.current_w])
+        self.last_error = WEBGL_INVALID_ENUM
+        webgl_parameter_int(0)
+
+    me get_vertex_attrib_offset(index: i32, pname: i32) -> i32:
+        if not self.ensure_context_available():
+            return 0
+        if not webgl_valid_attrib_index(index):
+            self.last_error = WEBGL_INVALID_VALUE
+            return 0
+        if pname != WEBGL_VERTEX_ATTRIB_ARRAY_POINTER:
+            self.last_error = WEBGL_INVALID_ENUM
+            return 0
+        self.vertex_attribs[index].offset
+
+    me vertex_attrib_pointer(index: i32, size: i32, data_type: i32, normalized: bool, stride: i32, offset: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        if not webgl_valid_attrib_index(index) or size < 1 or size > 4 or stride < 0 or stride > 255 or offset < 0:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        val type_bytes = webgl_vertex_attrib_type_bytes(data_type)
+        if type_bytes == 0:
+            self.last_error = WEBGL_INVALID_ENUM
+            return false
+        if stride % type_bytes != 0 or offset % type_bytes != 0:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return false
+        if self.bound_array_buffer < 0:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return false
+        val buffer_index = self.find_buffer_index(self.bound_array_buffer)
+        if buffer_index < 0 or not self.buffers[buffer_index].initialized:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return false
+        var attrib = self.vertex_attribs[index]
+        attrib.size = size
+        attrib.data_type = data_type
+        attrib.normalized = normalized
+        attrib.stride = stride
+        attrib.offset = offset
+        attrib.buffer_id = self.bound_array_buffer
+        self.vertex_attribs[index] = attrib
+        self.render_commands.push(webgl_render_command_vertex_attrib_pointer(index, size, data_type, normalized, stride, offset, self.bound_array_buffer))
+        true
+
+    me vertex_attrib_divisor(index: i32, divisor: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        if not webgl_valid_attrib_index(index):
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        if divisor < 0:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        var attrib = self.vertex_attribs[index]
+        attrib.divisor = divisor
+        self.vertex_attribs[index] = attrib
+        self.render_commands.push(webgl_render_command_vertex_attrib_divisor(index, divisor))
+        true
+
+    me vertex_attrib_4f(index: i32, x: f64, y: f64, z: f64, w: f64) -> bool:
+        if not self.ensure_context_available():
+            return false
+        if not webgl_valid_attrib_index(index):
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        var attrib = self.vertex_attribs[index]
+        attrib.current_x = x
+        attrib.current_y = y
+        attrib.current_z = z
+        attrib.current_w = w
+        self.vertex_attribs[index] = attrib
+        self.render_commands.push(webgl_render_command_vertex_attrib_4f(index, x, y, z, w))
+        true
+
+    me vertex_attrib_1f(index: i32, x: f64) -> bool:
+        self.vertex_attrib_4f(index, x, 0.0, 0.0, 1.0)
+
+    me vertex_attrib_2f(index: i32, x: f64, y: f64) -> bool:
+        self.vertex_attrib_4f(index, x, y, 0.0, 1.0)
+
+    me vertex_attrib_3f(index: i32, x: f64, y: f64, z: f64) -> bool:
+        self.vertex_attrib_4f(index, x, y, z, 1.0)
+
+    me vertex_attrib_1fv(index: i32, values: [f64]) -> bool:
+        if values.len() < 1:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        self.vertex_attrib_1f(index, values[0])
+
+    me vertex_attrib_2fv(index: i32, values: [f64]) -> bool:
+        if values.len() < 2:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        self.vertex_attrib_2f(index, values[0], values[1])
+
+    me vertex_attrib_3fv(index: i32, values: [f64]) -> bool:
+        if values.len() < 3:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        self.vertex_attrib_3f(index, values[0], values[1], values[2])
+
+    me vertex_attrib_4fv(index: i32, values: [f64]) -> bool:
+        if values.len() < 4:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        self.vertex_attrib_4f(index, values[0], values[1], values[2], values[3])
+
+    me draw_arrays(mode: i32, first: i32, count: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        if webgl_valid_draw_mode(mode) == WebGLCheck.Invalid:
+            self.last_error = WEBGL_INVALID_ENUM
+            return false
+        if first < 0 or count < 0:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        if not self.bound_framebuffer_is_complete():
+            self.last_error = WEBGL_INVALID_FRAMEBUFFER_OPERATION
+            return false
+        if self.current_program_id < 0 or not self.webgl_has_enabled_vertex_source():
+            self.last_error = WEBGL_INVALID_OPERATION
+            return false
+        self.draw_call_count = self.draw_call_count + 1
+        self.last_draw_mode = mode
+        self.last_draw_count = count
+        self.render_commands.push(webgl_render_command_draw_arrays(mode, first, count))
+        true
+
+    me draw_arrays_instanced(mode: i32, first: i32, count: i32, instance_count: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        if webgl_valid_draw_mode(mode) == WebGLCheck.Invalid:
+            self.last_error = WEBGL_INVALID_ENUM
+            return false
+        if first < 0 or count < 0 or instance_count < 0:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        if not self.bound_framebuffer_is_complete():
+            self.last_error = WEBGL_INVALID_FRAMEBUFFER_OPERATION
+            return false
+        if self.current_program_id < 0 or not self.webgl_has_enabled_vertex_source():
+            self.last_error = WEBGL_INVALID_OPERATION
+            return false
+        self.draw_call_count = self.draw_call_count + 1
+        self.last_draw_mode = mode
+        self.last_draw_count = count
+        self.render_commands.push(webgl_render_command_draw_arrays_instanced(mode, first, count, instance_count))
+        true
+
+    me draw_elements(mode: i32, count: i32, element_type: i32, offset: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        if webgl_valid_draw_mode(mode) == WebGLCheck.Invalid:
+            self.last_error = WEBGL_INVALID_ENUM
+            return false
+        if count < 0 or offset < 0:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        if not self.bound_framebuffer_is_complete():
+            self.last_error = WEBGL_INVALID_FRAMEBUFFER_OPERATION
+            return false
+        if self.current_program_id < 0 or not self.webgl_has_enabled_vertex_source():
+            self.last_error = WEBGL_INVALID_OPERATION
+            return false
+        if not self.webgl_valid_index_type(element_type):
+            self.last_error = WEBGL_INVALID_ENUM
+            return false
+        val index_buffer = self.bound_buffer_index_for_target(WEBGL_ELEMENT_ARRAY_BUFFER)
+        if index_buffer < 0:
+            return false
+        if not self.buffers[index_buffer].initialized:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return false
+        self.indexed_draw_call_count = self.indexed_draw_call_count + 1
+        self.last_draw_mode = mode
+        self.last_draw_count = count
+        self.render_commands.push(webgl_render_command_draw_elements(mode, count, element_type, offset))
+        true
+
+    me draw_elements_instanced(mode: i32, count: i32, element_type: i32, offset: i32, instance_count: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        if webgl_valid_draw_mode(mode) == WebGLCheck.Invalid:
+            self.last_error = WEBGL_INVALID_ENUM
+            return false
+        if count < 0 or offset < 0 or instance_count < 0:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        if not self.bound_framebuffer_is_complete():
+            self.last_error = WEBGL_INVALID_FRAMEBUFFER_OPERATION
+            return false
+        if self.current_program_id < 0 or not self.webgl_has_enabled_vertex_source():
+            self.last_error = WEBGL_INVALID_OPERATION
+            return false
+        if not self.webgl_valid_index_type(element_type):
+            self.last_error = WEBGL_INVALID_ENUM
+            return false
+        val index_buffer = self.bound_buffer_index_for_target(WEBGL_ELEMENT_ARRAY_BUFFER)
+        if index_buffer < 0:
+            return false
+        if not self.buffers[index_buffer].initialized:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return false
+        self.indexed_draw_call_count = self.indexed_draw_call_count + 1
+        self.last_draw_mode = mode
+        self.last_draw_count = count
+        self.render_commands.push(webgl_render_command_draw_elements_instanced(mode, count, element_type, offset, instance_count))
+        true
+
+    me read_pixels(x: i32, y: i32, width: i32, height: i32, format: i32, pixel_type: i32) -> [u8]:
+        if not self.ensure_context_available():
+            return []
+        if x < 0 or y < 0 or width < 0 or height < 0:
+            self.last_error = WEBGL_INVALID_VALUE
+            return []
+        val bytes_per_pixel = webgl_texture_pixel_bytes(format, pixel_type)
+        if bytes_per_pixel == 0:
+            self.last_error = WEBGL_INVALID_ENUM
+            return []
+        if not self.bound_framebuffer_is_complete():
+            self.last_error = WEBGL_INVALID_FRAMEBUFFER_OPERATION
+            return []
+        val required = webgl_required_texture_bytes_safe(width, height, bytes_per_pixel, self.pack_alignment)
+        if required < 0:
+            self.last_error = WEBGL_INVALID_VALUE
+            return []
+        self.render_commands.push(webgl_render_command_read_pixels(x, y, width, height, format, pixel_type))
+        webgl_zero_bytes(required)
+
+    me pixel_store_i(pname: i32, param: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        if pname == WEBGL_PACK_ALIGNMENT:
+            if param != 1 and param != 2 and param != 4 and param != 8:
+                self.last_error = WEBGL_INVALID_VALUE
+                return false
+            self.pack_alignment = param
+            self.render_commands.push(webgl_render_command_pixel_store(pname, param))
+            return true
+        if pname == WEBGL_UNPACK_ALIGNMENT:
+            if param != 1 and param != 2 and param != 4 and param != 8:
+                self.last_error = WEBGL_INVALID_VALUE
+                return false
+            self.unpack_alignment = param
+            self.render_commands.push(webgl_render_command_pixel_store(pname, param))
+            return true
+        if pname == WEBGL_UNPACK_FLIP_Y_WEBGL:
+            self.unpack_flip_y = param != 0
+            self.render_commands.push(webgl_render_command_pixel_store(pname, param))
+            return true
+        if pname == WEBGL_UNPACK_PREMULTIPLY_ALPHA_WEBGL:
+            self.unpack_premultiply_alpha = param != 0
+            self.render_commands.push(webgl_render_command_pixel_store(pname, param))
+            return true
+        if pname == WEBGL_UNPACK_COLORSPACE_CONVERSION_WEBGL:
+            if param != WEBGL_BROWSER_DEFAULT_WEBGL and param != WEBGL_NO_ERROR:
+                self.last_error = WEBGL_INVALID_VALUE
+                return false
+            self.unpack_colorspace_conversion = param
+            self.render_commands.push(webgl_render_command_pixel_store(pname, param))
+            return true
+        self.last_error = WEBGL_INVALID_ENUM
+        false
+
+    me tex_parameter_i(target: i32, pname: i32, param: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        val texture_index = self.bound_texture_index_for_upload(target)
+        if texture_index < 0:
+            return false
+        var texture = self.textures[texture_index]
+        if pname == WEBGL_TEXTURE_MIN_FILTER:
+            if not webgl_valid_texture_min_filter(param):
+                self.last_error = WEBGL_INVALID_ENUM
+                return false
+            texture.min_filter = param
+            self.textures[texture_index] = texture
+            self.render_commands.push(webgl_render_command_tex_parameter(target, pname, param))
+            return true
+        if pname == WEBGL_TEXTURE_MAG_FILTER:
+            if param != WEBGL_NEAREST and param != WEBGL_LINEAR:
+                self.last_error = WEBGL_INVALID_ENUM
+                return false
+            texture.mag_filter = param
+            self.textures[texture_index] = texture
+            self.render_commands.push(webgl_render_command_tex_parameter(target, pname, param))
+            return true
+        if pname == WEBGL_TEXTURE_WRAP_S:
+            if not webgl_valid_texture_wrap(param):
+                self.last_error = WEBGL_INVALID_ENUM
+                return false
+            texture.wrap_s = param
+            self.textures[texture_index] = texture
+            self.render_commands.push(webgl_render_command_tex_parameter(target, pname, param))
+            return true
+        if pname == WEBGL_TEXTURE_WRAP_T:
+            if not webgl_valid_texture_wrap(param):
+                self.last_error = WEBGL_INVALID_ENUM
+                return false
+            texture.wrap_t = param
+            self.textures[texture_index] = texture
+            self.render_commands.push(webgl_render_command_tex_parameter(target, pname, param))
+            return true
+        self.last_error = WEBGL_INVALID_ENUM
+        false
+
+    me get_tex_parameter(target: i32, pname: i32) -> WebGLParameterValue:
+        if not self.ensure_context_available():
+            return webgl_parameter_int(0)
+        val texture_index = self.bound_texture_index_for_upload(target)
+        if texture_index < 0:
+            return webgl_parameter_int(0)
+        val texture = self.textures[texture_index]
+        if pname == WEBGL_TEXTURE_MIN_FILTER:
+            return webgl_parameter_int(texture.min_filter)
+        if pname == WEBGL_TEXTURE_MAG_FILTER:
+            return webgl_parameter_int(texture.mag_filter)
+        if pname == WEBGL_TEXTURE_WRAP_S:
+            return webgl_parameter_int(texture.wrap_s)
+        if pname == WEBGL_TEXTURE_WRAP_T:
+            return webgl_parameter_int(texture.wrap_t)
+        self.last_error = WEBGL_INVALID_ENUM
+        webgl_parameter_int(0)
+
+    me bind_sampler(texture_unit_index: i32, sampler_id: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        if self.version < 2:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return false
+        if texture_unit_index < 0 or texture_unit_index >= self.texture_units.len():
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        if sampler_id == -1:
+            var texture_unit = self.texture_units[texture_unit_index]
+            texture_unit.sampler_id = -1
+            self.texture_units[texture_unit_index] = texture_unit
+            self.render_commands.push(webgl_render_command_bind_sampler(texture_unit_index, -1))
+            return true
+        val sampler_index = self.find_sampler_index(sampler_id)
+        if sampler_index < 0 or not self.samplers[sampler_index].valid:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        var texture_unit = self.texture_units[texture_unit_index]
+        texture_unit.sampler_id = sampler_id
+        self.texture_units[texture_unit_index] = texture_unit
+        self.render_commands.push(webgl_render_command_bind_sampler(texture_unit_index, sampler_id))
+        true
+
+    me sampler_parameter_i(sampler_id: i32, pname: i32, param: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        if self.version < 2:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return false
+        val sampler_index = self.find_sampler_index(sampler_id)
+        if sampler_index < 0 or not self.samplers[sampler_index].valid:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        var sampler = self.samplers[sampler_index]
+        if pname == WEBGL_TEXTURE_MIN_FILTER:
+            if not webgl_valid_texture_min_filter(param):
+                self.last_error = WEBGL_INVALID_ENUM
+                return false
+            sampler.min_filter = param
+            self.samplers[sampler_index] = sampler
+            self.render_commands.push(webgl_render_command_sampler_parameter(sampler_id, pname, param))
+            return true
+        if pname == WEBGL_TEXTURE_MAG_FILTER:
+            if param != WEBGL_NEAREST and param != WEBGL_LINEAR:
+                self.last_error = WEBGL_INVALID_ENUM
+                return false
+            sampler.mag_filter = param
+            self.samplers[sampler_index] = sampler
+            self.render_commands.push(webgl_render_command_sampler_parameter(sampler_id, pname, param))
+            return true
+        if pname == WEBGL_TEXTURE_WRAP_S:
+            if not webgl_valid_texture_wrap(param):
+                self.last_error = WEBGL_INVALID_ENUM
+                return false
+            sampler.wrap_s = param
+            self.samplers[sampler_index] = sampler
+            self.render_commands.push(webgl_render_command_sampler_parameter(sampler_id, pname, param))
+            return true
+        if pname == WEBGL_TEXTURE_WRAP_T:
+            if not webgl_valid_texture_wrap(param):
+                self.last_error = WEBGL_INVALID_ENUM
+                return false
+            sampler.wrap_t = param
+            self.samplers[sampler_index] = sampler
+            self.render_commands.push(webgl_render_command_sampler_parameter(sampler_id, pname, param))
+            return true
+        self.last_error = WEBGL_INVALID_ENUM
+        false
+
+    me get_sampler_parameter(sampler_id: i32, pname: i32) -> WebGLParameterValue:
+        if not self.ensure_context_available():
+            return webgl_parameter_int(0)
+        val sampler_index = self.find_sampler_index(sampler_id)
+        if sampler_index < 0 or not self.samplers[sampler_index].valid:
+            self.last_error = WEBGL_INVALID_VALUE
+            return webgl_parameter_int(0)
+        val sampler = self.samplers[sampler_index]
+        if pname == WEBGL_TEXTURE_MIN_FILTER:
+            return webgl_parameter_int(sampler.min_filter)
+        if pname == WEBGL_TEXTURE_MAG_FILTER:
+            return webgl_parameter_int(sampler.mag_filter)
+        if pname == WEBGL_TEXTURE_WRAP_S:
+            return webgl_parameter_int(sampler.wrap_s)
+        if pname == WEBGL_TEXTURE_WRAP_T:
+            return webgl_parameter_int(sampler.wrap_t)
+        self.last_error = WEBGL_INVALID_ENUM
+        webgl_parameter_int(0)
+
+    me generate_mipmap(target: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        val texture_index = self.bound_texture_index_for_upload(target)
+        if texture_index < 0:
+            return false
+        var texture = self.textures[texture_index]
+        if not texture.initialized or texture.width <= 0 or texture.height <= 0:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return false
+        if self.version == 1 and (webgl_texture_size_class(texture.width) == WebGLTextureSize.NonPowerOfTwo or webgl_texture_size_class(texture.height) == WebGLTextureSize.NonPowerOfTwo):
+            self.last_error = WEBGL_INVALID_OPERATION
+            return false
+        texture.mipmap_generated = true
+        self.textures[texture_index] = texture
+        self.render_commands.push(webgl_render_command_generate_mipmap(target))
+        true
+
+    me tex_image_2d(target: i32, level: i32, internal_format: i32, width: i32, height: i32, border: i32, format: i32, pixel_type: i32, pixels: [u8]) -> bool:
+        if not self.ensure_context_available():
+            return false
+        val texture_index = self.bound_texture_index_for_upload(target)
+        if texture_index < 0:
+            return false
+        if not self.validate_texture_image_args(level, internal_format, width, height, border, format, pixel_type):
+            return false
+        val bytes_per_pixel = webgl_texture_pixel_bytes(format, pixel_type)
+        val required = webgl_required_texture_bytes_safe(width, height, bytes_per_pixel, self.unpack_alignment)
+        if required < 0:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        if pixels.len() > 0 and pixels.len() < required:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return false
+        var texture = self.textures[texture_index]
+        texture.target = webgl_texture_binding_target(target)
+        texture.width = width
+        texture.height = height
+        texture.level = level
+        texture.internal_format = internal_format
+        texture.format = format
+        texture.pixel_type = pixel_type
+        texture.initialized = true
+        texture.mipmap_generated = false
+        if pixels.len() == 0:
+            texture.pixels = webgl_zero_bytes(required)
+        else:
+            texture.pixels = webgl_copy_bytes(pixels, required)
+        self.textures[texture_index] = texture
+        self.render_commands.push(webgl_render_command_tex_image_2d(target, level, internal_format, width, height, format, pixel_type))
+        true
+
+    me tex_sub_image_2d(target: i32, level: i32, xoffset: i32, yoffset: i32, width: i32, height: i32, format: i32, pixel_type: i32, pixels: [u8]) -> bool:
+        if not self.ensure_context_available():
+            return false
+        val texture_index = self.bound_texture_index_for_upload(target)
+        if texture_index < 0:
+            return false
+        var texture = self.textures[texture_index]
+        if not texture.initialized:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return false
+        if level != texture.level:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        if format != texture.format or pixel_type != texture.pixel_type:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return false
+        if xoffset < 0 or yoffset < 0 or width < 0 or height < 0 or xoffset + width > texture.width or yoffset + height > texture.height:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        val bpp = webgl_texture_pixel_bytes(format, pixel_type)
+        if bpp == 0:
+            self.last_error = WEBGL_INVALID_ENUM
+            return false
+        val required = webgl_required_texture_bytes_safe(width, height, bpp, self.unpack_alignment)
+        if required < 0:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        if pixels.len() < required:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return false
+        texture.pixels = webgl_replace_texture_region(texture.pixels, texture.width, bpp, xoffset, yoffset, width, height, self.unpack_alignment, pixels)
+        self.textures[texture_index] = texture
+        self.render_commands.push(webgl_render_command_tex_sub_image_2d(target, level, xoffset, yoffset, width, height, format, pixel_type))
+        true
+
+    me compressed_tex_image_2d(target: i32, level: i32, internal_format: i32, width: i32, height: i32, border: i32, data: [u8]) -> bool:
+        if not self.ensure_context_available():
+            return false
+        val texture_index = self.bound_texture_index_for_upload(target)
+        if texture_index < 0:
+            return false
+        if level != 0 or width < 0 or height < 0 or border != 0:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        if not webgl_supported_compressed_texture_format(internal_format):
+            self.last_error = WEBGL_INVALID_ENUM
+            return false
+        false
+
+    me compressed_tex_sub_image_2d(target: i32, level: i32, xoffset: i32, yoffset: i32, width: i32, height: i32, format: i32, data: [u8]) -> bool:
+        if not self.ensure_context_available():
+            return false
+        val texture_index = self.bound_texture_index_for_upload(target)
+        if texture_index < 0:
+            return false
+        if level != 0 or xoffset < 0 or yoffset < 0 or width < 0 or height < 0:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        if not webgl_supported_compressed_texture_format(format):
+            self.last_error = WEBGL_INVALID_ENUM
+            return false
+        false
+
+    me copy_tex_image_2d(target: i32, level: i32, internal_format: i32, x: i32, y: i32, width: i32, height: i32, border: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        val texture_index = self.bound_texture_index_for_upload(target)
+        if texture_index < 0:
+            return false
+        if not self.validate_texture_image_args(level, internal_format, width, height, border, internal_format, WEBGL_UNSIGNED_BYTE):
+            return false
+        val bpp = webgl_texture_pixel_bytes(internal_format, WEBGL_UNSIGNED_BYTE)
+        val required = webgl_required_texture_bytes_safe(width, height, bpp, 1)
+        if required < 0:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        var texture = self.textures[texture_index]
+        texture.target = webgl_texture_binding_target(target)
+        texture.width = width
+        texture.height = height
+        texture.level = level
+        texture.internal_format = internal_format
+        texture.format = internal_format
+        texture.pixel_type = WEBGL_UNSIGNED_BYTE
+        texture.initialized = true
+        texture.mipmap_generated = false
+        texture.pixels = webgl_zero_bytes(required)
+        self.textures[texture_index] = texture
+        self.render_commands.push(webgl_render_command_copy_tex_image_2d(target, level, internal_format, x, y, width, height))
+        true
+
+    me copy_tex_sub_image_2d(target: i32, level: i32, xoffset: i32, yoffset: i32, x: i32, y: i32, width: i32, height: i32) -> bool:
+        if not self.ensure_context_available():
+            return false
+        val texture_index = self.bound_texture_index_for_upload(target)
+        if texture_index < 0:
+            return false
+        var texture = self.textures[texture_index]
+        if not texture.initialized:
+            self.last_error = WEBGL_INVALID_OPERATION
+            return false
+        if level != texture.level:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        if xoffset < 0 or yoffset < 0 or width < 0 or height < 0 or xoffset + width > texture.width or yoffset + height > texture.height:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        val bpp = webgl_texture_pixel_bytes(texture.format, texture.pixel_type)
+        if bpp == 0:
+            self.last_error = WEBGL_INVALID_ENUM
+            return false
+        val required = webgl_required_texture_bytes_safe(width, height, bpp, 1)
+        if required < 0:
+            self.last_error = WEBGL_INVALID_VALUE
+            return false
+        val pixels = webgl_zero_bytes(required)
+        texture.pixels = webgl_replace_texture_region(texture.pixels, texture.width, bpp, xoffset, yoffset, width, height, 1, pixels)
+        texture.mipmap_generated = false
+        self.textures[texture_index] = texture
+        self.render_commands.push(webgl_render_command_copy_tex_sub_image_2d(target, level, xoffset, yoffset, x, y, width, height))
+        true

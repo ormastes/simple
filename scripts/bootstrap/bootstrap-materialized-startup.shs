@@ -17,7 +17,14 @@ bootstrap_materialized_startup() {
       --allow-receipt-root "$bms_output" \
       "$bms_root" || return 1
   fi
-  if ! bootstrap_stage3_materialized_git_state "$bms_root" "$bms_state" "$bms_receipt"; then
+  bootstrap_stage3_materialized_git_state "$bms_root" "$bms_state" "$bms_receipt"
+  bms_rc=$?
+  if [ "$bms_rc" -eq 3 ]; then
+    # Fail closed, but do not advise --undo: the receipt was never judged.
+    echo "error: Windows materialization consumer timed out validating $bms_receipt; keep the materialization and retry with a larger BOOTSTRAP_STAGE3_GIT_MAX_MILLISECONDS (ceiling 1200000)." >&2
+    return 1
+  fi
+  if [ "$bms_rc" -ne 0 ]; then
     echo "error: Windows materialization receipt is invalid: $bms_receipt" >&2
     echo 'Reprepare with materialize-symlinks-windows.shs --undo, then --strict-missing --receipt with a new receipt path; supply that receipt before retrying.' >&2
     return 1
@@ -25,4 +32,15 @@ bootstrap_materialized_startup() {
   SIMPLE_WINDOWS_MATERIALIZED_LINKS_RECEIPT=$bms_receipt
   export SIMPLE_WINDOWS_MATERIALIZED_LINKS_RECEIPT
   echo "Windows materialization receipt verified: $bms_receipt"
+}
+
+# Admitted resume lanes exec their resumer before the wrapper's own startup
+# would run, so they must call the same owner first. Otherwise the resumer
+# recomputes git state in plain mode and its dirty fingerprint can never match
+# the materialization-aware one bound into the Stage 2 preflight receipt.
+bootstrap_materialized_resume_startup() {
+  case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*|Windows*) ;; *) return 0 ;; esac
+  command -v bootstrap_stage3_materialized_git_state >/dev/null 2>&1 ||
+    . "$1/scripts/check/lib/bootstrap-stage3/authority.shs" || return 1
+  bootstrap_materialized_startup "$1" "$2"
 }

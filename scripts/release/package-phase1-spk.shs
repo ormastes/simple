@@ -2,23 +2,51 @@
 # Package a bootstrap compiler built outside the release matrix (FreeBSD VM,
 # Linux riscv64 cross) the same way the matrix rows do, minus MCP/test-runner.
 #
-#   sh scripts/release/package-phase1-spk.shs <version> <platform> <binary> [phase]
+#   sh scripts/release/package-phase1-spk.shs <version> <platform> <binary> [phase] [essentials-dir]
+#
+# essentials-dir (optional): the phase ladder's essentials/ handoff; every
+# binary in it whose STATUS line is "ok" ships in bin/, and STATUS is kept as
+# bin/ESSENTIALS so a consumer can see what is missing and why.
 set -eu
-version=$1 platform=$2 binary=$3 phase=${4:-1}
+version=$1 platform=$2 binary=$3 phase=${4:-1} essentials=${5:-}
 pkg="simple-bootstrap-${version}-${platform}"
 rm -rf "$pkg" && mkdir -p "$pkg/bin"
 case $platform in
-  windows-*) cp "$binary" "$pkg/bin/simple.exe" ;;   # resolver looks for bin/simple.exe
-  *) cp "$binary" "$pkg/bin/simple-runtime" ;;
+  windows-*|*-windows-*)
+    # Resolver looks for bin/simple.exe; never write a POSIX bin/simple wrapper
+    # here — on Windows MSYS2 `> "$pkg/bin/simple"` clobbers bin/simple.exe.
+    cp "$binary" "$pkg/bin/simple.exe"
+    chmod +x "$pkg/bin/simple.exe"
+    cmp -s "$binary" "$pkg/bin/simple.exe" || { echo "FAIL — bin/simple.exe does not match input binary" >&2; exit 1; }
+    ;;
+  *)
+    cp "$binary" "$pkg/bin/simple-runtime"
+    chmod +x "$pkg/bin/simple-runtime"
+    printf '%s\n' '#!/bin/sh' 'SCRIPT_DIR=$(dirname -- "$0")' \
+      'export SIMPLE_ASSET_ROOT="$SCRIPT_DIR/.."' 'exec "$SCRIPT_DIR/simple-runtime" "$@"' > "$pkg/bin/simple"
+    chmod +x "$pkg/bin/simple"
+    ;;
 esac
-chmod +x "$pkg"/bin/simple*
-printf '%s\n' '#!/bin/sh' 'SCRIPT_DIR=$(dirname -- "$0")' \
-  'export SIMPLE_ASSET_ROOT="$SCRIPT_DIR/.."' 'exec "$SCRIPT_DIR/simple-runtime" "$@"' > "$pkg/bin/simple"
-chmod +x "$pkg/bin/simple"
 echo "$phase" > "$pkg/PHASE"
+if [ -n "$essentials" ] && [ -f "$essentials/STATUS" ]; then
+  cp "$essentials/STATUS" "$pkg/bin/ESSENTIALS"
+  sed -n 's/=ok$//p' "$essentials/STATUS" | while read -r name; do
+    for f in "$essentials/$name" "$essentials/$name.exe"; do
+      if [ -f "$f" ]; then cp "$f" "$pkg/bin/" && chmod +x "$pkg/bin/${f##*/}"; fi
+    done
+  done
+fi
 rm -rf src/compiler_rust/target   # build output; never packaged
+cp_flags=-r
+case "$platform:$(uname -s 2>/dev/null || true)" in
+  windows-*:*|*-windows-*:*|*:MINGW*|*:MSYS*|*:CYGWIN*) cp_flags=-rL ;;
+esac
+if [ -d tools/counterpart/sdk/c ]; then
+  mkdir -p "$pkg/tools/counterpart/sdk"
+  cp "$cp_flags" tools/counterpart/sdk/c "$pkg/tools/counterpart/sdk/c"
+fi
 for entry in lib src examples assets README.md LICENSE THIRD_PARTY_NOTICES.md; do
-  [ -e "$entry" ] && cp -r "$entry" "$pkg/"
+  [ -e "$entry" ] && cp "$cp_flags" "$entry" "$pkg/"
 done
 # Same development-only pruning as the matrix packaging step.
 rm -rf "$pkg/src/app/vscode_extension/node_modules" "$pkg/src/app/vscode_extension/.vscode-test" "$pkg/build"

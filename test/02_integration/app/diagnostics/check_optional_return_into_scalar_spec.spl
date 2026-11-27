@@ -1,0 +1,111 @@
+# Tracks: optional_return_into_scalar_fn_accepted_2026-11-26
+"""Typed-return contract: an Option value must not be returned from a scalar fn.
+
+`Dict.get` returns `V?` (seed 9d21958ee39, 2026-11-03). Returning it bare
+from a `-> i64` function used to be admitted: `simple check` warned
+"declared return type mismatch admitted" and passed, and `simple run` printed
+the Option heap word (aarch64 2026-11-26: 6057657724097 / 5904280416257).
+The seed now rejects it during lowering with error[E1003], and a lowering type
+error fails `simple run` instead of falling back to the interpreter.
+
+Both bad probes must exit non-zero, name the mismatch, and print no heap
+word. A float returned from `-> i64` (owner rule) must fail the same way.
+The `?? 0` form must keep running and print exactly 7. Each probe is capped at 120 s and its temp dir is removed.
+Binary: $SIMPLE_BINARY if set, else bin/simple. The probe unsets the runner's
+SIMPLE_EXECUTION_MODE/SIMPLE_RUNTIME_MODE, which would force the interpreter.
+"""
+use std.spec
+use std.io_runtime.{process_run_timeout, env_get, dir_remove_all}
+use std.nogc_sync_mut.io.file_ops.{file_write, secure_temp_dir}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+
+fn simple_binary() -> text:
+    val from_env = env_get("SIMPLE_BINARY")
+    if from_env != "": return from_env
+    "bin/simple"
+
+# Writes `source` to a fresh private dir, runs it (120 s cap), removes the dir;
+# returns (exit code, stdout, stderr).
+fn run_probe(source: text) -> (i32, text, text):
+    val dir = secure_temp_dir(get_temp_dir(), "simple-optional-return-").unwrap()
+    val path = dir + "/probe.spl"
+    expect(file_write(path, source)).to_equal(true)
+    val (stdout, stderr, code) = process_run_timeout("/usr/bin/env", ["-u", "SIMPLE_EXECUTION_MODE", "-u", "SIMPLE_RUNTIME_MODE", simple_binary(), "run", path], 120000)
+    # Guarded: only ever remove the private dir this probe created.
+    if dir != "" and dir.contains("simple-optional-return-"):
+        dir_remove_all(dir)
+    (code, stdout, stderr)
+
+# A line of 10+ digits is an Option heap word leaking through `-> i64`.
+fn has_heap_word_line(out: text) -> bool:
+    for line in out.split("\n"):
+        val t = line.trim()
+        var rest = t
+        for d in ["0", "1", "2", "3", "4", "5", "6", "7", "8", "9"]:
+            rest = rest.replace(d, "")
+        if t.len() >= 10 and rest == "":
+            return true
+    false
+
+# Probe sources are triple-quoted (raw): a `{1: 7}` dict literal inside an
+# ordinary "..." string is interpolation and would silently become "1".
+val DICT_GET_BARE = """fn lookup() -> i64:
+    val map: Dict<i64, i64> = {1: 7}
+    return map.get(1)
+
+fn main() -> i64:
+    print lookup()
+    0
+"""
+
+val OPTIONAL_BARE = """fn maybe() -> i64?:
+    return Some(7)
+
+fn value() -> i64:
+    return maybe()
+
+fn main() -> i64:
+    print value()
+    0
+"""
+
+val FLOAT_BARE = """fn f() -> i64:
+    return 1.5
+
+fn main() -> i64:
+    print f()
+    0
+"""
+
+val DICT_GET_UNWRAPPED = """fn lookup() -> i64:
+    val map: Dict<i64, i64> = {1: 7}
+    return map.get(1) ?? 0
+
+fn main() -> i64:
+    print lookup()
+    0
+"""
+
+describe "optional value returned from a scalar fn":
+    it "rejects a Dict.get Option returned from -> i64":
+        val (code, stdout, stderr) = run_probe(DICT_GET_BARE)
+        expect(code != 0).to_equal(true)
+        expect(has_heap_word_line(stdout)).to_equal(false)
+        expect(stderr.contains("`lookup` is declared to return `i64` but returns `i64?`")).to_equal(true)
+
+    it "rejects an explicit i64? returned from -> i64":
+        val (code, stdout, stderr) = run_probe(OPTIONAL_BARE)
+        expect(code != 0).to_equal(true)
+        expect(has_heap_word_line(stdout)).to_equal(false)
+        expect(stderr.contains("`value` is declared to return `i64` but returns `i64?`")).to_equal(true)
+
+    it "rejects a float returned from -> i64":
+        val (code, stdout, stderr) = run_probe(FLOAT_BARE)
+        expect(code != 0).to_equal(true)
+        expect(stdout.contains("1.5")).to_equal(false)
+        expect(stderr.contains("error[E1003]")).to_equal(true)
+
+    it "keeps running the unwrapped form":
+        val (code, stdout, stderr) = run_probe(DICT_GET_UNWRAPPED)
+        expect(code).to_equal(0)
+        expect(stdout.trim()).to_equal("7")

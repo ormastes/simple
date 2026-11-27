@@ -1,0 +1,110 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-PERF
+# @tag: perf, engine2d, interpreter
+
+"""
+# Interpreted Engine2D Full-Resolution Render Budget
+
+## Overview
+
+Phase budgets for the interpreter-lane `cpu` Engine2D at the 640x480 size named
+by `doc/08_tracking/bug/interpreted_engine2d_full_res_render_slow_2026-07-02.md`.
+Each budget covers one whole-surface phase that used to be a per-pixel
+interpreted loop:
+
+- surface creation (`SoftwareBackend.init_with_initial_color` fill),
+- full-frame readback (`engine2d_readback_with_identity` provenance checksum).
+
+Budgets sit between the measured before and after figures (seed, aarch64 DGX
+Spark, 2026-11-13) so host noise on either side does not flip the verdict:
+
+| phase | before | after | budget |
+|-------|--------|-------|--------|
+| create 640x480 | ~180 ms | ~5 ms | 60 ms |
+| readback 640x480 | ~425 ms | ~90 ms | 200 ms |
+
+Every timing is the best of three so a single scheduler stall cannot fail it.
+The readback checksum is also compared against the original per-pixel
+definition, so the faster fold cannot drift from the published value.
+
+Whole-pipeline numbers (cold/warm compose, RSS, frame hash) come from
+`test/05_perf/gui/bench_ui_draw_ir_pipeline_render.spl`.
+
+## Syntax
+
+```sh
+bin/simple test test/05_perf/gui/engine2d_interp_full_res_render_budget_spec.spl
+```
+"""
+
+use std.spec
+use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
+
+extern fn rt_time_now_nanos() -> i64
+
+val W: i32 = 640
+val H: i32 = 480
+val CREATE_BUDGET_MS: i64 = 60
+val READBACK_BUDGET_MS: i64 = 200
+
+fn reference_checksum(pixels: [u32]) -> i64:
+    # The original definition: modulo folded in at every pixel.
+    var checksum: i64 = 0
+    var i = 0
+    while i < pixels.len():
+        checksum = (checksum + pixels[i].to_i64()) % 2147483647
+        i = i + 1
+    checksum
+
+fn best_create_ms() -> i64:
+    var best: i64 = 1000000
+    var k = 0
+    while k < 3:
+        val t0 = rt_time_now_nanos()
+        var engine = Engine2D.create_with_backend(W, H, "cpu")
+        val elapsed = (rt_time_now_nanos() - t0) / 1000000
+        engine.shutdown()
+        if elapsed < best:
+            best = elapsed
+        k = k + 1
+    best
+
+fn best_readback_ms(engine: Engine2D) -> i64:
+    var best: i64 = 1000000
+    var k = 0
+    while k < 3:
+        val t0 = rt_time_now_nanos()
+        val readback = engine.read_pixels_with_source()
+        val elapsed = (rt_time_now_nanos() - t0) / 1000000
+        if readback.pixels.len() == (W * H) and elapsed < best:
+            best = elapsed
+        k = k + 1
+    best
+
+describe "Interpreted Engine2D full-resolution render budget":
+    it "creates a 640x480 cpu surface within the create budget":
+        val create_ms = best_create_ms()
+        print "E2D_BUDGET create_ms={create_ms} budget_ms={CREATE_BUDGET_MS}"
+        expect(create_ms <= CREATE_BUDGET_MS).to_equal(true)
+
+    it "reads back a 640x480 frame within the readback budget":
+        var engine = Engine2D.create_with_backend(W, H, "cpu")
+        engine.clear(0xff000000u32)
+        engine.draw_rect_filled(1, 31, 638, 40, 0xff3b6ea5u32)
+        val readback_ms = best_readback_ms(engine)
+        engine.shutdown()
+        print "E2D_BUDGET readback_ms={readback_ms} budget_ms={READBACK_BUDGET_MS}"
+        expect(readback_ms <= READBACK_BUDGET_MS).to_equal(true)
+
+    it "keeps the readback checksum equal to the per-pixel definition":
+        var engine = Engine2D.create_with_backend(W, H, "cpu")
+        # High-bit and all-ones pixels: a sign-extending or wrapping fold
+        # would diverge from the reference on exactly these values.
+        engine.clear(0xffffffffu32)
+        engine.draw_rect_filled(0, 0, 320, 240, 0x80000000u32)
+        engine.draw_rect_filled(320, 240, 320, 240, 0xff3b6ea5u32)
+        val readback = engine.read_pixels_with_source()
+        engine.shutdown()
+        expect(readback.pixels.len()).to_equal(307200)
+        expect(readback.pixel_count).to_equal(307200)
+        expect(readback.checksum).to_equal(reference_checksum(readback.pixels))

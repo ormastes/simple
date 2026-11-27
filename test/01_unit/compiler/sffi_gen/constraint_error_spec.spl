@@ -1,0 +1,56 @@
+use std.spec.*
+use std.spec.step
+use std.common.constraint_error.{ConstraintError}
+
+struct Port:
+    raw: i32
+
+fn raw_port(v: i32) -> i32:
+    v
+
+# Same shape the generator emits (asserted against real generator output in
+# constrained_unit_facade_wire_spec.spl); the extern is replaced by raw_port.
+fn rt_net_port(v: i32) -> Result<Port, ConstraintError>:
+    val raw = raw_port(v)
+    if raw < 1 or raw > 65535:
+        return Err(ConstraintError.out_of_range("Port", raw, "1", "65535"))
+    Ok(Port(raw: raw))
+
+# @manual_section: constraint_error
+describe "ConstraintError":
+    """The stdlib error a generated constrained-unit facade returns."""
+
+    it "carries value and bounds":
+        # @req: RB-SFFI-02
+        step("Build an out-of-range error")
+        val e = ConstraintError.out_of_range("Port", 70000, "1", "65535")
+        expect(e.unit_name).to_equal("Port")
+        expect(e.value).to_equal(70000)
+        expect(e.min_text).to_equal("1")
+        expect(e.max_text).to_equal("65535")
+        expect(e.message).to_equal("Port value 70000 outside [1, 65535]")
+
+    it "marks an open side as unbounded":
+        # @req: RB-SFFI-02
+        step("Build an error with no maximum")
+        val e = ConstraintError.out_of_range("Count", -1, "0", "")
+        expect(e.message).to_equal("Count value -1 outside [0, +inf]")
+
+    it "lets a generated-shape facade return Err for an out-of-range raw value":
+        # @req: RB-SFFI-02
+        step("Call the facade with 0, below the minimum")
+        match rt_net_port(0):
+            case Err(e):
+                expect(e.value).to_equal(0)
+                expect(e.unit_name).to_equal("Port")
+            case Ok(_):
+                assert_true(false)
+
+    it "lets a generated-shape facade return Ok for an in-range raw value":
+        # @req: RB-SFFI-02
+        step("Call the facade with 8080")
+        match rt_net_port(8080):
+            case Ok(p):
+                expect(p.raw).to_equal(8080)
+            case Err(_):
+                assert_true(false)

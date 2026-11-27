@@ -1,0 +1,49 @@
+Nil-digest / unlistable-directory live-key source review (2026-10-31)
+
+Reviewed change: branch work/nil-return-fs-externs-20261031 (PR #5629), diff
+origin/release/1.0.0...HEAD of src/compiler/80.driver/driver_build/incremental.spl.
+rt_file_hash_sha256 now returns text? (nil = missing/unreadable/provider
+failure) instead of a non-64-char sentinel text, and directory walks use
+dir_list_optional instead of dir_list(...) ?? [].
+
+Re-reviewed bindings (Generated/LiveKey.lean, T-K1 / producer_stdlib_src):
+  native_build_compiler_source_fingerprint      (producer_compiler_src)
+  _native_build_compiler_executable_hash_uncached (producer_exe)
+  _native_build_runtime_provider_fingerprint_uncached (producer_runtime)
+  native_build_spl_tree_fingerprint             (producer_stdlib_src)
+
+Success path (every directory lists, every file hashes): unchanged.
+- dir_list(p) is defined as rt_dir_list(host_path_native(p)) ?? [] and
+  dir_list_optional(p) as rt_dir_list(host_path_native(p)); on a non-nil
+  listing both return the identical entry list, which is then sorted by the
+  same incremental_sorted_text.
+- Manifest rows keep the exact format "{full}|{size}|{digest}" (runtime:
+  "{entry}|{size}|{digest}"), same traversal order, same "\n" join, same
+  temp-file hashing, same 64-char check, and the same output forms
+  "sha256:{d}n{N}", "file-sha256:{d}", "dir-sha256:{d}n{N}", raw 64-hex exe
+  hash. The digest text is unwrap() of the same value previously returned.
+- Field set, component order and framing in the live key are untouched;
+  no other bound declaration (cache_key_frame, producer identity, scope key)
+  changed. Canonical bytes are therefore byte-identical to before.
+
+Failure path: previously an unreadable .spl file contributed an empty digest
+("path|size|") and an unlistable directory was treated as empty, so two
+different trees could collapse to the same manifest (a potential false hit).
+Now either condition returns "unfingerprintable-<pid>-<time_us>" for the
+whole component. Executable/runtime paths already fell back to ""/
+unfingerprintable on a non-64 digest; nil now takes the same fallback.
+The unfingerprintable value cannot equal any success-form value (different
+prefix) and embeds pid and microsecond time, so it does not equal a stored
+key from another run. The model treats each producer field as an opaque
+scalar; T-K1 (live_key_sound) needs only that equal encodings imply equal
+inputs. A fresh non-matching scalar can only produce a cache miss, never a
+false hit: a sound over-approximation. The change strictly removes the
+empty-digest / empty-listing aliasing noted above.
+
+Model impact: none. No Lean change required; LiveKey field list, enc,
+enc_inj and the per-field visibility theorems are unaffected. The model still
+assumes injective framing and collision-resistant digests.
+
+Validation: source-binding --update re-pinned only the four bindings listed
+above; the follow-up source-binding check passed. No cache encoding version,
+validation policy, or runtime ABI was changed by this review.

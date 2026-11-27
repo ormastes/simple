@@ -161,6 +161,7 @@ impl ModuleLoader {
         // Load sections with bounds checking
         let mut code_offset = 0usize;
         let mut data_offset = 0usize;
+        let mut interp_snapshot: Option<Vec<u8>> = None;
         let mut section_bases = vec![0usize; sections.len() + 1];
 
         for (idx, section) in sections.iter().enumerate() {
@@ -309,6 +310,23 @@ impl ModuleLoader {
                     }
                 }
 
+                // Interpreter fallback snapshot: not mapped, handed to the
+                // driver verbatim so it can re-seed the interpreter before the
+                // module's `rt_interp_call`-routed functions are reached.
+                SectionType::InterpSnapshot => {
+                    let actual_offset = base_offset + section.offset;
+                    reader.seek(SeekFrom::Start(actual_offset)).map_err(|e| {
+                        error!(offset = actual_offset, error = %e, "Failed to seek to interp snapshot section");
+                        LoadError::Io(e)
+                    })?;
+                    let mut payload = vec![0u8; section.size as usize];
+                    reader.read_exact(&mut payload).map_err(|e| {
+                        error!(section_idx = idx, size = section.size, error = %e, "Failed to read interp snapshot");
+                        LoadError::Io(e)
+                    })?;
+                    interp_snapshot = Some(payload);
+                }
+
                 _ => {
                     trace!(section_type = ?section.section_type, "Skipping unknown section type");
                 }
@@ -441,6 +459,7 @@ impl ModuleLoader {
             got_mem,
             symbols,
             version: 1,
+            interp_snapshot,
         })
     }
 

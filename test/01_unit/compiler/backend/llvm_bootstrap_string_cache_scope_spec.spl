@@ -1,0 +1,66 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+
+"""Bug llvm_bootstrap_string_cache_scope_escape_2026_10_25.
+
+The bootstrap string-global accumulator publishes its finished text into the
+module-level `_llvm_bootstrap_string_globals_text_cache`. When the LLVM
+object-path codegen scope was active, that text was scope-owned and dangled
+after scope end, so the adapter refused the scope under SIMPLE_BOOTSTRAP=1.
+`llvm_bootstrap_string_globals_retain_for_scope` now gives the cache an owned
+lifetime: called while the scope is paused, it finishes the builder into the
+cache and promotes the cache root, so it survives scope end with the accessor
+contract unchanged.
+"""
+use std.spec.{describe, it, expect}
+use compiler.backend._MirToLlvm.asm_constraints_helpers.{llvm_bootstrap_string_globals_reset,
+    llvm_bootstrap_string_globals_add, llvm_bootstrap_string_globals_text,
+    llvm_bootstrap_string_globals_retain_for_scope}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end}
+use std.nogc_sync_mut.io.file_ops.{file_read_text}
+
+val DECL_A: text = "@.str.bs.a = private unnamed_addr constant [6 x i8] c\"alpha\\00\""
+val DECL_B: text = "@.str.bs.b = private unnamed_addr constant [5 x i8] c\"beta\\00\""
+
+describe "bootstrap string-global cache across the codegen scope":
+    it "keeps cache text built inside a scope readable after scope end":
+        llvm_bootstrap_string_globals_reset()
+        expect(transient_scope_begin()).to_equal(true)
+        llvm_bootstrap_string_globals_add(DECL_A)
+        llvm_bootstrap_string_globals_add(DECL_B)
+        val in_scope = llvm_bootstrap_string_globals_text()
+        expect(transient_scope_pause()).to_equal(true)
+        expect(llvm_bootstrap_string_globals_retain_for_scope()).to_equal(true)
+        expect(transient_scope_end()).to_equal(true)
+        expect(transient_array_scope_state_v1()).to_equal(0)
+        # Churn the heap so a freed cache would be overwritten.
+        var churn: [text] = []
+        for i in 0..2000:
+            churn.push("churn-{i}-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+        val after = llvm_bootstrap_string_globals_text()
+        expect(after).to_equal("{DECL_A}\n{DECL_B}")
+        expect(in_scope.len()).to_equal(after.len())
+        llvm_bootstrap_string_globals_reset()
+
+    it "finishes a still-open builder before promoting and keeps late adds":
+        llvm_bootstrap_string_globals_reset()
+        expect(transient_scope_begin()).to_equal(true)
+        llvm_bootstrap_string_globals_add(DECL_A)
+        expect(transient_scope_pause()).to_equal(true)
+        expect(llvm_bootstrap_string_globals_retain_for_scope()).to_equal(true)
+        expect(transient_scope_end()).to_equal(true)
+        llvm_bootstrap_string_globals_add(DECL_B)
+        expect(llvm_bootstrap_string_globals_text()).to_equal("{DECL_A}\n{DECL_B}")
+        llvm_bootstrap_string_globals_reset()
+
+    it "is a no-op success when the cache is empty":
+        llvm_bootstrap_string_globals_reset()
+        expect(llvm_bootstrap_string_globals_retain_for_scope()).to_equal(true)
+        expect(llvm_bootstrap_string_globals_text()).to_equal("")
+
+    it "no longer refuses the LLVM codegen scope under SIMPLE_BOOTSTRAP":
+        val src = file_read_text("src/compiler/70.backend/backend/llvm_codegen_adapter.spl")
+        expect(src.len()).to_be_greater_than(0)
+        expect(src.contains("bug=llvm_bootstrap_string_cache_scope_escape_2026_10_25")).to_equal(false)
+        expect(src.contains("llvm_bootstrap_string_globals_retain_for_scope()")).to_equal(true)

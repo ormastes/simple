@@ -1,0 +1,56 @@
+"""As a tool author, I need invalid environment input rejected before a host call.
+
+These admission scenarios are host independent. They exercise production SOSIX
+checked APIs, including bool adapters, without reading or changing valid keys.
+"""
+use std.spec
+use std.common.text_bytes.{bytes_to_text, text_to_utf8_bytes}
+use std.nogc_async_mut.sosix.environment.{sosix_env_get_checked,
+    sosix_env_set_checked, sosix_env_remove_checked, sosix_env_set, sosix_env_remove}
+use std.nogc_sync_mut.io.external_text_io.{TextIoError}
+
+# @manual_section: Reject invalid environment input before host effects
+# @req REQ-SOSIX-ENV-ADMISSION
+describe "SOSIX environment input admission":
+    it "rejects empty and equals-containing keys consistently":
+        step("Submit invalid names to lookup assignment and removal")
+        for key in ["", "A=B", "=", "A=B=C"]:
+            assert_true(sosix_env_get_checked(key).is_err())
+            assert_true(sosix_env_set_checked(key, "value").is_err())
+            assert_true(sosix_env_remove_checked(key).is_err())
+            assert_false(sosix_env_set(key, "value"))
+            assert_false(sosix_env_remove(key))
+
+    it "rejects embedded NUL in keys and values without truncation":
+        step("Submit C-string truncation inputs at every environment boundary")
+        val key = "SIMPLE_SOSIX_ENV_NUL\0SUFFIX"
+        assert_true(sosix_env_get_checked(key).is_err())
+        assert_true(sosix_env_remove_checked(key).is_err())
+        assert_true(sosix_env_set_checked(key, "safe").is_err())
+        assert_true(sosix_env_set_checked("SIMPLE_SOSIX_ENV_NUL", "before\0after").is_err())
+        assert_false(sosix_env_set("SIMPLE_SOSIX_ENV_NUL", "before\0after"))
+
+    # Rust P1 represents text with String::from_utf8_lossy. Detect the fixture
+    # capability explicitly; a repaired/replaced input is not malformed text.
+    if text_to_utf8_bytes(bytes_to_text([65u8, 255u8])).len() == 2:
+        it "returns a typed codec failure for malformed key bytes":
+            step("Present an invalid UTF8 byte carrier as an environment key")
+            val malformed = bytes_to_text([65u8, 255u8])
+            match sosix_env_get_checked(malformed):
+                case Err(TextIoError.Codec(error)):
+                    expect(error.byte_offset).to_equal(1)
+                case _: assert_true(false)
+            assert_true(sosix_env_set_checked(malformed, "value").is_err())
+            assert_true(sosix_env_remove_checked(malformed).is_err())
+
+        it "returns a typed codec failure for malformed value bytes":
+            step("Present an invalid UTF8 byte carrier as an assignment value")
+            val malformed = bytes_to_text([65u8, 255u8])
+            match sosix_env_set_checked("SIMPLE_SOSIX_ENV_CODEC", malformed):
+                case Err(TextIoError.Codec(error)):
+                    expect(error.byte_offset).to_equal(1)
+                case _: assert_true(false)
+            assert_false(sosix_env_set("SIMPLE_SOSIX_ENV_CODEC", malformed))
+    else:
+        planned("malformed environment key codec rejection", "This runtime replaces invalid byte carriers; requires the native byte-preserving text provider")
+        planned("malformed environment value codec rejection", "This runtime replaces invalid byte carriers; requires the native byte-preserving text provider")

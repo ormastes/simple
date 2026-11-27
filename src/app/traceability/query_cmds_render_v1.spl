@@ -1,0 +1,126 @@
+# Pure rendering for `trace matrix|links|explain|diff|report` (table and SDN).
+use std.common.sdn.value.{SdnValue}
+use std.common.sdn.encode.{sdn_encode_canonical}
+use std.common.traceability.profile_v1.{trace_profile_name_v1}
+use std.common.traceability.query_missing_v1.{TraceGraphCompletenessV1, TraceRequirementIdV1, trace_link_status_name_v1}
+use std.common.traceability.query_status_v1.{TraceRequirementStatusV1}
+use std.common.traceability.query_matrix_v1.{TraceMatrixResultV1, trace_matrix_cell_text_v1}
+use std.common.traceability.query_links_v1.{TraceLinksResultV1, trace_link_issue_kind_name_v1}
+use std.common.traceability.query_explain_v1.{TraceExplainResultV1, trace_explain_reason_name_v1}
+use std.common.traceability.query_diff_v1.{TraceDiffResultV1, trace_diff_change_name_v1}
+use std.common.traceability.query_report_v1.{TraceReportResultV1}
+use app.traceability.query_cmds_options_v1.{TraceCmdOptionsV1}
+
+fn cmd_cell_v1(value: text) -> text:
+    var out = ""
+    for ch in value.chars():
+        if ch == "\t" or ch == "\n" or ch == "\r": out = out + " "
+        else: out = out + ch
+    out
+
+fn cmd_envelope_v1(schema: text, snapshot: text, completeness: TraceGraphCompletenessV1,
+    options: TraceCmdOptionsV1, body: Dict<text, SdnValue>) -> text:
+    var doc: Dict<text, SdnValue> = body
+    doc["schema"] = SdnValue.String(schema)
+    doc["snapshot"] = SdnValue.String(snapshot)
+    doc["profile"] = SdnValue.String(trace_profile_name_v1(options.profile))
+    doc["graph_complete"] = SdnValue.Bool(completeness == TraceGraphCompletenessV1.Complete)
+    doc["qualification"] = SdnValue.String("unverified")
+    doc["admission_eligible"] = SdnValue.Bool(false)
+    sdn_encode_canonical(SdnValue.Dict(doc))
+
+fn cmd_header_v1(snapshot: text, completeness: TraceGraphCompletenessV1, options: TraceCmdOptionsV1) -> text:
+    "Snapshot: " + snapshot + "\n" + "Profile: " + trace_profile_name_v1(options.profile) + "\n" +
+        "Graph complete: " + (completeness == TraceGraphCompletenessV1.Complete).to_text() + "\n" +
+        "Qualification: unverified; admission eligible: false\n"
+
+pub fn trace_cmd_render_matrix_v1(result: TraceMatrixResultV1, options: TraceCmdOptionsV1) -> text:
+    if options.query.format == "sdn":
+        var cells: [SdnValue] = []
+        for cell in result.cells:
+            cells.push(SdnValue.Dict({"row": SdnValue.String(cell.row.value), "col": SdnValue.String(cell.col.value),
+                "linked": SdnValue.Int(cell.linked.value), "verified": SdnValue.Int(cell.verified.value),
+                "missing": SdnValue.Int(cell.missing.value), "unknown": SdnValue.Int(cell.unknown.value)}))
+        return cmd_envelope_v1("simple.trace.matrix/v1", result.snapshot_id.value, result.completeness, options,
+            {"cells": SdnValue.Array(cells), "unassigned": SdnValue.Int(result.unassigned.value)})
+    var out = cmd_header_v1(result.snapshot_id.value, result.completeness, options)
+    out = out + "ROW\tCOL\tCOUNTS\n"
+    for cell in result.cells:
+        out = out + cmd_cell_v1(cell.row.value) + "\t" + cmd_cell_v1(cell.col.value) + "\t" + trace_matrix_cell_text_v1(cell) + "\n"
+    out + "Rows: " + result.rows.len().to_text() + "; columns: " + result.cols.len().to_text() +
+        "; non-empty cells: " + result.cells.len().to_text() + "; unassigned requirements: " +
+        result.unassigned.value.to_text() + "\n"
+
+pub fn trace_cmd_render_links_v1(result: TraceLinksResultV1, options: TraceCmdOptionsV1) -> text:
+    if options.query.format == "sdn":
+        var issues: [SdnValue] = []
+        for issue in result.issues:
+            issues.push(SdnValue.Dict({"edge": SdnValue.String(issue.edge_id.value),
+                "kind": SdnValue.String(trace_link_issue_kind_name_v1(issue.kind))}))
+        return cmd_envelope_v1("simple.trace.links/v1", result.snapshot_id.value, result.completeness, options,
+            {"checked": SdnValue.Int(result.checked.value), "issues": SdnValue.Array(issues),
+                "linked_requirements": SdnValue.Int(result.linked_requirements.value),
+                "verified_requirements": SdnValue.Int(result.verified_requirements.value)})
+    var out = cmd_header_v1(result.snapshot_id.value, result.completeness, options)
+    out = out + "EDGE\tISSUE\n"
+    for issue in result.issues:
+        out = out + cmd_cell_v1(issue.edge_id.value) + "\t" + trace_link_issue_kind_name_v1(issue.kind) + "\n"
+    out + "Edges checked: " + result.checked.value.to_text() + "; issues: " + result.issues.len().to_text() +
+        "; requirements linked: " + result.linked_requirements.value.to_text() +
+        "; verified: " + result.verified_requirements.value.to_text() + "\n"
+
+pub fn trace_cmd_render_explain_v1(result: TraceExplainResultV1, options: TraceCmdOptionsV1) -> text:
+    val status = result.status
+    if options.query.format == "sdn":
+        var reasons: [SdnValue] = []
+        for reason in result.reasons:
+            reasons.push(SdnValue.String(trace_explain_reason_name_v1(reason)))
+        return cmd_envelope_v1("simple.trace.explain/v1", result.snapshot_id.value, result.completeness, options,
+            {"id": SdnValue.String(status.requirement_id.value), "title": SdnValue.String(status.title),
+                "implementation": SdnValue.String(trace_link_status_name_v1(status.implementation)),
+                "verification": SdnValue.String(trace_link_status_name_v1(status.verification)),
+                "reasons": SdnValue.Array(reasons)})
+    var out = cmd_header_v1(result.snapshot_id.value, result.completeness, options)
+    out = out + status.requirement_id.value + ": " + cmd_cell_v1(status.title) + "\n"
+    out = out + "implementation: " + trace_link_status_name_v1(status.implementation) + "\n"
+    out = out + "verification: " + trace_link_status_name_v1(status.verification) + "\n"
+    for reason in result.reasons:
+        out = out + "why: " + trace_explain_reason_name_v1(reason) + "\n"
+    out
+
+pub fn trace_cmd_render_diff_v1(result: TraceDiffResultV1, options: TraceCmdOptionsV1) -> text:
+    val head = result.head_snapshot_id.value
+    if options.query.format == "sdn":
+        var entries: [SdnValue] = []
+        for entry in result.entries:
+            entries.push(SdnValue.Dict({"id": SdnValue.String(entry.requirement_id.value),
+                "change": SdnValue.String(trace_diff_change_name_v1(entry.change)),
+                "base": SdnValue.String(trace_link_status_name_v1(entry.base)),
+                "head": SdnValue.String(trace_link_status_name_v1(entry.head))}))
+        return cmd_envelope_v1("simple.trace.diff/v1", head, result.completeness, options,
+            {"base_snapshot": SdnValue.String(result.base_snapshot_id.value), "entries": SdnValue.Array(entries)})
+    var out = cmd_header_v1(head, result.completeness, options) + "Base: " + result.base_snapshot_id.value + "\n"
+    out = out + "ID\tCHANGE\tBASE\tHEAD\n"
+    for entry in result.entries:
+        out = out + cmd_cell_v1(entry.requirement_id.value) + "\t" + trace_diff_change_name_v1(entry.change) + "\t" +
+            trace_link_status_name_v1(entry.base) + "\t" + trace_link_status_name_v1(entry.head) + "\n"
+    out + "Changed requirements: " + result.entries.len().to_text() + "\n"
+
+pub fn trace_cmd_render_report_v1(result: TraceReportResultV1, options: TraceCmdOptionsV1) -> text:
+    if options.query.format == "sdn":
+        var top: [SdnValue] = []
+        for id in result.top_missing:
+            top.push(SdnValue.String(id.value))
+        return cmd_envelope_v1("simple.trace.report/v1", result.snapshot_id.value, result.completeness, options,
+            {"total": SdnValue.Int(result.total.value), "linked": SdnValue.Int(result.linked.value),
+                "verified": SdnValue.Int(result.verified.value), "missing": SdnValue.Int(result.missing.value),
+                "unknown": SdnValue.Int(result.unknown.value), "link_issues": SdnValue.Int(result.link_issues.value),
+                "top_missing": SdnValue.Array(top)})
+    var out = cmd_header_v1(result.snapshot_id.value, result.completeness, options)
+    out = out + "Requirements: " + result.total.value.to_text() + "; linked: " + result.linked.value.to_text() +
+        "; verified: " + result.verified.value.to_text() + "; missing: " + result.missing.value.to_text() +
+        "; unknown: " + result.unknown.value.to_text() + "; link issues: " + result.link_issues.value.to_text() + "\n"
+    for id in result.top_missing:
+        out = out + "missing: " + cmd_cell_v1(id.value) + "\n"
+    out + "Next: simple trace missing; simple trace explain <id>; simple trace matrix\n"
+

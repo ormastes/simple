@@ -87,8 +87,13 @@ bin/simple test test/03_system/check/windows_dangling_symlink_fails_loudly_spec.
 
 use std.spec.step
 
-use std.io_runtime.{file_read, process_run}
+use std.io_runtime.{file_read}
+use std.nogc_sync_mut.io.process_ops.{process_run, resolve_shell_argv}
 use std.spec.*
+
+fn _run_sh_dangling(command: text) -> (text, text, i64):
+    val (sh_bin, sh_args) = resolve_shell_argv(command)
+    process_run(sh_bin, sh_args)
 
 describe "materialize-symlinks-windows --strict-missing":
     # @manual scenario evidence
@@ -122,7 +127,7 @@ describe "materialize-symlinks-windows --strict-missing":
             " > " + root + "/strict.txt 2>&1; echo \"EXIT=$?\" >> " + root + "/strict.txt; " +
             "sh scripts/setup/materialize-symlinks-windows.shs " + root +
             " > " + root + "/lenient.txt 2>&1; echo \"EXIT=$?\" >> " + root + "/lenient.txt"
-        val (_stdout, _stderr, code) = process_run("sh", ["-c", command])
+        val (_stdout, _stderr, code) = _run_sh_dangling(command)
         expect(code).to_equal(0)
 
         val strict = file_read(root + "/strict.txt")
@@ -132,7 +137,7 @@ describe "materialize-symlinks-windows --strict-missing":
             expect(strict).to_contain("materialize-symlinks-windows: this script is Windows-only")
         else:
             step("STRICT: the tracked dangling target is a named, counted, non-zero failure")
-            expect(strict).to_contain("DANGLING symlink (target does not exist)")
+            expect(strict).to_contain("DANGLING symlink (tracked target missing)")
             expect(strict).to_contain("pkg/tracked_link.spl")
             expect(strict).to_contain("failed=1")
             expect(strict).to_contain("strict_missing=1")
@@ -141,15 +146,17 @@ describe "materialize-symlinks-windows --strict-missing":
             step("STRICT: the untracked target is NOT a failure -- it is a pending skip")
             expect(strict).to_contain("skipped_pending(target missing)=1")
 
-            step("The failure is loud, not inferred: the offender is named on the way out")
-            val strict_names_only_the_tracked_one = strict.contains("untracked_link ->")
-            expect(strict_names_only_the_tracked_one).to_equal(false)
+            step("The failure is loud, not inferred: only the tracked dangling offender fails as DANGLING")
+            val strict_flags_untracked_as_dangling = strict.contains("DANGLING symlink (tracked target missing): pkg/untracked_link")
+            expect(strict_flags_untracked_as_dangling).to_equal(false)
+            expect(strict).to_contain("pending-untracked symlink: pkg/untracked_link ->")
 
-            step("DEFAULT: without the flag both stay pending and the exit is clean")
+            step("DEFAULT: tracked dangling targets still fail loudly while untracked stays pending")
             val lenient = file_read(root + "/lenient.txt")
-            expect(lenient).to_contain("skipped_pending(target missing)=2")
-            expect(lenient).to_contain("failed=0")
-            expect(lenient).to_contain("EXIT=0")
+            expect(lenient).to_contain("DANGLING symlink (tracked target missing)")
+            expect(lenient).to_contain("skipped_pending(target missing)=1")
+            expect(lenient).to_contain("failed=1")
+            expect(lenient).to_contain("EXIT=1")
 
             step("A failed materialisation leaves the placeholder as path text -- provably unusable")
             val still_text = file_read(root + "/pkg/tracked_link.spl")

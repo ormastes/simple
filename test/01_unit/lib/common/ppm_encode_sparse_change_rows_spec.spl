@@ -1,0 +1,95 @@
+# @tag: unit, image, ppm, perf
+# @cover src/lib/common/image/ppm_decode.spl 30%
+#
+# encode_ppm_p6 on a 3600 x 3040 frame shaped like 4x text: most pixels of a
+# mixed 64-pixel block equal the pixel above (glyph stems are vertical), and
+# a few short clusters per block change from row to row (glyph edges). On the
+# 4x html catalog frame 29,051 such blocks went through three interpreted
+# byte stores per pixel: 3.0 s of a 4.6 s encode, although ~96 % of those
+# pixels equal the pixel above. Bytes are pinned by a hash measured on the
+# base implementation (b4595a3c0f4) and, on a small frame, compared byte for
+# byte with a per-pixel reference encoder.
+
+use std.spec.*
+use std.common.image.ppm_decode.{encode_ppm_p6}
+use std.gc_async_mut.gpu.engine2d_host_clock.{time_now_unix_micros}
+
+val FRAME_W = 3600
+val FRAME_H = 3040
+# Measured on the base implementation (b4595a3c0f4).
+val FRAME_HASH: i64 = 1297538080
+
+# Row template `v` (0..4): dark 2-px stems in two of every three 8-px groups,
+# constant down the frame, plus a 3-px cluster whose colour depends on `v` in
+# every group where (g * 13 + v) % 5 == 0.
+fn row_template(w: i32, v: i32) -> [u32]:
+    var row: [u32] = [0xffffffffu32; w]
+    var x = 0
+    # cpu-lane-loop-ok: builds one fixture row template
+    while x < w:
+        val g = x / 8
+        val k = x % 8
+        if (k == 2 or k == 3) and g % 3 != 0:
+            row[x] = 0xff202428u32
+        elif k >= 5 and (g * 13 + v) % 5 == 0:
+            row[x] = (4278190080 + (((v as i64) * 7919 + (g as i64) * 104729 + (k as i64) * 31) % 16777216)) as u32
+        x = x + 1
+    row
+
+fn frame_fixture(w: i32, h: i32) -> [u32]:
+    var px: [u32] = [0xffffffffu32; w * h]
+    var rows: [[u32]] = []
+    var v = 0
+    # cpu-lane-loop-ok: five row templates
+    while v < 5:
+        rows.push(row_template(w, v))
+        v = v + 1
+    var y = 0
+    # cpu-lane-loop-ok: one span write per fixture row; rows 30..39 of every
+    # 40 stay flat white
+    while y < h:
+        if y % 40 < 30:
+            px.write_span(rows[y % 5], (y * w) as i64, 0, w as i64)
+        y = y + 1
+    px
+
+fn reference_encode(w: i32, h: i32, pixels: [u32]) -> [u8]:
+    var out: [u8] = []
+    for b in "P6\n{w} {h}\n255\n".bytes():
+        out.push((b as i64) & 255)
+    for p in pixels:
+        val argb = p as i64
+        out.push((argb >> 16) & 0xFF)
+        out.push((argb >> 8) & 0xFF)
+        out.push(argb & 0xFF)
+    out
+
+fn sampled_hash(bytes: [u8]) -> i64:
+    var acc: i64 = 17
+    var i: i64 = 0
+    # cpu-lane-loop-ok: spec probe over a 1-in-97 byte sample
+    while i < bytes.len():
+        acc = (acc * 31 + (bytes[i] as i64)) % 4294967291
+        i = i + 97
+    acc
+
+describe "encode_ppm_p6 on rows that change in sparse clusters":
+    it "matches a per-pixel reference encoder":
+        val w = 203
+        val h = 90
+        val px = frame_fixture(w, h)
+        val got = encode_ppm_p6(w as u32, h as u32, px)
+        val want = reference_encode(w, h, px)
+        expect(got.len()).to_equal(want.len())
+        expect(got == want).to_equal(true)
+
+    it "encodes the measured bytes within a time budget":
+        val px = frame_fixture(FRAME_W, FRAME_H)
+        val t0 = time_now_unix_micros()
+        val bytes = encode_ppm_p6(FRAME_W as u32, FRAME_H as u32, px)
+        val elapsed = time_now_unix_micros() - t0
+        val h = sampled_hash(bytes)
+        print "ppm_encode_sparse elapsed_us={elapsed} len={bytes.len()} hash={h}"
+        expect(bytes.len()).to_equal(32832017)
+        expect(h).to_equal(FRAME_HASH)
+        expect(elapsed < 13500000).to_equal(true)

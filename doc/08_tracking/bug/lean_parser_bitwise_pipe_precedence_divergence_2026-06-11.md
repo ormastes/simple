@@ -1,8 +1,17 @@
 # Bug: Lean Parser Bitwise/Pipe Precedence Divergence
-## Open 2026-09-16 — needs owner triage
+## Resolved 2026-11-25 — fix verified on release/1.0.0
 
-Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
-evidence found in the body. This is bookkeeping, not verification.
+Verified 2026-11-25 (worktree wt-p3-bas, Windows x86_64, tracked self-hosted
+`bin/simple.exe`): the 2026-11-04 fix is present in
+`src/compiler/10.frontend/core/parser_expr.spl` — dedicated
+`parse_bit_or`/`parse_bit_xor`/`parse_bit_and` levels (lines 404-431) sit
+between addition and range, and the `parse_binary_from` bitwise loops
+(lines ~560-571) consume kinds 120/122/121 at their own levels, not at
+multiplication. Executed evidence:
+`SIMPLE_LIB=src bin/simple.exe test test/01_unit/compiler/parser_bitwise_precedence_spec.spl --mode=interpreter`
+→ `Results: 5 total, 5 passed, 0 failed` (exit 0), including the two runtime
+examples that the 2026-11-04 note said needed a stage built from the lean
+parser — the deployed self-hosted binary is such a stage.
 
 ## Not closed 2026-09-13 — STILL REAL; fix blocked by a concurrent bootstrap
 
@@ -62,3 +71,14 @@ in the leveled chain: `parse_multiplication` → `parse_bitwise_and` → `parse_
 - M1 parser fix commit: landed infix &/^ + prefix ~ at multiplication level as deliberate
   short-term placement matching existing PIPE placement (1ea5249607 + follow-up fix commit).
 
+
+## Fix implemented 2026-11-04 (verification-pending)
+
+`parser_expr.spl`: `&`/`|`/`^` removed from `parse_multiplication` and
+`parse_binary_from`'s multiplication loop; new `parse_bit_or -> parse_bit_xor ->
+parse_bit_and -> parse_addition` levels sit between range and addition (matching
+the Rust seed: `comparison < range < bit_or < xor < and < term`). Spec:
+`test/01_unit/compiler/parser_bitwise_precedence_spec.spl` (3 source-structure
+examples fail pre-fix; 2 runtime examples need a stage built from the lean parser).
+Verify: after next stage3 deploy, `SIMPLE_BIN=<stage3> bin/simple test` that spec and
+run a bootstrap to confirm no source relied on the old precedence.

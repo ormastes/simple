@@ -2,23 +2,25 @@
 
 use std.sffi.cli_args.{cli_get_args}
 use app.io.process_ops.{process_run, process_run_bounded}
-use std.nogc_sync_mut.io.env_ops.{env_get, host_os}
+use std.nogc_sync_mut.io.env_ops.{env_get, env_set, host_os}
 use app.io.cli_ops.{cli_current_exe_path}
-use app.test_runner_new.client_arg_shape.{client_flag_consumes_value, client_select_tagged}
+use app.test_runner_new.client_arg_shape.{client_flag_consumes_value, client_select_tagged, client_dropped_execution_flags}
 use app.test_runner_new.timeout_budget.{client_default_timeout_secs, resolve_timeout_secs, timeout_value_is_well_formed}
 use app.test_runner_new.daemon_backlog.{daemon_backlog_bypass, count_pending_requests, daemon_claim_wait_expired, daemon_platform_bypass}
 use app.test_runner_new.no_examples_gate.{no_examples_is_silent_green, no_examples_exit_code}
 use std.test_runner.test_runner_args.{parse_test_args, test_args_validation_error}
+use std.test_runner.compiler_select.{select_test_child_binary}
 use std.test_runner.test_config.{load_test_config}
 use std.test_runner.test_runner_types.{TEST_OUTPUT_CAPTURE_BYTES, TestRunOutcome, test_run_outcome_exit_code}
 use std.test_runner.test_runner_modes.{run_spl_doctest_mode}
 use app.test_runner_new.sdn_worker_args.{parse_private_sdn_worker_args}
 use app.test_runner_new.sdn_wrapper.{run_test_sdn_wrapper}
-use app.test_daemon.light_protocol.{LIGHT_REQUEST_RESPONSE_GRACE_MS, LIGHT_REQUEST_ENVIRONMENT_REROUTE_RESULT, light_response_client_result, light_request_encode_v2, light_request_expiry_micros, light_request_timeout_ms_from_seconds, timeout_verdict_line, early_death_verdict_line, bounded_run_classification, has_verdict_line, exit_code_reason}
-use app.test_daemon.environment_identity.{test_daemon_environment_identity_v1, test_daemon_environment_can_reuse_v1}
+use app.test_daemon.light_protocol.{ensure_daemon_at, LIGHT_REQUEST_RESPONSE_GRACE_MS, LIGHT_REQUEST_ENVIRONMENT_REROUTE_RESULT, light_response_client_result, light_request_encode_v2, light_request_expiry_micros, light_request_timeout_ms_from_seconds, timeout_verdict_line, early_death_verdict_line, bounded_run_classification, has_verdict_line, exit_code_reason}
+use app.test_daemon.environment_identity.{TestDaemonEnvironmentIdentityV1, test_daemon_environment_identity_v1, test_daemon_environment_can_reuse_v1}
 
 use std.io_runtime.{dir_create_all}
-use std.io_runtime.{dir_list}
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write}
+use std.io_runtime.{dir_list_or_empty}
 use std.io_runtime.{file_exists}
 use std.io_runtime.{read_file_text}
 use std.io_runtime.{read_file_text_result}
@@ -28,7 +30,8 @@ use std.io_runtime.{file_rename}
 use std.io_runtime.{getpid}
 use std.io_runtime.{thread_sleep}
 use std.io_runtime.{time_now_unix_micros}
-extern fn rt_path_absolute(path: text) -> text
+# Nil when a relative path cannot be resolved (cwd unreadable); never the input.
+extern fn rt_path_absolute(path: text) -> text?
 extern fn sys_get_args() -> [text]
 
 # Atomic write: tmp + rename. Plain rt_file_write_text does open(create,
@@ -39,19 +42,16 @@ extern fn sys_get_args() -> [text]
 # daemon can misread an in-flight request as empty ("missing test path"),
 # consuming and discarding the real request (#98).
 fn atomic_write_text(path: text, content: text) -> bool:
-    val tmp_path = "{path}.tmp"
-    if not file_write(tmp_path, content):
-        file_delete(tmp_path)
-        return false
-    if file_rename(tmp_path, path):
-        return true
-    file_delete(tmp_path)
-    false
+    file_atomic_write(path, content)
 
 val LIGHT_DAEMON_DIR: text = ".build/test_daemon_light"
 val LIGHT_REQ_DIR: text = ".build/test_daemon_light/requests"
 val LIGHT_RESP_DIR: text = ".build/test_daemon_light/responses"
 val LIGHT_LOCK: text = ".build/test_daemon_light/daemon.lock"
+# Wakeup sequence bumped after every request publish; the daemon's idle loop
+# stat()s this file in-process instead of shelling out to `ls -1` (dir_list_or_empty)
+# every 250 ms. Shared with light_daemon.spl (see its LIGHT_WAKE note).
+val LIGHT_WAKE: text = ".build/test_daemon_light/wakeup.seq"
 # The live daemon records here the absolute path of the binary it executes every
 # served spec with (written by light_daemon.spl at startup). Read below so this
 # client can tell whether the daemon lane would silently substitute a different
@@ -169,14 +169,16 @@ fn invoking_binary() -> text:
     simple_test_child_binary_ignores_invoking_binary_recurrence_2026-08-08.md."""
     val current = cli_current_exe_path()
     if current != "" and file_exists(current):
-        val self_path = rt_path_absolute(current) ?? ""
-        if self_path.len() > 0 and file_exists(self_path):
-            return self_path
-    val process_args = sys_get_args()
-    if process_args.len() > 0 and file_exists(process_args[0]):
-        val argv_binary = rt_path_absolute(process_args[0]) ?? ""
-        if argv_binary != "" and file_exists(argv_binary):
-            return argv_binary
+        if val self_path = rt_path_absolute(current):
+            if self_path.len() > 0 and file_exists(self_path):
+                return self_path
+    val raw = sys_get_args()
+    # A source-mode argv[0] is a `.spl` path (this client's own source): it
+    # exists but is not executable, so it is never the compiler binary.
+    if raw.len() > 0 and not raw[0].ends_with(".spl") and file_exists(raw[0]):
+        if val argv_binary = rt_path_absolute(raw[0]):
+            if argv_binary != "" and file_exists(argv_binary):
+                return argv_binary
     ""
 
 fn simple_binary() -> text:
@@ -191,7 +193,11 @@ fn simple_binary() -> text:
         return invoker
     if not file_exists(configured_raw):
         return ""
-    val configured = rt_path_absolute(configured_raw) ?? ""
+    val configured_abs = rt_path_absolute(configured_raw)
+    if configured_abs == nil:
+        # "" is this fn's documented "no qualified binary" result.
+        return ""
+    val configured = configured_abs.unwrap()
     if configured == "" or not file_exists(configured) or configured != invoker:
         return ""
     configured
@@ -325,17 +331,22 @@ fn daemon_recorded_binary() -> text:
     val recorded = (read_file_text(LIGHT_BINARY)).trim()
     if recorded == "" or not file_exists(recorded):
         return ""
-    val canonical = rt_path_absolute(recorded) ?? ""
-    if canonical != "" and file_exists(canonical): canonical else: ""
+    if val canonical = rt_path_absolute(recorded):
+        if canonical != "" and file_exists(canonical):
+            return canonical
+    # "" is this fn's documented "no recorded binary" result.
+    ""
+
+fn real_pid_alive(pid: text) -> bool:
+    pid_alive_and_named(pid: pid, proc_root: "/proc")
 
 fn ensure_daemon() -> bool:
-    if daemon_lock_alive():
-        return true
-    report_stale_lock()
-    file_delete(LIGHT_LOCK)
-    # The binary record belongs to the dead lock holder; clear it so the wait
-    # below can only be satisfied by the daemon spawned here.
-    file_delete(LIGHT_BINARY)
+    ensure_daemon_at(LIGHT_LOCK, LIGHT_BINARY, \p: real_pid_alive(p), \: spawn_light_daemon(), \: report_stale_lock(), \: no_hook())
+
+fn no_hook():
+    pass
+
+fn spawn_light_daemon() -> bool:
     val binary = simple_binary()
     val (_daemon_out, _daemon_err, daemon_code) = process_run(
         "/bin/sh",
@@ -344,18 +355,7 @@ fn ensure_daemon() -> bool:
     if daemon_code != 0:
         file_write("/tmp/simple-test-daemon-light.log", "failed to spawn light daemon: {daemon_code}\n")
         return false
-    # The daemon claims LIGHT_LOCK first and publishes LIGHT_BINARY right
-    # after. Returning on the lock alone raced that publish: the caller then
-    # read no binary record, reported "identity unavailable or mismatched" and
-    # bypassed the daemon it had just started. Wait for both.
-    var waits = 0
-    while waits < 40:
-        if file_exists(LIGHT_LOCK) and file_exists(LIGHT_BINARY):
-            return true
-        thread_sleep(50)
-        waits = waits + 1
-    file_write("/tmp/simple-test-daemon-light.log", "light daemon shell exited but did not create lock\n")
-    false
+    true
 
 # Fail-closed verdict for a run that produced NO evidence it executed anything.
 #
@@ -376,6 +376,39 @@ fn fail_closed_on_no_examples(path: text, body: text, code: i64) -> i64:
     print timeout_verdict_line(path, "no-examples-executed", 0)
     no_examples_exit_code(body, code)
 
+# Re-emit the verdict as the LAST output when trailing noise buries it.
+# Measured on Windows: `test rv64_arch_import_closure_spec.spl` printed its
+# SPEC FILE VERDICT / Results lines at lines 175/222 of 448, followed by ~226
+# gc-warning lines from the relayed child stderr. Any caller reading the tail
+# (the repo convention is "verdict is the LAST line") saw NO verdict at all.
+# Bug: test_runner_verdict_buried_under_trailing_warnings_2026-11-03.
+fn print_verdict_recap(body: text):
+    val lines = body.split("\n")
+    var verdict_idx = -1
+    var results_idx = -1
+    var last_nonempty = -1
+    var i = 0
+    while i < lines.len():
+        val l = lines[i]
+        if l.starts_with("SPEC FILE VERDICT:"):
+            verdict_idx = i
+        if l.starts_with("Results:"):
+            results_idx = i
+        if l.trim() != "":
+            last_nonempty = i
+        i = i + 1
+    if verdict_idx < 0:
+        return
+    var last_wanted = verdict_idx
+    if results_idx > last_wanted:
+        last_wanted = results_idx
+    if last_nonempty <= last_wanted:
+        return
+    print "--- verdict recap (re-emitted after trailing output) ---"
+    print lines[verdict_idx]
+    if results_idx >= 0:
+        print lines[results_idx]
+
 fn print_response(path: text, content: text) -> i64:
     val newline = content.find("\n")
     if newline < 0:
@@ -388,13 +421,24 @@ fn print_response(path: text, content: text) -> i64:
         return client_result
     if body != "":
         print body
+        print_verdict_recap(body)
     fail_closed_on_no_examples(path, body, code)
 
 fn has_spl_doctest_flag(args: [text]) -> bool:
-    for a in args:
+    # The comment-doctest lane is .spl-only: an .md target runs the md lane.
+    var flag = false
+    var i = 0
+    while i < args.len():
+        val a = args[i]
         if a == "--spl-doctest":
-            return true
-    false
+            flag = true
+        elif client_flag_consumes_value(a):
+            # The next token is this option's value, even if it ends in .md.
+            i = i + 1
+        elif not a.starts_with("-") and a.ends_with(".md"):
+            return false
+        i = i + 1
+    flag
 
 fn run_scoped_spl_doctest(args: [text]) -> i64:
     """Handle `simple test --spl-doctest <target>` directly, in-process.
@@ -404,8 +448,23 @@ fn run_scoped_spl_doctest(args: [text]) -> i64:
     file target ending in .spl always matches
     test_should_use_light_daemon_client's routing and would otherwise run as
     a normal spec via the daemon, silently discarding --spl-doctest. Handle it
-    here before any daemon/path-only forwarding happens."""
+    here before any daemon/path-only forwarding happens. This special route is
+    dispatched before main()'s general client validation, so validate the
+    arguments here before converting them."""
+    val usage_error = test_args_validation_error(args)
+    if usage_error != "":
+        eprint "ERROR: {usage_error}"
+        return 2
     val options = parse_test_args(args)
+    # --compiler=phase2 applies to doctest children too: pin the selected CLI
+    # (fail closed, exit 2) before any child is spawned.
+    match select_test_child_binary(options.compiler):
+        case Err(message):
+            eprint "ERROR: test-runner: {message}"
+            return 2
+        case Ok(selected):
+            if selected != "":
+                env_set("SIMPLE_BINARY", selected)
     val config = load_test_config()
     print "=== Running SPL Doctests ==="
     print ""
@@ -416,10 +475,19 @@ fn run_scoped_spl_doctest(args: [text]) -> i64:
         return 0
     1
 
+# Direct spec-header read for effective_timeout_secs: bypasses the stdlib
+# text-read chain (see the note at the directive mirror below).
+@unsafe(reason: "raw nullable file-text read for the header directive; nil is read as absent", capabilities: [ffi])
+extern fn rt_file_read_text(path: text) -> text?
+
+fn _spec_header_text_direct(path: text) -> text:
+    unsafe(capabilities: [ffi]):
+        rt_file_read_text(path) ?? ""
+
 # Mirror test_runner_single.spl's slow_it floor so the outer bounded wait
 # never undercuts the inner runner's raised per-file bound.
 fn effective_timeout_secs(path: text, timeout_secs: i64) -> i64:
-    val content = read_file_text(path)
+    val content = _spec_header_text_direct(path)
     var effective = timeout_secs
     if effective < 600 and content.contains("slow_it "):
         effective = 600
@@ -427,6 +495,13 @@ fn effective_timeout_secs(path: text, timeout_secs: i64) -> i64:
     # test_runner_single.spl / test_runner_main.spl. Without the directive
     # half of this mirror, a spec declaring more than 600s is still cut off
     # out here and reports a timeout instead of a real verdict.
+    # The spec header is read through the DIRECT rt_file_read_text extern
+    # (the same admission test_runner_single's directive parser uses): the
+    # stdlib read_file_text chain has co-compiled same-name definitions whose
+    # flattened-unit winner under the seed lane comes back empty, which made
+    # the directive invisible on the seed and pinned the bound at the default
+    # budget (doc/08_tracking/bug/
+    # seed_file_write_bytes_noop_and_timeout_directive_2026-10-24.md).
     val declared = _spec_timeout_secs_directive_text(content)
     if declared > effective:
         effective = declared
@@ -438,12 +513,12 @@ fn effective_timeout_secs(path: text, timeout_secs: i64) -> i64:
 # that happened to sit at offset 3 would silently vanish.
 fn _spec_timeout_secs_directive_text(content: text) -> i64:
     val key = "# @timeout_secs "
-    val klen = key.len()
-    val n = content.len()
+    val klen = key.byte_len()
+    val n = content.byte_len()
     var idx = -1
     var i = 0
     while i + klen <= n:
-        if content[i:i + klen] == key:
+        if content.substring(i, i + klen) == key:
             idx = i
             break
         i = i + 1
@@ -472,13 +547,20 @@ fn _spec_timeout_secs_directive_text(content: text) -> i64:
 # runner wins the race instead of this wait killing it mid-report. See
 # doc/08_tracking/bug/
 # seed_test_runner_kills_child_at_600s_ignoring_timeout_2026-08-02.md.
-fn run_one_direct(binary: text, path: text, timeout_secs: i64) -> i64:
+fn run_one_direct(binary: text, path: text, timeout_secs: i64, compiler: text = "") -> i64:
     val child_timeout_secs = effective_timeout_secs(path, timeout_secs)
     val outer_timeout_ms = child_timeout_secs * 1000 + 30000
     val started_micros = time_now_unix_micros()
+    var direct_args = ["test", "--no-session-daemon", "--timeout", "{child_timeout_secs}"]
+    # `--compiler=phase2` must reach the single lane, which resolves the phase2
+    # full CLI itself; dropping it here ran the spec on the invoking binary and
+    # reported PASS (fail-open, measured 2026-10-30 on macOS).
+    if compiler != "":
+        direct_args = direct_args.push("--compiler=" + compiler)
+    direct_args = direct_args.push(path)
     val (out, err, code) = process_run_bounded(
         binary,
-        ["test", "--no-session-daemon", "--timeout", "{child_timeout_secs}", path],
+        direct_args,
         outer_timeout_ms,
         TEST_OUTPUT_CAPTURE_BYTES
     )
@@ -509,6 +591,7 @@ fn run_one_direct(binary: text, path: text, timeout_secs: i64) -> i64:
         print "error: test-runner: {exit_code_reason(code)} (outer bound {outer_timeout_ms}ms, elapsed {elapsed_ms}ms)"
         print timeout_verdict_line(path, "outer-bound-timeout", outer_timeout_ms)
         return if code == 0: 1 else: code
+    print_verdict_recap(out + "\n" + err)
     fail_closed_on_no_examples(path, out + err, code)
 
 # Run one spec file through the light daemon. `seq` disambiguates request ids
@@ -528,6 +611,13 @@ fn run_one_via_daemon(path: text, timeout_ms: i64, seq: i64,
         file_delete(resp_path)
         print "ERROR: test daemon request write failed: {req_path}"
         return 1
+    # Wake the daemon AFTER the request rename is visible: its idle loop
+    # stat()s this sequence file in-process every ~10 ms, so a visible bump
+    # replaces the old 250 ms dir_list_or_empty() poll (a `/bin/sh -c "ls -1 ..."`
+    # shell-out per poll) with a ~10 ms claim path. Best-effort: a lost bump
+    # (e.g. this process dying here) only costs one 500 ms daemon fallback
+    # sweep, never the request.
+    val _ = atomic_write_text(LIGHT_WAKE, id)
     val deadline = expiry_micros + (LIGHT_REQUEST_RESPONSE_GRACE_MS * 1000)
     val submitted_micros = time_now_unix_micros()
     var claimed = false
@@ -551,7 +641,11 @@ fn run_one_via_daemon(path: text, timeout_ms: i64, seq: i64,
                     file_delete(withdrawn_path)
                     return LIGHT_DAEMON_WITHDRAWN_RESULT
                 claimed = true
-        thread_sleep(100)
+        # Poll every 10 ms: the response lands only when the served spec
+        # finishes (typically seconds away), so a fine poll costs ~100
+        # in-process file stats per second of runtime and cuts the old
+        # 100 ms loop's up-to-100 ms pickup latency to ~10 ms.
+        thread_sleep(10)
     # No response inside the budget + grace. Emit a verdict so the spec reads
     # BROKEN, not UNRUN, and name the lock + the one-line remedy: the most
     # common cause of a whole-corpus version of this message is a stale lock
@@ -653,6 +747,31 @@ fn _test_env_gate_names() -> text:
             names.push(name)
     names.join(", ")
 
+struct DirectRun:
+    binary: text
+    paths: [text]
+    timeout_secs: i64
+    compiler: text
+
+fn daemon_child_marker_set() -> bool:
+    """True inside a worker the light daemon spawned (light_daemon.spl sets it)."""
+    env_get("SIMPLE_TEST_DAEMON_CHILD") == "1"
+
+fn run_direct(run: DirectRun) -> i64:
+    """Run every path on the direct lane; any failing spec fails the run."""
+    var worst = 0
+    for p in run.paths:
+        val code = run_one_direct(run.binary, p, run.timeout_secs, run.compiler)
+        if code != 0 and worst == 0:
+            worst = code
+    if run.paths.len() > 1:
+        print "Requested {run.paths.len()} spec file(s); executed {run.paths.len()}."
+    worst
+
+fn run_daemon_child_direct(binary: text, paths: [text], timeout_secs: i64, compiler: text) -> i64:
+    val run = DirectRun(binary: binary, paths: paths, timeout_secs: timeout_secs, compiler: compiler)
+    return run_direct(run)
+
 fn main() -> i64:
     val raw_cleaned = clean_args()
     val parsed_modes = parse_private_sdn_worker_args(raw_cleaned, false)
@@ -683,8 +802,28 @@ fn main() -> i64:
     if client_options.coverage:
         eprint "ERROR: --coverage needs a directory target (the instrumented coverage build runs in the directory lane); run: simple test <dir> --coverage"
         return 2
+    # --mode=<compiled lane> / --compile / --native-backend=<b>: neither lane
+    # of this client can honour them — the daemon request carries only a path,
+    # and the direct lane's inner runner (test_runner_single.spl) always
+    # interprets — so a flag that is not honoured is rejected here, naming
+    # every dropped flag (same rule as --coverage/--resume above). Forwarding
+    # needs compiled-lane support in the single runner first; until that lands
+    # the refusal is the fail-closed half. The previous behaviour silently ran
+    # the tagged interpreter in ~31 ms and reported PASS for a lane that never
+    # ran (fail-open evidence collection).
+    # Bug: test_runner_direct_lane_drops_mode_backend_flags_2026_11_09.
+    val dropped_exec_flags = client_dropped_execution_flags(cleaned)
+    if dropped_exec_flags.len() > 0:
+        eprint "ERROR: test-runner: {dropped_exec_flags.join(", ")}: this single-spec lane always executes the interpreter (the daemon request carries only a path and the direct child is the interpreter-only single lane); compiled lanes run via the directory runner: simple test <dir> {dropped_exec_flags.join(" ")} — refusing to run rather than silently downgrade"
+        return 2
     if client_options.format == "doc":
         print "note: --format doc: spipe doc generation runs in the directory lane only; this single-spec run prints text"
+    # --compiler=phase2: refuse early (exit 2) when the phase2 full CLI is not
+    # pinned, exactly like the directory and single lanes.
+    val compiler_selection = select_test_child_binary(client_options.compiler)
+    if compiler_selection.is_err():
+        eprint "ERROR: test-runner: {compiler_selection.unwrap_err()}"
+        return 2
     val run = parse_client_run(cleaned)
     if not run.valid:
         eprint "ERROR: {run.error}: {run.path}"
@@ -708,6 +847,11 @@ fn main() -> i64:
         print "ERROR: test-runner: canonical invoking candidate identity is unavailable or SIMPLE_BINARY does not match it"
         print "ERROR: refusing to fall back to deployed bin/simple or a Rust seed"
         return 1
+    # A spec served by the light daemon that itself runs `simple test <spec>`
+    # must not queue behind the single daemon worker that is busy serving it.
+    if daemon_child_marker_set():
+        print "test-daemon: nested run inside a daemon-served spec (SIMPLE_TEST_DAEMON_CHILD=1); running directly"
+        return run_daemon_child_direct(candidate_binary, requested, run.timeout_secs, client_options.compiler)
     # Daemon-lane timeout only: the light-request protocol clamps to
     # LIGHT_REQUEST_MAX_TIMEOUT_MS (600s). The direct lane must honor the
     # full requested --timeout — see long_timeout_bypass below and
@@ -715,104 +859,46 @@ fn main() -> i64:
     # seed_test_runner_kills_child_at_600s_ignoring_timeout_2026-08-02.md.
     val timeout_ms = light_request_timeout_ms_from_seconds(run.timeout_secs)
     val long_timeout_bypass = run.timeout_secs * 1000 > timeout_ms
-    ensure_dirs()
-    # Capture once for this suite invocation. Hashing is not repeated per spec.
-    # A legacy daemon has no second lock line and therefore fails this check.
-    val caller_environment = test_daemon_environment_identity_v1()
-    # The light daemon may be unable to start (e.g. it relies on runtime
-    # methods the seed interpreter lacks). Degrade to direct execution rather
-    # than refusing, but decide once for the whole batch.
-    # SIMPLE_COVERAGE: the daemon's environment predates this request, so a
-    # daemon-run child would not have coverage enabled. Bypass the daemon and
-    # run directly so the child inherits SIMPLE_COVERAGE=1.
-    val cov_env = env_get("SIMPLE_COVERAGE") ?? ""
-    val cov_bypass = cov_env != "" and cov_env != "0"
-    # SIMPLE_REQUIRE_GPU: same frozen-environment defect class again, and it
-    # fails OPEN, which is the worst variant. The GPU conformance specs
-    # (test/03_system/gpu_lane/*_debug_session_conformance_spec.spl) are
-    # host-aware skip-clean by default; SIMPLE_REQUIRE_GPU=1 is the opt-in
-    # switch that turns "no device" into a FAILURE so CI can demand real
-    # device evidence. Served by the daemon, the spec body reads the DAEMON's
-    # environment, observes the variable as UNSET, and silently takes the
-    # permissive branch -- so a lane that asked for a hard device requirement
-    # gets a green that proves nothing, which is exactly what the switch
-    # exists to prevent. Measured 2026-08-09: `SIMPLE_REQUIRE_GPU=1
-    # bin/simple test <cuda spec>` had the spec body observe the var as unset
-    # (nil via env_get, false via test_env_available) while the caller had it
-    # set to "1". Bypass the daemon so the value reaches the spec.
-    val require_gpu_env = env_get("SIMPLE_REQUIRE_GPU") ?? ""
-    val require_gpu_bypass = require_gpu_env != "" and require_gpu_env != "0"
-    # Same defect class as SIMPLE_COVERAGE, one step worse because it fails
-    # SILENTLY instead of just under-reporting.
-    #
-    # The light daemon is a long-lived process whose environment is frozen at
-    # whichever invocation happened to start it; the v1 request
-    # (light_request_encode) carries only a header, an expiry and a path — no
-    # environment at all. So a spec that resolves "which binary do I exercise"
-    # from the environment reads the DAEMON's stale value, not the caller's.
-    # Measured 2026-08-02 on the Rust seed: with a daemon already running,
-    # `SIMPLE_TEST_BINARY=VALUE_SIX bin/simple test <spec>` had the spec body
-    # observe VALUE_FIVE (the previous run's value), and a child
-    # `process_run("/bin/sh", ...)` saw VALUE_FIVE too. Resolving the override
-    # in the child shell rather than via env_get does NOT help — the shell
-    # inherits the daemon's environment either way. Kill the daemon first and
-    # both forms immediately read the caller's value.
-    #
-    # A silently-ignored binary override means the spec exercised the default
-    # binary while claiming to test the selected one, so a sabotage check can
-    # pass for the wrong reason. Fail-safe: any request that names one of these
-    # overrides takes the direct lane, where the child really does inherit it.
-    val binary_override_bypass = _has_binary_override()
-    # test_env_gate family: see _test_env_gate_vars above. Bypass the daemon
-    # whenever the caller sets one, so the value actually reaches the spec.
-    # Residual gap stated plainly: this cannot repair the OPPOSITE direction --
-    # a daemon started WITH a gate var set keeps reporting it available to
-    # later runs that do not set it, and there is nothing here to detect that
-    # because the v1 request carries no environment. The real fix is to put the
-    # caller's environment in the request; this is the same fail-safe divert the
-    # four bypasses above use.
-    val env_gate_names = _test_env_gate_names()
-    val env_gate_bypass = env_gate_names != ""
-    # Same defect class again, and the reason the 2026-07-27 fix did not hold.
-    # The light daemon is pinned for its ENTIRE LIFETIME to whichever binary
-    # spawned it, and the v1 request carries only a path + expiry — no binary.
-    # So a daemon-served run executes the spec with the DAEMON's compiler while
-    # the caller reads the result as if its own compiler had produced it. A
-    # lane that rebuilds the compiler and runs `test` to verify the fix then
-    # measures the old binary and calls it green. Divert to the direct lane
-    # whenever the daemon's binary is not the one running this process. A
-    # daemon predating this record has unavailable identity and must not serve
-    # qualification work.
-    val invoker = candidate_binary
     val daemon_host = host_os()
     val daemon_host_bypass = daemon_platform_bypass(daemon_host)
-    val daemon_binary = if daemon_host_bypass: "" else: daemon_recorded_binary()
-    val daemon_was_alive = not daemon_host_bypass and daemon_lock_alive()
-    val invoker_bypass = daemon_was_alive and daemon_binary != invoker
-    val environment_bypass = daemon_was_alive and not test_daemon_environment_can_reuse_v1(
-        caller_environment, lock_environment_digest())
-    # A --timeout beyond the daemon protocol cap cannot ride the daemon lane
-    # (the request would be clamped and the spec killed at ~600s); run
-    # directly so the full requested timeout is honored.
-    # HEAD-OF-LINE BLOCKING. The light daemon drains its request FIFO with a
-    # SINGLE worker (light_daemon.spl main(): `handle_request` blocks inside
-    # process_run_bounded for the served spec's whole budget), so N concurrent
-    # `simple test` clients are executed strictly one at a time no matter how
-    # many cores are free. Measured: every client parks waiting for its .resp
-    # at ~0% CPU while exactly one spec computes, and clients then die together
-    # as their request deadlines expire while still queued.
-    # daemon_backlog.spl already decided the policy and pinned it with a unit
-    # spec, but had ZERO production call sites -- the decision was never
-    # consulted, so clients joined the queue unconditionally. This is that wiring.
-    # Count only `.req` entries. A raw dir_list().len() also counts the
-    # `.req.tmp` files produced by the atomic tmp+rename write above, so a
-    # client could bypass on the in-flight write that is about to become its
-    # OWN request -- and, worse, on leftover `.resp`/lock names. That is what
-    # `count_pending_requests` exists for; it was pinned by a unit spec but had
-    # zero production call sites. This is that wiring.
-    val backlog_pending = if not daemon_host_bypass and file_exists(LIGHT_REQ_DIR): count_pending_requests(dir_list(LIGHT_REQ_DIR)) else: 0
-    val backlog_bypass = daemon_backlog_bypass(backlog_pending)
-    var daemon_ok = if daemon_host_bypass or cov_bypass or binary_override_bypass or long_timeout_bypass or invoker_bypass or require_gpu_bypass or env_gate_bypass or backlog_bypass or environment_bypass or not caller_environment.valid: false else: ensure_daemon()
+    # SIMPLE_COVERAGE / SIMPLE_REQUIRE_GPU / binary overrides / env gates /
+    # --compiler / --timeout beyond daemon cap must reach the child directly.
+    # Avoid creating daemon directories or hashing the full environment on
+    # non-daemon platforms (Windows/macOS) or when a static direct-lane bypass
+    # has already been selected.
+    val cov_env = env_get("SIMPLE_COVERAGE") ?? ""
+    val cov_bypass = cov_env != "" and cov_env != "0"
+    val require_gpu_env = env_get("SIMPLE_REQUIRE_GPU") ?? ""
+    val require_gpu_bypass = require_gpu_env != "" and require_gpu_env != "0"
+    val binary_override_bypass = _has_binary_override()
+    val env_gate_names = _test_env_gate_names()
+    val env_gate_bypass = env_gate_names != ""
+    val compiler_bypass = client_options.compiler != ""
+    val static_bypass = daemon_host_bypass or cov_bypass or binary_override_bypass or long_timeout_bypass or require_gpu_bypass or env_gate_bypass or compiler_bypass
+    # See doc/08_tracking/bug/test_daemon_freezes_env_binary_override_dead_2026-08-02.md,
+    # light_test_daemon_serializes_concurrent_test_invocations_2026-08-21.md, and
+    # test_invocation_fixed_setup_cost_caps_every_sweep_2026-08-17.md.
+    var caller_environment = TestDaemonEnvironmentIdentityV1(true, "", "bypassed")
+    var invoker = candidate_binary
+    var daemon_binary = ""
+    var daemon_was_alive = false
+    var invoker_bypass = false
+    var environment_bypass = false
+    var backlog_pending = 0
+    var backlog_bypass = false
+    if not static_bypass:
+        ensure_dirs()
+        # Capture once for this suite invocation. Hashing is not repeated per spec.
+        # A legacy daemon has no second lock line and therefore fails this check.
+        caller_environment = test_daemon_environment_identity_v1()
+        daemon_binary = daemon_recorded_binary()
+        daemon_was_alive = daemon_lock_alive()
+        invoker_bypass = daemon_was_alive and daemon_binary != invoker
+        environment_bypass = daemon_was_alive and not test_daemon_environment_can_reuse_v1(
+            caller_environment, lock_environment_digest())
+        backlog_pending = if file_exists(LIGHT_REQ_DIR): count_pending_requests(dir_list_or_empty(LIGHT_REQ_DIR)) else: 0
+        backlog_bypass = daemon_backlog_bypass(backlog_pending)
+    var daemon_ok = if static_bypass or invoker_bypass or backlog_bypass or environment_bypass or not caller_environment.valid: false else: ensure_daemon()
     if daemon_ok:
         val active_daemon_binary = daemon_recorded_binary()
         if active_daemon_binary == "" or active_daemon_binary != candidate_binary:
@@ -826,6 +912,10 @@ fn main() -> i64:
     if not daemon_ok:
         if daemon_host_bypass:
             print "test-daemon: light daemon requires Linux /proc; running directly on {daemon_host}"
+            if binary_override_bypass:
+                print "binary-override: {_binary_override_names()} set; bypassing test daemon so the override reaches the spec"
+        elif compiler_bypass:
+            print "compiler-select: --compiler={client_options.compiler}; bypassing test daemon so the selected compiler executes the spec"
         elif cov_bypass:
             print "coverage: SIMPLE_COVERAGE set; bypassing test daemon"
         elif require_gpu_bypass:
@@ -876,12 +966,12 @@ fn main() -> i64:
                 print "environment-identity: daemon generation changed before execution; rerouting directly"
                 daemon_ok = false
                 binary = candidate_binary
-                code = run_one_direct(binary, p, run.timeout_secs)
+                code = run_one_direct(binary, p, run.timeout_secs, client_options.compiler)
             elif code == LIGHT_DAEMON_WITHDRAWN_RESULT:
                 print "daemon-busy: the single test-daemon worker did not claim the request; running directly"
-                code = run_one_direct(candidate_binary, p, run.timeout_secs)
+                code = run_one_direct(candidate_binary, p, run.timeout_secs, client_options.compiler)
         else:
-            code = run_one_direct(binary, p, run.timeout_secs)
+            code = run_one_direct(binary, p, run.timeout_secs, client_options.compiler)
         executed = executed + 1
         seq = seq + 1
         # Aggregate: any failing spec fails the whole run. Keep going so the

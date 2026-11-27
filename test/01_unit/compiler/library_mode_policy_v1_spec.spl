@@ -1,0 +1,70 @@
+use std.spec.*
+use compiler.common.library_mode_policy_v1.*
+use compiler.common.driver_compile_options.{CompileOptions}
+use compiler.driver.cache.native_noop_admission.{native_noop_normalized_invocation_v1}
+
+# Production policy functions, not a model of resolution. Native stage parity
+# is separately exercised by the owner/value fixture matrix.
+describe "explicit semantic library mode":
+    it "derives all eight GC concurrency mutability selections":
+        step("derives all eight GC concurrency mutability selections")
+        for memory in ["gc", "nogc"]:
+            for concurrency in ["sync", "async"]:
+                for mutability in ["mut", "immut"]:
+                    val mode = memory + "-" + concurrency + "-" + mutability
+                    val policy = library_mode_policy_v1(mode).unwrap()
+                    expect(policy.mode).to_equal(mode)
+                    expect(policy.gc_off).to_equal(memory == "nogc")
+                    expect(policy.allowed_families).to_equal([memory + "_" + concurrency + "_" + mutability, "common"])
+
+    it "admits only the implemented noalloc combination":
+        step("admits only the implemented noalloc combination")
+        val policy = library_mode_policy_v1("noalloc-async-mut").unwrap()
+        expect(policy.allowed_families).to_equal(["nogc_async_mut_noalloc", "common"])
+        expect(policy.gc_off).to_equal(true)
+        for bad in ["noalloc-sync-mut", "noalloc-async-immut", "nogc_sync_mut", "src/lib/nogc_sync_mut"]:
+            expect(library_mode_policy_v1(bad).is_err()).to_equal(true)
+
+    it "accepts split and inline CLI values and rejects duplicates or missing values":
+        step("accepts split and inline CLI values and rejects duplicates or missing values")
+        expect(library_mode_parse_args_v1(["native-build", "entry.spl", "--library-mode", "nogc-sync-mut"]).unwrap().mode).to_equal("nogc-sync-mut")
+        expect(library_mode_parse_args_v1(["--library-mode=gc-sync-mut", "entry.spl"]).unwrap().mode).to_equal("gc-sync-mut")
+        for args in [["--library-mode"], ["--library-mode="], ["--library-mode=nogc-sync-mut", "--library-mode=gc-sync-mut"], ["--library-mode=nogc-sync-mut", "--library-mode=nogc-sync-mut"]]:
+            expect(library_mode_parse_args_v1(args).is_err()).to_equal(true)
+
+    it "does not turn a legacy allowlist into explicit selection":
+        step("does not turn a legacy allowlist into explicit selection")
+        expect(library_mode_options_error_v1("", true, ["nogc_sync_mut", "common"])).to_equal("")
+        expect(library_mode_options_error_v1("", false, ["gc_async_mut", "gc_sync_mut"])).to_equal("")
+        expect(library_mode_selected_family_v1("")).to_equal("")
+        expect(library_mode_effective_family_v1("", "/repo/src/lib/nogc_sync_mut/inner.spl")).to_equal("")
+        expect(library_mode_closure_digest_v1("literal legacy policy bytes", "")).to_equal("literal legacy policy bytes")
+
+    it "checks explicit typed options and preserves internal owner coherence":
+        step("checks explicit typed options and preserves internal owner coherence")
+        expect(library_mode_options_error_v1("nogc-sync-mut", true, ["nogc_sync_mut", "common"])).to_equal("")
+        expect(library_mode_options_error_v1("nogc-sync-mut", false, ["nogc_sync_mut", "common"]) != "").to_equal(true)
+        expect(library_mode_options_error_v1("nogc-sync-mut", true, ["nogc_async_mut", "common"]) != "").to_equal(true)
+        expect(library_mode_effective_family_v1("nogc-sync-mut", "app.smux")).to_equal("nogc_sync_mut")
+        expect(library_mode_effective_family_v1("nogc-sync-mut", "std.nogc_async_mut.inner")).to_equal("nogc_async_mut")
+        expect(library_mode_effective_family_v1("nogc-sync-mut", "lib.gc_sync_mut.inner")).to_equal("gc_sync_mut")
+        expect(library_mode_effective_family_v1("nogc-sync-mut", "app.project.lib.gc_sync_mut.entry")).to_equal("nogc_sync_mut")
+        expect(library_mode_effective_family_v1("nogc-sync-mut", "C:/work/lib/gc_sync_mut/project/src/app/main.spl")).to_equal("")
+        expect(library_mode_generic_import_v1("std.sosix.time")).to_equal(true)
+        expect(library_mode_import_key_v1("lib.sosix.time", "nogc-sync-mut", "app.main")).to_equal(library_mode_import_key_v1("std.sosix.time", "nogc-sync-mut", "app.main"))
+        expect(library_mode_import_key_v1("std.sosix.time", "nogc-sync-mut", "")).to_equal("")
+        expect(library_mode_generic_import_v1("std.nogc_async_mut.sosix.time")).to_equal(false)
+        expect(library_mode_generic_import_v1("std.common.crypto.sha256")).to_equal(false)
+
+    it "separates configured invocation identities from equivalent legacy restrictions":
+        step("separates configured invocation identities from equivalent legacy restrictions")
+        var legacy = CompileOptions.default()
+        legacy.gc_off = true
+        legacy.allowed_families = ["nogc_sync_mut", "common"]
+        val before = native_noop_normalized_invocation_v1(legacy, "out.exe")
+        var configured = legacy
+        configured.library_mode = "nogc-sync-mut"
+        val selected = native_noop_normalized_invocation_v1(configured, "out.exe")
+        expect(selected != before).to_equal(true)
+        expect(native_noop_normalized_invocation_v1(legacy, "out.exe")).to_equal(before)
+        expect(library_mode_closure_digest_v1("environment", "nogc-sync-mut") != library_mode_closure_digest_v1("environment", "gc-sync-mut")).to_equal(true)

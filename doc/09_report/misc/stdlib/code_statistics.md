@@ -1,5 +1,10 @@
 # Simple Language Code Statistics
 
+> Historical report from 2026-02-05. Its counts and zero-Rust claim do not
+> describe the current checkout. See the [2026-11-24 LOC report](../../project_loc_2026-11-24.md)
+> for the measured tracked checkout, including submodules and vendored code.
+> The original report below is preserved as historical evidence.
+
 **Generated:** 2026-02-05
 **Version:** 0.4.0 (Pure Simple Edition)
 **Status:** 100% Pure Simple Architecture

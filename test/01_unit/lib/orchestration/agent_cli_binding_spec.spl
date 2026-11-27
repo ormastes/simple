@@ -1,0 +1,98 @@
+# AUTHORED_UNRUN. Pure adapter/integrity checks, not installed-CLI or launch proof.
+# @req REQ-CARET-AGENT-CLI-001 REQ-CARET-AGENT-CLI-002 REQ-CARET-AGENT-CLI-003
+use std.spec.{describe, it, expect, step}
+use std.common.contracts.orchestration.agent_cli_v1.*
+use std.common.contracts.orchestration.agent_invocation_binding_v1.*
+use std.common.contracts.orchestration.agent_policy_resolution_v1.{AgentPolicyResolutionV1, resolve_agent_policy_v1}
+use std.common.crypto.sha256.sha256_text
+use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
+
+fn agent_binding_policy_fixture() -> AgentPolicyResolutionV1:
+    val source = file_read_regular_no_follow_bounded("test/fixtures/orchestration/caret_agent_session.sdn", 1048576).unwrap()
+    val catalog = file_read_regular_no_follow_bounded("test/fixtures/orchestration/caret_policy_catalog.sdn", 1048576).unwrap()
+    resolve_agent_policy_v1(source, catalog, "caret", "review-simple").unwrap()
+
+fn agent_binding_task_fixture(policy: AgentPolicyResolutionV1) -> AgentTaskInputV1:
+    val content = "--not-an-option\nReview $(literal) and 'quoted' text"
+    AgentTaskInputV1(ns: policy.session.meta.ns, reference: policy.session.agent.task_ref,
+        content: content, content_digest: sha256_text(content))
+
+describe "exact agent CLI adapter and retained task binding":
+    it "rejects unknown interfaces without borrowing another provider's flags":
+        step("Admit only the three observed interface versions")
+        val digest = "a".repeat(64)
+        expect(agent_cli_capability_v1("codex", "codex-cli 0.167.0\n", digest).unwrap().version).to_equal("0.167.0")
+        expect(agent_cli_capability_v1("claude", "2.1.318 (Claude Code)", digest).unwrap().version).to_equal("2.1.318")
+        expect(agent_cli_capability_v1("kimi", "2.5.0", digest).unwrap().version).to_equal("2.5.0")
+        for provider in ["gemini", "opencode", "", "claude_cli"]:
+            expect(agent_cli_capability_v1(provider, "2.1.318 (Claude Code)", digest).is_err()).to_equal(true)
+        expect(agent_cli_capability_v1("codex", "codex-cli 9.0.0", digest).is_err()).to_equal(true)
+        expect(agent_cli_capability_v1("claude", "2.1.318 (Claude Code)", "invalid").is_err()).to_equal(true)
+
+    it "uses exact provider resume and output forms while preserving prompt data":
+        step("Build typed argv without shell concatenation or guessed resume flags")
+        val task = "--dangerously-skip-permissions\n$(literal); 'quoted'"
+        val request = AgentCliRequestV1(mode: "noninteractive", prompt: task, model: "chosen-model", resume_id: "session-one")
+        val codex = agent_cli_capability_v1("codex", "codex-cli 0.167.0", "a".repeat(64)).unwrap()
+        val claude = agent_cli_capability_v1("claude", "2.1.318 (Claude Code)", "a".repeat(64)).unwrap()
+        val kimi = agent_cli_capability_v1("kimi", "2.5.0", "a".repeat(64)).unwrap()
+        expect(agent_cli_invocation_v1(codex, request).unwrap().argv).to_equal(["exec", "resume", "--model", "chosen-model", "--json", "--", "session-one", task])
+        expect(agent_cli_invocation_v1(claude, request).unwrap().argv).to_equal(["--print", "--output-format", "json", "--model", "chosen-model", "--resume", "session-one", "--", task])
+        expect(agent_cli_invocation_v1(kimi, request).unwrap().argv).to_equal(["--output-format", "stream-json", "--model", "chosen-model", "--session", "session-one", "--prompt=" + task])
+        expect(agent_cli_invocation_v1(codex, request).unwrap().output_format).to_equal("jsonl")
+        expect(agent_cli_invocation_v1(claude, request).unwrap().output_format).to_equal("json")
+
+    it "does not convert unsupported interactive work or a stdin sentinel into another mode":
+        step("Reject interactive Kimi and Codex's lone dash before any launch")
+        val codex = agent_cli_capability_v1("codex", "codex-cli 0.167.0", "a".repeat(64)).unwrap()
+        val kimi = agent_cli_capability_v1("kimi", "2.5.0", "a".repeat(64)).unwrap()
+        var request = AgentCliRequestV1(mode: "interactive", prompt: "task", model: "", resume_id: "")
+        expect(agent_cli_invocation_v1(codex, request).unwrap().argv).to_equal(["--", "task"])
+        expect(agent_cli_invocation_v1(kimi, request).unwrap_err()).to_equal("agent-cli-interactive-task-unsupported")
+        request.prompt = "-"
+        for mode in ["interactive", "noninteractive"]:
+            request.mode = mode
+            expect(agent_cli_invocation_v1(codex, request).unwrap_err()).to_equal("agent-cli-stdin-prompt-unsupported")
+
+    it "rejects malformed task and option values before constructing executable argv":
+        step("Keep option-like resume selectors and control characters outside the adapter")
+        val capability = agent_cli_capability_v1("codex", "codex-cli 0.167.0", "a".repeat(64)).unwrap()
+        for value in ["--last", "bad\nvalue", "bad\tvalue", " bad", "bad\0value"]:
+            val request = AgentCliRequestV1(mode: "interactive", prompt: "task", model: "", resume_id: value)
+            expect(agent_cli_invocation_v1(capability, request).is_err()).to_equal(true)
+        for prompt in ["", "bad\0task", "x".repeat(65537)]:
+            expect(agent_cli_invocation_v1(capability, AgentCliRequestV1(mode: "interactive", prompt: prompt, model: "", resume_id: "")).is_err()).to_equal(true)
+
+    it "binds retained policy and exact task content to the provider invocation":
+        step("Preserve source task executable and ordered argv identity in the binding digest")
+        val policy = agent_binding_policy_fixture()
+        val task = agent_binding_task_fixture(policy)
+        val capability = agent_cli_capability_v1("codex", "codex-cli 0.167.0", "a".repeat(64)).unwrap()
+        val bound = bind_agent_task_invocation_v1(policy, task, capability, "", "").unwrap()
+        expect(bound.invocation.argv).to_equal(["--", task.content])
+        expect(bound.source_digest).to_equal(policy.source_digest)
+        expect(bound.catalog_digest).to_equal(policy.catalog_digest)
+        expect(bound.task_digest).to_equal(task.content_digest)
+        expect(bind_agent_task_invocation_v1(policy, task, capability, "", "").unwrap().binding_digest).to_equal(bound.binding_digest)
+        expect(bind_agent_task_invocation_v1(policy, task, capability, "other-model", "").unwrap().binding_digest == bound.binding_digest).to_equal(false)
+        expect(bind_agent_task_invocation_v1(policy, task, capability, "", "prior-session").unwrap().binding_digest == bound.binding_digest).to_equal(false)
+        var changed = capability
+        changed.executable_digest = "b".repeat(64)
+        expect(bind_agent_task_invocation_v1(policy, task, changed, "", "").unwrap().binding_digest == bound.binding_digest).to_equal(false)
+
+    it "rejects wrong task scope content and provider before binding":
+        step("Do not confuse integrity values with authority to replace the retained task")
+        val policy = agent_binding_policy_fixture()
+        val task = agent_binding_task_fixture(policy)
+        val capability = agent_cli_capability_v1("codex", "codex-cli 0.167.0", "a".repeat(64)).unwrap()
+        var changed = task
+        changed.ns = "wrong-namespace"
+        expect(bind_agent_task_invocation_v1(policy, changed, capability, "", "").unwrap_err()).to_equal("agent-task-reference-mismatch")
+        changed = task
+        changed.reference = "wrong-reference"
+        expect(bind_agent_task_invocation_v1(policy, changed, capability, "", "").is_err()).to_equal(true)
+        changed = task
+        changed.content = "changed without updating digest"
+        expect(bind_agent_task_invocation_v1(policy, changed, capability, "", "").unwrap_err()).to_equal("agent-task-content-mismatch")
+        val other = agent_cli_capability_v1("claude", "2.1.318 (Claude Code)", "a".repeat(64)).unwrap()
+        expect(bind_agent_task_invocation_v1(policy, task, other, "", "").unwrap_err()).to_equal("agent-cli-provider-mismatch")

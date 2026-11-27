@@ -1,0 +1,68 @@
+# @cover src/lib/nogc_sync_mut/crash/failure_slot_v1.spl
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-DHR-03
+# plan: doc/03_plan/app/debug/dhr_debug_spy_replay_recovery_plan_2026-11-17.md
+#
+# The library half of the P2 assert hook: the profile gate and the process
+# slot. The interpreter call site (70.backend interpreter_calls.spl, compiled
+# only under SIMPLE_FEATURES=dhr) is not exercised here: specs run on the Rust
+# seed, which never executes that pure-Simple interpreter.
+
+use std.spec.*
+use std.nogc_sync_mut.io_runtime.{env_get_opt, env_set_process, env_remove_process}
+use std.nogc_sync_mut.crash.failure_slot_v1.{FailureKindV1, dhr_profile_active, publish_assert_failure, take_process_failure}
+
+fn restore_features(saved: text):
+    if saved == "":
+        env_remove_process("SIMPLE_FEATURES")
+    else:
+        env_set_process("SIMPLE_FEATURES", saved)
+
+describe "FailureSlotV1 assert hook":
+    it "profile on: a failing assert lands in the process slot as an Assert record":
+        val saved = env_get_opt("SIMPLE_FEATURES") ?? ""
+        take_process_failure()
+        env_set_process("SIMPLE_FEATURES", "dhr")
+        val published = publish_assert_failure("interpreter:assert", "assertion failed: x > 0")
+        restore_features(saved)
+        expect(published).to_equal(true)
+        val record = take_process_failure().unwrap()
+        expect(record.kind == FailureKindV1.Assert).to_equal(true)
+        expect(record.site).to_equal("interpreter:assert")
+        expect(record.message).to_equal("assertion failed: x > 0")
+        expect(take_process_failure().is_none()).to_equal(true)
+
+    it "profile off: a failing assert leaves the process slot empty":
+        val saved = env_get_opt("SIMPLE_FEATURES") ?? ""
+        take_process_failure()
+        env_remove_process("SIMPLE_FEATURES")
+        val published = publish_assert_failure("interpreter:assert", "assertion failed")
+        restore_features(saved)
+        expect(published).to_equal(false)
+        expect(take_process_failure().is_none()).to_equal(true)
+
+    it "another feature tag alone does not turn the profile on":
+        val saved = env_get_opt("SIMPLE_FEATURES") ?? ""
+        env_set_process("SIMPLE_FEATURES", "macho")
+        val active = dhr_profile_active()
+        restore_features(saved)
+        expect(active).to_equal(false)
+
+    it "the profile tag is found in a mixed, case-insensitive feature list":
+        val saved = env_get_opt("SIMPLE_FEATURES") ?? ""
+        env_set_process("SIMPLE_FEATURES", "macho, DHR")
+        val active = dhr_profile_active()
+        restore_features(saved)
+        expect(active).to_equal(true)
+
+    it "DBG-06 holds for the process slot: a second assert only counts as nested":
+        val saved = env_get_opt("SIMPLE_FEATURES") ?? ""
+        take_process_failure()
+        env_set_process("SIMPLE_FEATURES", "dhr")
+        publish_assert_failure("first", "assertion failed: a")
+        val second = publish_assert_failure("second", "assertion failed: b")
+        restore_features(saved)
+        expect(second).to_equal(false)
+        val record = take_process_failure().unwrap()
+        expect(record.site).to_equal("first")
+        expect(record.nested_faults).to_equal(1)

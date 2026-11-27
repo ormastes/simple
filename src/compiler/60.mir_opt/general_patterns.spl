@@ -371,7 +371,7 @@ fn fact_for_recognizer(recognizer_name: text) -> OptimizationFact?:
         if facts[i].general_recognizer == recognizer_name:
             return Some(facts[i])
         i = i + 1
-    nil
+    None
 
 fn all_fact_keys() -> [text]:
     val facts = web_hot_path_facts()
@@ -519,6 +519,25 @@ fn simple_strength_reduce_recommendation() -> BackendOptimizationRecommendation:
         "medium"
     )
 
+fn simple_predicate_promote_recommendation() -> BackendOptimizationRecommendation:
+    val provider = backend_plugin_provider(
+        "simple-predicate-promote",
+        ["typed_mir", "predication_candidate", "predicate_safe"],
+        ["canonical_mir", "predicated_ops"],
+        "predicate-safety-guarded"
+    )
+    val policy = optimization_backend_policy_skip(
+        [OptimizerBackendKind.Llvm],
+        "llvm_runs_if_conversion_and_select_promotion"
+    )
+    backend_recommendation(
+        "simple-predicate-promote",
+        optimization_rule_provider_with_backend_policy(provider, policy),
+        "Runs Simple-side branch-to-predicate promotion for Cranelift and interpreter JIT paths only when candidate and safety facts prove the select-shaped branch is safe to if-convert; LLVM should use its if-conversion and select-promotion transforms.",
+        "LLVM pass documentation describes if-conversion and select-promotion transforms in the backend pipeline family.",
+        "high"
+    )
+
 fn bounds_check_elim_recommendation() -> BackendOptimizationRecommendation:
     val provider = backend_plugin_provider(
         "bounds-check-elim",
@@ -648,6 +667,7 @@ fn all_backend_optimization_recommendations() -> [BackendOptimizationRecommendat
         cranelift_local_licm_recommendation(),
         simple_loop_unroll_recommendation(),
         simple_strength_reduce_recommendation(),
+        simple_predicate_promote_recommendation(),
         bounds_check_elim_recommendation(),
         byte_scan_recommendation(),
         checksum_reducer_recommendation(),
@@ -689,7 +709,7 @@ fn backend_optimization_decision_with_facts(rec: BackendOptimizationRecommendati
     if not base.applies:
         return base
     val missing = optimization_rule_provider_missing_fact(rec.provider, available_facts)
-    if missing != nil:
+    if missing.is_some():
         return BackendOptimizationDecision(rec.stable_name, backend_name, max_cost_class, rec.cost_class, false, "missing " + missing.unwrap())
     base
 
@@ -753,6 +773,7 @@ fn backend_optimization_plan_for_budget(backend_name: text, max_cost_class: text
     (names, skipped) = backend_optimization_plan_add_entry(names, skipped, "cranelift-local-licm", backend_name, max_cost_class, "medium", is_low_tier_jit, "backend_not_simple_low_tier_jit")
     (names, skipped) = backend_optimization_plan_add_entry(names, skipped, "simple-loop-unroll", backend_name, max_cost_class, "medium", is_low_tier_jit, "backend_not_simple_low_tier_jit")
     (names, skipped) = backend_optimization_plan_add_entry(names, skipped, "simple-strength-reduce", backend_name, max_cost_class, "medium", is_low_tier_jit, "backend_not_simple_low_tier_jit")
+    (names, skipped) = backend_optimization_plan_add_entry(names, skipped, "simple-predicate-promote", backend_name, max_cost_class, "high", is_low_tier_jit, "backend_not_simple_low_tier_jit")
     (names, skipped) = backend_optimization_plan_add_entry(names, skipped, "bounds-check-elim", backend_name, max_cost_class, "medium", true, "")
     (names, skipped) = backend_optimization_plan_add_entry(names, skipped, "byte-scan-to-delimiter", backend_name, max_cost_class, "medium", true, "")
     (names, skipped) = backend_optimization_plan_add_entry(names, skipped, "checksum-reducer", backend_name, max_cost_class, "medium", true, "")

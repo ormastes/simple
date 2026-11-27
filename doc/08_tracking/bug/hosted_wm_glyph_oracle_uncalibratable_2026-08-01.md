@@ -200,3 +200,100 @@ exactly what the current resource lock forbids — deferred, not shortcut.
 Deferred verification: rerun
 `sh scripts/check/check-linux-hosted-wm-live-window-evidence.shs` on a quiet
 host after Stage-4 completes.
+
+
+## Re-check 2026-11-05 (aarch64 Linux host, clean release/1.0.0 worktree)
+
+Re-verified from a dedicated clean worktree
+(`work/libbug-linux-wmglyph-20261105` off `origin/release/1.0.0`), per the
+calibration procedure's step 1. The gate script is byte-identical to the
+main checkout, so every prior finding still applies.
+
+**Environment-block chain proven on this host (none fixable without the
+admitted Linux X11 phase environment):**
+
+- `xdotool`, ImageMagick (`import`/`convert`), and `Xvfb` are all absent,
+  and the host has no root/sudo, so the capture toolchain cannot be
+  installed. The gate exits at line 791 (`missing-command-xdotool`) — before
+  the compiler is even version-checked — which is *past* the
+  `GLYPH_RGB_SHA256=pending` declaration but long before the glyph oracle
+  hard-fail (line 1188 in this revision; line 966 at the revision this doc
+  originally surveyed).
+- No `libsimple_runtime.so` runtime provider exists on this host, so
+  `admit_runtime_provider` could not pass even with the toolchain present.
+- The only Simple binaries on this host are the Rust seed / phase-snapshot
+  builds; the prescribed phase1 seed is rejected by the gate's own
+  `--version` seed filter (per this doc's admission-rule note), and no
+  pure-Simple `bin/release/<triple>/simple` exists here.
+
+**Calibration status:** still uncalibratable here, exactly as this doc
+predicted for an interpreter-only, no-native-build-closure host. No hash was
+invented or back-filled; `GLYPH_RGB_SHA256` remains `pending`. The oracle
+hard-fail is and remains the designed fail-closed terminal state for a
+pending pin outside `LINUX_HOSTED_WM_CALIBRATE_GLYPH=1`.
+
+**Code change this pass (coverage, not a relaxation):** the gate's
+`--self-test` exercised `glyph_oracle_mode` only with a pinned digest; the
+pending-pin decision path this bug is named for had zero host-independent
+coverage. The self-test now asserts all three designed decisions:
+`pending`+no flag → `calibration-required` (the hard-fail path),
+`pending`+`LINUX_HOSTED_WM_CALIBRATE_GLYPH=1` → `calibration-only` (the
+designed path past the hard-fail), and any real digest → `pinned` with or
+without the flag. The executable contract in
+`test/03_system/gui/linux_hosted_wm_live_window_spec.spl` was extended to
+match. The production gate behavior is unchanged: fail-closed on pending,
+calibration-only under the flag.
+
+**Naming note:** this doc and
+`doc/06_spec/03_system/gui/linux_hosted_wm_live_window_spec.md` say the
+calibration run ends at `glyph-oracle-calibration-only-*`; the script (and
+the .spl spec, which is the executable contract) emit
+`glyph-oracle-calibration-candidate-*` / `-candidate-invalid`. Same designed
+terminal state, two names; left as-is to avoid churning the spec-locked
+string, recorded here so the next calibration run is not misread.
+
+**Still open:** blocker #5 (real render to hash). The valid calibration
+procedure above remains the only admissible fix, and it requires the
+admitted X11 phase environment (toolchain + quiet host + pure-Simple binary
++ runtime provider DSO).
+
+## Linux x86_64 Re-check (2026-11-26, Lane 1)
+
+- `GLYPH_RGB_SHA256=pending` remains at `scripts/check/check-linux-hosted-wm-live-window-evidence.shs:26`.
+- `sh scripts/check/check-linux-hosted-wm-live-window-evidence.shs --self-test`: **PASS** (exit 0).
+- `test/03_system/gui/linux_hosted_wm_live_window_spec.spl`: 1 passed (Example 3
+  source contract), 2 failed (Example 1 requires live `build/linux-hosted-wm-font-event-current/evidence.env`;
+  Example 2 fails on `{comp.render_revision}` interpolation in spec line 285).
+- Live calibration (`LINUX_HOSTED_WM_CALIBRATE_GLYPH=1`) remains blocked on this
+  host: `xdotool`, `Xvfb`, ImageMagick `import`/`convert`, and a GUI-enabled
+  `simple` binary (`rt_winit_event_loop_new`) are absent, and `cargo build` is
+  not runnable here. No hash fabricated; status stays `open`.
+
+## Linux aarch64 Re-check (2026-11-26, lane wm-lane-20261126)
+
+Host: DGX Spark (GB10), release/1.0.0 79445b063c4, seed
+`/home/yoon/.cache/cargo-target-wr-seed1126b/release/simple`.
+
+- `GLYPH_RGB_SHA256=pending` still at
+  `scripts/check/check-linux-hosted-wm-live-window-evidence.shs:26`.
+- `--self-test`: exit 0 (`runtime_staged=pass`, `runtime_fd=pass`,
+  `runtime_changed=rejected`).
+- Live run (`SIMPLE_BIN=<seed>`): exit 1,
+  `status=unavailable reason=missing-command-xdotool`; framebuffer, window
+  PNG, glyph crop and deliberate-red rows all `fail`/`missing`; runtime
+  provider `fail`.
+- Environment: `xdotool`, `Xvfb`, ImageMagick (`import`/`convert`/`magick`)
+  absent; no passwordless sudo; the only X server (`/tmp/.X11-unix/X0`) is
+  owned by `gdm` with no client auth for this user; Xorg has only the
+  `modesetting` driver (no `dummy`); no
+  `src/runtime/spl_winit/target/release/libspl_winit.so`.
+
+No crop was captured, so no pin was written. Calibration still needs the
+admitted X11 phase environment; status stays `open`.
+
+Blockers that no package install removes, even with the capture tools
+unpacked without root: the gate rejects the only available compiler
+(`--version` matches `rust-built ... bootstrap seed` -> `rust-seed-forbidden`,
+script line 889; no pure-Simple `bin/release/<triple>/simple` exists here),
+and `admit_runtime_provider` has no admitted `libsimple_runtime.so`
+(`src/compiler_rust/target/bootstrap/deps/` is empty in this worktree).

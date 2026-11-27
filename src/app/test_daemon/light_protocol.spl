@@ -1,3 +1,6 @@
+use std.nogc_sync_mut.io.file_ops.{file_create_exclusive, file_lock, file_unlock, file_modified_time}
+use std.io_runtime.{file_exists, read_file_text, file_write, file_delete, file_rename, getpid, thread_sleep, time_now_unix_micros}
+
 val LIGHT_REQUEST_DEFAULT_TIMEOUT_MS: i64 = 600000
 # Ceiling on an EXPLICITLY requested budget, not the default (which stays
 # 600s above). It used to equal the default, so a spec that asked for more —
@@ -7,19 +10,19 @@ val LIGHT_REQUEST_DEFAULT_TIMEOUT_MS: i64 = 600000
 # can never print a failure either. Only specs that declare a larger budget
 # can reach this ceiling. See tile_paint_parity_spec (measured 1108s honest).
 val LIGHT_REQUEST_MAX_TIMEOUT_MS: i64 = 2400000
-val LIGHT_REQUEST_RESPONSE_GRACE_MS: i64 = 2000
+pub val LIGHT_REQUEST_RESPONSE_GRACE_MS: i64 = 2000
 val LIGHT_REQUEST_V1_HEADER: text = "simple-test-daemon-request-v1"
 val LIGHT_REQUEST_V2_HEADER: text = "simple-test-daemon-request-v2"
-val LIGHT_REQUEST_ENVIRONMENT_REROUTE_CODE: i64 = 75
-val LIGHT_REQUEST_ENVIRONMENT_REROUTE_MARKER: text =
+pub val LIGHT_REQUEST_ENVIRONMENT_REROUTE_CODE: i64 = 75
+pub val LIGHT_REQUEST_ENVIRONMENT_REROUTE_MARKER: text =
     "TEST_DAEMON_REROUTE_ENVIRONMENT"
-val LIGHT_REQUEST_ENVIRONMENT_REROUTE_RESULT: i64 = -750075
+pub val LIGHT_REQUEST_ENVIRONMENT_REROUTE_RESULT: i64 = -750075
 
 fn light_response_is_environment_reroute(code: i64, body: text) -> bool:
     code == LIGHT_REQUEST_ENVIRONMENT_REROUTE_CODE and
         body.trim() == LIGHT_REQUEST_ENVIRONMENT_REROUTE_MARKER
 
-fn light_response_client_result(code: i64, body: text) -> i64:
+pub fn light_response_client_result(code: i64, body: text) -> i64:
     if light_response_is_environment_reroute(code, body):
         return LIGHT_REQUEST_ENVIRONMENT_REROUTE_RESULT
     code
@@ -31,20 +34,20 @@ fn light_request_clamp_timeout_ms(timeout_ms: i64) -> i64:
         return LIGHT_REQUEST_MAX_TIMEOUT_MS
     timeout_ms
 
-fn light_request_timeout_ms_from_seconds(timeout_secs: i64) -> i64:
+pub fn light_request_timeout_ms_from_seconds(timeout_secs: i64) -> i64:
     if timeout_secs <= 0:
         return LIGHT_REQUEST_DEFAULT_TIMEOUT_MS
     if timeout_secs > LIGHT_REQUEST_MAX_TIMEOUT_MS / 1000:
         return LIGHT_REQUEST_MAX_TIMEOUT_MS
     timeout_secs * 1000
 
-fn light_request_expiry_micros(now_micros: i64, timeout_ms: i64) -> i64:
+pub fn light_request_expiry_micros(now_micros: i64, timeout_ms: i64) -> i64:
     now_micros + (light_request_clamp_timeout_ms(timeout_ms) * 1000)
 
 fn light_request_encode(path: text, expiry_micros: i64) -> text:
     "{LIGHT_REQUEST_V1_HEADER}\n{expiry_micros}\n{path}"
 
-fn light_request_encode_v2(path: text, expiry_micros: i64,
+pub fn light_request_encode_v2(path: text, expiry_micros: i64,
         environment_digest: text, daemon_generation: text) -> text:
     "{LIGHT_REQUEST_V2_HEADER}\n{expiry_micros}\n{environment_digest}\n{daemon_generation}\n{path}"
 
@@ -101,7 +104,7 @@ fn light_request_parse(content: text) -> (text, i64):
 # `reason=` fields are appended AFTER dropped= so no existing parser is
 # disturbed, and give a grep-able marker that distinguishes a killed spec from
 # an honestly-failing one.
-fn timeout_verdict_line(path: text, reason: text, budget_ms: i64) -> text:
+pub fn timeout_verdict_line(path: text, reason: text, budget_ms: i64) -> text:
     "SPEC FILE VERDICT: {path} declared>=1 executed=1 passed=0 failed=1 dropped=0 timeout=1 reason={reason} budget_ms={budget_ms}"
 
 # A child that died long BEFORE its budget did not time out, however much its
@@ -143,7 +146,7 @@ pub fn early_death_verdict_line(path: text, code: i64, elapsed_ms: i64, budget_m
 fn no_response_verdict_line(path: text, budget_ms: i64) -> text:
     "SPEC FILE VERDICT: {path} declared>=1 executed=0 passed=0 failed=0 dropped=1 timeout=1 inconclusive=1 reason=daemon-no-response budget_ms={budget_ms}"
 
-fn has_verdict_line(output: text) -> bool:
+pub fn has_verdict_line(output: text) -> bool:
     output.contains("SPEC FILE VERDICT:")
 
 # Unrun verdict emission (bug: unrun_spec_emits_no_verdict_line_2026-08-10)
@@ -173,17 +176,27 @@ fn has_verdict_line(output: text) -> bool:
 # verdict line with no outcome at all, and
 # scripts/check/check-test-runner-executes-bodies.shs (assert_zero) correctly
 # refused to accept it as an error report.
-fn unrun_verdict_line(path: text, reason: text) -> text:
+pub fn unrun_verdict_line(path: text, reason: text) -> text:
     "SPEC FILE VERDICT: {path} outcome=ERROR declared>=1 executed=0 passed=0 failed=1 dropped=1 unrun=1 reason={reason}"
+
+pub fn process_failure_verdict_line(path: text, passed: i64, in_development: i64 = 0) -> text:
+    val executed = passed + in_development
+    "SPEC FILE VERDICT: {path} outcome=ERROR declared>={executed} executed={executed} passed={passed} failed=0 in_development={in_development} dropped=0 process_error=1 reason=child-exit-nonzero"
 
 # Classify WHY a spec executed nothing, from the child's combined output. The
 # reason is a grep-able token on the verdict line so a sweep can separate a
 # missing module (an infrastructure gap someone must land) from a spec that
 # genuinely declares no examples (an authoring gap). Ordered most-specific
 # first; falls back to a token that never claims more than it knows.
-fn unrun_reason(output: text) -> text:
+pub fn unrun_reason(output: text) -> text:
     if output.starts_with("COVER ADMISSION FAILED:"):
         return "cover-admission-failed"
+    if output == "no parseable pass/fail summary in test output; refusing synthetic pass":
+        return "bdd-evidence-unavailable"
+    if output.contains("test-runner: structured BDD evidence unavailable"):
+        return "bdd-evidence-unavailable"
+    if output.contains("--assert-ran: no BDD examples executed"):
+        return "zero-examples"
     if output.contains("Cannot resolve module:"):
         return "unresolved-module"
     if output.contains("compile failed: parse:") or output.contains("error: parse") or output.contains("error: syntax") or output.contains("Unexpected token"):
@@ -192,15 +205,26 @@ fn unrun_reason(output: text) -> text:
         return "unresolved-symbol"
     return "zero-examples"
 
-# Did this spec fail to LOAD, as opposed to running and failing an assertion?
-# The distinction is the whole point of the unrun line: a spec that asserted
-# something and got the wrong answer is a product defect; a spec that could not
-# be loaded at all is an infrastructure gap, and it declared examples nobody
-# ever evaluated. `unrun_reason` is the single classifier — this is a named
-# predicate over it, NOT a second copy of the token list, so the two can never
-# drift apart.
-fn is_load_failure(output: text) -> bool:
-    unrun_reason(output) != "zero-examples"
+# Did this result fail without authenticated execution evidence, rather than
+# run examples and fail an assertion? Assertion failures must stay on the ran
+# path with their real count. A structured-evidence refusal with zero examples
+# gets the existing unrun verdict shape, carrying reason=zero-examples.
+fn is_unrun_failure(output: text) -> bool:
+    if output.starts_with("test-runner: authenticated BDD assertion failure:"):
+        return false
+    val reason = unrun_reason(output)
+    reason != "zero-examples" or output.contains("--assert-ran: no BDD examples executed")
+
+pub fn aggregate_spec_file_verdict_line(path: text, passed: i64, failed: i64,
+        in_development: i64, error: text, degraded: text,
+        timed_out: bool, duration_ms: i64, blocked: i64 = 0) -> text:
+    if timed_out:
+        return timeout_verdict_line(path, "aggregate-lane-timeout", duration_ms)
+    if error.starts_with("test-runner: BDD process failure after authenticated pass"):
+        return process_failure_verdict_line(path, passed, in_development)
+    if error != "" and is_unrun_failure(error):
+        return unrun_verdict_line(path, unrun_reason(error))
+    ran_verdict_line(path, passed, failed, in_development, degraded, blocked)
 
 # Verdict line for a spec the AGGREGATING (directory) lane actually ran.
 #
@@ -229,12 +253,27 @@ fn is_load_failure(output: text) -> bool:
 # the module ran to completion while the counts said a test failed, and readers
 # took the token. See doc/08_tracking/bug/
 # test_runner_exits_zero_on_failed_spec_2026-08-21.md
-fn verdict_outcome_token(executed: i64, failed: i64) -> text:
+# `blocked` (2026-11-12) counts examples that could not run because their
+# ENVIRONMENT is missing -- `pending("BLOCKED: ...")` or an
+# `Err("precondition: ...")` failure (parse_blocked_examples). A blocked example
+# is never a pass and never OK: any blocked example with no real failure makes
+# the file `outcome=BLOCKED`; a real failure still wins (`ERROR`). Exit code 6
+# (TestRunOutcome.BlockedScenario) so gates can decide how to treat it.
+# See doc/08_tracking/bug/llm_caret_env_gated_specs_no_blocked_outcome_2026-11-12.md
+@allow(primitive_api)  # verdict-line counters (executed/failed/blocked) are raw example tallies; pinned by blocked_outcome_spec and spec_verdict_invariant_spec
+pub fn verdict_outcome_token(executed: i64, failed: i64, blocked: i64 = 0) -> text:
     if failed > 0:
         return "ERROR"
+    if blocked > 0:
+        return "BLOCKED"
     if executed <= 0:
         return "NOT_RUN"
     "OK"
+
+# Human-readable companion of a BLOCKED verdict: the reason is free text, so it
+# lives on its own line instead of breaking the verdict's one-token-per-key shape.
+pub fn blocked_reason_line(path: text, blocked: i64, reason: text) -> text:
+    "SPEC FILE BLOCKED: {path} blocked={blocked} reason={reason}"
 
 # `in_development` counts examples that RAN and were then neutralised by
 # `# @tag:in-development`. They are executed work and must be counted as such:
@@ -256,10 +295,10 @@ fn verdict_outcome_token(executed: i64, failed: i64) -> text:
 # never compiled read as an ordinary red. The token carries no whitespace (see
 # `verdict_degrade_token_field` in test_runner_execute.spl) so a reader
 # splitting this line on whitespace still sees exactly one token per key.
-fn ran_verdict_line(path: text, passed: i64, failed: i64, in_development: i64 = 0, degraded: text = "") -> text:
-    val executed = passed + failed + in_development
-    val outcome = verdict_outcome_token(executed, failed)
-    val base = "SPEC FILE VERDICT: {path} outcome={outcome} declared>={executed} executed={executed} passed={passed} failed={failed} in_development={in_development} dropped=0"
+pub fn ran_verdict_line(path: text, passed: i64, failed: i64, in_development: i64 = 0, degraded: text = "", blocked: i64 = 0) -> text:
+    val executed = passed + failed + in_development + blocked
+    val outcome = verdict_outcome_token(executed, failed, blocked)
+    val base = "SPEC FILE VERDICT: {path} outcome={outcome} declared>={executed} executed={executed} passed={passed} failed={failed} in_development={in_development} blocked={blocked} dropped=0"
     if degraded == "": base else: base + " degraded={degraded}"
 
 # Human-readable gloss for a process exit status seen on the test lane. Exit
@@ -267,7 +306,7 @@ fn ran_verdict_line(path: text, passed: i64, failed: i64, in_development: i64 = 
 # it comes from the reporting harness), so every timeout/abort report prints
 # the number WITH this sentence. See doc/07_guide/infra/testing.md
 # "Test-lane exit codes".
-fn exit_code_reason(code: i64) -> text:
+pub fn exit_code_reason(code: i64) -> text:
     if code == 0:
         return "exit 0 (clean; but with NO verdict line it means the spec RAN NOTHING)"
     if code == 124:
@@ -319,3 +358,137 @@ fn light_request_is_pollable(name: text) -> bool:
     if not name.ends_with(".req"):
         return false
     true
+
+# --- Lane lock protocol (shared by light_daemon.spl and test_runner_client.spl)
+#
+# daemon.lock holds "<pid>\n<environment digest>". It is created with O_EXCL
+# (exactly one creator wins) and is only ever deleted by its owner, or by a
+# breaker that proved the recorded pid dead while holding the kernel lock
+# "<lock>.break". An empty or one-line file is "being written", never stale.
+# Bug: test_daemon_ensure_daemon_deletes_live_lock_and_shared_tmp_claim_2026-11-02.
+
+pub fn light_lock_is_complete(content: text) -> bool:
+    val lines = content.split("\n")
+    lines.len() >= 2 and lines[0].trim() != "" and lines[1].trim() != ""
+
+pub fn light_lock_pid(content: text) -> text:
+    (content.split("\n")[0]).trim()
+
+pub fn light_unique_tmp_path(path: text) -> text:
+    "{path}.{getpid()}.{time_now_unix_micros()}.tmp"
+
+pub fn light_atomic_publish(path: text, content: text) -> bool:
+    """Unique tmp + same-directory rename. No shared tmp name, no plain-write fallback."""
+    val tmp_path = light_unique_tmp_path(path)
+    if not file_write(tmp_path, content):
+        file_delete(tmp_path)
+        return false
+    if file_rename(tmp_path, path):
+        return true
+    file_delete(tmp_path)
+    false
+
+pub fn light_lock_older_than(path: text, secs: i64) -> bool:
+    val mtime = file_modified_time(path)
+    mtime > 0 and (time_now_unix_micros() / 1000000) - mtime > secs
+
+pub fn light_lock_break_stale(lock_path: text, binary_path: text, judged_pid: text, alive: fn(text) -> bool) -> bool:
+    """Delete the lock iff it is complete, still names judged_pid, and that pid is dead."""
+    val h = file_lock("{lock_path}.break", 10)
+    if h < 0:
+        return false
+    var broke = false
+    if file_exists(lock_path):
+        val content = read_file_text(lock_path)
+        if light_lock_is_complete(content):
+            val pid = light_lock_pid(content)
+            if pid == judged_pid and not alive(pid):
+                file_delete(lock_path)
+                file_delete(binary_path)
+                broke = true
+        elif judged_pid == "" and light_lock_older_than(lock_path, 10):
+            # Torn record from a claimant that died mid-write: stale only after a grace.
+            file_delete(lock_path)
+            file_delete(binary_path)
+            broke = true
+    file_unlock(h)
+    broke
+
+pub fn light_lock_release(lock_path: text, binary_path: text, my_pid: text):
+    """Release only a lock this pid owns."""
+    if file_exists(lock_path) and light_lock_pid(read_file_text(lock_path)) == my_pid:
+        file_delete(lock_path)
+        file_delete(binary_path)
+
+pub fn light_lock_claim(lock_path: text, digest: text, my_pid: text, alive: fn(text) -> bool, binary_path: text) -> bool:
+    """Become the lane owner or report that someone else is. O_EXCL decides; no sleep arbitration."""
+    var attempt = 0
+    while attempt < 4:
+        if file_create_exclusive(lock_path, my_pid + "\n" + digest):
+            return true
+        val content = read_file_text(lock_path)
+        if light_lock_is_complete(content):
+            val pid = light_lock_pid(content)
+            if pid == my_pid:
+                return true
+            if alive(pid):
+                return false
+            light_lock_break_stale(lock_path, binary_path, pid, alive)
+        else:
+            # Another claimant is between create and write (or the file is gone).
+            thread_sleep(50)
+            if attempt == 3:
+                light_lock_break_stale(lock_path, binary_path, "", alive)
+        attempt = attempt + 1
+    false
+
+pub fn lock_alive_at(lock_path: text, alive: fn(text) -> bool) -> bool:
+    if not file_exists(lock_path):
+        return false
+    val pid = light_lock_pid(read_file_text(lock_path))
+    pid != "" and alive(pid)
+
+
+
+
+pub fn ensure_daemon_at(lock_path: text, binary_path: text, alive: fn(text) -> bool, launch: fn() -> bool, on_stale: fn(), after_first_check: fn()) -> bool:
+    """Start the light daemon at most once however many clients race here.
+
+    The unlocked alive check is only a fast path. Everything after it runs under
+    a kernel lock (auto-released if this process dies), re-checks liveness, and
+    deletes a lock only after proving its recorded pid dead. `after_first_check`
+    is a test seam that runs between the fast-path check and the spawn lock."""
+    if lock_alive_at(lock_path, alive):
+        return true
+    after_first_check()
+    val h = file_lock("{lock_path}.spawn", 30)
+    if h < 0:
+        return false
+    var ok = false
+    if lock_alive_at(lock_path, alive):
+        ok = true
+    else:
+        if file_exists(lock_path):
+            val content = read_file_text(lock_path)
+            val pid = light_lock_pid(content)
+            if pid != "":
+                on_stale()
+            light_lock_break_stale(lock_path, binary_path, pid, alive)
+        ok = launch() and wait_for_daemon_record(lock_path, binary_path)
+    file_unlock(h)
+    ok
+
+pub fn wait_for_daemon_record(lock_path: text, binary_path: text) -> bool:
+    # The daemon claims LIGHT_LOCK first and publishes LIGHT_BINARY right
+    # after. Returning on the lock alone raced that publish: the caller then
+    # read no binary record, reported "identity unavailable or mismatched" and
+    # bypassed the daemon it had just started. Wait for both.
+    var waits = 0
+    while waits < 40:
+        if file_exists(lock_path) and file_exists(binary_path):
+            return true
+        thread_sleep(50)
+        waits = waits + 1
+    file_write("/tmp/simple-test-daemon-light.log", "light daemon shell exited but did not create lock\n")
+    false
+

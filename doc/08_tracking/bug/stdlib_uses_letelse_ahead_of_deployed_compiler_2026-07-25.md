@@ -96,3 +96,27 @@ real fallback.
 - Session memory `project_letelse_refutable_val_binding_2026-07-25` records the
   original feature work as "NOT pushed till verified"; the stdlib edit reached
   the tree regardless. Treat that memory as describing intent, not tree state.
+
+## Verification note 2026-11-25 (p3-bar lane, worktree wt-p3-bar) — RESOLVED
+
+The sequencing gap this entry tracks is closed: the deployed toolchain now
+carries refutable let-else, and the stdlib has re-adopted it.
+
+- The tracked self-hosted binary at the release/1.0.0 tip (`fcd95d41d60`)
+  parses and executes the form: a standalone probe
+  `val Some(x) = v else: return -1` printed `3` for `Some(2)` and `-1` for
+  `None` (run via `SIMPLE_LIB=src bin/simple.exe run`).
+- The stdlib now uses the form broadly — e.g.
+  `src/lib/nogc_sync_mut/web_framework/persistence.spl:196` and
+  `src/lib/nogc_sync_mut/web_framework/session.spl:171` — so the "exactly one
+  site" blast-radius measurement in this entry is historical.
+- The original workaround site is gone: `variables.spl` was refactored and no
+  longer contains the `?? 0` shim this entry added (current dollar-scan at
+  `variables.spl:390-394` uses `find` + `if dollar_idx < 0`).
+  `SIMPLE_LIB=src bin/simple.exe check src/lib/nogc_sync_mut/env/variables.spl`
+  completes with no parse error (only a pre-existing, unrelated
+  `export use *` warning in a compiler file).
+
+Item 2 of "What still needs doing" (a lint that parses `src/lib/**` with the
+deployed binary) remains a worthwhile separate enhancement, not this bug.
+Status: resolved — deployed compiler and stdlib are back in sequence.

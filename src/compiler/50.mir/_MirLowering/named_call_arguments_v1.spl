@@ -1,0 +1,182 @@
+use compiler.hir.hir_definitions.*
+use compiler.hir.hir_types.*
+use compiler.mir.mir_data.*
+use compiler.mir.mir_instructions.{mir_operand_copy}
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir.mir_lowering_stmts.*
+use compiler.mir.call_argument_slots_v1.{mir_call_argument_slots_v1}
+use compiler.mir._MirLowering.declaration_providers_v1.*
+use compiler.mir._MirLowering.resident_default_global_owner.*
+use compiler.mir._MirLoweringExpr.expr_dispatch.*
+
+impl MirLowering:
+    me _named_module_fn_call_slots_v1(callee_label: text, callee_symbol_id: i64, names: [text]) -> Result<[i64], text>:
+        val mod_params = self.module_fn_params[callee_symbol_id]
+        var mod_names: [text] = []
+        var mod_defaults: [bool] = []
+        for mp in mod_params:
+            mod_names.push(mp.name)
+            mod_defaults.push(mp.has_default)
+        val mod_slots = mir_call_argument_slots_v1(mod_names, mod_defaults, names)?
+        var mod_index = 0
+        while mod_index < mod_params.len():
+            if not mod_slots.contains(mod_index):
+                val omitted = mod_params[mod_index]
+                if not omitted.has_default or self.mir_hir_expr_is_error_default_v1(omitted.default):
+                    return Err("named default requires admitted declaration scope: {callee_label}.{omitted.name}")
+            mod_index = mod_index + 1
+        Ok(mod_slots)
+
+    me named_call_slots_v1(callee_name: text, args: [HirCallArg], callee_symbol: SymbolId = SymbolId(id: -1)) -> Result<[i64], text>:
+        var has_named = false
+        for arg in args:
+            if arg.has_name:
+                has_named = true
+                break
+        if not has_named: return Ok([])
+        var names: [text] = []
+        for arg in args:
+            names.push(if arg.has_name: arg.name else: "")
+        if self.declaration_repository != None:
+            val lookup_keys = self._callable_lookup_keys_for_named_args_v1(callee_symbol, callee_name)
+            var first_ambiguous_key = ""
+            for key in lookup_keys:
+                if self.declaration_parameter_defaults_ambiguous.has(key):
+                    if first_ambiguous_key == "":
+                        first_ambiguous_key = key
+                    continue
+                if self.declaration_parameter_defaults.has(key):
+                    val declaration = self.declaration_parameter_defaults[key]
+                    var parameters: [text] = []
+                    var defaults: [bool] = []
+                    for param in declaration.function.params:
+                        parameters.push(param.name)
+                        defaults.push(param.has_default)
+                    return mir_call_argument_slots_v1(parameters, defaults, names)
+            if callee_symbol.id >= 0 and self.module_fn_params.has(callee_symbol.id):
+                return self._named_module_fn_call_slots_v1(callee_name, callee_symbol.id, names)
+            val missing_label = if first_ambiguous_key != "": first_ambiguous_key else: callee_name
+            return Err("named call lacks unique declaration metadata: {missing_label}")
+        if callee_symbol.id >= 0 and self.module_fn_params.has(callee_symbol.id):
+            return self._named_module_fn_call_slots_v1(callee_name, callee_symbol.id, names)
+        if val params = bootstrap_fn_param_defaults_lookup(callee_name):
+            var parameters: [text] = []
+            var defaults: [bool] = []
+            for param in params:
+                parameters.push(param.name)
+                defaults.push(param.has_default)
+            val slots = mir_call_argument_slots_v1(parameters, defaults, names)?
+            var index = 0
+            while index < params.len():
+                if not slots.contains(index):
+                    if not self.mir_hir_expr_is_admitted_literal_default_v1(params[index].default):
+                        return Err("named default requires admitted declaration scope: {callee_name}.{params[index].name}")
+                index = index + 1
+            return Ok(slots)
+        # PM3 unit lane: the callee may be held only as a module
+        # surface, so the HIR prescan never registered it. Surface
+        # rows carry parameter names and default flags but no default
+        # expressions, so every parameter must be supplied by name;
+        # an unsupplied defaulted parameter keeps the fail-closed
+        # refusal below (bug: stage2 test_runner_build "named call
+        # lacks bootstrap parameter metadata", 2026-11-25).
+        if self.surface_fn_param_rows_v1.has(callee_name) and not self.surface_fn_param_ambig_v1.has(callee_name):
+            val encoded = self.surface_fn_param_rows_v1[callee_name]
+            val shape_parts = encoded.split("|")
+            var surface_params: [text] = []
+            if shape_parts[0] != "":
+                for surface_param_name in shape_parts[0].split(","):
+                    surface_params.push(surface_param_name)
+            var surface_defaults: [bool] = []
+            if shape_parts.len() > 1:
+                var flag_index = 0
+                while flag_index < shape_parts[1].len():
+                    surface_defaults.push(shape_parts[1].substring(flag_index, flag_index + 1) == "1")
+                    flag_index = flag_index + 1
+            if surface_defaults.len() == surface_params.len():
+                val surface_slots = mir_call_argument_slots_v1(surface_params, surface_defaults, names)?
+                var surface_index = 0
+                while surface_index < surface_params.len():
+                    if not surface_slots.contains(surface_index):
+                        return Err("named default requires admitted declaration scope: {callee_name}.{surface_params[surface_index]}")
+                    surface_index = surface_index + 1
+                return Ok(surface_slots)
+        Err("named call lacks bootstrap parameter metadata: {callee_name}")
+
+    me complete_named_call_operands_v1(callee_name: text, supplied: [MirOperand], slots: [i64], callee_symbol: SymbolId = SymbolId(id: -1)) -> [MirOperand]:
+        var params: [HirParam] = []
+        var from_module_params = false
+        if self.declaration_repository != None:
+            val lookup_keys = self._callable_lookup_keys_for_named_args_v1(callee_symbol, callee_name)
+            var first_ambiguous_key = ""
+            for key in lookup_keys:
+                if self.declaration_parameter_defaults_ambiguous.has(key):
+                    if first_ambiguous_key == "":
+                        first_ambiguous_key = key
+                    continue
+                if self.declaration_parameter_defaults.has(key):
+                    match self.complete_declaration_call_args_v1(key, supplied, slots):
+                        case Ok(completed): return completed
+                        case Err(reason):
+                            self.error_fatal(reason, None)
+                            return []
+            if callee_symbol.id >= 0 and self.module_fn_params.has(callee_symbol.id):
+                params = self.module_fn_params[callee_symbol.id]
+                from_module_params = true
+            else:
+                val missing_label = if first_ambiguous_key != "": first_ambiguous_key else: callee_name
+                self.error_fatal("named call lacks unique declaration metadata: {missing_label}", None)
+                return []
+        else:
+            if callee_symbol.id >= 0 and self.module_fn_params.has(callee_symbol.id):
+                params = self.module_fn_params[callee_symbol.id]
+                from_module_params = true
+            else:
+                params = bootstrap_fn_param_defaults_lookup(callee_name) ?? []
+        if params.len() == 0:
+            # Surface-bound call (PM3 unit lane): named_call_slots_v1 admitted
+            # it only with every parameter supplied by name, so reordering the
+            # supplied operands by slot yields the complete argument list and
+            # no default ever needs materializing.
+            if slots.len() != supplied.len():
+                self.error_fatal("named call surface declaration changed during lowering", None)
+                return []
+            var surface_by_slot: Dict<i64, MirOperand> = {}
+            var surface_fill = 0
+            while surface_fill < slots.len():
+                surface_by_slot[slots[surface_fill]] = supplied[surface_fill]
+                surface_fill = surface_fill + 1
+            var surface_result: [MirOperand] = []
+            var surface_slot = 0
+            while surface_slot < slots.len():
+                if not surface_by_slot.has(surface_slot):
+                    self.error_fatal("named call surface slot missing during lowering", None)
+                    return []
+                surface_result.push(surface_by_slot[surface_slot])
+                surface_slot = surface_slot + 1
+            return surface_result
+        if params.len() < slots.len() or slots.len() != supplied.len():
+            self.error_fatal("named call bootstrap declaration changed during lowering", None)
+            return []
+        var supplied_by_slot: Dict<i64, MirOperand> = {}
+        var index = 0
+        while index < slots.len():
+            supplied_by_slot[slots[index]] = supplied[index]
+            index = index + 1
+        var result: [MirOperand] = []
+        index = 0
+        while index < params.len():
+            if supplied_by_slot.has(index):
+                result.push(supplied_by_slot[index])
+            else:
+                val expression = if from_module_params:
+                    params[index].default
+                else:
+                    self.bind_resident_default_global_v1(callee_name, params[index].default)
+                var local = self.lower_expr_for_slot(expression, params[index].type_)
+                match params[index].type_.kind:
+                    case HirTypeKind.Any | HirTypeKind.TypeParam(_, _): local = self.box_runtime_value(local)
+                    case _: ()
+                result.push(mir_operand_copy(local))
+            index = index + 1
+        result

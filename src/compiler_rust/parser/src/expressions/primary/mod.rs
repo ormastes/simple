@@ -133,6 +133,11 @@ impl<'a> Parser<'a> {
             .map(|block| Expr::UnsafeBlock(block.statements, capabilities))
     }
 
+    fn match_followed_by_adjacent_index(&mut self) -> bool {
+        let next = self.peek_next();
+        matches!(next.kind, TokenKind::LBracket) && next.span.start == self.current.span.end
+    }
+
     pub(crate) fn parse_primary(&mut self) -> Result<Expr, ParseError> {
         match &self.current.kind.clone() {
             // Ellipsis as expression placeholder: `...` is equivalent to pass/unit ()
@@ -153,6 +158,7 @@ impl<'a> Parser<'a> {
             | TokenKind::TypedFloat(_, _)
             | TokenKind::String(_)
             | TokenKind::RawString(_)
+            | TokenKind::CharLit(_)
             | TokenKind::TypedString(_, _)
             | TokenKind::TypedRawString(_, _)
             | TokenKind::FString(_)
@@ -161,6 +167,7 @@ impl<'a> Parser<'a> {
             | TokenKind::Symbol(_)
             | TokenKind::Atom(_)
             | TokenKind::CustomBlock { .. } => self.parse_primary_literal(),
+            TokenKind::SetLitStart => self.parse_set_literal(),
             TokenKind::I18nString { .. } | TokenKind::I18nFString { .. } => self.parse_i18n_literal(),
             // pass_do_nothing / pass_dn / pass_todo / todo in expression position → unit ()
             TokenKind::Identifier { name, .. }
@@ -278,6 +285,8 @@ impl<'a> Parser<'a> {
             | TokenKind::On
             | TokenKind::Into
             | TokenKind::Bind
+            | TokenKind::Allow
+            | TokenKind::Forbid
             | TokenKind::Unwrap
             | TokenKind::Lazy
             | TokenKind::Skip => self.parse_primary_identifier(),
@@ -374,7 +383,7 @@ impl<'a> Parser<'a> {
                 || self.peek_is(&TokenKind::NotEq)
                 || self.peek_is(&TokenKind::Newline)
                 || self.peek_is(&TokenKind::Eof)
-                || self.peek_is(&TokenKind::LBracket)
+                || self.match_followed_by_adjacent_index()
                 || self.peek_is(&TokenKind::Semicolon)
                 || self.peek_is(&TokenKind::Plus)
                 || self.peek_is(&TokenKind::Minus)

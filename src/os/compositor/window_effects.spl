@@ -12,6 +12,11 @@ use os.compositor.rendering_primitives.{rounded_rect_aa, filled_circle, draw_rin
 use os.compositor.rendering_primitives.{gradient_h}
 use os.compositor.text_render.{draw_text_shadow}
 use os.compositor.glass_dispatch.{cap_blend_rect, cap_blur_region, cap_gradient_v, cap_read_pixel}
+use common.ui.wm_chrome_theme.{
+    WM_AQUA_TRAFFIC_CLOSE, WM_AQUA_TRAFFIC_MIN, WM_AQUA_TRAFFIC_MAX,
+    WM_AQUA_TRAFFIC_UNFOCUSED, WM_AQUA_TRAFFIC_RADIUS, WM_AQUA_TRAFFIC_Y,
+    WM_AQUA_TRAFFIC_CLOSE_X, WM_AQUA_UNFOCUSED_TEXT, WM_AQUA_TITLE_X
+}
 
 # ============================================================================
 # Multi-layer Shadows (ported from QEMU active/inactive shadows)
@@ -248,18 +253,22 @@ fn draw_glass_title_effects(backend: CompositorBackend, x: i32, y: i32, w: i32, 
     # Subtle noise on title bar
     draw_noise_blend(backend, x, y, w, title_h, 4)
 
-    # Accent tint on active window
+    # Accent & frost tint on active window vs muted unfocused titlebar
     if focused:
+        # Aqua translucent frost tint + luminous top specular highlight
+        cap_blend_rect(backend, x, y, w, title_h, 0x00DCEAFB, 36)
+        cap_blend_rect(backend, x, y, w, 1, 0x00FFFFFF, 80)
         cap_blend_rect(backend, x, y, w, title_h, config.accent_color, 8)
         # Gradient accent stripe
         cap_blend_rect(backend, x + 10, y + title_h - 1, w - 20, 1, config.accent_color, 40)
         # Gradient accent stripe (accent -> accent2)
         gradient_h(backend, x + 20, y + title_h - 3, w - 40, 2, config.accent_color, config.accent2_color)
         # Top highlight specular
-        cap_blend_rect(backend, x + 4, y + 1, 12, 2, 0x00FFFFFF, 30)
+        cap_blend_rect(backend, x + 4, y + 1, 12, 2, 0x00FFFFFF, 40)
 
     if not focused:
-        cap_blend_rect(backend, x, y, w, title_h, 0x00304060, 25)
+        cap_blend_rect(backend, x, y, w, title_h, 0x00E2E2E6, 42)
+        cap_blend_rect(backend, x, y, w, title_h, 0x00304060, 20)
 
     # Separator line
     cap_blend_rect(backend, x, y + title_h, w, 1, config.border_color, config.border_alpha)
@@ -337,25 +346,35 @@ fn draw_glass_window_enhanced(backend: CompositorBackend, x: i32, y: i32, w: i32
     # 4. Title bar effects
     draw_glass_title_effects(backend, x, y, w, title_h, config, focused)
 
-    # 5. Traffic light buttons (macOS style)
-    _draw_traffic_lights(backend, x, y, focused)
-
-    # 6. Title text (centered in title bar)
-    val text_fg: u32 = if focused: 0xFFFFFFFF else: 0xFFB0B0B0
-    val text_x = x + w / 2 - 32
-    val text_y = y + (title_h - 16) / 2
-    draw_text_shadow(backend, text_x, text_y, title, text_fg, 0x00000000, 40)
-
-    # 7. Rainbow edge refraction
+    # 5. Rainbow edge refraction
     if focused:
         draw_rainbow_edge(backend, x, y, w)
 
-    # 8. Focus ring (only on focused windows)
+    # 6. Focus ring (only on focused windows)
     if focused:
         draw_focus_ring(backend, x, y, w, h, config, title_h)
 
-    # 9. Noise texture (title bar only for performance)
+    # 7. Noise texture (title bar only for performance)
     draw_noise_blend(backend, x, y, w, title_h, 3)
+
+    # 8. Traffic light buttons (drawn above glass/focus overlays so #FF5F56/#FFBD2E/#27C93F stay crisp)
+    _draw_traffic_lights(backend, x, y, focused)
+
+    # 9. Title text (centered in title bar, clear of left traffic lights)
+    val surf_r: i32 = ((config.surface_color >> 16) & 0xFFu32).to_i32()
+    val surf_g: i32 = ((config.surface_color >> 8) & 0xFFu32).to_i32()
+    val surf_b: i32 = (config.surface_color & 0xFFu32).to_i32()
+    val surf_luma = (surf_r * 299 + surf_g * 587 + surf_b * 114) / 1000
+    val text_fg: u32 = if surf_luma >= 140:
+        if focused: 0xFF1D1D1Fu32 else: WM_AQUA_UNFOCUSED_TEXT
+    else:
+        if focused: 0xFFFFFFFF else: 0xFFB0B0B0
+    val min_text_x = x + WM_AQUA_TITLE_X
+    val centered_text_x = x + w / 2 - (title.len().to_i32() * 6) / 2
+    val text_x = if centered_text_x > min_text_x: centered_text_x else: min_text_x
+    val text_y = y + (title_h - 7) / 2
+    val shadow_alpha = if surf_luma >= 140: 0 else: 40
+    draw_text_shadow(backend, text_x, text_y, title, text_fg, 0x00000000, shadow_alpha)
 
     # 10. Inactive dimming
     if not focused:
@@ -366,31 +385,29 @@ fn draw_glass_window_enhanced(backend: CompositorBackend, x: i32, y: i32, w: i32
 # ============================================================================
 
 fn _draw_traffic_lights(backend: CompositorBackend, wx: i32, wy: i32, focused: bool):
-    """Draw macOS-style traffic light buttons (close/minimize/maximize).
+    """Draw macOS/Aqua traffic light buttons (close/minimize/maximize).
 
-    Active: colored circles with X/minus/plus icons.
-    Inactive: gray circles.
+    Active: #FF5F56 / #FFBD2E / #27C93F circles with subtle specular + glyphs.
+    Inactive: uniform muted gray circles matching WM_AQUA_TRAFFIC_UNFOCUSED.
     """
-    val btn_y = wy + 8
-    val r: i32 = 6
-    val x_start: i32 = wx + 12
+    val btn_y = wy + WM_AQUA_TRAFFIC_Y
+    val r: i32 = WM_AQUA_TRAFFIC_RADIUS
+    val x_start: i32 = wx + WM_AQUA_TRAFFIC_CLOSE_X
     val spacing: i32 = 20
 
     if focused:
-        # Close button (QEMU pink-red)
+        val close_rgb = WM_AQUA_TRAFFIC_CLOSE & 0x00FFFFFFu32
+        val min_rgb = WM_AQUA_TRAFFIC_MIN & 0x00FFFFFFu32
+        val max_rgb = WM_AQUA_TRAFFIC_MAX & 0x00FFFFFFu32
+
+        # Close button (#FF5F56)
         val close_x = x_start
         val close_cy = btn_y + r
-        # 1. Outer ring
-        draw_ring(backend, close_x + r, close_cy, r + 1, 1, 0x00FF6B8A, 20)
-        # 2. Main circle
-        filled_circle(backend, close_x + r, close_cy, r, 0x00FF6B8A, 255)
-        # 3. Top-half gradient highlight
+        draw_ring(backend, close_x + r, close_cy, r + 1, 1, close_rgb, 20)
+        filled_circle(backend, close_x + r, close_cy, r, close_rgb, 255)
         cap_blend_rect(backend, close_x + 2, btn_y + 2, r * 2 - 4, r - 2, 0x00FFFFFF, 18)
-        # 4. Soft specular dot
         filled_circle(backend, close_x + r - 2, close_cy - 2, 2, 0x00FFFFFF, 60)
-        # 5. Inner ring
         draw_ring(backend, close_x + r, close_cy, r - 1, 1, 0x00000000, 20)
-        # 6. X glyph (2px thick using draw_line-like pattern)
         cap_blend_rect(backend, close_x + 4, btn_y + 4, 1, 1, 0x00000000, 180)
         cap_blend_rect(backend, close_x + 5, btn_y + 5, 1, 1, 0x00000000, 180)
         cap_blend_rect(backend, close_x + 6, btn_y + 6, 1, 1, 0x00000000, 180)
@@ -399,53 +416,38 @@ fn _draw_traffic_lights(backend: CompositorBackend, wx: i32, wy: i32, focused: b
         cap_blend_rect(backend, close_x + 7, btn_y + 5, 1, 1, 0x00000000, 180)
         cap_blend_rect(backend, close_x + 5, btn_y + 7, 1, 1, 0x00000000, 180)
         cap_blend_rect(backend, close_x + 4, btn_y + 8, 1, 1, 0x00000000, 180)
-        # 7. Bottom shadow
         cap_blend_rect(backend, close_x + 3, btn_y + r * 2, r * 2 - 6, 2, 0x00000000, 40)
 
-        # Minimize button (QEMU purple-blue)
+        # Minimize button (#FFBD2E)
         val min_x = x_start + spacing
         val min_cy = btn_y + r
-        # 1. Outer ring
-        draw_ring(backend, min_x + r, min_cy, r + 1, 1, 0x008B8BFA, 20)
-        # 2. Main circle
-        filled_circle(backend, min_x + r, min_cy, r, 0x008B8BFA, 255)
-        # 3. Top-half gradient highlight
+        draw_ring(backend, min_x + r, min_cy, r + 1, 1, min_rgb, 20)
+        filled_circle(backend, min_x + r, min_cy, r, min_rgb, 255)
         cap_blend_rect(backend, min_x + 2, btn_y + 2, r * 2 - 4, r - 2, 0x00FFFFFF, 18)
-        # 4. Soft specular dot
         filled_circle(backend, min_x + r - 2, min_cy - 2, 2, 0x00FFFFFF, 60)
-        # 5. Inner ring
         draw_ring(backend, min_x + r, min_cy, r - 1, 1, 0x00000000, 20)
-        # 6. Dash glyph
         cap_blend_rect(backend, min_x + 3, btn_y + r, 6, 1, 0x00000000, 200)
-        # 7. Bottom shadow
         cap_blend_rect(backend, min_x + 3, btn_y + r * 2, r * 2 - 6, 2, 0x00000000, 40)
 
-        # Maximize button (QEMU teal-green)
+        # Maximize button (#27C93F)
         val max_x = x_start + spacing * 2
         val max_cy = btn_y + r
-        # 1. Outer ring
-        draw_ring(backend, max_x + r, max_cy, r + 1, 1, 0x0050D0A0, 20)
-        # 2. Main circle
-        filled_circle(backend, max_x + r, max_cy, r, 0x0050D0A0, 255)
-        # 3. Top-half gradient highlight
+        draw_ring(backend, max_x + r, max_cy, r + 1, 1, max_rgb, 20)
+        filled_circle(backend, max_x + r, max_cy, r, max_rgb, 255)
         cap_blend_rect(backend, max_x + 2, btn_y + 2, r * 2 - 4, r - 2, 0x00FFFFFF, 18)
-        # 4. Soft specular dot
         filled_circle(backend, max_x + r - 2, max_cy - 2, 2, 0x00FFFFFF, 60)
-        # 5. Inner ring
         draw_ring(backend, max_x + r, max_cy, r - 1, 1, 0x00000000, 20)
-        # 6. Plus glyph
         cap_blend_rect(backend, max_x + 3, btn_y + r, 6, 1, 0x00000000, 200)
         cap_blend_rect(backend, max_x + r, btn_y + 3, 1, 6, 0x00000000, 200)
-        # 7. Bottom shadow
         cap_blend_rect(backend, max_x + 3, btn_y + r * 2, r * 2 - 6, 2, 0x00000000, 40)
 
         # Reflection line below all buttons
         cap_blend_rect(backend, x_start, btn_y + r * 2 + 2, spacing * 2 + r * 2, 2, 0x00FFFFFF, 8)
     else:
-        # Inactive: gray circles
-        _draw_filled_circle_c(backend, x_start + r, btn_y + r, r, 0xFF808080)
-        _draw_filled_circle_c(backend, x_start + spacing + r, btn_y + r, r, 0xFF808080)
-        _draw_filled_circle_c(backend, x_start + spacing * 2 + r, btn_y + r, r, 0xFF808080)
+        # Inactive: muted gray circles
+        _draw_filled_circle_c(backend, x_start + r, btn_y + r, r, WM_AQUA_TRAFFIC_UNFOCUSED)
+        _draw_filled_circle_c(backend, x_start + spacing + r, btn_y + r, r, WM_AQUA_TRAFFIC_UNFOCUSED)
+        _draw_filled_circle_c(backend, x_start + spacing * 2 + r, btn_y + r, r, WM_AQUA_TRAFFIC_UNFOCUSED)
         # Inactive inset shadow
         cap_blend_rect(backend, x_start + 2, btn_y + r * 2 - 1, 6, 1, 0x00000000, 25)
         cap_blend_rect(backend, x_start + spacing + 2, btn_y + r * 2 - 1, 6, 1, 0x00000000, 25)
@@ -455,8 +457,9 @@ fn _draw_filled_circle_c(backend: CompositorBackend, cx: i32, cy: i32, r: i32, c
     """Draw a filled circle centered at (cx, cy) with radius r."""
     var dy: i32 = 0 - r
     while dy <= r:
-        val abs_dy = if dy < 0: 0 - dy else: dy
-        val hw = r - abs_dy
+        var hw: i32 = 0
+        while (hw + 1) * (hw + 1) + dy * dy <= r * r:
+            hw = hw + 1
         if hw > 0:
             backend.fill_rect(cx - hw, cy + dy, hw * 2, 1, color)
         dy = dy + 1

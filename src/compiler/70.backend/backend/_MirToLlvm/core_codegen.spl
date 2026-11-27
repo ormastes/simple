@@ -1,19 +1,23 @@
+use compiler.mir.mir_instruction_support.{MirCallOrigin, mir_call_origin_uses_local_symbols, mir_call_origin_uses_local_symbols_named}
 use std.common.binary_io.{f64_to_bits}
 use std.common.math.ieee754_bits.{math_f64_round_to_f32_bits, math_f32_widen_bits}
+use std.nogc_sync_mut.io_runtime.{cwd}
 # Part 1 of src/compiler/70.backend/backend/mir_to_llvm.spl
 use compiler.backend.mir_to_llvm.*
+use compiler.backend.llvm_xray_semantic_rows.{llvm_xray_semantic_attachment_v1}
 # MIR to LLVM IR Translation
 #
 # MirToLlvm class that translates MIR to LLVM IR.
 # Implements MirTextCodegen trait for shared instruction dispatch.
 
 use compiler.mir.mir_data.*
+use compiler.mir.mir_instruction_support.{GpuBarrierScope}
 use compiler.mir.mir_instructions.{MirModule, MirFunction, MirBlock, MirInst,
     mir_module_functions_sorted, mir_module_statics_sorted}
 use compiler.hir.hir_types.{SymbolId}
 use compiler.common.diagnostics.span.{Span}
 use compiler.common.dependency.visibility.{Visibility}
-use compiler.common.module_path_naming.{module_logical_name_from_path}
+use compiler.common.module_path_naming.{module_logical_name_from_path, module_canonical_fold_name}
 use compiler.mir.mir_lowering.{bootstrap_mir_function_count, bootstrap_mir_function_at, bootstrap_mir_function_name_at,
     bootstrap_mir_function_module_at, bootstrap_mir_function_return_type_tag_at,
     bootstrap_mir_function_return_unsigned_at, bootstrap_mir_function_param_count_at,
@@ -23,6 +27,23 @@ use compiler.mir.mir_lowering.{bootstrap_mir_function_count, bootstrap_mir_funct
     bootstrap_mir_static_name_at, bootstrap_mir_static_type_tag_at,
     bootstrap_mir_static_init_kind_at, bootstrap_mir_static_init_payload_at,
     bootstrap_mir_static_alignment_at, bootstrap_mir_static_visibility_at, bootstrap_mir_static_external_at}
+# Records in the Windows XRay ring-mode ring (__simple_xray_ring_v2); 32 B each.
+const XRAY_RING_CAPACITY_V2: i64 = 65536
+
+# MSVC export list for the flag-guard data symbols (no auto-export on MSVC).
+# On 32-bit x86 Windows (m:x), .drectve /EXPORT: names carry the COFF leading `_`
+# (`___simple_xray_*`), while x64/ARM64/ARMv7 (m:w) keep `__simple_xray_*`.
+fn xray_msvc_export_directives_for_arch(ring_wrap: bool, target_arch: text) -> [text]:
+    val is_x86_32 = target_arch == "i686" or target_arch == "i386" or target_arch == "x86"
+    val prefix = if is_x86_32: "___simple_xray_" else: "__simple_xray_"
+    var out = ["/EXPORT:{prefix}descriptor_v1,DATA", "/EXPORT:{prefix}names_v1,DATA",
+        "/EXPORT:{prefix}hook_v1,DATA", "/EXPORT:{prefix}ring_v2,DATA"]
+    if ring_wrap:
+        out = out.push("/EXPORT:{prefix}ring_wrap_v2,DATA")
+    out
+
+fn xray_msvc_export_directives(ring_wrap: bool) -> [text]:
+    xray_msvc_export_directives_for_arch(ring_wrap, "x86_64")
 # These implementation helpers belong to the SSA transform owner. The public
 # facade also exports them; its separate native-resolution regression remains
 # covered by mir_opt_facade_ssa_owner_spec.spl.
@@ -35,6 +56,7 @@ use compiler.backend.llvm_ir_builder.{LlvmIRBuilder, natural_alignment, is_integ
     llvm_ir_builder_push_line, llvm_codegen_error_module}
 use compiler.backend.common.mir_text_codegen.MirTextCodegen
 use compiler.mir.mir_call_ownership.{mir_runtime_owned_call_name}
+use compiler.mir.text_extern_abi.{runtime_tuple_result_facade}
 use compiler.mir.mir_coverage_probe_admission.{
     mir_coverage_probe_admission_diagnostic_module_v1
 }
@@ -43,6 +65,26 @@ use compiler.mir.mir_coverage_probe_admission.{
 extern fn rt_string_builder_len(handle: i64) -> i64
 @unsafe(reason: "raw string-builder append ABI", capabilities: [ffi])
 extern fn rt_string_builder_push(handle: i64, value: text)
+
+pub fn llvm_aggregate_trace_operand_count_v1(operands: [MirOperand]) -> i64:
+    operands.len()
+
+# reason: internal MirToLlvm tuple-facade selector exported for unit specs
+@allow(primitive_api)
+pub fn llvm_select_runtime_tuple_facade_v1(bare_name: text, arg_count: i64, call_origin: MirCallOrigin, has_local_source_body: bool) -> text:
+    """Select the raw-block runtime tuple facade unless calling a module-local Source body."""
+    if call_origin == MirCallOrigin.Unknown:
+        return ""
+    if call_origin == MirCallOrigin.Source and has_local_source_body:
+        return ""
+    val normalized_name = bare_name.replace("\"", "")
+    runtime_tuple_result_facade(normalized_name, arg_count)
+
+fn llvm_is_owned_alias_or_runtime_name_v1(name: text) -> bool:
+    """True for runtime-owned names or source-facing runtime aliases tracked locally."""
+    (mir_runtime_owned_call_name(name) or name == "env_get" or
+        name == "get_args" or name == "get_cli_args" or
+        name == "sys_get_args" or name == "eprint")
 
 # Decimal spelling crosses enum boundaries; only this scalar backend owner
 # decodes to IEEE bits. LLVM's hexadecimal float syntax uses binary64 bits,
@@ -77,15 +119,37 @@ fn llvm_static_linkage(visibility: Visibility) -> text:
 fn bootstrap_llvm_static_linkage(visibility_tag: i64) -> text:
     if visibility_tag == 0: "" else: "hidden "
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _sffi_string_builder_len", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 @always_inline
 fn _sffi_string_builder_len(handle: i64) -> i64:
     unsafe(capabilities: [ffi]):
         rt_string_builder_len(handle)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _sffi_string_builder_push", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 @always_inline
 fn _sffi_string_builder_push(handle: i64, value: text):
     unsafe(capabilities: [ffi]):
         rt_string_builder_push(handle, value)
+
+# Debug-info path prefix map (live_object_key.sdn gap debug_info_path_prefix,
+# closed): a source path under the build root is emitted RELATIVE to it, so
+# objects built from the same repo-relative source in two workspaces carry the
+# same DIFile and a cross-workspace cache hit cannot embed another
+# workspace's absolute path. Paths outside the root are left as given.
+# Separators are normalized to '/'; the root match ignores ASCII case on a
+# drive-letter path (Windows).
+pub fn debug_info_prefix_map_path(path: text, root: text) -> text:
+    val p = path.replace("\\", "/")
+    var r = root.replace("\\", "/")
+    while r.byte_len() > 1 and r.ends_with("/"):
+        r = r.substring(0, r.byte_len() - 1)
+    if r == "" or p.byte_len() <= r.byte_len() + 1:
+        return p
+    val head = p.substring(0, r.byte_len())
+    val same = if r.byte_len() >= 2 and r.substring(1, 2) == ":": head.to_lower() == r.to_lower() else: head == r
+    if same and p.substring(r.byte_len(), r.byte_len() + 1) == "/":
+        return p.substring(r.byte_len() + 1, p.byte_len())
+    p
 
 # DS3 debug-info path split: NOT std.nogc_sync_mut.path.{basename, dirname} --
 # empirically, that dirname()'s rfind()-based fast path throws ("match
@@ -117,25 +181,30 @@ extern fn rt_enum_discriminant(value: MirInstKind) -> i64
 @unsafe(reason: "raw tagged-value payload ABI", capabilities: [ffi])
 extern fn rt_enum_payload(value: MirInstKind) -> i64
 @unsafe(reason: "raw tuple projection ABI", capabilities: [ffi])
-extern fn rt_tuple_get<T>(tuple: i64, index: i64) -> T
+# T must match the selected variant slot; the borrowed owner must remain live.
+extern fn rt_tuple_get<T>(tuple: i64, index: i64) -> T?
 @unsafe(reason: "raw runtime-value integer projection ABI", capabilities: [ffi])
 extern fn rt_value_as_int(value: i64) -> i64
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _sffi_env_get", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 @always_inline
 fn _sffi_env_get(key: text) -> text?:
     unsafe(capabilities: [ffi]):
         rt_env_get(key)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _sffi_enum_discriminant", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 @always_inline
 fn _sffi_enum_discriminant(value: MirInstKind) -> i64:
     unsafe(capabilities: [ffi]):
         rt_enum_discriminant(value)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _sffi_enum_payload", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 @always_inline
 fn _sffi_enum_payload(value: MirInstKind) -> i64:
     unsafe(capabilities: [ffi]):
         rt_enum_payload(value)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _sffi_tuple_get", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 @always_inline
 # Returns nil for an absent optional payload slot (e.g. HirExprKind.If's
 # `else` block, HirExprKind.IfChain's trailing else). The non-optional
@@ -144,8 +213,45 @@ fn _sffi_enum_payload(value: MirInstKind) -> i64:
 # `else` failed native-build in the pure-Simple MIR lowerer.
 fn _sffi_tuple_get<T>(tuple: i64, index: i64) -> T?:
     unsafe(capabilities: [ffi]):
-        rt_tuple_get(tuple, index)
+        rt_tuple_get<T>(tuple, index)
 
+# @workaround bug=stage2_generic_tail_unwrap_reboxes_record_2026-11-19 reason=ROOT-FIXED+STAGE2-GATED retire_after_stage2_seed=162c481782f; erased_generic_required_getter_int_boxes_record_handles_even_with_explicit_return_use_concrete_payload_owners
+@always_inline
+fn _sffi_local_id_payload_req(tuple: i64, index: i64) -> LocalId:
+    val payload: LocalId? = _sffi_tuple_get<LocalId>(tuple, index)
+    if val present = payload:
+        return present
+    panic("required tuple payload slot {index} is absent")
+
+@always_inline
+fn _sffi_mir_const_value_payload_req(tuple: i64, index: i64) -> MirConstValue:
+    val payload: MirConstValue? = _sffi_tuple_get<MirConstValue>(tuple, index)
+    if val present = payload:
+        return present
+    panic("required tuple payload slot {index} is absent")
+
+@always_inline
+fn _sffi_mir_type_payload_req(tuple: i64, index: i64) -> MirType:
+    val payload: MirType? = _sffi_tuple_get<MirType>(tuple, index)
+    if val present = payload:
+        return present
+    panic("required tuple payload slot {index} is absent")
+
+@always_inline
+fn _sffi_aggregate_kind_payload_req(tuple: i64, index: i64) -> AggregateKind:
+    val payload: AggregateKind? = _sffi_tuple_get<AggregateKind>(tuple, index)
+    if val present = payload:
+        return present
+    panic("required tuple payload slot {index} is absent")
+
+@always_inline
+fn _sffi_mir_operand_list_payload_req(tuple: i64, index: i64) -> [MirOperand]:
+    val payload: [MirOperand]? = _sffi_tuple_get<[MirOperand]>(tuple, index)
+    if val present = payload:
+        return present
+    panic("required tuple payload slot {index} is absent")
+
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _sffi_value_as_int", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 @always_inline
 fn _sffi_value_as_int(value: i64) -> i64:
     unsafe(capabilities: [ffi]):
@@ -239,7 +345,55 @@ pub fn llvm_first_duplicate_ssa_def(ir: text) -> text:
         seen[name] = true
     ""
 
+extern fn rt_file_append_text(path: text, content: text) -> bool
+extern fn rt_time_now_nanos() -> i64
+
+# SIMPLE_EMIT_TRACE=<file>: append one line per translated function / SSA prep
+# (name, block count, instruction count, nanoseconds). Open-append-close per
+# record so the log survives a kill (print is block-buffered and lost). Unset
+# => "" and the whole feature is a no-op.
+# doc/08_tracking/bug/seed_emit_object_superlinear_hang_large_module_2026-07-20.md
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in llvm_emit_trace_path", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+fn llvm_emit_trace_path() -> text:
+    var path = ""
+    unsafe(capabilities: [ffi]):
+        path = rt_env_get("SIMPLE_EMIT_TRACE") ?? ""
+    path
+
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in llvm_emit_trace_now", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+fn llvm_emit_trace_now() -> i64:
+    var now = 0
+    unsafe(capabilities: [ffi]):
+        now = rt_time_now_nanos()
+    now
+
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in llvm_emit_trace_record", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+fn llvm_emit_trace_record(path: text, phase: text, name: text, blocks: i64, insts: i64, start_ns: i64):
+    val elapsed = llvm_emit_trace_now() - start_ns
+    unsafe(capabilities: [ffi]):
+        rt_file_append_text(path, "{phase} fn={name} blocks={blocks} insts={insts} ns={elapsed}\n")
+
+fn llvm_emit_trace_inst_count(blocks: [MirBlock]) -> i64:
+    var n = 0
+    var i = 0
+    while i < blocks.len():
+        n = n + blocks[i].instructions.len()
+        i = i + 1
+    n
+
 fn llvm_bootstrap_ssa_function(
+    fn_: MirFunction,
+    bootstrap_mode: bool
+) -> MirFunction:
+    val trace_path = llvm_emit_trace_path()
+    if trace_path == "":
+        return llvm_bootstrap_ssa_function_impl(fn_, bootstrap_mode)
+    val t0 = llvm_emit_trace_now()
+    val out = llvm_bootstrap_ssa_function_impl(fn_, bootstrap_mode)
+    llvm_emit_trace_record(trace_path, "ssa", fn_.name, fn_.blocks.len(), llvm_emit_trace_inst_count(fn_.blocks), t0)
+    out
+
+fn llvm_bootstrap_ssa_function_impl(
     fn_: MirFunction,
     bootstrap_mode: bool
 ) -> MirFunction:
@@ -310,7 +464,33 @@ fn llvm_module_is_native_entry(module_name: text) -> bool:
     val native_entry = _sffi_env_get("SIMPLE_NATIVE_BUILD_ENTRY") ?? ""
     if native_entry == "":
         return true
-    module_name == llvm_module_name_from_entry_path(native_entry)
+    # Exact, or one side is the canonical fold of the other (a repository tier
+    # / `std.` spelling). Folding BOTH sides made external neighbours
+    # `dot.1/hello.spl` and `dot.2/hello.spl` the same entry: the driver keeps
+    # external dotted names unfolded (_driver_physical_module_identity), so the
+    # neighbour must not match.
+    val entry_name = llvm_module_name_from_entry_path(native_entry)
+    if module_name == entry_name:
+        return true
+    module_name == module_canonical_fold_name(entry_name) or module_canonical_fold_name(module_name) == entry_name
+
+# XRay function attributes (design A.5, LLVM stage 1). xray_mode 2 ->
+# `xray-always`: LLVM's XRayInstrumentation pass then emits the entry sled,
+# a PATCHABLE_RET exit sled per return and a PATCHABLE_TAIL_CALL sled per tail
+# call. LLVM has no attribute that keeps exit sleds but drops tail sleds, so
+# mode 1 is rejected by translate_module (fail closed), and `xray-skip-exit`
+# (which would drop the exit sleds too) is never emitted. Never-listed
+# functions (xray_mode 0) get `xray-never` only in an instrumented module (one
+# that has a sled function); a module whose functions are all never-listed
+# gets none, which is equivalent because no threshold is emitted. No
+# `xray-instruction-threshold` (owner decision Q5). Off returns "" so the IR is
+# byte-identical (B).
+fn llvm_xray_function_attrs(xray_mode: i64, module_instrumented: bool) -> text:
+    if xray_mode > 0:
+        return " \"function-instrument\"=\"xray-always\""
+    if module_instrumented:
+        return " \"function-instrument\"=\"xray-never\""
+    ""
 
 # ============================================================================
 # MIR to LLVM IR Translation
@@ -366,15 +546,12 @@ impl MirTextCodegen for MirToLlvm:
         if self.debug_info:
             var dbg_source_file = ""
             for fn_dbg in mir_module_functions_sorted(module):
-                match fn_dbg.span:
-                    nil: ()
-                    _:
-                        if fn_dbg.span.file != "":
-                            dbg_source_file = fn_dbg.span.file
-                            break
+                if fn_dbg.span.file != "":
+                    dbg_source_file = fn_dbg.span.file
+                    break
             if dbg_source_file == "":
                 dbg_source_file = "{module.name}.spl"
-            val (dbg_filename, dbg_directory) = debug_info_split_path(dbg_source_file)
+            val (dbg_filename, dbg_directory) = debug_info_split_path(debug_info_prefix_map_path(dbg_source_file, cwd()))
             self.builder.emit_debug_info_header(dbg_filename, dbg_directory)
 
         # Origin discriminator (see mir_call_ownership.spl): record which
@@ -396,11 +573,27 @@ impl MirTextCodegen for MirToLlvm:
         self.module_qualified_symbol_names = {}
         if not is_entry_module and module.name != "":
             for fn_qualify in mir_module_functions_sorted(module):
-                if not fn_qualify.name.contains("."):
+                # A COMDAT instance keeps its bare mangled name: every object
+                # that instantiated it must spell the same symbol to dedupe.
+                if not fn_qualify.name.contains(".") and not fn_qualify.is_comdat:
                     self.module_qualified_symbol_names[fn_qualify.name] = "{module.name}.{fn_qualify.name}"
+        # XRay (design A.5/B): per-module state, derived only from this
+        # module's functions. Off leaves both empty.
+        self.fn_xray_mode = {}
+        self.xray_module_on = false
+        self.xray_semantic_owner = module.name
+        self.xray_flag_guard = false
+        self.xray_site = {}
+        self.xray_guard_seq = 0
         for fn_owner in mir_module_functions_sorted(module):
-            if mir_runtime_owned_call_name(fn_owner.name):
+            # Source-facing runtime aliases can also have ordinary local bodies.
+            # Remember their identity before emission: callers may sort before
+            # definitions. These aliases are not reserved runtime symbols, so
+            # llvm_function_symbol_name keeps their normal local names.
+            if llvm_is_owned_alias_or_runtime_name_v1(fn_owner.name):
                 self.owned_name_has_local[fn_owner.name] = true
+            if fn_owner.export_name != "" and llvm_is_owned_alias_or_runtime_name_v1(fn_owner.export_name):
+                self.owned_name_has_local[fn_owner.export_name] = true
             # `@export("C", name: "...")`: record the requested ABI symbol so
             # llvm_function_symbol_name can honour it in BOTH mangling modes.
             # Must run BEFORE any function is emitted, since a call site may
@@ -416,8 +609,22 @@ impl MirTextCodegen for MirToLlvm:
             # body is emitted -- llvm_function_symbol_name consults fn_global
             # at call sites, and translate_function reads the rest on the
             # `define` line / at the terminator.
+            if fn_owner.is_comdat:
+                self.fn_comdat[fn_owner.name] = true
+                self.fn_comdat[self.llvm_function_symbol_name(fn_owner.name)] = true
             if fn_owner.is_global:
                 self.fn_global[fn_owner.name] = true
+            if fn_owner.is_inline:
+                # Record @inline attribute for alwaysinline codegen
+                # translate_function receives the emitted SYMBOL (e.g. main ->
+                # __simple_main), so key by both the MIR name and the symbol.
+                self.fn_inline[fn_owner.name] = true
+                self.fn_inline[self.llvm_function_symbol_name(fn_owner.name)] = true
+            if fn_owner.xray_mode > 0:
+                # Keyed like fn_inline: translate_function gets the SYMBOL.
+                self.xray_module_on = true
+                self.fn_xray_mode[fn_owner.name] = fn_owner.xray_mode
+                self.fn_xray_mode[self.llvm_function_symbol_name(fn_owner.name)] = fn_owner.xray_mode
             if fn_owner.is_naked or fn_owner.section != "" or fn_owner.align > 0:
                 # translate_function receives the emitted SYMBOL, so key the
                 # placement tables by both the MIR name and that symbol.
@@ -431,6 +638,28 @@ impl MirTextCodegen for MirToLlvm:
                 if fn_owner.align > 0:
                     self.fn_align[fn_owner.name] = fn_owner.align
                     self.fn_align[placement_symbol] = fn_owner.align
+        # XRay fail-closed admission (design A.5): LLVM sleds are admitted for
+        # Linux, Darwin (aarch64/x86_64), and Windows triples; mode 1 (exit sleds
+        # without tail-exit sleds) has no LLVM spelling; the debug-only bootstrap
+        # function table is not keyed by this module's functions.
+        if self.xray_module_on:
+            # Windows and Darwin: flag-guard sleds in writable data (zero .text
+            # self-patching; compliant with Apple Silicon LC_CODE_SIGNATURE / W^X,
+            # __TEXT,__stubs page sharing, and -Wl,-dead_strip); Linux: LLVM sleds.
+            val darwin_xray = (self.target_os.starts_with("darwin") or self.target_os.starts_with("macos")) and
+                (self.target_arch == "aarch64" or self.target_arch == "arm64" or self.target_arch == "x86_64")
+            self.xray_flag_guard = self.target_os.starts_with("windows") or darwin_xray
+            if not self.xray_flag_guard and not self.target_os.starts_with("linux"):
+                self.codegen_error("XRAY-E-UNSUPPORTED-TARGET: LLVM XRay sleds are admitted for Linux, Darwin (aarch64/x86_64), and Windows triples only (target os '{self.target_os}', arch '{self.target_arch}')")
+            # MSVC (clang-cl / --msvc) has no auto-export: emit_xray_flag_guard_globals
+            # writes an explicit `/EXPORT:<sym>,DATA` list into .drectve instead.
+            if bootstrap_debug:
+                self.codegen_error("XRAY-E-UNSUPPORTED-TARGET: LLVM XRay is not supported on the bootstrap translation path")
+            for fn_mode in mir_module_functions_sorted(module):
+                if fn_mode.xray_mode == 1:
+                    self.codegen_error("XRAY-E-UNSUPPORTED-MODE: LLVM cannot emit exit sleds without tail-exit sleds (xray_mode 1 in '{fn_mode.name}')")
+            if self.xray_flag_guard:
+                self.emit_xray_flag_guard_globals(module)
 
         # mutglobal lane (module-level `var` mutation storage, see
         # scratchpad/mutglobal_plan.md): emit real LLVM `@name = global ...`
@@ -470,7 +699,7 @@ impl MirTextCodegen for MirToLlvm:
                     # separate unresolved path.
                     match init_const.value:
                         case Int(word): g_init = self.translate_integer_constant_operand(word, g_ty)
-                        case Zero: g_init = if g_ty == "ptr": "null" else: self.translate_const_value(init_const.value)
+                        case MirConstValue.Zero: g_init = if g_ty == "ptr": "null" else: self.translate_const_value(init_const.value)
                         case FloatLexeme(decimal): g_init = llvm_float_lexeme_constant(decimal, g_ty)
                         case _: g_init = self.translate_const_value(init_const.value)
                     # A Str initializer renders as a `getelementptr` PTR
@@ -574,7 +803,8 @@ impl MirTextCodegen for MirToLlvm:
         if self.unknown_func_decls.keys().len() > 0:
             self.builder.emit("")
             self.builder.emit("; External call declarations")
-            for unknown_name in self.unknown_func_decls.keys():
+            # Sorted: declaration order sets .o symbol-table order (fixpoint determinism).
+            for unknown_name in self.unknown_func_decls.keys().sort():
                 # rt_* runtime builtins covered by the static runtime-declares
                 # block are registered in defined_func_names; skip those so we
                 # never emit a wrong-signature llc redefinition. Any other
@@ -583,7 +813,8 @@ impl MirTextCodegen for MirToLlvm:
                 if not self.defined_func_names.has(unknown_name):
                     self.builder.emit(self.external_declare_line(unknown_name))
 
-        val bootstrap_string_globals = if self.bootstrap_string_globals_active:
+        val was_bootstrap_string_globals_active = self.bootstrap_string_globals_active
+        val bootstrap_string_globals = if was_bootstrap_string_globals_active:
             llvm_bootstrap_string_globals_text()
         else:
             ""
@@ -597,6 +828,8 @@ impl MirTextCodegen for MirToLlvm:
             self.builder.emit("; String constants")
             for global_decl in self.string_globals:
                 self.builder.emit(global_decl)
+        if was_bootstrap_string_globals_active:
+            llvm_bootstrap_string_globals_reset()
 
         if not bootstrap_debug:
             self.builder.emit_tbaa_hierarchy()
@@ -662,6 +895,23 @@ impl MirTextCodegen for MirToLlvm:
                 emitted_names[g_name] = true
             index = index + 1
 
+        # Consumer rows need declarations in the flat LLVM module. Emit them
+        # after all provider definitions so a provider wins regardless of
+        # aggregate module order. The emitted-name set also folds repeated
+        # imports that carry distinct consumer symbol ids.
+        index = 0
+        while index < static_count:
+            if bootstrap_mir_static_external_at(index):
+                val g_name = "@g_{bootstrap_mir_static_name_at(index)}"
+                if not emitted_names.contains(g_name):
+                    val g_ty = bootstrap_llvm_static_type_text(
+                        bootstrap_mir_static_type_tag_at(index), self.native_int_type)
+                    _sffi_string_builder_push(ir_handle, "\n")
+                    _sffi_string_builder_push(ir_handle,
+                        "{g_name} = external global {g_ty}")
+                    emitted_names[g_name] = true
+            index = index + 1
+
     me translate_bootstrap_function_at(index: i64, ir_handle: i64):
         val name = bootstrap_mir_function_name_at(index)
         val emitted_name = if name == "main": "__simple_main" else: name
@@ -682,6 +932,15 @@ impl MirTextCodegen for MirToLlvm:
         self.translate_function_with_ir_handle(name, body, span, -1, -1)
 
     me translate_function_with_ir_handle(name: text, body: MirBody, span: Span, module_index: i64, ir_handle: i64):
+        val trace_path = llvm_emit_trace_path()
+        if trace_path == "":
+            self.translate_function_with_ir_handle_impl(name, body, span, module_index, ir_handle)
+            return
+        val t0 = llvm_emit_trace_now()
+        self.translate_function_with_ir_handle_impl(name, body, span, module_index, ir_handle)
+        llvm_emit_trace_record(trace_path, "translate", name, body.blocks.len(), llvm_emit_trace_inst_count(body.blocks), t0)
+
+    me translate_function_with_ir_handle_impl(name: text, body: MirBody, span: Span, module_index: i64, ir_handle: i64):
         """Translate a MIR function with optimization attributes.
 
         Renames 'main' to '__simple_main' so the entry point wrapper
@@ -712,6 +971,7 @@ impl MirTextCodegen for MirToLlvm:
             val llvm_ty: text = self.llvm_type_text(local.type_)
             val local_id = self.local_id_value(local.id)
             self.local_types[local_id] = llvm_ty
+            self.remember_gep_pointer_type(local_id, local.type_)
             # Prime every local's unsigned bit upfront from its MIR-declared
             # type (U8/U16/U32/U64) -- this is what makes an unsigned
             # function PARAMETER (an Arg-kind local, never Alloc'd) visible
@@ -814,6 +1074,14 @@ impl MirTextCodegen for MirToLlvm:
                     case CallIndirect(_, _, _, _): has_call = true
                     case Intrinsic(_, _, _): has_call = true
                     case Send(_, _, _): has_store = true
+                    # Aggregate lowers to rt_alloc/rt_array_new plus word
+                    # stores (llvm_emit_aggregate_impl). Without this a
+                    # struct-returning ctor was marked `readonly`, which is UB
+                    # for a callee that allocates and writes: LLVM may drop the
+                    # field stores, so by-value returned fields read back wrong.
+                    case Aggregate(_, _, _):
+                        has_store = true
+                        has_call = true
                     case _: ()
                 scan_inst_i = scan_inst_i + 1
             scan_block_i = scan_block_i + 1
@@ -838,10 +1106,15 @@ impl MirTextCodegen for MirToLlvm:
         # (nondeterministic). Force the true entry symbol's LLVM return type
         # to i64 so a bare `return` / fall-off-the-end emits `ret i64 0`
         # instead, matching the documented "no return type => exit 0"
-        # contract. Only the exact global entry symbol is affected --
-        # per-module mains (`__simple_main_<mod>`, not called by
-        # entry_point.spl) keep their real signature.
-        val effective_ret_ty = if fn_name == "__simple_main" and ret_ty == "void":
+        # contract. The module-suffixed spelling (`__simple_main_<mod>`,
+        # emitted when the entry file is not flagged entry_main_symbol,
+        # class_def.spl) is covered too: the hosted C main / the stage3 smoke
+        # harness (llvm-objcopy --redefine-sym <mod-main>=__simple_main) bind
+        # THAT symbol as the process entry, and a `define void` there made
+        # `fn main():` exit with print()'s leftover RAX (rc=10 on
+        # s3_fable38, 2026-11-04). The i64 result is ABI-harmless to any
+        # void-typed caller of a per-module main.
+        val effective_ret_ty = if ret_ty == "void" and (fn_name == "__simple_main" or fn_name.starts_with("__simple_main_")):
             "i64"
         else:
             ret_ty
@@ -854,22 +1127,22 @@ impl MirTextCodegen for MirToLlvm:
         self.remember_function_param_types(name, param_types)
         self.remember_function_param_types(fn_name, param_types)
 
-        var dbg_id: i64? = nil
+        var dbg_id: i64? = None
         if self.debug_info:
             val sub_id = self.builder.next_debug_id()
             # Synthetic functions (module init, generic specialization
             # templates -- see module_lowering.spl's `begin_function(..., nil)`
             # call sites) build their MirFunction with a nil span; matching
-            # against nil first avoids crashing on `.line` for those.
-            val dbg_line = match span:
-                nil: 1
-                _: if span.line > 0: span.line else: 1
+            # presence first avoids crashing on `.line` for those.
+            val dbg_line = if span.? and span.line > 0: span.line else: 1
             self.builder.emit_di_subprogram(sub_id, name, dbg_line)
             dbg_id = Some(sub_id)
 
         # Asm-embedding contract (design A.2): `@naked` -> `naked noinline`
         # (never alwaysinline), `@section` -> `section "..."`, `@align` ->
-        # `align n`, `@global` -> `dso_local` external symbol. Keyed by the
+        # `align n` (owner decision R1: n is a BYTE count, emitted as-is -- never
+        # p2align; riscv twins write `@align(4)`, not `@align(2)`), `@global` ->
+        # `dso_local` external symbol. Keyed by the
         # MIR name; the loop in translate_module fills these before any body.
         val placement_naked = self.fn_naked.has(name)
         var placement_attrs = ""
@@ -882,19 +1155,51 @@ impl MirTextCodegen for MirToLlvm:
             placement_suffix = placement_suffix + " section \"" + self.fn_section[name] + "\""
         if self.fn_align.has(name):
             placement_suffix = placement_suffix + " align {self.fn_align[name]}"
-        val placement_prefix = if self.fn_global.has(name): "define dso_local" else: "define"
+        var placement_prefix = if self.fn_global.has(name): "define dso_local" else: "define"
+        # module-scoped instance: every requesting object defines its own
+        # copy as `linkonce_odr` in a same-named `any` comdat; the linker
+        # keeps one (ELF group / COFF IMAGE_COMDAT_SELECT_ANY / Mach-O weak).
+        if self.fn_comdat.has(name):
+            placement_prefix = "define linkonce_odr"
+            placement_suffix = " comdat" + placement_suffix
+            val comdat_decl = "$" + fn_name + " = comdat any"
+            if ir_handle >= 0:
+                if _sffi_string_builder_len(ir_handle) > 0:
+                    val comdat_newline = "\n"
+                    _sffi_string_builder_push(ir_handle, comdat_newline)
+                _sffi_string_builder_push(ir_handle, comdat_decl)
+            else:
+                self.builder.emit(comdat_decl)
+        # XRay (design A.5): emitters read only MirFunction.xray_mode. A sled
+        # function drops the size heuristic's FORCED inlining (alwaysinline is
+        # honoured even at -O0). The regular inliner may still inline it at
+        # -O2; per plan §5.4 the observable entity is the physical function and
+        # an inlined call site has no boundary (reported, not forced with
+        # noinline). Explicit @inline functions are never-listed (mode 0).
+        val xray_mode = if self.fn_xray_mode.has(name): self.fn_xray_mode[name] else: 0
+        var attrs = " nounwind" + placement_attrs
+        if is_readonly and not placement_naked and not (self.xray_flag_guard and xray_mode > 0):
+            attrs = attrs + " readonly"
+        if ((is_small and xray_mode == 0) or self.fn_inline.has(name)) and not placement_naked:
+            attrs = attrs + " alwaysinline"
+        if not self.xray_flag_guard:
+            attrs = attrs + llvm_xray_function_attrs(xray_mode, self.xray_module_on)
+        var semantic_suffix = ""
+        if (xray_mode == 2 and self.target_os.starts_with("linux") and
+                self.native_int_type == "i64" and
+                (self.target_arch == "x86_64" or self.target_arch == "aarch64")):
+            match llvm_xray_semantic_attachment_v1(fn_name, self.xray_semantic_owner):
+                case Ok(attachment): semantic_suffix = attachment
+                case Err(reason): self.codegen_error(reason)
         if ir_handle >= 0 or placement_naked or placement_suffix != "" or placement_prefix != "define":
             val param_str = params.join(", ")
-            var attrs = " nounwind" + placement_attrs
-            if is_readonly and not placement_naked:
-                attrs = attrs + " readonly"
-            if is_small and not placement_naked:
-                attrs = attrs + " alwaysinline"
             var dbg_suffix = ""
-            match dbg_id:
-                Some(id): dbg_suffix = " !dbg !{id}"
-                nil: ()
-            val opening = "{placement_prefix} {effective_ret_ty} @{fn_name}({param_str}){attrs}{placement_suffix}{dbg_suffix} {{"
+            # if-val, not a bare `None:` arm: bare None has ambiguous owners
+            # and degrades to a catch-all, tripping B5b next to `case _:`-style
+            # two-default matches on the strict lane.
+            if val did = dbg_id:
+                dbg_suffix = " !dbg !{did}"
+            val opening = "{placement_prefix} {effective_ret_ty} @{fn_name}({param_str}){attrs}{placement_suffix}{dbg_suffix}{semantic_suffix} {{"
             if ir_handle >= 0:
                 if _sffi_string_builder_len(ir_handle) > 0:
                     val newline = "\n"
@@ -904,16 +1209,13 @@ impl MirTextCodegen for MirToLlvm:
                 self.builder.emit(opening)
         else:
             val param_str = params.join(", ")
-            var attrs = " nounwind" + placement_attrs
-            if is_readonly and not placement_naked:
-                attrs = attrs + " readonly"
-            if is_small and not placement_naked:
-                attrs = attrs + " alwaysinline"
             var dbg_suffix = ""
-            match dbg_id:
-                Some(id): dbg_suffix = " !dbg !{id}"
-                nil: ()
-            val opening = "define {effective_ret_ty} @{fn_name}({param_str}){attrs}{dbg_suffix} {{"
+            # if-val, not a bare `None:` arm: bare None has ambiguous owners
+            # and degrades to a catch-all, tripping B5b next to `case _:`-style
+            # two-default matches on the strict lane.
+            if val did = dbg_id:
+                dbg_suffix = " !dbg !{did}"
+            val opening = "define {effective_ret_ty} @{fn_name}({param_str}){attrs}{dbg_suffix}{semantic_suffix} {{"
             val builder_handle = llvm_ir_builder_handle(self.builder)
             llvm_ir_builder_push_line(opening, builder_handle)
         if bootstrap_debug:
@@ -921,6 +1223,15 @@ impl MirTextCodegen for MirToLlvm:
 
         val is_start = name == "_start"
         var block_i = 0
+        if self.xray_flag_guard and xray_mode > 0 and self.xray_site.has(name) and not placement_naked and body.blocks.len() > 0:
+            self.builder.emit_label("xray_entry")
+            self.emit_xray_flag_guard(name, 0, "bb{body.blocks[0].bootstrap_block_id_value()}")
+        if placement_naked:
+            # Design A.2 `@naked`: never run the generic block translator --
+            # it materialises locals/params as allocas inside a prologue-free
+            # `naked` define (invalid code). Seed parity: compile_naked_function.
+            self.translate_naked_body(name, body)
+            block_i = body.blocks.len()
         while block_i < body.blocks.len():
             self.translate_block_at(body.blocks, block_i, effective_ret_ty, is_start, return_slot_id, module_index, ir_handle)
             block_i = block_i + 1
@@ -941,6 +1252,212 @@ impl MirTextCodegen for MirToLlvm:
             self.builder.end_function()
         if bootstrap_debug:
             print "[mir-to-llvm] function:done {name}"
+
+    me emit_darwin_xray_flag_guard_globals(module: MirModule):
+        """Darwin Mach-O flag-guard route: one 32-byte per-function slot in
+        `__DATA,__xray_fn_slots` (`{ magic, func_addr, func_name, func_id, enabled }`).
+        Avoids `__TEXT` self-modification on Apple Silicon (`maxprot=r-x`,
+        `LC_CODE_SIGNATURE`, `__TEXT,__stubs` page sharing, `-Wl,-dead_strip`)
+        and carries zero cross-object global symbol collisions across multi-module links."""
+        self.defined_func_names["__simple_darwin_xray_edge_v1"] = true
+        self.builder.emit("")
+        self.builder.emit("; XRay flag-guard slots (Darwin Mach-O __DATA,__xray_fn_slots)")
+        self.builder.emit("declare void @__simple_darwin_xray_edge_v1(ptr, i32)")
+        var slot_idx = 0
+        for fn_slot in mir_module_functions_sorted(module):
+            if fn_slot.xray_mode > 0 and not fn_slot.is_naked and fn_slot.blocks.len() > 0:
+                val symbol = self.llvm_function_symbol_name(fn_slot.name)
+                self.xray_site[fn_slot.name] = slot_idx
+                self.xray_site[symbol] = slot_idx
+                val name_len = escaped_string_byte_len(symbol) + 1
+                val name_text = escape_llvm_string(symbol)
+                self.builder.emit("@__simple_xray_dname_{slot_idx} = private unnamed_addr constant [{name_len} x i8] c\"{name_text}\\00\"")
+                self.builder.emit("@__simple_xray_dslot_{slot_idx} = internal global {{ i64, ptr, ptr, i32, i32 }} {{ i64 6005640646450433073, ptr @{symbol}, ptr @__simple_xray_dname_{slot_idx}, i32 0, i32 0 }}, section \"__DATA,__xray_fn_slots\", align 8")
+                slot_idx = slot_idx + 1
+
+    me emit_xray_flag_guard_globals(module: MirModule):
+        """Windows flag-guard route: one activation slot per sled function, one
+        exported descriptor `{ count, [count x ptr] }` listing the slots in site
+        order, and the edge hook declaration. Site id = index in that order."""
+        if self.target_os.starts_with("darwin") or self.target_os.starts_with("macos"):
+            self.emit_darwin_xray_flag_guard_globals(module)
+            return
+        var slots: [text] = []
+        var slot_names: [text] = []
+        for fn_slot in mir_module_functions_sorted(module):
+            if fn_slot.xray_mode > 0:
+                val symbol = self.llvm_function_symbol_name(fn_slot.name)
+                self.xray_site[fn_slot.name] = slots.len()
+                slots = slots.push("ptr @__simple_xray_slot_{symbol}")
+                slot_names = slot_names.push("@__simple_xray_slot_{symbol}")
+        self.builder.emit("")
+        self.builder.emit("; XRay flag-guard sleds (Windows)")
+        # No dllexport: one explicit export turns MinGW lld auto-export off and
+        # the DLL loses every function export (bug
+        # xray_win_flag_guard_dllexport_disables_mingw_auto_export_2026-11-15).
+        # MSVC link has no auto-export: export the data symbols by an explicit
+        # list in the object's .drectve (read by lld-link, link.exe and the
+        # in-house COFF linker). MinGW keeps auto-export (no list, no dllexport).
+        if self.target_env == "msvc":
+            self.builder.emit("module asm \".section .drectve,\\22yn\\22\"")
+            for directive in xray_msvc_export_directives_for_arch(module.xray_ring_wrap, self.target_arch):
+                self.builder.emit("module asm \".ascii \\22 {directive}\\22\"")
+            self.builder.emit("module asm \".text\"")
+        for slot_name in slot_names:
+            self.builder.emit("{slot_name} = internal global i8 0")
+        self.builder.emit("@__simple_xray_descriptor_v1 = constant {{ i64, [{slots.len()} x ptr] }} {{ i64 {slots.len()}, [{slots.len()} x ptr] [{slots.join(", ")}] }}")
+        # Site id -> Simple function name, parallel to the descriptor.
+        var name_refs: [text] = []
+        var site_index = 0
+        for fn_name in mir_module_functions_sorted(module):
+            if fn_name.xray_mode > 0:
+                val name_len = escaped_string_byte_len(fn_name.name) + 1
+                val name_text = escape_llvm_string(fn_name.name)
+                self.builder.emit("@__simple_xray_name_{site_index} = private unnamed_addr constant [{name_len} x i8] c\"{name_text}\\00\"")
+                name_refs = name_refs.push("ptr @__simple_xray_name_{site_index}")
+                site_index = site_index + 1
+        self.builder.emit("@__simple_xray_names_v1 = constant {{ i64, [{name_refs.len()} x ptr] }} {{ i64 {name_refs.len()}, [{name_refs.len()} x ptr] [{name_refs.join(", ")}] }}")
+        self.builder.emit("@__simple_xray_hook_v1 = global ptr null")
+        # Ring mode (PROVISIONAL): with a null hook the edge appends one
+        # {site, kind, pad, seq, ts} record to this exported fixed-size ring (ABI
+        # v2; ts = llvm.readcyclecounter at the edge, v1 had no ts). The
+        # write index is claimed by atomicrmw add (lockless); a claim past
+        # capacity is dropped and counted; seq = index+1 is release-stored last
+        # so a reader sees only complete records.
+        val cap = XRAY_RING_CAPACITY_V2
+        val ring_ty = "{{ i64, i64, i64, [{cap} x {{ i64, i32, i32, i64, i64 }}] }}"
+        self.builder.emit("@__simple_xray_ring_v2 = global {ring_ty} {{ i64 {cap}, i64 0, i64 0, [{cap} x {{ i64, i32, i32, i64, i64 }}] zeroinitializer }}")
+        self.builder.emit("define internal void @__simple_xray_edge_v1(i64 %site, i32 %kind) nounwind {{")
+        self.builder.emit("xe_entry:")
+        self.builder.emit("  %h = load volatile ptr, ptr @__simple_xray_hook_v1")
+        self.builder.emit("  %set = icmp ne ptr %h, null")
+        self.builder.emit("  br i1 %set, label %xe_call, label %xe_ring")
+        self.builder.emit("xe_call:")
+        self.builder.emit("  call void %h(i64 %site, i32 %kind)")
+        self.builder.emit("  br label %xe_done")
+        self.builder.emit("xe_ring:")
+        self.builder.emit("  %xe_widx = getelementptr inbounds {ring_ty}, ptr @__simple_xray_ring_v2, i32 0, i32 1")
+        if module.xray_ring_wrap:
+            self.emit_xray_ring_wrap_store(ring_ty, cap)
+            return
+        self.builder.emit("  %xe_i = atomicrmw add ptr %xe_widx, i64 1 monotonic")
+        self.builder.emit("  %xe_full = icmp uge i64 %xe_i, {cap}")
+        self.builder.emit("  br i1 %xe_full, label %xe_drop, label %xe_store")
+        self.builder.emit("xe_drop:")
+        self.builder.emit("  %xe_dropped = getelementptr inbounds {ring_ty}, ptr @__simple_xray_ring_v2, i32 0, i32 2")
+        self.builder.emit("  %xe_d = atomicrmw add ptr %xe_dropped, i64 1 monotonic")
+        self.builder.emit("  br label %xe_done")
+        self.builder.emit("xe_store:")
+        self.builder.emit("  %xe_rsite = getelementptr inbounds {ring_ty}, ptr @__simple_xray_ring_v2, i32 0, i32 3, i64 %xe_i, i32 0")
+        self.builder.emit("  store i64 %site, ptr %xe_rsite, align 8")
+        self.builder.emit("  %xe_rkind = getelementptr inbounds {ring_ty}, ptr @__simple_xray_ring_v2, i32 0, i32 3, i64 %xe_i, i32 1")
+        self.builder.emit("  store i32 %kind, ptr %xe_rkind, align 4")
+        self.builder.emit("  %xe_ts = call i64 @llvm.readcyclecounter()")
+        self.builder.emit("  %xe_rts = getelementptr inbounds {ring_ty}, ptr @__simple_xray_ring_v2, i32 0, i32 3, i64 %xe_i, i32 4")
+        self.builder.emit("  store i64 %xe_ts, ptr %xe_rts, align 8")
+        self.builder.emit("  %xe_seq = add i64 %xe_i, 1")
+        self.builder.emit("  %xe_rseq = getelementptr inbounds {ring_ty}, ptr @__simple_xray_ring_v2, i32 0, i32 3, i64 %xe_i, i32 3")
+        self.builder.emit("  store atomic i64 %xe_seq, ptr %xe_rseq release, align 8")
+        self.builder.emit("  br label %xe_done")
+        self.builder.emit("xe_done:")
+        self.builder.emit("  ret void")
+        self.builder.emit("}}")
+        self.builder.emit("declare i64 @llvm.readcyclecounter()")
+
+    me emit_xray_ring_wrap_store(ring_ty: text, cap: i64):
+        """Wrap ring (MirModule.xray_ring_wrap): keep the most recent `cap`
+        edges. Slot = claim mod cap; seq := 0, fence, payload, seq := claim+1
+        (release), so a reader rejects a slot whose seq is not claim+1 before
+        and after reading it (overwritten or torn). Never drops."""
+        self.builder.emit("  %xe_c = atomicrmw add ptr %xe_widx, i64 1 monotonic")
+        self.builder.emit("  %xe_i = urem i64 %xe_c, {cap}")
+        self.builder.emit("  %xe_rseq = getelementptr inbounds {ring_ty}, ptr @__simple_xray_ring_v2, i32 0, i32 3, i64 %xe_i, i32 3")
+        self.builder.emit("  store atomic i64 0, ptr %xe_rseq monotonic, align 8")
+        self.builder.emit("  fence release")
+        self.builder.emit("  %xe_rsite = getelementptr inbounds {ring_ty}, ptr @__simple_xray_ring_v2, i32 0, i32 3, i64 %xe_i, i32 0")
+        self.builder.emit("  store i64 %site, ptr %xe_rsite, align 8")
+        self.builder.emit("  %xe_rkind = getelementptr inbounds {ring_ty}, ptr @__simple_xray_ring_v2, i32 0, i32 3, i64 %xe_i, i32 1")
+        self.builder.emit("  store i32 %kind, ptr %xe_rkind, align 4")
+        self.builder.emit("  %xe_ts = call i64 @llvm.readcyclecounter()")
+        self.builder.emit("  %xe_rts = getelementptr inbounds {ring_ty}, ptr @__simple_xray_ring_v2, i32 0, i32 3, i64 %xe_i, i32 4")
+        self.builder.emit("  store i64 %xe_ts, ptr %xe_rts, align 8")
+        self.builder.emit("  %xe_seq = add i64 %xe_c, 1")
+        self.builder.emit("  store atomic i64 %xe_seq, ptr %xe_rseq release, align 8")
+        self.builder.emit("  br label %xe_done")
+        self.builder.emit("xe_done:")
+        self.builder.emit("  ret void")
+        self.builder.emit("}}")
+        self.builder.emit("declare i64 @llvm.readcyclecounter()")
+        self.builder.emit("@__simple_xray_ring_wrap_v2 = constant i64 1")
+
+    me emit_xray_flag_guard(name: text, kind: i64, continue_label: text):
+        """Load the slot; when set call the edge hook. Falls through to
+        `continue_label` (which this method emits when it is not an existing block)."""
+        val seq = self.xray_guard_seq
+        self.xray_guard_seq = seq + 1
+        val site = self.xray_site[name]
+        if self.target_os.starts_with("darwin") or self.target_os.starts_with("macos"):
+            self.builder.emit("  %xg_ptr{seq} = getelementptr inbounds {{ i64, ptr, ptr, i32, i32 }}, ptr @__simple_xray_dslot_{site}, i32 0, i32 4")
+            self.builder.emit("  %xg{seq} = load volatile i32, ptr %xg_ptr{seq}, align 4")
+            self.builder.emit("  %xc{seq} = icmp ne i32 %xg{seq}, 0")
+            self.builder.emit("  br i1 %xc{seq}, label %xs{seq}, label %{continue_label}")
+            self.builder.emit_label("xs{seq}")
+            self.builder.emit("  call void @__simple_darwin_xray_edge_v1(ptr @__simple_xray_dslot_{site}, i32 {kind})")
+            self.builder.emit("  br label %{continue_label}")
+            if continue_label == "xr{seq}":
+                self.builder.emit_label(continue_label)
+            return
+        val symbol = self.llvm_function_symbol_name(name)
+        self.builder.emit("  %xg{seq} = load volatile i8, ptr @__simple_xray_slot_{symbol}")
+        self.builder.emit("  %xc{seq} = icmp ne i8 %xg{seq}, 0")
+        self.builder.emit("  br i1 %xc{seq}, label %xs{seq}, label %{continue_label}")
+        self.builder.emit_label("xs{seq}")
+        self.builder.emit("  call void @__simple_xray_edge_v1(i64 {site}, i32 {kind})")
+        self.builder.emit("  br label %{continue_label}")
+        if continue_label == "xr{seq}":
+            self.builder.emit_label(continue_label)
+
+    me translate_naked_body(name: text, body: MirBody):
+        """Design A.2 `@naked` (seed parity with compile_naked_function): the
+        body MUST be exactly one raw `asm { }` block with no bound operands and
+        no clobbers(...), falling through to `Ret(nil)`/`Unreachable`. Nothing
+        else is materialised -- no local/param allocas, no `ret`; the block is
+        followed by `unreachable`. The asm carries the conservative implicit
+        `~{memory}` clobber (owner decision D2). Violations are recorded as
+        E-NAKED-BODY / E-NAKED-CLOBBER codegen errors (fail-closed module)."""
+        self.builder.emit_label("naked_entry")
+        var asm_blocks = 0
+        var violation = ""
+        var block_i = 0
+        while block_i < body.blocks.len() and violation == "":
+            val block = body.blocks[block_i]
+            var inst_i = 0
+            while inst_i < block.instructions.len() and violation == "":
+                val inst = block.instructions[inst_i]
+                match inst.kind:
+                    case InlineAsm(asm_template, is_volatile, inputs, outputs, clobbers, clobber_abis, options):
+                        if inputs.len() > 0 or outputs.len() > 0 or clobbers.len() > 0 or clobber_abis.len() > 0:
+                            violation = "E-NAKED-CLOBBER: `{name}` is @naked; its raw asm block must not carry clobbers(...) or bound operands (the whole register file belongs to the author)"
+                        else:
+                            asm_blocks = asm_blocks + 1
+                            if asm_blocks == 1:
+                                self.llvm_inline_asm_impl(asm_template, is_volatile, [], [], [], [], options)
+                    case _:
+                        violation = "E-NAKED-BODY: `{name}` is @naked; its body must be exactly one raw asm block, found a non-asm instruction"
+                inst_i = inst_i + 1
+            if violation == "":
+                match block.terminator:
+                    case Ret(value):
+                        if value.?:
+                            violation = "E-NAKED-BODY: `{name}` is @naked; it must not return a value"
+                    case Unreachable: ()
+                    case _: violation = "E-NAKED-BODY: `{name}` is @naked; control flow other than fall-through is not allowed"
+            block_i = block_i + 1
+        if violation == "" and asm_blocks != 1:
+            violation = "E-NAKED-BODY: `{name}` is @naked; its body must be exactly one raw asm block, found {asm_blocks}"
+        if violation != "":
+            self.codegen_error(violation)
+        self.builder.emit("  unreachable")
 
     me first_unemitted_call_destination(body: MirBody) -> i64:
         """Return the first MIR Call destination without an emitted LLVM SSA
@@ -1002,9 +1519,9 @@ impl MirTextCodegen for MirToLlvm:
             print "[mir-to-llvm] instruction:const-discriminant index={index}"
         if _sffi_enum_discriminant(inst_kind) == const_disc:
             val payload = _sffi_enum_payload(inst_kind)
-            val dest: LocalId = _sffi_tuple_get<LocalId>(payload, 0)
-            val value: MirConstValue = _sffi_tuple_get<MirConstValue>(payload, 1)
-            val ty: MirType = _sffi_tuple_get<MirType>(payload, 2)
+            val dest: LocalId = _sffi_local_id_payload_req(payload, 0)
+            val value: MirConstValue = _sffi_mir_const_value_payload_req(payload, 1)
+            val ty: MirType = _sffi_mir_type_payload_req(payload, 2)
             self.translate_const(dest, value, ty)
             # Fast paths must perform the SAME trailing bookkeeping the
             # fall-through dispatch does. Skipping this call is exactly how the
@@ -1053,11 +1570,12 @@ impl MirTextCodegen for MirToLlvm:
             MirInstKind.Aggregate(LocalId(id: 0), AggregateKind.Array(MirType.i64()), []))
         if _sffi_enum_discriminant(inst_kind) == aggregate_disc:
             val agg_payload = _sffi_enum_payload(inst_kind)
-            val agg_dest: LocalId = _sffi_tuple_get<LocalId>(agg_payload, 0)
-            val agg_kind: AggregateKind = _sffi_tuple_get<AggregateKind>(agg_payload, 1)
-            val agg_operands: [MirOperand] = _sffi_tuple_get<[MirOperand]>(agg_payload, 2)
+            val agg_dest: LocalId = _sffi_local_id_payload_req(agg_payload, 0)
+            val agg_kind: AggregateKind = _sffi_aggregate_kind_payload_req(agg_payload, 1)
+            val agg_operands: [MirOperand] = _sffi_mir_operand_list_payload_req(agg_payload, 2)
             if mir_trace_enabled():
-                eprint("MIRB-AGG fastpath-fired dest={agg_dest.id} operands={agg_operands.len()}\n")
+                val agg_operand_count: i64 = agg_operands.len()
+                eprint("MIRB-AGG fastpath-fired dest={agg_dest.id} operands={agg_operand_count}\n")
             # Call the uniquely-named impl, NOT the trait name: the trait
             # declares translate_aggregate with a `()` body, and a call through
             # the trait name reaches that silent no-op on this lane.
@@ -1072,8 +1590,8 @@ impl MirTextCodegen for MirToLlvm:
             print "[mir-to-llvm] instruction:copy-discriminant index={index}"
         if _sffi_enum_discriminant(inst_kind) == copy_disc:
             val payload = _sffi_enum_payload(inst_kind)
-            val dest: LocalId = _sffi_tuple_get<LocalId>(payload, 0)
-            val src: LocalId = _sffi_tuple_get<LocalId>(payload, 1)
+            val dest: LocalId = _sffi_local_id_payload_req(payload, 0)
+            val src: LocalId = _sffi_local_id_payload_req(payload, 1)
             self.translate_copy_move(dest, src, false)
             # Same invariant as the Const fast path above: mirror the trailing
             # bookkeeping of the fall-through dispatch before returning.
@@ -1374,6 +1892,20 @@ impl MirTextCodegen for MirToLlvm:
         eprint("error: {message} [module={self.builder.module_name} function={self.current_function_name} at={llvm_format_span(self.current_inst_span)}]")
         self.codegen_errors = self.codegen_errors.push(diagnostic)
 
+    me llvm_callable_uses_local_symbols(origin: MirCallOrigin, callee: text) -> bool:
+        """Callable authority for an operand of the module being translated.
+
+        An Unknown origin is a defect of this module's MIR, so it is this
+        module's compile error (codegen_error), not the process-wide panic of
+        mir_call_origin_uses_local_symbols_named that cost Stage 3 every
+        module of a worker's claim. Answers false (the bare name) as the
+        placeholder; the module never reaches an object."""
+        if origin == MirCallOrigin.Unknown:
+            self.codegen_error("E-BACKEND-LLVM-CALL-ORIGIN: {callee}: callee lacks proven source/runtime/foreign origin")
+            return false
+        # EXPLICIT return: mixed-return/tail rule (see cl_translate_operand).
+        return mir_call_origin_uses_local_symbols_named(origin, callee)
+
     me mark_instruction_dest_defined_at(instructions: [MirInst], index: i64):
         val inst: MirInst = instructions[index]
         match inst.kind:
@@ -1410,6 +1942,48 @@ impl MirTextCodegen for MirToLlvm:
             return "null"
         value
 
+    me llvm_resolved_tuple_facade_for_call_v1(func: MirOperand, arg_count: i64) -> text:
+        """Select a direct Const(Str) call's tuple facade before target name mangling."""
+        var const_callee_name = ""
+        match func.kind:
+            case Const(value, _):
+                match value:
+                    case Str(name):
+                        const_callee_name = name.replace("\"", "")
+                    case _: ()
+            case _: ()
+        if const_callee_name == "":
+            return ""
+        llvm_select_runtime_tuple_facade_v1(
+            const_callee_name,
+            arg_count,
+            func.call_origin,
+            self.owned_name_has_local.has(const_callee_name)
+        )
+
+    me translate_call_target_at(operands: [MirOperand], index: i64) -> text:
+        val operand = operands[index]
+        match operand.kind:
+            case Const(value, const_ty):
+                match value:
+                    case Str(name):
+                        match const_ty.kind:
+                            case FuncPtr(_):
+                                # translate_operand_at resolves the authority the same
+                                # way AND registers the return type, external signature
+                                # and `declare` line. Short-circuiting here left every
+                                # runtime callee outside the static declare block
+                                # undeclared (llc: use of undefined value
+                                # '@rt_value_as_int_wide', p2_add, 2026-11-12).
+                                return self.translate_operand_at(operands, index)
+                            case _:
+                                val resolved = if self.llvm_callable_uses_local_symbols(operand.call_origin, name): self.llvm_function_symbol_name(name) else: name
+                                self.unknown_func_decls[resolved] = true
+                                return "@{resolved}"
+                    case _: ()
+            case _: ()
+        self.translate_operand_at(operands, index)
+
     fn normalize_call_callee(callee: text) -> text:
         if callee == "0":
             return "null"
@@ -1417,7 +1991,7 @@ impl MirTextCodegen for MirToLlvm:
             return callee
         "@{callee}"
 
-    me emit_value_type_conversion(value: text, src_ty: text, dst_ty: text, src_unsigned: bool) -> text:
+    me emit_value_type_conversion(value: text, src_ty: text, dst_ty: text, src_unsigned: bool, dst_unsigned: bool = false) -> text:
         """Emit a verified scalar conversion for value_as_type callers."""
         if src_ty == "void" or src_ty == "unit":
             # A void tail expression (e.g. `exit(...)` as the last statement of
@@ -1428,6 +2002,10 @@ impl MirTextCodegen for MirToLlvm:
             # lib.nogc_sync_mut.test_runner.runner_lifecycle.cleanup_and_exit,
             # 2026-10-15; see site-19 addendum).
             return self.ret_value_for_type(dst_ty, "0")
+        if dst_ty == "void" or dst_ty == "unit":
+            # Discarding a non-void scalar into a void/unit target (for example
+            # a unit loop/match join arm) emits no LLVM cast instruction.
+            return "0"
         if src_ty == "i1" and dst_ty == "ptr":
             # LLVM cannot bitcast i1 to ptr. Preserve the boolean through the
             # target's native integer width before converting to a pointer.
@@ -1442,12 +2020,35 @@ impl MirTextCodegen for MirToLlvm:
             val converted = self.builder.fresh_local()
             self.builder.emit("  {converted} = icmp ne ptr {value}, null")
             return converted
+        if src_ty == "ptr" and is_float_type(dst_ty):
+            # A float word read from an untyped slot (rt_array_get /
+            # rt_tuple_get emitted as `call ptr`, e.g. a [f64] element load
+            # in a struct-list loop — app.mcp.ctx_postings) holds raw IEEE
+            # bits; a direct conversion is invalid IR (llc: "invalid cast
+            # opcode ... ptr to double"). Go through the same-width int,
+            # mirroring llvm_bitcast_impl's ptr<->float arms (#9813).
+            val float_bits = self.builder.fresh_local()
+            val as_float = self.builder.fresh_local()
+            val bits_ty = self.float_int_equiv(dst_ty)
+            self.builder.emit("  {float_bits} = ptrtoint ptr {value} to {bits_ty}")
+            self.builder.emit("  {as_float} = bitcast {bits_ty} {float_bits} to {dst_ty}")
+            return as_float
+        if is_float_type(src_ty) and dst_ty == "ptr":
+            # Inverse: a float word stored into an untyped slot.
+            val float_bits = self.builder.fresh_local()
+            val stored = self.builder.fresh_local()
+            val bits_ty = self.float_int_equiv(src_ty)
+            self.builder.emit("  {float_bits} = bitcast {src_ty} {value} to {bits_ty}")
+            self.builder.emit("  {stored} = inttoptr {bits_ty} {float_bits} to ptr")
+            return stored
 
         var cast_inst = self.select_cast_instruction(src_ty, dst_ty)
         if src_unsigned and cast_inst == "sext":
             cast_inst = "zext"
         if src_unsigned and cast_inst == "sitofp":
             cast_inst = "uitofp"
+        if dst_unsigned and cast_inst == "fptosi":
+            cast_inst = "fptoui"
         if cast_inst.len() == 0:
             # No scalar meaning (e.g. ptr -> i8 would truncate an address).
             # Recorded, not panicked: `undef` keeps the rest of the function
@@ -1459,9 +2060,10 @@ impl MirTextCodegen for MirToLlvm:
         self.builder.emit("  {tmp} = {cast_inst} {src_ty} {value} to {dst_ty}")
         tmp
 
-    me value_as_type_signed(value: text, from_ty: text, to_ty: text, src_unsigned: bool) -> text:
+    me value_as_type_signed(value: text, from_ty: text, to_ty: text, src_unsigned: bool, dst_unsigned: bool = false) -> text:
         """Same as value_as_type, but widening picks zext when src_unsigned
         is set (MIR-level U8/U16/U32 source) instead of always sext'ing.
+        dst_unsigned selects fptoui for an explicitly unsigned integer target.
         See select_widen_instruction / is_unsigned_mir_kind."""
         var src_ty = self.valid_llvm_type(from_ty)
         # contains_key + index read, never `.get()`: a native `Dict.get()` HIT
@@ -1477,7 +2079,7 @@ impl MirTextCodegen for MirToLlvm:
         # must zext, not sext -- select_cast_instruction has no signedness
         # input and always sext's i8/i16/i32 widening (only correct for
         # signed sources). See is_unsigned_mir_kind.
-        self.emit_value_type_conversion(value, src_ty, dst_ty, src_unsigned)
+        self.emit_value_type_conversion(value, src_ty, dst_ty, src_unsigned, dst_unsigned)
 
     me get_operand_unsigned(operand: MirOperand) -> bool:
         """Best-effort MIR-level signedness for an operand: true for a Const
@@ -1605,17 +2207,26 @@ impl MirTextCodegen for MirToLlvm:
         the call said `call ptr @...`, which is the second half of site 13.
         Falls back to the old varargs shape only when the callee's parameter
         types were never recorded -- a guessed prototype is worse than none."""
+        # These raw-memory externs are compiler intrinsics. Emit a local body
+        # only on external reference so direct calls and function pointers
+        # share the same ABI. Byte offsets have no alignment guarantee.
+        if name == "spl_load_i64" or name == "spl_load_u8" or name == "spl_store_i64" or name == "spl_store_u8":
+            val address_ir = " alwaysinline {\n  %ptr = inttoptr i64 %base to ptr\n  %address = getelementptr i8, ptr %ptr, i64 %offset\n"
+            if name == "spl_load_i64" or name == "spl_load_u8":
+                val read_ir = if name == "spl_load_i64": "  %value = load i64, ptr %address, align 1" else: "  %byte = load i8, ptr %address, align 1\n  %value = zext i8 %byte to i64"
+                return "define internal i64 @" + name + "(i64 %base, i64 %offset)" + address_ir + read_ir + "\n  ret i64 %value\n}"
+            val write_ir = if name == "spl_store_i64": "  store i64 %value, ptr %address, align 1" else: "  %byte = trunc i64 %value to i8\n  store i8 %byte, ptr %address, align 1"
+            return "define internal void @" + name + "(i64 %base, i64 %offset, i64 %value)" + address_ir + write_ir + "\n  ret void\n}"
         var ret_ty = self.lookup_function_return_type(name)
         if ret_ty == "" or ret_ty == "nil":
             ret_ty = "i64"
         if ret_ty != "void":
             ret_ty = self.valid_llvm_type(ret_ty)
-        val recorded = self.function_param_types.get(name)
-        if recorded.?:
+        if self.function_param_types.has(name):
             # Keep the element type at the flat-Option boundary. The bootstrap
             # compiler otherwise erases this local's array receiver and can
             # resolve `join` to the unrelated ThreadHandle.join method.
-            val param_tys: [text] = recorded.unwrap()
+            val param_tys: [text] = self.function_param_types[name]
             return "declare {ret_ty} @{name}({param_tys.join(\", \")})"
         "declare {ret_ty} @{name}(...)"
 
@@ -1655,6 +2266,8 @@ impl MirTextCodegen for MirToLlvm:
             print "[mir-to-llvm] terminator:kind index={block_index}"
         match term:
             case Ret(_):
+                if self.xray_flag_guard and self.xray_site.has(self.current_function_name) and not self.fn_naked.has(self.current_function_name):
+                    self.emit_xray_flag_guard(self.current_function_name, 1, "xr{self.xray_guard_seq}")
                 val ret_kind = blocks[block_index].bootstrap_ret_kind()
                 if bootstrap_debug:
                     print "[mir-to-llvm] terminator:ret-scalar-kind index={block_index} kind={ret_kind}"
@@ -1788,7 +2401,7 @@ impl MirTextCodegen for MirToLlvm:
                 # `switch {nit} %lN` ill-typed. value_as_type re-reads the
                 # value's registered type and is a no-op when it already
                 # matches.
-                val discr_val = self.value_as_type(discr_raw, self.get_operand_type_at(value_operands, 0), nit)
+                val discr_val = self.value_as_type_signed(discr_raw, self.get_operand_type_at(value_operands, 0), nit, self.get_operand_unsigned_at(value_operands, 0))
                 val default_id = default.bootstrap_value()
                 if bootstrap_debug:
                     print "[mir-to-llvm] terminator:switch index={block_index} default={default_id} cases={targets.len()}"
@@ -1835,8 +2448,8 @@ impl MirTextCodegen for MirToLlvm:
                 val tag_ops: [MirOperand] = [type_tag]
                 val payload_raw = self.translate_operand_at(payload_ops, 0)
                 val tag_raw = self.translate_operand_at(tag_ops, 0)
-                val payload_i64 = self.value_as_type(payload_raw, self.get_operand_type_at(payload_ops, 0), "i64")
-                val tag_i64 = self.value_as_type(tag_raw, self.get_operand_type_at(tag_ops, 0), "i64")
+                val payload_i64 = self.value_as_type_signed(payload_raw, self.get_operand_type_at(payload_ops, 0), "i64", self.get_operand_unsigned_at(payload_ops, 0))
+                val tag_i64 = self.value_as_type_signed(tag_raw, self.get_operand_type_at(tag_ops, 0), "i64", self.get_operand_unsigned_at(tag_ops, 0))
                 self.builder.emit("  call void @rt_exception_throw(i64 {payload_i64}, i64 {tag_i64})")
                 self.builder.emit("  unreachable")
 
@@ -1851,8 +2464,8 @@ impl MirTextCodegen for MirToLlvm:
                 val tag_ops: [MirOperand] = [type_tag]
                 val payload_raw = self.translate_operand_at(payload_ops, 0)
                 val tag_raw = self.translate_operand_at(tag_ops, 0)
-                val payload_i64 = self.value_as_type(payload_raw, self.get_operand_type_at(payload_ops, 0), "i64")
-                val tag_i64 = self.value_as_type(tag_raw, self.get_operand_type_at(tag_ops, 0), "i64")
+                val payload_i64 = self.value_as_type_signed(payload_raw, self.get_operand_type_at(payload_ops, 0), "i64", self.get_operand_unsigned_at(payload_ops, 0))
+                val tag_i64 = self.value_as_type_signed(tag_raw, self.get_operand_type_at(tag_ops, 0), "i64", self.get_operand_unsigned_at(tag_ops, 0))
                 self.builder.emit("  call void @rt_exception_resume(i64 {payload_i64}, i64 {tag_i64})")
                 self.builder.emit("  unreachable")
 
@@ -1860,9 +2473,9 @@ impl MirTextCodegen for MirToLlvm:
                                 unwind_payload_dest, unwind_type_tag_dest):
                 val func_operands: [MirOperand] = [func]
                 val normal_id = normal.bootstrap_value()
-                val has_unwind = unwind != nil
+                val has_unwind = unwind.?
                 val unwind_id = if has_unwind: (unwind ?? BlockId(id: 0)).bootstrap_value() else: 0
-                val has_dest = dest != nil
+                val has_dest = dest.?
                 val dest_id = if has_dest: (dest ?? LocalId(id: 0)).id else: 0
                 if bootstrap_debug:
                     print "[mir-to-llvm] terminator:call index={block_index} dest={has_dest} normal={normal_id} unwind={has_unwind}"
@@ -1873,7 +2486,8 @@ impl MirTextCodegen for MirToLlvm:
                     val posix_elf_supported = unwind_os == "linux" or unwind_os == "freebsd"
                     if not elf_arch_supported or not posix_elf_supported:
                         self.codegen_error("E-BACKEND-LLVM-UNWIND-ABI: recoverable exceptions are supported only on POSIX ELF x86_64/AArch64/RV64")
-                var func_val = self.translate_operand_at(func_operands, 0)
+                val terminator_tuple_facade = self.llvm_resolved_tuple_facade_for_call_v1(func, args.len())
+                var func_val = if terminator_tuple_facade != "": "@" + terminator_tuple_facade else: self.translate_call_target_at(func_operands, 0)
                 match func.kind:
                     case Copy(local) | Move(local):
                         func_val = self.value_as_type(func_val, self.get_operand_type_at(func_operands, 0), "ptr")
@@ -1887,11 +2501,11 @@ impl MirTextCodegen for MirToLlvm:
                     var arg_val = self.translate_operand_at(args, arg_index)
                     var arg_ty = self.valid_llvm_type(self.get_operand_type_at(args, arg_index))
                     val param_ty = self.lookup_function_param_type(call_func_val, arg_i)
-                    if param_ty != "" and param_ty != nil:
+                    if param_ty != "":
                         # See translate_call: print()'s raw-format runtime
                         # helpers need signedness-aware widening.
                         val is_print_raw_fmt = call_func_val == "@rt_raw_i64_to_string" or call_func_val == "@rt_raw_u64_to_string" or call_func_val == "@rt_raw_bool_to_string"
-                        if is_print_raw_fmt:
+                        if is_print_raw_fmt or is_integer_type(arg_ty):
                             arg_val = self.value_as_type_signed(arg_val, arg_ty, param_ty, self.get_operand_unsigned_at(args, arg_index))
                         else:
                             arg_val = self.value_as_type(arg_val, arg_ty, param_ty)
@@ -1996,7 +2610,9 @@ impl MirTextCodegen for MirToLlvm:
         elif dest_ty == "i64":
             self.builder.emit("  {dest_name} = add i64 {boxed}, 0  ; boxed text literal")
         else:
-            panic("LLVM text literal has unsupported result type: {dest_ty}")
+            # A destination typed neither ptr nor i64 is a defect of this
+            # module's MIR: its compile error; the module never reaches llc.
+            self.codegen_error("E-BACKEND-LLVM-TEXT-LITERAL: text literal has unsupported result type {dest_ty}")
 
     me emit_boxed_text_literal_value(value: text, dest_ty: text) -> text:
         val dest_name = self.builder.fresh_local()
@@ -2005,6 +2621,8 @@ impl MirTextCodegen for MirToLlvm:
 
     me translate_const(dest: LocalId, value: MirConstValue, ty: MirType):
         val dest_id = self.local_id_value(dest)
+        if not self.local_types.has(dest_id):
+            self.remember_gep_pointer_type(dest_id, ty)
         val dest_name = self.get_local(dest_id)
         # SSA rewrites create fresh destinations that have no MirLocal entry.
         # For those, get_local_type falls back to native int and can poison a
@@ -2031,7 +2649,10 @@ impl MirTextCodegen for MirToLlvm:
                 elif is_integer_type(llvm_ty) or llvm_ty == "i1":
                     self.builder.emit("  {dest_name} = add {llvm_ty} {v}, 0  ; const int")
                 else:
-                    self.codegen_error("E-BACKEND-LLVM-CONST-TYPE: integer constant cannot define {llvm_ty}; use an explicit MIR Cast for numeric conversion")
+                    # dest + the Const's own MIR type name the def site: an i64
+                    # const into a registered void local is a MIR lowering
+                    # default def (bug native_const_type_void_unit_tail_if_join_2026-11-13).
+                    self.codegen_error("E-BACKEND-LLVM-CONST-TYPE: integer constant cannot define {llvm_ty}; use an explicit MIR Cast for numeric conversion (dest=_{dest_id} const_type={self.llvm_type_text(ty)} value={v})")
             case FloatLexeme(v):
                 val fv = llvm_float_lexeme_constant(v, llvm_ty)
                 if llvm_ty == "float":
@@ -2085,7 +2706,7 @@ impl MirTextCodegen for MirToLlvm:
                     val nit = self.native_int()
                     self.mark_ptr_local(dest_id)
                     self.builder.emit("  {dest_name} = getelementptr inbounds [{str_len} x i8], ptr {global_name}, {nit} 0, {nit} 0  ; string const")
-            case Zero:
+            case MirConstValue.Zero:
                 if is_float_type(llvm_ty):
                     self.builder.emit("  {dest_name} = fadd {llvm_ty} 0.0, 0.0  ; const zero")
                 elif llvm_ty == "ptr":
@@ -2111,6 +2732,14 @@ impl MirTextCodegen for MirToLlvm:
                 self.builder.emit_alloca(tmp, llvm_ty)
                 self.builder.emit_store(llvm_ty, "zeroinitializer", tmp)
                 self.builder.emit_load(dest_name, llvm_ty, tmp)
+            case _:
+                # Defensive fail-closed arm: a garbage MirConstValue discriminant
+                # (ill-formed enum word) must name this site and poison the
+                # module via codegen_error instead of silently emitting nothing,
+                # leaving the destination an undefined SSA local for downstream
+                # instructions (candidate AV site
+                # phase2_candidate_native_smokes_access_violation_2026_11_02).
+                self.codegen_error("E-BACKEND-LLVM-CONST-GARBAGE: MirConstValue discriminant outside the defined variants reached translate_const")
 
     me translate_copy_move(dest: LocalId, src: LocalId, is_move: bool):
         val dest_id = self.local_id_value(dest)
@@ -2126,6 +2755,7 @@ impl MirTextCodegen for MirToLlvm:
         self.defined_locals[dest_id] = true
         val dest_name = self.get_local(dest_id)
         val src_name = self.local_value_text(src_id)
+        self.inherit_gep_pointer_type(dest_name, src_name)
         # Bug #149: `get_local_type` checks the STICKY `ptr_locals`/
         # `bool_locals` flags before `local_types`. Those flags are set once,
         # upfront, from every local's MIR-DECLARED type (translate_function's
@@ -2151,7 +2781,7 @@ impl MirTextCodegen for MirToLlvm:
         # contains_key + index read, never `.get()`.
         # See doc/07_guide/language/dict_native_pitfalls.md
         val has_recorded_src_ty = self.local_types.contains_key(src_id)
-        var ty = if has_recorded_src_ty and self.local_types[src_id] != nil and self.local_types[src_id] != "nil" and self.local_types[src_id] != "":
+        var ty = if has_recorded_src_ty and self.local_types[src_id] != "nil" and self.local_types[src_id] != "":
             self.valid_llvm_type(self.local_types[src_id])
         else:
             self.valid_llvm_type(self.get_local_type(src_id))
@@ -2197,9 +2827,13 @@ impl MirTextCodegen for MirToLlvm:
         # entry stays unset (default false/signed) even though its source
         # temp was correctly marked unsigned, and a later print(x) would
         # sign-extend a high-bit-set unsigned value incorrectly.
-        if not self.unsigned_locals.has(dest_id):
-            if self.unsigned_locals.has(src_id):
-                self.unsigned_locals[dest_id] = self.unsigned_locals[src_id]
+        # Copy/Move already replaces the destination LLVM type with `ty`.
+        # Replace signedness as well: an inferred local can have a preseeded
+        # false entry even when its source is U8. Keeping that entry makes
+        # `val byte = bytes[i]; byte as i64` sign-extend bytes above 127.
+        # Conversions belong to Cast; a copy preserves its source value.
+        val source_unsigned = if self.unsigned_locals.has(src_id): self.unsigned_locals[src_id] else: false
+        self.unsigned_locals[dest_id] = source_unsigned
 
         if is_float_type(ty):
             # -0.0 sign fix: see translate_cast_float_signsafe above for
@@ -2273,7 +2907,7 @@ impl MirTextCodegen for MirToLlvm:
                 val right_val = self.value_as_type_signed(right_raw, self.get_operand_type(right), ty, bin_unsigned)
                 if is_float_type(ty):
                     self.builder.emit_fadd(dest_name, ty, left_val, right_val)
-                elif is_signed_int_type(ty):
+                elif is_signed_int_type(ty) and not bin_unsigned:
                     self.builder.emit_add_nsw(dest_name, ty, left_val, right_val)
                 else:
                     self.builder.emit_add(dest_name, ty, left_val, right_val)
@@ -2282,7 +2916,7 @@ impl MirTextCodegen for MirToLlvm:
                 val right_val = self.value_as_type_signed(right_raw, self.get_operand_type(right), ty, bin_unsigned)
                 if is_float_type(ty):
                     self.builder.emit_fsub(dest_name, ty, left_val, right_val)
-                elif is_signed_int_type(ty):
+                elif is_signed_int_type(ty) and not bin_unsigned:
                     self.builder.emit_sub_nsw(dest_name, ty, left_val, right_val)
                 else:
                     self.builder.emit_sub(dest_name, ty, left_val, right_val)
@@ -2291,7 +2925,7 @@ impl MirTextCodegen for MirToLlvm:
                 val right_val = self.value_as_type_signed(right_raw, self.get_operand_type(right), ty, bin_unsigned)
                 if is_float_type(ty):
                     self.builder.emit_fmul(dest_name, ty, left_val, right_val)
-                elif is_signed_int_type(ty):
+                elif is_signed_int_type(ty) and not bin_unsigned:
                     self.builder.emit_mul_nsw(dest_name, ty, left_val, right_val)
                 else:
                     self.builder.emit_mul(dest_name, ty, left_val, right_val)
@@ -2361,7 +2995,10 @@ impl MirTextCodegen for MirToLlvm:
                 self.emit_comparison(dest_name, ty, eq_pred, eq_cmp_ty, eq_left, eq_right)
             case Ne:
                 val ne_cmp_ty = self.equality_compare_type(left, right)
-                val ne_pred = if is_float_type(ne_cmp_ty): "one" else: "ne"
+                # IEEE `!=` is the complement of `==`: unordered, so that
+                # `nan != nan` is true. `one` made both `x == x` and `x != x`
+                # false on NaN (generic_erased_body_boundary nan_text).
+                val ne_pred = if is_float_type(ne_cmp_ty): "une" else: "ne"
                 val ne_left = self.value_as_type(left_raw, self.get_operand_type(left), ne_cmp_ty)
                 val ne_right = self.value_as_type(right_raw, self.get_operand_type(right), ne_cmp_ty)
                 self.emit_comparison(dest_name, ty, ne_pred, ne_cmp_ty, ne_left, ne_right)
@@ -2408,7 +3045,7 @@ impl MirTextCodegen for MirToLlvm:
             case Offset:
                 val nit = self.native_int()
                 val left_val = self.value_as_type(left_raw, self.get_operand_type(left), "ptr")
-                val right_val = self.value_as_type(right_raw, self.get_operand_type(right), nit)
+                val right_val = self.value_as_type_signed(right_raw, self.get_operand_type(right), nit, self.get_operand_unsigned(right))
                 self.builder.emit("  {dest_name} = getelementptr i8, ptr {left_val}, {nit} {right_val}")
 
     me translate_unaryop(dest: LocalId, op: MirUnaryOp, operand: MirOperand):
@@ -2420,7 +3057,7 @@ impl MirTextCodegen for MirToLlvm:
 
         match op:
             case Neg:
-                val cast_operand = self.value_as_type(operand_val, self.get_operand_type(operand), ty)
+                val cast_operand = self.value_as_type_signed(operand_val, self.get_operand_type(operand), ty, self.get_operand_unsigned(operand))
                 if is_float_type(ty):
                     self.builder.emit_fneg(dest_name, ty, cast_operand)
                 else:
@@ -2442,7 +3079,7 @@ impl MirTextCodegen for MirToLlvm:
                 val rhs = if cmp_ty == "ptr": "null" else: "0"
                 self.emit_comparison(dest_name, ty, "eq", cmp_ty, cmp_operand, rhs)
             case BitNot:
-                val cast_operand = self.value_as_type(operand_val, self.get_operand_type(operand), ty)
+                val cast_operand = self.value_as_type_signed(operand_val, self.get_operand_type(operand), ty, self.get_operand_unsigned(operand))
                 self.builder.emit_not(dest_name, ty, cast_operand)
             case Transpose:
                 self.emit_unsupported_panic("LLVM backend does not support Transpose lowering")
@@ -2452,7 +3089,7 @@ impl MirTextCodegen for MirToLlvm:
         if bootstrap_debug:
             print "[mir-to-llvm] call:entry index={index}"
         val inst: MirInst = instructions[index]
-        var dest: LocalId? = nil
+        var dest: LocalId? = None
         var func = mir_operand_const_int(0)
         var args: [MirOperand] = []
         match inst.kind:
@@ -2469,13 +3106,28 @@ impl MirTextCodegen for MirToLlvm:
         # (LocalId, not Some(LocalId)) — a match then exhausts without
         # matching any arm ("invalid pattern ... object value LocalId").
         # `!= nil` and `??` handle both the wrapped and decayed shapes.
-        val has_dest = dest != nil
+        val has_dest = dest.?
         val dest_id = if has_dest: (dest ?? LocalId(id: 0)).id else: 0
         val dest_name = if has_dest: self.get_local(dest_id) else: ""
         if bootstrap_debug:
             print "[mir-to-llvm] call:dest index={index} present={has_dest}"
+        # Unknown named-call authority must never fall through string emission:
+        # it is this module's compile error, and the call is not emitted.
+        var unproven_callee = false
+        match func.kind:
+            case Const(value, _):
+                match value:
+                    case Str(name):
+                        if func.call_origin == MirCallOrigin.Unknown:
+                            self.llvm_callable_uses_local_symbols(func.call_origin, name)
+                            unproven_callee = true
+                    case _: ()
+            case _: ()
+        if unproven_callee:
+            return
+        val early_tuple_facade = self.llvm_resolved_tuple_facade_for_call_v1(func, args.len())
         val callee_operands: [MirOperand] = [func]
-        var func_name = self.translate_operand_at(callee_operands, 0)
+        var func_name = if early_tuple_facade != "": "@" + early_tuple_facade else: self.translate_call_target_at(callee_operands, 0)
         if bootstrap_debug:
             print "[mir-to-llvm] call:callee index={index}"
         match func.kind:
@@ -2492,18 +3144,46 @@ impl MirTextCodegen for MirToLlvm:
         # (verbatim byte copy, both [u8] layouts). A quoted LLVM name
         # (`@"text.from_bytes"`) is matched too.
         val bare_static_name = bare_name_for_call.replace("\"", "")
-        # Process-run externs: the .spl extern shape
-        # (cmd as one text value, tuple-of-3 result) does not match the C
-        # owners' seed ABI (cmd as ptr+len, SplArray* result with a tagged
-        # int in slot 2) -- calling the seed symbol directly from generated
-        # code misaligns every arg after cmd and misreads the result
-        # (parity case process_run_timeout: SIGSEGV). Route to the
-        # runtime_native.c *_tuple facades, which accept the tagged-or-raw
-        # cmd text value and return the rt_alloc'd 3-word tuple block the
-        # Tuple destructure loads expect (declares registered in
-        # emit_runtime_declarations, asm_constraints_helpers.spl).
-        var call_func_name = if bare_name_for_call == "get_args" or bare_name_for_call == "get_cli_args" or bare_name_for_call == "sys_get_args": "@rt_get_args" elif bare_name_for_call == "env_get": "@rt_env_get" elif bare_name_for_call == "rt_env_get" and args.len() == 1: "@rt_env_get_value" elif bare_name_for_call == "eprint": "@rt_eprint" elif bare_name_for_call == "rt_dict_insert": "@rt_dict_set" elif bare_name_for_call == "rt_process_run": "@rt_process_run_tuple" elif bare_name_for_call == "rt_process_run_bounded": "@rt_process_run_bounded_tuple" elif bare_name_for_call == "rt_process_run_inherit": "@rt_process_run_inherit_value" elif bare_name_for_call == "rt_process_spawn_guarded": "@rt_process_spawn_guarded_value" elif bare_name_for_call == "rt_process_run_timeout": "@rt_process_run_timeout_tuple" elif bare_name_for_call == "rt_process_run_owned_observed_bounded_value": "@rt_process_run_owned_observed_bounded_text" elif bare_static_name == "text.from_char_code": "@rt_char_from_code" elif bare_static_name == "text.from_bytes": "@rt_bytes_to_text" else: func_name
+        # Process-run externs: the MIR text_arg_indices registry already
+        # split cmd into the C owners' (ptr, len) words, but the owners
+        # return a SplArray* with a tagged int in slot 2, which the LLVM
+        # Tuple destructure misreads (parity case process_run_timeout:
+        # SIGSEGV). Route to the runtime_native.c *_tuple facades, which take
+        # the same (ptr, len, args, ...) words and return the rt_alloc'd
+        # 3-word tuple block the destructure loads expect (declares
+        # registered in emit_runtime_declarations, asm_constraints_helpers.spl).
+        # The name/word-count table is runtime_tuple_result_facade
+        # (compiler.mir.text_extern_abi), shared with the Cranelift adapter.
+        # A nonlocal bare `env_get` callee (an importer's view of the @always_inline
+        # config.env_get / std.env.env_get providers) carries ONE boxed text
+        # word -- MIR's (ptr, len) split is keyed on `rt_env_get`, not on the
+        # alias. Route it to the boxed entry rt_env_get_value like a one-word
+        # rt_env_get; the (ptr, len) owner rt_env_get would read the handle as
+        # key_ptr and a stale register as key_len
+        # (always_inline_cross_module_text_extern_abi_dropped_2026-11-06).
+        val imported_env_get = bare_name_for_call == "env_get" and not self.owned_name_has_local.has("env_get")
+        val imported_argv = (bare_name_for_call == "get_args" or bare_name_for_call == "get_cli_args" or bare_name_for_call == "sys_get_args") and not self.owned_name_has_local.has(bare_name_for_call)
+        val imported_eprint = bare_name_for_call == "eprint" and not self.owned_name_has_local.has("eprint")
+        var call_func_name = if imported_argv: "@rt_get_args" elif imported_env_get and args.len() == 1: "@rt_env_get_value" elif imported_env_get: "@rt_env_get" elif bare_name_for_call == "rt_env_get" and args.len() == 1: "@rt_env_get_value" elif imported_eprint: "@rt_eprint" elif bare_name_for_call == "rt_dict_insert": "@rt_dict_set" elif bare_name_for_call == "rt_process_spawn_guarded": "@rt_process_spawn_guarded_value" elif bare_static_name == "text.from_char_code": "@rt_char_from_code" elif bare_static_name == "text.from_bytes": "@rt_bytes_to_text" else: func_name
+        if func.call_origin != MirCallOrigin.Runtime:
+            call_func_name = func_name
+        # Tuple-result owners: runtime, foreign (stdlib extern), and non-local
+        # source-origin externs (cached/imported modules without a local body).
+        val tuple_facade = if early_tuple_facade != "": early_tuple_facade else: llvm_select_runtime_tuple_facade_v1(bare_static_name, args.len(), func.call_origin, self.owned_name_has_local.has(bare_static_name))
+        if tuple_facade != "":
+            call_func_name = "@" + tuple_facade
         call_func_name = self.normalize_call_callee(call_func_name)
+        # Inline typed-bytes LE loads (no per-call registry lock). Only when
+        # the destination is a plain i64; anything else keeps the runtime call.
+        val inline_tb_width = self.inline_typed_bytes_le_supported(call_func_name, args.len())
+        if inline_tb_width > 0 and has_dest and self.valid_llvm_type(self.get_local_type(dest_id)) == "i64":
+            val tb_arr = self.value_as_type(self.translate_operand_at(args, 0), self.get_operand_type_at(args, 0), "i64")
+            val tb_idx = self.value_as_type_signed(self.translate_operand_at(args, 1), self.get_operand_type_at(args, 1), "i64", self.get_operand_unsigned_at(args, 1))
+            self.emit_inline_typed_bytes_le(dest_name, tb_arr, tb_idx, inline_tb_width)
+            self.value_types[dest_name] = "i64"
+            self.unsigned_locals[dest_id] = self.lookup_function_return_unsigned(call_func_name)
+            self.defined_locals[dest_id] = true
+            return
         var arg_parts: [text] = []
         var arg_tys: [text] = []
         var arg_i = 0
@@ -2516,14 +3196,14 @@ impl MirTextCodegen for MirToLlvm:
             var arg_ty = self.valid_llvm_type(maybe_arg_ty)
             match arg.kind:
                 case Copy(local) | Move(local):
-                    if self.bool_locals.has(local.id):
+                    if self.bool_locals.has(self.local_id_value(local)):
                         arg_ty = "i1"
-                    if self.ptr_locals.has(local.id):
+                    if self.ptr_locals.has(self.local_id_value(local)):
                         arg_ty = "ptr"
                 case _:
                     ()
             val param_ty = self.lookup_function_param_type(call_func_name, arg_i)
-            if param_ty != "" and param_ty != nil:
+            if param_ty != "":
                 # print()'s raw-format runtime helpers (lower_bootstrap_print_call
                 # in switch_operators_calls.spl) route every numeric type --
                 # signed AND unsigned -- through the same i64-formatting
@@ -2534,13 +3214,34 @@ impl MirTextCodegen for MirToLlvm:
                 val is_print_raw_fmt = call_func_name == "@rt_raw_i64_to_string" or call_func_name == "@rt_raw_u64_to_string" or call_func_name == "@rt_raw_bool_to_string"
                 if call_func_name == "@rt_enum_new" and arg_i == 2 and arg_ty == "double":
                     arg_val = self.store_field_bits(arg_val, arg_ty, param_ty)
-                elif is_print_raw_fmt:
+                elif is_print_raw_fmt or is_integer_type(arg_ty):
+                    # Declared numeric parameters preserve the source integer
+                    # signedness too, not only raw formatting helpers.
                     arg_val = self.value_as_type_signed(arg_val, arg_ty, param_ty, self.get_operand_unsigned_at(args, arg_i))
                 else:
                     arg_val = self.value_as_type(arg_val, arg_ty, param_ty)
                 arg_ty = self.valid_llvm_type(param_ty)
             elif arg_val == "0":
                 arg_val = self.ret_value_for_type(arg_ty, "0")
+            else:
+                # No declared param (varargs `declare ... @f(...)` for a callee
+                # in another module): arg_ty came from the sticky ptr_locals /
+                # MIR-declared type, which can disagree with the SSA value's
+                # real type (a `[i64]` local defined by `call i64 @g(...)`).
+                # value_as_type reads value_types and emits the inttoptr /
+                # ptrtoint, so the operand is type-consistent with arg_ty.
+                # llc: "'%l26' defined with type 'i64' but expected 'ptr'"
+                # (external_text.spl `unicode_scalar_from_utf8(external_wide_bytes(utf8))`).
+                arg_val = self.value_as_type(arg_val, arg_ty, arg_ty)
+            if arg_ty == "void":
+                # `void` is only valid as a function result. A void-typed call
+                # operand means MIR gave the argument local a Unit type (a
+                # value whose type was lost through a match/if arm that
+                # diverges); printing it made llc reject the whole module with
+                # "void type only allowed for function results" and no name.
+                self.codegen_error("call to {call_func_name} passes a void-typed value as argument {arg_i} ({arg_val}); its MIR local has Unit type")
+                arg_ty = self.native_int()
+                arg_val = "undef"
             arg_parts = arg_parts.push("{arg_ty} {arg_val}")
             arg_tys = arg_tys.push(arg_ty)
             if bootstrap_debug:
@@ -2579,7 +3280,7 @@ impl MirTextCodegen for MirToLlvm:
                 var known_ret_ty = self.lookup_function_return_type(call_func_name)
                 if self.bootstrap_mode_enabled():
                     val bare_func_name = if call_func_name.starts_with("@"): call_func_name[1:] else: call_func_name
-                    if bare_func_name == "get_args" or bare_func_name == "get_cli_args" or bare_func_name == "bootstrap_version" or bare_func_name == "bootstrap_output_from_args":
+                    if imported_argv or bare_func_name == "bootstrap_version" or bare_func_name == "bootstrap_output_from_args":
                         known_ret_ty = "ptr"
                     elif bare_func_name == "rt_get_args":
                         known_ret_ty = "ptr"
@@ -2587,9 +3288,9 @@ impl MirTextCodegen for MirToLlvm:
                         # Bootstrap array element accessor returns a tagged handle
                         # (ptr), matching `declare ptr @rt_array_get(ptr, i64)`.
                         known_ret_ty = "ptr"
-                    elif bare_func_name == "env_get" or bare_func_name == "rt_env_get":
+                    elif imported_env_get or bare_func_name == "rt_env_get" or bare_func_name == "rt_env_get_value":
                         known_ret_ty = "ptr"
-                    elif bare_func_name == "eprint":
+                    elif imported_eprint:
                         known_ret_ty = "void"
                 if known_ret_ty != "" and known_ret_ty != "nil" and known_ret_ty != "void":
                     ret_ty = known_ret_ty
@@ -2603,7 +3304,10 @@ impl MirTextCodegen for MirToLlvm:
                 # A narrower-than-i64 unsigned return (e.g. `fn f() -> u8`)
                 # must be tracked so a later print(f()) zext's instead of
                 # sext's. See is_unsigned_mir_kind / lookup_function_return_unsigned.
-                self.unsigned_locals[dest_id] = self.lookup_function_return_unsigned(call_func_name)
+                # An indirect/local-pointer callee has no named return entry;
+                # retain its typed MIR destination's signedness in that case.
+                if known_ret_ty != "" and known_ret_ty != "nil":
+                    self.unsigned_locals[dest_id] = self.lookup_function_return_unsigned(call_func_name)
                 val call_line = "  {name} = call {ret_ty} {call_sig}{call_func_name}({args_str})"
                 if ir_handle >= 0:
                     val emitted_call = "\n{call_line}"
@@ -2611,7 +3315,10 @@ impl MirTextCodegen for MirToLlvm:
                 else:
                     self.builder.emit(call_line)
         else:
-            val call_line = "  call void {call_sig}{call_func_name}({args_str})"
+            # Discarding a value does not change the callee's return ABI.
+            val declared_return = self.lookup_function_return_type(call_func_name)
+            val ignored_return = if imported_argv or call_func_name == "@rt_get_args": "ptr" elif declared_return == "" or declared_return == "nil": "void" else: self.valid_llvm_type(declared_return)
+            val call_line = "  call {ignored_return} {call_sig}{call_func_name}({args_str})"
             if ir_handle >= 0:
                 val emitted_call = "\n{call_line}"
                 _sffi_string_builder_push(ir_handle, emitted_call)
@@ -2651,16 +3358,23 @@ impl MirTextCodegen for MirToLlvm:
     me translate_operand_at(operands: [MirOperand], index: i64) -> text:
         val operand = operands[index]
         match operand.kind:
-            case Copy(local) | Move(local):
-                self.local_value_text(local.id)
+            # Split arms + local_id_value (translate_operand's form): the or-pattern
+            # binding read a packed word as LocalId.id on the stage-native lane, so every
+            # struct field stored the same undefined %l<0x1400000004> (F3 repro, Q_b2).
+            case Copy(local):
+                self.local_value_text(self.local_id_value(local))
+            case Move(local):
+                self.local_value_text(self.local_id_value(local))
             case Const(const_val, const_ty):
                 match const_ty.kind:
                     case FuncPtr(signature):
                         match const_val:
                             case Str(name):
-                                val resolved = self.llvm_function_symbol_name(name)
-                                val return_types: [MirType] = [signature.return_type]
-                                self.remember_function_return_type(resolved, self.llvm_type_text_at(return_types, 0))
+                                val resolved = if self.llvm_callable_uses_local_symbols(operand.call_origin, name): self.llvm_function_symbol_name(name) else: name
+                                if self.lookup_function_return_type(resolved) == "" and signature.return_type.?:
+                                    val return_types: [MirType] = [signature.return_type]
+                                    self.remember_function_return_type(resolved, self.llvm_type_text_at(return_types, 0))
+                                    self.remember_function_return_unsigned(resolved, self.is_unsigned_mir_kind(signature.return_type.kind))
                                 self.remember_external_call_signature(resolved, signature)
                                 self.unknown_func_decls[resolved] = true
                                 "@{resolved}"
@@ -2685,7 +3399,7 @@ impl MirTextCodegen for MirToLlvm:
                             val str_len = escaped_string_byte_len(v) + 1
                             val nit = self.native_int()
                             "getelementptr inbounds ([{str_len} x i8], ptr {global_name}, {nit} 0, {nit} 0)"
-                    case Zero: if self.llvm_type_text(const_ty) == "ptr": "null" else: "0"
+                    case MirConstValue.Zero: if self.llvm_type_text(const_ty) == "ptr": "null" else: "0"
                     case Array(elements): "zeroinitializer  ; array ({elements.len()} elements)"
                     case Tuple(elements): "zeroinitializer  ; tuple ({elements.len()} elements)"
                     case Struct(_): "zeroinitializer  ; struct"
@@ -2694,7 +3408,8 @@ impl MirTextCodegen for MirToLlvm:
     me get_operand_type_at(operands: [MirOperand], index: i64) -> text:
         val operand = operands[index]
         match operand.kind:
-            case Copy(local) | Move(local): self.get_local_type(local.id)
+            case Copy(local): self.get_local_type(self.local_id_value(local))
+            case Move(local): self.get_local_type(self.local_id_value(local))
             case Const(_, const_ty):
                 val types: [MirType] = [const_ty]
                 self.llvm_type_text_at(types, 0)
@@ -2704,7 +3419,7 @@ impl MirTextCodegen for MirToLlvm:
         val operand = operands[index]
         match operand.kind:
             case Copy(local) | Move(local):
-                if self.unsigned_locals.contains_key(local.id): self.unsigned_locals[local.id] else: false
+                if self.unsigned_locals.contains_key(self.local_id_value(local)): self.unsigned_locals[self.local_id_value(local)] else: false
             case Const(_, type_):
                 match type_.kind:
                     case MirTypeKind.U8 | MirTypeKind.U16 | MirTypeKind.U32 | MirTypeKind.U64: true
@@ -2724,7 +3439,7 @@ impl MirTextCodegen for MirToLlvm:
                 match const_val:
                     case Int(word):
                         return self.translate_integer_constant_operand(word, self.valid_llvm_type(self.llvm_type_text(const_ty)))
-                    case Zero:
+                    case MirConstValue.Zero:
                         if self.llvm_type_text(const_ty) == "ptr": return "null"
                     case _: ()
                 # For function references, return @name directly. An
@@ -2736,9 +3451,10 @@ impl MirTextCodegen for MirToLlvm:
                     case FuncPtr(signature):
                         match const_val:
                             case Str(name):
-                                val resolved = self.llvm_function_symbol_name(name)
-                                if signature.return_type != nil:
+                                val resolved = if self.llvm_callable_uses_local_symbols(operand.call_origin, name): self.llvm_function_symbol_name(name) else: name
+                                if self.lookup_function_return_type(resolved) == "" and signature.return_type.?:
                                     self.remember_function_return_type(resolved, self.llvm_type_text(signature.return_type))
+                                    self.remember_function_return_unsigned(resolved, self.is_unsigned_mir_kind(signature.return_type.kind))
                                 self.remember_external_call_signature(resolved, signature)
                                 self.unknown_func_decls[resolved] = true
                                 "@{resolved}"
@@ -2793,7 +3509,7 @@ impl MirTextCodegen for MirToLlvm:
                 val str_len = v.len() + 1
                 val nit = self.native_int()
                 "getelementptr inbounds ([{str_len} x i8], ptr {global_name}, {nit} 0, {nit} 0)"
-            case Zero: "0"
+            case MirConstValue.Zero: "0"
             case Array(elements):
                 val count = elements.len()
                 "zeroinitializer  ; array ({count} elements)"
@@ -2802,6 +3518,13 @@ impl MirTextCodegen for MirToLlvm:
                 "zeroinitializer  ; tuple ({count} elements)"
             case Struct(fields):
                 "zeroinitializer  ; struct"
+            case _:
+                # Defensive fail-closed arm: a garbage MirConstValue discriminant
+                # names this site and poisons the module via codegen_error
+                # instead of emitting an unsourced initializer word (candidate AV
+                # site phase2_candidate_native_smokes_access_violation_2026_11_02).
+                self.codegen_error("E-BACKEND-LLVM-CONST-GARBAGE: MirConstValue discriminant outside the defined variants reached translate_const_value")
+                "0  ; garbage const"
 
     fn get_local(id: i64) -> text:
         """Get LLVM local name for MIR local."""
@@ -2846,7 +3569,7 @@ impl MirTextCodegen for MirToLlvm:
         # See doc/07_guide/language/dict_native_pitfalls.md
         if self.local_types.contains_key(id):
             val ty = self.local_types[id]
-            if ty == nil or ty == "nil":
+            if ty == "nil":
                 self.native_int()
             else:
                 ty
@@ -2865,7 +3588,7 @@ impl MirTextCodegen for MirToLlvm:
         val direct = self.function_return_types.get(func_name)
         if direct.?:
             val ty = direct.unwrap()
-            if ty == nil or ty == "nil":
+            if ty == "nil":
                 return ""
             return ty
         if func_name.starts_with("@"):
@@ -2873,7 +3596,7 @@ impl MirTextCodegen for MirToLlvm:
             val bare_hit = self.function_return_types.get(bare)
             if bare_hit.?:
                 val bare_ty = bare_hit.unwrap()
-                if bare_ty == nil or bare_ty == "nil":
+                if bare_ty == "nil":
                     return ""
                 return bare_ty
         val bootstrap_index = self.bootstrap_llvm_function_index_for_name(func_name)
@@ -2892,11 +3615,13 @@ impl MirTextCodegen for MirToLlvm:
         if func_name.starts_with("@"):
             val bare = func_name[1:]
             val bare_hit = self.function_param_types.get(bare)
-            if bare_hit.?:
-                val bare_param_tys = bare_hit.unwrap()
-                if index < bare_param_tys.len():
-                    return bare_param_tys[index]
-                return ""
+            match bare_hit:
+                case Some(bare_param_tys):
+                    if index < bare_param_tys.len():
+                        return bare_param_tys[index]
+                    return ""
+                case _:
+                    pass
         val bootstrap_index = self.bootstrap_llvm_function_index_for_name(func_name)
         if bootstrap_index >= 0 and index >= 0 and index < bootstrap_mir_function_param_count_at(bootstrap_index):
             return bootstrap_llvm_static_type_text(bootstrap_mir_function_param_type_tag_at(bootstrap_index, index), self.native_int_type)
@@ -2913,8 +3638,11 @@ impl MirTextCodegen for MirToLlvm:
         if func_name.starts_with("@"):
             val bare = func_name[1:]
             val bare_hit = self.function_param_types.get(bare)
-            if bare_hit.?:
-                return bare_hit.unwrap().len()
+            match bare_hit:
+                case Some(bare_tys):
+                    return bare_tys.len()
+                case _:
+                    pass
         val bootstrap_index = self.bootstrap_llvm_function_index_for_name(func_name)
         if bootstrap_index >= 0:
             return bootstrap_mir_function_param_count_at(bootstrap_index)
@@ -2971,6 +3699,7 @@ impl MirTextCodegen for MirToLlvm:
         # Same fact, keyed by the emitted name -- the lookup that actually
         # round-trips. See alloca_elem_type_for_value.
         self.alloca_elem_types_by_name[dest_name] = llvm_ty
+        self.remember_gep_element_type(dest_name, llvm_ty)
         self.alloca_elem_unsigned[dest_id] = self.is_unsigned_mir_kind(ty.kind)
         self.builder.emit_alloca(dest_name, llvm_ty)
 
@@ -3056,7 +3785,13 @@ impl MirTextCodegen for MirToLlvm:
         val store_ty_raw = if slot_elem != "": slot_elem else: self.valid_llvm_type(self.get_operand_type(value))
         # See translate_alloc: void spill slots are materialized as i64.
         val store_ty = if store_ty_raw == "void": "i64" else: store_ty_raw
-        val value_val = self.value_as_type(raw_value_val, self.get_operand_type(value), store_ty)
+        # SSA spills can retain an inferred i64 slot while their defining
+        # value has since resolved to U8. Widen using the value's signedness:
+        # the signed-default helper turns high-bit octets into negative ints
+        # before the load, even when Copy/Move preserved the source metadata.
+        # Keep noninteger slot conversion behavior unchanged in this repair.
+        val source_unsigned = is_integer_type(store_ty) and self.get_operand_unsigned(value)
+        val value_val = self.value_as_type_signed(raw_value_val, self.get_operand_type(value), store_ty, source_unsigned)
         self.builder.emit_store(store_ty, value_val, ptr_val)
 
     # mutglobal lane (module-level `var` mutation storage, see
@@ -3095,11 +3830,11 @@ impl MirTextCodegen for MirToLlvm:
             val g_key = self.global_static_key(symbol_id)
             if self.global_static_names.has(g_key):
                 val recorded_name = self.global_static_names[g_key]
-                if recorded_name != nil and recorded_name != "":
+                if recorded_name != "":
                     g_name = recorded_name
             if self.global_static_types.has(g_key):
                 val recorded_type = self.global_static_types[g_key]
-                if recorded_type != nil and recorded_type != "" and recorded_type != "nil":
+                if recorded_type != "" and recorded_type != "nil":
                     g_ty = recorded_type
         val dest_name = "%l{dest_id}"
         self.local_types[dest_id] = g_ty
@@ -3120,7 +3855,7 @@ impl MirTextCodegen for MirToLlvm:
         val g_name = self.global_static_names.get(g_key) ?? "@g_undeclared_{symbol.id}"
         val g_ty = self.global_static_types.get(g_key) ?? self.native_int_type
         val raw_value_val = self.translate_operand(value)
-        val value_val = self.value_as_type(raw_value_val, self.get_operand_type(value), g_ty)
+        val value_val = self.value_as_type_signed(raw_value_val, self.get_operand_type(value), g_ty, self.get_operand_unsigned(value))
         self.builder.emit_store(g_ty, value_val, g_name)
 
     me translate_global_addr_ids(dest_id: i64, symbol_id: i64, module_index: i64, ir_handle: i64):
@@ -3138,7 +3873,7 @@ impl MirTextCodegen for MirToLlvm:
             val g_key = self.global_static_key(symbol_id)
             if self.global_static_names.has(g_key):
                 val recorded_name = self.global_static_names[g_key]
-                if recorded_name != nil and recorded_name != "":
+                if recorded_name != "":
                     g_name = recorded_name
         if g_name == "":
             self.emit_unsupported_panic(
@@ -3173,18 +3908,19 @@ impl MirTextCodegen for MirToLlvm:
             val g_key = self.global_static_key(symbol_id)
             if self.global_static_names.has(g_key):
                 val recorded_name = self.global_static_names[g_key]
-                if recorded_name != nil and recorded_name != "":
+                if recorded_name != "":
                     g_name = recorded_name
             if self.global_static_types.has(g_key):
                 val recorded_type = self.global_static_types[g_key]
-                if recorded_type != nil and recorded_type != "" and recorded_type != "nil":
+                if recorded_type != "" and recorded_type != "nil":
                     g_ty = recorded_type
         var value_text = "0"
         if value_kind == 1 or value_kind == 2:
             val local_id = inst.bootstrap_store_global_value_local_id()
             value_text = "%l{local_id}"
             # Match the regular StoreGlobal path using the actual SSA type.
-            value_text = self.value_as_type(value_text, self.get_local_type(local_id), g_ty)
+            val source_unsigned = if self.unsigned_locals.contains_key(local_id): self.unsigned_locals[local_id] else: false
+            value_text = self.value_as_type_signed(value_text, self.get_local_type(local_id), g_ty, source_unsigned)
         elif value_kind == 3:
             val const_kind = inst.bootstrap_store_global_const_kind()
             val const_text = inst.bootstrap_store_global_const_scalar_text()
@@ -3229,6 +3965,116 @@ impl MirTextCodegen for MirToLlvm:
         if self.current_bootstrap_module >= 0 and not lookup_name.contains("."):
             return bootstrap_llvm_module_local_function_index(lookup_name, self.current_bootstrap_module)
         -1
+
+    # === Overrides: aggregates ===
+
+    me translate_aggregate(dest: LocalId, kind: AggregateKind, operands: [MirOperand]):
+        """Trait-named entry point. Delegates to the uniquely-named impl below.
+
+        Keep this delegation: `translate_aggregate` is ALSO declared on the
+        MirTextCodegen trait (common/mir_text_codegen.spl:190) with a body of
+        `()` -- a silent no-op. On the staged lane a call through the trait name
+        reaches that default instead of this override, so the instruction is
+        consumed and NOTHING is emitted, with no diagnostic anywhere. Measured:
+        the Aggregate arrives at backend dispatch, the discriminant matches and
+        collides with nothing, the call "succeeds", and yet no probe inside this
+        method fires and the emitted module skips the aggregate's dest entirely
+        (%l1 -> %l4) while the Copy consuming it IS emitted -> llc "use of
+        undefined value".
+        """
+        self.llvm_emit_aggregate_impl(dest, kind, operands)
+
+    # === Overrides: unsupported async/actor lowering ===
+
+    me translate_create_promise(dest: LocalId, body: LocalId, result_type: MirType):
+        self.emit_unsupported_panic("LLVM backend does not support async CreatePromise lowering yet")
+
+    me translate_await(dest: LocalId, promise: MirOperand):
+        self.emit_unsupported_panic("LLVM backend does not support async Await lowering yet")
+
+    me translate_yield(value: MirOperand?):
+        self.emit_unsupported_panic("LLVM backend does not support async Yield lowering yet")
+
+    me translate_spawn(dest: LocalId, handler: MirOperand, args: [MirOperand]):
+        self.emit_unsupported_panic("LLVM backend does not support async Spawn lowering yet")
+
+    me translate_send(target: MirOperand, message: MirOperand):
+        self.emit_unsupported_panic("LLVM backend does not support actor Send lowering yet")
+
+    me translate_receive(dest: LocalId, timeout: MirOperand?):
+        self.emit_unsupported_panic("LLVM backend does not support actor Receive lowering yet")
+
+    # === Overrides: unsupported GPU lowering ===
+
+    me translate_gpu_kernel_def(name: text):
+        self.emit_unsupported_panic("LLVM text backend does not support GPU kernel definitions")
+
+    me translate_gpu_launch(args: [text]):
+        self.emit_unsupported_panic("LLVM text backend does not support GPU launches")
+
+    me translate_gpu_global_id(dest: LocalId, dim: i64):
+        self.emit_unsupported_panic("LLVM text backend does not support GpuGlobalId")
+
+    me translate_gpu_local_id(dest: LocalId, dim: i64):
+        self.emit_unsupported_panic("LLVM text backend does not support GpuLocalId")
+
+    me translate_gpu_block_id(dest: LocalId, dim: i64):
+        self.emit_unsupported_panic("LLVM text backend does not support GpuBlockId")
+
+    me translate_gpu_block_dim(dest: LocalId, dim: i64):
+        self.emit_unsupported_panic("LLVM text backend does not support GpuBlockDim")
+
+    me translate_gpu_grid_dim(dest: LocalId, dim: i64):
+        self.emit_unsupported_panic("LLVM text backend does not support GpuGridDim")
+
+    me translate_gpu_barrier(scope: GpuBarrierScope):
+        self.emit_unsupported_panic("LLVM text backend does not support GpuBarrier")
+
+    me translate_gpu_mem_fence(scope: GpuMemoryScope):
+        self.emit_unsupported_panic("LLVM text backend does not support GpuMemFence")
+
+    me translate_gpu_shared_alloc(dest: LocalId, type_: MirType, size: i64):
+        self.emit_unsupported_panic("LLVM text backend does not support GpuSharedAlloc")
+
+    me translate_gpu_atomic_op(dest: LocalId, op: GpuAtomicOpKind, ptr: MirOperand, value: MirOperand):
+        self.emit_unsupported_panic("LLVM text backend does not support GpuAtomicOp")
+
+    me translate_gpu_atomic_cas(dest: LocalId, ptr: MirOperand, expected: MirOperand, desired: MirOperand):
+        self.emit_unsupported_panic("LLVM text backend does not support GpuAtomicCas")
+
+    # === Overrides: unsupported VHDL lowering ===
+
+    me translate_vhdl_process(kind: VhdlProcessKind, body_block: BlockId):
+        self.emit_unsupported_panic("LLVM backend does not support VHDL process lowering")
+
+    me translate_vhdl_signal_assign(target: MirOperand, value: MirOperand, delay_ns: i64?):
+        self.emit_unsupported_panic("LLVM backend does not support VHDL signal assignment lowering")
+
+    me translate_vhdl_var_assign(target: MirOperand, value: MirOperand):
+        self.emit_unsupported_panic("LLVM backend does not support VHDL variable assignment lowering")
+
+    me translate_vhdl_port_map(entity: text, instance: text, connections: [(text, MirOperand)]):
+        self.emit_unsupported_panic("LLVM backend does not support VHDL port maps")
+
+    me translate_vhdl_resize(dest: LocalId, operand: MirOperand, new_width: i64, signed: bool):
+        self.emit_unsupported_panic("LLVM backend does not support VHDL resize")
+
+    me translate_vhdl_slice(dest: LocalId, signal: MirOperand, hi: i64, lo: i64):
+        self.emit_unsupported_panic("LLVM backend does not support VHDL slice")
+
+    me translate_vhdl_concat(dest: LocalId, parts: [MirOperand]):
+        self.emit_unsupported_panic("LLVM backend does not support VHDL concat")
+
+    # === Overrides: unsupported SIMD lowering ===
+
+    me translate_simd_binop(dest: LocalId, a: MirOperand, b: MirOperand, op_name: text):
+        self.emit_unsupported_panic("LLVM backend does not support SIMD operation {op_name}")
+
+    me translate_simd_fma(dest: LocalId, a: MirOperand, b: MirOperand, c: MirOperand, op_name: text):
+        self.emit_unsupported_panic("LLVM backend does not support SIMD operation {op_name}")
+
+    me translate_simd_horizontal(dest: LocalId, a: MirOperand, op_name: text):
+        self.emit_unsupported_panic("LLVM backend does not support SIMD operation {op_name}")
 
 fn bootstrap_llvm_static_index(module_index: i64, symbol_id: i64) -> i64:
     if module_index < 0:

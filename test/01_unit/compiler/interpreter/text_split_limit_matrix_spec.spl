@@ -1,0 +1,112 @@
+use std.spec.{describe, it, expect}
+
+# Prevention matrix for bug text-split-limit-ignored (2026-07-20):
+# `.split(sep, N)` must keep at most N pieces, the final piece holding the
+# unsplit remainder (splitn semantics); N <= 0 means unlimited. Bounded
+# empty-separator cases stay within the character count: the unbounded /
+# over-count empty-separator split is a documented cross-engine divergence
+# (see doc/08_tracking/bug/text_split_limit_ignored_2026-07-20.md) and is
+# intentionally not pinned here.
+describe "text split limit matrix":
+    it "honors a literal two-part limit":
+        val parts = "a:b:c".split(":", 2)
+
+        expect(parts.len()).to_equal(2)
+        expect(parts[0]).to_equal("a")
+        expect(parts[1]).to_equal("b:c")
+
+    it "honors a variable-held limit":
+        val limit = 2
+        val parts = "a:b:c".split(":", limit)
+
+        expect(parts.len()).to_equal(2)
+        expect(parts[0]).to_equal("a")
+        expect(parts[1]).to_equal("b:c")
+
+    it "keeps the whole value at limit one":
+        val parts = "a:b:c".split(":", 1)
+
+        expect(parts.len()).to_equal(1)
+        expect(parts[0]).to_equal("a:b:c")
+
+    it "treats limit zero as unlimited":
+        val parts = "a:b:c".split(":", 0)
+
+        expect(parts.len()).to_equal(3)
+        expect(parts[0]).to_equal("a")
+        expect(parts[1]).to_equal("b")
+        expect(parts[2]).to_equal("c")
+
+    it "treats a negative limit as unlimited":
+        val limit = 0 - 3
+        val parts = "a:b:c".split(":", limit)
+
+        expect(parts.len()).to_equal(3)
+        expect(parts[0]).to_equal("a")
+        expect(parts[1]).to_equal("b")
+        expect(parts[2]).to_equal("c")
+
+    it "returns every piece when the limit exceeds the piece count":
+        val parts = "a:b:c".split(":", 10)
+
+        expect(parts.len()).to_equal(3)
+        expect(parts[0]).to_equal("a")
+        expect(parts[1]).to_equal("b")
+        expect(parts[2]).to_equal("c")
+
+    it "holds the unsplit remainder on multi-separator input":
+        val parts = "a:b:c:d:e".split(":", 3)
+
+        expect(parts.len()).to_equal(3)
+        expect(parts[0]).to_equal("a")
+        expect(parts[1]).to_equal("b")
+        expect(parts[2]).to_equal("c:d:e")
+
+    it "keeps a trailing separator inside the remainder":
+        val parts = "a:b:".split(":", 2)
+
+        expect(parts.len()).to_equal(2)
+        expect(parts[0]).to_equal("a")
+        expect(parts[1]).to_equal("b:")
+
+    it "keeps the trailing empty piece under a large limit":
+        val parts = "a:b:".split(":", 5)
+
+        expect(parts.len()).to_equal(3)
+        expect(parts[0]).to_equal("a")
+        expect(parts[1]).to_equal("b")
+        expect(parts[2]).to_equal("")
+
+    it "preserves a value without the requested separator":
+        val parts = "abc".split(":", 2)
+
+        expect(parts.len()).to_equal(1)
+        expect(parts[0]).to_equal("abc")
+
+    it "splits an empty string into one empty piece":
+        val parts = "".split(":", 2)
+
+        expect(parts.len()).to_equal(1)
+        expect(parts[0]).to_equal("")
+
+    it "honors the limit with a multibyte separator":
+        val parts = "a✓b✓c".split("✓", 2)
+
+        expect(parts.len()).to_equal(2)
+        expect(parts[0]).to_equal("a")
+        expect(parts[1]).to_equal("b✓c")
+
+    it "bounds an empty separator by codepoints on multibyte text":
+        val parts = "é✓日".split("", 2)
+
+        expect(parts.len()).to_equal(2)
+        expect(parts[0]).to_equal("é")
+        expect(parts[1]).to_equal("✓日")
+
+    it "bounds an empty separator at exactly the character count":
+        val parts = "abc".split("", 3)
+
+        expect(parts.len()).to_equal(3)
+        expect(parts[0]).to_equal("a")
+        expect(parts[1]).to_equal("b")
+        expect(parts[2]).to_equal("c")

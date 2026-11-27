@@ -1,0 +1,500 @@
+# milestone_0030 D1/D2: controller-side issuance of ONE signed grant and a policy-driven (non-interactive)
+# approval for the pre-authorized remote build/test class, issue-then-verify against the controller's installed
+# snapshot. Issuer and approver seeds are OpenSSH Ed25519 private files in the protected identity store (dir 0700,
+# file 0600, owner uid, no links: host_identity_store_linux_v1); each signature reads its file, signs through the
+# domain-pinned sign-only entry point and wipes the bytes. No seed, key file, path or signer error detail is logged.
+use app.orchestrator.validation.OrchestratorValidationReplyV1
+use app.orchestrator.host_identity_command_v1.{host_identity_failure_v1, host_identity_finish_v1,
+    host_identity_open_failure_v1, host_identity_store_error_v1}
+use std.common.build_manager.contracts.builder_identifier_valid_v1
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.contracts.orchestration.host_control_operation_v6.{HostControlSubRequestV6, host_control_sub_encode_v6}
+use std.common.contracts.orchestration.host_execute_associated_v3.host_execute_associated_decode_v3
+use std.common.contracts.orchestration.host_execution_association_v3.host_execution_association_encode_v3
+use std.common.task_runner.distributed_operation_journal_v2.{distributed_operation_journal_read_v3,
+    distributed_operation_journal_read_required_v3, distributed_operation_journal_publish_v3}
+use std.nogc_sync_mut.io.local_authority_policy_v1.host_local_context_v1
+use std.nogc_sync_mut.orchestration.controller_local_root_v3.{ControllerLocalRootV3,
+    controller_local_root_open_v3, controller_local_root_close_v3}
+use std.nogc_sync_mut.orchestration.controller_dispatch_owner_v3.{ControllerDispatchOwnedTurnV3,
+    controller_dispatch_host_action_begin_v3, controller_dispatch_host_action_send_v3,
+    controller_dispatch_remote_execute_key_v3, controller_dispatch_step_v3, controller_dispatch_close_v3}
+use std.nogc_sync_mut.orchestration.host_linux_service_agent_v4.host_agent_invoke_request_decode_v4
+use std.nogc_sync_mut.orchestration.host_agent_attachment_v4.{HostAgentAttachRequestV4, HostAgentDetachRequestV4,
+    host_agent_attach_request_encode_v4, host_agent_detach_request_encode_v4}
+use std.sosix.time.{sosix_sleep_ms, sosix_time_now_monotonic_ms}
+use app.orchestrator.controller_agent_pane_author_v4.{ControllerAgentPaneAttachInputsV4,
+    controller_agent_pane_attach_plan_v4, controller_agent_pane_detach_operation_v4}
+use std.nogc_sync_mut.sosix.host.file_read_regular_no_follow_bounded
+use std.common.contracts.distributed_control_v2.{ExecutionGrantV2, OperationEnvelopeV2, ExecutionEnvironmentV2}
+use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
+use std.common.contracts.distributed_control_codec_v2.{distributed_grant_digest_v2, distributed_encode_operation_v2}
+use std.nogc_sync_mut.daemon_sdk.distributed_grant_verification_v2.{DistributedAuthorityKeyV2,
+    distributed_grant_signature_message_v2, distributed_approval_signature_message_v2}
+use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.{distributed_authority_snapshot_key_v2,
+    distributed_verify_grant_approval_from_snapshot_v2}
+use std.nogc_sync_mut.orchestration.controller_dispatch_config_v1.{ControllerDispatchContextV1,
+    controller_dispatch_context_load_v1, controller_dispatch_grant_clock_v1}
+use std.nogc_sync_mut.daemon_sdk.remote_build_task_class_v1.remote_build_task_class_v1
+use std.nogc_sync_mut.io.host_identity_store_v1.{host_identity_store_open_v1, host_identity_store_read_v1,
+    host_identity_store_close_v1, host_identity_store_publish_v1, HostIdentityStorePublicationV1}
+use app.orchestrator.host_identity_key_v1.{host_identity_private_sign_grant_v1, host_identity_private_sign_approval_v1}
+use std.common.contracts.orchestration.host_linux_service_enrollment_v3.{
+    HostLinuxServiceEnrollmentBindingV3, host_linux_service_enrollment_digest_v3, host_linux_service_enrollment_decode_v3,
+    host_linux_service_enrollment_encode_v3}
+use std.nogc_sync_mut.io.host_enrollment_v1.{HostEnrollmentCredentialV1, host_enrollment_credential_encode_v1}
+use std.common.crypto.sha256.sha256_text
+use std.common.crypto.secure_memory.secure_zero_u8_slots
+
+pub struct ControllerIssuedAuthorityV1:
+    signed: DistributedSignedGrantV2
+    approval: DistributedSignedApprovalV2
+
+pub fn controller_authority_key_leaf_v1(key: DistributedAuthorityKeyV2) -> text:
+    # Same bytes as the former `+` chain. Written as a method call with an argument on purpose: the frozen Phase 2
+    # compiler carries hir_lambda_param_hint_outlives_module_scope_2026-11-14, so the first one-parameter lambda of a
+    # module (`\key:` below) takes the previous module's reclaimed hint as its parameter type unless a method call
+    # with an argument is lowered before it in this module (E-HIR-VISIT-UNHANDLED at walk_hir_type).
+    val parts: [text] = ["simple-controller-authority-key-v1", key.role, key.identity, str(key.revision)]
+    sha256_text(parts.join("\n")) + ".key"
+
+# Production key reader: one bounded read of the role key's leaf from the protected store, which is closed
+# before the bytes are used. Store errors are fixed codes.
+fn controller_authority_store_read_v1(store_root: text, key: DistributedAuthorityKeyV2) -> Result<[u8], text>:
+    val opened = host_identity_store_open_v1(store_root)
+    if opened.owner.is_none(): return Err("controller-key-store-unavailable")
+    # Read only through a cleanly opened store; a refused open is closed and nothing is read.
+    if not opened.ready or opened.cleanup_pending or opened.error != "":
+        host_identity_store_close_v1(opened.owner.unwrap())
+        return Err("controller-key-store-unavailable")
+    var read = host_identity_store_read_v1(opened.owner.unwrap(), controller_authority_key_leaf_v1(key), 4096)
+    val closed = host_identity_store_close_v1(read.owner)
+    if read.bytes.is_none(): return Err("controller-key-unavailable")
+    # milestone_0051 KEYWIPE-02: `held` is taken out of the turn ONCE and the turn's Option is released, so `held` (a
+    # `var` place) is the only holder of the bytes: the refusal wipe reaches them in place instead of forking a copy
+    # while `read.bytes` keeps the original. On success `held` is returned (the caller wipes it after signing).
+    var held = read.bytes.unwrap()
+    read.bytes = None
+    if read.error != "" or read.absent or read.cleanup_pending or not closed.completed or closed.error != "":
+        if held.len() > 0 and not secure_zero_u8_slots(held).verified(): return Err("controller-key-buffer-wipe")
+        return Err("controller-key-unavailable")
+    Ok(held)
+
+pub fn controller_authority_store_reader_v1(store_root: text) -> fn(DistributedAuthorityKeyV2) -> Result<[u8], text>:
+    \key: controller_authority_store_read_v1(store_root, key)
+
+fn controller_authority_sign_v1(read_key: fn(DistributedAuthorityKeyV2) -> Result<[u8], text>,
+        key: DistributedAuthorityKeyV2, message: [u8], grant_domain: bool) -> Result<[u8], text>:
+    var file = read_key(key)?
+    val signed = if grant_domain: host_identity_private_sign_grant_v1(file, key.public_key, message)
+        else: host_identity_private_sign_approval_v1(file, key.public_key, message)
+    val wipe = secure_zero_u8_slots(file)
+    if not wipe.verified(): return Err("controller-key-buffer-wipe")
+    signed
+
+# Issue-then-verify. Nothing is returned unless the pair verifies from the same installed snapshot the host uses,
+# at `now` (the controller grant clock, controller_dispatch_grant_clock_v1), under issuer == controller.
+pub fn controller_authority_issue_v1(context: ControllerDispatchContextV1,
+        read_key: fn(DistributedAuthorityKeyV2) -> Result<[u8], text>, issuer_id: text, approver_id: text,
+        grant: ExecutionGrantV2, request: OperationEnvelopeV2, requested: ExecutionEnvironmentV2,
+        approval_expires_at: i64, now: i64) -> Result<ControllerIssuedAuthorityV1, text>:
+    if now <= 0: return Err("dispatch-wall-clock-unavailable")
+    if issuer_id != context.config.controller_id: return Err("controller-issuer-not-controller")
+    val snapshot = context.policy.snapshot
+    val issuer = distributed_authority_snapshot_key_v2(snapshot, "grant-issuer", issuer_id)?
+    val approver = distributed_authority_snapshot_key_v2(snapshot, "human-approver", approver_id)?
+    # D1 class (shared with the Host remote-build route); refused before any key is read.
+    if remote_build_task_class_v1(approver, grant, request, requested, approval_expires_at, now) != "":
+        return Err("controller-approval-outside-task-class")
+    controller_authority_sign_pair_v1(context, read_key, issuer, approver, grant, request, approval_expires_at, now)
+
+# The shared issue-then-verify tail of every class: nothing is returned unless the pair verifies from the installed
+# snapshot at `now`. The class predicate already ran; the issuer is the configured controller's grant-issuer key.
+fn controller_authority_sign_pair_v1(context: ControllerDispatchContextV1,
+        read_key: fn(DistributedAuthorityKeyV2) -> Result<[u8], text>, issuer: DistributedAuthorityKeyV2,
+        approver: DistributedAuthorityKeyV2, grant: ExecutionGrantV2, request: OperationEnvelopeV2,
+        approval_expires_at: i64, now: i64) -> Result<ControllerIssuedAuthorityV1, text>:
+    val snapshot = context.policy.snapshot
+    val issuer_id = issuer.identity
+    val approver_id = approver.identity
+    var signed = DistributedSignedGrantV2(grant: grant, issuer_id: issuer_id, key_revision: issuer.revision, signature: [])
+    var approval = DistributedSignedApprovalV2(approver_id: approver_id, key_revision: approver.revision,
+        grant_digest: distributed_grant_digest_v2(grant)?, request_digest: sha256_text(distributed_encode_operation_v2(request)?),
+        policy_revision: snapshot.policy_revision, session_generation: context.policy.session_generation,
+        expires_at: approval_expires_at, signature: [])
+    # Refuse BEFORE any key is read: with empty signatures the verifier runs every non-signature check (key
+    # revocation/expiry/scope for both roles, role separation, request-vs-grant) and can only end at SIGNATURE_INVALID.
+    match distributed_verify_grant_approval_from_snapshot_v2(snapshot, signed, approval, request, now,
+        snapshot.generation, snapshot.policy_revision, snapshot.revocation_epoch, context.policy.session_generation):
+        case Err(code):
+            if code != "SIGNATURE_INVALID": return Err(code)
+        case Ok(_): return Err("controller-unsigned-pair-accepted")
+    # Both messages (and their metadata validation) before the first signature.
+    val grant_message = distributed_grant_signature_message_v2(signed)?
+    val approval_message = distributed_approval_signature_message_v2(approval)?
+    signed.signature = controller_authority_sign_v1(read_key, issuer, grant_message, true)?
+    approval.signature = controller_authority_sign_v1(read_key, approver, approval_message, false)?
+    distributed_verify_grant_approval_from_snapshot_v2(snapshot, signed, approval, request, now,
+        snapshot.generation, snapshot.policy_revision, snapshot.revocation_epoch, context.policy.session_generation)?
+    Ok(ControllerIssuedAuthorityV1(signed: signed, approval: approval))
+
+# milestone_0046 (owner decision 2026-11-19 "Both"): controller-signed Host service actions. The allow-list is exactly the
+# operator abandons; a policy key must also be enrolled for the kind (installed policy, AUTHORITY_OPERATION_DENIED
+# otherwise). Same issuer (controller grant-issuer) and approver (human-approver) keys and store as the remote-build
+# class: no new key, no new custody. milestone_0045: `remote-run-abandon` is verified by the CONTROLLER's own journal
+# edit (remote_run_abandon_v1.spl), never sent to a Host; a pair of one kind can never verify as another.
+pub val CONTROLLER_HOST_ACTION_KINDS_V1: [text] = ["helper-abandon", "service-handoff-abandon", "remote-run-abandon",
+    "retention-release"]
+val CONTROLLER_HOST_ACTION_MAX_TTL_MS_V1: i64 = 86400000
+
+pub struct ControllerHostActionAuthorityV1:
+    operation: OperationEnvelopeV2
+    authority: ControllerIssuedAuthorityV1
+
+# An abandon runs no workload: the environment digest only binds the kind (grant and request carry the same value) and
+# the budget is the minimum the verifier accepts (1 byte, 1 ms).
+pub fn controller_host_action_environment_digest_v1(kind: text) -> text:
+    sha256_text("simple-host-service-action-v1\n" + kind)
+
+# The host-action class: one allow-listed kind on both grant and request, an unrevoked human-approver key whose scope and
+# operations cover the grant, and an approval that is live and cannot outlive the grant. Returns "" when admitted.
+pub fn controller_host_action_class_v1(approver: DistributedAuthorityKeyV2, grant: ExecutionGrantV2,
+        request: OperationEnvelopeV2, approval_expires_at: i64, now: i64) -> text:
+    if approver.role != "human-approver" or approver.revoked: return "controller-host-action-approver-key"
+    if not CONTROLLER_HOST_ACTION_KINDS_V1.contains(request.operation): return "controller-host-action-kind"
+    if grant.operations.len() != 1 or grant.operations[0] != request.operation: return "controller-host-action-grant-operations"
+    if (grant.environment_digest != controller_host_action_environment_digest_v1(request.operation) or
+            request.environment_digest != grant.environment_digest):
+        return "controller-host-action-environment"
+    if approver.principal != grant.principal or approver.project != grant.project or approver.host_id != grant.host_id:
+        return "controller-host-action-approver-scope"
+    if not approver.operations.contains(request.operation): return "controller-host-action-approver-operations"
+    if grant.expires_at > approver.expires_at: return "controller-host-action-approver-budget"
+    if approval_expires_at <= now or approval_expires_at > grant.expires_at: return "controller-host-action-approval-expiry"
+    ""
+
+# Builds the `kind` envelope for the record digest `payload_digest` on `host_id` (the installed binding's physical host),
+# then issue-then-verify. Every refusal before the signatures happens before any key is read.
+pub fn controller_host_action_issue_v1(context: ControllerDispatchContextV1,
+        read_key: fn(DistributedAuthorityKeyV2) -> Result<[u8], text>, approver_id: text, kind: text, operation_id: text,
+        payload_digest: text, host_id: text, grant_id: text, ttl_ms: i64, now: i64) -> Result<ControllerHostActionAuthorityV1, text>:
+    if now <= 0: return Err("dispatch-wall-clock-unavailable")
+    if not CONTROLLER_HOST_ACTION_KINDS_V1.contains(kind): return Err("controller-host-action-kind")
+    if ttl_ms <= 0 or ttl_ms > CONTROLLER_HOST_ACTION_MAX_TTL_MS_V1: return Err("controller-host-action-ttl")
+    val snapshot = context.policy.snapshot
+    val issuer = distributed_authority_snapshot_key_v2(snapshot, "grant-issuer", context.config.controller_id)?
+    val approver = distributed_authority_snapshot_key_v2(snapshot, "human-approver", approver_id)?
+    val expires = now + ttl_ms
+    val environment = controller_host_action_environment_digest_v1(kind)
+    val grant = ExecutionGrantV2(id: grant_id, principal: approver.principal, project: approver.project, host_id: host_id,
+        operations: [kind], environment_digest: environment, policy_revision: snapshot.policy_revision,
+        revocation_epoch: snapshot.revocation_epoch, expires_at: expires, maximum_memory_bytes: 1, maximum_duration_ms: 1)
+    val request = OperationEnvelopeV2(version: 2, id: operation_id, payload_digest: payload_digest, principal: approver.principal,
+        project: approver.project, host_id: host_id, operation: kind, environment_digest: environment,
+        policy_revision: snapshot.policy_revision, revocation_epoch: snapshot.revocation_epoch,
+        session_generation: context.policy.session_generation, memory_bytes: 1, duration_ms: 1)
+    val refused = controller_host_action_class_v1(approver, grant, request, expires, now)
+    if refused != "": return Err(refused)
+    val authority = controller_authority_sign_pair_v1(context, read_key, issuer, approver, grant, request, expires, now)?
+    Ok(ControllerHostActionAuthorityV1(operation: request, authority: authority))
+
+# A local administrator selects the operation and approval key. The immutable
+# enrollment, Host identity, memory, environment and action are derived here.
+# Enrollment runs no workload, so its execution duration claim is the minimum.
+# Duration and clock use the existing signed authority V2 millisecond ABI.
+@allow(primitive_api)
+pub fn controller_linux_enrollment_issue_v3(context: ControllerDispatchContextV1,
+        read_key: fn(DistributedAuthorityKeyV2) -> Result<[u8], text>, approver_id: text,
+        binding: HostLinuxServiceEnrollmentBindingV3, operation_id: text, grant_id: text,
+        ttl_ms: i64, now: i64) -> Result<HostEnrollmentCredentialV1, text>:
+    if now <= 0: return Err("dispatch-wall-clock-unavailable")
+    if ttl_ms <= 0 or ttl_ms > CONTROLLER_HOST_ACTION_MAX_TTL_MS_V1 or now > 9223372036854775807 - ttl_ms:
+        return Err("controller-linux-enrollment-ttl")
+    val digest = host_linux_service_enrollment_digest_v3(binding)?
+    val snapshot = context.policy.snapshot
+    if (context.policy.source_digest != binding.policy_digest or
+            context.config.authority_policy_digest != binding.policy_digest or
+            snapshot.policy_revision != binding.policy_revision):
+        return Err("controller-linux-enrollment-policy-mismatch")
+    if context.config.provider_identity_digest != binding.provider_identity_digest:
+        return Err("controller-linux-enrollment-provider-mismatch")
+    val issuer = distributed_authority_snapshot_key_v2(snapshot, "grant-issuer", context.config.controller_id)?
+    val approver = distributed_authority_snapshot_key_v2(snapshot, "human-approver", approver_id)?
+    val expires = now + ttl_ms
+    val kind = "host_enroll_v1"
+    val grant = ExecutionGrantV2(id: grant_id, principal: approver.principal, project: approver.project,
+        host_id: binding.physical_host_id, operations: [kind], environment_digest: binding.provider_identity_digest,
+        policy_revision: snapshot.policy_revision, revocation_epoch: snapshot.revocation_epoch, expires_at: expires,
+        maximum_memory_bytes: binding.physical_memory_bytes, maximum_duration_ms: 1)
+    val operation = OperationEnvelopeV2(version: 2, id: operation_id, payload_digest: digest,
+        principal: approver.principal, project: approver.project, host_id: binding.physical_host_id,
+        operation: kind, environment_digest: binding.provider_identity_digest, policy_revision: snapshot.policy_revision,
+        revocation_epoch: snapshot.revocation_epoch, session_generation: context.policy.session_generation,
+        memory_bytes: binding.physical_memory_bytes, duration_ms: 1)
+    val issued = controller_authority_sign_pair_v1(context, read_key, issuer, approver, grant, operation, expires, now)?
+    Ok(HostEnrollmentCredentialV1(operation: operation, signed: issued.signed, approval: issued.approval))
+
+# Local administrative command. The immutable leaf is assigned by controller
+# identity and operation ID, never by a caller-supplied file name.
+pub fn controller_linux_enrollment_command_v3(args: [text]) -> OrchestratorValidationReplyV1:
+    if args.len() != 10 or args[0] != "host-linux-enrollment-issue":
+        return host_identity_failure_v1("host-linux-enrollment-issue-usage", 2)
+    for index in 1..args.len():
+        if args[index] == "": return host_identity_failure_v1("host-linux-enrollment-issue-argument-required", 2)
+    if not builder_identifier_valid_v1(args[7]) or not builder_identifier_valid_v1(args[8]):
+        return host_identity_failure_v1("host-linux-enrollment-issue-identity", 2)
+    val ttl = args[9].to_i64() ?? 0
+    if ttl <= 0 or ttl > CONTROLLER_HOST_ACTION_MAX_TTL_MS_V1 or str(ttl) != args[9]:
+        return host_identity_failure_v1("controller-linux-enrollment-ttl", 2)
+    val binding_bytes = file_read_regular_no_follow_bounded(args[6], 16384)
+    if binding_bytes.is_err(): return host_identity_failure_v1("host-linux-enrollment-binding-unreadable", 1)
+    val decoded = host_linux_service_enrollment_decode_v3(binding_bytes.unwrap())
+    if decoded.is_err(): return host_identity_failure_v1(decoded.unwrap_err(), 1)
+    val binding = decoded.unwrap()
+    val context = controller_dispatch_context_load_v1(args[1], args[2])
+    if context.is_err(): return host_identity_failure_v1(context.unwrap_err(), 1)
+    val opened = host_identity_store_open_v1(args[4])
+    if not opened.ready or opened.owner.is_none() or opened.error != "" or opened.cleanup_pending:
+        return host_identity_open_failure_v1(opened)
+    val leaf = sha256_text("simple-linux-enrollment-credential-v3\n" + args[2] + "\n" + args[7]) + ".profile"
+    val prior = host_identity_store_read_v1(opened.owner.unwrap(), leaf, 65536)
+    if prior.cleanup_pending or prior.error != "":
+        return host_identity_store_error_v1("host-linux-enrollment-output-read", prior.owner)
+    if not prior.absent or prior.bytes.is_some():
+        return host_identity_finish_v1({"status": SdnValue.String("existing-enrollment-credential"),
+            "credentialLeaf": SdnValue.String(leaf)}, 1, prior.owner)
+    val now = controller_dispatch_grant_clock_v1()
+    if now.is_err(): return host_identity_store_error_v1(now.unwrap_err(), prior.owner)
+    val signed = controller_linux_enrollment_issue_v3(context.unwrap(), controller_authority_store_reader_v1(args[3]),
+        args[5], binding, args[7], args[8], ttl, now.unwrap())
+    if signed.is_err(): return host_identity_store_error_v1(signed.unwrap_err(), prior.owner)
+    val credential = signed.unwrap()
+    val encoded = host_enrollment_credential_encode_v1(credential)
+    if encoded.is_err(): return host_identity_store_error_v1(encoded.unwrap_err(), prior.owner)
+    val current = controller_dispatch_context_load_v1(args[1], args[2])
+    if current.is_err() or current.unwrap().config != context.unwrap().config or
+            current.unwrap().policy.source_digest != context.unwrap().policy.source_digest:
+        return host_identity_store_error_v1("host-linux-enrollment-issuer-context-changed", prior.owner)
+    val publish_time = controller_dispatch_grant_clock_v1()
+    if publish_time.is_err(): return host_identity_store_error_v1(publish_time.unwrap_err(), prior.owner)
+    if publish_time.unwrap() < now.unwrap():
+        return host_identity_store_error_v1("host-linux-enrollment-issuer-clock-regressed", prior.owner)
+    val policy = current.unwrap().policy
+    val snapshot = policy.snapshot
+    val rechecked = distributed_verify_grant_approval_from_snapshot_v2(snapshot, credential.signed, credential.approval,
+        credential.operation, publish_time.unwrap(), snapshot.generation, snapshot.policy_revision,
+        snapshot.revocation_epoch, policy.session_generation)
+    if rechecked.is_err(): return host_identity_store_error_v1(rechecked.unwrap_err(), prior.owner)
+    val bytes = encoded.unwrap().bytes()
+    val published = host_identity_store_publish_v1(prior.owner, leaf, bytes)
+    if published.publication != HostIdentityStorePublicationV1.Published or not published.file_synced or
+            published.error != "" or published.cleanup_pending:
+        return host_identity_finish_v1({"status": SdnValue.String("enrollment-credential-publication-unconfirmed"),
+            "credentialLeaf": SdnValue.String(leaf)}, 1, published.owner)
+    val saved = host_identity_store_read_v1(published.owner, leaf, 65536)
+    if saved.error != "" or saved.cleanup_pending or saved.absent or saved.bytes.is_none() or saved.bytes.unwrap() != bytes:
+        return host_identity_store_error_v1("host-linux-enrollment-output-readback", saved.owner)
+    host_identity_finish_v1({"status": SdnValue.String("enrollment-credential-published"),
+        "credentialLeaf": SdnValue.String(leaf), "credentialDigest": SdnValue.String(sha256_text(encoded.unwrap())),
+        "fileSynced": SdnValue.Bool(published.file_synced), "namespaceSynced": SdnValue.Bool(published.namespace_synced),
+        "bindingDigest": SdnValue.String(credential.operation.payload_digest)}, 0, saved.owner)
+
+val CONTROLLER_AGENT_PANE_BUNDLE_LIMIT_V4: i64 = 2097152
+
+fn controller_agent_pane_input_v4(source: text) -> Result<Dict<text, text>, text>:
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 4194304,
+            max_depth: 2, max_nodes: 32, max_rows: 0, max_cells: 0, max_columns: 16)):
+        case Ok(value): value
+        case Err(_): return Err("controller-agent-pane-input-syntax")
+    if sdn_encode_canonical(parsed.value) + "\n" != source: return Err("controller-agent-pane-input-noncanonical")
+    val fields = match parsed.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("controller-agent-pane-input-object")
+    val names = ["bindingUid", "invoke", "plan", "helperRequest", "helperExecuteProof", "streamPolicy", "installedHelperTemplate"]
+    if fields.len() != names.len() + 2 or not fields.contains_key("kind") or not fields.contains_key("version") or
+            fields["kind"] != SdnValue.String("controller-agent-pane-author-input") or fields["version"] != SdnValue.Int(1):
+        return Err("controller-agent-pane-input-fields")
+    var input: Dict<text, text> = {}
+    for name in names:
+        if not fields.contains_key(name): return Err("controller-agent-pane-input-missing:" + name)
+        match fields[name]:
+            case SdnValue.String(value):
+                if value == "": return Err("controller-agent-pane-input-empty:" + name)
+                input[name] = value
+            case _: return Err("controller-agent-pane-input-text:" + name)
+    if not builder_identifier_valid_v1(input["bindingUid"]): return Err("controller-agent-pane-input-binding")
+    Ok(input)
+
+fn controller_agent_pane_wait_v4(first: ControllerDispatchOwnedTurnV3) -> ControllerDispatchOwnedTurnV3:
+    var turn = first
+    val started = sosix_time_now_monotonic_ms()
+    var steps = 0
+    while started >= 0 and steps < 4000 and turn.phase != "ready" and turn.owner.is_some() and turn.error == "":
+        val now = sosix_time_now_monotonic_ms()
+        if now < started or now - started >= 20000: break
+        sosix_sleep_ms(5)
+        turn = controller_dispatch_step_v3(turn.owner.unwrap())
+        steps = steps + 1
+    turn
+
+fn controller_agent_pane_exchange_ready_v4(turn: ControllerDispatchOwnedTurnV3) -> bool:
+    turn.phase == "ready" and turn.outcome == "authenticated-reply" and turn.owner.is_some() and turn.root_cleanup.is_none() and turn.error == ""
+
+fn controller_agent_pane_close_dispatch_v4(original: ControllerDispatchOwnedTurnV3) -> OrchestratorValidationReplyV1:
+    var turn = original
+    var root = turn.root_cleanup
+    var steps = 0
+    var clean = true
+    while turn.owner.is_some() and steps < 64:
+        turn = controller_dispatch_close_v3(turn.owner.unwrap())
+        if turn.root_cleanup.is_some(): root = turn.root_cleanup
+        if turn.error != "": clean = false
+        steps = steps + 1
+    var reply = host_identity_failure_v1("controller-agent-pane-host-evidence-unconfirmed", 2)
+    if controller_agent_pane_exchange_ready_v4(original) and clean and turn.owner.is_none() and root.is_none():
+        return OrchestratorValidationReplyV1(exit_code: 0, output: "")
+    reply.controller_dispatch_cleanup = turn.owner
+    reply.controller_root_cleanup = root
+    reply
+
+fn controller_agent_pane_close_root_v4(root: ControllerLocalRootV3, original: OrchestratorValidationReplyV1) -> OrchestratorValidationReplyV1:
+    val closed = controller_local_root_close_v3(root)
+    if closed.closed and closed.error == "" and closed.owner.is_none(): return original
+    var reply = host_identity_failure_v1("controller-agent-pane-root-cleanup-unconfirmed", 2)
+    if original.exit_code == 0:
+        reply.output = sdn_encode_canonical(SdnValue.Dict({"version": SdnValue.Int(1),
+            "kind": SdnValue.String("controller-agent-pane-author-recovery"),
+            "publicationReceipt": SdnValue.String(original.output),
+            "cleanupPending": SdnValue.Bool(closed.owner.is_some())})) + "\n"
+    reply.controller_root_cleanup = closed.owner
+    reply
+
+# The only callers derive an attach/detach operation from retained authenticated
+# evidence. Neither arbitrary messages nor caller-supplied operations reach a key.
+fn controller_agent_pane_sign_v4(context: ControllerDispatchContextV1,
+        read_key: fn(DistributedAuthorityKeyV2) -> Result<[u8], text>, approver_id: text,
+        operation: OperationEnvelopeV2, grant_id: text, expires: i64, now: i64) -> Result<ControllerIssuedAuthorityV1, text>:
+    if not ["host_agent_attach_v4", "host_agent_detach_v4"].contains(operation.operation):
+        return Err("controller-agent-pane-action")
+    val snapshot = context.policy.snapshot
+    val issuer = distributed_authority_snapshot_key_v2(snapshot, "grant-issuer", context.config.controller_id)?
+    val approver = distributed_authority_snapshot_key_v2(snapshot, "human-approver", approver_id)?
+    val grant = ExecutionGrantV2(id: grant_id, principal: operation.principal, project: operation.project,
+        host_id: operation.host_id, operations: [operation.operation], environment_digest: operation.environment_digest,
+        policy_revision: operation.policy_revision, revocation_epoch: operation.revocation_epoch, expires_at: expires,
+        maximum_memory_bytes: operation.memory_bytes, maximum_duration_ms: operation.duration_ms)
+    controller_authority_sign_pair_v1(context, read_key, issuer, approver, grant, operation, expires, now)
+
+fn controller_agent_pane_publish_v4(root: ControllerLocalRootV3, args: [text], input: Dict<text, text>,
+        operation: text, target: text, observation: text, ttl: i64) -> Result<text, text>:
+    val context = root.current_v3()?
+    val config = root.config_v3()?
+    if config.linux_host_binding.is_none(): return Err("controller-agent-pane-linux-enrollment-required")
+    val enrollment = host_linux_service_enrollment_encode_v3(config.linux_host_binding.unwrap())?
+    val store = root.workload_v3()?
+    val execute_source = distributed_operation_journal_read_required_v3(store.journal,
+        controller_dispatch_remote_execute_key_v3(operation), 2097152)?
+    val execute = host_execute_associated_decode_v3(execute_source)?
+    val association = host_execution_association_encode_v3(execute.association)?
+    val leaf = "controller-agent-pane-authored-v1/" + sha256_text(operation) + ".sdn"
+    val prior = distributed_operation_journal_read_v3(store.journal, leaf, CONTROLLER_AGENT_PANE_BUNDLE_LIMIT_V4)?
+    if prior.is_some(): return Err("controller-agent-pane-bundle-exists")
+    val clock = host_local_context_v1(context.policy)
+    val now = clock.grant_clock
+    if now <= 0 or now > 9223372036854775807 - ttl: return Err("controller-agent-pane-clock")
+    val sources = ControllerAgentPaneAttachInputsV4(execute_source, association,
+        observation, enrollment, input["invoke"], target, input["bindingUid"], input["plan"], input["helperRequest"],
+        input["helperExecuteProof"], input["streamPolicy"], input["installedHelperTemplate"])
+    val plan = controller_agent_pane_attach_plan_v4(sources, context.policy.snapshot, config.controller_id, clock)?
+    val read_key = controller_authority_store_reader_v1(args[3])
+    val expires = now + ttl
+    val attach = controller_agent_pane_sign_v4(context, read_key, args[4], plan.attach_operation, args[5], expires, now)?
+    val attach_source = host_agent_attach_request_encode_v4(HostAgentAttachRequestV4(operation_id: operation,
+        association_digest: plan.association_digest, operation: plan.attach_operation, signed: attach.signed, approval: attach.approval,
+        helper_request: input["helperRequest"], plan: input["plan"], pane_binding: plan.pane_binding, plan_digest: plan.plan_digest,
+        pane_binding_digest: plan.pane_binding_digest, helper_execute_signed: plan.helper_execute_proof.signed,
+        helper_execute_approval: plan.helper_execute_proof.approval, stream_policy: input["streamPolicy"]))?
+    val detach_operation = controller_agent_pane_detach_operation_v4(plan, attach_source, context.policy.snapshot, config.controller_id, clock)?
+    val detach = controller_agent_pane_sign_v4(context, read_key, args[4], detach_operation, args[6], expires, now)?
+    val attach_digest = sha256_text(attach_source)
+    val detach_source = host_agent_detach_request_encode_v4(HostAgentDetachRequestV4(operation_id: operation,
+        association_digest: plan.association_digest, attach_digest: attach_digest, operation: detach_operation,
+        signed: detach.signed, approval: detach.approval))?
+
+    val current = root.current_v3()?
+    if current.config != context.config or current.policy.source_digest != context.policy.source_digest:
+        return Err("controller-agent-pane-signing-context-changed")
+    val publish_clock = host_local_context_v1(current.policy)
+    if publish_clock.grant_clock < now: return Err("controller-agent-pane-clock-regressed")
+    val snapshot = current.policy.snapshot
+    val fresh_plan = controller_agent_pane_attach_plan_v4(sources, snapshot, config.controller_id, publish_clock)?
+    val refreshed_detach = controller_agent_pane_detach_operation_v4(fresh_plan, attach_source, snapshot, config.controller_id, publish_clock)?
+    if distributed_encode_operation_v2(refreshed_detach)? != distributed_encode_operation_v2(detach_operation)?:
+        return Err("controller-agent-pane-detach-context-changed")
+    val _detach = distributed_verify_grant_approval_from_snapshot_v2(snapshot, detach.signed, detach.approval,
+        detach_operation, publish_clock.grant_clock, snapshot.generation, publish_clock.policy_revision,
+        publish_clock.revocation_epoch, publish_clock.session_generation)?
+    val bundle = sdn_encode_canonical(SdnValue.Dict({"version": SdnValue.Int(1),
+        "kind": SdnValue.String("controller-agent-pane-authored"), "operationId": SdnValue.String(operation),
+        "attach": SdnValue.String(attach_source), "detach": SdnValue.String(detach_source)})) + "\n"
+    if bundle.byte_len() > CONTROLLER_AGENT_PANE_BUNDLE_LIMIT_V4: return Err("controller-agent-pane-bundle-size")
+    val published = distributed_operation_journal_publish_v3(store.journal, leaf, bundle)?
+    if not published: return Err("controller-agent-pane-bundle-exists")
+    if distributed_operation_journal_read_required_v3(store.journal, leaf, CONTROLLER_AGENT_PANE_BUNDLE_LIMIT_V4)? != bundle:
+        return Err("controller-agent-pane-bundle-readback")
+    Ok(sdn_encode_canonical(SdnValue.Dict({"version": SdnValue.Int(1), "kind": SdnValue.String("controller-agent-pane-author-receipt"),
+        "operationId": SdnValue.String(operation), "bundleKey": SdnValue.String(leaf),
+        "bundleDigest": SdnValue.String(sha256_text(bundle)), "attachDigest": SdnValue.String(attach_digest),
+        "detachDigest": SdnValue.String(sha256_text(detach_source))})) + "\n")
+
+pub fn controller_agent_pane_author_command_v4(args: [text]) -> OrchestratorValidationReplyV1:
+    if args.len() != 9 or args[0] != "controller-agent-pane-author":
+        return host_identity_failure_v1("controller-agent-pane-author-usage", 2)
+    if not builder_digest_valid_v1(args[2]) or not builder_identifier_valid_v1(args[4]) or
+            not builder_identifier_valid_v1(args[5]) or not builder_identifier_valid_v1(args[6]) or args[5] == args[6]:
+        return host_identity_failure_v1("controller-agent-pane-author-argument", 2)
+    val ttl = args[7].to_int() ?? 0
+    if ttl <= 0 or ttl > 86400000 or ttl.to_text() != args[7]: return host_identity_failure_v1("controller-agent-pane-author-ttl", 2)
+    val source = file_read_regular_no_follow_bounded(args[8], 4194304)
+    if source.is_err(): return host_identity_failure_v1("controller-agent-pane-author-input", 2)
+    val decoded = controller_agent_pane_input_v4(source.unwrap())
+    if decoded.is_err(): return host_identity_failure_v1(decoded.unwrap_err(), 2)
+    val input = decoded.unwrap()
+    val invoke = host_agent_invoke_request_decode_v4(input["invoke"])
+    if invoke.is_err(): return host_identity_failure_v1(invoke.unwrap_err(), 2)
+    val operation = invoke.unwrap().operation_id
+    val target_frame = host_control_sub_encode_v6(HostControlSubRequestV6("agent-pane-target", input["invoke"]))
+    val observation_frame = host_control_sub_encode_v6(HostControlSubRequestV6("agent-runtime-inspect", input["invoke"]))
+    if target_frame.is_err() or observation_frame.is_err(): return host_identity_failure_v1("controller-agent-pane-host-evidence-frame", 2)
+    val opened = controller_local_root_open_v3(args[1], args[2])
+    if not opened.ready or opened.owner.is_none() or opened.error != "":
+        var reply = host_identity_failure_v1("controller-agent-pane-root-unavailable", 2)
+        reply.controller_root_cleanup = opened.owner
+        return reply
+    val ready = controller_agent_pane_wait_v4(controller_dispatch_host_action_begin_v3(opened.owner.unwrap(), operation))
+    if not controller_agent_pane_exchange_ready_v4(ready): return controller_agent_pane_close_dispatch_v4(ready)
+    val target = controller_agent_pane_wait_v4(controller_dispatch_host_action_send_v3(ready.owner.unwrap(), target_frame.unwrap()))
+    if not controller_agent_pane_exchange_ready_v4(target): return controller_agent_pane_close_dispatch_v4(target)
+    val observation = controller_agent_pane_wait_v4(controller_dispatch_host_action_send_v3(target.owner.unwrap(), observation_frame.unwrap()))
+    val clean = controller_agent_pane_close_dispatch_v4(observation)
+    if clean.exit_code != 0: return clean
+    val retained = controller_local_root_open_v3(args[1], args[2])
+    if not retained.ready or retained.owner.is_none() or retained.error != "":
+        var reply = host_identity_failure_v1("controller-agent-pane-root-unavailable", 2)
+        reply.controller_root_cleanup = retained.owner
+        return reply
+    val root = retained.owner.unwrap()
+    val issued = controller_agent_pane_publish_v4(root, args, input, operation, target.response, observation.response, ttl)
+    val reply = if issued.is_ok(): OrchestratorValidationReplyV1(exit_code: 0, output: issued.unwrap()) else:
+        host_identity_failure_v1(issued.unwrap_err(), 2)
+    controller_agent_pane_close_root_v4(root, reply)
+
+export ControllerIssuedAuthorityV1, controller_authority_key_leaf_v1, controller_authority_store_reader_v1
+export controller_authority_issue_v1
+export ControllerHostActionAuthorityV1, CONTROLLER_HOST_ACTION_KINDS_V1, controller_host_action_environment_digest_v1
+export controller_host_action_class_v1, controller_host_action_issue_v1
+export controller_linux_enrollment_issue_v3, controller_linux_enrollment_command_v3

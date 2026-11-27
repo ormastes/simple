@@ -7,7 +7,8 @@ use std.scv.compile_source_inventory_core.{
 use compiler.driver.driver_build.native_full_inventory_sources.{
     NativeFullInventorySourcesV1, native_full_inventory_select_v1,
     native_full_inventory_requires_cold_index_v1,
-    native_cold_entry_snapshot_path_v1
+    native_cold_entry_snapshot_path_v1, native_cold_source_root_snapshot_path_v1,
+    native_cold_source_roots_snapshot_v1
 }
 
 fn full_source_entry(path: text) -> CompileSourceInventoryEntryV1:
@@ -74,6 +75,32 @@ describe "frozen full-inventory source selection":
             root, "C:\\dev\\simple", "c:/dev/simple/{entry}").unwrap()).to_equal("{root}/{entry}")
         expect(native_cold_entry_snapshot_path_v1(
             root, "C:\\dev\\simple", "c:/dev/simple/build/scv/snapshots/revision/{entry}").unwrap()).to_equal("{root}/{entry}")
+
+    it "rebases closure source roots onto the same frozen tree as the cold entry":
+        # Parse-shard regression (MCP/full-CLI Phase 2 build): the frozen
+        # entry's `.main_lazy_json` stayed frozen while `app.mcp.api_tools`
+        # resolved through the live `src/app` root, admitting
+        # app.mcp.main_lazy_json under both spellings.
+        val checkout = "C:\\dev\\simple"
+        val root = "C:/dev/simple/build/scv/snapshots/revision"
+        for spelling in ["src/app", "src/app/", "./src/app", "C:/dev/simple/src/app",
+                "c:/dev/simple/src/app", "{root}/src/app"]:
+            expect(native_cold_source_root_snapshot_path_v1(
+                root, checkout, spelling).unwrap()).to_equal("{root}/src/app")
+        # The entry itself is also a closure root and maps to the entry's copy.
+        expect(native_cold_source_root_snapshot_path_v1(
+            root, checkout, "src/app/mcp/main.spl").unwrap()).to_equal(
+            native_cold_entry_snapshot_path_v1(root, checkout, "src/app/mcp/main.spl").unwrap())
+        for invalid in ["src/../src/app", "D:/other/src/app", "/tmp/outside", ""]:
+            expect(native_cold_source_root_snapshot_path_v1(
+                root, checkout, invalid).is_err()).to_equal(true)
+
+    it "keeps a root with no frozen copy and rebases one that has a copy":
+        # "." stands in for the frozen tree: this checkout's src/compiler exists
+        # there, src/no_such_frozen_root does not.
+        val rebased = native_cold_source_roots_snapshot_v1(
+            ".", "/nonexistent/checkout", ["src/compiler", "src/no_such_frozen_root"])
+        expect(rebased).to_equal(["./src/compiler", "src/no_such_frozen_root"])
 
     it "forces cold index construction even with warm compatibility markers":
         expect(native_full_inventory_requires_cold_index_v1(

@@ -1,0 +1,156 @@
+# Native fixture: a user method that shares its name with a builtin
+# text/array method must stay the user method, whatever the receiver
+# expression is.
+#
+# Bug (2026-11-18): MIR lowering only recognised the user owner when the
+# receiver was a variable. A receiver that is a constructor temporary, a call
+# result, a field or an array element left the call unresolved, and the
+# builtin-name fallbacks took it:
+#   .join(x)            -> rt_array_join_any   ("rejected invalid array handle", SIGSEGV)
+#   .len() / .length()  -> rt_string_char_count (constructor temporary only)
+#   .char_at(i)         -> rt_interp_cstr + spl_str_slice
+#   .index_of(a, b) / .find(a, b) / .find_str(a, b) -> rt_text_find
+# doc/08_tracking/bug/native_user_method_builtin_name_hijacked_2026-11-18.md
+#
+# Expected stdout is expected_output.txt (the seed interpreter is the
+# reference). `native-build main.spl --backend=<cranelift|llvm>
+# --entry-closure`, then compare stdout with
+# `SIMPLE_EXECUTION_MODE=interpret <seed> run main.spl`.
+class Flight:
+    waiters: i64
+
+    fn join(key: text) -> Flight:
+        Flight(waiters: self.waiters + key.len())
+
+    fn len() -> i64:
+        self.waiters + 100
+
+    fn length() -> i64:
+        self.waiters + 200
+
+    fn char_at(index: i64) -> i64:
+        self.waiters + index + 300
+
+    fn index_of(needle: text, start: i64) -> i64:
+        self.waiters + needle.len() + start + 400
+
+    fn find(needle: text, start: i64) -> i64:
+        self.waiters + needle.len() + start + 500
+
+    fn find_str(needle: text, start: i64) -> i64:
+        self.waiters + needle.len() + start + 600
+
+    fn contains(key: text) -> i64:
+        self.waiters + key.len() + 700
+
+struct Gate:
+    slots: i64
+
+impl Gate:
+    fn join(self, key: text) -> Gate:
+        Gate(slots: self.slots + key.len())
+
+    fn len(self) -> i64:
+        self.slots + 100
+
+    fn length(self) -> i64:
+        self.slots + 200
+
+    fn char_at(self, index: i64) -> i64:
+        self.slots + index + 300
+
+    fn index_of(self, needle: text, start: i64) -> i64:
+        self.slots + needle.len() + start + 400
+
+    fn find(self, needle: text, start: i64) -> i64:
+        self.slots + needle.len() + start + 500
+
+    fn find_str(self, needle: text, start: i64) -> i64:
+        self.slots + needle.len() + start + 600
+
+    fn contains(self, key: text) -> i64:
+        self.slots + key.len() + 700
+
+struct Holder:
+    flight: Flight
+    gate: Gate
+
+fn make_flight() -> Flight:
+    Flight(waiters: 4)
+
+fn make_gate() -> Gate:
+    Gate(slots: 5)
+
+fn class_temporary():
+    val joined = Flight(waiters: 4).join("abc")
+    print "class tmp join={joined.waiters}"
+    print "class tmp len={Flight(waiters: 4).len()}"
+    print "class tmp length={Flight(waiters: 4).length()}"
+    print "class tmp char_at={Flight(waiters: 4).char_at(2)}"
+    print "class tmp index_of={Flight(waiters: 4).index_of("ab", 1)}"
+    print "class tmp find={Flight(waiters: 4).find("ab", 1)}"
+    print "class tmp find_str={Flight(waiters: 4).find_str("ab", 1)}"
+    print "class tmp contains={Flight(waiters: 4).contains("ab")}"
+
+fn struct_temporary():
+    val joined = Gate(slots: 5).join("abc")
+    print "struct tmp join={joined.slots}"
+    print "struct tmp len={Gate(slots: 5).len()}"
+    print "struct tmp length={Gate(slots: 5).length()}"
+    print "struct tmp char_at={Gate(slots: 5).char_at(2)}"
+    print "struct tmp index_of={Gate(slots: 5).index_of("ab", 1)}"
+    print "struct tmp find={Gate(slots: 5).find("ab", 1)}"
+    print "struct tmp find_str={Gate(slots: 5).find_str("ab", 1)}"
+    print "struct tmp contains={Gate(slots: 5).contains("ab")}"
+
+fn call_result():
+    val joined = make_flight().join("abc")
+    print "class call join={joined.waiters}"
+    print "class call len={make_flight().len()}"
+    print "class call char_at={make_flight().char_at(2)}"
+    print "class call find={make_flight().find("ab", 1)}"
+    val gate_joined = make_gate().join("abc")
+    print "struct call join={gate_joined.slots}"
+    print "struct call len={make_gate().len()}"
+    print "struct call char_at={make_gate().char_at(2)}"
+    print "struct call index_of={make_gate().index_of("ab", 1)}"
+
+fn field_and_element(holder: Holder, flights: [Flight], gates: [Gate]):
+    val joined = holder.flight.join("abc")
+    print "class field join={joined.waiters}"
+    print "class field char_at={holder.flight.char_at(2)}"
+    print "class field find_str={holder.flight.find_str("ab", 1)}"
+    val gate_joined = holder.gate.join("abc")
+    print "struct field join={gate_joined.slots}"
+    print "struct field char_at={holder.gate.char_at(2)}"
+    print "struct field find={holder.gate.find("ab", 1)}"
+    val element_joined = flights[0].join("abc")
+    print "class element join={element_joined.waiters}"
+    print "class element char_at={flights[0].char_at(2)}"
+    val gate_element_joined = gates[0].join("abc")
+    print "struct element join={gate_element_joined.slots}"
+    print "struct element index_of={gates[0].index_of("ab", 1)}"
+
+fn variable_receiver():
+    val flight = Flight(waiters: 4)
+    val joined = flight.join("abc")
+    print "class var join={joined.waiters} len={flight.len()} char_at={flight.char_at(2)}"
+    val gate = Gate(slots: 5)
+    val gate_joined = gate.join("abc")
+    print "struct var join={gate_joined.slots} len={gate.len()} find={gate.find("ab", 1)}"
+
+fn builtins_keep_working():
+    var parts: [text] = []
+    parts.push("a")
+    parts.push("b")
+    val word = "hello"
+    print "builtin join={parts.join(",")} len={parts.len()}"
+    print "builtin text len={word.len()} char_at={word.char_at(1)} index_of={word.index_of("l", 3)} find={word.find("l", 0)}"
+
+fn main():
+    class_temporary()
+    struct_temporary()
+    call_result()
+    field_and_element(Holder(flight: Flight(waiters: 4), gate: Gate(slots: 5)), [Flight(waiters: 4)], [Gate(slots: 5)])
+    variable_receiver()
+    builtins_keep_working()

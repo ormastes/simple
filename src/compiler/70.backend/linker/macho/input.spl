@@ -73,7 +73,8 @@ fn macho_checked_object(bytes: [u8]) -> Result<MachOObject, text>:
                 if length < 0: return Err("invalid Mach-O section size")
                 if address < 0 or length > 0x7fffffffffffffff - address:
                     return Err("Mach-O section address range overflows")
-                if (flags & 255) != 1 and (flags & 255) != 12 and not macho_range(bytes, payload, length):
+                val skind = flags & 255
+                if skind != 1 and skind != 12 and skind != 18 and not macho_range(bytes, payload, length):
                     return Err("Mach-O section payload exceeds input")
                 val relocations = macho_read(bytes, at + 60, 4)
                 val reloc_offset = macho_read(bytes, at + 56, 4)
@@ -104,6 +105,14 @@ fn macho_checked_object(bytes: [u8]) -> Result<MachOObject, text>:
             if command_size != 24: return Err("invalid Mach-O LC_UUID size")
         elif kind == 0x24 or kind == 0x25:
             if command_size != 16: return Err("invalid Mach-O version-min command size")
+        elif kind == 0x29 or kind == 0x2e:
+            if command_size != 16: return Err("invalid Mach-O linkedit-data command size")
+            val dataoff = macho_read(bytes, offset + 8, 4)
+            val datasize = macho_read(bytes, offset + 12, 4)
+            if datasize != 0 and not macho_range(bytes, dataoff, datasize):
+                return Err("Mach-O linkedit-data payload exceeds input")
+        elif kind == 0x2d:
+            if command_size < 16: return Err("invalid Mach-O LC_LINKER_OPTION size")
         elif kind == 0x32:
             if command_size < 24: return Err("invalid Mach-O build-version command size")
             val tools = macho_read(bytes, offset + 20, 4)
@@ -156,7 +165,7 @@ fn macho_archive_inputs(bytes: [u8]) -> Result<[MachOInput], text>:
         if name != "/" and name != "//" and not name.starts_with("__.SYMDEF"):
             val object = macho_checked_object(bytes[start:start + size])
             if object.is_err(): return Err("archive member {name}: {object.unwrap_err()}")
-            result = result.push(MachOInput(name: "archive member " + name, object: object.unwrap()))
+            result.push(MachOInput(name: "archive member " + name, object: object.unwrap()))
     Ok(result)
 
 export MachOInput, macho_range, macho_read, macho_put, macho_sign, macho_cstring

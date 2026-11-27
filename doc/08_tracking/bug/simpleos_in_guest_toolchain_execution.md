@@ -1,5 +1,21 @@
 # SimpleOS In-Guest Toolchain Execution Gap
 
+## 2026-11-09 legacy static-builder selector repair
+
+The retained legacy `clang_static.shs` builder switched on an uninitialized
+`TOOL`, so its documented no-argument invocation failed with `unsupported tool:`
+before checking the cross-build prerequisites. Defaulting an unset or empty
+selector to `clang` repairs that dispatch error while preserving explicit
+`llc`/`lld` selection and rejection of unknown tools.
+
+The focused shell regression fails on the original script at the unset-selector
+case, then passes six selector/admission cases after the repair. Its isolated
+tree intentionally lacks cross-build inputs: each supported selector must reach
+the missing-prerequisite failure without creating output. Cross-build, guest
+handoff, and compiler-operation evidence remain NOT_RUN. This repairs a legacy
+builder entrypoint only; the ordinary filesystem-launch goal and this bug stay
+open.
+
 Date: 2026-05-05
 Status: Open — kernel task preparation evidence improved 2026-05-30 and
 status gate added 2026-05-30; real compiler payloads and live
@@ -199,3 +215,14 @@ Add `x64-toolchain-exec-probe` and include it in the SimpleOS real-OS audit
 once it passes under QEMU. Do not add the lane until Blockers 1 and 2 are
 both resolved — a lane that always defers is dead code and contradicts the
 audit requirement that the scenario pass.
+
+## W4-8 Update (2026-11-27) — `fix-implemented-verification-pending` (build-to-guest wiring contract + fail-closed status spec)
+
+- **Build-to-guest execution wiring (`src/os/port/guest_toolchain_execution_gate.spl`):**
+  - Imported `GuestToolchainArtifactRoleV1`, `GuestToolchainArtifactBuildReceiptV1`, and `guest_toolchain_artifact_build_receipt_payload_sha256_v1` from `os.port.guest_toolchain_artifact_build_receipt` (no circular import).
+  - Added `GuestToolchainExecutionWiringError`, `guest_toolchain_artifact_role_to_execution_role`, `guest_toolchain_execution_role_to_artifact_role`, `guest_toolchain_execution_bind_build_receipts_v1`, and `guest_toolchain_real_payload_wiring_gate_detail` to bind all 7 executable tool build receipts (`SimpleCompiler`, `SimpleInterpreter`, `SimpleLoader`, `Llvm`, `Clang`, `Clangxx`, `Lld`) to guest execution roles, targets, ABIs, and digests while keeping status fail-closed (`"BLOCKED: ..."`) until authoritative QEMU guest execution and consume-once token consumption.
+  - Disambiguated private helper names (`_exec_safe_scalar`, `_exec_argv_valid`, `_exec_bool_name`) to prevent signature collisions with `guest_toolchain_artifact_build_receipt.spl`.
+- **Host unit verification (no QEMU launched):**
+  - Fixed `test/01_unit/os/port/deploy_toolchains_status_spec.spl` (removed contradictory `"READY"` expectation so it enforces fail-closed blocking on host staging booleans): `2 total, 2 passed, 0 failed`.
+  - Extended `test/01_unit/os/toolchain/guest_toolchain_execution_gate_spec.spl` with build-to-guest real-payload wiring positive & negative tests: `15 total, 15 passed, 0 failed`.
+- **Status:** `fix-implemented-verification-pending` — `waiting-for:` QEMU guest boot producing real compiler payloads, authoritative target-native execution receipt, and loader-owned consume-once token.

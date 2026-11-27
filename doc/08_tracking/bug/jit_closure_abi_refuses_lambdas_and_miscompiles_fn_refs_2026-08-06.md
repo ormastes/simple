@@ -1,4 +1,18 @@
 # JIT closure ABI: lambdas refuse the whole module, and named-fn refs SILENTLY MISCOMPILE
+
+## Triage 2026-11-25 (lane p2w3-aa)
+
+The "Open 2026-09-16 — needs owner triage" header above is stale bookkeeping;
+the operative status is the 2026-11-05 mirp2-E3 re-verification at the bottom:
+Defect 2 (silent wrong answer) is CLOSED, row re-scoped to the f08 residual
+(P3, loud-and-correct refusal of a closure returned from an ANY-returning
+fn). Spot-re-verified on the tracked Windows seed (`bin/simple.exe`, Rust seed
+v1.0.0-rc.1): fixture `f06_named_fn_as_value.spl` prints `f06 marker
+result=42` — correct, no garbage, no fallback. Remaining work (f08 return-slot
+boxing, f10 extern-fn-as-value) is Rust-seed-only under the "seed is
+bootstrap-only" policy. No pure-Simple change possible from a bug lane; left
+OPEN as re-scoped.
+
 ## Open 2026-09-16 — needs owner triage
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
@@ -426,3 +440,32 @@ The actual native regression now checks parsed reversed declarations, equal-span
 ### Final bounded result, 2026-10-16
 
 With the concrete ordering containment, the final actual native probe completed monomorphization for 413 modules: the earlier `array_sort_by` specialization refusal was crossed. This does not establish the ordering assertions, because subsequent MIR lowering reported semantic failures and the supervisor stopped the process at 8,392,880 KiB (exit88, quiescent1) before native execution. See `native_compiler_behavior_probe_retention_and_semantics.md` and the final output's `mcdc-token-stack-native-probe/final-failure-summary.json`. The general inference/callable defect remains OPEN, the O(n²) local workaround limitation remains explicit, and the authored ordering SSpec is UNRUN. No fourth cycle was attempted.
+
+## 2026-11-05 premise check (mirp2-B)
+Still a Rust-seed (cranelift JIT) defect; the pure-Simple native path handles the
+same shapes correctly (s3_fable44 native repro, see
+`native_mir_lambda_and_enum_eq_block_caret_cs_2026_10_19.md`). Under the
+"seed is bootstrap-only" policy this is now only a seed-speed lever (stage1
+interpreted fallback), belonging to family E (seed JIT/cranelift). Left OPEN.
+Next step: in `cranelift_emitter.rs` `emit_global_load` fn-ref branch, box the
+`func_addr` into an `rt_closure_new(addr, nil-env)` value so indirect calls go
+through the same closure ABI as lambdas, then drop the module-wide refusal.
+
+## 2026-11-05 mirp2-E3 re-verification (execution, C:/dev/simple/bin/simple.exe (Rust seed, deployed 2026-11-04))
+
+Proposed fix (wrap fn address via rt_closure_new in GlobalLoad) is ALREADY
+LANDED: `codegen/instr/mod.rs` GlobalLoad arm wraps `name$boxed` in
+`rt_closure_new` (closure_boxed_entry.rs `named_fn_value_targets` /
+`imported_fn_value_targets`), and `compile_indirect_call` goes through
+`rt_closure_func_ptr`. `cranelift_emitter.rs::emit_global_load` is not on
+the JIT path (only `dispatch_instruction` users: LLVM, mir_interpreter).
+Fixture sweep (`SIMPLE_JIT_TRACE=1 bin/simple run`):
+f01-f07, f09 JIT, correct (f06 named fn as value = 42, no fallback).
+Residuals, both LOUD and correct (no silent miscompile):
+- f08: closure returned from an ANY-returning fn -> refused
+  (jit.rs `first_unsupported_lambda`, "return slot boxes the handle").
+- f10: extern fn as value -> refused; tracked separately in
+  jit_extern_fn_as_value_still_miscompiles_2026-08-08.md.
+Defect 2 (silent wrong answer) is CLOSED. Row re-scoped to the f08 residual
+(P3); next step: give ANY-typed return slots a closure-handle passthrough in
+the return boxing so f08 can JIT.

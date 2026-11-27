@@ -21,7 +21,7 @@ use std.nogc_sync_mut.io.file_ops.{file_fsync, directory_fsync, secure_temp_dir}
 use std.nogc_sync_mut.io_runtime.{file_rename, dir_exists}
 
 # Directory operations
-use std.nogc_sync_mut.io.dir_ops.{dir_create, dir_create_all, dir_walk, dir_remove_all, is_dir}
+use std.nogc_sync_mut.io.dir_ops.{dir_create, dir_create_all, dir_walk, dir_remove_all, is_dir, dir_is_real_no_follow}
 use std.nogc_sync_mut.io.dir_ops.{dir_list, dir_remove}
 
 # Process operations
@@ -31,7 +31,7 @@ use std.nogc_sync_mut.io.process_ops.{process_spawn_async, process_wait, process
 use std.nogc_sync_mut.io.resource_scope.{ObservedProcessResult, ExecutionResourceClass, ExecutionResourceScope, ExecutionScopeResult, CurrentExecutionResourceScope, process_run_observed_bounded, standard_resource_budget, execution_resource_scope, execution_resource_scope_with_budget, run_in_execution_resource_scope, run_in_systemd_resource_scope, begin_current_execution_resource_scope, end_current_execution_resource_scope}
 use std.nogc_sync_mut.io.process_ops.{
     process_spawn_piped, browser_renderer_spawn_sandboxed, browser_renderer_sandbox_enter, process_write_stdin, process_write_stdin_some,
-    process_read_stdout, process_is_piped_alive, process_close_piped,
+    process_read_stdout, process_is_piped_alive, process_close_piped, process_read_stdout_result, process_piped_exit_status_v1,
     process_pin_executable, process_close_pinned_executable,
     process_spawn_pinned_piped
 }
@@ -41,7 +41,7 @@ use std.nogc_sync_mut.io.process_ops.{eprint}
 # shell_output (1-arg) has no equivalent in the new split io.process_ops module —
 # it is only defined (pub) in the pre-migration io_runtime.spl monolith.
 use std.nogc_sync_mut.io_runtime.{shell_output, read_file_text_result, env_get_opt}
-use app.io.process_env_ops.{process_spawn_async_env, process_is_alive}
+use app.io.process_env_ops.{process_spawn_async_env, process_is_alive, process_run_bounded_environment_v1}
 use app.io.rt_hal_isolated_host.{
     RtHalIsolatedExactHostConfig, rt_hal_linux_isolated_host_port,
     rt_hal_install_isolated_exact_host,
@@ -64,6 +64,7 @@ use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros, time_now_micros, curren
 use std.nogc_sync_mut.io.time_ops.{timestamp_year, timestamp_month, timestamp_day}
 use std.nogc_sync_mut.io.time_ops.{timestamp_hour, timestamp_minute, timestamp_second}
 use std.nogc_sync_mut.io.time_ops.{timestamp_now, sleep_ms}
+use std.nogc_sync_mut.io_runtime.{time_now_monotonic_ms}
 
 # System info
 use std.nogc_sync_mut.io.sysinfo_ops.{getpid, hostname, cpu_count, path_basename,
@@ -88,7 +89,6 @@ use std.nogc_sync_mut.io.debug_stubs.{rt_debug_select_frame, rt_debug_get_select
 use std.nogc_sync_mut.io.debug_stubs.{rt_debug_get_source_lines}
 use std.nogc_sync_mut.io.debug_stubs.{rt_debug_add_watch, rt_debug_remove_watch, rt_debug_list_watches}
 use std.nogc_sync_mut.io.debug_stubs.{rt_debug_set_variable, rt_debug_eval_expression, rt_debug_terminate}
-use std.nogc_sync_mut.io.debug_stubs.{atomic_i64_new, atomic_bool_new}
 
 # String helpers
 use std.nogc_sync_mut.io.string_helpers.{hex_to_char, byte_to_char, char_code}
@@ -121,7 +121,7 @@ use app.io.cli_ops.{fault_set_timeout, fault_set_execution_limit}
 # Platform detection
 fn is_windows_platform() -> bool:
     val os_env = env_get_opt("OS")
-    if os_env == nil:
+    if os_env.is_none():
         false
     else:
         os_env.lower().contains("windows")
@@ -132,10 +132,12 @@ extern fn rt_random_uniform(min: f64, max: f64) -> f64
 @unsafe(reason: "raw scalar random provider ABI", capabilities: [ffi])
 extern fn rt_random_randint(min: i64, max: i64) -> i64
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in random_uniform", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 fn random_uniform(min: f64, max: f64) -> f64:
     unsafe(capabilities: [ffi]): rt_random_uniform(min, max)
 
-fn random_randint(min: i64, max: i64) -> i64:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in random_randint", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+pub fn random_randint(min: i64, max: i64) -> i64:
     unsafe(capabilities: [ffi]): rt_random_randint(min, max)
 
 # Logging
@@ -154,28 +156,35 @@ extern fn rt_log_is_enabled(level: i64, scope_ptr: i64, scope_len: i64) -> i64
 @unsafe(reason: "raw logging configuration ABI", capabilities: [ffi])
 extern fn rt_log_clear_scope_levels()
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in log_emit", reviewers: ["ormastes", "opus-review"], capabilities: ["raw_ptr", "ffi"])
 @unsafe(reason: "passes caller-owned raw pointer/length ranges to the log provider", capabilities: [ffi, raw_ptr])
 fn log_emit(level: i64, scope_ptr: i64, scope_len: i64, msg_ptr: i64, msg_len: i64):
     unsafe(capabilities: [ffi, raw_ptr]): rt_log_emit(level, scope_ptr, scope_len, msg_ptr, msg_len)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in log_get_global_level", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 fn log_get_global_level() -> i64:
     unsafe(capabilities: [ffi]): rt_log_get_global_level()
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in log_set_global_level", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 fn log_set_global_level(level: i64):
     unsafe(capabilities: [ffi]): rt_log_set_global_level(level)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in log_get_scope_level", reviewers: ["ormastes", "opus-review"], capabilities: ["raw_ptr", "ffi"])
 @unsafe(reason: "passes caller-owned raw pointer/length range to the log provider", capabilities: [ffi, raw_ptr])
 fn log_get_scope_level(scope_ptr: i64, scope_len: i64) -> i64:
     unsafe(capabilities: [ffi, raw_ptr]): rt_log_get_scope_level(scope_ptr, scope_len)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in log_set_scope_level", reviewers: ["ormastes", "opus-review"], capabilities: ["raw_ptr", "ffi"])
 @unsafe(reason: "passes caller-owned raw pointer/length range to the log provider", capabilities: [ffi, raw_ptr])
 fn log_set_scope_level(scope_ptr: i64, scope_len: i64, level: i64):
     unsafe(capabilities: [ffi, raw_ptr]): rt_log_set_scope_level(scope_ptr, scope_len, level)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in log_is_enabled", reviewers: ["ormastes", "opus-review"], capabilities: ["raw_ptr", "ffi"])
 @unsafe(reason: "passes caller-owned raw pointer/length range to the log provider", capabilities: [ffi, raw_ptr])
 fn log_is_enabled(level: i64, scope_ptr: i64, scope_len: i64) -> i64:
     unsafe(capabilities: [ffi, raw_ptr]): rt_log_is_enabled(level, scope_ptr, scope_len)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in log_clear_scope_levels", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 fn log_clear_scope_levels():
     unsafe(capabilities: [ffi]): rt_log_clear_scope_levels()
 
@@ -189,7 +198,7 @@ use std.nogc_sync_mut.concurrent.thread.{thread_sleep}
 # `(stdout, stderr, exit_code)` shape is required.
 fn shell_tuple(command: text) -> (text, text, i64):
     val os_env = env_get_opt("OS")
-    val is_windows = if os_env == nil:
+    val is_windows = if os_env.is_none():
         false
     else:
         os_env.lower().contains("windows")
@@ -251,10 +260,12 @@ extern fn rt_volatile_read_u64(addr: i64) -> i64
 @unsafe(reason: "raw volatile write dereferences caller-supplied address", capabilities: [ffi, raw_ptr])
 extern fn rt_volatile_write_u64(addr: i64, value: i64)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in read_volatile", reviewers: ["ormastes", "opus-review"], capabilities: ["raw_ptr", "ffi"])
 @unsafe(reason: "caller must supply a live aligned volatile u64 address", capabilities: [ffi, raw_ptr])
 fn read_volatile(addr: i64) -> i64:
     unsafe(capabilities: [ffi, raw_ptr]): rt_volatile_read_u64(addr)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in write_volatile", reviewers: ["ormastes", "opus-review"], capabilities: ["raw_ptr", "ffi"])
 @unsafe(reason: "caller must supply a live aligned writable volatile u64 address", capabilities: [ffi, raw_ptr])
 fn write_volatile(addr: i64, value: i64):
     unsafe(capabilities: [ffi, raw_ptr]): rt_volatile_write_u64(addr, value)
@@ -274,7 +285,7 @@ export read_file_text_result
 export file_rename
 
 # Directory operations
-export dir_create, dir_create_all, dir_walk, dir_remove_all, is_dir, dir_exists
+export dir_create, dir_create_all, dir_walk, dir_remove_all, is_dir, dir_exists, dir_is_real_no_follow
 export dir_list, dir_remove
 
 # Process operations
@@ -287,8 +298,8 @@ export run_in_systemd_resource_scope
 export process_spawn_async, process_wait, process_is_running, process_kill
 export process_spawn_piped, browser_renderer_spawn_sandboxed, browser_renderer_sandbox_enter, process_write_stdin, process_write_stdin_some
 export process_pin_executable, process_close_pinned_executable, process_spawn_pinned_piped
-export process_read_stdout, process_is_piped_alive, process_close_piped
-export process_spawn_async_env, process_is_alive
+export process_read_stdout, process_is_piped_alive, process_close_piped, process_read_stdout_result, process_piped_exit_status_v1
+export process_spawn_async_env, process_is_alive, process_run_bounded_environment_v1
 export RtHalIsolatedExactHostConfig, rt_hal_linux_isolated_host_port
 export rt_hal_install_isolated_exact_host
 export rt_hal_install_isolated_exact_host_from_plan
@@ -313,6 +324,7 @@ export time_now_unix_micros, time_now_micros, current_time_unix, current_time_ms
 export timestamp_year, timestamp_month, timestamp_day
 export timestamp_hour, timestamp_minute, timestamp_second
 export timestamp_now, sleep_ms
+export time_now_monotonic_ms
 
 # System info
 export getpid, hostname, cpu_count, path_basename
@@ -337,7 +349,6 @@ export rt_debug_select_frame, rt_debug_get_selected_frame, rt_debug_frame_locals
 export rt_debug_get_source_lines
 export rt_debug_add_watch, rt_debug_remove_watch, rt_debug_list_watches
 export rt_debug_set_variable, rt_debug_eval_expression, rt_debug_terminate
-export atomic_i64_new, atomic_bool_new
 
 # String helpers
 export hex_to_char, byte_to_char, char_code

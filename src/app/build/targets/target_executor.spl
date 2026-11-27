@@ -7,6 +7,9 @@
 
 use app.build.targets.build_targets.{BuildTarget, TargetSet, find_target, validate_targets}
 use app.build.targets.target_resolve.{ResolvePlan, resolve_target, format_target_plan}
+use app.build.targets.backend_contracts.{vector_length_tier_error}
+use std.common.cpu_tier.tier_id.{tier_spec_simd_class, simd_class_is_scalable}
+use app.build.targets.provider_gate.{provider_gate, provider_host_triple}
 use app.io.cli_compile.{cli_native_build}
 use std.common.crypto.sha256.{sha256_text}
 use std.io_runtime.{file_exists}
@@ -24,6 +27,8 @@ struct TargetAction:
     emit_archive: bool
     emit_shared: bool
     action_digest: text
+    triple: text
+    cpu_policy: text
 
 struct TargetExecutionSummary:
     selected_count: i64
@@ -83,7 +88,13 @@ fn target_output_path(repo_root: text, target: BuildTarget) -> text:
     repo_root + "/build/targets/" + component + "/" + component + suffix
 
 fn target_cache_dir(repo_root: text, target: BuildTarget) -> text:
-    repo_root + "/build/target_cache/" + target_storage_component(target.name)
+    """Target-local cache namespace, split by SIMD class when a cpu_tier is set
+    so objects built for different vector ISAs (e.g. NEON vs SVE2) never share entries."""
+    val base = repo_root + "/build/target_cache/" + target_storage_component(target.name)
+    val simd_class = tier_spec_simd_class(target.cpu_tier)
+    if simd_class.len() > 0:
+        return base + "/simd-" + simd_class
+    base
 
 fn target_candidate_output_path(output: text, process_id: i64) -> text:
     """Process-qualified unpublished output used for fail-closed publication."""
@@ -105,8 +116,33 @@ fn target_action(repo_root: text, ts: TargetSet, target: BuildTarget) -> TargetA
         target_cache_dir(repo_root, target),
         target.kind == "library",
         target.kind == "shared",
-        _target_action_digest(repo_root, ts, target)
+        _target_action_digest(repo_root, ts, target),
+        target.triple,
+        target_cpu_policy(target.cpu_tier)
     )
+
+fn target_cpu_policy(tier: text) -> text:
+    """native-build `--cpu` policy for a cpu_tier; empty = none/unsupported.
+
+    native-build honours `--cpu` (SIMPLE_NATIVE_CPU -> codegen target cpu) only
+    for `default`, `native` and `x86-64-v1..v4`; `x86-64` is the v1 baseline."""
+    if tier == "x86-64" or tier == "x86-64-v1":
+        return "x86-64-v1"
+    if tier == "x86-64-v2" or tier == "x86-64-v3" or tier == "x86-64-v4":
+        return tier
+    ""
+
+fn target_action_error(target: BuildTarget) -> text:
+    """Refuse a tier native-build cannot honour rather than build it at baseline."""
+    val vl_error = vector_length_tier_error(target.cpu_tier)
+    if vl_error.len() > 0:
+        return vl_error + " (" + target.name + ")"
+    val simd_class = tier_spec_simd_class(target.cpu_tier)
+    if simd_class_is_scalable(simd_class):
+        return "target-error: scalable-vector-unsupported: " + target.name + ": " + target.cpu_tier + " (" + simd_class + "): native-build has no SVE/RVV codegen; drop cpu_tier for a scalar build"
+    if target.cpu_tier.len() > 0 and target_cpu_policy(target.cpu_tier).len() == 0:
+        return "target-error: unsupported-cpu_tier: " + target.name + ": " + target.cpu_tier
+    ""
 
 fn target_action_args(repo_root: text, action: TargetAction) -> [text]:
     var args: [text] = [
@@ -120,6 +156,12 @@ fn target_action_args(repo_root: text, action: TargetAction) -> [text]:
     if action.emit_shared:
         args.push("--emit-shared")
         args.push("--no-mangle")
+    if action.triple.len() > 0:
+        args.push("--target")
+        args.push(action.triple)
+    if action.cpu_policy.len() > 0:
+        args.push("--cpu")
+        args.push(action.cpu_policy)
     args
 
 fn target_action_args_with_manifest(
@@ -154,7 +196,10 @@ fn target_dependency_manifest_path(
         val prefix = repo_root + "/"
         if not output.starts_with(prefix):
             return "target-error: dependency-output-outside-repo: " + dep_name
-        val digest = file_hash_sha256(output)
+        val digest_opt = file_hash_sha256(output)
+        if digest_opt.is_none():
+            return "target-error: dependency-output-missing: " + dep_name
+        val digest = digest_opt.unwrap()
         if not digest_is_sha256(digest):
             return "target-error: dependency-output-missing: " + dep_name
         inputs.push(DependencyArtifactInputV1(
@@ -220,6 +265,11 @@ fn execute_target_plan(repo_root: text, ts: TargetSet, name: text) -> TargetExec
     var preflight = 0
     while preflight < plan.order.len():
         val preflight_index = find_target(ts, plan.order[preflight])
+        if preflight_index >= 0:
+            val field_error = target_action_error(ts.targets[preflight_index])
+            if field_error.len() > 0:
+                return TargetExecutionSummary(plan.order.len(), 0, 0, 0, 0,
+                    ts.targets[preflight_index].name, field_error)
         if preflight_index >= 0 and ts.targets[preflight_index].deps.len() > 0:
             val blocked = ts.targets[preflight_index]
             # The canonical manifest sorts producer names. Link order is
@@ -271,7 +321,9 @@ fn execute_target_plan(repo_root: text, ts: TargetSet, name: text) -> TargetExec
             cache_dir: action.cache_dir,
             emit_archive: action.emit_archive,
             emit_shared: action.emit_shared,
-            action_digest: action.action_digest
+            action_digest: action.action_digest,
+            triple: action.triple,
+            cpu_policy: action.cpu_policy
         )
         val manifest_path = target_dependency_manifest_path(
             repo_root, ts, target, action.cache_dir)
@@ -288,16 +340,27 @@ fn execute_target_plan(repo_root: text, ts: TargetSet, name: text) -> TargetExec
                 "target-error: action-failed: " + target.name + ": exit=" + rc.to_text())
         # A successful action without a fresh nonempty candidate and SHA-256
         # identity is not success. Publish only after these checks pass.
-        if not file_exists(candidate_path) or file_size_raw(candidate_path) <= 0 or file_hash_sha256(candidate_path).len() != 64:
+        if not file_exists(candidate_path) or file_size_raw(candidate_path) <= 0 or not _file_sha256_present_v1(candidate_path):
             file_delete(candidate_path)
             return TargetExecutionSummary(plan.order.len(), executed, rebuilt, reused, unknown, target.name,
                 "target-error: fresh-output-invalid: " + target.name + ": " + candidate_path)
+        # Opt-in backend group members publish only after provider admission.
+        # The executor only READS the provider-owned sidecar; it never emits one.
+        val gate_error = target_provider_admission(ts, target, candidate_path, action.output, repo_root)
+        if gate_error.len() > 0:
+            file_delete(candidate_path)
+            return TargetExecutionSummary(plan.order.len(), executed, rebuilt, reused, unknown, target.name,
+                gate_error)
         if not file_rename(candidate_path, action.output):
             file_delete(candidate_path)
             return TargetExecutionSummary(plan.order.len(), executed, rebuilt, reused, unknown, target.name,
                 "target-error: output-publish-failed: " + target.name + ": " + action.output)
         i = i + 1
     TargetExecutionSummary(plan.order.len(), executed, rebuilt, reused, unknown, "", "")
+
+fn target_provider_admission(ts: TargetSet, target: BuildTarget, candidate_path: text, declared_output: text, repo_root: text) -> text:
+    """Empty text = admitted or ungated; else a refusal. Reads the sidecar, never writes it."""
+    provider_gate(ts, target, candidate_path, declared_output, provider_host_triple(target), repo_root + "/build/backends/receipts")
 
 fn format_target_execution(name: text, plan: ResolvePlan, summary: TargetExecutionSummary) -> text:
     format_target_plan(name, plan) + "\n" +
@@ -307,3 +370,9 @@ fn format_target_execution(name: text, plan: ResolvePlan, summary: TargetExecuti
         " reused=" + summary.reused_count.to_text() +
         " unknown-digests=" + summary.unknown_digest_count.to_text() +
         " closure-digest=unknown executor-reuse=disabled bootstrap=none"
+
+# Absent/unreadable file == no identity: nil never counts as a digest.
+fn _file_sha256_present_v1(path: text) -> bool:
+    if val digest = file_hash_sha256(path):
+        return digest.len() == 64
+    false

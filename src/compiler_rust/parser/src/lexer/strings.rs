@@ -1,7 +1,90 @@
 use super::escapes::EscapeResult;
 use crate::token::TokenKind;
 
+/// Diagnostic code for a `{...}` in a string literal that is not a valid
+/// interpolation and fell back to literal text. Staged as a warning; ratchet to
+/// an error by changing `warn_brace` (follow-up bug
+/// `string_interp_malformed_brace_warning_to_error_2026-11-09`).
+pub(crate) const BRACE_WARNING_CODE: &str = "W-STR-BRACE-001";
+pub(crate) const BRACE_ESCAPE_HINT: &str = "use `{{` for a literal `{` and `}}` for a literal `}` inside a string";
+
 impl<'a> super::Lexer<'a> {
+    fn warn_brace(&mut self, what: &str) {
+        self.brace_warnings.push(format!(
+            "{BRACE_WARNING_CODE}: {what} in string literal at line {} column {} is kept as literal text; {BRACE_ESCAPE_HINT}",
+            self.line, self.column
+        ));
+    }
+
+    /// Dispatch for a single-quoted literal after the opening quote has been
+    /// consumed: legacy raw string (gate OFF) or ADR-005 char literal (gate ON).
+    pub(super) fn scan_single_quoted(&mut self) -> TokenKind {
+        if self.char_literal_mode {
+            self.scan_char_literal()
+        } else {
+            self.scan_raw_string()
+        }
+    }
+
+    /// ADR-005 char literal: exactly one Unicode scalar or one escape, then `'`.
+    /// Any other content is a lex error that points at `r"..."`.
+    pub(super) fn scan_char_literal(&mut self) -> TokenKind {
+        const HINT: &str = "use r\"...\" for raw text";
+        let value = match self.peek() {
+            None | Some('\n') => {
+                return TokenKind::Error(format!("Unterminated char literal; {}", HINT));
+            }
+            Some('\'') => {
+                self.advance();
+                return TokenKind::Error(format!("Empty char literal ''; {}", HINT));
+            }
+            Some('\\') => {
+                self.advance();
+                match self.process_escape(false) {
+                    EscapeResult::Char(c) => c,
+                    // `\X` is not an escape: it is two scalars, which a char
+                    // literal cannot hold (pure-Simple lexer agrees: the
+                    // backslash survives, so 'a\b' is invalid as a char).
+                    EscapeResult::KeepBoth(_) => {
+                        return TokenKind::Error(format!("Char literal holds more than one Unicode scalar; {}", HINT))
+                    }
+                    EscapeResult::Error(msg) => return TokenKind::Error(msg),
+                    EscapeResult::Unterminated => {
+                        return TokenKind::Error(format!("Unterminated char literal; {}", HINT));
+                    }
+                }
+            }
+            Some(c) => {
+                self.advance();
+                c
+            }
+        };
+        if self.peek() == Some('\'') {
+            self.advance();
+            return TokenKind::CharLit(value);
+        }
+        // Consume the rest of the would-be literal on this line so lexing resumes cleanly.
+        let mut closed = false;
+        while let Some(c) = self.peek() {
+            if c == '\n' {
+                break;
+            }
+            self.advance();
+            if c == '\'' {
+                closed = true;
+                break;
+            }
+        }
+        if closed {
+            TokenKind::Error(format!(
+                "Char literal holds more than one Unicode scalar; {}",
+                HINT
+            ))
+        } else {
+            TokenKind::Error(format!("Unterminated char literal; {}", HINT))
+        }
+    }
+
     pub(super) fn scan_raw_string(&mut self) -> TokenKind {
         let mut value = String::new();
 
@@ -245,6 +328,7 @@ impl<'a> super::Lexer<'a> {
                 // This handles JSON patterns like {\"key\": \"value\"}
                 // where { is followed by an escape sequence
                 if self.check('\\') {
+                    self.warn_brace("`{` followed by an escape");
                     current_literal.push('{');
                     current_literal_raw.push('{');
                     continue;
@@ -253,6 +337,7 @@ impl<'a> super::Lexer<'a> {
                 // This handles patterns like '{' in "expected '{' after 'loss'"
                 // where the user wants literal braces in the string
                 if self.check('\'') || self.check('"') {
+                    self.warn_brace("`{` followed by a quote");
                     current_literal.push('{');
                     current_literal_raw.push('{');
                     continue;
@@ -276,6 +361,8 @@ impl<'a> super::Lexer<'a> {
                 let mut paren_depth = 0; // Track () and [] nesting for format spec detection
                 let mut in_string: Option<char> = None; // Track if inside string and which quote
                 let mut expr_failed = false;
+                // True once an unescaped `"` opened a nested string inside the hole.
+                let mut opened_nested_quote = false;
                 // Track the byte offset of the last top-level ':' for format spec splitting.
                 // A top-level ':' means: brace_depth==1, paren_depth==0, not in a string.
                 let mut last_top_colon: Option<usize> = None;
@@ -365,6 +452,7 @@ impl<'a> super::Lexer<'a> {
                             break;
                         } else {
                             in_string = Some(c); // Start of string
+                            opened_nested_quote = true;
                         }
                         expr.push(c);
                         self.advance();
@@ -422,10 +510,27 @@ impl<'a> super::Lexer<'a> {
                     expr.push(c);
                     self.advance();
                 }
+                // A hole that swallowed an unescaped `"` must be a complete
+                // expression; otherwise the `"` was really the outer literal's
+                // closing quote and the `{` a literal brace (`"{x (" + v + ")} y"`
+                // must not absorb the concatenation as literal text).
+                if !expr_failed && brace_depth == 0 && opened_nested_quote {
+                    let body = match last_top_colon {
+                        Some(pos) if Self::is_format_spec(&expr[pos + 1..]) => &expr[..pos],
+                        _ => expr.as_str(),
+                    };
+                    let mut probe = crate::parser_impl::core::Parser::new_expression(body);
+                    let parses = matches!(probe.parse_expression(), Ok(_))
+                        && (probe.is_at_end() || matches!(probe.current.kind, TokenKind::Eof));
+                    if !parses {
+                        expr_failed = true;
+                    }
+                }
                 // If expression scanning failed or braces unmatched, backtrack
                 // and treat the { as a literal character
                 if expr_failed || brace_depth != 0 {
                     *self = saved_state;
+                    self.warn_brace("unmatched or malformed `{`");
                     parts.truncate(saved_parts_len);
                     current_literal = saved_literal;
                     current_literal_raw = saved_literal_raw;
@@ -436,6 +541,7 @@ impl<'a> super::Lexer<'a> {
                 // If expression is empty (just "{}"), treat as literal "{}"
                 // This allows strings like "m{} block" without escaping
                 if expr.trim().is_empty() {
+                    self.warn_brace("empty `{}`");
                     current_literal.push_str("{}");
                     current_literal_raw.push_str("{}");
                 } else {
@@ -478,6 +584,14 @@ impl<'a> super::Lexer<'a> {
                 match self.process_escape(true) {
                     EscapeResult::Char(c) => {
                         current_literal.push(c);
+                        current_literal_raw.push(c);
+                    }
+                    // Not an escape: the backslash stays, exactly like the
+                    // pure-Simple lexer (`\X` -> `\` + X).
+                    EscapeResult::KeepBoth(c) => {
+                        current_literal.push('\\');
+                        current_literal.push(c);
+                        current_literal_raw.push('\\');
                         current_literal_raw.push(c);
                     }
                     EscapeResult::Error(msg) => return TokenKind::Error(msg),

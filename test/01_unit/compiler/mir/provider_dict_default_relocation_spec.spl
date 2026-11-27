@@ -1,0 +1,79 @@
+# Regression for stage2_test_runner_build_mir_segv_aarch64_2026-10-11.
+#
+# A provider class field default can transport as a DictLit with NIL
+# key_type (archive/SMF HIR-summary reconstruction leaves the slot absent;
+# ordinary frontend lowering stamps an Infer placeholder instead).
+# register_provider_class -> relocate_provider_default's DictLit arm used to
+# call relocate_provider_type(key_type, ...) unguarded; the nil key_type
+# dereference SIGSEGV'd the compiler (aarch64 stage-2 test_runner build,
+# 2026-10-11, fixed in PR #2943). The arm now mirrors the pre-existing
+# value_type guard. This spec calls relocate_provider_default directly with
+# a nil-key_type DictLit and pins that relocation preserves the slot instead
+# of dereferencing it.
+#
+# @cover src/compiler/50.mir/_MirLowering/provider_metadata.spl
+use std.spec.*
+use std.spec.step
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir._MirLowering.provider_metadata.*
+use compiler.hir.hir_types.*
+use compiler.hir.hir_definitions.*
+use compiler.common.diagnostics.span.{Span}
+
+fn trivial_symbols() -> SymbolTable:
+    val parsed = parse_and_build_module("fn placeholder() -> i64:\n    0\n", "dict_default_symbols.spl")
+    var hir_lowering = HirLowering.with_filename("dict_default_symbols.spl")
+    hir_lowering.lower_module(parsed).symbols
+
+fn nil_key_dict_expr() -> HirExpr:
+    val span = Span.empty()
+    HirExpr(kind: HirExprKind.DictLit([], nil, nil), has_type_: false,
+        type_: HirType(kind: HirTypeKind.Dict(
+            HirType(kind: HirTypeKind.Named(SymbolId.new(1), []), span: span),
+            HirType(kind: HirTypeKind.Named(SymbolId.new(2), []), span: span)), span: span),
+        span: span)
+
+fn typed_key_dict_expr() -> HirExpr:
+    val span = Span.empty()
+    val key_t = HirType(kind: HirTypeKind.Named(SymbolId.new(3), []), span: span)
+    HirExpr(kind: HirExprKind.DictLit([], key_t, nil), has_type_: false,
+        type_: HirType(kind: HirTypeKind.Dict(key_t,
+            HirType(kind: HirTypeKind.Named(SymbolId.new(4), []), span: span)), span: span),
+        span: span)
+
+describe "provider dict-literal default relocation nil key_type guard":
+    it "relocates a nil-key_type DictLit default without dereferencing nil":
+        step("relocate_provider_default on DictLit([], nil, nil)")
+        var lowering = MirLowering.new(trivial_symbols())
+        lowering.trait_impl_closure_complete = true
+        val relocated = lowering.relocate_provider_default(nil_key_dict_expr(), trivial_symbols(), {})
+        match relocated.kind:
+            case HirExprKind.DictLit(_, key_type, value_type):
+                expect(key_type).to_be_nil()
+                expect(value_type).to_be_nil()
+            case _: fail("nil-key_type dict default lost its DictLit shape")
+
+    it "still relocates a present key_type through the provider table path":
+        step("relocate_provider_default on DictLit([], Named, nil)")
+        var lowering = MirLowering.new(trivial_symbols())
+        lowering.trait_impl_closure_complete = true
+        val provider = trivial_symbols()
+        val relocated = lowering.relocate_provider_default(typed_key_dict_expr(), provider, {})
+        match relocated.kind:
+            case HirExprKind.DictLit(_, key_type, _):
+                expect(key_type == nil).to_be(false)
+            case _: fail("typed dict default lost its DictLit shape")
+
+    it "relocates nil-key_type entries without error state":
+        step("no relocation-family lowering errors are recorded")
+        var lowering = MirLowering.new(trivial_symbols())
+        lowering.trait_impl_closure_complete = true
+        lowering.relocate_provider_default(nil_key_dict_expr(), trivial_symbols(), {})
+        for e in lowering.errors:
+            if e.message.contains("relocate_provider") or e.message.contains("nil"):
+                fail("unexpected relocation error: {e.message}")
+        expect(true).to_be(true)

@@ -1,0 +1,181 @@
+# Admission of versioned library artifacts (AC-4..AC-8).
+# Plan: doc/03_plan/compiler/lib_dylib_versioning_plan.md
+# Plain data only: also used by the GPU runtime provider slot, so nothing
+# here may depend on a compiler session.
+
+use compiler.driver.libver.identity.{LibIdentity}
+use compiler.driver.libver.sidecar.{libver_parse_sidecar}
+use compiler.driver.libver.naming.{parse_stdlib_name}
+
+struct LibHostReq:
+    """What the consumer accepts. Plain data; no session state."""
+    name_required: text
+    host_triple: text
+    host_tier_base: text
+    host_tier_features: [text]
+    abi_major_supported: i64
+    abi_minor_supported: i64
+    abi_window: i64
+    deprecated_abi: [i64]
+    iface_parts_required: [text]
+    iface_digest_required: text
+    artifact_sha256: text
+    producer_required: Option<text>
+
+enum LibRefusal:
+    SidecarMissing
+    SidecarMalformed
+    NameMismatch
+    TripleMismatch
+    AbiMajorMismatch
+    AbiMinorTooNew
+    AbiOutOfWindow
+    TierTooHigh
+    TierUnknown
+    DigestMismatch
+    HashMismatch
+    ProducerMismatch
+
+    fn name() -> text:
+        match self:
+            case SidecarMissing: "SidecarMissing"
+            case SidecarMalformed: "SidecarMalformed"
+            case NameMismatch: "NameMismatch"
+            case TripleMismatch: "TripleMismatch"
+            case AbiMajorMismatch: "AbiMajorMismatch"
+            case AbiMinorTooNew: "AbiMinorTooNew"
+            case AbiOutOfWindow: "AbiOutOfWindow"
+            case TierTooHigh: "TierTooHigh"
+            case TierUnknown: "TierUnknown"
+            case DigestMismatch: "DigestMismatch"
+            case HashMismatch: "HashMismatch"
+            case ProducerMismatch: "ProducerMismatch"
+
+struct LibAdmit:
+    ok: bool
+    refusal: Option<LibRefusal>
+
+fn libver_admitted() -> LibAdmit:
+    LibAdmit(ok: true, refusal: None)
+
+fn libver_refused(r: LibRefusal) -> LibAdmit:
+    LibAdmit(ok: false, refusal: Some(r))
+
+# Entry point for loaders and link steps: sidecar text in, verdict out.
+fn libver_admit(sidecar_text: text, host: LibHostReq) -> LibAdmit:
+    if sidecar_text.trim() == "":
+        return libver_refused(LibRefusal.SidecarMissing)
+    match libver_parse_sidecar(sidecar_text):
+        case Some(id): libver_admit_identity(id, host)
+        case None: libver_refused(LibRefusal.SidecarMalformed)
+
+# Fixed check order; the first failing check names the refusal.
+fn libver_admit_identity(id: LibIdentity, host: LibHostReq) -> LibAdmit:
+    if id.name != host.name_required:
+        return libver_refused(LibRefusal.NameMismatch)
+    if id.triple != host.host_triple:
+        return libver_refused(LibRefusal.TripleMismatch)
+    if id.abi_major != host.abi_major_supported:
+        val older = host.abi_major_supported - id.abi_major
+        if older < 1:
+            return libver_refused(LibRefusal.AbiMajorMismatch)
+        if older > host.abi_window or not abi_list_has(host.deprecated_abi, id.abi_major):
+            return libver_refused(LibRefusal.AbiOutOfWindow)
+    elif id.abi_minor > host.abi_minor_supported:
+        return libver_refused(LibRefusal.AbiMinorTooNew)
+    val tier = libver_tier_verdict(id.cpu_tier, host.host_tier_base, host.host_tier_features)
+    if tier == 1:
+        return libver_refused(LibRefusal.TierUnknown)
+    if tier == 2:
+        return libver_refused(LibRefusal.TierTooHigh)
+    if id.iface_digest != host.iface_digest_required:
+        if host.iface_parts_required.len() == 0 or not texts_subset(host.iface_parts_required, id.iface_parts):
+            return libver_refused(LibRefusal.DigestMismatch)
+    if id.sha256 != host.artifact_sha256:
+        return libver_refused(LibRefusal.HashMismatch)
+    match host.producer_required:
+        case Some(p):
+            if p != id.producer:
+                return libver_refused(LibRefusal.ProducerMismatch)
+        case None: ()
+    libver_admitted()
+
+fn abi_list_has(xs: [i64], v: i64) -> bool:
+    for x in xs:
+        if x == v:
+            return true
+    false
+
+fn texts_subset(need: [text], have: [text]) -> bool:
+    for n in need:
+        if not have.contains(n):
+            return false
+    true
+
+# Tier verdict: 0 admitted, 1 unknown base, 2 too high (base rank or feature).
+fn libver_tier_verdict(artifact_tier: text, host_tier: text, host_features: [text]) -> i64:
+    val a = artifact_tier.split("+")
+    val h = host_tier.split("+")
+    val a_arch = tier_arch(a[0])
+    val h_arch = tier_arch(h[0])
+    if a_arch == "" or h_arch == "":
+        return 1
+    if a_arch != "generic" and a_arch != h_arch:
+        return 2
+    if tier_rank(a[0]) > tier_rank(h[0]) and a_arch != "generic":
+        return 2
+    var i = 1
+    while i < a.len():
+        if not host_features.contains(a[i]) and not h.contains(a[i]):
+            return 2
+        i = i + 1
+    0
+
+# Levels per arch, baseline first. Mirrors the `levels` key of
+# config/build/cpu_tiers.sdn (SIMD lane); swap this table for a reader once
+# that file lands.
+fn tier_levels(arch: text) -> [text]:
+    match arch:
+        case "x86_64": ["x86-64", "x86-64-v2", "x86-64-v3", "x86-64-v4"]
+        case "aarch64": ["armv8-a", "armv8.2-a", "armv9-a"]
+        case "riscv64": ["rv64gc", "rv64gcv"]
+        case _: []
+
+fn tier_canon(base: text) -> text:
+    if base == "x86-64-v1":
+        return "x86-64"
+    base
+
+fn tier_arch(base: text) -> text:
+    val b = tier_canon(base)
+    if b == "generic":
+        return "generic"
+    for arch in ["x86_64", "aarch64", "riscv64"]:
+        if tier_levels(arch).contains(b):
+            return arch
+    ""
+
+fn tier_rank(base: text) -> i64:
+    val b = tier_canon(base)
+    val levels = tier_levels(tier_arch(b))
+    var i = 0
+    while i < levels.len():
+        if levels[i] == b:
+            return i
+        i = i + 1
+    0
+
+
+# Link-time check for a static archive (AC-12a). The archive file name must
+# parse and agree with its sidecar BEFORE the normal admission runs.
+fn libver_link_check(archive_file_name: text, sidecar_text: text, host: LibHostReq) -> LibAdmit:
+    val parsed = parse_stdlib_name(archive_file_name)
+    if parsed.is_none():
+        return libver_refused(LibRefusal.NameMismatch)
+    match libver_parse_sidecar(sidecar_text):
+        case Some(id):
+            val parts = parsed.unwrap()
+            if parts.name != id.name or parts.semver != id.semver or parts.triple != id.triple or parts.tier != id.cpu_tier:
+                return libver_refused(LibRefusal.NameMismatch)
+        case None: ()
+    libver_admit(sidecar_text, host)

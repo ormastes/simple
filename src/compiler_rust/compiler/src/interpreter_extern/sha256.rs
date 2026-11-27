@@ -143,8 +143,7 @@ fn require_arity(args: &[Value], expected: usize, who: &str) -> Result<(), Compi
 /// `rt_sha256_new() -> i64`
 pub fn rt_sha256_new(args: &[Value]) -> Result<Value, CompileError> {
     require_arity(args, 0, "rt_sha256_new")?;
-    let handle = SHA256_COUNTER
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |current| current.checked_add(1))
+    let handle = simple_common::atomic_update::update_i64(&SHA256_COUNTER, Ordering::SeqCst, Ordering::SeqCst, |current| current.checked_add(1))
         .map_err(|_| CompileError::runtime("rt_sha256_new: handle space exhausted"))?;
     SHA256_STATE.lock().unwrap().insert(handle, Context::new(&SHA256));
     Ok(Value::Int(handle))

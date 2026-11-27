@@ -1,0 +1,76 @@
+# Bug stage3_selfbuild_raw_text_strict_extern_2026-11-18.
+# A `for key in keys` binder (and any `text` parameter fed from one) holds the
+# RAW char* the element decode produced. Externs listed in
+# tagged_text_value_arg_indices decode their operand with rt_core_as_string,
+# which rejects a raw char*: `rt_hash_text(key)` returned 0 for every key, the
+# selected-export key table missed every lookup, and the Stage 3 compiler died
+# `PANIC: bounds_check intrinsic index=-1` in
+# module_surface_selected_exports_project_v1 on any input.
+# Fixture: test/fixtures/native_tagged_text_extern_raw_operand/main.spl
+
+use std.spec.*
+use compiler.hir.hir_types.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir.mir_instruction_graph.{MirModule, MirFunction}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.mir.mir.*
+use compiler.mir._MirLowering.module_lowering.*
+
+val TT_SOURCE = "extern fn rt_hash_text(content: text) -> i64\nextern fn rt_dir_delete(path: text) -> bool\n\nfn hash_param(key: text) -> i64:\n    rt_hash_text(key)\n\nfn hash_loop(keys: [text]) -> i64:\n    var total = 0\n    for key in keys:\n        total = total + rt_hash_text(key)\n    total\n\nfn bridge_param(path: text) -> bool:\n    rt_dir_delete(path)\n\nfn main():\n    val a = hash_param(\"a\")\n    val b = hash_loop([\"a\"])\n    val c = bridge_param(\"a\")\n    print a + b\n"
+
+class TtLowered:
+    mir: MirModule
+    errors: text
+
+fn tt_lower() -> TtLowered:
+    val log = Logger(level: 0)
+    val ast = parse_full_frontend(TT_SOURCE, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["app.main"] = ast
+    val sources = [SourceFile(path: "app/main.spl", content: TT_SOURCE, module_name: "app.main")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var lowering = hirlowering_for_module("app.main", surfaces)
+    val hir = lowering.lower_module(ast)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    var prescan_mods: Dict<text, HirModule> = {}
+    prescan_mods["main_hir"] = hir
+    mir_lowering.prescan_module_struct_names(prescan_mods, "main_hir")
+    val mir = mir_lowering.lower_module(hir, [hir])
+    var out = ""
+    for e in mir_lowering.errors:
+        out = out + "mir: " + e.message + "\n"
+    TtLowered(mir: mir, errors: out)
+
+fn tt_function_text(mir: MirModule, name: text) -> text:
+    for fid in mir.functions.keys():
+        val f = mir.functions[fid]
+        if f.name == name or f.name.ends_with("." + name):
+            return "{f.blocks}"
+    ""
+
+describe "Strict tagged-text extern operands":
+    it "lowers the probe without MIR errors":
+        val lowered = tt_lower()
+        expect(lowered.errors).to_equal("")
+        expect(tt_function_text(lowered.mir, "hash_param").contains("rt_hash_text")).to_equal(true)
+
+    it "normalizes a text parameter of unknown representation before rt_hash_text":
+        step("raw char* must be boxed (rt_string_new); a tagged handle is kept")
+        val lowered = tt_lower()
+        expect(tt_function_text(lowered.mir, "hash_param").contains("rt_string_new")).to_equal(true)
+
+    it "normalizes a for-loop text binder before rt_hash_text":
+        val lowered = tt_lower()
+        expect(tt_function_text(lowered.mir, "hash_loop").contains("rt_string_new")).to_equal(true)
+
+    it "keeps the char* bridge for a true const char* extern (control)":
+        val lowered = tt_lower()
+        val body = tt_function_text(lowered.mir, "bridge_param")
+        expect(body.contains("rt_interp_cstr")).to_equal(true)
+        expect(body.contains("rt_string_new")).to_equal(false)

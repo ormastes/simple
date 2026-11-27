@@ -59,3 +59,82 @@ fixture from a bad parser without touching either.
 - `nested_fn_in_spec_block_loses_captured_local_2026-08-04.md` — the record that
   carried these three until now; its 2026-09-19 fix note records the measurement
   that separated them.
+
+
+## 2026-11-03 source investigation (candidate; behavioral verification blocked)
+
+Current release source was inspected at `074d5611e1dfb53286fb1acb2e3e457957047013`.
+The pure reader owners are `src/os/kernel/acpi/hpet_table.spl` and
+`src/os/kernel/acpi/fadt.spl`; both accept table-relative readers and deliberately
+permit `base = 0`. FADT fixture writes and parser accesses agree at 76 and
+208/212. No evidence attributes these failures to nested-function capture.
+
+An independent production HPET layout defect was found: the code invented four
+reserved bytes after EventTimerBlockID. The HPET specification 1.0a section 3.2.4
+places the 12-byte GAS at byte 40, hence its address at byte 44. The parser and
+fixture now use these standard offsets. Source reference:
+[Intel HPET specification](https://www.intel.com/content/dam/www/public/us/en/documents/technical-specifications/software-developers-hpet-spec-1-0a.pdf).
+This layout correction alone does **not** explain the historical zero result,
+because the old fixture agreed with the old parser's wrong layout.
+
+The three positive examples now assert fixture words before calling the parser,
+and inspect the optional payload with `?? 0` before retaining the original
+numeric cast assertion. A payload/cast disagreement can therefore identify the
+assertion boundary without removing the reported failure operation. Adjacent
+fixtures cover a nonzero high HPET address word and nonzero legacy fallback for
+wrong-space/zero-address FADT extended GAS. No physical MMIO is accessed.
+
+**TEST_BLOCKED:** no qualified self-hosted Simple CLI is available on this host;
+`bin/simple.exe` is the bootstrap-only Rust seed. Zero behavioral examples were
+executed. The 13 authored examples and their output/cast boundaries still require
+execution through a qualified producer. This bug remains open; neither a hardware
+PASS nor a diagnosis/closure of the historical three zero reads is claimed.
+
+## 2026-11-09 diagnosis — root cause found, fix implemented (verification pending)
+
+Executed against worktree source with `child binary: C:\dev\wt\acpi\bin\simple.exe`
+(release/1.0.0 @ e954b1d95e2 + this change).
+
+**Red (before):** 13 examples, 3 failed — the same three, same numbers
+(`expected 0 to equal 4275044352 / 45064 / 47104`).
+
+**Root cause is NOT in the ACPI parsers or fixtures.** In each failing example
+the `expect(result ?? 0).to_equal(...)` assertion already PASSED; only the
+trailing `expect(result as u64)` / `expect(result as u32)` line failed. The
+sibling examples that use only `?? 0` (`preserves both HPET address words`,
+both `falls back to a nonzero legacy port` cases) were green on the same run,
+so `acpi_hpet_base_raw` and `acpi_fadt_pm_tmr_port_raw` return the correct
+payloads.
+
+The zero comes from applying `as <int>` to a `T?` value returned from a
+function: the seed evaluates `Some(0xFED00000) as u64` to `0`. A spec-independent
+probe reproduces it (`fn mk(v: u64) -> u64?` returning `v`; `mk(0xFED00000) as u64`
+-> `0`, while `?? 0` -> `0xFED00000`; a locally-typed `val r: u32? = 0xB008; r as u32`
+passes, so the defect is specific to the boxed/returned optional). Under the
+nil-only-in-unsafe policy (`T?` -> `T` must go through `??`/unwrap), that cast
+should be rejected at compile time, not silently zeroed — filed separately as
+`optional_as_cast_yields_zero_2026_11_09`.
+
+Why it looked like "three reads": the only positive-payload assertions in the
+original spec were written with `as`, and the nil siblings cannot distinguish a
+zeroing parser from a working one. The nested-fn attribution, the HPET GAS
+offset (fixed in #6338), and the FADT 76/208 layout were all red herrings for
+this symptom.
+
+**Fix (spec):** drop every `as` cast on an optional; assert `to_not_be_nil()` and
+`?? 0` payload separately; add a discriminating example that pairs a zero fixture
+(nil) with a nonzero fixture (present) for both parsers.
+
+**Green (after):** `SPEC FILE VERDICT: ... outcome=OK executed=14 passed=14 failed=0`.
+Status: fix-implemented-verification-pending (interpreter run on the Windows seed;
+native verification outstanding).
+
+## Fix (2026-11-13)
+
+`acpi_test.spl` did not execute at all on the current seed (`executed=0`, HIR
+error "cannot cast an optional `T?` to `u64` with `as`") because
+`src/os/kernel/acpi/clock_sources.spl` cast the `u64?` results of
+`_resolve_rsdp()` / `acpi_find_table()` with `as u64` after a nil check. Narrowed
+with `?? 0` (the nil case already returned above). Red 0/14 executed -> green
+14/14 (`bin/simple test test/01_unit/os/acpi/acpi_test.spl`). `madt_spec.spl`
+still fails to load with the same error class from another module; not addressed here.

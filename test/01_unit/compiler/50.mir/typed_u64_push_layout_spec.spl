@@ -1,0 +1,87 @@
+# @req REQ-SSPEC-COMPILER
+# native_composite_packed_u64_readback_exit31_2026_11_07
+use std.spec.{describe, it, expect}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+struct TypedPushAudit:
+    errors: [text]
+    functions: i64
+    callees: [text]
+
+fn typed_push_audit(source: text) -> TypedPushAudit:
+    val filename = "testdata/typed_u64_push_layout.spl"
+    val ast = parse_full_frontend(source, filename, "typed_u64_push_layout", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(ast)
+    var lowering = MirLowering.new(hir.symbols)
+    val mir = lowering.lower_module(hir)
+    var errors: [text] = []
+    for error in hir_lowering.errors:
+        errors.push("HIR: " + error.message)
+    for error in lowering.errors:
+        errors.push("MIR: " + error.message)
+    var functions = 0
+    var callees: [text] = []
+    for function in mir.functions.values():
+        if function.name != "probe" and not function.name.ends_with(".probe"): continue
+        functions = functions + 1
+        for block in function.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case MirInstKind.Call(_, callee, _):
+                        match callee.kind:
+                            case MirOperandKind.Const(MirConstValue.Str(name), _): callees.push(name)
+                            case _: ()
+                    case _: ()
+    TypedPushAudit(errors: errors, functions: functions, callees: callees)
+
+fn typed_push_count(names: [text], expected: text) -> i64:
+    var count = 0
+    for name in names:
+        if name == expected: count = count + 1
+    count
+
+describe "typed U64 push storage ownership":
+    it "a declared U64 array passes raw bits to its layout-aware provider":
+        val audit = typed_push_audit("fn probe(words: [u64], value: u64) -> i64:\n    words.push(value)\n    0\n")
+        expect(audit.errors.len()).to_equal(0)
+        expect(audit.functions).to_equal(1)
+        expect(typed_push_count(audit.callees, "rt_typed_words_u64_push")).to_equal(1)
+        expect(typed_push_count(audit.callees, "rt_array_push")).to_equal(0)
+        expect(typed_push_count(audit.callees, "rt_value_int_wide")).to_equal(0)
+
+    it "an extern returned packed-capable U64 array keeps declared element authority":
+        val audit = typed_push_audit("extern fn rt_array_new_with_cap_u64(capacity: i64) -> [u64]\nfn probe() -> i64:\n    val words = rt_array_new_with_cap_u64(1)\n    words.push(8u64)\n    0\n")
+        expect(audit.errors.len()).to_equal(0)
+        expect(audit.functions).to_equal(1)
+        expect(typed_push_count(audit.callees, "rt_typed_words_u64_push")).to_equal(1)
+        expect(typed_push_count(audit.callees, "rt_array_push")).to_equal(0)
+        expect(typed_push_count(audit.callees, "rt_value_int_wide")).to_equal(0)
+
+    it "a signed array retains generic tagged slot insertion":
+        val audit = typed_push_audit("fn probe(words: [i64], value: i64) -> i64:\n    words.push(value)\n    0\n")
+        expect(audit.errors.len()).to_equal(0)
+        expect(audit.functions).to_equal(1)
+        expect(typed_push_count(audit.callees, "rt_typed_words_u64_push")).to_equal(0)
+        expect(typed_push_count(audit.callees, "rt_array_push")).to_equal(1)
+        expect(typed_push_count(audit.callees, "rt_value_int_wide")).to_equal(1)
+
+    it "an Any array cannot acquire typed storage authority from a U64 payload":
+        val audit = typed_push_audit("fn probe(words: [Any], value: u64) -> i64:\n    words.push(value)\n    0\n")
+        expect(audit.errors.len()).to_equal(0)
+        expect(audit.functions).to_equal(1)
+        expect(typed_push_count(audit.callees, "rt_typed_words_u64_push")).to_equal(0)
+        expect(typed_push_count(audit.callees, "rt_array_push")).to_equal(1)
+
+    it "a declared Any empty literal does not select storage from its first pushed value":
+        val audit = typed_push_audit("fn probe() -> i64:\n    var words: [Any] = []\n    words.push(8u64)\n    0\n")
+        expect(audit.errors.len()).to_equal(0)
+        expect(audit.functions).to_equal(1)
+        expect(typed_push_count(audit.callees, "rt_typed_words_u64_push")).to_equal(0)
+        expect(typed_push_count(audit.callees, "rt_array_push")).to_equal(1)

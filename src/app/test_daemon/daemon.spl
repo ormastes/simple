@@ -19,9 +19,12 @@ use app.test_daemon.{
     TREQ_SESSION_ACQUIRE, TREQ_SESSION_RELEASE, TREQ_SESSION_STATUS,
     TREQ_SESSION_RESET, TREQ_SESSION_EXECUTE, TREQ_SESSION_STOP,
     TRESP_QUEUED, TRESP_RUNNING, TRESP_COMPLETED, TRESP_FAILED,
-    TRESP_SKIPPED, TRESP_CACHED, TRESP_ERROR
+    TRESP_SKIPPED, TRESP_CACHED, TRESP_ERROR,
+    test_request_mcdc_mode, test_daemon_mcdc_child_env_prefix,
+    test_daemon_mcdc_child_profile_arg
 }
 use app.test_daemon.agent_pool.{AgentPool, agent_pool_new}
+use app.test_cache_shared.{shared_cache_clear_memo}
 use app.test_incremental_state_shared.{IncrementalTestState, incremental_test_state_load}
 use app.test_daemon.qemu_broker.{QemuBroker, qemu_broker_new}
 use app.test_daemon.resource_policy.{
@@ -43,9 +46,13 @@ use app.test_daemon.adapters.hardware_adapter.{OpenocdAdapter, Trace32Adapter, o
 
 use std.io_runtime.{time_now_unix_micros}
 use std.io_runtime.{hash_text}
-use std.io_runtime.{dir_list}
+use std.io_runtime.{dir_list_or_empty}
 use std.io_runtime.{file_exists}
 use std.io_runtime.{mkdir_p}
+use app.io.process_ops.{process_run_bounded}
+use std.test_runner.test_runner_types.{TEST_OUTPUT_CAPTURE_BYTES}
+use std.test_runner.test_executor_parsing.{parse_test_output}
+use app.test_daemon.native_profile.{NATIVE_SESSION_PROFILE_V1, native_session_binding_error, native_session_worker_args, native_session_transport_output, native_session_completed}
 # ============================================================================
 # Test Daemon
 # ============================================================================
@@ -70,6 +77,7 @@ impl TestDaemon:
 
     me run():
         while self.runner.is_running():
+            shared_cache_clear_memo()
             self.runner.run_poll_cycle(self.handle_request)
 
             # Periodic session broker cleanup every 50 cycles
@@ -150,6 +158,11 @@ impl TestDaemon:
             resp.fields["retry_after_ms"] = "{self.config.resource_policy.idle_poll_ms}"
             return resp
 
+        # A profile request never reads or writes the legacy path-only cache
+        # and never joins a legacy in-flight request with a different producer.
+        if req.fields.contains_key("native_profile"):
+            return self.execute_native_test(req)
+
         # Dedup check
         val dedup_key = hash_text(test_path)
         val existing = self.active_requests["{dedup_key}"]
@@ -160,8 +173,13 @@ impl TestDaemon:
 
         self.active_requests["{dedup_key}"] = req.id
 
-        # Change detection (unless clean run)
-        if clean != "true":
+        # Change detection (unless clean run). The cache is keyed by path only,
+        # so it may serve and record MC/DC-on runs only: an off/dynamic result
+        # must never replay to a client that asked for a different mode.
+        val mcdc_mode = test_request_mcdc_mode(req.fields)
+        if clean == "true":
+            shared_cache_clear_memo()
+        elif mcdc_mode == "on":
             val cached = self.incremental_state.check_freshness(test_path)
             if cached.test_path != "":
                 # Remove from active
@@ -174,10 +192,12 @@ impl TestDaemon:
                 resp.fields["duration_ms"] = "{cached.duration_ms}"
                 resp.fields["output"] = cached.output
                 resp.fields["cached"] = "true"
+                resp.fields["mcdc_mode"] = mcdc_mode
                 return resp
 
         # Execute test
-        val result = self.execute_test(test_path)
+        var result = self.execute_test(test_path, req.fields)
+        result.request_id = req.id
 
         # Remove from active
         self.active_requests["{dedup_key}"] = ""
@@ -187,6 +207,7 @@ impl TestDaemon:
     # --- Run all tests ---
 
     fn handle_run_all(req: DaemonRequest) -> DaemonResponse:
+        shared_cache_clear_memo()
         val filter = req.fields["filter"] ?? ""
         val test_files = discover_test_files(filter)
 
@@ -196,23 +217,23 @@ impl TestDaemon:
         var total_cached: i64 = 0
         val start_time = time_now_unix_micros()
 
+        val mcdc_mode = test_request_mcdc_mode(req.fields)
         var i = 0
         while i < test_files.len():
             val test_path = test_files[i]
-            val cached = self.incremental_state.check_freshness(test_path)
+            # Path-keyed cache serves MC/DC-on runs only (see handle_run_single).
+            val cached = self.incremental_state.check_freshness(if mcdc_mode == "on": test_path else: "")
 
-            if cached.test_path != "":
+            if mcdc_mode == "on" and cached.test_path != "":
                 total_passed = total_passed + cached.passed
                 total_failed = total_failed + cached.failed
                 total_skipped = total_skipped + cached.skipped
                 total_cached = total_cached + 1
             else:
-                self.execute_test(test_path)
-                val entry = self.incremental_state.check_freshness(test_path)
-                if entry.test_path != "":
-                    total_passed = total_passed + entry.passed
-                    total_failed = total_failed + entry.failed
-                    total_skipped = total_skipped + entry.skipped
+                val run = self.execute_test(test_path, req.fields)
+                total_passed = total_passed + ((run.fields["passed"] ?? "0").to_i64() ?? 0)
+                total_failed = total_failed + ((run.fields["failed"] ?? "0").to_i64() ?? 0)
+                total_skipped = total_skipped + ((run.fields["skipped"] ?? "0").to_i64() ?? 0)
             i = i + 1
 
         val elapsed = (time_now_unix_micros() - start_time) / 1000
@@ -224,24 +245,31 @@ impl TestDaemon:
         resp.fields["cached"] = "{total_cached}"
         resp.fields["total"] = "{test_files.len()}"
         resp.fields["duration_ms"] = "{elapsed}"
+        resp.fields["mcdc_mode"] = mcdc_mode
         resp
 
     # --- Clean run (bypass cache) ---
 
     fn handle_clean_run(req: DaemonRequest) -> DaemonResponse:
+        shared_cache_clear_memo()
+        if req.fields.contains_key("native_profile"):
+            return self.handle_run_single(req)
         val test_path = req.fields["test_path"] ?? ""
         if test_path == "":
             var resp = daemon_response_new(req.id, TRESP_ERROR)
             resp.fields["error"] = "missing test_path"
             return resp
 
-        self.execute_test(test_path)
+        var result = self.execute_test(test_path, req.fields)
+        result.request_id = req.id
+        result
 
     # --- Status query ---
 
     fn handle_status(req: DaemonRequest) -> DaemonResponse:
         val state = self.runner.get_state()
         var resp = daemon_response_new(req.id, TRESP_COMPLETED)
+        resp.fields["native_profile"] = NATIVE_SESSION_PROFILE_V1
         resp.fields["daemon_status"] = state.status_text()
         resp.fields["items_processed"] = "{state.items_processed}"
         resp.fields["errors_count"] = "{state.errors_count}"
@@ -303,8 +331,10 @@ impl TestDaemon:
         val output = req.fields["output"] ?? ""
         self.agent_pool.report_result(agent_id, test_path, status, passed, failed, duration_ms, output)
 
-        # Also record in cache
-        self.incremental_state.record_daemon_result(test_path, status, passed, failed, 0, duration_ms, output)
+        # Also record in cache -- MC/DC-on results only. Agents do not report
+        # their mode, so an unmarked report is never cached.
+        if (req.fields["mcdc_mode"] ?? "") == "on":
+            self.incremental_state.record_daemon_result(test_path, status, passed, failed, 0, duration_ms, output)
 
         var resp = daemon_response_new(req.id, TRESP_COMPLETED)
         resp.fields["test_path"] = test_path
@@ -417,13 +447,47 @@ impl TestDaemon:
 
     # --- Execute a test ---
 
-    fn execute_test(test_path: text) -> DaemonResponse:
+    fn execute_native_test(req: DaemonRequest) -> DaemonResponse:
+        val test_path = req.fields["test_path"] ?? ""
+        var resp = daemon_response_new(req.id, TRESP_FAILED)
+        resp.fields["test_path"] = test_path
+        resp.fields["passed"] = "0"
+        resp.fields["failed"] = "1"
+        resp.fields["cached"] = "false"
+        val binding_error = native_session_binding_error(req)
+        if binding_error != "":
+            resp.fields["output"] = binding_error
+            return resp
+        val timeout_ms = ((req.fields["timeout_seconds"] ?? "").to_i64() ?? 0) * 1000
+        val start = time_now_unix_micros()
+        val (out, err, code) = process_run_bounded(req.fields["worker"] ?? "",
+            native_session_worker_args(req), timeout_ms, TEST_OUTPUT_CAPTURE_BYTES)
+        val output = out + err
+        val (passed, failed, skipped, pending) = parse_test_output(output)
+        val verified = native_session_completed(code, passed, failed, pending)
+        resp.status = if verified: TRESP_COMPLETED else: TRESP_FAILED
+        resp.fields["passed"] = if verified: "{passed}" else: "0"
+        resp.fields["failed"] = if verified: "0" else: if failed > 0: "{failed}" else: "1"
+        resp.fields["skipped"] = "{skipped}"
+        resp.fields["duration_ms"] = "{(time_now_unix_micros() - start) / 1000}"
+        resp.fields["output"] = native_session_transport_output(output)
+        resp.fields["native_profile"] = NATIVE_SESSION_PROFILE_V1
+        resp.fields["worker_sha256"] = req.fields["worker_sha256"] ?? ""
+        resp.fields["producer_sha256"] = req.fields["producer_sha256"] ?? ""
+        resp.fields["runtime_sha256"] = req.fields["runtime_sha256"] ?? ""
+        resp.fields["environment_sha256"] = req.fields["environment_sha256"] ?? ""
+        resp
+
+    fn execute_test(test_path: text, req_fields: {text: text}) -> DaemonResponse:
         # Shell out to the local child runner; the daemon owns scheduling.
         extern fn rt_shell_exec(cmd: text) -> text
         extern fn rt_shell_exit_code() -> i64
 
         val setup_start = time_now_unix_micros()
-        val cmd = "bin/simple test {test_path} --no-session-daemon --sequential 2>&1"
+        # The child's MC/DC mode comes from the REQUEST (the client's resolved
+        # mode), never from the daemon's inherited environment.
+        val mcdc_mode = test_request_mcdc_mode(req_fields)
+        val cmd = "{test_daemon_mcdc_child_env_prefix(req_fields)} bin/simple test {test_path} --no-session-daemon --sequential{test_daemon_mcdc_child_profile_arg(req_fields)} 2>&1"
         val setup_ms = (time_now_unix_micros() - setup_start) / 1000
 
         val test_start = time_now_unix_micros()
@@ -435,8 +499,9 @@ impl TestDaemon:
         val passed = if exit_code == 0: 1 else: 0
         val failed = if exit_code != 0: 1 else: 0
 
-        # Record in cache
-        self.incremental_state.record_daemon_result(test_path, status, passed, failed, 0, duration_ms, output)
+        # Record in cache (MC/DC-on runs only; see handle_run_single)
+        if mcdc_mode == "on":
+            self.incremental_state.record_daemon_result(test_path, status, passed, failed, 0, duration_ms, output)
 
         var resp = daemon_response_new("", status)
         resp.fields["test_path"] = test_path
@@ -447,6 +512,7 @@ impl TestDaemon:
         resp.fields["setup_ms"] = "{setup_ms}"
         resp.fields["output"] = output
         resp.fields["cached"] = "false"
+        resp.fields["mcdc_mode"] = mcdc_mode
         resp
 
     fn active_request_count() -> i64:
@@ -521,7 +587,7 @@ fn discover_test_files_in_dir(dir: text, filter: text, files: [text]):
     if not file_exists(dir):
         return
 
-    val entries = dir_list(dir)
+    val entries = dir_list_or_empty(dir)
     var i = 0
     while i < entries.len():
         val entry = entries[i]

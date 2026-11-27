@@ -1,0 +1,125 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# Bug: doc/08_tracking/bug/compiler_driver_v1_bootstrap_activation_blocked_on_callable_loader_2026-08-14.md
+# The packed compile request/result that crosses the CompilerDriverV1 provider
+# boundary. Only fixed-width scalars and length-prefixed UTF-8 cross; no
+# CompileOptions / CompileResult object layout is shared with the artifact.
+
+use std.spec.step
+
+use std.spec.*
+use compiler.driver.driver_provider_compile_wire_v1.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default, driver_output_format_smf}
+
+fn sample_request() -> DriverCompileRequestV1:
+    DriverCompileRequestV1(
+        format_code: DRIVER_COMPILE_FORMAT_SMF_V1,
+        opt_level: 2,
+        has_opt_level: true,
+        release: true,
+        low_memory: false,
+        no_borrow_check: true,
+        source: "src/app/cli/bootstrap_main.spl",
+        output: "build/out/bootstrap_main.smf",
+        backend: "cranelift",
+        native_target: "x86_64-unknown-linux-gnu",
+        backend_plugin_path: "",
+        cli_mode_text: "aot",
+    )
+
+describe "CompilerDriverV1 compile wire":
+    it "round-trips a compile request through the packed encoding":
+        # @req REQ-SSPEC-COMPILER
+        step("round-trips a compile request through the packed encoding")
+        val bytes = encode_driver_compile_request_v1(sample_request())
+        expect(bytes.len()).to_be_greater_than(DRIVER_COMPILE_REQUEST_V1_HEADER_SIZE)
+        val decoded = decode_driver_compile_request_v1(bytes)
+        expect(decoded.ok).to_equal(true)
+        expect(decoded.value.format_code).to_equal(DRIVER_COMPILE_FORMAT_SMF_V1)
+        expect(decoded.value.opt_level).to_equal(2)
+        expect(decoded.value.has_opt_level).to_equal(true)
+        expect(decoded.value.release).to_equal(true)
+        expect(decoded.value.low_memory).to_equal(false)
+        expect(decoded.value.no_borrow_check).to_equal(true)
+        expect(decoded.value.source).to_equal("src/app/cli/bootstrap_main.spl")
+        expect(decoded.value.output).to_equal("build/out/bootstrap_main.smf")
+        expect(decoded.value.backend).to_equal("cranelift")
+        expect(decoded.value.native_target).to_equal("x86_64-unknown-linux-gnu")
+        expect(decoded.value.backend_plugin_path).to_equal("")
+        expect(decoded.value.cli_mode_text).to_equal("aot")
+
+    it "rejects a short, wrong-magic, wrong-version, or truncated request":
+        # @req REQ-SSPEC-COMPILER
+        step("rejects a short, wrong-magic, wrong-version, or truncated request")
+        expect(decode_driver_compile_request_v1([]).ok).to_equal(false)
+        expect(decode_driver_compile_request_v1([1, 2, 3]).ok).to_equal(false)
+        var bad_magic = encode_driver_compile_request_v1(sample_request())
+        bad_magic[0] = 0
+        expect(decode_driver_compile_request_v1(bad_magic).ok).to_equal(false)
+        expect(decode_driver_compile_request_v1(bad_magic).diagnostic).to_equal("compile-request-magic-mismatch")
+        var bad_version = encode_driver_compile_request_v1(sample_request())
+        bad_version[4] = 9
+        expect(decode_driver_compile_request_v1(bad_version).diagnostic).to_equal("compile-request-version-unsupported")
+        val full = encode_driver_compile_request_v1(sample_request())
+        var truncated: [u8] = []
+        var i = 0
+        while i < full.len() - 3:
+            truncated.push(full[i])
+            i = i + 1
+        val short = decode_driver_compile_request_v1(truncated)
+        expect(short.ok).to_equal(false)
+        expect(short.diagnostic).to_equal("compile-request-truncated")
+
+    it "round-trips a compile result with diagnostics":
+        # @req REQ-SSPEC-COMPILER
+        step("round-trips a compile result with diagnostics")
+        val bytes = encode_driver_compile_result_v1(DriverCompileResultV1(
+            compile_status: DRIVER_COMPILE_STATUS_FAILED_V1,
+            diagnostics: ["parse error: expected ':'", "second"],
+        ))
+        val decoded = decode_driver_compile_result_v1(bytes)
+        expect(decoded.ok).to_equal(true)
+        expect(decoded.value.compile_status).to_equal(DRIVER_COMPILE_STATUS_FAILED_V1)
+        expect(decoded.value.diagnostics.len()).to_equal(2)
+        expect(decoded.value.diagnostics[0]).to_equal("parse error: expected ':'")
+        expect(decoded.value.diagnostics[1]).to_equal("second")
+        val ok_bytes = encode_driver_compile_result_v1(DriverCompileResultV1(
+            compile_status: DRIVER_COMPILE_STATUS_OK_V1, diagnostics: []))
+        val ok_decoded = decode_driver_compile_result_v1(ok_bytes)
+        expect(ok_decoded.ok).to_equal(true)
+        expect(ok_decoded.value.compile_status).to_equal(DRIVER_COMPILE_STATUS_OK_V1)
+        expect(ok_decoded.value.diagnostics.len()).to_equal(0)
+        expect(decode_driver_compile_result_v1([83, 67, 68]).ok).to_equal(false)
+
+    it "maps CompileOptions to a request and back without losing bootstrap fields":
+        # @req REQ-SSPEC-COMPILER
+        step("maps CompileOptions to a request and back without losing bootstrap fields")
+        var options = driver_core_compile_options_default()
+        options.input_files = ["a.spl"]
+        options.bootstrap_input_count = 1
+        options.bootstrap_input_0 = "a.spl"
+        options.cli_mode_text = "aot"
+        options.output_file = Some("a.smf")
+        options.output_format = driver_output_format_smf()
+        options.backend = "cranelift"
+        options.low_memory = true
+        options.release = true
+        options.opt_level = 1
+        val request = driver_compile_request_from_options_v1(options)
+        expect(request.source).to_equal("a.spl")
+        expect(request.output).to_equal("a.smf")
+        expect(request.format_code).to_equal(DRIVER_COMPILE_FORMAT_SMF_V1)
+        expect(request.has_opt_level).to_equal(true)
+        expect(request.opt_level).to_equal(1)
+        val restored = driver_compile_options_from_request_v1(request)
+        expect(restored.input_files.len()).to_equal(1)
+        expect(restored.input_files[0]).to_equal("a.spl")
+        expect(restored.bootstrap_input_count).to_equal(1)
+        expect(restored.bootstrap_input_0).to_equal("a.spl")
+        expect(restored.cli_mode_text).to_equal("aot")
+        expect(restored.output_file ?? "").to_equal("a.smf")
+        expect(restored.output_format.to_text()).to_equal("smf")
+        expect(restored.backend).to_equal("cranelift")
+        expect(restored.low_memory).to_equal(true)
+        expect(restored.release).to_equal(true)
+        expect(restored.opt_level ?? -1).to_equal(1)

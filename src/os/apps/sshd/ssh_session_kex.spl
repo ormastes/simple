@@ -1,10 +1,10 @@
 # SSH session key exchange; extracted from ssh_session.spl.
 
 use os.apps.sshd.ssh_packet.{ssh_put_u32, ssh_get_u32}
-use os.apps.sshd.ssh_transport.{SshKexInit, SshAlgorithms, SSH_MSG_KEXINIT, SSH_MSG_IGNORE, SSH_MSG_DEBUG, SSH_DISCONNECT_PROTOCOL_ERROR, ssh_negotiate_algorithms, ssh_build_ext_info_server_sig_algs, ssh_kex_uses_strict_kex, ssh_build_disconnect}
+use os.apps.sshd.ssh_transport.{SshKexInit, SshAlgorithms, SSH_MSG_KEXINIT, SSH_MSG_IGNORE, SSH_MSG_DEBUG, SSH_DISCONNECT_PROTOCOL_ERROR, SSH_DISCONNECT_KEY_EXCHANGE_FAILED, ssh_negotiate_algorithms, ssh_build_ext_info_server_sig_algs, ssh_kex_uses_strict_kex, ssh_build_disconnect}
 use os.apps.sshd.ssh_kex.{ssh_build_kex_ecdh_reply, ssh_parse_kex_ecdh_init, ssh_build_newkeys, ssh_build_kexinit_for_host_keys_and_certs, host_key_set_advertised_algorithms}
 use os.apps.sshd.ssh_kex_core.{ssh_kex_compute_exchange_hash, ssh_derive_keys}
-use os.apps.sshd.ssh_kex_primitives.{HostKeySet, HostCertificateSet, SSH_MSG_KEX_ECDH_REPLY, ssh_build_ed25519_host_key_blob, _append_byte, _push_bytes, _push_mpint_bytes, curve25519_shared_secret_mpint_bytes}
+use os.apps.sshd.ssh_kex_primitives.{HostKeySet, HostCertificateSet, SSH_MSG_KEX_ECDH_REPLY, ssh_build_ed25519_host_key_blob, _append_byte, _push_bytes, _push_mpint_bytes, curve25519_shared_secret_mpint_bytes, ssh_x25519_shared_secret_valid}
 use os.apps.sshd.ssh_session.{SshSession, SshSessionState}
 use os.apps.sshd.ssh_session_helpers.{ssh_session_u8_at, _bytes_to_hex, _slice_range, _copy_bytes_stable, _copy_prefix_stable, _parse_kexinit_fast, _build_live_host_key_blob_for_algo, _ed25519_public_key_from_seed, _unwrap_ssh_signature, _extract_ed25519_pubkey, _zeroed_32_bytes}
 use os.kernel.log.klog_api.{log_info}
@@ -23,7 +23,7 @@ extern fn rt_ssh_curve25519_exchange_hash(client_version: [u8], server_version: 
 extern fn rt_boot_tcp_send_kex_reply_ed25519(fd: i64, host_key_blob: [u8], server_public: [u8], sig_blob: [u8]) -> i64
 extern fn rt_boot_tcp_send_newkeys_fixed(fd: i64) -> i64
 extern fn serial_println(msg: text)
-extern fn rt_thread_sleep(ms: i64) -> i64
+extern fn rt_thread_sleep(ms: i64)
 
 fn log_raw_println(msg: text):
     serial_println(msg)
@@ -445,7 +445,7 @@ impl SshSession:
             return false
         # The freestanding rekey scalar derivation is keyed by this host
         # secret.  Never fall back to peer-only deterministic material.
-        if self.host_keys.ed25519_seed == nil:
+        if self.host_keys.ed25519_seed.is_none():
             return false
         if self.rekey_in_progress or self.rekey_count >= 16u32:
             return false
@@ -570,8 +570,8 @@ impl SshSession:
             x25519(server_private, client_public)
         else:
             []
-        if shared_secret.len() != 32:
-            self.disconnect(SSH_DISCONNECT_PROTOCOL_ERROR, "server X25519 shared failed")
+        if not ssh_x25519_shared_secret_valid(shared_secret):
+            self.disconnect(SSH_DISCONNECT_KEY_EXCHANGE_FAILED, "server X25519 shared failed")
             return false
         log_info("[app.sshd] " + "[sshd-session] shared secret len={shared_secret.len()}")
         # Length is sufficient operational evidence.  Secret bytes must never
@@ -586,7 +586,7 @@ impl SshSession:
             if self.host_ed25519_public.len() == 32:
                 negotiated_hk_algo = "ssh-ed25519"
                 host_key_blob = ssh_build_ed25519_host_key_blob(self.host_ed25519_public)
-            elif self.host_keys.ed25519_seed != nil:
+            elif self.host_keys.ed25519_seed.is_some():
                 val fallback_pubkey = _ed25519_public_key_from_seed(self.host_keys.ed25519_seed)
                 if fallback_pubkey.len() == 32:
                     negotiated_hk_algo = "ssh-ed25519"
@@ -641,7 +641,7 @@ impl SshSession:
         # directly so the signature is bound to the exact host key blob we
         # advertised, instead of re-deriving a public key mid-KEX.
         var sig_blob: [u8] = []
-        if negotiated_hk_algo == "ssh-ed25519" and self.host_keys.ed25519_seed != nil and self.host_ed25519_public.len() == 32:
+        if negotiated_hk_algo == "ssh-ed25519" and self.host_keys.ed25519_seed.is_some() and self.host_ed25519_public.len() == 32:
             val stable_seed = _copy_bytes_stable(self.host_keys.ed25519_seed)
             val stable_pub = _copy_bytes_stable(self.host_ed25519_public)
             val stable_hash = _copy_bytes_stable(exchange_hash)

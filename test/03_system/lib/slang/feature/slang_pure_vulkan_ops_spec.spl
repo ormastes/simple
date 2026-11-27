@@ -1,0 +1,180 @@
+"""
+## Purpose
+Proves the pure runner Vulkan ops provider really executes on the GPU through
+the Vulkan loader: every op (matvec, rmsnorm, add, mul, silu, attention) is run
+on the device and compared with the CPU provider (tensor_ops.spl) within 1e-4
+relative tolerance.
+Skips with a reason when the Vulkan loader or a compute-capable GPU is absent.
+"""
+
+use std.spec.*
+use std.io_runtime.{file_exists, file_read_bytes, file_append_text, dir_create_all}
+use std.gc_async_mut.slang.model_executor.pure.tensor_ops.{PureTensor, tensor_from_values, tensor_matvec, tensor_rmsnorm, tensor_add, tensor_mul, tensor_silu, tensor_attention, tensor_rope, tensor_kv_write, tensor_row, tensor_decode_f32_le}
+use std.gc_async_mut.slang.model_executor.pure.weights.{pure_weights_f32_ranges, PureF32Range}
+use std.gc_async_mut.slang.model_executor.pure.tensor_ops_vulkan.{vk_ops_available, vk_ops_open, vk_ops_device_name, vk_tensor_upload, vk_tensor_upload_f32_bytes, vk_tensor_download, vk_tensor_matvec, vk_tensor_rmsnorm, vk_tensor_add, vk_tensor_mul, vk_tensor_silu, vk_tensor_attention, vk_tensor_rope, vk_tensor_kv_write, vk_tensor_row, vk_tensor_argmax, vk_tensor_free, vk_ops_sync}
+
+# The runner does not keep stdout of passing examples and counts skip() as a
+# pass, so evidence (and every skip reason) is also appended to a file.
+fn _record(line: text):
+    print line
+    dir_create_all("build/probe")
+    file_append_text("build/probe/vulkan_evidence.txt", line + "\n")
+
+fn rand_values(n: i64, seed: i64) -> [f64]:
+    var out: [f64] = []
+    var s = seed
+    var i: i64 = 0
+    while i < n:
+        s = (s * 1103515245 + 12345) % 2147483648
+        out.push(((s % 20001) as f64) / 10000.0 - 1.0)
+        i = i + 1
+    out
+
+fn rand_tensor(shape: [i64], seed: i64) -> PureTensor:
+    var n: i64 = 1
+    for d in shape:
+        n = n * d
+    tensor_from_values(rand_values(n, seed), shape)
+
+# Max |gpu - cpu| relative to max(1, max|cpu|).
+fn rel_err(gpu: PureTensor, cpu: PureTensor) -> f64:
+    var scale = 1.0
+    var i: i64 = 0
+    while i < cpu.data.len():
+        val a = if cpu.data[i] < 0.0: -cpu.data[i] else: cpu.data[i]
+        if a > scale:
+            scale = a
+        i = i + 1
+    var worst = 0.0
+    i = 0
+    while i < cpu.data.len():
+        val d0 = gpu.data[i] - cpu.data[i]
+        val d = if d0 < 0.0: -d0 else: d0
+        if d > worst:
+            worst = d
+        i = i + 1
+    worst / scale
+
+fn ms3(us: i64) -> text:
+    "{us / 1000}.{us % 1000}"
+
+fn vk_present() -> bool:
+    if not vk_ops_available():
+        _record("SKIPPED: Vulkan loader not found")
+        return false
+    true
+
+fn find_shape(ranges: [PureF32Range], rows: i64, cols: i64) -> PureF32Range:
+    for r in ranges:
+        if r.shape.len() == 2 and r.shape[0] == rows and r.shape[1] == cols:
+            return r
+    ranges[0]
+
+describe "slang pure runner Vulkan provider (system)":
+    it "opens a Vulkan GPU":
+        if vk_present():
+            val ops = vk_ops_open().unwrap()
+            _record("DEVICE: {vk_ops_device_name(ops)}")
+            expect(vk_ops_device_name(ops) != "").to_equal(true)
+
+    it "matvec matches the CPU op":
+        if vk_present():
+            val ops = vk_ops_open().unwrap()
+            val w = rand_tensor([300, 288], 1)
+            val x = rand_tensor([288], 2)
+            val y = vk_tensor_download(ops, vk_tensor_matvec(ops, vk_tensor_upload(ops, w).unwrap(), vk_tensor_upload(ops, x).unwrap()).unwrap()).unwrap()
+            val e = rel_err(y, tensor_matvec(w, x))
+            _record("REL_ERR matvec 300x288 = {e}")
+            expect(y.data.len()).to_equal(300)
+            expect(e < 0.0001).to_equal(true)
+
+    it "rmsnorm matches the CPU op":
+        if vk_present():
+            val ops = vk_ops_open().unwrap()
+            val x = rand_tensor([288], 3)
+            val w = rand_tensor([288], 4)
+            val y = vk_tensor_download(ops, vk_tensor_rmsnorm(ops, vk_tensor_upload(ops, x).unwrap(), vk_tensor_upload(ops, w).unwrap(), 0.00001).unwrap()).unwrap()
+            val e = rel_err(y, tensor_rmsnorm(x, w, 0.00001))
+            _record("REL_ERR rmsnorm 288 = {e}")
+            expect(e < 0.0001).to_equal(true)
+
+    it "add, mul and silu match the CPU ops":
+        if vk_present():
+            val ops = vk_ops_open().unwrap()
+            val a = rand_tensor([768], 5)
+            val b = rand_tensor([768], 6)
+            val da = vk_tensor_upload(ops, a).unwrap()
+            val db = vk_tensor_upload(ops, b).unwrap()
+            val s = vk_tensor_download(ops, vk_tensor_add(ops, da, db).unwrap()).unwrap()
+            val m = vk_tensor_download(ops, vk_tensor_mul(ops, da, db).unwrap()).unwrap()
+            val u = vk_tensor_download(ops, vk_tensor_silu(ops, da).unwrap()).unwrap()
+            _record("REL_ERR add={rel_err(s, tensor_add(a, b))} mul={rel_err(m, tensor_mul(a, b))} silu={rel_err(u, tensor_silu(a))}")
+            expect(rel_err(s, tensor_add(a, b)) < 0.0001).to_equal(true)
+            expect(rel_err(m, tensor_mul(a, b)) < 0.0001).to_equal(true)
+            expect(rel_err(u, tensor_silu(a)) < 0.0001).to_equal(true)
+
+    it "attention matches the CPU op":
+        if vk_present():
+            val ops = vk_ops_open().unwrap()
+            val q = rand_tensor([288], 7)
+            val kb = rand_tensor([32, 288], 8)
+            val vb = rand_tensor([32, 288], 9)
+            val y = vk_tensor_download(ops, vk_tensor_attention(ops, vk_tensor_upload(ops, q).unwrap(), vk_tensor_upload(ops, kb).unwrap(), vk_tensor_upload(ops, vb).unwrap(), 20, 6, 48).unwrap()).unwrap()
+            val e = rel_err(y, tensor_attention(q, kb, vb, 20, 6, 48))
+            _record("REL_ERR attention = {e}")
+            expect(e < 0.0001).to_equal(true)
+
+    it "rope matches the CPU op":
+        if vk_present():
+            val ops = vk_ops_open().unwrap()
+            val x = rand_tensor([288], 10)
+            val y = vk_tensor_download(ops, vk_tensor_rope(ops, vk_tensor_upload(ops, x).unwrap(), 7, 6, 48, 10000.0).unwrap()).unwrap()
+            val e = rel_err(y, tensor_rope(x, 7, 6, 48, 10000.0))
+            _record("REL_ERR rope = {e}")
+            expect(e < 0.0001).to_equal(true)
+
+    it "kv_write writes one row in place and row lookup reads it":
+        if vk_present():
+            val ops = vk_ops_open().unwrap()
+            val buf = rand_tensor([4, 6], 11)
+            val row = rand_tensor([6], 12)
+            val dbuf = vk_tensor_upload(ops, buf).unwrap()
+            vk_tensor_kv_write(ops, dbuf, 2, vk_tensor_upload(ops, row).unwrap()).unwrap()
+            expect(rel_err(vk_tensor_download(ops, dbuf).unwrap(), tensor_kv_write(buf, 2, row)) < 0.0001).to_equal(true)
+            expect(vk_tensor_kv_write(ops, dbuf, 4, vk_tensor_upload(ops, row).unwrap()).is_err()).to_equal(true)
+            val table = rand_tensor([5, 6], 13)
+            val r = vk_tensor_download(ops, vk_tensor_row(ops, vk_tensor_upload(ops, table).unwrap(), 3).unwrap()).unwrap()
+            expect(rel_err(r, tensor_row(table, 3)) < 0.0001).to_equal(true)
+
+    it "argmax returns the CPU index, lowest index on ties":
+        if vk_present():
+            val ops = vk_ops_open().unwrap()
+            var vals = rand_values(32000, 14)
+            vals[31337] = 5.0
+            val unique = tensor_from_values(vals, [32000])
+            expect(vk_tensor_argmax(ops, vk_tensor_upload(ops, unique).unwrap()).unwrap()).to_equal(31337)
+            vals[31337] = 0.5
+            vals[20000] = 7.0
+            vals[100] = 7.0
+            val tied = tensor_from_values(vals, [32000])
+            expect(vk_tensor_argmax(ops, vk_tensor_upload(ops, tied).unwrap()).unwrap()).to_equal(100)
+
+    it "reports a Vulkan-side error as Err, not a crash":
+        if vk_present():
+            val ops = vk_ops_open().unwrap()
+            val one = vk_tensor_upload(ops, rand_tensor([288], 1)).unwrap()
+            expect(vk_tensor_attention(ops, one, one, one, 2000, 6, 48).is_err()).to_equal(true)
+
+    it "rejects mismatched shapes instead of reading past a buffer":
+        if vk_present():
+            val ops = vk_ops_open().unwrap()
+            val w = vk_tensor_upload(ops, rand_tensor([4, 8], 21)).unwrap()
+            val short = vk_tensor_upload(ops, rand_tensor([5], 22)).unwrap()
+            val a = vk_tensor_upload(ops, rand_tensor([8], 23)).unwrap()
+            expect(vk_tensor_matvec(ops, w, short).is_err()).to_equal(true)
+            expect(vk_tensor_add(ops, a, short).is_err()).to_equal(true)
+            expect(vk_tensor_mul(ops, a, short).is_err()).to_equal(true)
+            expect(vk_tensor_rmsnorm(ops, a, short, 0.00001).is_err()).to_equal(true)
+            expect(vk_tensor_rope(ops, short, 1, 2, 4, 10000.0).is_err()).to_equal(true)
+            expect(vk_tensor_attention(ops, a, a, a, 4, 2, 4).is_err()).to_equal(true)
+            expect(vk_tensor_matvec(ops, w, a).is_ok()).to_equal(true)

@@ -1,0 +1,66 @@
+"""Runtime begin/probe/commit recorder used by instrumented module copies."""
+# @req REQ-MCDC-MOD-005
+# design: doc/05_design/generics_coverage_mcdc.md
+
+use std.spec
+use std.nogc_sync_mut.mcdc.module_probe.*
+
+# Shape produced by module_decisions for `x or not x` (decision 1).
+fn inner(x: bool) -> bool:
+    mcdc_mod_commit(1, mcdc_mod_begin(1) and (mcdc_mod_probe(1, 0, (x)) or mcdc_mod_probe(1, 1, (not x))))
+
+# Shape produced for `a and (b or c)` (decision 0).
+fn outer(a: bool, b: bool, c: bool) -> bool:
+    mcdc_mod_commit(0, mcdc_mod_begin(0) and (mcdc_mod_probe(0, 0, (a)) and (mcdc_mod_probe(0, 1, (b)) or mcdc_mod_probe(0, 2, (c)))))
+
+describe "mcdc module probe":
+    it "records values, masked conditions and outcomes once per distinct vector":
+        step("Evaluate a and (b or c) with (T,F,T), again, then (F,-,-)")
+        mcdc_mod_reset(true)
+        expect(outer(true, false, true)).to_equal(true)
+        expect(mcdc_mod_rows().len()).to_equal(1)
+        expect(mcdc_mod_rows()[0]).to_equal("0, 5, 7, true")
+        expect(outer(true, false, true)).to_equal(true)
+        expect(mcdc_mod_rows().len()).to_equal(1)
+        expect(mcdc_mod_eval_count()).to_equal(2)
+        expect(outer(false, true, true)).to_equal(false)
+        expect(mcdc_mod_rows().len()).to_equal(2)
+        expect(mcdc_mod_rows()[1]).to_equal("0, 0, 1, false")
+        expect(mcdc_mod_frame_depth()).to_equal(0)
+        expect(mcdc_mod_anomalies()).to_equal(0)
+
+    it "keeps outer frames intact across nested evaluations of another decision":
+        step("Conditions of decision 0 call a function that evaluates decision 1")
+        mcdc_mod_reset(true)
+        val r = mcdc_mod_commit(0, mcdc_mod_begin(0) and (mcdc_mod_probe(0, 0, (inner(true))) and mcdc_mod_probe(0, 1, (inner(false)))))
+        expect(r).to_equal(true)
+        val rows = mcdc_mod_rows()
+        expect(rows.len()).to_equal(3)
+        expect(rows[0]).to_equal("1, 1, 1, true")
+        expect(rows[1]).to_equal("1, 2, 3, true")
+        expect(rows[2]).to_equal("0, 3, 3, true")
+        expect(mcdc_mod_frame_depth()).to_equal(0)
+        expect(mcdc_mod_anomalies()).to_equal(0)
+
+    it "discards stale frames when a commit arrives for an outer decision":
+        mcdc_mod_reset(true)
+        mcdc_mod_begin(0)
+        mcdc_mod_probe(0, 0, true)
+        mcdc_mod_begin(1)
+        expect(mcdc_mod_commit(0, true)).to_equal(true)
+        expect(mcdc_mod_rows().len()).to_equal(1)
+        expect(mcdc_mod_rows()[0]).to_equal("0, 1, 1, true")
+        expect(mcdc_mod_frame_depth()).to_equal(0)
+        expect(mcdc_mod_anomalies()).to_equal(0)
+
+    it "counts probes and commits without a matching frame as anomalies":
+        mcdc_mod_reset(true)
+        expect(mcdc_mod_probe(0, 0, true)).to_equal(true)
+        expect(mcdc_mod_anomalies()).to_equal(1)
+        expect(mcdc_mod_commit(5, false)).to_equal(false)
+        expect(mcdc_mod_anomalies()).to_equal(2)
+        expect(mcdc_mod_rows().len()).to_equal(0)
+
+    it "formats rows in the SDN record table shape":
+        expect(mcdc_mod_row(12, 5, 7, false)).to_equal("12, 5, 7, false")
+        expect(MCDC_MOD_RECORDS_HEADER).to_equal("|decision, values, evaluated, outcome|")

@@ -1,7 +1,8 @@
 #![allow(primitive_api, COLL006)]
 
 use std.common.crypto.sha256_core.{sha256_initial_hash, sha256_pad_message, sha256_process_block}
-use std.common.string_core.{text_to_bytes, bytes_to_text}
+use std.common.string_core.{text_to_bytes}
+use std.common.encoding.external_text.{bytes_to_text_checked}
 use std.common.base_encoding.utilities.{validated_utf8_bytes_to_text_linear}
 use compiler.common.cache_contract.public_summary_v1.{PublicSummaryEntryV1, PublicSummaryV1, public_summary_declaration_graph_digest_v1, public_summary_normalized_signature_v1, public_summary_sorted_dependencies_v1}
 use compiler.common.cache_contract.snapshot_contract_v1.{LogicalSourcePathV1, PathSemanticsV1, SourceBlobV1, SourceEncodingPolicyV1, GeneratedProvenanceV1, CompileSnapshotV1, ResolutionWitnessV1, ResolutionCandidateV1, SnapshotSourceEntryV1, NegativeCandidateV1, DirectoryGenerationV1, GeneratedInputV1, NamedDigestV1, CacheDependencyRoleV1, CacheObjectRefV1, CacheObjectDependencyV1, CacheVerifiedObjectViewV1, CacheVerifiedObjectViewDecodeV1, CacheDependencyPageV1, logical_source_path_valid_v1}
@@ -128,10 +129,12 @@ fn _append_bytes_v1(buffer: [u8], values: [u8]) -> [u8]:
         i = i + 1
     out
 
-# Array range indexing has no native lowering yet. Keep the checked half-open
-# interval semantics with an explicit value copy after the caller's bounds
-# preflight.
-# @workaround bug=native_deferred_range_index_2026_10_11 reason=preserve validated half-open byte ranges until native range lowering exists
+# Keep the checked half-open interval semantics after the caller's bounds
+# preflight. Explicit element loops are used rather than `values[start..end]`
+# because `..` inside `[...]` parses as `expr_index(base, expr_range(...))`
+# (allocating a range array that pure-Simple interpreters reject as an array
+# index), whereas `:` is slice syntax and explicit copy works identically across
+# all compiler and interpreter lanes.
 fn _copy_u8_range_v1(values: [u8], start: i64, end: i64) -> [u8]:
     var out: [u8] = []
     if start < 0 or end < start or end > values.len(): return out
@@ -141,7 +144,6 @@ fn _copy_u8_range_v1(values: [u8], start: i64, end: i64) -> [u8]:
         index = index + 1
     out
 
-# @workaround bug=native_deferred_range_index_2026_10_11 reason=preserve validated dependency page ranges with a typed value copy
 fn _copy_cache_dependencies_v1(values: [CacheObjectDependencyV1],
         start: i64, end: i64) -> [CacheObjectDependencyV1]:
     var out: [CacheObjectDependencyV1] = []
@@ -152,31 +154,9 @@ fn _copy_cache_dependencies_v1(values: [CacheObjectDependencyV1],
         index = index + 1
     out
 
-# @workaround bug=native_cache_contract_mir_lowering_gaps_2026_10_11 reason=preserve independent array copy for canonical sorting without unsupported copy receiver
-fn _copy_semantic_read_entries_v1(values: [SemanticReadEntryV1]) -> [SemanticReadEntryV1]:
-    var out: [SemanticReadEntryV1] = []
-    var index = 0
-    while index < values.len():
-        out.push(values[index])
-        index = index + 1
-    out
-
-# @workaround bug=native_cache_contract_mir_lowering_gaps_2026_10_11 reason=preserve independent summary sorting copy without unsupported copy receiver
-fn _copy_public_summary_entries_v1(values: [PublicSummaryEntryV1]) -> [PublicSummaryEntryV1]:
-    var out: [PublicSummaryEntryV1] = []
-    var index = 0
-    while index < values.len():
-        out.push(values[index])
-        index = index + 1
-    out
-
-# @workaround bug=native_cache_contract_mir_lowering_gaps_2026_10_11 reason=retain scalar equality owner at decoded envelope fields
-fn _i64_equal_v1(left: i64, right: i64) -> bool:
-    left == right
-
 fn _envelope_kind_schema_matches_v1(kind: i64, schema: i64,
         expected_kind: i64) -> bool:
-    _i64_equal_v1(kind, expected_kind) and _i64_equal_v1(schema, 1)
+    kind == expected_kind and schema == 1
 
 pub fn canonical_cache_encode_envelope_v1(kind: i64, schema: i64, payload: [u8]) -> [u8]:
     var buffer: [u8] = []
@@ -334,8 +314,8 @@ pub fn canonical_source_blob_payload_v1(blob: SourceBlobV1) -> [u8]:
     match blob.encoding_policy:
         case SourceEncodingPolicyV1.Utf8Exact: buffer = _push_u16_v1(buffer, 1)
     match blob.generated_provenance:
-        case nil: buffer.push(0 as u8)
-        case provenance:
+        case None: buffer.push(0 as u8)
+        case Some(provenance):
             buffer.push(1 as u8)
             val producer_result = _append_digest_v1(buffer, provenance.producer_digest)
             if not producer_result.ok: return []
@@ -377,7 +357,7 @@ pub fn canonical_source_blob_decode_bounded_v1(bytes: [u8],
     if not decoded.ok: return _source_blob_decode_failure_v1(decoded.error)
     val envelope = match decoded.value:
         case Some(value): value
-        case nil: return _source_blob_decode_failure_v1("missing_source_envelope")
+        case None: return _source_blob_decode_failure_v1("missing_source_envelope")
     if not _envelope_kind_schema_matches_v1(envelope.kind, envelope.schema,
             canonical_cache_kind_source_blob_v1()):
         return _source_blob_decode_failure_v1("source_blob_schema_mismatch")
@@ -388,7 +368,7 @@ pub fn canonical_source_blob_decode_bounded_v1(bytes: [u8],
     val encoding_tag = cursor.read_u16()
     if encoding_tag != 1: cursor.failed = true
     val provenance_tag = cursor.read_u8()
-    var provenance: GeneratedProvenanceV1? = nil
+    var provenance: GeneratedProvenanceV1? = None
     if provenance_tag == 1:
         if not cursor.reserve_items(1):
             return _source_blob_decode_failure_v1("source_blob_item_limit_exceeded")
@@ -722,7 +702,7 @@ pub fn canonical_compile_snapshot_decode_bounded_v1(bytes: [u8],
     if not decoded.ok: return _snapshot_decode_failure_v1(decoded.error)
     val envelope = match decoded.value:
         case Some(value): value
-        case nil: return _snapshot_decode_failure_v1("missing_snapshot_envelope")
+        case None: return _snapshot_decode_failure_v1("missing_snapshot_envelope")
     if not _envelope_kind_schema_matches_v1(envelope.kind, envelope.schema,
             canonical_cache_kind_compile_snapshot_v1()):
         return _snapshot_decode_failure_v1("compile_snapshot_schema_mismatch")
@@ -891,7 +871,7 @@ pub fn verified_kind_object_view_v1(kind: text, bytes: [u8],
         if not decoded.ok: return _object_view_failure_v1(decoded.error)
         val source = match decoded.value:
             case Some(value): value
-            case nil: return _object_view_failure_v1("missing_source_blob")
+            case None: return _object_view_failure_v1("missing_source_blob")
         val dependencies = _CacheDependencyBuilderV1(dependencies: [],
             maximum: max_dependencies, ok: true)
         match source.generated_provenance:
@@ -902,7 +882,7 @@ pub fn verified_kind_object_view_v1(kind: text, bytes: [u8],
                 dependencies.add("generated_input_manifest",
                     CacheDependencyRoleV1.ExternalWitness, "", 0,
                     provenance.input_manifest_digest)
-            case nil: pass
+            case None: pass
         if not dependencies.ok:
             return _object_view_failure_v1("dependency_limit_exceeded")
         return CacheVerifiedObjectViewDecodeV1(ok: true,
@@ -910,7 +890,7 @@ pub fn verified_kind_object_view_v1(kind: text, bytes: [u8],
                 kind: kind, schema: 1, object_digest: decoded.cas_object_digest),
                 semantic_digest: decoded.semantic_source_digest,
                 dependencies: dependencies.dependencies,
-                complete_object_dependencies: source.generated_provenance == nil)),
+                complete_object_dependencies: source.generated_provenance.is_none())),
             error: "")
     if kind == "compile_snapshot":
         val decoded = canonical_compile_snapshot_decode_bounded_v1(bytes,
@@ -918,7 +898,7 @@ pub fn verified_kind_object_view_v1(kind: text, bytes: [u8],
         if not decoded.ok: return _object_view_failure_v1(decoded.error)
         val snapshot = match decoded.value:
             case Some(value): value
-            case nil: return _object_view_failure_v1("missing_compile_snapshot")
+            case None: return _object_view_failure_v1("missing_compile_snapshot")
         val dependencies = _snapshot_view_dependencies_v1(snapshot, max_dependencies)
         if not dependencies.ok:
             return _object_view_failure_v1("dependency_limit_exceeded")
@@ -991,8 +971,8 @@ pub fn canonical_file_ast_decode_v1(bytes: [u8]) -> FileAstDecodeV1:
     val decoded = canonical_cache_decode_envelope_v1(bytes)
     if not decoded.ok: return FileAstDecodeV1(ok: false, value: nil, error: decoded.error)
     val envelope = match decoded.value:
-        case value: value
-        case nil: return FileAstDecodeV1(ok: false, value: nil, error: "missing_envelope")
+        case Some(value): value
+        case None: return FileAstDecodeV1(ok: false, value: nil, error: "missing_envelope")
     if envelope.kind != canonical_cache_kind_file_ast_v1() or envelope.schema != 1:
         return FileAstDecodeV1(ok: false, value: nil, error: "file_ast_schema_mismatch")
     val cursor = _CanonicalCursorV1(bytes: envelope.payload, position: 0, failed: false)
@@ -1044,7 +1024,7 @@ fn _read_entry_key_v1(entry: SemanticReadEntryV1) -> text:
     _effect_tag_v1(entry.effect_kind).to_text() + "\u0000" + entry.logical_name
 
 pub fn canonical_semantic_read_set_payload_v1(read_set: SemanticReadSetV1) -> [u8]:
-    var entries = _copy_semantic_read_entries_v1(read_set.entries)
+    var entries = read_set.entries.copy()
     var i = 1
     while i < entries.len():
         val held = entries[i]
@@ -1110,20 +1090,20 @@ fn _effect_from_tag_v1(tag: i64) -> SemanticEffectKindV1?:
         case 8: SemanticEffectKindV1.ProcessFacade
         case 9: SemanticEffectKindV1.Plugin
         case 10: SemanticEffectKindV1.ToolchainComponent
-        case _: nil
+        case _: None
 
 fn _replay_from_tag_v1(tag: i64) -> SemanticReplayPolicyV1?:
     match tag:
         case 1: SemanticReplayPolicyV1.DeclaredReplayable
         case 2: SemanticReplayPolicyV1.UndeclaredUncacheable
-        case _: nil
+        case _: None
 
 pub fn canonical_semantic_read_set_decode_v1(bytes: [u8]) -> SemanticReadSetDecodeV1:
     val decoded = canonical_cache_decode_envelope_v1(bytes)
     if not decoded.ok: return SemanticReadSetDecodeV1(ok: false, value: nil, error: decoded.error)
     val envelope = match decoded.value:
-        case value: value
-        case nil: return SemanticReadSetDecodeV1(ok: false, value: nil, error: "missing_envelope")
+        case Some(value): value
+        case None: return SemanticReadSetDecodeV1(ok: false, value: nil, error: "missing_envelope")
     if envelope.kind != canonical_cache_kind_semantic_read_set_v1() or envelope.schema != 1:
         return SemanticReadSetDecodeV1(ok: false, value: nil, error: "semantic_read_set_schema_mismatch")
     val cursor = _CanonicalCursorV1(bytes: envelope.payload, position: 0, failed: false)
@@ -1138,8 +1118,8 @@ pub fn canonical_semantic_read_set_decode_v1(bytes: [u8]) -> SemanticReadSetDeco
         val effect_tag = _read_le_v1(cursor.bytes, cursor.position, 2)
         cursor.position = cursor.position + 2
         val effect = match _effect_from_tag_v1(effect_tag):
-            case value: value
-            case nil: return SemanticReadSetDecodeV1(ok: false, value: nil, error: "unknown_effect_tag")
+            case Some(value): value
+            case None: return SemanticReadSetDecodeV1(ok: false, value: nil, error: "unknown_effect_tag")
         val logical_name = cursor.read_text()
         val provider_id = cursor.read_text()
         val provider_digest = cursor.read_digest()
@@ -1149,8 +1129,8 @@ pub fn canonical_semantic_read_set_decode_v1(bytes: [u8]) -> SemanticReadSetDeco
         val replay_tag = _read_le_v1(cursor.bytes, cursor.position, 2)
         cursor.position = cursor.position + 2
         val replay = match _replay_from_tag_v1(replay_tag):
-            case value: value
-            case nil: return SemanticReadSetDecodeV1(ok: false, value: nil, error: "unknown_replay_tag")
+            case Some(value): value
+            case None: return SemanticReadSetDecodeV1(ok: false, value: nil, error: "unknown_replay_tag")
         entries.push(SemanticReadEntryV1(effect_kind: effect, logical_name: logical_name, provider_id: provider_id,
             provider_manifest_digest: provider_digest, value_digest: value_digest, replay_policy: replay))
         i = i + 1
@@ -1183,8 +1163,12 @@ class _CanonicalCursorV1:
         if self.position > self.bytes.len() - count:
             self.failed = true
             return ""
-        val value = bytes_to_text(_copy_u8_range_v1(self.bytes, self.position,
-            self.position + count))
+        val value: text = match bytes_to_text_checked(_copy_u8_range_v1(self.bytes, self.position,
+                self.position + count)):
+            case Ok(decoded): decoded
+            case Err(_):
+                self.failed = true
+                return ""
         self.position = self.position + count
         value
 
@@ -1380,7 +1364,7 @@ fn _summary_entry_less_v1(a: PublicSummaryEntryV1, b: PublicSummaryEntryV1) -> b
     a.stable_symbol_id < b.stable_symbol_id or (a.stable_symbol_id == b.stable_symbol_id and a.canonical_bytes < b.canonical_bytes)
 
 fn _summary_entries_sorted_v1(entries: [PublicSummaryEntryV1]) -> [PublicSummaryEntryV1]:
-    var sorted = _copy_public_summary_entries_v1(entries)
+    var sorted = entries.copy()
     var i = 1
     while i < sorted.len():
         val held = sorted[i]
@@ -1540,8 +1524,8 @@ pub fn canonical_public_summary_decode_v1(bytes: [u8]) -> PublicSummaryDecodeV1:
     val decoded = canonical_cache_decode_envelope_v1(bytes)
     if not decoded.ok: return _summary_decode_failure_v1(decoded.error)
     val envelope = match decoded.value:
-        case value: value
-        case nil: return _summary_decode_failure_v1("missing_envelope")
+        case Some(value): value
+        case None: return _summary_decode_failure_v1("missing_envelope")
     if envelope.kind != canonical_cache_kind_public_summary_v1() or envelope.schema != 1:
         return _summary_decode_failure_v1("summary_schema_mismatch")
     val cursor = _CanonicalCursorV1(bytes: envelope.payload, position: 0, failed: false)

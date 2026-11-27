@@ -157,3 +157,147 @@ The x86_64 dynamic outputs are compared with
 `ld.lld --dynamic-linker /lib64/ld-linux-x86-64.so.2 [-pie] pic_start_x64.o libadd_x64.so.1`
 (`llvm-readelf -l -S -d -r`, `llvm-objdump -d --section=.plt`). They are never
 executed: this aarch64 host has no x86_64 glibc or ld-linux-x86-64.so.2.
+
+## ELF32 fixtures (i386 + armv7, internal linker ELF32 lane)
+
+`elf32_hello.c` writes `hello internal linker\n` three times and exits 42 via
+`helper(40)` in `elf32_helper.c`. Produced with `Ubuntu clang version 18.1.3`:
+
+```
+CF="-c -O1 -ffreestanding -fno-stack-protector -fno-asynchronous-unwind-tables -fno-unwind-tables"
+clang --target=i686-linux-gnu $CF -fno-pic elf32_hello.c  -o elf32_hello_i386.o
+clang --target=i686-linux-gnu $CF -fno-pic elf32_helper.c -o elf32_helper_i386.o
+clang --target=i686-linux-gnu $CF -fPIC   elf32_hello.c  -o elf32_hello_i386_pic.o   # GOTPC/GOTOFF/PLT32
+clang --target=i686-linux-gnu $CF -fPIC   elf32_helper.c -o elf32_helper_i386_pic.o  # GOTPC/GOT32X
+clang --target=armv7-linux-gnueabihf $CF -fno-pic elf32_hello.c  -o elf32_hello_arm.o
+clang --target=armv7-linux-gnueabihf $CF -fno-pic elf32_helper.c -o elf32_helper_arm.o
+```
+
+clang --target=i686-linux-gnu -c elf32_got32_nobase_i386.s -o elf32_got32_nobase_i386.o  # GOT32 without base register
+
+## elf32_hello_arm_soft.o / elf32_helper_arm_soft.o
+
+Same sources (`elf32_hello.c` / `elf32_helper.c`), built soft-float
+(no Tag_ABI_VFP_args) for the EF_ARM_ABI_FLOAT_SOFT e_flags test:
+
+    clang --target=armv7-linux-gnueabihf -mfloat-abi=soft -ffreestanding -fno-pic -O1 -c elf32_hello.c -o elf32_hello_arm_soft.o
+    clang --target=armv7-linux-gnueabihf -mfloat-abi=soft -ffreestanding -fno-pic -O1 -c elf32_helper.c -o elf32_helper_arm_soft.o
+
+## Boot-linker SHF_MERGE fixtures (work/boot-link-shf-merge-20261118)
+
+`elf_boot_link_merge_spec.spl` pools SHF_MERGE|SHF_STRINGS through the boot
+linker and byte-compares with ld.lld. From this directory, with the llvm-mingw
+23.1.0 clang/ld.lld:
+
+```
+CF="-c -O1 -ffreestanding -fno-pic -fno-stack-protector -fno-asynchronous-unwind-tables -fno-unwind-tables -fmerge-all-constants -nostdlib"
+clang --target=aarch64-linux-gnu $CF boot_merge_a_a64.c -o boot_merge_a_a64.o
+clang --target=aarch64-linux-gnu $CF boot_merge_b_a64.c -o boot_merge_b_a64.o
+clang --target=x86_64-linux-gnu $CF merge_strings_a_x64.c -o boot_merge_a_x64.o
+clang --target=x86_64-linux-gnu $CF merge_strings_b_x64.c -o boot_merge_b_x64.o
+ld.lld -m aarch64linux --no-relax -T boot_merge_a64.ld boot_merge_a_a64.o boot_merge_b_a64.o -o ref_a64.elf
+ld.lld -m elf_x86_64 -T boot_merge_x64.ld boot_merge_a_x64.o boot_merge_b_x64.o -o ref_x64.elf
+for a in a64 x64; do for s in text rodata; do
+  llvm-objcopy -O binary --only-section=.$s ref_$a.elf boot_merge_$a.lld.$s.bin; done; done
+```
+
+Reference symbol values (llvm-readelf -s): a64 first_message 0x40000000,
+_start 0x4000000c, other_message 0x4000004c, tail_message 0x40000058,
+string_sink 0x40000098; x64 long_message 0x400000, _start 0x400010,
+short_message 0x400030, string_sink 0x400048.
+## tls_ie_arm.o / tls_ie_def_arm.o
+
+armv7 initial-exec TLS through an R_ARM_TLS_IE32 GOT slot (ld.lld slot = 0xc):
+
+    clang --target=armv7-linux-gnueabihf -mtp=cp15 -ffreestanding -fPIC -O1 -c tls_ie_arm.c -o tls_ie_arm.o
+    clang --target=armv7-linux-gnueabihf -ffreestanding -fPIC -O1 -c tls_ie_def_arm.c -o tls_ie_def_arm.o
+
+## ifunc_sym_x64.o
+
+Static IFUNC called directly and address-taken (`.quad add_val`); ld.lld makes
+`add_val` STT_FUNC at the `.iplt` entry:
+
+    clang --target=x86_64-linux-gnu -c ifunc_sym_x64.s -o ifunc_sym_x64.o
+
+## thm_call_notype_arm.o / thm_call_notype_def_arm.o
+
+Thumb `bl` to a NOTYPE Thumb label; ld.lld keeps BL (no interworking for non-STT_FUNC):
+
+    clang --target=armv7-linux-gnueabihf -c thm_call_notype_arm.s -o thm_call_notype_arm.o
+    clang --target=armv7-linux-gnueabihf -c thm_call_notype_def_arm.s -o thm_call_notype_def_arm.o
+
+## gottpoff_addend_x64.o
+
+GOTTPOFF with addend -4 on a raw field (no relaxation); slot = tprel(S) = -8:
+
+    clang --target=x86_64-linux-gnu -c gottpoff_addend_x64.s -o gottpoff_addend_x64.o
+
+## ELF32 dynamic fixtures (i386, lane c)
+
+`Ubuntu clang version 18.1.3`, run from this directory:
+
+```
+PIC="-c -O1 -ffreestanding -fPIC -fno-stack-protector -fno-asynchronous-unwind-tables -fno-unwind-tables -nostdlib"
+clang --target=i686-linux-gnu $PIC dyn_start_i386.c -o dyn_start_i386.o
+clang --target=i686-linux-gnu $PIC dyn_lib_i386.c -o dyn_lib_i386.o
+ld.lld -shared --soname libadd_i386.so --hash-style=both -o libadd_i386.so.1 dyn_lib_i386.o
+```
+
+| file | role |
+|---|---|
+| dyn_start_i386.o | GOTPC (_GLOBAL_OFFSET_TABLE_), GOT32X (msg, import -> .got + R_386_GLOB_DAT), PLT32 (add_val -> PLT1 + R_386_JUMP_SLOT); writes msg and exits 42 via int $0x80 |
+| libadd_i386.so.1 | ELF32 DSO exporting add_val / msg / base / scratch (soname `libadd_i386.so`) |
+
+`elf32_dynamic_spec` checks the output against
+`ld.lld --dynamic-linker /lib/ld-linux.so.2 [-pie] dyn_start_i386.o libadd_i386.so.1`;
+both run under `qemu-i386-static -L /usr/i686-linux-gnu` and print `hi`, exit 42.
+
+## ELF32 dynamic fixtures (armv7 Thumb, lane c)
+
+```
+PIC="-c -O1 -mthumb -ffreestanding -fPIC -fno-stack-protector -fno-asynchronous-unwind-tables -fno-unwind-tables -nostdlib"
+clang --target=armv7-linux-gnueabihf $PIC dyn_start_arm.c -o dyn_start_arm.o
+clang --target=armv7-linux-gnueabihf $PIC dyn_lib_arm.c -o dyn_lib_arm.o
+ld.lld -shared --soname libadd_arm.so --hash-style=both -o libadd_arm.so.1 dyn_lib_arm.o
+```
+
+dyn_start_arm.o: R_ARM_THM_CALL add_val (import -> ARM PLT, BLX), R_ARM_GOT_PREL msg (GLOB_DAT).
+Runs under `qemu-arm-static -L /usr/arm-linux-gnueabihf`: `hi`, exit 42, same as ld.lld.
+
+## armv7 Thumb B.W thunk and GD/LDM TLS fixtures
+
+Uses the same `PIC` flags and `T=--target=armv7-linux-gnueabihf`:
+
+```
+clang $T $PIC dyn_tail_arm.c -o dyn_tail_arm.o
+clang $T $PIC dyn_tls_arm.c -o t1.o && clang $T -c dyn_tlsld_arm.s -o t2.o && ld.lld -r -o dyn_tls_arm.o t1.o t2.o
+clang $T $PIC dyn_tlslib_arm.c -o tl.o && ld.lld -shared --soname libtls_arm.so --hash-style=both -o libtls_arm.so.1 tl.o
+clang $T $PIC ldstub_arm.c -o ls.o && ld.lld -shared --soname ld-linux-armhf.so.3 --hash-style=both -o ldstub_arm.so.1 ls.o
+```
+
+- **dyn_tail_arm.o** has `R_ARM_THM_JUMP24` to `add_val`, which is imported. Its Thumb `B.W` reaches the ARM-state PLT through a PIC veneer.
+- **dyn_tls_arm.o** has `R_ARM_TLS_GD32` for `tv` (imported from libtls) and for `lv` (local). It also has `R_ARM_TLS_LDM32` and `R_ARM_TLS_LDO32` for `lv3`. The program exits with 37 + 3 + 2 = 42.
+- **ldstub_arm.so.1** is a link-time stand-in for `ld-linux-armhf.so.3` and exports only `__tls_get_addr`. The runtime uses the real loader, plus `libc.so.6`.
+
+Under `qemu-arm-static -L /usr/arm-linux-gnueabihf`, the Simple linker and ld.lld give the same results in both dynamic and PIE modes: `hi`/rc=42 for the tail-call fixture and rc=42 for the TLS fixture.
+
+## riscv64 dynamic fixtures (elf_riscv64_dynamic_spec)
+
+Rebuilt by `sh test/fixtures/linker/elf/rebuild_rv64_dynamic.shs [--oracle]` (clang 18 + ld.lld only):
+
+    T="--target=riscv64-linux-gnu -march=rv64gc -mabi=lp64d"
+    P="-c -O1 -ffreestanding -fPIC -fno-stack-protector -fno-asynchronous-unwind-tables -fno-unwind-tables -nostdlib -mno-relax"
+    clang $T $P dyn_start_rv64.c -o dyn_start_rv64.o; clang $T $P dyn_lib_rv64.c -o dyn_lib_rv64.o
+    ld.lld -shared --soname libadd_rv64.so --hash-style=both -o libadd_rv64.so.1 dyn_lib_rv64.o
+    # oracle: ld.lld --no-relax --dynamic-linker /lib/ld-linux-riscv64-lp64d.so.1 [-pie] \
+    #         dyn_start_rv64.o libadd_rv64.so.1   -> prints "hi", exit 42 under qemu-riscv64
+
+## weak_dynamic_rv32.o (elf_riscv32_static_spec)
+
+    clang --target=riscv32-linux-musl -march=rv32gc -mabi=ilp32d -mno-relax -fno-pic -O1 \
+        -ffreestanding -c weak_dynamic_rv32.c -o weak_dynamic_rv32.o
+
+## symver_* / comdat_note_* (elf_symver_object_spec)
+
+    for f in symver_def_a64 symver_use_a64 comdat_note_a_a64 comdat_note_b_a64; do
+        clang --target=aarch64-linux-gnu -c $f.s -o $f.o; done

@@ -1,0 +1,44 @@
+# Reuses real owned-root/policy/WAL setup; no copied root construction.
+# Scripted prior Container facts do not qualify native containment observation.
+use test.fixtures.orchestration.host_exec_control_installation_fixture_v3.host_installation_fixture_v3
+use test.fixtures.orchestration.host_runtime_exec_begin_fixture_v3.exec_begin_signing_seed_v3
+use std.common.contracts.orchestration.host_containment_installation_v1.*
+use std.common.contracts.orchestration.host_exec_control_installation_v3.HostExecControlInstallationRequestV3
+use std.nogc_sync_mut.orchestration.host_local_root_v1.HostLocalRootV1
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.HostReservationAuthorizationContextV1
+use std.nogc_sync_mut.daemon_sdk.distributed_grant_verification_v2.*
+use std.common.contracts.distributed_control_codec_v2.*
+use std.common.crypto.sha256.sha256_text
+use std.common.crypto.ed25519.pure_ed25519_sign_from_seed_v1
+
+pub struct HostContainmentFixtureV1:
+    local: HostLocalRootV1
+    request: HostContainmentInstallationRequestV1
+    context: HostReservationAuthorizationContextV1
+    auxiliary_root: text
+    exec_request: HostExecControlInstallationRequestV3
+
+pub fn host_containment_resign_v1(request: HostContainmentInstallationRequestV1) -> HostContainmentInstallationRequestV1:
+    var value = request
+    value.operation.id = value.intent.operation_id
+    value.operation.payload_digest = host_containment_installation_intent_digest_v1(value.intent).unwrap()
+    value.signed.signature = pure_ed25519_sign_from_seed_v1(exec_begin_signing_seed_v3(1), distributed_grant_signature_message_v2(value.signed).unwrap()).signature
+    value.approval.grant_digest = sha256_text(distributed_encode_grant_v2(value.signed.grant).unwrap())
+    value.approval.request_digest = sha256_text(distributed_encode_operation_v2(value.operation).unwrap())
+    value.approval.signature = pure_ed25519_sign_from_seed_v1(exec_begin_signing_seed_v3(65), distributed_approval_signature_message_v2(value.approval).unwrap()).signature
+    value
+
+pub fn host_containment_fixture_v1() -> HostContainmentFixtureV1:
+    val base = host_installation_fixture_v3("success", ["host_exec_control_install_v3", "host_containment_install_v1"])
+    val original = base.request.intent
+    val intent = HostContainmentInstallationIntentV1(operation_id: "containment-install-1",
+        enrollment_binding_digest: original.enrollment_binding_digest, scope: original.scope,
+        provider_identity_digest: original.provider_identity_digest,
+        containment_policy_bytes: original.control_policy_bytes, containment_policy_digest: original.control_policy_digest,
+        containment_identity_digest: "c".repeat(64))
+    var operation = base.request.operation
+    operation.operation = "host_containment_install_v1"
+    var signed = base.request.signed
+    signed.grant.operations = ["host_containment_install_v1"]
+    val request = host_containment_resign_v1(HostContainmentInstallationRequestV1(intent, operation, signed, base.request.approval))
+    HostContainmentFixtureV1(base.local, request, base.context, base.auxiliary_root, base.request)

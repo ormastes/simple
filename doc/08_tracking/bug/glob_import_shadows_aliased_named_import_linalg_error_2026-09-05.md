@@ -59,3 +59,5 @@ no ambiguity error, no warning.
 `src/compiler_rust/target/debug/simple run <spec>` (debug Rust seed from
 current source). Repro kept at
 `scratchpad/probe8.spl` shape shown above.
+
+**Revalidated 2026-11-02: still plausible because the report title (A glob `use std.X.*` shadows an explicit aliased named import of the same type ) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**

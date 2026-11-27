@@ -1,0 +1,78 @@
+"""
+## Purpose and audience
+Purpose: Pin Chrome 159's block stacking for number line-heights whose used
+value has a sub-pixel part. Chrome keeps the line box in LayoutUnits: an h3
+(18.72px x 1.5) line is 28.08 px, a 15px/1.3 line 19.5 px, and a block of
+n such lines n times that. The block cursor advances by the exact height
+and each box paints from round(top) to round(bottom), at device scale k on
+the device line (112.32 device px for the h3 at k=4). This engine floored the
+line to whole px (28, 19), so boxes drifted up a row per few blocks (an
+article `header` holding an h3 was 97 rows where Chrome paints 98), and at
+k=4 it painted every box k x its CSS height from a snapped top, leaving white
+rows between boxes.
+Audience: web renderer block layout maintainers.
+
+Chrome oracle: Chrome for Testing 159.0.8154.6 aarch64, `--headless=new
+--disable-gpu --hide-scrollbars --force-device-scale-factor=K`, window
+400x300, Liberation Sans via `sans-serif`. Values are the device rows where
+the pixel colour changes in one column (box edges).
+
+| page / column        | K | Chrome edges                                   | base 9ad6ef27f18 |
+|----------------------|---|------------------------------------------------|------------------|
+| STACK, x 300         | 1 | 0 20 39 59 78 98 117 145 173 201 229 257       | 0 19 38 57 ... 254 |
+| STACK, x 1200        | 4 | 0 78 156 234 312 390 468 580 693 805 917 1030  | white rows at 154, 310, 466 |
+| MULTI, x 380         | 1 | 0 59 78 137 156 176                            | 0 57 76 133 152 171 |
+| MULTI, x 1520        | 4 | 0 234 312 546 624 702                          | 0 228 308 534 610 612 692 |
+| HEADER, x 5          | 1 | header rows 0-97 (first edge 98)               | 97               |
+
+Not pinned: text y inside lines 2..n of a wrapped run; lines taller than
+their strut (mixed sizes, atomics); px and `normal` line-heights.
+"""
+
+"""
+Traceability: REQ-WEB-BLOCK-FRAC-LINE-H-001 — a number line-height's sub-pixel part advances the block cursor and snaps box edges like Chrome, at device scale 1 and k.
+"""
+# @tag: unit, browser_engine, layout, line_height, device_scale, chrome159
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_foundation.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+val STACK: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>body{{margin:0;font:16px/1.5 sans-serif;color:#172033;background:#fff}} div{{margin:0;color:#fff}} .a{{background:#173b7a}} .b{{background:#7a173b}} .s{{font-size:15px;line-height:1.3}} .h{{font-size:18.72px;line-height:1.5}}</style></head><body><div class=\"a s\">one</div><div class=\"b s\">two</div><div class=\"a s\">three</div><div class=\"b s\">four</div><div class=\"a s\">five</div><div class=\"b s\">six</div><div class=\"a h\">h1</div><div class=\"b h\">h2</div><div class=\"a h\">h3</div><div class=\"b h\">h4</div><div class=\"a h\">h5</div></body></html>"
+
+val MULTI: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>body{{margin:0;font:16px/1.5 sans-serif;color:#fff;background:#fff}} div,pre{{margin:0}} .a{{background:#173b7a}} .b{{background:#7a173b}} .s{{font-size:15px;line-height:1.3}} pre.s{{font-size:13px;line-height:1.5}}</style></head><body><pre class=\"a s\">one\ntwo\nthree</pre><div class=\"b s\">x</div><div class=\"a s\" style=\"width:120px\">wrap wrap wrap wrap wrap wrap wrap</div><div class=\"b s\">y</div><div class=\"a s\">z</div></body></html>"
+
+val HEADER: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>*{{box-sizing:border-box}} body{{margin:0;font:16px/1.5 sans-serif;color:#172033;background:#fff}} header{{display:flex;justify-content:space-between;align-items:center;padding:16px 24px;color:white;background:#173b7a}}</style></head><body><article><header><h3>Article</h3></header><address>Simple renderer team</address></article></body></html>"
+
+# Rows y0..y1-1 of column x where the colour differs from the row above.
+fn _edges(px: [u32], w: i32, x: i32, y0: i32, y1: i32) -> text:
+    var s = ""
+    var prev = 0xffffffffu32
+    var y = y0
+    while y < y1:
+        val c = px[y * w + x] & 0xffffffu32
+        if c != prev:
+            s = s + " {y}"
+            prev = c
+        y = y + 1
+    s.trim()
+
+describe "Fractional number line-heights in block layout (Chrome 159)":
+    it "AC-1: a stack of 19.5 px and 28.08 px line boxes at device scale 1":
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(STACK, 400, 300, 1, "cpu_simd")
+        expect(_edges(px, 400, 300, 0, 300)).to_equal("0 20 39 59 78 98 117 145 173 201 229 257")
+
+    it "AC-2: the same stack at device scale 4 has no gap rows":
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(STACK, 400, 300, 4, "cpu_simd")
+        expect(_edges(px, 1600, 1200, 0, 1200)).to_equal("0 78 156 234 312 390 468 580 693 805 917 1030")
+
+    it "AC-3: pre and wrapped blocks are n exact lines tall at scales 1 and 4":
+        val one = simple_web_layout_render_html_pixels_engine2d_at_device_scale(MULTI, 400, 300, 1, "cpu_simd")
+        expect(_edges(one, 400, 380, 0, 300)).to_equal("0 59 78 137 156 176")
+        val four = simple_web_layout_render_html_pixels_engine2d_at_device_scale(MULTI, 400, 300, 4, "cpu_simd")
+        expect(_edges(four, 1600, 1520, 0, 1200)).to_equal("0 234 312 546 624 702")
+
+    it "AC-4: an article header holding an h3 is 98 rows at device scale 1":
+        val px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(HEADER, 400, 300, 1, "cpu_simd")
+        expect(_edges(px, 400, 5, 0, 99)).to_equal("0 98")

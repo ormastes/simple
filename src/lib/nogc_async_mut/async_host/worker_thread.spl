@@ -3,7 +3,6 @@
 # Worker thread that polls tasks from thread-safe queue.
 # Part of multi-threaded async runtime.
 
-use std.async_core.{Poll}
 use std.thread_sffi.{thread_sleep, thread_yield}
 use std.async_host.thread_safe_queue.{ThreadSafeQueue}
 
@@ -25,13 +24,13 @@ class WorkerThread:
     global_queue: ThreadSafeQueue
     is_running: bool
     shutdown_requested: bool
-    task_registry: Dict<usize, fn() -> Poll<()>>
+    task_registry: Dict<usize, fn() -> i64>
 
     static fn new(
         worker_id: usize,
         local_queue: ThreadSafeQueue,
         global_queue: ThreadSafeQueue,
-        task_registry: Dict<usize, fn() -> Poll<()>>
+        task_registry: Dict<usize, fn() -> i64>
     ) -> WorkerThread:
         """Create new worker thread.
 
@@ -73,34 +72,32 @@ class WorkerThread:
         Returns:
             true if task executed, false if no work available
         """
-        # Try local queue first (LIFO for cache locality)
+        # Try local queue first (LIFO for cache locality); 0 = empty sentinel
         var task_id = self.local_queue.try_pop()
 
         # Try global queue
-        if task_id == nil:
+        if task_id == 0:
             task_id = self.global_queue.try_pop()
+        if task_id == 0:
+            return false
 
-        # Execute task if found
-        match task_id:
-            case Some(id):
-                # Native codegen: Dict.get() on non-scalar values is unsafe.
-                # Use contains_key() + indexed read.
-                if self.task_registry.contains_key(id):
-                    val poll_fn = self.task_registry[id]
-                    val result = poll_fn()
-                    match result:
-                        case Poll.Ready(_):
-                            # Task complete, remove from registry
-                            self.task_registry.remove(id)
-                        case Poll.Pending:
-                            # Re-queue task for later
-                            self.local_queue.push(id)
-                    return true
-                else:
-                    # Task not found in registry, skip
-                    return true
-            case nil:
-                return false
+        # Execute task
+        val id = task_id
+        # Native codegen: Dict.get() on non-scalar values is unsafe.
+        # Use contains_key() + indexed read.
+        if self.task_registry.contains_key(id):
+            val poll_fn = self.task_registry[id]
+            val result = poll_fn()
+            if result == 1:
+                # Task complete, remove from registry
+                self.task_registry.remove(id)
+            else:
+                # Re-queue task for later
+                self.local_queue.push(id)
+            return true
+        else:
+            # Task not found in registry, skip
+            return true
 
     me shutdown():
         """Request shutdown (thread-safe)."""

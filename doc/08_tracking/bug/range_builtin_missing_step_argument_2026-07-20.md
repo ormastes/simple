@@ -1,7 +1,8 @@
 # Bug: builtin `range(start, end, step)` silently ignores the 3rd (step) argument
 
 - **Date:** 2026-07-20
-- **Status:** open (found triaging `test/feature/usage/loops_spec.spl`)
+- **Status:** RESOLVED 2026-11-25 — the 3-arg step branch is implemented and
+  the filed failures no longer reproduce (probe below).
 - **Area:** `src/compiler_rust/compiler/src/interpreter_call/builtins.rs` (`"range"` arm),
   deployed seed at `bin/release/x86_64-unknown-linux-gnu/simple`
 
@@ -60,3 +61,16 @@ bin/release/x86_64-unknown-linux-gnu/simple test test/feature/usage/loops_spec.s
 Not checked against the pure-Simple self-hosted compiler or a compiled/native
 path — only the Rust seed interpreter (the path `bin/simple test` exercises on
 this host) was probed.
+
+## Verification 2026-11-25 (p2w4-al lane, Windows host)
+
+- Source: `src/compiler_rust/compiler/src/interpreter_call/builtins.rs:126-149`
+  now reads `args[2]` as the step (with an explicit comment citing this bug
+  doc), rejects a zero step, and builds the sequence via
+  `create_range_object_step(start, end, RangeBound::Exclusive, step)`.
+- Live probe (seed interpreter, `bin/simple.exe run`):
+  `[for x in range(0, 10, 2): x]` → `[0, 2, 4, 6, 8]`;
+  `[for x in range(5, 0, -1): x]` → `[5, 4, 3, 2, 1]`;
+  `range(3)` → `[0, 1, 2]`; `range(1, 4)` → `[1, 2, 3]`.
+  Both filed failures are fixed, and the 2-arg form is now EXCLUSIVE of
+  `end` (the inclusivity quirk noted above is also gone).

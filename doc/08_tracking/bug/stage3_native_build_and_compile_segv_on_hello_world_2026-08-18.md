@@ -9,7 +9,12 @@
 
 - **Filed:** 2026-08-18
 - **Severity:** HIGH — the tracked stage3 artifact is non-functional
-- **Status:** OPEN (found while verifying an unrelated documented claim)
+- **Status:** SUPERSEDED — the tracked SEGV no longer reproduces (re-measured
+  2026-08-31, see update below and 2026-11-11 lane boot20 addendum at end);
+  absorbed by `c_runtime_missing_83_codegen_runtime_symbols_2026-08-21.md`.
+  Residual failures tracked by
+  `darwin_stage_binaries_clobber_bare_paths_2026-08-31.md` (clobber) and the
+  separately-blocked bootstrap redeploy (seed-wrapper fallback refusal).
 
 > **STATUS UPDATE 2026-08-31 (re-measured at `origin/main` @ `28ca075c2c7`,
 > linux-x86_64 host) — the SEGV itself is GONE; the gate is still RED for two
@@ -341,3 +346,18 @@ The record stays **OPEN**. The guard is still red, so the promotion to MANDATORY
 described in `.claude/rules/vcs.md` is still blocked, and the repair still needs
 a bootstrap redeploy — which is itself blocked, see
 `stage3_hir_segv_compiler_driver_unit2of833_2026-09-14.md`.
+
+## Triage 2026-11-11 (lane boot20) — SUPERSEDED, flipped from OPEN
+
+Verdict: **SUPERSEDED / STALE-SEGV**. The defect this row tracks — rc=139
+SEGVs from `bootstrap/stage3/simple` on `native-build`/`compile` — no longer
+reproduces anywhere; the 2026-08-31 re-measure at `origin/main` `28ca075c2c7`
+documented above found zero rc=139 across all tracked stage binaries, with
+`--version` and `compile` rc=0, and attributed the SEGV absence to the
+fail-closed link work in `c_runtime_missing_83_codegen_runtime_symbols_2026-08-21.md`
+(absorber). The residual gate redness measured 2026-08-31 is two DIFFERENT
+defect classes tracked elsewhere: (a) darwin Mach-O blobs at bare Linux stage
+paths — `darwin_stage_binaries_clobber_bare_paths_2026-08-31.md`; (b) the
+deliberate `bootstrap_main cannot emit a seed-wrapper fallback` refusal on
+`native-build`, which needs the separately-blocked bootstrap redeploy.
+No new code change in this lane; historical SEGV text retained for context.

@@ -207,6 +207,10 @@ impl<'a> Parser<'a> {
         }
 
         // Support both inline and block-form syntax for then branch
+        // Set when a block-form then-arm ends with a same-line trailing
+        // `else:`/`elif` so its still-open Indent can be closed by the Dedent
+        // that trails the else/elif arm once the whole chain is parsed.
+        let mut then_arm_indent_unclosed = false;
         let then_branch = if use_braces {
             // Curly brace form: if cond { body } else { body }
             self.parse_brace_block_expr()?
@@ -252,12 +256,26 @@ impl<'a> Parser<'a> {
                 }
 
                 let mut statements = Vec::new();
+                // A then-arm may be followed by a same-line trailing `else:`
+                // / `elif ...:` at the arm's own column (no Dedent in between)
+                // — e.g. `if c:\n    "a" else: "b"`. The self-hosted grammar
+                // accepts that form; without the Else/Elif break below the
+                // loop fed the `else` to `parse_item` and died with
+                // "expected expression, found Else". Mirrors the empty
+                // then-branch check above, which already treats a bare
+                // Else/Elif as this if-expression's own continuation.
+                // See doc/08_tracking/bug/
+                // riscv_scalar_product_vhdl_else_parse_2026-08-12.md.
                 while !self.check(&TokenKind::Dedent) && !self.is_at_end() {
                     // Skip empty lines and same-line statement separators.
                     while self.check(&TokenKind::Newline) || self.check(&TokenKind::Semicolon) {
                         self.advance();
                     }
-                    if self.check(&TokenKind::Dedent) || self.is_at_end() {
+                    if self.check(&TokenKind::Dedent)
+                        || self.is_at_end()
+                        || self.check(&TokenKind::Else)
+                        || self.check(&TokenKind::Elif)
+                    {
                         break;
                     }
 
@@ -268,6 +286,15 @@ impl<'a> Parser<'a> {
                         self.advance();
                     }
                 }
+
+                // When the loop above broke on a same-line trailing
+                // Else/Elif instead of the arm's closing Dedent, the arm's
+                // Indent stays open: its Dedent is only emitted after the
+                // trailing else/elif arm's line ends. Remember this so the
+                // Dedent can be consumed once the whole if/elif/else chain
+                // has been parsed (see below, next to the
+                // continuation_indents reconciliation).
+                then_arm_indent_unclosed = self.check(&TokenKind::Else) || self.check(&TokenKind::Elif);
 
                 if self.check(&TokenKind::Dedent) {
                     self.advance();
@@ -432,6 +459,22 @@ impl<'a> Parser<'a> {
             }
         }
 
+        // Close a block-form then-arm Indent left open by a same-line
+        // trailing else:/elif. The matching Dedent trails the else/elif arm:
+        // consume an optional Newline followed by the Dedent (or a bare
+        // Dedent). Defensive — if the tokens are not there (e.g. the else
+        // arm already consumed the level), leave the stream untouched.
+        // See doc/08_tracking/bug/
+        // riscv_scalar_product_vhdl_else_parse_2026-08-12.md.
+        if then_arm_indent_unclosed {
+            if self.check(&TokenKind::Newline) && matches!(self.peek_next().kind, TokenKind::Dedent) {
+                self.advance(); // consume Newline
+                self.advance(); // consume Dedent
+            } else if self.check(&TokenKind::Dedent) {
+                self.advance(); // consume Dedent
+            }
+        }
+
         Ok(Expr::If {
             let_pattern,
             condition: Box::new(condition),
@@ -441,6 +484,7 @@ impl<'a> Parser<'a> {
     }
 
     pub(crate) fn parse_arguments(&mut self) -> Result<Vec<Argument>, ParseError> {
+        let args_are_higher_order = std::mem::take(&mut self.next_args_higher_order);
         self.expect(&TokenKind::LParen)?;
         let mut args = Vec::new();
 
@@ -599,6 +643,11 @@ impl<'a> Parser<'a> {
                     TokenKind::Extend => Some("extend".to_string()),
                     TokenKind::Asm => Some("asm".to_string()),
                     TokenKind::OutErr => Some("out_err".to_string()),
+                    // `spawn` is a soft keyword (actor spawn expr); it must still
+                    // work as a named-arg label, e.g. R(spawn: X.Rejected("..")).
+                    TokenKind::Spawn => Some("spawn".to_string()),
+                    TokenKind::Admit => Some("admit".to_string()),
+                    TokenKind::Assume => Some("assume".to_string()),
                     _ => None,
                 }
             };
@@ -619,7 +668,9 @@ impl<'a> Parser<'a> {
             }
 
             self.call_arg_depth += 1;
+            self.ho_arg_depth += usize::from(args_are_higher_order);
             let parsed_value = self.parse_expression();
+            self.ho_arg_depth -= usize::from(args_are_higher_order);
             self.call_arg_depth -= 1;
             let mut value = parsed_value?;
 
@@ -756,6 +807,9 @@ impl<'a> Parser<'a> {
                         | TokenKind::Extend
                         | TokenKind::Asm
                         | TokenKind::OutErr
+                        | TokenKind::Spawn
+                        | TokenKind::Admit
+                        | TokenKind::Assume
                 );
 
                 if is_likely_named_arg {
@@ -883,13 +937,14 @@ impl<'a> Parser<'a> {
                         break;
                     }
 
-                    // Stop at closing brackets when the lambda body is inside a function call.
+                    // Stop at closing brackets or comma when the lambda body is inside a call/collection.
                     // Example: items.filter(\d:\n    not done.contains(d)).len()
-                    // The `)` that closes .filter(...) terminates the lambda body.
+                    // The `)` or `,` that closes .filter(...) or a struct field terminates the lambda body.
                     if matches!(
                         self.current.kind,
                         TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace
-                    ) {
+                    ) || (!statements.is_empty() && self.check(&TokenKind::Comma))
+                    {
                         break;
                     }
 
@@ -903,15 +958,16 @@ impl<'a> Parser<'a> {
                 }
 
                 // Consume dedent if present.
-                // If we broke at a closing bracket (RParen etc.), the dedent may come
-                // later as the bracket closes. Pop the lexer's indent stack to stay in sync.
+                // If we broke at a closing bracket/comma, the dedent may come
+                // later as the enclosing construct closes. Pop the lexer's indent stack to stay in sync.
                 if self.check(&TokenKind::Dedent) {
                     self.advance();
                 } else if matches!(
                     self.current.kind,
                     TokenKind::RParen | TokenKind::RBracket | TokenKind::RBrace
-                ) {
-                    // Lambda body ended at a closing bracket without a Dedent.
+                ) || (!statements.is_empty() && self.check(&TokenKind::Comma))
+                {
+                    // Lambda body ended at a closing bracket or comma without a Dedent.
                     // Pop the indent stack to keep it in sync.
                     self.lexer.pop_indent();
                 }

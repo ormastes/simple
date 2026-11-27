@@ -1,5 +1,7 @@
 # Generic formal verification hardening — TLDR
 
+> **SUPERSEDED (2026-11-01)** by `doc/03_plan/compiler/generics/generics_refactoring_formal_verification_plan_2026-10-31.md` (see its §1A.6); the `40.mono` files named below no longer exist on `origin/release/1.0.0`.
+
 <!-- codex-architecture -->
 
 [Full plan](generic_formal_verification_hardening_plan.md). Baseline: `release_phase3` at `e6a4904a9faf67c4ee11d199cb197b002a9bf21c`, inspected 2026-10-18.

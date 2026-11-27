@@ -1,5 +1,5 @@
 # Bootstrap lock is keyed on `--output`, but the seed path is not — concurrent bootstraps still collide
-## Open 2026-09-16 — needs owner triage
+## Status 2026-11-11 — SUPERSEDED (verified at p3-boot11 base; was "Open 2026-09-16 — needs owner triage")
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
@@ -178,3 +178,72 @@ that dirties the tree under every one of them.
 Note step 2 succeeds in acquiring its own `${output_dir}.lock` — the guard does
 not fire, which is the point of this report.
 
+
+## Triage 2026-11-03 (boot-script-fixes lane)
+
+Already fixed on origin: bootstrap-from-scratch.sh:2857-2893 guards the shared seed path with a worktree-level Rust authority lock (rust_authority_lock_root, bootstrap_acquire_rust_authority) plus immutable bootstrap.generations publication, independent of --output. Row closed fixed.
+
+## Triage 2026-11-10 (p3-boot3 lane, assignment row 17)
+
+**Verdict: SUPERSEDED (fix verified live at this lane's base).**
+
+Independently re-verified on the p3-boot3 worktree (base
+origin/release/1.0.0), corroborating the 2026-11-03 boot-script-fixes note
+with current line numbers:
+
+- The shared seed path is still the hardcoded
+  `src/compiler_rust/target/bootstrap/simple` (now
+  `scripts/bootstrap/bootstrap-from-scratch.sh:3001`), but publication into it
+  is serialized repo-wide, independent of `--output`:
+  `rust_authority_lock_root=.../src/compiler_rust/target/.bootstrap-authority-locks`
+  (`:3004`), `bootstrap_acquire_rust_authority` (`:3051`) using the shared
+  portable lock, publication via immutable `bootstrap.generations/` +
+  `bootstrap.current.env` transaction marker with refuse-or-recover
+  (`:3154-3167`, `:4207-4223`), and atomic `cp -pL` + `mv` materialization in
+  `bootstrap_authority_materialize_legacy_file`
+  (`scripts/bootstrap/bootstrap-authority-wiring.shs:424-434`) — the exact
+  atomic-rename shape this doc said was deliberately withheld on 2026-07-31.
+- A shared-cargo-cache lock additionally serializes sibling worktrees'
+  cargo runs before the publication lock (`bootstrap_acquire_shared_rust_cargo_cache`,
+  `:3013-3050`).
+
+The guard's `--output=<other-dir>` escape hatch remains per-output-dir only,
+but the artifact whose clobbering motivated the guard (the seed and its
+siblings) is now covered by the worktree-level authority lock, so concurrent
+bootstraps with different outputs no longer race the staging copy. No change
+made in this lane.
+
+---
+
+## Triage 2026-11-10 (P3 compiler-seed lane, work/p3-seed-20261110)
+
+Verdict: **SUPERSEDED (fix verified present on this base)**. The 2026-11-03
+triage note's claim was checked against the code, not just trusted: the shared
+seed path is no longer a bare `cp -p` target. This worktree
+(1504212d788b) has the worktree-level Rust authority lock
+(`rust_authority_lock_root="${repo_root}/src/compiler_rust/target/.bootstrap-authority-locks"`,
+`bootstrap_acquire_rust_authority()` at `scripts/bootstrap/bootstrap-from-scratch.sh:3004-3059`,
+acquired at :3151/:3723/:3926/:4153) held around the seed publish
+(`bootstrap_stage3_publish_seed_generation`,
+`scripts/check/lib/bootstrap-stage3/authority.shs:4676`), which commits an
+immutable generation and rebinds the marker instead of overwriting an executing
+binary — implementing suggested fixes 1+2 together and eliminating the ETXTBSY
+clobber class by construction. Lock arrival merged via 9e7e7a526edb (2026-11-07,
+ancestor of this branch). No change made.
+
+---
+
+## Triage 2026-11-11 (P3 boot11 lane, work/p3-boot11-20261111)
+
+**Verdict: SUPERSEDED (independently verified at this lane's base,
+origin/release/1.0.0 tip f01a4d15967e).** The 2026-11-03/2026-11-10 triage
+claims were re-checked against source, not trusted: the shared seed path is
+still the hardcoded `src/compiler_rust/target/bootstrap/simple`, but
+publication is serialized repo-wide independent of `--output` —
+`rust_authority_lock_root` (`scripts/bootstrap/bootstrap-from-scratch.sh:3060`),
+`bootstrap_acquire_rust_authority()` (`:3107`, acquired at `:3211/:3779/:3982/:4209`),
+and atomic `cp -pL` + `mv` materialization via
+`bootstrap_authority_materialize_legacy_file`
+(`scripts/bootstrap/bootstrap-authority-wiring.shs:424`). Suggested fixes 1+2
+both stand implemented; the ETXTBSY clobber class is closed by construction.
+No change made in this lane.

@@ -1,5 +1,22 @@
 # String interpolation brace scanner breaks across concatenated string literals
 
+## Verification 2026-11-25 — closure reconfirmed, measured on pinned binary
+
+Engine: worktree-pinned `bin/simple.exe` (Rust seed v1.0.0-rc.1,
+38,403,072 bytes), Windows 11 / Git Bash, `SIMPLE_LIB=src bin/simple.exe run`
+(the `test` lane is blocked repo-wide at HEAD by the unrelated
+`@representation_boundary` decorator gap; `run` is unaffected).
+
+Ran the exact repro from the "Repro" section:
+
+```
+body{font:14px;color:#1a1f26;}
+END
+```
+
+The runtime value is exactly the concatenation of the two literals — no
+adjacent source text leaks. The 2026-09-13 closure stands (measured).
+
 ## Closed 2026-09-13 — fixed, re-verified by running the entry repro
 
 Verification engine: pinned copy of `src/compiler_rust/target/release/simple.exe`

@@ -1,0 +1,52 @@
+# divergence_byte_char_find_option_sweep_2026-08-01
+#
+# Sweep of the remaining src/lib tiers (nogc_sync_mut, nogc_async_mut,
+# gc_async_mut, scv, common) for raw-i64 find/index_of results consumed as
+# Options. Found and fixed: ftp_utils.parse_connection_string (both runtime
+# twins) used `if at_idx.?:` / `if colon_idx.?:` on `index_of` results, so a
+# miss (-1) took the "present" branch and "ftp://host" parsed to
+# username "" instead of "anonymous". All other swept sites verified clean
+# (guarded, sentinel conventions, or Option-returning finds).
+#
+# Verified here on both runtime twins (nogc_sync_mut and nogc_async_mut
+# ftp_utils carry identical parse_connection_string implementations).
+
+use std.nogc_sync_mut.ftp_utils.{parse_connection_string}
+use std.nogc_async_mut.ftp_utils.{parse_connection_string as parse_connection_string_async}
+
+describe "ftp connection string parse (find/Option divergence)":
+    it "host without userinfo or port keeps anonymous username and default port":
+        val (host, port, username) = parse_connection_string("ftp://example.com")
+        expect(host).to_equal("example.com")
+        expect(port).to_equal(21)
+        expect(username).to_equal("anonymous")
+
+    it "full connection string parses all three components":
+        val (host, port, username) = parse_connection_string("ftp://alice@ftp.example.org:2121")
+        expect(host).to_equal("ftp.example.org")
+        expect(port).to_equal(2121)
+        expect(username).to_equal("alice")
+
+    it "host with port but no userinfo keeps anonymous username":
+        val (host, port, username) = parse_connection_string("ftp://files.example.net:990")
+        expect(host).to_equal("files.example.net")
+        expect(port).to_equal(990)
+        expect(username).to_equal("anonymous")
+
+    it "plain host without scheme, userinfo, or port":
+        val (host, port, username) = parse_connection_string("mirror.local")
+        expect(host).to_equal("mirror.local")
+        expect(port).to_equal(21)
+        expect(username).to_equal("anonymous")
+
+    it "nogc_async_mut twin: host without userinfo keeps anonymous username":
+        val (host, port, username) = parse_connection_string_async("ftp://example.com")
+        expect(host).to_equal("example.com")
+        expect(port).to_equal(21)
+        expect(username).to_equal("anonymous")
+
+    it "nogc_async_mut twin: full connection string parses all three components":
+        val (host, port, username) = parse_connection_string_async("ftp://bob@ftp.example.org:2121")
+        expect(host).to_equal("ftp.example.org")
+        expect(port).to_equal(2121)
+        expect(username).to_equal("bob")

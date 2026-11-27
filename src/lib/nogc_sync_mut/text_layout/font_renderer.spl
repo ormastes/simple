@@ -68,6 +68,9 @@ var _adv_overflow_cursor: i32 = 0
 val _GID_SLOTS: i32 = 4
 var _gid_identity: [text] = [""; 4]
 var _gid_vals: [[i64]] = [[0; 95]; 4]
+# The face's parsed kern index (`sfnt_blob_kern_face_info`), warmed with the
+# glyph ids so a kern-cache miss no longer re-parses the table directory.
+var _gid_kern: [[i64]] = [[0]; 4]
 var _gid_cursor: i32 = 0
 
 fn _gid_slot(identity: text) -> i32:
@@ -96,6 +99,7 @@ fn _gid_warm(identity: text, blob: [u8]) -> i32:
     _gid_cursor = (_gid_cursor + 1) % _GID_SLOTS
     _gid_identity[slot] = identity
     _gid_vals[slot] = ids
+    _gid_kern[slot] = sfnt_blob_kern_face_info(blob)
     slot
 
 # Batched ASCII advance warm (2026-09-13, round 13), keyed by (loaded-face
@@ -262,6 +266,41 @@ fn _milli_px_to_px_i64(milli: i64) -> i64:
     if milli <= 0: return 0
     (milli + 500) / 1000
 
+# round(value * num / den) for den > 0, half away from zero: the rescale
+# `resolve_font_metrics_with_language_milli` applies to a run's boundaries.
+fn _fr_scale_round(value: i64, num: i64, den: i64) -> i64:
+    if value < 0: return 0 - _fr_scale_round(0 - value, num, den)
+    (value * num + den / 2) / den
+
+# A fractional size as FreeType sees it: Chrome 159 hands it the size in 26.6
+# fixed point, truncated (`SkScalarToFDot6`), so 10.6667 px is 682/64 =
+# 10.65625 px and 13.3333 px 853/64. Every fractional-size advance and pen is
+# scaled by this many 1/64 px, not by the float size.
+# Before that, Blink creates the platform font at its font-cache-key size:
+# `(unsigned)(size * 100)` in float32, / 100. `font-size: 18.72px` is float
+# 18.7199993, x100 = 1871.9999 -> 18.71 px -> 1197/64 (not 1198/64); 20.72 x100
+# rounds to 2072.0 and keeps 1326/64 (font_cache_key_size_chrome159_spec).
+# units_per_em of the selected outline face (head.unitsPerEm), 0 when unknown.
+# One-entry memo keyed on the face identity: a run asks once per draw.
+var _fr_upem_identity: text = ""
+var _fr_upem_value: i64 = 0
+val _FR_TAG_HEAD: u32 = 1751474532u32
+
+fn _fr_units_per_em(identity: text, blob: [u8]) -> i64:
+    if identity == "" or blob.len() < 12:
+        return 0
+    if identity == _fr_upem_identity:
+        return _fr_upem_value
+    var upem: i64 = 0
+    if val Some(font) = sfnt_glyf_parse_offset_table(blob):
+        if val Some(t) = sfnt_glyf_find_table(font, _FR_TAG_HEAD):
+            val off = t.offset as i64
+            if off + 20 <= blob.len():
+                upem = sfnt_glyf_read_u16_be(blob, off + 18) as i64
+    _fr_upem_identity = identity
+    _fr_upem_value = upem
+    upem
+
 fn _adv_cache_lookup(identity: text, font_size: i32, codepoint: i32) -> i32:
     if codepoint >= _ADV_ASCII_LO and codepoint <= _ADV_ASCII_HI:
         val slot = _adv_ascii_slot(identity, font_size)
@@ -312,11 +351,14 @@ fn _adv_cache_store(identity: text, font_size: i32, codepoint: i32, advance: i32
     _adv_overflow_val[_adv_overflow_cursor] = advance
     _adv_overflow_cursor = (_adv_overflow_cursor + 1) % _ADV_OVERFLOW_CAP
 use std.nogc_sync_mut.sffi.spl_fonts.{FontRasterizer, LayoutGlyph, SubpixelGlyphBitmap}
-use std.common.encoding.sfnt.{font_unmanaged_identity_face_spec}
+use std.common.encoding.sfnt.{font_unmanaged_identity_face_spec, font_face_spec_path}
 use std.nogc_sync_mut.text_layout.font_provider.{
     browser_font_dylib_candidates,
     browser_serif_font_candidates,
     browser_font_candidates_for_family,
+    browser_font_family_category,
+    browser_font_family_for_style,
+    browser_host_has_measured_linux_face_set,
     browser_family_has_host_face,
     browser_platform_hangul_faces,
     browser_bundled_font_path_for_family
@@ -333,7 +375,7 @@ use std.nogc_sync_mut.text_layout.font_rasterizer.{
 use std.nogc_sync_mut.text_layout.font_vector_data.{vf_glyph_commands, vf_glyph_width}
 use std.nogc_sync_mut.text_layout.font_advance_layout.{font_batch_apply_advances}
 use std.nogc_sync_mut.io.font_sffi.{font_face_ascent, free_font, font_face_identity, font_face_is_live, load_font}
-use std.nogc_sync_mut.sffi.io.{file_read_bytes}
+use std.nogc_sync_mut.sffi.io.{file_read_bytes, file_exists}
 use std.nogc_sync_mut.io.env_ops.{env_get}
 use std.nogc_sync_mut.io.time_ops.{rt_time_now_micros}
 # Glyph iteration is by CODEPOINT. `text.len()` is a UTF-8 BYTE count while
@@ -341,14 +383,15 @@ use std.nogc_sync_mut.io.time_ops.{rt_time_now_micros}
 # a 3-character string 6 times and read phantom zero codepoints past the end —
 # inflating every non-ASCII advance array, width, and rendered run.
 # See doc/08_tracking/bug/live_lane_inline_text_measure_counts_utf8_bytes_2026-08-11.md
-use std.common.encoding.utf8.{text_codepoints}
+use std.common.encoding.utf8.{text_codepoints, utf8_codepoint_byte_len}
 use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_PROGRAM_VERSION}
-use std.common.encoding.sfnt_glyf.{SFNT_GLYPH_SELECTOR_CODEPOINT, SFNT_GLYPH_SELECTOR_INDEX, sfnt_blob_glyph_advances_into, sfnt_blob_glyph_ids_into, sfnt_glyph_advance_into, sfnt_measure_glyph_into, sfnt_render_glyph_into}
-use std.common.encoding.font_registry.{FontAssetCandidate, selected_font_asset_candidates, selected_font_asset_candidate_for_path, selected_font_asset_candidate_for_identity, selected_font_asset_for_language_category, selected_font_asset_identity, selected_font_asset_identity_for_path, selected_font_asset_local_path_for_identity, selected_font_asset_physical_path, selected_font_language_ranks, selected_font_simple_tuple_accepted, validate_selected_font_asset}
-use std.common.encoding.sfnt_kern.{sfnt_blob_kern_pair_milli_px}
+use std.common.encoding.sfnt_glyf.{sfnt_glyph_gray_row_has_ink, SFNT_GLYPH_SELECTOR_CODEPOINT, SFNT_GLYPH_SELECTOR_INDEX, sfnt_blob_glyph_advances_into, sfnt_blob_glyph_ids_into, sfnt_glyph_advance_into, sfnt_measure_glyph_into, sfnt_render_glyph_into, sfnt_lcd_glyph_outline, sfnt_lcd_outline_frame, sfnt_lcd_outline_raster, sfnt_gray_glyph_outline, sfnt_gray_outline_frame, sfnt_gray_outline_raster, SfntLcdGlyph, SfntLcdOutline}
+use std.common.encoding.sfnt_glyf.{sfnt_font_cache_key_size_26_6, sfnt_glyf_parse_offset_table, sfnt_glyf_find_table, sfnt_glyf_read_u16_be}
+use std.common.encoding.font_registry.{FontAssetCandidate, FontAssetRuntimeValidation, clear_registered_selected_font_fixtures, register_selected_font_fixture, selected_font_asset_candidates, selected_font_asset_candidate_for_path, selected_font_asset_candidate_for_identity, selected_font_asset_for_language_category, selected_font_asset_identity, selected_font_asset_identity_for_path, selected_font_asset_local_path_for_identity, selected_font_asset_physical_path, selected_font_language_ranks, selected_font_simple_tuple_accepted, validate_selected_font_asset}
+use std.common.encoding.sfnt_kern.{sfnt_blob_kern_face_info, sfnt_kern_face_pair_milli_px, sfnt_blob_line_metric_units, sfnt_line_metric_units_normal_line_height_px, sfnt_line_metric_units_ascent_descent_px, sfnt_line_metric_units_normal_line_height_milli_px, sfnt_line_metric_units_ascent_descent_milli_px, sfnt_line_metric_units_ascent_descent_device_px}
 use std.common.encoding.utf8.{text_codepoints}
 use std.common.ui.draw_ir.{DrawIrGlyphRunPayload, draw_ir_empty_glyph_run_payload, draw_ir_glyph_run_payload}
-use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new, mutex_lock, mutex_unlock}
+use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new, mutex_lock_gate, mutex_unlock}
 
 # These facade mutexes are declared nil and lazily created by
 # _font_mutex_acquire on first use, on every target (hosted and freestanding
@@ -360,13 +403,13 @@ use std.nogc_sync_mut.concurrent.mutex.{Mutex, mutex_new, mutex_lock, mutex_unlo
 use std.skia.entity.font.{sk_font_new, sk_font_style_normal, sk_typeface_from_attached_font}
 use std.skia.feature.glyph.ot_parser.{parse_offset_table}
 use std.skia.feature.shaper.font_fallback.{fallback_chain_new}
-use std.skia.feature.shaper.shaper.{shaped_run_to_font_glyph_run, shaper_face_blob_sha256_hex_cached, shaper_new, shaper_shape_with_language, shaper_with_ot_face_blob_hex, shaper_with_ot_font}
+use std.skia.feature.shaper.shaper.{shaped_run_to_font_glyph_run, shaper_face_blob_sha256_hex_cached, shaper_new, shaper_shape_with_language, shaper_with_ot_face_blob_hex, shaper_with_registered_ot_font}
 use std.skia.feature.shaper.script_detect.{Script, script_of}
 export use std.nogc_sync_mut.text_layout.font_types.{
     CachedGlyph, FontCacheStats, FontGlyphRun, FontTextPayload, FontRenderQuad, FontRenderBatch,
     FontRenderConfig, FontExecutionPolicy, font_execution_plan, font_execution_plan_into, font_render_category_name,
     font_render_config_normalize, font_render_config_default_for_size,
-    font_render_config_identity, font_render_config_valid,
+    font_render_config_identity, font_render_config_identity_sizeless, font_render_config_valid,
     font_render_batch_atlas_owner_identity, font_render_batch_atlas_cache_identity
 }
 
@@ -390,6 +433,19 @@ class ResolvedFontMetrics:
     reason: text
     glyph_run: DrawIrGlyphRunPayload
     shaping_required: bool
+    # EXACT run width in milli-px (the unrounded pen end `width` snaps), or
+    # -1 when no exact pen exists (shaped runs, fractional-size rescale).
+    # A mid-line run's LCD pen phase is derived from it (Chrome 159 lays the
+    # line out fractionally; see inline_run_pen_origin_chrome159_spec).
+    width_milli: i64 = -1
+    # A shaped run's exact glyph pens in 1/64 px, one per glyph; [] when the
+    # run is not shaped. Paint derives the 1x quarter-px LCD phase and the
+    # device pen floor(k x pen) from it without shaping again.
+    glyph_pens_64: [i32] = []
+    # Line-metric units ([ascent, descent, gap, upem]) of the face that shaped
+    # the run, [] for an unshaped run. Blink's `line-height: normal` line box
+    # holds every face a run uses, not only the primary font.
+    used_face_units: [i64] = []
 
 # ponytail: process-local 128-entry ring for pinned layout metrics; replace with
 # per-document caches only when concurrent multi-face ownership lands.
@@ -408,7 +464,7 @@ var _resolved_font_metric_cursor: i64 = 0
 # Dict in step: the wrap-around overwrite removes the evicted key first, and
 # every reset clears both.
 var _resolved_font_metric_index: Dict<text, i64> = {}
-var _resolved_font_metric_lock: Mutex? = nil
+var _resolved_font_metric_lock: Mutex? = None
 # Shaped-run cache hit/miss counters (2026-08-06) -- this cache existed
 # before this session but had no observability; added so proportionality
 # (repeated identical shaping produces hits, not re-shaping) is provable.
@@ -442,6 +498,24 @@ var _resolved_font_metric_misses: i64 = 0
 # the proven-safe side of that boundary. Read-only accessors below are safe
 # regardless (no push involved).
 val GLYPH_RASTER_CACHE_LIMIT: i64 = 4096
+# LCD glyphs rasterised at a non-zero quarter-pixel phase, keyed
+# "{atlas font identity}|{face generation}|{codepoint}|{size}|{phase}".
+var _lcd_phase_glyphs: Dict<text, CachedGlyph> = {}
+# Last atlas slot of each phase cell, same keys. A hint only: every read is
+# checked against the slot's identity before use (see _lcd_phase_atlas_index).
+var _lcd_phase_atlas_slots: Dict<text, i32> = {}
+# Phase-independent half of an LCD glyph (parsed, hinted outline and frame),
+# keyed "{rasterizer identity}|{selector kind}|{selector value}|{size}|{x milli}".
+# A run draws a glyph at up to four quarter phases; each phase cell after the
+# first skips the parse and the hint (3.3 of 12.7 ms on the interpreter lane).
+# Dropped whole at LCD_OUTLINE_CACHE_LIMIT entries.
+val LCD_OUTLINE_CACHE_LIMIT: i64 = 2048
+var _lcd_outlines: Dict<text, SfntLcdOutline> = {}
+var _lcd_outline_count: i64 = 0
+# Phase-0 LCD cells whose pixels nobody has read yet, by `get_glyph`'s raster
+# key: the metrics of the cell with empty `pixels` (`lcd_frame_only`). Handed
+# out only while a renderer has `lcd_defer_cells` set.
+var _lcd_frame_glyphs: Dict<text, CachedGlyph> = {}
 var _glyph_raster_keys: [text] = []
 var _glyph_raster_values: [CachedGlyph] = []
 var _glyph_raster_cursor: i64 = 0
@@ -461,6 +535,21 @@ fn _glyph_raster_cache_reset_for_test():
     _glyph_raster_cursor = 0
     _glyph_raster_hits = 0
     _glyph_raster_misses = 0
+    _fallback_ascent_keys = []
+    _fallback_ascent_values = []
+
+# Fallback-layout baseline memo. `_stage_text_active` asks the selected
+# outline face for its scaled ascender once per staged text run, through
+# `sfnt_measure_glyph_into` on the run's first codepoint -- a full table
+# directory parse, a whole-cmap-subtable parse and an outline parse, ~25 ms
+# per text command per frame on the interpreter lane, for a number that only
+# depends on (face, codepoint, size). Keyed exactly like the glyph-raster
+# cache above (rasterizer identity + codepoint + size) and mutated only inline
+# in that method body, for the same reason. A stored 0 means "the face gave
+# no ascender for this glyph", i.e. keep the ink-top baseline.
+val FALLBACK_ASCENT_CACHE_LIMIT: i64 = 512
+var _fallback_ascent_keys: [text] = []
+var _fallback_ascent_values: [i32] = []
 
 # Referenced by the shared mutex helpers below. Keep this declaration before
 # first use because SMF semantic compilation resolves module globals in order.
@@ -505,12 +594,12 @@ fn _font_mutex_acquire(current: Mutex?) -> Mutex:
     match current:
         case Some(active):
             if not _registered_selected_fonts_only:
-                mutex_lock(active)
+                mutex_lock_gate(active)
             active
         case None:
             val fresh = mutex_new(0)
             if not _registered_selected_fonts_only:
-                mutex_lock(fresh)
+                mutex_lock_gate(fresh)
             fresh
 
 fn _font_mutex_release(active: Mutex):
@@ -652,7 +741,7 @@ fn _browser_default_font_live_store(cache_key: text, renderer: FontRenderer):
     _browser_default_font_live_faces = _browser_default_font_live_faces.push(renderer)
 var _registered_selected_font_paths: [text] = []
 var _registered_selected_font_blobs: [[u8]] = []
-var _browser_default_font_lock: Mutex? = nil
+var _browser_default_font_lock: Mutex? = None
 
 fn _browser_default_font_lock_acquire() -> Mutex:
     val active = _font_mutex_acquire(_browser_default_font_lock)
@@ -720,6 +809,7 @@ fn _font_renderer_reset_registered_selected_bytes_for_test():
     _registered_selected_font_blobs = []
     _registered_selected_fonts_only = false
     _last_selected_registration_reason = ""
+    clear_registered_selected_font_fixtures()
 
 # Receipt for the LAST font_renderer_register_selected_bytes call. A module
 # global scalar/text, not a returned aggregate: the baremetal lane loses
@@ -762,14 +852,28 @@ fn font_renderer_register_selected_bytes(path: text, blob: [u8]) -> bool:
         _last_selected_registration_reason = "identity"
         return false
     val active_lock = _browser_default_font_lock_acquire()
-    for registered_path in _registered_selected_font_paths:
-        if registered_path == path:
+    var existing_index: i64 = 0
+    while existing_index < _registered_selected_font_paths.len():
+        if _registered_selected_font_paths[existing_index] == path:
+            _registered_selected_font_blobs[existing_index] = blob
             _browser_default_font_lock_release(active_lock)
             return true
+        existing_index = existing_index + 1
     _registered_selected_font_paths = _registered_selected_font_paths.push(path)
     _registered_selected_font_blobs = _registered_selected_font_blobs.push(blob)
     _browser_default_font_lock_release(active_lock)
     true
+
+pub fn font_renderer_register_font_fixture_bytes(path: text, family: text, blob: [u8]) -> FontAssetRuntimeValidation:
+    """Register a test font fixture in both the provenance registry and in-memory byte cache."""
+    val registered = register_selected_font_fixture(path, family, blob)
+    if not registered.valid:
+        _last_selected_registration_reason = registered.reason
+        return registered
+    if not font_renderer_register_selected_bytes(path, blob):
+        val fail_reason = if _last_selected_registration_reason != "": _last_selected_registration_reason else: "runtime"
+        return FontAssetRuntimeValidation(selected: true, valid: false, family: registered.family, reason: fail_reason)
+    registered
 
 fn _browser_default_font_rebuild_from_path(font_path: text) -> (FontRenderer, bool):
     """Reconstruct a fresh FontRenderer for a cache hit from the ALREADY
@@ -900,13 +1004,16 @@ val FONT_RENDER_TRANSFORM_IDENTITY: text = "uniform-scale;translate-late"
 
 val FONT_ATLAS_WIDTH: i32 = 1024
 val FONT_ATLAS_HEIGHT: i32 = 1024
+# Skia SK_MAX_SIZE_FOR_LCDTEXT: Chrome 159 draws LCD text up to 48 device px
+# and grayscale above (measured 48 px LCD, 49 px gray, 2026-11-16).
+val FONT_LCD_MAX_SIZE_PX: i32 = 48
 # The scalar stays literal-initialized for freestanding startup. Its dedicated
 # facade mutex is now lazily created on first use on every target (matching
 # the cache locks above) -- see the ROOT CAUSE comment on _font_mutex_acquire
 # for why eager `= mutex_new(0)` at module-init time was unsafe on the
 # hosted/Rust-seed path too, not just baremetal.
 var _font_atlas_dependency_generation_counter: i64 = 0
-var _font_atlas_dependency_generation_lock: Mutex? = nil
+var _font_atlas_dependency_generation_lock: Mutex? = None
 
 fn _font_render_config_default_selection(config: FontRenderConfig) -> bool:
     # Sequential explicit gates, not one parenthesized mixed `and` chain: the
@@ -929,29 +1036,29 @@ fn _font_render_config_default_selection(config: FontRenderConfig) -> bool:
 
 fn _font_render_config_candidate(config: FontRenderConfig) -> FontAssetCandidate?:
     if _font_render_config_default_selection(config):
-        return nil
+        return None
     val normalized_language = font_render_config_normalize(config.language)
     val language_parts = normalized_language.split("-")
     if language_parts.len() == 0 or language_parts[0] == "":
-        return nil
+        return None
     val language = language_parts[0]
     val category = font_render_category_name(config.category)
     if language == "und" or category == "auto":
-        return nil
+        return None
     val selected = selected_font_asset_for_language_category(language, category)
     if selected == nil:
-        return nil
+        return None
     val candidate = selected.?
     val family = font_render_config_normalize(config.family)
     if family != "auto" and family != candidate.family.lower():
-        return nil
+        return None
     var expected_script = ""
     for rank in selected_font_language_ranks():
         if rank.language == language:
             expected_script = rank.likely_script.lower()
     val script = font_render_config_normalize(config.script)
     if expected_script == "" or (script != "auto" and script != expected_script):
-        return nil
+        return None
     candidate
 
 fn font_render_config_selection_supported(config: FontRenderConfig) -> bool:
@@ -1082,6 +1189,27 @@ class GlyphCache:
         self.payload_bytes = payload + glyph_bytes
         true
 
+    # Give a deferred LCD cell its pixels: `glyph` replaces the `lcd_frame_only`
+    # entry of the same codepoint and size IN PLACE, so the entry keeps its
+    # eviction order. Newest first: the frame is filled right after the run
+    # that deferred it. False when the cache holds no such entry.
+    me fill_frame(glyph: CachedGlyph) -> bool:
+        var entries = self.entries
+        var i: i64 = entries.len() - 1
+        while i >= 0:
+            val entry = entries[i]
+            if (entry.lcd_frame_only and entry.glyph_index < 0 and entry.codepoint == glyph.codepoint and
+                entry.font_size == glyph.font_size and
+                entry.render_config_identity == self.observed_render_config_identity):
+                var configured = glyph
+                configured.render_config_identity = self.observed_render_config_identity
+                entries[i] = configured
+                self.entries = entries
+                self.payload_bytes = self.payload_bytes + glyph.pixels.len().to_i64()
+                return true
+            i = i - 1
+        false
+
     me invalidate():
         self.entries = []
         self.payload_bytes = 0
@@ -1127,7 +1255,16 @@ class GlyphCache:
 # never `self.atlas_parks[i].field = x` -- because in-place mutation of a
 # nested place clones the container on the interpreter lane (see
 # doc/08_tracking/bug/interpreter_nested_place_mutation_clones_container_2026-09-12.md).
-val FONT_ATLAS_PARK_MAX: i64 = 4
+#
+# 11 parks plus the active atlas is 12 owners: three generic families (sans,
+# serif, monospace) in regular, bold, italic and bold italic. It was 4, and a
+# page that cycles through more than five faces then wiped an owner on every
+# return: the sequence re-seeded, every glyph was inserted again, and the
+# Vulkan lane repacked the whole atlas per run (36 full packs for 36
+# paragraphs in nine faces, 190 s of a 219 s render; 9 full packs after).
+# Keep `VULKAN_FONT_ATLAS_MIRROR_MAX` at least this large: an owner the
+# producer still holds but the consumer has dropped repacks in full too.
+pub val FONT_ATLAS_PARK_MAX: i64 = 11
 
 class FontAtlasPark:
     key: text
@@ -1208,6 +1345,18 @@ class FontRenderer:
     # the wipe, i.e. to the previous behaviour.
     atlas_parks: [FontAtlasPark] = []
     active_render_config_identity: text = ""
+    # LCD subpixel glyphs (Chrome/Skia LCD16 parity) for sizes up to
+    # FONT_LCD_MAX_SIZE_PX. Off by default: only a consumer that composites
+    # per channel (Engine2D's CPU lane via `set_lcd_text`) turns it on. An
+    # LCD atlas cell is (avg << 24) | (r << 16) | (g << 8) | b; a grayscale
+    # cell keeps rgb = 0xFFFFFF, so single-alpha consumers still see coverage.
+    lcd_text: bool = false
+    # Set by `stage_text_with_advances_configured` around its own staging pass:
+    # `get_glyph` may then answer an unrastered phase-0 LCD cell with its
+    # metrics alone (`CachedGlyph.lcd_frame_only`). Never set between calls.
+    lcd_defer_cells: bool = false
+    # The same identity with `size=` masked: what decides an atlas wipe.
+    active_render_config_atlas_identity: text = ""
     # ---- Staged FontRenderBatch payload -----------------------------------
     # The prepared batch is written HERE instead of being returned. A
     # FontRenderBatch returned across a call kept its scalars/identity/atlas
@@ -1278,7 +1427,7 @@ class FontRenderer:
             ttf_handle: 0,
             use_vector: true,
             use_bitmap: true,
-            ttf_rasterizer: nil,
+            ttf_rasterizer: None,
             selected_outline_blob: [],
             atlas_pixels: [], atlas_codepoints: [], atlas_face_ids: [], atlas_face_generations: [], atlas_glyph_indices: [], atlas_font_sizes: [],
             atlas_xs: [], atlas_ys: [], atlas_widths: [], atlas_heights: [],
@@ -1294,7 +1443,7 @@ class FontRenderer:
             ttf_handle: handle,
             use_vector: true,
             use_bitmap: true,
-            ttf_rasterizer: nil,
+            ttf_rasterizer: None,
             selected_outline_blob: [],
             atlas_pixels: [], atlas_codepoints: [], atlas_face_ids: [], atlas_face_generations: [], atlas_glyph_indices: [], atlas_font_sizes: [],
             atlas_xs: [], atlas_ys: [], atlas_widths: [], atlas_heights: [],
@@ -1318,7 +1467,7 @@ class FontRenderer:
             ttf_handle: 0,
             use_vector: false,
             use_bitmap: true,
-            ttf_rasterizer: nil,
+            ttf_rasterizer: None,
             selected_outline_blob: [],
             atlas_pixels: [], atlas_codepoints: [], atlas_face_ids: [], atlas_face_generations: [], atlas_glyph_indices: [], atlas_font_sizes: [],
             atlas_xs: [], atlas_ys: [], atlas_widths: [], atlas_heights: [],
@@ -1483,15 +1632,427 @@ class FontRenderer:
         self.cache = cache
         self.cache.rasterizations == 0 and self.cache.hits == 0
 
+    me set_lcd_text(enabled: bool):
+        """Switch LCD subpixel glyphs on or off. A change drops every cached
+        glyph and atlas cell, since the two modes rasterise different bitmaps
+        under the same (codepoint, size) key."""
+        if enabled == self.lcd_text:
+            return
+        self.lcd_text = enabled
+        var cache = self.cache
+        cache.invalidate()
+        self.cache = cache
+        self.atlas_parks = []
+        self._reset_font_atlas(self.atlas_face_generation, self.atlas_font_identity)
+
+    fn _lcd_applies(font_size: i32) -> bool:
+        self.lcd_text and font_size <= FONT_LCD_MAX_SIZE_PX and self.selected_outline_blob.len() > 0
+
+    # A glyph above the LCD cutoff on the LCD-text lane: gray exact-area cells
+    # at Skia quarter phases (`_gray_glyph`).
+    fn _gray_applies(font_size: i32) -> bool:
+        self.lcd_text and font_size > FONT_LCD_MAX_SIZE_PX and font_size <= 512 and self.selected_outline_blob.len() > 0
+
+    # Glyph id of `codepoint` in the selected outline face, read from the
+    # per-face ASCII table (`_gid_warm`: one cmap parse per face). The cold
+    # glyph path resolved the same id by codepoint three times -- `has_glyph`,
+    # the measure pass and the phased LCD cell -- and each one re-parsed the
+    # whole cmap (about 3 ms each on the interpreter lane). 0 = the face has no
+    # such glyph; -1 = not answerable here (no selected blob, a foreign
+    # provider answers `has_glyph`, or a non-ASCII codepoint), and the caller
+    # keeps its by-codepoint path for both.
+    fn _selected_outline_gid(codepoint: i32) -> i64:
+        if self.selected_outline_blob.len() == 0:
+            return -1
+        if val Some(rasterizer) = self.ttf_rasterizer:
+            if rasterizer.has_glyph_reads_selected_blob():
+                return _gid_lookup(_gid_warm(rasterizer.cache_identity(), self.selected_outline_blob), codepoint)
+        -1
+
+    # LCD variant of a selected-outline glyph; `fallback` is returned when the
+    # outline cannot be rasterised.
+    fn _lcd_glyph(selector_kind: i64, selector_value: i64, codepoint: i32, glyph_index: i32, face_generation: i64, font_size: i32, fallback: CachedGlyph, phase_q: i64 = 0, x_milli: i64 = 0) -> CachedGlyph:
+        if val Some(outline) = self._lcd_outline(selector_kind, selector_value, font_size, x_milli):
+            if val Some(g) = sfnt_lcd_outline_raster(outline, phase_q):
+                val w = g.slg_width
+                val h = g.slg_height
+                val gray = g.slg_gray
+                val rgb = g.slg_rgb
+                if w > 0 and h > 0 and gray.len() == w * h and rgb.len() == w * h * 3:
+                    return CachedGlyph(codepoint: codepoint, face_id: 0, face_generation: face_generation,
+                        glyph_index: glyph_index, font_size: font_size,
+                        width: w.to_i32(), height: h.to_i32(),
+                        advance: fallback.advance, bearing_x: g.slg_bearing_x.to_i32(),
+                        bearing_y: g.slg_bearing_y.to_i32(), pixels: gray, lcd_pixels: rgb)
+        fallback
+
+    # Gray cell of the selected-outline glyph above the LCD cutoff (no LCD
+    # pixels); `fallback` when the outline cannot be rasterised.
+    fn _gray_glyph(selector_kind: i64, selector_value: i64, codepoint: i32, glyph_index: i32, font_size: i32, fallback: CachedGlyph, phase_q: i64, x_milli: i64) -> CachedGlyph:
+        if val Some(outline) = self._lcd_outline(selector_kind, selector_value, font_size, x_milli, true):
+            if val Some(g) = sfnt_gray_outline_raster(outline, phase_q):
+                val w = g.slg_width
+                val h = g.slg_height
+                if w > 0 and h > 0 and g.slg_gray.len() == w * h:
+                    return CachedGlyph(codepoint: codepoint, face_id: 0, face_generation: 0,
+                        glyph_index: glyph_index, font_size: font_size,
+                        width: w.to_i32(), height: h.to_i32(),
+                        advance: fallback.advance, bearing_x: g.slg_bearing_x.to_i32(),
+                        bearing_y: g.slg_bearing_y.to_i32(), pixels: g.slg_gray)
+        fallback
+
+    # The selected face's LCD outline, from `_lcd_outlines` when the rasterizer
+    # identity names the selected blob (the `_selected_outline_gid` guard).
+    # `gray`: the unhinted, gray-framed outline (`sfnt_gray_glyph_outline`) of
+    # a glyph above the LCD cutoff, cached beside the LCD ones.
+    fn _lcd_outline(selector_kind: i64, selector_value: i64, font_size: i32, x_milli: i64, gray: bool = false) -> SfntLcdOutline?:
+        var key = ""
+        if val Some(rasterizer) = self.ttf_rasterizer:
+            if rasterizer.has_glyph_reads_selected_blob():
+                key = "{rasterizer.cache_identity()}|{selector_kind}|{selector_value}|{font_size}|{x_milli}" + (if gray: "|g" else: "")
+        if key != "":
+            if val Some(hit) = _lcd_outlines.get(key):
+                return Some(hit)
+        val built = if gray: sfnt_gray_glyph_outline(self.selected_outline_blob, selector_kind, selector_value, font_size.to_i64(), x_milli) else: sfnt_lcd_glyph_outline(self.selected_outline_blob, selector_kind, selector_value, font_size.to_i64(), x_milli)
+        if key != "":
+            if val Some(outline) = built:
+                if _lcd_outline_count >= LCD_OUTLINE_CACHE_LIMIT:
+                    _lcd_outlines = {}
+                    _lcd_outline_count = 0
+                _lcd_outlines[key] = outline
+                _lcd_outline_count = _lcd_outline_count + 1
+        built
+
+    # Phase-0 LCD cell of `_lcd_glyph` as metrics only (`lcd_frame_only`, no
+    # pixels): the same width, height and bearings, read from the outline
+    # without the raster. Zero-size when the outline cannot be rasterised.
+    fn _lcd_frame_glyph(selector_kind: i64, selector_value: i64, codepoint: i32, font_size: i32, advance: i32) -> CachedGlyph:
+        if val Some(outline) = self._lcd_outline(selector_kind, selector_value, font_size, 0):
+            val frame = sfnt_lcd_outline_frame(outline, 0)
+            if frame.len() == 4:
+                return CachedGlyph(codepoint: codepoint, face_id: 0, face_generation: 0,
+                    glyph_index: -1, font_size: font_size,
+                    width: frame[0].to_i32(), height: frame[1].to_i32(),
+                    advance: advance, bearing_x: frame[2].to_i32(),
+                    bearing_y: frame[3].to_i32(), pixels: [], lcd_frame_only: true)
+        CachedGlyph.empty(codepoint, font_size)
+
+    # Chrome's quarter-pixel glyph phases for an LCD run (Skia subpixel
+    # positioning; measured: left 1.00/1.25/1.50/1.75 px give four different
+    # `l` fringe patterns, 1.33 equals 1.25 and 1.66 equals 1.75). The staged
+    # quads sit on whole-pixel pens, the integer snap of the exact milli pen;
+    # each glyph whose exact pen rounds to a non-zero quarter is swapped for
+    # an outline rasterised at that phase. Applied only when the layout's
+    # advances are exactly the measured ones, so the fractions describe the
+    # pens actually used. Phase cells are atlas entries with glyph_index
+    # -1 - phase (plain codepoint glyphs use -1).
+    # `_font_atlas_entry_index` scans every atlas entry; a run phases most of
+    # its glyphs, so that scan per glyph per frame cost about 0.2 s on a 16-line
+    # page. The slot hint makes the warm path O(1).
+    fn _lcd_phase_atlas_index(key: text, glyph_index: i32, codepoint: i32, font_size: i32) -> i32:
+        if val Some(slot) = _lcd_phase_atlas_slots.get(key):
+            if (slot >= 0 and slot < self.atlas_codepoints.len() and
+                self.atlas_face_ids[slot] == 0 and
+                self.atlas_face_generations[slot] == 0 and
+                self.atlas_glyph_indices[slot] == glyph_index and
+                self.atlas_codepoints[slot] == codepoint and
+                self.atlas_font_sizes[slot] == font_size):
+                return slot
+        val idx = self._font_atlas_entry_index(0, 0, glyph_index, codepoint, font_size)
+        if idx >= 0:
+            _lcd_phase_atlas_slots[key] = idx
+        idx
+
+    # `pen_origin_milli` is where the run REALLY starts relative to the whole
+    # pixel it is drawn at: a run laid out mid-line after fractional-width
+    # inline content (Chrome 159: `<span>ll</span> l` starts its `l` at
+    # 12.5547 while the integer layout says 13 -> origin -445). Each glyph's
+    # quarter phase and whole-pixel shift then come from origin + exact pen.
+    # `size_milli` is the computed fractional size (`font-size: 18.72px`, 0 =
+    # whole px). Chrome 159 lays such a run out at the float size and
+    # rasterises every glyph at it: each glyph is swapped for a cell whose
+    # outline x is scaled to `size_milli` (`sfnt_render_glyph_lcd_milli`), at
+    # the quarter phase of its exact float pen.
+    # `letter_milli` / `word_milli` are the run's exact CSS spacing: the producer
+    # rounded each advance from its pen, so the staged pen is the running sum of
+    # `advance_widths` and the exact pen adds the spacing before each glyph.
+    me _lcd_apply_pen_phases(content: text, advance_widths: [i32], font_size: i32, pen_origin_milli: i64 = 0, size_milli: i64 = 0, letter_milli: i64 = 0, word_milli: i64 = 0):
+        # Above the LCD cutoff the same pens take GRAY cells (sfnt_gray_outline_raster):
+        # every glyph, phase 0 included, since even phase 0 keeps the true
+        # bearing and exact-area coverage the whole-pixel gray glyph lacks.
+        val gray = self._gray_applies(font_size)
+        if not gray and not self._lcd_applies(font_size):
+            return
+        val frac = size_milli > 0 and size_milli < 512000 and size_milli % 1000 != 0
+        # More than ~2 px off means the producer's model disagrees with this
+        # layout, not a sub-pixel phase; keep the integer pens.
+        val origin = if pen_origin_milli > -2000 and pen_origin_milli < 2000: pen_origin_milli else: 0
+        val cps = text_codepoints(content)
+        val n = cps.len()
+        if n == 0 or advance_widths.len() != n:
+            return
+        var run_identity: text = ""
+        if val run_rasterizer = self.ttf_rasterizer:
+            run_identity = run_rasterizer.cache_identity()
+        # `pens` are exact milli-px pens; `whole` the whole-pixel pens the quads
+        # were staged at. A fractional run takes both from the layout's model
+        # (`resolve_font_metrics_with_language_milli`): the run is measured at
+        # ref = 8 x round(size) (at most 512), and the snapped reference
+        # boundaries are rescaled to `size_milli`.
+        var pens: [i64] = []
+        var whole: [i64] = [0; n + 1]
+        if frac:
+            var ref: i64 = ((size_milli + 500) / 1000) * 8
+            if ref > 512:
+                ref = 512
+            val ref_pens = self._text_pen_milli(cps, ref.to_i32(), run_identity)
+            val s266 = sfnt_font_cache_key_size_26_6(size_milli)
+            pens = [0; n + 1]
+            var k: i64 = 0
+            while k <= n:
+                pens[k] = _fr_scale_round(ref_pens[k], s266, ref * 64)
+                whole[k] = _fr_scale_round(_milli_px_to_px_i64(ref_pens[k]), s266, ref * 64)
+                k = k + 1
+            # Run end anchored to the exact pen end, as the layout resolver does.
+            val end_px = _milli_px_to_px_i64(pens[n])
+            if n > 0 and end_px >= whole[n - 1] and end_px - whole[n] <= 1 and whole[n] - end_px <= 1:
+                whole[n] = end_px
+        else:
+            pens = self._text_pen_milli(cps, font_size, run_identity)
+            # An integer-size pen is a whole number of font units
+            # (size/upem px), but it is summed from advances each rounded to
+            # milli-px: `p` after `a..o` (letter-spacing 5px, 16 px) comes out
+            # at 190.622, not the exact quarter tie 190.625 Chrome rounds UP.
+            # Snapped to the unit grid, the phase sees the exact pen
+            # (lcd_quarter_phase_tie_chrome159_spec). `whole` keeps the
+            # layout's pens.
+            val upem = _fr_units_per_em(run_identity, self.selected_outline_blob)
+            val grid_den: i64 = (font_size as i64) * 1000
+            var k: i64 = 0
+            while k <= n:
+                whole[k] = _milli_px_to_px_i64(pens[k])
+                if upem > 0:
+                    val units = _fr_scale_round(pens[k], upem, grid_den)
+                    pens[k] = _fr_scale_round(units, grid_den, upem)
+                k = k + 1
+        if letter_milli != 0 or word_milli != 0:
+            var extra: i64 = 0
+            var placed: i64 = 0
+            var k: i64 = 0
+            while k <= n:
+                pens[k] = pens[k] + extra
+                whole[k] = placed
+                val gap = pens[k] - placed * 1000
+                if gap > 3000 or gap < -3000:
+                    return
+                if k < n:
+                    extra = extra + letter_milli
+                    if cps[k] == 32 or cps[k] == 9 or cps[k] == 10 or cps[k] == 13:
+                        extra = extra + word_milli
+                    placed = placed + advance_widths[k].to_i64()
+                k = k + 1
+        var byte_offsets: [i64] = [0; n]
+        var shifts: [i32] = [0; n]
+        var round_shifts: [i32] = [0; n]
+        var phases: [i64] = [0; n]
+        var any_phase = frac or gray
+        # A fractional run whose advances are not the layout's model still
+        # takes the float-size outlines, on its integer pens (phase 0).
+        var pens_known = true
+        var byte_offset: i64 = 0
+        var i: i64 = 0
+        while i < n:
+            val px = whole[i]
+            # A gray run's LAST advance moves no glyph: at k > 1 it absorbs the
+            # device-advance rounding (`_dir_anchor_device_advances`), so it
+            # must not decline the whole run.
+            if advance_widths[i].to_i64() != whole[i + 1] - px and not (gray and i == n - 1):
+                if not frac:
+                    return
+                pens_known = false
+            byte_offsets[i] = byte_offset
+            byte_offset = byte_offset + utf8_codepoint_byte_len(cps[i])
+            # Nearest quarter of the exact pen (origin included) relative to
+            # the whole-pixel pen, split into a whole-pixel shift and a phase
+            # 0..3. The +16/-16 offsets keep both divisions on non-negative
+            # operands (floor division) for |delta| < 3.6 px.
+            val delta = pens[i] - px * 1000 + origin
+            val q = (delta + 125 + 4000) / 250 - 16
+            val whole = (q + 16) / 4 - 4
+            shifts[i] = whole.to_i32()
+            phases[i] = q - whole * 4
+            # Whole-pixel snap of the same pen for a glyph that gets no phase
+            # cell: 0 whenever the origin is 0 (|delta| < 0.5 px).
+            round_shifts[i] = ((delta + 500 + 4000) / 1000 - 4).to_i32()
+            if phases[i] != 0 or round_shifts[i] != 0:
+                any_phase = true
+            i = i + 1
+        if not any_phase:
+            return
+        if not pens_known:
+            phases = [0; n]
+            shifts = [0; n]
+            round_shifts = [0; n]
+        # Fractional cells are keyed apart from whole-px ones by the size:
+        # glyph_index -1 - phase - 4 * size_milli (whole-px phase cells keep
+        # -1 - phase). The atlas matches on glyph_index and font_size.
+        val cell_base: i64 = if frac: 4 * size_milli else: 0
+        # Gray cells take -5 - phase: phase 0 must not collide with the plain
+        # whole-pixel glyph (-1) of the same size.
+        val cell_first: i64 = if gray: -5 else: -1
+        # The outline is rasterised at the size FreeType gets (font-cache key,
+        # 26.6): 18.72 px glyphs are 1197/64 px wide (font_cache_key_size AC-5).
+        val x_milli: i64 = if frac: (sfnt_font_cache_key_size_26_6(size_milli) * 1000 + 32) / 64 else: 0
+        var quads = self.staged_quads
+        var inserted: [FontRenderQuad] = []
+        var ci: i64 = 0
+        var qi: i64 = 0
+        while qi < quads.len():
+            val q = quads[qi]
+            while ci < n and byte_offsets[ci] != q.byte_offset:
+                ci = ci + 1
+            if ci >= n:
+                break
+            val phase = phases[ci]
+            var replaced = false
+            if phase != 0 or frac:
+                val cp = cps[ci].to_i32()
+                val base = self.get_glyph(cp, font_size)
+                if base.lcd_pixels.len() > 0 or base.lcd_frame_only or (gray and base.width > 0):
+                    val cell_index = (cell_first - phase - cell_base).to_i32()
+                    val key = "{self.atlas_font_identity}|{self.atlas_face_generation}|{cp}|{font_size}|{phase}|{x_milli}"
+                    var pg = base
+                    var fresh = false
+                    if val Some(hit) = _lcd_phase_glyphs.get(key):
+                        pg = hit
+                    else:
+                        fresh = true
+                        # By glyph index when the face table knows it: the
+                        # same outline without another cmap parse.
+                        val phase_gid = self._selected_outline_gid(cp)
+                        val phase_kind = if phase_gid > 0: SFNT_GLYPH_SELECTOR_INDEX else: SFNT_GLYPH_SELECTOR_CODEPOINT
+                        val phase_value = if phase_gid > 0: phase_gid else: cp.to_i64()
+                        pg = if gray: self._gray_glyph(phase_kind, phase_value, cp, cell_index, font_size, base, phase, x_milli) else: self._lcd_glyph(phase_kind, phase_value, cp, cell_index, 0, font_size, base, phase, x_milli)
+                        _lcd_phase_glyphs[key] = pg
+                    if pg.glyph_index == cell_index:
+                        # A cell built just now has no atlas slot yet: skip the
+                        # whole-atlas scan (O(atlas) per cold cell).
+                        var idx: i32 = if fresh: -1 else: self._lcd_phase_atlas_index(key, pg.glyph_index, cp, font_size)
+                        if idx < 0:
+                            idx = self._insert_font_atlas_glyph(pg)
+                            if idx >= 0:
+                                _lcd_phase_atlas_slots[key] = idx
+                                inserted.push(FontRenderQuad(codepoint: cp, byte_offset: q.byte_offset,
+                                    dst_x: 0, dst_y: 0, width: self.atlas_widths[idx], height: self.atlas_heights[idx],
+                                    atlas_x: self.atlas_xs[idx], atlas_y: self.atlas_ys[idx], color: q.color))
+                        if idx >= 0:
+                            # Same baseline: a fractional cell's ink top moves
+                            # with its own bearing (identical rows unless the x
+                            # scale flips a near-horizontal stem run).
+                            val dy = if frac or gray: base.bearing_y + base.height - pg.bearing_y - pg.height else: 0
+                            quads[qi] = FontRenderQuad(codepoint: q.codepoint, byte_offset: q.byte_offset,
+                                dst_x: q.dst_x - base.bearing_x + shifts[ci] + pg.bearing_x,
+                                dst_y: q.dst_y + dy,
+                                width: self.atlas_widths[idx], height: self.atlas_heights[idx],
+                                atlas_x: self.atlas_xs[idx], atlas_y: self.atlas_ys[idx], color: q.color)
+                            replaced = true
+            if not replaced and round_shifts[ci] != 0:
+                quads[qi] = FontRenderQuad(codepoint: q.codepoint, byte_offset: q.byte_offset,
+                    dst_x: q.dst_x + round_shifts[ci], dst_y: q.dst_y,
+                    width: q.width, height: q.height,
+                    atlas_x: q.atlas_x, atlas_y: q.atlas_y, color: q.color)
+            qi = qi + 1
+        self._lcd_publish_cells(inserted)
+        self.staged_quads = quads
+
+    # Atlas cells inserted after `_stage_text_active` published its batch: name
+    # them in the staged dirty rects under a new atlas generation.
+    #
+    # The per-owner sequence moves ONCE per staged batch, however many passes
+    # add cells to it. One LCD run can publish three times (the staging pass,
+    # the phase cells of `_lcd_apply_pen_phases`, the phase-0 cells of
+    # `_lcd_resolve_deferred_cells`), and a second step made the batch read
+    # `host + 2` to a consumer, which is its "a dirty batch never reached me"
+    # signal: the Vulkan lane repacked all 1,048,576 atlas pixels for every
+    # run that had both a phased and a phase-0 cell. A batch that already
+    # carries dirty rects at the current sequence has taken its step; its
+    # rects simply grow.
+    me _lcd_publish_cells(inserted: [FontRenderQuad]):
+        if inserted.len() > 0:
+            val stepped = self.staged_dirty_rects.len() > 0 and self.staged_atlas_owner_sequence == self.atlas_owner_sequence
+            self.atlas_generation = _next_font_atlas_dependency_generation()
+            if not stepped:
+                self.atlas_owner_sequence = self.atlas_owner_sequence + 1
+            self.atlas_unpublished_mutation = false
+            self.staged_atlas_generation = self.atlas_generation
+            self.staged_atlas_owner_sequence = self.atlas_owner_sequence
+            var dirty = self.staged_dirty_rects
+            for d in inserted:
+                dirty.push(d)
+            self.staged_dirty_rects = dirty
+
+    # Raster the deferred phase-0 LCD cells that are still drawn: every staged
+    # quad left with atlas_x = -1 (see `lcd_defer_cells`). The quad keeps its
+    # place and takes the cell `get_glyph` builds now, the one the staging
+    # pass used to insert up front. The atlas held no such cell when the quad
+    # was staged and only phase cells were added since, so a cell is inserted
+    # once per codepoint without another atlas scan. False = a cell did not
+    # fit the atlas (or is not the frame that was staged): the caller stages
+    # the run again without deferral.
+    me _lcd_resolve_deferred_cells(font_size: i32) -> bool:
+        var quads = self.staged_quads
+        var inserted: [FontRenderQuad] = []
+        var cell_cps: [i32] = []
+        var cell_slots: [i32] = []
+        var resolved = true
+        var qi: i64 = 0
+        while qi < quads.len():
+            val q = quads[qi]
+            if q.atlas_x < 0:
+                var idx: i32 = -1
+                var known = false
+                var ci: i64 = 0
+                while ci < cell_cps.len():
+                    if cell_cps[ci] == q.codepoint:
+                        idx = cell_slots[ci]
+                        known = true
+                    ci = ci + 1
+                if not known:
+                    val glyph = self.get_glyph(q.codepoint, font_size)
+                    if glyph.width == q.width and glyph.height == q.height:
+                        idx = self._insert_font_atlas_glyph(glyph)
+                        if idx >= 0:
+                            inserted.push(FontRenderQuad(codepoint: q.codepoint, byte_offset: q.byte_offset,
+                                dst_x: 0, dst_y: 0, width: self.atlas_widths[idx], height: self.atlas_heights[idx],
+                                atlas_x: self.atlas_xs[idx], atlas_y: self.atlas_ys[idx], color: q.color))
+                    cell_cps.push(q.codepoint)
+                    cell_slots.push(idx)
+                if idx < 0:
+                    resolved = false
+                else:
+                    quads[qi] = FontRenderQuad(codepoint: q.codepoint, byte_offset: q.byte_offset,
+                        dst_x: q.dst_x, dst_y: q.dst_y,
+                        width: self.atlas_widths[idx], height: self.atlas_heights[idx],
+                        atlas_x: self.atlas_xs[idx], atlas_y: self.atlas_ys[idx], color: q.color)
+            qi = qi + 1
+        self._lcd_publish_cells(inserted)
+        self.staged_quads = quads
+        resolved
+
     me _activate_render_config(config: FontRenderConfig):
         val identity = font_render_config_identity(config)
         if identity != self.active_render_config_identity:
             var cache = self.cache
             cache.sync_render_config_identity(identity)
             self.cache = cache
-            if self.active_render_config_identity != "":
+            # Atlas cells are keyed by size already (`_font_atlas_entry_index`),
+            # so a size-only change keeps the atlas. Wiping it here re-rasterised
+            # every glyph and forced a full GPU atlas repack per size switch.
+            val atlas_identity = font_render_config_identity_sizeless(identity)
+            if self.active_render_config_atlas_identity != "" and atlas_identity != self.active_render_config_atlas_identity:
                 self._reset_font_atlas(self.atlas_face_generation, self.atlas_font_identity)
             self.active_render_config_identity = identity
+            self.active_render_config_atlas_identity = atlas_identity
 
     # Copy an inbound batch into the staged slot and answer with the quad
     # count. The aggregate crosses only as an INBOUND parameter and the answer
@@ -1750,8 +2311,9 @@ class FontRenderer:
             return foreign * 1000
         if font_size <= 0 or font_size > 512:
             return 0
-        val blob = self.selected_outline_blob
-        if blob.len() == 0:
+        # Read the field in place: `val blob = self.selected_outline_blob`
+        # lowers to rt_array_copy under the JIT, one whole-font copy per call.
+        if self.selected_outline_blob.len() == 0:
             return 0
         # Same face-identity source the advance lane uses (`_adv_identity` in
         # `get_glyph_advance_milli`): the glyph-id table is keyed on it, so a
@@ -1760,14 +2322,14 @@ class FontRenderer:
         val identity: text = if kern_rast != nil: kern_rast.?.cache_identity() else: ""
         if identity == "":
             return 0
-        val gid_slot = _gid_warm(identity, blob)
+        val gid_slot = _gid_warm(identity, self.selected_outline_blob)
         if gid_slot < 0:
             return 0
         val left_gid = _gid_lookup(gid_slot, left_codepoint)
         val right_gid = _gid_lookup(gid_slot, right_codepoint)
         if left_gid <= 0 or right_gid <= 0:
             return 0
-        sfnt_blob_kern_pair_milli_px(blob, left_gid, right_gid, font_size.to_i64()) as i32
+        sfnt_kern_face_pair_milli_px(self.selected_outline_blob, _gid_kern[gid_slot], left_gid, right_gid, font_size.to_i64()) as i32
 
     me horizontal_line_metric(font_size: i32, field: i32) -> i32:
         val rast = self.ttf_rasterizer
@@ -1825,13 +2387,22 @@ class FontRenderer:
         # CachedGlyph), so each of the other two idioms crashes on one side.
         # See doc/08_tracking/bug/
         # font_renderer_cached_glyph_unwrap_semantic_crash_2026-08-15.md.
+        var filling_frame = false
+        var frame_advance: i32 = 0
         if val Some(cached_glyph) = cached:
             self.glyph_phase_cache_hit = true
             if cached_glyph.width > 0 and cached_glyph.height > 0:
                 self.glyph_phase_cache_hit_positive = true
                 self.glyph_phase_return_positive = true
-            self.cache = cache
-            return cached_glyph
+            # A deferred LCD cell (`lcd_frame_only`) read outside its staging
+            # pass gets its pixels now: the raster below runs and
+            # `fill_frame` puts the result in this entry's place.
+            if cached_glyph.lcd_frame_only and not self.lcd_defer_cells:
+                filling_frame = true
+                frame_advance = cached_glyph.advance
+            else:
+                self.cache = cache
+                return cached_glyph
 
         # Cross-instance glyph-raster cache (T12, render-perf replan
         # 2026-08-07) -- keyed by rasterizer identity + codepoint + size.
@@ -1842,11 +2413,26 @@ class FontRenderer:
         # below happens INLINE in this method body (never delegated to a
         # separate free-function push helper) -- see the comment on
         # `_glyph_raster_keys` above for why that boundary matters.
-        val raster_identity = if active_rasterizer != nil: active_rasterizer.cache_identity() else: ""
-        val raster_key = "{raster_identity};cp={codepoint};fs={font_size}"
+        # Without a rasterizer the glyph comes from the fallback tier chosen in
+        # "Rasterize" below (ttf handle, vector outline, or bitmap), so the tier
+        # is part of the key: an empty identity alone served the vector 'A'
+        # (7 px) to a bitmap-tier renderer (8x16).
+        val raster_identity = if active_rasterizer != nil:
+            active_rasterizer.cache_identity()
+        else if self.has_ttf():
+            "fallback=ttf:{self.ttf_handle}"
+        else if self.use_vector:
+            "fallback=vector"
+        else if self.use_bitmap:
+            "fallback=bitmap"
+        else:
+            "fallback=none"
+        val raster_lcd = if self._lcd_applies(font_size): ";lcd" else if self._gray_applies(font_size): ";gray" else: ""
+        val raster_key = "{raster_identity};cp={codepoint};fs={font_size}{raster_lcd}"
         var raster_idx = 0
-        var raster_hit: CachedGlyph? = nil
-        while raster_idx < _glyph_raster_keys.len():
+        var raster_hit: CachedGlyph? = None
+        # A frame being filled was a cache hit: no cross-instance lookup.
+        while not filling_frame and raster_idx < _glyph_raster_keys.len():
             if _glyph_raster_keys[raster_idx] == raster_key:
                 raster_hit = _glyph_raster_values[raster_idx]
             raster_idx = raster_idx + 1
@@ -1854,11 +2440,18 @@ class FontRenderer:
         # values in _glyph_raster_values are stored RAW.
         if val Some(raster_glyph) = raster_hit:
             _glyph_raster_hits = _glyph_raster_hits + 1
-            cache.insert(raster_glyph)
+            if not (filling_frame and cache.fill_frame(raster_glyph)):
+                cache.insert(raster_glyph)
             self.cache = cache
             if raster_glyph.width > 0 and raster_glyph.height > 0:
                 self.glyph_phase_return_positive = true
             return raster_glyph
+        if self.lcd_defer_cells:
+            if val Some(frame_glyph) = _lcd_frame_glyphs.get(raster_key):
+                cache.insert(frame_glyph)
+                self.cache = cache
+                self.glyph_phase_return_positive = true
+                return frame_glyph
         _glyph_raster_misses = _glyph_raster_misses + 1
 
         # Rasterize
@@ -1872,20 +2465,159 @@ class FontRenderer:
         # `!= nil` rather than `if val Some(x) =` destructuring.
         var handled = false
         val rast = active_rasterizer
-        val rast_has_glyph = rast != nil and rast.has_glyph(codepoint.to_i64())
+        # A positive id from the face table is what `has_glyph` reports true
+        # for over the same blob, and lets the measure pass below select by
+        # index; 0 and -1 keep the original `has_glyph` path.
+        val known_gid = self._selected_outline_gid(codepoint)
+        val rast_has_glyph = known_gid > 0 or (rast != nil and rast.has_glyph(codepoint.to_i64()))
         if rast_has_glyph:
             self.glyph_phase_rasterizer_maps = true
         if _VEC_ATLAS_PROBE and _vec_glyph_probe_count < 8:
             _vec_glyph_probe_count = _vec_glyph_probe_count + 1
             print("[vec-glyph-probe] gwc-pre-rasterize cp={codepoint} rast_nil={rast == nil} has_glyph={rast_has_glyph}")
-        if rast_has_glyph:
+        # A frame being filled passed the checks of the block below when it was
+        # deferred (glyph id, measure, ink), with this advance: raster it.
+        if filling_frame and known_gid > 0 and self._lcd_applies(font_size):
+            val frame_seed = CachedGlyph(codepoint: codepoint, face_id: 0, face_generation: 0, glyph_index: -1, font_size: font_size, width: 0, height: 0, advance: frame_advance, bearing_x: 0, bearing_y: 0, pixels: [])
+            val filled = self._lcd_glyph(SFNT_GLYPH_SELECTOR_INDEX, known_gid, codepoint, -1, 0, font_size, frame_seed)
+            if filled.lcd_pixels.len() > 0:
+                self.glyph_phase_bitmap_non_nil = true
+                self.glyph_phase_bitmap_positive = true
+                self.glyph_phase_adapter_positive = true
+                self.glyph_phase_reconstructed_positive = true
+                self.glyph_phase_bitmap_pixels_match = true
+                self.glyph_phase_adapter_pixels_match = true
+                glyph = filled
+                handled = true
+        if filling_frame and known_gid > 0 and not handled and self._gray_applies(font_size):
+            val gray_seed = CachedGlyph(codepoint: codepoint, face_id: 0, face_generation: 0, glyph_index: -1, font_size: font_size, width: 0, height: 0, advance: frame_advance, bearing_x: 0, bearing_y: 0, pixels: [])
+            val gray_filled = self._gray_glyph(SFNT_GLYPH_SELECTOR_INDEX, known_gid, codepoint, -1, font_size, gray_seed, 0, 0)
+            if gray_filled.width > 0 and gray_filled.pixels.len() > 0:
+                self.glyph_phase_bitmap_non_nil = true
+                self.glyph_phase_bitmap_positive = true
+                self.glyph_phase_adapter_positive = true
+                self.glyph_phase_reconstructed_positive = true
+                self.glyph_phase_bitmap_pixels_match = true
+                self.glyph_phase_adapter_pixels_match = true
+                glyph = gray_filled
+                handled = true
+        if rast_has_glyph and not handled:
             if self.selected_outline_blob.len() > 0:
                 var direct_meta: [i64] = [0; 20]
-                sfnt_measure_glyph_into(self.selected_outline_blob, SFNT_GLYPH_SELECTOR_CODEPOINT, codepoint.to_i64(), font_size.to_i64(), direct_meta)
-                val direct_count = direct_meta[5]
-                if direct_meta[7] == 310031 and direct_count >= 0 and direct_count <= 16777216:
+                # The selector only decides how the glyph id is found; slots
+                # [15]/[16] (the selector receipt) are re-pointed at the index
+                # below before the render reads them.
+                if known_gid > 0:
+                    sfnt_measure_glyph_into(self.selected_outline_blob, SFNT_GLYPH_SELECTOR_INDEX, known_gid, font_size.to_i64(), direct_meta)
+                else:
+                    sfnt_measure_glyph_into(self.selected_outline_blob, SFNT_GLYPH_SELECTOR_CODEPOINT, codepoint.to_i64(), font_size.to_i64(), direct_meta)
+                var direct_count = direct_meta[5]
+                # LCD first (2026-11-18). An LCD-size glyph keeps nothing of the
+                # grayscale render below except its two receipts: the advance,
+                # which the measure pass already holds, and "the bitmap has
+                # ink" (`direct_meta[9] > 0`). `sfnt_glyph_gray_row_has_ink`
+                # proves the second from one pixel row, so the whole-glyph
+                # grayscale raster (13 ms per cold glyph on the interpreter
+                # lane, discarded) is skipped. No proof, or no LCD glyph, and
+                # the original path below runs unchanged.
+                if direct_meta[7] == 310031 and direct_count > 0 and direct_count <= 16777216 and direct_meta[6] > 0 and self._lcd_applies(font_size):
+                    val lcd_width = direct_meta[0] as i32
+                    val lcd_height = direct_meta[1] as i32
+                    if direct_count == lcd_width.to_i64() * lcd_height.to_i64() and sfnt_glyph_gray_row_has_ink(self.selected_outline_blob, direct_meta[6], font_size.to_i64()):
+                        val lcd_advance_raw = direct_meta[2] as i32
+                        val lcd_advance = if lcd_advance_raw > 0: lcd_advance_raw else: lcd_width + 1
+                        # Deferred cell (`lcd_defer_cells`): the staging pass
+                        # reads only this cell's metrics, and a glyph whose pen
+                        # lands on a quarter phase is drawn from its phase cell
+                        # instead. `_lcd_resolve_deferred_cells` rasters the
+                        # ones still drawn at phase 0.
+                        if self.lcd_defer_cells:
+                            val frame_glyph = self._lcd_frame_glyph(SFNT_GLYPH_SELECTOR_INDEX, direct_meta[6], codepoint, font_size, lcd_advance)
+                            if frame_glyph.lcd_frame_only:
+                                self.glyph_phase_bitmap_non_nil = true
+                                self.glyph_phase_bitmap_positive = true
+                                self.glyph_phase_adapter_positive = true
+                                self.glyph_phase_reconstructed_positive = true
+                                self.glyph_phase_bitmap_pixels_match = true
+                                self.glyph_phase_adapter_pixels_match = true
+                                self.glyph_phase_return_positive = true
+                                _lcd_frame_glyphs[raster_key] = frame_glyph
+                                cache.insert(frame_glyph)
+                                self.cache = cache
+                                return frame_glyph
+                        val lcd_seed = CachedGlyph(codepoint: codepoint, face_id: 0, face_generation: 0, glyph_index: -1, font_size: font_size, width: lcd_width, height: lcd_height, advance: lcd_advance, bearing_x: direct_meta[3] as i32, bearing_y: direct_meta[4] as i32, pixels: [])
+                        val lcd_first = self._lcd_glyph(SFNT_GLYPH_SELECTOR_INDEX, direct_meta[6], codepoint, -1, 0, font_size, lcd_seed)
+                        if lcd_first.lcd_pixels.len() > 0:
+                            self.glyph_phase_bitmap_non_nil = true
+                            if lcd_width > 0 and lcd_height > 0:
+                                self.glyph_phase_bitmap_positive = true
+                                self.glyph_phase_adapter_positive = true
+                                self.glyph_phase_reconstructed_positive = true
+                            self.glyph_phase_bitmap_pixels_match = true
+                            self.glyph_phase_adapter_pixels_match = true
+                            glyph = lcd_first
+                            handled = true
+                if not handled and direct_meta[7] == 310031 and direct_count >= 0 and direct_count <= 16777216:
                     var direct_pixels: [u8] = [0u8; direct_count]
-                    sfnt_render_glyph_into(self.selected_outline_blob, SFNT_GLYPH_SELECTOR_CODEPOINT, codepoint.to_i64(), font_size.to_i64(), direct_meta, direct_pixels)
+                    # Render by the glyph id the measure pass just resolved
+                    # (direct_meta[6]) instead of by codepoint. The codepoint
+                    # selector makes sfnt_render_glyph_into re-parse the whole
+                    # cmap subtable only to arrive at this same id (~20 ms per
+                    # cold glyph on the interpreter lane). The receipt slots
+                    # [15]/[16] are re-pointed at the index selector so the
+                    # render's own measure/render pairing check still holds;
+                    # the outline, bounds and coverage are computed from the
+                    # identical glyph id, so the bitmap is unchanged.
+                    val direct_glyph_id = direct_meta[6]
+                    # A gray-size glyph on the LCD-text lane (above the LCD
+                    # cutoff) takes its phase-0 exact-area cell as the base
+                    # (`sfnt_gray_outline_raster`): the quarter-phase cells share
+                    # its frame, phase-0 pens draw it directly, and the 4x4
+                    # supersample (2.5x the cost on the interpreter lane) is
+                    # never run for a glyph whose pixels it would not supply.
+                    var gray_base = false
+                    if direct_glyph_id > 0 and self._gray_applies(font_size):
+                        if val Some(gray_outline) = self._lcd_outline(SFNT_GLYPH_SELECTOR_INDEX, direct_glyph_id, font_size, 0, true):
+                            # Deferred like an LCD cell (`lcd_defer_cells`):
+                            # metrics only; a pen at a quarter phase draws its
+                            # phase cell and `_lcd_resolve_deferred_cells`
+                            # rasters the bases still drawn at phase 0.
+                            val gray_frame = sfnt_gray_outline_frame(gray_outline, 0)
+                            if self.lcd_defer_cells and gray_frame.len() == 4:
+                                val gray_advance_raw = direct_meta[2] as i32
+                                val frame_glyph = CachedGlyph(codepoint: codepoint, face_id: 0, face_generation: 0, glyph_index: -1, font_size: font_size,
+                                    width: gray_frame[0].to_i32(), height: gray_frame[1].to_i32(),
+                                    advance: if gray_advance_raw > 0: gray_advance_raw else: gray_frame[0].to_i32() + 1,
+                                    bearing_x: gray_frame[2].to_i32(), bearing_y: gray_frame[3].to_i32(), pixels: [], lcd_frame_only: true)
+                                self.glyph_phase_bitmap_non_nil = true
+                                self.glyph_phase_bitmap_positive = true
+                                self.glyph_phase_adapter_positive = true
+                                self.glyph_phase_reconstructed_positive = true
+                                self.glyph_phase_bitmap_pixels_match = true
+                                self.glyph_phase_adapter_pixels_match = true
+                                self.glyph_phase_return_positive = true
+                                _lcd_frame_glyphs[raster_key] = frame_glyph
+                                cache.insert(frame_glyph)
+                                self.cache = cache
+                                return frame_glyph
+                            if val Some(g) = sfnt_gray_outline_raster(gray_outline, 0):
+                                if g.slg_width > 0 and g.slg_height > 0 and g.slg_gray.len() == g.slg_width * g.slg_height:
+                                    direct_meta[0] = g.slg_width
+                                    direct_meta[1] = g.slg_height
+                                    direct_meta[3] = g.slg_bearing_x
+                                    direct_meta[4] = g.slg_bearing_y
+                                    direct_meta[8] = 310032
+                                    direct_meta[9] = 1
+                                    direct_pixels = g.slg_gray
+                                    gray_base = true
+                    if gray_base:
+                        direct_count = direct_pixels.len()
+                    elif direct_glyph_id > 0:
+                        direct_meta[15] = SFNT_GLYPH_SELECTOR_INDEX
+                        direct_meta[16] = direct_glyph_id
+                        sfnt_render_glyph_into(self.selected_outline_blob, SFNT_GLYPH_SELECTOR_INDEX, direct_glyph_id, font_size.to_i64(), direct_meta, direct_pixels)
+                    else:
+                        sfnt_render_glyph_into(self.selected_outline_blob, SFNT_GLYPH_SELECTOR_CODEPOINT, codepoint.to_i64(), font_size.to_i64(), direct_meta, direct_pixels)
                     if direct_meta[8] == 310032 and (direct_count == 0 or direct_meta[9] > 0):
                         val direct_width = direct_meta[0] as i32
                         val direct_height = direct_meta[1] as i32
@@ -1902,6 +2634,10 @@ class FontRenderer:
                             self.glyph_phase_bitmap_pixels_match = true
                             self.glyph_phase_adapter_pixels_match = true
                             glyph = CachedGlyph(codepoint: codepoint, face_id: 0, face_generation: 0, glyph_index: -1, font_size: font_size, width: direct_width, height: direct_height, advance: direct_advance, bearing_x: direct_bearing_x, bearing_y: direct_bearing_y, pixels: direct_pixels)
+                            if self._lcd_applies(font_size):
+                                val lcd_kind = if direct_glyph_id > 0: SFNT_GLYPH_SELECTOR_INDEX else: SFNT_GLYPH_SELECTOR_CODEPOINT
+                                val lcd_value = if direct_glyph_id > 0: direct_glyph_id else: codepoint.to_i64()
+                                glyph = self._lcd_glyph(lcd_kind, lcd_value, codepoint, -1, 0, font_size, glyph)
                             handled = true
             else:
                 val gb = rast.rasterize(codepoint.to_i64(), font_size.to_i64())
@@ -1990,7 +2726,8 @@ class FontRenderer:
             print("[vec-glyph-probe] gwc-pre-insert cp={codepoint} w={glyph.width} h={glyph.height} adv={glyph.advance} plen={glyph.pixels.len()}")
         val expected_pixels = glyph.width.to_i64() * glyph.height.to_i64()
         if glyph.advance > 0 and expected_pixels == glyph.pixels.len().to_i64():
-            cache.insert(glyph)
+            if not (filling_frame and cache.fill_frame(glyph)):
+                cache.insert(glyph)
         if glyph.width > 0 and glyph.height > 0:
             self.glyph_phase_return_positive = true
             # Store into the cross-instance glyph-raster cache -- inline
@@ -2085,12 +2822,30 @@ class FontRenderer:
         # crashed on cache hits and bare field access crashed on wrapped
         # values. Pattern-match narrowing handles both. See doc/08_tracking/
         # bug/font_renderer_cached_glyph_unwrap_semantic_crash_2026-08-15.md.
+        # The selected-outline blob is read BEFORE the glyph-cache answer is
+        # used: on that backend the cache may not answer at all (below).
+        val _gb_t0 = _fr_probe_now()
+        val _blob_len = self.selected_outline_blob.len()
+        _fr_probe_add_gadv_blob(_fr_probe_now() - _gb_t0)
+        # Whole-pixel advance of an already rasterised glyph, x1000; -1 = none.
+        var _cached_whole_milli: i32 = -1
         if val Some(cached_adv) = cached:
             # A rasterized CachedGlyph carries only a whole-pixel advance; x1000
             # is the honest widening of it, not a fresh fractional measurement.
+            # So it answers directly only where nothing better exists. With a
+            # selected outline blob the index / direct lanes below read the
+            # exact `hmtx` milli advance (`meta[18]`) without a raster; taking
+            # the cached whole pixel there refilled an EVICTED advance slot
+            # (more than 8 (face, size) pairs on a page) with round(advance),
+            # and every later pen of that pair lost its fraction: Chrome 159
+            # advances `H` at 13 px by 9.39 px, the refill said 9. The cached
+            # value is kept only as the fallback for a glyph the blob lanes
+            # cannot answer.
             val _cached_milli = cached_adv.advance * 1000
-            _adv_cache_store(_adv_identity, font_size, codepoint, _cached_milli)
-            return _cached_milli
+            if _blob_len == 0 or _adv_identity == "":
+                _adv_cache_store(_adv_identity, font_size, codepoint, _cached_milli)
+                return _cached_milli
+            _cached_whole_milli = _cached_milli
 
         # Selected-blob fast lane, ahead of `has_glyph`: on this backend
         # `has_glyph` IS `sfnt_blob_glyph_exists`, i.e. the same cmap parse the
@@ -2099,12 +2854,9 @@ class FontRenderer:
         # single parse, and a non-zero id is exactly what `has_glyph` reports
         # true for over the same blob. A `-1` (face not warmed, or non-ASCII)
         # falls through to the original path untouched.
-        val _gb_t0 = _fr_probe_now()
-        val _blob = self.selected_outline_blob
-        _fr_probe_add_gadv_blob(_fr_probe_now() - _gb_t0)
-        if _blob.len() > 0 and _adv_identity != "":
+        if _blob_len > 0 and _adv_identity != "":
             val _gw_t0 = _fr_probe_now()
-            val _gid_s = _gid_warm(_adv_identity, _blob)
+            val _gid_s = _gid_warm(_adv_identity, self.selected_outline_blob)
             _fr_probe_add_gadv_warm(_fr_probe_now() - _gw_t0)
             val _gid = _gid_lookup(_gid_s, codepoint)
             # Only a POSITIVE id takes the fast lane. `0` (this face has no such
@@ -2122,7 +2874,7 @@ class FontRenderer:
                 # 0 means the batch could not answer and the per-glyph path
                 # runs unchanged.
                 val _aw_t0 = _fr_probe_now()
-                val _aw_slot = _advw_warm(_adv_identity, font_size, _gid_s, _blob)
+                val _aw_slot = _advw_warm(_adv_identity, font_size, _gid_s, self.selected_outline_blob)
                 val _aw_milli = _advw_lookup(_aw_slot, codepoint)
                 val _aw_px = _advw_lookup_px(_aw_slot, codepoint)
                 _fr_probe_add_gadv_batch(_fr_probe_now() - _aw_t0, _aw_px > 0)
@@ -2139,7 +2891,7 @@ class FontRenderer:
                     return _adv_batched
                 var index_meta: [i64] = [0; 20]
                 val _sa_t0 = _fr_probe_now()
-                sfnt_glyph_advance_into(_blob, SFNT_GLYPH_SELECTOR_INDEX, _gid, font_size.to_i64(), index_meta)
+                sfnt_glyph_advance_into(self.selected_outline_blob, SFNT_GLYPH_SELECTOR_INDEX, _gid, font_size.to_i64(), index_meta)
                 _fr_probe_add_gadv_sfnt(_fr_probe_now() - _sa_t0)
                 if index_meta[7] == 310031 and index_meta[2] > 0:
                     # meta[18] is the unrounded `hmtx` advance in milli-pixels;
@@ -2179,6 +2931,9 @@ class FontRenderer:
             _adv_cache_store(_adv_identity, font_size, codepoint, _gfp_result)
             return _gfp_result
 
+        if _cached_whole_milli >= 0:
+            _adv_cache_store(_adv_identity, font_size, codepoint, _cached_whole_milli)
+            return _cached_whole_milli
         if self.has_ttf():
             val _gfp_result2 = rt_font_glyph_advance(self.ttf_handle, codepoint.to_i64(), font_size.to_f64()).to_i32() * 1000
             _adv_cache_store(_adv_identity, font_size, codepoint, _gfp_result2)
@@ -2232,40 +2987,12 @@ class FontRenderer:
             total_w = total_w + advance
         total_w
 
-    me measure_text_advances(content: text, font_size: i32) -> [i32]:
-        # indexed loop: for-in over text yields corrupted bindings (doc/08_tracking/bug/for_loop_over_text_char_code_at_zero_len_crash_2026-07-19.md)
-        val content_cps = text_codepoints(content)
+    # Exact pen position in milli-pixels before each codepoint, plus the run
+    # width at index len (kerning included). `measure_text_advances` snaps
+    # these to whole pixels; LCD staging reads the fractions as Chrome's
+    # quarter-pixel glyph phases.
+    me _text_pen_milli(content_cps: [i64], font_size: i32, _run_identity: text) -> [i64]:
         val content_len = content_cps.len()
-        if content_len == 0:
-            return []
-        # Run-level memo: identical (face, size, text) runs recur across a
-        # document (repeated labels, table cells, nav items). Keyed on the
-        # loaded-face identity so a face swap cannot serve a stale run.
-        val _run_identity: text = if self.ttf_rasterizer != nil: self.ttf_rasterizer.?.cache_identity() else: ""
-        if _run_identity != "" and content_len <= _RUN_MEMO_MAX_CHARS:
-            val _run_hit = _run_memo_lookup(_run_identity, font_size, content)
-            _fr_probe_add_run(_run_hit.len() > 0)
-            if _run_hit.len() > 0:
-                return _run_hit
-        # Sized up front, then written by index: the former `advances.push(...)`
-        # reallocated and copied the whole array once per character, which is
-        # quadratic in the run length.
-        var advances: [i32] = [0; content_len]
-        # Fractional accumulation (2026-09-13, round 12).
-        #
-        # `boundaries[i]` is the EXACT pen position, in milli-pixels, just
-        # before glyph `i`; `cumulative` is the running value and ends as the
-        # exact width of the whole run. The emitted array is then
-        # `round(boundaries[i+1]) - round(boundaries[i])`, so:
-        #   - the run total is round(exact total), not a sum of rounded parts
-        #     (eight Menlo `M` at 16 px: round(77.06) = 77, not 8 x 10 = 80);
-        #   - each glyph position is the integer snap of the exact pen, never
-        #     more than half a pixel off, which is what Skia does;
-        #   - a face whose advances are whole pixels reproduces the previous
-        #     array exactly, because every boundary is already an integer.
-        # The array itself stays `[i32]` whole pixels: the Draw IR -> Engine2D
-        # twins consume integer positions and that contract does not change.
-        # What changed is WHERE the rounding happens.
         var boundaries: [i64] = [0; content_len + 1]
         var cumulative: i64 = 0
         var prev_cp = -1
@@ -2319,6 +3046,43 @@ class FontRenderer:
             prev_cp = cp
             ci = ci + 1
         boundaries[content_len] = cumulative
+        boundaries
+
+    me measure_text_advances(content: text, font_size: i32) -> [i32]:
+        # indexed loop: for-in over text yields corrupted bindings (doc/08_tracking/bug/for_loop_over_text_char_code_at_zero_len_crash_2026-07-19.md)
+        val content_cps = text_codepoints(content)
+        val content_len = content_cps.len()
+        if content_len == 0:
+            return []
+        # Run-level memo: identical (face, size, text) runs recur across a
+        # document (repeated labels, table cells, nav items). Keyed on the
+        # loaded-face identity so a face swap cannot serve a stale run.
+        val _run_identity: text = if self.ttf_rasterizer.is_some(): self.ttf_rasterizer.?.cache_identity() else: ""
+        if _run_identity != "" and content_len <= _RUN_MEMO_MAX_CHARS:
+            val _run_hit = _run_memo_lookup(_run_identity, font_size, content)
+            _fr_probe_add_run(_run_hit.len() > 0)
+            if _run_hit.len() > 0:
+                return _run_hit
+        # Sized up front, then written by index: the former `advances.push(...)`
+        # reallocated and copied the whole array once per character, which is
+        # quadratic in the run length.
+        var advances: [i32] = [0; content_len]
+        # Fractional accumulation (2026-09-13, round 12).
+        #
+        # `boundaries[i]` is the EXACT pen position, in milli-pixels, just
+        # before glyph `i`; `cumulative` is the running value and ends as the
+        # exact width of the whole run. The emitted array is then
+        # `round(boundaries[i+1]) - round(boundaries[i])`, so:
+        #   - the run total is round(exact total), not a sum of rounded parts
+        #     (eight Menlo `M` at 16 px: round(77.06) = 77, not 8 x 10 = 80);
+        #   - each glyph position is the integer snap of the exact pen, never
+        #     more than half a pixel off, which is what Skia does;
+        #   - a face whose advances are whole pixels reproduces the previous
+        #     array exactly, because every boundary is already an integer.
+        # The array itself stays `[i32]` whole pixels: the Draw IR -> Engine2D
+        # twins consume integer positions and that contract does not change.
+        # What changed is WHERE the rounding happens.
+        val boundaries = self._text_pen_milli(content_cps, font_size, _run_identity)
         var bi = 0
         var previous_px: i64 = 0
         while bi < content_len:
@@ -2329,6 +3093,20 @@ class FontRenderer:
         if _run_identity != "" and content_len <= _RUN_MEMO_MAX_CHARS:
             _run_memo_store(_run_identity, font_size, content, advances)
         advances
+
+    # Exact (unrounded) pen end of `content` in milli-px: the value whose
+    # rounding is the sum of `measure_text_advances`.
+    # reason: mirrors measure_text_advances(content: text, font_size: i32).
+    # @allow(primitive_api)
+    me measure_text_width_milli(content: text, font_size: i32) -> i64:
+        val content_cps = text_codepoints(content)
+        if content_cps.len() == 0:
+            return 0
+        var run_identity: text = ""
+        if val run_rasterizer = self.ttf_rasterizer:
+            run_identity = run_rasterizer.cache_identity()
+        val boundaries = self._text_pen_milli(content_cps, font_size, run_identity)
+        boundaries[content_cps.len()]
 
     # -----------------------------------------------------------------------
     # Render text into a pixel buffer (ARGB u32)
@@ -2378,7 +3156,7 @@ class FontRenderer:
                     byte_offset: fallback_byte_offset
                 ))
                 fallback_x = fallback_x + glyph.advance.to_i64()
-                fallback_byte_offset = fallback_byte_offset + 1
+                fallback_byte_offset = fallback_byte_offset + utf8_codepoint_byte_len(codepoint.to_i64())
                 ci = ci + 1
         if layout.len() == 0:
             return FontTextPayload(valid: false, width: 0, height: 0, offset_x: 0, offset_y: 0, pixels: [])
@@ -2587,17 +3365,45 @@ class FontRenderer:
             row_height = 0
         if y + padded_height > FONT_ATLAS_HEIGHT:
             return -1
-        var row = 0
         var _probe_glyph_nz = 0
-        while row < glyph.height:
-            var col = 0
-            while col < glyph.width:
-                val alpha = glyph.pixels[row * glyph.width + col].to_u32()
-                if alpha > 0u32:
-                    _probe_glyph_nz = _probe_glyph_nz + 1
-                self.atlas_pixels[(y + row) * FONT_ATLAS_WIDTH + x + col] = (alpha << 24) | 0x00FFFFFFu32
-                col = col + 1
+        val lcd = glyph.lcd_pixels.len() == glyph.width.to_i64() * glyph.height.to_i64() * 3
+        # Each glyph row is built in a local line and written as one span into
+        # the atlas taken off the field (an element store per pixel into the
+        # `self.atlas_pixels` field was ~9 us a pixel on the interpreter lane:
+        # 0.8 s of the 4x css-layout text paint).
+        # bug=interpreter_field_array_write_span_copies_whole_array_2026-11-23
+        val gw = glyph.width.to_i64()
+        val gh = glyph.height.to_i64()
+        val gray = glyph.pixels
+        val subpixels = glyph.lcd_pixels
+        var atlas = self.atlas_pixels
+        self.atlas_pixels = []
+        var line: [u32] = [0u32; gw]
+        var row: i64 = 0
+        while row < gh:
+            var col: i64 = 0
+            val base = row * gw
+            # The mode tests sit outside the pixel loop (a branch per pixel is
+            # a measurable share of a cold cell on the interpreter lane).
+            if lcd:
+                while col < gw:
+                    val sub = (base + col) * 3
+                    line[col] = (gray[base + col].to_u32() << 24) | (subpixels[sub].to_u32() << 16) |
+                        (subpixels[sub + 1].to_u32() << 8) | subpixels[sub + 2].to_u32()
+                    col = col + 1
+            else:
+                while col < gw:
+                    line[col] = (gray[base + col].to_u32() << 24) | 0x00FFFFFFu32
+                    col = col + 1
+            if _VEC_ATLAS_PROBE:
+                var pc: i64 = 0
+                while pc < gw:
+                    if gray[base + pc] > 0u8:
+                        _probe_glyph_nz = _probe_glyph_nz + 1
+                    pc = pc + 1
+            atlas.write_span(line, (y.to_i64() + row) * FONT_ATLAS_WIDTH.to_i64() + x.to_i64(), 0, gw)
             row = row + 1
+        self.atlas_pixels = atlas
         if _VEC_ATLAS_PROBE and _vec_glyph_probe_count < 8:
             _vec_glyph_probe_count = _vec_glyph_probe_count + 1
             print("[vec-glyph-probe] insert cp={glyph.codepoint} w={glyph.width} h={glyph.height} src_pixels_len={glyph.pixels.len()} src_nz={_probe_glyph_nz} ax={x} ay={y}")
@@ -2681,6 +3487,7 @@ class FontRenderer:
         # structs whenever the fallback produced them.
         var fallback_cps: [i32] = []
         var fallback_xs: [i64] = []
+        var fallback_byte_offsets: [i64] = []
         if _VEC_ATLAS_PROBE and _vec_glyph_probe_count < 8:
             _vec_glyph_probe_count = _vec_glyph_probe_count + 1
             print("[vec-glyph-probe] active-after-layout_text layout_len={layout.len()} use_vector={self.use_vector} use_bitmap={self.use_bitmap} content_len={content.len()}")
@@ -2726,8 +3533,10 @@ class FontRenderer:
                 ))
                 fallback_cps = fallback_cps.push(codepoint)
                 fallback_xs = fallback_xs.push(fallback_x)
+                fallback_byte_offsets = fallback_byte_offsets.push(fallback_byte_offset)
                 fallback_x = fallback_x + glyph.advance.to_i64()
-                fallback_byte_offset = fallback_byte_offset + 1
+                # UTF-8 byte offset (owner decision 2026-11-13: text offsets are bytes).
+                fallback_byte_offset = fallback_byte_offset + utf8_codepoint_byte_len(codepoint.to_i64())
                 ci = ci + 1
         self.text_phase_layout_nonempty = layout.len() > 0
         if layout.len() == 0:
@@ -2753,11 +3562,30 @@ class FontRenderer:
                     fallback_baseline = ink_top
                 fi = fi + 1
             if self.selected_outline_blob.len() > 0:
-                var ascent_meta: [i64] = [0; 20]
-                sfnt_measure_glyph_into(self.selected_outline_blob, SFNT_GLYPH_SELECTOR_CODEPOINT,
-                    fallback_cps[0].to_i64(), font_size.to_i64(), ascent_meta)
-                if ascent_meta[7] == 310031 and ascent_meta[17] > 0:
-                    fallback_baseline = ascent_meta[17].to_i32()
+                # Memoized per (rasterizer identity, codepoint, size); see
+                # `_fallback_ascent_keys`. Only a live rasterizer identity
+                # names the blob, so anything else measures every time.
+                val ascent_memoizable = active_rasterizer != nil and font_identity != ""
+                val ascent_key = "{font_identity};cp={fallback_cps[0]};fs={font_size}"
+                var face_ascent: i32 = -1
+                if ascent_memoizable:
+                    var ascent_idx = 0
+                    while ascent_idx < _fallback_ascent_keys.len():
+                        if _fallback_ascent_keys[ascent_idx] == ascent_key:
+                            face_ascent = _fallback_ascent_values[ascent_idx]
+                        ascent_idx = ascent_idx + 1
+                if face_ascent < 0:
+                    face_ascent = 0
+                    var ascent_meta: [i64] = [0; 20]
+                    sfnt_measure_glyph_into(self.selected_outline_blob, SFNT_GLYPH_SELECTOR_CODEPOINT,
+                        fallback_cps[0].to_i64(), font_size.to_i64(), ascent_meta)
+                    if ascent_meta[7] == 310031 and ascent_meta[17] > 0:
+                        face_ascent = ascent_meta[17].to_i32()
+                    if ascent_memoizable and _fallback_ascent_keys.len() < FALLBACK_ASCENT_CACHE_LIMIT:
+                        _fallback_ascent_keys = _fallback_ascent_keys.push(ascent_key)
+                        _fallback_ascent_values = _fallback_ascent_values.push(face_ascent)
+                if face_ascent > 0:
+                    fallback_baseline = face_ascent
         var attempt = 0
         while attempt < 2:
             var quads: [FontRenderQuad] = []
@@ -2779,7 +3607,7 @@ class FontRenderer:
                     requad_cp = fallback_cps[i]
                     quad_dst_x = fallback_xs[i]
                     quad_dst_y = 0
-                    quad_byte_offset = i.to_i64()
+                    quad_byte_offset = fallback_byte_offsets[i]
                 val glyph = self.get_glyph(requad_cp, font_size)
                 if i < fallback_cps.len():
                     quad_dst_x = quad_dst_x + glyph.bearing_x.to_i64()
@@ -2794,13 +3622,26 @@ class FontRenderer:
                         _vec_glyph_probe_count = _vec_glyph_probe_count + 1
                         print("[vec-glyph-probe] quadloop-after-entry_index i={i} atlas_index={atlas_index}")
                     var inserted = false
-                    if atlas_index < 0:
+                    # A deferred phase-0 LCD cell (see `lcd_defer_cells`) has no
+                    # pixels to insert: its quad carries atlas_x = -1 until
+                    # `_lcd_apply_pen_phases` swaps in a phase cell or
+                    # `_lcd_resolve_deferred_cells` rasters it.
+                    val deferred = atlas_index < 0 and glyph.lcd_frame_only
+                    if atlas_index < 0 and not deferred:
                         atlas_index = self._insert_font_atlas_glyph(glyph)
                         if _VEC_ATLAS_PROBE and _vec_glyph_probe_count < 8:
                             _vec_glyph_probe_count = _vec_glyph_probe_count + 1
                             print("[vec-glyph-probe] quadloop-after-insert i={i} atlas_index={atlas_index}")
                         inserted = atlas_index >= 0
-                    if atlas_index < 0:
+                    if deferred:
+                        self.text_phase_atlas_index_valid = true
+                        quads = quads.push(FontRenderQuad(
+                            codepoint: glyph.codepoint, byte_offset: quad_byte_offset,
+                            dst_x: quad_dst_x.to_i32(), dst_y: quad_dst_y.to_i32(),
+                            width: glyph.width, height: glyph.height,
+                            atlas_x: -1, atlas_y: -1, color: color))
+                        self.text_phase_quad_appended = true
+                    elif atlas_index < 0:
                         overflow = true
                     else:
                         self.text_phase_atlas_index_valid = true
@@ -2887,11 +3728,51 @@ class FontRenderer:
         self.stage_text_with_advances_configured(content, advance_widths, color, config)
         self.staged_batch()
 
-    me stage_text_with_advances_configured(content: text, advance_widths: [i32], color: u32, config: FontRenderConfig) -> i64:
+    # Per-codepoint integer glyph advances: the pen `_stage_text_active`'s
+    # no-layout fallback places quads with.
+    me _glyph_pen_advances(content: text, font_size: i32) -> [i32]:
+        val cps = text_codepoints(content)
+        var out: [i32] = [0; cps.len()]
+        var ci = 0
+        while ci < cps.len():
+            out[ci] = self.get_glyph(cps[ci] as i32, font_size).advance
+            ci = ci + 1
+        out
+
+    me stage_text_with_advances_configured(content: text, advance_widths: [i32], color: u32, config: FontRenderConfig, pen_origin_milli: i64 = 0, size_milli: i64 = 0, letter_milli: i64 = 0, word_milli: i64 = 0) -> i64:
         if not font_render_config_selection_supported(config) or not self._ensure_render_config_face(config):
             return self._stage_invalid_config(config)
         self._activate_render_config(config)
-        val natural_advances = self.measure_text_advances(content, config.size)
+        # Phase-0 LCD cells are deferred for this pass: most glyphs of an LCD
+        # run are drawn from a quarter-phase cell, and the phase-0 cell the
+        # staging pass rastered for each of them first (about 13 ms per cold
+        # glyph on the interpreter lane) was never drawn.
+        self.lcd_defer_cells = self._lcd_applies(config.size) or self._gray_applies(config.size)
+        self._stage_text_with_advances_active(content, advance_widths, color, config, pen_origin_milli, size_milli, letter_milli, word_milli)
+        if self.lcd_defer_cells:
+            self.lcd_defer_cells = false
+            if not self._lcd_resolve_deferred_cells(config.size):
+                # Atlas full: start it over and stage with every cell up
+                # front, as `_stage_text_active` does on its own overflow.
+                self._reset_font_atlas(self.atlas_face_generation, self.atlas_font_identity)
+                self._stage_text_with_advances_active(content, advance_widths, color, config, pen_origin_milli, size_milli, letter_milli, word_milli)
+        self._apply_staged_config(config)
+        self.staged_quads.len()
+
+    me _stage_text_with_advances_active(content: text, advance_widths: [i32], color: u32, config: FontRenderConfig, pen_origin_milli: i64, size_milli: i64, letter_milli: i64, word_milli: i64):
+        # `natural_advances` must describe the pen the quads were ACTUALLY
+        # staged at, or the re-layout shift carries the difference into the
+        # quads. When the rasterizer has no layout of its own,
+        # `_stage_text_active` walks the per-glyph INTEGER advances, while
+        # `measure_text_advances` snaps a FRACTIONAL cumulative pen; feeding
+        # the latter leaked the rounding gap into every glyph and accumulated
+        # (+4 px by the last glyph of a 31-glyph 24 px run, which the CPU
+        # lane's run-width clip then cut in half).
+        # test/01_unit/lib/nogc_sync_mut/text_layout/advance_staging_pen_drift_spec.spl
+        val natural_advances = if self.layout_text(content, config.size, 0).len() == 0:
+            self._glyph_pen_advances(content, config.size)
+        else:
+            self.measure_text_advances(content, config.size)
         self._stage_text_active(content, color, config.size)
         # The advance re-layout rewrites the staged quads IN PLACE (array
         # element assignment on a local, then one field store) instead of the
@@ -2901,12 +3782,22 @@ class FontRenderer:
         if not font_batch_apply_advances(content, natural_advances, advance_widths, quads):
             self.staged_valid = false
         self.staged_quads = quads
-        self._apply_staged_config(config)
-        self.staged_quads.len()
+        if self.staged_valid:
+            self._lcd_apply_pen_phases(content, advance_widths, config.size, pen_origin_milli, size_milli, letter_milli, word_milli)
 
     # Single-aggregate return (was `(CachedGlyph, GlyphCache)`); the cache half
     # now updates `self.cache` in place — see get_glyph above for the channel
     # rationale.
+    # True when the selected face measures `glyph_index` cleanly and it has no
+    # coverage at all (an outline-less glyph), as opposed to a failed measure.
+    fn _selected_glyph_is_blank(glyph_index: i32, font_size: i32) -> bool:
+        if self.selected_outline_blob.len() == 0:
+            return false
+        var meta: [i64] = [0; 20]
+        sfnt_measure_glyph_into(self.selected_outline_blob, SFNT_GLYPH_SELECTOR_INDEX,
+            glyph_index.to_i64(), font_size.to_i64(), meta)
+        meta[7] == 310031 and meta[5] == 0 and meta[0] == 0 and meta[1] == 0
+
     me _selected_glyph_index_cached(generation: i64, glyph_index: i32, font_size: i32) -> CachedGlyph:
         var cache = self.cache
         val cached = cache.lookup_index(0, generation, glyph_index, font_size)
@@ -2931,11 +3822,13 @@ class FontRenderer:
             return CachedGlyph(codepoint: -1, face_id: 0, face_generation: generation,
                 glyph_index: glyph_index, font_size: font_size, width: 0, height: 0,
                 advance: 0, bearing_x: 0, bearing_y: 0, pixels: [])
-        val glyph = CachedGlyph(codepoint: -1, face_id: 0, face_generation: generation,
+        var glyph = CachedGlyph(codepoint: -1, face_id: 0, face_generation: generation,
             glyph_index: glyph_index, font_size: font_size,
             width: meta[0].to_i32(), height: meta[1].to_i32(),
             advance: meta[2].to_i32(), bearing_x: meta[3].to_i32(),
             bearing_y: meta[4].to_i32(), pixels: pixels)
+        if self._lcd_applies(font_size) and glyph.width > 0 and glyph.height > 0:
+            glyph = self._lcd_glyph(SFNT_GLYPH_SELECTOR_INDEX, glyph_index.to_i64(), -1, glyph_index, generation, font_size, glyph)
         if glyph.width > 0 and glyph.height > 0 and glyph.pixels.len() == glyph.width.to_i64() * glyph.height.to_i64():
             cache.insert(glyph)
         self.cache = cache
@@ -2950,15 +3843,17 @@ class FontRenderer:
         self.stage_selected_glyph_run_configured(payload, color, config)
         self.staged_batch()
 
-    me stage_selected_glyph_run_configured(payload: DrawIrGlyphRunPayload, color: u32, config: FontRenderConfig) -> i64:
+    # `pen_q4`: each glyph's exact pen to the nearest quarter device px
+    # ([] = the whole-px `payload.xs` only).
+    me stage_selected_glyph_run_configured(payload: DrawIrGlyphRunPayload, color: u32, config: FontRenderConfig, pen_q4: [i32] = []) -> i64:
         if not font_render_config_selection_supported(config) or not self._ensure_render_config_face(config):
             return self._stage_invalid_config(config)
         self._activate_render_config(config)
-        val staged = self._stage_selected_glyph_run_active(payload, color, config.size)
+        val staged = self._stage_selected_glyph_run_active(payload, color, config.size, pen_q4)
         self._apply_staged_config(config)
         staged
 
-    me _stage_selected_glyph_run_active(payload: DrawIrGlyphRunPayload, color: u32, font_size: i32) -> i64:
+    me _stage_selected_glyph_run_active(payload: DrawIrGlyphRunPayload, color: u32, font_size: i32, pen_q4: [i32] = []) -> i64:
         val active = self.ttf_rasterizer
         if active == nil:
             return self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: "", face_generation: 0, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: []))
@@ -2982,6 +3877,7 @@ class FontRenderer:
                 ascent = ascent_meta[17].to_i32()
         if ascent <= 0:
             return self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: identity, face_generation: generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: []))
+        val lcd_phases = pen_q4.len() == payload.glyph_ids.len() and self._lcd_applies(font_size)
         var attempt = 0
         while attempt < 2:
             var quads: [FontRenderQuad] = []
@@ -2994,17 +3890,50 @@ class FontRenderer:
                     return self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: identity, face_generation: generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: []))
                 val glyph_id = raw_gid.to_i32()
                 val glyph = self._selected_glyph_index_cached(generation, glyph_id, font_size)
+                # A glyph with no outline (the space of `مرحبا بالعالم`, the
+                # empty placeholder 785 after हिंदी's anusvara) paints nothing
+                # in Chrome; it gets no quad, like `_stage_glyph_run_active`.
+                # A glyph whose raster FAILED still declines the run.
+                val blank = (glyph.width <= 0 or glyph.height <= 0) and self._selected_glyph_is_blank(glyph_id, font_size)
+                if blank:
+                    i = i + 1
+                    continue
                 if glyph.width <= 0 or glyph.height <= 0:
                     return self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: identity, face_generation: generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: []))
-                var atlas_index = self._font_atlas_entry_index(0, generation, glyph_id, -1, font_size)
+                # LCD sizes: the glyph starts on its exact pen to the nearest
+                # quarter px (Skia subpixel positioning), as the plain lane's
+                # `_lcd_apply_pen_phases` does: a whole-px pen plus a phase
+                # cell. `مرحبا بالعالم`'s first letter at 68.6875 px is pen 68
+                # phase 3 (Chrome ink x1 96, the truncated pen's 95).
+                var pen_x = payload.xs[i]
+                var cell = glyph
+                var cell_cp: i32 = -1
+                if lcd_phases:
+                    val q = pen_q4[i]
+                    val whole = if q >= 0: q / 4 else: 0 - ((3 - q) / 4)
+                    if whole - pen_x <= 1 and pen_x - whole <= 1:
+                        pen_x = whole
+                        val phase = q - whole * 4
+                        if phase != 0 and glyph.lcd_pixels.len() > 0:
+                            cell_cp = -2 - phase
+                            val key = "sel|{identity}|{generation}|{glyph_id}|{font_size}|{phase}"
+                            if val Some(hit) = _lcd_phase_glyphs.get(key):
+                                cell = hit
+                            else:
+                                cell = self._lcd_glyph(SFNT_GLYPH_SELECTOR_INDEX, glyph_id.to_i64(), cell_cp, glyph_id, generation, font_size, glyph, phase)
+                                _lcd_phase_glyphs[key] = cell
+                            if cell.codepoint != cell_cp:
+                                cell = glyph
+                                cell_cp = -1
+                var atlas_index = self._font_atlas_entry_index(0, generation, glyph_id, cell_cp, font_size)
                 var inserted = false
                 if atlas_index < 0:
-                    atlas_index = self._insert_font_atlas_glyph(glyph)
+                    atlas_index = self._insert_font_atlas_glyph(cell)
                     inserted = atlas_index >= 0
                 if atlas_index < 0:
                     overflow = true
                 else:
-                    val destination = _font_shaped_glyph_destination(payload.xs[i], payload.ys[i], glyph, ascent)
+                    val destination = _font_shaped_glyph_destination(pen_x, payload.ys[i], cell, ascent)
                     if not destination.0:
                         return self._stage_batch(FontRenderBatch(program_version: FONT_ATLAS_COMPOSITE_PROGRAM_VERSION, transform_identity: FONT_RENDER_TRANSFORM_IDENTITY, font_identity: identity, face_generation: generation, valid: false, atlas_width: FONT_ATLAS_WIDTH, atlas_height: FONT_ATLAS_HEIGHT, atlas_pixels: self.atlas_pixels, quads: [], atlas_generation: self.atlas_generation, dirty_rects: []))
                     val quad = FontRenderQuad(codepoint: -1, byte_offset: -1,
@@ -3139,6 +4068,9 @@ class _ResolvedShapedGlyphRun:
     payload: DrawIrGlyphRunPayload
     advances: [i32]
     width: i32
+    pens_64: [i32] = []
+    # The shaping face's line-metric units (`sfnt_blob_line_metric_units`).
+    face_units: [i64] = []
 
 # Both classifiers below are pure functions of one short string and are called
 # once per uncached resolve — 146 times on css-layout for at most a handful of
@@ -3182,6 +4114,186 @@ fn _resolved_font_complex_script(codepoints: [i64]) -> i32:
             complex_script = next
     complex_script
 
+# The language whose bundled face an Arabic (1) or Devanagari (2) run takes. A
+# page language written in another script (or none) cannot shape the run, so
+# the run takes its script's face, as Chrome's per-script fallback does: Chrome
+# 159 lays out `Hx مرحبا` in a `lang="en"` page with Noto Sans Arabic. Picking
+# it up front skips a doomed shaping attempt on the `lang` face (2.6 s cold for
+# Noto Sans SC on the interpreter lane).
+fn _resolved_font_script_language(language: text, complex_script: i32) -> text:
+    if complex_script == 1 and not ["ar", "fa", "ur", "ps", "sd", "ug", "ckb", "ks"].contains(language):
+        return "ar"
+    if complex_script == 2 and not ["hi", "mr", "ne", "sa", "kok", "mai"].contains(language):
+        return "hi"
+    language
+
+# ---------------------------------------------------------------------------
+# `line-height: normal`
+#
+# ONE source for the web renderer's text AND element styles
+# (`style_line_h`): the normal line height of the face the family list
+# resolves to, from that face's own metrics. Before 2026-11-14 a #text style
+# used `ResolvedFontMetrics.line_height` — which is `font_size` whenever the
+# foreign line metric answers 0, as it does on the pure-Simple outline lane —
+# and an element style used `9 * (font_size / 8)`: 9/18/27/36 at
+# 12/16/24/32px where Chrome's Liberation Sans is 14/18/28/37.
+#
+# SCOPE: only the host the numbers were measured on
+# (`browser_host_has_measured_linux_face_set`). Elsewhere this answers 0 and
+# every caller keeps the value it had. `ResolvedFontMetrics.line_height` is
+# deliberately NOT changed, so non-web consumers (common/ui/draw_ir.spl text
+# height, widget and window-scene text) are untouched on every host.
+#
+# A candidate whose file is a TrueType COLLECTION (`path#N`, macOS .ttc) has a
+# `ttcf` header, not an offset table: its units row is empty and the walk moves
+# to the next candidate. No collection is in the measured Linux stacks.
+val BROWSER_NORMAL_LINE_MEMO_LIMIT: i32 = 2048
+var _browser_normal_line_px_memo: Dict<text, i32> = {}
+var _browser_normal_line_px_memo_count: i32 = 0
+var _browser_face_line_units_memo: Dict<text, [i64]> = {}
+var _browser_face_line_units_memo_count: i32 = 0
+
+var _browser_face_ascent_descent_memo: Dict<text, [i32]> = {}
+
+# [ascent, descent] in whole px of the face `line-height: normal` resolves to
+# (the same first-existing candidate walk as `browser_normal_line_height_px`),
+# or [] off the measured host / when no face answers, so callers keep their
+# estimate. Chrome 159 Liberation Serif 16px: 14 / 3.
+# reason: family name, style flags and px size are the web-style domain.
+# @allow(primitive_api)
+pub fn browser_face_ascent_descent_px(family: text, bold: bool, italic: bool, font_size: i32) -> [i32]:
+    if font_size <= 0 or font_size > 512:
+        return []
+    browser_face_ascent_descent_milli_px(family, bold, italic, font_size * 1000)
+
+# Fractional-size twin: `font_size_milli` is the computed size in thousandths
+# of a px (Chrome 159 h3 = 18720). Whole-px sizes answer exactly as above.
+# reason: family name, style flags and milli-px size are the web-style domain.
+# @allow(primitive_api)
+pub fn browser_face_ascent_descent_milli_px(family: text, bold: bool, italic: bool, font_size_milli: i32) -> [i32]:
+    browser_face_ascent_descent_device_px(family, bold, italic, font_size_milli, 1)
+
+# Device-scale twin: [ascent, descent] in whole DEVICE px at device scale `k`
+# (Chrome --force-device-scale-factor), from the face at font_size_milli * k
+# with Blink's subpixel-positioning borrow
+# (`sfnt_line_metric_units_ascent_descent_device_px`). k == 1 answers exactly
+# what `browser_face_ascent_descent_milli_px` always answered.
+# reason: family name, style flags, milli-px size and integer device scale are the web-style domain.
+# @allow(primitive_api)
+pub fn browser_face_ascent_descent_device_px(family: text, bold: bool, italic: bool, font_size_milli: i32, k: i32) -> [i32]:
+    if font_size_milli <= 0 or font_size_milli > 512000 or k < 1:
+        return []
+    if not browser_host_has_measured_linux_face_set():
+        return []
+    val style_key = if bold and italic: "|bi|" elif bold: "|b|" elif italic: "|i|" else: "|r|"
+    val key = family + style_key + font_size_milli.to_string() + (if k > 1: "@" + k.to_string() else: "")
+    val memoisable = browser_bundled_font_path_for_family(family) == ""
+    if memoisable and _browser_face_ascent_descent_memo.has(key):
+        return _browser_face_ascent_descent_memo[key]
+    var out: [i32] = []
+    val candidates = browser_font_candidates_for_family(browser_font_family_for_style(family, bold, italic))
+    for candidate in candidates:
+        if out.len() == 0:
+            val path = font_face_spec_path(candidate)
+            if file_exists(path):
+                val ad = sfnt_line_metric_units_ascent_descent_device_px(_browser_face_line_units(path), font_size_milli.to_i64(), k.to_i64())
+                if ad.len() == 2:
+                    out = [ad[0] as i32, ad[1] as i32]
+    if memoisable and out.len() == 2:
+        if _browser_face_ascent_descent_memo.len() >= BROWSER_NORMAL_LINE_MEMO_LIMIT:
+            _browser_face_ascent_descent_memo = {}
+        _browser_face_ascent_descent_memo[key] = out
+    out
+
+# Line-metric units ([ascent, descent, gap, upem]) of the primary face that
+# `family` resolves to, or [] off the measured host. Lets a run tell a fallback
+# face from its own primary face (a `font-family: Noto Sans Devanagari` run
+# shapes with its primary face: no union, the strut already is that face).
+# reason: family name and style flags are the web-style domain.
+# @allow(primitive_api)
+pub fn browser_face_line_units(family: text, bold: bool, italic: bool) -> [i64]:
+    if not browser_host_has_measured_linux_face_set():
+        return []
+    for candidate in browser_font_candidates_for_family(browser_font_family_for_style(family, bold, italic)):
+        val path = font_face_spec_path(candidate)
+        if file_exists(path):
+            return _browser_face_line_units(path)
+    []
+
+# [ascent, descent] in whole px at font_size_milli * k of a run's USED face
+# (`ResolvedFontMetrics.used_face_units`), each carrying its share of the face's
+# line gap (Blink AddLeading: the floored half above, the rest below), or [].
+# This is what a `line-height: normal` line box unions with its strut. There is
+# no subpixel-positioning borrow: Chrome 159 at k=4 puts a Noto Sans Devanagari
+# 16px line at 59 + 26 = 85 (the borrow would make it 86) and Noto Sans Arabic's
+# baseline 88 below the line top.
+# reason: font-unit scalars, a milli-px size and an integer device scale are the SFNT table domain.
+# @allow(primitive_api)
+pub fn browser_used_face_line_ascent_descent_device_px(units: [i64], font_size_milli: i32, k: i32) -> [i32]:
+    if units.len() != 4 or font_size_milli <= 0 or k < 1:
+        return []
+    val size = (font_size_milli as i64) * (k as i64)
+    val ad = sfnt_line_metric_units_ascent_descent_milli_px(units, size)
+    val line = sfnt_line_metric_units_normal_line_height_milli_px(units, size)
+    if ad.len() != 2 or line < ad[0] + ad[1]:
+        return []
+    val above = (line - ad[0] - ad[1]) / 2
+    [(ad[0] + above) as i32, (line - ad[0] - above) as i32]
+
+fn _browser_face_line_units(path: text) -> [i64]:
+    if _browser_face_line_units_memo.has(path):
+        return _browser_face_line_units_memo[path]
+    val blob = file_read_bytes(path)
+    val units = sfnt_blob_line_metric_units(blob)
+    if units.len() == 0:
+        return units
+    if _browser_face_line_units_memo_count >= 256:
+        _browser_face_line_units_memo = {}
+        _browser_face_line_units_memo_count = 0
+    _browser_face_line_units_memo[path] = units
+    _browser_face_line_units_memo_count = _browser_face_line_units_memo_count + 1
+    units
+
+pub fn browser_normal_line_height_px(family: text, bold: bool, italic: bool, font_size: i32) -> i32:
+    if font_size <= 0 or font_size > 512:
+        return 0
+    browser_normal_line_height_milli_px(family, bold, italic, font_size * 1000)
+
+# Fractional-size twin of `browser_normal_line_height_px` (see the ascent/descent
+# twin above); ascent, descent and gap are each rounded at the float size.
+# reason: family name, style flags and milli-px size are the web-style domain.
+# @allow(primitive_api)
+pub fn browser_normal_line_height_milli_px(family: text, bold: bool, italic: bool, font_size_milli: i32) -> i32:
+    if font_size_milli <= 0 or font_size_milli > 512000:
+        return 0
+    if not browser_host_has_measured_linux_face_set():
+        return 0
+    val style_key = if bold and italic: "|bi|" elif bold: "|b|" elif italic: "|i|" else: "|r|"
+    val key = family + style_key + font_size_milli.to_string()
+    # A bundled family's face path depends on SIMPLE_ASSET_ROOT, which a
+    # process can change, so its pixel value is never memoised (the per-path
+    # units row still is, and a path is its own identity).
+    val memoisable = browser_bundled_font_path_for_family(family) == ""
+    if memoisable and _browser_normal_line_px_memo.has(key):
+        return _browser_normal_line_px_memo[key]
+    var px = 0
+    val candidates = browser_font_candidates_for_family(browser_font_family_for_style(family, bold, italic))
+    for candidate in candidates:
+        if px == 0:
+            val path = font_face_spec_path(candidate)
+            if file_exists(path):
+                val units = _browser_face_line_units(path)
+                px = sfnt_line_metric_units_normal_line_height_milli_px(units, font_size_milli.to_i64()) as i32
+    # 0 is "no face answered" (a file that was not there yet, a collection):
+    # never memoised, so a later call can still succeed.
+    if memoisable and px > 0:
+        if _browser_normal_line_px_memo_count >= BROWSER_NORMAL_LINE_MEMO_LIMIT:
+            _browser_normal_line_px_memo = {}
+            _browser_normal_line_px_memo_count = 0
+        _browser_normal_line_px_memo[key] = px
+        _browser_normal_line_px_memo_count = _browser_normal_line_px_memo_count + 1
+    px
+
 fn _resolved_font_category(family: text) -> text:
     if _resolved_font_category_memo.has(family):
         return _resolved_font_category_memo[family]
@@ -3190,18 +4302,10 @@ fn _resolved_font_category(family: text) -> text:
     computed
 
 fn _resolved_font_category_uncached(family: text) -> text:
-    val normalized = family.trim().lower()
-    for candidate in selected_font_asset_candidates():
-        if candidate.family.lower() == normalized:
-            return candidate.category
-    if (normalized.contains("mono") or normalized.contains("courier") or
-        normalized.contains("code") or normalized.contains("console")):
-        return "mono"
-    if normalized.contains("sans") or normalized.contains("arial") or normalized.contains("helvetica"):
-        return "sans"
-    if normalized.contains("serif") or normalized.contains("times") or normalized.contains("georgia"):
-        return "serif"
-    ""
+    # Per-name, in list order — the one resolver the candidate lists use
+    # (font_provider.spl § Family-LIST resolution), not a substring test over
+    # the whole value.
+    browser_font_family_category(family)
 
 fn _resolved_font_empty_shaped() -> _ResolvedShapedGlyphRun:
     _ResolvedShapedGlyphRun(valid: false, payload: draw_ir_empty_glyph_run_payload(), advances: [], width: 0)
@@ -3247,11 +4351,14 @@ fn _resolve_selected_shaped_glyph_run(candidate: FontAssetCandidate, content: te
         return _resolved_font_empty_shaped()
     val shaped = if registered_only:
         val font = sk_font_new(sk_typeface_from_attached_font(candidate.family, sk_font_style_normal(), font_path, 0), font_size.to_f64())
-        val shaper = shaper_with_ot_font(shaper_new(fallback_chain_new(font)), parsed.?)
+        # Registered bytes were validated against the pinned digest at
+        # registration (`_registered_selected_font_bytes` returned true), so the
+        # pinned digest names them; see `shaper_with_registered_ot_font`.
+        val shaper = shaper_with_registered_ot_font(shaper_new(fallback_chain_new(font)), parsed.?, candidate.sha256)
         (shaper_shape_with_language(shaper, codepoints, font, 0.0, 0.0, language), 0, 0)
     else:
         val loaded = load_font(font_path)
-        if loaded == nil:
+        if loaded.is_none():
             return _resolved_font_empty_shaped()
         val face = loaded.?
         val font = sk_font_new(sk_typeface_from_attached_font(candidate.family, sk_font_style_normal(), font_path, face.handle), font_size.to_f64())
@@ -3265,6 +4372,8 @@ fn _resolve_selected_shaped_glyph_run(candidate: FontAssetCandidate, content: te
     var xs: [i32] = []
     var ys: [i32] = []
     var clusters: [i64] = []
+    # Each glyph pen in 1/64 px.
+    var pens_64: [i32] = []
     var advances: [i32] = [0; codepoints.len()]
     var total_advance = 0.0
     var valid = runs.len() > 0
@@ -3278,6 +4387,11 @@ fn _resolve_selected_shaped_glyph_run(candidate: FontAssetCandidate, content: te
             xs = xs.push(material.xs[i])
             ys = ys.push(material.ys[i])
             clusters = clusters.push(material.clusters[i])
+            if i < run.positions.len():
+                val pen_scaled: f64 = (run.positions[i].x * 64.0) + 0.5
+                val pen_trunc: i32 = pen_scaled.to_i32()
+                val pen_floor: i32 = if pen_scaled < 0.0 and (pen_trunc.to_f64() != pen_scaled): pen_trunc - 1 else: pen_trunc
+                pens_64 = pens_64.push(pen_floor)
             val cluster = material.clusters[i]
             val before = total_advance.to_i32()
             total_advance = total_advance + run.glyphs[i].x_advance
@@ -3291,7 +4405,7 @@ fn _resolve_selected_shaped_glyph_run(candidate: FontAssetCandidate, content: te
             valid = false
     val width = total_advance.to_i32()
     val payload = draw_ir_glyph_run_payload(glyph_ids, xs, ys, clusters, valid and width >= 0)
-    _ResolvedShapedGlyphRun(valid: payload.valid, payload: payload, advances: if payload.valid: advances else: [], width: if payload.valid: width else: 0)
+    _ResolvedShapedGlyphRun(valid: payload.valid, payload: payload, advances: if payload.valid: advances else: [], width: if payload.valid: width else: 0, pens_64: if payload.valid: pens_64 else: [], face_units: if payload.valid: sfnt_blob_line_metric_units(font_blob) else: [])
 
 # ---------------------------------------------------------------------------
 # Front memo for resolved font metrics.
@@ -3632,9 +4746,9 @@ fn _resolve_font_metrics_with_language_config_uncached(family: text, content: te
     if family.trim() == "" or font_size <= 0 or font_size > 512:
         return ResolvedFontMetrics(valid: false, family: family, identity: "", advances: [], width: 0, line_height: 0, reason: "invalid-font-request", glyph_run: draw_ir_empty_glyph_run_payload(), shaping_required: false)
     val _fr_cls0 = _fr_probe_now()
-    val normalized_language = _resolved_font_language(language)
     val codepoints = text_codepoints(content)
     val complex_script = _resolved_font_complex_script(codepoints)
+    val normalized_language = _resolved_font_script_language(_resolved_font_language(language), complex_script)
     val category = _resolved_font_category(family)
     # The coverage matrix picks a BUNDLED face with real coverage for a script,
     # and for complex-script content that is exactly what must happen. For
@@ -3728,6 +4842,7 @@ fn _resolve_font_metrics_with_language_config_uncached(family: text, content: te
     if _WM_TRACE: print("[rfm] at=measure shaped_valid={shaped.valid}")
     val _fr_t0 = _fr_probe_now()
     val advances = if shaped.valid: shaped.advances else: renderer.measure_text_advances(content, font_size)
+    val width_milli: i64 = if shaped.valid: -1 else: renderer.measure_text_width_milli(content, font_size)
     _fr_probe_add_measure(_fr_probe_now() - _fr_t0, (codepoints.len() as i64))
     if _WM_TRACE: print("[rfm] at=measured advances={advances.len()}")
     var width = 0
@@ -3763,7 +4878,10 @@ fn _resolve_font_metrics_with_language_config_uncached(family: text, content: te
         line_height: if valid: line_height else: 0,
         reason: if valid and (complex_script == 0 or shaped.valid): "resolved" else if valid: "font-shaping-unavailable" else: "font-identity-unavailable",
         glyph_run: shaped.payload,
-        shaping_required: complex_script != 0
+        glyph_pens_64: if valid: shaped.pens_64 else: [],
+        used_face_units: if valid and shaped.valid: shaped.face_units else: [],
+        shaping_required: complex_script != 0,
+        width_milli: if valid: width_milli else: -1
     )
     if resolved.valid and cacheable:
         _resolved_font_metric_store(cache_key, resolved)
@@ -3808,3 +4926,60 @@ fn resolve_font_metrics_configured(config: FontRenderConfig, content: text) -> R
 # Compatibility entry point for producers without language metadata.
 fn resolve_font_metrics(family: text, content: text, font_size: i32) -> ResolvedFontMetrics:
     resolve_font_metrics_with_language(family, content, font_size, "und")
+
+# Fractional-size metrics (`font-size: 18.72px`, UA h3). Chrome 159 lays text
+# out at the float size: the run width scales linearly (Skia, no hinting).
+# The advance and kern caches are keyed on whole-px sizes, so instead of
+# widening those keys the run is resolved at a reference size `ref` (8x the
+# rounded size, at most 512) and the integer pen boundaries are rescaled to
+# `font_size_milli`. Boundaries, not advances, are rescaled, so the run total is
+# round(exact width) exactly as `measure_text_advances` does, and the error of
+# any boundary is at most half a pixel of the reference size shrunk by 1/8.
+# Shaped (complex-script) runs and whole-px sizes take the integer path.
+# reason: family, text, milli-px size and language are the web-style domain.
+# @allow(primitive_api)
+pub fn resolve_font_metrics_with_language_milli(family: text, content: text, font_size_milli: i32, language: text) -> ResolvedFontMetrics:
+    val px = (font_size_milli + 500) / 1000
+    if font_size_milli % 1000 == 0 or font_size_milli <= 0 or font_size_milli > 512000:
+        return resolve_font_metrics_with_language(family, content, px, language)
+    var ref_px = px * 8
+    if ref_px > 512:
+        ref_px = 512
+    val at_ref = resolve_font_metrics_with_language(family, content, ref_px, language)
+    if not at_ref.valid or at_ref.shaping_required:
+        return resolve_font_metrics_with_language(family, content, px, language)
+    val n = at_ref.advances.len()
+    var advances: [i32] = [0; n]
+    var cumulative_ref: i64 = 0
+    var previous: i64 = 0
+    val s266 = sfnt_font_cache_key_size_26_6(font_size_milli as i64)
+    var i = 0
+    while i < n:
+        cumulative_ref = cumulative_ref + (at_ref.advances[i] as i64)
+        val boundary = _fr_scale_round(cumulative_ref, s266, (ref_px as i64) * 64)
+        advances[i] = (boundary - previous) as i32
+        previous = boundary
+        i = i + 1
+    val line_height = ((at_ref.line_height as i64) * (font_size_milli as i64) + (ref_px as i64) * 500) / ((ref_px as i64) * 1000)
+    # Exact run width as Chrome 159 measures it: FreeType takes the size in
+    # 26.6 fixed point, so 10.6667 px advances are scaled at 682/64 = 10.65625
+    # px (`v` = 1024 units is 341/64 px, `Overview` 44.4219 px, not the 44.4541
+    # of the float size). The boundaries above use the same size, but sum
+    # whole reference px, each rounded once at the reference size: at 13.3333
+    # px `Overview` is 433 ref px -> 55.49 (55) while its exact pen end is
+    # 55.5469 (56, Chrome's edge). The run end is anchored to the exact pen
+    # end (last advance absorbs the <= 1 px), so `width` is its rounding and
+    # `width_milli` is always kept. `_lcd_apply_pen_phases` anchors the same.
+    var width_milli: i64 = -1
+    var width = previous
+    if at_ref.width_milli >= 0 and n > 0:
+        val exact = _fr_scale_round(at_ref.width_milli, s266, (ref_px as i64) * 64)
+        val anchored = _milli_px_to_px_i64(exact)
+        val last = (advances[n - 1] as i64) + anchored - previous
+        if last >= 0 and anchored - previous <= 1 and previous - anchored <= 1:
+            advances[n - 1] = last as i32
+            width = anchored
+            width_milli = exact
+    ResolvedFontMetrics(valid: true, family: at_ref.family, identity: at_ref.identity, advances: advances,
+        width: width as i32, line_height: line_height as i32, reason: at_ref.reason,
+        glyph_run: at_ref.glyph_run, shaping_required: false, width_milli: width_milli)

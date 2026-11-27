@@ -85,3 +85,10 @@ assert this row so as not to freeze the bug. The bootstrap blocker was fixed at
 its one call site instead. A real fix needs a presence predicate that decodes
 collection emptiness (the tree-walk implementation is the reference) wired into
 both `lower_condition` paths, plus the value-position arms.
+
+## Closed 2026-11-05 — no longer reproduces (F1 lane)
+
+Re-measured on the release/1.0.0 seed (`simple run` and `simple test`):
+`if e.?:` on `[]`, `{}` and `""` all take the else branch, `not e.?` is
+`true`, and a `while w.?: w = w[1:]` drain loop terminates after 3 turns.
+Pinned by `test/01_unit/compiler/interpreter/exists_check_presence_regression_spec.spl`.

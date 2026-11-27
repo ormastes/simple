@@ -6,7 +6,9 @@
 use std.common.contracts.execution.simpleos_capability_v1.{
     ProtocolCapabilityManifestV1,
     protocol_capability_manifest_v1_new,
-    protocol_capability_manifest_v1_with_probe
+    protocol_capability_manifest_v1_with_probe,
+    protocol_capability_default_limits,
+    ProtocolTimeouts
 }
 
 pub fn simpleos_http_protocol_reachable(protocol: text) -> bool:
@@ -43,6 +45,52 @@ pub fn simpleos_http_capability_manifests(tls_enabled: bool, h1_request_response
         manifests.push(_http_manifest("http/1.1", tls_enabled, probe_id, evidence_id))
     if tls_enabled and h2_request_response_verified:
         manifests.push(_http_manifest("h2", true, probe_id, evidence_id))
+    manifests
+
+pub struct SimpleosHttpConfiguredBoundsV1:
+    max_connections: i64
+    max_body_bytes: i64
+    read_timeout_ms: i64
+    write_timeout_ms: i64
+    idle_timeout_ms: i64
+    drain_timeout_ms: i64
+
+fn _http_apply_configured_bounds(
+    manifest: ProtocolCapabilityManifestV1, bounds: SimpleosHttpConfiguredBoundsV1
+) -> ProtocolCapabilityManifestV1:
+    # ServerConfig has no handshake field; read_timeout_ms bounds the handshake.
+    # Values come from the configured production owner verbatim; out-of-range
+    # values are left for protocol_capability_manifest_v1_validate to reject.
+    var next = manifest
+    var limits = protocol_capability_default_limits()
+    limits.max_connections = bounds.max_connections
+    limits.max_body_bytes = bounds.max_body_bytes
+    next.limits = limits
+    next.timeouts = ProtocolTimeouts(
+        handshake_ms: bounds.read_timeout_ms,
+        read_ms: bounds.read_timeout_ms,
+        write_ms: bounds.write_timeout_ms,
+        idle_ms: bounds.idle_timeout_ms,
+        drain_ms: bounds.drain_timeout_ms
+    )
+    next
+
+pub fn simpleos_http_capability_manifests_configured(
+    tls_enabled: bool,
+    h1_request_response_verified: bool,
+    h2_request_response_verified: bool,
+    probe_id: text,
+    evidence_id: text,
+    bounds: SimpleosHttpConfiguredBoundsV1
+) -> [ProtocolCapabilityManifestV1]:
+    val base = simpleos_http_capability_manifests(
+        tls_enabled, h1_request_response_verified, h2_request_response_verified,
+        probe_id, evidence_id)
+    var manifests: [ProtocolCapabilityManifestV1] = []
+    var i = 0
+    while i < base.len():
+        manifests.push(_http_apply_configured_bounds(base[i], bounds))
+        i = i + 1
     manifests
 
 pub struct ServerProtocolProbeHandle:
@@ -104,3 +152,4 @@ export simpleos_http_protocol_reachable, simpleos_http_alpn_protocols
 export simpleos_http_select_alpn, simpleos_http_capability_manifests
 export simpleos_ssh_protocol_reachable, simpleos_ssh_capability_manifests
 export ServerProtocolProbeHandle, server_protocol_probe_handle_admitted
+export SimpleosHttpConfiguredBoundsV1, simpleos_http_capability_manifests_configured

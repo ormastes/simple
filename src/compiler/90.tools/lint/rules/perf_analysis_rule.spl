@@ -1,0 +1,782 @@
+# Performance Analysis & Collection Refactoring — Lint Rule Owner & CLI Explanations
+#
+# Owns:
+#   - `collect_perf_profile_findings_v1(path, content, profile) -> [PerfFindingRecordV1]`
+#   - Typed HIR lowering + `run_hir_perf_analysis_pipeline_v1` integration
+#   - 13-point `evaluate_loop_refactor_safety_v1` verification for loop refactors
+#   - Pre-execution tier-gated lint integration (`run_admitted_perf_analysis_lints_v1`)
+#   - Structured `--explain <RULE_CODE>` metadata and JSON/text formatters
+#   - Deterministic git `--porcelain` `.spl` path extraction for `--changed`
+
+use compiler.common.diagnostics.span.{Span}
+use compiler.frontend.flat_ast_bridge.{parse_and_build_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.semantics.perf.cost_summary_v1.{default_perf_summarizer_config_v1}
+use compiler.semantics.perf.deep_analyzer_hook_v1.{default_deep_analyzer_hook_v1}
+use compiler.semantics.perf.loop_idiom_recognizer_v1.{RecognizedLoopIdiomV1}
+use compiler.semantics.perf.loop_refactor_safety_v1.{
+    derive_hir_loop_safety_facts_v1, evaluate_loop_refactor_safety_v1
+}
+use compiler.semantics.perf.perf_analysis_contracts_v1.{
+    AnalysisResultStatus, BoundEvidenceV1, BoundOrigin, BoundRegime, BoundRelation,
+    CostExprV1, LoopIdiomCandidateV1, LoopIdiomFamily, PerfAnalysisTier,
+    PerfFindingRecordV1, PerfFixApplicability, PerfFixKind, PerfResourceDimension,
+    ProvenanceEdgeV1, SafetyObligationKind, SafetyObligationStatusV1, SizeMeasureKind
+}
+use compiler.semantics.perf.perf_hir_pipeline_v1.{
+    HirPerfPipelineRequestV1, run_hir_perf_analysis_pipeline_v1
+}
+use compiler.semantics.perf_facts.types.{HirPerfCostClass}
+use compiler.tools.fix.node_view_walk.{source_parses}
+use compiler.tools.lint._LintMain.config_and_model.{
+    LintCategory, LintConfig, LintDiag, LintEvidenceTier, LintLevel,
+    LintRunResult, PerfLintProfile, map_lint_code_to_config_name
+}
+use compiler.tools.lint._LintMain.rule_cost_tier.{
+    LintTierProfile, lint_admit_and_record_v1, lint_perf_rule_names
+}
+use compiler.tools.lint.rules.perf_hir_lint_verifier_v1.{
+    HirBuilderSiteCheckV1, HirFnPerfContextV1, PERF_LINT_ARRAY_APPEND_SYM,
+    build_hir_fn_perf_context_v1, default_perf_lint_registry_v1,
+    fn_ctx_has_linear_seq_binding_v1, verify_hir_builder_in_block_v1
+}
+use std.common.crypto.sha256.{sha256_text}
+use std.common.diagnostics.diagnostic_v1.{
+    json_array, json_object, json_pair, json_string
+}
+
+pub struct PerfProfileScanRequestV1:
+    path: text
+    content: text
+    profile: PerfLintProfile
+    max_tier: PerfAnalysisTier
+    has_parse_or_type_errors: bool
+
+pub struct PerfRuleExplanationV1:
+    rule_code: text
+    config_name: text
+    tier: PerfAnalysisTier
+    cost_tier_name: text
+    default_severity: text
+    escalation_policy: text
+    rationale: text
+    evidence_requirements: [text]
+    safe_fix_conditions: [text]
+
+var _PERF_FINDING_PROVIDERS_V1: [fn(PerfProfileScanRequestV1) -> [PerfFindingRecordV1]] = []
+
+pub fn register_perf_finding_provider_v1(provider: fn(PerfProfileScanRequestV1) -> [PerfFindingRecordV1]):
+    _PERF_FINDING_PROVIDERS_V1.push(provider)
+
+pub fn clear_perf_finding_providers_v1():
+    _PERF_FINDING_PROVIDERS_V1 = []
+
+fn _tier_rank(tier: PerfAnalysisTier) -> i64:
+    match tier:
+        case PerfAnalysisTier.T0ExistingFacts: 0
+        case PerfAnalysisTier.T1FastLocal: 1
+        case PerfAnalysisTier.T2Compositional: 2
+        case PerfAnalysisTier.T3DeepOptional: 3
+        case PerfAnalysisTier.T4Empirical: 4
+
+pub fn max_tier_for_perf_profile_v1(profile: PerfLintProfile) -> PerfAnalysisTier:
+    match profile:
+        case PerfLintProfile.PerfFast: PerfAnalysisTier.T1FastLocal
+        case PerfLintProfile.Perf: PerfAnalysisTier.T2Compositional
+        case PerfLintProfile.PerfDeep: PerfAnalysisTier.T3DeepOptional
+
+fn _perf_blocked_obligations(reason: text) -> [SafetyObligationStatusV1]:
+    [
+        SafetyObligationStatusV1(kind: SafetyObligationKind.Aliasing, discharged: false, reason: reason),
+        SafetyObligationStatusV1(kind: SafetyObligationKind.CollectionIdentity, discharged: false, reason: reason)
+    ]
+
+fn _leading_indent(line: text) -> text:
+    var idx = 0
+    while idx < line.byte_len():
+        val b = line.byte_at(idx)
+        if b != 32 and b != 9:
+            break
+        idx = idx + 1
+    line.slice(0, idx)
+
+fn _is_ident_char_byte(b: i64) -> bool:
+    (b >= 97 and b <= 122) or (b >= 65 and b <= 90) or (b >= 48 and b <= 57) or b == 95
+
+fn _is_valid_ident(s: text) -> bool:
+    if s == "":
+        return false
+    val first = s.byte_at(0)
+    val first_ok = (first >= 97 and first <= 122) or (first >= 65 and first <= 90) or first == 95
+    if not first_ok:
+        return false
+    var i = 1
+    while i < s.byte_len():
+        if not _is_ident_char_byte(s.byte_at(i)):
+            return false
+        i = i + 1
+    true
+
+fn _contains_ident_token(haystack: text, ident: text) -> bool:
+    if ident == "" or haystack == "":
+        return false
+    val n = haystack.byte_len()
+    val m = ident.byte_len()
+    if m > n:
+        return false
+    var i = 0
+    while i + m <= n:
+        if haystack.slice(i, i + m) == ident:
+            val left_ok = if i == 0: true else: not _is_ident_char_byte(haystack.byte_at(i - 1))
+            val right_ok = if i + m == n: true else: not _is_ident_char_byte(haystack.byte_at(i + m))
+            if left_ok and right_ok:
+                return true
+        i = i + 1
+    false
+
+fn _parse_empty_array_var_decl(trimmed: text) -> (text, text):
+    if not trimmed.starts_with("var "):
+        return ("", "")
+    val eq_idx = trimmed.find("=")
+    if eq_idx <= 4:
+        return ("", "")
+    val rhs = trimmed.slice(eq_idx + 1, trimmed.byte_len()).trim()
+    if rhs != "[]":
+        return ("", "")
+    val lhs_decl = trimmed.slice(0, eq_idx).trim()
+    val after_var = lhs_decl.slice(4, lhs_decl.byte_len()).trim()
+    val colon_idx = after_var.find(":")
+    val var_name = if colon_idx > 0: after_var.slice(0, colon_idx).trim() else: after_var
+    if not _is_valid_ident(var_name):
+        return ("", "")
+    (var_name, lhs_decl)
+
+fn _parse_for_in_header(trimmed: text) -> (text, text):
+    if not trimmed.starts_with("for ") or not trimmed.ends_with(":"):
+        return ("", "")
+    val body = trimmed.slice(4, trimmed.byte_len() - 1).trim()
+    val in_idx = body.find(" in ")
+    if in_idx <= 0:
+        return ("", "")
+    val item = body.slice(0, in_idx).trim()
+    val iter_src = body.slice(in_idx + 4, body.byte_len()).trim()
+    if not _is_valid_ident(item) or iter_src == "":
+        return ("", "")
+    (item, iter_src)
+
+fn _parse_builder_push(trimmed: text, builder: text) -> text:
+    val prefix = builder + ".push("
+    if not trimmed.starts_with(prefix) or not trimmed.ends_with(")"):
+        return ""
+    trimmed.slice(prefix.byte_len(), trimmed.byte_len() - 1).trim()
+
+fn _declared_fn_name(trimmed: text) -> text:
+    var rest = ""
+    if trimmed.starts_with("fn "):
+        rest = trimmed.slice(3, trimmed.byte_len())
+    elif trimmed.starts_with("pub fn "):
+        rest = trimmed.slice(7, trimmed.byte_len())
+    elif trimmed.starts_with("me "):
+        rest = trimmed.slice(3, trimmed.byte_len())
+    elif trimmed.starts_with("pub me "):
+        rest = trimmed.slice(7, trimmed.byte_len())
+    else:
+        return ""
+    val paren = rest.find("(")
+    if paren <= 0:
+        return ""
+    rest.slice(0, paren).trim()
+
+fn _scan_repeated_lookup_receiver(trimmed: text, loop_var: text) -> text:
+    val markers = [".contains(", ".index_of(", ".find("]
+    for marker in markers:
+        val pos = trimmed.find(marker)
+        if pos > 0:
+            var start = pos
+            while start > 0 and _is_ident_char_byte(trimmed.byte_at(start - 1)):
+                start = start - 1
+            if start < pos:
+                val recv = trimmed.slice(start, pos)
+                if recv != "" and recv != loop_var and _is_valid_ident(recv):
+                    return recv
+    ""
+
+# reason: path and content are canonical source inputs at the lint analysis boundary
+@allow(primitive_api)
+pub fn collect_perf_profile_findings_v1(
+    path: text,
+    content: text,
+    profile: PerfLintProfile
+) -> [PerfFindingRecordV1]:
+    val max_tier = max_tier_for_perf_profile_v1(profile)
+    val max_rank = _tier_rank(max_tier)
+    val parse_ok = source_parses(path, content)
+    val source_digest = sha256_text(content)
+    var findings: [PerfFindingRecordV1] = []
+
+    if not parse_ok:
+        val partial_ev = BoundEvidenceV1(
+            resource: PerfResourceDimension.Work, expression: CostExprV1.UnknownTerm(reason: "parse_failure"),
+            rendered_expression: "unknown(parse_failure)", relation: BoundRelation.UpperBound,
+            regime: BoundRegime.WorstCase, model_id: "perf_preflight_v1",
+            assumptions: ["source did not parse cleanly"], status: AnalysisResultStatus.Partial,
+            origin: BoundOrigin.Heuristic, provenance_id: "prov:parse_failure"
+        )
+        findings.push(PerfFindingRecordV1(
+            rule_code: "PERF-ANALYSIS-001", stable_occurrence_id: "PERF-ANALYSIS-001@" + path + "#module/0",
+            function_id: "<module>", file: path, primary_span: Span.new(0, 0, 1, 1), related_locations: [],
+            message: "Partial performance analysis: source failed parse preflight; automatic fixes disabled.",
+            evidence: Some(partial_ev), tier: PerfAnalysisTier.T1FastLocal,
+            semantic_fingerprint: source_digest, fix_candidates: []
+        ))
+        return findings
+
+    val lines = content.split("\n")
+    var line_starts: [i64] = []
+    var offset = 0
+    for ln in lines:
+        line_starts.push(offset)
+        offset = offset + ln.byte_len() + 1
+
+    var nogc_fn_names: Dict<text, bool> = {}
+    var pending_nogc = false
+    for ln in lines:
+        val tr = ln.trim()
+        if tr == "@nogc" or tr.starts_with("@nogc("):
+            pending_nogc = true
+        elif tr != "" and not tr.starts_with("#") and not tr.starts_with("@"):
+            val dfn = _declared_fn_name(tr)
+            if dfn != "" and pending_nogc:
+                nogc_fn_names[dfn] = true
+            pending_nogc = false
+
+    val parsed_mod = parse_and_build_module(content, path)
+    var lowering = HirLowering.with_filename(path)
+    val hir_mod = lowering.lower_module(parsed_mod)
+    val perf_reg = default_perf_lint_registry_v1()
+    val sum_cfg = default_perf_summarizer_config_v1()
+    var fn_contexts: Dict<text, HirFnPerfContextV1> = {}
+
+    for fn_hir in hir_mod.functions.values():
+        if not fn_hir.is_extern:
+            val src_nogc = nogc_fn_names.contains_key(fn_hir.name)
+            fn_contexts[fn_hir.name] = build_hir_fn_perf_context_v1(hir_mod, fn_hir, src_nogc)
+            val pipe_res = run_hir_perf_analysis_pipeline_v1(HirPerfPipelineRequestV1(
+                function: fn_hir,
+                file: path,
+                semantic_revision: source_digest,
+                dependency_fingerprint: source_digest,
+                tier: max_tier,
+                complexity_policy: "default",
+                registry: perf_reg,
+                callee_summaries: {},
+                summarizer_config: sum_cfg,
+                contracts: [],
+                empirical_samples: [],
+                deep_hook: default_deep_analyzer_hook_v1(),
+                deep_budget_ms: 25,
+                deep_max_steps: 16,
+                cancelled: false
+            ))
+            for pf in pipe_res.findings:
+                val keep_pf = (
+                    pf.rule_code == "PERF-ALLOC-001" or
+                    pf.rule_code == "PERF-CONTRACT-001" or
+                    pf.rule_code == "PERF-CONTRACT-002" or
+                    (pf.rule_code == "PERF-ANALYSIS-001" and pipe_res.invoked_deep_plugin)
+                )
+                if keep_pf and _tier_rank(pf.tier) <= max_rank:
+                    findings.push(pf)
+
+    var current_fn = "<module>"
+    var idx = 0
+    while idx < lines.len():
+        val raw_line = lines[idx]
+        val trimmed = raw_line.trim()
+        val decl_fn = _declared_fn_name(trimmed)
+        if decl_fn != "":
+            current_fn = decl_fn
+
+        val active_fn_ctx: Option<HirFnPerfContextV1> = if fn_contexts.contains_key(current_fn):
+            Some(fn_contexts[current_fn])
+        else:
+            None
+
+        # T1: Avoidable intermediate materialization (.collect().map / .collect().filter)
+        if trimmed != "" and not trimmed.starts_with("#"):
+            if trimmed.contains(".collect().map(") or trimmed.contains(".collect().filter("):
+                val col_pos = raw_line.find(".collect().")
+                val c_start = line_starts[idx] + (if col_pos >= 0: col_pos else: 0)
+                val c_end = line_starts[idx] + raw_line.byte_len()
+                val mat_span = Span.new(c_start, c_end, idx + 1, (if col_pos >= 0: col_pos + 1 else: 1))
+                val alloc_ev = BoundEvidenceV1(
+                    resource: PerfResourceDimension.AllocCount,
+                    expression: CostExprV1.Const(value: 1),
+                    rendered_expression: "1_intermediate_buffer",
+                    relation: BoundRelation.UpperBound,
+                    regime: BoundRegime.WorstCase,
+                    model_id: "materialization_chain_v1",
+                    assumptions: ["intermediate array is not observed independently"],
+                    status: AnalysisResultStatus.Complete,
+                    origin: BoundOrigin.Inferred,
+                    provenance_id: "prov:alloc:" + (idx + 1).to_text()
+                )
+                findings.push(PerfFindingRecordV1(
+                    rule_code: "PERF-ALLOC-001",
+                    stable_occurrence_id: "PERF-ALLOC-001@" + path + "#" + current_fn + "/" + (idx + 1).to_text(),
+                    function_id: current_fn,
+                    file: path,
+                    primary_span: mat_span,
+                    related_locations: [],
+                    message: "Avoidable intermediate collection materialization before downstream adapter.",
+                    evidence: Some(alloc_ev),
+                    tier: PerfAnalysisTier.T1FastLocal,
+                    semantic_fingerprint: source_digest,
+                    fix_candidates: []
+                ))
+
+        # T1: Typed-HIR verified fresh-builder map idiom + 13-point safety evaluation
+        if idx + 2 < lines.len():
+            val indent0 = _leading_indent(lines[idx])
+            val indent1 = _leading_indent(lines[idx + 1])
+            val indent2 = _leading_indent(lines[idx + 2])
+            if indent0.byte_len() > 0 and indent0 == indent1 and indent2.byte_len() > indent0.byte_len():
+                val (builder, lhs_decl) = _parse_empty_array_var_decl(trimmed)
+                val (loop_var, iter_src) = _parse_for_in_header(lines[idx + 1].trim())
+                if builder != "" and loop_var != "":
+                    val push_expr = _parse_builder_push(lines[idx + 2].trim(), builder)
+                    var single_stmt_loop = push_expr != ""
+                    if single_stmt_loop and idx + 3 < lines.len():
+                        val next_trim = lines[idx + 3].trim()
+                        if next_trim != "" and not next_trim.starts_with("#"):
+                            val indent3 = _leading_indent(lines[idx + 3])
+                            if indent3.byte_len() > indent0.byte_len():
+                                single_stmt_loop = false
+                    if single_stmt_loop:
+                        val span_start = line_starts[idx] + indent0.byte_len()
+                        val span_end = line_starts[idx + 2] + lines[idx + 2].byte_len()
+                        val loop_span = Span.new(span_start, span_end, idx + 1, indent0.byte_len() + 1)
+                        val old_text = content.slice(span_start, span_end)
+                        val new_text = lhs_decl + " = " + iter_src + ".iter().map(\\" + loop_var + ": " + push_expr + ").collect()"
+                        val lexical_aliases = (iter_src == builder) or _contains_ident_token(push_expr, builder)
+
+                        val site_opt: Option<HirBuilderSiteCheckV1> = match active_fn_ctx:
+                            case Some(ctx): verify_hir_builder_in_block_v1(ctx.function.body, ctx, builder, loop_var, iter_src)
+                            case None: None
+                        val fn_is_nogc = match active_fn_ctx:
+                            case Some(ctx): ctx.is_nogc
+                            case None: nogc_fn_names.contains_key(current_fn)
+
+                        var refs_builder = lexical_aliases and _contains_ident_token(push_expr, builder)
+                        var aliases_in = iter_src == builder
+                        var has_inner_ret = false
+                        var has_brk_cont = false
+                        var has_try_throw = false
+                        var has_await_yield = false
+                        var builder_fresh_ok = false
+                        var iter_linear_ok = false
+                        var post_mut = false
+                        var unknown_fx = true
+                        var mutable_capture = false
+
+                        match site_opt:
+                            case Some(site):
+                                refs_builder = refs_builder or site.purity.refs_builder
+                                aliases_in = aliases_in or site.aliases_input
+                                has_inner_ret = site.purity.has_inner_return
+                                has_brk_cont = site.purity.has_break_or_continue
+                                has_try_throw = site.purity.has_try_or_throw
+                                has_await_yield = site.purity.has_await_or_yield
+                                builder_fresh_ok = site.matched_hir_pair and site.builder_is_fresh_array
+                                iter_linear_ok = site.matched_hir_pair and site.iter_is_linear_seq
+                                post_mut = site.post_or_other_mutation
+                                unknown_fx = (not site.matched_hir_pair) or site.purity.has_unknown_call_effect
+                                mutable_capture = site.purity.reads_mutable_or_unknown_var
+                            case None:
+                                pass_do_nothing
+
+                        val resolved_sym_opt: Option<i64> = if builder_fresh_ok and iter_linear_ok:
+                            Some(PERF_LINT_ARRAY_APPEND_SYM)
+                        else:
+                            None
+                        val idiom = RecognizedLoopIdiomV1(
+                            region_id: (idx + 1).to_text(), function_id: current_fn,
+                            semantic_revision: source_digest, dependency_fingerprint: source_digest,
+                            file: path, source_span: loop_span, family: LoopIdiomFamily.Map,
+                            iterator_source_expr: iter_src, induction_var: loop_var, target_binding: builder,
+                            predicate_preview: None, transform_preview: Some(push_expr),
+                            seed_preview: None, step_preview: None, fallback_preview: None,
+                            replacement_preview: new_text, expected_old_text: old_text,
+                            requires_eager_collect: true, has_terminal_consumer: true,
+                            resolved_operation_symbol_id: resolved_sym_opt,
+                            body_references_target_binding: refs_builder,
+                            source_aliases_target_binding: aliases_in,
+                            has_inner_return: has_inner_ret, has_break_or_continue: has_brk_cont,
+                            has_throw_or_try: has_try_throw, has_await_or_yield: has_await_yield
+                        )
+                        var safety_facts = derive_hir_loop_safety_facts_v1(
+                            idiom, fn_is_nogc, source_digest, source_digest
+                        )
+                        if not builder_fresh_ok:
+                            safety_facts.builder_is_fresh_local = false
+                        if not iter_linear_ok:
+                            safety_facts.output_shape_and_duplicates_preserved = false
+                        if post_mut:
+                            safety_facts.external_ref_observes_builder_identity = true
+                        if mutable_capture:
+                            safety_facts.captured_aliases_disjoint = false
+                        if unknown_fx:
+                            safety_facts.runtime_effects.unknown_effect = true
+
+                        val eval_res = evaluate_loop_refactor_safety_v1(idiom, safety_facts)
+                        var finding_to_push = eval_res.finding
+                        if eval_res.all_discharged:
+                            val idiom_ev = BoundEvidenceV1(
+                                resource: PerfResourceDimension.Work,
+                                expression: CostExprV1.Size(param_name: iter_src, measure: SizeMeasureKind.Length),
+                                rendered_expression: "length(" + iter_src + ")",
+                                relation: BoundRelation.UpperBound,
+                                regime: BoundRegime.WorstCase,
+                                model_id: "loop_idiom_map_v1",
+                                assumptions: ["resolved Array/Slice receiver and eager .collect() preserve order"],
+                                status: AnalysisResultStatus.Complete,
+                                origin: BoundOrigin.Inferred,
+                                provenance_id: "prov:idiom:" + (idx + 1).to_text()
+                            )
+                            finding_to_push.evidence = Some(idiom_ev)
+                            finding_to_push.semantic_fingerprint = source_digest
+                        findings.push(finding_to_push)
+
+        # T2: Compositional repeated linear scan inside a traversal (verified Array/Slice receiver only)
+        if max_rank >= 2:
+            val (outer_var, outer_src) = _parse_for_in_header(trimmed)
+            if outer_var != "":
+                val loop_indent = _leading_indent(raw_line)
+                var body_idx = idx + 1
+                while body_idx < lines.len():
+                    val body_line = lines[body_idx]
+                    val body_trim = body_line.trim()
+                    if body_trim != "" and not body_trim.starts_with("#"):
+                        val b_indent = _leading_indent(body_line)
+                        if b_indent.byte_len() <= loop_indent.byte_len():
+                            break
+                        val scanned_recv = _scan_repeated_lookup_receiver(body_trim, outer_var)
+                        if scanned_recv != "" and fn_ctx_has_linear_seq_binding_v1(active_fn_ctx, scanned_recv):
+                            val _cost_ref = HirPerfCostClass.LinearReceiver
+                            val b_start = line_starts[body_idx] + b_indent.byte_len()
+                            val b_end = line_starts[body_idx] + body_line.byte_len()
+                            val scan_span = Span.new(b_start, b_end, body_idx + 1, b_indent.byte_len() + 1)
+                            val outer_span = Span.new(
+                                line_starts[idx] + loop_indent.byte_len(),
+                                line_starts[idx] + raw_line.byte_len(),
+                                idx + 1,
+                                loop_indent.byte_len() + 1
+                            )
+                            val prod_expr = CostExprV1.Multiply(factors: [
+                                CostExprV1.Size(param_name: outer_src, measure: SizeMeasureKind.Length),
+                                CostExprV1.Size(param_name: scanned_recv, measure: SizeMeasureKind.Length)
+                            ])
+                            val scan_ev = BoundEvidenceV1(
+                                resource: PerfResourceDimension.Work,
+                                expression: prod_expr,
+                                rendered_expression: "length(" + outer_src + ") * length(" + scanned_recv + ")",
+                                relation: BoundRelation.UpperBound,
+                                regime: BoundRegime.WorstCase,
+                                model_id: "repeated_scan_v1",
+                                assumptions: [
+                                    "inner lookup scans verified linear Array/Slice receiver on each outer iteration",
+                                    "outer and inner collection lengths remain stable during traversal"
+                                ],
+                                status: AnalysisResultStatus.Complete,
+                                origin: BoundOrigin.Inferred,
+                                provenance_id: "prov:scan:" + (body_idx + 1).to_text()
+                            )
+                            val redesign_cand = LoopIdiomCandidateV1(
+                                rule_id: "PERF-ALG-001", action_id: "perf-alg-index:" + current_fn + ":" + (body_idx + 1).to_text(),
+                                function_id: current_fn, semantic_revision: source_digest, dependency_fingerprint: source_digest,
+                                file: path, source_span: scan_span, family: LoopIdiomFamily.FindSearch,
+                                replacement_preview: "", expected_old_text: body_trim,
+                                applicability: PerfFixApplicability.ReviewRequired, fix_kind: PerfFixKind.AlgorithmChange,
+                                obligations: _perf_blocked_obligations("requires verifying key hashing/equality laws and O(distinct_keys) auxiliary memory"),
+                                resource_tradeoff_note: "Prebuilding a lookup index reduces expected work to O(n+m) with O(distinct_keys) extra memory.",
+                                disabled_reason: None
+                            )
+                            findings.push(PerfFindingRecordV1(
+                                rule_code: "PERF-COST-001", stable_occurrence_id: "PERF-COST-001@" + path + "#" + current_fn + "/" + (body_idx + 1).to_text(),
+                                function_id: current_fn, file: path, primary_span: scan_span,
+                                related_locations: [ProvenanceEdgeV1(
+                                    node_id: "outer:" + (idx + 1).to_text(), role: "outer_traversal", file: path,
+                                    span: outer_span, summary_line: "outer traversal over `" + outer_src + "`", child_ids: []
+                                )],
+                                message: "Modeled work bound is `length(" + outer_src + ") * length(" + scanned_recv + ")`: repeated linear lookup on `" + scanned_recv + "` inside traversal.",
+                                evidence: Some(scan_ev), tier: PerfAnalysisTier.T2Compositional,
+                                semantic_fingerprint: source_digest, fix_candidates: [redesign_cand]
+                            ))
+                            findings.push(PerfFindingRecordV1(
+                                rule_code: "PERF-ALG-001", stable_occurrence_id: "PERF-ALG-001@" + path + "#" + current_fn + "/" + (body_idx + 1).to_text(),
+                                function_id: current_fn, file: path, primary_span: scan_span, related_locations: [],
+                                message: "Index or lookup-set redesign opportunity for repeated scan over `" + scanned_recv + "` (review-required memory tradeoff).",
+                                evidence: Some(scan_ev), tier: PerfAnalysisTier.T2Compositional,
+                                semantic_fingerprint: source_digest, fix_candidates: [redesign_cand]
+                            ))
+                    body_idx = body_idx + 1
+
+        idx = idx + 1
+
+    val req = PerfProfileScanRequestV1(
+        path: path,
+        content: content,
+        profile: profile,
+        max_tier: max_tier,
+        has_parse_or_type_errors: false
+    )
+    for provider in _PERF_FINDING_PROVIDERS_V1:
+        for extra in provider(req):
+            if _tier_rank(extra.tier) <= max_rank:
+                findings.push(extra)
+
+    findings
+
+fn _config_has_explicit_perf_override(config: LintConfig) -> bool:
+    for name in lint_perf_rule_names():
+        if config.levels.has(name):
+            return true
+    false
+
+pub fn run_admitted_perf_analysis_lints_v1(
+    file_config: LintConfig,
+    path: text,
+    content: text
+) -> [LintRunResult]:
+    if not path.ends_with(".spl"):
+        return []
+    if file_config.tier_profile == LintTierProfile.NormalBuild:
+        for name in lint_perf_rule_names():
+            val _ = lint_admit_and_record_v1(file_config, name)
+        return []
+    var effective_profile: Option<PerfLintProfile> = file_config.perf_profile
+    if not effective_profile.? and _config_has_explicit_perf_override(file_config):
+        effective_profile = Some(PerfLintProfile.Perf)
+    match effective_profile:
+        case None:
+            return []
+        case Some(perf_prof):
+            var admitted_by_name: Dict<text, bool> = {}
+            var any_admitted = false
+            for name in lint_perf_rule_names():
+                val ok = lint_admit_and_record_v1(file_config, name)
+                admitted_by_name[name] = ok
+                if ok:
+                    any_admitted = true
+            if not any_admitted:
+                return []
+            val findings = collect_perf_profile_findings_v1(path, content, perf_prof)
+            var out: [LintRunResult] = []
+            for finding in findings:
+                if finding.rule_code == "PERF-FIX-001":
+                    continue
+                val cfg_name = map_lint_code_to_config_name(finding.rule_code)
+                if cfg_name != "" and admitted_by_name.contains_key(cfg_name) and not admitted_by_name[cfg_name]:
+                    continue
+                val base_level = if finding.rule_code.starts_with("PERF-CONTRACT-"):
+                    file_config.get_level(cfg_name)
+                else:
+                    LintLevel.Warn
+                val cat = if finding.rule_code == "PERF-STYLE-001": LintCategory.Style else: LintCategory.Warning
+                var ev_lines: [String] = ["tier=" + finding.tier.name()]
+                match finding.evidence:
+                    case Some(ev):
+                        ev_lines.push("resource=" + ev.resource.name())
+                        ev_lines.push("bound=" + ev.rendered_expression)
+                        ev_lines.push("relation=" + ev.relation.name())
+                        ev_lines.push("regime=" + ev.regime.name())
+                    case None:
+                        val _ = 0
+                val ev_tier = if finding.rule_code.starts_with("PERF-CONTRACT-"):
+                    LintEvidenceTier.TypedProven
+                else:
+                    LintEvidenceTier.ParsedStructural
+                var diag = LintDiag.new(finding.rule_code, base_level, cat, finding.message)
+                    .with_evidence(ev_lines)
+                    .with_evidence_tier(ev_tier)
+                if finding.fix_candidates.len() > 0:
+                    val first_c = finding.fix_candidates[0]
+                    diag = diag.with_fix(first_c.resource_tradeoff_note + " (--fix-safe applicability: " + first_c.applicability.name() + ")")
+                val line_no = if finding.primary_span.line > 0: finding.primary_span.line else: 1
+                val col_no = if finding.primary_span.col > 0: finding.primary_span.col else: 0
+                out.push(LintRunResult.new(path, line_no, col_no, diag))
+            return out
+
+fn _make_exp(
+    code: text, cfg: text, tier: PerfAnalysisTier, cost_name: text,
+    sev: text, pol: text, rat: text, ev: [text], fix: [text]
+) -> PerfRuleExplanationV1:
+    PerfRuleExplanationV1(
+        rule_code: code, config_name: cfg, tier: tier, cost_tier_name: cost_name,
+        default_severity: sev, escalation_policy: pol, rationale: rat,
+        evidence_requirements: ev, safe_fix_conditions: fix
+    )
+
+fn _all_perf_rule_explanations_v1() -> [PerfRuleExplanationV1]:
+    [
+        _make_exp(
+            "PERF-STYLE-001", "perf_loop_idiom_style", PerfAnalysisTier.T1FastLocal, "Medium",
+            "advisory (hint; never a correctness error)",
+            "Remains advisory across profiles; imperative loops remain first-class.",
+            "Identifies simple single-pass builder or accumulator loops that have a direct collection-expression equivalent (`map`, `filter`, `fold`) without claiming a runtime speedup.",
+            ["Resolved collection receiver and builder operation identity", "Single-exit loop structure with preserved eager consumption"],
+            ["Fresh non-escaping local builder with zero input/output aliasing", "All 13 semantic safety obligations discharged at current source and dependency revisions", "Explicit `--fix-safe` invocation and clean post-edit reparse"]
+        ),
+        _make_exp(
+            "PERF-COST-001", "perf_repeated_scan_cost", PerfAnalysisTier.T2Compositional, "High",
+            "warn (exception_policy: reason_required)",
+            "Warn by default across standard profiles; scoped `@allow(perf_repeated_scan_cost)` requires `# reason:`.",
+            "Detects a linear scan, membership lookup, or linear helper called repeatedly inside an enclosing traversal, producing superlinear `O(n*m)` modeled work.",
+            ["Parameterized outer iteration count and inner linear receiver/callee summary", "Explicit size variables (`length(outer)`, `length(inner)`) and stability assumptions"],
+            ["No automatic bulk rewrite by default; index precomputation changes auxiliary memory and requires hash/equality verification (`ReviewRequired`)"]
+        ),
+        _make_exp(
+            "PERF-COST-002", "perf_complexity_bound_increase", PerfAnalysisTier.T2Compositional, "High",
+            "warn (exception_policy: reason_required)",
+            "Warn on source-attributable symbolic bound growth under compatible analyzer/model versions.",
+            "Reports functions whose inferred symbolic resource bound increased relative to a compatible baseline without mislabeling model upgrades as code regressions.",
+            ["Matching analyzer/model configuration fingerprint and comparable size parameters", "Provenance root identifying the changed loop or callee summary"],
+            ["Advisory/diagnostic finding only; requires human inspection of algorithmic change"]
+        ),
+        _make_exp(
+            "PERF-ALLOC-001", "perf_avoidable_materialization", PerfAnalysisTier.T1FastLocal, "Medium",
+            "warn (moderate: advisory)",
+            "Advisory in `moderate`; `warn` in `default`/`strict`/`robust`.",
+            "Flags avoidable intermediate collection allocations (such as `.collect()` immediately feeding another adapter) or repeated accumulator copying.",
+            ["Modeled allocation count or cumulative allocated bytes on intermediate stage", "Proof that intermediate collection identity is unobservable before offering automatic fusion"],
+            ["Unobservable intermediate identity, preserved evaluation order, and preserved terminal materialization"]
+        ),
+        _make_exp(
+            "PERF-ALG-001", "perf_algorithm_redesign", PerfAnalysisTier.T2Compositional, "High",
+            "advisory",
+            "Contextual review suggestion; never promoted to automatic bulk `--fix-safe`.",
+            "Surfaces index, `count_by`/`group_by`, or grouped-join redesign candidates while disclosing expected-vs-worst-case and auxiliary-memory tradeoffs.",
+            ["Output shape preservation (grouped vs flat) and duplicate/order semantics", "Disclosed auxiliary memory growth `O(distinct_keys)`"],
+            ["`ReviewRequired` by design; never auto-applied in `--fix-safe` batch runs"]
+        ),
+        _make_exp(
+            "PERF-CONTRACT-001", "perf_resource_contract_refuted", PerfAnalysisTier.T2Compositional, "High",
+            "warn (strict/robust/critical/verified: deny; reason_required)",
+            "Denied in `strict`, `robust`, `critical`, and `verified` profiles.",
+            "Reports an explicit resource or complexity contract refuted by a lower-bound argument or concrete operation-budget witness (never merely a loose upper bound).",
+            ["Refuting witness or lower-bound evidence under the declared resource dimension and regime"],
+            ["No automatic fix; update the algorithm or revise the declared contract with justification"]
+        ),
+        _make_exp(
+            "PERF-CONTRACT-002", "perf_resource_contract_unproved", PerfAnalysisTier.T2Compositional, "High",
+            "warn (verified: deny; reason_required)",
+            "Warns in standard profiles; denies only in `verified` profile where proof closure is mandatory.",
+            "Distinguishes `Unproved` from `Refuted`: the analyzer could not establish the declared resource contract within available models or budget.",
+            ["Explicit unresolved term, unknown callee summary, or exhausted analysis budget"],
+            ["No automatic fix; supply missing callee contract/model or refine loop structure"]
+        ),
+        _make_exp(
+            "PERF-ANALYSIS-001", "perf_analysis_coverage_note", PerfAnalysisTier.T1FastLocal, "Medium",
+            "advisory (verified: warn)",
+            "Coverage note by default; promoted to `warn` in `verified` profile.",
+            "Records unknown calls, unsupported constructs, parse recovery, or budget expiration honestly instead of fabricating zero/constant cost.",
+            ["Explicit `Partial`, `Unknown`, or `Cancelled` status with reason"],
+            ["Automatic fixes are strictly disabled whenever analysis coverage is incomplete"]
+        ),
+        _make_exp(
+            "PERF-FIX-001", "perf_fix_blocked_precondition", PerfAnalysisTier.T1FastLocal, "Medium",
+            "allow (disabled action carrier)",
+            "Always `allow` in lint output; surfaces unmet safety obligations to code-action / fix inspectors without warning on valid loops.",
+            "Explains why a recognized loop idiom cannot be rewritten automatically (e.g. aliasing, partial builder observation, effectful callback, or stale revision).",
+            ["Specific unmet `SafetyObligationKind` or revision mismatch reason"],
+            ["Disabled (`Unavailable`) until all blocking preconditions are discharged"]
+        )
+    ]
+
+# reason: rule codes and config names are canonical text identifiers at the CLI explain boundary
+@allow(primitive_api)
+pub fn perf_rule_explanation_v1(rule_code_or_name: text) -> Option<PerfRuleExplanationV1>:
+    val needle = rule_code_or_name.trim()
+    val upper = needle.upper()
+    val lower = needle.lower()
+    for exp in _all_perf_rule_explanations_v1():
+        if exp.rule_code == upper or exp.config_name == lower:
+            return Some(exp)
+    None
+
+# reason: CLI --explain human text output
+@allow(primitive_api)
+pub fn format_perf_rule_explanation_text_v1(exp: PerfRuleExplanationV1) -> text:
+    var lines: [text] = [
+        exp.rule_code + " (" + exp.config_name + ")",
+        "Analysis Tier: " + exp.tier.name() + " (LintCostTier: " + exp.cost_tier_name + ")",
+        "Default Severity: " + exp.default_severity,
+        "Severity Policy: " + exp.escalation_policy,
+        "Rationale: " + exp.rationale,
+        "Evidence Requirements:"
+    ]
+    for ev in exp.evidence_requirements:
+        lines.push("  - " + ev)
+    lines.push("Safe-fix Conditions:")
+    for cond in exp.safe_fix_conditions:
+        lines.push("  - " + cond)
+    lines.join("\n")
+
+# reason: CLI --explain JSON output
+@allow(primitive_api)
+pub fn format_perf_rule_explanation_json_v1(exp: PerfRuleExplanationV1) -> text:
+    var ev_items: [text] = []
+    for ev in exp.evidence_requirements:
+        ev_items.push(json_string(ev))
+    var fix_items: [text] = []
+    for cond in exp.safe_fix_conditions:
+        fix_items.push(json_string(cond))
+    json_object([
+        json_pair("type", json_string("lint-rule-explanation")),
+        json_pair("code", json_string(exp.rule_code)),
+        json_pair("name", json_string(exp.config_name)),
+        json_pair("tier", json_string(exp.tier.name())),
+        json_pair("cost_tier", json_string(exp.cost_tier_name)),
+        json_pair("default_severity", json_string(exp.default_severity)),
+        json_pair("escalation_policy", json_string(exp.escalation_policy)),
+        json_pair("rationale", json_string(exp.rationale)),
+        json_pair("evidence_requirements", json_array(ev_items)),
+        json_pair("safe_fix_conditions", json_array(fix_items))
+    ])
+
+# Pure parser for `git status --porcelain` output: extracts modified, added,
+# untracked, and renamed-destination `.spl` paths while skipping deleted files.
+# reason: git porcelain stdout is raw text and returns normalized relative path strings
+@allow(primitive_api)
+pub fn parse_git_status_changed_spl_files_v1(porcelain_output: text) -> [text]:
+    var seen: Dict<text, bool> = {}
+    var paths: [text] = []
+    for raw_line in porcelain_output.split("\n"):
+        var line = raw_line
+        if line.ends_with("\r"):
+            line = line.slice(0, line.byte_len() - 1)
+        if line.byte_len() < 4:
+            continue
+        val status_xy = line.slice(0, 2)
+        if status_xy == "D " or status_xy == " D" or status_xy == "DD":
+            continue
+        var path_part = line.slice(3, line.byte_len()).trim()
+        val arrow_idx = path_part.find(" -> ")
+        if arrow_idx >= 0:
+            path_part = path_part.slice(arrow_idx + 4, path_part.byte_len()).trim()
+        if path_part.starts_with("\"") and path_part.ends_with("\"") and path_part.byte_len() >= 2:
+            path_part = path_part.slice(1, path_part.byte_len() - 1)
+        path_part = path_part.replace("\\", "/")
+        if path_part.ends_with(".spl") and not seen.contains_key(path_part):
+            seen[path_part] = true
+            paths.push(path_part)
+    paths.sort()
+    paths
+
+export PerfProfileScanRequestV1, PerfRuleExplanationV1
+export register_perf_finding_provider_v1, clear_perf_finding_providers_v1
+export max_tier_for_perf_profile_v1, collect_perf_profile_findings_v1
+export run_admitted_perf_analysis_lints_v1
+export perf_rule_explanation_v1, format_perf_rule_explanation_text_v1, format_perf_rule_explanation_json_v1
+export parse_git_status_changed_spl_files_v1

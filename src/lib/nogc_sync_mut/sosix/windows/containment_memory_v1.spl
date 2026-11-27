@@ -1,0 +1,50 @@
+# Windows memory-cap evidence over lane E's job-object probe (architecture 4.2).
+# Its helpers are non-pub, so they are not public API of the variant. Public surface is
+# windows/containment_v1.
+use std.common.contracts.sosix.containment_v1.{SosixContainFlagV1}
+use std.common.crypto.sha256.{sha256_text}
+use std.nogc_sync_mut.io.windows_memory_cap_probe_v1.{WindowsJobMemoryBytesV1, WindowsProbeTimeoutMsV1, WindowsMemoryCapProbeRequestV1, WindowsMemoryCapObservationV1, WindowsMemoryCapVerdictV1, windows_memory_cap_probe_run_v1, windows_memory_cap_verdict_v1}
+use std.nogc_sync_mut.io.windows_process_owner.{windows_process_file_digest_v1}
+use std.nogc_sync_mut.sosix.containment_types_v1.{SosixContainMemoryProbeV1, SosixContainMemoryEvidenceV1}
+
+fn _memory_refused_v1(reason: text) -> SosixContainMemoryEvidenceV1:
+    SosixContainMemoryEvidenceV1(enforced: SosixContainFlagV1(false), evidence_digest: "", reason: reason)
+
+fn _memory_run_v1(probe: SosixContainMemoryProbeV1, tag: text, args: [text], cap: i64) -> Result<WindowsMemoryCapObservationV1, text>:
+    val stem = probe.work_dir.replace("\\", "/") + "/sosix_memcap_" + tag
+    windows_memory_cap_probe_run_v1(WindowsMemoryCapProbeRequestV1(program: probe.program, args: args,
+        directory: probe.work_dir, stdout_path: stem + ".out", stderr_path: stem + ".err",
+        cap: WindowsJobMemoryBytesV1(cap), timeout_ms: WindowsProbeTimeoutMsV1(probe.wall.value)))
+
+fn _memory_identity_v1(under: WindowsMemoryCapObservationV1, over: WindowsMemoryCapObservationV1, baseline: WindowsMemoryCapObservationV1, program_digest: text) -> text:
+    var lines = ["sosix-contain-memory-v1", program_digest]
+    for observed in [under, over, baseline]:
+        lines = lines.push(observed.cap.value.to_string() + ":" + observed.peak.value.to_string() + ":" + observed.exit_code.value.to_string() + ":" + observed.stdout_text)
+    sha256_text(lines.join("\n"))
+
+# Lane E's under-cap, over-cap and uncapped-baseline runs; enforced only for its Enforced verdict.
+fn _memory_evidence_v1(probe: SosixContainMemoryProbeV1) -> SosixContainMemoryEvidenceV1:
+    if probe.cap.value <= 0 or probe.program == "" or probe.work_dir == "" or probe.wall.value <= 0:
+        return _memory_refused_v1("memory-probe-request-invalid")
+    if probe.under_args.len() == 0 or probe.over_args.len() == 0:
+        return _memory_refused_v1("memory-probe-request-invalid")
+    val program_digest = windows_process_file_digest_v1(probe.program)
+    if program_digest == "" or program_digest != probe.program_digest:
+        return _memory_refused_v1("memory-probe-digest-mismatch")
+    val under = match _memory_run_v1(probe, "under", probe.under_args, probe.cap.value):
+        Ok(value): value
+        Err(reason): return _memory_refused_v1("memory-probe-run-failed: " + reason)
+    val over = match _memory_run_v1(probe, "over", probe.over_args, probe.cap.value):
+        Ok(value): value
+        Err(reason): return _memory_refused_v1("memory-probe-run-failed: " + reason)
+    val baseline = match _memory_run_v1(probe, "base", probe.over_args, 0):
+        Ok(value): value
+        Err(reason): return _memory_refused_v1("memory-probe-run-failed: " + reason)
+    val digest = _memory_identity_v1(under, over, baseline, program_digest)
+    match windows_memory_cap_verdict_v1(under, over, baseline):
+        WindowsMemoryCapVerdictV1.Enforced:
+            SosixContainMemoryEvidenceV1(enforced: SosixContainFlagV1(true), evidence_digest: digest, reason: "")
+        WindowsMemoryCapVerdictV1.NotEnforced(reason): SosixContainMemoryEvidenceV1(enforced: SosixContainFlagV1(false), evidence_digest: digest, reason: "memory-cap-not-enforced: " + reason)
+        WindowsMemoryCapVerdictV1.Inconclusive(reason): SosixContainMemoryEvidenceV1(enforced: SosixContainFlagV1(false), evidence_digest: "", reason: "memory-cap-inconclusive: " + reason)
+
+export _memory_evidence_v1

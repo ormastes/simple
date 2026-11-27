@@ -1,0 +1,96 @@
+# SOURCE_AUTHORED_NOT_RUN. Actual native Linux observation provider, /usr/bin/
+# printf and sleep required, on the actual Linux main thread with genuine
+# procfs origin. Missing setup FAILS; no skip/scripted receipt.
+use std.spec.*
+use std.nogc_sync_mut.io.process_capture_evidence_v1.*
+
+var capture_linux_owner_v1: Option<ProcessCaptureOwnerV1> = nil
+
+fn capture_linux_cleanup_v1() -> bool:
+    for turn in 0..8:
+        if capture_linux_owner_v1.is_none(): return true
+        val closed = process_capture_step_v1(capture_linux_owner_v1.unwrap(), true)
+        capture_linux_owner_v1 = closed.owner
+    capture_linux_owner_v1.is_none()
+
+fn capture_linux_begin_v1(command: text, args: [text], limit: i64) -> Result<ProcessCaptureOwnerV1, text>:
+    if capture_linux_owner_v1.is_some() and not capture_linux_cleanup_v1():
+        return Err("prior genuine capture owner cleanup remains retained")
+    val started = process_capture_begin_v1(ProcessCaptureRequestV1(command: command, args: args,
+        timeout_ms: 1000, stdout_limit: limit, stderr_limit: 4096, term_grace_ms: 500))
+    capture_linux_owner_v1 = started.owner
+    if started.error != "" or started.owner.is_none():
+        capture_linux_cleanup_v1()
+        return Err("required native Linux capture setup unavailable: {started.error}")
+    Ok(started.owner.unwrap())
+
+describe "Actual Linux observation-backed capture prerequisite specimens":
+    after_each:
+        expect(capture_linux_cleanup_v1()).to_equal(true)
+
+    it "preserves real EOF and counts alongside exact bytes and actual CLI result":
+        step("Execute an actual finite readonly printf under the existing observation owner")
+        val owner = capture_linux_begin_v1("/usr/bin/printf", ["%s", "capture-native-v1"], 4096).unwrap()
+        val actual = process_capture_step_v1(owner)
+        capture_linux_owner_v1 = actual.owner
+        expect(actual.error).to_equal("")
+        expect(actual.owner.is_none()).to_equal(true)
+        val evidence = actual.evidence.unwrap()
+        expect(evidence.process_result_v1().unwrap().exit_code).to_equal(0)
+        expect(evidence.output_complete_v1()).to_equal(Some(true))
+        expect(evidence.stdout_eof_v1().is_none()).to_equal(true)
+        expect(evidence.reaped_v1()).to_equal(Some(true))
+        expect(evidence.native_error_v1()).to_equal(Some(0))
+        expect(evidence.retirement_confirmed_v1()).to_equal(true)
+        val count = "capture-native-v1".byte_len()
+        expect(evidence.stdout_seen_v1()).to_equal(Some(count))
+        expect(evidence.stdout_kept_v1()).to_equal(Some(count))
+        expect(evidence.stdout_delivered_v1()).to_equal(count)
+        expect(evidence.stdout_truncated_v1()).to_equal(Some(false))
+        var returned = evidence.stdout_bytes_v1()
+        returned[0] = 0u8
+        expect(evidence.stdout_bytes_v1()[0]).to_equal(99u8)
+
+    it "makes copied owners share native completion and its first real decode diagnostic":
+        step("Collect genuine non-UTF8 printf bytes then retry the copied canonical owner")
+        val owner = capture_linux_begin_v1("/usr/bin/printf", ["%b", "\\0377"], 4096).unwrap()
+        val copied = owner
+        val actual = process_capture_step_v1(owner)
+        capture_linux_owner_v1 = actual.owner
+        expect(actual.owner.is_none()).to_equal(true)
+        expect(actual.error).to_equal("process-capture-output-not-utf8")
+        expect(actual.evidence.unwrap().stdout_bytes_v1()).to_equal([255u8])
+        expect(actual.evidence.unwrap().retirement_confirmed_v1()).to_equal(true)
+        expect(actual.evidence.unwrap().process_result_v1().is_none()).to_equal(true)
+        val retried = process_capture_step_v1(copied)
+        capture_linux_owner_v1 = retried.owner
+        expect(retried.owner.is_none()).to_equal(true)
+        expect(retried.evidence.is_none()).to_equal(true)
+        expect(retried.error).to_equal(actual.error)
+        val canceled_alias = process_capture_step_v1(copied, true)
+        capture_linux_owner_v1 = canceled_alias.owner
+        expect(canceled_alias.owner.is_none()).to_equal(true)
+        expect(canceled_alias.evidence.is_none()).to_equal(true)
+        expect(canceled_alias.error).to_equal(actual.error)
+
+    it "keeps actual truncated bytes and never fabricates a complete transcript":
+        step("Apply a four-byte native stdout bound to a longer actual printf")
+        val owner = capture_linux_begin_v1("/usr/bin/printf", ["%s", "output-over-the-bound"], 4).unwrap()
+        val actual = process_capture_step_v1(owner)
+        capture_linux_owner_v1 = actual.owner
+        val evidence = actual.evidence.unwrap()
+        expect(evidence.stdout_truncated_v1()).to_equal(Some(true))
+        expect(evidence.process_result_v1().unwrap().limit_exceeded).to_equal(true)
+        expect(evidence.stdout_delivered_v1()).to_equal(4)
+        # No assertion replaces actual output_complete with exit/limit inference.
+
+    it "cancels and retires the actual owner rather than adopting a PID":
+        step("Cancel a genuine bounded sleep through the existing same-owner cancellation bridge")
+        val owner = capture_linux_begin_v1("/usr/bin/sleep", ["30"], 4096).unwrap()
+        val canceled = process_capture_step_v1(owner, true)
+        capture_linux_owner_v1 = canceled.owner
+        val evidence = canceled.evidence.unwrap()
+        expect(evidence.cancel_requested_v1()).to_equal(Some(true))
+        expect(evidence.reaped_v1()).to_equal(Some(true))
+        expect(evidence.retirement_confirmed_v1()).to_equal(true)
+        expect(canceled.owner.is_none()).to_equal(true)

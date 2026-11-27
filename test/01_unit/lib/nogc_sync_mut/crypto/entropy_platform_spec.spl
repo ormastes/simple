@@ -1,0 +1,36 @@
+# Hosted platform entropy owner: rt_entropy_fill must be runtime-backed by the
+# OS CSPRNG and fail closed (nil -> Err), never return zero-filled bytes.
+use std.spec
+use std.nogc_sync_mut.crypto.entropy_platform.{entropy_platform_bytes, entropy_platform_raw_for_test}
+
+fn _any_nonzero(bytes: [u8]) -> bool:
+    var i: u64 = 0u64
+    while i < bytes.len():
+        if bytes[i] != 0u8:
+            return true
+        i = i + 1u64
+    false
+
+describe "platform entropy rt_entropy_fill backing":
+    it "returns exactly the requested number of bytes":
+        val r = entropy_platform_bytes(32u64)
+        expect(r.is_ok()).to_equal(true)
+        expect(r.unwrap().len()).to_equal(32u64)
+        expect(entropy_platform_bytes(1u64).unwrap().len()).to_equal(1u64)
+        expect(entropy_platform_bytes(4096u64).unwrap().len()).to_equal(4096u64)
+
+    it "returns non-zero output":
+        expect(_any_nonzero(entropy_platform_bytes(32u64).unwrap())).to_equal(true)
+
+    it "returns different bytes on two calls":
+        val a = entropy_platform_bytes(32u64).unwrap()
+        val b = entropy_platform_bytes(32u64).unwrap()
+        expect(a == b).to_equal(false)
+
+    it "handles a zero-length raw fill as an empty success":
+        val raw = entropy_platform_raw_for_test(0u64)
+        expect(raw.is_ok()).to_equal(true)
+        expect(raw.unwrap().len()).to_equal(0u64)
+
+    it "rejects a zero-length owner request instead of returning empty bytes":
+        expect(entropy_platform_bytes(0u64).is_err()).to_equal(true)

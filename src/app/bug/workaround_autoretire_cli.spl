@@ -1,0 +1,44 @@
+# Thin I/O wrapper for `bug-resolve --auto-retire` and `--recover` / `--recover-apply`:
+# `--auto-retire` reads the stored workaround index only; `--recover` previews and
+# `--recover-apply` delegates to `app.bug.workaround_recover`.
+use app.bug.workaround_store.{load_workarounds}
+use app.bug.closure_gate.{BugIdV1}
+use app.bug.workaround_autoretire.{AutoRetireVerdictV1, workaround_auto_retire_report_v1,
+    workaround_auto_retire_lines_v1}
+use app.bug.workaround_recover.{default_workaround_recover_options, workaround_recover_run,
+    workaround_recover_render_sdn, workaround_recover_render_json}
+
+pub fn workaround_auto_retire_print_v1(bug_id: BugIdV1) -> AutoRetireVerdictV1:
+    match load_workarounds():
+        case Ok(index):
+            val report = workaround_auto_retire_report_v1(index, bug_id)
+            for line in workaround_auto_retire_lines_v1(report):
+                print line
+            report.verdict
+        case Err(reason):
+            print "auto-retire: {bug_id.value}: workaround index unavailable ({reason})"
+            AutoRetireVerdictV1.IndexIncomplete
+
+@allow(primitive_api)  # CLI wrapper boundary forwarding bug-resolve flags into workaround_recover_run
+pub fn workaround_recover_for_bug_cli_v1(
+    bug_id: BugIdV1,
+    fix_commit: text,
+    apply: bool,
+    allow_stage2_gated: bool,
+    link_recover: bool,
+    as_json: bool
+) -> i64:
+    var opts = default_workaround_recover_options()
+    opts.bug_ids = [bug_id.value]
+    opts.fix_commit = fix_commit
+    opts.apply = apply
+    opts.allow_stage2_gated = allow_stage2_gated
+    opts.link_recover = link_recover
+    opts.as_json = as_json
+    val result = workaround_recover_run(opts)
+    if as_json:
+        print workaround_recover_render_json(result)
+    else:
+        print workaround_recover_render_sdn(result)
+    if result.ok: 0 else: 1
+

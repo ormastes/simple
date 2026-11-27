@@ -1,0 +1,202 @@
+"""
+SCVN-B03 storage acknowledgement contract. The user-facing snapshot path must
+return a failure when real object, WAL or mutable-head staging is blocked.
+Retained on-disk head/workspace bytes supply independent negative evidence.
+"""
+# @req REQ-SCVN-B03-READ, REQ-SCVN-B03-PUBLISH
+use std.spec.{describe, it, expect}
+use std.spec.step
+use app.io.mod (process_run, file_write, file_read, file_exists, file_delete, dir_create)
+use std.nogc_sync_mut.io.dir_ops.{dir_remove}
+use std.scv.store.{scv_init_repo, scv_current_op, scv_read_workspace_commit, scv_restore_commit}
+use std.scv.maintenance.{scv_export_tree}
+use std.scv.working_copy.{scv_snapshot}
+use std.scv.journal.{scv_wal_recover}
+
+fn setup_scv_fixture() -> text:
+    val (out, err, code) = process_run("mktemp", ["-d", "/tmp/scv-publication.XXXXXX"])
+    expect(code).to_equal(0)
+    expect(err).to_equal("")
+    val root = out.trim()
+    expect(scv_init_repo(root)).to_equal("initialized\n")
+    root
+
+fn freeze_scv_candidate(root: text) -> (text, text):
+    (file_read("{root}/.scv/HEAD_OP"), file_read("{root}/.scv/meta/workspaces.sdn"))
+
+fn exercise_scv_operation(root: text) -> text:
+    scv_snapshot(root)
+
+fn collect_scv_evidence(root: text) -> (text, text):
+    (file_read("{root}/.scv/HEAD_OP"), file_read("{root}/.scv/meta/workspaces.sdn"))
+
+fn check_exact_subject(before: (text, text), after: (text, text)):
+    expect(after).to_equal(before)
+
+describe "SCVN-B03 snapshot publication failures":
+    it "does not acknowledge a snapshot whose chunk cannot be staged":
+        step("setup")
+        val root = setup_scv_fixture()
+        expect(file_write("{root}/abc", "abc")).to_equal(true)
+        step("capture")
+        val before = freeze_scv_candidate(root)
+        val chunk = "sha256_ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        expect(dir_remove("{root}/.scv/objects/chunks", false)).to_equal(true)
+        expect(file_write("{root}/.scv/objects/chunks", "blocked staging parent")).to_equal(true)
+        step("exercise")
+        val outcome = exercise_scv_operation(root)
+        step("evidence")
+        val after = collect_scv_evidence(root)
+        step("assert")
+        expect(outcome).to_start_with("ERROR cannot publish chunk")
+        check_exact_subject(before, after)
+        expect(file_exists("{root}/.scv/objects/chunks/{chunk}.blob")).to_equal(false)
+
+    it "does not acknowledge a snapshot whose durable WAL record cannot be staged":
+        step("setup")
+        val root = setup_scv_fixture()
+        expect(file_write("{root}/abc", "abc")).to_equal(true)
+        step("capture")
+        val before = freeze_scv_candidate(root)
+        dir_create("{root}/.scv/journal/wal.log.tmp", true)
+        step("exercise")
+        val outcome = exercise_scv_operation(root)
+        step("evidence")
+        val after = collect_scv_evidence(root)
+        step("assert")
+        expect(outcome).to_equal("ERROR cannot begin snapshot WAL\n")
+        check_exact_subject(before, after)
+
+    it "does not acknowledge a head write failure or fall back to overwriting it":
+        step("setup")
+        val root = setup_scv_fixture()
+        expect(file_write("{root}/abc", "abc")).to_equal(true)
+        step("capture")
+        val before = freeze_scv_candidate(root)
+        dir_create("{root}/.scv/HEAD_OP.tmp", true)
+        step("exercise")
+        val outcome = exercise_scv_operation(root)
+        step("evidence")
+        val after = collect_scv_evidence(root)
+        val wal = file_read("{root}/.scv/journal/wal.log")
+        step("assert")
+        expect(outcome).to_equal("ERROR cannot publish operation head\n")
+        check_exact_subject(before, after)
+        expect(wal).to_contain("BEGIN op=")
+        expect(wal.contains("COMMIT op=")).to_equal(false)
+        expect(wal.contains("ABORT op=")).to_equal(false)
+
+    it "leaves failed workspace publication pending and rejects unsuccessful recovery":
+        step("setup")
+        val root = setup_scv_fixture()
+        expect(file_write("{root}/abc", "abc")).to_equal(true)
+        step("capture")
+        val before = freeze_scv_candidate(root)
+        dir_create("{root}/.scv/meta/workspaces.sdn.tmp", true)
+        step("exercise")
+        val outcome = exercise_scv_operation(root)
+        val recovery = scv_wal_recover(root)
+        step("evidence")
+        val (head_after, workspace_after) = collect_scv_evidence(root)
+        val (head_before, workspace_before) = before
+        val wal = file_read("{root}/.scv/journal/wal.log")
+        step("assert")
+        expect(outcome).to_equal("ERROR cannot publish operation workspace\n")
+        expect(head_after == head_before).to_equal(false)
+        expect(workspace_after).to_equal(workspace_before)
+        expect(recovery).to_equal("ERROR unresolved WAL: operation head differs from recorded pre-state and has no exact candidate binding; state preserved\n")
+        expect(wal.contains("COMMIT op=")).to_equal(false)
+        expect(wal.contains("ABORT op=")).to_equal(false)
+
+describe "SCVN-B03 worktree neighbor preservation":
+    it "restores tracked bytes without overwriting untracked tmp or lock neighbors":
+        step("setup")
+        val root = setup_scv_fixture()
+        expect(file_write("{root}/a", "admitted bytes")).to_equal(true)
+        expect(scv_snapshot(root)).to_start_with("snapshot ")
+        step("capture")
+        val commit = scv_read_workspace_commit(root)
+        expect(file_write("{root}/a", "changed bytes")).to_equal(true)
+        expect(file_write("{root}/a.tmp", "valuable temporary data")).to_equal(true)
+        expect(file_write("{root}/a.lock", "valuable lock data")).to_equal(true)
+        step("exercise")
+        val outcome = scv_restore_commit(root, commit)
+        step("evidence")
+        val restored = file_read("{root}/a")
+        val temporary = file_read("{root}/a.tmp")
+        val lock_data = file_read("{root}/a.lock")
+        step("assert")
+        expect(outcome).to_equal("restored 1\n")
+        expect(restored).to_equal("admitted bytes")
+        expect(temporary).to_equal("valuable temporary data")
+        expect(lock_data).to_equal("valuable lock data")
+
+    it "exports tracked bytes without overwriting existing tmp or lock neighbors":
+        step("setup")
+        val root = setup_scv_fixture()
+        expect(file_write("{root}/a", "admitted bytes")).to_equal(true)
+        expect(scv_snapshot(root)).to_start_with("snapshot ")
+        val destination = "{root}/out"
+        dir_create(destination, true)
+        step("capture")
+        expect(file_write("{destination}/a", "old destination")).to_equal(true)
+        expect(file_write("{destination}/a.tmp", "valuable temporary data")).to_equal(true)
+        expect(file_write("{destination}/a.lock", "valuable lock data")).to_equal(true)
+        step("exercise")
+        val outcome = scv_export_tree(root, destination)
+        step("evidence")
+        val exported = file_read("{destination}/a")
+        val temporary = file_read("{destination}/a.tmp")
+        val lock_data = file_read("{destination}/a.lock")
+        step("assert")
+        expect(outcome).to_equal("exported 1\n")
+        expect(exported).to_equal("admitted bytes")
+        expect(temporary).to_equal("valuable temporary data")
+        expect(lock_data).to_equal("valuable lock data")
+
+    it "retains restore neighbors and directory contents when destination replacement fails":
+        step("setup")
+        val root = setup_scv_fixture()
+        expect(file_write("{root}/a", "admitted bytes")).to_equal(true)
+        expect(scv_snapshot(root)).to_start_with("snapshot ")
+        step("capture")
+        val commit = scv_read_workspace_commit(root)
+        expect(file_delete("{root}/a")).to_equal(true)
+        dir_create("{root}/a", true)
+        expect(file_write("{root}/a/marker", "retained directory")).to_equal(true)
+        expect(file_write("{root}/a.tmp", "valuable temporary data")).to_equal(true)
+        expect(file_write("{root}/a.lock", "valuable lock data")).to_equal(true)
+        step("exercise")
+        val outcome = scv_restore_commit(root, commit)
+        step("evidence")
+        val marker = file_read("{root}/a/marker")
+        val temporary = file_read("{root}/a.tmp")
+        val lock_data = file_read("{root}/a.lock")
+        step("assert")
+        expect(outcome).to_equal("ERROR cannot restore file: a\n")
+        expect(marker).to_equal("retained directory")
+        expect(temporary).to_equal("valuable temporary data")
+        expect(lock_data).to_equal("valuable lock data")
+
+    it "retains export neighbors and directory contents when destination replacement fails":
+        step("setup")
+        val root = setup_scv_fixture()
+        expect(file_write("{root}/a", "admitted bytes")).to_equal(true)
+        expect(scv_snapshot(root)).to_start_with("snapshot ")
+        val destination = "{root}/out"
+        dir_create("{destination}/a", true)
+        step("capture")
+        expect(file_write("{destination}/a/marker", "retained directory")).to_equal(true)
+        expect(file_write("{destination}/a.tmp", "valuable temporary data")).to_equal(true)
+        expect(file_write("{destination}/a.lock", "valuable lock data")).to_equal(true)
+        step("exercise")
+        val outcome = scv_export_tree(root, destination)
+        step("evidence")
+        val marker = file_read("{destination}/a/marker")
+        val temporary = file_read("{destination}/a.tmp")
+        val lock_data = file_read("{destination}/a.lock")
+        step("assert")
+        expect(outcome).to_equal("ERROR cannot export file: a\n")
+        expect(marker).to_equal("retained directory")
+        expect(temporary).to_equal("valuable temporary data")
+        expect(lock_data).to_equal("valuable lock data")

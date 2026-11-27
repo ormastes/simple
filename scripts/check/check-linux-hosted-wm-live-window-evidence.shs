@@ -12,6 +12,7 @@ HOSTED_BIN="${HOSTED_WM_ARTIFACT:-$BUILD_DIR/hosted-wm}"
 WINT_LIB="${SIMPLE_WM_WINIT_LIB:-src/runtime/spl_winit/target/release/libspl_winit.so}"
 RUNTIME_LIB="${SIMPLE_WM_RUNTIME_LIB:-}"
 RUNTIME_LIB_EXPECTED_SHA256="${SIMPLE_WM_RUNTIME_LIB_SHA256:-}"
+FORBIDDEN_RUNTIME_IDENTITIES="${SIMPLE_WM_FORBIDDEN_RUNTIME_IDENTITIES:-$ROOT_DIR/config/check/hosted_wm_forbidden_runtime_identities.sdn}"
 FONT_ASSET='assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf'
 FONT_ASSET_SHA256=2cb2adb378a8f574213e23df697050b83c54c27df465a2015552740b2769a081
 # The title raster must come from the registered default instance, rather than
@@ -106,6 +107,21 @@ canonical_regular_file() {
     printf '%s/%s\n' "$directory" "$(basename -- "$1")"
 }
 
+forbidden_runtime_digest() {
+    # Persistent forbidden bootstrap identity: the registry records SHA-256
+    # digests of known Rust-seed/bootstrap libsimple_runtime.so builds, so a
+    # bootstrap DSO copied from elsewhere stays refused even when the canonical
+    # bootstrap artifact is absent from this checkout.
+    [ -f "$FORBIDDEN_RUNTIME_IDENTITIES" ] || return 2
+    awk -F',' '
+        $1 ~ /^[[:space:]]*[0-9a-f]+[[:space:]]*$/ {
+            digest = $1
+            gsub(/[[:space:]]/, "", digest)
+            if (length(digest) == 64) print digest
+        }
+    ' "$FORBIDDEN_RUNTIME_IDENTITIES" | grep -qx "$1"
+}
+
 bootstrap_runtime_provider() {
     case "$1" in
         */src/compiler_rust/target/bootstrap/*) return 0 ;;
@@ -113,7 +129,7 @@ bootstrap_runtime_provider() {
     if [ -f "$BOOTSTRAP_RUNTIME_LIB" ] && [ ! -L "$BOOTSTRAP_RUNTIME_LIB" ]; then
         [ "$(sha256_file "$1")" = "$(sha256_file "$BOOTSTRAP_RUNTIME_LIB")" ] && return 0
     fi
-    return 1
+    [ "$2" != "" ] && forbidden_runtime_digest "$2"
 }
 
 admit_runtime_provider() {
@@ -131,11 +147,17 @@ admit_runtime_provider() {
         runtime_provider_reason=runtime-provider-not-canonical-regular-file
         return 1
     }
-    if bootstrap_runtime_provider "$runtime_provider_source_path"; then
+    runtime_provider_sha256="$(sha256_file "$runtime_provider_source_path")"
+    # Fail closed: without the persistent forbidden identity registry a copied
+    # bootstrap DSO cannot be distinguished from a legitimate provider build.
+    [ -f "$FORBIDDEN_RUNTIME_IDENTITIES" ] || {
+        runtime_provider_reason=runtime-provider-forbidden-registry-missing
+        return 1
+    }
+    if bootstrap_runtime_provider "$runtime_provider_source_path" "$runtime_provider_sha256"; then
         runtime_provider_reason=runtime-provider-bootstrap-forbidden
         return 1
     fi
-    runtime_provider_sha256="$(sha256_file "$runtime_provider_source_path")"
     if [ "$runtime_provider_sha256" != "$RUNTIME_LIB_EXPECTED_SHA256" ]; then
         runtime_provider_reason=runtime-provider-sha256-mismatch
         return 1
@@ -381,6 +403,8 @@ emit() {
         echo "linux_hosted_wm_live_window_runtime_provider_sha256=$runtime_provider_sha256"
         echo "linux_hosted_wm_live_window_runtime_provider_expected_sha256=$RUNTIME_LIB_EXPECTED_SHA256"
         echo "linux_hosted_wm_live_window_runtime_provider_build_identity=$runtime_provider_build_identity"
+        echo "linux_hosted_wm_live_window_runtime_provider_forbidden_registry=$FORBIDDEN_RUNTIME_IDENTITIES"
+        echo "linux_hosted_wm_live_window_runtime_provider_forbidden_registry_sha256=$forbidden_registry_sha256"
         echo "linux_hosted_wm_live_window_runtime_provider_status=$runtime_provider_status"
         echo "linux_hosted_wm_live_window_runtime_provider_admission_sha256=$runtime_provider_admission_sha256"
         echo "linux_hosted_wm_live_window_window_marker=$window_marker"
@@ -586,6 +610,7 @@ engine_sha="$(sha256_file src/os/compositor/compositor_engine2d.spl)"
 simple_bin_sha=""
 wrapper_sha="$(sha256_file "$0")"
 hosted_bin_sha=""
+forbidden_registry_sha256="$(sha256_file "$FORBIDDEN_RUNTIME_IDENTITIES" 2>/dev/null || true)"
 runtime_provider_path=""
 runtime_provider_source_path=""
 runtime_provider_sha256=""
@@ -689,6 +714,24 @@ if [ "$SELF_TEST" -eq 1 ]; then
         exit 1
     fi
     GLYPH_RGB_SHA256=pending
+    # The pending oracle is the calibration gate this wrapper is named for: a
+    # pending pin without LINUX_HOSTED_WM_CALIBRATE_GLYPH=1 must resolve to the
+    # calibration-required hard-fail, while the calibration flag must resolve
+    # to calibration-only and skip that hard-fail.  A real 64-hex digest must
+    # always resolve to pinned, with or without the calibration flag.
+    if [ "$(glyph_oracle_mode "$GLYPH_RGB_SHA256" 0)" != calibration-required ]; then
+        echo "linux_hosted_wm_live_window_self_test_status=fail"
+        exit 1
+    fi
+    if [ "$(glyph_oracle_mode "$GLYPH_RGB_SHA256" 1)" != calibration-only ]; then
+        echo "linux_hosted_wm_live_window_self_test_status=fail"
+        exit 1
+    fi
+    if [ "$(glyph_oracle_mode "$glyph_sha" 0)" != pinned ] \
+        || [ "$(glyph_oracle_mode "$glyph_sha" 1)" != pinned ]; then
+        echo "linux_hosted_wm_live_window_self_test_status=fail"
+        exit 1
+    fi
     checksum_fixture="$BUILD_DIR/checksum-fixture.ppm"
     printf 'P6\n1 1\n255\n\001\002\003' >"$checksum_fixture"
     [ "$(capture_argb_checksum "$checksum_fixture")" = 2130772484 ]
@@ -716,10 +759,21 @@ if [ "$SELF_TEST" -eq 1 ]; then
     runtime_fixture="$runtime_fixture_dir/runtime-provider.so"
     bootstrap_fixture="$runtime_fixture_dir/src/compiler_rust/target/bootstrap/deps/libsimple_runtime.so"
     bootstrap_copy_fixture="$runtime_fixture_dir/copied-bootstrap-runtime.so"
+    forbidden_registry_fixture="$runtime_fixture_dir/forbidden-runtime-identities.sdn"
     mkdir -p "$(dirname -- "$bootstrap_fixture")"
     printf 'admitted runtime fixture\n' >"$runtime_fixture"
     printf 'bootstrap runtime fixture\n' >"$bootstrap_fixture"
     cp "$bootstrap_fixture" "$bootstrap_copy_fixture"
+    # The persistent forbidden identity registry lists the bootstrap fixture
+    # digest; the admitted runtime fixture digest is deliberately absent.
+    cat >"$forbidden_registry_fixture" <<'REGISTRY_EOF'
+# fixture forbidden runtime identity registry
+forbidden_runtime_identities |sha256, origin, recorded_on|
+    PLACEHOLDER_DIGEST, rust-seed-bootstrap-libsimple_runtime.so, 2026-11-05
+REGISTRY_EOF
+    sed -i "s/PLACEHOLDER_DIGEST/$(sha256_file "$bootstrap_fixture")/" \
+        "$forbidden_registry_fixture"
+    FORBIDDEN_RUNTIME_IDENTITIES="$forbidden_registry_fixture"
     BOOTSTRAP_RUNTIME_LIB="$bootstrap_fixture"
     RUNTIME_LIB="$runtime_fixture"
     RUNTIME_LIB_EXPECTED_SHA256="$(sha256_file "$runtime_fixture")"
@@ -738,6 +792,32 @@ if [ "$SELF_TEST" -eq 1 ]; then
         echo "linux_hosted_wm_live_window_self_test_status=fail"
         exit 1
     fi
+    # Canonical bootstrap artifact absent: the copied bootstrap DSO must still
+    # be refused via the persistent forbidden identity registry.
+    BOOTSTRAP_RUNTIME_LIB="$runtime_fixture_dir/absent/libsimple_runtime.so"
+    if admit_runtime_provider; then
+        echo "linux_hosted_wm_live_window_self_test_status=fail"
+        exit 1
+    fi
+    [ "$runtime_provider_reason" = runtime-provider-bootstrap-forbidden ] || {
+        echo "linux_hosted_wm_live_window_self_test_status=fail"
+        exit 1
+    }
+    # A legitimate provider build stays admitted without the canonical
+    # bootstrap artifact, and fail-closes when the registry is missing.
+    RUNTIME_LIB="$runtime_fixture"
+    RUNTIME_LIB_EXPECTED_SHA256="$(sha256_file "$runtime_fixture")"
+    admit_runtime_provider
+    FORBIDDEN_RUNTIME_IDENTITIES="$runtime_fixture_dir/no-such-registry.sdn"
+    if admit_runtime_provider; then
+        echo "linux_hosted_wm_live_window_self_test_status=fail"
+        exit 1
+    fi
+    [ "$runtime_provider_reason" = runtime-provider-forbidden-registry-missing ] || {
+        echo "linux_hosted_wm_live_window_self_test_status=fail"
+        exit 1
+    }
+    FORBIDDEN_RUNTIME_IDENTITIES="$forbidden_registry_fixture"
     RUNTIME_LIB="$runtime_fixture"
     RUNTIME_LIB_EXPECTED_SHA256=0000000000000000000000000000000000000000000000000000000000000000
     if admit_runtime_provider; then
@@ -762,6 +842,9 @@ if [ "$SELF_TEST" -eq 1 ]; then
     echo "linux_hosted_wm_live_window_self_test_source_provenance_status=$source_provenance_status"
     echo "linux_hosted_wm_live_window_self_test_simple_bin_default=explicit-required"
     echo "linux_hosted_wm_live_window_self_test_glyph_oracle=pass"
+    echo "linux_hosted_wm_live_window_self_test_glyph_oracle_pending_requires_calibration=calibration-required"
+    echo "linux_hosted_wm_live_window_self_test_glyph_oracle_pending_calibration_mode=calibration-only"
+    echo "linux_hosted_wm_live_window_self_test_glyph_oracle_pinned_digest=pinned"
     echo "linux_hosted_wm_live_window_self_test_glyph_missing_character=rejected"
     echo "linux_hosted_wm_live_window_self_test_glyph_bars=rejected"
     echo "linux_hosted_wm_live_window_self_test_glyph_wrong_font=rejected"
@@ -776,6 +859,9 @@ if [ "$SELF_TEST" -eq 1 ]; then
     echo "linux_hosted_wm_live_window_self_test_capture_checksum=pass"
     echo "linux_hosted_wm_live_window_self_test_runtime_bootstrap=rejected"
     echo "linux_hosted_wm_live_window_self_test_runtime_bootstrap_content=rejected"
+    echo "linux_hosted_wm_live_window_self_test_runtime_bootstrap_registry=rejected"
+    echo "linux_hosted_wm_live_window_self_test_runtime_forbidden_registry_missing=rejected"
+    echo "linux_hosted_wm_live_window_self_test_runtime_non_bootstrap_without_canonical=pass"
     echo "linux_hosted_wm_live_window_self_test_runtime_sha256_mismatch=rejected"
     echo "linux_hosted_wm_live_window_self_test_runtime_changed=rejected"
     echo "linux_hosted_wm_live_window_self_test_runtime_staged=pass"

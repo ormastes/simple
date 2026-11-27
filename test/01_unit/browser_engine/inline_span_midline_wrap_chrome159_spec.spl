@@ -1,0 +1,111 @@
+"""
+## Purpose and audience
+Purpose: pin how a plain inline element (`<span>`, `<b>`, `<a>`) that
+starts MID-LINE and does not fit the rest of that line wraps and paints,
+against Chrome 159. Chrome breaks the element's text at the line end, carries
+it on at the left edge of the next line boxes, continues the content after it
+on its last line, and paints the element's background once per line fragment
+(its content area, 17 px tall in a 20 px line). Simple laid the element out
+as one unbroken box: the text ran past the 200 px block to x=399, the
+background was one strip, and the text after it started a new line.
+Audience: browser-engine inline layout and paint maintainers.
+
+Chrome oracle (Chrome 159.0.8154.6 headless, `--hide-scrollbars
+--force-device-scale-factor=1 --window-size=400,300`, host default
+sans-serif 16px). Three 80 px bands; each holds a 200 px block, line-height
+20 px. Fragment rects are `getClientRects()` of the element:
+
+| band | element | fragment rects (x, y, w; h = 17) |
+|------|---------|----------------------------------|
+| 0 | span, green bg | (81.83, 1, 113.88) (0, 21, 187.63) (0, 41, 32.03) |
+| 1 | b, green bg | (40.05, 81, 119.11) (0, 101, 184.89) (0, 121, 65.80) |
+| 2 | a, black text | (93.38, 161, 88.94) (0, 181, 173.44) |
+
+Per 20 px line row, the fully green columns and rows, and the dark (< 128)
+ink columns, read from the Chrome screenshot are `IS_CHROME` below
+(-1 / -1 = none). Band 0/1 text inside the element is transparent, so ink
+there is the text before and after it; band 2 is all black text. Band 1 has
+no text after its `<b>`: a run after a bold element starts a few px off
+Chrome even on one line (`Lead <b>bold</b> tail text.` ink ends 128, Chrome
+131), a separate gap this spec does not pin.
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-INLINE-SPAN-MIDLINE-WRAP-001 -- an inline element starting mid-line wraps into the following line boxes like a text run, the content after it continues on its last line, and its background paints once per line fragment.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{simple_web_render_html_to_pixels_with_resolved_engine2d_backend}
+
+val IS_W: i32 = 400
+val IS_H: i32 = 300
+val IS_PAGE: text = "<!DOCTYPE html><html><body style=\"margin:0;background:#fff;color:#000;font:16px sans-serif\"><div style=\"height:80px;overflow:hidden\"><div style=\"width:200px;line-height:20px\">Before text <span id=\"s0\" style=\"background:#0f0;color:transparent\">a long span that wraps across several lines here</span> after it.</div></div><div style=\"height:80px;overflow:hidden\"><div style=\"width:200px;line-height:20px\">Lead <b id=\"s1\" style=\"background:#0f0;color:transparent\">bold words that continue on and on past the edge</b></div></div><div style=\"height:80px;overflow:hidden\"><div style=\"width:200px;line-height:20px\">Some words <a id=\"s2\" style=\"color:#000;text-decoration:none\">linked words wrapping here and more</a> done.</div></div></body></html>"
+# Per 20 px line row y = 20 * k: green x0, x1, y0, y1, ink x0, x1.
+val IS_CHROME: [i32] = [
+    82, 195, 1, 17, 2, 76,
+    0, 187, 21, 37, -1, -1,
+    0, 31, 41, 57, 38, 83,
+    -1, -1, -1, -1, -1, -1,
+    40, 158, 81, 97, 2, 33,
+    0, 184, 101, 117, -1, -1,
+    0, 65, 121, 137, -1, -1,
+    -1, -1, -1, -1, -1, -1,
+    -1, -1, -1, -1, 1, 180,
+    -1, -1, -1, -1, 0, 171,
+    -1, -1, -1, -1, 1, 37
+]
+
+fn is_row(px: [u32], y0: i32) -> [i32]:
+    var gx0 = 9999
+    var gx1 = -1
+    var gy0 = 9999
+    var gy1 = -1
+    var kx0 = 9999
+    var kx1 = -1
+    var y = y0
+    while y < y0 + 20:
+        var x = 0
+        while x < IS_W:
+            val p = px[y * IS_W + x]
+            val r = (p >> 16) & 255u32
+            val g = (p >> 8) & 255u32
+            val b = p & 255u32
+            if g > 200u32 and r < 60u32 and b < 60u32:
+                if x < gx0: gx0 = x
+                if x > gx1: gx1 = x
+                if y < gy0: gy0 = y
+                if y > gy1: gy1 = y
+            if r < 128u32 and g < 128u32 and b < 128u32:
+                if x < kx0: kx0 = x
+                if x > kx1: kx1 = x
+            x = x + 1
+        y = y + 1
+    val out = [gx0, gx1, gy0, gy1, kx0, kx1]
+    var k = 0
+    while k < 6:
+        if out[k] == 9999: out[k] = -1
+        k = k + 1
+    out
+
+fn is_mismatches(px: [u32]) -> i32:
+    if px.len() != IS_W * IS_H:
+        return 99
+    var bad = 0
+    var row = 0
+    while row * 6 < IS_CHROME.len():
+        val got = is_row(px, row * 20)
+        var k = 0
+        while k < 6:
+            val want = IS_CHROME[row * 6 + k]
+            val d = got[k] - want
+            if d > 1 or d < -1:
+                print "row y={row * 20} field {k}: {got[k]}, Chrome {want}"
+                bad = bad + 1
+            k = k + 1
+        row = row + 1
+    bad
+
+describe "inline element starting mid-line wraps like Chrome 159":
+    it "AC-1: breaks into line fragments, continues after it, paints a background per fragment (cpu_simd)":
+        step("span / b with a background and a black a, each starting mid-line in a 200 px block")
+        expect(is_mismatches(simple_web_render_html_to_pixels_with_resolved_engine2d_backend(IS_PAGE, IS_W, IS_H, "cpu_simd"))).to_equal(0)

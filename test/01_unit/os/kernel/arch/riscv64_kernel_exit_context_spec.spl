@@ -1,0 +1,49 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-OS
+# Repro: rv64_prepare_kernel_exit_context and vmm_copyin_packed_string_vector
+# were deleted by the stale-snapshot merge e274cd33719 while their callers
+# (riscv64/interrupt.spl, ipc/syscall_process.spl) and imports survived, so the
+# riscv64 kernel link lowered them to undefined globals.
+# bug: doc/08_tracking/bug/riscv64_fs_exec_kernel_link_undefined_runtime_2026-11-19.md
+
+use std.spec.step
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read_text}
+use os.kernel.arch.riscv64.trap_model.{RV64_KERNEL_RETURN_COOKIE, RV64_SSTATUS_SPP, create_rv64_kernel_context, rv64_prepare_kernel_exit_context}
+
+describe "rv64 kernel exit continuation":
+    it "matches the cookie the _rv64_enter_user trampoline stores":
+        step("trap_vector writes the same cookie trap_model validates")
+        val src = file_read_text("src/os/kernel/arch/riscv64/trap_vector.spl")
+        expect(src.contains("li      t0, 0x525636344B524554")).to_equal(true)
+        expect(RV64_KERNEL_RETURN_COOKIE).to_equal(0x525636344B524554u64)
+
+    it "resumes a valid saved kernel frame with the exit code in a0":
+        step("valid continuation -> Ok, a0 = exit code, scause cleared")
+        var saved = create_rv64_kernel_context(0x80200000, 0x80400000, 0)
+        saved.scause = RV64_KERNEL_RETURN_COOKIE
+        val r = rv64_prepare_kernel_exit_context(saved, 7)
+        expect(r.is_ok()).to_equal(true)
+        val resumed = r.unwrap()
+        expect(resumed.a0).to_equal(7u64)
+        expect(resumed.scause).to_equal(0u64)
+
+    it "rejects a frame without the cookie, sepc, sp or S-mode SPP":
+        step("each invalid continuation -> Err")
+        val good = create_rv64_kernel_context(0x80200000, 0x80400000, 0)
+        var no_cookie = good
+        expect(rv64_prepare_kernel_exit_context(no_cookie, 0).is_err()).to_equal(true)
+        var no_sp = good
+        no_sp.scause = RV64_KERNEL_RETURN_COOKIE
+        no_sp.sp = 0
+        expect(rv64_prepare_kernel_exit_context(no_sp, 0).is_err()).to_equal(true)
+        var user_spp = good
+        user_spp.scause = RV64_KERNEL_RETURN_COOKIE
+        user_spp.sstatus = user_spp.sstatus & ~RV64_SSTATUS_SPP
+        expect(rv64_prepare_kernel_exit_context(user_spp, 0).is_err()).to_equal(true)
+
+describe "vmm packed string vector copy-in":
+    it "is defined where syscall_process imports it from":
+        step("vmm_copy defines it; vmm re-exports through vmm_copy")
+        val src = file_read_text("src/os/kernel/memory/vmm_copy.spl")
+        expect(src.contains("fn vmm_copyin_packed_string_vector(")).to_equal(true)

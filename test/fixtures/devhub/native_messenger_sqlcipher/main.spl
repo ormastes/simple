@@ -1,0 +1,120 @@
+# Supplemental Phase-2 production feature check; not a replacement SSpec runner.
+use std.io_runtime.{env_get_opt, file_hash_sha256_or_empty}
+use std.env.{env_set, env_unset}
+use std.database.sqlite_format.varint.{sqlite_varint_decode}
+use app.devhub.messenger.config.{MessengerTarget, MessengerPolicy, MessengerDbConfig, SchemaProfile}
+use app.devhub.messenger.plugin_access.{MessengerPortResult}
+use app.devhub.messenger.policy.{check_read, PermissionVerdict}
+use app.devhub.messenger.adapter.sqlcipher_reader.{messenger_sqlcipher4_history, messenger_sqlcipher4_list_rooms, messenger_sqlcipher4_list_members, messenger_sqlcipher4_fetch_message}
+
+val CIPHER_DB = "test/fixtures/database/sqlcipher4/messenger.sqlcipher4"
+val CIPHER_TAMPERED_DB = "test/fixtures/database/sqlcipher4/messenger_tampered.sqlcipher4"
+val CIPHER_PLAIN_DB = "test/fixtures/database/sqlcipher4/messenger_plain.sqlite"
+val CIPHER_SECRET_ENV = "SIMPLE_SECRET_MESSENGER_CIPHERTEST"
+val CIPHER_PASSWORD = "messenger-fixture-passphrase"
+val CIPHER_WRONG_PASSWORD = "wrong-cipher-system-fixture-password"
+
+fn cipher_system_schema() -> SchemaProfile:
+    SchemaProfile(profile_id: "messenger.schema_profile.v1",
+        room_table: "room", room_id: "id", room_name: "title", room_created_at: "created_at",
+        member_table: "room_member", member_room_id: "room_id", member_identity_id: "user_id",
+        member_joined_at: "joined_at", member_left_at: "left_at", member_role: "role",
+        message_table: "messages", message_id: "id", message_room_id: "room_id",
+        message_sender_id: "sender_id", message_body: "body", message_created_at: "created_at",
+        message_updated_at: "updated_at", message_sequence: "seq", message_reply_to_id: "reply_to_id",
+        timestamp_unit: "s", sequence_kind: "monotonic_within_room")
+
+fn cipher_system_target(path: text = CIPHER_DB, agent_bodies: bool = false) -> MessengerTarget:
+    var policy = MessengerPolicy.deny_all()
+    policy.expose_message_body_to_agents = agent_bodies
+    val db = MessengerDbConfig(path: path, format: "sqlcipher4", access: "read_only",
+        snapshot_mode: "consistent_live", profile: "sqlcipher4_4k_sha512", key_kind: "passphrase",
+        secret_ref: "secret://messenger/ciphertest", cipher_page_size: 4096,
+        cipher_kdf_iter: 256000, cipher_kdf_algorithm: "pbkdf2_hmac_sha512",
+        cipher_hmac_algorithm: "hmac_sha512", cipher_page_hmac: true,
+        cipher_hmac_pgno: "little_endian", cipher_reserved_bytes: 80,
+        cipher_plaintext_header_bytes: 0, immutable: false)
+    MessengerTarget(name: "cipher-system-fixture", read_provider: "sqlcipher4_database",
+        send_provider: "none", send_enabled: false, source_kind: "external_owned_by_messenger",
+        schema_profile_name: "messenger.schema_profile.v1", content_pipeline: "none",
+        cache_mode: "none", sync_policy: "on_demand", db: db, api: nil,
+        schema: cipher_system_schema(), policy: policy)
+
+fn cipher_system_read(target: MessengerTarget, operation: text, selector: text = "1",
+        limit: i64 = 10, actor: text = "user", secret: text? = Some(CIPHER_PASSWORD)) -> MessengerPortResult:
+    print "read stage: capture synthetic environment"
+    val previous = env_get_opt(CIPHER_SECRET_ENV)
+    print "read stage: secret supplied={secret != nil}"
+    if secret != nil:
+        val accepted = env_set(CIPHER_SECRET_ENV, secret!)
+        print "read stage: environment mutation accepted={accepted}"
+        assert(accepted)
+    else:
+        val removed = env_unset(CIPHER_SECRET_ENV)
+        assert(env_get_opt(CIPHER_SECRET_ENV) == nil)
+    print "read stage: policy verdict"
+    val verdict: PermissionVerdict = check_read(target)
+    print "read stage: policy permitted={verdict.permitted}"
+    print "read stage: schema present={target.schema != nil} db present={target.db != nil}"
+    if val profile = target.schema:
+        val schema_valid = profile.profile_id == "messenger.schema_profile.v1"
+        print "read stage: schema identity valid={schema_valid}"
+    if val database = target.db:
+        val path_valid = database.path != ""
+        print "read stage: database path nonempty={path_valid}"
+    print "read stage: invoke adapter"
+    val result = if operation == "rooms":
+        messenger_sqlcipher4_list_rooms(target, actor)
+    elif operation == "members":
+        messenger_sqlcipher4_list_members(target, selector, actor)
+    elif operation == "fetch":
+        messenger_sqlcipher4_fetch_message(target, selector, actor)
+    else:
+        assert(operation == "history")
+        messenger_sqlcipher4_history(target, selector, limit, actor)
+    print "read stage: adapter returned status={result.status}"
+    # Restore the process environment before assertions inspect the response.
+    if previous != nil:
+        assert(env_set(CIPHER_SECRET_ENV, previous!))
+    else:
+        val restored = env_unset(CIPHER_SECRET_ENV)
+        assert(env_get_opt(CIPHER_SECRET_ENV) == nil)
+    result
+
+fn main() -> i64:
+    match sqlite_varint_decode([255u8, 255u8, 255u8, 255u8, 255u8, 255u8, 255u8, 255u8, 255u8], 0):
+        case Ok(decoded):
+            assert(decoded.0 == 18446744073709551615u64)
+            assert(decoded.1 == 9)
+        case Err(_): assert(false)
+    match sqlite_varint_decode([128u8], 0):
+        case Ok(_): assert(false)
+        case Err(_): ()
+    print "PASS native SQLite unsigned varint and truncation"
+    print "stage: hash encrypted fixture"
+    val before = file_hash_sha256_or_empty(CIPHER_DB)
+    print "fixture hash length={before.len()}"
+    assert(before.len() == 64)
+    print "stage: production history read"
+    val correct = cipher_system_read(cipher_system_target(), "history")
+    print "history status={correct.status} exit={correct.exit_code}"
+    assert(correct.status == "ok" and correct.exit_code == 0)
+    assert(correct.payload.contains("unicode: héllo wörld ✓"))
+    assert(correct.payload.contains("\"count\":3"))
+    assert(not correct.payload.contains(CIPHER_PASSWORD))
+    print "PASS native Messenger SQLCipher UTF-8 history"
+    val wrong = cipher_system_read(cipher_system_target(), "history", secret: Some(CIPHER_WRONG_PASSWORD))
+    assert(wrong.status == "config_error" and wrong.exit_code == 2)
+    assert(wrong.payload == "")
+    assert(not wrong.error.contains(CIPHER_WRONG_PASSWORD))
+    print "PASS native Messenger SQLCipher wrong-key rejection"
+    val tampered = cipher_system_read(cipher_system_target(CIPHER_TAMPERED_DB), "history")
+    assert(tampered.status == "config_error" and tampered.exit_code == 2)
+    assert(tampered.payload == "")
+    assert(tampered.error == wrong.error)
+    print "PASS native Messenger SQLCipher tamper rejection"
+    val recovered = cipher_system_read(cipher_system_target(), "history")
+    assert(recovered.status == "ok" and recovered.payload.contains("hello world"))
+    assert(file_hash_sha256_or_empty(CIPHER_DB) == before)
+    print "PASS native Messenger SQLCipher recovery and read-only source"
+    0

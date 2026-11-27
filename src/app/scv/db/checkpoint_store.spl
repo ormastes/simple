@@ -42,7 +42,7 @@ fn _checkpoint_reader_policy(initial: DbCheckpointReader, policy: DbPolicyConfig
     # Policy codec body is <=16MiB, hex wire <=32MiB+header. Reserve a full
     # bounded encode before measuring it; later authorizations pay actual wire.
     var reader = db_checkpoint_reader_reserve(initial, 0u64, 67109600u64)?
-    reader.policy_bytes = db_policy_encode(policy)?.len() as u64
+    reader.policy_bytes = (db_policy_encode(policy)?).len() as u64
     Ok(reader)
 
 fn _checkpoint_paged_preview(initial: DbCheckpointReader, manifest: DbPagedManifest, patch: DbPatch, policy: DbPagedPolicy, now: u64) -> Result<(DbCheckpointReader, text), text>:
@@ -112,7 +112,7 @@ fn _checkpoint_pending(initial: DbCheckpointReader, checkpoint: DbDatabaseCheckp
         # Both journal alternatives remain in flight until actual local index
         # observation; checkpoint installation cannot discard/reclassify them.
         if ["prepared", "awaiting-index"].contains(item.phase): return Err("SCVDB_CHECKPOINT_SETTLEMENT_IN_FLIGHT")
-        if item.paged_journal != nil:
+        if item.paged_journal.is_some():
             match checkpoint.storage:
                 Paged(_): ()
                 _: return Err("SCVDB_CHECKPOINT_STORAGE_MIGRATION_REQUIRED")
@@ -132,7 +132,7 @@ fn _checkpoint_pending(initial: DbCheckpointReader, checkpoint: DbDatabaseCheckp
         reader = loaded.0
         val accepted = loaded.1
         if item.phase == "local-index-observed":
-            if accepted == nil: return Err("SCVDB_CHECKPOINT_TERMINAL_NOT_ACCEPTED")
+            if accepted.is_none(): return Err("SCVDB_CHECKPOINT_TERMINAL_NOT_ACCEPTED")
             val terminal = accepted.unwrap()
             if terminal.canonical_digest != patch.payload_digest or terminal.actor != patch.actor or terminal.actor_counter != patch.actor_counter: return Err("SCVDB_CHECKPOINT_PENDING_COLLISION")
         # The queue bounds each original patch at 1MiB. Policy work uses the

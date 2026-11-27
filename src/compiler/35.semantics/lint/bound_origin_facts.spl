@@ -1,0 +1,349 @@
+# Boundary origin facts: for each bound value in a module, where it came from
+# (extern_decl, param, literal, extern_return, cast, copy, call, expr).
+# Feeds `simple robust inventory`. Slice of
+# doc/03_plan/release/1.0.0/robust_boundaries_library_units_sffi_backends_plan_2026-11-15.md
+# (P3 origin facts). Text-level, same fidelity as SPL-BOUND-001..003; typed HIR
+# fact interning (ValueSemanticOrigin / BoundaryPermit) remains open.
+
+use compiler.semantics.lint.lint_text.{code_line_snapshot}
+
+pub struct BoundOriginFact:
+    line_num: i64
+    function: text
+    subject: text
+    origin: text
+    boundary: bool
+
+fn _bof_ident_char(c: text) -> bool:
+    (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or
+        (c >= "0" and c <= "9") or c == "_"
+
+fn _bof_leading_ident(s: text) -> text:
+    var i = 0
+    while i < s.byte_len() and _bof_ident_char(s.substring(i, i + 1)):
+        i = i + 1
+    s.substring(0, i)
+
+fn _bof_indent(raw: text) -> i64:
+    var i = 0
+    while i < raw.byte_len() and raw.substring(i, i + 1) == " ":
+        i = i + 1
+    i
+
+fn _bof_strip_fn_prefix(line: text) -> text:
+    var rest = line
+    for prefix in ["pub ", "static ", "async ", "unsafe "]:
+        if rest.starts_with(prefix):
+            rest = rest.substring(prefix.byte_len(), rest.byte_len())
+    rest
+
+fn _bof_extern_name(line: text) -> text:
+    val rest = _bof_strip_fn_prefix(line)
+    if rest.starts_with("extern fn "):
+        return _bof_leading_ident(rest.substring(10, rest.byte_len()))
+    ""
+
+fn _bof_fn_name(line: text) -> text:
+    val rest = _bof_strip_fn_prefix(line)
+    if rest.starts_with("fn "):
+        return _bof_leading_ident(rest.substring(3, rest.byte_len()))
+    if rest.starts_with("me "):
+        return _bof_leading_ident(rest.substring(3, rest.byte_len()))
+    ""
+
+fn _bof_paren_depth(s: text) -> i64:
+    var depth = 0
+    var in_str = false
+    var i = 0
+    while i < s.byte_len():
+        val c = s.substring(i, i + 1)
+        if in_str:
+            if c == "\\":
+                i = i + 1
+            elif c == "\"":
+                in_str = false
+        elif c == "\"":
+            in_str = true
+        elif c == "(":
+            depth = depth + 1
+        elif c == ")":
+            depth = depth - 1
+        i = i + 1
+    depth
+
+# Index of the `)` matching the `(` at `open`, skipping string literals; -1 if unclosed.
+fn _bof_match_close(s: text, open: i64) -> i64:
+    var depth = 0
+    var in_str = false
+    var i = open
+    while i < s.byte_len():
+        val c = s.substring(i, i + 1)
+        if in_str:
+            if c == "\\":
+                i = i + 1
+            elif c == "\"":
+                in_str = false
+        elif c == "\"":
+            in_str = true
+        elif c == "(" or c == "[":
+            depth = depth + 1
+        elif c == ")" or c == "]":
+            depth = depth - 1
+            if depth == 0:
+                return i
+        i = i + 1
+    -1
+
+# Splits on top-level commas only: commas inside brackets or string literals
+# (e.g. a default value `sep: text = "a, b"`) do not split.
+fn _bof_split_top(s: text) -> [text]:
+    var parts: [text] = []
+    var depth = 0
+    var in_str = false
+    var part = ""
+    var i = 0
+    while i < s.byte_len():
+        val c = s.substring(i, i + 1)
+        if in_str:
+            part = part + c
+            if c == "\\" and i + 1 < s.byte_len():
+                i = i + 1
+                part = part + s.substring(i, i + 1)
+            elif c == "\"":
+                in_str = false
+        elif c == "\"":
+            in_str = true
+            part = part + c
+        elif c == "," and depth == 0:
+            parts.push(part)
+            part = ""
+        else:
+            if c == "(" or c == "[":
+                depth = depth + 1
+            elif c == ")" or c == "]":
+                depth = depth - 1
+            part = part + c
+        i = i + 1
+    parts.push(part)
+    parts
+
+# Parameter names of a signature that may have been joined from several lines.
+fn _bof_params(line: text) -> [text]:
+    val open = line.find("(")
+    if open < 0:
+        return []
+    var close = _bof_match_close(line, open)
+    if close < 0:
+        close = line.byte_len()
+    var names: [text] = []
+    for part in _bof_split_top(line.substring(open + 1, close)):
+        val name = _bof_leading_ident(part.trim())
+        if name != "" and name != "self":
+            names.push(name)
+    names
+
+# Names bound by a (possibly nested) tuple pattern; `_` binds nothing.
+fn _bof_pattern_names(pat: text) -> [text]:
+    val p = pat.trim()
+    if p.starts_with("("):
+        var inner = p.substring(1, p.byte_len())
+        val close = _bof_match_close(p, 0)
+        if close > 0:
+            inner = p.substring(1, close)
+        var names: [text] = []
+        for part in _bof_split_top(inner):
+            for n in _bof_pattern_names(part):
+                names.push(n)
+        return names
+    val n = _bof_leading_ident(p)
+    if n != "" and n != "_":
+        return [n]
+    []
+
+fn _bof_all_ident(s: text) -> bool:
+    if s == "":
+        return false
+    _bof_leading_ident(s).byte_len() == s.byte_len()
+
+fn _bof_literal(rhs: text) -> bool:
+    if rhs.starts_with("\""):
+        return true
+    if rhs == "true" or rhs == "false" or rhs == "nil":
+        return true
+    var first = rhs.substring(0, 1)
+    if first == "-" and rhs.byte_len() > 1:
+        first = rhs.substring(1, 2)
+    first >= "0" and first <= "9"
+
+fn _bof_rhs_origin(rhs: text, externs: [text]) -> text:
+    if _bof_literal(rhs):
+        return "literal"
+    for e in externs:
+        if rhs.starts_with(e + "("):
+            return "extern_return"
+    if rhs.contains(" as "):
+        return "cast"
+    if _bof_all_ident(rhs):
+        return "copy"
+    if rhs.contains("("):
+        return "call"
+    "expr"
+
+# Names bound by `val`/`var` (one, or several for a tuple pattern) and the rhs.
+# `_` placeholders bind nothing and are skipped.
+fn _bof_binding(trimmed: text) -> ([text], text):
+    var rest = ""
+    if trimmed.starts_with("val "):
+        rest = trimmed.substring(4, trimmed.byte_len())
+    elif trimmed.starts_with("var "):
+        rest = trimmed.substring(4, trimmed.byte_len())
+    else:
+        return ([], "")
+    val eq = rest.find(" = ")
+    if eq < 0:
+        return ([], "")
+    var names: [text] = []
+    if rest.starts_with("("):
+        val close = _bof_match_close(rest, 0)
+        if close < 0 or close > eq:
+            return ([], "")
+        for n in _bof_pattern_names(rest.substring(0, close + 1)):
+            names.push(n)
+    else:
+        val name = _bof_leading_ident(rest)
+        if name == "":
+            return ([], "")
+        names.push(name)
+    (names, rest.substring(eq + 3, rest.byte_len()).trim())
+
+pub fn bound_origin_facts(source: text, file_path: text) -> [BoundOriginFact]:
+    val lines = code_line_snapshot(source).lines
+    var externs: [text] = []
+    for cl in lines:
+        val name = _bof_extern_name(cl.trimmed)
+        if name != "":
+            externs.push(name)
+    var facts: [BoundOriginFact] = []
+    var fn_name = ""
+    var fn_indent = 0
+    var boundary = false
+    var ann = ""
+    var in_sig = false
+    var sig = ""
+    var sig_line = 0
+    for cl in lines:
+        val t = cl.trimmed
+        if t == "":
+            continue
+        val ind = _bof_indent(cl.raw)
+        if in_sig:
+            sig = sig + " " + t
+            if _bof_paren_depth(sig) <= 0:
+                in_sig = false
+                for p in _bof_params(sig):
+                    facts.push(BoundOriginFact(line_num: sig_line, function: fn_name, subject: p, origin: "param", boundary: boundary))
+            continue
+        if t.starts_with("@") or (ann != "" and not t.contains("fn ") and (t.ends_with(",") or t.ends_with(")"))):
+            ann = ann + " " + t
+            continue
+        val ext = _bof_extern_name(t)
+        if ext != "":
+            facts.push(BoundOriginFact(line_num: cl.line_num, function: "", subject: ext, origin: "extern_decl", boundary: false))
+            ann = ""
+            continue
+        val name = _bof_fn_name(t)
+        if name != "":
+            fn_name = name
+            fn_indent = ind
+            boundary = ann.contains("capabilities") and ann.contains("ffi")
+            ann = ""
+            sig = t
+            sig_line = cl.line_num
+            if _bof_paren_depth(sig) > 0:
+                in_sig = true
+            else:
+                for p in _bof_params(sig):
+                    facts.push(BoundOriginFact(line_num: sig_line, function: fn_name, subject: p, origin: "param", boundary: boundary))
+            continue
+        ann = ""
+        if fn_name != "" and ind <= fn_indent:
+            fn_name = ""
+            boundary = false
+        if fn_name == "":
+            continue
+        val (bnames, rhs) = _bof_binding(t)
+        for bname in bnames:
+            facts.push(BoundOriginFact(line_num: cl.line_num, function: fn_name, subject: bname, origin: _bof_rhs_origin(rhs, externs), boundary: boundary))
+    facts
+
+pub fn bound_origin_inventory_text(source: text, file_path: text) -> text:
+    bound_origin_inventory_text_of(bound_origin_facts(source, file_path), file_path)
+
+# Renderers over already-computed facts, shared by the text and HIR sources.
+pub fn bound_origin_inventory_text_of(facts: [BoundOriginFact], file_path: text) -> text:
+    # One line per fact, in source order, then a fixed-order summary line.
+    var out = ""
+    var n_boundary = 0
+    for f in facts:
+        var fn_label = f.function
+        if fn_label == "":
+            fn_label = "-"
+        var kind = "plain"
+        if f.boundary:
+            kind = "boundary"
+            n_boundary = n_boundary + 1
+        out = out + "{file_path}:{f.line_num} {fn_label} {f.subject} {f.origin} {kind}\n"
+    var summary = "summary: {file_path} facts={facts.len()} boundary={n_boundary}"
+    for origin in ["extern_decl", "param", "literal", "extern_return", "cast", "copy", "call", "expr"]:
+        var n = 0
+        for f in facts:
+            if f.origin == origin:
+                n = n + 1
+        summary = summary + " {origin}={n}"
+    out + summary + "\n"
+
+fn _bof_sdn_str(s: text) -> text:
+    "\"" + s.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+
+pub fn bound_origin_inventory_sdn(paths: [text], sources: [text]) -> text:
+    bound_origin_inventory_sdn_of(paths, _bof_facts_per_file(paths, sources))
+
+fn _bof_facts_per_file(paths: [text], sources: [text]) -> [[BoundOriginFact]]:
+    var out: [[BoundOriginFact]] = []
+    var i = 0
+    while i < paths.len():
+        out.push(bound_origin_facts(sources[i], paths[i]))
+        i = i + 1
+    out
+
+pub fn bound_origin_inventory_sdn_of(paths: [text], per_file: [[BoundOriginFact]]) -> text:
+    # Cross-file inventory as one SDN document: totals, then one row per fact
+    # in path order, then source order.
+    var rows = ""
+    var n_facts = 0
+    var n_boundary = 0
+    var i = 0
+    while i < paths.len():
+        for f in per_file[i]:
+            n_facts = n_facts + 1
+            if f.boundary:
+                n_boundary = n_boundary + 1
+            rows = rows + "    {{file: {_bof_sdn_str(paths[i])}, line: {f.line_num}, function: {_bof_sdn_str(f.function)}, subject: {_bof_sdn_str(f.subject)}, origin: {_bof_sdn_str(f.origin)}, boundary: {f.boundary}}}\n"
+        i = i + 1
+    "inventory:\n  files: {paths.len()}\n  facts: {n_facts}\n  boundary: {n_boundary}\n  rows: [\n" + rows + "  ]\n"
+
+pub fn bound_origin_boundaries_text(paths: [text], sources: [text]) -> text:
+    bound_origin_boundaries_text_of(paths, _bof_facts_per_file(paths, sources))
+
+pub fn bound_origin_boundaries_text_of(paths: [text], per_file: [[BoundOriginFact]]) -> text:
+    # Boundary sites only (facts inside capabilities-ffi functions), then a total.
+    var out = ""
+    var n = 0
+    var i = 0
+    while i < paths.len():
+        for f in per_file[i]:
+            if f.boundary:
+                n = n + 1
+                out = out + "{paths[i]}:{f.line_num} {f.function} {f.subject} {f.origin}\n"
+        i = i + 1
+    out + "boundaries: files={paths.len()} sites={n}\n"

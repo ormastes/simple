@@ -1,0 +1,86 @@
+#!/bin/sh
+# The deploy transaction's one sub-directory entry class: the content-addressed
+# levelled vector provider (providers/simple_vector_provider_levelled-<16hex>.<ext>).
+# Symlink-free on purpose (real directories only), so it runs on every host.
+set -eu
+
+repo_root=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+. "$repo_root/scripts/bootstrap/bootstrap-deploy-transaction.shs"
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/bootstrap-deploy-tx-provider.XXXXXX")
+trap 'rm -rf "$scratch"' EXIT HUP INT TERM
+checks=0
+fail() { echo "bootstrap deploy tx provider entry test: FAIL — $1" >&2; exit 1; }
+ok() { checks=$((checks + 1)); }
+expect() { "$@" >/dev/null 2>&1 || fail "rejected: $*"; ok; }
+reject() { if "$@" >/dev/null 2>&1; then fail "accepted: $*"; fi; ok; }
+
+good=providers/simple_vector_provider_levelled-0123456789abcdef.dll
+expect bootstrap_deploy_tx_provider_entry "$good"
+expect bootstrap_deploy_tx_provider_entry providers/simple_vector_provider_levelled-0123456789abcdef.so
+expect bootstrap_deploy_tx_provider_entry providers/simple_vector_provider_levelled-0123456789abcdef.dylib
+reject bootstrap_deploy_tx_provider_entry providers/simple_vector_provider_levelled-0123456789ABCDEF.dll
+reject bootstrap_deploy_tx_provider_entry providers/simple_vector_provider_levelled-0123456789abcde.dll
+reject bootstrap_deploy_tx_provider_entry providers/simple_vector_provider_levelled-0123456789abcdeg.dll
+reject bootstrap_deploy_tx_provider_entry providers/simple_vector_provider_levelled.dll
+reject bootstrap_deploy_tx_provider_entry providers/other.dll
+reject bootstrap_deploy_tx_provider_entry providers/x/simple_vector_provider_levelled-0123456789abcdef.dll
+reject bootstrap_deploy_tx_provider_entry other/simple_vector_provider_levelled-0123456789abcdef.dll
+reject bootstrap_deploy_tx_provider_entry ../providers/simple_vector_provider_levelled-0123456789abcdef.dll
+reject bootstrap_deploy_tx_entry_name_ok providers/../simple
+reject bootstrap_deploy_tx_entry_name_ok bin/simple
+expect bootstrap_deploy_tx_entry_name_ok simple
+[ "$(bootstrap_deploy_tx_role_for_name "$good")" = vector-provider ] || fail role; ok
+reject bootstrap_deploy_tx_role_for_name providers/other.dll
+expect bootstrap_deploy_tx_known_generation_entry "$good"
+reject bootstrap_deploy_tx_known_generation_entry providers/other.dll
+
+# Staging through _add with real directories.
+release="$scratch/release"; platform=test-platform; cand="$scratch/cand"
+mkdir -p "$release/$platform" "$cand"
+bootstrap_deploy_tx_release_root=$(bootstrap_deploy_tx_canonical_dir "$release")
+bootstrap_deploy_tx_platform=$platform
+bootstrap_deploy_tx_platform_path="$bootstrap_deploy_tx_release_root/$platform"
+bootstrap_deploy_tx_dir="$scratch/gen.pending"; mkdir "$bootstrap_deploy_tx_dir"
+bootstrap_deploy_tx_journal="$bootstrap_deploy_tx_dir/entries.tsv"; : >"$bootstrap_deploy_tx_journal"
+bootstrap_deploy_tx_final_dir="$scratch/gen"
+bootstrap_deploy_tx_active=1; bootstrap_deploy_tx_state=staging
+required="simple simple_seed simple_ui_backend simple_mcp_server simple_mcp_server.sha256 simple_lsp_mcp_server simple_lsp_mcp_server.sha256 launcher.simple launcher.simple_seed launcher.simple_ui_backend launcher.simple_mcp_server launcher.simple_lsp_mcp_server authority.stage4-provenance.env authority.stage3-acceptance.env authority.kernel-policy.sdn authority.phase7.env authority.phase7-candidates.env authority.performance-baseline.env authority.performance-measurement.env"
+for name in $required; do
+    printf '%s\n' "$name-payload" >"$cand/$name"
+    expect bootstrap_deploy_tx_add "$name" "$cand/$name" "$bootstrap_deploy_tx_platform_path/$name" 644 ""
+done
+expect bootstrap_deploy_tx_verify_full_closure "$bootstrap_deploy_tx_journal" ""
+leaf=${good#providers/}
+printf 'provider-bytes\n' >"$cand/$leaf"
+psha=$(bootstrap_deploy_tx_hash_file "$cand/$leaf")
+# Destination must be <platform>/providers/<same leaf>; wrong dir/leaf/sha refused.
+reject bootstrap_deploy_tx_add "$good" "$cand/$leaf" "$bootstrap_deploy_tx_platform_path/$leaf" 755 "$psha"
+reject bootstrap_deploy_tx_add "$good" "$cand/$leaf" "$bootstrap_deploy_tx_platform_path/providers/other.dll" 755 "$psha"
+reject bootstrap_deploy_tx_add "$good" "$cand/$leaf" "$bootstrap_deploy_tx_platform_path/providers/$leaf" 755 "$(printf '%064d' 0)"
+reject bootstrap_deploy_tx_add providers/other.dll "$cand/$leaf" "$bootstrap_deploy_tx_platform_path/providers/other.dll" 755 ""
+expect bootstrap_deploy_tx_add "$good" "$cand/$leaf" "$bootstrap_deploy_tx_platform_path/providers/$leaf" 755 "$psha"
+[ -f "$bootstrap_deploy_tx_dir/$good" ] || fail "provider not staged under providers/"; ok
+grep -Fq "$good|$(bootstrap_deploy_tx_canonical_file "$cand/$leaf")|$bootstrap_deploy_tx_platform_path/$good|755|$psha" "$bootstrap_deploy_tx_journal" || fail journal; ok
+reject bootstrap_deploy_tx_add "$good" "$cand/$leaf" "$bootstrap_deploy_tx_platform_path/providers/$leaf" 755 "$psha"
+expect bootstrap_deploy_tx_verify_full_closure "$bootstrap_deploy_tx_journal" ""
+# A second provider row breaks the closure.
+cp "$bootstrap_deploy_tx_journal" "$scratch/two.tsv"
+printf '%s\n' "providers/simple_vector_provider_levelled-fedcba9876543210.dll|x|y|755|z" >>"$scratch/two.tsv"
+reject bootstrap_deploy_tx_verify_full_closure "$scratch/two.tsv" ""
+
+# Receipt entries round-trip through generation validation (20 entries).
+entries="$scratch/receipt-entries.env"
+expect bootstrap_deploy_tx_write_receipt_entries "$entries"
+[ "$(bootstrap_deploy_tx_value "$entries" entry_count)" = 20 ] || fail entry_count; ok
+grep -Fq "_role=vector-provider" "$entries" || fail receipt_role; ok
+mv "$bootstrap_deploy_tx_dir" "$bootstrap_deploy_tx_final_dir"
+expect bootstrap_deploy_tx_validate_entries "$entries" "$bootstrap_deploy_tx_final_dir"
+# Tampered provider bytes fail validation.
+chmod u+w "$bootstrap_deploy_tx_final_dir/$good"
+printf 'tampered\n' >"$bootstrap_deploy_tx_final_dir/$good"
+reject bootstrap_deploy_tx_validate_entries "$entries" "$bootstrap_deploy_tx_final_dir"
+# A 19-entry generation (no provider) still validates (older generations).
+sed -e '/^entry_20_/d' -e 's/^entry_count=20$/entry_count=19/' "$entries" >"$scratch/entries19.env"
+rm -rf "$bootstrap_deploy_tx_final_dir/providers"
+expect bootstrap_deploy_tx_validate_entries "$scratch/entries19.env" "$bootstrap_deploy_tx_final_dir"
+echo "bootstrap deploy tx provider entry test: PASS — $checks checks"

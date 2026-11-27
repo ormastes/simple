@@ -38,7 +38,8 @@ use std.common.gpu.simpleos_host_gpu_draw_ir.{
     SimpleOsHostGpuImageResource,
     simpleos_host_gpu_draw_ir_encode, simpleos_host_gpu_draw_ir_decode,
     simpleos_host_gpu_image_resource, simpleos_host_gpu_image_resource_coverage_reason,
-    simpleos_host_gpu_image_resources_encode, simpleos_host_gpu_image_resources_decode
+    simpleos_host_gpu_image_resources_encode, simpleos_host_gpu_image_resources_decode,
+    simpleos_host_gpu_image_resources_validate
 }
 use std.common.ui.draw_ir.{
     DRAW_IR_BACKEND_GPU, DRAW_IR_COMMAND_IMAGE, DRAW_IR_COMMAND_RECT,
@@ -48,7 +49,7 @@ use std.common.ui.draw_ir.{
     draw_ir_box_with_style, draw_ir_group_command, draw_ir_image_command,
     draw_ir_rect, draw_ir_rect_bounds, draw_ir_style_prop, draw_ir_text
 }
-use std.common.base_encoding.utilities.{text_to_bytes, bytes_to_text}
+use std.common.base_encoding.utilities.{base_encoding_text_to_bytes as text_to_bytes, base_encoding_bytes_to_text as bytes_to_text}
 use std.common.gpu.simpleos_host_gpu_protocol.{
     SIMPLEOS_HOST_GPU_IMAGE_RESOURCE_HEADER_BYTES,
     SIMPLEOS_HOST_GPU_MAX_IMAGE_URI_BYTES,
@@ -76,6 +77,16 @@ fn _host_gpu_resource_bytes_copy(bytes: [u8]) -> [u8]:
     for byte in bytes:
         copy.push(byte)
     copy
+
+fn _expect_image_resource_validation_parity(
+    resources: [SimpleOsHostGpuImageResource], max_bytes: i64, max_resources: i64, reason: text
+):
+    val validation = simpleos_host_gpu_image_resources_validate(resources, max_bytes, max_resources)
+    val encoded = simpleos_host_gpu_image_resources_encode(resources, max_bytes, max_resources)
+    expect(validation.ok).to_equal(false)
+    expect(validation.reason).to_equal(reason)
+    expect(encoded.ok).to_equal(false)
+    expect(encoded.reason).to_equal(reason)
 
 fn _host_gpu_image_composition(uris: [text]) -> DrawIrComposition:
     var commands: [DrawIrCommand] = []
@@ -188,6 +199,12 @@ describe "SimpleOS host-GPU bounded Draw IR codec":
         val decoded = simpleos_host_gpu_draw_ir_decode([], DRAW_IR_TEST_MAX_BYTES, DRAW_IR_TEST_MAX_COMMANDS)
         expect(decoded.ok).to_be(false)
         expect(decoded.reason).to_equal("empty-payload")
+
+    it "rejects an invalid UTF-8 payload before schema parsing":
+        val bad: [u8] = [100u8, 255u8, 10u8]
+        val decoded = simpleos_host_gpu_draw_ir_decode(bad, DRAW_IR_TEST_MAX_BYTES, DRAW_IR_TEST_MAX_COMMANDS)
+        expect(decoded.ok).to_be(false)
+        expect(decoded.reason).to_equal("invalid-utf8")
 
     it "rejects a corrupted Draw IR schema before decoding":
         # @req REQ-HOSTGPU-DRAWIR-001

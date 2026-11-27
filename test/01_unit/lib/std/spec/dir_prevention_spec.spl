@@ -1,0 +1,87 @@
+# Directory-wide prevention policy: resolution, parsing, caching.
+# Feature: doc/08_tracking/bug/sspec_no_dir_wide_prevention_scope_2026-08-07.md
+# Runs no child process; the end-to-end check lives in
+# dir_prevention_policy_runner_spec.spl.
+use std.spec.*
+use std.nogc_sync_mut.spec.dir_prevention.{
+    dir_prevention_walk, dir_prevention_env_value, dir_prevention_cache_misses,
+    dir_prevention_parse, dir_prevention_load,
+    DIR_PREVENTION_FILE, DIR_PREVENTION_ENV, DIR_PREVENTION_SEP}
+
+val FIXTURE_ROOT: text = "test/fixtures/dir_prevention"
+val POLICY_DIR: text = FIXTURE_ROOT + "/policy_dir"
+val NESTED_DIR: text = POLICY_DIR + "/nested"
+
+describe "dir_prevention_walk":
+    it "finds the policy file in the spec's own directory":
+        val found = dir_prevention_walk(POLICY_DIR)
+        expect(found.len()).to_equal(1)
+        expect(found[0]).to_equal(POLICY_DIR + "/" + DIR_PREVENTION_FILE)
+
+    it "merges ancestor policies root-most first":
+        val found = dir_prevention_walk(NESTED_DIR)
+        expect(found.len()).to_equal(2)
+        expect(found[0]).to_equal(POLICY_DIR + "/" + DIR_PREVENTION_FILE)
+        expect(found[1]).to_equal(NESTED_DIR + "/" + DIR_PREVENTION_FILE)
+
+    it "is empty for a directory chain without a policy file":
+        expect(dir_prevention_walk(FIXTURE_ROOT).len()).to_equal(0)
+        expect(dir_prevention_walk("test/01_unit/lib/std/spec").len()).to_equal(0)
+
+    it "accepts backslash paths":
+        val found = dir_prevention_walk("test\\fixtures\\dir_prevention\\policy_dir")
+        expect(found.len()).to_equal(1)
+
+describe "dir_prevention_env_value":
+    it "joins the chain with the separator and caches per directory":
+        val before = dir_prevention_cache_misses()
+        val first = dir_prevention_env_value(NESTED_DIR + "/a_spec.spl")
+        val again = dir_prevention_env_value(NESTED_DIR + "/b_spec.spl")
+        expect(first).to_equal(again)
+        expect(first).to_contain(DIR_PREVENTION_SEP)
+        expect(first).to_contain(POLICY_DIR + "/" + DIR_PREVENTION_FILE)
+        expect(first).to_contain(NESTED_DIR + "/" + DIR_PREVENTION_FILE)
+        # two specs in one directory cost exactly one walk
+        expect(dir_prevention_cache_misses() - before).to_equal(1)
+
+    it "yields an empty value (unchanged behaviour) when no policy applies":
+        expect(dir_prevention_env_value("test/01_unit/lib/std/spec/dir_prevention_spec.spl")).to_equal("")
+
+    it "names the env var the runner and std.spec agree on":
+        expect(DIR_PREVENTION_ENV).to_equal("SIMPLE_SPEC_DIR_PREVENTION")
+
+describe "dir_prevention_parse":
+    it "reads mock, reason and the at_most budget":
+        val src = "# comment\nprevent:\n  - mock: fs_write\n    reason: no disk\n  - mock: net_send\n    at_most: 2\n    reason: two sends\n"
+        val rules = dir_prevention_parse(src, "origin.sdn")
+        expect(rules.len()).to_equal(2)
+        expect(rules[0].mock_name).to_equal("fs_write")
+        expect(rules[0].max_allowed).to_equal(0)
+        expect(rules[0].reason).to_equal("no disk")
+        expect(rules[0].source).to_equal("origin.sdn")
+        expect(rules[1].mock_name).to_equal("net_send")
+        expect(rules[1].max_allowed).to_equal(2)
+
+    it "ignores blank lines, comments and keys outside a rule":
+        val src = "\n# top\nreason: stray\nprevent:\n\n  - mock: a\n\n    # inner comment\n    reason: r\n"
+        val rules = dir_prevention_parse(src, "o")
+        expect(rules.len()).to_equal(1)
+        expect(rules[0].reason).to_equal("r")
+
+    it "drops a rule without a mock name and yields nothing for empty input":
+        expect(dir_prevention_parse("prevent:\n  - mock:\n    reason: x\n", "o").len()).to_equal(0)
+        expect(dir_prevention_parse("", "o").len()).to_equal(0)
+
+describe "dir_prevention_load":
+    it "loads every file of a joined env value in order":
+        val joined = POLICY_DIR + "/" + DIR_PREVENTION_FILE + DIR_PREVENTION_SEP + NESTED_DIR + "/" + DIR_PREVENTION_FILE
+        val rules = dir_prevention_load(joined)
+        expect(rules.len()).to_equal(3)
+        expect(rules[0].mock_name).to_equal("forbidden_seam")
+        expect(rules[1].mock_name).to_equal("budgeted_seam")
+        expect(rules[1].max_allowed).to_equal(2)
+        expect(rules[2].mock_name).to_equal("nested_seam")
+
+    it "skips missing files and an empty value":
+        expect(dir_prevention_load("").len()).to_equal(0)
+        expect(dir_prevention_load(FIXTURE_ROOT + "/missing.sdn").len()).to_equal(0)

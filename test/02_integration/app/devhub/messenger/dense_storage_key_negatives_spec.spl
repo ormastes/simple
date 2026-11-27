@@ -1,0 +1,102 @@
+# Integration layer, I/O and crypto: key and secret negatives through the
+# server storage port (format=sqlcipher4) on the dense encrypted database.
+#
+# Every rejection here fires on page 1 before any page is decrypted, so the
+# whole file runs in seconds even on the Phase 1 seed.  The positive controls
+# (the same file opened with the right key) are dense_codec_page_auth_spec.spl
+# and dense_storage_rows_spec.spl.
+# Lifecycle: doc/01_research/app/tools/devhub/devhub_cli_wrapper_forwarding_2026-09-06.md ;
+# doc/03_plan/agent_tasks/devhub_messenger_master.md ;
+# doc/04_architecture/app/devhub/messenger_gateway.md ;
+# doc/05_design/app/devhub/messenger_sdn_and_api.md
+# @manual_section: storage-port-key-negatives
+
+"""
+## Purpose and audience
+Purpose: a wrong, near-miss, missing, empty or malformed secret must never open
+the dense encrypted database, must be classified, and must never echo secret or
+plaintext into the error text; the source file must stay byte-identical.
+Audience: reviewers of the secret-handling edge of the Messenger read path.
+The passphrase is public synthetic test data from dense_ground_truth.json.
+"""
+
+use std.spec.*
+use test.support.devhub_messenger_dense.*
+use std.common.json.value.{JsonValue, json_value_field}
+
+val truth = dense_truth()
+val good = truth_passphrase(truth)
+val base_path = dense_path(DENSE_BASE)
+val sha_before = dense_file_sha256(DENSE_BASE)
+val _secret_ready = dense_set_secret(good)
+val LEAKS: [text] = [good, "definitely-wrong", "SQLite format", "tie-first", "fresh general"]
+
+describe "wrong and near-miss passphrases":
+    it "rejects a wrong passphrase as an authentication failure without echoing it":
+        # @req REQ-MSGR-DENSE-KEY-001
+        step("Open the database with an unrelated passphrase")
+        # @capture(protocol_json): storage-port error code and message for the wrong passphrase
+        val verdict = port_verdict_with_secret("definitely-wrong", base_path, DENSE_REF, good)
+        expect(verdict_code(verdict)).to_equal("STORAGE_PORT_AUTHENTICATION_FAILED")
+        expect(leaks_none(verdict, LEAKS)).to_equal(true)
+
+    it "rejects every near-miss of the right passphrase":
+        # @req REQ-MSGR-DENSE-KEY-002
+        step("Open with the right passphrase plus a suffix, minus its last character, case-changed, and space-padded")
+        # @capture(statistics): rejection code per near-miss variant
+        val shorter = good.substring(0, good.len() - 1)
+        val upper_first = good.substring(0, 1).upper() + good.substring(1, good.len())
+        val variants: [text] = [good + "x", shorter, upper_first, good + " ", " " + good]
+        var seen = ""
+        for variant in variants:
+            val verdict = port_verdict_with_secret(variant, base_path, DENSE_REF, good)
+            seen = seen + verdict_code(verdict) + ";"
+        expect(seen).to_equal("STORAGE_PORT_AUTHENTICATION_FAILED;STORAGE_PORT_AUTHENTICATION_FAILED;STORAGE_PORT_AUTHENTICATION_FAILED;STORAGE_PORT_AUTHENTICATION_FAILED;STORAGE_PORT_AUTHENTICATION_FAILED;")
+        expect(upper_first == good).to_equal(false)
+
+    it "gives wrong key and tampered first page the same code and the same text":
+        # @req REQ-MSGR-DENSE-KEY-003
+        step("Open the pristine file with a wrong key and the tampered-first-page file with the right key")
+        # @capture(protocol_json): the two error strings, which must be identical
+        val wrong = port_verdict_with_secret("definitely-wrong", base_path, DENSE_REF, good)
+        val tampered = port_verdict(dense_path("dense_multipage_tamper_first.sqlcipher4"), "sqlcipher4", DENSE_REF)
+        expect(verdict_code(tampered)).to_equal("STORAGE_PORT_AUTHENTICATION_FAILED")
+        expect(tampered).to_equal(wrong)
+
+describe "missing, empty and malformed secrets":
+    it "reports an unset secret as missing and names only the variable, not a value":
+        # @req REQ-MSGR-DENSE-KEY-004
+        step("Unset the secret variable and open")
+        # @capture(protocol_json): storage-port error code and message with the variable unset
+        val verdict = port_verdict_without_secret(base_path, good)
+        expect(verdict_code(verdict)).to_equal("STORAGE_PORT_MISSING_SECRET")
+        expect(verdict_message(verdict).contains(DENSE_ENV)).to_equal(true)
+        expect(leaks_none(verdict, LEAKS)).to_equal(true)
+
+    it "treats an empty secret as missing rather than as an empty passphrase":
+        # @req REQ-MSGR-DENSE-KEY-005
+        step("Set the secret variable to the empty string and open")
+        # @capture(protocol_json): storage-port error code for the empty secret
+        val verdict = port_verdict_with_secret("", base_path, DENSE_REF, good)
+        expect(verdict_code(verdict)).to_equal("STORAGE_PORT_MISSING_SECRET")
+
+    it "rejects an empty or malformed secret reference before reading any secret":
+        # @req REQ-MSGR-DENSE-KEY-006
+        step("Open with an empty ref, a ref without the scheme, an empty name, a dot-dot name, and an unbound name")
+        # @capture(statistics): rejection code and detail per malformed reference
+        val refs: [text] = ["", "not-a-ref", "secret://", "secret://messenger/../dense", "secret://messenger/unbound"]
+        var seen = ""
+        for ref in refs:
+            val verdict = port_verdict(base_path, "sqlcipher4", ref)
+            seen = seen + verdict_code(verdict) + ";"
+            expect(leaks_none(verdict, LEAKS)).to_equal(true)
+        expect(seen).to_equal("STORAGE_PORT_MISSING_SECRET;STORAGE_PORT_MISSING_SECRET;STORAGE_PORT_MISSING_SECRET;STORAGE_PORT_MISSING_SECRET;STORAGE_PORT_MISSING_SECRET;")
+
+describe "the source stays untouched":
+    it "leaves the encrypted source byte-identical after every rejected open":
+        # @req REQ-MSGR-DENSE-KEY-007
+        step("Compare the file hash taken before the negatives with the generator's hashlib value")
+        # @capture(statistics): sha256 before and after against the ground-truth hashlib digest
+        val expected = tf(json_value_field(json_value_field(truth, "files"), DENSE_BASE), "sha256")
+        expect(sha_before).to_equal(expected)
+        expect(dense_file_sha256(DENSE_BASE)).to_equal(expected)

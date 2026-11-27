@@ -200,3 +200,69 @@ full authority native linkage and deployment remain unqualified. The separate
 class-static compiler repair is an UNRUN draft; it has not been validated by
 these caller probes. Keep this bug OPEN and do not close the authoritative
 bug DB or report full native/compiler PASS from these results.
+
+## Phase 3 AsyncFile owner attribution (2026-10-26, Astra lane)
+
+The normal Stage 2 producer acfedbebd1db457efc0f8d1b0b3020dfa20711157bc090334c1b523a6a228779 compiled the 389-module hir_codec entry closure from a0aa04ea5df71665466a5c148cd148b6711da23e plus an unrelated explicit HirTypeKind import. Its go-to-end manifest identifies lib.nogc_async_mut.io.file as a MIR failure with E-MIR-TYPE-TypeParam: unsubstituted generic type parameter T. This is actual module attribution. Its FileThreadPool.exec has one Future.from_value(task()) call, matching the existing generic static factory mechanism.
+
+A candidate replaces that call with one evaluation of task(), a typed Poll<i64>.Ready value, and the real Future<i64> constructor. Public signature and synchronous task execution stay unchanged. The intended code recovery reference is a0aa04ea5df71665466a5c148cd148b6711da23e. Native runtime qualification is PENDING; no workaround fix or retirement is claimed. Workaround source commit: [9ed671541235acb1050ca51ccb0b3f0f5e19fd46](https://github.com/ormastes/simple/commit/9ed671541235acb1050ca51ccb0b3f0f5e19fd46) (same source patch as local `c2bb5f8e273`). Qualified bug DB reconciliation remains pending.
+
+Regression fixture: test/fixtures/compiler/async_file_future_receiver/main.spl. It must exit zero and print exactly one async-file-task-called line followed by async-file-future-ready-pass, proving the actual production method invokes the supplied task once and returns Ready(37). Pending or a wrong payload fails. The other unchanged failed owner in the diagnostic closure is io.buffer; its prior six-cycle failure is not cleared by this candidate.
+
+Evidence: C:/dev/wt-s3self/build/native_probe/phase3-hir-codec-import/cycle2-serial-parse/worker-output.exe.go-to-end.sdn and retained full-worker-stderr-1.log/full-worker-stderr-2.log. The command exited 1, with 387 successful MIR modules and two failed owners; aggregate dependency failures blocked all object emission in entry-object mode.
+
+Source review confirms that the supplied task is evaluated exactly once and that the concrete constructor preserves the original Future.from_value fields (empty state and Ready payload). No known runtime regression was found by source review; this does not claim a completed runtime test. The first file-workaround attempt passed HIR/mono for 390 modules but was refused before MIR because ordinary dynload selects Both output. The existing cycle2-native-mode job uses the supported one-binary output mode and remains the pending native qualification; no new retry is implied by this record.
+
+## 2026-11-04 triage (n88b, opus-n88b): deferred, needs stage3 cross-module repro
+
+A single-module analog (`class Fut<T>` with `static fn from_value(v: T) -> Fut<T>`, both
+`Fut.from_value(true)` and `Fut<bool>.from_value(true)` returning `Fut<bool>`) lowers through
+parse->HIR->MIR on current release/1.0.0 with 0 HIR/MIR errors, so the failure needs the imported
+`std.nogc_async_mut.async` `Future<T>` owner. Production callers were already moved to concrete
+construction (9ed67154123, dd0b28e9c72). Stage3 repro: native-build a module whose function
+returns `Future<bool>` via `Future.from_value(true)` imported from std; expect the
+`E-MIR-TYPE-TypeParam` diagnostic if still broken. Status stays open.
+
+
+## Round 15 note (2026-11-07, work/r15-stdlib-20261107)
+
+MIR-level spec test/01_unit/compiler/50.mir/generic_static_receiver_typeparam_spec.spl (single module, inferred + explicit receiver) is green: the failure needs the imported std Future owner. Native verification: native-build test/fixtures/compiler/async_file_future_receiver/main.spl.
+
+## WA-S6 re-verification (2026-11-26): still OPEN for `Future<i64>` scalar payloads in `50.mir`
+
+While `Future.from_value(Some(text_val))` (`Future<text?>`) now lowers and
+decodes cleanly through `rt_is_some`/`rt_unwrap_or_self`, replacing the
+concrete constructor in `FileThreadPool.exec(task: fn() -> i64) -> Future<i64>`
+(`src/lib/nogc_async_mut/io/file.spl:235`) with `Future.from_value(task())`
+still miscompiles `i64` payloads in pure-Simple `50.mir` -> `MirToLlvm` IR:
+1. At the generic static-factory call site, `Pool.exec` boxes `task()`'s raw
+   `i64` (`37`) with `call i64 @rt_value_int_wide(i64 %l11)` (`297`) before
+   passing `%l14` to `Future.from_value(i64)`.
+2. Inside `Future.from_value(i64 %l1)`, `Poll.Ready(value)` stores `%l1`
+   verbatim via `rt_enum_new(..., i64 %l1)` (storing `297` in the payload).
+3. At a concrete consumer `val state: Poll<i64> = fut.poll(); match state: case Poll.Ready(v): v`,
+   `decode_instantiated_enum_payload_slot_v1` -> `enum_payload_value` returns
+   raw `rt_enum_payload` with no `rt_value_as_int_wide` unbox (returning
+   `297` instead of `37`). Unannotated `match fut.poll(): case Poll.Ready(v):`
+   also still fails HIR lowering (`expression_components.spl:600`:
+   `generic enum pattern requires its declared subject owner`).
+
+Status for `FileThreadPool.exec` (`Future<i64>`) remains OPEN (`50.mir` erased
+generic `T` vs raw `I64` enum-payload ABI mismatch). Workaround in
+`src/lib/nogc_async_mut/io/file.spl:235` is KEPT with updated reason and
+pinned by `test/01_unit/lib/nogc_async_mut/io/wa_src_lane6_file_future_spec.spl`.
+
+## Root cause and fix for `Future<T>` scalar `i64`/`f64` payloads (2026-11-26)
+
+Reproduced natively on uniform P3 (`D:\t\p3-inc\simple.exe` `native-build --backend llvm`):
+- `Future<i64>.from_value(37)` -> `296` (`37 << 3`), `Future.from_value(37)` -> `296`, `poll_unwrap(Future<i64>.from_value(37).poll())` -> `296`, `complete(37)` -> `296`, `map(\x: x + 1)` -> `2376`, `Future<i64>.from_value(9000000000)` -> `72000000000`.
+- `Future<f64>.from_value(2.5)` -> denormal garbage (`1.31e-308`, `rt_value_float` heap pointer bitcast directly to `double`).
+- Concrete `Future<i64>(state: [], poll_result: Poll.Ready(37))` -> `37`.
+
+Root cause in `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl` + `mir_lowering_stmts.spl`:
+Generic classes with non-`Dict<K, T>` fields (`Future<T>{poll_result: Poll<T>}`, `Cell<T>`, `Box<T>`) store and decode `T` payloads raw/bitcast (`module_lowering.spl:2631-2638`). Only `#erased-dict-class` methods opt into `rt_value_int_wide` via `__erased_scalar_slot__`. Because `Future` declares `from_value(value: T)` (`static fn`) and `complete(value: T)` inline inside `class Future<T>`, `resolved_call_hir_param_types` published `[TypeParam("T")]`, causing `lower_method_call_arg` (`mir_lowering_stmts.spl:3306`) to run `box_runtime_value` (`rt_value_int_wide` / `rt_value_float`) on those arguments while `Poll<T>` stored and decoded raw/bitcast words.
+
+Fix in `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl`:
+- Added `class_erased_raw_slot_flags_v1`, `mask_class_erased_raw_param_types_v1`, and `adapt_class_erased_raw_operands_v1` across the `InstanceMethod`, `StaticMethod`, and `Unresolved` static/instance method call arms (`sym.generic_param_count == 0` and not `#erased-dict-class`).
+- Class-level `TypeParam` slots now pass integers/bools/records raw, bitcast `f64`/`f32` to `i64` (`bitcast_float_enum_payload`) to match `Poll<f64>` / erased `i64` param ABI, and retain `box_runtime_value` for `nil` and `text`.
+- Retired `@workaround bug=native_future_receiver_typeparam_2026_10_18` in `src/lib/nogc_async_mut/io/file.spl:235` back to `Future.from_value(task())`, updated `test/01_unit/lib/nogc_async_mut/io/wa_src_lane6_file_future_spec.spl`, and added `test/01_unit/compiler/50.mir/generic_future_scalar_payload_spec.spl`. (Note: unannotated `match fut.poll(): case Poll.Ready(v):` remains an HIR pattern-subject annotation requirement.)

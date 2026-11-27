@@ -498,3 +498,26 @@ modified `.spl` source directly via `simple test`/interpreter mode — the
 real-import spec above is genuine build-and-run verification of the fixed
 functions, not merely a source read or a parallel reimplementation.
 
+
+## 2026-11-25 verification (lane p2w3-ak): seed-side fix confirmed in the pinned binary
+
+On worktree work/p2w3-ak-20261125 (release/1.0.0 tip dd709d76f18), the tracked
+`bin/simple.exe` (Rust seed v1.0.0-rc.1, Windows) was run against this doc's
+own minimal always-reproducible repro:
+
+```simple
+extern fn rt_string_bytes(value: text) -> [i64]
+
+fn main() -> i64:
+    val hb = rt_string_bytes("abc")
+    print "hb.len()={hb.len()}"
+    print "bytes={hb[0]},{hb[1]},{hb[2]}"
+    0
+```
+
+Output: `hb.len()=3`, `bytes=97,98,99`, exit 0 — the exact call that previously
+crashed with ``method `len` not found on type `i64` `` now returns the correct
+byte array, so the pinned seed contains the Worker-P `EXTERN_DISPATCH`
+`rt_string_bytes` handler. The pure-Simple registry-scoping half of the fix
+lives in `src/compiler/10.frontend/core/interpreter/` (source present at this
+HEAD). Closed status re-confirmed.

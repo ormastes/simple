@@ -1,0 +1,45 @@
+#!/bin/sh
+# Real native owner/worker qualification; no P2 compiler build or Tree claim.
+set -eu
+if [ "$(uname -s)" != Darwin ]; then echo 'UNAVAILABLE: AMFI image owner requires macOS'; exit 77; fi
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+scratch=$(mktemp -d "${TMPDIR:-/tmp}/sosix-bound-image.XXXXXXXX")
+trap 'rm -rf "$scratch"' EXIT HUP INT TERM
+cc=${CC:-cc}
+"$cc" -std=c11 -O0 "$root/src/runtime/test/rt_sosix_darwin_constraint_fixture.c" -o "$scratch/source"
+"$cc" -std=c11 -O0 -DSOSIX_LIBRARY_FIXTURE=99 -dynamiclib \
+    "$root/src/runtime/test/rt_sosix_darwin_constraint_fixture.c" -o "$scratch/injected.dylib"
+"$cc" -std=c11 -O0 -Wno-deprecated-declarations \
+    "$root/src/runtime/test/rt_sosix_darwin_signature_selfcheck.c" -o "$scratch/signature-check"
+"$scratch/signature-check" "$scratch/source" "$scratch/provisioned"
+codesign --verify --strict "$scratch/provisioned"
+echo 'PASS: Apple strict validation accepts the provisioned in-memory signature'
+"$cc" -fobjc-arc -Wno-deprecated-declarations -framework Foundation \
+    "$root/src/runtime/test/rt_sosix_darwin_lwcr_parity_selfcheck.m" -o "$scratch/parity"
+"$scratch/parity"
+"$cc" -std=c11 -O0 -Wno-deprecated-declarations \
+    "$root/src/runtime/test/rt_sosix_darwin_bound_image_selfcheck.c" -o "$scratch/owner-check"
+"$scratch/owner-check" "$scratch/injected.dylib" "$scratch/injected.marker"
+"$cc" -std=c11 -O0 -Wno-deprecated-declarations \
+    "$root/src/runtime/tools/sosix_darwin_snapshot_runner.c" -o "$scratch/worker"
+"$scratch/worker" --capabilities --profile bound-image-group > "$scratch/capabilities"
+test "$(cat "$scratch/capabilities")" = 'profile: "bound-image-group"
+amfi_spi_available: true
+source_sha256_required: true
+system_libraries_only: true
+process_group: true
+complete_descendant_tree: false
+sealed_v4: false'
+digest=$(shasum -a 256 "$scratch/source" | awk '{print $1}')
+"$scratch/worker" --profile bound-image-group --sha256 "$digest" --cwd /private/tmp -- \
+    "$scratch/source" plain "$scratch/worker.marker"
+test -f "$scratch/worker.marker"
+echo 'PASS: worker executes the explicit authenticated bound-image profile'
+status=0
+"$scratch/worker" --profile bound-image-group \
+    --sha256 0000000000000000000000000000000000000000000000000000000000000000 --cwd /private/tmp -- \
+    "$scratch/source" plain "$scratch/denied.marker" 2>"$scratch/denied.error" || status=$?
+test "$status" = 125
+test ! -e "$scratch/denied.marker"
+echo 'PASS: worker refuses a mismatched manifest digest before execution'
+echo 'STATUS: PASS (kernel-bound image and cooperative group only; strict Tree/V4 unavailable)'

@@ -5,7 +5,7 @@ Two workflows implement the first slice of
 
 | Workflow | What it does | Triggers |
 |---|---|---|
-| `phase-ladder.yml` | Climbs every bootstrap lane to phase 4, one phase per rung, then publishes what each lane reached as the next numbered RC | push to `release/**` and `release_phase3` (bootstrap-relevant paths), nightly 04:17 KST, manual |
+| `phase-ladder.yml` | Climbs every bootstrap lane to phase 4, one phase per rung (darwin-x86_64, the slow Intel macOS runner, climbs in its own chain so it never holds the other lanes back), then publishes what each lane reached as the next numbered RC | push to `release/**` and `release_phase3` (bootstrap-relevant paths), nightly 04:17 KST, manual |
 | `component-build.yml` | Builds only the kernels, plugins, providers and SIMD variants a change touches, using an already-proven compiler | push and PR on `main`, `release/**`, `release_phase3`; manual |
 
 ## Phase ladder
@@ -29,13 +29,53 @@ Two workflows implement the first slice of
 1. Finds the lane's highest phase in the earlier rungs' handoffs (`<platform>-p<N>/`).
 2. Stages it as `build/bootstrap/stage<N>/simple`, so the resolver
    (`resolve-bootstrap-compiler.shs`, `config/bootstrap.sdn` `compiler: auto`) picks it.
-   Rung 1 has no handoff, so the resolver takes the newest RC instead.
+   Rung 1 has no handoff, so the resolver takes the newest RC instead; when no RC
+   package qualifies, the step builds phase 1 with the Rust seed (the `release.yml` commands).
 3. Builds phase N+1 with `build-next-phase-ci.shs` (capped at 4).
 4. Requires the new compiler to build and run a hello world. `--version` alone is not enough.
 5. Writes `<out-dir>/<platform>-p<N+1>/{simple,PHASE}` as the next rung's input.
+6. From phase 3 on (`PHASE_LADDER_ESSENTIALS_FROM`, default 3; earlier phases record `not-built`), builds the **essentials** with the new phase: `simple_cli` (`src/app/cli/main.spl`, must answer `--version`), `simple_test_runner` (`src/app/test_runner_new/main.spl`) and `simple_build_runner` (`src/app/buildrunner/main.spl`), into `<handoff>/essentials/` with one line per binary in `essentials/STATUS` (`ok`, `failed`, or `not-built: <reason>`). A failed essential is recorded and its log kept, but does not stop the compiler climbing. Phase-4 essentials carry forward to later rungs. The RC package ships every `ok` essential in `bin/` and keeps `STATUS` as `bin/ESSENTIALS`; the run summary lists each lane's essentials. The riscv64 cross lane records `not-built` for now (it cross-builds only the compiler).
 
 A lane that fails one rung is retried by the next rung from the same input.
 Other lanes keep climbing.
+
+### Release producer selection
+
+For release qualification, choose the highest phase whose **actual compiler
+binary** has a known-success receipt for that platform, then choose the most
+recent qualifying producer within that phase. Bind the receipt to the binary
+digest, source revision/digest, toolchain/runtime identity and digest, and the
+exact Hello source/build/output evidence: compile succeeded, the emitted executable
+ran with exit status 0, and produced the expected output. The `PHASE` file,
+directory name, version banner, or resolver's Hello smoke by itself is not a
+release producer receipt.
+
+Skip lower phases already proven for the required release contract. If a
+verified Phase 3 candidate exists, use that exact immutable binary to produce
+Phase 3 (P3 -> P3), then build the Phase 4 full CLI from that output and run
+the required tests.
+A missing or incompatible candidate permits only an explicit, bounded fallback
+to the next known-success candidate that supports the task; record why the
+fallback was needed. Do not rebuild lower phases solely because the default
+pipeline starts from the Rust seed, and do not fall through to the seed
+implicitly. Keep each producer frozen and its outputs/cache private. Use the
+normal cache policy and the release build's LLVM/LLD configuration with 24
+build jobs for P3 -> P3 and Phase 4 native builds. Use any receipt-bound stage
+resume command unchanged when it pins its own worker count. This is a selection
+policy, not a claim that a Phase 3 candidate is currently admitted.
+
+The existing `config/bootstrap.sdn` keys (`compiler: auto` and
+`compiler_release: latest`) remain the selector inputs. The resolver's
+`auto` ordering is a candidate-discovery convenience; its smoke result does not
+replace the stronger release evidence above or add another configuration
+layer. See the [release qualification guide](../release_full_bootstrap.md).
+
+For a prerelease or beta, platform qualification may be partial only when at
+least one platform binary is genuinely qualified and every missing or failed
+platform is explicitly reported. Zero qualified artifacts, or any security or
+artifact-integrity failure, cannot be reported as PASS. Stable releases retain
+the complete required platform and release gates. This qualification policy
+does not define tag triggers or infer which workflow a tag invokes.
 
 ### Publishing moves the default compiler
 
@@ -51,11 +91,21 @@ The `publish` job packages each lane's highest phase with
 ```sh
 gh workflow run phase-ladder.yml --ref release/1.0.0                      # all lanes
 gh workflow run phase-ladder.yml --ref release/1.0.0 -f lanes=linux-x86_64,linux-riscv64 -f publish=false
+gh workflow run phase-ladder.yml --ref release/1.0.0 -f lanes=linux-x86_64 -f max_rung=1 -f fresh=false -f publish=false
 ```
 
-Rung 1 needs a proven compiler: an RC package for the lane, or a local stage
-binary. With neither, run `release.yml`, which builds phase 1 from the Rust seed
-and drops an RC. The ladder deliberately does not rebuild the seed.
+For a bounded diagnostic advance, select the isolated work branch and use
+`max_rung=1`, `fresh=false`, and `publish=false`. The manual budget accepts
+1–4 and defaults to 4; push and scheduled runs retain four rungs. A single
+rung attempts the next phase from the highest retained handoff, rather than
+rebuilding Phase 1. Inspect the actual compiler/Hello result and receipts before
+advancing again. A failed attempt requires a repair or new evidence, not another
+unchanged retry. Successful wrapper mocks do not qualify a compiler.
+
+Rung 1 starts from an RC package for the lane or a local stage binary. With
+neither, it builds the Rust seed and phase 1 itself, so a lane with no RC package
+still climbs. The rung installs what that needs: clang/lld/llvm on Linux, Homebrew
+LLVM on macOS, rustup in the FreeBSD VM. Later rungs never use the seed.
 
 ### freebsd-riscv64 (local lane)
 
@@ -121,3 +171,19 @@ the previous incremental state. State is saved only after a successful build.
 - The remaining 20-lane allocation, slot mutexes, release-selector config,
   provenance/admission, and the manual-debug transport from the plan are not
   implemented yet.
+
+<!-- wave-f-perf-analysis-collection-refactoring-2026-11-19 -->
+
+## Performance Analyzer Bootstrap Staging and Feature-Off Isolation (2026-11-18)
+
+Canonical plan: [Simple Performance Analysis and Collection Refactoring](../../../03_plan/compiler/performance_analysis_and_collection_refactoring_2026-11-18.md) (`D11`, `D12`, §8.3–§8.4, §13.3, §16.2; guard spec: `test/05_perf/compiler/perf_analyzer_overhead_guard_spec.spl`).
+
+To keep early CPU bootstrap fast, deterministic, and free of solver or whole-program dependencies, the phase ladder enforces strict staging for `PERF-*` symbolic analysis and collection refactoring (`src/compiler/35.semantics/perf/`):
+
+| Ladder Stage | Performance Analyzer Policy |
+|--------------|-----------------------------|
+| **Rungs 1–3 (Phase 1 -> Phase 3 bootstrap)** | **Feature-off (`T0` existing facts only, `D12`, `I10`):** No mandatory symbolic cost analyzer, recurrence/AARA solver, analyzer plugin load, or source/MIR collection pipeline rewrite runs on the bootstrap compile path. Disabled analysis allocates zero `perf_analysis_contracts_v1` side tables and leaves emitted code identical. |
+| **Phase 4 full-CLI & CI validation** | Builds and tests `T1`/`T2` lint/LSP/MCP perf analyzers alongside debug/release artifacts, runs `simple perf compare --baseline --current` differential checks (`C16`), and executes `perf_analysis_collection_refactoring_spec.spl` and `perf_analyzer_overhead_guard_spec.spl`. |
+| **Optional `T3` deep analyzer plugins** | Packaged statically or loaded dynamically only through the audited plugin boundary (`I12`); a missing optional plugin reduces `T3` diagnostic coverage (`PERF-ANALYSIS-001`) without affecting normal compilation (`§14.3`). |
+
+File-based incremental caching remains the compiler scheduling boundary across all rungs: per-function `FunctionCostSummaryV1` caches operate inside semantic lint/query sessions without introducing a mandatory whole-project HIR/MIR phase barrier (§13.3).

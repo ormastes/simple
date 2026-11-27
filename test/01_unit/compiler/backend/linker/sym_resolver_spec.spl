@@ -220,7 +220,9 @@ describe "SymResolver - strong vs weak":
         expect(e.offset).to_equal(32)
         expect(e.size).to_equal(48)
         expect(e.obj_idx).to_equal(0)
-        val placed = elf_place_common(elf_static_place([make_obj([common_a, common_b])]).unwrap(), res)
+        val empty_live: [[bool]] = [[]]
+        val common_live: {text: bool} = {"shared_data": true}
+        val placed = elf_place_common(elf_static_place([make_obj([common_a, common_b])], empty_live).unwrap(), res, common_live)
         expect(placed.inputs.outs.len()).to_equal(1)
         expect(placed.inputs.outs[0].name).to_equal(".bss")
         expect(placed.inputs.outs[0].sh_type).to_equal(8)
@@ -273,3 +275,85 @@ describe "SymResolver - empty-name symbols":
         val res = sym_resolve_objects([obj])
         expect(sym_defined_count(res)).to_equal(1)
         expect(sym_has_symbol(res, "real_fn")).to_equal(true)
+
+# ============================================================================
+# Module-scoped mono instances (per-file P-D): the native backend binds a
+# COMDAT instance STB_WEAK in every object that instantiated it; the
+# pure-Simple resolver must keep one copy, not report a duplicate.
+# ============================================================================
+
+describe "SymResolver - COMDAT instance dedup":
+    it "two objects with the same weak instance resolve to one copy, no error":
+        val a = make_obj([ElfSymbol(st_name: 0, st_info: 34, st_other: 0, st_shndx: 1, st_value: 0x10, st_size: 6, name: "Box__get__i64")])
+        val b = make_obj([ElfSymbol(st_name: 0, st_info: 34, st_other: 0, st_shndx: 1, st_value: 0x20, st_size: 6, name: "Box__get__i64")])
+        val res = sym_resolve_objects([a, b])
+        expect(sym_error_count(res)).to_equal(0)
+        expect(sym_defined_count(res)).to_equal(1)
+        val kept = sym_get(res, "Box__get__i64")
+        expect(kept.is_some()).to_equal(true)
+        expect(kept.unwrap().obj_idx).to_equal(0)
+
+    it "two strong definitions of the instance still fail (the pre-fix behaviour)":
+        val a = make_obj([ElfSymbol(st_name: 0, st_info: 18, st_other: 0, st_shndx: 1, st_value: 0x10, st_size: 6, name: "Box__get__i64")])
+        val b = make_obj([ElfSymbol(st_name: 0, st_info: 18, st_other: 0, st_shndx: 1, st_value: 0x20, st_size: 6, name: "Box__get__i64")])
+        val res = sym_resolve_objects([a, b])
+        expect(sym_error_count(res)).to_equal(1)
+
+# glibc i686 libc.a: __x86.get_pc_thunk.* is STB_GLOBAL (hidden) in a
+# .text.__x86.get_pc_thunk.* section that is a member of a COMDAT group
+# (SHF_GROUP). Repro for bug simple_linker_armv7_i686_hosted_relocs.
+fn make_group_obj(syms: [ElfSymbol], flags: i64) -> ElfObject:
+    make_sig_obj(syms, flags, syms[0].name)
+
+# Section 1 = the defining section; when it carries SHF_GROUP, section 2 is an
+# SHT_GROUP (GRP_COMDAT, member 1) whose sh_info names a signature symbol `sig`.
+fn make_sig_obj(syms: [ElfSymbol], flags: i64, sig: text) -> ElfObject:
+    val base = make_obj(syms)
+    val null_sec = ElfSectionHeader(sh_name: 0, sh_type: 0, sh_flags: 0, sh_addr: 0, sh_size: 0, sh_info: 0)
+    val text_sec = ElfSectionHeader(sh_name: 0, sh_type: 1, sh_flags: flags, sh_addr: 0, sh_size: 4, sh_info: 0)
+    if (flags & 0x200) == 0:
+        return ElfObject(header: base.header, sections: [null_sec, text_sec], symbols: syms,
+            relocations: base.relocations, strtab: base.strtab, shstrtab: base.shstrtab, raw: base.raw)
+    var all = syms
+    all.push(ElfSymbol(st_name: 0, st_info: 3, st_other: 0, st_shndx: 1, st_value: 0, st_size: 0, name: sig))
+    val group_sec = ElfSectionHeader(sh_name: 0, sh_type: 17, sh_flags: 0, sh_addr: 0, sh_size: 8, sh_info: all.len() - 1)
+    # ELF32 image (raw[4]=1), e_shoff 0: shdr[2].sh_offset (byte 96) -> 120,
+    # group words at 120: GRP_COMDAT, member section 1.
+    var raw: [u8] = []
+    for _i in 0..128: raw.push(0u8)
+    raw[4] = 1u8
+    raw[96] = 120u8
+    raw[120] = 1u8
+    raw[124] = 1u8
+    ElfObject(header: base.header, sections: [null_sec, text_sec, group_sec], symbols: all,
+        relocations: base.relocations, strtab: base.strtab, shstrtab: base.shstrtab, raw: raw)
+
+describe "SymResolver - strong COMDAT group members":
+    it "strong definitions in SHF_GROUP sections keep the first copy, no error":
+        val s = ElfSymbol(st_name: 0, st_info: 18, st_other: 2, st_shndx: 1, st_value: 0, st_size: 4, name: "__x86.get_pc_thunk.bx")
+        val res = sym_resolve_objects([make_group_obj([s], 0x206), make_group_obj([s], 0x206)])
+        expect(sym_error_count(res)).to_equal(0)
+        expect(sym_get(res, "__x86.get_pc_thunk.bx").unwrap().obj_idx).to_equal(0)
+
+    it "a strong group member vs a strong non-group definition still fails":
+        val s = ElfSymbol(st_name: 0, st_info: 18, st_other: 0, st_shndx: 1, st_value: 0, st_size: 4, name: "dup_fn")
+        val res = sym_resolve_objects([make_group_obj([s], 0x206), make_group_obj([s], 0x6)])
+        expect(sym_error_count(res)).to_equal(1)
+
+    it "a strong non-group definition replacing a weak group one clears the COMDAT mark":
+        # follow-up to PR #10183 review item 2: stale `grouped` let a later group copy mask a real duplicate
+        val w = ElfSymbol(st_name: 0, st_info: 34, st_other: 0, st_shndx: 1, st_value: 0, st_size: 4, name: "f")
+        val s = ElfSymbol(st_name: 0, st_info: 18, st_other: 0, st_shndx: 1, st_value: 0, st_size: 4, name: "f")
+        val res = sym_resolve_objects([make_group_obj([w], 0x206), make_group_obj([s], 0x6), make_group_obj([s], 0x206)])
+        expect(sym_error_count(res)).to_equal(1)
+
+    it "strong definitions in groups with DIFFERENT signatures are still a duplicate":
+        # follow-up to PR #10183 review item 1: lld dedups COMDAT by group signature only
+        val s = ElfSymbol(st_name: 0, st_info: 18, st_other: 0, st_shndx: 1, st_value: 0, st_size: 4, name: "g")
+        val res = sym_resolve_objects([make_sig_obj([s], 0x206, "grp_a"), make_sig_obj([s], 0x206, "grp_b")])
+        expect(sym_error_count(res)).to_equal(1)
+
+    it "strong definitions in groups with the SAME signature keep the first copy":
+        val s = ElfSymbol(st_name: 0, st_info: 18, st_other: 0, st_shndx: 1, st_value: 0, st_size: 4, name: "g")
+        val res = sym_resolve_objects([make_sig_obj([s], 0x206, "grp_a"), make_sig_obj([s], 0x206, "grp_a")])
+        expect(sym_error_count(res)).to_equal(0)

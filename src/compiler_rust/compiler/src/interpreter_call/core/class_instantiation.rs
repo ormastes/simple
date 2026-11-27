@@ -114,7 +114,19 @@ pub(crate) fn instantiate_class(
         diagram_sffi::trace_method(class_name, "new");
     }
 
-    let class_def = classes.get(class_name).cloned().ok_or_else(|| {
+    // Standalone unit constructor `Name(raw)` / `Name(value: raw)`: same
+    // Value::Unit as the `raw_sfx` literal, not the record-class object, so
+    // both construction forms agree. Bug:
+    // unit_from_primitive_construction_unsupported_runtime_2026-11-15.
+    if args.len() == 1 && args[0].name.as_deref().map_or(true, |n| n == "value") {
+        if let Some(suffix) = crate::interpreter_unit::standalone_unit_suffix(class_name) {
+            let raw = evaluate_expr(&args[0].value, env, functions, classes, enums, impl_methods)?;
+            return crate::interpreter_unit::construct_standalone_unit(class_name, &suffix, raw)
+                .map_err(|msg| CompileError::semantic_with_context(msg, ErrorContext::new().with_code(codes::TYPE_MISMATCH)));
+        }
+    }
+
+    let class_def = crate::interpreter::resolve_class_in_scope(classes, class_name)?.ok_or_else(|| {
         let available_classes: Vec<&str> = classes.keys().map(|s| s.as_str()).collect();
         let suggestion = if !available_classes.is_empty() {
             typo::suggest_name(class_name, available_classes.clone())
@@ -162,6 +174,10 @@ pub(crate) fn instantiate_class(
         } else {
             undefaulted_field_fill(&field.ty, class_def.is_value_type)
         };
+        // Declared-type boundary: a `u64`/`u32`/... field holds `Value::UInt`
+        // from construction on, exactly like a typed local (see
+        // `interpreter::coerce_to_declared_field_of`).
+        let val = crate::interpreter::coerce_to_declared_field_of(&class_def, &field.name, val);
         fields.insert(field.name.clone(), val);
     }
 
@@ -248,6 +264,8 @@ pub(crate) fn instantiate_class(
             // Mark this class as currently in its `new` method
             IN_NEW_METHOD.with(|set| set.borrow_mut().insert(class_name.to_string()));
 
+            let _fn_return_guard = crate::interpreter::push_current_fn_return_type(None);
+            let _expected_target_guard = crate::interpreter::push_expected_target_type(None);
             let result = match exec_block_fn(
                 &new_method.body,
                 &mut local_env,
@@ -454,6 +472,7 @@ pub(crate) fn instantiate_class(
                     ctx,
                 ));
             }
+            let val = crate::interpreter::coerce_to_declared_field_of(&class_def, name, val);
             fields.insert(name.clone(), val);
         } else {
             while positional_idx < class_def.fields.len()
@@ -463,6 +482,7 @@ pub(crate) fn instantiate_class(
             }
             if positional_idx < class_def.fields.len() {
                 let field_name = &class_def.fields[positional_idx].name;
+                let val = crate::interpreter::coerce_to_declared_field_of(&class_def, field_name, val);
                 fields.insert(field_name.clone(), val);
                 positional_idx += 1;
                 continue;
@@ -550,5 +570,117 @@ mod tests {
             assert!(should_implicitly_call_new(false, is_static, 2, 2, true));
             assert!(!should_implicitly_call_new(false, is_static, 3, 2, true));
         }
+    }
+}
+
+/// Default value for an initializer-less module `var`/`val` of a named type
+/// (owner decision 2026-11-09, bug
+/// noinit_module_var_nonlocal_type_nil_fallback_needs_hir_zero_2026-11-09):
+/// an enum defaults to its FIRST variant, a class/struct to its default
+/// construction with every undefaulted field zero-filled (scalars 0/false/0.0,
+/// `text` "", arrays empty, nested enum/class recursively). `None` when the
+/// type is not a known class or enum (the caller keeps its existing contract)
+/// or the first enum variant carries a payload (no safe default exists).
+pub(crate) fn noinit_named_type_default(
+    ty: &Type,
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Option<Value> {
+    noinit_named_type_default_depth(ty, env, functions, classes, enums, impl_methods, 0)
+}
+
+fn noinit_named_type_default_depth(
+    ty: &Type,
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+    depth: usize,
+) -> Option<Value> {
+    if depth > 8 {
+        return None;
+    }
+    let name = match ty {
+        Type::Simple(name) => name.as_str(),
+        Type::Generic { name, .. } => name.as_str(),
+        _ => return None,
+    };
+    if let Some(enum_def) = enums.get(name) {
+        let first = enum_def.variants.first()?;
+        if first.fields.as_ref().is_some_and(|f| !f.is_empty()) {
+            return None;
+        }
+        return Some(Value::Enum {
+            enum_name: enum_def.name.clone(),
+            variant: first.name.clone(),
+            payload: None,
+        });
+    }
+    let class_def = crate::interpreter::resolve_class_in_scope(classes, name).ok().flatten()?;
+    let value = instantiate_class(name, &[], env, functions, classes, enums, impl_methods).ok()?;
+    // Zero-fill the fields `instantiate_class` left nil (undefaulted fields of
+    // a non-value-type class), by declared field type.
+    let mut zero_fields: Vec<(String, Value)> = Vec::new();
+    for field in &class_def.fields {
+        if field.default.is_some() {
+            continue;
+        }
+        if let Some(z) = noinit_zero_for_type(&field.ty, env, functions, classes, enums, impl_methods, depth + 1) {
+            zero_fields.push((field.name.clone(), z));
+        }
+    }
+    match value {
+        Value::ClassInstance(instance) => {
+            for (fname, z) in zero_fields {
+                let is_nil = instance.with_fields(|f| matches!(f.get(&fname), Some(Value::Nil)));
+                if is_nil {
+                    instance.set_field(fname, z);
+                }
+            }
+            Some(Value::ClassInstance(instance))
+        }
+        Value::Object { class, fields } => {
+            let mut map: HashMap<String, Value> = fields.as_ref().clone();
+            for (fname, z) in zero_fields {
+                if matches!(map.get(&fname), Some(Value::Nil)) {
+                    map.insert(fname, z);
+                }
+            }
+            Some(Value::Object {
+                class,
+                fields: Arc::new(map),
+            })
+        }
+        other => Some(other),
+    }
+}
+
+fn noinit_zero_for_type(
+    ty: &Type,
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+    depth: usize,
+) -> Option<Value> {
+    match ty {
+        Type::Simple(name) => match name.as_str() {
+            "text" | "str" | "String" => Some(Value::text(String::new())),
+            _ => {
+                let scalar = undefaulted_field_fill(ty, true);
+                if !matches!(scalar, Value::Nil) {
+                    return Some(scalar);
+                }
+                noinit_named_type_default_depth(ty, env, functions, classes, enums, impl_methods, depth)
+            }
+        },
+        Type::Array { size: None, .. } => Some(Value::array(Vec::<Value>::new())),
+        Type::Generic { .. } => noinit_named_type_default_depth(ty, env, functions, classes, enums, impl_methods, depth),
+        _ => None,
     }
 }

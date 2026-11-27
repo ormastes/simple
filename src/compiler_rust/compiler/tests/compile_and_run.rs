@@ -472,3 +472,238 @@ fn main() -> i64:
     // qualifies typed receivers (verified via native-build e2e repro).
     assert_eq!(compile_and_run(code), 3);
 }
+
+/// seed_untyped_byte_len_binding_raw_i64_misdecoded_2026_11_09 (PR #7883):
+/// the exact text-scan loop whose bound `value_len - needle_len` was built
+/// from two UNTYPED `byte_len` bindings. Under the JIT the raw i64 results
+/// were carried as if tagged, the difference misdecoded, and the loop never
+/// terminated; with a bounded guard here it returned the wrong position.
+#[test]
+fn untyped_byte_len_difference_is_integer_under_jit() {
+    let src = r#"fn index_of(value: text, needle: text) -> i64:
+    val value_len = value.byte_len()
+    val needle_len = needle.byte_len()
+    if needle_len > value_len:
+        return -1
+    var start = 0
+    var guard = 0
+    while start <= value_len - needle_len:
+        guard = guard + 1
+        if guard > 64:
+            return -99
+        var offset = 0
+        while offset < needle_len and value.byte_at(start + offset) == needle.byte_at(offset):
+            offset = offset + 1
+        if offset == needle_len:
+            return start
+        start = start + 1
+    return -1
+
+fn main() -> i64:
+    val a = "semantic".byte_len()
+    val b = "/".byte_len()
+    if a - b != 7:
+        return 100 + (a - b)
+    val pos = index_of("abc/def", "/")
+    if pos != 3:
+        return 50 + pos
+    if index_of("semantic_surface.spl", "/") != -1:
+        return 40
+    return 0
+"#;
+    assert_eq!(compile_and_run(src), 0);
+}
+
+// Bug: doc/08_tracking/bug/jit_unsafe_optional_as_cast_garbage_2026_11_09.md
+// `T? as <numeric>` inside `unsafe:` must extract the Some payload, not
+// reinterpret the boxed Option heap word.
+#[test]
+fn unsafe_optional_u64_as_cast_extracts_payload() {
+    let src = r#"
+fn mk(v: u64) -> u64?:
+    if v != 0:
+        v
+    else:
+        nil
+
+fn main() -> i64:
+    val r = mk(4275044352)
+    var out: u64 = 0
+    unsafe:
+        out = r as u64
+    if out == 4275044352:
+        return 42
+    return 7
+"#;
+    assert_eq!(compile_and_run(src), 42);
+}
+
+#[test]
+fn unsafe_optional_i64_as_cast_extracts_payload() {
+    let src = r#"
+fn mk(v: i64) -> i64?:
+    if v != 0:
+        v
+    else:
+        nil
+
+fn main() -> i64:
+    val r = mk(-1234567)
+    var out: i64 = 0
+    unsafe:
+        out = r as i64
+    if out == -1234567:
+        return 42
+    return 7
+"#;
+    assert_eq!(compile_and_run(src), 42);
+}
+
+#[test]
+fn unsafe_optional_text_as_cast_decodes_payload() {
+    let src = r#"
+fn mk(v: text) -> text?:
+    if v != "":
+        v
+    else:
+        nil
+
+fn main() -> i64:
+    val r = mk("77")
+    var out: i64 = 0
+    unsafe:
+        out = r as i64
+    if out == 77:
+        return 42
+    return 7
+"#;
+    assert_eq!(compile_and_run(src), 42);
+}
+
+#[test]
+fn unsafe_option_enum_i64_as_cast_extracts_payload() {
+    let src = r#"
+fn main() -> i64:
+    val r: Option<i64> = Some(99)
+    var out: i64 = 0
+    unsafe:
+        out = r as i64
+    if out == 99:
+        return 42
+    return 7
+"#;
+    assert_eq!(compile_and_run(src), 42);
+}
+
+#[test]
+fn unsafe_optional_as_cast_to_wider_int_converts_payload() {
+    let src = r#"
+fn mk(v: i32) -> i32?:
+    if v != 0:
+        v
+    else:
+        nil
+
+fn main() -> i64:
+    val r = mk(-5)
+    var out: i64 = 0
+    unsafe:
+        out = r as i64
+    if out == -5:
+        return 42
+    return 7
+"#;
+    assert_eq!(compile_and_run(src), 42);
+}
+
+// Bug jit_struct_assignment_aliases_not_copies_2026-08-10: value-struct
+// assignment must copy on the JIT/SMF lane; classes keep reference semantics.
+#[test]
+fn struct_reassign_copies_not_aliases() {
+    simple_runtime::register_static_runtime_symbols();
+    let code = r#"
+struct P:
+    x: i64
+    y: i64
+
+fn main() -> i64:
+    val a = P(x: 1, y: 2)
+    var b = P(x: 0, y: 0)
+    b = a
+    b.x = 99
+    a.x
+"#;
+    assert_eq!(compile_and_run(code), 1);
+}
+
+#[test]
+fn struct_let_copy_field_mutate_keeps_source() {
+    simple_runtime::register_static_runtime_symbols();
+    let code = r#"
+struct P:
+    x: i64
+    y: i64
+
+fn main() -> i64:
+    val a = P(x: 1, y: 2)
+    var b = a
+    b.x = 99
+    a.x + b.x
+"#;
+    assert_eq!(compile_and_run(code), 100);
+}
+
+#[test]
+fn nested_struct_reassign_copies_inner() {
+    simple_runtime::register_static_runtime_symbols();
+    let code = r#"
+struct In:
+    a: i64
+
+struct Out:
+    inner: In
+    k: i64
+
+fn main() -> i64:
+    val o = Out(inner: In(a: 5), k: 1)
+    var o2 = Out(inner: In(a: 0), k: 0)
+    o2 = o
+    o2.inner.a = 77
+    o.inner.a
+"#;
+    assert_eq!(compile_and_run(code), 5);
+}
+
+#[test]
+fn struct_stored_in_array_element_is_copied() {
+    simple_runtime::register_static_runtime_symbols();
+    let code = r#"
+struct P:
+    x: i64
+
+fn main() -> i64:
+    var a = P(x: 3)
+    var arr = [P(x: 0)]
+    arr[0] = a
+    a.x = 50
+    arr[0].x
+"#;
+    assert_eq!(compile_and_run(code), 3);
+}
+
+#[test]
+fn class_reassign_keeps_reference_semantics() {
+    simple_runtime::register_static_runtime_symbols();
+    let code = r#"
+class C:
+    x: i64
+
+fn main() -> i64:
+    val a = C(x: 1)
+    var b = C(x: 0)
+    b = a
+    b.x = 42
+    a.x
+"#;
+    assert_eq!(compile_and_run(code), 42);
+}

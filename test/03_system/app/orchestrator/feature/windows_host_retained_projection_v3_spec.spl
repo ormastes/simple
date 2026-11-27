@@ -1,0 +1,61 @@
+# @req HOST-WINDOWS-RETAIN-01
+# AUTHORED_NOT_RUN. Actual protected deployment/store; deliberately malformed
+# projection is a fault fixture, not a claim of executed commit-failure injection.
+use std.spec.*
+use std.nogc_sync_mut.io.env_ops.{host_os, env_get}
+use std.nogc_sync_mut.io.file_ops.file_read_regular_no_follow_bounded
+use std.nogc_sync_mut.orchestration.host_windows_deployment_v2.HostWindowsDeploymentAnchorV2
+use std.nogc_sync_mut.orchestration.host_service_enrollment_v2.host_service_enrollment_payload_decode_v2
+use std.nogc_sync_mut.orchestration.host_service_domain_v3.*
+use std.nogc_sync_mut.orchestration.host_local_root_v3.HostLocalRootV3
+use std.nogc_sync_mut.orchestration.host_windows_local_root_v3.*
+
+# @inline
+fn windows_retained_projection_fixture_v3() -> HostWindowsLocalRootV3:
+    if host_os() != "windows": fail("Actual Windows deployment fixture required")
+    val parent = env_get("SIMPLE_WINDOWS_HOST_PRIVATE_PARENT")
+    val pin = env_get("SIMPLE_WINDOWS_HOST_POLICY_PIN")
+    val binding_path = env_get("SIMPLE_WINDOWS_HOST_BINDING_FILE")
+    if parent == "" or pin == "" or binding_path == "": fail("Protected Host deployment fixture variables required")
+    val binding = host_service_enrollment_payload_decode_v2(file_read_regular_no_follow_bounded(binding_path, 16384).unwrap()).unwrap()
+    val opened = host_service_domain_open_windows_v3(HostWindowsDeploymentAnchorV2(parent, pin), binding)
+    match opened:
+        case HostServiceDomainOpenV3.Ready(domain):
+            match domain.local:
+                case HostLocalRootV3.Windows(local): return local
+                case _: fail("Windows deployment returned wrong backend")
+        case HostServiceDomainOpenV3.Pending(domain, error):
+            expect(host_service_domain_close_v3(domain).closed).to_equal(true)
+            fail("Fixture must have a reconciled empty inventory: " + error)
+        case HostServiceDomainOpenV3.CleanupRequired(cleanup, error):
+            expect(host_service_cleanup_v3(cleanup).closed).to_equal(true)
+            fail("Fixture startup cleanup: " + error)
+        case HostServiceDomainOpenV3.Rejected(error): fail("Fixture startup rejected: " + error)
+
+describe "Windows Host post-effect projection retention":
+    it "retains the exact same native writer before rejecting a malformed returned projection":
+        step("Open the genuine protected Host and inject an inconsistent returned ledger revision")
+        var local = windows_retained_projection_fixture_v3()
+        val original = local.capacity_v3()
+        var returned = original
+        returned.ledger.revision = original.ledger.revision + 1
+        val result = local.retain_v3(returned, local.container_v3())
+        expect(result.unwrap_err()).to_equal("host-windows-projection-stale")
+        expect(local.capacity_v3().ledger.revision).to_equal(returned.ledger.revision)
+        expect(local.capacity_v3().journal.windows_store.unwrap().same_owner(original.journal.windows_store.unwrap())).to_equal(true)
+        expect(local.ready_v3()).to_equal(false)
+        expect(local.current_v3().unwrap_err()).to_equal("host-windows-projection-stale")
+        expect(host_windows_local_close_v3(local).closed).to_equal(true)
+
+    it "rejects changed writer provenance before replacing the canonical owner":
+        step("Change the returned lease digest while retaining the genuine native store")
+        var local = windows_retained_projection_fixture_v3()
+        val original = local.capacity_v3()
+        var unrelated = original
+        unrelated.journal.lease_digest = "0".repeat(64)
+        if unrelated.journal.lease_digest == original.journal.lease_digest:
+            unrelated.journal.lease_digest = "1".repeat(64)
+        expect(local.retain_v3(unrelated, local.container_v3()).unwrap_err()).to_equal("host-windows-owner-turn-mismatch")
+        expect(local.capacity_v3().journal.lease_digest).to_equal(original.journal.lease_digest)
+        expect(local.current_v3().is_ok()).to_equal(true)
+        expect(host_windows_local_close_v3(local).closed).to_equal(true)

@@ -1,7 +1,7 @@
 # Tail `if` with one float arm and one integer arm loses the value (JIT)
 
 - **Date:** 2026-09-06
-- **Status:** OPEN
+- **Status:** FIX-IMPLEMENTED 2026-11-03, verification-pending (seed redeploy). MIR-side: float+int tail-if arms merge as f64 and the int arm gets an int->float Cast before the merge store (lowering_stmt.rs `if_merge_int_arm_to_float`); test `tail_if_statement_merge_slot_is_f64_when_float_and_int_arms_mix`. Re-run the repro above after seed deploy.
 - **Severity:** P1 — silent wrong value, no diagnostic at any level
 - **Area:** Rust bootstrap seed, MIR lowering of `HirStmt::If` / HIR numeric
   literal coercion
@@ -88,3 +88,30 @@ must update it.
 Agreeing-type arms are all correct as of 2026-09-06: f64/f64, f32/f32, i64/i64,
 text/text, `elif` chains, and nested tail `if`s. Verified in `_scratch/mabs5.spl`
 against the interpreter oracle.
+
+**Revalidated 2026-11-02: still plausible because the report title (Tail `if` with one float arm and one integer arm loses the value (JIT)) has no merged fix or passing regression cited in its tracking doc; no merged fix commit with a passing regression is cited in this doc.**
+
+## Source-level verification — 2026-11-05
+
+cargo test -p simple-compiler --lib tail_if_statement_merge_slot: 4/4 PASS at
+current release/1.0.0 source (float arms, float+int mix, int arms, text arms).
+The original program still prints the garbage values on the JIT lane with the
+deployed seed binary, as expected — that binary predates the 2026-11-03 fix
+(seed binary dated Oct 31; lowering_stmt.rs fix committed Nov 3-4), while the
+SIMPLE_EXECUTION_MODE=interpret oracle prints MIX_NEG=1.5 / MIX_POS=2.
+Remaining acceptance: re-run the JIT repro after the next seed redeploy.
+
+## Residue observed 2026-11-14 (seed built at c89479c9d7b, Cranelift JIT, `SIMPLE_JIT_STRICT=1`)
+
+The original two-arm repro above is FIXED on this seed (`MIX_NEG=1.5`,
+`MIX_POS=2.0`). Two neighbouring shapes still return wrong values on the JIT
+(the interpreter is correct for both), block form and one-line form alike:
+
+| shape (`-> f64`, tail position) | JIT | interpreter |
+|---|---|---|
+| `if c: 3 else: 4` / block form with the same arms (both arms int) | `0.0 0.0` | `3 4` |
+| `if x == 0: 0 elif x == 1: 1.5 else: 2` (block form) | `0.0 0.0 0.0` | `0 1.5 2` |
+
+Found while reviewing work/covfix-20261113 (fixtures `tail_if3.spl` /
+`tail_if4.spl` in that review); not introduced by it. The same shapes give the
+same wrong values with and without that branch's parser change.

@@ -1,9 +1,10 @@
 # Windows MSVC: Stage 2 admission blocked — cl.exe cannot compile runtime.c
 
 - **Date:** 2026-09-02
-- **Status:** PARTIALLY FIXED (2026-09-06) — C sources now compile under cl.exe;
-  the compiler-flag half is still open in the Rust runtime-compile path.
-  Stage 2 admission NOT observed from this lane.
+- **Status:** SUPERSEDED (2026-11-11, lane boot16) — the two C-compile defects
+  are FIXED and verified present in tree; the row's framing (MSVC Stage-2
+  admission) is obsolete because the MSVC lane is now optional per policy
+  (Windows default = llvm-mingw UCRT; CLAUDE.md). See addendum.
 - **Failing gate:** `Stage 2: proving struct receiver/runtime capability`
   (`scripts/bootstrap/bootstrap-from-scratch.sh:2592-2626`, exit 3)
 - **Lane:** `x86_64-pc-windows-msvc`, worktree pinned at
@@ -262,3 +263,40 @@ pre-existing Windows-host red for the gate.
    276/492/498/509 (warnings, explicitly out of the minimal unblock), the
    `-fsyntax-only`-can't-see-it link stage, and the bootstrap diagnostic
    matcher's blindness to `error C\d+` (still filed, still unfixed).
+
+
+---
+
+## Triage addendum 2026-11-11 (lane boot16)
+
+**Verdict: SUPERSEDED** (the two C-compile defects are FIXED and verified present;
+the row's MSVC-Stage-2-admission premise is obsolete by policy).
+
+Verified present in this tree (in ancestry via the release/1.0.0 main-tree
+transplant, merge `9e7e7a526edb` et al.):
+
+- `rt_mmap` signature divergence — FIXED. All three sites now agree on the
+  tagged-value form `int64_t rt_mmap(int64_t path_value, int64_t size,
+  int64_t offset, int64_t readonly)`: `src/runtime/runtime.h:323`,
+  `src/runtime/platform/platform_win.h:417`,
+  `src/runtime/platform/unix_common.h:327`. No C2040.
+- C11 atomics / weak-symbol gate — FIXED. `SPL_WEAK`
+  (`src/runtime/runtime.h:2314`) expands to nothing under
+  `_MSC_VER && !__clang__`; the live runtime-compile invocations call
+  `msvc_c11_atomics_flags(&cc)`
+  (`src/compiler_rust/compiler/src/pipeline/native_project/tools.rs:451`),
+  appending `-std:c11 -experimental:c11atomics` only for cl.exe/clang-cl and an
+  empty slice for every gcc/clang lane.
+
+**Superseding policy:** the blocker was "Stage 2 admission on the MSVC lane."
+CLAUDE.md Critical Rules now make the Windows default = GitHub llvm-mingw UCRT;
+MSVC (clang-cl) is only the *optional* `--msvc` lane, so the Stage-2 MSVC
+admission path this row gated is no longer the supported Windows route. (Matches
+the 2026-11-04 `bug_db.sdn` triage: "CLOSED obsolete … Premise no longer
+applies.")
+
+cl.exe is not installed on this host (ROCm clang-cl and llvm-mingw gcc/cc are),
+so the cl.exe-specific compile was not re-executed; the fix is verified by
+source inspection of the wired flags and the unified signatures. The remaining
+diagnostic-matcher gap (MSVC `error C\d+` blindness) and the C4028/C4029
+warning family are separate, still-open items not in scope here.

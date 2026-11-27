@@ -37,6 +37,11 @@ fn collect_old_expressions(expr: &HirExpr, results: &mut Vec<HirExpr>) {
                 collect_old_expressions(arg, results);
             }
         }
+        HirExprKind::TypeParamStaticCall { args, .. } => {
+            for arg in args {
+                collect_old_expressions(arg, results);
+            }
+        }
         // Field/index access
         HirExprKind::FieldAccess { receiver, .. } => {
             collect_old_expressions(receiver, results);
@@ -133,7 +138,8 @@ fn collect_old_expressions(expr: &HirExpr, results: &mut Vec<HirExpr>) {
         | HirExprKind::Local(_)
         | HirExprKind::Global(_)
         | HirExprKind::Nil
-        | HirExprKind::ContractResult => {}
+        | HirExprKind::ContractResult
+        | HirExprKind::ConstGeneric(_) => {}
         // Let-in expressions
         HirExprKind::LetIn { value, body, .. } => {
             collect_old_expressions(value, results);

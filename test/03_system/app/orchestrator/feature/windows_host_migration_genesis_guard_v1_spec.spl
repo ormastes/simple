@@ -1,0 +1,132 @@
+# AUTHORED_NOT_RUN. Requires a disposable real Windows managed installation.
+# Fresh accounting absence never proves legacy workload/writer absence.
+# @req REQ-WINDOWS-HOST-MIGRATION-GUARD-001
+use std.spec.{describe, it, expect, step}
+use std.nogc_sync_mut.orchestration.host_windows_deployment_v2.*
+use std.nogc_sync_mut.orchestration.host_service_enrollment_v2.*
+use std.nogc_sync_mut.orchestration.host_enrollment_v1.host_enrollment_credential_decode_v1
+use std.nogc_sync_mut.orchestration.host_service_private_receipt_v2.HostServicePrivateCleanupV2
+use std.nogc_sync_mut.container.machine_authority_v1.*
+use std.nogc_sync_mut.io.windows_private_file_v1.*
+use std.nogc_sync_mut.io.external_text_io.io_legacy_utf8
+use std.nogc_sync_mut.io.env_ops.env_get
+
+var migration_guard_native_cleanup_v1 = HostServicePrivateCleanupV2(files: [], roots: [])
+var migration_guard_machine_v1: Option<MachineContainerAuthorityV1> = nil
+var migration_guard_machine_open_cleanup_v1: Option<MachineContainerAuthorityCleanupV1> = nil
+var migration_guard_deployment_cleanup_v1: Option<HostWindowsDeploymentCleanupV2> = nil
+
+fn migration_guard_native_error_v1(issue: WindowsPrivateErrorV1) -> text:
+    if val file = issue.cleanup_file: migration_guard_native_cleanup_v1.files.push(file)
+    if val root = issue.cleanup_root: migration_guard_native_cleanup_v1.roots.push(root)
+    issue.message
+
+fn migration_guard_root_v1(path: text) -> Result<WindowsPrivateRootV1, text>:
+    match windows_private_root_open_v1(path):
+        case Ok(root):
+            migration_guard_native_cleanup_v1.roots.push(root)
+            Ok(root)
+        case Err(issue): Err(migration_guard_native_error_v1(issue))
+
+fn migration_guard_file_v1(root: WindowsPrivateRootV1, name: text) -> Result<WindowsPrivateFileV1, text>:
+    match root.open_private_file(name, 1048576u64):
+        case Ok(file):
+            migration_guard_native_cleanup_v1.files.push(file)
+            Ok(file)
+        case Err(issue): Err(migration_guard_native_error_v1(issue))
+
+fn migration_guard_source_v1(root: WindowsPrivateRootV1, name: text) -> Result<text, text>:
+    var file = migration_guard_file_v1(root, name)?
+    val bytes = file.read_all_bounded(1048576)
+    val closed = file.close()
+    if closed:
+        val files = migration_guard_native_cleanup_v1.files
+        migration_guard_native_cleanup_v1.files = files[0:files.len() - 1]
+    if not closed: return Err("actual source file cleanup remains: " + name)
+    io_legacy_utf8(bytes?)
+
+fn migration_guard_close_root_v1(original: WindowsPrivateRootV1) -> bool:
+    var root = original
+    if not root.close(): return false
+    val roots = migration_guard_native_cleanup_v1.roots
+    migration_guard_native_cleanup_v1.roots = roots[0:roots.len() - 1]
+    true
+
+fn migration_guard_authority_v1() -> Result<MachineContainerAuthorityV1, text>:
+    match machine_container_authority_open_v1():
+        case MachineContainerAuthorityOpenV1.Ready(owner):
+            migration_guard_machine_v1 = Some(owner)
+            Ok(owner)
+        case MachineContainerAuthorityOpenV1.Rejected(reason): Err(reason)
+        case MachineContainerAuthorityOpenV1.CleanupRequired(owner, reason):
+            migration_guard_machine_open_cleanup_v1 = Some(owner)
+            Err(reason)
+
+fn migration_guard_close_authority_v1(owner: MachineContainerAuthorityV1) -> text:
+    val state = owner.close_v1()
+    if state == "released": migration_guard_machine_v1 = nil
+    state
+
+fn migration_guard_deployment_reason_v1(turn: HostWindowsDeploymentOpenV2) -> Result<text, text>:
+    match turn:
+        case HostWindowsDeploymentOpenV2.Rejected(reason): Ok(reason)
+        case HostWindowsDeploymentOpenV2.RecoveryRequired(_, reason): Err("unexpected-recovery:" + reason)
+        case HostWindowsDeploymentOpenV2.CleanupRequired(owner, reason):
+            migration_guard_deployment_cleanup_v1 = Some(owner)
+            val closed = host_windows_deployment_cleanup_v2(owner)
+            migration_guard_deployment_cleanup_v1 = closed.cleanup
+            if not closed.closed or closed.cleanup.is_some(): return Err("deployment cleanup remains pending: " + reason)
+            Ok(reason)
+        case HostWindowsDeploymentOpenV2.Ready(owner):
+            val closed = host_windows_deployment_close_v2(owner)
+            migration_guard_deployment_cleanup_v1 = closed.cleanup
+            Err("unexpected-ready; cleanup=" + closed.error)
+
+describe "Fresh managed Host admission requires a real migration fence":
+    it "refuses genuine signed fresh enrollment and leaves the actual machine WAL empty":
+        step("Read actual administrator-prepared signed inputs matching the protected machine policy")
+        val parent_path = env_get("SIMPLE_WINDOWS_MANAGED_HOST_FIXTURE") ?? ""
+        assert(parent_path != "")
+        val input = migration_guard_root_v1(parent_path).unwrap()
+        val binding = host_service_enrollment_payload_decode_v2(migration_guard_source_v1(input, "enrollment-binding.sdn").unwrap()).unwrap()
+        val credential = host_enrollment_credential_decode_v1(migration_guard_source_v1(input, "enrollment-credential.sdn").unwrap()).unwrap()
+        val config = migration_guard_source_v1(input, "host-config.sdn").unwrap()
+        val engine = migration_guard_source_v1(input, "engine-policy.sdn").unwrap()
+        val broker = migration_guard_source_v1(input, "broker-policy.sdn").unwrap()
+        if not migration_guard_close_root_v1(input):
+            fail("actual fixture parent cleanup remains")
+            return
+        if binding.machine_parent != parent_path:
+            fail("fixture signed parent does not match actual installed input parent")
+            return
+        step("Observe an initially empty actual machine WAL, then release that same writer")
+        val before = migration_guard_authority_v1().unwrap()
+        val before_head = before.journal_head_v1()
+        val before_closed = migration_guard_close_authority_v1(before)
+        if before_closed != "released":
+            fail("actual initial machine writer cleanup remains: " + before_closed)
+            return
+        if before_head.is_err():
+            fail("actual initial machine WAL could not be read: " + before_head.unwrap_err())
+            return
+        if before_head.unwrap() != "":
+            fail("refusal-only fixture requires an actually empty machine WAL; existing charge is preserved")
+            return
+        step("Invoke production Host enrollment without fabricating any migration evidence")
+        val anchor = HostWindowsDeploymentAnchorV2(parent_path, binding.policy_digest)
+        val reason = migration_guard_deployment_reason_v1(host_windows_deployment_enroll_v2(anchor,
+            binding, credential, config, engine, broker))
+        if reason.is_err():
+            fail(reason.unwrap_err())
+            return
+        if reason.unwrap() != "machine-managed-claim-migration-fence-unavailable":
+            fail("unexpected production admission result: " + reason.unwrap())
+            return
+        expect(reason.unwrap()).to_equal("machine-managed-claim-migration-fence-unavailable")
+        step("Reopen the installed machine owner and verify no first capacity charge was committed")
+        val after = migration_guard_authority_v1().unwrap()
+        val after_head = after.journal_head_v1()
+        val after_closed = migration_guard_close_authority_v1(after)
+        expect(after_closed).to_equal("released")
+        expect(after_head.is_ok()).to_equal(true)
+        expect(after_head.unwrap()).to_equal(before_head.unwrap())

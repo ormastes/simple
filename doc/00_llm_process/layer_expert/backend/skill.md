@@ -301,3 +301,125 @@ Board-side consequences: [os layer expert](../os/skill.md).
 The MIR-side member of the same admission family — `starts_with`/`ends_with`
 returning the wrong boolean on the native path — is written up once in
 [mir_lowering](../mir_lowering/skill.md) § 2026-09-26.
+
+### Cranelift function-handle refusals (2026-10-29)
+
+A zero import/call handle is not enough to identify the failing source module.
+Retain the bridge's declaration diagnostic, including symbol, module, requested
+signature and underlying Cranelift error. Import diagnostics distinguish stale
+declarations from missing builder/module state. Return-zero ABI and fail-closed
+build aggregation remain unchanged. The rebuilt bridge must be qualified;
+editing its source cannot change a statically linked frozen producer. See
+`doc/08_tracking/bug/buildrunner_cranelift_zero_function_ref_2026_10_29.md`.
+
+## Cranelift rejected-call publication (2026-10-30)
+
+A void call legitimately returns handle zero; do not use that value alone as an
+error test. The Rust provider retains declaration/import/direct-call failures
+per live module and refuses function completion and object/JIT publication.
+Free/reset clear owned failures. Isolated provider evidence is separate from
+new compiler qualification. See
+[refusal propagation](../../../08_tracking/bug/cranelift_rejected_call_publication_2026_10_30.md).
+
+## Pure-Simple JIT callee binding (2026-11-13)
+
+The K1 JIT lane runs `cranelift_jit_run_main` (`cranelift_codegen_adapter.spl`):
+the AOT lane's lowering into a host JIT module (`CL_TARGET_HOST`, `jit: true`
+selects `cranelift_define_function`). `jit_extern_resolution.spl` classifies
+named callees by `MirOperand.call_origin` once per module, before codegen.
+Undefined Source and unproven-origin callees are refused there by name.
+Local Source callees link in-module. Foreign and Runtime callees are imports,
+and the provider admits or refuses them at declaration.
+The provider (`cranelift_sffi.rs`) registers the seed JIT's own runtime symbol
+table (`jit::seed_jit_runtime_symbol_table`, one source for both builders). It
+admits a runtime-table import only with exactly its `RuntimeFuncSpec`
+signature. It admits a process symbol only through plain import linkage
+(1), never through linkage 5 (`CRANELIFT_LINKAGE_RUNTIME_IMPORT`). A refused
+declaration returns 0. Do not add an `rt_*` name table in `.spl`: the provider
+is the oracle. See
+[provider fix](../../../08_tracking/bug/pure_simple_jit_provider_registers_no_runtime_symbols_2026-11-13.md).
+Declare every import through `cl_declare_import_function`
+(`cranelift_runtime_imports.spl`). In a JIT module it declares Foreign callees
+with linkage 1 and everything else with linkage 5, and records refused names
+in the ledger. `cranelift_jit_run_main` reports them by name before finalize:
+`E-JIT-RUNTIME-EXTERN-UNBOUND`, `E-JIT-FOREIGN-EXTERN-UNBOUND` or
+`E-JIT-LOWERING-IMPORT-UNBOUND`. A direct `cranelift_declare_function(..., IMPORT)`
+skips the ledger, so the refusal surfaces only as `E-JIT-FINALIZE`.
+Admission checks Cranelift types, not value representation (tagged versus raw,
+boxed `text` versus (ptr, len)). `cranelift_runtime_import_seed_parity_spec.spl`
+pins the adapter's runtime-import shims against the seed's `RuntimeFuncSpec`
+table. `jit_runtime_extern_interpreter_parity_spec.spl` checks that JIT and
+interpreter return the same values.
+
+## Object -> SMF relocation mapping on aarch64 ELF (2026-11-13)
+
+`compile -o x.smf` turns the Cranelift object into SMF relocations in
+`linker/object_parser.rs::map_relocation_type`. `object` 0.36 classifies only
+ABS/PREL/CALL26 for ELF AArch64 (CALL26 as `PltRelative`); everything else is
+`Unknown` + `RelocationFlags::Elf`. Mapping only Mach-O flags left every ELF
+ADRP/LO12/GOT reloc as `None` and CALL26 as x86 `Plt32`, so every SMF on
+aarch64 Linux crashed (unpatched `adrp; ldr; blr` into its own code bytes).
+aarch64 ELF is now mapped by `r_type` first and fails closed on anything the
+loader cannot apply. Trap: ELF `r_type` numbers are per-machine; gate on
+`obj_file.architecture()`. See
+[bug](../../../08_tracking/bug/smf_aarch64_elf_relocations_dropped_2026-11-13.md).
+
+Backend provider gate, receipt identity and backend contracts-as-data live in
+`src/app/build/targets/` (#10181); `provider_entry` `.provider.sdn` + SVE/RVV VL
+query merged in #10351 (review FAIL: provider gate self-attests; fix PR in
+progress). Details: mission_critical_robustness feature note.
+
+## 2026-11-23: seed Cranelift float call results are decoded at the producer
+
+User functions return f64/f32 as raw bits in an i64 register. The caller's dest
+vreg is typed f64 by `build_vreg_types`, and `decode_float_call_result`
+(`codegen/instr/body.rs`) now bitcasts the i64 carrier back to f64 right after
+the call (as `sync_vars_to_vregs` does for cross-block floats). Before this,
+any consumer that picks float vs. int lowering from the Cranelift value type
+broke on a direct call result: `floor_f64(x).to_i32()` gave 0, `.abs()`/
+`.sqrt()` worked on the bits, and `.floor()`/`.max()` failed with
+`function not found: f64.floor`. Trap: `simple test` runs spec bodies in the
+interpreter, so a codegen regression spec must compile a child program
+(`run` with `SIMPLE_EXECUTION_MODE` unset, and `native-build`). Also: the
+in-process `JitCompiler` harness did not reproduce the free-function shape,
+only `simple run` did. See
+[bug](../../../08_tracking/bug/native_call_result_f64_to_int_conversion_bits_2026-11-23.md).
+
+## 2026-11-24 — float -> int conversions saturate on every engine
+
+`x as T`, `x.to_T()` and `to_int` on a float follow the interpreter's
+`semantics::cast_float_to_numeric` (Rust `as`): truncate toward zero, saturate
+to the target width, NaN -> 0. All three Cranelift lowerings (`basic_ops.rs`
+cast, `methods.rs`, `closures_structs.rs`) call
+`helpers::float_to_int_saturating`, which is `fcvt_to_*_sat.i64` + clamp +
+`ireduce`. Do not bring back `fcvt_to_{sint,uint}` + `ireduce` for a user cast:
+`ireduce` wraps (`70000.5.to_u16()` gave 4464), and plain `fcvt` traps (SIGILL)
+on negative->unsigned, NaN, and out-of-i64 input. Integer-source narrowing
+still wraps on every engine. Parity test (861 rows, every width, 5 receiver
+shapes): `compiler/tests/float_to_int_saturating_cast_parity.rs`. Open: the
+LLVM backend still emits `fptosi`/`fptoui`, and the compiled `[f64].sum()`
+reads a boxed float as an int
+([bug](../../../08_tracking/bug/compiled_float_array_sum_reads_boxed_float_as_int_2026-11-24.md)).
+[Bug](../../../08_tracking/bug/compiled_float_to_narrow_uint_wraps_or_traps_vs_interpreter_saturates_2026-11-23.md).
+
+## 2026-11-24 (2) — float sum typing, narrow-slot adapters, C rt_array_min
+
+- `[f64]`/`[f32]` `.sum()` is typed F64 in HIR and unboxed as F64 in MIR. An I64 unbox of
+  `rt_array_sum`'s boxed float read the heap handle as an int. Untyped mixed arrays still
+  use I64 (open).
+- `adapt_value_to_type`, the `calls.rs` argument adapt and the `body.rs` narrow return slot
+  now call `float_to_int_saturating`; there is no trapping `fcvt_to_sint` left in instr/.
+  Unit test: `codegen::instr::helpers::float_adapt_tests`.
+- The C runtime has `rt_array_min` (twin of `rt_array_max`), so native-build of
+  `[T].min()` links. Selfcheck: `src/runtime/test/rt_array_min_selfcheck.c`.
+- Open: a float passed to an int-typed user parameter/return disagrees across engines
+  ([bug](../../../08_tracking/bug/float_passed_to_int_typed_param_or_return_engines_disagree_2026-11-24.md)).
+
+## 2026-11-26 — seed JIT binds every elf_utils name (jit-runtime-symbol-names lane)
+
+- **Fix.** `JitCompiler::with_provider` adds an elf_utils `symbol_lookup_fn`, and `jit_import_resolves_without_dlsym` accepts every name that `elf_utils::resolve_runtime_symbol` defines. The import check now passes exactly the names the builder binds.
+- **Names affected.** Before this, 81 declared `.spl` externs passed the check only through `dlsym`: 76 `rt_cranelift_*`, 3 `spl_cranelift_*_v2`, `spl_backend_plugin_run_v1` and `doctest_read_file`. On a seed without exported symbols, every call to one of them was spliced through the interpreter (`hybrid-interp-splice`).
+- **Trap: `RUSTFLAGS` drops the dynamic exports.** Setting `RUSTFLAGS` in the env replaces the `.cargo/config.toml` rustflags, which carry `--export-dynamic`. An interactive-shell build (`RUSTFLAGS=-C link-arg=-fuse-ld=mold`) therefore has 0 dynamic symbols. Check with `nm -D --defined-only <seed> | grep -c ' T '`.
+- **Scope.** The `cranelift_sffi` JIT modules keep their runtime-table-only contract: `register_seed_jit_runtime_symbols` is unchanged.
+- **Test.** `elf_utils::tests::declared_externs_with_a_runtime_definition_resolve_for_the_jit_without_dlsym`.
+- **Open.** The web catalog still splices 67 externs on both seeds. None of them is an elf_utils name: they are `rt_opengl_*`, `rt_oneapi_*`, `rt_intel_engine2d_*`, `rt_webgpu_*`, `rt_font_*`, `rt_fb_*`, `rt_bytes_alloc`, `spl_str_ptr`, `rt_text_count_codepoints_cached` and `rt_engine2d_blend_*`.

@@ -400,8 +400,16 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_file_msync", &[I64, I64, I32], &[I32]),
     RuntimeFuncSpec::new("rt_file_lock", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_file_unlock", &[I64], &[I8]),
+    RuntimeFuncSpec::new("rt_file_lock_owned_acquire_v2", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_file_lock_owned_state_v2", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_file_lock_owned_release_v2", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_file_read_text_at_checked", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_mmap", &[I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_mmap_create", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_cpu_topology_count", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_cpu_topology_field", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_thread_pin_current", &[I64], &[I8]),
+    RuntimeFuncSpec::new("rt_thread_current_cpu", &[], &[I64]),
     RuntimeFuncSpec::new("rt_munmap", &[I64, I64], &[I8]),
     RuntimeFuncSpec::new("rt_call_ptr_0", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_call_ptr_1", &[I64, I64], &[I64]),
@@ -434,6 +442,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_byte_array_new", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_byte_array_new_len", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_bytes_to_text", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_tls_wire_from_bytes", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_char_from_code", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_array_new_with_cap_u64", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_array_push", &[I64, I64], &[I8]),
@@ -443,12 +452,24 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_array_set_text", &[I64, I64, I64], &[I8]),
     RuntimeFuncSpec::new("rt_array_pop", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_array_clear", &[I64], &[I8]),
+    RuntimeFuncSpec::new("rt_array_reserve", &[I64, I64], &[I8]),
     RuntimeFuncSpec::new("rt_transient_array_scope_begin", &[], &[I8]),
     RuntimeFuncSpec::new("rt_transient_array_scope_pause", &[], &[I8]),
     RuntimeFuncSpec::new("rt_transient_heap_promote", &[I64], &[I8]),
     RuntimeFuncSpec::new("rt_transient_heap_promote_share_begin", &[], &[I8]),
     RuntimeFuncSpec::new("rt_transient_heap_promote_share_end", &[], &[I8]),
+    RuntimeFuncSpec::new("rt_session_heap_begin", &[], &[I32]),
+    RuntimeFuncSpec::new("rt_session_heap_end", &[I32], &[I8]),
+    RuntimeFuncSpec::new("rt_session_alloc_begin", &[], &[I8]),
+    RuntimeFuncSpec::new("rt_session_alloc_end", &[], &[I8]),
+    RuntimeFuncSpec::new("rt_transient_heap_adopt", &[I64], &[I8]),
+    RuntimeFuncSpec::new("rt_session_heap_id", &[], &[I32]),
     RuntimeFuncSpec::new("rt_transient_array_scope_end", &[], &[I8]),
+    RuntimeFuncSpec::new("rt_rc_share", &[I64], &[I8]),
+    RuntimeFuncSpec::new("rt_rc_retain", &[I64], &[I8]),
+    RuntimeFuncSpec::new("rt_rc_release", &[I64], &[I8]),
+    RuntimeFuncSpec::new("rt_rc_count", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_heap_graph_bytes", &[I64], &[I64]),
     // Diagnostic heap counters. Compiled code needs these to observe whether a
     // transient scope actually reclaimed: `alloc - free` climbing across a
     // scope boundary is the signature of a scope that tracked nothing.
@@ -491,6 +512,11 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_dict_clear", &[I64], &[I8]),
     RuntimeFuncSpec::new("rt_dict_keys", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_dict_values", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_dict_scope_read_bound_v1", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_dict_scope_read_owner_v1", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_dict_scope_read_epoch_v1", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_dict_scope_read_meta_v1", &[I64, I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_dict_scope_read_slot_v1", &[I64, I64, I64, I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_dict_insert", &[I64, I64, I64], &[I8]),
     RuntimeFuncSpec::new("rt_dict_contains", &[I64, I64], &[I8]),
     RuntimeFuncSpec::new("rt_dict_remove", &[I64, I64], &[I8]),
@@ -524,8 +550,10 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // Index/slice operations
     // =========================================================================
     RuntimeFuncSpec::new("rt_index_get", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_get", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_index_set", &[I64, I64, I64], &[I8]),
     RuntimeFuncSpec::new("rt_slice", &[I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_slice_text_bytes", &[I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_contains", &[I64, I64], &[I8]),
     // =========================================================================
     // Vector reduction operations (SIMD)
@@ -618,6 +646,9 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // there was no equivalent for ordering, so string `<`/`>` fell through to a
     // raw pointer/handle icmp. See doc/08_tracking/bug/sspec_test_path_false_green_undercount_2026-07-20.md.
     RuntimeFuncSpec::new("rt_text_cmp_any", &[I64, I64], &[I64]),
+    // Representation-aware equality for statically typed text, including
+    // raw extern strings and tagged runtime strings. Returns an i64 0/1.
+    RuntimeFuncSpec::new("rt_text_eq_any", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_len", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_data", &[I64], &[I64]), // RuntimeValue string -> raw ptr
     RuntimeFuncSpec::new("rt_string_char_at", &[I64, I64], &[I64]),
@@ -642,8 +673,10 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_string_to_lower", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_to_int", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_to_int_lenient", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_string_to_float", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_to_int_dynamic", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_any_to_int", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_any_cast_int", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_index_of", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_find", &[I64, I64], &[I64]),
     // Receiver-polymorphic index_of (array or text). See rt_index_of.
@@ -707,6 +740,8 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // rt_raw_i64_to_string's raw-scalar bypass for the optional-primitive
     // print path. See doc/08_tracking/bug/interp_index_of_digit_leading_literal_2026-07-22.md.
     RuntimeFuncSpec::new("rt_opt_i64_to_string", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_i64_to_hex", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_opt_value_to_string", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_opt_bool_to_string", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_opt_f64_to_string", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_value_to_string", &[I64], &[I64]),
@@ -772,6 +807,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // Enum operations
     // =========================================================================
     RuntimeFuncSpec::new("rt_enum_new", &[I32, I32, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_enum_register_name", &[I32, I32, I64, I64, I64], &[]),
     RuntimeFuncSpec::new("rt_enum_check_discriminant", &[I64, I64], &[I8]),
     RuntimeFuncSpec::new("rt_enum_check_variant", &[I64, I64, I64], &[I8]),
     RuntimeFuncSpec::new("rt_try_is_absent", &[I64, I64, I64], &[I8]),
@@ -882,6 +918,14 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // raw-i64 marshalling boundary.
     RuntimeFuncSpec::new("rt_array_bytes_validate", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_array_bytes_copy_checked", &[I64, I64, I64], &[I64]),
+    // Packed-backing probes consumed by std.nogc_sync_mut.sffi.file_bytes_typed
+    // (typed_byte_basis / copy_typed_packed_bytes). Same seed-gap family as the
+    // two contracts above: without a compiler-owned contract the JIT cannot
+    // emit a direct runtime call, and the hybrid interp splice re-decodes the
+    // packed `[u8]` into a boxed element array the twins reject (-22/-1), so
+    // stdlib byte writes silently no-op under the seed.
+    RuntimeFuncSpec::new("rt_array_bytes_basis_len", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_array_bytes_basis_ptr", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_array_header_ptr", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_array_set_len_known", &[I64, I64], &[I8]),
     RuntimeFuncSpec::new("rt_array_set_len_known_text", &[I64, I64], &[I8]),
@@ -916,6 +960,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_typed_words_u64_set", &[I64, I64, I64], &[I8]),
     RuntimeFuncSpec::new("rt_typed_words_i64_at", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_typed_words_i64_set", &[I64, I64, I64], &[I8]),
+    RuntimeFuncSpec::new("rt_typed_words_byte_write_trap", &[], &[]),
     RuntimeFuncSpec::new("rt_typed_words_i64_push", &[I64, I64], &[I8]),
     RuntimeFuncSpec::new("rt_memory_barrier", &[], &[]),
     RuntimeFuncSpec::new("rt_load_barrier", &[], &[]),
@@ -1154,6 +1199,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_eprint_value", &[I64], &[]),   // RuntimeValue
     RuntimeFuncSpec::new("rt_eprintln_value", &[I64], &[]), // RuntimeValue
     RuntimeFuncSpec::new("rt_read_stdin_line", &[], &[I64]), // -> RuntimeValue (string)
+    RuntimeFuncSpec::new("rt_stdin_read_line", &[], &[I64]), // -> RuntimeValue (string)
     RuntimeFuncSpec::new("rt_capture_stdout_start", &[], &[]),
     RuntimeFuncSpec::new("rt_capture_stderr_start", &[], &[]),
     // =========================================================================
@@ -1668,7 +1714,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_process_owned_v3_cancel_value", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_process_owned_v3_result_value", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_process_owned_v3_collect_value", &[I64], &[I64]),
-    RuntimeFuncSpec::new("rt_process_owned_v3_release_value", &[I64], &[I32]),
+    RuntimeFuncSpec::new("rt_process_owned_v3_release_value", &[I64], &[I8]),
     RuntimeFuncSpec::new("rt_process_owned_v3_capabilities_value", &[], &[I64]),
     RuntimeFuncSpec::new("rt_process_owned_v3_set_capture_limits_value", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_process_owned_v3_observation_value", &[I64], &[I64]),
@@ -1682,22 +1728,35 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
         &[I64, I64, I64, I64, I64, I64],
         &[I64],
     ),
+    RuntimeFuncSpec::new("rt_sosix_darwin_snapshot_v1_capabilities_value", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_sosix_darwin_snapshot_v1_start_value", &[I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_sosix_darwin_snapshot_v1_poll_value", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_sosix_darwin_snapshot_v1_cancel_value", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_sosix_darwin_snapshot_v1_output_value", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_sosix_darwin_snapshot_v1_ack_value", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_process_observation_v4_capabilities_value", &[], &[I64]),
     RuntimeFuncSpec::new("rt_process_observation_v4_pin_cwd_value", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_process_observation_v4_cwd_digest_value", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_process_observation_v4_close_cwd_value", &[I64], &[I32]),
+    RuntimeFuncSpec::new("rt_process_observation_v4_reserved_matches_value", &[I64, I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_observation_v4_reserve_value", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_process_observation_v4_reserved_state_value", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_observation_v4_reserved_start_pinned_value", &[I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_observation_v4_reserved_observe_value", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_observation_v4_reserved_ack_value", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_observation_v4_reserved_confirm_release_value", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_process_observation_v4_start_value", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_process_observation_v4_start_pinned_value", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_process_observation_v4_poll_value", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_process_observation_v4_cancel_value", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_process_observation_v4_collect_value", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_process_observation_v4_ack_collect_value", &[I64, I64], &[I64]),
-    // rt_process_is_running(pid) -> bool (as i64: 0/1)
-    RuntimeFuncSpec::new("rt_process_is_running", &[I64], &[I64]),
+    // rt_process_is_running(pid) -> bool
+    RuntimeFuncSpec::new("rt_process_is_running", &[I64], &[I8]),
     // rt_process_wait(pid, timeout_ms) -> exit_code
     RuntimeFuncSpec::new("rt_process_wait", &[I64, I64], &[I64]),
-    // rt_process_kill(pid) -> bool (as i64: 0/1)
-    RuntimeFuncSpec::new("rt_process_kill", &[I64], &[I64]),
+    // rt_process_kill(pid) -> bool
+    RuntimeFuncSpec::new("rt_process_kill", &[I64], &[I8]),
     // rt_process_spawn_async(cmd_ptr, cmd_len, args) -> pid (i64)
     RuntimeFuncSpec::new("rt_process_spawn_async", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_process_spawn_async_value", &[I64, I64], &[I64]),
@@ -1713,8 +1772,8 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
         &[I64, I64, I64, I64, I64, I64, I64, I64],
         &[I64],
     ),
-    // rt_process_exists(pid) -> bool (as i64: 0/1)
-    RuntimeFuncSpec::new("rt_process_exists", &[I64], &[I64]),
+    // rt_process_exists(pid) -> bool
+    RuntimeFuncSpec::new("rt_process_exists", &[I64], &[I8]),
     // rt_getpid() -> process id
     RuntimeFuncSpec::new("rt_getpid", &[], &[I64]),
     // =========================================================================
@@ -1960,6 +2019,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_vulkan_get_last_error", &[], &[I64]),
     RuntimeFuncSpec::new("rt_vulkan_selected_device_driver_identity", &[], &[I64]),
     RuntimeFuncSpec::new("rt_vulkan_selected_device_driver_identity_hash", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_vulkan_selected_device_identity_v1", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_vulkan_selected_device_type", &[], &[I64]),
     RuntimeFuncSpec::new("rt_vulkan_fence_submission_supported", &[], &[I64]),
     RuntimeFuncSpec::new("rt_vulkan_submit_and_wait_fence", &[I64], &[I64]),
@@ -2097,9 +2157,9 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     ), // module, packed name, grid_xyz, block_xyz, args_ptr
     RuntimeFuncSpec::new(
         "rt_cuda_launch_kernel_ex",
-        &[I64, I64, I64, I64, I64, I64, I64, I64, I64, I64, I64, I64],
+        &[I64, I64, I64, I64, I64, I64, I64, I64, I64, I64, I64],
         &[I64],
-    ), // module, name_ptr, name_len, grid_xyz, block_xyz, shared, stream, args_ptr
+    ), // module, name (C string), grid_xyz, block_xyz, shared, stream, args_ptr
     RuntimeFuncSpec::new("rt_cuda_sync", &[], &[I64]),
     RuntimeFuncSpec::new("rt_cuda_get_error_string", &[I64], &[I64]),
     // =========================================================================
@@ -2112,6 +2172,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // Environment Variable Operations
     // =========================================================================
     RuntimeFuncSpec::new("rt_env_get", &[I64, I64], &[I64]), // name_ptr, name_len -> RuntimeValue
+    RuntimeFuncSpec::new("rt_env_get_raw", &[I64, I64], &[I64]), // raw ABI twin (sffi_minimal): name_ptr, name_len -> RuntimeValue; never text-expanded
     RuntimeFuncSpec::new("rt_env_get_i64", &[I64, I64, I64], &[I64]), // name_ptr, name_len, default -> i64
     RuntimeFuncSpec::new("rt_lexer_source_set", &[I64, I64], &[I8]), // source_ptr, source_len -> bool
     RuntimeFuncSpec::new("rt_lexer_source_slice", &[I64, I64], &[I64]), // start, end -> RuntimeValue
@@ -2137,6 +2198,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_progress_tls_start_nanos", &[], &[I64]),
     RuntimeFuncSpec::new("rt_progress_tls_store_start_nanos", &[I64], &[]),
     RuntimeFuncSpec::new("rt_entropy_hardware_ready", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_entropy_fill", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_sleep_ms", &[I64], &[]),
     // message_ptr, message_len (text arg — see extern_text_cchar_abi_family_sweep_2026-07-29.md)
     RuntimeFuncSpec::new("rt_panic", &[I64, I64], &[]),
@@ -2174,6 +2236,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // pairs back to the Simple extern's argument count.
     RuntimeFuncSpec::new("rt_linux_group_available_capacity_v1", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_linux_group_parent_acquire_v1", &[I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_linux_group_parent_acquire_at_v2", &[I64, I64, I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_linux_group_parent_release_v1", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_linux_group_launch_broker_v1", &[I64, I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_linux_group_start_v1",
@@ -2182,6 +2245,17 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_linux_group_poll_v1", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_linux_group_cancel_v1", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_linux_group_collect_v1", &[I64], &[I64]),
+    // Cache authority machine signatures after semantic text expansion.
+    RuntimeFuncSpec::new("rt_cache_host_open_root_v1", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_cache_host_open_read_v1", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_cache_host_open_child_v1", &[I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_cache_host_open_cas_kind_v1", &[I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_cache_host_open_cas_shard_v1", &[I64, I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_cache_host_open_cas_leaf_v1", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_cache_host_open_pinned_cas_v1", &[I64, I64, I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_cache_host_publish_noreplace_v1", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_cache_host_publish_retained_noreplace_v2", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_cache_host_quarantine_v1", &[I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_file_stat", &[I64, I64], &[I64]),  // path_ptr, path_len -> i64 (mtime seconds)
     // =========================================================================
     // File I/O Operations
@@ -2189,6 +2263,8 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_file_canonicalize", &[I64, I64], &[I64]), // path_ptr, path_len -> RuntimeValue
     RuntimeFuncSpec::new("rt_file_read_text", &[I64, I64], &[I64]),    // path_ptr, path_len -> RuntimeValue
     RuntimeFuncSpec::new("rt_file_read_regular_no_follow_bounded", &[I64, I64, I64], &[I64]), // path_ptr, path_len, max_bytes -> RuntimeValue
+    RuntimeFuncSpec::new("rt_file_read_regular_no_follow_bounded_raw", &[I64, I64, I64], &[I64]), // raw ABI twin (sffi_minimal); never text-expanded
+    RuntimeFuncSpec::new("rt_file_read_text_raw", &[I64, I64], &[I64]), // raw ABI twin (sffi_minimal); never text-expanded
     RuntimeFuncSpec::new("rt_file_read_regular_no_follow_bounded_bytes", &[I64, I64, I64], &[I64]), // path_ptr, path_len, max_bytes -> RuntimeValue ([u8])
     RuntimeFuncSpec::new("rt_file_read_regular_no_follow_last_failure", &[], &[I64]), // -> arm code of the last NIL return
     RuntimeFuncSpec::new("rt_file_read_text_rv", &[I64], &[I64]), // RuntimeValue(string) -> RuntimeValue
@@ -2202,6 +2278,9 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_file_fsync_cached", &[I64, I64], &[I8]),         // path -> bool, prefer write-at cache
     RuntimeFuncSpec::new("rt_crc32_text", &[I64, I64], &[I64]),               // text -> i64 (CRC32 checksum)
     RuntimeFuncSpec::new("rt_file_sync", &[I64, I64], &[I8]),                 // path -> bool (alias for fsync)
+    RuntimeFuncSpec::new("rt_dir_sync", &[I64, I64], &[I8]),                  // dir path -> bool (fsync the directory)
+    RuntimeFuncSpec::new("rt_file_read_under_root_bytes", &[I64, I64, I64, I64, I64], &[I64]), // root_ptr, root_len, rel_ptr, rel_len, max_bytes -> RuntimeValue ([u8])
+    RuntimeFuncSpec::new("rt_file_write_under_root_bytes", &[I64, I64, I64], &[I8]), // root/rel/data RuntimeValues -> bool
     RuntimeFuncSpec::new("rt_file_create_excl", &[I64, I64, I64, I64], &[I8]), // path, content -> bool (O_EXCL)
     // Descriptor-pinned file views use tagged text values for root/path; they
     // are deliberately not part of the legacy ptr/len text-argument map.
@@ -2274,6 +2353,9 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     ), // ptr, capacity, row bytes, values, source stride/x/y, width/height -> copied pixels
     RuntimeFuncSpec::new("rt_file_write_bytes", &[I64, I64, I64, I64], &[I8]), // path, bytes -> bool
     RuntimeFuncSpec::new("rt_file_write_bytes_array", &[I64, I64], &[I8]), // path/data RuntimeValues -> bool
+    RuntimeFuncSpec::new("rt_file_atomic_write", &[I64, I64], &[I64]),     // path/content RuntimeValues -> i64 (0/1)
+    RuntimeFuncSpec::new("rt_file_atomic_write_mode", &[I64, I64, I32], &[I64]), // path/content/mode -> i64 (0/1)
+    RuntimeFuncSpec::new("rt_file_atomic_write_bytes_array", &[I64, I64], &[I8]), // path/data RuntimeValues -> bool
     // SimpleOS syscall byte adapters. Every array occupies one RuntimeValue
     // slot so its owner stays live through the consuming runtime call. In
     // particular, rename retains both path owners and read/recv retain their
@@ -2317,8 +2399,34 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // runtime/src/value/sffi/file_io/io_file.rs:82,331,340.
     // The other 13 members are i64/bool-only and already correct.
     RuntimeFuncSpec::new("rt_io_file_open", &[I64, I64, I64], &[I64]), // path_ptr, path_len, mode -> fd
+    // Two-argument twins of rt_io_file_open for the modes Simple callers use
+    // (runtime io_file.rs). The three-argument mixed (ptr,len,mode) form is
+    // mis-passed by seed-produced candidates (path_len = -1 at the Rust ABI
+    // boundary), while these expand correctly on every producer
+    // (bug stage2_sanity_scv_snapshot_entry_zero_sources_2026-10-22).
+    RuntimeFuncSpec::new("rt_io_file_open_read", &[I64, I64], &[I64]),   // path_ptr, path_len -> fd
+    RuntimeFuncSpec::new("rt_io_file_open_write", &[I64, I64], &[I64]),  // path_ptr, path_len -> fd
+    RuntimeFuncSpec::new("rt_io_file_open_append", &[I64, I64], &[I64]), // path_ptr, path_len -> fd
+    // i64 twin of rt_io_file_close (bool return): the dynamic dispatcher
+    // admits only all-i64 -> i64 contracts, and the hand-written interpreter
+    // close adapter is a unix-only stub, so Windows closes always failed.
+    RuntimeFuncSpec::new("rt_io_file_close_value", &[I64], &[I64]),       // fd -> 0/1
     RuntimeFuncSpec::new("rt_io_file_exists", &[I64, I64], &[I8]),     // path_ptr, path_len -> bool
     RuntimeFuncSpec::new("rt_io_file_delete", &[I64, I64], &[I8]),     // path_ptr, path_len -> bool
+    // Descriptor members consumed by std.nogc_sync_mut.io's FileTextSession
+    // read path (session open/read/close/seek/flush/meta). The Rust runtime
+    // exports these (runtime/src/value/sffi/file_io/io_file.rs), but without
+    // compiler-owned contracts AND RUNTIME_SYMBOL_NAMES entries the seed JIT
+    // demotes them to the hybrid interp splice, where the FileTextSession read
+    // silently returns nil and std.io_runtime file text reads come back empty
+    // (the same seed gap family as rt_array_bytes_*; see
+    // doc/08_tracking/bug/seed_file_write_bytes_noop_and_timeout_directive_2026-10-24.md).
+    RuntimeFuncSpec::new("rt_io_file_read", &[I64, I64], &[I64]),        // fd, size -> RuntimeValue (array)
+    RuntimeFuncSpec::new("rt_io_file_read_all", &[I64], &[I64]),         // fd -> RuntimeValue (array)
+    RuntimeFuncSpec::new("rt_io_file_close", &[I64], &[I8]),             // fd -> bool
+    RuntimeFuncSpec::new("rt_io_file_seek", &[I64, I64, I64], &[I64]),   // fd, offset, whence -> pos
+    RuntimeFuncSpec::new("rt_io_file_flush", &[I64], &[I8]),             // fd -> bool
+    RuntimeFuncSpec::new("rt_io_file_meta_size", &[I64], &[I64]),        // fd -> size
     RuntimeFuncSpec::new("rt_file_get_size", &[I32], &[I64]),          // fd -> size
     RuntimeFuncSpec::new("rt_file_close", &[I32], &[I8]),              // fd -> bool
     RuntimeFuncSpec::new("rt_close_fd", &[I64], &[I64]),               // fd -> status
@@ -2334,6 +2442,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_path_relative", &[I64, I64, I64, I64], &[I64]), // from, to -> RuntimeValue
     RuntimeFuncSpec::new("rt_path_join", &[I64, I64, I64, I64], &[I64]), // path1, path2 -> RuntimeValue
     RuntimeFuncSpec::new("rt_path_parent", &[I64, I64], &[I64]),   // path -> RuntimeValue
+    RuntimeFuncSpec::new("rt_path_normalize", &[I64], &[I64]),     // boxed path RuntimeValue -> RuntimeValue
     // =========================================================================
     // Runtime Configuration
     // =========================================================================
@@ -2362,7 +2471,12 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_bdd_it_start", &[I64, I64], &[]), // name_ptr, name_len
     RuntimeFuncSpec::new("rt_bdd_it_end", &[I64], &[]),        // passed
     RuntimeFuncSpec::new("rt_bdd_has_failure", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_bdd_record_result", &[I64], &[]),
+    RuntimeFuncSpec::new("rt_bdd_executed_total", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_bdd_failed_total", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_bdd_note_skip", &[], &[]),
     RuntimeFuncSpec::new("rt_bdd_expect_fail", &[I64, I64], &[]), // msg_ptr, msg_len
+    RuntimeFuncSpec::new("rt_bdd_fail_rv", &[I64], &[]),           // msg (RuntimeValue text)
     RuntimeFuncSpec::new("rt_bdd_expect_eq", &[I64, I64], &[]),   // actual, expected
     RuntimeFuncSpec::new("rt_bdd_expect_truthy", &[I64], &[]),    // value
     RuntimeFuncSpec::new("rt_bdd_before_each", &[I64], &[]),      // block (fn ptr)
@@ -2383,6 +2497,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // =========================================================================
     // Pure-Simple collection helpers implemented by the C SFFI runtime.
     RuntimeFuncSpec::new("spl_ordered_key_cmp", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("spl_erased_key_hash", &[I64], &[I64]),
     RuntimeFuncSpec::new("spl_collection_capture_begin", &[I64], &[I64]),
     RuntimeFuncSpec::new("spl_collection_capture_note_size", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("spl_collection_capture_note_lookup", &[I64, I64, I64], &[I64]),
@@ -2460,6 +2575,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_array_map", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_array_reduce", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_array_remove", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_array_insert", &[I64, I64, I64], &[I8]),
     RuntimeFuncSpec::new("rt_array_reversed", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_clear", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_collection_remove", &[I64, I64], &[I64]),
@@ -2485,6 +2601,8 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_push", &[I64, I64], &[I64]),
     // dst, src, dst_off, src_off, count -> count written (bulk in-place span copy)
     RuntimeFuncSpec::new("rt_array_write_span", &[I64, I64, I64, I64, I64], &[I64]),
+    // dst, dst_off, count, value -> count written (bulk in-place volatile fill)
+    RuntimeFuncSpec::new("rt_array_fill_span", &[I64, I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_reverse", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_reverse_mut", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_sha384_digest", &[I64], &[I64]), // [u8] -> 48-byte [u8]
@@ -2493,6 +2611,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_string_capitalize", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_center", &[I64, I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_char_count", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_string_to_digit", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_chomp", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_find_all", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_string_is_alnum", &[I64], &[I64]),
@@ -2522,6 +2641,274 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_tls13_sha256", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_value_unbox_int", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_xxh3_128_text", &[I64], &[I64]), // text -> 32-hex XXH3-128
+    // Caret JIT extern wave 1 (jit_caret_392_unregistered_externs_hybrid_splice_2026-11-13).
+    // Signatures transcribed from the `#[no_mangle] extern "C"` Rust definitions; text and
+    // array parameters are tagged RuntimeValues (I64), `bool` is I8, raw pointers are I64.
+    RuntimeFuncSpec::new("rt_debug_exit_success", &[], &[]),
+    RuntimeFuncSpec::new("rt_fd_stat_snapshot_v1", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_file_mode", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_file_modified", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_file_modified_time", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_heap_array_capacity_bytes", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_heap_aux_live_bytes", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_mem_attr_enabled", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_io_file_meta_created", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_io_file_meta_flags", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_io_file_meta_modified", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_io_file_set_permissions", &[I64, I8], &[I8]),
+    RuntimeFuncSpec::new("rt_io_file_write", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_io_file_write_all", &[I64, I64, I64], &[I8]),
+    RuntimeFuncSpec::new("rt_par_atomic_i64_is_lock_free", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_par_atomic_load_i64", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_path_extension", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_path_filename", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_print_err", &[I64], &[]),
+    RuntimeFuncSpec::new("rt_process_hwm_kib", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_process_last_child_peak_rss_kib", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_process_last_child_cpu_ms", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_process_run_tuple", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_run_bounded_tuple", &[I64, I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_run_bounded_observed_tuple_v1", &[I64, I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_run_bounded_environment_tuple_v1", &[I64, I64, I64, I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_run_bounded_admitted_tuple_v1", &[I64, I64, I64, I64, I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_spawn_async_environment_v1", &[I64, I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_pty_close", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_pty_exit_code_v1", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_pty_hangup", &[I64], &[I8]),
+    RuntimeFuncSpec::new("rt_pty_is_running", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_pty_read", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_pty_resize", &[I64, I32, I32], &[I8]),
+    RuntimeFuncSpec::new("rt_pty_write", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_pty_write_bytes_v1", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_random_randint", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_random_uniform", &[F64, F64], &[F64]),
+    RuntimeFuncSpec::new("rt_shell_exec", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_stdin_read", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_stdin_read_all", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_stdin_read_timeout_v1", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_string_from_byte_array", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_string_to_byte_array", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_term_flush", &[], &[I32]),
+    RuntimeFuncSpec::new("rt_term_write", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_text_validate_utf8", &[I64], &[I8]),
+    RuntimeFuncSpec::new("rt_transient_array_scope_identity_v1", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_transient_array_scope_state_v1", &[], &[I64]),
+    // Caret JIT extern wave 2: scalar-ABI C runtime exports (int64_t/double/void only).
+    RuntimeFuncSpec::new("rt_alloc_probe_count_v1", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_alloc_probe_coverage_v1", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_alloc_probe_reset_v1", &[], &[]),
+    RuntimeFuncSpec::new("rt_mem_guard_stats", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_mem_harden_check_native", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_time_now_seconds", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_time_now_seconds_f64", &[], &[F64]),
+    RuntimeFuncSpec::new("rt_linux_group_stream_release_inherited_v2", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_windows_private_alloc_v1", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_windows_private_free_v1", &[I64], &[]),
+    RuntimeFuncSpec::new("rt_windows_private_root_open_v1", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_windows_private_root_ready_v1", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_windows_private_directory_v1", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_windows_private_file_v1", &[I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_windows_private_check_v1", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_windows_private_file_write_v1", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_windows_private_file_seal_v1", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_windows_private_file_size_v1", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_windows_private_file_read_v1", &[I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_windows_private_publish_v1", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_windows_private_root_close_v1", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_windows_private_file_close_v1", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_windows_private_read_root_open_v2", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_windows_private_read_root_ready_v2", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_windows_private_read_directory_v2", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_windows_private_read_file_open_v2", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_windows_private_read_file_check_v2", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_windows_private_read_file_size_v2", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_windows_private_read_file_read_v2", &[I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_windows_private_read_root_close_v2", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_windows_private_read_file_close_v2", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_windows_private_roots_same_directory_v2", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_windows_private_adopt_published_read_v2", &[I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_windows_private_stage_discard_v2", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_windows_journal_open_v1", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_windows_journal_live_v1", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_windows_journal_read_v1", &[I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_windows_journal_publish_v1", &[I64, I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_windows_journal_replace_v1", &[I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_windows_journal_compare_replace_v1", &[I64, I64, I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_windows_journal_consumption_claim_v1", &[I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_windows_journal_close_v1", &[I64], &[I64]),
+    // Host runtime & container/workspace capability ABIs
+    RuntimeFuncSpec::new("rt_host_memory_headroom_bytes_v1", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_mkdir", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_sleep_nanos", &[I64], &[]),
+    RuntimeFuncSpec::new("rt_win_compare_object_handles", &[I64, I64], &[I32]),
+    RuntimeFuncSpec::new("rt_windows_pty_owner_thread_guard_v1", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_windows_pipe_file_mode_v1", &[I64, I64, I64, I32], &[I64]),
+    RuntimeFuncSpec::new("rt_workspace_storage_open_v1", &[I64, I64, I64, I64, I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_workspace_storage_observe_v1", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_workspace_storage_release_if_absent_v1", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_workspace_storage_forget_released_v1", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_workspace_storage_close_retained_v1", &[I64], &[I64]),
+    RuntimeFuncSpec::new(
+        "rt_workspace_storage_prepare_executable_v1",
+        &[I64, I64, I64, I64, I64, I64, I64, I64, I64],
+        &[I64],
+    ),
+    RuntimeFuncSpec::new("rt_linux_container_user_open_v1", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_linux_container_user_observe_v1", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_linux_container_user_close_v1", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_linux_container_containment_capture_v1", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_linux_container_containment_observe_v1", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_linux_container_containment_close_v1", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new(
+        "rt_linux_container_containment_kernel_observe_v1",
+        &[I64, I64, I64, I64, I64],
+        &[I64],
+    ),
+    // Direct Win32/NT system DLL SFFI specs (resolved at JIT link via dlsym_lookup)
+    RuntimeFuncSpec::new("BCryptOpenAlgorithmProvider", &[I64, I64, I64, I32], &[I32]),
+    RuntimeFuncSpec::new("BCryptCreateHash", &[I64, I64, I64, I32, I64, I32, I32], &[I32]),
+    RuntimeFuncSpec::new("BCryptHashData", &[I64, I64, I32, I32], &[I32]),
+    RuntimeFuncSpec::new("BCryptFinishHash", &[I64, I64, I32, I32], &[I32]),
+    RuntimeFuncSpec::new("BCryptDestroyHash", &[I64], &[I32]),
+    RuntimeFuncSpec::new("BCryptCloseAlgorithmProvider", &[I64, I32], &[I32]),
+    RuntimeFuncSpec::new("BCryptGenRandom", &[I64, I64, I32, I32], &[I32]),
+    RuntimeFuncSpec::new(
+        "NtCreateFile",
+        &[I64, I32, I64, I64, I64, I32, I32, I32, I32, I64, I32],
+        &[I32],
+    ),
+    RuntimeFuncSpec::new("NtQueryVolumeInformationFile", &[I64, I64, I64, I32, I32], &[I32]),
+    RuntimeFuncSpec::new("NtOpenDirectoryObject", &[I64, I32, I64], &[I32]),
+    RuntimeFuncSpec::new("NtQueryDirectoryObject", &[I64, I64, I32, I8, I8, I64, I64], &[I32]),
+    RuntimeFuncSpec::new("NtOpenSymbolicLinkObject", &[I64, I32, I64], &[I32]),
+    RuntimeFuncSpec::new("NtQuerySymbolicLinkObject", &[I64, I64, I64], &[I32]),
+    RuntimeFuncSpec::new("NtQuerySystemInformation", &[I32, I64, I32, I64], &[I32]),
+    RuntimeFuncSpec::new("NtClose", &[I64], &[I32]),
+    RuntimeFuncSpec::new("OpenThreadToken", &[I64, I32, I32, I64], &[I32]),
+    RuntimeFuncSpec::new("OpenProcessToken", &[I64, I32, I64], &[I32]),
+    RuntimeFuncSpec::new("GetTokenInformation", &[I64, I32, I64, I32, I64], &[I32]),
+    RuntimeFuncSpec::new("EqualSid", &[I64, I64], &[I32]),
+    RuntimeFuncSpec::new("GetSecurityInfo", &[I64, I32, I32, I64, I64, I64, I64, I64], &[I32]),
+    RuntimeFuncSpec::new("GetSecurityDescriptorLength", &[I64], &[I32]),
+    RuntimeFuncSpec::new("GetSecurityDescriptorControl", &[I64, I64, I64], &[I32]),
+    RuntimeFuncSpec::new("IsValidAcl", &[I64], &[I32]),
+    RuntimeFuncSpec::new("GetAclInformation", &[I64, I64, I32, I32], &[I32]),
+    RuntimeFuncSpec::new("GetAce", &[I64, I32, I64], &[I32]),
+    RuntimeFuncSpec::new("IsValidSid", &[I64], &[I32]),
+    RuntimeFuncSpec::new("IsWellKnownSid", &[I64, I32], &[I32]),
+    RuntimeFuncSpec::new("ConvertStringSecurityDescriptorToSecurityDescriptorW", &[I64, I32, I64, I64], &[I32]),
+    RuntimeFuncSpec::new("LsaGetLogonSessionData", &[I64, I64], &[I32]),
+    RuntimeFuncSpec::new("LsaFreeReturnBuffer", &[I64], &[I32]),
+    RuntimeFuncSpec::new("SHGetKnownFolderPath", &[I64, I32, I64, I64], &[I32]),
+    RuntimeFuncSpec::new("CoTaskMemFree", &[I64], &[]),
+    // Seed-1 (#4411): JIT-reachable system/HTTP/piped-process/IPC SFFI bridges
+    RuntimeFuncSpec::new("rt_black_box", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_hostname", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_http_request", &[I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_spawn_piped", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_read_stdout", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_write_stdin_some", &[I64, I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_is_alive", &[I64], &[I8]),
+    RuntimeFuncSpec::new("rt_process_close_piped", &[I64], &[I8]),
+    RuntimeFuncSpec::new("rt_process_stdout_state", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_piped_exit_status_value", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_spawn_piped_generation_v1", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_piped_pid_for_generation_v1", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_read_stdout_ref_v1", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_stdout_state_ref_v1", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_validate_piped_ref_v1", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new(
+        "rt_process_write_stdin_some_ref_v1",
+        &[I64, I64, I64, I64, I64, I64],
+        &[I64],
+    ),
+    RuntimeFuncSpec::new("rt_process_is_piped_alive_ref_v1", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_close_piped_ref_v1", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_local_unix_connect_v1", &[I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_local_unix_read_v1", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_local_unix_write_some_v1", &[I64, I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new(
+        "rt_local_unix_write_some_admitted_v1",
+        &[I64, I64, I64, I64, I64, I64],
+        &[I64],
+    ),
+    RuntimeFuncSpec::new("rt_local_unix_close_v1", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_retained_private_credential_open_v1", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new("rt_retained_private_credential_state_v1", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_retained_private_credential_error_v1", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_retained_private_credential_read_v1", &[I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new(
+        "rt_retained_private_credential_publish_v1",
+        &[I64, I64, I64, I64, I64],
+        &[I64],
+    ),
+    RuntimeFuncSpec::new("rt_retained_private_credential_close_v1", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_process_stream_reserve_v2", &[], &[I64]),
+    RuntimeFuncSpec::new("rt_process_stream_bind_v2", &[I64, I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new(
+        "rt_process_stream_abandon_unlaunched_v2",
+        &[I64, I64, I64, I64, I64],
+        &[I64],
+    ),
+    RuntimeFuncSpec::new("rt_process_stream_pid_v2", &[I64, I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new(
+        "rt_process_stream_retire_v2",
+        &[I64, I64, I64, I64, I64, I64, I64],
+        &[I64],
+    ),
+    RuntimeFuncSpec::new(
+        "rt_process_read_stdout_owned_v2",
+        &[I64, I64, I64, I64, I64, I64],
+        &[I64],
+    ),
+    RuntimeFuncSpec::new(
+        "rt_process_stdout_state_owned_v2",
+        &[I64, I64, I64, I64, I64, I64],
+        &[I64],
+    ),
+    RuntimeFuncSpec::new(
+        "rt_process_validate_piped_owned_v2",
+        &[I64, I64, I64, I64, I64, I64],
+        &[I64],
+    ),
+    RuntimeFuncSpec::new(
+        "rt_process_write_stdin_some_owned_v2",
+        &[I64, I64, I64, I64, I64, I64, I64, I64, I64, I64],
+        &[I64],
+    ),
+    RuntimeFuncSpec::new("rt_process_input_enable_v1", &[I64, I64, I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new(
+        "rt_process_input_install_v1",
+        &[I64, I64, I64, I64, I64, I64, I64, I64, I64, I64, I64, I64],
+        &[I64],
+    ),
+    RuntimeFuncSpec::new(
+        "rt_process_input_revoke_v1",
+        &[I64, I64, I64, I64, I64, I64, I64, I64, I64, I64, I64],
+        &[I64],
+    ),
+    RuntimeFuncSpec::new("rt_process_input_state_v1", &[I64, I64, I64, I64, I64, I64], &[I64]),
+    RuntimeFuncSpec::new(
+        "rt_process_input_write_some_v1",
+        &[I64, I64, I64, I64, I64, I64, I64, I64, I64, I64, I64, I64, I64, I64, I64, I64],
+        &[I64],
+    ),
+    RuntimeFuncSpec::new("rt_linux_group_stream_admit_v2", &[I64, I64], &[I64]),
+    RuntimeFuncSpec::new(
+        "rt_linux_group_launch_stream_broker_v2",
+        &[I64, I64, I64, I64, I64, I64, I64, I64, I64, I64, I64, I64, I64],
+        &[I64],
+    ),
+    RuntimeFuncSpec::new(
+        "rt_linux_group_stream_admit_profiled_v3",
+        &[I64, I64, I64, I64, I64, I64, I64],
+        &[I64],
+    ),
+    RuntimeFuncSpec::new(
+        "rt_linux_group_launch_stream_broker_profiled_v3",
+        &[I64, I64, I64, I64, I64, I64, I64, I64, I64, I64, I64, I64, I64, I64, I64, I64, I64, I64],
+        &[I64],
+    ),
 ];
 
 #[cfg(test)]
@@ -2533,6 +2920,7 @@ mod tests {
         for (name, machine_arity) in [
             ("rt_linux_group_available_capacity_v1", 2),
             ("rt_linux_group_parent_acquire_v1", 4),
+            ("rt_linux_group_parent_acquire_at_v2", 6),
             ("rt_linux_group_parent_release_v1", 1),
             ("rt_linux_group_launch_broker_v1", 5),
             ("rt_linux_group_start_v1", 18),
@@ -2815,7 +3203,7 @@ mod tests {
         }
         let release = spec_for("rt_process_owned_v3_release_value").expect("owned V3 release runtime spec");
         assert_eq!(release.params, [I64]);
-        assert_eq!(release.returns, [I32]);
+        assert_eq!(release.returns, [I8]);
         let capabilities =
             spec_for("rt_process_owned_v3_capabilities_value").expect("owned V3 capability runtime spec");
         assert!(capabilities.params.is_empty());
@@ -2843,6 +3231,15 @@ mod tests {
         let start = spec_for("rt_process_owned_v3_start_pinned_value").unwrap();
         assert_eq!(start.params, [I64, I64, I64, I64, I64, I64]);
         assert_eq!(start.returns, [I64]);
+    }
+
+    #[test]
+    fn process_bool_sffi_specs_use_i8_return_abi() {
+        for name in ["rt_process_is_running", "rt_process_kill", "rt_process_exists"] {
+            let spec = spec_for(name).unwrap_or_else(|| panic!("missing process bool spec: {name}"));
+            assert_eq!(spec.params, [I64], "{name} params");
+            assert_eq!(spec.returns, [I8], "{name} must use I8 to match extern \"C\" fn -> bool");
+        }
     }
 
     #[test]

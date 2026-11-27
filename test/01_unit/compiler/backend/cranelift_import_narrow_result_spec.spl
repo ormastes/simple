@@ -1,0 +1,95 @@
+# @req: REQ-CRANELIFT-VERIFIER-TYPES-001
+# Regression (bug cranelift_lsp_mcp_stdout_write_failed_2026-11-13): imported
+# calls are declared with an I64 result, but a C callee returning `bool` /
+# `int8_t` / `int32_t` only defines the low bits of RAX. The Cranelift lane
+# must re-extend such results from their declared width; full-word returns
+# are left untouched.
+use std.spec
+use std.spec.step
+use compiler.mir.mir.*
+use compiler.backend.cranelift_codegen_adapter.{cl_import_result_narrow_plan, cl_import_call_result_narrow_plan}
+use std.nogc_sync_mut.io.file_ops.{file_read}
+
+describe "Cranelift imported-call narrow result plan":
+    it "zero-extends a declared bool from its low byte":
+        step("Bool -> (I8, unsigned)")
+        val (ty, signed) = cl_import_result_narrow_plan(MirType.bool())
+        expect(ty).to_equal(1)
+        expect(signed).to_equal(false)
+
+    it "sign-extends declared signed sub-word integers":
+        step("I8/I16/I32 -> signed reduce widths")
+        val (t8, s8) = cl_import_result_narrow_plan(MirType(kind: MirTypeKind.I8))
+        expect(t8).to_equal(1)
+        expect(s8).to_equal(true)
+        val (t16, s16) = cl_import_result_narrow_plan(MirType(kind: MirTypeKind.I16))
+        expect(t16).to_equal(2)
+        expect(s16).to_equal(true)
+        val (t32, s32) = cl_import_result_narrow_plan(MirType(kind: MirTypeKind.I32))
+        expect(t32).to_equal(3)
+        expect(s32).to_equal(true)
+
+    it "zero-extends declared unsigned sub-word integers":
+        step("U8/U32 -> unsigned reduce widths")
+        val (t8, s8) = cl_import_result_narrow_plan(MirType(kind: MirTypeKind.U8))
+        expect(t8).to_equal(1)
+        expect(s8).to_equal(false)
+        val (t32, s32) = cl_import_result_narrow_plan(MirType(kind: MirTypeKind.U32))
+        expect(t32).to_equal(3)
+        expect(s32).to_equal(false)
+
+    it "leaves full-word results untouched":
+        step("I64/F64/Unit -> no reduce")
+        val (ti, _) = cl_import_result_narrow_plan(MirType.i64())
+        expect(ti).to_equal(0)
+        val (tf, _) = cl_import_result_narrow_plan(MirType.f64())
+        expect(tf).to_equal(0)
+        val (tu, _) = cl_import_result_narrow_plan(MirType.unit())
+        expect(tu).to_equal(0)
+
+    # Bug phase2_cranelift_extern_bool_return_upper_bits_2026-11-18: MIR splits
+    # a `text` argument of a (ptr, len) runtime extern into two operands, so the
+    # call's arity differs from the declared parameter count. The result must
+    # still be re-extended from the recorded return type.
+    it "plans from the recorded return when text expansion changed the arity":
+        step("rt_file_exists(text) -> bool: 1 declared param, 2 call operands")
+        val sig = MirSignature(params: [], return_type: MirType.bool(), is_variadic: false,
+            declared_params: [MirType.i64()], declared_params_known: true)
+        val (ty, signed) = cl_import_call_result_narrow_plan(MirType(kind: MirTypeKind.FuncPtr(sig)))
+        expect(ty).to_equal(1)
+        expect(signed).to_equal(false)
+
+    it "plans a zero-argument bool extern":
+        step("rt_transient_array_scope_begin() -> bool")
+        val sig = MirSignature(params: [], return_type: MirType.bool(), is_variadic: false)
+        val (ty, signed) = cl_import_call_result_narrow_plan(MirType(kind: MirTypeKind.FuncPtr(sig)))
+        expect(ty).to_equal(1)
+        expect(signed).to_equal(false)
+
+    it "leaves a callee with no recorded return untouched":
+        step("non-FuncPtr operand type and I64 return -> no reduce")
+        val (tn, _) = cl_import_call_result_narrow_plan(MirType.i64())
+        expect(tn).to_equal(0)
+        val sig = MirSignature(params: [], return_type: MirType.i64(), is_variadic: false)
+        val (tw, _) = cl_import_call_result_narrow_plan(MirType(kind: MirTypeKind.FuncPtr(sig)))
+        expect(tw).to_equal(0)
+
+    it "routes i8 runtime predicates rt_value_is_float and rt_value_is_nil through translate_runtime_import_call_i8":
+        step("verify cranelift_codegen_adapter declares i8 return and sexts to i64")
+        val adapter = file_read("src/compiler/70.backend/backend/cranelift_codegen_adapter.spl")
+        expect(adapter).to_contain("translate_runtime_import_call_i8")
+        expect(adapter).to_contain("rt_value_is_float")
+        expect(adapter).to_contain("rt_value_is_nil")
+        expect(adapter).to_contain("cranelift_sextend(ctx, CL_TYPE_I64, raw_i8)")
+        val sig = MirSignature(params: [MirType.i64()], return_type: MirType(kind: MirTypeKind.I8), is_variadic: false)
+        val (ty, signed) = cl_import_call_result_narrow_plan(MirType(kind: MirTypeKind.FuncPtr(sig)))
+        expect(ty).to_equal(1)
+        expect(signed).to_equal(true)
+
+    it "routes rt_panic through void helper and __simple_rt_string_char_code_at to rt_string_char_code_at":
+        step("verify cranelift_codegen_adapter handles rt_panic as void and aliases __simple_rt_string_char_code_at")
+        val adapter = file_read("src/compiler/70.backend/backend/cranelift_codegen_adapter.spl")
+        expect(adapter).to_contain("name == \"rt_panic\"")
+        expect(adapter).to_contain("translate_runtime_import_call_void(ctx, cl_module, name, arg_vals)")
+        expect(adapter).to_contain("name == \"__simple_rt_string_char_code_at\"")
+        expect(adapter).to_contain("translate_runtime_import_call_i64(ctx, cl_module, \"rt_string_char_code_at\", arg_vals)")

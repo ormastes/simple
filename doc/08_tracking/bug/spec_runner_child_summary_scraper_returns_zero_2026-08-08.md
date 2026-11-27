@@ -90,3 +90,28 @@ Note also that the runner already has a second, working path
 (`SPEC FILE VERDICT` / `warning: child exit 1 contradicted by a clean SPEC FILE
 VERDICT; trusting the verdict`), which is why a dead scraper is silent.
 
+
+## Triage 2026-11-25 (release/1.0.0, Windows host) — still open, runtime verification blocked
+
+Code inspection of the current `extract_number_before`
+(`src/app/test_runner_new/test_runner_single.spl:619`) shows the ANSI hazard
+from candidate cause 1 is handled: it keeps the **last complete digit run**
+before the keyword, so `\e[32m1 example, 0 failures\e[0m` parses as
+examples=1 / failures=0 and `\e[31m12 examples, 1 failure\e[0m` as
+examples=12 / failures=1. That was already the documented behavior on
+2026-08-08, so candidate cause 2 (stream/line splitting — the tokens landing
+on different `\n`-delimited lines of `combined`, or the summary line not
+surviving into the captured child output at all) remains the live suspect,
+exactly as the 2026-08-17 note suspected.
+
+Runtime confirmation is environment-blocked on this host: `bin/simple.exe
+test` (the only lane that exercises `parse_child_example_summary` end-to-end,
+including the `SIMPLE_TEST_RUNNER_DEBUG=1` `has_sum=` field) fails repo-wide
+at release/1.0.0 HEAD with `unknown decorator '@representation_boundary'`
+(known seed/source inconsistency), and importing `test_runner_single` from a
+plain `run` probe hits the same decorator in `test_runner_client.spl`. The
+"silently returns zero" defect shape also still exists in the source
+(`(0, 0, 0)` return for both "no summary" and "unparseable"), so the fix bar
+(discrimination proof + distinct signals) is unmet. Record stays OPEN;
+next step is unchanged — run `SIMPLE_TEST_RUNNER_DEBUG=1 bin/simple test
+<any *_spec.spl>` on a host with a working runner and read `has_sum=`.

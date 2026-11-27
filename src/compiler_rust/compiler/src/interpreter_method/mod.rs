@@ -1,21 +1,104 @@
 // Method call dispatcher - delegates to type-specific handlers
 
 pub(crate) mod collections;
-mod primitives;
-mod special;
+pub(crate) mod primitives;
+pub(crate) mod special;
 
 use super::{
     eval_arg, eval_arg_int, eval_arg_usize, evaluate_expr, exec_function, exec_function_with_captured_env,
-    exec_function_with_values, find_and_exec_method, instantiate_class, try_method_missing, Enums, ImplMethods,
+    exec_function_with_values, find_and_exec_method, instantiate_class, interpreter_call::select_named_static_overload,
+    try_method_missing, Enums, ImplMethods,
     BITFIELDS, BLANKET_IMPL_METHODS, BLOCK_SCOPED_ENUMS, GLOBAL_ENUMS, GLOBAL_IMPL_METHODS, TRAIT_IMPLS,
 };
 use crate::error::{codes, typo, CompileError, ErrorContext};
 use crate::value::{format_f32_display, Env, Value};
-use simple_parser::ast::{Argument, ClassDef, Expr, FunctionDef};
+use simple_parser::ast::{Argument, ClassDef, Expr, FunctionDef, Type};
 use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::sync::Arc;
+
+/// `obj.name(args)` where `name` is a callable FIELD (lambda, function, block
+/// closure, native function, constructor, or `__call__` object) rather than a
+/// method. Shared by the `Value::Object` and `Value::ClassInstance` receiver
+/// arms of `call_method` so `self.callback(x)` behaves the same on a struct
+/// and a class. `Ok(None)` when the field holds no callable shape.
+#[allow(clippy::too_many_arguments)] // reason: mirrors the dispatcher it is split out of
+fn call_callable_field(
+    field_value: &Value,
+    args: &[Argument],
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Option<Value>, CompileError> {
+    match field_value {
+        Value::Lambda {
+            params,
+            body,
+            env: captured_env,
+        } => {
+            // Call the lambda stored in the field
+            let mut arg_vals = Vec::new();
+            for arg in args {
+                arg_vals.push(evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?);
+            }
+            // Create local env from captured env and bind params
+            let _closure_origin = crate::interpreter::interpreter_module::ClosureOriginGuard::enter_closure(&captured_env);
+            let mut local_env = Env::clone(captured_env);
+            for (i, param) in params.iter().enumerate() {
+                if let Some(val) = arg_vals.get(i) {
+                    local_env.insert(param.clone(), val.clone());
+                }
+            }
+            // Evaluate the body expression
+            let result = evaluate_expr(body.as_ref(), &mut local_env, functions, classes, enums, impl_methods)?;
+            Ok(Some(result))
+        }
+        Value::Function { def, captured_env, .. } => {
+            // Call the function stored in the field
+            exec_function_with_captured_env(
+                def,
+                args,
+                env,
+                &mut Env::clone(captured_env),
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )
+            .map(Some)
+        }
+        // Any OTHER callable field shape (block closure, native
+        // function, constructor, or an object implementing the
+        // `__call__` protocol) routes through the single place that
+        // knows which `Value` variants are invocable, so
+        // `obj.handler(x)` agrees with `(obj.handler)(x)`.
+        other => {
+            let candidate = other.clone();
+            if matches!(
+                candidate,
+                Value::BlockClosure { .. }
+                    | Value::NativeFunction(_)
+                    | Value::Constructor { .. }
+                    | Value::Object { .. }
+                    | Value::ClassInstance(_)
+            ) {
+                return crate::interpreter::interpreter_call::call_value_as_callable(
+                    candidate,
+                    args,
+                    env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                );
+            }
+            Ok(None)
+        }
+    }
+}
 
 /// Byte offset of the first byte >= 0x80, or `bytes.len()` when all-ASCII.
 /// Word-at-a-time so an all-ASCII document costs ~len/8 iterations.
@@ -85,6 +168,16 @@ pub fn clear_ascii_memo() {
     });
 }
 
+/// Code-point length of `s` (ADR-005 item 5: user-facing `len()` counts code
+/// points). ASCII text (memoized) answers in O(1) from the byte length.
+pub(crate) fn text_cp_len(s: &Arc<String>) -> usize {
+    if shared_text_is_ascii(s) {
+        s.len()
+    } else {
+        s.chars().count()
+    }
+}
+
 // Thread-local storage for pinned strings used by the "ptr" method on strings.
 // Strings are kept alive here so that raw pointers returned to SFFI/codegen remain valid.
 // Call `clear_pinned_strings()` between test runs or when the interpreter resets to reclaim memory.
@@ -97,6 +190,338 @@ pub fn clear_pinned_strings() {
     PINNED_STRINGS.with(|cell| {
         cell.borrow_mut().clear();
     });
+}
+
+pub(crate) fn is_bdd_matcher_name(method: &str) -> bool {
+    matches!(
+        method,
+        "to_equal"
+            | "to_be"
+            | "to_contain"
+            | "to_include"
+            | "to_be_truthy"
+            | "to_be_falsy"
+            | "to_be_true"
+            | "to_be_false"
+            | "to_be_nil"
+            | "to_be_none"
+            | "to_be_some"
+            | "to_be_greater_than"
+            | "to_be_less_than"
+            | "to_be_greater_than_or_equal"
+            | "to_be_gte"
+            | "to_be_less_than_or_equal"
+            | "to_be_lte"
+            | "to_start_with"
+            | "to_end_with"
+            | "to_not_equal"
+            | "to_not_contain"
+            | "not_to_contain"
+            | "not_to_include"
+            | "to_not_include"
+            | "to_not_be_nil"
+            | "to"
+            | "not_to"
+            | "to_not"
+    )
+}
+
+/// Evaluate a postfix BDD matcher against an already-evaluated receiver and
+/// optional first argument value. Shared by top-level `evaluate_method_call`
+/// (`expect(x).to_*`) and nested/chained `call_method_on_value`
+/// (`xs.len().to_*`). Returns `Ok(None)` when `method` is not a BDD matcher.
+pub(crate) fn eval_bdd_matcher_on_values(
+    recv_val: &Value,
+    method: &str,
+    arg0: Option<&Value>,
+) -> Result<Option<Value>, CompileError> {
+    if !is_bdd_matcher_name(method) {
+        return Ok(None);
+    }
+
+    use crate::interpreter::interpreter_call::{
+        finish_bdd_matcher, push_bdd_failure, BDD_EXPECT_FAILED, BDD_EXPECT_PROVISIONAL, BDD_EXPECT_SEQ,
+        BDD_MATCHER_COUNT, BDD_MATCHER_RAN, BDD_PROVISIONAL_SEQ,
+    };
+
+    // TARGETED retraction: clear the provisional only when it was raised by
+    // the expect this matcher is chained to. Clearing unconditionally
+    // destroyed a genuine bare `expect <cond>` failure raised by a
+    // different expect in the same example — see
+    // doc/08_tracking/bug/bare_expect_statement_vacuous_2026-08-18.md.
+    let owns_provisional = BDD_PROVISIONAL_SEQ.with(|cell: &RefCell<usize>| *cell.borrow())
+        == BDD_EXPECT_SEQ.with(|cell: &RefCell<usize>| *cell.borrow());
+    if owns_provisional {
+        BDD_EXPECT_PROVISIONAL.with(|cell: &RefCell<bool>| *cell.borrow_mut() = false);
+        BDD_PROVISIONAL_SEQ.with(|cell: &RefCell<usize>| *cell.borrow_mut() = 0);
+    }
+    // Monotonic within an example: records that a matcher checked the expect
+    // receiver, so a re-set provisional flag can't false-fail the example.
+    BDD_MATCHER_RAN.with(|cell: &RefCell<bool>| *cell.borrow_mut() = true);
+    // Counted form, paired with BDD_EXPECT_NEEDS_MATCHER, so a vacuous
+    // `expect(<non-bool>)` is caught even when a sibling expect in the same
+    // example did chain a matcher. See bdd.rs for the contract.
+    BDD_MATCHER_COUNT.with(|cell: &RefCell<usize>| *cell.borrow_mut() += 1);
+
+    let record_failure = |failure_msg: String| {
+        BDD_EXPECT_FAILED.with(|cell: &RefCell<bool>| *cell.borrow_mut() = true);
+        push_bdd_failure(failure_msg);
+    };
+
+    let matched = match method {
+        "to_equal" | "to_be" => {
+            let expected = arg0.cloned().unwrap_or(Value::Nil);
+            // Must use nullable-aware equality, not raw `==`: a receiver from a
+            // `-> T?` function arrives as `Option::None`/`Option::Some(x)`.
+            let ok = recv_val.nullable_eq(&expected);
+            if !ok {
+                record_failure(format!(
+                    "expected {} to equal {}",
+                    recv_val.to_display_string(),
+                    expected.to_display_string()
+                ));
+            }
+            ok
+        }
+        "to_contain" | "to_include" => {
+            let needle = arg0.cloned().unwrap_or(Value::Nil);
+            let ok = match recv_val {
+                Value::Str(s) => matches!(&needle, Value::Str(n) if s.contains(n.as_str())),
+                Value::Array(arr) => arr.contains(&needle),
+                _ => false,
+            };
+            if !ok {
+                record_failure(format!(
+                    "expected {} to contain {}",
+                    recv_val.to_display_string(),
+                    needle.to_display_string()
+                ));
+            }
+            ok
+        }
+        "to_be_truthy" => {
+            let ok = recv_val.truthy();
+            if !ok {
+                record_failure(format!("expected {} to be truthy", recv_val.to_display_string()));
+            }
+            ok
+        }
+        "to_be_falsy" => {
+            let ok = !recv_val.truthy();
+            if !ok {
+                record_failure(format!("expected {} to be falsy", recv_val.to_display_string()));
+            }
+            ok
+        }
+        "to_be_true" => {
+            // Strict equality (not just truthy) — mirrors ExpectHelper.to_be_true.
+            let ok = *recv_val == Value::Bool(true);
+            if !ok {
+                record_failure(format!("expected true, got {}", recv_val.to_display_string()));
+            }
+            ok
+        }
+        "to_be_false" => {
+            // Strict equality (not just falsy) — mirrors ExpectHelper.to_be_false.
+            let ok = *recv_val == Value::Bool(false);
+            if !ok {
+                record_failure(format!("expected false, got {}", recv_val.to_display_string()));
+            }
+            ok
+        }
+        "to_be_nil" | "to_be_none" => {
+            let ok = recv_val.is_nil_like();
+            if !ok {
+                record_failure(format!("expected {} to be nil", recv_val.to_display_string()));
+            }
+            ok
+        }
+        "to_be_some" => {
+            let ok = !recv_val.is_nil_like();
+            if !ok {
+                record_failure(format!("expected Some(_), got {}", recv_val.to_display_string()));
+            }
+            ok
+        }
+        "to_be_greater_than" => {
+            let expected = arg0.cloned().unwrap_or(Value::Int(0));
+            let ok = numeric_ordering(recv_val, &expected).is_some_and(|ordering| ordering.is_gt());
+            if !ok {
+                record_failure(format!(
+                    "expected {} to be greater than {}",
+                    recv_val.to_display_string(),
+                    expected.to_display_string()
+                ));
+            }
+            ok
+        }
+        "to_be_less_than" => {
+            let expected = arg0.cloned().unwrap_or(Value::Int(0));
+            let ok = numeric_ordering(recv_val, &expected).is_some_and(|ordering| ordering.is_lt());
+            if !ok {
+                record_failure(format!(
+                    "expected {} to be less than {}",
+                    recv_val.to_display_string(),
+                    expected.to_display_string()
+                ));
+            }
+            ok
+        }
+        "to_be_greater_than_or_equal" | "to_be_gte" => {
+            let expected = arg0.cloned().unwrap_or(Value::Int(0));
+            let ok = numeric_ordering(recv_val, &expected).is_some_and(|ordering| ordering.is_gt() || ordering.is_eq());
+            if !ok {
+                record_failure(format!(
+                    "expected {} to be greater than or equal to {}",
+                    recv_val.to_display_string(),
+                    expected.to_display_string()
+                ));
+            }
+            ok
+        }
+        "to_be_less_than_or_equal" | "to_be_lte" => {
+            let expected = arg0.cloned().unwrap_or(Value::Int(0));
+            let ok = numeric_ordering(recv_val, &expected).is_some_and(|ordering| ordering.is_lt() || ordering.is_eq());
+            if !ok {
+                record_failure(format!(
+                    "expected {} to be less than or equal to {}",
+                    recv_val.to_display_string(),
+                    expected.to_display_string()
+                ));
+            }
+            ok
+        }
+        "to_start_with" => {
+            let prefix = arg0.cloned().unwrap_or_else(|| Value::text(String::new()));
+            let ok = matches!((recv_val, &prefix), (Value::Str(s), Value::Str(p)) if s.starts_with(p.as_str()));
+            if !ok {
+                record_failure(format!(
+                    "expected {} to start with {}",
+                    recv_val.to_display_string(),
+                    prefix.to_display_string()
+                ));
+            }
+            ok
+        }
+        "to_end_with" => {
+            let suffix = arg0.cloned().unwrap_or_else(|| Value::text(String::new()));
+            let ok = matches!((recv_val, &suffix), (Value::Str(s), Value::Str(p)) if s.ends_with(p.as_str()));
+            if !ok {
+                record_failure(format!(
+                    "expected {} to end with {}",
+                    recv_val.to_display_string(),
+                    suffix.to_display_string()
+                ));
+            }
+            ok
+        }
+        "to_not_equal" => {
+            let expected = arg0.cloned().unwrap_or(Value::Nil);
+            let ok = !recv_val.nullable_eq(&expected);
+            if !ok {
+                record_failure(format!(
+                    "expected {} to not equal {}",
+                    recv_val.to_display_string(),
+                    expected.to_display_string()
+                ));
+            }
+            ok
+        }
+        "to_not_contain" | "to_not_include" | "not_to_contain" | "not_to_include" => {
+            let needle = arg0.cloned().unwrap_or(Value::Nil);
+            let contains = match recv_val {
+                Value::Str(s) => matches!(&needle, Value::Str(n) if s.contains(n.as_str())),
+                Value::Array(arr) => arr.contains(&needle),
+                _ => false,
+            };
+            let ok = !contains;
+            if !ok {
+                record_failure(format!(
+                    "expected {} to not contain {}",
+                    recv_val.to_display_string(),
+                    needle.to_display_string()
+                ));
+            }
+            ok
+        }
+        "to_not_be_nil" => {
+            let ok = !recv_val.is_nil_like();
+            if !ok {
+                record_failure("expected value to not be nil, got nil".to_string());
+            }
+            ok
+        }
+        "to" | "not_to" | "to_not" => {
+            let matcher = arg0.cloned().unwrap_or(Value::Nil);
+            let inner = match &matcher {
+                Value::Matcher(m) => m.matches(recv_val),
+                other => *recv_val == *other,
+            };
+            let is_negated = method == "not_to" || method == "to_not";
+            let ok = if is_negated { !inner } else { inner };
+            if !ok {
+                record_failure(format!(
+                    "expected {:?} {} {:?}",
+                    recv_val,
+                    if is_negated { "not to match" } else { "to match" },
+                    matcher
+                ));
+            }
+            ok
+        }
+        _ => return Ok(None),
+    };
+
+    finish_bdd_matcher(Value::Bool(matched)).map(Some)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn eval_bdd_matcher_method(
+    recv_val: &Value,
+    method: &str,
+    args: &[Argument],
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Option<Value>, CompileError> {
+    if !is_bdd_matcher_name(method) {
+        return Ok(None);
+    }
+    let arg0 = if args.is_empty() {
+        None
+    } else {
+        Some(eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?)
+    };
+    eval_bdd_matcher_on_values(recv_val, method, arg0.as_ref())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn try_exec_ufcs_method(
+    recv_val: &Value,
+    method: &str,
+    args: &[Argument],
+    env: &mut Env,
+    functions: &mut HashMap<String, Arc<FunctionDef>>,
+    classes: &mut HashMap<String, Arc<ClassDef>>,
+    enums: &Enums,
+    impl_methods: &ImplMethods,
+) -> Result<Option<Value>, CompileError> {
+    let Some(func) = crate::interpreter::interpreter_call::caller_bound_function(method, functions) else {
+        return Ok(None);
+    };
+    crate::interpreter::interpreter_call::gate_private_call(&func.name, &func)?;
+    if let Some(rest) = func.params.get(1..) {
+        crate::interpreter::interpreter_call::reject_bool_literal_args_for_slice(rest, args)
+            .map_err(|e| crate::interpreter::interpreter_call::name_callee(e, &func))?;
+    }
+    let mut arg_values = vec![recv_val.clone()]; // Receiver becomes first argument
+    for arg in args {
+        let val = evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?;
+        arg_values.push(val);
+    }
+    exec_function_with_values(&func, &arg_values, env, functions, classes, enums, impl_methods).map(Some)
 }
 
 fn numeric_ordering(left: &Value, right: &Value) -> Option<Ordering> {
@@ -220,7 +645,7 @@ pub(crate) fn peel_bdd_matcher_receiver(receiver: &Box<Expr>) -> Option<(&Box<Ex
 pub(crate) fn is_argless_bdd_matcher(name: &str) -> bool {
     matches!(
         name,
-        "to_be_nil" | "to_be_none" | "to_be_truthy" | "to_be_falsy" | "to_be_true" | "to_be_false" | "to_not_be_nil"
+        "to_be_nil" | "to_be_none" | "to_be_some" | "to_be_truthy" | "to_be_falsy" | "to_be_true" | "to_be_false" | "to_not_be_nil"
     )
 }
 
@@ -250,6 +675,7 @@ pub(crate) fn evaluate_negated_bdd_matcher(
         "to_contain" => Some("to_not_contain"),
         "to_include" => Some("to_not_include"),
         "to_be_nil" | "to_be_none" => Some("to_not_be_nil"),
+        "to_be_some" => Some("to_be_none"),
         "to" => Some("not_to"),
         _ => None,
     };
@@ -257,7 +683,7 @@ pub(crate) fn evaluate_negated_bdd_matcher(
         return evaluate_method_call(expect_call, negated, args, env, functions, classes, enums, impl_methods);
     }
     use crate::interpreter::interpreter_call::{
-        finish_bdd_matcher, BDD_EXPECT_FAILED, BDD_EXPECT_PROVISIONAL, BDD_FAILURE_MSG, BDD_INSIDE_IT,
+        finish_bdd_matcher, BDD_EXPECT_FAILED, BDD_EXPECT_PROVISIONAL, BDD_FAILURE_MSG, push_bdd_failure, BDD_INSIDE_IT,
         BDD_PROVISIONAL_MSG, BDD_PROVISIONAL_SEQ,
     };
     // The positive form's failure state is suppressed wholesale: the hard
@@ -293,9 +719,7 @@ pub(crate) fn evaluate_negated_bdd_matcher(
     };
     if matched {
         BDD_EXPECT_FAILED.with(|cell| *cell.borrow_mut() = true);
-        BDD_FAILURE_MSG.with(|cell| {
-            *cell.borrow_mut() = Some(format!("expected `{method}` not to match, but it did"))
-        });
+        push_bdd_failure(format!("expected `{method}` not to match, but it did"));
     }
     finish_bdd_matcher(Value::Bool(!matched))
 }
@@ -306,6 +730,20 @@ fn use_bare_module_fallback(receiver_in_env: bool, receiver_is_class: bool, rece
 
 /// Main entry point for method call evaluation
 #[allow(clippy::borrowed_box, clippy::too_many_arguments)] // reason: Box<dyn Trait> dispatch with ABI-locked entry; refactoring deferred
+/// ADR-005: `char.from_code(n)` inverts `.ord()`. A non-scalar code point
+/// (surrogate, > U+10FFFF) is an error, never a silent NUL. The value is a
+/// 1-char text until the char value type lands.
+pub(crate) fn char_from_code(args: &[Value]) -> Result<Value, CompileError> {
+    let code = match args.first() {
+        Some(v) => v.as_int()?,
+        None => return Err(CompileError::semantic("char.from_code expects one integer code point")),
+    };
+    match u32::try_from(code).ok().and_then(char::from_u32) {
+        Some(ch) => Ok(Value::text(ch.to_string())),
+        None => Err(CompileError::semantic(format!("char.from_code: {code} is not a Unicode scalar value"))),
+    }
+}
+
 pub(crate) fn evaluate_method_call(
     receiver: &Box<Expr>,
     method: &str,
@@ -320,7 +758,11 @@ pub(crate) fn evaluate_method_call(
         eprintln!("[eval-method-call] method={} argc={}", method, args.len());
     }
     // Support module-style dot calls (lib.func()) by resolving directly to imported functions/classes.
-    if let Expr::Identifier(module_name) = receiver.as_ref() {
+    let receiver_base = match receiver.as_ref() {
+        Expr::GenericInst { expr, .. } => expr.as_ref(),
+        other => other,
+    };
+    if let Expr::Identifier(module_name) = receiver_base {
         if method == "empty" {
             if let Ok(filter) = std::env::var("SIMPLE_INTERPRETER_CALL_TRACE") {
                 if filter == "1" || filter == "all" || method.contains(&filter) {
@@ -362,6 +804,8 @@ pub(crate) fn evaluate_method_call(
             receiver_is_enum,
         ) {
             if let Some(func) = functions.get(method).cloned() {
+                // A bare-name call spelled `m.f()`: same visibility rule.
+                crate::interpreter::interpreter_call::gate_private_call(&func.name, &func)?;
                 return exec_function(&func, args, env, functions, classes, enums, impl_methods, None);
             }
             if classes.contains_key(method) {
@@ -370,6 +814,23 @@ pub(crate) fn evaluate_method_call(
         }
 
         // Builtin text static methods
+        // ADR-005: `char.from_code(n)`; errors on a non-scalar code point.
+        if module_name == "char" && method == "from_code" {
+            let evaluated_args: Vec<Value> = args
+                .iter()
+                .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                .collect::<Result<Vec<_>, _>>()?;
+            return char_from_code(&evaluated_args);
+        }
+        // `text.from_bytes(b)`: native routes it to `rt_bytes_to_text`
+        // (seed_interp_text_from_bytes_static_2026-11-06).
+        if module_name == "text" && method == "from_bytes" {
+            let evaluated_args: Vec<Value> = args
+                .iter()
+                .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                .collect::<Result<Vec<_>, _>>()?;
+            return crate::interpreter::interpreter_extern::conversion::rt_bytes_to_text_fn(&evaluated_args);
+        }
         if module_name == "text" && method == "from_char_code" {
             let evaluated_args: Vec<Value> = args
                 .iter()
@@ -384,6 +845,16 @@ pub(crate) fn evaluate_method_call(
         }
     }
 
+    // Read declaration metadata BEFORE executing the receiver: a getter may
+    // mutate bindings, and evaluating it twice would duplicate its effects.
+    let declared_receiver_width = match receiver.as_ref() {
+        Expr::Call { callee, .. } => match callee.as_ref() {
+            Expr::Identifier(name) =>
+                super::interpreter_call::declared_signed_call_return_width(name, env, functions),
+            _ => None,
+        },
+        _ => None,
+    };
     let recv_val = evaluate_expr(receiver, env, functions, classes, enums, impl_methods)?.deref_pointer();
 
     // Handle module (Dict) method calls - look up function in module and use its captured_env
@@ -400,6 +871,9 @@ pub(crate) fn evaluate_method_call(
         };
         if let Some(func_val) = lookup(method) {
             if let Value::Function { def, captured_env, .. } = &func_val {
+                // `m.f()` names `f` exactly like a bare call does; qualifying
+                // it does not make a private fn visible.
+                crate::interpreter::interpreter_call::gate_private_call(&def.name, def)?;
                 let mut captured_env_clone = Env::clone(captured_env);
                 return exec_function_with_captured_env(
                     def,
@@ -414,6 +888,23 @@ pub(crate) fn evaluate_method_call(
             }
             if let Value::Constructor { class_name } = &func_val {
                 return instantiate_class(class_name, args, env, functions, classes, enums, impl_methods);
+            }
+            // `X.Pay(3)`: a payload variant of an enum declared in `mod X:`.
+            if let Value::EnumVariantConstructor {
+                enum_name,
+                variant_name,
+            } = func_val
+            {
+                return crate::interpreter::interpreter_call::construct_enum_variant(
+                    enum_name,
+                    variant_name,
+                    args,
+                    env,
+                    functions,
+                    classes,
+                    enums,
+                    impl_methods,
+                );
             }
         }
         // Self-named module shadowing: `use a.b.Foo.{Foo}` binds the *module*
@@ -515,394 +1006,9 @@ pub(crate) fn evaluate_method_call(
     }
 
     // BDD assertion shortcut methods: to_equal, to_be, to_contain, etc.
-    // These combine expect(val).to(matcher) into expect(val).to_equal(expected).
-    // A passing matcher must not clear an earlier failure in the same `it`;
-    // the example-level reset above is the only success-state reset point.
-    use crate::value::MatcherValue;
-    // A `.to_*()` matcher is being applied to the expect receiver, so a prior
-    // bare-call "hollow expect" provisional failure no longer applies — the call
-    // result IS being checked here. Clear it before the matcher arm records its
-    // own result (the matcher still sets BDD_EXPECT_FAILED on mismatch).
-    if matches!(
-        method,
-        "to_equal"
-            | "to_be"
-            | "to_contain"
-            | "to_include"
-            | "to_be_truthy"
-            | "to_be_falsy"
-            | "to_be_true"
-            | "to_be_false"
-            | "to_be_nil"
-            | "to_be_none"
-            | "to_be_greater_than"
-            | "to_be_less_than"
-            | "to_be_greater_than_or_equal"
-            | "to_be_gte"
-            | "to_be_less_than_or_equal"
-            | "to_be_lte"
-            | "to_start_with"
-            | "to_end_with"
-            | "to_not_equal"
-            | "to_not_contain"
-            | "to_not_include"
-            | "to_not_be_nil"
-            | "to"
-            | "not_to"
-            | "to_not"
-    ) {
-        use crate::interpreter::interpreter_call::{
-            BDD_EXPECT_PROVISIONAL, BDD_EXPECT_SEQ, BDD_MATCHER_COUNT, BDD_MATCHER_RAN, BDD_PROVISIONAL_SEQ,
-        };
-        // TARGETED retraction: clear the provisional only when it was raised by
-        // the expect this matcher is chained to. Clearing unconditionally
-        // destroyed a genuine bare `expect <cond>` failure raised by a
-        // different expect in the same example — see
-        // doc/08_tracking/bug/bare_expect_statement_vacuous_2026-08-18.md.
-        let owns_provisional = BDD_PROVISIONAL_SEQ.with(|cell: &std::cell::RefCell<usize>| *cell.borrow())
-            == BDD_EXPECT_SEQ.with(|cell: &std::cell::RefCell<usize>| *cell.borrow());
-        if owns_provisional {
-            BDD_EXPECT_PROVISIONAL.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = false);
-            BDD_PROVISIONAL_SEQ.with(|cell: &std::cell::RefCell<usize>| *cell.borrow_mut() = 0);
-        }
-        // Monotonic within an example: records that a matcher checked the expect
-        // receiver, so a re-set provisional flag can't false-fail the example.
-        BDD_MATCHER_RAN.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
-        // Counted form, paired with BDD_EXPECT_NEEDS_MATCHER, so a vacuous
-        // `expect(<non-bool>)` is caught even when a sibling expect in the same
-        // example did chain a matcher. See bdd.rs for the contract.
-        BDD_MATCHER_COUNT.with(|cell: &std::cell::RefCell<usize>| *cell.borrow_mut() += 1);
-    }
-    let bdd_matcher_result: Option<Value> = 'bdd_matcher: {
-    match method {
-        "to_equal" | "to_be" => {
-            let expected = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
-            // Must use nullable-aware equality, not raw `==`: a receiver from a
-            // `-> T?` function arrives as `Option::None`/`Option::Some(x)`, so raw
-            // `==` made `to_equal(nil)` a FALSE FAILURE on a genuinely-nil value
-            // and `to_equal(x)` a false failure on a genuinely-matching one.
-            let matched = recv_val.nullable_eq(&expected);
-            use crate::interpreter::interpreter_call::{BDD_EXPECT_FAILED, BDD_FAILURE_MSG};
-            if !matched {
-                BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
-                let failure_msg = format!(
-                    "expected {} to equal {}",
-                    recv_val.to_display_string(),
-                    expected.to_display_string()
-                );
-                BDD_FAILURE_MSG
-                    .with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = Some(failure_msg));
-            }
-            break 'bdd_matcher Some(Value::Bool(matched));
-        }
-        "to_contain" | "to_include" => {
-            let needle = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
-            let matched = match &recv_val {
-                Value::Str(s) => {
-                    if let Value::Str(n) = &needle {
-                        s.contains(n.as_str())
-                    } else {
-                        false
-                    }
-                }
-                Value::Array(arr) => arr.contains(&needle),
-                _ => false,
-            };
-            use crate::interpreter::interpreter_call::{BDD_EXPECT_FAILED, BDD_FAILURE_MSG};
-            if !matched {
-                BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
-                let failure_msg = format!(
-                    "expected {} to contain {}",
-                    recv_val.to_display_string(),
-                    needle.to_display_string()
-                );
-                BDD_FAILURE_MSG
-                    .with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = Some(failure_msg));
-            }
-            break 'bdd_matcher Some(Value::Bool(matched));
-        }
-        "to_be_truthy" => {
-            let matched = recv_val.truthy();
-            use crate::interpreter::interpreter_call::{BDD_EXPECT_FAILED, BDD_FAILURE_MSG};
-            if !matched {
-                BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
-                let failure_msg = format!("expected {} to be truthy", recv_val.to_display_string());
-                BDD_FAILURE_MSG
-                    .with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = Some(failure_msg));
-            }
-            break 'bdd_matcher Some(Value::Bool(matched));
-        }
-        "to_be_falsy" => {
-            let matched = !recv_val.truthy();
-            use crate::interpreter::interpreter_call::{BDD_EXPECT_FAILED, BDD_FAILURE_MSG};
-            if !matched {
-                BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
-                let failure_msg = format!("expected {} to be falsy", recv_val.to_display_string());
-                BDD_FAILURE_MSG
-                    .with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = Some(failure_msg));
-            }
-            break 'bdd_matcher Some(Value::Bool(matched));
-        }
-        "to_be_true" => {
-            // Strict equality (not just truthy) — mirrors
-            // ExpectHelper.to_be_true in src/lib/nogc_sync_mut/spec.spl
-            // (`self.value != true` fails), unlike `to_be_truthy` which
-            // accepts any truthy value.
-            let matched = recv_val == Value::Bool(true);
-            use crate::interpreter::interpreter_call::{BDD_EXPECT_FAILED, BDD_FAILURE_MSG};
-            if !matched {
-                BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
-                let failure_msg = format!("expected true, got {}", recv_val.to_display_string());
-                BDD_FAILURE_MSG
-                    .with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = Some(failure_msg));
-            }
-            break 'bdd_matcher Some(Value::Bool(matched));
-        }
-        "to_be_false" => {
-            // Strict equality (not just falsy) — mirrors
-            // ExpectHelper.to_be_false in src/lib/nogc_sync_mut/spec.spl
-            // (`self.value != false` fails), unlike `to_be_falsy` which
-            // accepts any falsy value.
-            let matched = recv_val == Value::Bool(false);
-            use crate::interpreter::interpreter_call::{BDD_EXPECT_FAILED, BDD_FAILURE_MSG};
-            if !matched {
-                BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
-                let failure_msg = format!("expected false, got {}", recv_val.to_display_string());
-                BDD_FAILURE_MSG
-                    .with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = Some(failure_msg));
-            }
-            break 'bdd_matcher Some(Value::Bool(matched));
-        }
-        "to_be_nil" | "to_be_none" => {
-            // Treat Option::None as nil-like (matches `== nil` semantics via
-            // Value::is_nil_like), so `expect(none_option).to_be_nil()` /
-            // `.to_be_none()` pass instead of failing with "expected Option::None
-            // to be nil".
-            let matched = recv_val.is_nil_like();
-            use crate::interpreter::interpreter_call::{BDD_EXPECT_FAILED, BDD_FAILURE_MSG};
-            if !matched {
-                BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
-                let failure_msg = format!("expected {} to be nil", recv_val.to_display_string());
-                BDD_FAILURE_MSG
-                    .with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = Some(failure_msg));
-            }
-            break 'bdd_matcher Some(Value::Bool(matched));
-        }
-        "to_be_greater_than" => {
-            let expected = eval_arg(args, 0, Value::Int(0), env, functions, classes, enums, impl_methods)?;
-            let matched = numeric_ordering(&recv_val, &expected).is_some_and(|ordering| ordering.is_gt());
-            use crate::interpreter::interpreter_call::{BDD_EXPECT_FAILED, BDD_FAILURE_MSG};
-            if !matched {
-                BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
-                let failure_msg = format!(
-                    "expected {} to be greater than {}",
-                    recv_val.to_display_string(),
-                    expected.to_display_string()
-                );
-                BDD_FAILURE_MSG
-                    .with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = Some(failure_msg));
-            }
-            break 'bdd_matcher Some(Value::Bool(matched));
-        }
-        "to_be_less_than" => {
-            let expected = eval_arg(args, 0, Value::Int(0), env, functions, classes, enums, impl_methods)?;
-            let matched = numeric_ordering(&recv_val, &expected).is_some_and(|ordering| ordering.is_lt());
-            use crate::interpreter::interpreter_call::{BDD_EXPECT_FAILED, BDD_FAILURE_MSG};
-            if !matched {
-                BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
-                let failure_msg = format!(
-                    "expected {} to be less than {}",
-                    recv_val.to_display_string(),
-                    expected.to_display_string()
-                );
-                BDD_FAILURE_MSG
-                    .with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = Some(failure_msg));
-            }
-            break 'bdd_matcher Some(Value::Bool(matched));
-        }
-        "to_be_greater_than_or_equal" | "to_be_gte" => {
-            let expected = eval_arg(args, 0, Value::Int(0), env, functions, classes, enums, impl_methods)?;
-            let matched =
-                numeric_ordering(&recv_val, &expected).is_some_and(|ordering| ordering.is_gt() || ordering.is_eq());
-            use crate::interpreter::interpreter_call::{BDD_EXPECT_FAILED, BDD_FAILURE_MSG};
-            if !matched {
-                BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
-                let failure_msg = format!(
-                    "expected {} to be greater than or equal to {}",
-                    recv_val.to_display_string(),
-                    expected.to_display_string()
-                );
-                BDD_FAILURE_MSG
-                    .with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = Some(failure_msg));
-            }
-            break 'bdd_matcher Some(Value::Bool(matched));
-        }
-        "to_be_less_than_or_equal" | "to_be_lte" => {
-            let expected = eval_arg(args, 0, Value::Int(0), env, functions, classes, enums, impl_methods)?;
-            let matched =
-                numeric_ordering(&recv_val, &expected).is_some_and(|ordering| ordering.is_lt() || ordering.is_eq());
-            use crate::interpreter::interpreter_call::{BDD_EXPECT_FAILED, BDD_FAILURE_MSG};
-            if !matched {
-                BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
-                let failure_msg = format!(
-                    "expected {} to be less than or equal to {}",
-                    recv_val.to_display_string(),
-                    expected.to_display_string()
-                );
-                BDD_FAILURE_MSG
-                    .with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = Some(failure_msg));
-            }
-            break 'bdd_matcher Some(Value::Bool(matched));
-        }
-        "to_start_with" => {
-            let prefix = eval_arg(
-                args,
-                0,
-                Value::text(String::new()),
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?;
-            let matched = match (&recv_val, &prefix) {
-                (Value::Str(s), Value::Str(p)) => s.starts_with(p.as_str()),
-                _ => false,
-            };
-            use crate::interpreter::interpreter_call::{BDD_EXPECT_FAILED, BDD_FAILURE_MSG};
-            if !matched {
-                BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
-                let failure_msg = format!(
-                    "expected {} to start with {}",
-                    recv_val.to_display_string(),
-                    prefix.to_display_string()
-                );
-                BDD_FAILURE_MSG
-                    .with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = Some(failure_msg));
-            }
-            break 'bdd_matcher Some(Value::Bool(matched));
-        }
-        "to_end_with" => {
-            let suffix = eval_arg(
-                args,
-                0,
-                Value::text(String::new()),
-                env,
-                functions,
-                classes,
-                enums,
-                impl_methods,
-            )?;
-            let matched = match (&recv_val, &suffix) {
-                (Value::Str(s), Value::Str(p)) => s.ends_with(p.as_str()),
-                _ => false,
-            };
-            use crate::interpreter::interpreter_call::{BDD_EXPECT_FAILED, BDD_FAILURE_MSG};
-            if !matched {
-                BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
-                let failure_msg = format!(
-                    "expected {} to end with {}",
-                    recv_val.to_display_string(),
-                    suffix.to_display_string()
-                );
-                BDD_FAILURE_MSG
-                    .with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = Some(failure_msg));
-            }
-            break 'bdd_matcher Some(Value::Bool(matched));
-        }
-        "to_not_equal" => {
-            let expected = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
-            // Nullable-aware, per `to_equal` above. With raw `!=` this was the
-            // dangerous direction: `to_not_equal(nil)` on a genuinely-nil value
-            // and `to_not_equal(x)` on a genuinely-equal one both FALSE-PASSED.
-            let matched = !recv_val.nullable_eq(&expected);
-            use crate::interpreter::interpreter_call::{BDD_EXPECT_FAILED, BDD_FAILURE_MSG};
-            if !matched {
-                BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
-                let failure_msg = format!(
-                    "expected {} to not equal {}",
-                    recv_val.to_display_string(),
-                    expected.to_display_string()
-                );
-                BDD_FAILURE_MSG
-                    .with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = Some(failure_msg));
-            }
-            break 'bdd_matcher Some(Value::Bool(matched));
-        }
-        "to_not_contain" | "to_not_include" => {
-            let needle = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
-            let contains = match &recv_val {
-                Value::Str(s) => {
-                    if let Value::Str(n) = &needle {
-                        s.contains(n.as_str())
-                    } else {
-                        false
-                    }
-                }
-                Value::Array(arr) => arr.contains(&needle),
-                _ => false,
-            };
-            let matched = !contains;
-            use crate::interpreter::interpreter_call::{BDD_EXPECT_FAILED, BDD_FAILURE_MSG};
-            if !matched {
-                BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
-                let failure_msg = format!(
-                    "expected {} to not contain {}",
-                    recv_val.to_display_string(),
-                    needle.to_display_string()
-                );
-                BDD_FAILURE_MSG
-                    .with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = Some(failure_msg));
-            }
-            break 'bdd_matcher Some(Value::Bool(matched));
-        }
-        "to_not_be_nil" => {
-            // Symmetric with to_be_nil: Option::None counts as nil-like, so
-            // to_not_be_nil(None) correctly fails.
-            let matched = !recv_val.is_nil_like();
-            use crate::interpreter::interpreter_call::{BDD_EXPECT_FAILED, BDD_FAILURE_MSG};
-            if !matched {
-                BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
-                BDD_FAILURE_MSG.with(|cell: &std::cell::RefCell<Option<String>>| {
-                    *cell.borrow_mut() = Some("expected value to not be nil, got nil".to_string())
-                });
-            }
-            break 'bdd_matcher Some(Value::Bool(matched));
-        }
-        // BDD assertion methods: to(matcher) and not_to(matcher)
-        // These work on any value type and are used with matchers like eq(5), gt(3), etc.
-        "to" | "not_to" | "to_not" => {
-            let matcher = eval_arg(args, 0, Value::Nil, env, functions, classes, enums, impl_methods)?;
-            let matched = match &matcher {
-                Value::Matcher(m) => m.matches(&recv_val),
-                // If the argument isn't a Matcher, treat it as an equality check
-                other => recv_val == *other,
-            };
-            let is_negated = method == "not_to" || method == "to_not";
-            let passed = if is_negated { !matched } else { matched };
-
-            // Report to BDD framework
-            use crate::interpreter::interpreter_call::{BDD_EXPECT_FAILED, BDD_FAILURE_MSG};
-            if !passed {
-                BDD_EXPECT_FAILED.with(|cell: &std::cell::RefCell<bool>| *cell.borrow_mut() = true);
-                let failure_msg = format!(
-                    "expected {:?} {} {:?}",
-                    recv_val,
-                    if is_negated { "not to match" } else { "to match" },
-                    matcher
-                );
-                BDD_FAILURE_MSG
-                    .with(|cell: &std::cell::RefCell<Option<String>>| *cell.borrow_mut() = Some(failure_msg));
-            }
-
-            break 'bdd_matcher Some(Value::Bool(passed));
-        }
-        _ => {}
-    }
-    None
-    };
-    if let Some(result) = bdd_matcher_result {
-        return crate::interpreter::interpreter_call::finish_bdd_matcher(result);
+    // Shared with nested/chained call dispatch in interpreter_helpers/method_dispatch.rs.
+    if let Some(result) = eval_bdd_matcher_method(&recv_val, method, args, env, functions, classes, enums, impl_methods)? {
+        return Ok(result);
     }
 
     // Dispatch to type-specific handlers
@@ -1173,9 +1279,9 @@ pub(crate) fn evaluate_method_call(
             // directly rather than through a lossy stand-in (U+FFFD
             // substitution changes the byte length).
             match method {
-                "len" | "length" => return Ok(Value::Int(bytes.len() as i64)),
+                "len" | "length" | "byte_len" => return Ok(Value::Int(bytes.len() as i64)),
                 "is_empty" => return Ok(Value::Bool(bytes.is_empty())),
-                "bytes" => {
+                "bytes" | "to_bytes" => {
                     let out: Vec<Value> = bytes.iter().map(|b| Value::Int(*b as i64)).collect();
                     return Ok(Value::array(out));
                 }
@@ -1259,9 +1365,7 @@ pub(crate) fn evaluate_method_call(
             // Methods defined directly in the enum body (or merged from impl blocks).
             // Try the local `enums` map first, then fall back to GLOBAL_ENUMS so
             // that methods on cross-module enums stored as struct fields are found.
-            let enum_def_opt = enums
-                .get(enum_name)
-                .cloned()
+            let enum_def_opt = crate::interpreter::owner_module_enum(enum_name).or_else(|| enums.get(enum_name).cloned())
                 .or_else(|| GLOBAL_ENUMS.with(|cell| cell.borrow().get(enum_name).cloned()));
             if let Some(enum_def) = enum_def_opt {
                 for m in &enum_def.methods {
@@ -1282,6 +1386,12 @@ pub(crate) fn evaluate_method_call(
                         );
                     }
                 }
+            }
+
+            // Built-in Display for payload-less enum variants: the variant name.
+            // User-defined `to_string` (handled above) takes precedence.
+            if matches!(method, "to_string" | "to_text") && args.is_empty() && payload.is_none() {
+                return Ok(Value::text(variant.clone()));
             }
 
             // Some(x) member-call forwarding. Since 60fd804c, `-> T?` functions
@@ -1316,15 +1426,14 @@ pub(crate) fn evaluate_method_call(
         // EnumName.VariantName(args) -> create enum with payload
         Value::EnumType { enum_name } => {
             // Check module-local, block-scoped, and imported enums.
-            let enum_def = enums
-                .get(enum_name)
-                .cloned()
+            let enum_def = crate::interpreter::owner_module_enum(enum_name).or_else(|| enums.get(enum_name).cloned())
                 .or_else(|| BLOCK_SCOPED_ENUMS.with(|cell| cell.borrow().get(enum_name).cloned()))
                 .or_else(|| GLOBAL_ENUMS.with(|cell| cell.borrow().get(enum_name).cloned()));
             if let Some(enum_def) = enum_def {
                 // Check if the method name is a variant name
                 let variant_opt = enum_def.variants.iter().find(|v| v.name == method);
                 if let Some(variant) = variant_opt {
+                    super::interpreter_call::validate_enum_variant_arity(&enum_def, method, args.len())?;
                     // Construct enum variant with payload
                     let has_fields = variant.fields.as_ref().is_some_and(|f| !f.is_empty());
                     if !has_fields && args.is_empty() {
@@ -1461,42 +1570,38 @@ pub(crate) fn evaluate_method_call(
         // fields live behind a shared RwLock.
         Value::ClassInstance(instance) => {
             let class_name = instance.class().to_string();
-            let method_def: Option<Arc<FunctionDef>> = classes
-                .get(class_name.as_str())
-                .and_then(|class_def| class_def.methods.iter().find(|m| m.name == method).cloned())
-                .map(Arc::new)
-                .or_else(|| {
-                    impl_methods
-                        .get(class_name.as_str())
-                        .and_then(|ms| ms.iter().find(|m| m.name == method).cloned())
-                })
-                .or_else(|| {
-                    GLOBAL_IMPL_METHODS.with(|cell| {
-                        cell.borrow()
-                            .get(class_name.as_str())
-                            .and_then(|ms| ms.iter().find(|m| m.name == method).cloned())
-                    })
-                })
-                .or_else(|| {
-                    TRAIT_IMPLS.with(|cell| {
-                        cell.borrow().iter().find_map(|((_t, ty), ms)| {
-                            (ty == &class_name)
-                                .then(|| ms.iter().find(|m| m.name == method).cloned())
-                                .flatten()
-                        })
-                    })
-                });
-            if let Some(method_def) = method_def {
-                let mut arg_vals = Vec::with_capacity(args.len());
-                for arg in args {
-                    arg_vals.push(evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?);
-                }
-                let mut self_fields = HashMap::new();
-                self_fields.insert("self".to_string(), recv_val.clone());
-                let self_fields = Arc::new(self_fields);
-                return crate::interpreter::interpreter_call::exec_function_with_values_and_self(
+            // Bind `self` to the ClassInstance value itself through the
+            // single-key `{"self": value}` convention `exec_function_inner`
+            // already honours for enum receivers; that keeps reference
+            // semantics (fields live behind a shared RwLock) while routing the
+            // call through the SAME path as `Value::Object` — so `&mut` /
+            // `mut` argument write-back, trait impls and blanket impls apply
+            // to a class receiver exactly as they do to a struct receiver.
+            let mut self_fields = HashMap::new();
+            self_fields.insert("self".to_string(), recv_val.clone());
+            let self_fields = Arc::new(self_fields);
+            if let Some(result) = find_and_exec_method(
+                method,
+                args,
+                &class_name,
+                &self_fields,
+                env,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            )? {
+                return Ok(result);
+            }
+            let global_impl: Option<Arc<FunctionDef>> = GLOBAL_IMPL_METHODS.with(|cell| {
+                cell.borrow()
+                    .get(class_name.as_str())
+                    .and_then(|ms| ms.iter().find(|m| m.name == method).cloned())
+            });
+            if let Some(method_def) = global_impl {
+                return exec_function(
                     method_def.as_ref(),
-                    &arg_vals,
+                    args,
                     env,
                     functions,
                     classes,
@@ -1504,6 +1609,15 @@ pub(crate) fn evaluate_method_call(
                     impl_methods,
                     Some((class_name.as_str(), &self_fields)),
                 );
+            }
+            // `obj.handler(x)` where `handler` is a callable field — same
+            // fallback as the `Value::Object` arm below.
+            if let Some(field_value) = instance.field(method) {
+                if let Some(result) =
+                    call_callable_field(&field_value, args, env, functions, classes, enums, impl_methods)?
+                {
+                    return Ok(result);
+                }
             }
             // Not found — fall through to the shared error/UFCS path below.
         }
@@ -1525,69 +1639,10 @@ pub(crate) fn evaluate_method_call(
             // Check if the method name corresponds to a callable field (Lambda/Function)
             // This allows patterns like: self.callback(arg) where callback is a lambda field
             if let Some(field_value) = fields.get(method) {
-                match field_value {
-                    Value::Lambda {
-                        params,
-                        body,
-                        env: captured_env,
-                    } => {
-                        // Call the lambda stored in the field
-                        let mut arg_vals = Vec::new();
-                        for arg in args {
-                            arg_vals.push(evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?);
-                        }
-                        // Create local env from captured env and bind params
-                        let mut local_env = Env::clone(captured_env);
-                        for (i, param) in params.iter().enumerate() {
-                            if let Some(val) = arg_vals.get(i) {
-                                local_env.insert(param.clone(), val.clone());
-                            }
-                        }
-                        // Evaluate the body expression
-                        let result =
-                            evaluate_expr(body.as_ref(), &mut local_env, functions, classes, enums, impl_methods)?;
-                        return Ok(result);
-                    }
-                    Value::Function { def, captured_env, .. } => {
-                        // Call the function stored in the field
-                        return exec_function_with_captured_env(
-                            def,
-                            args,
-                            env,
-                            &mut Env::clone(captured_env),
-                            functions,
-                            classes,
-                            enums,
-                            impl_methods,
-                        );
-                    }
-                    // Any OTHER callable field shape (block closure, native
-                    // function, constructor, or an object implementing the
-                    // `__call__` protocol) routes through the single place that
-                    // knows which `Value` variants are invocable, so
-                    // `obj.handler(x)` agrees with `(obj.handler)(x)`.
-                    other => {
-                        let candidate = other.clone();
-                        if matches!(
-                            candidate,
-                            Value::BlockClosure { .. }
-                                | Value::NativeFunction(_)
-                                | Value::Constructor { .. }
-                                | Value::Object { .. }
-                        ) {
-                            if let Some(result) = crate::interpreter::interpreter_call::call_value_as_callable(
-                                candidate,
-                                args,
-                                env,
-                                functions,
-                                classes,
-                                enums,
-                                impl_methods,
-                            )? {
-                                return Ok(result);
-                            }
-                        }
-                    }
+                if let Some(result) =
+                    call_callable_field(field_value, args, env, functions, classes, enums, impl_methods)?
+                {
+                    return Ok(result);
                 }
             }
             // Try method_missing hook
@@ -1608,6 +1663,12 @@ pub(crate) fn evaluate_method_call(
                 try_bare_some_option_method(&recv_val, method, args, env, functions, classes, enums, impl_methods)?
             {
                 return Ok(result);
+            }
+            // Built-in value clone for a struct with no user `clone` (user
+            // methods and method_missing ran above; this arm has no UFCS step).
+            // `Object` fields are copy-on-write, so a Value clone is a value copy.
+            if method == "clone" && args.is_empty() {
+                return Ok(recv_val.clone());
             }
             // Collect available methods for typo suggestion
             let mut available_methods: Vec<&str> = Vec::new();
@@ -1679,6 +1740,11 @@ pub(crate) fn evaluate_method_call(
                 return Err(crate::error::factory::class_not_found(class_name));
             }
         }
+        Value::Symbol(class_name) if method == "default" && args.is_empty() => {
+            if let Some(val) = special::primitive_default_value(class_name) {
+                return Ok(val);
+            }
+        }
         Value::Mock(mock) => {
             if let Some(result) =
                 special::handle_mock_methods(mock, method, args, env, functions, classes, enums, impl_methods)?
@@ -1704,6 +1770,7 @@ pub(crate) fn evaluate_method_call(
                         env: captured,
                     } = func
                     {
+                        let _closure_origin = crate::interpreter::interpreter_module::ClosureOriginGuard::enter_closure(&captured);
                         let mut local_env = Env::clone(&captured);
                         // No args to bind for or_else
                         return evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods);
@@ -1732,6 +1799,7 @@ pub(crate) fn evaluate_method_call(
                         env: captured,
                     } = func
                     {
+                        let _closure_origin = crate::interpreter::interpreter_module::ClosureOriginGuard::enter_closure(&captured);
                         let mut local_env = Env::clone(&captured);
                         return evaluate_expr(&body, &mut local_env, functions, classes, enums, impl_methods);
                     }
@@ -1772,9 +1840,43 @@ pub(crate) fn evaluate_method_call(
     // for user-defined trait implementations on built-in types (e.g., `impl MyTrait for text:`).
     {
         // Map Value type to the possible type names used in `impl Trait for TypeName:`
+        // Runtime ints carry no width, so the receiver's STATIC type names the
+        // impl — the same key the pure-Simple resolver uses
+        // (`Int(bits, signed)`, 35.semantics/resolve_strategies.spl): an explicit
+        // `(x as i32).m()` cast's target, or a bare identifier's declared width
+        // (`val y: i32`, `val w = x as i32`, `fn f(x: i32)`) recorded in the frame
+        // by `CowEnv::set_declared_int_width`. Use it first so `impl Trait for
+        // i32` does not collapse onto i64. Unknown width (plain `val n = 5`,
+        // i64) keeps the existing i64-first order.
+        let cast_int_ty: Option<&str> = match (receiver.as_ref(), &recv_val) {
+            (Expr::Cast { target_type: Type::Simple(t), .. }, Value::Int(_)) => {
+                match t.as_str() {
+                    "i8" | "i16" | "i32" | "i64" => Some(t.as_str()),
+                    _ => None,
+                }
+            }
+            (Expr::Identifier(name), Value::Int(_)) => match env.declared_int_width(name) {
+                Some(8) => Some("i8"),
+                Some(16) => Some("i16"),
+                Some(32) => Some("i32"),
+                _ => None,
+            },
+            (_, Value::Int(_)) => match declared_receiver_width {
+                Some(8) => Some("i8"), Some(16) => Some("i16"),
+                Some(32) => Some("i32"), Some(64) => Some("i64"),
+                _ => None,
+            },
+            _ => None,
+        };
+        let cast_names: [&str; 4] = [cast_int_ty.unwrap_or(""), "i64", "i32", "int"];
         let type_names: &[&str] = match &recv_val {
             Value::Str(_) | Value::StrBytes(_) => &["text", "str", "String"],
+            Value::Int(_) if cast_int_ty.is_some() => &cast_names,
             Value::Int(_) => &["i64", "i32", "int"],
+            Value::UInt { width: 8, .. } => &["u8"],
+            Value::UInt { width: 16, .. } => &["u16"],
+            Value::UInt { width: 32, .. } => &["u32"],
+            Value::UInt { width: 64, .. } => &["u64"],
             Value::Float(_) => &["f64", "float"],
             Value::Float32(_) => &["f32", "float"],
             Value::Bool(_) => &["bool"],
@@ -1790,13 +1892,13 @@ pub(crate) fn evaluate_method_call(
 
         if !type_names.is_empty() {
             // Search TRAIT_IMPLS for a method matching this type
-            let trait_method: Option<Arc<FunctionDef>> = TRAIT_IMPLS.with(|cell| {
+            let trait_method: Option<(Arc<FunctionDef>, String)> = TRAIT_IMPLS.with(|cell| {
                 let trait_impls = cell.borrow();
                 for type_alias in type_names {
                     for ((_trait_name, impl_type), methods) in trait_impls.iter() {
                         if impl_type == type_alias {
                             if let Some(func) = methods.iter().find(|m| m.name == method) {
-                                return Some(func.clone());
+                                return Some((func.clone(), impl_type.clone()));
                             }
                         }
                     }
@@ -1804,12 +1906,11 @@ pub(crate) fn evaluate_method_call(
                 None
             });
 
-            if let Some(func) = trait_method {
+            if let Some((func, impl_type)) = trait_method {
                 // For built-in types, set self to the value directly (like enum methods)
                 let mut self_fields = HashMap::new();
                 self_fields.insert("self".to_string(), recv_val.clone());
                 let self_fields = Arc::new(self_fields);
-                let type_name = type_names[0];
                 return exec_function(
                     &func,
                     args,
@@ -1818,7 +1919,9 @@ pub(crate) fn evaluate_method_call(
                     classes,
                     enums,
                     impl_methods,
-                    Some((type_name, &self_fields)),
+                    // Fallback search may choose an i64 impl for a narrow
+                    // receiver. Its self type is that actual impl owner.
+                    Some((&impl_type, &self_fields)),
                 );
             }
 
@@ -1854,15 +1957,8 @@ pub(crate) fn evaluate_method_call(
 
     // UFCS Fallback: Try to find a free function with the method name
     // This allows both len(x) and x.len() syntax to work
-    if let Some(func) = functions.get(method).cloned() {
-        // Evaluate all arguments to values
-        let mut arg_values = vec![recv_val.clone()]; // Receiver becomes first argument
-        for arg in args {
-            let val = evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?;
-            arg_values.push(val);
-        }
-        // Call the function with receiver as first argument
-        return exec_function_with_values(&func, &arg_values, env, functions, classes, enums, impl_methods);
+    if let Some(result) = try_exec_ufcs_method(&recv_val, method, args, env, functions, classes, enums, impl_methods)? {
+        return Ok(result);
     }
 
     // E1013 - Unknown Method (with helpful hints for common conversions)
@@ -2027,10 +2123,39 @@ pub(crate) fn evaluate_method_call_with_self_update(
     }
     // Builtin text static methods — intercept before evaluate_expr to avoid
     // "variable `text` not found" when the receiver is the builtin type name.
-    if let Expr::Identifier(module_name) = receiver.as_ref() {
-        if method == "new" && matches!(module_name.as_str(), "Map" | "Dict" | "HashMap" | "BTreeMap") {
-            let value = Value::Dict(Arc::new(HashMap::new()));
+    let receiver_base = match receiver.as_ref() {
+        Expr::GenericInst { expr, .. } => expr.as_ref(),
+        other => other,
+    };
+    if let Expr::Identifier(module_name) = receiver_base {
+        // A user-defined class/struct registered under the same name (e.g.
+        // `use std.nogc_async_mut.src.map.{Map}`) takes precedence, so the
+        // imported Map's own statics run instead of the builtin alias
+        // (doc/08_tracking/bug/map_insert_if_absent_missing_and_map_new_resolves_to_dict_2026-07-20.md).
+        if method == "new"
+            && matches!(module_name.as_str(), "Map" | "Dict" | "HashMap" | "BTreeMap")
+            && !classes.contains_key(module_name.as_str())
+        {
+            let value = Value::Dict(Arc::new(crate::value::DictMap::new()));
             return Ok((value, None));
+        }
+        // User class shadowing the builtin alias: dispatch `Map.new()` to the
+        // imported class's own static `new` (the generic path below would
+        // evaluate the bare identifier `Map` and fail with "variable not found").
+        if method == "new" && classes.contains_key(module_name.as_str()) {
+            let evaluated_args: Vec<Value> = args
+                .iter()
+                .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                .collect::<Result<Vec<_>, _>>()?;
+            if let Some(class_def) = crate::interpreter::resolve_class_in_scope(classes, module_name.as_str())? {
+                if let Some(func) = select_named_static_overload(class_def.methods.iter(), "new", &evaluated_args) {
+                    crate::interpreter::interpreter_call::reject_bool_literal_args_for_slice(&func.params, args)
+                        .map_err(|e| crate::interpreter::interpreter_call::name_callee(e, &func))?;
+                    let result =
+                        exec_function_with_values(&func, &evaluated_args, env, functions, classes, enums, impl_methods)?;
+                    return Ok((result, None));
+                }
+            }
         }
         if method == "new" && BITFIELDS.with(|cell| cell.borrow().contains_key(module_name)) {
             let value = super::interpreter_call::instantiate_bitfield_from_args(
@@ -2043,6 +2168,21 @@ pub(crate) fn evaluate_method_call_with_self_update(
                 impl_methods,
             )?;
             return Ok((value, None));
+        }
+        // ADR-005: `char.from_code(n)`; errors on a non-scalar code point.
+        if module_name == "char" && method == "from_code" {
+            let evaluated_args: Vec<Value> = args
+                .iter()
+                .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                .collect::<Result<Vec<_>, _>>()?;
+            return Ok((char_from_code(&evaluated_args)?, None));
+        }
+        if module_name == "text" && method == "from_bytes" {
+            let evaluated_args: Vec<Value> = args
+                .iter()
+                .map(|a| evaluate_expr(&a.value, env, functions, classes, enums, impl_methods))
+                .collect::<Result<Vec<_>, _>>()?;
+            return Ok((crate::interpreter::interpreter_extern::conversion::rt_bytes_to_text_fn(&evaluated_args)?, None));
         }
         if module_name == "text" && method == "from_char_code" {
             let evaluated_args: Vec<Value> = args
@@ -2087,6 +2227,7 @@ pub(crate) fn evaluate_method_call_with_self_update(
                     for arg in args {
                         arg_vals.push(evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?);
                     }
+                    let _closure_origin = crate::interpreter::interpreter_module::ClosureOriginGuard::enter_closure(&captured_env);
                     let mut local_env = Env::clone(captured_env);
                     for (i, param) in params.iter().enumerate() {
                         if let Some(val) = arg_vals.get(i) {
@@ -2133,16 +2274,15 @@ pub(crate) fn evaluate_method_call_with_self_update(
             return Ok((result, None));
         }
         // UFCS Fallback: Try to find a free function with the method name
-        if let Some(func) = functions.get(method).cloned() {
-            // Evaluate all arguments to values
-            let mut arg_values = vec![recv_val.clone()]; // Receiver becomes first argument
-            for arg in args {
-                let val = evaluate_expr(&arg.value, env, functions, classes, enums, impl_methods)?;
-                arg_values.push(val);
-            }
-            // Call the function with receiver as first argument
-            let result = exec_function_with_values(&func, &arg_values, env, functions, classes, enums, impl_methods)?;
+        if let Some(result) =
+            try_exec_ufcs_method(&recv_val, method, args, env, functions, classes, enums, impl_methods)?
+        {
             return Ok((result, None)); // UFCS calls don't mutate self
+        }
+        // Built-in value clone (see the non-mutating path above); here it runs
+        // after the UFCS fallback, so a free `fn clone` would still win.
+        if method == "clone" && args.is_empty() {
+            return Ok((recv_val.clone(), None));
         }
         // Collect available methods for typo suggestion
         let mut available_methods: Vec<&str> = Vec::new();
@@ -2210,6 +2350,8 @@ pub(crate) fn evaluate_method_call_with_self_update(
         "drain",
         // Bulk in-place span copy (returns the COUNT, receiver derived below like `pop`)
         "write_span",
+        // Bulk in-place volatile fill (returns the COUNT, receiver derived below like `pop`)
+        "fill_span",
         // Dict / Map in-place mutators
         "update",
         "set",
@@ -2359,6 +2501,36 @@ pub(crate) fn evaluate_method_call_with_self_update(
         }
     }
 
+    // `fill_span(dst_off, count, value)` is the fourth such mutator: its result is
+    // the COUNT WRITTEN, so the mutated receiver is re-derived from `recv_val`
+    // here exactly like `write_span` above, for the same silent-drop hazard.
+    if method == "fill_span" {
+        if let Value::Array(arr) = &recv_val {
+            let (dst_off, count, value) =
+                collections::eval_fill_span_args(args, env, functions, classes, enums, impl_methods)?;
+            if count <= 0 {
+                return Ok((result, None));
+            }
+            let mut updated = arr.as_ref().clone();
+            collections::array_fill_span(&mut updated, dst_off, count, &value)?;
+            return Ok((result, Some(Value::array(updated))));
+        }
+        if let Value::ByteArray(bytes) = &recv_val {
+            let (dst_off, count, value) =
+                collections::eval_fill_span_args(args, env, functions, classes, enums, impl_methods)?;
+            if count <= 0 {
+                return Ok((result, None));
+            }
+            let mut updated = bytes.as_ref().clone();
+            let written = collections::byte_array_fill_span(&mut updated, dst_off, count, &value)?;
+            let new_value = match written {
+                collections::ByteSpanWrite::InPlace(_) => Value::byte_array(updated),
+                collections::ByteSpanWrite::Widened(values, _) => Value::array(values),
+            };
+            return Ok((result, Some(new_value)));
+        }
+    }
+
     // TEXT IS A VALUE TYPE: never rebind a text receiver, for ANY method.
     //
     // The list above is an ARRAY/DICT mutator list. Four of its entries —
@@ -2390,6 +2562,14 @@ pub(crate) fn evaluate_method_call_with_self_update(
     if matches!(recv_val, Value::Str(_) | Value::StrBytes(_)) {
         return Ok((result, None));
     }
+    // A reference-semantics `class` receiver mutates its shared cell in place:
+    // there is never anything to write back, and a method that RETURNS a new
+    // instance of the same class (`list.prepend(x)` on a persistent list) must
+    // not be mistaken for an in-place mutator by the same-discriminant test
+    // below — that rebound the receiver binding to the fresh instance.
+    if matches!(recv_val, Value::ClassInstance(_)) {
+        return Ok((result, None));
+    }
 
     // A packed byte mutator deliberately widens to the legacy generic array
     // when a pushed/inserted element is not representable as u8. That changes
@@ -2414,6 +2594,45 @@ pub(crate) fn evaluate_method_call_with_self_update(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// ADR-005: user-facing text `len()` counts code points; `byte_len()` stays
+    /// bytes. `text_cp_len` is the single helper every interpreter `len` arm
+    /// (method dispatch, `len()` builtin, slice bounds) routes through, so it is
+    /// pinned directly on the ASCII memo path and on 2/3/4-byte and combining
+    /// sequences (a combining mark is its own code point, not folded into a
+    /// grapheme). Before the switch it returned `s.len()` (bytes) for all rows.
+    #[test]
+    fn text_cp_len_counts_code_points_not_bytes() {
+        let cases: &[(&str, usize, usize)] = &[
+            ("", 0, 0),
+            ("hello", 5, 5),
+            ("h\u{e9}llo", 5, 6),         // 2-byte
+            ("a\u{20ac}b", 3, 5),         // 3-byte
+            ("a\u{1F600}b", 3, 6),        // 4-byte
+            ("e\u{301}", 2, 3),           // combining sequence
+            ("h\u{e9}llo\u{20ac}", 6, 9), // the bug's repro text
+        ];
+        for (s, cp, bytes) in cases {
+            let arc = Arc::new((*s).to_string());
+            assert_eq!(text_cp_len(&arc), *cp, "code points of {s:?}");
+            assert_eq!(arc.len(), *bytes, "bytes of {s:?}");
+            // Memoized ASCII path must agree with the non-memo path.
+            assert_eq!(text_cp_len(&arc), arc.chars().count(), "memo path of {s:?}");
+        }
+    }
+
+    /// End-to-end through the interpreter: `.len()` and `.byte_len()` on the
+    /// bug's repro text disagree exactly by the multi-byte overhead.
+    #[test]
+    fn interpreter_text_len_is_code_points_and_byte_len_is_bytes() {
+        use crate::interpreter::evaluate_module;
+        use simple_parser::Parser;
+        let source = "val s = \"h\u{e9}llo\u{20ac}\"\nmain = s.len() * 100 + s.byte_len()\n";
+        let mut parser = Parser::new(source);
+        let module = parser.parse().expect("parse");
+        let result = evaluate_module(&module.items).expect("len/byte_len must evaluate");
+        assert_eq!(result, 609, "len()=6 code points, byte_len()=9 bytes");
+    }
 
     // Regression test: me.field as a direct argument to a nested me fn call must
     // not produce "self not found". The bug was that the two typed-dict dispatch
@@ -2523,5 +2742,107 @@ main = c.double_add()
             ),
             Some(Ordering::Less),
         );
+    }
+}
+
+#[cfg(test)]
+mod text_from_bytes_static_tests {
+    //! seed_interp_text_from_bytes_static_2026-11-06: `text.from_bytes(b)` is
+    //! a builtin static (native: `rt_bytes_to_text`), not a variable lookup.
+    use crate::interpreter::evaluate_module;
+    use simple_parser::Parser;
+
+    #[test]
+    fn text_from_bytes_builds_text_from_a_byte_array() {
+        let src = "fn probe() -> i64:\n    val b: [u8] = [97u8, 98u8, 99u8]\n    val t = text.from_bytes(b)\n    if t == \"abc\":\n        return 1\n    0\nmain = probe()\n";
+        assert_eq!(evaluate_module(&Parser::new(src).parse().expect("parse").items).expect("evaluate"), 1);
+    }
+}
+
+#[cfg(test)]
+mod text_byte_offset_method_tests {
+    //! `substring`/`slice(a, b)`, `index_of`/`find`/`find_str` and
+    //! `last_index_of`/`rfind` are the BYTE-offset family (bounded by
+    //! `byte_len()`); `len()`, `s[i]` and `s[a:b]` are code points. Owner
+    //! decision 2026-11-07, ADR-005 "Staging" and
+    //! doc/05_design/language/text/text_len_counts_characters_2026-11-07.md.
+    //! 04969955c75 flipped the direct-receiver method arms to code points, so a
+    //! byte scanner (`byte_at` + `substring`) cut the wrong range on any
+    //! non-ASCII input: the SDN parser re-encoded `{error: "日本", schema: x}`
+    //! as `{cess: ..., ema: ...}`.
+
+    use crate::interpreter::evaluate_module;
+    use simple_parser::Parser;
+
+    /// Run a snippet; `main` is a bitmask of the checks that FAILED (0 = pass).
+    fn run(src: &str) -> i32 {
+        let mut parser = Parser::new(src);
+        let module = parser.parse().expect("parse");
+        evaluate_module(&module.items).expect("evaluate")
+    }
+
+    #[test]
+    fn substring_and_slice_methods_take_byte_offsets() {
+        // "日本ab": 4 code points, 8 bytes (3 + 3 + 1 + 1).
+        let src = r#"
+fn check() -> i64:
+    val s = "日本ab"
+    var bad = 0
+    if s.byte_len() != 8: bad = bad + 1
+    if s.len() != 4: bad = bad + 2
+    if s.substring(0, 3) != "日": bad = bad + 4
+    if s.slice(3, 6) != "本": bad = bad + 8
+    if s.substring(6, 8) != "ab": bad = bad + 16
+    if s.substring(6) != "ab": bad = bad + 32
+    if s.slice(0, s.byte_len()) != s: bad = bad + 64
+    if s[0:2] != "日本": bad = bad + 128
+    bad
+
+main = check()
+"#;
+        assert_eq!(run(src), 0);
+    }
+
+    #[test]
+    fn index_of_family_returns_byte_offsets_usable_with_substring() {
+        let src = r#"
+fn check() -> i64:
+    val s = "日本ab日"
+    var bad = 0
+    if s.index_of("a") != 6: bad = bad + 1
+    if s.find("b") != 7: bad = bad + 2
+    if s.index_of("日", 1) != 8: bad = bad + 4
+    if s.last_index_of("日") != 8: bad = bad + 8
+    if s.rfind("本") != 3: bad = bad + 16
+    if s.index_of("", 99) != 11: bad = bad + 32
+    if s.substring(s.index_of("a"), s.byte_len()) != "ab日": bad = bad + 64
+    if s.byte_at(6) != 97: bad = bad + 128
+    bad
+
+main = check()
+"#;
+        assert_eq!(run(src), 0);
+    }
+
+    #[test]
+    fn mid_code_point_offset_keeps_the_raw_bytes() {
+        // Same policy as `spl_str_slice` (C) and the nested-receiver arm in
+        // interpreter_helpers/method_dispatch.rs: no snapping, no U+FFFD. The
+        // byte length is the requested width and adjacent cuts reassemble.
+        let src = r#"
+fn check() -> i64:
+    val s = "aé€z"
+    var bad = 0
+    if s.slice(0, 2).byte_len() != 2: bad = bad + 1
+    if s.substring(2, 4).byte_len() != 2: bad = bad + 2
+    if s.slice(0, 2) + s.slice(2, 7) != s: bad = bad + 4
+    if s.slice(-3, 1) != "a": bad = bad + 8
+    if s.slice(6, 99) != "z": bad = bad + 16
+    if s.slice(4, 2) != "": bad = bad + 32
+    bad
+
+main = check()
+"#;
+        assert_eq!(run(src), 0);
     }
 }

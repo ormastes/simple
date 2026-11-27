@@ -1,0 +1,77 @@
+# Standalone native ownership regression. Root-admitted private compile/run only.
+# Exit0 + exact stdout generic-registry-owner-ok. Baseline should fail the
+# semantic reads before any duplicate-registration loop on a stale owner.
+use compiler.frontend.core.types.{flat_pool_state_take,
+    type_pools_promote_hir_owners, option_generic_type_register,
+    option_generic_type_get_inner, option_generic_tag_to_id,
+    array_generic_type_register, array_generic_type_get_elem,
+    array_generic_tag_to_id}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin,
+    transient_scope_pause, transient_scope_end}
+
+@unsafe(reason: "qualification reads actual thread-local scratch scope state", capabilities: [ffi])
+extern fn rt_transient_array_scope_state_v1() -> i64
+@unsafe(reason: "qualification verifies actual scratch backing reclamation", capabilities: [ffi])
+extern fn rt_heap_aux_live_bytes() -> i64
+
+fn scope_state() -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_transient_array_scope_state_v1()
+
+fn backing_bytes() -> i64:
+    unsafe(capabilities: [ffi]):
+        rt_heap_aux_live_bytes()
+
+fn main() -> i64:
+    if not transient_scope_begin(): return 1
+    if scope_state() != 1: return 11
+    # Same owner replacement the full frontend performs inside its scope.
+    val previous = flat_pool_state_take()
+    val option = option_generic_type_register(1041)
+    val array = array_generic_type_register(1042)
+    # These are mandatory preconditions, never accepted as baseline RED.
+    # They exclude module-initialization/store/index failures before teardown.
+    if option < 0 or array < 0: return 19
+    val before_option = option_generic_type_get_inner(option_generic_tag_to_id(option))
+    val before_array = array_generic_type_get_elem(array_generic_tag_to_id(array))
+    if before_option != 1041: return 20
+    if before_array != 1042: return 21
+    var disposable: [i64] = []
+    for i in 0..4096:
+        disposable.push(i)
+    if disposable.len() != 4096: return 12
+    if not transient_scope_pause():
+        val ended = transient_scope_end()
+        return 2
+    if scope_state() != 2: return 13
+    val promoted = type_pools_promote_hir_owners()
+    val bytes_before_end = backing_bytes()
+    val ended = transient_scope_end()
+    val bytes_after_end = backing_bytes()
+    if not promoted or not ended: return 3
+    if scope_state() != 0: return 14
+    # Reject a no-op/no-GC scope provider, even if stale memory stays readable.
+    if bytes_before_end - bytes_after_end < 16384: return 15
+    # Capture semantic scalar reads before any post-end matcher allocations.
+    # The global native headers must remain valid managed arrays, not merely
+    # readable freed memory. The runtime index helper validates that owner.
+    val option_inner = option_generic_type_get_inner(option_generic_tag_to_id(option))
+    val array_inner = array_generic_type_get_elem(array_generic_tag_to_id(array))
+    if option_inner != 1041: return 4
+    if array_inner != 1042: return 5
+    # Force fresh allocations into the freed-header size classes before reuse.
+    var churn: [[i64]] = []
+    for i in 0..128:
+        churn.push([i, i + 1])
+    if churn.len() != 128 or churn[127][1] != 128: return 16
+    if option_generic_type_get_inner(option_generic_tag_to_id(option)) != 1041: return 17
+    if array_generic_type_get_elem(array_generic_tag_to_id(array)) != 1042: return 18
+    if option_generic_type_register(1041) != option: return 6
+    if array_generic_type_register(1042) != array: return 7
+    val option_next = option_generic_type_register(1043)
+    val array_next = array_generic_type_register(1044)
+    if option_next == option or array_next == array: return 8
+    if option_generic_type_get_inner(option_generic_tag_to_id(option_next)) != 1043: return 9
+    if array_generic_type_get_elem(array_generic_tag_to_id(array_next)) != 1044: return 10
+    print "generic-registry-owner-ok"
+    0

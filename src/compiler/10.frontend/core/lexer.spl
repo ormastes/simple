@@ -20,10 +20,9 @@ use compiler.core.tokens.{keyword_lookup, TOK_DEDENT, TOK_EOF}
 use compiler.core.lexer_chars.{is_digit, is_hex_digit, is_alpha, is_ident_char, is_space}
 use compiler.core.lexer_types.{Token, TokenKind, LexSpan, lex_span_new, lex_token_new, lex_token_eof, token_kind_from_code, token_kind_code}
 use std.string_core.{char_code, char_from_code}
-use std.common.string_core.{string_to_int}
+use std.common.string_core.{string_to_int, str_len}
 use compiler.frontend.core.lexer_struct.{CoreLexer, make_core_lexer, core_lexer_next_token, core_lexer_token_text, core_lexer_token_line, core_lexer_token_col}
-# @workaround bug=lexer_imported_instance_methods_2026_10_06
-use compiler.frontend.core.lexer_struct.{core_lexer_char_at_pos, core_lexer_char_slice, core_lexer_enable_forced_indentation, core_lexer_disable_forced_indentation, core_lexer_pop_indent}
+use compiler.frontend.core.lexer_struct.{core_lexer_char_at_pos, core_lexer_char_slice, core_lexer_enable_forced_indentation, core_lexer_disable_forced_indentation, core_lexer_pop_indent, core_lexer_push_match_arm_column, core_lexer_pop_match_arm_column}
 use compiler.frontend.core.lexer_struct.{core_lexer_last_text_get, core_lexer_last_line_get, core_lexer_last_col_get, core_lexer_last_suffix_get, core_token_env_save_set}
 use compiler.core.ast.{module_get_path}
 use compiler.core.ast.{lexer_core_pos_get, lexer_core_pos_set, lexer_core_line_get, lexer_core_line_set}
@@ -38,6 +37,7 @@ use compiler.core.ast.{lexer_cur_suffix2_get, lexer_cur_suffix2_set}
 @unsafe(reason: "raw owned tagged-array release ABI", capabilities: [ffi])
 extern fn rt_array_free(array: i64)
 
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _sffi_array_free", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 @always_inline
 fn _sffi_array_free(array: i64):
     unsafe(capabilities: [ffi]):
@@ -92,16 +92,52 @@ var lex_cur_suffix_direct: [text] = [""]
 var lex_token_start_direct: [i64] = [0]
 var lex_token_end_direct: [i64] = [0]
 # CoreLexer positions index source_chars, while LexSpan positions index UTF-8
-# bytes. Keep a forward cursor so token span conversion visits each character
-# once during normal scanning; speculative restores can rewind it.
-var lex_span_char_cursor: [i64] = [0]
-var lex_span_byte_cursor: [i64] = [0]
+# bytes. For a non-ASCII source, entry i is the byte offset of char i
+# (char_count + 1 entries), built once on the first conversion. It replaced a
+# forward cursor that rewound to 0 on every backward query: the flat bridge
+# converts expression spans out of source order, so a fresh parse of a
+# non-ASCII module paid an O(n) walk per span (measured 2026-11-13,
+# data_schema_resolver.spl: 102 s vs 9.7 s, see
+# doc/08_tracking/bug/fresh_parse_vs_cache_hit_span_divergence_2026-11-13.md).
+var lex_span_byte_prefix: [i64] = []
+# Empty until the first span conversion of a source; then one entry: whether
+# every character of the source is one byte (byte length == char count), in
+# which case a byte offset IS the char offset and no prefix table is built.
+# Measured 2026-11-07 (seed interpreter, `lint driver_types.spl`, 82 KB
+# ASCII): the cursor walk was the single hottest interpreted leaf, 12.8% of
+# self time. Reset with the prefix table; saved/restored with it for nested
+# lexers.
+var lex_span_all_ascii: [bool] = []
 var lex_cur_no_interp_direct: [bool] = [false]
 
 # Pure, independently testable: returns slot[0], or `default` when slot is
 # empty instead of trapping on an out-of-bounds read.
+fn _lex_raw_bool_slot_empty(slot: [bool]) -> bool:
+    var is_nil = false
+    unsafe:
+        is_nil = (slot == nil)
+    is_nil or slot.len() == 0
+
+fn _lex_raw_i64_slot_empty(slot: [i64]) -> bool:
+    var is_nil = false
+    unsafe:
+        is_nil = (slot == nil)
+    is_nil or slot.len() == 0
+
+fn _lex_raw_text_slot_empty(slot: [text]) -> bool:
+    var is_nil = false
+    unsafe:
+        is_nil = (slot == nil)
+    is_nil or slot.len() == 0
+
+fn _lex_core_slot_empty() -> bool:
+    var is_nil = false
+    unsafe:
+        is_nil = (current_core_lexer_slot == nil)
+    is_nil or current_core_lexer_slot.len() == 0
+
 fn bool_slot0_or(slot: [bool], default: bool) -> bool:
-    if slot.len() == 0:
+    if _lex_raw_bool_slot_empty(slot):
         return default
     slot[0]
 
@@ -123,27 +159,63 @@ fn lexer_new(source: text) -> Lexer:
     Lexer(dummy: 0)
 
 fn lex_source_byte_offset(char_offset: i64) -> i64:
-    if current_core_lexer_slot.len() == 0:
+    if _lex_core_slot_empty():
         return 0
-    if lex_span_char_cursor.len() == 0:
-        lex_span_char_cursor = [0]
-    if lex_span_byte_cursor.len() == 0:
-        lex_span_byte_cursor = [0]
     var target = char_offset
     if target < 0:
         target = 0
     val char_count = current_core_lexer_slot[0].source_chars.len()
     if target > char_count:
         target = char_count
-    if target < lex_span_char_cursor[0]:
-        lex_span_char_cursor[0] = 0
-        lex_span_byte_cursor[0] = 0
-    while lex_span_char_cursor[0] < target:
-        # Read one character in place. Passing source_chars as an argument
-        # would copy or scan the full source on every token.
-        lex_span_byte_cursor[0] = lex_span_byte_cursor[0] + current_core_lexer_slot[0].source_chars[lex_span_char_cursor[0]].len()
-        lex_span_char_cursor[0] = lex_span_char_cursor[0] + 1
-    lex_span_byte_cursor[0]
+    if _lex_raw_bool_slot_empty(lex_span_all_ascii):
+        # Byte count stays independent of text.len() code-point semantics.
+        lex_span_all_ascii = [str_len(current_core_lexer_slot[0].source) == char_count]
+    if lex_span_all_ascii[0]:
+        # One byte per character: the offsets coincide, no walk needed.
+        return target
+    lex_span_prefix_ensure(char_count)
+    lex_span_byte_prefix[target]
+
+fn lex_span_prefix_ensure(char_count: i64):
+    if _lex_raw_i64_slot_empty(lex_span_byte_prefix) or lex_span_byte_prefix.len() != char_count + 1:
+        # One pass per source. Read each character in place: passing
+        # source_chars as an argument would copy the full source.
+        var prefix: [i64] = [0]
+        var acc: i64 = 0
+        var i: i64 = 0
+        while i < char_count:
+            acc = acc + str_len(current_core_lexer_slot[0].source_chars[i])
+            prefix.push(acc)
+            i = i + 1
+        lex_span_byte_prefix = prefix
+
+# Inverse of lex_source_byte_offset over the live source: the char index whose
+# byte offset is the largest one <= `byte_offset` (clamped to the source). For
+# callers that only hold a BYTE position (a converted Span) but must record a
+# CHAR offset in the span pool, which the bridge converts to bytes exactly once.
+fn lex_source_char_offset(byte_offset: i64) -> i64:
+    if _lex_core_slot_empty():
+        return 0
+    var target = byte_offset
+    if target < 0:
+        target = 0
+    val char_count = current_core_lexer_slot[0].source_chars.len()
+    if _lex_raw_bool_slot_empty(lex_span_all_ascii):
+        lex_span_all_ascii = [str_len(current_core_lexer_slot[0].source) == char_count]
+    if lex_span_all_ascii[0]:
+        return if target > char_count: char_count else: target
+    lex_span_prefix_ensure(char_count)
+    if target >= lex_span_byte_prefix[char_count]:
+        return char_count
+    var lo: i64 = 0
+    var hi: i64 = char_count
+    while lo < hi:
+        val mid = (lo + hi + 1) / 2
+        if lex_span_byte_prefix[mid] <= target:
+            lo = mid
+        else:
+            hi = mid - 1
+    lo
 
 fn lex_current_token_byte_span(kind: i64, line: i64, col: i64) -> LexSpan:
     # EOF and dedents do not consume source. Their cur_start may still name
@@ -154,6 +226,17 @@ fn lex_current_token_byte_span(kind: i64, line: i64, col: i64) -> LexSpan:
     val start = lex_source_byte_offset(lex_token_start_get())
     val end_pos = lex_source_byte_offset(lex_token_end_get())
     lex_span_new(start, end_pos, line, col)
+
+# Declaration end boundary for the token the parser currently holds, for
+# span owners that build flat ranges directly (the parser's module-level
+# declaration spans) instead of going through the Token wrapper above.
+# Same DEDENT/EOF rule: those tokens consume no source, so the consume point
+# (token end) is the true boundary; every other token contributes its start.
+# All values are BYTE offsets, matching LexSpan and source slicing.
+fn lex_current_token_decl_end_byte() -> i64:
+    if lex_cur_kind_get_slot() == TOK_DEDENT or lex_cur_kind_get_slot() == TOK_EOF:
+        return lex_source_byte_offset(lex_token_end_get())
+    lex_source_byte_offset(lex_token_start_get())
 
 fn lexer_next_token(self: Lexer) -> Token:
     # Advance the global lexer and build a Token record.
@@ -175,38 +258,41 @@ fn lex_init(source: text):
 
 fn lex_init_with_path(source: text, source_path: text):
     # Nil-guards: module-level vars may be nil in native binaries
-    if lex_state == nil:
-        lex_state = {}
-    if lex_source_char_count_slot.len() == 0:
-        lex_source_char_count_slot = [0]
-    if lex_source_code_base_slot.len() == 0:
-        lex_source_code_base_slot = [0]
-    if lex_source_codes.len() == 0:
-        lex_source_codes = []
-    if current_core_lexer_slot.len() == 0:
-        current_core_lexer_slot = []
-    if lex_env_save_enabled.len() == 0:
-        lex_env_save_enabled = [false]
-    if lex_generic_close_pending.len() == 0:
-        lex_generic_close_pending = [false]
-    if lex_cur_kind_direct.len() == 0:
-        lex_cur_kind_direct = [0]
-    if lex_cur_text_direct.len() == 0:
-        lex_cur_text_direct = [""]
-    if lex_cur_line_direct.len() == 0:
-        lex_cur_line_direct = [0]
-    if lex_cur_col_direct.len() == 0:
-        lex_cur_col_direct = [0]
-    if lex_cur_suffix_direct.len() == 0:
-        lex_cur_suffix_direct = [""]
-    if lex_token_start_direct.len() == 0:
-        lex_token_start_direct = [0]
-    if lex_token_end_direct.len() == 0:
-        lex_token_end_direct = [0]
+    unsafe:
+        if lex_state == nil:
+            lex_state = {}
+        if lex_source_char_count_slot == nil or lex_source_char_count_slot.len() == 0:
+            lex_source_char_count_slot = [0]
+        if lex_source_code_base_slot == nil or lex_source_code_base_slot.len() == 0:
+            lex_source_code_base_slot = [0]
+        if lex_source_codes == nil or lex_source_codes.len() == 0:
+            lex_source_codes = []
+        if current_core_lexer_slot == nil or current_core_lexer_slot.len() == 0:
+            current_core_lexer_slot = []
+        if lex_env_save_enabled == nil or lex_env_save_enabled.len() == 0:
+            lex_env_save_enabled = [false]
+        if lex_generic_close_pending == nil or lex_generic_close_pending.len() == 0:
+            lex_generic_close_pending = [false]
+        if lex_cur_kind_direct == nil or lex_cur_kind_direct.len() == 0:
+            lex_cur_kind_direct = [0]
+        if lex_cur_text_direct == nil or lex_cur_text_direct.len() == 0:
+            lex_cur_text_direct = [""]
+        if lex_cur_line_direct == nil or lex_cur_line_direct.len() == 0:
+            lex_cur_line_direct = [0]
+        if lex_cur_col_direct == nil or lex_cur_col_direct.len() == 0:
+            lex_cur_col_direct = [0]
+        if lex_cur_suffix_direct == nil or lex_cur_suffix_direct.len() == 0:
+            lex_cur_suffix_direct = [""]
+        if lex_token_start_direct == nil or lex_token_start_direct.len() == 0:
+            lex_token_start_direct = [0]
+        if lex_token_end_direct == nil or lex_token_end_direct.len() == 0:
+            lex_token_end_direct = [0]
+        if lex_cur_no_interp_direct == nil or lex_cur_no_interp_direct.len() == 0:
+            lex_cur_no_interp_direct = [false]
     # Replace the cursor with each new source; a prior file may have owned the
     # backing storage of the old module-global array.
-    lex_span_char_cursor = [0]
-    lex_span_byte_cursor = [0]
+    lex_span_byte_prefix = []
+    lex_span_all_ascii = []
     lex_env_save_enabled[0] = (env_get_nullable("SIMPLE_BOOTSTRAP_LEX_ENV_SAVE") ?? "") == "1"
     lex_generic_close_pending[0] = false
     core_token_env_save_set(lex_env_save_enabled[0])
@@ -305,7 +391,7 @@ fn lex_source_char_at(pos: i64) -> text:
     # entirely for that literal. Route through the CoreLexer's own
     # codepoint-indexed source_chars array (same basis as cur_start/pos)
     # instead of re-slicing the raw byte-indexed text.
-    if current_core_lexer_slot.len() > 0:
+    if not _lex_core_slot_empty():
         val lx: CoreLexer = current_core_lexer_slot[0]
         return core_lexer_char_at_pos(lx, pos)
     val source = current_core_source_get()
@@ -317,7 +403,7 @@ fn lex_source_char_at(pos: i64) -> text:
 fn lex_source_slice(start: i64, end: i64) -> text:
     # See lex_source_char_at: keep the same codepoint-indexed basis as
     # cur_start/pos when a CoreLexer is active.
-    if current_core_lexer_slot.len() > 0:
+    if not _lex_core_slot_empty():
         val lx: CoreLexer = current_core_lexer_slot[0]
         return core_lexer_char_slice(lx, start, end)
     val source = current_core_source_get()
@@ -332,12 +418,13 @@ fn lex_source_slice(start: i64, end: i64) -> text:
 
 fn lex_source_set(value: text):
     # Nil-guards: module-level vars may be nil in native binaries
-    if lex_source_code_base_slot.len() == 0:
-        lex_source_code_base_slot = [0]
-    if lex_source_codes.len() == 0:
-        lex_source_codes = []
-    if lex_source_char_count_slot.len() == 0:
-        lex_source_char_count_slot = [0]
+    unsafe:
+        if lex_source_code_base_slot == nil or lex_source_code_base_slot.len() == 0:
+            lex_source_code_base_slot = [0]
+        if lex_source_codes == nil or lex_source_codes.len() == 0:
+            lex_source_codes = []
+        if lex_source_char_count_slot == nil or lex_source_char_count_slot.len() == 0:
+            lex_source_char_count_slot = [0]
     val source_len = value.len()
     lex_source_code_base_slot[0] = lex_source_codes.len()
     var pos = 0
@@ -362,6 +449,10 @@ pub fn lexer_release_parse_source_globals():
     lex_source_codes = []
     lex_source_char_count_slot = [0]
     lex_source_code_base_slot = [0]
+    # The span offset table is sized by the released source (8 B per char of
+    # the last non-ASCII module); the ASCII flag is per source too.
+    lex_span_byte_prefix = []
+    lex_span_all_ascii = []
     env_set("SIMPLE_BOOTSTRAP_LEX_SOURCE", "")
     env_set("SIMPLE_BOOTSTRAP_LEX_PATH", "")
 
@@ -410,17 +501,17 @@ fn lex_cur_suffix_set(value: text):
         env_set("SIMPLE_BOOTSTRAP_LEX_CUR_SUFFIX", value)
 
 fn lex_token_start_get() -> i64:
-    if lex_token_start_direct.len() > 0:
+    if not _lex_raw_i64_slot_empty(lex_token_start_direct):
         return lex_token_start_direct[0]
     lex_env_i64("SIMPLE_BOOTSTRAP_LEX_TOKEN_START", 0)
 
 fn lex_token_end_get() -> i64:
-    if lex_token_end_direct.len() > 0:
+    if not _lex_raw_i64_slot_empty(lex_token_end_direct):
         return lex_token_end_direct[0]
     lex_env_i64("SIMPLE_BOOTSTRAP_LEX_TOKEN_END", 0)
 
 fn lex_cur_no_interp_get() -> bool:
-    if lex_cur_no_interp_direct.len() > 0:
+    if not _lex_raw_bool_slot_empty(lex_cur_no_interp_direct):
         return lex_cur_no_interp_direct[0]
     false
 
@@ -490,9 +581,9 @@ fn current_core_indent_stack_set(values: [i64]):
         return
     lex_state_set("core_indent_stack", parts.join(","))
 
-fn current_core_source_get() -> text:
+pub fn current_core_source_get() -> text:
     # Guest-first: the module-global slot persists where the env var does not.
-    if lex_inline_source_slot.len() > 0 and lex_inline_source_slot[0] != "":
+    if not _lex_raw_text_slot_empty(lex_inline_source_slot) and lex_inline_source_slot[0] != "":
         return lex_inline_source_slot[0]
     val inline_source: text = env_get_nullable("SIMPLE_BOOTSTRAP_LEX_SOURCE") ?? ""
     if inline_source != "":
@@ -620,9 +711,11 @@ fn lex_next_token_record() -> Token:
 # ===== Public API =====
 
 fn lex_next() -> i64:
-    if current_core_lexer_slot.len() == 0:
+    if _lex_core_slot_empty():
         current_core_lexer_slot = [current_core_lexer_load()]
     var loaded: CoreLexer = current_core_lexer_slot[0]
+    if _lex_raw_bool_slot_empty(lex_generic_close_pending):
+        lex_generic_close_pending = [false]
     if lex_generic_close_pending[0]:
         lex_generic_close_pending[0] = false
         # next_token_after_generic_close() only clears the prior token before
@@ -646,7 +739,7 @@ fn lex_next() -> i64:
     # and a loud one-shot diagnostic instead of handing the parser an
     # unconsumable token forever.
     if kind == 0:
-        if lex_dead_reported.len() == 0:
+        if _lex_raw_bool_slot_empty(lex_dead_reported):
             lex_dead_reported = [false]
         if not lex_dead_reported[0]:
             lex_dead_reported[0] = true
@@ -704,7 +797,7 @@ fn lex_next() -> i64:
 # bug doc: doc/08_tracking/bug/
 #   stage3_selfhost_parser_rejects_arrow_match_arms_2026-09-06.md
 fn lex_mark_current_token_as_generic_close():
-    if lex_generic_close_pending.len() == 0:
+    if _lex_raw_bool_slot_empty(lex_generic_close_pending):
         lex_generic_close_pending = [false]
     lex_generic_close_pending[0] = true
 
@@ -727,17 +820,17 @@ fn lex_mark_current_token_as_generic_close():
 # source (skipping normal tokenization) hand the live position back so the
 # next `lex_next()` resumes from the right place.
 fn lex_live_line_get() -> i64:
-    if current_core_lexer_slot.len() == 0:
+    if _lex_core_slot_empty():
         current_core_lexer_slot = [current_core_lexer_load()]
     current_core_lexer_slot[0].line
 
 fn lex_live_col_get() -> i64:
-    if current_core_lexer_slot.len() == 0:
+    if _lex_core_slot_empty():
         current_core_lexer_slot = [current_core_lexer_load()]
     current_core_lexer_slot[0].col
 
 fn lex_force_set_pos(new_pos: i64, new_line: i64, new_col: i64):
-    if current_core_lexer_slot.len() == 0:
+    if _lex_core_slot_empty():
         current_core_lexer_slot = [current_core_lexer_load()]
     var lx: CoreLexer = current_core_lexer_slot[0]
     lx.pos = new_pos
@@ -753,21 +846,37 @@ fn lex_force_set_pos(new_pos: i64, new_line: i64, new_col: i64):
 # body gets real NEWLINE/INDENT/DEDENT tokens even while inside a call's `(`.
 
 fn lex_enable_forced_indentation():
-    if current_core_lexer_slot.len() == 0:
+    if _lex_core_slot_empty():
         current_core_lexer_slot = [current_core_lexer_load()]
     var loaded: CoreLexer = current_core_lexer_slot[0]
     loaded = core_lexer_enable_forced_indentation(loaded)
     current_core_lexer_store(loaded)
 
+# Match-arm column hooks (see CoreLexer.pipe_line_continues): called by
+# parse_match_arms_common right after the match block's Indent, and on exit.
+fn lex_push_match_arm_column():
+    if _lex_core_slot_empty():
+        current_core_lexer_slot = [current_core_lexer_load()]
+    var loaded: CoreLexer = current_core_lexer_slot[0]
+    loaded = core_lexer_push_match_arm_column(loaded)
+    current_core_lexer_store(loaded)
+
+fn lex_pop_match_arm_column():
+    if _lex_core_slot_empty():
+        current_core_lexer_slot = [current_core_lexer_load()]
+    var loaded: CoreLexer = current_core_lexer_slot[0]
+    loaded = core_lexer_pop_match_arm_column(loaded)
+    current_core_lexer_store(loaded)
+
 fn lex_disable_forced_indentation():
-    if current_core_lexer_slot.len() == 0:
+    if _lex_core_slot_empty():
         current_core_lexer_slot = [current_core_lexer_load()]
     var loaded: CoreLexer = current_core_lexer_slot[0]
     loaded = core_lexer_disable_forced_indentation(loaded)
     current_core_lexer_store(loaded)
 
 fn lex_pop_indent():
-    if current_core_lexer_slot.len() == 0:
+    if _lex_core_slot_empty():
         current_core_lexer_slot = [current_core_lexer_load()]
     var loaded: CoreLexer = current_core_lexer_slot[0]
     loaded = core_lexer_pop_indent(loaded)
@@ -853,14 +962,14 @@ struct LexSnapshot:
     indent_stack: [i64]
 
 fn lex_snapshot_save() -> LexSnapshot:
-    if current_core_lexer_slot.len() == 0:
+    if _lex_core_slot_empty():
         current_core_lexer_slot = [current_core_lexer_load()]
     val lx: CoreLexer = current_core_lexer_slot[0]
     var at_ls_i: i64 = 0
     if lx.at_line_start:
         at_ls_i = 1
     var generic_pending_i: i64 = 0
-    if lex_generic_close_pending.len() > 0 and lex_generic_close_pending[0]:
+    if not _lex_raw_bool_slot_empty(lex_generic_close_pending) and lex_generic_close_pending[0]:
         generic_pending_i = 1
     var nums: [i64] = [lx.pos, lx.line, lx.col, lx.pending_dedents, at_ls_i, lx.paren_depth, lx.cur_start, lex_cur_kind_direct[0], lex_cur_line_direct[0], lex_cur_col_direct[0], lx.cur_kind, generic_pending_i]
     var saved_indent_stack: [i64] = []
@@ -872,7 +981,7 @@ fn lex_snapshot_save() -> LexSnapshot:
 
 fn lex_snapshot_restore(snapshot: LexSnapshot):
     # Rebuild the CoreLexer from saved fields
-    if current_core_lexer_slot.len() == 0:
+    if _lex_core_slot_empty():
         current_core_lexer_slot = [current_core_lexer_load()]
     val nums: [i64] = snapshot.nums
     val txts: [text] = snapshot.texts
@@ -886,7 +995,7 @@ fn lex_snapshot_restore(snapshot: LexSnapshot):
     lx.cur_start = nums[6]
     if nums.len() > 10:
         lx.cur_kind = nums[10]
-    if lex_generic_close_pending.len() == 0:
+    if _lex_raw_bool_slot_empty(lex_generic_close_pending):
         lex_generic_close_pending = [false]
     if nums.len() > 11:
         lex_generic_close_pending[0] = nums[11] == 1
@@ -943,20 +1052,26 @@ var lex_all_lines: [i64] = []
 var lex_all_cols: [i64] = []
 
 pub fn lex_tokenize_all(source: text) -> i64:
-    # Nil-guards: module-level vars may be nil in native binaries
-    if lex_all_kinds == nil:
-        lex_all_kinds = []
-    if lex_all_texts == nil:
-        lex_all_texts = []
-    if lex_all_lines == nil:
-        lex_all_lines = []
-    if lex_all_cols == nil:
-        lex_all_cols = []
+    # Nil-guards: module-level vars may be nil in native binaries.
+    # Avoid calling .clear() on a freshly created [] in freestanding builds.
+    unsafe:
+        if lex_all_kinds == nil:
+            lex_all_kinds = []
+        else:
+            lex_all_kinds.clear()
+        if lex_all_texts == nil:
+            lex_all_texts = []
+        else:
+            lex_all_texts.clear()
+        if lex_all_lines == nil:
+            lex_all_lines = []
+        else:
+            lex_all_lines.clear()
+        if lex_all_cols == nil:
+            lex_all_cols = []
+        else:
+            lex_all_cols.clear()
     lex_init(source)
-    lex_all_kinds.clear()
-    lex_all_texts.clear()
-    lex_all_lines.clear()
-    lex_all_cols.clear()
 
     while true:
         val kind: i64 = lex_next()
@@ -970,3 +1085,111 @@ pub fn lex_tokenize_all(source: text) -> i64:
     lex_all_kinds.len()
 
 export LexNextSnapshot, lex_next_snapshot
+export lex_source_byte_offset, lex_source_char_offset, lex_current_token_decl_end_byte
+
+# ===== LexerState snapshot (ParseContext stage 1) =====
+# See doc/05_design/compiler/frontend/parse_context_per_context_state.md.
+# take moves this file's parse state out and installs fresh initial
+# owners; install makes a taken snapshot active again.
+pub struct LexerState:
+    lex_state: {text: text}
+    lex_source_char_count_slot: [i64]
+    lex_source_code_base_slot: [i64]
+    lex_source_codes: [i64]
+    current_core_lexer_slot: [CoreLexer]
+    lex_env_save_enabled: [bool]
+    lex_generic_close_pending: [bool]
+    lex_cur_kind_direct: [i64]
+    lex_cur_text_direct: [text]
+    lex_inline_source_slot: [text]
+    lex_cur_line_direct: [i64]
+    lex_cur_col_direct: [i64]
+    lex_cur_suffix_direct: [text]
+    lex_token_start_direct: [i64]
+    lex_token_end_direct: [i64]
+    lex_span_byte_prefix: [i64]
+    lex_span_all_ascii: [bool]
+    lex_cur_no_interp_direct: [bool]
+    lex_dead_reported: [bool]
+    lex_all_kinds: [i64]
+    lex_all_texts: [text]
+    lex_all_lines: [i64]
+    lex_all_cols: [i64]
+
+pub fn lexer_state_take() -> LexerState:
+    val s = LexerState(
+        lex_state: lex_state,
+        lex_source_char_count_slot: lex_source_char_count_slot,
+        lex_source_code_base_slot: lex_source_code_base_slot,
+        lex_source_codes: lex_source_codes,
+        current_core_lexer_slot: current_core_lexer_slot,
+        lex_env_save_enabled: lex_env_save_enabled,
+        lex_generic_close_pending: lex_generic_close_pending,
+        lex_cur_kind_direct: lex_cur_kind_direct,
+        lex_cur_text_direct: lex_cur_text_direct,
+        lex_inline_source_slot: lex_inline_source_slot,
+        lex_cur_line_direct: lex_cur_line_direct,
+        lex_cur_col_direct: lex_cur_col_direct,
+        lex_cur_suffix_direct: lex_cur_suffix_direct,
+        lex_token_start_direct: lex_token_start_direct,
+        lex_token_end_direct: lex_token_end_direct,
+        lex_span_byte_prefix: lex_span_byte_prefix,
+        lex_span_all_ascii: lex_span_all_ascii,
+        lex_cur_no_interp_direct: lex_cur_no_interp_direct,
+        lex_dead_reported: lex_dead_reported,
+        lex_all_kinds: lex_all_kinds,
+        lex_all_texts: lex_all_texts,
+        lex_all_lines: lex_all_lines,
+        lex_all_cols: lex_all_cols
+    )
+    lex_state = {}
+    lex_source_char_count_slot = [0]
+    lex_source_code_base_slot = [0]
+    lex_source_codes = []
+    current_core_lexer_slot = []
+    lex_env_save_enabled = [false]
+    lex_generic_close_pending = [false]
+    lex_cur_kind_direct = [0]
+    lex_cur_text_direct = [""]
+    lex_inline_source_slot = [""]
+    lex_cur_line_direct = [0]
+    lex_cur_col_direct = [0]
+    lex_cur_suffix_direct = [""]
+    lex_token_start_direct = [0]
+    lex_token_end_direct = [0]
+    lex_span_byte_prefix = []
+    lex_span_all_ascii = []
+    lex_cur_no_interp_direct = [false]
+    lex_dead_reported = [false]
+    lex_all_kinds = []
+    lex_all_texts = []
+    lex_all_lines = []
+    lex_all_cols = []
+    s
+
+pub fn lexer_state_install(s: LexerState):
+    lex_state = s.lex_state
+    lex_source_char_count_slot = s.lex_source_char_count_slot
+    lex_source_code_base_slot = s.lex_source_code_base_slot
+    lex_source_codes = s.lex_source_codes
+    current_core_lexer_slot = s.current_core_lexer_slot
+    lex_env_save_enabled = s.lex_env_save_enabled
+    lex_generic_close_pending = s.lex_generic_close_pending
+    lex_cur_kind_direct = s.lex_cur_kind_direct
+    lex_cur_text_direct = s.lex_cur_text_direct
+    lex_inline_source_slot = s.lex_inline_source_slot
+    lex_cur_line_direct = s.lex_cur_line_direct
+    lex_cur_col_direct = s.lex_cur_col_direct
+    lex_cur_suffix_direct = s.lex_cur_suffix_direct
+    lex_token_start_direct = s.lex_token_start_direct
+    lex_token_end_direct = s.lex_token_end_direct
+    lex_span_byte_prefix = s.lex_span_byte_prefix
+    lex_span_all_ascii = s.lex_span_all_ascii
+    lex_cur_no_interp_direct = s.lex_cur_no_interp_direct
+    lex_dead_reported = s.lex_dead_reported
+    lex_all_kinds = s.lex_all_kinds
+    lex_all_texts = s.lex_all_texts
+    lex_all_lines = s.lex_all_lines
+    lex_all_cols = s.lex_all_cols
+
+export LexerState, lexer_state_take, lexer_state_install

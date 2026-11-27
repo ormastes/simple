@@ -25,6 +25,59 @@ gates before admission or promotion. The next actual restart integrates latest
 requested release and reviewed applicable unmerged fixes; preserve live frozen
 inputs, old receipts and compatible frontend/HIR caches.
 
+## Shared Cross-Platform Phase 3 / Phase 4 Build & Handoff Baseline
+
+Native host builds across **Linux, macOS, FreeBSD, Windows (Git-Bash/MSYS2), and
+SimpleOS** run through the unified phased script documented in
+[shared Phase 3/4 build](../../tooling/phase3_phase4_shared_build.md) and
+[bootstrap options](../../tooling/bootstrap_options.md):
+
+- **Shared cross-platform phased build (`scripts/bootstrap/build-phase3-phase4.sh` & `.bat`):**
+  Running interactively without `--phase=...` (or with `--menu`) opens the
+  **interactive Phased Build Menu**; non-interactive handoff automation passes
+  `--phase=p3a|p3|p4|all`. On Windows, `scripts/bootstrap/build-phase3-phase4.bat`
+  delegates to the same `.sh` script with 2 configs: **`mingw` is DEFAULT**
+  (`--win-config=mingw`, `llvm-mingw` clang + `ld.lld`) and **`msvc` is optional**
+  (`--win-config=msvc`, `clang-cl`). Legacy standalone Phase 3/4 scripts
+  (`p3-selfbuild-stage3.shs`, `p3-manual-link-stage3.shs`, `p3-smoke-stage3.shs`,
+  `p3-targeted-stage2-build.shs`, `p3-entry-groups.shs`, etc.) are deprecated —
+  invoking them directly pauses with migration instructions for `build-phase3-phase4.sh`
+  (including phased/shard mode) and returns without building.
+- **Default Phase 1 & Phase 2 skip once Phase 3+ exists:** In
+  `scripts/bootstrap/bootstrap-from-scratch.sh`, when a working native pure-Simple
+  Phase 3+ host compiler already exists (`bin/release/<triple>/simple` or `bin/simple`
+  without the Rust-seed banner), **default bootstrap skips Phase 1 (Cargo Rust seed)
+  and Phase 2 (`seed -> stage2`)** and delegates directly to
+  `scripts/bootstrap/build-phase3-phase4.sh` (`P3 -> P4`). Pass `--from-seed` /
+  `--cold-bootstrap` (or `--full-bootstrap` in CI) ONLY when intentionally rebuilding
+  Phase 1 & Phase 2 from the Rust seed; pass `--skip-seed` to require an existing
+  Phase 3+ compiler without seed fallback.
+- **Compile mode (`shard` default, `file` optional) & `native_host_match` link policy:**
+  `--compile-mode=shard` is **DEFAULT** in `build-phase3-phase4.sh`
+  (`SIMPLE_FILE_WORKERS=0`, `SIMPLE_HIR_SHARDING=1`, `SIMPLE_MIR_SHARDING=1`);
+  `--compile-mode=file` (`SIMPLE_FILE_WORKERS=1`) is optional.
+  `scripts/bootstrap/stage3-native-host-link-policy.{sdn,shs}` enforces the mandatory
+  **`native_host_match` tag check** (`target (platform, cpu) == host (os, arch)`),
+  minimizing `simple` to link **only** thin entry + `(platform, cpu)` static primitive
+  archive (`libsimple-primitive-<platform>-<cpu>.a`) + dead-stripped primitive C core
+  statically, while linking `lib/libsimple-{std,compiler-common,compiler,app}.dylib`
+  (`.so`) dynamically. **Phase 3 builds ONLY native host targets** — non-native
+  backends (other CPUs, VHDL, GPU/CUDA/Vulkan, Wasm) are NOT built during Phase 3,
+  **but if a `.dylib` already exists on disk, `simple` can load and use it**
+  (`--backend-plugin <existing.dylib>`).
+- **Phase 4 dual-mode build:** Phase 4 builds **both** the optimized production
+  binary (`simple`: `--profile=prod --release --strip`) AND the XRay-instrumented
+  debug binary (`simple-debug`: `--profile=dev --debug --no-strip --xray`), plus
+  Stage 5 essentials (`simple_test_runner`, `simple_build_runner`,
+  `simple_mcp_server`, `simple_lsp_mcp_server`).
+- **Protected script guard & zero-compile `--path-check`:** Every core bootstrap
+  script carries a top-of-file
+  `PROTECTED BOOTSTRAP SCRIPT — DO NOT MODIFY UNLESS EXPLICITLY REQUESTED BY USER`
+  banner. Run `sh scripts/check/fast-verify-bootstrap-scripts.shs` before starting
+  platform handoffs to verify sealed `.sdn` SHA-256 digests, protected banners,
+  syntax, and `check-bootstrap-path-matrix-all.shs` (`PATH_ACTION|...|status=ALIVE`
+  superset records across Unix/Windows/SimpleOS without running compilation).
+
 ## Canonical readiness checker
 
 Run the canonical checker for the exact target triple:
@@ -196,3 +249,91 @@ For a failing live run, stop at the first trustworthy boundary, preserve the
 receipt, fix the pure-Simple owner, and verify a distinct root-cause cycle. The
 lane has a maximum of three distinct fix/verify cycles. Do not rerun an identical
 failed command; after the third cycle, stop and report the remaining blocker.
+
+## Hello sanity: 16 native execution cases and phase interpreter checks
+
+The complete native Hello target is a 16-case matrix: four linkage forms, two
+code-generation backends (LLVM and Cranelift), and two execution paths (direct
+compiler invocation and BuildRunner). The forms are: source to executable,
+two objects to executable, static library to executable, and shared library to
+executable. Every cell must build and run its own executable and retain the
+observed `Hello, World!` output. A successful compile, object, or library build
+alone is not a pass. Do not substitute frontend probes (`p2_add`, MIR retention,
+module naming, or positional Hello) for these cases.
+
+Track each cell independently using the tuple `(form, backend, path)` and one
+of `PASS`, `FAIL`, `UNRUN`, or `UNSUPPORTED`, with command, compiler identity,
+artifact hash, exit status, and output as evidence. A missing receipt is
+`UNRUN`; unsupported behavior is never a pass. The required rows are:
+
+| Form | LLVM direct | LLVM BuildRunner | Cranelift direct | Cranelift BuildRunner |
+| --- | --- | --- | --- | --- |
+| Source to executable | status + evidence | status + evidence | status + evidence | status + evidence |
+| Two objects to executable | status + evidence | status + evidence | status + evidence | status + evidence |
+| Static library to executable | status + evidence | status + evidence | status + evidence | status + evidence |
+| Shared library to executable | status + evidence | status + evidence | status + evidence | status + evidence |
+
+These are acceptance requirements, not claims that all 16 cases are currently
+implemented or proven. At the time of this guide update, the existing
+`hello-sanity-matrix.py` driver runs the four direct cases for one selected
+backend per invocation. An optional one-source BuildRunner adapter requires
+`--buildrunner-manager`, `--buildrunner-manifest-writer`,
+`--buildrunner-template`, and `--buildrunner-target` together. It uses the
+production manifest writer and manager, verifies the published artifact and a
+bound enforced-memory receipt, then executes the artifact. Manager exit alone
+is insufficient. Its memory receipt support is currently limited to Windows
+Job Objects and Linux cgroups; macOS cannot receive a BuildRunner pass from an
+unqualified memory receipt. The other three BuildRunner forms remain `UNRUN`.
+Without the complete provider configuration, all four BuildRunner forms remain
+`UNRUN`. Keep separate reports for both backends. Required pending BuildRunner
+cells make an otherwise successful direct report `PARTIAL` with nonzero exit;
+neither a report nor this guide claims the full 16-case gate has passed.
+
+Invoke `scripts/bootstrap/hello-sanity-matrix.shs` from Bash or the
+`hello-sanity-matrix.cmd` entrypoint from Windows with `--compiler`,
+`--phase 1|2|3`, `--source-root`, `--runtime-path`, a fresh `--output`, and
+`--backend llvm|cranelift`. Use the exact compiler belonging to the phase and
+backend being checked. Keep outputs and logs distinct; parallel jobs may share
+frozen read-only inputs but must not share writable outputs or conflicting
+caches. Record compiler/runtime identities, link inputs and commands, exit
+statuses, artifact hashes, and observed output. Backend reports remain
+diagnostic evidence and do not replace formal admission receipts.
+
+On macOS the adapter pins the actual clang binary and `ld64.lld`, captures
+the compiler's hosted link inputs, checks exact main/provider object identity,
+and verifies the shared library load command and exported symbol. The default
+is serial execution (`--jobs 1`); `--jobs 0` permits concurrent direct lanes
+only when aggregate resource headroom allows it. `--max-rss-kib` bounds each
+command's process tree, and `--min-free-disk-bytes` defaults to 1.5 GiB. Admission
+must also preserve the campaign's host memory reserve; a request for parallel
+cases does not authorize exceeding it.
+
+The 2026-10-29 macOS diagnostic campaign used the unchanged P2 compiler
+`0d6f2e4720845195c9f91de292056fac4c57cabef81390507c78d95e51133a28`.
+All eight direct cells (four per backend) terminated at their RSS bounds before
+emitting their requested artifacts. Their process receipts report quiescence
+and zero observer errors. All eight BuildRunner cells were `UNRUN`; the P2
+interpreter was `SKIPPED`. The native matrix is **incomplete and failing**.
+Retained local evidence is under
+`build/hello-matrix-macos-p2-cranelift-20261029-02` and
+`build/hello-matrix-macos-p2-llvm-20261029-01`; the latter contains the resource
+admission record showing capacity for one lane after the 8 GiB host reserve.
+Real C-based Mach-O transport tests validate the adapter's four linkage forms;
+they are not evidence that these P2 Simple compiler cells passed.
+
+Interpreter execution is tracked separately from the 16 native cases. Use the
+interpreter owned by the selected phase compiler; a separate or ambient CLI is
+not evidence. The phase-specific interpreter state is:
+
+| Phase | Interpreter requirement | Evidence rule |
+| --- | --- | --- |
+| 1 | Required | Run the seed's `run` with `SIMPLE_EXECUTION_MODE=interpret`; bind evidence to the phase 1 compiler. |
+| 2 | Configured skip | Minimal compiler has no `run`; record `SKIPPED`, never `PASS`. |
+| 3 | Required | Qualify the full CLI built by the exact phase 3 compiler and bind it to that producer, source, and runtime before interpreter execution. |
+
+The phase's overall gate is incomplete while any required direct, BuildRunner,
+or interpreter case is `UNRUN`, `UNSUPPORTED`, or `FAIL`. In particular, the
+current driver cannot yet consume separately receipt-bound phase 3 full-CLI
+evidence, so phase 3 interpreter qualification remains pending that integration.
+Do not promote a direct-only matrix `PASS` to phase completion when required
+BuildRunner cases remain `UNRUN`.

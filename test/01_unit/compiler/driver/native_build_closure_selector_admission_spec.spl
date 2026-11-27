@@ -1,0 +1,45 @@
+# Regression: child selector spelling must bind the parent's canonical roots.
+use std.spec
+use std.spec.step
+use app.cli.native_build_closure_roots.{native_build_closure_roots_v1}
+use compiler.driver.driver_build.native_entry_closure_owner.{native_entry_closure_request_identity_matches_v1}
+
+describe "native closure selector admission":
+    it "maps checkout absolute relative and snapshot absolute selectors identically":
+        step("maps selectors through the authenticated source and snapshot pair")
+        val relative = native_build_closure_roots_v1("/owner", "/frozen", ["src/app", "test/probe.spl"])
+        val absolute = native_build_closure_roots_v1("/owner", "/frozen", ["/owner/src/app", "/owner/test/probe.spl"])
+        val frozen = native_build_closure_roots_v1("/owner", "/frozen", ["/frozen/src/app", "/frozen/test/probe.spl"])
+        expect(relative.is_ok()).to_equal(true)
+        expect(absolute.is_ok()).to_equal(true)
+        expect(frozen.is_ok()).to_equal(true)
+        expect(relative.unwrap()).to_equal(["src/app", "test/probe.spl"])
+        expect(absolute.unwrap()).to_equal(relative.unwrap())
+        expect(frozen.unwrap()).to_equal(relative.unwrap())
+
+    it "rejects foreign roots and traversal while admitting ordinary generated roots":
+        step("rejects selectors outside the admitted source authority")
+        expect(native_build_closure_roots_v1("/owner", "/frozen", ["/other/src/app"]).is_err()).to_equal(true)
+        expect(native_build_closure_roots_v1("/owner", "/frozen", ["/owner2/src/app"]).is_err()).to_equal(true)
+        expect(native_build_closure_roots_v1("/owner", "/frozen", ["src/../app"]).is_err()).to_equal(true)
+        expect(native_build_closure_roots_v1("/owner", "/frozen", ["build/arbitrary"]).unwrap()).to_equal(["build/arbitrary"])
+        expect(native_build_closure_roots_v1("/owner", "", ["src/app"]).is_err()).to_equal(true)
+
+    it "maps the complete WM source and snapshot selector sets identically":
+        step("canonicalizes generated, OS, library, entry, and frozen roots")
+        val source = "/home/yoon/simple/build/p1-bytespan-git"
+        val snapshot = source + "/build/scv/snapshots/scv-revision-v1-a87867388a9c9ee552ef15a1d7ed0626164b9b38923710bd5faf6157defba1a2"
+        val roots = ["build/os/generated", "src/os", "src/lib", "examples/09_embedded/simple_os/arch/x86_64", "examples/09_embedded/simple_os/arch/x86_64/gui_entry_desktop.spl"]
+        var frozen: [text] = []
+        for root in roots:
+            frozen.push(snapshot + "/" + root)
+        expect(native_build_closure_roots_v1(source, snapshot, roots).unwrap()).to_equal(roots)
+        expect(native_build_closure_roots_v1(source, snapshot, frozen).unwrap()).to_equal(roots)
+
+    it "preserves ordered duplicates and keeps request identity comparison strict":
+        step("binds exact ordered selectors after canonicalization")
+        val roots = native_build_closure_roots_v1("/owner", "/frozen", ["/owner/src/app", "src/lib", "/frozen/src/app"]).unwrap()
+        expect(roots).to_equal(["src/app", "src/lib", "src/app"])
+        expect(native_entry_closure_request_identity_matches_v1("/owner", "src/main.spl", roots, "producer", "/owner", "src/main.spl", ["src/app", "src/lib", "src/app"], "producer")).to_equal(true)
+        expect(native_entry_closure_request_identity_matches_v1("/owner", "src/main.spl", roots, "producer", "/owner", "src/main.spl", ["src/lib", "src/app", "src/app"], "producer")).to_equal(false)
+        expect(native_entry_closure_request_identity_matches_v1("/owner", "src/main.spl", roots, "producer", "/owner", "src/main.spl", ["src/app", "src/lib"], "producer")).to_equal(false)

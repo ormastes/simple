@@ -524,6 +524,7 @@ fn require_i64_field(name: &str, fields: &HashMap<String, Value>, field: &str) -
 fn require_f64_field(name: &str, fields: &HashMap<String, Value>, field: &str) -> Result<f64, CompileError> {
     match fields.get(field) {
         Some(Value::Float(n)) => Ok(*n),
+        Some(Value::Float32(n)) => Ok(*n as f64),
         Some(Value::Int(n)) => Ok(*n as f64),
         Some(other) => Err(CompileError::runtime(format!(
             "{name}: field {field} must be a float, got {:?}",
@@ -1198,7 +1199,8 @@ pub fn rt_simd_hmin_f32x4(args: &[Value]) -> Result<Value, CompileError> {
 // Vec16u8 is a Simple record `struct Vec16u8 { u0..u7, u8_, u9..u15: u8 }`.
 // Field name `u8_` (not `u8`) avoids the `u8` type-keyword clash. In
 // interpreter mode the value arrives as `Value::Object { class, fields }`
-// with each lane stored as `Value::Int` in 0..=255.
+// with each lane stored as an integer in 0..=255. Unsigned u8 fields retain
+// their width in `Value::UInt { width: 8, .. }`.
 // ============================================================================
 
 fn require_u8_field(name: &str, fields: &HashMap<String, Value>, field: &str) -> Result<u8, CompileError> {
@@ -1212,8 +1214,13 @@ fn require_u8_field(name: &str, fields: &HashMap<String, Value>, field: &str) ->
                 )))
             }
         }
+        Some(Value::UInt { value, width: 8 }) => u8::try_from(*value).map_err(|_| {
+            CompileError::runtime(format!(
+                "{name}: field {field} must be in 0..=255, got {value}"
+            ))
+        }),
         Some(other) => Err(CompileError::runtime(format!(
-            "{name}: field {field} must be an integer, got {:?}",
+            "{name}: field {field} must be an integer in 0..=255, got {:?}",
             other
         ))),
         None => Err(CompileError::runtime(format!("{name}: missing field {field}"))),
@@ -1521,11 +1528,15 @@ pub fn rt_engine2d_simd_copy_span_u32(args: &[Value]) -> Result<Value, CompileEr
     Ok(pack_u32_array(dst))
 }
 
-/// Src-over blend of a single packed straight-alpha pixel (0xAARRGGBB),
-/// bit-exact with `oracle_src_over` (truncating integer division). Shared by
-/// the in-place span bridges below and `rt_engine2d_simd_blend_row_u32`.
+/// Chrome 159 (Skia) source-over of one straight-alpha pixel (0xAARRGGBB).
+/// Opaque destination: `round(s*a/255) + ((d*(256-a)) >> 8)` for a solid
+/// fill (`solid`), `round(s*a/255) + div255r(d*(255-a))` for an image.
+/// Translucent destination (an opacity-group layer): Skia's premultiplied
+/// 8-bit value stored straight; transparent destination returns src. Twin of
+/// `engine2d_blend_u32` (runtime_simd_dispatch.c), `blend_pixel`
+/// (runtime engine2d_simd_ops.rs) and color.spl `blend` / `blend_solid`.
 #[inline]
-fn engine2d_blend_pixel_u32(s: u32, d: u32) -> u32 {
+fn engine2d_blend_pixel_u32(s: u32, d: u32, solid: bool) -> u32 {
     let sa = (s >> 24) & 0xFF;
     if sa == 255 {
         return s;
@@ -1535,12 +1546,33 @@ fn engine2d_blend_pixel_u32(s: u32, d: u32) -> u32 {
     }
     let da = (d >> 24) & 0xFF;
     let inv = 255 - sa;
-    let dst_weight = da * inv / 255;
-    let out_alpha = sa + dst_weight;
-    let r = (((s >> 16) & 0xFF) * sa + ((d >> 16) & 0xFF) * dst_weight) / out_alpha;
-    let g = (((s >> 8) & 0xFF) * sa + ((d >> 8) & 0xFF) * dst_weight) / out_alpha;
-    let b = ((s & 0xFF) * sa + (d & 0xFF) * dst_weight) / out_alpha;
-    (out_alpha << 24) | (r << 16) | (g << 8) | b
+    if da == 0 {
+        return s;
+    }
+    if da != 255 {
+        // Skia's premultiplied 8-bit layer value, stored straight; it
+        // round-trips exactly, so a group composite sees Chrome's value.
+        let dw = (da * inv + 127) / 255;
+        let oa = sa + dw;
+        let channel = |shift: u32| {
+            let p = (((s >> shift) & 0xFF) * sa + 127) / 255
+                + (((((d >> shift) & 0xFF) * da + 127) / 255) * inv + 127) / 255;
+            ((p * 255 + oa / 2) / oa).min(255)
+        };
+        return (oa << 24) | (channel(16) << 16) | (channel(8) << 8) | channel(0);
+    }
+    let channel = |shift: u32| {
+        let sc = (s >> shift) & 0xFF;
+        let dc = (d >> shift) & 0xFF;
+        let dterm = if solid {
+            (dc * (inv + 1)) >> 8
+        } else {
+            let v = dc * inv + 128;
+            (v + (v >> 8)) >> 8
+        };
+        (sc * sa + 127) / 255 + dterm
+    };
+    0xFF00_0000 | (channel(16) << 16) | (channel(8) << 8) | channel(0)
 }
 
 /// Interpreter bridge for the native in-place blend-span ABI. Blends
@@ -1570,7 +1602,7 @@ pub fn rt_engine2d_simd_blend_span_u32(args: &[Value]) -> Result<Value, CompileE
         for i in 0..count {
             let d = dst[dst_offset + i];
             let s = src[src_offset + i];
-            dst[dst_offset + i] = engine2d_blend_pixel_u32(s, d);
+            dst[dst_offset + i] = engine2d_blend_pixel_u32(s, d, false);
         }
     }
     Ok(pack_u32_array(dst))
@@ -1601,7 +1633,7 @@ pub fn rt_engine2d_simd_blend_const_span_u32(args: &[Value]) -> Result<Value, Co
         let count = requested.min(dst.len() - offset);
         for i in 0..count {
             let d = dst[offset + i];
-            dst[offset + i] = engine2d_blend_pixel_u32(s, d);
+            dst[offset + i] = engine2d_blend_pixel_u32(s, d, true);
         }
     }
     Ok(pack_u32_array(dst))
@@ -1633,21 +1665,7 @@ pub fn rt_engine2d_simd_blend_row_u32(args: &[Value]) -> Result<Value, CompileEr
     for i in 0..n {
         let d = dst[i];
         let s = src[i];
-        let sa = (s >> 24) & 0xFF;
-        let pixel = if sa == 255 {
-            s
-        } else if sa == 0 {
-            d
-        } else {
-            let da = (d >> 24) & 0xFF;
-            let inv = 255 - sa;
-            let dst_weight = da * inv / 255;
-            let out_alpha = sa + dst_weight;
-            let r = (((s >> 16) & 0xFF) * sa + ((d >> 16) & 0xFF) * dst_weight) / out_alpha;
-            let g = (((s >> 8) & 0xFF) * sa + ((d >> 8) & 0xFF) * dst_weight) / out_alpha;
-            let b = ((s & 0xFF) * sa + (d & 0xFF) * dst_weight) / out_alpha;
-            (out_alpha << 24) | (r << 16) | (g << 8) | b
-        };
+        let pixel = engine2d_blend_pixel_u32(s, d, false);
         out.push(pixel);
     }
     Ok(pack_u32_array(out))
@@ -2213,6 +2231,34 @@ pub fn rt_rank_select_free(args: &[Value]) -> Result<Value, CompileError> {
 
 #[cfg(test)]
 mod engine2d_span_tests {
+    use super::*;
+
+    #[test]
+    fn const_span_pct_matches_per_pixel_solid_rule() {
+        for pct in 0..=100i32 {
+            for &src in &[0xFF00_0000u32, 0xFFFF_0000, 0x1280_E507, 0xFFFF_FFFF] {
+                let dsts: Vec<u32> = (0..256u32).step_by(15).map(|v| 0x4000_0000 | (v << 16) | ((255 - v) << 8) | (v / 2)).collect();
+                let mut span = dsts.clone();
+                blend_const_span_pct_scalar(&mut span, src, pct);
+                for (i, &d) in dsts.iter().enumerate() {
+                    let want = if pct >= 100 {
+                        src
+                    } else if pct <= 0 {
+                        d
+                    } else {
+                        let a = ((pct as u32) * 255 + 50) / 100;
+                        engine2d_blend_pixel_u32((a << 24) | (src & 0x00FF_FFFF), d | 0xFF00_0000, true)
+                    };
+                    assert_eq!(span[i], want, "pct={pct} src={src:#x} dst={d:#x}");
+                }
+            }
+        }
+        // Chrome 159 cell: rgba(0,0,0,0.4) over rgb(128,128,128) = #4d4d4d.
+        let mut cell = [0xFF80_8080u32];
+        blend_const_span_pct_scalar(&mut cell, 0xFF00_0000, 40);
+        assert_eq!(cell[0], 0xFF4D_4D4D);
+    }
+
     use super::{pack_u32_array, rt_engine2d_simd_blend_row_u32, rt_engine2d_simd_copy_span_u32, unpack_u32_array};
     use crate::value::Value;
 
@@ -2260,7 +2306,7 @@ mod engine2d_span_tests {
         let blended = rt_engine2d_simd_blend_row_u32(&[dst, src]).unwrap();
         assert_eq!(
             unpack_u32_array("blended", &blended).unwrap(),
-            vec![0x80ff_ffff, 0xbfaa_0054, 0x0011_2233]
+            vec![0x80ff_ffff, 0xc0aa_0055, 0x0011_2233]
         );
     }
 }
@@ -2417,6 +2463,155 @@ pub fn rt_xgetbv(args: &[Value]) -> Result<Value, CompileError> {
     Ok(Value::Int(value))
 }
 
+// --- Host SIMD probes (interpreter twins) --------------------------------
+//
+// `src/compiler/30.types/simd_capabilities.spl` also declares these six as
+// `extern fn`. They had C (runtime_native.c) and Rust-runtime
+// (simple_runtime::value::sffi::env_process) owners but no interpreter twin, so
+// the seed's hybrid-interp native-build worker died in native_compile with
+// `semantic: unknown extern function: rt_is_darwin_arm64` (Phase 2 hello,
+// 2026-10-31). Each twin delegates to the Rust-runtime owner, so the
+// interpreter answers exactly what compiled code answers on the same host.
+use simple_runtime::value::sffi::env_process as host_probe;
+
+/// `rt_getauxval(key: i64) -> i64` — Linux auxv lookup, 0 elsewhere.
+pub fn rt_getauxval(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::semantic(format!(
+            "rt_getauxval expects 1 argument, got {}",
+            args.len()
+        )));
+    }
+    Ok(Value::Int(host_probe::rt_getauxval(args[0].as_int()?)))
+}
+
+/// `rt_is_darwin_arm64() -> bool`.
+pub fn rt_is_darwin_arm64(args: &[Value]) -> Result<Value, CompileError> {
+    expect_no_args("rt_is_darwin_arm64", args)?;
+    Ok(Value::Bool(host_probe::rt_is_darwin_arm64()))
+}
+
+/// `rt_sysctlbyname_i32(name: text) -> i32` — a 32-bit Darwin sysctl, 0 when
+/// absent, not 32-bit, off Darwin, or for a name of 128+ bytes (the runtime
+/// owners' bound).
+pub fn rt_sysctlbyname_i32(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::semantic(format!(
+            "rt_sysctlbyname_i32 expects 1 argument, got {}",
+            args.len()
+        )));
+    }
+    let name: String = match &args[0] {
+        Value::Str(s) => s.as_ref().to_string(),
+        other => {
+            return Err(CompileError::semantic(format!(
+                "rt_sysctlbyname_i32: argument must be text, got {other:?}"
+            )))
+        }
+    };
+    Ok(Value::Int(sysctlbyname_i32_host(&name) as i64))
+}
+
+#[cfg(target_os = "macos")]
+fn sysctlbyname_i32_host(name: &str) -> i32 {
+    if name.is_empty() || name.len() >= 128 {
+        return 0;
+    }
+    let key = match std::ffi::CString::new(name) {
+        Ok(key) => key,
+        Err(_) => return 0,
+    };
+    let mut value = 0i32;
+    let mut value_len = std::mem::size_of::<i32>();
+    // SAFETY: key is a NUL-terminated C string; value/value_len point at live
+    // locals sized for one i32; no new value is written (null, 0).
+    let rc = unsafe {
+        libc::sysctlbyname(
+            key.as_ptr(),
+            (&mut value as *mut i32).cast(),
+            &mut value_len,
+            std::ptr::null_mut(),
+            0,
+        )
+    };
+    if rc == 0 && value_len == std::mem::size_of::<i32>() {
+        value
+    } else {
+        0
+    }
+}
+
+#[cfg(not(target_os = "macos"))]
+fn sysctlbyname_i32_host(_name: &str) -> i32 {
+    0
+}
+
+/// `rt_riscv_read_vlenb() -> i32` — RVV vlenb, 0 without the V extension.
+pub fn rt_riscv_read_vlenb(args: &[Value]) -> Result<Value, CompileError> {
+    expect_no_args("rt_riscv_read_vlenb", args)?;
+    Ok(Value::Int(host_probe::rt_riscv_read_vlenb() as i64))
+}
+
+/// `rt_sve_read_vl_bytes() -> i32` — SVE VL via `rdvl`, 0 without SVE.
+pub fn rt_sve_read_vl_bytes(args: &[Value]) -> Result<Value, CompileError> {
+    expect_no_args("rt_sve_read_vl_bytes", args)?;
+    Ok(Value::Int(host_probe::rt_sve_read_vl_bytes() as i64))
+}
+
+/// `rt_riscv_has_v_ext() -> bool`.
+pub fn rt_riscv_has_v_ext(args: &[Value]) -> Result<Value, CompileError> {
+    expect_no_args("rt_riscv_has_v_ext", args)?;
+    Ok(Value::Bool(host_probe::rt_riscv_has_v_ext()))
+}
+
+/// `rt_cuda_sm_version(device: i32) -> i32` — 0 (no CUDA probe), matching
+/// both runtime owners.
+pub fn rt_cuda_sm_version(args: &[Value]) -> Result<Value, CompileError> {
+    if args.len() != 1 {
+        return Err(CompileError::semantic(format!(
+            "rt_cuda_sm_version expects 1 argument, got {}",
+            args.len()
+        )));
+    }
+    Ok(Value::Int(host_probe::rt_cuda_sm_version(args[0].as_int()? as i32) as i64))
+}
+
+#[cfg(test)]
+mod host_probe_tests {
+    use super::*;
+
+    #[test]
+    fn darwin_arm64_matches_target() {
+        let expected = cfg!(all(target_os = "macos", target_arch = "aarch64"));
+        assert!(matches!(rt_is_darwin_arm64(&[]).unwrap(), Value::Bool(b) if b == expected));
+    }
+
+    #[test]
+    fn sysctlbyname_reads_a_real_key_on_darwin_and_zero_elsewhere() {
+        let ncpu = rt_sysctlbyname_i32(&[Value::text("hw.ncpu")]).unwrap();
+        let missing = rt_sysctlbyname_i32(&[Value::text("simple.no.such.key")]).unwrap();
+        let long = rt_sysctlbyname_i32(&[Value::text(&"x".repeat(200))]).unwrap();
+        assert!(matches!(missing, Value::Int(0)));
+        assert!(matches!(long, Value::Int(0)));
+        if cfg!(target_os = "macos") {
+            assert!(matches!(ncpu, Value::Int(n) if n > 0));
+        } else {
+            assert!(matches!(ncpu, Value::Int(0)));
+        }
+        assert!(rt_sysctlbyname_i32(&[Value::Int(1)]).is_err());
+    }
+
+    #[test]
+    fn remaining_probes_answer_like_the_runtime_owner() {
+        assert!(matches!(rt_getauxval(&[Value::Int(0x7fff_ffff)]).unwrap(), Value::Int(0)));
+        assert!(matches!(rt_cuda_sm_version(&[Value::Int(0)]).unwrap(), Value::Int(0)));
+        let vlenb = rt_riscv_read_vlenb(&[]).unwrap();
+        assert!(matches!(vlenb, Value::Int(n) if n >= 0));
+        assert!(matches!(rt_riscv_has_v_ext(&[]).unwrap(), Value::Bool(_)));
+        assert!(rt_is_darwin_arm64(&[Value::Int(1)]).is_err());
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Percent-opacity constant-colour span blend (web renderer row kernel).
 //
@@ -2435,41 +2630,33 @@ pub fn rt_xgetbv(args: &[Value]) -> Result<Value, CompileError> {
 // same source loop compiled three ways.
 // ---------------------------------------------------------------------------
 
-/// One pixel of the percent blend. MUST stay bit-identical to
-/// `blend_opacity` in
-/// `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_primitives.spl`.
-#[inline(always)]
-fn blend_opacity_pct_u32(src: u32, dst: u32, opacity_pct: i32) -> u32 {
-    if opacity_pct >= 100 {
-        return src;
-    }
-    if opacity_pct <= 0 {
-        return dst;
-    }
-    let sr = ((src >> 16) & 255) as i32;
-    let sg = ((src >> 8) & 255) as i32;
-    let sb = (src & 255) as i32;
-    let dr = ((dst >> 16) & 255) as i32;
-    let dg = ((dst >> 8) & 255) as i32;
-    let db = (dst & 255) as i32;
-    let inv = 100 - opacity_pct;
-    let r = (sr * opacity_pct + dr * inv + 50) / 100;
-    let g = (sg * opacity_pct + dg * inv + 50) / 100;
-    let b = (sb * opacity_pct + db * inv + 50) / 100;
-    // Mirrors the Simple `argb` helper EXACTLY
-    // (renderer_foundation.spl:1223), which does not clamp:
-    //     0xFF000000u32 | (r.to_u32() << 16) | (g.to_u32() << 8) | b.to_u32()
-    // Clamping here would be a no-op for every reachable input (channels are
-    // 0..255 and opacity_pct is 0..100 after the early returns above), but
-    // writing it out this way makes the two bit-identical by construction
-    // rather than by argument.
-    0xFF00_0000u32 | ((r as u32) << 16) | ((g as u32) << 8) | (b as u32)
-}
-
+/// The percent blend over a span. MUST stay bit-identical to `blend_opacity`
+/// in `src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_primitives.spl`
+/// and the C kernel `rt_engine2d_blend_const_span_pct_u32`: the percent
+/// becomes a = round(pct*255/100), dst is treated as opaque, and each channel
+/// is Chrome's solid rule round(s*a/255) + ((d*(256-a)) >> 8) (the same
+/// result as `engine2d_blend_pixel_u32(.., true)`). The constant source terms
+/// are hoisted so the loop body is branch-free and widens.
 #[inline(always)]
 fn blend_const_span_pct_scalar(dst: &mut [u32], src: u32, opacity_pct: i32) {
+    if opacity_pct >= 100 {
+        dst.fill(src);
+        return;
+    }
+    if opacity_pct <= 0 {
+        return;
+    }
+    let a = ((opacity_pct as u32) * 255 + 50) / 100;
+    let inv = 256 - a;
+    let sr = (((src >> 16) & 0xFF) * a + 127) / 255;
+    let sg = (((src >> 8) & 0xFF) * a + 127) / 255;
+    let sb = ((src & 0xFF) * a + 127) / 255;
     for d in dst.iter_mut() {
-        *d = blend_opacity_pct_u32(src, *d, opacity_pct);
+        let v = *d;
+        let r = sr + ((((v >> 16) & 0xFF) * inv) >> 8);
+        let g = sg + ((((v >> 8) & 0xFF) * inv) >> 8);
+        let b = sb + (((v & 0xFF) * inv) >> 8);
+        *d = 0xFF00_0000 | (r << 16) | (g << 8) | b;
     }
 }
 
@@ -3138,4 +3325,170 @@ pub fn rt_engine2d_blend_mask_span_u32(args: &[Value]) -> Result<Value, CompileE
     }
     blend_mask_span_dispatch(&mut span, &mask_all[m0..m0 + count], color);
     Ok(pack_u32_array(span))
+}
+
+#[cfg(test)]
+mod vec16u8_tests {
+    use super::*;
+
+    fn vec16(fields: impl Fn(usize) -> Value) -> Value {
+        let mut object_fields = HashMap::with_capacity(VEC16U8_FIELDS.len());
+        for (i, field) in VEC16U8_FIELDS.iter().enumerate() {
+            object_fields.insert((*field).to_string(), fields(i));
+        }
+        Value::Object {
+            class: "Vec16u8".to_string(),
+            fields: Arc::new(object_fields),
+        }
+    }
+
+    fn result_lanes(value: Value) -> [i64; 16] {
+        let Value::Object { class, fields } = value else {
+            panic!("expected Vec16u8 result, got {value:?}");
+        };
+        assert_eq!(class, "Vec16u8");
+        std::array::from_fn(|i| match fields.get(VEC16U8_FIELDS[i]) {
+            Some(Value::Int(n)) => *n,
+            other => panic!("unexpected result lane {:?}: {other:?}", VEC16U8_FIELDS[i]),
+        })
+    }
+
+    fn assert_add_rejects(field: &str, value: Value, expected_error: &str) {
+        let lhs = vec16(|_| Value::UInt { value: 0, width: 8 });
+        let mut fields = match lhs {
+            Value::Object { fields, .. } => (*fields).clone(),
+            _ => unreachable!(),
+        };
+        fields.insert(field.to_string(), value);
+        let lhs = Value::Object {
+            class: "Vec16u8".to_string(),
+            fields: Arc::new(fields),
+        };
+        let rhs = vec16(|_| Value::Int(0));
+        let error = rt_simd_add_u8x16(&[lhs, rhs]).unwrap_err();
+        let message = format!("{error}");
+        assert!(message.contains(expected_error), "unexpected error: {message}");
+    }
+
+    #[test]
+    fn add_accepts_unsigned_u8_fields_across_all_lanes() {
+        let lhs = vec16(|i| Value::UInt {
+            value: if i == 8 { 255 } else { i as u64 },
+            width: 8,
+        });
+        let rhs = vec16(|_| Value::UInt { value: 0, width: 8 });
+
+        let result = rt_simd_add_u8x16(&[lhs, rhs]).unwrap();
+
+        let mut expected = std::array::from_fn(|i| i as i64);
+        expected[8] = 255;
+        assert_eq!(result_lanes(result), expected);
+    }
+
+    #[test]
+    fn add_accepts_mixed_signed_and_unsigned_u8_fields() {
+        let lhs = vec16(|i| {
+            if i % 2 == 0 {
+                Value::Int(i as i64)
+            } else {
+                Value::UInt {
+                    value: i as u64,
+                    width: 8,
+                }
+            }
+        });
+        let rhs = vec16(|_| Value::Int(1));
+
+        assert_eq!(
+            result_lanes(rt_simd_add_u8x16(&[lhs, rhs]).unwrap()),
+            std::array::from_fn(|i| i as i64 + 1)
+        );
+    }
+
+    #[test]
+    fn add_rejects_out_of_range_int_and_unsigned_fields() {
+        assert_add_rejects("u0", Value::Int(-1), "field u0 must be in 0..=255");
+        assert_add_rejects("u0", Value::Int(256), "field u0 must be in 0..=255");
+        assert_add_rejects(
+            "u0",
+            Value::UInt { value: 256, width: 8 },
+            "field u0 must be in 0..=255",
+        );
+        assert_add_rejects(
+            "u0",
+            Value::UInt {
+                value: u64::MAX,
+                width: 8,
+            },
+            "field u0 must be in 0..=255",
+        );
+    }
+
+    #[test]
+    fn add_rejects_non_u8_uint_widths_and_non_integer_fields() {
+        assert_add_rejects(
+            "u0",
+            Value::UInt { value: 1, width: 16 },
+            "field u0 must be an integer",
+        );
+        assert_add_rejects("u0", Value::Bool(true), "field u0 must be an integer");
+    }
+
+    #[test]
+    fn add_rejects_missing_field() {
+        let mut fields = match vec16(|_| Value::Int(0)) {
+            Value::Object { fields, .. } => (*fields).clone(),
+            _ => unreachable!(),
+        };
+        fields.remove("u8_");
+        let lhs = Value::Object {
+            class: "Vec16u8".to_string(),
+            fields: Arc::new(fields),
+        };
+        let rhs = vec16(|_| Value::Int(0));
+        let error = rt_simd_add_u8x16(&[lhs, rhs]).unwrap_err();
+        assert!(format!("{error}").contains("missing field u8_"));
+    }
+}
+
+/// Bugs: simd_f32x4_vec_field_boxed_float32_not_unwrapped_2026-07-20 and
+/// simd_lane_ops_reject_f32_cast_values_2026-08-25. A `Vec4f`/`Vec8f` lane
+/// built from an `f32` value (`x as f32`, a `Float32.value` field) is a
+/// `Value::Float32`; the f32 lane extractor must accept it, not reject it as
+/// "must be a float".
+#[cfg(test)]
+mod f32_lane_value_tests {
+    use super::{rt_simd_fma_f32x8, rt_simd_mul_f32x4, unpack_vec4f, unpack_vec8f};
+    use crate::value::Value;
+    use std::collections::HashMap;
+
+    fn vec_obj(class: &str, names: &[&str], lanes: &[f32]) -> Value {
+        let mut fields = HashMap::new();
+        for (n, v) in names.iter().zip(lanes) {
+            fields.insert((*n).to_string(), Value::Float32(*v));
+        }
+        Value::Object {
+            class: class.to_string(),
+            fields: std::sync::Arc::new(fields),
+        }
+    }
+
+    #[test]
+    fn f32x4_lane_ops_accept_float32_fields() {
+        let xyzw = ["x", "y", "z", "w"];
+        let a = vec_obj("Vec4f", &xyzw, &[1.0, 2.0, 1.0, 2.0]);
+        let b = vec_obj("Vec4f", &xyzw, &[2.0, 2.0, 2.0, 2.0]);
+        let r = rt_simd_mul_f32x4(&[a, b]).expect("Float32 lanes must be accepted");
+        assert_eq!(unpack_vec4f("r", &r).unwrap(), [2.0, 4.0, 2.0, 4.0]);
+    }
+
+    #[test]
+    fn f32x8_lane_ops_accept_float32_fields() {
+        let e = ["e0", "e1", "e2", "e3", "e4", "e5", "e6", "e7"];
+        let a = vec_obj("Vec8f", &e, &[1.0; 8]);
+        let b = vec_obj("Vec8f", &e, &[2.0; 8]);
+        let c = vec_obj("Vec8f", &e, &[0.5; 8]);
+        let r = rt_simd_fma_f32x8(&[a, b, c]).expect("Float32 lanes must be accepted");
+        assert_eq!(unpack_vec8f("r", &r).unwrap(), [2.5; 8]);
+    }
 }

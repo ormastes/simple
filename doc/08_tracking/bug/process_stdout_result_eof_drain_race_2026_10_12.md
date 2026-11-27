@@ -17,3 +17,20 @@ One focused Linux cycle executed actual revised production C bodies with real li
 Production C SHA076b2f537ac007ef49a01c49b09c2cb014d8f2b9aac411da6b2c22be601c3707 and patcha5d96d2a11aeab486bdc9dca52757ac2b5aed2db93c01d76d10674c9e505aeeb derive from immutable36df. Original64651441 and the earlier Windows six-provider three-attempt STOP remain preserved. The current publication owners match that original baseline; unrelated repository changes are not attributed to this native result.
 
 This is not a native SPL-facade, RuntimeValue/SplArray public-spawn, Windows/macOS/BSD, sanitizer, or full-core PASS. The bug remains OPEN and the source fix remains draft. Existing public PID/process-group reuse limits, CString embedded-NUL limits, and stable SIGPIPE-disposition assumptions are explicit. The proposed raw helper remains private and unsafe in the canonical IO owner; existing SOSIX aliases remain the application boundary.
+
+**Revalidated 2026-11-02: still plausible because OPEN. Linux POSIX lifecycle owner regression PASS; native SPL facade and other platform qualification UNEXECUTED. Actual proposal baseline 3; no merged fix commit with a passing regression is cited in this doc.**
+
+## Verification note (2026-11-26, Linux x86_64 lane 3)
+
+Verified on `origin/release/1.0.0` (Linux x86_64):
+
+- Confirmed PR #3345 (`500914bd6ab`) is landed on `release/1.0.0`.
+- `test/02_integration/lib/io/process_stdout_state_spec.spl`: 3/3 PASS via
+  `bootstrap/simple --mode=interpreter`.
+- Added `test/02_integration/runtime/run_process_stdout_lifecycle_native_test.shs`
+  and ran it against the real `src/runtime/runtime_process.c` +
+  `src/runtime/runtime_process_tree.c` (with OS-call fault injection):
+  `posix lifecycle source fixture PASS`.
+- Native-compiled SPL facade execution (`stage2 native-build`) was refused by
+  MIR shard admission due to concurrent P3a bootstrap memory pressure. Status
+  remains `fix-implemented-verification-pending`.

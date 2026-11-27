@@ -9,6 +9,7 @@
 #   bash        - run a shell command (timeout, capture stdout/stderr/exit)
 #   read_file   - real FS read, line-numbered, offset/limit
 #   write_file  - real FS write, refused outside workspace root
+#   edit_file   - exact unique-occurrence string replacement in a workspace file
 #   list_dir    - real directory listing
 #   glob        - simple `*` glob within the workspace
 #   mail_list / mail_read / mail_send      - IMAP/SMTP (infra_mail.spl)
@@ -18,7 +19,7 @@
 # Permission model:
 #   read-only tools (read_file / list_dir / glob / mail_list / mail_read /
 #   storage_ls / storage_get / wiki_search / wiki_read) are auto-allowed
-#   mutating tools (bash / write_file / mail_send / storage_put / wiki_write) require
+#   mutating tools (bash / write_file / edit_file / mail_send / storage_put / wiki_write) require
 #   explicit allow (allow_list or allow_all). With no grant the policy default is "ask"; in non-interactive
 #   mode "ask" resolves to DENY and the model gets a permission-error tool_result
 #   instead of any execution.
@@ -30,12 +31,15 @@
 # Runtime externs
 # ============================================================================
 
-use app.io.mod.{process_run}
+use app.io.mod.{process_run, process_run_timeout}
+use std.nogc_async_mut.sosix.pty.{sosix_pty_native_exec_argv}
+use std.nogc_async_mut.sosix.host_facade.{sosix_which}
 use std.io_runtime.{read_file_text}
+use std.common.encoding.utf8.{text_truncate_bytes}
 use std.io_runtime.{file_write}
 use std.io_runtime.{file_exists}
 use std.io_runtime.{dir_exists}
-use std.io_runtime.{dir_list}
+use std.io_runtime.{dir_list_or_empty}
 use app.llm_caret.infra_mail.{mail_tool_schemas, mail_list, mail_read, mail_send}
 use app.llm_caret.infra_storage.{storage_tool_schemas, storage_ls, storage_get, storage_put}
 use app.llm_caret.infra_wiki.{wiki_tool_schemas, wiki_search, wiki_read, wiki_write}
@@ -96,7 +100,9 @@ fn _json_unescape(s: text) -> text:
             i = i + 1
     out
 
-fn _json_get_str(json: text, key: text) -> text:
+# (found, value): found is false when the key is absent or its value is not a
+# complete JSON string (a tool call cut off mid-value has no closing quote).
+fn _json_find_str(json: text, key: text) -> (bool, text):
     # Do NOT pre-unescape here: the escaped-flag scanner below plus
     # _json_unescape handle JSON escapes correctly. A prior pre-pass that
     # rewrote \" -> " truncated any quoted value (regression, see
@@ -104,30 +110,35 @@ fn _json_get_str(json: text, key: text) -> text:
     val search = _Q() + key + _Q() + ":"
     val idx = _idx(json, search)
     if idx < 0:
-        return ""
-    val after = json.substring(idx + search.len()).trim()
+        return (false, "")
+    val after = json.substring(idx + search.byte_len()).trim()
     if not after.starts_with(_Q()):
-        return ""
+        return (false, "")
     val rest = after.substring(1)
     var end = 0
     var escaped = false
-    while end < rest.len():
-        val ch = rest[end]
+    # Byte scan: quote and backslash are ASCII and never occur inside a
+    # multi-byte UTF-8 sequence, and substring() takes byte offsets.
+    while end < rest.byte_len():
+        val b = rest.byte_at(end)
         if escaped:
             escaped = false
-        elif ch == "\\":
+        elif b == 92:
             escaped = true
-        elif ch == "\"":
-            return _json_unescape(rest.substring(0, end))
+        elif b == 34:
+            return (true, _json_unescape(rest.substring(0, end)))
         end = end + 1
-    ""
+    (false, "")
+
+pub fn _json_get_str(json: text, key: text) -> text:
+    _json_find_str(json, key).1
 
 fn _json_get_int(json: text, key: text, dflt: i64) -> i64:
     val search = _Q() + key + _Q() + ":"
     val idx = _idx(json, search)
     if idx < 0:
         return dflt
-    val after = json.substring(idx + search.len()).trim()
+    val after = json.substring(idx + search.byte_len()).trim()
     var end = 0
     while end < after.len():
         val ch = after.substring(end, end + 1)
@@ -157,10 +168,10 @@ struct ToolResult:
     content: text
     is_error: bool
 
-fn new_tool_result(tool_use_id: text, content: text) -> ToolResult:
+pub fn new_tool_result(tool_use_id: text, content: text) -> ToolResult:
     ToolResult(tool_use_id: tool_use_id, content: content, is_error: false)
 
-fn new_tool_error(tool_use_id: text, content: text) -> ToolResult:
+pub fn new_tool_error(tool_use_id: text, content: text) -> ToolResult:
     ToolResult(tool_use_id: tool_use_id, content: content, is_error: true)
 
 # A model turn: assistant text plus zero or more tool_use requests.
@@ -172,10 +183,10 @@ struct ModelResponse:
     tool_calls: [ToolCall]
     stop_reason: text
 
-fn new_model_text(content: text) -> ModelResponse:
+pub fn new_model_text(content: text) -> ModelResponse:
     ModelResponse(text: content, tool_calls: [], stop_reason: "end_turn")
 
-fn new_model_tools(content: text, calls: [ToolCall]) -> ModelResponse:
+pub fn new_model_tools(content: text, calls: [ToolCall]) -> ModelResponse:
     ModelResponse(text: content, tool_calls: calls, stop_reason: "tool_use")
 
 # ============================================================================
@@ -192,7 +203,7 @@ struct PermissionPolicy:
 fn _normalize_root(root: text) -> text:
     var r = root
     while r.len() > 1 and r.ends_with("/"):
-        r = r.substring(0, r.len() - 1)
+        r = r.substring(0, r.byte_len() - 1)
     r
 
 fn default_policy(workspace_root: text) -> PermissionPolicy:
@@ -204,7 +215,7 @@ fn default_policy(workspace_root: text) -> PermissionPolicy:
         interactive: false
     )
 
-fn allow_all_policy(workspace_root: text) -> PermissionPolicy:
+pub fn allow_all_policy(workspace_root: text) -> PermissionPolicy:
     PermissionPolicy(
         workspace_root: _normalize_root(workspace_root),
         default_mode: "allow",
@@ -213,7 +224,7 @@ fn allow_all_policy(workspace_root: text) -> PermissionPolicy:
         interactive: false
     )
 
-fn policy_with_allow(workspace_root: text, allow_list: [text]) -> PermissionPolicy:
+pub fn policy_with_allow(workspace_root: text, allow_list: [text]) -> PermissionPolicy:
     PermissionPolicy(
         workspace_root: _normalize_root(workspace_root),
         default_mode: "ask",
@@ -228,17 +239,17 @@ fn _list_contains(items: [text], target: text) -> bool:
             return true
     false
 
-fn is_read_only_tool(name: text) -> bool:
+pub fn is_read_only_tool(name: text) -> bool:
     name == "read_file" or name == "list_dir" or name == "glob" or
         name == "mail_list" or name == "mail_read" or
         name == "storage_ls" or name == "storage_get" or
         name == "wiki_search" or name == "wiki_read"
 
-fn is_mutating_tool(name: text) -> bool:
-    name == "bash" or name == "write_file" or name == "mail_send" or name == "storage_put" or
+pub fn is_mutating_tool(name: text) -> bool:
+    name == "bash" or name == "write_file" or name == "edit_file" or name == "mail_send" or name == "storage_put" or
         name == "wiki_write"
 
-fn is_known_tool(name: text) -> bool:
+pub fn is_known_tool(name: text) -> bool:
     is_read_only_tool(name) or is_mutating_tool(name)
 
 # Anthropic-shape tool definitions (`name` / `description` / `input_schema`)
@@ -248,12 +259,12 @@ fn tool_schemas() -> [text]:
     val q = _Q()
     val obj_schema = _LB() + q + "type" + q + ": " + q + "object" + q + ", " + q + "properties" + q + ": " + _LB() + _RB() + _RB()
     var base: [text] = []
-    for name in ["bash", "read_file", "write_file", "list_dir", "glob"]:
+    for name in ["bash", "read_file", "write_file", "edit_file", "list_dir", "glob"]:
         base.push(_LB() + q + "name" + q + ": " + q + name + q + ", " + q + "description" + q + ": " + q + "workspace tool " + name + q + ", " + q + "input_schema" + q + ": " + obj_schema + _RB())
     base + mail_tool_schemas() + storage_tool_schemas() + wiki_tool_schemas()
 
 # Returns "allow" | "deny" | "ask".
-fn permission_decision(policy: PermissionPolicy, name: text) -> text:
+pub fn permission_decision(policy: PermissionPolicy, name: text) -> text:
     if policy.default_mode != "allow" and policy.default_mode != "deny" and policy.default_mode != "ask":
         return "deny"
     if is_read_only_tool(name):
@@ -295,9 +306,9 @@ fn guard_path(policy: PermissionPolicy, path: text) -> (text, text):
 val MAX_TOOL_OUTPUT = 30000
 
 fn _truncate(s: text, max_len: i64) -> text:
-    if s.len() <= max_len:
+    if s.byte_len() <= max_len:
         return s
-    s.substring(0, max_len) + "\n[output truncated: " + s.len().to_text() + " bytes total]"
+    text_truncate_bytes(s, max_len) + "\n[output truncated: " + s.byte_len().to_text() + " bytes total]"
 
 fn _pad_left(s: text, width: i64) -> text:
     var r = s
@@ -312,18 +323,35 @@ fn _sq(s: text) -> text:
 # Executors (only reachable through run_tool)
 # ============================================================================
 
-fn exec_bash(input: text) -> ToolResult:
+# bash runs from the workspace root, the same root read_file/write_file resolve
+# against; without the `cd` it inherited caret's own cwd, so an agent's relative
+# commands (`bin/simple test ...`, `git diff`) ran in a different tree.
+fn exec_bash(workspace_root: text, input: text) -> ToolResult:
     val command = _json_get_str(input, "command")
     if command == "":
         return new_tool_error("", "bash: missing required 'command'")
     var timeout_ms = _json_get_int(input, "timeout_ms", 120000)
     if timeout_ms <= 0:
         timeout_ms = 120000
-    var secs = timeout_ms / 1000
-    if secs < 1:
-        secs = 1
-    val wrapped = "timeout " + secs.to_text() + " /bin/sh -c " + _sq(command)
-    val (out, errout, code) = process_run("/bin/sh", ["-c", wrapped])
+    # The shell comes from the SOSIX PTY facade (native: /bin/sh or cmd.exe);
+    # the timeout is enforced by the process runner, not a `timeout` binary.
+    val probe = sosix_pty_native_exec_argv("")
+    if not probe.is_ok():
+        return new_tool_error("", "bash: no native shell on this platform")
+    val native_shell: text = probe.unwrap()[0]
+    # Agent commands are POSIX: on Windows prefer `sh` on PATH (as Caret's
+    # panes do) and fall back to the facade's cmd.exe.
+    val posix = native_shell != "cmd.exe" or sosix_which("sh") != ""
+    var wrapped = command
+    if workspace_root != "":
+        if posix:
+            wrapped = "cd " + _sq(workspace_root) + " && " + command
+        else:
+            wrapped = "cd /d \"" + workspace_root + "\" && " + command
+    var argv = sosix_pty_native_exec_argv(wrapped).unwrap_or([])
+    if posix and argv[0] == "cmd.exe":
+        argv = ["sh", "-c", wrapped]
+    val (out, errout, code) = process_run_timeout(argv[0], argv[1:], timeout_ms)
     val stdout = out ?? ""
     val stderr = errout ?? ""
     var content = stdout
@@ -373,6 +401,45 @@ fn exec_write_file(policy: PermissionPolicy, input: text) -> ToolResult:
         return new_tool_error("", "write_file: failed to write " + path)
     new_tool_result("", "wrote " + content.len().to_text() + " bytes to " + path)
 
+fn _count_occurrences(s: text, needle: text) -> i64:
+    var n = 0
+    var pos = 0
+    while pos <= s.byte_len() - needle.byte_len():
+        val i = _idx(s.substring(pos), needle)
+        if i < 0:
+            break
+        n = n + 1
+        pos = pos + i + needle.byte_len()
+    n
+
+fn exec_edit_file(policy: PermissionPolicy, input: text) -> ToolResult:
+    val path = _json_get_str(input, "path")
+    val (full, err) = guard_path(policy, path)
+    if err != "":
+        return new_tool_error("", "edit_file: " + err)
+    if not file_exists(full):
+        return new_tool_error("", "edit_file: file not found: " + path)
+    val old_text = _json_get_str(input, "old_text")
+    # A missing or cut-off new_text must not be read as "" -- that silently
+    # DELETED the matched text (observed: "replaced 1 occurrence (462 -> 0 chars)").
+    val new_found = _json_find_str(input, "new_text")
+    if not new_found.0:
+        return new_tool_error("", "edit_file: new_text is missing or not a complete JSON string; nothing was changed")
+    val new_text = new_found.1
+    if old_text == "":
+        return new_tool_error("", "edit_file: old_text must not be empty")
+    val raw = read_file_text(full)
+    val n = _count_occurrences(raw, old_text)
+    if n == 0:
+        return new_tool_error("", "edit_file: old_text not found in " + path)
+    if n > 1:
+        return new_tool_error("", "edit_file: old_text occurs " + n.to_text() + " times in " + path + "; include more surrounding lines so it is unique")
+    val at = _idx(raw, old_text)
+    val updated = raw.substring(0, at) + new_text + raw.substring(at + old_text.byte_len())
+    if not file_write(full, updated):
+        return new_tool_error("", "edit_file: failed to write " + path)
+    new_tool_result("", "edited " + path + ": replaced 1 occurrence (" + old_text.len().to_text() + " -> " + new_text.len().to_text() + " chars)")
+
 fn exec_list_dir(policy: PermissionPolicy, input: text) -> ToolResult:
     var path = _json_get_str(input, "path")
     if path == "":
@@ -382,7 +449,7 @@ fn exec_list_dir(policy: PermissionPolicy, input: text) -> ToolResult:
         return new_tool_error("", "list_dir: " + err)
     if not dir_exists(full):
         return new_tool_error("", "list_dir: directory not found: " + path)
-    val entries = dir_list(full) ?? []
+    val entries = dir_list_or_empty(full) ?? []
     new_tool_result("", _truncate(entries.join("\n"), MAX_TOOL_OUTPUT))
 
 # Minimal `*` glob matcher on a single name.
@@ -424,7 +491,7 @@ fn exec_glob(policy: PermissionPolicy, input: text) -> ToolResult:
         return new_tool_error("", "glob: " + err)
     if not dir_exists(full):
         return new_tool_error("", "glob: directory not found: " + path)
-    val entries = dir_list(full) ?? []
+    val entries = dir_list_or_empty(full) ?? []
     var matches: [text] = []
     for e in entries:
         if _glob_match(pattern, e):
@@ -458,11 +525,13 @@ fn run_tool(policy: PermissionPolicy, call: ToolCall) -> ToolResult:
     # decision == "allow": dispatch to the real executor
     var res = new_tool_error(call.id, "unknown tool: " + call.name)
     if call.name == "bash":
-        res = exec_bash(call.input)
+        res = exec_bash(policy.workspace_root, call.input)
     elif call.name == "read_file":
         res = exec_read_file(policy, call.input)
     elif call.name == "write_file":
         res = exec_write_file(policy, call.input)
+    elif call.name == "edit_file":
+        res = exec_edit_file(policy, call.input)
     elif call.name == "list_dir":
         res = exec_list_dir(policy, call.input)
     elif call.name == "glob":

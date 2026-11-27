@@ -20,6 +20,12 @@
 #endif
 
 extern int64_t rt_thread_spawn_isolated(int64_t closure, int64_t data);
+extern int64_t rt_thread_spawn_isolated_kind(int64_t kind, int64_t closure, int64_t data);
+extern int64_t rt_thread_spawn_isolated_with_args_kind(int64_t kind, int64_t closure, int64_t data1, int64_t data2);
+
+/* runtime_thread.c RT_WORKER_CLOSURE_*: the spawner states the word kind. */
+#define KIND_ADDRESS 1
+#define KIND_VALUE 2
 extern int64_t rt_thread_join(int64_t handle);
 extern int64_t rt_thread_is_done(int64_t handle);
 extern int64_t rt_thread_id(int64_t handle);
@@ -47,10 +53,42 @@ static int64_t slow_entry(int64_t data) {
     return data;
 }
 
+/* Two-argument direct worker (record [0] = entry, [1] = DIRECT_MARKER). */
+static int64_t direct2_entry(int64_t a, int64_t b) {
+    return a + b;
+}
+
 /* Direct-function record: [0] = entry(data), [1] = DIRECT_MARKER. */
 static int64_t direct_entry(int64_t data) {
     return data + 8;
 }
+
+extern int64_t rt_pool_state_create_v1(int64_t capacity);
+extern int64_t rt_pool_state_try_submit_i64_v1(int64_t state, int64_t entry, int64_t input);
+extern int64_t rt_pool_state_try_submit_i64_kind_v1(int64_t state, int64_t kind, int64_t entry, int64_t input);
+extern int64_t rt_pool_task_join_i64_v1(int64_t task);
+extern int64_t rt_pool_task_release_i64_v1(int64_t task);
+extern int64_t rt_pool_state_close_v1(int64_t state);
+extern int64_t rt_pool_state_destroy_v1(int64_t state);
+
+static int64_t pool_plus_one(int64_t input) { return input + 1; }
+static int64_t pool_plus_thousand(int64_t input) { return input + 1000; }
+
+#ifdef _WIN32
+static int map_fixed_page(uintptr_t addr) {
+    return (uintptr_t)VirtualAlloc((void*)addr, 4096, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE) == addr;
+}
+static void unmap_page(uintptr_t addr) { VirtualFree((void*)addr, 0, MEM_RELEASE); }
+#else
+#include <sys/mman.h>
+static int map_fixed_page(uintptr_t addr) {
+    void* p = mmap((void*)addr, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) return 0;
+    if ((uintptr_t)p != addr) { munmap(p, 4096); return 0; }
+    return 1;
+}
+static void unmap_page(uintptr_t addr) { munmap((void*)addr, 4096); }
+#endif
 
 int main(void) {
     static int64_t record[2];
@@ -59,6 +97,9 @@ int main(void) {
     record[1] = 0;
     direct[0] = (int64_t)(intptr_t)&direct_entry;
     direct[1] = DIRECT_MARKER;
+    static int64_t direct2[2];
+    direct2[0] = (int64_t)(intptr_t)&direct2_entry;
+    direct2[1] = DIRECT_MARKER;
 
     /* A real address of this process is never the int-tagged (addr << 3)
      * word, including above 2^47 on aarch64 PIE and with a top-byte tag. */
@@ -68,8 +109,9 @@ int main(void) {
     assert(rt_native_word_exceeds_user_va(UINT64_C(0x0000aaaaaaab0000) << 3));
 #endif
 
-    /* thread.spl shape: (closure, nil). nil must not be taken as the closure. */
-    int64_t h1 = rt_thread_spawn_isolated((int64_t)(intptr_t)record, NIL);
+    /* thread.spl shape: (closure, nil), the closure a heap-tagged value. nil
+     * must not be taken as the closure. */
+    int64_t h1 = rt_thread_spawn_isolated((int64_t)(intptr_t)record | 1, NIL);
     assert(h1 != 0);
     assert(rt_thread_join(h1) == 42);
     assert(g_seen_env == (int64_t)(intptr_t)record);
@@ -79,21 +121,21 @@ int main(void) {
     assert(rt_thread_join(h1) == NIL);
 
     /* A second spawn must not reuse h1's slot while h1 is unfreed. */
-    int64_t h2 = rt_thread_spawn_isolated((int64_t)(intptr_t)direct, 7 << 3);
+    int64_t h2 = rt_thread_spawn_isolated_kind(KIND_ADDRESS, (int64_t)(intptr_t)direct, 7 << 3);
     assert(h2 != 0 && h2 != h1);
     rt_thread_free(h1);
     assert(rt_thread_join(h2) == (7 << 3) + 8);
     rt_thread_free(h2);
 
     /* Legacy (0, closure) argument order is still accepted. */
-    int64_t h3 = rt_thread_spawn_isolated(0, (int64_t)(intptr_t)record);
+    int64_t h3 = rt_thread_spawn_isolated(0, (int64_t)(intptr_t)record | 1);
     assert(h3 != 0);
     assert(rt_thread_join(h3) == 42);
     assert(g_seen_data == NIL);
     rt_thread_free(h3);
 
     /* free without join detaches; let the worker finish first. */
-    int64_t h4 = rt_thread_spawn_isolated((int64_t)(intptr_t)direct, 0);
+    int64_t h4 = rt_thread_spawn_isolated_kind(KIND_ADDRESS, (int64_t)(intptr_t)direct, 0);
     assert(h4 != 0);
     while (rt_thread_is_done(h4) == 0) SLEEP_MS(1);
     assert(rt_thread_id(h4) != 0);
@@ -105,13 +147,97 @@ int main(void) {
     static int64_t slow[2];
     slow[0] = (int64_t)(intptr_t)&slow_entry;
     slow[1] = DIRECT_MARKER;
-    int64_t h5 = rt_thread_spawn_isolated((int64_t)(intptr_t)slow, 9 << 3);
+    int64_t h5 = rt_thread_spawn_isolated_kind(KIND_ADDRESS, (int64_t)(intptr_t)slow, 9 << 3);
     assert(h5 != 0);
     rt_thread_free(h5);
     assert(rt_thread_join(h5) == 0);
     for (int i = 0; i < 2000 && g_slow_finished == 0; i++) SLEEP_MS(1);
     assert(g_slow_finished == (9 << 3));
     SLEEP_MS(20);
+
+    /* Explicit worker-closure kind (isolated_thread_raw_worker_argument_
+     * heuristic_flake_2026-08-12): the spawner's kind decides, never the
+     * word's value. VALUE + TAG_INT (addr << 3) is a raw native record with
+     * raw i64 args, at ANY address -- no VA cutoff. */
+    int64_t h6 = rt_thread_spawn_isolated_kind(KIND_VALUE, (int64_t)(intptr_t)record << 3, 5 << 3);
+    assert(h6 != 0);
+    assert(rt_thread_join(h6) == 42);
+    assert(g_seen_env == (int64_t)(intptr_t)record);
+    assert(g_seen_data == 5);
+    rt_thread_free(h6);
+    /* The same record under ADDRESS keeps RuntimeValue args. */
+    int64_t h7 = rt_thread_spawn_isolated_kind(KIND_ADDRESS, (int64_t)(intptr_t)record, 5 << 3);
+    assert(h7 != 0);
+    assert(rt_thread_join(h7) == 42);
+    assert(g_seen_data == (5 << 3));
+    rt_thread_free(h7);
+    /* Two-argument workers: raw args decoded under VALUE + TAG_INT. */
+    int64_t h8 = rt_thread_spawn_isolated_with_args_kind(KIND_VALUE, (int64_t)(intptr_t)direct2 << 3, 10 << 3, 32 << 3);
+    assert(h8 != 0);
+    assert(rt_thread_join(h8) == 42);
+    rt_thread_free(h8);
+    int64_t h9 = rt_thread_spawn_isolated_with_args_kind(KIND_ADDRESS, (int64_t)(intptr_t)direct2, 10, 32);
+    assert(h9 != 0);
+    assert(rt_thread_join(h9) == 42);
+    rt_thread_free(h9);
+    /* Rejections: unknown kinds, non-callable value tags, null-page payloads,
+     * and "addresses" above the user-VA ceiling. */
+    assert(rt_thread_spawn_isolated_kind(0, (int64_t)(intptr_t)record, NIL) == 0);
+    assert(rt_thread_spawn_isolated_kind(3, (int64_t)(intptr_t)record, NIL) == 0);
+    assert(rt_thread_spawn_isolated_kind(KIND_VALUE, NIL, NIL) == 0);
+    assert(rt_thread_spawn_isolated_kind(KIND_VALUE, (int64_t)(intptr_t)record | 2, NIL) == 0);
+    assert(rt_thread_spawn_isolated_kind(KIND_VALUE, 4095 << 3, NIL) == 0);
+    assert(rt_thread_spawn_isolated_kind(KIND_ADDRESS, (int64_t)(UINT64_C(0x00ff000000000000)), NIL) == 0);
+    assert(rt_thread_spawn_isolated_with_args_kind(7, (int64_t)(intptr_t)direct2, 1, 2) == 0);
+
+    /* Pool v1 function values follow the submitter's declared kind
+     * (pool_native_function_payload_value_heuristic_2026-11-06). Records at
+     * A and A << 3: the word A << 3 is both the int-tagged value of the
+     * record at A and the address of the record at A << 3. */
+    {
+        uintptr_t low = 0, high = 0;
+        for (uintptr_t base = 0x10030000u; base < 0x70000000u && !high; base += 0x01000000u) {
+            if (!map_fixed_page(base)) continue;
+            if (!map_fixed_page(base << 3)) { unmap_page(base); continue; }
+            low = base;
+            high = base << 3;
+        }
+        assert(high != 0);
+        ((int64_t*)low)[0] = (int64_t)(intptr_t)pool_plus_one;
+        ((int64_t*)low)[1] = DIRECT_MARKER;
+        ((int64_t*)high)[0] = (int64_t)(intptr_t)pool_plus_thousand;
+        ((int64_t*)high)[1] = DIRECT_MARKER;
+        static int64_t heap_rec[2];
+        heap_rec[0] = (int64_t)(intptr_t)pool_plus_one;
+        heap_rec[1] = DIRECT_MARKER;
+        int64_t ps = rt_pool_state_create_v1(64);
+        assert(ps != 0);
+        /* 1024 tasks through the legacy (VALUE) entry and 1024 through the
+         * kind entry, mixing the dual-decodable word with ordinary records. */
+        for (int64_t i = 0; i < 1024; i++) {
+            int64_t word = (i % 2) ? (int64_t)high : ((int64_t)(intptr_t)heap_rec | 1);
+            int64_t t = rt_pool_state_try_submit_i64_v1(ps, word, i);
+            assert(t > 0);
+            assert(rt_pool_task_join_i64_v1(t) == i + 1);
+            assert(rt_pool_task_release_i64_v1(t) == 1);
+        }
+        for (int64_t i = 0; i < 1024; i++) {
+            int64_t kind = (i % 3 == 2) ? KIND_ADDRESS : KIND_VALUE;
+            int64_t word = (i % 3 == 0) ? ((int64_t)(intptr_t)heap_rec << 3) : (int64_t)high;
+            int64_t want = (i % 3 == 2) ? i + 1000 : i + 1;
+            int64_t t = rt_pool_state_try_submit_i64_kind_v1(ps, kind, word, i);
+            assert(t > 0);
+            assert(rt_pool_task_join_i64_v1(t) == want);
+            assert(rt_pool_task_release_i64_v1(t) == 1);
+        }
+        assert(rt_pool_state_try_submit_i64_kind_v1(ps, 0, (int64_t)high, 1) == -3);
+        assert(rt_pool_state_try_submit_i64_kind_v1(ps, 3, (int64_t)high, 1) == -3);
+        assert(rt_pool_state_try_submit_i64_kind_v1(ps, KIND_VALUE, (int64_t)(intptr_t)heap_rec | 2, 1) == -3);
+        assert(rt_pool_state_close_v1(ps) >= 0);
+        assert(rt_pool_state_destroy_v1(ps) >= 0);
+        unmap_page(low);
+        unmap_page(high);
+    }
 
     puts("rt_thread_owner_contract_selfcheck: ok");
     return 0;

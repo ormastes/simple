@@ -17,6 +17,16 @@ impl<'a> Parser<'a> {
         Ok(())
     }
 
+    fn push_brace_warning(&mut self, message: String) {
+        self.error_hints.push(crate::error_recovery::ErrorHint {
+            level: crate::error_recovery::ErrorHintLevel::Warning,
+            message,
+            span: self.previous.span,
+            suggestion: Some("{{ and }}".to_string()),
+            help: None,
+        });
+    }
+
     pub(super) fn parse_primary_literal(&mut self) -> Result<Expr, ParseError> {
         match &self.current.kind.clone() {
             TokenKind::Integer(n) => {
@@ -54,6 +64,14 @@ impl<'a> Parser<'a> {
                 self.reject_detached_path_suffix()?;
                 Ok(Expr::String(s))
             }
+            TokenKind::CharLit(c) => {
+                // Char literal (SIMPLE_CHAR_LITERAL_LEXER gate): a char is a
+                // one-scalar string in the seed (see hir control.rs CHAR/STRING
+                // equality), so it lowers to the same node legacy `'x'` did.
+                let s = c.to_string();
+                self.advance();
+                Ok(Expr::String(s))
+            }
             TokenKind::TypedString(s, suffix) => {
                 // String with unit suffix: "127.0.0.1"_ip
                 let s = s.clone();
@@ -85,6 +103,7 @@ impl<'a> Parser<'a> {
                 self.advance();
                 self.reject_detached_path_suffix()?;
                 let mut result_parts = Vec::new();
+                let mut bad_holes: Vec<String> = Vec::new();
                 let parse_complete_expr = |source: &str| {
                     let mut parser = Parser::new_expression(source);
                     match parser.parse_expression() {
@@ -102,7 +121,8 @@ impl<'a> Parser<'a> {
                                 result_parts.push(FStringPart::Expr(expr));
                             } else {
                                 // Keep brace-bearing regex/CSS text compatible.
-                                result_parts.push(FStringPart::Literal(format!("{{{}}}", expr_str)));
+                                bad_holes.push(expr_str.clone());
+                                literalize_braced(&expr_str, &mut result_parts, &parse_complete_expr);
                             }
                         }
                         FStringToken::ExprWithFormat(expr_str, format_spec) => {
@@ -116,11 +136,24 @@ impl<'a> Parser<'a> {
                                 if let Some(expr) = parse_complete_expr(&complete) {
                                     result_parts.push(FStringPart::Expr(expr));
                                 } else {
-                                    result_parts.push(FStringPart::Literal(format!("{{{}}}", complete)));
+                                    bad_holes.push(complete.clone());
+                                    literalize_braced(&complete, &mut result_parts, &parse_complete_expr);
                                 }
                             }
                         }
                     }
+                }
+                for hole in bad_holes {
+                    self.push_brace_warning(format!(
+                        "{}: `{{{}}}` in string literal is not a valid interpolation expression and is kept as literal text; {}",
+                        crate::lexer::strings::BRACE_WARNING_CODE,
+                        hole,
+                        crate::lexer::strings::BRACE_ESCAPE_HINT
+                    ));
+                }
+                let lexed: Vec<String> = std::mem::take(&mut self.lexer.brace_warnings);
+                for msg in lexed {
+                    self.push_brace_warning(msg);
                 }
                 // Extract const_keys from placeholders and create TypeMeta
                 let const_keys = extract_fstring_keys(&result_parts);
@@ -163,4 +196,51 @@ impl<'a> Parser<'a> {
             )),
         }
     }
+}
+
+/// A `{...}` hole that is not a complete expression (e.g. the dict-like text
+/// `{k: 1, d: "{d}"}`) stays literal, but any complete `{expr}` holes nested
+/// inside it are still interpolated.
+fn literalize_braced(
+    inner: &str,
+    out: &mut Vec<FStringPart>,
+    parse: &dyn Fn(&str) -> Option<Expr>,
+) {
+    let mut lit = String::from("{");
+    let mut chars = inner.char_indices().peekable();
+    while let Some((i, c)) = chars.next() {
+        if c == '{' {
+            let mut depth = 1;
+            let mut end = None;
+            for (j, d) in inner[i + 1..].char_indices() {
+                match d {
+                    '{' => depth += 1,
+                    '}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            end = Some(i + 1 + j);
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            if let Some(end) = end {
+                let hole = &inner[i + 1..end];
+                if let Some(expr) = parse(hole) {
+                    if !lit.is_empty() {
+                        out.push(FStringPart::Literal(std::mem::take(&mut lit)));
+                    }
+                    out.push(FStringPart::Expr(expr));
+                    while chars.peek().is_some_and(|&(k, _)| k <= end) {
+                        chars.next();
+                    }
+                    continue;
+                }
+            }
+        }
+        lit.push(c);
+    }
+    lit.push('}');
+    out.push(FStringPart::Literal(lit));
 }

@@ -1,0 +1,115 @@
+# Explicit-state presentation plans and checked native viewport transactions.
+# The API publishes returned state only on success, or quarantines uncertainty
+# using the existing WindowGeometryUpdate policy. No hidden process is closed.
+use os.apps.smux.service.{ServiceState}
+use os.apps.smux.contract.{MuxPanePresentation}
+use os.apps.smux.pane_presentation.{pane_presentation, pane_title_valid, window_store_presentation}
+use os.apps.smux.window_layout_service.{WindowGeometryUpdate, geometry_failure,
+    apply_window_viewports, commit_window_geometry, window_content_valid, arrange_window_plan}
+use std.common.contracts.mux.execution_v1.{MuxBorderV1, MuxBorderStatusV1}
+
+fn presentation_target(st: ServiceState, session_id: text, window_id: text, pane_id: text) -> int:
+    val wi = st.find_window_idx(window_id)
+    val pi = st.find_pane_idx(pane_id)
+    if wi < 0 or pi < 0: return -1
+    val pane = st.get_pane(pi).pane
+    if st.get_window(wi).session_id != session_id or pane.session_id != session_id or pane.window_id != window_id:
+        return -1
+    return wi
+
+fn presentation_plan(st: ServiceState, wi: int, entry: MuxPanePresentation) -> Result<ServiceState, text>:
+    val window = st.get_window(wi)
+    val saved = window_store_presentation(window, entry)
+    if saved.is_err(): return Err(saved.unwrap_err())
+    val planned = st.replace_window(wi, saved.unwrap())
+    if not window_content_valid(planned, window.session_id, window.id):
+        return Err("presentation leaves no child content viewport")
+    return apply_window_viewports(planned, window.session_id, window.id)
+
+fn presentation_commit(before: ServiceState, planned: Result<ServiceState, text>, session_id: text, window_id: text) -> WindowGeometryUpdate:
+    if planned.is_err(): return geometry_failure(before, planned.unwrap_err())
+    return commit_window_geometry(before, planned.unwrap(), session_id, window_id)
+
+pub fn set_pane_title_plan(before: ServiceState, session_id: text, window_id: text, pane_id: text, title: text) -> Result<ServiceState, text>:
+    val wi = presentation_target(before, session_id, window_id, pane_id)
+    if wi < 0: return Err("unknown pane: " + pane_id)
+    if not pane_title_valid(title): return Err("pane title contains controls or exceeds 1024 bytes")
+    val prior = pane_presentation(before.get_window(wi), pane_id)
+    return presentation_plan(before, wi, MuxPanePresentation(pane_id: pane_id, title: title,
+        hidden: prior.hidden, border: prior.border, status: prior.status))
+
+pub fn set_pane_title_state(before: ServiceState, session_id: text, window_id: text, pane_id: text, title: text) -> WindowGeometryUpdate:
+    return presentation_commit(before, set_pane_title_plan(before, session_id, window_id, pane_id, title), session_id, window_id)
+
+pub fn set_pane_border_plan(before: ServiceState, session_id: text, window_id: text, pane_id: text, border: MuxBorderV1) -> Result<ServiceState, text>:
+    val wi = presentation_target(before, session_id, window_id, pane_id)
+    if wi < 0: return Err("unknown pane: " + pane_id)
+    val prior = pane_presentation(before.get_window(wi), pane_id)
+    return presentation_plan(before, wi, MuxPanePresentation(pane_id: pane_id, title: prior.title,
+        hidden: prior.hidden, border: border, status: prior.status))
+
+pub fn set_pane_border_state(before: ServiceState, session_id: text, window_id: text, pane_id: text, border: MuxBorderV1) -> WindowGeometryUpdate:
+    return presentation_commit(before, set_pane_border_plan(before, session_id, window_id, pane_id, border), session_id, window_id)
+
+pub fn set_pane_border_status_plan(before: ServiceState, session_id: text, window_id: text, pane_id: text, status: MuxBorderStatusV1) -> Result<ServiceState, text>:
+    val wi = presentation_target(before, session_id, window_id, pane_id)
+    if wi < 0: return Err("unknown pane: " + pane_id)
+    val prior = pane_presentation(before.get_window(wi), pane_id)
+    return presentation_plan(before, wi, MuxPanePresentation(pane_id: pane_id, title: prior.title,
+        hidden: prior.hidden, border: prior.border, status: status))
+
+pub fn set_pane_border_status_state(before: ServiceState, session_id: text, window_id: text, pane_id: text, status: MuxBorderStatusV1) -> WindowGeometryUpdate:
+    return presentation_commit(before, set_pane_border_status_plan(before, session_id, window_id, pane_id, status), session_id, window_id)
+
+pub fn hide_pane_plan(before: ServiceState, session_id: text, window_id: text, pane_id: text) -> Result<ServiceState, text>:
+    val wi = presentation_target(before, session_id, window_id, pane_id)
+    if wi < 0: return Err("unknown pane: " + pane_id)
+    val window = before.get_window(wi)
+    val prior = pane_presentation(window, pane_id)
+    if prior.hidden: return Ok(before)
+    var survivor = ""
+    var i = 0
+    while i < before.pane_count:
+        val pane = before.get_pane(i).pane
+        if pane.session_id == session_id and pane.window_id == window_id and pane.id != pane_id:
+            if survivor == "" and not pane_presentation(window, pane.id).hidden: survivor = pane.id
+        i = i + 1
+    if survivor == "": return Err("cannot hide last visible pane")
+    val entry = MuxPanePresentation(pane_id: pane_id, title: prior.title,
+        hidden: true, border: prior.border, status: prior.status)
+    val saved = window_store_presentation(window, entry)
+    if saved.is_err(): return Err(saved.unwrap_err())
+    val next_window = if window.zoom_pane == pane_id: saved.unwrap().with_zoom("") else: saved.unwrap()
+    var changed = before.replace_window(wi, next_window)
+    if before.get_pane(before.find_pane_idx(pane_id)).focus:
+        i = 0
+        while i < changed.pane_count:
+            val record = changed.get_pane(i)
+            if record.pane.session_id == session_id and record.pane.window_id == window_id:
+                changed = changed.replace_pane(i, record.with_focus(record.pane.id == survivor))
+            i = i + 1
+    return apply_window_viewports(changed, session_id, window_id)
+
+pub fn hide_pane_state(before: ServiceState, session_id: text, window_id: text, pane_id: text) -> WindowGeometryUpdate:
+    return presentation_commit(before, hide_pane_plan(before, session_id, window_id, pane_id), session_id, window_id)
+
+pub fn show_pane_plan(before: ServiceState, session_id: text, window_id: text, pane_id: text) -> Result<ServiceState, text>:
+    val wi = presentation_target(before, session_id, window_id, pane_id)
+    if wi < 0: return Err("unknown pane: " + pane_id)
+    val prior = pane_presentation(before.get_window(wi), pane_id)
+    if not prior.hidden: return Ok(before)
+    return presentation_plan(before, wi, MuxPanePresentation(pane_id: pane_id, title: prior.title,
+        hidden: false, border: prior.border, status: prior.status))
+
+pub fn show_pane_state(before: ServiceState, session_id: text, window_id: text, pane_id: text) -> WindowGeometryUpdate:
+    return presentation_commit(before, show_pane_plan(before, session_id, window_id, pane_id), session_id, window_id)
+
+pub fn rebalance_window_plan(before: ServiceState, session_id: text, window_id: text) -> Result<ServiceState, text>:
+    val wi = before.find_window_idx(window_id)
+    if wi < 0 or before.get_window(wi).session_id != session_id: return Err("unknown window: " + window_id)
+    val window = before.get_window(wi)
+    val layout = if window.layout == "manual": "even-horizontal" else: window.layout
+    return arrange_window_plan(before, session_id, window_id, layout, window.canvas_cols, window.canvas_rows)
+
+pub fn rebalance_window_state(before: ServiceState, session_id: text, window_id: text) -> WindowGeometryUpdate:
+    return presentation_commit(before, rebalance_window_plan(before, session_id, window_id), session_id, window_id)

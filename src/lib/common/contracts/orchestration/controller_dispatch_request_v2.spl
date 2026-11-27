@@ -1,0 +1,128 @@
+# Untrusted resolved dispatch envelope, not an execution grant or host receipt.
+# Common checks canonical wire shape and immutable bindings only. The actual
+# consumer MUST decode retained platform request bytes, recompute the semantic
+# request digest and verify ALL action-specific signed grants/approvals against
+# protected service-owned snapshots/current clocks before any execution effect.
+use std.common.contracts.orchestration.assignment_v1.*
+use std.common.contracts.orchestration.host_reservation_codec_v1.*
+use std.common.contracts.container.execution_v2.*
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.common.contracts.distributed_control_codec_v2.{distributed_encode_operation_v2, distributed_decode_operation_v2}
+use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
+use std.common.contracts.distributed_authority_codec_v2.*
+use std.common.sdn.value.{SdnValue, SdnSpan}
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.contracts.orchestration.resource_v1.{as_dict, only_known}
+use std.common.string_core.str_len
+
+pub struct ControllerDispatchRequestV2:
+    binding: ControllerAssignmentBindingV1
+    operation: OperationEnvelopeV2
+    execution: ContainerExecutionRequestV2
+    assignment_signed: DistributedSignedGrantV2
+    assignment_approval: DistributedSignedApprovalV2
+    execution_signed: DistributedSignedGrantV2
+    execution_approval: DistributedSignedApprovalV2
+    prepare_signed: DistributedSignedGrantV2
+    prepare_approval: DistributedSignedApprovalV2
+    host_execution_signed: DistributedSignedGrantV2
+    host_execution_approval: DistributedSignedApprovalV2
+
+pub fn controller_dispatch_request_encode_v2(request: ControllerDispatchRequestV2) -> Result<text, text>:
+    # Bound opaque bytes before copying/escaping them into the outer envelope.
+    val body_bytes = str_len(request.execution.request_bytes)
+    if body_bytes == 0 or body_bytes > 1048576: return Err("controller-dispatch-body-size")
+    val binding = request.binding
+    val host_match = host_reservation_match_operation_v1(binding.host_intent, binding.host_operation)?
+    val assignment_match = controller_assignment_match_v1(binding, request.operation)?
+    val plan = request.execution.plan
+    val scope = ContainerHostScopeV2(physical_host_id: plan.physical_host_id, service_scope_id: plan.service_scope_id,
+        boot_id: plan.boot_id, provider_generation: plan.provider_generation, native_machine_id: plan.native_machine_id,
+        continuity_mode: plan.continuity_mode, continuity_id: plan.continuity_id)
+    if plan.workload_uid != binding.workload_uid or plan.operation_id != binding.host_operation.id:
+        return Err("controller-dispatch-workload-operation-mismatch")
+    if plan.physical_host_id != binding.host_intent.physical_host_id or
+            plan.service_scope_id != binding.host_intent.reservation.service_scope_id or
+            plan.provider_generation != binding.host_intent.fence.provider_generation or
+            container_scope_fence_id_v2(scope)? != binding.host_intent.fence.boot_id:
+        return Err("controller-dispatch-scope-mismatch")
+    if container_execution_plan_digest_v2(plan)? != binding.host_intent.plan_digest:
+        return Err("controller-dispatch-plan-digest-mismatch")
+    val execution = container_execution_request_encode_v2(request.execution)?
+    val reference = controller_assignment_bytes_v1(binding)?
+    val reservation = host_reservation_encode_intent_v1(binding.host_intent)?
+    val host_operation = distributed_encode_operation_v2(binding.host_operation)?
+    val operation = distributed_encode_operation_v2(request.operation)?
+    val fields: Dict<text, SdnValue> = {"version": SdnValue.Int(2),
+        "kind": SdnValue.String("controller-dispatch-request"),
+        "assignmentReference": SdnValue.String(reference), "reservation": SdnValue.String(reservation),
+        "hostOperation": SdnValue.String(host_operation), "controllerOperation": SdnValue.String(operation),
+        "execution": SdnValue.String(execution),
+        "assignmentSigned": SdnValue.String(distributed_encode_signed_grant_v2(request.assignment_signed)?),
+        "assignmentApproval": SdnValue.String(distributed_encode_signed_approval_v2(request.assignment_approval)?),
+        "executionSigned": SdnValue.String(distributed_encode_signed_grant_v2(request.execution_signed)?),
+        "executionApproval": SdnValue.String(distributed_encode_signed_approval_v2(request.execution_approval)?),
+        "prepareSigned": SdnValue.String(distributed_encode_signed_grant_v2(request.prepare_signed)?),
+        "prepareApproval": SdnValue.String(distributed_encode_signed_approval_v2(request.prepare_approval)?),
+        "hostExecutionSigned": SdnValue.String(distributed_encode_signed_grant_v2(request.host_execution_signed)?),
+        "hostExecutionApproval": SdnValue.String(distributed_encode_signed_approval_v2(request.host_execution_approval)?)}
+    val source = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    # Escaping plus other fields may exceed the packet budget even when the
+    # body is individually valid. Reject rather than truncate any bytes.
+    if str_len(source) > 2097152: return Err("controller-dispatch-request-too-large")
+    Ok(source)
+
+fn dispatch_request_fields_v2(source: text) -> Result<[text], text>:
+    val limits = SdnStrictLimitsV1(max_source_bytes: 2097152, max_depth: 2,
+        max_nodes: 40, max_rows: 0, max_cells: 0, max_columns: 20)
+    val parsed = match sdn_parse_strict_v1(source, limits):
+        case Ok(value): value
+        case Err(issue): return Err("controller-dispatch-request-invalid:" + issue.code)
+    val spans: Dict<text, SdnSpan> = {}
+    val fields = match as_dict(parsed.value, "", spans):
+        case Ok(value): value
+        case Err(reason): return Err("controller-dispatch-request-invalid:" + reason.kind)
+    val names = ["assignmentReference", "reservation", "hostOperation", "controllerOperation",
+        "execution", "assignmentSigned", "assignmentApproval", "executionSigned",
+        "executionApproval", "prepareSigned", "prepareApproval", "hostExecutionSigned", "hostExecutionApproval"]
+    val allowed = names + ["version", "kind"]
+    if only_known(fields, allowed, "", spans).is_err(): return Err("controller-dispatch-unknown-field")
+    if not fields.contains_key("version") or not fields.contains_key("kind"):
+        return Err("controller-dispatch-envelope-required")
+    match fields["version"]:
+        case SdnValue.Int(value):
+            if value != 2: return Err("controller-dispatch-version")
+        case _: return Err("controller-dispatch-version-type")
+    match fields["kind"]:
+        case SdnValue.String(value):
+            if value != "controller-dispatch-request": return Err("controller-dispatch-kind")
+        case _: return Err("controller-dispatch-kind-type")
+    var values: [text] = []
+    for name in names:
+        if not fields.contains_key(name): return Err("controller-dispatch-missing:" + name)
+        match fields[name]:
+            case SdnValue.String(value): values.push(value)
+            case _: return Err("controller-dispatch-text-required:" + name)
+    Ok(values)
+
+pub fn controller_dispatch_request_decode_v2(source: text) -> Result<ControllerDispatchRequestV2, text>:
+    if str_len(source) > 2097152: return Err("controller-dispatch-request-too-large")
+    val fields = dispatch_request_fields_v2(source)?
+    val reference = controller_assignment_decode_reference_v1(fields[0])?
+    val binding = controller_assignment_restore_v1(reference, fields[1], fields[2])?
+    val operation = distributed_decode_operation_v2(fields[3])?
+    val execution = container_execution_request_decode_v2(fields[4])?
+    val request = ControllerDispatchRequestV2(binding: binding, operation: operation, execution: execution,
+        assignment_signed: distributed_decode_signed_grant_v2(fields[5])?,
+        assignment_approval: distributed_decode_signed_approval_v2(fields[6])?,
+        execution_signed: distributed_decode_signed_grant_v2(fields[7])?,
+        execution_approval: distributed_decode_signed_approval_v2(fields[8])?,
+        prepare_signed: distributed_decode_signed_grant_v2(fields[9])?,
+        prepare_approval: distributed_decode_signed_approval_v2(fields[10])?,
+        host_execution_signed: distributed_decode_signed_grant_v2(fields[11])?,
+        host_execution_approval: distributed_decode_signed_approval_v2(fields[12])?)
+    if controller_dispatch_request_encode_v2(request)? != source:
+        return Err("controller-dispatch-not-canonical")
+    Ok(request)

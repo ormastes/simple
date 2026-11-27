@@ -1,0 +1,159 @@
+# Writer <-> reader parity for the SMF v1.3 default header layout.
+# Bug smf_header_wire_layout_diverges_rust_vs_simple_2026-08-10: the Simple
+# writers now emit the Rust seed's 96-byte #[repr(C)] layout by default, stamp
+# version 1.3, and keep the compile-options hash in the .simple_meta section.
+# Readers keep accepting the legacy packed 128-byte layout for one release.
+use std.spec.{describe, it, expect}
+use compiler.backend.linker.smf_header.{SmfHeader, SMF_HEADER_SIZE, SMF_PACKED_HEADER_SIZE, SMF_VERSION_MINOR, smf_header_from_bytes, smf_header_field_shift, smf_header_size_at, smf_header_trailer_offset}
+use compiler.backend.linker.smf_enums.{Platform, Arch}
+use compiler.backend.linker.smf_writer.{smf_build_aspect_pack_image}
+use compiler.backend.linker.smf_meta.{smf_meta_compile_options_bytes, SMF_META_SECTION_NAME}
+use compiler.driver.smf_writer.{SmfBuildOptions, Target, build_smf_with_code_for_target, generate_smf_with_raw_code_options}
+
+fn sample() -> SmfHeader:
+    var h = SmfHeader.new_v1_3(Platform.Linux, Arch.X86_64)
+    h.flags = 0x11223344
+    h.section_count = 3
+    h.section_table_offset = 0x1000
+    h.symbol_table_offset = 0x2000
+    h.symbol_count = 7
+    h.exported_count = 5
+    h.entry_point = 0xAABBCCDDEEFF0011
+    h.stub_size = 0x11223344
+    h.smf_data_offset = 0x55667788
+    h.module_hash = 0xDEADBEEFCAFEF00D
+    h.source_hash = 0x0123456789ABCDEF
+    h.app_type = 2
+    h.prefetch_hint = 1
+    h.prefetch_file_count = 9
+    h
+
+fn body(n: i64) -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < n:
+        out.push(((i * 7) & 0xFF) as u8)
+        i = i + 1
+    out
+
+fn sixteen() -> [u8]:
+    var out: [u8] = []
+    var i = 0
+    while i < 16:
+        out.push((i + 1) as u8)
+        i = i + 1
+    out
+
+describe "SMF v1.3 default writer layout":
+    it "defines the header size as the seed's 96 bytes":
+        expect SMF_HEADER_SIZE == 96
+        expect SMF_PACKED_HEADER_SIZE == 128
+        expect SMF_VERSION_MINOR == 3
+
+    it "stamps version 1.3 and serializes to exactly 96 bytes":
+        val bytes = sample().to_bytes()
+        expect bytes.len() == 96
+        expect bytes[4] == 1
+        expect bytes[5] == 3
+
+    it "places fields at the Rust repr(C) offsets with zero padding":
+        val bytes = sample().to_bytes()
+        expect bytes[20] == 0 and bytes[21] == 0 and bytes[22] == 0 and bytes[23] == 0
+        expect bytes[24] == 0x00
+        expect bytes[25] == 0x10
+        expect bytes[40] == 7
+        expect bytes[44] == 5
+        expect bytes[48] == 0x11
+        expect bytes[55] == 0xAA
+        expect bytes[64] == 0x0D
+        expect bytes[80] == 2
+        expect bytes[82] == 0x00
+        expect bytes[83] == 0x05
+        expect bytes[86] == 1
+        expect bytes[87] == 9
+        expect bytes[93] == 0 and bytes[94] == 0 and bytes[95] == 0
+
+    it "round-trips every field through smf_header_from_bytes":
+        val h = sample()
+        val p = smf_header_from_bytes(body(200) + h.to_bytes()).unwrap()
+        expect p.version_minor == 3
+        expect p.flags == h.flags
+        expect p.section_count == 3
+        expect p.section_table_offset == 0x1000
+        expect p.symbol_table_offset == 0x2000
+        expect p.symbol_count == 7
+        expect p.exported_count == 5
+        expect p.entry_point == h.entry_point
+        expect p.stub_size == h.stub_size
+        expect p.smf_data_offset == h.smf_data_offset
+        expect p.module_hash == h.module_hash
+        expect p.source_hash == h.source_hash
+        expect p.app_type == 2
+        expect p.window_width == 1280
+        expect p.window_height == 720
+        expect p.prefetch_hint == 1
+        expect p.prefetch_file_count == 9
+
+describe "SMF v1.3 trailer location":
+    it "locates a v1.3 trailer at EOF-96 even with zero sections":
+        var h = sample()
+        h.section_count = 0
+        h.section_table_offset = 0
+        val img = body(200) + h.to_bytes()
+        expect smf_header_trailer_offset(img) == img.len() - 96
+        expect smf_header_field_shift(img, img.len() - 96) == 4
+        expect smf_header_size_at(img, img.len() - 96) == 96
+
+    it "prefers the v1.3 trailer over a coincidental packed magic 32 bytes earlier":
+        var b = body(200)
+        b[168] = 83
+        b[169] = 77
+        b[170] = 70
+        b[171] = 0
+        val img = b + sample().to_bytes()
+        expect smf_header_trailer_offset(img) == img.len() - 96
+        expect smf_header_from_bytes(img).unwrap().section_table_offset == 0x1000
+
+    it "still reads a legacy packed 128-byte trailer with shift 0 (removal TODO after one release)":
+        var h = sample()
+        h.version_minor = 1
+        val img = body(200) + h.to_packed_bytes()
+        expect h.to_packed_bytes().len() == SMF_PACKED_HEADER_SIZE
+        expect smf_header_trailer_offset(img) == img.len() - 128
+        expect smf_header_field_shift(img, img.len() - 128) == 0
+        expect smf_header_from_bytes(img).unwrap().entry_point == h.entry_point
+
+describe "SMF v1.3 writers":
+    it "driver writer emits a v1.3 96-byte trailer the shared decoder reads":
+        val code = body(40)
+        val img = build_smf_with_code_for_target(code, Target(os: "linux", arch: "x86_64"))
+        expect smf_header_trailer_offset(img) == img.len() - 96
+        val p = smf_header_from_bytes(img).unwrap()
+        expect p.version_minor == 3
+        expect p.section_count == 1
+        expect p.section_table_offset == 40
+
+    it "aspect pack image carries a v1.3 96-byte trailer":
+        val img = smf_build_aspect_pack_image([1, 2, 3, 4, 5]).unwrap()
+        expect smf_header_trailer_offset(img) == img.len() - 96
+        val p = smf_header_from_bytes(img).unwrap()
+        expect p.version_minor == 3
+        expect p.section_count == 1
+        expect p.is_aspect_pack() == true
+        expect p.section_table_offset == 8
+
+describe "compile-options hash relocation":
+    it "is carried by the .simple_meta section, never by header bytes":
+        var opts = SmfBuildOptions.create(Target(os: "linux", arch: "x86_64"))
+        opts.compile_options_bytes = sixteen()
+        val img = generate_smf_with_raw_code_options(body(24), opts)
+        expect SMF_META_SECTION_NAME == ".simple_meta"
+        val got = smf_meta_compile_options_bytes(img)
+        expect got.len() == 16
+        expect got[0] == 1
+        expect got[15] == 16
+        expect smf_header_from_bytes(img).unwrap().section_count == 2
+
+    it "reports no options when the section is absent":
+        val img = build_smf_with_code_for_target(body(24), Target(os: "linux", arch: "x86_64"))
+        expect smf_meta_compile_options_bytes(img).len() == 0

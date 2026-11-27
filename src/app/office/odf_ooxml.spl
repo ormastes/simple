@@ -24,7 +24,7 @@ use app.office.sheets.cell_format.{FormatSpec, SheetFormats, empty_sheet_formats
 # for the docx image writer/importer's disk round-trip (embed on export,
 # restore-if-missing on import). No new runtime surface, no bootstrap needed.
 use std.io_runtime.{file_exists}
-extern fn rt_file_read_bytes(path: text) -> [u8]
+extern fn rt_file_read_bytes(path: text) -> [u8]?
 use std.io_runtime.{file_write_bytes}
 
 # =========================================================================
@@ -287,7 +287,7 @@ fn _docx_para_spans(para_xml: text, rels: [_DocxRelEntry], start_id: i32) -> _Do
         if del_s >= 0 and (marker < 0 or del_s < marker):
             marker = del_s
         if marker < 0:
-            for sp in _docx_runs_in(para_xml.slice(i, para_xml.len())):
+            for sp in _docx_runs_in(para_xml.slice(i, para_xml.byte_len())):
                 spans.push(sp)
             i = para_xml.len()
             continue
@@ -387,7 +387,7 @@ fn _parse_md_image(plain: text) -> _MdImage:
     if close_bracket < 0 or not t.ends_with(")"):
         return _MdImage(is_image: false, alt: "", src: "")
     val alt = t.slice(2, close_bracket)
-    val src = t.slice(close_bracket + 2, t.len() - 1)
+    val src = t.slice(close_bracket + 2, t.byte_len() - 1)
     if src.contains("\"") or src.contains("<") or src.contains(">"):
         return _MdImage(is_image: false, alt: "", src: "")
     _MdImage(is_image: true, alt: alt, src: src)
@@ -401,13 +401,13 @@ fn _docx_drawing_image(para_xml: text, rels: [_DocxRelEntry], zip_bytes: [u8]) -
     produced). Returns nil for paragraphs with no drawing."""
     val d = _find_from(para_xml, "<w:drawing>", 0)
     if d < 0:
-        return nil
+        return None
     val docpr_s = _find_from(para_xml, "<wp:docPr", d)
     if docpr_s < 0:
-        return nil
+        return None
     val docpr_e = _find_from(para_xml, "/>", docpr_s)
     if docpr_e < 0:
-        return nil
+        return None
     val docpr_tag = para_xml.slice(docpr_s, docpr_e + 2)
     val alt = _xml_unescape(_xml_attr(docpr_tag, "name"))
     val src = _xml_unescape(_xml_attr(docpr_tag, "descr"))
@@ -419,7 +419,7 @@ fn _docx_drawing_image(para_xml: text, rels: [_DocxRelEntry], zip_bytes: [u8]) -
             val target = _docx_rel_target(rels, rid)
             if target != "" and not file_exists(src):
                 val media_bytes = zip_extract(zip_bytes, "word/{target}")
-                if media_bytes != nil:
+                if media_bytes.is_some():
                     file_write_bytes(src, media_bytes)
     Some(_plain_block(BlockKind.Paragraph, "![{alt}]({src})"))
 
@@ -438,7 +438,7 @@ fn _docx_document_xml_to_document_with_rels(document_xml: text, rels: [_DocxRelE
             break
         val para = document_xml.slice(start, end_pos)
         val img_block = _docx_drawing_image(para, rels, zip_bytes)
-        if img_block != nil:
+        if img_block.is_some():
             doc.blocks.push(img_block)
         else:
             val content = _docx_para_text(para, rels)
@@ -582,7 +582,7 @@ fn _ods_cell_value(cell_xml: text) -> text:
         if fe > f:
             var formula = _xml_unescape(cell_xml.slice(f + 15, fe))
             if formula.starts_with("of:="):
-                formula = "={formula.slice(4, formula.len())}"
+                formula = "={formula.slice(4, formula.byte_len())}"
             return formula
     val v = _find_from(cell_xml, "office:value=\"", 0)
     if v >= 0:
@@ -770,7 +770,7 @@ fn sheet_to_xlsx_bytes(sheet: Sheet) -> [u8]:
     val start = parse_cell_ref(parts[0])
     val end_ref = parse_cell_ref(parts[1])
     var rows = ""
-    if start != nil and end_ref != nil:
+    if start.is_some() and end_ref.is_some():
         var r = start.row
         while r <= end_ref.row:
             var cells = ""
@@ -964,7 +964,7 @@ fn _xlsx_argb(color: text) -> text:
     """"#rrggbb" -> "FFrrggbb" (opaque ARGB hex xlsx expects for rgb=).
     Case is preserved as written so re-importing round-trips exactly."""
     if color.starts_with("#"):
-        return "FF{color.slice(1, color.len())}"
+        return "FF{color.slice(1, color.byte_len())}"
     "FF{color}"
 
 fn _xlsx_from_argb(argb: text) -> text:
@@ -1089,7 +1089,7 @@ fn sheet_to_xlsx_bytes_formatted(sheet: Sheet, formats: SheetFormats) -> [u8]:
     val fonts = _xlsx_distinct_fonts(distinct_specs)
     val fills = _xlsx_distinct_fills(distinct_specs)
     var rows = ""
-    if start != nil and end_ref != nil:
+    if start.is_some() and end_ref.is_some():
         var r = start.row
         while r <= end_ref.row:
             var cells = ""
@@ -1504,9 +1504,9 @@ fn _docx_image_run(alt: text, src: text, rels: _DocxRels) -> _DocxBuildResult:
     non-.png src falls back to a plain placeholder run carrying the alt
     text, never crashing the export."""
     if src.ends_with(".png") and file_exists(src):
-        val bytes = rt_file_read_bytes(src)
-        val added = _docx_rels_add_image(rels, bytes)
-        return _DocxBuildResult(xml: _docx_drawing_xml(added.rid, alt, src), rels: added.rels)
+        if val bytes = rt_file_read_bytes(src):
+            val added = _docx_rels_add_image(rels, bytes)
+            return _DocxBuildResult(xml: _docx_drawing_xml(added.rid, alt, src), rels: added.rels)
     _DocxBuildResult(xml: "<w:r><w:t xml:space=\"preserve\">{_xml_escape_d(alt)}</w:t></w:r>", rels: rels)
 
 fn _docx_para(block: DocBlock, rels: _DocxRels, revisions: [RevisionDef]) -> _DocxBuildResult:

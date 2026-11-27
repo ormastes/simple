@@ -1,7 +1,39 @@
 # Two perf specs blocked: no self-hosted Simple binary, and an unregistered font fixture (2026-08-18)
 
-Status: OPEN
-Lane: lane-test-fix worktree, `bin/simple` -> shared Rust seed (rebuild forbidden in this lane)
+Status: fix-implemented-verification-pending (updated 2026-11-27; prior 2026-11-11 BLOCKED note below) —
+registered test font-fixture provenance support and unit verification implemented; remaining blocker is deployment of a
+pure-Simple self-hosted binary plus host-pinned baseline env, both outside a
+P3 lane's grant.
+Lane: lane-test-fix worktree, `bin/simple` -> shared Rust seed (rebuild forbidden in that lane)
+
+## Addendum 2026-11-11 (lane ne19) — BLOCKED, one of two blockers resolved in-tree
+
+Verified against the release/1.0.0 tree (worktree `bin/simple.exe` is still
+the Rust seed v1.0.0-rc.1; no `bin/release/<triple>/` exists here).
+
+**Blocker 2 (font fixture): FIXED in-tree.** `simple_2d_vector_fonts_perf_spec.spl`
+now loads the fixture through the bytes API (`engine.load_font_bytes(PERF_FONT,
+font_blob)`, line ~110) — exactly the remedy this doc specified — instead of
+the registry-gated file-path API. The `SIMPLE_2D_BITMAP_BASELINE_NS` /
+`SIMPLE_2D_BITMAP_BASELINE_CHECKSUM` pins remain env-supplied by design; this
+lane did not invent values.
+
+**Blocker 1 (self-hosted binary): unchanged.** `multicore_green_fanout_spec.spl`
+still asserts `expect(stderr).to_equal("")` (lines ~215, ~225), which only a
+deployed pure-Simple `bin/release/<triple>/simple` can satisfy; the seed's
+mandatory banner makes every available binary fail that assertion. Per this
+doc's own reasoning the assertion must not be relaxed.
+
+**Grant addendum (verbatim unblock path):** in a lane authorized to run the
+bootstrap build, deploy the self-hosted binary (`bin/simple build bootstrap`
+or the release-channel equivalent) so `bin/release/<triple>/simple` exists,
+then set `SIMPLE_2D_BITMAP_BASELINE_NS` / `SIMPLE_2D_BITMAP_BASELINE_CHECKSUM`
+from the pinned host and run:
+
+    bin/simple test test/05_perf/stress/multicore_green_fanout_spec.spl
+    bin/simple test test/05_perf/graphics_2d/simple_2d_vector_fonts_perf_spec.spl
+
+A P3 triage lane is not granted a bootstrap rebuild, so this row stays BLOCKED.
 
 ## 1. `test/05_perf/stress/multicore_green_fanout_spec.spl` — needs a self-hosted binary
 
@@ -52,3 +84,77 @@ asserts both are `> 0`. Neither variable is set anywhere in the repository —
 they are host-pinned perf evidence. Supplying invented values would fabricate a
 perf baseline, so this spec cannot go green on an unpinned, heavily loaded host
 regardless of the load-font fix.
+
+
+---
+
+## 2026-11-13 addendum — P3 gpu lane p3-gpu-20261113 (work/p3-gpu-20261113, base 6f4cb189867)
+
+**Verdict: BLOCKED stands — re-verified at this tip.** Blocker 2 (font fixture)
+remains fixed in-tree (`load_font_bytes(PERF_FONT, font_blob)` bytes API in
+`simple_2d_vector_fonts_perf_spec.spl`). Blocker 1 unchanged: no
+`bin/release/<triple>/` self-hosted binary exists in this worktree (verified:
+`bin/release` absent), so `multicore_green_fanout_spec.spl`'s
+`expect(stderr).to_equal("")` still cannot pass on the seed binary with its
+mandatory banner — and per this doc must not be relaxed. The lane remains
+forbidden a bootstrap rebuild. Grant unchanged: deploy the self-hosted binary
+in a bootstrap-authorized lane, set the two pinned baseline env vars from the
+pinned host, run both named specs.
+
+## Triage 2026-11-13 (Linux aarch64, lane uia) — row stays OPEN
+
+Blocked on this host: multicore_green_fanout_spec asserts empty stderr, which needs a self-hosted binary (the seed banner cannot be suppressed through its env -i probe), and the vector-font spec needs host-pinned baselines. The font-fixture half is fixed (1fc1852855a). Regression found, not repaired here: transplant 88aac2ffe28 undid cbe6b94a79f in multicore_green_fanout_spec.spl (mkdir -p build/tmp in unique_probe_path; bin/simple fallback in simple_binary), so probes now fail with 98/127 before reaching the stderr assertion; origin/main carries the same reverted text.
+
+## 2026-11-13 follow-up (Linux aarch64, lane uia)
+
+Probe regression repaired: cbe6b94a79f re-applied to test/05_perf/stress/multicore_green_fanout_spec.spl (mkdir -p build/tmp; bin/simple fallback). On release/1.0.0 5221a5058a8, Linux aarch64 (DGX Spark GB10), Rust seed af717f53d6bce3e5: before, 3 examples 2 failed with the harness sentinel (expected probe_write_failed, 98); after, with SIMPLE_BIN set to the seed, the probes run and the same 2 examples fail only on the empty-stderr assertion (seed banner). Row stays open on the self-hosted-binary blocker. origin/main still carries the reverted text and needs the same change.
+
+## Addendum 2026-11-13 (lane work/live-p3-l3-20261113)
+
+State unchanged at this base: the font-fixture blocker stays fixed in-tree
+(bytes-API load), and the remaining blocker stays the absence of a deployed
+pure-Simple \`bin/release/<triple>/simple\` (the empty-stderr assertion in
+\`multicore_green_fanout_spec.spl\` is still correct and still cannot pass on the
+seed's mandatory banner). Bootstrap deployment is outside a P3 lane's grant; no
+change attempted.
+
+## 2026-11-26 (Linux aarch64, DGX GB10): row stays OPEN
+
+Tip `79445b063c4`, Rust seed sha256 prefix `fb80903917d6d5f5`.
+
+- **The font fixture is fixed, but by `ce3953a93ef`, not `1fc1852855a`.** The
+  addenda above credit the bytes API (`load_font_bytes`), and that is wrong.
+  The bytes API takes the provenance-gated lane, which rejects the
+  unregistered fixture (identity `""`), so `1fc1852855a` produced the
+  all-zero rows. `ce3953a93ef` writes the fixture to disk and calls
+  `load_font`, the unmanaged lane. Measured now: `cold_p50_ns=19808476
+  warm_p50_ns=16662376 bitmap_checksum=772523490`. The font loads and the
+  bitmap block runs.
+- **Six expectations still fail, and none of them is about loading the font.**
+  - `warm*100 <= cold*75` and `warm_hits 651 == 217` are the vector-cache reds
+    in `vector_font_perf_spec_masked_reds_2026-11-15.md`.
+  - The other four (baseline ns > 0, checksum > 0, checksum == 0, ratio < 1)
+    fail because `SIMPLE_2D_BITMAP_BASELINE_NS` / `_CHECKSUM` are not set.
+- **Fanout probe fix.** The OS-thread probe summed `ThreadHandle.join()`
+  values, but `join()` returns `i64?`. The JIT rejected it ("cannot apply
+  `Add` to an optional value") and the interpreter then failed with "cannot
+  convert enum to int", so the probe exited 1. It now uses
+  `.join().unwrap()`. Standalone probe: rc 1 -> 0, with no JIT demotion.
+  After the fix, both failing examples fail only on `expect(stderr).to_equal("")`
+  (the seed banner).
+- **Still blocked:** there is no deployed pure-Simple `bin/release/<triple>/simple`
+  (`bin/release` is absent), and the host-pinned bitmap baseline env is not
+  set.
+
+## 2026-11-27 implementation — Wave 5 Lane W5-1 (`fix-implemented-verification-pending`)
+
+- Replaced the unmanaged disk-write workaround in `test/05_perf/graphics_2d/simple_2d_vector_fonts_perf_spec.spl` with a proper provenance-gated test font fixture registration API:
+  - `src/lib/common/encoding/font_registry.spl`: added `_registered_font_fixture_candidates`, `_fixture_default_axes_for_blob` (supporting both static `"static"` and `fvar` variable TTF fixtures), `register_selected_font_fixture`, and `clear_registered_selected_font_fixtures`, preserving the 16-asset production `selected_font_asset_candidates()` catalog, rejecting unmanaged paths (`"unmanaged"`), and blocking bundled-path shadowing (`"reserved-selected-path"`).
+  - `src/lib/{nogc_sync_mut,common,nogc_async_mut,gc_async_mut}/text_layout/font_renderer.spl`: added and re-exported `font_renderer_register_font_fixture_bytes`, cleared fixture registrations in `_font_renderer_reset_registered_selected_bytes_for_test()`, and updated `font_renderer_register_selected_bytes` to refresh blobs on path re-registration.
+  - `test/fixtures/fonts/simple_2d_vector/font_fixture.spl`: added `SIMPLE_2D_ASCII_FIXTURE_PATH`, `SIMPLE_2D_LATIN1_FIXTURE_PATH`, `register_simple_2d_ascii_font_fixture`, and `register_simple_2d_latin1_font_fixture`.
+  - `test/01_unit/lib/common/text_layout/font_fixture_registration_spec.spl`: new unit verification spec for provenance registration, bit-flip/truncation/shadow rejection, and `Engine2D.load_font_bytes` / `FontRenderer` end-to-end rendering.
+- Verified with `simple.exe test --mode=interpreter`:
+  - `test/01_unit/lib/common/text_layout/font_fixture_registration_spec.spl`: `2 total, 2 passed, 0 failed` (`EXIT=0`).
+  - `test/01_unit/lib/common/encoding/font_registry_metadata_path_spec.spl`: `2 total, 2 passed, 0 failed` (`EXIT=0`).
+  - `test/05_perf/graphics_2d/simple_2d_vector_fonts_perf_spec.spl` (provenance-gated `load_font_bytes`): `cold_p50_ns=50076500 warm_p50_ns=42123300 bitmap_p50_ns=51518900 bitmap_checksum=772523490 warm_hits=651/217 warm_misses=0 warm_rasterizations=0 cache_entries=2 cache_bytes=336 checksum=562346002 checksum_mismatches=0` (`EXIT=1` on remaining interpreter cold/warm `4212330000 < 3755737501`, `651 == 217` tracked separately under `vector_font_perf_spec_masked_reds_2026-11-15.md`, and 4 unset `SIMPLE_2D_BITMAP_BASELINE_*` assertions).
+- `waiting-for:` Deployed pure-Simple `bin/release/<triple>/simple` binary for `multicore_green_fanout_spec.spl` (`expect(stderr).to_equal("")`) and native throughput of `simple_2d_vector_fonts_perf_spec.spl`, plus host-pinned `SIMPLE_2D_BITMAP_BASELINE_NS` / `SIMPLE_2D_BITMAP_BASELINE_CHECKSUM`.

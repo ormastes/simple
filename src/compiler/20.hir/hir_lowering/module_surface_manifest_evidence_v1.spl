@@ -1,0 +1,150 @@
+# Registry-owned snapshot of authenticated producer observations. Copies protect
+# frozen permission inputs from later SourceFile/policy-array mutation.
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.common.cache.visibility_manifest_read_v1.{VisibilityManifestEvidenceV1, VisibilityManifestReadV1, visibility_manifest_parent_v1, visibility_manifest_path_valid_v1}
+use compiler.common.cache.visibility_manifest_policy_v1.{VisibilityManifestPolicyV1}
+use compiler.common.module_path_naming.{module_source_relative_path}
+use std.common.build_manager.contracts.{builder_digest_valid_v1}
+use compiler.hir.hir_lowering.module_surface_semantic_projection.{module_surface_semantic_state, module_surface_semantic_mix, module_surface_semantic_finish}
+
+fn surface_manifest_policy_copy_v1(policy: VisibilityManifestPolicyV1) -> VisibilityManifestPolicyV1:
+    VisibilityManifestPolicyV1(
+        source_path: policy.source_path, directory_path: policy.directory_path,
+        coverage_root: policy.coverage_root, content_sha256: policy.content_sha256,
+        snapshot_id: policy.snapshot_id, has_arch: policy.has_arch,
+        dimension: policy.dimension, layer: policy.layer,
+        expose_paths: policy.expose_paths.copy(), child_names: policy.child_names.copy(),
+        child_visibilities: policy.child_visibilities.copy(), child_modifiers: policy.child_modifiers.copy(),
+        friend_modules: policy.friend_modules.copy(), internal_exports: policy.internal_exports.copy(),
+        valid: policy.valid, frontend_identity: policy.frontend_identity,
+        parser_provider_id: policy.parser_provider_id, frontend_route: policy.frontend_route,
+        advisory_policy: policy.advisory_policy, advisory_identity: policy.advisory_identity,
+        target_triple: policy.target_triple, preprocessed_source_sha256: policy.preprocessed_source_sha256,
+        cfg_receipt_present: policy.cfg_receipt_present, cfg_source_identity: policy.cfg_source_identity,
+        cfg_preprocessed_sha256: policy.cfg_preprocessed_sha256, cfg_decision_digest: policy.cfg_decision_digest,
+        child_target_paths: policy.child_target_paths.copy(), child_target_sha256: policy.child_target_sha256.copy(),
+        child_target_kinds: policy.child_target_kinds.copy(), child_resolution_outcomes: policy.child_resolution_outcomes.copy())
+
+pub(package) fn module_surface_manifest_snapshot_v1(source: SourceFile) -> VisibilityManifestEvidenceV1:
+    var policies: [VisibilityManifestPolicyV1] = []
+    for policy in source.visibility_manifest_policies_v1:
+        policies.push(surface_manifest_policy_copy_v1(policy))
+    VisibilityManifestEvidenceV1(root: source.visibility_manifest_root_v1,
+        snapshot_id: source.visibility_manifest_snapshot_id_v1,
+        complete: source.visibility_manifest_complete_v1,
+        reason: source.visibility_manifest_reason_v1,
+        reads: source.visibility_manifest_reads_v1.copy(), policies: policies)
+
+fn surface_manifest_policy_alignment_v1(policy: VisibilityManifestPolicyV1) -> bool:
+    val count = policy.child_names.len()
+    count == policy.child_visibilities.len() and count == policy.child_modifiers.len() and
+        count == policy.child_target_paths.len() and count == policy.child_target_sha256.len() and
+        count == policy.child_target_kinds.len() and count == policy.child_resolution_outcomes.len()
+
+# An empty reason means the complete chain and every positive parser policy are
+# internally joined. The authenticated producer remains the source of absence
+# proof; this validator cannot turn arbitrary caller rows into authentication.
+pub fn module_surface_manifest_ready_reason_v1(source_path: text, evidence: VisibilityManifestEvidenceV1) -> text:
+    if not evidence.complete: return "manifest-authority-incomplete:" + evidence.reason
+    if evidence.snapshot_id == "" or not visibility_manifest_path_valid_v1(source_path) or
+            not visibility_manifest_path_valid_v1(evidence.root) or
+            not source_path.starts_with(evidence.root + "/"):
+        return "manifest-source-root-invalid"
+    if evidence.reads.len() == 0: return "manifest-chain-empty"
+    var policies_by_path: Dict<text, i64> = {}
+    for index in 0..evidence.policies.len():
+        val policy = evidence.policies[index]
+        if policies_by_path.contains_key(policy.source_path): return "manifest-policy-duplicate"
+        policies_by_path[policy.source_path] = index
+    var directory = visibility_manifest_parent_v1(source_path)
+    var positive_count = 0
+    for index in 0..evidence.reads.len():
+        val row: VisibilityManifestReadV1 = evidence.reads[index]
+        if row.source_path != source_path or row.snapshot_id != evidence.snapshot_id or
+                row.directory_path != directory or row.manifest_path != directory + "/__init__.spl":
+            return "manifest-chain-owner-mismatch"
+        if row.exists:
+            positive_count = positive_count + 1
+            if not builder_digest_valid_v1(row.content_sha256) or not policies_by_path.contains_key(row.manifest_path):
+                return "manifest-positive-policy-missing"
+            val policy = evidence.policies[policies_by_path[row.manifest_path]]
+            if policy.snapshot_id != evidence.snapshot_id or policy.coverage_root != evidence.root or
+                    policy.directory_path != row.directory_path or policy.content_sha256 != row.content_sha256:
+                return "manifest-policy-owner-mismatch"
+            if not policy.valid or not surface_manifest_policy_alignment_v1(policy):
+                return "manifest-policy-invalid"
+            if policy.frontend_identity == "" or policy.parser_provider_id == "" or
+                    (policy.frontend_route != "advisory-selected" and policy.frontend_route != "target-cfg-reference") or policy.advisory_policy == "" or
+                    not builder_digest_valid_v1(policy.preprocessed_source_sha256):
+                return "manifest-frontend-provenance-missing"
+            if policy.cfg_receipt_present and (policy.cfg_source_identity == "" or
+                    not builder_digest_valid_v1(policy.cfg_preprocessed_sha256) or
+                    not builder_digest_valid_v1(policy.cfg_decision_digest) or
+                    policy.cfg_preprocessed_sha256 != policy.preprocessed_source_sha256):
+                return "manifest-cfg-provenance-invalid"
+            if policy.frontend_route == "target-cfg-reference" and (not policy.cfg_receipt_present or
+                    policy.advisory_policy != "reference" or policy.advisory_identity != ""):
+                return "manifest-cfg-receipt-missing"
+            var child_names: Dict<text, i64> = {}
+            for child in 0..policy.child_names.len():
+                val name = policy.child_names[child]
+                if name == "" or child_names.contains_key(name): return "manifest-child-duplicate"
+                child_names[name] = child
+                if policy.child_resolution_outcomes[child] == "snapshot-selected":
+                    if not visibility_manifest_path_valid_v1(policy.child_target_paths[child]) or
+                            not builder_digest_valid_v1(policy.child_target_sha256[child]) or
+                            (policy.child_target_kinds[child] != "source-file" and policy.child_target_kinds[child] != "directory-interface"):
+                        return "manifest-child-selection-invalid"
+                elif policy.child_target_paths[child] != "" or policy.child_target_sha256[child] != "" or policy.child_target_kinds[child] != "":
+                    return "manifest-unselected-child-has-target"
+        elif row.content_sha256 != "" or policies_by_path.contains_key(row.manifest_path):
+            return "manifest-negative-has-positive-payload"
+        if directory == evidence.root:
+            if index != evidence.reads.len() - 1: return "manifest-chain-past-root"
+        elif index == evidence.reads.len() - 1:
+            return "manifest-chain-root-not-reached"
+        directory = visibility_manifest_parent_v1(directory)
+    if positive_count != evidence.policies.len(): return "manifest-orphan-policy"
+    ""
+
+# Semantic fingerprint includes both positive and negative dependencies. Epoch
+# IDs are joined above, not reused as cross-build semantic content; path limbs
+# use the same snapshot-relative owner projection as declaration authority.
+# Incomplete evidence is explicitly hashed as incomplete, never treated as open.
+pub(package) fn module_surface_manifest_digest_v1(source_path: text, evidence: VisibilityManifestEvidenceV1) -> text:
+    if evidence.complete and module_surface_manifest_ready_reason_v1(source_path, evidence) != "": return ""
+    var digest = module_surface_semantic_state()
+    digest = module_surface_semantic_mix(digest, "schema", "manifest-permission-input-v1")
+    digest = module_surface_semantic_mix(digest, "source", module_source_relative_path(source_path))
+    digest = module_surface_semantic_mix(digest, "root", module_source_relative_path(evidence.root))
+    digest = module_surface_semantic_mix(digest, "complete", "{evidence.complete}")
+    digest = module_surface_semantic_mix(digest, "reason", evidence.reason)
+    digest = module_surface_semantic_mix(digest, "read-count", "{evidence.reads.len()}")
+    for row in evidence.reads:
+        digest = module_surface_semantic_mix(digest, "directory", module_source_relative_path(row.directory_path))
+        digest = module_surface_semantic_mix(digest, "manifest", module_source_relative_path(row.manifest_path))
+        digest = module_surface_semantic_mix(digest, "present", "{row.exists}")
+        digest = module_surface_semantic_mix(digest, "content", row.content_sha256)
+    digest = module_surface_semantic_mix(digest, "policy-count", "{evidence.policies.len()}")
+    for policy in evidence.policies:
+        if not surface_manifest_policy_alignment_v1(policy): return ""
+        digest = module_surface_semantic_mix(digest, "policy-path", module_source_relative_path(policy.source_path))
+        digest = module_surface_semantic_mix(digest, "policy-valid", "{policy.valid}")
+        for field in [policy.content_sha256, "{policy.has_arch}", policy.dimension, policy.layer,
+                policy.frontend_identity, policy.parser_provider_id, policy.frontend_route,
+                policy.advisory_policy, policy.advisory_identity, policy.target_triple,
+                policy.preprocessed_source_sha256, "{policy.cfg_receipt_present}",
+                policy.cfg_source_identity, policy.cfg_preprocessed_sha256, policy.cfg_decision_digest]:
+            digest = module_surface_semantic_mix(digest, "policy-field", field)
+        for expose in policy.expose_paths: digest = module_surface_semantic_mix(digest, "expose", expose)
+        for friend in policy.friend_modules: digest = module_surface_semantic_mix(digest, "friend", friend)
+        for internal_export in policy.internal_exports: digest = module_surface_semantic_mix(digest, "internal-export", internal_export)
+        for index in 0..policy.child_names.len():
+            digest = module_surface_semantic_mix(digest, "child-name", policy.child_names[index])
+            digest = module_surface_semantic_mix(digest, "child-visibility", policy.child_visibilities[index])
+            digest = module_surface_semantic_mix(digest, "child-modifier", policy.child_modifiers[index])
+            digest = module_surface_semantic_mix(digest, "child-path", module_source_relative_path(policy.child_target_paths[index]))
+            digest = module_surface_semantic_mix(digest, "child-sha256", policy.child_target_sha256[index])
+            digest = module_surface_semantic_mix(digest, "child-kind", policy.child_target_kinds[index])
+            digest = module_surface_semantic_mix(digest, "child-outcome", policy.child_resolution_outcomes[index])
+    module_surface_semantic_finish(digest)

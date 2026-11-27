@@ -1,0 +1,66 @@
+# @cover src/compiler_rust/compiler/src/interpreter/node_exec.rs
+"""
+## Purpose and audience
+An assignment whose place root is a call result (`get_arr()[i()] += rhs()`)
+follows the owner contract of 2026-11-06 on both seed engines: the right-hand
+side first, then the root call, then the index, each exactly once. Readers are
+seed interpreter and JIT authors.
+Bug: doc/08_tracking/bug/seed_interp_call_root_place_order_2026-11-06.md
+## Operator workflow
+bin/simple test test/01_unit/language/call_root_place_order_spec.spl
+## Compatibility and limitations
+The probe runs as a subprocess under each engine because a spec body runs on
+one engine only. Only the evaluation order is checked; whether the write
+reaches the array the call returned is an aliasing question this spec does
+not answer.
+## Verification guidance and troubleshooting
+A CASE line whose left side differs from its `want=` literal is a failure.
+"""
+# @manual_section: Call-result place roots
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val PROBE_PATH: text = "test/01_unit/language/probe_call_root_place_order.spl"
+
+fn run_probe(mode: text) -> text:
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_JIT_STRICT=1 SIMPLE_EXECUTION_MODE=" + mode + " " +
+        bin + " run " + PROBE_PATH + " 2>&1"
+    val out = process_run("sh", ["-c", cmd])
+    out.0
+
+fn mismatched_cases(raw: text) -> [text]:
+    var bad: [text] = []
+    for line in raw.split("\n"):
+        val t = line.trim()
+        if t.starts_with("CASE "):
+            val halves = t.split(" want=")
+            if halves.len() != 2:
+                bad.push(t)
+            else:
+                val lhs = halves[0].split("=")
+                if lhs.len() != 2 or lhs[1] != halves[1]:
+                    bad.push(t)
+    bad
+
+describe "Call-result place root evaluation order":
+    it "evaluates rhs, root call, index once each on the interpreter":
+        # @req REQ-ATTR-16
+        step("Run the probe on the seed interpreter")
+        val out = run_probe("interpreter")
+        # @capture(exec): probe output
+        step("Verify every CASE line and the done marker")
+        expect(out).to_contain("PROBE_DONE")
+        expect(mismatched_cases(out).join("|")).to_equal("")
+
+    it "evaluates rhs, root call, index once each on the jit":
+        # @req REQ-ATTR-16
+        step("Run the probe on the seed JIT with strict fallback")
+        val out = run_probe("jit")
+        # @capture(exec): probe output
+        step("Verify every CASE line and the done marker")
+        expect(out).to_contain("PROBE_DONE")
+        expect(mismatched_cases(out).join("|")).to_equal("")

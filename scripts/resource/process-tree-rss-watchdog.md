@@ -260,7 +260,8 @@ at 129 bytes including newline and the table at 131,072 rows, and validates PID
 ranges. The kernel metadata allocation is independently bounded. A vanished
 process is excluded only after ESRCH or a confirmed zombie; permission errors,
 short reads, and changed birth identities fail the observation. Observer path,
-binary/source SHA-256, backend, starts/restarts/errors and last PID are receipted.
+binary/source SHA-256, denial-policy header SHA-256, backend,
+starts/restarts/errors and last PID are receipted.
 The session helper remains verified during native observations. Observer failure
 kills/reaps the observer; a fresh observer may be started for cleanup only,
 never to resume the workload. A persistently broken observer kills the anchored
@@ -268,13 +269,27 @@ root group and reports unverified quiescence. SIGPIPE is ignored before helper
 admission so early pipe closure produces a caught exit 89 with a receipt; the
 workload receives its original SIGPIPE disposition.
 
-A denied libproc/session detail query now receives one independent
-`sysctl(KERN_PROC_PID)` check. It is omitted only when that successful query
-proves the PID absent, or returns the exact expected PID/birth identity in
-zombie state. A live process, reused PID, short metadata reply, or denied
-metadata check still fails closed with exit 89. Denial diagnostics retain the
-original operation/errno and record the proof outcome. This does not make a
-live protected process measurable or authorize ignoring denied RSS.
+A denied libproc/session detail query receives up to three independent
+`sysctl(KERN_PROC_PID)` checks. When a check finds the exact expected identity
+still live, the observer waits 10 ms and checks again to cover a short-lived
+process exiting between the detail error and proof. It is omitted only when a
+successful query proves the PID absent, or returns the exact expected
+PID/birth identity in zombie state. A persistent live process, reused PID,
+short metadata reply, or denied metadata check still fails closed with exit
+89. Denial diagnostics retain the original operation/errno and record the
+probe count and final proof outcome. This does not make a live protected
+process measurable or authorize ignoring denied RSS.
+
+The denial policy has a deterministic fixture that exercises live-then-exit,
+live-then-zombie, persistent live denial, PID reuse, unknown proof, and
+immediate authoritative absence/zombie cases:
+
+```sh
+cc -std=c11 -Wall -Wextra -Werror \
+  scripts/resource/macos-observer-denial-policy-test.c \
+  -o /tmp/macos-observer-denial-policy-test
+/tmp/macos-observer-denial-policy-test
+```
 Denial diagnostics also record bounded, whitespace-sanitized kernel command
 name, parent/group/session IDs and effective/real UID. On detail EOF the
 supervisor records its expected root/session, retained/current group anchor
@@ -421,3 +436,37 @@ observer protocol deadlines, identity/session validation, explicit timeout or
 cancellation, or cleanup. No retries or additional sleeps are introduced.
 Regression: `test/01_unit/scripts/process_tree_rss_monitor_budget_test.shs`;
 defect: https://github.com/ormastes/simple/issues/3002.
+
+
+### Optional Darwin charged-footprint supplement
+
+RSS excludes compressed/swapped accounting that can dominate a native worker.
+Darwin callers may explicitly add `--max-phys-footprint-kib=N`, or export
+`SIMPLE_BOOTSTRAP_PROCESS_TREE_PHYS_FOOTPRINT_CAP_KIB=N` to the canonical
+transcribed owner. Unset/zero retains the existing RSS policy and legacy observer
+protocol. Positive values require Darwin and current `ri_phys_footprint` from
+`proc_pid_rusage`; observation failure refuses execution rather than substituting
+RSS or zero. The facade forwards an explicit option, so an older watchdog refuses
+an unsupported request instead of silently ignoring a new environment variable.
+
+The supplement sums current values from the same selected live process tree as
+RSS, within the existing bounded, sequential observation window. It is sampled
+protection, not an atomic snapshot or a kernel hard limit. `peak_phys_footprint_kib`
+is the maximum observed current tree sum; `peak_single_phys_footprint_kib` is the
+maximum observed single-process current value. Neither uses or sums per-process
+lifetime peaks. RSS fields retain their original meaning and threshold. A footprint
+breach reports `phys-footprint-cap-exceeded` (exit88), including during timeout
+TERM drain and when RSS is monitored. Missing live measurements fail closed (89).
+Receipts identify the additional metric/cap separately and report unavailable
+rather than zero when no complete measurement exists.
+
+Future owners must bind the new facade/watchdog/observer source and binary hashes,
+require the footprint receipt fields and retain source/producer/runtime admission.
+An environment variable alone does not upgrade old frozen helpers. Never mutate
+an active/frozen guard; deploy reviewed changes in a new payload/owner transaction.
+The small `scripts/test/test-darwin-footprint-guard.py --output FRESH_DIRECTORY`
+fixture builds only standard C policy helpers, not the compiler or runtime.
+
+RSS and charged footprint are different accounting measures, not strict bounds
+for one another. Choose an explicit footprint cap from healthy phase measurements
+and host reserve; do not automatically reuse an RSS cap's numeric value.

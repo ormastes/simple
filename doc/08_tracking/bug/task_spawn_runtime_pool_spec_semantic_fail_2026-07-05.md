@@ -37,3 +37,22 @@ struct (arrays and structs are value types — see
 interpreter mis-types the runtime-pool object. Fix spec or interpreter at root
 cause, then add this spec back to the async hardening evidence list.
 
+
+## Closed 2026-11-09 (verification-only, lane p3-subj7)
+
+Spec now passes 1/1 with the seed interpreter
+(`simple test test/01_unit/lib/nogc_async_mut/task_spawn_runtime_pool_spec.spl
+--mode=interpreter --clean --timeout 120 --sequential`) on
+origin/release/1.0.0 (worktree @54181f128ea). The spec is already re-listed in
+`scripts/check/check-async-library-hardening-evidence.shs` and passes there
+too. Neighbours (actor_dispatch 12/12, generator 1/1) green. No source change
+in this closure.
+
+
+## Triage 2026-11-13 (lane p3-async-20261113, base 80a8116e5e2) — confirms CLOSED
+
+Re-verified once on this base (seed `bin/simple.exe`, `--timeout 300`):
+`test/01_unit/lib/nogc_async_mut/task_spawn_runtime_pool_spec.spl` →
+`outcome=OK declared>=1 executed=1 passed=1` — matches the 2026-11-09
+p3-subj7 closure; the spec remains listed in
+`scripts/check/check-async-library-hardening-evidence.shs`. No source change.

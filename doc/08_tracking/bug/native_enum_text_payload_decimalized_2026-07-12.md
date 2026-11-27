@@ -40,3 +40,21 @@ compiler; do not add UI-local pointer formatting, runtime aliases, or fake
 history events. Add a minimal native regression that constructs a text-bearing
 enum, passes it through a callback, pattern-matches it, and asserts the text.
 
+
+## Triage 2026-11-25 (work/p2w4-af-20261125)
+
+The "Open 2026-09-16 — needs owner triage" header is stale bookkeeping: the
+2026-07-15 status above records the pure-Simple enum payload typing fix as
+landed with a strict dual-backend regression added. Confirmed at
+`origin/release/1.0.0` that the regression case exists:
+`scripts/check/check-native-seed-parity.shs:2271` runs
+`enum_text_callback` expecting `run` (the exact payload this bug
+decimalized), with the case writer at line 1223.
+
+Execution of that parity case requires a fresh pure-Simple self-hosted
+compiler binary; this session's only binary is the pinned Rust seed
+v1.0.0-rc.1 (`bin/simple.exe`), which is bootstrap-only and additionally
+cannot run `bin/simple.exe test` at this tip (rejects the
+`@representation_boundary` decorator used by `src/app/test_runner_new`).
+Status unchanged: fix landed, native execution verification pending a
+self-hosted binary. Not independently re-verified here.

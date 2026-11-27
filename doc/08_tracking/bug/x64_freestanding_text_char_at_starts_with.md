@@ -1,4 +1,18 @@
 # BUG: x86_64 freestanding native-build — text `char_at` / `starts_with` mis-decode
+
+**Status:** OPEN
+**Reconciled:** 2026-11-09
+
+## Corrective review of PR #8095
+
+Only the deep-sshd-stack `starts_with` predicate/control-flow residual is
+reopened. The corrected analysis below distinguishes it from by-design
+`char_at` and already-fixed byte-array storage. The preserved October 27
+adjudication says `keep_open`; PR #8095's reliance on the September 16
+bookkeeping banner did not resolve that residual. Severity and other bug-row
+fields are unchanged. No new native/QEMU execution is claimed, and the two
+resolved subfindings stay resolved.
+
 ## Closed 2026-09-16 — ...command.trim().starts_with("/")`. ## Fix Make the x86_64 freestanding native-build codegen
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; classification is
@@ -134,3 +148,44 @@ in the merged kernel (NVMe BAR high + FAT stream open). The sshd exec dispatch
 (this session) is already wired and calls `fs_exec_spawn_ring3` correctly; it is
 gated on this reader landing.
 
+
+## 2026-11-12 fix attempt (baremetal lane, work/fix-baremetal-20261112)
+
+State at 7a06b4aafd5, lane file scope `examples/09_embedded/simple_os/**` +
+baremetal runtime C:
+
+1. **Deep-stack `starts_with` residual: UNFIXED, out of lane scope.** The
+   frame-depth-sensitive mis-discrimination is a compiler codegen defect
+   (src/compiler), which this lane may not touch. The raw-byte workaround in
+   `ssh_session.spl` must stay. No new execution evidence claimed.
+2. **Loader/boot-integration blocker: verified already landed.** The
+   documented fix (a) — pre-read `/FSEXEC.ELF` into the static path-read
+   buffer before pmm/vmm — is present at HEAD in
+   `examples/09_embedded/simple_os/arch/x86_64/ssh_ring3_entry.spl:62-75`
+   (pre-nvme/net/vmm preload + `simpleos_fat32_note_preload_size` receipt).
+3. **In-scope defect fixed: `simpleos_fat32_note_preload_size` had NO C
+   definition anywhere in the tree** — the extern in ssh_ring3_entry.spl
+   would silently bind to an auto-generated weak NIL stub (the exact
+   silent-stub class of baremetal_entry_closure_class_instantiation_fault).
+   Added the real definition to
+   `examples/09_embedded/simple_os/arch/x86_64/boot/baremetal_stubs.c`
+   (stores the size; new `simpleos_fat32_preload_size()` getter exposes it
+   to the exec path). **Verified:** the complete `baremetal_stubs.c` compiles
+   for `x86_64-unknown-none` with
+   `-ffreestanding -fno-builtin -fno-stack-protector -mno-red-zone -fno-pic`
+   (clang, exit 0) and `nm` shows `T simpleos_fat32_note_preload_size` /
+   `T simpleos_fat32_preload_size`. Consumption of the resident buffer by
+   the spawn path is `src/os/**` work — out of this lane's scope.
+
+**Status: OPEN** (compiler codegen residual). DB row updated.
+
+## BF-9 Update (2026-11-26) — OS-side `char_at`/`starts_with` elimination & verify waiting (`fix-implemented-verification-pending`)
+
+- **OS-side fix**: Replaced remaining `text.char_at()` and `text.starts_with()` calls in `src/os/apps/sshd/` (`ssh_identification.spl:ssh_identification_text_to_bytes_stable`, shared byte-prefix helper `ssh_text_starts_with_bytes`, `ssh_remote_shell.spl`, `host_key_loader.spl`, `ssh_sftp_v3.spl`, and `ssh_session_shell_test_ext.spl`) with `text_to_bytes` byte scans. Also fixed `'\r'`/`'\n'` raw-string newline comparison in `SshRemoteShell.feed_remote_input` (`"\r"`/`"\n"`).
+- **Host specs**:
+  - `SIMPLE_LIB=src bin/simple test test/01_unit/os/kernel_bf9/bf9_sshd_byte_pack_and_text_spec.spl --mode=interpreter` -> `3 examples, 0 failures`.
+  - `SIMPLE_LIB=src bin/simple test test/01_unit/os/apps/sshd/ssh_identification_spec.spl test/01_unit/os/apps/sshd/ssh_text_utf8_reject_spec.spl --mode=interpreter`
+- **QEMU/baremetal verification pending**:
+  ```sh
+  sh scripts/os/ssh_multi_cmd.shs && sh scripts/os/ssh_clang_hello_ring3.shs
+  ```

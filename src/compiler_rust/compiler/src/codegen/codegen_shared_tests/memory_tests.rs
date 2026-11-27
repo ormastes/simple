@@ -17,6 +17,7 @@ shared_test!(shared_enum_payload, |f: &mut MirFunction| {
         dest: wrapped,
         enum_name: "Option".to_string(),
         variant_name: "Some".to_string(),
+        discriminant: simple_runtime::value::hash_variant_discriminant("Some"),
         payload,
     });
     block.instructions.push(MirInst::EnumPayload { dest, value: wrapped });
@@ -427,6 +428,7 @@ shared_module_test!(shared_closure_create_and_indirect_call,
             return_type: TypeId::I64,
             args: vec![arg],
             effect: crate::mir::Effect::Compute,
+            signature_declared: false,
         });
         block.terminator = Terminator::Return(Some(dest));
 
@@ -455,6 +457,7 @@ shared_module_test!(shared_closure_create_and_indirect_call,
             return_type: TypeId::I64,
             args: vec![VReg(1)],
             effect: crate::mir::Effect::Compute,
+            signature_declared: false,
         },
     ]
 );

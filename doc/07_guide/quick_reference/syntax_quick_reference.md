@@ -216,11 +216,9 @@ print "Result: {compute()}"         # Expressions allowed
 ### Raw Strings (No Interpolation)
 
 ```text
-# Single quotes = raw string
-val regex = '[a-z]+\d{2,3}'         # No escaping needed
-val path = 'C:\Users\name'          # Backslashes are literal
-
-# r"..." prefix also works
+# Raw text is r"..." (single quotes are char-only, see Text Indexing and ADR-005)
+val regex = r"[a-z]+\d{2,3}"        # No escaping needed
+val path = r"C:\Users\name"         # Backslashes are literal
 val pattern = r"no\escape"
 
 # Triple-quoted strings are raw and may span lines
@@ -300,6 +298,37 @@ val duration = 2_hr                 # Time
 val weight = 5_kg                   # Mass
 val discount = 20_pct               # Percentage (stored as 0.2)
 ```
+
+### Unit Declarations and Constrained Units
+
+Keyword is `unit` only (`newunit` / `newtype` are deprecated spellings and do
+NOT take a constraint).
+
+```text
+unit FreeBytes: i64 as fbytes                    # nominal unit, optional `as suffix`
+unit Speed = Meter / Second                      # declared derived unit
+
+unit Port: u16 as pt where 1 <= self <= 65535    # (a) any predicate on `self`
+unit Port: u16 as pt in 1..=65535                # (b) range sugar: same `where`
+unit Byte: i64 in 0..256                         #     exclusive upper bound
+unit Even: i64 where self % 2 == 0               #     non-range predicate
+```
+
+Both forms register ONE `where` predicate (the range form is rewritten to
+`lo <= self and self <= hi`) through the refinement registry.
+
+```text
+val p = 70000 as Port        # compile error SPL-UNIT-005 (literal out of range)
+val q = Port(70000)          # compile error SPL-UNIT-005
+val r = 70000_pt             # compile error SPL-UNIT-005
+
+val a = Port(raw)            # Result<Port, ConstraintError>: Ok(port) / Err(e)
+val b = raw as Port          # the unit in range; SPL-UNIT-005 error out of range
+```
+
+Predicates may use numbers, `self`, `+ - * / %`, comparisons (chained),
+`and` / `or` / `not` and parentheses. The old `# @unit_range X lo..hi`
+annotation comment of the SFFI scanner is a deprecated alias of `in lo..=hi`.
 
 ---
 
@@ -396,7 +425,69 @@ val s = "Hello, World!"
 s[0:5]                              # "Hello"
 s[7:]                               # "World!"
 s[-6:-1]                            # "World"
+"héllo€"[1..3]                      # "él" once C2 lands (s[a..b] counts code points, like s[i]); bytes until then
+"héllo€".substring(1, 3)            # "é" — substring/slice(a, b) are BYTE offsets
 ```
+
+### Text Indexing and `char` ([ADR-005](../../04_architecture/adr/ADR-005-text-index-yields-char.md))
+
+`s[i]` yields a `char`: a 4-byte Unicode code point value that never
+allocates. It is never an integer and never a 1-character `text`.
+
+```text
+val s = "72é"
+s[0] == '7'                     # char literal: exactly one scalar or escape in single quotes (r"..." is raw text)
+s[2] == 'é'                     # per code point, not per byte
+s[-1] == 'é'                    # negative index counts from the end
+s[0].ord()                          # 55 (code point); same as s[0] as i64
+s[0].to_digit()                     # Some(7); 'a'.to_digit() is None
+s[0].to_text()                      # "7"
+char.from_code(233)                 # 'é'
+s.char_code_at(0)                   # 55 (kept)
+s.byte_at(2)                        # 195 (u8, O(1))
+for c in s.chars(): use(c)          # O(n) iteration yielding char
+s[0..2]                             # "72" (slices stay text)
+s[99]                               # PANIC-W-INDEX: unproven index (ADR-006); use s.char_at_checked(i) ?? c
+s.char_at(99)                       # "" (char_at keeps its over-run policy)
+```
+
+- `c == "7"` and `c + 1` are compile errors: compare with `'7'` or use
+  `c.to_text()` / `c.ord()`.
+- **Staged:** using `s[i]` where an `i64` is expected is a WARNING now and an
+  ERROR after phase 3. `s[i]` is O(1) on ASCII text and O(i) otherwise, so
+  use `s.chars()` or `s.byte_at(i)` in loops (a lint warns on `s[i]` inside
+  `for i in 0..s.len()`). Lexers must use `byte_at` / `char_code_at` with
+  `byte_len()` bounds and cut with `substring`.
+- **Single quotes mean ONLY `char`** (decision 2026-11-03): exactly one Unicode
+  scalar (U+0000..U+10FFFF minus surrogates, 1-4 UTF-8 bytes) or one escape
+  (`'\n'`, `'\''`, `'\u{1F600}'`). `'é'`, `'한'`, `'😀'` are each one char.
+  Multi-scalar text in single quotes is not a char: write `r"..."` (raw) or
+  `"..."`. A user-perceived character can be several scalars (decomposed
+  `e` + U+0301, ZWJ emoji), so `'é'` written decomposed is NOT a valid char
+  literal and stays text; grapheme handling is a separate API.
+- **Length and slicing units (owner decision 2026-11-07,
+  [design](../../05_design/language/text/text_len_counts_characters_2026-11-07.md)):**
+  the index family is character-based and the named byte family is
+  byte-based. `s.len()` (and `s.length()`, `s.char_count()`) = code points;
+  `s[i]` and `s[a..b]` / `s[a:b]` index and slice by code point and are
+  bounded by `len()`. `s.byte_len()` = UTF-8 bytes; `byte_at`, `substring(a, b)`,
+  `slice(a, b)`, `index_of`, `char_code_at`, `to_bytes` are byte-offset APIs.
+  Never mix `len()` with `byte_at`/`substring` on one receiver: a byte scan
+  is bounded by `byte_len()`. Rollout: callers that used `len()` as a byte
+  offset (buffers, protocol framing, base64, SDN/JSON lexers) migrate to
+  `byte_len()` first; then `len()` flips to code points in the interpreter
+  and JIT together (C1); `s[a..b]` flips after its own byte-offset audit (C2).
+  Until each flip lands, that form still counts bytes in both engines. The
+  JIT `byte_len()` boxing gap is fixed
+  (`177e47d13d9`). Spec: `test/01_unit/lib/text/text_len_units_spec.spl`.
+- A `char` is not a condition: `if c:` / `while c:` is a type error. Write
+  `c != '\0'`.
+- Staged warnings (non-exhaustive match, `Any` outside `unsafe:`, char used as
+  `i64`, char-vs-text compare, new `'...'` raw strings) become errors once
+  Windows, macOS and Linux all have a working self-hosted Simple binary.
+- **Lexer switch is staged:** until it lands (after the stage3 self-build
+  passes) the old multi-scalar `'...'` raw-string form still lexes; do not
+  write new ones (`scripts/check/check-no-single-quoted-raw-string.shs`).
 
 ### Bitfield Slicing (`int.bits[lo..hi]`)
 
@@ -504,10 +595,13 @@ val upper = {k.upper(): v for k, v in data}
 
 ## Optional & Null Handling
 
+**Rule:** `nil` is not allowed in safe compiled code. Handle `T?` only via `None`, `.?`, `??`, `if val`, or `match`; `nil` is allowed only inside `unsafe:` blocks and interpreted scripts.
+**One exception — the unit type:** `Nil` is the unit type and `nil` its only value, so `fn f() -> Result<Nil, text>: Ok(nil)` and `-> Nil` / `return nil` are safe. `Nil` never means absence (`Nil?` is rejected). See `doc/07_guide/language/robust_semantic_absence.md` § Unit type.
+
 ### Safe Navigation (`?.`)
 
 ```text
-# Returns nil if any part is nil
+# Returns None if any part is None
 user?.address?.city
 user?.profile?.settings?.theme
 
@@ -533,22 +627,22 @@ val city = user?.address?.city ?? "N/A"
 ### Combining `?.` and `??`
 
 ```text
-# Complete nil-safe access with default
+# Complete None-safe access with default
 val display = user?.profile?.display_name ?? user?.name ?? "Anonymous"
 ```
 
 ### Existence Check (`.?`) — Returns `T?`
 
-The `.?` operator checks if a value is **present** (not nil AND not empty).
-It returns `T?` — the value itself if present, `nil` if absent. This enables
+The `.?` operator checks if a value is **present** (not None AND not empty).
+It returns `T?` — the value itself if present, `None` if absent. This enables
 pattern binding with `if val`:
 
 ```text
-# Returns T? (value if present, nil if absent)
+# Returns T? (value if present, None if absent)
 opt.?                         # T?:    pass-through (already optional)
-list.?                        # [T]?:  Some(list) if non-empty, nil if []
-dict.?                        # {K:V}?: Some(dict) if non-empty, nil if {}
-str.?                         # text?: Some(str) if non-empty, nil if ""
+list.?                        # [T]?:  Some(list) if non-empty, None if []
+dict.?                        # {K:V}?: Some(dict) if non-empty, None if {}
+str.?                         # text?: Some(str) if non-empty, None if ""
 num.?                         # i64?:  Some(num) — primitives always present
 flag.?                        # bool?: Some(flag) — primitives always present
 
@@ -560,7 +654,7 @@ if val name = input.?:
 val host = config_host.? ?? env_host.? ?? "localhost"
 
 # Still works in boolean context (truthiness of T?)
-if str.?:                     # truthy if non-nil, non-empty
+if str.?:                     # truthy if non-None, non-empty
     use(str)
 ```
 
@@ -569,13 +663,13 @@ if str.?:                     # truthy if non-nil, non-empty
 Named alternatives to `.?` for text, providing readable presence checks:
 
 ```text
-# Returns text? — value if non-empty, nil if empty
+# Returns text? — value if non-empty, None if empty
 presence("hello")             # "hello" (text?)
-presence("")                  # nil
+presence("")                  # None
 
 # Returns text? — value if non-blank, nil if empty/whitespace
 presence_trimmed("hello")     # "hello" (text?)
-presence_trimmed("  ")        # nil
+presence_trimmed("  ")        # None
 
 # Pattern binding
 if val name = input.presence:
@@ -589,6 +683,10 @@ val query = user_input.presence_trimmed ?? "default search"
 ```
 
 ### Result with `.?`
+
+For a Result, use `if val value = result.ok.?:` or match `Ok` / `Err`
+explicitly. A bare `if val value = result:` or `while val value = result:`
+is an error; it does not select the Ok payload or bind the whole Result.
 
 ```text
 # Result.ok returns Option, Result.err returns Option
@@ -620,6 +718,10 @@ list.last                     # same as list.last()
 text.trim.upper.split(",")    # split needs parens (has arg)
 ```
 
+`.first`/`.last` return a raw nilable `T?` (nil when the collection is
+empty), not an `Option<T>` — test presence with `.?` or `!= nil`, not
+`.is_some()`.
+
 ### Combining `.?` with No-Paren
 
 ```text
@@ -642,14 +744,14 @@ if val tags = user?.profile?.tags.?:
 | Verbose | Concise | Notes |
 |---------|---------|-------|
 | `if opt.is_some(): use(opt!)` | `if val x = opt.?: use(x)` | Bind + use |
-| `opt.is_none()` | `not opt.?` | Negated existence |
+| `opt.is_none()` | `not opt.?` | Negated existence — **only for scalar `T?`.** On a collection optional (`[T]?`, `text?`) `.?` also treats EMPTY as absent, so `not xs.?` is NOT `xs.is_none()`; keep `is_none()` when empty must mean "present" (e.g. an empty `dir_list_optional` result) |
 | `if s.not_empty: use(s)` | `if val s = s.?: use(s)` | Bind non-empty text |
 | `if s.not_empty: use(s) else: use(d)` | `val s = s.presence ?? d` | With fallback |
 | `s.not_empty` (bool) | `s.presence` (text?) | Value-returning check |
 | `result.is_ok()` | `result.ok.?` | `ok` returns Option |
 | `result.is_err()` | `result.err.?` | `err` returns Option |
 | `list.is_empty()` | `not list.?` | Empty = not present |
-| `list.first().is_some()` | `list.first.?` | No-paren + existence |
+| `list.first != nil` | `list.first.?` | No-paren + existence — `.first`/`.last` return a raw nilable `T?` (nil when empty), not `Option<T>`, so they have no `.is_some()` |
 
 ---
 
@@ -778,6 +880,12 @@ val inc = partial1(add, 1)           # partial1(f, a) → \b: f(a, b)
 
 ## Pattern Matching
 
+**`Some`/`None` patterns require an Option subject.** `match x: Some(j)` where
+`x` is a plain `i64`/`text`/`bool`/`f64`/`char` is `error[SPL-PAT-001]`
+("pattern `Some(_)` expects Option<T>, found i64"). Bind the value directly
+(`val j = x`) or drop the pattern; use `T?` + `if val j = x:` when absence is real.
+`text.index_of` returns `i64` (`-1` on miss), not an Option.
+
 ### Basic Match
 
 Two syntaxes are supported. **Erlang-style `| ->` is preferred** (shorter):
@@ -795,6 +903,35 @@ match value:
     case 1: "one"
     case _("all remaining values use the fallback label"): "other"
 ```
+
+### No Arm Matched Is an Error
+
+A `match` whose scrutinee matches **no arm fails at runtime** — as a statement
+and as an expression alike (owner decision 2026-11-14). It never silently does
+nothing. An arm whose guard is false does not count as matched.
+
+```text
+match n:            # n == 7
+    case 1: print "one"
+    case 2: print "two"
+# error: invalid pattern: match statement exhausted without matching any
+#        pattern for i64 value 7; arms [...]
+```
+
+Say what you mean instead: add the missing arm, or an explicit catch-all when
+doing nothing is really the intent.
+
+```text
+match n:
+    case 1: print "one"
+    case _: pass    # explicit: every other value is ignored on purpose
+```
+
+Seed interpreter: error names the scrutinee type, value, source location and
+arms. Seed JIT/native: `rt_panic` with the same wording and the match line,
+then abort. The pure-Simple core interpreter still warns by default and aborts
+only under the `critical` profile (`doc/07_guide/language/strictness_tiers.md`);
+see `doc/08_tracking/bug/match_statement_no_arm_silent_noop_2026-11-14.md`.
 
 ### Pattern Guards
 
@@ -859,6 +996,12 @@ else:
 
 # Expression form
 val result = if x > 0: "positive" else: "non-positive"
+
+# Expression form, value and else/elif on indented continuation lines
+# (accepted by the seed and the pure-Simple parser)
+r = if n > 0:
+    1
+    else: 2
 ```
 
 ### Chained Comparisons
@@ -896,7 +1039,7 @@ A bare comma pattern is **always** a tuple destructure, of any arity, and
 means exactly what the parenthesized spelling means: `for a, b in xs:` ==
 `for (a, b) in xs:`. The iterable is never consulted. There is no
 "enumerate shorthand" — `for i, x in xs:` over a plain array does NOT give
-you the index; it tries to unpack each element and binds `nil` for the parts
+you the index; it tries to unpack each element and fails to bind the parts
 a non-tuple does not have. Write `xs.enumerate()` when you want positions.
 
 ### While Loops
@@ -908,7 +1051,7 @@ while condition:
 loop:
     match iterator.next():
         Some(item): process(item)
-        nil: break
+        None: break
 ```
 
 ### With Statement (Context Managers)
@@ -936,14 +1079,14 @@ with File.open("in.txt") as input, File.create("out.txt") as output:
 match value:
     Some(x):
         process(x)
-    nil:
+    None:
         ()  # Do nothing, return unit value
 
 # pass keyword - statement style (Python-like)
 match value:
     Some(x):
         process(x)
-    nil:
+    None:
         pass  # Do nothing
 
 # Both are synonyms - choose based on preference:
@@ -1386,14 +1529,19 @@ Writing the group longhand — a trait listing every method of both members —
 remains valid and is what the landed
 `src/lib/common/debug/debug_profiler.spl` does.
 
-Two rules that go with groups and are *not* optional — classes are value types,
-so a mis-shaped group silently does nothing:
+Two rules that go with groups and are *not* optional. `class` values are
+**reference types** on every engine (owner decision 2026-11-06; the seed
+interpreter's shared `Value::ClassInstance` carrier is the default since
+2026-11-04); `struct` values are **value types** that copy on bind, store and
+read-back. A group shaped around a struct therefore silently does nothing:
 
 - A group is **one trait over one value**, acquired through a **single**
   accessor. Never a struct pairing two accessors (that holds two diverging
   copies).
-- Every mutating trait method must be `me`, not `fn`. A `fn` method receives a
-  **copy** and discards mutation with no diagnostic.
+- Every mutating trait method must be `me`, not `fn`. On a `struct` receiver a
+  `fn` method gets a **copy** and discards mutation with no diagnostic; on a
+  `class` receiver the mutation is visible, but `fn` still declares a
+  non-mutating contract.
 
 Full treatment, including the acquisition-position aliasing trap:
 [Authoring a capability library](../language/capability_library_authoring.md).
@@ -1552,3 +1700,14 @@ See [coding_style.md](../language/coding_style.md) for the current inheritance p
 - [../../06_spec/app/compiler/modules/grammar/grammar_reference.md](../../06_spec/app/compiler/modules/grammar/grammar_reference.md) - Grammar registry output
 - [../import_quick_reference.md](import_quick_reference.md) - Import patterns
 - [../../05_design/pipeline_operators_design.md](../../05_design/pipeline_operators_design.md) - Pipeline operator design
+
+---
+
+## Reserved Words Used as Names
+
+`on` is a reserved keyword (it introduces AOP advice: `on pc{...} use X`). It is
+accepted in expressions and as `on = ...` / `on.field`, but a statement that
+starts with `on` followed by anything other than a `pc{...}` pointcut is rejected
+with "`on` is a reserved keyword and cannot be used as an identifier". Pick a
+different name (`enabled`, `is_on`). Bug:
+`doc/08_tracking/bug/on_is_an_undocumented_reserved_word_2026-08-02.md`.

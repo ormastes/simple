@@ -1,0 +1,40 @@
+# Canonical site IDs remain inside the Simple control plane. Only this leaf
+# translates them to LLVM IDs from the issued exact-address manifest.
+use std.common.trace.observer_contract_v1.*
+use std.common.trace.xray_llvm_semantic_map_v1.*
+use std.nogc_sync_mut.trace.xray_llvm_adapter_v1.*
+
+extern fn simple_xray_llvm_resident_publish_v1(descriptor: i64) -> i64
+extern fn simple_xray_llvm_resident_close_v1() -> i64
+extern fn simple_xray_llvm_patch_function(id: i64) -> i64
+extern fn simple_xray_llvm_unpatch_function(id: i64) -> i64
+
+pub class XrayLlvmResidentLeafV1:
+    manifest: XrayLlvmBoundManifestV1
+    descriptor: i64
+    generation: u64
+
+impl XrayLlvmResidentLeafV1:
+    fn llvm_id(site: i64) -> i64:
+        for binding in self.manifest.bindings:
+            if binding.site_id as i64 == site: return binding.llvm_id
+        -1
+
+impl XrayLlvmLeafV1 for XrayLlvmResidentLeafV1:
+    fn sled_kind() -> TraceBackendV1: TraceBackendV1.Llvm
+    fn max_function_id() -> i64: self.manifest.bindings.len()
+    me install(arena: i64, generation: u64, context: u64, module_instance: u64) -> i64:
+        if (arena != self.descriptor or generation != self.generation or
+                module_instance != self.manifest.module_instance): return 0
+        simple_xray_llvm_resident_publish_v1(self.descriptor)
+    me patch_function(id: i64) -> i64:
+        val llvm_id = self.llvm_id(id)
+        if llvm_id <= 0: return -1
+        simple_xray_llvm_patch_function(llvm_id)
+    me unpatch_function(id: i64) -> i64:
+        val llvm_id = self.llvm_id(id)
+        if llvm_id <= 0: return -1
+        simple_xray_llvm_unpatch_function(llvm_id)
+    me close(arena: i64) -> i64:
+        if arena != self.descriptor: return 0
+        simple_xray_llvm_resident_close_v1()

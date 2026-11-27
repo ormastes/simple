@@ -34,8 +34,8 @@
 //! Scope of a name `N` seen from owner `O`: `O`'s own declaration of `N`, else
 //! the declaration named by `O`'s selective import of `N` (aliases and
 //! re-export chains followed through the flattener's import-binding markers),
-//! else unchanged (bare). Glob imports carry no per-name marker and keep the
-//! bare-name meaning.
+//! else the declaration exactly one of `O`'s glob sources (`use m.*`, bare
+//! `use m`) reaches, else unchanged (bare).
 //!
 //! Units with no owner attributes (native-project lane, single files) have
 //! every owner `None`, so no name ever collides and this pass is a no-op.
@@ -75,18 +75,37 @@ fn declaration_owner(
     })
 }
 
-/// `(name, owner, field layout)` of a struct/class declaration.
-fn struct_declaration(node: &Node) -> Option<(&str, Option<String>, Vec<(&str, &Type)>)> {
+/// Layout of a nominal declaration: struct/class fields, or enum variants
+/// with their payload (field name, type) lists.
+type Layout<'a> = Vec<(&'a str, Vec<(Option<&'a str>, &'a Type)>)>;
+
+/// `(name, owner, layout)` of a struct/class/enum declaration.
+fn struct_declaration(node: &Node) -> Option<(&str, Option<String>, Layout<'_>)> {
     match node {
         Node::Struct(s) => Some((
             s.name.as_str(),
             declaration_owner(&s.attributes, &s.methods),
-            s.fields.iter().map(|f| (f.name.as_str(), &f.ty)).collect(),
+            s.fields.iter().map(|f| (f.name.as_str(), vec![(None, &f.ty)])).collect(),
         )),
         Node::Class(c) => Some((
             c.name.as_str(),
             declaration_owner(&c.attributes, &c.methods),
-            c.fields.iter().map(|f| (f.name.as_str(), &f.ty)).collect(),
+            c.fields.iter().map(|f| (f.name.as_str(), vec![(None, &f.ty)])).collect(),
+        )),
+        // Same-named enums with different variant sets collide exactly like
+        // structs with different fields: the registry is keyed by bare name,
+        // so the last registration's variants won and every `E.Variant` of the
+        // other module failed MIR lowering ("unknown variant or method").
+        Node::Enum(e) => Some((
+            e.name.as_str(),
+            declaration_owner(&e.attributes, &e.methods),
+            e.variants
+                .iter()
+                .map(|v| {
+                    let payload = v.fields.iter().flatten().map(|f| (f.name.as_deref(), &f.ty)).collect();
+                    (v.name.as_str(), payload)
+                })
+                .collect(),
         )),
         _ => None,
     }
@@ -94,7 +113,7 @@ fn struct_declaration(node: &Node) -> Option<(&str, Option<String>, Vec<(&str, &
 
 fn census(items: &[Node]) -> FlattenStructOwners {
     let mut owners: FlattenStructOwners = HashMap::new();
-    let mut layouts: HashMap<&str, Vec<Vec<(&str, &Type)>>> = HashMap::new();
+    let mut layouts: HashMap<&str, Vec<Layout<'_>>> = HashMap::new();
     for item in items {
         if let Some((name, owner, fields)) = struct_declaration(item) {
             owners.entry(name.to_string()).or_default().push(owner);
@@ -110,11 +129,57 @@ fn census(items: &[Node]) -> FlattenStructOwners {
     owners
 }
 
-/// Owner-exact symbol of the struct/class `name` as seen from `current`, or
-/// `None` when nothing attributes it (keep the bare-name lookup).
+/// Importer owner key -> modules it glob-imports (`use m.*`, bare `use m`).
+pub(crate) type FlattenGlobSources = HashMap<String, Vec<String>>;
+
+/// Owner-exact symbol of the colliding declaration `name` reachable from
+/// module `owner`: its own declaration, else the one its selective import of
+/// the name designates, else the one exactly ONE of its glob sources reaches
+/// (two distinct glob candidates are ambiguous -> `None`, bare meaning kept).
+fn resolve_through(
+    owners: &FlattenStructOwners,
+    bindings: &FlattenImportBindings,
+    globs: &FlattenGlobSources,
+    owner: &str,
+    name: &str,
+    hops: usize,
+    seen: &mut std::collections::HashSet<(String, String)>,
+) -> Option<String> {
+    // Each (module, name) is visited once: bounds the glob walk and breaks
+    // import cycles.
+    if hops > MAX_REEXPORT_HOPS || !seen.insert((owner.to_string(), name.to_string())) {
+        return None;
+    }
+    if let Some(list) = owners.get(name) {
+        if list.iter().any(|declared| declared.as_deref() == Some(owner)) {
+            return Some(flattened_global_symbol(list, Some(owner), name));
+        }
+    }
+    if let Some((source_owner, source_name)) = bindings.get(owner).and_then(|imports| imports.get(name)) {
+        // Selective import (or re-export facade): follow the source module.
+        return resolve_through(owners, bindings, globs, source_owner, source_name, hops + 1, seen);
+    }
+    let mut found: Option<String> = None;
+    for glob_owner in globs.get(owner).into_iter().flatten() {
+        if glob_owner == owner {
+            continue;
+        }
+        if let Some(symbol) = resolve_through(owners, bindings, globs, glob_owner, name, hops + 1, seen) {
+            match &found {
+                Some(previous) if previous != &symbol => return None,
+                _ => found = Some(symbol),
+            }
+        }
+    }
+    found
+}
+
+/// Owner-exact symbol of the struct/class/enum `name` as seen from `current`,
+/// or `None` when nothing attributes it (keep the bare-name lookup).
 pub(crate) fn resolve_owned_struct(
     owners: &FlattenStructOwners,
     bindings: &FlattenImportBindings,
+    globs: &FlattenGlobSources,
     current: Option<&str>,
     name: &str,
 ) -> Option<String> {
@@ -123,20 +188,8 @@ pub(crate) fn resolve_owned_struct(
             return Some(flattened_global_symbol(list, current, name));
         }
     }
-    let mut importer = current.unwrap_or("<entry>");
-    let mut local = name;
-    for _ in 0..MAX_REEXPORT_HOPS {
-        let (source_owner, source_name) = bindings.get(importer)?.get(local)?;
-        if let Some(list) = owners.get(source_name) {
-            if list.iter().any(|owner| owner.as_deref() == Some(source_owner.as_str())) {
-                return Some(flattened_global_symbol(list, Some(source_owner), source_name));
-            }
-        }
-        // Re-export facade: follow the source module's own import of the name.
-        importer = source_owner;
-        local = source_name;
-    }
-    None
+    let mut seen = std::collections::HashSet::new();
+    resolve_through(owners, bindings, globs, current.unwrap_or("<entry>"), name, 0, &mut seen)
 }
 
 /// Every bare (or aliased) name whose meaning from `current` differs from the
@@ -144,11 +197,12 @@ pub(crate) fn resolve_owned_struct(
 pub(crate) fn struct_scope_for(
     owners: &FlattenStructOwners,
     bindings: &FlattenImportBindings,
+    globs: &FlattenGlobSources,
     current: Option<&str>,
 ) -> FlattenStructScope {
     let mut scope = FlattenStructScope::new();
     for name in owners.keys() {
-        if let Some(symbol) = resolve_owned_struct(owners, bindings, current, name) {
+        if let Some(symbol) = resolve_owned_struct(owners, bindings, globs, current, name) {
             if &symbol != name {
                 scope.insert(name.clone(), symbol);
             }
@@ -159,7 +213,7 @@ pub(crate) fn struct_scope_for(
             if scope.contains_key(local) || owners.contains_key(local) {
                 continue;
             }
-            if let Some(symbol) = resolve_owned_struct(owners, bindings, current, local) {
+            if let Some(symbol) = resolve_owned_struct(owners, bindings, globs, current, local) {
                 if &symbol != local {
                     scope.insert(local.clone(), symbol);
                 }
@@ -236,6 +290,7 @@ fn rewrite_signature(function: &mut simple_parser::ast::FunctionDef, scope: &Fla
 pub(crate) fn module_with_owner_qualified_structs(
     ast_module: &Module,
     bindings: &FlattenImportBindings,
+    globs: &FlattenGlobSources,
 ) -> Result<Option<(Module, FlattenStructOwners)>, String> {
     let owners = census(&ast_module.items);
     if owners.is_empty() {
@@ -245,7 +300,7 @@ pub(crate) fn module_with_owner_qualified_structs(
     let mut scope_of = |owner: &Option<String>| -> FlattenStructScope {
         scopes
             .entry(owner.clone())
-            .or_insert_with(|| struct_scope_for(&owners, bindings, owner.as_deref()))
+            .or_insert_with(|| struct_scope_for(&owners, bindings, globs, owner.as_deref()))
             .clone()
     };
 
@@ -303,7 +358,11 @@ pub(crate) fn module_with_owner_qualified_structs(
                 }
             }
             Node::Enum(e) => {
-                let scope = scope_of(&declaration_owner(&e.attributes, &e.methods));
+                let owner = declaration_owner(&e.attributes, &e.methods);
+                if let Some(list) = owners.get(&e.name) {
+                    e.name = flattened_global_symbol(list, owner.as_deref(), &e.name);
+                }
+                let scope = scope_of(&owner);
                 for variant in &mut e.variants {
                     if let Some(fields) = &mut variant.fields {
                         fields.iter_mut().for_each(|field| rewrite_type(&mut field.ty, &scope));

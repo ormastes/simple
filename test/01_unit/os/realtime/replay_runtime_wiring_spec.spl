@@ -1,0 +1,195 @@
+# @cover src/os/realtime/scheduler.spl
+# @cover src/os/realtime/irq.spl
+# @session:mutating
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-DHR-05
+# plan: doc/03_plan/app/debug/dhr_debug_spy_replay_recovery_plan_2026-11-17.md
+#
+# DHR P6 runtime wiring: the REAL realtime scheduler (sched_switch, sched_tick)
+# and IRQ dispatch (irq_dispatch) enforce the replay hooks' return values.
+# timer_isr itself is not executed here (its arch acks are MMIO); it calls
+# sched_tick, which is the tick path these examples drive.
+
+use std.spec.*
+use std.replay.bm_replay_core.{bm_ring_init}
+use std.replay.portable_replay.{portable_replay_reset, PR_FAIL_CLOSED_VALUE}
+use os.realtime.replay.mode.{rtos_replay_set_mode}
+use os.realtime.replay.hooks.{rr_divergence_count, rr_reset_divergences, rr_event_count}
+use os.realtime.task.{task_table_init, task_create, task_delete, task_get, task_set_state,
+    TASK_STATE_READY, TASK_STATE_RUNNING, TASK_STATE_BLOCKED}
+use os.realtime.scheduler.{sched_init, sched_add, sched_pick, sched_tick, sched_switch,
+    sched_get_current, sched_get_tick, sched_set_tick, sched_set_current, NO_TASK}
+use os.realtime.irq.{irq_init, irq_bind, irq_dispatch}
+
+val OFF: i32 = 0
+val RECORD: i32 = 1
+val REPLAY: i32 = 2
+
+fn _reset():
+    rtos_replay_set_mode(OFF)
+    bm_ring_init()
+    portable_replay_reset()
+    rr_reset_divergences()
+    task_table_init()
+    var i = 0
+    while i < 16:
+        task_delete(i)
+        i = i + 1
+    sched_init()
+    irq_init()
+
+fn _task(priority: i32) -> i32:
+    task_create(priority, 0u64, 0u64, 0u32, "t")
+
+fn _state(id: i32) -> i32:
+    task_get(id).state
+
+describe "realtime scheduler pick enforces rr_hook_schedule":
+    it "Off dispatches the live pick and logs nothing":
+        _reset()
+        val a = _task(1)
+        val b = _task(2)
+        sched_add(a, 1)
+        sched_add(b, 2)
+        sched_tick()
+        sched_switch()
+        expect(sched_get_current()).to_equal(a)
+        expect(_state(a)).to_equal(TASK_STATE_RUNNING)
+        expect(sched_get_tick()).to_equal(1u64)
+        expect(rr_event_count()).to_equal(0)
+
+    it "Replay follows the logged tid over a different live pick":
+        _reset()
+        val a = _task(1)
+        val b = _task(1)
+        rtos_replay_set_mode(RECORD)
+        sched_add(a, 1)
+        sched_add(b, 1)
+        sched_tick()
+        sched_switch()
+        expect(sched_get_current()).to_equal(a)
+        sched_init()
+        task_set_state(a, TASK_STATE_READY)
+        rtos_replay_set_mode(REPLAY)
+        sched_add(b, 1)
+        sched_add(a, 1)
+        sched_tick()
+        sched_switch()
+        expect(sched_get_current()).to_equal(a)
+        expect(_state(a)).to_equal(TASK_STATE_RUNNING)
+        expect(_state(b)).to_equal(TASK_STATE_READY)
+        expect(rr_divergence_count()).to_equal(0)
+        rtos_replay_set_mode(OFF)
+        expect(sched_pick()).to_equal(b)
+
+    it "Replay of a logged tid that is not runnable dispatches nothing":
+        _reset()
+        val a = _task(1)
+        val b = _task(1)
+        rtos_replay_set_mode(RECORD)
+        sched_add(a, 1)
+        sched_tick()
+        sched_switch()
+        expect(sched_get_current()).to_equal(a)
+        sched_init()
+        task_set_state(a, TASK_STATE_BLOCKED)
+        rtos_replay_set_mode(REPLAY)
+        sched_add(b, 1)
+        sched_tick()
+        sched_switch()
+        expect(sched_get_current()).to_equal(NO_TASK)
+        expect(_state(a)).to_equal(TASK_STATE_BLOCKED)
+        expect(_state(b)).to_equal(TASK_STATE_READY)
+        expect(rr_divergence_count()).to_equal(1)
+        rtos_replay_set_mode(OFF)
+        expect(sched_pick()).to_equal(b)
+
+    it "Replay of an exhausted log dispatches nothing, never the live pick":
+        _reset()
+        val a = _task(1)
+        sched_add(a, 1)
+        sched_tick()
+        rtos_replay_set_mode(REPLAY)
+        sched_switch()
+        expect(sched_get_current()).to_equal(NO_TASK)
+        expect(_state(a)).to_equal(TASK_STATE_READY)
+        expect(rr_divergence_count()).to_equal(1)
+        rtos_replay_set_mode(OFF)
+        expect(sched_pick()).to_equal(a)
+
+describe "realtime tick path enforces rr_hook_timer_tick":
+    it "Off advances the live tick and logs nothing":
+        _reset()
+        sched_set_tick(40u64)
+        sched_tick()
+        expect(sched_get_tick()).to_equal(41u64)
+        expect(rr_event_count()).to_equal(0)
+
+    it "Replay uses the logged ticks, then fails closed when the log is exhausted":
+        _reset()
+        rtos_replay_set_mode(RECORD)
+        sched_tick()
+        sched_tick()
+        expect(sched_get_tick()).to_equal(2u64)
+        expect(rr_event_count()).to_equal(2)
+        sched_init()
+        sched_set_tick(40u64)
+        rtos_replay_set_mode(REPLAY)
+        sched_tick()
+        expect(sched_get_tick()).to_equal(1u64)
+        sched_tick()
+        expect(sched_get_tick()).to_equal(2u64)
+        expect(rr_divergence_count()).to_equal(0)
+        sched_tick()
+        expect(sched_get_tick()).to_equal(PR_FAIL_CLOSED_VALUE.to_u64())
+        expect(rr_divergence_count()).to_equal(1)
+
+describe "realtime IRQ dispatch enforces rr_hook_irq":
+    it "Off delivers and wakes the bound handler task, logging nothing":
+        _reset()
+        val c = _task(3)
+        val h = _task(1)
+        sched_set_current(c)
+        task_set_state(h, TASK_STATE_BLOCKED)
+        expect(irq_bind(5, h)).to_equal(true)
+        expect(irq_dispatch(5)).to_equal(true)
+        expect(_state(h)).to_equal(TASK_STATE_READY)
+        expect(rr_event_count()).to_equal(0)
+
+    it "Replay delivers the logged vector":
+        _reset()
+        val c = _task(3)
+        val h = _task(1)
+        sched_set_current(c)
+        irq_bind(5, h)
+        task_set_state(h, TASK_STATE_BLOCKED)
+        rtos_replay_set_mode(RECORD)
+        expect(irq_dispatch(5)).to_equal(true)
+        sched_init()
+        sched_set_current(c)
+        task_set_state(h, TASK_STATE_BLOCKED)
+        rtos_replay_set_mode(REPLAY)
+        expect(irq_dispatch(5)).to_equal(true)
+        expect(_state(h)).to_equal(TASK_STATE_READY)
+        expect(rr_divergence_count()).to_equal(0)
+
+    it "Replay does not deliver a mismatched vector":
+        _reset()
+        val c = _task(3)
+        val h = _task(1)
+        val g = _task(1)
+        sched_set_current(c)
+        irq_bind(5, h)
+        irq_bind(6, g)
+        task_set_state(h, TASK_STATE_BLOCKED)
+        task_set_state(g, TASK_STATE_BLOCKED)
+        rtos_replay_set_mode(RECORD)
+        expect(irq_dispatch(5)).to_equal(true)
+        sched_init()
+        sched_set_current(c)
+        task_set_state(h, TASK_STATE_BLOCKED)
+        rtos_replay_set_mode(REPLAY)
+        expect(irq_dispatch(6)).to_equal(false)
+        expect(_state(g)).to_equal(TASK_STATE_BLOCKED)
+        expect(_state(h)).to_equal(TASK_STATE_BLOCKED)
+        expect(rr_divergence_count()).to_equal(1)

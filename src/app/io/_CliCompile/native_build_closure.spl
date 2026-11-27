@@ -1,3 +1,6 @@
+use compiler.common.cache.visibility_manifest_read_v1.{visibility_manifest_reads_v1,
+    visibility_manifest_roots_valid_v1, visibility_manifest_reads_prevalidated_v1}
+use app.compiler_entrypoint.source_authority.{compiler_source_authority_open_published_v1, compiler_source_authority_visibility_maps_v1}
 # Entry-closure walker for `native-build --entry-closure`, split out of
 # compile_targets.spl so the slim parse-shard entry
 # (src/app/cli/parse_shard_main.spl) can compute the same source set without
@@ -9,32 +12,42 @@ use app.io.env_ops (env_get, env_set)
 use app.compiler_entrypoint.source_authority.{compiler_source_authority_acquire_v1,
     compiler_source_authority_inherit_v1, compiler_source_authority_publish_v1,
     compiler_source_authority_clear_v1}
-use app.compiler_entrypoint.derived_composition.{compiler_cuda_composition_root_v1}
+use app.compiler_entrypoint.derived_composition.{compiler_cuda_composition_root_v1, compiler_cuda_composition_selector_v1}
 use std.scv.compile_source_inventory.{compile_source_inventory_plain_checkout_v1,
     compile_source_inventory_checkout_cache_root_v1}
 use app.io.time_ops (time_now_unix_micros)
 use app.cli.native_build_warm_receipt.{native_build_warm_candidate_publish}
+use compiler.driver.driver_library_mode_resolution_v1.{driver_library_mode_resolve_v1,
+    driver_library_mode_native_owner_v1}
 use app.io._CliCompile.native_build_snapshot_roots.{native_build_snapshot_source_roots_v1}
 use std.nogc_sync_mut.io.file_ops.{file_exists}
 use std.nogc_sync_mut.io.process_ops.{eprint}
-use compiler.driver.driver_source_loading.{
+use compiler.driver.driver_entry_closure_core.{
     _driver_text_bucket_set_new,
     _driver_cached_entry_source_scan, driver_closure_scan_phase_trace,
     _driver_entry_import_dirname, _driver_physical_source_key,
     driver_resolve_closure_import_v1, driver_closure_native_owner_v1,
-    driver_closure_import_specs_v1, driver_closure_importer_module_v1
+    driver_closure_import_specs_v1, driver_closure_importer_module_v1,
+    driver_entry_scan_cache_release
 }
 use compiler.common.source_root_resolution.{SourceRootResolutionV1}
+use app.io._CliCompile.native_build_mcdc_closure.{native_build_mcdc_closure_spec_v1}
+use app.cli.native_build_parse_closure_scratch.{native_build_parse_closure_stage_end_v1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause,
+    transient_scope_end}
+use std.nogc_sync_mut.fs.host_path.{host_path_release_cached_platform_v1}
 use std.scv.compile_snapshot.{
     scv_compile_snapshot_open_v1
 }
 @unsafe(reason: "raw path expansion; empty text is the invalid-or-expansion-failure sentinel", capabilities: [ffi])
-extern fn rt_path_absolute(path: text) -> text
+# Nil when a relative path cannot be resolved (cwd unreadable); never the input.
+extern fn rt_path_absolute(path: text) -> text?
 
 fn _nb_file_exists_raw(path: text) -> bool:
     file_exists(path)
 
-fn _nb_path_absolute_raw(path: text) -> text:
+@representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in _nb_path_absolute_raw", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
+fn _nb_path_absolute_raw(path: text) -> text?:
     unsafe(capabilities: [ffi]):
         rt_path_absolute(path)
 
@@ -50,7 +63,7 @@ fn _nb_basename(path: text) -> text:
 fn _nb_trim_trailing_slashes(path: text) -> text:
     var p = path
     while p.len() > 1 and p.ends_with("/"):
-        p = p.substring(0, p.len() - 1)
+        p = p.substring(0, p.byte_len() - 1)
     p
 
 fn _nb_source_dirs_cover_workspace(source_dirs: [text]) -> bool:
@@ -123,9 +136,13 @@ pub fn native_build_closure_release_snapshot_memo_v1():
     _nb_scv_snapshot_inventory_v1 = ""
 
 fn _nb_scv_relative_path_v1(path: text) -> text:
-    val root = _nb_trim_trailing_slashes(
-        _nb_path_absolute_raw(".").replace("\\", "/"))
-    val absolute = _nb_path_absolute_raw(path).replace("\\", "/")
+    val root_abs = _nb_path_absolute_raw(".")
+    val path_abs = _nb_path_absolute_raw(path)
+    if root_abs.is_none() or path_abs.is_none():
+        # "" is this fn's documented "not under the checkout" result.
+        return ""
+    val root = _nb_trim_trailing_slashes(root_abs.unwrap().replace("\\", "/"))
+    val absolute = path_abs.unwrap().replace("\\", "/")
     if root == "" or absolute == "":
         return ""
     if absolute == root:
@@ -133,24 +150,39 @@ fn _nb_scv_relative_path_v1(path: text) -> text:
     val prefix = root + "/"
     if not absolute.starts_with(prefix):
         return ""
-    absolute.substring(prefix.len(), absolute.len())
+    absolute.substring(prefix.len(), absolute.byte_len())
+
+fn _nb_scv_snapshot_build_path_v1(checkout: text, snapshot_root: text, path: text, relative: text) -> text:
+    # Ordinary generated sources are admitted verbatim. Only CUDA composition
+    # selectors map back to their canonical source records.
+    if compiler_cuda_composition_selector_v1(relative):
+        val derived = compiler_cuda_composition_root_v1(
+            checkout, snapshot_root, path, false)
+        if derived.is_err(): return ""
+        return snapshot_root + "/" + derived.unwrap()
+    snapshot_root + "/" + relative
 
 fn _nb_scv_snapshot_path_v1(path: text) -> text:
-    val absolute = _nb_path_absolute_raw(path).replace("\\", "/")
-    val snapshot_absolute = _nb_path_absolute_raw(
-        _nb_scv_snapshot_root_v1).replace("\\", "/")
-    if snapshot_absolute != "" and (absolute == snapshot_absolute or
-            absolute.starts_with(snapshot_absolute + "/")):
-        return absolute
+    val path_abs = _nb_path_absolute_raw(path)
+    if path_abs.is_none():
+        # "" is this fn's documented "no snapshot path" result.
+        return ""
+    val absolute = path_abs.unwrap().replace("\\", "/")
+    val snapshot_abs = _nb_path_absolute_raw(_nb_scv_snapshot_root_v1)
+    if snapshot_abs.is_some():
+        val snapshot_absolute = snapshot_abs.unwrap().replace("\\", "/")
+        if snapshot_absolute != "" and (absolute == snapshot_absolute or
+                absolute.starts_with(snapshot_absolute + "/")):
+            return absolute
     val relative = _nb_scv_relative_path_v1(path)
     if relative == "" or _nb_scv_snapshot_root_v1 == "":
         return ""
     if relative.starts_with("build/"):
-        val checkout = _nb_trim_trailing_slashes(_nb_path_absolute_raw(".").replace("\\", "/"))
-        val derived = compiler_cuda_composition_root_v1(
-            checkout, _nb_scv_snapshot_root_v1, path, false)
-        if derived.is_err(): return ""
-        return _nb_scv_snapshot_root_v1 + "/" + derived.unwrap()
+        val checkout_abs = _nb_path_absolute_raw(".")
+        if checkout_abs.is_none(): return ""
+        val checkout = _nb_trim_trailing_slashes(checkout_abs.unwrap().replace("\\", "/"))
+        return _nb_scv_snapshot_build_path_v1(
+            checkout, _nb_scv_snapshot_root_v1, path, relative)
     _nb_scv_snapshot_root_v1 + "/" + relative
 
 fn _nb_scv_key_v1(entry: text, source_dirs: [text], revision: text) -> text:
@@ -208,7 +240,11 @@ fn _nb_scv_freeze_v1(entry: text, source_dirs: [text]) -> (bool, text, [text]):
             var inventory_roots = effective_roots
             if not inventory_roots.contains(entry):
                 inventory_roots = inventory_roots.push(entry)
-            val root = compile_source_inventory_plain_checkout_v1(_nb_path_absolute_raw("."))
+            val checkout_abs = _nb_path_absolute_raw(".")
+            if checkout_abs.is_none():
+                _cli_eprint("SCV-E-SOURCE-AUTHORITY: checkout root unresolvable (current directory unreadable)")
+                return (false, "", [])
+            val root = compile_source_inventory_plain_checkout_v1(checkout_abs.unwrap())
             val cache_root = compile_source_inventory_checkout_cache_root_v1(root)
             val authority = compiler_source_authority_acquire_v1(
                 root, cache_root, inventory_roots,
@@ -263,7 +299,82 @@ fn _nb_normalize_source_dirs(source_dirs: [text]) -> [text]:
         result = result.push(candidate)
     result
 
-pub fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
+# Live state carried between bounded coordinator walk stages. Source text,
+# resolver answers, and visibility observations deliberately stay outside.
+struct NativeBuildClosureChunkV1:
+    queue: [text]
+    discovered: Dict<text, bool>
+    result: [text]
+    resolve_cache: Dict<text, text>
+    frozen: bool
+    frozen_entry: text
+    frozen_source_dirs: [text]
+    closure_source_dirs: [text]
+    manifest_inventory: Dict<text, text>
+    manifest_selected: Dict<text, text>
+    manifest_snapshot_id: text
+    library_mode: text
+    qi: i64
+    snapshot_key: text
+    snapshot_root: text
+    snapshot_revision: text
+    snapshot_commit: text
+    snapshot_tree: text
+    snapshot_inventory: text
+
+fn _nb_closure_text_array_copy_v1(items: [text]) -> [text]:
+    var out: [text] = []
+    for item in items:
+        out = out.push(item)
+    out
+
+fn _nb_closure_bool_dict_copy_v1(items: Dict<text, bool>) -> Dict<text, bool>:
+    var out: Dict<text, bool> = {}
+    for key in items.keys():
+        out[key] = items[key]
+    out
+
+fn _nb_closure_text_dict_copy_v1(items: Dict<text, text>) -> Dict<text, text>:
+    var out: Dict<text, text> = {}
+    for key in items.keys():
+        out[key] = items[key]
+    out
+
+fn _nb_closure_chunk_checkpoint_v1(mut state: NativeBuildClosureChunkV1) -> bool:
+    val paused = transient_scope_pause()
+    driver_entry_scan_cache_release()
+    host_path_release_cached_platform_v1()
+    if not paused:
+        val _ended = transient_scope_end()
+        driver_entry_scan_cache_release()
+        host_path_release_cached_platform_v1()
+        return false
+    if not native_build_parse_closure_stage_end_v1(state):
+        return false
+    # Unlike the final publication checkpoint, the walk still needs its frozen
+    # snapshot mapping. Restore only the adopted strings, never old scope data.
+    _nb_scv_snapshot_key_v1 = state.snapshot_key
+    _nb_scv_snapshot_root_v1 = state.snapshot_root
+    _nb_scv_snapshot_revision_v1 = state.snapshot_revision
+    _nb_scv_snapshot_commit_v1 = state.snapshot_commit
+    _nb_scv_snapshot_tree_v1 = state.snapshot_tree
+    _nb_scv_snapshot_inventory_v1 = state.snapshot_inventory
+    if not transient_scope_begin():
+        return false
+    # Adoption prunes already-session-owned containers. Mutable BFS containers
+    # therefore need fresh transient heads; entries added in this next stage
+    # would otherwise be freed at the following checkpoint.
+    state.queue = _nb_closure_text_array_copy_v1(state.queue)
+    state.result = _nb_closure_text_array_copy_v1(state.result)
+    state.discovered = _nb_closure_bool_dict_copy_v1(state.discovered)
+    state.resolve_cache = _nb_closure_text_dict_copy_v1(state.resolve_cache)
+    true
+
+pub fn _native_build_entry_closure(entry: text, source_dirs: [text], library_mode: text = "") -> [text]:
+    _native_build_entry_closure_chunked_v1(entry, source_dirs, library_mode, 0)
+
+pub fn _native_build_entry_closure_chunked_v1(entry: text, source_dirs: [text],
+        library_mode: text = "", checkpoint_every: i64 = 0) -> [text]:
     # BFS the entry's import closure so --entry-closure compiles only reachable
     # modules (one `main`), not every file in the --source dirs. Over-approximates
     # safely: an unresolved `use` is skipped; a genuinely missing import still
@@ -327,8 +438,27 @@ pub fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
             "snapshot (weaker consistency guarantee: a concurrent edit is " +
             "not guaranteed to be seen atomically)")
     _nb_scv_unfrozen_closure_v1 = not frozen.0
-    val frozen_entry = if frozen.0: frozen.1 else: entry
-    val frozen_source_dirs = if frozen.0: frozen.2 else: source_dirs
+    var frozen_snapshot = frozen.0
+    var frozen_entry = if frozen.0: frozen.1 else: entry
+    var frozen_source_dirs = if frozen.0: frozen.2 else: source_dirs
+    var manifest_inventory: Dict<text, text> = {}
+    var manifest_selected: Dict<text, text> = {}
+    var manifest_snapshot_id = ""
+    if frozen_snapshot:
+        val checkout = _nb_path_absolute_raw(".")
+        if checkout.is_none(): return []
+        val authority_root = compile_source_inventory_plain_checkout_v1(checkout.unwrap())
+        val authority = compiler_source_authority_open_published_v1(authority_root)
+        if not authority.valid or authority.snapshot.snapshot_root != _nb_scv_snapshot_root_v1:
+            _cli_eprint("visibility manifest snapshot authority mismatch")
+            return []
+        val maps = compiler_source_authority_visibility_maps_v1(authority_root, authority)
+        if maps.is_err():
+            _cli_eprint(maps.unwrap_err())
+            return []
+        manifest_inventory = maps.unwrap().0
+        manifest_selected = maps.unwrap().1
+        manifest_snapshot_id = authority.snapshot.revision_id + ":" + authority.snapshot.inventory_digest
     val trace_closure = (env_get("SIMPLE_NATIVE_BUILD_TRACE_CLOSURE") ?? "") == "1"
     # Level-gated, default-off per-file timing probe. The 25-file checkpoint
     # above only shows aggregate progress; this prints a per-file elapsed-us
@@ -341,15 +471,55 @@ pub fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
     discovered[_driver_physical_source_key(frozen_entry)] = true
     var result: [text] = []
     var resolve_cache: Dict<text, text> = {}
-    val closure_source_dirs = _nb_normalize_source_dirs(frozen_source_dirs)
+    var closure_source_dirs = _nb_normalize_source_dirs(frozen_source_dirs)
+    var walk_library_mode = library_mode
+    val visibility_roots_prevalidated = frozen_snapshot and
+        visibility_manifest_roots_valid_v1(_nb_scv_snapshot_root_v1, frozen_source_dirs) == ""
     var qi = 0
     var timing_file_start_us: i64 = 0
     while qi < queue.len():
+        if checkpoint_every > 0 and result.len() > 0 and
+                result.len() % checkpoint_every == 0 and qi < queue.len():
+            var chunk = NativeBuildClosureChunkV1(queue, discovered, result, resolve_cache,
+                frozen_snapshot, frozen_entry, frozen_source_dirs, closure_source_dirs,
+                manifest_inventory, manifest_selected, manifest_snapshot_id, walk_library_mode, qi,
+                _nb_scv_snapshot_key_v1, _nb_scv_snapshot_root_v1,
+                _nb_scv_snapshot_revision_v1, _nb_scv_snapshot_commit_v1,
+                _nb_scv_snapshot_tree_v1, _nb_scv_snapshot_inventory_v1)
+            if not _nb_closure_chunk_checkpoint_v1(chunk):
+                _cli_eprint("native-build: closure chunk scratch retirement failed")
+                return []
+            queue = chunk.queue
+            discovered = chunk.discovered
+            result = chunk.result
+            resolve_cache = chunk.resolve_cache
+            frozen_snapshot = chunk.frozen
+            frozen_entry = chunk.frozen_entry
+            frozen_source_dirs = chunk.frozen_source_dirs
+            closure_source_dirs = chunk.closure_source_dirs
+            manifest_inventory = chunk.manifest_inventory
+            manifest_selected = chunk.manifest_selected
+            manifest_snapshot_id = chunk.manifest_snapshot_id
+            walk_library_mode = chunk.library_mode
+            qi = chunk.qi
         val f = queue[qi]
         qi = qi + 1
         if trace_timing:
             timing_file_start_us = time_now_unix_micros()
         result.append(f)
+        if frozen_snapshot:
+            # Validate policy inputs in the same frozen snapshot, but do not
+            # traverse their imports. Only actual source imports add compile
+            # dependencies; the worker parses ancestor policy records alone.
+            val observations = if visibility_roots_prevalidated:
+                visibility_manifest_reads_prevalidated_v1(f, _nb_scv_snapshot_root_v1,
+                    manifest_snapshot_id, manifest_inventory, manifest_selected)
+            else:
+                visibility_manifest_reads_v1(f, _nb_scv_snapshot_root_v1,
+                    frozen_source_dirs, manifest_snapshot_id, manifest_inventory, manifest_selected)
+            if observations.is_err():
+                _cli_eprint(observations.unwrap_err())
+                return []
         # A start marker must precede the cached scan: completion-only timing
         # cannot identify the physical source when that scan itself times out.
         driver_closure_scan_phase_trace("closure_node:start", f)
@@ -363,10 +533,15 @@ pub fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
             _cli_eprint("[native-build] closure entry read len={content.len()}")
         if trace_closure and result.len() % 25 == 0:
             _cli_eprint("[native-build] closure visited {result.len()} queued={queue.len()} file={f}")
+        elif result.len() % 500 == 0:
+            _cli_eprint("[native-build] closure progress visited={result.len()} queued={queue.len()}")
         # Import specs, resolution, and native-owner preference are the
         # driver worker walk's own functions (driver_resolve_closure_import_v1):
         # the two walks must bind every spelling to the same physical file.
-        val module_paths = driver_closure_import_specs_v1(f)
+        var module_paths = driver_closure_import_specs_v1(f)
+        if f == frozen_entry:
+            val mcdc_spec = native_build_mcdc_closure_spec_v1(env_get("SIMPLE_MCDC_MODE") ?? "")
+            if mcdc_spec != "": module_paths.push(mcdc_spec)
         val importer_dir = _driver_entry_import_dirname(f)
         val importer_module = driver_closure_importer_module_v1(f)
         for mp in module_paths:
@@ -376,11 +551,15 @@ pub fn _native_build_entry_closure(entry: text, source_dirs: [text]) -> [text]:
             if resolve_cache.has(cache_key):
                 rp = resolve_cache[cache_key]
             else:
-                val selected = driver_resolve_closure_import_v1(mp, closure_source_dirs, importer_dir)
+                val selected = match driver_library_mode_resolve_v1(mp, closure_source_dirs, importer_dir, walk_library_mode, importer_module):
+                    case Ok(value): value
+                    case Err(reason):
+                        _cli_eprint(reason)
+                        return []
                 match selected:
                     case SourceRootResolutionV1.Found(path):
                         val spelling = if mp.starts_with(".") and not mp.starts_with(".."): importer_module + mp else: mp
-                        rp = driver_closure_native_owner_v1(path, spelling, importer_dir)
+                        rp = driver_library_mode_native_owner_v1(path, spelling, importer_dir, walk_library_mode, importer_module)
                     case SourceRootResolutionV1.Missing: ()
                     case SourceRootResolutionV1.Ambiguous(directory):
                         _cli_eprint("SOURCE_ROOT_AMBIGUOUS: import '{mp}' has competing numbered directories under '{directory}'")

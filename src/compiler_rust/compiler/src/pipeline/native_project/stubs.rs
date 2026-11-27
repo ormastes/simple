@@ -2,6 +2,8 @@
 
 use std::path::{Path, PathBuf};
 
+use object::{Object, ObjectKind, ObjectSymbol};
+use rayon::prelude::*;
 use simple_common::target::TargetOS;
 
 use super::{effective_target, ModuleImports};
@@ -956,6 +958,71 @@ pub(crate) fn generate_stub_object_freestanding(
     Err(format!("failed to compile freestanding stubs: {}", last_stderr))
 }
 
+/// Read defined and undefined global symbol names from an object file or archive.
+///
+/// ELF relocatable objects are parsed in-process so Linux/FreeBSD links do not
+/// fork `nm` serially once per module object (~1,700 subprocesses); archives
+/// and other formats fall back to `nm -g -p`.
+fn scan_object_or_archive_symbols(path: &std::path::Path) -> Result<(Vec<String>, Vec<String>), String> {
+    if cfg!(any(target_os = "linux", target_os = "freebsd")) {
+        use std::io::Read;
+        if let Ok(mut file) = std::fs::File::open(path) {
+            let mut magic = [0u8; 4];
+            if file.read_exact(&mut magic).is_ok() && magic == *b"\x7fELF" {
+                drop(file);
+                if let Ok(bytes) = std::fs::read(path) {
+                    if let Ok(parsed) = object::File::parse(bytes.as_slice()) {
+                        if parsed.kind() == ObjectKind::Relocatable {
+                            let mut defined = Vec::new();
+                            let mut undefined = Vec::new();
+                            for symbol in parsed.symbols().filter(|s| s.is_global()) {
+                                if let Ok(name) = symbol.name() {
+                                    if name.is_empty() {
+                                        continue;
+                                    }
+                                    if symbol.is_undefined() {
+                                        // Match `nm -g -p`: weak undefined symbols are
+                                        // emitted as `w sym` (not `U sym`) and ignored here.
+                                        if !symbol.is_weak() {
+                                            undefined.push(name.to_string());
+                                        }
+                                    } else {
+                                        defined.push(name.to_string());
+                                    }
+                                }
+                            }
+                            return Ok((defined, undefined));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let output = nm_command()?
+        .arg("-g")
+        .arg("-p")
+        .arg(external_tool_path(path))
+        .output()
+        .map_err(|e| format!("nm: {e}"))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut defined = Vec::new();
+    let mut undefined = Vec::new();
+    for line in stdout.lines() {
+        let parts: Vec<&str> = line.split_whitespace().collect();
+        match parts.as_slice() {
+            [sym_type, name] if *sym_type == "U" => {
+                undefined.push(name.to_string());
+            }
+            [_addr, sym_type, name] if *sym_type != "U" => {
+                defined.push(name.to_string());
+            }
+            _ => {}
+        }
+    }
+    Ok((defined, undefined))
+}
+
 /// Generate a stub object file that provides weak definitions for all unresolved symbols.
 #[cfg(any(
     target_os = "android",
@@ -972,6 +1039,35 @@ pub(crate) fn generate_stub_object(
     selected_runtime_libs: &[&std::path::Path],
     imports: &ModuleImports,
 ) -> Result<PathBuf, String> {
+    generate_stub_object_with_system_libs(temp_dir, object_paths, main_o, selected_runtime_libs, imports, &[])
+}
+
+/// As [`generate_stub_object`], plus link-line system libraries that only
+/// contribute DEFINED symbols (their own undefined refs, e.g. libmingw32's
+/// WinMain/__ImageBase, are resolved by the linker, never stubbed).
+pub(crate) fn generate_stub_object_with_system_libs(
+    temp_dir: &std::path::Path,
+    object_paths: &[PathBuf],
+    main_o: &std::path::Path,
+    selected_runtime_libs: &[&std::path::Path],
+    imports: &ModuleImports,
+    system_libs: &[PathBuf],
+) -> Result<PathBuf, String> {
+    generate_stub_object_with_policy(temp_dir, object_paths, main_o, selected_runtime_libs,
+        imports, system_libs, false)
+}
+
+/// Typed provider selection may require strict resolution independently of the
+/// ambient legacy fallback policy. Default callers retain their existing policy.
+pub(super) fn generate_stub_object_with_policy(
+    temp_dir: &std::path::Path,
+    object_paths: &[PathBuf],
+    main_o: &std::path::Path,
+    selected_runtime_libs: &[&std::path::Path],
+    imports: &ModuleImports,
+    system_libs: &[PathBuf],
+    require_real_providers: bool,
+) -> Result<PathBuf, String> {
     use std::collections::{HashSet, BTreeSet};
 
     let mut defined = HashSet::new();
@@ -986,26 +1082,17 @@ pub(crate) fn generate_stub_object(
         v
     };
 
-    for path in &scan_paths {
-        let output = nm_command()?
-            .arg("-g")
-            .arg("-p")
-            .arg(external_tool_path(path))
-            .output()
-            .map_err(|e| format!("nm: {e}"))?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        for line in stdout.lines() {
-            let parts: Vec<&str> = line.split_whitespace().collect();
-            match parts.as_slice() {
-                [sym_type, name] if *sym_type == "U" => {
-                    undefined.insert(name.to_string());
-                }
-                [_addr, sym_type, name] if *sym_type != "U" => {
-                    defined.insert(name.to_string());
-                }
-                _ => {}
-            }
-        }
+    // Scan relocatable object files in parallel in-process using `object`
+    // instead of spawning `nm -g -p` serially per module (~1,700 subprocesses).
+    // Archives or non-relocatable inputs fall back to `nm -g -p`.
+    let scan_results: Vec<Result<(Vec<String>, Vec<String>), String>> = scan_paths
+        .par_iter()
+        .map(|path| scan_object_or_archive_symbols(path))
+        .collect();
+    for res in scan_results {
+        let (defs, undefs) = res?;
+        defined.extend(defs);
+        undefined.extend(undefs);
     }
 
     let fallback_runtime = if selected_runtime_libs.is_empty() {
@@ -1042,30 +1129,22 @@ pub(crate) fn generate_stub_object(
 
     let target = effective_target();
     let plat_config = simple_common::platform::link_config::PlatformLinkConfig::for_target(&target);
-    for lib_path in &plat_config.system_scan_libs {
-        if std::path::Path::new(lib_path).exists() {
-            let mut nm_cmd = nm_command()?;
-            for flag in &plat_config.nm_flags {
-                nm_cmd.arg(flag);
-            }
-            nm_cmd.arg(external_tool_path(lib_path));
-            if let Ok(output) = nm_cmd.output() {
-                let stdout = String::from_utf8_lossy(&output.stdout);
-                for line in stdout.lines() {
-                    let parts: Vec<&str> = line.split_whitespace().collect();
-                    if let [_addr, sym_type, name] = parts.as_slice() {
-                        if *sym_type != "U" {
-                            let base = name.split("@@").next().unwrap_or(name);
-                            defined.insert(base.to_string());
-                            if base != *name {
-                                defined.insert(name.to_string());
-                            }
-                        }
-                    }
-                }
-            }
+    let mut scan_libs: Vec<PathBuf> =
+        plat_config.system_scan_libs.iter().map(PathBuf::from).chain(system_libs.iter().cloned()).collect();
+    // macOS 11+ has no libSystem.B.dylib on disk (dyld shared cache), so the hard-coded
+    // entry above never exists there. Scan the SDK's .tbd stubs instead; without this,
+    // real libc/framework symbols are missing from `defined` and get weak-stubbed,
+    // overriding the real definitions.
+    if target.os == TargetOS::MacOS {
+        if let Some(sdk) = macos_sdk_root() {
+            scan_libs.extend(macos_sdk_scan_libs(
+                &sdk,
+                &plat_config.libraries,
+                &simple_common::platform::link_config::PlatformLinkConfig::macos_frameworks(),
+            ));
         }
     }
+    scan_defined_symbols(&scan_libs, &plat_config.nm_flags, &mut defined)?;
 
     // LOAD milestone (see memory: simple-bootstrap-stage4-runtime-symbol-gap):
     // the self-hosted bootstrap runtime is intentionally incomplete — some rt_*
@@ -1112,7 +1191,17 @@ pub(crate) fn generate_stub_object(
     // to that authoritative link; it still rejects every live missing symbol.
     // Non-strict links keep this preflight because their platform flags may
     // deliberately tolerate unresolved symbols.
-    let strict_final_link = std::env::var("SIMPLE_NO_STUB_FALLBACK").as_deref() == Ok("1");
+    //
+    // The same deferral applies whenever the platform link itself rejects
+    // undefined symbols. On windows-gnu `unresolved_symbol_flags` carries no
+    // `--unresolved-symbols=ignore-all`, so ld.lld fails the link on every
+    // live undefined `rt_*` and nothing can reach a NULL GOT slot; the names
+    // this preflight would reject are the dead-code references COFF resolves
+    // before section GC (the 112 `rt_*` of stage2 on windows-gnu, 2026-11-08),
+    // which the linker's GC-parity retry stubs loudly. Failing here instead
+    // forced SIMPLE_ALLOW_UNRESOLVED_RUNTIME=1 on the whole lane (WA-s2n7).
+    let strict_final_link = std::env::var("SIMPLE_NO_STUB_FALLBACK").as_deref() == Ok("1")
+        || !plat_config.tolerates_unresolved_symbols();
     if !undefined_runtime.is_empty() && !stub_missing_runtime && !strict_final_link {
         let names = undefined_runtime.join(", ");
         if std::env::var(ALLOW_UNRESOLVED_RUNTIME_ENV).as_deref() == Ok("1") {
@@ -1192,7 +1281,8 @@ or set {}=1 to bypass at your own risk.",
         .collect();
 
     let is_bootstrap = std::env::var("SIMPLE_BOOTSTRAP").as_deref() == Ok("1");
-    let strict_no_stub_fallback = std::env::var("SIMPLE_NO_STUB_FALLBACK").as_deref() == Ok("1");
+    let strict_no_stub_fallback = require_real_providers
+        || std::env::var("SIMPLE_NO_STUB_FALLBACK").as_deref() == Ok("1");
     let is_freestanding = effective_target().os == simple_common::target::TargetOS::None;
     if !is_bootstrap && !strict_no_stub_fallback && !is_freestanding && !internal_missing.is_empty() {
         // FAIL CLOSED. These are Simple-level symbols (including `extern fn`
@@ -1632,6 +1722,104 @@ the old fabricating behaviour.",
 // Rust std/alloc internals are never stubbed.
 // ---------------------------------------------------------------------------
 
+/// Collect the defined (non-`U`) symbols of each existing file in `paths` via `nm`.
+fn scan_defined_symbols(
+    paths: &[PathBuf],
+    nm_flags: &[&str],
+    defined: &mut std::collections::HashSet<String>,
+) -> Result<(), String> {
+    // One nm per library, independent of each other: run them across the rayon
+    // pool and merge the per-library sets afterwards (no shared mutable state).
+    // Measured 2026-11-18: ~25 serial nm spawns at ~5 s each on a loaded Windows
+    // host were ~120 s of an aarch64-pc-windows-gnullvm "link" (~67 s on x64).
+    use rayon::prelude::*;
+    let per_lib: Vec<Result<Vec<String>, String>> = paths
+        .par_iter()
+        .filter(|lib_path| lib_path.exists())
+        .map(|lib_path| {
+            let mut nm_cmd = nm_command()?;
+            for flag in nm_flags {
+                nm_cmd.arg(flag);
+            }
+            nm_cmd.arg(external_tool_path(lib_path));
+            let mut names = Vec::new();
+            if let Ok(output) = nm_cmd.output() {
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                for line in stdout.lines() {
+                    let parts: Vec<&str> = line.split_whitespace().collect();
+                    if let [_addr, sym_type, name] = parts.as_slice() {
+                        if *sym_type != "U" {
+                            let base = name.split("@@").next().unwrap_or(name);
+                            names.push(base.to_string());
+                            if base != *name {
+                                names.push(name.to_string());
+                            }
+                        }
+                    }
+                }
+            }
+            Ok(names)
+        })
+        .collect();
+    for names in per_lib {
+        defined.extend(names?);
+    }
+    Ok(())
+}
+
+/// Existing macOS SDK `.tbd` text stubs that define system symbols, in a fixed order:
+/// the libSystem umbrella, its re-exported `usr/lib/system/*.tbd` sub-libraries (sorted),
+/// `usr/lib/lib<name>.tbd` per library, then `<F>.framework/<F>.tbd` per framework.
+fn macos_sdk_scan_libs(sdk: &Path, libraries: &[&str], frameworks: &[&str]) -> Vec<PathBuf> {
+    let lib_dir = sdk.join("usr/lib");
+    let mut out = Vec::new();
+    let umbrella = lib_dir.join("libSystem.B.tbd");
+    if umbrella.is_file() {
+        out.push(umbrella);
+    }
+    if let Ok(entries) = std::fs::read_dir(lib_dir.join("system")) {
+        let mut subs: Vec<PathBuf> = entries
+            .filter_map(|e| e.ok().map(|e| e.path()))
+            .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("tbd") && p.is_file())
+            .collect();
+        subs.sort();
+        out.extend(subs);
+    }
+    for name in libraries {
+        let p = lib_dir.join(format!("lib{name}.tbd"));
+        if p.is_file() {
+            out.push(p);
+        }
+    }
+    let fw_dir = sdk.join("System/Library/Frameworks");
+    for fw in frameworks {
+        let p = fw_dir.join(format!("{fw}.framework")).join(format!("{fw}.tbd"));
+        if p.is_file() {
+            out.push(p);
+        }
+    }
+    out
+}
+
+/// macOS SDK root: `$SDKROOT` when it names a directory, else `xcrun --sdk macosx --show-sdk-path`.
+fn macos_sdk_root() -> Option<PathBuf> {
+    if let Some(v) = std::env::var_os("SDKROOT") {
+        let p = PathBuf::from(v);
+        if p.is_dir() {
+            return Some(p);
+        }
+    }
+    let out = std::process::Command::new("xcrun")
+        .args(["--sdk", "macosx", "--show-sdk-path"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let p = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
+    p.is_dir().then_some(p)
+}
+
 /// Undefined symbol names reported by an lld-link run (`undefined symbol: X`).
 pub(crate) fn lld_link_undefined_symbols(diagnostics: &str) -> Vec<String> {
     let mut names: Vec<String> = diagnostics
@@ -1691,22 +1879,85 @@ pub(crate) fn coff_gc_parity_stub_source(names: &[String]) -> Result<String, Str
     Ok(source)
 }
 
-/// Compile the trap stubs with clang-cl (MSVC ABI). Fails fast if clang-cl is
-/// not installed.
-pub(crate) fn compile_coff_gc_parity_stubs(temp_dir: &Path, names: &[String]) -> Result<PathBuf, String> {
+/// Which COFF toolchain the final link belongs to. The parity stub object must
+/// be produced by the SAME toolchain: a clang-cl object carries
+/// `/DEFAULTLIB:libcmt`/`oldnames` directives and `__security_check_cookie`
+/// references that an llvm-mingw (gnu) link cannot satisfy, and a mingw object
+/// would drag mingw CRT symbols into an MSVC link.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CoffStubToolchain {
+    /// clang-cl + lld-link (MSVC ABI, `/link` option group).
+    Msvc,
+    /// clang + ld.lld `-m i386pep` (llvm-mingw UCRT; never GCC).
+    Gnu,
+}
+
+/// Compiler program and arguments that turn `stub_c` into `stub_o` for the
+/// given toolchain. Pure, so the gnu/msvc spelling is unit-testable without a
+/// compiler on the host.
+pub(crate) fn gc_parity_stub_compile_command(
+    toolchain: CoffStubToolchain,
+    gnu_cc: &str,
+    stub_c: &Path,
+    stub_o: &Path,
+) -> (String, Vec<String>) {
+    match toolchain {
+        CoffStubToolchain::Msvc => (
+            "clang-cl".to_string(),
+            vec![
+                "/nologo".to_string(),
+                "/c".to_string(),
+                "/O1".to_string(),
+                "/Gy".to_string(),
+                format!("/Fo{}", stub_o.display()),
+                stub_c.display().to_string(),
+            ],
+        ),
+        CoffStubToolchain::Gnu => {
+            let mut args = vec![
+                "-c".to_string(),
+                "-O1".to_string(),
+                // One section per stub (clang-cl `/Gy` equivalent) so a gnu
+                // `--gc-sections` link drops stubs nothing references.
+                "-ffunction-sections".to_string(),
+                "-fdata-sections".to_string(),
+                // No stack cookie / unwind tables: the stub only traps.
+                "-fno-stack-protector".to_string(),
+                "-fno-asynchronous-unwind-tables".to_string(),
+            ];
+            let target = simple_common::target::Target::parse("x86_64-pc-windows-gnu")
+                .unwrap_or_else(|_| effective_target());
+            if let Some(flag) = windows_gnu_target_flag(target, gnu_cc) {
+                args.push(flag.to_string());
+            }
+            args.push("-o".to_string());
+            args.push(stub_o.display().to_string());
+            args.push(stub_c.display().to_string());
+            (gnu_cc.to_string(), args)
+        }
+    }
+}
+
+/// Compile the trap stubs with the toolchain of the final link (clang-cl for
+/// MSVC, the gnu `clang` for llvm-mingw). Fails fast if that compiler is not
+/// installed.
+pub(crate) fn compile_coff_gc_parity_stubs(
+    temp_dir: &Path,
+    names: &[String],
+    toolchain: CoffStubToolchain,
+) -> Result<PathBuf, String> {
     let source = coff_gc_parity_stub_source(names)?;
     let stub_c = temp_dir.join("_gc_parity_stubs.c");
-    let stub_o = temp_dir.join("_gc_parity_stubs.obj");
+    let stub_o = temp_dir.join(match toolchain {
+        CoffStubToolchain::Msvc => "_gc_parity_stubs.obj",
+        CoffStubToolchain::Gnu => "_gc_parity_stubs.o",
+    });
     std::fs::write(&stub_c, source).map_err(|e| format!("write {}: {e}", stub_c.display()))?;
-    let cc = "clang-cl";
-    simple_common::platform::cc_detect::require_compiler(cc)?;
-    let output = std::process::Command::new(cc)
-        .arg("/nologo")
-        .arg("/c")
-        .arg("/O1")
-        .arg("/Gy")
-        .arg(format!("/Fo{}", stub_o.display()))
-        .arg(&stub_c)
+    let gnu_cc = target_c_compiler(effective_target());
+    let (cc, args) = gc_parity_stub_compile_command(toolchain, &gnu_cc, &stub_c, &stub_o);
+    simple_common::platform::cc_detect::require_compiler(&cc)?;
+    let output = std::process::Command::new(&cc)
+        .args(&args)
         .output()
         .map_err(|e| format!("compile GC-parity stubs ({cc}): {e}"))?;
     if !output.status.success() {
@@ -1731,6 +1982,36 @@ mod coff_gc_parity_tests {
             lld_link_undefined_symbols(log),
             vec!["DocBlock::Heading".to_string(), "rt_cuda_malloc".to_string()]
         );
+    }
+
+    #[test]
+    fn parses_ld_lld_mingw_undefined_symbols() {
+        // llvm-mingw's ld.lld (`-m i386pep`) spells the diagnostic with its own
+        // program name; the gnu lane's parity retry reads the same list.
+        let log = "ld.lld: error: undefined symbol: rt_layout_add\n>>> referenced by aot-1.o\n\
+                   ld.lld: error: undefined symbol: rt_hlt\n\
+                   ld.lld: error: undefined symbol: rt_layout_add\n\
+                   clang: error: linker command failed with exit code 1 (use -v to see invocation)\n";
+        assert_eq!(lld_link_undefined_symbols(log), vec!["rt_hlt".to_string(), "rt_layout_add".to_string()]);
+    }
+
+    #[test]
+    fn gnu_parity_stubs_compile_with_gnu_clang_not_clang_cl() {
+        let c = Path::new("t/_gc_parity_stubs.c");
+        let o = Path::new("t/_gc_parity_stubs.o");
+        let (cc, args) = gc_parity_stub_compile_command(CoffStubToolchain::Gnu, "C:/llvm-mingw/bin/clang.exe", c, o);
+        assert_eq!(cc, "C:/llvm-mingw/bin/clang.exe");
+        assert!(args.iter().any(|a| a == "--target=x86_64-w64-windows-gnu"), "{args:?}");
+        assert!(args.iter().any(|a| a == "-ffunction-sections"), "{args:?}");
+        assert!(args.iter().any(|a| a == "-fno-stack-protector"), "{args:?}");
+        // No CL-style switches reach the gnu driver: those were the WA-s2n9/9b
+        // `/Zl` `/GS-` patches on a clang-cl object.
+        assert!(args.iter().all(|a| !a.starts_with('/')), "{args:?}");
+        assert!(!args.iter().any(|a| a.contains("clang-cl")));
+
+        let (cc, args) = gc_parity_stub_compile_command(CoffStubToolchain::Msvc, "clang", c, o);
+        assert_eq!(cc, "clang-cl");
+        assert!(args.iter().any(|a| a == "/Gy"), "{args:?}");
     }
 
     #[test]
@@ -2151,5 +2432,59 @@ mod tests {
             text.contains("SIMPLE_FABRICATED_STUB_BASELINE_WRITE"),
             "baseline file must document the regeneration procedure the code implements"
         );
+    }
+
+    fn unique_temp_dir(tag: &str) -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("simple-{tag}-{}-{nanos}", std::process::id()))
+    }
+
+    #[test]
+    fn macos_sdk_scan_libs_collects_existing_tbds() {
+        let sdk = unique_temp_dir("sdk-scan");
+        let touch = |rel: &str| {
+            let p = sdk.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, b"").unwrap();
+        };
+        touch("usr/lib/libSystem.B.tbd");
+        touch("usr/lib/system/libsystem_c.tbd");
+        touch("usr/lib/system/libsystem_kernel.tbd");
+        touch("usr/lib/system/readme.txt");
+        touch("usr/lib/libz.tbd");
+        touch("System/Library/Frameworks/CoreFoundation.framework/CoreFoundation.tbd");
+        let got = macos_sdk_scan_libs(&sdk, &["z", "missing"], &["CoreFoundation", "Missing"]);
+        let want: Vec<PathBuf> = [
+            "usr/lib/libSystem.B.tbd",
+            "usr/lib/system/libsystem_c.tbd",
+            "usr/lib/system/libsystem_kernel.tbd",
+            "usr/lib/libz.tbd",
+            "System/Library/Frameworks/CoreFoundation.framework/CoreFoundation.tbd",
+        ]
+        .iter()
+        .map(|rel| sdk.join(rel))
+        .collect();
+        let _ = std::fs::remove_dir_all(&sdk);
+        assert_eq!(got, want);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn macos_sdk_scan_finds_libsystem_symbols() {
+        let Some(sdk) = macos_sdk_root() else {
+            eprintln!("skip: no macOS SDK (SDKROOT unset and xcrun failed)");
+            return;
+        };
+        let plat = simple_common::platform::link_config::PlatformLinkConfig::for_host();
+        let frameworks = simple_common::platform::link_config::PlatformLinkConfig::macos_frameworks();
+        let paths = macos_sdk_scan_libs(&sdk, &plat.libraries, &frameworks);
+        assert!(!paths.is_empty(), "SDK at {} yielded no .tbd files", sdk.display());
+        let mut defined = HashSet::new();
+        scan_defined_symbols(&paths, &plat.nm_flags, &mut defined).unwrap();
+        assert!(defined.contains("_proc_pidinfo"), "_proc_pidinfo not found in SDK stubs");
+        assert!(defined.contains("_environ"), "_environ not found in SDK stubs");
     }
 }

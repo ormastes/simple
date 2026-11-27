@@ -9,11 +9,15 @@ use std.nogc_async_mut.debug.legacy_service_adapter_v1.{LegacyDebugBackendAdapte
 
 class FakeLegacyBackend:
     attach_ok: bool
+    detach_failures_remaining: i64
     events: [text]
     evaluate_calls: i64
 
     static fn create(attach_ok: bool) -> FakeLegacyBackend:
-        FakeLegacyBackend(attach_ok: attach_ok, events: [], evaluate_calls: 0)
+        FakeLegacyBackend(attach_ok: attach_ok, detach_failures_remaining: 0, events: [], evaluate_calls: 0)
+
+    static fn create_with_one_detach_failure(attach_ok: bool) -> FakeLegacyBackend:
+        FakeLegacyBackend(attach_ok: attach_ok, detach_failures_remaining: 1, events: [], evaluate_calls: 0)
 
 impl DebugBackend for FakeLegacyBackend:
     fn name() -> String: "fake"
@@ -22,7 +26,11 @@ impl DebugBackend for FakeLegacyBackend:
         if self.attach_ok: Ok(()) else: Err("fixture attach failed")
     me detach() -> Result<(), String>:
         self.events.push("detach")
-        Ok(())
+        if self.detach_failures_remaining > 0:
+            self.detach_failures_remaining = self.detach_failures_remaining - 1
+            Err("fixture detach failed")
+        else:
+            Ok(())
     me run() -> Result<(), String>:
         self.events.push("run")
         Ok(())
@@ -73,7 +81,11 @@ describe "LegacyDebugBackendAdapterV1 migration ownership":
         val marker_id = marker.open("build-marker", "marker.spl", [])!
         val failed_id = DebugSessionId(value: "debug-{session_number(marker_id) - 1}")
         val receipts = central_debug_service_v1_receipts(failed_id)
-        expect(receipts.filter(_.action == "legacy.attach" and not _.allowed).len()).to_equal(1)
+        val failed_attach = receipts.filter(_1.action == "legacy.attach" and _1.outcome == "failed")
+        expect(failed_attach.len()).to_equal(1)
+        expect(failed_attach[0].allowed).to_equal(true)
+        expect(failed_attach[0].succeeded).to_equal(false)
+        expect(failed_attach[0].reason).to_equal("fixture attach failed")
         expect(receipts.filter(_.action == "session.close").len()).to_equal(1)
         marker.close(marker_id)!
 
@@ -85,7 +97,7 @@ describe "LegacyDebugBackendAdapterV1 migration ownership":
         expect(result.is_err()).to_equal(true)
         expect(backend.evaluate_calls).to_equal(0)
         val receipts = central_debug_service_v1_receipts(session_id)
-        expect(receipts.filter(_.action == "legacy.evaluate" and not _.allowed).len()).to_equal(1)
+        expect(receipts.filter(_1.action == "legacy.evaluate" and not _1.allowed).len()).to_equal(1)
         adapter.close(session_id)!
 
     it "detaches the backend before centrally closing the session":
@@ -97,3 +109,28 @@ describe "LegacyDebugBackendAdapterV1 migration ownership":
         val receipts = central_debug_service_v1_receipts(session_id)
         expect(receipts[receipts.len() - 2].action).to_equal("legacy.detach.outcome")
         expect(receipts[receipts.len() - 1].action).to_equal("session.close")
+
+    it "receipts a failed detach and keeps the session open for retry":
+        val before = central_debug_service_v1_session_count()
+        val backend = FakeLegacyBackend.create_with_one_detach_failure(true)
+        val adapter = LegacyDebugBackendAdapterV1.create(backend)
+        val session_id = adapter.open("build-detach-retry", "retry.spl", [])!
+        val first_close = adapter.close(session_id)
+        expect(first_close.is_err()).to_equal(true)
+        expect(central_debug_service_v1_session_count()).to_equal(before + 1)
+        val first_receipts = central_debug_service_v1_receipts(session_id)
+        val failed_detach = first_receipts.filter(_1.action == "legacy.detach.outcome" and _1.outcome == "failed")
+        expect(failed_detach.len()).to_equal(1)
+        expect(failed_detach[0].allowed).to_equal(true)
+        expect(failed_detach[0].succeeded).to_equal(false)
+        expect(failed_detach[0].reason).to_equal("fixture detach failed")
+        expect(first_receipts.filter(_.action == "session.close").len()).to_equal(0)
+        expect(adapter.close(session_id).is_ok()).to_equal(true)
+        expect(central_debug_service_v1_session_count()).to_equal(before)
+        val final_receipts = central_debug_service_v1_receipts(session_id)
+        val detach_outcomes = final_receipts.filter(_.action == "legacy.detach.outcome")
+        expect(detach_outcomes.len()).to_equal(2)
+        expect(detach_outcomes[1].allowed).to_equal(true)
+        expect(detach_outcomes[1].succeeded).to_equal(true)
+        expect(detach_outcomes[1].outcome).to_equal("succeeded")
+        expect(final_receipts[final_receipts.len() - 1].action).to_equal("session.close")

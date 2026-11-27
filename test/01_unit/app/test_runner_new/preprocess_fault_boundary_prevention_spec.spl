@@ -1,0 +1,30 @@
+use std.spec.*
+use std.io_runtime.{cwd, file_write, file_delete, getpid}
+use std.nogc_sync_mut.io.env_ops.{env_set}
+use std.test_runner.test_runner_execute.{preprocess_probe_verdict, preprocess_needs_isolation, preprocess_boundary_failure}
+
+# Prevention: behavioural pins of the boundary policy.
+describe "test runner preprocessing fault boundary policy":
+    it "ordinary specs never need a child process":
+        expect(preprocess_needs_isolation("describe \"x\":\n    it \"y\":\n        expect(1).to_equal(1)\n")).to_equal(false)
+        expect(preprocess_needs_isolation("a\n" + "\n".repeat(1500) + "b\n")).to_equal(false)
+
+    it "huge or blank-line-flooded specs need isolation":
+        expect(preprocess_needs_isolation("val x = (" + "\n".repeat(2500))).to_equal(true)
+        expect(preprocess_needs_isolation("x".repeat(1000001))).to_equal(true)
+
+    it "probe verdict classifies segfault, stack overflow, timeout and missing marker as failures":
+        expect(preprocess_probe_verdict(0, "PREPROCESS_PROBE_OK lines=1 cont=1")).to_equal("")
+        expect(preprocess_probe_verdict(139, "")).to_contain("rc=139")
+        expect(preprocess_probe_verdict(134, "")).to_contain("rc=134")
+        expect(preprocess_probe_verdict(124, "")).to_contain("rc=124")
+        expect(preprocess_probe_verdict(0, "")).to_contain("rc=0")
+
+    it "the escape hatch and non-spec files bypass; a clean spec yields no failure":
+        val path = cwd() + "/build/pbp_{getpid()}_spec.spl"
+        val _w = file_write(path, "val x = (" + "\n".repeat(3000))
+        env_set("SIMPLE_TEST_PREPROCESS_BOUNDARY", "0")
+        expect(preprocess_boundary_failure("nonexistent-binary", path)).to_equal("")
+        env_set("SIMPLE_TEST_PREPROCESS_BOUNDARY", "")
+        expect(preprocess_boundary_failure("nonexistent-binary", cwd() + "/README.md")).to_equal("")
+        val _d = file_delete(path)

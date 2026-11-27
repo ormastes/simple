@@ -1,0 +1,122 @@
+# REQ-002 REQ-005. Source assertions authored; runtime NOT_RUN.
+# Snapshot, actual OCI argv and immutable native request/plan binding.
+use std.common.config_core.server_context_types_v1.*
+use std.common.config_core.server_context_decode_v1.decode_server_config_v1
+use std.common.config_core.server_container_projection_v1.*
+use std.common.contracts.container.execution_options_v1.{OciEnvironmentEntryV1, oci_execution_options_v1}
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, container_execution_plan_digest_v2}
+use std.nogc_async_mut.container.server_launch_projection_v1.*
+use std.nogc_async_mut.container.providers.linux.request_v1.{LinuxOciRequestV1, linux_oci_request_digest_v1}
+use std.nogc_async_mut.container.providers.linux.request_codec_v1.linux_oci_retained_request_decode_v1
+
+fn container_server_selection_fixture_v1(host: text) -> ResolvedServerV1:
+    val record = ServerRecordV1(name: "shared", transport: "ssh", host: "localhost", port: 22,
+        container_host: host, auth_ref: "secret://container-job/read-only",
+        tls_ref: "trust://company/server", remote_executable: "/opt/simple/bin/simple")
+    ResolvedServerV1(record: record, consumer: "orchestrator", context: "work", source: "context_shared")
+
+fn container_server_scope_fixture_v1() -> ContainerHostScopeV2:
+    ContainerHostScopeV2(physical_host_id: "physical", service_scope_id: "service",
+        boot_id: "boot", provider_generation: 1, native_machine_id: "native-machine",
+        continuity_mode: "native-boot-incarnation-v1", continuity_id: "boot")
+
+fn container_server_native_fixture_v1() -> LinuxOciRequestV1:
+    LinuxOciRequestV1(pod_uid: "job", attempt: 1, operation_id: "launch", image: "simple-image",
+        bundle_path: "", command: ["/opt/simple/bin/simple", "orchestrator", "servers", "show"],
+        args: [], timeout_ms: 1000, cpu_limit_millis: 1000, memory_limit_bytes: 1048576,
+        pid_limit: 64, network_policy: "bridge", filesystem_policy: "read-only")
+
+describe "container server projection into actual immutable workload requests":
+    it "emits one public selected context and projects its guest endpoint deterministically":
+        step("Encode only selected context and server with public logical references")
+        val selected = container_server_selection_fixture_v1("server.internal")
+        val source = server_container_snapshot_v1(selected).unwrap()
+        expect(server_container_snapshot_v1(selected).unwrap()).to_equal(source)
+        val decoded = decode_server_config_v1(source).unwrap()
+        expect(decoded.current_context).to_equal("work")
+        expect(decoded.servers.len()).to_equal(1)
+        expect(decoded.contexts.len()).to_equal(1)
+        expect(decoded.servers[0].host).to_equal("server.internal")
+        expect(decoded.servers[0].container_host).to_equal("server.internal")
+        expect(decoded.servers[0].auth_ref).to_equal("secret://container-job/read-only")
+        expect(source.contains("localhost")).to_equal(false)
+        expect(source.contains("PRIVATE KEY")).to_equal(false)
+
+    it "passes pinned discovery through the actual OCI environment command encoder":
+        step("Observe exact --env argument values used by the production OCI request path")
+        val source = server_container_snapshot_v1(container_server_selection_fixture_v1("server.internal")).unwrap()
+        val existing = [OciEnvironmentEntryV1(name: "LANG", value: "C")]
+        val environment = container_server_environment_v1(existing,
+            container_server_selection_fixture_v1("server.internal")).unwrap()
+        val options = oci_execution_options_v1(environment, "").unwrap()
+        expect(options.len()).to_equal(8)
+        expect(options[0]).to_equal("--env")
+        expect(options[1]).to_equal("LANG=C")
+        expect(options[2]).to_equal("--env")
+        expect(options[3]).to_equal("SIMPLE_SERVERS_SDN=" + source)
+        expect(options[4]).to_equal("--env")
+        expect(options[5]).to_equal("SIMPLE_SERVER_CLIENT_SCOPE=container")
+        expect(options[6]).to_equal("--env")
+        expect(options[7]).to_equal("SIMPLE_SERVERS_CONFIG=")
+
+    it "binds the injected snapshot to native retained bytes request digest and plan digest":
+        step("Compute all immutable identities after adding explicit discovery environment")
+        val original = container_server_native_fixture_v1()
+        val execution = container_server_linux_request_v1(container_server_scope_fixture_v1(), original,
+            container_server_selection_fixture_v1("server.internal")).unwrap()
+        val native = linux_oci_retained_request_decode_v1(execution.request_bytes).unwrap()
+        expect(native.environment.len()).to_equal(3)
+        expect(original.environment.len()).to_equal(0)
+        expect(execution.plan.request_digest).to_equal(linux_oci_request_digest_v1(native).unwrap())
+        expect(execution.plan.request_digest == linux_oci_request_digest_v1(original).unwrap()).to_equal(false)
+        val changed = container_server_linux_request_v1(container_server_scope_fixture_v1(), original,
+            container_server_selection_fixture_v1("other.internal")).unwrap()
+        expect(execution.plan.request_digest == changed.plan.request_digest).to_equal(false)
+        expect(container_execution_plan_digest_v2(execution.plan).unwrap() ==
+            container_execution_plan_digest_v2(changed.plan).unwrap()).to_equal(false)
+
+    it "rejects malformed unpaired duplicate and host scope discovery in the production encoder":
+        step("Reject invalid discovery before digest or native process creation")
+        val source = server_container_snapshot_v1(container_server_selection_fixture_v1("server.internal")).unwrap()
+        val snapshot = OciEnvironmentEntryV1(name: "SIMPLE_SERVERS_SDN", value: source)
+        val marker = OciEnvironmentEntryV1(name: "SIMPLE_SERVER_CLIENT_SCOPE", value: "container")
+        val cleared = OciEnvironmentEntryV1(name: "SIMPLE_SERVERS_CONFIG", value: "")
+        expect(oci_execution_options_v1([snapshot], "").is_err()).to_equal(true)
+        expect(oci_execution_options_v1([marker], "").is_err()).to_equal(true)
+        expect(oci_execution_options_v1([snapshot, marker], "").is_err()).to_equal(true)
+        expect(oci_execution_options_v1([snapshot, marker, marker, cleared], "").is_err()).to_equal(true)
+        val host_marker = OciEnvironmentEntryV1(name: "SIMPLE_SERVER_CLIENT_SCOPE", value: "host")
+        expect(oci_execution_options_v1([snapshot, host_marker, cleared], "").is_err()).to_equal(true)
+        val malformed = OciEnvironmentEntryV1(name: "SIMPLE_SERVERS_SDN", value: "version: 1")
+        expect(oci_execution_options_v1([malformed, marker, cleared], "").is_err()).to_equal(true)
+        val competing = OciEnvironmentEntryV1(name: "SIMPLE_SERVERS_CONFIG", value: "/host/servers.sdn")
+        expect(oci_execution_options_v1([snapshot, marker, competing], "").is_err()).to_equal(true)
+        val alias = OciEnvironmentEntryV1(name: "simple_servers_config", value: "")
+        expect(oci_execution_options_v1([snapshot, marker, alias], "").is_err()).to_equal(true)
+
+    it "rejects container loopback local transport inline credentials and disabled networking":
+        step("Refuse local endpoints malformed references and an absent container network")
+        expect(server_container_snapshot_v1(container_server_selection_fixture_v1("127.0.0.1")).is_err()).to_equal(true)
+        expect(server_container_snapshot_v1(container_server_selection_fixture_v1("localhost")).is_err()).to_equal(true)
+        var selected = container_server_selection_fixture_v1("server.internal")
+        selected.record.auth_ref = "private-key-bytes"
+        expect(server_container_snapshot_v1(selected).is_err()).to_equal(true)
+        val local_config = default_server_config_v1()
+        val local = ResolvedServerV1(record: local_config.servers[0], consumer: "simple",
+            context: "local", source: "context_shared")
+        expect(server_container_snapshot_v1(local).is_err()).to_equal(true)
+        var native = container_server_native_fixture_v1()
+        native.network_policy = "none"
+        expect(container_server_linux_request_v1(container_server_scope_fixture_v1(), native,
+            container_server_selection_fixture_v1("server.internal")).is_err()).to_equal(true)
+
+    it "rejects reserved environment replacement and keeps the ordinary environment path":
+        step("Refuse competing selected discovery without changing ordinary explicit values")
+        val original = [OciEnvironmentEntryV1(name: "LANG", value: "C")]
+        val encoded = oci_execution_options_v1(original, "").unwrap()
+        expect(encoded[1]).to_equal("LANG=C")
+        val ordinary_path = [OciEnvironmentEntryV1(name: "SIMPLE_SERVERS_CONFIG", value: "/guest/servers.sdn")]
+        expect(oci_execution_options_v1(ordinary_path, "").is_ok()).to_equal(true)
+        val competing = [OciEnvironmentEntryV1(name: "SIMPLE_SERVERS_SDN", value: "existing")]
+        expect(container_server_environment_v1(competing,
+            container_server_selection_fixture_v1("server.internal")).is_err()).to_equal(true)

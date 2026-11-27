@@ -1,8 +1,12 @@
-use std.common.bytes.concat_copy_v1.{bytes_concat_copy_v1}
+use std.nogc_sync_mut.io.file_ops.{file_read_text}
+use compiler.driver.unit_identity.{UnitIdentity, unit_identity_encode}
+use compiler.driver.cache.action_key.{interface_digest_of_source}
+use compiler.driver.watcher.smf_manifest.{smf_manifest_host_abi_digest, update_smf_manifest_entry}
+use std.io_runtime.{is_file}
 # Driver AOT SMF and self-contained outputs.
 
 use compiler.backend.backend_helpers.{
-    compile_module_with_backend,
+    compile_module_with_backend_scoped_v1,
     get_effective_backend_name
 }
 use compiler.backend.linker.linker_wrapper.{
@@ -19,8 +23,10 @@ use compiler.driver.smf_writer.{
     SmfDependencyEntry
 }
 use compiler.driver.smf_binary_helpers.{smf_u32_to_bytes}
+use compiler.driver.smf_elf_parser.{elf_relocated_non_code_section}
 use compiler.driver.driver_types.{CompileContext}
 use compiler.common.driver_core_types.{
+    CompileOptions,
     CompileResult,
     compileoptions_effective_mir_opt_level
 }
@@ -29,6 +35,10 @@ use compiler.driver.driver_log_helpers.{log_build_progress}
 use compiler.common.config.{Logger}
 use compiler.common.attributes.{DriverManifestAttr}
 use compiler.mir.mir_data.{MirModule}
+use compiler.driver.driver_build.smf_staged_parts_v1.{
+    smf_parts_assemble_manifests_v1}
+use compiler.driver.driver_build.smf_object_spool_v1.{smf_object_spool_put_v1,
+    smf_object_spool_assemble_v1, smf_object_spool_release_v1, smf_object_spool_count_v1}
 use compiler.driver.driver_source_loading.{_driver_physical_source_key}
 use compiler.driver.cache.cache_root.{machine_cache_root}
 use compiler.driver.cache.package_archive_cache.{PackageArchiveAuthorityV1}
@@ -67,18 +77,18 @@ fn smf_render_launch_metadata() -> text:
         "  mmap_hint: true\n"
 
 fn smf_publish_demand_scc_outputs_v1(ctx: CompileContext, path: text) -> bool:
-    if ctx.demand_scc_publication == nil:
+    if ctx.demand_scc_publication.is_none():
         return true
-    if (ctx.demand_compile_execution == nil or
-            ctx.demand_mir_admission == nil or
+    if (ctx.demand_compile_execution.is_none() or
+            ctx.demand_mir_admission.is_none() or
             ctx.demand_dirty_modules.len() == 0):
         return false
     var ownership = ctx.demand_scc_publication!
     var execution = ctx.demand_compile_execution!
     for index in 0..ownership.modules.len():
+        val module_identity: text = ownership.modules[index].entry.module_identity
         if not scc_publication_complete_smf_v1(
-                &mut ownership,
-                ownership.modules[index].entry.module_identity, path):
+                &mut ownership, module_identity, path):
             ctx.demand_scc_publication = Some(ownership)
             ctx.demand_compile_execution = Some(execution)
             return false
@@ -125,30 +135,32 @@ impl CompilerDriver:
         val backend_name = ctx.options.backend
         val effective_backend = get_effective_backend_name(
             backend_name, ctx.options.release)
+        val spooled_before = smf_object_spool_count_v1(self.native_staged_codegen.smf_part_objects)
+        val smf_total_modules = ctx.mir_modules.len() + spooled_before
         smf_log_debug(
             log,
             "AOT SMF: compiling to {output} (backend: {effective_backend})")
-        log_build_progress("smf_package", "modules", 0, ctx.mir_modules.len(), output, 0, 1, 0, 0, "running")
+        log_build_progress("smf_package", "modules", 0, smf_total_modules, output, 0, 1, 0, 0, "running")
 
         var smf_bytes: [u8] = []
         match self.collect_smf_bytes():
             case Ok(collected): smf_bytes = collected
             case Err(failure):
-                log_build_progress("smf_package", "modules", 0, ctx.mir_modules.len(), output, 1, 1, 1, 0, "failure")
+                log_build_progress("smf_package", "modules", 0, smf_total_modules, output, 1, 1, 1, 0, "failure")
                 return failure
 
         match link_to_smf(smf_bytes, output, ctx.options.verbose):
             case Ok(_):
-                if not smf_publish_demand_scc_outputs_v1(ctx, output):
+                if not smf_publish_demand_scc_outputs_v1(self.ctx, output):
                     return CompileResult.CodegenError(
                         "demand-driven SCC SMF publication failed closed")
-                log_build_progress("smf_package", "modules", ctx.mir_modules.len(), ctx.mir_modules.len(), output, 1, 1, 0, 0, "complete")
+                log_build_progress("smf_package", "modules", smf_total_modules, smf_total_modules, output, 1, 1, 0, 0, "complete")
                 smf_log_info(
                     log,
                     "SMF module written to {output} (backend: {effective_backend})")
                 CompileResult.Success(output)
             case Err(e):
-                log_build_progress("smf_package", "modules", 0, ctx.mir_modules.len(), output, 1, 1, 1, 0, "failure")
+                log_build_progress("smf_package", "modules", 0, smf_total_modules, output, 1, 1, 1, 0, "failure")
                 CompileResult.CodegenError("Failed to write SMF file: {e}")
 
     me compile_to_self_contained(output: text) -> CompileResult:
@@ -177,48 +189,84 @@ impl CompilerDriver:
             case Err(e):
                 CompileResult.CodegenError("Self-contained build failed: {e}")
 
-    me collect_smf_bytes() -> Result<[u8], CompileResult>:
+    me smf_record_module_parts_v1(names: [text]) -> text:
+        """Compile the SMF object + driver-manifest bytes of each named module
+        still held in ctx.mir_modules into native_staged_codegen's part maps
+        (smf_staged_parts_v1.spl). Staged batches and MIR shards call it before
+        releasing their MIR; collect_smf_bytes records whatever is still held.
+        Returns "" or the first module's compile error."""
         val ctx: CompileContext = self.ctx
-        val log = ctx.logger
         val backend_name = ctx.options.backend
         val opt_level = compileoptions_effective_mir_opt_level(ctx.options)
-        var all_object_bytes: [u8] = []
+        for name in names:
+            if not ctx.mir_modules.contains_key(name):
+                continue
+            smf_log_trace(ctx.logger, "compiling module for SMF: {name}")
+            val module = ctx.mir_modules[name]
+            # Same arguments as the unscoped chain (target_cpu "", no storage
+            # bindings, nil retained options) so the object bytes are unchanged;
+            # the per-module transient scope reclaims the codegen scratch, which
+            # a MIR-shard worker otherwise holds until exit (+3.28 GiB on a
+            # 401K-instruction claim).
+            val compiled = compile_module_with_backend_scoped_v1(
+                backend_name,
+                module,
+                ctx.options.release,
+                opt_level, "", [], None, None, None, None, []
+            )
+            match compiled:
+                case Err(err):
+                    return "AOT compile error in {name}: {err.to_text()}"
+                case Ok(compiled_module):
+                    var module_bytes: [u8] = []
+                    if val obj_bytes = compiled_module.object_code:
+                        module_bytes = obj_bytes
+                    if module_bytes.len() == 0 and module.functions.len() > 0:
+                        return "AOT compile error in {name}: backend returned no object code for {module.functions.len()} function(s)"
+                    # item5: spool to disk; bytes are not retained per module.
+                    self.native_staged_codegen.smf_part_objects = smf_object_spool_put_v1(
+                        self.native_staged_codegen.smf_part_objects, name, module_bytes)
+                    if self.native_staged_codegen.smf_part_objects.error != "":
+                        return "SMF object spool: {self.native_staged_codegen.smf_part_objects.error}"
+                    self.native_staged_codegen.smf_part_manifests[name] = smf_module_driver_manifest_bytes_v1(module)
+                case _:
+                    return "AOT compile error in {name}: backend result not Ok"
+        ""
 
+    me collect_smf_bytes() -> Result<[u8], CompileResult>:
         # Fail closed. An SMF with no code still gets a `main` symbol of size
         # 0 (smf_writer), and the loader then jumps into it. Zero modules,
         # a module with functions but no object, or no code in total are
         # compile errors, never a successful empty artifact.
-        if ctx.mir_modules.keys().len() == 0:
+        var held_names: [text] = []
+        for held_name in self.ctx.mir_modules.keys():
+            held_names = held_names.push(held_name)
+        val record_error = self.smf_record_module_parts_v1(held_names)
+        if record_error != "":
+            return Err(CompileResult.CodegenError(record_error))
+        val ctx: CompileContext = self.ctx
+        if self.native_staged_codegen.smf_part_objects.error != "":
+            val spool_err = self.native_staged_codegen.smf_part_objects.error
+            self.native_staged_codegen.smf_part_objects = smf_object_spool_release_v1(
+                self.native_staged_codegen.smf_part_objects)
+            return Err(CompileResult.CodegenError("SMF object spool: {spool_err}"))
+        # Parts are keyed by module name and assembled in explicitly sorted
+        # key order (smf_object_spool_assemble_v1), so a whole-program,
+        # staged or sharded build packages the same bytes.
+        val module_count = smf_object_spool_count_v1(self.native_staged_codegen.smf_part_objects)
+        if module_count == 0:
             return Err(CompileResult.CodegenError(
                 "SMF compile produced no MIR modules; nothing to package"))
-        for name in ctx.mir_modules.keys():
-            smf_log_trace(log, "compiling module for SMF: {name}")
-            val compiled = compile_module_with_backend(
-                backend_name,
-                ctx.mir_modules[name],
-                ctx.options.release,
-                opt_level
-            )
-            match compiled:
-                case Err(err):
-                    return Err(CompileResult.CodegenError(
-                        "AOT compile error in {name}: {err.to_text()}"))
-                case Ok(module):
-                    var module_bytes: [u8] = []
-                    if val obj_bytes = module.object_code:
-                        module_bytes = obj_bytes
-                    if module_bytes.len() == 0 and ctx.mir_modules[name].functions.len() > 0:
-                        return Err(CompileResult.CodegenError(
-                            "AOT compile error in {name}: backend returned no object code for {ctx.mir_modules[name].functions.len()} function(s)"))
-                    # @workaround bug=native_array_concat_dispatch_bootstrap_2026_10_16 recover=1986eb71e4ad1d334d795a4706c2bd06e7a0722b reason=baked bootstrap producer cannot dispatch array concat
-                    all_object_bytes = bytes_concat_copy_v1(all_object_bytes, module_bytes)
-                case _:
-                    return Err(CompileResult.CodegenError(
-                        "AOT compile error in {name}: backend result not Ok"))
+        val assembled = smf_object_spool_assemble_v1(self.native_staged_codegen.smf_part_objects)
+        self.native_staged_codegen.smf_part_objects = smf_object_spool_release_v1(
+            self.native_staged_codegen.smf_part_objects)
+        if assembled.is_err():
+            return Err(CompileResult.CodegenError("SMF object spool: {assembled.unwrap_err()}"))
+        val all_object_bytes = assembled.unwrap()
 
         if all_object_bytes.len() == 0:
             return Err(CompileResult.CodegenError(
-                "SMF compile produced no object code across {ctx.mir_modules.keys().len()} module(s)"))
+                "SMF compile produced no object code across {module_count} module(s)"))
         # extract_code_from_object only understands ELF and passes anything
         # else through as raw code, so a COFF or Mach-O object would be
         # loaded and entered at its file header.
@@ -230,22 +278,38 @@ impl CompilerDriver:
             if coff or macho:
                 return Err(CompileResult.CodegenError(
                     "SMF packaging needs ELF object code, but the backend produced a {if coff: "COFF" else: "Mach-O"} object for this host target"))
+        # SMF relocations address the merged Code section only and every
+        # output mode below drops the other allocated sections, so a relocated
+        # constant in `.data.rel.ro.<sym>` / `.rodata.*` / `.data.*` would be
+        # loaded unrelocated (child SIGBUS). Fail closed by name instead.
+        val relocated_data = elf_relocated_non_code_section(all_object_bytes)
+        if relocated_data != "":
+            return Err(CompileResult.CodegenError(
+                "SMF packaging keeps Code relocations only, but the object relocates non-code section {relocated_data}; its relocated constants cannot be represented in --mode=smf output"))
 
         val deps = smf_collect_dependency_hashes(ctx)
         val entry_source_hash = if ctx.source_content_hashes_owner.len() > 0:
             ctx.source_content_hashes_owner[0]
         else:
             0
-        val manifest_bytes = smf_collect_driver_manifest_bytes(ctx.mir_modules)
+        val manifest_bytes = smf_parts_assemble_manifests_v1(self.native_staged_codegen.smf_part_manifests)
         val launch_metadata_bytes = smf_render_launch_metadata().bytes()
         val target = Target.host()
         val mode = ctx.options.smf_output_mode
+        # Unit identity record (.simple_meta kind 3): try_load_smf_cached admits
+        # this SMF only when it matches its manifest row (smf_cached_unit_identity_admit).
+        var identity_source = ""
+        if ctx.options.input_files.len() > 0:
+            identity_source = file_read_text(smf_entry_source_input_v1(ctx.options.input_files))
+        val identity_bytes = smf_unit_identity_bytes_v1(
+            identity_source, ctx.options.native_target, ctx.options.profile, ctx.options.allowed_families)
         val smf_bytes = if mode == "elf_embedded":
             var opts = SmfBuildOptions.create(target)
             opts.deps = deps
             opts.source_hash = entry_source_hash
             opts.driver_manifest_bytes = manifest_bytes
             opts.launch_metadata_bytes = launch_metadata_bytes
+            opts.unit_identity_bytes = identity_bytes
             generate_smf_with_raw_code_options(all_object_bytes, opts)
         elif mode == "reloc_sections":
             var opts = SmfBuildOptions.create(target)
@@ -253,6 +317,7 @@ impl CompilerDriver:
             opts.source_hash = entry_source_hash
             opts.driver_manifest_bytes = manifest_bytes
             opts.launch_metadata_bytes = launch_metadata_bytes
+            opts.unit_identity_bytes = identity_bytes
             build_smf_with_relocations(all_object_bytes, opts)
         else:
             var opts = SmfBuildOptions.create(target)
@@ -260,19 +325,17 @@ impl CompilerDriver:
             opts.source_hash = entry_source_hash
             opts.driver_manifest_bytes = manifest_bytes
             opts.launch_metadata_bytes = launch_metadata_bytes
+            opts.unit_identity_bytes = identity_bytes
             generate_smf_with_options(all_object_bytes, opts)
         Ok(smf_bytes)
 
-fn smf_collect_driver_manifest_bytes(modules: Dict<text, MirModule>) -> [u8]:
+fn smf_module_driver_manifest_bytes_v1(module: MirModule) -> [u8]:
     var payload: [u8] = []
-    for module_name in modules.keys():
-        val module = modules[module_name]
-        for fn_ in module.functions.values():
-            if fn_.has_driver_manifest_attr:
-                # @workaround bug=native_array_concat_dispatch_bootstrap_2026_10_16 recover=1986eb71e4ad1d334d795a4706c2bd06e7a0722b reason=baked bootstrap producer cannot dispatch array concat
-                payload = bytes_concat_copy_v1(payload,
-                    smf_encode_driver_manifest_record(
-                        fn_.name, fn_.driver_manifest_attr))
+    for fn_ in module.functions.values():
+        if fn_.has_driver_manifest_attr:
+            payload = payload.concat(
+                smf_encode_driver_manifest_record(
+                    fn_.name, fn_.driver_manifest_attr))
     payload
 
 fn smf_encode_driver_manifest_record(
@@ -280,8 +343,7 @@ fn smf_encode_driver_manifest_record(
     attr: DriverManifestAttr
 ) -> [u8]:
     var buf: [u8] = []
-    # @workaround bug=native_array_concat_dispatch_bootstrap_2026_10_16 recover=1986eb71e4ad1d334d795a4706c2bd06e7a0722b reason=baked bootstrap producer cannot dispatch array concat
-    buf = bytes_concat_copy_v1(buf, smf_u32_to_bytes(0x44525653))
+    buf = buf.concat(smf_u32_to_bytes(0x44525653))
     var kind_byte: u8 = 0
     match attr.kind:
         case Driver:
@@ -292,19 +354,13 @@ fn smf_encode_driver_manifest_record(
     buf = buf.push((attr.driver_class & 0xFF).to_u8())
     buf = buf.push(1)
     buf = buf.push(0)
-    # @workaround bug=native_array_concat_dispatch_bootstrap_2026_10_16 recover=1986eb71e4ad1d334d795a4706c2bd06e7a0722b reason=baked bootstrap producer cannot dispatch array concat
-    buf = bytes_concat_copy_v1(buf, smf_u32_to_bytes(attr.vendor as i32))
-    # @workaround bug=native_array_concat_dispatch_bootstrap_2026_10_16 recover=1986eb71e4ad1d334d795a4706c2bd06e7a0722b reason=baked bootstrap producer cannot dispatch array concat
-    buf = bytes_concat_copy_v1(buf, smf_u32_to_bytes(attr.device_ids.len() as i32))
-    # @workaround bug=native_array_concat_dispatch_bootstrap_2026_10_16 recover=1986eb71e4ad1d334d795a4706c2bd06e7a0722b reason=baked bootstrap producer cannot dispatch array concat
-    buf = bytes_concat_copy_v1(buf, smf_fixed_ascii_bytes(attr.version, 16))
-    # @workaround bug=native_array_concat_dispatch_bootstrap_2026_10_16 recover=1986eb71e4ad1d334d795a4706c2bd06e7a0722b reason=baked bootstrap producer cannot dispatch array concat
-    buf = bytes_concat_copy_v1(buf, smf_fixed_ascii_bytes(name, 32))
+    buf = buf.concat(smf_u32_to_bytes(attr.vendor as i32))
+    buf = buf.concat(smf_u32_to_bytes(attr.device_ids.len() as i32))
+    buf = buf.concat(smf_fixed_ascii_bytes(attr.version, 16))
+    buf = buf.concat(smf_fixed_ascii_bytes(name, 32))
     for id in attr.device_ids:
-        # @workaround bug=native_array_concat_dispatch_bootstrap_2026_10_16 recover=1986eb71e4ad1d334d795a4706c2bd06e7a0722b reason=baked bootstrap producer cannot dispatch array concat
-        buf = bytes_concat_copy_v1(buf, smf_u32_to_bytes(0))
-        # @workaround bug=native_array_concat_dispatch_bootstrap_2026_10_16 recover=1986eb71e4ad1d334d795a4706c2bd06e7a0722b reason=baked bootstrap producer cannot dispatch array concat
-        buf = bytes_concat_copy_v1(buf, smf_u32_to_bytes(id as i32))
+        buf = buf.concat(smf_u32_to_bytes(0))
+        buf = buf.concat(smf_u32_to_bytes(id as i32))
     buf
 
 fn smf_fixed_ascii_bytes(value: text, width: i64) -> [u8]:
@@ -344,3 +400,47 @@ fn smf_collect_dependency_hashes(ctx: CompileContext) -> [SmfDependencyEntry]:
         source_index = source_index + 1
     deps
 use compiler.common.diagnostics.span.{Span}
+
+# Canonical unit identity record for an SMF built from `source`. Fields match
+# what the SMF manifest row states (smf_manifest_entry_new_with_iface):
+# iface = interface_digest_of_source (simple/interface/v1), abi = host driver
+# ABI digest, triple = native_target, policy = profile, caps = allowed
+# families. No triple -> no record (unverifiable; loader treats it as a miss).
+# reason: identity fields are opaque digest/triple/policy/capability tokens
+@allow(primitive_api)
+fn smf_unit_identity_bytes_v1(source: text, native_target: text, profile: text, allowed_families: [text]) -> [u8]:
+    if native_target == "":
+        return []
+    val id = UnitIdentity(
+        iface_digest: interface_digest_of_source(source),
+        abi_digest: smf_manifest_host_abi_digest(),
+        target_triple: native_target,
+        policy: profile,
+        capabilities: allowed_families)
+    unit_identity_encode(id).bytes()
+
+# The entry source of a build: the first input that is a regular file
+# (`--entry-closure` may lead with a directory). The SMF identity record and
+# its manifest row both hash this file, so they must pick the same one.
+fn smf_entry_source_input_v1(input_files: [text]) -> text:
+    for path in input_files:
+        if is_file(path):
+            return path
+    input_files[0]
+
+# Record the manifest row for an SMF written by compile_to_smf, stating the
+# same triple/profile/families that smf_unit_identity_bytes_v1 put in the SMF.
+fn smf_record_manifest_row_v1(options: CompileOptions, source_path: text, smf_path: text, source_hash: i64) -> bool:
+    update_smf_manifest_entry(
+        source_path,
+        smf_path,
+        source_hash,
+        options.backend,
+        compileoptions_effective_mir_opt_level(options),
+        options.release,
+        options.debug_info,
+        options.gc_off,
+        options.profile,
+        options.allowed_families,
+        options.native_target
+    )

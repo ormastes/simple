@@ -419,6 +419,15 @@ assertions keep passing exactly as before). Two additions:
 
 ## Known Constraints / Blockers
 
+
+- **2026-11-22 traps (GB10 aarch64, work/cuda-runtime-bugs):** (1) CUresult codes are
+  POSITIVE (3 NOT_INITIALIZED, 101 INVALID_DEVICE) -- negate before returning them through an
+  i64 "value or error" extern, or a failure reads as a real value. (2) In a seed built without
+  the `cuda` feature, `*_array` byte externs that call `simple_runtime::cuda_runtime` hit the `-3`
+  stubs; `memcpy_htod_array` / `module_load_data_array` now route to their dlopen siblings,
+  `launch_kernel_name_array` still does not (interpreter uses `rt_cuda_launch_kernel`). (3) Native
+  builds have no C forwarders for 28 CUDA externs:
+  `doc/08_tracking/bug/native_c_runtime_missing_cuda_provider_forwarders_2026-11-22.md`.
 - **B0: RESOLVED** — interpreter adapter landed 2026-08-07; the follow-on
   cubin/NUL-byte native bug it uncovered is a new, separate, still-OPEN
   issue: `doc/08_tracking/bug/rt_cuda_module_load_data_bytes_cstring_rejects_binary_cubin_2026-08-07.md`.

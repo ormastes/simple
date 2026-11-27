@@ -1,11 +1,10 @@
 # Bootstrap Publish Blocked on Windows: Native Symlink Requires SeCreateSymbolicLinkPrivilege
-## Open 2026-09-16 — needs owner triage
+## Closed 2026-11-11 — FIXED (lane boot10): NTFS-junction compatibility pointer verified live on this host (guard PASS). See addendum
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
-**Status:** OPEN — environmental, not a code defect. Needs a decision from the
-user; nothing here should be changed without one.
+**Status:** CLOSED 2026-11-11 (FIXED per 2026-11-09 owner decision, verified live by lane boot10)
 **Severity:** Blocking — phase-1 publish cannot complete on this Windows host
 (and, by the same mechanism, presumably any Windows host whose session lacks
 the privilege).
@@ -198,3 +197,60 @@ build `ring`. See
 
 Diagnosis helper for future sessions (no elevation needed, changes nothing):
 `sh scripts/setup/windows-symlink-privilege.shs check`.
+
+## Resolution 2026-11-09 (owner decision: no privilege dependency)
+
+Premise is stale: the shell helper (`bootstrap_stage3_create_compatibility_link`)
+and the perl publish helper (`scripts/check/lib/bootstrap-authority-generation-publish.pl`)
+both create the directory pointer as an NTFS junction on Windows
+(`mklink /J`, verified as a reparse point resolving to the exact target before
+the atomic rename). No symlink privilege is needed; the pointer is
+directory-only, so no file copy/pointer fallback applies. The remaining
+`winsymlinks:nativestrict` env only wraps the perl helper, which no longer
+calls symlink() on Windows. Reproduced on Windows 11 (MINGW64): a poisoned
+`ln` returning EPERM is never touched. Regression:
+`sh scripts/check/check-bootstrap-compat-link-no-privilege.shs` ->
+`PASS - 1 compatibility pointer created without symlink privilege ...`.
+Status: fix-implemented-verification-pending.
+
+## Triage 2026-11-10 (p3-boot2 lane)
+
+SUPERSEDED — the 2026-11-09 resolution (no-privilege NTFS junction) is
+verified live on this host from work/p3-boot2-20261110 (base
+origin/release/1.0.0), one cycle:
+
+- `sh scripts/check/check-bootstrap-compat-link-no-privilege.shs` ->
+  `PASS - 1 compatibility pointer created without symlink privilege,
+  resolved and renamed (os=MINGW64_NT-10.0-26300)`.
+- Windows junction code confirmed in both named sites:
+  `scripts/check/lib/bootstrap-stage3/authority.shs:4924-4928`
+  (`cmd.exe //d //c mklink //J`, with a comment explaining the
+  directory-only ABI/atomicity contract) and
+  `scripts/check/lib/bootstrap-authority-generation-publish.pl:74`
+  (`mklink //J` on the fresh-publish path, junction-verified before rename).
+  The remaining `winsymlinks:nativestrict` wrapper no longer reaches a
+  `symlink()` call on Windows, matching the resolution's claim.
+
+No code change needed; the phase-1 publish lane no longer depends on
+SeCreateSymbolicLinkPrivilege. Recovery-marker handling from this record
+remains documented in authority.shs for the next run.
+
+## Triage 2026-11-11 (lane boot10)
+
+FIXED — the 2026-11-09 resolution (no-privilege NTFS junction) re-verified
+live on this Windows host from work/p3-boot10-20261111 (base
+origin/release/1.0.0), one cycle:
+
+- `sh scripts/check/check-bootstrap-compat-link-no-privilege.shs` ->
+  `PASS - 1 compatibility pointer created without symlink privilege,
+  resolved and renamed (os=MINGW64_NT-10.0-26300)`.
+- Windows junction code confirmed in both named sites:
+  `scripts/check/lib/bootstrap-stage3/authority.shs` (`cmd.exe //d //c mklink
+  //J` with the directory-only ABI/atomicity comment) and
+  `scripts/check/lib/bootstrap-authority-generation-publish.pl:74`
+  (`mklink //J` on the fresh-publish path). The remaining
+  `winsymlinks:nativestrict` wrapper no longer reaches a `symlink()` call on
+  Windows.
+
+Phase-1 publish no longer depends on SeCreateSymbolicLinkPrivilege. No code
+change this lane.

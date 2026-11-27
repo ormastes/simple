@@ -1,7 +1,12 @@
 # arm64 attested build: `compiler-version-invalid` is a BY-DESIGN Rust-seed refusal, not a stale binary (2026-09-01)
 
-Status: **OPEN**. Corrects the working hypothesis that a fresh `cargo build
---release --bin simple` would clear the attested build's compiler admission.
+Status: **STALE** 2026-11-11 (lane p3-comp9; disposition first recorded by P3 compiler-seed
+lane 2026-11-10). The filed hypothesis (a rebuilt Rust seed would clear
+`compiler-version-invalid`) is stale: the attested builder's version/path filters
+are the guard working as designed and must not be weakened. The real remaining
+work — producing and admitting a pure-Simple Stage 4 full CLI — is an
+infrastructure pipeline task outside this lane. Disposition re-verified fresh at
+base 77be2266752d (see dated addendum).
 
 ## Finding 1 — the fresh seed DOES fix the parser gap (hypothesis confirmed)
 
@@ -109,3 +114,35 @@ The admissible artifact is therefore specifically a **Stage 4 full CLI**
 target `cli`), which is exactly the artifact
 `scripts/check/admit-simpleos-arm64-server-compiler.shs` exists to admit and
 which CLAUDE.md records as not currently deployed anywhere.
+
+## Triage 2026-11-10 (P3 compiler-seed lane, work/p3-seed-20261110)
+
+Verdict: **STALE-BLOCKED (by design — not a seed code defect)**. Re-read against
+`origin/release/1.0.0` at 1504212d788b; nothing in the record contradicts the
+doc's own Finding 2: the attested builder's version/path filters are the guard
+working correctly and "must not be weakened". No change in `src/compiler_rust`
+can make a Rust seed admissible — the remaining work is producing/admitting a
+pure-Simple Stage 4 full CLI (`scripts/check/admit-simpleos-arm64-server-compiler.shs`),
+an infrastructure pipeline task outside this lane. Evidence: host-limited review;
+guard scripts unchanged and behaving as documented. No code change made; the
+open "Remaining blocker" section stands as the tracking item.
+
+## Triage 2026-11-11 (lane comp9, worktree simple-p3-comp9-20261111, base 77be2266752d)
+
+Verdict: **STALE** — confirms the P3 compiler-seed lane 2026-11-10 disposition; not
+re-litigated. Fresh re-verification at this base (not resting on the 2026-11-10
+addendum alone):
+
+- `scripts/check/lib/simpleos-arm64-guest-source-fingerprint.shs` still carries all
+  three guard mechanisms the doc's Finding 2 names: path filter →
+  `rust-seed-or-debug-forbidden` (:41), one-line version filter →
+  `compiler-version-invalid` (:96), and the `Rust-built|bootstrap seed only|debug
+  build` refusal grep (:104). Guard behavior is unchanged, so no Rust-seed rebuild
+  can ever be admitted — the filed defect is by design, not a code defect.
+- `scripts/check/admit-simpleos-arm64-server-compiler.shs` (the Stage-4-CLI
+  admission receipt producer named as the remedy) is present at this base.
+- The remaining blocker (a pure-Simple Stage 4 full CLI with `os build` support)
+  is an infrastructure pipeline task, not a compiler-source defect; it stays
+  tracked in `arm64_wm_vulkan_real_firmware_lane_blocked_2026-09-01.md`.
+
+Disposition: STALE. Header flipped OPEN → STALE 2026-11-11 (lane p3-comp9).

@@ -1,6 +1,11 @@
 ---
 id: interp_option_dict_return_erased_2026-07-16
-status: OPEN
+status: LIVE (triaged 2026-11-11, lanes interp4/seedfix/int9/int11) — the seed
+  interpreter `-> Dict<K,V>?` return channel HANGS the seed codegen path
+  (CPU-bound no-output loop; parent-executed unbounded probe verdict,
+  `build/review/seedfix-defectC-probe.log`); root fix in
+  `src/compiler_rust` belongs to the seed-fix lane. See the 2026-11-11
+  addenda below.
 severity: medium
 discovered: 2026-07-16
 discovered_by: strict-cranelift diagnosis in scripts/check/check-native-seed-parity.shs
@@ -77,3 +82,87 @@ rt_cranelift_new_aot_module_triple`), irrelevant to this probe which already
 captured its answer before that point.
 
 **Status:** STILL-REPRODUCES (exact match, in-context).
+
+## 2026-11-10/11 triage — BLOCKED, needs-grant (lane p3-interp4 row 19, seed-smoke)
+
+Re-verification attempted with this doc's prescribed in-context method on the
+worktree seed. Probe added temporarily at the top level of
+src/compiler/70.backend/backend/cranelift_codegen_adapter.spl (after the
+CL_TYPE_* block), exactly this shape:
+
+    fn _probe_opt_dict() -> Dict<i64, i64>?:
+        var h: Dict<i64, i64> = {}
+        Some(h)
+    val _probe_opt_dict_run = _probe_opt_dict()
+    print "PROBE_OPT_DICT_CHECK={_probe_opt_dict_run.?}"
+
+Exact command (worktree C:/Users/yoon/dev/simple-p3-interp4-20261110):
+
+    ./bin/simple.exe native-build --entry examples/01_getting_started/hello_native.spl --backend cranelift
+
+Cycle 1 result: ABANDONED per budget ruling. The run spent >50 min
+CPU-saturated (~1 core, ~1.7 GB RSS) in the silent compiler-graph
+interpretation phase and was killed by the 3600 s harness task timeout before
+the cranelift adapter module initialized (log: build/p3fix-interp4/row19_probe.log,
+2518 lines, last line "workarounds: incomplete coverage; run simple check-dbs
+--fullscan bugs"; PROBE_OPT_DICT_CHECK never emitted). Per the 2026-11-11
+parent directive this cycle was abandoned, not retried unchanged: a full
+in-context re-verification needs an UNBOUNDED wall-clock grant (the 2026-07-17
+run reached module load quickly; today's graph+seed takes >1 h before any
+user-visible phase runs). Standalone `bin/simple run` still does not reproduce
+per this doc, so no cheaper repro exists within lane scope.
+
+Status: OPEN, root fix in src/compiler_rust (seed interpreter Option-of-Dict
+return channel) — write-forbidden to this lane; routed to the seed-fix lane
+together with this grant request. The STATICS_FAILED_KEY workaround in
+cranelift_codegen_adapter.spl remains the in-tree mitigation and is unaffected
+by the probe (file restored byte-identical to HEAD).
+
+## 2026-11-11 unbounded probe verdict (seedfix lane, parent-executed)
+
+The granted unbounded probe ran ~4h wall / ~11.4k CPU-s (pid 14504, detached
+per grant; log preserved at build/review/seedfix-defectC-probe.log, 9887
+lines). Progress: silent compiler-graph phase ended (~3h50m); module-load
+phase began; then the log FROZEN at 9886 lines for the final ~40 min while
+the process stayed ~98% CPU — no forward progress. Killed as pathological;
+`cranelift_codegen_adapter.spl` probe edit restored byte-identical to HEAD;
+`PROBE_OPT_DICT_CHECK` never emitted.
+
+Verdict: LIVE, re-classified — the Option<Dict<K,V>> return channel does not
+merely erase payloads, it appears to HANG the seed codegen path (CPU-bound
+no-output loop). Evidence is stronger than the original erasure report: a
+minimal hello-world-class entry with `fn _probe_opt_dict() -> Dict<i64,i64>?`
+never completes codegen. Next owner step: bisect the hang site in
+src/compiler_rust with a debug build (SIMPLE_DBG_* flags), or bound the
+compiler-graph phase with a cycle counter and dump the active node list.
+
+
+## Addendum 2026-11-11 (lane int9) — concurs LIVE; no new probe attempted
+
+int9 triage: no re-probe attempted. The standalone `bin/simple run` repro
+does not reproduce per this record, and the in-context repro is the
+ hours-scale compiler-graph interpretation the 2026-11-11 unbounded probe
+already ran to a pathological-CPU freeze verdict (parent-executed, log at
+`build/review/seedfix-defectC-probe.log`, 9887 lines). int9's tracked seed is
+the same build-commit (`46fe8f6b6def`) the parent's probe ran, so a repeat
+would re-run an existing red check unchanged. Concur with the re-classified
+verdict: LIVE — the seed interpreter `-> Dict<K,V>?` return channel hangs the
+seed codegen path; next owner step stands (bisect the hang site in
+`src/compiler_rust` with a debug build and `SIMPLE_DBG_*` flags, or bound the
+compiler-graph phase with a cycle counter and dump active nodes). Root fix
+and any grant beyond that belong to the seed-fix lane. Status stays OPEN.
+
+## Addendum 2026-11-11 (lane int11) — header flipped LIVE; in-tree mitigation re-verified
+
+Sweep flip. Same-day prior-lane addenda (interp4 BLOCKED-needs-grant, seedfix
+parent-executed unbounded probe verdict, int9 concurrence) already recorded
+the verified LIVE disposition; the header/frontmatter was never flipped.
+Quick re-verify at base `84f5076db138` (one source check, no re-probe): the
+in-tree mitigation `STATICS_FAILED_KEY` is still present in
+`src/compiler/70.backend/backend/cranelift_codegen_adapter.spl` (10 hits),
+and no commit in ancestry touches the Option<Dict<K,V>> return-channel path.
+The hours-scale in-context repro was already run to a pathological-CPU-freeze
+verdict by the granted parent probe today — re-running is budget-forbidden.
+Verdict stands: LIVE, owner seed-fix lane (`src/compiler_rust`, bisect the
+hang site with a debug build + `SIMPLE_DBG_*` flags, or bound the
+compiler-graph phase with a cycle counter).

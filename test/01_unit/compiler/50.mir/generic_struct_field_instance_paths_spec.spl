@@ -1,6 +1,6 @@
 # @req REQ-SSPEC-COMPILER
 # @req REQ-GENERIC-ANNOTATION-FIELD
-# @tag: unit, compiler, mir, mono, generics
+# @tag: unit, compiler, mir, generics
 #
 # A type-parameter field (`struct W<T>: v: T`) is typed by the INSTANCE it is
 # read from: `r.v + r.v` is a string concatenation on a `W<text>` and an
@@ -18,7 +18,7 @@
 # on parameters, returns, locals and fields. Only genuinely argumentless
 # receivers remain unknown instances.
 #
-# Each example runs HIR -> 40.mono -> 50.mir -> MirToLlvm in-process.
+# Each example runs HIR -> 50.mir -> MirToLlvm in-process.
 use std.spec
 use compiler.common.config.Logger
 use compiler.frontend.frontend.parse_full_frontend
@@ -30,7 +30,6 @@ use compiler.common.driver_core_types.{driver_core_compile_options_default}
 use compiler.driver.driver_mir_target.{driver_mir_target_context}
 use compiler.backend.mir_to_llvm.{MirToLlvm}
 use compiler.backend.backend.backend_types.{CodegenTarget}
-use compiler.mono.monomorphize_integration.{run_monomorphization_with_diagnostics}
 
 val MODULE = "gfp_probe"
 
@@ -54,12 +53,7 @@ fn shape(body: text) -> Shaped:
     var errors: [text] = []
     for e in hl.errors:
         errors.push("hir: " + e.message)
-    var mods: Dict<text, HirModule> = {}
-    mods[MODULE] = hir
-    val (mono, _stats, diags) = run_monomorphization_with_diagnostics(mods)
-    for d in diags:
-        errors.push("mono: " + d)
-    val m: HirModule = mono[MODULE]
+    val m: HirModule = hir
     var lowering = MirLowering.new_for_target(m.symbols, driver_mir_target_context(driver_core_compile_options_default()))
     val mir = lowering.lower_module(m)
     for e in lowering.errors:
@@ -226,6 +220,22 @@ describe "type-param field: annotated instances survive every source route":
         val s = shape(
             "fn probe(r: W) -> i64:\n" +
             "    r.v + r.v\n")
+        # Retargeted 2026-11-12: 2a488e2cf13 enforces nominal generic arity in HIR,
+        # so a bare `W` is now refused before MIR with an explicit arity error.
+        expect(verdict(s, "probe")).to_equal("hir: type `W` expects 1 type arguments, got 0")
+
+    it "an erased generic call result does not guess the instance from its word":
+        # `ident("a")` is an erased `T` word (i64 in MIR) with no HIR type;
+        # binding T=i64 from it would remember `W<i64>` and type the nested
+        # read as an integer add on a text. Unknown stays unknown: refused.
+        val s = shape(
+            "fn ident<T>(x: T) -> T:\n" +
+            "    x\n" +
+            "\n" +
+            "fn probe() -> i64:\n" +
+            "    val r = W(v: W(v: ident(\"a\")))\n" +
+            "    r.v.v + r.v.v\n")
+        expect(verdict(s, "probe")).to_not_equal("add")
         expect(refused(s, "probe")).to_equal(true)
 
     it "moving such a field without operating on it still lowers":

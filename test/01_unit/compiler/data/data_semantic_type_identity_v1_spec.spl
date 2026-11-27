@@ -1,0 +1,80 @@
+# Authored owner/transport regressions; execution awaits an admitted runtime.
+use std.spec.*
+use compiler.common.data.data_semantic_type_identity_v1.*
+
+fn primitive_identity_v1() -> text:
+    data_semantic_type_node_v1("int", ["64", "unsigned"], [])
+
+fn rejected_identity_v1(value: text) -> bool:
+    match data_semantic_type_identity_v1(value):
+        case Err(_): true
+        case Ok(_): false
+
+describe "complete semantic type identity transport":
+    it "compares complete nested descriptors and relevant qualifier positions":
+        step("Build two structural keys differing only inside a nested generic argument")
+        val inner = primitive_identity_v1()
+        val mutable = data_semantic_type_node_v1("ref", ["mutable"], [inner])
+        val immutable = data_semantic_type_node_v1("ref", ["immutable"], [inner])
+        val a = data_semantic_type_identity_v1(data_semantic_type_node_v1("named", ["pkg.types", "Box", "class"], [mutable])).unwrap()
+        val same = data_semantic_type_identity_v1(a.canonical).unwrap()
+        val b = data_semantic_type_identity_v1(data_semantic_type_node_v1("named", ["pkg.types", "Box", "class"], [immutable])).unwrap()
+        expect(data_semantic_type_identity_equal_v1(a, same)).to_equal(true)
+        expect(data_semantic_type_identity_equal_v1(a, b)).to_equal(false)
+
+    it "keeps nominal declaration owner, name and kind distinct":
+        step("Equal machine representation does not merge different nominal declarations")
+        val a = data_semantic_type_identity_v1(data_semantic_type_node_v1("named", ["pkg.a", "RegionId", "struct"], [])).unwrap()
+        for fields in [["pkg.b", "RegionId", "struct"], ["pkg.a", "ObjId", "struct"], ["pkg.a", "RegionId", "class"]]:
+            val b = data_semantic_type_identity_v1(data_semantic_type_node_v1("named", fields, [])).unwrap()
+            expect(data_semantic_type_identity_equal_v1(a, b)).to_equal(false)
+
+    it "uses UTF-8 bytes for length prefixes and the explicit byte bound":
+        step("Round-trip non-ASCII owner/name fields without confusing characters and bytes")
+        val encoded = data_semantic_type_node_v1("named", ["pkg.型", "Région", "struct"], [])
+        val value = data_semantic_type_identity_v1(encoded).unwrap()
+        expect(value.byte_len).to_equal(encoded.bytes().len())
+        expect(data_semantic_type_identity_valid_v1(value)).to_equal(true)
+        val wrong = DataSemanticTypeIdentityV1(version: value.version, canonical: encoded, byte_len: value.byte_len - 1)
+        expect(data_semantic_type_identity_valid_v1(wrong)).to_equal(false)
+
+    it "rejects wrong versions, trailing bytes and malformed framing":
+        step("A prefix, empty field, or unchecked version is not an identity proof")
+        val good = data_semantic_type_identity_v1(primitive_identity_v1()).unwrap()
+        val wrong = DataSemanticTypeIdentityV1(version: 2, canonical: good.canonical, byte_len: good.byte_len)
+        expect(data_semantic_type_identity_equal_v1(good, wrong)).to_equal(false)
+        for wire in [good.canonical + "extra", "03:int0:0:", "3:int2:99999:", "", "-1:"]:
+            expect(rejected_identity_v1(wire)).to_equal(true)
+
+    it "rejects unknown constructors, alias carriers, arity and effect/type confusion":
+        step("Do not accept unresolved aliases or a typed-looking but malformed tree")
+        for wire in [data_semantic_type_node_v1("infer", [], []),
+                     data_semantic_type_node_v1("named", ["pkg.a", "A", "type_alias"], []),
+                     data_semantic_type_node_v1("ref", ["mutable"], []),
+                     data_semantic_type_node_v1("optional", [], [primitive_identity_v1(), primitive_identity_v1()]),
+                     data_semantic_type_node_v1("effect.io", [], []),
+                     data_semantic_type_node_v1("function", ["0", "1"], [primitive_identity_v1(), primitive_identity_v1()]),
+                     data_semantic_type_node_v1("function", ["9223372036854775807", "9223372036854775807"], [])]:
+            expect(rejected_identity_v1(wire)).to_equal(true)
+
+    it "enforces depth and total node budgets before admitting a key":
+        step("Finite recursive trees must fit both depth and aggregate-node limits")
+        var deep = primitive_identity_v1()
+        for _ in 0..34: deep = data_semantic_type_node_v1("optional", [], [deep])
+        expect(rejected_identity_v1(deep)).to_equal(true)
+        var leaves: [text] = []
+        for _ in 0..256: leaves = leaves.push(data_semantic_type_node_v1("unit", [], []))
+        val group = data_semantic_type_node_v1("tuple", [], leaves)
+        val wide = data_semantic_type_node_v1("tuple", [], [group, group, group, group])
+        expect(wide.bytes().len() < DATA_SEMANTIC_TYPE_MAX_BYTES_V1).to_equal(true)
+        expect(rejected_identity_v1(wide)).to_equal(true)
+
+    it "requires exact comparison even when a caller assigns the same digest bucket":
+        step("Two entries in one forced bucket remain distinguishable by complete descriptors")
+        val a = data_semantic_type_identity_v1(primitive_identity_v1()).unwrap()
+        val b = data_semantic_type_identity_v1(data_semantic_type_node_v1("text", [], [])).unwrap()
+        val bucket = [a, b]
+        var hits = 0
+        for item in bucket:
+            if data_semantic_type_identity_equal_v1(item, b): hits = hits + 1
+        expect(hits).to_equal(1)

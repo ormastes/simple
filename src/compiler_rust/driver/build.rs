@@ -18,6 +18,7 @@ use walkdir::WalkDir;
 fn main() {
     let out_dir = env::var("OUT_DIR").unwrap();
     let manifest_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
+    emit_reproducible_msvc_link_args(&out_dir);
     // CARGO_MANIFEST_DIR = .../simple/src/compiler_rust/driver
     // We need to go up 3 levels to get to project root (.../simple)
     let project_root = Path::new(&manifest_dir)
@@ -41,6 +42,39 @@ fn main() {
         // Export VERSION for runtime use
         println!("cargo:rustc-env=SIMPLE_VERSION={}", file_version);
     }
+
+    // Record the commit the seed was built from so AOT gates can check freshness.
+    // Watch the RESOLVED ref storage, not just .git/HEAD: a new commit on the
+    // same branch moves the ref (and packed-refs), not HEAD, and in a linked
+    // worktree .git is a file so the real gitdir lives elsewhere
+    // (OPUS-REVIEW on the seed-freshness gate, 2026-11-09).
+    for rel in ["HEAD", "packed-refs"] {
+        if let Some(path) = std::process::Command::new("git")
+            .args(["rev-parse", "--git-path", rel])
+            .current_dir(&project_root)
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        {
+            let watched = std::path::PathBuf::from(&path);
+            let watched = if watched.is_absolute() {
+                watched
+            } else {
+                project_root.join(watched)
+            };
+            println!("cargo:rerun-if-changed={}", watched.display());
+        }
+    }
+    let commit = std::process::Command::new("git")
+        .args(["rev-parse", "HEAD"])
+        .current_dir(project_root)
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    println!("cargo:rustc-env=SIMPLE_BUILD_COMMIT={}", commit);
 
     // Generate tests for stdlib
     let stdlib_test_root = project_root.join("test/unit/lib/std");
@@ -279,5 +313,25 @@ mod tests {
         assert_ne!(nested, flat);
         assert!(nested.starts_with("unit_app_build_coverage_spec_"));
         assert!(flat.starts_with("unit_app_build_coverage_spec_"));
+    }
+}
+
+/// Bug seed_rust_build_not_reproducible_2026-11-02: on x86_64-pc-windows-msvc
+/// rustc always passes `/DEBUG` to lld-link, so a PDB is written even though
+/// the bootstrap profile strips debuginfo. The PDB records rustc's random
+/// per-link temp directory, and lld-link derives the CodeView GUID (and, under
+/// `/Brepro`, the COFF TimeDateStamp) from it, so two links of identical
+/// objects never hash equal. The bootstrap profile wants no debug info at all,
+/// so drop the PDB there. Cargo exposes no profile name to build scripts; the
+/// profile directory is the parent of `build/` in OUT_DIR.
+fn emit_reproducible_msvc_link_args(out_dir: &str) {
+    if env::var("CARGO_CFG_TARGET_ENV").as_deref() != Ok("msvc") {
+        return;
+    }
+    let is_bootstrap = Path::new(out_dir)
+        .ancestors()
+        .any(|p| p.file_name().map_or(false, |n| n == "bootstrap") && p.join("build").is_dir());
+    if is_bootstrap {
+        println!("cargo:rustc-link-arg-bins=/DEBUG:NONE");
     }
 }

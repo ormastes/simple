@@ -38,7 +38,7 @@ scv_storage_spec -> app
 
 ### Storage chunking
 
-#### records chunk lists for large files while preserving export bytes
+#### records structural roots for large files while retaining raw bytes
 
 <details>
 <summary>Executable SSpec</summary>
@@ -49,7 +49,8 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 val script = "set -eu\nREPO=$(pwd)\nTMP=$(mktemp -d /tmp/scv-doc-cdc.XXXXXX)\nhead -c 2300 /dev/zero | tr '\\000' A > \"$TMP/big.txt\"\ncd \"$TMP\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" init >/dev/null\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" snapshot >/dev/null\nFILE=$(sed -n 's/.*|\\(file_[^|]*\\).*/\\1/p' .scv/meta/status_index.sdn | head -1)\nsed -n '1,16p' \".scv/objects/files/$FILE.sdn\"\nSIMPLE_LIB=\"$REPO/src\" \"$REPO/bin/release/simple\" run \"$REPO/src/app/scv/main.spl\" fsck\n"
 val out = _scv_storage_doc_script(script)
-expect(out).to_contain("chunks:")
+expect(out).to_contain("structure: syntax_node_")
+expect(out.contains("chunks:")).to_equal(false)
 expect(out).to_contain("OK checked=1")
 ```
 

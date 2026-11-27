@@ -53,3 +53,61 @@ destination before publishing), not the miss. After that fix the second build
 succeeds by RECOMPILING; `cached=0` remains. Diagnosing the miss needs a trace
 line naming the declining sub-condition, which does not exist today.
 
+## Addendum 2026-11-11 (lane ne16) — BLOCKED, still OPEN
+
+Verdict: BLOCKED (measurement cannot run on this host); stays OPEN.
+
+**What changed since filing (code inspection, verified in tree):**
+- The doc's diagnostic prerequisite LANDED: the driver now prints the
+  declining sub-condition — `driver_aot_native_output.spl:2437` logs
+  `reason={witness_reason}` per declined module, and `:2585` logs
+  `cached={n} uncached={n} uncached_modules=[...]`. The hit machinery was
+  also reworked around `source_snapshot_matches` + a per-module witness
+  (`expected_witness_reason == "ok"` gate at `:2394-2439`).
+- Unit coverage for the witness machinery passes on the fresh seed
+  (build-commit `46fe8f6b6def`):
+  `test/01_unit/compiler/cache_v2/native_module_witness_spec.spl` -> 6/6 PASS
+  (interpreter mode).
+
+**What is NOT proven:** whether an identical second positional build now
+reports a hit. That requires two real `native-build`s sharing one HOME — and
+native-build on this Windows host is a known live defect (hang; never retry a
+hung build), so the measurement cannot be taken here. No in-tree check script
+automates the identical-second-build scenario (grep of `scripts/check/`).
+
+**Exact grant command (Linux host, pure-Simple release binary):**
+```sh
+# from repo root, with bin/release/x86_64-unknown-linux-gnu/simple deployed as bin/simple
+SIMPLE_COMPILER_TRACE=1 bin/simple native-build \
+  scripts/check/cert/redeploy_gate/fixtures/hello_world.spl -o /tmp/nc1/hello
+SIMPLE_COMPILER_TRACE=1 bin/simple native-build \
+  scripts/check/cert/redeploy_gate/fixtures/hello_world.spl -o /tmp/nc2/hello
+# pass: second build prints "[NATIVE] cache hit: ..." and cached>=1;
+# fail: cached=0 again — but now the decline reason IS logged, capture it.
+```
+
+
+
+## Addendum 2026-11-13 (lane work/live-p3-l3-20261113 (worktree lp3-wt, base f790f7f266e = origin/release/1.0.0 tip, seed binary build-commit 46fe8f6b6def))
+
+Still unmeasurable on this Windows host for the pure-Simple driver path: a
+positional `native-build` without `SIMPLE_NATIVE_BUILD_RUST=1` routes through
+the interpreted worker (the known Windows hang — never retried), and the
+identical-second-build scenario this row names is a property of
+`driver_aot_native_output.spl`, which the Rust engine does not exercise. The
+decline-reason trace lines this row asked for are in tree (verified). Adjacent
+evidence from the 2026-11-13 repair of
+`check-native-object-cache-invalidation.shs` (see
+`native_object_cache_ignores_dependency_interface_change_2026-08-17.md`):
+the Rust engine's per-module `InterfaceSliceIndex` key was verified correct in
+both directions at this base; the pure-Simple driver's identical-second-build
+behaviour remains UNMEASURED. Grant unchanged: Linux host, two positional
+native-builds sharing one HOME.
+
+## Triage 2026-11-13 (P3 tools lane)
+No code change this lane; the 2026-11-11 (lane ne16) addendum stands — BLOCKED
+on this host: the diagnostic prerequisite landed (per-module decline reason is
+logged), but the two-real-native-builds measurement cannot run on Windows
+(native-build hang class; never retry a hung build). The Linux grant in the
+record is the unblock path.
+

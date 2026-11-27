@@ -1,0 +1,151 @@
+# Canonical preparation for the controller's existing V4 agent actions. Callers must supply
+# retained/authenticated Host evidence and an installed controller snapshot. No keys are opened here.
+use std.common.crypto.sha256.sha256_text
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
+use std.common.contracts.orchestration.host_authorization_context_v1.HostReservationAuthorizationContextV1
+use std.common.contracts.orchestration.host_agent_pane_stream_v6.{HostAgentPaneTargetReceiptV6, host_agent_pane_target_receipt_decode_v6}
+use std.common.contracts.orchestration.host_execute_associated_v3.host_execute_associated_decode_v3
+use std.common.contracts.orchestration.host_execution_association_v3.{host_execution_association_encode_v3, host_execution_association_digest_v3}
+use std.common.contracts.orchestration.host_linux_service_enrollment_v3.host_linux_service_enrollment_decode_v3
+use std.common.contracts.orchestration.agent_workspace_invocation_v2.agent_workspace_invocation_manifest_decode_v2
+use std.common.contracts.orchestration.host_reservation_codec_v1.host_helper_reservation_receipt_v1
+use std.common.contracts.container.execution_v2.container_execution_plan_bytes_v2
+use std.common.contracts.container.effect_deadline_v1.container_effect_deadline_v1
+use std.common.contracts.container.primary_attach_v1.{HostAgentPaneBindingV4, host_agent_pane_binding_encode_v4,
+    container_primary_attach_plan_decode_v1, container_primary_attach_plan_digest_v1, container_primary_attach_admission_validate_v1}
+use std.common.contracts.container.stream_v2.{ContainerHelperAdmissionV2, container_stream_policy_decode_v2,
+    container_stream_policy_digest_v2, container_stream_policy_template_pin_v2}
+use std.common.build_manager.group_process_stream_protocol_v2.group_process_stream_template_decode_v3
+use std.nogc_sync_mut.daemon_sdk.distributed_authority_snapshot_v2.{DistributedAuthoritySnapshotV2,
+    distributed_verify_grant_approval_from_snapshot_v2}
+use std.nogc_sync_mut.orchestration.host_execution_observation_v2.host_execution_observation_decode_v2
+use std.nogc_sync_mut.orchestration.host_helper_request_v1.{HostHelperExecutionProofV1, host_helper_request_decode_v1,
+    host_helper_execution_proof_decode_v1}
+use std.nogc_sync_mut.orchestration.host_linux_service_agent_v4.host_agent_invoke_request_decode_v4
+use std.nogc_sync_mut.orchestration.host_agent_attachment_v4.{host_agent_action_operation_v4, host_agent_attach_payload_digest_v4,
+    host_agent_attach_helper_execute_operation_v4, host_agent_attach_helper_execute_digest_v4,
+    host_agent_attach_request_decode_v4, host_agent_detach_payload_digest_v4}
+
+pub struct ControllerAgentPaneAttachInputsV4:
+    execute: text
+    association: text
+    observation: text
+    enrollment: text
+    invoke: text
+    target: text
+    binding_uid: text
+    plan: text
+    helper_request: text
+    helper_execute_proof: text
+    stream_policy: text
+    installed_helper_template: text
+
+pub struct ControllerAgentPaneAttachPlanV4:
+    execute_operation: OperationEnvelopeV2
+    attach_operation: OperationEnvelopeV2
+    association_digest: text
+    pane_binding: text
+    plan_digest: text
+    pane_binding_digest: text
+    helper_execute_proof: HostHelperExecutionProofV1
+
+# A canonical receipt is data. The caller must obtain it on the authenticated retained route.
+pub fn controller_agent_pane_bind_target_v4(target_source: text, invoke_source: text,
+        binding_uid: text) -> Result<text, text>:
+    val target = host_agent_pane_target_receipt_decode_v6(target_source)?
+    val invoke = host_agent_invoke_request_decode_v4(invoke_source)?
+    controller_agent_pane_target_binding_v4(target, invoke.operation_id, invoke_source, binding_uid)
+
+fn controller_agent_pane_target_binding_v4(target: HostAgentPaneTargetReceiptV6, operation_id: text,
+        invoke_source: text, binding_uid: text) -> Result<text, text>:
+    if target.operation_id != operation_id or target.invoke_digest != sha256_text(invoke_source):
+        return Err("controller-agent-pane-target-invoke-mismatch")
+    host_agent_pane_binding_encode_v4(HostAgentPaneBindingV4(binding_uid: binding_uid,
+        service_incarnation: target.service_incarnation, session_id: target.session_id,
+        window_id: target.window_id, pane_id: target.pane_id, service_epoch: target.service_epoch))
+
+pub fn controller_agent_pane_attach_plan_v4(input: ControllerAgentPaneAttachInputsV4,
+        snapshot: DistributedAuthoritySnapshotV2, controller: text,
+        context: HostReservationAuthorizationContextV1) -> Result<ControllerAgentPaneAttachPlanV4, text>:
+    val target = host_agent_pane_target_receipt_decode_v6(input.target)?
+    val invoke = host_agent_invoke_request_decode_v4(input.invoke)?
+    val binding = controller_agent_pane_target_binding_v4(target, invoke.operation_id, input.invoke, input.binding_uid)?
+    val execute = host_execute_associated_decode_v3(input.execute)?
+    val association = execute.association
+    if (execute.operation.id != invoke.operation_id or execute.signed.issuer_id != controller or
+            host_execution_association_encode_v3(association)? != input.association or
+            association.service_scope.continuity_id != target.service_incarnation):
+        return Err("controller-agent-pane-execute-mismatch")
+    val manifest = agent_workspace_invocation_manifest_decode_v2(invoke.manifest)?
+    if (manifest.base.operation_id != invoke.operation_id or not association.readonly_rootfs or association.agent_probe_list_digest == "" or
+            association.agent_invocation_manifest_digest != sha256_text(invoke.manifest) or
+            context.grant_clock <= 0 or context.grant_clock >= manifest.base.not_after):
+        return Err("controller-agent-pane-manifest-mismatch")
+    val _execute_grant = distributed_verify_grant_approval_from_snapshot_v2(snapshot, execute.signed,
+        execute.approval, execute.operation, context.grant_clock, snapshot.generation, context.policy_revision,
+        context.revocation_epoch, context.session_generation)?
+
+    val plan = container_primary_attach_plan_decode_v1(input.plan)?
+    val observation = host_execution_observation_decode_v2(input.observation)?
+    val prepared = execute.prepare.prepare
+    if (plan.terminal_mode != "tty" or plan.runtime != observation.runtime or observation.phase != "running" or
+            observation.inspect_status != "ok" or observation.operation_id != invoke.operation_id or
+            observation.operation_digest != sha256_text(distributed_encode_operation_v2(prepared.operation)?) or
+            observation.plan_digest != prepared.intent.plan_digest or
+            observation.request_digest != association.execution.plan.request_digest or
+            observation.grant_id != execute.signed.grant.id or observation.principal != execute.signed.grant.principal or
+            observation.issuer_id != controller or observation.approver_id != execute.approval.approver_id or
+            observation.provider_identity_digest != plan.provider_identity_digest or
+            container_execution_plan_bytes_v2(plan.workload)? != container_execution_plan_bytes_v2(association.execution.plan)?):
+        return Err("controller-agent-pane-runtime-mismatch")
+    val enrollment = host_linux_service_enrollment_decode_v3(input.enrollment)?
+    if (sha256_text(input.enrollment) != association.enrollment_digest or
+            enrollment.provider_identity_digest != observation.provider_identity_digest or
+            enrollment.agent_helper_template_digest != sha256_text(input.installed_helper_template)):
+        return Err("controller-agent-pane-enrollment-mismatch")
+    val template = group_process_stream_template_decode_v3(input.installed_helper_template)?
+    val stream = container_stream_policy_decode_v2(input.stream_policy)?
+    if container_stream_policy_digest_v2(stream)? != plan.policy_digest: return Err("attach-stream-policy")
+    val _pinned = container_stream_policy_template_pin_v2(stream, template)?
+
+    val helper = host_helper_request_decode_v1(input.helper_request)?
+    val proof = host_helper_execution_proof_decode_v1(helper, input.helper_execute_proof)?
+    if helper.signed.issuer_id != controller or proof.signed.issuer_id != controller or helper.plan.helper_kind != "attach-broker":
+        return Err("controller-agent-pane-helper-mismatch")
+    val _prepared_grant = distributed_verify_grant_approval_from_snapshot_v2(snapshot, helper.signed, helper.approval,
+        helper.operation, context.grant_clock, snapshot.generation, context.policy_revision, context.revocation_epoch,
+        context.session_generation)?
+    val grant = distributed_verify_grant_approval_from_snapshot_v2(snapshot, proof.signed, proof.approval,
+        host_agent_attach_helper_execute_operation_v4(helper), context.grant_clock, snapshot.generation,
+        context.policy_revision, context.revocation_epoch, context.session_generation)?
+    val admission = ContainerHelperAdmissionV2(plan: helper.plan, intent: helper.intent, operation: helper.operation,
+        receipt: host_helper_reservation_receipt_v1(helper.intent, helper.operation)?,
+        deadline: container_effect_deadline_v1(helper.plan.request_digest, helper.operation.id, ["attach"], grant.expires_at)?,
+        grant_id: grant.id, issuer_id: proof.signed.issuer_id, approver_id: proof.approval.approver_id,
+        cpu_millis: helper.intent.reservation.cpu_millis, memory_bytes: helper.intent.reservation.memory_bytes)
+    val _associated = container_primary_attach_admission_validate_v1(plan, admission)?
+
+    val association_digest = host_execution_association_digest_v3(association)?
+    val plan_digest = container_primary_attach_plan_digest_v1(plan)?
+    val binding_digest = sha256_text(binding)
+    val payload = host_agent_attach_payload_digest_v4(invoke.operation_id, association_digest, plan_digest,
+        sha256_text(input.helper_request), binding_digest,
+        host_agent_attach_helper_execute_digest_v4(proof.signed, proof.approval)?, sha256_text(input.stream_policy))
+    val operation = host_agent_action_operation_v4("host_agent_attach_v4", execute.operation, payload, context)?
+    Ok(ControllerAgentPaneAttachPlanV4(execute.operation, operation, association_digest, binding,
+        plan_digest, binding_digest, proof))
+
+pub fn controller_agent_pane_detach_operation_v4(plan: ControllerAgentPaneAttachPlanV4, signed_attach: text,
+        snapshot: DistributedAuthoritySnapshotV2, controller: text,
+        context: HostReservationAuthorizationContextV1) -> Result<OperationEnvelopeV2, text>:
+    val attach = host_agent_attach_request_decode_v4(signed_attach)?
+    if (attach.operation_id != plan.execute_operation.id or attach.association_digest != plan.association_digest or
+            attach.signed.issuer_id != controller or
+            distributed_encode_operation_v2(attach.operation)? != distributed_encode_operation_v2(plan.attach_operation)?):
+        return Err("controller-agent-pane-attach-mismatch")
+    val _grant = distributed_verify_grant_approval_from_snapshot_v2(snapshot, attach.signed, attach.approval,
+        attach.operation, context.grant_clock, snapshot.generation, context.policy_revision,
+        context.revocation_epoch, context.session_generation)?
+    val payload = host_agent_detach_payload_digest_v4(attach.operation_id, attach.association_digest, sha256_text(signed_attach))
+    host_agent_action_operation_v4("host_agent_detach_v4", plan.execute_operation, payload, context)

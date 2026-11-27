@@ -1,0 +1,40 @@
+use compiler.common.driver_compile_options.{TargetDebugRequestV1}
+use compiler.driver.driver_xray_policy.{driver_target_debug_request_v1}
+use common.trace.observer_contract_v1.{TraceConfigV1, TraceFailureV1, TraceInstrumentationV1}
+use common.trace.observer_config_v1.{trace_config_defaults_v1}
+
+fn target_profile_observer_request_check() -> text:
+    val absent_config: TraceConfigV1? = nil
+    val absent: Result<TraceConfigV1?, TraceFailureV1> = Ok(absent_config)
+    if driver_target_debug_request_v1(TargetDebugRequestV1.Default, absent).unwrap() != TargetDebugRequestV1.Default:
+        return "absent extension changed request"
+    val off_config: TraceConfigV1? = Some(trace_config_defaults_v1())
+    val off: Result<TraceConfigV1?, TraceFailureV1> = Ok(off_config)
+    if driver_target_debug_request_v1(TargetDebugRequestV1.Default, off).unwrap() != TargetDebugRequestV1.Disabled:
+        return "explicit Off lost"
+    if driver_target_debug_request_v1(TargetDebugRequestV1.Enabled, off).is_ok():
+        return "typed and extension conflict accepted"
+    var dynamic_config = trace_config_defaults_v1()
+    dynamic_config.instrumentation = TraceInstrumentationV1.Dynamic
+    val dynamic_optional: TraceConfigV1? = Some(dynamic_config)
+    val dynamic_result: Result<TraceConfigV1?, TraceFailureV1> = Ok(dynamic_optional)
+    if driver_target_debug_request_v1(TargetDebugRequestV1.Default, dynamic_result).unwrap() != TargetDebugRequestV1.Enabled:
+        return "explicit Dynamic lost"
+    val invalid: Result<TraceConfigV1?, TraceFailureV1> = Err(TraceFailureV1.InvalidArgument)
+    if driver_target_debug_request_v1(TargetDebugRequestV1.Default, invalid).is_ok():
+        return "parser failure disappeared into Default"
+    var always_config = trace_config_defaults_v1()
+    always_config.instrumentation = TraceInstrumentationV1.AlwaysOn
+    val always_optional: TraceConfigV1? = Some(always_config)
+    val always_result: Result<TraceConfigV1?, TraceFailureV1> = Ok(always_optional)
+    if driver_target_debug_request_v1(TargetDebugRequestV1.Default, always_result).is_ok():
+        return "unsupported AlwaysOn disappeared into Default"
+    ""
+
+fn main() -> i64:
+    val error = target_profile_observer_request_check()
+    if error != "":
+        print error
+        return 1
+    print "PASS actual observer request policy: absent Off Dynamic malformed conflict AlwaysOn"
+    0

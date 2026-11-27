@@ -1,0 +1,106 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-LIB
+# bug: doc/08_tracking/bug/bootstrap_macos_blocked_seed_compile_and_linux_only_stage3_authority_2026-09-06.md
+#
+# Pure-Simple twin of the decision logic inside the pinned native helper
+# src/runtime/tools/stage3_fdwalk.c (fd-relative walk + exec-by-held-fd for
+# Darwin, where the Stage-3 shared runner has no procfs magic links and no
+# fexecve). Policy: doc/07_guide/os/hal/pure_simple_hal.md §2 — bootstrap C
+# keeps a Simple twin. The pairing here is a SHARED VECTOR TABLE: the C file
+# carries the same rows between `twin-vectors: stage3_fdwalk_v1` markers and
+# runs them under `stage3_fdwalk --selftest`; this spec runs them through the
+# Simple twin AND pins the two tables byte-identical by reading the C source.
+# Not a `@dual_pair:` runner pair: the helper is a standalone program, not a
+# runtime-linked rt_* symbol, so the DualRunner cannot call it in-process.
+#
+# Repro (RED before the twin existed): every `it` below failed with an
+# unresolved import of std.stage3_fdwalk_policy.
+
+use std.spec
+use std.stage3_fdwalk_policy.{fdwalk_component_ok, fdwalk_split_relative, fdwalk_exec_verdict, fdwalk_vectors, fdwalk_run_vector, FdIdentity, HeldExecutable, RepathObservation, FDWALK_VERDICT_ADMIT, FDWALK_VERDICT_NOT_REGULAR, FDWALK_VERDICT_UNLINKED, FDWALK_VERDICT_REPATH_MISSING, FDWALK_VERDICT_REPATH_SYMLINK, FDWALK_VERDICT_IDENTITY_MISMATCH}
+use std.fs.{read_file, exists}
+
+describe "stage3 fdwalk policy: path components":
+    it "accepts the portable component alphabet":
+        assert_true(fdwalk_component_ok("bin"))
+        assert_true(fdwalk_component_ok("stage3-shared-runner.pl"))
+        assert_true(fdwalk_component_ok("a.b_c-d"))
+        assert_true(fdwalk_component_ok("-"))
+        assert_true(fdwalk_component_ok("..."))
+
+    it "rejects empty, dot, dot-dot, separators, spaces and backslashes":
+        for bad in ["", ".", "..", "a b", "a/b", "a\\b", "é", "a\tb"]:
+            expect_not(fdwalk_component_ok(bad))
+
+    it "rejects components over 255 bytes":
+        var long = ""
+        var i = 0
+        while i < 256:
+            long = long + "x"
+            i = i + 1
+        expect_not(fdwalk_component_ok(long))
+        assert_true(fdwalk_component_ok(long.substring(1, 256)))
+
+describe "stage3 fdwalk policy: relative path splitting":
+    it "splits a valid relative path into components":
+        val parts = fdwalk_split_relative("bin/simple")
+        expect(parts.len()).to_equal(2)
+        expect(parts[0]).to_equal("bin")
+        expect(parts[1]).to_equal("simple")
+        expect(fdwalk_split_relative("simple").len()).to_equal(1)
+
+    it "rejects absolute, empty, doubled, dot and dot-dot spellings as empty":
+        for bad in ["/bin/simple", "", "bin//simple", "bin/./simple", "bin/../simple", "bin/"]:
+            expect(fdwalk_split_relative(bad).len()).to_equal(0)
+
+fn held(regular: bool, nlink: i64, dev: i64, ino: i64) -> HeldExecutable:
+    return HeldExecutable(regular: regular, nlink: nlink, identity: FdIdentity(dev: dev, ino: ino))
+
+fn repath(present: bool, symlink: bool, dev: i64, ino: i64) -> RepathObservation:
+    return RepathObservation(present: present, symlink: symlink, identity: FdIdentity(dev: dev, ino: ino))
+
+describe "stage3 fdwalk policy: exec verdict (verify-by-fd)":
+    it "admits a regular linked file whose re-resolved path is the same inode":
+        expect(fdwalk_exec_verdict(held(true, 1, 7, 42), repath(true, false, 7, 42))).to_equal(FDWALK_VERDICT_ADMIT)
+        expect(fdwalk_exec_verdict(held(true, 2, 7, 42), repath(true, false, 7, 42))).to_equal(FDWALK_VERDICT_ADMIT)
+
+    it "rejects in the C helper's priority order":
+        expect(fdwalk_exec_verdict(held(false, 1, 7, 42), repath(true, false, 7, 42))).to_equal(FDWALK_VERDICT_NOT_REGULAR)
+        expect(fdwalk_exec_verdict(held(true, 0, 7, 42), repath(true, false, 7, 42))).to_equal(FDWALK_VERDICT_UNLINKED)
+        expect(fdwalk_exec_verdict(held(true, 1, 7, 42), repath(false, false, 0, 0))).to_equal(FDWALK_VERDICT_REPATH_MISSING)
+        expect(fdwalk_exec_verdict(held(true, 1, 7, 42), repath(true, true, 7, 42))).to_equal(FDWALK_VERDICT_REPATH_SYMLINK)
+        expect(fdwalk_exec_verdict(held(true, 1, 7, 42), repath(true, false, 7, 43))).to_equal(FDWALK_VERDICT_IDENTITY_MISMATCH)
+        expect(fdwalk_exec_verdict(held(true, 1, 7, 42), repath(true, false, 8, 42))).to_equal(FDWALK_VERDICT_IDENTITY_MISMATCH)
+
+    it "verdict ordinals are the helper's exit contract":
+        expect(FDWALK_VERDICT_ADMIT).to_equal(0)
+        expect(FDWALK_VERDICT_NOT_REGULAR).to_equal(1)
+        expect(FDWALK_VERDICT_UNLINKED).to_equal(2)
+        expect(FDWALK_VERDICT_REPATH_MISSING).to_equal(3)
+        expect(FDWALK_VERDICT_REPATH_SYMLINK).to_equal(4)
+        expect(FDWALK_VERDICT_IDENTITY_MISMATCH).to_equal(5)
+
+describe "stage3 fdwalk policy: shared twin vectors":
+    it "every shared vector passes through the Simple twin":
+        val rows = fdwalk_vectors()
+        assert_true(rows.len() > 20)
+        for row in rows:
+            assert_true(fdwalk_run_vector(row))
+
+    it "the C helper carries a byte-identical vector table":
+        val c_path = "src/runtime/tools/stage3_fdwalk.c"
+        assert_true(exists(c_path))
+        val c_source = read_file(c_path)
+        for row in fdwalk_vectors():
+            val quoted = "\"" + row.replace("\\", "\\\\") + "\","
+            assert_true(c_source.contains(quoted))
+        # and the C table has no row the twin lacks
+        val marker_start = c_source.index_of("twin-vectors: stage3_fdwalk_v1")
+        val marker_end = c_source.index_of("end twin-vectors")
+        assert_true(marker_start >= 0 and marker_end > marker_start)
+        val table = c_source.substring(marker_start, marker_end)
+        var c_rows = 0
+        for line in table.split("\n"):
+            if line.trim().starts_with("\""):
+                c_rows = c_rows + 1
+        expect(c_rows).to_equal(fdwalk_vectors().len())

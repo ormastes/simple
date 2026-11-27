@@ -1,0 +1,112 @@
+# Coordinator admission only; this does not terminate or reap workers.
+# Unconfirmed retirement forbids both successful continuation and fallback.
+pub fn native_build_hir_warmup_outcome_v1(aggregate_code: i64, all_stopped: bool) -> text:
+    if not all_stopped:
+        return "fail"
+    if aggregate_code == 0:
+        return "ready"
+    "fallback"
+
+# The bootstrap capsule hands over `native-build <args>`; the HIR profile and
+# the internal worker take the user args after the subcommand.
+pub fn native_build_capsule_user_args_v1(args: [text]) -> [text]:
+    if args.len() > 0 and args[0] == "native-build":
+        return args[1:]
+    args
+
+# Tool-build coordinator (native_build_main.spl). An auto/default pool refused
+# before any worker started (profile admission, worker route, owner bound or
+# ledger set-up) left no claim, ledger row or cache entry, and the pool only
+# warms the HIR cache: the final worker lowers HIR serially in process. An
+# explicit SIMPLE_HIR_SHARDING=1 request stays fail-closed, and a pool that
+# started and then failed stays fatal (bootstrap-fable-17, 2026-11-12).
+# reason: internal CLI coordinator policy checks HIR sharding env flag, exit code, and pre-spawn refusal state
+@allow(primitive_api)
+pub fn native_build_hir_refusal_runs_serial_v1(code: i64, refused_before_spawn: bool,
+        hir_sharding: text = "") -> bool:
+    if hir_sharding == "1":
+        return false
+    code != 0 and refused_before_spawn
+
+# reason: internal CLI coordinator policy checks HIR sharding env flag, exit code, and pre-spawn refusal state
+@allow(primitive_api)
+pub fn native_build_hir_refusal_blocks_v1(code: i64, refused_before_spawn: bool,
+        hir_sharding: text = "") -> bool:
+    hir_sharding == "1" and code != 0 and refused_before_spawn
+
+# go-to-end (compiler/80.driver/driver_build/go_to_end.spl), Stage 3 census
+# directive 2026-11-13: HIR runs to the end and MIR lowers every module whose
+# HIR succeeded. A pool that started and retired every owner has warmed the
+# HIR cache for each module that lowered, so its module failures no longer
+# skip the MIR shard pool: each MIR worker redoes HIR for the failed modules,
+# drops them and their importers (go_to_end_recover_hir_v1) and records them
+# as non-PASS rows, so the aggregate fails and the link stays blocked. A pool
+# refused before any spawn warmed nothing (every MIR worker would lower the
+# whole closure's HIR) and an unconfirmed retirement stays "fail". A pool
+# that failed without naming a failed module (an owner killed before claiming,
+# a timeout, a BLOCKED ledger; failed_modules 0, or -1 when unreadable) keeps
+# the in-process fallback, which may still succeed.
+pub fn native_build_hir_warmup_go_to_end_outcome_v1(outcome: text, refused_before_spawn: bool,
+        failed_modules: i64, go_to_end: bool) -> text:
+    if go_to_end and outcome == "fallback" and not refused_before_spawn and failed_modules > 0:
+        return "ready-with-failures"
+    outcome
+
+pub fn native_build_hir_warmup_admits_mir_v1(outcome: text) -> bool:
+    outcome == "ready" or outcome == "ready-with-failures"
+
+# A HIR-failed module may never reach the MIR ledger, so an all-PASS MIR
+# verdict after a HIR pool with module failures must not link: the binary would
+# miss those modules. Every verdict becomes "fail" (the link stays blocked).
+pub fn native_build_mir_outcome_after_hir_failures_v1(outcome: text, hir_failed: bool) -> text:
+    if hir_failed:
+        return "fail"
+    outcome
+
+# A retired owner that was signalled or timed out reached the worker route.
+# Repeating its whole frontend requires the existing explicit fallback opt-in.
+# reason: internal CLI coordinator policy consumes the ledger verdict and retained wait diagnostic
+@allow(primitive_api)
+pub fn native_build_capsule_mir_outcome_v1(ledger_outcome: text, worker_termination: text,
+        inprocess_opt_in: bool) -> text:
+    if ledger_outcome == "fallback" and worker_termination != "" and not inprocess_opt_in:
+        return "fail"
+    ledger_outcome
+
+# The bootstrap capsule retains its existing prepass by default. Other Stage 3
+# tool entries opt into the same bounded route only with explicit MIR sharding.
+pub fn native_build_stage3_capsule_shard_entry_selected_v1(entry: text, mode: text,
+        explicit_mir_sharding: bool) -> bool:
+    mode == "dynload" and (entry == "src/app/cli/bootstrap_main.spl" or explicit_mir_sharding)
+
+# Parallelism for the MIR pool. Ordinary serial builds stay in-process; an
+# interface-only HIR or explicit-sharding opt-in permits one live worker so
+# serial low-memory hosts can use the same bounded pool.
+pub fn mir_shard_pool_parallel_v1(parallel: i64, interface_hir: text, explicit_sharding: bool = false) -> i64:
+    if parallel > 1: return parallel
+    if parallel == 1 and (interface_hir == "1" or explicit_sharding): return 1
+    0
+
+# Stage 3 bootstrap_main capsule route. "per-file": the default file-worker
+# pool. "two-pass": SIMPLE_FILE_WORKERS=0 under go-to-end or explicit MIR
+# sharding runs the HIR shard pool and then the MIR shard pool, so a codegen
+# panic costs one module and one worker instead of the whole in-process build.
+# "hir-warmup": the unchanged two-pass default (HIR warm-up, then in-process
+# MIR). Explicit whole-program builds skip this optional prepass; their
+# focused driver owns source loading and never needs a shard closure request.
+pub fn native_build_stage3_capsule_mir_route_v1(per_file_selected: bool, go_to_end: bool,
+        whole_program: text, explicit_mir_sharding: bool) -> text:
+    if per_file_selected:
+        return "per-file"
+    if whole_program == "1":
+        return "whole-program"
+    if go_to_end or explicit_mir_sharding:
+        return "two-pass"
+    "hir-warmup"
+
+export native_build_hir_warmup_outcome_v1, native_build_capsule_user_args_v1,
+    native_build_hir_refusal_runs_serial_v1, native_build_hir_refusal_blocks_v1,
+    native_build_hir_warmup_go_to_end_outcome_v1,
+    native_build_hir_warmup_admits_mir_v1, native_build_stage3_capsule_shard_entry_selected_v1,
+    native_build_stage3_capsule_mir_route_v1, native_build_mir_outcome_after_hir_failures_v1,
+    native_build_capsule_mir_outcome_v1, mir_shard_pool_parallel_v1

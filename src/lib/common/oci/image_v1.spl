@@ -1,0 +1,185 @@
+# Shared OCI image index / manifest / config codec (pure, no IO).
+#
+# Decodes the OCI image-spec documents independently of any provider and
+# validates digests, declared sizes, layer media types and target platform.
+# Registry transport is deliberately out of scope: callers hand in the bytes
+# they fetched (or read) through the shared async fs/net APIs, and verify them
+# here with oci_blob_verify_v1 before trusting them.
+# Design: doc/05_design/simple_container_macos_seatbelt.md §16.5.3-16.5.4.
+
+use std.common.json.value.{JsonValue, json_parse_value_strict, json_value_has, json_value_field}
+use std.common.crypto.sha256.sha256_u8_hex
+use std.common.text_bytes.text_to_utf8_bytes
+use std.common.oci.descriptor_v1.{OciLimitsV1, OciPlatformV1, OciDescriptorV1,
+    OCI_MEDIA_TYPE_INDEX_V1, OCI_MEDIA_TYPE_MANIFEST_V1, OCI_MEDIA_TYPE_CONFIG_V1,
+    OCI_MEDIA_TYPE_LAYER_TAR_V1, OCI_MEDIA_TYPE_LAYER_GZIP_V1, OCI_MEDIA_TYPE_LAYER_ZSTD_V1,
+    oci_digest_valid_v1, oci_token_valid_v1, oci_env_valid_v1, oci_platform_matches_v1,
+    oci_descriptor_decode_v1, oci_json_object_v1, oci_json_text_v1, oci_json_i64_v1,
+    oci_json_array_v1, oci_json_text_list_v1}
+
+pub struct OciImageReferenceV1:
+    """A digest-pinned reference `name@sha256:<hex>`. Tags are not identity."""
+    name: text
+    digest: text
+
+pub struct OciImageIndexV1:
+    manifests: [OciDescriptorV1]
+
+pub struct OciImageManifestV1:
+    config: OciDescriptorV1
+    layers: [OciDescriptorV1]
+    total_bytes: i64
+
+pub struct OciImageConfigV1:
+    os: text
+    architecture: text
+    variant: text
+    user: text
+    env: [text]
+    entrypoint: [text]
+    cmd: [text]
+    working_dir: text
+    diff_ids: [text]
+
+# Only digest-pinned references resolve; "name:tag" alone is rejected because
+# a mutable tag cannot carry content identity.
+pub fn oci_image_reference_parse_v1(reference: text) -> Result<OciImageReferenceV1, text>:
+    if reference.len() == 0 or reference.len() > 4096 or reference.contains("\0") or reference.contains(" "):
+        return Err("oci-reference-invalid")
+    val parts = reference.split("@")
+    if parts.len() != 2:
+        return Err("oci-reference-digest-required")
+    if parts[0] == "" or parts[0].starts_with("/") or parts[0].contains(".."):
+        return Err("oci-reference-name-invalid")
+    if not oci_digest_valid_v1(parts[1]):
+        return Err("oci-reference-digest-invalid")
+    Ok(OciImageReferenceV1(name: parts[0], digest: parts[1]))
+
+fn _oci_document_v1(bytes: text, limits: OciLimitsV1, what: text) -> Result<JsonValue, text>:
+    if bytes.len() == 0:
+        return Err("oci-" + what + "-empty")
+    if bytes.len() > limits.max_document_bytes:
+        return Err("oci-" + what + "-exceeds-document-limit")
+    match json_parse_value_strict(bytes):
+        case Ok(value): oci_json_object_v1(value, what)
+        case Err(_): Err("oci-" + what + "-json-invalid")
+
+fn _oci_schema_v2(document: JsonValue, what: text, media_type: text) -> Result<bool, text>:
+    val version = oci_json_i64_v1(document, "schemaVersion", what)?
+    if version != 2:
+        return Err("oci-" + what + "-schema-version-unsupported")
+    val declared = oci_json_text_v1(document, "mediaType", false, what)?
+    if declared != "" and declared != media_type:
+        return Err("oci-" + what + "-media-type-mismatch")
+    Ok(true)
+
+pub fn oci_layer_media_type_supported_v1(media_type: text) -> bool:
+    media_type == OCI_MEDIA_TYPE_LAYER_TAR_V1 or media_type == OCI_MEDIA_TYPE_LAYER_GZIP_V1 or
+        media_type == OCI_MEDIA_TYPE_LAYER_ZSTD_V1
+
+pub fn oci_image_index_decode_v1(bytes: text, limits: OciLimitsV1) -> Result<OciImageIndexV1, text>:
+    val document = _oci_document_v1(bytes, limits, "index")?
+    val schema = _oci_schema_v2(document, "index", OCI_MEDIA_TYPE_INDEX_V1)?
+    val entries = oci_json_array_v1(document, "manifests", limits.max_descriptors, "index")?
+    var manifests: [OciDescriptorV1] = []
+    for entry in entries:
+        val descriptor = oci_descriptor_decode_v1(entry, limits)?
+        # Nested indexes are not followed implicitly.
+        if descriptor.media_type != OCI_MEDIA_TYPE_MANIFEST_V1:
+            return Err("oci-index-entry-media-type-unsupported")
+        manifests.push(descriptor)
+    Ok(OciImageIndexV1(manifests: manifests))
+
+# Exactly one manifest must match the requested platform. No "closest match"
+# fallback: zero is absent and more than one is ambiguous.
+pub fn oci_image_index_select_v1(index: OciImageIndexV1, want: OciPlatformV1) -> Result<OciDescriptorV1, text>:
+    var found: [OciDescriptorV1] = []
+    for descriptor in index.manifests:
+        match descriptor.platform:
+            case Some(platform):
+                if oci_platform_matches_v1(platform, want):
+                    found.push(descriptor)
+            case None: pass
+    if found.len() == 0:
+        return Err("oci-index-platform-absent: " + want.os + "/" + want.architecture)
+    if found.len() > 1:
+        return Err("oci-index-platform-ambiguous: " + want.os + "/" + want.architecture)
+    Ok(found[0])
+
+pub fn oci_image_manifest_decode_v1(bytes: text, limits: OciLimitsV1) -> Result<OciImageManifestV1, text>:
+    val document = _oci_document_v1(bytes, limits, "manifest")?
+    val schema = _oci_schema_v2(document, "manifest", OCI_MEDIA_TYPE_MANIFEST_V1)?
+    if not json_value_has(document, "config"):
+        return Err("oci-manifest-missing-config")
+    val config = oci_descriptor_decode_v1(json_value_field(document, "config"), limits)?
+    if config.media_type != OCI_MEDIA_TYPE_CONFIG_V1:
+        return Err("oci-manifest-config-media-type-unsupported")
+    val entries = oci_json_array_v1(document, "layers", limits.max_descriptors, "manifest")?
+    var layers: [OciDescriptorV1] = []
+    var total = config.size
+    for entry in entries:
+        val layer = oci_descriptor_decode_v1(entry, limits)?
+        if not oci_layer_media_type_supported_v1(layer.media_type):
+            return Err("oci-manifest-layer-media-type-unsupported")
+        # Compare before adding so the running total can never overflow.
+        if layer.size > limits.max_total_bytes - total:
+            return Err("oci-manifest-total-size-exceeds-limit")
+        total = total + layer.size
+        layers.push(layer)
+    Ok(OciImageManifestV1(config: config, layers: layers, total_bytes: total))
+
+pub fn oci_image_config_decode_v1(bytes: text, limits: OciLimitsV1) -> Result<OciImageConfigV1, text>:
+    val document = _oci_document_v1(bytes, limits, "config")?
+    val os = oci_json_text_v1(document, "os", true, "config")?
+    val architecture = oci_json_text_v1(document, "architecture", true, "config")?
+    val variant = oci_json_text_v1(document, "variant", false, "config")?
+    if not oci_token_valid_v1(os, 64) or not oci_token_valid_v1(architecture, 64):
+        return Err("oci-config-platform-invalid")
+    var user = ""
+    var env: [text] = []
+    var entrypoint: [text] = []
+    var cmd: [text] = []
+    var working_dir = ""
+    if json_value_has(document, "config"):
+        val runtime = oci_json_object_v1(json_value_field(document, "config"), "config")?
+        user = oci_json_text_v1(runtime, "User", false, "config")?
+        env = oci_json_text_list_v1(runtime, "Env", 4096, "config")?
+        entrypoint = oci_json_text_list_v1(runtime, "Entrypoint", 4096, "config")?
+        cmd = oci_json_text_list_v1(runtime, "Cmd", 4096, "config")?
+        working_dir = oci_json_text_v1(runtime, "WorkingDir", false, "config")?
+    if not oci_env_valid_v1(env):
+        return Err("oci-config-env-invalid")
+    if working_dir != "" and (not working_dir.starts_with("/") or working_dir.contains("..")):
+        return Err("oci-config-working-dir-invalid")
+    if not json_value_has(document, "rootfs"):
+        return Err("oci-config-missing-rootfs")
+    val rootfs = oci_json_object_v1(json_value_field(document, "rootfs"), "config")?
+    val rootfs_type = oci_json_text_v1(rootfs, "type", true, "config")?
+    if rootfs_type != "layers":
+        return Err("oci-config-rootfs-type-unsupported")
+    val diff_ids = oci_json_text_list_v1(rootfs, "diff_ids", limits.max_descriptors, "config")?
+    for diff_id in diff_ids:
+        if not oci_digest_valid_v1(diff_id):
+            return Err("oci-config-diff-id-invalid")
+    Ok(OciImageConfigV1(os: os, architecture: architecture, variant: variant, user: user,
+        env: env, entrypoint: entrypoint, cmd: cmd, working_dir: working_dir, diff_ids: diff_ids))
+
+# The config's uncompressed layer list must pair one-to-one with the manifest.
+pub fn oci_image_config_matches_manifest_v1(manifest: OciImageManifestV1, config: OciImageConfigV1) -> text:
+    if manifest.layers.len() != config.diff_ids.len():
+        return "oci-config-diff-ids-layer-count-mismatch"
+    ""
+
+# "" when `blob` has exactly the descriptor's size and sha256 digest. sha512
+# descriptors decode but cannot be verified here and are refused.
+pub fn oci_blob_verify_v1(descriptor: OciDescriptorV1, blob: [u8]) -> text:
+    if not descriptor.digest.starts_with("sha256:"):
+        return "oci-blob-digest-algorithm-unverifiable"
+    if blob.len() != descriptor.size:
+        return "oci-blob-size-mismatch"
+    if "sha256:" + sha256_u8_hex(blob) != descriptor.digest:
+        return "oci-blob-digest-mismatch"
+    ""
+
+pub fn oci_blob_verify_text_v1(descriptor: OciDescriptorV1, blob: text) -> text:
+    oci_blob_verify_v1(descriptor, text_to_utf8_bytes(blob))

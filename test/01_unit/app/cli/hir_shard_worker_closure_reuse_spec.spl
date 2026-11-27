@@ -1,0 +1,55 @@
+"""Runtime behavior specs for HIR/worker closure reuse and fail-closed admission (#4450)."""
+
+use std.spec
+use app.cli.native_build_main.{
+    native_build_shard_worker_closure_reused_v1,
+    native_build_closure_ensure_published_for_shards_v1
+}
+use app.cli.native_build_parse_closure_owner.{
+    native_build_parse_closure_reuse_decision_v1
+}
+use app.io.env_ops.{env_get, env_set}
+
+describe "HIR shard worker parse-closure reuse":
+    it "reuses inherited closure request without triggering re-walk":
+        val old_consumer = env_get("SIMPLE_PARSE_CLOSURE_CONSUMER") ?? ""
+        val old_req = env_get("SIMPLE_PARSE_CLOSURE_REQUEST") ?? ""
+        val old_dig = env_get("SIMPLE_PARSE_CLOSURE_REQUEST_DIGEST") ?? ""
+        val old_hir = env_get("SIMPLE_HIR_SHARD") ?? ""
+        env_set("SIMPLE_PARSE_CLOSURE_CONSUMER", "1")
+        env_set("SIMPLE_PARSE_CLOSURE_REQUEST", "/tmp/closure-request-1/request.v1")
+        env_set("SIMPLE_PARSE_CLOSURE_REQUEST_DIGEST", "abc123")
+        env_set("SIMPLE_HIR_SHARD", "1/4")
+        val reused = native_build_shard_worker_closure_reused_v1()
+        val ensured = native_build_closure_ensure_published_for_shards_v1(["--entry-closure", "--cache-dir=/tmp/cache"])
+        val decision = native_build_parse_closure_reuse_decision_v1(
+            true, true, "/tmp/closure-request-1/request.v1", "abc123", "")
+        env_set("SIMPLE_PARSE_CLOSURE_CONSUMER", old_consumer)
+        env_set("SIMPLE_PARSE_CLOSURE_REQUEST", old_req)
+        env_set("SIMPLE_PARSE_CLOSURE_REQUEST_DIGEST", old_dig)
+        env_set("SIMPLE_HIR_SHARD", old_hir)
+        expect(reused).to_equal(true)
+        expect(ensured).to_equal(true)
+        expect(decision.is_ok()).to_equal(true)
+        expect(decision.unwrap()).to_equal(true)
+
+    it "refuses shard child re-walk when closure request or digest is missing":
+        val old_consumer = env_get("SIMPLE_PARSE_CLOSURE_CONSUMER") ?? ""
+        val old_req = env_get("SIMPLE_PARSE_CLOSURE_REQUEST") ?? ""
+        val old_dig = env_get("SIMPLE_PARSE_CLOSURE_REQUEST_DIGEST") ?? ""
+        env_set("SIMPLE_PARSE_CLOSURE_CONSUMER", "1")
+        env_set("SIMPLE_PARSE_CLOSURE_REQUEST", "")
+        env_set("SIMPLE_PARSE_CLOSURE_REQUEST_DIGEST", "")
+        val reused = native_build_shard_worker_closure_reused_v1()
+        val missing_decision = native_build_parse_closure_reuse_decision_v1(
+            true, true, "", "abc123", "")
+        val mismatch_decision = native_build_parse_closure_reuse_decision_v1(
+            true, true, "/tmp/closure-request-1/request.v1", "abc123", "digest mismatch")
+        env_set("SIMPLE_PARSE_CLOSURE_CONSUMER", old_consumer)
+        env_set("SIMPLE_PARSE_CLOSURE_REQUEST", old_req)
+        env_set("SIMPLE_PARSE_CLOSURE_REQUEST_DIGEST", old_dig)
+        expect(reused).to_equal(false)
+        expect(missing_decision.is_err()).to_equal(true)
+        expect(missing_decision.unwrap_err()).to_contain("refusing to re-walk")
+        expect(mismatch_decision.is_err()).to_equal(true)
+        expect(mismatch_decision.unwrap_err()).to_contain("digest mismatch")

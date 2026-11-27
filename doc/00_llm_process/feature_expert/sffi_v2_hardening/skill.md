@@ -28,3 +28,13 @@ provider loading, generated bindings, or SFFI assurance.
 
 Start with the existing RED return/weak-stub/byte-array fixtures. Preserve
 positive controls and require cross-lane category parity.
+
+## Constrained-unit facades (RB-SFFI, release/1.0.0)
+
+- #10182: facade exec spec, native `SPL-UNIT-002/005` checks (div/remainder
+  lowering in `src/compiler/50.mir/_MirLoweringExpr/`, spec
+  `test/01_unit/compiler/mir/unit_div_remainder_native_spec.spl`), borrowed
+  `char*` contract; generator `src/compiler/90.tools/sffi_gen/constrained_unit_{gen,scan}.spl`.
+- Merged (94261e5): #10345 bool/enum checked facades + clang C ABI fixture
+  (`test/01_unit/compiler/sffi_gen/sffi_cabi_fixture_spec.spl`,
+  `test/fixtures/sffi_cabi/cabi_fixture.c`).

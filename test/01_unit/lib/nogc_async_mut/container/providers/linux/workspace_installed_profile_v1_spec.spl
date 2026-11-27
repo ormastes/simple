@@ -1,0 +1,60 @@
+# AUTHORED_NOT_RUN: strict installed metadata, no native owner or quota grant.
+use std.spec.*
+use std.nogc_async_mut.container.providers.linux.workspace_installed_profile_v1.*
+
+fn workspace_profile_fixture_v1() -> LinuxWorkspaceInstalledProfileV1:
+    LinuxWorkspaceInstalledProfileV1(machine_policy_digest: "a".repeat(64),
+        provider_policy_digest: "b".repeat(64), containment_profile_digest: "c".repeat(64),
+        protected_parent: "/srv/simple-workspaces", leaf_name: "workspace-1", expected_pool_id: "xfs:pool",
+        expected_workspace_id: "inode:workspace", quota_id: 42, hard_bytes: 1048576,
+        guest_root: "/work", read_only: false)
+
+describe "fixed installed Linux workspace metadata":
+    it "roundtrips exact native quota identity and guest mapping":
+        val original = workspace_profile_fixture_v1()
+        val bytes = linux_workspace_installed_profile_encode_v1(original).unwrap()
+        val decoded = linux_workspace_installed_profile_decode_v1(bytes).unwrap()
+        expect(linux_workspace_installed_profile_encode_v1(decoded).unwrap()).to_equal(bytes)
+        expect(linux_workspace_source_root_v1(decoded)).to_equal("/srv/simple-workspaces/workspace-1")
+        val storage = linux_workspace_storage_request_v1(decoded)
+        expect(storage.kind).to_equal("linux-xfs-project-v1")
+        expect(storage.quota_id).to_equal(42)
+        expect(storage.hard_bytes).to_equal(1048576)
+        expect(storage.policy_digest).to_equal(original.machine_policy_digest)
+
+    it "rejects schema additions, alternate versions and noncanonical bytes":
+        val bytes = linux_workspace_installed_profile_encode_v1(workspace_profile_fixture_v1()).unwrap()
+        for changed in [bytes.replace("version: 1", "version: 2"), bytes.replace("version: 1", "surprise: true, version: 1"), bytes + "\n"]:
+            expect(linux_workspace_installed_profile_decode_v1(changed).unwrap_err().len()).to_be_greater_than(0)
+
+    it "rejects path traversal, non-XFS quota spellings and policy digest loss":
+        var profile = workspace_profile_fixture_v1()
+        profile.protected_parent = "/srv/../other"
+        expect(linux_workspace_installed_profile_encode_v1(profile).unwrap_err()).to_equal("linux-mount-path-invalid")
+        profile = workspace_profile_fixture_v1()
+        profile.quota_id = 0
+        expect(linux_workspace_installed_profile_encode_v1(profile).unwrap_err()).to_equal("workspace-profile-storage-invalid")
+        profile = workspace_profile_fixture_v1()
+        profile.hard_bytes = 513
+        expect(linux_workspace_installed_profile_encode_v1(profile).unwrap_err()).to_equal("workspace-profile-storage-invalid")
+        profile = workspace_profile_fixture_v1()
+        profile.machine_policy_digest = ""
+        expect(linux_workspace_installed_profile_encode_v1(profile).unwrap_err()).to_equal("workspace-profile-digest-invalid")
+
+    it "excludes machine state and host credential or kernel trees":
+        for parent in ["/var/lib/simple/container", "/etc", "/proc", "/sys", "/dev", "/run"]:
+            var profile = workspace_profile_fixture_v1()
+            profile.protected_parent = parent
+            expect(linux_workspace_installed_profile_encode_v1(profile).unwrap_err().len()).to_be_greater_than(0)
+        var guest = workspace_profile_fixture_v1()
+        guest.guest_root = "/proc/work"
+        expect(linux_workspace_installed_profile_encode_v1(guest).unwrap_err()).to_equal("workspace-profile-guest-system-overlap")
+
+    it "binds permission and exact destination changes into the profile digest":
+        var profile = workspace_profile_fixture_v1()
+        val original = linux_workspace_installed_profile_digest_v1(profile).unwrap()
+        profile.read_only = true
+        expect(linux_workspace_installed_profile_digest_v1(profile).unwrap() == original).to_equal(false)
+        profile = workspace_profile_fixture_v1()
+        profile.guest_root = "/other"
+        expect(linux_workspace_installed_profile_digest_v1(profile).unwrap() == original).to_equal(false)

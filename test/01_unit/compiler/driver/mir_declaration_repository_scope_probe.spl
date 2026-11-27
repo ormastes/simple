@@ -1,0 +1,50 @@
+# Actual declaration carrier ownership, not a production issuance authority.
+use compiler.mir.hir_declaration_types_v1.{MirHirDeclarationRepositoryV1, MirHirModuleDeclarationsV1}
+use compiler.common.cache_contract.hir_owned_artifact_cache_v1.{HirOwnedArtifactContextV1}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end, transient_promote}
+use std.nogc_sync_mut.sffi.runtime.{transient_array_scope_state_v1}
+
+fn rejects_external_root() -> bool:
+    val context = HirOwnedArtifactContextV1("scope-probe", "probe-header", true)
+    var repository = MirHirDeclarationRepositoryV1(context, "parent", ["module"], {}, "")
+    if not transient_scope_begin(): return false
+    repository.authority = "seal-" + repository.final_repository_authority
+    val paused = transient_scope_pause()
+    val owned = if paused: transient_promote(repository) else: false
+    val ended = transient_scope_end()
+    # Do not dereference the refused root's scratch-owned seal after closing.
+    paused and not owned and ended and transient_array_scope_state_v1() == 0
+
+fn retains_scoped_root() -> bool:
+    # These owners predate the lease, as in the real declaration factory.
+    val context = HirOwnedArtifactContextV1("scope-probe", "probe-header", true)
+    val names: [text] = ["first", "second"]
+    val declarations: Dict<text, MirHirModuleDeclarationsV1> = {}
+    if not transient_scope_begin(): return false
+    var repository = MirHirDeclarationRepositoryV1(context, "parent", names, declarations, "")
+    repository.authority = "seal-" + repository.final_repository_authority
+    val paused = transient_scope_pause()
+    val owned = if paused: transient_promote(repository) else: false
+    val ended = transient_scope_end()
+    if not paused or not owned or not ended: return false
+    if transient_array_scope_state_v1() != 0: return false
+    if repository.authority != "seal-parent": return false
+    if repository.final_repository_authority != "parent": return false
+    if repository.artifact_context.directory != "scope-probe": return false
+    if repository.artifact_context.producer_header != "probe-header": return false
+    if not repository.artifact_context.enabled: return false
+    if repository.ordered_modules.len() != 2: return false
+    if repository.ordered_modules[0] != "first" or repository.ordered_modules[1] != "second": return false
+    if repository.modules.len() != 0: return false
+    if context.directory != "scope-probe" or names[1] != "second": return false
+    true
+
+fn main() -> i64:
+    if not rejects_external_root():
+        print "FAIL: external declaration root control"
+        return 1
+    if not retains_scoped_root():
+        print "FAIL: scoped declaration root retention"
+        return 2
+    print "PASS: actual MIR declaration root ownership and external-field retention"
+    0

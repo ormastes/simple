@@ -1,0 +1,102 @@
+# @req: REQ-BUILD-SRC-001
+# RB-LOAD-02: loader hot-swap generation -> image publication, per-call reader
+# pins, and lockless refcount reclamation of old images.
+# todo (remaining scope): doc/08_tracking/todo/rb_load_hot_swap_pinning_2026-11-22.md
+use std.spec.*
+use std.spec.step
+
+use compiler.driver.smf_writer.{SmfBuildOptions, Target, generate_smf_with_options}
+use compiler.driver.unit_identity.{UnitIdentity, unit_identity_encode}
+use compiler.driver.watcher.smf_manifest.{SmfManifestEntry, smf_manifest_entry_new_with_identity}
+use compiler.loader.hot_swap_pin.{HotSwapSlot, hot_swap_slot_load, hot_swap_try, hot_swap_read_begin, hot_swap_read_end, hot_swap_reclaim, hot_swap_image_live}
+
+fn good_identity() -> UnitIdentity:
+    UnitIdentity(
+        iface_digest: "iface-v1-1111",
+        abi_digest: "abi-v1-aaaa",
+        target_triple: "x86_64-unknown-linux-gnu",
+        policy: "release",
+        capabilities: ["io"])
+
+fn image_with(id: UnitIdentity, code: u8) -> [u8]:
+    var opts = SmfBuildOptions.create(Target.x86_64_unknown_linux_gnu())
+    opts.unit_identity_bytes = unit_identity_encode(id).bytes()
+    generate_smf_with_options([code, 0xC3], opts)
+
+fn pinned_row() -> SmfManifestEntry:
+    val id = good_identity()
+    smf_manifest_entry_new_with_identity(
+        "hs_unit.spl", "build/hs_unit.smf", 1, "cranelift", 0, true, false, false,
+        id.policy, id.capabilities, id.iface_digest, id.abi_digest, [], [], id.target_triple)
+
+fn loaded_slot() -> HotSwapSlot:
+    hot_swap_slot_load(pinned_row(), image_with(good_identity(), 0x90)).unwrap()
+
+describe "RB-LOAD-02: hot-swap generation -> image":
+    it "readers use the new image after a swap":
+        # @req: REQ-BUILD-SRC-001
+        step("swap generation 0 -> 1 and read")
+        val slot = loaded_slot()
+        val v1 = image_with(good_identity(), 0x91)
+        expect(hot_swap_try(slot, 0, v1).is_ok()).to_equal(true)
+        val r = hot_swap_read_begin(slot).unwrap()
+        expect(r.generation()).to_equal(1)
+        expect(r.image() == v1).to_equal(true)
+        hot_swap_read_end(r)
+
+    it "a refused swap leaves the old image active":
+        step("ABI mismatch is refused; readers still get generation 0")
+        val slot = loaded_slot()
+        var bad = good_identity()
+        bad.abi_digest = "abi-v1-bbbb"
+        expect(hot_swap_try(slot, 0, image_with(bad, 0x92)).is_err()).to_equal(true)
+        val r = hot_swap_read_begin(slot).unwrap()
+        expect(r.generation()).to_equal(0)
+        expect(r.image() == image_with(good_identity(), 0x90)).to_equal(true)
+        hot_swap_read_end(r)
+        expect(hot_swap_reclaim(slot)).to_equal(0)
+        expect(hot_swap_image_live(slot, 0)).to_equal(true)
+
+    it "an old image is not freed while a reader holds it":
+        step("reader pins generation 0 across a swap")
+        val slot = loaded_slot()
+        val r0 = hot_swap_read_begin(slot).unwrap()
+        expect(hot_swap_try(slot, 0, image_with(good_identity(), 0x93)).is_ok()).to_equal(true)
+        expect(hot_swap_reclaim(slot)).to_equal(0)
+        expect(hot_swap_image_live(slot, 0)).to_equal(true)
+        expect(r0.image() == image_with(good_identity(), 0x90)).to_equal(true)
+        step("release the pin; reclaim frees generation 0 only")
+        hot_swap_read_end(r0)
+        expect(hot_swap_reclaim(slot)).to_equal(1)
+        expect(hot_swap_image_live(slot, 0)).to_equal(false)
+        expect(hot_swap_image_live(slot, 1)).to_equal(true)
+
+    it "refuses a load whose image has no identity record":
+        step("no legacy fallback at load")
+        val opts = SmfBuildOptions.create(Target.x86_64_unknown_linux_gnu())
+        val r = hot_swap_slot_load(pinned_row(), generate_smf_with_options([0xC3], opts))
+        expect(r.is_err()).to_equal(true)
+        expect(r.unwrap_err().contains("SMF-E-UNIT-IDENTITY-MISSING")).to_equal(true)
+
+    it "never overwrites a pinned entry when the table wraps":
+        step("pin generation 0, then swap and reclaim until the table wraps")
+        val slot = loaded_slot()
+        val r0 = hot_swap_read_begin(slot).unwrap()
+        var g: i64 = 0
+        while g < 7:
+            expect(hot_swap_try(slot, g, image_with(good_identity(), 0x94)).is_ok()).to_equal(true)
+            hot_swap_reclaim(slot)
+            g = g + 1
+        step("generation 8 maps onto the pinned entry and is refused")
+        val full = hot_swap_try(slot, 7, image_with(good_identity(), 0x95))
+        expect(full.is_err()).to_equal(true)
+        expect(full.unwrap_err().contains("SMF-E-HOTSWAP-FULL")).to_equal(true)
+        expect(hot_swap_image_live(slot, 0)).to_equal(true)
+        expect(r0.image() == image_with(good_identity(), 0x90)).to_equal(true)
+        step("release the pin; reclaim frees it and the swap succeeds")
+        hot_swap_read_end(r0)
+        expect(hot_swap_reclaim(slot) >= 1).to_equal(true)
+        expect(hot_swap_try(slot, 7, image_with(good_identity(), 0x95)).unwrap()).to_equal(8)
+        val r8 = hot_swap_read_begin(slot).unwrap()
+        expect(r8.generation()).to_equal(8)
+        hot_swap_read_end(r8)

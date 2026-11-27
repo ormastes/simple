@@ -54,3 +54,13 @@ sh scripts/check/check-compiler-provenance.shs bin/release/x86_64-unknown-linux-
 ## Triage 2026-09-13 (BUGFIX-7 lane)
 
 Out of lane: needs a fresh redeploy/provenance check of build/redeploy_out artifacts, a bootstrap-deploy operation this lane does not run. No change made.
+
+## Triage 2026-11-25 (p3-bav lane)
+
+`build/redeploy_out/` does not exist in a fresh worktree of release/1.0.0
+(fe984a4a3a5) and is not git-tracked — the stale artifact was a local leftover
+of an earlier redeploy run on the reporting host, not repo content. The default
+`BINS` list in `scripts/check/check-compiler-provenance.shs` still names
+`build/redeploy_out/simple_stage2` (line 67), so the gate decision (rebuild,
+exclude with comment, or delete) remains with the bootstrap/deploy lane; this
+lane cannot run a redeploy. No change made.

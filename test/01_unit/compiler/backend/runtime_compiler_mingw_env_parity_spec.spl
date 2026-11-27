@@ -1,0 +1,83 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+"""
+# Windows MinGW C-Driver Discovery (`SIMPLE_MINGW_ROOT`) and Runtime Compiler Parity
+
+Bootstrap and Git Bash env scripts (`platform-detect.shs`,
+`windows-gitbash-bootstrap-env.shs`, `retain-ladder-seed-runtime.shs`) export
+`SIMPLE_MINGW_ROOT`, while p3 scripts export `SIMPLE_LLVM_MINGW_ROOT`.
+`runtime_compiler.spl` must probe both, normalize MSYS `/c/...` paths before
+direct `process_run` spawns, skip MSVC-flavoured clang on env hits, avoid
+duplicate `--target=` flags on MinGW cross compiles, and let Stage4 admit
+llvm-mingw clang on MinGW targets.
+"""
+
+use std.spec.{describe, it, expect}
+use std.io_runtime.{file_read_nullable}
+use compiler.backend.runtime_compiler.{
+    windows_clang_env_dirs_v1,
+    windows_mingw_clang_env_dirs_v1,
+    windows_only_msvc_llvm_diagnostic_v1,
+    windows_msys_drive_path_v1
+}
+use compiler.backend.stage4_symbol_closure.{stage4_windows_c_object_uses_msvc_abi}
+
+describe "Windows MinGW C-driver env discovery parity":
+    it "probes SIMPLE_LLVM_BIN, SIMPLE_LLVM_MINGW_ROOT/bin, and SIMPLE_MINGW_ROOT/bin in order":
+        expect(windows_mingw_clang_env_dirs_v1("", "", "")).to_equal([])
+        expect(windows_mingw_clang_env_dirs_v1("", "", "C:/llvm-mingw")).to_equal(["C:/llvm-mingw/bin"])
+        expect(windows_mingw_clang_env_dirs_v1("C:/llvm/bin", "C:/lm", "C:/mg")).to_equal([
+            "C:/llvm/bin",
+            "C:/lm/bin",
+            "C:/mg/bin"
+        ])
+
+    it "deduplicates identical roots and strips trailing slashes":
+        expect(windows_mingw_clang_env_dirs_v1("C:/lm/bin/", "C:/lm/", "C:/lm\\")).to_equal(["C:/lm/bin"])
+        expect(windows_mingw_clang_env_dirs_v1("", "C:/lm/", "C:/lm")).to_equal(["C:/lm/bin"])
+
+    it "preserves windows_clang_env_dirs_v1 two-argument compatibility":
+        expect(windows_clang_env_dirs_v1("", "")).to_equal([])
+        expect(windows_clang_env_dirs_v1("C:/llvm/bin", "C:/lm")).to_equal(["C:/llvm/bin", "C:/lm/bin"])
+
+    it "names both SIMPLE_MINGW_ROOT and SIMPLE_LLVM_MINGW_ROOT in GNU diagnostics":
+        val msg = windows_only_msvc_llvm_diagnostic_v1(["C:\\Program Files\\LLVM\\bin\\clang.exe"])
+        expect(msg.contains("SIMPLE_MINGW_ROOT")).to_be(true)
+        expect(msg.contains("SIMPLE_LLVM_MINGW_ROOT")).to_be(true)
+        expect(msg.contains("SIMPLE_LLVM_BIN")).to_be(true)
+        expect(msg.contains("llvm-mingw")).to_be(true)
+        val source = file_read_nullable("src/compiler/70.backend/backend/runtime_compiler.spl") ?? ""
+        expect(source).to_contain("windows_mingw_clang_env_dirs_v1(_env_text(\"SIMPLE_LLVM_BIN\"), _env_text(\"SIMPLE_LLVM_MINGW_ROOT\"), _env_text(\"SIMPLE_MINGW_ROOT\"))")
+        expect(source).to_contain("set SIMPLE_MINGW_ROOT or SIMPLE_LLVM_MINGW_ROOT")
+
+describe "Windows MSYS drive path normalization and compile parity":
+    it "rewrites MSYS /drive/... paths on Windows and leaves other paths untouched":
+        expect(windows_msys_drive_path_v1("/c/dev/simple/src/runtime", true)).to_equal("c:/dev/simple/src/runtime")
+        expect(windows_msys_drive_path_v1("/D/llvm-mingw/bin/clang.exe", true)).to_equal("D:/llvm-mingw/bin/clang.exe")
+        expect(windows_msys_drive_path_v1("C:/dev/simple/src/runtime", true)).to_equal("C:/dev/simple/src/runtime")
+        expect(windows_msys_drive_path_v1("C:\\dev\\simple\\src\\runtime", true)).to_equal("C:\\dev\\simple\\src\\runtime")
+        expect(windows_msys_drive_path_v1("//server/share/src", true)).to_equal("//server/share/src")
+        expect(windows_msys_drive_path_v1("/pinned/llvm-mingw/clang.exe", true)).to_equal("/pinned/llvm-mingw/clang.exe")
+        expect(windows_msys_drive_path_v1("/1/not-a-drive", true)).to_equal("/1/not-a-drive")
+        expect(windows_msys_drive_path_v1("/가", true)).to_equal("/가")
+        expect(windows_msys_drive_path_v1("/c/dev/simple", false)).to_equal("/c/dev/simple")
+
+    it "avoids emitting a second conflicting --target flag for MinGW cross targets":
+        val source = file_read_nullable("src/compiler/70.backend/backend/runtime_compiler.spl") ?? ""
+        expect(source).to_contain("if hosted_c_target_is_mingw(target):\n                comp_args.push(\"--target=\" + hosted_mingw_clang_target(target))\n            else:\n                for target_arg in hosted_cross_c_target_args(")
+
+describe "Stage4 Windows MinGW clang ABI classification":
+    it "admits llvm-mingw clang on explicit MinGW targets and triple-prefixed drivers":
+        expect(stage4_windows_c_object_uses_msvc_abi("windows", "x86_64-pc-windows-gnu", "C:/llvm-mingw/bin/clang.exe", false).unwrap()).to_be(false)
+        expect(stage4_windows_c_object_uses_msvc_abi("windows", "x86_64-w64-windows-gnu", "C:\\llvm-mingw\\bin\\clang.exe", false).unwrap()).to_be(false)
+        expect(stage4_windows_c_object_uses_msvc_abi("windows", "x86_64-w64-mingw32", "clang.exe", false).unwrap()).to_be(false)
+        expect(stage4_windows_c_object_uses_msvc_abi("windows", "aarch64-pc-windows-gnullvm", "C:/lm/bin/clang.exe", false).unwrap()).to_be(false)
+        expect(stage4_windows_c_object_uses_msvc_abi("windows", "host", "C:/lm/bin/x86_64-w64-mingw32-clang.exe", false).unwrap()).to_be(false)
+
+    it "still rejects ambiguous bare clang on host or mismatched MSVC linker/target":
+        expect(stage4_windows_c_object_uses_msvc_abi("windows", "host", "clang.exe", false).is_err()).to_be(true)
+        expect(stage4_windows_c_object_uses_msvc_abi("windows", "host", "clang.exe", true).is_err()).to_be(true)
+        expect(stage4_windows_c_object_uses_msvc_abi("windows", "x86_64-pc-windows-gnu", "C:/llvm-mingw/bin/clang.exe", true).is_err()).to_be(true)
+        expect(stage4_windows_c_object_uses_msvc_abi("windows", "x86_64-pc-windows-msvc", "x86_64-w64-mingw32-clang.exe", false).is_err()).to_be(true)

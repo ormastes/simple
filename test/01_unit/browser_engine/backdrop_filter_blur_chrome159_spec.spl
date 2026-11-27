@@ -1,0 +1,73 @@
+"""
+## Purpose and audience
+Purpose: Pin CSS `backdrop-filter: blur()` against Chrome 159 on the raster,
+cpu_simd and Vulkan lanes. Chrome blurs only what is inside the border box
+(mirrored at its edges), clips the result to the rounded box, and uses
+Skia's triple-box approximation of the Gaussian. Every lane used to ignore
+the property outside the WM glass material path.
+Audience: maintainers of the web paint path and Engine2D box effects.
+"""
+
+"""
+Traceability: doc/08_tracking/bug/web_layout_cascade_selector_paint_chrome159_round4_divergences_2026-11-15.md
+(backdrop-filter ignored).
+"""
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_software_pixels
+}
+
+# A 40px red stripe under a 100x50 blur(4px) box: both stripe edges ramp.
+val BDF_STRIPE = "<!DOCTYPE html><html><body style='margin:0;background:#ffffff'><div style='position:absolute;left:40px;top:0;width:40px;height:90px;background:#ff0000'></div><div style='position:absolute;left:20px;top:20px;width:100px;height:50px;backdrop-filter:blur(4px)'></div></body></html>"
+# A 2px stripe on the box's left edge: Chrome mirrors the box edge.
+val BDF_EDGE = "<!DOCTYPE html><html><body style='margin:0;background:#ffffff'><div style='position:absolute;left:40px;top:0;width:2px;height:90px;background:#ff0000'></div><div style='position:absolute;left:40px;top:20px;width:80px;height:50px;backdrop-filter:blur(4px)'></div></body></html>"
+# A 6px stripe on the left edge of a box with radius 16: the corners stay
+# unblurred.
+val BDF_ROUND = "<!DOCTYPE html><html><body style='margin:0;background:#ffffff'><div style='position:absolute;left:20px;top:0;width:6px;height:90px;background:#ff0000'></div><div style='position:absolute;left:20px;top:20px;width:80px;height:50px;border-radius:16px;backdrop-filter:blur(4px)'></div></body></html>"
+
+val BDF_STRIPE_PTS: [i32] = [30, 45, 36, 45, 40, 45, 44, 45, 40, 10, 80, 45, 84, 45]
+val BDF_EDGE_PTS: [i32] = [40, 45, 41, 45, 42, 45, 44, 45, 46, 45]
+val BDF_ROUND_PTS: [i32] = [20, 20, 21, 21, 22, 40, 25, 40, 28, 40, 20, 69, 22, 50]
+
+# Chrome 159 at device scale 1 and 4 (pixel centres), green channel (red
+# and blue are FF and equal to green on these pages).
+val BDF_STRIPE_K1: [i32] = [0xFD, 0xCA, 0x74, 0x25, 0x00, 0x8B, 0xDA]
+val BDF_EDGE_K1: [i32] = [0xA6, 0xA9, 0xB0, 0xC6, 0xDE]
+val BDF_ROUND_K1: [i32] = [0x00, 0x00, 0x3A, 0x74, 0xB7, 0x00, 0x3A]
+val BDF_STRIPE_K4: [i32] = [0xFE, 0xCD, 0x70, 0x1E, 0x00, 0x8F, 0xE1]
+val BDF_EDGE_K4: [i32] = [0x9E, 0xA3, 0xAD, 0xC9, 0xE3]
+val BDF_ROUND_K4: [i32] = [0x00, 0x00, 0x34, 0x76, 0xBE, 0x00, 0x34]
+
+fn bdf_mismatches(px: [u32], k: i32, pts: [i32], want: [i32]) -> i32:
+    val w = 120 * k
+    if px.len() != w * 90 * k:
+        return -1
+    var bad = 0
+    var i = 0
+    while i < want.len():
+        val p = px[(pts[i * 2 + 1] * k + k / 2) * w + pts[i * 2] * k + k / 2]
+        val want_px = 0xFF0000u32 | ((want[i] as u32) << 8) | (want[i] as u32)
+        var sh = 0u32
+        while sh <= 16u32:
+            val d = ((p >> sh) & 0xFFu32) as i32 - ((want_px >> sh) & 0xFFu32) as i32
+            if d > 2 or d < -2:
+                bad = bad + 1
+                sh = 24u32
+            else:
+                sh = sh + 8u32
+        i = i + 1
+    bad
+
+fn bdf_lane_failures(lane: text) -> i32:
+    bdf_mismatches(simple_web_layout_render_html_pixels_engine2d_at_device_scale(BDF_STRIPE, 120, 90, 4, lane), 4, BDF_STRIPE_PTS, BDF_STRIPE_K4) + bdf_mismatches(simple_web_layout_render_html_pixels_engine2d_at_device_scale(BDF_EDGE, 120, 90, 4, lane), 4, BDF_EDGE_PTS, BDF_EDGE_K4) + bdf_mismatches(simple_web_layout_render_html_pixels_engine2d_at_device_scale(BDF_ROUND, 120, 90, 4, lane), 4, BDF_ROUND_PTS, BDF_ROUND_K4)
+
+describe "backdrop-filter: blur() (Chrome 159)":
+    it "raster blurs the box backdrop":
+        expect(bdf_mismatches(simple_web_layout_render_html_software_pixels(BDF_STRIPE, 120, 90, 600000), 1, BDF_STRIPE_PTS, BDF_STRIPE_K1) + bdf_mismatches(simple_web_layout_render_html_software_pixels(BDF_EDGE, 120, 90, 600000), 1, BDF_EDGE_PTS, BDF_EDGE_K1) + bdf_mismatches(simple_web_layout_render_html_software_pixels(BDF_ROUND, 120, 90, 600000), 1, BDF_ROUND_PTS, BDF_ROUND_K1)).to_equal(0)
+    it "cpu_simd blurs the box backdrop at device scale 4":
+        expect(bdf_lane_failures("cpu_simd")).to_equal(0)
+    it "vulkan blurs the box backdrop at device scale 4":
+        expect(bdf_lane_failures("vulkan")).to_equal(0)

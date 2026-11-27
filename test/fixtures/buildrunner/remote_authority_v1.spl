@@ -1,0 +1,95 @@
+# Test-only deterministic keys. Signing text is independent of production codecs.
+use std.spec.expect
+use std.common.build_manager.contracts.{BuildTaskV1, BuildInputV1, builder_task_identity_v1}
+use std.common.build_manager.codec.builder_encode_task_v1
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.common.contracts.distributed_authority_v2.{DistributedSignedGrantV2, DistributedSignedApprovalV2}
+use std.common.crypto.sha256.sha256_text
+use std.common.crypto.ed25519.pure_ed25519_sign_from_seed_v1
+use app.llm_caret.workbench.distributed_grant_verification_v2.DistributedAuthorityKeyV2
+use app.buildrunner.remote_authority_v1.*
+use test.fixtures.app.llm_caret.distributed_authority_verification_fixture_v2.*
+
+struct RemoteAuthorityFixtureV1:
+    completion: RemoteCompletionEnvelopeV1
+    signed: DistributedSignedGrantV2
+    approval: DistributedSignedApprovalV2
+    issuer: DistributedAuthorityKeyV2
+    approver: DistributedAuthorityKeyV2
+    host_key: DistributedAuthorityKeyV2
+    request: OperationEnvelopeV2
+    task: BuildTaskV1
+    expected: RemoteCompletionBindingV1
+
+fn remote_authority_task_v1() -> BuildTaskV1:
+    BuildTaskV1(id: "compile_1", attempt: 1, phase: "native",
+        producer_digest: "a".repeat(64), source_digest: "b".repeat(64),
+        toolchain_digest: "c".repeat(64), dependencies: [], program: "producer",
+        args: ["compile", "input.spl"],
+        inputs: [BuildInputV1(path: "input.spl", digest: "d".repeat(64))],
+        outputs: ["result.o"], cache_key: "e".repeat(64), timeout_ms: 500,
+        memory_limit_bytes: 512, links: [], memory_policy: "enforce")
+
+fn remote_authority_golden_message_v1(value: RemoteCompletionEnvelopeV1) -> text:
+    var reaped = "false"
+    if value.tree_reaped: reaped = "true"
+    ["SIMPLE_REMOTE_COMPLETION_SIGNATURE_V1", "{value.version}", value.task_identity,
+        value.host_id, value.assignment_digest, "{value.controller_epoch}", value.operation_id,
+        value.request_digest, value.grant_digest, value.result_digest, value.process_digest,
+        value.output_inventory_digest, value.tests_digest, value.signer_id,
+        "{value.key_revision}", "{value.completed_at}", reaped, ""].join("\n")
+
+fn remote_authority_resign_v1(value: RemoteCompletionEnvelopeV1) -> RemoteCompletionEnvelopeV1:
+    var signed = value
+    val signature = pure_ed25519_sign_from_seed_v1(verification_seed(129),
+        verification_bytes(remote_authority_golden_message_v1(value)))
+    signed.signature = signature.signature
+    signed
+
+fn remote_authority_fixture_v1() -> RemoteAuthorityFixtureV1:
+    val base = verification_fixture()
+    val task = remote_authority_task_v1()
+    var request = base.request
+    request.payload_digest = sha256_text(builder_encode_task_v1(task))
+    val request_wire = "DBC_OPERATION_V2\noperation_1\n" + request.payload_digest +
+        "\nuser_1\nproject_1\nworker_1\nbuild\n" + "a".repeat(64) + "\n4\n2\n3\n512\n500\n"
+    val request_digest = sha256_text(request_wire)
+    var approval = base.approval
+    approval.request_digest = request_digest
+    val approval_message = "DBC_APPROVAL_SIGNATURE_V2\napprover_1\n1\n" + approval.grant_digest +
+        "\n" + request_digest + "\n4\n3\n190\n"
+    val approval_signature = pure_ed25519_sign_from_seed_v1(verification_seed(65),
+        verification_bytes(approval_message))
+    approval.signature = approval_signature.signature
+    val completion = remote_authority_resign_v1(RemoteCompletionEnvelopeV1(version: 1,
+        task_identity: builder_task_identity_v1(task), host_id: "worker_1",
+        assignment_digest: "1".repeat(64), controller_epoch: 7, operation_id: "operation_1",
+        request_digest: request_digest, grant_digest: approval.grant_digest,
+        result_digest: "2".repeat(64), process_digest: "3".repeat(64),
+        output_inventory_digest: "4".repeat(64), tests_digest: "5".repeat(64),
+        signer_id: "host_signer_1", key_revision: 1, completed_at: 99,
+        tree_reaped: true, signature: []))
+    val host_signature = pure_ed25519_sign_from_seed_v1(verification_seed(129), [])
+    val expected = RemoteCompletionBindingV1(task_identity: completion.task_identity,
+        host_id: "worker_1", assignment_digest: "1".repeat(64), controller_epoch: 7,
+        operation_id: "operation_1", result_digest: "2".repeat(64),
+        process_digest: "3".repeat(64), output_inventory_digest: "4".repeat(64),
+        tests_digest: "5".repeat(64))
+    RemoteAuthorityFixtureV1(completion: completion, signed: base.signed, approval: approval,
+        issuer: base.issuer, approver: base.approver,
+        host_key: verification_key("host_signer_1", "execution-host", host_signature.public_key),
+        request: request, task: task, expected: expected)
+
+fn remote_authority_error_v1(fixture: RemoteAuthorityFixtureV1) -> text:
+    match remote_verify_completion_v1(fixture.completion, fixture.signed, fixture.approval,
+            fixture.issuer, fixture.approver, fixture.host_key, fixture.request,
+            fixture.task, fixture.expected, 100, 4, 2, 3):
+        case Ok(value): ""
+        case Err(reason): reason
+
+fn remote_authority_encode_v1(value: RemoteCompletionEnvelopeV1) -> text:
+    match remote_completion_encode_v1(value):
+        case Ok(wire): wire
+        case Err(reason):
+            expect(reason).to_equal("")
+            ""

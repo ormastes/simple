@@ -1,0 +1,113 @@
+"""
+## Purpose and audience
+Preserve top-level source visibility intent separately from legacy declaration
+visibility. Compiler maintainers can distinguish omitted and explicit pri
+without changing member, generated declaration or typed visibility policy.
+## Operator workflow
+Parse real source; inspect source-offset facts; restore pending metadata and
+parser-state snapshots; check legacy declaration and grammar behavior.
+## Compatibility and limitations
+Facts must be joined to an actual declaration before access evaluation. No
+folder-local enforcement, public-set migration, or overlay integration is
+claimed. Historical caches are invalidated through the frontend codec identity.
+"""
+use std.spec.*
+use compiler.core.ast.{ast_reset, decl_count, decl_get_name, decl_get_visibility_text, decl_struct_def}
+use compiler.core.parser.{parser_init_with_path, parser_has_errors}
+use compiler.core.parser_decls.{parse_module_body}
+use compiler.frontend.core.flat_pool_codec.{FlatPoolReader, FLAT_POOL_CODEC_VERSION}
+use compiler.frontend.core._ParserDecls.enum_module_body.{
+    parser_top_level_visibility_intent_count_v1, parser_top_level_visibility_intent_offset_v1,
+    parser_top_level_visibility_intent_modifier_v1, flat_pending_pools_dump,
+    flat_pending_pools_restore, pending_decl_attr_state_take, pending_decl_attr_state_install}
+
+val INTENT_SOURCE = "fn folder_value() -> i64:\n    1\npri fn file_value() -> i64:\n    2\npub fn public_value() -> i64:\n    3\npub(peer) fn peer_value() -> i64:\n    4\n"
+
+fn parse_visibility_intent_source(source: text):
+    ast_reset()
+    parser_init_with_path(source, "visibility_intent.spl")
+    parse_module_body()
+
+fn intent_decl_visibility(name: text) -> text:
+    for index in 0..decl_count():
+        if decl_get_name(index) == name: return decl_get_visibility_text(index)
+    "missing"
+
+describe "top-level source visibility intent":
+    it "retains distinct source facts without changing legacy declaration values":
+        step("Parse omitted, explicit pri, ordinary pub and scoped pub declarations")
+        parse_visibility_intent_source(INTENT_SOURCE)
+        expect(parser_has_errors()).to_equal(false)
+        expect(parser_top_level_visibility_intent_count_v1()).to_equal(4)
+        expect(parser_top_level_visibility_intent_modifier_v1(0)).to_equal("omitted")
+        expect(parser_top_level_visibility_intent_modifier_v1(1)).to_equal("pri")
+        expect(parser_top_level_visibility_intent_modifier_v1(2)).to_equal("public")
+        expect(parser_top_level_visibility_intent_modifier_v1(3)).to_equal("peer")
+        expect(parser_top_level_visibility_intent_offset_v1(0)).to_equal(0)
+        expect(parser_top_level_visibility_intent_offset_v1(1)).to_be_greater_than(0)
+        expect(intent_decl_visibility("folder_value")).to_equal("private")
+        expect(intent_decl_visibility("file_value")).to_equal("private")
+
+    it "round trips facts through pending metadata and parser-state ownership":
+        step("Encode real observations and move the active parse state")
+        parse_visibility_intent_source(INTENT_SOURCE)
+        val encoded = flat_pending_pools_dump()
+        val state = pending_decl_attr_state_take()
+        expect(parser_top_level_visibility_intent_count_v1()).to_equal(0)
+        pending_decl_attr_state_install(state)
+        expect(parser_top_level_visibility_intent_modifier_v1(1)).to_equal("pri")
+        step("Reject pending-only data whose declaration IDs do not belong to the current module")
+        parse_visibility_intent_source("fn other():\n    0\n")
+        expect(flat_pending_pools_restore(FlatPoolReader.new(encoded))).to_equal(false)
+        parse_visibility_intent_source(INTENT_SOURCE)
+        expect(flat_pending_pools_restore(FlatPoolReader.new(encoded))).to_equal(true)
+        expect(parser_top_level_visibility_intent_count_v1()).to_equal(4)
+        expect(parser_top_level_visibility_intent_modifier_v1(0)).to_equal("omitted")
+        expect(parser_top_level_visibility_intent_modifier_v1(1)).to_equal("pri")
+
+    it "preserves member and generated defaults and pri static and macro grammar":
+        step("Parse a class, pri static function and pri macro through unchanged routes")
+        parse_visibility_intent_source("class Owner:\n    pri: i64\n    pri me hidden() -> i64:\n        1\npri static fn local_static() -> i64:\n    2\npri macro identity(x):\n    x\n")
+        expect(parser_has_errors()).to_equal(false)
+        expect(parser_top_level_visibility_intent_count_v1()).to_equal(3)
+        expect(parser_top_level_visibility_intent_modifier_v1(0)).to_equal("omitted")
+        expect(parser_top_level_visibility_intent_modifier_v1(1)).to_equal("pri")
+        expect(parser_top_level_visibility_intent_modifier_v1(2)).to_equal("pri")
+        expect(intent_decl_visibility("Owner__hidden")).to_equal("private")
+        expect(intent_decl_visibility("local_static")).to_equal("private")
+        val generated = decl_struct_def("Generated", [], [], [], [], 0)
+        expect(decl_get_visibility_text(generated)).to_equal("private")
+        expect(parser_top_level_visibility_intent_count_v1()).to_equal(3)
+
+    it "exposes no inferred intent for missing rows and changes the cache identity":
+        step("Check absent facts and the incompatible frontend codec identity")
+        parse_visibility_intent_source("")
+        expect(parser_top_level_visibility_intent_count_v1()).to_equal(0)
+        expect(parser_top_level_visibility_intent_modifier_v1(0)).to_equal("unknown")
+        expect(parser_top_level_visibility_intent_offset_v1(0)).to_equal(-1)
+        expect(FLAT_POOL_CODEC_VERSION).to_equal("spl-flatpool-v19-aspect-owner-declaration-intent-manifest-v1")
+
+    it "clears observations after a malformed restore":
+        step("Parse valid facts before presenting a truncated metadata frame")
+        parse_visibility_intent_source(INTENT_SOURCE)
+        expect(flat_pending_pools_restore(FlatPoolReader.new("0\n"))).to_equal(false)
+        expect(parser_top_level_visibility_intent_count_v1()).to_equal(0)
+        expect(parser_top_level_visibility_intent_modifier_v1(0)).to_equal("unknown")
+
+    it "uses exact source-byte prefix offsets with UTF-8 and a multiline pub":
+        step("Parse a Unicode comment followed by pri and multiline pub modifiers")
+        parse_visibility_intent_source("# é\npri fn f():\n    0\npub\nfn g():\n    0\n")
+        expect(parser_has_errors()).to_equal(false)
+        expect(parser_top_level_visibility_intent_count_v1()).to_equal(2)
+        expect(parser_top_level_visibility_intent_offset_v1(0)).to_equal(5)
+        expect(parser_top_level_visibility_intent_offset_v1(1)).to_equal(23)
+        expect(parser_top_level_visibility_intent_modifier_v1(0)).to_equal("pri")
+        expect(parser_top_level_visibility_intent_modifier_v1(1)).to_equal("public")
+
+    it "hides observations when parsing fails":
+        step("Parse an invalid function header after an explicit public modifier")
+        parse_visibility_intent_source("pub fn\n")
+        expect(parser_has_errors()).to_equal(true)
+        expect(parser_top_level_visibility_intent_count_v1()).to_equal(0)
+        expect(parser_top_level_visibility_intent_offset_v1(0)).to_equal(-1)
+        expect(parser_top_level_visibility_intent_modifier_v1(0)).to_equal("unknown")

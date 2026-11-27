@@ -1,0 +1,54 @@
+# @req REQ-SSPEC-UNIT
+# @cover src/compiler/50.mir/mir_lowering_stmts.spl
+# @cover src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl
+#
+# Phase-3 census (run-19 Stage 2, 2026-11-13) class 2: `[mir-lower] WARNING:
+# struct/class name 'TextSpan' re-registered with a DIFFERENT field list
+# (existing=[start, end] vs new=[value, start, len]; keeping EXISTING)` (also
+# JoinPoint, ElfSymbol). The bare layout tier keeps the FIRST registration;
+# the module-qualified tier is exact. An audit found 20 bare-name reads with no
+# ambiguity guard, reached through (A) bare `struct_value_syms` provenance and
+# (B) `struct_field_type_name` storing the bare NESTED field type, so a
+# correctly qualified outer struct still copied/compared its `TextSpan` field
+# with the first-registered layout (field COUNT drives the copy and the `==`
+# loop). Fix: the struct copy (`copy_struct_value_recursive`) and structural
+# `==` (`lower_struct_structural_eq`) recurse through the qualified layout
+# recorded in `struct_field_type_ownership_key` and fail closed on a bare name
+# in `struct_field_order_conflict_warned`.
+#
+# Each fixture module exports only functions, so this consumer never imports
+# the two same-named types. The interpreter passes regardless of the fix; the
+# discriminator is a native compile of this file (two TextSpan layouts in one
+# entry closure). UNEXECUTED on a producer carrying the fix (same status as
+# inferred_receiver_method_resolution_spec.spl).
+# Record: doc/08_tracking/bug/p3_census_mir_classes_2026-11-13.md
+use std.spec.*
+use test.fixtures.compiler.same_name_layouts.span_a.{
+    span_a_make, span_a_end, span_a_copy_end, span_a_wrap_end, span_a_eq, span_a_wrap_eq
+}
+use test.fixtures.compiler.same_name_layouts.span_b.{
+    span_b_make, span_b_len, span_b_copy_len, span_b_wrap_len, span_b_eq, span_b_wrap_eq
+}
+
+describe "same-named structs with different field lists across modules":
+    it "reads each layout's own field through the direct path":
+        expect(span_a_end(span_a_make(1, 5))).to_equal(5)
+        expect(span_b_len(span_b_make("x", 2, 9))).to_equal(9)
+
+    it "copies each value with its own field count":
+        expect(span_a_copy_end(span_a_make(1, 5))).to_equal(5)
+        expect(span_b_copy_len(span_b_make("x", 2, 9))).to_equal(9)
+
+    it "copies a nested same-named field through the owner's qualified layout":
+        expect(span_a_wrap_end("l", 3, 8)).to_equal(8)
+        expect(span_b_wrap_len("v", 4, 11)).to_equal(11)
+
+    it "compares each layout structurally, including nested":
+        expect(span_a_eq(span_a_make(1, 5), span_a_make(1, 5))).to_equal(true)
+        expect(span_a_eq(span_a_make(1, 5), span_a_make(1, 6))).to_equal(false)
+        expect(span_b_eq(span_b_make("x", 2, 9), span_b_make("x", 2, 9))).to_equal(true)
+        expect(span_b_eq(span_b_make("x", 2, 9), span_b_make("y", 2, 9))).to_equal(false)
+        expect(span_a_wrap_eq(1, 5, 5)).to_equal(true)
+        expect(span_a_wrap_eq(1, 5, 6)).to_equal(false)
+        expect(span_b_wrap_eq("v", 9, 9)).to_equal(true)
+        expect(span_b_wrap_eq("v", 9, 10)).to_equal(false)

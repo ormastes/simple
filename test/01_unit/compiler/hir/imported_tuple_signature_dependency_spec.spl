@@ -79,15 +79,15 @@ fn tuple_dep_spec_surfaces(modules: Dict<text, Module>, sources: [SourceFile]) -
 fn tuple_dep_spec_lower(owner_return: text) -> HirLowering:
     val log = tuple_dep_spec_logger()
     val sem_source =
-        "struct ResolveError:\n    message: text\n\nfn resolve_methods(m: i64) -> " +
+        "pub struct ResolveError:\n    message: text\n\npub fn resolve_methods(m: i64) -> " +
         owner_return + ":\n    " + (if owner_return == "[ResolveError]": "[]" else: "(m, [])")
     val mid_source =
         "use sem.resolve.\{resolve_methods\}\n\nfn run_pass(m: i64) -> i64:\n    m"
     val cons_source =
         "use sem.resolve.\{resolve_methods\}\n\nfn go() -> i64:\n    1"
-    val sem = parse_full_frontend(sem_source, "sem.resolve", "sem.resolve", log)
-    val mid = parse_full_frontend(mid_source, "drv.passes", "drv.passes", log)
-    val cons = parse_full_frontend(cons_source, "drv.driver", "drv.driver", log)
+    val sem = parse_full_frontend(sem_source, "sem/resolve.spl", "sem.resolve", log)
+    val mid = parse_full_frontend(mid_source, "drv/passes.spl", "drv.passes", log)
+    val cons = parse_full_frontend(cons_source, "drv/driver.spl", "drv.driver", log)
     var modules: Dict<text, Module> = {}
     modules["sem.resolve"] = sem
     modules["drv.passes"] = mid
@@ -96,7 +96,7 @@ fn tuple_dep_spec_lower(owner_return: text) -> HirLowering:
         SourceFile(path: "drv/passes.spl", content: mid_source, module_name: "drv.passes")
     ]
     val surfaces = tuple_dep_spec_surfaces(modules, sources)
-    var lowering = hirlowering_for_module("drv.driver", surfaces)
+    var lowering = hirlowering_for_module("drv/driver.spl", surfaces)
     val hir = lowering.lower_module(cons)
     lowering
 
@@ -112,10 +112,14 @@ fn projection_hir_type(kind: HirTypeKind) -> HirType:
 fn projection_owner_type(id: i64) -> HirType:
     projection_hir_type(HirTypeKind.Named(SymbolId.new(id), []))
 
-fn project_owner_shape(type_: Type) -> HirType:
+fn project_owner_lowering() -> HirLowering:
     var lowering = tuple_dep_spec_lower("[ResolveError]")
     lowering.symbols.bind_qualified_type("shape.owner", "OwnerType", SymbolId.new(901))
     lowering.symbols.bind_qualified_type("shape.owner", "OtherType", SymbolId.new(902))
+    lowering
+
+fn project_owner_shape(type_: Type) -> HirType:
+    var lowering = project_owner_lowering()
     lowering.imported_surface_type(type_, "shape.owner")
 
 describe "imported callable whose signature dependency sits inside a tuple":
@@ -138,13 +142,14 @@ describe "imported callable whose signature dependency sits inside a tuple":
 
 describe "recursive imported surface type projection":
     it "preserves owner-qualified names through nested arrays and array-of-tuple":
+        var lowering = project_owner_lowering()
         val owner = projection_owner_type(901)
         val other = projection_owner_type(902)
         val nested = projection_parser_type(TypeKind.Array(
             projection_parser_type(TypeKind.Array(projection_named("OwnerType"), nil)), nil))
         val nested_expected = projection_hir_type(HirTypeKind.Array(
             projection_hir_type(HirTypeKind.Array(owner, nil)), nil))
-        expect(hir_types_equal(project_owner_shape(nested), nested_expected)).to_equal(true)
+        expect(hir_types_equal(lowering.imported_surface_type(nested, "shape.owner"), nested_expected)).to_equal(true)
 
         val array_tuple = projection_parser_type(TypeKind.Array(
             projection_parser_type(TypeKind.Tuple([
@@ -153,15 +158,16 @@ describe "recursive imported surface type projection":
         val array_tuple_expected = projection_hir_type(HirTypeKind.Array(
             projection_hir_type(HirTypeKind.Tuple([other, owner])), nil))
         expect(hir_types_equal(
-            project_owner_shape(array_tuple), array_tuple_expected)).to_equal(true)
+            lowering.imported_surface_type(array_tuple, "shape.owner"), array_tuple_expected)).to_equal(true)
 
     it "preserves immutable and mutable pointer projection":
+        var lowering = project_owner_lowering()
         val owner = projection_owner_type(901)
         val immutable = projection_parser_type(TypeKind.Pointer(projection_named("OwnerType"), false))
         val mutable = projection_parser_type(TypeKind.Pointer(projection_named("OwnerType"), true))
-        expect(hir_types_equal(project_owner_shape(immutable),
+        expect(hir_types_equal(lowering.imported_surface_type(immutable, "shape.owner"),
             projection_hir_type(HirTypeKind.Ptr(owner, false)))).to_equal(true)
-        expect(hir_types_equal(project_owner_shape(mutable),
+        expect(hir_types_equal(lowering.imported_surface_type(mutable, "shape.owner"),
             projection_hir_type(HirTypeKind.Ptr(owner, true)))).to_equal(true)
 
     it "preserves every union position and its order":

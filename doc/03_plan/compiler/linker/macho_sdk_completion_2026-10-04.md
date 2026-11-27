@@ -49,3 +49,24 @@ Managed internal-engine admission, bounded/no-swap worker evidence and Windows,
 Linux, FreeBSD and SimpleOS execution remain separate requirements. External
 hosted defaults remain unchanged. All Simple runtime/host gates are UNRUN until
 an admitted deployed runtime and actual host evidence are available.
+
+## Status 2026-10-25 (verified against origin/release/1.0.0)
+
+Checked against `origin/release/1.0.0` source and `git log` on 2026-10-25.
+Honest host scope: only the claims below that cite a commit carry execution
+evidence, and that evidence is from the commit message, not re-run here.
+
+| Area | State | Evidence |
+|---|---|---|
+| Internal ELF x64 linker links the full self-hosted CLI | PARTIAL (Linux x64 only) | `59126e2c285` (PR #4014, 2026-10-20): native-built internal linker linked the 2793-object cranelift CLI in 79 s; output ran `--version`, `-c 'print(1+1)'`, hello, same as ld.lld. Peak RSS 21.3 GB, far above the 6000000000-byte bounded target, so ITEM4-REQ-009 stays OPEN |
+| Native-built linker driver | DONE (Linux) | PR #3984 (`9c0ddc8662e`); native output byte-identical to interpreted driver on hello/wide/153-module links per `59126e2c285` |
+| COMDAT / weak instance dedup across non-LLVM backends | DONE (object-writer side) | PR #4603 (`cbe361c2497`, core `0bf2df39343`): ELF and Mach-O writers; PR #4575 module-scoped mono COMDAT instances (always on inside the opt-in `SIMPLE_FILE_WORKERS=1` file-worker lane since P-G3 #4598; the `SIMPLE_MONO_MODULE_SCOPED` flag no longer exists). Producer-side only; it is not a linker-host gate |
+| Windows hosted link line (mswsock, llvm-mingw runtimes, single-owner GNU COFF runtime) | DONE (external-linker wrapper) | PR #4507 (`a45f49099eb`), #4487 (`e0837cb030e`), #4490 (`8bd0ec39b5d`). These fix the clang/lld link line; they do not execute the internal Simple COFF engine on Windows |
+| Object-hash link receipt | OPEN (PR #4356 held, not merged) | Guard-side recognition only: `8c35ad4b536` |
+| Mach-O | PARTIAL / in progress | Hosted Mach-O source + `macho_writer.spl` dedup exist; conditional Mach-O build is in progress, not landed; Darwin link/load/sign execution UNRUN |
+| FreeBSD, SimpleOS on-guest linker, Windows internal engine, PE ARM64 | OPEN | No host execution evidence on this base |
+| S7-I04-AC01..AC09 umbrella scenarios | OPEN | Still NOT_IMPLEMENTED bodies; the full-CLI link above is partial input to AC06 (Linux only) |
+
+Superseded 2026-10-25: earlier text saying all Simple-linker execution is
+UNRUN is no longer true for Linux x64 ELF — see `59126e2c285`. Every other
+host row and the bounded-memory/performance gate remain as stated above.

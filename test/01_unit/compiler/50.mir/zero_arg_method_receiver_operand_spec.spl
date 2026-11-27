@@ -1,0 +1,173 @@
+# @req REQ-SSPEC-COMPILER
+# Tracks: native_zero_arg_method_receiver_not_marshalled_2026-07-19
+"""
+# Zero-argument method calls carry the receiver as MIR call operand 0
+
+`Engine2D._draw_font_b` faulted on the native lane with a nil/garbage
+receiver for `batch.material_supported()` -- a method call with NO explicit
+arguments. A zero-arg call has nothing but the receiver to marshal, so if the
+MIR `Call` arrives with an empty operand list the backend silently reuses
+whatever register held the previous return value as `self`.
+
+Each example lowers a source through HIR and MIR in-process and asserts the
+lowered `Call` for the zero-arg method has exactly one operand, that the
+operand is the receiver (the named local, `self`, or the preceding call's
+result for a chained call), and that the callee signature declares that one
+receiver parameter.
+
+Shapes: struct method on a local, trait method on a local, method of a class
+declared in another module, and a chained `self.mk().ok()` call.
+"""
+use std.spec.{describe, it, expect}
+use compiler.common.config.{Logger}
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.frontend.parser_types.{Module}
+use compiler.core.parser.{parser_has_errors}
+use compiler.hir.hir_lowering.types.{HirLowering, hirlowering_for_module}
+use compiler.hir.hir_lowering.items.*
+use compiler.hir.hir_lowering.module_surface.{module_surfaces_from_modules}
+use compiler.hir.hir_types.{HirModule}
+use compiler.mir.mir_lowering.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+use compiler.mir.mir_instruction_kinds.*
+use compiler.mir.mir_instruction_support.*
+use compiler.mir.mir_instruction_graph.*
+use compiler.mir.mir_types.*
+
+val STRUCT_SRC = "struct B:\n    v: i64\n\n    fn s_ok() -> bool:\n        self.v > 0\n\nfn run() -> bool:\n    val b = B(v: 1)\n    b.s_ok()\n"
+
+val TRAIT_SRC = "trait Sup:\n    fn t_ok() -> bool\n\nstruct B:\n    v: i64\n\nimpl Sup for B:\n    fn t_ok() -> bool:\n        self.v > 0\n\nfn run() -> bool:\n    val b = B(v: 1)\n    b.t_ok()\n"
+
+val CHAIN_SRC = "struct B:\n    v: i64\n\n    fn c_ok() -> bool:\n        self.v > 0\n\nclass E:\n    n: i64\n\n    fn mk() -> B:\n        B(v: self.n)\n\n    fn run() -> bool:\n        self.mk().c_ok()\n"
+
+val PARAM_SRC = "struct B:\n    v: i64\n\n    fn p_ok() -> bool:\n        self.v > 0\n\nclass E:\n    n: i64\n\n    me run(batch: B) -> bool:\n        batch.p_ok()\n"
+
+val LIB_SRC = "pub class B:\n    v: i64\n\n    fn i_ok() -> bool:\n        self.v > 0\n"
+
+val APP_SRC = "use lib.b.\{B\}\n\nfn run() -> bool:\n    val b = B(v: 1)\n    b.i_ok()\n"
+
+fn operand_local(o: MirOperand) -> i64:
+    match o.kind:
+        case MirOperandKind.Copy(l): l.id
+        case MirOperandKind.Move(l): l.id
+        case _: -1
+
+fn callee_name(o: MirOperand) -> text:
+    match o.kind:
+        case MirOperandKind.Const(v, _):
+            match v:
+                case MirConstValue.Str(s): s
+                case _: ""
+        case _: ""
+
+fn local_origin(f: MirFunction, local: i64, defs: Dict<i64, text>) -> text:
+    if local < 0 or local >= f.locals.len(): return "none"
+    match f.locals[local].kind:
+        case LocalKind.Arg(n):
+            if n == 0: return "self"
+            return "param"
+        case _: ()
+    if defs.contains(local): return defs[local]
+    "temp"
+
+fn describe_receiver(f: MirFunction, local: i64, prev_dest: i64, defs: Dict<i64, text>) -> text:
+    """`val b = B(..)` binds the constructing instruction's dest local
+    directly (MIR records no name on it), so the receiver is identified by
+    the instruction that defined it, following Copy/Move temps, the
+    Alloc/Store/Load slot a parameter is spilled through, and the
+    GetField->Aggregate field-wise value copy a struct parameter gets."""
+    if local == prev_dest and prev_dest >= 0: return "chained"
+    local_origin(f, local, defs)
+
+# Returns "args=<n> recv=<who> callee_params=<n>" for the Call to `method`
+# inside the function whose name ends with `caller`.
+fn call_shape(m: MirModule, caller: text, method: text) -> text:
+    var out = "missing"
+    var callee_params = -1
+    for f in m.functions.values():
+        if f.name.ends_with(method): callee_params = f.signature.params.len()
+    for f in m.functions.values():
+        if f.name.ends_with(caller):
+            var prev_dest = -1
+            var defs: Dict<i64, text> = {}
+            for b in f.blocks:
+                for inst in b.instructions:
+                    match inst.kind:
+                        case MirInstKind.Copy(to, from): defs[to.id] = local_origin(f, from.id, defs)
+                        case MirInstKind.Move(to, from): defs[to.id] = local_origin(f, from.id, defs)
+                        case MirInstKind.Store(p, v): defs[operand_local(p)] = local_origin(f, operand_local(v), defs)
+                        case MirInstKind.Load(d, p): defs[d.id] = local_origin(f, operand_local(p), defs)
+                        case MirInstKind.GetField(d, base, _): defs[d.id] = local_origin(f, operand_local(base), defs)
+                        case MirInstKind.Aggregate(d, _, ops):
+                            # A struct built only from one parameter's own fields is
+                            # that parameter's value copy, not a fresh value.
+                            var from_param = ops.len() > 0
+                            for o in ops:
+                                if local_origin(f, operand_local(o), defs) != "param": from_param = false
+                            defs[d.id] = if from_param: "param" else: "struct-value"
+                        case MirInstKind.Call(dest, fnop, args):
+                            if callee_name(fnop).ends_with(method):
+                                var recv = -1
+                                if args.len() > 0: recv = operand_local(args[0])
+                                out = "args={args.len()} recv={describe_receiver(f, recv, prev_dest, defs)}"
+                            prev_dest = -1
+                            if val d = dest:
+                                prev_dest = d.id
+                                defs[d.id] = "call-result"
+                        case _: ()
+    "{out} callee_params={callee_params}"
+
+fn single_module_shape(src: text, caller: text, method: text) -> text:
+    val file = "testdata/zero_arg_{method}.spl"
+    val parsed = parse_full_frontend(src, file, "zero_arg_{method}", Logger(level: 0))
+    if parser_has_errors(): return "parse-error"
+    var hl = HirLowering.with_filename(file)
+    val hir: HirModule = hl.lower_module(parsed)
+    if hl.errors.len() != 0: return "hir-error"
+    var lowering = MirLowering.new(hir.symbols)
+    val m = lowering.lower_module(hir)
+    call_shape(m, caller, method)
+
+fn imported_module_shape() -> text:
+    val log = Logger(level: 0)
+    val lib_ast = parse_full_frontend(LIB_SRC, "lib/b.spl", "lib.b", log)
+    val app_ast = parse_full_frontend(APP_SRC, "app/main.spl", "app.main", log)
+    var modules: Dict<text, Module> = {}
+    modules["lib.b"] = lib_ast
+    modules["app.main"] = app_ast
+    val sources = [SourceFile(path: "lib/b.spl", content: LIB_SRC, module_name: "lib.b"), SourceFile(path: "app/main.spl", content: APP_SRC, module_name: "app.main")]
+    val surfaces = module_surfaces_from_modules(modules, sources).unwrap()
+    var lib_lowering = hirlowering_for_module("lib.b", surfaces)
+    var app_lowering = hirlowering_for_module("app.main", surfaces)
+    val lib_hir = lib_lowering.lower_module(lib_ast)
+    val app_hir = app_lowering.lower_module(app_ast)
+    var hir_modules: Dict<text, HirModule> = {}
+    hir_modules["lib.b"] = lib_hir
+    hir_modules["app.main"] = app_hir
+    var mir_lowering = MirLowering.new(app_hir.symbols)
+    for module_key in hir_modules.keys():
+        mir_lowering.prescan_module_struct_names(hir_modules, module_key)
+    val m = mir_lowering.lower_module(app_hir, [lib_hir, app_hir])
+    for e in mir_lowering.errors:
+        if e.message.contains("unresolved method call"): return "mir-error: {e.message}"
+    # The callee lives in lib.b, so its signature is not in the app module;
+    # only the call operands are asserted here.
+    call_shape(m, "run", "i_ok")
+
+describe "zero-arg method call receiver operand":
+    it "struct method on a local receiver passes the local as operand 0":
+        expect(single_module_shape(STRUCT_SRC, "run", "s_ok")).to_equal("args=1 recv=struct-value callee_params=1")
+
+    it "trait method on a local receiver passes the local as operand 0":
+        expect(single_module_shape(TRAIT_SRC, "run", "t_ok")).to_equal("args=1 recv=struct-value callee_params=1")
+
+    it "engine shape: zero-arg call on a `me` method parameter passes the parameter as operand 0":
+        expect(single_module_shape(PARAM_SRC, "E.run", "p_ok")).to_equal("args=1 recv=param callee_params=1")
+
+    it "chained self.mk().c_ok() passes the mk() result as operand 0":
+        expect(single_module_shape(CHAIN_SRC, "E.run", "c_ok")).to_equal("args=1 recv=chained callee_params=1")
+
+    it "method of a class declared in another module passes the local as operand 0":
+        expect(imported_module_shape()).to_equal("args=1 recv=struct-value callee_params=-1")

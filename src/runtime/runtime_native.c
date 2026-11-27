@@ -1,7 +1,21 @@
 #if defined(__linux__) && !defined(_GNU_SOURCE)
 #define _GNU_SOURCE
 #endif
+/* Descriptor snapshots use Windows 8 FILE_ID_INFO. Select the existing
+ * runtime_fd_stat_v1.h minimum before any transitive Windows header, whose
+ * include guards would otherwise hide declarations from a later definition. */
+#if defined(_WIN32) && (!defined(_WIN32_WINNT) || _WIN32_WINNT < 0x0602)
+#undef _WIN32_WINNT
+#define _WIN32_WINNT 0x0602
+#endif
+#if defined(_WIN32)
+/* Winsock 2 for the TCP/UDP section. It must precede every transitive
+ * <windows.h> (runtime_win_long_path.h pulls one in below). */
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#endif
 #include "runtime_alloc_observer.h"
+#include "xray/xray_startup_owned_threads_v1.h"
 #if defined(SIMPLE_ALLOC_OBSERVER_V1) && SIMPLE_ALLOC_OBSERVER_V1
 const volatile int rt_alloc_observer_native_owner_v1 = 1;
 #endif
@@ -24,9 +38,16 @@ const volatile int rt_alloc_observer_native_owner_v1 = 1;
  * runtime.c + platform headers. We must NOT include platform/platform.h
  * here to avoid duplicate symbol definitions. */
 #include "runtime.h"
+#include "runtime_crt_file.h"
 #include "runtime_simd_dispatch.h"
+#include "rt_sve_vl.h"
 #include "runtime_memory_guard.h"
+#include "runtime_env_owned.h"
 #include "runtime_startup_args.h"
+#include "runtime_utf8_strict_private.h"
+#include "platform/runtime_windows_private_atomic.h"
+#include "platform/runtime_windows_pty_owner_thread_private.h"
+#include "platform/runtime_windows_pipe_file_mode_private.h"
 #include "simple_gui_html_provider_abi_v1.h"
 #include "simple_gui_event_provider_abi_v1.h"
 
@@ -35,9 +56,13 @@ const volatile int rt_alloc_observer_native_owner_v1 = 1;
 #include <sys/stdio.h>
 #endif
 #include <stdlib.h>
+#if defined(__GLIBC__)
+#include <malloc.h>
+#endif
 #include <string.h>
 #include <limits.h>
 #include <errno.h>
+#include "platform/runtime_windows_private_root.h"
 #include <math.h>
 #include <signal.h>
 #include <time.h>
@@ -69,6 +94,10 @@ typedef SSIZE_T ssize_t;
 #if !defined(_WIN32)
 #include <sys/wait.h>
 #endif
+#if defined(__linux__) || defined(__APPLE__) || defined(__FreeBSD__)
+#include <sys/statvfs.h>
+#define RT_HAVE_STATVFS 1
+#endif
 #if defined(__linux__)
 #include <sys/auxv.h>
 #endif
@@ -81,7 +110,9 @@ typedef SSIZE_T ssize_t;
 #include <process.h>
 #include <malloc.h>
 #include <windows.h>
+#include <psapi.h>
 #include "platform/windows_raw_mapping.h"
+#include "platform/spl_win_utf16_private.h"
 #endif
 
 #if defined(_MSC_VER)
@@ -177,51 +208,59 @@ static int rt_msvc_clock_gettime(int clock_id, struct timespec* ts) {
 #endif
 
 /* OS CSPRNG bytes encoded as lowercase hexadecimal.  This is the native
- * provider for std.nogc_sync_mut.io.crypto_sffi.random_hex. */
-const char* rt_random_hex(int64_t len) {
+ * provider for std.nogc_sync_mut.io.crypto_sffi.random_hex. Returns a
+ * RuntimeValue (nil == 3) like its Rust twin: it used to return the raw `char*`,
+ * which the caller read as a tagged value, so checked entropy always came back
+ * nil. */
+int64_t rt_string_new(const uint8_t* data, uint64_t len);
+
+int64_t rt_random_hex(int64_t len) {
     static const char hex[] = "0123456789abcdef";
-    if (len < 0 || (uint64_t)len > (SIZE_MAX - 1) / 2) return NULL;
+    if (len < 0 || (uint64_t)len > (SIZE_MAX - 1) / 2) return 3;
     size_t byte_len = (size_t)len;
     unsigned char* random_bytes = NULL;
     if (byte_len > 0) {
         random_bytes = (unsigned char*)rt_observed_malloc_v1(byte_len);
-        if (!random_bytes) return NULL;
+        if (!random_bytes) return 3;
 #if defined(_WIN32)
         typedef long (WINAPI *BCryptGenRandomFn)(void*, unsigned char*, unsigned long, unsigned long);
-        if (byte_len > 0xffffffffu) { free(random_bytes); return NULL; }
+        if (byte_len > 0xffffffffu) { free(random_bytes); return 3; }
         HMODULE library = LoadLibraryA("bcrypt.dll");
-        if (!library) { free(random_bytes); return NULL; }
+        if (!library) { free(random_bytes); return 3; }
         BCryptGenRandomFn fill = (BCryptGenRandomFn)GetProcAddress(library, "BCryptGenRandom");
         long status = fill ? fill(NULL, random_bytes, (unsigned long)byte_len, 0x00000002) : -1;
         FreeLibrary(library);
-        if (status != 0) { free(random_bytes); return NULL; }
+        if (status != 0) { free(random_bytes); return 3; }
 #else
         int fd = open("/dev/urandom", O_RDONLY);
-        if (fd < 0) { free(random_bytes); return NULL; }
+        if (fd < 0) { free(random_bytes); return 3; }
         size_t offset = 0;
         while (offset < byte_len) {
             ssize_t count = read(fd, random_bytes + offset, byte_len - offset);
             if (count < 0 && errno == EINTR) continue;
             if (count <= 0) {
-                close(fd);
+                rt_crt_close(fd);
                 free(random_bytes);
-                return NULL;
+                return 3;
             }
             offset += (size_t)count;
         }
-        close(fd);
+        rt_crt_close(fd);
 #endif
     }
     char* encoded = (char*)rt_observed_malloc_v1(byte_len * 2 + 1);
-    if (!encoded) { free(random_bytes); return NULL; }
+    if (!encoded) { free(random_bytes); return 3; }
     for (size_t i = 0; i < byte_len; i++) {
         encoded[i * 2] = hex[random_bytes[i] >> 4];
         encoded[i * 2 + 1] = hex[random_bytes[i] & 0x0f];
     }
-    encoded[byte_len * 2] = '\0';
     free(random_bytes);
-    return encoded;
+    int64_t result = rt_string_new((const uint8_t*)encoded, (uint64_t)(byte_len * 2));
+    free(encoded);
+    return result;
 }
+
+static int rt_dir_create_all_cpath(const char* path);
 
 /* C-string worker; the public (ptr, len) entry point is below. Named to match
  * the workers in platform/unix_common.h and platform/platform_win.h. */
@@ -235,35 +274,10 @@ bool rt_dir_create_cpath(const char* path, bool recursive) {
 #endif
     }
 
-    char* tmp = spl_strdup(path);
-    if (!tmp) return false;
-    size_t len = strlen(tmp);
-    while (len > 1 && (tmp[len - 1] == '/' || tmp[len - 1] == '\\')) {
-        tmp[--len] = '\0';
-    }
-    for (char* p = tmp + 1; *p; p++) {
-        if (*p == '/' || *p == '\\') {
-            char saved = *p;
-            *p = '\0';
-#if defined(_WIN32)
-            if (_mkdir(tmp) != 0 && errno != EEXIST) {
-#else
-            if (mkdir(tmp, 0755) != 0 && errno != EEXIST) {
-#endif
-                *p = saved;
-                free(tmp);
-                return false;
-            }
-            *p = saved;
-        }
-    }
-#if defined(_WIN32)
-    bool ok = _mkdir(tmp) == 0 || errno == EEXIST;
-#else
-    bool ok = mkdir(tmp, 0755) == 0 || errno == EEXIST;
-#endif
-    free(tmp);
-    return ok;
+    /* Keep one recursive walk: it skips Windows drive/extended-path roots
+     * rather than trying mkdir("C:"), and treats backslashes as ordinary
+     * filename bytes on POSIX. */
+    return rt_dir_create_all_cpath(path) != 0;
 }
 
 #define RT_VALUE_TAG_MASK 0x7ULL
@@ -277,10 +291,18 @@ bool rt_dir_create_cpath(const char* path, bool recursive) {
 #define RT_VALUE_SPECIAL_ERROR 0x3ULL
 #define RT_VALUE_HEAP_STRING 0x53545231U
 #define RT_VALUE_HEAP_ARRAY 0x02U
-#define RT_VALUE_HEAP_CLOSURE 0x03U
+/* Keep the small heap-kind bytes identical to the hosted Rust HeapObjectType:
+ * Dict=0x03 and Closure=0x06. RtCoreDict also shares RuntimeDict's len@8,
+ * cap@16 prefix so target-independent inline len decoding cannot confuse a
+ * closure with a dictionary in either runtime. */
+#define RT_VALUE_HEAP_DICT 0x03U
 #define RT_VALUE_HEAP_ENUM 0x04U
-#define RT_VALUE_HEAP_DICT 0x06U
+#define RT_VALUE_HEAP_CLOSURE 0x06U
 #define RT_VALUE_HEAP_MUTEX 0x09U
+_Static_assert(RT_VALUE_HEAP_STRING == 0x53545231U, "RtCore string ABI changed");
+_Static_assert(RT_VALUE_HEAP_ARRAY == 0x02U, "RtCore array tag must match HeapObjectType");
+_Static_assert(RT_VALUE_HEAP_DICT == 0x03U, "RtCore dict tag must match HeapObjectType");
+_Static_assert(RT_VALUE_HEAP_CLOSURE == 0x06U, "RtCore closure tag must match HeapObjectType");
 /* Heap-boxed f64 (lossless container float). The inline TAG_FLOAT form stored
  * only (bits & ~7) | TAG_FLOAT, silently zeroing the low 3 mantissa bits, so a
  * container/Any float lost precision ([0.1][0] != 0.1). Container floats are now
@@ -329,6 +351,22 @@ bool rt_dir_create_cpath(const char* path, bool recursive) {
  * safe to set purely internally in rt_tuple_new. */
 #define RT_CORE_ARRAY_FLAG_TUPLE 0x01U
 #define RT_CORE_ARRAY_MAX_CAP 100000000LL
+#define RT_CORE_BYTE_ARRAY_MAX_CAP 1073741824LL
+
+/* Packed bytes have a bounded byte budget, not the tagged-slot element budget.
+ * Keep allocation, header admission, concat and growth on the same contract. */
+static int64_t rt_core_array_capacity_limit(uint8_t flags) {
+    return (flags & RT_CORE_ARRAY_FLAG_BYTES)
+        ? RT_CORE_BYTE_ARRAY_MAX_CAP : RT_CORE_ARRAY_MAX_CAP;
+}
+
+static int rt_core_array_capacity_valid(int64_t cap, uint8_t flags) {
+    size_t elem_size = (flags & RT_CORE_ARRAY_FLAG_BYTES)
+        ? sizeof(uint8_t) : sizeof(int64_t);
+    return cap >= 0 && cap <= rt_core_array_capacity_limit(flags) &&
+        cap <= INT64_MAX / (int64_t)elem_size &&
+        (uint64_t)cap <= SIZE_MAX / elem_size;
+}
 #define RT_HOST_GPU_LANE_HOST 1
 #define RT_HOST_GPU_LANE_GPU 2
 #define RT_HOST_GPU_PHASE_BEGIN 1
@@ -428,6 +466,22 @@ SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_vulkan_readback_u32_checksum(int64_t data
     (void)data; (void)pixel_count; (void)handle; (void)offset;
     return -1;
 }
+
+/*
+ * C twin of the Rust lane's `cfg(not(feature = "vulkan"))` arm of
+ * rt_vulkan_selected_device_identity_v1 (vulkan_graphics_runtime_device.rs):
+ * the core C runtime selects no Vulkan device, so there is no generation token
+ * to match and no physical-device UUID to report. It returns the same empty
+ * string the Rust lane uses for "owner absent". The Simple facade
+ * (vulkan_sffi_selected_device_identity_v1) requires exactly "v1:<hex>:<hex>"
+ * with non-zero UUIDs, so an empty string is rejected fail-closed and can never
+ * be mistaken for a real device. A Vulkan-featured provider overrides this
+ * weak definition.
+ */
+SPL_HOSTED_UNAVAILABLE_WEAK const char* rt_vulkan_selected_device_identity_v1(int64_t expected_token) {
+    (void)expected_token;
+    return "";
+}
 #endif
 
 /*
@@ -449,64 +503,9 @@ SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_vulkan_dependency_quarantine_unlock(void)
     return 1;
 }
 
-/* Optional hosted backends are unavailable in the core C runtime. */
-/* oneAPI */
-bool rt_oneapi_init(void) { return false; }
-bool rt_oneapi_is_available(void) { return false; }
-int64_t rt_oneapi_device_count(void) { return 0; }
-int64_t rt_oneapi_malloc_device(int64_t size) { (void)size; return -3; }
-bool rt_oneapi_free(int64_t ptr) { (void)ptr; return false; }
-bool rt_oneapi_memset(int64_t ptr, int64_t value, int64_t size) {
-    (void)ptr; (void)value; (void)size;
-    return false;
-}
-int64_t rt_oneapi_compile_spirv(int64_t bytes, int64_t size) {
-    (void)bytes; (void)size;
-    return -3;
-}
-int64_t rt_oneapi_compile_opencl(int64_t source) { (void)source; return -3; }
-int64_t rt_oneapi_get_function(int64_t module, int64_t name) {
-    (void)module; (void)name;
-    return -3;
-}
-int64_t rt_oneapi_create_queue(void) { return -3; }
-bool rt_oneapi_destroy_queue(int64_t queue) { (void)queue; return false; }
-bool rt_oneapi_submit_kernel(int64_t queue, int64_t kernel,
-                              int64_t global_range, int64_t local_range) {
-    (void)queue; (void)kernel; (void)global_range; (void)local_range;
-    return false;
-}
-
-/* OpenGL */
-int64_t rt_opengl_init(int64_t width, int64_t height) {
-    (void)width; (void)height;
-    return -3;
-}
-bool rt_opengl_destroy(int64_t ctx) { (void)ctx; return false; }
-int64_t rt_opengl_is_available(void) { return 0; }
-int64_t rt_opengl_create_fbo(int64_t ctx, int64_t width, int64_t height) {
-    (void)ctx; (void)width; (void)height;
-    return -3;
-}
-bool rt_opengl_destroy_fbo(int64_t ctx, int64_t fbo) {
-    (void)ctx; (void)fbo;
-    return false;
-}
-bool rt_opengl_bind_fbo(int64_t ctx, int64_t fbo) {
-    (void)ctx; (void)fbo;
-    return false;
-}
-bool rt_opengl_clear(int64_t ctx, int64_t color) {
-    (void)ctx; (void)color;
-    return false;
-}
-bool rt_opengl_draw_image(int64_t ctx, int64_t x, int64_t y, int64_t width,
-                          int64_t height, int64_t pixels, int64_t image_width,
-                          int64_t image_height) {
-    (void)ctx; (void)x; (void)y; (void)width; (void)height;
-    (void)pixels; (void)image_width; (void)image_height;
-    return false;
-}
+/* Optional hosted backends are unavailable in the core C runtime: the oneAPI
+ * and OpenGL fixed-value stubs are shared with runtime_native_gpu_stub.c. */
+#include "runtime_hosted_backend_stubs_impl.h"
 
 /* Intel Engine2D */
 bool rt_intel_engine2d_set_args_blit(int64_t fb, int64_t src, int64_t x,
@@ -569,52 +568,6 @@ bool rt_intel_engine2d_set_args_gradient(int64_t fb, int64_t x, int64_t y, int64
                                          int64_t fb_h) {
     (void)fb; (void)x; (void)y; (void)w; (void)h;
     (void)top_color; (void)bottom_color; (void)fb_w; (void)fb_h;
-    return false;
-}
-
-/* oneAPI backfill (extern decls added .spl-side; unavailable in core C runtime). */
-bool rt_oneapi_queue_wait(int64_t queue) { (void)queue; return false; }
-bool rt_oneapi_unload_module(int64_t module) { (void)module; return false; }
-
-/* OpenGL backfill (unavailable in core C runtime; fail closed like the block above). */
-bool rt_opengl_clear_scissor(int64_t ctx) { (void)ctx; return false; }
-bool rt_opengl_set_scissor(int64_t ctx, int64_t x, int64_t y, int64_t w, int64_t h) {
-    (void)ctx; (void)x; (void)y; (void)w; (void)h;
-    return false;
-}
-bool rt_opengl_draw_rect(int64_t ctx, int64_t x, int64_t y, int64_t w, int64_t h,
-                         int64_t color, int64_t filled) {
-    (void)ctx; (void)x; (void)y; (void)w; (void)h; (void)color; (void)filled;
-    return false;
-}
-bool rt_opengl_draw_rounded_rect(int64_t ctx, int64_t x, int64_t y, int64_t w, int64_t h,
-                                 int64_t radius, int64_t color) {
-    (void)ctx; (void)x; (void)y; (void)w; (void)h; (void)radius; (void)color;
-    return false;
-}
-bool rt_opengl_draw_gradient_rect(int64_t ctx, int64_t x, int64_t y, int64_t w, int64_t h,
-                                  int64_t top_color, int64_t bottom_color) {
-    (void)ctx; (void)x; (void)y; (void)w; (void)h; (void)top_color; (void)bottom_color;
-    return false;
-}
-bool rt_opengl_draw_line(int64_t ctx, int64_t x1, int64_t y1, int64_t x2, int64_t y2,
-                         int64_t color, int64_t thickness) {
-    (void)ctx; (void)x1; (void)y1; (void)x2; (void)y2; (void)color; (void)thickness;
-    return false;
-}
-bool rt_opengl_draw_circle(int64_t ctx, int64_t cx, int64_t cy, int64_t radius,
-                           int64_t color, int64_t filled) {
-    (void)ctx; (void)cx; (void)cy; (void)radius; (void)color; (void)filled;
-    return false;
-}
-bool rt_opengl_draw_triangle(int64_t ctx, int64_t x1, int64_t y1, int64_t x2, int64_t y2,
-                             int64_t x3, int64_t y3, int64_t color) {
-    (void)ctx; (void)x1; (void)y1; (void)x2; (void)y2; (void)x3; (void)y3; (void)color;
-    return false;
-}
-bool rt_opengl_flush(int64_t ctx) { (void)ctx; return false; }
-bool rt_opengl_read_pixels(int64_t ctx, int64_t pixels, int64_t width, int64_t height) {
-    (void)ctx; (void)pixels; (void)width; (void)height;
     return false;
 }
 
@@ -774,6 +727,59 @@ SPL_HOSTED_UNAVAILABLE_WEAK bool rt_sdl2_present_rgba(int64_t window_handle,
 SPL_HOSTED_UNAVAILABLE_WEAK int64_t rt_hosted_select_surface(void) {
     return -2;
 }
+/* Counted-text access for values handed to C. Read text by its byte LENGTH,
+ * never up to a NUL. In the mixed link of a seed-built compiler this file is
+ * a supplement behind the Rust simple_runtime: rt_string_len /
+ * rt_string_data / rt_interp_cstr / rt_array_get_text resolve to the Rust
+ * owner, whose alloc_runtime_string stores header + len with NO trailing NUL
+ * (value/sffi/package.rs), and this file's private rt_core_as_string* reject
+ * every Rust string. Treating rt_interp_cstr as a C string there reads heap
+ * slack past len: the native codegen pool's "/bin/sh -c '... 2>&1'" reached
+ * sh as "... 2>&1}}". A value with no counted length (a raw char* from a
+ * bootstrap call site) keeps the NUL-terminated reading.
+ * See doc/08_tracking/bug/process_spawn_value_reads_past_counted_text_2026-11-21.md */
+
+/* Borrowed view: 1 with (*data, *len) set, 0 for nil / no text. */
+static int rt_text_view_abi(int64_t value, const char** data, size_t* len) {
+    int64_t counted = rt_string_len(value);
+    if (counted >= 0) {
+        const uint8_t* bytes = rt_string_data(value);
+        if (!bytes && counted != 0) return 0;
+        *data = bytes ? (const char*)bytes : "";
+        *len = (size_t)counted;
+        return 1;
+    }
+    const char* raw = rt_interp_cstr(value);
+    if (!raw || (uintptr_t)raw < 0x10000) return 0;
+    *data = raw;
+    *len = strlen(raw);
+    return 1;
+}
+
+/* Owned NUL-terminated copy for a NUL-dependent consumer (exec, open, dlopen,
+ * getenv, inet_pton, ...). The caller frees it. NULL = no text or OOM. */
+static char* rt_text_cstr_dup(int64_t value) {
+    const char* data;
+    size_t len;
+    if (!rt_text_view_abi(value, &data, &len) || len == SIZE_MAX) return NULL;
+    char* out = (char*)rt_observed_malloc_v1(len + 1);
+    if (!out) return NULL;
+    if (len) memcpy(out, data, len);
+    out[len] = '\0';
+    return out;
+}
+
+/* Copy into a caller buffer instead of the heap: NULL when the text is
+ * missing or does not fit (len >= cap). */
+static const char* rt_text_cstr_into(int64_t value, char* buf, size_t cap) {
+    const char* data;
+    size_t len;
+    if (!rt_text_view_abi(value, &data, &len) || len >= cap) return NULL;
+    if (len) memcpy(buf, data, len);
+    buf[len] = '\0';
+    return buf;
+}
+
 #if defined(SIMPLE_CORE_C_STANDALONE)
 bool rt_is_interpreter_runtime(void) {
     return false;
@@ -832,9 +838,7 @@ int64_t rt_mmap_raw(int64_t addr, int64_t length, int64_t prot, int64_t flags,
    to open(2) unchanged; Windows translates them onto _wopen and returns a CRT
    descriptor, which is what spl_windows_mmap_raw maps. Failure is -1 with
    errno set by the CRT. */
-int64_t rt_open_fd(const char* path, int64_t flags, int64_t mode) {
-    const char* p = rt_interp_cstr((int64_t)(uintptr_t)path);
-    if (!p) return -1;
+static int64_t rt_open_fd_cstr(const char* p, int64_t flags, int64_t mode) {
 #if defined(_WIN32)
     (void)mode; /* Rust's OpenOptions ignores the POSIX mode on Windows too. */
     int access = (int)(flags & 0x3);
@@ -848,12 +852,22 @@ int64_t rt_open_fd(const char* path, int64_t flags, int64_t mode) {
     wchar_t* wide = (wchar_t*)rt_observed_malloc_v1((size_t)wide_len * sizeof(wchar_t));
     if (!wide) { errno = ENOMEM; return -1; }
     MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, p, -1, wide, wide_len);
-    int fd = _wopen(wide, oflag, _S_IREAD | _S_IWRITE);
+    int fd = rt_crt_wopen(wide, oflag, _S_IREAD | _S_IWRITE);
     free(wide);
     return (int64_t)fd;
 #else
     return (int64_t)open(p, (int)flags, (unsigned int)mode);
 #endif
+}
+
+int64_t rt_open_fd(const char* path, int64_t flags, int64_t mode) {
+    char* p = rt_text_cstr_dup((int64_t)(uintptr_t)path);
+    if (!p) return -1;
+    int64_t fd = rt_open_fd_cstr(p, flags, mode);
+    int saved = errno;
+    free(p);
+    errno = saved;
+    return fd;
 }
 
 int64_t rt_close_fd(int64_t fd) {
@@ -905,6 +919,18 @@ int64_t rt_current_task_id(void) {
  * definitions: on COFF, Rust may alias rt_par_* to rt_gpu_* COMDATs which
  * the core-C GPU trap provider replaces. Each CPU entry needs a live owner.
  * BEGIN CORE PAR ATOMICS */
+int64_t rt_par_atomic_i64_is_lock_free(int64_t* ptr) {
+    if (ptr == NULL || sizeof(_Atomic int64_t) != sizeof(int64_t) ||
+        _Alignof(_Atomic int64_t) > sizeof(int64_t) ||
+        (uintptr_t)ptr % _Alignof(_Atomic int64_t) != 0)
+        return 0;
+    return atomic_is_lock_free((const volatile _Atomic int64_t*)ptr) ? 1 : 0;
+}
+
+int64_t rt_par_atomic_load_i64(int64_t* ptr) {
+    return atomic_load_explicit((const volatile _Atomic int64_t*)ptr, memory_order_seq_cst);
+}
+
 int64_t rt_par_atomic_add_i64(int64_t* ptr, int64_t value) {
     return atomic_fetch_add_explicit((_Atomic int64_t*)ptr, value, memory_order_seq_cst);
 }
@@ -923,26 +949,26 @@ int64_t rt_par_atomic_cmpxchg_i64(int64_t* ptr, int64_t expected, int64_t value)
     return expected;
 }
 
-int64_t rt_par_atomic_min_i64(int64_t* ptr, int64_t value) {
+/* CAS fold shared by min/max: store the smaller (take_min) or larger of the
+ * current value and `value`, returning the value observed before the exchange. */
+static int64_t rt_par_atomic_fold_i64(int64_t* ptr, int64_t value, int take_min) {
     _Atomic int64_t* atomic = (_Atomic int64_t*)ptr;
     int64_t previous = atomic_load_explicit(atomic, memory_order_seq_cst);
     for (;;) {
-        int64_t next = previous < value ? previous : value;
+        int64_t next = take_min ? (previous < value ? previous : value)
+                                : (previous > value ? previous : value);
         if (atomic_compare_exchange_weak_explicit(atomic, &previous, next,
                                                   memory_order_seq_cst, memory_order_seq_cst))
             return previous;
     }
 }
 
+int64_t rt_par_atomic_min_i64(int64_t* ptr, int64_t value) {
+    return rt_par_atomic_fold_i64(ptr, value, 1);
+}
+
 int64_t rt_par_atomic_max_i64(int64_t* ptr, int64_t value) {
-    _Atomic int64_t* atomic = (_Atomic int64_t*)ptr;
-    int64_t previous = atomic_load_explicit(atomic, memory_order_seq_cst);
-    for (;;) {
-        int64_t next = previous > value ? previous : value;
-        if (atomic_compare_exchange_weak_explicit(atomic, &previous, next,
-                                                  memory_order_seq_cst, memory_order_seq_cst))
-            return previous;
-    }
+    return rt_par_atomic_fold_i64(ptr, value, 0);
 }
 /* END CORE PAR ATOMICS */
 
@@ -984,41 +1010,20 @@ SPL_CORE_C_WEAK void rt_atomic_int_store(int64_t handle, int64_t new_value) {
     atomic_store_explicit(&value->value, new_value, memory_order_seq_cst);
 }
 
-SPL_CORE_C_WEAK int64_t rt_atomic_int_swap(int64_t handle, int64_t new_value) {
-    RtCoreAtomicInt* value = (RtCoreAtomicInt*)(intptr_t)handle;
-    if (!value) return 0;
-    return atomic_exchange_explicit(&value->value, new_value, memory_order_seq_cst);
-}
-
-SPL_CORE_C_WEAK int64_t rt_atomic_int_fetch_add(int64_t handle, int64_t delta) {
-    RtCoreAtomicInt* value = (RtCoreAtomicInt*)(intptr_t)handle;
-    if (!value) return 0;
-    return atomic_fetch_add_explicit(&value->value, delta, memory_order_seq_cst);
-}
-
-SPL_CORE_C_WEAK int64_t rt_atomic_int_fetch_sub(int64_t handle, int64_t delta) {
-    RtCoreAtomicInt* value = (RtCoreAtomicInt*)(intptr_t)handle;
-    if (!value) return 0;
-    return atomic_fetch_sub_explicit(&value->value, delta, memory_order_seq_cst);
-}
-
-SPL_CORE_C_WEAK int64_t rt_atomic_int_fetch_and(int64_t handle, int64_t operand) {
-    RtCoreAtomicInt* value = (RtCoreAtomicInt*)(intptr_t)handle;
-    if (!value) return 0;
-    return atomic_fetch_and_explicit(&value->value, operand, memory_order_seq_cst);
-}
-
-SPL_CORE_C_WEAK int64_t rt_atomic_int_fetch_or(int64_t handle, int64_t operand) {
-    RtCoreAtomicInt* value = (RtCoreAtomicInt*)(intptr_t)handle;
-    if (!value) return 0;
-    return atomic_fetch_or_explicit(&value->value, operand, memory_order_seq_cst);
-}
-
-SPL_CORE_C_WEAK int64_t rt_atomic_int_fetch_xor(int64_t handle, int64_t operand) {
-    RtCoreAtomicInt* value = (RtCoreAtomicInt*)(intptr_t)handle;
-    if (!value) return 0;
-    return atomic_fetch_xor_explicit(&value->value, operand, memory_order_seq_cst);
-}
+/* Null-guarded seq_cst read-modify-write on an RtCoreAtomicInt handle. */
+#define RT_ATOMIC_INT_RMW(name, atomic_op, arg) \
+    SPL_CORE_C_WEAK int64_t name(int64_t handle, int64_t arg) { \
+        RtCoreAtomicInt* value = (RtCoreAtomicInt*)(intptr_t)handle; \
+        if (!value) return 0; \
+        return atomic_op(&value->value, arg, memory_order_seq_cst); \
+    }
+RT_ATOMIC_INT_RMW(rt_atomic_int_swap, atomic_exchange_explicit, new_value)
+RT_ATOMIC_INT_RMW(rt_atomic_int_fetch_add, atomic_fetch_add_explicit, delta)
+RT_ATOMIC_INT_RMW(rt_atomic_int_fetch_sub, atomic_fetch_sub_explicit, delta)
+RT_ATOMIC_INT_RMW(rt_atomic_int_fetch_and, atomic_fetch_and_explicit, operand)
+RT_ATOMIC_INT_RMW(rt_atomic_int_fetch_or, atomic_fetch_or_explicit, operand)
+RT_ATOMIC_INT_RMW(rt_atomic_int_fetch_xor, atomic_fetch_xor_explicit, operand)
+#undef RT_ATOMIC_INT_RMW
 
 SPL_CORE_C_WEAK void rt_atomic_int_free(int64_t handle) {
     RtCoreAtomicInt* value = (RtCoreAtomicInt*)(intptr_t)handle;
@@ -1070,39 +1075,24 @@ SPL_CORE_C_WEAK bool rt_atomic_bool_compare_exchange(int64_t handle, bool curren
  * exists in `<stdatomic.h>` either; fetch-not is fetch-xor(true) (0^1=1,
  * 1^1=0), the same reduction Rust's `rt_atomic_bool_fetch_not` uses
  * (`fetch_xor(true, SeqCst)`, runtime/src/value/sffi/atomic.rs). */
-SPL_CORE_C_WEAK bool rt_atomic_bool_fetch_and(int64_t handle, bool operand) {
-    RtCoreAtomicBool* value = (RtCoreAtomicBool*)(intptr_t)handle;
-    if (!value) return false;
-    bool current = atomic_load_explicit(&value->value, memory_order_seq_cst);
-    while (!atomic_compare_exchange_weak_explicit(
-        &value->value, &current, current && operand,
-        memory_order_seq_cst, memory_order_seq_cst)) {
-        /* current is refreshed by a failed CAS; retry with the new value. */
+/* CAS-loop fetch-modify on an RtCoreAtomicBool handle; returns the previous
+ * value. `expr` may use `current` and `operand`. */
+#define RT_ATOMIC_BOOL_RMW(name, params, expr) \
+    SPL_CORE_C_WEAK bool name params { \
+        RtCoreAtomicBool* value = (RtCoreAtomicBool*)(intptr_t)handle; \
+        if (!value) return false; \
+        bool current = atomic_load_explicit(&value->value, memory_order_seq_cst); \
+        while (!atomic_compare_exchange_weak_explicit( \
+            &value->value, &current, (expr), \
+            memory_order_seq_cst, memory_order_seq_cst)) { \
+            /* current is refreshed by a failed CAS; retry with the new value. */ \
+        } \
+        return current; \
     }
-    return current;
-}
-
-SPL_CORE_C_WEAK bool rt_atomic_bool_fetch_or(int64_t handle, bool operand) {
-    RtCoreAtomicBool* value = (RtCoreAtomicBool*)(intptr_t)handle;
-    if (!value) return false;
-    bool current = atomic_load_explicit(&value->value, memory_order_seq_cst);
-    while (!atomic_compare_exchange_weak_explicit(
-        &value->value, &current, current || operand,
-        memory_order_seq_cst, memory_order_seq_cst)) {
-    }
-    return current;
-}
-
-SPL_CORE_C_WEAK bool rt_atomic_bool_fetch_not(int64_t handle) {
-    RtCoreAtomicBool* value = (RtCoreAtomicBool*)(intptr_t)handle;
-    if (!value) return false;
-    bool current = atomic_load_explicit(&value->value, memory_order_seq_cst);
-    while (!atomic_compare_exchange_weak_explicit(
-        &value->value, &current, !current,
-        memory_order_seq_cst, memory_order_seq_cst)) {
-    }
-    return current;
-}
+RT_ATOMIC_BOOL_RMW(rt_atomic_bool_fetch_and, (int64_t handle, bool operand), current && operand)
+RT_ATOMIC_BOOL_RMW(rt_atomic_bool_fetch_or, (int64_t handle, bool operand), current || operand)
+RT_ATOMIC_BOOL_RMW(rt_atomic_bool_fetch_not, (int64_t handle), !current)
+#undef RT_ATOMIC_BOOL_RMW
 
 SPL_CORE_C_WEAK void rt_atomic_bool_free(int64_t handle) {
     RtCoreAtomicBool* value = (RtCoreAtomicBool*)(intptr_t)handle;
@@ -1164,6 +1154,14 @@ SPL_CORE_C_WEAK int64_t rt_atexit_check(void) {
 }
 
 #undef SPL_CORE_C_WEAK
+
+/* Crash signal handler (SIGSEGV / SIGBUS): one body shared with runtime.c
+ * so core-C binaries export rt_install_crash_handler and install it at startup. */
+#include "runtime_crash_handler_impl.h"
+
+int64_t rt_install_crash_handler(void) {
+    return rt_install_crash_handler_impl();
+}
 
 static int64_t rt_host_gpu_queue_now_us(void) {
 #if defined(_WIN32)
@@ -1265,15 +1263,7 @@ void rt_host_gpu_queue_reset(void) {
     rt_host_gpu_queue_last_payload_text_value[0] = '\0';
 }
 
-static void rt_host_gpu_queue_copy_payload_text(char* dst, const char* src) {
-    if (!dst) return;
-    if (!src) {
-        dst[0] = '\0';
-        return;
-    }
-    strncpy(dst, src, 4095);
-    dst[4095] = '\0';
-}
+#include "runtime_payload_text.h"
 
 int64_t rt_host_gpu_queue_emit_payload_text(int64_t lane_code, int64_t kind_code, int64_t payload_size, int64_t backend_handle, int64_t payload_hash, const char* payload_text) {
     if ((lane_code != RT_HOST_GPU_LANE_HOST && lane_code != RT_HOST_GPU_LANE_GPU) ||
@@ -1441,6 +1431,15 @@ int64_t rt_host_gpu_queue_last_payload_text(void) {
  * that scope.  Keep this in the existing reserved word so the native string
  * layout and every data offset remain unchanged. */
 #define RT_CORE_STRING_FLAG_TRANSIENT 2u
+/* Set together with TRANSIENT on a string owned by the thread's live build
+ * session (BSM T1) rather than its module scope: a module-scope end skips it,
+ * rt_session_heap_end frees it. Same reserved word, layout unchanged (I6). */
+#define RT_CORE_STRING_FLAG_SESSION 4u
+/* RT_CORE_STRING_FLAG_ASCII: set once a scan proves the bytes are ASCII (heap
+ * text is immutable, so it never goes stale); keeps len()/slice/find on ASCII
+ * text O(1) after the first call (ADR-005 item 5 code-point unit). Twin of the
+ * Rust runtime's RT_STRING_FLAG_ASCII. */
+#define RT_CORE_STRING_FLAG_ASCII 8u
 
 typedef struct RtCoreString {
     uint32_t kind;
@@ -1494,6 +1493,7 @@ typedef struct RtCoreDictEntry {
     int64_t key;       /* canonicalized tagged key */
     int64_t value;     /* tagged value */
     uint64_t hash;
+    int64_t seq;       /* insertion stamp: Dict iterates in insertion order */
     int8_t occupied;   /* 0 = empty, 1 = live, -1 = tombstone */
 } RtCoreDictEntry;
 
@@ -1502,11 +1502,20 @@ typedef struct RtCoreDict {
     uint8_t flags;
     uint16_t reserved;
     uint32_t transient_scope_id;
-    int64_t cap;       /* power of two */
-    int64_t len;       /* live entries */
+    int64_t len;       /* live entries; shared with RuntimeDict at offset 8 */
+    int64_t cap;       /* power of two; shared with RuntimeDict at offset 16 */
     int64_t tombstones;
     RtCoreDictEntry* entries;
+    int64_t read_owner;
+    int64_t read_epoch;
+    int64_t read_backing;
+    int64_t next_seq;  /* next insertion stamp (appended: offsets above unchanged) */
 } RtCoreDict;
+
+_Static_assert(offsetof(RtCoreDict, len) == 8, "RtCoreDict len must match RuntimeDict");
+_Static_assert(offsetof(RtCoreDict, cap) == 16, "RtCoreDict cap must match RuntimeDict");
+
+static _Atomic int64_t rt_core_dict_read_owner_counter = 0;
 
 /* Heap-boxed f64 (see RT_VALUE_HEAP_FLOAT). A leaf object: the full double is
  * stored verbatim so container/Any floats round-trip exactly. Discrimination is
@@ -1541,10 +1550,64 @@ typedef struct RtCoreUInt {
 static RtCoreDict* rt_core_as_dict(int64_t value);
 static int64_t rt_core_dict_lookup(RtCoreDict* d, int64_t key);
 static int rt_core_dict_put(RtCoreDict* d, int64_t key, int64_t value);
+static int core_dict_put_seq(RtCoreDict* d, int64_t key, int64_t value, int64_t seq);
+static int64_t* core_dict_ordered_slots(RtCoreDict* d, int64_t* count);
 static int rt_core_dict_has(RtCoreDict* d, int64_t key);
 static int rt_core_dict_del(RtCoreDict* d, int64_t key, int64_t* removed);
 
 static _Atomic size_t rt_core_heap_registry_count = 0;
+/* Successful heap-object registrations since process start. Unlike the live
+ * registry count, releases never decrement this counter; duplicate registrations
+ * and registry rehashing do not increment it. Mirrors Rust total_allocs. */
+static _Atomic int64_t rt_core_heap_total_allocs = 0;
+
+/* Aux-byte accounting: container BACKING buffers (RtCoreArray.data,
+ * RtCoreDict.entries) live in allocations separate from the object header,
+ * so header/registry counters miss them. Mirrors the Rust runtime's
+ * value::heap AUX_LIVE_BYTES contract (rt_heap_aux_live_bytes /
+ * rt_heap_array_capacity_bytes). Relaxed atomics only: diagnostic counters,
+ * never used for correctness. Every site that allocates, reallocs or frees a
+ * backing buffer must call one of the helpers below. */
+static _Atomic int64_t g_core_aux_live_bytes = 0;
+static _Atomic int64_t g_core_array_cap_bytes = 0;
+
+static inline int64_t core_aux_array_data_bytes(const RtCoreArray* a) {
+    if (!a || !a->data || a->cap <= 0) return 0;
+    int64_t elem = (a->flags & RT_CORE_ARRAY_FLAG_BYTES) ? 1 : (int64_t)sizeof(int64_t);
+    return a->cap * elem;
+}
+
+static inline int64_t core_aux_dict_entries_bytes(const RtCoreDict* d) {
+    if (!d || !d->entries || d->cap <= 0) return 0;
+    return d->cap * (int64_t)sizeof(RtCoreDictEntry);
+}
+
+static inline void core_aux_note_array(int64_t delta) {
+    if (!delta) return;
+    atomic_fetch_add_explicit(&g_core_aux_live_bytes, delta, memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_core_array_cap_bytes, delta, memory_order_relaxed);
+}
+
+static inline void core_aux_note_dict(int64_t delta) {
+    if (!delta) return;
+    atomic_fetch_add_explicit(&g_core_aux_live_bytes, delta, memory_order_relaxed);
+}
+
+/* Release an array's backing buffer and its accounting. */
+static inline void core_aux_array_data_free(RtCoreArray* a) {
+    if (!a) return;
+    core_aux_note_array(-core_aux_array_data_bytes(a));
+    free(a->data);
+    a->data = NULL;
+}
+
+/* Release a dict's entry table and its accounting. */
+static inline void core_aux_dict_entries_free(RtCoreDict* d) {
+    if (!d) return;
+    core_aux_note_dict(-core_aux_dict_entries_bytes(d));
+    free(d->entries);
+    d->entries = NULL;
+}
 static RtCoreString* rt_core_short_string_cache[257] = {0};
 static atomic_flag rt_core_short_string_cache_lock = ATOMIC_FLAG_INIT;
 static _Atomic uint32_t rt_core_transient_array_scope_next_id = 1;
@@ -1554,6 +1617,7 @@ static _Thread_local int rt_core_transient_array_scope_paused = 0;
 static _Thread_local uint8_t rt_core_transient_scope_thread_token = 0;
 static _Atomic uintptr_t rt_core_transient_scope_owner = 0;
 static _Thread_local void** rt_core_transient_heap_scope_objects = NULL;
+static _Thread_local uint32_t* rt_core_transient_heap_scope_object_scopes = NULL;
 static _Thread_local size_t rt_core_transient_heap_scope_object_len = 0;
 static _Thread_local size_t rt_core_transient_heap_scope_object_cap = 0;
 typedef struct RtCoreTransientRawAlloc {
@@ -1564,6 +1628,18 @@ static _Thread_local RtCoreTransientRawAlloc* rt_core_transient_raw_allocs = NUL
 static _Thread_local size_t rt_core_transient_raw_alloc_cap = 0;
 static _Thread_local size_t rt_core_transient_raw_alloc_len = 0;
 static _Thread_local size_t rt_core_transient_raw_alloc_tombs = 0;
+/* Build session heap (BSM T1, doc/05_design/compiler/memory/
+ * build_session_memory_model_v1.md §2-§4). One live session per thread; its id
+ * comes from the module-scope id space so tags never collide. Objects it owns
+ * live on their own list so rt_transient_array_scope_begin's empty-list guard
+ * is unaffected. */
+static _Thread_local uint32_t rt_core_session_heap_live_id = 0;
+static _Thread_local int32_t rt_core_session_alloc_depth = 0;
+static _Thread_local void** rt_core_session_heap_objects = NULL;
+static _Thread_local size_t rt_core_session_heap_object_len = 0;
+static _Thread_local size_t rt_core_session_heap_object_cap = 0;
+/* Nodes the last rt_transient_heap_adopt visited (I2 pruning evidence). */
+static _Thread_local uint64_t rt_core_session_adopt_visits = 0;
 #if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
 extern int32_t rt_transient_raw_scope_begin(void);
 extern int32_t rt_transient_raw_scope_pause(void);
@@ -1571,6 +1647,7 @@ extern int64_t rt_transient_raw_words(
     int64_t value, const uintptr_t** words, uintptr_t* canonical_ptr);
 extern int32_t rt_transient_raw_promote(uintptr_t ptr);
 extern int32_t rt_transient_raw_scope_end(void);
+extern void spl_free_batch_v1(uint8_t** ptrs, size_t count);
 #endif
 static RtCoreMutex** rt_core_mutex_registry = NULL;
 static size_t rt_core_mutex_registry_len = 0;
@@ -1604,30 +1681,97 @@ static uint32_t rt_core_registered_object_kind(void* ptr) {
     return *(uint8_t*)ptr;
 }
 
+static int core_allocation_uses_session_v1(void) {
+    return rt_core_session_heap_live_id &&
+        (rt_core_session_alloc_depth > 0 || !rt_core_transient_array_scope_active ||
+         rt_core_transient_array_scope_paused);
+}
+
 static uint32_t rt_core_transient_scope_for_new_object(void) {
+    /* A live session owns what a paused/absent module scope would have left
+     * permanent, and everything inside rt_session_alloc_begin/end (I3). */
+    if (core_allocation_uses_session_v1()) {
+        return rt_core_session_heap_live_id;
+    }
     return rt_core_transient_array_scope_active && !rt_core_transient_array_scope_paused
         ? rt_core_transient_array_scope_id
         : 0;
 }
 
-#define RT_CORE_TRANSIENT_SCOPE_MAX_OBJECTS ((size_t)1 << 24)
+/* Advisory size for one transient scope's tracking list; NOT a limit.
+ * The list used to refuse growth past 2^24 entries, which made the next
+ * allocation's registration fail and panic ("text concat: registration
+ * failed") while the Rust twin (TransientHeapScope.objects, a plain Vec) has
+ * no count limit at all. Stage 3 is the first bootstrap stage on this C
+ * runtime, so the first per-module pass scope over a very large MIR module
+ * died there although Stage 2 ran the same pass on the Rust runtime.
+ * Growth is now bounded only by SIZE_MAX and the allocator, exactly like the
+ * twin; crossing this size prints one stderr line per scope so a
+ * pathological scope stays visible instead of fatal.
+ * doc/08_tracking/bug/stage3_transient_scope_object_cap_panic_2026-11-20.md */
+#ifndef RT_CORE_TRANSIENT_SCOPE_WARN_OBJECTS
+#define RT_CORE_TRANSIENT_SCOPE_WARN_OBJECTS ((size_t)1 << 24)
+#endif
+static _Thread_local uint32_t rt_core_transient_scope_warned_id = 0;
+
+/* Make room for `extra` more session-list entries; 0 on failure. */
+static int core_session_reserve(size_t extra) {
+    size_t need = rt_core_session_heap_object_len + extra;
+    if (need <= rt_core_session_heap_object_cap) return 1;
+    size_t next_cap = rt_core_session_heap_object_cap ? rt_core_session_heap_object_cap : 64;
+    while (next_cap < need) {
+        if (next_cap > SIZE_MAX / 2 / sizeof(void*)) return 0;
+        next_cap *= 2;
+    }
+    void** next = (void**)rt_observed_realloc_v1(
+        rt_core_session_heap_objects, next_cap * sizeof(void*));
+    if (!next) return 0;
+    rt_core_session_heap_objects = next;
+    rt_core_session_heap_object_cap = next_cap;
+    return 1;
+}
 
 static int rt_core_track_transient_immortal(void* ptr) {
+    if (rt_core_session_heap_live_id &&
+        rt_core_transient_scope_for_new_object() == rt_core_session_heap_live_id) {
+        if (!core_session_reserve(1)) return 0;
+        rt_core_session_heap_objects[rt_core_session_heap_object_len++] = ptr;
+        return 1;
+    }
     if (rt_core_transient_heap_scope_object_len == rt_core_transient_heap_scope_object_cap) {
         size_t next_cap = rt_core_transient_heap_scope_object_cap == 0
             ? 64
             : rt_core_transient_heap_scope_object_cap * 2;
-        if (next_cap > RT_CORE_TRANSIENT_SCOPE_MAX_OBJECTS ||
+        if (rt_core_transient_heap_scope_object_cap > SIZE_MAX / 2 ||
             next_cap > SIZE_MAX / sizeof(void*)) {
             return 0;
         }
+        uint32_t* next_scopes = (uint32_t*)rt_observed_realloc_v1(
+            rt_core_transient_heap_scope_object_scopes, next_cap * sizeof(uint32_t));
+        if (!next_scopes) return 0;
         void** next = (void**)rt_observed_realloc_v1(
             rt_core_transient_heap_scope_objects, next_cap * sizeof(void*));
-        if (!next) return 0;
+        if (!next) {
+            rt_core_transient_heap_scope_object_scopes = next_scopes;
+            return 0;
+        }
+        rt_core_transient_heap_scope_object_scopes = next_scopes;
         rt_core_transient_heap_scope_objects = next;
         rt_core_transient_heap_scope_object_cap = next_cap;
     }
-    rt_core_transient_heap_scope_objects[rt_core_transient_heap_scope_object_len++] = ptr;
+    rt_core_transient_heap_scope_objects[rt_core_transient_heap_scope_object_len] = ptr;
+    rt_core_transient_heap_scope_object_scopes[rt_core_transient_heap_scope_object_len] =
+        rt_core_transient_array_scope_id;
+    rt_core_transient_heap_scope_object_len++;
+    if (rt_core_transient_heap_scope_object_len == RT_CORE_TRANSIENT_SCOPE_WARN_OBJECTS + 1 &&
+            rt_core_transient_scope_warned_id != rt_core_transient_array_scope_id) {
+        rt_core_transient_scope_warned_id = rt_core_transient_array_scope_id;
+        fprintf(stderr,
+            "[transient-scope] WARNING scope %u tracks more than %zu objects; "
+            "continuing (no count limit, Rust-twin parity)\n",
+            (unsigned)rt_core_transient_array_scope_id,
+            (size_t)RT_CORE_TRANSIENT_SCOPE_WARN_OBJECTS);
+    }
     return 1;
 }
 
@@ -1639,16 +1783,24 @@ static int rt_core_register_scoped_immortal(void* ptr, uint32_t* object_scope_id
         rt_core_transient_heap_scope_objects[rt_core_transient_heap_scope_object_len - 1] == ptr) {
         rt_core_transient_heap_scope_object_len--;
     }
+    if (*object_scope_id && rt_core_session_heap_object_len > 0 &&
+        rt_core_session_heap_objects[rt_core_session_heap_object_len - 1] == ptr) {
+        rt_core_session_heap_object_len--;
+    }
     *object_scope_id = 0;
     return 0;
 }
 
 static int rt_core_register_string(RtCoreString* s) {
     if (!s) return 0;
-    if (rt_core_transient_scope_for_new_object() != 0) {
-        s->reserved |= RT_CORE_STRING_FLAG_TRANSIENT;
+    const uint32_t owner_scope = rt_core_transient_scope_for_new_object();
+    if (owner_scope != 0) {
+        const uint32_t flags = owner_scope == rt_core_session_heap_live_id
+            ? RT_CORE_STRING_FLAG_TRANSIENT | RT_CORE_STRING_FLAG_SESSION
+            : RT_CORE_STRING_FLAG_TRANSIENT;
+        s->reserved |= flags;
         if (!rt_core_track_transient_immortal(s)) {
-            s->reserved &= ~RT_CORE_STRING_FLAG_TRANSIENT;
+            s->reserved &= ~flags;
             return 0;
         }
         if (rt_core_register_immortal_ptr(s)) return 1;
@@ -1656,7 +1808,11 @@ static int rt_core_register_string(RtCoreString* s) {
             rt_core_transient_heap_scope_objects[rt_core_transient_heap_scope_object_len - 1] == s) {
             rt_core_transient_heap_scope_object_len--;
         }
-        s->reserved &= ~RT_CORE_STRING_FLAG_TRANSIENT;
+        if (rt_core_session_heap_object_len > 0 &&
+            rt_core_session_heap_objects[rt_core_session_heap_object_len - 1] == s) {
+            rt_core_session_heap_object_len--;
+        }
+        s->reserved &= ~flags;
         return 0;
     }
     return rt_core_register_immortal_ptr(s);
@@ -1664,7 +1820,7 @@ static int rt_core_register_string(RtCoreString* s) {
 
 static int rt_core_register_persistent_string(RtCoreString* s) {
     if (!s) return 0;
-    s->reserved &= ~RT_CORE_STRING_FLAG_TRANSIENT;
+    s->reserved &= ~(RT_CORE_STRING_FLAG_TRANSIENT | RT_CORE_STRING_FLAG_SESSION);
     return rt_core_register_immortal_ptr(s);
 }
 
@@ -1720,6 +1876,7 @@ static int rt_core_register_mutex(RtCoreMutex* mutex) {
     }
     rt_core_mutex_registry[rt_core_mutex_registry_len++] = mutex;
     atomic_fetch_add_explicit(&rt_core_heap_registry_count, 1, memory_order_relaxed);
+    atomic_fetch_add_explicit(&rt_core_heap_total_allocs, 1, memory_order_relaxed);
     atomic_flag_clear_explicit(&rt_core_mutex_registry_lock, memory_order_release);
     return 1;
 }
@@ -1785,8 +1942,26 @@ static int rt_core_is_registered_enum(RtCoreEnum* e) {
     return rt_core_is_registered_immortal_ptr(e);
 }
 
+/* Monotonic successful heap-object allocation registrations, not live count,
+ * raw allocator calls, or a modeled collection-operation count. */
+int64_t rt_heap_alloc_count(void) {
+    return atomic_load_explicit(&rt_core_heap_total_allocs, memory_order_relaxed);
+}
+
 int64_t rt_heap_registry_count(void) {
     return (int64_t)atomic_load_explicit(&rt_core_heap_registry_count, memory_order_relaxed);
+}
+
+/* Live container backing-buffer bytes (array element buffers + dict entry
+ * tables); excludes object headers. Same contract as the Rust runtime's
+ * value::heap::rt_heap_aux_live_bytes. */
+int64_t rt_heap_aux_live_bytes(void) {
+    return atomic_load_explicit(&g_core_aux_live_bytes, memory_order_relaxed);
+}
+
+/* Live array element-buffer CAPACITY bytes (subset of aux bytes). */
+int64_t rt_heap_array_capacity_bytes(void) {
+    return atomic_load_explicit(&g_core_array_cap_bytes, memory_order_relaxed);
 }
 
 /* Current owner's context only. Observation neither opens a scope nor grants
@@ -1796,6 +1971,23 @@ int64_t rt_transient_array_scope_state_v1(void) {
             atomic_load_explicit(&rt_core_transient_scope_owner, memory_order_acquire) !=
                 (uintptr_t)&rt_core_transient_scope_thread_token) return 0;
     return rt_core_transient_array_scope_paused ? 2 : 1;
+}
+
+/* Identity of this thread's actual live scope, not a borrowed lease. Pause
+ * preserves it; end retires it; begin's existing nonwrapping counter never
+ * reissues an identity. An inactive/foreign context observes zero. */
+int64_t rt_transient_array_scope_identity_v1(void) {
+    if (!rt_core_transient_array_scope_active ||
+            atomic_load_explicit(&rt_core_transient_scope_owner, memory_order_acquire) !=
+                (uintptr_t)&rt_core_transient_scope_thread_token) return 0;
+    return (int64_t)rt_core_transient_array_scope_id;
+}
+
+/* Signed domain separates process(0), module(+id), and session(-id). This
+ * observes the allocator's selection, including explicit session override. */
+int64_t rt_allocation_owner_identity_v1(void) {
+    const uint32_t owner = rt_core_transient_scope_for_new_object();
+    return core_allocation_uses_session_v1() ? -(int64_t)owner : (int64_t)owner;
 }
 
 int8_t rt_transient_array_scope_begin(void) {
@@ -1881,14 +2073,21 @@ static int rt_core_register_closure(RtCoreClosure* closure) {
     return rt_core_register_scoped_immortal(closure, &closure->transient_scope_id);
 }
 
-static RtCoreClosure* rt_core_as_closure(int64_t value) {
+/* Untag a heap-tagged value and return the pointer only if it is a
+ * registered immortal pointer, else NULL. Membership is a pointer-only
+ * comparison inside rt_core_is_registered_immortal_ptr, so a raw pointer that
+ * merely collides with the heap tag is never dereferenced. */
+static void* rt_core_untag_registered_immortal(int64_t value) {
     if ((((uint64_t)value) & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_HEAP) return NULL;
-    RtCoreClosure* closure = (RtCoreClosure*)(uintptr_t)(((uint64_t)value) & ~RT_VALUE_TAG_MASK);
+    void* p = (void*)(uintptr_t)(((uint64_t)value) & ~RT_VALUE_TAG_MASK);
+    if (!p) return NULL;
+    if (!rt_core_is_registered_immortal_ptr(p)) return NULL;
+    return p;
+}
+
+static RtCoreClosure* rt_core_as_closure(int64_t value) {
+    RtCoreClosure* closure = (RtCoreClosure*)rt_core_untag_registered_immortal(value);
     if (!closure) return NULL;
-    /* Membership is a pointer-only comparison inside
-     * rt_core_is_registered_immortal_ptr. Do not dereference a raw function
-     * pointer that merely collides with the heap tag. */
-    if (!rt_core_is_registered_immortal_ptr(closure)) return NULL;
     return closure->kind == RT_VALUE_HEAP_CLOSURE ? closure : NULL;
 }
 
@@ -1940,25 +2139,134 @@ static RtCoreClosurePin* spl_closure_pin_find_locked(const void* closure) {
  * slots, so they are counted against the load factor and reclaimed on grow. */
 #define RT_CORE_IMMORTAL_TOMBSTONE ((uintptr_t)1)
 
-static uintptr_t* rt_core_immortal_registry = NULL; /* open-addressing table, 0 = empty */
-static size_t rt_core_immortal_registry_cap = 0;    /* power of two, or 0 */
-static size_t rt_core_immortal_registry_len = 0;
-static size_t rt_core_immortal_registry_tombs = 0;
-static atomic_flag rt_core_immortal_registry_lock = ATOMIC_FLAG_INIT;
 
-static void rt_core_immortal_registry_acquire(void) {
-    while (atomic_flag_test_and_set_explicit(&rt_core_immortal_registry_lock, memory_order_acquire)) {}
-}
-static void rt_core_immortal_registry_release(void) {
-    atomic_flag_clear_explicit(&rt_core_immortal_registry_lock, memory_order_release);
-}
+/* Sharded, lock-free-read registry. Every validated heap access
+ * (rt_array_get/push, rt_enum_check_variant, text decode, ...) asks this
+ * registry and every allocation registers here, so the former single
+ * process-wide spinlock serialized every isolated-thread worker on one cache
+ * line: the internal ELF linker ran 3x slower at 16 jobs than at 1 and burned
+ * ~46 cores spinning at 116 jobs. Bug:
+ * doc/08_tracking/bug/immortal_registry_global_spinlock_serializes_threads_2026-11-16.md
+ *
+ * - An address lives in exactly one of 64 shards, chosen by the top hash bits
+ *   (twin of the 64 HeapRegistryShard in src/compiler_rust/runtime/src/value/heap.rs).
+ *   Each shard has its own writer lock, table and fork-child overlay, on its
+ *   own cache lines.
+ * - Membership READS take no lock. A shard's live table is one block
+ *   {cap, slots[cap]} published as `slots` through one atomic pointer, so a
+ *   reader always sees a cap matching its slots; slot loads/stores are atomic.
+ *   A reader probing a superseded table still answers correctly: a pointer it
+ *   holds was registered before it reached the reader, hence before the
+ *   reader's load of the published table, and every later table is a rehash
+ *   that keeps it.
+ * - A resize retires the old block instead of freeing it. Retired blocks are
+ *   freed by a later writer of that shard only when no reader is inside a
+ *   probe (striped per-thread reader counters; publish-store then
+ *   counter-load vs counter-increment then publish-load, all seq_cst, so
+ *   either the reader sees the new table or the writer sees the reader). */
+#define RT_CORE_IMMORTAL_SHARD_BITS 6
+#define RT_CORE_IMMORTAL_SHARDS (1u << RT_CORE_IMMORTAL_SHARD_BITS)
 
-static inline size_t rt_core_immortal_hash_ptr(uintptr_t p) {
+typedef struct RtCoreImmortalShard {
+    _Alignas(128) atomic_flag lock;
+    uintptr_t* _Atomic published; /* == registry, for lock-free readers */
+    uintptr_t* registry;          /* open-addressing table, 0 = empty; slots[-1] = cap */
+    size_t cap;                   /* power of two, or 0 */
+    size_t len;
+    size_t tombs;
+    uintptr_t** retired;          /* superseded blocks awaiting a reader-free moment */
+    size_t retired_len;
+    size_t retired_cap;
+    /* Fork-child overlay, see spl_immortal_registry_freeze_for_fork_child_v1. */
+    uintptr_t* _Atomic frozen;
+    size_t frozen_cap;
+    uintptr_t* erased;
+    size_t erased_cap;
+    size_t erased_len;
+    size_t erased_tombs;
+} RtCoreImmortalShard;
+
+static RtCoreImmortalShard rt_core_immortal_shards[RT_CORE_IMMORTAL_SHARDS];
+/* Set once any shard publishes a table or is frozen: cheap "registry empty" reject. */
+static atomic_int rt_core_immortal_nonempty = 0;
+/* Shard 0's writer lock. Kept under the old name for the try-lock gate of the
+ * dict scope-read view and for the fork selfchecks that hold it. */
+#define rt_core_immortal_registry_lock (rt_core_immortal_shards[0].lock)
+
+static inline uint64_t rt_core_immortal_hash64(uintptr_t p) {
     uint64_t x = (uint64_t)p;
     x ^= x >> 33;
     x *= 0xff51afd7ed558ccdULL;
     x ^= x >> 33;
-    return (size_t)x;
+    return x;
+}
+
+static inline size_t rt_core_immortal_hash_ptr(uintptr_t p) {
+    return (size_t)rt_core_immortal_hash64(p);
+}
+
+static inline RtCoreImmortalShard* core_immortal_shard(uintptr_t p) {
+    return &rt_core_immortal_shards[rt_core_immortal_hash64(p) >> (64 - RT_CORE_IMMORTAL_SHARD_BITS)];
+}
+
+static void core_immortal_shard_acquire(RtCoreImmortalShard* s) {
+    while (atomic_flag_test_and_set_explicit(&s->lock, memory_order_acquire)) {}
+}
+static void core_immortal_shard_release(RtCoreImmortalShard* s) {
+    atomic_flag_clear_explicit(&s->lock, memory_order_release);
+}
+
+#define RT_CORE_IMMORTAL_READER_STRIPES 64
+typedef struct {
+    _Alignas(128) atomic_long active;
+} RtCoreImmortalReaderStripe;
+static RtCoreImmortalReaderStripe rt_core_immortal_readers[RT_CORE_IMMORTAL_READER_STRIPES];
+static atomic_uint rt_core_immortal_reader_next = 0;
+static _Thread_local int rt_core_immortal_reader_slot = -1;
+
+static inline RtCoreImmortalReaderStripe* core_immortal_reader_stripe(void) {
+    if (rt_core_immortal_reader_slot < 0) {
+        rt_core_immortal_reader_slot = (int)(atomic_fetch_add_explicit(
+            &rt_core_immortal_reader_next, 1, memory_order_relaxed) % RT_CORE_IMMORTAL_READER_STRIPES);
+    }
+    return &rt_core_immortal_readers[rt_core_immortal_reader_slot];
+}
+
+/* caller holds s->lock */
+static void core_immortal_reclaim_retired_locked(RtCoreImmortalShard* s) {
+    if (s->retired_len == 0) return;
+    for (size_t i = 0; i < RT_CORE_IMMORTAL_READER_STRIPES; i++) {
+        if (atomic_load_explicit(&rt_core_immortal_readers[i].active, memory_order_seq_cst) != 0) return;
+    }
+    for (size_t i = 0; i < s->retired_len; i++) free(s->retired[i]);
+    s->retired_len = 0;
+}
+
+/* caller holds s->lock; `slots` is no longer published */
+static void core_immortal_retire_locked(RtCoreImmortalShard* s, uintptr_t* slots) {
+    if (!slots) return;
+    if (s->retired_len == s->retired_cap) {
+        size_t cap = s->retired_cap ? s->retired_cap * 2 : 8;
+        uintptr_t** grown = (uintptr_t**)realloc(s->retired, cap * sizeof(uintptr_t*));
+        if (!grown) return; /* a reader may still probe it: leak, never free */
+        s->retired = grown;
+        s->retired_cap = cap;
+    }
+    s->retired[s->retired_len++] = slots - 1;
+    core_immortal_reclaim_retired_locked(s);
+}
+
+/* Upper bound of any shard's live capacity (lock-free; dict scope-read fuel). */
+static size_t core_immortal_max_cap(void) {
+    size_t cap = 0;
+    RtCoreImmortalReaderStripe* stripe = core_immortal_reader_stripe();
+    atomic_fetch_add_explicit(&stripe->active, 1, memory_order_seq_cst);
+    for (size_t i = 0; i < RT_CORE_IMMORTAL_SHARDS; i++) {
+        uintptr_t* slots = atomic_load_explicit(&rt_core_immortal_shards[i].published, memory_order_seq_cst);
+        if (slots && (size_t)slots[-1] > cap) cap = (size_t)slots[-1];
+    }
+    atomic_fetch_sub_explicit(&stripe->active, 1, memory_order_release);
+    return cap;
 }
 
 #define RT_CORE_TRANSIENT_RAW_TOMBSTONE ((uintptr_t)1)
@@ -2106,7 +2414,9 @@ static void rt_core_transient_raw_clear(void) {
     rt_core_transient_raw_alloc_tombs = 0;
 }
 
-static void rt_struct_alloc_unregister(void* ptr);
+/* Owned raw allocations reclaimed per struct-registry lock acquisition. */
+#define RT_CORE_TRANSIENT_RAW_RECLAIM_BATCH ((size_t)512)
+static void rt_core_transient_raw_reclaim_batch(void** raws, size_t count);
 
 static void rt_core_reclaim_transient_raw(void) {
     /* Empty scopes must not pay for a prior scope's allocation high water.
@@ -2116,51 +2426,48 @@ static void rt_core_reclaim_transient_raw(void) {
         if (rt_core_transient_raw_alloc_tombs != 0) rt_core_transient_raw_clear();
         return;
     }
+    /* Batched so the struct-registry write lock is taken once per batch,
+     * not once per allocation; reclaiming a batch only tombstones entries
+     * already walked and never resizes the table. */
+    void* batch[RT_CORE_TRANSIENT_RAW_RECLAIM_BATCH];
+    size_t batched = 0;
     for (size_t i = 0; i < rt_core_transient_raw_alloc_cap; i++) {
         RtCoreTransientRawAlloc* entry = &rt_core_transient_raw_allocs[i];
         if (entry->ptr == 0 || entry->ptr == RT_CORE_TRANSIENT_RAW_TOMBSTONE) continue;
         if (entry->bytes & RT_CORE_TRANSIENT_RAW_OWNED_BIT) {
-            void* raw = (void*)entry->ptr;
-#if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
-            /* The composed allocator may add hardening headers, quarantine,
-             * or guarded mappings. Reclaim through its canonical ABI; rt_free
-             * also unregisters this entry safely while the table is scanned. */
-            rt_free(raw);
-#else
-            rt_struct_alloc_unregister(raw);
-            /* Now that sampled guard slots are registered here too, reclaim
-             * must not hand one to free(): a slot is a page-aligned mmap
-             * mapping, not a libc chunk. Route it through the guard's own
-             * reclaim, which PROT_NONEs the mapping so a later UAF traps.
-             * This mirrors rt_free's guard-slot branch. */
-            if (rt_mem_guard_is_slot(raw)) {
-                rt_mem_guard_free_sampled(raw);
-            } else {
-                free(raw);
+            batch[batched++] = (void*)entry->ptr;
+            if (batched == RT_CORE_TRANSIENT_RAW_RECLAIM_BATCH) {
+                rt_core_transient_raw_reclaim_batch(batch, batched);
+                batched = 0;
             }
-#endif
         }
     }
+    if (batched != 0) rt_core_transient_raw_reclaim_batch(batch, batched);
     rt_core_transient_raw_clear();
 }
 
-/* caller holds the lock; table has a free slot */
-static int rt_core_immortal_registry_insert_raw(uintptr_t p) {
-    size_t mask = rt_core_immortal_registry_cap - 1;
+#if !defined(SIMPLE_RUNTIME_MEMORY_OWNER)
+#define PERSISTENT_RAW_REGISTRY_HASH(ptr) rt_core_immortal_hash_ptr(ptr)
+#include "persistent_raw_registry_impl.h"
+#endif
+
+/* caller holds s->lock; table has a free slot */
+static int rt_core_immortal_registry_insert_raw(RtCoreImmortalShard* s, uintptr_t p) {
+    size_t mask = s->cap - 1;
     size_t i = rt_core_immortal_hash_ptr(p) & mask;
     size_t first_tomb = SIZE_MAX;
     for (;;) {
-        uintptr_t e = rt_core_immortal_registry[i];
+        uintptr_t e = s->registry[i];
         if (e == 0) {
             /* Reuse the earliest tombstone seen, but only after proving p is
              * not already present further along the probe chain. */
             if (first_tomb != SIZE_MAX) {
-                rt_core_immortal_registry[first_tomb] = p;
-                rt_core_immortal_registry_tombs--;
+                __atomic_store_n(&s->registry[first_tomb], p, __ATOMIC_RELAXED);
+                s->tombs--;
             } else {
-                rt_core_immortal_registry[i] = p;
+                __atomic_store_n(&s->registry[i], p, __ATOMIC_RELAXED);
             }
-            rt_core_immortal_registry_len++;
+            s->len++;
             return 1;
         }
         if (e == RT_CORE_IMMORTAL_TOMBSTONE) {
@@ -2172,97 +2479,233 @@ static int rt_core_immortal_registry_insert_raw(uintptr_t p) {
     }
 }
 
-/* caller holds the lock; returns 1 if an entry was erased */
-static int rt_core_immortal_registry_erase_raw(uintptr_t p) {
-    if (rt_core_immortal_registry_cap == 0) return 0;
-    size_t mask = rt_core_immortal_registry_cap - 1;
+/* Fork-child overlay (twin of HeapRegistry in
+ * src/compiler_rust/runtime/src/value/heap.rs). A copy-on-write fork child
+ * inherits the parent's whole table; writing it privatizes it page by page and
+ * its first growth allocates a fresh 2x table per child. After
+ * spl_immortal_registry_freeze_for_fork_child_v1() the inherited table is
+ * read-only: the child's objects use the (now empty) live table and an erase
+ * of an inherited pointer is recorded in the erased set. Per shard, under the
+ * shard lock. Bug:
+ * doc/08_tracking/bug/mir_fork_child_heap_registry_cow_resize_2026-10-25.md */
+static int core_ptr_table_has(const uintptr_t* table, size_t cap, uintptr_t p) {
+    if (cap == 0) return 0;
+    size_t mask = cap - 1;
     size_t i = rt_core_immortal_hash_ptr(p) & mask;
     for (;;) {
-        uintptr_t e = rt_core_immortal_registry[i];
+        uintptr_t e = table[i];
+        if (e == 0) return 0;
+        if (e == p) return 1;
+        i = (i + 1) & mask;
+    }
+}
+
+/* caller holds s->lock: p is an inherited pointer that is currently live */
+static int core_immortal_frozen_live(RtCoreImmortalShard* s, uintptr_t p) {
+    return core_ptr_table_has(s->frozen, s->frozen_cap, p) &&
+        (s->erased_len == 0 || !core_ptr_table_has(s->erased, s->erased_cap, p));
+}
+
+/* caller holds s->lock; p is not in the erased set */
+static int core_immortal_erased_add(RtCoreImmortalShard* s, uintptr_t p) {
+    if ((s->erased_len + s->erased_tombs + 1) * 10 >= s->erased_cap * 7) {
+        size_t new_cap = s->erased_cap == 0 ? 64 : s->erased_cap * 2;
+        if (new_cap > SIZE_MAX / sizeof(uintptr_t)) return 0;
+        uintptr_t* fresh = (uintptr_t*)rt_observed_calloc_v1(new_cap, sizeof(uintptr_t));
+        if (!fresh) return 0;
+        for (size_t k = 0; k < s->erased_cap; k++) {
+            uintptr_t e = s->erased[k];
+            if (e == 0 || e == RT_CORE_IMMORTAL_TOMBSTONE) continue;
+            size_t j = rt_core_immortal_hash_ptr(e) & (new_cap - 1);
+            while (fresh[j] != 0) j = (j + 1) & (new_cap - 1);
+            fresh[j] = e;
+        }
+        free(s->erased);
+        s->erased = fresh;
+        s->erased_cap = new_cap;
+        s->erased_tombs = 0;
+    }
+    size_t mask = s->erased_cap - 1;
+    size_t i = rt_core_immortal_hash_ptr(p) & mask;
+    while (s->erased[i] != 0 && s->erased[i] != RT_CORE_IMMORTAL_TOMBSTONE) {
+        i = (i + 1) & mask;
+    }
+    if (s->erased[i] == RT_CORE_IMMORTAL_TOMBSTONE) s->erased_tombs--;
+    s->erased[i] = p;
+    s->erased_len++;
+    return 1;
+}
+
+/* caller holds s->lock; returns 1 if p was in the erased set */
+static int core_immortal_erased_drop(RtCoreImmortalShard* s, uintptr_t p) {
+    if (s->erased_cap == 0) return 0;
+    size_t mask = s->erased_cap - 1;
+    size_t i = rt_core_immortal_hash_ptr(p) & mask;
+    for (;;) {
+        uintptr_t e = s->erased[i];
         if (e == 0) return 0;
         if (e == p) {
-            rt_core_immortal_registry[i] = RT_CORE_IMMORTAL_TOMBSTONE;
-            rt_core_immortal_registry_len--;
-            rt_core_immortal_registry_tombs++;
+            s->erased[i] = RT_CORE_IMMORTAL_TOMBSTONE;
+            s->erased_len--;
+            s->erased_tombs++;
             return 1;
         }
         i = (i + 1) & mask;
     }
 }
 
-/* caller holds the lock */
-static int rt_core_immortal_registry_resize(size_t new_cap) {
-    if (new_cap > SIZE_MAX / sizeof(uintptr_t)) return 0;
-    uintptr_t* fresh = (uintptr_t*)rt_observed_calloc_v1(new_cap, sizeof(uintptr_t));
-    if (!fresh) return 0;
-    uintptr_t* old = rt_core_immortal_registry;
-    size_t old_cap = rt_core_immortal_registry_cap;
-    rt_core_immortal_registry = fresh;
-    rt_core_immortal_registry_cap = new_cap;
-    rt_core_immortal_registry_len = 0;
-    rt_core_immortal_registry_tombs = 0; /* rehash drops tombstones */
+/* Called in the child right after fork() (single-threaded there). A nested
+ * fork keeps the first frozen layer and inherits the small live table. */
+void spl_immortal_registry_freeze_for_fork_child_v1(void) {
+    /* Only this thread survives fork(): a parent thread caught inside a probe
+     * would otherwise pin its reader stripe and block reclaim forever. */
+    for (size_t i = 0; i < RT_CORE_IMMORTAL_READER_STRIPES; i++) {
+        atomic_store_explicit(&rt_core_immortal_readers[i].active, 0, memory_order_relaxed);
+    }
+    for (size_t k = 0; k < RT_CORE_IMMORTAL_SHARDS; k++) {
+        RtCoreImmortalShard* s = &rt_core_immortal_shards[k];
+        core_immortal_shard_acquire(s);
+        if (!atomic_load_explicit(&s->frozen, memory_order_relaxed)) {
+            s->frozen_cap = s->cap;
+            atomic_store_explicit(&s->frozen, s->registry, memory_order_release);
+            atomic_store_explicit(&s->published, NULL, memory_order_seq_cst);
+            if (s->registry) atomic_store_explicit(&rt_core_immortal_nonempty, 1, memory_order_release);
+            s->registry = NULL;
+            s->cap = 0;
+            s->len = 0;
+            s->tombs = 0;
+        }
+        core_immortal_shard_release(s);
+    }
+}
+
+/* caller holds s->lock */
+static int core_immortal_live_erase_raw(RtCoreImmortalShard* s, uintptr_t p) {
+    if (s->cap == 0) return 0;
+    size_t mask = s->cap - 1;
+    size_t i = rt_core_immortal_hash_ptr(p) & mask;
+    for (;;) {
+        uintptr_t e = s->registry[i];
+        if (e == 0) return 0;
+        if (e == p) {
+            __atomic_store_n(&s->registry[i], RT_CORE_IMMORTAL_TOMBSTONE, __ATOMIC_RELAXED);
+            s->len--;
+            s->tombs++;
+            return 1;
+        }
+        i = (i + 1) & mask;
+    }
+}
+
+/* Erase p from its shard; returns 1 if an entry was erased. */
+static int rt_core_immortal_registry_erase(uintptr_t p) {
+    RtCoreImmortalShard* s = core_immortal_shard(p);
+    core_immortal_shard_acquire(s);
+    int erased = core_immortal_live_erase_raw(s, p);
+    /* Out of memory for the erased set: refuse the erase (the object stays
+     * allocated) rather than report a pointer both live and freed. */
+    if (!erased && atomic_load_explicit(&s->frozen, memory_order_relaxed) && core_immortal_frozen_live(s, p)) {
+        erased = core_immortal_erased_add(s, p);
+    }
+    core_immortal_shard_release(s);
+    return erased;
+}
+
+/* caller holds s->lock */
+static int rt_core_immortal_registry_resize(RtCoreImmortalShard* s, size_t new_cap) {
+    if (new_cap > SIZE_MAX / sizeof(uintptr_t) - 1) return 0;
+    /* block = {cap, slots[cap]}: lock-free readers get cap from slots[-1] */
+    uintptr_t* block = (uintptr_t*)rt_observed_calloc_v1(new_cap + 1, sizeof(uintptr_t));
+    if (!block) return 0;
+    block[0] = (uintptr_t)new_cap;
+    uintptr_t* fresh = block + 1;
+    uintptr_t* old = s->registry;
+    size_t old_cap = s->cap;
+    s->registry = fresh;
+    s->cap = new_cap;
+    s->len = 0;
+    s->tombs = 0; /* rehash drops tombstones */
     for (size_t i = 0; i < old_cap; i++) {
         if (old[i] != 0 && old[i] != RT_CORE_IMMORTAL_TOMBSTONE) {
-            rt_core_immortal_registry_insert_raw(old[i]);
+            rt_core_immortal_registry_insert_raw(s, old[i]);
         }
     }
-    free(old);
+    atomic_store_explicit(&s->published, fresh, memory_order_seq_cst);
+    atomic_store_explicit(&rt_core_immortal_nonempty, 1, memory_order_release);
+    core_immortal_retire_locked(s, old);
     return 1;
 }
 
 static int rt_core_register_immortal_ptr(void* ptr) {
     if (!ptr) return 0;
-    rt_core_immortal_registry_acquire();
+    RtCoreImmortalShard* s = core_immortal_shard((uintptr_t)ptr);
+    core_immortal_shard_acquire(s);
+    uintptr_t* frozen = atomic_load_explicit(&s->frozen, memory_order_relaxed);
+    if (frozen && core_ptr_table_has(frozen, s->frozen_cap, (uintptr_t)ptr)) {
+        /* Inherited address: present, or re-registered after its erase. */
+        if (core_immortal_erased_drop(s, (uintptr_t)ptr)) {
+            atomic_fetch_add_explicit(&rt_core_heap_registry_count, 1, memory_order_relaxed);
+            atomic_fetch_add_explicit(&rt_core_heap_total_allocs, 1, memory_order_relaxed);
+        }
+        core_immortal_shard_release(s);
+        return 1;
+    }
     /* grow at 70% load; tombstones count as occupancy since they lengthen
      * probe chains exactly as live entries do */
-    if ((rt_core_immortal_registry_len + rt_core_immortal_registry_tombs + 1) * 10
-            >= rt_core_immortal_registry_cap * 7) {
-        size_t new_cap = rt_core_immortal_registry_cap == 0 ? 256 : rt_core_immortal_registry_cap * 2;
+    if ((s->len + s->tombs + 1) * 10 >= s->cap * 7) {
+        size_t new_cap = s->cap == 0 ? 256 : s->cap * 2;
         /* A transient teardown can leave millions of tombstones while very
          * few live objects remain. Rehash those at the same capacity instead
          * of doubling the table once per source file. */
-        if (rt_core_immortal_registry_cap != 0 &&
-            rt_core_immortal_registry_tombs > rt_core_immortal_registry_len &&
-            (rt_core_immortal_registry_len + 1) * 10 < rt_core_immortal_registry_cap * 5) {
-            new_cap = rt_core_immortal_registry_cap;
+        if (s->cap != 0 && s->tombs > s->len && (s->len + 1) * 10 < s->cap * 5) {
+            new_cap = s->cap;
         }
-        if (!rt_core_immortal_registry_resize(new_cap)) {
-            rt_core_immortal_registry_release();
+        if (!rt_core_immortal_registry_resize(s, new_cap)) {
+            core_immortal_shard_release(s);
             return 0;
         }
     }
-    int inserted = rt_core_immortal_registry_insert_raw((uintptr_t)ptr);
+    int inserted = rt_core_immortal_registry_insert_raw(s, (uintptr_t)ptr);
     if (inserted) {
         atomic_fetch_add_explicit(&rt_core_heap_registry_count, 1, memory_order_relaxed);
+        atomic_fetch_add_explicit(&rt_core_heap_total_allocs, 1, memory_order_relaxed);
     }
-    rt_core_immortal_registry_release();
+    core_immortal_shard_release(s);
     return 1;
 }
 
 static int rt_core_is_registered_immortal_ptr(void* ptr) {
     if (!ptr) return 0;
+    uintptr_t p = (uintptr_t)ptr;
+    RtCoreImmortalShard* s = core_immortal_shard(p);
     int found = 0;
-    rt_core_immortal_registry_acquire();
-    if (rt_core_immortal_registry_cap != 0) {
-        size_t mask = rt_core_immortal_registry_cap - 1;
-        size_t i = rt_core_immortal_hash_ptr((uintptr_t)ptr) & mask;
+    RtCoreImmortalReaderStripe* stripe = core_immortal_reader_stripe();
+    atomic_fetch_add_explicit(&stripe->active, 1, memory_order_seq_cst);
+    uintptr_t* slots = atomic_load_explicit(&s->published, memory_order_seq_cst);
+    if (slots) {
+        size_t mask = (size_t)slots[-1] - 1;
+        size_t i = rt_core_immortal_hash_ptr(p) & mask;
         for (;;) {
-            uintptr_t e = rt_core_immortal_registry[i];
+            uintptr_t e = __atomic_load_n(&slots[i], __ATOMIC_RELAXED);
             if (e == 0) break;
-            if (e == (uintptr_t)ptr) { found = 1; break; }
+            if (e == p) { found = 1; break; }
             i = (i + 1) & mask;
         }
     }
-    rt_core_immortal_registry_release();
+    atomic_fetch_sub_explicit(&stripe->active, 1, memory_order_release);
+    /* Fork-child overlay only: frozen + erased sets mutate under the lock. */
+    if (!found && atomic_load_explicit(&s->frozen, memory_order_acquire)) {
+        core_immortal_shard_acquire(s);
+        found = core_immortal_frozen_live(s, p);
+        core_immortal_shard_release(s);
+    }
     return found;
 }
 
 static int rt_core_unregister_immortal_ptr(void* ptr) {
     if (!ptr) return 0;
     rt_core_heap_lifecycle_acquire();
-    rt_core_immortal_registry_acquire();
-    int erased = rt_core_immortal_registry_erase_raw((uintptr_t)ptr);
-    rt_core_immortal_registry_release();
+    int erased = rt_core_immortal_registry_erase((uintptr_t)ptr);
     if (erased) {
         atomic_fetch_sub_explicit(&rt_core_heap_registry_count, 1, memory_order_relaxed);
         core_transient_share_forget((uintptr_t)ptr);
@@ -2271,72 +2714,99 @@ static int rt_core_unregister_immortal_ptr(void* ptr) {
     return erased;
 }
 
+/* Free one tracked object if it is still registered and still owned by
+ * `scope_id` (strings: transient, unshared, and session-flagged exactly when
+ * `session`). Caller holds the heap lifecycle lock. Shared by module-scope end
+ * and rt_session_heap_end (BSM I4). */
+static void core_reclaim_tracked_object_locked(void* ptr, uint32_t scope_id, int session) {
+    if (!rt_core_is_registered_immortal_ptr(ptr)) return;
+    uint32_t kind = rt_core_registered_object_kind(ptr);
+    uint32_t* object_scope = NULL;
+    int reclaim_string = 0;
+    switch (kind) {
+        case RT_VALUE_HEAP_STRING: {
+            RtCoreString* string = (RtCoreString*)ptr;
+            reclaim_string =
+                (string->reserved & RT_CORE_STRING_FLAG_TRANSIENT) != 0 &&
+                (string->reserved & RT_CORE_STRING_FLAG_SHARED) == 0 &&
+                ((string->reserved & RT_CORE_STRING_FLAG_SESSION) != 0) == (session != 0);
+            break;
+        }
+        case RT_VALUE_HEAP_ARRAY:
+            object_scope = &((RtCoreArray*)ptr)->transient_scope_id;
+            break;
+        case RT_VALUE_HEAP_DICT:
+            object_scope = &((RtCoreDict*)ptr)->transient_scope_id;
+            break;
+        case RT_VALUE_HEAP_ENUM:
+            object_scope = &((RtCoreEnum*)ptr)->transient_scope_id;
+            break;
+        case RT_VALUE_HEAP_CLOSURE:
+            object_scope = &((RtCoreClosure*)ptr)->transient_scope_id;
+            break;
+        case RT_VALUE_HEAP_FLOAT:
+        case RT_VALUE_HEAP_INT:   /* identical leaf layout */
+        case RT_VALUE_HEAP_UINT:  /* identical leaf layout */
+            object_scope = &((RtCoreFloat*)ptr)->transient_scope_id;
+            break;
+        default:
+            break;
+    }
+    if (!reclaim_string && (!object_scope || *object_scope != scope_id)) return;
+    if (kind == RT_VALUE_HEAP_CLOSURE) {
+        /* Pinned by a pending consumer: the last rt_closure_release frees it. */
+        RtCoreClosurePin* pin = spl_closure_pin_find_locked(ptr);
+        if (pin) {
+            pin->orphaned = 1;
+            return;
+        }
+    }
+    int erased = rt_core_immortal_registry_erase((uintptr_t)ptr);
+    if (!erased) return;
+    atomic_fetch_sub_explicit(&rt_core_heap_registry_count, 1, memory_order_relaxed);
+    switch (rt_core_registered_object_kind(ptr)) {
+        case RT_VALUE_HEAP_ARRAY:
+            core_aux_array_data_free((RtCoreArray*)ptr);
+            break;
+        case RT_VALUE_HEAP_DICT:
+            core_aux_dict_entries_free((RtCoreDict*)ptr);
+            break;
+        default:
+            break;
+    }
+    free(ptr);
+}
+
 static void rt_core_reclaim_transient_immortal(uint32_t scope_id) {
     rt_core_heap_lifecycle_acquire();
+    /* Scope-correct reclaim (doc: stage2_mir_shard_flat_pool_text_len_minus1):
+     * each tracked entry carries the id of the scope that created it. Only
+     * entries owned by the ENDING scope are freed; earlier/later scopes'
+     * entries survive (compacted forward) so a string referenced from live
+     * pool arrays is never freed by another scope's end. Previously the
+     * string branch ignored scope ownership entirely, so any scope end freed
+     * every transient-flagged string in the process - the cross-scope kill
+     * behind the flat-pool encode refusals. */
+    size_t kept = 0;
     for (size_t i = 0; i < rt_core_transient_heap_scope_object_len; i++) {
         void* ptr = rt_core_transient_heap_scope_objects[i];
-        if (!rt_core_is_registered_immortal_ptr(ptr)) continue;
-        uint32_t kind = rt_core_registered_object_kind(ptr);
-        uint32_t* object_scope = NULL;
-        int reclaim_string = 0;
-        switch (kind) {
-            case RT_VALUE_HEAP_STRING: {
-                RtCoreString* string = (RtCoreString*)ptr;
-                reclaim_string =
-                    (string->reserved & RT_CORE_STRING_FLAG_TRANSIENT) != 0 &&
-                    (string->reserved & RT_CORE_STRING_FLAG_SHARED) == 0;
-                break;
-            }
-            case RT_VALUE_HEAP_ARRAY:
-                object_scope = &((RtCoreArray*)ptr)->transient_scope_id;
-                break;
-            case RT_VALUE_HEAP_DICT:
-                object_scope = &((RtCoreDict*)ptr)->transient_scope_id;
-                break;
-            case RT_VALUE_HEAP_ENUM:
-                object_scope = &((RtCoreEnum*)ptr)->transient_scope_id;
-                break;
-            case RT_VALUE_HEAP_CLOSURE:
-                object_scope = &((RtCoreClosure*)ptr)->transient_scope_id;
-                break;
-            case RT_VALUE_HEAP_FLOAT:
-            case RT_VALUE_HEAP_INT:   /* identical leaf layout */
-            case RT_VALUE_HEAP_UINT:  /* identical leaf layout */
-                object_scope = &((RtCoreFloat*)ptr)->transient_scope_id;
-                break;
-            default:
-                break;
+        const uint32_t entry_scope = rt_core_transient_heap_scope_object_scopes[i];
+        if (entry_scope != scope_id) {
+            rt_core_transient_heap_scope_objects[kept] = ptr;
+            rt_core_transient_heap_scope_object_scopes[kept] = entry_scope;
+            kept++;
+            continue;
         }
-        if (!reclaim_string && (!object_scope || *object_scope != scope_id)) continue;
-        if (kind == RT_VALUE_HEAP_CLOSURE) {
-            /* Pinned by a pending consumer: the last rt_closure_release frees it. */
-            RtCoreClosurePin* pin = spl_closure_pin_find_locked(ptr);
-            if (pin) {
-                pin->orphaned = 1;
-                continue;
-            }
-        }
-        rt_core_immortal_registry_acquire();
-        int erased = rt_core_immortal_registry_erase_raw((uintptr_t)ptr);
-        rt_core_immortal_registry_release();
-        if (!erased) continue;
-        atomic_fetch_sub_explicit(&rt_core_heap_registry_count, 1, memory_order_relaxed);
-        switch (rt_core_registered_object_kind(ptr)) {
-            case RT_VALUE_HEAP_ARRAY:
-                free(((RtCoreArray*)ptr)->data);
-                break;
-            case RT_VALUE_HEAP_DICT:
-                free(((RtCoreDict*)ptr)->entries);
-                break;
-            default:
-                break;
-        }
-        free(ptr);
+        core_reclaim_tracked_object_locked(ptr, scope_id, 0);
     }
-    rt_core_transient_heap_scope_object_len = 0;
+    rt_core_transient_heap_scope_object_len = kept;
     /* String-heavy parses can briefly track millions of pointers. Do not pin
-     * that peak-capacity side buffer for the remaining compilation. */
-    if (rt_core_transient_heap_scope_object_cap > 262144) {
+     * that peak-capacity side buffer for the remaining compilation. Only
+     * release it when nothing survives - with per-scope entries living on
+     * across scope ends, a nonempty list still needs the buffer. */
+    if (kept == 0 && rt_core_transient_heap_scope_object_cap > 262144) {
+        free(rt_core_transient_heap_scope_object_scopes);
+        rt_core_transient_heap_scope_object_scopes = NULL;
         free(rt_core_transient_heap_scope_objects);
         rt_core_transient_heap_scope_objects = NULL;
         rt_core_transient_heap_scope_object_cap = 0;
@@ -2372,10 +2842,8 @@ static inline RtCoreFloat* rt_core_as_heap_float(int64_t value) {
  * Registry membership is checked BEFORE any dereference (same tag-collision
  * guard as rt_core_as_heap_float). */
 static inline RtCoreWideInt* rt_core_as_heap_int(int64_t value) {
-    if ((((uint64_t)value) & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_HEAP) return NULL;
-    RtCoreWideInt* n = (RtCoreWideInt*)(uintptr_t)(((uint64_t)value) & ~RT_VALUE_TAG_MASK);
+    RtCoreWideInt* n = (RtCoreWideInt*)rt_core_untag_registered_immortal(value);
     if (!n) return NULL;
-    if (!rt_core_is_registered_immortal_ptr(n)) return NULL;
     if (n->kind != RT_VALUE_HEAP_INT) return NULL;
     return n;
 }
@@ -2385,10 +2853,8 @@ static inline RtCoreWideInt* rt_core_as_heap_int(int64_t value) {
  * tag-collision guard as rt_core_as_heap_float / rt_core_as_heap_int), so a
  * stray i64 that merely aliases TAG_HEAP is never dereferenced. */
 static inline RtCoreUInt* rt_core_as_heap_uint(int64_t value) {
-    if ((((uint64_t)value) & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_HEAP) return NULL;
-    RtCoreUInt* u = (RtCoreUInt*)(uintptr_t)(((uint64_t)value) & ~RT_VALUE_TAG_MASK);
+    RtCoreUInt* u = (RtCoreUInt*)rt_core_untag_registered_immortal(value);
     if (!u) return NULL;
-    if (!rt_core_is_registered_immortal_ptr(u)) return NULL;
     if (u->kind != RT_VALUE_HEAP_UINT) return NULL;
     return u;
 }
@@ -2405,6 +2871,16 @@ static inline int64_t rt_core_from_special(uint64_t payload) {
 
 static inline int64_t rt_core_nil(void) {
     return rt_core_from_special(RT_VALUE_SPECIAL_NIL);
+}
+
+/* Register a freshly built heap string and return its tagged value; on
+ * registration failure free it and return nil. */
+static int64_t rt_core_string_publish_or_nil(RtCoreString* out) {
+    if (!rt_core_register_string(out)) {
+        free(out);
+        return rt_core_nil();
+    }
+    return (int64_t)(((uint64_t)(uintptr_t)out) | RT_VALUE_TAG_HEAP);
 }
 
 static inline int rt_core_is_int(int64_t value) {
@@ -2681,7 +3157,8 @@ static inline RtCoreArray* rt_core_as_array(int64_t value) {
         return NULL;
     }
     if (a->kind != RT_VALUE_HEAP_ARRAY) return NULL;
-    if (a->len < 0 || a->cap < 0 || a->len > a->cap || a->cap > RT_CORE_ARRAY_MAX_CAP) return NULL;
+    if (a->len < 0 || a->len > a->cap ||
+        !rt_core_array_capacity_valid(a->cap, a->flags)) return NULL;
     return a;
 }
 
@@ -2754,13 +3231,21 @@ typedef struct RtCoreTransientPlan {
     size_t seen_len;
 } RtCoreTransientPlan;
 
-#define RT_CORE_TRANSIENT_MAX_NODES ((size_t)1 << 22)
+/* Dynamically grows with overflow checks bounded by SIZE_MAX / allocator availability. */
 /* Only the promotion-share set below ever erases; a per-call plan never does.
  * A tombstone keeps lookup probe chains intact and is dropped on rehash. */
 #define RT_CORE_TRANSIENT_SEEN_TOMBSTONE ((uintptr_t)1)
 
+/* Return non-zero if (len + 1) * 10 >= cap * 7 without unsigned wrap. */
+static inline int rt_core_seen_needs_grow(size_t seen_len, size_t seen_cap) {
+    if (seen_cap == 0 || seen_len >= seen_cap) return 1;
+    size_t thresh = (seen_cap / 10) * 7 + ((seen_cap % 10) * 7 + 9) / 10;
+    return seen_len + 1 >= thresh;
+}
+
 static int rt_core_transient_seen_insert(RtCoreTransientPlan* plan, uintptr_t ptr) {
-    if ((plan->seen_len + 1) * 10 >= plan->seen_cap * 7) {
+    if (rt_core_seen_needs_grow(plan->seen_len, plan->seen_cap)) {
+        if (plan->seen_cap > SIZE_MAX / 2) return -1;
         size_t next_cap = plan->seen_cap == 0 ? 256 : plan->seen_cap * 2;
         if (next_cap > SIZE_MAX / sizeof(uintptr_t)) return -1;
         uintptr_t* fresh = (uintptr_t*)rt_observed_calloc_v1(next_cap, sizeof(uintptr_t));
@@ -2788,7 +3273,8 @@ static int rt_core_transient_seen_insert(RtCoreTransientPlan* plan, uintptr_t pt
      * here forever (stage3 promotion-registry rewalk livelock defense in
      * depth, 2026-10-17). */
     size_t probes;
-    for (probes = 0; probes < plan->seen_cap * 4; probes++) {
+    size_t probe_limit = plan->seen_cap > SIZE_MAX / 4 ? SIZE_MAX : plan->seen_cap * 4;
+    for (probes = 0; probes < probe_limit; probes++) {
         if (!plan->seen[i]) {
             plan->seen[i] = ptr;
             plan->seen_len++;
@@ -2805,8 +3291,9 @@ static int rt_core_transient_seen_insert(RtCoreTransientPlan* plan, uintptr_t pt
 static int rt_core_transient_plan_push(
     RtCoreTransientPlan* plan, void* ptr, uint8_t kind, size_t bytes) {
     if (plan->len == plan->cap) {
+        if (plan->cap > SIZE_MAX / 2) return 0;
         size_t next_cap = plan->cap == 0 ? 32 : plan->cap * 2;
-        if (next_cap > RT_CORE_TRANSIENT_MAX_NODES) return 0;
+        if (next_cap > SIZE_MAX / sizeof(RtCoreTransientNode)) return 0;
         RtCoreTransientNode* fresh = (RtCoreTransientNode*)rt_observed_realloc_v1(
             plan->nodes, next_cap * sizeof(RtCoreTransientNode));
         if (!fresh) return 0;
@@ -2815,6 +3302,35 @@ static int rt_core_transient_plan_push(
     }
     plan->nodes[plan->len++] = (RtCoreTransientNode){ptr, kind, bytes};
     return 1;
+}
+
+/* Text values are also held as an UNTAGGED pointer to RtCoreString.data
+ * (rt_interp_cstr decode; Stage-2-compiled code stores it in struct fields such
+ * as a retained ParserModule). That word is a legitimate reference to its
+ * owning string, so promotion must treat it as one or the string is freed at
+ * scope end under a live AST (bug transient_promote_misses_raw_text_data_pointer_2026-10-25).
+ * Returns 1 = tracked transient string (node filled), 0 = registered
+ * persistent/shared string, -1 = not a text data pointer (caller continues).
+ * Cheap rejects come first (tagged, tiny, misaligned words, empty registry);
+ * registry membership is verified before the candidate header is read, so an
+ * arbitrary aligned word is never dereferenced. Simple twin:
+ * core_memory.spl transient_classify. */
+static int rt_core_transient_text_data_pointer(int64_t value, RtCoreTransientNode* node) {
+    const uint64_t data_off = offsetof(RtCoreString, data);
+    uint64_t w = (uint64_t)value;
+    if ((w & (sizeof(uint64_t) - 1)) != 0 || w <= 0x10000 + data_off) return -1;
+    if (!atomic_load_explicit(&rt_core_immortal_nonempty, memory_order_acquire)) return -1;
+    RtCoreString* text = (RtCoreString*)(uintptr_t)(w - data_off);
+    if (!rt_core_is_registered_immortal_ptr(text) ||
+            rt_core_registered_object_kind(text) != RT_VALUE_HEAP_STRING) {
+        return -1;
+    }
+    if ((text->reserved & RT_CORE_STRING_FLAG_TRANSIENT) != 0 &&
+            (text->reserved & RT_CORE_STRING_FLAG_SHARED) == 0) {
+        *node = (RtCoreTransientNode){text, RT_CORE_TRANSIENT_STRING, 0};
+        return 1;
+    }
+    return 0;
 }
 
 /* 1 = tracked node, 0 = immediate or persistent string, -1 = invalid node. */
@@ -2830,15 +3346,29 @@ static int rt_core_transient_classify(int64_t value, RtCoreTransientNode* node) 
     }
 #else
     uintptr_t raw = (uintptr_t)value;
-    uintptr_t raw_ptr = raw & RT_VALUE_TAG_MASK ? raw & ~RT_VALUE_TAG_MASK : raw;
-    RtCoreTransientRawAlloc* allocation = rt_core_transient_raw_lookup(raw_ptr);
-    if (allocation) {
-        *node = (RtCoreTransientNode){
-            (void*)raw_ptr, RT_CORE_TRANSIENT_RAW,
-            allocation->bytes & RT_CORE_TRANSIENT_RAW_SIZE_MASK};
-        return 1;
+    if ((raw & RT_VALUE_TAG_MASK) <= 1) {
+        uintptr_t raw_ptr = raw & ~RT_VALUE_TAG_MASK;
+        if (raw_ptr != 0) {
+            RtCoreTransientRawAlloc* allocation = rt_core_transient_raw_lookup(raw_ptr);
+            if (allocation) {
+                *node = (RtCoreTransientNode){
+                    (void*)raw_ptr, RT_CORE_TRANSIENT_RAW,
+                    allocation->bytes & RT_CORE_TRANSIENT_RAW_SIZE_MASK};
+                return 1;
+            }
+            size_t raw_bytes = 0;
+            if (rt_persistent_raw_lookup_size((void*)raw_ptr, &raw_bytes)) {
+                *node = (RtCoreTransientNode){
+                    (void*)raw_ptr, RT_CORE_TRANSIENT_RAW, raw_bytes};
+                return 1;
+            }
+        }
     }
 #endif
+    {
+        int text = rt_core_transient_text_data_pointer(value, node);
+        if (text >= 0) return text;
+    }
     if (!rt_core_is_heap(value)) return 0;
     void* ptr = (void*)(uintptr_t)(((uint64_t)value) & ~RT_VALUE_TAG_MASK);
     if (rt_core_is_registered_immortal_ptr(ptr)) {
@@ -3047,7 +3577,7 @@ int8_t rt_transient_heap_promote(int64_t value) {
     }
     int ok = root_class == 1 &&
         rt_core_transient_add(&plan, value) == 1;
-    if (!ok && getenv("SIMPLE_TRANSIENT_PROMOTE_DEBUG")) {
+    if (!ok && rt_env_present("SIMPLE_TRANSIENT_PROMOTE_DEBUG")) {
         fprintf(stderr, "[transient-promote] root refused: value=0x%016llx class=%d heap=%d\n",
                 (unsigned long long)(uint64_t)value, root_class, (int)rt_core_is_heap(value));
     }
@@ -3083,6 +3613,13 @@ int8_t rt_transient_heap_promote(int64_t value) {
             }
         }
     }
+    /* BSM compatibility alias (design §4): with a live session, promotion
+     * retags module-owned nodes to the SESSION instead of making them
+     * permanent. It keeps the FULL walk above (no I2 pruning) because legacy
+     * callers may still violate I1 (e8152c252ad: unowned roots holding
+     * module-owned children). With no session this block is unchanged. */
+    const uint32_t session_id = rt_core_session_heap_live_id;
+    if (ok && session_id && !core_session_reserve(plan.len)) ok = 0;
     if (ok) {
         const uint32_t scope_id = rt_core_transient_array_scope_id;
         for (size_t i = 0; i < plan.len; i++) {
@@ -3090,7 +3627,12 @@ int8_t rt_transient_heap_promote(int64_t value) {
             uint32_t* object_scope = NULL;
             switch (node.kind) {
                 case RT_CORE_TRANSIENT_STRING:
-                    ((RtCoreString*)node.ptr)->reserved &= ~RT_CORE_STRING_FLAG_TRANSIENT;
+                    if (!session_id) {
+                        ((RtCoreString*)node.ptr)->reserved &= ~RT_CORE_STRING_FLAG_TRANSIENT;
+                    } else if ((((RtCoreString*)node.ptr)->reserved & RT_CORE_STRING_FLAG_SESSION) == 0) {
+                        ((RtCoreString*)node.ptr)->reserved |= RT_CORE_STRING_FLAG_SESSION;
+                        rt_core_session_heap_objects[rt_core_session_heap_object_len++] = node.ptr;
+                    }
                     break;
                 case RT_CORE_TRANSIENT_ARRAY: object_scope = &((RtCoreArray*)node.ptr)->transient_scope_id; break;
                 case RT_CORE_TRANSIENT_DICT: object_scope = &((RtCoreDict*)node.ptr)->transient_scope_id; break;
@@ -3103,12 +3645,24 @@ int8_t rt_transient_heap_promote(int64_t value) {
 #else
                     RtCoreTransientRawAlloc* raw =
                         rt_core_transient_raw_lookup((uintptr_t)node.ptr);
-                    if (raw) raw->bytes &= RT_CORE_TRANSIENT_RAW_SIZE_MASK;
+                    if (raw) {
+                        size_t raw_bytes = raw->bytes & RT_CORE_TRANSIENT_RAW_SIZE_MASK;
+                        if (!rt_persistent_raw_register(node.ptr, raw_bytes)) {
+                            ok = 0;
+                        } else {
+                            raw->bytes = raw_bytes;
+                        }
+                    }
 #endif
                     break;
                 }
             }
-            if (object_scope && *object_scope == scope_id) *object_scope = 0;
+            if (object_scope && *object_scope == scope_id) {
+                *object_scope = session_id;
+                if (session_id) {
+                    rt_core_session_heap_objects[rt_core_session_heap_object_len++] = node.ptr;
+                }
+            }
         }
         if (ok) core_transient_share_record(&plan);
     }
@@ -3118,10 +3672,227 @@ int8_t rt_transient_heap_promote(int64_t value) {
     return ok ? 1 : 0;
 }
 
+/* ---------------------------------------------------------------------------
+ * Build session heap (BSM T1) — design §3 I2-I4, §4.
+ * -------------------------------------------------------------------------- */
+
+static uint32_t core_session_next_id(void) {
+    uint32_t next_id =
+        atomic_load_explicit(&rt_core_transient_array_scope_next_id, memory_order_relaxed);
+    while (next_id != 0) {
+        uint32_t successor = next_id == UINT32_MAX ? 0 : next_id + 1;
+        if (atomic_compare_exchange_weak_explicit(
+                &rt_core_transient_array_scope_next_id, &next_id, successor,
+                memory_order_relaxed, memory_order_relaxed)) {
+            break;
+        }
+    }
+    return next_id;
+}
+
+/* 0 on failure: a session is already live on this thread, a module scope is
+ * active on this thread, or the id space is exhausted. */
+uint32_t rt_session_heap_begin(void) {
+    if (rt_core_session_heap_live_id || rt_core_transient_array_scope_active) return 0;
+    uint32_t id = core_session_next_id();
+    if (!id) return 0;
+    rt_core_session_heap_live_id = id;
+    rt_core_session_alloc_depth = 0;
+    rt_core_session_heap_object_len = 0;
+    return id;
+}
+
+/* Frees every object still tagged `s` in ONE pass over the session list (I4).
+ * Tag-0 and other-scope objects are never touched. */
+int8_t rt_session_heap_end(uint32_t s) {
+    if (!s || s != rt_core_session_heap_live_id || rt_core_transient_array_scope_active) return 0;
+    rt_core_heap_lifecycle_acquire();
+    for (size_t i = 0; i < rt_core_session_heap_object_len; i++) {
+        core_reclaim_tracked_object_locked(rt_core_session_heap_objects[i], s, 1);
+    }
+    free(rt_core_session_heap_objects);
+    rt_core_session_heap_objects = NULL;
+    rt_core_session_heap_object_len = 0;
+    rt_core_session_heap_object_cap = 0;
+    rt_core_session_heap_live_id = 0;
+    rt_core_session_alloc_depth = 0;
+    rt_core_heap_lifecycle_release();
+#if defined(__GLIBC__)
+    /* A completed build session can leave gigabytes of freed small objects
+     * resident in libc arenas while its coordinator waits for child builds.
+     * Return those unused pages at this coarse epoch boundary. Trimming does
+     * not change live object ownership; run outside the lifecycle lock. */
+    (void)malloc_trim(0);
+#endif
+    return 1;
+}
+
+/* Depth-counted: while > 0, new objects get the SESSION id even inside a
+ * running module scope (I3: session containers grow under the session). */
+int8_t rt_session_alloc_begin(void) {
+    if (!rt_core_session_heap_live_id || rt_core_session_alloc_depth == INT32_MAX) return 0;
+    rt_core_session_alloc_depth++;
+    return 1;
+}
+
+int8_t rt_session_alloc_end(void) {
+    if (!rt_core_session_heap_live_id || rt_core_session_alloc_depth <= 0) return 0;
+    rt_core_session_alloc_depth--;
+    return 1;
+}
+
+uint32_t rt_session_heap_id(void) {
+    return rt_core_session_heap_live_id;
+}
+
+/* Debug evidence for I2: nodes visited by the last rt_transient_heap_adopt. */
+uint64_t spl_session_adopt_visits_debug(void) {
+    return rt_core_session_adopt_visits;
+}
+
+/* I2: is `node` owned by the active module scope `module_id`? Anything else
+ * (session, permanent, other scope) is a prune point. */
+static int core_adopt_module_owned(const RtCoreTransientNode* node, uint32_t module_id) {
+    switch (node->kind) {
+        case RT_CORE_TRANSIENT_STRING:
+            return (((RtCoreString*)node->ptr)->reserved & RT_CORE_STRING_FLAG_SESSION) == 0;
+        case RT_CORE_TRANSIENT_ARRAY: return ((RtCoreArray*)node->ptr)->transient_scope_id == module_id;
+        case RT_CORE_TRANSIENT_DICT: return ((RtCoreDict*)node->ptr)->transient_scope_id == module_id;
+        case RT_CORE_TRANSIENT_ENUM: return ((RtCoreEnum*)node->ptr)->transient_scope_id == module_id;
+        case RT_CORE_TRANSIENT_FLOAT: return ((RtCoreFloat*)node->ptr)->transient_scope_id == module_id;
+        case RT_CORE_TRANSIENT_CLOSURE: return ((RtCoreClosure*)node->ptr)->transient_scope_id == module_id;
+        case RT_CORE_TRANSIENT_RAW: {
+            return 1; /* raw blocks are not session-tagged: walk (conservative) */
+        }
+        default:
+            return 0;
+    }
+}
+
+/* 1 = handled (pushed or pruned), -1 = invalid node / allocation failure. */
+static int core_adopt_add(RtCoreTransientPlan* plan, int64_t value, uint32_t module_id) {
+    RtCoreTransientNode node;
+    int classified = rt_core_transient_classify(value, &node);
+    if (classified < 0) return -1;
+    if (classified == 0) return 1;
+    rt_core_session_adopt_visits++;
+    if (!core_adopt_module_owned(&node, module_id)) return 1; /* I2 prune */
+    int seen = rt_core_transient_seen_insert(plan, (uintptr_t)node.ptr);
+    if (seen < 0) return -1;
+    if (!seen) return 1;
+    return rt_core_transient_plan_push(plan, node.ptr, node.kind, node.bytes) ? 1 : -1;
+}
+
+/* Move the module-owned part of v's graph to the live session: retag nodes
+ * tagged with the ACTIVE module scope id to the session id and put them on
+ * the session list; stop at any node with another tag (I2), so the cost is
+ * O(nodes the module allocated), never O(session). Root classification as in
+ * rt_transient_heap_promote: scalars and registered non-module roots are a
+ * no-op success. Raw struct blocks are promoted (made permanent) exactly as
+ * promote does — v1 sessions do not own raw blocks. 0 without a live session
+ * or a paused module scope owned by this thread. */
+int8_t rt_transient_heap_adopt(int64_t value) {
+    rt_core_session_adopt_visits = 0;
+    if (!rt_core_session_heap_live_id || !rt_core_transient_array_scope_active ||
+            !rt_core_transient_array_scope_paused ||
+            atomic_load_explicit(&rt_core_transient_scope_owner, memory_order_acquire) !=
+                (uintptr_t)&rt_core_transient_scope_thread_token) return 0;
+    const uint32_t module_id = rt_core_transient_array_scope_id;
+    const uint32_t session_id = rt_core_session_heap_live_id;
+    rt_core_heap_lifecycle_acquire();
+    RtCoreTransientNode root;
+    int root_class = rt_core_transient_classify(value, &root);
+    if (root_class == 0) {
+        int ok_noop = !rt_core_is_heap(value) || rt_core_is_registered_immortal_ptr(
+            (void*)(uintptr_t)(((uint64_t)value) & ~RT_VALUE_TAG_MASK));
+        rt_core_heap_lifecycle_release();
+        return ok_noop ? 1 : 0;
+    }
+    RtCoreTransientPlan plan = {0};
+    int ok = root_class == 1 && core_adopt_add(&plan, value, module_id) == 1;
+    for (size_t i = 0; ok && i < plan.len; i++) {
+        RtCoreTransientNode node = plan.nodes[i];
+        if (node.kind == RT_CORE_TRANSIENT_ARRAY) {
+            RtCoreArray* array = (RtCoreArray*)node.ptr;
+            if (array->flags & (RT_CORE_ARRAY_FLAG_BYTES | RT_CORE_ARRAY_FLAG_U64_PACKED)) continue;
+            for (int64_t j = 0; j < array->len && ok; j++) {
+                ok = core_adopt_add(&plan, ((int64_t*)array->data)[j], module_id) == 1;
+            }
+        } else if (node.kind == RT_CORE_TRANSIENT_DICT) {
+            RtCoreDict* dict = (RtCoreDict*)node.ptr;
+            for (int64_t j = 0; j < dict->cap && ok; j++) {
+                RtCoreDictEntry* entry = &dict->entries[j];
+                if (entry->occupied != 1) continue;
+                ok = core_adopt_add(&plan, entry->key, module_id) == 1 &&
+                    core_adopt_add(&plan, entry->value, module_id) == 1;
+            }
+        } else if (node.kind == RT_CORE_TRANSIENT_ENUM) {
+            ok = core_adopt_add(&plan, ((RtCoreEnum*)node.ptr)->payload, module_id) == 1;
+        } else if (node.kind == RT_CORE_TRANSIENT_CLOSURE) {
+            RtCoreClosure* closure = (RtCoreClosure*)node.ptr;
+            for (int64_t j = 0; j < closure->capture_count && ok; j++) {
+                ok = core_adopt_add(&plan, closure->captures[j], module_id) == 1;
+            }
+        } else if (node.kind == RT_CORE_TRANSIENT_RAW) {
+            for (size_t offset = 0; offset + sizeof(int64_t) <= node.bytes && ok;
+                    offset += sizeof(int64_t)) {
+                int64_t child;
+                memcpy(&child, (const uint8_t*)node.ptr + offset, sizeof(child));
+                ok = core_adopt_add(&plan, child, module_id) == 1;
+            }
+        }
+    }
+    if (ok && !core_session_reserve(plan.len)) ok = 0;
+    for (size_t i = 0; ok && i < plan.len; i++) {
+        RtCoreTransientNode node = plan.nodes[i];
+        uint32_t* object_scope = NULL;
+        switch (node.kind) {
+            case RT_CORE_TRANSIENT_STRING:
+                ((RtCoreString*)node.ptr)->reserved |= RT_CORE_STRING_FLAG_SESSION;
+                rt_core_session_heap_objects[rt_core_session_heap_object_len++] = node.ptr;
+                break;
+            case RT_CORE_TRANSIENT_ARRAY: object_scope = &((RtCoreArray*)node.ptr)->transient_scope_id; break;
+            case RT_CORE_TRANSIENT_DICT: object_scope = &((RtCoreDict*)node.ptr)->transient_scope_id; break;
+            case RT_CORE_TRANSIENT_ENUM: object_scope = &((RtCoreEnum*)node.ptr)->transient_scope_id; break;
+            case RT_CORE_TRANSIENT_FLOAT: object_scope = &((RtCoreFloat*)node.ptr)->transient_scope_id; break;
+            case RT_CORE_TRANSIENT_CLOSURE: object_scope = &((RtCoreClosure*)node.ptr)->transient_scope_id; break;
+            case RT_CORE_TRANSIENT_RAW: {
+#if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
+                if (!rt_transient_raw_promote((uintptr_t)node.ptr)) ok = 0;
+#else
+                RtCoreTransientRawAlloc* raw =
+                    rt_core_transient_raw_lookup((uintptr_t)node.ptr);
+                if (raw) {
+                    size_t raw_bytes = raw->bytes & RT_CORE_TRANSIENT_RAW_SIZE_MASK;
+                    if (!rt_persistent_raw_register(node.ptr, raw_bytes)) {
+                        ok = 0;
+                    } else {
+                        raw->bytes = raw_bytes;
+                    }
+                }
+#endif
+                break;
+            }
+        }
+        if (object_scope && *object_scope == module_id) {
+            *object_scope = session_id;
+            rt_core_session_heap_objects[rt_core_session_heap_object_len++] = node.ptr;
+        }
+    }
+    free(plan.nodes);
+    free(plan.seen);
+    rt_core_heap_lifecycle_release();
+    return ok ? 1 : 0;
+}
+
 static int8_t rt_core_array_reserve(SplArray* a, int64_t min_cap);
 
+#include "runtime_console_utf8_private.h"
 static void rt_core_write_bytes(FILE* stream, const uint8_t* ptr, uint64_t len) {
     if (!ptr || len == 0) return;
+#if defined(_WIN32)
+    if (rt_console_write_utf8(stream, ptr, (size_t)len)) return;
+#endif
     fwrite(ptr, 1, (size_t)len, stream);
 }
 
@@ -3220,12 +3991,85 @@ char* rt_stdin_read_line(void) {
     return NULL; /* EOF */
 }
 
-int64_t rt_stdin_read_line_text(void) {
-    char buf[4096];
-    if (!fgets(buf, sizeof(buf), stdin)) {
-        return rt_string_new(NULL, 0);
+/* Hosted text ABI: unlike the legacy raw/4096-byte helpers, read one complete
+ * UTF-8 line, preserve embedded NUL, and distinguish EOF (empty text) from an
+ * I/O or decoding error (NIL). Core-C has no Rust stdin-mock owner. */
+/* Single raw fd-0 byte reader shared by all stdin readers below. stdio
+ * read-ahead would swallow bytes that the other readers (or raw read(0)
+ * users) expect. Returns 1 (byte stored), 0 (EOF) or -1 (error). */
+static int stdin_raw_byte(uint8_t *out) {
+    for (;;) {
+#if defined(_WIN32)
+        int n = _read(0, out, 1);
+#else
+        ssize_t n = read(0, out, 1);
+#endif
+        if (n == 1) return 1;
+        if (n == 0) return 0;
+        if (errno == EINTR) continue;
+        return -1;
     }
-    return rt_string_new((const uint8_t*)buf, (int64_t)strlen(buf));
+}
+
+int64_t rt_read_stdin_line(void) {
+    uint8_t *bytes = NULL;
+    size_t length = 0, capacity = 0;
+    int failed = 0;
+    for (;;) {
+        uint8_t ch = 0;
+        int got = stdin_raw_byte(&ch);
+        if (got <= 0) {
+            failed = got < 0;
+            break;
+        }
+        if (length == capacity) {
+            if (capacity > (size_t)INT64_MAX / 2) {
+                failed = 1;
+                break;
+            }
+            size_t next_capacity = capacity ? capacity * 2 : 256;
+            uint8_t *next = (uint8_t *)rt_observed_realloc_v1(bytes, next_capacity);
+            if (!next) {
+                failed = 1;
+                break;
+            }
+            bytes = next;
+            capacity = next_capacity;
+        }
+        bytes[length++] = ch;
+        if (ch == '\n') break;
+    }
+    int64_t result = 0; /* RuntimeValue::NIL */
+    if (!failed && splc_utf8_valid_up_to(bytes, (int64_t)length) == (int64_t)length) {
+        if (length && bytes[length - 1] == '\n') {
+            --length;
+            if (length && bytes[length - 1] == '\r') --length;
+        }
+        result = rt_string_new(bytes, (uint64_t)length);
+    }
+    free(bytes);
+    return result;
+}
+
+int64_t rt_stdin_read_line_text(void) {
+    uint8_t *bytes = NULL;
+    size_t length = 0, capacity = 0;
+    for (;;) {
+        uint8_t ch = 0;
+        if (stdin_raw_byte(&ch) <= 0) break;
+        if (length == capacity) {
+            size_t next_capacity = capacity ? capacity * 2 : 256;
+            uint8_t *next = (uint8_t *)rt_observed_realloc_v1(bytes, next_capacity);
+            if (!next) break;
+            bytes = next;
+            capacity = next_capacity;
+        }
+        bytes[length++] = ch;
+        if (ch == '\n') break;
+    }
+    int64_t value = rt_string_new(bytes, (uint64_t)length);
+    free(bytes);
+    return value;
 }
 
 int64_t rt_stdin_read_chars_text(int64_t count) {
@@ -3236,19 +4080,22 @@ int64_t rt_stdin_read_chars_text(int64_t count) {
     if (!buf) {
         return rt_string_new(NULL, 0);
     }
-    size_t n = fread(buf, 1, (size_t)count, stdin);
+    size_t n = 0;
+    while (n < (size_t)count) {
+        uint8_t ch = 0;
+        if (stdin_raw_byte(&ch) <= 0) break;
+        buf[n++] = (char)ch;
+    }
     int64_t value = rt_string_new((const uint8_t*)buf, (int64_t)n);
     free(buf);
     return value;
 }
 
 int64_t stdin_read_char(void) {
-    int ch = fgetc(stdin);
-    if (ch == EOF) {
-        return rt_string_new(NULL, 0);
-    }
-    uint8_t byte = (uint8_t)ch;
-    return rt_string_new(&byte, 1);
+    /* EOF and errors yield the empty string. */
+    uint8_t byte = 0;
+    if (stdin_raw_byte(&byte) == 1) return rt_string_new(&byte, 1);
+    return rt_string_new(NULL, 0);
 }
 
 #if defined(_WIN32)
@@ -3285,7 +4132,7 @@ static void rt_win_set_binary_stdio(void) {
      * had already broken inventory generations. Make binary the process
      * default, which is the POSIX and Rust-std contract every caller assumes;
      * an explicit "t" still opts into translation. */
-#if defined(_MSC_VER)
+#if defined(_MSC_VER) || defined(_UCRT)
     _set_fmode(_O_BINARY);
 #else
     _fmode = _O_BINARY;
@@ -3305,10 +4152,18 @@ void (__cdecl *rt_win_set_binary_stdio_ptr)(void) = rt_win_set_binary_stdio_ctor
 #endif
 #endif /* _WIN32 */
 
+/* Shared read opens use the Windows long-path helper on Windows and stdio on
+ * other platforms. Keep this selector outside the Windows-only setup block. */
+#if defined(_WIN32)
+#define RT_FOPEN_READ_SHARED(p) rt_win_fopen_read_shared(p)
+#else
+#define RT_FOPEN_READ_SHARED(p) fopen((p), "rb")
+#endif
+
 int64_t rt_stdout_write_text(const char* s) {
     if (!s) return 0;
     int64_t len = (int64_t)strlen(s);
-    fputs(s, stdout);
+    rt_core_write_bytes(stdout, (const uint8_t*)s, (uint64_t)len);
     return len;
 }
 
@@ -3519,7 +4374,14 @@ int64_t rt_value_as_int(int64_t value) {
         }
         return rt_string_to_int_lenient(value);
     }
-    return rt_value_as_int_wide(value);
+    /* NOT rt_value_as_int_wide: that unbox passes any TAG_HEAP-shaped word
+     * through verbatim (container-read contract), which turned the RAW odd
+     * operands above (P4: 4097 -> 4097, 1 -> 1) into their own value instead
+     * of the bare shift. Same order as the Rust twin (value_ops.rs
+     * rt_value_as_int): a registered wide-int box decodes, else `>> 3`. */
+    RtCoreWideInt* wide = rt_core_as_heap_int(value);
+    if (wide) return wide->value;
+    return value >> 3;
 }
 
 /* Box an f64 into the tagged RuntimeValue representation. Floats are
@@ -3627,7 +4489,36 @@ int64_t rt_method_not_found(const uint8_t* type_name, uint64_t type_len,
     exit(70);
 }
 
-int64_t rt_interp_call(const uint8_t* name, uint64_t len, int64_t argc, int64_t argv) {
+/* Commit headroom (CommitLimit - CommitTotal) * PageSize via
+ * K32GetPerformanceInfo, resolved with GetProcAddress because the symbol
+ * lives in kernel32 on modern Windows. Use the SDK's typed layout: PageSize is at
+ * offset 80 on Win64; offset 88 contains HandleCount and ProcessCount.
+ * Same interpreter-first rationale as rt_host_memory_headroom_bytes_v1.
+ * Returns 0 when unavailable; callers keep the extern path as fallback. */
+int64_t rt_host_commit_headroom_bytes_v1(void) {
+#if defined(_WIN32)
+    HMODULE kernel32 = GetModuleHandleW(L"kernel32");
+    if (!kernel32) return 0;
+    typedef BOOL (WINAPI *QueryCommitFn)(PPERFORMANCE_INFORMATION, DWORD);
+    QueryCommitFn query = (QueryCommitFn)(void (*)(void))GetProcAddress(kernel32, "K32GetPerformanceInfo");
+    if (!query) return 0;
+    PERFORMANCE_INFORMATION info;
+    memset(&info, 0, sizeof(info));
+    info.cb = (uint32_t)sizeof(info);
+    if (query(&info, (DWORD)sizeof(info)) == 0) return 0;
+    uint64_t commit_total = info.CommitTotal;
+    uint64_t commit_limit = info.CommitLimit;
+    uint64_t page_size = info.PageSize;
+    if (commit_limit < commit_total || page_size == 0) return 0;
+    uint64_t headroom_pages = commit_limit - commit_total;
+    if (headroom_pages > (uint64_t)INT64_MAX / page_size) return 0;
+    return (int64_t)(headroom_pages * page_size);
+#else
+    return 0;
+#endif
+}
+
+int64_t rt_interp_call(const uint8_t* name, uint64_t len, int64_t argc, const uint64_t* argv) {
     (void)argc;
     (void)argv;
     return rt_function_not_found(name, len);
@@ -3747,10 +4638,107 @@ int64_t rt_string_new_literal(const uint8_t* bytes, uint64_t len) {
     return value;
 }
 
+/* A raw `char*` that is exactly the `data` member of a live registered heap
+ * string (the rt_interp_cstr decode used by `t!`, `match Some(s)`, `if val`,
+ * `.unwrap()` and `??` on a `text?`) still owns a length. strlen() on it cut
+ * binary-capable text at the first NUL (bug
+ * optional_text_unwrap_truncates_at_nul_2026-10-25: SCV digested 4158 of
+ * 11465 bytes). Same validation order as rt_core_transient_text_data_pointer:
+ * cheap rejects, then registry membership BEFORE the header is read, so an
+ * arbitrary pointer (e.g. a .rodata literal) is never dereferenced. */
+static RtCoreString* rt_core_string_from_data_pointer(int64_t value) {
+    const uint64_t data_off = offsetof(RtCoreString, data);
+    uint64_t w = (uint64_t)value;
+    if ((w & (sizeof(uint64_t) - 1)) != 0 || w <= 0x10000 + data_off) return NULL;
+    if (!atomic_load_explicit(&rt_core_immortal_nonempty, memory_order_acquire)) return NULL;
+    RtCoreString* s = (RtCoreString*)(uintptr_t)(w - data_off);
+    if (!rt_core_is_registered_immortal_ptr(s) ||
+            rt_core_registered_object_kind(s) != RT_VALUE_HEAP_STRING) {
+        return NULL;
+    }
+    return s;
+}
+
+static inline RtCoreString* rt_core_as_string_or_data(int64_t value) {
+    RtCoreString* s = rt_core_as_string(value);
+    if (s) return s;
+    return rt_core_string_from_data_pointer(value);
+}
+
 int64_t rt_string_len(int64_t string) {
     RtCoreString* s = rt_core_as_string(string);
     if (s) return (int64_t)s->len;
-    return string >= 0x10000 ? (int64_t)strlen((const char*)(uintptr_t)string) : -1;
+    if (string < 0x10000) return -1;
+    RtCoreString* owner = rt_core_string_from_data_pointer(string);
+    if (owner) return (int64_t)owner->len;
+    return (int64_t)strlen((const char*)(uintptr_t)string);
+}
+
+/* ADR-005 item 5: the user-facing text unit is the CODE POINT. rt_string_len
+ * above stays the BYTE primitive (byte_len(), the (data, len) text extern ABI,
+ * every internal caller); rt_string_char_count / rt_len's text arm / rt_slice
+ * / the find family route through these helpers. Twins of the Rust runtime's
+ * text_cp_len_bytes / text_byte_to_cp / text_cp_to_byte (collections.rs).
+ * ASCII fast path: one word-at-a-time high-bit scan, then byte == code point. */
+static uint64_t rt_utf8_width(const char* data, uint64_t i, uint64_t len); /* defined below */
+
+static int spl_text_bytes_ascii(const uint8_t* d, uint64_t len) {
+    uint64_t i = 0;
+    for (; i + 8 <= len; i += 8) {
+        uint64_t w;
+        memcpy(&w, d + i, 8);
+        if (w & 0x8080808080808080ULL) return 0;
+    }
+    for (; i < len; i++) {
+        if (d[i] & 0x80) return 0;
+    }
+    return 1;
+}
+
+static uint64_t spl_text_cp_len_bytes(const uint8_t* d, uint64_t len) {
+    if (spl_text_bytes_ascii(d, len)) return len;
+    uint64_t n = 0;
+    for (uint64_t i = 0; i < len; i++) {
+        if ((d[i] & 0xC0) != 0x80) n++;
+    }
+    return n;
+}
+
+/* Byte offset of code-point index `cp`; `len` past the end. */
+static uint64_t spl_text_cp_to_byte(const uint8_t* d, uint64_t len, uint64_t cp) {
+    if (spl_text_bytes_ascii(d, len)) return cp < len ? cp : len;
+    uint64_t seen = 0;
+    for (uint64_t i = 0; i < len; i++) {
+        if ((d[i] & 0xC0) != 0x80) {
+            if (seen == cp) return i;
+            seen++;
+        }
+    }
+    return len;
+}
+
+/* The `reserved` flag word is shared by every thread holding the string, so
+ * the memo bit is read and set atomically (lockless; a plain `|=` is a
+ * read-modify-write that can drop a bit set concurrently). */
+static int spl_core_string_is_ascii(RtCoreString* s) {
+    if (__atomic_load_n(&s->reserved, __ATOMIC_RELAXED) & RT_CORE_STRING_FLAG_ASCII) return 1;
+    if (!spl_text_bytes_ascii((const uint8_t*)s->data, s->len)) return 0;
+    __atomic_fetch_or(&s->reserved, RT_CORE_STRING_FLAG_ASCII, __ATOMIC_RELAXED);
+    return 1;
+}
+
+static int64_t spl_core_string_cp_len(RtCoreString* s) {
+    /* Cached path first: one atomic load instead of an O(n) scan on every
+     * call (rt_slice / rt_text_find / len() re-enter here per piece). */
+    int64_t cached = rt_str_cached_cp_count(s);
+    if (cached >= 0) return cached;
+    if (spl_core_string_is_ascii(s)) {
+        rt_str_cache_cp_count(s, s->len);
+        return (int64_t)s->len;
+    }
+    uint64_t n = spl_text_cp_len_bytes((const uint8_t*)s->data, s->len);
+    rt_str_cache_cp_count(s, n);
+    return (int64_t)n;
 }
 
 /* The raw-pointer fallback MUST mirror rt_string_len's, with the identical
@@ -3773,7 +4761,7 @@ const uint8_t* rt_string_data(int64_t string) {
 }
 
 int64_t rt_string_bytes(int64_t string) {
-    RtCoreString* s = rt_core_as_string(string);
+    RtCoreString* s = rt_core_as_string_or_data(string);
     SplArray* bytes = rt_array_new(s ? (int64_t)s->len : 0);
     if (!bytes) return rt_core_nil();
     if (s) {
@@ -3789,7 +4777,7 @@ int64_t rt_string_bytes(int64_t string) {
 }
 
 int64_t rt_string_chars(int64_t string) {
-    RtCoreString* s = rt_core_as_string(string);
+    RtCoreString* s = rt_core_as_string_or_data(string);
     SplArray* chars = rt_array_new(s ? (int64_t)s->len : 0);
     if (!chars) return rt_core_nil();
     if (!s) return (int64_t)(uintptr_t)chars;
@@ -3830,7 +4818,7 @@ int64_t rt_string_builder_new(void) {
 
 int64_t rt_string_builder_push(int64_t handle, int64_t string) {
     RtStringBuilder* builder = rt_string_builder_from_handle(handle);
-    RtCoreString* value = rt_core_as_string(string);
+    RtCoreString* value = rt_core_as_string_or_data(string);
     if (!builder || !value) return 0;
     if (value->len == 0) return 1;
     if (value->len > SIZE_MAX - builder->len) return 0;
@@ -3930,12 +4918,13 @@ static uint64_t rt_str_first_non_ascii(const uint8_t* data, uint64_t len) {
  * strings are immutable and the flag is positive-only (set => proven ASCII;
  * unset => unknown), so a missed cache only costs a rescan, never a wrong answer.
  *
- * NOTE: deliberately does NOT touch the cp-count field (bits [29:0]). That field
- * overlaps RT_CORE_STRING_FLAG_SHARED at bit 0, so writing a cp-count would clear
- * the SHARED bit and defeat rt_string_free's refusal to free interned literals.
- * See the report accompanying this change. */
+ * NOTE: deliberately does NOT touch the cp-count field. That field shares the
+ * `reserved` word with RT_CORE_STRING_FLAG_* (low nibble); the layout in
+ * runtime_simd_dispatch.h now keeps them disjoint (count in bits [29:4], valid
+ * at bit 30, ASCII memo at bit 3), but this fast path has no count to write.
+ * See doc/08_tracking/bug/rt_text_slice_cp_index_quadratic_scv_prime_hang_2026-11-12.md. */
 int64_t rt_string_char_code_at(int64_t string, int64_t index) {
-    RtCoreString* s = rt_core_as_string(string);
+    RtCoreString* s = rt_core_as_string_or_data(string);
     const uint8_t* data;
     uint64_t len;
     uint64_t byte_index = 0;
@@ -3960,7 +4949,7 @@ int64_t rt_string_char_code_at(int64_t string, int64_t index) {
         uint64_t first_hi = rt_str_first_non_ascii(data, len);
         if (first_hi == len) {
             /* Whole string is ASCII: char index == byte index, now and forever. */
-            if (s) s->reserved |= SIMD_CACHE_FLAG_IS_ASCII;
+            if (s) __atomic_fetch_or(&s->reserved, SIMD_CACHE_FLAG_IS_ASCII, __ATOMIC_RELAXED);
             return data[index];
         }
         if (first_hi > (uint64_t)index) {
@@ -4002,9 +4991,13 @@ int64_t __simple_rt_string_char_code_at(int64_t string, int64_t index) {
  * (e.g. the web renderer's browser_renderer_protocol.spl scanning for byte
  * 10 '\n' / 44 ',') index the raw UTF-8 buffer directly, so a character
  * index would desync the frame at the first multi-byte codepoint.
- * O(1): straight buffer read, no codepoint walk needed. */
+ * Expected O(1) for counted strings and their validated data borrows.
+ * Foreign C strings retain an O(n) NUL-terminated length scan. */
 int64_t rt_string_byte_at(int64_t string, int64_t index) {
-    RtCoreString* s = rt_core_as_string(string);
+    /* A live counted string retains its length when a text ABI exposes its
+     * data pointer. Validate that existing owner before falling back to strlen
+     * for genuinely foreign C strings; never cache foreign-pointer lengths. */
+    RtCoreString* s = rt_core_as_string_or_data(string);
     const uint8_t* data;
     uint64_t len;
     if (index < 0) return 0;
@@ -4030,6 +5023,46 @@ int64_t rt_string_char_at(int64_t string, int64_t index) {
     return rt_string_new((const uint8_t*)s->data + index, 1);
 }
 
+/* One checked allocation owner for infallible tagged text concatenation.
+ * Fault injection is compiled only into the focused native selfcheck. */
+#ifdef RT_STRING_CONCAT_TESTING
+static int rt_concat_test_fault_v1;
+#endif
+static int64_t rt_core_concat_bytes_v1(const uint8_t* left, uint64_t left_len,
+                                      const uint8_t* right, uint64_t right_len) {
+    if (left_len > UINT64_MAX - right_len)
+        spl_panic("text concat: length overflow");
+    const uint64_t length = left_len + right_len;
+    if (length > SIZE_MAX - sizeof(RtCoreString) - 1)
+        spl_panic("text concat: allocation size overflow");
+    RtCoreString* out = NULL;
+#ifdef RT_STRING_CONCAT_TESTING
+    if (rt_concat_test_fault_v1 == 1) rt_concat_test_fault_v1 = 0;
+    else
+#endif
+    out = (RtCoreString*)rt_observed_malloc_v1(sizeof(RtCoreString) + (size_t)length + 1);
+    if (!out) spl_panic("text concat: allocation failed");
+    out->kind = RT_VALUE_HEAP_STRING;
+    out->reserved = 0;
+    out->len = length;
+    if (left_len) memcpy(out->data, left, (size_t)left_len);
+    if (right_len) memcpy(out->data + (size_t)left_len, right, (size_t)right_len);
+    out->data[(size_t)length] = '\0';
+    int registered;
+#ifdef RT_STRING_CONCAT_TESTING
+    if (rt_concat_test_fault_v1 == 2) {
+        rt_concat_test_fault_v1 = 0;
+        registered = 0;
+    } else
+#endif
+    registered = rt_core_register_string(out);
+    if (!registered) {
+        free(out);
+        spl_panic("text concat: registration failed");
+    }
+    return (int64_t)(((uint64_t)(uintptr_t)out) | RT_VALUE_TAG_HEAP);
+}
+
 int64_t rt_string_concat(int64_t left, int64_t right) {
     RtCoreString* a = rt_core_as_string(left);
     RtCoreString* b = rt_core_as_string(right);
@@ -4043,33 +5076,9 @@ int64_t rt_string_concat(int64_t left, int64_t right) {
         right_text = rt_to_string(right);
         b = rt_core_as_string(right_text);
     }
-    if (!a || !b) return rt_core_nil();
-
-    /* a->len + b->len can wrap uint64_t for adversarial/corrupt inputs. A
-     * wrapped small `len` still succeeds malloc (so the `!out` check below
-     * never fires) but the memcpy calls below still copy the ORIGINAL
-     * un-wrapped a->len/b->len bytes, writing far past the undersized
-     * allocation and corrupting whatever heap object follows it. Reject
-     * loudly via the file's established unrecoverable-error convention
-     * (spl_panic, see rt_panic/panic above) instead of truncating or
-     * returning a plausible-looking nil. */
-    if (a->len > UINT64_MAX - b->len) {
-        spl_panic("rt_string_concat: length overflow");
-    }
-    uint64_t len = a->len + b->len;
-    RtCoreString* out = (RtCoreString*)rt_observed_malloc_v1(sizeof(RtCoreString) + (size_t)len + 1);
-    if (!out) return rt_core_nil();
-    out->kind = RT_VALUE_HEAP_STRING;
-    out->reserved = 0;
-    out->len = len;
-    if (a->len > 0) memcpy(out->data, a->data, (size_t)a->len);
-    if (b->len > 0) memcpy(out->data + a->len, b->data, (size_t)b->len);
-    out->data[len] = '\0';
-    if (!rt_core_register_string(out)) {
-        free(out);
-        return rt_core_nil();
-    }
-    return (int64_t)(((uint64_t)(uintptr_t)out) | RT_VALUE_TAG_HEAP);
+    if (!a || !b) spl_panic("text concat: conversion failed");
+    return rt_core_concat_bytes_v1((const uint8_t*)a->data, a->len,
+                                   (const uint8_t*)b->data, b->len);
 }
 
 /// Runtime dispatch for `any + any`: if either operand is a heap string, perform
@@ -4136,7 +5145,9 @@ int64_t rt_tagged_add(int64_t left, int64_t right) {
 
 int64_t rt_len(int64_t value) {
     RtCoreString* s = rt_core_as_string(value);
-    if (s) return (int64_t)s->len;
+    /* User-facing `.len()` on text counts code points (ADR-005 item 5); the
+     * byte length is rt_string_len / byte_len(). */
+    if (s) return spl_core_string_cp_len(s);
     RtCoreArray* a = rt_core_as_array(value);
     return a ? a->len : 0;
 }
@@ -4283,65 +5294,31 @@ static int64_t rt_core_format_array_like(RtCoreArray* array, int is_tuple) {
     return rt_string_builder_finish(sb);
 }
 
-/* rt_core_format_dict -- Oracle (interpreter): "{k: v, ...}", entries sorted
- * ascending by their RENDERED key string (byte-wise, not numeric -- verified:
- * a Dict<i64,text> with keys 1, 10, 2 prints "{1: x, 10: y, 2: z}", the same
- * order "1" < "10" < "2" sorts as plain strings), bare/unquoted keys and
- * values (verified: {"a": "hello"} prints "{a: hello}", no quotes anywhere),
- * empty dict -> "{}". Keys/values recurse through rt_to_string. */
-typedef struct RtCoreDictSortEntry {
-    int64_t key_str;   /* rendered key, tagged rt_string handle */
-    int64_t value;     /* raw tagged value, rendered lazily during emit */
-} RtCoreDictSortEntry;
-
-static int rt_core_dict_sort_entry_less(int64_t a_str, int64_t b_str) {
-    RtCoreString* a = rt_core_as_string(a_str);
-    RtCoreString* b = rt_core_as_string(b_str);
-    if (!a || !b) return 0;
-    uint64_t min_len = a->len < b->len ? a->len : b->len;
-    int cmp = min_len > 0 ? memcmp(a->data, b->data, (size_t)min_len) : 0;
-    if (cmp != 0) return cmp < 0;
-    return a->len < b->len;
-}
-
+/* rt_core_format_dict -- Oracle (interpreter): "{k: v, ...}" in INSERTION
+ * order (doc/07_guide/language/dict_iteration_order.md), bare/unquoted keys
+ * and values (verified: {"a": "hello"} prints "{a: hello}", no quotes
+ * anywhere), empty dict -> "{}". Keys/values recurse through rt_to_string. */
 static int64_t rt_core_format_dict(RtCoreDict* dict) {
-    int64_t n = dict->len;
-    if (n <= 0) return rt_string_new((const uint8_t*)"{}", 2);
-    RtCoreDictSortEntry* entries = (RtCoreDictSortEntry*)rt_observed_malloc_v1((size_t)n * sizeof(RtCoreDictSortEntry));
-    if (!entries) return rt_string_new((const uint8_t*)"{}", 2);
+    if (dict->len <= 0) return rt_string_new((const uint8_t*)"{}", 2);
     int64_t out_i = 0;
-    for (int64_t i = 0; i < dict->cap && out_i < n; i++) {
-        if (dict->entries[i].occupied != 1) continue;
-        entries[out_i].key_str = rt_to_string(dict->entries[i].key);
-        entries[out_i].value = dict->entries[i].value;
-        out_i++;
-    }
-    /* Insertion sort: dict print sizes are small in practice and this keeps
-     * the comparator a plain function (no qsort_r portability concerns). */
-    for (int64_t i = 1; i < out_i; i++) {
-        RtCoreDictSortEntry cur = entries[i];
-        int64_t j = i - 1;
-        while (j >= 0 && rt_core_dict_sort_entry_less(cur.key_str, entries[j].key_str)) {
-            entries[j + 1] = entries[j];
-            j--;
-        }
-        entries[j + 1] = cur;
-    }
+    int64_t* slots = core_dict_ordered_slots(dict, &out_i);
+    if (!slots) return rt_string_new((const uint8_t*)"{}", 2);
     int64_t sb = rt_string_builder_new();
     if (!sb) {
-        free(entries);
+        free(slots);
         return rt_string_new((const uint8_t*)"{}", 2);
     }
     rt_string_builder_push(sb, rt_string_new((const uint8_t*)"{", 1));
     int64_t sep = rt_string_new((const uint8_t*)", ", 2);
     int64_t colon = rt_string_new((const uint8_t*)": ", 2);
     for (int64_t i = 0; i < out_i; i++) {
+        RtCoreDictEntry* e = &dict->entries[slots[i]];
         if (i > 0) rt_string_builder_push(sb, sep);
-        rt_string_builder_push(sb, entries[i].key_str);
+        rt_string_builder_push(sb, rt_to_string(e->key));
         rt_string_builder_push(sb, colon);
-        rt_string_builder_push(sb, rt_to_string(entries[i].value));
+        rt_string_builder_push(sb, rt_to_string(e->value));
     }
-    free(entries);
+    free(slots);
     rt_string_builder_push(sb, rt_string_new((const uint8_t*)"}", 1));
     return rt_string_builder_finish(sb);
 }
@@ -4362,6 +5339,53 @@ static int64_t rt_core_format_dict(RtCoreDict* dict) {
  * "Option::Some(3)", None -> "Option::None", Result Ok(7) -> "Result::Ok(7)",
  * Err("bad") -> "Result::Err(bad)". Returns rt_core_nil() to signal "not
  * handled, fall through" (nil is never a real formatted string result). */
+/* User-enum display names, registered by codegen next to each enum
+ * construction (rt_enum_register_name). Lockless open-addressed table: a slot
+ * is claimed by CAS on its key, then its name is published with a release
+ * store; readers acquire-load the name and skip slots whose name is not yet
+ * published. Names point into immutable module data and are never freed. */
+#define RT_ENUM_NAME_SLOTS 4096
+typedef struct RtEnumNameSlot {
+    _Atomic uint64_t key;          /* (enum_id << 32 | disc) + 1; 0 = empty */
+    _Atomic(const uint8_t*) name;
+    int64_t len;
+    int64_t arity;
+} RtEnumNameSlot;
+static RtEnumNameSlot rt_enum_name_slots[RT_ENUM_NAME_SLOTS];
+
+static RtEnumNameSlot* rt_enum_name_find(uint64_t key, int claim) {
+    uint64_t h = key * 0x9E3779B97F4A7C15ull;
+    for (uint32_t i = 0; i < RT_ENUM_NAME_SLOTS; i++) {
+        RtEnumNameSlot* slot = &rt_enum_name_slots[(h + i) & (RT_ENUM_NAME_SLOTS - 1)];
+        uint64_t cur = atomic_load_explicit(&slot->key, memory_order_acquire);
+        if (cur == key) return slot;
+        if (cur == 0) {
+            if (!claim) return NULL;
+            uint64_t expected = 0;
+            if (atomic_compare_exchange_strong_explicit(&slot->key, &expected, key,
+                    memory_order_acq_rel, memory_order_acquire)) {
+                return slot;
+            }
+            if (expected == key) return slot;
+        }
+    }
+    return NULL;
+}
+
+void rt_enum_register_name(int32_t enum_id, int32_t discriminant, const uint8_t* name, int64_t len, int64_t arity) {
+    if (!name || len <= 0) return;
+    uint64_t key = (((uint64_t)(uint32_t)enum_id << 32) | (uint32_t)discriminant) + 1;
+    RtEnumNameSlot* slot = rt_enum_name_find(key, 0);
+    if (slot && atomic_load_explicit(&slot->name, memory_order_acquire)) return;
+    slot = rt_enum_name_find(key, 1);
+    if (!slot) return;
+    const uint8_t* expected = NULL;
+    slot->len = len;
+    slot->arity = arity;
+    atomic_compare_exchange_strong_explicit(&slot->name, &expected, name,
+        memory_order_release, memory_order_relaxed);
+}
+
 static int64_t rt_core_format_enum(RtCoreEnum* e) {
     int64_t id = (int64_t)e->enum_id;
     int64_t disc = (int64_t)e->discriminant;
@@ -4388,14 +5412,43 @@ static int64_t rt_core_format_enum(RtCoreEnum* e) {
         rt_string_builder_push(sb, rt_string_new((const uint8_t*)")", 1));
         return rt_string_builder_finish(sb);
     }
-    /* Custom user enum: no name metadata reaches the runtime -- fall through
-     * (caller must treat rt_core_nil() as "not handled"). */
-    return rt_core_nil();
+    /* Custom user enum: use the codegen-registered name when present,
+     * otherwise fall through (caller treats rt_core_nil() as "not handled"). */
+    uint64_t key = (((uint64_t)(uint32_t)id << 32) | (uint32_t)disc) + 1;
+    RtEnumNameSlot* slot = rt_enum_name_find(key, 0);
+    const uint8_t* name = slot ? atomic_load_explicit(&slot->name, memory_order_acquire) : NULL;
+    if (!name) return rt_core_nil();
+    int64_t name_str = rt_string_new(name, (uint64_t)slot->len);
+    if (slot->arity <= 0) return name_str;
+    int64_t sb = rt_string_builder_new();
+    rt_string_builder_push(sb, name_str);
+    rt_string_builder_push(sb, rt_string_new((const uint8_t*)"(", 1));
+    SplArray* items = slot->arity > 1 ? (SplArray*)(uintptr_t)e->payload : NULL;
+    if (items && rt_core_array_ptr(items)) {
+        int64_t n = rt_array_len(items);
+        for (int64_t i = 0; i < n; i++) {
+            if (i > 0) rt_string_builder_push(sb, rt_string_new((const uint8_t*)", ", 2));
+            rt_string_builder_push(sb, rt_to_string(rt_array_get(items, i)));
+        }
+    } else {
+        rt_string_builder_push(sb, rt_to_string(e->payload));
+    }
+    rt_string_builder_push(sb, rt_string_new((const uint8_t*)")", 1));
+    return rt_string_builder_finish(sb);
 }
 
 int64_t rt_raw_u64_to_string(int64_t raw) {
     char buf[32];
     int len = snprintf(buf, sizeof(buf), "%llu", (unsigned long long)(uint64_t)raw);
+    return rt_string_new((const uint8_t*)buf, len > 0 ? (uint64_t)len : 0);
+}
+
+/* rt_i64_to_hex: `n.to_hex()` -- lowercase two's-complement hex, no prefix;
+ * twin of the Rust runtime and the interpreter's format!("{:x}", n).
+ * doc/08_tracking/bug/jit_primitive_method_parity_gaps_2026-11-13.md */
+int64_t rt_i64_to_hex(int64_t raw) {
+    char buf[24];
+    int len = snprintf(buf, sizeof(buf), "%llx", (unsigned long long)(uint64_t)raw);
     return rt_string_new((const uint8_t*)buf, len > 0 ? (uint64_t)len : 0);
 }
 
@@ -4422,24 +5475,41 @@ int64_t rt_raw_i64_to_string(int64_t raw) {
 /* Forward decl: rt_raw_f64_to_string is defined further below in this file. */
 int64_t rt_raw_f64_to_string(double v);
 
+/* Seed optional semantics = pure Simple (owner rule 2026-11-06): a present
+ * flat optional renders as `Option::Some(v)` and nil as `Option::None`,
+ * matching the interpreter oracle.
+ * Bug: doc/08_tracking/bug/parse_family_strips_option_jit_native_2026-08-02.md */
+static int64_t rt_opt_wrap_some(int64_t inner) {
+    int64_t pre = rt_string_new((const uint8_t*)"Option::Some(", 13);
+    int64_t post = rt_string_new((const uint8_t*)")", 1);
+    return rt_string_concat(rt_string_concat(pre, inner), post);
+}
+
+int64_t rt_value_to_string(int64_t v);
+/* Tagged flat-optional value (string-interpolation sink). */
+int64_t rt_opt_value_to_string(int64_t v) {
+    if (v == rt_core_nil()) return rt_string_new((const uint8_t*)"Option::None", 12);
+    return rt_opt_wrap_some(rt_value_to_string(v));
+}
+
 int64_t rt_opt_i64_to_string(int64_t raw) {
-    if (raw == rt_core_nil()) return rt_string_new((const uint8_t*)"nil", 3);
-    char buf[32];
-    int len = snprintf(buf, sizeof(buf), "%lld", (long long)raw);
+    if (raw == rt_core_nil()) return rt_string_new((const uint8_t*)"Option::None", 12);
+    char buf[48];
+    int len = snprintf(buf, sizeof(buf), "Option::Some(%lld)", (long long)raw);
     return rt_string_new((const uint8_t*)buf, len > 0 ? (uint64_t)len : 0);
 }
 
 int64_t rt_opt_bool_to_string(int64_t raw) {
-    if (raw == rt_core_nil()) return rt_string_new((const uint8_t*)"nil", 3);
-    if (raw != 0) return rt_string_new((const uint8_t*)"true", 4);
-    return rt_string_new((const uint8_t*)"false", 5);
+    if (raw == rt_core_nil()) return rt_string_new((const uint8_t*)"Option::None", 12);
+    if (raw != 0) return rt_string_new((const uint8_t*)"Option::Some(true)", 18);
+    return rt_string_new((const uint8_t*)"Option::Some(false)", 19);
 }
 
 int64_t rt_opt_f64_to_string(int64_t raw) {
-    if (raw == rt_core_nil()) return rt_string_new((const uint8_t*)"nil", 3);
+    if (raw == rt_core_nil()) return rt_string_new((const uint8_t*)"Option::None", 12);
     double v;
     memcpy(&v, &raw, sizeof(double));
-    return rt_raw_f64_to_string(v);
+    return rt_opt_wrap_some(rt_raw_f64_to_string(v));
 }
 
 /* rt_raw_bool_to_string — same "raw operand, no tag check" contract as
@@ -4727,11 +5797,10 @@ static int rt_core_enum_eq(
         rt_core_value_eq_inner(left->payload, right->payload, visited, visited_len);
 }
 
-static int rt_core_value_eq_inner(
-    int64_t left,
-    int64_t right,
-    RtCoreEqPair* visited,
-    size_t visited_len) {
+/* Equality for everything that is not an array/enum (identity, float, wide
+ * int, special, string). Returns 0/1 when decided, -1 when the operands may be
+ * containers and the caller must compare them structurally. */
+static int rt_core_eq_leaf(int64_t left, int64_t right) {
     if (left == right) return 1;
     if (rt_core_is_float(left) || rt_core_is_float(right)) {
         return rt_core_is_float(left) && rt_core_is_float(right) &&
@@ -4748,6 +5817,16 @@ static int rt_core_value_eq_inner(
         if (!a || !b || a->len != b->len) return 0;
         return a->len == 0 || memcmp(a->data, b->data, (size_t)a->len) == 0;
     }
+    return -1;
+}
+
+static int rt_core_value_eq_inner(
+    int64_t left,
+    int64_t right,
+    RtCoreEqPair* visited,
+    size_t visited_len) {
+    int leaf = rt_core_eq_leaf(left, right);
+    if (leaf >= 0) return leaf;
     RtCoreArray* left_array = rt_core_as_registered_array(left);
     RtCoreArray* right_array = rt_core_as_registered_array(right);
     if (left_array || right_array) {
@@ -4762,23 +5841,8 @@ static int rt_core_value_eq_inner(
 }
 
 int64_t rt_native_eq(int64_t left, int64_t right) {
-    if (left == right) return 1;
-    if (rt_core_is_float(left) || rt_core_is_float(right)) {
-        return rt_core_is_float(left) && rt_core_is_float(right) &&
-            rt_core_as_float(left) == rt_core_as_float(right);
-    }
-    {
-        int numeric = spl_core_heap_int_eq(left, right);
-        if (numeric >= 0) return numeric;
-    }
-    if (rt_core_is_special(left) || rt_core_is_special(right)) return 0;
-    RtCoreString* left_string = rt_core_as_string(left);
-    RtCoreString* right_string = rt_core_as_string(right);
-    if (left_string || right_string) {
-        if (!left_string || !right_string || left_string->len != right_string->len) return 0;
-        return left_string->len == 0 ||
-            memcmp(left_string->data, right_string->data, (size_t)left_string->len) == 0;
-    }
+    int leaf = rt_core_eq_leaf(left, right);
+    if (leaf >= 0) return leaf;
     RtCoreArray* left_array = rt_core_as_registered_array(left);
     RtCoreArray* right_array = rt_core_as_registered_array(right);
     RtCoreEnum* left_enum = rt_core_as_registered_enum(left);
@@ -4821,11 +5885,11 @@ int64_t rt_text_eq_fast(int64_t left, int64_t right) {
  * expr_dispatch.spl, which now routes here whenever local_is_str() says
  * either operand is string-shaped).
  *
- * Root fix: normalize BOTH operands to a raw null-terminated buffer via the
- * same tagged-or-raw runtime detection rt_interp_cstr already uses for
- * string-interpolation operands (bug #136), then compare byte content. This
- * handles all four combinations (tagged/tagged, tagged/raw, raw/tagged,
- * raw/raw) without any compile-time guess about which side is which --
+ * Root fix: normalize BOTH operands to a byte view via the same tagged-or-raw
+ * runtime detection used for string-interpolation operands (bug #136). Tagged
+ * strings retain their stored length (including embedded NUL bytes); raw C
+ * strings use strlen. This handles all four combinations (tagged/tagged,
+ * tagged/raw, raw/tagged, raw/raw) without any compile-time guess about which side is which --
  * unlike rt_string_eq/rt_native_eq above, which require BOTH sides already
  * tagged and so silently return 0 (never equal) for a raw literal operand. */
 int64_t rt_text_eq_any(int64_t left, int64_t right) {
@@ -4840,11 +5904,26 @@ int64_t rt_text_eq_any(int64_t left, int64_t right) {
      * selfcheck: src/runtime/test/rt_text_eq_any_nil_sentinel_selfcheck.c).
      * nil == nil is EQUAL; nil vs any real string is NOT. */
     if (left == rt_core_nil() || right == rt_core_nil()) return left == right ? 1 : 0;
-    const char* a = rt_interp_cstr(left);
-    const char* b = rt_interp_cstr(right);
-    if (!a || !b) return 0;
-    if (a == b) return 1;
-    return strcmp(a, b) == 0 ? 1 : 0;
+    const char* a;
+    const char* b;
+    size_t a_len;
+    size_t b_len;
+    RtCoreString* left_string = rt_core_as_string_or_data(left);
+    RtCoreString* right_string = rt_core_as_string_or_data(right);
+    if (left_string) {
+        a = left_string->data;
+        a_len = (size_t)left_string->len;
+    } else {
+        if (!rt_text_view_abi(left, &a, &a_len)) return 0;
+    }
+    if (right_string) {
+        b = right_string->data;
+        b_len = (size_t)right_string->len;
+    } else {
+        if (!rt_text_view_abi(right, &b, &b_len)) return 0;
+    }
+    if (a_len != b_len) return 0;
+    return a_len == 0 || memcmp(a, b, a_len) == 0;
 }
 
 int64_t rt_native_neq(int64_t left, int64_t right) {
@@ -4860,15 +5939,28 @@ int64_t rt_native_neq(int64_t left, int64_t right) {
  * `"foo" < "bar"` native said true, oracle interpreter said false --
  * whichever literal happened to be malloc'd/placed at the lower address
  * "won", entirely unrelated to alphabetical order). Same tagged-or-raw
- * normalization as rt_text_eq_any, then a real byte-wise strcmp. Returns a
+ * normalization as rt_text_eq_any, then length-aware byte comparison. Returns a
  * strcmp-style signed result (the caller compares this against 0 with the
  * requested predicate). */
 int64_t rt_text_cmp_any(int64_t left, int64_t right) {
-    const char* a = rt_interp_cstr(left);
-    const char* b = rt_interp_cstr(right);
-    if (!a) a = "";
-    if (!b) b = "";
-    return (int64_t)strcmp(a, b);
+    RtCoreString* left_string = rt_core_as_string_or_data(left);
+    RtCoreString* right_string = rt_core_as_string_or_data(right);
+    const char* a = "";
+    const char* b = "";
+    size_t a_view = 0;
+    size_t b_view = 0;
+    if (left_string) { a = left_string->data; a_view = (size_t)left_string->len; }
+    else (void)rt_text_view_abi(left, &a, &a_view);
+    if (right_string) { b = right_string->data; b_view = (size_t)right_string->len; }
+    else (void)rt_text_view_abi(right, &b, &b_view);
+    uint64_t a_len = (uint64_t)a_view;
+    uint64_t b_len = (uint64_t)b_view;
+    if (a_len > SIZE_MAX || b_len > SIZE_MAX)
+        spl_panic("text compare: size overflow");
+    size_t common = (size_t)(a_len < b_len ? a_len : b_len);
+    int prefix = common ? memcmp(a, b, common) : 0;
+    if (prefix) return prefix;
+    return a_len < b_len ? -1 : (a_len > b_len ? 1 : 0);
 }
 
 /* 2026-08-01: ordering counterpart of rt_native_eq, for `<` `<=` `>` `>=`
@@ -4984,6 +6076,58 @@ int64_t spl_ordered_key_cmp(int64_t left, int64_t right) {
     return a < b ? -1 : (a > b ? 1 : 0);
 }
 
+/* `.hash()` on an erased generic value (`key.hash()` with `key: K`, e.g.
+ * Map.hash_key). Erased bodies carry no trait dictionary, so 50.mir lowers
+ * the call here. Keys equal under rt_native_eq hash equally:
+ *   - text: FNV-1a over the bytes (= rt_hash_text = std.hash Hash for text)
+ *   - integer words and wide/unsigned boxes: the value (= Hash for i64)
+ *   - registered boxed floats: IEEE bits, with both zeros hashing to 0
+ * Any other registered handle (array, tuple, dict, enum, struct allocation)
+ * has no address-free hash at this boundary; abort instead of hashing its
+ * address. A non-heap word (raw integer, bool, inline float) is equal under
+ * rt_native_eq only to the identical word, so hashing its value is
+ * consistent. Hash values for floats/bools need not match std.hash's typed
+ * impls: only agreement with erased equality is promised. */
+static void spl_erased_key_hash_refuse(const char* what, unsigned kind) {
+    fprintf(stderr, "spl_erased_key_hash: key type has no supported native hash (%s %u)\n",
+        what, kind);
+    abort();
+}
+
+int64_t spl_erased_key_hash(int64_t value) {
+    uintptr_t raw = (uintptr_t)value;
+    uintptr_t candidate = (raw & RT_VALUE_TAG_MASK) == RT_VALUE_TAG_HEAP
+        ? raw & ~RT_VALUE_TAG_MASK : raw;
+    int registered_leaf = 0;
+    if (candidate >= 4096 &&
+            rt_core_is_registered_immortal_ptr((void*)candidate)) {
+        uint32_t kind = rt_core_registered_object_kind((void*)candidate);
+        if (kind != RT_VALUE_HEAP_STRING && kind != RT_VALUE_HEAP_FLOAT &&
+                kind != RT_VALUE_HEAP_INT && kind != RT_VALUE_HEAP_UINT)
+            spl_erased_key_hash_refuse("heap kind", (unsigned)kind);
+        registered_leaf = 1;
+    }
+    /* Records live in the struct allocation registry, not the immortal one. */
+    if (rt_struct_receiver_valid(value, 0, 1))
+        spl_erased_key_hash_refuse("struct allocation", 0);
+    if (rt_core_as_string(value)) return rt_hash_text(value);
+    RtCoreFloat* boxed_float = rt_core_as_heap_float(value);
+    if (boxed_float) {
+        double d = boxed_float->value;
+        if (d == 0.0) return 0;
+        uint64_t bits;
+        memcpy(&bits, &d, sizeof(bits));
+        return (int64_t)bits;
+    }
+    RtCoreUInt* boxed_uint = rt_core_as_heap_uint(value);
+    if (boxed_uint) return (int64_t)boxed_uint->value;
+    if (rt_core_as_heap_int(value)) return rt_core_numeric_arg(value);
+    /* A registered leaf the decoders above did not accept (an untagged
+     * string pointer, say) would otherwise hash its address. */
+    if (registered_leaf) spl_erased_key_hash_refuse("undecoded registered leaf", 0);
+    return rt_core_numeric_arg(value);
+}
+
 /* Shared telemetry uses this runtime owner for text, builders, and nil. */
 #include "runtime_collection_capture_impl.h"
 
@@ -5018,9 +6162,15 @@ int64_t rt_slice(int64_t value, int64_t start, int64_t end, int64_t step) {
         return (int64_t)(uintptr_t)result;
     }
 
-    RtCoreString* s = rt_core_as_string(value);
+    RtCoreString* s = rt_core_as_string_or_data(value);
     if (!s) return rt_core_nil();
-    int64_t len = (int64_t)s->len;
+    /* Indices are CODE POINTS (ADR-005 item 5), the unit len(), s[i] and
+     * index_of use. ASCII text keeps byte == code point (one word-wise scan),
+     * so the raw copy below is unchanged for it. */
+    const uint8_t* sd = (const uint8_t*)s->data;
+    int ascii = spl_core_string_is_ascii(s);
+    int64_t byte_len = (int64_t)s->len;
+    int64_t len = ascii ? byte_len : spl_core_string_cp_len(s);
     int64_t begin = start;
     int64_t finish = end;
     int64_t stride = step;
@@ -5031,21 +6181,44 @@ int64_t rt_slice(int64_t value, int64_t start, int64_t end, int64_t step) {
     if (begin > len) begin = len;
     if (finish > len) finish = len;
     if (stride != 1) {
+        /* Walk code points from `begin`, taking every `stride`-th one. */
         uint64_t out_len = 0;
-        for (int64_t i = begin; i < finish; i += stride) out_len++;
+        uint64_t cp_count = 0;
+        for (int64_t i = begin; i < finish; i += stride) cp_count++;
+        uint64_t b = ascii ? (uint64_t)begin : spl_text_cp_to_byte(sd, s->len, (uint64_t)begin);
+        uint64_t bend = ascii ? (uint64_t)finish : spl_text_cp_to_byte(sd, s->len, (uint64_t)finish);
+        if (ascii) {
+            out_len = cp_count;
+        } else {
+            uint64_t k = 0;
+            for (uint64_t i = b; i < bend; k++) {
+                uint64_t w = rt_utf8_width(s->data, i, s->len);
+                if (k % (uint64_t)stride == 0) out_len += w;
+                i += w;
+            }
+        }
         RtCoreString* out = (RtCoreString*)rt_observed_malloc_v1(sizeof(RtCoreString) + (size_t)out_len + 1);
         if (!out) return rt_core_nil();
         out->kind = RT_VALUE_HEAP_STRING;
         out->reserved = 0;
         out->len = out_len;
         uint64_t out_i = 0;
-        for (int64_t i = begin; i < finish; i += stride) out->data[out_i++] = s->data[i];
-        out->data[out_len] = '\0';
-        if (!rt_core_register_string(out)) {
-            free(out);
-            return rt_core_nil();
+        uint64_t k = 0;
+        for (uint64_t i = b; i < bend; k++) {
+            uint64_t w = ascii ? 1 : rt_utf8_width(s->data, i, s->len);
+            if (k % (uint64_t)stride == 0) {
+                memcpy(out->data + out_i, s->data + i, (size_t)w);
+                out_i += w;
+            }
+            i += w;
         }
-        return (int64_t)(((uint64_t)(uintptr_t)out) | RT_VALUE_TAG_HEAP);
+        out->data[out_len] = '\0';
+        return rt_core_string_publish_or_nil(out);
+    }
+    if (!ascii) {
+        begin = (int64_t)spl_text_cp_to_byte(sd, s->len, (uint64_t)begin);
+        finish = (int64_t)spl_text_cp_to_byte(sd, s->len, (uint64_t)finish);
+        len = byte_len;
     }
     /* UTF-8 slice audit, stage 1 (COUNTING ONLY, default off). This range is
      * copied RAW, so a boundary inside a multi-byte codepoint stores invalid
@@ -5061,16 +6234,49 @@ int64_t rt_slice(int64_t value, int64_t start, int64_t end, int64_t step) {
     return rt_string_new((const uint8_t*)s->data + begin, (uint64_t)(finish - begin));
 }
 
+/* `.slice(a, b)` / `.substring(a, b)` METHOD entry: same ABI as rt_slice, but
+ * a text receiver is cut at BYTE offsets clamped to 0..=byte_len() (owner
+ * decision 2026-11-07; ADR-005 "Staging";
+ * doc/05_design/language/text/text_len_counts_characters_2026-11-07.md).
+ * rt_slice itself serves the `s[a:b]` operator and stays code-point indexed.
+ * A range that splits a multi-byte code point is copied RAW, like
+ * spl_str_slice: no snapping and no U+FFFD. Any other receiver, and a
+ * zero/negative step, is rt_slice. Twin of the Rust runtime crate's symbol. */
+int64_t rt_slice_text_bytes(int64_t value, int64_t start, int64_t end, int64_t step) {
+    RtCoreString* s = rt_core_as_string_or_data(value);
+    if (!s || step < 1) return rt_slice(value, start, end, step);
+    int64_t len = (int64_t)s->len;
+    int64_t finish = end < 0 ? 0 : (end > len ? len : end);
+    int64_t begin = start < 0 ? 0 : (start > finish ? finish : start);
+    if (step != 1 || begin >= finish) return rt_string_new((const uint8_t*)s->data, 0);
+    if (rt_text_slice_audit_level() != 0) {
+        rt_text_slice_audit_note(RT_TEXT_SLICE_SITE_RT_SLICE_C, "rt_slice_text_bytes_c",
+                                 begin, finish,
+                                 (const uint8_t*)s->data, (uint64_t)len,
+                                 (const uint8_t*)s->data + begin,
+                                 (uint64_t)(finish - begin));
+    }
+    return rt_string_new((const uint8_t*)s->data + begin, (uint64_t)(finish - begin));
+}
+
 int64_t rt_string_starts_with(int64_t value, int64_t prefix) {
-    RtCoreString* s = rt_core_as_string(value);
-    RtCoreString* p = rt_core_as_string(prefix);
-    if (!s || !p || p->len > s->len) return 0;
-    return p->len == 0 || memcmp(s->data, p->data, (size_t)p->len) == 0;
+    const char* p;
+    size_t prefix_len;
+    if (value < 0x10000 || prefix < 0x10000 || !rt_text_view_abi(prefix, &p, &prefix_len)) return 0;
+    RtCoreString* s = rt_core_as_string_or_data(value);
+    if (s) return prefix_len <= s->len && memcmp(s->data, p, prefix_len) == 0;
+    /* Bootstrap substring receivers can be bare C strings. A prefix check only
+     * needs the first prefix_len bytes, even for a source-sized receiver. */
+    const char* raw = (const char*)(uintptr_t)value;
+    for (size_t i = 0; i < prefix_len; ++i) {
+        if (raw[i] == '\0' || raw[i] != p[i]) return 0;
+    }
+    return 1;
 }
 
 int64_t rt_string_ends_with(int64_t value, int64_t suffix) {
-    RtCoreString* s = rt_core_as_string(value);
-    RtCoreString* p = rt_core_as_string(suffix);
+    RtCoreString* s = rt_core_as_string_or_data(value);
+    RtCoreString* p = rt_core_as_string_or_data(suffix);
     if (!s || !p || p->len > s->len) return 0;
     return p->len == 0 || memcmp(s->data + (s->len - p->len), p->data, (size_t)p->len) == 0;
 }
@@ -5112,13 +6318,18 @@ int64_t text_dot_from_char_code(int64_t code) {
 }
 
 int64_t rt_string_find(int64_t value, int64_t needle) {
-    RtCoreString* s = rt_core_as_string(value);
-    RtCoreString* n = rt_core_as_string(needle);
+    RtCoreString* s = rt_core_as_string_or_data(value);
+    RtCoreString* n = rt_core_as_string_or_data(needle);
     if (!s || !n) return -1;
     if (n->len == 0) return 0;
     if (n->len > s->len) return -1;
+    /* BYTE offset (owner decision 2026-11-13, ADR-005 "Staging"): index_of is
+     * in the byte family with substring/slice(a, b)/byte_at, bounded by
+     * byte_len(). Matches the Rust runtime rt_string_find. */
     for (uint64_t i = 0; i + n->len <= s->len; i++) {
-        if (memcmp(s->data + i, n->data, (size_t)n->len) == 0) return (int64_t)i;
+        if (memcmp(s->data + i, n->data, (size_t)n->len) == 0) {
+            return (int64_t)i;
+        }
     }
     return -1;
 }
@@ -5130,14 +6341,17 @@ int64_t rt_string_index_of(int64_t value, int64_t needle) {
 }
 
 int64_t rt_text_find(int64_t value, int64_t needle, int64_t start) {
-    RtCoreString* s = rt_core_as_string(value);
-    RtCoreString* n = rt_core_as_string(needle);
+    RtCoreString* s = rt_core_as_string_or_data(value);
+    RtCoreString* n = rt_core_as_string_or_data(needle);
     if (!s || !n) return -1;
     /* Negative start clamps to 0 (the two-arg index_of contract; matches the
      * Rust runtime crate and simple_core impls). */
     if (start < 0) start = 0;
-    if (n->len == 0) return start <= (int64_t)s->len ? start : (int64_t)s->len;
-    if (start >= (int64_t)s->len || n->len > s->len) return -1;
+    /* `start` and the answer are BYTE offsets (owner decision 2026-11-13,
+     * ADR-005 "Staging"); matches the Rust runtime rt_text_find. */
+    int64_t hay_len = (int64_t)s->len;
+    if (n->len == 0) return start <= hay_len ? start : hay_len;
+    if (start >= hay_len || n->len > s->len) return -1;
     for (uint64_t i = (uint64_t)start; i + n->len <= s->len; i++) {
         if (memcmp(s->data + i, n->data, (size_t)n->len) == 0) return (int64_t)i;
     }
@@ -5145,13 +6359,16 @@ int64_t rt_text_find(int64_t value, int64_t needle, int64_t start) {
 }
 
 int64_t rt_string_rfind(int64_t value, int64_t needle) {
-    RtCoreString* s = rt_core_as_string(value);
-    RtCoreString* n = rt_core_as_string(needle);
+    RtCoreString* s = rt_core_as_string_or_data(value);
+    RtCoreString* n = rt_core_as_string_or_data(needle);
     if (!s || !n) return -1;
+    /* BYTE offset, like index_of / find (owner decision 2026-11-13). */
     if (n->len == 0) return (int64_t)s->len;
     if (n->len > s->len) return -1;
     for (uint64_t i = s->len - n->len + 1; i-- > 0;) {
-        if (memcmp(s->data + i, n->data, (size_t)n->len) == 0) return (int64_t)i;
+        if (memcmp(s->data + i, n->data, (size_t)n->len) == 0) {
+            return (int64_t)i;
+        }
     }
     return -1;
 }
@@ -5208,15 +6425,20 @@ int64_t rt_string_contains(int64_t value, int64_t needle) {
  * rt_string_ascii_case appears earlier in the file. */
 static int rt_string_promote_raw_receiver(int64_t value, int64_t* out);
 
-static int64_t rt_string_ascii_case(int64_t value, int to_lower) {
-    RtCoreString* s = rt_core_as_string(value);
-    if (!s) {
-        int64_t promoted;
-        if (rt_string_promote_raw_receiver(value, &promoted)) {
-            return rt_string_ascii_case(promoted, to_lower);
-        }
-        return rt_core_nil();
+/* Declare `s` as the text receiver of `value`. A raw (non-text) receiver is
+ * promoted when possible and the call re-dispatched as `call` (which names
+ * `promoted`); otherwise the enclosing function returns `fallback`. */
+#define RT_STRING_RECV_OR_PROMOTE(s, value, fallback, call) \
+    RtCoreString* s = rt_core_as_string(value); \
+    if (!s) { \
+        int64_t promoted; \
+        if (rt_string_promote_raw_receiver((value), &promoted)) return call; \
+        return fallback; \
     }
+
+
+static int64_t rt_string_ascii_case(int64_t value, int to_lower) {
+    RT_STRING_RECV_OR_PROMOTE(s, value, rt_core_nil(), rt_string_ascii_case(promoted, to_lower))
     RtCoreString* out = (RtCoreString*)rt_observed_malloc_v1(sizeof(RtCoreString) + (size_t)s->len + 1);
     if (!out) return rt_core_nil();
     out->kind = RT_VALUE_HEAP_STRING;
@@ -5232,11 +6454,7 @@ static int64_t rt_string_ascii_case(int64_t value, int to_lower) {
         out->data[i] = ch;
     }
     out->data[s->len] = '\0';
-    if (!rt_core_register_string(out)) {
-        free(out);
-        return rt_core_nil();
-    }
-    return (int64_t)(((uint64_t)(uintptr_t)out) | RT_VALUE_TAG_HEAP);
+    return rt_core_string_publish_or_nil(out);
 }
 
 int64_t rt_string_to_lower(int64_t value) {
@@ -5259,17 +6477,39 @@ int64_t rt_text_to_upper_ascii(int64_t value) {
     return rt_string_ascii_case(value, 0);
 }
 
+/* NUL-terminated copy of a `text` handle read through the shared rt_string_*
+ * ABI rather than this file's private registry. In the Windows
+ * core-c-bootstrap link this file is a SUPPLEMENT behind the Rust native_all
+ * archive: strings are Rust-owned, rt_string_len/rt_string_data resolve to the
+ * Rust owner, and rt_core_as_string rejects every one of them. The two
+ * C-only exports below (nothing in native_all defines them) must therefore
+ * never decode a handle privately. In a pure core-C binary the same calls
+ * resolve to this file's own accessors, so both compositions agree.
+ * See doc/08_tracking/bug/stage2_windows_mixed_runtime_owner_array_handle_2026-11-12.md */
+static char* core_text_dup_abi(int64_t value) {
+    int64_t len = rt_string_len(value);
+    if (len < 0) return NULL;
+    const uint8_t* data = rt_string_data(value);
+    if (!data && len != 0) return NULL;
+    char* out = (char*)rt_observed_malloc_v1((size_t)len + 1);
+    if (!out) return NULL;
+    if (len > 0) memcpy(out, data, (size_t)len);
+    out[len] = '\0';
+    return out;
+}
+
 int64_t rt_text_is_ascii(int64_t value) {
+    /* Heap text: consult/update the shared positive-only ASCII memo so
+     * repeated callers (e.g. str_split's dispatch) pay O(1) after the first
+     * scan instead of re-walking the buffer every call. */
     RtCoreString* s = rt_core_as_string(value);
-    if (!s) {
-        int64_t promoted;
-        if (rt_string_promote_raw_receiver(value, &promoted)) {
-            return rt_text_is_ascii(promoted);
-        }
-        return 0;
-    }
-    for (uint64_t i = 0; i < s->len; i++) {
-        if (((uint8_t)s->data[i]) > 0x7f) return 0;
+    if (s) return spl_core_string_is_ascii(s) ? 1 : 0;
+    int64_t len = rt_string_len(value);
+    if (len < 0) return 0;
+    const uint8_t* data = rt_string_data(value);
+    if (!data) return len == 0 ? 1 : 0;
+    for (int64_t i = 0; i < len; i++) {
+        if (data[i] > 0x7f) return 0;
     }
     return 1;
 }
@@ -5296,8 +6536,8 @@ int64_t rt_string_to_float(int64_t value) {
 }
 
 int64_t rt_string_split(int64_t value, int64_t delimiter) {
-    RtCoreString* s = rt_core_as_string(value);
-    RtCoreString* d = rt_core_as_string(delimiter);
+    RtCoreString* s = rt_core_as_string_or_data(value);
+    RtCoreString* d = rt_core_as_string_or_data(delimiter);
     if (!s || !d) return rt_core_nil();
     if (d->len == 0) return rt_string_chars(value);
 
@@ -5329,8 +6569,8 @@ int64_t rt_string_split(int64_t value, int64_t delimiter) {
 }
 
 int64_t rt_string_split_limit(int64_t value, int64_t delimiter, int64_t limit) {
-    RtCoreString* s = rt_core_as_string(value);
-    RtCoreString* d = rt_core_as_string(delimiter);
+    RtCoreString* s = rt_core_as_string_or_data(value);
+    RtCoreString* d = rt_core_as_string_or_data(delimiter);
     if (!s || !d) return rt_core_nil();
     if (limit <= 0) return rt_string_split(value, delimiter);
     if (limit == 1) {
@@ -5393,7 +6633,7 @@ static int64_t spl_core_slot_value(const RtCoreArray* array, int64_t i) {
  * is rendered once for the two passes. */
 int64_t rt_string_join(int64_t array_value, int64_t separator) {
     RtCoreArray* array = rt_core_as_array(array_value);
-    RtCoreString* sep = rt_core_as_string(separator);
+    RtCoreString* sep = rt_core_as_string_or_data(separator);
     if (!array || !sep) return rt_core_nil();
     RtCoreString** items = NULL;
     if (array->len > 0) {
@@ -5403,7 +6643,7 @@ int64_t rt_string_join(int64_t array_value, int64_t separator) {
     uint64_t total = 0;
     for (int64_t i = 0; i < array->len; i++) {
         int64_t value = spl_core_slot_value(array, i);
-        RtCoreString* item = rt_core_as_string(value);
+        RtCoreString* item = rt_core_as_string_or_data(value);
         if (!item) item = rt_core_as_string(rt_to_string(value));
         items[i] = item;
         if (item) total += item->len;
@@ -5431,11 +6671,7 @@ int64_t rt_string_join(int64_t array_value, int64_t separator) {
     }
     free(items);
     out->data[total] = '\0';
-    if (!rt_core_register_string(out)) {
-        free(out);
-        return rt_core_nil();
-    }
-    return (int64_t)(((uint64_t)(uintptr_t)out) | RT_VALUE_TAG_HEAP);
+    return rt_core_string_publish_or_nil(out);
 }
 
 /* Native joins accept registered counted strings and borrowed NUL-terminated
@@ -5443,7 +6679,7 @@ int64_t rt_string_join(int64_t array_value, int64_t separator) {
  * cannot distinguish them from tagged handles. Small non-text values are empty,
  * as in rt_interp_cstr; arbitrary non-text heap values are not accepted inputs. */
 static int8_t core_join_text_view(int64_t value, const char** data, size_t* len) {
-    RtCoreString* string = rt_core_as_string(value);
+    RtCoreString* string = rt_core_as_string_or_data(value);
     if (string) {
         if (string->len > SIZE_MAX - sizeof(RtCoreString) - 1) return 0;
         *data = string->data;
@@ -5589,6 +6825,13 @@ int64_t rt_unwrap_or_self(int64_t value) {
 #define RT_DISC_NONE 2371748697u
 #define RT_RESULT_ENUM_ID 0u
 #define RT_OPTION_ENUM_ID 1u
+/* Result is id 0 from compiled code and id 2 from rt_result_ok/err, with
+ * positional Ok=0/Err=1 (legacy hashed tags still accepted). A user enum's
+ * declared index is 0/1 for its first variants (#6953), so Ok/Err may only be
+ * read under these ids. */
+static inline int rt_is_result_enum_id(uint32_t id) { return id == 0u || id == 2u; }
+static inline int rt_result_disc_is_ok(uint32_t d) { return d == 0u || d == RT_DISC_OK; }
+static inline int rt_result_disc_is_err(uint32_t d) { return d == 1u || d == RT_DISC_ERR; }
 
 int64_t rt_unwrap_or_value(int64_t value, int64_t default_val) {
     RtCoreEnum* e = rt_core_as_enum(value);
@@ -5600,9 +6843,9 @@ int64_t rt_unwrap_or_value(int64_t value, int64_t default_val) {
         return value;
     }
 
-    if (e->enum_id == RT_RESULT_ENUM_ID) {
-        if (e->discriminant == RT_DISC_OK) return e->payload;
-        if (e->discriminant == RT_DISC_ERR) return default_val;
+    if (rt_is_result_enum_id(e->enum_id)) {
+        if (rt_result_disc_is_ok(e->discriminant)) return e->payload;
+        if (rt_result_disc_is_err(e->discriminant)) return default_val;
     }
 
     /* Arbitrary user enum: preserve the pre-existing "return self" fallback. */
@@ -5637,6 +6880,9 @@ int8_t rt_is_some(int64_t value) {
  * doc/08_tracking/bug/native_codegen_dotq_true_on_empty_array_2026-09-13.md */
 int8_t rt_is_present(int64_t value) {
     if (rt_is_none(value)) return 0;
+    /* `Err(e).?` is absent, as in the Rust twin and the interpreter. */
+    RtCoreEnum* result = rt_core_as_enum(value);
+    if (result && rt_is_result_enum_id(result->enum_id) && rt_result_disc_is_err(result->discriminant)) return 0;
     int64_t payload = rt_unwrap_or_self(value);
     if (payload == rt_core_nil()) return 0;
     RtCoreString* s = rt_core_as_string(payload);
@@ -5657,14 +6903,7 @@ int8_t rt_is_present(int64_t value) {
  * the native lane links THIS file, so a Rust-only definition would leave
  * native `.repeat()` unresolved. */
 int64_t rt_string_repeat(int64_t value, int64_t count) {
-    RtCoreString* s = rt_core_as_string(value);
-    if (!s) {
-        int64_t promoted;
-        if (rt_string_promote_raw_receiver(value, &promoted)) {
-            return rt_string_repeat(promoted, count);
-        }
-        return value;
-    }
+    RT_STRING_RECV_OR_PROMOTE(s, value, value, rt_string_repeat(promoted, count))
     if (count <= 0 || s->len == 0) return rt_string_new((const uint8_t*)"", 0);
     if (count == 1) return value;
 
@@ -5681,11 +6920,7 @@ int64_t rt_string_repeat(int64_t value, int64_t count) {
         memcpy(out->data + i * s->len, s->data, (size_t)s->len);
     }
     out->data[out_len] = '\0';
-    if (!rt_core_register_string(out)) {
-        free(out);
-        return rt_core_nil();
-    }
-    return (int64_t)(((uint64_t)(uintptr_t)out) | RT_VALUE_TAG_HEAP);
+    return rt_core_string_publish_or_nil(out);
 }
 
 /* Character-class predicates: non-empty AND every character in the class.
@@ -5763,26 +6998,40 @@ static uint64_t rt_utf8_width(const char* data, uint64_t i, uint64_t len) {
     return 1;
 }
 
-/* char_count: number of UTF-8 codepoints, as opposed to len (bytes).
- * -1 for a non-text receiver, matching rt_string_len / rt_len. */
+/* User-facing text length (ADR-005 item 5): number of UTF-8 code points.
+ * len(), char_count(), the s[i] bound and rt_len's text arm all route here;
+ * rt_string_len stays the BYTE primitive. The receiver fallback MUST mirror
+ * rt_string_len's (identical `>= 0x10000` guard): the pure-Simple MIR lowers
+ * `.len()` on a text local to this symbol and a text LITERAL is a bare
+ * pointer into .rodata, not a heap RtCoreString. -1 for a non-text receiver. */
 int64_t rt_string_char_count(int64_t value) {
     RtCoreString* s = rt_core_as_string(value);
-    if (!s) return -1;
-    int64_t count = 0;
-    for (uint64_t i = 0; i < s->len; i += rt_utf8_width(s->data, i, s->len)) count++;
-    return count;
+    if (s) return spl_core_string_cp_len(s);
+    if (value < 0x10000) return -1;
+    RtCoreString* owner = rt_core_string_from_data_pointer(value);
+    if (owner) return (int64_t)spl_text_cp_len_bytes((const uint8_t*)owner->data, owner->len);
+    const char* raw = (const char*)(uintptr_t)value;
+    return (int64_t)spl_text_cp_len_bytes((const uint8_t*)raw, (uint64_t)strlen(raw));
+}
+
+/* to_digit on a one-character text (ADR-005): Some(0..9) for a single ASCII
+ * decimal digit, None for anything else (non-digit, empty, multi-character,
+ * non-text). C twin of rt_string_to_digit in the Rust runtime
+ * (runtime/src/value/collections.rs), which the seed codegen emits for
+ * `.to_digit()`; without it a C-runtime link of that call is unresolved.
+ * char::to_digit(10) accepts ASCII digits only, so the two lanes agree on
+ * every input, non-ASCII included. Never a silent 0. */
+int64_t rt_string_to_digit(int64_t value) {
+    RT_STRING_RECV_OR_PROMOTE(s, value, rt_option_none(), rt_string_to_digit(promoted))
+    if (s->len != 1) return rt_option_none();
+    unsigned char c = (unsigned char)s->data[0];
+    if (c < '0' || c > '9') return rt_option_none();
+    return rt_option_some(rt_value_int((int64_t)(c - '0')));
 }
 
 /* capitalize: uppercase the first character, lowercase the rest (ASCII only). */
 int64_t rt_string_capitalize(int64_t value) {
-    RtCoreString* s = rt_core_as_string(value);
-    if (!s) {
-        int64_t promoted;
-        if (rt_string_promote_raw_receiver(value, &promoted)) {
-            return rt_string_capitalize(promoted);
-        }
-        return value;
-    }
+    RT_STRING_RECV_OR_PROMOTE(s, value, value, rt_string_capitalize(promoted))
     if (s->len == 0) return rt_string_new((const uint8_t*)"", 0);
     char* out = (char*)rt_observed_malloc_v1((size_t)s->len);
     if (!out) return value;
@@ -5799,14 +7048,7 @@ int64_t rt_string_capitalize(int64_t value) {
 
 /* swapcase: uppercase <-> lowercase for every character (ASCII only). */
 int64_t rt_string_swapcase(int64_t value) {
-    RtCoreString* s = rt_core_as_string(value);
-    if (!s) {
-        int64_t promoted;
-        if (rt_string_promote_raw_receiver(value, &promoted)) {
-            return rt_string_swapcase(promoted);
-        }
-        return value;
-    }
+    RT_STRING_RECV_OR_PROMOTE(s, value, value, rt_string_swapcase(promoted))
     if (s->len == 0) return rt_string_new((const uint8_t*)"", 0);
     char* out = (char*)rt_observed_malloc_v1((size_t)s->len);
     if (!out) return value;
@@ -5825,14 +7067,7 @@ int64_t rt_string_swapcase(int64_t value) {
  * boundary is whitespace OR ASCII punctuation, exactly as the interpreter's
  * arm defines it. */
 int64_t rt_string_title(int64_t value) {
-    RtCoreString* s = rt_core_as_string(value);
-    if (!s) {
-        int64_t promoted;
-        if (rt_string_promote_raw_receiver(value, &promoted)) {
-            return rt_string_title(promoted);
-        }
-        return value;
-    }
+    RT_STRING_RECV_OR_PROMOTE(s, value, value, rt_string_title(promoted))
     if (s->len == 0) return rt_string_new((const uint8_t*)"", 0);
     char* out = (char*)rt_observed_malloc_v1((size_t)s->len);
     if (!out) return value;
@@ -5856,14 +7091,7 @@ int64_t rt_string_title(int64_t value) {
 
 /* chomp: strip ONE trailing line terminator -- "\r\n", "\n", or "\r". */
 int64_t rt_string_chomp(int64_t value) {
-    RtCoreString* s = rt_core_as_string(value);
-    if (!s) {
-        int64_t promoted;
-        if (rt_string_promote_raw_receiver(value, &promoted)) {
-            return rt_string_chomp(promoted);
-        }
-        return value;
-    }
+    RT_STRING_RECV_OR_PROMOTE(s, value, value, rt_string_chomp(promoted))
     uint64_t len = s->len;
     if (len >= 2 && s->data[len - 2] == '\r' && s->data[len - 1] == '\n') len -= 2;
     else if (len >= 1 && (s->data[len - 1] == '\n' || s->data[len - 1] == '\r')) len -= 1;
@@ -5873,9 +7101,8 @@ int64_t rt_string_chomp(int64_t value) {
 
 /* trim_start_matches: repeatedly strip `pattern` from the front. */
 int64_t rt_string_trim_start_matches(int64_t value, int64_t pattern) {
-    RtCoreString* s = rt_core_as_string(value);
-    RtCoreString* p = rt_core_as_string(pattern);
-    if (!s || !p) return value;
+    RT_STRING_RECV_OR_PROMOTE(s, value, value, rt_string_trim_start_matches(promoted, pattern))
+    RT_STRING_RECV_OR_PROMOTE(p, pattern, value, rt_string_trim_start_matches(value, promoted))
     if (p->len == 0) return value;
     uint64_t start = 0;
     while (s->len - start >= p->len && memcmp(s->data + start, p->data, (size_t)p->len) == 0) {
@@ -5887,9 +7114,8 @@ int64_t rt_string_trim_start_matches(int64_t value, int64_t pattern) {
 
 /* trim_end_matches: repeatedly strip `pattern` from the end. */
 int64_t rt_string_trim_end_matches(int64_t value, int64_t pattern) {
-    RtCoreString* s = rt_core_as_string(value);
-    RtCoreString* p = rt_core_as_string(pattern);
-    if (!s || !p) return value;
+    RT_STRING_RECV_OR_PROMOTE(s, value, value, rt_string_trim_end_matches(promoted, pattern))
+    RT_STRING_RECV_OR_PROMOTE(p, pattern, value, rt_string_trim_end_matches(value, promoted))
     if (p->len == 0) return value;
     uint64_t end = s->len;
     while (end >= p->len && memcmp(s->data + end - p->len, p->data, (size_t)p->len) == 0) {
@@ -5899,24 +7125,26 @@ int64_t rt_string_trim_end_matches(int64_t value, int64_t pattern) {
     return rt_string_new((const uint8_t*)s->data, end);
 }
 
-/* removeprefix / remove_prefix: strip `prefix` ONCE if present. */
-int64_t rt_string_remove_prefix(int64_t value, int64_t prefix) {
-    RtCoreString* s = rt_core_as_string(value);
-    RtCoreString* p = rt_core_as_string(prefix);
+/* Strip `pattern` ONCE from the front (from_front) or back of `value` if present. */
+static int64_t rt_string_remove_once(int64_t value, int64_t pattern, int from_front) {
+    RtCoreString* s = rt_core_as_string_or_data(value);
+    RtCoreString* p = rt_core_as_string_or_data(pattern);
     if (!s || !p) return value;
     if (p->len == 0 || p->len > s->len) return value;
-    if (memcmp(s->data, p->data, (size_t)p->len) != 0) return value;
-    return rt_string_new((const uint8_t*)s->data + p->len, s->len - p->len);
+    uint64_t at = from_front ? 0 : s->len - p->len;
+    if (memcmp(s->data + at, p->data, (size_t)p->len) != 0) return value;
+    uint64_t keep = from_front ? p->len : 0;
+    return rt_string_new((const uint8_t*)s->data + keep, s->len - p->len);
+}
+
+/* removeprefix / remove_prefix: strip `prefix` ONCE if present. */
+int64_t rt_string_remove_prefix(int64_t value, int64_t prefix) {
+    return rt_string_remove_once(value, prefix, 1);
 }
 
 /* removesuffix / remove_suffix: strip `suffix` ONCE if present. */
 int64_t rt_string_remove_suffix(int64_t value, int64_t suffix) {
-    RtCoreString* s = rt_core_as_string(value);
-    RtCoreString* p = rt_core_as_string(suffix);
-    if (!s || !p) return value;
-    if (p->len == 0 || p->len > s->len) return value;
-    if (memcmp(s->data + s->len - p->len, p->data, (size_t)p->len) != 0) return value;
-    return rt_string_new((const uint8_t*)s->data, s->len - p->len);
+    return rt_string_remove_once(value, suffix, 0);
 }
 
 /* squeeze: collapse runs of the same adjacent CHARACTER (codepoint, not byte,
@@ -5927,14 +7155,7 @@ int64_t rt_string_remove_suffix(int64_t value, int64_t suffix) {
  * string, so rt_core_as_string yields NULL -- that is the "no argument,
  * squeeze everything" case. An explicit empty string squeezes nothing. */
 int64_t rt_string_squeeze(int64_t value, int64_t set) {
-    RtCoreString* s = rt_core_as_string(value);
-    if (!s) {
-        int64_t promoted;
-        if (rt_string_promote_raw_receiver(value, &promoted)) {
-            return rt_string_squeeze(promoted, set);
-        }
-        return value;
-    }
+    RT_STRING_RECV_OR_PROMOTE(s, value, value, rt_string_squeeze(promoted, set))
     if (s->len == 0) return rt_string_new((const uint8_t*)"", 0);
     RtCoreString* set_s = rt_core_as_string(set);
     char* out = (char*)rt_observed_malloc_v1((size_t)s->len);
@@ -6008,14 +7229,7 @@ static inline uint64_t rt_checked_mul_u64(uint64_t a, uint64_t b, const char* ct
  * A width at or below the current length is a no-op, so a negative width
  * returns the receiver rather than attempting a huge allocation. */
 int64_t rt_string_pad_left(int64_t value, int64_t width, int64_t pad) {
-    RtCoreString* s = rt_core_as_string(value);
-    if (!s) {
-        int64_t promoted;
-        if (rt_string_promote_raw_receiver(value, &promoted)) {
-            return rt_string_pad_left(promoted, width, pad);
-        }
-        return value;
-    }
+    RT_STRING_RECV_OR_PROMOTE(s, value, value, rt_string_pad_left(promoted, width, pad))
     int64_t current = rt_str_char_count(s);
     if (width <= current) return value;
     uint64_t pw; const char* pc = rt_pad_char(pad, &pw);
@@ -6033,14 +7247,7 @@ int64_t rt_string_pad_left(int64_t value, int64_t width, int64_t pad) {
 
 /* pad_right / pad_end: right-pad to `width` CHARACTERS. */
 int64_t rt_string_pad_right(int64_t value, int64_t width, int64_t pad) {
-    RtCoreString* s = rt_core_as_string(value);
-    if (!s) {
-        int64_t promoted;
-        if (rt_string_promote_raw_receiver(value, &promoted)) {
-            return rt_string_pad_right(promoted, width, pad);
-        }
-        return value;
-    }
+    RT_STRING_RECV_OR_PROMOTE(s, value, value, rt_string_pad_right(promoted, width, pad))
     int64_t current = rt_str_char_count(s);
     if (width <= current) return value;
     uint64_t pw; const char* pc = rt_pad_char(pad, &pw);
@@ -6058,14 +7265,7 @@ int64_t rt_string_pad_right(int64_t value, int64_t width, int64_t pad) {
 
 /* center: pad both sides to `width` CHARACTERS, extra character on the RIGHT. */
 int64_t rt_string_center(int64_t value, int64_t width, int64_t pad) {
-    RtCoreString* s = rt_core_as_string(value);
-    if (!s) {
-        int64_t promoted;
-        if (rt_string_promote_raw_receiver(value, &promoted)) {
-            return rt_string_center(promoted, width, pad);
-        }
-        return value;
-    }
+    RT_STRING_RECV_OR_PROMOTE(s, value, value, rt_string_center(promoted, width, pad))
     int64_t current = rt_str_char_count(s);
     if (width <= current) return value;
     uint64_t pw; const char* pc = rt_pad_char(pad, &pw);
@@ -6089,14 +7289,7 @@ int64_t rt_string_center(int64_t value, int64_t width, int64_t pad) {
 /* zfill: left-pad with '0' to `width` CHARACTERS, keeping a leading sign in
  * front of the zeros ("-7".zfill(4) is "-007", not "00-7"). */
 int64_t rt_string_zfill(int64_t value, int64_t width) {
-    RtCoreString* s = rt_core_as_string(value);
-    if (!s) {
-        int64_t promoted;
-        if (rt_string_promote_raw_receiver(value, &promoted)) {
-            return rt_string_zfill(promoted, width);
-        }
-        return value;
-    }
+    RT_STRING_RECV_OR_PROMOTE(s, value, value, rt_string_zfill(promoted, width))
     int64_t current = rt_str_char_count(s);
     if (width <= current) return value;
     uint64_t sign = (s->len > 0 && (s->data[0] == '+' || s->data[0] == '-')) ? 1 : 0;
@@ -6115,8 +7308,8 @@ int64_t rt_string_zfill(int64_t value, int64_t width) {
 /* find_all / find_indices: BYTE offsets of every non-overlapping match.
  * An empty needle yields an EMPTY array, matching the interpreter's guard. */
 int64_t rt_string_find_all(int64_t value, int64_t needle) {
-    RtCoreString* s = rt_core_as_string(value);
-    RtCoreString* n = rt_core_as_string(needle);
+    RtCoreString* s = rt_core_as_string_or_data(value);
+    RtCoreString* n = rt_core_as_string_or_data(needle);
     SplArray* out = rt_array_new(0);
     if (!out) return rt_core_nil();
     if (!s || !n || n->len == 0) return (int64_t)(uintptr_t)out;
@@ -6135,14 +7328,7 @@ int64_t rt_string_find_all(int64_t value, int64_t needle) {
  * Deliberately NOT rt_slice, which is byte-indexed. Negative arguments clamp
  * to 0, matching the saturating eval_arg_usize in the interpreter. */
 int64_t rt_string_substr(int64_t value, int64_t start, int64_t length) {
-    RtCoreString* s = rt_core_as_string(value);
-    if (!s) {
-        int64_t promoted;
-        if (rt_string_promote_raw_receiver(value, &promoted)) {
-            return rt_string_substr(promoted, start, length);
-        }
-        return value;
-    }
+    RT_STRING_RECV_OR_PROMOTE(s, value, value, rt_string_substr(promoted, start, length))
     if (start < 0) start = 0;
     if (length < 0) length = 0;
     uint64_t b = 0;
@@ -6158,14 +7344,7 @@ int64_t rt_string_substr(int64_t value, int64_t start, int64_t length) {
  * A separate symbol rather than a default argument, because the omitted-slot
  * padding value (tagged nil) IS the integer 3 for an int parameter. */
 int64_t rt_string_substr_from(int64_t value, int64_t start) {
-    RtCoreString* s = rt_core_as_string(value);
-    if (!s) {
-        int64_t promoted;
-        if (rt_string_promote_raw_receiver(value, &promoted)) {
-            return rt_string_substr_from(promoted, start);
-        }
-        return value;
-    }
+    RT_STRING_RECV_OR_PROMOTE(s, value, value, rt_string_substr_from(promoted, start))
     if (start < 0) start = 0;
     uint64_t b = 0;
     int64_t skipped = 0;
@@ -6606,6 +7785,31 @@ int64_t rt_array_max(int64_t receiver) {
     return result;
 }
 
+/* collections.rs rt_array_min -- twin of rt_array_max above: nil for an empty
+ * array or a non-array; packed [u8] / [u64] compare raw UNSIGNED elements. */
+int64_t rt_array_min(int64_t receiver) {
+    SplArray* arr = rt_core_as_array(receiver) ? (SplArray*)(uintptr_t)receiver : NULL;
+    if (!arr || rt_array_len(arr) <= 0) return rt_core_nil();
+    RtCoreArray* packed = rt_core_array_ptr(arr);
+    if (packed->flags & (RT_CORE_ARRAY_FLAG_BYTES | RT_CORE_ARRAY_FLAG_U64_PACKED)) {
+        int is_bytes = (packed->flags & RT_CORE_ARRAY_FLAG_BYTES) != 0;
+        uint64_t best = UINT64_MAX;
+        for (int64_t i = 0; i < packed->len; i++) {
+            uint64_t v = is_bytes ? (uint64_t)((const uint8_t*)packed->data)[i]
+                                  : ((const uint64_t*)packed->data)[i];
+            if (v < best) best = v;
+        }
+        return rt_value_int((int64_t)best);
+    }
+    int64_t result = spl_core_array_value_at(arr, 0);
+    int64_t count = rt_array_len(arr);
+    for (int64_t index = 1; index < count; index++) {
+        int64_t candidate = spl_core_array_value_at(arr, index);
+        if (rt_sort_cmp(candidate, result) < 0) result = candidate;
+    }
+    return result;
+}
+
 /* take / taken: first n CHARACTERS of text, or first n ELEMENTS of an array.
  * A negative n yields an empty result, matching the saturating eval_arg_usize. */
 int64_t rt_take(int64_t receiver, int64_t n) {
@@ -6702,9 +7906,9 @@ int64_t rt_string_sorted(int64_t value) {
  * An empty or absent separator puts the receiver in the FIRST slot for
  * partition and the LAST slot for rpartition, matching the interpreter arms. */
 static int64_t rt_string_partition_at(int64_t value, int64_t sep_value, int from_end, const char* who) {
-    RtCoreString* s = rt_core_as_string(value);
+    RtCoreString* s = rt_core_as_string_or_data(value);
     if (!s) rt_refuse_non_text_receiver(who, value);
-    RtCoreString* sep = rt_core_as_string(sep_value);
+    RtCoreString* sep = rt_core_as_string_or_data(sep_value);
     SplArray* out = rt_array_new(3);
     if (!out) return rt_core_nil();
     int64_t hit = -1;
@@ -6750,9 +7954,9 @@ int64_t rt_string_rpartition(int64_t value, int64_t sep) {
 
 /* replace_first: replace only the FIRST occurrence of `pattern`. */
 int64_t rt_string_replace_first(int64_t value, int64_t pattern, int64_t replacement) {
-    RtCoreString* s = rt_core_as_string(value);
-    RtCoreString* p = rt_core_as_string(pattern);
-    RtCoreString* r = rt_core_as_string(replacement);
+    RtCoreString* s = rt_core_as_string_or_data(value);
+    RtCoreString* p = rt_core_as_string_or_data(pattern);
+    RtCoreString* r = rt_core_as_string_or_data(replacement);
     if (!s || !p || !r) return value;
     if (p->len > s->len) return value;
     /* An empty pattern matches at offset 0, so replace_first("", x) prepends x
@@ -6775,9 +7979,9 @@ int64_t rt_string_replace_first(int64_t value, int64_t pattern, int64_t replacem
 }
 
 int64_t rt_string_replace(int64_t value, int64_t old_value, int64_t new_value) {
-    RtCoreString* s = rt_core_as_string(value);
-    RtCoreString* old_s = rt_core_as_string(old_value);
-    RtCoreString* new_s = rt_core_as_string(new_value);
+    RtCoreString* s = rt_core_as_string_or_data(value);
+    RtCoreString* old_s = rt_core_as_string_or_data(old_value);
+    RtCoreString* new_s = rt_core_as_string_or_data(new_value);
     if (!s || !old_s || !new_s) return value;
     if (old_s->len == 0) return value;
 
@@ -6814,11 +8018,7 @@ int64_t rt_string_replace(int64_t value, int64_t old_value, int64_t new_value) {
         }
     }
     out->data[out_len] = '\0';
-    if (!rt_core_register_string(out)) {
-        free(out);
-        return rt_core_nil();
-    }
-    return (int64_t)(((uint64_t)(uintptr_t)out) | RT_VALUE_TAG_HEAP);
+    return rt_core_string_publish_or_nil(out);
 }
 
 /* A raw, unregistered `char*` receiver does not decode via rt_core_as_string.
@@ -6828,18 +8028,18 @@ int64_t rt_string_replace(int64_t value, int64_t old_value, int64_t new_value) {
  * never dereferenced. */
 static int rt_string_promote_raw_receiver(int64_t value, int64_t* out) {
     if (value < 0x10000) return 0;
+    RtCoreString* owner = rt_core_string_from_data_pointer(value);
+    if (owner) {
+        *out = (int64_t)(((uint64_t)(uintptr_t)owner) | RT_VALUE_TAG_HEAP);
+        return 1;
+    }
     const char* p = (const char*)(uintptr_t)value;
     *out = rt_string_new((const uint8_t*)p, (uint64_t)strlen(p));
     return 1;
 }
 
 int64_t rt_string_trim(int64_t value) {
-    RtCoreString* s = rt_core_as_string(value);
-    if (!s) {
-        int64_t promoted;
-        if (rt_string_promote_raw_receiver(value, &promoted)) return rt_string_trim(promoted);
-        return value;
-    }
+    RT_STRING_RECV_OR_PROMOTE(s, value, value, rt_string_trim(promoted))
     uint64_t begin = 0;
     uint64_t end = s->len;
     while (begin < end && (s->data[begin] == ' ' || s->data[begin] == '\t' || s->data[begin] == '\n' || s->data[begin] == '\r')) {
@@ -6852,12 +8052,7 @@ int64_t rt_string_trim(int64_t value) {
 }
 
 int64_t rt_string_trim_start(int64_t value) {
-    RtCoreString* s = rt_core_as_string(value);
-    if (!s) {
-        int64_t promoted;
-        if (rt_string_promote_raw_receiver(value, &promoted)) return rt_string_trim_start(promoted);
-        return value;
-    }
+    RT_STRING_RECV_OR_PROMOTE(s, value, value, rt_string_trim_start(promoted))
     uint64_t begin = 0;
     while (begin < s->len && (s->data[begin] == ' ' || s->data[begin] == '\t' ||
                               s->data[begin] == '\n' || s->data[begin] == '\v' ||
@@ -6868,12 +8063,7 @@ int64_t rt_string_trim_start(int64_t value) {
 }
 
 int64_t rt_string_trim_end(int64_t value) {
-    RtCoreString* s = rt_core_as_string(value);
-    if (!s) {
-        int64_t promoted;
-        if (rt_string_promote_raw_receiver(value, &promoted)) return rt_string_trim_end(promoted);
-        return value;
-    }
+    RT_STRING_RECV_OR_PROMOTE(s, value, value, rt_string_trim_end(promoted))
     uint64_t end = s->len;
     while (end > 0 && (s->data[end - 1] == ' ' || s->data[end - 1] == '\t' ||
                        s->data[end - 1] == '\n' || s->data[end - 1] == '\r')) {
@@ -6944,6 +8134,18 @@ int64_t rt_any_to_int(int64_t value) {
     return rt_value_unbox_int(value);
 }
 
+/* `v as <int>` with `v: any`: rt_any_to_int, except TEXT takes the CAST
+ * contract of rt_value_as_int (one code point -> that code point, longer text
+ * -> lenient parse) instead of the `.to_i64()` parse. `char_at` has no static
+ * return type, so `s.char_at(i) as i64` lands here; the parse turned every
+ * ASCII digit into its value (doc/08_tracking/bug/
+ * char_at_as_i64_parses_digit_jit_ppm_header_2026-11-23.md).
+ * Twin: Rust runtime value/collections.rs. */
+int64_t rt_any_cast_int(int64_t value) {
+    if (rt_core_as_string(value)) return rt_value_as_int(value);
+    return rt_any_to_int(value);
+}
+
 /* Task #178 (text3 lane): backs the `int("42")` global builtin's native MIR
  * lowering (switch_operators_calls.spl). rt_string_to_int above requires an
  * ALREADY-tagged receiver (rt_core_as_string-checked, 0 otherwise) -- the
@@ -6957,9 +8159,27 @@ int64_t rt_any_to_int(int64_t value) {
  * rt_string_to_int's own behavior for its existing to_i64()/parse_int()/
  * to_int() callers. */
 int64_t rt_string_to_int_any(int64_t value) {
-    const char* raw = rt_interp_cstr(value);
-    if (!raw) return 0;
-    return (int64_t)strtoll(raw, NULL, 10);
+    /* Length-bounded for tagged strings: never let strtoll read past s->len
+     * (bug native_int_text_unbounded_strtoll_2026_11_03). Raw char* literals
+     * are NUL-terminated by construction and keep the strtoll path. */
+    RtCoreString* s = rt_core_as_string(value);
+    if (s) {
+        char buf[64];
+        uint64_t n = s->len < sizeof(buf) - 1 ? s->len : sizeof(buf) - 1;
+        if (n) memcpy(buf, s->data, (size_t)n);
+        buf[n] = '\0';
+        return (int64_t)strtoll(buf, NULL, 10);
+    }
+    /* Not a C-registered string: a Rust-owned string in the mixed link (no NUL
+     * at len) or a raw char*. Bound the read by the counted length. */
+    const char* data;
+    size_t len;
+    if (!rt_text_view_abi(value, &data, &len)) return 0;
+    char buf[64];
+    size_t n = len < sizeof(buf) - 1 ? len : sizeof(buf) - 1;
+    if (n) memcpy(buf, data, n);
+    buf[n] = '\0';
+    return (int64_t)strtoll(buf, NULL, 10);
 }
 
 /* Task #118: sibling of rt_string_to_int() with the canonical `int(text)`
@@ -7084,6 +8304,7 @@ static char** rt_core_filtered_argv = NULL;
 SPL_WEAK void spl_init_args(int argc, char** argv) {
     rt_core_argc = simple_runtime_filter_startup_args(
         argc, argv, &rt_core_filtered_argv, &rt_core_argv);
+    rt_install_crash_handler();
 }
 
 SPL_WEAK int64_t spl_arg_count(void) {
@@ -7122,11 +8343,40 @@ SPL_WEAK const char* spl_get_arg(int64_t idx) {
  * (8ca87866c6, ~475 collisions). ELF/Mach-O extract a weak archive member
  * normally (unlike the Windows GNU case above), so keeping it weak there
  * costs nothing and avoids that risk. See the Windows bootstrap
- * rt_set_args unresolved-reference investigation, 2026-09-01. */
+ * rt_set_args unresolved-reference investigation, 2026-09-01.
+ *
+ * Exception, ELF only: the hosted bundle linked together with
+ * libsimple_native_all.a (host-gpu / auto native-build). Among HOSTED ELF
+ * composers it is the only one that passes SIMPLE_RUNTIME_MEMORY_OWNER without
+ * SIMPLE_CORE_C_STANDALONE (runtime_compiler.spl adds STANDALONE when
+ * `include_dynload or core_c_profile`, and its caller passes include_dynload =
+ * no native_all archive; tools.rs, the exact_stage4 lane above, always adds
+ * it). The freestanding SimpleOS sysroots also omit STANDALONE, but there
+ * simple_core/core_process.spl owns argv (see os/libc/simpleos_cli_args.c), so
+ * __simpleos__ / non-hosted builds keep the weak copies. The native_all link
+ * always carries --allow-multiple-definition and puts these objects before
+ * the archive. There, `-u
+ * rt_vulkan_provider_is_available` pulls the simple_runtime CGU that also
+ * defines rt_set_args/rt_get_args/sys_get_args/rt_get_argc STRONGLY, and a
+ * weak C copy loses to it: Rust rt_get_args built its array with the C
+ * rt_array_new and the Rust rt_array_push_grow, which rejects a C array, so
+ * compiled code read `sys_get_args().len()` as 0. The whole argv family is
+ * therefore strong here, so the first (C) definition wins and the C array
+ * owner settled for runtime.c (see rt_cli_get_args below) holds for the Rust
+ * archive too. Mach-O has no --allow-multiple-definition, so it is excluded.
+ * doc/08_tracking/bug/hosted_native_all_rust_argv_overrides_c_array_owner_2026-11-07.md */
+#if defined(__ELF__) && defined(SIMPLE_RUNTIME_MEMORY_OWNER) && \
+    !defined(SIMPLE_CORE_C_STANDALONE) && !defined(__simpleos__) && \
+    defined(__STDC_HOSTED__) && __STDC_HOSTED__
+#define SPL_ARGV_RUST_ARCHIVE_PEER 1
+#define SPL_ARGV_FAMILY_OWNER
+#else
+#define SPL_ARGV_FAMILY_OWNER SPL_WEAK
+#endif
 #if defined(_WIN32)
 void rt_set_args(int argc, char** argv) {
 #else
-SPL_WEAK void rt_set_args(int argc, char** argv) {
+SPL_ARGV_FAMILY_OWNER void rt_set_args(int argc, char** argv) {
 #endif
     spl_init_args(argc, argv);
 }
@@ -7174,11 +8424,11 @@ void rt_set_args_wide(int argc, const wchar_t** argv) {
 }
 #endif /* _WIN32 */
 
-SPL_WEAK int32_t rt_get_argc(void) {
+SPL_ARGV_FAMILY_OWNER int32_t rt_get_argc(void) {
     return (int32_t)spl_arg_count();
 }
 
-SPL_WEAK SplArray* rt_get_args(void) {
+SPL_ARGV_FAMILY_OWNER SplArray* rt_get_args(void) {
     return rt_cli_get_args();
 }
 
@@ -7186,14 +8436,20 @@ SPL_WEAK SplArray* rt_get_args(void) {
  * interpreter registers it on every lane). No native C definition existed, so
  * entry-closure binaries linked it as a silent 0-returning stub and
  * get_args() saw an empty array (native_sys_get_args_missing 2026-07-23). */
-SPL_WEAK SplArray* sys_get_args(void) {
+SPL_ARGV_FAMILY_OWNER SplArray* sys_get_args(void) {
     return rt_cli_get_args();
 }
 
 /* A COFF archive needs a strong standalone owner. The hosted runtime.c argv
  * implementation uses incompatible legacy array/value layouts and is omitted
- * for this lane. Preserve its existing ownership for hosted and Unix builds. */
-#if defined(_WIN32) && defined(SIMPLE_CORE_C_STANDALONE)
+ * whenever this file is in the bundle (SIMPLE_RUNTIME_MEMORY_OWNER; see the
+ * matching guard in runtime.c), so on Windows this copy is then the only one
+ * and must be strong: a lone weak external is not resolved there. ELF keeps
+ * weak for the Rust-capsule coexistence reason given at rt_set_args above,
+ * except beside the Rust archive (SPL_ARGV_RUST_ARCHIVE_PEER, same place). */
+#if (defined(_WIN32) && \
+    (defined(SIMPLE_CORE_C_STANDALONE) || defined(SIMPLE_RUNTIME_MEMORY_OWNER))) || \
+    defined(SPL_ARGV_RUST_ARCHIVE_PEER)
 #define SPL_CORE_ARGV_OWNER
 #else
 #define SPL_CORE_ARGV_OWNER SPL_WEAK
@@ -7224,6 +8480,8 @@ SPL_CORE_ARGV_OWNER int64_t rt_cli_arg_at(int64_t index) {
     return rt_string_new((const uint8_t*)arg, (uint64_t)strlen(arg));
 }
 #undef SPL_CORE_ARGV_OWNER
+#undef SPL_ARGV_FAMILY_OWNER
+#undef SPL_ARGV_RUST_ARCHIVE_PEER
 
 int64_t rt_file_preload_pages(int64_t path_value) {
 #if defined(_WIN32)
@@ -7243,13 +8501,13 @@ int64_t rt_file_preload_pages(int64_t path_value) {
 
     off_t size = lseek(fd, 0, SEEK_END);
     if (size <= 0) {
-        close(fd);
+        rt_crt_close(fd);
         return 0;
     }
     lseek(fd, 0, SEEK_SET);
 
     unsigned char* mapped = (unsigned char*)mmap(NULL, (size_t)size, PROT_READ, MAP_PRIVATE, fd, 0);
-    close(fd);
+    rt_crt_close(fd);
     if (mapped == MAP_FAILED) return -3;
 
     volatile uint64_t sum = 0;
@@ -7283,7 +8541,7 @@ int64_t rt_net_tcp_connect_local_discard(void) {
     struct sockaddr_in addr;
     rt_core_sockaddr_loopback(9, &addr);
     connect(fd, (struct sockaddr*)&addr, sizeof(addr));
-    close(fd);
+    rt_crt_close(fd);
     return 0;
 #endif
 }
@@ -7297,7 +8555,7 @@ int64_t rt_net_udp_send_local_discard(void) {
     struct sockaddr_in addr;
     rt_core_sockaddr_loopback(9, &addr);
     sendto(fd, "x", 1, 0, (struct sockaddr*)&addr, sizeof(addr));
-    close(fd);
+    rt_crt_close(fd);
     return 0;
 #endif
 }
@@ -7313,7 +8571,7 @@ int64_t rt_net_http_plain_local_probe(void) {
     if (connect(fd, (struct sockaddr*)&addr, sizeof(addr)) == 0) {
         write(fd, "GET / HTTP/1.0\r\n\r\n", 18);
     }
-    close(fd);
+    rt_crt_close(fd);
     return 0;
 #endif
 }
@@ -7322,172 +8580,40 @@ int64_t rt_net_http_plain_local_probe(void) {
  * Memory Operations
  * ================================================================ */
 
-/* Struct field accesses are emitted as direct native loads/stores, so a
- * non-null corrupt receiver must be rejected before Cranelift dereferences it.
- * Keep a dedicated, bounded allocation table: this avoids probing candidate
- * addresses and keeps validation O(1) on the field-access hot path. */
-typedef struct RtStructAllocation {
-    uintptr_t ptr;
-    size_t bytes;
-} RtStructAllocation;
-
-#define RT_STRUCT_ALLOC_TOMBSTONE ((uintptr_t)1)
-#define RT_STRUCT_ALLOC_MAX_CAP ((size_t)1 << 22)
-
-static RtStructAllocation* rt_struct_allocs = NULL;
-static size_t rt_struct_alloc_cap = 0;
-static size_t rt_struct_alloc_len = 0;
-static size_t rt_struct_alloc_tombs = 0;
-#if defined(_WIN32)
-static SRWLOCK rt_struct_alloc_lock = SRWLOCK_INIT;
-#else
-static pthread_rwlock_t rt_struct_alloc_lock = PTHREAD_RWLOCK_INITIALIZER;
+#define STRUCT_ALLOC_REGISTRY_HASH(ptr) rt_core_immortal_hash_ptr(ptr)
+#if !defined(SIMPLE_RUNTIME_MEMORY_OWNER)
+#define STRUCT_ALLOC_REGISTRY_TEST_EXPORTS 1
 #endif
+#include "struct_alloc_registry_impl.h"
 
-static void rt_struct_alloc_lock_acquire(void) {
-#if defined(_WIN32)
-    AcquireSRWLockExclusive(&rt_struct_alloc_lock);
+static void rt_core_transient_raw_reclaim_batch(void** raws, size_t count) {
+#if defined(SIMPLE_RUNTIME_MEMORY_OWNER)
+    /* The composed allocator may add hardening headers, quarantine, or
+     * guarded mappings. Reclaim through its canonical ABI; rt_free also
+     * unregisters each entry safely while the table is scanned. */
+    spl_free_batch_v1((uint8_t**)raws, count);
 #else
-    pthread_rwlock_wrlock(&rt_struct_alloc_lock);
-#endif
-}
-
-static void rt_struct_alloc_lock_release(void) {
-#if defined(_WIN32)
-    ReleaseSRWLockExclusive(&rt_struct_alloc_lock);
-#else
-    pthread_rwlock_unlock(&rt_struct_alloc_lock);
-#endif
-}
-
-static void rt_struct_alloc_read_lock_acquire(void) {
-#if defined(_WIN32)
-    AcquireSRWLockShared(&rt_struct_alloc_lock);
-#else
-    pthread_rwlock_rdlock(&rt_struct_alloc_lock);
-#endif
-}
-
-static void rt_struct_alloc_read_lock_release(void) {
-#if defined(_WIN32)
-    ReleaseSRWLockShared(&rt_struct_alloc_lock);
-#else
-    pthread_rwlock_unlock(&rt_struct_alloc_lock);
-#endif
-}
-
-static int rt_struct_alloc_insert_raw(uintptr_t ptr, size_t bytes) {
-    size_t mask = rt_struct_alloc_cap - 1;
-    size_t i = rt_core_immortal_hash_ptr(ptr) & mask;
-    size_t first_tomb = SIZE_MAX;
-    for (;;) {
-        uintptr_t entry = rt_struct_allocs[i].ptr;
-        if (entry == 0) {
-            size_t target = first_tomb == SIZE_MAX ? i : first_tomb;
-            rt_struct_allocs[target] = (RtStructAllocation){ptr, bytes};
-            if (first_tomb != SIZE_MAX) rt_struct_alloc_tombs--;
-            rt_struct_alloc_len++;
-            return 1;
-        }
-        if (entry == RT_STRUCT_ALLOC_TOMBSTONE) {
-            if (first_tomb == SIZE_MAX) first_tomb = i;
-        } else if (entry == ptr) {
-            rt_struct_allocs[i].bytes = bytes;
-            return 1;
-        }
-        i = (i + 1) & mask;
-    }
-}
-
-static int rt_struct_alloc_resize(size_t next_cap) {
-    if (next_cap > RT_STRUCT_ALLOC_MAX_CAP ||
-            next_cap > SIZE_MAX / sizeof(RtStructAllocation)) return 0;
-    RtStructAllocation* fresh = (RtStructAllocation*)rt_observed_calloc_v1(
-        next_cap, sizeof(RtStructAllocation));
-    if (!fresh) return 0;
-    RtStructAllocation* old = rt_struct_allocs;
-    size_t old_cap = rt_struct_alloc_cap;
-    rt_struct_allocs = fresh;
-    rt_struct_alloc_cap = next_cap;
-    rt_struct_alloc_len = 0;
-    rt_struct_alloc_tombs = 0;
-    for (size_t i = 0; i < old_cap; i++) {
-        uintptr_t ptr = old[i].ptr;
-        if (ptr != 0 && ptr != RT_STRUCT_ALLOC_TOMBSTONE) {
-            rt_struct_alloc_insert_raw(ptr, old[i].bytes);
-        }
-    }
-    free(old);
-    return 1;
-}
-
-static int rt_struct_alloc_register(void* ptr, size_t bytes) {
-    int ok = 0;
-    if (!ptr) return 0;
     rt_struct_alloc_lock_acquire();
-    if (rt_struct_alloc_cap == 0) {
-        ok = rt_struct_alloc_resize(256);
-    } else {
-        ok = 1;
-    }
-    if (ok && (rt_struct_alloc_len + rt_struct_alloc_tombs + 1) * 10
-            >= rt_struct_alloc_cap * 7) {
-        if ((rt_struct_alloc_len + 1) * 10 < rt_struct_alloc_cap * 6) {
-            ok = rt_struct_alloc_resize(rt_struct_alloc_cap);
-        } else if (rt_struct_alloc_cap < RT_STRUCT_ALLOC_MAX_CAP) {
-            ok = rt_struct_alloc_resize(rt_struct_alloc_cap * 2);
-        } else if (rt_struct_alloc_tombs > rt_struct_alloc_len / 4) {
-            ok = rt_struct_alloc_resize(rt_struct_alloc_cap);
-        } else if (rt_struct_alloc_len + 1 >= rt_struct_alloc_cap) {
-            ok = 0;
-        }
-    }
-    if (ok) ok = rt_struct_alloc_insert_raw((uintptr_t)ptr, bytes);
+    for (size_t i = 0; i < count; i++) rt_struct_alloc_unregister_locked(raws[i]);
     rt_struct_alloc_lock_release();
-    return ok;
-}
-
-static void rt_struct_alloc_unregister(void* ptr) {
-    if (!ptr) return;
-    rt_struct_alloc_lock_acquire();
-    if (rt_struct_alloc_cap != 0) {
-        size_t mask = rt_struct_alloc_cap - 1;
-        size_t i = rt_core_immortal_hash_ptr((uintptr_t)ptr) & mask;
-        for (;;) {
-            uintptr_t entry = rt_struct_allocs[i].ptr;
-            if (entry == 0) break;
-            if (entry == (uintptr_t)ptr) {
-                rt_struct_allocs[i] = (RtStructAllocation){RT_STRUCT_ALLOC_TOMBSTONE, 0};
-                rt_struct_alloc_len--;
-                rt_struct_alloc_tombs++;
-                break;
-            }
-            i = (i + 1) & mask;
+    rt_persistent_raw_lock_acquire();
+    if (rt_persistent_raw_cap != 0 && rt_persistent_raw_len != 0) {
+        for (size_t i = 0; i < count; i++) rt_persistent_raw_unregister_locked(raws[i]);
+    }
+    rt_persistent_raw_lock_release();
+    for (size_t i = 0; i < count; i++) {
+        /* Now that sampled guard slots are registered here too, reclaim
+         * must not hand one to free(): a slot is a page-aligned mmap
+         * mapping, not a libc chunk. Route it through the guard's own
+         * reclaim, which PROT_NONEs the mapping so a later UAF traps.
+         * This mirrors rt_free's guard-slot branch. */
+        if (rt_mem_guard_is_slot(raws[i])) {
+            rt_mem_guard_free_sampled(raws[i]);
+        } else {
+            free(raws[i]);
         }
     }
-    rt_struct_alloc_lock_release();
-}
-
-static int rt_struct_alloc_lookup_size(void* ptr, size_t* bytes_out) {
-    int found = 0;
-    if (!ptr) return 0;
-    rt_struct_alloc_read_lock_acquire();
-    if (rt_struct_alloc_cap != 0) {
-        size_t mask = rt_struct_alloc_cap - 1;
-        size_t i = rt_core_immortal_hash_ptr((uintptr_t)ptr) & mask;
-        for (;;) {
-            uintptr_t entry = rt_struct_allocs[i].ptr;
-            if (entry == 0) break;
-            if (entry == (uintptr_t)ptr) {
-                *bytes_out = rt_struct_allocs[i].bytes;
-                found = 1;
-                break;
-            }
-            i = (i + 1) & mask;
-        }
-    }
-    rt_struct_alloc_read_lock_release();
-    return found;
+#endif
 }
 
 /* runtime_memory.c is the canonical allocator/pointer ABI member whenever it
@@ -7495,6 +8621,17 @@ static int rt_struct_alloc_lookup_size(void* ptr, size_t* bytes_out) {
  * SIMPLE_CORE_C_STANDALONE: a native-all link needs the hosted providers below
  * even though it still compiles runtime_memory.c beside runtime_native.c. */
 #if !defined(SIMPLE_RUNTIME_MEMORY_OWNER)
+static int rt_core_raw_register_alloc(void* ptr, size_t size) {
+    if (!rt_core_transient_raw_register(ptr, size)) return 0;
+    if (!rt_core_transient_array_scope_active || rt_core_transient_array_scope_paused) {
+        if (!rt_persistent_raw_register(ptr, size)) {
+            rt_core_transient_raw_erase(ptr);
+            return 0;
+        }
+    }
+    return 1;
+}
+
 void* rt_alloc(int64_t size) {
     if (size < 0) return NULL;
     if (rt_mem_guard_should_sample((size_t)size)) {
@@ -7507,7 +8644,7 @@ void* rt_alloc(int64_t size) {
              * could not classify a tagged raw root that happened to be
              * sampled, so it refused, and a promoted live graph was reported
              * unpromotable under SIMPLE_MEM_GUARD_RATE. */
-            if (!rt_core_transient_raw_register(guarded, (size_t)size)) {
+            if (!rt_core_raw_register_alloc(guarded, (size_t)size)) {
                 rt_mem_guard_free_sampled(guarded);
                 return NULL;
             }
@@ -7517,8 +8654,8 @@ void* rt_alloc(int64_t size) {
          * to the normal allocator below rather than returning NULL for a
          * sampling decision that isn't itself an OOM. */
     }
-    void* ptr = rt_observed_malloc_v1((size_t)size);
-    if (ptr && !rt_core_transient_raw_register(ptr, (size_t)size)) {
+    void* ptr = rt_observed_calloc_v1(1, (size_t)size);
+    if (ptr && !rt_core_raw_register_alloc(ptr, (size_t)size)) {
         free(ptr);
         return NULL;
     }
@@ -7545,8 +8682,8 @@ int8_t rt_struct_receiver_valid(int64_t receiver, int64_t byte_offset, int64_t a
     rt_struct_alloc_read_lock_acquire();
     if (rt_struct_alloc_cap != 0) {
         size_t mask = rt_struct_alloc_cap - 1;
-        size_t i = rt_core_immortal_hash_ptr(ptr) & mask;
-        for (;;) {
+        size_t i = rt_struct_alloc_hash(ptr) & mask;
+        for (size_t probes = 0; probes < rt_struct_alloc_cap; probes++) {
             uintptr_t entry = rt_struct_allocs[i].ptr;
             if (entry == 0) break;
             if (entry == ptr) {
@@ -7566,6 +8703,18 @@ int8_t rt_struct_receiver_valid(int64_t receiver, int64_t byte_offset, int64_t a
 void* rt_realloc(void* ptr, int64_t size) {
     if (size < 0) return NULL;
     if (!ptr) return rt_alloc(size);
+    size_t persistent_old_size = 0;
+    int persistent_tracked = rt_persistent_raw_lookup_size(ptr, &persistent_old_size);
+    RtCoreTransientRawAlloc* tracked = rt_core_transient_raw_lookup((uintptr_t)ptr);
+    /* Snapshot tracked metadata by value before rt_struct_alloc() can grow
+     * rt_core_transient_raw_allocs and free the backing array. */
+    int tracked_found = tracked != NULL;
+    size_t tracked_old_size = tracked
+        ? (tracked->bytes & RT_CORE_TRANSIENT_RAW_SIZE_MASK)
+        : 0;
+    int tracked_owned = tracked
+        ? ((tracked->bytes & RT_CORE_TRANSIENT_RAW_OWNED_BIT) != 0)
+        : 0;
     size_t struct_bytes = 0;
     if (rt_struct_alloc_lookup_size(ptr, &struct_bytes)) {
         if (size == 0) {
@@ -7574,6 +8723,25 @@ void* rt_realloc(void* ptr, int64_t size) {
         }
         void* next = rt_struct_alloc(size);
         if (!next) return NULL;
+        if (tracked_found) {
+            RtCoreTransientRawAlloc* next_t = rt_core_transient_raw_lookup((uintptr_t)next);
+            if (next_t) {
+                next_t->bytes = (size_t)size |
+                    (tracked_owned ? RT_CORE_TRANSIENT_RAW_OWNED_BIT : 0);
+            }
+            if (tracked_owned) {
+                rt_persistent_raw_unregister(next);
+            } else if (!rt_persistent_raw_register(next, (size_t)size)) {
+                rt_free(next);
+                return NULL;
+            }
+        } else if (persistent_tracked) {
+            rt_core_transient_raw_erase(next);
+            if (!rt_persistent_raw_register(next, (size_t)size)) {
+                rt_free(next);
+                return NULL;
+            }
+        }
         memcpy(next, ptr, struct_bytes < (size_t)size ? struct_bytes : (size_t)size);
         rt_free(ptr);
         return next;
@@ -7588,43 +8756,75 @@ void* rt_realloc(void* ptr, int64_t size) {
         RtMemGuardSlot* slot = rt_mem_guard_find(ptr);
         size_t old_size = slot ? slot->size : 0;
         if (size == 0) {
+            rt_persistent_raw_unregister(ptr);
+            rt_core_transient_raw_erase(ptr);
             rt_mem_guard_free_sampled(ptr);
             return NULL;
         }
-        void* next = rt_observed_malloc_v1((size_t)size);
+        void* next = rt_observed_calloc_v1(1, (size_t)size);
         if (!next) return NULL;
-        if (!rt_core_transient_raw_register(next, (size_t)size)) {
+        if (tracked_found) {
+            if (!rt_core_transient_raw_register_state(next, (size_t)size, tracked_owned) ||
+                    (!tracked_owned && !rt_persistent_raw_register(next, (size_t)size))) {
+                rt_core_transient_raw_erase(next);
+                free(next);
+                return NULL;
+            }
+        } else if (persistent_tracked && !rt_persistent_raw_register(next, (size_t)size)) {
             free(next);
             return NULL;
         }
         memcpy(next, ptr, old_size < (size_t)size ? old_size : (size_t)size);
+        rt_persistent_raw_unregister(ptr);
+        rt_core_transient_raw_erase(ptr);
         rt_mem_guard_free_sampled(ptr);
         return next;
     }
-    RtCoreTransientRawAlloc* tracked = rt_core_transient_raw_lookup((uintptr_t)ptr);
-    if (!tracked) return rt_observed_realloc_v1(ptr, (size_t)size);
+    if (!tracked_found) {
+        if (size == 0 && persistent_tracked) {
+            rt_free(ptr);
+            return NULL;
+        }
+        void* next = rt_observed_realloc_v1(ptr, (size_t)size);
+        if (next && persistent_tracked) {
+            if ((uintptr_t)next != (uintptr_t)ptr) {
+                rt_persistent_raw_unregister(ptr);
+            }
+            (void)rt_persistent_raw_register(next, (size_t)size);
+            if ((size_t)size > persistent_old_size) {
+                memset((uint8_t*)next + persistent_old_size, 0,
+                       (size_t)size - persistent_old_size);
+            }
+        }
+        return next;
+    }
     if (size == 0) {
+        rt_persistent_raw_unregister(ptr);
         rt_core_transient_raw_erase(ptr);
         free(ptr);
         return NULL;
     }
-    size_t old_size = tracked->bytes & RT_CORE_TRANSIENT_RAW_SIZE_MASK;
-    int owned = (tracked->bytes & RT_CORE_TRANSIENT_RAW_OWNED_BIT) != 0;
-    void* next = rt_observed_malloc_v1((size_t)size);
+    void* next = rt_observed_calloc_v1(1, (size_t)size);
     if (!next) return NULL;
-    if (!rt_core_transient_raw_register_state(next, (size_t)size, owned)) {
+    if (!rt_core_transient_raw_register_state(next, (size_t)size, tracked_owned) ||
+            (!tracked_owned && !rt_persistent_raw_register(next, (size_t)size))) {
+        rt_core_transient_raw_erase(next);
         free(next);
         return NULL;
     }
-    memcpy(next, ptr, old_size < (size_t)size ? old_size : (size_t)size);
+    memcpy(next, ptr, tracked_old_size < (size_t)size ? tracked_old_size : (size_t)size);
+    rt_persistent_raw_unregister(ptr);
     rt_core_transient_raw_erase(ptr);
     free(ptr);
     return next;
 }
 
 void rt_free(void* ptr) {
+    if (!ptr) return;
     rt_struct_alloc_unregister(ptr);
+    rt_persistent_raw_unregister(ptr);
     if (rt_mem_guard_is_slot(ptr)) {
+        rt_core_transient_raw_erase(ptr);
         rt_mem_guard_free_sampled(ptr);
         return;
     }
@@ -7761,10 +8961,9 @@ void rt_memory_barrier(void) {
  * round-trip cannot be elided or constant-folded, so it is a genuine
  * barrier here. MinGW is deliberately NOT routed here -- it has the GNU
  * asm and takes the branch below, exactly like Linux/macOS/FreeBSD. */
-static volatile int64_t rt_black_box_sink;
 int64_t rt_black_box(int64_t value) {
-    rt_black_box_sink = value;
-    return rt_black_box_sink;
+    volatile int64_t sink = value;
+    return sink;
 }
 #elif defined(__GNUC__) || defined(__clang__)
 SPL_WEAK int64_t rt_black_box(int64_t value) {
@@ -7772,10 +8971,9 @@ SPL_WEAK int64_t rt_black_box(int64_t value) {
     return value;
 }
 #else
-static volatile int64_t rt_black_box_sink;
 int64_t rt_black_box(int64_t value) {
-    rt_black_box_sink = value;
-    return rt_black_box_sink;
+    volatile int64_t sink = value;
+    return sink;
 }
 #endif
 
@@ -8091,6 +9289,11 @@ int64_t rt_dma_cache_line_size(void) {
  * ================================================================ */
 
 int64_t rt_strlen(const char* s) {
+    /* `.len()` and tag_str_local_if_raw (rt_strlen + rt_string_new re-tag) on
+     * a raw text local: keep the owning heap string's length so an embedded
+     * NUL does not truncate (optional_text_unwrap_truncates_at_nul_2026-10-25). */
+    RtCoreString* owner = rt_core_string_from_data_pointer((int64_t)(uintptr_t)s);
+    if (owner) return (int64_t)owner->len;
     return spl_str_len(s);
 }
 
@@ -8114,29 +9317,22 @@ char* rt_strcat(const char* a, const char* b) {
  * interpolation, [...].join in method_calls_literals.spl) expect a raw
  * pointer. */
 int64_t rt_strcat_tagged(int64_t a, int64_t b) {
-    RtCoreString* left_string = rt_core_as_string(a);
-    RtCoreString* right_string = rt_core_as_string(b);
-    const char* left = left_string ? (const char*)left_string->data : rt_interp_cstr(a);
-    const char* right = right_string ? (const char*)right_string->data : rt_interp_cstr(b);
-    /* Tagged text is length-delimited and may contain NUL bytes. Raw C-string
-     * operands retain the existing pointer/low-value fallback semantics. */
-    size_t left_len = left_string ? (size_t)left_string->len : (left ? strlen(left) : 0);
-    size_t right_len = right_string ? (size_t)right_string->len : (right ? strlen(right) : 0);
-    size_t total = left_len + right_len;
-
-    RtCoreString* out = (RtCoreString*)rt_observed_malloc_v1(sizeof(RtCoreString) + total + 1);
-    if (!out) return rt_core_nil();
-    out->kind = RT_VALUE_HEAP_STRING;
-    out->reserved = 0;
-    out->len = (uint64_t)total;
-    if (left_len > 0) memcpy(out->data, left, left_len);
-    if (right_len > 0) memcpy(out->data + left_len, right, right_len);
-    out->data[total] = '\0';
-    if (!rt_core_register_string(out)) {
-        free(out);
-        return rt_core_nil();
-    }
-    return (int64_t)(((uint64_t)(uintptr_t)out) | RT_VALUE_TAG_HEAP);
+    RtCoreString* left_string = rt_core_as_string_or_data(a);
+    RtCoreString* right_string = rt_core_as_string_or_data(b);
+    /* Tagged text is length-delimited and may contain NUL bytes; a non-C
+     * operand (Rust-owned string or raw char*) goes through the counted view. */
+    const char* left = "";
+    const char* right = "";
+    size_t left_view = 0;
+    size_t right_view = 0;
+    if (left_string) { left = (const char*)left_string->data; left_view = (size_t)left_string->len; }
+    else (void)rt_text_view_abi(a, &left, &left_view);
+    if (right_string) { right = (const char*)right_string->data; right_view = (size_t)right_string->len; }
+    else (void)rt_text_view_abi(b, &right, &right_view);
+    uint64_t left_len = (uint64_t)left_view;
+    uint64_t right_len = (uint64_t)right_view;
+    return rt_core_concat_bytes_v1((const uint8_t*)left, left_len,
+                                   (const uint8_t*)right, right_len);
 }
 
 char* rt_substr(const char* s, int64_t start, int64_t len) {
@@ -8154,18 +9350,26 @@ char* rt_strreplace(const char* s, const char* old_s, const char* new_s) {
 SplArray* rt_strsplit(const char* s, const char* delim) {
     SplArray* out = rt_array_new(4);
     if (!out || !s) return out;
-    if (!delim || !*delim) {
-        rt_array_push(out, rt_string_new((const uint8_t*)s, (uint64_t)strlen(s)));
+    RtCoreString* s_owner = rt_core_string_from_data_pointer((int64_t)(uintptr_t)s);
+    RtCoreString* d_owner = delim ? rt_core_string_from_data_pointer((int64_t)(uintptr_t)delim) : NULL;
+    size_t s_len = s_owner ? (size_t)s_owner->len : strlen(s);
+    size_t delim_len = d_owner ? (size_t)d_owner->len : (delim ? strlen(delim) : 0);
+    if (!delim || delim_len == 0) {
+        rt_array_push(out, rt_string_new((const uint8_t*)s, (uint64_t)s_len));
         return out;
     }
-    size_t delim_len = strlen(delim);
-    const char* start = s;
-    const char* hit = NULL;
-    while ((hit = strstr(start, delim)) != NULL) {
-        rt_array_push(out, rt_string_new((const uint8_t*)start, (uint64_t)(hit - start)));
-        start = hit + delim_len;
+    size_t start = 0;
+    size_t i = 0;
+    while (i + delim_len <= s_len) {
+        if (memcmp(s + i, delim, delim_len) == 0) {
+            rt_array_push(out, rt_string_new((const uint8_t*)(s + start), (uint64_t)(i - start)));
+            i += delim_len;
+            start = i;
+        } else {
+            i++;
+        }
     }
-    rt_array_push(out, rt_string_new((const uint8_t*)start, (uint64_t)strlen(start)));
+    rt_array_push(out, rt_string_new((const uint8_t*)(s + start), (uint64_t)(s_len - start)));
     return out;
 }
 
@@ -8179,8 +9383,7 @@ int64_t rt_strcmp(const char* a, const char* b) {
 
 static SplArray* rt_core_array_new_fill(int64_t cap, uint8_t flags, int zero_items) {
     int64_t actual_cap = cap > 4 ? cap : 4;
-    if (actual_cap < 0 || actual_cap > RT_CORE_ARRAY_MAX_CAP ||
-        actual_cap > INT64_MAX / (int64_t)sizeof(int64_t)) {
+    if (!rt_core_array_capacity_valid(actual_cap, flags)) {
         return NULL;
     }
     RtCoreArray* a = (RtCoreArray*)rt_observed_calloc_v1(1, sizeof(RtCoreArray));
@@ -8199,6 +9402,7 @@ static SplArray* rt_core_array_new_fill(int64_t cap, uint8_t flags, int zero_ite
         free(a);
         return NULL;
     }
+    core_aux_note_array(core_aux_array_data_bytes(a));
     return (SplArray*)(((uintptr_t)a) | RT_VALUE_TAG_HEAP);
 }
 
@@ -8265,6 +9469,36 @@ SplArray* rt_array_new_with_cap_u64(int64_t cap) {
     return rt_core_array_new(cap, RT_CORE_ARRAY_FLAG_U64_PACKED);
 }
 
+/* C twins of the Rust runtime's rt_array_new_with_cap family
+ * (compiler_rust/runtime/src/value/collections.rs): `cap` slots RESERVED,
+ * `len == 0`, tagged-slot representation -- i.e. exactly rt_array_new(cap).
+ * Not the len == cap constructor rt_array_new_uninit above: every caller
+ * (io/tls_common_hooks.spl, src/array_builder.spl) fills with push().
+ * Declared in .spl and in RUNTIME_SYMBOL_NAMES, served by the JIT and the
+ * interpreter, but absent from every C translation unit, so a native link of
+ * any module pulling them in failed with an unresolved symbol (or got a
+ * zero-returning stub under SIMPLE_ALLOW_UNRESOLVED_RT=1, i.e. a null [u8]).
+ * The typed spellings carry no representation difference in either runtime. */
+SplArray* rt_array_new_with_cap(int64_t cap) {
+    return rt_array_new(cap);
+}
+
+SplArray* rt_array_new_with_cap_text(int64_t cap) {
+    return rt_array_new(cap);
+}
+
+SplArray* rt_array_new_with_cap_bool(int64_t cap) {
+    return rt_array_new(cap);
+}
+
+SplArray* rt_array_new_with_cap_i64(int64_t cap) {
+    return rt_array_new(cap);
+}
+
+SplArray* rt_array_new_with_cap_js_value(int64_t cap) {
+    return rt_array_new(cap);
+}
+
 /* Is this array stored as PACKED BYTES rather than tagged int64 slots?
  *
  * `[u8]` takes the packed representation (RT_CORE_ARRAY_FLAG_BYTES); every
@@ -8284,7 +9518,7 @@ int rt_array_is_byte_packed(SplArray* value) {
 void rt_array_free(SplArray* value) {
     RtCoreArray* array = rt_core_as_registered_array((int64_t)(uintptr_t)value);
     if (!array || !rt_core_unregister_array(array)) return;
-    free(array->data);
+    core_aux_array_data_free(array);
     free(array);
 }
 
@@ -8383,8 +9617,7 @@ void rt_array_free(SplArray* value) {
 #define RT_CORE_DEEP_FREE_REFUSE 3
 #define RT_CORE_DEEP_FREE_DICT 4
 
-/* Bounds the planner's own memory; exceeding it refuses rather than grows. */
-#define RT_CORE_DEEP_FREE_MAX_NODES ((size_t)1 << 22)
+/* Dynamically grows with overflow checks; allocator OOM refuses atomically. */
 
 typedef struct RtCoreDeepFreeNode {
     void* ptr;
@@ -8402,6 +9635,7 @@ typedef struct RtCoreDeepFreePlan {
 
 /* caller-local table, no lock needed */
 static int rt_core_deep_free_seen_grow(RtCoreDeepFreePlan* plan) {
+    if (plan->seen_cap > SIZE_MAX / 2) return 0;
     size_t new_cap = plan->seen_cap == 0 ? 256 : plan->seen_cap * 2;
     if (new_cap > SIZE_MAX / sizeof(uintptr_t)) return 0;
     uintptr_t* fresh = (uintptr_t*)rt_observed_calloc_v1(new_cap, sizeof(uintptr_t));
@@ -8422,7 +9656,7 @@ static int rt_core_deep_free_seen_grow(RtCoreDeepFreePlan* plan) {
 
 /* 1 = newly inserted, 0 = already present (alias or cycle), -1 = out of memory */
 static int rt_core_deep_free_seen_insert(RtCoreDeepFreePlan* plan, uintptr_t p) {
-    if ((plan->seen_len + 1) * 10 >= plan->seen_cap * 7) {
+    if (rt_core_seen_needs_grow(plan->seen_len, plan->seen_cap)) {
         if (!rt_core_deep_free_seen_grow(plan)) return -1;
     }
     size_t mask = plan->seen_cap - 1;
@@ -8441,8 +9675,9 @@ static int rt_core_deep_free_seen_insert(RtCoreDeepFreePlan* plan, uintptr_t p) 
 
 static int rt_core_deep_free_plan_push(RtCoreDeepFreePlan* plan, void* ptr, int kind) {
     if (plan->len == plan->cap) {
+        if (plan->cap > SIZE_MAX / 2) return 0;
         size_t next_cap = plan->cap == 0 ? 32 : plan->cap * 2;
-        if (next_cap > RT_CORE_DEEP_FREE_MAX_NODES) return 0;
+        if (next_cap > SIZE_MAX / sizeof(RtCoreDeepFreeNode)) return 0;
         RtCoreDeepFreeNode* fresh = (RtCoreDeepFreeNode*)rt_observed_realloc_v1(
             plan->nodes, next_cap * sizeof(RtCoreDeepFreeNode));
         if (!fresh) return 0;
@@ -8597,13 +9832,13 @@ static int64_t rt_core_deep_free_run(void* root, int root_kind) {
             if (plan.nodes[i].kind == RT_CORE_DEEP_FREE_ARRAY) {
                 RtCoreArray* a = (RtCoreArray*)plan.nodes[i].ptr;
                 if (rt_core_unregister_array(a)) {
-                    free(a->data);
+                    core_aux_array_data_free(a);
                     free(a);
                 }
             } else if (plan.nodes[i].kind == RT_CORE_DEEP_FREE_DICT) {
                 RtCoreDict* d = (RtCoreDict*)plan.nodes[i].ptr;
                 if (rt_core_unregister_immortal_ptr(d)) {
-                    free(d->entries);
+                    core_aux_dict_entries_free(d);
                     free(d);
                 }
             } else {
@@ -8705,6 +9940,464 @@ int64_t rt_string_free(int64_t value) {
     return 1;
 }
 
+/* ============================================================================
+ * Object-graph refcount (Build Session Memory Model v1 section 2 "RC shared",
+ * section 3 I5/I6/I8, section 4 refcount surface; package P4). Rust twin:
+ * src/compiler_rust/runtime/src/value/rc_graph.rs.
+ *
+ * Ownership rule: every registered heap object is owned by exactly ONE of
+ *   {transient scope (tag = scope id), session, rc root, process (tag 0, rc 0)}.
+ * rt_rc_share(root) makes the root an rc root (rc = 1) and claims its OWNED
+ * graph: every node reachable from the root that is not itself an rc root, is
+ * not tagged with a scope other than the active one, and is not a
+ * RT_CORE_STRING_FLAG_SHARED cache string. Claimed nodes get tag 0 (strings
+ * lose RT_CORE_STRING_FLAG_TRANSIENT) so no scope end frees them.
+ * A sub-object shared between two rc roots MUST itself be an rc root retained
+ * by each parent; otherwise the first release frees it under the other.
+ * rt_rc_release reaching 0 frees the owned graph (tag 0, rc 0 nodes). An
+ * rc-root child is RELEASED once per distinct child (not freed); a child
+ * tagged with a live scope/session and a SHARED string are left alone.
+ * RC graphs are acyclic (I5): SIMPLE_RC_CYCLE_CHECK=1 makes share fail closed
+ * on a back-edge.
+ *
+ * The count lives in a pointer-keyed side table (I6: the frozen RtCore*
+ * layouts and the registry probe code are untouched); only rc roots have a
+ * row, so ordinary objects pay nothing. All rc state is guarded by
+ * rt_core_heap_lifecycle_lock, the lock scope-end reclaim holds, so share and
+ * release never interleave with a reclaim. Not covered in v1: untyped raw
+ * struct allocations (RT_CORE_TRANSIENT_RAW) are not graph nodes here.
+ * ========================================================================== */
+
+typedef struct RtCoreRcSet {
+    uintptr_t* keys; /* 0 = empty, RT_CORE_IMMORTAL_TOMBSTONE = erased */
+    uint32_t* vals;
+    size_t cap;
+    size_t len;
+    size_t tombs;
+} RtCoreRcSet;
+
+static RtCoreRcSet rt_core_rc_table = {0};
+
+static uint32_t* core_rc_set_find(RtCoreRcSet* set, uintptr_t p) {
+    if (set->cap == 0) return NULL;
+    size_t mask = set->cap - 1;
+    size_t i = rt_core_immortal_hash_ptr(p) & mask;
+    for (;;) {
+        uintptr_t e = set->keys[i];
+        if (e == 0) return NULL;
+        if (e == p) return &set->vals[i];
+        i = (i + 1) & mask;
+    }
+}
+
+static int core_rc_set_grow(RtCoreRcSet* set) {
+    size_t new_cap = set->cap == 0 ? 64 : set->cap * 2;
+    if (set->cap != 0 && set->tombs > set->len) new_cap = set->cap;
+    if (new_cap > SIZE_MAX / sizeof(uintptr_t)) return 0;
+    uintptr_t* keys = (uintptr_t*)calloc(new_cap, sizeof(uintptr_t));
+    uint32_t* vals = (uint32_t*)calloc(new_cap, sizeof(uint32_t));
+    if (!keys || !vals) {
+        free(keys);
+        free(vals);
+        return 0;
+    }
+    for (size_t k = 0; k < set->cap; k++) {
+        uintptr_t e = set->keys[k];
+        if (e == 0 || e == RT_CORE_IMMORTAL_TOMBSTONE) continue;
+        size_t j = rt_core_immortal_hash_ptr(e) & (new_cap - 1);
+        while (keys[j] != 0) j = (j + 1) & (new_cap - 1);
+        keys[j] = e;
+        vals[j] = set->vals[k];
+    }
+    free(set->keys);
+    free(set->vals);
+    set->keys = keys;
+    set->vals = vals;
+    set->cap = new_cap;
+    set->tombs = 0;
+    return 1;
+}
+
+/* p must not already be present. */
+static uint32_t* core_rc_set_insert(RtCoreRcSet* set, uintptr_t p, uint32_t v) {
+    if ((set->len + set->tombs + 1) * 10 >= set->cap * 7 && !core_rc_set_grow(set)) return NULL;
+    size_t mask = set->cap - 1;
+    size_t i = rt_core_immortal_hash_ptr(p) & mask;
+    while (set->keys[i] != 0 && set->keys[i] != RT_CORE_IMMORTAL_TOMBSTONE) i = (i + 1) & mask;
+    if (set->keys[i] == RT_CORE_IMMORTAL_TOMBSTONE) set->tombs--;
+    set->keys[i] = p;
+    set->vals[i] = v;
+    set->len++;
+    return &set->vals[i];
+}
+
+static void core_rc_set_erase(RtCoreRcSet* set, uintptr_t p) {
+    uint32_t* slot = core_rc_set_find(set, p);
+    if (!slot) return;
+    set->keys[slot - set->vals] = RT_CORE_IMMORTAL_TOMBSTONE;
+    set->len--;
+    set->tombs++;
+}
+
+static void core_rc_set_free(RtCoreRcSet* set) {
+    free(set->keys);
+    free(set->vals);
+    *set = (RtCoreRcSet){0};
+}
+
+typedef struct RtCoreRcNode {
+    void* ptr;
+    uint32_t kind;
+} RtCoreRcNode;
+
+/* 1 = registered graph node; 0 = immediate, unregistered, or unknown kind.
+ * Membership is checked before any dereference. */
+static int core_rc_node(int64_t value, RtCoreRcNode* node) {
+    if (!rt_core_is_heap(value)) return 0;
+    void* ptr = (void*)(uintptr_t)(((uint64_t)value) & ~RT_VALUE_TAG_MASK);
+    if (!ptr || !rt_core_is_registered_immortal_ptr(ptr)) return 0;
+    uint32_t kind = rt_core_registered_object_kind(ptr);
+    switch (kind) {
+        case RT_VALUE_HEAP_STRING:
+        case RT_VALUE_HEAP_ARRAY:
+        case RT_VALUE_HEAP_DICT:
+        case RT_VALUE_HEAP_ENUM:
+        case RT_VALUE_HEAP_CLOSURE:
+        case RT_VALUE_HEAP_FLOAT:
+        case RT_VALUE_HEAP_INT:
+        case RT_VALUE_HEAP_UINT:
+            node->ptr = ptr;
+            node->kind = kind;
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+static uint32_t* core_rc_scope_slot(const RtCoreRcNode* n) {
+    switch (n->kind) {
+        case RT_VALUE_HEAP_ARRAY: return &((RtCoreArray*)n->ptr)->transient_scope_id;
+        case RT_VALUE_HEAP_DICT: return &((RtCoreDict*)n->ptr)->transient_scope_id;
+        case RT_VALUE_HEAP_ENUM: return &((RtCoreEnum*)n->ptr)->transient_scope_id;
+        case RT_VALUE_HEAP_CLOSURE: return &((RtCoreClosure*)n->ptr)->transient_scope_id;
+        case RT_VALUE_HEAP_FLOAT:
+        case RT_VALUE_HEAP_INT:   /* identical leaf layout */
+        case RT_VALUE_HEAP_UINT:
+            return &((RtCoreFloat*)n->ptr)->transient_scope_id;
+        default:
+            return NULL;
+    }
+}
+
+/* Children visitor shared by share / release / graph_bytes / cycle check. */
+static int64_t core_rc_child_count(const RtCoreRcNode* n) {
+    switch (n->kind) {
+        case RT_VALUE_HEAP_ARRAY: {
+            RtCoreArray* a = (RtCoreArray*)n->ptr;
+            if (a->flags & (RT_CORE_ARRAY_FLAG_BYTES | RT_CORE_ARRAY_FLAG_U64_PACKED)) return 0;
+            return a->data ? a->len : 0;
+        }
+        case RT_VALUE_HEAP_DICT: {
+            RtCoreDict* d = (RtCoreDict*)n->ptr;
+            return d->entries ? d->cap * 2 : 0;
+        }
+        case RT_VALUE_HEAP_ENUM: return 1;
+        case RT_VALUE_HEAP_CLOSURE: return ((RtCoreClosure*)n->ptr)->capture_count;
+        default: return 0;
+    }
+}
+
+static int core_rc_child_at(const RtCoreRcNode* n, int64_t i, int64_t* out) {
+    switch (n->kind) {
+        case RT_VALUE_HEAP_ARRAY:
+            *out = ((int64_t*)((RtCoreArray*)n->ptr)->data)[i];
+            return 1;
+        case RT_VALUE_HEAP_DICT: {
+            RtCoreDictEntry* e = &((RtCoreDict*)n->ptr)->entries[i / 2];
+            if (e->occupied != 1) return 0;
+            *out = (i & 1) ? e->value : e->key;
+            return 1;
+        }
+        case RT_VALUE_HEAP_ENUM:
+            *out = ((RtCoreEnum*)n->ptr)->payload;
+            return 1;
+        case RT_VALUE_HEAP_CLOSURE:
+            *out = ((RtCoreClosure*)n->ptr)->captures[i];
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+static int64_t core_rc_node_bytes(const RtCoreRcNode* n) {
+    switch (n->kind) {
+        case RT_VALUE_HEAP_STRING:
+            return (int64_t)sizeof(RtCoreString) + (int64_t)((RtCoreString*)n->ptr)->len;
+        case RT_VALUE_HEAP_ARRAY: {
+            RtCoreArray* a = (RtCoreArray*)n->ptr;
+            int64_t elem = (a->flags & RT_CORE_ARRAY_FLAG_BYTES) ? 1 : (int64_t)sizeof(int64_t);
+            return (int64_t)sizeof(RtCoreArray) + (a->data ? a->cap * elem : 0);
+        }
+        case RT_VALUE_HEAP_DICT: {
+            RtCoreDict* d = (RtCoreDict*)n->ptr;
+            return (int64_t)sizeof(RtCoreDict) +
+                (d->entries ? d->cap * (int64_t)sizeof(RtCoreDictEntry) : 0);
+        }
+        case RT_VALUE_HEAP_ENUM: return (int64_t)sizeof(RtCoreEnum);
+        case RT_VALUE_HEAP_CLOSURE:
+            return (int64_t)sizeof(RtCoreClosure) +
+                ((RtCoreClosure*)n->ptr)->capture_count * (int64_t)sizeof(int64_t);
+        default: return (int64_t)sizeof(RtCoreFloat);
+    }
+}
+
+/* Claimable by an rc graph: not a SHARED cache string and not tagged with a
+ * scope other than `allowed_scope` (the active scope at share, 0 at release).
+ * A transient string carries no scope id; it is claimable only while a scope
+ * is active (it belongs to that scope). */
+static int core_rc_owned(const RtCoreRcNode* n, uint32_t allowed_scope) {
+    if (n->kind == RT_VALUE_HEAP_STRING) {
+        uint32_t flags = ((RtCoreString*)n->ptr)->reserved;
+        if (flags & RT_CORE_STRING_FLAG_SHARED) return 0;
+        if (flags & RT_CORE_STRING_FLAG_TRANSIENT) return allowed_scope != 0;
+        return 1;
+    }
+    uint32_t* tag = core_rc_scope_slot(n);
+    return !tag || *tag == 0 || *tag == allowed_scope;
+}
+
+typedef struct RtCoreRcWalk {
+    RtCoreRcNode* nodes;
+    size_t len;
+    size_t cap;
+    RtCoreRcSet seen;
+} RtCoreRcWalk;
+
+static int core_rc_walk_push(RtCoreRcWalk* w, RtCoreRcNode n) {
+    if (core_rc_set_find(&w->seen, (uintptr_t)n.ptr)) return 1;
+    if (!core_rc_set_insert(&w->seen, (uintptr_t)n.ptr, 1)) return 0;
+    if (w->len == w->cap) {
+        size_t next = w->cap == 0 ? 32 : w->cap * 2;
+        RtCoreRcNode* fresh = (RtCoreRcNode*)realloc(w->nodes, next * sizeof(RtCoreRcNode));
+        if (!fresh) return 0;
+        w->nodes = fresh;
+        w->cap = next;
+    }
+    w->nodes[w->len++] = n;
+    return 1;
+}
+
+static void core_rc_walk_free(RtCoreRcWalk* w) {
+    free(w->nodes);
+    core_rc_set_free(&w->seen);
+    *w = (RtCoreRcWalk){0};
+}
+
+/* Lifecycle lock held. Appends `root` and its owned non-rc descendants to
+ * `owned`; distinct rc-root children go to `rc_children` (not descended). */
+static int core_rc_collect(RtCoreRcNode root, uint32_t allowed_scope,
+        RtCoreRcWalk* owned, RtCoreRcWalk* rc_children) {
+    size_t start = owned->len;
+    if (core_rc_set_find(&owned->seen, (uintptr_t)root.ptr)) return 1;
+    if (!core_rc_walk_push(owned, root)) return 0;
+    for (size_t i = start; i < owned->len; i++) {
+        RtCoreRcNode n = owned->nodes[i];
+        int64_t count = core_rc_child_count(&n);
+        for (int64_t j = 0; j < count; j++) {
+            int64_t value;
+            RtCoreRcNode child;
+            if (!core_rc_child_at(&n, j, &value) || !core_rc_node(value, &child)) continue;
+            if (core_rc_set_find(&rt_core_rc_table, (uintptr_t)child.ptr)) {
+                if (rc_children && !core_rc_walk_push(rc_children, child)) return 0;
+                continue;
+            }
+            if (!core_rc_owned(&child, allowed_scope)) continue;
+            if (!core_rc_walk_push(owned, child)) return 0;
+        }
+    }
+    return 1;
+}
+
+typedef struct RtCoreRcFrame {
+    RtCoreRcNode n;
+    int64_t next;
+    int64_t count;
+} RtCoreRcFrame;
+
+/* Lifecycle lock held. 1 = back-edge reachable from root, 0 = DAG, -1 = OOM. */
+static int core_rc_has_cycle(RtCoreRcNode root) {
+    RtCoreRcSet color = {0}; /* 1 = on the DFS stack, 2 = finished */
+    size_t len = 0, cap = 32;
+    int result = 0;
+    RtCoreRcFrame* frames = (RtCoreRcFrame*)malloc(cap * sizeof(RtCoreRcFrame));
+    if (!frames || !core_rc_set_insert(&color, (uintptr_t)root.ptr, 1)) {
+        free(frames);
+        core_rc_set_free(&color);
+        return -1;
+    }
+    frames[len++] = (RtCoreRcFrame){root, 0, core_rc_child_count(&root)};
+    while (len > 0) {
+        RtCoreRcFrame* f = &frames[len - 1];
+        if (f->next >= f->count) {
+            *core_rc_set_find(&color, (uintptr_t)f->n.ptr) = 2;
+            len--;
+            continue;
+        }
+        int64_t value;
+        RtCoreRcNode child;
+        int64_t j = f->next++;
+        if (!core_rc_child_at(&f->n, j, &value) || !core_rc_node(value, &child)) continue;
+        uint32_t* c = core_rc_set_find(&color, (uintptr_t)child.ptr);
+        if (c) {
+            if (*c == 1) { result = 1; break; }
+            continue;
+        }
+        if (!core_rc_set_insert(&color, (uintptr_t)child.ptr, 1)) { result = -1; break; }
+        if (len == cap) {
+            RtCoreRcFrame* fresh =
+                (RtCoreRcFrame*)realloc(frames, cap * 2 * sizeof(RtCoreRcFrame));
+            if (!fresh) { result = -1; break; }
+            frames = fresh;
+            cap *= 2;
+        }
+        frames[len++] = (RtCoreRcFrame){child, 0, core_rc_child_count(&child)};
+    }
+    free(frames);
+    core_rc_set_free(&color);
+    return result;
+}
+
+/* Lifecycle lock held. Frees one owned node exactly like scope-end reclaim. */
+static void core_rc_free_node(RtCoreRcNode n) {
+    if (n.kind == RT_VALUE_HEAP_STRING &&
+            (((RtCoreString*)n.ptr)->reserved & RT_CORE_STRING_FLAG_SHARED)) return;
+    if (n.kind == RT_VALUE_HEAP_CLOSURE) {
+        RtCoreClosurePin* pin = spl_closure_pin_find_locked(n.ptr);
+        if (pin) { pin->orphaned = 1; return; } /* last rt_closure_release frees it */
+    }
+    int erased = rt_core_immortal_registry_erase((uintptr_t)n.ptr);
+    if (!erased) return;
+    atomic_fetch_sub_explicit(&rt_core_heap_registry_count, 1, memory_order_relaxed);
+    core_transient_share_forget((uintptr_t)n.ptr);
+    if (n.kind == RT_VALUE_HEAP_ARRAY) core_aux_array_data_free((RtCoreArray*)n.ptr);
+    else if (n.kind == RT_VALUE_HEAP_DICT) core_aux_dict_entries_free((RtCoreDict*)n.ptr);
+    free(n.ptr);
+}
+
+static uint32_t core_rc_active_scope(void) {
+    return rt_core_transient_array_scope_active ? rt_core_transient_array_scope_id : 0;
+}
+
+int8_t rt_rc_share(int64_t value) {
+    RtCoreRcNode root;
+    RtCoreRcWalk owned = {0};
+    int8_t ok = 0;
+    rt_core_heap_lifecycle_acquire();
+    if (!core_rc_node(value, &root)) goto out;
+    if (core_rc_set_find(&rt_core_rc_table, (uintptr_t)root.ptr)) { ok = 1; goto out; }
+    if (root.kind == RT_VALUE_HEAP_STRING &&
+            (((RtCoreString*)root.ptr)->reserved & RT_CORE_STRING_FLAG_SHARED)) goto out;
+    char* check = rt_env_owned("SIMPLE_RC_CYCLE_CHECK");
+    int check_cycle = check && check[0] == '1';
+    free(check);
+    if (check_cycle && core_rc_has_cycle(root) != 0) goto out;
+    if (core_rc_collect(root, core_rc_active_scope(), &owned, NULL) &&
+            core_rc_set_insert(&rt_core_rc_table, (uintptr_t)root.ptr, 1)) {
+        for (size_t i = 0; i < owned.len; i++) {
+            RtCoreRcNode n = owned.nodes[i];
+            if (n.kind == RT_VALUE_HEAP_STRING) {
+                ((RtCoreString*)n.ptr)->reserved &= ~RT_CORE_STRING_FLAG_TRANSIENT;
+            } else {
+                uint32_t* tag = core_rc_scope_slot(&n);
+                if (tag) *tag = 0;
+            }
+        }
+        ok = 1;
+    }
+out:
+    core_rc_walk_free(&owned);
+    rt_core_heap_lifecycle_release();
+    return ok;
+}
+
+int8_t rt_rc_retain(int64_t value) {
+    RtCoreRcNode root;
+    int8_t ok = 0;
+    rt_core_heap_lifecycle_acquire();
+    if (core_rc_node(value, &root)) {
+        uint32_t* rc = core_rc_set_find(&rt_core_rc_table, (uintptr_t)root.ptr);
+        if (rc && *rc < UINT32_MAX) { (*rc)++; ok = 1; }
+    }
+    rt_core_heap_lifecycle_release();
+    return ok;
+}
+
+int8_t rt_rc_release(int64_t value) {
+    RtCoreRcNode root;
+    rt_core_heap_lifecycle_acquire();
+    uint32_t* rc = core_rc_node(value, &root)
+        ? core_rc_set_find(&rt_core_rc_table, (uintptr_t)root.ptr) : NULL;
+    if (!rc) { rt_core_heap_lifecycle_release(); return 0; }
+    if (--(*rc) > 0) { rt_core_heap_lifecycle_release(); return 1; }
+    /* rc hit 0: free the owned graph and cascade into rc children that reach
+     * 0. Everything is collected first and freed after, so no node is read
+     * after it is freed. On OOM the uncollected remainder leaks (never freed
+     * while reachable). */
+    RtCoreRcWalk dead = {0};
+    RtCoreRcWalk zero_roots = {0};
+    core_rc_set_erase(&rt_core_rc_table, (uintptr_t)root.ptr);
+    int ok = core_rc_walk_push(&zero_roots, root);
+    for (size_t k = 0; ok && k < zero_roots.len; k++) {
+        RtCoreRcWalk kids = {0};
+        ok = core_rc_collect(zero_roots.nodes[k], 0, &dead, &kids);
+        for (size_t i = 0; ok && i < kids.len; i++) {
+            uintptr_t kid = (uintptr_t)kids.nodes[i].ptr;
+            uint32_t* krc = core_rc_set_find(&rt_core_rc_table, kid);
+            if (krc && --(*krc) == 0) {
+                core_rc_set_erase(&rt_core_rc_table, kid);
+                ok = core_rc_walk_push(&zero_roots, kids.nodes[i]);
+            }
+        }
+        core_rc_walk_free(&kids);
+    }
+    for (size_t i = 0; i < dead.len; i++) core_rc_free_node(dead.nodes[i]);
+    core_rc_walk_free(&dead);
+    core_rc_walk_free(&zero_roots);
+    rt_core_heap_lifecycle_release();
+    return 1;
+}
+
+int64_t rt_rc_count(int64_t value) {
+    RtCoreRcNode root;
+    int64_t count = -1;
+    rt_core_heap_lifecycle_acquire();
+    if (core_rc_node(value, &root)) {
+        uint32_t* rc = core_rc_set_find(&rt_core_rc_table, (uintptr_t)root.ptr);
+        if (rc) count = (int64_t)*rc;
+    }
+    rt_core_heap_lifecycle_release();
+    return count;
+}
+
+/* Bytes of the owned graph: struct headers + payload buffers (array data at
+ * cap * elem, dict entries at cap * sizeof(entry), string bytes). rc-root
+ * children contribute 0. -1 for an invalid root or OOM. */
+int64_t rt_heap_graph_bytes(int64_t value) {
+    RtCoreRcNode root;
+    int64_t total = -1;
+    rt_core_heap_lifecycle_acquire();
+    if (core_rc_node(value, &root)) {
+        RtCoreRcWalk owned = {0};
+        if (core_rc_collect(root, core_rc_active_scope(), &owned, NULL)) {
+            total = 0;
+            for (size_t i = 0; i < owned.len; i++) total += core_rc_node_bytes(&owned.nodes[i]);
+        }
+        core_rc_walk_free(&owned);
+    }
+    rt_core_heap_lifecycle_release();
+    return total;
+}
+
 SplArray* rt_byte_array_new(uint64_t cap) {
     if (cap > (uint64_t)INT64_MAX) {
         return NULL;
@@ -8761,7 +10454,7 @@ int64_t rt_random_bytes_c(uint64_t count) {
 #else
         fd = open("/dev/urandom", O_RDONLY);
         if (fd >= 0 && fcntl(fd, F_SETFD, FD_CLOEXEC) < 0) {
-            close(fd);
+            rt_crt_close(fd);
             fd = -1;
         }
 #endif
@@ -8786,13 +10479,23 @@ int64_t rt_random_bytes_c(uint64_t count) {
     return (int64_t)(uintptr_t)result;
 }
 
+/* Platform entropy owner ABI (std.nogc_sync_mut.crypto.entropy_platform):
+ * `count` fresh OS CSPRNG bytes (BCryptGenRandom on Windows, /dev/urandom
+ * elsewhere via rt_random_bytes_c), or NIL on provider failure or a request
+ * over 1 MiB. Fails closed: never a zero-filled stand-in. Rust lane:
+ * src/compiler_rust/runtime/src/value/sffi/random.rs. */
+int64_t rt_entropy_fill(uint64_t count) {
+    if (count > (1u << 20)) return rt_core_nil();
+    return rt_random_bytes_c(count);
+}
+
 SplArray* rt_bytes_alloc(int64_t len) {
     if (len < 0) return NULL;
     return rt_byte_array_new_len((uint64_t)len);
 }
 
 int64_t rt_text_to_bytes(int64_t text_value) {
-    RtCoreString* s = rt_core_as_string(text_value);
+    RtCoreString* s = rt_core_as_string_or_data(text_value);
     uint64_t len = s ? s->len : 0;
     SplArray* arr = rt_byte_array_new_len(len);
     RtCoreArray* array = rt_core_array_ptr(arr);
@@ -9070,20 +10773,153 @@ int64_t rt_sha384_digest(int64_t data_value) {
     return spl_sha2_512_family_digest(data_value, iv, 48u);
 }
 
-/* `[u8]` -> text, bytes copied verbatim (the interpreter's
- * Value::text_from_bytes; also the native lowering of `text.from_bytes`).
+/* Native twin of value/pbkdf2_native.rs. Reuse the SHA-512 compression owner,
+ * and keep the iteration loop allocation-free rather than retaining one
+ * registered runtime array per intermediate HMAC. */
+static const uint64_t spl_pbkdf512_iv[8] = {
+    0x6a09e667f3bcc908ull, 0xbb67ae8584caa73bull,
+    0x3c6ef372fe94f82bull, 0xa54ff53a5f1d36f1ull,
+    0x510e527fade682d1ull, 0x9b05688c2b3e6c1full,
+    0x1f83d9abfb41bd6bull, 0x5be0cd19137e2179ull
+};
+
+static void spl_pbkdf512_clear(void* memory, size_t length) {
+    volatile uint8_t* bytes = (volatile uint8_t*)memory;
+    while (length--) *bytes++ = 0;
+}
+
+/* state already includes prefix whole blocks (128 bytes for HMAC). */
+static void spl_pbkdf512_finish(uint64_t state[8], const uint8_t* data,
+                                size_t length, uint64_t prefix, uint8_t out[64]) {
+    uint8_t block[256];
+    size_t offset = 0;
+    while (length - offset >= 128u) {
+        spl_sha512_compress(state, data + offset);
+        offset += 128u;
+    }
+    size_t remaining = length - offset;
+    memset(block, 0, sizeof(block));
+    if (remaining) memcpy(block, data + offset, remaining);
+    block[remaining] = 0x80u;
+    size_t final_bytes = remaining < 112u ? 128u : 256u;
+    uint64_t total = prefix + (uint64_t)length;
+    uint64_t bits = total << 3;
+    for (unsigned i = 0; i < 8; ++i)
+        block[final_bytes - 1u - i] = (uint8_t)(bits >> (8u * i));
+    block[final_bytes - 9u] = (uint8_t)(total >> 61);
+    spl_sha512_compress(state, block);
+    if (final_bytes == 256u) spl_sha512_compress(state, block + 128u);
+    for (unsigned i = 0; i < 64; ++i)
+        out[i] = (uint8_t)(state[i / 8u] >> (56u - 8u * (i % 8u)));
+    spl_pbkdf512_clear(block, sizeof(block));
+}
+
+static void spl_pbkdf512_hmac(const uint64_t inner[8], const uint64_t outer[8],
+                             const uint8_t* data, size_t length, uint8_t out[64]) {
+    uint64_t state[8];
+    uint8_t digest[64];
+    memcpy(state, inner, sizeof(state));
+    spl_pbkdf512_finish(state, data, length, 128u, digest);
+    memcpy(state, outer, sizeof(state));
+    spl_pbkdf512_finish(state, digest, sizeof(digest), 128u, out);
+    spl_pbkdf512_clear(state, sizeof(state));
+    spl_pbkdf512_clear(digest, sizeof(digest));
+}
+
+int64_t rt_pbkdf2_hmac_sha512(int64_t password_value, int64_t salt_value,
+                             int64_t iterations, int64_t dk_len) {
+    int64_t password_len = rt_array_bytes_validate(password_value);
+    int64_t salt_len = rt_array_bytes_validate(salt_value);
+    if (password_len < 0 || salt_len < 0) return rt_core_nil();
+    /* Preserve the Rust twin's nonpositive length/round semantics. Enforce
+     * PBKDF2's four-byte block-index limit before allocating. */
+    if (dk_len <= 0) return (int64_t)(uintptr_t)rt_byte_array_new_len(0);
+    if ((uint64_t)dk_len > (uint64_t)UINT32_MAX * 64u ||
+        (uint64_t)dk_len > SIZE_MAX || (uint64_t)password_len > SIZE_MAX ||
+        (uint64_t)salt_len > SIZE_MAX - 4u) return rt_core_nil();
+    uint32_t rounds = iterations <= 0 ? 1u :
+        ((uint64_t)iterations > UINT32_MAX ? UINT32_MAX : (uint32_t)iterations);
+    uint8_t* password = (uint8_t*)malloc(password_len ? (size_t)password_len : 1u);
+    uint8_t* salt = (uint8_t*)malloc((size_t)salt_len + 4u);
+    uint8_t key_block[128] = {0}, u[64], accumulated[64];
+    uint64_t inner[8], outer[8], state[8];
+    int64_t result = rt_core_nil();
+    if (!password || !salt) goto cleanup;
+    if (rt_array_bytes_copy_checked(password_value, password, password_len) != password_len ||
+        rt_array_bytes_copy_checked(salt_value, salt, salt_len) != salt_len) goto cleanup;
+    if (password_len > 128) {
+        memcpy(state, spl_pbkdf512_iv, sizeof(state));
+        spl_pbkdf512_finish(state, password, (size_t)password_len, 0, key_block);
+    } else if (password_len) {
+        memcpy(key_block, password, (size_t)password_len);
+    }
+    for (unsigned i = 0; i < 128; ++i) key_block[i] ^= 0x36u;
+    memcpy(inner, spl_pbkdf512_iv, sizeof(inner));
+    spl_sha512_compress(inner, key_block);
+    for (unsigned i = 0; i < 128; ++i) key_block[i] ^= 0x36u ^ 0x5cu;
+    memcpy(outer, spl_pbkdf512_iv, sizeof(outer));
+    spl_sha512_compress(outer, key_block);
+    SplArray* array = rt_byte_array_new_len((uint64_t)dk_len);
+    RtCoreArray* output = rt_core_array_ptr(array);
+    if (!output || !output->data) goto cleanup;
+    for (uint64_t offset = 0, block_index = 1; offset < (uint64_t)dk_len;
+         offset += 64u, ++block_index) {
+        for (unsigned i = 0; i < 4; ++i)
+            salt[(size_t)salt_len + i] = (uint8_t)(block_index >> (24u - 8u * i));
+        spl_pbkdf512_hmac(inner, outer, salt, (size_t)salt_len + 4u, u);
+        memcpy(accumulated, u, sizeof(u));
+        for (uint32_t round = 1; round < rounds; ++round) {
+            spl_pbkdf512_hmac(inner, outer, u, sizeof(u), u);
+            for (unsigned i = 0; i < 64; ++i) accumulated[i] ^= u[i];
+        }
+        size_t count = (uint64_t)dk_len - offset < 64u ?
+            (size_t)((uint64_t)dk_len - offset) : 64u;
+        memcpy((uint8_t*)output->data + (size_t)offset, accumulated, count);
+    }
+    result = (int64_t)(uintptr_t)array;
+cleanup:
+    if (password) { spl_pbkdf512_clear(password, (size_t)password_len); free(password); }
+    if (salt) { spl_pbkdf512_clear(salt, (size_t)salt_len + 4u); free(salt); }
+    spl_pbkdf512_clear(key_block, sizeof(key_block));
+    spl_pbkdf512_clear(u, sizeof(u));
+    spl_pbkdf512_clear(accumulated, sizeof(accumulated));
+    spl_pbkdf512_clear(inner, sizeof(inner));
+    spl_pbkdf512_clear(outer, sizeof(outer));
+    spl_pbkdf512_clear(state, sizeof(state));
+    return result;
+}
+
+/* `[u8]` -> text, strict UTF-8 like Rust String::from_utf8 (malformed
+ * sequences are REJECTED with NIL (owner decision 2026-11-23); the interpreter's Value::text_from_bytes; also the native lowering of `text.from_bytes`).
  * A `[u8]` arrives in one of two layouts: byte-packed
  * (RT_CORE_ARRAY_FLAG_BYTES, one byte per element) or generic i64 slots
  * holding tagged ints (e.g. a `[u8]` literal the backend built slot by slot).
  * Copying `array->data` verbatim is only right for the first: for slots it
  * produced 8 tagged bytes per element. Slots are narrowed through
  * rt_array_bytes_copy_checked, which rejects non-int or out-of-range
- * elements; a rejected array yields "" like a non-array did before. */
+ * elements; a rejected array yields NIL, matching the Rust runtime. */
 int64_t rt_bytes_to_text(int64_t bytes_value) {
     RtCoreArray* array = rt_core_as_array(bytes_value);
     if (!array || !array->data || array->len <= 0) {
         return rt_string_new(NULL, 0);
     }
+    if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) {
+        return spl_text_from_utf8_strict((const uint8_t*)array->data, (size_t)array->len);
+    }
+    int64_t length = rt_array_bytes_validate(bytes_value);
+    if (length <= 0) return SPL_UTF8_TEXT_REJECTED; /* bad element: NIL like Rust */
+    uint8_t* narrowed = (uint8_t*)rt_observed_malloc_v1((size_t)length);
+    if (!narrowed) return rt_string_new(NULL, 0);
+    int64_t copied = rt_array_bytes_copy_checked(bytes_value, narrowed, length);
+    int64_t result = copied > 0 ? spl_text_from_utf8_strict(narrowed, (size_t)copied) : SPL_UTF8_TEXT_REJECTED;
+    free(narrowed);
+    return result;
+}
+
+/* TLS wire carrier: counted bytes, deliberately without UTF-8 repair. */
+int64_t rt_tls_wire_from_bytes(int64_t bytes_value) {
+    RtCoreArray* array = rt_core_as_array(bytes_value);
+    if (!array || !array->data || array->len <= 0) return rt_string_new(NULL, 0);
     if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) {
         return rt_string_new((const uint8_t*)array->data, (uint64_t)array->len);
     }
@@ -9092,7 +10928,7 @@ int64_t rt_bytes_to_text(int64_t bytes_value) {
     uint8_t* narrowed = (uint8_t*)rt_observed_malloc_v1((size_t)length);
     if (!narrowed) return rt_string_new(NULL, 0);
     int64_t copied = rt_array_bytes_copy_checked(bytes_value, narrowed, length);
-    int64_t result = rt_string_new(narrowed, copied > 0 ? (uint64_t)copied : 0);
+    int64_t result = copied > 0 ? rt_string_new(narrowed, (uint64_t)copied) : rt_string_new(NULL, 0);
     free(narrowed);
     return result;
 }
@@ -9380,6 +11216,19 @@ int8_t rt_array_clear(SplArray* a) {
     return 1;
 }
 
+/* `[T].reserve(additional)` — capacity hint; contents and len are unchanged.
+ * Dual-lane twin of the Rust seed rt_array_reserve
+ * (src/compiler_rust/runtime/src/value/collections.rs): both ensure capacity
+ * for len + additional elements without touching the header address. See
+ * doc/08_tracking/bug/compiler_seed_missing_array_reserve_2026-11-12.md. */
+int8_t rt_array_reserve(SplArray* a, int64_t additional) {
+    RtCoreArray* array = rt_core_array_ptr(a);
+    if (!array) return 0;
+    if (additional <= 0) return 1;
+    if (array->len > INT64_MAX - additional) return 0;
+    return rt_core_array_reserve(a, array->len + additional);
+}
+
 int8_t rt_array_push_i64_raw(SplArray* a, int64_t val) {
     return rt_array_push(a, val);
 }
@@ -9454,6 +11303,39 @@ int64_t rt_array_write_span(SplArray* dst, SplArray* src, int64_t dst_off,
     return count;
 }
 
+/* Bulk in-place volatile fill: dst[dst_off..dst_off+count] = value.
+ *
+ * Compiler-owned twin of `Array.fill_span(dst_off, count, value) -> i64`.
+ * Every store is volatile and the fill ends with a full fence, so a
+ * secret wipe through it is never elided or reordered past the call: this
+ * is the runtime boundary the secure-memory owner uses instead of handing
+ * raw data pointers to Simple code. Same bounds rule and diagnostic shape
+ * as rt_array_write_span: count <= 0 is a no-op returning 0, an invalid
+ * destination handle answers -1, and an out-of-range span never writes.
+ * Returns the count written. */
+int64_t rt_array_fill_span(SplArray* dst, int64_t dst_off, int64_t count, int64_t value) {
+    if (count <= 0) return 0;
+    RtCoreArray* d = rt_core_array_ptr(dst);
+    if (!d) return -1;
+    if (dst_off < 0 || count > d->len || dst_off > d->len - count) {
+        fprintf(stderr,
+                "error: semantic: fill_span out of range: dst_off=%lld count=%lld dst_len=%lld\n",
+                (long long)dst_off, (long long)count, (long long)d->len);
+        exit(1);
+    }
+    if (d->flags & RT_CORE_ARRAY_FLAG_BYTES) {
+        volatile uint8_t* p = (volatile uint8_t*)d->data + dst_off;
+        for (int64_t i = 0; i < count; i++) p[i] = (uint8_t)(value & 0xff);
+    } else {
+        int d_u64 = (d->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) != 0;
+        int64_t slot = d_u64 ? value : rt_core_value_u64_compact(value);
+        volatile int64_t* p = (volatile int64_t*)d->data + dst_off;
+        for (int64_t i = 0; i < count; i++) p[i] = slot;
+    }
+    rt_memory_barrier();
+    return count;
+}
+
 int64_t rt_array_get_i64_raw(SplArray* a, int64_t index) {
     return rt_array_get(a, index);
 }
@@ -9464,9 +11346,10 @@ SplArray* rt_array_concat(SplArray* a, SplArray* b) {
     if (!left || !right || left->len > INT64_MAX - right->len) return NULL;
 
     int64_t total = left->len + right->len;
-    if (total > RT_CORE_ARRAY_MAX_CAP) return NULL;
     int left_bytes = (left->flags & RT_CORE_ARRAY_FLAG_BYTES) != 0;
     int right_bytes = (right->flags & RT_CORE_ARRAY_FLAG_BYTES) != 0;
+    if (!rt_core_array_capacity_valid(total,
+            left_bytes && right_bytes ? RT_CORE_ARRAY_FLAG_BYTES : 0)) return NULL;
     int left_u64 = (left->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) != 0;
     int right_u64 = (right->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) != 0;
     if (left_u64 != right_u64) return NULL;
@@ -9590,70 +11473,51 @@ int64_t rt_array_data_ptr_text(SplArray* a) {
  * rt_interp_cstr accepts both encodings and is a strict superset. */
 #ifdef _WIN32
 static HMODULE runtime_dynload_open_utf8(const char *path) {
-    int wide_len;
     wchar_t *wide_path;
     HMODULE handle;
     if (!path || !path[0]) return NULL;
-    wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
-        path, -1, NULL, 0);
-    if (wide_len <= 0) return NULL;
-    wide_path = (wchar_t*)rt_observed_malloc_v1((size_t)wide_len * sizeof(wchar_t));
+    wide_path = spl_win_utf8_to_wide(path, -1, MB_ERR_INVALID_CHARS,
+        rt_observed_malloc_v1, free, NULL);
     if (!wide_path) return NULL;
-    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
-            path, -1, wide_path, wide_len) != wide_len) {
-        free(wide_path);
-        return NULL;
-    }
     handle = LoadLibraryW(wide_path);
     free(wide_path);
     return handle;
 }
 #endif
 
+#if defined(__linux__)
+/* Fallback twin of runtime_dynload.c simple_dynload_unique_snapshot_linux_v1:
+ * dlopen caches by pathname even after the snapshot fd is closed, so every
+ * admitted snapshot must get a fresh, monotonically increasing fd number or a
+ * reused /proc/self/fd/N path could resolve to an older mapped object under a
+ * newer digest. Without this the fallback returned the raw memfd, whose number
+ * is reused as soon as it is closed. */
+static int simple_dynload_unique_snapshot_linux_v1(int snapshot) {
+    static atomic_flag lock = ATOMIC_FLAG_INIT;
+    static uint64_t fd_floor = 64;
+    int unique_snapshot = -1;
+    while (atomic_flag_test_and_set_explicit(&lock, memory_order_acquire)) { }
+    if (fd_floor <= INT_MAX) {
+        unique_snapshot = fcntl(snapshot, F_DUPFD_CLOEXEC, (int)fd_floor);
+        if (unique_snapshot >= 0)
+            fd_floor = (uint64_t)unique_snapshot + 1;
+    }
+    atomic_flag_clear_explicit(&lock, memory_order_release);
+    close(snapshot);
+    return unique_snapshot;
+}
+#endif
+
+#include "runtime_dynload_snapshot_private.h"
+
 int64_t spl_dynlib_snapshot_linux(int64_t path_value) {
 #if defined(__linux__)
-    const char* path = rt_interp_cstr(path_value);
+    char* path = rt_text_cstr_dup(path_value);
     if (!path) return -1;
-    int source = open(path, O_RDONLY | O_CLOEXEC | O_NOFOLLOW | O_NONBLOCK);
-    if (source < 0) return -1;
-    struct stat source_stat;
-    if (fstat(source, &source_stat) != 0 || !S_ISREG(source_stat.st_mode) ||
-        source_stat.st_size < 0 || (uint64_t)source_stat.st_size > UINT64_C(1073741824)) {
-        close(source);
-        return -1;
-    }
-    int snapshot = (int)syscall(SYS_memfd_create, "simple-sffi-provider",
-                                MFD_CLOEXEC | MFD_ALLOW_SEALING);
-    if (snapshot < 0) { close(source); return -1; }
-    uint8_t buffer[65536];
-    uint64_t total = 0;
-    for (;;) {
-        ssize_t got = read(source, buffer, sizeof(buffer));
-        if (got == 0) break;
-        if (got < 0) {
-            if (errno == EINTR) continue;
-            close(source); close(snapshot); return -1;
-        }
-        if ((uint64_t)got > UINT64_C(1073741824) - total) {
-            close(source); close(snapshot); return -1;
-        }
-        total += (uint64_t)got;
-        ssize_t offset = 0;
-        while (offset < got) {
-            ssize_t put = write(snapshot, buffer + offset, (size_t)(got - offset));
-            if (put < 0 && errno == EINTR) continue;
-            if (put <= 0) { close(source); close(snapshot); return -1; }
-            offset += put;
-        }
-    }
-    if (total != (uint64_t)source_stat.st_size || close(source) != 0 ||
-        lseek(snapshot, 0, SEEK_SET) < 0 ||
-        fcntl(snapshot, F_ADD_SEALS,
-              F_SEAL_WRITE | F_SEAL_GROW | F_SEAL_SHRINK | F_SEAL_SEAL) != 0) {
-        close(snapshot);
-        return -1;
-    }
-    return (int64_t)snapshot;
+    int snapshot = simple_dynload_snapshot_memfd_linux_v1(path, "simple-sffi-provider");
+    free(path);
+    if (snapshot < 0) return -1;
+    return (int64_t)simple_dynload_unique_snapshot_linux_v1(snapshot);
 #else
     (void)path_value;
     return -1;
@@ -9668,14 +11532,16 @@ int64_t spl_dlopen(int64_t path_value) {
 int64_t spl_dlopen_checked(int64_t path_value, int64_t* out_handle) {
     if (!out_handle) return 1;
     *out_handle = 0;
-    const char* path = rt_interp_cstr(path_value);
-    if (!path || !path[0]) return 1;
+    char* path = rt_text_cstr_dup(path_value);
+    if (!path || !path[0]) { free(path); return 1; }
 #ifdef _WIN32
     HMODULE handle = runtime_dynload_open_utf8(path);
+    free(path);
     if (!handle) return 2;
     *out_handle = (int64_t)(intptr_t)handle;
 #else
     void* handle = dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    free(path);
     if (!handle) return 2;
     *out_handle = (int64_t)(intptr_t)handle;
 #endif
@@ -9690,14 +11556,16 @@ int64_t spl_dlsym(int64_t handle, int64_t name_value) {
 int64_t spl_dlsym_checked(int64_t handle, int64_t name_value, int64_t* out_symbol) {
     if (!out_symbol) return 1;
     *out_symbol = 0;
-    const char* name = rt_interp_cstr(name_value);
-    if (!handle || !name || !name[0]) return 1;
+    char* name = rt_text_cstr_dup(name_value);
+    if (!handle || !name || !name[0]) { free(name); return 1; }
 #ifdef _WIN32
     FARPROC symbol = GetProcAddress((HMODULE)(intptr_t)handle, name);
+    free(name);
     if (!symbol) return 3;
     *out_symbol = (int64_t)(intptr_t)symbol;
 #else
     void* symbol = dlsym((void*)(intptr_t)handle, name);
+    free(name);
     if (!symbol) return 3;
     *out_symbol = (int64_t)(intptr_t)symbol;
 #endif
@@ -9707,16 +11575,18 @@ int64_t spl_dlsym_checked(int64_t handle, int64_t name_value, int64_t* out_symbo
 int64_t spl_dlsym_process_checked(int64_t name_value, int64_t* out_symbol) {
     if (!out_symbol) return 1;
     *out_symbol = 0;
-    const char* name = rt_interp_cstr(name_value);
-    if (!name || !name[0]) return 1;
+    char* name = rt_text_cstr_dup(name_value);
+    if (!name || !name[0]) { free(name); return 1; }
 #ifdef _WIN32
     HMODULE process = GetModuleHandleA(NULL);
-    if (!process) return 3;
+    if (!process) { free(name); return 3; }
     FARPROC symbol = GetProcAddress(process, name);
+    free(name);
     if (!symbol) return 3;
     *out_symbol = (int64_t)(intptr_t)symbol;
 #else
     void* symbol = dlsym(NULL, name);
+    free(name);
     if (!symbol) return 3;
     *out_symbol = (int64_t)(intptr_t)symbol;
 #endif
@@ -9851,6 +11721,76 @@ int64_t spl_wffi_try_call_i64_out(int64_t fptr, int64_t args_value,
     return SPL_WFFI_OK;
 }
 
+/* Copies an all-int Simple array into raw[*count..]; 0 on a non-int array. */
+static int spl_wffi_append_int_args(int64_t value, int64_t* raw, int64_t* count) {
+    RtCoreArray* array = rt_core_as_array(value);
+    if (!array || (array->flags & RT_CORE_ARRAY_FLAG_BYTES)) return 0;
+    if (array->len > 0 && !array->data) return 0;
+    for (int64_t i = 0; i < array->len; i++) {
+        int64_t item = ((int64_t*)array->data)[i];
+        if (!rt_core_is_int(item)) return 0;
+        if (*count >= 8) { (*count)++; continue; }
+        raw[(*count)++] = rt_core_as_int(item);
+    }
+    return 1;
+}
+
+/* Byte-descriptor dispatch, twin of the Rust runtime's
+ * spl_wffi_call_i64_with_bytes_checked: the callee receives
+ * prefix..., ptr, len, suffix... (at most 8 foreign args); ptr is NULL when
+ * len == 0 and is valid only for the duration of the call. */
+int64_t spl_wffi_call_i64_with_bytes_checked(int64_t fptr, int64_t prefix_args,
+                                             int64_t bytes, int64_t offset,
+                                             int64_t length, int64_t suffix_args) {
+    if (fptr == 0) return spl_wffi_i64_checked_result(SPL_WFFI_NULL_FUNCTION, 0);
+    RtCoreArray* owner = rt_core_as_array(bytes);
+    if (!owner || !(owner->flags & RT_CORE_ARRAY_FLAG_BYTES) || offset < 0 || length < 0 ||
+        offset > INT64_MAX - length || offset + length > owner->len ||
+        (length > 0 && !owner->data)) {
+        return spl_wffi_i64_checked_result(SPL_WFFI_INVALID_ARGUMENT, 0);
+    }
+    int64_t raw[10] = {0};
+    int64_t count = 0;
+    if (!spl_wffi_append_int_args(prefix_args, raw, &count)) {
+        return spl_wffi_i64_checked_result(SPL_WFFI_INVALID_ARGUMENT, 0);
+    }
+    int64_t prefix_count = count;
+    int64_t suffix_raw[8] = {0};
+    int64_t suffix_count = 0;
+    if (!spl_wffi_append_int_args(suffix_args, suffix_raw, &suffix_count)) {
+        return spl_wffi_i64_checked_result(SPL_WFFI_INVALID_ARGUMENT, 0);
+    }
+    if (prefix_count + 2 + suffix_count > 8) {
+        return spl_wffi_i64_checked_result(SPL_WFFI_UNSUPPORTED_SIGNATURE, 0);
+    }
+    raw[count++] = length == 0 ? 0 : (int64_t)(uintptr_t)((uint8_t*)owner->data + offset);
+    raw[count++] = length;
+    for (int64_t i = 0; i < suffix_count; i++) raw[count++] = suffix_raw[i];
+    SplArray* packed = rt_array_new(count);
+    if (!packed) return spl_wffi_i64_checked_result(SPL_WFFI_INVALID_ARGUMENT, 0);
+    for (int64_t i = 0; i < count; i++) {
+        if (!rt_array_push(packed, rt_value_int(raw[i]))) {
+            rt_array_free(packed);
+            return spl_wffi_i64_checked_result(SPL_WFFI_INVALID_ARGUMENT, 0);
+        }
+    }
+    int64_t value = spl_wffi_call_i64(fptr, (int64_t)(uintptr_t)packed, count);
+    rt_array_free(packed);
+    return spl_wffi_i64_checked_result(SPL_WFFI_OK, value);
+}
+
+int64_t spl_wffi_call_i64_with_bytes(int64_t fptr, int64_t prefix_args, int64_t bytes,
+                                     int64_t offset, int64_t length, int64_t suffix_args) {
+    int64_t checked = spl_wffi_call_i64_with_bytes_checked(fptr, prefix_args, bytes,
+                                                           offset, length, suffix_args);
+    RtCoreArray* pair = rt_core_as_array(checked);
+    if (!pair || pair->len != 2 || !pair->data) return 0;
+    int64_t status = rt_core_as_int(((int64_t*)pair->data)[0]);
+    int64_t value = rt_core_as_int(((int64_t*)pair->data)[1]);
+    rt_array_free((SplArray*)(uintptr_t)checked);
+    return status == SPL_WFFI_OK ? value : 0;
+}
+
 int64_t rt_array_header_ptr(SplArray* a) {
     RtCoreArray* array = rt_core_array_ptr(a);
     return array ? (int64_t)(uintptr_t)array : 0;
@@ -9870,21 +11810,26 @@ int8_t rt_array_set_len_known_text(int64_t header_ptr, int64_t len) {
 static int8_t rt_core_array_reserve(SplArray* a, int64_t min_cap) {
     RtCoreArray* array = rt_core_array_ptr(a);
     if (!array) return 0;
+    if (!rt_core_array_capacity_valid(min_cap, array->flags)) return 0;
     if (array->cap >= min_cap) return 1;
     int64_t new_cap = array->cap > 0 ? array->cap : 4;
+    int64_t limit = rt_core_array_capacity_limit(array->flags);
     while (new_cap < min_cap) {
-        if (new_cap > INT64_MAX / 2) return 0;
-        new_cap *= 2;
+        new_cap = new_cap > limit / 2 ? limit : new_cap * 2;
     }
+    if (!rt_core_array_capacity_valid(new_cap, array->flags)) return 0;
     size_t elem_size = (array->flags & RT_CORE_ARRAY_FLAG_BYTES) ? sizeof(uint8_t) : sizeof(int64_t);
+    int64_t old_bytes = core_aux_array_data_bytes(array);
     void* data = rt_observed_realloc_v1(array->data, (size_t)new_cap * elem_size);
     if (!data) {
         array->len = 0;
         array->cap = 0;
+        core_aux_note_array(-old_bytes); /* cap 0: later free counts 0 */
         return 0;
     }
     array->data = data;
     array->cap = new_cap;
+    core_aux_note_array(core_aux_array_data_bytes(array) - old_bytes);
     return 1;
 }
 
@@ -9899,13 +11844,15 @@ int64_t rt_bytes_u8_at(SplArray* a, int64_t idx) {
     return rt_core_as_int(((int64_t*)array->data)[idx]) & 0xff;
 }
 
-int64_t rt_bytes_u32_le_at(SplArray* a, int64_t idx) {
+/* Little-endian load of `width` bytes at `idx` (negative idx counts from the
+ * end); 0 when out of range. */
+static int64_t rt_bytes_le_at(SplArray* a, int64_t idx, int width) {
     RtCoreArray* array = rt_core_array_ptr(a);
     if (!array) return 0;
     if (idx < 0) idx = array->len + idx;
-    if (idx < 0 || idx + 4 > array->len) return 0;
+    if (idx < 0 || idx + width > array->len) return 0;
     uint64_t v = 0;
-    for (int shift = 0; shift < 4; shift++) {
+    for (int shift = 0; shift < width; shift++) {
         uint64_t byte = (array->flags & RT_CORE_ARRAY_FLAG_BYTES)
             ? ((uint8_t*)array->data)[idx + shift]
             : (uint64_t)(rt_core_as_int(((int64_t*)array->data)[idx + shift]) & 0xff);
@@ -9914,19 +11861,12 @@ int64_t rt_bytes_u32_le_at(SplArray* a, int64_t idx) {
     return (int64_t)v;
 }
 
+int64_t rt_bytes_u32_le_at(SplArray* a, int64_t idx) {
+    return rt_bytes_le_at(a, idx, 4);
+}
+
 int64_t rt_bytes_u64_le_at(SplArray* a, int64_t idx) {
-    RtCoreArray* array = rt_core_array_ptr(a);
-    if (!array) return 0;
-    if (idx < 0) idx = array->len + idx;
-    if (idx < 0 || idx + 8 > array->len) return 0;
-    uint64_t v = 0;
-    for (int shift = 0; shift < 8; shift++) {
-        uint64_t byte = (array->flags & RT_CORE_ARRAY_FLAG_BYTES)
-            ? ((uint8_t*)array->data)[idx + shift]
-            : (uint64_t)(rt_core_as_int(((int64_t*)array->data)[idx + shift]) & 0xff);
-        v |= byte << (shift * 8);
-    }
-    return (int64_t)v;
+    return rt_bytes_le_at(a, idx, 8);
 }
 
 int8_t rt_bytes_u8_set(SplArray* a, int64_t idx, int64_t val) {
@@ -9986,12 +11926,11 @@ int64_t rt_typed_bytes_u64_le_unchecked(SplArray* a, int64_t idx) {
     return (int64_t)v;
 }
 
-int8_t rt_typed_bytes_u32_le_set(SplArray* a, int64_t idx, int64_t val) {
+static int8_t rt_typed_bytes_le_set(SplArray* a, int64_t idx, uint64_t v, int nbytes) {
     RtCoreArray* array = rt_core_array_ptr(a);
     if (!array) return 0;
-    if (idx < 0 || idx + 4 > array->len) return 0;
-    uint32_t v = (uint32_t)val;
-    for (int shift = 0; shift < 4; shift++) {
+    if (idx < 0 || idx + nbytes > array->len) return 0;
+    for (int shift = 0; shift < nbytes; shift++) {
         int64_t byte = (int64_t)((v >> (shift * 8)) & 0xff);
         if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) {
             ((uint8_t*)array->data)[idx + shift] = (uint8_t)byte;
@@ -10000,80 +11939,110 @@ int8_t rt_typed_bytes_u32_le_set(SplArray* a, int64_t idx, int64_t val) {
         }
     }
     return 1;
+}
+
+int8_t rt_typed_bytes_u32_le_set(SplArray* a, int64_t idx, int64_t val) {
+    return rt_typed_bytes_le_set(a, idx, (uint32_t)val, 4);
 }
 
 int8_t rt_typed_bytes_u64_le_set(SplArray* a, int64_t idx, int64_t val) {
+    return rt_typed_bytes_le_set(a, idx, (uint64_t)val, 8);
+}
+
+/* Shared guards for the typed `[u32]`/`[u64]`/`[i64]` word lanes. `slot_at`
+ * normalises a negative index and bounds-checks it; `slot_push` reserves one
+ * more element and claims it. Both return NULL where the lane returns 0. */
+/* A BYTES ([u8]) array has 1-byte elements, so it has no word slot: the
+ * readers decode the byte through typed_words_byte_at, and a typed word write
+ * into one is a runtime error (owner decision; the Rust lane traps the same
+ * way). typed_words_byte_at is a static helper with no rt_ ABI, so it has no
+ * Rust twin; rt_typed_words_byte_write_trap is the dual-lane entry that the
+ * JIT's inlined writers call.
+ * Bug: seed_jit_u8_array_into_i64_array_param_reads_zero_2026-11-27 */
+void rt_typed_words_byte_write_trap(void) {
+    spl_panic("typed word write: a [u8] array cannot be written through a word-typed array parameter ([i64]/[u64]/[u32])");
+}
+
+static int64_t* rt_typed_words_slot_at(SplArray* a, int64_t idx, RtCoreArray** out_array) {
     RtCoreArray* array = rt_core_array_ptr(a);
-    if (!array) return 0;
-    if (idx < 0 || idx + 8 > array->len) return 0;
-    uint64_t v = (uint64_t)val;
-    for (int shift = 0; shift < 8; shift++) {
-        int64_t byte = (int64_t)((v >> (shift * 8)) & 0xff);
-        if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) {
-            ((uint8_t*)array->data)[idx + shift] = (uint8_t)byte;
-        } else {
-            ((int64_t*)array->data)[idx + shift] = rt_value_int(byte);
-        }
-    }
+    if (!array) return NULL;
+    /* Readers decode BYTES before calling this, so only a writer gets here. */
+    if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) rt_typed_words_byte_write_trap();
+    if (idx < 0) idx = array->len + idx;
+    if (idx < 0 || idx >= array->len) return NULL;
+    *out_array = array;
+    return &((int64_t*)array->data)[idx];
+}
+
+static int typed_words_byte_at(SplArray* a, int64_t idx, int64_t* out) {
+    RtCoreArray* array = rt_core_array_ptr(a);
+    if (!array || !(array->flags & RT_CORE_ARRAY_FLAG_BYTES)) return 0;
+    if (idx < 0) idx = array->len + idx;
+    *out = (idx < 0 || idx >= array->len) ? 0 : ((const uint8_t*)array->data)[idx];
     return 1;
 }
 
-int64_t rt_typed_words_u32_at(SplArray* a, int64_t idx) {
+static int64_t* rt_typed_words_slot_push(SplArray* a, RtCoreArray** out_array) {
     RtCoreArray* array = rt_core_array_ptr(a);
-    if (!array) return 0;
-    if (idx < 0) idx = array->len + idx;
-    if (idx < 0 || idx >= array->len) return 0;
-    int64_t value = ((int64_t*)array->data)[idx];
+    if (!array) return NULL;
+    /* Readers decode BYTES before calling this, so only a writer gets here. */
+    if (array->flags & RT_CORE_ARRAY_FLAG_BYTES) rt_typed_words_byte_write_trap();
+    if (!rt_core_array_reserve(a, array->len + 1)) return NULL;
+    *out_array = array;
+    return &((int64_t*)array->data)[array->len++];
+}
+
+int64_t rt_typed_words_u32_at(SplArray* a, int64_t idx) {
+    RtCoreArray* array;
+    int64_t byte;
+    if (typed_words_byte_at(a, idx, &byte)) return byte;
+    int64_t* slot = rt_typed_words_slot_at(a, idx, &array);
+    if (!slot) return 0;
+    int64_t value = *slot;
     if (!(array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED)) value = rt_core_numeric_arg(value);
     return value & 0xffffffffLL;
 }
 
 int8_t rt_typed_words_u32_push(SplArray* a, int64_t val) {
-    RtCoreArray* array = rt_core_array_ptr(a);
-    if (!array) return 0;
-    if (!rt_core_array_reserve(a, array->len + 1)) return 0;
+    RtCoreArray* array;
+    int64_t* slot = rt_typed_words_slot_push(a, &array);
+    if (!slot) return 0;
     val &= 0xffffffffLL;
-    ((int64_t*)array->data)[array->len++] =
-        (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) ? val : rt_value_int(val);
+    *slot = (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) ? val : rt_value_int(val);
     return 1;
 }
 
 int8_t rt_typed_words_u32_set(SplArray* a, int64_t idx, int64_t val) {
-    RtCoreArray* array = rt_core_array_ptr(a);
-    if (!array) return 0;
-    if (idx < 0) idx = array->len + idx;
-    if (idx < 0 || idx >= array->len) return 0;
+    RtCoreArray* array;
+    int64_t* slot = rt_typed_words_slot_at(a, idx, &array);
+    if (!slot) return 0;
     val &= 0xffffffffLL;
-    ((int64_t*)array->data)[idx] =
-        (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) ? val : rt_value_int(val);
+    *slot = (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) ? val : rt_value_int(val);
     return 1;
 }
 
 int64_t rt_typed_words_u64_at(SplArray* a, int64_t idx) {
-    RtCoreArray* array = rt_core_array_ptr(a);
-    if (!array) return 0;
-    if (idx < 0) idx = array->len + idx;
-    if (idx < 0 || idx >= array->len) return 0;
-    int64_t value = ((int64_t*)array->data)[idx];
-    return (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) ? value : rt_value_as_u64(value);
+    RtCoreArray* array;
+    int64_t byte;
+    if (typed_words_byte_at(a, idx, &byte)) return byte;
+    int64_t* slot = rt_typed_words_slot_at(a, idx, &array);
+    if (!slot) return 0;
+    return (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) ? *slot : rt_value_as_u64(*slot);
 }
 
 int8_t rt_typed_words_u64_push(SplArray* a, int64_t val) {
-    RtCoreArray* array = rt_core_array_ptr(a);
-    if (!array) return 0;
-    if (!rt_core_array_reserve(a, array->len + 1)) return 0;
-    ((int64_t*)array->data)[array->len++] =
-        (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) ? val : rt_core_value_u64_compact(val);
+    RtCoreArray* array;
+    int64_t* slot = rt_typed_words_slot_push(a, &array);
+    if (!slot) return 0;
+    *slot = (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) ? val : rt_core_value_u64_compact(val);
     return 1;
 }
 
 int8_t rt_typed_words_u64_set(SplArray* a, int64_t idx, int64_t val) {
-    RtCoreArray* array = rt_core_array_ptr(a);
-    if (!array) return 0;
-    if (idx < 0) idx = array->len + idx;
-    if (idx < 0 || idx >= array->len) return 0;
-    ((int64_t*)array->data)[idx] =
-        (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) ? val : rt_core_value_u64_compact(val);
+    RtCoreArray* array;
+    int64_t* slot = rt_typed_words_slot_at(a, idx, &array);
+    if (!slot) return 0;
+    *slot = (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) ? val : rt_core_value_u64_compact(val);
     return 1;
 }
 
@@ -10083,35 +12052,34 @@ int8_t rt_typed_words_u64_set(SplArray* a, int64_t idx, int64_t val) {
  * (gc_flags LAZY_WORDS) to stop leaking one heap box per store. A U64_PACKED
  * array holds raw words and is read/written as such. */
 int64_t rt_typed_words_i64_at(SplArray* a, int64_t idx) {
-    RtCoreArray* array = rt_core_array_ptr(a);
-    if (!array) return 0;
-    if (idx < 0) idx = array->len + idx;
-    if (idx < 0 || idx >= array->len) return 0;
-    int64_t value = ((int64_t*)array->data)[idx];
-    return (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) ? value : rt_value_unbox_int(value);
+    RtCoreArray* array;
+    int64_t byte;
+    if (typed_words_byte_at(a, idx, &byte)) return byte;
+    int64_t* slot = rt_typed_words_slot_at(a, idx, &array);
+    if (!slot) return 0;
+    return (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) ? *slot : rt_value_unbox_int(*slot);
 }
 
 int8_t rt_typed_words_i64_push(SplArray* a, int64_t val) {
-    RtCoreArray* array = rt_core_array_ptr(a);
-    if (!array) return 0;
-    if (!rt_core_array_reserve(a, array->len + 1)) return 0;
-    ((int64_t*)array->data)[array->len++] =
-        (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) ? val : rt_value_int(val);
+    RtCoreArray* array;
+    int64_t* slot = rt_typed_words_slot_push(a, &array);
+    if (!slot) return 0;
+    *slot = (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) ? val : rt_value_int(val);
     return 1;
 }
 
 int8_t rt_typed_words_i64_set(SplArray* a, int64_t idx, int64_t val) {
-    RtCoreArray* array = rt_core_array_ptr(a);
-    if (!array) return 0;
-    if (idx < 0) idx = array->len + idx;
-    if (idx < 0 || idx >= array->len) return 0;
-    ((int64_t*)array->data)[idx] =
-        (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) ? val : rt_value_int(val);
+    RtCoreArray* array;
+    int64_t* slot = rt_typed_words_slot_at(a, idx, &array);
+    if (!slot) return 0;
+    *slot = (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) ? val : rt_value_int(val);
     return 1;
 }
 
 int64_t rt_typed_words_u64_raw_data_at(int64_t data_ptr, int64_t idx) {
     if (data_ptr == 0 || idx < 0) return 0;
+    /* Bit 0 set: the hoisted loop pointer of a BYTES array (MIR tags it). */
+    if (data_ptr & 1) return ((const uint8_t*)(uintptr_t)(data_ptr & ~(int64_t)1))[idx];
     return ((int64_t*)(uintptr_t)data_ptr)[idx];
 }
 
@@ -10155,8 +12123,23 @@ int64_t rt_tuple_get(int64_t tuple, int64_t idx) {
 }
 
 int64_t rt_tuple_len(int64_t tuple) {
-    RtCoreArray* array = rt_core_as_array(tuple);
-    return array ? array->len : -1;
+    /* Used by system_env_core.env_vars_nilable as a runtime-vs-native tuple
+     * discriminator (returns arity for a registered runtime tuple/array, -1
+     * for a compiled two-word struct pair). Validate registry ownership
+     * quietly without firing rt_core_report_invalid_array_once. */
+    uintptr_t raw = (uintptr_t)tuple;
+    if (raw < 4096) return -1;
+    if ((raw & RT_VALUE_TAG_MASK) == RT_VALUE_TAG_HEAP) {
+        raw &= ~RT_VALUE_TAG_MASK;
+    } else if ((raw & RT_VALUE_TAG_MASK) != 0) {
+        return -1;
+    }
+    RtCoreArray* array = (RtCoreArray*)raw;
+    if (!rt_core_is_registered_immortal_ptr(array) ||
+        array->kind != RT_VALUE_HEAP_ARRAY) {
+        return -1;
+    }
+    return array->len;
 }
 
 /* Enum-eq bug (enumtext lane, filed bug #2): `==` on an enum value has no
@@ -10199,7 +12182,134 @@ typedef struct RtEnumInternEntry {
 static RtEnumInternEntry rt_enum_intern_table[RT_ENUM_INTERN_MAX];
 static int rt_enum_intern_count = 0;
 
+/* Payload-less variants are process-lifetime singletons, even inside a
+ * transient scope (bug option_struct_none_box_freed_by_transient_scope_2026_11_09).
+ *
+ * `Option<struct>`'s native `nil` is `rt_option_none()`: a heap-boxed None
+ * enum. Until this fix rt_enum_new treated it like any other construction:
+ * outside a transient scope it was interned and immortal, but INSIDE a scope
+ * it was a fresh scope-owned box, freed at rt_transient_array_scope_end.
+ * Any function that opens a scope, computes an `Option<struct>` and returns
+ * the None past scope end therefore returned a dangling pointer: the
+ * caller's `x == nil` read freed memory (false), `.unwrap()` wrote into it,
+ * and the Windows heap reported c0000374 at the next malloc (stage3
+ * `native-build hello.spl`, bug
+ * stage3_native_build_heap_corruption_c0000374_2026_11_08). Unlike a
+ * `Some(struct)`, a None gives the caller nothing to rt_transient_heap_promote,
+ * so this could not be fixed at the call sites in general.
+ *
+ * A variant whose payload is the nil special or the integer 0 (the constant
+ * lower_enum_construct_named passes for unit variants) owns no heap state,
+ * so it has no reason to belong to the scope: intern it by (enum_id,
+ * discriminant, payload) in the lock-free singleton list below and register
+ * the single allocation as a plain immortal (scope id 0, never tracked by a
+ * transient scope or a session heap). Exactly one node exists per distinct
+ * key, so memory is bounded by the program's unit variant count and no
+ * construction ever allocates a second time. rt_transient_heap_promote
+ * already treats a registered immortal root as a no-op success, so callers
+ * that promote a None keep working. */
+static inline int enum_payload_is_unit(int64_t payload) {
+    /* nil, the integer 0, and the two bool specials: `Ok(true)` /
+     * `Some(false)` built inside a scope (Result<bool, text> lease owners)
+     * own no heap state either, and the set stays bounded by variant count.
+     * Other scalar payloads keep today's scoped-box behaviour; a caller that
+     * returns one past scope end must rt_transient_heap_promote it. */
+    return payload == rt_core_nil() || payload == 0 ||
+        payload == rt_core_from_special(RT_VALUE_SPECIAL_TRUE) ||
+        payload == rt_core_from_special(RT_VALUE_SPECIAL_FALSE);
+}
+
+/* Lock-free, prepend-only singleton list. rt_enum_new is called from every
+ * native-build thread, so the set is published with CAS and read with
+ * acquire loads; there is no capacity and no fallback allocation (the list
+ * holds exactly one node per distinct key, bounded by the program's unit
+ * variant count). A thread that loses the publish race re-scans only the
+ * nodes prepended since its snapshot (the list never reorders or removes),
+ * and releases its own allocation if a twin was published meanwhile.
+ * Option.None is by far the hottest key and gets a dedicated slot so the
+ * common path is one acquire load. */
+typedef struct RtEnumUnitSingleton {
+    uint32_t enum_id;
+    uint32_t discriminant;
+    int64_t payload;
+    int64_t value;
+    struct RtEnumUnitSingleton* _Atomic next;
+} RtEnumUnitSingleton;
+static RtEnumUnitSingleton* _Atomic rt_enum_unit_singletons = NULL;
+static _Atomic int64_t rt_option_none_singleton = 0;
+
+static int64_t enum_unit_singleton_find(RtEnumUnitSingleton* from, RtEnumUnitSingleton* stop,
+                                        int32_t enum_id, int32_t discriminant, int64_t payload) {
+    for (RtEnumUnitSingleton* n = from; n && n != stop;
+         n = atomic_load_explicit(&n->next, memory_order_acquire)) {
+        if (n->enum_id == (uint32_t)enum_id && n->discriminant == (uint32_t)discriminant &&
+            n->payload == payload) {
+            return n->value;
+        }
+    }
+    return 0;
+}
+
+static int64_t enum_new_unit_singleton(int32_t enum_id, int32_t discriminant, int64_t payload) {
+    const int is_option_none = enum_id == RT_OPTION_ENUM_ID &&
+        ((uint32_t)discriminant == RT_DISC_NONE || discriminant == 1) && payload == rt_core_nil();
+    if (is_option_none) {
+        int64_t cached = atomic_load_explicit(&rt_option_none_singleton, memory_order_acquire);
+        if (cached) return cached;
+    }
+    RtEnumUnitSingleton* head = atomic_load_explicit(&rt_enum_unit_singletons, memory_order_acquire);
+    int64_t existing = enum_unit_singleton_find(head, NULL, enum_id, discriminant, payload);
+    if (existing) return existing;
+
+    RtCoreEnum* value = (RtCoreEnum*)rt_observed_calloc_v1(1, sizeof(RtCoreEnum));
+    if (!value) return rt_core_nil();
+    value->kind = RT_VALUE_HEAP_ENUM;
+    value->enum_id = (uint32_t)enum_id;
+    value->discriminant = (uint32_t)discriminant;
+    value->payload = payload;
+    value->transient_scope_id = 0;
+    if (!rt_core_register_immortal_ptr(value)) {
+        free(value);
+        return rt_core_nil();
+    }
+    int64_t tagged = (int64_t)(((uint64_t)(uintptr_t)value) | RT_VALUE_TAG_HEAP);
+    RtEnumUnitSingleton* node = (RtEnumUnitSingleton*)calloc(1, sizeof(RtEnumUnitSingleton));
+    if (!node) {
+        rt_core_unregister_immortal_ptr(value);
+        free(value);
+        return rt_core_nil();
+    }
+    node->enum_id = (uint32_t)enum_id;
+    node->discriminant = (uint32_t)discriminant;
+    node->payload = payload;
+    node->value = tagged;
+    for (;;) {
+        atomic_store_explicit(&node->next, head, memory_order_relaxed);
+        RtEnumUnitSingleton* expected = head;
+        if (atomic_compare_exchange_weak_explicit(&rt_enum_unit_singletons, &expected, node,
+                                                  memory_order_acq_rel, memory_order_acquire)) {
+            if (is_option_none) {
+                atomic_store_explicit(&rt_option_none_singleton, tagged, memory_order_release);
+            }
+            return tagged;
+        }
+        /* Lost the race: `expected` is the new head. Only nodes between it
+         * and our snapshot are new; if one carries our key, use it. */
+        int64_t raced = enum_unit_singleton_find(expected, head, enum_id, discriminant, payload);
+        if (raced) {
+            rt_core_unregister_immortal_ptr(value);
+            free(value);
+            free(node);
+            return raced;
+        }
+        head = expected;
+    }
+}
+
 int64_t rt_enum_new(int32_t enum_id, int32_t discriminant, int64_t payload) {
+    if (enum_payload_is_unit(payload)) {
+        return enum_new_unit_singleton(enum_id, discriminant, payload);
+    }
     const int transient = rt_core_transient_scope_for_new_object() != 0;
     if (!transient) {
         for (int i = 0; i < rt_enum_intern_count; i++) {
@@ -10263,7 +12373,10 @@ int8_t rt_try_is_absent(int64_t value, int64_t expected_enum_id, int64_t err_dis
     int64_t discriminant = (int64_t)e->discriminant;
     if ((int64_t)e->enum_id == RT_OPTION_ENUM_ID && (discriminant == 1 || discriminant == RT_DISC_NONE)) return 1;
     if (discriminant != err_discriminant) return 0;
-    return expected_enum_id == 0 || e->enum_id == 0 || (int64_t)e->enum_id == expected_enum_id;
+    /* Erased `?` (expected id 0): only a builtin Result's Err is absent; a
+     * user enum's declared index 1 must not return early (#6953). */
+    if (expected_enum_id == 0) return rt_is_result_enum_id(e->enum_id);
+    return e->enum_id == 0 || (int64_t)e->enum_id == expected_enum_id;
 }
 
 int64_t rt_enum_payload(int64_t value) {
@@ -10450,9 +12563,7 @@ int64_t rt_closure_release(int64_t closure_value) {
         *pin = rt_core_closure_pins[--rt_core_closure_pin_len];
     }
     if (free_now) {
-        rt_core_immortal_registry_acquire();
-        int erased = rt_core_immortal_registry_erase_raw((uintptr_t)closure);
-        rt_core_immortal_registry_release();
+        int erased = rt_core_immortal_registry_erase((uintptr_t)closure);
         if (erased) {
             atomic_fetch_sub_explicit(&rt_core_heap_registry_count, 1, memory_order_relaxed);
             free(closure);
@@ -10550,6 +12661,9 @@ int64_t rt_array_reduce(SplArray* array, int64_t init, int64_t closure_value) {
  * form and the legacy inline RT_VALUE_TAG_FLOAT form, so both of Rust's float
  * arms are subsumed by the one test. */
 static inline int rt_core_value_truthy(int64_t value) {
+    /* ADR-005 char (TAG_SPECIAL, payload = 1<<40 | code point; runtime_value.h RT_IS_CHAR): no truthiness, fail closed. */
+    if ((((uint64_t)value) & RT_VALUE_TAG_MASK) == RT_VALUE_TAG_SPECIAL && ((rt_core_special_payload(value) & ~0x1FFFFFULL) == (1ULL << 40)))
+        spl_panic("truthiness of a char is a type error; compare explicitly");
     if (rt_core_is_float(value)) return rt_core_as_float(value) != 0.0;
     RtCoreUInt* unsigned_value = rt_core_as_heap_uint(value);
     if (unsigned_value) return unsigned_value->value != 0;
@@ -10656,26 +12770,27 @@ int64_t rt_array_any_truthy(SplArray* array) {
     return 0;
 }
 
-int64_t rt_array_all(SplArray* array, int64_t closure_value) {
+/* Shared closure quantifier for all/any. is_all=1: stop on the first falsy
+ * predicate (answer 0), else 1. is_all=0: stop on the first truthy predicate
+ * (answer 1), else 0. A zero func_ptr falls back to element truthiness. */
+static int64_t rt_array_quantify(SplArray* array, int64_t closure_value, int is_all) {
     if (!rt_core_array_ptr(array)) return 0;
     int64_t func_ptr = rt_closure_func_ptr(closure_value);
-    if (!func_ptr) return rt_array_all_truthy(array);
+    if (!func_ptr) return is_all ? rt_array_all_truthy(array) : rt_array_any_truthy(array);
     RtArrayElemFn func = (RtArrayElemFn)(uintptr_t)func_ptr;
     for (int64_t i = 0; i < rt_array_len(array); i++) {
-        if (!rt_core_value_truthy(func(closure_value, spl_core_array_value_at(array, i)))) return 0;
+        int truthy = rt_core_value_truthy(func(closure_value, spl_core_array_value_at(array, i))) ? 1 : 0;
+        if (truthy != is_all) return !is_all;
     }
-    return 1;
+    return is_all;
+}
+
+int64_t rt_array_all(SplArray* array, int64_t closure_value) {
+    return rt_array_quantify(array, closure_value, 1);
 }
 
 int64_t rt_array_any(SplArray* array, int64_t closure_value) {
-    if (!rt_core_array_ptr(array)) return 0;
-    int64_t func_ptr = rt_closure_func_ptr(closure_value);
-    if (!func_ptr) return rt_array_any_truthy(array);
-    RtArrayElemFn func = (RtArrayElemFn)(uintptr_t)func_ptr;
-    for (int64_t i = 0; i < rt_array_len(array); i++) {
-        if (rt_core_value_truthy(func(closure_value, spl_core_array_value_at(array, i)))) return 1;
-    }
-    return 0;
+    return rt_array_quantify(array, closure_value, 0);
 }
 
 /* ---------------------------------------------------------------------------
@@ -10768,20 +12883,29 @@ int64_t rt_find(int64_t receiver, int64_t arg) {
     return rt_string_find(receiver, arg);
 }
 
-/* Option::map. Absent from this file entirely until now, which is why the
- * type-blind `map` dispatch could not link on the C lane at all. Semantics are
- * pinned to the Rust rt_option_map (runtime/src/value/objects.rs): None/nil is
- * returned UNCHANGED with the closure never invoked, a null closure yields nil,
- * and otherwise the payload is passed to the closure and the result re-wrapped
- * in Some. Some is (enum_id 1, discriminant 0) and None is (1, 1) — the same
- * constants rt_array_at in this file already builds its Option with. */
+/* Option/Result::map. Absent from this file entirely until now, which is why
+ * the type-blind `map` dispatch could not link on the C lane at all. Semantics
+ * are pinned to the Rust rt_option_map (runtime/src/value/objects.rs): None/nil
+ * and Result.Err are returned UNCHANGED with the closure never invoked, a null
+ * closure yields nil, and otherwise the payload is passed to the closure and
+ * re-wrapped in the corresponding present variant. Option Some is (enum_id 1,
+ * discriminant 0) and None is (1, 1) — the same constants rt_array_at in this
+ * file already builds its Option with. */
 int64_t rt_option_map(int64_t value, int64_t closure_value) {
     if (rt_is_none(value)) return value;
+    RtCoreEnum* e = rt_core_as_enum(value);
+    int result_ok = 0;
+    if (e && rt_is_result_enum_id(e->enum_id)) {
+        if (rt_result_disc_is_err(e->discriminant)) return value;
+        result_ok = rt_result_disc_is_ok(e->discriminant);
+    }
     int64_t payload = rt_enum_payload(value);
     int64_t func_ptr = rt_closure_func_ptr(closure_value);
     if (!func_ptr) return rt_core_nil();
     RtArrayElemFn func = (RtArrayElemFn)(uintptr_t)func_ptr;
-    return rt_enum_new(1, 0, func(closure_value, payload));
+    int64_t mapped = func(closure_value, payload);
+    if (result_ok) return rt_enum_new((int32_t)e->enum_id, (int32_t)e->discriminant, mapped);
+    return rt_enum_new(1, 0, mapped);
 }
 
 /* Receiver-polymorphic map: arrays go to rt_array_map, everything else keeps
@@ -10796,9 +12920,10 @@ int64_t rt_map(int64_t receiver, int64_t closure_value) {
     return rt_option_map(receiver, closure_value);
 }
 
-static int64_t rt_bdd_passed = 0;
-static int64_t rt_bdd_failed = 0;
+static _Atomic int64_t rt_bdd_passed = 0;
+static _Atomic int64_t rt_bdd_failed = 0;
 static int rt_bdd_current_failed = 0;
+static int64_t rt_bdd_skipped = 0;
 
 static void rt_bdd_print_text(int64_t value) {
     RtCoreString* s = rt_core_as_string(value);
@@ -10812,9 +12937,11 @@ void rt_bdd_describe_start_rv(int64_t name_rv) {
 }
 
 void rt_bdd_describe_end(void) {
+    int64_t passed = atomic_load_explicit(&rt_bdd_passed, memory_order_seq_cst);
+    int64_t failed = atomic_load_explicit(&rt_bdd_failed, memory_order_seq_cst);
     printf("%lld examples, %lld failures\n",
-           (long long)(rt_bdd_passed + rt_bdd_failed),
-           (long long)rt_bdd_failed);
+           (long long)(passed + failed),
+           (long long)failed);
 }
 
 void rt_bdd_it_start_rv(int64_t name_rv) {
@@ -10823,18 +12950,46 @@ void rt_bdd_it_start_rv(int64_t name_rv) {
     rt_bdd_print_text(name_rv);
 }
 
+void rt_bdd_record_result(int64_t passed) {
+    if (passed != 0) {
+        atomic_fetch_add_explicit(&rt_bdd_passed, 1, memory_order_seq_cst);
+    } else {
+        atomic_fetch_add_explicit(&rt_bdd_failed, 1, memory_order_seq_cst);
+    }
+}
+
+int64_t rt_bdd_executed_total(void) {
+    return atomic_load_explicit(&rt_bdd_passed, memory_order_seq_cst) +
+           atomic_load_explicit(&rt_bdd_failed, memory_order_seq_cst);
+}
+
+int64_t rt_bdd_failed_total(void) {
+    return atomic_load_explicit(&rt_bdd_failed, memory_order_seq_cst);
+}
+
 void rt_bdd_it_end(int64_t passed) {
     if (passed != 0 && !rt_bdd_current_failed) {
-        rt_bdd_passed += 1;
+        rt_bdd_record_result(1);
         fputs(" pass\n", stdout);
     } else {
-        rt_bdd_failed += 1;
+        rt_bdd_record_result(0);
         fputs(" fail\n", stdout);
     }
 }
 
 int64_t rt_bdd_has_failure(void) {
     return rt_bdd_current_failed ? 1 : 0;
+}
+
+void rt_bdd_note_skip(void) {
+    rt_bdd_skipped += 1;
+}
+
+/* std.spec fail(msg) twin of the Rust rt_bdd_fail_rv. */
+void rt_bdd_fail_rv(int64_t msg_rv) {
+    rt_bdd_current_failed = 1;
+    fputs("\n    ", stdout);
+    rt_bdd_print_text(msg_rv);
 }
 
 void rt_bdd_expect_fail(int64_t msg_ptr, int64_t msg_len) {
@@ -10875,21 +13030,38 @@ void rt_bdd_expect_truthy(int64_t value) {
 
 int64_t rt_bdd_format_results(void) {
     rt_bdd_describe_end();
-    return rt_bdd_failed;
+    return atomic_load_explicit(&rt_bdd_failed, memory_order_seq_cst);
 }
 
 void rt_bdd_clear_state(void) {
-    rt_bdd_passed = 0;
-    rt_bdd_failed = 0;
+    atomic_store_explicit(&rt_bdd_passed, 0, memory_order_seq_cst);
+    atomic_store_explicit(&rt_bdd_failed, 0, memory_order_seq_cst);
     rt_bdd_current_failed = 0;
+    rt_bdd_skipped = 0;
 }
 
 int64_t rt_hash_text(int64_t value) {
     RtCoreString* s = rt_core_as_string(value);
-    if (!s) return 0;
+    if (!s) {
+        if (value < 0x10000) return 0;
+        uintptr_t raw = (uintptr_t)value;
+        if ((raw & RT_VALUE_TAG_MASK) == RT_VALUE_TAG_HEAP &&
+                rt_core_is_registered_immortal_ptr((void*)(raw & ~RT_VALUE_TAG_MASK))) {
+            return 0;
+        }
+        s = rt_core_string_from_data_pointer(value);
+    }
     uint64_t hash = 14695981039346656037ULL;
-    for (uint64_t i = 0; i < s->len; i++) {
-        hash ^= (uint8_t)s->data[i];
+    if (s) {
+        for (uint64_t i = 0; i < s->len; i++) {
+            hash ^= (uint8_t)s->data[i];
+            hash *= 1099511628211ULL;
+        }
+        return (int64_t)hash;
+    }
+    const uint8_t* raw_bytes = (const uint8_t*)(uintptr_t)value;
+    for (uint64_t i = 0; raw_bytes[i] != 0; i++) {
+        hash ^= raw_bytes[i];
         hash *= 1099511628211ULL;
     }
     return (int64_t)hash;
@@ -10973,6 +13145,47 @@ static int64_t splc_utf8_array_to_bytes(int64_t value, uint8_t** out) {
     }
     *out = buf;
     return len;
+}
+
+/* C twins of the Rust spl_fonts_call_* transports (wsffi_native.rs): pass a
+ * Simple [u8] to a dlsym'd font provider as (ptr, len). Same contract: a null
+ * function or an unreadable byte array returns 0 without calling. */
+int64_t spl_fonts_call_init_blob(int64_t fptr, int64_t blob_value, int64_t digest_value) {
+    typedef int64_t (*Fn4)(int64_t, int64_t, int64_t, int64_t);
+    if (fptr == 0) return 0;
+    uint8_t* blob = NULL;
+    uint8_t* digest = NULL;
+    int64_t blob_len = splc_utf8_array_to_bytes(blob_value, &blob);
+    if (blob_len < 0) return 0;
+    int64_t digest_len = splc_utf8_array_to_bytes(digest_value, &digest);
+    if (digest_len < 0) { free(blob); return 0; }
+    int64_t rc = ((Fn4)(uintptr_t)fptr)((int64_t)(uintptr_t)blob, blob_len,
+                                         (int64_t)(uintptr_t)digest, digest_len);
+    free(blob);
+    free(digest);
+    return rc;
+}
+
+int64_t spl_fonts_call_init_path(int64_t fptr, int64_t path_value) {
+    typedef int64_t (*Fn2)(int64_t, int64_t);
+    if (fptr == 0) return 0;
+    uint8_t* path = NULL;
+    int64_t path_len = splc_utf8_array_to_bytes(path_value, &path);
+    if (path_len < 0) return 0;
+    int64_t rc = ((Fn2)(uintptr_t)fptr)((int64_t)(uintptr_t)path, path_len);
+    free(path);
+    return rc;
+}
+
+int64_t spl_fonts_call_layout_text(int64_t fptr, int64_t text_value, int64_t size_px, int64_t max_width) {
+    typedef int64_t (*Fn4)(int64_t, int64_t, int64_t, int64_t);
+    if (fptr == 0) return 0;
+    uint8_t* bytes = NULL;
+    int64_t len = splc_utf8_array_to_bytes(text_value, &bytes);
+    if (len < 0) return 0;
+    int64_t rc = ((Fn4)(uintptr_t)fptr)((int64_t)(uintptr_t)bytes, len, size_px, max_width);
+    free(bytes);
+    return rc;
 }
 
 /* Twin of what `std::str::from_utf8` runs (core's run_utf8_validation), which
@@ -11193,6 +13406,31 @@ int64_t rt_array_remove(int64_t array_value, int64_t index) {
     return removed;
 }
 
+/* Twin of rt_array_insert: insert `value` BEFORE `index` in place
+ * (index == len appends). Non-array receiver, negative index or index > len
+ * is a no-op returning 0, matching the Rust lane and the interpreter's
+ * `insert` arm. Built on push + get/set so growth and storage layouts are
+ * handled by the existing primitives, exactly as the Rust lane does. */
+int8_t rt_array_insert(int64_t array_value, int64_t index, int64_t value) {
+    SplArray* a = (SplArray*)(uintptr_t)array_value;
+    if (!rt_core_array_ptr(a)) return 0;
+    int64_t len = rt_array_len(a);
+    if (index < 0 || index > len) return 0;
+    /* push grows the buffer (and stores the value in the packed layout);
+     * then one memmove shifts the tail and the new slot is re-set, so the
+     * cost is the inherent O(n) shift with no per-element calls. */
+    if (!rt_array_push(a, value)) return 0;
+    if (index == len) return 1;
+    RtCoreArray* array = rt_core_array_ptr(a);
+    size_t elem = (array->flags & RT_CORE_ARRAY_FLAG_BYTES) ? 1
+                : (array->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) ? sizeof(uint64_t)
+                : sizeof(int64_t);
+    uint8_t* base = (uint8_t*)array->data;
+    memmove(base + (size_t)(index + 1) * elem, base + (size_t)index * elem,
+            (size_t)(len - index) * elem);
+    return rt_array_set(a, index, value);
+}
+
 /* pop / clear: receiver-dispatched spellings of rt_array_pop/rt_array_clear.
  *
  * These had NO C definition anywhere (only the Rust runtime's
@@ -11271,6 +13509,38 @@ int64_t rt_clear(int64_t receiver) {
     return rt_string_new((const uint8_t*)"", 0);
 }
 
+/* Per-code-point text index (ADR-005), negative counts from the end, and an
+ * out-of-range index panics with the same message as the Rust runtime's
+ * rt_index_get and the interpreter. rt_string_char_at keeps its byte/nil
+ * over-run policy for char_at callers. */
+static int64_t rt_string_index_checked(int64_t string, int64_t index) {
+    RtCoreString* s = rt_core_as_string(string);
+    const uint8_t* p = s ? (const uint8_t*)s->data : NULL;
+    uint64_t n = s ? s->len : 0;
+    /* ASCII fast path (memoized per string): byte == code point, so `s[i]`
+     * stays one byte copy -- the cost rt_string_char_at had. Otherwise the
+     * cached code-point count replaces the old full counting pass. */
+    int ascii = s ? spl_core_string_is_ascii(s) : 1;
+    int64_t count = s ? (ascii ? (int64_t)n : spl_core_string_cp_len(s)) : 0;
+    int64_t want = index < 0 ? count + index : index;
+    if (ascii && want >= 0 && want < count) return rt_string_new(p + want, 1);
+    if (want >= 0 && want < count) {
+        int64_t cp = -1;
+        for (uint64_t i = 0; i < n; i++) {
+            if ((p[i] & 0xC0) == 0x80) continue;
+            if (++cp == want) {
+                uint64_t j = i + 1;
+                while (j < n && (p[j] & 0xC0) == 0x80) j++;
+                return rt_string_new(p + i, j - i);
+            }
+        }
+    }
+    char msg[64];
+    int len = snprintf(msg, sizeof(msg), "error: string index %lld out of bounds", (long long)index);
+    rt_panic((const uint8_t*)msg, (uint64_t)(len > 0 ? len : 0));
+    return rt_core_nil();
+}
+
 int64_t rt_index_get(int64_t collection, int64_t idx) {
     RtCoreArray* a = rt_core_as_array(collection);
     if (a) {
@@ -11281,11 +13551,26 @@ int64_t rt_index_get(int64_t collection, int64_t idx) {
     }
     if (rt_core_as_string(collection)) {
         if ((idx & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_INT) return rt_core_nil();
-        return rt_string_char_at(collection, idx >> 3);
+        return rt_string_index_checked(collection, idx >> 3);
     }
     RtCoreDict* d = rt_core_as_dict(collection);
     if (d) return rt_core_dict_lookup(d, idx);
     return 3;
+}
+
+/* `.get(i)` method entry, receiver-dispatched like rt_at: an array receiver
+ * answers a real Option (Some(elem) in range, None otherwise) -- owner decision
+ * that `a.get(i)` is `T?` on every lane, `a[i]` the direct form
+ * (doc/08_tracking/bug/array_get_contract_drift_crypto_2026-10-18.md). Every
+ * other receiver keeps rt_index_get's answer. The index arrives tagged, as
+ * for rt_index_get, so the codegen boxing rules are shared. */
+int64_t rt_get(int64_t collection, int64_t idx) {
+    RtCoreArray* a = rt_core_as_array(collection);
+    if (a) {
+        if ((idx & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_INT) return rt_enum_new(1, 1, rt_core_nil());
+        return rt_array_at((SplArray*)a, idx >> 3);
+    }
+    return rt_index_get(collection, idx);
 }
 
 int8_t rt_index_set(int64_t collection, int64_t idx, int64_t val) {
@@ -11366,16 +13651,85 @@ static int64_t rt_core_dict_canon_key(int64_t k) {
     return rt_value_int(rt_core_numeric_arg(k));
 }
 
-static uint64_t rt_core_dict_hash(int64_t k) {
-    RtCoreString* s = rt_core_as_string(k);
-    if (s) {
-        uint64_t h = 1469598103934665603ULL; /* FNV-1a offset basis */
-        for (uint64_t i = 0; i < s->len; i++) {
-            h ^= (uint8_t)s->data[i];
-            h *= 1099511628211ULL;
-        }
-        return h;
+static uint64_t rt_core_dict_mix(uint64_t x) {
+    x ^= x >> 33;
+    x *= 0xff51afd7ed558ccdULL;
+    x ^= x >> 33;
+    return x;
+}
+
+static uint64_t rt_core_dict_text_hash(RtCoreString* s) {
+    uint64_t h = 1469598103934665603ULL; /* FNV-1a offset basis */
+    for (uint64_t i = 0; i < s->len; i++) {
+        h ^= (uint8_t)s->data[i];
+        h *= 1099511628211ULL;
     }
+    return h;
+}
+
+/* Structural hash of a registered array/tuple, agreeing with rt_core_array_eq
+ * (and the rt_core_value_eq_inner it recurses into) for every pair those call
+ * equal: same length, element-wise equal. The TUPLE flag is not compared there,
+ * so it is not hashed either: [1, 2] and (1, 2) are one dict key. Integers hash
+ * by numeric value whatever their storage (tagged immediate, wide/u64 box, or
+ * a raw u64/byte-packed element) because rt_core_generic_int_eq and
+ * spl_core_heap_int_eq compare values; floats by their folded bits (IEEE `==`
+ * makes -0.0 == +0.0; NaN never compares equal, so its bucket is irrelevant);
+ * text by content; enums by id and discriminant (payload equality only
+ * narrows equal pairs further). Anything else compares by identity, so its
+ * word is hashed. Beyond the depth cap only the length is hashed, which equal
+ * arrays share, so the cap can only add collisions. */
+#define RT_CORE_DICT_HASH_MAX_DEPTH 8
+
+static uint64_t rt_core_dict_array_hash(RtCoreArray* a, int depth);
+
+static uint64_t rt_core_dict_int_hash(uint64_t value) {
+    return rt_core_dict_mix(value ^ UINT64_C(0x55494e545f553634));
+}
+
+static uint64_t rt_core_dict_element_hash(int64_t v, int depth) {
+    if (rt_core_is_float(v)) return rt_core_dict_mix(rt_core_dict_float_bits(v));
+    uint32_t int_kind = spl_core_heap_int_kind(v);
+    uint64_t bits = 0;
+    int is_u64 = 0;
+    if (int_kind && spl_core_int_operand(v, int_kind, &bits, &is_u64)) return rt_core_dict_int_hash(bits);
+    if (rt_core_is_special(v)) return rt_core_dict_mix((uint64_t)v);
+    RtCoreString* s = rt_core_as_string(v);
+    if (s) return rt_core_dict_text_hash(s);
+    RtCoreArray* a = rt_core_as_registered_array(v);
+    if (a) return rt_core_dict_array_hash(a, depth + 1);
+    RtCoreEnum* e = rt_core_as_registered_enum(v);
+    if (e) return rt_core_dict_mix(((uint64_t)e->enum_id << 32) ^ e->discriminant ^ UINT64_C(0x454e554d));
+    /* A tagged immediate integer, or a word compared by identity. */
+    if (rt_core_is_int(v)) return rt_core_dict_int_hash((uint64_t)rt_core_as_int(v));
+    return rt_core_dict_mix((uint64_t)v);
+}
+
+static uint64_t rt_core_dict_array_hash(RtCoreArray* a, int depth) {
+    uint64_t h = rt_core_dict_mix((uint64_t)a->len ^ UINT64_C(0x5455504c45));
+    if (depth > RT_CORE_DICT_HASH_MAX_DEPTH) return h;
+    int bytes = (a->flags & RT_CORE_ARRAY_FLAG_BYTES) != 0;
+    int u64 = (a->flags & RT_CORE_ARRAY_FLAG_U64_PACKED) != 0;
+    for (int64_t i = 0; i < a->len; i++) {
+        uint64_t element = bytes ? rt_core_dict_int_hash((uint64_t)((uint8_t*)a->data)[i])
+            : u64 ? rt_core_dict_int_hash(((uint64_t*)a->data)[i])
+            : rt_core_dict_element_hash(((int64_t*)a->data)[i], depth);
+        h = (h * 1099511628211ULL) ^ element;
+    }
+    return h;
+}
+
+/* Set on a dict the first time an array/tuple key is inserted. Telling an
+ * array from an immediate integer takes a registry probe, so lookups in a dict
+ * that never held one skip it: an array probe key cannot equal any key there,
+ * so hashing it by address cannot hide a hit. Only an insert can add an array
+ * key, and every insert (resize included) goes through core_dict_put_seq, so
+ * the flag is never missing when needed; a spuriously set flag costs a probe. */
+#define RT_CORE_DICT_FLAG_ARRAY_KEYS 0x01U
+
+static uint64_t rt_core_dict_hash(RtCoreDict* d, int64_t k, int inserting) {
+    RtCoreString* s = rt_core_as_string(k);
+    if (s) return rt_core_dict_text_hash(s);
     /* Float keys hash by VALUE, so two independent boxes of the same double --
      * and the legacy inline form of that same double -- share a bucket. */
     /* Integer boxes hash by VALUE too, and a wide box hashes like the u64 box
@@ -11384,13 +13738,20 @@ static uint64_t rt_core_dict_hash(int64_t k) {
     uint32_t int_kind = spl_core_heap_int_kind(k);
     uint64_t bits = 0;
     int is_u64 = 0;
-    uint64_t x = (int_kind && spl_core_int_operand(k, int_kind, &bits, &is_u64))
-        ? (bits ^ UINT64_C(0x55494e545f553634))
-        : (rt_core_is_float(k) ? rt_core_dict_float_bits(k) : (uint64_t)k);
-    x ^= x >> 33;
-    x *= 0xff51afd7ed558ccdULL;
-    x ^= x >> 33;
-    return x;
+    if (int_kind && spl_core_int_operand(k, int_kind, &bits, &is_u64)) {
+        return rt_core_dict_mix(bits ^ UINT64_C(0x55494e545f553634));
+    }
+    if (rt_core_is_float(k)) return rt_core_dict_mix(rt_core_dict_float_bits(k));
+    /* Registered arrays and runtime tuples hash by VALUE, matching the
+     * structural equality rt_core_dict_key_eq already applies to them. */
+    if (inserting || (d->flags & RT_CORE_DICT_FLAG_ARRAY_KEYS)) {
+        RtCoreArray* a = rt_core_as_registered_array(k);
+        if (a) {
+            d->flags |= RT_CORE_DICT_FLAG_ARRAY_KEYS;
+            return rt_core_dict_array_hash(a, 0);
+        }
+    }
+    return rt_core_dict_mix((uint64_t)k);
 }
 
 /* Key equality for the slot scan. rt_native_eq everywhere EXCEPT float keys,
@@ -11407,25 +13768,49 @@ static int rt_core_dict_key_eq(int64_t a, int64_t b) {
     return rt_native_eq(a, b) != 0;
 }
 
+/* Reader invalidation never prevents an ordinary dictionary mutation. Zero
+ * permanently poisons the optional reader when its bounded epoch is spent. */
+static void core_dict_read_advance(RtCoreDict* d) {
+    if (d->read_epoch > 0)
+        d->read_epoch = d->read_epoch == INT64_MAX ? 0 : d->read_epoch + 1;
+}
+
 static void rt_core_dict_resize(RtCoreDict* d, int64_t new_cap) {
     RtCoreDictEntry* old = d->entries;
     int64_t old_cap = d->cap;
+    /* Re-insert in insertion order and renumber stamps 0..len-1, so a dict
+     * that saw removes regains the ordered-view fast path. */
+    int64_t live = 0;
+    int64_t* order = core_dict_ordered_slots(d, &live);
     RtCoreDictEntry* fresh = (RtCoreDictEntry*)rt_observed_calloc_v1((size_t)new_cap, sizeof(RtCoreDictEntry));
-    if (!fresh) return;
+    if (!fresh) { free(order); return; }
+    core_dict_read_advance(d);
+    if (d->read_backing == INT64_MAX) d->read_epoch = 0;
+    else d->read_backing++;
     d->entries = fresh;
     d->cap = new_cap;
     d->len = 0;
     d->tombstones = 0;
-    for (int64_t i = 0; i < old_cap; i++) {
-        if (old[i].occupied == 1) {
-            rt_core_dict_put(d, old[i].key, old[i].value);
-        }
+    for (int64_t r = 0; r < live; r++) {
+        RtCoreDictEntry* e = &old[order[r]];
+        core_dict_put_seq(d, e->key, e->value, r);
     }
+    d->next_seq = live;
+    free(order);
     free(old);
+    core_aux_note_dict((new_cap - old_cap) * (int64_t)sizeof(RtCoreDictEntry));
 }
 
 static int rt_core_dict_put(RtCoreDict* d, int64_t key, int64_t value) {
+    return core_dict_put_seq(d, key, value, -1);
+}
+
+/* seq < 0: a NEW key takes the next insertion stamp (appends to the order);
+ * replacing an existing key's value keeps its stamp (keeps its position).
+ * seq >= 0 is only passed by rt_core_dict_resize to carry stamps over. */
+static int core_dict_put_seq(RtCoreDict* d, int64_t key, int64_t value, int64_t seq) {
     if (!d || !d->entries) return 0;
+    core_dict_read_advance(d);
     /* Resize at 70% load (live + tombstones). */
     if ((d->len + d->tombstones + 1) * 10 > d->cap * 7) {
         /* A delete-heavy workload (`d[k] = v; d.remove(k)` in a loop) drives
@@ -11447,7 +13832,7 @@ static int rt_core_dict_put(RtCoreDict* d, int64_t key, int64_t value) {
         rt_core_dict_resize(d, next_cap);
     }
     int64_t ck = rt_core_dict_canon_key(key);
-    uint64_t h = rt_core_dict_hash(ck);
+    uint64_t h = rt_core_dict_hash(d, ck, 1);
     int64_t mask = d->cap - 1;
     int64_t idx = (int64_t)(h & (uint64_t)mask);
     int64_t first_tomb = -1;
@@ -11466,6 +13851,7 @@ static int rt_core_dict_put(RtCoreDict* d, int64_t key, int64_t value) {
             e->key = ck;
             e->value = value;
             e->hash = h;
+            e->seq = seq >= 0 ? seq : d->next_seq++;
             e->occupied = 1;
             d->len++;
             return 1;
@@ -11483,52 +13869,39 @@ static int rt_core_dict_put(RtCoreDict* d, int64_t key, int64_t value) {
     return 0;
 }
 
-static int64_t rt_core_dict_lookup(RtCoreDict* d, int64_t key) {
-    if (!d || !d->entries || d->len == 0) return rt_core_nil();
+/* Probe for `key` (canonicalised); NULL when absent or the dict is empty. */
+static RtCoreDictEntry* rt_core_dict_find(RtCoreDict* d, int64_t key) {
+    if (!d || !d->entries || d->len == 0) return NULL;
     int64_t ck = rt_core_dict_canon_key(key);
-    uint64_t h = rt_core_dict_hash(ck);
+    uint64_t h = rt_core_dict_hash(d, ck, 0);
     int64_t mask = d->cap - 1;
     int64_t idx = (int64_t)(h & (uint64_t)mask);
     for (;;) {
         RtCoreDictEntry* e = &d->entries[idx];
-        if (e->occupied == 0) return rt_core_nil();
-        if (e->occupied == 1 && e->hash == h && rt_core_dict_key_eq(e->key, ck)) return e->value;
+        if (e->occupied == 0) return NULL;
+        if (e->occupied == 1 && e->hash == h && rt_core_dict_key_eq(e->key, ck)) return e;
         idx = (idx + 1) & mask;
     }
+}
+
+static int64_t rt_core_dict_lookup(RtCoreDict* d, int64_t key) {
+    RtCoreDictEntry* e = rt_core_dict_find(d, key);
+    return e ? e->value : rt_core_nil();
 }
 
 static int rt_core_dict_has(RtCoreDict* d, int64_t key) {
-    if (!d || !d->entries || d->len == 0) return 0;
-    int64_t ck = rt_core_dict_canon_key(key);
-    uint64_t h = rt_core_dict_hash(ck);
-    int64_t mask = d->cap - 1;
-    int64_t idx = (int64_t)(h & (uint64_t)mask);
-    for (;;) {
-        RtCoreDictEntry* e = &d->entries[idx];
-        if (e->occupied == 0) return 0;
-        if (e->occupied == 1 && e->hash == h && rt_core_dict_key_eq(e->key, ck)) return 1;
-        idx = (idx + 1) & mask;
-    }
+    return rt_core_dict_find(d, key) != NULL;
 }
 
 static int rt_core_dict_del(RtCoreDict* d, int64_t key, int64_t* removed) {
-    if (!d || !d->entries || d->len == 0) return 0;
-    int64_t ck = rt_core_dict_canon_key(key);
-    uint64_t h = rt_core_dict_hash(ck);
-    int64_t mask = d->cap - 1;
-    int64_t idx = (int64_t)(h & (uint64_t)mask);
-    for (;;) {
-        RtCoreDictEntry* e = &d->entries[idx];
-        if (e->occupied == 0) return 0;
-        if (e->occupied == 1 && e->hash == h && rt_core_dict_key_eq(e->key, ck)) {
-            if (removed) *removed = e->value;
-            e->occupied = -1;
-            d->len--;
-            d->tombstones++;
-            return 1;
-        }
-        idx = (idx + 1) & mask;
-    }
+    RtCoreDictEntry* e = rt_core_dict_find(d, key);
+    if (!e) return 0;
+    if (removed) *removed = e->value;
+    core_dict_read_advance(d);
+    e->occupied = -1;
+    d->len--;
+    d->tombstones++;
+    return 1;
 }
 
 int64_t rt_dict_new(int64_t cap_hint) {
@@ -11553,6 +13926,14 @@ int64_t rt_dict_new(int64_t cap_hint) {
         free(d);
         return rt_core_nil();
     }
+    core_aux_note_dict(core_aux_dict_entries_bytes(d));
+    int64_t owner = atomic_load_explicit(&rt_core_dict_read_owner_counter, memory_order_relaxed);
+    while (owner < INT64_MAX &&
+           !atomic_compare_exchange_weak_explicit(&rt_core_dict_read_owner_counter,
+               &owner, owner + 1, memory_order_relaxed, memory_order_relaxed)) { }
+    d->read_owner = owner == INT64_MAX ? 0 : owner + 1;
+    d->read_epoch = 1;
+    d->read_backing = 1;
     return (int64_t)(((uint64_t)(uintptr_t)d) | RT_VALUE_TAG_HEAP);
 }
 
@@ -11596,10 +13977,136 @@ int8_t rt_dict_remove(int64_t dict, int64_t key) {
 int8_t rt_dict_clear(int64_t dict) {
     RtCoreDict* d = rt_core_as_dict(dict);
     if (!d || !d->entries) return 0;
+    core_dict_read_advance(d);
     for (int64_t i = 0; i < d->cap; i++) d->entries[i].occupied = 0;
     d->len = 0;
     d->tombstones = 0;
+    d->next_seq = 0;
     return 1;
+}
+
+/* Allocation-free, owner-thread-only compiler scope-binding view.
+ * Included after the dictionary owner implementation; never exports a pointer
+ * or a tagged heap value. The caller must retain the dictionary and charge its
+ * read permit before each operation. Concurrent dictionary mutation is outside
+ * the dictionary's existing thread-safety contract. */
+/* One unit per registry probe plus one payload operation. The optional reader
+ * permits at most 64 probes per membership; longer collision tails fail closed
+ * instead of spending global registry capacity for every key byte. No waiting for a
+ * contended registry lock: a concurrent owner is unsupported and fails closed. */
+#define RT_DICT_SCOPE_READ_PROBE_LIMIT_V1 64
+int64_t rt_dict_scope_read_bound_v1(void) {
+    if (atomic_flag_test_and_set_explicit(&rt_core_immortal_registry_lock, memory_order_acquire)) return -1;
+    size_t cap = core_immortal_max_cap();
+    core_immortal_shard_release(&rt_core_immortal_shards[0]);
+    size_t probes = cap < RT_DICT_SCOPE_READ_PROBE_LIMIT_V1 ? cap : RT_DICT_SCOPE_READ_PROBE_LIMIT_V1;
+    return (int64_t)probes * 3 + 1;
+}
+
+static void* core_dict_scope_read_heap_v1(int64_t value, uint32_t kind, int64_t* fuel) {
+    uintptr_t raw = (uintptr_t)value;
+    if (raw < 4096 || (raw & RT_VALUE_TAG_MASK) != RT_VALUE_TAG_HEAP) return NULL;
+    uintptr_t ptr = raw & ~RT_VALUE_TAG_MASK;
+    /* Shard 0 stays the single scope-read gate: a held gate fails closed
+     * for every dict, then the dict's own shard is try-locked too. */
+    RtCoreImmortalShard* gate = &rt_core_immortal_shards[0];
+    RtCoreImmortalShard* shard = core_immortal_shard(ptr);
+    if (atomic_flag_test_and_set_explicit(&gate->lock, memory_order_acquire)) return NULL;
+    if (shard != gate && atomic_flag_test_and_set_explicit(&shard->lock, memory_order_acquire)) {
+        core_immortal_shard_release(gate);
+        return NULL;
+    }
+    size_t cap = shard->cap;
+    int found = 0;
+    if (cap) {
+        size_t index = rt_core_immortal_hash_ptr(ptr) & (cap - 1);
+        for (size_t probes = 0; probes < cap && probes < RT_DICT_SCOPE_READ_PROBE_LIMIT_V1 && *fuel > 0; probes++) {
+            --*fuel;
+            uintptr_t entry = shard->registry[index];
+            if (!entry) break;
+            if (entry == ptr) { found = 1; break; }
+            index = (index + 1) & (cap - 1);
+        }
+    }
+    if (shard != gate) core_immortal_shard_release(shard);
+    core_immortal_shard_release(gate);
+    if (!found) return NULL;
+    /* Dict kind is byte-sized; numeric and text kinds are 32-bit. */
+    if (kind == RT_VALUE_HEAP_DICT)
+        return ((RtCoreDict*)ptr)->kind == kind ? (void*)ptr : NULL;
+    return *(uint32_t*)ptr == kind ? (void*)ptr : NULL;
+}
+
+static RtCoreDict* core_dict_scope_read_checked_v1(
+    int64_t dict, int64_t owner, int64_t epoch, int64_t fuel) {
+    int64_t bound = rt_dict_scope_read_bound_v1();
+    if (bound < 0 || fuel < bound) return NULL;
+    RtCoreDict* d = core_dict_scope_read_heap_v1(dict, RT_VALUE_HEAP_DICT, &fuel);
+    if (!d || owner <= 0 || epoch <= 0 || d->read_owner != owner ||
+        d->read_epoch != epoch || d->read_backing <= 0 || !d->entries)
+        return NULL;
+    return d;
+}
+
+int64_t rt_dict_scope_read_owner_v1(int64_t dict, int64_t fuel) {
+    int64_t bound = rt_dict_scope_read_bound_v1();
+    if (bound < 0 || fuel < bound) return -1;
+    RtCoreDict* d = core_dict_scope_read_heap_v1(dict, RT_VALUE_HEAP_DICT, &fuel);
+    return d && d->read_owner > 0 && d->read_epoch > 0 ? d->read_owner : -1;
+}
+
+int64_t rt_dict_scope_read_epoch_v1(int64_t dict, int64_t owner, int64_t fuel) {
+    int64_t bound = rt_dict_scope_read_bound_v1();
+    if (bound < 0 || fuel < bound) return -1;
+    RtCoreDict* d = core_dict_scope_read_heap_v1(dict, RT_VALUE_HEAP_DICT, &fuel);
+    return d && owner > 0 && d->read_owner == owner && d->read_epoch > 0
+        ? d->read_epoch : -1;
+}
+
+int64_t rt_dict_scope_read_meta_v1(int64_t dict, int64_t owner,
+    int64_t epoch, int64_t field, int64_t fuel) {
+    RtCoreDict* d = core_dict_scope_read_checked_v1(dict, owner, epoch, fuel);
+    if (!d || d->cap <= 0 || d->len < 0 || d->len > d->cap ||
+        (uint64_t)d->cap > INT64_MAX / sizeof(RtCoreDictEntry)) return -1;
+    switch (field) {
+        case 0: return 1; /* provider kind (C core). Slot view is HASH order, not rt_dict_keys order */
+        case 1: return d->len;
+        case 2: case 3: return d->cap;
+        case 4: return d->read_backing;
+        case 5: return sizeof(RtCoreDict);
+        case 6: return d->cap * (int64_t)sizeof(RtCoreDictEntry);
+        default: return -1;
+    }
+}
+
+int64_t rt_dict_scope_read_slot_v1(int64_t dict, int64_t owner,
+    int64_t epoch, int64_t slot, int64_t field, int64_t byte_index, int64_t fuel) {
+    RtCoreDict* d = core_dict_scope_read_checked_v1(dict, owner, epoch, fuel);
+    if (!d || slot < 0 || slot >= d->cap) return -1;
+    RtCoreDictEntry* entry = &d->entries[slot];
+    if (field == 0) return entry->occupied == 1 ? 1 : 0;
+    if (entry->occupied != 1) return -1;
+    /* The checked owner may spend up to one registry-cap of the original
+     * allowance. Reserve that worst case before key/value validation. */
+    size_t registry_cap = core_immortal_max_cap();
+    size_t owner_probes = registry_cap < RT_DICT_SCOPE_READ_PROBE_LIMIT_V1
+        ? registry_cap : RT_DICT_SCOPE_READ_PROBE_LIMIT_V1;
+    if ((uint64_t)fuel <= owner_probes) return -1;
+    fuel -= (int64_t)owner_probes;
+    RtCoreString* key = core_dict_scope_read_heap_v1(entry->key, RT_VALUE_HEAP_STRING, &fuel);
+    if (!key || key->len > INT64_MAX) return -1;
+    RtCoreWideInt* wide = core_dict_scope_read_heap_v1(entry->value, RT_VALUE_HEAP_INT, &fuel);
+    if (!wide && !rt_core_is_int(entry->value)) return -1;
+    int64_t value = wide ? wide->value : rt_core_as_int(entry->value);
+    if (value < 0) return -1;
+    switch (field) {
+        case 1: return value;
+        case 2: return (int64_t)key->len;
+        case 3:
+            return byte_index >= 0 && (uint64_t)byte_index < key->len
+                ? (uint8_t)key->data[byte_index] : -1;
+        default: return -1;
+    }
 }
 
 int64_t rt_dict_len(int64_t dict) {
@@ -11607,14 +14114,76 @@ int64_t rt_dict_len(int64_t dict) {
     return d ? d->len : 0;
 }
 
+typedef struct RtCoreDictOrderSlot {
+    int64_t seq;
+    int64_t slot;
+} RtCoreDictOrderSlot;
+
+static int core_dict_order_cmp(const void* a, const void* b) {
+    int64_t sa = ((const RtCoreDictOrderSlot*)a)->seq;
+    int64_t sb = ((const RtCoreDictOrderSlot*)b)->seq;
+    return sa < sb ? -1 : (sa > sb ? 1 : 0);
+}
+
+/* Live slot indices in INSERTION order (ascending stamp). The one ordering
+ * source for keys/values/entries/formatting. Caller frees; NULL with
+ * *count = 0 only for an empty dict. Fast path O(cap): with no remove since
+ * the last clear/resize the stamps are exactly 0..len-1, so each slot lands
+ * at out[stamp]. Otherwise sort by stamp, O(n log n). Allocation failure is
+ * fatal: a non-empty dict must never read back as empty. */
+static void core_dict_order_oom(int64_t len) {
+    fprintf(stderr, "rt_dict: out of memory building ordered view (len=%lld)\n", (long long)len);
+    fflush(stderr);
+    abort();
+}
+
+static int64_t* core_dict_ordered_slots(RtCoreDict* d, int64_t* count) {
+    *count = 0;
+    if (!d || !d->entries || d->len <= 0) return NULL;
+    int64_t n = d->len;
+    int64_t* slots = (int64_t*)rt_observed_malloc_v1((size_t)n * sizeof(int64_t));
+    if (!slots) core_dict_order_oom(n);
+    if (d->next_seq == n) {
+        int dense = 1;
+        int64_t placed = 0;
+        for (int64_t i = 0; i < n; i++) slots[i] = -1;
+        for (int64_t i = 0; i < d->cap; i++) {
+            if (d->entries[i].occupied != 1) continue;
+            int64_t s = d->entries[i].seq;
+            if (s < 0 || s >= n || slots[s] != -1) { dense = 0; break; }
+            slots[s] = i;
+            placed++;
+        }
+        if (dense && placed == n) {
+            *count = n;
+            return slots;
+        }
+    }
+    RtCoreDictOrderSlot* order = (RtCoreDictOrderSlot*)rt_observed_malloc_v1((size_t)n * sizeof(RtCoreDictOrderSlot));
+    if (!order) core_dict_order_oom(n);
+    int64_t m = 0;
+    for (int64_t i = 0; i < d->cap && m < n; i++) {
+        if (d->entries[i].occupied != 1) continue;
+        order[m].seq = d->entries[i].seq;
+        order[m].slot = i;
+        m++;
+    }
+    qsort(order, (size_t)m, sizeof(RtCoreDictOrderSlot), core_dict_order_cmp);
+    for (int64_t i = 0; i < m; i++) slots[i] = order[i].slot;
+    *count = m;
+    free(order);
+    return slots;
+}
+
 int64_t rt_dict_keys(int64_t dict) {
     RtCoreDict* d = rt_core_as_dict(dict);
     if (!d) return (int64_t)(uintptr_t)rt_array_new(0);
     SplArray* arr = rt_array_new(d->len);
     if (!arr) return rt_core_nil();
-    for (int64_t i = 0; i < d->cap; i++) {
-        if (d->entries[i].occupied == 1) rt_array_push(arr, d->entries[i].key);
-    }
+    int64_t n = 0;
+    int64_t* slots = core_dict_ordered_slots(d, &n);
+    for (int64_t i = 0; i < n; i++) rt_array_push(arr, d->entries[slots[i]].key);
+    free(slots);
     return (int64_t)(uintptr_t)arr;
 }
 
@@ -11623,9 +14192,10 @@ int64_t rt_dict_values(int64_t dict) {
     if (!d) return (int64_t)(uintptr_t)rt_array_new(0);
     SplArray* arr = rt_array_new(d->len);
     if (!arr) return rt_core_nil();
-    for (int64_t i = 0; i < d->cap; i++) {
-        if (d->entries[i].occupied == 1) rt_array_push(arr, d->entries[i].value);
-    }
+    int64_t n = 0;
+    int64_t* slots = core_dict_ordered_slots(d, &n);
+    for (int64_t i = 0; i < n; i++) rt_array_push(arr, d->entries[slots[i]].value);
+    free(slots);
     return (int64_t)(uintptr_t)arr;
 }
 
@@ -11635,15 +14205,18 @@ int64_t rt_dict_entries(int64_t dict) {
     if (!d) return (int64_t)(uintptr_t)rt_array_new(0);
     SplArray* arr = rt_array_new(d->len);
     if (!arr) return rt_core_nil();
-    for (int64_t i = 0; i < d->cap; i++) {
-        if (d->entries[i].occupied != 1) continue;
+    int64_t n = 0;
+    int64_t* slots = core_dict_ordered_slots(d, &n);
+    for (int64_t i = 0; i < n; i++) {
+        RtCoreDictEntry* e = &d->entries[slots[i]];
         int64_t pair = rt_tuple_new(2);
         if (pair != rt_core_nil()) {
-            rt_tuple_set(pair, 0, d->entries[i].key);
-            rt_tuple_set(pair, 1, d->entries[i].value);
+            rt_tuple_set(pair, 0, e->key);
+            rt_tuple_set(pair, 1, e->value);
         }
         rt_array_push(arr, pair);
     }
+    free(slots);
     return (int64_t)(uintptr_t)arr;
 }
 
@@ -11721,6 +14294,20 @@ SPL_CORE_C_WEAK int64_t rt_time_now_seconds(void) {
     return (int64_t)time(NULL);
 }
 
+/* Weak mirror of runtime_timestamp.c's rt_time_now_seconds_f64 (not in the
+ * seed core-C list). Same microsecond-wallclock body as the Windows arm there;
+ * without it the seed->stage2 bootstrap_main link leaves it undefined.
+ * A composition that links runtime_timestamp.c names it the owner with
+ * SIMPLE_RUNTIME_TIMESTAMP_OWNER; MSVC has no weak definition, so the mirror
+ * is compiled out there to keep exactly one definition. */
+#if !defined(SIMPLE_RUNTIME_TIMESTAMP_OWNER)
+int64_t rt_time_now_unix_micros(void);
+SPL_CORE_C_WEAK double rt_time_now_seconds_f64(void) {
+    int64_t micros = rt_time_now_unix_micros();
+    return micros < 0 ? -1.0 : (double)micros / 1000000.0;
+}
+#endif /* !SIMPLE_RUNTIME_TIMESTAMP_OWNER */
+
 #if defined(_WIN32)
 #include "platform/runtime_win_long_path.h"
 #endif
@@ -11772,9 +14359,9 @@ SPL_CORE_C_WEAK int64_t rt_remove(int64_t path_value) {
     if (stat(path, &st) != 0) { int64_t rc = -(int64_t)errno; free(path); return rc; }
     int64_t rc;
     if (S_ISDIR(st.st_mode)) {
-        rc = rmdir(path) == 0 ? 0 : -(int64_t)errno;
+        rc = rt_crt_rmdir(path) == 0 ? 0 : -(int64_t)errno;
     } else {
-        rc = unlink(path) == 0 ? 0 : -(int64_t)errno;
+        rc = rt_crt_unlink(path) == 0 ? 0 : -(int64_t)errno;
     }
     free(path);
     return rc;
@@ -11787,51 +14374,14 @@ SPL_CORE_C_WEAK int64_t rt_remove(int64_t path_value) {
  * worker above this point -- and every later user in this file -- can use it.
  * This file used to carry a forward-declared, separately-defined copy. */
 #include "platform/runtime_win_long_path.h"
+#include "platform/runtime_win_excl_file.h"
 #endif
-static int rt_bucket2_fsync_path(const char* path) {
-    if (!path) return 0;
-#if defined(_WIN32)
-    /* Same fix as runtime.c's rt_fsync_path twin: fopen()+fflush() is both
-     * MAX_PATH-capped (ANSI/narrow-CRT) and not actually durable (fflush()
-     * only empties the CRT's userspace buffer). Use CreateFileW (widened,
-     * extended-length-prefixed) + FlushFileBuffers, falling back to
-     * CreateFileA only when the path cannot be widened. GENERIC_WRITE is
-     * required for FlushFileBuffers to succeed. FILE_FLAG_BACKUP_SEMANTICS is
-     * required too: callers durability-sync DIRECTORIES through this same
-     * worker (native_noop_admission.spl syncs "{root}/generations" after a
-     * rename, the POSIX fsync-the-parent-dir idiom), and CreateFile refuses
-     * to open a directory handle at all without it (ERROR_ACCESS_DENIED);
-     * harmless on a regular file. */
-    wchar_t* wide_path = rt_widen_long_path_rc(path);
-    HANDLE file = INVALID_HANDLE_VALUE;
-    if (wide_path) {
-        file = CreateFileW(wide_path, GENERIC_READ | GENERIC_WRITE,
-                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                           NULL, OPEN_EXISTING,
-                           FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS, NULL);
-        free(wide_path);
-    } else {
-        file = CreateFileA(path, GENERIC_READ | GENERIC_WRITE,
-                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-                           NULL, OPEN_EXISTING,
-                           FILE_ATTRIBUTE_NORMAL | FILE_FLAG_BACKUP_SEMANTICS, NULL);
-    }
-    if (file == INVALID_HANDLE_VALUE) return 0;
-    int ok = FlushFileBuffers(file) != 0;
-    if (!CloseHandle(file)) ok = 0;
-    return ok ? 1 : 0;
-#else
-    FILE* file = fopen(path, "rb");
-    if (!file) return 0;
-    int ok = fsync(fileno(file)) == 0;
-    fclose(file);
-    return ok ? 1 : 0;
-#endif
-}
+/* fsync worker rt_fsync_path: one body shared with runtime.c. */
+#include "runtime_file_fsync_impl.h"
 SPL_CORE_C_WEAK int rt_file_fsync(const uint8_t* path_ptr, uint64_t path_len) {
     char path[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return 0;
-    return rt_bucket2_fsync_path(path);
+    return rt_fsync_path(path);
 }
 
 /* ---- mirrors runtime_timestamp.c (rt_progress_* thread-local clock ABI) --- */
@@ -11975,8 +14525,9 @@ int64_t rt_typed_bytes_u8_data_at(int64_t data_ptr, int64_t index) {
 static int rt_bucket2_mem_attr_gate = -1; /* -1 unresolved, 0 off, 1 on */
 int64_t rt_mem_attr_enabled(void) {
     if (rt_bucket2_mem_attr_gate < 0) {
-        const char* v = getenv("SIMPLE_MEM_ATTR");
+        char* v = rt_env_owned("SIMPLE_MEM_ATTR");
         rt_bucket2_mem_attr_gate = (v && strcmp(v, "1") == 0) ? 1 : 0;
+        free(v);
     }
     return rt_bucket2_mem_attr_gate;
 }
@@ -11996,6 +14547,7 @@ void rt_mem_attr_set_owner(const uint8_t* name_ptr, uint64_t name_len) {
     if (n >= RT_BUCKET2_MEM_ATTR_OWNER_MAX) n = RT_BUCKET2_MEM_ATTR_OWNER_MAX - 1;
     memcpy(rt_bucket2_mem_attr_owner, name_ptr, n);
     rt_bucket2_mem_attr_owner[n] = '\0';
+    rt_mem_guard_set_owner(rt_bucket2_mem_attr_owner, n); /* guard-trap owner report */
 }
 
 /* ---- log_sffi.rs: rt_log_* family ----------------------------------------
@@ -12104,7 +14656,7 @@ int64_t rt_mmap(int64_t path_value, int64_t size, int64_t offset, int64_t readon
     if (end < (uint64_t)offset) return 0;
 #if defined(_WIN32)
     DWORD access = readonly ? GENERIC_READ : (GENERIC_READ | GENERIC_WRITE);
-    HANDLE file = CreateFileA(path, access, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+    HANDLE file = CreateFileA(path, access, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
                               OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (file == INVALID_HANDLE_VALUE) return 0;
     LARGE_INTEGER file_size;
@@ -12136,12 +14688,12 @@ int64_t rt_mmap(int64_t path_value, int64_t size, int64_t offset, int64_t readon
     if (fd < 0) return 0;
     struct stat st;
     if (fstat(fd, &st) != 0 || st.st_size < 0 || (uint64_t)st.st_size < end) {
-        close(fd);
+        rt_crt_close(fd);
         return 0;
     }
     int protection = readonly ? PROT_READ : (PROT_READ | PROT_WRITE);
     void* address = mmap(NULL, (size_t)size, protection, MAP_SHARED, fd, (off_t)offset);
-    close(fd);
+    rt_crt_close(fd);
     if (address == MAP_FAILED) return 0;
     if ((uintptr_t)address > (uintptr_t)INT64_MAX) {
         munmap(address, (size_t)size);
@@ -12151,6 +14703,39 @@ int64_t rt_mmap(int64_t path_value, int64_t size, int64_t offset, int64_t readon
 #endif
 }
 
+
+/* ---- file_ops.rs: rt_mmap_create ------------------------------------------ */
+/* WRITER-side twin of rt_mmap: create (or truncate) `path`, set its length to
+ * exactly `size` bytes, and return a read-write shared mapping of the whole
+ * file (0 on any failure). The caller fills the view, rt_msync + rt_munmap,
+ * then publishes with an atomic rename (temp+rename). */
+int64_t rt_mmap_create(int64_t path_value, int64_t size) {
+    if (size <= 0) return 0;
+    const uint8_t* bytes = rt_string_data(path_value);
+    int64_t len = rt_string_len(path_value);
+    char path[4096];
+    if (!bytes || len <= 0 || len >= (int64_t)sizeof(path)) return 0;
+    memcpy(path, bytes, (size_t)len);
+    path[len] = '\0';
+    if (strlen(path) != (size_t)len) return 0;
+#if defined(_WIN32)
+    HANDLE file = CreateFileA(path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                              NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (file == INVALID_HANDLE_VALUE) return 0;
+    LARGE_INTEGER want;
+    want.QuadPart = size;
+    BOOL sized = SetFilePointerEx(file, want, NULL, FILE_BEGIN) && SetEndOfFile(file);
+    CloseHandle(file);
+    if (!sized) return 0;
+#else
+    int fd = open(path, O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (fd < 0) return 0;
+    int sized = ftruncate(fd, (off_t)size) == 0;
+    rt_crt_close(fd);
+    if (!sized) return 0;
+#endif
+    return rt_mmap(path_value, size, 0, 0);
+}
 /* ---- file_ops.rs: rt_munmap / rt_msync / rt_madvise ---------------------- */
 
 bool rt_munmap(int64_t addr, int64_t size) {
@@ -12205,10 +14790,13 @@ bool rt_madvise(int64_t addr, int64_t size, int64_t advice) {
 #endif
 }
 
+#include "runtime_file_lock_owned_v2.c"
+
 /* ---- file_ops.rs: rt_file_lock / rt_file_unlock -------------------------- */
 
 /* Acquire an exclusive OS file lock (flock); mirrors file_ops.rs's
- * rt_file_lock exactly, including its EINTR-retry / timeout-poll shape. The
+ * rt_file_lock exactly: nonpositive timeouts make one nonblocking attempt,
+ * while positive timeouts use the EINTR-retry / timeout-poll shape. The
  * returned descriptor must be consumed exactly once by rt_file_unlock. */
 int64_t rt_file_lock(const uint8_t* path_ptr, uint64_t path_len, int64_t timeout_secs) {
     char path[RT_TEXT_PATH_MAX];
@@ -12220,18 +14808,18 @@ int64_t rt_file_lock(const uint8_t* path_ptr, uint64_t path_len, int64_t timeout
      * LOCKFILE_EXCLUSIVE_LOCK alone blocks; adding LOCKFILE_FAIL_IMMEDIATELY
      * gives the LOCK_NB poll the timeout path needs. The whole file is locked
      * (MAXDWORD:MAXDWORD), matching flock's whole-file semantics. */
-    int fd = _open(path, _O_RDWR | _O_CREAT | _O_BINARY | _O_NOINHERIT, _S_IREAD | _S_IWRITE);
+    int fd = rt_crt_open(path, _O_RDWR | _O_CREAT | _O_BINARY | _O_NOINHERIT, _S_IREAD | _S_IWRITE);
     if (fd < 0) return -1;
     HANDLE handle = (HANDLE)_get_osfhandle(fd);
-    if (handle == INVALID_HANDLE_VALUE) { _close(fd); return -1; }
+    if (handle == INVALID_HANDLE_VALUE) { rt_crt_close(fd); return -1; }
     OVERLAPPED overlapped;
     if (timeout_secs <= 0) {
         memset(&overlapped, 0, sizeof(overlapped));
-        if (LockFileEx(handle, LOCKFILE_EXCLUSIVE_LOCK, 0,
+        if (LockFileEx(handle, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0,
                        MAXDWORD, MAXDWORD, &overlapped)) {
             return (int64_t)fd;
         }
-        _close(fd);
+        rt_crt_close(fd);
         return -1;
     }
     ULONGLONG deadline = GetTickCount64() + (ULONGLONG)timeout_secs * 1000ULL;
@@ -12244,32 +14832,31 @@ int64_t rt_file_lock(const uint8_t* path_ptr, uint64_t path_len, int64_t timeout
         }
         DWORD error = GetLastError();
         if (error != ERROR_LOCK_VIOLATION && error != ERROR_IO_PENDING) {
-            _close(fd);
+            rt_crt_close(fd);
             return -1;
         }
-        if (GetTickCount64() >= deadline) { _close(fd); return -1; }
+        if (GetTickCount64() >= deadline) { rt_crt_close(fd); return -1; }
         Sleep(50); /* 50ms, matching the POSIX branch's poll interval */
     }
 #else
     int fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
     if (fd < 0) return -1;
     if (timeout_secs <= 0) {
-        for (;;) {
-            if (flock(fd, LOCK_EX) == 0) return (int64_t)fd;
-            if (errno != EINTR) { close(fd); return -1; }
-        }
+        if (flock(fd, LOCK_EX | LOCK_NB) == 0) return (int64_t)fd;
+        rt_crt_close(fd);
+        return -1;
     }
     struct timespec deadline;
     clock_gettime(CLOCK_MONOTONIC, &deadline);
     deadline.tv_sec += timeout_secs;
     for (;;) {
         if (flock(fd, LOCK_EX | LOCK_NB) == 0) return (int64_t)fd;
-        if (errno != EWOULDBLOCK && errno != EAGAIN && errno != EINTR) { close(fd); return -1; }
+        if (errno != EWOULDBLOCK && errno != EAGAIN && errno != EINTR) { rt_crt_close(fd); return -1; }
         struct timespec now;
         clock_gettime(CLOCK_MONOTONIC, &now);
         if (now.tv_sec > deadline.tv_sec ||
             (now.tv_sec == deadline.tv_sec && now.tv_nsec >= deadline.tv_nsec)) {
-            close(fd);
+            rt_crt_close(fd);
             return -1;
         }
         struct timespec sleep_for = {0, 50000000L}; /* 50ms */
@@ -12288,11 +14875,11 @@ bool rt_file_unlock(int64_t handle) {
         memset(&overlapped, 0, sizeof(overlapped));
         unlocked = UnlockFileEx(native, 0, MAXDWORD, MAXDWORD, &overlapped) != 0;
     }
-    bool closed = _close(fd) == 0;
+    bool closed = rt_crt_close(fd) == 0;
     return unlocked && closed;
 #else
     bool unlocked = flock(fd, LOCK_UN) == 0;
-    bool closed = close(fd) == 0;
+    bool closed = rt_crt_close(fd) == 0;
     return unlocked && closed;
 #endif
 }
@@ -12313,7 +14900,7 @@ int64_t rt_io_file_open(const uint8_t* path_ptr, uint64_t path_len, int64_t mode
     }
 #if defined(_WIN32)
     flags |= _O_BINARY;
-    return (int64_t)_open(path, flags, _S_IREAD | _S_IWRITE);
+    return (int64_t)rt_crt_open(path, flags, _S_IREAD | _S_IWRITE);
 #else
     return (int64_t)open(path, flags, 0666);
 #endif
@@ -12555,12 +15142,23 @@ bool rt_io_file_flush(int64_t fd) {
 bool rt_io_file_set_permissions(int64_t fd, bool readonly) {
     if (fd < 0 || fd > INT_MAX) return false;
 #if defined(_WIN32)
-    /* No fd-level readonly toggle in the Win32 CRT; report failure rather
-     * than silently doing nothing. The Rust reference is unix-only here
-     * (io_file.rs uses std::fs::Permissions, whose readonly semantics on
-     * Windows differ entirely from the Unix mode bits mirrored above). */
-    (void)readonly;
-    return false;
+    /* Same contract as the Rust twin (interpreter_extern/io_file.rs:
+     * Permissions::set_readonly + File::set_permissions), which on Windows
+     * toggles FILE_ATTRIBUTE_READONLY on the open handle through
+     * SetFileInformationByHandle(FileBasicInfo). Zeroed timestamps mean
+     * "unchanged"; a CRT write-mode fd carries FILE_WRITE_ATTRIBUTES. */
+    HANDLE handle = (HANDLE)_get_osfhandle((int)fd);
+    if (handle == INVALID_HANDLE_VALUE || handle == NULL) return false;
+    FILE_BASIC_INFO basic;
+    if (!GetFileInformationByHandleEx(handle, FileBasicInfo, &basic, sizeof(basic))) return false;
+    DWORD attributes = basic.FileAttributes;
+    if (readonly) attributes |= FILE_ATTRIBUTE_READONLY;
+    else attributes &= ~(DWORD)FILE_ATTRIBUTE_READONLY;
+    if (attributes == 0) attributes = FILE_ATTRIBUTE_NORMAL;
+    FILE_BASIC_INFO update;
+    memset(&update, 0, sizeof(update));
+    update.FileAttributes = attributes;
+    return SetFileInformationByHandle(handle, FileBasicInfo, &update, sizeof(update)) != 0;
 #else
     struct stat st;
     if (fstat((int)fd, &st) != 0) return false;
@@ -12661,6 +15259,12 @@ bool rt_io_file_delete(const uint8_t* path_ptr, uint64_t path_len) {
 #endif
 }
 
+/* Byte-count read to EOF, shared with runtime.c; this lane routes the
+ * growable buffer through the allocation observer. */
+#define RT_FILE_SLURP_MALLOC(n) rt_observed_malloc_v1(n)
+#define RT_FILE_SLURP_REALLOC(p, n) rt_observed_realloc_v1((p), (n))
+#include "runtime_file_slurp_impl.h"
+
 /* (ptr, len) -> RuntimeValue: see rt_text_arg_to_path above.
  *
  * runtime_sffi.rs:1852 declares `&[I64, I64] -> &[I64]`; the result is a
@@ -12690,38 +15294,21 @@ int64_t rt_file_read_text(const uint8_t* path_ptr, uint64_t path_len) {
      * -8673224916767039355. Do NOT size from fseek/ftell -- procfs and sysfs
      * report 0 and would silently yield "" (the spl_file_read comment records
      * that incident). Pinned by scripts/check/check-binary-file-read-length.shs. */
-    FILE* f = fopen(path, "rb");
+    FILE* f = RT_FOPEN_READ_SHARED(path);
     if (!f) {
         /* DIAGNOSTIC (bug-linked: stage2_sanity_scv_snapshot_entry_zero_sources_2026-10-22):
-         * ungated dump of the fopen failure on the candidate's actual read path. */
-        fprintf(stderr,
-            "[rt_file_read_text-diag] errno=%d path_len=%llu path_bytes=",
-            errno, (unsigned long long)path_len);
-        for (uint64_t i = 0; i < path_len && i < 200; i++)
-            fprintf(stderr, "%02x", (unsigned)path_ptr[i]);
-        fprintf(stderr, " converted='%s'\n", path);
+         * gated behind SIMPLE_RT_FILE_READ_TEXT_DIAG=1 so missing-file probes stay silent. */
+        if (rt_env_flag_is("SIMPLE_RT_FILE_READ_TEXT_DIAG", '1')) {
+            fprintf(stderr,
+                "[rt_file_read_text-diag] errno=%d path_len=%llu path_bytes=",
+                errno, (unsigned long long)path_len);
+            for (uint64_t i = 0; i < path_len && i < 200; i++)
+                fprintf(stderr, "%02x", (unsigned)path_ptr[i]);
+            fprintf(stderr, " converted='%s'\n", path);
+        }
         return rt_nil;
     }
-    size_t cap = 4096;
-    size_t len = 0;
-    char* content = (char*)rt_observed_malloc_v1(cap);
-    if (!content) { fclose(f); return rt_nil; }
-    for (;;) {
-        if (len >= cap) {
-            size_t new_cap = cap * 2;
-            char* grown = (char*)rt_observed_realloc_v1(content, new_cap);
-            if (!grown) { free(content); fclose(f); return rt_nil; }
-            content = grown;
-            cap = new_cap;
-        }
-        size_t n = fread(content + len, 1, cap - len, f);
-        len += n;
-        if (n == 0) break;
-    }
-    fclose(f);
-    int64_t result = rt_string_new((const uint8_t*)content, (uint64_t)len);
-    free(content);
-    return result;
+    return rt_file_slurp_text_close(f);
 }
 
 /* Memory-map a file and copy its bytes into the canonical runtime string.
@@ -12730,7 +15317,7 @@ int64_t rt_file_mmap_read_text(const uint8_t* path_ptr, uint64_t path_len) {
     char path[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return rt_core_nil();
 #if defined(_WIN32)
-    int fd = _open(path, _O_RDONLY | _O_BINARY);
+    int fd = rt_crt_open(path, _O_RDONLY | _O_BINARY);
     if (fd < 0) return rt_core_nil();
     struct _stat64 st;
     if (_fstat64(fd, &st) != 0 || st.st_size <= 0) { _close(fd); return rt_core_nil(); }
@@ -12746,7 +15333,7 @@ int64_t rt_file_mmap_read_text(const uint8_t* path_ptr, uint64_t path_len) {
     _close(fd);
     return result;
 #else
-    int fd = open(path, O_RDONLY);
+    int fd = rt_crt_open(path, O_RDONLY);
     if (fd < 0) return rt_core_nil();
     struct stat st;
     if (fstat(fd, &st) != 0 || st.st_size <= 0) { close(fd); return rt_core_nil(); }
@@ -12756,7 +15343,7 @@ int64_t rt_file_mmap_read_text(const uint8_t* path_ptr, uint64_t path_len) {
     if (data == MAP_FAILED) { close(fd); return rt_core_nil(); }
     int64_t result = rt_string_new(data, (uint64_t)len);
     munmap((void*)data, len);
-    close(fd);
+    rt_crt_close(fd);
     return result;
 #endif
 }
@@ -12818,7 +15405,7 @@ static int rt_read_regular_no_follow_buffer(const uint8_t* path_ptr,
 #if defined(_WIN32)
     wchar_t* wide_path = rt_widen_long_path_rc(path);
     if (!wide_path) return 4;
-    HANDLE handle = CreateFileW(wide_path, GENERIC_READ, FILE_SHARE_READ, NULL,
+    HANDLE handle = CreateFileW(wide_path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
         OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN, NULL);
     free(wide_path);
     if (handle == INVALID_HANDLE_VALUE) return 4;
@@ -12874,7 +15461,7 @@ done:
 #if defined(_WIN32)
     CloseHandle(handle);
 #elif defined(O_NOFOLLOW)
-    close(fd);
+    rt_crt_close(fd);
 #endif
     if (error != 100) {
         free(bytes);
@@ -12898,6 +15485,20 @@ int64_t rt_file_read_regular_no_follow_bounded(
     int64_t result = rt_string_new(bytes, (uint64_t)total);
     free(bytes);
     return result;
+}
+
+/* Raw pointer/length ABI twins for the low-level sffi tier
+ * (src/compiler/70.backend/sffi_minimal.spl): same behaviour, distinct names,
+ * so the raw `(ptr, len) -> i64?` view never shares a name with the typed
+ * `(text) -> text?` view (seed extern return types are keyed by bare name).
+ * See doc/08_tracking/bug/seed_jit_extern_return_type_last_wins_2026-11-27.md */
+int64_t rt_file_read_text_raw(const uint8_t* path_ptr, uint64_t path_len) {
+    return rt_file_read_text(path_ptr, path_len);
+}
+
+int64_t rt_file_read_regular_no_follow_bounded_raw(
+        const uint8_t* path_ptr, uint64_t path_len, int64_t max_bytes) {
+    return rt_file_read_regular_no_follow_bounded(path_ptr, path_len, max_bytes);
 }
 
 /* Binary sibling; both result forms share the same handle admission and read
@@ -12947,29 +15548,10 @@ int64_t rt_file_read_text_rv(int64_t path_value) {
     const int64_t rt_nil = 3;
     char* path = rt_core_string_to_cpath(path_value);
     if (!path) return rt_nil;
-    FILE* f = fopen(path, "rb");
+    FILE* f = RT_FOPEN_READ_SHARED(path);
     free(path);
     if (!f) return rt_nil;
-    size_t cap = 4096;
-    size_t len = 0;
-    char* content = (char*)rt_observed_malloc_v1(cap);
-    if (!content) { fclose(f); return rt_nil; }
-    for (;;) {
-        if (len >= cap) {
-            size_t new_cap = cap * 2;
-            char* grown = (char*)rt_observed_realloc_v1(content, new_cap);
-            if (!grown) { free(content); fclose(f); return rt_nil; }
-            content = grown;
-            cap = new_cap;
-        }
-        size_t n = fread(content + len, 1, cap - len, f);
-        len += n;
-        if (n == 0) break;
-    }
-    fclose(f);
-    int64_t result = rt_string_new((const uint8_t*)content, (uint64_t)len);
-    free(content);
-    return result;
+    return rt_file_slurp_text_close(f);
 }
 
 /*
@@ -12979,177 +15561,27 @@ int64_t rt_file_read_text_rv(int64_t path_value) {
  * interpreter provider documents single-thread, fail-closed parity instead
  * of claiming this native atomic drain contract.
  */
-#define RT_FILE_EXISTS_PROBE_ACCEPTING    (UINT64_C(1) << 63)
-#define RT_FILE_EXISTS_PROBE_TRANSITION   (UINT64_C(1) << 62)
-#define RT_FILE_EXISTS_PROBE_LEASE_MASK   (RT_FILE_EXISTS_PROBE_TRANSITION - 1)
-#define RT_FILE_EXISTS_PROBE_GENERATION_MAX UINT64_C(0x7fffffffffffffff)
-#define RT_FILE_EXISTS_PROBE_TOTAL_MAX    UINT64_C(0x7fffffff)
-
-static atomic_uint_fast64_t rt_file_exists_probe_state = ATOMIC_VAR_INIT(0);
-static atomic_uint_fast64_t rt_file_exists_probe_generation = ATOMIC_VAR_INIT(0);
-static atomic_uint_fast64_t rt_file_exists_probe_total = ATOMIC_VAR_INIT(0);
-static atomic_uint_fast64_t rt_file_exists_probe_failed = ATOMIC_VAR_INIT(0);
-
-/* Reserve one total slot. A failed slot is incremented only after this succeeds,
- * so concurrent records preserve failed <= total <= TOTAL_MAX. */
-static int rt_file_exists_probe_try_add_total(void) {
-    uint_fast64_t current = atomic_load_explicit(
-        &rt_file_exists_probe_total, memory_order_relaxed);
-    while (current < RT_FILE_EXISTS_PROBE_TOTAL_MAX) {
-        if (atomic_compare_exchange_weak_explicit(
-                &rt_file_exists_probe_total, &current, current + 1,
-                memory_order_relaxed, memory_order_relaxed)) {
-            return 1;
-        }
-    }
-    return 0;
-}
-
-static uint_fast64_t rt_file_exists_probe_lease_admit(void) {
-    /* Disabled source path: one relaxed gate load, without assembly claims. */
-    uint_fast64_t state = atomic_load_explicit(
-        &rt_file_exists_probe_state, memory_order_relaxed);
-    if ((state & RT_FILE_EXISTS_PROBE_ACCEPTING) == 0) return 0;
-
-    for (;;) {
-        if ((state & RT_FILE_EXISTS_PROBE_ACCEPTING) == 0) return 0;
-        if ((state & RT_FILE_EXISTS_PROBE_LEASE_MASK) ==
-            RT_FILE_EXISTS_PROBE_LEASE_MASK) return 0;
-        if (atomic_compare_exchange_weak_explicit(
-                &rt_file_exists_probe_state, &state, state + UINT64_C(1),
-                memory_order_acquire, memory_order_relaxed)) {
-            uint_fast64_t generation = atomic_load_explicit(
-                &rt_file_exists_probe_generation, memory_order_acquire);
-            if (generation != 0) return generation;
-            atomic_fetch_sub_explicit(
-                &rt_file_exists_probe_state, UINT64_C(1), memory_order_release);
-            return 0;
-        }
-    }
-}
-
-static void rt_file_exists_probe_record(uint_fast64_t lease, int exists) {
-    if (lease != 0 && atomic_load_explicit(
-            &rt_file_exists_probe_generation, memory_order_acquire) == lease) {
-        if (rt_file_exists_probe_try_add_total() && !exists) {
-            uint_fast64_t failed = atomic_load_explicit(
-                &rt_file_exists_probe_failed, memory_order_relaxed);
-            while (failed < RT_FILE_EXISTS_PROBE_TOTAL_MAX) {
-                if (atomic_compare_exchange_weak_explicit(
-                        &rt_file_exists_probe_failed, &failed, failed + 1,
-                        memory_order_relaxed, memory_order_relaxed)) {
-                    break;
-                }
-            }
-        }
-    }
-    if (lease != 0) {
-        atomic_fetch_sub_explicit(
-            &rt_file_exists_probe_state, UINT64_C(1), memory_order_release);
-    }
-}
+#include "runtime_file_exists_probe_impl.h"
 
 int64_t rt_file_exists_probe_begin(void) {
-    uint_fast64_t idle = 0;
-    if (!atomic_compare_exchange_strong_explicit(
-            &rt_file_exists_probe_state, &idle, RT_FILE_EXISTS_PROBE_TRANSITION,
-            memory_order_acq_rel, memory_order_acquire)) {
-        return -1;
-    }
-    uint_fast64_t generation = atomic_load_explicit(
-        &rt_file_exists_probe_generation, memory_order_acquire);
-    if (generation >= RT_FILE_EXISTS_PROBE_GENERATION_MAX) {
-        atomic_store_explicit(&rt_file_exists_probe_state, 0, memory_order_release);
-        return -3;
-    }
-    generation += 1;
-    atomic_store_explicit(
-        &rt_file_exists_probe_generation, generation, memory_order_release);
-    atomic_store_explicit(&rt_file_exists_probe_total, 0, memory_order_relaxed);
-    atomic_store_explicit(&rt_file_exists_probe_failed, 0, memory_order_relaxed);
-    atomic_store_explicit(
-        &rt_file_exists_probe_state, RT_FILE_EXISTS_PROBE_ACCEPTING,
-        memory_order_release);
-    return (int64_t)generation;
+    return rt_file_exists_probe_begin_impl();
 }
 
 int64_t rt_file_exists_probe_end(int64_t token) {
-    if (token <= 0 || (uint_fast64_t)token > RT_FILE_EXISTS_PROBE_GENERATION_MAX ||
-        atomic_load_explicit(&rt_file_exists_probe_generation, memory_order_acquire) !=
-            (uint_fast64_t)token) return -2;
-
-    uint_fast64_t state = atomic_load_explicit(
-        &rt_file_exists_probe_state, memory_order_acquire);
-    for (;;) {
-        if ((state & RT_FILE_EXISTS_PROBE_ACCEPTING) == 0 ||
-            atomic_load_explicit(&rt_file_exists_probe_generation, memory_order_acquire) !=
-                (uint_fast64_t)token) {
-            return -2;
-        }
-        uint_fast64_t closing =
-            (state & RT_FILE_EXISTS_PROBE_LEASE_MASK) |
-            RT_FILE_EXISTS_PROBE_TRANSITION;
-        if (atomic_compare_exchange_weak_explicit(
-                &rt_file_exists_probe_state, &state, closing,
-                memory_order_acq_rel, memory_order_acquire)) {
-            break;
-        }
-    }
-
-    do {
-        state = atomic_load_explicit(
-            &rt_file_exists_probe_state, memory_order_acquire);
-    } while ((state & RT_FILE_EXISTS_PROBE_LEASE_MASK) != 0);
-
-    uint_fast64_t total = atomic_load_explicit(
-        &rt_file_exists_probe_total, memory_order_acquire);
-    uint_fast64_t failed = atomic_load_explicit(
-        &rt_file_exists_probe_failed, memory_order_acquire);
-    if (total > RT_FILE_EXISTS_PROBE_TOTAL_MAX) total = RT_FILE_EXISTS_PROBE_TOTAL_MAX;
-    if (failed > RT_FILE_EXISTS_PROBE_TOTAL_MAX) {
-        failed = RT_FILE_EXISTS_PROBE_TOTAL_MAX;
-    }
-    atomic_store_explicit(
-        &rt_file_exists_probe_state,
-        0,
-        memory_order_release);
-    return (int64_t)((total << 32) | failed);
+    return rt_file_exists_probe_end_impl(token);
 }
 
 #if defined(SIMPLE_RUNTIME_TESTING)
 int64_t rt_file_exists_probe_test_seed_generation(int64_t generation) {
-    if (generation < 0 || (uint_fast64_t)generation >
-            RT_FILE_EXISTS_PROBE_GENERATION_MAX) return -3;
-    uint_fast64_t idle = 0;
-    if (!atomic_compare_exchange_strong_explicit(
-            &rt_file_exists_probe_state, &idle, RT_FILE_EXISTS_PROBE_TRANSITION,
-            memory_order_acq_rel, memory_order_acquire)) return -1;
-    atomic_store_explicit(
-        &rt_file_exists_probe_generation, (uint_fast64_t)generation,
-        memory_order_release);
-    atomic_store_explicit(&rt_file_exists_probe_total, 0, memory_order_relaxed);
-    atomic_store_explicit(&rt_file_exists_probe_failed, 0, memory_order_relaxed);
-    atomic_store_explicit(&rt_file_exists_probe_state, 0, memory_order_release);
-    return 0;
+    return rt_file_exists_probe_test_seed_generation_impl(generation);
 }
 
 int64_t rt_file_exists_probe_test_seed_counters(int64_t total, int64_t failed) {
-    if (total < 0 || failed < 0 || (uint_fast64_t)total >
-            RT_FILE_EXISTS_PROBE_TOTAL_MAX || (uint_fast64_t)failed >
-            (uint_fast64_t)total) return -3;
-    uint_fast64_t state = atomic_load_explicit(
-        &rt_file_exists_probe_state, memory_order_acquire);
-    if ((state & RT_FILE_EXISTS_PROBE_ACCEPTING) == 0 ||
-        (state & RT_FILE_EXISTS_PROBE_LEASE_MASK) != 0) return -1;
-    atomic_store_explicit(
-        &rt_file_exists_probe_total, (uint_fast64_t)total, memory_order_relaxed);
-    atomic_store_explicit(
-        &rt_file_exists_probe_failed, (uint_fast64_t)failed, memory_order_relaxed);
-    return 0;
+    return rt_file_exists_probe_test_seed_counters_impl(total, failed);
 }
 #endif
 
-int rt_file_exists(const uint8_t* path_ptr, uint64_t path_len) {
+bool rt_file_exists(const uint8_t* path_ptr, uint64_t path_len) {
     uint_fast64_t lease = rt_file_exists_probe_lease_admit();
     char path[RT_TEXT_PATH_MAX];
     int exists = 0;
@@ -13174,50 +15606,18 @@ int rt_file_exists(const uint8_t* path_ptr, uint64_t path_len) {
     return exists;
 }
 
-int rt_file_is_regular_no_follow(const uint8_t* path_ptr, uint64_t path_len) {
-    char path_buf[RT_TEXT_PATH_MAX];
-    if (!rt_text_arg_to_path(path_ptr, path_len, path_buf, sizeof(path_buf))) return 0;
-    const char* path = path_buf;
-#if defined(_WIN32)
-    if (!path) return 0;
-    /* Long-path widened, like rt_file_read_regular_no_follow_bounded: the
-     * plain UTF-16 conversion failed past MAX_PATH, so a long
-     * package-module index path read as "not a regular file" and admission
-     * failed package-index:generation-unavailable (2026-09-25). */
-    wchar_t* wide_path = rt_widen_long_path_rc(path);
-    if (!wide_path) return 0;
-    DWORD attributes = GetFileAttributesW(wide_path);
-    free(wide_path);
-    return attributes != INVALID_FILE_ATTRIBUTES &&
-           (attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) == 0;
-#else
-    struct stat st;
-    return path && lstat(path, &st) == 0 && S_ISREG(st.st_mode);
-#endif
+/* No-shell stat probes: one body shared with runtime.c. */
+#include "runtime_file_stat_impl.h"
+
+bool rt_file_is_regular_no_follow(const uint8_t* path_ptr, uint64_t path_len) {
+    return rt_file_is_regular_no_follow_impl(path_ptr, path_len);
 }
 
-/* rt_file_is_char_device: mirrors runtime.c's rt_file_is_char_device for the
- * core-c-bootstrap build (native binaries linked without runtime.c). See
- * that definition for rationale (no-shell char-device probe, symlinks
- * followed). */
 int rt_file_is_char_device(const uint8_t* path_ptr, uint64_t path_len) {
-#if defined(_WIN32)
-    (void)path_ptr; (void)path_len;
-    return 0;
-#else
-    /* The compiler emits the two-argument (ptr, len) form for `text` externs
-     * (runtime_sffi.rs / src/compiler/50.mir/text_extern_abi.spl); a Simple
-     * `text` is NOT NUL-terminated, so the buffer must be copied. */
-    char buf[4096];
-    if (!path_ptr || path_len >= sizeof(buf)) return 0;
-    memcpy(buf, path_ptr, (size_t)path_len);
-    buf[(size_t)path_len] = '\0';
-    struct stat st;
-    return stat(buf, &st) == 0 && S_ISCHR(st.st_mode);
-#endif
+    return rt_file_is_char_device_impl(path_ptr, path_len);
 }
 
-int rt_file_delete(const uint8_t* path_ptr, uint64_t path_len) {
+bool rt_file_delete(const uint8_t* path_ptr, uint64_t path_len) {
     char path[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return 0;
     return remove(path) == 0 ? 1 : 0;
@@ -13387,7 +15787,8 @@ int64_t rt_path_absolute(const uint8_t* path_ptr, uint64_t path_len) {
         }
     }
     free(path);
-    if (!absolute) return rt_string_new(path_ptr, path_len);
+    /* cwd (or allocation) failure: nil, never the relative input. RT_NIL == 3. */
+    if (!absolute) return 3; /* RT_NIL (runtime_value.h); this file does not include it */
     int64_t result = rt_string_new((const uint8_t*)absolute, strlen(absolute));
     free(absolute);
     return result;
@@ -13644,7 +16045,7 @@ static int rt_http_resolve(const char* host, const char* port, const struct addr
         return EAI_SYSTEM;
     }
     pthread_t thread;
-    int create_result = pthread_create(&thread, &thread_attr, rt_http_resolve_worker, job);
+    int create_result = SIMPLE_XRAY_STARTUP_PTHREAD_CREATE_V1(&thread, &thread_attr, rt_http_resolve_worker, job);
     pthread_attr_destroy(&thread_attr);
     if (create_result != 0) {
         close(notify[0]); close(notify[1]); free(job->host); free(job->port); free(job);
@@ -13696,6 +16097,7 @@ static int rt_http_send_all(int fd, const void* data, size_t len, int64_t deadli
     }
     return 1;
 }
+#endif /* !_WIN32 socket helpers */
 
 static int rt_http_append(char** dst, size_t* len, size_t* cap,
                           const char* text, size_t text_len) {
@@ -13718,6 +16120,7 @@ static int rt_http_append(char** dst, size_t* len, size_t* cap,
     return 1;
 }
 
+#if !defined(_WIN32)
 static const char* rt_http_header_end(const uint8_t* data, size_t len) {
     if (!data || len < 4) return NULL;
     for (size_t i = 0; i + 4 <= len; i++) {
@@ -13740,10 +16143,13 @@ static int rt_http_has_header(const char* headers, size_t len, const char* name)
     return 0;
 }
 
-static int rt_http_header_has_token(const char* headers, size_t len,
-                                    const char* name, const char* token) {
+/* This owner implements only chunked transfer coding. Never decode one layer
+ * of an unsupported coding chain and report the encoded bytes as content.
+ * 0 absent, 1 chunked, -1 invalid, -2 unsupported. */
+static int simple_http_response_transfer_coding(const char* headers, size_t len) {
+    const char* name = "Transfer-Encoding";
     size_t name_len = strlen(name);
-    size_t token_len = strlen(token);
+    int present = 0, chunked = 0;
     const char* line = headers;
     const char* end = headers + len;
     while (line < end) {
@@ -13751,24 +16157,32 @@ static int rt_http_header_has_token(const char* headers, size_t len,
         if (!next || next > end) next = end;
         if ((size_t)(next - line) > name_len &&
             strncasecmp(line, name, name_len) == 0 && line[name_len] == ':') {
+            present = 1;
             const char* value = line + name_len + 1;
             while (value < next) {
-                while (value < next && (*value == ' ' || *value == '\t' || *value == ',')) value++;
-                const char* token_end = value;
-                while (token_end < next && *token_end != ',' && *token_end != ' ' && *token_end != '\t') token_end++;
-                if ((size_t)(token_end - value) == token_len &&
-                    strncasecmp(value, token, token_len) == 0) return 1;
-                value = token_end < next ? token_end + 1 : next;
+                const char* separator = memchr(value, ',', (size_t)(next - value));
+                if (!separator) separator = next;
+                const char* token_end = separator;
+                while (value < token_end && (*value == ' ' || *value == '\t')) value++;
+                while (token_end > value && (token_end[-1] == ' ' || token_end[-1] == '\t')) token_end--;
+                /* RFC 9110 5.6.1.2 permits empty list elements. */
+                if (value < token_end) {
+                    if ((size_t)(token_end - value) != 7 ||
+                        strncasecmp(value, "chunked", 7) != 0) return -2;
+                    if (++chunked > 1) return -1;
+                }
+                value = separator < next ? separator + 1 : next;
             }
         }
         line = next < end ? next + 2 : end;
     }
-    return 0;
+    return present ? (chunked ? 1 : -1) : 0;
 }
 
 static int64_t rt_http_content_length(const char* headers, size_t len) {
     const char* line = headers;
     const char* end = headers + len;
+    int64_t declared = -1;
     while (line < end) {
         const char* next = strstr(line, "\r\n");
         if (!next || next > end) next = end;
@@ -13782,11 +16196,12 @@ static int64_t rt_http_content_length(const char* headers, size_t len) {
                 parsed > (unsigned long long)INT64_MAX) return -2;
             while (parse_end < next && (*parse_end == ' ' || *parse_end == '\t')) parse_end++;
             if (parse_end != next) return -2;
-            return (int64_t)parsed;
+            if (declared >= 0 && declared != (int64_t)parsed) return -2;
+            declared = (int64_t)parsed;
         }
         line = next < end ? next + 2 : end;
     }
-    return -1;
+    return declared;
 }
 
 static int rt_http_decode_chunked(const uint8_t* src, size_t src_len,
@@ -13801,14 +16216,34 @@ static int rt_http_decode_chunked(const uint8_t* src, size_t src_len,
         size_t size_len = pos - line_start;
         const uint8_t* semi = memchr(src + line_start, ';', size_len);
         if (semi) size_len = (size_t)(semi - (src + line_start));
-        char size_text[32];
-        if (size_len == 0 || size_len >= sizeof(size_text)) { free(result); return 0; }
-        memcpy(size_text, src + line_start, size_len); size_text[size_len] = '\0';
-        char* parse_end = NULL;
-        unsigned long long chunk = strtoull(size_text, &parse_end, 16);
-        if (parse_end == size_text || chunk > SIZE_MAX) { free(result); return 0; }
+        if (size_len == 0) { free(result); return 0; }
+        size_t chunk = 0;
+        for (size_t i = 0; i < size_len; i++) {
+            unsigned char c = src[line_start + i];
+            unsigned digit;
+            if (c >= '0' && c <= '9') digit = c - '0';
+            else if (c >= 'a' && c <= 'f') digit = c - 'a' + 10;
+            else if (c >= 'A' && c <= 'F') digit = c - 'A' + 10;
+            else { free(result); return 0; }
+            if (chunk > (SIZE_MAX - digit) / 16) { free(result); return 0; }
+            chunk = chunk * 16 + digit;
+        }
         pos += 2;
-        if (chunk == 0) break;
+        if (chunk == 0) {
+            /* The last-chunk is followed by trailers and a final empty line.
+             * EOF after the size line (or inside a trailer) is incomplete. */
+            while (pos < src_len) {
+                size_t trailer_start = pos;
+                while (pos + 1 < src_len && !(src[pos] == '\r' && src[pos + 1] == '\n')) pos++;
+                if (pos + 1 >= src_len) { free(result); return 0; }
+                size_t trailer_len = pos - trailer_start;
+                pos += 2;
+                if (trailer_len == 0) {
+                    *out = result; *out_len = used; return 1;
+                }
+            }
+            free(result); return 0;
+        }
         if ((size_t)chunk > src_len - pos || used > SIZE_MAX - (size_t)chunk) {
             free(result); return 0;
         }
@@ -13823,8 +16258,10 @@ static int rt_http_decode_chunked(const uint8_t* src, size_t src_len,
         }
         pos += 2;
     }
-    *out = result; *out_len = used; return 1;
+    /* Exhausting the input after a data chunk is not a last-chunk. */
+    free(result); return 0;
 }
+#endif /* !_WIN32 response parsing helpers */
 
 static int rt_http_token_char(unsigned char value) {
     return ('0' <= value && value <= '9') || ('A' <= value && value <= 'Z') ||
@@ -13860,6 +16297,7 @@ static int rt_http_headers_valid(RtCoreArray* headers) {
     return 1;
 }
 
+#if !defined(_WIN32)
 static int rt_http_perform(const char* method, const char* url, RtCoreArray* headers,
                            const uint8_t* body, size_t body_len, int64_t timeout_ms,
                            int64_t* status_out,
@@ -13923,7 +16361,7 @@ static int rt_http_perform(const char* method, const char* url, RtCoreArray* hea
         if (deadline_ms != 0) {
             int flags = fcntl(fd, F_GETFL, 0);
             if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) != 0) {
-                close(fd); fd = -1; continue;
+                rt_crt_close(fd); fd = -1; continue;
             }
         }
         int connected = connect(fd, item->ai_addr, item->ai_addrlen) == 0;
@@ -13977,7 +16415,7 @@ static int rt_http_perform(const char* method, const char* url, RtCoreArray* hea
                  rt_http_send_all(fd, body, body_len, deadline_ms);
     free(request); free(host_port);
     if (!ok) {
-        close(fd);
+        rt_crt_close(fd);
         snprintf(error, error_cap, errno == ETIMEDOUT ? "HTTP request timed out" : "HTTP request write failed");
         return 0;
     }
@@ -14001,7 +16439,7 @@ static int rt_http_perform(const char* method, const char* url, RtCoreArray* hea
         if (n == 0) break;
         received += (size_t)n;
     }
-    close(fd); response[received] = '\0';
+    rt_crt_close(fd); response[received] = '\0';
     const char* header_end = rt_http_header_end(response, received);
     if (!header_end) { free(response); snprintf(error, error_cap, "invalid HTTP response"); return 0; }
     int status = 0;
@@ -14055,8 +16493,17 @@ static int rt_http_perform(const char* method, const char* url, RtCoreArray* hea
     }
     const uint8_t* payload = (const uint8_t*)header_end + 4;
     size_t payload_len = received - (size_t)(payload - response);
-    if (rt_http_header_has_token(header_start, header_len,
-                                 "Transfer-Encoding", "chunked")) {
+    int transfer_coding = simple_http_response_transfer_coding(header_start, header_len);
+    if (transfer_coding != 0 && rt_http_has_header(header_start, header_len, "Content-Length")) {
+        free(headers_copy); free(reason_copy); free(response);
+        snprintf(error, error_cap, "conflicting HTTP response framing"); return 0;
+    }
+    if (transfer_coding < 0) {
+        free(headers_copy); free(reason_copy); free(response);
+        snprintf(error, error_cap, transfer_coding == -2 ?
+                 "unsupported HTTP transfer coding" : "invalid HTTP Transfer-Encoding"); return 0;
+    }
+    if (transfer_coding == 1) {
         uint8_t* decoded = NULL; size_t decoded_len = 0;
         if (!rt_http_decode_chunked(payload, payload_len, &decoded, &decoded_len)) {
             free(headers_copy); free(reason_copy); free(response);
@@ -14083,14 +16530,287 @@ static int rt_http_perform(const char* method, const char* url, RtCoreArray* hea
     if (headers_len_out) *headers_len_out = header_len;
     return 1;
 }
+#else /* _WIN32: WinHTTP provider (bug windows_core_http_client_unavailable_2026_10_27) */
+#include <winhttp.h>
+
+/* UTF-8 -> freshly allocated NUL-terminated UTF-16; NULL on failure. */
+static wchar_t* rt_http_win_wide(const char* text, size_t len) {
+    if (len > (size_t)INT_MAX) return NULL;
+    return spl_win_utf8_to_wide(text, (ptrdiff_t)len, MB_ERR_INVALID_CHARS,
+                                rt_observed_malloc_v1, free, NULL);
+}
+
+/* UTF-16 (len wchar_t) -> allocated UTF-8 bytes (not NUL-counted). */
+static uint8_t* rt_http_win_narrow(const wchar_t* text, size_t len, size_t* out_len) {
+    *out_len = 0;
+    if (len > (size_t)INT_MAX) return NULL;
+    return (uint8_t*)spl_win_wide_to_utf8(text, (ptrdiff_t)len, 0,
+                                          rt_observed_malloc_v1, free, out_len);
+}
+
+static void rt_http_win_error(DWORD code, char* error, size_t error_cap, const char* fallback) {
+    switch (code) {
+    case ERROR_WINHTTP_TIMEOUT: snprintf(error, error_cap, "HTTP request timed out"); break;
+    case ERROR_WINHTTP_NAME_NOT_RESOLVED: snprintf(error, error_cap, "HTTP host lookup failed"); break;
+    case ERROR_WINHTTP_CANNOT_CONNECT:
+    case ERROR_WINHTTP_CONNECTION_ERROR: snprintf(error, error_cap, "HTTP connection failed"); break;
+    case ERROR_WINHTTP_SECURE_FAILURE: snprintf(error, error_cap, "HTTPS certificate validation failed"); break;
+    case ERROR_WINHTTP_INVALID_URL:
+    case ERROR_WINHTTP_UNRECOGNIZED_SCHEME: snprintf(error, error_cap, "invalid HTTP URL"); break;
+    case ERROR_WINHTTP_INVALID_SERVER_RESPONSE: snprintf(error, error_cap, "invalid HTTP response"); break;
+    default: snprintf(error, error_cap, "%s (winhttp error %lu)", fallback, (unsigned long)code); break;
+    }
+}
+
+/* WinHTTP's per-phase timeouts are not an overall deadline (measured: a
+ * 500 ms receive timeout still blocked 3 s on loopback), so a timer-queue
+ * watchdog closes the request handle at the deadline, which aborts the
+ * blocked synchronous call. */
+typedef struct {
+    HINTERNET request;
+    volatile LONG fired;
+} RtHttpWinWatchdog;
+
+static VOID CALLBACK rt_http_win_watchdog_fire(PVOID context, BOOLEAN timer_fired) {
+    (void)timer_fired;
+    RtHttpWinWatchdog* dog = (RtHttpWinWatchdog*)context;
+    if (InterlockedExchange(&dog->fired, 1) == 0) WinHttpCloseHandle(dog->request);
+}
+
+static int rt_http_win_timeout(int64_t deadline_ms) {
+    if (deadline_ms == 0) return 0; /* 0 = WinHTTP infinite for that phase */
+    int64_t left = deadline_ms - rt_time_now_monotonic_ms();
+    if (left <= 0) return -1;
+    return left > INT_MAX ? INT_MAX : (int)left;
+}
+
+/* Same contract as the POSIX rt_http_perform: http:// (and https:// with
+ * WinHTTP's default certificate validation, never relaxed), no redirect
+ * following, 64 MiB body cap, exact binary bodies, overall deadline. */
+static int rt_http_perform(const char* method, const char* url, RtCoreArray* headers,
+                           const uint8_t* body, size_t body_len, int64_t timeout_ms,
+                           int64_t* status_out,
+                           uint8_t** body_out, size_t* body_len_out,
+                           uint8_t** reason_out, size_t* reason_len_out,
+                           uint8_t** headers_out, size_t* headers_len_out,
+                           char* error, size_t error_cap) {
+    *status_out = -1; *body_out = NULL; *body_len_out = 0;
+    if (reason_out) *reason_out = NULL;
+    if (reason_len_out) *reason_len_out = 0;
+    if (headers_out) *headers_out = NULL;
+    if (headers_len_out) *headers_len_out = 0;
+    int64_t deadline_ms = 0;
+    if (timeout_ms > 0) {
+        int64_t now = rt_time_now_monotonic_ms();
+        deadline_ms = timeout_ms > INT64_MAX - now ? INT64_MAX : now + timeout_ms;
+    }
+    if (!rt_http_method_is_token(method) || !url) {
+        snprintf(error, error_cap, "invalid HTTP method or URL"); return 0;
+    }
+    for (const unsigned char* p = (const unsigned char*)url; *p; p++) {
+        if (*p <= 0x20 || *p == 0x7f) { snprintf(error, error_cap, "invalid HTTP URL"); return 0; }
+    }
+    int secure = strncmp(url, "https://", 8) == 0;
+    if (!secure && strncmp(url, "http://", 7) != 0) {
+        snprintf(error, error_cap, "native HTTP supports http:// and https:// only"); return 0;
+    }
+    if (body_len > (size_t)0xFFFFFFFFu) { snprintf(error, error_cap, "HTTP request body too large"); return 0; }
+
+    int ok = 0;
+    HINTERNET session = NULL, connect = NULL, request = NULL;
+    RtHttpWinWatchdog watchdog = {NULL, 0};
+    HANDLE watchdog_timer = NULL;
+    wchar_t *wurl = NULL, *wmethod = NULL, *whost = NULL, *wpath = NULL, *wheaders = NULL;
+    char* header_block = NULL; size_t header_block_len = 0, header_block_cap = 0;
+    uint8_t* response = NULL;
+    wchar_t* raw_headers = NULL;
+
+    wurl = rt_http_win_wide(url, strlen(url));
+    wmethod = rt_http_win_wide(method, strlen(method));
+    if (!wurl || !wmethod) { snprintf(error, error_cap, "invalid HTTP URL"); goto done; }
+    URL_COMPONENTS parts; memset(&parts, 0, sizeof(parts));
+    parts.dwStructSize = sizeof(parts);
+    parts.dwHostNameLength = (DWORD)-1; parts.dwUrlPathLength = (DWORD)-1; parts.dwExtraInfoLength = (DWORD)-1;
+    if (!WinHttpCrackUrl(wurl, 0, 0, &parts) || parts.dwHostNameLength == 0) {
+        snprintf(error, error_cap, "HTTP URL has no host"); goto done;
+    }
+    whost = (wchar_t*)rt_observed_malloc_v1(((size_t)parts.dwHostNameLength + 1) * sizeof(wchar_t));
+    size_t path_len = (size_t)parts.dwUrlPathLength + (size_t)parts.dwExtraInfoLength;
+    wpath = (wchar_t*)rt_observed_malloc_v1((path_len + 2) * sizeof(wchar_t));
+    if (!whost || !wpath) { snprintf(error, error_cap, "out of memory"); goto done; }
+    memcpy(whost, parts.lpszHostName, parts.dwHostNameLength * sizeof(wchar_t));
+    whost[parts.dwHostNameLength] = L'\0';
+    {
+        size_t at = 0;
+        if (parts.dwUrlPathLength == 0) wpath[at++] = L'/';
+        if (parts.dwUrlPathLength) { memcpy(wpath + at, parts.lpszUrlPath, parts.dwUrlPathLength * sizeof(wchar_t)); at += parts.dwUrlPathLength; }
+        if (parts.dwExtraInfoLength) { memcpy(wpath + at, parts.lpszExtraInfo, parts.dwExtraInfoLength * sizeof(wchar_t)); at += parts.dwExtraInfoLength; }
+        /* a URL fragment is never sent on the wire */
+        for (size_t i = 0; i < at; i++) if (wpath[i] == L'#') { at = i; break; }
+        if (at == 0) wpath[at++] = L'/';
+        wpath[at] = L'\0';
+    }
+
+    if (headers) {
+        for (int64_t i = 0; i < headers->len; i++) {
+            RtCoreString* header = rt_core_as_string(((int64_t*)headers->data)[i]);
+            if (!header || memchr(header->data, '\r', header->len) || memchr(header->data, '\n', header->len)) continue;
+            if (!rt_http_append(&header_block, &header_block_len, &header_block_cap, header->data, header->len) ||
+                !rt_http_append(&header_block, &header_block_len, &header_block_cap, "\r\n", 2)) {
+                snprintf(error, error_cap, "out of memory"); goto done;
+            }
+        }
+        if (header_block_len) {
+            wheaders = rt_http_win_wide(header_block, header_block_len);
+            if (!wheaders) { snprintf(error, error_cap, "invalid HTTP v2 headers"); goto done; }
+        }
+    }
+
+    /* Direct connection, matching the POSIX socket provider (no implicit proxy). */
+    session = WinHttpOpen(L"simple-runtime/1", WINHTTP_ACCESS_TYPE_NO_PROXY,
+                          WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
+    if (!session) { rt_http_win_error(GetLastError(), error, error_cap, "HTTP session failed"); goto done; }
+    {
+        int t = rt_http_win_timeout(deadline_ms);
+        if (t < 0) { snprintf(error, error_cap, "HTTP request timed out"); goto done; }
+        WinHttpSetTimeouts(session, t, t, t, t);
+    }
+    connect = WinHttpConnect(session, whost, parts.nPort, 0);
+    if (!connect) { rt_http_win_error(GetLastError(), error, error_cap, "HTTP connection failed"); goto done; }
+    request = WinHttpOpenRequest(connect, wmethod, wpath, NULL, WINHTTP_NO_REFERER,
+                                 WINHTTP_DEFAULT_ACCEPT_TYPES, secure ? WINHTTP_FLAG_SECURE : 0);
+    if (!request) { rt_http_win_error(GetLastError(), error, error_cap, "HTTP request failed"); goto done; }
+    {
+        DWORD policy = WINHTTP_OPTION_REDIRECT_POLICY_NEVER;
+        if (!WinHttpSetOption(request, WINHTTP_OPTION_REDIRECT_POLICY, &policy, sizeof(policy))) {
+            rt_http_win_error(GetLastError(), error, error_cap, "HTTP redirect policy failed"); goto done;
+        }
+        DWORD no_cookies = WINHTTP_DISABLE_COOKIES | WINHTTP_DISABLE_AUTHENTICATION;
+        (void)WinHttpSetOption(request, WINHTTP_OPTION_DISABLE_FEATURE, &no_cookies, sizeof(no_cookies));
+        int t = rt_http_win_timeout(deadline_ms);
+        if (t < 0) { snprintf(error, error_cap, "HTTP request timed out"); goto done; }
+        if (t > 0 && !WinHttpSetTimeouts(request, t, t, t, t)) {
+            rt_http_win_error(GetLastError(), error, error_cap, "HTTP timeout setup failed"); goto done;
+        }
+        if (t > 0) {
+            watchdog.request = request;
+            if (!CreateTimerQueueTimer(&watchdog_timer, NULL, rt_http_win_watchdog_fire, &watchdog,
+                                       (DWORD)t, 0, WT_EXECUTEONLYONCE)) {
+                watchdog_timer = NULL;
+                snprintf(error, error_cap, "HTTP timeout setup failed"); goto done;
+            }
+        }
+    }
+    if (!WinHttpSendRequest(request, wheaders ? wheaders : WINHTTP_NO_ADDITIONAL_HEADERS,
+                            wheaders ? (DWORD)-1L : 0,
+                            body_len ? (LPVOID)body : WINHTTP_NO_REQUEST_DATA,
+                            (DWORD)body_len, (DWORD)body_len, 0) ||
+        !WinHttpReceiveResponse(request, NULL)) {
+        rt_http_win_error(GetLastError(), error, error_cap, "HTTP request write failed"); goto done;
+    }
+    {
+        DWORD status = 0, size = sizeof(status);
+        if (!WinHttpQueryHeaders(request, WINHTTP_QUERY_STATUS_CODE | WINHTTP_QUERY_FLAG_NUMBER,
+                                 WINHTTP_HEADER_NAME_BY_INDEX, &status, &size, WINHTTP_NO_HEADER_INDEX) ||
+            status < 100 || status > 999) {
+            snprintf(error, error_cap, "invalid HTTP status"); goto done;
+        }
+        *status_out = (int64_t)status;
+    }
+    if (reason_out || headers_out) {
+        DWORD bytes = 0;
+        WinHttpQueryHeaders(request, WINHTTP_QUERY_RAW_HEADERS_CRLF, WINHTTP_HEADER_NAME_BY_INDEX,
+                            WINHTTP_NO_OUTPUT_BUFFER, &bytes, WINHTTP_NO_HEADER_INDEX);
+        if (GetLastError() != ERROR_INSUFFICIENT_BUFFER || bytes == 0 || bytes > 2u * 1024u * 1024u) {
+            snprintf(error, error_cap, bytes > 2u * 1024u * 1024u ? "HTTP response metadata too large" : "invalid HTTP headers");
+            goto done;
+        }
+        raw_headers = (wchar_t*)rt_observed_malloc_v1((size_t)bytes + sizeof(wchar_t));
+        if (!raw_headers) { snprintf(error, error_cap, "out of memory"); goto done; }
+        if (!WinHttpQueryHeaders(request, WINHTTP_QUERY_RAW_HEADERS_CRLF, WINHTTP_HEADER_NAME_BY_INDEX,
+                                 raw_headers, &bytes, WINHTTP_NO_HEADER_INDEX)) {
+            snprintf(error, error_cap, "invalid HTTP headers"); goto done;
+        }
+        size_t wlen = bytes / sizeof(wchar_t);
+        raw_headers[wlen] = L'\0';
+        /* status line: "HTTP/1.1 200 OK\r\n"; header block follows, ends "\r\n\r\n" */
+        size_t line_end = 0;
+        while (line_end < wlen && raw_headers[line_end] != L'\r' && raw_headers[line_end] != L'\n') line_end++;
+        size_t sp1 = 0;
+        while (sp1 < line_end && raw_headers[sp1] != L' ') sp1++;
+        size_t sp2 = sp1 + 1;
+        while (sp2 < line_end && raw_headers[sp2] != L' ') sp2++;
+        size_t hstart = line_end;
+        while (hstart < wlen && (raw_headers[hstart] == L'\r' || raw_headers[hstart] == L'\n') && hstart < line_end + 2) hstart++;
+        size_t hend = wlen;
+        while (hend > hstart && (raw_headers[hend - 1] == L'\r' || raw_headers[hend - 1] == L'\n' || raw_headers[hend - 1] == L'\0')) hend--;
+        if (reason_out && sp2 < line_end) {
+            size_t n = 0;
+            uint8_t* reason = rt_http_win_narrow(raw_headers + sp2 + 1, line_end - sp2 - 1, &n);
+            if (!reason) { snprintf(error, error_cap, "out of memory"); goto done; }
+            if (n == 0) { free(reason); reason = NULL; }
+            *reason_out = reason; if (reason_len_out) *reason_len_out = n;
+        }
+        if (headers_out && hend > hstart) {
+            size_t n = 0;
+            uint8_t* block = rt_http_win_narrow(raw_headers + hstart, hend - hstart, &n);
+            if (!block) { snprintf(error, error_cap, "out of memory"); goto done; }
+            *headers_out = block; if (headers_len_out) *headers_len_out = n;
+        }
+    }
+    {
+        size_t received = 0, capacity = 8192;
+        response = (uint8_t*)rt_observed_malloc_v1(capacity + 1);
+        if (!response) { snprintf(error, error_cap, "out of memory"); goto done; }
+        for (;;) {
+            if (deadline_ms != 0 && rt_http_win_timeout(deadline_ms) < 0) {
+                snprintf(error, error_cap, "HTTP request timed out"); goto done;
+            }
+            if (received == capacity) {
+                if (capacity >= 64 * 1024 * 1024) { snprintf(error, error_cap, "HTTP response too large"); goto done; }
+                capacity *= 2;
+                uint8_t* grown = (uint8_t*)rt_observed_realloc_v1(response, capacity + 1);
+                if (!grown) { snprintf(error, error_cap, "out of memory"); goto done; }
+                response = grown;
+            }
+            DWORD got = 0;
+            DWORD want = (DWORD)(capacity - received > 0x7FFFFFFF ? 0x7FFFFFFF : capacity - received);
+            if (!WinHttpReadData(request, response + received, want, &got)) {
+                rt_http_win_error(GetLastError(), error, error_cap, "HTTP response read failed"); goto done;
+            }
+            if (got == 0) break;
+            received += got;
+        }
+        response[received] = '\0';
+        *body_out = response; *body_len_out = received; response = NULL;
+    }
+    ok = 1;
+done:
+    /* INVALID_HANDLE_VALUE: wait for an in-flight callback before reading `fired`. */
+    if (watchdog_timer) DeleteTimerQueueTimer(NULL, watchdog_timer, INVALID_HANDLE_VALUE);
+    if (InterlockedExchange(&watchdog.fired, 1) != 0) {
+        request = NULL; /* already closed by the watchdog */
+        if (!ok) snprintf(error, error_cap, "HTTP request timed out");
+    }
+    if (!ok) {
+        *status_out = -1;
+        if (reason_out && *reason_out) { free(*reason_out); *reason_out = NULL; }
+        if (reason_len_out) *reason_len_out = 0;
+        if (headers_out && *headers_out) { free(*headers_out); *headers_out = NULL; }
+        if (headers_len_out) *headers_len_out = 0;
+    }
+    if (request) WinHttpCloseHandle(request);
+    if (connect) WinHttpCloseHandle(connect);
+    if (session) WinHttpCloseHandle(session);
+    free(response); free(raw_headers); free(header_block);
+    free(wurl); free(wmethod); free(whost); free(wpath); free(wheaders);
+    return ok;
+}
 #endif
 
 int64_t rt_http_get(int64_t url_value) {
     RtCoreString* url = rt_core_as_string(url_value);
     if (!url) return rt_http_tuple(-1, NULL, 0, "invalid HTTP URL text argument");
-#if defined(_WIN32)
-    return rt_http_tuple(-1, NULL, 0, "native HTTP is unavailable on Windows core runtime");
-#else
     int64_t status = -1; uint8_t* body = NULL; size_t body_len = 0; char error[160] = {0};
     int ok = rt_http_perform("GET", url->data, NULL, NULL, 0, 0,
                              &status, &body, &body_len, NULL, NULL, NULL, NULL,
@@ -14098,7 +16818,6 @@ int64_t rt_http_get(int64_t url_value) {
     int64_t result = ok ? rt_http_tuple(status, body, body_len, "")
                         : rt_http_tuple(-1, NULL, 0, error);
     free(body); return result;
-#endif
 }
 
 static int64_t rt_http_request_with_timeout(int64_t method_value, int64_t url_value,
@@ -14108,9 +16827,6 @@ static int64_t rt_http_request_with_timeout(int64_t method_value, int64_t url_va
     RtCoreString* url = rt_core_as_string(url_value);
     RtCoreString* body = rt_core_as_string(body_value);
     if (!method || !url) return rt_http_tuple(-1, NULL, 0, "invalid HTTP text argument");
-#if defined(_WIN32)
-    return rt_http_tuple(-1, NULL, 0, "native HTTP is unavailable on Windows core runtime");
-#else
     int64_t status = -1; uint8_t* response = NULL; size_t response_len = 0; char error[160] = {0};
     int ok = rt_http_perform(method->data, url->data, rt_core_as_array(headers_value),
                              body ? (const uint8_t*)body->data : NULL, body ? (size_t)body->len : 0,
@@ -14120,7 +16836,6 @@ static int64_t rt_http_request_with_timeout(int64_t method_value, int64_t url_va
     int64_t result = ok ? rt_http_tuple(status, response, response_len, "")
                         : rt_http_tuple(-1, NULL, 0, error);
     free(response); return result;
-#endif
 }
 
 int64_t rt_http_request(int64_t method_value, int64_t url_value, int64_t headers_value,
@@ -14141,11 +16856,6 @@ int64_t rt_http_request_v2(int64_t method_value, int64_t url_value,
         return rt_http_v2_tuple(-1, NULL, 0, NULL, 0, NULL, 0,
                                 "invalid HTTP v2 argument");
     }
-#if defined(_WIN32)
-    (void)headers; (void)headers_value; (void)timeout_ms;
-    return rt_http_v2_tuple(-1, NULL, 0, NULL, 0, NULL, 0,
-                            "native HTTP is unavailable on Windows core runtime");
-#else
     if (!rt_http_headers_valid(headers)) {
         return rt_http_v2_tuple(-1, NULL, 0, NULL, 0, NULL, 0,
                                 "invalid HTTP v2 headers");
@@ -14165,7 +16875,6 @@ int64_t rt_http_request_v2(int64_t method_value, int64_t url_value,
         : rt_http_v2_tuple(-1, NULL, 0, NULL, 0, NULL, 0, error);
     free(reason); free(response_headers); free(response);
     return result;
-#endif
 }
 
 int64_t rt_http_client_request(int64_t client, int64_t method, int64_t url,
@@ -14181,15 +16890,12 @@ int64_t rt_http_download(int64_t url_value, int64_t output_path_value) {
     RtCoreString* url = rt_core_as_string(url_value);
     RtCoreString* output_path = rt_core_as_string(output_path_value);
     if (!url || !output_path) return rt_http_download_tuple(-1, 0, "invalid HTTP download text argument");
-#if defined(_WIN32)
-    return rt_http_download_tuple(-1, 0, "native HTTP is unavailable on Windows core runtime");
-#else
     int64_t status = -1; uint8_t* body = NULL; size_t body_len = 0; char error[160] = {0};
     int ok = rt_http_perform("GET", url->data, NULL, NULL, 0, 0,
                              &status, &body, &body_len, NULL, NULL, NULL, NULL,
                              error, sizeof(error));
     if (ok) {
-        FILE* file = fopen(output_path->data, "wb");
+        FILE* file = rt_crt_fopen(output_path->data, "wb");
         if (!file) {
             ok = 0; snprintf(error, sizeof(error), "HTTP download write failed");
         } else {
@@ -14203,7 +16909,6 @@ int64_t rt_http_download(int64_t url_value, int64_t output_path_value) {
     int64_t result = ok ? rt_http_download_tuple(status, body_len, "")
                         : rt_http_download_tuple(-1, 0, error);
     free(body); return result;
-#endif
 }
 
 static void rt_glyph_pattern(uint8_t ch, uint8_t out[7]) {
@@ -14319,26 +17024,18 @@ int64_t rt_path_join(
 #if defined(_WIN32)
 /* Environment names and values are UTF-8 at this boundary, never ACP bytes. */
 static wchar_t* native_env_widen(const char* value) {
-    int count = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value, -1, NULL, 0);
-    if (count <= 0) return NULL;
-    wchar_t* wide = (wchar_t*)rt_observed_malloc_v1((size_t)count * sizeof(wchar_t));
-    if (!wide) return NULL;
-    if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, value, -1, wide, count)) {
-        free(wide);
-        return NULL;
-    }
-    return wide;
+    return spl_win_utf8_to_wide(value, -1, MB_ERR_INVALID_CHARS,
+                                rt_observed_malloc_v1, free, NULL);
 }
 
 static int64_t native_host_text_from_wide(const wchar_t* wide, DWORD length) {
     if (length == 0) return rt_string_new((const uint8_t*)"", 0);
     if (length > INT_MAX) return rt_core_nil();
-    int bytes = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide, (int)length, NULL, 0, NULL, NULL);
-    if (bytes <= 0) return rt_core_nil();
-    uint8_t* utf8 = (uint8_t*)rt_observed_malloc_v1((size_t)bytes);
+    size_t bytes = 0;
+    char* utf8 = spl_win_wide_to_utf8(wide, (ptrdiff_t)length, WC_ERR_INVALID_CHARS,
+                                      rt_observed_malloc_v1, free, &bytes);
     if (!utf8) return rt_core_nil();
-    int converted = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide, (int)length, (char*)utf8, bytes, NULL, NULL);
-    int64_t result = converted == bytes ? rt_string_new(utf8, (uint64_t)bytes) : rt_core_nil();
+    int64_t result = rt_string_new((const uint8_t*)utf8, (uint64_t)bytes);
     free(utf8);
     return result;
 }
@@ -14384,13 +17081,29 @@ int64_t rt_env_get(const uint8_t* key_ptr, uint64_t key_len) {
     return result;
 }
 
+/* Raw pointer/length ABI twin of rt_env_get for the deliberately low-level
+ * sffi tier (src/compiler/70.backend/sffi_minimal.spl). Distinct NAME, same
+ * symbol semantics: the seed resolves extern return types by bare name, so the
+ * raw `(ptr, len) -> i64?` view must not share a name with the typed
+ * `(text) -> text?` view. See
+ * doc/08_tracking/bug/seed_jit_extern_return_type_last_wins_2026-11-27.md */
+int64_t rt_env_get_raw(const uint8_t* key_ptr, uint64_t key_len) {
+    return rt_env_get(key_ptr, key_len);
+}
+
 int64_t rt_env_get_value(int64_t key) {
-    return rt_env_get_cstr(rt_interp_cstr(key));
+    char* name = rt_text_cstr_dup(key);
+    int64_t result = rt_env_get_cstr(name);
+    free(name);
+    return result;
 }
 
 static atomic_flag rt_lexer_source_lock = ATOMIC_FLAG_INIT;
 static uint8_t* rt_lexer_source_bytes = NULL;
 static uint64_t rt_lexer_source_length = 0;
+static bool rt_lexer_source_ascii = true;
+static uint64_t rt_lexer_cursor_char = 0;
+static uint64_t rt_lexer_cursor_byte = 0;
 
 static void rt_lexer_source_acquire(void) {
     while (atomic_flag_test_and_set_explicit(&rt_lexer_source_lock, memory_order_acquire)) {}
@@ -14400,36 +17113,86 @@ static void rt_lexer_source_release(void) {
     atomic_flag_clear_explicit(&rt_lexer_source_lock, memory_order_release);
 }
 
+static uint64_t rt_lexer_first_char_byte(const uint8_t* bytes, uint64_t len) {
+    uint64_t i = 0;
+    while (i < len && (bytes[i] & 0xC0) == 0x80) {
+        i++;
+    }
+    return i;
+}
+
 bool rt_lexer_source_set(const uint8_t* source_ptr, uint64_t source_len) {
     if (!source_ptr && source_len != 0) return false;
+    if (source_len > (uint64_t)(SIZE_MAX - 1)) return false;
     uint8_t* replacement = (uint8_t*)rt_observed_malloc_v1((size_t)source_len + 1);
     if (!replacement) return false;
     if (source_len != 0) memcpy(replacement, source_ptr, (size_t)source_len);
     replacement[source_len] = 0;
+    bool is_ascii = (source_len == 0) || spl_text_bytes_ascii(replacement, source_len);
+    uint64_t first_byte = is_ascii ? 0 : rt_lexer_first_char_byte(replacement, source_len);
     rt_lexer_source_acquire();
     uint8_t* previous = rt_lexer_source_bytes;
     rt_lexer_source_bytes = replacement;
     rt_lexer_source_length = source_len;
+    rt_lexer_source_ascii = is_ascii;
+    rt_lexer_cursor_char = 0;
+    rt_lexer_cursor_byte = first_byte;
     rt_lexer_source_release();
     free(previous);
     return true;
 }
 
 static bool rt_lexer_source_char_to_byte(uint64_t target, uint64_t* byte_offset) {
-    uint64_t chars = 0;
-    for (uint64_t i = 0; i < rt_lexer_source_length; i++) {
-        if ((rt_lexer_source_bytes[i] & 0xC0) != 0x80) {
-            if (chars == target) {
-                *byte_offset = i;
-                return true;
-            }
-            chars++;
-        }
-    }
-    if (chars == target) {
-        *byte_offset = rt_lexer_source_length;
+    if (rt_lexer_source_ascii) {
+        if (target > rt_lexer_source_length) return false;
+        *byte_offset = target;
         return true;
     }
+    uint64_t chars = rt_lexer_cursor_char;
+    uint64_t i = rt_lexer_cursor_byte;
+    if (target == chars) {
+        *byte_offset = i;
+        return true;
+    }
+    if (target < chars) {
+        /* Seek backward if target is closer to cursor than 0; otherwise restart from byte 0. */
+        if (chars - target <= target) {
+            while (chars > target && i > 0) {
+                i--;
+                while (i > 0 && (rt_lexer_source_bytes[i] & 0xC0) == 0x80) {
+                    i--;
+                }
+                chars--;
+            }
+            rt_lexer_cursor_char = chars;
+            rt_lexer_cursor_byte = i;
+            *byte_offset = i;
+            return true;
+        }
+        chars = 0;
+        i = rt_lexer_first_char_byte(rt_lexer_source_bytes, rt_lexer_source_length);
+        if (target == 0) {
+            rt_lexer_cursor_char = 0;
+            rt_lexer_cursor_byte = i;
+            *byte_offset = i;
+            return true;
+        }
+    }
+    while (i < rt_lexer_source_length) {
+        i++;
+        while (i < rt_lexer_source_length && (rt_lexer_source_bytes[i] & 0xC0) == 0x80) {
+            i++;
+        }
+        chars++;
+        if (chars == target) {
+            rt_lexer_cursor_char = chars;
+            rt_lexer_cursor_byte = i;
+            *byte_offset = i;
+            return true;
+        }
+    }
+    rt_lexer_cursor_char = chars;
+    rt_lexer_cursor_byte = i;
     return false;
 }
 
@@ -14452,15 +17215,18 @@ int64_t rt_lexer_source_slice(int64_t start, int64_t end) {
 int64_t rt_env_get_i64(const uint8_t* key_ptr, uint64_t key_len, int64_t default_value) {
     char* key = rt_core_text_arg_to_cstr(key_ptr, key_len);
     if (!key) return default_value;
-    const char* value = getenv(key);
+    char* value = rt_env_owned(key);
     if (!value || value[0] == '\0') {
+        free(value);
         free(key);
         return default_value;
     }
     char* end = NULL;
     long long parsed = strtoll(value, &end, 10);
     free(key);
-    return end == value ? default_value : (int64_t)parsed;
+    int64_t result = end == value ? default_value : (int64_t)parsed;
+    free(value);
+    return result;
 }
 
 #if defined(_WIN32)
@@ -14534,7 +17300,7 @@ int8_t rt_env_remove(const uint8_t* key_ptr, uint64_t key_len) {
  * are still defined in runtime.c only — add them here when needed. */
 
 static char* rt_core_string_to_cpath(int64_t value) {
-    RtCoreString* s = rt_core_as_string(value);
+    RtCoreString* s = rt_core_as_string_or_data(value);
     if (!s) return NULL;
     char* out = (char*)rt_observed_malloc_v1((size_t)s->len + 1);
     if (!out) return NULL;
@@ -14544,7 +17310,7 @@ static char* rt_core_string_to_cpath(int64_t value) {
 }
 
 static const uint8_t* rt_core_string_bytes(int64_t value, uint64_t* len_out) {
-    RtCoreString* s = rt_core_as_string(value);
+    RtCoreString* s = rt_core_as_string_or_data(value);
     if (!s) {
         *len_out = 0;
         return NULL;
@@ -14604,25 +17370,78 @@ extern char** environ;
 /* env_process.rs: rt_env_home() -> RuntimeValue (nil if HOME/USERPROFILE
  * unset). Zero-arg call, confirmed at every call site (mod_748/798/832/840). */
 int64_t rt_env_home(void) {
-    const char* home = getenv("HOME");
+    char* home = rt_env_owned("HOME");
 #if defined(_WIN32)
-    if (!home || home[0] == '\0') home = getenv("USERPROFILE");
+    if (!home || home[0] == '\0') {
+        free(home);
+        home = rt_env_owned("USERPROFILE");
+    }
 #endif
-    if (!home || home[0] == '\0') return rt_core_nil();
-    return rt_string_new((const uint8_t*)home, (uint64_t)strlen(home));
+    int64_t result = (!home || home[0] == '\0') ? rt_core_nil() :
+        rt_string_new((const uint8_t*)home, (uint64_t)strlen(home));
+    free(home);
+    return result;
 }
 
 /* env_process.rs rt_env_all/rt_env_vars: array of (key, value) 2-tuples,
  * one per process environment variable. Order is whatever the OS yields.
  * Zero-arg call, confirmed at every call site (mod_751/809/840). */
+#if defined(_WIN32)
+/* This snapshot owns every pair/string it has constructed so far. */
+static void native_env_snapshot_discard(SplArray* snapshot) {
+    for (int64_t i = 0; i < rt_array_len(snapshot); i++) {
+        int64_t pair = rt_array_get(snapshot, i);
+        rt_string_free(rt_tuple_get(pair, 0));
+        rt_string_free(rt_tuple_get(pair, 1));
+        rt_array_free((SplArray*)(uintptr_t)pair);
+    }
+    rt_array_free(snapshot);
+}
+#endif
+
 int64_t rt_env_vars(void) {
     SplArray* out = rt_array_new(0);
     if (!out) return rt_core_nil();
 #if defined(_WIN32)
-    char** env = _environ;
+    /* The CRT drops explicitly empty values and misses direct Win32 writes.
+     * Match rt_env_get/rt_env_set's Unicode process-environment authority.
+     * The OS block is immutable until FreeEnvironmentStringsW releases it. */
+    LPWCH block = GetEnvironmentStringsW();
+    if (!block) {
+        rt_array_free(out);
+        return rt_core_nil();
+    }
+    for (const wchar_t* entry = block; *entry; entry += wcslen(entry) + 1) {
+        const wchar_t* eq = wcschr(entry, L'=');
+        /* Hidden =C: drive entries are not public environment names. */
+        if (!eq || eq == entry) continue;
+        size_t key_len = (size_t)(eq - entry);
+        size_t value_len = wcslen(eq + 1);
+        if (key_len > INT_MAX || value_len > INT_MAX) goto failed;
+        int64_t key_str = native_host_text_from_wide(entry, (DWORD)key_len);
+        int64_t value_str = native_host_text_from_wide(eq + 1, (DWORD)value_len);
+        int64_t pair = rt_core_nil();
+        if (key_str != rt_core_nil() && value_str != rt_core_nil()) {
+            pair = rt_tuple_new(2);
+            if (pair != rt_core_nil()) {
+                rt_tuple_set(pair, 0, key_str);
+                rt_tuple_set(pair, 1, value_str);
+                if (rt_array_push(out, pair)) continue;
+                rt_array_free((SplArray*)(uintptr_t)pair);
+            }
+        }
+        rt_string_free(key_str);
+        rt_string_free(value_str);
+        goto failed;
+    }
+    FreeEnvironmentStringsW(block);
+    return (int64_t)(uintptr_t)out;
+failed:
+    FreeEnvironmentStringsW(block);
+    native_env_snapshot_discard(out);
+    return rt_core_nil();
 #else
     char** env = environ;
-#endif
     for (int64_t i = 0; env && env[i]; i++) {
         const char* entry = env[i];
         const char* eq = strchr(entry, '=');
@@ -14639,6 +17458,7 @@ int64_t rt_env_vars(void) {
         rt_array_push(out, pair);
     }
     return (int64_t)(uintptr_t)out;
+#endif
 }
 
 /* descriptor.rs: rt_file_open(path_ptr, path_len, mode) -> fd (-1 on
@@ -14651,9 +17471,10 @@ int32_t rt_file_open(const uint8_t* path_ptr, uint64_t path_len, int32_t mode) {
     int fd = -1;
 #if defined(_WIN32)
     switch (mode) {
-        case 0: fd = _open(path, _O_RDONLY | _O_BINARY); break;
-        case 1: fd = _open(path, _O_RDWR | _O_BINARY); break;
-        case 2: fd = _open(path, _O_WRONLY | _O_BINARY); break;
+        case 0: fd = rt_crt_open(path, _O_RDONLY | _O_BINARY); break;
+        case 1: fd = rt_crt_open(path, _O_RDWR | _O_BINARY); break;
+        case 2: fd = rt_crt_open(path, _O_WRONLY | _O_BINARY); break;
+        case 3: fd = rt_crt_open(path, _O_RDWR | _O_CREAT | _O_BINARY, 0666); break;
         default: fd = -1; break;
     }
 #else
@@ -14661,6 +17482,7 @@ int32_t rt_file_open(const uint8_t* path_ptr, uint64_t path_len, int32_t mode) {
         case 0: fd = open(path, O_RDONLY); break;
         case 1: fd = open(path, O_RDWR); break;
         case 2: fd = open(path, O_WRONLY); break;
+        case 3: fd = open(path, O_RDWR | O_CREAT, 0666); break;
         default: fd = -1; break;
     }
 #endif
@@ -14691,61 +17513,89 @@ int8_t rt_file_exists_str(int64_t path_value) {
     return exists;
 }
 
-/* file_ops.rs: rt_file_canonicalize(path_ptr, path_len) -> RuntimeValue
- * (nil on failure). Deliberately NOT realpath(3)/std::fs::canonicalize --
- * file_ops.rs's own comment says libc::realpath segfaults in self-hosted
- * binaries -- so this is a pure lexical normalization: make absolute
- * (joining the cwd when relative), then drop "." components and pop on
- * ".." components, without touching the filesystem or resolving symlinks. */
+/* file_ops.rs: rt_file_canonicalize(path_ptr, path_len) -> RuntimeValue.
+ *
+ * The ONE cross-engine contract, shared with the Rust runtime
+ * (runtime/src/value/sffi/file_io/file_ops.rs), the interpreter twin
+ * (compiler/src/interpreter_extern/file_io.rs) and the pure-Simple owner
+ * (src/runtime/simple_core/core_fs.spl): the real absolute path with every
+ * symlink resolved -- realpath(3) on POSIX, GetFinalPathNameByHandleW on
+ * Windows (also expands 8.3 short names) with the \\?\ verbatim prefix
+ * stripped exactly as the Rust lanes do. The path must exist; every failure
+ * (missing path, unreadable component, invalid UTF-8, allocation) is the
+ * explicit nil, never a lexical guess.
+ *
+ * This used to be a lexical "join cwd, drop . and .." normalization that never
+ * touched the filesystem, justified by a stale note that libc realpath
+ * "segfaults in self-hosted binaries"; rt_path_absolute a few hundred lines
+ * above has always called realpath(path, NULL) from those same binaries, so
+ * the two engines disagreed (/tmp vs /private/tmp on macOS). */
+#if defined(_WIN32)
+static int64_t native_win_final_path_text(const wchar_t* final_path, DWORD length) {
+    static const wchar_t sep = (wchar_t)92;
+    /* \\?\UNC\server\share\... -> \\server\share\...; \\?\C:\... -> C:\... */
+    if (length >= 4 && final_path[0] == sep && final_path[1] == sep &&
+        final_path[2] == L'?' && final_path[3] == sep) {
+        if (length >= 8 && (final_path[4] == L'U' || final_path[4] == L'u') &&
+            (final_path[5] == L'N' || final_path[5] == L'n') &&
+            (final_path[6] == L'C' || final_path[6] == L'c') && final_path[7] == sep) {
+            /* Same as the Rust lanes' strip_verbatim_prefix: drop the 8-char
+             * "\\?\UNC\" and re-prefix the two leading separators. */
+            DWORD rest = length - 8;
+            wchar_t* unc = (wchar_t*)rt_observed_malloc_v1(((size_t)rest + 2) * sizeof(wchar_t));
+            if (!unc) return rt_core_nil();
+            unc[0] = sep;
+            unc[1] = sep;
+            if (rest > 0) memcpy(unc + 2, final_path + 8, (size_t)rest * sizeof(wchar_t));
+            int64_t result = native_host_text_from_wide(unc, rest + 2);
+            free(unc);
+            return result;
+        }
+        return native_host_text_from_wide(final_path + 4, length - 4);
+    }
+    return native_host_text_from_wide(final_path, length);
+}
+#endif
+
 int64_t rt_file_canonicalize(const uint8_t* path_ptr, uint64_t path_len) {
     char* path = rt_core_text_arg_to_cstr(path_ptr, path_len);
     if (!path) return rt_core_nil();
-    char* abs = NULL;
-    if (path[0] == '/') {
-        abs = spl_strdup(path);
-    } else {
-        /* rt_getcwd() (runtime.h), not raw getcwd(3): already used the same
-         * way elsewhere in this file (see the realpath fallback a few
-         * hundred lines above) and portable across the WIN32 branch, unlike
-         * a bare getcwd/_getcwd call. */
-        char* cwd = rt_getcwd();
-        if (!cwd) { free(path); return rt_core_nil(); }
-        size_t need = strlen(cwd) + 1 + strlen(path) + 1;
-        abs = (char*)rt_observed_malloc_v1(need);
-        if (abs) snprintf(abs, need, "%s/%s", cwd, path);
-        free(cwd);
-    }
+    if (path[0] == '\0') { free(path); return rt_core_nil(); }
+#if defined(_WIN32)
+    wchar_t* wide = rt_widen_long_path_rc(path);
     free(path);
-    if (!abs) return rt_core_nil();
-
-    char* out = (char*)rt_observed_malloc_v1(strlen(abs) + 2);
-    if (!out) { free(abs); return rt_core_nil(); }
-    out[0] = '/';
-    size_t out_len = 1;
-
-    char* saveptr = NULL;
-    char* tok = strtok_r(abs, "/", &saveptr);
-    while (tok) {
-        if (strcmp(tok, ".") == 0) {
-            /* skip */
-        } else if (strcmp(tok, "..") == 0) {
-            if (out_len > 1) {
-                size_t i = out_len - 1;
-                while (i > 0 && out[i - 1] != '/') i--;
-                out_len = i > 1 ? i - 1 : 1;
+    if (!wide) return rt_core_nil();
+    /* FILE_FLAG_BACKUP_SEMANTICS: CreateFileW refuses to open a directory
+     * handle without it; harmless on a regular file. No access bits are
+     * requested, so a read-protected file still canonicalizes (like realpath). */
+    HANDLE handle = CreateFileW(wide, 0,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+        OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    free(wide);
+    if (handle == INVALID_HANDLE_VALUE) return rt_core_nil();
+    int64_t result = rt_core_nil();
+    DWORD need = GetFinalPathNameByHandleW(handle, NULL, 0, VOLUME_NAME_DOS);
+    if (need > 0) {
+        wchar_t* final_path = (wchar_t*)rt_observed_malloc_v1(((size_t)need + 1) * sizeof(wchar_t));
+        if (final_path) {
+            DWORD written = GetFinalPathNameByHandleW(handle, final_path, need + 1, VOLUME_NAME_DOS);
+            if (written > 0 && written <= need) {
+                result = native_win_final_path_text(final_path, written);
             }
-        } else {
-            size_t tok_len = strlen(tok);
-            if (out_len > 1) out[out_len++] = '/';
-            memcpy(out + out_len, tok, tok_len);
-            out_len += tok_len;
+            free(final_path);
         }
-        tok = strtok_r(NULL, "/", &saveptr);
     }
-    int64_t result = rt_string_new((const uint8_t*)out, (uint64_t)out_len);
-    free(out);
-    free(abs);
+    CloseHandle(handle);
     return result;
+#else
+    /* realpath(path, NULL) returns libc-malloc'd memory: plain free(). */
+    char* resolved = realpath(path, NULL);
+    free(path);
+    if (!resolved) return rt_core_nil();
+    int64_t result = rt_string_new((const uint8_t*)resolved, (uint64_t)strlen(resolved));
+    free(resolved);
+    return result;
+#endif
 }
 
 /* file_ops.rs: rt_file_read_lines(path_ptr, path_len) -> RuntimeValue array
@@ -14755,7 +17605,7 @@ int64_t rt_file_canonicalize(const uint8_t* path_ptr, uint64_t path_len) {
 int64_t rt_file_read_lines(const uint8_t* path_ptr, uint64_t path_len) {
     char* path = rt_core_text_arg_to_cstr(path_ptr, path_len);
     if (!path) return rt_core_nil();
-    FILE* f = fopen(path, "rb");
+    FILE* f = RT_FOPEN_READ_SHARED(path);
     free(path);
     if (!f) return rt_core_nil();
     if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return rt_core_nil(); }
@@ -14796,7 +17646,7 @@ int64_t rt_file_read_lines(const uint8_t* path_ptr, uint64_t path_len) {
 int64_t rt_file_mmap_read_bytes(const uint8_t* path_ptr, uint64_t path_len) {
     char* path = rt_core_text_arg_to_cstr(path_ptr, path_len);
     if (!path) return rt_core_nil();
-    FILE* f = fopen(path, "rb");
+    FILE* f = RT_FOPEN_READ_SHARED(path);
     free(path);
     if (!f) return rt_core_nil();
     if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return rt_core_nil(); }
@@ -14856,12 +17706,11 @@ int64_t rt_dir_glob(const uint8_t* pattern_ptr, uint64_t pattern_len) {
  * world-readable. That security requirement is why this function was
  * factored out of rt_file_atomic_write rather than the mode variant being
  * written as a wrapper around it. */
-static int64_t rt_file_atomic_write_impl(int64_t path_value, int64_t content_value,
-                                         int64_t mode, int have_mode) {
+static int64_t spl_file_atomic_write_data(int64_t path_value, const uint8_t* content_data,
+                                         size_t content_len, int64_t mode, int have_mode) {
     static atomic_uint_fast64_t sequence = 0;
-    RtCoreString* path_string = rt_core_as_string(path_value);
-    RtCoreString* content_string = rt_core_as_string(content_value);
-    if (!path_string || !content_string || path_string->len == 0 ||
+    RtCoreString* path_string = rt_core_as_string_or_data(path_value);
+    if (!path_string || (!content_data && content_len != 0) || path_string->len == 0 ||
         memchr(path_string->data, '\0', (size_t)path_string->len) != NULL) return 0;
 
     char* path = rt_core_string_to_cpath(path_value);
@@ -14893,6 +17742,14 @@ static int64_t rt_file_atomic_write_impl(int64_t path_value, int64_t content_val
         }
     }
     free(parent);
+#if defined(_WIN32)
+    if (have_mode && (mode & 0077) == 0) {
+        int ok = rt_win_private_atomic_write(path, content_data,
+            content_len, (int)mode);
+        free(path);
+        return ok ? 1 : 0;
+    }
+#endif
     size_t path_len = strlen(path);
     char* temp_path = (char*)rt_observed_malloc_v1(path_len + 64);
     if (!temp_path) {
@@ -14906,12 +17763,16 @@ static int64_t rt_file_atomic_write_impl(int64_t path_value, int64_t content_val
                                 (unsigned long)GetCurrentProcessId(),
                                 (unsigned long long)atomic_fetch_add(&sequence, 1));
         if (temp_len >= 0 && (size_t)temp_len < path_len + 64)
-            fd = _open(temp_path, _O_WRONLY | _O_CREAT | _O_EXCL | _O_BINARY, _S_IREAD | _S_IWRITE);
+            fd = rt_crt_open(temp_path, _O_WRONLY | _O_CREAT | _O_EXCL | _O_BINARY, _S_IREAD | _S_IWRITE);
 #else
         int temp_len = snprintf(temp_path, path_len + 64, "%s.tmp.%ld.%llu", path,
                                 (long)getpid(), (unsigned long long)atomic_fetch_add(&sequence, 1));
         if (temp_len >= 0 && (size_t)temp_len < path_len + 64)
-            fd = open(temp_path, O_WRONLY | O_CREAT | O_EXCL, 0600);
+            /* An explicit mode stages at 0600 and narrows before the rename. A
+             * plain write stages at 0666 so the kernel applies the umask: a new
+             * file gets the same mode as file_write, with no umask() call
+             * (process-global, so not thread-safe). */
+            fd = open(temp_path, O_WRONLY | O_CREAT | O_EXCL, have_mode ? 0600 : 0666);
 #endif
         if (fd < 0 && errno != EEXIST) break;
     }
@@ -14922,7 +17783,7 @@ static int64_t rt_file_atomic_write_impl(int64_t path_value, int64_t content_val
 #endif
     int created = fd >= 0;
     int ok = file != NULL;
-    if (ok) ok = fwrite(content_string->data, 1, (size_t)content_string->len, file) == (size_t)content_string->len;
+    if (ok && content_len > 0) ok = fwrite(content_data, 1, content_len, file) == content_len;
     if (ok) ok = fflush(file) == 0;
 #if !defined(_WIN32)
     if (ok && preserve_mode) ok = fchmod(fd, existing_stat.st_mode & 07777) == 0;
@@ -14940,19 +17801,30 @@ static int64_t rt_file_atomic_write_impl(int64_t path_value, int64_t content_val
 #if defined(_WIN32)
         _close(fd);
 #else
-        close(fd);
+        rt_crt_close(fd);
 #endif
     }
 #if defined(_WIN32)
-    /* Win32 CRT permissions express exactly one bit -- read-only -- so the
-     * POSIX mode is honoured to the only extent the platform allows: the
+    /* Owner-only modes use the protected-DACL provider above. For other
+     * modes retain the pre-existing CRT mapping: permissions express exactly
+     * one bit -- read-only -- so the POSIX mode is honoured only as follows: the
      * owner-write bit maps to _S_IWRITE, everything else (group/other,
      * setuid, sticky) has no Win32 equivalent and is silently not applied.
      * Applied to the TEMP file, before the move, for the same
      * never-wider-than-requested reason as the fchmod above. A failure here
      * is NOT fatal to the write: the bytes are still published atomically. */
     if (ok && have_mode) _chmod(temp_path, _S_IREAD | ((mode & 0200) ? _S_IWRITE : 0));
-    if (ok) ok = MoveFileExA(temp_path, path, MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+    /* Uncoordinated same-path writers are allowed, and a replace can transiently
+     * fail while another writer or reader holds the target: bounded retry here
+     * so callers need no lock or retry of their own. Wide/long-path capable. */
+    if (ok) {
+        int moved = 0;
+        for (int attempt = 0; attempt < 8 && !moved; attempt++) {
+            moved = rt_win_long_path_rename(temp_path, path) != 0;
+            if (!moved) Sleep((DWORD)1 << attempt);
+        }
+        ok = moved;
+    }
 #else
     if (ok) ok = rename(temp_path, path) == 0;
 #endif
@@ -14962,10 +17834,537 @@ static int64_t rt_file_atomic_write_impl(int64_t path_value, int64_t content_val
     return ok ? 1 : 0;
 }
 
+static int64_t rt_file_atomic_write_impl(int64_t path_value, int64_t content_value,
+                                         int64_t mode, int have_mode) {
+    RtCoreString* content_string = rt_core_as_string_or_data(content_value);
+    if (!content_string) return 0;
+    return spl_file_atomic_write_data(path_value, (const uint8_t*)content_string->data,
+                                     (size_t)content_string->len, mode, have_mode);
+}
+
 int64_t rt_file_atomic_write(int64_t path_value, int64_t content_value) {
     return rt_file_atomic_write_impl(path_value, content_value, 0, 0);
 }
 
+/* Byte twin of rt_file_atomic_write. Same element decoding as
+ * rt_file_write_bytes_array: raw for packed arrays, untagged for boxed. */
+int8_t rt_file_atomic_write_bytes_array(int64_t path, int64_t data) {
+    SplArray* a = (SplArray*)(intptr_t)data;
+    if (a == NULL) return 0;
+    int64_t n = rt_array_len(a);
+    unsigned char* buf = (unsigned char*)rt_observed_malloc_v1((size_t)(n > 0 ? n : 1));
+    if (buf == NULL) return 0;
+    int packed = rt_array_is_byte_packed(a);
+    for (int64_t i = 0; i < n; i++) {
+        int64_t v = rt_array_get(a, i);
+        if (!packed) {
+            if (!rt_core_is_int(v)) { free(buf); return 0; }
+            v = rt_core_as_int(v);
+        }
+        buf[i] = (unsigned char)(v & 0xFF);
+    }
+    int8_t ok = spl_file_atomic_write_data(path, buf, (size_t)n, 0, 0) != 0;
+    free(buf);
+    return ok;
+}
+
+
+/* ================================================================
+ * Open-time confinement under a trusted root (todo 479).
+ *
+ * rt_file_read_under_root_bytes / rt_file_write_under_root_bytes walk `rel`
+ * one component at a time below `root`, refusing a reparse point (Windows) or
+ * symlink (POSIX) at EVERY component at open time and holding the directory
+ * chain open until the final operation completes. A held directory cannot be
+ * renamed, deleted or replaced (Windows: no FILE_SHARE_DELETE; POSIX: every
+ * operation is fd-relative), so a junction swapped in after a path-policy walk
+ * cannot redirect the final open or write. `root` is trusted but must not be
+ * a link at its own final component. Rust twin:
+ * compiler_rust/runtime/src/value/sffi/file_io/under_root.rs.
+ * Failure arms mirror rt_file_read_regular_no_follow_last_failure: 2 bad
+ * args, 4 open, 5 metadata, 6 not regular, 7 too large, 8 link, 9 read.
+ * ================================================================ */
+#define RT_UR_MAX_DEPTH 64
+
+static int rt_ur_split(const char* rel, char* buf, size_t bufsz, char** segs, int* count) {
+    size_t len = strlen(rel);
+    if (len == 0 || len >= bufsz || rel[0] == '/') return 0;
+    memcpy(buf, rel, len + 1);
+    int n = 0;
+    char* p = buf;
+    for (;;) {
+        char* slash = strchr(p, '/');
+        if (slash) *slash = 0;
+        if (*p == 0 || strcmp(p, ".") == 0 || strcmp(p, "..") == 0 || strchr(p, '\\')
+#if defined(_WIN32)
+            || strchr(p, ':')
+#endif
+        ) return 0;
+        if (n >= RT_UR_MAX_DEPTH) return 0;
+        segs[n++] = p;
+        if (!slash) break;
+        p = slash + 1;
+    }
+    *count = n;
+    return 1;
+}
+
+static unsigned long rt_ur_temp_counter;
+#if defined(_WIN32)
+/* Windows: every step is an NtCreateFile RELATIVE to the parent directory
+ * handle (OBJECT_ATTRIBUTES.RootDirectory), so no step re-resolves a path by
+ * name. Holding a directory without share-delete does NOT stop
+ * FSCTL_SET_REPARSE_POINT (it needs only FILE_WRITE_ATTRIBUTES), but a
+ * relative open does not re-resolve a path by name. That alone is NOT enough:
+ * a relative open still FOLLOWS a reparse point set on the held directory (a
+ * relative symlink target resolves against the held directory's own path), so
+ * every open also sets OBJ_DONT_REPARSE, which fails it with
+ * STATUS_REPARSE_POINT_ENCOUNTERED (reported as the link arm 8). Each opened
+ * handle is additionally checked for FILE_ATTRIBUTE_REPARSE_POINT. */
+typedef struct { USHORT Length; USHORT MaximumLength; PWSTR Buffer; } RtUrUstr;
+typedef struct {
+    ULONG Length; HANDLE RootDirectory; RtUrUstr* ObjectName; ULONG Attributes;
+    PVOID SecurityDescriptor; PVOID SecurityQualityOfService;
+} RtUrObjAttr;
+typedef struct { LONG_PTR Status; ULONG_PTR Information; } RtUrIosb;
+typedef LONG (NTAPI *RtUrNtCreateFileFn)(PHANDLE, ACCESS_MASK, RtUrObjAttr*, RtUrIosb*,
+    PLARGE_INTEGER, ULONG, ULONG, ULONG, ULONG, PVOID, ULONG);
+
+#define RT_UR_LIST_DIR 0x1u
+#define RT_UR_ADD_FILE 0x2u
+#define RT_UR_ADD_SUBDIR 0x4u
+#define RT_UR_READ_ATTR 0x80u
+#define RT_UR_SYNC 0x100000u
+#define RT_UR_DELETE 0x10000u
+#define RT_UR_DIRECTORY_FILE 0x1u
+#define RT_UR_SYNC_IO 0x20u
+#define RT_UR_NON_DIRECTORY_FILE 0x40u
+#define RT_UR_OPEN_REPARSE 0x200000u
+#define RT_UR_FILE_OPEN 1u
+#define RT_UR_FILE_CREATE 2u
+
+typedef struct {
+    HANDLE held[RT_UR_MAX_DEPTH + 1];
+    int count;
+} RtUrChain;
+
+static void rt_ur_close(RtUrChain* c) {
+    while (c->count > 0) CloseHandle(c->held[--c->count]);
+}
+
+typedef LONG (NTAPI *RtUrNtSetInfoFn)(HANDLE, RtUrIosb*, PVOID, ULONG, ULONG);
+static RtUrNtSetInfoFn rt_ur_nt_set_info(void) {
+    static RtUrNtSetInfoFn fn;
+    if (!fn) {
+        HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+        if (ntdll) fn = (RtUrNtSetInfoFn)(void*)GetProcAddress(ntdll, "NtSetInformationFile");
+    }
+    return fn;
+}
+
+static RtUrNtCreateFileFn rt_ur_nt_create_file(void) {
+    static RtUrNtCreateFileFn fn;
+    if (!fn) {
+        HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+        if (ntdll) fn = (RtUrNtCreateFileFn)(void*)GetProcAddress(ntdll, "NtCreateFile");
+    }
+    return fn;
+}
+
+/* One open relative to `parent`; err is an arm (4 open, 6 wrong kind). */
+static HANDLE rt_ur_open_rel(HANDLE parent, const char* name, ACCESS_MASK access, ULONG share,
+        ULONG disposition, ULONG options, int* err) {
+    RtUrNtCreateFileFn nt = rt_ur_nt_create_file();
+    wchar_t wide[512];
+    int n = nt ? MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, name, -1, wide, 512) : 0;
+    if (n <= 1) { *err = 4; return INVALID_HANDLE_VALUE; }
+    RtUrUstr us;
+    us.Length = (USHORT)((n - 1) * 2);
+    us.MaximumLength = us.Length;
+    us.Buffer = wide;
+    RtUrObjAttr oa;
+    memset(&oa, 0, sizeof(oa));
+    oa.Length = sizeof(oa);
+    oa.RootDirectory = parent;
+    oa.ObjectName = &us;
+    oa.Attributes = 0x40 | 0x1000; /* OBJ_CASE_INSENSITIVE | OBJ_DONT_REPARSE */
+    RtUrIosb iosb;
+    HANDLE h = INVALID_HANDLE_VALUE;
+    LONG st = nt(&h, access, &oa, &iosb, NULL, FILE_ATTRIBUTE_NORMAL, share, disposition,
+        options | RT_UR_SYNC_IO | RT_UR_OPEN_REPARSE, NULL, 0);
+    if (st < 0) {
+        /* NOT_A_DIRECTORY / FILE_IS_A_DIRECTORY: wrong kind; everything else: open. */
+        if ((ULONG)st == 0xC000050Bu || (ULONG)st == 0xC0000280u) *err = 8; /* reparse point met */
+        else *err = ((ULONG)st == 0xC0000103u || (ULONG)st == 0xC00000BAu) ? 6 : 4;
+        return INVALID_HANDLE_VALUE;
+    }
+    return h;
+}
+
+/* 0 when `h` is a non-link of the wanted kind, else the arm. */
+static int rt_ur_check(HANDLE h, int want_dir) {
+    BY_HANDLE_FILE_INFORMATION info;
+    if (!GetFileInformationByHandle(h, &info)) return 5;
+    if (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) return 8;
+    int is_dir = (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    return is_dir == want_dir ? 0 : 6;
+}
+
+/* Open the trusted root by name, then each directory component relative to its
+ * parent. The deepest handle is c->held[c->count - 1]. 0 or an arm. */
+static int rt_ur_walk(const char* root, char** segs, int dirs, int create, RtUrChain* c) {
+    c->count = 0;
+    wchar_t* wide = rt_widen_long_path_rc(root);
+    if (!wide) return 4;
+    ACCESS_MASK access = RT_UR_LIST_DIR | RT_UR_READ_ATTR | RT_UR_SYNC |
+        (create ? (RT_UR_ADD_FILE | RT_UR_ADD_SUBDIR) : 0);
+    HANDLE h = CreateFileW(wide, access, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING,
+        FILE_FLAG_BACKUP_SEMANTICS | FILE_FLAG_OPEN_REPARSE_POINT, NULL);
+    free(wide);
+    if (h == INVALID_HANDLE_VALUE) return 4;
+    int bad = rt_ur_check(h, 1);
+    if (bad) { CloseHandle(h); return bad; }
+    c->held[c->count++] = h;
+    for (int i = 0; i < dirs; i++) {
+        int err = 0;
+        HANDLE parent = c->held[c->count - 1];
+        h = rt_ur_open_rel(parent, segs[i], access, FILE_SHARE_READ | FILE_SHARE_WRITE,
+            RT_UR_FILE_OPEN, RT_UR_DIRECTORY_FILE, &err);
+        if (h == INVALID_HANDLE_VALUE && create && err == 4) {
+            h = rt_ur_open_rel(parent, segs[i], access, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                RT_UR_FILE_CREATE, RT_UR_DIRECTORY_FILE, &err);
+            /* A concurrent writer may have created it first: retry as an open. */
+            if (h == INVALID_HANDLE_VALUE)
+                h = rt_ur_open_rel(parent, segs[i], access, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    RT_UR_FILE_OPEN, RT_UR_DIRECTORY_FILE, &err);
+        }
+        if (h == INVALID_HANDLE_VALUE) return err;
+        bad = rt_ur_check(h, 1);
+        if (bad) { CloseHandle(h); return bad; }
+        c->held[c->count++] = h;
+    }
+    return 0;
+}
+
+static int rt_ur_read(const char* root, const char* rel, int64_t max_bytes, uint8_t** out, size_t* out_len) {
+    char buf[RT_TEXT_PATH_MAX];
+    char* segs[RT_UR_MAX_DEPTH];
+    int n = 0;
+    *out = NULL;
+    *out_len = 0;
+    if (max_bytes < 0 || (uint64_t)max_bytes >= (uint64_t)SIZE_MAX || !rt_ur_split(rel, buf, sizeof(buf), segs, &n)) return 2;
+    RtUrChain* c = (RtUrChain*)calloc(1, sizeof(RtUrChain));
+    if (!c) return 9;
+    int error = rt_ur_walk(root, segs, n - 1, 0, c);
+    HANDLE h = INVALID_HANDLE_VALUE;
+    uint8_t* bytes = NULL;
+    size_t total = 0;
+    if (error == 0) {
+        error = 100;
+        int err = 0;
+        h = rt_ur_open_rel(c->held[c->count - 1], segs[n - 1],
+            0x1u /* FILE_READ_DATA */ | RT_UR_READ_ATTR | RT_UR_SYNC,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+            RT_UR_FILE_OPEN, RT_UR_NON_DIRECTORY_FILE, &err);
+        if (h == INVALID_HANDLE_VALUE) { error = err; goto done; }
+        int bad = rt_ur_check(h, 0);
+        if (bad) { error = bad; goto done; }
+        LARGE_INTEGER size;
+        if (!GetFileSizeEx(h, &size)) { error = 5; goto done; }
+        if (size.QuadPart < 0 || (uint64_t)size.QuadPart > (uint64_t)max_bytes) { error = 7; goto done; }
+        size_t capacity = (size_t)size.QuadPart + 1;
+        bytes = (uint8_t*)rt_observed_malloc_v1(capacity);
+        if (!bytes) { error = 9; goto done; }
+        for (;;) {
+            if (total == capacity) {
+                size_t limit = (size_t)max_bytes + 1;
+                if (capacity >= limit) break;
+                size_t grown = capacity > limit / 2 ? limit : capacity * 2;
+                uint8_t* replacement = (uint8_t*)rt_observed_realloc_v1(bytes, grown);
+                if (!replacement) { error = 9; goto done; }
+                bytes = replacement;
+                capacity = grown;
+            }
+            size_t chunk = capacity - total;
+            if (chunk > 1048576) chunk = 1048576;
+            DWORD count = 0;
+            if (!ReadFile(h, bytes + total, (DWORD)chunk, &count, NULL)) { error = 9; goto done; }
+            if (count == 0) break;
+            total += (size_t)count;
+        }
+        if (total > (size_t)max_bytes) error = 7;
+    }
+done:
+    if (h != INVALID_HANDLE_VALUE) CloseHandle(h);
+    rt_ur_close(c);
+    free(c);
+    if (error != 100) { free(bytes); return error; }
+    *out = bytes;
+    *out_len = total;
+    return 100;
+}
+
+/* Returns 1 on success, else 0. */
+static int rt_ur_write(const char* root, const char* rel, const uint8_t* data, size_t len) {
+    char buf[RT_TEXT_PATH_MAX];
+    char* segs[RT_UR_MAX_DEPTH];
+    int n = 0;
+    if (!rt_ur_split(rel, buf, sizeof(buf), segs, &n)) return 0;
+    RtUrChain* c = (RtUrChain*)calloc(1, sizeof(RtUrChain));
+    if (!c) return 0;
+    int ok = 0;
+    HANDLE temp = INVALID_HANDLE_VALUE;
+    unsigned char* info = NULL;
+    if (rt_ur_walk(root, segs, n - 1, 1, c) != 0) goto done;
+    HANDLE parent = c->held[c->count - 1];
+    {
+        /* An existing leaf must be a plain file; a link or directory is refused. */
+        int err = 0;
+        HANDLE existing = rt_ur_open_rel(parent, segs[n - 1], RT_UR_READ_ATTR | RT_UR_SYNC,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, RT_UR_FILE_OPEN, 0, &err);
+        if (existing != INVALID_HANDLE_VALUE) {
+            int bad = rt_ur_check(existing, 0);
+            CloseHandle(existing);
+            if (bad) goto done;
+        } else if (err != 4) {
+            goto done;
+        }
+    }
+    {
+        char name[128];
+        FILETIME ft;
+        GetSystemTimeAsFileTime(&ft);
+        unsigned long seq = (unsigned long)InterlockedIncrement((volatile LONG*)&rt_ur_temp_counter);
+        snprintf(name, sizeof(name), ".simple-under-root-%lu-%lu-%08lx%08lx.tmp",
+            (unsigned long)GetCurrentProcessId(), seq,
+            (unsigned long)ft.dwHighDateTime, (unsigned long)ft.dwLowDateTime);
+        int err = 0;
+        temp = rt_ur_open_rel(parent, name, 0x40000000u /* GENERIC_WRITE */ | RT_UR_DELETE |
+            RT_UR_READ_ATTR | RT_UR_SYNC, FILE_SHARE_READ | FILE_SHARE_WRITE,
+            RT_UR_FILE_CREATE, RT_UR_NON_DIRECTORY_FILE, &err);
+        if (temp == INVALID_HANDLE_VALUE) goto done;
+        int wrote = 1;
+        size_t off = 0;
+        while (off < len) {
+            DWORD chunk = (DWORD)((len - off) > 1048576 ? 1048576 : (len - off));
+            DWORD count = 0;
+            if (!WriteFile(temp, data + off, chunk, &count, NULL) || count == 0) { wrote = 0; break; }
+            off += count;
+        }
+        if (wrote && !FlushFileBuffers(temp)) wrote = 0;
+        if (wrote) {
+            /* INVARIANT (do not weaken): this rename cannot carry OBJ_DONT_REPARSE and
+             * DOES follow a reparse point set on RootDirectory. It is safe only because
+             * `temp` stays open WITHOUT FILE_SHARE_DELETE across the rename, which keeps
+             * the parent non-empty so FSCTL_SET_REPARSE_POINT on it fails (error 145).
+             * Adding share-delete to the temp, or closing it before the rename,
+             * reopens the write escape.
+             * Publish by a handle-relative rename (NtSetInformationFile FileRenameInformation: the Win32
+             * SetFileInformationByHandle wrapper rejects a RootDirectory with ERROR_INVALID_PARAMETER). */
+            wchar_t wide[512];
+            int wn = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, segs[n - 1], -1, wide, 512);
+            if (wn > 1) {
+                size_t name_bytes = (size_t)(wn - 1) * 2;
+                size_t size = offsetof(FILE_RENAME_INFO, FileName) + name_bytes + 2;
+                info = (unsigned char*)calloc(1, size);
+                if (info) {
+                    FILE_RENAME_INFO* ri = (FILE_RENAME_INFO*)info;
+                    ri->ReplaceIfExists = TRUE;
+                    ri->RootDirectory = parent;
+                    ri->FileNameLength = (DWORD)name_bytes;
+                    memcpy(ri->FileName, wide, name_bytes);
+                    for (int attempt = 0; attempt < 8 && !ok; attempt++) {
+                        RtUrIosb ios;
+                        RtUrNtSetInfoFn ns = rt_ur_nt_set_info();
+                        LONG rn = ns ? ns(temp, &ios, info, (ULONG)size, 10 /* FileRenameInformation */) : -1;
+                        ok = rn >= 0;
+                        if (!ok) {
+                            /* A sharing violation or an access-denied from another open handle on
+                             * the target (even a share-all reader) can clear by itself. */
+                            if ((ULONG)rn != 0xC0000043u && (ULONG)rn != 0xC0000022u) break;
+                            Sleep((DWORD)1 << attempt);
+                        }
+                    }
+                }
+            }
+        }
+        if (!ok) {
+            FILE_DISPOSITION_INFO del;
+            del.DeleteFile = TRUE;
+            SetFileInformationByHandle(temp, FileDispositionInfo, &del, sizeof(del));
+        }
+    }
+done:
+    if (temp != INVALID_HANDLE_VALUE) CloseHandle(temp);
+    rt_ur_close(c);
+    free(c);
+    free(info);
+    return ok;
+}
+#else
+static int rt_ur_open_dir_at(int dirfd, const char* name) {
+    int fd = openat(dirfd, name, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) return (errno == ELOOP || errno == ENOTDIR) ? -8 : -4;
+    return fd;
+}
+
+/* Returns the held directory fd of the parent, or a negative arm. */
+static int rt_ur_walk(const char* root, char** segs, int dirs, int create) {
+    int fd = open(root, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+    if (fd < 0) return (errno == ELOOP || errno == ENOTDIR) ? -8 : -4;
+    for (int i = 0; i < dirs; i++) {
+        int next = rt_ur_open_dir_at(fd, segs[i]);
+        if (next == -4 && create) {
+            (void)mkdirat(fd, segs[i], 0755);
+            next = rt_ur_open_dir_at(fd, segs[i]);
+        }
+        rt_crt_close(fd);
+        if (next < 0) return next;
+        fd = next;
+    }
+    return fd;
+}
+
+static int rt_ur_read(const char* root, const char* rel, int64_t max_bytes, uint8_t** out, size_t* out_len) {
+    char buf[RT_TEXT_PATH_MAX];
+    char* segs[RT_UR_MAX_DEPTH];
+    int n = 0;
+    *out = NULL;
+    *out_len = 0;
+    if (max_bytes < 0 || (uint64_t)max_bytes >= (uint64_t)SIZE_MAX || !rt_ur_split(rel, buf, sizeof(buf), segs, &n)) return 2;
+    int parent = rt_ur_walk(root, segs, n - 1, 0);
+    if (parent < 0) return -parent;
+    int fd = openat(parent, segs[n - 1], O_RDONLY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+    int open_errno = errno;
+    rt_crt_close(parent);
+    if (fd < 0) return open_errno == ELOOP ? 8 : 4;
+    int error = 100;
+    uint8_t* bytes = NULL;
+    size_t total = 0;
+    struct stat st;
+    if (fstat(fd, &st) != 0) { error = 5; goto done; }
+    if (!S_ISREG(st.st_mode)) { error = 6; goto done; }
+    if (st.st_size < 0 || (uint64_t)st.st_size > (uint64_t)max_bytes) { error = 7; goto done; }
+    size_t capacity = (size_t)st.st_size + 1;
+    bytes = (uint8_t*)rt_observed_malloc_v1(capacity);
+    if (!bytes) { error = 9; goto done; }
+    for (;;) {
+        if (total == capacity) {
+            size_t limit = (size_t)max_bytes + 1;
+            if (capacity >= limit) break;
+            size_t grown = capacity > limit / 2 ? limit : capacity * 2;
+            uint8_t* replacement = (uint8_t*)rt_observed_realloc_v1(bytes, grown);
+            if (!replacement) { error = 9; goto done; }
+            bytes = replacement;
+            capacity = grown;
+        }
+        size_t chunk = capacity - total;
+        if (chunk > 1048576) chunk = 1048576;
+        ssize_t count = read(fd, bytes + total, chunk);
+        if (count < 0 && errno == EINTR) continue;
+        if (count < 0) { error = 9; goto done; }
+        if (count == 0) break;
+        total += (size_t)count;
+    }
+    if (total > (size_t)max_bytes) error = 7;
+done:
+    rt_crt_close(fd);
+    if (error != 100) { free(bytes); return error; }
+    *out = bytes;
+    *out_len = total;
+    return 100;
+}
+
+static int rt_ur_write(const char* root, const char* rel, const uint8_t* data, size_t len) {
+    char buf[RT_TEXT_PATH_MAX];
+    char* segs[RT_UR_MAX_DEPTH];
+    int n = 0;
+    if (!rt_ur_split(rel, buf, sizeof(buf), segs, &n)) return 0;
+    int dirfd = rt_ur_walk(root, segs, n - 1, 1);
+    if (dirfd < 0) return 0;
+    int ok = 0;
+    char temp[128];
+    unsigned long seq = __atomic_fetch_add(&rt_ur_temp_counter, 1, __ATOMIC_RELAXED);
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    snprintf(temp, sizeof(temp), ".simple-under-root-%lu-%lu-%lx%lx.tmp", (unsigned long)getpid(), seq, (unsigned long)ts.tv_sec, (unsigned long)ts.tv_nsec);
+    struct stat st;
+    if (fstatat(dirfd, segs[n - 1], &st, AT_SYMLINK_NOFOLLOW) == 0 &&
+        (S_ISDIR(st.st_mode) || S_ISLNK(st.st_mode))) goto done;
+    int fd = openat(dirfd, temp, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0644);
+    if (fd < 0) goto done;
+    int wrote = 1;
+    size_t off = 0;
+    while (off < len) {
+        ssize_t count = write(fd, data + off, len - off);
+        if (count < 0 && errno == EINTR) continue;
+        if (count <= 0) { wrote = 0; break; }
+        off += (size_t)count;
+    }
+    if (wrote && fsync(fd) != 0) wrote = 0;
+    if (rt_crt_close(fd) != 0) wrote = 0;
+    if (!wrote || renameat(dirfd, temp, dirfd, segs[n - 1]) != 0) {
+        (void)unlinkat(dirfd, temp, 0);
+        goto done;
+    }
+    ok = 1;
+done:
+    rt_crt_close(dirfd);
+    return ok;
+}
+#endif
+
+int64_t rt_file_read_under_root_bytes(const uint8_t* root_ptr, uint64_t root_len,
+        const uint8_t* rel_ptr, uint64_t rel_len, int64_t max_bytes) {
+    const int64_t rt_nil = 3;
+    char root[RT_TEXT_PATH_MAX];
+    char rel[RT_TEXT_PATH_MAX];
+    if (root_len == 0 || rel_len == 0 ||
+        !rt_text_arg_to_path(root_ptr, root_len, root, sizeof(root)) ||
+        !rt_text_arg_to_path(rel_ptr, rel_len, rel, sizeof(rel))) return RT_RNF_FAIL(2);
+    uint8_t* bytes;
+    size_t total;
+    int status = rt_ur_read(root, rel, max_bytes, &bytes, &total);
+    if (status != 100) return RT_RNF_FAIL(status);
+    rt_rnf_last_failure = 100;
+    SplArray* result = rt_byte_array_new_len((uint64_t)total);
+    if (!result) { free(bytes); return RT_RNF_FAIL(9); }
+    RtCoreArray* array = rt_core_array_ptr(result);
+    if (total > 0 && array) memcpy(array->data, bytes, total);
+    free(bytes);
+    return (int64_t)(uintptr_t)result;
+}
+
+/* (root RuntimeValue text, rel RuntimeValue text, [u8] RuntimeValue) -> bool.
+ * Same array decoding as rt_file_atomic_write_bytes_array. */
+int8_t rt_file_write_under_root_bytes(int64_t root_value, int64_t rel_value, int64_t data) {
+    SplArray* a = (SplArray*)(intptr_t)data;
+    if (a == NULL) return 0;
+    char* root = rt_core_string_to_cpath(root_value);
+    char* rel = rt_core_string_to_cpath(rel_value);
+    int8_t ok = 0;
+    if (root && rel) {
+        int64_t n = rt_array_len(a);
+        unsigned char* buf = (unsigned char*)rt_observed_malloc_v1((size_t)(n > 0 ? n : 1));
+        if (buf != NULL) {
+            int packed = rt_array_is_byte_packed(a);
+            int decoded = 1;
+            for (int64_t i = 0; i < n; i++) {
+                int64_t v = rt_array_get(a, i);
+                if (!packed) {
+                    if (!rt_core_is_int(v)) { decoded = 0; break; }
+                    v = rt_core_as_int(v);
+                }
+                buf[i] = (unsigned char)(v & 0xFF);
+            }
+            if (decoded) ok = rt_ur_write(root, rel, buf, (size_t)n) != 0;
+            free(buf);
+        }
+    }
+    free(root);
+    free(rel);
+    return ok;
+}
 /* ================================================================
  * Stage2 Windows/MSVC link gap (2026-09-12): rt_file_atomic_write_mode,
  * rt_file_list_dir, rt_file_mode, rt_fs_read_text. Declared as externs in
@@ -15051,9 +18450,8 @@ int64_t rt_file_mode(int64_t path_value) {
     return (int64_t)(st.st_mode & 07777);
 }
 
-/* fs.spl:106 `extern fn rt_file_list_dir(path: text) -> [text]` -- entry
- * NAMES (not full paths), "." and ".." skipped, empty array on error so the
- * `[text]` (non-optional) return is always a real array.
+/* fs.spl:106 `extern fn rt_file_list_dir(path: text) -> [text]?` -- entry
+ * NAMES (not full paths), "." and ".." skipped, nil on error.
  *
  * The Windows branch deliberately uses FindFirstFileW/FindNextFileW where
  * the neighbouring rt_dir_list uses the ...A variants: Simple `text` is
@@ -15062,16 +18460,13 @@ int64_t rt_file_mode(int64_t path_value) {
  * follows the in-file precedent (MultiByteToWideChar with CP_UTF8 /
  * MB_ERR_INVALID_CHARS, as used by rt_mmap_raw's path handling). */
 int64_t rt_file_list_dir(int64_t path_value) {
-    SplArray* out = rt_array_new(0);
-    char* path = rt_core_string_to_cpath(path_value);
-    if (!path || !out) {
-        if (path) free(path);
-        return (int64_t)(uintptr_t)out;
-    }
+    /* ABI accessors, not rt_core_string_to_cpath: see core_text_dup_abi. */
+    char* path = core_text_dup_abi(path_value);
+    if (!path) return rt_core_nil();
 #if defined(_WIN32)
     size_t path_len = strlen(path);
     char* pattern = (char*)rt_observed_malloc_v1(path_len + 3);
-    if (!pattern) { free(path); return (int64_t)(uintptr_t)out; }
+    if (!pattern) { free(path); return rt_core_nil(); }
     memcpy(pattern, path, path_len);
     /* Tolerate a trailing separator so "dir\" and "dir" behave alike. */
     if (path_len > 0 && (path[path_len - 1] == '\\' || path[path_len - 1] == '/')) path_len--;
@@ -15080,20 +18475,23 @@ int64_t rt_file_list_dir(int64_t path_value) {
     pattern[path_len + 2] = '\0';
     free(path);
 
-    int wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, pattern, -1, NULL, 0);
-    wchar_t* wide_pattern = wide_len > 0 ? (wchar_t*)rt_observed_malloc_v1((size_t)wide_len * sizeof(wchar_t)) : NULL;
-    if (!wide_pattern ||
-        !MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, pattern, -1, wide_pattern, wide_len)) {
-        if (wide_pattern) free(wide_pattern);
+    wchar_t* wide_pattern = spl_win_utf8_to_wide(pattern, -1, MB_ERR_INVALID_CHARS,
+                                                 rt_observed_malloc_v1, free, NULL);
+    if (!wide_pattern) {
         free(pattern);
-        return (int64_t)(uintptr_t)out;
+        return rt_core_nil();
     }
     free(pattern);
 
     WIN32_FIND_DATAW data;
     HANDLE find = FindFirstFileW(wide_pattern, &data);
     free(wide_pattern);
-    if (find == INVALID_HANDLE_VALUE) return (int64_t)(uintptr_t)out;
+    if (find == INVALID_HANDLE_VALUE) return rt_core_nil();
+    SplArray* out = rt_array_new(0);
+    if (!out) {
+        FindClose(find);
+        return rt_core_nil();
+    }
     do {
         if (wcscmp(data.cFileName, L".") == 0 || wcscmp(data.cFileName, L"..") == 0) continue;
         int utf8_len = WideCharToMultiByte(CP_UTF8, 0, data.cFileName, -1, NULL, 0, NULL, NULL);
@@ -15109,7 +18507,12 @@ int64_t rt_file_list_dir(int64_t path_value) {
 #else
     DIR* dir = opendir(path);
     free(path);
-    if (!dir) return (int64_t)(uintptr_t)out;
+    if (!dir) return rt_core_nil();
+    SplArray* out = rt_array_new(0);
+    if (!out) {
+        closedir(dir);
+        return rt_core_nil();
+    }
     struct dirent* entry;
     while ((entry = readdir(dir)) != NULL) {
         const char* name = entry->d_name;
@@ -15124,7 +18527,7 @@ int64_t rt_file_list_dir(int64_t path_value) {
 static ssize_t rt_file_read_at_fd(int fd, void* buffer, size_t size, int64_t offset) {
 #if defined(_WIN32)
     if (_lseeki64(fd, offset, SEEK_SET) < 0) return -1;
-    return (ssize_t)read(fd, buffer, (unsigned int)size);
+    return (ssize_t)rt_crt_read(fd, buffer, (unsigned int)size);
 #else
     return pread(fd, buffer, size, (off_t)offset);
 #endif
@@ -15133,7 +18536,7 @@ static ssize_t rt_file_read_at_fd(int fd, void* buffer, size_t size, int64_t off
 static ssize_t rt_file_write_at_fd(int fd, const void* data, size_t size, int64_t offset) {
 #if defined(_WIN32)
     if (_lseeki64(fd, offset, SEEK_SET) < 0) return -1;
-    return (ssize_t)write(fd, data, (unsigned int)size);
+    return (ssize_t)rt_crt_write(fd, data, (unsigned int)size);
 #else
     return pwrite(fd, data, size, (off_t)offset);
 #endif
@@ -15166,18 +18569,18 @@ const char* rt_file_read_text_at(const char* path_value, int64_t offset, int64_t
         return "";
     }
 
-    int fd = open(path, O_RDONLY);
+    int fd = rt_crt_open(path, O_RDONLY);
     free(path);
     if (fd < 0) return "";
 
     char* buffer = (char*)rt_observed_malloc_v1((size_t)size + 1);
     if (!buffer) {
-        close(fd);
+        rt_crt_close(fd);
         return "";
     }
 
     ssize_t bytes_read = rt_file_read_at_fd(fd, buffer, (size_t)size, offset);
-    close(fd);
+    rt_crt_close(fd);
     if (bytes_read < 0) {
         free(buffer);
         return "";
@@ -15205,7 +18608,7 @@ int64_t rt_file_read_text_at_checked(int64_t path_value, int64_t offset, int64_t
      * code page and cannot reliably open source paths containing Unicode. */
     int fd = (int)rt_open_fd(path, 0, 0);
 #else
-    int fd = open(path, O_RDONLY);
+    int fd = rt_crt_open(path, O_RDONLY);
 #endif
     free(path);
     if (fd < 0) return rt_core_nil();
@@ -15220,17 +18623,17 @@ int64_t rt_file_read_text_at_checked(int64_t path_value, int64_t offset, int64_t
         if (remaining < size) size = remaining;
     }
     if (size == 0) {
-        close(fd);
+        rt_crt_close(fd);
         return rt_string_new(NULL, 0);
     }
 
     uint8_t* buffer = (uint8_t*)rt_observed_malloc_v1((size_t)size);
     if (!buffer) {
-        close(fd);
+        rt_crt_close(fd);
         return rt_core_nil();
     }
     ssize_t bytes_read = rt_file_read_at_fd(fd, buffer, (size_t)size, offset);
-    close(fd);
+    rt_crt_close(fd);
     if (bytes_read < 0) {
         free(buffer);
         return rt_core_nil();
@@ -15254,12 +18657,12 @@ int64_t rt_file_write_text_at(int64_t path_value, int64_t offset_value, int64_t 
         return 0;
     }
 
-    int fd = open(path, O_WRONLY | O_CREAT, 0644);
+    int fd = rt_crt_open(path, O_WRONLY | O_CREAT, 0644);
     free(path);
     if (fd < 0) return -1;
 
     ssize_t bytes_written = rt_file_write_at_fd(fd, data, (size_t)data_len, offset);
-    close(fd);
+    rt_crt_close(fd);
     return (int64_t)bytes_written;
 }
 
@@ -15275,7 +18678,7 @@ int64_t rt_file_write_text_at(int64_t path_value, int64_t offset_value, int64_t 
  * not rename it back. */
 void* rt_file_open_stream(const char* path, const char* mode) {
     if (!path || !mode) return NULL;
-    return (void*)fopen(path, mode);
+    return (void*)rt_crt_fopen(path, mode);
 }
 
 /* Two `text` arguments -> FOUR machine words; runtime_sffi.rs:1881 declares
@@ -15361,7 +18764,7 @@ static int rt_core_file_write_data(
     if (!path_ptr || (!data && data_len != 0) || path_len > SIZE_MAX - 1) return 0;
     char* path = rt_core_text_arg_to_cstr(path_ptr, path_len);
     if (!path) return 0;
-    FILE* f = fopen(path, mode);
+    FILE* f = rt_crt_fopen(path, mode);
     free(path);
     if (!f) return 0;
     size_t written = fwrite(data, 1, (size_t)data_len, f);
@@ -15380,11 +18783,21 @@ int rt_file_append_text(const uint8_t* path, uint64_t path_len, const uint8_t* c
 static int rt_core_mkdir_one(const char* path) {
     if (!path || !*path) return 0;
 #if defined(_WIN32)
-    if (mkdir(path) == 0) return 1;
+    /* Use the same UTF-8/extended-path owner as Windows file operations. */
+    wchar_t* wide_path = rt_widen_long_path_rc(path);
+    if (!wide_path) return 0;
+    int ok = CreateDirectoryW(wide_path, NULL) != 0;
+    if (!ok) {
+        DWORD attrs = GetFileAttributesW(wide_path);
+        ok = attrs != INVALID_FILE_ATTRIBUTES &&
+             (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    }
+    free(wide_path);
+    return ok;
 #else
     if (mkdir(path, 0777) == 0) return 1;
-#endif
     return rt_is_dir(path) ? 1 : 0;
+#endif
 }
 
 /* C-string worker for rt_dir_create_all / rt_mkdir_p. */
@@ -15454,28 +18867,59 @@ bool rt_dir_create(const uint8_t* path_ptr, uint64_t path_len, bool recursive) {
     return rt_dir_create_cpath(path, recursive);
 }
 
-static char* rt_core_shell_quote(const char* s) {
-    if (!s) return spl_strdup("''");
-    size_t extra = 2;
+#if !defined(_WIN32)
+static size_t rt_core_shell_quoted_len(const char* s) {
+    size_t len = 2;
+    if (!s) return len;
     for (const char* p = s; *p; p++) {
-        extra += (*p == '\'') ? 4 : 1;
+        len += (*p == '\'') ? 4 : 1;
     }
-    char* out = (char*)rt_observed_malloc_v1(extra + 1);
-    if (!out) return spl_strdup("''");
-    char* w = out;
-    *w++ = '\'';
-    for (const char* p = s; *p; p++) {
-        if (*p == '\'') {
-            memcpy(w, "'\\''", 4);
-            w += 4;
-        } else {
-            *w++ = *p;
+    return len;
+}
+
+static char* rt_core_write_shell_quoted(char* dst, const char* s) {
+    *dst++ = '\'';
+    if (s) {
+        for (const char* p = s; *p; p++) {
+            if (*p == '\'') {
+                memcpy(dst, "'\\''", 4);
+                dst += 4;
+            } else {
+                *dst++ = *p;
+            }
         }
     }
-    *w++ = '\'';
-    *w = '\0';
-    return out;
+    *dst++ = '\'';
+    return dst;
 }
+
+static char* rt_slurp_stream_bytes(FILE* stream, size_t* out_len) {
+    *out_len = 0;
+    if (!stream) return NULL;
+    size_t cap = 4096;
+    size_t len = 0;
+    char* buf = (char*)rt_observed_malloc_v1(cap);
+    if (!buf) return NULL;
+    for (;;) {
+        size_t avail = cap - len;
+        if (avail <= 1) {
+            if (cap > SIZE_MAX / 2) break;
+            size_t next_cap = cap * 2;
+            char* grown = (char*)rt_observed_realloc_v1(buf, next_cap);
+            if (!grown) break;
+            buf = grown;
+            cap = next_cap;
+            avail = cap - len;
+        }
+        size_t got = fread(buf + len, 1, avail - 1, stream);
+        if (got == 0) break;
+        len += got;
+    }
+    buf[len] = '\0';
+    *out_len = len;
+    return buf;
+}
+#endif
 
 /* (cmd_ptr, cmd_len, args) -> RuntimeValue (array), per runtime_sffi.rs:1419.
  *
@@ -15493,6 +18937,12 @@ static char* rt_core_shell_quote(const char* s) {
  * declared result type. Same worker/entry-point split the (ptr, len) parameter
  * fixes used for rt_dir_create_cpath et al. */
 static SplArray* rt_process_run_array(const char* cmd, uint64_t cmd_len, SplArray* args) {
+#if defined(_WIN32)
+    /* The Windows capture owner handles argv quoting, both output streams and
+     * raw exit codes. Zero deadline and -1 capture cap preserve unbounded run
+     * semantics; the POSIX popen/status encoding below is not a Windows ABI. */
+    return rt_process_run_bounded(cmd, cmd_len, args, 0, -1);
+#else
     SplArray* result = rt_array_new(3);
     if (!cmd || cmd_len == 0) {
         rt_array_push(result, rt_string_new((const uint8_t*)"", 0));
@@ -15511,63 +18961,119 @@ static SplArray* rt_process_run_array(const char* cmd, uint64_t cmd_len, SplArra
     memcpy(cmd_c, cmd, (size_t)cmd_len);
     cmd_c[cmd_len] = '\0';
 
-    char* command = rt_core_shell_quote(cmd_c);
-    free(cmd_c);
-    int64_t argc = rt_array_len(args);
+    size_t total_len = rt_core_shell_quoted_len(cmd_c);
+    int64_t argc = args ? rt_array_len(args) : 0;
+    if (argc < 0) argc = 0;
     for (int64_t i = 0; i < argc; i++) {
         int64_t arg = rt_array_get(args, i);
         const uint8_t* arg_data = rt_string_data(arg);
         const char* arg_s = arg_data ? (const char*)arg_data : "";
-        char* quoted = rt_core_shell_quote(arg_s);
-        size_t new_len = strlen(command) + strlen(quoted) + 2;
-        char* joined = (char*)rt_observed_malloc_v1(new_len);
-        if (!joined) {
-            free(quoted);
-            continue;
+        size_t qlen = rt_core_shell_quoted_len(arg_s);
+        if (qlen > SIZE_MAX - 2 - total_len) {
+            free(cmd_c);
+            rt_array_push(result, rt_string_new((const uint8_t*)"", 0));
+            rt_array_push(result, rt_string_new((const uint8_t*)"command too long", 16));
+            rt_array_push(result, rt_value_int(-1));
+            return result;
         }
-        snprintf(joined, new_len, "%s %s", command, quoted);
-        free(command);
-        free(quoted);
-        command = joined;
+        total_len += 1 + qlen;
     }
 
-    char* redirected = spl_str_concat(command, " 2>/tmp/simple_core_process_run_stderr");
-    FILE* pipe = popen(redirected ? redirected : command, "r");
-    free(command);
-    if (redirected) free(redirected);
-    if (!pipe) {
+    /* stderr goes to a per-call mkstemp file that is read back after pclose.
+     * It used to go to the fixed shared path /tmp/simple_core_process_run_stderr
+     * and was never read, so every native process_run/shell returned an EMPTY
+     * stderr where the seed returns the child's text (and concurrent processes
+     * raced on the one file). If mkstemp fails, stderr is discarded rather than
+     * falling back to a shared path. */
+    char err_path[] = "/tmp/simple_process_run_stderr_XXXXXX";
+    int err_fd = mkstemp(err_path);
+    if (err_fd >= 0) {
+        close(err_fd);
+        size_t qerr_len = rt_core_shell_quoted_len(err_path);
+        if (qerr_len > SIZE_MAX - 4 - total_len) {
+            unlink(err_path);
+            free(cmd_c);
+            rt_array_push(result, rt_string_new((const uint8_t*)"", 0));
+            rt_array_push(result, rt_string_new((const uint8_t*)"command too long", 16));
+            rt_array_push(result, rt_value_int(-1));
+            return result;
+        }
+        total_len += 3 + qerr_len;
+    } else {
+        const size_t suffix_len = sizeof(" 2>/dev/null") - 1;
+        if (suffix_len > SIZE_MAX - 1 - total_len) {
+            free(cmd_c);
+            rt_array_push(result, rt_string_new((const uint8_t*)"", 0));
+            rt_array_push(result, rt_string_new((const uint8_t*)"command too long", 16));
+            rt_array_push(result, rt_value_int(-1));
+            return result;
+        }
+        total_len += suffix_len;
+    }
+
+    char* full_command = (char*)rt_observed_malloc_v1(total_len + 1);
+    if (!full_command) {
+        if (err_fd >= 0) unlink(err_path);
+        free(cmd_c);
         rt_array_push(result, rt_string_new((const uint8_t*)"", 0));
         rt_array_push(result, rt_string_new((const uint8_t*)"process spawn failed", 20));
         rt_array_push(result, rt_value_int(-1));
         return result;
     }
 
-    size_t cap = 4096;
-    size_t len = 0;
-    char* stdout_buf = (char*)rt_observed_malloc_v1(cap);
-    if (!stdout_buf) stdout_buf = spl_strdup("");
-    if (stdout_buf) stdout_buf[0] = '\0';
-    char chunk[512];
-    while (fgets(chunk, sizeof(chunk), pipe)) {
-        size_t chunk_len = strlen(chunk);
-        if (len + chunk_len + 1 > cap) {
-            while (len + chunk_len + 1 > cap) cap *= 2;
-            stdout_buf = (char*)rt_observed_realloc_v1(stdout_buf, cap);
-            if (!stdout_buf) break;
-        }
-        memcpy(stdout_buf + len, chunk, chunk_len);
-        len += chunk_len;
-        stdout_buf[len] = '\0';
+    char* w = rt_core_write_shell_quoted(full_command, cmd_c);
+    free(cmd_c);
+    for (int64_t i = 0; i < argc; i++) {
+        int64_t arg = rt_array_get(args, i);
+        const uint8_t* arg_data = rt_string_data(arg);
+        const char* arg_s = arg_data ? (const char*)arg_data : "";
+        *w++ = ' ';
+        w = rt_core_write_shell_quoted(w, arg_s);
     }
+    if (err_fd >= 0) {
+        memcpy(w, " 2>", 3);
+        w += 3;
+        w = rt_core_write_shell_quoted(w, err_path);
+    } else {
+        const size_t suffix_len = sizeof(" 2>/dev/null") - 1;
+        memcpy(w, " 2>/dev/null", suffix_len);
+        w += suffix_len;
+    }
+    *w = '\0';
+
+    FILE* pipe = popen(full_command, "r");
+    free(full_command);
+    if (!pipe) {
+        if (err_fd >= 0) unlink(err_path);
+        rt_array_push(result, rt_string_new((const uint8_t*)"", 0));
+        rt_array_push(result, rt_string_new((const uint8_t*)"process spawn failed", 20));
+        rt_array_push(result, rt_value_int(-1));
+        return result;
+    }
+
+    size_t stdout_len = 0;
+    char* stdout_buf = rt_slurp_stream_bytes(pipe, &stdout_len);
     int status = pclose(pipe);
     int exit_code = status == -1 ? -1 : (status >> 8);
 
-    const char* stdout_text = stdout_buf ? stdout_buf : "";
-    rt_array_push(result, rt_string_new((const uint8_t*)stdout_text, (uint64_t)strlen(stdout_text)));
-    rt_array_push(result, rt_string_new((const uint8_t*)"", 0));
-    rt_array_push(result, rt_value_int(exit_code));
+    char* stderr_buf = NULL;
+    size_t stderr_len = 0;
+    if (err_fd >= 0) {
+        FILE* err_file = fopen(err_path, "rb");
+        if (err_file) {
+            stderr_buf = rt_slurp_stream_bytes(err_file, &stderr_len);
+            fclose(err_file);
+        }
+        unlink(err_path);
+    }
+
+    rt_array_push(result, rt_string_new((const uint8_t*)(stdout_buf ? stdout_buf : ""), (uint64_t)stdout_len));
     if (stdout_buf) free(stdout_buf);
+    rt_array_push(result, rt_string_new((const uint8_t*)(stderr_buf ? stderr_buf : ""), (uint64_t)stderr_len));
+    if (stderr_buf) free(stderr_buf);
+    rt_array_push(result, rt_value_int(exit_code));
     return result;
+#endif
 }
 
 int64_t rt_process_run_inherit(const char* cmd, uint64_t cmd_len, SplArray* args) {
@@ -15583,9 +19089,18 @@ int64_t rt_process_run_inherit(const char* cmd, uint64_t cmd_len, SplArray* args
         free(command);
         return -1;
     }
+    /* Each argument is copied by its counted length (rt_text_cstr_dup): a
+     * Rust-owned string has no NUL at len. A missing element stays "". */
     for (int64_t i = 0; i < argc; i++) {
-        const uint8_t* value = rt_string_data(rt_array_get(args, i));
-        argv[i] = value ? (const char*)value : "";
+        char* value = rt_text_cstr_dup(rt_array_get(args, i));
+        if (!value) value = (char*)rt_observed_calloc_v1(1, 1);
+        if (!value) {
+            for (int64_t j = 0; j < i; j++) free((char*)argv[j]);
+            free(argv);
+            free(command);
+            return -1;
+        }
+        argv[i] = value;
     }
 #if defined(_WIN32)
     /* rt_process_spawn_async returns a _spawnvp process HANDLE on Windows, and
@@ -15607,6 +19122,7 @@ int64_t rt_process_run_inherit(const char* cmd, uint64_t cmd_len, SplArray* args
     int64_t pid = rt_process_spawn_async(command, argv, argc);
     int64_t code = pid <= 0 ? -1 : rt_process_wait(pid, 0);
 #endif
+    for (int64_t i = 0; i < argc; i++) free((char*)argv[i]);
     free(argv);
     free(command);
     return code;
@@ -15629,50 +19145,106 @@ int64_t rt_process_run_inherit(const char* cmd, uint64_t cmd_len, SplArray* args
  * stay untouched for seed-compiled callers. */
 static int64_t* rt_process_result_to_tuple(SplArray* result) {
     int64_t* tuple = (int64_t*)rt_alloc(3 * (int64_t)sizeof(int64_t));
-    if (!tuple) return NULL;
+    if (!tuple) {
+        rt_array_free(result);
+        return NULL;
+    }
     tuple[0] = rt_array_get(result, 0);
     tuple[1] = rt_array_get(result, 1);
     /* slot 2 is always pushed via rt_value_int by both C owners: untag. */
     tuple[2] = rt_value_as_int(rt_array_get(result, 2));
+    /* The owner array is ours: every caller hands over a fresh result and
+     * nothing else reads it after the slots are copied out (the two text
+     * slots stay alive through tuple[0]/tuple[1]). Free the shallow owner
+     * here, as rt_process_run_owned_observed_bounded_text does; before this,
+     * each spawn leaked its result array. */
+    rt_array_free(result);
     return tuple;
 }
 
+typedef struct RtProcessValueArgv {
+    char* command;
+    char** argv;   /* argc entries + NULL terminator, each owned */
+    int64_t argc;
+} RtProcessValueArgv;
+
+static void rt_process_value_argv_free(RtProcessValueArgv* pa) {
+    if (pa->argv) {
+        for (int64_t i = 0; i < pa->argc; i++) free(pa->argv[i]);
+        free(pa->argv);
+    }
+    free(pa->command);
+    pa->command = NULL;
+    pa->argv = NULL;
+    pa->argc = 0;
+}
+
+/* 0 = ok; -EINVAL = no command; -E2BIG = bad argc; -ENOMEM = copy failed.
+ * A missing argument element becomes "" as before. */
+static int64_t rt_process_value_argv_build(int64_t cmd, SplArray* args, RtProcessValueArgv* pa) {
+    pa->command = NULL;
+    pa->argv = NULL;
+    pa->argc = 0;
+    if (!rt_interp_cstr(cmd)) return -EINVAL;
+    int64_t argc = rt_array_len(args);
+    if (argc < 0 || (uint64_t)argc > SIZE_MAX / sizeof(char*) - 2) return -E2BIG;
+    pa->command = rt_text_cstr_dup(cmd);
+    if (!pa->command) return -ENOMEM;
+    pa->argv = (char**)rt_observed_calloc_v1((size_t)argc + 1, sizeof(char*));
+    if (!pa->argv) {
+        rt_process_value_argv_free(pa);
+        return -ENOMEM;
+    }
+    pa->argc = argc;
+    for (int64_t i = 0; i < argc; i++) {
+        int64_t item = rt_array_get_text(args, i);
+        char* value = rt_interp_cstr(item) ? rt_text_cstr_dup(item) : NULL;
+        if (!value) value = (char*)rt_observed_calloc_v1(1, 1);
+        if (!value) {
+            rt_process_value_argv_free(pa);
+            return -ENOMEM;
+        }
+        pa->argv[i] = value;
+    }
+    return 0;
+}
+
 int64_t rt_process_run_inherit_value(int64_t cmd, SplArray* args) {
-    const char* cmd_c = rt_interp_cstr(cmd);
-    uint64_t cmd_len = cmd_c ? (uint64_t)strlen(cmd_c) : 0;
-    return rt_process_run_inherit(cmd_c ? cmd_c : "", cmd_len, args);
+    char* command = rt_text_cstr_dup(cmd);
+    if (!command) return rt_process_run_inherit("", 0, args);
+    int64_t code = rt_process_run_inherit(command, (uint64_t)strlen(command), args);
+    free(command);
+    return code;
 }
 
 int64_t rt_process_spawn_guarded_value(int64_t cmd, SplArray* args) {
-    const char* command = rt_interp_cstr(cmd);
-    if (!command) return -1;
-    int64_t argc = rt_array_len(args);
-    const char** argv = (const char**)rt_observed_calloc_v1((size_t)argc + 1, sizeof(char*));
-    if (!argv) return -1;
-    for (int64_t i = 0; i < argc; i++) {
-        const char* value = rt_interp_cstr(rt_array_get_text(args, i));
-        argv[i] = value ? value : "";
-    }
-    int64_t pid = rt_process_spawn_guarded(command, argv, argc);
-    free(argv);
+    RtProcessValueArgv pa;
+    if (rt_process_value_argv_build(cmd, args, &pa) != 0) return -1;
+    int64_t pid = rt_process_spawn_guarded(pa.command, (const char**)pa.argv, pa.argc);
+    rt_process_value_argv_free(&pa);
     return pid;
 }
 
 /* Unique value ABI for native Simple callers. The raw C owner below
  * keeps its existing (char*, char**, count) contract. */
 int64_t rt_process_spawn_async_value(int64_t cmd, SplArray* args) {
-    const char* command = rt_interp_cstr(cmd);
-    if (!command) return -1;
-    int64_t argc = rt_array_len(args);
-    if (argc < 0 || (uint64_t)argc > SIZE_MAX / sizeof(char*) - 2) return -1;
-    const char** argv = (const char**)rt_observed_calloc_v1((size_t)argc + 1, sizeof(char*));
-    if (!argv) return -1;
-    for (int64_t i = 0; i < argc; i++) {
-        const char* value = rt_interp_cstr(rt_array_get_text(args, i));
-        argv[i] = value ? value : "";
-    }
-    int64_t pid = rt_process_spawn_async(command, argv, argc);
-    free(argv);
+    RtProcessValueArgv pa;
+    if (rt_process_value_argv_build(cmd, args, &pa) != 0) return -1;
+    int64_t pid = rt_process_spawn_async(pa.command, (const char**)pa.argv, pa.argc);
+    rt_process_value_argv_free(&pa);
+    return pid;
+}
+
+/* Value-ABI facade over rt_process_spawn_session (runtime_process_tree.c):
+ * same unpacking as rt_process_spawn_async_value, but the child becomes a
+ * session leader so rt_process_kill_tree(pid) can reach every descendant.
+ * Returns pid > 0, -errno, or RT_PTREE_UNSUPPORTED; never a fake pid. */
+int64_t rt_process_spawn_session_value(int64_t cmd, SplArray* args) {
+    RtProcessValueArgv pa;
+    int64_t rc = rt_process_value_argv_build(cmd, args, &pa);
+    if (rc != 0) return rc;
+    int64_t pid = rt_process_spawn_session(pa.command, (const char**)pa.argv, pa.argc);
+    rt_process_value_argv_free(&pa);
     return pid;
 }
 
@@ -15680,15 +19252,16 @@ int64_t rt_process_run(const char* cmd, uint64_t cmd_len, SplArray* args) {
     return (int64_t)(uintptr_t)rt_process_run_array(cmd, cmd_len, args);
 }
 
-int64_t* rt_process_run_tuple(int64_t cmd, SplArray* args) {
-    const char* cmd_c = rt_interp_cstr(cmd);
-    uint64_t cmd_len = cmd_c ? (uint64_t)strlen(cmd_c) : 0;
-    return rt_process_result_to_tuple(rt_process_run_array(cmd_c ? cmd_c : "", cmd_len, args));
+/* LLVM-lane tuple facades. Since the pure-Simple MIR registers the process
+ * owners in text_arg_indices (text_extern_abi.spl), cmd reaches every backend
+ * already split into (ptr, len) -- the same words the C owners take -- so the
+ * facades only re-pack the result into the rt_alloc'd 3-word block the LLVM
+ * Tuple destructure loads. */
+int64_t* rt_process_run_tuple(const char* cmd, uint64_t cmd_len, SplArray* args) {
+    return rt_process_result_to_tuple(rt_process_run_array(cmd, cmd_len, args));
 }
 
-int64_t* rt_process_run_timeout_tuple(int64_t cmd, SplArray* args, int64_t timeout_ms) {
-    const char* cmd_c = rt_interp_cstr(cmd);
-    uint64_t cmd_len = cmd_c ? (uint64_t)strlen(cmd_c) : 0;
+int64_t* rt_process_run_timeout_tuple(const char* cmd, uint64_t cmd_len, SplArray* args, int64_t timeout_ms) {
     // rt_process_run_timeout's declared return type is int64_t (RuntimeValue
     // ABI, see commit 072c6754e09 "state the RuntimeValue return type for
     // rt_process_run{,_timeout}"); it still returns an SplArray* handle
@@ -15698,7 +19271,7 @@ int64_t* rt_process_run_timeout_tuple(int64_t cmd, SplArray* args, int64_t timeo
     // compile -- which broke the LLVM native-link step of EVERY native-build,
     // for every program, including `print "x"`.
     return rt_process_result_to_tuple(
-        (SplArray*)(uintptr_t)rt_process_run_timeout(cmd_c ? cmd_c : "", cmd_len, args, timeout_ms));
+        (SplArray*)(uintptr_t)rt_process_run_timeout(cmd, cmd_len, args, timeout_ms));
 }
 
 /* Same (ptr, len) vs single-text-value ABI split as the facades above, for
@@ -15714,11 +19287,9 @@ int64_t* rt_process_run_timeout_tuple(int64_t cmd, SplArray* args, int64_t timeo
  * facade's only caller -- the pure-Simple LLVM backend -- still loads the raw
  * rt_alloc'd 3-word block like rt_process_result_to_tuple above. Re-pack it
  * here so both backends keep their own destructure contract. */
-int64_t* rt_process_run_owned_observed_bounded_text(int64_t cmd, SplArray* args, int64_t timeout_ms,
-                                                    int64_t max_output_bytes) {
-    const char* cmd_c = rt_interp_cstr(cmd);
-    uint64_t cmd_len = cmd_c ? (uint64_t)strlen(cmd_c) : 0;
-    int64_t* handle = rt_process_run_owned_observed_bounded_value(cmd_c ? cmd_c : "", cmd_len, args,
+int64_t* rt_process_run_owned_observed_bounded_text(const char* cmd, uint64_t cmd_len, SplArray* args,
+                                                    int64_t timeout_ms, int64_t max_output_bytes) {
+    int64_t* handle = rt_process_run_owned_observed_bounded_value(cmd, cmd_len, args,
                                                                   timeout_ms, max_output_bytes);
     if (!handle) return NULL;
     int64_t tuple_value = (int64_t)(uintptr_t)handle;
@@ -15731,39 +19302,83 @@ int64_t* rt_process_run_owned_observed_bounded_text(int64_t cmd, SplArray* args,
     return block;
 }
 
-int64_t* rt_process_run_bounded_tuple(int64_t cmd, SplArray* args, int64_t timeout_ms,
-                                      int64_t max_output_bytes) {
-    const char* cmd_c = rt_interp_cstr(cmd);
-    uint64_t cmd_len = cmd_c ? (uint64_t)strlen(cmd_c) : 0;
+int64_t* rt_process_run_bounded_tuple(const char* cmd, uint64_t cmd_len, SplArray* args,
+                                      int64_t timeout_ms, int64_t max_output_bytes) {
     return rt_process_result_to_tuple(rt_process_run_bounded(
-        cmd_c ? cmd_c : "", cmd_len, args, timeout_ms, max_output_bytes));
+        cmd, cmd_len, args, timeout_ms, max_output_bytes));
+}
+
+/* Byte-capture twin of rt_process_run_bounded_tuple: same raw 3-word block
+ * ([u8] stdout, [u8] stderr, untagged status) for the pure-Simple LLVM and
+ * Cranelift lanes, whose tuple destructure loads words 0/8/16 directly.
+ * Rust twin: env_process.rs. */
+int64_t* rt_process_run_bounded_bytes_tuple(const char* cmd, uint64_t cmd_len, SplArray* args,
+                                            int64_t timeout_ms, int64_t max_output_bytes) {
+    return rt_process_result_to_tuple((SplArray*)(uintptr_t)rt_process_run_bounded_bytes(
+        cmd, cmd_len, args, timeout_ms, max_output_bytes));
 }
 
 int64_t rt_file_read_bytes(const uint8_t* path_ptr, uint64_t path_len) {
-    if (!path_ptr || path_len > SIZE_MAX - 1) return 0;
+    /* Failure is nil (RuntimeValue::NIL, as the Rust definition returns), never a
+     * raw 0: the declared type is `[u8]?` and a 0 word is not nil, so a missing
+     * file read back as an empty success. */
+    if (!path_ptr || path_len > SIZE_MAX - 1) return rt_core_nil();
     char* path = (char*)rt_observed_malloc_v1((size_t)path_len + 1);
-    if (!path) return 0;
+    if (!path) return rt_core_nil();
     memcpy(path, path_ptr, (size_t)path_len);
     path[path_len] = '\0';
 
-    FILE* f = fopen(path, "rb");
+    FILE* f = RT_FOPEN_READ_SHARED(path);
     free(path);
-    if (!f) return 0;
-    if (fseek(f, 0, SEEK_END) != 0) {
+    if (!f) return rt_core_nil();
+#if defined(_WIN32)
+    if (_fseeki64(f, 0, SEEK_END) != 0) {
         fclose(f);
-        return 0;
+        return rt_core_nil();
     }
-    long file_len = ftell(f);
-    if (file_len < 0 || fseek(f, 0, SEEK_SET) != 0) {
+    __int64 file_len_i64 = _ftelli64(f);
+    if (file_len_i64 < 0 || _fseeki64(f, 0, SEEK_SET) != 0) {
         fclose(f);
-        return 0;
+        return rt_core_nil();
+    }
+#else
+    if (fseeko(f, 0, SEEK_END) != 0) {
+        fclose(f);
+        return rt_core_nil();
+    }
+    off_t file_len_off = ftello(f);
+    if (file_len_off < 0 || fseeko(f, 0, SEEK_SET) != 0) {
+        fclose(f);
+        return rt_core_nil();
+    }
+    int64_t file_len_i64 = (int64_t)file_len_off;
+    if ((off_t)file_len_i64 != file_len_off) {
+        fclose(f);
+        return rt_core_nil();
+    }
+#endif
+    uint64_t file_len = (uint64_t)file_len_i64;
+    if (file_len > (uint64_t)SIZE_MAX || file_len > (uint64_t)INT64_MAX) {
+        fclose(f);
+        return rt_core_nil();
     }
 
-    SplArray* result = rt_byte_array_new_len((uint64_t)file_len);
+    SplArray* result = rt_byte_array_new_len(file_len);
     RtCoreArray* array = rt_core_array_ptr(result);
-    if (!array || (file_len > 0 && fread(array->data, 1, (size_t)file_len, f) != (size_t)file_len)) {
+    if (!array) {
+        if (result) rt_array_free(result);
         fclose(f);
-        return 0;
+        return rt_core_nil();
+    }
+    size_t total_read = 0;
+    while (total_read < (size_t)file_len) {
+        size_t got = fread((uint8_t*)array->data + total_read, 1, (size_t)file_len - total_read, f);
+        if (got == 0) {
+            rt_array_free(result);
+            fclose(f);
+            return rt_core_nil();
+        }
+        total_read += got;
     }
     fclose(f);
     return (int64_t)(uintptr_t)result;
@@ -15791,10 +19406,10 @@ int rt_file_write_bytes(const uint8_t* path_ptr, uint64_t path_len, const uint8_
  * kernel rather than building a giant byte-array in the interpreter. */
 int rt_file_truncate(const char* path, uint64_t size) {
     if (!path) return 0;
-    int fd = open(path, O_WRONLY | O_CREAT, 0644);
+    int fd = rt_crt_open(path, O_WRONLY | O_CREAT, 0644);
     if (fd < 0) return 0;
     int rc = ftruncate(fd, (off_t)size);
-    close(fd);
+    rt_crt_close(fd);
     return rc == 0 ? 1 : 0;
 }
 
@@ -15947,20 +19562,22 @@ int64_t rt_sosix_directory_pair_close_v1(int64_t token) {
  * ---------------------------------------------------------------- */
 
 /* Entry NAMES (not full paths), `.`/`..` excluded. An unreadable directory
- * yields an EMPTY array, matching runtime.c's copy and the `[text]`
- * (non-optional) Simple signature; the Rust runtime's nil is the outlier.
- * Order is whatever the OS yields. */
+ * yields nil. Order is whatever the OS yields. */
 int64_t rt_dir_list(const uint8_t* path_ptr, uint64_t path_len) {
     char path[RT_TEXT_PATH_MAX];
-    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return (int64_t)(uintptr_t)rt_array_new(0);
+    if (!rt_text_arg_to_path(path_ptr, path_len, path, sizeof(path))) return rt_core_nil();
 #if defined(_WIN32)
     char pattern[RT_TEXT_PATH_MAX + 4];
     int n = snprintf(pattern, sizeof(pattern), "%s\\*", path);
-    SplArray* out = rt_array_new(0);
-    if (n < 0 || (size_t)n >= sizeof(pattern)) return (int64_t)(uintptr_t)out;
+    if (n < 0 || (size_t)n >= sizeof(pattern)) return rt_core_nil();
     WIN32_FIND_DATAA data;
     HANDLE find = FindFirstFileA(pattern, &data);
-    if (find == INVALID_HANDLE_VALUE) return (int64_t)(uintptr_t)out;
+    if (find == INVALID_HANDLE_VALUE) return rt_core_nil();
+    SplArray* out = rt_array_new(0);
+    if (!out) {
+        FindClose(find);
+        return rt_core_nil();
+    }
     do {
         const char* name = data.cFileName;
         if (strcmp(name, ".") == 0 || strcmp(name, "..") == 0) continue;
@@ -15969,9 +19586,13 @@ int64_t rt_dir_list(const uint8_t* path_ptr, uint64_t path_len) {
     FindClose(find);
     return (int64_t)(uintptr_t)out;
 #else
-    SplArray* out = rt_array_new(0);
     DIR* dir = opendir(path);
-    if (!dir) return (int64_t)(uintptr_t)out;
+    if (!dir) return rt_core_nil();
+    SplArray* out = rt_array_new(0);
+    if (!out) {
+        closedir(dir);
+        return rt_core_nil();
+    }
     struct dirent* entry;
     while ((entry = readdir(dir)) != NULL) {
         const char* name = entry->d_name;
@@ -16033,10 +19654,8 @@ bool rt_file_rename(const uint8_t* old_ptr, uint64_t old_len,
  * the Win32 error instead; this runs only on a path that is already failing.
  * Set SIMPLE_QUIET_SECURE_TEMP_DIAG=1 to silence. */
 static void rt_secure_temp_dir_diag(const char* stage, const char* detail) {
-    if (getenv("SIMPLE_QUIET_SECURE_TEMP_DIAG")) return;
-    fprintf(stderr, "rt_secure_temp_dir: %s failed (GetLastError=%lu) %s\n",
-            stage, (unsigned long)GetLastError(), detail ? detail : "");
-    fflush(stderr);
+    unsigned long err = (unsigned long)GetLastError(); /* before the env probe can clobber it */
+    rt__shared_secure_temp_dir_diag(stage, err, rt_env_present("SIMPLE_QUIET_SECURE_TEMP_DIAG"), detail);
 }
 #endif
 
@@ -16052,11 +19671,6 @@ static void rt_secure_temp_dir_diag(const char* stage, const char* detail) {
  * and the AOT diagnostic lane stages per worker process; the slot makes the
  * pair safe under any caller). set_parent/make is a single logical
  * operation: make always consumes the slot, success or failure. */
-static _Thread_local char rt_secure_temp_dir_parent_slot[RT_TEXT_PATH_MAX];
-static _Thread_local int rt_secure_temp_dir_parent_ready = 0;
-static _Thread_local char rt_secure_temp_dir_prefix_slot[128];
-static _Thread_local int rt_secure_temp_dir_prefix_ready = 0;
-
 static int64_t rt_secure_temp_dir_core(const char* parent, const uint8_t* prefix_ptr, uint64_t prefix_len) {
     char prefix[128], path[RT_TEXT_PATH_MAX];
     if (!rt_text_arg_to_path(prefix_ptr, prefix_len, prefix, sizeof(prefix)) || prefix[0] == '\0' || strchr(prefix, '/') || strchr(prefix, '\\')) return rt_string_new(NULL, 0);
@@ -16136,45 +19750,7 @@ int64_t rt_secure_temp_dir(const uint8_t* parent_ptr, uint64_t parent_len,
  * generic extern crossing every seed and both pure-Simple backends already
  * emit, so the split API needs no table row at all. See
  * doc/08_tracking/bug/tracked_seed_cranelift_split_secure_temp_dir_refuses_20261019.md */
-static int rt_secure_temp_dir_slot_from_value(int64_t value, char* slot, size_t slot_size) {
-    int64_t len = rt_string_len(value);
-    if (len <= 0) return 0;
-    return rt_text_arg_to_path(rt_string_data(value), (uint64_t)len, slot, slot_size);
-}
-
-int64_t rt_secure_temp_dir_set_parent(int64_t parent_value) {
-    if (!rt_secure_temp_dir_slot_from_value(parent_value,
-                             rt_secure_temp_dir_parent_slot,
-                             sizeof(rt_secure_temp_dir_parent_slot))) return 0;
-    rt_secure_temp_dir_parent_ready = 1;
-    return 1;
-}
-
-int64_t rt_secure_temp_dir_set_prefix(int64_t prefix_value) {
-    if (!rt_secure_temp_dir_slot_from_value(prefix_value,
-                             rt_secure_temp_dir_prefix_slot,
-                             sizeof(rt_secure_temp_dir_prefix_slot))) return 0;
-    if (rt_secure_temp_dir_prefix_slot[0] == '\0' ||
-        strchr(rt_secure_temp_dir_prefix_slot, '/') ||
-        strchr(rt_secure_temp_dir_prefix_slot, '\\')) return 0;
-    rt_secure_temp_dir_prefix_ready = 1;
-    return 1;
-}
-
-int64_t rt_secure_temp_dir_make(void) {
-    if (!rt_secure_temp_dir_parent_ready || !rt_secure_temp_dir_prefix_ready) {
-        rt_secure_temp_dir_parent_ready = 0;
-        rt_secure_temp_dir_prefix_ready = 0;
-        return rt_string_new(NULL, 0);
-    }
-    char parent[RT_TEXT_PATH_MAX];
-    snprintf(parent, sizeof(parent), "%s", rt_secure_temp_dir_parent_slot);
-    rt_secure_temp_dir_parent_ready = 0;
-    rt_secure_temp_dir_prefix_ready = 0;
-    return rt_secure_temp_dir_core(parent,
-        (const uint8_t*)rt_secure_temp_dir_prefix_slot,
-        (uint64_t)strlen(rt_secure_temp_dir_prefix_slot));
-}
+#include "runtime_secure_temp_split_private.h"
 
 #if defined(_WIN32)
 /* Widen a UTF-8 path to UTF-16 and, when qualifying it as a full path still
@@ -16189,14 +19765,11 @@ int64_t rt_secure_temp_dir_make(void) {
  * escape sequences. */
 static wchar_t* spl_widen_long_path(const char* path) {
     static const wchar_t sep = (wchar_t)92;
-    int wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
-    if (wide_len <= 0) return NULL;
-    wchar_t* wide = (wchar_t*)rt_observed_malloc_v1((size_t)wide_len * sizeof(wchar_t));
+    size_t wide_units = 0;
+    wchar_t* wide = spl_win_utf8_to_wide(path, -1, MB_ERR_INVALID_CHARS,
+                                         rt_observed_malloc_v1, free, &wide_units);
     if (!wide) return NULL;
-    if (!MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, wide, wide_len)) {
-        free(wide);
-        return NULL;
-    }
+    int wide_len = (int)wide_units + 1; /* count includes the terminator */
     /* A short relative spelling can still resolve beyond MAX_PATH. Only skip
      * resolution for a short drive-absolute path; UNC/extended paths retain
      * their existing spelling. */
@@ -16288,13 +19861,17 @@ int64_t rt_file_publish_noreplace(const uint8_t* staged_ptr, uint64_t staged_len
 /* Byte-for-byte copy via stdio; truncates/creates dst (std::fs::copy). */
 int rt_file_copy(const uint8_t* src_ptr, uint64_t src_len,
                  const uint8_t* dst_ptr, uint64_t dst_len) {
-    char src_path[RT_TEXT_PATH_MAX];
-    char dst_path[RT_TEXT_PATH_MAX];
-    if (!rt_text_arg_to_path(src_ptr, src_len, src_path, sizeof(src_path))) return 0;
-    if (!rt_text_arg_to_path(dst_ptr, dst_len, dst_path, sizeof(dst_path))) return 0;
-    FILE* in = fopen(src_path, "rb");
+    char src[RT_TEXT_PATH_MAX];
+    char dst[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path(src_ptr, src_len, src, sizeof(src))) return 0;
+    if (!rt_text_arg_to_path(dst_ptr, dst_len, dst, sizeof(dst))) return 0;
+    FILE* in = rt_crt_fopen(src, "rb");
     if (!in) return 0;
-    FILE* out = fopen(dst_path, "wb");
+#if !defined(_WIN32)
+    struct stat source_stat;
+    if (fstat(fileno(in), &source_stat) != 0) { fclose(in); return 0; }
+#endif
+    FILE* out = rt_crt_fopen(dst, "wb");
     if (!out) { fclose(in); return 0; }
     uint8_t buf[65536];
     int ok = 1;
@@ -16302,16 +19879,34 @@ int rt_file_copy(const uint8_t* src_ptr, uint64_t src_len,
     while ((got = fread(buf, 1, sizeof(buf), in)) > 0) {
         if (fwrite(buf, 1, got, out) != got) { ok = 0; break; }
     }
-    if (ferror(in)) ok = 0;
+    if (ferror(in) || fflush(out) != 0) ok = 0;
+#if !defined(_WIN32)
+    /* BuildRunner publishes this copy as the executable artifact. Preserve
+     * ordinary permissions from the opened source, independent of umask or
+     * an existing destination's mode; never propagate privilege bits. Apply
+     * only after the bytes are flushed, through the already-open destination. */
+    if (ok && fchmod(fileno(out), source_stat.st_mode & 0777) != 0) ok = 0;
+#endif
     if (fclose(out) != 0) ok = 0;
-    fclose(in);
+    if (fclose(in) != 0) ok = 0;
     return ok;
 }
 
 int rt_file_copy_create_excl_no_follow(
         const char* source, int64_t source_len,
         const char* destination, int64_t destination_len) {
-#if defined(_WIN32) || !defined(O_NOFOLLOW)
+    if (!source || !destination || source_len <= 0 || destination_len <= 0 ||
+            memchr(source, 0, (size_t)source_len) != NULL ||
+            memchr(destination, 0, (size_t)destination_len) != NULL) return 0;
+#if defined(_WIN32)
+    char src[RT_TEXT_PATH_MAX];
+    char dst[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path((const uint8_t*)source, (uint64_t)source_len,
+            src, sizeof(src)) ||
+        !rt_text_arg_to_path((const uint8_t*)destination,
+            (uint64_t)destination_len, dst, sizeof(dst))) return 0;
+    return rt_win_file_copy_create_excl_no_follow(src, dst);
+#elif !defined(O_NOFOLLOW)
     (void)source; (void)source_len; (void)destination; (void)destination_len;
     return 0;
 #else
@@ -16361,7 +19956,18 @@ int rt_file_copy_create_excl_no_follow(
 int rt_file_link_create_excl_no_follow(
         const char* source, int64_t source_len,
         const char* destination, int64_t destination_len) {
-#if defined(_WIN32) || !defined(O_NOFOLLOW)
+    if (!source || !destination || source_len <= 0 || destination_len <= 0 ||
+            memchr(source, 0, (size_t)source_len) != NULL ||
+            memchr(destination, 0, (size_t)destination_len) != NULL) return 0;
+#if defined(_WIN32)
+    char src[RT_TEXT_PATH_MAX];
+    char dst[RT_TEXT_PATH_MAX];
+    if (!rt_text_arg_to_path((const uint8_t*)source, (uint64_t)source_len,
+            src, sizeof(src)) ||
+        !rt_text_arg_to_path((const uint8_t*)destination,
+            (uint64_t)destination_len, dst, sizeof(dst))) return 0;
+    return rt_win_file_link_create_excl_no_follow(src, dst);
+#elif !defined(O_NOFOLLOW)
     (void)source; (void)source_len; (void)destination; (void)destination_len;
     return 0;
 #else
@@ -16398,7 +20004,7 @@ int rt_sha256_file_raw_v1(const char *path, uint8_t out[32]) {
 #if defined(_WIN32)
     wchar_t* wide = rt_win_long_path_widen(path);
     if (!wide) return 0;
-    FILE* in = _wfopen(wide, L"rb");
+    FILE* in = rt_crt_wfopen(wide, L"rb");
     free(wide);
 #else
     FILE* in = fopen(path, "rb");
@@ -16504,7 +20110,7 @@ static const uint8_t xxh3c_secret[192] = {
 #define RT_XXH_MX2 0x9FB21C651E98DF25ull
 
 static uint32_t xxh3c_r32(const uint8_t* p) {
-    return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24);
+    return rt__shared_read_u32_le(p);
 }
 static uint64_t xxh3c_r64(const uint8_t* p) {
     return (uint64_t)xxh3c_r32(p) | ((uint64_t)xxh3c_r32(p + 4) << 32);
@@ -16805,6 +20411,57 @@ int rt_setenv(const char* key, const char* value) {
 #endif
 }
 
+/* io_file.rs rt_io_file_close_value twin: same close, reported as 1/0. */
+int64_t rt_io_file_close_value(int64_t fd) {
+    return rt_io_file_close(fd) ? 1 : 0;
+}
+
+/* env_process.rs rt_env_temp twin: TMPDIR, then TMP, then TEMP, then the
+ * platform default (MSYS-style "/c/Temp" on Windows, "/tmp" elsewhere). */
+int64_t rt_env_temp(void) {
+    static const char* const keys[] = {"TMPDIR", "TMP", "TEMP"};
+    for (size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
+        char* v = rt_env_owned(keys[i]);
+        if (v) {
+            int64_t result = rt_string_new((const uint8_t*)v, (uint64_t)strlen(v));
+            free(v);
+            return result;
+        }
+    }
+#if defined(_WIN32)
+    return rt_string_new((const uint8_t*)"/c/Temp", 7);
+#else
+    return rt_string_new((const uint8_t*)"/tmp", 4);
+#endif
+}
+
+/* cli_sffi.rs rt_exec_output twin: run the command through the platform
+ * shell, return captured stdout text; "" on bad input or spawn failure. */
+int64_t rt_exec_output(int64_t cmd_value) {
+    int64_t out = rt_shell_exec(cmd_value);
+    if (!rt_string_data(out)) return rt_string_new((const uint8_t*)"", 0);
+    return out;
+}
+
+/* directory.rs rt_set_current_dir twin: (utf-8 ptr, len) -> bool. */
+bool rt_set_current_dir(const uint8_t* path_ptr, uint64_t path_len) {
+    if (!path_ptr || path_len == 0 || path_len >= 4096) return false;
+    if (memchr(path_ptr, '\0', (size_t)path_len)) return false;
+#if defined(_WIN32)
+    wchar_t wide[4096];
+    int n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, (LPCCH)path_ptr,
+                                (int)path_len, wide, 4095);
+    if (n <= 0) return false;
+    wide[n] = L'\0';
+    return SetCurrentDirectoryW(wide) != 0;
+#else
+    char path[4096];
+    memcpy(path, path_ptr, (size_t)path_len);
+    path[path_len] = '\0';
+    return chdir(path) == 0;
+#endif
+}
+
 void rt_exit(int64_t code) {
     exit((int)code);
 }
@@ -17078,6 +20735,24 @@ int64_t rt_dyncall_3(int64_t fn_ptr, int64_t arg0, int64_t arg1, int64_t arg2) {
     return ((rt_dyncall_3_fn)(uintptr_t)fn_ptr)(arg0, arg1, arg2);
 }
 
+int64_t rt_dyncall_4(int64_t fn_ptr, int64_t arg0, int64_t arg1, int64_t arg2, int64_t arg3) {
+    typedef int64_t (*rt_dyncall_4_fn)(int64_t, int64_t, int64_t, int64_t);
+    if (fn_ptr <= 0) return -1;
+    return ((rt_dyncall_4_fn)(uintptr_t)fn_ptr)(arg0, arg1, arg2, arg3);
+}
+
+int64_t rt_dyncall_5(int64_t fn_ptr, int64_t arg0, int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4) {
+    typedef int64_t (*rt_dyncall_5_fn)(int64_t, int64_t, int64_t, int64_t, int64_t);
+    if (fn_ptr <= 0) return -1;
+    return ((rt_dyncall_5_fn)(uintptr_t)fn_ptr)(arg0, arg1, arg2, arg3, arg4);
+}
+
+int64_t rt_dyncall_6(int64_t fn_ptr, int64_t arg0, int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t arg5) {
+    typedef int64_t (*rt_dyncall_6_fn)(int64_t, int64_t, int64_t, int64_t, int64_t, int64_t);
+    if (fn_ptr <= 0) return -1;
+    return ((rt_dyncall_6_fn)(uintptr_t)fn_ptr)(arg0, arg1, arg2, arg3, arg4, arg5);
+}
+
 /* Exact SimpleProviderQueryV1 discovery call.  Keep this separate from the
  * generic i64 dynamic-call family: the provider ABI returns int32_t. */
 int32_t rt_provider_query_v1_call(int64_t fn_ptr, int64_t request_ptr, int64_t result_ptr) {
@@ -17105,19 +20780,12 @@ int32_t rt_cli_command_v1_call(int64_t fn_ptr, int64_t interface_handle,
 
 #if defined(_WIN32)
 static HMODULE simple_load_library_utf8(const char *path) {
-    int wide_len;
     wchar_t *wide_path;
     HMODULE handle;
     if (!path || !path[0]) return NULL;
-    wide_len = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1, NULL, 0);
-    if (wide_len <= 0) return NULL;
-    wide_path = (wchar_t*)rt_observed_malloc_v1((size_t)wide_len * sizeof(wchar_t));
+    wide_path = spl_win_utf8_to_wide(path, -1, MB_ERR_INVALID_CHARS,
+        rt_observed_malloc_v1, free, NULL);
     if (!wide_path) return NULL;
-    if (MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path, -1,
-            wide_path, wide_len) != wide_len) {
-        free(wide_path);
-        return NULL;
-    }
     handle = LoadLibraryW(wide_path);
     free(wide_path);
     return handle;
@@ -17126,6 +20794,8 @@ static HMODULE simple_load_library_utf8(const char *path) {
 
 int64_t rt_host_dynlib_open(const uint8_t *path_ptr, int64_t path_len, int64_t mode) {
     if (!path_ptr || path_len <= 0 || path_len > 1048576) return 0;
+    /* Embedded NUL fails closed, like the Rust twin (wsffi_native.rs raw_text_cstring). */
+    if (memchr(path_ptr, 0, (size_t)path_len)) return 0;
     char *path = (char*)rt_observed_malloc_v1((size_t)path_len + 1);
     if (!path) return 0;
     memcpy(path, path_ptr, (size_t)path_len);
@@ -17143,6 +20813,7 @@ int64_t rt_host_dynlib_open(const uint8_t *path_ptr, int64_t path_len, int64_t m
 
 int64_t rt_host_dynlib_symbol(int64_t handle, const uint8_t *name_ptr, int64_t name_len) {
     if (handle <= 0 || !name_ptr || name_len <= 0 || name_len > 1048576) return 0;
+    if (memchr(name_ptr, 0, (size_t)name_len)) return 0;
     char *name = (char*)rt_observed_malloc_v1((size_t)name_len + 1);
     if (!name) return 0;
     memcpy(name, name_ptr, (size_t)name_len);
@@ -17212,38 +20883,47 @@ int64_t spl_str_ptr(const char* value) {
 /* ================================================================
  * Reserved-Field Cache Helpers for RtCoreString
  *
- * Bit layout (see runtime_simd_dispatch.h for constants):
- *   Bit 31     = is-ASCII validity flag
- *   Bit 30     = cp-count validity flag
- *   Bit 29     = is-ASCII value (meaningful only when bit 31 = 1)
- *   Bits [28:0] = codepoint count (meaningful only when bit 30 = 1)
+ * Bit layout (see runtime_simd_dispatch.h for the shared contract):
+ *   Bit  3      = all-ASCII memo (== RT_CORE_STRING_FLAG_ASCII)
+ *   Bit 30      = cp-count-valid
+ *   Bits [29:4] = codepoint count (26 bits, cap RT_STR_CACHE_CP_MAX)
+ * The write is a compare-and-swap loop: it only stores when the valid bit
+ * is not yet set, so it can never drop a concurrently-set
+ * RT_CORE_STRING_FLAG_* bit, and the cached value is deterministic for
+ * immutable heap text, so losing a race against an identical write is
+ * harmless. Strings at/above the count cap are never cached.
  * ================================================================ */
 
 void rt_str_cache_cp_count(RtCoreString* s, uint64_t count) {
     if (!s) return;
-    if (count > SIMD_CACHE_CPCOUNT_MASK) return;
-    uint32_t r = s->reserved;
-    r |= SIMD_CACHE_FLAG_CPCOUNT_VALID;
-    r = (r & ~SIMD_CACHE_CPCOUNT_MASK) | ((uint32_t)count & SIMD_CACHE_CPCOUNT_MASK);
-    s->reserved = r;
+    if (count > RT_STR_CACHE_CP_MAX) return;
+    uint32_t want = RT_STR_CACHE_CP_VALID | ((uint32_t)count << RT_STR_CACHE_CP_SHIFT);
+    uint32_t old = __atomic_load_n(&s->reserved, __ATOMIC_RELAXED);
+    while (!(old & RT_STR_CACHE_CP_VALID)) {
+        uint32_t next = (old & ~RT_STR_CACHE_CP_FIELD) | want;
+        if (__atomic_compare_exchange_n(&s->reserved, &old, next, 0,
+                                        __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+            return;
+    }
 }
 
 int64_t rt_str_cached_cp_count(RtCoreString* s) {
+    uint32_t r;
     if (!s) return -1;
-    if (!(s->reserved & SIMD_CACHE_FLAG_CPCOUNT_VALID)) return -1;
-    return (int64_t)(s->reserved & SIMD_CACHE_CPCOUNT_MASK);
+    r = __atomic_load_n(&s->reserved, __ATOMIC_RELAXED);
+    if (!(r & RT_STR_CACHE_CP_VALID)) return -1;
+    return (int64_t)((r & RT_STR_CACHE_CP_FIELD) >> RT_STR_CACHE_CP_SHIFT);
 }
 
 void rt_str_set_ascii_flag(RtCoreString* s, int is_ascii) {
-    if (!s) return;
-    if (is_ascii)
-        s->reserved |= SIMD_CACHE_FLAG_IS_ASCII;
-    /* Non-ASCII: don't cache (positive-only flag per spec) */
+    if (!s || !is_ascii) return;
+    /* Positive-only memo, same atomic discipline as spl_core_string_is_ascii. */
+    __atomic_fetch_or(&s->reserved, RT_STR_RESERVED_ASCII_MEMO, __ATOMIC_RELAXED);
 }
 
 int rt_str_is_ascii_cached(RtCoreString* s) {
     if (!s) return -1;
-    if (s->reserved & SIMD_CACHE_FLAG_IS_ASCII) return 1;
+    if (__atomic_load_n(&s->reserved, __ATOMIC_RELAXED) & RT_STR_RESERVED_ASCII_MEMO) return 1;
     return -1; /* unknown (could be ASCII or not) */
 }
 
@@ -17368,13 +21048,13 @@ int64_t rt_event_loop_poll_get_fd(int64_t index) {
 }
 
 int64_t rt_kqueue_create(void) { return rt_event_loop_create(); }
-int64_t rt_kqueue_register(int64_t h, int64_t fd, int64_t m) { return rt_event_loop_register(h, fd, m, fd, 1); }
+int64_t rt_kqueue_register(int64_t h, int64_t fd, int64_t m, int64_t token, int64_t edge) { return rt_event_loop_register(h, fd, m, token, edge); }
 int64_t rt_kqueue_deregister(int64_t h, int64_t fd) { return rt_event_loop_deregister(h, fd); }
 int64_t rt_kqueue_poll(int64_t h, int64_t max, int64_t ms) { return rt_event_loop_poll(h, max, ms); }
 int64_t rt_kqueue_close(int64_t h) { return rt_event_loop_close(h); }
 
 int64_t rt_iocp_create(void) { return -1; }
-int64_t rt_iocp_register(int64_t h, int64_t fd, int64_t m) { (void)h; (void)fd; (void)m; return -1; }
+int64_t rt_iocp_register(int64_t h, int64_t fd, int64_t m, int64_t token, int64_t edge) { (void)h; (void)fd; (void)m; (void)token; (void)edge; return -1; }
 /* Omitted when this family was written: create/register/poll/close were all
  * present but deregister was not, while the kqueue family above defines all
  * five. The gap is invisible until a NATIVE link -- the interpreter resolves
@@ -17388,7 +21068,7 @@ int64_t rt_iocp_poll(int64_t h, int64_t max, int64_t ms) { (void)h; (void)max; (
 int64_t rt_iocp_close(int64_t h) { (void)h; return -1; }
 
 int64_t rt_event_ports_create(void) { return -1; }
-int64_t rt_event_ports_register(int64_t h, int64_t fd, int64_t m) { (void)h; (void)fd; (void)m; return -1; }
+int64_t rt_event_ports_register(int64_t h, int64_t fd, int64_t m, int64_t token, int64_t edge) { (void)h; (void)fd; (void)m; (void)token; (void)edge; return -1; }
 /* Same omission as the IOCP family above; referenced from
  * src/lib/nogc_async_mut/io/platform_event.spl:365. Returns -1 to match the
  * rest of this unavailable-backend family. */
@@ -17402,11 +21082,102 @@ int64_t rt_event_ports_close(int64_t h) { (void)h; return -1; }
  * text = int64_t tagged heap pointer; extract via rt_core_as_string()
  * ================================================================ */
 
-#if !defined(_WIN32)
+#if defined(_WIN32)
+/* Winsock compat shim: the POSIX bodies below compile and run unchanged on
+ * Windows through these definitions. Every macro is #undef'd at the end of the
+ * socket section so file I/O elsewhere keeps the CRT read/close.
+ * A SOCKET is a kernel HANDLE, and Windows guarantees handle values fit in 32
+ * bits, so the existing (int)fd narrowing is lossless. */
+static INIT_ONCE ws_compat_init_once = INIT_ONCE_STATIC_INIT;
 
-static const char* rt_extract_cstr(int64_t text_val) {
-    RtCoreString* s = rt_core_as_string(text_val);
-    return s ? s->data : NULL;
+static BOOL CALLBACK ws_compat_init_cb(PINIT_ONCE once, PVOID param, PVOID* context) {
+    (void)once; (void)param; (void)context;
+    WSADATA data;
+    return WSAStartup(MAKEWORD(2, 2), &data) == 0;
+}
+
+/* Every descriptor this section owns starts here, so WSAStartup runs once
+ * before first use (a failed startup is retried on the next call). */
+static int ws_compat_socket(int af, int type, int protocol) {
+    if (!InitOnceExecuteOnce(&ws_compat_init_once, ws_compat_init_cb, NULL, NULL)) return -1;
+    SOCKET s = socket(af, type, protocol);
+    return s == INVALID_SOCKET ? -1 : (int)s;
+}
+
+/* Winsock reports failure through WSAGetLastError, not errno; map the one
+ * code the nonblocking connect path inspects. */
+static int ws_compat_connect(SOCKET s, const struct sockaddr* address, int length) {
+    if (connect(s, address, length) == 0) return 0;
+    errno = WSAGetLastError() == WSAEWOULDBLOCK ? EINPROGRESS : EIO;
+    return -1;
+}
+
+/* Winsock takes char* option buffers, and SO_RCVTIMEO/SO_SNDTIMEO as a DWORD
+ * of milliseconds instead of a struct timeval (0 = no timeout on both). */
+static int ws_compat_setsockopt(SOCKET s, int level, int name, const void* value, int length) {
+    if (level == SOL_SOCKET && (name == SO_RCVTIMEO || name == SO_SNDTIMEO) &&
+        length == (int)sizeof(struct timeval)) {
+        const struct timeval* tv = (const struct timeval*)value;
+        if (tv->tv_sec < 0 || tv->tv_usec < 0) { WSASetLastError(WSAEINVAL); return -1; }
+        DWORD ms = (DWORD)tv->tv_sec * 1000u + (DWORD)((tv->tv_usec + 999) / 1000);
+        return setsockopt(s, level, name, (const char*)&ms, (int)sizeof(ms));
+    }
+    /* On a Winsock STREAM socket SO_REUSEADDR also lets a second socket bind a
+     * port another socket is actively listening on. The BSD meaning callers
+     * want (rebind over TIME_WAIT) is already Windows' default, so drop it.
+     * Not SO_EXCLUSIVEADDRUSE: that refuses a quick restart on the same port.
+     * Datagram sockets keep it: multicast receivers share a port through it. */
+    if (level == SOL_SOCKET && name == SO_REUSEADDR) {
+        int type = 0;
+        int type_len = (int)sizeof(type);
+        if (getsockopt(s, SOL_SOCKET, SO_TYPE, (char*)&type, &type_len) == 0 && type == SOCK_STREAM) return 0;
+    }
+    return setsockopt(s, level, name, (const char*)value, length);
+}
+
+static int ws_compat_getsockopt(SOCKET s, int level, int name, void* value, socklen_t* length) {
+    return getsockopt(s, level, name, (char*)value, length);
+}
+
+/* Winsock cannot query FIONBIO, so F_GETFL reports no flags. Both callers set
+ * or clear O_NONBLOCK explicitly afterwards, and connect_timeout's "restore"
+ * targets a socket it just created (always blocking), so nothing is lost. */
+#define WS_COMPAT_F_GETFL 3
+#define WS_COMPAT_F_SETFL 4
+#define WS_COMPAT_O_NONBLOCK 0x4000
+static int ws_compat_fcntl(SOCKET s, int command, int argument) {
+    if (command == WS_COMPAT_F_GETFL) return 0;
+    if (command != WS_COMPAT_F_SETFL) return -1;
+    u_long mode = (argument & WS_COMPAT_O_NONBLOCK) ? 1 : 0;
+    return ioctlsocket(s, FIONBIO, &mode) == 0 ? 0 : -1;
+}
+
+#define F_GETFL WS_COMPAT_F_GETFL
+#define F_SETFL WS_COMPAT_F_SETFL
+#define O_NONBLOCK WS_COMPAT_O_NONBLOCK
+#define fcntl ws_compat_fcntl
+#define socket ws_compat_socket
+#define connect ws_compat_connect
+#define setsockopt ws_compat_setsockopt
+#define getsockopt ws_compat_getsockopt
+#define close(fd) closesocket(fd)
+#define read(fd, buffer, length) recv((fd), (char*)(buffer), (int)(length), 0)
+#define poll(fds, count, timeout) WSAPoll((fds), (ULONG)(count), (timeout))
+/* Windows has no SIGPIPE: a send to a closed peer is already just an error. */
+#define MSG_NOSIGNAL 0
+#endif /* _WIN32 */
+
+/* Socket address operands arrive in BOTH text conventions: a tagged
+ * RtCoreString (seed, interpreter, and the compiler's boxed-text externs such
+ * as rt_io_tcp_bind) or the bare char* the compiler's default extern text
+ * bridge produces (rt_interp_cstr unwrap). Measured on the Windows Stage 2
+ * build of avx_server_loadgen: rt_io_tcp_connect received the raw buffer, the
+ * tagged-only decode returned NULL, and every connect failed in 0 us before a
+ * socket existed. Decoded through the counted view (rt_text_cstr_into): a
+ * Rust-owned string carries no NUL at len, so the bytes are copied into the
+ * caller's buffer. NULL for nil, low words, or text that does not fit. */
+static const char* rt_extract_cstr(int64_t text_val, char* buf, size_t cap) {
+    return rt_text_cstr_into(text_val, buf, cap);
 }
 
 static int rt_parse_addr_port(const char* addr_str, struct sockaddr_in* sa) {
@@ -17429,6 +21200,36 @@ static int rt_parse_addr_port(const char* addr_str, struct sockaddr_in* sa) {
     return 0;
 }
 
+/* Extract the text address argument and parse it as host:port. 0 on success. */
+static int rt_io_addr_arg(int64_t addr_val, struct sockaddr_in* sa) {
+    char addr_buf[256];
+    const char* a = rt_extract_cstr(addr_val, addr_buf, sizeof(addr_buf));
+    if (!a) return -1;
+    return rt_parse_addr_port(a, sa) < 0 ? -1 : 0;
+}
+
+/* socket(AF_INET, type) with SO_REUSEADDR bound to `sa`; -1 on any failure. */
+static int rt_io_socket_bind_reuse(int type, const struct sockaddr_in* sa) {
+    int fd = socket(AF_INET, type, 0);
+    if (fd < 0) return -1;
+    int opt = 1;
+    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
+    if (bind(fd, (const struct sockaddr*)sa, sizeof(*sa)) < 0) { close(fd); return -1; }
+    return fd;
+}
+
+/* Allocate a `size`-byte receive array; NULL (nothing leaked) on failure. */
+static SplArray* rt_io_recv_buffer_new(int64_t size, RtCoreArray** out_ca) {
+    SplArray* arr = rt_byte_array_new((uint64_t)size);
+    RtCoreArray* ca = rt_core_array_ptr(arr);
+    if (!ca || (size > 0 && !ca->data)) {
+        if (arr) rt_array_free(arr);
+        return NULL;
+    }
+    *out_ca = ca;
+    return arr;
+}
+
 static int64_t rt_make_addr_string(struct sockaddr_in* sa) {
     char ip[INET_ADDRSTRLEN];
     inet_ntop(AF_INET, &sa->sin_addr, ip, sizeof(ip));
@@ -17444,15 +21245,10 @@ int64_t rt_io_tcp_socket_create(int64_t family) {
 }
 
 int64_t rt_io_tcp_bind(int64_t addr_val) {
-    const char* a = rt_extract_cstr(addr_val);
-    if (!a) return -1;
     struct sockaddr_in sa;
-    if (rt_parse_addr_port(a, &sa) < 0) return -1;
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
+    if (rt_io_addr_arg(addr_val, &sa) < 0) return -1;
+    int fd = rt_io_socket_bind_reuse(SOCK_STREAM, &sa);
     if (fd < 0) return -1;
-    int opt = 1;
-    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-    if (bind(fd, (struct sockaddr*)&sa, sizeof(sa)) < 0) { close(fd); return -1; }
     /* Bug: redis_tagged_text_runtime_abi_2026_10_11. Match the canonical
      * rt_io_tcp_bind listener contract (also used by the Rust provider).
      * bind_fd remains the separate pre-listen socket operation. */
@@ -17461,10 +21257,8 @@ int64_t rt_io_tcp_bind(int64_t addr_val) {
 }
 
 bool rt_io_tcp_bind_fd(int64_t fd, int64_t addr_val) {
-    const char* a = rt_extract_cstr(addr_val);
-    if (!a) return 0;
     struct sockaddr_in sa;
-    if (rt_parse_addr_port(a, &sa) < 0) return 0;
+    if (rt_io_addr_arg(addr_val, &sa) < 0) return 0;
     return bind((int)fd, (struct sockaddr*)&sa, sizeof(sa)) == 0 ? 1 : 0;
 }
 
@@ -17488,10 +21282,8 @@ int64_t rt_io_tcp_accept_timeout(int64_t fd, int64_t ms) {
 }
 
 int64_t rt_io_tcp_connect(int64_t addr_val) {
-    const char* a = rt_extract_cstr(addr_val);
-    if (!a) return -1;
     struct sockaddr_in sa;
-    if (rt_parse_addr_port(a, &sa) < 0) return -1;
+    if (rt_io_addr_arg(addr_val, &sa) < 0) return -1;
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return -1;
     if (connect(fd, (struct sockaddr*)&sa, sizeof(sa)) < 0) { close(fd); return -1; }
@@ -17500,21 +21292,19 @@ int64_t rt_io_tcp_connect(int64_t addr_val) {
 
 int64_t rt_io_tcp_connect_timeout(int64_t addr_val, int64_t ms) {
     if (ms <= 0) return -1;
-    const char* address = rt_extract_cstr(addr_val);
-    if (!address) return -1;
     struct sockaddr_in socket_address;
-    if (rt_parse_addr_port(address, &socket_address) < 0) return -1;
+    if (rt_io_addr_arg(addr_val, &socket_address) < 0) return -1;
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return -1;
     int original_flags = fcntl(fd, F_GETFL, 0);
     if (original_flags < 0 || fcntl(fd, F_SETFL, original_flags | O_NONBLOCK) != 0) {
-        close(fd);
+        rt_crt_close(fd);
         return -1;
     }
     int connected = connect(fd, (struct sockaddr*)&socket_address,
                             sizeof(socket_address));
     if (connected != 0 && errno != EINPROGRESS) {
-        close(fd);
+        rt_crt_close(fd);
         return -1;
     }
     if (connected != 0) {
@@ -17523,19 +21313,19 @@ int64_t rt_io_tcp_connect_timeout(int64_t addr_val, int64_t ms) {
         pfd.fd = fd;
         pfd.events = POLLOUT;
         if (poll(&pfd, 1, (int)ms) <= 0) {
-            close(fd);
+            rt_crt_close(fd);
             return -1;
         }
         int socket_error = 0;
         socklen_t error_length = sizeof(socket_error);
         if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &socket_error, &error_length) != 0 ||
             socket_error != 0) {
-            close(fd);
+            rt_crt_close(fd);
             return -1;
         }
     }
     if (fcntl(fd, F_SETFL, original_flags) != 0) {
-        close(fd);
+        rt_crt_close(fd);
         return -1;
     }
     return (int64_t)fd;
@@ -17543,12 +21333,9 @@ int64_t rt_io_tcp_connect_timeout(int64_t addr_val, int64_t ms) {
 
 int64_t rt_io_tcp_read(int64_t fd, int64_t size) {
     if (size < 0) return rt_core_nil();
-    SplArray* arr = rt_byte_array_new((uint64_t)size);
-    RtCoreArray* ca = rt_core_array_ptr(arr);
-    if (!ca || (size > 0 && !ca->data)) {
-        if (arr) rt_array_free(arr);
-        return rt_core_nil();
-    }
+    RtCoreArray* ca;
+    SplArray* arr = rt_io_recv_buffer_new(size, &ca);
+    if (!arr) return rt_core_nil();
     ssize_t n = read((int)fd, ca->data, (size_t)size);
     if (n < 0) {
         rt_array_free(arr);
@@ -17569,6 +21356,23 @@ int64_t rt_io_tcp_read_line(int64_t fd) {
     }
     if (pos == 0) return rt_core_nil();
     return rt_string_new((const uint8_t*)buf, (uint64_t)pos);
+}
+
+/* Consume one line (newline included) without materialising it. Mirrors the
+ * Rust runtime's rt_io_tcp_drain_line: bytes consumed (capped at 8192), or -1
+ * when nothing could be read. Declared by std nogc_sync_mut/sffi/net.spl;
+ * without a C definition every C-runtime native link of a TCP client failed
+ * with `undefined symbol: rt_io_tcp_drain_line`. */
+int64_t rt_io_tcp_drain_line(int64_t fd) {
+    int64_t total = 0;
+    char byte;
+    while (total < 8192) {
+        ssize_t n = read((int)fd, &byte, 1);
+        if (n <= 0) break;
+        total++;
+        if (byte == '\n') break;
+    }
+    return total > 0 ? total : -1;
 }
 
 /* A peer closing its read side must be a transport error, never a process
@@ -17718,13 +21522,15 @@ bool rt_io_tcp_set_reuseaddr(int64_t fd, bool enabled) {
 
 bool rt_io_tcp_set_read_timeout(int64_t fd, int64_t ms) {
     struct timeval tv;
-    tv.tv_sec = ms / 1000; tv.tv_usec = (ms % 1000) * 1000;
+    tv.tv_sec = ms < 0 ? 0 : ms / 1000;
+    tv.tv_usec = ms < 0 ? 0 : (ms % 1000) * 1000;
     return setsockopt((int)fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv)) == 0 ? 1 : 0;
 }
 
 bool rt_io_tcp_set_write_timeout(int64_t fd, int64_t ms) {
     struct timeval tv;
-    tv.tv_sec = ms / 1000; tv.tv_usec = (ms % 1000) * 1000;
+    tv.tv_sec = ms < 0 ? 0 : ms / 1000;
+    tv.tv_usec = ms < 0 ? 0 : (ms % 1000) * 1000;
     return setsockopt((int)fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv)) == 0 ? 1 : 0;
 }
 
@@ -17737,26 +21543,19 @@ bool rt_io_tcp_shutdown(int64_t fd, int64_t how) {
  * ================================================================ */
 
 int64_t rt_io_udp_bind(int64_t addr_val) {
-    const char* a = rt_extract_cstr(addr_val);
-    if (!a) return -1;
     struct sockaddr_in sa;
-    if (rt_parse_addr_port(a, &sa) < 0) return -1;
-    int fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (rt_io_addr_arg(addr_val, &sa) < 0) return -1;
+    int fd = rt_io_socket_bind_reuse(SOCK_DGRAM, &sa);
     if (fd < 0) return -1;
-    int opt = 1;
-    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof(opt));
-    if (bind(fd, (struct sockaddr*)&sa, sizeof(sa)) < 0) { close(fd); return -1; }
     return (int64_t)fd;
 }
 
 int64_t rt_io_udp_send_to(int64_t fd, int64_t data_val, int64_t addr_val) {
-    const char* a = rt_extract_cstr(addr_val);
-    if (!a) return -1;
+    struct sockaddr_in sa;
+    if (rt_io_addr_arg(addr_val, &sa) < 0) return -1;
     RtCoreArray* ca = rt_core_array_ptr((SplArray*)(uintptr_t)data_val);
     if (!ca || !(ca->flags & RT_CORE_ARRAY_FLAG_BYTES) || ca->len < 0 ||
         ca->len > 65535 || (ca->len > 0 && !ca->data)) return -1;
-    struct sockaddr_in sa;
-    if (rt_parse_addr_port(a, &sa) < 0) return -1;
     return (int64_t)sendto((int)fd, ca->data, (size_t)ca->len, 0, (struct sockaddr*)&sa, sizeof(sa));
 }
 
@@ -17769,12 +21568,9 @@ int64_t rt_io_udp_send(int64_t fd, int64_t data_val) {
 
 int64_t rt_io_udp_recv(int64_t fd, int64_t size) {
     if (size < 0 || size > 65535) return rt_core_nil();
-    SplArray* arr = rt_byte_array_new((uint64_t)size);
-    RtCoreArray* ca = rt_core_array_ptr(arr);
-    if (!ca || (size > 0 && !ca->data)) {
-        if (arr) rt_array_free(arr);
-        return rt_core_nil();
-    }
+    RtCoreArray* ca;
+    SplArray* arr = rt_io_recv_buffer_new(size, &ca);
+    if (!arr) return rt_core_nil();
     ssize_t n = recv((int)fd, ca->data, (size_t)size, 0);
     if (n < 0) {
         rt_array_free(arr);
@@ -17785,10 +21581,8 @@ int64_t rt_io_udp_recv(int64_t fd, int64_t size) {
 }
 
 bool rt_io_udp_connect(int64_t fd, int64_t addr_val) {
-    const char* a = rt_extract_cstr(addr_val);
-    if (!a) return 0;
     struct sockaddr_in sa;
-    if (rt_parse_addr_port(a, &sa) < 0) return 0;
+    if (rt_io_addr_arg(addr_val, &sa) < 0) return 0;
     return connect((int)fd, (struct sockaddr*)&sa, sizeof(sa)) == 0 ? 1 : 0;
 }
 
@@ -17823,7 +21617,8 @@ bool rt_io_udp_set_multicast_loop(int64_t fd, bool enabled) {
 
 static bool rt_io_udp_multicast_membership(int64_t fd, int64_t addr_val,
                                            bool join) {
-    const char* address = rt_extract_cstr(addr_val);
+    char addr_buf[256];
+    const char* address = rt_extract_cstr(addr_val, addr_buf, sizeof(addr_buf));
     if (!address) return 0;
     if (strchr(address, ':')) {
         struct ipv6_mreq request;
@@ -17853,12 +21648,9 @@ bool rt_io_udp_leave_multicast(int64_t fd, int64_t addr_val) {
 
 int64_t rt_io_udp_recv_from(int64_t fd, int64_t size) {
     if (size < 0 || size > 65535) return rt_core_nil();
-    SplArray* arr = rt_byte_array_new((uint64_t)size);
-    RtCoreArray* ca = rt_core_array_ptr(arr);
-    if (!ca || (size > 0 && !ca->data)) {
-        if (arr) rt_array_free(arr);
-        return rt_core_nil();
-    }
+    RtCoreArray* ca;
+    SplArray* arr = rt_io_recv_buffer_new(size, &ca);
+    if (!arr) return rt_core_nil();
     struct sockaddr_in from;
     socklen_t fromlen = sizeof(from);
     ssize_t n = recvfrom((int)fd, ca->data, (size_t)size, 0, (struct sockaddr*)&from, &fromlen);
@@ -17883,47 +21675,155 @@ int64_t rt_io_udp_recv_from(int64_t fd, int64_t size) {
     return tuple;
 }
 
-#else /* _WIN32 stubs */
-int64_t rt_io_tcp_socket_create(int64_t f) { (void)f; return -1; }
-int64_t rt_io_tcp_bind(int64_t a) { (void)a; return -1; }
-bool rt_io_tcp_bind_fd(int64_t f, int64_t a) { (void)f; (void)a; return false; }
-bool rt_io_tcp_listen(int64_t f, int64_t b) { (void)f; (void)b; return false; }
-int64_t rt_io_tcp_accept(int64_t f) { (void)f; return -1; }
-int64_t rt_io_tcp_accept_timeout(int64_t f, int64_t m) { (void)f; (void)m; return -1; }
-int64_t rt_io_tcp_connect(int64_t a) { (void)a; return -1; }
-int64_t rt_io_tcp_connect_timeout(int64_t a, int64_t m) { (void)a; (void)m; return -1; }
-int64_t rt_io_tcp_read(int64_t f, int64_t s) { (void)f; (void)s; return rt_core_nil(); }
-int64_t rt_io_tcp_read_line(int64_t f) { (void)f; return rt_core_nil(); }
-int64_t rt_io_tcp_write(int64_t f, int64_t d) { (void)f; (void)d; return -1; }
-int64_t rt_io_socket_send_nosigpipe(int64_t f, int64_t d) { (void)f; (void)d; return -1; }
-int64_t rt_io_tcp_write_text(int64_t f, int64_t d) { (void)f; (void)d; return -1; }
-int64_t rt_io_tcp_write_bytes(int64_t f, int64_t d) { (void)f; (void)d; return -1; }
-bool rt_io_tcp_flush(int64_t f) { (void)f; return false; }
-bool rt_io_tcp_close(int64_t f) { (void)f; return false; }
-int64_t rt_io_tcp_local_addr(int64_t f) { (void)f; return rt_core_nil(); }
-int64_t rt_io_tcp_peer_addr(int64_t f) { (void)f; return rt_core_nil(); }
-bool rt_io_tcp_set_nonblocking(int64_t f, bool e) { (void)f; (void)e; return false; }
-bool rt_io_tcp_set_nodelay(int64_t f, bool e) { (void)f; (void)e; return false; }
-bool rt_io_tcp_set_reuseport(int64_t f, bool e) { (void)f; (void)e; return false; }
-bool rt_io_tcp_set_reuseaddr(int64_t f, bool e) { (void)f; (void)e; return false; }
-bool rt_io_tcp_set_read_timeout(int64_t f, int64_t m) { (void)f; (void)m; return false; }
-bool rt_io_tcp_set_write_timeout(int64_t f, int64_t m) { (void)f; (void)m; return false; }
-bool rt_io_tcp_shutdown(int64_t f, int64_t h) { (void)f; (void)h; return false; }
-int64_t rt_io_udp_bind(int64_t a) { (void)a; return -1; }
-int64_t rt_io_udp_send_to(int64_t f, int64_t d, int64_t a) { (void)f; (void)d; (void)a; return -1; }
-int64_t rt_io_udp_send(int64_t f, int64_t d) { (void)f; (void)d; return -1; }
-int64_t rt_io_udp_recv(int64_t f, int64_t s) { (void)f; (void)s; return rt_core_nil(); }
-bool rt_io_udp_connect(int64_t f, int64_t a) { (void)f; (void)a; return false; }
-int64_t rt_io_udp_local_addr(int64_t f) { (void)f; return rt_core_nil(); }
-bool rt_io_udp_set_broadcast(int64_t f, bool e) { (void)f; (void)e; return false; }
-bool rt_io_udp_set_read_timeout(int64_t f, int64_t m) { (void)f; (void)m; return false; }
-bool rt_io_udp_close(int64_t f) { (void)f; return false; }
-bool rt_io_udp_set_nonblocking(int64_t f, bool e) { (void)f; (void)e; return false; }
-bool rt_io_udp_set_multicast_loop(int64_t f, bool e) { (void)f; (void)e; return false; }
-bool rt_io_udp_join_multicast(int64_t f, int64_t a) { (void)f; (void)a; return false; }
-bool rt_io_udp_leave_multicast(int64_t f, int64_t a) { (void)f; (void)a; return false; }
-int64_t rt_io_udp_recv_from(int64_t f, int64_t s) { (void)f; (void)s; return rt_core_nil(); }
-#endif /* !_WIN32 */
+/* browser_net_runtime.spl: rt_dns_lookup(hostname: text) -> text. Not in
+ * text_arg_indices, so the hostname is one tagged text value and the result a
+ * tagged text: the de-duplicated numeric addresses joined by ',' in resolver
+ * order, empty on any failure (Rust twin: value/net_tcp.rs rt_dns_lookup).
+ *
+ * Like the Rust twin (value/net.rs run_bounded_net_lookup) the resolve runs on
+ * a worker thread and the caller waits at most RT_DNS_LOOKUP_TIMEOUT_MS; at
+ * most RT_DNS_MAX_IN_FLIGHT lookups are outstanding (a stuck resolver cannot
+ * accumulate unbounded threads); a lookup that misses its deadline is
+ * abandoned, not cancelled. Lockless: the job is handed off through an atomic
+ * done flag and freed by whichever side drops the last atomic reference. */
+#define RT_DNS_LOOKUP_TIMEOUT_MS 5000
+#define RT_DNS_MAX_IN_FLIGHT 8
+
+typedef struct {
+    atomic_int refs;
+    atomic_int done;
+    char host[1024];
+    char joined[4096];
+    size_t used;
+} RtDnsJob;
+
+static atomic_int rt_dns_in_flight = 0;
+
+static void rt_dns_job_release(RtDnsJob* job) {
+    if (atomic_fetch_sub(&job->refs, 1) == 1) free(job);
+}
+
+static void rt_dns_job_resolve(RtDnsJob* job) {
+    struct addrinfo hints;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family = AF_UNSPEC;
+    hints.ai_socktype = SOCK_STREAM;
+    struct addrinfo* results = NULL;
+    if (getaddrinfo(job->host, NULL, &hints, &results) == 0 && results) {
+        char* joined = job->joined;
+        size_t used = 0;
+        joined[0] = '\0';
+        for (struct addrinfo* it = results; it; it = it->ai_next) {
+            char ip[INET6_ADDRSTRLEN];
+            const void* addr = NULL;
+            if (it->ai_family == AF_INET) addr = &((const struct sockaddr_in*)it->ai_addr)->sin_addr;
+            else if (it->ai_family == AF_INET6) addr = &((const struct sockaddr_in6*)it->ai_addr)->sin6_addr;
+            if (!addr || !inet_ntop(it->ai_family, addr, ip, sizeof(ip))) continue;
+            size_t ip_len = strlen(ip);
+            int seen = 0;
+            for (const char* p = joined; *p && !seen;) {
+                const char* end = strchr(p, ',');
+                size_t len = end ? (size_t)(end - p) : strlen(p);
+                if (len == ip_len && memcmp(p, ip, ip_len) == 0) seen = 1;
+                p = end ? end + 1 : p + len;
+            }
+            if (seen || used + ip_len + 2 > sizeof(job->joined)) continue;
+            if (used) joined[used++] = ',';
+            memcpy(joined + used, ip, ip_len + 1);
+            used += ip_len;
+        }
+        job->used = used;
+    }
+    if (results) freeaddrinfo(results);
+    atomic_store_explicit(&job->done, 1, memory_order_release);
+}
+
+#if defined(_WIN32)
+static DWORD WINAPI rt_dns_job_thread(LPVOID arg) {
+#else
+static void* rt_dns_job_thread(void* arg) {
+#endif
+    RtDnsJob* job = (RtDnsJob*)arg;
+    rt_dns_job_resolve(job);
+    atomic_fetch_sub(&rt_dns_in_flight, 1);
+    rt_dns_job_release(job);
+    return 0;
+}
+
+int64_t rt_dns_lookup_timeout_ms(int64_t hostname_value, int64_t timeout_ms) {
+    uint64_t host_len = 0;
+    const uint8_t* host_bytes = rt_core_string_bytes(hostname_value, &host_len);
+    if (timeout_ms <= 0 || !host_bytes || host_len == 0 || host_len >= 1024) return rt_string_new(NULL, 0);
+#if defined(_WIN32)
+    if (!InitOnceExecuteOnce(&ws_compat_init_once, ws_compat_init_cb, NULL, NULL)) return rt_string_new(NULL, 0);
+#endif
+    if (atomic_fetch_add(&rt_dns_in_flight, 1) >= RT_DNS_MAX_IN_FLIGHT) {
+        atomic_fetch_sub(&rt_dns_in_flight, 1);
+        return rt_string_new(NULL, 0);
+    }
+    RtDnsJob* job = (RtDnsJob*)calloc(1, sizeof(RtDnsJob));
+    if (!job) {
+        atomic_fetch_sub(&rt_dns_in_flight, 1);
+        return rt_string_new(NULL, 0);
+    }
+    memcpy(job->host, host_bytes, (size_t)host_len);
+    atomic_init(&job->refs, 2);
+    atomic_init(&job->done, 0);
+#if defined(_WIN32)
+    HANDLE thread = CreateThread(NULL, 0, rt_dns_job_thread, job, 0, NULL);
+    if (!thread) {
+        atomic_fetch_sub(&rt_dns_in_flight, 1);
+        free(job);
+        return rt_string_new(NULL, 0);
+    }
+    DWORD wait_ms = timeout_ms > 0x7fffffffLL ? 0x7fffffffu : (DWORD)timeout_ms;
+    WaitForSingleObject(thread, wait_ms);
+    CloseHandle(thread);
+#else
+    pthread_t thread;
+    pthread_attr_t attr;
+    pthread_attr_init(&attr);
+    pthread_attr_setdetachstate(&attr, PTHREAD_CREATE_DETACHED);
+    int created = pthread_create(&thread, &attr, rt_dns_job_thread, job);
+    pthread_attr_destroy(&attr);
+    if (created != 0) {
+        atomic_fetch_sub(&rt_dns_in_flight, 1);
+        free(job);
+        return rt_string_new(NULL, 0);
+    }
+    struct timespec step = {0, 1000000};
+    for (int64_t waited = 0; waited < timeout_ms && !atomic_load_explicit(&job->done, memory_order_acquire); waited++) {
+        nanosleep(&step, NULL);
+    }
+#endif
+    int64_t out;
+    if (atomic_load_explicit(&job->done, memory_order_acquire)) {
+        out = rt_string_new((const uint8_t*)job->joined, (uint64_t)job->used);
+    } else {
+        out = rt_string_new(NULL, 0);
+    }
+    rt_dns_job_release(job);
+    return out;
+}
+
+int64_t rt_dns_lookup(int64_t hostname_value) {
+    return rt_dns_lookup_timeout_ms(hostname_value, RT_DNS_LOOKUP_TIMEOUT_MS);
+}
+
+#if defined(_WIN32)
+#undef F_GETFL
+#undef F_SETFL
+#undef O_NONBLOCK
+#undef fcntl
+#undef socket
+#undef connect
+#undef setsockopt
+#undef getsockopt
+#undef close
+#undef read
+#undef poll
+#undef MSG_NOSIGNAL
+#endif /* _WIN32 */
 
 /* ================================================================
  * Channel Functions (simple mutex-based queue)
@@ -18104,6 +22004,20 @@ int64_t rt_cpuid_tuple(int32_t leaf, int32_t subleaf) {
     return tuple;
 }
 
+/* Raw 4-word block (a, b, c, d as untagged words) for the pure-Simple native
+ * lanes, which destructure a tuple result by loading words 0/8/16/24 instead
+ * of calling rt_tuple_get. Rust twin: env_process.rs. */
+int64_t* rt_cpuid_tuple_block(int32_t leaf, int32_t subleaf) {
+    RtCpuidResult regs = rt_cpuid(leaf, subleaf);
+    int64_t* block = (int64_t*)rt_alloc(4 * (int64_t)sizeof(int64_t));
+    if (!block) return NULL;
+    block[0] = (int64_t)regs.a;
+    block[1] = (int64_t)regs.b;
+    block[2] = (int64_t)regs.c;
+    block[3] = (int64_t)regs.d;
+    return block;
+}
+
 int64_t rt_xgetbv(int32_t index) {
 #if defined(__x86_64__) || defined(_M_X64)
 #  if defined(_MSC_VER)
@@ -18188,6 +22102,10 @@ int32_t rt_riscv_read_vlenb(void) {
 #else
     return 0;
 #endif
+}
+
+int32_t rt_sve_read_vl_bytes(void) {
+    return rt_sve_vl_bytes_measured();
 }
 
 bool rt_riscv_has_v_ext(void) {
@@ -18350,13 +22268,20 @@ static int simple_startup_load_aspect_spec(const char *spec) {
 }
 
 int __simple_startup_before_main(int argc, char **argv) {
-    const char *spec = getenv(SIMPLE_STARTUP_ASPECT_ENV);
+    char *spec = NULL;
+    if (rt_env_snapshot(SIMPLE_STARTUP_ASPECT_ENV, &spec) != 0) {
+        fprintf(stderr, "simple runtime: unable to read %s.\n",
+                SIMPLE_STARTUP_ASPECT_ENV);
+        return 1;
+    }
     const char *option = "--startup-extension";
     size_t option_len = strlen(option);
     int i;
 
     /* Stable order: environment list first, then argv from left to right. */
-    if (simple_startup_load_aspect_spec(spec) != 0) return 1;
+    int env_result = simple_startup_load_aspect_spec(spec);
+    free(spec);
+    if (env_result != 0) return 1;
     for (i = 1; i < argc; i++) {
         const char *arg = argv[i];
         const char *path = NULL;
@@ -18426,13 +22351,16 @@ void rt_trap_unimplemented(const char *symbol) {
 
 /* ---- Option / Result construction -------------------------------------
  * Mirrors rt_option_some/rt_option_none in the Rust runtime, which build a
- * canonical enum with the reserved Option enum_id 1 and the stable 32-bit
- * variant-name hashes. Result has no reserved enum_id; the same hashes are
- * already the identification key used by rt_unwrap_or_trap above, so Ok/Err
- * are constructed with them here. Keeping these four consistent with
+ * canonical enum with the reserved Option enum_id 1 and positional
+ * discriminants (Some=0, None=1; Ok=0, Err=1), the convention shared with
+ * pure-Simple MIR and the seed's hash_variant_discriminant. Legacy hashed
+ * Some/None/Ok/Err tags from already-built objects are still accepted by
+ * unwrap/try. Keeping these consistent with
  * rt_unwrap_or_trap is what makes `?`/`??`/`.unwrap()` agree. */
 #define SPL_OPTION_ENUM_ID   1
 #define SPL_RESULT_ENUM_ID   2
+/* Legacy hashed Option tags: already-built stage objects may still carry
+ * them, so unwrap/try keep accepting them alongside the positional ones. */
 #define SPL_HASH_SOME 4053299545u
 #define SPL_HASH_NONE 2371748697u
 #define SPL_HASH_OK   2405352012u
@@ -18444,9 +22372,17 @@ void rt_trap_unimplemented(const char *symbol) {
  * runtime, the one the bootstrap/native lane actually links, only ever
  * MENTIONED it in a comment. Semantics transcribed from the pure-Simple
  * definition in src/runtime/simple_core/core_values.spl:78, which is the
- * canonical one: ordinal discriminants for the reserved Option enum_id 1, and
- * the stable 32-bit variant-name hashes for Result, which has no reserved id. */
+ * canonical one: ordinal discriminants for Option (id 1) and Result (id 2
+ * plus the legacy untagged id 0 used by pure-Simple MIR); older hashed
+ * Result values are still matched by Ok/Err name hash. */
 int64_t rt_unwrap_or_trap(int64_t value) {
+    /* Flat nil is absent, just like boxed Option.None. Check before the
+     * non-enum passthrough so false, zero and present Char stay unchanged. */
+    if (value == rt_core_nil()) {
+        fprintf(stderr, "simple runtime: .unwrap() called on None\n");
+        fflush(stderr);
+        abort();
+    }
     int64_t enum_id = rt_enum_id(value);
     int64_t discriminant;
     if (enum_id < 0) return value;
@@ -18460,6 +22396,13 @@ int64_t rt_unwrap_or_trap(int64_t value) {
         }
         return value;
     }
+    if ((enum_id == SPL_RESULT_ENUM_ID || enum_id == 0) && discriminant == 0) return rt_enum_payload(value);
+    if ((enum_id == SPL_RESULT_ENUM_ID || enum_id == 0) && discriminant == 1) {
+        fprintf(stderr, "simple runtime: .unwrap() called on Err\n");
+        fflush(stderr);
+        abort();
+    }
+    /* Untagged legacy Result lane (no reserved id) still carries name hashes. */
     if (discriminant == (int64_t)SPL_HASH_OK) return rt_enum_payload(value);
     if (discriminant == (int64_t)SPL_HASH_ERR) {
         fprintf(stderr, "simple runtime: .unwrap() called on Err\n");
@@ -18470,19 +22413,19 @@ int64_t rt_unwrap_or_trap(int64_t value) {
 }
 
 int64_t rt_option_some(int64_t payload) {
-    return rt_enum_new(SPL_OPTION_ENUM_ID, (int32_t)SPL_HASH_SOME, payload);
+    return rt_enum_new(SPL_OPTION_ENUM_ID, 0, payload);
 }
 
 int64_t rt_option_none(void) {
-    return rt_enum_new(SPL_OPTION_ENUM_ID, (int32_t)SPL_HASH_NONE, rt_value_nil());
+    return rt_enum_new(SPL_OPTION_ENUM_ID, 1, rt_value_nil());
 }
 
 int64_t rt_result_ok(int64_t payload) {
-    return rt_enum_new(SPL_RESULT_ENUM_ID, (int32_t)SPL_HASH_OK, payload);
+    return rt_enum_new(SPL_RESULT_ENUM_ID, 0, payload);
 }
 
 int64_t rt_result_err(int64_t payload) {
-    return rt_enum_new(SPL_RESULT_ENUM_ID, (int32_t)SPL_HASH_ERR, payload);
+    return rt_enum_new(SPL_RESULT_ENUM_ID, 1, payload);
 }
 
 /* `?` propagation: yield the Some/Ok payload, otherwise hand the wrapper back
@@ -19080,7 +23023,21 @@ int8_t rt_file_write_bytes_array(int64_t path, int64_t data) {
     n = rt_array_len(a);
     buf = (unsigned char*)rt_observed_malloc_v1((size_t)(n > 0 ? n : 1));
     if (buf == NULL) return 0;
-    for (i = 0; i < n; i++) buf[i] = (unsigned char)(rt_array_get(a, i) & 0xFF);
+    /* rt_array_get returns the RAW byte for byte-packed arrays but a TAGGED
+     * value (n << 3 | TAG_INT) for boxed-element arrays; masking the tagged
+     * word wrote 0x53 as 0x98. Untag boxed ints, refuse non-ints (Rust twin:
+     * byte_array_bytes). */
+    {
+        int packed = rt_array_is_byte_packed(a);
+        for (i = 0; i < n; i++) {
+            int64_t v = rt_array_get(a, i);
+            if (!packed) {
+                if (!rt_core_is_int(v)) { free(buf); return 0; }
+                v = rt_core_as_int(v);
+            }
+            buf[i] = (unsigned char)(v & 0xFF);
+        }
+    }
     {
         char* cpath = rt_core_string_to_cpath(path);
         if (cpath == NULL) { free(buf); return 0; }
@@ -19135,3 +23092,25 @@ int64_t rt_collection_set(int64_t receiver, int64_t key, int64_t value) {
  * bundle_* ABI that used to live here was removed 2026-10-19. */
 #define SIMPLE_RUNTIME_HOSTED_SAFE_ARTIFACT_OWNER_V1 1
 #include "runtime_hosted_safe_artifact_v1.c"
+
+/* Single hosted owner for read-back workspace storage capabilities. */
+#include "runtime_workspace_storage_v1.c"
+
+/* Kernel object identity for the Windows service-logon namespace owner.
+ * CompareObjectHandles lives only in kernelbase.dll (not in llvm-mingw's
+ * kernel32/advapi32/ntdll import libraries), so a direct Simple extern leaves
+ * it unresolved at link. Resolve it at run time; report "not identical" (0)
+ * when the entry point is unavailable so callers fail closed. */
+int32_t rt_win_compare_object_handles(int64_t first, int64_t second) {
+#if defined(_WIN32)
+    typedef BOOL (WINAPI *compare_fn)(HANDLE, HANDLE);
+    HMODULE kb = GetModuleHandleW(L"kernelbase.dll");
+    compare_fn fn = kb ? (compare_fn)(void *)GetProcAddress(kb, "CompareObjectHandles") : NULL;
+    if (!fn) return 0;
+    return fn((HANDLE)(intptr_t)first, (HANDLE)(intptr_t)second) ? 1 : 0;
+#else
+    (void)first;
+    (void)second;
+    return 0;
+#endif
+}

@@ -9,7 +9,12 @@ use std.nogc_sync_mut.http_server.types.{HttpRequest, HttpResponse, HttpStatus}
 use std.nogc_sync_mut.http_server.parser.{parse_request_with_policy_limits, MAX_REQUEST_LINE, MAX_HEADER_COUNT, MAX_HEADER_LINE, MAX_BODY_SIZE}
 use std.nogc_sync_mut.http_server.response.{write_response_limited, write_error_limited, with_default_security_headers}
 use std.nogc_sync_mut.http_server.router.{Router}
-use std.nogc_sync_mut.http_server.request_parser.{HttpRequestParserV1}
+use std.nogc_sync_mut.http_server.request_parser.{HttpRequestParserV1, http_request_parser_parse_owned_v1}
+# Import for native trait dispatch: the candidate requires the impl's vtable
+# module in the compilation at a trait-dispatch site (missing native trait
+# implementation otherwise, cf. #9359-R1). HttpVectorRequestParserV1 is the
+# sole impl of HttpRequestParserV1.
+use std.nogc_sync_mut.http_server.vector_parser
 use std.nogc_sync_mut.atomic.{AtomicI64, MemoryOrdering, atomic_i64_new}
 use std.concurrent.thread.{thread_spawn_with_args}
 
@@ -143,6 +148,9 @@ fn request_parse_error_status(message: text) -> HttpStatus:
         return HttpStatus.BadRequest
     HttpStatus.BadRequest
 
+fn _no_stream_handler(req: HttpRequest, stream: TcpStream) -> bool:
+    false
+
 class SimpleHttpServer:
     host: text
     port: i32
@@ -151,6 +159,12 @@ class SimpleHttpServer:
     policy: SecureServerPolicy
     admission: ConnectionAdmission
     request_parser: HttpRequestParserV1?
+    # Optional raw-connection handler: called with the parsed request and the
+    # live stream BEFORE routing. Returning true means it wrote the whole
+    # response itself (e.g. server-sent events flushed as they are produced);
+    # the server then only closes the connection.
+    stream_handler: fn(HttpRequest, TcpStream) -> bool
+    has_stream_handler: bool
 
     static fn new(host: text, port: i32, router: Router) -> SimpleHttpServer:
         SimpleHttpServer(
@@ -160,13 +174,20 @@ class SimpleHttpServer:
             running: false,
             policy: SecureServerPolicy.production(),
             admission: ConnectionAdmission.new(DEFAULT_MAX_CONNECTIONS),
-            request_parser: nil
+            request_parser: None,
+            stream_handler: _no_stream_handler,
+            has_stream_handler: false
         )
 
     # Explicit opt-in. The default constructor leaves request_parser=nil and
     # retains the existing scalar `read_line` parser path.
     me with_http_request_parser_v1(parser: HttpRequestParserV1) -> SimpleHttpServer:
         self.request_parser = parser
+        self
+
+    me with_stream_handler(handler: fn(HttpRequest, TcpStream) -> bool) -> SimpleHttpServer:
+        self.stream_handler = handler
+        self.has_stream_handler = true
         self
 
     me with_policy(policy: SecureServerPolicy) -> SimpleHttpServer:
@@ -221,7 +242,7 @@ class SimpleHttpServer:
                     if not self.admission.try_acquire():
                         val _ = stream.close()
                         continue
-                    if self.request_parser != nil:
+                    if self.request_parser.is_some():
                         # This server owns the mutable parser continuation. Keep
                         # configured parses on that owner before accepting the
                         # next connection; the default scalar path remains detached.
@@ -254,7 +275,7 @@ class SimpleHttpServer:
     me handle_connection_on_owner_v1(stream: TcpStream) -> HttpConnectionOwnedResultV1:
         defer self.admission.release()
         val outcome = self.handle_connection_owned_v1(stream)
-        if outcome.parser != nil:
+        if outcome.parser.is_some():
             self.request_parser = outcome.parser
         outcome
 
@@ -282,15 +303,15 @@ class SimpleHttpServer:
                 return _http_connection_owned_result_v1(
                     false, false, 0, 0, [], self.request_parser,
                     "peer-address-failed")
-        var parsed_request: HttpRequest? = nil
+        var parsed_request: HttpRequest? = None
         var parse_error = ""
         var buffered_remainder: [u8] = []
         var provider_attempts: i64 = 0
         var provider_successes: i64 = 0
         var provider_used = false
-        if self.request_parser != nil:
-            val parsed = self.request_parser!.parse_request_owned_v1(
-                stream, self.policy.max_request_line,
+        if val parser = self.request_parser:
+            val parsed = http_request_parser_parse_owned_v1(
+                parser, stream, self.policy.max_request_line,
                 self.policy.max_header_count, self.policy.max_header_line,
                 self.policy.max_body, self.policy.max_read_iters)
             parsed_request = parsed.request
@@ -307,9 +328,16 @@ class SimpleHttpServer:
                     self.policy.max_body, self.policy.max_read_iters):
                 Ok(req): parsed_request = req
                 Err(error): parse_error = error
-        if parsed_request != nil:
+        if parsed_request.is_some():
             var request = parsed_request!
             request.remote_addr = remote_addr
+            if self.has_stream_handler:
+                val streamer = self.stream_handler
+                if streamer(request, stream):
+                    val _ = stream.close()
+                    return _http_connection_owned_result_v1(
+                        true, provider_used, provider_attempts, provider_successes,
+                        buffered_remainder, self.request_parser, "request-handled")
             val resp = with_default_security_headers(self.router.dispatch(request), false)
             if not write_response_limited(stream, resp, self.policy.max_response_bytes):
                 val _ = stream.close()
@@ -329,9 +357,9 @@ class SimpleHttpServer:
                     "parse-error-response-write-failed")
         val _ = stream.close()
         _http_connection_owned_result_v1(
-            parsed_request != nil, provider_used, provider_attempts,
+            parsed_request.is_some(), provider_used, provider_attempts,
             provider_successes, buffered_remainder, self.request_parser,
-            if parsed_request != nil: "request-handled" else: parse_error)
+            if parsed_request.is_some(): "request-handled" else: parse_error)
 
 export SimpleHttpServer, SecureServerPolicy, PlaintextDevelopmentCapability, ConnectionAdmission
 export HttpConnectionOwnedResultV1

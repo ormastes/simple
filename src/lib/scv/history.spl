@@ -1,0 +1,204 @@
+"""Bounded native history over readable loose SCV commit objects.
+
+Traversal uses stored-parent depth-first order, emitting each revision once.
+It validates reference syntax and required fields, not content hashes (fsck
+owns integrity). Packed-only objects fail explicitly. No writes are performed.
+"""
+use app.io.mod.{file_read_regular_no_follow_bounded}
+use std.scv.core.{scv_object_path, scv_workspace_path, scv_bookmarks_path, scv_state_valid}
+use std.scv.store.{scv_repo_exists}
+use std.scv.working_copy.{scv_change_derivation_label}
+
+struct ScvHistoryLimits:
+    max_commits: i64
+    max_edges: i64
+    max_bytes: i64
+
+struct ScvHistoryRevision:
+    id: text
+    change: text
+    parents: [text]
+    tree: text
+    state: text
+
+struct ScvHistoryFrame:
+    id: text
+    leaving: bool
+
+fn scv_history_limits() -> ScvHistoryLimits:
+    ScvHistoryLimits(max_commits: 10000, max_edges: 50000, max_bytes: 16777216)
+
+fn scv_history_ref_valid(id: text, prefix: text) -> bool:
+    if not id.starts_with(prefix) or id.len() != prefix.len() + 64:
+        return false
+    for ch in id[prefix.len():].chars():
+        if not "0123456789abcdef".contains(ch): return false
+    true
+
+fn scv_history_read(path: text, label: text) -> Result<text, text>:
+    match file_read_regular_no_follow_bounded(path, 1048576):
+        Ok(content): Ok(content)
+        Err(error): Err("ERROR cannot read history {label}: {error}\n")
+
+# Reject absent or duplicate required fields instead of accepting a partial row.
+fn scv_history_field(content: text, name: text) -> Result<text, text>:
+    var found = false
+    var value = ""
+    for line in content.split("\n"):
+        if line.starts_with("{name}:"):
+            if found: return Err("duplicate {name}")
+            found = true
+            value = line[name.len() + 1:].trim()
+    if not found: return Err("missing {name}")
+    Ok(value)
+
+fn scv_history_parse(id: text, content: text) -> Result<ScvHistoryRevision, text>:
+    val change = scv_history_field(content, "change")?
+    val tree = scv_history_field(content, "tree")?
+    val state = scv_history_field(content, "state")?
+    val parent_field = scv_history_field(content, "parents")?
+    if not scv_history_ref_valid(change, "change_"): return Err("invalid change id")
+    if not scv_history_ref_valid(tree, "tree_"): return Err("invalid tree id")
+    if not scv_state_valid(state): return Err("invalid state")
+    var parents: [text] = []
+    for parent in parent_field.split(" "):
+        if parent == "": continue
+        if not scv_history_ref_valid(parent, "commit_"): return Err("invalid parent id")
+        parents.push(parent)
+    Ok(ScvHistoryRevision(id: id, change: change, parents: parents, tree: tree, state: state))
+
+# All output stays private until every reachable object has passed admission.
+# The frontier has at most one frame per admitted edge plus one per active node.
+fn scv_history_walk(root: text, head: text, limits: ScvHistoryLimits) -> Result<[ScvHistoryRevision], text>:
+    if limits.max_commits <= 0 or limits.max_edges < 0 or limits.max_bytes <= 0:
+        return Err("ERROR invalid history limits\n")
+    if not scv_history_ref_valid(head, "commit_"):
+        return Err("ERROR invalid history commit id: {head}\n")
+    var pending = [ScvHistoryFrame(id: head, leaving: false)]
+    var visited: {text: bool} = {}
+    var active: {text: bool} = {}
+    var revisions: [ScvHistoryRevision] = []
+    var edges = 0
+    var bytes = 0
+    while pending.len() > 0:
+        val frame = pending[pending.len() - 1]
+        pending.pop()
+        if frame.leaving:
+            active[frame.id] = false
+            continue
+        if active.get(frame.id) ?? false:
+            return Err("ERROR history cycle at {frame.id}\n")
+        if visited.contains_key(frame.id): continue
+        if revisions.len() >= limits.max_commits:
+            return Err("ERROR history commit limit exceeded\n")
+        val content = scv_history_read(scv_object_path(root, "commits", frame.id), "commit {frame.id}")?
+        if content.len() > limits.max_bytes - bytes:
+            return Err("ERROR history byte limit exceeded\n")
+        bytes = bytes + content.len()
+        val revision = match scv_history_parse(frame.id, content):
+            Ok(value): value
+            Err(error): return Err("ERROR invalid history commit {frame.id}: {error}\n")
+        if revision.parents.len() > limits.max_edges - edges:
+            return Err("ERROR history edge limit exceeded\n")
+        edges = edges + revision.parents.len()
+        visited[frame.id] = true
+        active[frame.id] = true
+        revisions.push(revision)
+        pending.push(ScvHistoryFrame(id: frame.id, leaving: true))
+        var index = revision.parents.len()
+        while index > 0:
+            index = index - 1
+            pending.push(ScvHistoryFrame(id: revision.parents[index], leaving: false))
+    Ok(revisions)
+
+fn scv_history_head(root: text, bookmark: text) -> Result<text, text>:
+    if bookmark == "":
+        val content = scv_history_read(scv_workspace_path(root), "workspace")?
+        val head = match scv_history_field(content, "default"):
+            Ok(value): value
+            Err(error): return Err("ERROR invalid history workspace: {error}\n")
+        if head != "" and not scv_history_ref_valid(head, "commit_"):
+            return Err("ERROR invalid history commit id: {head}\n")
+        return Ok(head)
+    if bookmark.starts_with("--") or bookmark.contains("|") or bookmark.contains("\n") or bookmark.contains("\r"):
+        return Err("ERROR invalid history bookmark\n")
+    val content = scv_history_read(scv_bookmarks_path(root), "bookmarks")?
+    var head = ""
+    var found = false
+    for line in content.split("\n"):
+        if line.trim() == "": continue
+        val fields = line.split("|")
+        if fields.len() != 2: return Err("ERROR invalid history bookmark row\n")
+        if fields[0] != bookmark: continue
+        if found: return Err("ERROR duplicate history bookmark: {bookmark}\n")
+        found = true
+        head = fields[1]
+    if not found: return Err("ERROR unknown history bookmark: {bookmark}\n")
+    if not scv_history_ref_valid(head, "commit_"):
+        return Err("ERROR invalid history commit id: {head}\n")
+    Ok(head)
+
+fn scv_history_row(revision: ScvHistoryRevision) -> text:
+    val derivation = scv_change_derivation_label(revision.parents.join(" "), revision.tree)
+    "commit_id {revision.id} change={revision.change} {derivation} tree={revision.tree} state={revision.state}\n"
+
+fn scv_log_all_parents(root: text, bookmark: text) -> text:
+    if not scv_repo_exists(root): return "ERROR repository not initialized\n"
+    val head = match scv_history_head(root, bookmark):
+        Ok(value): value
+        Err(error): return error
+    if head == "": return "no commits\n"
+    val revisions = match scv_history_walk(root, head, scv_history_limits()):
+        Ok(value): value
+        Err(error): return error
+    var rows: [text] = []
+    for revision in revisions: rows.push(scv_history_row(revision))
+    rows.join("")
+
+# This is ancestry of the selected record.latest filtered by stable ChangeId.
+# It does not claim to reconstruct abandoned or non-ancestor rewrite versions.
+fn scv_change_log(root: text, selected: text) -> text:
+    if not scv_repo_exists(root): return "ERROR repository not initialized\n"
+    var change = selected
+    if change == "":
+        val head = match scv_history_head(root, ""):
+            Ok(value): value
+            Err(error): return error
+        if head == "": return "no changes\n"
+        val content = match scv_history_read(scv_object_path(root, "commits", head), "commit {head}"):
+            Ok(value): value
+            Err(error): return error
+        val revision = match scv_history_parse(head, content):
+            Ok(value): value
+            Err(error): return "ERROR invalid history commit {head}: {error}\n"
+        change = revision.change
+    if not scv_history_ref_valid(change, "change_"):
+        return "ERROR invalid history change id: {change}\n"
+    val record = match scv_history_read(scv_object_path(root, "changes", change), "change {change}"):
+        Ok(value): value
+        Err(error): return error
+    val latest = match scv_history_field(record, "latest"):
+        Ok(value): value
+        Err(error): return "ERROR invalid history change {change}: {error}\n"
+    var state = "open"
+    # A v1 record has no state; a present empty or duplicate state is invalid.
+    for line in record.split("\n"):
+        if line.starts_with("state:"):
+            state = match scv_history_field(record, "state"):
+                Ok(value): value
+                Err(error): return "ERROR invalid history change {change}: {error}\n"
+            break
+    if state != "open" and state != "closed":
+        return "ERROR invalid history change state: {change}\n"
+    val revisions = match scv_history_walk(root, latest, scv_history_limits()):
+        Ok(value): value
+        Err(error): return error
+    if revisions[0].change != change:
+        return "ERROR history change latest mismatch: {change}\n"
+    var rows = ["change_id {change} state={state} latest={latest}\n"]
+    for revision in revisions:
+        if revision.change == change: rows.push(scv_history_row(revision))
+    rows.join("")
+
+export ScvHistoryLimits, ScvHistoryRevision, scv_history_limits, scv_history_walk
+export scv_log_all_parents, scv_change_log

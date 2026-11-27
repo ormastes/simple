@@ -2,7 +2,23 @@
 
 - **Filed:** 2026-07-28
 - **Severity:** medium — deterministic false-red for any spec combining the two graphs
-- **Status:** open
+- **Status:** resolved (2026-09-20 fix + guard; header corrected 2026-11-25 — see below)
+
+## Verification note (2026-11-25)
+
+The "Status: open" header was stale: the 2026-09-20 resolution note below
+records the repro green at HEAD, and the requested permanent combined-session
+guard exists at HEAD —
+`test/01_unit/compiler/semantics/safety_checker_unsafe_boundary_spec.spl:312`
+(`describe "safety checker unsafe boundary after lint-main module init"`),
+and the `Type.method` dispatch fix is present in
+`src/compiler/10.frontend/core/interpreter/_EvalOps/call_method_eval.spl`
+(enum-variant-first, then `Type__method`; pinned by
+`test/01_unit/compiler/interpreter/static_class_method_dispatch_spec.spl`).
+Verified on this host by code inspection; `bin/simple.exe test` cannot run
+specs at release/1.0.0 HEAD (pinned seed rejects `@representation_boundary`,
+including in the test runner's own sources), so the guard spec was not
+re-executed here. Header flipped to resolved; body kept as filed.
 - **Found via:** SE1 `safety-enforce` lane spec (12th example failed while 11 passed)
 
 ## Symptom

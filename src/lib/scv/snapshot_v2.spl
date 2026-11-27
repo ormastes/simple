@@ -1,0 +1,236 @@
+# Exact logical source snapshots. No live filesystem reads or semantic inference.
+# Construction copies payloads: caller-owned overlay arrays never become storage.
+use std.common.crypto.sha256.{sha256_text}
+use std.scv.store.{scv_content_id_for_u8}
+use std.scv.compile_source_inventory_core.{compile_source_inventory_identity_cmp_v1}
+
+pub struct ScvFrozenFileV2:
+    path: text
+    kind: text
+    mode: text
+    content_id: text
+    bytes: [u8]
+
+pub struct ScvSnapshotV2:
+    schema: i64
+    snapshot_id: text
+    namespace: text
+    path_policy: text
+    capture_generation: i64
+    acknowledged_generation: i64
+    source_coverage: text
+    complete_scopes: [text]
+    files: [ScvFrozenFileV2]
+    unsupported_inputs: [text]
+
+pub struct ScvOverlayFileV2:
+    path: text
+    generation: i64
+    deleted: bool
+    bytes: [u8]
+
+pub fn scv_snapshot_path_valid_v2(path: text) -> bool:
+    if path == "" or path.starts_with("/") or path.contains("\\"):
+        return false
+    for part in path.split("/"):
+        if part == "" or part == "." or part == "..": return false
+    for forbidden in ["|", "\n", "\r", "\0", ":"]:
+        if path.contains(forbidden): return false
+    true
+
+pub fn scv_snapshot_copy_bytes_v2(bytes: [u8]) -> [u8]:
+    var copied: [u8] = []
+    for byte in bytes: copied = copied.push(byte)
+    copied
+
+pub fn scv_snapshot_file_v2(path: text, bytes: [u8]) -> ScvFrozenFileV2:
+    ScvFrozenFileV2(path: path, kind: "regular", mode: "materialized-bytes-v1",
+        content_id: scv_content_id_for_u8(bytes), bytes: scv_snapshot_copy_bytes_v2(bytes))
+
+pub fn scv_snapshot_in_scope_v2(path: text, scope: text) -> bool:
+    path == scope or path.starts_with(scope + "/")
+
+pub fn scv_snapshot_sorted_v2(values: [text]) -> [text]:
+    # Independent heap storage; O(n log n), never mutate caller-owned arrays.
+    var sorted: [text] = []
+    for value in values: sorted = sorted.push(value)
+    var start = sorted.len() / 2
+    while start > 0:
+        start = start - 1
+        scv_snapshot_sift_text_v2(sorted, start, sorted.len())
+    var end = sorted.len()
+    while end > 1:
+        end = end - 1
+        val temporary = sorted[0]
+        sorted[0] = sorted[end]
+        sorted[end] = temporary
+        scv_snapshot_sift_text_v2(sorted, 0, end)
+    sorted
+
+fn scv_snapshot_sift_text_v2(mut values: [text], root_index: i64, count: i64):
+    var root = root_index
+    while root * 2 + 1 < count:
+        val left = root * 2 + 1
+        var largest = root
+        if compile_source_inventory_identity_cmp_v1(values[largest], values[left]) < 0: largest = left
+        val right = left + 1
+        if right < count and compile_source_inventory_identity_cmp_v1(values[largest], values[right]) < 0:
+            largest = right
+        if largest == root: return
+        val temporary = values[root]
+        values[root] = values[largest]
+        values[largest] = temporary
+        root = largest
+
+fn scv_snapshot_sift_file_v2(mut values: [ScvFrozenFileV2], root_index: i64, count: i64):
+    var root = root_index
+    while root * 2 + 1 < count:
+        val left = root * 2 + 1
+        var largest = root
+        if compile_source_inventory_identity_cmp_v1(values[largest].path, values[left].path) < 0: largest = left
+        val right = left + 1
+        if right < count and compile_source_inventory_identity_cmp_v1(values[largest].path, values[right].path) < 0:
+            largest = right
+        if largest == root: return
+        val temporary = values[root]
+        values[root] = values[largest]
+        values[largest] = temporary
+        root = largest
+
+pub fn scv_snapshot_file_index_v2(snapshot: ScvSnapshotV2, path: text) -> i64:
+    var low = 0
+    var high = snapshot.files.len()
+    while low < high:
+        val middle = low + (high - low) / 2
+        val order = compile_source_inventory_identity_cmp_v1(snapshot.files[middle].path, path)
+        if order == 0: return middle
+        if order < 0: low = middle + 1
+        else: high = middle
+    -1
+
+pub fn scv_snapshot_scope_complete_v2(snapshot: ScvSnapshotV2, path: text) -> bool:
+    if snapshot.source_coverage != "complete": return false
+    for scope in snapshot.complete_scopes:
+        if scv_snapshot_in_scope_v2(path, scope): return true
+    false
+
+pub fn scv_snapshot_identity_v2(snapshot: ScvSnapshotV2) -> text:
+    var rows = ["simple/scv-snapshot/v2", snapshot.namespace, snapshot.path_policy,
+        snapshot.capture_generation.to_text(), snapshot.acknowledged_generation.to_text(),
+        snapshot.source_coverage]
+    for scope in snapshot.complete_scopes: rows = rows.push("scope|" + scope)
+    for unsupported in snapshot.unsupported_inputs: rows = rows.push("unknown|" + unsupported)
+    for file in snapshot.files:
+        rows = rows.push("file|{file.path}|{file.kind}|{file.mode}|{file.content_id}|{file.bytes.len()}")
+    "scv-snapshot-v2-sha256-" + sha256_text(rows.join("\n"))
+
+pub fn scv_snapshot_freeze_v2(namespace: text, files: [ScvFrozenFileV2],
+        scopes: [text], generation: i64, acknowledged_generation: i64,
+        coverage: text, unsupported_inputs: [text]) -> Result<ScvSnapshotV2, text>:
+    if namespace != "declared-source-files-v2" and namespace != "compile-inventory-v1":
+        return Err("snapshot-namespace-unsupported")
+    if generation < 0 or acknowledged_generation < 0 or generation < acknowledged_generation:
+        return Err("snapshot-capture-before-acknowledged-generation")
+    if coverage != "complete" and coverage != "unknown": return Err("snapshot-coverage-invalid")
+    if coverage == "complete" and scopes.len() == 0: return Err("snapshot-complete-scope-missing")
+    var previous = ""
+    val ordered_scopes = scv_snapshot_sorted_v2(scopes)
+    for scope in ordered_scopes:
+        if (not scv_snapshot_path_valid_v2(scope) or scope == previous or
+                (previous != "" and scope.starts_with(previous + "/"))):
+            return Err("snapshot-scope-invalid")
+        previous = scope
+    for scope in ordered_scopes:
+        for other in ordered_scopes:
+            if other.starts_with(scope + "/"): return Err("snapshot-scope-overlap")
+    var retained: [ScvFrozenFileV2] = []
+    for file in files:
+        if not scv_snapshot_path_valid_v2(file.path):
+            return Err("snapshot-path-invalid-or-duplicate")
+        if file.kind != "regular" or file.mode != "materialized-bytes-v1":
+            return Err("snapshot-file-kind-or-mode-unsupported")
+        if file.content_id != scv_content_id_for_u8(file.bytes):
+            return Err("snapshot-file-digest-mismatch")
+        retained = retained.push(scv_snapshot_file_v2(file.path, file.bytes))
+    var start = retained.len() / 2
+    while start > 0:
+        start = start - 1
+        scv_snapshot_sift_file_v2(retained, start, retained.len())
+    var end = retained.len()
+    while end > 1:
+        end = end - 1
+        val temporary = retained[0]
+        retained[0] = retained[end]
+        retained[end] = temporary
+        scv_snapshot_sift_file_v2(retained, 0, end)
+    previous = ""
+    var paths: [text] = []
+    for file in retained:
+        if file.path == previous: return Err("snapshot-path-invalid-or-duplicate")
+        previous = file.path
+        paths = paths.push(file.path)
+    # Prefixes need independent lookup: a-b can sort between a and a/x.
+    for path in paths:
+        var prefix = ""
+        val parts = path.split("/")
+        var part_index = 0
+        while part_index + 1 < parts.len():
+            prefix = if prefix == "": parts[part_index] else: prefix + "/" + parts[part_index]
+            var low = 0
+            var high = paths.len()
+            while low < high:
+                val middle = low + (high - low) / 2
+                val order = compile_source_inventory_identity_cmp_v1(paths[middle], prefix)
+                if order == 0: return Err("snapshot-file-directory-conflict")
+                if order < 0: low = middle + 1
+                else: high = middle
+            part_index = part_index + 1
+    val unknown = scv_snapshot_sorted_v2(unsupported_inputs)
+    for capability in unknown:
+        if not scv_snapshot_path_valid_v2(capability): return Err("snapshot-capability-invalid")
+    var snapshot = ScvSnapshotV2(schema: 2, snapshot_id: "", namespace: namespace,
+        path_policy: "logical-exact-case-sensitive-v1", capture_generation: generation,
+        acknowledged_generation: acknowledged_generation, source_coverage: coverage,
+        complete_scopes: ordered_scopes, files: retained, unsupported_inputs: unknown)
+    snapshot.snapshot_id = scv_snapshot_identity_v2(snapshot)
+    Ok(snapshot)
+
+pub fn scv_snapshot_valid_v2(snapshot: ScvSnapshotV2) -> bool:
+    if snapshot.schema != 2 or snapshot.path_policy != "logical-exact-case-sensitive-v1": return false
+    if scv_snapshot_identity_v2(snapshot) != snapshot.snapshot_id: return false
+    val rebuilt = scv_snapshot_freeze_v2(snapshot.namespace, snapshot.files,
+        snapshot.complete_scopes, snapshot.capture_generation, snapshot.acknowledged_generation,
+        snapshot.source_coverage, snapshot.unsupported_inputs)
+    if val Err(_) = rebuilt: return false
+    rebuilt.unwrap().snapshot_id == snapshot.snapshot_id
+
+pub fn scv_snapshot_read_v2(snapshot: ScvSnapshotV2, path: text) -> Result<[u8], text>:
+    if not scv_snapshot_path_valid_v2(path): return Err("snapshot-path-invalid")
+    val index = scv_snapshot_file_index_v2(snapshot, path)
+    if index < 0:
+        if scv_snapshot_scope_complete_v2(snapshot, path): return Err("snapshot-file-absent")
+        return Err("snapshot-file-unknown")
+    val file = snapshot.files[index]
+    if file.content_id != scv_content_id_for_u8(file.bytes): return Err("snapshot-file-corrupt")
+    Ok(scv_snapshot_copy_bytes_v2(file.bytes))
+
+pub fn scv_snapshot_overlay_v2(base: ScvSnapshotV2, overlays: [ScvOverlayFileV2],
+        generation: i64, acknowledged_generation: i64) -> Result<ScvSnapshotV2, text>:
+    if not scv_snapshot_valid_v2(base): return Err("snapshot-base-invalid")
+    if generation < base.capture_generation or acknowledged_generation < base.acknowledged_generation:
+        return Err("snapshot-generation-regressed")
+    var seen: [text] = []
+    for overlay in overlays:
+        if not scv_snapshot_path_valid_v2(overlay.path) or seen.contains(overlay.path):
+            return Err("snapshot-overlay-path-invalid-or-duplicate")
+        if overlay.generation <= base.capture_generation or overlay.generation > generation:
+            return Err("snapshot-overlay-generation-outside-barrier")
+        if overlay.deleted and overlay.bytes.len() != 0: return Err("snapshot-deleted-overlay-has-bytes")
+        seen = seen.push(overlay.path)
+    var files: [ScvFrozenFileV2] = []
+    for file in base.files:
+        if not seen.contains(file.path): files = files.push(file)
+    for overlay in overlays:
+        if not overlay.deleted: files = files.push(scv_snapshot_file_v2(overlay.path, overlay.bytes))
+    scv_snapshot_freeze_v2(base.namespace, files, base.complete_scopes, generation,
+        acknowledged_generation, base.source_coverage, base.unsupported_inputs)

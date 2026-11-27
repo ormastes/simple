@@ -1,0 +1,52 @@
+# AUTHORED_NOT_RUN. Genuine installed service unit only; no provisioning, WAL
+# initialization, engine execution, fabricated PID or fake native owner.
+# @req REQ-LINUX-WORKLOAD-LOWER-003
+# @req REQ-LINUX-WORKLOAD-LOWER-004
+use std.spec.{describe, it, expect, step, fail}
+use std.nogc_sync_mut.io.linux_installed_fresh_epoch_owner_v1.*
+
+var lower_context_preparations_v2: [LinuxInstalledFreshEpochOwnerV1] = []
+var lower_context_successors_v2: [LinuxFreshEpochSuccessorCustodyV1] = []
+
+describe "Actual retained Linux workload context has supporting custody only":
+    it "observes installed machine boot and architecture and invalidates closed aliases":
+        step("Open actual fixed installed profiles and retain every cleanup-bearing result")
+        val preparation = match linux_installed_fresh_epoch_open_v1():
+            case LinuxFreshEpochOpenV1.Ready(owner):
+                lower_context_preparations_v2.push(owner)
+                owner
+            case LinuxFreshEpochOpenV1.CleanupRequired(owner, reason):
+                lower_context_preparations_v2.push(owner)
+                val close = owner.close_v1()
+                fail("actual preparation unavailable:" + reason + ":closed=" + str(close.closed) + ":" + close.error)
+                return
+            case LinuxFreshEpochOpenV1.Rejected(reason):
+                fail("administrator-provisioned fixture required:" + reason)
+                return
+        val before = preparation.current_v1().unwrap()
+        step("Transfer supporting custody without opening a machine writer or acquiring admission")
+        val transition = preparation.consume_preparation_v1()
+        if transition.successor.is_none():
+            val close = preparation.close_v1()
+            fail("actual successor unavailable:" + transition.error + ":closed=" + str(close.closed))
+            return
+        val successor = transition.successor.unwrap()
+        lower_context_successors_v2.push(successor)
+        val alias = successor
+        val context = successor.current_host_context_v2()
+        if context.is_err():
+            val close = successor.close_v1()
+            fail("actual native context unavailable:" + context.unwrap_err() + ":closed=" + str(close.closed))
+            return
+        expect(context.unwrap().native_machine_id.byte_len()).to_equal(32)
+        expect(context.unwrap().native_boot_id.byte_len()).to_equal(36)
+        expect(["x86_64", "aarch64"].contains(context.unwrap().architecture)).to_equal(true)
+        expect(context.unwrap().owner_generation).to_equal(before.owner_generation)
+        expect(successor.current_v1().unwrap().partition_identity_digest).to_equal(before.partition_identity_digest)
+        expect(alias.current_host_context_v2().unwrap()).to_equal(context.unwrap())
+        step("Close actual observation owners once; a copied alias cannot recover current context")
+        val close = successor.close_v1()
+        expect(close.closed).to_equal(true)
+        expect(close.owner.is_none()).to_equal(true)
+        expect(alias.current_host_context_v2().is_err()).to_equal(true)
+        expect(alias.close_v1().closed).to_equal(true)

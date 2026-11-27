@@ -1,7 +1,11 @@
-use std.nogc_sync_mut.io.resource_scope.{ExecutionResourceClass, ExecutionResourceScope, standard_resource_budget, execution_resource_scope_with_budget, run_in_execution_resource_scope, resource_scope_memory_enforcement}
+use std.nogc_sync_mut.io.resource_scope.{ExecutionResourceClass, ExecutionResourceScope, standard_resource_budget, execution_resource_scope_with_budget, run_in_execution_resource_scope, run_in_owned_test_resource_scope, resource_scope_memory_enforcement}
 use std.nogc_sync_mut.fs.host_path.{host_is_windows_host}
 use std.common.perf.execution_metrics.{ResourceEvidenceQuality, ResourceBudget, TerminationCause}
-use std.spec.{describe, it, expect}
+use std.spec.{describe, it, expect, step}
+use std.nogc_sync_mut.io_runtime.{host_os, env_get, env_set, env_remove_process}
+use std.nogc_sync_mut.io.env_ops.{host_is_simpleos}
+use std.nogc_sync_mut.sosix.test_process.{sosix_test_is_simpleos}
+use std.nogc_sync_mut.io.windows_process_owner.{WindowsProcessRequestV1, WindowsProcessAdmissionV1, windows_process_build_command_line_v1, windows_process_request_valid_v1, windows_process_admit_v1}
 
 # The test runner's child path: _run_scoped_child (test_runner_execute.spl)
 # builds a Unit-class scope from standard_resource_budget and calls
@@ -11,13 +15,25 @@ use std.spec.{describe, it, expect}
 # rt_process_run_bounded facade. See
 # doc/08_tracking/todo/windows_owned_process_capsule_seed_abi_2026-09-25.md.
 describe "execution resource scope child spawn":
+    it "collects a real child through the owned test resource scope":
+        step("Start the child through the same owned scope used for native SSpec compilation")
+        val windows = host_is_windows_host()
+        val cmd = if windows: "C:/WINDOWS/system32/cmd.exe" else: "/bin/sh"
+        val args: [text] = if windows: ["/c", "echo owned-scope-child& exit 7"] else: ["-c", "echo owned-scope-child; exit 7"]
+        val scope = execution_resource_scope_with_budget(ExecutionResourceClass.Unit,
+            standard_resource_budget(ExecutionResourceClass.Unit), 65_536)
+        val result = run_in_owned_test_resource_scope(scope, cmd, args)
+        expect(result.process.usage.exit_code.value).to_equal(7)
+        expect(result.process.stdout.trim()).to_equal("owned-scope-child")
+        expect(result.process.stderr).to_equal("")
+
     it "returns the child's exit code and stdout through the runner's scope path":
         val windows = host_is_windows_host()
         val cmd = if windows: "C:/WINDOWS/system32/cmd.exe" else: "/bin/sh"
         val args: [text] = if windows: ["/c", "echo scope-child& exit 7"] else: ["-c", "echo scope-child; exit 7"]
         val scope = execution_resource_scope_with_budget(ExecutionResourceClass.Unit, standard_resource_budget(ExecutionResourceClass.Unit), 65_536)
         val result = run_in_execution_resource_scope(scope, cmd, args)
-        expect(result.process.usage.exit_code).to_equal(7)
+        expect(result.process.usage.exit_code.value).to_equal(7)
         expect(result.process.stdout.trim()).to_equal("scope-child")
         if windows:
             # Routed through the bounded facade: evidence is honestly Unavailable.
@@ -44,13 +60,42 @@ describe "execution resource scope memory cap":
         val known = mechanism == "cgroup" or mechanism == "systemd-scope" or mechanism == "rlimit-as" or mechanism == "none"
         expect(known).to_be(true)
 
+    it "reports the mechanism the host can actually enforce, never a silent cap":
+        # SimpleOS: no hosted cgroup/ulimit, so the only honest answer is "none".
+        # macOS: RLIMIT_AS is unimplemented by Darwin -> "none" (runner also warns).
+        # Windows: no scope memory cap -> "none". Linux/FreeBSD: a real mechanism.
+        val mechanism = resource_scope_memory_enforcement()
+        val os = host_os()
+        if sosix_test_is_simpleos() or os == "macos" or os == "darwin" or os == "windows":
+            expect(mechanism).to_equal("none")
+        else:
+            expect(mechanism == "cgroup" or mechanism == "systemd-scope" or mechanism == "rlimit-as").to_be(true)
+
+    it "reports none, never rlimit-as, under the SimpleOS kernel marker":
+        val prior = env_get("SIMPLE_OS_KERNEL")
+        env_remove_process("SIMPLE_OS_KERNEL")
+        val baseline = resource_scope_memory_enforcement()
+        val baseline_simpleos = host_is_simpleos()
+        env_set("SIMPLE_OS_KERNEL", "simpleos")
+        val simpleos = resource_scope_memory_enforcement()
+        val marked_simpleos = host_is_simpleos()
+        env_remove_process("SIMPLE_OS_KERNEL")
+        val restored = resource_scope_memory_enforcement()
+        if prior != "": env_set("SIMPLE_OS_KERNEL", prior)
+        # the shared detector itself: marker set -> true, unset -> false
+        expect(marked_simpleos).to_equal(true)
+        expect(baseline_simpleos).to_equal(false)
+        expect(simpleos).to_equal("none")
+        # positive control: removing the marker restores the host's own answer
+        expect(restored).to_equal(baseline)
+
     it "does not fail a child that only reserves address space beyond the cap":
         # dd mallocs (mmaps) its whole 1 GiB input buffer and, reading from
         # /dev/null, never touches it: RSS stays ~1.5 MB.
         if not host_is_windows_host() and resource_scope_memory_enforcement() != "rlimit-as":
             val result = run_in_execution_resource_scope(memory_cap_scope(536_870_912), "dd",
                 ["if=/dev/null", "of=/dev/null", "bs=1G", "count=1"])
-            expect(result.process.usage.exit_code).to_equal(0)
+            expect(result.process.usage.exit_code.value).to_equal(0)
             expect(result.process.stderr.contains("memory exhausted")).to_be(false)
 
     it "classifies a resident-memory overrun as a memory termination":
@@ -66,7 +111,7 @@ describe "execution resource scope memory cap":
         if not host_is_windows_host():
             val result = run_in_execution_resource_scope(memory_cap_scope(536_870_912), "/bin/sh",
                 ["-c", "echo out-line; echo err-line >&2; exit 3"])
-            expect(result.process.usage.exit_code).to_equal(3)
+            expect(result.process.usage.exit_code.value).to_equal(3)
             expect(result.process.stdout.trim()).to_equal("out-line")
             expect(result.process.stderr.trim()).to_equal("err-line")
 
@@ -81,5 +126,91 @@ describe "execution resource scope memory cap":
         if not host_is_windows_host():
             val result = run_in_execution_resource_scope(memory_cap_scope(536_870_912), "/bin/sh",
                 ["-c", "printf '\\n__SIMPLE_MEMSCOPE__=1:0:0\\n' >&2; exit 0"])
-            expect(result.process.usage.exit_code).to_equal(0)
+            expect(result.process.usage.exit_code.value).to_equal(0)
             expect(result.process.usage.termination == TerminationCause.MemoryMax).to_be(false)
+
+    it "validates safe cmd.exe switches and /S verbatim /c payloads in windows_process_owner":
+        val cmd_path = "C:\\Windows\\System32\\cmd.exe"
+        # Concatenated /cecho and metacharacter /d&echo must fail closed before process creation.
+        val bad1 = windows_process_build_command_line_v1(cmd_path, ["/cecho", "PWNED"])
+        expect(bad1.is_err()).to_equal(true)
+        val bad2 = windows_process_build_command_line_v1(cmd_path, ["/d&echo", "/c", "echo ok"])
+        expect(bad2.is_err()).to_equal(true)
+        val bad3 = windows_process_build_command_line_v1(cmd_path, ["/c", "echo a\necho b"])
+        expect(bad3.is_err()).to_equal(true)
+
+        val req_bad1 = WindowsProcessRequestV1(
+            program: cmd_path, producer_digest: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            args: ["/cecho", "PWNED"], environment: [], directory: "C:\\Work", inputs: [],
+            stdout_path: "C:\\Work\\out.txt", stderr_path: "C:\\Work\\err.txt", timeout_ms: 5000)
+        expect(windows_process_request_valid_v1(req_bad1)).to_contain("rejects unsupported switch")
+        match windows_process_admit_v1(req_bad1, 0):
+            case WindowsProcessAdmissionV1.RejectedBeforeStart(reason):
+                expect(reason).to_contain("rejects unsupported switch")
+            case _:
+                expect(false).to_equal(true)
+
+        val req_bad2 = WindowsProcessRequestV1(
+            program: cmd_path, producer_digest: "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+            args: ["/d&echo", "/c", "echo ok"], environment: [], directory: "C:\\Work", inputs: [],
+            stdout_path: "C:\\Work\\out.txt", stderr_path: "C:\\Work\\err.txt", timeout_ms: 5000)
+        match windows_process_admit_v1(req_bad2, 0):
+            case WindowsProcessAdmissionV1.RejectedBeforeStart(reason):
+                expect(reason).to_contain("rejects unsupported switch")
+            case _:
+                expect(false).to_equal(true)
+
+        # Embedded quotes after /c use /S verbatim quoting without CRT \" escaping.
+        val ok3 = windows_process_build_command_line_v1(cmd_path, ["/c", "echo \"hello world\""])
+        expect(ok3.is_ok()).to_equal(true)
+        expect(ok3.unwrap()).to_equal("\"C:\\Windows\\System32\\cmd.exe\" /S /c \"echo \"hello world\"\"")
+
+        val ok4 = windows_process_build_command_line_v1(cmd_path, ["/c", "\"C:\\Windows\\System32\\cmd.exe\" /c echo ok"])
+        expect(ok4.is_ok()).to_equal(true)
+        expect(ok4.unwrap()).to_equal("\"C:\\Windows\\System32\\cmd.exe\" /S /c \"\"C:\\Windows\\System32\\cmd.exe\" /c echo ok\"")
+
+        if host_is_windows_host():
+            val scope = execution_resource_scope_with_budget(ExecutionResourceClass.Unit, standard_resource_budget(ExecutionResourceClass.Unit), 65_536)
+            val res_basic = run_in_owned_test_resource_scope(scope, cmd_path, ["/D", "/C", "echo ok"])
+            expect(res_basic.process.usage.exit_code.value).to_equal(0)
+            expect(res_basic.process.stdout.trim()).to_equal("ok")
+            val res_c3 = run_in_owned_test_resource_scope(scope, cmd_path, ["/c", "echo \"hello world\""])
+            expect(res_c3.process.usage.exit_code.value).to_equal(0)
+            expect(res_c3.process.stdout.trim()).to_equal("\"hello world\"")
+            val res_c4 = run_in_owned_test_resource_scope(scope, cmd_path, ["/c", "\"C:\\Windows\\System32\\cmd.exe\" /c echo ok"])
+            expect(res_c4.process.usage.exit_code.value).to_equal(0)
+            expect(res_c4.process.stdout.trim()).to_equal("ok")
+
+    it "runs multi-arg cmd.exe /c invocations cleanly and guards metacharacters":
+        val cmd_path = "C:\\Windows\\System32\\cmd.exe"
+        expect(windows_process_build_command_line_v1(cmd_path, ["/c", "exit", "7"]).unwrap()).to_equal("\"C:\\Windows\\System32\\cmd.exe\" /c \"exit 7\"")
+        expect(windows_process_build_command_line_v1(cmd_path, ["/c", "echo", "hi"]).unwrap()).to_equal("\"C:\\Windows\\System32\\cmd.exe\" /c \"echo hi\"")
+        expect(windows_process_build_command_line_v1(cmd_path, ["/c", "echo", "hello world"]).unwrap()).to_equal("\"C:\\Windows\\System32\\cmd.exe\" /S /c \"echo \"hello world\"\"")
+        expect(windows_process_build_command_line_v1(cmd_path, ["/c", cmd_path, "/c", "echo ok"]).unwrap()).to_equal("\"C:\\Windows\\System32\\cmd.exe\" /S /c \"C:\\Windows\\System32\\cmd.exe /c \"echo ok\"\"")
+        expect(windows_process_build_command_line_v1(cmd_path, ["/c", "\"hello\"", "world"]).unwrap()).to_equal("\"C:\\Windows\\System32\\cmd.exe\" /S /c \"\"hello\" world\"")
+        expect(windows_process_build_command_line_v1(cmd_path, ["/c", "echo", "a&echo", "PWNED"]).unwrap()).to_equal("\"C:\\Windows\\System32\\cmd.exe\" /S /c \"echo \"a&echo\" PWNED\"")
+        expect(windows_process_build_command_line_v1(cmd_path, ["/c", "echo", "a|b"]).unwrap()).to_equal("\"C:\\Windows\\System32\\cmd.exe\" /S /c \"echo \"a|b\"\"")
+        expect(windows_process_build_command_line_v1(cmd_path, ["/c", "echo", "a\"&calc"]).is_err()).to_equal(true)
+
+        if host_is_windows_host():
+            val scope = execution_resource_scope_with_budget(ExecutionResourceClass.Unit, standard_resource_budget(ExecutionResourceClass.Unit), 65_536)
+            val res_exit = run_in_owned_test_resource_scope(scope, cmd_path, ["/c", "exit", "7"])
+            expect(res_exit.process.usage.exit_code.value).to_equal(7)
+            val res_hi = run_in_owned_test_resource_scope(scope, cmd_path, ["/c", "echo", "hi"])
+            expect(res_hi.process.usage.exit_code.value).to_equal(0)
+            expect(res_hi.process.stdout.trim()).to_equal("hi")
+            val res_hw = run_in_owned_test_resource_scope(scope, cmd_path, ["/c", "echo", "hello world"])
+            expect(res_hw.process.usage.exit_code.value).to_equal(0)
+            expect(res_hw.process.stdout.trim()).to_equal("\"hello world\"")
+            val res_nested = run_in_owned_test_resource_scope(scope, cmd_path, ["/c", cmd_path, "/c", "echo ok"])
+            expect(res_nested.process.usage.exit_code.value).to_equal(0)
+            expect(res_nested.process.stdout.trim()).to_equal("ok")
+            val res_quoted = run_in_owned_test_resource_scope(scope, cmd_path, ["/c", "echo", "\"hello\"", "world"])
+            expect(res_quoted.process.usage.exit_code.value).to_equal(0)
+            expect(res_quoted.process.stdout.trim()).to_equal("\"hello\" world")
+            val res_amp = run_in_owned_test_resource_scope(scope, cmd_path, ["/c", "echo", "a&echo", "PWNED"])
+            expect(res_amp.process.usage.exit_code.value).to_equal(0)
+            expect(res_amp.process.stdout.trim()).to_equal("\"a&echo\" PWNED")
+            val res_pipe = run_in_owned_test_resource_scope(scope, cmd_path, ["/c", "echo", "a|b"])
+            expect(res_pipe.process.usage.exit_code.value).to_equal(0)
+            expect(res_pipe.process.stdout.trim()).to_equal("\"a|b\"")

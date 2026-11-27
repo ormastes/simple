@@ -1,0 +1,39 @@
+use std.spec.*
+use app.compiler_entrypoint.inventory_scratch.{compiler_inventory_file_event_cost_v1}
+use std.nogc_sync_mut.io.time_ops.{time_now_unix_micros}
+use std.nogc_sync_mut.io.dir_ops.{dir_list}
+
+# Bug: coverage_test_flag_times_out_and_mcdc_no_probes_windows_2026-11-03
+# (remaining item: cold SCV inventory init >3.8 GB RSS / 5 min CPU).
+# Measured 2026-11-07 on the Windows seed, 45k-file checkout, whole cold init
+# (`compiler_inventory_refresh_v1`, cold_init=true, roots src+test+examples/10_tooling):
+# 80 s wall, ~460 MB peak working set (was 21 GB / 342 CPU-s before streaming,
+# 3.8 GB+ in the coverage report). This guard pins the per-file contract that
+# keeps it linear: each listed file is reduced to a digest-only event (no
+# retained text) at ~1 ms/file; an order-of-magnitude regression fails here
+# without needing a 45k-file walk.
+
+describe "cold inventory init stays streaming and cheap per file":
+    it "reduces real sources to digest-only events within a per-file budget":
+        val dir = "src/compiler/00.common"
+        var n = 0
+        var longest_us = 0
+        val t0 = time_now_unix_micros()
+        for f in (dir_list(dir) ?? []):
+            if f.ends_with(".spl"):
+                val p = dir + "/" + f
+                val s = time_now_unix_micros()
+                val ev = compiler_inventory_file_event_cost_v1("create", p, p, nil)
+                val took = time_now_unix_micros() - s
+                if took > longest_us:
+                    longest_us = took
+                expect(ev != nil).to_equal(true)
+                expect(ev!.byte_count).to_be_greater_than(0)
+                expect(ev!.content_digest.len()).to_equal(64)
+                n = n + 1
+        val total_ms = (time_now_unix_micros() - t0) / 1000
+        expect(n).to_be_greater_than(20)
+        # ~1 ms/file measured; 50 ms/file average is a 50x regression.
+        expect(total_ms).to_be_less_than(n * 50)
+        # No single file may take > 5 s (a content-retaining or quadratic path would).
+        expect(longest_us).to_be_less_than(5000000)

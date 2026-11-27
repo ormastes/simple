@@ -235,3 +235,21 @@ text-array-free key encoding is feasible for this cache's key shape
 (identity+generation+font_size+codepoint+render_config — mostly not
 representable as small integers without a lookup step of its own).
 
+
+## Triage 2026-11-25 (worktree work/p2w2-ah-20261125, Windows host) — STILL OPEN
+
+- The deliberately-RED repro spec is intact and unchanged:
+  `test/01_unit/language/text_array_index_readback_spec.spl` still contains
+  the free-function-push shape (`val _indirect_keys: [text] = []` at :39,
+  `_store_text` push at :42-43, assertions at :61-63) that fails on the
+  interpreter lane per the T11 re-investigation above.
+- Root cause stands as recorded: an interpreter-only free-function
+  module-global write-back loss, with no bounded fix location identified —
+  it needs an interpreter/codegen investigation (stale/cloned module slot),
+  which is beyond a bounded P2 fix.
+- Could not re-execute the spec on this host: `bin/simple.exe test` fails
+  repo-wide at release/1.0.0 HEAD with
+  `unknown decorator '@representation_boundary'` (pinned seed predates
+  cfd89933699). Verification here is by source inspection only.
+- Status stays OPEN (P2). The never-landed glyph-raster cache remains
+  reverted; do not land it as-is per the Recommendation above.

@@ -11,6 +11,7 @@
 mod aggregate_layout;
 mod archive;
 mod config;
+mod piped_observer;
 mod compiler;
 mod discovery;
 pub(crate) mod inline_asm_emit;
@@ -32,6 +33,8 @@ mod mangle;
 mod module_global_init;
 mod stubs;
 mod tools;
+mod coff_partial_link;
+mod coff_weak_projection;
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
@@ -214,10 +217,39 @@ fn native_object_staging_dir(cache_base_dir: &Path, cache_dir: &Path) -> Result<
         .map_err(|e| format!("create native object staging parent {}: {e}", staging_parent.display()))?;
     std::fs::create_dir_all(cache_dir)
         .map_err(|e| format!("create native object cache {}: {e}", cache_dir.display()))?;
+    cleanup_stale_native_object_staging_dirs(staging_parent, Duration::from_secs(24 * 60 * 60));
     tempfile::Builder::new()
         .prefix("native-objects-")
         .tempdir_in(staging_parent)
         .map_err(|e| format!("create native object staging in {}: {e}", staging_parent.display()))
+}
+
+fn cleanup_stale_native_object_staging_dirs(staging_parent: &Path, max_age: Duration) {
+    let Ok(entries) = std::fs::read_dir(staging_parent) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if !name.starts_with("native-objects-") {
+            continue;
+        }
+        let Ok(meta) = entry.metadata() else {
+            continue;
+        };
+        if !meta.is_dir() {
+            continue;
+        }
+        let Ok(modified) = meta.modified() else {
+            continue;
+        };
+        if now.duration_since(modified).is_ok_and(|age| age > max_age) {
+            let _ = std::fs::remove_dir_all(&path);
+        }
+    }
 }
 
 /// Read a cache entry only when it is a parseable relocatable object.
@@ -227,8 +259,11 @@ fn native_object_staging_dir(cache_base_dir: &Path, cache_dir: &Path) -> Result<
 /// Invalid entries are left in place: another builder may have atomically
 /// published a valid object after our read, so unlinking here would race it.
 fn expected_cached_object_identity() -> (Architecture, BinaryFormat) {
+    object_identity_for_target(effective_target())
+}
+
+fn object_identity_for_target(target: simple_common::target::Target) -> (Architecture, BinaryFormat) {
     use simple_common::target::{TargetArch, TargetOS};
-    let target = effective_target();
     let architecture = match target.arch {
         TargetArch::X86_64 => Architecture::X86_64,
         TargetArch::Aarch64 => Architecture::Aarch64,
@@ -248,26 +283,37 @@ fn expected_cached_object_identity() -> (Architecture, BinaryFormat) {
     (architecture, format)
 }
 
-fn read_usable_cached_object(path: &Path) -> Option<Vec<u8>> {
-    let Ok(bytes) = std::fs::read(path) else {
-        return None;
-    };
+fn is_usable_cached_object_bytes(bytes: &[u8]) -> bool {
     let (expected_arch, expected_format) = expected_cached_object_identity();
-    let usable = object::File::parse(bytes.as_slice())
+    object::File::parse(bytes)
         .map(|object| {
             object.kind() == ObjectKind::Relocatable
                 && object.architecture() == expected_arch
                 && object.format() == expected_format
         })
-        .unwrap_or(false);
-    usable.then_some(bytes)
+        .unwrap_or(false)
+}
+
+#[cfg_attr(not(test), allow(dead_code))]
+fn read_usable_cached_object(path: &Path) -> Option<Vec<u8>> {
+    let Ok(bytes) = std::fs::read(path) else {
+        return None;
+    };
+    is_usable_cached_object_bytes(bytes.as_slice()).then_some(bytes)
+}
+
+fn is_usable_cached_object(path: &Path) -> bool {
+    let Ok(bytes) = std::fs::read(path) else {
+        return false;
+    };
+    is_usable_cached_object_bytes(bytes.as_slice())
 }
 
 /// Initialize the rayon global thread pool with appropriate stack size and
 /// thread count for compilation workloads.
 ///
-/// Compilation threads need large stacks (16 MiB) because monomorphization,
-/// HIR lowering, and codegen can produce deep call stacks. Without this,
+/// Compilation threads need large stacks (16 MiB) because HIR lowering
+/// and codegen can produce deep call stacks. Without this,
 /// rayon's default 2 MiB stacks can overflow on complex modules.
 ///
 /// The pool is initialized exactly once per process via `std::sync::Once`.
@@ -582,6 +628,8 @@ pub(crate) struct ModuleImports {
     /// with `ty=ANY` because the enum reached the file via re-export but
     /// not via a direct `use` chain that triggered `preregister_imported_type_names`).
     pub enum_defs: EnumDefs,
+    /// Bare enum names declared by several modules (merged `enum_defs` rows).
+    pub duplicate_enum_names: std::sync::Arc<std::collections::HashSet<String>>,
     /// Mangled enum owner to stable dotted runtime identity.
     pub enum_runtime_names: std::sync::Arc<std::collections::HashMap<String, String>>,
     /// Set of mangled names that correspond to module-level data (`val`/`var`/
@@ -604,6 +652,9 @@ pub(crate) struct ModuleImports {
     /// enough that the "most fields wins" ambiguity heuristic in
     /// `get_field_info` is unlikely to mis-resolve — currently set only for
     /// `--entry-closure` builds.
+    /// Canonical `module_prefix__Type` -> declared field `= default` exprs
+    /// (same owner keys as `struct_defs`).
+    pub struct_field_defaults: std::sync::Arc<std::collections::HashMap<String, std::collections::HashMap<String, simple_parser::ast::Expr>>>,
     pub populate_global_struct_defs: bool,
     /// When true, pass `enum_defs` to the HIR lowerer so cross-module enum
     /// receivers (`TypeKind.Inferred`, `TokenKind.KwPub`, etc.) resolve via
@@ -782,6 +833,7 @@ pub struct NativeProjectBuilder {
     pub(crate) config: NativeBuildConfig,
     /// Entry file whose `main` becomes `spl_main` (the program entry point).
     pub(crate) entry_file: Option<PathBuf>,
+    piped_observer: piped_observer::PipedObserverSelection,
 }
 
 impl NativeProjectBuilder {
@@ -802,6 +854,7 @@ impl NativeProjectBuilder {
             output,
             config: NativeBuildConfig::default(),
             entry_file: None,
+            piped_observer: piped_observer::PipedObserverSelection::CoreC,
         }
     }
 
@@ -943,6 +996,7 @@ impl NativeProjectBuilder {
     /// Returns an error when file discovery, source loading, incremental cache
     /// setup, compilation, or linking fails.
     pub fn build(mut self) -> Result<NativeBuildResult, String> {
+        self.validate_piped_observer_lane()?;
         if let Ok(backend) = std::env::var("SIMPLE_BACKEND") {
             if !matches!(backend.as_str(), "llvm" | "cranelift") {
                 return Err(format!(
@@ -1129,7 +1183,6 @@ impl NativeProjectBuilder {
         }
 
         // 4. Read all source files and determine dirty set
-        let compile_start = Instant::now();
         let step_start = Instant::now();
         // 4b. Discovery phase (hoisted above the dirty-set determination so the
         // opt-in safe-incremental object cache key can fold in every cross-module
@@ -1148,6 +1201,14 @@ impl NativeProjectBuilder {
                 step_start.elapsed().as_secs_f64()
             );
         }
+        // The parse above ran on the rayon workers and `parsed` was dropped on
+        // this thread, so every closure AST is now a cross-thread free parked
+        // on an idle worker's pages (~1.1 GB resident for a 1598-module
+        // closure, tracked live heap 67 MB). Collect on every worker and here
+        // before the per-file compile phase builds on top of it.
+        rayon::broadcast(|_| crate::mem_trace::release_thread_heap());
+        crate::mem_trace::release_thread_heap();
+        crate::mem_trace::snapshot("native-build: after build_import_map");
         if let Some(collision) = &result.enum_runtime_collision {
             return Err(collision.clone());
         }
@@ -1205,11 +1266,13 @@ impl NativeProjectBuilder {
                 struct_module_owners: std::sync::Arc::new(result.struct_module_owners),
                 duplicate_struct_defs: std::sync::Arc::new(result.duplicate_struct_defs),
                 enum_defs: std::sync::Arc::new(result.enum_defs),
+                duplicate_enum_names: std::sync::Arc::new(result.duplicate_enum_names),
                 enum_runtime_names: std::sync::Arc::new(result.enum_runtime_names),
                 data_exports: std::sync::Arc::new(result.data_exports),
                 fn_arities: std::sync::Arc::new(result.fn_arities),
                 fn_return_types: std::sync::Arc::new(result.fn_return_types),
                 method_param_defaults: std::sync::Arc::new(result.method_param_defaults),
+                struct_field_defaults: std::sync::Arc::new(result.struct_field_defaults),
                 populate_global_struct_defs: true,
                 populate_global_enum_defs: true,
             }
@@ -1228,11 +1291,13 @@ impl NativeProjectBuilder {
                 struct_module_owners: std::sync::Arc::new(std::collections::HashMap::new()),
                 duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
                 enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+                duplicate_enum_names: std::sync::Arc::new(std::collections::HashSet::new()),
                 enum_runtime_names: std::sync::Arc::new(std::collections::HashMap::new()),
                 data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
                 fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
                 fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
                 method_param_defaults: std::sync::Arc::new(std::collections::HashMap::new()),
+                struct_field_defaults: std::sync::Arc::new(std::collections::HashMap::new()),
                 populate_global_struct_defs: false,
                 populate_global_enum_defs: false,
             }
@@ -1262,11 +1327,7 @@ impl NativeProjectBuilder {
                 .unwrap_or(0);
             let triple = effective_target().triple_str().to_string();
             Some(GlobalBuildFingerprint {
-                producer: std::env::current_exe()
-                    .ok()
-                    .and_then(|path| std::fs::read(path).ok())
-                    .map(|bytes| hash_one(&bytes))
-                    .unwrap_or(0),
+                producer: compiler_fingerprint(),
                 opt_level: hash_one(&self.config.opt_level.as_str()),
                 entry_closure: hash_one(&self.config.entry_closure),
                 target: hash_one(&triple),
@@ -1292,63 +1353,63 @@ impl NativeProjectBuilder {
         let effective_backend = self.config.backend.as_str();
 
         // Determine which files need recompilation via content hash
-        // `Arc<str>` so the dirty-set shares source text with `file_sources`
-        // instead of cloning every module's source again.
+        // `Arc<str>` so the dirty-set shares source text instead of cloning.
+        // Evaluate slice digests and cache checks in parallel across workers, and
+        // point directly to validated cache objects instead of duplicating `.o`
+        // bytes into `temp_dir`.
         let mut to_compile: Vec<(usize, PathBuf, std::sync::Arc<str>, Option<PathBuf>)> = Vec::new();
         let mut cached_objects: Vec<(usize, PathBuf)> = Vec::new();
 
+        enum DirtyEntry {
+            Skip,
+            Cached(usize, PathBuf),
+            Compile(usize, PathBuf, std::sync::Arc<str>, Option<PathBuf>),
+        }
+
         if use_incremental {
-            // Canonicalize entry early so we can force-recompile the entry file
+            use rayon::prelude::*;
             let canon_entry_for_cache: Option<PathBuf> = self.entry_file.as_ref().map(|p| safe_canonicalize(p));
-            for (i, (path, source)) in file_sources.iter().enumerate() {
-                // Skip symlink aliases -- only compile each physical file once
-                if !compile_indices.contains(&i) {
-                    continue;
-                }
-                // Always recompile the entry file (its main->spl_main renaming depends on is_entry)
-                let is_entry = is_entry_file(path, &canon_entry_for_cache);
-                let cache_eligible = object_cache_eligible(is_entry, source);
-                let mut immediate_cache = None;
-                if cache_eligible {
-                    let per_file_root = self.effective_source_root_for(path);
-                    let module_prefix = crate::codegen::common_backend::module_prefix_from_path(path, &per_file_root);
-                    let base_hash = object_cache_key(
-                        source,
-                        is_entry,
-                        effective_backend,
-                        self.config.no_mangle,
-                        &module_prefix,
-                        self.config.opt_level,
-                    );
-                    // Fold in the whole-build fingerprint and THIS module's
-                    // interface slice: every cross-module row the module's
-                    // source names (and the rows those rows' payloads name).
-                    // A dependency this object was compiled against changing
-                    // misses the cache; a change the module cannot observe
-                    // hits it. See `InterfaceSliceIndex`.
-                    let slice_digest = slice_index
-                        .as_ref()
-                        .map(|index| index.digest_for_source(source))
-                        .unwrap_or(0);
-                    let hash = hash_one(&(base_hash, global_fp_combined, slice_digest));
-                    let cached_o = objects_dir.join(format!("{:016x}.o", hash));
-                    if let Some(cached_bytes) = read_usable_cached_object(&cached_o) {
-                        // Cache hit: use the bytes already read for validation
-                        // instead of issuing a second filesystem read via copy.
-                        let obj_path = temp_dir_path.join(format!("mod_{}.o", i));
-                        if std::fs::write(&obj_path, cached_bytes).is_ok() {
-                            cached_objects.push((i, obj_path));
-                            continue;
-                        }
+            let entries: Vec<DirtyEntry> = file_sources
+                .par_iter()
+                .enumerate()
+                .map(|(i, (path, source))| {
+                    if !compile_indices.contains(&i) {
+                        return DirtyEntry::Skip;
                     }
-                    // Persist every cache-eligible object as soon as its compile
-                    // succeeds. The key already includes the module's cross-module
-                    // dependency slice, so mangled modules are just as safe to make
-                    // durable here as no-mangle modules. Entry objects and
-                    // inline-asm sidecars remain excluded above.
-                    immediate_cache = Some(cached_o);
+                    let is_entry = is_entry_file(path, &canon_entry_for_cache);
+                    let cache_eligible = object_cache_eligible(is_entry, source);
+                    let mut immediate_cache = None;
+                    if cache_eligible {
+                        let per_file_root = self.effective_source_root_for(path);
+                        let module_prefix = crate::codegen::common_backend::module_prefix_from_path(path, &per_file_root);
+                        let base_hash = object_cache_key(
+                            source,
+                            is_entry,
+                            effective_backend,
+                            self.config.no_mangle,
+                            &module_prefix,
+                            self.config.opt_level,
+                        );
+                        let slice_digest = slice_index
+                            .as_ref()
+                            .map(|index| index.digest_for_source(source))
+                            .unwrap_or(0);
+                        let hash = hash_one(&(base_hash, global_fp_combined, slice_digest));
+                        let cached_o = objects_dir.join(format!("{:016x}.o", hash));
+                        if is_usable_cached_object(&cached_o) {
+                            return DirtyEntry::Cached(i, cached_o);
+                        }
+                        immediate_cache = Some(cached_o);
+                    }
+                    DirtyEntry::Compile(i, path.clone(), std::sync::Arc::from(source.as_str()), immediate_cache)
+                })
+                .collect();
+            for entry in entries {
+                match entry {
+                    DirtyEntry::Skip => {}
+                    DirtyEntry::Cached(i, path) => cached_objects.push((i, path)),
+                    DirtyEntry::Compile(i, path, src, cache) => to_compile.push((i, path, src, cache)),
                 }
-                to_compile.push((i, path.clone(), std::sync::Arc::from(source.as_str()), immediate_cache));
             }
         } else {
             for (i, (path, source)) in file_sources.iter().enumerate() {
@@ -1369,6 +1430,17 @@ impl NativeProjectBuilder {
                 use_incremental,
                 step_start.elapsed().as_secs_f64()
             );
+            if let Some(ref gfp) = global_fp {
+                let prev = std::fs::read_to_string(cache_dir.join("incremental_manifest.txt"))
+                    .ok()
+                    .and_then(|line| GlobalBuildFingerprint::from_manifest_line(&line));
+                eprintln!(
+                    "[native-rust-trace] step 4 global fingerprint: {} (dirty {}/{})",
+                    gfp.describe_change(prev.as_ref()),
+                    to_compile.len(),
+                    to_compile.len() + cached_count
+                );
+            }
             for (idx, path, _, _) in to_compile.iter().take(12) {
                 eprintln!("  compile[{idx}]={}", path.display());
             }
@@ -1392,11 +1464,24 @@ impl NativeProjectBuilder {
         //  which modules are dirty.)
 
         // 5. Compile dirty files
+        let compile_start = Instant::now();
+        crate::mem_trace::snapshot("native-build: before compile");
         let results = if self.config.parallel {
             self.compile_entries_parallel(&to_compile, &temp_dir_path, &canonical_entry, &imports)
         } else {
             self.compile_entries_sequential(&to_compile, &temp_dir_path, &canonical_entry, &imports)
         };
+        if self.config.parallel {
+            rayon::broadcast(|_| {
+                compiler::clear_thread_local_compile_worker();
+                crate::interpreter::clear_parsed_source_cache();
+                crate::mem_trace::release_thread_heap();
+            });
+        }
+        compiler::clear_thread_local_compile_worker();
+        crate::interpreter::clear_parsed_source_cache();
+        crate::mem_trace::release_thread_heap();
+        crate::mem_trace::snapshot("native-build: after compile");
         let compile_time = compile_start.elapsed();
         if rust_trace {
             eprintln!("[native-rust-trace] step 5 compile: {:.3}s", compile_time.as_secs_f64());
@@ -1479,6 +1564,7 @@ impl NativeProjectBuilder {
         if let Some(security_registry_o) = self.generate_security_registry_init_object(&temp_dir_path, &file_sources)? {
             object_paths.push(security_registry_o);
         }
+        drop(file_sources);
 
         // 6. Cache writes happen atomically per successful module in the compile
         // workers. This intentionally leaves useful keyed objects behind when a
@@ -1519,7 +1605,7 @@ impl NativeProjectBuilder {
         let link_result = if self.config.emit_archive {
             self.archive_objects(&final_object_paths)
         } else {
-            self.link_objects(&final_object_paths, &imports)
+            self.link_objects(&temp_dir_path, &final_object_paths, &imports)
         };
         let link_time = link_start.elapsed();
 
@@ -1823,11 +1909,22 @@ fn compiler_fingerprint() -> u64 {
     static FINGERPRINT: OnceLock<u64> = OnceLock::new();
     *FINGERPRINT.get_or_init(|| {
         use std::hash::{Hash, Hasher};
+        use std::io::Read;
         let mut hasher = std::collections::hash_map::DefaultHasher::new();
         match std::env::current_exe() {
-            Ok(exe) => match std::fs::read(&exe) {
-                Ok(bytes) => {
-                    bytes.hash(&mut hasher);
+            Ok(exe) => match std::fs::File::open(&exe) {
+                Ok(mut file) => {
+                    if let Ok(meta) = file.metadata() {
+                        meta.len().hash(&mut hasher);
+                    }
+                    let mut buf = [0u8; 64 * 1024];
+                    loop {
+                        match file.read(&mut buf) {
+                            Ok(0) => break,
+                            Ok(n) => hasher.write(&buf[..n]),
+                            Err(_) => break,
+                        }
+                    }
                 }
                 Err(_) => {
                     if let Ok(meta) = std::fs::metadata(&exe) {
@@ -2219,10 +2316,42 @@ impl ModuleTokens {
 /// Parameter declarations (`fn f(k: i64)`) match too, which only widens the
 /// slice; top-level `val p: Pt` / field declarations do not.
 pub(crate) fn source_label_tokens(source: &str) -> std::collections::HashSet<String> {
-    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
-    let chars: Vec<char> = source.chars().collect();
     let mut out = std::collections::HashSet::new();
     let mut depth: usize = 0;
+    if source.is_ascii() {
+        let bytes = source.as_bytes();
+        let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+        let mut i = 0;
+        while i < bytes.len() {
+            if is_ident(bytes[i]) {
+                let start = i;
+                while i < bytes.len() && is_ident(bytes[i]) {
+                    i += 1;
+                }
+                if depth == 0 {
+                    continue;
+                }
+                let mut j = i;
+                while j < bytes.len() && (bytes[j] == b' ' || bytes[j] == b'\t') {
+                    j += 1;
+                }
+                let single_colon = j < bytes.len() && bytes[j] == b':' && bytes.get(j + 1) != Some(&b':');
+                if single_colon && !bytes[start].is_ascii_digit() {
+                    out.insert(source[start..i].to_string());
+                }
+            } else {
+                match bytes[i] {
+                    b'(' => depth += 1,
+                    b')' => depth = depth.saturating_sub(1),
+                    _ => {}
+                }
+                i += 1;
+            }
+        }
+        return out;
+    }
+    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
+    let chars: Vec<char> = source.chars().collect();
     let mut i = 0;
     while i < chars.len() {
         if is_ident(chars[i]) {
@@ -2288,8 +2417,35 @@ pub(crate) fn expand_fuzzy_tokens(tokens: std::collections::HashSet<String>) -> 
 /// `resolve_name_variants` looks up: `type_member` (type lowercased) and the
 /// fully normalized `typemember`.
 pub(crate) fn source_dotted_pair_tokens(source: &str) -> std::collections::HashSet<String> {
-    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
     let mut out = std::collections::HashSet::new();
+    if source.is_ascii() {
+        let bytes = source.as_bytes();
+        let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+        let mut i = 0;
+        let mut prev: Option<&str> = None;
+        while i < bytes.len() {
+            if is_ident(bytes[i]) {
+                let start = i;
+                while i < bytes.len() && is_ident(bytes[i]) {
+                    i += 1;
+                }
+                let run = &source[start..i];
+                if let Some(owner) = prev.take() {
+                    out.insert(format!("{}_{}", owner.to_lowercase(), run));
+                    out.insert(fuzzy_norm(&format!("{owner}{run}")));
+                }
+                if i < bytes.len() && bytes[i] == b'.' {
+                    prev = Some(run);
+                    i += 1;
+                }
+            } else {
+                prev = None;
+                i += 1;
+            }
+        }
+        return out;
+    }
+    let is_ident = |c: char| c.is_alphanumeric() || c == '_';
     let chars: Vec<char> = source.chars().collect();
     let mut i = 0;
     let mut prev: Option<String> = None;
@@ -2360,6 +2516,12 @@ pub(crate) struct InterfaceSliceIndex {
     /// changes stay granular. Drop this only once that registration is
     /// limited to the enums a module names.
     universal_tokens: Vec<String>,
+    /// Precomputed transitive closure of `universal_tokens` over
+    /// non-`member_only` edges. Every module's slice starts from this identical
+    /// baseline, avoiding O(N_modules * |universal_closure|) repeated BFS work.
+    universal_seen: std::collections::HashSet<String>,
+    universal_matched: Vec<u64>,
+    universal_member_only: std::collections::HashSet<String>,
 }
 
 impl InterfaceSliceIndex {
@@ -2367,6 +2529,9 @@ impl InterfaceSliceIndex {
         let mut index = InterfaceSliceIndex {
             by_name: std::collections::HashMap::new(),
             universal_tokens: Vec::new(),
+            universal_seen: std::collections::HashSet::new(),
+            universal_matched: Vec::new(),
+            universal_member_only: std::collections::HashSet::new(),
         };
         let sorted = |items: &[String]| {
             let mut v = items.to_vec();
@@ -2468,7 +2633,37 @@ impl InterfaceSliceIndex {
         }
         index.universal_tokens.sort();
         index.universal_tokens.dedup();
+        index.precompute_universal_closure();
         index
+    }
+
+    fn precompute_universal_closure(&mut self) {
+        let mut seen: std::collections::HashSet<String> = self.universal_tokens.iter().cloned().collect();
+        let mut queue: Vec<String> = self.universal_tokens.clone();
+        let mut matched: Vec<u64> = Vec::new();
+        let mut member_only_hits = std::collections::HashSet::new();
+        while let Some(token) = queue.pop() {
+            let Some(entries) = self.by_name.get(&token) else {
+                continue;
+            };
+            for entry in entries {
+                if entry.member_only {
+                    member_only_hits.insert(token.clone());
+                    continue;
+                }
+                matched.push(hash_one(&(&token, entry.digest)));
+                for extra in &entry.extra_tokens {
+                    if seen.insert(extra.clone()) {
+                        queue.push(extra.clone());
+                    }
+                }
+            }
+        }
+        matched.sort_unstable();
+        matched.dedup();
+        self.universal_seen = seen;
+        self.universal_matched = matched;
+        self.universal_member_only = member_only_hits;
     }
 
     fn add(&mut self, names: &[String], digest: u64, extra_tokens: Vec<String>, member_only: bool) {
@@ -2494,23 +2689,47 @@ impl InterfaceSliceIndex {
     /// row that appears or disappears under a module's token changes the digest.
     pub(crate) fn digest_for_tokens(&self, tokens: &ModuleTokens) -> u64 {
         use std::hash::{Hash, Hasher};
-        let mut seen: std::collections::HashSet<String> = tokens.all.clone();
-        seen.extend(self.universal_tokens.iter().cloned());
-        let mut queue: Vec<String> = seen.iter().cloned().collect();
-        let mut matched: Vec<u64> = Vec::new();
+        let mut matched = self.universal_matched.clone();
+        let mut local_seen: std::collections::HashSet<&str> = std::collections::HashSet::with_capacity(tokens.all.len());
+        let mut queue: Vec<&str> = Vec::with_capacity(tokens.all.len());
+        for token in &tokens.all {
+            let s = token.as_str();
+            if !self.universal_seen.contains(s) && local_seen.insert(s) {
+                queue.push(s);
+            }
+        }
+        for token in &tokens.members {
+            let s = token.as_str();
+            if self.universal_member_only.contains(s) {
+                if let Some(entries) = self.by_name.get(s) {
+                    for entry in entries {
+                        if entry.member_only {
+                            matched.push(hash_one(&(s, entry.digest)));
+                            for extra in &entry.extra_tokens {
+                                let es = extra.as_str();
+                                if !self.universal_seen.contains(es) && local_seen.insert(es) {
+                                    queue.push(es);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
         while let Some(token) = queue.pop() {
-            let Some(entries) = self.by_name.get(&token) else {
+            let Some(entries) = self.by_name.get(token) else {
                 continue;
             };
-            let is_member = tokens.members.contains(&token);
+            let is_member = tokens.members.contains(token);
             for entry in entries {
                 if entry.member_only && !is_member {
                     continue;
                 }
-                matched.push(hash_one(&(&token, entry.digest)));
+                matched.push(hash_one(&(token, entry.digest)));
                 for extra in &entry.extra_tokens {
-                    if seen.insert(extra.clone()) {
-                        queue.push(extra.clone());
+                    let es = extra.as_str();
+                    if !self.universal_seen.contains(es) && local_seen.insert(es) {
+                        queue.push(es);
                     }
                 }
             }
@@ -2595,6 +2814,24 @@ impl GlobalBuildFingerprint {
             Some("codegen instrumentation changed")
         } else {
             None
+        }
+    }
+
+    /// One-line, pre-compile description of how this build's global inputs
+    /// differ from the previous build's manifest (`None` = no manifest yet).
+    /// Names the changed whole-build component, or states that only the
+    /// per-module interface slices can invalidate objects. Diagnostic only: it
+    /// never influences a cache key.
+    pub(crate) fn describe_change(&self, prev: Option<&GlobalBuildFingerprint>) -> String {
+        match prev {
+            None => "no previous manifest (first build in this cache scope)".to_string(),
+            Some(prev) => match self.changed_reason(prev) {
+                Some(why) => format!("full rebuild expected: {why}"),
+                None if self.layout != prev.layout => {
+                    "interface layout changed; only modules whose interface slice covers it rebuild".to_string()
+                }
+                None => "global inputs unchanged".to_string(),
+            },
         }
     }
 

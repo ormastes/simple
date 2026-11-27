@@ -41,14 +41,20 @@ def digest(path):
     return h.hexdigest()
 
 
+def target_machine(target):
+    machines = {"x86_64-unknown-linux-gnu": 62, "aarch64-unknown-linux-gnu": 183}
+    require(target in machines, "unsupported receipt executable target")
+    return machines[target]
+
+
 def native_digest(path, target):
-    require(target == "x86_64-unknown-linux-gnu", "unsupported receipt executable target")
+    expected_machine = target_machine(target)
     with open(path, "rb") as stream:
         header = stream.read(64)
     require(len(header) == 64 and header[:7] == b"\x7fELF\x02\x01\x01"
             and header[7] in (0, 3), "entry is not a Linux ELF64 executable")
     kind, machine, version = struct.unpack_from("<HHI", header, 16)
-    require(kind in (2, 3) and machine == 62 and version == 1,
+    require(kind in (2, 3) and machine == expected_machine and version == 1,
             "entry ELF executable architecture mismatch")
     return digest(path)
 
@@ -71,7 +77,7 @@ def capture(candidate, identity_path, source, runtime, backend, target, fixture,
     require(backend in ("llvm", "cranelift") and identity["backend"] == backend, "backend mismatch")
     require(re.fullmatch(r"[A-Za-z0-9_]+(?:-[A-Za-z0-9_]+){2,}", target)
             and identity["target"] == target, "target mismatch")
-    require(target == "x86_64-unknown-linux-gnu", "unsupported receipt executable target")
+    target_machine(target)
     if "producer_backend" in identity:
         require(identity["producer_backend"] in ("llvm", "cranelift"), "invalid producer backend")
     candidate, source, runtime, fixture = map(lambda p: Path(p).resolve(strict=True),

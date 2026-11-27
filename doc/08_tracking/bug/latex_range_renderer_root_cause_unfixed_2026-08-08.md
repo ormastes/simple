@@ -57,3 +57,35 @@ Handle `..` in `_expr_latex` itself so every argument position inherits it, make
 `_split_range` bracket-depth-aware, and tighten the repro spec to an exact
 expected string covering both `sum` and `int`.
 
+## Verification 2026-11-25 (P2 ledger sweep, Windows worktree) — RESOLVED
+
+All three "Fix" items above have landed:
+
+1. `_expr_latex` now has a `..` range production
+   (`src/lib/common/math_repr.spl:567-573`), so every argument position
+   inherits it; `_expr_pretty` and `_expr_text` gained the same production.
+2. `_split_range` (`:349`) is paren/bracket-depth-aware (its own header
+   comment documents the `f(a..b)..n` case).
+3. The under-constrained repro spec is superseded by
+   `test/01_unit/lib/common/math_repr_range_spec.spl`: exact-string
+   assertions covering `sum`, `int`, a bare range, known-fn args, plain-call
+   args, subscript brackets, a nested range, and all four renderers.
+
+Execution evidence — probe on the pinned tracked binary (`bin/simple.exe
+run`, calling `render_latex_raw`/`to_pretty`/`to_text`/`to_debug` directly):
+
+```
+lim(x, 0..1) x        -> \lim(x, 0 \ldots 1) x        (was: \lim(x, 0) x)
+f(1..n)               -> \operatorname{f}(1 \ldots n) (was: \operatorname{f}(1))
+sum(i,1..n) i         -> \sum_{i=1}^{n} i
+int(x,0..1) x         -> \int_{0}^{1} x
+int(x, f(a..b)..n) x  -> \int_{\operatorname{f}(a \ldots b)}^{n} x   (was: wrong bounds)
+to_debug(int(x, f(a..b)..n) x) -> Int(x, Call(f, Range(Id(a), Id(b))), Id(n), Id(x))
+```
+
+Every output matches the range spec's expected strings exactly. Stated limit:
+`bin/simple.exe test` cannot run the spec at this HEAD — the pinned seed
+rejects `@representation_boundary` in the test runner — so the probe is the
+execution evidence; the spec is expected green once the runner is loadable
+again.
+

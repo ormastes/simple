@@ -1,0 +1,96 @@
+use std.spec.{describe, it, expect, step}
+use std.io_runtime.{env_get, env_set, env_remove_process, dir_create_all, dir_remove_all, file_write, file_delete, getpid}
+use std.nogc_sync_mut.sffi.dynamic.{
+    platform_name,
+    platform_lib_extension,
+    sffi_lib_candidates_for_platform,
+    sffi_lib_candidates,
+    sffi_select_lib_path_for_platform,
+    sffi_lib_path
+}
+use std.nogc_async_mut.sffi.dynamic.{
+    platform_name as async_platform_name,
+    platform_lib_extension as async_platform_lib_extension,
+    sffi_lib_candidates_for_platform as async_sffi_lib_candidates_for_platform,
+    sffi_lib_path as async_sffi_lib_path
+}
+
+describe "sffi shared-library naming and platform candidates":
+    it "orders MinGW and MSVC dll candidates on Windows and ELF/Mach-O elsewhere":
+        step("Inspect candidates generated for each target platform")
+        val win_candidates = sffi_lib_candidates_for_platform("build", "gpu_transfer", "windows")
+        expect(win_candidates.len()).to_equal(2)
+        expect(win_candidates[0]).to_equal("build/libspl_gpu_transfer.dll")
+        expect(win_candidates[1]).to_equal("build/spl_gpu_transfer.dll")
+
+        val win_backslash = sffi_lib_candidates_for_platform("C:\\sffi\\out", "demo", "windows")
+        expect(win_backslash[0]).to_equal("C:\\sffi\\out\\libspl_demo.dll")
+        expect(win_backslash[1]).to_equal("C:\\sffi\\out\\spl_demo.dll")
+
+        val mac_candidates = sffi_lib_candidates_for_platform("build", "demo", "macos")
+        expect(mac_candidates.len()).to_equal(1)
+        expect(mac_candidates[0]).to_equal("build/libspl_demo.dylib")
+
+        val linux_candidates = sffi_lib_candidates_for_platform("build", "demo", "linux")
+        expect(linux_candidates.len()).to_equal(1)
+        expect(linux_candidates[0]).to_equal("build/libspl_demo.so")
+
+        val freebsd_candidates = sffi_lib_candidates_for_platform("build/", "demo", "freebsd")
+        expect(freebsd_candidates.len()).to_equal(1)
+        expect(freebsd_candidates[0]).to_equal("build/libspl_demo.so")
+
+    it "selects MSVC cdylib on Windows when only spl_<prefix>.dll exists and prefers MinGW when both exist":
+        step("Create isolated temp directory and exercise fallback vs primary preference")
+        val tmp_dir = "build/test_sffi_lib_path_tmp_{getpid()}"
+        dir_remove_all(tmp_dir)
+        expect(dir_create_all(tmp_dir)).to_equal(true)
+
+        val mingw_path = "{tmp_dir}/libspl_demo.dll"
+        val msvc_path = "{tmp_dir}/spl_demo.dll"
+
+        expect(sffi_select_lib_path_for_platform(tmp_dir, "demo", "windows")).to_equal(mingw_path)
+
+        expect(file_write(msvc_path, "msvc")).to_equal(true)
+        expect(sffi_select_lib_path_for_platform(tmp_dir, "demo", "windows")).to_equal(msvc_path)
+
+        expect(file_write(mingw_path, "mingw")).to_equal(true)
+        expect(sffi_select_lib_path_for_platform(tmp_dir, "demo", "windows")).to_equal(mingw_path)
+
+        file_delete(msvc_path)
+        file_delete(mingw_path)
+        dir_remove_all(tmp_dir)
+
+    it "resolves sffi_lib_path via SIMPLE_SFFI_PATH and preserves async facade parity":
+        step("Verify facade exports and live SIMPLE_SFFI_PATH candidate selection")
+        expect(async_platform_name()).to_equal(platform_name())
+        expect(async_platform_lib_extension()).to_equal(platform_lib_extension())
+        expect(async_sffi_lib_candidates_for_platform("build", "demo", "windows").len()).to_equal(2)
+
+        val prev = env_get("SIMPLE_SFFI_PATH") ?? ""
+        val tmp_dir = "build/test_sffi_env_tmp_{getpid()}"
+        dir_remove_all(tmp_dir)
+        expect(dir_create_all(tmp_dir)).to_equal(true)
+        expect(env_set("SIMPLE_SFFI_PATH", tmp_dir)).to_equal(true)
+
+        val ext = platform_lib_extension()
+        val live_candidates = sffi_lib_candidates("probe")
+        expect(live_candidates[0]).to_equal("{tmp_dir}/libspl_probe{ext}")
+
+        if platform_name() == "windows":
+            val msvc_probe = "{tmp_dir}/spl_probe.dll"
+            expect(file_write(msvc_probe, "msvc")).to_equal(true)
+            expect(sffi_lib_path("probe")).to_equal(msvc_probe)
+            expect(async_sffi_lib_path("probe")).to_equal(msvc_probe)
+            file_delete(msvc_probe)
+        else:
+            val elf_or_macho_probe = "{tmp_dir}/libspl_probe{ext}"
+            expect(file_write(elf_or_macho_probe, "elf")).to_equal(true)
+            expect(sffi_lib_path("probe")).to_equal(elf_or_macho_probe)
+            expect(async_sffi_lib_path("probe")).to_equal(elf_or_macho_probe)
+            file_delete(elf_or_macho_probe)
+
+        if prev == "":
+            env_remove_process("SIMPLE_SFFI_PATH")
+        else:
+            env_set("SIMPLE_SFFI_PATH", prev)
+        dir_remove_all(tmp_dir)

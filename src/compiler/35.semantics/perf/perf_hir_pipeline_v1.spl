@@ -1,0 +1,182 @@
+# Unified Typed-HIR Performance Analysis & Collection Refactoring Pipeline (V1)
+#
+# Connects the conservative T1..T4 semantic owners over a single read-only
+# typed `HirFunction` snapshot without duplicating rules or mutating AST/HIR:
+#   - T0 (`T0ExistingFacts`): no-op (D12, I10 normal-compile / Phase-3 isolation)
+#   - T1 (`T1FastLocal`): `recognize_hir_function_loop_idioms_v1` + 13-point
+#     `evaluate_loop_refactor_safety_v1` + growing-accumulator / repeated-view checks
+#   - T2 (`T2Compositional`): `summarize_hir_function_v1` caller-propagated cost
+#     summaries, nested key-join redesign (`PERF-ALG-001`), and 3-valued
+#     `verify_function_resource_contract_v1` (`Verified | Refuted | Unproved`)
+#   - T3 (`T3DeepOptional`): bounded `run_optional_deep_analysis_v1` plugin hook
+
+use compiler.common.diagnostics.span.{Span}
+use compiler.hir.hir_definitions.{HirFunction}
+use compiler.semantics.perf_facts.types.{CollectionOperationRegistry}
+use compiler.semantics.perf.perf_analysis_contracts_v1.{
+    PerfAnalysisTier, FunctionCostSummaryV1, LoopIdiomCandidateV1,
+    ContractVerificationVerdict, ResourceContractCheckV1, PerfFindingRecordV1
+}
+use compiler.semantics.perf.cost_summary_v1.{
+    PerfSummarizerConfigV1, summarize_hir_function_v1
+}
+use compiler.semantics.perf.deep_analyzer_hook_v1.{
+    DeepAnalyzerPluginV1, DeepAnalyzerRequestV1, run_optional_deep_analysis_v1
+}
+use compiler.semantics.perf.loop_idiom_recognizer_v1.{
+    recognize_hir_function_loop_idioms_v1
+}
+use compiler.semantics.perf.loop_refactor_safety_v1.{
+    derive_hir_loop_safety_facts_v1, evaluate_loop_refactor_safety_v1
+}
+use compiler.semantics.perf.algorithm_redesign_advisor_v1.{
+    detect_hir_growing_accumulators_v1, detect_hir_repeated_lazy_views_v1,
+    detect_hir_nested_key_joins_v1
+}
+use compiler.semantics.perf.resource_contract_verifier_v1.{
+    DeclaredResourceContractV1, OperationCounterSampleV1,
+    verify_function_resource_contract_v1
+}
+
+struct HirPerfPipelineRequestV1:
+    function: HirFunction
+    file: text
+    semantic_revision: text
+    dependency_fingerprint: text
+    tier: PerfAnalysisTier
+    complexity_policy: text
+    registry: CollectionOperationRegistry
+    callee_summaries: Dict<text, FunctionCostSummaryV1>
+    summarizer_config: PerfSummarizerConfigV1
+    contracts: [DeclaredResourceContractV1]
+    empirical_samples: [OperationCounterSampleV1]
+    deep_hook: Option<DeepAnalyzerPluginV1>
+    deep_budget_ms: i64
+    deep_max_steps: i64
+    cancelled: bool
+
+struct HirPerfPipelineResultV1:
+    tier: PerfAnalysisTier
+    summary: Option<FunctionCostSummaryV1>
+    idiom_candidates: [LoopIdiomCandidateV1]
+    contract_checks: [ResourceContractCheckV1]
+    findings: [PerfFindingRecordV1]
+    invoked_deep_plugin: bool
+
+fn _pipeline_tier_rank(tier: PerfAnalysisTier) -> i64:
+    match tier:
+        case PerfAnalysisTier.T0ExistingFacts: 0
+        case PerfAnalysisTier.T1FastLocal: 1
+        case PerfAnalysisTier.T2Compositional: 2
+        case PerfAnalysisTier.T3DeepOptional: 3
+        case PerfAnalysisTier.T4Empirical: 4
+
+pub fn run_hir_perf_analysis_pipeline_v1(req: HirPerfPipelineRequestV1) -> HirPerfPipelineResultV1:
+    val rank = _pipeline_tier_rank(req.tier)
+    if rank <= 0:
+        return HirPerfPipelineResultV1(
+            tier: req.tier,
+            summary: None,
+            idiom_candidates: [],
+            contract_checks: [],
+            findings: [],
+            invoked_deep_plugin: false
+        )
+
+    var findings: [PerfFindingRecordV1] = []
+    var candidates: [LoopIdiomCandidateV1] = []
+    var contract_checks: [ResourceContractCheckV1] = []
+    var final_summary: Option<FunctionCostSummaryV1> = None
+    var invoked_deep = false
+
+    # T1: Conservative loop-idiom recognition + 13-obligation safety verification
+    val recog = recognize_hir_function_loop_idioms_v1(
+        req.function, req.semantic_revision, req.dependency_fingerprint, req.file, req.registry
+    )
+    val is_nogc = req.function.effect_region == "nogc"
+    for raw_idiom in recog.raw_idioms:
+        val safety_facts = derive_hir_loop_safety_facts_v1(
+            raw_idiom, is_nogc, req.semantic_revision, req.dependency_fingerprint
+        )
+        val eval_res = evaluate_loop_refactor_safety_v1(raw_idiom, safety_facts)
+        candidates.push(eval_res.candidate)
+        findings.push(eval_res.finding)
+
+    # T1: Growing accumulator & repeated lazy-view enumeration checks
+    for ga in detect_hir_growing_accumulators_v1(
+        req.function, req.semantic_revision, req.dependency_fingerprint, req.file
+    ):
+        findings.push(ga.finding)
+    for rv in detect_hir_repeated_lazy_views_v1(
+        req.function, req.semantic_revision, req.dependency_fingerprint, req.file, req.registry
+    ):
+        for f in rv.findings:
+            findings.push(f)
+
+    # T2+: Parameterized function cost summary, nested join redesign, and @cost contracts
+    if rank >= 2:
+        val sum_res = summarize_hir_function_v1(
+            req.function, req.file, req.semantic_revision,
+            req.registry, req.callee_summaries, req.summarizer_config
+        )
+        var active_summary = sum_res.summary
+        for sf in sum_res.findings:
+            findings.push(sf)
+
+        if rank >= 3:
+            val deep_req = DeepAnalyzerRequestV1(
+                function_id: req.function.name,
+                semantic_revision: req.semantic_revision,
+                file: req.file,
+                primary_span: req.function.span,
+                tier: PerfAnalysisTier.T3DeepOptional,
+                base_summary: active_summary,
+                budget_ms: req.deep_budget_ms,
+                max_solver_steps: req.deep_max_steps,
+                cancelled: req.cancelled,
+                configuration_fingerprint: active_summary.configuration_fingerprint
+            )
+            val deep_out = run_optional_deep_analysis_v1(req.deep_hook, deep_req)
+            active_summary = deep_out.summary
+            invoked_deep = deep_out.invoked_plugin
+            if val cf = deep_out.coverage_finding:
+                findings.push(cf)
+
+        final_summary = Some(active_summary)
+
+        for nj in detect_hir_nested_key_joins_v1(
+            req.function, req.semantic_revision, req.dependency_fingerprint,
+            req.file, req.complexity_policy, req.registry
+        ):
+            findings.push(nj.finding)
+
+        for c in req.contracts:
+            if c.function_id == req.function.name:
+                val check = verify_function_resource_contract_v1(c, active_summary, req.empirical_samples)
+                contract_checks.push(check)
+                if check.verdict != ContractVerificationVerdict.Verified and check.rule_code != "":
+                    findings.push(PerfFindingRecordV1(
+                        rule_code: check.rule_code,
+                        stable_occurrence_id: check.rule_code + "@" + req.file + "#" + req.function.name,
+                        function_id: req.function.name,
+                        file: req.file,
+                        primary_span: req.function.span,
+                        related_locations: [],
+                        message: check.explanation,
+                        evidence: None,
+                        tier: PerfAnalysisTier.T2Compositional,
+                        semantic_fingerprint: req.semantic_revision + ":" + req.dependency_fingerprint,
+                        fix_candidates: []
+                    ))
+
+    HirPerfPipelineResultV1(
+        tier: req.tier,
+        summary: final_summary,
+        idiom_candidates: candidates,
+        contract_checks: contract_checks,
+        findings: findings,
+        invoked_deep_plugin: invoked_deep
+    )
+
+export HirPerfPipelineRequestV1, HirPerfPipelineResultV1
+export run_hir_perf_analysis_pipeline_v1

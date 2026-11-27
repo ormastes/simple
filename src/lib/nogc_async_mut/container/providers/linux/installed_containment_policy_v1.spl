@@ -1,0 +1,58 @@
+# Installed configuration data only; decoding does not observe or seal executables.
+use std.nogc_async_mut.container.providers.linux.engine_policy_v1.*
+use std.nogc_async_mut.container.providers.linux.containment_profile_v1.*
+use std.common.string_core.str_len
+use std.common.crypto.sha256.sha256_text
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+
+pub struct LinuxOciInstalledContainmentPolicyV1:
+    cli_policy: LinuxOciEnginePolicyV1
+    profile: LinuxOciContainmentProfileV1
+
+pub fn linux_oci_installed_containment_policy_encode_v1(value: LinuxOciInstalledContainmentPolicyV1) -> Result<text, text>:
+    if value.profile.runtime_name != value.profile.runtime_program:
+        return Err("containment-installed-runtime-name-mismatch")
+    val cli = linux_oci_engine_policy_encode_v1(value.cli_policy)?
+    val profile = linux_oci_containment_profile_encode_v1(value.profile)?
+    if value.profile.cli_policy_digest != linux_oci_engine_policy_digest_v1(value.cli_policy)?:
+        return Err("containment-installed-cli-mismatch")
+    val source = sdn_encode_canonical(SdnValue.Dict({"kind": SdnValue.String("linux-oci-installed-containment-policy"),
+        "version": SdnValue.Int(1), "cliPolicy": SdnValue.String(cli), "profile": SdnValue.String(profile)})) + "\n"
+    if str_len(source) > 1048576: return Err("containment-installed-source-bound")
+    Ok(source)
+
+pub fn linux_oci_installed_containment_policy_decode_v1(source: text) -> Result<LinuxOciInstalledContainmentPolicyV1, text>:
+    if str_len(source) == 0 or str_len(source) > 1048576: return Err("containment-installed-source-bound")
+    val parsed = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 1048576,
+            max_depth: 2, max_nodes: 16, max_rows: 0, max_cells: 0, max_columns: 4)):
+        case Ok(value): value
+        case Err(_): return Err("containment-installed-syntax")
+    val fields = match parsed.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("containment-installed-object")
+    val names = ["kind", "version", "cliPolicy", "profile"]
+    if fields.len() != 4: return Err("containment-installed-fields")
+    for name in names:
+        if not fields.contains_key(name): return Err("containment-installed-fields")
+    if (fields["kind"] != SdnValue.String("linux-oci-installed-containment-policy") or
+            fields["version"] != SdnValue.Int(1)): return Err("containment-installed-kind-version")
+    val cli = match fields["cliPolicy"]:
+        case SdnValue.String(value): linux_oci_engine_policy_decode_v1(value)?
+        case _: return Err("containment-installed-cli-type")
+    val profile = match fields["profile"]:
+        case SdnValue.String(value): linux_oci_containment_profile_decode_v1(value)?
+        case _: return Err("containment-installed-profile-type")
+    val value = LinuxOciInstalledContainmentPolicyV1(cli_policy: cli, profile: profile)
+    if linux_oci_installed_containment_policy_encode_v1(value)? != source: return Err("containment-installed-noncanonical")
+    Ok(value)
+
+pub fn linux_oci_installed_containment_policy_digest_v1(value: LinuxOciInstalledContainmentPolicyV1) -> Result<text, text>:
+    Ok(sha256_text(linux_oci_installed_containment_policy_encode_v1(value)?))
+
+pub fn linux_oci_containment_route_v1(value: LinuxOciInstalledContainmentPolicyV1, args: [text]) -> Result<[text], text>:
+    linux_oci_installed_containment_policy_encode_v1(value)?
+    linux_oci_engine_route_v1(value.cli_policy,
+        ["--runtime", value.profile.runtime_program, "--cgroup-manager", value.profile.cgroup_manager] + args)

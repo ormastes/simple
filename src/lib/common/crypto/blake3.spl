@@ -12,7 +12,7 @@
 #
 # Usage: use std.common.crypto.blake3.{blake3_hash, blake3_hash_xof,
 #            blake3_keyed_hash, blake3_derive_key, blake3_hex}
-# Legacy callers: blake3_bytes([i64]) -> [i64] and blake3_text(text) -> text.
+# Legacy callers: blake3_bytes([u8]) -> [u8] and blake3_text(text) -> text.
 
 use std.common.crypto.types.{crypto_text_to_bytes, bytes_to_hex}
 
@@ -280,14 +280,14 @@ fn _b3_core(key: [u32], flags: u32, data: [u8], out_len: i64) -> [u8]:
         var cv = _b3_node_cv(_b3_chunk_node(key, data, i * _B3_CHUNK_LEN, _B3_CHUNK_LEN, i.to_u64(), flags))
         var total = i + 1
         while total % 2 == 0:
-            cv = _b3_node_cv(_b3_parent(key, stack.pop(), cv, flags))
+            cv = _b3_node_cv(_b3_parent(key, stack.pop().unwrap(), cv, flags))
             total = total / 2
         stack.push(cv)
         i = i + 1
     val last_off = (nchunks - 1) * _B3_CHUNK_LEN
     var node = _b3_chunk_node(key, data, last_off, n - last_off, (nchunks - 1).to_u64(), flags)
     while stack.len() > 0:
-        node = _b3_parent(key, stack.pop(), _b3_node_cv(node), flags)
+        node = _b3_parent(key, stack.pop().unwrap(), _b3_node_cv(node), flags)
     var blk = 0
     while out.len() < out_len:
         val words = _b3_node_run(node, blk.to_u64(), _B3_ROOT)
@@ -310,24 +310,12 @@ fn _b3_key_words(key: [u8]) -> [u32]:
         i = i + 1
     w
 
-fn _to_u8s(data: [i64]) -> [u8]:
-    var o: [u8] = []
-    for x in data:
-        o.push((x & 255).to_u8())
-    o
-
-fn _to_i64s(data: [u8]) -> [i64]:
-    var o: [i64] = []
-    for x in data:
-        o.push(x.to_i64())
-    o
-
 # ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
 # 32-byte BLAKE3 digest.
-fn blake3_hash(data: [u8]) -> [u8]:
+pub fn blake3_hash(data: [u8]) -> [u8]:
     _b3_core(_b3_iv(), 0u32, data, 32)
 
 # Extendable output of `out_len` bytes (the first 32 equal blake3_hash).
@@ -342,17 +330,32 @@ fn blake3_keyed_hash(key: [u8], data: [u8]) -> [u8]:
 
 # Key derivation: hash the context string, then use it as the key for the material.
 fn blake3_derive_key(context: text, material: [u8]) -> [u8]:
-    val ctx_key = _b3_core(_b3_iv(), _B3_DERIVE_KEY_CONTEXT, _to_u8s(crypto_text_to_bytes(context)), 32)
+    val ctx_key = _b3_core(_b3_iv(), _B3_DERIVE_KEY_CONTEXT, crypto_text_to_bytes(context), 32)
     _b3_core(_b3_key_words(ctx_key), _B3_DERIVE_KEY_MATERIAL, material, 32)
 
 # Lowercase hex of a byte list.
-fn blake3_hex(data: [u8]) -> text:
-    bytes_to_hex(_to_i64s(data))
+pub fn blake3_hex(data: [u8]) -> text:
+    bytes_to_hex(data)
 
 # Legacy API: 32-byte digest of a byte list.
-fn blake3_bytes(data: [i64]) -> [i64]:
-    _to_i64s(blake3_hash(_to_u8s(data)))
+fn blake3_bytes(data: [u8]) -> [u8]:
+    blake3_hash(data)
 
 # Legacy API: 64-char lowercase hex digest of text.
-fn blake3_text(data: text) -> text:
+pub fn blake3_text(data: text) -> text:
     bytes_to_hex(blake3_bytes(crypto_text_to_bytes(data)))
+
+# 64-char lowercase hex BLAKE3 digest of the UTF-8 bytes of `s`.
+fn blake3_hex_text(s: text) -> text:
+    blake3_hex(blake3_hash(crypto_text_to_bytes(s)))
+
+# As blake3_hex_text, with every CR (0x0D) removed first (CRLF == LF).
+pub fn blake3_hex_lf(s: text) -> text:
+    val raw = crypto_text_to_bytes(s)
+    var out: [u8] = []
+    var i = 0
+    while i < raw.len():
+        if raw[i] != 13:
+            out.push(raw[i])
+        i = i + 1
+    blake3_hex(blake3_hash(out))

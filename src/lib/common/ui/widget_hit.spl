@@ -8,11 +8,12 @@
 # the process-local widget prop store. A re-conversion through widget_draw_ir
 # then shows the updated frame.
 #
-# Coordinates are framebuffer pixels (origin top-left), matching compute_layout
+# Coordinates are framebuffer pixels (origin top-left), matching compute_pixel_layout
 # and the Draw-IR renderer.
 
-use common.ui.layout.{compute_layout, find_rect}
+use common.ui.layout.{compute_pixel_layout, find_rect}
 use common.ui.widget.{WidgetNode, WidgetRect}
+use std.common.encoding.utf8.{text_codepoints}
 
 struct HitResult:
     id: text
@@ -25,21 +26,25 @@ fn _contains(rect: WidgetRect, px: i32, py: i32) -> bool:
 # Topmost widget under (px, py): the LAST rect in draw order (deepest / latest
 # sibling) that contains the point. Mirrors window_scene's top-of-stack pick.
 fn widget_hit_test(root: WidgetNode, w: i32, h: i32, px: i32, py: i32) -> HitResult:
-    _hit_test_rects(compute_layout(root, 0, 0, w, h), px, py)
+    _hit_test_rects(compute_pixel_layout(root, 0, 0, w, h), px, py)
 
 # Same hit-test, over an already-computed layout. Lets callers that need to
 # hit-test the same tree more than once per event (e.g. press + click) share
-# one compute_layout() pass instead of recomputing it for each call.
-fn _hit_test_rects(rects: [WidgetRect], px: i32, py: i32) -> HitResult:
+# one compute_pixel_layout() pass instead of recomputing it for each call.
+fn _hit_test_rects_id(rects: [WidgetRect], px: i32, py: i32) -> text:
     var best = ""
     for rect in rects:
         if _contains(rect, px, py):
             best = rect.id
+    best
+
+fn _hit_test_rects(rects: [WidgetRect], px: i32, py: i32) -> HitResult:
+    val best = _hit_test_rects_id(rects, px, py)
     HitResult(id: best, found: best != "")
 
 # Deepest scroll-kind widget under the point (scroll target for wheel events).
-fn widget_scroll_hit(root: WidgetNode, w: i32, h: i32, px: i32, py: i32) -> text:
-    val rects = compute_layout(root, 0, 0, w, h)
+fn widget_scroll_hit(root: WidgetNode, w: i32, h: i32, px: i32, py: i32, layout: [WidgetRect] = []) -> text:
+    val rects = if layout.len() > 0: layout else: compute_pixel_layout(root, 0, 0, w, h)
     var best = ""
     for rect in rects:
         if _contains(rect, px, py):
@@ -51,18 +56,21 @@ fn widget_scroll_hit(root: WidgetNode, w: i32, h: i32, px: i32, py: i32) -> text
 fn _kind_of(id: text) -> text:
     WidgetNode(id: id).kind_name()
 
+fn _is_text_input_kind(kind: text) -> bool:
+    kind == "input" or kind == "textfield" or kind == "textarea"
+
 # =========================================================================
 # Dispatch reducers — mutate the shared widget prop store.
 # =========================================================================
 
 # Press feedback: mark the hit button pressed (for a "pressed" render frame).
 #
-# `layout`: an optional precomputed compute_layout() result. When the caller
+# `layout`: an optional precomputed compute_pixel_layout() result. When the caller
 # already has one (e.g. dispatching press + click for the same pointer event),
 # pass it here to skip re-running layout. Left empty ("not provided"), this
 # computes its own layout exactly as before.
 fn widget_set_pressed(root: WidgetNode, w: i32, h: i32, px: i32, py: i32, layout: [WidgetRect] = []) -> text:
-    val rects = if layout.len() > 0: layout else: compute_layout(root, 0, 0, w, h)
+    val rects = if layout.len() > 0: layout else: compute_pixel_layout(root, 0, 0, w, h)
     val hit = _hit_test_rects(rects, px, py)
     if hit.found and _kind_of(hit.id) == "button":
         WidgetNode(id: hit.id).set_prop("ui_pressed", "true")
@@ -76,52 +84,53 @@ fn widget_clear_pressed(root: WidgetNode):
             WidgetNode(id: id).set_prop("ui_pressed", "false")
 
 # Hover: mark the hit widget hovered, clear hover on all others.
-fn widget_dispatch_hover(root: WidgetNode, w: i32, h: i32, px: i32, py: i32) -> text:
-    val hit = widget_hit_test(root, w, h, px, py)
+fn widget_dispatch_hover(root: WidgetNode, w: i32, h: i32, px: i32, py: i32, layout: [WidgetRect] = []) -> text:
+    val rects = if layout.len() > 0: layout else: compute_pixel_layout(root, 0, 0, w, h)
+    val hit_id = _hit_test_rects_id(rects, px, py)
     for id in root.collect_ids():
         if id != "":
             var flag = "false"
-            if hit.found and id == hit.id:
+            if hit_id != "" and id == hit_id:
                 flag = "true"
             WidgetNode(id: id).set_prop("ui_hover", flag)
-    hit.id
+    hit_id
 
 # Click: toggle checkbox `checked`, focus text inputs (single-focus), return
 # the hit widget id (empty when nothing was hit).
 #
-# `layout`: optional precomputed compute_layout() result — see widget_set_pressed.
+# `layout`: optional precomputed compute_pixel_layout() result — see widget_set_pressed.
 fn widget_dispatch_click(root: WidgetNode, w: i32, h: i32, px: i32, py: i32, layout: [WidgetRect] = []) -> text:
-    val rects = if layout.len() > 0: layout else: compute_layout(root, 0, 0, w, h)
-    val hit = _hit_test_rects(rects, px, py)
-    if not hit.found:
+    val rects = if layout.len() > 0: layout else: compute_pixel_layout(root, 0, 0, w, h)
+    val hit_id = _hit_test_rects_id(rects, px, py)
+    if hit_id == "":
         return ""
-    val kind = _kind_of(hit.id)
+    val kind = _kind_of(hit_id)
     if kind == "button":
-        val node = WidgetNode(id: hit.id)
+        val node = WidgetNode(id: hit_id)
         node.set_prop("ui_action_pending", "true")
     if kind == "checkbox":
-        val node = WidgetNode(id: hit.id)
+        val node = WidgetNode(id: hit_id)
         var next = "true"
         if node.get_prop("checked") == "true":
             next = "false"
         node.set_prop("checked", next)
-    if kind == "input" or kind == "textfield":
+    if _is_text_input_kind(kind):
         for id in root.collect_ids():
             if id != "":
                 var flag = "false"
-                if id == hit.id:
+                if id == hit_id:
                     flag = "true"
                 WidgetNode(id: id).set_prop("ui_focus", flag)
-    hit.id
+    hit_id
 
 # Scroll: route to the scroll container under the point and advance its
 # offset. Positive `dy` moves content up (reveals lower rows); clamped to
 # [0, content_height - viewport_height].
-fn widget_dispatch_scroll(root: WidgetNode, w: i32, h: i32, px: i32, py: i32, dy: i32) -> text:
-    val target = widget_scroll_hit(root, w, h, px, py)
+fn widget_dispatch_scroll(root: WidgetNode, w: i32, h: i32, px: i32, py: i32, dy: i32, layout: [WidgetRect] = []) -> text:
+    val rects = if layout.len() > 0: layout else: compute_pixel_layout(root, 0, 0, w, h)
+    val target = widget_scroll_hit(root, w, h, px, py, rects)
     if target == "":
         return ""
-    val rects = compute_layout(root, 0, 0, w, h)
     val node = WidgetNode(id: target)
     var srect_h = 0
     var srect_y = 0
@@ -169,12 +178,12 @@ fn _scroll_max_offset(
     if maximum > 0: maximum else: 0
 
 fn widget_scrollbar_pointer_down(
-    root: WidgetNode, w: i32, h: i32, px: i32, py: i32
+    root: WidgetNode, w: i32, h: i32, px: i32, py: i32, layout: [WidgetRect] = []
 ) -> text:
-    val target = widget_scroll_hit(root, w, h, px, py)
+    val rects = if layout.len() > 0: layout else: compute_pixel_layout(root, 0, 0, w, h)
+    val target = widget_scroll_hit(root, w, h, px, py, rects)
     if target == "":
         return ""
-    val rects = compute_layout(root, 0, 0, w, h)
     val node = WidgetNode(id: target)
     match find_rect(rects, target):
         case Some(rect):
@@ -216,43 +225,49 @@ fn widget_scrollbar_pointer_down(
             return ""
 
 fn widget_scrollbar_pointer_move(
-    root: WidgetNode, w: i32, h: i32, py: i32
+    root: WidgetNode, w: i32, h: i32, py: i32, layout: [WidgetRect] = []
 ) -> text:
-    val rects = compute_layout(root, 0, 0, w, h)
+    var dragging_id = ""
     for id in root.collect_ids():
         if id != "":
-            val node = WidgetNode(id: id)
-            if (node.kind_name() == "scroll" and
-                node.get_prop("ui_scrollbar_dragging") == "true"):
-                match find_rect(rects, id):
-                    case Some(rect):
-                        val maximum = _scroll_max_offset(
-                            node, rects, rect.y, rect.h
-                        )
-                        var thumb_h = if maximum > 0:
-                            rect.h * rect.h / (rect.h + maximum)
-                        else:
-                            rect.h
-                        if thumb_h < 12:
-                            thumb_h = 12
-                        val travel = rect.h - thumb_h
-                        if travel > 0:
-                            val origin_y = _prop_int_of(
-                                node, "ui_scrollbar_drag_origin_y"
-                            )
-                            val origin_offset = _prop_int_of(
-                                node, "ui_scrollbar_drag_origin_offset"
-                            )
-                            var next = origin_offset +
-                                (py - origin_y) * maximum / travel
-                            if next < 0:
-                                next = 0
-                            if next > maximum:
-                                next = maximum
-                            node.set_prop("scroll_offset", "{next}")
-                        return id
-                    case _:
-                        pass
+            val candidate = WidgetNode(id: id)
+            if (candidate.kind_name() == "scroll" and
+                candidate.get_prop("ui_scrollbar_dragging") == "true"):
+                dragging_id = id
+                break
+    if dragging_id == "":
+        return ""
+    val rects = if layout.len() > 0: layout else: compute_pixel_layout(root, 0, 0, w, h)
+    val node = WidgetNode(id: dragging_id)
+    match find_rect(rects, dragging_id):
+        case Some(rect):
+            val maximum = _scroll_max_offset(
+                node, rects, rect.y, rect.h
+            )
+            var thumb_h = if maximum > 0:
+                rect.h * rect.h / (rect.h + maximum)
+            else:
+                rect.h
+            if thumb_h < 12:
+                thumb_h = 12
+            val travel = rect.h - thumb_h
+            if travel > 0:
+                val origin_y = _prop_int_of(
+                    node, "ui_scrollbar_drag_origin_y"
+                )
+                val origin_offset = _prop_int_of(
+                    node, "ui_scrollbar_drag_origin_offset"
+                )
+                var next = origin_offset +
+                    (py - origin_y) * maximum / travel
+                if next < 0:
+                    next = 0
+                if next > maximum:
+                    next = maximum
+                node.set_prop("scroll_offset", "{next}")
+            return dragging_id
+        case _:
+            pass
     ""
 
 fn widget_scrollbar_pointer_up(root: WidgetNode):
@@ -316,7 +331,7 @@ fn widget_dispatch_key(focused_id: text, key: text):
         if key == "enter" or key == " " or key == "space":
             WidgetNode(id: focused_id).set_prop("ui_action_pending", "true")
         return
-    if kind != "input" and kind != "textfield":
+    if not _is_text_input_kind(kind):
         return
     val node = WidgetNode(id: focused_id)
     val value = node.get_prop("value")
@@ -371,7 +386,7 @@ fn widget_dispatch_composition_update(focused_id: text, preedit: text):
     if focused_id == "":
         return
     val kind = _kind_of(focused_id)
-    if kind != "input" and kind != "textfield":
+    if not _is_text_input_kind(kind):
         return
     WidgetNode(id: focused_id).set_prop("preedit", preedit)
 
@@ -383,7 +398,7 @@ fn widget_dispatch_composition_commit(focused_id: text, committed: text):
     if focused_id == "":
         return
     val kind = _kind_of(focused_id)
-    if kind != "input" and kind != "textfield":
+    if not _is_text_input_kind(kind):
         return
     val node = WidgetNode(id: focused_id)
     node.set_prop("preedit", "")
@@ -396,9 +411,458 @@ fn widget_dispatch_composition_commit(focused_id: text, committed: text):
     node.set_prop("value", joined)
     node.set_prop("caret", "{caret + _nchars(committed)}")
 
+# =========================================================================
+# Layered & Interactive Pointer / Context-Menu / Keyboard Event Dispatch
+# =========================================================================
+
+fn _hit_prop_int_or(node: WidgetNode, key: text, fallback: i32) -> i32:
+    val raw = node.get_prop(key)
+    if raw == "":
+        return fallback
+    raw.to_int() ?? fallback
+
+fn _hit_clamp(v: i32, lo: i32, hi: i32) -> i32:
+    if hi < lo:
+        return lo
+    if v < lo:
+        return lo
+    if v > hi:
+        return hi
+    v
+
+fn _hit_in_box(px: i32, py: i32, x: i32, y: i32, w: i32, h: i32) -> bool:
+    px >= x and px < x + w and py >= y and py < y + h
+
+fn _hit_is_floating_node(node: WidgetNode) -> bool:
+    val kind = node.kind_name()
+    if kind == "dialog" and node.get_prop("internal_window") == "true":
+        return true
+    if kind != "dialog" and node.get_prop("draggable") == "true" and node.get_prop("x") != "":
+        return true
+    false
+
+fn _hit_find_rect_idx(rects: [WidgetRect], id: text) -> i64:
+    var i: i64 = 0
+    while i < rects.len():
+        if rects[i].id == id:
+            return i
+        i = i + 1
+    -1
+
+fn _hit_collect_floating(node: WidgetNode, mut out: [WidgetNode]):
+    if not node.is_visible():
+        return
+    if _hit_is_floating_node(node):
+        out.push(node)
+        return
+    for child in node.children():
+        _hit_collect_floating(child, out)
+
+fn _hit_sort_floating_asc(mut nodes: [WidgetNode]):
+    var i: i32 = 1
+    while i < nodes.len() as i32:
+        val key = nodes[i]
+        val key_z = _hit_prop_int_or(key, "z_order", 10)
+        var j: i32 = i - 1
+        while j >= 0 and _hit_prop_int_or(nodes[j], "z_order", 10) > key_z:
+            nodes[j + 1] = nodes[j]
+            j = j - 1
+        nodes[j + 1] = key
+        i = i + 1
+
+fn _hit_floating_bounds(node: WidgetNode, rects: [WidgetRect], canvas_w: i32, canvas_h: i32) -> [i32]:
+    val ridx = _hit_find_rect_idx(rects, node.id)
+    val base_x = if ridx >= 0: rects[ridx].x else: 0
+    val base_y = if ridx >= 0: rects[ridx].y else: 0
+    val base_w = if ridx >= 0: rects[ridx].w else: 220
+    val base_h = if ridx >= 0: rects[ridx].h else: 140
+    val fw = _hit_clamp(_hit_prop_int_or(node, "width", base_w), 48, canvas_w)
+    val fh = _hit_clamp(_hit_prop_int_or(node, "height", base_h), 28, canvas_h)
+    val fx = _hit_clamp(_hit_prop_int_or(node, "x", base_x), 0, canvas_w - fw)
+    val fy = _hit_clamp(_hit_prop_int_or(node, "y", base_y), 0, canvas_h - fh)
+    val is_win = node.kind_name() == "dialog" and node.get_prop("internal_window") == "true"
+    val title_h: i32 = if is_win: (if fh >= 32: 24 else: fh - 4) else: 0
+    val title_shift: i32 = if is_win: title_h + 4 else: 0
+    [fx, fy, fw, fh, base_x, base_y, title_shift]
+
+fn _hit_close_open_popups(node: WidgetNode) -> text:
+    var closed_drop = ""
+    val kind = node.kind_name()
+    if kind == "context_menu" and node.get_prop("open") == "true":
+        node.set_prop("open", "false")
+        node.set_prop("hovered_index", "-1")
+    if kind == "dropdown" and node.get_prop("open") == "true":
+        closed_drop = node.id
+        node.set_prop("open", "false")
+        node.set_prop("hovered_index", "-1")
+    for child in node.children():
+        val sub = _hit_close_open_popups(child)
+        if sub != "" and closed_drop == "":
+            closed_drop = sub
+    closed_drop
+
+fn _hit_dispatch_open_context_menus(node: WidgetNode, rects: [WidgetRect], canvas_w: i32, canvas_h: i32, px: i32, py: i32, is_down: bool) -> text:
+    if not node.is_visible():
+        return ""
+    if node.kind_name() == "context_menu" and node.get_prop("open") == "true":
+        val ridx = _hit_find_rect_idx(rects, node.id)
+        val raw_x = if node.get_prop("anchor_x") != "": _hit_prop_int_or(node, "anchor_x", 0) elif ridx >= 0: rects[ridx].x else: 0
+        val raw_y = if node.get_prop("anchor_y") != "": _hit_prop_int_or(node, "anchor_y", 0) elif ridx >= 0: rects[ridx].y else: 0
+        val items = node.children()
+        val row_h: i32 = 24
+        val req_w = _hit_prop_int_or(node, "width", 160)
+        val menu_w = _hit_clamp(if req_w > 120: req_w else: 160, 48, canvas_w)
+        val raw_h: i32 = if items.len() > 0: (items.len() as i32) * row_h + 8 else: 32
+        val menu_h = _hit_clamp(raw_h, 24, canvas_h)
+        val menu_x = _hit_clamp(raw_x, 0, canvas_w - menu_w)
+        val menu_y = _hit_clamp(raw_y, 0, canvas_h - menu_h)
+        if _hit_in_box(px, py, menu_x, menu_y, menu_w, menu_h):
+            val idx = (py - menu_y - 4) / row_h
+            if idx >= 0 and idx < items.len() as i32:
+                val item = items[idx]
+                if is_down:
+                    node.set_prop("selected_index", "{idx}")
+                    node.set_prop("last_action", item.get_prop("label"))
+                    node.set_prop("ui_action_pending", "true")
+                    node.set_prop("open", "false")
+                    node.set_prop("hovered_index", "-1")
+                else:
+                    node.set_prop("hovered_index", "{idx}")
+                return item.id
+            return node.id
+    for child in node.children():
+        val res = _hit_dispatch_open_context_menus(child, rects, canvas_w, canvas_h, px, py, is_down)
+        if res != "":
+            return res
+    ""
+
+fn _hit_dispatch_open_dropdowns(node: WidgetNode, rects: [WidgetRect], ox_delta: i32, oy_delta: i32, canvas_w: i32, canvas_h: i32, px: i32, py: i32, is_down: bool) -> text:
+    if not node.is_visible():
+        return ""
+    var cur_ox = ox_delta
+    var cur_oy = oy_delta
+    if _hit_is_floating_node(node):
+        val bounds = _hit_floating_bounds(node, rects, canvas_w, canvas_h)
+        cur_ox = bounds[0] - bounds[4]
+        cur_oy = bounds[1] - bounds[5] + bounds[6]
+    if node.kind_name() == "dropdown" and node.get_prop("open") == "true":
+        val ridx = _hit_find_rect_idx(rects, node.id)
+        val trig_x = if ridx >= 0: rects[ridx].x + cur_ox else: _hit_prop_int_or(node, "x", 0)
+        val trig_y = if ridx >= 0: rects[ridx].y + cur_oy else: _hit_prop_int_or(node, "y", 0)
+        val trig_w = if ridx >= 0: rects[ridx].w else: _hit_prop_int_or(node, "width", 140)
+        val trig_h = if ridx >= 0: rects[ridx].h else: _hit_prop_int_or(node, "height", 28)
+        val items = node.children()
+        val row_h: i32 = 24
+        val raw_h: i32 = if items.len() > 0: (items.len() as i32) * row_h + 8 else: 32
+        val pop_w = _hit_clamp(if trig_w > 120: trig_w else: 120, 48, canvas_w)
+        val pop_h = _hit_clamp(raw_h, 24, canvas_h)
+        val below_y = trig_y + trig_h + 2
+        val raw_y = if below_y + pop_h <= canvas_h: below_y else: (if trig_y - pop_h - 2 >= 0: trig_y - pop_h - 2 else: canvas_h - pop_h)
+        val pop_x = _hit_clamp(trig_x, 0, canvas_w - pop_w)
+        val pop_y = _hit_clamp(raw_y, 0, canvas_h - pop_h)
+        if _hit_in_box(px, py, pop_x, pop_y, pop_w, pop_h):
+            val idx = (py - pop_y - 4) / row_h
+            if idx >= 0 and idx < items.len() as i32:
+                val item = items[idx]
+                if is_down:
+                    node.set_prop("selected_index", "{idx}")
+                    node.set_prop("value", item.get_prop("label"))
+                    node.set_prop("open", "false")
+                    node.set_prop("hovered_index", "-1")
+                else:
+                    node.set_prop("hovered_index", "{idx}")
+                return item.id
+            return node.id
+    for child in node.children():
+        val res = _hit_dispatch_open_dropdowns(child, rects, cur_ox, cur_oy, canvas_w, canvas_h, px, py, is_down)
+        if res != "":
+            return res
+    ""
+
+fn _hit_focus_textfield(node: WidgetNode, target_id: text):
+    val kind = node.kind_name()
+    if _is_text_input_kind(kind):
+        if node.id == target_id:
+            node.set_prop("ui_focus", "true")
+            if node.get_prop("caret") == "":
+                val cps = text_codepoints(node.get_prop("value"))
+                node.set_prop("caret", "{cps.len()}")
+        else:
+            node.set_prop("ui_focus", "false")
+    for child in node.children():
+        _hit_focus_textfield(child, target_id)
+
+fn _hit_focus_floating(floating: [WidgetNode], target_id: text):
+    var has_other = false
+    var max_other_z: i32 = 0
+    for fnode in floating:
+        if fnode.id != target_id:
+            val z = _hit_prop_int_or(fnode, "z_order", 0)
+            if not has_other or z > max_other_z:
+                max_other_z = z
+                has_other = true
+    for fnode in floating:
+        if fnode.id == target_id:
+            fnode.set_prop("ui_focus", "true")
+            if has_other:
+                val cur_z = _hit_prop_int_or(fnode, "z_order", 0)
+                if cur_z <= max_other_z:
+                    fnode.set_prop("z_order", "{max_other_z + 1}")
+        else:
+            fnode.set_prop("ui_focus", "false")
+
+fn _hit_apply_control_action(root: WidgetNode, node: WidgetNode, prev_open_drop_id: text):
+    val kind = node.kind_name()
+    if kind == "button":
+        val prev_count = _hit_prop_int_or(node, "click_count", 0)
+        node.set_prop("click_count", "{prev_count + 1}")
+        node.set_prop("ui_pressed", "true")
+        node.set_prop("ui_action_pending", "true")
+        root.set_prop("last_clicked", node.id)
+    elif kind == "checkbox":
+        var next = "true"
+        if node.get_prop("checked") == "true":
+            next = "false"
+        node.set_prop("checked", next)
+    elif kind == "dropdown":
+        if prev_open_drop_id == node.id:
+            node.set_prop("open", "false")
+        else:
+            node.set_prop("open", "true")
+            node.set_prop("hovered_index", "-1")
+    elif _is_text_input_kind(kind):
+        _hit_focus_textfield(root, node.id)
+
+fn _hit_find_in_floating_children(node: WidgetNode, rects: [WidgetRect], ox_delta: i32, oy_delta: i32, px: i32, py: i32) -> WidgetNode?:
+    if not node.is_visible():
+        return None
+    if _hit_is_floating_node(node) or node.kind_name() == "context_menu":
+        return None
+    val children = node.children()
+    var i: i32 = (children.len() as i32) - 1
+    while i >= 0:
+        val child = children[i]
+        val nested = _hit_find_in_floating_children(child, rects, ox_delta, oy_delta, px, py)
+        if val Some(_) = nested:
+            return nested
+        i = i - 1
+    val ridx = _hit_find_rect_idx(rects, node.id)
+    if ridx >= 0:
+        val r = rects[ridx]
+        if _hit_in_box(px, py, r.x + ox_delta, r.y + oy_delta, r.w, r.h):
+            val kind = node.kind_name()
+            if kind == "button" or kind == "checkbox" or kind == "dropdown" or _is_text_input_kind(kind):
+                return Some(node)
+    None
+
+fn _hit_collect_main_excluded(node: WidgetNode, mut excluded: [text], inside_excluded: bool):
+    val is_excl = inside_excluded or _hit_is_floating_node(node) or node.kind_name() == "context_menu"
+    if is_excl:
+        excluded.push(node.id)
+    val child_excl = is_excl or node.kind_name() == "dropdown"
+    for child in node.children():
+        _hit_collect_main_excluded(child, excluded, child_excl)
+
+fn _hit_in_list(list: [text], item: text) -> bool:
+    for entry in list:
+        if entry == item:
+            return true
+    false
+
+# @allow(primitive_api): canvas pixel dimensions and pointer coordinates match sibling widget_hit API
+fn widget_dispatch_pointer_down(root: WidgetNode, w: i32, h: i32, px: i32, py: i32, layout: [WidgetRect] = []) -> text:
+    """Handle pointer-down across context menus, dropdown popups, layered internal windows, draggable cards, buttons, and text fields."""
+    val rects = if layout.len() > 0: layout else: compute_pixel_layout(root, 0, 0, w, h)
+    root.set_prop("ui_drag_node_id", "")
+
+    val ctx_hit = _hit_dispatch_open_context_menus(root, rects, w, h, px, py, true)
+    if ctx_hit != "":
+        return ctx_hit
+
+    val drop_popup_hit = _hit_dispatch_open_dropdowns(root, rects, 0, 0, w, h, px, py, true)
+    if drop_popup_hit != "":
+        return drop_popup_hit
+
+    val prev_open_drop = _hit_close_open_popups(root)
+
+    var floating: [WidgetNode] = []
+    _hit_collect_floating(root, floating)
+    _hit_sort_floating_asc(floating)
+
+    var idx: i32 = (floating.len() as i32) - 1
+    while idx >= 0:
+        val fnode = floating[idx]
+        val bounds = _hit_floating_bounds(fnode, rects, w, h)
+        val fx = bounds[0]
+        val fy = bounds[1]
+        val fw = bounds[2]
+        val fh = bounds[3]
+        if _hit_in_box(px, py, fx, fy, fw, fh):
+            _hit_focus_floating(floating, fnode.id)
+            val ox_delta = fx - bounds[4]
+            val oy_delta = fy - bounds[5] + bounds[6]
+            var child_hit: WidgetNode? = None
+            val fchildren = fnode.children()
+            var ci: i32 = (fchildren.len() as i32) - 1
+            while ci >= 0:
+                child_hit = _hit_find_in_floating_children(fchildren[ci], rects, ox_delta, oy_delta, px, py)
+                if val Some(_) = child_hit:
+                    break
+                ci = ci - 1
+            if val Some(cnode) = child_hit:
+                _hit_apply_control_action(root, cnode, prev_open_drop)
+                return cnode.id
+            val is_win = fnode.kind_name() == "dialog" and fnode.get_prop("internal_window") == "true"
+            val in_drag_handle = if is_win: py <= fy + 28 else: true
+            if fnode.get_prop("draggable") == "true" and in_drag_handle:
+                root.set_prop("ui_drag_node_id", fnode.id)
+                root.set_prop("ui_drag_offset_x", "{px - fx}")
+                root.set_prop("ui_drag_offset_y", "{py - fy}")
+                fnode.set_prop("ui_pressed", "true")
+            return fnode.id
+        idx = idx - 1
+
+    var excluded: [text] = []
+    _hit_collect_main_excluded(root, excluded, false)
+    var r_i: i64 = rects.len() - 1
+    while r_i >= 0:
+        val r = rects[r_i]
+        if not _hit_in_list(excluded, r.id) and _hit_in_box(px, py, r.x, r.y, r.w, r.h):
+            val node = WidgetNode(id: r.id)
+            _hit_apply_control_action(root, node, prev_open_drop)
+            if node.get_prop("draggable") == "true":
+                val cur_x = _hit_prop_int_or(node, "x", r.x)
+                val cur_y = _hit_prop_int_or(node, "y", r.y)
+                root.set_prop("ui_drag_node_id", node.id)
+                root.set_prop("ui_drag_offset_x", "{px - cur_x}")
+                root.set_prop("ui_drag_offset_y", "{py - cur_y}")
+                node.set_prop("ui_pressed", "true")
+            return r.id
+        r_i = r_i - 1
+    ""
+
+# @allow(primitive_api): canvas pixel dimensions and pointer coordinates match sibling widget_hit API
+fn widget_dispatch_pointer_move(root: WidgetNode, w: i32, h: i32, px: i32, py: i32, layout: [WidgetRect] = []) -> text:
+    """Handle pointer-move: repositions active dragged card/window or updates hover highlights."""
+    val rects = if layout.len() > 0: layout else: compute_pixel_layout(root, 0, 0, w, h)
+    val drag_id = root.get_prop("ui_drag_node_id")
+    if drag_id != "":
+        val dnode = WidgetNode(id: drag_id)
+        val ridx = _hit_find_rect_idx(rects, drag_id)
+        val base_w = if ridx >= 0: rects[ridx].w else: 160
+        val base_h = if ridx >= 0: rects[ridx].h else: 80
+        val dw = _hit_clamp(_hit_prop_int_or(dnode, "width", base_w), 48, w)
+        val dh = _hit_clamp(_hit_prop_int_or(dnode, "height", base_h), 28, h)
+        val off_x = _hit_prop_int_or(root, "ui_drag_offset_x", 0)
+        val off_y = _hit_prop_int_or(root, "ui_drag_offset_y", 0)
+        val next_x = _hit_clamp(px - off_x, 0, w - dw)
+        val next_y = _hit_clamp(py - off_y, 0, h - dh)
+        dnode.set_prop("x", "{next_x}")
+        dnode.set_prop("y", "{next_y}")
+        return drag_id
+
+    val ctx_hover = _hit_dispatch_open_context_menus(root, rects, w, h, px, py, false)
+    if ctx_hover != "":
+        return ctx_hover
+
+    val drop_hover = _hit_dispatch_open_dropdowns(root, rects, 0, 0, w, h, px, py, false)
+    if drop_hover != "":
+        return drop_hover
+
+    widget_dispatch_hover(root, w, h, px, py, rects)
+
+# @allow(primitive_api): canvas pixel dimensions and pointer coordinates match sibling widget_hit API
+fn widget_dispatch_pointer_up(root: WidgetNode, w: i32, h: i32, px: i32, py: i32, layout: [WidgetRect] = []) -> text:
+    """Finish an active drag or press interaction on pointer-up."""
+    val drag_id = root.get_prop("ui_drag_node_id")
+    root.set_prop("ui_drag_node_id", "")
+    widget_clear_pressed(root)
+    if drag_id != "":
+        return drag_id
+    val rects = if layout.len() > 0: layout else: compute_pixel_layout(root, 0, 0, w, h)
+    _hit_test_rects_id(rects, px, py)
+
+fn _hit_find_context_menu(node: WidgetNode, menu_id: text) -> text:
+    if node.kind_name() == "context_menu":
+        if menu_id == "" or node.id == menu_id:
+            return node.id
+    for child in node.children():
+        val sub = _hit_find_context_menu(child, menu_id)
+        if sub != "":
+            return sub
+    ""
+
+# @allow(primitive_api): canvas pixel dimensions and pointer coordinates match sibling widget_hit API
+fn widget_dispatch_context_menu(root: WidgetNode, w: i32, h: i32, px: i32, py: i32, menu_id: text = "") -> text:
+    """Open the target context menu at (px, py) clamped inside the canvas bounds."""
+    _hit_close_open_popups(root)
+    val target_id = _hit_find_context_menu(root, menu_id)
+    if target_id == "":
+        return ""
+    val mnode = WidgetNode(id: target_id)
+    val items = mnode.children()
+    val req_w = _hit_prop_int_or(mnode, "width", 160)
+    val menu_w = _hit_clamp(if req_w > 120: req_w else: 160, 48, w)
+    val raw_h: i32 = if items.len() > 0: (items.len() as i32) * 24 + 8 else: 32
+    val menu_h = _hit_clamp(raw_h, 24, h)
+    val ax = _hit_clamp(px, 0, w - menu_w)
+    val ay = _hit_clamp(py, 0, h - menu_h)
+    mnode.set_prop("anchor_x", "{ax}")
+    mnode.set_prop("anchor_y", "{ay}")
+    mnode.set_prop("open", "true")
+    mnode.set_prop("hovered_index", "-1")
+    target_id
+
+fn _hit_find_focused_textfield(node: WidgetNode) -> text:
+    val kind = node.kind_name()
+    if _is_text_input_kind(kind) and node.get_prop("ui_focus") == "true":
+        return node.id
+    for child in node.children():
+        val sub = _hit_find_focused_textfield(child)
+        if sub != "":
+            return sub
+    ""
+
+fn _hit_normalize_key_name(key: text) -> text:
+    if key == "Backspace":
+        return "backspace"
+    if key == "Delete":
+        return "delete"
+    if key == "Left" or key == "ArrowLeft":
+        return "left"
+    if key == "Right" or key == "ArrowRight":
+        return "right"
+    if key == "Home":
+        return "home"
+    if key == "End":
+        return "end"
+    if key == "Enter" or key == "Return":
+        return "enter"
+    if key == "Escape" or key == "Esc":
+        return "escape"
+    key
+
+fn widget_dispatch_key_input(root: WidgetNode, key: text) -> text:
+    """Dispatch a keyboard event to open popups (Escape) or the currently focused text field using UTF-8 codepoint indexing."""
+    val norm = _hit_normalize_key_name(key)
+    if norm == "escape":
+        return _hit_close_open_popups(root)
+    val focused_id = _hit_find_focused_textfield(root)
+    if focused_id == "":
+        return ""
+    if (norm == "backspace" or norm == "delete" or norm == "left" or
+        norm == "right" or norm == "home" or norm == "end" or
+        norm == "enter" or _nchars(norm) == 1):
+        widget_dispatch_key(focused_id, norm)
+    elif _nchars(norm) > 1:
+        widget_dispatch_composition_commit(focused_id, norm)
+    focused_id
+
 export HitResult, widget_hit_test, widget_scroll_hit
 export widget_set_pressed, widget_clear_pressed, widget_dispatch_hover
 export widget_dispatch_click, widget_dispatch_scroll, widget_dispatch_key
 export widget_scrollbar_pointer_down, widget_scrollbar_pointer_move
 export widget_scrollbar_pointer_up
 export widget_dispatch_composition_update, widget_dispatch_composition_commit
+export widget_dispatch_pointer_down, widget_dispatch_pointer_move, widget_dispatch_pointer_up
+export widget_dispatch_context_menu, widget_dispatch_key_input

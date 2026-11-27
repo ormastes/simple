@@ -40,18 +40,29 @@ pub(crate) fn get_vreg_or_default<M: Module>(
     builder.ins().iconst(types::I64, 3)
 }
 
-/// `baremetal` selects the freestanding heap-tag vocabulary. It MUST come from
-/// the compilation target (`Target::is_baremetal()`, `common/src/target.rs`,
-/// threaded in as `InstrContext::baremetal`) and never be assumed: the
-/// freestanding tag numbers below OVERLAP hosted `HeapObjectType` values
-/// (`runtime/src/value/heap.rs`), so applying them on a hosted build turns an
-/// honest `-1` sentinel into a confidently wrong length read out of an
-/// unrelated field.
+/// `baremetal` enables only the riscv64 freestanding dict tag (11), which
+/// overlaps hosted `HeapObjectType::Unique`. RtCore and hosted Rust dictionaries
+/// share tag 3 and the `{header, len, capacity}` prefix, while closures use tag
+/// 6 in both runtimes, so the ordinary dict/closure decode needs no target gate.
+///
+/// `string_cp_len` is the declared `rt_string_char_count` func ref. User-facing
+/// `.len()` on text counts CODE POINTS (ADR-005 item 5), so the string arm
+/// calls it instead of loading the offset-8 BYTE length; `None` (baremetal C
+/// cores without that symbol) keeps the byte load. Bug:
+/// text_len_bytes_vs_codepoint_index_bound_disagree_2026_11_03.
+///
+/// `tuple_len` is the declared `rt_tuple_len` func ref: heap tag 4 is a
+/// `RuntimeTuple` in the Rust runtime but an enum in the C core, so the tag is
+/// not decoded inline; the runtime answers the arity, or -1 for a non-tuple.
+/// `None` keeps the -1 sentinel. Bug:
+/// seed_jit_any_typed_tuple_len_returns_minus_one_2026-11-27.
 pub(crate) fn inline_runtime_len_value(
     builder: &mut FunctionBuilder,
     value: cranelift_codegen::ir::Value,
     baremetal: bool,
     fam_arrays: bool,
+    string_cp_len: Option<cranelift_codegen::ir::FuncRef>,
+    tuple_len: Option<cranelift_codegen::ir::FuncRef>,
 ) -> cranelift_codegen::ir::Value {
     let invalid = builder.ins().iconst(types::I64, -1);
     let tag_mask = builder.ins().iconst(types::I64, 7);
@@ -76,20 +87,11 @@ pub(crate) fn inline_runtime_len_value(
     let is_heap_string = builder.ins().icmp_imm(IntCC::Equal, object_type, 1);
     let is_string = builder.ins().bor(is_core_string, is_heap_string);
     let is_array = builder.ins().icmp_imm(IntCC::Equal, object_type, 2);
-    // RuntimeDict (object_type 0x03) shares the {header, len, capacity} header
-    // layout, so its entry count is likewise stored at offset 8. Without this
-    // case `d.len()`/`d.is_empty()` on an untyped-receiver dict fall through to
-    // the -1 sentinel under the Cranelift JIT fast path.
+    // Hosted RuntimeDict and RtCoreDict both use object_type 0x03 and store
+    // their entry count at offset 8. Closure is 0x06 in both runtimes and must
+    // fall through to the -1 sentinel rather than reading its capture count.
     let is_dict = builder.ins().icmp_imm(IntCC::Equal, object_type, 3);
-    // TODO: [codegen][P1] Reconcile the two heap-kind numbering schemes (HeapObjectType::Closure = 0x06 in runtime/src/value/heap.rs:14 vs RT_VALUE_HEAP_DICT 0x06 / RT_VALUE_HEAP_CLOSURE 0x03 in src/runtime/runtime_native.c:250,252) and add an acceptance test that .len() on a hosted closure returns -1 rather than its capture count -- see doc/08_tracking/bug/cranelift_inline_len_heap_tag_space_collision_dict_closure_2026-09-06.md (PR #403)
-    // simple-core SplDict (freestanding / SimpleOS native-build) uses tag byte 6
-    // with layout {tag@0, cap@8, len@16, items@32} — unlike RuntimeDict (tag 3,
-    // len@8). Without this case `.len()`/`.values()` on an untyped/ANY-erased
-    // dict hit the -1 sentinel here, silently under-counting iteration and
-    // dropping a synthesized `main` during in-guest HIR lowering (the SimpleOS
-    // interpreter then reports "module has no main function").
-    let is_spldict = builder.ins().icmp_imm(IntCC::Equal, object_type, 6);
-    // The riscv64/SimpleOS BAREMETAL runtime tags its dict with 11, not 3 or 6
+    // The riscv64/SimpleOS BAREMETAL runtime tags its dict with 11
     // (examples/09_embedded/simple_os/arch/riscv64/boot/baremetal_stubs.c:48,
     // `#define HEAP_DICT 11U`). Without this case an ANY-erased
     // `Dict<SymbolId, HirFunction>` fell through to the -1 sentinel below, and
@@ -98,64 +100,88 @@ pub(crate) fn inline_runtime_len_value(
     // AND every loop over the dict silently does nothing. Measured in-guest
     // under real OpenSBI: `hir.functions.len()` answered -1, HIR lowering
     // dropped `main`, and the interpreter reported "module has no main
-    // function" -- exactly the failure the 6-tag comment above describes, from
-    // a third tag nobody had covered.
+    // function".
     // See doc/08_tracking/bug/riscv64_freestanding_len_eq_zero_guard_never_fires_2026-09-01.md
     //
     // Its layout is {HeapHeader hdr(8), uint64 len, uint64 cap, keys, vals}
-    // (baremetal_runtime_core.inc.c:2060-2068), so len sits at offset 8 -- the
-    // SAME offset as strings and arrays, and NOT SplDict's offset 16. It
-    // therefore joins the offset-8 group, not the spldict branch.
+    // (baremetal_runtime_core.inc.c:2060-2068), so len sits at offset 8.
     //
     // TARGET-GATED, and it has to be: hosted `HeapObjectType::Unique` is 0x0B
     // == 11 (runtime/src/value/heap.rs:19), so an ungated tag-11 arm would make
     // `.len()` on a hosted Unique load its offset-8 word -- not a length -- and
-    // report it as one. That is the same silent-wrong-answer class this arm
-    // exists to remove, only aimed at the hosted lane. The predicate is
-    // `Target::is_baremetal()` (common/src/target.rs), the same one
-    // common_backend.rs already uses to disable PIC for freestanding targets;
-    // it reaches here as `InstrContext::baremetal`.
+    // report it as one. The predicate is `Target::is_baremetal()`
+    // (common/src/target.rs), reaching here as `InstrContext::baremetal`.
     // RuntimeString, RuntimeArray and RuntimeDict store len at offset 8.
     let has_len_str_arr = builder.ins().bor(is_string, is_array);
     let has_len_rt = builder.ins().bor(has_len_str_arr, is_dict);
-    let has_len_rt2 = if baremetal {
+    let has_len = if baremetal {
         let is_bm_dict = builder.ins().icmp_imm(IntCC::Equal, object_type, 11);
         builder.ins().bor(has_len_rt, is_bm_dict)
     } else {
         has_len_rt
     };
-    let has_len = builder.ins().bor(has_len_rt2, is_spldict);
-    builder.ins().brif(has_len, len_block, &[], done_block, &[invalid]);
-    builder.seal_block(type_block);
+    if let Some(tuple_len_ref) = tuple_len {
+        let other_block = builder.create_block();
+        let tuple_block = builder.create_block();
+        builder.ins().brif(has_len, len_block, &[], other_block, &[]);
+        builder.seal_block(type_block);
+
+        builder.switch_to_block(other_block);
+        let is_tag4 = builder.ins().icmp_imm(IntCC::Equal, object_type, 4);
+        builder.ins().brif(is_tag4, tuple_block, &[], done_block, &[invalid]);
+        builder.seal_block(other_block);
+
+        builder.switch_to_block(tuple_block);
+        let call = adapted_call(builder, tuple_len_ref, &[value]);
+        let arity = builder.inst_results(call)[0];
+        builder.ins().jump(done_block, &[arity]);
+        builder.seal_block(tuple_block);
+    } else {
+        builder.ins().brif(has_len, len_block, &[], done_block, &[invalid]);
+        builder.seal_block(type_block);
+    }
 
     builder.switch_to_block(len_block);
-    // SplDict keeps its entry count at offset 16; everything else at offset 8.
-    // Separate blocks so off16 is never loaded on a (possibly smaller) non-dict.
-    //
+    // Text: code-point count via the runtime (ASCII fast path inside it);
+    // arrays/dicts fall through to the inline offset-8 element count.
+    if let Some(cp_len_ref) = string_cp_len {
+        let cp_block = builder.create_block();
+        let other_block = builder.create_block();
+        builder.ins().brif(is_string, cp_block, &[], other_block, &[]);
+        builder.seal_block(len_block);
+
+        builder.switch_to_block(cp_block);
+        let cp_call = adapted_call(builder, cp_len_ref, &[value]);
+        let cp_len = builder.inst_results(cp_call)[0];
+        builder.ins().jump(done_block, &[cp_len]);
+        builder.seal_block(cp_block);
+
+        builder.switch_to_block(other_block);
+        let len = if fam_arrays {
+            let len32 = builder.ins().load(types::I32, MemFlags::new(), ptr_bits, 8);
+            builder.ins().uextend(types::I64, len32)
+        } else {
+            builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8)
+        };
+        builder.ins().jump(done_block, &[len]);
+        builder.seal_block(other_block);
+
+        builder.switch_to_block(done_block);
+        let result = builder.block_params(done_block)[0];
+        builder.seal_block(done_block);
+        return result;
+    }
     // On FAM-array baremetal targets (aarch64/arm32/x86_32 C runtimes) the
     // offset-8 length is a `u32` for arrays AND dicts
     // (`RuntimeMap{u32 len; u32 cap; keys*; values*}`), while RuntimeString
     // keeps its `u64 len` — so the offset-8 group splits by width there.
     // Without the split, an inlined `.len()` on a 512-element sector buffer
     // reads `len | cap<<32` = 2199023256064 (aarch64 clang-bringup Blocker 2).
-    let spldict_len_block = builder.create_block();
-    let other_len_block = builder.create_block();
-    builder
-        .ins()
-        .brif(is_spldict, spldict_len_block, &[], other_len_block, &[]);
-    builder.seal_block(len_block);
-
-    builder.switch_to_block(spldict_len_block);
-    let len16 = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 16);
-    builder.ins().jump(done_block, &[len16]);
-    builder.seal_block(spldict_len_block);
-
-    builder.switch_to_block(other_len_block);
     if fam_arrays {
         let str_block = builder.create_block();
         let arrdict_block = builder.create_block();
         builder.ins().brif(is_string, str_block, &[], arrdict_block, &[]);
-        builder.seal_block(other_len_block);
+        builder.seal_block(len_block);
 
         builder.switch_to_block(str_block);
         let str_len = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8);
@@ -170,13 +196,40 @@ pub(crate) fn inline_runtime_len_value(
     } else {
         let len = builder.ins().load(types::I64, MemFlags::new(), ptr_bits, 8);
         builder.ins().jump(done_block, &[len]);
-        builder.seal_block(other_len_block);
+        builder.seal_block(len_block);
     }
 
     builder.switch_to_block(done_block);
     let result = builder.block_params(done_block)[0];
     builder.seal_block(done_block);
     result
+}
+
+/// Declared `rt_string_char_count` for `inline_runtime_len_value`: the text arm of a
+/// user-facing `.len()` counts code points (ADR-005 item 5). `None` on baremetal
+/// targets, whose C cores do not define the symbol (byte load kept there).
+pub(crate) fn string_cp_len_ref<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+) -> Option<cranelift_codegen::ir::FuncRef> {
+    if ctx.baremetal {
+        return None;
+    }
+    let id = *ctx.runtime_funcs.get("rt_string_char_count")?;
+    Some(ctx.module.declare_func_in_func(id, builder.func))
+}
+
+/// `rt_tuple_len` for `inline_runtime_len_value`; hosted targets only, like
+/// `string_cp_len_ref` (baremetal tag 4 has no tuple contract).
+pub(crate) fn tuple_len_ref<M: Module>(
+    ctx: &mut InstrContext<'_, M>,
+    builder: &mut FunctionBuilder,
+) -> Option<cranelift_codegen::ir::FuncRef> {
+    if ctx.baremetal {
+        return None;
+    }
+    let id = *ctx.runtime_funcs.get("rt_tuple_len")?;
+    Some(ctx.module.declare_func_in_func(id, builder.func))
 }
 
 pub(crate) fn inline_runtime_array_len_value(
@@ -459,7 +512,7 @@ pub(crate) fn adapted_call(
 
 /// Resolve a runtime call to its local body when one is declared, otherwise
 /// use the predeclared runtime import.
-fn resolve_runtime_func<M: Module>(ctx: &InstrContext<'_, M>, func_name: &str) -> cranelift_module::FuncId {
+pub(crate) fn resolve_runtime_func<M: Module>(ctx: &InstrContext<'_, M>, func_name: &str) -> cranelift_module::FuncId {
     ctx.func_ids
         .get(func_name)
         .copied()
@@ -713,7 +766,8 @@ fn adapt_value_to_type(
                     .bitcast(types::I64, cranelift_codegen::ir::MemFlags::new(), promoted);
             }
         }
-        return builder.ins().fcvt_to_sint(expected_ty, val);
+        // Narrow int slot: saturate like an explicit cast (NaN -> 0), never trap.
+        return float_to_int_saturating(builder, val, expected_ty, true);
     }
     // int → float
     if actual_ty.is_int() && expected_ty.is_float() {
@@ -782,5 +836,108 @@ pub(crate) fn indirect_call_with_result<M: Module>(
             let nil = builder.ins().iconst(types::I64, 3);
             ctx.vreg_values.insert(*d, nil);
         }
+    }
+}
+
+/// Float -> integer conversion with the interpreter's semantics
+/// (`semantics::cast_float_to_numeric`, i.e. Rust `as`): truncate toward
+/// zero, SATURATE to the target width's range, NaN -> 0. Used by every
+/// `x as uN/iN` and `x.to_uN()/to_iN()` lowering so the compiled engines agree
+/// with the interpreter. The old `fcvt_to_{sint,uint}.i64` + `ireduce` wrapped
+/// in-i64-range values (`70000.5.to_u16()` = 4464) and TRAPPED (SIGILL) on a
+/// negative float to an unsigned type and on NaN/out-of-i64-range input.
+/// `to_int` selects the result width (I8/I16/I32/I64); `signed` the range.
+/// doc/08_tracking/bug/compiled_float_to_narrow_uint_wraps_or_traps_vs_interpreter_saturates_2026-11-23.md
+pub(crate) fn float_to_int_saturating(
+    builder: &mut FunctionBuilder,
+    val: cranelift_codegen::ir::Value,
+    to_int: types::Type,
+    signed: bool,
+) -> cranelift_codegen::ir::Value {
+    let wide = if signed {
+        builder.ins().fcvt_to_sint_sat(types::I64, val)
+    } else {
+        builder.ins().fcvt_to_uint_sat(types::I64, val)
+    };
+    if to_int == types::I64 {
+        return wide;
+    }
+    let bits = to_int.bits();
+    let clamped = if signed {
+        let max = builder.ins().iconst(types::I64, (1i64 << (bits - 1)) - 1);
+        let min = builder.ins().iconst(types::I64, -(1i64 << (bits - 1)));
+        let upper = builder.ins().smin(wide, max);
+        builder.ins().smax(upper, min)
+    } else {
+        let max = builder.ins().iconst(types::I64, ((1u64 << bits) - 1) as i64);
+        builder.ins().umin(wide, max)
+    };
+    builder.ins().ireduce(to_int, clamped)
+}
+
+/// Implicit float -> narrow-int slot adapters (`adapt_value_to_type`, used by
+/// every `adapted_call`) used trapping `fcvt_to_sint`, so NaN, +/-inf or an
+/// out-of-range float passed into an i8/i16/i32 runtime/SFFI slot killed the
+/// process with SIGILL. They now saturate exactly like an explicit cast.
+#[cfg(test)]
+mod float_adapt_tests {
+    use super::*;
+    use cranelift_codegen::ir::AbiParam;
+    use cranelift_codegen::settings;
+    use cranelift_frontend::FunctionBuilderContext;
+    use cranelift_jit::{JITBuilder, JITModule};
+    use cranelift_module::Linkage;
+
+    /// JIT `f(x: f64) -> i64 = sextend(adapt_value_to_type(x, slot))`.
+    fn adapt_fn(slot: types::Type) -> (JITModule, extern "C" fn(f64) -> i64) {
+        let isa = cranelift_native::builder()
+            .expect("host ISA")
+            .finish(settings::Flags::new(settings::builder()))
+            .expect("ISA");
+        let mut module = JITModule::new(JITBuilder::with_isa(isa, cranelift_module::default_libcall_names()));
+        let mut sig = module.make_signature();
+        sig.params.push(AbiParam::new(types::F64));
+        sig.returns.push(AbiParam::new(types::I64));
+        let id = module.declare_function("adapt", Linkage::Export, &sig).expect("declare");
+        let mut ctx = module.make_context();
+        ctx.func.signature = sig;
+        let mut fctx = FunctionBuilderContext::new();
+        {
+            let mut b = FunctionBuilder::new(&mut ctx.func, &mut fctx);
+            let entry = b.create_block();
+            b.append_block_params_for_function_params(entry);
+            b.switch_to_block(entry);
+            b.seal_block(entry);
+            let x = b.block_params(entry)[0];
+            let narrow = adapt_value_to_type(&mut b, x, slot);
+            let wide = b.ins().sextend(types::I64, narrow);
+            b.ins().return_(&[wide]);
+            b.finalize();
+        }
+        module.define_function(id, &mut ctx).expect("define");
+        module.finalize_definitions().expect("finalize");
+        let code = module.get_finalized_function(id);
+        (module, unsafe { std::mem::transmute::<*const u8, extern "C" fn(f64) -> i64>(code) })
+    }
+
+    #[test]
+    fn float_into_narrow_int_slot_saturates_instead_of_trapping() {
+        let inputs = [-5.5, 3.7, 70000.5, -40000.25, 1e20, -1e20, f64::NAN, f64::INFINITY, f64::NEG_INFINITY];
+        let mut failures = Vec::new();
+        for slot in [types::I8, types::I16, types::I32] {
+            let (_module, f) = adapt_fn(slot);
+            for x in inputs {
+                let want = match slot {
+                    types::I8 => x as i8 as i64,
+                    types::I16 => x as i16 as i64,
+                    _ => x as i32 as i64,
+                };
+                let got = f(x);
+                if got != want {
+                    failures.push(format!("{slot} <- {x}: got {got}, want {want}"));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "narrow slot adapters:\n{}", failures.join("\n"));
     }
 }

@@ -1,0 +1,54 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Bare PAYLOAD variant patterns are variant tests, not default bindings
+
+Bug match_unqualified_imported_enum_variant_default_arms_2026-10-24: in
+`VhdlBackend.compile_process`, `case Combinational(_)` / `case Clocked(_)` over a
+re-exported enum lowered as binding default arms (MIR B5b "multiple
+wildcard/binding default arms"). This probe covers the local-enum half of the
+rule (single-file harness cannot resolve imports): bare payload variants of
+the subject's enum must lower as variant tests.
+"""
+
+# @tag: unit, compiler, mir, hir, enum
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+val payload_enum_src = "enum K:\n    Comb(names: [text])\n    Clk(domain: text)\n    Rst(domain: text)\n\n"
+
+fn payload_lower(src: text) -> (MirModule, [text]):
+    val file = "testdata/fixture_bare_payload.spl"
+    val parsed = parse_full_frontend(src, file, "fixture_bare_payload", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(file)
+    val hir = hir_lowering.lower_module(parsed)
+    val target_context = driver_mir_target_context(driver_core_compile_options_default())
+    var lowering = MirLowering.new_for_target(hir.symbols, target_context)
+    val mir = lowering.lower_module(hir)
+    var messages: [text] = []
+    for e in hir_lowering.errors:
+        messages = messages.push(e.message)
+    for e in lowering.errors:
+        messages = messages.push(e.message)
+    (mir, messages)
+
+fn payload_joined(messages: [text]) -> text:
+    var out = ""
+    for m in messages:
+        out = out + m + "\n"
+    out
+
+describe "bare payload variant patterns":
+    it "does not lower bare payload variant arms as multiple default bindings":
+        val body = "fn pick(k: K) -> i64:\n    match k:\n        case Comb(_):\n            1\n        case Clk(_):\n            2\n        case Rst(_):\n            3\n"
+        val (mir, messages) = payload_lower(payload_enum_src + body)
+        val all = payload_joined(messages)
+        print "errors: [{all}]"
+        expect(all.contains("B5b")).to_equal(false)
+        expect(all.contains("multiple wildcard")).to_equal(false)

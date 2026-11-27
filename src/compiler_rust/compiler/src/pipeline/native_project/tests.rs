@@ -9,10 +9,10 @@ use crate::codegen::common_backend::{enum_runtime_module_name_from_path, module_
 use crate::incremental::SourceInfo;
 use crate::pipeline::execution::runtime_bundle_env_lock_for_tests as runtime_bundle_env_lock;
 use super::linker::{
-    add_extra_link_objects, is_boot_c_translation_unit, minimal_boot_source_allowed, split_extra_link_objects,
-    validate_extra_link_objects,
+    add_extra_link_objects, freestanding_boot_dir, is_boot_c_translation_unit, minimal_boot_asm_source_allowed,
+    minimal_boot_source_allowed, split_extra_link_objects, validate_extra_link_objects,
 };
-use super::tools::find_hosted_runtime_rlib;
+use super::tools::{find_compiler_rt_builtins, find_hosted_runtime_rlib};
 use simple_simd::{host_cpu_config, reset_host_cpu_config_cache_for_tests, HostCpuConfig, SimdTier};
 use super::*;
 
@@ -157,15 +157,38 @@ fn boot_source_discovery_keeps_required_core_and_skips_fragments() {
 }
 
 #[test]
+fn boot_source_discovery_falls_back_to_source_root_and_prefers_entry() {
+    let temp = tempfile::tempdir().unwrap();
+    let entry = temp.path().join("test/regression/probe.spl");
+    let entry_boot = temp.path().join("test/regression/boot");
+    let source_root = temp.path().join("arch/x86_64");
+    let source_boot = source_root.join("boot");
+    fs::create_dir_all(entry.parent().unwrap()).unwrap();
+    fs::create_dir_all(&source_boot).unwrap();
+    fs::write(&entry, "").unwrap();
+
+    assert_eq!(freestanding_boot_dir(&entry, &[source_root.clone()]), Some(source_boot));
+    fs::create_dir_all(&entry_boot).unwrap();
+    assert_eq!(freestanding_boot_dir(&entry, &[source_root]), Some(entry_boot));
+}
+
+#[test]
 fn minimal_rv64_boot_keeps_entry_and_required_runtime_owners() {
     assert!(minimal_boot_source_allowed("boot_entry", false));
     assert!(minimal_boot_source_allowed("baremetal_runtime_core.inc", false));
     assert!(minimal_boot_source_allowed("freestanding_runtime", false));
     assert!(minimal_boot_source_allowed("baremetal_stubs", false));
     assert!(minimal_boot_source_allowed("rv64_display_backend", false));
+    // S-mode primitives TU (rt_memcpy/rt_riscv64_sbi_call/unsafe_addr_of...);
+    // omitting it left 8 symbols undefined in the riscv64 fs-exec kernel link.
+    assert!(minimal_boot_source_allowed("rv64_kernel_primitives", false));
     assert!(!minimal_boot_source_allowed("full_networking_runtime", false));
     assert!(minimal_boot_source_allowed("full_networking_runtime", true));
     assert!(!minimal_boot_source_allowed("unrelated_service", false));
+    assert!(minimal_boot_asm_source_allowed("crt0"));
+    assert!(minimal_boot_asm_source_allowed("context_switch"));
+    assert!(!minimal_boot_asm_source_allowed("multiboot2_elf64_loader"));
+    assert!(!minimal_boot_asm_source_allowed("up2_dci_uefi_transition"));
 }
 
 #[test]
@@ -263,11 +286,11 @@ fn qemu_facade_preserves_exact_historical_public_surface_on_physical_owners() {
     let repo_root = repo_root_for_native_project_tests();
     let facade = std::fs::read_to_string(repo_root.join("src/os/qemu_runner.spl")).unwrap();
     let expected = [
-        ("os._QemuRunner.runner_targets.", "_MULTIARCH_RESULT_ROOT _OS_BUILD_DEFAULT_TIMEOUT_MS _OS_BUILD_DEFAULT_LOG_MODE _parse_timeout_ms _os_build_timeout_ms _normalize_os_log_mode _os_build_log_mode _os_build_backend_for_target default_os_build_backend_for_target _now_ms _result_arch_slug _result_arch_dir _smoke_result_path _smoke_serial_log_path _smoke_serial_sample_path _bootstrap_result_path _native_build_failure_log_path _json_bool _escape_json _status_text _loader_name_for_arch _backend_title_case _platform_name_for_arch _image_path_for_target _ensure_result_dir _smoke_result_body _bootstrap_result_body _write_smoke_result _write_bootstrap_result _write_native_build_failure_log _tail_lines native_build_prerequisite_hint _print_native_build_failure_hint is_qemu_success OsTarget QemuRunOptions qemu_run_options_default qemu_run_options_debug_gui qemu_run_options_headless _qemu_command_binary _lane_to_target catalog_os_target simpleos_platform_arch get_target get_qemu_target get_gui_target get_gpu_test_target get_tools_test_target get_fs_test_target get_browser_soft_target get_browser_probe_target get_desktop_browser_target get_desktop_gui_target get_ssh_live_target get_toolchain_vfs_probe_target get_ssh_x25519_probe_target get_desktop_probe_target get_wm_simple_web_check_target get_arm64_wm_qemu_target get_riscv64_ssh_live_target"),
+        ("os._QemuRunner.runner_targets.", "qemu_default_arch qemu_default_arch_from_facts_v1 _MULTIARCH_RESULT_ROOT _OS_BUILD_DEFAULT_TIMEOUT_MS _OS_BUILD_DEFAULT_LOG_MODE _parse_timeout_ms _os_build_timeout_ms _normalize_os_log_mode _os_build_log_mode _os_build_backend_for_target default_os_build_backend_for_target _now_ms _result_arch_slug _result_arch_dir _smoke_result_path _smoke_serial_log_path _smoke_serial_sample_path _bootstrap_result_path _native_build_failure_log_path _json_bool _escape_json _status_text _loader_name_for_arch _backend_title_case _platform_name_for_arch _image_path_for_target _ensure_result_dir _smoke_result_body _bootstrap_result_body _write_smoke_result _write_bootstrap_result _write_native_build_failure_log _tail_lines native_build_prerequisite_hint _print_native_build_failure_hint is_qemu_success OsTarget QemuRunOptions qemu_run_options_default qemu_run_options_debug_gui qemu_run_options_headless _qemu_command_binary _lane_to_target catalog_os_target simpleos_platform_arch get_target get_qemu_target get_gui_target get_gpu_test_target get_tools_test_target get_fs_test_target get_browser_soft_target get_browser_probe_target get_desktop_browser_target get_desktop_gui_target get_ssh_live_target get_toolchain_vfs_probe_target get_ssh_x25519_probe_target get_desktop_probe_target get_wm_simple_web_check_target get_arm64_wm_qemu_target get_riscv64_ssh_live_target"),
         ("os._QemuRunner.scenario_catalog.", "test_os run_all_architectures test_all_architectures QemuScenario scenario_lane_kind _acceptance_lane_scenario _scenario_from_target _arm_fs_exec_platform_name _riscv_fs_exec_platform_name _arm_fs_exec_scenario _riscv_fs_exec_target _riscv_fs_exec_scenario _desktop_disk_scenario_target _is_desktop_disk_scenario_name _desktop_disk_scenario_target_direct _desktop_scenario_timeout_ms _ensure_desktop_scenario_media scenario_rv64_base scenario_rv64_dtb_pci scenario_rv64_ssh scenario_rv64_x25519_probe scenario_x64_pci_lab scenario_x64_nvme scenario_x64_net_user scenario_x64_ssh scenario_x64_toolchain_vfs_probe scenario_x64_q35_pure_nvme_perf scenario_x64_gpu_2d scenario_x64_gui scenario_x64_gui_tablet scenario_x64_wm_input_test scenario_x64_wm_simple_web_check scenario_x64_nvme_fat32 scenario_arm64_virtio_fat32_smf scenario_arm64_wm_ramfb scenario_arm32_virtio_fat32_smf scenario_riscv64_virtio_fat32_smf scenario_riscv32_virtio_fat32_smf scenario_riscv64_hosted scenario_x64_full_stack scenario_x64_desktop_test arm_fs_exec_disk_image_path arm_fs_exec_kernel_bin_path _arm_virtio_blk_exec_disk_args riscv_fs_exec_disk_image_path _riscv_virtio_blk_exec_disk_args ovmf_code_candidates ovmf_code_path desktop_uefi_bootloader_candidates desktop_uefi_bootloader_path desktop_uefi_disk_image_path desktop_uefi_esp_dir_path desktop_uefi_boot_media_ready _x64_desktop_uefi_args scenario_x64_desktop_uefi get_all_scenarios get_scenario scenario_exists scenario_by_name_direct _arm_fs_exec_scenario_name _riscv_fs_exec_scenario_name"),
         ("os._QemuRunner.scenario_disks.", "_is_arm_fs_exec_scenario_name _is_arm_fs_exec_scenario _is_riscv_fs_exec_scenario_name _is_riscv_fs_exec_scenario _catalog_platform_name_for_scenario _catalog_lane_for_scenario _catalog_has_lane_for_scenario _catalog_lane_for_scenario_direct _ensure_catalog_scenario_media scenario_target get_arm64_fs_exec_target get_arm32_fs_exec_target get_riscv64_fs_exec_target get_riscv32_fs_exec_target get_riscv64_hosted_target get_riscv64_ssh_live_target get_riscv64_x25519_probe_target _desktop_release_version desktop_release_disk_image_path_in desktop_release_disk_image_path desktop_release_installer_iso_path_in desktop_release_installer_iso_path desktop_disk_image_candidates_in desktop_disk_image_candidates desktop_installer_iso_candidates_in desktop_installer_iso_candidates desktop_disk_image_path_in desktop_disk_image_path desktop_disk_make_script_args desktop_uefi_disk_make_script_args fs_test_disk_image_path _x64_nvme_fs_test_disk_args desktop_installer_iso_path_in desktop_installer_iso_path _x64_nvme_disk_args scenario_x64_desktop_disk scenario_x64_desktop_gui ensure_desktop_disk_image ensure_removable_disk_image desktop_uefi_disk_image_tool_app_validation_command _desktop_uefi_disk_image_has_required_tool_apps ensure_desktop_uefi_boot_image board_bundle_command _board_bundle_expected_artifact _board_bundle_output_path _board_qemu_linked_scenario_name board_lane_test_command ensure_board_bundle test_board_lane test_board ensure_fs_test_disk_image ensure_arm_fs_exec_disk_image"),
         ("os._QemuRunner.scenario_disks.", "_is_arm_fs_exec_scenario_name _is_arm_fs_exec_scenario _is_riscv_fs_exec_scenario_name _is_riscv_fs_exec_scenario _catalog_platform_name_for_scenario _catalog_lane_for_scenario _catalog_has_lane_for_scenario _catalog_lane_for_scenario_direct _ensure_catalog_scenario_media scenario_target get_arm64_fs_exec_target get_arm32_fs_exec_target get_riscv64_fs_exec_target get_riscv32_fs_exec_target get_riscv64_hosted_target get_riscv64_ssh_live_target get_riscv64_x25519_probe_target _desktop_release_version desktop_release_disk_image_path_in desktop_release_disk_image_path desktop_release_installer_iso_path_in desktop_release_installer_iso_path desktop_disk_image_candidates_in desktop_disk_image_candidates desktop_installer_iso_candidates_in desktop_installer_iso_candidates desktop_disk_image_path_in desktop_disk_image_path desktop_disk_make_script_args desktop_uefi_disk_make_script_args fs_test_disk_image_path _x64_nvme_fs_test_disk_args desktop_installer_iso_path_in desktop_installer_iso_path _x64_nvme_disk_args scenario_x64_desktop_disk scenario_x64_desktop_gui ensure_desktop_disk_image ensure_removable_disk_image desktop_uefi_disk_image_tool_app_validation_command _desktop_uefi_disk_image_has_required_tool_apps ensure_desktop_uefi_boot_image board_bundle_command _board_bundle_expected_artifact _board_bundle_output_path _board_qemu_linked_scenario_name board_lane_test_command ensure_board_bundle test_board_lane test_board ensure_fs_test_disk_image ensure_arm_fs_exec_disk_image"),
-        ("os._QemuRunner.scenario_exec.", "ensure_riscv_fs_exec_disk_image _fs_test_disk_image_has_required_fixtures _ensure_catalog_fs_exec_disk_image _catalog_fs_exec_disk_image_has_required_smf _staged_tool_app_smf_name _native_tool_version_path _native_tool_version_pattern _native_tool_pipeline_path _native_tool_pipeline_pattern _catalog_lane_disk_image_has_required_staged_apps _arm_fs_exec_disk_image_has_required_smf _riscv_fs_exec_disk_image_has_required_smf ensure_arm_fs_exec_kernel_binary scenario_kernel_path _desktop_disk_image_has_required_manifests build_scenario_command build_scenario_command_headless _build_scenario_command_impl build_scenario run_scenario run_scenario_headless _run_scenario_impl test_scenario scenario_qemu_exit_success arm64_wm_ramfb_serial_log_path arm_fs_exec_required_marker_fragments riscv64_hosted_required_marker_fragments arm64_wm_ramfb_required_marker_fragments _scenario_required_marker_fragments _scenario_uses_catalog_completion_contract _scenario_serial_accepts_completion _scenario_serial_accepts_completion_with_optional_protection fs_exec_lane_name_rejects_resident_fallback qemu_scenario_serial_acceptance_reason qemu_scenario_serial_accepts_completion _print_scenario_missing_markers qemu_protection_serial_reason qemu_protection_serial_accepts_hardening qemu_scenario_protection_board_id qemu_scenario_protection_serial_reason qemu_scenario_protection_serial_accepts_hardening scenario_test_timeout_ms ensure_scenario_media boot_disk_image_serial"),
+        ("os._QemuRunner.scenario_exec.", "run_scenario_sealed_v1 scenario_sealed_run_supported_v1 ensure_riscv_fs_exec_disk_image _fs_test_disk_image_has_required_fixtures _ensure_catalog_fs_exec_disk_image _catalog_fs_exec_disk_image_has_required_smf _staged_tool_app_smf_name _native_tool_version_path _native_tool_version_pattern _native_tool_pipeline_path _native_tool_pipeline_pattern _catalog_lane_disk_image_has_required_staged_apps _arm_fs_exec_disk_image_has_required_smf _riscv_fs_exec_disk_image_has_required_smf ensure_arm_fs_exec_kernel_binary scenario_kernel_path _desktop_disk_image_has_required_manifests build_scenario_command build_scenario_command_headless _build_scenario_command_impl build_scenario run_scenario run_scenario_headless _run_scenario_impl test_scenario scenario_qemu_exit_success arm64_wm_ramfb_serial_log_path arm_fs_exec_required_marker_fragments riscv64_hosted_required_marker_fragments arm64_wm_ramfb_required_marker_fragments _scenario_required_marker_fragments _scenario_uses_catalog_completion_contract _scenario_serial_accepts_completion _scenario_serial_accepts_completion_with_optional_protection fs_exec_lane_name_rejects_resident_fallback qemu_scenario_serial_acceptance_reason qemu_scenario_serial_accepts_completion _print_scenario_missing_markers qemu_protection_serial_reason qemu_protection_serial_accepts_hardening qemu_scenario_protection_board_id qemu_scenario_protection_serial_reason qemu_scenario_protection_serial_accepts_hardening scenario_test_timeout_ms ensure_scenario_media boot_disk_image_serial"),
     ];
     for (owner, historical_surface) in expected {
         assert_eq!(
@@ -511,10 +534,11 @@ fn pure_simple_lambda_inline_helper_has_both_callers() {
 fn folded_global_scalar_type_calls_keep_mir_lowering_receiver_ownership() {
     let dispatch = include_str!("../../../../../compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl");
     assert!(dispatch.contains("fn folded_global_scalar_type(constant: MirConstant) -> MirType:"));
-    assert!(dispatch.contains("self.folded_global_scalar_type(constant)"));
-    assert!(dispatch.contains("self.folded_global_scalar_type(mir_const)"));
-    assert!(!dispatch.contains("= folded_global_scalar_type(constant)"));
-    assert!(!dispatch.contains("= folded_global_scalar_type(mir_const)"));
+    // The helper is module-level (8e84e2fa086): callers resolve it directly,
+    // and a `self.` call would look for a method that does not exist.
+    assert!(dispatch.contains("= folded_global_scalar_type(constant)"));
+    assert!(dispatch.contains("= folded_global_scalar_type(mir_const)"));
+    assert!(!dispatch.contains("self.folded_global_scalar_type("));
 }
 
 #[test]
@@ -655,6 +679,7 @@ fn enum_runtime_identity_qualification_preserves_builtins_and_custom_shadows() {
         dest: unit,
         enum_name: "Result".to_string(),
         variant_name: "Same".to_string(),
+        discriminant: simple_runtime::value::hash_variant_discriminant("Same"),
     });
     block.instructions.push(MirInst::PatternTest {
         dest: matched,
@@ -662,6 +687,7 @@ fn enum_runtime_identity_qualification_preserves_builtins_and_custom_shadows() {
         pattern: MirPattern::Variant {
             enum_name: "Option".to_string(),
             variant_name: "None".to_string(),
+            discriminant: simple_runtime::value::hash_variant_discriminant("None"),
             payload: None,
         },
     });
@@ -705,6 +731,7 @@ fn enum_runtime_identity_uses_unique_global_enum_suffix() {
             dest,
             enum_name: "FixConfidence".to_string(),
             variant_name: "Safe".to_string(),
+            discriminant: simple_runtime::value::hash_variant_discriminant("Safe"),
         });
     mir.functions.push(function);
 
@@ -745,6 +772,7 @@ fn enum_runtime_identity_preserves_unlisted_external_owner() {
             dest,
             enum_name: "ByteOrder".to_string(),
             variant_name: "LittleEndian".to_string(),
+            discriminant: simple_runtime::value::hash_variant_discriminant("LittleEndian"),
         });
     mir.functions.push(function);
 
@@ -1001,11 +1029,13 @@ fn native_project_extra_provider_resolves_symbol_and_suppresses_stub() {
         struct_module_owners: std::sync::Arc::new(std::collections::HashMap::new()),
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        duplicate_enum_names: std::sync::Arc::new(std::collections::HashSet::new()),
         enum_runtime_names: std::sync::Arc::new(std::collections::HashMap::new()),
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
         method_param_defaults: std::sync::Arc::new(std::collections::HashMap::new()),
+        struct_field_defaults: std::sync::Arc::new(std::collections::HashMap::new()),
         populate_global_struct_defs: false,
         populate_global_enum_defs: false,
     };
@@ -2196,6 +2226,104 @@ fn test_native_hir_loads_common_imported_struct_fields_from_lib_root() {
     assert_eq!(function.return_type, crate::hir::TypeId::STRING);
 }
 
+/// doc/08_tracking/bug/native_user_class_imported_trait_vtable_missing_2026-11-15.md
+/// `class Buf with Transport:` where `Transport` is IMPORTED must record a
+/// HirImpl (and so a vtable_impls entry), or the native link stubs
+/// `__vtable__..Buf__for__Transport` and the first cross-module trait call
+/// segfaults.
+#[test]
+fn test_native_class_with_imported_trait_records_impl_and_vtable() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_root = temp.path().join("project");
+    let src_root = project_root.join("src");
+    let lib_root = src_root.join("lib");
+    let owner = lib_root.join("nogc_sync_mut/xt/transport.spl");
+    let consumer = src_root.join("app/xt/main.spl");
+    std::fs::create_dir_all(owner.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(consumer.parent().unwrap()).unwrap();
+    std::fs::write(
+        &owner,
+        "trait Transport:\n    fn read_message() -> text?\n    fn write_message(msg: text)\n    fn close()\n",
+    )
+    .unwrap();
+    std::fs::write(
+        &consumer,
+        "use std.xt.transport.{Transport}\n\nclass Buf with Transport:\n    closed: bool\n    static fn new() -> Buf:\n        Buf(closed: false)\n    fn read_message() -> text?:\n        nil\n    fn write_message(msg: text):\n        print msg\n    fn close():\n        print \"c\"\n",
+    )
+    .unwrap();
+
+    let source = std::fs::read_to_string(&consumer).unwrap();
+    let ast = simple_parser::Parser::new(&source).parse().unwrap();
+    let resolver = crate::module_resolver::ModuleResolver::new(project_root, lib_root.clone())
+        .with_extra_source_roots(vec![src_root, lib_root]);
+    let mut lowerer = crate::hir::Lowerer::with_module_resolver(resolver, consumer);
+    lowerer.set_strict_mode(false);
+    lowerer.set_lenient_types(true);
+    let hir = lowerer.lower_module(&ast).expect("consumer must lower");
+    assert!(
+        hir.impls
+            .iter()
+            .any(|i| i.type_name == "Buf" && i.trait_name.as_deref() == Some("Transport")),
+        "no HirImpl for Buf with imported Transport; impls={:?}",
+        hir.impls.iter().map(|i| (&i.type_name, &i.trait_name)).collect::<Vec<_>>()
+    );
+    let mir = crate::mir::lower_to_mir(&hir).expect("consumer must lower to MIR");
+    let entry = mir
+        .vtable_impls
+        .iter()
+        .find(|(_, owner, sym, _, _)| owner == "Buf" && sym.ends_with("__for__Transport"))
+        .expect("no vtable_impls entry for Buf/Transport");
+    assert_eq!(entry.3.iter().filter(|slot| slot.is_some()).count(), 3, "slots: {:?}", entry.3);
+}
+
+/// Root cause of the same bug: an entry OUTSIDE every stdlib family (here
+/// `test/xt/main.spl`) resolved `std.xt.transport.transport` through the
+/// family loop, and the earlier family's package-self match
+/// (`nogc_async_mut/xt/transport/__init__.spl`, which declares no trait) beat
+/// the later family's real `nogc_sync_mut/xt/transport/transport.spl`. The
+/// trait binding was then recorded for the wrong unit and `Buf` got no impl.
+#[test]
+fn test_native_entry_outside_src_binds_imported_trait_from_later_family_file() {
+    let temp = tempfile::tempdir().unwrap();
+    let project_root = temp.path().join("project");
+    let src_root = project_root.join("src");
+    let lib_root = src_root.join("lib");
+    let decoy = lib_root.join("nogc_async_mut/xt/transport/__init__.spl");
+    let owner = lib_root.join("nogc_sync_mut/xt/transport/transport.spl");
+    let consumer = project_root.join("test/xt/main.spl");
+    for path in [&decoy, &owner, &consumer] {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    }
+    std::fs::write(&decoy, "fn decoy_only() -> i64:\n    0\n").unwrap();
+    std::fs::write(&owner, "trait Transport:\n    fn close()\n").unwrap();
+    std::fs::write(
+        &consumer,
+        "use std.xt.transport.transport.{Transport}\n\nclass Buf with Transport:\n    closed: bool\n    fn close():\n        print \"c\"\n",
+    )
+    .unwrap();
+
+    let mp = simple_parser::ast::ModulePath::new(vec!["std".into(), "xt".into(), "transport".into(), "transport".into()]);
+    let resolver = crate::module_resolver::ModuleResolver::new(project_root.clone(), src_root.clone())
+        .with_extra_source_roots(super::compiler::native_hir_resolver_roots(&project_root, &[src_root.clone(), lib_root]));
+    let resolved = resolver.resolve(&mp, &consumer).expect("stdlib import must resolve");
+    assert_eq!(
+        crate::interpreter::normalize_path_key(&resolved.path),
+        crate::interpreter::normalize_path_key(&owner)
+    );
+
+    let source = std::fs::read_to_string(&consumer).unwrap();
+    let ast = simple_parser::Parser::new(&source).parse().unwrap();
+    let mut lowerer = crate::hir::Lowerer::with_module_resolver(resolver, consumer);
+    lowerer.set_strict_mode(false);
+    lowerer.set_lenient_types(true);
+    let hir = lowerer.lower_module(&ast).expect("consumer must lower");
+    assert!(
+        hir.impls.iter().any(|i| i.type_name == "Buf" && i.trait_name.as_deref() == Some("Transport")),
+        "no HirImpl for Buf with imported Transport; impls={:?}",
+        hir.impls.iter().map(|i| (&i.type_name, &i.trait_name)).collect::<Vec<_>>()
+    );
+}
+
 #[test]
 fn test_incremental_cache_dir_custom() {
     let config = NativeBuildConfig {
@@ -2206,7 +2334,8 @@ fn test_incremental_cache_dir_custom() {
     let builder =
         NativeProjectBuilder::new(PathBuf::from("/project"), PathBuf::from("/project/bin/simple")).config(config);
 
-    assert_eq!(builder.cache_dir().parent().unwrap(), PathBuf::from("/tmp/my_cache"));
+    // The cache root is extended-length-prefixed on Windows (`win_long_path`).
+    assert_eq!(builder.cache_dir().parent().unwrap(), win_long_path(Path::new("/tmp/my_cache")));
     assert!(builder
         .cache_dir()
         .file_name()
@@ -2890,6 +3019,9 @@ fn test_core_lane_runtime_archives_expose_required_abi_symbols() {
     assert!(core_c_symbols.contains("rt_crc32_text"));
     assert!(core_c_symbols.contains("rt_file_create_excl"));
     assert!(core_c_symbols.contains("rt_file_sync"));
+    assert!(core_c_symbols.contains("rt_dir_sync"));
+    assert!(core_c_symbols.contains("rt_file_read_under_root_bytes"));
+    assert!(core_c_symbols.contains("rt_file_write_under_root_bytes"));
     for symbol in [
         "rt_file_view_open_beneath_no_follow_v1",
         "rt_file_view_pread_exact_v1",
@@ -3079,15 +3211,150 @@ fn test_core_c_runtime_target_flags_cover_aarch64_atomics_and_riscv_vectors() {
 
 #[test]
 fn test_windows_gnu_target_flag_is_only_for_clang_drivers() {
+    use simple_common::platform::cc_detect::ToolDetectEnv;
     use simple_common::target::Target;
 
     let target = Target::parse("x86_64-pc-windows-gnu").unwrap();
-    assert_eq!(target_c_compiler(target), "clang");
+    // Without CC, Windows GNU prefers the arch-matching llvm-mingw driver
+    // (never bare `clang` which could hit an MSVC clang ahead on PATH).
+    assert_eq!(
+        target_c_compiler_with_env(target, &ToolDetectEnv::default()),
+        "x86_64-w64-mingw32-clang"
+    );
+    let override_env = ToolDetectEnv {
+        cc: Some("/custom/clang".to_string()),
+        ..ToolDetectEnv::default()
+    };
+    assert_eq!(target_c_compiler_with_env(target, &override_env), "/custom/clang");
     assert_eq!(
         windows_gnu_target_flag(target, "clang"),
         Some("--target=x86_64-w64-windows-gnu")
     );
+    assert_eq!(
+        windows_gnu_target_flag(target, "x86_64-w64-mingw32-clang"),
+        Some("--target=x86_64-w64-windows-gnu")
+    );
     assert_eq!(windows_gnu_target_flag(target, "x86_64-w64-mingw32-gcc"), None);
+    assert_eq!(windows_gnu_target_flag(target, "clang-cl"), None);
+}
+
+#[test]
+fn test_windows_gnu_target_flag_follows_target_arch() {
+    use simple_common::target::Target;
+
+    for (triple, driver, flag) in [
+        ("aarch64-pc-windows-gnullvm", "aarch64-w64-mingw32-clang", "--target=aarch64-w64-windows-gnu"),
+        ("aarch64-w64-mingw32", "aarch64-w64-mingw32-clang", "--target=aarch64-w64-windows-gnu"),
+        ("i686-pc-windows-gnu", "i686-w64-mingw32-clang", "--target=i686-w64-windows-gnu"),
+        ("armv7-pc-windows-gnu", "armv7-w64-mingw32-clang", "--target=armv7-w64-windows-gnu"),
+        ("x86_64-pc-windows-gnu", "x86_64-w64-mingw32-clang", "--target=x86_64-w64-windows-gnu"),
+    ] {
+        let target = Target::parse(triple).unwrap();
+        assert_eq!(windows_gnu_target_flag(target, "clang"), Some(flag), "{triple}");
+        assert_eq!(windows_gnu_target_flag(target, driver), Some(flag), "{triple}");
+    }
+}
+
+fn write_fake_clang_tool(dir: &Path, name: &str, effective_triple: &str) -> PathBuf {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        let script = format!(
+            "#!/bin/sh\nif [ \"$1\" = \"--print-effective-triple\" ] || [ \"$1\" = \"-dumpmachine\" ]; then\n  echo \"{effective_triple}\"\nfi\nexit 0\n"
+        );
+        std::fs::write(&path, script).unwrap();
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).unwrap();
+        path
+    }
+    #[cfg(windows)]
+    {
+        let path = dir.join(format!("{name}.cmd"));
+        let script = format!(
+            "@echo off\r\nif \"%1\"==\"--print-effective-triple\" echo {effective_triple}\r\nif \"%1\"==\"-dumpmachine\" echo {effective_triple}\r\nexit /b 0\r\n"
+        );
+        std::fs::write(&path, script).unwrap();
+        path
+    }
+}
+
+#[test]
+fn test_windows_gnu_target_compiler_prefers_arch_llvm_mingw_and_rejects_msvc_clang() {
+    use simple_common::platform::cc_detect::ToolDetectEnv;
+    use simple_common::target::Target;
+
+    let temp = tempfile::tempdir().unwrap();
+    let msvc_bin = temp.path().join("llvm-msvc").join("bin");
+    let mingw_bin = temp.path().join("llvm-mingw").join("bin");
+    std::fs::create_dir_all(&msvc_bin).unwrap();
+    std::fs::create_dir_all(&mingw_bin).unwrap();
+
+    // Put MSVC-target clang ahead of llvm-mingw on PATH, mirroring windows-llvm-23.1.1.shs.
+    let msvc_clang = write_fake_clang_tool(&msvc_bin, "clang", "x86_64-pc-windows-msvc");
+    let _mingw_clang = write_fake_clang_tool(&mingw_bin, "clang", "x86_64-w64-windows-gnu");
+    let i686_cc = write_fake_clang_tool(&mingw_bin, "i686-w64-mingw32-clang", "i686-w64-windows-gnu");
+    let x86_64_cc = write_fake_clang_tool(&mingw_bin, "x86_64-w64-mingw32-clang", "x86_64-w64-windows-gnu");
+    let aarch64_cc = write_fake_clang_tool(&mingw_bin, "aarch64-w64-mingw32-clang", "aarch64-w64-windows-gnu");
+    let i686_cxx = write_fake_clang_tool(&mingw_bin, "i686-w64-mingw32-clang++", "i686-w64-windows-gnu");
+
+    let joined_path = std::env::join_paths([&msvc_bin, &mingw_bin]).unwrap();
+    let path_env = ToolDetectEnv {
+        path: Some(joined_path),
+        ..ToolDetectEnv::default()
+    };
+
+    for (triple, expected_path, expected_flag) in [
+        ("i686-pc-windows-gnu", &i686_cc, "--target=i686-w64-windows-gnu"),
+        ("x86_64-pc-windows-gnu", &x86_64_cc, "--target=x86_64-w64-windows-gnu"),
+        ("aarch64-pc-windows-gnu", &aarch64_cc, "--target=aarch64-w64-windows-gnu"),
+    ] {
+        let target = Target::parse(triple).unwrap();
+        let selected = target_c_compiler_with_env(target, &path_env);
+        assert_eq!(Path::new(&selected), expected_path.as_path(), "{triple}");
+        assert_ne!(Path::new(&selected), msvc_clang.as_path(), "{triple}");
+        assert_eq!(windows_gnu_target_flag(target, &selected), Some(expected_flag), "{triple}");
+    }
+    assert_eq!(
+        Path::new(&target_cxx_compiler_with_env(Target::parse("i686-pc-windows-gnu").unwrap(), &path_env)),
+        i686_cxx.as_path()
+    );
+
+    // When ONLY MSVC clang exists on PATH (no llvm-mingw anywhere), fail closed on the
+    // arch-matching llvm-mingw driver name and never fall back to MSVC clang.
+    let msvc_only_env = ToolDetectEnv {
+        path: Some(msvc_bin.as_os_str().to_os_string()),
+        ..ToolDetectEnv::default()
+    };
+    for (triple, expected_fallback) in [
+        ("i686-pc-windows-gnu", "i686-w64-mingw32-clang"),
+        ("x86_64-pc-windows-gnu", "x86_64-w64-mingw32-clang"),
+        ("aarch64-pc-windows-gnu", "aarch64-w64-mingw32-clang"),
+    ] {
+        let selected = target_c_compiler_with_env(Target::parse(triple).unwrap(), &msvc_only_env);
+        assert_eq!(selected, expected_fallback, "{triple}");
+    }
+
+    // Also discover <arch>-w64-mingw32-clang from $HOME/.simple/toolchains/llvm-mingw-*/bin
+    // even when llvm-mingw is absent from PATH and MSVC clang is first on PATH.
+    let home = temp.path().join("home");
+    let home_mingw_bin = home
+        .join(".simple")
+        .join("toolchains")
+        .join("llvm-mingw-20260922-ucrt-x86_64")
+        .join("bin");
+    std::fs::create_dir_all(&home_mingw_bin).unwrap();
+    let home_i686_cc = write_fake_clang_tool(&home_mingw_bin, "i686-w64-mingw32-clang", "i686-w64-windows-gnu");
+    let home_env = ToolDetectEnv {
+        path: Some(msvc_bin.as_os_str().to_os_string()),
+        home_dir: Some(home),
+        ..ToolDetectEnv::default()
+    };
+    assert_eq!(
+        Path::new(&target_c_compiler_with_env(Target::parse("i686-pc-windows-gnu").unwrap(), &home_env)),
+        home_i686_cc.as_path()
+    );
 }
 
 #[cfg(target_os = "linux")]
@@ -3606,7 +3873,7 @@ fn pure_simple_runtime_bundle_separates_memory_and_hosted_ownership() {
         );
         assert!(source.find(standalone_flag).unwrap() < source.find(dynload_flag).unwrap());
     }
-    assert!(source.contains("if include_dynload:\n                # Only the standalone core-C composition"));
+    assert!(source.contains("if include_dynload or core_c_profile:\n                # Only the standalone core-C composition"));
 }
 
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
@@ -3959,7 +4226,10 @@ fn test_stage4_rust_runtime_selector_requires_staticlib() {
     );
     std::fs::remove_file(&staticlib).unwrap();
     let error = NativeProjectBuilder::stage4_rust_runtime_staticlib(temp.path()).unwrap_err();
-    assert!(error.contains(&staticlib.display().to_string()));
+    // The production message joins `deps/libsimple_runtime.a` verbatim, so on
+    // Windows it mixes separators; render the expected path the same way.
+    let reported = temp.path().join("deps/libsimple_runtime.a");
+    assert!(error.contains(&reported.display().to_string()), "{error}");
     assert!(error.contains("staticlib"));
 }
 
@@ -4229,6 +4499,51 @@ void rt_passenger_owned(void) { }
         weak.iter().any(|raw| raw.trim_start_matches('_') == "rt_passenger_owned"),
         "owner-provided passenger symbol must be demoted to WEAK so the outer C definition can override it, found strong: {weak:?}"
     );
+}
+
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[test]
+fn test_stage4_rust_runtime_projection_preserves_thread_packing_callback() {
+    let temp = tempfile::tempdir().unwrap();
+    let rust_runtime = build_compiler_backfill_test_archive(temp.path(), "packing_owner", &[
+        // No root references the callback: the projection must explicitly
+        // extract its separate archive member and keep the symbol global.
+        "int rt_projected_root(void) { return 7; }\n",
+        "void simple_note_user_threads_started(void) {}\nvoid rt_typed_words_i64_set(void) {}\n",
+    ]);
+    let projected = build_stage4_rust_runtime_projection_archive(&rust_runtime,
+        &["rt_projected_root".to_string()], &[], &temp.path().join("projection")).unwrap();
+    let (defined, _) = super::tools::archive_global_symbols(&projected).unwrap();
+    let canonical: std::collections::BTreeMap<_, _> = defined.into_iter()
+        .map(|(name, count)| (name.trim_start_matches('_').to_string(), count)).collect();
+    assert_eq!(canonical, std::collections::BTreeMap::from([
+        ("rt_projected_root".to_string(), 1),
+        ("simple_note_user_threads_started".to_string(), 1),
+    ]));
+    let source = temp.path().join("mixed.c");
+    let executable = temp.path().join("mixed");
+    std::fs::write(&source, r#"
+extern int rt_projected_root(void);
+extern void simple_note_user_threads_started(void) __attribute__((weak));
+int main(void) {
+    if (!simple_note_user_threads_started || rt_projected_root() != 7) return 1;
+    simple_note_user_threads_started();
+    return 0;
+}
+"#).unwrap();
+    let linked = std::process::Command::new(find_c_compiler())
+        .arg(&source).arg(&projected).arg("-o").arg(&executable).output().unwrap();
+    assert!(linked.status.success(), "{}", String::from_utf8_lossy(&linked.stderr));
+    assert!(std::process::Command::new(&executable).status().unwrap().success());
+
+    let incomplete = build_compiler_backfill_test_archive(temp.path(), "missing_packing_hook", &[
+        "int rt_projected_root(void) { return 7; }\nvoid rt_typed_words_i64_push(void) {}\n",
+    ]);
+    let rejected = temp.path().join("rejected");
+    let error = build_stage4_rust_runtime_projection_archive(&incomplete,
+        &["rt_projected_root".to_string()], &[], &rejected).unwrap_err();
+    assert!(error.contains("requires exactly one simple_note_user_threads_started definition; found 0"));
+    assert!(!rejected.join("libsimple_stage4_rust_runtime.a").exists());
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -4656,13 +4971,20 @@ fn test_core_c_runtime_owns_tool_host_service_family() {
         "rt_ptr_read_i32",
         "rt_string_index_of",
         "rt_array_max",
+        "rt_array_min",
         "rt_array_sort",
         "max",
-        "f64.sqrt",
-        "f64.floor",
-        "f64.ceil",
     ] {
         assert!(symbols.contains(symbol), "core-c runtime must own `{symbol}`");
+    }
+    // ELF-spelling aliases; runtime_core_host_services.c compiles them out on _WIN32.
+    #[cfg(not(target_os = "windows"))]
+    for symbol in ["f64.sqrt", "f64.floor", "f64.ceil"] {
+        assert!(symbols.contains(symbol), "core-c runtime must own `{symbol}`");
+    }
+    #[cfg(target_os = "windows")]
+    for symbol in ["f64.sqrt", "f64.floor", "f64.ceil"] {
+        assert!(!symbols.contains(symbol), "`{symbol}` ELF alias must stay out of the Windows archive");
     }
 }
 
@@ -4912,6 +5234,7 @@ fn test_bootstrap_mutex_capsule_exports_only_canonical_bootstrap_abi() {
         "rt_mem_snapshot_close",
         "rt_file_create_excl",
         "rt_file_sync",
+        "rt_dir_sync",
         "rt_simple_abi_version",
         "rt_simple_abi_version_deferred",
         "rt_sosix_directory_pair_check_v1",
@@ -5076,6 +5399,90 @@ fn test_runtime_bundle_host_gpu_missing_authority_fails_closed() {
     assert!(selected.0.ends_with("host_gpu_core_c_runtime/libsimple_runtime.a"));
     assert!(!selected.1);
     assert_eq!(find_hosted_runtime_rlib(temp.path()), None);
+}
+
+// Blocker 8 (doc/08_tracking/bug/linux_gb10_n2_qualification_executable_blockers_2026-11-18.md):
+// an ordinary GPU entry needs the Vulkan runtime and the provider registry,
+// which only a `--features vulkan` native_all archive carries. The explicit
+// `host-gpu-native-all` lane admits exactly that archive and nothing weaker.
+#[cfg(target_os = "linux")]
+#[test]
+fn test_runtime_bundle_host_gpu_native_all_selects_vulkan_native_all() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let temp = tempfile::tempdir().unwrap();
+    let native_all = build_compiler_backfill_test_archive(
+        temp.path(),
+        "simple_native_all",
+        &["long rt_vulkan_init(void) { return 1; }\nlong rt_gpu_provider_loaded(long b) { return b; }\n"],
+    );
+    let mut config = NativeBuildConfig {
+        runtime_path: Some(temp.path().to_path_buf()),
+        ..Default::default()
+    };
+    config.runtime_bundle = "host-gpu-native-all".to_string();
+    let builder = NativeProjectBuilder::new(PathBuf::from("/project"), temp.path().join("qual")).config(config);
+
+    assert_eq!(builder.resolve_runtime_lane(), NativeRuntimeLane::HostGpuNativeAll);
+    let selected = builder.selected_runtime_library(temp.path()).unwrap().unwrap();
+    assert_eq!(selected.0, native_all);
+    assert!(selected.1);
+    assert!(builder.reject_unexpected_native_all(Some(&selected)).is_ok());
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn test_runtime_bundle_host_gpu_native_all_rejects_archive_without_vulkan() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let temp = tempfile::tempdir().unwrap();
+    build_compiler_backfill_test_archive(
+        temp.path(),
+        "simple_native_all",
+        &["long rt_gpu_provider_loaded(long b) { return b; }\n"],
+    );
+    let mut config = NativeBuildConfig {
+        runtime_path: Some(temp.path().to_path_buf()),
+        ..Default::default()
+    };
+    config.runtime_bundle = "host-gpu-native-all".to_string();
+    let builder = NativeProjectBuilder::new(PathBuf::from("/project"), temp.path().join("qual")).config(config);
+
+    let error = builder.selected_runtime_library(temp.path()).unwrap_err();
+    assert!(error.contains("rt_vulkan_init"), "{error}");
+    assert!(error.contains("--features vulkan"), "{error}");
+}
+
+#[test]
+fn test_runtime_bundle_host_gpu_native_all_requires_runtime_path() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let temp = tempfile::tempdir().unwrap();
+    let mut config = NativeBuildConfig::default();
+    config.runtime_bundle = "host-gpu-native-all".to_string();
+    let builder = NativeProjectBuilder::new(PathBuf::from("/project"), temp.path().join("qual")).config(config);
+
+    let error = builder.selected_runtime_library(temp.path()).unwrap_err();
+    assert!(error.contains("--runtime-path"), "{error}");
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn test_runtime_bundle_host_gpu_still_refuses_native_all() {
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let temp = tempfile::tempdir().unwrap();
+    build_compiler_backfill_test_archive(
+        temp.path(),
+        "simple_native_all",
+        &["long rt_vulkan_init(void) { return 1; }\n"],
+    );
+    let mut config = NativeBuildConfig {
+        runtime_path: Some(temp.path().to_path_buf()),
+        ..Default::default()
+    };
+    config.runtime_bundle = "host-gpu".to_string();
+    let builder = NativeProjectBuilder::new(PathBuf::from("/project"), temp.path().join("qual")).config(config);
+
+    let selected = builder.selected_runtime_library(temp.path()).unwrap().unwrap();
+    assert!(selected.0.ends_with("host_gpu_core_c_runtime/libsimple_runtime.a"));
+    assert!(!selected.1);
 }
 
 #[test]
@@ -5367,8 +5774,8 @@ fn native_project_fs_platform_aliases_keep_the_sync_path_owner() {
         src_root.join("lib/nogc_async_mut/path.spl"),
         src_root.join("lib/nogc_async_mut/platform.spl"),
         src_root.join("lib/platform.spl"),
-        src_root.join("lib/nogc_sync_mut/fs.spl"),
-        src_root.join("lib/nogc_async_mut/fs.spl"),
+        src_root.join("lib/nogc_sync_mut/fs/flat.spl"),
+        src_root.join("lib/nogc_async_mut/fs/flat.spl"),
     ];
     let file_sources = paths
         .iter()
@@ -6842,11 +7249,13 @@ int main(void) { app_call(); return 0; }
         struct_module_owners: std::sync::Arc::new(std::collections::HashMap::new()),
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        duplicate_enum_names: std::sync::Arc::new(std::collections::HashSet::new()),
         enum_runtime_names: std::sync::Arc::new(std::collections::HashMap::new()),
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
         method_param_defaults: std::sync::Arc::new(std::collections::HashMap::new()),
+        struct_field_defaults: std::sync::Arc::new(std::collections::HashMap::new()),
         populate_global_struct_defs: false,
         populate_global_enum_defs: false,
     };
@@ -6958,11 +7367,13 @@ void __module_init_security_registry(void) {
         struct_module_owners: std::sync::Arc::new(std::collections::HashMap::new()),
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        duplicate_enum_names: std::sync::Arc::new(std::collections::HashSet::new()),
         enum_runtime_names: std::sync::Arc::new(std::collections::HashMap::new()),
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
         method_param_defaults: std::sync::Arc::new(std::collections::HashMap::new()),
+        struct_field_defaults: std::sync::Arc::new(std::collections::HashMap::new()),
         populate_global_struct_defs: false,
         populate_global_enum_defs: false,
     };
@@ -7020,6 +7431,8 @@ fn test_gcc_cpu_dispatch_symbols_are_not_stub_candidates() {
 /// `starts_with` silently false in every native-built binary on this host and
 /// left the Stage-3 admission planner rejecting its own valid
 /// `--bootstrap-reason`. These names must never be stub candidates.
+// glibc/POSIX libc names: Windows resolves its CRT through `is_windows_system_name`.
+#[cfg(not(target_os = "windows"))]
 #[test]
 fn test_libc_names_are_not_stub_candidates() {
     for symbol in [
@@ -7129,6 +7542,33 @@ fn test_mingw_crt_symbols_follow_output_target_not_build_host() {
     assert!(!super::tools::is_system_symbol_for_target("app__main", target));
 }
 
+/// i386 COFF prefixes C names with `_`: mingw's stack probe `_alloca` is the
+/// undefined symbol `__alloca` in LLVM i686 objects. Stubbing it links but
+/// skips guard-page probing for large frames.
+#[test]
+fn test_mingw_i686_decorated_crt_symbols_are_never_stub_candidates() {
+    let target = simple_common::target::Target::parse("i686-pc-windows-gnu").unwrap();
+    for symbol in ["__alloca", "___chkstk", "___chkstk_ms", "___main"] {
+        assert!(
+            super::tools::is_system_symbol_for_target(symbol, target),
+            "{symbol} must resolve from the i686 MinGW CRT/compiler-rt, never generated stubs"
+        );
+    }
+    assert!(!super::tools::is_system_symbol_for_target("_app__main", target));
+}
+
+#[test]
+fn test_mingw_i686_stdcall_decorated_win32_symbols_are_never_stub_candidates() {
+    let target = simple_common::target::Target::parse("i686-pc-windows-gnu").unwrap();
+    for symbol in ["_Sleep@4", "_GetLastError@0", "_CreateProcessW@40", "_CloseHandle@4"] {
+        assert!(
+            super::tools::is_system_symbol_for_target(symbol, target),
+            "{symbol} is a kernel32 stdcall import, never a generated stub"
+        );
+    }
+    assert!(!super::tools::is_system_symbol_for_target("_app_fn@4", target));
+}
+
 #[test]
 fn test_msvc_win32_and_ucrt_imports_are_never_stub_candidates() {
     let target = simple_common::target::Target::parse("x86_64-pc-windows-msvc").unwrap();
@@ -7169,6 +7609,7 @@ fn test_inline_asm_symbols_are_never_weak_stub_candidates() {
     assert!(!super::stubs::is_inline_asm_symbol("_app__main"));
 }
 
+#[cfg(not(target_os = "windows"))]
 #[test]
 fn test_versioned_termios_symbols_are_not_stub_candidates() {
     for symbol in [
@@ -7236,11 +7677,13 @@ int main(int argc, char** argv) {
         struct_module_owners: std::sync::Arc::new(std::collections::HashMap::new()),
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        duplicate_enum_names: std::sync::Arc::new(std::collections::HashSet::new()),
         enum_runtime_names: std::sync::Arc::new(std::collections::HashMap::new()),
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
         method_param_defaults: std::sync::Arc::new(std::collections::HashMap::new()),
+        struct_field_defaults: std::sync::Arc::new(std::collections::HashMap::new()),
         populate_global_struct_defs: false,
         populate_global_enum_defs: false,
     };
@@ -7375,11 +7818,13 @@ int main(void) {
         struct_module_owners: std::sync::Arc::new(std::collections::HashMap::new()),
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        duplicate_enum_names: std::sync::Arc::new(std::collections::HashSet::new()),
         enum_runtime_names: std::sync::Arc::new(std::collections::HashMap::new()),
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
         method_param_defaults: std::sync::Arc::new(std::collections::HashMap::new()),
+        struct_field_defaults: std::sync::Arc::new(std::collections::HashMap::new()),
         populate_global_struct_defs: false,
         populate_global_enum_defs: false,
     };
@@ -7449,11 +7894,13 @@ int main(void) {
         struct_module_owners: std::sync::Arc::new(std::collections::HashMap::new()),
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        duplicate_enum_names: std::sync::Arc::new(std::collections::HashSet::new()),
         enum_runtime_names: std::sync::Arc::new(std::collections::HashMap::new()),
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
         method_param_defaults: std::sync::Arc::new(std::collections::HashMap::new()),
+        struct_field_defaults: std::sync::Arc::new(std::collections::HashMap::new()),
         populate_global_struct_defs: false,
         populate_global_enum_defs: false,
     };
@@ -7517,11 +7964,13 @@ int main(void) { return (int)run_check(); }
         struct_module_owners: std::sync::Arc::new(std::collections::HashMap::new()),
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        duplicate_enum_names: std::sync::Arc::new(std::collections::HashSet::new()),
         enum_runtime_names: std::sync::Arc::new(std::collections::HashMap::new()),
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
         method_param_defaults: std::sync::Arc::new(std::collections::HashMap::new()),
+        struct_field_defaults: std::sync::Arc::new(std::collections::HashMap::new()),
         populate_global_struct_defs: false,
         populate_global_enum_defs: false,
     };
@@ -8067,13 +8516,13 @@ int main(void) {
     if (rt_value_as_int(rt_dict_get(uint_dict, rt_value_u64(0))) != 10) return 112;
     if (rt_value_as_int(rt_dict_get(uint_dict, rt_value_u64(INT64_C(1) << 61))) != 20) return 113;
 
-    int64_t none = rt_enum_new(1, (int32_t)2371748697u, 3);
-    int64_t some = rt_enum_new(1, (int32_t)4053299545u, rt_value_int(9));
+    int64_t none = rt_enum_new(1, 1, 3);
+    int64_t some = rt_enum_new(1, 0, rt_value_int(9));
     if (rt_enum_id(none) != 1 || rt_enum_id(some) != 1 || rt_enum_id(rt_value_int(9)) != -1) return 104;
     if (!rt_is_none(none) || rt_is_some(none)) return 94;
     if (rt_is_none(some) || !rt_is_some(some)) return 95;
-    if ((uint32_t)rt_enum_discriminant(some) != 4053299545u) return 96;
-    if (!rt_enum_check_discriminant(some, 4053299545u)) return 97;
+    if ((uint32_t)rt_enum_discriminant(some) != 0u) return 96;
+    if (!rt_enum_check_discriminant(some, 0u)) return 97;
     if (rt_enum_payload(some) != rt_value_int(9)) return 98;
     int64_t uint_inner = rt_enum_new(77, 1, boxed_u64_max);
     int64_t uint_outer = rt_enum_new(78, 1, uint_inner);
@@ -8302,11 +8751,13 @@ fn test_freestanding_weak_boot_alias_uses_strong_simple_suffix_match() {
         struct_module_owners: std::sync::Arc::new(std::collections::HashMap::new()),
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        duplicate_enum_names: std::sync::Arc::new(std::collections::HashSet::new()),
         enum_runtime_names: std::sync::Arc::new(std::collections::HashMap::new()),
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
         method_param_defaults: std::sync::Arc::new(std::collections::HashMap::new()),
+        struct_field_defaults: std::sync::Arc::new(std::collections::HashMap::new()),
         populate_global_struct_defs: false,
         populate_global_enum_defs: false,
     };
@@ -9187,7 +9638,9 @@ fn empty_import_map_result() -> imports::ImportMapResult {
         unique_struct_owners: std::collections::HashMap::new(),
         struct_module_owners: std::collections::HashMap::new(),
         duplicate_struct_defs: std::collections::HashMap::new(),
+        struct_field_defaults: std::collections::HashMap::new(),
         enum_defs: std::collections::HashMap::new(),
+        duplicate_enum_names: std::collections::HashSet::new(),
         enum_runtime_names: std::collections::HashMap::new(),
         enum_runtime_collision: None,
         data_exports: std::collections::HashSet::new(),
@@ -9453,11 +9906,13 @@ fn test_linker_fails_closed_on_undefined_runtime_symbol() {
         struct_module_owners: std::sync::Arc::new(std::collections::HashMap::new()),
         duplicate_struct_defs: std::sync::Arc::new(std::collections::HashMap::new()),
         enum_defs: std::sync::Arc::new(std::collections::HashMap::new()),
+        duplicate_enum_names: std::sync::Arc::new(std::collections::HashSet::new()),
         enum_runtime_names: std::sync::Arc::new(std::collections::HashMap::new()),
         data_exports: std::sync::Arc::new(std::collections::HashSet::new()),
         fn_arities: std::sync::Arc::new(std::collections::HashMap::new()),
         fn_return_types: std::sync::Arc::new(std::collections::HashMap::new()),
         method_param_defaults: std::sync::Arc::new(std::collections::HashMap::new()),
+        struct_field_defaults: std::sync::Arc::new(std::collections::HashMap::new()),
         populate_global_struct_defs: false,
         populate_global_enum_defs: false,
     };
@@ -9468,6 +9923,19 @@ fn test_linker_fails_closed_on_undefined_runtime_symbol() {
     }
     if let Some(v) = prev_boot {
         std::env::set_var("SIMPLE_BOOTSTRAP", v);
+    }
+    // On a platform whose final link rejects undefined symbols (windows-gnu:
+    // `tolerates_unresolved_symbols() == false`) the preflight verdict is
+    // deliberately deferred to that authoritative link (stubs.rs, WA-s2n7,
+    // 2026-11-08, doc/08_tracking/bug/stage2_windows_gnu_112_undefined_rt_symbols_2026-11-08.md),
+    // so there is nothing for this preflight to reject there.
+    let target = super::effective_target();
+    if !simple_common::platform::link_config::PlatformLinkConfig::for_target(&target).tolerates_unresolved_symbols() {
+        assert!(
+            result.is_ok(),
+            "strict-final-link platforms defer the undefined-rt_* verdict to the linker; got: {result:?}"
+        );
+        return;
     }
     let err = result.expect_err("undefined rt_* symbol must be a hard link error, not a silent stub");
     assert!(
@@ -9960,4 +10428,407 @@ fn non_native_import_alias_keeps_original_callable_and_function_value() {
     assert!(value.body.iter().any(|stmt| matches!(stmt,
         HirStmt::Let { value: Some(expr), .. }
         if matches!(&expr.kind, HirExprKind::Global(name) if name == "normalize"))));
+}
+
+/// The pre-compile diagnostic names the changed global component (or states
+/// that only interface slices can invalidate) so a wide rebuild is explained
+/// before compilation starts (seed_global_interface_cache_rebuild_latency).
+#[test]
+fn test_global_build_fingerprint_describe_change_names_component() {
+    let base = GlobalBuildFingerprint {
+        producer: 1,
+        opt_level: 2,
+        entry_closure: 3,
+        target: 4,
+        linker_script: 5,
+        layout: 6,
+        instrumentation: 7,
+    };
+    assert!(base.describe_change(None).contains("no previous manifest"));
+    assert_eq!(base.describe_change(Some(&base)), "global inputs unchanged");
+    let mut producer = base;
+    producer.producer = 9;
+    assert_eq!(
+        producer.describe_change(Some(&base)),
+        "full rebuild expected: compiler producer changed"
+    );
+    let mut layout = base;
+    layout.layout = 9;
+    assert!(layout.describe_change(Some(&base)).contains("interface layout changed"));
+}
+
+/// bootstrap_imported_free_method_rebind_2026_10_12: a class method `free` and
+/// an `extern fn free` collide on the bare name; the extern identity must win
+/// regardless of module order.
+#[test]
+fn build_import_map_prefers_extern_identity_over_same_named_method_in_either_order() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("src");
+    std::fs::create_dir_all(&root).unwrap();
+    let builder = root.join("a_builder.spl");
+    let abi = root.join("b_abi.spl");
+    std::fs::write(
+        &builder,
+        "class Builder:\n    h: i64\n    fn free():\n        pass\n",
+    )
+    .unwrap();
+    std::fs::write(&abi, "extern fn free(p: i64)\n").unwrap();
+    let b = (builder.clone(), std::fs::read_to_string(&builder).unwrap());
+    let a = (abi.clone(), std::fs::read_to_string(&abi).unwrap());
+    for sources in [vec![b.clone(), a.clone()], vec![a, b]] {
+        let result = super::imports::build_import_map(&sources, std::slice::from_ref(&root), &root);
+        assert_eq!(result.map.get("free").map(String::as_str), Some("free"));
+    }
+}
+
+#[test]
+fn suffix_index_keeps_leading_underscore_of_private_helper() {
+    use super::imports::{build_suffix_index, resolve_by_suffix, suffix_of};
+    let gate = "compiler__backend__introspection__elf_artifact_gate___u64".to_string();
+    assert_eq!(suffix_of(&gate), Some("_u64"));
+    assert_eq!(suffix_of("mod__Foo.bar"), Some("Foo.bar"));
+    assert_eq!(suffix_of("a__b__c"), Some("c"));
+    let mut all = std::collections::HashMap::new();
+    all.insert("gate".to_string(), vec![gate]);
+    let index = build_suffix_index(&all);
+    assert!(index.get("u64").is_none());
+    // An erased-receiver `.to_u64()` must not bind to the private `_u64`.
+    assert_eq!(resolve_by_suffix("to_u64", &index), None);
+}
+
+#[test]
+fn core_c_vector_provider_pin_is_validated_and_scoped_to_the_loader_tu() {
+    use super::tools::{
+        core_c_vector_provider_pin, core_c_vector_provider_pin_define,
+        core_c_vector_provider_pin_fingerprint,
+    };
+    let pin_a = "0e3f00aa11bb22cc33dd44ee55ff66aa77bb88cc99dd00ee11ff22aa33bb44cc";
+    let pin_b = "f".repeat(64);
+    assert_eq!(core_c_vector_provider_pin(None), Ok(None));
+    assert_eq!(core_c_vector_provider_pin(Some("")), Ok(None));
+    assert_eq!(core_c_vector_provider_pin(Some(pin_a)), Ok(Some(pin_a.to_string())));
+    assert!(core_c_vector_provider_pin(Some(&pin_a.to_uppercase())).is_err());
+    assert!(core_c_vector_provider_pin(Some(&pin_a[..63])).is_err());
+    assert!(core_c_vector_provider_pin(Some("x".repeat(64).as_str())).is_err());
+    // Define emitted only into runtime_simd_utf8.c, and only with a pin.
+    assert_eq!(
+        core_c_vector_provider_pin_define("runtime_simd_utf8.c", Some(pin_a)),
+        Some(format!("-DSIMPLE_VECTOR_PROVIDER_PIN_HEX={pin_a}"))
+    );
+    assert_eq!(core_c_vector_provider_pin_define("runtime_native.c", Some(pin_a)), None);
+    assert_eq!(core_c_vector_provider_pin_define("runtime_simd_utf8.c", None), None);
+    // Archive reuse key differs with / without / per pin.
+    let none = core_c_vector_provider_pin_fingerprint(None);
+    let a = core_c_vector_provider_pin_fingerprint(Some(pin_a));
+    let b = core_c_vector_provider_pin_fingerprint(Some(&pin_b));
+    assert_ne!(none, a);
+    assert_ne!(none, b);
+    assert_ne!(a, b);
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn test_freestanding_qualified_to_bare_does_not_alias_weak_undefined() {
+    // ELF weak undefined is nm `w`, never a usable bare definition.
+    let temp = tempfile::tempdir().unwrap();
+    let cc = std::env::var("CC").unwrap_or_else(|_| "clang".to_string());
+    let src = temp.path().join("weak_undefined.c");
+    let obj = temp.path().join("weak_undefined.o");
+    std::fs::write(&src, r#"
+        extern long rt_io_tcp_bind(long) __attribute__((weak));
+        extern long os__kernel__boot__tcp_baremetal_min__rt_io_tcp_bind(long);
+        long caller_use(long x) {
+            return (rt_io_tcp_bind ? rt_io_tcp_bind(x) : 0)
+                + os__kernel__boot__tcp_baremetal_min__rt_io_tcp_bind(x);
+        }
+    "#).unwrap();
+    assert!(std::process::Command::new(&cc).arg("-c").arg(&src)
+        .arg("-o").arg(&obj).status().unwrap().success());
+    let symbols = NativeProjectBuilder::read_global_symbol_types(&obj).unwrap();
+    assert!(symbols.iter().any(|(kind, name)| kind == "w" && name == "rt_io_tcp_bind"));
+    let aliases = NativeProjectBuilder::freestanding_qualified_to_bare_defsyms(&[obj], &[]).unwrap();
+    assert_eq!(aliases, Vec::<(String, String)>::new());
+}
+
+/// `use lib.game_api as g` then `g.run(...)`: a whole-module alias must map
+/// `g.run` to the module's owner exactly like `use lib.game_api` maps
+/// `game_api.run`. Before the fix the Aliased arm only resolved `game_api` as
+/// an item, so lowering failed `Unknown variable: g` and the module de-JITed.
+/// doc/08_tracking/bug/jit_lowering_module_alias_and_panic_2026-07-02.md
+#[test]
+fn test_jitalias_module_alias_resolves_qualified_call() {
+    let temp = tempfile::tempdir().unwrap();
+    let src_root = temp.path().join("project/src");
+    let lib_root = src_root.join("lib");
+    let api_path = lib_root.join("game_api.spl");
+    let other_path = lib_root.join("other_api.spl");
+    let caller_path = lib_root.join("caller.spl");
+    std::fs::create_dir_all(&lib_root).unwrap();
+    std::fs::write(&api_path, "pub fn run(value: i64) -> i64:\n    value + 1\n").unwrap();
+    std::fs::write(&other_path, "pub fn run(value: i64) -> text:\n    \"wrong\"\n").unwrap();
+    std::fs::write(
+        &caller_path,
+        "use lib.game_api as g\n\nfn answer() -> i64:\n    val result = g.run(41)\n    result\n",
+    )
+    .unwrap();
+
+    let paths = [&api_path, &other_path, &caller_path];
+    let file_sources: Vec<_> = paths
+        .iter()
+        .map(|path| ((*path).clone(), std::fs::read_to_string(path).unwrap()))
+        .collect();
+    let imports = super::imports::build_import_map(&file_sources, std::slice::from_ref(&lib_root), &src_root);
+    let ast = simple_parser::Parser::new(&std::fs::read_to_string(&caller_path).unwrap())
+        .parse()
+        .unwrap();
+    let use_map = super::imports::build_use_map_from_ast(&ast, &imports.all_mangled, &imports.re_exports);
+    let selected = use_map.get("g.run").expect("module alias must resolve `g.run`");
+    assert_eq!(
+        imports.fn_return_types.get(selected),
+        Some(&simple_parser::Type::Simple("i64".to_string()))
+    );
+
+    let mut lowerer = crate::hir::Lowerer::new();
+    lowerer.set_lenient_types(true);
+    lowerer.set_global_fn_return_types(std::sync::Arc::new(imports.fn_return_types.clone()));
+    lowerer.set_qualified_import_functions(std::sync::Arc::new(use_map));
+    let lowered = lowerer.lower_module(&ast).expect("alias call must lower, not fail");
+    let answer = lowered.functions.iter().find(|function| function.name == "answer").unwrap();
+    let result = answer.locals.iter().find(|local| local.name == "result").unwrap();
+    assert_eq!(result.ty, crate::hir::TypeId::I64);
+}
+
+#[test]
+fn text_opt_kept_when_source_parses() {
+    let src = "fn f(s: text?) -> i64:\n    match s:\n        case Some(v): 1\n        case None: 0\n";
+    assert_eq!(super::compiler::normalize_text_opt_if_unparseable(src), src);
+}
+
+#[test]
+fn text_opt_rewritten_when_source_unparseable() {
+    let src = "fn f(s: text?) -> ):\n";
+    let out = super::compiler::normalize_text_opt_if_unparseable(src);
+    assert_eq!(out, src.replace("text?", "text"));
+    assert!(!out.contains("text?"));
+}
+
+#[test]
+fn file_phase_timing_line_names_phase_seconds_and_file() {
+    let line = super::compiler::phase_line("hir", 1.234, Path::new("a/b.spl"));
+    assert_eq!(line, "[native-file-phase] hir=1.23s a/b.spl");
+}
+
+#[test]
+fn file_phase_timer_only_advances_when_enabled() {
+    let file = Path::new("a/b.spl");
+    let mut off = super::compiler::FilePhaseTimer::with_enabled(file, false);
+    let off_start = off.last_for_tests();
+    off.mark("parse");
+    assert_eq!(off.last_for_tests(), off_start);
+    let mut on = super::compiler::FilePhaseTimer::with_enabled(file, true);
+    let on_start = on.last_for_tests();
+    std::thread::sleep(std::time::Duration::from_millis(2));
+    on.mark("parse");
+    assert!(on.last_for_tests() > on_start);
+}
+
+/// compiled_hir_module_form_use_bare_names_2026-11-19: an imported
+/// function named by a symbol-form `use` and only address-taken (the
+/// syscall_shim.spl workaround shape) must compile under LLVM.
+#[cfg(feature = "llvm")]
+#[test]
+fn llvm_address_taken_symbol_form_import_compiles() {
+    let temp = tempfile::tempdir().unwrap();
+    let src = temp.path().join("src");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(
+        src.join("provider.spl"),
+        "@export(\"C\", name: \"ga_provider_fn\")\nfn ga_provider_fn() -> i64:\n    42\n",
+    )
+    .unwrap();
+    fs::write(
+        src.join("consumer.spl"),
+        "use provider.{ga_provider_fn}\nfn keep() -> u64:\n    ga_provider_fn as u64\n",
+    )
+    .unwrap();
+    let archive = temp.path().join("probe.a");
+    let result = NativeProjectBuilder::new(temp.path().to_path_buf(), archive)
+        .source_dir(src)
+        .config(NativeBuildConfig {
+            emit_archive: true,
+            backend: "llvm".to_string(),
+            num_threads: Some(1),
+            ..Default::default()
+        })
+        .build()
+        .expect("address-taken import must compile under LLVM");
+    assert_eq!(result.failed, 0);
+}
+
+/// extern_shadow_blocks_imported_fn_value_2026-11-20: a same-named
+/// `extern fn` declared in ANOTHER module of the closure must not stop this
+/// file's explicit `use` from binding an address-taken function value
+/// (the syscall_shim.spl / netstack_init.spl shape). Covers zero- and
+/// one-argument providers: arity is not the trigger.
+#[cfg(feature = "llvm")]
+#[test]
+fn llvm_address_taken_import_survives_foreign_extern_shadow() {
+    let temp = tempfile::tempdir().unwrap();
+    let src = temp.path().join("src");
+    fs::create_dir_all(src.join("pkg")).unwrap();
+    fs::write(
+        src.join("pkg/provider.spl"),
+        "fn es_zero() -> i64:\n    42\nfn es_one(x: i64) -> i64:\n    x + 1\n",
+    )
+    .unwrap();
+    fs::write(
+        src.join("pkg/other.spl"),
+        "extern fn es_zero() -> i64\nextern fn es_one(x: i64) -> i64\nfn other_use() -> i64:\n    es_zero() + es_one(1)\n",
+    )
+    .unwrap();
+    fs::write(
+        src.join("consumer.spl"),
+        "use pkg.provider\nuse pkg.provider.{es_zero, es_one}\nfn keep() -> u64:\n    var total: u64 = 0\n    total = total + (es_one as u64)\n    total = total + (es_zero as u64)\n    total\n",
+    )
+    .unwrap();
+    let archive = temp.path().join("probe.a");
+    let result = NativeProjectBuilder::new(temp.path().to_path_buf(), archive)
+        .source_dir(src)
+        .config(NativeBuildConfig {
+            emit_archive: true,
+            backend: "llvm".to_string(),
+            num_threads: Some(1),
+            ..Default::default()
+        })
+        .build()
+        .expect("imported fn value must bind despite a foreign extern of the same name");
+    assert_eq!(result.failed, 0);
+}
+
+#[test]
+fn compiler_rt_builtins_env_override_selects_explicit_archive() {
+    // clang 23 ships no riscv64 bare-metal builtins in its resource dir, so the
+    // riscv64 kernel link lost __fixdfdi/__nedf2. An explicit clang-built
+    // archive must win; a missing path must be ignored (fall back to clang).
+    let _guard = runtime_bundle_env_lock().lock().unwrap_or_else(|e| e.into_inner());
+    let dir = tempfile::tempdir().unwrap();
+    let archive = dir.path().join("libclang_rt.builtins-riscv64.a");
+    std::fs::write(&archive, b"!<arch>\n").unwrap();
+    std::env::set_var("SIMPLE_COMPILER_RT_BUILTINS", &archive);
+    let chosen = find_compiler_rt_builtins("riscv64-unknown-none-elf");
+    let missing = dir.path().join("absent.a");
+    std::env::set_var("SIMPLE_COMPILER_RT_BUILTINS", &missing);
+    let fallback = find_compiler_rt_builtins("riscv64-unknown-none-elf");
+    let gcc = dir.path().join("libgcc.a");
+    std::fs::write(&gcc, b"!<arch>\n").unwrap();
+    std::env::set_var("SIMPLE_COMPILER_RT_BUILTINS", &gcc);
+    let gcc_pick = find_compiler_rt_builtins("riscv64-unknown-none-elf");
+    std::env::remove_var("SIMPLE_COMPILER_RT_BUILTINS");
+    assert_eq!(chosen, Some(archive));
+    assert_ne!(fallback, Some(missing));
+    assert_ne!(gcc_pick, Some(gcc));
+}
+
+/// Perf regression (bug seed_native_build_per_file_compile_minutes_windows_2026-11-23):
+/// `build_use_map_from_ast` walks the whole `all_mangled` table per imported
+/// name. On the full-CLI closure that cost 65% of all per-file CPU
+/// (`pre_hir`, up to 190 s for one file). Run a wide table x many imports and
+/// keep the module-qualified (`mod.fn`) binding intact. No wall-clock assert:
+/// a time bound flakes on a loaded host, and the quadratic form still makes
+/// this test visibly slow.
+#[test]
+fn build_use_map_wide_closure_stays_within_budget() {
+    let mut all_mangled = std::collections::HashMap::new();
+    for i in 0..20_000 {
+        let name = format!("f{i}");
+        let owners = vec![format!("pkg__m{}__{name}", i % 97), format!("other__m{}__{name}", i % 89)];
+        all_mangled.insert(name, owners);
+    }
+    all_mangled.insert("helper".to_string(), vec!["pkg__m1__helper".to_string()]);
+    let mut source = String::new();
+    for m in 0..40 {
+        source.push_str(&format!("use pkg.m{m}\n"));
+    }
+    source.push_str("fn main():\n    0\n");
+    let ast = simple_parser::Parser::new(&source).parse().unwrap();
+    let use_map = super::imports::build_use_map_from_ast(&ast, &all_mangled, &std::collections::HashMap::new());
+    assert_eq!(use_map.get("m1.helper").map(String::as_str), Some("pkg__m1__helper"));
+    assert_eq!(use_map.get("m3.f3").map(String::as_str), Some("pkg__m3__f3"));
+    assert!(use_map.get("m3.f4").is_none());
+}
+
+/// The indexed module-key lookup must find the owners the exact-name scan
+/// found when a segment's edge underscore fuses with the `__` separator:
+/// a module named `impl_`, a module under `impl_`, and one under `p_dot`.
+#[test]
+fn build_use_map_module_import_keeps_underscore_edged_segments() {
+    let mut all_mangled = std::collections::HashMap::new();
+    for (name, owner) in [
+        ("helper", "pkg__impl___helper"),
+        ("inner", "pkg__impl___m__inner"),
+        ("dotted", "pkg__p_dot__n__dotted"),
+    ] {
+        all_mangled.insert(name.to_string(), vec![owner.to_string(), format!("other__x__{name}")]);
+    }
+    let source = "use pkg.impl_\nuse pkg.impl_.m\nuse pkg.p_dot.n\nfn main():\n    0\n";
+    let ast = simple_parser::Parser::new(source).parse().unwrap();
+    let use_map = super::imports::build_use_map_from_ast(&ast, &all_mangled, &std::collections::HashMap::new());
+    assert_eq!(use_map.get("impl_.helper").map(String::as_str), Some("pkg__impl___helper"));
+    assert_eq!(use_map.get("m.inner").map(String::as_str), Some("pkg__impl___m__inner"));
+    assert_eq!(use_map.get("n.dotted").map(String::as_str), Some("pkg__p_dot__n__dotted"));
+    assert!(use_map.get("m.helper").is_none());
+}
+
+/// The erased bare-`Some` guard and binder name user enums through the same
+/// identity the qualified constructors stamp (`pkg.owner.Opt`), so a native
+/// build refuses `Opt.Nope` and binds `Opt.Some(4)`'s payload.
+/// seed_jit_any_match_bare_some_arm_takes_user_enum_unit_variant_2026-11-27
+#[test]
+fn erased_some_arm_user_enum_identity_survives_runtime_name_qualification() {
+    let source = "enum Opt:\n    Some(i64)\n    Nope\n\nfn g(x) -> i64:\n    match x:\n        Some(v): return v\n        None: return -5\n    -9\n\nfn h(x) -> i64:\n    match x:\n        Some(v): return 1\n        _: return 2\n    -9\n\nfn main() -> i64:\n    g(Opt.Some(4)) * 10 + h(Opt.Nope)\n";
+    let ast = simple_parser::Parser::new(source).parse().unwrap();
+    let mut lowerer = crate::hir::Lowerer::new();
+    lowerer.set_strict_mode(false);
+    lowerer.set_lenient_types(true);
+    let lowered = lowerer.lower_module(&ast).expect("module should lower");
+    let mut mir = crate::mir::lower_to_mir(&lowered).expect("module should reach MIR");
+    mir.local_globals.insert("Opt".to_string());
+    super::mangle::qualify_enum_runtime_names(
+        &mut mir,
+        "pkg.owner",
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+    )
+    .unwrap();
+    let mut jit = crate::codegen::JitCompiler::new_static().expect("static JIT");
+    jit.compile_module(&mir).expect("JIT compilation");
+    assert_eq!(unsafe { jit.call_i64_void("main").expect("JIT execution") }, 42);
+}
+
+/// Same, for a local user `enum Option` (bare id 1 is never re-pointed, but
+/// qualification stamps `pkg.owner.Option`) and a generic Some-owner.
+#[test]
+fn erased_some_arm_binds_user_option_and_generic_owner_after_qualification() {
+    let source = "enum Option:\n    Some(i64)\n    None\n\nenum Bi<T>:\n    Some(T)\n    None\n\nfn g(x) -> i64:\n    match x:\n        Some(v): return v\n        None: return -5\n    -9\n\nfn main() -> i64:\n    val b: Bi<i64> = Bi.Some(7)\n    g(Option::Some(42)) * 10 + g(b)\n";
+    let ast = simple_parser::Parser::new(source).parse().unwrap();
+    let mut lowerer = crate::hir::Lowerer::new();
+    lowerer.set_strict_mode(false);
+    lowerer.set_lenient_types(true);
+    let lowered = lowerer.lower_module(&ast).expect("module should lower");
+    let mut mir = crate::mir::lower_to_mir(&lowered).expect("module should reach MIR");
+    for name in ["Option", "Bi"] {
+        mir.local_globals.insert(name.to_string());
+    }
+    super::mangle::qualify_enum_runtime_names(
+        &mut mir,
+        "pkg.owner",
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+        &std::collections::HashMap::new(),
+    )
+    .unwrap();
+    let mut jit = crate::codegen::JitCompiler::new_static().expect("static JIT");
+    jit.compile_module(&mir).expect("JIT compilation");
+    assert_eq!(unsafe { jit.call_i64_void("main").expect("JIT execution") }, 427);
 }

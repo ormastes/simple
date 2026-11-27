@@ -1,0 +1,94 @@
+# @tag:in-development
+# FIXED in source 2026-11-06 (hir/lower stmt_lowering.rs optional_enum_payload_inner, expr/control.rs lower_coalesce, mir/lower/lowering_expr_builtin.rs rt_unwrap_or_self u64 decode); stays tagged until a seed carrying it is deployed.
+# Bug: jit_if_val_f64_optional_f32_u64_payload_garbage_2026-11-06
+#
+# JIT `if val` on `Option<f32>` bound a raw word (576179277326712832),
+# `if val`/`??` on `Option<u64>` left the tagged word (`a + 1` printed
+# `<invalid-heap:0x29>`, `None ?? 7` printed `<value:0x7>`). The sspec runner
+# forces the interpreter, so each case runs a fixture through the compiler
+# binary in strict JIT mode (`SIMPLE_BINARY` or `bin/simple`).
+use std.spec
+use std.io_runtime.{process_run, file_write, dir_create_all, env_get, env_set}
+
+fn work_dir() -> text:
+    val tmp = env_get("TMPDIR")
+    val root = if tmp != "": tmp else: "/tmp"
+    val dir = root + "/simple-spec-jit-option-f32-u64"
+    dir_create_all(dir)
+    dir
+
+fn run_jit(name: text, source: text) -> (text, i64):
+    val path = work_dir() + "/" + name + ".spl"
+    assert_true(file_write(path, source))
+    env_set("SIMPLE_EXECUTION_MODE", "jit")
+    env_set("SIMPLE_JIT_STRICT", "1")
+    env_set("SIMPLE_RUST_SEED_WARNING", "0")
+    env_set("SIMPLE_TIMEOUT_SECONDS", "0")
+    val configured = env_get("SIMPLE_BINARY")
+    val bin = if configured == "": "bin/simple" else: configured
+    val ran = process_run(bin, ["run", path])
+    (ran[0].trim(), ran[2])
+
+describe "if val / ?? over f64?, Option<f32>, Option<u64> (seed JIT)":
+    it "binds an f64? payload as a float":
+        val (out, rc) = run_jit("f64_opt", """fn mf() -> f64?:
+    return 2.5
+fn main():
+    if val a = mf():
+        print("f64 {a}")
+""")
+        assert_equal(rc, 0)
+        assert_equal(out, "f64 2.5")
+
+    it "binds an Option<f32> payload as a float":
+        val (out, rc) = run_jit("f32_enum", """fn of() -> Option<f32>:
+    return Some(1.5)
+fn main():
+    if val b = of():
+        print("f32 {b}")
+""")
+        assert_equal(rc, 0)
+        assert_equal(out, "f32 1.5")
+
+    it "binds an Option<u64> payload as a raw u64 usable in arithmetic":
+        val (out, rc) = run_jit("u64_enum_ifval", """fn ou() -> Option<u64>:
+    return Some(5)
+fn main():
+    if val c = ou():
+        print("u64 {c} {c + 1}")
+""")
+        assert_equal(rc, 0)
+        assert_equal(out, "u64 5 6")
+
+    it "coalesces Option<u64> to a raw u64 (present, None, full width)":
+        val (out, rc) = run_jit("u64_enum_coalesce", """fn ou() -> Option<u64>:
+    return Some(5)
+fn on() -> Option<u64>:
+    return None
+fn main():
+    val d = ou() ?? 0
+    print("d {d} {d + 1}")
+    val g = on() ?? 7
+    print("g {g} {g + 1}")
+    val big: Option<u64> = Some(18446744073709551615)
+    val j = big ?? 0
+    print("j {j}")
+""")
+        assert_equal(rc, 0)
+        assert_equal(out, "d 5 6\ng 7 8\nj 18446744073709551615")
+
+    it "keeps f32? and u64? pointer forms correct":
+        val (out, rc) = run_jit("pointer_forms", """fn pf() -> f32?:
+    return 1.5
+fn pu() -> u64?:
+    return 7
+fn main():
+    if val a = pf():
+        print("f32? {a}")
+    if val c = pu():
+        print("u64? {c + 1}")
+    val d = pu() ?? 0
+    print("d {d + 1}")
+""")
+        assert_equal(rc, 0)
+        assert_equal(out, "f32? 1.5\nu64? 8\nd 8")

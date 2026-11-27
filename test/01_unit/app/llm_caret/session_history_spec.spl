@@ -1,0 +1,85 @@
+# @req REQ-SSPEC-UNIT
+"""
+# Claude full session history
+
+As a caret user reopening a remote session, history pages must be requested
+with the right parameters and the returned events split into messages.
+"""
+
+use std.spec.step
+use std.spec.*
+use app.llm_caret.claude_full.assistant.sessionHistory.*
+
+fn echoFetcher(req: HistoryFetchRequest) -> HistoryFetchResult:
+    HistoryFetchResult(status: 200, body: "{\"data\":[],\"has_more\":false,\"first_id\":\"" + req.label + "|" + req.params + "|" + req.url + "\"}")
+
+fn failingFetcher(req: HistoryFetchRequest) -> HistoryFetchResult:
+    HistoryFetchResult(status: 500, body: "")
+
+fn pagedFetcher(req: HistoryFetchRequest) -> HistoryFetchResult:
+    HistoryFetchResult(status: 200, body: "{\"data\":[{\"id\":\"1\"},{\"id\":\"2\"}],\"has_more\":true,\"first_id\":\"e1\",\"last_id\":\"e2\"}")
+
+describe "Claude full session history":
+    it "builds the events url and auth headers for a session":
+        step("auth ctx")
+        val ctx = createHistoryAuthCtx("s1", "https://api.example", "tok", "org-9")
+        expect(ctx.baseUrl).to_equal("https://api.example/v1/sessions/s1/events")
+        expect(ctx.headers).to_equal("Authorization: Bearer tok\nanthropic-beta: ccr-byoc-2025-07-29\nx-organization-uuid: org-9")
+
+    it "defaults the page size when the limit is not positive":
+        step("limits")
+        expect(latestEventsParams(25)).to_equal("limit=25&anchor_to_latest=true")
+        expect(latestEventsParams(0)).to_equal("limit=100&anchor_to_latest=true")
+        expect(olderEventsParams("e5", -3)).to_equal("limit=100&before_id=e5")
+
+    it "requests the latest page with the right label and params":
+        step("fetch latest")
+        val ctx = createHistoryAuthCtx("s1", "https://a", "t", "o")
+        val page = fetchLatestEvents(ctx, 10, echoFetcher) ?? HistoryPage(events: [], firstId: "none", hasMore: true)
+        expect(page.firstId).to_equal("fetchLatestEvents|limit=10&anchor_to_latest=true|https://a/v1/sessions/s1/events")
+
+    it "requests an older page before the given id":
+        step("fetch older")
+        val ctx = createHistoryAuthCtx("s1", "https://a", "t", "o")
+        val page = fetchOlderEvents(ctx, "e3", 5, echoFetcher) ?? HistoryPage(events: [], firstId: "none", hasMore: true)
+        expect(page.firstId).to_equal("fetchOlderEvents|limit=5&before_id=e3|https://a/v1/sessions/s1/events")
+
+    it "returns nothing when the server answers with an error status":
+        step("failure")
+        val ctx = createHistoryAuthCtx("s1", "https://a", "t", "o")
+        expect(fetchLatestEvents(ctx, 10, failingFetcher).?).to_equal(false)
+
+    it "splits the data array into raw events and reads paging fields":
+        step("parse")
+        val ctx = createHistoryAuthCtx("s1", "https://a", "t", "o")
+        val page = fetchLatestEvents(ctx, 2, pagedFetcher) ?? HistoryPage(events: [], firstId: "none", hasMore: false)
+        expect(page.events.len()).to_equal(2)
+        expect(page.events[0].raw).to_equal("{\"id\":\"1\"}")
+        expect(page.events[1].raw).to_equal("{\"id\":\"2\"}")
+        expect(page.firstId).to_equal("e1")
+        expect(page.hasMore).to_equal(true)
+
+    it "keeps nested commas inside one event":
+        step("nested")
+        val r = parseSessionEventsResponse("{\"data\":[{\"a\":[1,2],\"b\":\"x,y\"},{\"c\":1}],\"has_more\":false,\"first_id\":null,\"last_id\":\"z\"}")
+        expect(r.data.len()).to_equal(2)
+        expect(r.data[0].raw).to_equal("{\"a\":[1,2],\"b\":\"x,y\"}")
+        expect(r.has_more).to_equal(false)
+        expect(r.first_id).to_equal("")
+        expect(r.last_id).to_equal("z")
+
+    it "returns an empty list for an empty or missing data array":
+        step("empty")
+        expect(parseSessionEventsResponse("{\"data\":[],\"has_more\":false}").data.len()).to_equal(0)
+        expect(parseSessionEventsResponse("{\"has_more\":true}").data.len()).to_equal(0)
+        expect(parseSessionEventsResponse("{\"data\":null}").data.len()).to_equal(0)
+
+    it "extracts JSON scalars":
+        step("scalars")
+        expect(_extract_json_string_or_empty("{\"k\": \"a\\\"b\"}", "k")).to_equal("a\\\"b")
+        expect(_extract_json_string_or_empty("{\"k\": 5}", "k")).to_equal("")
+        expect(_extract_json_value("{\"n\": 42, \"m\":1}", "n")).to_equal("42")
+        expect(_extract_json_value("{}", "n")).to_equal("null")
+        expect(_extract_json_bool("{\"b\": true}", "b")).to_equal(true)
+        expect(_slice_text("hello", 1, 3)).to_equal("el")
+        expect(_is_ws("\t")).to_equal(true)

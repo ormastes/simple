@@ -1,0 +1,189 @@
+# macOS VM-free Seatbelt session for the Simple container layer.
+#
+# Sibling of `podman_session_v1`: executes native macOS Mach-O workloads on the
+# Darwin host under a compiled Seatbelt SBPL profile (`/usr/bin/sandbox-exec -f`)
+# with write access confined to the workload's isolated worktree and attempt
+# temporary directory while keeping the repository root and host system trees
+# read-only.
+
+use std.nogc_sync_mut.container_session.podman_session_v1.{PodmanMountV1,
+    podman_session_token_valid_v1, podman_session_path_valid_v1}
+use std.nogc_sync_mut.io.process_ops.{process_run_timeout}
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_read}
+use std.nogc_sync_mut.io.env_ops.{host_os}
+
+pub const MACOS_SEATBELT_PROGRAM_V1 = "/usr/bin/sandbox-exec"
+
+pub struct MacosSeatbeltSessionSpecV1:
+    name: text
+    owner: text
+    image: text
+    command: [text]
+    workdir: text = ""
+    repo_root: text = ""
+    worktree_path: text = ""
+    attempt_dir: text = ""
+    home_dir: text = ""
+    mounts: [PodmanMountV1] = []
+    network: text = "host"
+    env: [text] = []
+    instance: text = ""
+
+# Predicate selecting the native Darwin Seatbelt backend from `--container` image + host OS.
+@allow(primitive_api)
+pub fn macos_seatbelt_image_selected_v1(image: text, os_name: text) -> bool:
+    if image == "macos-seatbelt" or image == "seatbelt" or image == "macos-native":
+        return true
+    os_name == "macos" and image == "default"
+
+# Host capability probe predicate for `/usr/bin/sandbox-exec`.
+@allow(primitive_api)
+pub fn macos_seatbelt_host_capable_v1() -> bool:
+    if host_os() != "macos":
+        return false
+    if not file_exists(MACOS_SEATBELT_PROGRAM_V1):
+        return false
+    val probe = process_run_timeout(MACOS_SEATBELT_PROGRAM_V1,
+        ["-p", "(version 1)(allow default)", "/usr/bin/true"], 5000)
+    (probe.2 as i64) == 0
+
+# Resolve symlinks on the deepest existing ancestor so `/tmp/...` becomes
+# `/private/tmp/...` before Darwin kernel Seatbelt evaluates `subpath`.
+pub fn macos_seatbelt_canonical_path_v1(path: text) -> text:
+    if path == "":
+        return ""
+    var head = path
+    var tail = ""
+    while head != "":
+        val res = process_run_timeout("realpath", [head], 5000)
+        if (res.2 as i64) == 0 and res.0.trim() != "":
+            return res.0.trim() + tail
+        val slash = head.last_index_of("/")
+        if slash <= 0:
+            break
+        tail = head.substring(slash, head.byte_len()) + tail
+        head = head.substring(0, slash)
+    if path == "/tmp":
+        return "/private/tmp"
+    if path.starts_with("/tmp/"):
+        return "/private" + path
+    if path == "/var":
+        return "/private/var"
+    if path.starts_with("/var/"):
+        return "/private" + path
+    path
+
+fn _sbpl_valid_path_v1(path: text) -> bool:
+    if path == "" or path.byte_len() > 1024 or not path.starts_with("/"):
+        return false
+    for idx in 0..path.byte_len():
+        val b = path.byte_at(idx) as i64
+        if b < 32 or b == 127:
+            return false
+    if path.contains("/../") or path.ends_with("/.."):
+        return false
+    true
+
+fn _sbpl_quote_v1(path: text) -> text:
+    "\"" + path.replace("\\", "\\\\").replace("\"", "\\\"") + "\""
+
+fn _git_worktrees_admin_dir_v1(repo_root: text) -> text:
+    if repo_root == "":
+        return ""
+    val dot_git = repo_root + "/.git"
+    if not file_exists(dot_git):
+        return ""
+    val content = file_read(dot_git).trim()
+    if content.starts_with("gitdir:"):
+        val gitdir = content.substring(7, content.byte_len()).trim()
+        val marker = "/.git/worktrees/"
+        val pos = gitdir.index_of(marker)
+        if pos > 0:
+            return macos_seatbelt_canonical_path_v1(gitdir.substring(0, pos) + "/.git/worktrees")
+    macos_seatbelt_canonical_path_v1(dot_git + "/worktrees")
+
+fn _is_agy_command_v1(cmd: text) -> bool:
+    cmd == "agy" or cmd.ends_with("/agy")
+
+pub fn macos_seatbelt_validate_v1(spec: MacosSeatbeltSessionSpecV1) -> text:
+    if not podman_session_token_valid_v1(spec.name): return "macos-seatbelt-name-invalid"
+    if not podman_session_token_valid_v1(spec.owner): return "macos-seatbelt-owner-invalid"
+    if spec.command.len() == 0 or spec.command[0] == "": return "macos-seatbelt-command-empty"
+    for word in spec.command:
+        if word.contains("\u{0}"): return "macos-seatbelt-command-invalid"
+    if spec.network != "host" and spec.network != "none" and spec.network != "private":
+        return "macos-seatbelt-network-unsupported"
+    if not _sbpl_valid_path_v1(spec.attempt_dir): return "macos-seatbelt-attempt-dir-invalid"
+    if spec.workdir != "" and not _sbpl_valid_path_v1(spec.workdir): return "macos-seatbelt-workdir-invalid"
+    if spec.repo_root != "" and not _sbpl_valid_path_v1(spec.repo_root): return "macos-seatbelt-repo-invalid"
+    if spec.worktree_path != "" and not _sbpl_valid_path_v1(spec.worktree_path): return "macos-seatbelt-worktree-invalid"
+    for mount in spec.mounts:
+        if not podman_session_path_valid_v1(mount.source) or not podman_session_path_valid_v1(mount.target):
+            return "macos-seatbelt-mount-invalid"
+    if spec.instance != "" and not podman_session_token_valid_v1(spec.instance):
+        return "macos-seatbelt-instance-invalid"
+    ""
+
+pub fn macos_seatbelt_compile_profile_v1(spec: MacosSeatbeltSessionSpecV1) -> Result<text, text>:
+    val reason = macos_seatbelt_validate_v1(spec)
+    if reason != "":
+        return Err(reason)
+    val attempt = macos_seatbelt_canonical_path_v1(spec.attempt_dir)
+    val repo = macos_seatbelt_canonical_path_v1(spec.repo_root)
+    val worktree = macos_seatbelt_canonical_path_v1(spec.worktree_path)
+    var lines: [text] = [
+        "(version 1)",
+        "; simple-container macos-seatbelt-session-v1 name=" + spec.name,
+        "(allow default)",
+        "(deny file-write*)"
+    ]
+    if spec.network == "none":
+        lines.push("(deny network*)")
+    lines.push("(allow file-write* (literal \"/dev/null\") (literal \"/dev/tty\") (literal \"/dev/ptmx\") (literal \"/dev/dtracehelper\") (subpath \"/dev/fd\"))")
+    lines.push("(allow file-write* (subpath " + _sbpl_quote_v1(attempt) + "))")
+    if worktree != "":
+        lines.push("(allow file-write* (subpath " + _sbpl_quote_v1(worktree) + "))")
+    if repo != "" and worktree == repo:
+        lines.push("(allow file-write* (subpath " + _sbpl_quote_v1(repo) + "))")
+    elif repo != "" and worktree != "":
+        val admin_dir = _git_worktrees_admin_dir_v1(repo)
+        if admin_dir != "" and _sbpl_valid_path_v1(admin_dir):
+            lines.push("(allow file-write* (subpath " + _sbpl_quote_v1(admin_dir) + "))")
+    if _is_agy_command_v1(spec.command[0]) and spec.home_dir != "" and _sbpl_valid_path_v1(spec.home_dir):
+        val gemini_dir = macos_seatbelt_canonical_path_v1(spec.home_dir) + "/.gemini"
+        lines.push("(allow file-write* (subpath " + _sbpl_quote_v1(gemini_dir) + "))")
+    for mount in spec.mounts:
+        val src = macos_seatbelt_canonical_path_v1(mount.source)
+        if mount.read_only:
+            lines.push("(deny file-write* (subpath " + _sbpl_quote_v1(src) + "))")
+        else:
+            lines.push("(allow file-write* (subpath " + _sbpl_quote_v1(src) + "))")
+    if repo != "" and worktree != repo:
+        # Repo source tree stays write-protected unless worktree lives inside it;
+        # if worktree is under repo, deny repo first then re-allow worktree + git admin.
+        if worktree != "" and worktree.starts_with(repo + "/"):
+            lines.push("(deny file-write* (subpath " + _sbpl_quote_v1(repo) + "))")
+            lines.push("(allow file-write* (subpath " + _sbpl_quote_v1(worktree) + "))")
+            val admin_under = _git_worktrees_admin_dir_v1(repo)
+            if admin_under != "" and _sbpl_valid_path_v1(admin_under):
+                lines.push("(allow file-write* (subpath " + _sbpl_quote_v1(admin_under) + "))")
+    Ok(lines.join("\n") + "\n")
+
+pub fn macos_seatbelt_run_argv_v1(profile_path: text, spec: MacosSeatbeltSessionSpecV1) -> Result<[text], text>:
+    val reason = macos_seatbelt_validate_v1(spec)
+    if reason != "":
+        return Err(reason)
+    if not _sbpl_valid_path_v1(profile_path):
+        return Err("macos-seatbelt-profile-path-invalid")
+    var env_args: [text] = ["/usr/bin/env",
+        "SIMPLE_CONTAINER_BACKEND=macos-seatbelt",
+        "SIMPLE_CONTAINER_NAME=" + spec.name,
+        "TMPDIR=" + spec.attempt_dir + "/tmp"]
+    for entry in spec.env:
+        env_args.push(entry)
+    Ok([MACOS_SEATBELT_PROGRAM_V1, "-f", profile_path] + env_args + spec.command)
+
+export MACOS_SEATBELT_PROGRAM_V1, MacosSeatbeltSessionSpecV1
+export macos_seatbelt_image_selected_v1, macos_seatbelt_host_capable_v1
+export macos_seatbelt_canonical_path_v1, macos_seatbelt_validate_v1
+export macos_seatbelt_compile_profile_v1, macos_seatbelt_run_argv_v1

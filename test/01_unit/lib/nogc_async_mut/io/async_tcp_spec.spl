@@ -75,3 +75,46 @@ describe "AsyncTcpStream loopback":
             case _: panic("bind failed")
         listener.close()
         expect(listener.is_open()).to_equal(false)
+
+describe "AsyncTcpStream connected session":
+
+    # @manual scenario evidence
+    it "connect_timeout resolves eagerly and exposes both addresses":
+        # @req REQ-SSPEC-LIB
+        step("connect with a timeout and inspect addresses")
+        val listener = match AsyncTcpListener.bind("127.0.0.1:0").poll():
+            case Poll.Ready(Ok(l)): l
+            case _: panic("bind failed")
+        val addr = listener.local_addr().unwrap()
+        var client = match AsyncTcpStream.connect_timeout(addr, 5000).poll():
+            case Poll.Ready(Ok(s)): s
+            case _: panic("connect failed")
+        expect(client.is_open()).to_equal(true)
+        expect(client.local_addr().unwrap().contains("127.0.0.1")).to_equal(true)
+        client.close()
+        listener.close()
+
+    it "round-trips text through an accepted connection":
+        # @req REQ-SSPEC-LIB
+        step("write_text then read_exact the same bytes")
+        val listener = match AsyncTcpListener.bind("127.0.0.1:0").poll():
+            case Poll.Ready(Ok(l)): l
+            case _: panic("bind failed")
+        val addr = listener.local_addr().unwrap()
+        var client = match AsyncTcpStream.connect(addr).poll():
+            case Poll.Ready(Ok(s)): s
+            case _: panic("connect failed")
+        var server = match listener.accept().poll():
+            case Poll.Ready(Ok(s)): s
+            case _: panic("accept failed")
+        match client.write_text("echo").poll():
+            case Poll.Ready(Ok(())): expect(true).to_equal(true)
+            case _: expect(false).to_equal(true)
+        var got = match server.read_exact(4).poll():
+            case Poll.Ready(Ok(data)): data
+            case _: panic("read failed")
+        expect(got.len()).to_equal(4)
+        expect(got[0]).to_equal(101)
+        client.close()
+        server.close()
+        listener.close()

@@ -69,10 +69,19 @@ unsafe fn with_fd<T>(fd: i64, default: T, f: impl FnOnce(&mut File) -> T) -> T {
 /// back the same way the Unix branch does.
 #[cfg(windows)]
 unsafe fn with_fd<T>(fd: i64, default: T, f: impl FnOnce(&mut File) -> T) -> T {
-    if fd <= 0 {
-        return default;
-    }
-    let mut file = File::from_raw_handle(fd as *mut std::ffi::c_void);
+    use std::os::windows::io::AsRawHandle;
+    // Descriptors 0..2 are the inherited standard streams, not HANDLE values.
+    let handle = match fd {
+        0 => std::io::stdin().as_raw_handle(),
+        1 => {
+            let _ = std::io::stdout().flush();
+            std::io::stdout().as_raw_handle()
+        }
+        2 => std::io::stderr().as_raw_handle(),
+        _ if fd < 0 => return default,
+        _ => fd as *mut std::ffi::c_void,
+    };
+    let mut file = File::from_raw_handle(handle);
     let out = f(&mut file);
     let _ = file.into_raw_handle();
     out
@@ -287,8 +296,15 @@ pub unsafe extern "C" fn rt_io_file_close(fd: i64) -> bool {
             return false;
         }
         let file = File::from_raw_fd(fd as i32);
-        // Surface a write-back error rather than losing it in the drop.
-        let ok = file.sync_all().is_ok();
+        // Surface a write-back error rather than losing it in the drop. EINVAL
+        // means the descriptor cannot be synchronized (procfs, sysfs, pipes):
+        // nothing to write back, so the close itself succeeded. Without this
+        // every `read_file("/proc/meminfo")` came back "" and slang's memory
+        // gate refused all model loads on Linux.
+        let ok = match file.sync_all() {
+            Ok(()) => true,
+            Err(error) => error.raw_os_error() == Some(libc::EINVAL),
+        };
         drop(file);
         ok
     }
@@ -300,18 +316,53 @@ pub unsafe extern "C" fn rt_io_file_close(fd: i64) -> bool {
         // Windows twin of the Unix branch: reconstruct the File from the
         // HANDLE the Simple side carries, surface a write-back error, then
         // genuinely close via drop.
+        //
+        // FlushFileBuffers (sync_all) fails with ERROR_INVALID_FUNCTION on
+        // handles opened without write access, so a read-only session's close
+        // reported failure and FileTextSession reads came back Err even though
+        // every byte was read (measured: "file text close failed" from
+        // std.io_runtime.read_file_text under the seed). A close must surface
+        // real write-back errors, not a refused no-op flush: when sync fails,
+        // probe the handle with a zero-length write — denied on read-only
+        // handles (close is genuinely fine), allowed on writable ones (the
+        // sync failure was real, keep reporting it). C parity: close == 0.
         #[cfg(windows)]
         {
-            let file = File::from_raw_handle(fd as *mut std::ffi::c_void);
-            let ok = file.sync_all().is_ok();
+            use std::io::Write as _;
+            let mut file = File::from_raw_handle(fd as *mut std::ffi::c_void);
+            // FlushFileBuffers (sync_all) fails with ERROR_INVALID_FUNCTION on
+            // handles opened without write access, so a read-only session's
+            // close reported failure and FileTextSession reads came back Err
+            // even though every byte was read. A close must surface real
+            // write-back errors, not a refused no-op flush: when the flush
+            // fails, probe the handle with a zero-length write — denied on
+            // read-only handles (close is genuinely fine), allowed on writable
+            // ones (the flush failure was real, keep reporting it).
+            let flushed = file.sync_all().is_ok();
+            let read_only = !flushed && file.write(&[]).is_err();
             drop(file);
-            ok
+            flushed || read_only
         }
         #[cfg(not(windows))]
         {
             let _ = fd;
             false
         }
+    }
+}
+
+/// i64-returning twin of `rt_io_file_close` for the seed's dynamic SFFI
+/// dispatcher, which admits only all-i64 -> i64 contracts. The interpreter's
+/// hand-written `rt_io_file_close` adapter is unix-only (its `with_fd` and
+/// open are `#[cfg(not(unix))]` stubs returning `false`/`-1`), so on Windows
+/// every interpreter close went through that stub and failed; routing the
+/// Simple `io_file_close` through this twin reaches the real runtime close.
+#[no_mangle]
+pub unsafe extern "C" fn rt_io_file_close_value(fd: i64) -> i64 {
+    if rt_io_file_close(fd) {
+        1
+    } else {
+        0
     }
 }
 
@@ -427,6 +478,18 @@ mod tests {
 
     unsafe fn open(path: &str, mode: i64) -> i64 {
         rt_io_file_open(path.as_ptr(), path.len() as u64, mode)
+    }
+
+    // procfs rejects fsync with EINVAL; closing a read-only /proc fd must
+    // still report success or `read_file("/proc/meminfo")` returns "".
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn close_of_procfs_fd_succeeds() {
+        unsafe {
+            let fd = open("/proc/self/status", 0);
+            assert!(fd >= 0, "ReadOnly open of /proc/self/status failed");
+            assert!(rt_io_file_close(fd));
+        }
     }
 
     #[test]

@@ -97,3 +97,30 @@ Archive SHA-256 values, in table order:
 LLVM 23.1.1 `llvm-nm --defined-only` confirmed the actual failing function
 symbols in these archives. Archive construction does not prove the full
 compiler executable links, nor qualify Phase 2/3 or general SPipe execution.
+
+## 2026-11-04 fix (n88b) - status fix-implemented-verification-pending
+
+Pure-Simple HIR fix in `src/compiler/20.hir/hir_lowering/statements.spl`
+(StmtKind.For tuple branch, flagged for phase-3 owner): when the iterable's
+declared type resolves to `Dict<K, V>`, the two tuple binders are defined and
+`Let`-typed as K and V instead of nil/Infer. Only a declared Dict type is used;
+no field-name guessing. Limit: iterables whose type is not known at early HIR
+lowering (e.g. `self.module.types`) are unchanged until HIR inference runs; keep
+the typed-local workaround there.
+
+TDD spec (fails before: "expected infer to equal named"; passes after, seed
+`bin/simple.exe`): `test/01_unit/compiler/20.hir/dict_tuple_for_binder_types_spec.spl`.
+
+Stage3 repro (native fixture, expected output `PASS: dictionary nominal tuple binders = 31`):
+`bootstrap/stage3/simple native-build test/fixtures/native_dict_nominal_loop/main.spl -o build/dictloop.exe && build/dictloop.exe`
+(remove the typed-local workaround blocks only after this passes on a rebuilt producer).
+
+## Status 2026-11-25 — all 4 workarounds removed from `src/`
+- `HirLowering.binding_kind_type` (`statements.spl:150-162`) now resolves chained `Field` iterables (`self.records`, `module.types`, `self.module.types`, `self.declarations`) recursively via `binding_field_type`.
+- Reverted all 4 typed-local dictionary tuple-for loops (and unused `SymbolId` imports) across `enum_pattern_physical_v1.spl`, `enum_semantic_identity_v1.spl`, and `enum_semantic_validation_v1.spl`.
+- Extended `test/01_unit/compiler/20.hir/dict_tuple_for_binder_types_spec.spl` (2/2 PASS) to verify chained field `Dict<K, V>` iterables (`self.module.types` and `self.records`) retain nominal binder types.
+
+## WA-W2-3 Fixtures Audit (2026-11-26)
+- **Classification:** `ROOT-FIXED+RETIRED` (stale `# @workaround` tag on `test/fixtures/native_dict_nominal_loop/typed/main.spl:25`).
+- Verified `test/fixtures/native_dict_nominal_loop/main.spl` (unannotated original form) lowers cleanly (`hir=0 mir=0 llvm=0 void=0`) and passes in `--mode=interpreter` alongside `typed/main.spl`.
+- Retired the stale `# @workaround` tag on line 25 of `typed/main.spl` (consistent with `c62bd857af2` and `verified` DB status) while preserving the `for raw_key, raw_value` explicit nominal control code paired with `../main.spl`.

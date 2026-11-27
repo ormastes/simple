@@ -3,6 +3,7 @@
 // Special type methods: Unit, Option, Result, Mock, Future, Channel, ThreadPool, TraitObject, Object, Constructor
 
 use crate::error::CompileError;
+use crate::interpreter::interpreter_call::write_back_borrow_arguments;
 use crate::interpreter::{
     bind_args, captured_env_with_live_globals, execute_function_body, publish_and_repoint, sync_owned_captured_globals,
     Enums, ImplMethods,
@@ -14,19 +15,26 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 thread_local! {
-    static METHOD_INDEX_CLASS: RefCell<HashMap<String, HashMap<String, usize>>> =
+    /// Keyed by the DEFINITION's identity (its address), not the bare class
+    /// name: same-named classes from different modules are different
+    /// definitions with different method layouts, and a name-keyed cache
+    /// would miss (and rebuild a HashMap) on every call that alternates
+    /// between them. The per-entry name check below still guards address
+    /// reuse after a definition is dropped.
+    static METHOD_INDEX_CLASS: RefCell<HashMap<usize, HashMap<String, usize>>> =
         RefCell::new(HashMap::new());
     static METHOD_INDEX_IMPL: RefCell<HashMap<String, HashMap<String, usize>>> =
         RefCell::new(HashMap::new());
 }
 
-pub fn lookup_class_method_index(class_def: &ClassDef, class_name: &str, method_name: &str) -> Option<usize> {
+pub fn lookup_class_method_index(class_def: &ClassDef, _class_name: &str, method_name: &str) -> Option<usize> {
     crate::perf_counters::bump(&crate::perf_counters::MECALL_METHOD_LOOKUPS, 1);
+    let def_key = class_def as *const ClassDef as usize;
     METHOD_INDEX_CLASS.with(|cache| {
         // Fast path: probe with &str — avoids String allocation when entry exists (common case)
         {
             let cache_ref = cache.borrow();
-            if let Some(class_cache) = cache_ref.get(class_name) {
+            if let Some(class_cache) = cache_ref.get(&def_key) {
                 if let Some(idx) = class_cache.get(method_name).copied() {
                     if class_def
                         .methods
@@ -47,7 +55,7 @@ pub fn lookup_class_method_index(class_def: &ClassDef, class_name: &str, method_
             .map(|(i, method)| (method.name.clone(), i))
             .collect();
         let result = class_cache.get(method_name).copied();
-        cache_mut.insert(class_name.to_string(), class_cache);
+        cache_mut.insert(def_key, class_cache);
         result
     })
 }
@@ -101,7 +109,7 @@ pub fn find_and_exec_method_with_self(
     impl_methods: &ImplMethods,
 ) -> Result<Option<(Value, Value)>, CompileError> {
     // Check class methods (cached O(1) lookup)
-    if let Some(class_def) = classes.get(class).cloned() {
+    if let Some(class_def) = crate::interpreter::resolve_class_for_receiver(classes, class, &fields) {
         if let Some(idx) = lookup_class_method_index(&class_def, class, method) {
             let func = &class_def.methods[idx];
             let (result, updated_self) = exec_function_with_self_return(
@@ -118,7 +126,7 @@ pub fn find_and_exec_method_with_self(
             return Ok(Some((result, updated_self)));
         }
     }
-    // Check impl methods (cached O(1) lookup)
+    // Check impl methods (cached O(1) lookup, then GLOBAL_IMPL_METHODS fallback)
     if let Some(methods) = impl_methods.get(class) {
         if let Some(idx) = lookup_impl_method_index(methods, class, method) {
             let func = &methods[idx];
@@ -135,6 +143,25 @@ pub fn find_and_exec_method_with_self(
             )?;
             return Ok(Some((result, updated_self)));
         }
+    }
+    let global_impl = crate::interpreter::GLOBAL_IMPL_METHODS.with(|cell| {
+        cell.borrow()
+            .get(class)
+            .and_then(|methods| lookup_impl_method_index(methods, class, method).map(|idx| Arc::clone(&methods[idx])))
+    });
+    if let Some(func) = global_impl {
+        let (result, updated_self) = exec_function_with_self_return(
+            &func,
+            args,
+            env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+            class,
+            Arc::clone(fields),
+        )?;
+        return Ok(Some((result, updated_self)));
     }
     Ok(None)
 }
@@ -154,7 +181,7 @@ pub fn find_and_exec_method_with_self_owned(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Option<(Value, Value)>, CompileError> {
-    if let Some(class_def) = classes.get(class).cloned() {
+    if let Some(class_def) = crate::interpreter::resolve_class_for_receiver(classes, class, &fields) {
         if let Some(idx) = lookup_class_method_index(&class_def, class, method) {
             let func = &class_def.methods[idx];
             let (result, updated_self) = exec_function_with_self_return(
@@ -187,6 +214,25 @@ pub fn find_and_exec_method_with_self_owned(
             )?;
             return Ok(Some((result, updated_self)));
         }
+    }
+    let global_impl = crate::interpreter::GLOBAL_IMPL_METHODS.with(|cell| {
+        cell.borrow()
+            .get(class)
+            .and_then(|methods| lookup_impl_method_index(methods, class, method).map(|idx| Arc::clone(&methods[idx])))
+    });
+    if let Some(func) = global_impl {
+        let (result, updated_self) = exec_function_with_self_return(
+            &func,
+            args,
+            env,
+            functions,
+            classes,
+            enums,
+            impl_methods,
+            class,
+            fields,
+        )?;
+        return Ok(Some((result, updated_self)));
     }
     Ok(None)
 }
@@ -252,13 +298,17 @@ pub fn exec_function_with_self_return(
             if let Some(updated_arg) = local_env.get(&param.name).cloned() {
                 if matches!(
                     updated_arg,
-                    Value::Array(_) | Value::Dict(_) | Value::Object { .. } | Value::Tuple(_)
+                    Value::Array(_) | Value::ByteArray(_) | Value::Dict(_) | Value::Object { .. } | Value::Tuple(_)
                 ) {
                     outer_env.insert(var_name.clone(), updated_arg);
                 }
             }
         }
     }
+
+    write_back_borrow_arguments(
+        func, args, outer_env, &local_env, functions, classes, enums, impl_methods, self_mode,
+    )?;
 
     // Extract the potentially modified self (remove avoids an extra Arc clone)
     let updated_self = local_env.remove("self").unwrap_or_else(|| Value::Object {
@@ -328,11 +378,14 @@ pub fn resolve_object_method(
     classes: &HashMap<String, Arc<ClassDef>>,
     impl_methods: &ImplMethods,
     class: &str,
+    fields: &HashMap<String, Value>,
     method: &str,
 ) -> Option<ResolvedMethod> {
-    if let Some(class_def) = classes.get(class) {
-        if let Some(idx) = lookup_class_method_index(class_def, class, method) {
-            return Some(ResolvedMethod::Class(Arc::clone(class_def), idx));
+    // Module-qualified: the instance's own field set picks between same-named
+    // classes (see `resolve_class_for_receiver`).
+    if let Some(class_def) = crate::interpreter::resolve_class_for_receiver(classes, class, fields) {
+        if let Some(idx) = lookup_class_method_index(&class_def, class, method) {
+            return Some(ResolvedMethod::Class(Arc::clone(&class_def), idx));
         }
     }
     if let Some(methods) = impl_methods.get(class) {
@@ -463,7 +516,7 @@ pub fn exec_function_with_self_return_values(
                 // threw the clone away for every scalar.
                 let is_container = matches!(
                     local_env.get(&param.name),
-                    Some(Value::Array(_) | Value::Dict(_) | Value::Object { .. } | Value::Tuple(_))
+                    Some(Value::Array(_) | Value::ByteArray(_) | Value::Dict(_) | Value::Object { .. } | Value::Tuple(_))
                 );
                 if is_container {
                     if let Some(updated_arg) = local_env.get(&param.name).cloned() {
@@ -474,6 +527,18 @@ pub fn exec_function_with_self_return_values(
             }
         }
     }
+
+    write_back_borrow_arguments(
+        func,
+        arg_exprs,
+        outer_env,
+        &local_env,
+        functions,
+        classes,
+        enums,
+        impl_methods,
+        simple_parser::ast::SelfMode::SkipSelf,
+    )?;
 
     let updated_self = local_env.remove("self").unwrap_or_else(|| Value::Object {
         class: class_name.to_string(),
@@ -526,6 +591,7 @@ pub fn evaluate_call_args(
     enums: &Enums,
     impl_methods: &ImplMethods,
 ) -> Result<Vec<Value>, CompileError> {
+    let _expected_target_guard = crate::interpreter::push_expected_target_type(None);
     let mut vals = Vec::with_capacity(args.len());
     for arg in args {
         vals.push(crate::interpreter::evaluate_expr(

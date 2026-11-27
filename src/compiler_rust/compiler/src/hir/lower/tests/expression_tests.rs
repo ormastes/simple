@@ -1756,3 +1756,597 @@ fn builtin_receiver_method_fallback_ignores_unrelated_user_class_methods() {
         module.err()
     );
 }
+
+/// Bug native_struct_field_default_dropped_on_reexport_2026-10-25: a struct
+/// known here only through the global layout map (never `register_struct`ed
+/// locally, e.g. reached via a glob re-export) must still fill an omitted
+/// field from its declared `= default`, not the nil tag. Mirrors
+/// `HirSymbol(...)` omitting `generic_param_count: i64 = 0` in the stage2 seed
+/// build.
+#[test]
+fn test_lower_omitted_field_uses_global_declared_default() {
+    let decl = Parser::new("struct Sym:\n    a: i64\n    gpc: i64 = 12345\n    tag: text = \"t\"\n")
+        .parse()
+        .expect("parse decl");
+    let mut defaults: HashMap<String, HashMap<String, simple_parser::ast::Expr>> = HashMap::new();
+    for item in &decl.items {
+        if let simple_parser::ast::Node::Struct(s) = item {
+            defaults.insert(
+                s.name.clone(),
+                s.fields
+                    .iter()
+                    .filter_map(|f| f.default.clone().map(|d| (f.name.clone(), d)))
+                    .collect(),
+            );
+        }
+    }
+    let module = Parser::new("fn test(n: i64) -> Sym:\n    return Sym(a: n)\n")
+        .parse()
+        .expect("parse failed");
+    let mut lowerer = Lowerer::new();
+    lowerer.set_lenient_types(true);
+    lowerer.set_strict_mode(false);
+    lowerer.set_global_struct_defs(Arc::new(HashMap::from([(
+        "Sym".to_string(),
+        vec![
+            ("a".to_string(), Type::Simple("i64".to_string())),
+            ("gpc".to_string(), Type::Simple("i64".to_string())),
+            ("tag".to_string(), Type::Simple("text".to_string())),
+        ],
+    )])));
+    lowerer.set_global_struct_field_defaults(Arc::new(defaults));
+
+    let lowered = lowerer.lower_module(&module).expect("lower failed");
+    let body = format!("{:?}", lowered.functions[0].body);
+    assert!(body.contains("Integer(12345)"), "omitted gpc must lower its declared default: {body}");
+    assert!(!body.contains("kind: Nil"), "no omitted field may fall back to the nil tag: {body}");
+}
+
+// Regression for seed_untyped_byte_len_binding_raw_i64_misdecoded_2026_11_09
+// (surfaced by PR #7883): `byte_len`, `byte_at`, `char_code_at` and
+// `ord`/`codepoint`/`code_point` return a raw i64 from the runtime. When one
+// is missing from a result-type table, an UNTYPED `val n = s.byte_len()` is
+// typed ANY, MIR skips the int boxing, the raw word 20 prints as
+// `<value:0x14>`, the raw word 1 as `nil`, and `a - b` on two such bindings
+// is a tagged-arithmetic misdecode (2.0), so
+// `while start <= value_len - needle_len` never terminates. The typed
+// `val n: i64 = s.byte_len()` form only survives because the declared type
+// forces an UnboxInt. #7174 closed the STRING-receiver table; the erased
+// (`any`) receiver table still lacked `byte_len` and is what this pins.
+#[test]
+fn byte_len_and_raw_i64_text_builtins_infer_i64() {
+    let module = parse_and_lower(
+        r#"fn diff(value: text, needle: text) -> i64:
+    val a = value.byte_len()
+    val b = needle.byte_len()
+    return a - b
+
+fn byte_at_value(value: text) -> i64:
+    val a = value.byte_at(0)
+    return a
+
+fn char_code(value: text) -> i64:
+    val a = value.char_code_at(0)
+    return a
+
+fn ordinal(value: text) -> i64:
+    val a = value.ord()
+    return a
+
+fn erased(value: any) -> i64:
+    val a = value.byte_len()
+    return a
+"#,
+    )
+    .unwrap();
+
+    for (name, method) in [
+        ("diff", "byte_len"),
+        ("byte_at_value", "byte_at"),
+        ("char_code", "char_code_at"),
+        ("ordinal", "ord"),
+        ("erased", "byte_len"),
+    ] {
+        let function = module.functions.iter().find(|f| f.name == name).expect(name);
+        let lets: Vec<_> = function
+            .body
+            .iter()
+            .filter_map(|stmt| match stmt {
+                HirStmt::Let { ty, value: Some(value), .. } => Some((*ty, value)),
+                _ => None,
+            })
+            .collect();
+        assert!(!lets.is_empty(), "{name}: expected an untyped `val` binding");
+        for (local_ty, value) in &lets {
+            assert!(
+                matches!(&value.kind, HirExprKind::MethodCall { method: m, .. } if m == method),
+                "{name}: binding must stay a `{method}` method call, got {:?}",
+                value.kind
+            );
+            assert_eq!(value.ty, TypeId::I64, "{name}: `.{method}()` must infer i64, not ANY");
+            assert_eq!(*local_ty, TypeId::I64, "{name}: the untyped local must be i64");
+        }
+    }
+
+    // The exact #7883 loop-bound shape: the difference of two untyped
+    // `byte_len` bindings must be an integer binary op, never a dynamic one.
+    let diff = module.functions.iter().find(|f| f.name == "diff").unwrap();
+    let returned = diff
+        .body
+        .iter()
+        .find_map(|stmt| match stmt {
+            HirStmt::Return(Some(expr)) => Some(expr),
+            _ => None,
+        })
+        .expect("diff must return a - b");
+    assert!(matches!(returned.kind, HirExprKind::Binary { .. }), "{:?}", returned.kind);
+    assert_eq!(returned.ty, TypeId::I64, "a - b on two untyped byte_len bindings must be i64");
+}
+
+// optional_as_cast_yields_zero_2026_11_09: `T? as <numeric>` outside `unsafe`
+// must be a lowering error, not a value. Both engines produced a silent
+// wrong number for it (interpreter: the `Option.Some` variant ORDINAL 0; JIT:
+// the reinterpreted heap word). Narrowed forms and the `unsafe:` form stay
+// admitted.
+#[test]
+fn optional_as_numeric_cast_is_rejected_outside_unsafe() {
+    let mk = "fn mk(v: u64) -> u64?:\n    if v != 0:\n        v\n    else:\n        nil\n\n";
+
+    // Function-returned `T?` (the shape that masked the acpi spec zero reads).
+    let returned = parse_and_lower(&format!("{mk}fn bad() -> u64:\n    return mk(1) as u64\n"));
+    let err = returned.expect_err("`mk(1) as u64` on a `u64?` must not lower");
+    let msg = format!("{err}");
+    assert!(msg.contains("SIMPLE_JIT_STRICT:"), "must carry the strict marker so the JIT cannot demote: {msg}");
+    assert!(msg.contains("optional") && msg.contains("u64") && msg.contains("unsafe"), "{msg}");
+
+    // Locally typed `T?`, float target, and `Option<T>` spelling: same rule.
+    for (src, what) in [
+        ("fn bad() -> u32:\n    val r: u32? = 45064\n    return r as u32\n", "local `u32?`"),
+        (
+            "fn bad() -> f64:\n    val r: f64? = 1.5\n    return r as f64\n",
+            "float target",
+        ),
+        ("fn bad(r: Option<i64>) -> i64:\n    return r as i64\n", "`Option<i64>` spelling"),
+    ] {
+        assert!(parse_and_lower(src).is_err(), "{what}: `as` on an optional must be rejected");
+    }
+
+    // Narrowing first is fine, and so is the cast inside `unsafe:`.
+    parse_and_lower(&format!("{mk}fn ok() -> u64:\n    return (mk(1) ?? 0) as u64\n"))
+        .expect("`(mk(1) ?? 0) as u64` must lower");
+    parse_and_lower(&format!("{mk}fn ok() -> u64:\n    unsafe:\n        return mk(1) as u64\n"))
+        .expect("`mk(1) as u64` inside `unsafe:` must lower");
+    // The unsafe depth must be restored after the block: a cast AFTER it is
+    // rejected again.
+    assert!(
+        parse_and_lower(&format!(
+            "{mk}fn bad() -> u64:\n    unsafe:\n        val x = mk(1) as u64\n    return mk(2) as u64\n"
+        ))
+        .is_err(),
+        "unsafe depth must not leak past the block"
+    );
+    // Non-optional casts are untouched.
+    parse_and_lower("fn ok(v: i64) -> u8:\n    return v as u8\n").expect("plain numeric cast must lower");
+    // `any?` narrowed with `??` is plain `any`, so the recommended idiom
+    // `(json_to_number(v) ?? 0) as i64` lowers; left typed `any?`, the
+    // narrowing itself was rejected (the three spipe_knowledge_provider
+    // callers surfaced by the corpus sweep).
+    let module = parse_and_lower(
+        "fn j(flag: bool) -> any?:\n    if flag:\n        42\n    else:\n        nil\n\nfn ok() -> i64:\n    return (j(true) ?? 0) as i64\n",
+    )
+    .expect("`(any? ?? 0) as i64` must lower");
+    let ok = module.functions.iter().find(|f| f.name == "ok").unwrap();
+    let cast = ok
+        .body
+        .iter()
+        .find_map(|stmt| match stmt {
+            HirStmt::Return(Some(expr)) => Some(expr),
+            _ => None,
+        })
+        .unwrap();
+    assert!(matches!(&cast.kind, HirExprKind::Cast { expr, .. } if expr.ty == TypeId::ANY), "{:?}", cast.kind);
+}
+
+// `if val m = <generic T?>` must bind the PAYLOAD, so `m as i64` is the
+// narrowed cast ERR-01 recommends. With `T` uninferred the subject is the
+// registry optional over `any`, and the binding used to keep the optional
+// type, so the very narrowing the diagnostic suggests was itself rejected.
+// The un-narrowed generic cast must still be rejected.
+// Bug: doc/08_tracking/bug/if_val_binding_from_generic_optional_stays_optional_err01_2026-11-13.md
+#[test]
+fn if_val_on_generic_optional_binds_payload_for_numeric_cast() {
+    let pick = "fn pick<T>(v: T, ok: bool) -> T?:\n    if ok:\n        v\n    else:\n        nil\n\n";
+
+    // Statement form, expression form, and `elif val`.
+    for (body, what) in [
+        (
+            "fn ok() -> i64:\n    if val m = pick(41, true):\n        return (m as i64) + 1\n    return 0\n",
+            "statement `if val`",
+        ),
+        (
+            "fn ok() -> i64:\n    val r = if val m = pick(41, true): (m as i64) + 1 else: 0\n    return r\n",
+            "expression `if val`",
+        ),
+        (
+            "fn ok(f: bool) -> i64:\n    if f:\n        return 1\n    elif val m = pick(41, true):\n        return m as i64\n    return 0\n",
+            "`elif val`",
+        ),
+        (
+            "fn ok() -> i64:\n    var i = 0\n    var t = 0\n    while val m = pick(i, i < 3):\n        t = t + (m as i64)\n        i = i + 1\n    return t\n",
+            "`while val`",
+        ),
+    ] {
+        parse_and_lower(&format!("{pick}{body}"))
+            .unwrap_or_else(|e| panic!("{what}: `m as i64` on the narrowed binding must lower: {e}"));
+    }
+
+    // Negative: the generic optional itself, un-narrowed, is still ERR-01.
+    let err = parse_and_lower(&format!("{pick}fn bad() -> i64:\n    return pick(41, true) as i64\n"))
+        .expect_err("`pick(..) as i64` on a generic `T?` must not lower");
+    assert!(format!("{err}").contains("SIMPLE_JIT_STRICT:"), "{err}");
+    let err = parse_and_lower(&format!(
+        "{pick}fn bad() -> i64:\n    val m = pick(41, true)\n    return m as i64\n"
+    ))
+    .expect_err("a plain `val` of a generic `T?` is not narrowed");
+    assert!(format!("{err}").contains("optional"), "{err}");
+}
+
+// The PipelineOp LLVM plugin transports an Option word, rather than narrowing
+// its payload. Compile its actual production cast through the strict HIR owner.
+#[test]
+fn llvm_pipeline_optional_destination_keeps_narrow_unsafe_boundary() {
+    let plugin = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../plugins/backend_llvm_lib/llvm_lib_translate_expr.spl"
+    ))
+    .replace("\r\n", "\n");
+    let marker = "            val raw_dest_opt = unsafe(capabilities: [ffi]):\n";
+    let start = plugin.find(marker).expect("PipelineOp raw destination boundary");
+    let block = plugin[start..]
+        .lines()
+        .take(2)
+        .map(|line| line.strip_prefix("        ").expect("match-arm indentation"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let fixture = format!("fn pipeline(dest_opt: i64?) -> i64:\n{block}\n    raw_dest_opt\n");
+    let module = parse_and_lower(&fixture).expect("production raw Option cast must lower");
+    let function = module
+        .functions
+        .iter()
+        .find(|function| function.name == "pipeline")
+        .unwrap();
+    let HirStmt::Let { value: Some(value), .. } = &function.body[0] else {
+        panic!("expected raw destination binding");
+    };
+    assert_eq!(value.ty, TypeId::I64);
+    let HirExprKind::UnsafeBlock {
+        capabilities,
+        statements,
+    } = &value.kind
+    else {
+        panic!("raw conversion must retain its unsafe boundary");
+    };
+    assert_eq!(capabilities, &["ffi"]);
+    assert_eq!(statements.len(), 1, "unsafe must contain only the raw cast");
+    let original = "fn pipeline(dest_opt: i64?) -> i64:\n    dest_opt as i64\n";
+    let error = parse_and_lower(original).expect_err("original safe optional cast must fail");
+    assert!(format!("{error}").contains("SIMPLE_JIT_STRICT:"));
+    let escaped = format!("fn pipeline(dest_opt: i64?) -> i64:\n{block}\n    dest_opt as i64\n");
+    assert!(
+        parse_and_lower(&escaped).is_err(),
+        "unsafe scope must not leak to the next cast"
+    );
+    assert!(plugin.contains("ctx, mod_, builder, tm, raw_dest_opt, func as i64, call_args as i64,"));
+}
+
+#[test]
+fn string_receiver_to_i32_family_result_is_typed_not_any() {
+    // Bug row: jit_to_i32_returns_zero_and_leaks_mistagged_value_2026-08-26.
+    // The HIR string-receiver result-type table typed `to_int`/`to_i64` but
+    // omitted `to_i8`/`to_i16`/`to_i32`, so those calls fell through to
+    // generic dynamic dispatch typed `TypeId::ANY`. MIR print-lowering only
+    // BoxInts args with a known int type, so the raw narrowed word reached
+    // `rt_println_value` and was decoded by bit pattern (`"42".to_i32()`
+    // printed the f64 denormal of bit pattern 42).
+    let module = parse_and_lower(
+        "fn f():\n    val a = \"42\".to_i32()\n    val b = \"7\".to_i16()\n    val c = \"9\".to_i8()\n    val d = \"42\".to_i64()\n",
+    )
+    .unwrap();
+    let func = module.functions.iter().find(|f| f.name == "f").unwrap();
+    let tys: Vec<TypeId> = func
+        .body
+        .iter()
+        .filter_map(|s| match s {
+            HirStmt::Let { value: Some(v), .. } => Some(v.ty),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        tys,
+        vec![TypeId::I32, TypeId::I16, TypeId::I8, TypeId::I64],
+        "string-receiver to_i32/to_i16/to_i8 must infer their widths like to_i64"
+    );
+}
+
+// stage2_none_default_not_call_site_constant_2026-11-12: a `= None` default
+// on a `T?` parameter is a call-site constant (omitting it must lower, as
+// `= nil` always did); a `= None` default on a non-optional parameter is a
+// declaration error; and safe code never passes a literal `None` to a
+// non-optional parameter (nil/None only inside `unsafe`).
+#[test]
+fn none_default_is_constant_and_none_never_reaches_non_optional_param() {
+    let fo = "fn fo(a: i64, b: i64? = None) -> i64:\n    a\n\n";
+    parse_and_lower(&format!("{fo}fn main() -> i64:\n    fo(1) + fo(1, None)\n"))
+        .expect("omitted and explicit None on an `i64?` parameter must lower");
+    let err = parse_and_lower("fn bad(a: i64 = None) -> i64:\n    0\n")
+        .expect_err("`= None` on a non-optional parameter must not lower");
+    assert!(format!("{err}").contains("not declared optional"), "{err}");
+    let f3 = "fn f3(a: i64, b: i64, c: i64) -> i64:\n    a\n\n";
+    let err = parse_and_lower(&format!("{f3}fn main() -> i64:\n    f3(1, None, 3)\n"))
+        .expect_err("a literal None at an `i64` parameter must not lower");
+    assert!(format!("{err}").contains("passes None to argument 2"), "{err}");
+    parse_and_lower(&format!("{f3}fn main() -> i64:\n    unsafe:\n        f3(1, None, 3)\n"))
+        .expect("inside `unsafe:` the literal None is admitted");
+}
+
+// match_on_callable_scrutinee_silently_takes_first_arm_2026-11-14 (JIT
+// residual): a constructor/type or function value bound to an enum-typed slot
+// lowered, so the JIT ran `match` over it and fell silently to `case _:` (or
+// matched `case Some(I8):` over `Kind?`). It must be a lowering error at every
+// boundary the seed types: positional/named/forward-declared call arguments,
+// `Kind?` parameters, typed `val`, and same-file class field initialisers.
+#[test]
+fn callable_or_type_value_never_lowers_into_an_enum_slot() {
+    let decls = "class Vec4f:\n    x: i64\n\nenum Kind:\n    I8\n    F32\n\nclass Box:\n    k: Kind\n\nfn helper() -> i64:\n    1\n\n";
+    let kind_name = "fn kind_name(k: Kind) -> text:\n    match k:\n        case I8: \"i8\"\n        case _: \"other\"\n\n";
+    let kind_opt = "fn kind_opt(k: Kind?) -> text:\n    \"x\"\n\n";
+    let rejected = [
+        (format!("{decls}{kind_name}fn main():\n    print(kind_name(Vec4f))\n"), "argument 1 of `kind_name`", "the type `Vec4f`"),
+        (format!("{decls}{kind_name}fn main():\n    print(kind_name(helper))\n"), "argument 1 of `kind_name`", "the function `helper`"),
+        (format!("{decls}{kind_name}fn main():\n    print(kind_name(Kind))\n"), "argument 1 of `kind_name`", "the enum type `Kind`"),
+        (format!("{decls}{kind_name}fn main():\n    print(kind_name(k: Vec4f))\n"), "argument 1 of `kind_name`", "the type `Vec4f`"),
+        (
+            format!("{decls}fn pair(n: i64, k: Kind) -> i64:\n    n\n\nfn main():\n    print(pair(k: Vec4f, n: 1))\n"),
+            "argument 2 of `pair`",
+            "the type `Vec4f`",
+        ),
+        (format!("{decls}fn main():\n    print(kind_name(Vec4f))\n\n{kind_name}"), "argument 1 of `kind_name`", "the type `Vec4f`"),
+        (format!("{decls}{kind_opt}fn main():\n    print(kind_opt(Vec4f))\n"), "argument 1 of `kind_opt`", "the type `Vec4f`"),
+        (format!("{decls}fn main():\n    val k: Kind = Vec4f\n"), "binding `k`", "the type `Vec4f`"),
+        (format!("{decls}fn main():\n    val b = Box(k: helper)\n"), "field `Box.k`", "the function `helper`"),
+        (
+            format!("{decls}class Namer:\n    tag: i64\n    fn name(k: Kind) -> i64:\n        1\n\nfn main():\n    val n = Namer(tag: 1)\n    print(n.name(Vec4f))\n"),
+            "argument 1 of `Namer.name`",
+            "the type `Vec4f`",
+        ),
+    ];
+    for (source, slot, found) in &rejected {
+        let err = parse_and_lower(source).expect_err(&format!("must not lower:\n{source}"));
+        let text = format!("{err}");
+        assert!(
+            text.contains("type mismatch") && text.contains(slot) && text.contains(found) && text.contains("enum `Kind`"),
+            "wrong error for:\n{source}\n{text}"
+        );
+    }
+    // Real enum values, a struct instance into a struct slot, and a function
+    // into a fn-typed slot keep lowering.
+    let admitted = format!(
+        "{decls}{kind_name}{kind_opt}fn apply(f: fn() -> i64) -> i64:\n    f()\n\nfn main():\n    val k: Kind = Kind.F32\n    val v: Vec4f = Vec4f(x: 1)\n    val b = Box(k: Kind.I8)\n    print(kind_name(k))\n    print(kind_name(b.k))\n    print(kind_opt(Kind.I8))\n    print(apply(helper))\n    print(v.x)\n"
+    );
+    parse_and_lower(&admitted).expect("real enum values and matching slots must lower");
+    // A variant spelled like its enum (`Token::Token`) is a value, not the
+    // type; named arguments in swapped order still bind to the right slot.
+    let same_named_variant = "enum Token:\n    Token\n    Other\n\nfn tok(t: Token) -> i64:\n    1\n\nfn pair(n: i64, k: Token) -> i64:\n    n\n\nfn main():\n    val t: Token = Token.Token\n    print(tok(Token.Token))\n    print(pair(k: Token.Other, n: 2))\n";
+    parse_and_lower(same_named_variant).expect("a variant named like its enum is not a type reference");
+}
+
+/// A one-field record unit (`unit Name: T`) is erased to its scalar for HIR/JIT:
+/// `.value` must not hit "cannot infer field type ... struct 'ANY'", and the
+/// constructor must lower to the bare scalar rather than a class value.
+#[test]
+fn record_unit_is_erased_to_scalar() {
+    let src = "unit Length: i64\n\nfn dbl(x: Length) -> i64:\n    x.value * 2\n\nfn add(a: Length, b: Length) -> Length:\n    a + b\n\nfn lt(a: Length, b: Length) -> bool:\n    a < b\n\nfn mk() -> Length:\n    Length(value: 3)\n\nfn mk2() -> Length:\n    Length(4)\n";
+    let module = parse_and_lower(src).expect("record unit must lower without demotion");
+    for name in ["dbl", "add", "lt", "mk", "mk2"] {
+        assert!(module.functions.iter().any(|f| f.name == name), "{name} missing");
+    }
+    let mk = module.functions.iter().find(|f| f.name == "mk").unwrap();
+    assert_eq!(mk.return_type, TypeId::I64, "unit return is the scalar type");
+    let has_struct_init = mk
+        .body
+        .iter()
+        .any(|s| matches!(s, HirStmt::Return(Some(e)) if matches!(e.kind, HirExprKind::StructInit { .. })));
+    assert!(!has_struct_init, "unit constructor must not build a class value");
+}
+
+/// SPL-UNIT-002 must survive scalar erasure: HIR keeps unit identity through
+/// checking, so the JIT path denies what the interpreter denies.
+#[test]
+fn record_unit_spl_unit_002_denied_through_hir() {
+    let decls = "unit A: i64\nunit B: i64\n\n";
+    let denied = [
+        "fn f(x: A, y: B) -> i64:\n    (x + y).value\n",
+        "fn f(x: A, y: B) -> bool:\n    x < y\n",
+        "fn f(x: A) -> A:\n    x + 5\n",
+        "fn f(x: A) -> A:\n    x - 1\n",
+        "fn f(x: A) -> A:\n    x % 2\n",
+        "fn f(x: A) -> bool:\n    x < 5\n",
+        "fn f(x: A) -> bool:\n    x == 5\n",
+        "fn f(n: i64, x: A) -> A:\n    n + x\n",
+        "fn g(y: B) -> i64:\n    y.value\n\nfn f(x: A) -> i64:\n    g(x)\n",
+    ];
+    for body in denied {
+        let err = parse_and_lower(&format!("{decls}{body}")).expect_err(&format!("must deny:\n{body}"));
+        let text = format!("{err}");
+        assert!(text.contains("SPL-UNIT-002") && text.contains("SIMPLE_JIT_STRICT"), "{body}\n{text}");
+    }
+    let allowed = [
+        "fn f(x: A, y: A) -> A:\n    x + y\n",
+        "fn f(x: A, y: A) -> A:\n    x - y\n",
+        "fn f(x: A, y: A) -> i64:\n    (x * y).value\n",
+        "fn f(x: A, y: A) -> i64:\n    (x / y).value\n",
+        "fn f(x: A) -> A:\n    x * 3\n",
+        "fn f(x: A) -> A:\n    3 * x\n",
+        "fn f(x: A) -> A:\n    x / 2\n",
+        "fn f(x: A, y: A) -> bool:\n    x < y\n",
+        "fn f(x: A) -> bool:\n    x.value < 5\n",
+        "fn f(x: A) -> i64:\n    x.value + 1\n",
+        "fn g(y: A) -> i64:\n    y.value\n\nfn f(x: A) -> i64:\n    g(x)\n",
+    ];
+    for body in allowed {
+        parse_and_lower(&format!("{decls}{body}")).unwrap_or_else(|e| panic!("must lower:\n{body}\n{e}"));
+    }
+}
+
+fn assert_unit_002(decls: &str, denied: &[&str], allowed: &[&str]) {
+    for body in denied {
+        let err = parse_and_lower(&format!("{decls}{body}")).expect_err(&format!("must deny:\n{body}"));
+        let text = format!("{err}");
+        assert!(text.contains("SPL-UNIT-002") && text.contains("SIMPLE_JIT_STRICT"), "{body}\n{text}");
+    }
+    for body in allowed {
+        parse_and_lower(&format!("{decls}{body}")).unwrap_or_else(|e| panic!("must lower:\n{body}\n{e}"));
+    }
+}
+
+const UNIT_002_SHAPES: &str = "unit A: i64\nunit B: i64\n\nstruct P:\n    a: A\n    b: B\n    n: i64\n\nclass C:\n    a: A\n    b: B\n\n    fn get_a() -> A:\n        self.a\n\n    fn get_b() -> B:\n        self.b\n\n    fn take_b(y: B) -> i64:\n        y.value\n\n    static fn zero() -> A:\n        A(0)\n\nstruct Q:\n    p: P\n\nimpl Q:\n    fn inner_a() -> A:\n        self.p.a\n\n";
+
+/// SPL-UNIT-002 follows struct and class field accesses, including `self.f`
+/// and nested receivers.
+#[test]
+fn record_unit_spl_unit_002_field_access() {
+    assert_unit_002(
+        UNIT_002_SHAPES,
+        &[
+            "fn f(p: P) -> i64:\n    (p.a + p.b).value\n",
+            "fn f(p: P) -> bool:\n    p.a < p.b\n",
+            "fn f(p: P) -> A:\n    p.a + p.n\n",
+            "fn f(p: P) -> A:\n    p.a + 1\n",
+            "fn f(c: C, y: B) -> bool:\n    c.a == y\n",
+            "fn f(q: Q, y: B) -> bool:\n    q.p.a == y\n",
+            "fn f(x: A, y: B) -> bool:\n    val p = P(a: x, b: y, n: 1)\n    p.a < p.b\n",
+        ],
+        &[
+            "fn f(p: P, x: A) -> A:\n    p.a + x\n",
+            "fn f(p: P) -> i64:\n    p.a.value + p.b.value\n",
+            "fn f(p: P) -> i64:\n    p.n + 1\n",
+            "fn f(p: P) -> A:\n    p.a * p.n\n",
+            "fn f(c: C, x: A) -> bool:\n    c.a < x\n",
+            "fn f(q: Q, x: A) -> bool:\n    q.p.a == x\n",
+        ],
+    );
+    // `self.a < self.b` inside a method is denied.
+    let decls = "unit A: i64\nunit B: i64\n\n";
+    assert_unit_002(
+        decls,
+        &["class C:\n    a: A\n    b: B\n\n    fn bad() -> bool:\n        self.a < self.b\n"],
+        &["class C:\n    a: A\n    b: A\n\n    fn ok() -> bool:\n        self.a < self.b\n"],
+    );
+}
+
+/// SPL-UNIT-002 follows method-call results (instance, static, impl) and
+/// checks method arguments.
+#[test]
+fn record_unit_spl_unit_002_method_call() {
+    let shapes = UNIT_002_SHAPES.replace("    fn mixed() -> bool:\n        self.a < self.b\n\n", "");
+    assert_unit_002(
+        &shapes,
+        &[
+            "fn f(c: C) -> bool:\n    c.get_a() < c.get_b()\n",
+            "fn f(c: C, y: B) -> i64:\n    (c.get_a() + y).value\n",
+            "fn f(c: C) -> A:\n    c.get_a() + 1\n",
+            "fn f(y: B) -> bool:\n    C.zero() == y\n",
+            "fn f(q: Q, y: B) -> bool:\n    q.inner_a() < y\n",
+            "fn f(c: C, x: A) -> i64:\n    c.take_b(x)\n",
+            "fn f(c: C) -> i64:\n    c.take_b(c.get_a())\n",
+            "fn f(c: C, y: B) -> bool:\n    val r = c.get_a()\n    r < y\n",
+        ],
+        &[
+            "fn f(c: C, x: A) -> A:\n    c.get_a() + x\n",
+            "fn f(c: C) -> i64:\n    c.get_a().value + c.get_b().value\n",
+            "fn f(x: A) -> bool:\n    C.zero() == x\n",
+            "fn f(q: Q, x: A) -> bool:\n    q.inner_a() < x\n",
+            "fn f(c: C, y: B) -> i64:\n    c.take_b(y)\n",
+            "fn f(c: C) -> i64:\n    c.take_b(c.get_b())\n",
+        ],
+    );
+}
+
+/// SPL-UNIT-002 inside a lambda body (typed params) and through a
+/// lambda-bound local (params and inferred result).
+#[test]
+fn record_unit_spl_unit_002_lambda() {
+    assert_unit_002(
+        "unit A: i64\nunit B: i64\n\n",
+        &[
+            "fn f() -> i64:\n    val g = fn(x: A, y: B): (x + y).value\n    0\n",
+            "fn f(y: B) -> i64:\n    val g = fn(x: A): x < y\n    0\n",
+            "fn f(x: A) -> i64:\n    val g = fn(x: B): x.value\n    g(x)\n",
+            "fn f(x: A, y: B) -> bool:\n    val g = fn(v: A): v + v\n    g(x) < y\n",
+            "fn f(x: A) -> A:\n    val g = fn(v: A): v\n    g(x) + 1\n",
+        ],
+        &[
+            "fn f() -> i64:\n    val g = fn(x: A, y: A): (x + y).value\n    0\n",
+            "fn f(x: A) -> i64:\n    val g = fn(v: A): v.value\n    g(x)\n",
+            "fn f(x: A, y: A) -> bool:\n    val g = fn(v: A): v + v\n    g(x) < y\n",
+            // An untyped lambda param shadows the outer unit local.
+            "fn f(x: A, y: B) -> i64:\n    val g = fn(x): x + 1\n    0\n",
+            // Lambda params do not leak into the enclosing function.
+            "fn f(y: B) -> i64:\n    val g = fn(y: A): y.value\n    y.value\n",
+        ],
+    );
+}
+
+/// SPL-UNIT-002 on named arguments: free functions, methods, lambdas and
+/// constructor fields bind by name, not by position.
+#[test]
+fn record_unit_spl_unit_002_named_args() {
+    let decls = format!("{UNIT_002_SHAPES}fn g(p: A, q: B) -> i64:\n    p.value + q.value\n\n")
+        .replace("    fn mixed() -> bool:\n        self.a < self.b\n\n", "");
+    assert_unit_002(
+        &decls,
+        &[
+            "fn f(x: A, y: B) -> i64:\n    g(p: y, q: x)\n",
+            "fn f(x: A, y: B) -> i64:\n    g(q: x, p: x)\n",
+            "fn f(x: A, y: B) -> i64:\n    g(x, q: x)\n",
+            "fn f(c: C, x: A) -> i64:\n    c.take_b(y: x)\n",
+            "fn f(x: A, y: B) -> P:\n    P(a: y, b: y, n: 1)\n",
+            "fn f(x: A, y: B) -> P:\n    P(b: x, a: x, n: 1)\n",
+            "fn f(p: P, x: A) -> P:\n    P(a: p.b, b: p.b, n: 1)\n",
+        ],
+        &[
+            "fn f(x: A, y: B) -> i64:\n    g(p: x, q: y)\n",
+            "fn f(x: A, y: B) -> i64:\n    g(q: y, p: x)\n",
+            "fn f(x: A, y: B) -> i64:\n    g(x, q: y)\n",
+            "fn f(c: C, y: B) -> i64:\n    c.take_b(y: y)\n",
+            "fn f(x: A, y: B) -> P:\n    P(a: x, b: y, n: 1)\n",
+            "fn f(x: A, y: B) -> P:\n    P(b: y, a: x, n: 1)\n",
+            "fn f(p: P) -> P:\n    P(a: p.a, b: p.b, n: p.n)\n",
+        ],
+    );
+}
+
+/// Two same-named declarations with different signatures are ambiguous by
+/// bare name, so neither is checked (no false SPL-UNIT-002).
+#[test]
+fn record_unit_spl_unit_002_ambiguous_signature_is_unchecked() {
+    let mut lowerer = Lowerer::new();
+    let parse_fn = |src: &str| {
+        let module = simple_parser::Parser::new(src).parse().expect("parse");
+        module
+            .items
+            .into_iter()
+            .find_map(|n| match n {
+                simple_parser::ast::Node::Function(f) => Some(f),
+                _ => None,
+            })
+            .expect("function")
+    };
+    let a = parse_fn("fn g(y: A) -> A:\n    y\n");
+    let b = parse_fn("fn g(y: B) -> B:\n    y\n");
+    lowerer.register_unit_sig("g".to_string(), &a);
+    lowerer.register_unit_sig("g".to_string(), &a);
+    assert_eq!(lowerer.fn_sig_type_names["g"].1.as_deref(), Some("A"));
+    lowerer.register_unit_sig("g".to_string(), &b);
+    assert_eq!(lowerer.fn_sig_type_names["g"], (Vec::new(), None));
+}

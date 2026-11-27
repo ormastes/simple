@@ -1,6 +1,33 @@
 # Admitted Stage2 minimal native compile fails at `str.clear`
 
-Status: open runtime blocker for `compiler_minimal_native_compile_perf`.
+## Triage 2026-11-10 (p3-boot lane)
+
+SUPERSEDED — fix commit `3c31fc3aa8b6 fix(mir): route Dict.clear() to rt_dict_clear
+instead of str.clear` (2026-08-17) is an ancestor of work/p3-boot-20261110
+(`git merge-base --is-ancestor 3c31fc3aa8b HEAD` -> true).
+
+Evidence in current tree:
+
+- `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl:3336` —
+  `is_dict_method_name` now includes `clear` (and `set`).
+- `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl:4042-4057` —
+  the `receiver_is_dict and method == "clear"` arm emits `rt_dict_clear`, with
+  a comment naming this failure mode (`HirLowering.begin_module()`'s 15
+  `Dict.clear()` calls being routed into `str.clear`'s
+  `rt_refuse_non_text_receiver` guard, `src/runtime/runtime_native.c:7154`).
+- In-tree regression spec: `test/01_unit/compiler/codegen/dict_clear_native_dispatch_spec.spl`
+  plus probes `probe_dict_clear_native.spl` / `probe_nontext_receiver_dict_clear.spl`.
+  Not re-executed here: the spec's oracle is a full native build of the probe,
+  and the only driver available in this lane is the Rust seed (whose own MIR
+  lowering compiled the probe), so a green run would not exercise the fixed
+  self-hosted path and a red run would prove nothing about it. Commit ancestry
+  plus the dispatch arm plus the pinned spec is the verification.
+
+The runtime guard itself (`rt_refuse_non_text_receiver`) is intentionally loud
+and unchanged — the repair was in dispatch, as this record's "Repair belongs
+to the bootstrap/runtime owner" note anticipated.
+
+Status: superseded (triage 2026-11-11, lane boot9) — fixing commit 3c31fc3aa8b6 is an ancestor of this branch; rt_dict_clear dispatch arm and pinned spec verified in-tree (native-oracle re-run outside lane grant).
 
 An admitted Stage2 compiler at
 `/mnt/data/worktrees/restart12-compiler_perf_a/build/restart12-build11-a-r4/output/stage3/x86_64-unknown-linux-gnu/stage2-admitted/simple`
@@ -16,3 +43,17 @@ the first minimal path to `HirLowering.begin_module()` clearing its diagnostic
 collection before the stub-HIR boundary. Repair belongs to the bootstrap/runtime
 owner, not this benchmark lane. Re-test only with a newly admitted pure-Simple
 artifact and do not substitute the Rust seed.
+
+## Triage 2026-11-11 (lane boot9, work/p3-boot9-20261111)
+
+SUPERSEDED — fixing commit `3c31fc3aa8b6 fix(mir): route Dict.clear() to
+rt_dict_clear instead of str.clear` re-confirmed as an ancestor of
+work/p3-boot9-20261111 (`git merge-base --is-ancestor 3c31fc3aa8b6 HEAD` ->
+true). Dispatch arm present at
+`src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl:4032,4056`
+(`rt_dict_clear`); pinned regression spec
+`test/01_unit/compiler/codegen/dict_clear_native_dispatch_spec.spl` in tree.
+The spec's oracle is a full native build of the probe, which this lane
+cannot run (no self-hosted native driver; native builds outside grant), so
+no re-execution: commit ancestry + dispatch arm + pinned spec remains the
+verification, same evidence class as the 2026-11-10 p3-boot triage.

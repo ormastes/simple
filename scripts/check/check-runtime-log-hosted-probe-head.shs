@@ -1,5 +1,11 @@
 #!/bin/sh
-set -eu
+# Verdict convention (repo guard standard), last line of stdout:
+#   PASS — <n> hosted-log probe run(s) checked ...     (exit 0)
+#   FAIL — <what broke>                                (exit 1)
+#   ERROR — nothing was checked (<reason>)             (exit 2)
+# A missing compiler/fixture/platform is absence of evidence: ERROR, never a
+# pass and never a mute abort.
+set -u
 
 repo_root="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cc="${CC:-cc}"
@@ -9,43 +15,60 @@ if [ "${1:-}" = --asan ]; then
     shift
 fi
 if [ "$#" -ne 0 ]; then
-    printf 'usage: bash %s [--asan]\n' "$0" >&2
+    echo "ERROR — nothing was checked (usage: check-runtime-log-hosted-probe-head.shs [--asan])"
     exit 2
 fi
 
-tmp_dir="$(mktemp -d)"
+probe_src="$repo_root/scripts/check/fixtures/runtime_log_hosted_probe_head.c"
+[ -f "$probe_src" ] || { echo "ERROR — nothing was checked (probe source $probe_src missing)"; exit 2; }
+command -v "$cc" >/dev/null 2>&1 || { echo "ERROR — nothing was checked (C compiler '$cc' not found)"; exit 2; }
+
+tmp_dir="$(mktemp -d)" || { echo "ERROR — nothing was checked (mktemp)"; exit 2; }
 trap 'rm -rf "$tmp_dir"' EXIT
 
 platform="$(uname -s 2>/dev/null || printf unknown)"
-case "$platform" in
-    Linux) ;;
-    *) printf 'SKIP: hosted log probe fixture requires Linux; current platform is %s\n' "$platform"; exit 0 ;;
-esac
+if [ "$platform" != "Linux" ]; then
+    echo "ERROR — nothing was checked (hosted log probe fixture requires Linux; current platform is $platform)"
+    exit 2
+fi
 
 set -- -std=c11 -Wall -Wextra
 if [ "$asan" -eq 1 ]; then
     set -- "$@" -fsanitize=address -fno-omit-frame-pointer
 fi
 
-"$cc" "$@" \
-    "$repo_root/scripts/check/fixtures/runtime_log_hosted_probe_head.c" \
-    -o "$tmp_dir/runtime-log-hosted-probe-head"
+if ! "$cc" "$@" \
+    "$probe_src" \
+    -o "$tmp_dir/runtime-log-hosted-probe-head" 2>"$tmp_dir/compile.log"; then
+    cat "$tmp_dir/compile.log" >&2
+    echo "FAIL — hosted log probe fixture did not compile (cc=$cc; log above)"
+    exit 1
+fi
 
+run_rc=0
 if [ "$asan" -eq 1 ]; then
     if ! command -v timeout >/dev/null 2>&1; then
-        printf '%s\n' 'ERROR: --asan requires timeout to bound the sanitizer run' >&2
+        echo "ERROR — nothing was checked (--asan requires timeout to bound the sanitizer run)"
         exit 2
     fi
-    if ! (ulimit -f 128; SIMPLE_LOG_HOSTED_PROBE=1 timeout 10 \
-        "$tmp_dir/runtime-log-hosted-probe-head") 2> "$tmp_dir/stderr"; then
-        cat "$tmp_dir/stderr" >&2
-        exit 1
-    fi
+    (ulimit -f 128; SIMPLE_LOG_HOSTED_PROBE=1 timeout 10 \
+        "$tmp_dir/runtime-log-hosted-probe-head") 2> "$tmp_dir/stderr" || run_rc=$?
 else
     SIMPLE_LOG_HOSTED_PROBE=1 "$tmp_dir/runtime-log-hosted-probe-head" \
-        2> "$tmp_dir/stderr"
+        2> "$tmp_dir/stderr" || run_rc=$?
+fi
+if [ "$run_rc" -ne 0 ]; then
+    cat "$tmp_dir/stderr" >&2
+    echo "FAIL — hosted log probe exited $run_rc (expected 0; stderr above)"
+    exit 1
 fi
 
 expected='[HOSTED-LOG-PROBE] device_write level=-9223372036854775808 len=-9223372036854775808 payload=<UNREADABLE>'
-grep -Fqx -- "$expected" "$tmp_dir/stderr"
-printf '%s\n' 'PASS: hosted log probe emits complete maximum-length header'
+if ! grep -Fqx -- "$expected" "$tmp_dir/stderr"; then
+    cat "$tmp_dir/stderr" >&2
+    echo "FAIL — hosted log probe emitted an unexpected header (expected '$expected'; stderr above)"
+    exit 1
+fi
+
+echo 'PASS — 1 hosted-log probe run checked (fixture compiled, emitted complete maximum-length header under INT64_MIN level/len, exit 0)'
+exit 0

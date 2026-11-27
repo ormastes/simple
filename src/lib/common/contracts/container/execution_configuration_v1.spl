@@ -1,0 +1,159 @@
+# Configuration observations are DATA. They confer no launch, freshness,
+# namespace, immutable-program or stream-completeness authority.
+use std.common.contracts.container.execution_v2.{ContainerHostScopeV2, container_host_scope_bytes_v2, container_host_scope_decode_v2}
+use std.common.contracts.container.runtime_v1.RuntimeIdentityV1
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+use std.common.sdn.strict_v1.sdn_parse_strict_v1
+use std.common.sdn.strict_types_v1.SdnStrictLimitsV1
+use std.common.build_manager.contracts.builder_digest_valid_v1
+use std.common.crypto.sha256.sha256_text
+
+pub struct ContainerExecutionMountObservationV1:
+    kind: text
+    source: text
+    destination: text
+    read_only: bool
+
+pub struct ContainerExecutionConfigurationObservationV1:
+    scope: ContainerHostScopeV2
+    runtime: RuntimeIdentityV1
+    request_digest: text
+    requested_image_ref: text
+    requested_image_kind: text
+    runtime_image_id: text
+    image_config_id: text
+    image_repo_digests: [text]
+    primary_argv: [text]
+    working_directory: text
+    configured_user: text
+    readonly_rootfs: bool
+    mounts: [ContainerExecutionMountObservationV1]
+    environment_digest: text
+    environment_names: [text]
+    image_default_environment_digest: text
+    image_default_environment_names: [text]
+    configuration_digest: text
+
+fn configuration_text_array_v1(values: [text]) -> SdnValue:
+    var encoded: [SdnValue] = []
+    for value in values: encoded.push(SdnValue.String(value))
+    SdnValue.Array(encoded)
+
+pub fn container_configuration_mount_values_v1(mounts: [ContainerExecutionMountObservationV1]) -> SdnValue:
+    var values: [SdnValue] = []
+    for mount in mounts:
+        val fields: Dict<text, SdnValue> = {"kind": SdnValue.String(mount.kind), "source": SdnValue.String(mount.source),
+            "destination": SdnValue.String(mount.destination), "readOnly": SdnValue.Bool(mount.read_only)}
+        values.push(SdnValue.Dict(fields))
+    SdnValue.Array(values)
+
+pub fn container_execution_configuration_encode_v1(value: ContainerExecutionConfigurationObservationV1) -> Result<text, text>:
+    for digest in [value.request_digest, value.environment_digest, value.image_default_environment_digest, value.configuration_digest]:
+        if not builder_digest_valid_v1(digest): return Err("container-configuration-digest-invalid")
+    val runtime: Dict<text, SdnValue> = {"podUid": SdnValue.String(value.runtime.pod_uid), "attempt": SdnValue.Int(value.runtime.attempt),
+        "operationId": SdnValue.String(value.runtime.operation_id), "engine": SdnValue.String(value.runtime.engine),
+        "nativeId": SdnValue.String(value.runtime.native_id), "nodeBootId": SdnValue.String(value.runtime.node_boot_id),
+        "providerGeneration": SdnValue.Int(value.runtime.provider_generation)}
+    val fields: Dict<text, SdnValue> = {"kind": SdnValue.String("container-execution-configuration"), "version": SdnValue.Int(1),
+        "scope": SdnValue.String(container_host_scope_bytes_v2(value.scope)?), "runtime": SdnValue.Dict(runtime),
+        "requestDigest": SdnValue.String(value.request_digest), "requestedImageRef": SdnValue.String(value.requested_image_ref),
+        "requestedImageKind": SdnValue.String(value.requested_image_kind), "runtimeImageId": SdnValue.String(value.runtime_image_id),
+        "imageConfigId": SdnValue.String(value.image_config_id), "imageRepoDigests": configuration_text_array_v1(value.image_repo_digests),
+        "primaryArgv": configuration_text_array_v1(value.primary_argv), "workingDirectory": SdnValue.String(value.working_directory),
+        "configuredUser": SdnValue.String(value.configured_user), "readonlyRootfs": SdnValue.Bool(value.readonly_rootfs),
+        "mounts": container_configuration_mount_values_v1(value.mounts), "environmentDigest": SdnValue.String(value.environment_digest),
+        "environmentNames": configuration_text_array_v1(value.environment_names), "imageDefaultEnvironmentDigest": SdnValue.String(value.image_default_environment_digest),
+        "imageDefaultEnvironmentNames": configuration_text_array_v1(value.image_default_environment_names), "configurationDigest": SdnValue.String(value.configuration_digest)}
+    val source = sdn_encode_canonical(SdnValue.Dict(fields)) + "\n"
+    if source.byte_len() > 1048576: return Err("container-configuration-record-bound")
+    Ok(source)
+
+fn configuration_keys_v1(fields: Dict<text, SdnValue>, keys: [text]) -> Result<(), text>:
+    if fields.len() != keys.len(): return Err("container-configuration-fields")
+    for key in keys:
+        if not fields.contains_key(key): return Err("container-configuration-fields")
+    Ok(())
+
+fn configuration_text_v1(fields: Dict<text, SdnValue>, key: text) -> Result<text, text>:
+    match fields[key]:
+        case SdnValue.String(value):
+            if value.byte_len() > 65536 or value.contains("\0"): return Err("container-configuration-text-bound")
+            Ok(value)
+        case _: Err("container-configuration-text-required")
+
+fn configuration_integer_v1(fields: Dict<text, SdnValue>, key: text) -> Result<i64, text>:
+    match fields[key]:
+        case SdnValue.Int(value): Ok(value)
+        case _: Err("container-configuration-integer-required")
+
+fn configuration_boolean_v1(fields: Dict<text, SdnValue>, key: text) -> Result<bool, text>:
+    match fields[key]:
+        case SdnValue.Bool(value): Ok(value)
+        case _: Err("container-configuration-boolean-required")
+
+fn configuration_texts_v1(fields: Dict<text, SdnValue>, key: text, maximum: i64) -> Result<[text], text>:
+    val values = match fields[key]:
+        case SdnValue.Array(found): found
+        case _: return Err("container-configuration-array-required")
+    if values.len() > maximum: return Err("container-configuration-array-bound")
+    var texts: [text] = []
+    for item in values:
+        match item:
+            case SdnValue.String(value):
+                if value.byte_len() > 65536 or value.contains("\0"): return Err("container-configuration-text-bound")
+                texts.push(value)
+            case _: return Err("container-configuration-array-text-required")
+    Ok(texts)
+
+pub fn container_execution_configuration_decode_v1(source: text) -> Result<ContainerExecutionConfigurationObservationV1, text>:
+    if source.byte_len() == 0 or source.byte_len() > 1048576: return Err("container-configuration-record-bound")
+    val document = match sdn_parse_strict_v1(source, SdnStrictLimitsV1(max_source_bytes: 1048576, max_depth: 4,
+            max_nodes: 4096, max_rows: 0, max_cells: 0, max_columns: 24)):
+        case Ok(value): value
+        case Err(_): return Err("container-configuration-record-invalid")
+    val fields = match document.value:
+        case SdnValue.Dict(value): value
+        case _: return Err("container-configuration-object-required")
+    configuration_keys_v1(fields, ["kind", "version", "scope", "runtime", "requestDigest", "requestedImageRef", "requestedImageKind",
+        "runtimeImageId", "imageConfigId", "imageRepoDigests", "primaryArgv", "workingDirectory", "configuredUser", "readonlyRootfs",
+        "mounts", "environmentDigest", "environmentNames", "imageDefaultEnvironmentDigest", "imageDefaultEnvironmentNames", "configurationDigest"])?
+    if fields["kind"] != SdnValue.String("container-execution-configuration") or fields["version"] != SdnValue.Int(1):
+        return Err("container-configuration-kind-version")
+    val identity = match fields["runtime"]:
+        case SdnValue.Dict(value): value
+        case _: return Err("container-configuration-runtime-required")
+    configuration_keys_v1(identity, ["podUid", "attempt", "operationId", "engine", "nativeId", "nodeBootId", "providerGeneration"])?
+    val runtime = RuntimeIdentityV1(pod_uid: configuration_text_v1(identity, "podUid")?, attempt: configuration_integer_v1(identity, "attempt")?,
+        operation_id: configuration_text_v1(identity, "operationId")?, engine: configuration_text_v1(identity, "engine")?,
+        native_id: configuration_text_v1(identity, "nativeId")?, node_boot_id: configuration_text_v1(identity, "nodeBootId")?,
+        provider_generation: configuration_integer_v1(identity, "providerGeneration")?)
+    val entries = match fields["mounts"]:
+        case SdnValue.Array(value): value
+        case _: return Err("container-configuration-mounts-required")
+    if entries.len() > 64: return Err("container-configuration-mount-count")
+    var mounts: [ContainerExecutionMountObservationV1] = []
+    for entry in entries:
+        val mount = match entry:
+            case SdnValue.Dict(value): value
+            case _: return Err("container-configuration-mount-object")
+        configuration_keys_v1(mount, ["kind", "source", "destination", "readOnly"])?
+        mounts.push(ContainerExecutionMountObservationV1(kind: configuration_text_v1(mount, "kind")?, source: configuration_text_v1(mount, "source")?,
+            destination: configuration_text_v1(mount, "destination")?, read_only: configuration_boolean_v1(mount, "readOnly")?))
+    val value = ContainerExecutionConfigurationObservationV1(scope: container_host_scope_decode_v2(configuration_text_v1(fields, "scope")?)?,
+        runtime: runtime, request_digest: configuration_text_v1(fields, "requestDigest")?, requested_image_ref: configuration_text_v1(fields, "requestedImageRef")?,
+        requested_image_kind: configuration_text_v1(fields, "requestedImageKind")?, runtime_image_id: configuration_text_v1(fields, "runtimeImageId")?,
+        image_config_id: configuration_text_v1(fields, "imageConfigId")?, image_repo_digests: configuration_texts_v1(fields, "imageRepoDigests", 256)?,
+        primary_argv: configuration_texts_v1(fields, "primaryArgv", 512)?, working_directory: configuration_text_v1(fields, "workingDirectory")?,
+        configured_user: configuration_text_v1(fields, "configuredUser")?, readonly_rootfs: configuration_boolean_v1(fields, "readonlyRootfs")?, mounts: mounts,
+        environment_digest: configuration_text_v1(fields, "environmentDigest")?, environment_names: configuration_texts_v1(fields, "environmentNames", 512)?,
+        image_default_environment_digest: configuration_text_v1(fields, "imageDefaultEnvironmentDigest")?,
+        image_default_environment_names: configuration_texts_v1(fields, "imageDefaultEnvironmentNames", 512)?, configuration_digest: configuration_text_v1(fields, "configurationDigest")?)
+    if container_execution_configuration_encode_v1(value)? != source: return Err("container-configuration-record-not-canonical")
+    if value.requested_image_kind != "repository-digest" and value.requested_image_kind != "image-config-id":
+        return Err("container-configuration-image-kind")
+    var content = value
+    content.configuration_digest = "0000000000000000000000000000000000000000000000000000000000000000"
+    if sha256_text(container_execution_configuration_encode_v1(content)?) != value.configuration_digest:
+        return Err("container-configuration-content-digest-mismatch")
+    Ok(value)

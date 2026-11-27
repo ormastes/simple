@@ -1,0 +1,63 @@
+# Fixed command DATA only. The real retained owner is the sole executor and
+# proves runtime/currentness and observed image-ID provenance independently.
+# No caller format/argv, process owner, environment or async import lives here.
+use std.common.contracts.container.runtime_v1.{RuntimeCommandV1, RuntimeIdentityV1}
+
+pub enum ContainerConfigurationInspectKindV1:
+    ConfigurationBefore
+    ConfigurationImage
+    ConfigurationAfter
+    InputConfigurationBefore
+    InputConfigurationImage
+    InputConfigurationAfter
+
+pub fn container_configuration_inspect_command_v1(kind: ContainerConfigurationInspectKindV1,
+        expected: RuntimeIdentityV1, windows: bool, observed_image_id: text = "") -> Result<RuntimeCommandV1, text>:
+    match kind:
+        case ContainerConfigurationInspectKindV1.ConfigurationImage:
+            return configuration_inspect_image_v1(expected.engine, observed_image_id)
+        case ContainerConfigurationInspectKindV1.InputConfigurationImage:
+            return configuration_inspect_image_v1(expected.engine, observed_image_id)
+        case _: ()
+    if observed_image_id != "": return Err("configuration-inspect-image-id-for-non-image")
+    match kind:
+        case ContainerConfigurationInspectKindV1.ConfigurationBefore: configuration_inspect_container_v1(expected, windows)
+        case ContainerConfigurationInspectKindV1.ConfigurationAfter: configuration_inspect_container_v1(expected, windows)
+        case ContainerConfigurationInspectKindV1.InputConfigurationBefore: configuration_inspect_input_v1(expected, windows)
+        case ContainerConfigurationInspectKindV1.InputConfigurationAfter: configuration_inspect_input_v1(expected, windows)
+        case _: Err("configuration-inspect-kind-unavailable")
+
+fn configuration_inspect_image_key_v1(value: text) -> Result<text, text>:
+    val key = if value.starts_with("sha256:"): value.substring(7, value.byte_len()) else: value
+    if key.byte_len() != 64: return Err("configuration-native-image-id")
+    for byte in key.bytes():
+        if not ((byte >= 48 and byte <= 57) or (byte >= 97 and byte <= 102)):
+            return Err("configuration-native-image-id")
+    Ok(key)
+
+fn configuration_inspect_container_v1(expected: RuntimeIdentityV1, windows: bool) -> Result<RuntimeCommandV1, text>:
+    configuration_inspect_image_key_v1(expected.native_id)?
+    val prefix = if windows: "simple." else: "io.simpleorch."
+    val pod = if windows: "pod" else: "pod_uid"
+    val boot = if windows: "boot" else: "node_boot_id"
+    val generation = if windows: "generation" else: "provider_generation"
+    val operation = if windows: "operation" else: "operation_id"
+    val format = "{\"id\":{{{{json .Id}}}},\"pod\":{{{{json (index .Config.Labels \"" + prefix + pod + "\")}}}},\"attempt\":{{{{json (index .Config.Labels \"" + prefix + "attempt\")}}}},\"boot\":{{{{json (index .Config.Labels \"" + prefix + boot + "\")}}}},\"generation\":{{{{json (index .Config.Labels \"" + prefix + generation + "\")}}}},\"operation\":{{{{json (index .Config.Labels \"" + prefix + operation + "\")}}}},\"image\":{{{{json .Image}}}},\"path\":{{{{json .Path}}}},\"args\":{{{{json .Args}}}},\"workdir\":{{{{json .Config.WorkingDir}}}},\"user\":{{{{json .Config.User}}}},\"readonly\":{{{{json .HostConfig.ReadonlyRootfs}}}},\"environment\":{{{{json .Config.Env}}}},\"mounts\":[{{{{range $i, $m := .Mounts}}}}{{{{if $i}}}},{{{{end}}}}{\"kind\":{{{{json $m.Type}}}},\"source\":{{{{json $m.Source}}}},\"destination\":{{{{json $m.Destination}}}},\"rw\":{{{{json $m.RW}}}}}{{{{end}}}}]}"
+    Ok(RuntimeCommandV1(operation: "configuration-container", program: expected.engine,
+        args: ["container", "inspect", "--format", format, expected.native_id]))
+
+fn configuration_inspect_image_v1(engine: text, image_id: text) -> Result<RuntimeCommandV1, text>:
+    configuration_inspect_image_key_v1(image_id)?
+    val format = "{\"id\":{{{{json .Id}}}},\"repoDigests\":{{{{json .RepoDigests}}}},\"environment\":{{{{json .Config.Env}}}}}"
+    Ok(RuntimeCommandV1(operation: "configuration-image", program: engine,
+        args: ["image", "inspect", "--format", format, image_id]))
+
+fn configuration_inspect_input_v1(expected: RuntimeIdentityV1, windows: bool) -> Result<RuntimeCommandV1, text>:
+    val original = configuration_inspect_container_v1(expected, windows)?
+    if (original.args.len() != 5 or original.args[0] != "container" or original.args[1] != "inspect" or
+            original.args[2] != "--format" or not original.args[3].ends_with("}")):
+        return Err("container-input-configuration-template-shape")
+    val core = original.args[3]
+    val format = core.substring(0, core.byte_len() - 1) + ",\"openStdin\":{{{{json .Config.OpenStdin}}}},\"tty\":{{{{json .Config.Tty}}}},\"stdinOnce\":{{{{json .Config.StdinOnce}}}}}"
+    Ok(RuntimeCommandV1(operation: "input-configuration-container", program: original.program,
+        args: [original.args[0], original.args[1], original.args[2], format, original.args[4]]))

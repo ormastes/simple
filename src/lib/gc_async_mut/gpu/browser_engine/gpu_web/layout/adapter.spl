@@ -80,15 +80,15 @@ fn _web_layout_bool(value: bool) -> text:
 
 fn _web_layout_size(value: i32) -> LayoutLength:
     if value > 0: return layout_length_px(value as i64)
-    if value < 0: return layout_length_percent((0 - value) as i64)
+    if value < 0: return layout_length_percent(0 - (value as i64))
     layout_length_auto()
 
-fn _web_layout_horizontal_margin(value: i32) -> LayoutLength:
-    if value < 0: return layout_length_percent((0 - value) as i64)
+fn _web_layout_horizontal_margin(value: i32, is_pct: bool) -> LayoutLength:
+    if is_pct: return layout_length_percent(value as i64)
     layout_length_px(value as i64)
 
 fn _web_layout_vertical_margin(value: i32) -> LayoutLength:
-    if value <= -1000: return layout_length_viewport_height(((0 - value) - 1000) as i64)
+    if value <= -1000: return layout_length_viewport_height((0 - (value as i64)) - 1000)
     layout_length_px(if value < 0: 0 else: value as i64)
 
 fn _web_layout_position_offset(value: i32, available: bool) -> LayoutLength:
@@ -108,6 +108,23 @@ fn _web_layout_overflow_policy(hidden: bool, auto_y: bool, scroll_y: bool) -> La
         y: if scroll_y: LAYOUT_OVERFLOW_SCROLL elif auto_y: LAYOUT_OVERFLOW_AUTO else: LAYOUT_OVERFLOW_VISIBLE
     )
 
+fn _web_layout_parse_px_track(token: text) -> i64:
+    val lower = token.trim().lower()
+    val digits = if lower.ends_with("px") and lower.byte_len() > 2:
+        lower.substring(0, lower.byte_len() - 2)
+    else:
+        lower
+    if digits == "":
+        return 0
+    var index = 0
+    val digits_blen = digits.byte_len()
+    while index < digits_blen:
+        val ch = digits.substring(index, index + 1)
+        if ch < "0" or ch > "9":
+            return 0
+        index = index + 1
+    digits.to_i64()
+
 fn _web_layout_append_tracks(existing: [i64], raw: text) -> _WebLayoutTrackAppend:
     val start = existing.len()
     var tracks = existing
@@ -116,8 +133,9 @@ fn _web_layout_append_tracks(existing: [i64], raw: text) -> _WebLayoutTrackAppen
     for part in raw.split(" "):
         val token = part.trim()
         if token != "":
-            val size = token.to_i64()
-            if size <= 0:
+            val size = _web_layout_parse_px_track(token)
+            # A `L+Nfr` floored fr track (`minmax(Lpx, Nfr)`) is unsupported here.
+            if size <= 0 or token.contains("+"):
                 return _WebLayoutTrackAppend(tracks: existing, start: start, count: 0, supported: false)
             tracks.push(size)
     _WebLayoutTrackAppend(tracks: tracks, start: start, count: tracks.len() - start, supported: true)
@@ -135,7 +153,7 @@ fn _web_layout_grid_span(raw: text) -> i64:
     val start = parts[0].trim().to_i64()
     val tail = parts[1].trim()
     if tail.starts_with("span "):
-        val span = tail.substring(5, tail.len()).trim().to_i64()
+        val span = tail.substring(5, tail.byte_len()).trim().to_i64()
         return if span > 0: span else: 1
     val end_line = tail.to_i64()
     if start > 0 and end_line > start: end_line - start else: 1
@@ -312,8 +330,12 @@ fn _web_layout_adapt_state(
         if (style.display != "block" and style.display != "list-item" and
             style.display != "flex" and style.display != "grid"):
             admission_flags = admission_flags | LAYOUT_GPU_ADMISSION_INLINE_FLOW
+        # The GPU grid kernel packs tracks at the start: a `justify-content` the CPU
+        # layout acts on (`grid_justify_content_offsets`) is not admitted.
+        val grid_jc = style.justify_content
+        val grid_jc_start = grid_jc == "" or grid_jc == "normal" or grid_jc == "start" or grid_jc == "flex-start" or grid_jc == "stretch" or grid_jc == "left"
         if (style.display == "grid" and
-            (not column_tracks.supported or column_tracks.count == 0 or not row_tracks.supported)):
+            (not column_tracks.supported or column_tracks.count == 0 or not row_tracks.supported or not grid_jc_start)):
             admission_flags = admission_flags | LAYOUT_GPU_ADMISSION_UNSUPPORTED_TRACK
         val first_child = child_index.first_child[index]
         val next_sibling = child_index.next_sibling[index]
@@ -333,9 +355,9 @@ fn _web_layout_adapt_state(
                 border_box: style.border_box,
                 padding: layout_edges(style.pad_l as i64, style.pad_t as i64, style.pad_r as i64, style.pad_b as i64),
                 border: layout_edges(style.border_l as i64, style.border_t as i64, style.border_r as i64, style.border_b as i64),
-                margin_left: _web_layout_horizontal_margin(style.margin_l),
+                margin_left: _web_layout_horizontal_margin(style.margin_l, style.margin_l_pct),
                 margin_top: _web_layout_vertical_margin(style.margin_t),
-                margin_right: _web_layout_horizontal_margin(style.margin_r),
+                margin_right: _web_layout_horizontal_margin(style.margin_r, style.margin_r_pct),
                 margin_bottom: _web_layout_vertical_margin(style.margin_b),
                 margin_auto_bits: margin_auto_bits,
                 gap_px: style.gap_px as i64,
@@ -414,6 +436,8 @@ fn _web_layout_adapt_state(
                 style.min_height_px.to_text(), style.max_height_px.to_text(),
                 style.margin_l.to_text(), style.margin_t.to_text(),
                 style.margin_r.to_text(), style.margin_b.to_text(),
+                _web_layout_bool(style.margin_l_pct), _web_layout_bool(style.margin_r_pct),
+                style.margin_l_milli.to_text(), style.margin_r_milli.to_text(),
                 style.pad_l.to_text(), style.pad_t.to_text(),
                 style.pad_r.to_text(), style.pad_b.to_text(),
                 style.gap_px.to_text(), style.row_gap_px.to_text(),
@@ -562,4 +586,4 @@ fn web_layout_framework_input(
     )
 
 export WebLayoutAdapterResult, web_layout_adapt_cpu_oracle, web_layout_adapt_prepared
-export web_layout_validate_snapshot, web_layout_framework_input
+export web_layout_validate_snapshot, web_layout_framework_input, _web_layout_size

@@ -1,0 +1,117 @@
+# @req HOST-02 ORCH-02
+# NOT_RUN. Actual owned journal/WAL fixtures, no domain grant/native effect.
+use std.spec.{describe, it, expect, fail}
+use std.spec.step
+use std.common.task_runner.distributed_operation_journal_v2.*
+use std.common.contracts.distributed_operation_state_v2.{DistributedOperationStateV2, distributed_operation_initial_v2, distributed_operation_transition_v2}
+use std.common.contracts.distributed_control_v2.OperationEnvelopeV2
+use std.common.contracts.distributed_control_codec_v2.distributed_encode_operation_v2
+use std.nogc_sync_mut.daemon_sdk.operation_dispatch_v2.{daemon_operation_admit_v2, daemon_operation_begin_v2, daemon_operation_record_outcome_v2}
+use std.nogc_sync_mut.database.wal_segmented.database_wal_commit_v1
+use std.nogc_sync_mut.database.wal.{WalEntry, WalEntryType}
+use std.common.task_runner.index.task_runner_storage_escape_v1
+use std.nogc_sync_mut.io.file_ops.secure_temp_dir
+use std.nogc_sync_mut.io_runtime.dir_remove
+
+fn history_operation_v2(id: text) -> OperationEnvelopeV2:
+    OperationEnvelopeV2(2, id, "b".repeat(64), "user", "project", "host", "build", "c".repeat(64), 1, 0, 1, 1, 1)
+
+fn history_ready_v2(root: text, nonce: text) -> DistributedOperationJournalV2:
+    match distributed_operation_journal_open_owned_v2(root, "a".repeat(64), nonce, 50):
+        case DistributedOperationJournalOpenV2.Ready(owner): owner
+        case DistributedOperationJournalOpenV2.CleanupRequired(cleanup, reason):
+            val closed = distributed_operation_journal_open_cleanup_v2(cleanup)
+            assert(closed.closed and closed.error == "" and closed.cleanup.is_none())
+            fail(reason)
+        case DistributedOperationJournalOpenV2.Rejected(reason): fail(reason)
+
+fn history_close_v2(owner: DistributedOperationJournalV2):
+    val closed = distributed_operation_journal_close_owned_v2(owner)
+    assert(closed.closed and closed.error == "" and closed.cleanup.is_none())
+
+fn history_event_v2(row: DistributedOperationStateV2) -> WalEntry:
+    # Independent golden V2 wire framing for a real multi-event segment. This
+    # is a test producer, not a second production parser or fabricated owner.
+    WalEntry(0, WalEntryType.Insert, "distributed_operations_v2", row.operation_id,
+        task_runner_storage_escape_v1(row.state + "\n" + row.outcome_digest + "\n" + row.envelope), 0)
+
+describe "Canonical current-owner operation history batch":
+    it "returns empty canonical history without inventing an admission endpoint":
+        step("Open the actual owned journal over a private empty tree")
+        val root = secure_temp_dir("/tmp", "operation-history").unwrap()
+        val owner = history_ready_v2(root, "d".repeat(64))
+        val batch = distributed_operation_journal_history_batch_v2(owner).unwrap()
+        expect(batch.head_sequence).to_equal(0)
+        expect(batch.head_commit_digest).to_equal("")
+        expect(batch.operations.len()).to_equal(0)
+        expect(batch.revision_endpoints.len()).to_equal(0)
+        history_close_v2(owner)
+        assert(dir_remove(root, true))
+
+    it "aligns multi-event and multi-revision edges with their actual enclosing commits":
+        step("Publish a real two-operation segment, reopen canonically, then advance one operation twice")
+        val root = secure_temp_dir("/tmp", "operation-history").unwrap()
+        val first = history_ready_v2(root, "d".repeat(64))
+        val a = history_operation_v2("operation-a")
+        val b = history_operation_v2("operation-b")
+        val multi = database_wal_commit_v1(root + "/database-wal", first.authority_digest, first.revision,
+            [history_event_v2(distributed_operation_initial_v2(distributed_encode_operation_v2(a).unwrap()).unwrap()),
+             history_event_v2(distributed_operation_initial_v2(distributed_encode_operation_v2(b).unwrap()).unwrap())]).unwrap()
+        history_close_v2(first)
+        var owner = history_ready_v2(root, "e".repeat(64))
+        owner = daemon_operation_begin_v2(owner, a).unwrap()
+        val began = owner.revision
+        owner = daemon_operation_record_outcome_v2(owner, a, "failed", "f".repeat(64)).unwrap()
+        val batch = distributed_operation_journal_history_batch_v2(owner).unwrap()
+        expect(batch.head_sequence).to_equal(4)
+        expect(batch.revision_endpoints[multi.digest]).to_equal(2)
+        expect(batch.revision_endpoints[began]).to_equal(3)
+        expect(batch.revision_endpoints[owner.revision]).to_equal(4)
+        expect(batch.operations["operation-a"].admitted_sequence).to_equal(1)
+        expect(batch.operations["operation-a"].last_from_state).to_equal("executing")
+        expect(batch.operations["operation-a"].last_to_state).to_equal("failed")
+        expect(batch.operations["operation-a"].last_sequence).to_equal(4)
+        expect(batch.operations["operation-a"].last_commit_digest).to_equal(owner.revision)
+        expect(batch.operations["operation-b"].admitted_sequence).to_equal(2)
+        expect(batch.operations["operation-b"].last_commit_digest).to_equal(multi.digest)
+        history_close_v2(owner)
+        assert(dir_remove(root, true))
+
+    it "derives source state within one multi-event segment rather than from the final label":
+        step("Reopen admitted then executing then cancelled records sharing one canonical commit")
+        val root = secure_temp_dir("/tmp", "operation-history").unwrap()
+        val owner = history_ready_v2(root, "d".repeat(64))
+        val admitted = distributed_operation_initial_v2(distributed_encode_operation_v2(history_operation_v2("child")).unwrap()).unwrap()
+        val executing = distributed_operation_transition_v2(admitted, "executing", "").unwrap()
+        val cancelled = distributed_operation_transition_v2(executing, "cancelled", "f".repeat(64)).unwrap()
+        val committed = database_wal_commit_v1(root + "/database-wal", owner.authority_digest, owner.revision,
+            [history_event_v2(admitted), history_event_v2(executing), history_event_v2(cancelled)]).unwrap()
+        history_close_v2(owner)
+        val reopened = history_ready_v2(root, "e".repeat(64))
+        val batch = distributed_operation_journal_history_batch_v2(reopened).unwrap()
+        expect(batch.operations["child"].last_from_state).to_equal("executing")
+        expect(batch.operations["child"].last_to_state).to_equal("cancelled")
+        expect(batch.operations["child"].last_sequence).to_equal(3)
+        expect(batch.operations["child"].last_commit_digest).to_equal(committed.digest)
+        history_close_v2(reopened)
+        assert(dir_remove(root, true))
+
+    it "rejects stale or closed writer snapshots before returning a history authority":
+        step("Advance actual CURRENT and then close the exact updated native owner")
+        val root = secure_temp_dir("/tmp", "operation-history").unwrap()
+        val first = history_ready_v2(root, "d".repeat(64))
+        val current = daemon_operation_admit_v2(first, history_operation_v2("child")).unwrap().journal
+        expect(distributed_operation_journal_history_batch_v2(first).unwrap_err()).to_equal("OPERATION_JOURNAL_REVISION_STALE")
+        history_close_v2(current)
+        expect(distributed_operation_journal_history_batch_v2(current).is_err()).to_equal(true)
+        assert(dir_remove(root, true))
+
+    it "rejects a changed indexed operation ID even with matching envelope and state":
+        step("Keep the real WAL and exact lock while corrupting only the in-memory index ID")
+        val root = secure_temp_dir("/tmp", "operation-history").unwrap()
+        var owner = history_ready_v2(root, "d".repeat(64))
+        owner = daemon_operation_admit_v2(owner, history_operation_v2("child")).unwrap().journal
+        owner.operations["child"].operation_id = "other-child"
+        expect(distributed_operation_journal_history_batch_v2(owner).unwrap_err()).to_equal("OPERATION_JOURNAL_INDEX_MISMATCH")
+        history_close_v2(owner)
+        assert(dir_remove(root, true))

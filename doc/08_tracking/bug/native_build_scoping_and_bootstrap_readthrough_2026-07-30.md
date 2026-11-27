@@ -330,3 +330,23 @@ small** — with two caveats now on record:
    pass's own citations (matches the one invocation shape proven to work
    for all 6 real callers) rather than introducing a new mechanism.
 
+## Triage 2026-11-25 (P2 ledger sweep, Windows worktree)
+
+Contained fix #1 (fast-fail on missing entry) is confirmed present in
+source at this HEAD: `native_build_has_entry`
+(`src/app/cli/native_build_main.spl:3274`), enforced in `main()` (`:3598`)
+before the worker spawn. Stated limit: the 0.054s fast-fail timing was NOT
+re-measured here — on this Windows host a `native-build` invocation under
+the pinned tracked seed spends >30s loading the CLI graph before reaching
+that check, so the timing claim continues to stand on the original Linux
+measurement only.
+
+Since this record was written, the closure machinery has been restructured
+out of `compile_targets.spl` into
+`src/app/io/_CliCompile/native_build_closure.spl` (chunked coordinator with
+`resolve_cache`, `NativeBuildClosureChunkV1`), so the line citations above
+(514-648, 544, 551-566) are historical. The strict-`--source` scoping design
+gap (item 3) remains an owner decision — no strict-resolution mode was added
+— and the recommendation in "Verdict" (workspace-covering `--source` +
+`SIMPLE_NATIVE_BUILD_TRACE_CLOSURE=1`) is unchanged. No status change made.
+

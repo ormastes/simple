@@ -5,7 +5,9 @@ Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
 
 - Date: 2026-08-21
-- Status: OPEN
+- Status: OPEN (triaged LIVE 2026-11-11, lane ne13 — daemon still serial;
+  backlog-bypass mitigation verified 13/13 on seed; bounded worker pool not
+  landed. See addendum.)
 - Severity: high (corrupts every concurrent test sweep's verdict data)
 - Component: `src/app/test_daemon/light_daemon.spl`, `src/app/test_runner_new/test_runner_client.spl`
 
@@ -95,3 +97,53 @@ These emitted verdicts and are honest failures, not harness artifacts:
 | lib/common/web/browser_session_dom_generation_runtime_spec.spl | 1 total, 0 passed, 1 failed |
 | lib/common/web/browser_session_async_spec.spl | 24 executed, 22 passed, 2 failed |
 
+
+## Update 2026-11-03
+Mitigation (fix 2 above) is wired: the client calls daemon_backlog_bypass
+(test_runner_client.spl) so concurrent clients divert to the direct lane
+(daemon_backlog_bypass_spec 13/13). The worker pool (fix 1) is not done and the
+light daemon is bypassed on non-linux, so a budget spec must be authored on
+linux. Left open.
+
+## Addendum 2026-11-11 (lane ne13) — still LIVE; mitigation re-verified
+
+**Source verification (tip c8b6d0ebe90e, `src/app/test_daemon/light_daemon.spl`
+main loop :326-347):** the daemon is still serial. It now serves ONE request
+per poll iteration and re-lists, and `handle_request` skips requests whose
+client deadline expired while queued — but the loop's own comment states,
+verbatim: "It does NOT make the daemon parallel — clients avoid the queue
+entirely via daemon_backlog_bypass, which is wired in test_runner_client.spl."
+The load-bearing fix 1 (bounded worker pool sized to available parallelism) is
+still not implemented; the serialization hazard this doc records therefore
+still exists for any client that does reach the queue.
+
+**Mitigation verification actually run** (seed-smoke, fresh seed 46fe8f6b6def):
+`test/01_unit/app/test_runner_new/daemon_backlog_bypass_spec.spl` →
+outcome=OK, 13 declared, 13 executed, 13 passed, 0 failed. The 2026-11-03
+mitigation holds on release/1.0.0.
+
+**Why not fixed in this lane:** implementing the worker pool is a concurrency
+change to the test-runner hot path (bounded child workers, per-request claim
+protocol) that can only be authored AND measured on a linux host — the light
+daemon is bypassed on non-linux, so nothing on this Windows lane can exercise
+the code path. Routed to the test-runner owner. The unresolved high-queue-depth
+empty-read sub-question is largely avoided by the bypass (queue depth stays ~0
+for diverting clients) but is still unexplained; do not close this bug without
+it once the pool lands.
+
+
+## Triage 2026-11-13 (lane p3-async-20261113, base 80a8116e5e2) — still LIVE, Windows-lane blocked
+
+Same-base structural check: the daemon's own loop comment still states it
+does NOT make the daemon parallel (clients divert via
+`daemon_backlog_bypass` in test_runner_client.spl); the bounded worker pool
+(load-bearing fix 1) is still not implemented. The 2026-11-03 mitigation
+(`daemon_backlog_bypass_spec` 13/13, verified 2026-11-11 lane ne13 on this
+branch) stands per the no-rerun rule and was not re-executed.
+
+Why not fixed in this lane: the worker pool is a concurrency change to the
+test-runner hot path that can only be authored AND measured on a Linux host —
+the light daemon is bypassed on non-Linux, so nothing on this Windows lane
+can exercise the code path. Routed to the test-runner owner. The
+high-queue-depth empty-read sub-question remains unexplained; do not close
+without it once the pool lands. No source change.

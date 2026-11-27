@@ -2,7 +2,11 @@
  * This is host evidence only; Simple admission still requires the self-hosted
  * compiler/runtime lane. */
 #if !defined(__linux__)
-int main(void) { return 0; }
+#include <stdio.h>
+int main(void) {
+    fputs("process-observation-v4: requires Linux (not a PASS)\n", stderr);
+    return 77;
+}
 #else
 #define _GNU_SOURCE
 #define RT_PROCESS_OBSERVATION_V4_TESTING 1
@@ -59,7 +63,9 @@ int64_t rt_array_bytes_copy_checked(int64_t value, uint8_t* out, int64_t cap) {
     return n;
 }
 static const char* test_exec_path = "/proc/self/exe";
+static int test_exec_acquisitions;
 int64_t rt_process_acquire_pinned_executable(int64_t handle) {
+    test_exec_acquisitions++;
     if (handle != 77) { errno = ESTALE; return -1; }
     int fd=open(test_exec_path, O_RDONLY|O_CLOEXEC);
     return fd;
@@ -74,6 +80,9 @@ SplArray* rt_process_pinned_executable_sha256_value(int64_t handle) {
     return a;
 }
 
+/* Local-origin gate of the group stream owners (not exercised here). */
+int simple_local_unix_origin_v1(void) { return 0; }
+#define RT_OWNED_EXTERNAL_PIN 1 /* This harness stubs the executable pin. */
 #include "../runtime_process_owned.c"
 
 static void put_u64(SplArray* a, uint64_t value) {
@@ -112,6 +121,44 @@ static SplArray* ticket_from(const SplArray* words) {
     assert(rt_array_push(t,4));
     for (int i=4;i<=7;i++) assert(rt_array_push(t,rt_array_get((SplArray*)words,i)));
     return t;
+}
+
+static void check_unavailable_policies(const char* cwd, int64_t cwd_pin,
+                                         const uint8_t cwd_digest[32]) {
+    SplArray* capability = rt_process_observation_v4_capabilities_value();
+    /* Linux owns the leader and, when /proc is readable, ProcessGroup
+     * retirement (998622c8624); never a Tree/cgroup capability. */
+    int64_t bits = rt_array_get(capability, 3);
+    int group = owned_linux_group_retire_available();
+    assert(bits == (POV4_CAPABILITIES | (group ? POV4_CAP_PROCESS_GROUP_RETIRE : 0)));
+    assert((bits & ~(int64_t)(POV4_CAPABILITIES | POV4_CAP_PROCESS_GROUP_RETIRE)) == 0);
+    for (int policy = 1; policy <= 3; policy++) {
+      for (int cgroup = 0; cgroup <= 1; cgroup++) {
+        /* Admitted policies: LeaderOnly, and ProcessGroup when advertised.
+         * runtime_process_group_retire_linux_selfcheck runs those end to end. */
+        if (!cgroup && (policy == 1 || (policy == 2 && group))) continue;
+        SplArray* request = request_bytes(cwd, cwd_pin, cwd_digest, "--pov4-child", 1024);
+        set_u64_at(request, 80, (uint64_t)policy);
+        if (cgroup) {
+            set_u64_at(request, 64, 64 * 1024 * 1024);
+            set_u64_at(request, 72, POV4_ENFORCEMENT_CGROUP);
+        }
+        int acquisitions = test_exec_acquisitions;
+        SplArray* rejected = rt_process_observation_v4_start_pinned_value(77, cwd_pin, request);
+        SplArray* words = tuple_item(rejected, 3);
+        assert(rt_array_get(words, POV4_STATUS) == POV4_STATUS_REJECTED);
+        assert(rt_array_get(words, POV4_ERRNO) == ENOTSUP);
+        assert(rt_array_get(words, POV4_FAILURE_PHASE) == POV4_FAIL_ADMISSION);
+        assert(rt_array_get(words, POV4_FAILURE_REASON) ==
+               (cgroup ? POV4_REASON_MEMORY : POV4_REASON_PROVIDER));
+        assert(rt_array_get(words, POV4_PID) == 0);
+        assert(rt_array_get(words, POV4_TREE_EMPTY) == 0);
+        assert(rt_array_get(words, POV4_TREE_EMPTY_NS) == -1);
+        assert(rt_array_get(words, POV4_TICKET_HIGH) == 0);
+        assert(rt_array_get(words, POV4_TICKET_LOW) == 0);
+        assert(test_exec_acquisitions == acquisitions);
+      }
+    }
 }
 
 static void check_work_deadlines(const char* cwd, int64_t cwd_pin,
@@ -221,6 +268,12 @@ int main(int argc, char** argv) {
     SplArray* cwd_digest_value=rt_process_observation_v4_cwd_digest_value(cwd_pin);
     uint8_t cwd_digest[32]; assert(rt_array_bytes_copy_checked(
         (int64_t)(uintptr_t)cwd_digest_value,cwd_digest,32)==32);
+    check_unavailable_policies(cwd,cwd_pin,cwd_digest);
+    if (argc == 2 && strcmp(argv[1], "--admission-only") == 0) {
+        assert(rt_process_observation_v4_close_cwd_value(cwd_pin) == 1);
+        puts("runtime_process_observation_v4_admission_selfcheck: PASS (unsupported policies rejected before executable acquisition)");
+        return 0;
+    }
     check_work_deadlines(cwd,cwd_pin,cwd_digest);
     SplArray* request=request_bytes(cwd,cwd_pin,cwd_digest,"--pov4-child",1024);
     SplArray* unavailable=rt_process_observation_v4_start_value(request);

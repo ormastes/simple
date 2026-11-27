@@ -142,6 +142,45 @@ fn _sdl_text_command(component_id: text, x: i32, y: i32, value: text, color: u32
     draw_ir_text_resolved_font(component_id, x, y, value, color, metrics.family, metrics.identity, metrics.advances, metrics.width, metrics.line_height, font_size)
 
 # Append plain-text lines to the legacy GUI's canonical Draw IR scene.
+fn _sdl_fit_text(s: text, max_chars: i64) -> text:
+    if max_chars <= 0:
+        return ""
+    if s.len() <= max_chars:
+        return s
+    if max_chars <= 3:
+        return s[0:max_chars]
+    s[0:max_chars - 3] + "..."
+
+fn _sdl_html_to_lines(html: text, max_chars: i64, max_lines: i64) -> [text]:
+    var normalized = html.replace("</div>", "\n").replace("</li>", "\n")
+    normalized = normalized.replace("<br>", "\n").replace("<br/>", "\n")
+    normalized = normalized.replace("</p>", "\n").replace("</pre>", "\n").replace("</tr>", "\n")
+    normalized = normalized.replace("</span><span class=\"diagnostic-gutter", " </span><span class=\"diagnostic-gutter")
+    normalized = normalized.replace("</span><span class=\"content\">", " | </span><span class=\"content\">")
+    var plain = ""
+    var in_tag = false
+    var i: i64 = 0
+    while i < normalized.len():
+        val ch = normalized[i]
+        if ch == "<":
+            in_tag = true
+        elif ch == ">":
+            in_tag = false
+        elif not in_tag:
+            plain = plain + ch
+        i = i + 1
+    plain = plain.replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&").replace("&quot;", "\"")
+    var out: [text] = []
+    for raw in plain.split("\n"):
+        val trimmed = raw.trim()
+        if trimmed != "":
+            out.push(_sdl_fit_text(trimmed, max_chars))
+            if out.len() >= max_lines:
+                break
+    if out.len() == 0:
+        out.push("")
+    out
+
 fn gui_sdl_render_text_block(commands: [DrawIrCommand], lines: [text], component_prefix: text, x: i32, y: i32, line_height: i32, fg: u32) -> [DrawIrCommand]:
     var result = commands
     var row: i64 = 0
@@ -152,24 +191,38 @@ fn gui_sdl_render_text_block(commands: [DrawIrCommand], lines: [text], component
 
 fn gui_sdl_frame_draw_ir(frame: GuiFrame, w: i32, h: i32) -> DrawIrComposition:
     val bg   = rgba(30, 30, 30, 255)
+    val side = rgba(36, 38, 46, 255)
+    val bdr  = rgba(58, 64, 78, 255)
     val fg   = rgba(220, 220, 220, 255)
     val hdr  = rgba(50, 50, 80, 255)
     val stat = rgba(40, 60, 40, 255)
-    val line_h: i32 = 16
-    val tab_h:  i32 = 20
-    val tree_w: i32 = 200
-    val stat_h: i32 = 20
+    val line_h: i32 = 18
+    val tab_h:  i32 = 24
+    val tree_w: i32 = if w > 480: 200 else: (w / 3)
+    val stat_h: i32 = 22
     val stat_y = h - stat_h
+    val body_h = if stat_y > tab_h: stat_y - tab_h else: 0
+    val max_body_lines: i64 = if body_h > 0: (body_h / line_h) as i64 else: 1
+    val tree_chars: i64 = if tree_w > 16: ((tree_w - 12) / 8) as i64 else: 10
+    val ed_w: i32 = if w > tree_w: w - tree_w else: 80
+    val ed_chars: i64 = ((ed_w - 16) / 8) as i64
+    val top_chars: i64 = ((w - 16) / 8) as i64
 
     var commands: [DrawIrCommand] = [
         draw_ir_rect("editor-sdl:background", 0, 0, w, h, bg),
+        draw_ir_rect("editor-sdl:tree-background", 0, tab_h, tree_w, body_h, side),
+        draw_ir_rect("editor-sdl:tree-divider", tree_w - 1, tab_h, 1, body_h, bdr),
         draw_ir_rect("editor-sdl:tab-background", 0, 0, w, tab_h, hdr),
         draw_ir_rect("editor-sdl:status-background", 0, stat_y, w, stat_h, stat)
     ]
-    commands = gui_sdl_render_text_block(commands, [frame.tab_bar_html], "editor-sdl:tab", 4, 2, line_h, fg)
-    commands = gui_sdl_render_text_block(commands, [frame.file_tree_html], "editor-sdl:tree", 4, tab_h + 2, line_h, fg)
-    commands = gui_sdl_render_text_block(commands, [frame.editor_html], "editor-sdl:editor", tree_w + 4, tab_h + 2, line_h, fg)
-    commands = gui_sdl_render_text_block(commands, [frame.status_html], "editor-sdl:status", 4, stat_y + 2, line_h, fg)
+    val tab_lines = _sdl_html_to_lines(frame.tab_bar_html, top_chars, 1)
+    val tree_lines = _sdl_html_to_lines(frame.file_tree_html, tree_chars, max_body_lines)
+    val editor_lines = _sdl_html_to_lines(frame.editor_html, ed_chars, max_body_lines)
+    val status_lines = _sdl_html_to_lines(frame.status_html, top_chars, 1)
+    commands = gui_sdl_render_text_block(commands, tab_lines, "editor-sdl:tab", 6, 4, line_h, fg)
+    commands = gui_sdl_render_text_block(commands, tree_lines, "editor-sdl:tree", 6, tab_h + 4, line_h, fg)
+    commands = gui_sdl_render_text_block(commands, editor_lines, "editor-sdl:editor", tree_w + 8, tab_h + 4, line_h, fg)
+    commands = gui_sdl_render_text_block(commands, status_lines, "editor-sdl:status", 6, stat_y + 3, line_h, fg)
 
     val embedding = draw_ir_embedding_config("editor-sdl", "", 0, 0, w, h, 0, 1000, true)
     val source = draw_ir_source_gui_ast("editor-sdl", "editor-sdl", "1")

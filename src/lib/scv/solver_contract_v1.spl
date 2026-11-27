@@ -1,0 +1,127 @@
+# Pure host contracts. Descriptors are capabilities, not verified sandbox claims.
+use std.common.crypto.sha256.{sha256_text}
+
+struct ParserProvider:
+    provider_id: text
+    lock_digest: text
+
+struct DomainModelProvider:
+    provider_id: text
+    lock_digest: text
+
+struct SolverProvider:
+    provider_id: text
+    lock_digest: text
+
+struct ValidatorProvider:
+    provider_id: text
+    lock_digest: text
+
+struct Publisher:
+    provider_id: text
+    lock_digest: text
+
+struct SolveBindingV1:
+    repository: text
+    namespace: text
+    domain: text
+    base_revision: text
+    left_revision: text
+    right_revision: text
+    base_model_id: text
+    left_model_id: text
+    right_model_id: text
+    expected_root: text
+    schema_revision: text
+    policy_revision: text
+    routing_revision: text
+    identity_map_revision: text
+    parser_lock_digest: text
+    solver_lock_digest: text
+    profile_digest: text
+    configuration_digest: text
+    operation_bundle_digest: text
+    authorization_scope: text
+
+struct SolveRequestV1:
+    request_id: text
+    binding: SolveBindingV1
+    logical_work_budget: i64
+    memory_budget: i64
+    cancelled: bool
+
+# Supplied separately by the trusted accepted-policy owner, never decoded from
+# a candidate. expected binds both accepted policy and approved immutable reads.
+struct SolverHostPolicyV1:
+    expected: SolveBindingV1
+    parser: ParserProvider
+    model: DomainModelProvider
+    solver: SolverProvider
+    validators: [ValidatorProvider]
+    publisher: Publisher
+
+struct RequiredCheckV1:
+    check_id: text
+    subject_digest: text
+    required_producer_id: text
+    required_producer_lock: text
+
+struct SolverConflictV1:
+    domain: text
+    code: text
+    subject: text
+    input_key: text
+
+struct SolverAccessV1:
+    domain: text
+    object_id: text
+    start_byte: i64
+    end_byte: i64
+    whole_object: bool
+
+struct SolverPlanAccessV1:
+    plan_id: text
+    reads: [SolverAccessV1]
+    writes: [SolverAccessV1]
+
+struct SolveResultV1:
+    request_id: text
+    status: text
+    candidate_root: text?
+    conflicts: [SolverConflictV1]
+    required_checks: [RequiredCheckV1]
+    input_binding: SolveBindingV1
+    input_binding_key: text
+    deterministic_result_key: text
+    logical_work: i64
+    retained_input_bytes: i64
+    complete_proposal: bool
+    validation_status: text
+    execution_status: text
+
+# Length framing avoids separator collisions in arbitrary identity strings.
+fn solver_frame_v1(value: text) -> text:
+    "{value.len()}:{value}"
+
+fn solver_binding_bytes_v1(binding: SolveBindingV1) -> text:
+    var encoded = "scv-solve-binding-v1"
+    for value in [binding.repository, binding.namespace, binding.domain, binding.base_revision, binding.left_revision, binding.right_revision, binding.base_model_id, binding.left_model_id, binding.right_model_id, binding.expected_root, binding.schema_revision, binding.policy_revision, binding.routing_revision, binding.identity_map_revision, binding.parser_lock_digest, binding.solver_lock_digest, binding.profile_digest, binding.configuration_digest, binding.operation_bundle_digest, binding.authorization_scope]:
+        encoded = encoded + solver_frame_v1(value)
+    encoded
+
+fn solver_result_key_v1(request: SolveRequestV1, policy: SolverHostPolicyV1) -> text:
+    # Exact input/declared-lock binding only. This is NOT execution attestation
+    # or authority to put a result in an admitted provider-result cache.
+    var encoded = solver_binding_bytes_v1(request.binding)
+    for value in [policy.parser.provider_id, policy.parser.lock_digest, policy.model.provider_id, policy.model.lock_digest, policy.solver.provider_id, policy.solver.lock_digest, policy.publisher.provider_id, policy.publisher.lock_digest]:
+        encoded = encoded + solver_frame_v1(value)
+    for validator in policy.validators:
+        encoded = encoded + solver_frame_v1(validator.provider_id) + solver_frame_v1(validator.lock_digest)
+    # Limits/cancellation are part of cached outcome identity, including refusals.
+    encoded = encoded + solver_frame_v1("{request.logical_work_budget}") + solver_frame_v1("{request.memory_budget}") + solver_frame_v1("{request.cancelled}")
+    sha256_text(encoded)
+
+export ParserProvider, DomainModelProvider, SolverProvider, ValidatorProvider, Publisher
+export SolveBindingV1, SolveRequestV1, SolverHostPolicyV1, RequiredCheckV1
+export SolverConflictV1, SolverAccessV1, SolverPlanAccessV1, SolveResultV1
+export solver_frame_v1, solver_binding_bytes_v1, solver_result_key_v1

@@ -1,0 +1,78 @@
+# Startup composition for the existing listener, not another server loop.
+# Every acquired owner is returned, including failed ready publication/readback.
+use std.io.tcp.TcpListener
+use std.sosix.entropy.sosix_random_hex
+use std.nogc_sync_mut.orchestration.host_service_domain_v3.HostServiceDomainV3
+use std.nogc_sync_mut.io.host_service_ready_reader_v1.*
+use os.apps.smux.runtime_connection_owner_v5.{SmuxRuntimeConnectionOwnerV5,
+    smux_runtime_connection_open_v5, smux_runtime_connection_auth_publication_v6,
+    smux_runtime_connection_auth_current_v6}
+
+pub struct SmuxAuthenticatedPreparedV6:
+    domain: Option<HostServiceDomainV3>
+    owner: Option<SmuxRuntimeConnectionOwnerV5> = nil
+    reader: Option<HostServiceReadyReaderV1> = nil
+    listener: Option<TcpListener> = nil
+    address: text = ""
+    error: text = ""
+
+# Called only after Host and listener/client cleanup. Advance normal bounded
+# close phases, but never retry an actual error or claim consumed-error success.
+pub fn smux_runtime_authenticated_reader_close_v6(reader: HostServiceReadyReaderV1) -> HostServiceReadyReaderCloseTurnV1:
+    var turn = host_service_ready_reader_close_v1(reader)
+    var steps = 1
+    while turn.owner.is_some() and not turn.completed and turn.error == "" and steps < 64:
+        turn = host_service_ready_reader_close_v1(turn.owner.unwrap())
+        steps = steps + 1
+    if turn.owner.is_some() and turn.error == "":
+        return HostServiceReadyReaderCloseTurnV1(turn.owner, false, "host-service-auth-reader-close-budget")
+    turn
+
+fn startup_failure_v6(original: SmuxAuthenticatedPreparedV6, reason: text) -> SmuxAuthenticatedPreparedV6:
+    var turn = original
+    if turn.error == "": turn.error = reason
+    turn
+
+pub fn smux_runtime_authenticated_prepare_v6(setup_path: text, setup_digest: text,
+        domain: HostServiceDomainV3, endpoint: text) -> SmuxAuthenticatedPreparedV6:
+    var turn = SmuxAuthenticatedPreparedV6(Some(domain))
+    if endpoint != "127.0.0.1:0": return startup_failure_v6(turn, "host-service-auth-loopback-auto-required")
+    val bound = TcpListener.bind(endpoint)
+    if bound.is_err(): return startup_failure_v6(turn, "host-service-auth-listen")
+    turn.listener = Some(bound.unwrap())
+    val address = bound.unwrap().local_addr()
+    val incarnation = sosix_random_hex(16)
+    if address.is_err() or incarnation.is_none(): return startup_failure_v6(turn, "host-service-auth-startup-identity")
+    if not address.unwrap().starts_with("127.0.0.1:"): return startup_failure_v6(turn, "host-service-auth-loopback")
+    turn.address = address.unwrap()
+    val opened = smux_runtime_connection_open_v5(turn.domain.unwrap(), incarnation.unwrap())
+    turn.domain = opened.retained
+    turn.owner = opened.owner
+    if opened.owner.is_none() or opened.error != "":
+        return startup_failure_v6(turn, "host-service-auth-host-open:" + opened.error)
+    var publication = smux_runtime_connection_auth_publication_v6(turn.owner.unwrap(), bound.unwrap(), setup_path, setup_digest)
+    turn.owner = Some(publication.owner)
+    var steps = 0
+    while not publication.completed and publication.error == "" and publication.cleanup_pending and steps < 64:
+        publication = smux_runtime_connection_auth_publication_v6(turn.owner.unwrap(), bound.unwrap(), setup_path, setup_digest)
+        turn.owner = Some(publication.owner)
+        steps = steps + 1
+    if not publication.completed or publication.error != "" or publication.cleanup_pending:
+        return startup_failure_v6(turn, "host-service-auth-ready-publication:" + publication.error)
+    val reader = host_service_ready_reader_open_v1(setup_path, setup_digest,
+        publication.deployment_root, publication.authority_digest)
+    turn.reader = reader.owner
+    if not reader.ready or reader.owner.is_none() or reader.error != "":
+        return startup_failure_v6(turn, "host-service-auth-ready-read:" + reader.error)
+    val ready_digest = host_service_ready_reader_ready_digest_v1(reader.owner.unwrap())
+    val lease_digest = host_service_ready_reader_host_lease_digest_v1(reader.owner.unwrap())
+    val actual_endpoint = host_service_ready_reader_endpoint_v1(reader.owner.unwrap())
+    val actual_incarnation = host_service_ready_reader_incarnation_v1(reader.owner.unwrap())
+    if ready_digest.is_err() or lease_digest.is_err() or actual_endpoint.is_err() or actual_incarnation.is_err():
+        return startup_failure_v6(turn, "host-service-auth-ready-current")
+    if (ready_digest.unwrap() != publication.ready_digest or lease_digest.unwrap() != publication.lease_digest or
+            actual_endpoint.unwrap() != turn.address or actual_incarnation.unwrap() != incarnation.unwrap()):
+        return startup_failure_v6(turn, "host-service-auth-ready-substitution")
+    val current = smux_runtime_connection_auth_current_v6(turn.owner.unwrap())
+    if current.is_err(): return startup_failure_v6(turn, current.unwrap_err())
+    turn

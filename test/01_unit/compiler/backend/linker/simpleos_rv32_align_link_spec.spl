@@ -1,0 +1,58 @@
+# Real internal SimpleOS user link: RV32 ALIGN must use ELF32 table layouts.
+# @cover src/compiler/70.backend/linker/elf/elf_static_link.spl
+# @cover src/compiler/70.backend/linker/elf/riscv_align.spl
+use compiler.backend.linker.linker_wrapper.{link_simpleos_internal, NativeLinkConfig}
+use std.io_runtime.{file_read_bytes}
+
+val RV32_ALIGN_FIX: text = "test/fixtures/linker/elf/simpleos32"
+
+fn rv32_align_u32(bytes: [u8], offset: i64) -> i64:
+    (bytes[offset] as i64) | ((bytes[offset + 1] as i64) << 8) |
+        ((bytes[offset + 2] as i64) << 16) | ((bytes[offset + 3] as i64) << 24)
+
+fn rv32_align_section(bytes: [u8], name: text) -> i64:
+    val shoff = rv32_align_u32(bytes, 32)
+    val count = (bytes[48] as i64) | ((bytes[49] as i64) << 8)
+    val stridx = (bytes[50] as i64) | ((bytes[51] as i64) << 8)
+    val strings = rv32_align_u32(bytes, shoff + stridx * 40 + 16)
+    var i: i64 = 1
+    while i < count:
+        val header = shoff + i * 40
+        var at = strings + rv32_align_u32(bytes, header)
+        var found = ""
+        while bytes[at] != 0:
+            found = found + (bytes[at] as i64).to_char()
+            at = at + 1
+        if found == name: return header
+        i = i + 1
+    -1
+
+describe "SimpleOS RV32 static internal user link with ALIGN":
+    it "normalizes code padding, calls and absolute data references in ELF32":
+        var cfg = NativeLinkConfig.default()
+        cfg.runtime_path = "none"
+        cfg.extra_flags = ["-T", "{RV32_ALIGN_FIX}/simpleos_user32.ld", "-nostdlib", "-static"]
+        val output = "build/simpleos_rv32_align_user.elf"
+        val result = link_simpleos_internal(["{RV32_ALIGN_FIX}/riscv32_align.o"], output, "simpleos-riscv32", cfg)
+        expect(result.is_ok()).to_equal(true)
+        val bytes = file_read_bytes(output)
+        expect(bytes[4] as i64).to_equal(1)
+        expect(bytes[18] as i64).to_equal(243)
+        expect(rv32_align_u32(bytes, 36)).to_equal(1)
+        val text = rv32_align_section(bytes, ".text")
+        val data = rv32_align_section(bytes, ".data")
+        expect(text).to_be_greater_than(0)
+        expect(data).to_be_greater_than(0)
+        val text_address = rv32_align_u32(bytes, text + 12)
+        val text_offset = rv32_align_u32(bytes, text + 16)
+        val data_offset = rv32_align_u32(bytes, data + 16)
+        expect(rv32_align_u32(bytes, text + 20)).to_equal(34)
+        expect(rv32_align_u32(bytes, 24)).to_equal(text_address)
+        # LLD --no-relax oracle: ALIGN moves targets 24->16 and 58->32;
+        # the CALL remains unrelaxed and explicit symbol addends stay +24.
+        expect(rv32_align_u32(bytes, text_offset)).to_equal(0x00000097)
+        expect(rv32_align_u32(bytes, text_offset + 4)).to_equal(0x010080e7)
+        expect(rv32_align_u32(bytes, data_offset)).to_equal(text_address + 16)
+        expect(rv32_align_u32(bytes, data_offset + 4)).to_equal(text_address + 32)
+        expect(rv32_align_u32(bytes, data_offset + 8)).to_equal(text_address + 24)
+        expect(rv32_align_u32(bytes, data_offset + 12)).to_equal(text_address + 24)

@@ -12,33 +12,28 @@ use std.mcdc.dynamic_probe.{mcdc_dynamic_probe_controller_load_builtin_current_o
 use std.test_runner.test_runner_mcdc_report.{test_runner_result_with_mcdc_evidence}
 use std.test_runner.test_runner_files.{strip_ansi, read_file_content}
 use std.nogc_sync_mut.io.file_ops.{file_exists, file_write, file_delete, file_size, file_read_regular_no_follow_bounded}
-use std.nogc_sync_mut.io.process_ops.{process_bounded_timed_out, process_run_bounded}
+use std.nogc_sync_mut.io.file_ops.{file_create_exclusive}
+use nogc_sync_mut.io.crypto_sffi.{random_hex as coverage_wrapper_random_hex}
+use std.common.test_runner.wrapper_filename.{coverage_wrapper_filename}
+use std.nogc_sync_mut.io.process_ops.{process_bounded_timed_out, process_run_bounded, process_last_child_peak_rss_kib}
 use std.nogc_sync_mut.io.env_ops.{env_get}
+use std.nogc_sync_mut.sosix.test_process.{sosix_test_temp_dir}
 use std.common.traceability.case_events.{collect_trace_case_events, collect_trace_event_documents, decode_trace_case_events}
 use std.io_runtime.{getpid, host_os}
 use std.sffi.cli_args.{cli_get_args}
 use std.string_core.{char_code}
 use lib.common.env_access.model.{env_canonical_evidence_artifact_path}
 use std.nogc_sync_mut.sffi.io.{path_absolute}
+use std.nogc_sync_mut.io.darwin_image_owner.{darwin_image_path}
 
 # std::fs::canonicalize — resolves a symlink chain in-process, same alias
 # std.spec.engine_probe uses for the same /proc/self/exe resolution.
 
 fn _tp_get_temp_dir() -> text:
-    val tmpdir = env_get("TMPDIR")
-    if tmpdir != "" and tmpdir != nil:
-        return tmpdir
-    val tmp = env_get("TMP")
-    if tmp != "" and tmp != nil:
-        return tmp
-    val temp = env_get("TEMP")
-    if temp != "" and temp != nil:
-        return temp
-    val os_env = env_get("OS")
-    if os_env != "" and os_env != nil:
-        if os_env.lower().contains("windows"):
-            return "C:/Windows/Temp"
-    "/tmp"
+    # ONE temp root for the runner: the SOSIX owner resolves it (pwd -P on
+    # POSIX, so macOS /tmp -> /private/tmp; TEMP on Windows, 8.3 names still
+    # unresolved -- tracked as pending).
+    sosix_test_temp_dir()
 
 # =========================================================================
 # Binary Location Discovery
@@ -155,6 +150,15 @@ fn _self_exe_via_pid_query() -> text:
         if win_code != 0 or win_path == "" or win_path.ends_with(".spl") or not file_exists(win_path):
             return ""
         return win_path
+    if host_os() == "macos":
+        match darwin_image_path():
+            case Ok(path):
+                if path != "" and not path.ends_with(".spl") and file_exists(path):
+                    val resolved = path_absolute(path) ?? ""
+                    if resolved != "" and not resolved.ends_with(".spl") and file_exists(resolved):
+                        return resolved
+            case Err(_):
+                pass
     val (stdout, _stderr, code) = process_run_bounded("ps", ["-o", "comm=", "-p", "{getpid()}"], 2000, 65536)
     if code != 0:
         return ""
@@ -177,13 +181,13 @@ fn explicit_simple_binary_from_env() -> text:
                 return configured + ".exe"
     ""
 
-fn argv0_simple_binary(argv0: text) -> text:
+pub fn argv0_simple_binary(argv0: text) -> text:
     """argv[0] only when it looks like the compiled binary and exists; else ""."""
     if argv0 != "" and (argv0.ends_with("/simple") or argv0.ends_with("simple.exe")) and file_exists(argv0):
         return argv0
     ""
 
-fn explicit_binary_before_argv0(explicit: text, argv0_binary: text) -> text:
+pub fn explicit_binary_before_argv0(explicit: text, argv0_binary: text) -> text:
     """Precedence between the operator-named binary and argv[0]: explicit wins.
 
     Pinned by test/01_unit/app/test_runner_new/explicit_binary_precedence_spec.spl."""
@@ -191,7 +195,41 @@ fn explicit_binary_before_argv0(explicit: text, argv0_binary: text) -> text:
         return explicit
     argv0_binary
 
+pub fn shell_safe_child_binary_path(p: text) -> text:
+    """Publish SIMPLE_TEST_BINARY in a form a POSIX shell can execute.
+
+    On Windows, `rt_path_absolute` (via `find_simple_binary`) answers the
+    verbatim `\\\\?\\C:\\...` extended-length form with backslash separators.
+    Many specs forward SIMPLE_TEST_BINARY verbatim into
+    `process_run("sh", ["-c", "... " + bin + " run ..."])` (see
+    test/01_unit/compiler/interpreter/dict_class_value_identity_spec.spl and
+    its siblings). An unquoted backslash inside a `sh -c` command string is an
+    escape character, so `\\?\D:\wk-f1\bin\simple.exe` is silently corrupted
+    into `?D:wk-f1binsimple.exe` -- "command not found", read back by the spec
+    as an empty probe result rather than a real failure. Strip the prefix and
+    flip separators, the same idiom already used for this exact Windows
+    spelling in storage_roots/resolver.spl's `_strip_extended_length_prefix`
+    and compiler_entrypoint/admission.spl -- both docstrings on that path type
+    give the contract this rewrite relies on. A no-op on POSIX paths.
+    """
+    var out = p.replace("\\", "/")
+    if out.starts_with("//?/UNC/"):
+        return "//" + out.substring(8)
+    if out.starts_with("//?/"):
+        return out.substring(4)
+    out
+
 fn find_simple_binary() -> text:
+    # An explicit SIMPLE_BINARY/SIMPLE_RUNTIME wins over the memo as well: the
+    # directory lane sets SIMPLE_BINARY to the --compiler=phase2 full CLI after
+    # argument parsing, and a value memoised before that point (startup
+    # helpers call this too) made the comment-doctest children spawn the
+    # invoking binary while the spec children used the selected one
+    # (measured 2026-10-30: 0 phase2 invocations for --spl-doctest).
+    val explicit_now = explicit_simple_binary_from_env()
+    if explicit_now != "":
+        _cached_binary_path = explicit_now
+        return explicit_now
     if _cached_binary_path != "":
         return _cached_binary_path
 
@@ -263,6 +301,10 @@ fn find_simple_binary() -> text:
     # Fallback: try multiple known locations.
     val candidates = [
         "bin/simple",
+        "bin/simple.exe",
+        "./bin/simple.exe",
+        "bin/release/x86_64-pc-windows-msvc/simple.exe",
+        "bin/release/windows-x86_64/simple.exe",
         "./bin/simple",
         "bin/release/linux-x86_64/simple",
         "./bin/release/linux-x86_64/simple",
@@ -334,6 +376,37 @@ fn extract_error_message(output: text) -> text:
     result
 
 val SCENARIO_OMISSION_PREFIX = "__SIMPLE_SCENARIO_OMISSION_V1__|"
+
+# Examples that could not run because their ENVIRONMENT is missing. Two
+# authored forms are recognised, both from the child's own per-example output:
+#   * `pending("BLOCKED: <reason>")`  -> the spec library prints
+#     `it BLOCKED: <reason> ... pending`;
+#   * a failed example whose first message line is `precondition: <reason>`
+#     (an `Err("precondition: ...")` surfaced by the example) -> `✗ <name>`
+#     followed by that line.
+# Returns (blocked_pending, blocked_failed, first_reason). A blocked example is
+# never a pass; callers subtract `blocked_failed` from the failure tally and
+# report the file as BLOCKED only when no OTHER example failed.
+# Bug: llm_caret_env_gated_specs_no_blocked_outcome_2026-11-12.
+fn parse_blocked_examples(output: text) -> (i64, i64, text):
+    var blocked_pending = 0
+    var blocked_failed = 0
+    var reason = ""
+    var after_failure = false
+    for raw_line in output.split("\n"):
+        val clean = strip_ansi(raw_line).trim()
+        if clean.starts_with("it BLOCKED:") and clean.ends_with("... pending"):
+            blocked_pending = blocked_pending + 1
+            if reason == "":
+                reason = clean[11:].replace("... pending", "").trim()
+            after_failure = false
+            continue
+        if after_failure and clean.starts_with("precondition:"):
+            blocked_failed = blocked_failed + 1
+            if reason == "":
+                reason = clean
+        after_failure = clean.starts_with("✗ ")
+    (blocked_pending, blocked_failed, reason)
 
 fn parse_test_omission_evidence(output: text) -> ([TestOmissionEvidence], text):
     var evidence: [TestOmissionEvidence] = []
@@ -533,14 +606,23 @@ fn parse_test_output(output: text) -> (i64, i64, i64, i64):
         return (summary_passed, summary_failed, skipped, pending)
     (total_passed, total_failed, total_skipped, total_pending)
 
+# The whole value must be digits equal to 0 ("0", "00"); "0x" or "0 of 3" is
+# not an explicit zero result.
+fn _summary_value_is_zero(value: text) -> bool:
+    val v = value.trim()
+    v != "" and digits_to_i64(v) == 0
+
 fn output_has_zero_pass_summary(output: text) -> bool:
     var saw_passed_zero = false
     var saw_failed_zero = false
     for raw_line in output.split("\n"):
         val clean = strip_ansi(raw_line).trim()
-        if clean == "Passed: 0":
+        # std.spec's print_summary column-aligns its counts ("Passed:  0",
+        # "Pending: 1"), so match the field and its value, not one exact
+        # spacing; an exact "Passed: 0" compare refused every pending-only file.
+        if clean.starts_with("Passed:") and _summary_value_is_zero(clean[7:]):
             saw_passed_zero = true
-        elif clean == "Failed: 0":
+        elif clean.starts_with("Failed:") and _summary_value_is_zero(clean[7:]):
             saw_failed_zero = true
     saw_passed_zero and saw_failed_zero
 
@@ -658,6 +740,9 @@ fn build_child_args(file_path: text, options: TestOptions) -> [text]:
         val backend = if options.native_backend != "": options.native_backend else: "llvm"
         var native_args = ["test", file_path, "--native-backend=" + backend,
             "--sequential", "--no-cache", "--no-db", "--no-session-daemon", "--assert-ran"]
+        if options.library_mode != "":
+            native_args.push("--library-mode")
+            native_args.push(options.library_mode)
         for root in options.native_source_roots:
             native_args.push("--native-source")
             native_args.push(root)
@@ -861,6 +946,18 @@ fn _make_result_from_output_core(file_path: text, stdout: text, stderr: text, ex
             error: "{status}: {first.reason}; prerequisite={first.prerequisite}; owner={first.owner}; tracking={first.tracking_id}; resume={first.resume_command}",
             timed_out: false, cached: false, blocked: blocked,
             unsupported: unsupported, omission_evidence: omissions), combined)
+
+    # Environment-gated examples (`pending("BLOCKED: ...")`,
+    # `Err("precondition: ...")`): counted BLOCKED, never passed, never OK, and
+    # only when nothing else failed -- a real failure keeps the file ERROR.
+    val (blocked_pending, blocked_failed, blocked_reason) = parse_blocked_examples(combined)
+    if blocked_pending + blocked_failed > 0 and failed - blocked_failed <= 0:
+        val shown_pending = if pending >= blocked_pending: pending - blocked_pending else: 0
+        return TestFileResult(
+            path: file_path, passed: passed, failed: 0, skipped: skipped,
+            pending: shown_pending, duration_ms: duration_ms, setup_ms: 0,
+            error: "BLOCKED: {blocked_reason}", timed_out: false, cached: false,
+            blocked: blocked_pending + blocked_failed)
 
     if passed == 0 and failed == 0:
         if exit_code == 0:
@@ -1077,8 +1174,8 @@ pub fn vacuous_spec_baselined(path: text) -> bool:
             return true
     false
 
-fn _make_result_from_structured_evidence_core(file_path: text, stdout: text, stderr: text, exit_code: i32, duration_ms: i64, timeout_secs: i64, evidence_path: text) -> TestFileResult:
-    if evidence_path == "" or env_get("SIMPLE_TEST_ASSERT_RAN") != "1":
+fn _make_result_from_structured_evidence_core(file_path: text, stdout: text, stderr: text, exit_code: i32, duration_ms: i64, timeout_secs: i64, evidence_path: text, require_evidence: bool = false) -> TestFileResult:
+    if evidence_path == "" or (not require_evidence and env_get("SIMPLE_TEST_ASSERT_RAN") != "1"):
         return make_result_from_output(file_path, stdout, stderr, exit_code, duration_ms, timeout_secs)
     # -1 (timeout / spawn failure) and every 128+signo death (incl. a
     # shell-propagated 143/144) need the classification above, not the generic
@@ -1123,11 +1220,30 @@ fn _make_result_from_structured_evidence_core(file_path: text, stdout: text, std
             timed_out: false, cached: false, blocked: blocked,
             unsupported: unsupported, omission_evidence: omissions), combined)
     val (passed, evidence_failed, valid) = read_structured_test_evidence(evidence_path)
+    if valid == 0:
+        var process_detail = ""
+        if exit_code != 0:
+            val extracted_process_detail = extract_error_message(combined)
+            val detail = if extracted_process_detail != "": "{extracted_process_detail} (process exit {exit_code})" else: "Process exited with code {exit_code}"
+            process_detail = " ({detail})"
+        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: skipped, pending: pending,
+            duration_ms: duration_ms, setup_ms: 0,
+            error: "test-runner: structured BDD evidence unavailable{process_detail}", timed_out: false, cached: false)
+    if passed + evidence_failed == 0:
+        val process_detail = if exit_code != 0: " (Process exited with code {exit_code})" else: ""
+        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: skipped, pending: pending,
+            duration_ms: duration_ms, setup_ms: 0,
+            error: "--assert-ran: no BDD examples executed{process_detail}", timed_out: false, cached: false)
     if exit_code != 0:
-        val failed = if evidence_failed > 0: evidence_failed else: 1
-        return TestFileResult(path: file_path, passed: passed, failed: failed, skipped: skipped, pending: pending, duration_ms: duration_ms, setup_ms: 0, error: "Process exited with code {exit_code}", timed_out: false, cached: false)
-    if valid == 0 or passed + evidence_failed == 0:
-        return TestFileResult(path: file_path, passed: 0, failed: 1, skipped: skipped, pending: pending, duration_ms: duration_ms, setup_ms: 0, error: "--assert-ran: no BDD examples executed", timed_out: false, cached: false)
+        if evidence_failed > 0:
+            val assertion_detail = extract_error_message(combined)
+            val detail = if assertion_detail != "": assertion_detail else: "assertion failed"
+            val error = "test-runner: authenticated BDD assertion failure: {detail} (process exit {exit_code})"
+            return TestFileResult(path: file_path, passed: passed, failed: evidence_failed, skipped: skipped, pending: pending, duration_ms: duration_ms, setup_ms: 0, error: error, timed_out: false, cached: false)
+        if passed > 0:
+            return TestFileResult(path: file_path, passed: passed, failed: 0, skipped: skipped, pending: pending,
+                duration_ms: duration_ms, setup_ms: 0,
+                error: "test-runner: BDD process failure after authenticated pass (exit {exit_code})", timed_out: false, cached: false)
     # Zero-expectation gate: examples ran and none failed, but the child's own
     # tally says no expect()/assert was ever evaluated. WARN-FIRST: the
     # vacuity line is printed; the result becomes VACUOUS (a failure class)
@@ -1138,15 +1254,19 @@ fn _make_result_from_structured_evidence_core(file_path: text, stdout: text, std
         if env_get("SIMPLE_TEST_VACUOUS_STRICT") == "1" and not vacuous_spec_baselined(file_path):
             return TestFileResult(path: file_path, passed: passed, failed: 1, skipped: skipped, pending: pending, duration_ms: duration_ms, setup_ms: 0, error: vacuous_result_error(passed), timed_out: false, cached: false)
         print "warning: test-runner: VACUOUS: {passed} example(s) executed, 0 expectations evaluated (advisory; SIMPLE_TEST_VACUOUS_STRICT=1 fails it)"
-    val error = if evidence_failed > 0: "test-runner: spec failed" else: ""
+    var error = ""
+    if evidence_failed > 0:
+        val assertion_detail = extract_error_message(combined)
+        val detail = if assertion_detail != "": assertion_detail else: "assertion failed"
+        error = "test-runner: authenticated BDD assertion failure: {detail}"
     test_runner_result_with_mcdc_evidence(
-        TestFileResult(path: file_path, passed: passed, failed: evidence_failed, skipped: skipped, pending: pending, duration_ms: duration_ms, setup_ms: 0, error: error, timed_out: false, cached: false),
+        TestFileResult(path: file_path, passed: passed, failed: evidence_failed, skipped: skipped, pending: pending, duration_ms: duration_ms, peak_rss_kib: process_last_child_peak_rss_kib(), setup_ms: 0, error: error, timed_out: false, cached: false),
         combined
     )
 
-pub fn make_result_from_structured_evidence(file_path: text, stdout: text, stderr: text, exit_code: i32, duration_ms: i64, timeout_secs: i64, evidence_path: text) -> TestFileResult:
+pub fn make_result_from_structured_evidence(file_path: text, stdout: text, stderr: text, exit_code: i32, duration_ms: i64, timeout_secs: i64, evidence_path: text, require_evidence: bool = false) -> TestFileResult:
     _attach_structured_trace_case_events(
-        _make_result_from_structured_evidence_core(file_path, stdout, stderr, exit_code, duration_ms, timeout_secs, evidence_path),
+        _make_result_from_structured_evidence_core(file_path, stdout, stderr, exit_code, duration_ms, timeout_secs, evidence_path, require_evidence),
         stdout, stderr, evidence_path)
 
 # =========================================================================
@@ -1159,26 +1279,29 @@ fn coverage_wrapper_suffix(file_path: text) -> text:
     else:
         ".spl"
 
-fn build_coverage_wrapper(file_path: text, options: TestOptions) -> (text, text):
+fn build_coverage_wrapper_checked(file_path: text, options: TestOptions, source_override: text = "") -> Result<(text, text), text>:
+    if file_path == "": return Err("coverage wrapper source path is empty")
     val configured_mcdc = env_get("SIMPLE_MCDC_MODE") ?? ""
     val mcdc_enabled = configured_mcdc == "on" or
         configured_mcdc == "dynamic"
     if not options.coverage and not mcdc_enabled:
-        return (file_path, "")
-    val content = read_file_content(file_path)
+        return Ok((file_path, ""))
+    val content = if source_override != "": source_override else: read_file_content(file_path)
     if content == "":
-        return (file_path, "")
+        return Ok((file_path, ""))
 
-    # Windows paths arrive with backslashes; leaving them in `base` produced
-    # mixed-separator temp subpaths whose parent dirs are never created, so
-    # every spec degraded to plain interpreter (os error 3). Flatten both.
-    var base = file_path.replace("/", "_").replace("\\", "_")
-    base = base.replace(".spl", "")
-    val tmp_path = _tp_get_temp_dir() + "/simple_cov_" + getpid().to_text() + "_" + base + coverage_wrapper_suffix(file_path)
+    # Full source paths can exceed NAME_MAX after flattening. This is an
+    # invocation artifact: PID + random nonce is sufficient for file ownership.
+    # Keep the reserved prefix and spec suffix for existing readers. AOT source
+    # binding remains in staging; legacy coverage attribution is unchanged.
+    val filename = coverage_wrapper_filename(getpid(), coverage_wrapper_random_hex(16), coverage_wrapper_suffix(file_path) == "_spec.spl")
+    if filename.is_err(): return Err(filename.unwrap_err())
+    val tmp_path = _tp_get_temp_dir() + "/" + filename.unwrap()
 
     var lines: [text] = []
     if mcdc_enabled:
-        lines.push("use std.io.{{env_get, file_is_regular_no_follow, file_read_text_bounded}}")
+        lines.push("use std.nogc_sync_mut.io.env_ops.{{env_get}}")
+        lines.push("use std.nogc_sync_mut.io.file_ops.{{file_is_regular_no_follow, file_read_regular_no_follow_bounded}}")
         lines.push("use std.sffi.cli.{{cli_get_args}}")
         lines.push("use std.common.convert.{{try_parse_int}}")
         lines.push("use std.common.crypto.sha256.{{sha256_text}}")
@@ -1199,7 +1322,9 @@ fn build_coverage_wrapper(file_path: text, options: TestOptions) -> (text, text)
         lines.push("val __simple_mcdc_manifest_length = try_parse_int(__simple_mcdc_manifest_arg(\"--simple-mcdc-manifest-length=\"))")
         lines.push("val __simple_mcdc_manifest_sha256 = __simple_mcdc_manifest_arg(\"--simple-mcdc-manifest-sha256=\")")
         lines.push("if __simple_mcdc_manifest_path == \"\" or __simple_mcdc_manifest_length == nil or __simple_mcdc_manifest_length.unwrap() < 0 or __simple_mcdc_manifest_length.unwrap() > 67108864 or __simple_mcdc_manifest_sha256.len() != 64 or not file_is_regular_no_follow(__simple_mcdc_manifest_path): panic(\"test-runner: invalid MC/DC manifest contract\")")
-        lines.push("val __simple_mcdc_manifest = file_read_text_bounded(__simple_mcdc_manifest_path, __simple_mcdc_manifest_length.unwrap()) ?? \"\"")
+        lines.push("val __simple_mcdc_manifest = match file_read_regular_no_follow_bounded(__simple_mcdc_manifest_path, __simple_mcdc_manifest_length.unwrap()):")
+        lines.push("    case Ok(value): value")
+        lines.push("    case Err(_): panic(\"test-runner: MC/DC manifest read refused\")")
         lines.push("if __simple_mcdc_manifest.len() != __simple_mcdc_manifest_length.unwrap() or sha256_text(__simple_mcdc_manifest) != __simple_mcdc_manifest_sha256: panic(\"test-runner: MC/DC manifest integrity mismatch\")")
         lines.push("")
         lines.push("val __simple_mcdc_mode = if (env_get(\"SIMPLE_MCDC_MODE\") ?? \"\") == \"dynamic\": McdcMode.DynamicAspect else: McdcMode.StaticOn")
@@ -1236,8 +1361,15 @@ fn build_coverage_wrapper(file_path: text, options: TestOptions) -> (text, text)
         lines.push("__simple_mcdc_dump()")
 
     val wrapped = lines.join("\n")
-    file_write(tmp_path, wrapped)
-    (tmp_path, tmp_path)
+    if not file_create_exclusive(tmp_path, wrapped): return Err("coverage wrapper exclusive create refused: " + tmp_path)
+    Ok((tmp_path, tmp_path))
+
+fn build_coverage_wrapper(file_path: text, options: TestOptions, source_override: text = "") -> (text, text):
+    val prepared = build_coverage_wrapper_checked(file_path, options, source_override)
+    if prepared.is_err():
+        print "test-runner: " + prepared.unwrap_err()
+        return ("", "")
+    prepared.unwrap()
 
 fn extract_coverage_sdn(output: text) -> text:
     var in_block = false
@@ -1322,11 +1454,12 @@ export extract_compiler_coverage_manifest_sdn, strip_compiler_coverage_manifest_
 export extract_compiler_mcdc_obligation_manifest, mcdc_obligation_manifest_absent
 export find_simple_new_binary, find_runtime_lib_dir, find_simple_binary
 export explicit_simple_binary_from_env, argv0_simple_binary, explicit_binary_before_argv0
-export extract_error_message, parse_test_output, parse_test_omission_evidence
+export extract_error_message, parse_test_output, parse_test_omission_evidence, parse_blocked_examples
 export extract_number_before, extract_number_after_colon
 export build_child_args, make_result_from_output, read_structured_test_evidence, make_result_from_structured_evidence
 export read_structured_test_expectations, vacuous_result_error, vacuous_spec_baselined, spec_source_has_raw_assert
 export hosted_lane_child_error, apply_hosted_lane_child_error
 export coverage_wrapper_suffix, build_coverage_wrapper
+export build_coverage_wrapper_checked
 export extract_coverage_sdn, strip_coverage_blocks
 export list_tests_static, extract_static_test_name

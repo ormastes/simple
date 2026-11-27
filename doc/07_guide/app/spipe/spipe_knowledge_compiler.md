@@ -1548,3 +1548,57 @@ authorization-sensitive result is private/no-store, including conditional
 requests; a `304` must never reveal that a hidden resource exists.  If an
 adapter is unsupported, it is absent from capability advertisement rather than
 emulated by raw paths, a Node filesystem fallback, or a weaker cache policy.
+
+
+## Goal skill routing: `goal skills|start|status|resume` (verified 2026-11-16)
+
+Selects the task skill(s) for a goal from the `task_skills` table in
+`doc/00_llm_process/knowledge_registry.sdn` (pure selector
+`src/lib/common/llm/task_skill_selector.spl`). Run from the repo root:
+
+```bash
+bin/simple run src/app/spipe_process_harness/main.spl goal skills --task <class> [--provider <p>] [--registry <path>]
+bin/simple run src/app/spipe_process_harness/main.spl goal start  --goal <id> --task <class> --provider <p>
+bin/simple run src/app/spipe_process_harness/main.spl goal status --goal <id>
+bin/simple run src/app/spipe_process_harness/main.spl goal resume --goal <id>
+```
+
+`skills` writes nothing. `start` writes `.spipe/<id>/skill_selection.sdn` only
+for a `selected` outcome (never commit `.spipe/` output). `resume` compares the
+stored registry digest with the current registry's SHA-256.
+
+Exit codes: 0 selected / fresh, 1 rejected (`error=<kind>:<subject>`), 3 ask
+(unknown provider: candidates listed, nothing written), 4 stale, 5 receipt
+missing, 6 receipt unreadable. Mandatory complete-read receipts and goal-change
+re-evaluation are not implemented.
+
+```text
+$ ... goal skills --task impl --provider claude
+schema=GoalSkillSelectionV1
+registry_version=2
+registry_digest=sha256:1baaf50e...22ed
+provider=claude
+task_class=impl
+outcome=selected
+primary=impl|.claude/skills/impl.md|version=1
+dependency=verify|.claude/skills/verify.md|version=1                (exit 0)
+
+$ ... goal skills --task impl          # no provider: never a silent default
+provider=unknown
+outcome=fallback-ask
+
+$ ... goal skills --task bogus --provider claude
+error=unknown-task-class:bogus                                      (exit 1)
+
+$ ... goal start --goal g --task impl --provider claude
+...
+receipt=.spipe/g/skill_selection.sdn                                (exit 0)
+$ ... goal resume --goal g
+resume=fresh                                                        (exit 0)
+$ ... goal start --goal g2 --task impl --provider zzz
+fallback_candidate=impl|.agents/skills/impl/SKILL.md|version=1      (exit 3)
+```
+
+Exit codes for the no-provider `skills` case and for `status` after `start`
+were not all captured; the `start` outputs above were produced in a scratch
+directory containing a copy of the registry.

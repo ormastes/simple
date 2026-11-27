@@ -1,0 +1,68 @@
+# Single-owner editor types.
+#
+# app.editor.editor_ctrl_core glob-imports std.editor.buffer.buffer.*,
+# std.editor.common.types.*, app.editor.editor_controller_types.* and
+# app.editor.editor_controller.*. When two of those modules each declared their
+# own EditCommand / EditResult / EditorAction, Phase 4 HIR lowering of the full
+# CLI closure failed with "imported composite `EditCommand` has a mismatched
+# qualified declaration", and the seed interpreter silently picked one shape by
+# import order. Each type now has exactly one owner.
+use std.spec
+use std.editor.buffer.buffer.*
+use std.editor.common.types.*
+use app.editor.editor_controller_types.*
+use app.editor.commands.{editor_cmd_with}
+use std.io_runtime.{read_file_text}
+
+fn _src(path: text) -> text:
+    read_file_text(path)
+
+describe "editor types have one owner":
+    it "declares EditCommand/EditResult and their constructors only in common.types":
+        val buffer_src = _src("src/lib/editor/buffer/buffer.spl")
+        expect(buffer_src.contains("class EditorBuffer:")).to_equal(true)
+        expect(buffer_src.contains("struct EditCommand:")).to_equal(false)
+        expect(buffer_src.contains("struct EditResult:")).to_equal(false)
+        expect(buffer_src.contains("fn edit_ok(")).to_equal(false)
+        expect(buffer_src.contains("fn edit_fail(")).to_equal(false)
+        val types_src = _src("src/lib/editor/00.common/types.spl")
+        expect(types_src.contains("struct EditCommand:")).to_equal(true)
+        expect(types_src.contains("struct EditResult:")).to_equal(true)
+
+    it "declares controller result structs only in editor_controller_types":
+        val ctrl_src = _src("src/app/editor/editor_controller.spl")
+        expect(ctrl_src.contains("class EditorController:")).to_equal(true)
+        expect(ctrl_src.contains("struct EditorAction:")).to_equal(false)
+        expect(ctrl_src.contains("struct NormalKeyResult:")).to_equal(false)
+        expect(ctrl_src.contains("struct InsertKeyResult:")).to_equal(false)
+        expect(ctrl_src.contains("struct CommandKeyResult:")).to_equal(false)
+        expect(ctrl_src.contains("struct EditorAppliedCodeAction:")).to_equal(false)
+        expect(ctrl_src.contains("struct EditorPropertyPayload:")).to_equal(false)
+        expect(ctrl_src.contains("struct EditorVaultPropertyPayload:")).to_equal(false)
+        expect(ctrl_src.contains("struct EditorLocation:")).to_equal(false)
+
+    it "keeps edit_ok / edit_fail / edit_quit values through both glob imports":
+        val ok = edit_ok("saved")
+        expect(ok.ok).to_equal(true)
+        expect(ok.message).to_equal("saved")
+        expect(ok.quit).to_equal(false)
+        val bad = edit_fail("save failed")
+        expect(bad.ok).to_equal(false)
+        expect(bad.message).to_equal("save failed")
+        expect(bad.quit).to_equal(false)
+        val q = edit_quit()
+        expect(q.ok).to_equal(true)
+        expect(q.quit).to_equal(true)
+
+    it "builds the canonical EditCommand and EditResult shapes":
+        val cmd = editor_cmd_with("open", "a.md")
+        expect(cmd.name).to_equal("open")
+        expect(cmd.payload).to_equal("a.md")
+        expect(cmd.count).to_equal(1)
+        val direct = EditCommand(name: "save", payload: "", count: 2)
+        expect(direct.count).to_equal(2)
+        val r = EditResult(ok: true, message: "m", quit: false)
+        expect(r.message).to_equal("m")
+        val action = EditorAction(redraw: true, quit: false, status_msg: "s")
+        expect(action.redraw).to_equal(true)
+        expect(action.status_msg).to_equal("s")

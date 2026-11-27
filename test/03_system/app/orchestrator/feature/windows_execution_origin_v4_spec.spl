@@ -1,0 +1,120 @@
+# AUTHORED_NOT_RUN. Explicit scripted origin tests plus a native Windows
+# pre-launch-only requirement. No child launch, fault or cleanup qualification.
+# @req REQ-WINDOWS-ORIGIN-001 REQ-WINDOWS-ORIGIN-002 REQ-WINDOWS-ORIGIN-003
+use std.spec.*
+use test.fixtures.orchestration.simple_container_windows_adapter_fixture_v2.*
+use test.fixtures.orchestration.host_execution_windows_progress_v4.*
+use std.nogc_async_mut.container.providers.windows.docker_runtime_v1.{WindowsDockerRuntimeProviderV1,
+    windows_docker_progress_release_v4, windows_docker_progress_cancel_v4}
+use std.nogc_sync_mut.io.windows_command_domain_v4.windows_command_origin_matches_v4
+use std.nogc_sync_mut.orchestration.host_authorized_execution_v2.*
+use std.nogc_sync_mut.orchestration.host_capacity_owner_v1.host_capacity_owner_close_v1
+use std.common.contracts.orchestration.host_execute_request_v2.host_execute_request_encode_v2
+
+describe "Windows execution origin and provider domain isolation":
+    after_each:
+        host_windows_progress_sweep_v4()
+
+    it "refuses scripted progress in a native provider before registry consumption":
+        step("Create genuine scripted prepare progress without executing its first command")
+        val policy = windows_adapter_policy_fixture_v2()
+        val request = windows_adapter_native_request_fixture_v2()
+        var scripted = WindowsDockerRuntimeProviderV1.scripted(policy,
+            [windows_adapter_engine_fixture_v2(), windows_adapter_image_fixture_v2()])
+        val progress = scripted.progress_begin_v2("prepare", request)
+        expect(progress.failure_v4()).to_equal("")
+        var native = WindowsDockerRuntimeProviderV1.new(policy)
+        expect(native.progress_origin_error_v4(progress)).to_equal("docker-progress-origin-mismatch")
+        val rejected = native.progress_poll_v2(progress, false)
+        expect(rejected.failure_v4()).to_equal("docker-progress-origin-mismatch")
+        assert(rejected.operation_v2().is_none())
+        expect(native.consumed_script_count()).to_equal(0)
+        step("Prove the canonical scripted state still consumes engine then image exactly once")
+        val engine = scripted.progress_poll_v2(progress, false)
+        expect(scripted.consumed_script_count()).to_equal(1)
+        val completed = scripted.progress_poll_v2(engine, false)
+        expect(scripted.consumed_script_count()).to_equal(2)
+        expect(completed.operation_v2().unwrap().status).to_equal("ok")
+        expect(windows_docker_progress_release_v4(completed)).to_equal(true)
+        expect(windows_command_origin_matches_v4(true, false)).to_equal(false)
+        expect(windows_command_origin_matches_v4(false, true)).to_equal(false)
+
+    it "refuses changed policy and managed scope without consuming the original provider state":
+        step("Retain a genuine scripted progress owner while trying different immutable provider domains")
+        val policy = windows_adapter_policy_fixture_v2()
+        val request = windows_adapter_native_request_fixture_v2()
+        val script = [windows_adapter_engine_fixture_v2(), windows_adapter_image_fixture_v2()]
+        var original = WindowsDockerRuntimeProviderV1.scripted(policy, script)
+        val progress = original.progress_begin_v2("prepare", request)
+        var changed_policy = policy
+        changed_policy.engine_id = "different-engine"
+        var changed = WindowsDockerRuntimeProviderV1.scripted(changed_policy, script)
+        val wrong_policy = changed.progress_poll_v2(progress, false)
+        expect(wrong_policy.failure_v4()).to_equal("docker-progress-provider-domain-mismatch")
+        expect(changed.consumed_script_count()).to_equal(0)
+        var scoped = WindowsDockerRuntimeProviderV1.scripted(policy, script)
+        assert(scoped.bind_managed_scope_v2(windows_adapter_scope_fixture_v2()).is_ok())
+        val wrong_scope = scoped.progress_poll_v2(progress, false)
+        expect(wrong_scope.failure_v4()).to_equal("docker-progress-provider-domain-mismatch")
+        expect(scoped.consumed_script_count()).to_equal(0)
+        assert(wrong_policy.operation_v2().is_none())
+        assert(wrong_scope.operation_v2().is_none())
+        step("Complete the unchanged canonical provider after both substitutions were refused")
+        val engine = original.progress_poll_v2(progress, false)
+        val completed = original.progress_poll_v2(engine, false)
+        expect(original.consumed_script_count()).to_equal(2)
+        expect(completed.operation_v2().unwrap().status).to_equal("ok")
+        expect(windows_docker_progress_release_v4(completed)).to_equal(true)
+
+    it "refuses native-origin prelaunch progress in a scripted provider on actual Windows":
+        step("Require Windows canonical-thread admission without polling or launching a command")
+        @when(os="windows"):
+        val policy = windows_adapter_policy_fixture_v2()
+        val request = windows_adapter_native_request_fixture_v2()
+        var native = WindowsDockerRuntimeProviderV1.new(policy)
+        val progress = native.progress_begin_v2("prepare", request)
+        expect(progress.failure_v4()).to_equal("")
+        assert(progress.operation_v2().is_none())
+        var scripted = WindowsDockerRuntimeProviderV1.scripted(policy,
+            [windows_adapter_engine_fixture_v2(), windows_adapter_image_fixture_v2()])
+        expect(scripted.progress_origin_error_v4(progress)).to_equal("docker-progress-origin-mismatch")
+        val rejected = scripted.progress_poll_v2(progress, false)
+        expect(rejected.failure_v4()).to_equal("docker-progress-origin-mismatch")
+        assert(rejected.operation_v2().is_none())
+        expect(scripted.consumed_script_count()).to_equal(0)
+        step("Cancel and release the original prelaunch continuation before its first native command poll")
+        val cancelled = windows_docker_progress_cancel_v4(progress)
+        expect(cancelled.operation_v2().unwrap().status).to_equal("blocked")
+        expect(cancelled.failure_v4()).to_equal("docker-progress-cancelled")
+        expect(windows_docker_progress_release_v4(cancelled)).to_equal(true)
+        @else:
+        fail("native-origin prelaunch scenario requires an actual Windows host; no skip or Linux native substitute")
+        @end
+
+    it "rejects another live journal owner without consuming either provider":
+        step("Begin execution in one actual signed fixture and retain a second independent journal writer")
+        val first = host_windows_progress_fixture_v4()
+        val second = host_windows_progress_fixture_v4()
+        val begun = host_authorized_execution_begin_v4(first.owner, first.container,
+            host_execute_request_encode_v2(first.envelope).unwrap(), first.policy,
+            first.provider_digest, "service-a", first.context, host_windows_progress_clock_v4)
+        expect(begun.error).to_equal("")
+        assert(begun.continuation.is_some())
+        val continuation = begun.continuation.unwrap()
+        val rejected = host_authorized_execution_step_v4(second.owner, second.container,
+            continuation, second.context, false)
+        expect(rejected.error).to_equal("host-execution-continuation-origin-mismatch")
+        assert(rejected.continuation.is_some())
+        expect(windows_adapter_consumed_fixture_v2(begun.container)).to_equal(0)
+        expect(windows_adapter_consumed_fixture_v2(rejected.container)).to_equal(0)
+        expect(rejected.owner.journal.operations["operation-a"].state).to_equal("admitted")
+        expect(rejected.owner.journal.sequence).to_equal(second.owner.journal.sequence)
+        step("Retry the original canonical owner and cancel without creating a provider command")
+        val cancelled = host_authorized_execution_step_v4(begun.owner, begun.container,
+            continuation, first.context, true)
+        expect(cancelled.error).to_equal("host-execution-cancelled")
+        assert(cancelled.continuation.is_none())
+        expect(windows_adapter_consumed_fixture_v2(cancelled.container)).to_equal(0)
+        expect(cancelled.owner.journal.operations["operation-a"].state).to_equal("executing")
+        assert(host_capacity_owner_close_v1(cancelled.owner).unwrap())
+        assert(host_capacity_owner_close_v1(rejected.owner).unwrap())

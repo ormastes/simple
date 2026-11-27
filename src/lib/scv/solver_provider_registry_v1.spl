@@ -1,0 +1,264 @@
+"""Strict provider lock admission; artifact integrity is not execution proof.
+
+The host reads only beneath the repository root with bounded no-follow reads.
+The registry binds artifact bytes and manifests to separately supplied old
+policy pins. No API in this module can attest what the current process runs.
+"""
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.sdn.strict_v1.{sdn_parse_strict_bytes_v1, sdn_strict_limits_valid_v1}
+use std.common.sdn.strict_types_v1.{SdnStrictLimitsV1}
+use std.common.sdn.value.{SdnValue}
+use std.common.io.read_only_file_view.{read_only_file_view_read_beneath_bounded_v1}
+use std.scv.scv_config_fields_v1.{scv_config_dict_v1, scv_config_text_v1, scv_config_int_v1, scv_config_relative_path_v1}
+use std.scv.solver_contract_v1.*
+
+val PROVIDER_LOCK_PATH_V1 = "config/scv-providers.lock.sdn"
+val PROVIDER_ARTIFACT_MAX_BYTES_V1 = 16777216
+val PROVIDER_LOCK_MAX_ENTRIES_V1 = 128
+val PROVIDER_REGISTRY_MAX_ARTIFACT_BYTES_V1 = 67108864
+
+pub struct SolverProviderArtifactV1:
+    provider_id: text
+    domain: text
+    role: text
+    plugin_manifest: text
+    manifest_sha256: text
+    artifact_path: text
+    artifact_sha256: text
+    lock_digest: text
+    build_identity: text
+    abi_version: text
+    provider_schema: text
+    policy_revision: text
+    host_capability: text
+
+pub struct SolverProviderRegistryV1:
+    lock_sha256: text
+    read_bytes: i64
+    providers: [SolverProviderArtifactV1]
+
+pub struct SolverProviderResolutionV1:
+    status: text
+    diagnostic: text
+    execution_status: text
+    execution_attested: bool
+    provider_ids: [text]
+    lock_sha256: text
+    charged_work: i64
+
+fn registry_sha256_v1(value: text) -> bool:
+    if value.len() != 64: return false
+    for code in value.bytes():
+        if not ((code >= 48 and code <= 57) or (code >= 97 and code <= 102)): return false
+    true
+
+fn registry_read_limit_error_v1(reason: text, artifact: text) -> text:
+    if reason == "file_view_source_limit": return "resource_limited: " + artifact
+    reason
+
+pub fn solver_provider_artifact_bytes_match_v1(provider: SolverProviderArtifactV1, bytes: [u8]) -> bool:
+    bytes.len() <= PROVIDER_ARTIFACT_MAX_BYTES_V1 and sha256_u8_hex(bytes) == provider.artifact_sha256
+
+fn registry_provider_row_v1(row: [SdnValue], index: i64) -> Result<SolverProviderArtifactV1, text>:
+    val context = "providers[" + index.to_text() + "]"
+    if row.len() != 13: return Err("row_width: " + context)
+    var values: [text] = []
+    for value in row: values.push(scv_config_text_v1(value, context)?)
+    val provider_id = values[0]
+    val domain = values[1]
+    val role = values[2]
+    val manifest = values[3]
+    val manifest_digest = values[4]
+    val artifact = values[5]
+    val digest = values[6]
+    val lock_digest = values[7]
+    val build = values[8]
+    val abi = values[9]
+    val schema = values[10]
+    val policy = values[11]
+    val capability = values[12]
+    val limits = [256, 64, 32, 256, 64, 256, 64, 64, 256, 128, 128, 256, 128]
+    for value_index in 0..values.len():
+        if values[value_index].len() > limits[value_index]: return Err("text_limit: " + context)
+    if not ["source.bytes", "source.simple", "db.schema", "db.rows"].contains(domain):
+        return Err("unsupported_provider_domain: " + domain)
+    if not ["parser", "model", "solver", "validator", "publisher"].contains(role): return Err("unsupported_provider_role: " + role)
+    if not scv_config_relative_path_v1(manifest, false) or not manifest.starts_with("plugins/") or not manifest.ends_with("/plugin.sdn"):
+        return Err("unsafe_provider_manifest_path: " + manifest)
+    if not scv_config_relative_path_v1(artifact, false) or not artifact.starts_with("plugins/"):
+        return Err("unsafe_provider_artifact_path: " + artifact)
+    if not registry_sha256_v1(manifest_digest): return Err("invalid_manifest_sha256: " + provider_id)
+    if not registry_sha256_v1(digest): return Err("invalid_provider_sha256: " + provider_id)
+    if not registry_sha256_v1(lock_digest) or lock_digest != digest: return Err("provider_lock_digest_mismatch: " + provider_id)
+    if not capability.starts_with("host:"): return Err("invalid_host_capability: " + provider_id)
+    Ok(SolverProviderArtifactV1(provider_id: provider_id, domain: domain, role: role,
+        plugin_manifest: manifest, manifest_sha256: manifest_digest,
+        artifact_path: artifact, artifact_sha256: digest, lock_digest: lock_digest,
+        build_identity: build, abi_version: abi, provider_schema: schema,
+        policy_revision: policy, host_capability: capability))
+
+pub fn solver_provider_registry_parse_v1(bytes: [u8], limits: SdnStrictLimitsV1) -> Result<SolverProviderRegistryV1, text>:
+    if not sdn_strict_limits_valid_v1(limits): return Err("invalid_limits: provider_registry")
+    if bytes.len() > 1048576: return Err("source_limit: provider_registry")
+    val document = match sdn_parse_strict_bytes_v1(bytes, limits):
+        case Ok(value): value
+        case Err(issue): return Err(issue.code + ": provider registry line " + issue.line.to_text() + ": " + issue.message)
+    val root = scv_config_dict_v1(document.value, "provider_registry", ["schema_version", "providers"])?
+    scv_config_int_v1(root["schema_version"], "provider_registry.schema_version", 1, 1)?
+    var providers: [SolverProviderArtifactV1] = []
+    match root["providers"]:
+        case Table(headers, rows):
+            if headers != ["provider_id", "domain", "role", "plugin_manifest", "manifest_sha256", "artifact_path", "artifact_sha256", "lock_digest", "build_identity", "abi_version", "provider_schema", "policy_revision", "host_capability"]:
+                return Err("table_headers: providers lock columns mismatch")
+            if rows.len() == 0 or rows.len() > PROVIDER_LOCK_MAX_ENTRIES_V1: return Err("provider_limit: require 1..128 entries")
+            for row in rows:
+                val provider = registry_provider_row_v1(row, providers.len())?
+                for prior in providers:
+                    if prior.provider_id == provider.provider_id:
+                        return Err("duplicate_provider_id: " + provider.provider_id)
+                    if (prior.artifact_path == provider.artifact_path and
+                        (prior.artifact_sha256 != provider.artifact_sha256 or prior.build_identity != provider.build_identity)):
+                        return Err("conflicting_shared_provider_artifact: " + provider.artifact_path)
+                providers.push(provider)
+        case _: return Err("wrong_type: provider_registry.providers requires named table")
+    Ok(SolverProviderRegistryV1(lock_sha256: sha256_u8_hex(bytes), read_bytes: 0, providers: providers))
+
+fn registry_manifest_matches_v1(bytes: [u8], expected: SolverProviderArtifactV1, limits: SdnStrictLimitsV1) -> Result<bool, text>:
+    if bytes.len() > 65536: return Err("source_limit: provider_manifest")
+    val document = match sdn_parse_strict_bytes_v1(bytes, limits):
+        case Ok(value): value
+        case Err(issue): return Err(issue.code + ": provider manifest line " + issue.line.to_text())
+    val fields = scv_config_dict_v1(document.value, "provider_manifest", ["schema_version", "provider_id", "domain", "role", "artifact_path", "artifact_sha256", "build_identity", "abi_version", "provider_schema", "policy_revision", "host_capability"])?
+    scv_config_int_v1(fields["schema_version"], "provider_manifest.schema_version", 1, 1)?
+    val provider_id = scv_config_text_v1(fields["provider_id"], "provider_manifest.provider_id")?
+    val domain = scv_config_text_v1(fields["domain"], "provider_manifest.domain")?
+    val role = scv_config_text_v1(fields["role"], "provider_manifest.role")?
+    val artifact = scv_config_text_v1(fields["artifact_path"], "provider_manifest.artifact_path")?
+    val digest = scv_config_text_v1(fields["artifact_sha256"], "provider_manifest.artifact_sha256")?
+    val build = scv_config_text_v1(fields["build_identity"], "provider_manifest.build_identity")?
+    val abi = scv_config_text_v1(fields["abi_version"], "provider_manifest.abi_version")?
+    val schema = scv_config_text_v1(fields["provider_schema"], "provider_manifest.provider_schema")?
+    val policy = scv_config_text_v1(fields["policy_revision"], "provider_manifest.policy_revision")?
+    val capability = scv_config_text_v1(fields["host_capability"], "provider_manifest.host_capability")?
+    if (provider_id != expected.provider_id or domain != expected.domain or role != expected.role or
+        artifact != expected.artifact_path or digest != expected.artifact_sha256 or build != expected.build_identity or
+        abi != expected.abi_version or schema != expected.provider_schema or policy != expected.policy_revision or
+        capability != expected.host_capability): return Err("provider_manifest_lock_mismatch: " + expected.provider_id)
+    Ok(true)
+
+pub fn solver_provider_registry_load_budgeted_v1(root: text, accepted_lock_sha256: text, limits: SdnStrictLimitsV1,
+        memory_budget: i64, logical_work_budget: i64) -> Result<SolverProviderRegistryV1, text>:
+    if root == "" or not registry_sha256_v1(accepted_lock_sha256): return Err("needs_inputs: accepted_provider_lock_pin")
+    if not sdn_strict_limits_valid_v1(limits): return Err("invalid_limits: provider_registry")
+    if memory_budget <= 0 or logical_work_budget <= 0: return Err("resource_limited: provider_registry_budget")
+    var work_left = logical_work_budget
+    var lock_cap = 1048576
+    if memory_budget < lock_cap: lock_cap = memory_budget
+    if work_left < lock_cap: lock_cap = work_left
+    val lock_bytes = match read_only_file_view_read_beneath_bounded_v1(root, PROVIDER_LOCK_PATH_V1, lock_cap):
+        case Ok(bytes): bytes
+        case Err(reason): return Err(registry_read_limit_error_v1(reason, "provider_lock_bytes"))
+    work_left = work_left - lock_bytes.len()
+    if sha256_u8_hex(lock_bytes) != accepted_lock_sha256: return Err("provider_lock_pin_mismatch")
+    val registry = solver_provider_registry_parse_v1(lock_bytes, limits)?
+    var loaded_registry = registry
+    var total_artifact_bytes = 0
+    var total_read_bytes = lock_bytes.len()
+    var verified_artifact_paths: [text] = []
+    var verified_manifest_paths: [text] = []
+    for provider in registry.providers:
+        if work_left <= 0: return Err("resource_limited: provider_registry_work")
+        if not verified_manifest_paths.contains(provider.plugin_manifest):
+            var manifest_cap = 65536
+            if memory_budget < manifest_cap: manifest_cap = memory_budget
+            if work_left < manifest_cap: manifest_cap = work_left
+            val manifest_bytes = match read_only_file_view_read_beneath_bounded_v1(root, provider.plugin_manifest, manifest_cap):
+                case Ok(bytes): bytes
+                case Err(reason): return Err(registry_read_limit_error_v1(reason, "provider_manifest_bytes"))
+            work_left = work_left - manifest_bytes.len()
+            total_read_bytes = total_read_bytes + manifest_bytes.len()
+            if sha256_u8_hex(manifest_bytes) != provider.manifest_sha256: return Err("provider_manifest_digest_mismatch: " + provider.provider_id)
+            registry_manifest_matches_v1(manifest_bytes, provider, limits)?
+            verified_manifest_paths.push(provider.plugin_manifest)
+        if not verified_artifact_paths.contains(provider.artifact_path):
+            val remaining = PROVIDER_REGISTRY_MAX_ARTIFACT_BYTES_V1 - total_artifact_bytes
+            if remaining <= 0: return Err("resource_limited: provider_registry_artifacts")
+            var per_file_limit = PROVIDER_ARTIFACT_MAX_BYTES_V1
+            if remaining < per_file_limit: per_file_limit = remaining
+            if memory_budget < per_file_limit: per_file_limit = memory_budget
+            if work_left < per_file_limit: per_file_limit = work_left
+            if per_file_limit <= 0: return Err("resource_limited: provider_registry_work")
+            val artifact_bytes = match read_only_file_view_read_beneath_bounded_v1(root, provider.artifact_path, per_file_limit):
+                case Ok(bytes): bytes
+                case Err(reason): return Err(registry_read_limit_error_v1(reason, "provider_artifact_bytes"))
+            if not solver_provider_artifact_bytes_match_v1(provider, artifact_bytes): return Err("provider_artifact_digest_mismatch: " + provider.provider_id)
+            total_artifact_bytes = total_artifact_bytes + artifact_bytes.len()
+            total_read_bytes = total_read_bytes + artifact_bytes.len()
+            work_left = work_left - artifact_bytes.len()
+            verified_artifact_paths.push(provider.artifact_path)
+    loaded_registry.read_bytes = total_read_bytes
+    Ok(loaded_registry)
+
+pub fn solver_provider_registry_load_v1(root: text, accepted_lock_sha256: text, limits: SdnStrictLimitsV1) -> Result<SolverProviderRegistryV1, text>:
+    solver_provider_registry_load_budgeted_v1(root, accepted_lock_sha256, limits,
+        PROVIDER_ARTIFACT_MAX_BYTES_V1, PROVIDER_REGISTRY_MAX_ARTIFACT_BYTES_V1)
+
+pub fn solver_builtin_provider_ids_v1(domain: text) -> [text]:
+    if domain == "source.bytes": return ["scv.parser.raw-bytes.v1", "scv.model.source-file.v1", "scv.solver.source-bytes.v1"]
+    if domain == "source.simple": return ["scv.parser.raw-bytes.v1", "scv.model.simple-entity-edits.v1", "scv.solver.simple-entity-edits.v1"]
+    if domain == "db.schema": return ["scv.parser.db-schema-v2.v1", "scv.model.db-schema-v2.v1", "scv.solver.db-schema-v2.v1"]
+    if domain == "db.rows": return ["scv.parser.db-patch-v1.v1", "scv.model.db-rows-v1.v1", "scv.solver.db-reducer-v1.v1"]
+    []
+
+fn solver_provider_expected_domain_v1(domain: text, role_index: i64) -> text:
+    # The raw-byte parser is shared and deliberately makes no language parse claim.
+    if domain == "source.simple" and role_index == 0: return "source.bytes"
+    domain
+
+pub fn solver_provider_registry_resolve_v1(registry: SolverProviderRegistryV1, accepted_lock_sha256: text, accepted_policy: SolverHostPolicyV1, domain: text) -> SolverProviderResolutionV1:
+    val ids = solver_builtin_provider_ids_v1(domain)
+    var status = "needs_inputs"
+    var found: [text] = []
+    if ids.len() == 3 and registry_sha256_v1(accepted_lock_sha256) and registry.lock_sha256 == accepted_lock_sha256 and accepted_policy.expected.domain == domain:
+        val required = [accepted_policy.parser.provider_id, accepted_policy.model.provider_id, accepted_policy.solver.provider_id]
+        val pins = [accepted_policy.parser.lock_digest, accepted_policy.model.lock_digest, accepted_policy.solver.lock_digest]
+        var valid = (accepted_policy.expected.parser_lock_digest == pins[0] and
+            accepted_policy.expected.solver_lock_digest == pins[2])
+        for index in 0..3:
+            if required[index] != ids[index]: valid = false
+            var matches = 0
+            for provider in registry.providers:
+                if provider.provider_id == ids[index] and provider.domain == solver_provider_expected_domain_v1(domain, index) and provider.role == ["parser", "model", "solver"][index]:
+                    matches = matches + 1
+                    if (provider.policy_revision != accepted_policy.expected.policy_revision or
+                        provider.lock_digest != pins[index] or provider.abi_version != "scv-provider-abi-v1" or
+                        provider.host_capability != "host:builtin-in-process-v1" or
+                        provider.provider_schema != solver_provider_expected_schema_v1(domain, index)): valid = false
+                    found.push(provider.provider_id)
+            if matches != 1: valid = false
+        if valid: status = "resolved-unqualified"
+        else: found = []
+    else:
+        found = []
+    var diagnostic = "provider_registration_or_old_policy_mismatch"
+    if status == "resolved-unqualified": diagnostic = ""
+    if registry.lock_sha256 != accepted_lock_sha256: diagnostic = "provider_lock_pin_mismatch"
+    SolverProviderResolutionV1(status: status, diagnostic: diagnostic, execution_status: "unqualified-builtin-execution",
+        execution_attested: false, provider_ids: found, lock_sha256: registry.lock_sha256, charged_work: registry.read_bytes)
+
+fn solver_provider_expected_schema_v1(domain: text, role_index: i64) -> text:
+    if domain == "source.bytes": return "raw-bytes-v1"
+    if domain == "source.simple":
+        if role_index == 0: return "raw-bytes-v1"
+        return "simple-entity-edits-v1"
+    if domain == "db.schema": return "db-schema-v2.v1"
+    if domain == "db.rows":
+        if role_index == 0: return "db-patch-v1.v1"
+        if role_index == 1: return "db-rows-v1.v1"
+        return "db-reducer-v1.v1"
+    ""
+
+export SolverProviderArtifactV1, SolverProviderRegistryV1, SolverProviderResolutionV1
+export solver_provider_registry_parse_v1, solver_provider_registry_load_v1, solver_provider_registry_load_budgeted_v1, solver_provider_registry_resolve_v1
+export solver_builtin_provider_ids_v1
+export solver_provider_artifact_bytes_match_v1

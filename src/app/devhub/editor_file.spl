@@ -1,0 +1,40 @@
+# Real local-file ownership for the DevHub edit workflow.
+# Private workspaces are unique and never include remote page identifiers.
+use std.io.file_ops.{secure_temp_dir, file_create_exclusive}
+use std.io.dir_ops.{is_dir, dir_remove_all}
+use std.env.{env_get}
+use std.sffi.fs.{file_atomic_write_mode}
+
+fn editor_temp_parent() -> text:
+    var parent = env_get("TMPDIR")
+    if parent == "": parent = env_get("TEMP")
+    if parent == "": parent = env_get("TMP")
+    if parent == "" and is_dir("/tmp"): parent = "/tmp"
+    parent
+
+
+fn prepare_editor_file(parent: text, content: text, extension: text) -> Result<(text, text), text>:
+    # Page IDs are remote input and never become local path components.
+    if extension != ".md" and extension != ".html":
+        return Err("unsupported editor file extension")
+    val directory = match secure_temp_dir(parent, "devhub-edit"):
+        case Ok(path): path
+        case Err(_): return Err("could not create private editor directory")
+    val path = directory + "/page" + extension
+    # Reserve the name without writing the page into a default-DACL file.
+    # The mode-aware owner publishes the payload only in an owner-only file;
+    # a private Windows directory alone does not enforce that file DACL.
+    if not file_create_exclusive(path, ""):
+        val _cleaned = cleanup_editor_file(directory)
+        return Err("could not write private editor file")
+    if not file_atomic_write_mode(path, content, 384):
+        val _cleaned = cleanup_editor_file(directory)
+        return Err("could not write private editor file")
+    Ok((directory, path))
+
+
+fn cleanup_editor_file(directory: text) -> bool:
+    # Only a directory obtained from prepare_editor_file is passed here.
+    dir_remove_all(directory)
+
+

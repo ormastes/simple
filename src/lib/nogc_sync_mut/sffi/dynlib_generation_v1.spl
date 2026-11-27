@@ -1,0 +1,231 @@
+# Legacy DynLib providers under KPF generation lifetime (DHR P4).
+#
+# The legacy loader (`DynLib` / `DynLoader` in sffi/dynamic.spl) has no notion
+# of a code generation: a path maps to one cached DynLib, and `DynLib.close()`
+# retires the mapping through dynlib_lifetime_owner_v1, which only defers the
+# native dlclose past calls that are inside native code at that instant. A
+# caller that resolved a symbol, left native code, and will call again (a
+# suspended continuation, an in-flight request) is not protected, and there is
+# no way to replace a provider while old callers still run on it.
+#
+# This host binds each loaded DynLib to one KpfGenerationTable generation:
+#   publish  - a reload; the new library becomes active, the old generation is
+#              retired but stays mapped.
+#   begin_call / end_call - a KPF pin held for the whole caller operation, so
+#              old and new generations execute concurrently.
+#   unload   - KpfGenerationTable.collect first; the native mapping is closed
+#              only when collect accepts, so a pinned generation is refused
+#              with GenerationStillPinned and its library stays live.
+
+use common.kernel_plugin.ids.{KpfId128, KpfDigest256}
+use std.nogc_sync_mut.kernel_plugin.status.KpfSyncStatus
+use std.nogc_sync_mut.kernel_plugin.generation.{
+    KpfGenerationHandle, KpfGenerationPublication, KpfPinHandle, KpfGenerationTable,
+}
+use std.nogc_sync_mut.sffi.dynamic.{DynLib, DynI64FnSlot}
+
+struct _DynlibGenerationEntryV1:
+    generation: KpfGenerationHandle
+    lib: DynLib
+
+# A caller's lease: the pin that keeps `generation` alive and the library
+# that generation owns. Release it with DynlibGenerationHostV1.end_call.
+pub struct DynlibGenerationLeaseV1:
+    pin: KpfPinHandle
+    generation: KpfGenerationHandle
+    lib: DynLib
+
+# A cached DynI64FnSlot bound to one generation lease. The lease keeps the
+# slot's generation from being collected while the slot is held; calls made
+# through DynlibGenerationHostV1.call_slot refuse once the slot has been
+# released (release_slot) or its generation has been unloaded.
+pub struct DynGenerationI64SlotV1:
+    lease: DynlibGenerationLeaseV1
+    i64_slot: DynI64FnSlot
+
+class DynlibGenerationHostV1:
+    table: KpfGenerationTable
+    var entries: [_DynlibGenerationEntryV1]
+
+    static fn create(table: KpfGenerationTable) -> DynlibGenerationHostV1:
+        DynlibGenerationHostV1(table: table, entries: [])
+
+    fn _entry_index(generation: KpfGenerationHandle) -> i64:
+        var index = 0
+        while index < self.entries.len():
+            val candidate = self.entries[index].generation
+            if candidate.index == generation.index and candidate.epoch == generation.epoch:
+                return index
+            index = index + 1
+        -1
+
+    # Publish `lib` as the active generation. On success the host owns `lib`
+    # and the previous generation is retired but still mapped. On failure the
+    # caller keeps ownership of `lib`.
+    me publish(lib: DynLib, provider_id: KpfId128, composition_digest: KpfDigest256, registry_revision: u64) -> KpfGenerationPublication:
+        val publication = self.table.publish(provider_id, composition_digest, registry_revision)
+        if publication.status == KpfSyncStatus.Ok:
+            self.entries.push(_DynlibGenerationEntryV1(generation: publication.current, lib: lib))
+        publication
+
+    # Pin the active generation for one caller operation.
+    me begin_call() -> Result<DynlibGenerationLeaseV1, KpfSyncStatus>:
+        val active = self.table.active
+        val index = self._entry_index(active)
+        if index < 0: return Err(KpfSyncStatus.GenerationNotActive)
+        val pinned = self.table.pin(active)
+        if pinned.status != KpfSyncStatus.Ok: return Err(pinned.status)
+        Ok(DynlibGenerationLeaseV1(pin: pinned.handle, generation: active, lib: self.entries[index].lib))
+
+    me end_call(lease: DynlibGenerationLeaseV1) -> KpfSyncStatus:
+        self.table.release_pin(lease.pin)
+
+    # Resolve an integer slot on the active generation and bind it to a lease
+    # held until release_slot. A failed resolve ends the lease it took.
+    # @allow(primitive_api)  # name and arity mirror DynLib.resolve_i64_checked
+    @unsafe(reason: "resolves an unverified integer-only foreign ABI slot", capabilities: [ffi, raw_ptr])
+    me resolve_i64(name: text, arity: i64) -> Result<DynGenerationI64SlotV1, text>:
+        match self.begin_call():
+            case Ok(lease):
+                val resolved = unsafe(capabilities: [ffi, raw_ptr]):
+                    lease.lib.resolve_i64_checked(name, arity)
+                match resolved:
+                    case Ok(i64_slot): Ok(DynGenerationI64SlotV1(lease: lease, i64_slot: i64_slot))
+                    case Err(error):
+                        _ = self.end_call(lease)
+                        Err(error)
+            case Err(_): Err("E-SFFI-019: no active generation to resolve {name}")
+
+    # Call a generation-bound slot. The call shares the slot's pin for its
+    # duration, so a released slot (stale pin) or an unloaded generation is
+    # refused before any native code runs.
+    # @allow(primitive_api)  # args mirror DynI64FnSlot.call_checked
+    @unsafe(reason: "resolved integer slot cannot prove the provider artifact or declared C ABI", capabilities: [ffi, raw_ptr])
+    me call_slot(slot: DynGenerationI64SlotV1, args: [i64]) -> Result<i64, text>:
+        val shared = self.table.share_pin(slot.lease.pin)
+        if shared.status != KpfSyncStatus.Ok:
+            return Err("E-SFFI-019: slot generation released or unloaded: {slot.i64_slot.symbol}")
+        val result = unsafe(capabilities: [ffi, raw_ptr]):
+            slot.i64_slot.call_checked(args)
+        _ = self.table.release_pin(shared.handle)
+        result
+
+    me release_slot(slot: DynGenerationI64SlotV1) -> KpfSyncStatus:
+        self.end_call(slot.lease)
+
+    # Collect a retired generation and only then close its native mapping.
+    @unsafe(reason: "closes the retired generation's native provider mapping", capabilities: [ffi])
+    me unload(generation: KpfGenerationHandle) -> KpfSyncStatus:
+        val index = self._entry_index(generation)
+        if index < 0: return KpfSyncStatus.StaleHandle
+        val status = self.table.collect(generation)
+        if status != KpfSyncStatus.Ok: return status
+        val lib = self.entries[index].lib
+        self.entries.remove(index)
+        unsafe(capabilities: [ffi]):
+            lib.close()
+        KpfSyncStatus.Ok
+
+# Opt-in reload path for DynLoader-style path-keyed providers (DHR P4).
+#
+# DynLoader caches one DynLib per path and never replaces it. This loader keeps
+# one DynlibGenerationHostV1 per path instead: `reload(path)` loads a fresh
+# mapping and publishes it as that path's active generation, calls take a
+# lease for their whole duration, and `unload` closes a retired mapping only
+# after its last lease has ended. It lives here, not on DynLoader itself,
+# because sffi/dynamic.spl is imported by this module; it shares no state with
+# the DynLoader singleton, so callers that never use it see no change.
+class DynLoaderReloadV1:
+    generation_capacity: u32
+    pin_capacity: u32
+    var hosts: {text: DynlibGenerationHostV1}
+    var revisions: {text: u64}
+
+    static fn create(generation_capacity: u32, pin_capacity: u32) -> DynLoaderReloadV1:
+        DynLoaderReloadV1(generation_capacity: generation_capacity, pin_capacity: pin_capacity, hosts: {}, revisions: {})
+
+    # Load `path` again and publish it as the path's active generation. The
+    # previous generation is retired but stays mapped until `unload` collects
+    # it. A failed publish closes the fresh mapping and reports the status.
+    # @allow(primitive_api)  # path is the same text provider key DynLoader uses
+    @unsafe(reason: "loads an unverified dynamic provider as a new generation", capabilities: [ffi])
+    me reload(path: text, provider_id: KpfId128, composition_digest: KpfDigest256) -> Result<KpfGenerationPublication, text>:
+        val loaded = unsafe(capabilities: [ffi]):
+            DynLib.load_checked(path)
+        match loaded:
+            case Ok(lib):
+                if not self.hosts.contains(path):
+                    self.hosts[path] = DynlibGenerationHostV1.create(KpfGenerationTable.create(self.generation_capacity, self.pin_capacity))
+                    self.revisions[path] = 0u64
+                val revision = self.revisions[path] + 1u64
+                self.revisions[path] = revision
+                val host = self.hosts[path]
+                val publication = host.publish(lib, provider_id, composition_digest, revision)
+                if publication.status != KpfSyncStatus.Ok:
+                    unsafe(capabilities: [ffi]):
+                        lib.close()
+                    return Err("E-SFFI-019: reload publish refused for {path}")
+                Ok(publication)
+            case Err(error): Err(error)
+
+    # Lease the active generation of `path` for one caller operation.
+    # @allow(primitive_api)  # path is the same text provider key DynLoader uses
+    me begin_call(path: text) -> Result<DynlibGenerationLeaseV1, KpfSyncStatus>:
+        if not self.hosts.contains(path): return Err(KpfSyncStatus.GenerationNotActive)
+        val host = self.hosts[path]
+        host.begin_call()
+
+    # @allow(primitive_api)  # path is the same text provider key DynLoader uses
+    me end_call(path: text, lease: DynlibGenerationLeaseV1) -> KpfSyncStatus:
+        if not self.hosts.contains(path): return KpfSyncStatus.StaleHandle
+        val host = self.hosts[path]
+        host.end_call(lease)
+
+    # Checked dispatch through the active generation; the lease covers the
+    # whole call, so a concurrent reload cannot close this mapping under it.
+    # @allow(primitive_api)  # path and func mirror DynLoader.call_checked
+    @unsafe(reason: "checked transport cannot verify the provider artifact or all-i64 ABI", capabilities: [ffi, raw_ptr])
+    me call_checked(path: text, func: text, args: [i64]) -> Result<i64, text>:
+        match self.begin_call(path):
+            case Ok(lease):
+                val result = unsafe(capabilities: [ffi, raw_ptr]):
+                    lease.lib.call_checked(func, args)
+                _ = self.end_call(path, lease)
+                result
+            case Err(_): Err("E-SFFI-019: no active generation for {path}")
+
+    # Generation-aware DynI64FnSlot: resolve once on the active generation of
+    # `path`, call many times, release when done. A reload while the slot is
+    # held leaves its mapping live; after release the old mapping can be
+    # unloaded and the slot refuses further calls.
+    # @allow(primitive_api)  # path, name and arity mirror DynLib.resolve_i64_checked
+    @unsafe(reason: "resolves an unverified integer-only foreign ABI slot", capabilities: [ffi, raw_ptr])
+    me resolve_i64(path: text, name: text, arity: i64) -> Result<DynGenerationI64SlotV1, text>:
+        if not self.hosts.contains(path): return Err("E-SFFI-019: no active generation for {path}")
+        val host = self.hosts[path]
+        unsafe(capabilities: [ffi, raw_ptr]):
+            host.resolve_i64(name, arity)
+
+    # @allow(primitive_api)  # path and args mirror DynLoader.call_checked
+    @unsafe(reason: "resolved integer slot cannot prove the provider artifact or declared C ABI", capabilities: [ffi, raw_ptr])
+    me call_slot(path: text, slot: DynGenerationI64SlotV1, args: [i64]) -> Result<i64, text>:
+        if not self.hosts.contains(path): return Err("E-SFFI-019: no active generation for {path}")
+        val host = self.hosts[path]
+        unsafe(capabilities: [ffi, raw_ptr]):
+            host.call_slot(slot, args)
+
+    # @allow(primitive_api)  # path is the same text provider key DynLoader uses
+    me release_slot(path: text, slot: DynGenerationI64SlotV1) -> KpfSyncStatus:
+        if not self.hosts.contains(path): return KpfSyncStatus.StaleHandle
+        val host = self.hosts[path]
+        host.release_slot(slot)
+
+    # Collect a retired generation of `path`; its mapping is closed only when
+    # no lease still pins it.
+    # @allow(primitive_api)  # path is the same text provider key DynLoader uses
+    @unsafe(reason: "closes a retired generation's native provider mapping", capabilities: [ffi])
+    me unload(path: text, generation: KpfGenerationHandle) -> KpfSyncStatus:
+        if not self.hosts.contains(path): return KpfSyncStatus.StaleHandle
+        val host = self.hosts[path]
+        unsafe(capabilities: [ffi]):
+            host.unload(generation)

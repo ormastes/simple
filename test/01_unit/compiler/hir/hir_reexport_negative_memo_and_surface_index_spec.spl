@@ -1,0 +1,358 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-COMPILER
+
+"""
+## Purpose and audience
+Verifies G3 HIR re-export negative memoization (`-1` -> `-2` O(1) fast fail),
+frozen `hir_module_surface_index` O(1) scalar hash lookup (with duplicate,
+collision, unfrozen, and transient-scope safety), and memoized transient-safe
+`private_import_repo_root` / `private_import_is_baselined`.
+Audience: compiler engineers maintaining HIR import and surface resolution.
+"""
+
+# @tag: unit, compiler, hir, native-safe
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+use std.nogc_sync_mut.io_runtime.{write_file, file_delete, file_read_nullable, dir_create_all, dir_remove_all}
+use compiler.common.diagnostics.span.{Span}
+use compiler.common.dependency.visibility.{Visibility}
+use compiler.frontend.parser_types.{ParserImport, Variant, VariantKind}
+use compiler.hir.hir_lowering.types.{hirlowering_for_module}
+use compiler.hir.hir_lowering._Items.module_import_registration.*
+use compiler.hir.hir_lowering._Items.module_import_resolution.*
+use compiler.hir.hir_lowering._Items.module_lowering.*
+use compiler.hir.hir_lowering.module_surface.{
+    ModuleSurface,
+    ModuleSurfaceEnum,
+    ModuleSurfacesByName
+}
+
+extern fn rt_transient_array_scope_begin() -> bool
+extern fn rt_transient_array_scope_pause() -> bool
+extern fn rt_transient_array_scope_end() -> bool
+extern fn rt_session_heap_begin() -> u32
+extern fn rt_session_heap_end(session: u32) -> bool
+extern fn rt_session_heap_id() -> u32
+
+fn build_reexport_chain_registry(chain_len: i64) -> ModuleSurfacesByName:
+    var surfaces: [ModuleSurface] = []
+    var index_by_name: Dict<text, i64> = {}
+    var ordered_names: [text] = []
+    var ordered_indices: [i64] = []
+    var i = 0
+    while i < chain_len:
+        val mod_name = "negmemo.mod{i}"
+        var surf = ModuleSurface.empty(mod_name)
+        surf.content_hash = 100 + i
+        if i + 1 < chain_len:
+            val next_name = "negmemo.mod{i + 1}"
+            surf.imports = [ParserImport(module: next_name, items: [], is_lazy: false, span: Span.empty())]
+            surf.import_item_offsets = [0, 0]
+        else:
+            val enum_known = ModuleSurfaceEnum(
+                name: "Known", type_params: [],
+                variants: [Variant(name: "Zero", kind: VariantKind.Tuple([]), span: Span.empty())],
+                visibility: Visibility.Public, is_public: true, span: Span.empty())
+            val enum_rec = ModuleSurfaceEnum(
+                name: "Recoverable", type_params: [],
+                variants: [Variant(name: "Zero", kind: VariantKind.Tuple([]), span: Span.empty())],
+                visibility: Visibility.Public, is_public: true, span: Span.empty())
+            surf.enums["Known"] = enum_known
+            surf.enums["Recoverable"] = enum_rec
+            surf.enum_names = ["Known", "Recoverable"]
+            surf.enum_values = [enum_known, enum_rec]
+        surfaces = surfaces.push(surf)
+        index_by_name[mod_name] = i
+        ordered_names = ordered_names.push(mod_name)
+        ordered_indices = ordered_indices.push(i)
+        i = i + 1
+    ModuleSurfacesByName.from_parts(
+        surfaces, index_by_name, ordered_names, ordered_indices).unwrap()
+
+fn build_large_frozen_registry(count: i64, duplicate_last: bool) -> ModuleSurfacesByName:
+    var surfaces: [ModuleSurface] = []
+    var index_by_name: Dict<text, i64> = {}
+    var ordered_names: [text] = []
+    var ordered_indices: [i64] = []
+    var i = 0
+    while i < count:
+        val mod_name = "surf.pkg_{i / 10}.mod_{i}"
+        var surf = ModuleSurface.empty(mod_name)
+        surf.content_hash = 500 + i
+        surfaces = surfaces.push(surf)
+        index_by_name[mod_name] = i
+        ordered_names = ordered_names.push(mod_name)
+        ordered_indices = ordered_indices.push(i)
+        i = i + 1
+    if duplicate_last and count >= 2:
+        ordered_names = ordered_names.push(ordered_names[0])
+        ordered_indices = ordered_indices.push(1)
+    ModuleSurfacesByName(
+        surfaces: surfaces,
+        index_by_name: index_by_name,
+        ordered_names: ordered_names,
+        ordered_indices: ordered_indices,
+        generation: 1,
+        frozen: true)
+
+describe "G3 re-export negative memoization":
+    it "verifies -1 once, promotes to -2, and short-circuits later misses in O(1)":
+        step("First lookup misses and records -1 unverified negative memo")
+        val reg = build_reexport_chain_registry(3)
+        var lowering = hirlowering_for_module("negmemo.consumer", reg)
+        val first = lowering.find_reexport_source(0, "Missing")
+        expect(first.found).to_equal(false)
+        expect(lowering.reexport_walk_complete).to_equal(true)
+        expect(lowering.reexport_walk_valid).to_equal(true)
+        expect(lowering.reexport_chase_calls).to_equal(3)
+        expect(lowering.reexport_chase_memo_hits).to_equal(0)
+        expect(lowering.reexport_root_memo_index["0 Missing"]).to_equal(-1)
+
+        step("Second lookup re-walks once and promotes slot value to -2")
+        val second = lowering.find_reexport_source(0, "Missing")
+        expect(second.found).to_equal(false)
+        expect(lowering.reexport_chase_calls).to_equal(6)
+        expect(lowering.reexport_chase_memo_hits).to_equal(1)
+        val slot = lowering.reexport_root_memo_lookup("0 Missing")
+        expect(slot >= 0).to_equal(true)
+        expect(lowering.reexport_root_memo_index_values[slot]).to_equal(-2)
+
+        step("Third and fourth lookups return false in O(1) with zero extra walks")
+        val third = lowering.find_reexport_source(0, "Missing")
+        val fourth = lowering.find_reexport_source(0, "Missing")
+        expect(third.found).to_equal(false)
+        expect(fourth.found).to_equal(false)
+        expect(lowering.reexport_chase_calls).to_equal(6)
+        expect(lowering.reexport_chase_memo_hits).to_equal(3)
+
+    it "does not lock incomplete depth-truncated walks as -2":
+        step("Walk a 12-hop chain past depth limit 10")
+        val deep_reg = build_reexport_chain_registry(12)
+        var lowering = hirlowering_for_module("negmemo.consumer", deep_reg)
+        val miss = lowering.find_reexport_source(0, "Known")
+        expect(miss.found).to_equal(false)
+        expect(lowering.reexport_walk_complete).to_equal(false)
+        expect(lowering.reexport_root_memo_lookup("0 Known")).to_equal(-1)
+
+    it "preserves positive memo hits and recovery of planted -1 slots":
+        step("Positive miss then hit caches target module cleanly")
+        val reg = build_reexport_chain_registry(3)
+        var lowering = hirlowering_for_module("negmemo.consumer", reg)
+        val hit1 = lowering.find_reexport_source(0, "Known")
+        val hit2 = lowering.find_reexport_source(0, "Known")
+        expect(hit1.found).to_equal(true)
+        expect(hit1.module_index).to_equal(2)
+        expect(hit2.found).to_equal(true)
+        expect(hit2.module_index).to_equal(2)
+        expect(lowering.reexport_chase_calls).to_equal(2)
+        expect(lowering.reexport_chase_memo_hits).to_equal(1)
+
+        step("Planted -1 unverified negative recovers when item actually exists")
+        lowering.reexport_root_memo_record("0 Recoverable", -1, "")
+        val recovered = lowering.find_reexport_source(0, "Recoverable")
+        expect(recovered.found).to_equal(true)
+        expect(recovered.module_index).to_equal(2)
+        expect(recovered.item_name).to_equal("Recoverable")
+
+describe "G3 frozen surface name O(1) hash lookup":
+    it "builds cached hash index once across many frozen lookups":
+        step("Lookup 140 frozen surface names plus missing and duplicate probes")
+        val reg = build_large_frozen_registry(140, true)
+        val before_builds = hir_surface_name_index_build_count()
+        var i = 0
+        while i < 140:
+            val name = "surf.pkg_{i / 10}.mod_{i}"
+            expect(hir_module_surface_index(reg, name)).to_equal(i)
+            i = i + 1
+        expect(hir_module_surface_index(reg, "surf.missing")).to_equal(-1)
+        val after_builds = hir_surface_name_index_build_count()
+        expect(after_builds - before_builds).to_equal(1)
+
+        step("Duplicate ordered_names keeps first-occurrence-wins index 0")
+        expect(hir_module_surface_index(reg, "surf.pkg_0.mod_0")).to_equal(0)
+        expect(hir_surface_name_index_build_count()).to_equal(after_builds)
+
+    it "resolves out-of-range ordered indices and collisions accurately":
+        step("Create surfaces with shared prefixes and an out-of-range index entry")
+        val s0 = ModuleSurface.empty("alpha_0")
+        val s1 = ModuleSurface.empty("alpha_1")
+        val reg = ModuleSurfacesByName(
+            surfaces: [s0, s1],
+            index_by_name: {"alpha_0": 0, "alpha_1": 1},
+            ordered_names: ["alpha_0", "alpha_1", "alpha_bad"],
+            ordered_indices: [0, 1, 99],
+            generation: 7,
+            frozen: true)
+        expect(hir_module_surface_index(reg, "alpha_0")).to_equal(0)
+        expect(hir_module_surface_index(reg, "alpha_1")).to_equal(1)
+        expect(hir_module_surface_index(reg, "alpha_bad")).to_equal(-1)
+
+    it "falls back to linear scan when unfrozen or generation is 0":
+        step("Mutate unfrozen ordered_names without tripping frozen cache")
+        val before_builds = hir_surface_name_index_build_count()
+        var reg = ModuleSurfacesByName(
+            surfaces: [ModuleSurface.empty("u.a"), ModuleSurface.empty("u.b")],
+            index_by_name: {"u.a": 0},
+            ordered_names: ["u.a"],
+            ordered_indices: [0],
+            generation: 0,
+            frozen: false)
+        expect(hir_module_surface_index(reg, "u.a")).to_equal(0)
+        expect(hir_module_surface_index(reg, "u.b")).to_equal(-1)
+        reg.ordered_names = ["u.a", "u.b"]
+        reg.ordered_indices = [0, 1]
+        expect(hir_module_surface_index(reg, "u.b")).to_equal(1)
+        expect(hir_surface_name_index_build_count()).to_equal(before_builds)
+
+    it "stays UAF-free across promoted and unpromoted transient scopes":
+        step("Promoted flow: begin -> lookup -> pause -> promote -> end -> lookup")
+        val reg = build_large_frozen_registry(32, false)
+        var lowering = hirlowering_for_module("surf.pkg_0.mod_0", reg)
+        expect(rt_transient_array_scope_begin()).to_equal(true)
+        expect(lowering.surface_index_for_name("surf.pkg_1.mod_15")).to_equal(15)
+        expect(rt_transient_array_scope_pause()).to_equal(true)
+        expect(lowering.promote_phase_memo_transient_owners()).to_equal(true)
+        expect(rt_transient_array_scope_end()).to_equal(true)
+        val builds_after_promote = hir_surface_name_index_build_count()
+        expect(lowering.surface_index_for_name("surf.pkg_2.mod_25")).to_equal(25)
+        expect(hir_surface_name_index_build_count()).to_equal(builds_after_promote)
+
+        step("Paused direct flow: begin -> pause -> lookup -> end -> lookup")
+        val reg2 = build_large_frozen_registry(34, false)
+        expect(rt_transient_array_scope_begin()).to_equal(true)
+        expect(rt_transient_array_scope_pause()).to_equal(true)
+        expect(hir_module_surface_index(reg2, "surf.pkg_3.mod_31")).to_equal(31)
+        expect(rt_transient_array_scope_end()).to_equal(true)
+        val builds_after_paused = hir_surface_name_index_build_count()
+        expect(hir_module_surface_index(reg2, "surf.pkg_0.mod_2")).to_equal(2)
+        expect(hir_surface_name_index_build_count()).to_equal(builds_after_paused)
+
+        step("Unpromoted teardown recovers safely without UAF")
+        val reg3 = build_large_frozen_registry(36, false)
+        expect(rt_transient_array_scope_begin()).to_equal(true)
+        expect(hir_module_surface_index(reg3, "surf.pkg_1.mod_11")).to_equal(11)
+        expect(rt_transient_array_scope_end()).to_equal(true)
+        expect(hir_module_surface_index(reg3, "surf.pkg_2.mod_22")).to_equal(22)
+
+describe "G3 private import root memo and baseline transient ownership":
+    it "memoizes repo root across sibling subdirectories even if .git marker is removed":
+        step("Create temporary repo root with .git marker and subdirs")
+        val root = get_temp_dir() + "/simple_g3_priv_root_memo_test"
+        val _clean = dir_remove_all(root)
+        expect(dir_create_all(root + "/.git")).to_equal(true)
+        expect(dir_create_all(root + "/src/pkg_a")).to_equal(true)
+        expect(dir_create_all(root + "/src/pkg_b")).to_equal(true)
+        val mod_a = root + "/src/pkg_a/alpha.spl"
+        val mod_b = root + "/src/pkg_b/beta.spl"
+        expect(write_file(mod_a, "fn alpha(): pass\n")).to_equal(true)
+        expect(write_file(mod_b, "fn beta(): pass\n")).to_equal(true)
+
+        step("First lookup finds root; after removing .git, memo still resolves root")
+        expect(private_import_repo_root(mod_a)).to_equal(root)
+        expect(dir_remove_all(root + "/.git")).to_equal(true)
+        expect(private_import_repo_root(mod_a)).to_equal(root)
+        expect(private_import_repo_root(mod_b)).to_equal(root)
+        val _rm = dir_remove_all(root)
+
+    it "promotes private import baseline arrays loaded during a transient scope":
+        step("Create temp repo with private_import_baseline.txt")
+        val root = get_temp_dir() + "/simple_g3_priv_baseline_transient_test"
+        val _clean = dir_remove_all(root)
+        expect(dir_create_all(root + "/.git")).to_equal(true)
+        expect(dir_create_all(root + "/scripts/check")).to_equal(true)
+        expect(dir_create_all(root + "/src/mod_x")).to_equal(true)
+        val baseline_file = root + "/scripts/check/private_import_baseline.txt"
+        expect(write_file(baseline_file, "src/mod_x/unit.spl|secret_sym\n")).to_equal(true)
+        val mod_x = root + "/src/mod_x/unit.spl"
+        expect(write_file(mod_x, "fn secret_sym(): pass\n")).to_equal(true)
+
+        step("Load inside running transient scope, pause, promote, end scope")
+        var lowering = hirlowering_for_module("g3.priv", build_reexport_chain_registry(2))
+        expect(rt_transient_array_scope_begin()).to_equal(true)
+        expect(private_import_is_baselined(mod_x, "secret_sym")).to_equal(true)
+        expect(rt_transient_array_scope_pause()).to_equal(true)
+        expect(lowering.promote_phase_memo_transient_owners()).to_equal(true)
+        expect(rt_transient_array_scope_end()).to_equal(true)
+
+        step("Delete baseline file on disk and verify promoted cache still answers accurately")
+        expect(file_delete(baseline_file)).to_equal(true)
+        expect(private_import_is_baselined(mod_x, "secret_sym")).to_equal(true)
+        expect(private_import_is_baselined(mod_x, "nonexistent_sym")).to_equal(false)
+        val _rm = dir_remove_all(root)
+
+    it "retains cloned repo root and baseline entries across module scopes inside an active session":
+        step("Create temp repo with baseline and start an active BuildSession heap")
+        val root = get_temp_dir() + "/simple_g3_priv_session_multi_mod_test"
+        val _clean = dir_remove_all(root)
+        expect(dir_create_all(root + "/.git")).to_equal(true)
+        expect(dir_create_all(root + "/scripts/check")).to_equal(true)
+        expect(dir_create_all(root + "/src/pkg_a")).to_equal(true)
+        expect(dir_create_all(root + "/src/pkg_b")).to_equal(true)
+        val baseline_file = root + "/scripts/check/private_import_baseline.txt"
+        expect(write_file(baseline_file, "src/pkg_a/alpha.spl|alpha_priv\nsrc/pkg_b/beta.spl|beta_priv\n")).to_equal(true)
+        val mod_a = root + "/src/pkg_a/alpha.spl"
+        val mod_b = root + "/src/pkg_b/beta.spl"
+        expect(write_file(mod_a, "fn alpha_priv(): pass\n")).to_equal(true)
+        expect(write_file(mod_b, "fn beta_priv(): pass\n")).to_equal(true)
+
+        val sess = rt_session_heap_begin()
+        expect(sess > 0u32).to_equal(true)
+
+        step("Module 0 populates private-import caches inside an active transient scope without promote")
+        expect(rt_transient_array_scope_begin()).to_equal(true)
+        expect(private_import_is_baselined(mod_a, "alpha_priv")).to_equal(true)
+        expect(private_import_is_baselined(mod_a, "absent_sym")).to_equal(false)
+        expect(rt_transient_array_scope_end()).to_equal(true)
+
+        step("Remove .git and baseline on disk so Module 1 depends on session-owned caches")
+        expect(file_delete(baseline_file)).to_equal(true)
+        expect(dir_remove_all(root + "/.git")).to_equal(true)
+
+        step("Module 1 reads session-owned root and baseline caches inside a fresh transient scope")
+        expect(rt_transient_array_scope_begin()).to_equal(true)
+        expect(private_import_repo_root(mod_a)).to_equal(root)
+        expect(private_import_repo_root(mod_b)).to_equal(root)
+        expect(private_import_is_baselined(mod_b, "beta_priv")).to_equal(true)
+        expect(private_import_is_baselined(mod_a, "alpha_priv")).to_equal(true)
+        expect(rt_transient_array_scope_end()).to_equal(true)
+
+        expect(rt_session_heap_end(sess)).to_equal(true)
+        expect(private_import_repo_root(mod_a)).to_equal("")
+        expect(private_import_is_baselined(mod_a, "alpha_priv")).to_equal(false)
+        val _rm = dir_remove_all(root)
+
+    it "tracks session id for non-module-scoped lookups and invalidates across session teardown":
+        step("Populate caches during active session outside module scope, then tear down session")
+        val root = get_temp_dir() + "/simple_g3_priv_session_invalidation_test"
+        val _clean = dir_remove_all(root)
+        expect(dir_create_all(root + "/.git")).to_equal(true)
+        expect(dir_create_all(root + "/scripts/check")).to_equal(true)
+        expect(dir_create_all(root + "/src/pkg_c")).to_equal(true)
+        val baseline_file = root + "/scripts/check/private_import_baseline.txt"
+        expect(write_file(baseline_file, "src/pkg_c/gamma.spl|gamma_priv\n")).to_equal(true)
+        val mod_c = root + "/src/pkg_c/gamma.spl"
+        expect(write_file(mod_c, "fn gamma_priv(): pass\n")).to_equal(true)
+
+        val sess1 = rt_session_heap_begin()
+        expect(sess1 > 0u32).to_equal(true)
+        expect(private_import_repo_root(mod_c)).to_equal(root)
+        expect(private_import_is_baselined(mod_c, "gamma_priv")).to_equal(true)
+        expect(file_delete(baseline_file)).to_equal(true)
+        expect(dir_remove_all(root + "/.git")).to_equal(true)
+        expect(rt_session_heap_end(sess1)).to_equal(true)
+
+        step("After session end, stale session caches are invalidated rather than reused")
+        expect(private_import_repo_root(mod_c)).to_equal("")
+        expect(private_import_is_baselined(mod_c, "gamma_priv")).to_equal(false)
+        val _rm = dir_remove_all(root)
+
+    it "clones non-empty text into session ownership via private_import_clone_text":
+        expect(private_import_clone_text("")).to_equal("")
+        expect(private_import_clone_text("x")).to_equal("x")
+        expect(private_import_clone_text("src/pkg_a")).to_equal("src/pkg_a")
+        val src = file_read_nullable("src/compiler/20.hir/hir_lowering/_Items/module_import_resolution.spl") ?? ""
+        expect(src).to_contain("private_import_clone_text(found_root)")
+        expect(src).to_contain("private_import_clone_text(visited[i])")
+        expect(src).to_contain("private_import_clone_text(root)")

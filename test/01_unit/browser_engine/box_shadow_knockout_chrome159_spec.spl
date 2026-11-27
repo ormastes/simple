@@ -1,0 +1,72 @@
+"""
+## Purpose and audience
+Purpose: Pin that an outer box-shadow is clipped to outside the border box
+(CSS Backgrounds 3 §7.1), as Chrome 159 paints it: a translucent rounded box
+shows the page under it, not its own shadow. All three lanes painted the
+shadow under the box, so the interior took the shadow's tint.
+Audience: Web-render maintainers of the box-shadow painters (raster and
+Draw IR).
+"""
+
+"""
+Traceability: doc/08_tracking/bug/web_layout_cascade_selector_paint_chrome159_round4_divergences_2026-11-15.md
+(outer shadow knockout).
+"""
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_software_pixels
+}
+
+# A 60x40 box at (12,12), border-radius 12px, on #1e1e2e.
+fn ko_page(bg: text, shadow: text) -> text:
+    "<!DOCTYPE html><html><body style='margin:0;background:#1e1e2e'><div style='margin:12px;width:60px;height:40px;border-radius:12px;background:" + bg + shadow + "'></div></body></html>"
+
+val KO_SHADOW = ";box-shadow:0 0 20px rgba(0,88,188,0.6)"
+val KO_TRANSLUCENT = "rgba(255,255,255,0.72)"
+
+fn ko_render(page: text, lane: text) -> [u32]:
+    if lane == "raster":
+        return simple_web_layout_render_html_software_pixels(page, 100, 70, 600000)
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale(page, 100, 70, 1, lane)
+
+fn ko_near(a: u32, b: u32) -> bool:
+    var sh = 0u32
+    while sh <= 16u32:
+        val d = ((a >> sh) & 0xFFu32) as i32 - ((b >> sh) & 0xFFu32) as i32
+        if d > 2 or d < -2:
+            return false
+        sh = sh + 8u32
+    true
+
+# Inside the box (centre and near the top edge) the shadowed render must equal
+# the unshadowed one, whose colour is Chrome's (C0C0C4); just outside the
+# top-left curve but inside the box rect the shadow must still show.
+fn ko_failures(lane: text) -> i32:
+    val plain = ko_render(ko_page(KO_TRANSLUCENT, ""), lane)
+    val shadowed = ko_render(ko_page(KO_TRANSLUCENT, KO_SHADOW), lane)
+    if plain.len() != 100 * 70 or shadowed.len() != 100 * 70:
+        return -1
+    var bad = 0
+    if not ko_near(plain[30 * 100 + 40], 0xC0C0C4u32):
+        bad = bad + 1
+    if not ko_near(shadowed[30 * 100 + 40], plain[30 * 100 + 40]):
+        bad = bad + 1
+    if not ko_near(shadowed[14 * 100 + 40], plain[14 * 100 + 40]):
+        bad = bad + 1
+    if (shadowed[12 * 100 + 12] & 0xFFFFFFu32) == 0x1E1E2Eu32:
+        bad = bad + 1
+    val opaque = ko_render(ko_page("#808080", KO_SHADOW), lane)
+    if opaque.len() != 100 * 70 or not ko_near(opaque[30 * 100 + 40], 0x808080u32):
+        bad = bad + 1
+    bad
+
+describe "outer box-shadow is knocked out under the box (Chrome 159)":
+    it "raster":
+        expect(ko_failures("raster")).to_equal(0)
+    it "cpu_simd":
+        expect(ko_failures("cpu_simd")).to_equal(0)
+    it "vulkan":
+        expect(ko_failures("vulkan")).to_equal(0)

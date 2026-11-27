@@ -1,8 +1,30 @@
 # native-build: std.env closure blocked by unsupported array/text methods
-## Open 2026-09-16 — needs owner triage
+## Closed 2026-11-25 — remaining native-method gap (text.find) landed in source; verified by inspection (native run env-blocked)
 
 Reviewed in the 2026-09-16 bug-ledger normalization pass; no resolution
 evidence found in the body. This is bookkeeping, not verification.
+
+## Verification 2026-11-25 (p2w4-ag lane, release/1.0.0 @ 63e791180d3)
+
+The "Remaining gap (OPEN)" section named exactly one unresolved method:
+`text.find` in `expand_var_expr`. That lowering now exists in source:
+
+- `src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl:5346`
+  maps `case "find" | "index_of": "rt_string_find"` in the native text-method
+  table (gate at line 5253 includes `find` with `args.len() == 1`, line 5259);
+  additional `find` handling at lines 4244, 5083-5168 and
+  `builtin_method_extras.spl:451,555`.
+- `.join`/`.last`/`.pop` were already recorded as resolved upstream in the
+  interim (this doc, 2026-07-16 note).
+
+A live native-build re-run of the doc's repro on this Windows host was
+attempted and is **env-blocked**: the pinned Rust seed (v1.0.0-rc.1) rejects
+the `@representation_boundary` decorators added repo-wide by cfd89933699
+(`error: semantic: src/app/cli/native_build_main.spl:239:1: unknown decorator
+'@representation_boundary'`), so `native-build` cannot run at HEAD with this
+binary. Verification is therefore by code inspection only; the separate
+rt_env_* text-ABI runtime cluster stays tracked in its own record. Marking
+this bug's method-support gap resolved on the landed lowering.
 
 **Severity:** medium (loud fail — no silent wrongness; blocks any native-build
 entry that transitively imports std.env.variables / std.path)
@@ -103,3 +125,9 @@ env -u SIMPLE_BOOTSTRAP -u SIMPLE_RUNTIME_PATH SIMPLE_NO_STUB_FALLBACK=1 \
 # tip: unresolved name: rt_env_get / name; after fixes: unresolved method call: find/join/last/pop
 ```
 
+
+## 2026-11-05 note (mirp2-B)
+"Closure" here means the import closure of std.env, not lambdas. Not re-probed
+natively this session. Left OPEN; next step: native-build an entry importing
+`std.nogc_sync_mut.env.platform.{detect_os}` with s3_fable44 and record whether
+array find/join/last/pop and text methods still fail.

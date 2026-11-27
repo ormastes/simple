@@ -95,6 +95,9 @@ const SPEC_EXAMPLE_DROPPED_EXIT: i32 = 1;
 /// `timeout(1)`), so an outer classifier that knows nothing about this file still
 /// reads it as "killed on time", not "the examples failed".
 const SPEC_TIMEOUT_EXIT: i32 = 124;
+/// Exit status of a BLOCKED spec file (environment missing): distinct from pass
+/// (0) and failure (1). Matches `TestRunOutcome.BlockedScenario` (6).
+const SPEC_BLOCKED_EXIT: i32 = 6;
 
 /// The classified terminal outcome of running one spec file, as seen from INSIDE
 /// the process that ran it.
@@ -130,6 +133,9 @@ enum SpecOutcome {
     Timeout,
     /// Never launched. UNVERIFIED.
     NotRun,
+    /// Completed, nothing failed, and at least one example was environment-gated
+    /// (`pending("BLOCKED: ...")` / `Err("precondition: ...")`). Never a pass.
+    Blocked,
 }
 
 impl SpecOutcome {
@@ -142,6 +148,7 @@ impl SpecOutcome {
             SpecOutcome::Terminated => "TERMINATED",
             SpecOutcome::Timeout => "TIMEOUT",
             SpecOutcome::NotRun => "NOT_RUN",
+            SpecOutcome::Blocked => "BLOCKED",
         }
     }
 
@@ -150,14 +157,14 @@ impl SpecOutcome {
     /// `false` for the UNVERIFIED classes, whose partial tallies must not be
     /// counted as failures or drops.
     fn is_verified(self) -> bool {
-        matches!(self, SpecOutcome::Ok | SpecOutcome::Error | SpecOutcome::Crashed)
+        matches!(self, SpecOutcome::Ok | SpecOutcome::Error | SpecOutcome::Crashed | SpecOutcome::Blocked)
     }
 
     /// Whether `executed < declared` is meaningful as a *silent drop* for this
     /// outcome. Only a normally-completed run qualifies: every other class has an
     /// independent reason for having executed fewer examples.
     fn drop_check_applies(self) -> bool {
-        matches!(self, SpecOutcome::Ok)
+        matches!(self, SpecOutcome::Ok | SpecOutcome::Blocked)
     }
 
     /// The process status for this outcome, given the status the run itself
@@ -166,6 +173,8 @@ impl SpecOutcome {
     fn exit_code(self, module_exit_code: i32) -> i32 {
         match self {
             SpecOutcome::Timeout => SPEC_TIMEOUT_EXIT,
+            // 6 = TestRunOutcome.BlockedScenario in the pure-Simple runner.
+            SpecOutcome::Blocked => SPEC_BLOCKED_EXIT,
             _ => module_exit_code,
         }
     }
@@ -274,7 +283,11 @@ fn report_spec_file_verdict(
 
     let (counted_total, failed) = bdd_example_counts(results);
     let passed = counted_total.saturating_sub(failed);
-    let skipped = executed.saturating_sub(counted_total);
+    // BLOCKED examples (environment missing) are recorded as skipped in the
+    // result table; split them out so `skipped` stays host-unavailable skips only.
+    let skipped_all = executed.saturating_sub(counted_total);
+    let blocked = simple_compiler::interpreter::get_blocked_test_count().min(skipped_all);
+    let skipped = skipped_all - blocked;
     // An UNVERIFIED run executed fewer examples than it declared BY DEFINITION —
     // it was killed. That is not a silent drop and must never be reported as one.
     // A CRASHED run also executes fewer examples than it declared, but the cause
@@ -301,6 +314,8 @@ fn report_spec_file_verdict(
     // test_runner_exits_zero_on_failed_spec_2026-08-21.md
     let outcome = if failed > 0 && outcome == SpecOutcome::Ok {
         SpecOutcome::Error
+    } else if blocked > 0 && outcome == SpecOutcome::Ok {
+        SpecOutcome::Blocked
     } else {
         outcome
     };
@@ -311,7 +326,7 @@ fn report_spec_file_verdict(
     };
 
     println!(
-        "SPEC FILE VERDICT: {} outcome={} declared>={} executed={} passed={} failed={} skipped={} dropped={}",
+        "SPEC FILE VERDICT: {} outcome={} declared>={} executed={} passed={} failed={} skipped={} blocked={} dropped={}",
         path.display(),
         outcome.as_str(),
         declared,
@@ -319,6 +334,7 @@ fn report_spec_file_verdict(
         passed,
         failed,
         skipped,
+        blocked,
         dropped
     );
 
@@ -342,6 +358,10 @@ fn report_spec_file_verdict(
         if module_exit_code == 0 {
             return SPEC_EXAMPLE_DROPPED_EXIT;
         }
+    }
+
+    if outcome == SpecOutcome::Blocked {
+        return outcome.exit_code(module_exit_code);
     }
 
     module_exit_code

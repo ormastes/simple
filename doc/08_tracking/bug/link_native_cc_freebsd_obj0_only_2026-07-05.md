@@ -10,6 +10,21 @@ related: src/compiler/70.backend/linker/linking_process.spl
 
 # Native linking: FreeBSD branch ignores runtime objects (uses only object_files[0])
 
+## Verification 2026-11-25 (lane p2w3-aa) — source fix confirmed present; live FreeBSD evidence still pending
+
+Source inspection on release/1.0.0 tip confirms the fix is real and current:
+the `os_name == "freebsd"` branch of
+`src/compiler/70.backend/linker/_LinkerWrapper/native_linking.spl` (~line
+2738) builds its argument list with `for obj in
+cc_fallback_object_args(object_files)`, so every object (user objects,
+runtime objects, entry shim) is linked — no `object_files[0]` truncation
+remains anywhere in the branch. The helper `cc_fallback_object_args` is
+defined at line 2273. Remaining gap is unchanged from the header: a fresh
+FreeBSD QEMU `--full` receipt (`sh
+scripts/check/check-freebsd-bootstrap-qemu.shs --full`) requires a Linux/QEMU
+host; this Windows host cannot produce it. Status stays FIXED IN SOURCE —
+VERIFICATION PENDING, with the source half re-confirmed.
+
 ## Summary
 
 The FreeBSD native linking code path previously built link arguments from

@@ -1,0 +1,68 @@
+# Purpose and audience: executable specification for the Caret observer attention inbox (pure core).
+# @req REQ-CARET-OBS-003
+# Design: caret suite plan 2026-11-14 section 7.4.
+
+use std.spec
+use std.spec.step
+use app.llm_caret.observer.state_axes.*
+use app.llm_caret.observer.attention_inbox.*
+
+fn ev(session: text, generation: i64, op: text, kind: Attention) -> AttentionEvent:
+    AttentionEvent(session_id: session, generation: generation, operation_id: op, kind: kind, summary: "needs you")
+
+describe "observer attention inbox":
+    it "starts empty":
+        # @req REQ-CARET-OBS-003
+        step("empty inbox")
+        expect(attention_unread(attention_inbox_new()).len()).to_equal(0)  # oracle: nothing added
+
+    it "dedupes the same key (CU-009)":
+        # @req REQ-CARET-OBS-003
+        step("add same event twice")
+        var i = attention_inbox_new()
+        i = attention_add(i, ev("s1", 1, "op1", Attention.Approval))
+        i = attention_add(i, ev("s1", 1, "op1", Attention.Approval))
+        expect(attention_unread(i).len()).to_equal(1)  # oracle: duplicate key collapses to one
+
+    it "a new generation is a different key":
+        # @req REQ-CARET-OBS-003
+        step("add generation 1 and 2")
+        var i = attention_inbox_new()
+        i = attention_add(i, ev("s1", 1, "op1", Attention.Approval))
+        i = attention_add(i, ev("s1", 2, "op1", Attention.Approval))
+        expect(attention_unread(i).len()).to_equal(2)  # oracle: two generations, two keys
+
+    it "different kind or operation is a different key":
+        # @req REQ-CARET-OBS-003
+        step("vary kind and operation")
+        var i = attention_inbox_new()
+        i = attention_add(i, ev("s1", 1, "op1", Attention.Approval))
+        i = attention_add(i, ev("s1", 1, "op1", Attention.Question))
+        i = attention_add(i, ev("s1", 1, "op2", Attention.Approval))
+        expect(attention_unread(i).len()).to_equal(3)  # oracle: three distinct keys
+
+    it "ack removes from unread and a re-add does not resurrect it":
+        # @req REQ-CARET-OBS-003
+        step("ack then re-add")
+        var i = attention_add(attention_inbox_new(), ev("s1", 1, "op1", Attention.Approval))
+        i = attention_ack(i, "s1", 1, "op1", Attention.Approval)
+        expect(attention_unread(i).len()).to_equal(0)  # oracle: acked entry is read
+        i = attention_add(i, ev("s1", 1, "op1", Attention.Approval))
+        expect(attention_unread(i).len()).to_equal(0)  # oracle: dedupe keeps ack state
+
+    it "snoozed entries are not unread":
+        # @req REQ-CARET-OBS-003
+        step("snooze one of two")
+        var i = attention_add(attention_inbox_new(), ev("s1", 1, "op1", Attention.Approval))
+        i = attention_add(i, ev("s2", 1, "op1", Attention.Error))
+        i = attention_snooze(i, "s1", 1, "op1", Attention.Approval)
+        val unread = attention_unread(i)
+        expect(unread.len()).to_equal(1)  # oracle: one snoozed, one left
+        expect(unread[0].session_id).to_equal("s2")
+
+    it "ack of an unknown key leaves the inbox unchanged":
+        # @req REQ-CARET-OBS-003
+        step("ack missing")
+        var i = attention_add(attention_inbox_new(), ev("s1", 1, "op1", Attention.DoneUnread))
+        i = attention_ack(i, "zzz", 1, "op1", Attention.DoneUnread)
+        expect(attention_unread(i).len()).to_equal(1)  # oracle: nothing matched

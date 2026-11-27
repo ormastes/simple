@@ -1,3 +1,4 @@
+#![allow(REQC004)]
 # Vulkan Type Mapper - Vulkan/SPIR-V-Specific Type Mapping Implementation
 #
 # Maps MIR types to SPIR-V type strings/opcodes.
@@ -7,6 +8,7 @@ use compiler.mir.mir_data.*
 use compiler.backend.common.type_mapper.*
 use compiler.hir.hir_types.MemorySpace
 use compiler.mir.mir_types.{MirType}
+use compiler.hir.hir_types.{SymbolId}
 
 # ============================================================================
 # Vulkan Type Mapper
@@ -38,122 +40,34 @@ class VulkanTypeMapper:
 
     vulkan_version: (i64, i64)  # e.g., (1, 3) for Vulkan 1.3
     spirv_version: (i64, i64)   # e.g., (1, 6) for SPIR-V 1.6
+    type_defs: Dict<SymbolId, MirTypeDef>  # MirModule.types; resolves Struct(SymbolId) layout
 
     static fn create() -> VulkanTypeMapper:
         """Create mapper for Vulkan 1.3 / SPIR-V 1.6 (default)."""
         VulkanTypeMapper(
             vulkan_version: (1, 3),
-            spirv_version: (1, 6)
+            spirv_version: (1, 6),
+            type_defs: {}
         )
 
     static fn create_version(vk_major: i64, vk_minor: i64, spv_major: i64, spv_minor: i64) -> VulkanTypeMapper:
         """Create mapper for specific Vulkan/SPIR-V versions."""
         VulkanTypeMapper(
             vulkan_version: (vk_major, vk_minor),
-            spirv_version: (spv_major, spv_minor)
+            spirv_version: (spv_major, spv_minor),
+            type_defs: {}
         )
 
-impl TypeMapper for VulkanTypeMapper:
-    fn map_primitive(ty: PrimitiveType) -> text:
-        """
-        Map primitive types to SPIR-V type opcodes.
-
-        SPIR-V type opcodes:
-        - OpTypeInt width signed (1=signed, 0=unsigned)
-        - OpTypeFloat width
-        - OpTypeBool
-        - OpTypeVoid
-        """
-        match ty:
-            case I64: "OpTypeInt 64 1"
-            case I32: "OpTypeInt 32 1"
-            case I16: "OpTypeInt 16 1"
-            case I8: "OpTypeInt 8 1"
-            case U64: "OpTypeInt 64 0"
-            case U32: "OpTypeInt 32 0"
-            case U16: "OpTypeInt 16 0"
-            case U8: "OpTypeInt 8 0"
-            case F64: "OpTypeFloat 64"
-            case F32: "OpTypeFloat 32"
-            case F16: "OpTypeFloat 16"
-            case Bool: "OpTypeBool"
-            case Unit: "OpTypeVoid"
-
-    fn map_pointer(pointee: text, mutability: Mutability) -> text:
-        """
-        Map pointer types to SPIR-V representation.
-
-        SPIR-V pointers include storage class:
-        OpTypePointer StorageClass Type
-        """
-        # Default to StorageBuffer for global pointers
-        "OpTypePointer StorageBuffer {pointee}"
-
-    fn backend_name() -> text:
-        "Vulkan/SPIR-V"
-
-    fn map_memory_space(space: MemorySpace) -> text:
-        """
-        Map GPU memory space to SPIR-V storage class.
-
-        SPIR-V storage classes:
-        - StorageBuffer: Device global memory (SSBO)
-        - Workgroup: Shared memory
-        - Function: Thread-local
-        - Uniform: Uniform buffer (read-only)
-        - PushConstant: Push constants
-        """
-        match space:
-            case Global: "StorageBuffer"
-            case Shared: "Workgroup"
-            case Local: "Function"
-            case Constant: "Uniform"
-            case Uniform: "Uniform"
-
-    fn map_vector_type(elem: text, width: i64) -> text:
-        """
-        Map SIMD/vector type to SPIR-V vector type.
-
-        SPIR-V: OpTypeVector component_type component_count
-        Valid widths: 2, 3, 4 (8, 16 with extensions)
-        """
-        if width >= 2 and width <= 4:
-            "OpTypeVector {elem} {width}"
-        else:
-            # Fallback to array for non-standard widths
-            "OpTypeArray {elem} {width}"
-
-    fn supports_half_precision() -> bool:
-        """
-        Check if SPIR-V supports half precision.
-        Requires Float16 capability.
-        """
-        true  # Modern Vulkan/SPIR-V supports f16
-
-    fn supports_gpu() -> bool:
-        val (major, _) = self.vulkan_version
-        major == major
+    fn with_type_defs(defs: Dict<SymbolId, MirTypeDef>) -> VulkanTypeMapper:
+        """Copy of this mapper that resolves Struct(SymbolId) against the MIR module type table."""
+        VulkanTypeMapper(
+            vulkan_version: self.vulkan_version,
+            spirv_version: self.spirv_version,
+            type_defs: defs
+        )
 
 impl VulkanTypeMapper:
     # === SPIR-V-specific methods ===
-
-    fn map_struct(fields: [(text, MirType)]) -> text:
-        """
-        Map struct type to SPIR-V representation.
-
-        SPIR-V: OpTypeStruct member_types...
-        """
-        val field_types = fields.map(self.map_type(_.1))
-        "OpTypeStruct {field_types.join(' ')}"
-
-    fn map_array(element: MirType, size: i64) -> text:
-        """
-        Map array type to SPIR-V representation.
-
-        SPIR-V: OpTypeArray element_type length
-        """
-        val elem_ty = self.map_type(element)
-        "OpTypeArray {elem_ty} {size}"
 
     fn map_runtime_array(element: MirType) -> text:
         """
@@ -164,28 +78,6 @@ impl VulkanTypeMapper:
         """
         val elem_ty = self.map_type(element)
         "OpTypeRuntimeArray {elem_ty}"
-
-    fn map_tuple(elements: [MirType]) -> text:
-        """
-        Map tuple type to SPIR-V struct representation.
-
-        SPIR-V doesn't have tuples, use struct.
-        """
-        if elements.len() == 0:
-            "OpTypeStruct"
-        else:
-            val elem_types = elements.map(self.map_type(_))
-            "OpTypeStruct {elem_types.join(' ')}"
-
-    fn map_function(params: [MirType], ret: MirType) -> text:
-        """
-        Map function type to SPIR-V function type.
-
-        SPIR-V: OpTypeFunction return_type param_types...
-        """
-        val param_types = params.map(self.map_type(_))
-        val ret_type = self.map_type(ret)
-        "OpTypeFunction {ret_type} {param_types.join(' ')}"
 
     fn map_image_type(dim: SpirvImageDim, sampled: bool, depth: bool) -> text:
         """
@@ -286,7 +178,126 @@ impl VulkanTypeMapper:
         """
         32  # Conservative default
 
-    # === Size and alignment (SPIR-V/Vulkan rules) ===
+impl TypeMapper for VulkanTypeMapper:
+    fn map_primitive(ty: PrimitiveType) -> text:
+        """
+        Map primitive types to SPIR-V type opcodes.
+
+        SPIR-V type opcodes:
+        - OpTypeInt width signed (1=signed, 0=unsigned)
+        - OpTypeFloat width
+        - OpTypeBool
+        - OpTypeVoid
+        """
+        match ty:
+            case I64: "OpTypeInt 64 1"
+            case I32: "OpTypeInt 32 1"
+            case I16: "OpTypeInt 16 1"
+            case I8: "OpTypeInt 8 1"
+            case U64: "OpTypeInt 64 0"
+            case U32: "OpTypeInt 32 0"
+            case U16: "OpTypeInt 16 0"
+            case U8: "OpTypeInt 8 0"
+            case F64: "OpTypeFloat 64"
+            case F32: "OpTypeFloat 32"
+            case F16: "OpTypeFloat 16"
+            case Bool: "OpTypeBool"
+            case Unit: "OpTypeVoid"
+
+    fn map_pointer(pointee: text, mutability: Mutability) -> text:
+        """
+        Map pointer types to SPIR-V representation.
+
+        SPIR-V pointers include storage class:
+        OpTypePointer StorageClass Type
+        """
+        # Default to StorageBuffer for global pointers
+        "OpTypePointer StorageBuffer {pointee}"
+
+    fn backend_name() -> text:
+        "Vulkan/SPIR-V"
+
+    fn map_memory_space(space: MemorySpace) -> text:
+        """
+        Map GPU memory space to SPIR-V storage class.
+
+        SPIR-V storage classes:
+        - StorageBuffer: Device global memory (SSBO)
+        - Workgroup: Shared memory
+        - Function: Thread-local
+        - Uniform: Uniform buffer (read-only)
+        - PushConstant: Push constants
+        """
+        match space:
+            case Global: "StorageBuffer"
+            case Shared: "Workgroup"
+            case Local: "Function"
+            case Constant: "Uniform"
+            case Uniform: "Uniform"
+
+    fn map_vector_type(elem: text, width: i64) -> text:
+        """
+        Map SIMD/vector type to SPIR-V vector type.
+
+        SPIR-V: OpTypeVector component_type component_count
+        Valid widths: 2, 3, 4 (8, 16 with extensions)
+        """
+        if width >= 2 and width <= 4:
+            "OpTypeVector {elem} {width}"
+        else:
+            # Fallback to array for non-standard widths
+            "OpTypeArray {elem} {width}"
+
+    fn supports_half_precision() -> bool:
+        """
+        Check if SPIR-V supports half precision.
+        Requires Float16 capability.
+        """
+        true  # Modern Vulkan/SPIR-V supports f16
+
+    fn supports_gpu() -> bool:
+        val (major, _) = self.vulkan_version
+        major == major
+
+    fn map_struct(fields: [(text, MirType)]) -> text:
+        """
+        Map struct type to SPIR-V representation.
+
+        SPIR-V: OpTypeStruct member_types...
+        """
+        val field_types = fields.map(self.map_type(_.1))
+        "OpTypeStruct {field_types.join(' ')}"
+
+    fn map_array(element: MirType, size: i64) -> text:
+        """
+        Map array type to SPIR-V representation.
+
+        SPIR-V: OpTypeArray element_type length
+        """
+        val elem_ty = self.map_type(element)
+        "OpTypeArray {elem_ty} {size}"
+
+    fn map_tuple(elements: [MirType]) -> text:
+        """
+        Map tuple type to SPIR-V struct representation.
+
+        SPIR-V doesn't have tuples, use struct.
+        """
+        if elements.len() == 0:
+            "OpTypeStruct"
+        else:
+            val elem_types = elements.map(self.map_type(_))
+            "OpTypeStruct {elem_types.join(' ')}"
+
+    fn map_function(params: [MirType], ret: MirType) -> text:
+        """
+        Map function type to SPIR-V function type.
+
+        SPIR-V: OpTypeFunction return_type param_types...
+        """
+        val param_types = params.map(self.map_type(_))
+        val ret_type = self.map_type(ret)
+        "OpTypeFunction {ret_type} {param_types.join(' ')}"
 
     fn size_of(ty: MirType) -> i64:
         """
@@ -299,21 +310,32 @@ impl VulkanTypeMapper:
             case I8 | U8 | Bool: 1
             case Unit: 0
             case Ptr(_, _): 8  # 64-bit logical pointers
-            case Struct(fields):
-                # std430 layout with padding
-                var offset = 0
-                for f in fields:
-                    val align = self.align_of(f.1)
-                    offset = ((offset + align - 1) / align) * align
-                    offset = offset + self.size_of(f.1)
-                offset
+            case Struct(sym):
+                # std430 layout with padding; fields come from the module type table.
+                if self.type_defs.contains_key(sym):
+                    val type_def: MirTypeDef = self.type_defs[sym]
+                    match type_def.kind:
+                        case MirTypeDefKind.Struct(fields):
+                            var offset = 0
+                            for f in fields:
+                                val align = self.align_of(f.type_)
+                                offset = ((offset + align - 1) / align) * align
+                                offset = offset + self.size_of(f.type_)
+                            offset
+                        case _: 8
+                else:
+                    # symbol absent from the table: legacy pointer-passed slot
+                    8
             case Array(elem, size):
                 val elem_size = self.size_of(elem)
                 val elem_align = self.align_of(elem)
                 val stride = ((elem_size + elem_align - 1) / elem_align) * elem_align
                 stride * size
             case Tuple(elements):
-                elements.map(self.size_of(_)).sum()
+                var elements_size: i64 = 0
+                for element in elements:
+                    elements_size = elements_size + self.size_of(element)
+                elements_size
             case _:
                 panic("Cannot compute size of {ty}")
 
@@ -326,14 +348,22 @@ impl VulkanTypeMapper:
             case I32 | U32 | F32: 4
             case I16 | U16: 2
             case I8 | U8 | Bool: 1
-            case Struct(fields):
+            case Struct(sym):
                 # Struct alignment is largest member alignment.
-                var max_align = 1
-                for field in fields:
-                    val alignment = self.align_of(field.1)
-                    if alignment > max_align:
-                        max_align = alignment
-                max_align
+                if self.type_defs.contains_key(sym):
+                    val type_def: MirTypeDef = self.type_defs[sym]
+                    match type_def.kind:
+                        case MirTypeDefKind.Struct(fields):
+                            var max_align = 1
+                            for field in fields:
+                                val alignment = self.align_of(field.type_)
+                                if alignment > max_align:
+                                    max_align = alignment
+                            max_align
+                        case _: 8
+                else:
+                    # symbol absent from the table: legacy pointer-passed slot
+                    8
             case Array(elem, _):
                 # Array alignment is element alignment (std430)
                 self.align_of(elem)

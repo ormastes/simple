@@ -66,10 +66,39 @@ describe "driver memory lifecycle family invariants":
         # @req REQ-SSPEC-COMPILER
         step("never constructs the HIR lowerer inside the per-source loop")
         val source = file_read(HIR)
-        val loop = source.index_of("while source_idx < self.ctx.sources.len():")
-        expect(loop).to_be_greater_than(0)
-        val body = source.substring(loop, source.len())
-        expect(body).to_not_contain("hirlowering_for_module_with_diagnostics(")        expect(body).to_not_contain("hirlowering_new()")
+        # 2026-11-10 re-anchor: the old `while source_idx < ...` loop header was
+        # renamed to `while hir_loop_pos < hir_visit_order.len():` on both
+        # per-source paths. Guard each path's loop tail separately so a
+        # constructor introduced between the two loops cannot be mistaken for
+        # in-loop construction (the reuse contract spec owns the fine-grained
+        # ordering; this is the family-level tripwire).
+        val streaming_start = source.index_of(
+            "me lower_and_check_streaming_surfaces_impl() -> bool:")
+        val streaming_end = source.index_of("me lower_and_check_impl()", streaming_start)
+        expect(streaming_start).to_be_greater_than(0)
+        expect(streaming_end).to_be_greater_than(streaming_start)
+        val streaming = source.substring(streaming_start, streaming_end)
+        val streaming_loop = streaming.index_of(
+            "while hir_loop_pos < hir_visit_order.len():")
+        expect(streaming_loop).to_be_greater_than(0)
+        val streaming_tail = streaming.substring(streaming_loop, streaming.len())
+        expect(streaming_tail).to_not_contain("hirlowering_for_module_with_diagnostics(")
+        expect(streaming_tail).to_not_contain("hirlowering_new()")
+        val impl_start = source.index_of("if self.ctx.sources.len() <= 0:")
+        expect(impl_start).to_be_greater_than(0)
+        val owner_start = source.index_of(
+            "var phase_hir_modules: Dict<text, HirModule>", impl_start)
+        val owner_end = source.index_of(
+            "# Step 3b: ParserTrait coherence checking", owner_start)
+        expect(owner_start).to_be_greater_than(0)
+        expect(owner_end).to_be_greater_than(owner_start)
+        val owner = source.substring(owner_start, owner_end)
+        val retained_loop = owner.index_of(
+            "while hir_loop_pos < hir_visit_order.len():")
+        expect(retained_loop).to_be_greater_than(0)
+        val retained_tail = owner.substring(retained_loop, owner.len())
+        expect(retained_tail).to_not_contain("hirlowering_for_module_with_diagnostics(")
+        expect(retained_tail).to_not_contain("hirlowering_new()")
     it "reuses one diagnostics buffer and one trait-registry owner":
         # @req REQ-SSPEC-COMPILER
         step("reuses one diagnostics buffer and one trait-registry owner")

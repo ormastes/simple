@@ -1,0 +1,112 @@
+# @cover src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl 20%
+# @tag: unit, gpu, engine2d, vulkan, text, parity
+"""Vulkan vs Software parity on the text-heavy widget showcase frame.
+
+Regression spec for
+`doc/08_tracking/bug/engine2d_vulkan_software_showcase_frame_divergence_2026-07-02.md`:
+the 200x150 showcase frame differed between `SIMPLE_GUI_BACKEND=vulkan` and
+the software render in 1136 of 30000 pixels while the clear/rect parity gates
+stayed bit-exact.
+
+Each scenario replays one primitive family of the showcase on a real Vulkan
+device and on `SoftwareBackend`, so a failure names the family that diverges.
+Vulkan availability is required evidence: a missing device fails closed.
+"""
+
+use std.spec.*
+use std.gpu.engine2d.backend_vulkan.{VulkanBackend}
+use std.gpu.engine2d.backend_software.{SoftwareBackend}
+
+val W: i32 = 200
+val H: i32 = 150
+val BG: u32 = 0xFF14141Cu32
+val CARD: u32 = 0xFF1E1E28u32
+val FG: u32 = 0xFFE6E6F0u32
+val MUTED: u32 = 0xFF8A8A9Au32
+val ACCENT: u32 = 0xFF4C8DFFu32
+val WHITE: u32 = 0xFFFFFFFFu32
+val TRACK: u32 = 0xFF2A2A38u32
+
+fn _mismatches(left: [u32], right: [u32]) -> i32:
+    if left.len() != right.len():
+        return -1
+    var mismatches = 0
+    var i = 0
+    while i < left.len():
+        if left[i] != right[i]:
+            mismatches = mismatches + 1
+        i = i + 1
+    mismatches
+
+fn _vulkan_frame(family: text) -> [u32]:
+    var b = VulkanBackend.create()
+    if not b.init(W, H):
+        fail("Vulkan unavailable: " + b.last_error)
+        var none: [u32] = []
+        return none
+    b.clear(BG)
+    b.draw_rect_filled(4, 4, 192, 142, CARD)
+    if family == "rects" or family == "all":
+        b.draw_rect(10, 21, 130, 18, MUTED)
+        b.draw_rect_filled(10, 60, 130, 4, TRACK)
+        b.draw_rect_filled(10, 60, 78, 4, ACCENT)
+    if family == "text" or family == "all":
+        b.draw_text(15, 26, "Option A", FG, 7)
+        b.draw_text(146, 56, "62%", MUTED, 6)
+        b.draw_text(12, 74, "- First item", FG, 7)
+        b.draw_text(12, 86, "- Second item", FG, 7)
+        b.draw_text(12, 98, "- Third item", MUTED, 7)
+        b.draw_text(32, 112, "main.spl", MUTED, 7)
+        b.draw_text(12, 126, "Search...", MUTED, 7)
+    if family == "shapes" or family == "all":
+        b.draw_triangle_filled(126, 26, 134, 26, 130, 32, FG)
+        b.draw_circle_filled(88, 62, 6, WHITE)
+        b.draw_circle(160, 100, 4, MUTED)
+        b.draw_line(163, 103, 167, 107, MUTED, 1)
+    val readback = b.read_pixels_with_source()
+    # Provenance, so a green run cannot be a host-mirror comparing with itself.
+    print "showcase_parity family={family} device={b.session.device_name} source={readback.source} cpu_fallback={b.cpu_fallback_used} text_path={b.last_text_path} text_fallback_reason={b.last_text_fallback_reason}"
+    if readback.source != "device_readback":
+        fail("Vulkan frame was not read back from the device: " + readback.source)
+    b.shutdown()
+    readback.pixels
+
+fn _software_frame(family: text) -> [u32]:
+    var b = SoftwareBackend.create()
+    b.init(W, H)
+    b.clear(BG)
+    b.draw_rect_filled(4, 4, 192, 142, CARD)
+    if family == "rects" or family == "all":
+        b.draw_rect(10, 21, 130, 18, MUTED)
+        b.draw_rect_filled(10, 60, 130, 4, TRACK)
+        b.draw_rect_filled(10, 60, 78, 4, ACCENT)
+    if family == "text" or family == "all":
+        b.draw_text(15, 26, "Option A", FG, 7)
+        b.draw_text(146, 56, "62%", MUTED, 6)
+        b.draw_text(12, 74, "- First item", FG, 7)
+        b.draw_text(12, 86, "- Second item", FG, 7)
+        b.draw_text(12, 98, "- Third item", MUTED, 7)
+        b.draw_text(32, 112, "main.spl", MUTED, 7)
+        b.draw_text(12, 126, "Search...", MUTED, 7)
+    if family == "shapes" or family == "all":
+        b.draw_triangle_filled(126, 26, 134, 26, 130, 32, FG)
+        b.draw_circle_filled(88, 62, 6, WHITE)
+        b.draw_circle(160, 100, 4, MUTED)
+        b.draw_line(163, 103, 167, 107, MUTED, 1)
+    val pixels = b.read_pixels()
+    b.shutdown()
+    pixels
+
+describe "Vulkan vs Software showcase frame parity (200x150)":
+    it "matches on the rect family":
+        expect(_mismatches(_vulkan_frame("rects"), _software_frame("rects"))).to_equal(0)
+
+    it "matches on the text family":
+        expect(_mismatches(_vulkan_frame("text"), _software_frame("text"))).to_equal(0)
+
+    it "matches on the shape family":
+        expect(_mismatches(_vulkan_frame("shapes"), _software_frame("shapes"))).to_equal(0)
+
+    it "matches on the full text-heavy frame":
+        expect(_mismatches(_vulkan_frame("all"), _software_frame("all"))).to_equal(0)
+

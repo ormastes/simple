@@ -1,3 +1,4 @@
+#![allow(REQC004)]
 # C/C++ Type Mapper - C Backend Type Mapping Implementation
 #
 # Maps MIR types to C++20 type strings for the C backend.
@@ -10,6 +11,9 @@ use compiler.backend.common.type_mapper.*
 use compiler.backend.common.c_abi_type_mapping.{c_abi_map_type}
 use compiler.mir.mir_types.{MirType}
 use compiler.backend.backend.backend_types.{CodegenTarget}
+
+fn c_backend_unsupported_type(kind: text) -> text:
+    panic("E-BACKEND-C-TYPE-{kind}: C backend has no C type for MIR type kind {kind}")
 
 # ============================================================================
 # C Type Mapper
@@ -43,6 +47,16 @@ class CTypeMapper:
         else:
             CTypeMapper(target_bits: 64, type_names: {})
 
+impl CTypeMapper:
+    me register_type(sym_id: i64, c_name: text):
+        """Register a C type name for a MIR struct/enum symbol id (for generic type name sanitization)."""
+        self.type_names[sym_id] = c_name
+
+    fn map_return_type(ty: MirType) -> text:
+        match ty.kind:
+            case Unit: "void"
+            case _: self.map_type(ty)
+
 impl TypeMapper for CTypeMapper:
     fn map_primitive(ty: PrimitiveType) -> text:
         match ty:
@@ -54,6 +68,8 @@ impl TypeMapper for CTypeMapper:
             case F32: "float"
             case Bool: "int64_t"
             case Unit: "void"
+            case _:
+                todo("handle remaining cases")
 
     fn map_pointer(pointee: text, mutability: Mutability) -> text:
         "void*"
@@ -61,18 +77,24 @@ impl TypeMapper for CTypeMapper:
     fn backend_name() -> text:
         "C"
 
-impl CTypeMapper:
-    me register_type(sym_id: i64, c_name: text):
-        """Register a C type name for a MIR struct/enum symbol id (for generic type name sanitization)."""
-        self.type_names[sym_id] = c_name
-
     fn map_type(ty: MirType) -> text:
-        c_abi_map_type(ty, self.type_names)
-
-    fn map_return_type(ty: MirType) -> text:
+        # Explicit C-backend arms for kinds the shared C ABI mapper would
+        # otherwise collapse to void* (restores e299033a52d after the release
+        # transplant 88aac2ffe28 moved this mapper onto c_abi_map_type).
         match ty.kind:
-            case Unit: "void"
-            case _: self.map_type(ty)
+            case Bits(width, signed):
+                if width > 64: c_backend_unsupported_type("Bits({width} bits, wider than 64)")
+                else: c_abi_map_type(ty, self.type_names)
+            case Result(_, _):
+                # Runtime-boxed like the other aggregates; never a bare int64_t.
+                "void*"
+            case Vec4f: "float __attribute__((vector_size(16)))"
+            case Vec4i: "int32_t __attribute__((vector_size(16)))"
+            case Vec4d: "double __attribute__((vector_size(32)))"
+            case Vec8f: "float __attribute__((vector_size(32)))"
+            case Vec8i: "int32_t __attribute__((vector_size(32)))"
+            case ScalableVec(_, _): c_backend_unsupported_type("ScalableVec")
+            case _: c_abi_map_type(ty, self.type_names)
 
     fn size_of(ty: MirType) -> i64:
         match ty.kind:

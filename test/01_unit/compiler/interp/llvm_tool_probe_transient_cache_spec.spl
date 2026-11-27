@@ -1,0 +1,368 @@
+# @req REQ-LLVM-TOOL-PROBE-CACHE
+"""
+# LLVM Tool Probe Transient Cache Specification
+
+Verifies that `compiler.interp.interpreter.llvm.tools`:
+1. Includes `SIMPLE_LLVM_MINGW_ROOT/bin` in `_env_tool_dirs()` / `env_tool_dirs()`.
+2. Separates "no candidate file exists on disk" from "candidate file exists on
+   disk, but `--version` probe failed transiently".
+3. Never permanently caches `""` at `_FIND_TOOL_MAX_MISSES` when an existing
+   candidate binary fails `--version` transiently, records a diagnostic naming
+   the candidate path, and recovers when a subsequent retry succeeds (while
+   bounding permanently broken on-disk binaries at
+   `_FIND_TOOL_MAX_TRANSIENT_MISSES`).
+4. Keeps `find_tool_cache_check()` strictly read-only so concurrent cache hits
+   never race on `_last_tool_probe_diagnostic`.
+5. Never writes scope-owned strings into process-lifetime cache/diagnostic
+   globals while inside an active `transient_scope`.
+6. Still stops retrying and caches `""` after `_FIND_TOOL_MAX_MISSES` when no
+   candidate binary exists on disk (`exists = false`).
+"""
+
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.io_runtime.{env_get_or, env_set, env_remove_process}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_end}
+use compiler.interp.interpreter.llvm.tools.{
+    ToolProbeObservation, ToolProbeOutcome, ToolCacheDecision, ToolCacheLookup,
+    find_tool_max_misses, find_tool_max_transient_misses, tool_cache_can_persist,
+    env_tool_dirs_from, env_tool_dirs,
+    tool_cache_should_reuse, tool_cache_should_reuse_counts,
+    format_tool_probe_diagnostic, format_tool_probe_diagnostic_with_cap,
+    tool_probe_evaluate_observations, tool_probe_decide, tool_probe_decide_counts,
+    reset_find_tool_cache, last_tool_probe_diagnostic,
+    find_tool_cache_check, find_tool_cache_record, find_tool_cache_record_with_persist,
+    find_tool_cache_commit_probe, find_tool_cache_lock_is_free,
+    find_tool_for_candidates
+}
+
+describe("LLVM tool probe transient failure cache"):
+
+    describe("env_tool_dirs SIMPLE_LLVM_MINGW_ROOT support"):
+        it("appends SIMPLE_LLVM_MINGW_ROOT/bin in env_tool_dirs_from"):
+            val dirs = env_tool_dirs_from("", "", "", "", "C:/llvm-mingw")
+            expect(dirs.len()).to_equal(1)
+            expect(dirs[0]).to_equal("C:/llvm-mingw/bin")
+
+        it("preserves explicit and LLVM root priority before SIMPLE_LLVM_MINGW_ROOT/bin"):
+            val dirs = env_tool_dirs_from(
+                "C:/explicit/bin",
+                "C:/llvm23",
+                "C:/win23",
+                "C:/llvm18",
+                "C:/llvm-mingw"
+            )
+            expect(dirs.len()).to_equal(5)
+            expect(dirs[0]).to_equal("C:/explicit/bin")
+            expect(dirs[1]).to_equal("C:/llvm23/bin")
+            expect(dirs[2]).to_equal("C:/win23/bin")
+            expect(dirs[3]).to_equal("C:/llvm18/bin")
+            expect(dirs[4]).to_equal("C:/llvm-mingw/bin")
+
+        it("reads SIMPLE_LLVM_MINGW_ROOT into env_tool_dirs and restores prior env"):
+            val probe_root = "C:/spec-llvm-mingw-probe-root"
+            val prev_mingw = env_get_or("SIMPLE_LLVM_MINGW_ROOT", "")
+            env_set("SIMPLE_LLVM_MINGW_ROOT", probe_root)
+            val after = env_tool_dirs()
+            if prev_mingw == "":
+                env_remove_process("SIMPLE_LLVM_MINGW_ROOT")
+            else:
+                env_set("SIMPLE_LLVM_MINGW_ROOT", prev_mingw)
+            var found_dir = false
+            for d in after:
+                if d == "{probe_root}/bin":
+                    found_dir = true
+            expect(found_dir).to_equal(true)
+            expect(env_get_or("SIMPLE_LLVM_MINGW_ROOT", "")).to_equal(prev_mingw)
+
+    describe("pure probe classification and cache decisions"):
+        it("separates existing candidate --version failure from absent binary"):
+            val failed_existing = tool_probe_evaluate_observations([
+                ToolProbeObservation(path: "C:/llvm/bin/llc.exe", exists_on_disk: true, probe_ok: false)
+            ])
+            expect(failed_existing.found_path).to_equal("")
+            expect(failed_existing.had_existing_candidate).to_equal(true)
+            expect(failed_existing.failed_candidates.len()).to_equal(1)
+            expect(failed_existing.failed_candidates[0]).to_equal("C:/llvm/bin/llc.exe")
+
+            val absent = tool_probe_evaluate_observations([
+                ToolProbeObservation(path: "C:/llvm/bin/llc.exe", exists_on_disk: false, probe_ok: false)
+            ])
+            expect(absent.found_path).to_equal("")
+            expect(absent.had_existing_candidate).to_equal(false)
+            expect(absent.failed_candidates.len()).to_equal(0)
+
+        it("returns a later working candidate even if an earlier existing candidate failed"):
+            val outcome = tool_probe_evaluate_observations([
+                ToolProbeObservation(path: "C:/msys64/mingw64/bin/llc.exe", exists_on_disk: true, probe_ok: false),
+                ToolProbeObservation(path: "C:/llvm/bin/llc.exe", exists_on_disk: true, probe_ok: true)
+            ])
+            expect(outcome.found_path).to_equal("C:/llvm/bin/llc.exe")
+            expect(outcome.failed_candidates.len()).to_equal(0)
+
+        it("does not exhaust retry budget at absent cap and bounds permanently broken binaries at transient cap"):
+            val max_misses = find_tool_max_misses()
+            val max_transient = find_tool_max_transient_misses()
+            expect(max_transient).to_be_greater_than(max_misses)
+
+            val transient_outcome = ToolProbeOutcome(
+                found_path: "",
+                failed_candidates: ["C:/llvm/bin/llc.exe"],
+                had_existing_candidate: true
+            )
+            var absent_misses = 0
+            var transient_misses = 0
+            var step = 0
+            while step < max_misses + 3:
+                val d = tool_probe_decide_counts("llc-20,llc", absent_misses, transient_misses, transient_outcome)
+                absent_misses = d.absent_misses
+                transient_misses = d.transient_misses
+                expect(d.cached_path).to_equal("")
+                expect(d.absent_misses).to_equal(0)
+                expect(d.transient_misses).to_equal(step + 1)
+                expect(d.should_retry).to_equal(true)
+                expect(tool_cache_should_reuse_counts(d.cached_path, d.absent_misses, d.transient_misses)).to_equal(false)
+                expect(d.diagnostic).to_contain("C:/llvm/bin/llc.exe")
+                expect(d.diagnostic).to_contain("--version")
+                step = step + 1
+
+            val recovered = tool_probe_decide_counts("llc-20,llc", absent_misses, transient_misses, ToolProbeOutcome(
+                found_path: "C:/llvm/bin/llc.exe",
+                failed_candidates: [],
+                had_existing_candidate: true
+            ))
+            expect(recovered.cached_path).to_equal("C:/llvm/bin/llc.exe")
+            expect(recovered.absent_misses).to_equal(0)
+            expect(recovered.transient_misses).to_equal(0)
+            expect(recovered.should_retry).to_equal(false)
+            expect(recovered.diagnostic).to_equal("")
+            expect(tool_cache_should_reuse_counts(recovered.cached_path, recovered.absent_misses, recovered.transient_misses)).to_equal(true)
+
+            # Permanently broken on-disk binary stops retrying at _FIND_TOOL_MAX_TRANSIENT_MISSES.
+            val at_cap = tool_probe_decide_counts("llc-20,llc", 0, max_transient - 1, transient_outcome)
+            expect(at_cap.transient_misses).to_equal(max_transient)
+            expect(at_cap.should_retry).to_equal(false)
+            expect(tool_cache_should_reuse_counts(at_cap.cached_path, at_cap.absent_misses, at_cap.transient_misses)).to_equal(true)
+            expect(at_cap.diagnostic).to_contain("cached broken")
+            expect(at_cap.diagnostic).to_contain("C:/llvm/bin/llc.exe")
+
+    describe("per-process cache state, read-only hits, and transient_scope safety"):
+        it("allows retry past _FIND_TOOL_MAX_MISSES on transient --version failure and recovers"):
+            reset_find_tool_cache()
+            val key = "llc-20,llc-19,llc"
+            val candidate = "C:/llvm/bin/llc.exe"
+            val max_misses = find_tool_max_misses()
+            val transient_fail = ToolProbeOutcome(
+                found_path: "",
+                failed_candidates: [candidate],
+                had_existing_candidate: true
+            )
+
+            var attempt = 0
+            while attempt < max_misses + 2:
+                val lookup = find_tool_cache_check(key)
+                expect(lookup.hit).to_equal(false)
+                val resolved = find_tool_cache_record(key, transient_fail)
+                expect(resolved).to_equal("")
+                expect(last_tool_probe_diagnostic()).to_contain(candidate)
+                expect(last_tool_probe_diagnostic()).to_contain("transient")
+                attempt = attempt + 1
+
+            # Subsequent retry succeeds once --version works again.
+            val retry_lookup = find_tool_cache_check(key)
+            expect(retry_lookup.hit).to_equal(false)
+            val recovered_path = find_tool_cache_record(key, ToolProbeOutcome(
+                found_path: candidate,
+                failed_candidates: [],
+                had_existing_candidate: true
+            ))
+            expect(recovered_path).to_equal(candidate)
+            expect(last_tool_probe_diagnostic()).to_equal("")
+
+            # Subsequent calls hit the cached working path.
+            val hit_lookup = find_tool_cache_check(key)
+            expect(hit_lookup.hit).to_equal(true)
+            expect(hit_lookup.path).to_equal(candidate)
+            expect(hit_lookup.diagnostic).to_equal("")
+            reset_find_tool_cache()
+
+        it("bounds permanently broken on-disk binary at _FIND_TOOL_MAX_TRANSIENT_MISSES"):
+            reset_find_tool_cache()
+            val key = "broken-llc-20,broken-llc"
+            val candidate = "C:/msys64/mingw64/bin/llc.exe"
+            val max_transient = find_tool_max_transient_misses()
+            val broken_outcome = ToolProbeOutcome(
+                found_path: "",
+                failed_candidates: [candidate],
+                had_existing_candidate: true
+            )
+
+            var attempt = 0
+            while attempt < max_transient:
+                val lookup = find_tool_cache_check(key)
+                expect(lookup.hit).to_equal(false)
+                expect(find_tool_cache_record(key, broken_outcome)).to_equal("")
+                attempt = attempt + 1
+
+            val capped_lookup = find_tool_cache_check(key)
+            expect(capped_lookup.hit).to_equal(true)
+            expect(capped_lookup.path).to_equal("")
+            expect(capped_lookup.diagnostic).to_contain("cached broken")
+            expect(capped_lookup.diagnostic).to_contain(candidate)
+            reset_find_tool_cache()
+
+        it("keeps find_tool_cache_check read-only without clobbering last_tool_probe_diagnostic"):
+            reset_find_tool_cache()
+            val clang_key = "clang-19,clang"
+            val clang_path = "C:/llvm-mingw/bin/clang.exe"
+            val cached_clang = find_tool_cache_record(clang_key, ToolProbeOutcome(
+                found_path: clang_path,
+                failed_candidates: [],
+                had_existing_candidate: true
+            ))
+            expect(cached_clang).to_equal(clang_path)
+
+            val llc_key = "llc-20,llc"
+            val llc_path = "C:/llvm/bin/llc.exe"
+            val _llc_res = find_tool_cache_record(llc_key, ToolProbeOutcome(
+                found_path: "",
+                failed_candidates: [llc_path],
+                had_existing_candidate: true
+            ))
+            val recorded_diag = last_tool_probe_diagnostic()
+            expect(recorded_diag).to_contain(llc_path)
+
+            # Concurrent worker cache hit on clang must NOT overwrite _last_tool_probe_diagnostic.
+            val hit_lookup = find_tool_cache_check(clang_key)
+            expect(hit_lookup.hit).to_equal(true)
+            expect(hit_lookup.path).to_equal(clang_path)
+            expect(hit_lookup.diagnostic).to_equal("")
+            expect(last_tool_probe_diagnostic()).to_equal(recorded_diag)
+            reset_find_tool_cache()
+
+        it("never writes scope-owned strings into process globals while transient_scope is active"):
+            reset_find_tool_cache()
+            val scoped_key = "scoped-llc-20,scoped-llc"
+            val scoped_path = "C:/scoped/bin/llc.exe"
+            val scoped_outcome = ToolProbeOutcome(
+                found_path: scoped_path,
+                failed_candidates: [],
+                had_existing_candidate: true
+            )
+
+            # Explicit allow_persist=false guard (simulating active transient_scope).
+            val direct_ret = find_tool_cache_record_with_persist(scoped_key, scoped_outcome, false)
+            expect(direct_ret).to_equal(scoped_path)
+            expect(find_tool_cache_check(scoped_key).hit).to_equal(false)
+            expect(last_tool_probe_diagnostic()).to_equal("")
+
+            # Real transient_scope_begin/end integration when scope starts inactive.
+            expect(tool_cache_can_persist()).to_equal(true)
+            expect(transient_scope_begin()).to_equal(true)
+            expect(tool_cache_can_persist()).to_equal(false)
+            val inside_ret = find_tool_cache_record(scoped_key, scoped_outcome)
+            expect(inside_ret).to_equal(scoped_path)
+            expect(transient_scope_end()).to_equal(true)
+            expect(tool_cache_can_persist()).to_equal(true)
+            # After scope end, nothing from inside the scope was persisted.
+            expect(find_tool_cache_check(scoped_key).hit).to_equal(false)
+            expect(last_tool_probe_diagnostic()).to_equal("")
+            reset_find_tool_cache()
+
+        it("stops retrying after _FIND_TOOL_MAX_MISSES when no candidate exists on disk"):
+            reset_find_tool_cache()
+            val key = "missing-tool-20,missing-tool"
+            val max_misses = find_tool_max_misses()
+            val absent_outcome = ToolProbeOutcome(
+                found_path: "",
+                failed_candidates: [],
+                had_existing_candidate: false
+            )
+
+            var attempt = 0
+            while attempt < max_misses:
+                val lookup = find_tool_cache_check(key)
+                expect(lookup.hit).to_equal(false)
+                val resolved = find_tool_cache_record(key, absent_outcome)
+                expect(resolved).to_equal("")
+                expect(last_tool_probe_diagnostic()).to_contain("missing")
+                attempt = attempt + 1
+
+            # Past _FIND_TOOL_MAX_MISSES, absent binary is cached as "" and stops retrying.
+            val cached_lookup = find_tool_cache_check(key)
+            expect(cached_lookup.hit).to_equal(true)
+            expect(cached_lookup.path).to_equal("")
+            expect(cached_lookup.diagnostic).to_contain("cached absent")
+            reset_find_tool_cache()
+
+        it("caches genuinely absent binary via _find_tool end-to-end after _FIND_TOOL_MAX_MISSES"):
+            reset_find_tool_cache()
+            val missing_candidates = ["__nonexistent_llvm_tool_probe_test_xyz__"]
+            val key = missing_candidates.join(",")
+            val max_misses = find_tool_max_misses()
+
+            var attempt = 0
+            while attempt < max_misses:
+                val before_lookup = find_tool_cache_check(key)
+                expect(before_lookup.hit).to_equal(false)
+                val found = find_tool_for_candidates(missing_candidates)
+                expect(found).to_equal("")
+                expect(last_tool_probe_diagnostic()).to_contain("missing")
+                attempt = attempt + 1
+
+            val after_lookup = find_tool_cache_check(key)
+            expect(after_lookup.hit).to_equal(true)
+            expect(after_lookup.path).to_equal("")
+            expect(find_tool_for_candidates(missing_candidates)).to_equal("")
+            expect(find_tool_cache_lock_is_free()).to_equal(true)
+            reset_find_tool_cache()
+            expect(find_tool_cache_lock_is_free()).to_equal(true)
+
+        it("preserves concurrent winner under find_tool_cache_commit_probe and keeps spinlock free"):
+            reset_find_tool_cache()
+            expect(find_tool_cache_lock_is_free()).to_equal(true)
+            val key = "concurrent-llc-20,concurrent-llc"
+            val winner_path = "C:/llvm/bin/llc.exe"
+
+            # Thread A discovers working binary and commits first.
+            val first_commit = find_tool_cache_commit_probe(key, ToolProbeOutcome(
+                found_path: winner_path,
+                failed_candidates: [],
+                had_existing_candidate: true
+            ))
+            expect(first_commit).to_equal(winner_path)
+            expect(find_tool_cache_lock_is_free()).to_equal(true)
+
+            # Late-arriving Thread B had a transient failure; double-check must keep winner_path.
+            val loser_commit = find_tool_cache_commit_probe(key, ToolProbeOutcome(
+                found_path: "",
+                failed_candidates: [winner_path],
+                had_existing_candidate: true
+            ))
+            expect(loser_commit).to_equal(winner_path)
+            expect(last_tool_probe_diagnostic()).to_equal("")
+            expect(find_tool_cache_lock_is_free()).to_equal(true)
+
+            # Conversely, if absent cap was hit just before a concurrent winner succeeded, winner overwrites "".
+            val race_key = "race-recover-llc"
+            val max_misses = find_tool_max_misses()
+            var i = 0
+            while i < max_misses:
+                val _m = find_tool_cache_commit_probe(race_key, ToolProbeOutcome(
+                    found_path: "",
+                    failed_candidates: [],
+                    had_existing_candidate: false
+                ))
+                i = i + 1
+            expect(find_tool_cache_check(race_key).hit).to_equal(true)
+            expect(find_tool_cache_check(race_key).path).to_equal("")
+
+            val late_win = find_tool_cache_commit_probe(race_key, ToolProbeOutcome(
+                found_path: winner_path,
+                failed_candidates: [],
+                had_existing_candidate: true
+            ))
+            expect(late_win).to_equal(winner_path)
+            expect(find_tool_cache_check(race_key).path).to_equal(winner_path)
+            expect(last_tool_probe_diagnostic()).to_equal("")
+            expect(find_tool_cache_lock_is_free()).to_equal(true)
+            reset_find_tool_cache()

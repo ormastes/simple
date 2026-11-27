@@ -1,8 +1,8 @@
 # Relocation-graph section garbage collection for internal ELF executable links.
 
 use compiler.backend.linker.elf_parser.{
-    ElfObject, ElfRelocation, elf_section_name, elf_reloc_sym, elf_symbol_binding,
-    SHN_UNDEF, STB_LOCAL, STB_GLOBAL
+    ElfObject, ElfRelocation, elf_section_name, elf_reloc_sym, elf_reloc_type, elf_symbol_binding,
+    elf_section_link, SHN_UNDEF, STB_LOCAL, STB_GLOBAL
 }
 use compiler.backend.linker.sym_resolver.{SymResolution}
 
@@ -63,6 +63,9 @@ class _GcState:
             if elf_section_name(obj, si) == ".eh_frame":
                 eh_si = si
             si = si + 1
+        self.mark_eh_frame_at(obj, oi, eh_si, res)
+
+    me mark_eh_frame_at(obj: ElfObject, oi: i64, eh_si: i64, res: SymResolution):
         if eh_si < 0 or not self.marks[self.bases[oi] + eh_si]:
             return
         val sec = obj.sections[eh_si]
@@ -219,14 +222,18 @@ fn elf_section_gc(objects: [ElfObject], res: SymResolution, entry: text,
                 state.commons[name] = true
 
     var ranges: [[i64]] = []
+    var eh_sec_idx: [i64] = []
     var oi: i64 = 0
     while oi < objects.len():
         val obj = objects[oi]
         ranges.push(_gc_reloc_ranges(obj))
+        var eh_si: i64 = -1
         var si: i64 = 1
         while si < obj.sections.len():
             val sec = obj.sections[si]
             val name = elf_section_name(obj, si)
+            if name == ".eh_frame":
+                eh_si = si
             var pattern_root = false
             for pattern in root_patterns:
                 if _gc_glob(pattern, name): pattern_root = true
@@ -237,6 +244,7 @@ fn elf_section_gc(objects: [ElfObject], res: SymResolution, entry: text,
                      name.starts_with(".preinit_array") or name == ".eh_frame" or pattern_root):
                 state.mark(oi, si)
             si = si + 1
+        eh_sec_idx.push(eh_si)
         oi = oi + 1
 
     var wi: i64 = 0
@@ -246,7 +254,7 @@ fn elf_section_gc(objects: [ElfObject], res: SymResolution, entry: text,
             oi = state.work_obj[wi]
             val si = state.work_sec[wi]
             val obj = objects[oi]
-            if elf_section_name(obj, si) == ".eh_frame":
+            if eh_sec_idx[oi] == si:
                 wi = wi + 1
                 continue
             # workaround: doc/08_tracking/bug/native_array_copy_leaks_2026-10-20.md
@@ -267,7 +275,19 @@ fn elf_section_gc(objects: [ElfObject], res: SymResolution, entry: text,
         val before = state.work_obj.len()
         oi = 0
         while oi < objects.len():
-            state.mark_eh_frame(objects[oi], oi, res)
+            if eh_sec_idx[oi] >= 0:
+                state.mark_eh_frame_at(objects[oi], oi, eh_sec_idx[oi], res)
+            # ARM .ARM.exidx (SHF_LINK_ORDER) is never a root: lld keeps an
+            # exidx input exactly when the section its sh_link names is live.
+            if objects[oi].header.e_machine == 40:
+                var xi: i64 = 1
+                while xi < objects[oi].sections.len():
+                    if objects[oi].sections[xi].sh_type == 0x70000001 and
+                            not state.marks[state.bases[oi] + xi]:
+                        val ln = elf_section_link(objects[oi], xi)
+                        if ln > 0 and ln < objects[oi].sections.len() and state.marks[state.bases[oi] + ln]:
+                            state.mark(oi, xi)
+                    xi = xi + 1
             oi = oi + 1
         scanning = state.work_obj.len() > before
     ElfSectionGc(live: state.rows(), common_live: state.commons)
@@ -296,6 +316,8 @@ fn elf_gc_undefined(objects: [ElfObject], live: [[bool]], res: SymResolution) ->
             val si = reloc.target_section_idx
             if si < 0 or si >= live[oi].len() or not live[oi][si]:
                 continue
+            if elf_reloc_type(reloc) == 0:
+                continue  # R_*_NONE (e.g. ARM exidx -> __aeabi_unwind_cpp_pr0) only orders GC
             val sym_idx = elf_reloc_sym(reloc)
             if sym_idx <= 0 or sym_idx >= obj.symbols.len():
                 continue

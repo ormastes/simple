@@ -2,7 +2,7 @@
 # Handles message fragmentation, reassembly, and multi-frame operations
 
 use std.nogc_sync_mut.websocket.types.{OPCODE_TEXT, OPCODE_BINARY, OPCODE_CONTINUATION}
-use std.nogc_sync_mut.websocket.frame.{create_frame, generate_masking_key, parse_frame, extract_mask_key, extract_payload}
+use std.nogc_sync_mut.websocket.frame.{create_frame_with_random_mask, parse_frame, extract_mask_key, extract_payload}
 use std.nogc_sync_mut.websocket.handshake.{ws_handshake_text_to_bytes as text_to_bytes}
 
 # ==============================================================================
@@ -10,14 +10,14 @@ use std.nogc_sync_mut.websocket.handshake.{ws_handshake_text_to_bytes as text_to
 # ==============================================================================
 
 fn split_into_chunks(data: List<i64>, chunk_size: i64) -> List<List<i64>>:
-    val result = []
+    var result = []
     if chunk_size <= 0:
         return result
     val len = data.length()
     var offset = 0
 
     while offset < len:
-        val chunk = []
+        var chunk = []
         val remaining = len - offset
         val size = if remaining < chunk_size: remaining else: chunk_size
 
@@ -31,47 +31,45 @@ fn split_into_chunks(data: List<i64>, chunk_size: i64) -> List<List<i64>>:
 
     result
 
-fn create_fragmented_text(text_data: text, chunk_size: i64, is_masked: i64) -> List<List<i64>>:
+fn create_fragmented_text(text_data: text, chunk_size: i64, is_masked: i64) -> Result<List<List<i64>>, text>:
     val payload = text_to_bytes(text_data)
     val chunks = split_into_chunks(payload, chunk_size)
     val num_chunks = chunks.length()
-    val frames = []
+    var frames = []
 
     var i = 0
     while i < num_chunks:
         val chunk = chunks[i]
         val is_final = if i == num_chunks - 1: 1 else: 0
         val opcode = if i == 0: OPCODE_TEXT else: OPCODE_CONTINUATION
-        val mask_key = if is_masked == 1: generate_masking_key() else: []
-        val frame = create_frame(is_final, opcode, is_masked, chunk, mask_key)
+        val frame = create_frame_with_random_mask(is_final, opcode, is_masked, chunk)?
         frames.push(frame)
         i = i + 1
 
-    frames
+    Ok(frames)
 
-fn create_fragmented_binary(data: List<i64>, chunk_size: i64, is_masked: i64) -> List<List<i64>>:
+fn create_fragmented_binary(data: List<i64>, chunk_size: i64, is_masked: i64) -> Result<List<List<i64>>, text>:
     val chunks = split_into_chunks(data, chunk_size)
     val num_chunks = chunks.length()
-    val frames = []
+    var frames = []
 
     var i = 0
     while i < num_chunks:
         val chunk = chunks[i]
         val is_final = if i == num_chunks - 1: 1 else: 0
         val opcode = if i == 0: OPCODE_BINARY else: OPCODE_CONTINUATION
-        val mask_key = if is_masked == 1: generate_masking_key() else: []
-        val frame = create_frame(is_final, opcode, is_masked, chunk, mask_key)
+        val frame = create_frame_with_random_mask(is_final, opcode, is_masked, chunk)?
         frames.push(frame)
         i = i + 1
 
-    frames
+    Ok(frames)
 
 # ==============================================================================
 # Message Reassembly
 # ==============================================================================
 
 fn reassemble_fragments(fragments: List<List<i64>>) -> List<i64>:
-    val result = []
+    var result = []
     val num_fragments = fragments.length()
 
     var i = 0
@@ -94,7 +92,7 @@ fn merge_payloads(payloads: List<List<i64>>) -> List<i64>:
 # ==============================================================================
 
 fn concatenate_frames(frames: List<List<i64>>) -> List<i64>:
-    val result = []
+    var result = []
     val num_frames = frames.length()
 
     var i = 0
@@ -110,7 +108,7 @@ fn concatenate_frames(frames: List<List<i64>>) -> List<i64>:
     result
 
 fn extract_all_payloads(frames: List<List<i64>>) -> List<List<i64>>:
-    val result = []
+    var result = []
     val num_frames = frames.length()
 
     var i = 0

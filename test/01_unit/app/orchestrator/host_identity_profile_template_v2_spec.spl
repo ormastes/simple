@@ -1,0 +1,138 @@
+# Pure installer-input/production-gate regression cases. Path values below are
+# metadata fixtures, NOT fake projection owners or evidence of current OS proof.
+# Pair acquisition/replacement/native cleanup execution remains NOT_RUN.
+use app.orchestrator.host_identity_profile_template_v2.*
+use app.orchestrator.host_identity_profile_v1.{host_identity_profile_resolve_v2,
+    host_identity_profile_prepare_v1, host_identity_profile_publication_match_v2}
+use app.orchestrator.server_ssh_profile_v1.server_ssh_profile_decode_v1
+use std.nogc_sync_mut.io.host_identity_ssh_projection_v1.HostIdentitySshPathsV1
+use std.common.sdn.value.SdnValue
+use std.common.sdn.encode.sdn_encode_canonical
+
+val TEMPLATE_ROOT = "/home/owner/.simple/identity"
+val TEMPLATE_SERVER_KEY = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAID1AF8PoQ4lakrcKp00bfrycmCzPLsSWjMDNVfEq9GYM"
+
+fn template_fields_v2() -> Dict<text, SdnValue>:
+    {"kind": SdnValue.String("server-ssh-profile-template"), "version": SdnValue.Int(1),
+        "authRef": SdnValue.String("secret://shared-host"), "trustRef": SdnValue.String("trust://build"),
+        "user": SdnValue.String("builder"), "sshExecutable": SdnValue.String("/usr/bin/ssh"),
+        "hostKeyAlias": SdnValue.String("build"), "storeRoot": SdnValue.String(TEMPLATE_ROOT),
+        "sshDigest": SdnValue.String("c".repeat(64))}
+
+fn template_source_v2(fields: Dict<text, SdnValue>) -> text:
+    sdn_encode_canonical(SdnValue.Dict(fields))
+
+fn template_path_values_v2() -> HostIdentitySshPathsV1:
+    HostIdentitySshPathsV1(identity_path: TEMPLATE_ROOT + "/journal/" + "a".repeat(64) + ".key",
+        known_hosts_path: TEMPLATE_ROOT + "/journal/" + "b".repeat(64) + ".hosts")
+
+describe "Installer-only path-free profile templates":
+    it "derives a complete canonical runtime profile through the actual production helper":
+        val selected = host_identity_profile_selection_v2(template_source_v2(template_fields_v2()), TEMPLATE_ROOT)
+        expect(selected.is_ok()).to_equal(true)
+        val input = selected.unwrap()
+        expect(input.expected_paths == nil).to_equal(true)
+        val paths = template_path_values_v2()
+        val resolved = host_identity_profile_resolve_v2(input, TEMPLATE_ROOT, paths)
+        expect(resolved.is_ok()).to_equal(true)
+        val prepared = resolved.unwrap()
+        expect(prepared.profile.auth_ref).to_equal("secret://shared-host")
+        expect(prepared.profile.trust_ref).to_equal("trust://build")
+        expect(prepared.profile.identity_path).to_equal(paths.identity_path)
+        expect(prepared.profile.known_hosts_path).to_equal(paths.known_hosts_path)
+        expect(prepared.leaf).to_end_with(".profile")
+        expect(server_ssh_profile_decode_v1(prepared.canonical).is_ok()).to_equal(true)
+        val unchanged = host_identity_profile_prepare_v1(prepared.canonical, TEMPLATE_ROOT).unwrap()
+        expect(unchanged.canonical).to_equal(prepared.canonical)
+        expect(unchanged.leaf).to_equal(prepared.leaf)
+
+    it "forbids both path fields including empty caller placeholders":
+        var private_path = template_fields_v2()
+        private_path["identityPath"] = SdnValue.String("")
+        expect(host_identity_profile_template_decode_v2(template_source_v2(private_path)).is_err()).to_equal(true)
+        var public_path = template_fields_v2()
+        public_path["knownHostsPath"] = SdnValue.String("/caller/chosen.hosts")
+        expect(host_identity_profile_template_decode_v2(template_source_v2(public_path)).is_err()).to_equal(true)
+
+    it "rejects unknown fields duplicates coercion and bounded-text violations":
+        var unknown = template_fields_v2()
+        unknown["privateKey"] = SdnValue.String("never-copy-this")
+        expect(host_identity_profile_template_decode_v2(template_source_v2(unknown)).is_err()).to_equal(true)
+        expect(host_identity_profile_template_decode_v2("version: 1\nversion: 1\nkind: server-ssh-profile-template\n").is_err()).to_equal(true)
+        var wrong_type = template_fields_v2()
+        wrong_type["sshExecutable"] = SdnValue.Int(1)
+        expect(host_identity_profile_template_decode_v2(template_source_v2(wrong_type)).is_err()).to_equal(true)
+        var overlong = template_fields_v2()
+        overlong["user"] = SdnValue.String("x".repeat(129))
+        expect(host_identity_profile_template_decode_v2(template_source_v2(overlong)).is_err()).to_equal(true)
+
+    it "rejects wrong reference schemes roots digest spelling and source kind":
+        var bad_ref = template_fields_v2()
+        bad_ref["trustRef"] = SdnValue.String("secret://wrong-role")
+        expect(host_identity_profile_template_decode_v2(template_source_v2(bad_ref)).is_err()).to_equal(true)
+        var bad_root = template_fields_v2()
+        bad_root["storeRoot"] = SdnValue.String("relative/root")
+        expect(host_identity_profile_template_decode_v2(template_source_v2(bad_root)).is_err()).to_equal(true)
+        var bad_digest = template_fields_v2()
+        bad_digest["sshDigest"] = SdnValue.String("C".repeat(64))
+        expect(host_identity_profile_template_decode_v2(template_source_v2(bad_digest)).is_err()).to_equal(true)
+        var bad_kind = template_fields_v2()
+        bad_kind["kind"] = SdnValue.String("arbitrary-config")
+        expect(host_identity_profile_selection_v2(template_source_v2(bad_kind), TEMPLATE_ROOT).is_err()).to_equal(true)
+
+    it "binds the exact root and references at the production publication gate":
+        val source = template_source_v2(template_fields_v2())
+        expect(host_identity_profile_selection_v2(source, "/other/root").is_err()).to_equal(true)
+        val input = host_identity_profile_selection_v2(source, TEMPLATE_ROOT).unwrap()
+        val paths = template_path_values_v2()
+        expect(host_identity_profile_resolve_v2(input, "/other/root", paths).is_err()).to_equal(true)
+        val prepared = host_identity_profile_resolve_v2(input, TEMPLATE_ROOT, paths).unwrap()
+        val pin = "build " + TEMPLATE_SERVER_KEY + "\n"
+        expect(host_identity_profile_publication_match_v2(prepared, TEMPLATE_ROOT,
+            "secret://shared-host", "trust://build", paths, pin).is_ok()).to_equal(true)
+        expect(host_identity_profile_publication_match_v2(prepared, TEMPLATE_ROOT,
+            "secret://other", "trust://build", paths, pin).is_err()).to_equal(true)
+        expect(host_identity_profile_publication_match_v2(prepared, TEMPLATE_ROOT,
+            "secret://shared-host", "trust://other", paths, pin).is_err()).to_equal(true)
+        expect(host_identity_profile_publication_match_v2(prepared, "/other/root",
+            "secret://shared-host", "trust://build", paths, pin).is_err()).to_equal(true)
+
+    it "preserves existing complete profiles and rejects replacement path data":
+        val input = host_identity_profile_selection_v2(template_source_v2(template_fields_v2()), TEMPLATE_ROOT).unwrap()
+        val paths = template_path_values_v2()
+        val first = host_identity_profile_resolve_v2(input, TEMPLATE_ROOT, paths).unwrap()
+        val legacy = host_identity_profile_selection_v2(first.canonical, TEMPLATE_ROOT).unwrap()
+        expect(legacy.expected_paths != nil).to_equal(true)
+        val second = host_identity_profile_resolve_v2(legacy, TEMPLATE_ROOT, paths).unwrap()
+        expect(second.leaf).to_equal(first.leaf)
+        val replaced = HostIdentitySshPathsV1(identity_path: paths.identity_path,
+            known_hosts_path: TEMPLATE_ROOT + "/journal/" + "d".repeat(64) + ".hosts")
+        expect(host_identity_profile_resolve_v2(legacy, TEMPLATE_ROOT, replaced).is_err()).to_equal(true)
+        expect(host_identity_profile_publication_match_v2(first, TEMPLATE_ROOT,
+            "secret://shared-host", "trust://build", replaced, "build " + TEMPLATE_SERVER_KEY + "\n").is_err()).to_equal(true)
+
+    it "rejects unsafe SSH token syntax and a different actual pin alias":
+        val input = host_identity_profile_selection_v2(template_source_v2(template_fields_v2()), TEMPLATE_ROOT).unwrap()
+        val paths = template_path_values_v2()
+        val unsafe_path = HostIdentitySshPathsV1(identity_path: TEMPLATE_ROOT + "/%h.key", known_hosts_path: paths.known_hosts_path)
+        expect(host_identity_profile_resolve_v2(input, TEMPLATE_ROOT, unsafe_path).is_err()).to_equal(true)
+        val environment_path = HostIdentitySshPathsV1(identity_path: paths.identity_path, known_hosts_path: TEMPLATE_ROOT + "/$HOME.hosts")
+        expect(host_identity_profile_resolve_v2(input, TEMPLATE_ROOT, environment_path).is_err()).to_equal(true)
+        val prepared = host_identity_profile_resolve_v2(input, TEMPLATE_ROOT, paths).unwrap()
+        expect(host_identity_profile_publication_match_v2(prepared, TEMPLATE_ROOT,
+            "secret://shared-host", "trust://build", paths, "other " + TEMPLATE_SERVER_KEY + "\n").is_err()).to_equal(true)
+
+    it "preserves a native protected root while deriving only supplied ordinary path values":
+        val native_root = "\\GLOBAL??\\C:\\ProgramData\\Simple\\identity"
+        var fields = template_fields_v2()
+        fields["storeRoot"] = SdnValue.String(native_root)
+        fields["sshExecutable"] = SdnValue.String("C:/Windows/System32/OpenSSH/ssh.exe")
+        val input = host_identity_profile_selection_v2(template_source_v2(fields), native_root).unwrap()
+        val values = HostIdentitySshPathsV1(identity_path: "C:/ProgramData/Simple/identity/journal/" + "a".repeat(64) + ".key",
+            known_hosts_path: "C:/ProgramData/Simple/identity/journal/" + "b".repeat(64) + ".hosts")
+        val prepared = host_identity_profile_resolve_v2(input, native_root, values).unwrap()
+        expect(prepared.profile.store_root).to_equal(native_root)
+        expect(prepared.profile.identity_path).to_equal(values.identity_path)
+        expect(prepared.profile.known_hosts_path).to_equal(values.known_hosts_path)
+        # A template is installer input, never accepted by the runtime loader.
+        expect(server_ssh_profile_decode_v1(template_source_v2(fields)).is_err()).to_equal(true)

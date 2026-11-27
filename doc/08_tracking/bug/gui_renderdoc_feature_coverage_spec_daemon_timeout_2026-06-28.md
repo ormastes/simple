@@ -79,3 +79,15 @@ the SSpec reliable under the current daemon; the focused fast-gate SSpec still
 timed out. Keep the cache-preserving behavior because it avoids deliberate cold
 nested-gate refreshes, but do not claim the SSpec timeout is fixed until the
 gate is split further or the daemon profile is corrected.
+
+## Triage note 2026-11-25 (p3-bav lane) — still unverifiable on this host
+
+- **measured** (Windows tracked Rust seed v1.0.0-rc.1, `bin/simple.exe`): the
+  spec runner is still non-functional here, now failing even earlier than the
+  2026-09-13 note — `SIMPLE_LIB=src bin/simple.exe test <any spec>
+  --mode=interpreter` aborts at load with `error: semantic:
+  src/app/test_runner_new/test_runner_client.spl:9:1: unknown decorator
+  '@representation_boundary'` before any daemon/timeout behavior is reached.
+- **inferred**: the daemon-timeout and fast-gate-reliability claims in this
+  entry remain unverifiable on a seed-only host; the sharding / long-profile
+  decision stays with the rendering verification lane. No change made.

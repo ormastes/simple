@@ -1,0 +1,186 @@
+# @cover src/app/llm_caret/workbench/tui_entry.spl 80%
+# @cover src/app/llm_caret/workbench/tui_view.spl 80%
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# research: doc/01_research/app/llm_caret/caret_suite_ide_workbench_smux_migration_2026-09-05.md ; plan: caret_suite_final_ui_extension_traceability_plan_2026-11-14.md (CU-017)
+
+"""
+Caret workbench TUI cell-width capture (CU-017, host-runnable part).
+
+An operator with Korean and emoji agent labels, a mixed-script draft and
+emoji terminal output opens the live workbench at 80x24 and 120x40, switches
+agents, toggles composer/terminal with the leader chord and pages the pane,
+all through the real `route_workbench_key`. Every redraw is captured as a
+terminal grid, and every row must be exactly the terminal width in CELLS
+(a wide character is two cells, not its UTF-8 byte count) with no wide
+character split across the right edge.
+
+**TUI Captures:** build/test-artifacts/caret_workbench/cells_80x24.txt,
+build/test-artifacts/caret_workbench/cells_120x40.txt
+
+Out of scope for this spec (they stay BLOCKED, not claimed here):
+  - high-DPI desktop rendering of the same workbench (needs a GUI host);
+  - screen-reader announcement of roster/status/composer (needs an AT host).
+The roster here is a synthetic parent-owned process table (no OS child is
+spawned); it exercises rendering and key routing, not process control.
+"""
+# @evidence-display: embed_tui
+
+use std.spec.*
+use std.sffi.io.{file_write_text}
+use std.io_runtime.{dir_create_all}
+use std.common.encoding.utf8.{text_codepoints}
+use std.common.layout.text_metrics.{codepoint_cells}
+
+use app.llm_caret.agent_runtime.{AgentProcess, summarize_agent_team}
+use app.llm_caret.multi_caret_manager.{multi_caret_manager_of}
+use app.llm_caret.workbench.session_contract.{ComposerDraft, InputMode, Delivery}
+use app.llm_caret.workbench.session_source.{publish_manager_sessions,
+    declare_agent_provider, live_sessions, live_selected, select_live_session,
+    clear_live_sessions, clear_pane_output, publish_pane_output}
+use app.llm_caret.workbench.tui_layout.{CompactView}
+use app.llm_caret.workbench.tui_entry.{render_live_workbench_with_draft,
+    route_workbench_key}
+use app.llm_caret.workbench.key_resolver.{KeyEvent, KeyFocus, KeyRouteKind,
+    key_event, leader_switch_target}
+use app.llm_caret.workbench.leader_keys.{LeaderState, LeaderAction}
+
+val LABEL_A = "한국어 에이전트 🤖"
+val LABEL_B = "리뷰어 👩‍💻 Codex"
+val DRAFT_BODY = "안녕하세요 😀 배포 상태 확인"
+
+fn _roster():
+    clear_live_sessions()
+    clear_pane_output()
+    val procs = [
+        AgentProcess(agent_id: LABEL_A, status: "running", reason: "", pid: 4101),
+        AgentProcess(agent_id: LABEL_B, status: "running", reason: "", pid: 4102)
+    ]
+    val team = summarize_agent_team("cells", procs)
+    publish_manager_sessions(multi_caret_manager_of("cells", "running", "", 4, team))
+    declare_agent_provider(LABEL_A, "Claude CLI")
+    declare_agent_provider(LABEL_B, "Codex CLI")
+    publish_manager_sessions(multi_caret_manager_of("cells", "running", "", 4, team))
+    publish_pane_output("%1", ["빌드 완료 ✅ 테스트 통과", "👨‍👩‍👧 emoji 줄 and ascii", "끝"])
+
+fn _row_cells(row: text) -> i64:
+    var total = 0
+    for cp in text_codepoints(row):
+        total = total + codepoint_cells(cp)
+    total
+
+# Rows whose cell width differs from `width`, as "row N: cells".
+fn _bad_rows(lines: [text], width: i64) -> [text]:
+    var bad: [text] = []
+    var i = 0
+    while i < lines.len():
+        val c = _row_cells(lines[i])
+        if c != width:
+            bad.push("row " + i.to_text() + ": " + c.to_text())
+        i = i + 1
+    bad
+
+# A wide character must never be cut: no replacement character, and the row
+# must not end on a half-written pair (width check above catches the latter).
+fn _has_replacement(lines: [text]) -> bool:
+    for row in lines:
+        for cp in text_codepoints(row):
+            if cp == 65533:
+                return true
+    false
+
+fn _draft(body: text) -> ComposerDraft:
+    ComposerDraft(target: live_selected(), mode: InputMode.Message,
+        body: body, delivery: Delivery.Draft)
+
+fn _grid(width: i64, height: i64, view: CompactView) -> [text]:
+    render_live_workbench_with_draft(width, height, view, _draft(DRAFT_BODY))
+
+fn _capture(name: text, lines: [text]) -> bool:
+    dir_create_all("build/test-artifacts/caret_workbench")
+    file_write_text("build/test-artifacts/caret_workbench/cells_" + name + ".txt",
+        lines.join("\n") + "\n")
+
+fn _key(name: text) -> KeyEvent:
+    key_event(name, [])
+
+describe "Caret workbench keeps every row cell-exact with Korean and emoji":
+
+    it "renders 120x40 rows at exactly 120 cells with wide characters intact":
+        # @req: REQ-CARET-UI-003
+        step("Open the workbench with Korean/emoji agents, draft and pane output")
+        _roster()
+        val lines = _grid(120, 40, CompactView.Session)
+        expect(lines.len()).to_equal(40)
+        step("Every row is 120 CELLS wide, not 120 bytes or code points")
+        expect(_bad_rows(lines, 120).len()).to_equal(0)
+        expect(_has_replacement(lines)).to_equal(false)
+        step("The Korean label is present whole, not truncated mid-character")
+        val grid = lines.join("\n")
+        expect(grid).to_contain("한국어 에이전트")
+        expect(grid).to_contain("안녕하세요")
+        expect(_capture("120x40", lines)).to_equal(true)
+
+    it "renders 80x24 compact views at exactly 80 cells and never splits a wide character":
+        # @req: REQ-CARET-UI-003
+        step("Open the compact 80x24 workbench in both compact views")
+        _roster()
+        val session = _grid(80, 24, CompactView.Session)
+        val agents = _grid(80, 24, CompactView.Agents)
+        expect(session.len()).to_equal(24)
+        expect(agents.len()).to_equal(24)
+        step("Every row of both views is exactly 80 cells")
+        expect(_bad_rows(session, 80).len()).to_equal(0)
+        expect(_bad_rows(agents, 80).len()).to_equal(0)
+        expect(_has_replacement(session)).to_equal(false)
+        expect(_has_replacement(agents)).to_equal(false)
+        expect(_capture("80x24", session + agents)).to_equal(true)
+
+    it "keeps rows cell-exact after real key events switch agents and toggle the composer":
+        # @req: REQ-CARET-UI-004
+        step("Press leader then n through the real router at 120x40")
+        _roster()
+        val leader = _key("ctrl+g")
+        val pending = route_workbench_key(LeaderState.Idle, leader, KeyFocus.TerminalSurface)
+        expect(pending.route.kind).to_equal(KeyRouteKind.Consume)
+        val chord = route_workbench_key(pending.state, _key("n"), KeyFocus.TerminalSurface)
+        expect(chord.route.kind).to_equal(KeyRouteKind.Action)
+        expect(chord.route.action).to_equal(LeaderAction.NextAgent)
+        step("Apply the switch the router asked for and redraw")
+        val views = live_sessions()
+        expect(views.len()).to_equal(2)
+        var selected_idx = 0
+        if views[1].id.value == live_selected().value:
+            selected_idx = 1
+        val target = leader_switch_target(chord.route.action, chord.route.slot, selected_idx, views.len())
+        expect(target).to_equal(2)
+        select_live_session(views[target - 1].id)
+        expect(live_selected().value).to_equal(LABEL_B)
+        val switched = _grid(120, 40, CompactView.Session)
+        expect(_bad_rows(switched, 120).len()).to_equal(0)
+        expect(switched.join("\n")).to_contain("리뷰어")
+        step("Leader then m toggles composer/terminal and the redraw stays exact")
+        val p2 = route_workbench_key(chord.state, leader, KeyFocus.TerminalSurface)
+        val m = route_workbench_key(p2.state, _key("m"), KeyFocus.TerminalSurface)
+        expect(m.route.action).to_equal(LeaderAction.ToggleComposerTerminal)
+        val toggled = _grid(120, 40, CompactView.Session)
+        expect(_bad_rows(toggled, 120).len()).to_equal(0)
+        expect(_capture("120x40_after_keys", toggled)).to_equal(true)
+
+    it "routes scroll keys to the pane or the widget, never to the roster, and redraws exactly":
+        # @req: REQ-CARET-UI-004
+        step("Page-up in a terminal pane is forwarded byte-for-byte to the CLI")
+        _roster()
+        val pgup = key_event("pageup", [27, 91, 53, 126])
+        val to_cli = route_workbench_key(LeaderState.Idle, pgup, KeyFocus.TerminalSurface)
+        expect(to_cli.route.kind).to_equal(KeyRouteKind.Forward)
+        expect(to_cli.route.bytes.len()).to_equal(4)
+        step("Page-up over a native view is a widget key, not a forward")
+        val to_view = route_workbench_key(LeaderState.Idle, pgup, KeyFocus.NativeView)
+        expect(to_view.route.kind).to_equal(KeyRouteKind.Widget)
+        step("A scrolled pane (older output published) still draws cell-exact rows")
+        publish_pane_output("%1", ["이전 출력 줄 📜", "다음 줄 ✨ ascii"])
+        val lines = _grid(80, 24, CompactView.Session)
+        expect(_bad_rows(lines, 80).len()).to_equal(0)
+        expect(lines.join("\n")).to_contain("이전 출력")
+        clear_live_sessions()
+        clear_pane_output()

@@ -1,9 +1,11 @@
 # Paren-less container accessors silently drop the whole module out of JIT
 
 - **Filed:** 2026-08-08
-- **Status:** FIXED in the `run`/JIT lane 2026-08-08 (Rust seed driver). Fence
-- **Verification 2026-08-21 (bug-status-consistency audit): PARTIAL, not fully fixed.** fixed in the `run`/JIT lane only (`exec_core.rs:1071/1353` + `check-no-jit-module-drop.shs`); the `compile` lane is fenced, not fixed. `bug_db.sdn` row is `fix-implemented-verification-pending`.
-  remains for the `compile` lane. See "Upstream fix (landed)" below.
+- **Status:** REOPENED 2026-11-25 — the module-drop defect is gone, but the
+  accessor family now silently yields `nil` inside function scope (see
+  "Re-verification 2026-11-25" below). Prior status: FIXED in the `run`/JIT
+  lane 2026-08-08 (Rust seed driver); 2026-09-06 re-verification
+  FIXED-VERIFIED covered only the module-level interpreter path.
 - **Severity:** High — silent ~100-1000x slowdown, correct output, no diagnostic
 - **Fence:** `scripts/check/check-no-jit-module-drop.shs`
 
@@ -370,3 +372,41 @@ content was recovered from a pre-edit copy and verified back to
 `340ba81fdb0e87da87b2024e417eb83218bfcd90`. This is the documented empty-blob
 trap in this checkout's index; do not use `git checkout --` to revert here
 without pinning and re-verifying the expected blob SHA afterwards.
+
+## Re-verification 2026-11-25 (release/1.0.0 @ 4c6024f8271, Windows host) — REOPENED, new silent failure mode
+
+Direct probes with the pinned seed (`SIMPLE_LIB=src bin/simple.exe`):
+
+1. The 2026-09-06 module-level probe still behaves as recorded:
+   `val xs = [1,2,3]` / `print xs.length` at module level prints `3`,
+   `compile` succeeds rc=0, `run` rc=0 with no drop message.
+2. **Inside `fn main`, the same accessor family silently yields `nil` —
+   in BOTH engines, with rc=0 and no diagnostic, even under
+   `SIMPLE_JIT_STRICT=1`:**
+
+   ```
+   fn main():
+       val xs = [1, 2, 3]
+       print xs.first          # nil   (expected 1)
+       print xs.len()          # 3     (control: correct)
+       print xs.length == 3    # false (expected true)
+   ```
+
+   `print xs.length` / `print("abc".length)` / `val n = xs.length; print n`
+   each print an empty line. Identical output with `--mode=interpreter`, so
+   this is no longer a JIT-drop defect at all — paren-less container
+   accessors now resolve as a nil-valued field read in function scope, in
+   every lane, with no error.
+
+The filed defect (whole-module silent de-JIT) is gone, but the recommended
+end-state ("reject at semantic analysis, uniformly across all lanes") was
+never reached: the family is silently wrong instead of loudly rejected.
+Severity is unchanged (silent wrong answer). The fix belongs in the seed's
+semantic gate (`src/compiler_rust`) and its pure-Simple counterpart; the seed
+cannot be rebuilt on this host (no cargo), so this is recorded as a triage
+re-open, not a fix.
+
+Also still standing from 2026-09-06: the fence
+`scripts/check/check-no-jit-module-drop.shs` selftest fixture (`xs.length`
+as known-BAD, line 232) remains stale — `compile` accepts that fixture, so
+the fence errors out before scanning. Separate follow-up, unchanged.

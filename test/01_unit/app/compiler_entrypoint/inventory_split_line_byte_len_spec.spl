@@ -1,0 +1,65 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+
+"""
+# Inventory line walk: `byte_len()` on a split() element must be a plain i64 in compiled lanes
+
+**Bugs:**
+- doc/08_tracking/bug/stage2_admission_git_event_refresh_failed_erased_byte_len_2026_11_09.md (this spec)
+- doc/08_tracking/bug/seed_untyped_byte_len_binding_raw_i64_misdecoded_2026_11_09.md (seed root cause)
+
+`src/app/compiler_entrypoint/inventory_events.spl` walks `git ls-files -t`
+output as `for line in listed.split("\n")` and rejects a row with
+`line.byte_len() <= 2`. On a seed without the erased-receiver `byte_len`
+result type (`9a80b3cb557`), that call is typed ANY in compiled code and the
+raw i64 is misdecoded as a tagged word: 11 reads as `true`, which makes the
+`<= 2` fail-closed arm fire and every cold admission end in
+`SCV-E-ADMISSION: git-event-refresh-failed`. The fixture mirrors that exact
+shape; the compiled lane is `bin/simple run` (SIMPLE_TEST_BINARY when set).
+
+Red (deployed seed `bin/simple.exe` 2026-11-04): `lens=true,<value:0xe>, short=1`.
+Green: `lens=11,14, short=0`.
+"""
+
+use std.spec.*
+use std.io_runtime.{process_run, env_get, env_set_process}
+
+fn simple_exe() -> text:
+    val bin = env_get("SIMPLE_TEST_BINARY")
+    if bin != "" and bin != nil: bin else: "bin/simple"
+
+# The test runner exports SIMPLE_EXECUTION_MODE=interpret, which the child
+# `run` inherits; the defect is compiled-lane only, so force the JIT lane.
+fn run_compiled(fixture: text) -> (text, text, i64):
+    val previous = env_get("SIMPLE_EXECUTION_MODE") ?? ""
+    env_set_process("SIMPLE_EXECUTION_MODE", "jit")
+    val (stdout, stderr, code) = process_run(simple_exe(), ["run", fixture])
+    env_set_process("SIMPLE_EXECUTION_MODE", previous)
+    (stdout, stderr, code)
+
+val FIXTURE: text = "test/01_unit/app/compiler_entrypoint/fixtures/inventory_split_line_byte_len_fixture.spl"
+
+# Same row walk as inventory_events.spl after the typed-binding workaround:
+# the declared `text` binding is what keeps the deployed seed on the i64 path.
+fn short_rows_typed(listing: text) -> i64:
+    var short = 0
+    for row in listing.split("\n"):
+        val line: text = row
+        if line == "":
+            continue
+        if line.byte_len() <= 2 or line.substring(1, 2) != " ":
+            short = short + 1
+    short
+
+describe "inventory split-line byte_len":
+    it "compiled lane: split() elements report their byte length as a plain i64":
+        val (stdout, stderr, code) = run_compiled(FIXTURE)
+        expect(code).to_equal(0)
+        expect(stdout).to_contain("lens=11,14,")
+        expect(stdout).to_contain("short=0")
+        expect(stdout + stderr).not.to_contain("<value:")
+
+    it "typed-binding row walk accepts every `H <path>` row and rejects only short rows":
+        expect(short_rows_typed("H src/c.spl\nH src/main.spl\n")).to_equal(0)
+        expect(short_rows_typed("H\nH src/c.spl\n")).to_equal(1)
+        expect(short_rows_typed("Hsrc/c.spl\n")).to_equal(1)
