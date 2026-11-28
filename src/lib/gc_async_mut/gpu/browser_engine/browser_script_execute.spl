@@ -1,9 +1,65 @@
+use std.gc_async_mut.web.browser_session.{BrowserSession}
+use lib.js.types.js_types.{JsValue}
+
 pub class BrowserScriptExecutionResult:
     scripts_collected: i64
     scripts_executed: i64
     scripts_denied: i64
     console_output: [text]
     diagnostics: [text]
+
+# reason: mirrors sibling BrowserScriptExecutionResult scalar counts
+# @allow(primitive_api)
+pub class BrowserDomExecutionResult:
+    mutated_html: text
+    title: text
+    scripts_collected: i64
+    scripts_executed: i64
+    scripts_denied: i64
+    console_output: [text]
+    diagnostics: [text]
+
+pub fn execute_dom_scripts_via_session(html: text) -> BrowserDomExecutionResult:
+    """Execute inline JS and <script type='text/simple'> DOM scripts in-process via BrowserSession."""
+    var session = BrowserSession.new()
+    val opened = session.open_html("about:document", html)
+    var diag: [text] = []
+    match opened:
+        Err(e):
+            diag.push("session open failed: " + e)
+        Ok(_):
+            pass_dn
+    for w in session.warnings:
+        if (w.contains("error") or w.contains("denied") or
+            w.contains("unsupported") or w.contains("blocked")):
+            diag.push(w)
+    var logs: [text] = []
+    for l in session.simple_script_executor.dom_vm.logs:
+        logs.push(l)
+    if val Some(state) = session.runtime_state:
+        val js_logs = state.runtime.eval("typeof window !== 'undefined' && window.__simple_console_logs ? window.__simple_console_logs.join('\\n') : ''")
+        match js_logs:
+            Ok(v):
+                match v:
+                    JsValue.String(s):
+                        if s.trim() != "":
+                            for line in s.split("\n"):
+                                if line != "":
+                                    logs.push(line)
+                    _:
+                        pass_dn
+            _:
+                pass_dn
+    val rendered = session.render_html_document()
+    BrowserDomExecutionResult(
+        mutated_html: rendered,
+        title: session.current_title,
+        scripts_collected: 0,
+        scripts_executed: 0,
+        scripts_denied: 0,
+        console_output: logs,
+        diagnostics: diag
+    )
 
 impl BrowserScriptExecutionResult:
     static fn empty() -> BrowserScriptExecutionResult:
