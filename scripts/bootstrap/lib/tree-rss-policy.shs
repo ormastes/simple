@@ -42,6 +42,13 @@
 # Explicit SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB is a separate compiler-only
 # opt-in, admitted by both owners under 75% of fresh real total AND available
 # memory. It requires enforced scope, declared workers and an explicit cap.
+# Because available memory moves with other sessions' load, an admission that
+# fails ONLY on the available bound first waits for the pressure to clear:
+# it re-reads /proc/meminfo every 5 s for up to
+# SIMPLE_BOOTSTRAP_TREE_RSS_ADMIT_WAIT_S seconds (default 120, 0 = refuse at
+# the first check as before, values above 3600 are refused) and fails closed
+# only when the request still does not fit. Every other bound (previous
+# ceiling, total bound, explicit cap) is time-invariant and refuses at once.
 #
 # Precedence per knob: SIMPLE_BOOTSTRAP_TREE_RSS_<KNOB> > SIMPLE_HOST_TREE_RSS_
 # <KNOB> / host config (scripts/setup/host-env.shs --get) > built-in default.
@@ -400,6 +407,25 @@ bootstrap_tree_rss_headroom_facts() {
     }' "$1"
 }
 
+# SIMPLE_BOOTSTRAP_TREE_RSS_ADMIT_WAIT_S: how long an elevated-ceiling
+# admission may wait for transient host memory pressure to clear before it
+# refuses on the available bound alone. Default 120 s; 0 restores the
+# refuse-at-first-check behaviour; a non-decimal or over-3600 value is a
+# refusal, never clamped (a typo in a budget knob must not become a budget).
+# Sets bootstrap_tree_rss_admit_wait_s (not stdout: callers must see a
+# refusal, which a command-substitution subshell would swallow).
+bootstrap_tree_rss_admit_wait_budget() {
+  btr_aw=${SIMPLE_BOOTSTRAP_TREE_RSS_ADMIT_WAIT_S:-120}
+  case "$btr_aw" in
+    0) bootstrap_tree_rss_admit_wait_s=0; return 0 ;;
+  esac
+  bootstrap_tree_rss_is_uint "$btr_aw" 4 && [ "$btr_aw" -le 3600 ] || {
+    bootstrap_tree_rss_refusal="tree RSS policy: invalid SIMPLE_BOOTSTRAP_TREE_RSS_ADMIT_WAIT_S=$btr_aw (want decimal 0..3600)"
+    return 1
+  }
+  bootstrap_tree_rss_admit_wait_s=$btr_aw
+}
+
 bootstrap_tree_rss_admit_ceiling() {
   bootstrap_tree_rss_ceiling_request_kib=0
   bootstrap_tree_rss_ceiling_previous_kib=$bootstrap_tree_rss_ceiling_kib
@@ -427,6 +453,8 @@ bootstrap_tree_rss_admit_ceiling() {
     [ -z "${SIMPLE_PROCESS_TREE_RSS_TEST_FIXTURE+x}" ] || {
       bootstrap_tree_rss_refusal='tree RSS policy: elevated ceiling requires real host memory, explicit workers and enforced compiler scope'; return 1;
     }
+  bootstrap_tree_rss_admit_wait_budget || return 1
+  btr_admit_wait=$bootstrap_tree_rss_admit_wait_s
   btr_facts=$(bootstrap_tree_rss_headroom_facts /proc/meminfo) || {
     bootstrap_tree_rss_refusal='tree RSS policy: real host headroom is unavailable or contradictory'; return 1;
   }
@@ -436,11 +464,31 @@ EOF
   bootstrap_tree_rss_host_total_source=proc-meminfo
   btr_total_bound=$((bootstrap_tree_rss_host_total_kib / 4 * 3))
   btr_available_bound=$((bootstrap_tree_rss_available_kib / 4 * 3))
+  btr_admit_waited=0
+  if [ "$btr_requested" -gt "$bootstrap_tree_rss_ceiling_previous_kib" ] &&
+    [ "$btr_requested" -le "$btr_total_bound" ] &&
+    [ "$btr_explicit" -le "$btr_requested" ] &&
+    [ "$btr_requested" -gt "$btr_available_bound" ] && [ "$btr_admit_wait" -gt 0 ]; then
+    # Every time-invariant bound admits and only available_bound refuses:
+    # that bound moves with other sessions' load, so a transient dip at the
+    # instant of admission must not fail the row closed. Poll for recovery
+    # inside the wait budget; genuine insufficiency still refuses below.
+    while [ "$btr_admit_waited" -lt "$btr_admit_wait" ]; do
+      sleep 5
+      btr_admit_waited=$((btr_admit_waited + 5))
+      btr_facts=$(bootstrap_tree_rss_headroom_facts /proc/meminfo) || break
+      read -r bootstrap_tree_rss_host_total_kib bootstrap_tree_rss_available_kib bootstrap_tree_rss_available_source <<EOF
+$btr_facts
+EOF
+      btr_available_bound=$((bootstrap_tree_rss_available_kib / 4 * 3))
+      [ "$btr_requested" -le "$btr_available_bound" ] && break
+    done
+  fi
   [ "$btr_requested" -gt "$bootstrap_tree_rss_ceiling_previous_kib" ] &&
     [ "$btr_requested" -le "$btr_total_bound" ] &&
     [ "$btr_requested" -le "$btr_available_bound" ] &&
     [ "$btr_explicit" -le "$btr_requested" ] || {
-      bootstrap_tree_rss_refusal="tree RSS policy: compiler ceiling $btr_requested refused (previous=$bootstrap_tree_rss_ceiling_previous_kib total_bound=$btr_total_bound available_bound=$btr_available_bound cap=$btr_explicit)"; return 1;
+      bootstrap_tree_rss_refusal="tree RSS policy: compiler ceiling $btr_requested refused (previous=$bootstrap_tree_rss_ceiling_previous_kib total_bound=$btr_total_bound available_bound=$btr_available_bound cap=$btr_explicit$(if [ "$btr_admit_waited" -gt 0 ]; then printf ' waited_s=%s' "$btr_admit_waited"; fi))"; return 1;
     }
   bootstrap_tree_rss_ceiling_kib=$btr_requested
   bootstrap_tree_rss_ceiling_admission=elevated
@@ -1971,6 +2019,84 @@ bootstrap_tree_rss__selftest() {
   # Attribution vars without an explicit cap change nothing (policy-priced).
   btr_st_expect attribution-without-cap-ignored big 8 '' 45088768:58720256:budget:default \
     'SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_SOURCE=phase-policy SIMPLE_BOOTSTRAP_PROCESS_TREE_RSS_CAP_BOUND=worker-floor'
+  # Admission wait knob: default 120, 0 = refuse at the first check (the old
+  # behaviour), garbage / over-max / non-canonical spellings are refused.
+  btr_st_n=$((btr_st_n + 1))
+  btr_st_got=$(
+    unset SIMPLE_BOOTSTRAP_TREE_RSS_ADMIT_WAIT_S
+    bootstrap_tree_rss_admit_wait_budget && printf '%s ' "$bootstrap_tree_rss_admit_wait_s"
+    SIMPLE_BOOTSTRAP_TREE_RSS_ADMIT_WAIT_S=0; bootstrap_tree_rss_admit_wait_budget && printf '%s ' "$bootstrap_tree_rss_admit_wait_s"
+    SIMPLE_BOOTSTRAP_TREE_RSS_ADMIT_WAIT_S=3600; bootstrap_tree_rss_admit_wait_budget && printf '%s ' "$bootstrap_tree_rss_admit_wait_s"
+    SIMPLE_BOOTSTRAP_TREE_RSS_ADMIT_WAIT_S=abc; bootstrap_tree_rss_admit_wait_budget >/dev/null 2>&1 || printf 'abc-refused '
+    SIMPLE_BOOTSTRAP_TREE_RSS_ADMIT_WAIT_S=3601; bootstrap_tree_rss_admit_wait_budget >/dev/null 2>&1 || printf '3601-refused '
+    SIMPLE_BOOTSTRAP_TREE_RSS_ADMIT_WAIT_S=00; bootstrap_tree_rss_admit_wait_budget >/dev/null 2>&1 || printf '00-refused'
+  )
+  [ "$btr_st_got" = '120 0 3600 abc-refused 3601-refused 00-refused' ] || {
+    echo "selftest FAIL: admit-wait knob: $btr_st_got" >&2; btr_st_fail=1;
+  }
+  # Wait-path fixtures shadow the host probe and sleep, so they are
+  # deterministic and instant on any host. Admission requests ceiling
+  # 60000000 (previous 33554432, explicit cap 59000000, host total 100000000
+  # -> total_bound 75000000); only available_bound (3/4 of the probed
+  # MemAvailable) can refuse. WANT is a case glob.
+  # admit_case LABEL WAIT_S FIRST_AVAIL_KIB NEXT_AVAIL_KIB WANT
+  btr_st_admit_case() {
+    btr_st_n=$((btr_st_n + 1))
+    btr_st_got=$(
+      unset BOOTSTRAP_TREE_RSS_MEMINFO_PATH BOOTSTRAP_TREE_RSS_TEST_FIXTURE
+      unset SIMPLE_PROCESS_TREE_RSS_MEMINFO_PATH SIMPLE_PROCESS_TREE_RSS_TEST_FIXTURE
+      unset SIMPLE_BOOTSTRAP_TREE_RSS_ADMIT_WAIT_S
+      SIMPLE_BOOTSTRAP_RSS_CAP_MODE=enforce
+      SIMPLE_BOOTSTRAP_COMPILER_RSS_CEILING_KIB=60000000
+      [ -z "$2" ] || SIMPLE_BOOTSTRAP_TREE_RSS_ADMIT_WAIT_S=$2
+      btr_explicit=59000000
+      btr_jobs=1
+      bootstrap_tree_rss_ceiling_kib=33554432
+      # Positional params and variable writes do not survive into the
+      # command-substitution subshell that calls the shadow: capture the
+      # availabilities up front and keep the probe count in a file.
+      btr_st_first_avail=$3
+      btr_st_next_avail=$4
+      btr_st_probe_file=$btr_st_dir/admit-probes
+      printf '0\n' >"$btr_st_probe_file"
+      bootstrap_tree_rss_headroom_facts() {
+        btr_st_p=$(($(cat "$btr_st_probe_file") + 1))
+        printf '%s\n' "$btr_st_p" >"$btr_st_probe_file"
+        if [ "$btr_st_p" -eq 1 ]; then
+          printf '%s\n' "100000000 $btr_st_first_avail proc-meminfo"
+        else
+          printf '%s\n' "100000000 $btr_st_next_avail proc-meminfo"
+        fi
+      }
+      sleep() { :; }
+      if bootstrap_tree_rss_admit_ceiling; then
+        btr_st_got="ADMITTED:$bootstrap_tree_rss_ceiling_admission"
+      else
+        btr_st_got="REFUSED=$bootstrap_tree_rss_refusal"
+      fi
+      printf '%s:probes=%s' "$btr_st_got" "$(cat "$btr_st_probe_file")"
+    )
+    # Quoted: a literal match, not a glob (WANT carries `(` and `)`).
+    case "$btr_st_got" in
+      ("$5") ;;
+      (*) echo "selftest FAIL: $1: want $5 got $btr_st_got" >&2; btr_st_fail=1 ;;
+    esac
+  }
+  # Memory frees mid-wait: the row is admitted instead of dying at the
+  # instant of another session's transient pressure.
+  btr_st_admit_case wait-recovers-admits 30 1000000 80000000 'ADMITTED:elevated:probes=2'
+  # The default budget (knob unset) also waits.
+  btr_st_admit_case default-wait-recovers '' 1000000 80000000 'ADMITTED:elevated:probes=2'
+  # Genuine insufficiency still fails closed, naming how long it waited.
+  btr_st_admit_case wait-exhausted-refuses 10 1000000 1000000 \
+    'REFUSED=tree RSS policy: compiler ceiling 60000000 refused (previous=33554432 total_bound=75000000 available_bound=750000 cap=59000000 waited_s=10):probes=3'
+  # wait=0 preserves the old refusal exactly: no wait, no re-probe, no
+  # waited_s suffix.
+  btr_st_admit_case wait-zero-refuses-at-once 0 1000000 80000000 \
+    'REFUSED=tree RSS policy: compiler ceiling 60000000 refused (previous=33554432 total_bound=75000000 available_bound=750000 cap=59000000):probes=1'
+  # A malformed knob refuses before the host is even probed (probes=0).
+  btr_st_admit_case knob-garbage-refused abc 80000000 80000000 \
+    'REFUSED=tree RSS policy: invalid SIMPLE_BOOTSTRAP_TREE_RSS_ADMIT_WAIT_S=abc (want decimal 0..3600):probes=0'
   # The real host, enforce mode, no fixture: the published pair is admitted
   # by the policy's own elevated-ceiling admission (real /proc/meminfo) when
   # 3/4 of the host's current MemAvailable still covers the cap, and refused
@@ -1983,6 +2109,8 @@ bootstrap_tree_rss__selftest() {
     unset BOOTSTRAP_TREE_RSS_MEMINFO_PATH BOOTSTRAP_TREE_RSS_TEST_FIXTURE
     unset SIMPLE_PROCESS_TREE_RSS_MEMINFO_PATH SIMPLE_PROCESS_TREE_RSS_TEST_FIXTURE
     SIMPLE_BOOTSTRAP_RSS_CAP_MODE=enforce
+    # Pin refuse-at-first-check so the selftest never waits on a busy host.
+    SIMPLE_BOOTSTRAP_TREE_RSS_ADMIT_WAIT_S=0
     btr_st_avail=$(bootstrap_tree_rss_meminfo_available /proc/meminfo)
     if bootstrap_tree_rss_whole_build_export 8 ''; then
       btr_st_per=$((bootstrap_tree_rss_cap_kib / BOOTSTRAP_VERIFY_BUILD_THREADS))
@@ -2020,7 +2148,11 @@ bootstrap_tree_rss__selftest() {
         (*'compiler ceiling '*' refused (previous='*'available_bound='*)
           # Only a real headroom shortfall may refuse here: the plan was
           # within 3/4 of MemAvailable at plan time, admission re-read it.
-          [ -n "$btr_st_avail" ] && printf HEADROOM-REFUSED || printf 'refused-without-headroom-evidence' ;;
+          # wait=0 above pins refuse-at-first-check: no waited_s suffix.
+          case "$bootstrap_tree_rss_refusal" in
+            (*waited_s=*) printf 'refused-after-wait-with-wait-0' ;;
+            (*) [ -n "$btr_st_avail" ] && printf HEADROOM-REFUSED || printf 'refused-without-headroom-evidence' ;;
+          esac ;;
         (*) printf 'REFUSED=%s' "$bootstrap_tree_rss_refusal" ;;
       esac
     fi
