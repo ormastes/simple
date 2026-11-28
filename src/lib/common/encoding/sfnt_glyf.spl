@@ -3438,7 +3438,11 @@ fn _aaa_walk(e: [i64], o: [i64], start_y: i64, stop_y: i64, left_clip: i64, righ
                         rec[0] = -1
                         rec_on = false
                     first_span = 0
-                    _aaa_trap_row_gray(o, ry, left, rite, next_left, next_rite, left_dy, e[curr + 6], full, nrb)
+                    # The mask plane (a narrow path) has no gray-only row copy.
+                    if o[2] == 1:
+                        _aaa_trap_row(o, ry, left, rite, next_left, next_rite, left_dy, e[curr + 6], full, nrb)
+                    else:
+                        _aaa_trap_row_gray(o, ry, left, rite, next_left, next_rite, left_dy, e[curr + 6], full, nrb)
                 else:
                     _aaa_trap_row(o, ry, left, rite, next_left, next_rite, left_dy, e[curr + 6], full, nrb)
                 prev_rite = if rite > nx_x: (rite + 65535) >> 16 else: (nx_x + 65535) >> 16
@@ -3498,6 +3502,13 @@ fn _aaa_walk(e: [i64], o: [i64], start_y: i64, stop_y: i64, left_clip: i64, righ
         y = next_y
         if y >= stop_fixed: break
         var ne = curr
+        if rec_on and e[ne + 20] == 0 and e[ne] < ((rec[1] >> 8) << 8):
+            # The next test compares `ne` with the head sentinel, whose x is the
+            # left clip (0 for SafeRLE, irl for the mask plane). An edge left of
+            # the path's sample bounds could take a different branch under the
+            # other blitter, so the record is dropped.
+            rec[0] = -1
+            rec_on = false
         if e[ne + 4] > y:
             nn = (if (e[ne + 4]) > y and (e[ne + 4]) < nn: (e[ne + 4]) else: nn)
         elif e[e[ne + 20]] <= e[ne]:
@@ -4010,7 +4021,9 @@ fn _lcd_aaa_mask(commands: [SfntGlyfCommand], scale: f64, phase: f64, x0: i64, t
     if convex and n >= 2:
         _aaa_walk_convex(e, o, stop_y, left_b, right_b)
     else:
-        if use_mask or convex or rec.len() == 0:
+        # A rectangle is not recorded: at a phase where it takes the mask
+        # plane, a direct fill draws it with `_aaa_fat_rect`, not the walk.
+        if convex or rec.len() == 0 or (moves == 1 and _aaa_rect(pv, px, py, np).len() == 4):
             val no_rec: [i64] = []
             _aaa_walk(e, o, start_y, stop_y, left_b, right_b, np > (irb - irt) * 2, no_rec)
         else:
@@ -4308,22 +4321,63 @@ var _gray_aaa_recs: Dict<text, [i64]> = {}
 val _GRAY_AAA_REC_SLOT_BUDGET: i64 = 2000000
 var _gray_aaa_rec_slots: i64 = 0
 
+# Whether `_lcd_aaa_mask` (one sample per pixel) sees a convex path at
+# `phase`: the same f32 sample points and `_aaa_convex` test. Convexity is
+# not translation-invariant after the f32 rounding (Nunito `.` at 64 px and
+# `I` at 60/69/72 px are convex at some quarter phases only), and a convex
+# path takes the convex walker, which a record cannot replay.
+fn _gray_aaa_convex_at(commands: [SfntGlyfCommand], scale: f64, phase: f64, x0: i64, top: f64) -> bool:
+    val cx = (0 - x0) as f64
+    var px: [f64] = []
+    var py: [f64] = []
+    var moves = 0
+    for command in commands:
+        if command.verb == SFNT_GLYF_CLOSE: continue
+        if command.verb == SFNT_GLYF_MOVE:
+            moves = moves + 1
+            if moves > 1: return false
+        val ax = (((command.x1 * scale) as f32) as f64)
+        val ay = (((command.y1 * scale) as f32) as f64)
+        px.push((((1.0 * ((((ax + phase) as f32) as f64)) + cx) as f32) as f64))
+        py.push((((top - ay) as f32) as f64))
+        if command.verb == SFNT_GLYF_QUAD:
+            val bx = (((command.x2 * scale) as f32) as f64)
+            val by = (((command.y2 * scale) as f32) as f64)
+            px.push((((1.0 * ((((bx + phase) as f32) as f64)) + cx) as f32) as f64))
+            py.push((((top - by) as f32) as f64))
+    moves == 1 and _aaa_convex(px, py, px.len())
+
 # Replay recorded trapezoid rows shifted by `shift` (16.16) into a fresh
-# SafeRLE blitter state of `aw` x `h`: the writes `_aaa_walk` makes at that
-# phase (clip 0..aw, `nrb` and the previous span's right end re-derived as in
-# the walker).
-fn _gray_aaa_replay(rec: [i64], shift: i64, aw: i64, h: i64, irl: i64, irr: i64) -> [i64]:
-    var o: [i64] = [0; 8 + aw + (aw + 32) * h]
+# blitter state of `aw` x `h`: the writes `_aaa_walk` makes at that phase
+# (`nrb` and the previous span's right end re-derived as in the walker).
+# `mask`: the small-path mask plane `_lcd_aaa_mask` picks for this phase
+# (clip irl..irr, `_aaa_trap_row`'s mask writes); otherwise SafeRLE (clip
+# 0..aw). The walk depends on the blitter only through the left-clip x of
+# the head sentinel (`e[0]`); `_aaa_walk` drops a record whose edge order
+# test reached that sentinel left of the sample bounds, so a kept record
+# replays into both blitters.
+fn _gray_aaa_replay(rec: [i64], shift: i64, aw: i64, h: i64, irl: i64, irr: i64, mask: bool) -> [i64]:
+    var o: [i64] = []
+    var left_clip = 0
+    var right_clip = aw << 16
+    if mask:
+        o = [0; 8 + aw + (aw + 32) * h * 2]
+        o[2] = 1
+        o[7] = 24 + aw + (aw + 32) * h
+        if irl > 0: left_clip = irl << 16
+        if (irr << 16) < right_clip: right_clip = irr << 16
+    else:
+        o = [0; 8 + aw + (aw + 32) * h]
+        o[7] = 24 + aw
     o[0] = aw
     o[1] = h
     o[3] = 1
     o[4] = irl
     o[5] = irr
     o[6] = -1
-    o[7] = 24 + aw
-    val right_clip = aw << 16
+    val first_rite = left_clip >> 16
     val n = rec[0]
-    var prev_rite = 0
+    var prev_rite = first_rite
     var i = 0
     var rb = 6
     while i < n:
@@ -4332,13 +4386,16 @@ fn _gray_aaa_replay(rec: [i64], shift: i64, aw: i64, h: i64, irl: i64, irr: i64)
         val cx = rec[rb + 2] + shift
         val lx = rec[rb + 3] + shift
         val nx_x = rec[rb + 4] + shift
-        val left = if left_raw > 0: left_raw else: 0
+        val left = if left_raw > left_clip: left_raw else: left_clip
         val rite = if cx < right_clip: cx else: right_clip
-        if rec[rb + 8] == 1: prev_rite = 0
+        if rec[rb + 8] == 1: prev_rite = first_rite
         var nrb = false
         if full == 255:
             nrb = rec[rb + 10] == 1 or prev_rite > (left >> 16) or prev_rite > (lx >> 16)
-        _aaa_trap_row_gray(o, rec[rb], left, rite, if lx > 0: lx else: 0, if nx_x < right_clip: nx_x else: right_clip, rec[rb + 5], rec[rb + 6], full, nrb)
+        if mask:
+            _aaa_trap_row(o, rec[rb], left, rite, if lx > left_clip: lx else: left_clip, if nx_x < right_clip: nx_x else: right_clip, rec[rb + 5], rec[rb + 6], full, nrb)
+        else:
+            _aaa_trap_row_gray(o, rec[rb], left, rite, if lx > 0: lx else: 0, if nx_x < right_clip: nx_x else: right_clip, rec[rb + 5], rec[rb + 6], full, nrb)
         if full == 255: prev_rite = if rite > nx_x: (rite + 65535) >> 16 else: (nx_x + 65535) >> 16
         rb = rb + 11
         i = i + 1
@@ -4371,9 +4428,10 @@ pub fn sfnt_gray_outline_raster(outline: SfntLcdOutline, phase_q: i64) -> Option
             val irl = (rec[1] + shift) >> 16
             val irr = (rec[2] + shift + 65535) >> 16
             val irw = irr - irl
-            # Same blitter as a direct fill: a small path takes the mask plane.
-            if not (irw <= 32 and ((irw + 3) / 4 * 4) * rec[3] <= 1024):
-                mask = _gray_aaa_replay(rec, shift, width, height, irl, irr)
+            # Same blitter as a direct fill: a small path takes the mask plane,
+            # a path that is convex at this phase the convex walker.
+            if not _gray_aaa_convex_at(outline.slo_commands, scale, phase, x0, 0.0 - outline.slo_raster_top):
+                mask = _gray_aaa_replay(rec, shift, width, height, irl, irr, irw <= 32 and ((irw + 3) / 4 * 4) * rec[3] <= 1024)
     if mask.len() == 0:
         if known:
             mask = _lcd_aaa_mask(outline.slo_commands, scale, phase, x0, 0.0 - outline.slo_raster_top, width, height, 1, [])

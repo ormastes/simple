@@ -61,6 +61,9 @@ impl SimpleScriptVal:
     static fn from_list(items: [SimpleScriptVal]) -> SimpleScriptVal:
         SimpleScriptVal(kind: "list", text_val: "", int_val: items.len().to_i64(), float_val: 0.0, bool_val: items.len() > 0, node_id: -1, items: items)
 
+    static fn fn_ref(fn_idx: i64, name: text) -> SimpleScriptVal:
+        SimpleScriptVal(kind: "fn", text_val: name, int_val: fn_idx, float_val: 0.0, bool_val: true, node_id: -1, items: [])
+
     fn is_truthy() -> bool:
         if self.kind == "none": return false
         if self.kind == "bool": return self.bool_val
@@ -99,11 +102,13 @@ class SimpleScriptFn:
     params: [text]
     body_lines: [text]
     body_indents: [i64]
+    closure_env_id: i64
 
 class SimpleScriptDomListener:
     node_id: i64
     event_type: text
     fn_name: text
+    fn_idx: i64
     inline_params: [text]
     inline_lines: [text]
     inline_indents: [i64]
@@ -111,6 +116,8 @@ class SimpleScriptDomListener:
     once: bool
 
 class SimpleScriptExecFrame:
+    is_module: bool
+    closure_env_id: i64
     returned: bool
     ret_val: SimpleScriptVal
     names: [text]
@@ -274,6 +281,81 @@ fn _ss_count_indent(line: text) -> i64:
             break
     i
 
+fn _ss_is_scientific_sign(expr: text, pos: i64) -> bool:
+    if pos < 2:
+        return false
+    val e_ch = expr.substring(pos - 1, pos)
+    if e_ch != "e" and e_ch != "E":
+        return false
+    val n = expr.byte_len()
+    if pos + 1 >= n or not _ss_is_digit(expr.substring(pos + 1, pos + 2)):
+        return false
+    var k = pos - 2
+    var saw_digit = false
+    while k >= 0:
+        val ch = expr.substring(k, k + 1)
+        if _ss_is_digit(ch):
+            saw_digit = true
+            k = k - 1
+        elif ch == ".":
+            k = k - 1
+        elif _ss_is_ident_char(ch):
+            return false
+        else:
+            break
+    saw_digit
+
+fn _ss_parse_number_literal(raw: text) -> SimpleScriptVal?:
+    val expr = raw.trim()
+    if expr == "":
+        return None
+    if val Some(iv) = expr.parse_i64():
+        return Some(SimpleScriptVal.from_int(iv))
+    val n = expr.byte_len()
+    val first = expr.substring(0, 1)
+    val starts_num = _ss_is_digit(first) or (first == "." and n > 1 and _ss_is_digit(expr.substring(1, 2))) or ((first == "-" or first == "+") and n > 1 and (_ss_is_digit(expr.substring(1, 2)) or expr.substring(1, 2) == "."))
+    if not starts_num:
+        return None
+    var e_pos: i64 = -1
+    var i: i64 = 0
+    while i < n:
+        val ch = expr.substring(i, i + 1)
+        if ch == "e" or ch == "E":
+            e_pos = i
+            break
+        if not (_ss_is_digit(ch) or ch == "." or (i == 0 and (ch == "-" or ch == "+"))):
+            return None
+        i = i + 1
+    if e_pos < 0:
+        if val Some(fv) = expr.parse_f64():
+            return Some(SimpleScriptVal.from_float(fv))
+        return None
+    val mant_str = expr.substring(0, e_pos)
+    val exp_str = expr.substring(e_pos + 1, n)
+    if mant_str == "" or exp_str == "":
+        return None
+    val mant_opt = mant_str.parse_f64()
+    val exp_opt = exp_str.parse_i64()
+    if val Some(mant) = mant_opt:
+        if val Some(exp_v) = exp_opt:
+            var out = mant
+            if exp_v > 0:
+                var scale: f64 = 1.0
+                var k: i64 = 0
+                while k < exp_v and k < 308:
+                    scale = scale * 10.0
+                    k = k + 1
+                out = out * scale
+            elif exp_v < 0:
+                var div_s: f64 = 1.0
+                var k: i64 = 0
+                while k < -exp_v and k < 308:
+                    div_s = div_s * 10.0
+                    k = k + 1
+                out = out / div_s
+            return Some(SimpleScriptVal.from_float(out))
+    None
+
 fn _ss_find_top_level_op(expr: text, op: text) -> i64:
     # Find rightmost occurrence of op outside quotes, parens, brackets, braces.
     var depth_p: i64 = 0
@@ -313,18 +395,30 @@ fn _ss_find_top_level_op(expr: text, op: text) -> i64:
             elif ch == "}": depth_c = depth_c - 1
             elif depth_p == 0 and depth_b == 0 and depth_c == 0:
                 if expr.substring(i, i + oplen) == op:
-                    # For word ops like "and" / "or", check boundaries
                     var ok = true
-                    if op == " and " or op == " or ":
-                        ok = true
+                    if op == "==":
+                        val pch = if i > 0: expr.substring(i - 1, i) else: ""
+                        val nch = if i + oplen < n: expr.substring(i + oplen, i + oplen + 1) else: ""
+                        if pch == "=" or pch == "!" or pch == "<" or pch == ">" or nch == "=":
+                            ok = false
+                    elif op == "!=":
+                        val nch = if i + oplen < n: expr.substring(i + oplen, i + oplen + 1) else: ""
+                        if nch == "=":
+                            ok = false
                     elif op == "+" or op == "-":
-                        # Avoid unary leading + / - or after another operator
-                        if i == 0:
+                        if _ss_is_scientific_sign(expr, i):
+                            ok = false
+                        elif i == 0:
                             ok = false
                         else:
                             val prev = expr.substring(0, i).trim()
-                            if prev == "" or prev.ends_with("(") or prev.ends_with(",") or prev.ends_with("=") or prev.ends_with("!") or prev.ends_with("<") or prev.ends_with(">") or prev.ends_with("+") or prev.ends_with("-") or prev.ends_with("*") or prev.ends_with("/"):
+                            val nch = if i + 1 < n: expr.substring(i + 1, i + 2) else: ""
+                            if nch == "=" or prev == "" or prev.ends_with("(") or prev.ends_with("[") or prev.ends_with("{") or prev.ends_with(",") or prev.ends_with(":") or prev.ends_with("=") or prev.ends_with("!") or prev.ends_with("<") or prev.ends_with(">") or prev.ends_with("+") or prev.ends_with("-") or prev.ends_with("*") or prev.ends_with("/") or prev.ends_with("%") or prev.ends_with("&") or prev.ends_with("|"):
                                 ok = false
+                    elif op == "*" or op == "/" or op == "%":
+                        val nch = if i + 1 < n: expr.substring(i + 1, i + 2) else: ""
+                        if nch == "=":
+                            ok = false
                     if ok:
                         last = i
         i = i + 1
@@ -587,6 +681,13 @@ pub class SimpleScriptDomVm:
     var_names: [text]
     var_values: [SimpleScriptVal]
     fns: [SimpleScriptFn]
+    closure_envs_names: [[text]]
+    closure_envs_vals: [[SimpleScriptVal]]
+    map_keys_store: [[text]]
+    map_vals_store: [[SimpleScriptVal]]
+    scroll_node_ids: [i64]
+    scroll_tops: [i32]
+    scroll_lefts: [i32]
     listeners: [SimpleScriptDomListener]
     staged_nodes: [BeDomNode]
     data_transfer_keys: [text]
@@ -601,9 +702,14 @@ pub class SimpleScriptDomVm:
     current_client_y: i32
     current_offset_x: i32
     current_offset_y: i32
+    current_delta_x: f64
+    current_delta_y: f64
+    current_delta_mode: i64
     current_key: text
     current_code: text
     current_data: text
+    scroll_x: i64
+    scroll_y: i64
     next_alloc_id: i64
     error: text
 
@@ -620,6 +726,13 @@ impl SimpleScriptDomVm:
             var_names: [],
             var_values: [],
             fns: [],
+            closure_envs_names: [],
+            closure_envs_vals: [],
+            map_keys_store: [],
+            map_vals_store: [],
+            scroll_node_ids: [],
+            scroll_tops: [],
+            scroll_lefts: [],
             listeners: [],
             staged_nodes: [],
             data_transfer_keys: [],
@@ -634,9 +747,14 @@ impl SimpleScriptDomVm:
             current_client_y: 0,
             current_offset_x: 0,
             current_offset_y: 0,
+            current_delta_x: 0.0,
+            current_delta_y: 0.0,
+            current_delta_mode: 0,
             current_key: "",
             current_code: "",
             current_data: "",
+            scroll_x: 0,
+            scroll_y: 0,
             next_alloc_id: 100000,
             error: ""
         )
@@ -656,16 +774,111 @@ impl SimpleScriptDomVm:
             self.var_names = []
             self.var_values = []
             self.fns = []
+            self.closure_envs_names = []
+            self.closure_envs_vals = []
+            self.map_keys_store = []
+            self.map_vals_store = []
+            self.scroll_node_ids = []
+            self.scroll_tops = []
+            self.scroll_lefts = []
             self.listeners = []
             self.staged_nodes = []
             self.data_transfer_keys = []
             self.data_transfer_vals = []
             self.logs = []
+            self.scroll_x = 0
+            self.scroll_y = 0
             self.error = ""
 
     me _log(msg: text):
         self.logs.push(msg)
         self.console.append("log", msg, 0)
+
+    me _get_scroll_top(node_id: i64) -> i32:
+        var i: i64 = 0
+        while i < self.scroll_node_ids.len():
+            if self.scroll_node_ids[i] == node_id:
+                return self.scroll_tops[i]
+            i = i + 1
+        0
+
+    me _get_scroll_left(node_id: i64) -> i32:
+        var i: i64 = 0
+        while i < self.scroll_node_ids.len():
+            if self.scroll_node_ids[i] == node_id:
+                return self.scroll_lefts[i]
+            i = i + 1
+        0
+
+    me _set_scroll_top(node_id: i64, val_in: i32):
+        val clamped = if val_in < 0: 0 else: val_in
+        var i: i64 = 0
+        while i < self.scroll_node_ids.len():
+            if self.scroll_node_ids[i] == node_id:
+                self.scroll_tops[i] = clamped
+                self.dom_dirty = true
+                return
+            i = i + 1
+        self.scroll_node_ids.push(node_id)
+        self.scroll_tops.push(clamped)
+        self.scroll_lefts.push(0)
+        self.dom_dirty = true
+
+    me _set_scroll_left(node_id: i64, val_in: i32):
+        val clamped = if val_in < 0: 0 else: val_in
+        var i: i64 = 0
+        while i < self.scroll_node_ids.len():
+            if self.scroll_node_ids[i] == node_id:
+                self.scroll_lefts[i] = clamped
+                self.dom_dirty = true
+                return
+            i = i + 1
+        self.scroll_node_ids.push(node_id)
+        self.scroll_tops.push(0)
+        self.scroll_lefts.push(clamped)
+        self.dom_dirty = true
+
+    me _alloc_map(keys: [text], vals: [SimpleScriptVal]) -> SimpleScriptVal:
+        val id = self.map_keys_store.len()
+        self.map_keys_store.push(keys)
+        self.map_vals_store.push(vals)
+        SimpleScriptVal.obj("map", id)
+
+    me _capture_closure_env(mut frame: SimpleScriptExecFrame) -> i64:
+        if frame.is_module:
+            return -1
+        if frame.closure_env_id >= 0 and frame.closure_env_id < self.closure_envs_names.len():
+            var cnames = self.closure_envs_names[frame.closure_env_id]
+            var cvals = self.closure_envs_vals[frame.closure_env_id]
+            var fi: i64 = 0
+            while fi < frame.names.len():
+                var updated = false
+                var ci: i64 = 0
+                while ci < cnames.len():
+                    if cnames[ci] == frame.names[fi]:
+                        cvals[ci] = frame.values[fi]
+                        updated = true
+                        break
+                    ci = ci + 1
+                if not updated:
+                    cnames.push(frame.names[fi])
+                    cvals.push(frame.values[fi])
+                fi = fi + 1
+            self.closure_envs_names[frame.closure_env_id] = cnames
+            self.closure_envs_vals[frame.closure_env_id] = cvals
+            return frame.closure_env_id
+        var names: [text] = []
+        var vals: [SimpleScriptVal] = []
+        var fi: i64 = 0
+        while fi < frame.names.len():
+            names.push(frame.names[fi])
+            vals.push(frame.values[fi])
+            fi = fi + 1
+        val eid = self.closure_envs_names.len()
+        self.closure_envs_names.push(names)
+        self.closure_envs_vals.push(vals)
+        frame.closure_env_id = eid
+        eid
 
     me _get_var(frame: SimpleScriptExecFrame, name: text) -> SimpleScriptVal?:
         var i = frame.names.len() - 1
@@ -673,6 +886,14 @@ impl SimpleScriptDomVm:
             if frame.names[i] == name:
                 return Some(frame.values[i])
             i = i - 1
+        if frame.closure_env_id >= 0 and frame.closure_env_id < self.closure_envs_names.len():
+            val cnames = self.closure_envs_names[frame.closure_env_id]
+            val cvals = self.closure_envs_vals[frame.closure_env_id]
+            var ci = cnames.len() - 1
+            while ci >= 0:
+                if cnames[ci] == name:
+                    return Some(cvals[ci])
+                ci = ci - 1
         var g = self.var_names.len() - 1
         while g >= 0:
             if self.var_names[g] == name:
@@ -681,11 +902,30 @@ impl SimpleScriptDomVm:
         None
 
     me _set_var(mut frame: SimpleScriptExecFrame, name: text, value: SimpleScriptVal, declare_local: bool):
+        if frame.is_module:
+            var gi: i64 = 0
+            while gi < self.var_names.len():
+                if self.var_names[gi] == name:
+                    self.var_values[gi] = value
+                    return
+                gi = gi + 1
+            self.var_names.push(name)
+            self.var_values.push(value)
+            return
         if declare_local:
             var i: i64 = 0
             while i < frame.names.len():
                 if frame.names[i] == name:
                     frame.values[i] = value
+                    if frame.closure_env_id >= 0 and frame.closure_env_id < self.closure_envs_names.len():
+                        var cnames = self.closure_envs_names[frame.closure_env_id]
+                        var cvals = self.closure_envs_vals[frame.closure_env_id]
+                        var ci: i64 = 0
+                        while ci < cnames.len():
+                            if cnames[ci] == name:
+                                cvals[ci] = value
+                            ci = ci + 1
+                        self.closure_envs_vals[frame.closure_env_id] = cvals
                     return
                 i = i + 1
             frame.names.push(name)
@@ -695,8 +935,27 @@ impl SimpleScriptDomVm:
         while li >= 0:
             if frame.names[li] == name:
                 frame.values[li] = value
+                if frame.closure_env_id >= 0 and frame.closure_env_id < self.closure_envs_names.len():
+                    var cnames = self.closure_envs_names[frame.closure_env_id]
+                    var cvals = self.closure_envs_vals[frame.closure_env_id]
+                    var ci: i64 = 0
+                    while ci < cnames.len():
+                        if cnames[ci] == name:
+                            cvals[ci] = value
+                        ci = ci + 1
+                    self.closure_envs_vals[frame.closure_env_id] = cvals
                 return
             li = li - 1
+        if frame.closure_env_id >= 0 and frame.closure_env_id < self.closure_envs_names.len():
+            var cnames = self.closure_envs_names[frame.closure_env_id]
+            var cvals = self.closure_envs_vals[frame.closure_env_id]
+            var ci = cnames.len() - 1
+            while ci >= 0:
+                if cnames[ci] == name:
+                    cvals[ci] = value
+                    self.closure_envs_vals[frame.closure_env_id] = cvals
+                    return
+                ci = ci - 1
         var gi = self.var_names.len() - 1
         while gi >= 0:
             if self.var_names[gi] == name:
@@ -872,23 +1131,163 @@ impl SimpleScriptDomVm:
             i = i + 1
         out
 
+    me _call_fn_struct(f: SimpleScriptFn, args: [SimpleScriptVal], depth: i64) -> SimpleScriptVal:
+        if depth > SIMPLE_SCRIPT_VM_MAX_DEPTH:
+            return SimpleScriptVal.none()
+        var sub = SimpleScriptExecFrame(
+            is_module: false,
+            closure_env_id: f.closure_env_id,
+            returned: false,
+            ret_val: SimpleScriptVal.none(),
+            names: [],
+            values: []
+        )
+        var pi: i64 = 0
+        while pi < f.params.len():
+            val arg = if pi < args.len(): args[pi] else: SimpleScriptVal.none()
+            sub.names.push(f.params[pi])
+            sub.values.push(arg)
+            pi = pi + 1
+        self._exec_block(f.body_lines, f.body_indents, 0, f.body_lines.len(), sub, depth + 1)
+        sub.ret_val
+
+    me _call_fn_index(fn_idx: i64, args: [SimpleScriptVal], depth: i64) -> SimpleScriptVal:
+        if fn_idx >= 0 and fn_idx < self.fns.len():
+            return self._call_fn_struct(self.fns[fn_idx], args, depth)
+        SimpleScriptVal.none()
+
     me _call_user_fn(fn_name: text, args: [SimpleScriptVal], depth: i64) -> SimpleScriptVal:
         if depth > SIMPLE_SCRIPT_VM_MAX_DEPTH:
             return SimpleScriptVal.none()
-        for f in self.fns:
-            if f.name == fn_name:
-                var sub = SimpleScriptExecFrame(returned: false, ret_val: SimpleScriptVal.none(), names: [], values: [])
-                var pi: i64 = 0
-                while pi < f.params.len():
-                    val arg = if pi < args.len(): args[pi] else: SimpleScriptVal.none()
-                    sub.names.push(f.params[pi])
-                    sub.values.push(arg)
-                    pi = pi + 1
-                self._exec_block(f.body_lines, f.body_indents, 0, f.body_lines.len(), sub, depth + 1)
-                return sub.ret_val
+        var i = self.fns.len() - 1
+        while i >= 0:
+            if self.fns[i].name == fn_name:
+                return self._call_fn_struct(self.fns[i], args, depth)
+            i = i - 1
         SimpleScriptVal.none()
 
-    me _eval_call(recv: SimpleScriptVal, method: text, arg_exprs: [text], mut frame: SimpleScriptExecFrame, depth: i64) -> SimpleScriptVal:
+    me _write_back_target(target_expr: text, value: SimpleScriptVal, mut frame: SimpleScriptExecFrame, depth: i64):
+        val lhs = target_expr.trim()
+        if lhs == "":
+            return
+        val lp = _ss_split_postfix(lhs)
+        if lp.1 == "index":
+            var arr = self._eval_expr(lp.0, frame, depth + 1)
+            val key_v = self._eval_expr(lp.2, frame, depth + 1)
+            if arr.kind == "list":
+                val idx = key_v.as_int()
+                if idx >= 0 and idx < arr.items.len():
+                    var next_items = arr.items
+                    next_items[idx] = value
+                    self._write_back_target(lp.0, SimpleScriptVal.from_list(next_items), frame, depth + 1)
+            elif arr.kind == "map" and arr.node_id >= 0 and arr.node_id < self.map_keys_store.len():
+                self._map_set_key(arr.node_id, key_v.as_text(), value)
+            return
+        val dot = _ss_find_top_level_char(lhs, ".", true)
+        if dot > 0:
+            val recv_expr = lhs.substring(0, dot).trim()
+            val prop = lhs.substring(dot + 1, lhs.byte_len()).trim()
+            val recv = self._eval_expr(recv_expr, frame, depth + 1)
+            self._set_prop(recv, prop, value)
+            return
+        self._set_var(frame, lhs, value, false)
+
+    me _map_get_key(map_id: i64, key: text) -> SimpleScriptVal:
+        if map_id < 0 or map_id >= self.map_keys_store.len():
+            return SimpleScriptVal.none()
+        val keys = self.map_keys_store[map_id]
+        val vals = self.map_vals_store[map_id]
+        var i: i64 = 0
+        while i < keys.len():
+            if keys[i] == key:
+                return vals[i]
+            i = i + 1
+        SimpleScriptVal.none()
+
+    me _map_set_key(map_id: i64, key: text, value: SimpleScriptVal):
+        if map_id < 0 or map_id >= self.map_keys_store.len():
+            return
+        var keys = self.map_keys_store[map_id]
+        var vals = self.map_vals_store[map_id]
+        var i: i64 = 0
+        while i < keys.len():
+            if keys[i] == key:
+                vals[i] = value
+                self.map_vals_store[map_id] = vals
+                return
+            i = i + 1
+        keys.push(key)
+        vals.push(value)
+        self.map_keys_store[map_id] = keys
+        self.map_vals_store[map_id] = vals
+
+    me _eval_text_byte_slice_call(s: text, method: text, arg_vals: [SimpleScriptVal]) -> SimpleScriptVal:
+        val b_len = s.byte_len().to_i64()
+        if method == "split" and arg_vals.len() >= 1:
+            val sep = arg_vals[0].as_text()
+            var parts: [SimpleScriptVal] = []
+            if sep == "":
+                var ci: i64 = 0
+                while ci < b_len:
+                    parts.push(SimpleScriptVal.from_text(s.substring(ci, ci + 1)))
+                    ci = ci + 1
+            else:
+                for part in s.split(sep):
+                    parts.push(SimpleScriptVal.from_text(part))
+            return SimpleScriptVal.from_list(parts)
+        if method == "slice":
+            var start_i: i64 = if arg_vals.len() >= 1: arg_vals[0].as_int() else: 0
+            var end_i: i64 = if arg_vals.len() >= 2: arg_vals[1].as_int() else: b_len
+            if start_i < 0: start_i = b_len + start_i
+            if end_i < 0: end_i = b_len + end_i
+            if start_i < 0: start_i = 0
+            if end_i > b_len: end_i = b_len
+            if end_i <= start_i:
+                return SimpleScriptVal.from_text("")
+            return SimpleScriptVal.from_text(s.substring(start_i, end_i))
+        if method == "substring":
+            var a: i64 = if arg_vals.len() >= 1: arg_vals[0].as_int() else: 0
+            var b: i64 = if arg_vals.len() >= 2: arg_vals[1].as_int() else: b_len
+            if a < 0: a = 0
+            if b < 0: b = 0
+            if a > b_len: a = b_len
+            if b > b_len: b = b_len
+            if a > b:
+                val tmp = a
+                a = b
+                b = tmp
+            return SimpleScriptVal.from_text(s.substring(a, b))
+        SimpleScriptVal.none()
+
+    me _eval_text_method_call(s: text, method: text, arg_vals: [SimpleScriptVal]) -> SimpleScriptVal:
+        if method == "len" or method == "length": return SimpleScriptVal.from_int(s.len().to_i64())
+        if method == "trim": return SimpleScriptVal.from_text(s.trim())
+        if method == "lower" or method == "toLowerCase": return SimpleScriptVal.from_text(s.lower())
+        if method == "upper" or method == "toUpperCase": return SimpleScriptVal.from_text(s.upper())
+        val arg_count = arg_vals.len()
+        if (method == "contains" or method == "includes") and arg_count >= 1:
+            val needle = arg_vals[0].as_text()
+            return SimpleScriptVal.from_bool(s.contains(needle))
+        if method == "starts_with" and arg_count >= 1:
+            val prefix = arg_vals[0].as_text()
+            return SimpleScriptVal.from_bool(s.starts_with(prefix))
+        if method == "ends_with" and arg_count >= 1:
+            val suffix = arg_vals[0].as_text()
+            return SimpleScriptVal.from_bool(s.ends_with(suffix))
+        if method == "replace" and arg_count >= 2:
+            val pat = arg_vals[0].as_text()
+            val rep = arg_vals[1].as_text()
+            return SimpleScriptVal.from_text(s.replace(pat, rep))
+        if (method == "indexOf" or method == "index_of") and arg_count >= 1:
+            val target = arg_vals[0].as_text()
+            val found = s.index_of(target) ?? -1
+            return SimpleScriptVal.from_int(found)
+        if method == "split" or method == "slice" or method == "substring":
+            return self._eval_text_byte_slice_call(s, method, arg_vals)
+        if method == "to_i64" or method == "to_int": return SimpleScriptVal.from_int(s.trim().parse_i64() ?? 0)
+        SimpleScriptVal.none()
+
+    me _eval_call(recv: SimpleScriptVal, recv_expr: text, method: text, arg_exprs: [text], mut frame: SimpleScriptExecFrame, depth: i64) -> SimpleScriptVal:
         var args: [SimpleScriptVal] = []
         for ae in arg_exprs:
             args.push(self._eval_expr(ae, frame, depth + 1))
@@ -919,6 +1318,55 @@ impl SimpleScriptDomVm:
                 val created = BeDomNode.text_node(nid, args[0].as_text())
                 self.staged_nodes.push(created)
                 return SimpleScriptVal.dom(nid)
+            if method == "addEventListener" and args.len() >= 2:
+                val ev_type = args[0].as_text().trim().lower()
+                val cb_idx = if args[1].kind == "fn": args[1].int_val else: -1
+                val cb_name = if args[1].kind == "fn": args[1].text_val else: arg_exprs[1].trim()
+                val capture = if args.len() >= 3: args[2].is_truthy() else: false
+                self.listeners.push(SimpleScriptDomListener(
+                    node_id: -1,
+                    event_type: ev_type,
+                    fn_name: cb_name,
+                    fn_idx: cb_idx,
+                    inline_params: [],
+                    inline_lines: [],
+                    inline_indents: [],
+                    capture: capture,
+                    once: false
+                ))
+                return SimpleScriptVal.none()
+            return SimpleScriptVal.none()
+
+        if recv.kind == "global_window":
+            if method == "addEventListener" and args.len() >= 2:
+                val ev_type = args[0].as_text().trim().lower()
+                val cb_idx = if args[1].kind == "fn": args[1].int_val else: -1
+                val cb_name = if args[1].kind == "fn": args[1].text_val else: arg_exprs[1].trim()
+                val capture = if args.len() >= 3: args[2].is_truthy() else: false
+                self.listeners.push(SimpleScriptDomListener(
+                    node_id: -2,
+                    event_type: ev_type,
+                    fn_name: cb_name,
+                    fn_idx: cb_idx,
+                    inline_params: [],
+                    inline_lines: [],
+                    inline_indents: [],
+                    capture: capture,
+                    once: false
+                ))
+                return SimpleScriptVal.none()
+            if method == "scrollTo" and args.len() >= 2:
+                val nx = args[0].as_int()
+                val ny = args[1].as_int()
+                self.scroll_x = if nx < 0: 0 else: nx
+                self.scroll_y = if ny < 0: 0 else: ny
+                return SimpleScriptVal.none()
+            if method == "scrollBy" and args.len() >= 2:
+                val nx = self.scroll_x + args[0].as_int()
+                val ny = self.scroll_y + args[1].as_int()
+                self.scroll_x = if nx < 0: 0 else: nx
+                self.scroll_y = if ny < 0: 0 else: ny
+                return SimpleScriptVal.none()
             return SimpleScriptVal.none()
 
         if recv.kind == "global_console":
@@ -935,22 +1383,45 @@ impl SimpleScriptDomVm:
                 val r = if f >= 0.0: (f + 0.5).to_i64() else: (f - 0.5).to_i64()
                 return SimpleScriptVal.from_int(r)
             if method == "floor" and args.len() >= 1:
-                return SimpleScriptVal.from_int(args[0].as_float().to_i64())
+                val f = args[0].as_float()
+                val iv = f.to_i64()
+                return SimpleScriptVal.from_int(if f < 0.0 and iv.to_f64() != f: iv - 1 else: iv)
             if method == "ceil" and args.len() >= 1:
                 val f = args[0].as_float()
                 val i = f.to_i64()
                 return SimpleScriptVal.from_int(if f > i.to_f64(): i + 1 else: i)
             if method == "abs" and args.len() >= 1:
                 val f = args[0].as_float()
-                return SimpleScriptVal.from_float(if f < 0.0: -f else: f)
+                val res = if f < 0.0: -f else: f
+                if args[0].kind == "int":
+                    return SimpleScriptVal.from_int(res.to_i64())
+                return SimpleScriptVal.from_float(res)
             if method == "min" and args.len() >= 2:
                 val a = args[0].as_float()
                 val b = args[1].as_float()
-                return SimpleScriptVal.from_float(if a < b: a else: b)
+                val res = if a < b: a else: b
+                if args[0].kind == "int" and args[1].kind == "int":
+                    return SimpleScriptVal.from_int(res.to_i64())
+                return SimpleScriptVal.from_float(res)
             if method == "max" and args.len() >= 2:
                 val a = args[0].as_float()
                 val b = args[1].as_float()
-                return SimpleScriptVal.from_float(if a > b: a else: b)
+                val res = if a > b: a else: b
+                if args[0].kind == "int" and args[1].kind == "int":
+                    return SimpleScriptVal.from_int(res.to_i64())
+                return SimpleScriptVal.from_float(res)
+            if method == "clamp" and args.len() >= 3:
+                val v = args[0].as_float()
+                val lo = args[1].as_float()
+                val hi = args[2].as_float()
+                val clamped = if v < lo: lo elif v > hi: hi else: v
+                if args[0].kind == "int" and args[1].kind == "int" and args[2].kind == "int":
+                    return SimpleScriptVal.from_int(clamped.to_i64())
+                return SimpleScriptVal.from_float(clamped)
+            if method == "sqrt" and args.len() >= 1:
+                return SimpleScriptVal.from_float(args[0].as_float() ** 0.5)
+            if method == "pow" and args.len() >= 2:
+                return SimpleScriptVal.from_float(args[0].as_float() ** args[1].as_float())
             return SimpleScriptVal.none()
 
         if recv.kind == "dom":
@@ -999,12 +1470,14 @@ impl SimpleScriptDomVm:
                 return SimpleScriptVal.from_list([])
             if method == "addEventListener" and args.len() >= 2:
                 val ev_type = args[0].as_text().trim().lower()
+                val cb_idx = if args[1].kind == "fn": args[1].int_val else: -1
                 val cb_name = if args[1].kind == "fn": args[1].text_val else: arg_exprs[1].trim()
                 val capture = if args.len() >= 3: args[2].is_truthy() else: false
                 self.listeners.push(SimpleScriptDomListener(
                     node_id: nid,
                     event_type: ev_type,
                     fn_name: cb_name,
+                    fn_idx: cb_idx,
                     inline_params: [],
                     inline_lines: [],
                     inline_indents: [],
@@ -1016,6 +1489,38 @@ impl SimpleScriptDomVm:
                 if val Some(n) = self._find_node(nid):
                     var next = n
                     next.set_attr("data-focused", "true")
+                    self._commit_node(next)
+                return SimpleScriptVal.none()
+            if method == "scrollTo" and args.len() >= 2:
+                if val Some(n) = self._find_node(nid):
+                    val nx = args[0].as_int()
+                    val ny = args[1].as_int()
+                    val cx = if nx < 0: 0 else: nx
+                    var cy = if ny < 0: 0 else: ny
+                    val max_st = self._max_scroll_top(n)
+                    if max_st >= 0 and cy > max_st: cy = max_st
+                    self._set_scroll_left(nid, cx.to_i32())
+                    self._set_scroll_top(nid, cy.to_i32())
+                    var next = n
+                    next.set_attr("data-scroll-left", "{cx}")
+                    next.set_attr("data-scroll-top", "{cy}")
+                    self._commit_node(next)
+                return SimpleScriptVal.none()
+            if method == "scrollBy" and args.len() >= 2:
+                if val Some(n) = self._find_node(nid):
+                    val cur_x = if be_dom_has_attr(n, "data-scroll-left"): (be_dom_get_attr(n, "data-scroll-left").trim().parse_i64()) ?? 0 else: self._get_scroll_left(nid).to_i64()
+                    val cur_y = if be_dom_has_attr(n, "data-scroll-top"): (be_dom_get_attr(n, "data-scroll-top").trim().parse_i64()) ?? 0 else: self._get_scroll_top(nid).to_i64()
+                    val nx = cur_x + args[0].as_int()
+                    var cy = cur_y + args[1].as_int()
+                    val cx = if nx < 0: 0 else: nx
+                    if cy < 0: cy = 0
+                    val max_st = self._max_scroll_top(n)
+                    if max_st >= 0 and cy > max_st: cy = max_st
+                    self._set_scroll_left(nid, cx.to_i32())
+                    self._set_scroll_top(nid, cy.to_i32())
+                    var next = n
+                    next.set_attr("data-scroll-left", "{cx}")
+                    next.set_attr("data-scroll-top", "{cy}")
                     self._commit_node(next)
                 return SimpleScriptVal.none()
             return SimpleScriptVal.none()
@@ -1140,17 +1645,7 @@ impl SimpleScriptDomVm:
             return SimpleScriptVal.none()
 
         if recv.kind == "text":
-            val s = recv.text_val
-            if method == "len" or method == "length": return SimpleScriptVal.from_int(s.len().to_i64())
-            if method == "trim": return SimpleScriptVal.from_text(s.trim())
-            if method == "lower" or method == "toLowerCase": return SimpleScriptVal.from_text(s.lower())
-            if method == "upper" or method == "toUpperCase": return SimpleScriptVal.from_text(s.upper())
-            if method == "contains" and args.len() >= 1: return SimpleScriptVal.from_bool(s.contains(args[0].as_text()))
-            if method == "starts_with" and args.len() >= 1: return SimpleScriptVal.from_bool(s.starts_with(args[0].as_text()))
-            if method == "ends_with" and args.len() >= 1: return SimpleScriptVal.from_bool(s.ends_with(args[0].as_text()))
-            if method == "replace" and args.len() >= 2: return SimpleScriptVal.from_text(s.replace(args[0].as_text(), args[1].as_text()))
-            if method == "to_i64" or method == "to_int": return SimpleScriptVal.from_int(s.trim().parse_i64() ?? 0)
-            return SimpleScriptVal.none()
+            return self._eval_text_method_call(recv.text_val, method, args)
 
         if recv.kind == "int" or recv.kind == "float":
             if method == "to_text": return SimpleScriptVal.from_text(recv.as_text())
@@ -1160,11 +1655,92 @@ impl SimpleScriptDomVm:
         if recv.kind == "list":
             if method == "len" or method == "length":
                 return SimpleScriptVal.from_int(recv.items.len().to_i64())
+            if method == "push" and args.len() >= 1:
+                var next_items = recv.items
+                for a in args:
+                    next_items.push(a)
+                self._write_back_target(recv_expr, SimpleScriptVal.from_list(next_items), frame, depth + 1)
+                return SimpleScriptVal.from_int(next_items.len().to_i64())
+            if method == "pop":
+                if recv.items.len() == 0:
+                    return SimpleScriptVal.none()
+                val last_idx = recv.items.len() - 1
+                val popped = recv.items[last_idx]
+                var next_items: [SimpleScriptVal] = []
+                var ii: i64 = 0
+                while ii < last_idx:
+                    next_items.push(recv.items[ii])
+                    ii = ii + 1
+                self._write_back_target(recv_expr, SimpleScriptVal.from_list(next_items), frame, depth + 1)
+                return popped
+            if method == "join":
+                val sep = if args.len() >= 1: args[0].as_text() else: ","
+                var parts: [text] = []
+                for item in recv.items:
+                    parts.push(item.as_text())
+                return SimpleScriptVal.from_text(parts.join(sep))
+            if method == "slice":
+                val n = recv.items.len().to_i64()
+                var s_idx: i64 = if args.len() >= 1: args[0].as_int() else: 0
+                var e_idx: i64 = if args.len() >= 2: args[1].as_int() else: n
+                if s_idx < 0: s_idx = n + s_idx
+                if e_idx < 0: e_idx = n + e_idx
+                if s_idx < 0: s_idx = 0
+                if e_idx > n: e_idx = n
+                var sliced: [SimpleScriptVal] = []
+                var ii = s_idx
+                while ii < e_idx:
+                    sliced.push(recv.items[ii])
+                    ii = ii + 1
+                return SimpleScriptVal.from_list(sliced)
+            if (method == "indexOf" or method == "index_of") and args.len() >= 1:
+                val target = args[0]
+                var ii: i64 = 0
+                while ii < recv.items.len():
+                    if recv.items[ii].as_text() == target.as_text() and recv.items[ii].kind == target.kind:
+                        return SimpleScriptVal.from_int(ii)
+                    ii = ii + 1
+                return SimpleScriptVal.from_int(-1)
+            return SimpleScriptVal.none()
+
+        if recv.kind == "map":
+            val mid = recv.node_id
+            if mid >= 0 and mid < self.map_keys_store.len():
+                if method == "len" or method == "length":
+                    return SimpleScriptVal.from_int(self.map_keys_store[mid].len().to_i64())
+                if method == "keys":
+                    var out: [SimpleScriptVal] = []
+                    for k in self.map_keys_store[mid]:
+                        out.push(SimpleScriptVal.from_text(k))
+                    return SimpleScriptVal.from_list(out)
+                if (method == "has" or method == "contains") and args.len() >= 1:
+                    val key = args[0].as_text()
+                    for k in self.map_keys_store[mid]:
+                        if k == key:
+                            return SimpleScriptVal.from_bool(true)
+                    return SimpleScriptVal.from_bool(false)
             return SimpleScriptVal.none()
 
         SimpleScriptVal.none()
 
+    fn _max_scroll_top(n: BeDomNode) -> i64:
+        val sh = (be_dom_get_attr(n, "data-scroll-height").trim().parse_i64()) ?? -1
+        val ch = (be_dom_get_attr(n, "data-client-height").trim().parse_i64()) ?? -1
+        if sh >= 0 and ch >= 0:
+            val m = sh - ch
+            return if m > 0: m else: 0
+        -1
+
     me _get_prop(recv: SimpleScriptVal, prop: text) -> SimpleScriptVal:
+        if recv.kind == "global_window":
+            if prop == "scrollX" or prop == "pageXOffset":
+                return SimpleScriptVal.from_int(self.scroll_x)
+            if prop == "scrollY" or prop == "pageYOffset":
+                return SimpleScriptVal.from_int(self.scroll_y)
+            if prop == "document":
+                return SimpleScriptVal.obj("global_document", -1)
+            return SimpleScriptVal.none()
+
         if recv.kind == "global_document":
             if prop == "title":
                 return SimpleScriptVal.from_text(self.title)
@@ -1190,6 +1766,22 @@ impl SimpleScriptDomVm:
                 if prop == "disabled": return SimpleScriptVal.from_bool(be_dom_has_attr(n, "disabled"))
                 if prop == "selected": return SimpleScriptVal.from_bool(be_dom_has_attr(n, "selected"))
                 if prop == "selectedIndex": return SimpleScriptVal.from_int(_ss_select_index(n))
+                if prop == "scrollTop":
+                    if be_dom_has_attr(n, "data-scroll-top"):
+                        val raw_st = be_dom_get_attr(n, "data-scroll-top").trim()
+                        return SimpleScriptVal.from_int(raw_st.parse_i64() ?? 0)
+                    return SimpleScriptVal.from_int(self._get_scroll_top(n.node_id).to_i64())
+                if prop == "scrollLeft":
+                    if be_dom_has_attr(n, "data-scroll-left"):
+                        val raw_sl = be_dom_get_attr(n, "data-scroll-left").trim()
+                        return SimpleScriptVal.from_int(raw_sl.parse_i64() ?? 0)
+                    return SimpleScriptVal.from_int(self._get_scroll_left(n.node_id).to_i64())
+                if prop == "scrollHeight":
+                    val raw_sh = be_dom_get_attr(n, "data-scroll-height").trim()
+                    return SimpleScriptVal.from_int(raw_sh.parse_i64() ?? 0)
+                if prop == "clientHeight":
+                    val raw_ch = be_dom_get_attr(n, "data-client-height").trim()
+                    return SimpleScriptVal.from_int(raw_ch.parse_i64() ?? 0)
                 if prop == "textContent" or prop == "innerText": return SimpleScriptVal.from_text(be_dom_get_text_content(n))
                 if prop == "innerHTML": return SimpleScriptVal.from_text(be_dom_serialize_children(n))
                 if prop == "style": return SimpleScriptVal.obj("style", n.node_id)
@@ -1224,6 +1816,9 @@ impl SimpleScriptDomVm:
             if prop == "key": return SimpleScriptVal.from_text(self.current_key)
             if prop == "code": return SimpleScriptVal.from_text(self.current_code)
             if prop == "data": return SimpleScriptVal.from_text(self.current_data)
+            if prop == "deltaX": return SimpleScriptVal.from_float(self.current_delta_x)
+            if prop == "deltaY": return SimpleScriptVal.from_float(self.current_delta_y)
+            if prop == "deltaMode": return SimpleScriptVal.from_int(self.current_delta_mode)
             if prop == "defaultPrevented": return SimpleScriptVal.from_bool(self.event_prevent_default)
             if prop == "dataTransfer": return SimpleScriptVal.obj("datatransfer", -1)
             return SimpleScriptVal.none()
@@ -1232,6 +1827,12 @@ impl SimpleScriptDomVm:
             return SimpleScriptVal.from_int(recv.text_val.len().to_i64())
         if recv.kind == "list" and (prop == "len" or prop == "length"):
             return SimpleScriptVal.from_int(recv.items.len().to_i64())
+        if recv.kind == "map":
+            if prop == "len" or prop == "length":
+                if recv.node_id >= 0 and recv.node_id < self.map_keys_store.len():
+                    return SimpleScriptVal.from_int(self.map_keys_store[recv.node_id].len().to_i64())
+                return SimpleScriptVal.from_int(0)
+            return self._map_get_key(recv.node_id, prop)
         SimpleScriptVal.none()
 
     me _set_prop(recv: SimpleScriptVal, prop: text, value: SimpleScriptVal):
@@ -1251,13 +1852,36 @@ impl SimpleScriptDomVm:
                     self._set_element_inner_html(n.node_id, value.as_text())
                     return
                 if prop == "selectedIndex" and n.tag_name == "select":
-                    val next = _ss_select_by_index(n, value.as_int())
+                    var next = _ss_select_by_index(n, value.as_int())
+                    val next_val = browser_select_value(next)
+                    if next_val != "":
+                        next.set_attr("value", next_val)
+                    self._commit_node(next)
+                    return
+                if prop == "scrollTop":
+                    var st = value.as_int()
+                    if st < 0: st = 0
+                    val max_st = self._max_scroll_top(n)
+                    if max_st >= 0 and st > max_st: st = max_st
+                    self._set_scroll_top(n.node_id, st.to_i32())
+                    var next = n
+                    next.set_attr("data-scroll-top", "{st}")
+                    self._commit_node(next)
+                    return
+                if prop == "scrollLeft":
+                    var sl = value.as_int()
+                    if sl < 0: sl = 0
+                    self._set_scroll_left(n.node_id, sl.to_i32())
+                    var next = n
+                    next.set_attr("data-scroll-left", "{sl}")
                     self._commit_node(next)
                     return
                 if prop == "value" and n.tag_name == "select":
                     val upd = browser_select_update(n, value.as_text())
                     if upd.found:
-                        self._commit_node(upd.node)
+                        var next_sel = upd.node
+                        next_sel.set_attr("value", browser_select_value(next_sel))
+                        self._commit_node(next_sel)
                     return
                 var next = n
                 if prop == "id":
@@ -1289,6 +1913,9 @@ impl SimpleScriptDomVm:
                     val updated = _ss_style_set(be_dom_get_attr(n, "style"), prop, value.as_text())
                     if updated == "": next.remove_attr("style") else: next.set_attr("style", updated)
                 self._commit_node(next)
+            return
+        if recv.kind == "map":
+            self._map_set_key(recv.node_id, prop, value)
 
     me _eval_expr(raw_expr: text, mut frame: SimpleScriptExecFrame, depth: i64) -> SimpleScriptVal:
         if depth > 64:
@@ -1299,23 +1926,85 @@ impl SimpleScriptDomVm:
         if expr == "":
             return SimpleScriptVal.none()
 
+        # Inline lambda expression: fn(p1, p2): body_expr
+        if expr.starts_with("fn("):
+            val lp: i64 = 2
+            var dp: i64 = 0
+            var rp: i64 = -1
+            var li: i64 = lp
+            while li < expr.byte_len():
+                val lc = expr.substring(li, li + 1)
+                if lc == "(":
+                    dp = dp + 1
+                elif lc == ")":
+                    dp = dp - 1
+                    if dp == 0:
+                        rp = li
+                        break
+                li = li + 1
+            if rp > lp:
+                val after_rp = expr.substring(rp + 1, expr.byte_len()).trim()
+                if after_rp.starts_with(":"):
+                    val p_raw = expr.substring(lp + 1, rp).trim()
+                    var params: [text] = []
+                    if p_raw != "":
+                        for p in p_raw.split(","):
+                            params.push(p.trim())
+                    val body_expr = after_rp.substring(1, after_rp.byte_len()).trim()
+                    var b_lines: [text] = []
+                    var b_indents: [i64] = []
+                    if body_expr != "":
+                        b_lines.push("return " + body_expr)
+                        b_indents.push(0)
+                    val env_id = self._capture_closure_env(frame)
+                    val fn_idx = self.fns.len()
+                    val fname = "__ss_lambda_{fn_idx}"
+                    self.fns.push(SimpleScriptFn(
+                        name: fname,
+                        params: params,
+                        body_lines: b_lines,
+                        body_indents: b_indents,
+                        closure_env_id: env_id
+                    ))
+                    return SimpleScriptVal.fn_ref(fn_idx, fname)
+
         # Binary operators from lowest to highest precedence
-        val or_idx = _ss_find_top_level_op(expr, " or ")
+        val or_word_idx = _ss_find_top_level_op(expr, " or ")
+        val or_sym_idx = _ss_find_top_level_op(expr, "||")
+        var or_idx: i64 = -1
+        var or_len: i64 = 0
+        if or_word_idx > or_idx:
+            or_idx = or_word_idx
+            or_len = 4
+        if or_sym_idx > or_idx:
+            or_idx = or_sym_idx
+            or_len = 2
         if or_idx >= 0:
             val lv = self._eval_expr(expr.substring(0, or_idx), frame, depth + 1)
             if lv.is_truthy():
                 return SimpleScriptVal.from_bool(true)
-            val rv = self._eval_expr(expr.substring(or_idx + 4, expr.byte_len()), frame, depth + 1)
+            val rv = self._eval_expr(expr.substring(or_idx + or_len, expr.byte_len()), frame, depth + 1)
             return SimpleScriptVal.from_bool(rv.is_truthy())
 
-        val and_idx = _ss_find_top_level_op(expr, " and ")
+        val and_word_idx = _ss_find_top_level_op(expr, " and ")
+        val and_sym_idx = _ss_find_top_level_op(expr, "&&")
+        var and_idx: i64 = -1
+        var and_len: i64 = 0
+        if and_word_idx > and_idx:
+            and_idx = and_word_idx
+            and_len = 5
+        if and_sym_idx > and_idx:
+            and_idx = and_sym_idx
+            and_len = 2
         if and_idx >= 0:
             val lv = self._eval_expr(expr.substring(0, and_idx), frame, depth + 1)
             if not lv.is_truthy():
                 return SimpleScriptVal.from_bool(false)
-            val rv = self._eval_expr(expr.substring(and_idx + 5, expr.byte_len()), frame, depth + 1)
+            val rv = self._eval_expr(expr.substring(and_idx + and_len, expr.byte_len()), frame, depth + 1)
             return SimpleScriptVal.from_bool(rv.is_truthy())
 
+        val eq3_idx = _ss_find_top_level_op(expr, "===")
+        val ne3_idx = _ss_find_top_level_op(expr, "!==")
         val eq_idx = _ss_find_top_level_op(expr, "==")
         val ne_idx = _ss_find_top_level_op(expr, "!=")
         val le_idx = _ss_find_top_level_op(expr, "<=")
@@ -1324,16 +2013,34 @@ impl SimpleScriptDomVm:
         val gt_idx = _ss_find_top_level_op(expr, ">")
         var cmp_idx: i64 = -1
         var cmp_op = ""
-        if eq_idx > cmp_idx: cmp_idx = eq_idx; cmp_op = "=="
-        if ne_idx > cmp_idx: cmp_idx = ne_idx; cmp_op = "!="
-        if le_idx > cmp_idx: cmp_idx = le_idx; cmp_op = "<="
-        if ge_idx > cmp_idx: cmp_idx = ge_idx; cmp_op = ">="
-        if lt_idx > cmp_idx and lt_idx != le_idx: cmp_idx = lt_idx; cmp_op = "<"
-        if gt_idx > cmp_idx and gt_idx != ge_idx: cmp_idx = gt_idx; cmp_op = ">"
+        if eq3_idx > cmp_idx:
+            cmp_idx = eq3_idx
+            cmp_op = "==="
+        if ne3_idx > cmp_idx:
+            cmp_idx = ne3_idx
+            cmp_op = "!=="
+        if eq_idx > cmp_idx:
+            cmp_idx = eq_idx
+            cmp_op = "=="
+        if ne_idx > cmp_idx:
+            cmp_idx = ne_idx
+            cmp_op = "!="
+        if le_idx > cmp_idx:
+            cmp_idx = le_idx
+            cmp_op = "<="
+        if ge_idx > cmp_idx:
+            cmp_idx = ge_idx
+            cmp_op = ">="
+        if lt_idx > cmp_idx and lt_idx != le_idx:
+            cmp_idx = lt_idx
+            cmp_op = "<"
+        if gt_idx > cmp_idx and gt_idx != ge_idx:
+            cmp_idx = gt_idx
+            cmp_op = ">"
         if cmp_idx >= 0:
             val lv = self._eval_expr(expr.substring(0, cmp_idx), frame, depth + 1)
             val rv = self._eval_expr(expr.substring(cmp_idx + cmp_op.byte_len(), expr.byte_len()), frame, depth + 1)
-            if cmp_op == "==":
+            if cmp_op == "==" or cmp_op == "===":
                 if lv.kind == "none" or rv.kind == "none":
                     return SimpleScriptVal.from_bool(lv.kind == rv.kind)
                 if lv.kind == "bool" and rv.kind == "bool":
@@ -1341,7 +2048,7 @@ impl SimpleScriptDomVm:
                 if (lv.kind == "int" or lv.kind == "float") and (rv.kind == "int" or rv.kind == "float"):
                     return SimpleScriptVal.from_bool(lv.as_float() == rv.as_float())
                 return SimpleScriptVal.from_bool(lv.as_text() == rv.as_text())
-            if cmp_op == "!=":
+            if cmp_op == "!=" or cmp_op == "!==":
                 if lv.kind == "none" or rv.kind == "none":
                     return SimpleScriptVal.from_bool(lv.kind != rv.kind)
                 if (lv.kind == "int" or lv.kind == "float") and (rv.kind == "int" or rv.kind == "float"):
@@ -1374,9 +2081,15 @@ impl SimpleScriptDomVm:
         val mod_idx = _ss_find_top_level_op(expr, "%")
         var mul_pos: i64 = -1
         var mul_op = ""
-        if mul_idx > mul_pos: mul_pos = mul_idx; mul_op = "*"
-        if div_idx > mul_pos: mul_pos = div_idx; mul_op = "/"
-        if mod_idx > mul_pos: mul_pos = mod_idx; mul_op = "%"
+        if mul_idx > mul_pos:
+            mul_pos = mul_idx
+            mul_op = "*"
+        if div_idx > mul_pos:
+            mul_pos = div_idx
+            mul_op = "/"
+        if mod_idx > mul_pos:
+            mul_pos = mod_idx
+            mul_op = "%"
         if mul_pos > 0:
             val lv = self._eval_expr(expr.substring(0, mul_pos), frame, depth + 1)
             val rv = self._eval_expr(expr.substring(mul_pos + 1, expr.byte_len()), frame, depth + 1)
@@ -1414,6 +2127,7 @@ impl SimpleScriptDomVm:
         if expr == "false": return SimpleScriptVal.from_bool(false)
         if expr == "nil" or expr == "null" or expr == "undefined": return SimpleScriptVal.none()
         if expr == "document": return SimpleScriptVal.obj("global_document", -1)
+        if expr == "window" or expr == "self" or expr == "globalThis": return SimpleScriptVal.obj("global_window", -2)
         if expr == "console": return SimpleScriptVal.obj("global_console", -1)
         if expr == "Math": return SimpleScriptVal.obj("global_math", -1)
         if expr == "event" or expr == "ev": return SimpleScriptVal.obj("event", -1)
@@ -1425,6 +2139,21 @@ impl SimpleScriptDomVm:
                 items.push(self._eval_expr(part, frame, depth + 1))
             return SimpleScriptVal.from_list(items)
 
+        if expr.starts_with("{") and expr.ends_with("}"):
+            val inner_map = expr.substring(1, expr.byte_len() - 1).trim()
+            var mkeys: [text] = []
+            var mvals: [SimpleScriptVal] = []
+            for part in _ss_split_top_level_args(inner_map):
+                val colon = _ss_find_top_level_char(part, ":", false)
+                if colon > 0:
+                    var k = part.substring(0, colon).trim()
+                    if _ss_is_quoted_literal(k):
+                        k = self._eval_string_literal(k, frame, depth + 1)
+                    val v = self._eval_expr(part.substring(colon + 1, part.byte_len()).trim(), frame, depth + 1)
+                    mkeys.push(k)
+                    mvals.push(v)
+            return self._alloc_map(mkeys, mvals)
+
         # Postfix calls / index / property access
         val postfix = _ss_split_postfix(expr)
         val recv_expr = postfix.0
@@ -1435,8 +2164,15 @@ impl SimpleScriptDomVm:
             val recv_post = _ss_split_postfix(recv_expr)
             if recv_post.1 == "prop":
                 val obj = self._eval_expr(recv_post.0, frame, depth + 1)
-                return self._eval_call(obj, recv_post.2, arg_exprs, frame, depth + 1)
-            # Standalone global function call
+                if obj.kind == "map":
+                    val mval = self._map_get_key(obj.node_id, recv_post.2)
+                    if mval.kind == "fn":
+                        var margs: [SimpleScriptVal] = []
+                        for ae in arg_exprs:
+                            margs.push(self._eval_expr(ae, frame, depth + 1))
+                        return self._call_fn_index(mval.int_val, margs, depth + 1)
+                return self._eval_call(obj, recv_post.0, recv_post.2, arg_exprs, frame, depth + 1)
+            # Standalone global or closure variable call
             var args: [SimpleScriptVal] = []
             for ae in arg_exprs:
                 args.push(self._eval_expr(ae, frame, depth + 1))
@@ -1451,43 +2187,64 @@ impl SimpleScriptDomVm:
                 val lo = args[1].as_float()
                 val hi = args[2].as_float()
                 val clamped = if v < lo: lo elif v > hi: hi else: v
-                return SimpleScriptVal.from_int(clamped.to_i64())
+                if args[0].kind == "int" and args[1].kind == "int" and args[2].kind == "int":
+                    return SimpleScriptVal.from_int(clamped.to_i64())
+                return SimpleScriptVal.from_float(clamped)
             if recv_expr == "min" and args.len() >= 2:
-                val a = args[0].as_int()
-                val b = args[1].as_int()
-                return SimpleScriptVal.from_int(if a < b: a else: b)
+                val a = args[0].as_float()
+                val b = args[1].as_float()
+                if args[0].kind == "int" and args[1].kind == "int":
+                    return SimpleScriptVal.from_int(if a < b: args[0].as_int() else: args[1].as_int())
+                return SimpleScriptVal.from_float(if a < b: a else: b)
             if recv_expr == "max" and args.len() >= 2:
-                val a = args[0].as_int()
-                val b = args[1].as_int()
-                return SimpleScriptVal.from_int(if a > b: a else: b)
+                val a = args[0].as_float()
+                val b = args[1].as_float()
+                if args[0].kind == "int" and args[1].kind == "int":
+                    return SimpleScriptVal.from_int(if a > b: args[0].as_int() else: args[1].as_int())
+                return SimpleScriptVal.from_float(if a > b: a else: b)
             if (recv_expr == "int" or recv_expr == "parseInt") and args.len() >= 1:
                 return SimpleScriptVal.from_int(args[0].as_int())
+            if (recv_expr == "float" or recv_expr == "parseFloat") and args.len() >= 1:
+                if args[0].kind == "text":
+                    if val Some(nv) = _ss_parse_number_literal(args[0].as_text()):
+                        return nv
+                return SimpleScriptVal.from_float(args[0].as_float())
             if (recv_expr == "str" or recv_expr == "String" or recv_expr == "to_text") and args.len() >= 1:
                 return SimpleScriptVal.from_text(args[0].as_text())
+            if val Some(fn_v) = self._get_var(frame, recv_expr):
+                if fn_v.kind == "fn":
+                    return self._call_fn_index(fn_v.int_val, args, depth + 1)
             return self._call_user_fn(recv_expr, args, depth + 1)
         if pkind == "index":
             val arr = self._eval_expr(recv_expr, frame, depth + 1)
-            val idx = self._eval_expr(payload, frame, depth + 1).as_int()
-            if arr.kind == "list" and idx >= 0 and idx < arr.items.len():
-                return arr.items[idx]
+            val key_v = self._eval_expr(payload, frame, depth + 1)
+            if arr.kind == "list":
+                val idx = key_v.as_int()
+                if idx >= 0 and idx < arr.items.len():
+                    return arr.items[idx]
+            elif arr.kind == "map":
+                return self._map_get_key(arr.node_id, key_v.as_text())
+            elif arr.kind == "text":
+                val idx = key_v.as_int()
+                if idx >= 0 and idx < arr.text_val.len().to_i64():
+                    return SimpleScriptVal.from_text(arr.text_val.substring(idx, idx + 1))
             return SimpleScriptVal.none()
         if pkind == "prop":
             val obj = self._eval_expr(recv_expr, frame, depth + 1)
             return self._get_prop(obj, payload)
 
         # Numeric literal?
-        if val Some(iv) = expr.parse_i64():
-            return SimpleScriptVal.from_int(iv)
-        if expr.contains("."):
-            if val Some(fv) = expr.parse_f64():
-                return SimpleScriptVal.from_float(fv)
+        if val Some(nv) = _ss_parse_number_literal(expr):
+            return nv
 
         # Variable or function name lookup
         if val Some(v) = self._get_var(frame, expr):
             return v
-        for f in self.fns:
-            if f.name == expr:
-                return SimpleScriptVal(kind: "fn", text_val: expr, int_val: 0, float_val: 0.0, bool_val: true, node_id: -1, items: [])
+        var fi = self.fns.len() - 1
+        while fi >= 0:
+            if self.fns[fi].name == expr:
+                return SimpleScriptVal.fn_ref(fi, expr)
+            fi = fi - 1
         SimpleScriptVal.none()
 
     me _exec_assignment(stmt: text, mut frame: SimpleScriptExecFrame, depth: i64):
@@ -1501,16 +2258,16 @@ impl SimpleScriptDomVm:
             s = s.substring(4, s.byte_len()).trim()
 
         var op = "="
-        var op_pos = _ss_find_top_level_op(s, "+=")
-        if op_pos > 0:
-            op = "+="
-        else:
-            op_pos = _ss_find_top_level_op(s, "-=")
-            if op_pos > 0:
-                op = "-="
-            else:
-                op_pos = _ss_find_top_level_char(s, "=", false)
-                op = "="
+        var op_pos: i64 = -1
+        for cop in ["+=", "-=", "*=", "/=", "%="]:
+            val p = _ss_find_top_level_op(s, cop)
+            if p > 0:
+                op = cop
+                op_pos = p
+                break
+        if op_pos < 0:
+            op_pos = _ss_find_top_level_char(s, "=", false)
+            op = "="
         if op_pos <= 0:
             return
         val lhs = s.substring(0, op_pos).trim()
@@ -1520,12 +2277,40 @@ impl SimpleScriptDomVm:
             val cur = self._eval_expr(lhs, frame, depth + 1)
             if cur.kind == "text" or rhs.kind == "text":
                 rhs = SimpleScriptVal.from_text(cur.as_text() + rhs.as_text())
+            elif cur.kind == "float" or rhs.kind == "float":
+                rhs = SimpleScriptVal.from_float(cur.as_float() + rhs.as_float())
             else:
                 rhs = SimpleScriptVal.from_int(cur.as_int() + rhs.as_int())
         elif op == "-=":
             val cur = self._eval_expr(lhs, frame, depth + 1)
-            rhs = SimpleScriptVal.from_int(cur.as_int() - rhs.as_int())
+            if cur.kind == "float" or rhs.kind == "float":
+                rhs = SimpleScriptVal.from_float(cur.as_float() - rhs.as_float())
+            else:
+                rhs = SimpleScriptVal.from_int(cur.as_int() - rhs.as_int())
+        elif op == "*=":
+            val cur = self._eval_expr(lhs, frame, depth + 1)
+            if cur.kind == "float" or rhs.kind == "float":
+                rhs = SimpleScriptVal.from_float(cur.as_float() * rhs.as_float())
+            else:
+                rhs = SimpleScriptVal.from_int(cur.as_int() * rhs.as_int())
+        elif op == "/=":
+            val cur = self._eval_expr(lhs, frame, depth + 1)
+            val denom = rhs.as_float()
+            if denom == 0.0:
+                rhs = SimpleScriptVal.from_int(0)
+            elif cur.kind == "int" and rhs.kind == "int" and rhs.as_int() != 0:
+                rhs = SimpleScriptVal.from_int(cur.as_int() / rhs.as_int())
+            else:
+                rhs = SimpleScriptVal.from_float(cur.as_float() / denom)
+        elif op == "%=":
+            val cur = self._eval_expr(lhs, frame, depth + 1)
+            val m = rhs.as_int()
+            rhs = SimpleScriptVal.from_int(if m == 0: 0 else: cur.as_int() % m)
 
+        val lhs_post = _ss_split_postfix(lhs)
+        if lhs_post.1 == "index":
+            self._write_back_target(lhs, rhs, frame, depth + 1)
+            return
         val dot = _ss_find_top_level_char(lhs, ".", true)
         if dot > 0:
             val recv_expr = lhs.substring(0, dot).trim()
@@ -1565,9 +2350,50 @@ impl SimpleScriptDomVm:
                         b_lines.push(lines[body_end])
                         b_indents.push(indents[body_end])
                         body_end = body_end + 1
-                    self.fns.push(SimpleScriptFn(name: fname, params: params, body_lines: b_lines, body_indents: b_indents))
+                    val env_id = self._capture_closure_env(frame)
+                    val fn_idx = self.fns.len()
+                    self.fns.push(SimpleScriptFn(name: fname, params: params, body_lines: b_lines, body_indents: b_indents, closure_env_id: env_id))
+                    if not frame.is_module:
+                        self._set_var(frame, fname, SimpleScriptVal.fn_ref(fn_idx, fname), true)
                     idx = body_end
                     continue
+
+            # Multi-line lambda assignment: val cb = fn(params):
+            if (line.starts_with("val ") or line.starts_with("var ") or _ss_find_top_level_char(line, "=", false) > 0) and line.contains("fn(") and line.ends_with(":"):
+                val eq_pos = _ss_find_top_level_char(line, "=", false)
+                if eq_pos > 0:
+                    var lhs_raw = line.substring(0, eq_pos).trim()
+                    var declare_loc = false
+                    if lhs_raw.starts_with("val "):
+                        declare_loc = true
+                        lhs_raw = lhs_raw.substring(4, lhs_raw.byte_len()).trim()
+                    elif lhs_raw.starts_with("var "):
+                        declare_loc = true
+                        lhs_raw = lhs_raw.substring(4, lhs_raw.byte_len()).trim()
+                    val rhs_raw = line.substring(eq_pos + 1, line.byte_len()).trim()
+                    if rhs_raw.starts_with("fn(") and rhs_raw.ends_with(":"):
+                        val flp = rhs_raw.index_of("(") ?? -1
+                        val frp = rhs_raw.index_of(")") ?? -1
+                        var p_list: [text] = []
+                        if flp >= 0 and frp > flp:
+                            val p_raw = rhs_raw.substring(flp + 1, frp).trim()
+                            if p_raw != "":
+                                for p in p_raw.split(","):
+                                    p_list.push(p.trim())
+                        var body_end = idx + 1
+                        var b_lines: [text] = []
+                        var b_indents: [i64] = []
+                        while body_end < end_idx and (lines[body_end] == "" or indents[body_end] > indent):
+                            b_lines.push(lines[body_end])
+                            b_indents.push(indents[body_end])
+                            body_end = body_end + 1
+                        val env_id = self._capture_closure_env(frame)
+                        val fn_idx = self.fns.len()
+                        val fname = "__ss_anon_{fn_idx}"
+                        self.fns.push(SimpleScriptFn(name: fname, params: p_list, body_lines: b_lines, body_indents: b_indents, closure_env_id: env_id))
+                        self._set_var(frame, lhs_raw, SimpleScriptVal.fn_ref(fn_idx, fname), declare_loc)
+                        idx = body_end
+                        continue
 
             # Inline addEventListener("evt", fn(ev): ...)
             if line.contains(".addEventListener(") and line.ends_with(":"):
@@ -1597,11 +2423,13 @@ impl SimpleScriptDomVm:
                             b_lines.push(lines[body_end])
                             b_indents.push(indents[body_end])
                             body_end = body_end + 1
-                        if recv.kind == "dom" and recv.node_id >= 0:
+                        if (recv.kind == "dom" and recv.node_id >= 0) or recv.kind == "global_document" or recv.kind == "global_window":
+                            val target_nid = if recv.kind == "global_document": -1 elif recv.kind == "global_window": -2 else: recv.node_id
                             self.listeners.push(SimpleScriptDomListener(
-                                node_id: recv.node_id,
+                                node_id: target_nid,
                                 event_type: evt_name,
                                 fn_name: "",
+                                fn_idx: -1,
                                 inline_params: p_list,
                                 inline_lines: b_lines,
                                 inline_indents: b_indents,
@@ -1674,7 +2502,7 @@ impl SimpleScriptDomVm:
                     val list_val = self._eval_expr(list_expr, frame, depth + 1)
                     var ii: i64 = 0
                     while ii < list_val.items.len() and ii < SIMPLE_SCRIPT_VM_MAX_LOOP and not frame.returned:
-                        self._set_var(frame, var_name, list_val.items[ii], false)
+                        self._set_var(frame, var_name, list_val.items[ii], not frame.is_module)
                         self._exec_block(lines, indents, idx + 1, body_end, frame, depth + 1)
                         ii = ii + 1
                 idx = body_end
@@ -1695,7 +2523,13 @@ impl SimpleScriptDomVm:
             if line.starts_with("val ") or line.starts_with("var ") or _ss_find_top_level_char(line, "=", false) > 0:
                 val eq_pos = _ss_find_top_level_char(line, "=", false)
                 val eq2 = _ss_find_top_level_op(line, "==")
-                if line.starts_with("val ") or line.starts_with("var ") or (eq_pos > 0 and eq_pos != eq2):
+                val eq3 = _ss_find_top_level_op(line, "===")
+                val ne2 = _ss_find_top_level_op(line, "!=")
+                val ne3 = _ss_find_top_level_op(line, "!==")
+                val le = _ss_find_top_level_op(line, "<=")
+                val ge = _ss_find_top_level_op(line, ">=")
+                val is_cmp_eq = eq_pos >= 0 and (eq_pos == eq2 or eq_pos == eq3 or (ne2 >= 0 and eq_pos == ne2 + 1) or (ne3 >= 0 and eq_pos == ne3 + 1) or (le >= 0 and eq_pos == le + 1) or (ge >= 0 and eq_pos == ge + 1))
+                if line.starts_with("val ") or line.starts_with("var ") or (eq_pos > 0 and not is_cmp_eq):
                     self._exec_assignment(line, frame, depth + 1)
                     idx = idx + 1
                     continue
@@ -1720,7 +2554,7 @@ impl SimpleScriptDomVm:
                 continue
             lines.push(trimmed)
             indents.push(_ss_count_indent(cleaned))
-        var frame = SimpleScriptExecFrame(returned: false, ret_val: SimpleScriptVal.none(), names: [], values: [])
+        var frame = SimpleScriptExecFrame(is_module: true, closure_env_id: -1, returned: false, ret_val: SimpleScriptVal.none(), names: [], values: [])
         self._exec_block(lines, indents, 0, lines.len(), frame, 0)
         true
 
@@ -1748,7 +2582,12 @@ impl SimpleScriptDomVm:
 
         var phases_nodes: [i64] = []
         var phases_capture: [bool] = []
-        # Capture phase (ancestors outer -> parent)
+        # Capture phase (window -> document -> ancestors outer -> parent)
+        if target_node_id >= 0:
+            phases_nodes.push(-2)
+            phases_capture.push(true)
+            phases_nodes.push(-1)
+            phases_capture.push(true)
         var ci: i64 = 0
         while ci < path_node_ids.len() - 1:
             phases_nodes.push(path_node_ids[ci])
@@ -1757,13 +2596,18 @@ impl SimpleScriptDomVm:
         # Target phase
         phases_nodes.push(target_node_id)
         phases_capture.push(false)
-        # Bubble phase (parent -> outer)
+        # Bubble phase (parent -> outer -> document -> window)
         if bubbles:
             var bi: i64 = path_node_ids.len() - 2
             while bi >= 0:
                 phases_nodes.push(path_node_ids[bi])
                 phases_capture.push(false)
                 bi = bi - 1
+            if target_node_id >= 0:
+                phases_nodes.push(-1)
+                phases_capture.push(false)
+                phases_nodes.push(-2)
+                phases_capture.push(false)
 
         var pi: i64 = 0
         while pi < phases_nodes.len() and not self.event_stop_prop:
@@ -1775,14 +2619,19 @@ impl SimpleScriptDomVm:
                 val listener = self.listeners[li]
                 if listener.node_id == cur_id and listener.event_type == norm and (listener.capture == cap or cur_id == target_node_id):
                     val ev_val = SimpleScriptVal.obj("event", -1)
-                    if listener.fn_name != "":
+                    if listener.fn_idx >= 0:
+                        val _ = self._call_fn_index(listener.fn_idx, [ev_val], 0)
+                    elif listener.fn_name != "":
                         val _ = self._call_user_fn(listener.fn_name, [ev_val], 0)
                     else:
-                        var sub = SimpleScriptExecFrame(returned: false, ret_val: SimpleScriptVal.none(), names: [], values: [])
+                        var sub = SimpleScriptExecFrame(is_module: false, closure_env_id: -1, returned: false, ret_val: SimpleScriptVal.none(), names: [], values: [])
                         if listener.inline_params.len() >= 1:
                             sub.names.push(listener.inline_params[0])
                             sub.values.push(ev_val)
                         self._exec_block(listener.inline_lines, listener.inline_indents, 0, listener.inline_lines.len(), sub, 0)
                 li = li + 1
             pi = pi + 1
+        self.current_delta_x = 0.0
+        self.current_delta_y = 0.0
+        self.current_delta_mode = 0
         (self.event_prevent_default, self.event_stop_prop)

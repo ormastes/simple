@@ -12,7 +12,7 @@
 
 use std.spec.*
 use std.common.encoding.sfnt_glyf.{SFNT_GLYPH_SELECTOR_CODEPOINT, sfnt_gray_glyph_outline,
-    sfnt_gray_outline_frame, sfnt_gray_outline_raster, SfntLcdOutline, _lcd_aaa_mask}
+    sfnt_gray_outline_frame, sfnt_gray_outline_raster, SfntLcdOutline, _lcd_aaa_mask, _gray_aaa_recs}
 use std.nogc_sync_mut.sffi.io.{file_read_bytes}
 
 val FONT_PATH: text = "assets/fonts/google-fonts/ofl/nunito/Nunito[wght].ttf"
@@ -76,3 +76,42 @@ describe "Gray AAA phase record and replay":
     it "matches the direct unspecialised fill at 72 px, record taken at phase 3":
         val blob = file_read_bytes(FONT_PATH)
         expect(replay_mismatch(blob, 72, "QBjy%Wk5", 3)).to_equal(0)
+
+    # A narrow glyph takes the small-path mask plane (`_lcd_aaa_mask`
+    # use_mask: ir width <= 32, padded area <= 1024 samples). Its walk is
+    # recorded like a SafeRLE one, so the other phases replay it instead of
+    # re-running the edge build and the walk.
+    it "records the walk of a mask-plane glyph":
+        val blob = file_read_bytes(FONT_PATH)
+        match sfnt_gray_glyph_outline(blob, SFNT_GLYPH_SELECTOR_CODEPOINT, 105, 60, 60000):
+            Some(outline):
+                assert_true(sfnt_gray_outline_raster(outline, 0).is_some())
+                var rows: i64 = -1
+                if val Some(rec) = _gray_aaa_recs.get(outline.slo_key):
+                    rows = rec[0]
+                assert_true(rows > 0)
+            None: expect("outline").to_equal("missing")
+
+    it "matches the direct fill for mask-plane glyphs, record at phase 0 and phase 2":
+        val blob = file_read_bytes(FONT_PATH)
+        expect(replay_mismatch(blob, 64, "iltnu.,1j", 0)).to_equal(0)
+        expect(replay_mismatch(blob, 68, "iltnu.,1j", 2)).to_equal(0)
+
+    # Glyphs whose blitter flips between quarter phases (measured on Nunito:
+    # 65 px e = mask at phases 0 and 3, x at 2 and 3; 73 px z at 1..3, J at
+    # 0 and 1; 55 px b/p at 2, d/g/q at 1, E at 0 and 3, L at 0, 1 and 3), so
+    # a mask-plane record replays into SafeRLE and the other way round.
+    it "matches the direct fill where the blitter changes between phases":
+        val blob = file_read_bytes(FONT_PATH)
+        expect(replay_mismatch(blob, 65, "ex", 0)).to_equal(0)
+        expect(replay_mismatch(blob, 73, "zJ", 3)).to_equal(0)
+        expect(replay_mismatch(blob, 55, "bdgpqEL", 1)).to_equal(0)
+
+    # Convexity is not translation-invariant after the f32 rounding (Nunito
+    # `.` at 64 px is convex at phases 1..3 only, `I` at 60 px at phase 0,
+    # at 69 px at phases 0..2): a phase whose path is convex takes the
+    # convex walker, never a replay.
+    it "matches the direct fill where convexity changes between phases":
+        val blob = file_read_bytes(FONT_PATH)
+        expect(replay_mismatch(blob, 60, "I.", 1)).to_equal(0)
+        expect(replay_mismatch(blob, 69, "I", 3)).to_equal(0)
