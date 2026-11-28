@@ -68,7 +68,7 @@ SEED_ISO="${VM_DIR}/cloudinit-seed.iso"
 VARS="${VM_DIR}/efi-vars.fd"
 PIDFILE="${VM_DIR}/qemu.pid"
 SERIAL="${VM_DIR}/serial.log"
-MARKER=/var/lib/simple-orch-guest/provisioned.v1
+MARKER=/var/lib/simple-orch-guest/provisioned.v2
 GUEST_ENV=/etc/simple/orchestrator-host.env
 
 say() { printf 'linux-orch-guest: %s\n' "$*"; }
@@ -196,17 +196,23 @@ do_smoke() {
 guest_provision_script() {
     cat <<'GUEST'
 set -eu
-MARKER=/var/lib/simple-orch-guest/provisioned.v1
+MARKER=/var/lib/simple-orch-guest/provisioned.v2
 if [ -f "$MARKER" ]; then echo "already provisioned: $(cat "$MARKER")"; exit 0; fi
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -q
 apt-get install -y -q podman uidmap slirp4netns fuse-overlayfs dbus-user-session openssl acl rsync >/dev/null
 
-# Static rootless Podman service account with subordinate ID ranges.
+# Static rootless Podman service account with subordinate ID ranges. Its home is the absent
+# `/nonexistent` (doc/05_design/linux_installed_fresh_epoch_lower_v1_20261115.md, "Supported deployment
+# and trust"; checked by epoch_native_accounts_v1 and epoch_native_no_user_bus_v1). Engine helpers get
+# HOME/XDG_RUNTIME_DIR = run root from linux_fresh_epoch_helper_environment_v1, not from this record.
 SVC=simple-host; SVC_UID=950; SVC_GID=950
 getent group "$SVC" >/dev/null || groupadd --system --gid "$SVC_GID" "$SVC"
 getent passwd "$SVC" >/dev/null || useradd --system --uid "$SVC_UID" --gid "$SVC_GID" \
-    --home-dir /var/lib/simple-host --create-home --shell /usr/sbin/nologin "$SVC"
+    --home-dir /nonexistent --no-create-home --shell /usr/sbin/nologin "$SVC"
+# An account made by an earlier provisioning (home /var/lib/simple-host) is moved to the absent home.
+[ "$(getent passwd "$SVC" | cut -d: -f6)" = /nonexistent ] || usermod --home /nonexistent "$SVC"
+[ ! -e /nonexistent ] || { echo "/nonexistent exists; custody requires it absent"; exit 1; }
 grep -q "^${SVC}:" /etc/subuid || echo "${SVC}:200000:65536" >> /etc/subuid
 grep -q "^${SVC}:" /etc/subgid || echo "${SVC}:200000:65536" >> /etc/subgid
 
@@ -221,7 +227,10 @@ systemctl mask podman.service podman.socket simple-podman.service simple-podman.
 install -d -o root -g root -m 0755 /etc/simple /etc/simple/container
 install -d -o root -g root -m 0755 /var/lib/simple
 install -d -o root -g root -m 0711 /var/lib/simple/container
-install -d -o "$SVC" -g "$SVC" -m 0700 /var/lib/simple-host/podman /var/lib/simple-host/podman/graph
+# Every ancestor of graphRoot is a custody `root-dir` (root-owned, no group/other write); only the
+# graph itself is the service's private 0700 directory (`private-dir`).
+install -d -o root -g root -m 0755 /var/lib/simple-host /var/lib/simple-host/podman
+install -d -o "$SVC" -g "$SVC" -m 0700 /var/lib/simple-host/podman/graph
 # Admitted build-root prefix of the fresh route (profile key workloadBuildRootPrefix);
 # service-owned and private, so no other local user can plant a path beneath it.
 install -d -o "$SVC" -g "$SVC" -m 0700 /var/lib/simple-host/live-work
@@ -305,7 +314,7 @@ guest_prove_script() {
     cat <<'GUEST'
 set -eu
 echo "== id: $(id -un) uid=$(id -u)"
-echo "== marker: $(cat /var/lib/simple-orch-guest/provisioned.v1)"
+echo "== marker: $(cat /var/lib/simple-orch-guest/provisioned.v2)"
 echo "== /etc/simple/container"; ls -l /etc/simple/container
 stat -c '%n %U:%G %a' /etc/simple/container /var/lib/simple/container
 echo "== unit"; systemctl cat simple-orchestrator-host.service | grep -E '^(User|Group|Delegate|EnvironmentFile)='

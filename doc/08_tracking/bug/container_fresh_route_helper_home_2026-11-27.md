@@ -104,8 +104,9 @@ Unit and account are made by `guest_provision_script` in
 |---|---|---|---|
 | Account shell | `/usr/sbin/nologin` | `/usr/sbin/nologin` or `/sbin/nologin` | consistent |
 | Account name, uid, gid | `simple-host`, 950, 950; the profiles are generated from them | `serviceName`, `serviceUid`, `serviceGid` | consistent |
-| Account home | `/var/lib/simple-host`, created | `/nonexistent`, absent (`fresh-epoch-native-service-account`) | **open, owner decision** |
-| Unit `HOME`, `PATH` | not set; systemd gives the account home and its own default `PATH` | `HOME=/nonexistent`, `PATH=/usr/bin:/bin` | **open**, follows the account |
+| Account home | `/nonexistent`, not created (**changed 2026-11-28**, `useradd --no-create-home`; an older account is moved with `usermod --home`) | `/nonexistent`, absent (`fresh-epoch-native-service-account`) | **fixed in source 2026-11-28**; syntax-checked only |
+| Graph-root ancestry `/var/lib/simple-host`, `/var/lib/simple-host/podman` | service-owned (made by `--create-home` and `install -d -o $SVC ... 0700`) | every ancestor is a `root-dir`: uid 0, no group/other write (`linux_fresh_probe_native_security_v3`, `fresh-epoch-native-root-ancestry-writable`); only `graph` is the service's 0700 `private-dir` | **fixed in source 2026-11-28**: both root:root 0755, `graph` stays svc 0700; syntax-checked only |
+| Unit `HOME`, `PATH` | not set; systemd gives the account home (now `/nonexistent`) and its own default `PATH` | `HOME=/nonexistent`, `PATH=/usr/bin:/bin` | `HOME` follows the account now; `PATH` and any image `LANG` still **open** (not readable from source, not changed) |
 | Unit extra environment | `EnvironmentFile` of 16 `SIMPLE_*` keys and `Environment=SIMPLE_HOST_EXEC=` | closed list; each is `fresh-epoch-inherited-broker-environment-unsupported:<key>` | **open, owner decision** |
 | Unit `XDG_RUNTIME_DIR` | not set (the user manager is masked) | absent is allowed; when present it must be the run root | consistent |
 | Run root `/run/simple-host/podman` | named by the generated profile; no `RuntimeDirectory=` and no `install -d` in the provisioning | must exist and be held by custody | **open**: who creates it on a fresh boot was not found |
@@ -118,3 +119,32 @@ TODO (guest, not a PASS):
 - Decide the account home and the `SIMPLE_*` hand-over (second account or another configuration route),
   then start the unit and take the first fresh-route launch past custody's account and environment checks.
 - Find or add what creates the run root before first use.
+
+### Which side is canonical (2026-11-28)
+
+The custody side. Evidence: `doc/05_design/linux_installed_fresh_epoch_lower_v1_20261115.md` ("Supported
+deployment and trust": "a dedicated nonroot service UID/GID, nologin account with `/nonexistent` home";
+line 35: "`/nonexistent` must actually be absent"; "Launch data projection": the inherited broker
+environment "accepts only the documented fixed PATH/HOME/SHELL, service USER/LOGNAME, C locale, pinned
+runtime directory and bounded systemd invocation/journal metadata. Unknown keys refuse"). The checks
+(`epoch_native_accounts_v1`, `epoch_native_no_user_bus_v1`, `linux_fresh_epoch_broker_environment_v1`)
+landed with that design in 838a9c721b2 (2026-11-15) and were kept by 196fc669c34 (2026-11-27), which fixed
+the helpers' environment instead of relaxing the account rule. The provisioning script's account dates
+from 49449612a0b (2026-11-27) and cites no design.
+
+Changed in `guest_provision_script` (the account and directory half): home `/nonexistent`, not created,
+an existing account moved with `usermod --home`, and a refusal when `/nonexistent` exists;
+`/var/lib/simple-host` and `/var/lib/simple-host/podman` root:root 0755, `graph` svc 0700; the marker is
+now `provisioned.v2` so an image provisioned under v1 is provisioned again. No account-home user was
+found: `--run-specs` and the podman live lane run as root, and the helpers take HOME from the projection.
+
+Not changed (the environment half, still an owner decision): the unit's `EnvironmentFile` of `SIMPLE_*`
+keys and `Environment=SIMPLE_HOST_EXEC=`. `--run-specs` does not use them (it sources the env file itself,
+as root over SSH); only the supervised AOT route in the script header would start the unit, and there the
+spec reads `SIMPLE_LINUX_PROVISION_ACCEPTANCE_*` through `env_get`
+(`host_linux_provision_startup_v3_spec.spl`). Complying means a configuration route that is not the
+broker's environment. Not determined: whether that spec ever reaches `epoch_native_bind_launch_v1` (the
+point where the broker rule runs). The unit is therefore NOT claimed to comply.
+
+Evidence level: `sh -n` of the script and of the extracted guest heredoc. No guest was provisioned and
+the unit was not started.
