@@ -1,0 +1,171 @@
+# @cover src/lib/gc_async_mut/gpu/browser_engine/web_multi_script_engine.spl 80%
+# @cover src/lib/gc_async_mut/gpu/browser_engine/script/agent_script.spl 80%
+# @tag: system, rendering, web, script, js, simple, agent
+# @req REQ-WEB-009
+# @evidence-display: links
+
+"""
+# Multi-Script Web Engine (`JS Engine`, `Simple Script`, `Agent Script`) Specification
+
+Verifies:
+1. Hardened JS Engine expression, parser, and builtin execution (`JSON`, `Math`,
+   `parseInt`/`parseFloat` with CSS units, float literals, compound assignments,
+   closures, array HOFs, and trimmed/split/replaced strings).
+2. `AgentScriptExecutor` (`<script type="text/agent">` / `application/agent-script`)
+   action verbs (`click`, `fill`, `select`, `drag`, `hover`, `check`, `uncheck`,
+   `submit`), DOM mutations (`set_text`, `set_attr`, `set_style`, `add_class`,
+   `remove_class`), assertions/logging (`expect_text`, `expect_attr`, `log`), and
+   structured SDN receipts.
+3. Cooperative document-order multi-script pipeline execution via
+   `web_multi_script_run_and_render_html` combining `<script>`, `<script type="text/simple">`,
+   and `<script type="text/agent">` on a shared `BeDomNode` tree through software
+   pixel rasterization.
+"""
+
+use std.spec.*
+use std.spec.step
+use std.gc_async_mut.gpu.browser_js_host.{
+    js_runtime_with_default_logger, js_to_string
+}
+use std.gc_async_mut.gpu.browser_engine.script.agent_script.{
+    agent_script_is_type, execute_agent_script_on_html
+}
+use std.gc_async_mut.gpu.browser_engine.web_multi_script_engine.{
+    web_multi_script_run_and_render_html
+}
+
+fn _count_distinct_u32(pixels: [u32], cap: i64) -> i64:
+    var seen: [u32] = []
+    var i: i64 = 0
+    val n = pixels.len() as i64
+    while i < n and seen.len() < cap:
+        val px = pixels[i]
+        var found = false
+        for s in seen:
+            if s == px:
+                found = true
+                break
+        if not found:
+            seen.push(px)
+        i = i + 1
+    seen.len() as i64
+
+fn _eval_js_text(code: text) -> text:
+    var rt = js_runtime_with_default_logger("ms-spec")
+    match rt.eval(code):
+        Ok(v): js_to_string(v)
+        Err(e): "ERR:" + e.message
+
+describe "Multi-Script Web Engine (Agent Script, Simple Script, JS Engine)":
+
+    it "evaluates hardened JS math, float literals, units, compound assign, closures, HOFs, and strings":
+        # @req REQ-WEB-009
+        step("Verify float literals, Math.round/floor/ceil/max/min, and parseInt/parseFloat with CSS units")
+        val math_res = _eval_js_text("[Math.max(1,9,3), Math.min(4,2,8), Math.round(2.6), Math.floor(2.9), Math.ceil(2.1)].join(',')")
+        expect(math_res).to_equal("9,2,3,2,3")
+        val unit_res = _eval_js_text("parseInt('42px') + ',' + parseFloat('3.5rem') + ',' + parseInt('0xff', 16)")
+        expect(unit_res).to_equal("42,3.5,255")
+
+        step("Verify JSON, template literals, closures, +=, array HOFs, and string trim/replace/split/includes")
+        val hof_res = _eval_js_text("var sum = 0; var o = JSON.parse('{{\"k\":2}}'); [1,2,3,4].filter(function(x){{ return x % 2 === 0; }}).map(function(x){{ return x * o.k; }}).forEach(function(x){{ sum += x; }}); `sum=${{sum}}`")
+        expect(hof_res).to_equal("sum=12")
+        val str_res = _eval_js_text("'  hello-world  '.trim().replace('-', '_').split('_').join('|') + ':' + 'abcdef'.includes('cd')")
+        expect(str_res).to_equal("hello|world:true")
+
+    it "executes Agent Script verbs, DOM mutations, assertions, and emits SDN receipts":
+        # @req REQ-WEB-009
+        step("Verify supported script MIME detection")
+        expect(agent_script_is_type("text/agent")).to_equal(true)
+        expect(agent_script_is_type("application/agent-script")).to_equal(true)
+        expect(agent_script_is_type("text/javascript")).to_equal(false)
+
+        step("Execute all Agent Script verbs on form + kanban DOM")
+        val html = "<html><body><form id='f'><input id='name' value=''/><select id='tier'><option value='free'>Free</option><option value='pro'>Pro</option></select><input id='agree' type='checkbox'/><button id='btn'>Go</button></form><div id='todo'><div id='card1' class='card todo'>Task</div></div><div id='done'></div><div id='status' class='idle'>pending</div></body></html>"
+        val script = """
+fill #name "Alice"
+select #tier "pro"
+check #agree
+uncheck #agree
+check #agree
+hover #card1
+click #btn
+submit #f
+set_text #status "Ready"
+set_attr #card1 "data-owner" "Alice"
+set_style #status "background-color" "#16a34a"
+add_class #status "done"
+remove_class #status "idle"
+drag #card1 #done
+expect_text #status "Ready"
+expect_attr #name "value" "Alice"
+expect_attr #agree "checked" "checked"
+expect_attr #card1 "data-dragged" "true"
+log "agent step ok"
+"""
+        val res = execute_agent_script_on_html(html, script)
+        expect(res.receipt.ok).to_equal(true)
+        expect(res.receipt.failed).to_equal(0)
+        expect(res.receipt.steps_run).to_equal(19)
+        expect(res.receipt.mutations).to_equal(14)
+        expect(res.html).to_contain("data-dragged=\"true\"")
+        expect(res.html).to_contain("background-color: #16a34a;")
+        val sdn = res.receipt.to_sdn()
+        expect(sdn).to_contain("steps_run: 19")
+        expect(sdn).to_contain("ok: true")
+
+        step("Verify failed expectation marks receipt ok=false")
+        val bad = execute_agent_script_on_html(html, "expect_text #status \"WRONG\"")
+        expect(bad.receipt.ok).to_equal(false)
+        expect(bad.receipt.failed).to_equal(1)
+
+    it "runs JS, Simple Script, and Agent Script cooperatively in document order and renders pixels":
+        # @req REQ-WEB-009
+        step("Run cooperative 3-stage pipeline via web_multi_script_run_and_render_html")
+        val html = """<!doctype html>
+<html>
+<head><style>body { margin: 0; background: #0f172a; color: #f8fafc; } .card { padding: 12px; border: 1px solid #334155; } .badge-ok { background: #16a34a; color: #ffffff; }</style></head>
+<body>
+  <div id="pipeline" class="card">
+    <div id="sum">wait</div>
+    <div id="badge">PENDING</div>
+    <input id="chk" type="checkbox">
+  </div>
+  <div id="items"></div>
+  <script>
+    var list = document.getElementById('items');
+    [35, 40, 25].forEach(function(v){
+      var el = document.createElement('div');
+      el.className = 'row';
+      el.setAttribute('data-pts', String(v));
+      el.textContent = 'Item ' + v;
+      list.appendChild(el);
+    });
+  </script>
+  <script type="text/simple">
+    val total = sum_attr(".row", "data-pts")
+    val cnt = count(".row")
+    set_text #sum "{cnt} modules / {total} pts"
+    set_style #pipeline "border-color" "#0f766e"
+  </script>
+  <script type="text/agent">
+    check #chk
+    set_text #badge "APPROVED"
+    add_class #badge "badge-ok"
+    expect_text #sum "3 modules / 100 pts"
+    expect_attr #chk "checked" "checked"
+    log "cooperative pipeline verified"
+  </script>
+</body>
+</html>"""
+        val out = web_multi_script_run_and_render_html(html, 520, 340, [])
+        expect(out.ok).to_equal(true)
+        expect(out.scripts_executed).to_equal(3)
+        expect(out.js_scripts_run).to_equal(1)
+        expect(out.simple_scripts_run).to_equal(1)
+        expect(out.agent_scripts_run).to_equal(1)
+        expect(out.agent_receipt.ok).to_equal(true)
+        expect(out.agent_receipt.failed).to_equal(0)
+        expect(out.mutated_html).to_contain("3 modules / 100 pts")
+        expect(out.mutated_html).to_contain("APPROVED")
+        expect(out.pixels.len()).to_equal(520 * 340)
+        expect(_count_distinct_u32(out.pixels, 8)).to_be_greater_than(2)
