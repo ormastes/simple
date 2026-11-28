@@ -701,3 +701,117 @@ fn untyped_empty_array_mark_does_not_leak_into_next_function() {
     let src = "fn a(p: i64, q: i64) -> i64:\n    var x = []\n    0\n\nfn f(n0: [u8], n1: [u8]) -> [u8]:\n    var z: [u8] = []\n    z.push(0x00)\n    z = n0\n    z\n";
     parse_and_lower(src).unwrap_or_else(|e| panic!("declared [u8] local retyped: {e:?}"));
 }
+
+/// Residual (1) of u8_array_into_word_array_residual_shapes_2026-11-28: the
+/// VALUE is itself optional (`[u8]?`, or the `Option<[u8]>` enum spelling).
+/// `is_u8_array_value` looked at the value's raw type, and an Optional is not
+/// an Array, so the slot rule never fired and the byte-packed array reached
+/// the word slot.
+#[test]
+fn u8_array_rejected_in_optional_value_into_word_slot() {
+    let early = "fn at(data: [i64]?) -> i64:\n    0\n\n";
+    assert_u8_word_slot_cases(
+        &[
+            ("let", "fn f(x: [u8]?) -> i64:\n    val w: [i64]? = x\n    0\n"),
+            ("param", &format!("{early}fn f(x: [u8]?) -> i64:\n    at(x)\n")),
+            ("return", "fn g(x: [u8]?) -> [i64]?:\n    return x\n"),
+            ("nested", "fn f(x: [[u8]]?) -> i64:\n    val w: [[i64]]? = x\n    0\n"),
+            ("Option enum value", "fn f(x: Option<[u8]>) -> i64:\n    val w: [i64]? = x\n    0\n"),
+            ("unwrapped", "fn f(x: [u8]?) -> i64:\n    val w: [i64] = x.unwrap()\n    0\n"),
+        ],
+        &[
+            ("same", "fn f(x: [u8]?) -> i64:\n    val w: [u8]? = x\n    0\n"),
+            ("words", "fn f(x: [i64]?) -> i64:\n    val w: [i64]? = x\n    0\n"),
+            ("nil", "fn f() -> i64:\n    val w: [i64]? = nil\n    0\n"),
+            ("literal", &format!("{early}fn f() -> i64:\n    at([1, 2])\n")),
+        ],
+    );
+}
+
+/// Residual (2) of u8_array_into_word_array_residual_shapes_2026-11-28: a
+/// parameter spelled `Option<[i64]>` (the Generic form, not `[T]?`).
+/// `numeric_array_param_element` peeled only `Type::Optional`, so the
+/// recorded word-array row was empty for every recorded row: a
+/// later-declared callee, a method (via named arguments or an imported
+/// owner) and a trait row.
+#[test]
+fn u8_array_rejected_in_option_generic_spelled_parameter() {
+    let late = "\nfn at(data: Option<[i64]>) -> i64:\n    0\n";
+    let bx = "class Box:\n    var n: i64\n    fn at(data: Option<[i64]>) -> i64:\n        0\n\n";
+    let tr = "trait Store:\n    fn keep_words(data: Option<[i64]>) -> i64\n\n";
+    assert_u8_word_slot_cases(
+        &[
+            ("later free fn", &format!("fn f(b: [u8]) -> i64:\n    at(b)\n{late}")),
+            ("later free fn named", &format!("fn f(b: [u8]) -> i64:\n    at(data: b)\n{late}")),
+            ("method", &format!("{bx}fn f(g: Box, b: [u8]) -> i64:\n    g.at(b)\n")),
+            ("method named", &format!("{bx}fn f(g: Box, b: [u8]) -> i64:\n    g.at(data: b)\n")),
+            ("trait", &format!("{tr}fn f(s: Store, b: [u8]) -> i64:\n    s.keep_words(b)\n")),
+            ("trait builtin name", &format!("trait Store:\n    fn put(data: Option<[i64]>) -> i64\n\nfn f(s: Store, b: [u8]) -> i64:\n    s.put(b)\n")),
+        ],
+        &[
+            ("words", &format!("fn f(a: [i64]) -> i64:\n    at(a)\n{late}")),
+            ("literal", &format!("fn f() -> i64:\n    at([1, 2])\n{late}")),
+            ("same", &format!("fn f(b: [u8]) -> i64:\n    first(b)\n\nfn first(data: Option<[u8]>) -> i64:\n    0\n")),
+            ("method words", &format!("{bx}fn f(g: Box, a: [i64]) -> i64:\n    g.at(a)\n")),
+            ("trait words", &format!("{tr}fn f(s: Store, a: [i64]) -> i64:\n    s.keep_words(a)\n")),
+        ],
+    );
+}
+
+/// Residual (3) of u8_array_into_word_array_residual_shapes_2026-11-28: a
+/// trait-typed receiver that is not a bare local (`self.store.put(b)`, and
+/// a nested field chain `self.inner.store.put(b)`). `trait_method_param_rows`
+/// resolved `HirExprKind::Local` receivers only; a field receiver is a HIR
+/// `FieldAccess` and the trait row was never consulted.
+#[test]
+fn u8_array_rejected_in_trait_method_on_field_receiver() {
+    let tr = "trait Store:\n    fn keep_words(data: [i64]) -> i64\n    fn put(data: [i64]) -> i64\n\n";
+    let cl = "class Widget:\n    val store: Store\n    fn direct(b: [u8]) -> i64:\n        return self.store.keep_words(b)\n    fn direct_builtin(b: [u8]) -> i64:\n        return self.store.put(b)\n\n";
+    let nested = "class Holder:\n    val store: Store\n\nclass Outer:\n    val inner: Holder\n    fn nested(b: [u8]) -> i64:\n        return self.inner.store.keep_words(b)\n    fn nested_builtin(b: [u8]) -> i64:\n        return self.inner.store.put(b)\n\n";
+    assert_u8_word_slot_cases(
+        &[
+            ("field receiver", &format!("{tr}{cl}")),
+            ("field builtin name", &format!("{tr}{cl}").replace("self.store.keep_words(b)", "self.store.put(b)")),
+            ("nested field receiver", &format!("{tr}{nested}")),
+            ("nested field builtin name", &format!("{tr}{nested}").replace("self.inner.store.keep_words(b)", "self.inner.store.put(b)")),
+        ],
+        &[
+            ("field words", &format!("{tr}{cl}").replace("b: [u8]", "b: [i64]")),
+            ("nested words", &format!("{tr}{nested}").replace("b: [u8]", "b: [i64]")),
+        ],
+    );
+}
+
+/// Residual (4) of u8_array_into_word_array_residual_shapes_2026-11-28: a
+/// `[u8]` pushed into a `[[i64]]` (or deeper) with the builtin
+/// `push`/`append`. The builtin method path checked trait rows only; the
+/// receiver's own element type was never compared with the pushed value.
+#[test]
+fn u8_array_rejected_in_builtin_push_word_element() {
+    assert_u8_word_slot_cases(
+        &[
+            ("push", "fn f(b: [u8]) -> i64:\n    var rows: [[i64]] = []\n    rows.push(b)\n    0\n"),
+            ("append", "fn f(b: [u8]) -> i64:\n    var rows: List<[i64]> = []\n    rows.append(b)\n    0\n"),
+            ("deeper", "fn f(bb: [[u8]]) -> i64:\n    var rows: [[[i64]]] = []\n    rows.push(bb)\n    0\n"),
+            ("var push", "fn f(b: [u8]) -> i64:\n    var rows: [[i64]] = []\n    rows.push(b)\n    rows[0][0]\n"),
+        ],
+        &[
+            ("u8 rows", "fn f(b: [u8]) -> i64:\n    var rows: [[u8]] = []\n    rows.push(b)\n    0\n"),
+            ("word rows", "fn f(a: [i64]) -> i64:\n    var rows: [[i64]] = []\n    rows.push(a)\n    0\n"),
+            ("scalar", "fn f() -> i64:\n    var words: [i64] = []\n    words.push(7)\n    0\n"),
+            ("untyped empty", "fn f(b: [u8]) -> i64:\n    var rows = []\n    rows.push(b)\n    0\n"),
+            ("literal rows", "fn f() -> i64:\n    var rows: [[i64]] = []\n    rows.push([1, 2])\n    0\n"),
+        ],
+    );
+}
+
+/// Residual (5) of u8_array_into_word_array_residual_shapes_2026-11-28, NOT
+/// fixed here: an untyped `list` relay erases the element type to ANY, so
+/// the `[u8]` is invisible at the word slot. Pinned as admitted until a
+/// provenance design lands; the runtime word-write trap still catches
+/// writes, reads stay the risk.
+#[test]
+fn u8_array_through_untyped_list_relay_still_admitted() {
+    let src = "fn relay(x: list) -> list:\n    return x\n\nfn take(w: [i64]) -> i64:\n    w[0]\n\nfn f(b: [u8]) -> i64:\n    take(relay(b))\n";
+    parse_and_lower(src).unwrap_or_else(|e| panic!("untyped list relay must still lower (documented gap): {e:?}"));
+}

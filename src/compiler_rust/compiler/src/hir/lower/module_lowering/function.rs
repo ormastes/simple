@@ -515,8 +515,14 @@ impl Lowerer {
     /// coercion. Only the byte-packed source is rejected: a word array into a
     /// `[u8]` slot narrows like scalar `i64` -> `u8`, which is accepted today
     /// (separate owner question). An array literal is exempt: its elements take
-    /// the slot's type. An optional slot (`[i64]?`) is checked as its payload
-    /// and a nested one (`[[i64]]`) by its leaf element.
+    /// the slot's type. An optional slot (`[i64]?`) and an optional value
+    /// (`[u8]?`, either spelling) are checked as their payloads, and a nested
+    /// one (`[[i64]]`) by its leaf element. A parameter spelled `Option<[T]>`
+    /// rows like `[T]?`; a builtin `push`/`append` element and a trait method
+    /// on a field receiver (`self.store.put(b)`) are checked like any other
+    /// word-array slot. An untyped `list` relay still erases the element type
+    /// and is NOT covered (u8_array_into_word_array_residual_shapes_2026-11-28,
+    /// residual (5)).
     /// doc: seed_jit_u8_array_into_i64_array_param_reads_zero_2026-11-27,
     /// u8_array_into_word_array_unchecked_slots_2026-11-28
     pub(crate) fn reject_array_element_mismatch(&self, expected: TypeId, value: &HirExpr, slot: &str) -> LowerResult<()> {
@@ -562,13 +568,15 @@ impl Lowerer {
     }
 
     /// `value` is a `[u8]` array (at any nesting depth), or a nested array
-    /// literal holding one. A flat literal is not: its elements take the
-    /// slot's type.
+    /// literal holding one. An optional value (`[u8]?` in either spelling)
+    /// is looked at through its payload. A flat literal is not: its
+    /// elements take the slot's type.
     pub(crate) fn is_u8_array_value(&self, value: &HirExpr) -> bool {
         if is_numeric_type(value.ty) || value.ty == TypeId::ANY {
             return false;
         }
-        let (depth, leaf) = self.array_shape(value.ty);
+        let probe = self.option_payload(value.ty).unwrap_or(value.ty);
+        let (depth, leaf) = self.array_shape(probe);
         match &value.kind {
             HirExprKind::Array(items) => depth > 1 && items.iter().any(|item| self.is_u8_array_value(item)),
             _ => depth > 0 && leaf == TypeId::U8,
@@ -592,7 +600,8 @@ impl Lowerer {
             }
             return Ok(());
         }
-        if self.array_shape(value.ty) != (want.depth, TypeId::U8) {
+        let value_ty = self.option_payload(value.ty).unwrap_or(value.ty);
+        if self.array_shape(value_ty) != (want.depth, TypeId::U8) {
             return Ok(());
         }
         let name = numeric_type_name;
@@ -611,6 +620,8 @@ impl Lowerer {
         use simple_parser::ast::Type;
         let mut ty = match param.ty.as_ref()? {
             Type::Optional(inner) => inner.as_ref(),
+            // The `Option<[T]>` spelling parses as a Generic, not Optional.
+            Type::Generic { name, args } if name == "Option" && args.len() == 1 => &args[0],
             other => other,
         };
         let mut depth = 0;
@@ -662,6 +673,25 @@ impl Lowerer {
             }
         }
         Ok(())
+    }
+
+    /// The builtin `push`/`append` element slot: the receiver is an array
+    /// whose ELEMENT type is itself a word array (`[[i64]].push(b)`), and
+    /// the pushed value is a `[u8]` array of that nesting. An untyped empty
+    /// receiver is not checked here: its element type was just refined from
+    /// the pushed value (the caller runs this after that refinement).
+    pub(crate) fn reject_u8_array_push_element(
+        &self,
+        receiver_element: TypeId,
+        value: &HirExpr,
+        method: &str,
+    ) -> LowerResult<()> {
+        let (depth, leaf) = self.array_shape(receiver_element);
+        if depth == 0 || leaf == TypeId::U8 || !is_numeric_type(leaf) {
+            return Ok(());
+        }
+        let slot = format!("element type of the receiver of `{method}`");
+        self.reject_u8_array_into(&WordArraySlot { name: String::new(), depth, leaf }, value, &slot)
     }
 
     /// `T?` returned where a concrete scalar is declared. The seed's Option

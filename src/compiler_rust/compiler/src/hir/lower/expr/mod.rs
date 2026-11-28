@@ -2371,20 +2371,50 @@ impl Lowerer {
     /// trait name, simple type name per parameter, word-array shape per
     /// parameter. A trait-typed receiver is erased to ANY. A `val x: Trait`
     /// local carries the exact declaring TraitDef; a parameter keeps only its
-    /// declared type name, resolved the same way.
+    /// declared type name, resolved the same way. A field receiver that is
+    /// not a bare local (`self.inner.store.put(b)`; one-level `self.store` is
+    /// rewritten to a local before this runs) resolves the field's AUTHORED
+    /// declared type through the receiver struct's owner, exactly like
+    /// `trait_field_dispatch` does at the AST level. No method-name or
+    /// same-field-name search is allowed.
     fn trait_method_param_rows(
         &self,
         receiver: &HirExpr,
         method: &str,
         ctx: &FunctionContext,
     ) -> Option<(String, Vec<Option<String>>, Vec<Option<WordArraySlot>>)> {
-        let HirExprKind::Local(idx) = receiver.kind else {
+        if let HirExprKind::Local(idx) = receiver.kind {
+            let local = ctx.locals.get(idx)?;
+            let d = local.trait_dispatch_owner.clone().or_else(|| {
+                local.type_name_hint.as_deref().and_then(|n| self.trait_declaration_for_current_owner(n))
+            })?;
+            return self.trait_method_rows_from_dispatch(&d, method);
+        }
+        let HirExprKind::FieldAccess { receiver: base, field_index } = &receiver.kind else {
             return None;
         };
-        let local = ctx.locals.get(idx)?;
-        let d = local.trait_dispatch_owner.clone().or_else(|| {
-            local.type_name_hint.as_deref().and_then(|n| self.trait_declaration_for_current_owner(n))
-        })?;
+        let mut ty = base.ty;
+        if let Some(HirType::Pointer { inner, .. }) = self.module.types.get(ty) {
+            ty = *inner;
+        }
+        let Some(HirType::Struct { fields, .. }) = self.module.types.get(ty) else {
+            return None;
+        };
+        let (field_name, _) = fields.get(*field_index)?;
+        let (owner, declared) = self.struct_field_declared_types.get(&ty)?.as_ref()?;
+        let declared_ty = declared.get(field_name)?;
+        let d = self.declared_trait_dispatch_in_owner(declared_ty, owner)?;
+        self.trait_method_rows_from_dispatch(&d, method)
+    }
+
+    /// Parameter rows of `method` declared on the trait `d` (`self`
+    /// excluded), or `None` when the method is unknown or the declaration
+    /// is variadic.
+    fn trait_method_rows_from_dispatch(
+        &self,
+        d: &crate::hir::HirTraitDispatch,
+        method: &str,
+    ) -> Option<(String, Vec<Option<String>>, Vec<Option<WordArraySlot>>)> {
         let m = d.declaration.methods.iter().find(|m| m.name == method)?;
         let user = if m.params.first().is_some_and(|p| p.name == "self") { &m.params[1..] } else { &m.params[..] };
         (!user.iter().any(|p| p.variadic)).then(|| {
@@ -2485,6 +2515,21 @@ impl Lowerer {
                     }
                     receiver.ty = specialized_array_ty;
                 }
+            }
+        }
+
+        // A `[u8]` pushed into a word-array element (`[[i64]].push(b)`):
+        // the builtin element slot is checked exactly like a declared slot.
+        // Runs after the untyped-empty refinement above, which retypes an
+        // untyped `var rows = []` receiver to the pushed element's own type
+        // (a receiver whose type was actually declared keeps that word
+        // element here, so the pushed value is compared against it).
+        if matches!(method, "push" | "append")
+            && hir_args.len() == 1
+            && !args.iter().any(|a| matches!(a.value, Expr::Spread(_)))
+        {
+            if let Some(element) = element_ty {
+                self.reject_u8_array_push_element(element, &hir_args[0], method)?;
             }
         }
 
