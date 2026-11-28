@@ -1,0 +1,103 @@
+"""
+## Purpose and audience
+Purpose: Pin the LCD quarter phase of glyphs deep in a long run and after a
+lead-space run at k=1. Chrome 159 sums exact advances (16 px Liberation Sans:
+whole 1/128 px) and rounds an exact quarter tie UP (SkFixed pen + 1/8, floor
+to 1/4). The engine summed advances that were each rounded to milli-px; the
+earlier fix (`lcd_quarter_phase_tie_chrome159_spec`) snapped the running SUM to
+the unit grid, which only holds while the drift is under half a unit (3.9
+milli): 24 glyphs in, `g` came out 9 milli short of its tie at 170.125 and
+took phase 0 instead of Chrome's 1, the whole glyph 0.25 px left (about 80
+mismatching px for one glyph).
+Audience: web renderer / text paint maintainers.
+
+Chrome oracle (Chrome for Testing 159, `--headless=new --disable-gpu
+--force-device-scale-factor=1`, Liberation Sans 16 px, `color:#172033` on
+white). AC-1 page: one `white-space:pre` paragraph at left 10 px,
+`0 1 2 3 4 5 6 7 8 9 a e g s o c n m r u b d p q h k`; `g` pen 170.125,
+`p` pen 303.625.
+
+| pixel    | Chrome 159 | before this fix |
+|----------|------------|-----------------|
+| (176,12) | e2ab6c | bd7346 |
+| (177,12) | 2c2d5f | 1e4292 |
+| (178,12) | a0dcf8 | ccf1ff |
+| (303,12) | f0ce8c | da9d5f |
+| (304,12) | 422646 | 252d6c |
+| (305,12) | 6ec0f2 | afe3ff |
+
+AC-2 page: three nowrap paragraphs at top 0 / 30 / 60 px, each a `<code>`
+then ` — ...; values=element; owner=simple_web_html_layout`; the third is
+`<code>a</code> — renderable; ...` (Chrome: code right edge 19.640625, dash
+left 24.078125).
+
+| pixel    | Chrome 159 | before this fix |
+|----------|------------|-----------------|
+| (330,70) | af5e3f | 6e3433 |
+| (331,70) | 172d6c | 1e50a5 |
+| (332,70) | afe3ff | daf8ff |
+| (398,67) | f7ce92 | daa466 |
+| (400,67) | 6eb9eb | afe3ff |
+
+Tolerance: 8 levels per channel (the catalog differ's tolerance).
+"""
+
+"""
+Traceability: REQ-WEB-TEXT-METRICS-006 - an exact quarter-pixel tie pen takes Chrome's round-up LCD phase.
+"""
+# @tag: unit, browser_engine, text, engine2d, chrome159
+# @cover src/lib/nogc_sync_mut/text_layout/font_renderer.spl 1%
+use std.spec.*
+use std.io_runtime.{file_exists}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend
+}
+
+val SANS: text = "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
+val TOL: i64 = 8
+
+val PAGE_RUN: text = "<!doctype html><html><body style=\"margin:0;background:#fff;font:16px/1.5 sans-serif;color:#172033\"><p style=\"margin:0;position:absolute;left:10px;top:0px;white-space:pre\">0 1 2 3 4 5 6 7 8 9 a e g s o c n m r u b d p q h k</p></body></html>"
+val PAGE_LEAD: text = "<!doctype html><html><body style=\"margin:0;background:#fff;font:16px/1.5 sans-serif;color:#172033\"><p style=\"margin:0;position:absolute;left:10px;top:0px;white-space:nowrap\"><code>button</code> — partial; values=element; owner=simple_web_html_layout</p><p style=\"margin:0;position:absolute;left:10px;top:30px;white-space:nowrap\"><code>audio</code> — partial; values=element; owner=simple_web_html_layout</p><p style=\"margin:0;position:absolute;left:10px;top:60px;white-space:nowrap\"><code>a</code> — renderable; values=element; owner=simple_web_html_layout</p></body></html>"
+
+fn _chan(v: u32, shift: u32) -> i64:
+    ((v >> shift) & 0xFFu32).to_i64()
+
+fn _near(px: [u32], w: i32, x: i32, y: i32, want: u32) -> bool:
+    val got = px[y * w + x] & 0xFFFFFFu32
+    var ok = true
+    var shift: u32 = 0u32
+    while shift <= 16u32:
+        var d = _chan(got, shift) - _chan(want, shift)
+        if d < 0: d = 0 - d
+        if d > TOL: ok = false
+        shift = shift + 8u32
+    ok
+
+describe "LCD quarter phase deep in a run (Chrome 159)":
+    it "AC-1: `g` at pen 170.125 and `p` at 303.625, 24 and 44 glyphs in, round the tie up":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(PAGE_RUN, 400, 32, "cpu_simd")
+        expect(px.len()).to_equal(12800)
+        step("Chrome g right stem: (176,12) e2ab6c (177,12) 2c2d5f (178,12) a0dcf8")
+        expect(_near(px, 400, 176, 12, 0xe2ab6cu32)).to_equal(true)
+        expect(_near(px, 400, 177, 12, 0x2c2d5fu32)).to_equal(true)
+        expect(_near(px, 400, 178, 12, 0xa0dcf8u32)).to_equal(true)
+        step("Chrome p stem: (303,12) f0ce8c (304,12) 422646 (305,12) 6ec0f2")
+        expect(_near(px, 400, 303, 12, 0xf0ce8cu32)).to_equal(true)
+        expect(_near(px, 400, 304, 12, 0x422646u32)).to_equal(true)
+        expect(_near(px, 400, 305, 12, 0x6ec0f2u32)).to_equal(true)
+
+    it "AC-2: a run opening with a space after `<code>` keeps the exact pens at k=1":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(PAGE_LEAD, 600, 90, "cpu_simd")
+        expect(px.len()).to_equal(54000)
+        step("Chrome third line: (330,70) af5e3f (331,70) 172d6c (332,70) afe3ff (398,67) f7ce92 (400,67) 6eb9eb")
+        expect(_near(px, 600, 330, 70, 0xaf5e3fu32)).to_equal(true)
+        expect(_near(px, 600, 331, 70, 0x172d6cu32)).to_equal(true)
+        expect(_near(px, 600, 332, 70, 0xafe3ffu32)).to_equal(true)
+        expect(_near(px, 600, 398, 67, 0xf7ce92u32)).to_equal(true)
+        expect(_near(px, 600, 400, 67, 0x6eb9ebu32)).to_equal(true)
