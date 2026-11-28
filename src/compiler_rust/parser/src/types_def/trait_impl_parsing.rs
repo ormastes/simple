@@ -17,7 +17,7 @@ use super::super::Parser;
 
 /// Check if a function name follows constructor naming patterns
 /// These names are implicitly treated as static methods
-fn is_constructor_name(name: &str) -> bool {
+pub(crate) fn is_constructor_name(name: &str) -> bool {
     // Note: Removed `with_*` from auto-static detection because it's commonly used
     // for builder pattern methods like `with_note()` that need `self`.
     // Only `from_*` remains as a factory method pattern (e.g., `from_string`).

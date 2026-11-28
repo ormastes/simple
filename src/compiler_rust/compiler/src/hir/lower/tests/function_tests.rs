@@ -371,17 +371,23 @@ fn large_pure_scalar_repeat_stays_runtime_fill() {
     assert_eq!(repeat_kind(src), "fill");
     let src = "fn make() -> [i64]:\n    return [-5; 300]\n";
     assert_eq!(repeat_kind(src), "fill");
+    // jit_const_size_u8_repeat_literal_blowup_2026-11-27: a constant-size u8
+    // repeat must not unroll into an N-element literal either.
+    let src = "fn make() -> [u8]:\n    return [0u8; 16777216]\n";
+    assert_eq!(repeat_kind(src), "fill");
+    let src = "fn make() -> [u8]:\n    return [7u8; 300]\n";
+    assert_eq!(repeat_kind(src), "fill");
 }
 
 // Generalization: everything whose meaning depends on per-element evaluation
 // or on the literal path stays unrolled -- small counts, heap elements (a fill
-// would alias one object), u8 (packed literal path) and u64 (a full-width u64
-// fill reads back wrong through rt_array_repeat).
+// would alias one object) and u64 (a full-width u64 fill reads back wrong
+// through rt_array_repeat).
 #[test]
 fn repeat_unrolls_when_a_fill_could_change_meaning() {
     assert_eq!(repeat_kind("fn make() -> [i64]:\n    return [0; 8]\n"), "unrolled");
     assert_eq!(repeat_kind("fn make() -> [[i64]]:\n    return [[0, 0]; 300]\n"), "unrolled");
-    assert_eq!(repeat_kind("fn make() -> [u8]:\n    return [0u8; 300]\n"), "unrolled");
+    assert_eq!(repeat_kind("fn make() -> [u8]:\n    return [0u8; 8]\n"), "unrolled");
     assert_eq!(repeat_kind("fn make() -> [u64]:\n    return [1u64; 300]\n"), "unrolled");
 }
 

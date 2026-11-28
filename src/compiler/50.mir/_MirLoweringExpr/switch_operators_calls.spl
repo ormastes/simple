@@ -724,6 +724,21 @@ fn struct_construct_spread_base(e: HirExpr) -> HirExpr?:
 # ============================================================================
 
 impl MirLowering:
+    me enum_constructor_symbol_v1(enum_name: text, variant: text) -> text:
+        # Runtime constructor of an enum value. A variant NAMED `None` of a
+        # user enum is built by `rt_enum_new_none`, which stamps the object so
+        # a flat `None`/`nil`/`Some` arm over a typed `Q?` (tested by
+        # `rt_is_none_variant`) matches a present `Q.None` by variant name, as
+        # the tree-walk interpreter does. The builtin Option/Result keep
+        # `rt_enum_new`. Twin of the seed's
+        # codegen/shared.rs::enum_constructor_symbol.
+        # seed_jit_typed_optional_holding_user_none_takes_some_arm_2026-11-27
+        val bare = self.enum_bare_of(enum_name)
+        if variant == "None" and bare != "Option" and bare != "Result":
+            "rt_enum_new_none"
+        else:
+            "rt_enum_new"
+
     me enum_runtime_id(enum_name: text) -> i64:
         # Qualified first (step c): `enum_name` may be a runtime_name or a bare
         # name. Index read rather than `.get()` -- `.get()` on a Dict is
@@ -5212,19 +5227,30 @@ impl MirLowering:
             b_obx.terminate_goto(opt_norm_merge)
             self.builder = b_obx
 
-            # Flat lane: rt_is_some's sentinel check is exact here (no boxed
-            # enum hash involved) -- the same helper lower_try's flat lane uses.
+            # Flat lane: `rt_is_none_variant`, not `rt_is_some`. A flat `T?`
+            # word whose payload type is a user enum can BE that enum's value
+            # (the flat form of an `Evt?` is a user enum), and the tree-walk
+            # interpreter reads a flat `None`/`nil` arm by the payload
+            # variant's NAME: a present `Q.None` takes the `None` arm while
+            # staying present for `.?`/`??`/`if val`. `rt_is_some`
+            # (nil-sentinel presence) routed it to the `Some` arm
+            # (seed_jit_typed_optional_holding_user_none_takes_some_arm_2026-11-27).
+            # `rt_is_none_variant` answers the nil sentinel OR a stamped
+            # None-named user variant OR the boxed Option's own None; for
+            # every other flat word (scalars, strings, structs) it agrees
+            # with `rt_is_none`, so the Some/None partition is unchanged
+            # wherever no stamp can exist.
             var b_oft = self.builder
             b_oft.switch_to_block(opt_flat_blk)
-            val opt_is_some_op = MirOperand(kind: MirOperandKind.Const(
-                MirConstValue.Str("rt_is_some"),
+            val opt_is_none_variant_op = MirOperand(kind: MirOperandKind.Const(
+                MirConstValue.Str("rt_is_none_variant"),
                 MirType(kind: MirTypeKind.FuncPtr(MirSignature(
                     params: [MirType.i64()], return_type: MirType.bool(), is_variadic: false
                 )))
             ), call_origin: MirCallOrigin.Runtime)
-            val opt_is_some_res = b_oft.emit_call(opt_is_some_op, [mir_operand_copy(scrut_local)], MirType.bool())
-            val opt_is_some_local = opt_is_some_res ?? LocalId(id: 0)
-            b_oft.terminate_if(mir_operand_copy(opt_is_some_local), opt_flat_some_blk, opt_flat_none_blk)
+            val opt_is_none_variant_res = b_oft.emit_call(opt_is_none_variant_op, [mir_operand_copy(scrut_local)], MirType.bool())
+            val opt_is_none_variant_local = opt_is_none_variant_res ?? LocalId(id: 0)
+            b_oft.terminate_if(mir_operand_copy(opt_is_none_variant_local), opt_flat_none_blk, opt_flat_some_blk)
             self.builder = b_oft
 
             var b_ofs = self.builder
@@ -6774,7 +6800,7 @@ impl MirLowering:
             payload_local = bz.emit_const_int(0)
             self.builder = bz
         val func_operand = MirOperand(kind: MirOperandKind.Const(
-            MirConstValue.Str("rt_enum_new"),
+            MirConstValue.Str(self.enum_constructor_symbol_v1(enum_name, variant)),
             MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64(), MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
         ), call_origin: MirCallOrigin.Runtime)
         var payload_moves = payload_values.len() > 1
@@ -6995,7 +7021,7 @@ impl MirLowering:
             payload_local = bz.emit_const_int(0)
             self.builder = bz
         val func_operand = MirOperand(kind: MirOperandKind.Const(
-            MirConstValue.Str("rt_enum_new"),
+            MirConstValue.Str(self.enum_constructor_symbol_v1(enum_name, variant)),
             MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType(kind: MirTypeKind.I32), MirType(kind: MirTypeKind.I32), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
         ), call_origin: MirCallOrigin.Runtime)
         var payload_moves = args.len() > 1

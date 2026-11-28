@@ -2,6 +2,7 @@ pub mod backend_trait;
 pub mod buffer_pool;
 pub mod bytecode;
 pub mod closure_boxed_entry;
+pub mod cold_outline;
 pub mod common_backend;
 mod cranelift;
 pub mod cranelift_emitter;

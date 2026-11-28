@@ -1,0 +1,220 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-PERF
+# @tag: perf, jit, cranelift, frame, cold-branch
+
+"""
+## Purpose and audience
+
+Purpose: pin the acceptance criterion of
+`doc/08_tracking/bug/seed_jit_never_taken_branch_calls_cost_frame_on_every_entry_2026-11-27.md`:
+calls parked in a never-taken branch must not charge frame setup to every
+entry of the surrounding function on the seed Cranelift JIT. The oracle is a
+within-process A/B probe: `g0(x, k)` is a hot path with no calls; `g60(x, k)`
+is byte-for-byte the same hot path plus `if k > 5:` holding 60 real `h()`
+calls. On the hot path `k` is always 0, so the branch never runs. Cranelift
+has no shrink-wrapping (0.116: the x86_64 prologue spills every callee-saved
+register any call sequence in the function needs and reserves the whole
+frame, unconditionally), so before the fix the dead calls forced ~7 stack
+spills plus a 0x120-byte frame reservation into `g60`'s prologue, paid on
+every entry. The MIR pass `codegen/cold_outline.rs` outlines such arms into a
+`__cold_outline_*` helper called from the branch, so the frame cost is paid
+only when the arm is taken — exactly the manual outlining the doc measured as
+flat. Audience: compiler engineers maintaining the seed JIT lane and MIR
+optimization passes.
+
+## Budget
+
+The probe prints `ns_per_entry` per variant per pass (best of three
+interleaved passes, 2e8 entries per measured pass). Pinned: the best `g60`
+entry cost must be within 5/4 (1.25x) of the best `g0` entry cost.
+
+| phase | before fix (x86_64 seed JIT) | after fix | bound |
+|-----|------|------|------|
+| g60 best/g0 best, 60 dead calls | ~1.4-1.5x (doc: 30 calls cost +2.1 ns/call on aarch64) | ~1.0x | 1.25x |
+
+The same child run also pins branch-taken behavior: `g60(1, 6)` (k > 5, arm
+executes) must print 4020, the closed-form sum of the 60 outlined calls —
+outlining must never change observable behavior.
+
+## Operator workflow (re-verification recipe)
+
+The test runner refuses a SIMPLE_BINARY that differs from the binary running
+the spec, so each run uses the binary under test as both runner and child.
+Isolation knobs used throughout:
+`SIMPLE_HIR_CACHE_DIR=$PWD/build/p3cache/deadbranch/hir-cache` and
+`TMPDIR=$PWD/build/p3cache/deadbranch/tmp`.
+
+1. Build the scratch seed (from `src/compiler_rust`):
+     CC="$HOME/.simple/toolchains/llvm-mingw-20260922-ucrt-x86_64/bin/clang.exe" \
+       CARGO_TARGET_DIR=$PWD/build/p3cache/deadbranch/cargo-target \
+       cargo build --release -p simple-driver
+2. RED: with the pre-fix binary (evidence build:
+   build/p3cache/deadbranch/simple-prefix.exe), or equivalently with the
+   outlining pass disabled (`SIMPLE_COLD_OUTLINE_MIN_CALLS=0`), run:
+     SIMPLE_LIB=src SIMPLE_BINARY=$PWD/build/p3cache/deadbranch/simple-prefix.exe \
+       bin/simple test test/05_perf/compiler/jit_cold_branch_frame_cost_spec.spl
+   The cost pin FAILS: best g60/best g0 ≈ 1.4x on the x86_64 seed JIT
+   (pre-fix probe evidence: build/p3cache/deadbranch/logs/red-summary.txt,
+   30-call variant: cold30 5-6 ns/entry vs cold0 4 ns/entry).
+3. GREEN: same command against the fixed binary
+   (build/p3cache/deadbranch/cargo-target/release/simple.exe). The cost pin
+   passes (g60 best/g0 best ≈ 1.0x); the TAKEN pin still prints 4020.
+4. Probe raw materials for manual timing: build/p3cache/deadbranch/probes/
+   cold0.spl, cold30.spl, coldout.spl (outlined control, measured flat
+   pre-fix) with the runner build/p3cache/deadbranch/run_probes.sh; CLIF and
+   disassembled prologues: build/p3cache/deadbranch/logs/*.asm.
+
+## Compatibility and limitations
+
+The child goes through `sh -c` with `SIMPLE_EXECUTION_MODE=jit
+SIMPLE_ENGINE_RECEIPT=1` prefixed: the test runner's child-env scrub
+(`SIMPLE_TEST_CHILD_ENV_SCRUB=1`, test_runner_mode_env_leak_2026_11_12)
+strips mode pins from direct spawns, and its documented escape hatch is
+exactly such a prefix. The receipt assertion (`engine=cranelift-jit`,
+`demoted=no`) proves the measurement ran on the compiled lane, not the
+interpreter fallback.
+
+The pass only outlines arms that return early (the doc's shape), contain at
+least `SIMPLE_COLD_OUTLINE_MIN_CALLS` (default 8) call-like instructions, are
+not on a cycle (loop bodies are never outlined), and carry at most 32
+parameters (typed live-in vregs plus local slots read or written in the arm;
+stores move with the block — a slot written before any read arrives as a 0
+placeholder, since its incoming value is unread). Everything else —
+merge-shape arms that compute a value and fall through, raw asm, interpreter
+bridges — stays inline. Arms that fall through to a merge block are a
+deliberate residual gap (return shapes cover the measured defect class).
+Timing lanes vary: this pin bounds the RATIO of two functions in one
+process, so host speed cancels out.
+"""
+
+use std.spec
+use std.io_runtime.{process_run, env_get}
+
+fn simple_binary() -> text:
+    var configured = env_get("SIMPLE_BIN") ?? ""
+    if configured == "":
+        configured = env_get("SIMPLE_BINARY") ?? ""
+    if configured == "":
+        configured = env_get("SIMPLE_RUNTIME") ?? ""
+    if configured == "":
+        configured = env_get("SIMPLE_TEST_BINARY") ?? ""
+    if configured.len() > 0:
+        return configured
+    "bin/simple"
+
+fn probe_path() -> text:
+    "test/fixtures/compiler/cold_branch_frame/cold_branch_ab.spl"
+
+# The spec runs under the test runner's child-env scrub
+# (SIMPLE_TEST_CHILD_ENV_SCRUB=1): the process facades strip
+# SIMPLE_EXECUTION_MODE/SIMPLE_RUNTIME_MODE around every spawn, so the child
+# goes through `sh -c` with the pins prefixed; that prefix is the scrub's
+# documented escape hatch ("a shell set/env prefix lands after the scrub").
+fn run_probe_child() -> (text, text, i64):
+    val script = "SIMPLE_EXECUTION_MODE=jit SIMPLE_ENGINE_RECEIPT=1 \"{simple_binary()}\" {probe_path()}"
+    process_run("sh", ["-c", script])
+
+fn probe_field(line: text, key: text) -> text:
+    val marker = key + "="
+    val start = line.index_of(marker)
+    if start < 0:
+        return ""
+    val rest = line.substring(start + marker.len(), line.len())
+    val stop = rest.index_of(" ")
+    if stop < 0:
+        return rest
+    rest.substring(0, stop)
+
+# Best total_ns over the passes of one variant; -1 when no line parsed.
+fn best_total_ns(combined: text, variant: text) -> i64:
+    var best: i64 = -1
+    for raw in combined.split("\n"):
+        val line = raw.trim()
+        if !line.contains("PROBE"):
+            continue
+        if probe_field(line, "variant") != variant:
+            continue
+        val ns = probe_field(line, "total_ns")
+        if ns.len() == 0:
+            continue
+        val parsed = ns.to_i64()
+        if best < 0 or parsed < best:
+            best = parsed
+    best
+
+fn probe_acc(combined: text, variant: text) -> text:
+    for raw in combined.split("\n"):
+        val line = raw.trim()
+        if !line.contains("PROBE"):
+            continue
+        if probe_field(line, "variant") != variant:
+            continue
+        val acc = probe_field(line, "acc")
+        if acc.len() > 0:
+            return acc
+    ""
+
+fn receipt_line(combined: text) -> text:
+    for raw in combined.split("\n"):
+        val line = raw.trim()
+        if line.contains("[engine-receipt]"):
+            return line
+    ""
+
+fn receipt_field(line: text, key: text) -> text:
+    val marker = key + "="
+    val start = line.index_of(marker)
+    if start < 0:
+        return ""
+    val rest = line.substring(start + marker.len(), line.len())
+    val stop = rest.index_of(" ")
+    if stop < 0:
+        return rest
+    rest.substring(0, stop)
+
+fn taken_result(combined: text) -> text:
+    for raw in combined.split("\n"):
+        val line = raw.trim()
+        if !line.contains("TAKEN"):
+            continue
+        val result = probe_field(line, "result")
+        if result.len() > 0:
+            return result
+    ""
+
+describe "seed JIT: never-taken branch calls do not cost frame on entry":
+    # @req: REQ-SSPEC-PERF
+
+    it "runs the A/B probe on the cranelift-jit lane without demotion":
+        step("Run the A/B probe child forced onto the JIT lane")
+        val (stdout, stderr, code) = run_probe_child()
+        expect(code).to_equal(0)
+        val line = receipt_line(stdout + stderr)
+        step("The engine receipt names the compiled JIT engine, not the interpreter")
+        expect(line == "").to_equal(false)
+        expect(receipt_field(line, "engine")).to_equal("cranelift-jit")
+        expect(receipt_field(line, "demoted")).to_equal("no")
+
+    it "keeps behavior identical on the taken path and both hot paths":
+        step("Run the probe child and parse the result pins")
+        val (stdout, stderr, code) = run_probe_child()
+        expect(code).to_equal(0)
+        val combined = stdout + stderr
+        step("The never-taken g60 hot path computes the same sum as g0")
+        expect(probe_acc(combined, "g0")).to_equal("300000000")
+        expect(probe_acc(combined, "g60")).to_equal("300000000")
+        step("The taken branch (k > 5) still executes its 60 calls: 60*6 + 2*(60*61/2) = 4020")
+        expect(taken_result(combined)).to_equal("4020")
+
+    it "charges a never-taken 60-call branch at most 5/4 of the plain hot path per entry":
+        step("Run the probe child and take the best of three interleaved passes per variant")
+        val (stdout, stderr, code) = run_probe_child()
+        expect(code).to_equal(0)
+        val combined = stdout + stderr
+        val best0 = best_total_ns(combined, "g0")
+        val best60 = best_total_ns(combined, "g60")
+        expect(best0 > 0).to_equal(true)
+        expect(best60 > 0).to_equal(true)
+        print "COLD_BRANCH_PIN g0_best_ns={best0} g60_best_ns={best60} ratio_x100={(best60 * 100 / best0)}"
+        step("60 dead calls cost no more than 25% over the no-call baseline per entry")
+        expect(best60 * 4 <= best0 * 5).to_equal(true)

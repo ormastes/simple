@@ -261,11 +261,14 @@ fn {prefix}_{test_name}() {{
 
     fs::write(dest_path, generated).unwrap();
 
-    // Tell Cargo to rerun if test directory changes
-    println!("cargo:rerun-if-changed={}", test_root.display());
-
-    // Also rerun if any .spl file in the test directory changes
+    // Tell Cargo to rerun if the test directory changes. Only watch a root
+    // that exists: cargo cannot stably fingerprint a missing
+    // rerun-if-changed path, so a dead root (e.g. the legacy test/unit/lib/std
+    // on the current layout) leaves the driver dirty on every build.
     if test_root.exists() {
+        println!("cargo:rerun-if-changed={}", test_root.display());
+
+        // Also rerun if any .spl file in the test directory changes
         for entry in WalkDir::new(test_root)
             .follow_links(true)
             .into_iter()

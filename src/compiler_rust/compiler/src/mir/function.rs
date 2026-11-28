@@ -301,6 +301,13 @@ impl MirFunction {
         reg
     }
 
+    /// Advance the vreg counter past vregs adopted from another function
+    /// (cold-branch outlining moves a block's instructions, vregs included,
+    /// into a synthetic helper).
+    pub fn set_vreg_counter(&mut self, next: u32) {
+        self.next_vreg = next;
+    }
+
     pub fn new_block(&mut self) -> BlockId {
         let id = BlockId(self.next_block);
         self.next_block += 1;

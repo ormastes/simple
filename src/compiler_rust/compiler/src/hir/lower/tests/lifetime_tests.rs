@@ -574,6 +574,87 @@ fn mutable_aliasing():
 }
 
 #[test]
+fn test_extern_out_param_sequential_reborrow_allowed() {
+    // Bug sffi_out_param_capability_violation_blocks_stage2_2026-08-27: a `&mut`
+    // borrow passed to a foreign callee lives only for that call. The canonical
+    // out-param retry/fallback idiom re-borrows the same local in a LATER,
+    // disjoint extern call; that must compile. Before the fix the first borrow
+    // stayed in the capability env forever and the second acquire failed with
+    // "Aliasing violation: reference 2 already has Exclusive capability".
+    let source = r#"
+@unsafe(reason: "status/out ABI", capabilities: [ffi, raw_ptr])
+extern fn spl_wffi_try_call_i64_out(fptr: i64, args: [i64], nargs: i64, out_value: *mut i64) -> i64
+
+@unsafe(reason: "probe", capabilities: [ffi, raw_ptr])
+fn out_param_retry(fptr: i64, args: [i64]) -> i64:
+    var value: i64 = 0
+    val status = unsafe(capabilities: [ffi, raw_ptr]):
+        spl_wffi_try_call_i64_out(fptr, args, args.len(), &mut value)
+    if status == 0:
+        return value
+    val retry_status = unsafe(capabilities: [ffi, raw_ptr]):
+        spl_wffi_try_call_i64_out(fptr, args, args.len(), &mut value)
+    retry_status
+"#;
+
+    let result = lower_with_warnings(source);
+    assert!(
+        result.is_ok(),
+        "Sequential disjoint `&mut` out-param borrows at extern calls must lower: {:?}",
+        result.err()
+    );
+}
+
+#[test]
+fn test_extern_out_param_two_mut_args_same_call_rejected() {
+    // Two `&mut` of the same local inside ONE extern call's argument list
+    // alias for the whole call and must stay rejected.
+    let source = r#"
+@unsafe(reason: "status/out ABI", capabilities: [ffi, raw_ptr])
+extern fn spl_wffi_two_out(a: *mut i64, b: *mut i64) -> i64
+
+@unsafe(reason: "probe", capabilities: [ffi, raw_ptr])
+fn two_out_one_call() -> i64:
+    var value: i64 = 0
+    unsafe(capabilities: [ffi, raw_ptr]):
+        spl_wffi_two_out(&mut value, &mut value)
+"#;
+
+    let result = lower_with_warnings(source);
+    assert!(
+        result.is_err(),
+        "Two `&mut` of the same local in one extern call must stay rejected: {:?}",
+        result
+    );
+}
+
+#[test]
+fn test_extern_out_param_prior_borrow_binding_still_tracked() {
+    // A borrow bound before the call (`val p = &mut x`) predates the call's
+    // capability snapshot and must keep rejecting a later `&mut` re-borrow.
+    let source = r#"
+@unsafe(reason: "status/out ABI", capabilities: [ffi, raw_ptr])
+extern fn spl_wffi_try_call_i64_out(fptr: i64, args: [i64], nargs: i64, out_value: *mut i64) -> i64
+
+@unsafe(reason: "probe", capabilities: [ffi, raw_ptr])
+fn bound_then_reborrow(fptr: i64, args: [i64]) -> i64:
+    var value: i64 = 0
+    val held = &mut value
+    unsafe(capabilities: [ffi, raw_ptr]):
+        spl_wffi_try_call_i64_out(fptr, args, args.len(), &mut value)
+    val observed = *held
+    observed
+"#;
+
+    let result = lower_with_warnings(source);
+    assert!(
+        result.is_err(),
+        "A live `&mut` binding across an extern call must keep rejecting re-borrow: {:?}",
+        result
+    );
+}
+
+#[test]
 fn test_shared_aliasing_allowed() {
     // Multiple & (shared/immutable) references should be allowed
     let source = r#"

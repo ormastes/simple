@@ -614,19 +614,81 @@ pub extern "C" fn rt_opt_bool_to_string(raw: i64) -> RuntimeValue {
 }
 
 /// Convert a flat (non-boxed) `f64?`/`f32?` optional payload to a string
-/// RuntimeValue. The flat payload arrives as the f64 bit pattern reinterpreted
-/// as i64 (or the nil sentinel, which is not a valid f64 bit pattern that
-/// collides with a legitimate value in practice at this raw-int comparison
-/// stage -- checked before the bitcast). See `rt_opt_i64_to_string` for the
+/// RuntimeValue. See `rt_opt_i64_to_string` for the flat-optional
 /// representation rationale.
+///
+/// The flat payload is the f64 bit pattern reinterpreted as i64 (or the nil
+/// sentinel, which is not a valid f64 bit pattern that collides with a
+/// legitimate value in practice at this raw-int comparison stage -- checked
+/// before the bitcast). A typed float optional also escapes its inline
+/// `(tag, bits)` pair (`mir/float_option_inline.rs`) to this sink in the
+/// one-word forms `rt_option_float_bits` decodes: the Option enum holding the
+/// raw IEEE bits (explicit typed `Some(x)`), the Option enum holding a boxed
+/// float (generic / untyped producers), or the flat boxed float (`return x`
+/// into an `f64?` slot). Bitcasting those words printed the heap address as a
+/// denormal (`Some(0.1)` -> `Option::Some(4.9e-324...)`) and a `None` enum as
+/// a bogus `Some`. Enum words route through the exact decoder; the raw-bits
+/// and flat-boxed-float words keep their verbatim-bit paths below.
+/// seed_jit_f64_option_some_print_sink_reads_raw_payload_as_value_2026-11-27
 #[no_mangle]
 pub extern "C" fn rt_opt_f64_to_string(raw: i64) -> RuntimeValue {
     if raw == RuntimeValue::NIL.0 as i64 {
         let s = "Option::None";
         return unsafe { crate::value::collections::rt_string_new(s.as_ptr(), s.len() as u64) };
     }
-    let f = f64::from_bits(raw as u64);
+    let v = RuntimeValue::from_raw(raw as u64);
+    let bits = if let Some(p) = get_typed_ptr::<crate::value::objects::RuntimeEnum>(v, HeapObjectType::Enum) {
+        if unsafe { (*p).enum_id } != crate::value::objects::OPTION_ENUM_ID {
+            // Not reachable through the f64?/f32?-typed call sites; keep the
+            // verbatim-bit behavior for any stray non-Option enum word.
+            raw
+        } else if crate::value::objects::rt_is_none(v) {
+            let s = "Option::None";
+            return unsafe { crate::value::collections::rt_string_new(s.as_ptr(), s.len() as u64) };
+        } else {
+            crate::value::objects::rt_option_float_bits(v)
+        }
+    } else if v.as_heap_float_ptr().is_some() {
+        // Flat boxed-float form: the word is a heap float pointer, not the
+        // payload bits.
+        v.as_float().to_bits() as i64
+    } else {
+        raw
+    };
+    let f = f64::from_bits(bits as u64);
     let s = format!("Option::Some({})", format_float_display(f));
+    unsafe { crate::value::collections::rt_string_new(s.as_ptr(), s.len() as u64) }
+}
+
+/// Render a TAGGED flat-optional float (`f64?`/`f32?` reaching string
+/// interpolation) as `Option::None` / `Option::Some(v)`, matching the
+/// interpreter. `rt_opt_value_to_string` must stay type-erased: an `i64?`/
+/// `bool?` Some payload is a tagged `RuntimeValue` while a typed float Some
+/// payload is the RAW IEEE bits, and the two are indistinguishable at the
+/// word level (a raw `1.0` aliases TAG_INT, a raw `0.1` aliases TAG_FLOAT).
+/// This typed counterpart is the float sink mirroring
+/// `rt_opt_f64_to_string`: callers (the print/interpolation lowering, which
+/// knows the inner type) route only `f32?`/`f64?`-typed words here, and the
+/// same three one-word forms decode exactly through `rt_option_float_bits`.
+/// seed_jit_f64_option_some_print_sink_reads_raw_payload_as_value_2026-11-27
+#[no_mangle]
+pub extern "C" fn rt_opt_f64_value_to_string(v: RuntimeValue) -> RuntimeValue {
+    let s = if crate::value::objects::rt_is_none(v) {
+        "Option::None".to_string()
+    } else {
+        let is_float_option_word = v.as_heap_float_ptr().is_some()
+            || matches!(
+                get_typed_ptr::<crate::value::objects::RuntimeEnum>(v, HeapObjectType::Enum),
+                Some(p) if unsafe { (*p).enum_id } == crate::value::objects::OPTION_ENUM_ID
+            );
+        if is_float_option_word {
+            let f = f64::from_bits(crate::value::objects::rt_option_float_bits(v) as u64);
+            format!("Option::Some({})", format_float_display(f))
+        } else {
+            // Misrouted non-float word: keep the generic tagged display.
+            format!("Option::Some({})", value_to_display_string(v))
+        }
+    };
     unsafe { crate::value::collections::rt_string_new(s.as_ptr(), s.len() as u64) }
 }
 

@@ -2579,6 +2579,37 @@ impl<'a> MirLowerer<'a> {
 
     /// Lower a single HIR function to MIR function
     pub(super) fn lower_function(&mut self, func: &HirFunction) -> MirLowerResult<MirFunction> {
+        // Rewrite unresolved bare receiver-field reads (`kind` for
+        // `self.kind`) into typed `self.<field>` accesses BEFORE any
+        // per-function analysis so every downstream pass sees the final
+        // tree. The function is cloned only when a candidate exists (rare:
+        // a method body with a bare field read). See
+        // doc/08_tracking/bug/implicit_self_field_read_unresolved_in_plain_fn_method_2026-09-03.md
+        // and receiver_field_rewrite.rs.
+        let rewritten;
+        let func = if let Some(registry) = self.type_registry {
+            let context = super::receiver_field_rewrite::ReceiverFieldRewrite::for_function(
+                func,
+                registry,
+                &self.global_types,
+                &self.available_functions,
+                &self.function_value_globals,
+                &self.imported_function_names,
+            );
+            match context.filter(|ctx| ctx.body_has_candidate(&func.body)) {
+                Some(context) => {
+                    rewritten = {
+                        let mut owned = func.clone();
+                        context.rewrite_body(&mut owned.body);
+                        owned
+                    };
+                    &rewritten
+                }
+                None => func,
+            }
+        } else {
+            func
+        };
         // Per-function: local indices are function-scoped, so this MUST be
         // recomputed (not accumulated) or one function's locals would be read
         // as another's.

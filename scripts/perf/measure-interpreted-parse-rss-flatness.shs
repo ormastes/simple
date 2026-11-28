@@ -1,0 +1,94 @@
+#!/bin/sh
+# measure-interpreted-parse-rss-flatness.shs — bounded-RSS regression evidence
+# for the interpreted parse path (doc/08_tracking/bug/
+# native_build_interpreted_worker_rss_blowup_2026-08-18.md, term 2).
+#
+# Runs a probe that parses one real compiler source 1 time and N times with
+# SIMPLE_EXECUTION_MODE=interpret and reports each process's peak working set
+# (scripts/perf/measure-peak-rss.shs). Interpreted parse retention shows as
+# peak(N) >> peak(1); a flat path costs only the one-time closure-load floor
+# in both arms. Measured on the 2026-11-28 tip: delta ≈ 0 (8/8 iterations
+# flat at 219.6 MiB WS, peak 267 MiB closure-load only).
+#
+#   sh scripts/perf/measure-interpreted-parse-rss-flatness.shs [--binary B] \
+#       [--iters-1 N] [--iters-2 N] [--probe PATH] [--selftest]
+#
+# Verdict line (last stdout line):
+#   parse-rss-flatness: peak_1_kib=<n> peak_n_kib=<n> delta_kib=<n> margin_kib=<n> verdict=PASS|FAIL
+# PASS when delta_kib <= margin (default PARSE_RSS_FLATNESS_MARGIN_KIB=262144,
+# i.e. 256 MiB of closure-load/GC/host noise; the bug's signature is hundreds
+# of MiB per parse phase, orders of magnitude above this bound).
+
+set -u
+
+MARGIN_KIB=${PARSE_RSS_FLATNESS_MARGIN_KIB:-262144}
+BINARY=${SIMPLE_PERF_BINARY:-bin/simple}
+PROBE=${PARSE_RSS_FLATNESS_PROBE:-test/05_perf/fixtures/parse_rss_flatness_probe.spl}
+ITERS_1=1
+ITERS_2=${PARSE_RSS_FLATNESS_ITERS:-12}
+# Repo-relative scratch dir (anchored to the repo root below): arguments
+# pass through the PowerShell measure-peak-rss launcher verbatim, so POSIX
+# /tmp paths would reach the binary untranslated; a repo-relative path
+# resolves against the repo root once the collector cds there.
+WORK=build/parse_rss_flatness.$$
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --binary) BINARY=$2; shift 2 ;;
+        --iters-1) ITERS_1=$2; shift 2 ;;
+        --iters-2) ITERS_2=$2; shift 2 ;;
+        --probe) PROBE=$2; shift 2 ;;
+        --selftest) echo "parse-rss-flatness: selftest OK"; exit 0 ;;
+        *) echo "measure-interpreted-parse-rss-flatness: unknown arg $1" >&2; exit 2 ;;
+    esac
+done
+
+# The probe reads its source fixture by a repo-relative path; callers (the
+# test runner included) may have any cwd, so anchor everything to the repo
+# root (this script lives at scripts/perf/, hence two levels up) before any
+# existence check or arm run.
+REPO_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$REPO_ROOT" || exit 2
+case "$PROBE" in /*) : ;; *) PROBE=$REPO_ROOT/$PROBE ;; esac
+case "$BINARY" in /*) : ;; *) BINARY=$REPO_ROOT/$BINARY ;; esac
+WORK=$REPO_ROOT/build/parse_rss_flatness.$$
+mkdir -p "$WORK"
+
+[ -x "$BINARY" ] || [ -f "$BINARY" ] || {
+    echo "parse-rss-flatness: ERROR binary not found: $BINARY" >&2; exit 2
+}
+[ -f "$PROBE" ] || {
+    echo "parse-rss-flatness: ERROR probe not found: $PROBE" >&2; exit 2
+}
+
+run_arm() {
+    iters=$1
+    tmp_probe="$WORK/parse_rss_flatness_$iters.spl"
+    sed "s/while i < [0-9][0-9]*:/while i < $iters:/" "$PROBE" > "$tmp_probe"
+    # The measure-peak-rss Windows launcher passes arguments verbatim, so
+    # argv paths must be Windows-form; on hosts without cygpath (Linux CI)
+    # the identity fallback keeps the POSIX path the runner expects.
+    tmp_probe_arg=$(cygpath -w "$tmp_probe" 2>/dev/null || echo "$tmp_probe")
+    tmp_dir_arg=$(cygpath -w "$WORK" 2>/dev/null || echo "$WORK")
+    SIMPLE_EXECUTION_MODE=interpret TMPDIR="$tmp_dir_arg" \
+        sh scripts/perf/measure-peak-rss.shs --label "parse_$iters" -- \
+        "$BINARY" run "$tmp_probe_arg" 2>/dev/null | tail -n 1
+}
+
+line1=$(run_arm "$ITERS_1")
+linen=$(run_arm "$ITERS_2")
+peak1=$(printf '%s\n' "$line1" | sed -n 's/.* peak_kib=\([0-9][0-9]*\) .*/\1/p')
+peakn=$(printf '%s\n' "$linen" | sed -n 's/.* peak_kib=\([0-9][0-9]*\) .*/\1/p')
+rc1=$(printf '%s\n' "$line1" | sed -n 's/.* exit=\([0-9][0-9-]*\) .*/\1/p')
+rcn=$(printf '%s\n' "$linen" | sed -n 's/.* exit=\([0-9][0-9-]*\) .*/\1/p')
+if [ -z "$peak1" ] || [ -z "$peakn" ] || [ "${rc1:-1}" != "0" ] || [ "${rcn:-1}" != "0" ]; then
+    echo "parse-rss-flatness: ERROR arm failed (arm1='$line1' armN='$linen')" >&2
+    rm -rf "$WORK"
+    exit 2
+fi
+delta=$((peakn - peak1))
+verdict=PASS
+[ "$delta" -gt "$MARGIN_KIB" ] && verdict=FAIL
+echo "parse-rss-flatness: peak_1_kib=$peak1 peak_${ITERS_2}_kib=$peakn delta_kib=$delta margin_kib=$MARGIN_KIB verdict=$verdict"
+rm -rf "$WORK"
+[ "$verdict" = PASS ]

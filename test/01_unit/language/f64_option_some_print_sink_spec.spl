@@ -1,0 +1,132 @@
+# @tag:in-development
+# Tracks: seed_jit_f64_option_some_print_sink_reads_raw_payload_as_value_2026-11-27
+# FIXED in the Rust seed runtime 2026-11-27: `rt_opt_f64_to_string` (the flat
+# `f64?`/`f32?` print sink) decodes every one-word form a typed float optional
+# escapes to the sinks in -- the Option enum over raw IEEE bits (explicit
+# typed `Some(x)`), the Option enum over a boxed float (generic producers),
+# the flat boxed float (`return x` into an `f64?` slot), the flat raw-bits
+# payload, and nil -- through `rt_option_float_bits`, and the new typed
+# `rt_opt_f64_value_to_string` is the interpolation counterpart. Before the
+# fix, `val c: f64? = Some(0.1); print c` printed the enum's heap address as
+# a denormal and `print "i={c}"` printed `Option::Some(<enum@0x...>)`; the
+# interpreter prints `Option::Some(0.1)` for both.
+#
+# Lane note: `simple test` runs the spec itself on the interpreter lane, and
+# env_set from that lane does not reach process_run children (they default to
+# the JIT lane), so the JIT examples below are real JIT-lane evidence. The
+# expected strings are the pinned interpreter-lane oracles, recorded by
+# running each fixture with `SIMPLE_EXECUTION_MODE=interpreter` (see
+# doc/07_guide/compiler/seed_jit_f64_option_some_print_sink_reverification.md).
+#
+# Pending hunk: the `"{c}"` interpolation-HOLE example additionally needs the
+# lowering patch design in `lowering_expr_builtin.rs` (route flat optionals
+# whose inner type is F32/F64 at the `rt_value_to_string` sink to
+# `rt_opt_f64_value_to_string` instead of the type-erased
+# `rt_opt_value_to_string`, which cannot distinguish a raw IEEE payload from a
+# tagged int payload). It asserts the post-routing oracle; remove this tag
+# once a seed carrying both pieces is deployed.
+use std.spec
+use std.io_runtime.{process_run, file_write, dir_create_all, env_get, env_set}
+
+val PRINT_SINK = """extern fn spl_f64_to_bits(value: f64) -> i64
+extern fn spl_bits_to_f64(bits: i64) -> f64
+
+fn flat(x: f64) -> f64?:
+    return x
+
+fn main() -> i64:
+    val c: f64? = Some(0.1)
+    print c
+    val one: f64? = Some(1.0)
+    print one
+    val nn: f64? = Some(spl_bits_to_f64(9221120237041090565))
+    print nn
+    val nm: f64? = Some(spl_bits_to_f64(-9223372036854775808))
+    print nm
+    val fl: f64? = flat(0.1)
+    print fl
+    val f: f32? = Some(0.1)
+    print f
+    val n: f64? = None
+    print n
+    return 0
+"""
+
+val INTERP_HOLES = """extern fn spl_f64_to_bits(value: f64) -> i64
+extern fn spl_bits_to_f64(bits: i64) -> f64
+
+fn flat(x: f64) -> f64?:
+    return x
+
+fn main() -> i64:
+    val c: f64? = Some(0.1)
+    print "i={c}"
+    val one: f64? = Some(1.0)
+    print "i={one}"
+    val nn: f64? = Some(spl_bits_to_f64(9221120237041090565))
+    print "i={nn}"
+    val nm: f64? = Some(spl_bits_to_f64(-9223372036854775808))
+    print "i={nm}"
+    val fl: f64? = flat(0.1)
+    print "i={fl}"
+    val f: f32? = Some(0.1)
+    print "i={f}"
+    val n: f64? = None
+    print "i={n}"
+    return 0
+"""
+
+val INTERP_SINK_DIRECT = """extern fn rt_opt_f64_value_to_string(v: f64?) -> text
+
+fn flat(x: f64) -> f64?:
+    return x
+
+fn main() -> i64:
+    val c: f64? = Some(0.1)
+    print rt_opt_f64_value_to_string(c)
+    val one: f64? = Some(1.0)
+    print rt_opt_f64_value_to_string(one)
+    val n: f64? = None
+    print rt_opt_f64_value_to_string(n)
+    val fl: f64? = flat(0.1)
+    print rt_opt_f64_value_to_string(fl)
+    return 0
+"""
+
+# Interpreter-lane oracles (SIMPLE_EXECUTION_MODE=interpreter, same fixtures).
+val EXPECT_SOME = "Option::Some(0.1)\nOption::Some(1.0)\nOption::Some(NaN)\nOption::Some(-0.0)\nOption::Some(0.1)\nOption::Some(0.1)\nOption::None"
+val EXPECT_SOME_DIRECT = "Option::Some(0.1)\nOption::Some(1.0)\nOption::None\nOption::Some(0.1)"
+
+fn work_dir() -> text:
+    val tmp = env_get("TMPDIR")
+    val root = if tmp != "": tmp else: "/tmp"
+    val dir = root + "/simple-spec-f64-option-print-sink"
+    dir_create_all(dir)
+    dir
+
+fn run_fixture(name: text, source: text) -> (text, i64):
+    val path = work_dir() + "/" + name + ".spl"
+    assert_true(file_write(path, source))
+    env_set("SIMPLE_RUST_SEED_WARNING", "0")
+    env_set("SIMPLE_TIMEOUT_SECONDS", "0")
+    val configured = env_get("SIMPLE_BINARY")
+    val bin = if configured == "": "bin/simple" else: configured
+    val ran = process_run(bin, ["run", path])
+    (ran[0].trim(), ran[2])
+
+describe "typed f64?/f32? Some print sink (seed JIT)":
+    it "prints every escaping one-word form exactly (oracle: interpreter lane)":
+        val (out, rc) = run_fixture("print_sink", PRINT_SINK)
+        assert_equal(rc, 0)
+        assert_equal(out, EXPECT_SOME)
+
+describe "typed f64? interpolation sink (seed JIT)":
+    it "decodes a directly-called typed sink exactly (oracle: interpreter lane)":
+        val (out, rc) = run_fixture("interp_sink", INTERP_SINK_DIRECT)
+        assert_equal(rc, 0)
+        assert_equal(out, EXPECT_SOME_DIRECT)
+
+    it "interpolates typed float optionals exactly (needs the lowering routing hunk)":
+        val (out, rc) = run_fixture("interp_holes", INTERP_HOLES)
+        assert_equal(rc, 0)
+        assert_equal(out, EXPECT_SOME)

@@ -1,0 +1,109 @@
+"""
+Regression guard for doc/08_tracking/bug/
+stage2_compiled_program_returned_array_len_zero_2026-09-20.md.
+
+A Stage-2-compiled program saw .len() of a function-returned array as 0 while
+element access on the same handle still worked (returned-array length loss,
+caller side only: ret_lit=0, ident=0, typed_len=0, but r[1]=="y"). The defect
+no longer reproduces on any lane at this revision; this spec pins the original
+reduction so the loss cannot return. The struct-element variant of the same
+defect has its own native spec (returned_struct_array_native_spec.spl, which
+requires an admitted self-hosted compiler via SIMPLE_NATIVE_COMPILER); this
+spec drives the binary under test directly through SIMPLE_BINARY, so it also
+covers native-build lanes without stage-3 admission.
+
+Re-verification recipe (Git Bash, from the checkout root; probe caches stay
+under build/p3cache/arrlen0 for lane isolation):
+
+    export SIMPLE_HIR_CACHE_DIR=$PWD/build/p3cache/arrlen0/hir-cache \
+           TMPDIR=$PWD/build/p3cache/arrlen0/tmp SIMPLE_BOOTSTRAP=1 \
+           SIMPLE_NO_STUB_FALLBACK=1
+    BIN=build/p3cache/fresh-seed/simple-head.exe    # or: export SIMPLE_BINARY=$BIN
+    "$BIN" run test/fixtures/native_returned_array_len_zero/main.spl --mode=interpreter
+    "$BIN" run test/fixtures/native_returned_array_len_zero/main.spl --mode=jit
+    "$BIN" native-build --backend llvm --threads 1 --mode dynload \
+        --source test/fixtures/native_returned_array_len_zero \
+        -o build/p3cache/arrlen0/verify/ret-arr-len \
+        test/fixtures/native_returned_array_len_zero/main.spl
+    build/p3cache/arrlen0/verify/ret-arr-len
+
+Every lane must print exactly:
+
+    local=3 param_len=3
+    ret_lit=2
+    ident=3
+    ret_lit[1]=y ident[2]=c
+    typed_len=2
+
+and exit 0. A returned-array length regression prints 0 for ret_lit=/ident=/
+typed_len= and exits 91-94 (fixture-internal guards).
+"""
+use std.spec.*
+use std.io_runtime.{env_get, env_set, process_run_timeout, file_exists, dir_create_all, getpid, time_now_unix_micros}
+
+fn _probe_simple_bin() -> text:
+    # SIMPLE_BINARY wins when set: it names the binary under test, which may
+    # be newer than the checkout's bin/simple (a stale bin/simple cannot
+    # native-build current sources). Fall back to bin/simple, then to the
+    # env, then to a bare name.
+    val from_env = env_get("SIMPLE_BINARY") ?? ""
+    if from_env != "":
+        return from_env
+    if file_exists("bin/simple.exe"):
+        return "bin/simple.exe"
+    if file_exists("bin/simple"):
+        return "bin/simple"
+    "bin/simple"
+
+fn _expected_stdout() -> text:
+    "local=3 param_len=3\nret_lit=2\nident=3\nret_lit[1]=y ident[2]=c\ntyped_len=2\n"
+
+describe "returned array length survives function-return on every lane":
+    it "interpreter control lane reads caller-side .len() correctly":
+        val (out, _err, rc) = process_run_timeout(_probe_simple_bin(), [
+            "run", "test/fixtures/native_returned_array_len_zero/main.spl",
+            "--mode=interpreter",
+        ], 120000)
+        expect(rc).to_equal(0)
+        expect(out).to_equal(_expected_stdout())
+
+    it "JIT lane reads caller-side .len() correctly":
+        val (out, _err, rc) = process_run_timeout(_probe_simple_bin(), [
+            "run", "test/fixtures/native_returned_array_len_zero/main.spl",
+            "--mode=jit",
+        ], 120000)
+        expect(rc).to_equal(0)
+        expect(out).to_equal(_expected_stdout())
+
+    it "LLVM native lane reads caller-side .len() correctly":
+        val directory = "build/test/returned_array_len_zero_native_{getpid()}_{time_now_unix_micros()}"
+        val output = directory + "/probe"
+        expect(dir_create_all(directory)).to_equal(true)
+        # SIMPLE_BOOTSTRAP=1 keeps the native-build shard admission on the
+        # bounded stage-2 budget; without it a seed binary can refuse with
+        # "MIR shard admission refused; no serial fallback" on memory-tight
+        # hosts. SIMPLE_MCDC_MODE=off stops an MC/DC-on test runner from
+        # injecting std.nogc_sync_mut.mcdc.static_probe into the fixture
+        # build, which cannot resolve under the fixture's scoped --source.
+        # Restore both afterwards.
+        val old_bootstrap = env_get("SIMPLE_BOOTSTRAP") ?? ""
+        val old_mcdc = env_get("SIMPLE_MCDC_MODE") ?? ""
+        val _set = env_set("SIMPLE_BOOTSTRAP", "1")
+        val _set2 = env_set("SIMPLE_MCDC_MODE", "off")
+        # 15 min budget: a cold default cache pays a full SCV inventory decode
+        # plus the runtime C compile before linking the program.
+        val (_build_out, _build_err, build_code) = process_run_timeout(_probe_simple_bin(), [
+            "native-build", "--backend", "llvm", "--threads", "1",
+            "--mode", "dynload",
+            "--source", "test/fixtures/native_returned_array_len_zero",
+            "-o", output,
+            "test/fixtures/native_returned_array_len_zero/main.spl",
+        ], 900000)
+        val _restore = env_set("SIMPLE_BOOTSTRAP", old_bootstrap)
+        val _restore2 = env_set("SIMPLE_MCDC_MODE", old_mcdc)
+        if build_code != 0:
+            print("native-build failed rc={build_code}: {_build_err}")
+        expect(build_code).to_equal(0)
+        val (out, _err, rc) = process_run_timeout("./" + output, [], 10000)
+        expect(rc).to_equal(0)
+        expect(out).to_equal(_expected_stdout())

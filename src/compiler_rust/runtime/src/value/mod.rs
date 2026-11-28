@@ -381,7 +381,7 @@ pub use sffi::{
     rt_stdout_write, rt_value_format_string, rt_value_to_string, rt_opt_bool_to_string, rt_opt_f64_to_string,
     rt_opt_i64_to_string,
     rt_i64_to_hex,
-    rt_opt_value_to_string,
+    rt_opt_value_to_string, rt_opt_f64_value_to_string,
 };
 
 // Re-export log SFFI functions

@@ -1,0 +1,51 @@
+# Bug: implicit_self_field_read_unresolved_in_plain_fn_method_2026-09-03
+#
+# A plain (non-`me`) class method reading a receiver field bare (`kind` for
+# `self.kind`) died on every compiled lane: the seed HIR left the bare name as
+# an unresolved `Global`, the Cranelift JIT rejected it
+# (`GlobalLoad: unresolved identifier 'kind'`), and the interpreter fallback
+# failed with `variable 'kind' not found` — no working path. The pure-Simple
+# HIR lane resolves the same idiom to the receiver's field; the seed MIR
+# lowering now mirrors that. The sspec runner forces the interpreter, so each
+# case runs a fixture through the compiler binary in JIT mode and asserts
+# stdout/exit code. The binary is `SIMPLE_BINARY` or `bin/simple`.
+use std.spec
+use std.io_runtime.{process_run, file_write, dir_create_all, env_get, env_set}
+
+fn work_dir() -> text:
+    val tmp = env_get("TMPDIR")
+    val root = if tmp != "": tmp else: "/tmp"
+    val dir = root + "/simple-spec-implicit-self-field-read"
+    dir_create_all(dir)
+    dir
+
+fn run_jit(name: text, source: text) -> (text, i64):
+    val path = work_dir() + "/" + name + ".spl"
+    assert_true(file_write(path, source))
+    env_set("SIMPLE_EXECUTION_MODE", "jit")
+    env_set("SIMPLE_RUST_SEED_WARNING", "0")
+    val configured = env_get("SIMPLE_BINARY")
+    val bin = if configured == "": "bin/simple" else: configured
+    val ran = process_run(bin, ["run", path])
+    (ran.0.trim(), ran.2)
+
+describe "implicit self field read in a plain fn method (JIT lane)":
+    it "resolves the bare read to the receiver field":
+        # Doc repro: must print code=4 and exit 0.
+        val (out, rc) = run_jit("plain_fn_read", "class Box:\n    kind: text\n\n    fn code() -> i64:\n        if kind == \"a\":\n            4\n        else:\n            1\n\nfn main() -> i64:\n    val b = Box(kind: \"a\")\n    print \"code={{b.code()}}\"\n    0\n")
+        assert_equal(rc, 0)
+        assert_equal(out, "code=4")
+
+    it "takes the else branch when the field does not match":
+        val (out, rc) = run_jit("plain_fn_read_else", "class Box:\n    kind: text\n\n    fn code() -> i64:\n        if kind == \"a\":\n            4\n        else:\n            1\n\nfn main() -> i64:\n    val b = Box(kind: \"z\")\n    print \"code={{b.code()}}\"\n    0\n")
+        assert_equal(rc, 0)
+        assert_equal(out, "code=1")
+
+    it "resolves the bare read in a me method the same way":
+        val (out, rc) = run_jit("me_method_read", "class Counter:\n    score: i64\n\n    me fn bump() -> i64:\n        score + 1\n\nfn main() -> i64:\n    val c = Counter(score: 41)\n    print \"score={{c.bump()}}\"\n    0\n")
+        assert_equal(rc, 0)
+        assert_equal(out, "score=42")
+
+    it "still fails closed on a genuinely unknown name in a method":
+        val (_out, rc) = run_jit("unknown_name_guard", "class C:\n    x: i64\n\n    fn f() -> i64:\n        y\n\nfn main() -> i64:\n    val c = C(x: 1)\n    print \"r={{c.f()}}\"\n    0\n")
+        assert_not_equal(rc, 0)

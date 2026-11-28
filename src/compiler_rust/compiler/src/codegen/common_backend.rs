@@ -779,6 +779,7 @@ pub(crate) fn runtime_symbol_is_codegen_root(name: &str) -> bool {
             | "rt_opt_i64_to_string"
             | "rt_i64_to_hex"
             | "rt_opt_value_to_string"
+            | "rt_opt_f64_value_to_string"
             | "rt_opt_bool_to_string"
             | "rt_opt_f64_to_string"
             | "rt_hash_text"
@@ -3030,6 +3031,17 @@ impl<M: Module> CodegenBackend<M> {
             );
         }
         let functions = inline_small_pure_functions(mir, unique_functions);
+        if native_trace {
+            eprintln!("[rust-jit] compile_all cold_outline start functions={}", functions.len());
+        }
+        // Outline call-heavy conditional arms that return early, so the
+        // Cranelift frame their calls would force is set up only when the
+        // arm is actually taken (Cranelift has no shrink-wrapping; see
+        // doc/08_tracking/bug/seed_jit_never_taken_branch_calls_cost_frame_on_every_entry_2026-11-27.md).
+        // Runs after inlining so helper bodies are never re-inlined, and
+        // before referenced_call_names so helper callees are declared.
+        let functions =
+            super::cold_outline::outline_cold_branch_calls(functions, &self.function_return_types);
         if native_trace {
             eprintln!("[rust-jit] compile_all references start functions={}", functions.len());
         }

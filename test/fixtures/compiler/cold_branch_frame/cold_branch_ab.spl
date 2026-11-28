@@ -1,0 +1,77 @@
+# A/B probe pinned by test/05_perf/compiler/jit_cold_branch_frame_cost_spec.spl.
+#
+# g0: hot path only. g60: identical hot path plus a never-taken branch
+# (k is always 0) holding 60 real h() calls. h computes a + b*c via a loop so
+# the MIR inliner (back-edge-free candidates only) keeps it a real call.
+# main warms both paths, then measures them interleaved, best of 3 passes,
+# printing one PROBE line per (variant, pass).
+fn h(a: i64, b: i64, c: i64) -> i64:
+    var r: i64 = a
+    var i: i64 = 0
+    while i < b:
+        r = r + c
+        i = i + 1
+    r
+
+fn g0(x: i64, k: i64) -> i64:
+    if x == 1:
+        return k + 1
+    k + 2
+
+fn g60(x: i64, k: i64) -> i64:
+    if k > 5:
+        val t = h(k, 1, 2) + h(k, 2, 2) + h(k, 3, 2) + h(k, 4, 2) + h(k, 5, 2) \
+              + h(k, 6, 2) + h(k, 7, 2) + h(k, 8, 2) + h(k, 9, 2) + h(k, 10, 2) \
+              + h(k, 11, 2) + h(k, 12, 2) + h(k, 13, 2) + h(k, 14, 2) + h(k, 15, 2) \
+              + h(k, 16, 2) + h(k, 17, 2) + h(k, 18, 2) + h(k, 19, 2) + h(k, 20, 2) \
+              + h(k, 21, 2) + h(k, 22, 2) + h(k, 23, 2) + h(k, 24, 2) + h(k, 25, 2) \
+              + h(k, 26, 2) + h(k, 27, 2) + h(k, 28, 2) + h(k, 29, 2) + h(k, 30, 2) \
+              + h(k, 31, 2) + h(k, 32, 2) + h(k, 33, 2) + h(k, 34, 2) + h(k, 35, 2) \
+              + h(k, 36, 2) + h(k, 37, 2) + h(k, 38, 2) + h(k, 39, 2) + h(k, 40, 2) \
+              + h(k, 41, 2) + h(k, 42, 2) + h(k, 43, 2) + h(k, 44, 2) + h(k, 45, 2) \
+              + h(k, 46, 2) + h(k, 47, 2) + h(k, 48, 2) + h(k, 49, 2) + h(k, 50, 2) \
+              + h(k, 51, 2) + h(k, 52, 2) + h(k, 53, 2) + h(k, 54, 2) + h(k, 55, 2) \
+              + h(k, 56, 2) + h(k, 57, 2) + h(k, 58, 2) + h(k, 59, 2) + h(k, 60, 2)
+        return t
+    if x == 1:
+        return k + 1
+    k + 2
+
+extern fn rt_time_now_nanos() -> i64
+
+fn time_hot0() -> (i64, i64):
+    val N: i64 = 100000000
+    var acc: i64 = 0
+    var i: i64 = 0
+    val t0 = rt_time_now_nanos()
+    while i < N:
+        acc = acc + g0(1, 0) + g0(2, 0)
+        i = i + 1
+    val el = rt_time_now_nanos() - t0
+    (el, acc)
+
+fn time_hot60() -> (i64, i64):
+    val N: i64 = 100000000
+    var acc: i64 = 0
+    var i: i64 = 0
+    val t0 = rt_time_now_nanos()
+    while i < N:
+        acc = acc + g60(1, 0) + g60(2, 0)
+        i = i + 1
+    val el = rt_time_now_nanos() - t0
+    (el, acc)
+
+fn main():
+    # Branch-taken correctness pin: h(6, n, 2) = 6 + 2n, so the sum over
+    # n = 1..60 is 60*6 + 2*(60*61/2) = 4020. Outlining must not change it.
+    print "TAKEN result={g60(1, 6)} expect=4020"
+    # Warm-up outside the measured passes.
+    val _w0 = time_hot0()
+    val _w60 = time_hot60()
+    var p = 0
+    while p < 3:
+        val (el0, acc0) = time_hot0()
+        print "PROBE variant=g0 pass={p} total_ns={el0} ns_per_entry={(el0 / 200000000)} acc={acc0}"
+        val (el60, acc60) = time_hot60()
+        print "PROBE variant=g60 pass={p} total_ns={el60} ns_per_entry={(el60 / 200000000)} acc={acc60}"
+        p = p + 1

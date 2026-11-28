@@ -24,6 +24,7 @@ mod lowering_expr_struct;
 mod lowering_gpu;
 mod lowering_stmt;
 mod lowering_types;
+mod receiver_field_rewrite;
 
 #[cfg(test)]
 mod tests;
