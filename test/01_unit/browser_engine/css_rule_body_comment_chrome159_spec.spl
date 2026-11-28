@@ -1,0 +1,130 @@
+"""
+## Purpose and audience
+Purpose: Pin CSS Syntax 3 comment handling in `<style>` rule bodies against
+Chrome 159. The rule scanner split a body on `;` without removing `/* */`
+spans, so in `.box{/* background-color:#d04060;width:40px;height:20px */}`
+only the first commented declaration carried the `/*` and the rest
+(`width:40px`, `height:20px */`) reached the cascade.
+Audience: browser-engine CSS maintainers.
+
+Chrome oracle (Chrome 159.0.8154.6 headless, 900x2000,
+`body{margin:0;font:16px/1.5 sans-serif}`, every case in a
+`width:400px;height:600px;position:relative;overflow:hidden` slot,
+getBoundingClientRect relative to the slot, `x,y,w,h`):
+
+| id | rule                                                    | Chrome         |
+|----|---------------------------------------------------------|----------------|
+| a  | `#a{/* background-color:#d04060;width:40px;height:20px */}` | 0,0,400,24  |
+| b  | `#b{height:10px;/* width:40px;height:20px */}`          | 0,24,400,10    |
+| c  | `#c{width:50px;/* width:40px;height:20px */ height:12px}` | 0,34,50,12   |
+| d  | `/* #d{height:30px} */` (whole rule commented)          | 0,46,400,24    |
+| e  | `/* lead */ #e{height:14px}`                             | 0,70,400,14    |
+| f  | `#f{height:16px}/* #f{height:31px;width:32px} */`        | 0,84,400,16    |
+| g  | `#g /* mid */ {height:18px}`                             | 0,100,400,18   |
+| h  | `#h{width:/* x */60px;height:22px}`                      | 0,118,60,22    |
+| i  | `#i{font-family:"x/*y";height:26px}` (`/*` in a string)   | 0,140,400,26   |
+| j  | `#j{height:28px}/* c */` (after the string case)          | 0,166,400,28   |
+| k  | `#k{font-family:'a*/b/*';height:30px}`                  | 0,194,400,30   |
+| l  | `#l{height:32px}` (after the single-quote case)          | 0,224,400,32   |
+| m  | `#m{font-family:"x\"/*y";height:34px}` (escaped quote)   | 0,256,400,34   |
+| n  | `#n{height:36px}/* c */`                                 | 0,290,400,36   |
+| o  | `#o{background:url(x/*a.png);height:38px}` (unquoted url) | 0,326,400,38  |
+| p  | `#p{height:40px}/* c2 */`                                | 0,364,400,40   |
+| q  | `#q{font-family:"x/*k` newline `;height:42px}` (bad string ends at the newline) | 0,404,400,42 |
+| r  | `#r{height:44px}/* z */`                                 | 0,446,400,44   |
+| s  | `#s{height:46px}`                                        | 0,490,400,46   |
+| t  | `#t{content:"\"";height:48px}/* q */`                    | 0,536,400,48   |
+| u  | `#u{height:50px}`                                        | 0,584,400,50   |
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-CSS-RULE-BODY-COMMENT-CHROME159-001 — `/* */` comments in a style sheet are inert wherever they sit (rule body start, mid body, inside a value, before or inside a selector, or around a whole rule), matching Chrome 159.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_core_css_rules.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val VW: i32 = 900
+val VH: i32 = 2000
+val SHEET: text = "body{margin:0;font:16px/1.5 sans-serif}.s{position:relative;width:400px;height:600px;overflow:hidden}\n#a{/* background-color:#d04060;width:40px;height:20px */}\n#b{height:10px;/* width:40px;height:20px */}\n#c{width:50px;/* width:40px;height:20px */ height:12px}\n/* #d{height:30px} */\n/* lead */ #e{height:14px}\n#f{height:16px}/* #f{height:31px;width:32px} */\n#g /* mid */ {height:18px}\n#h{width:/* x */60px;height:22px}\n#i{font-family:\"x/*y\";height:26px}\n#j{height:28px}/* c */\n#k{font-family:'a*/b/*';height:30px}\n#l{height:32px}\n" + "#m{{font-family:\"x\\\"/*y\";height:34px}}\n" + "#n{height:36px}/* c */\n#o{background:url(x/*a.png);height:38px}\n#p{height:40px}/* c2 */\n" + "#q{{font-family:\"x/*k\n;height:42px}}\n" + "#r{height:44px}/* z */ #s{height:46px}\n#t{content:\"\\\"\";height:48px}/* q */\n#u{height:50px}\n"
+val BODY: text = "<div id=\"a\">aa</div><div id=\"b\">bb</div><div id=\"c\">cc</div><div id=\"d\">dd</div><div id=\"e\">ee</div><div id=\"f\">ff</div><div id=\"g\">gg</div><div id=\"h\">hh</div><div id=\"i\">ii</div><div id=\"j\">jj</div><div id=\"k\">kk</div><div id=\"l\">ll</div><div id=\"m\">mm</div><div id=\"n\">nn</div><div id=\"o\">oo</div><div id=\"p\">pp</div><div id=\"q\">qq</div><div id=\"r\">rr</div><div id=\"s\">ss</div><div id=\"t\">tt</div><div id=\"u\">uu</div>"
+val PAGE: text = "<html><head><style>" + SHEET + "</style></head><body><div class=\"s\">" + BODY + "</div></body></html>"
+
+fn field(id: text, name: text) -> text:
+    simple_web_layout_debug_layout_by_id(PAGE, VW, VH, id, name)
+
+fn box(id: text) -> text:
+    field(id, "x") + "," + field(id, "y") + "," + field(id, "w") + "," + field(id, "h")
+
+describe "CSS comments in rule bodies match Chrome 159":
+    it "AC-1: a commented declaration run at the start of a body applies nothing":
+        step("Chrome 159: #a keeps auto width and its 24 px line")
+        expect(box("a")).to_equal("0,0,400,24")
+
+    it "AC-2: a commented run after a live declaration applies nothing":
+        expect(box("b")).to_equal("0,24,400,10")
+        step("Chrome 159: the live declaration after the comment still applies")
+        expect(box("c")).to_equal("0,34,50,12")
+
+    it "AC-3: a comment inside a value is whitespace":
+        expect(box("h")).to_equal("0,118,60,22")
+
+    it "AC-4: comments around and inside selectors stay inert":
+        step("Chrome 159: a whole commented rule does nothing")
+        expect(box("d")).to_equal("0,46,400,24")
+        step("Chrome 159: a comment before or inside a selector is whitespace")
+        expect(box("e")).to_equal("0,70,400,14")
+        expect(box("f")).to_equal("0,84,400,16")
+        expect(box("g")).to_equal("0,100,400,18")
+
+    it "AC-5: a comment opener inside a quoted string is string content":
+        step("Chrome 159: `\"x/*y\"` and `'a*/b/*'` do not open comments")
+        expect(box("i")).to_equal("0,140,400,26")
+        expect(box("j")).to_equal("0,166,400,28")
+        expect(box("k")).to_equal("0,194,400,30")
+        expect(box("l")).to_equal("0,224,400,32")
+
+    it "AC-6: escapes, unquoted url() and bad strings do not open comments":
+        step("Chrome 159: `\\\"` keeps the string open; `/*` after it is string content")
+        expect(box("m")).to_equal("0,256,400,34")
+        expect(box("n")).to_equal("0,290,400,36")
+        step("Chrome 159: `/*` inside an unquoted url( ... ) is part of the url")
+        expect(box("o")).to_equal("0,326,400,38")
+        expect(box("p")).to_equal("0,364,400,40")
+        step("Chrome 159: an unescaped newline ends a bad string; the next declaration applies")
+        expect(box("q")).to_equal("0,404,400,42")
+        expect(box("r")).to_equal("0,446,400,44")
+        expect(box("s")).to_equal("0,490,400,46")
+        step("Chrome 159: `\"\\\"\"` is one string")
+        expect(box("t")).to_equal("0,536,400,48")
+        expect(box("u")).to_equal("0,584,400,50")
+
+# Review follow-up (Chrome 159.0.8154.6 headless, 900x2000, same body font,
+# a 400x900 `position:relative;overflow:hidden` slot, `x,y,w,h`):
+# v `#v{font-family:"a\"/*b*/";/* x;width:40px */height:52px}` -> 0,98,400,52
+# w `#w{background:url(//x/*y.png);height:54px}/* c3 */` -> 0,150,400,54
+# x `#x{height:56px}` -> 0,204,400,56
+# y `#y{font-family:"x` newline `/* z;width:40px */;height:58px}` -> 0,260,400,58
+# z `#z{height:60px}` -> 0,318,400,60
+val SHEET2: text = "body{{margin:0;font:16px/1.5 sans-serif}}.s{{position:relative;width:400px;height:900px;overflow:hidden}}\n" + "#t{{content:\"\\\"\";height:48px}}/* q */\n#u{{height:50px}}\n" + "#v{{font-family:\"a\\\"/*b*/\";/* x;width:40px */height:52px}}\n" + "#w{{background:url(//x/*y.png);height:54px}}/* c3 */\n#x{{height:56px}}\n" + "#y{{font-family:\"x\n/* z;width:40px */;height:58px}}\n#z{{height:60px}}\n"
+val PAGE2: text = "<html><head><style>" + SHEET2 + "</style></head><body><div class=\"s\"><div id=\"t\">tt</div><div id=\"u\">uu</div><div id=\"v\">vv</div><div id=\"w\">ww</div><div id=\"x\">xx</div><div id=\"y\">yy</div><div id=\"z\">zz</div></div></body></html>"
+
+fn field2(id: text, name: text) -> text:
+    simple_web_layout_debug_layout_by_id(PAGE2, VW, VH, id, name)
+
+fn box2(id: text) -> text:
+    field2(id, "x") + "," + field2(id, "y") + "," + field2(id, "w") + "," + field2(id, "h")
+
+describe "CSS comment stripping edge cases match Chrome 159":
+    it "AC-7: an escaped quote keeps a full `/* */` inside the string":
+        expect(box2("v")).to_equal("0,98,400,52")
+
+    it "AC-8: an unquoted url( ... ) with `//` and `/*` is url content; a later comment still strips":
+        expect(box2("w")).to_equal("0,150,400,54")
+        expect(box2("x")).to_equal("0,204,400,56")
+
+    it "AC-9: a bad string ends at its newline, so the next `/* */` is a comment":
+        expect(box2("y")).to_equal("0,260,400,58")
+        expect(box2("z")).to_equal("0,318,400,60")

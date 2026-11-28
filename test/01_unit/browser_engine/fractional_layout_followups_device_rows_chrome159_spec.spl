@@ -1,0 +1,214 @@
+"""
+## Purpose and audience
+Purpose: Pin the seven fractional-layout follow-ups of
+`web_render_fractional_layout_followups_2026-11-28` against Chrome 159 at
+k=4 and k=1. Four already matched at base 2bc96bcf7de and are pinned as
+controls; three were open:
+- a `clear` block that is the first in-flow child of a box with no top
+  border / padding never rendered: the clearance code read `Style` fields
+  (`contain_layout`, `contain_paint`) that do not exist, so the render
+  stopped with a semantic error;
+- a whole-px svg whose viewBox puts a shape edge between CSS px
+  (`min-height:17px` on a 3:1 viewBox) rounded the edge out instead of
+  filling the covered px and blending the partly covered ones (k=1 had no
+  edge blend at all);
+- `<br clear>` was not mapped to `clear` (HTML UA sheet), and a cleared
+  line started on the float's whole-px bottom instead of its exact bottom.
+Audience: browser-engine layout and replaced-element paint maintainers.
+
+Chrome oracle: Chrome for Testing 159.0.8154.6, `--headless=new --disable-gpu
+--hide-scrollbars --force-device-scale-factor=K --window-size=400,300`,
+Liberation Sans 16px/1.5. Device rows / columns whose pixel is exactly the
+colour; `ink` is the rows in a column range whose pixel differs from the
+background. Values are device px.
+
+| item | case | what | Chrome k=4 | Chrome k=1 |
+|------|------|------|------------|------------|
+| 7 | inline-block `middle` 40x20 (control) | box rows | 13..92 | 3..22 |
+| 7 | `xy` in a `middle` inline-block | box rows / text ink | 245..340 / 281..328 | 61..84 / 69..80 |
+| 1 | `ab` beside svg 40x41 `top` | svg rows / `ab` ink | 480..643 / 503..550 | 120..160 / 125..136 |
+| 2 | inline-block 20x12.5 below the strut | box rows | 740..789 | 185..196 |
+| 6 | svg `width:40.5px;max-width:40px` | rect cols | 89..248 | 22..61 |
+| 3 | float 30.75, `clear:both;margin-top:40.5px` first child | clear rows / float rows | 123..162 / 0..122 | 31..40 / 0..30 |
+| 3 | same, parent `border-top:1px` (control) | clear rows | 566..605 | 142..151 |
+| 3 | same, parent `overflow:hidden` (control) | clear rows | 962..999 | 241..249 |
+| 4 | `width=50 viewBox="0 0 3 1"` | rect rows | 3..68 | 0..15 |
+| 4 | same with `min-height:17px` | rect rows / edge px | 283..348 / eaaaea at 282, 349 | 71..85 / fa2afa at 70, 86 |
+| 4 | `width=16 viewBox="0 0 24 24"`, `rect x=3.4 rx=2` (opaque, then `rgba(255,0,255,0.5)`) | edge px x=9 / x=2 | fd11fd / ef87ef | f744f7 / eba1eb |
+| 5 | float 30.75 then `<br clear="all">` | `cd` bg rows | 695..766 | 174..190 |
+| 5 | float in an open line, then a `clear:both` block | block rows / line ink | 963..1002 / 863..936 | 241..250 / 215..234 |
+"""
+
+"""
+Traceability: REQ-WEB-FRACTIONAL-LAYOUT-FOLLOWUPS-001 — clearance, `<br clear>`, vertical-align boxes and viewBox-scaled svg shapes keep their sub-pixel geometry on Chrome 159's device rows at k=1 and k=4.
+"""
+# @tag: unit, browser_engine, device_scale, layout, svg, float, chrome159
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale
+}
+
+val CSS_W: i32 = 400
+val CSS_H: i32 = 300
+
+val PAGE_1: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>body{{margin:0;background:#fff;font:16px/1.5 'Liberation Sans';color:#172033}}.b{{height:60px}}</style></head><body><div class=\"b\"><div style=\"background:#e0e0ff\">ab <span style=\"display:inline-block;width:40px;height:20px;background:#0000ff;vertical-align:middle\"></span> cd</div></div><div class=\"b\"><div style=\"background:#e0ffe0\">ab <span style=\"display:inline-block;vertical-align:middle;background:#ffff00;padding:0 4px\">xy</span> cd</div></div><div class=\"b\"><div style=\"background:#ffe0e0\">ab <svg width=\"40\" height=\"41\" style=\"vertical-align:top\"><rect width=\"40\" height=\"41\" fill=\"#00ff00\"></rect></svg> cd</div></div><div class=\"b\"><div style=\"background:#e0ffff\">ab <span style=\"display:inline-block;width:20px;height:12.5px;background:#ff0000\"></span> cd</div></div><div class=\"b\"><div style=\"background:#ffffe0\">ab <svg width=\"40.5\" style=\"width:40.5px;max-width:40px;height:10px\"><rect width=\"100\" height=\"100\" fill=\"#ff00ff\"></rect></svg> cd</div></div></body></html>"
+val PAGE_3: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>body{{margin:0;background:#fff;font:16px/1.5 'Liberation Sans';color:#172033}}.b{{height:100px}}</style></head><body><div class=\"b\"><div style=\"height:50px;background:#e0e0ff\"><div style=\"float:left;width:20px;height:30.75px;background:#ff0000\"></div><div style=\"clear:both;margin-top:40.5px;height:10px;background:#0000ff\"></div></div></div><div class=\"b\"><div style=\"height:50px;background:#e0ffe0;border-top:1px solid #000\"><div style=\"float:left;width:20px;height:30.75px;background:#ff0000\"></div><div style=\"clear:both;margin-top:40.5px;height:10px;background:#0000ff\"></div></div></div><div class=\"b\"><div style=\"height:50px;background:#ffe0e0;overflow:hidden\"><div style=\"float:left;width:20px;height:30.75px;background:#ff0000\"></div><div style=\"clear:both;margin-top:40.5px;height:10px;background:#0000ff\"></div></div></div></body></html>"
+val PAGE_4: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>body{{margin:0;background:#fff;font:16px/1.5 'Liberation Sans';color:#172033}}.b{{height:70px}}</style></head><body><div class=\"b\"><div style=\"background:#e0e0ff\">ab <svg width=\"50\" viewBox=\"0 0 3 1\"><rect width=\"3\" height=\"1\" fill=\"#ff00ff\"></rect></svg> cd</div></div><div class=\"b\"><div style=\"background:#e0ffe0\">ab <svg width=\"50\" viewBox=\"0 0 3 1\" style=\"min-height:17px\"><rect width=\"3\" height=\"1\" fill=\"#ff00ff\"></rect></svg> cd</div></div><div class=\"b\"><div style=\"background:#ffe0e0\"><div style=\"float:left;width:20px;height:30.75px;background:#ff0000\"></div>ab<br clear=\"all\"><span style=\"background:#0000ff\">cd</span></div></div><div class=\"b\"><div style=\"background:#e0ffff\">ab <span style=\"float:left;width:20px;height:30.75px;background:#ff0000\"></span>cd</div><div style=\"clear:both;height:10px;background:#0000ff\"></div></div></body></html>"
+val PAGE_6: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>body{{margin:0;background:#fff;font:16px/1.5 'Liberation Sans';color:#172033}}.b{{height:70px}}</style></head><body><div class=\"b\"><div style=\"background:#e0ffe0\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 24 24\"><rect x=\"3.4\" y=\"3\" width=\"18\" height=\"18\" rx=\"2\" fill=\"#ff00ff\"></rect></svg></div></div><div class=\"b\"><div style=\"background:#e0ffe0\"><svg width=\"16\" height=\"16\" viewBox=\"0 0 24 24\"><rect x=\"3.4\" y=\"3\" width=\"18\" height=\"18\" fill=\"rgba(255,0,255,0.5)\"></rect></svg></div></div></body></html>"
+
+var g_px: [[u32]] = [[], [], [], [], [], [], [], []]
+
+fn _slot(page: i32, k: i32) -> i32:
+    val base = if page == 1: 0 elif page == 3: 2 elif page == 4: 4 else: 6
+    if k == 4: base else: base + 1
+
+fn _px(page: i32, k: i32) -> [u32]:
+    val s = _slot(page, k)
+    if g_px[s].len() == 0:
+        val html = if page == 1: PAGE_1 elif page == 3: PAGE_3 elif page == 4: PAGE_4 else: PAGE_6
+        g_px[s] = simple_web_layout_render_html_pixels_engine2d_at_device_scale(html, CSS_W, CSS_H, k, "cpu_simd")
+    g_px[s]
+
+# "first..last" rows in [y0, y1] on device column x whose pixel is exactly rgb.
+fn rows(page: i32, k: i32, x: i32, y0: i32, y1: i32, rgb: u32) -> text:
+    val px = _px(page, k)
+    val w = CSS_W * k
+    var first = -1
+    var last = -1
+    var y = y0
+    while y <= y1:
+        if (px[y * w + x] & 0xFFFFFFu32) == rgb:
+            if first < 0:
+                first = y
+            last = y
+        y = y + 1
+    "{first}..{last}"
+
+# "first..last" columns on device row y whose pixel is exactly rgb.
+fn cols(page: i32, k: i32, y: i32, rgb: u32) -> text:
+    val px = _px(page, k)
+    val w = CSS_W * k
+    var first = -1
+    var last = -1
+    var x = 0
+    while x < w:
+        if (px[y * w + x] & 0xFFFFFFu32) == rgb:
+            if first < 0:
+                first = x
+            last = x
+        x = x + 1
+    "{first}..{last}"
+
+# "first..last" rows in [y0, y1] where some pixel in columns [x0, x1] is not bg.
+fn ink(page: i32, k: i32, x0: i32, x1: i32, y0: i32, y1: i32, bg: u32) -> text:
+    val px = _px(page, k)
+    val w = CSS_W * k
+    var first = -1
+    var last = -1
+    var y = y0
+    while y <= y1:
+        var x = x0
+        var hit = false
+        while x <= x1 and not hit:
+            hit = (px[y * w + x] & 0xFFFFFFu32) != bg
+            x = x + 1
+        if hit:
+            if first < 0:
+                first = y
+            last = y
+        y = y + 1
+    "{first}..{last}"
+
+# True when every channel of the pixel is within 2 of rgb.
+fn near(page: i32, k: i32, x: i32, y: i32, rgb: u32) -> bool:
+    val p = _px(page, k)[y * CSS_W * k + x]
+    var ok = true
+    var shift = 0
+    while shift <= 16:
+        val a = ((p >> shift.to_u32()) & 0xFFu32) as i32
+        val b = ((rgb >> shift.to_u32()) & 0xFFu32) as i32
+        if a - b > 2 or b - a > 2:
+            ok = false
+        shift = shift + 8
+    ok
+
+# True when the pixel is nearer (sum of channel distances) to fill than to bg,
+# the side Chrome's blend of a more-than-half covered edge px falls on.
+fn nearer_fill(page: i32, k: i32, x: i32, y: i32, fill: u32, bg: u32) -> bool:
+    val p = _px(page, k)[y * CSS_W * k + x]
+    var d_fill = 0
+    var d_bg = 0
+    var shift = 0
+    while shift <= 16:
+        val a = ((p >> shift.to_u32()) & 0xFFu32) as i32
+        val f = ((fill >> shift.to_u32()) & 0xFFu32) as i32
+        val b = ((bg >> shift.to_u32()) & 0xFFu32) as i32
+        d_fill = d_fill + (if a > f: a - f else: f - a)
+        d_bg = d_bg + (if a > b: a - b else: b - a)
+        shift = shift + 8
+    d_fill < d_bg
+
+describe "fractional layout follow-ups match Chrome 159":
+    it "items 7, 1: text on a middle / top line sits on Chrome's device rows":
+        step("k=4")
+        expect(rows(1, 4, 150, 0, 239, 0x0000FFu32)).to_equal("13..92")
+        expect(rows(1, 4, 120, 240, 479, 0xFFFF00u32)).to_equal("245..340")
+        expect(ink(1, 4, 106, 167, 245, 340, 0xFFFF00u32)).to_equal("281..328")
+        expect(rows(1, 4, 200, 480, 719, 0x00FF00u32)).to_equal("480..643")
+        expect(ink(1, 4, 0, 60, 480, 643, 0xFFE0E0u32)).to_equal("503..550")
+        step("k=1")
+        expect(rows(1, 1, 37, 0, 59, 0x0000FFu32)).to_equal("3..22")
+        expect(rows(1, 1, 30, 60, 119, 0xFFFF00u32)).to_equal("61..84")
+        expect(ink(1, 1, 27, 41, 61, 84, 0xFFFF00u32)).to_equal("69..80")
+        expect(rows(1, 1, 50, 120, 179, 0x00FF00u32)).to_equal("120..160")
+        expect(ink(1, 1, 0, 15, 120, 160, 0xFFE0E0u32)).to_equal("125..136")
+
+    it "items 2, 6: a half-px box below the strut and a clamped svg width":
+        expect(rows(1, 4, 100, 720, 959, 0xFF0000u32)).to_equal("740..789")
+        expect(rows(1, 1, 25, 180, 239, 0xFF0000u32)).to_equal("185..196")
+        expect(cols(1, 4, 1000, 0xFF00FFu32)).to_equal("89..248")
+        expect(cols(1, 1, 250, 0xFF00FFu32)).to_equal("22..61")
+
+    it "item 3: a clear block with a large top margin starts at the float's bottom":
+        step("k=4: first child of a box with no top border")
+        expect(rows(3, 4, 200, 0, 399, 0x0000FFu32)).to_equal("123..162")
+        expect(rows(3, 4, 20, 0, 399, 0xFF0000u32)).to_equal("0..122")
+        step("k=4 controls: bordered parent, overflow:hidden parent")
+        expect(rows(3, 4, 200, 400, 799, 0x0000FFu32)).to_equal("566..605")
+        expect(rows(3, 4, 200, 800, 1199, 0x0000FFu32)).to_equal("962..999")
+        step("k=1")
+        expect(rows(3, 1, 50, 0, 99, 0x0000FFu32)).to_equal("31..40")
+        expect(rows(3, 1, 5, 0, 99, 0xFF0000u32)).to_equal("0..30")
+        expect(rows(3, 1, 50, 100, 199, 0x0000FFu32)).to_equal("142..151")
+        expect(rows(3, 1, 50, 200, 299, 0x0000FFu32)).to_equal("241..249")
+
+    it "item 4: viewBox-scaled svg edges fill covered px and blend the rest":
+        step("k=4")
+        expect(rows(4, 4, 120, 0, 279, 0xFF00FFu32)).to_equal("3..68")
+        expect(rows(4, 4, 120, 280, 559, 0xFF00FFu32)).to_equal("283..348")
+        assert_true(near(4, 4, 120, 282, 0xEAAAEAu32))
+        assert_true(near(4, 4, 120, 349, 0xEAAAEAu32))
+        step("k=1")
+        expect(rows(4, 1, 30, 0, 69, 0xFF00FFu32)).to_equal("0..15")
+        expect(rows(4, 1, 30, 70, 139, 0xFF00FFu32)).to_equal("71..85")
+        assert_true(near(4, 1, 30, 70, 0xFA2AFAu32))
+        assert_true(near(4, 1, 30, 86, 0xFA2AFAu32))
+
+    it "item 5: br clear and a float in an open line keep the float's exact bottom":
+        step("k=4")
+        expect(rows(4, 4, 16, 560, 839, 0x0000FFu32)).to_equal("695..766")
+        expect(rows(4, 4, 1200, 840, 1119, 0x0000FFu32)).to_equal("963..1002")
+        expect(ink(4, 4, 88, 240, 840, 936, 0xE0FFFFu32)).to_equal("863..936")
+        step("k=1")
+        expect(rows(4, 1, 4, 140, 209, 0x0000FFu32)).to_equal("174..190")
+        expect(rows(4, 1, 300, 210, 279, 0x0000FFu32)).to_equal("241..250")
+        expect(ink(4, 1, 22, 60, 210, 234, 0xE0FFFFu32)).to_equal("215..234")
+
+    it "item 4: a rounded or translucent rect keeps its partly covered edge px":
+        step("Chrome 159 `rect x=3.4 rx=2` in `width=16 viewBox=\"0 0 24 24\"`: k=1 col 2 is f744f7, k=4 col 9 is fd11fd")
+        assert_true(nearer_fill(6, 1, 2, 8, 0xFF00FFu32, 0xE0FFE0u32))
+        assert_true(nearer_fill(6, 4, 9, 32, 0xFF00FFu32, 0xE0FFE0u32))
+        step("Chrome 159 the same rect with `rgba(255,0,255,0.5)`: k=1 col 2 is eba1eb, k=4 col 9 is ef87ef")
+        assert_true(nearer_fill(6, 1, 2, 78, 0xF07FF0u32, 0xE0FFE0u32))
+        assert_true(nearer_fill(6, 4, 9, 312, 0xF07FF0u32, 0xE0FFE0u32))
