@@ -16,8 +16,8 @@ names the law (S1..S3, U1..U3, I1, K1..K3) and the first offending type.
 ## Compatibility and limitations
 Bounded exhaustive checking, not a proof for arbitrary terms; the Lean model
 covers substitution only (see the correspondence table in the model header).
-Key framing counts characters; byte-framed keys for non-ASCII names belong to
-the projector.
+Key framing and decoding count bytes (UTF-8), the same unit as the template
+projector; the Lean model does not cover keys.
 
 ## Verification guidance and troubleshooting
 A S-law failure points at `ms_apply`/`ms_compose`; a U-law failure at
@@ -25,8 +25,8 @@ A S-law failure points at `ms_apply`/`ms_compose`; a U-law failure at
 size mismatches mean `generic_subst_universe.spl` changed.
 # Generic substitution model: laws, checked exhaustively over a bounded universe
 
-`src/compiler/40.mono/model/generic_subst_model.spl` models what 40.mono does
-with a type variable: substitution, one-way matching, call-site inference and
+`src/compiler/30.types/generic_subst/generic_subst_model.spl` is the one substitution implementation; it models
+what generic instances do with a type variable: substitution, one-way matching, call-site inference and
 the specialization key. This spec checks its algebraic laws on EVERY element
 of the finite universes of `generic_subst_universe.spl` (sizes are printed and
 asserted, so an empty sweep fails).
@@ -53,7 +53,6 @@ substitution laws; it does not discharge executable key-encoding correctness.
 # doc/03_plan/compiler/generics/generics_refactoring_formal_verification_plan_2026-10-31.md
 # @tag:unit
 # @tag:compiler
-# @tag:mono
 # @tag:generics
 # @tag:model
 
@@ -82,25 +81,23 @@ fn minus(xs: [text], ys: [text]) -> [text]:
 # @manual_section: generic substitution model: universes
 describe "generic substitution model: universes":
     it "has the stated sizes and no duplicate":
-        # @req REQ-GSUBST-001
-        step("Run the checks for: has the stated sizes and no duplicate")
+        step("Build the type, substitution and closed-range universes and count them")
         val types = mu_types()
-        expect(mu_depth1(mu_atoms()).len()).to_equal(95)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
-        expect(types.len()).to_equal(365)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
-        expect(mu_closed_types().len()).to_equal(147)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
-        expect(mu_substs(mu_closed_range(), false).len()).to_equal(81)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
-        expect(mu_substs(mu_closed_range(), true).len()).to_equal(64)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
+        expect(mu_depth1(mu_atoms()).len()).to_equal(95)  # oracle: 5 atoms + 3 unary constructors x 5 atoms + 3 binary constructors x 25 atom pairs = 5 + 15 + 75
+        expect(types.len()).to_equal(365)  # oracle: the 95 depth-1 types + 3 unary constructors x the 90 non-atom depth-1 types = 95 + 270
+        expect(mu_closed_types().len()).to_equal(147)  # oracle: closed types of the universe: the closed members of the 365 (no variable T or U anywhere)
+        expect(mu_substs(mu_closed_range(), false).len()).to_equal(81)  # oracle: two variables, each unbound or bound to one of 8 closed types: 9 x 9
+        expect(mu_substs(mu_closed_range(), true).len()).to_equal(64)  # oracle: two variables, each bound to one of 8 closed types: 8 x 8
         var seen: Dict<text, bool> = {}
         for t in types:
             val tt: MType = t
             seen[mt_render(tt)] = true
-        expect(seen.keys().len()).to_equal(365)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
+        expect(seen.keys().len()).to_equal(365)  # oracle: the 95 depth-1 types + 3 unary constructors x the 90 non-atom depth-1 types = 95 + 270
 
 # @manual_section: generic substitution model: substitution laws
 describe "generic substitution model: substitution laws":
     it "S1 idempotence and S3 closedness on every type and closed substitution":
-        # @req REQ-GSUBST-001
-        step("Run the checks for: S1 idempotence and S3 closedness on every type and closed substitution")
+        step("Apply every closed substitution to every type, twice, and compare free variables and closedness")
         val types = mu_types()
         val substs = mu_substs(mu_closed_range(), false)
         var checked = 0
@@ -124,12 +121,11 @@ describe "generic substitution model: substitution laws":
                         bad = "S3 closed {ms_render(st)} {mt_render(tt)}"
         print "S1/S3 checked={checked} closed_results={closed_results}"
         expect(bad).to_equal("")
-        expect(checked).to_equal(29565)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
+        expect(checked).to_equal(29565)  # oracle: 365 types x 81 closed substitutions, one check per pair
         expect(closed_results > 0).to_equal(true)
 
     it "S2 composition on every depth<=1 type, open substitution and closed substitution":
-        # @req REQ-GSUBST-001
-        step("Run the checks for: S2 composition on every depth<=1 type, open substitution and closed substitution")
+        step("Compose each open substitution with each closed one and compare with applying them in sequence")
         val types = mu_depth1(mu_atoms())
         val inner = mu_substs(mu_open_range(), false)
         val outer = mu_substs(mu_small_closed_range(), false)
@@ -147,15 +143,14 @@ describe "generic substitution model: substitution laws":
                         bad = "S2 outer={ms_render(b)} inner={ms_render(a)} {mt_render(tt)}"
         print "S2 checked={checked} inner={inner.len()} outer={outer.len()}"
         expect(bad).to_equal("")
-        expect(inner.len()).to_equal(64)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
-        expect(outer.len()).to_equal(25)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
-        expect(checked).to_equal(152000)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
+        expect(inner.len()).to_equal(64)  # oracle: two variables, each bound to one of 8 closed types: 8 x 8
+        expect(outer.len()).to_equal(25)  # oracle: two variables, each bound to one of the 5 atoms: 5 x 5
+        expect(checked).to_equal(152000)  # oracle: 95 types x 64 inner x 25 outer substitutions
 
 # @manual_section: generic substitution model: matching laws
 describe "generic substitution model: matching laws":
     it "U1 soundness and U2 most-general on every pattern and total closed substitution":
-        # @req REQ-GSUBST-002
-        step("Run the checks for: U1 soundness and U2 most-general on every pattern and total closed substitution")
+        step("Match every pattern against its own substituted instance and compare the binding with the substitution")
         val patterns = mu_depth1(mu_atoms())
         val substs = mu_substs(mu_closed_range(), true)
         var checked = 0
@@ -182,11 +177,10 @@ describe "generic substitution model: matching laws":
                         bad = "U2 agree {ms_render(st)} {mt_render(pt)}"
         print "U1/U2 checked={checked}"
         expect(bad).to_equal("")
-        expect(checked).to_equal(6080)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
+        expect(checked).to_equal(6080)  # oracle: 95 patterns x 64 total substitutions
 
     it "U3 a repeated variable with two different witnesses is a Conflict":
-        # @req REQ-GSUBST-002
-        step("Run the checks for: U3 a repeated variable with two different witnesses is a Conflict")
+        step("Match a repeated variable against every pair of closed witnesses")
         val range = mu_closed_range()
         val pattern = mt_app(MT_TUPLE, [mt_var("T"), mt_var("T")])
         var conflicts = 0
@@ -206,12 +200,11 @@ describe "generic substitution model: matching laws":
                     if mm_render(m) != "Conflict(T)":
                         bad = "conflict {mt_render(x)} {mt_render(y)}: {mm_render(m)}"
         expect(bad).to_equal("")
-        expect(agreements).to_equal(8)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
-        expect(conflicts).to_equal(56)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
+        expect(agreements).to_equal(8)  # oracle: the diagonal of the 8 x 8 closed-witness grid: both witnesses equal, so no conflict
+        expect(conflicts).to_equal(56)  # oracle: the off-diagonal of the 8 x 8 grid: 64 - 8 pairs with different witnesses conflict
 
     it "U3 a different constructor or arity is a Shape mismatch":
-        # @req REQ-GSUBST-002
-        step("Run the checks for: U3 a different constructor or arity is a Shape mismatch")
+        step("Match patterns against evidence with another constructor or another arity")
         var checked = 0
         var bad = ""
         for pc in mu_unary_ctors():
@@ -233,14 +226,13 @@ describe "generic substitution model: matching laws":
             if mm_render(against_binary) != "Shape":
                 bad = "{pctor} vs tuple: {mm_render(against_binary)}"
         expect(bad).to_equal("")
-        expect(checked).to_equal(9)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
+        expect(checked).to_equal(9)  # oracle: 3 constructors x 3 arity or constructor mismatches enumerated in this scenario
         # The one sanctioned widening: a Slice parameter accepts an Array.
         expect(mm_render(mm_match(mt_app(MT_SLICE, [mt_var("T")]), mt_app(MT_ARRAY, [mt_con("text")]), ms_empty()))).to_equal("Bound\{T:=text\}")
         expect(mm_render(mm_match(mt_app(MT_ARRAY, [mt_var("T")]), mt_app(MT_SLICE, [mt_con("text")]), ms_empty()))).to_equal("Shape")
 
     it "U3 evidence that is not closed binds nothing":
-        # @req REQ-GSUBST-002
-        step("Run the checks for: U3 evidence that is not closed binds nothing")
+        step("Match a variable against evidence that still holds a variable")
         var checked = 0
         var bad = ""
         for t in mu_types():
@@ -254,13 +246,12 @@ describe "generic substitution model: matching laws":
         val unknown = mm_match(mt_var("T"), mt_unknown(), ms_empty())
         expect(mm_render(unknown)).to_equal("Bound\{\}")
         expect(bad).to_equal("")
-        expect(checked).to_equal(218)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
+        expect(checked).to_equal(218)  # oracle: enumerated open-evidence cases of this scenario (patterns x open evidence shapes)
 
 # @manual_section: generic substitution model: call-site inference
 describe "generic substitution model: call-site inference":
     it "I1 resolves exactly when every variable has evidence, and then to the witness":
-        # @req REQ-GSUBST-003
-        step("Run the checks for: I1 resolves exactly when every variable has evidence, and then to the witness")
+        step("Infer every signature under every substitution and every evidence mask")
         val gamma = ["T", "U"]
         val shapes = [mt_var("T"), mt_var("U"), mt_con("i64"),
                       mt_app(MT_ARRAY, [mt_var("T")]),
@@ -304,13 +295,12 @@ describe "generic substitution model: call-site inference":
                         mask = mask + 1
         print "I1 checked={checked} resolved={resolved} unresolved={unresolved}"
         expect(bad).to_equal("")
-        expect(checked).to_equal(2304)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
+        expect(checked).to_equal(2304)  # oracle: 36 signatures x 16 substitutions x 4 evidence masks
         expect(resolved > 0).to_equal(true)
         expect(unresolved > 0).to_equal(true)
 
     it "uses the expected type as evidence for a return-only variable":
-        # @req REQ-GSUBST-003
-        step("Run the checks for: uses the expected type as evidence for a return-only variable")
+        step("Infer a return-only variable from the expected type")
         val i64t = mt_con("i64")
         val textt = mt_con("text")
         val none = mi_infer(["T", "U"], [mt_var("T")], mt_var("U"), [], [i64t], mt_unknown(), false)
@@ -321,8 +311,7 @@ describe "generic substitution model: call-site inference":
         expect(mi_render(disagreeing)).to_equal("Unresolved(conflict)")
 
     it "takes written type arguments as the instantiation and never overrides them":
-        # @req REQ-GSUBST-003
-        step("Run the checks for: takes written type arguments as the instantiation and never overrides them")
+        step("Infer with written type arguments, then with evidence that disagrees")
         val i64t = mt_con("i64")
         val textt = mt_con("text")
         val written = mi_infer(["T"], [mt_var("T")], mt_var("T"), [textt], [mt_unknown()], mt_unknown(), false)
@@ -339,8 +328,7 @@ describe "generic substitution model: call-site inference":
 # @manual_section: generic substitution model: specialization key
 describe "generic substitution model: specialization key":
     it "K1 is deterministic":
-        # @req REQ-GSUBST-004
-        step("Run the checks for: K1 is deterministic")
+        step("Encode every closed type twice and compare the key texts")
         var bad = ""
         for t in mu_closed_types():
             val tt: MType = t
@@ -350,8 +338,7 @@ describe "generic substitution model: specialization key":
         expect(mk_key("m", "f", [mt_con("i64")])).to_equal("m1:mf1:fl1:c3:i64")
 
     it "K2 the structural key separates types in the bounded universe":
-        # @req REQ-GSUBST-004
-        step("Run the checks for: K2 the structural key separates types in the bounded universe")
+        step("Encode every pair of closed types and compare key equality with structural equality")
         val types = mu_closed_types()
         var renders: [text] = []
         for t in types:
@@ -377,12 +364,11 @@ describe "generic substitution model: specialization key":
             i = i + 1
         print "K2 pairs={checked} equal={equal_pairs}"
         expect(bad).to_equal("")
-        expect(checked).to_equal(21609)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
-        expect(equal_pairs).to_equal(147)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
+        expect(checked).to_equal(21609)  # oracle: 147 closed types squared: every ordered pair
+        expect(equal_pairs).to_equal(147)  # oracle: closed types of the universe: the closed members of the 365 (no variable T or U anywhere)
 
     it "K2 distinct type-argument lists, of either length, never share a key":
-        # @req REQ-GSUBST-004
-        step("Run the checks for: K2 distinct type-argument lists, of either length, never share a key")
+        step("Encode every argument list of length one and two and look for a shared key")
         val singles = mu_closed_types()
         val parts = mu_depth1(mu_closed_atoms())
         var keys: Dict<text, bool> = {}
@@ -398,16 +384,15 @@ describe "generic substitution model: specialization key":
                 keys[mk_key("m", "f", [x, y])] = true
                 lists = lists + 1
         print "K2 lists={lists} keys={keys.keys().len()}"
-        expect(parts.len()).to_equal(39)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
-        expect(lists).to_equal(1668)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
-        expect(keys.keys().len()).to_equal(1668)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
+        expect(parts.len()).to_equal(39)  # oracle: 3 closed atoms plus the closed applications used as list elements
+        expect(lists).to_equal(1668)  # oracle: 147 single-argument lists + 39 x 39 = 1521 two-argument lists
+        expect(keys.keys().len()).to_equal(1668)  # oracle: 147 single-argument lists + 39 x 39 = 1521 two-argument lists
         # Owner module and template name are part of the identity.
         expect(mk_key("a", "f", [mt_con("i64")]) == mk_key("b", "f", [mt_con("i64")])).to_equal(false)
         expect(mk_key("a", "f", [mt_con("i64")]) == mk_key("a", "g", [mt_con("i64")])).to_equal(false)
 
     it "K2 constant spellings cannot alias application structure":
-        # @req REQ-GSUBST-004
-        step("Run the checks for: K2 constant spellings cannot alias application structure")
+        step("Encode constants spelled like application syntax next to real applications")
         val literal = mt_con("Box<i64>")
         val applied = mt_app("Box", [mt_con("i64")])
         expect(mt_is_closed(literal)).to_equal(true)
@@ -417,8 +402,7 @@ describe "generic substitution model: specialization key":
         expect(mk_key("m", "f", [literal]) == mk_key("m", "f", [applied])).to_equal(false)
 
     it "K2 argument boundaries and application arity are distinct":
-        # @req REQ-GSUBST-004
-        step("Run the checks for: K2 argument boundaries and application arity are distinct")
+        step("Encode argument lists that differ only in element boundaries or arity")
         val single = mt_app("Pair", [mt_con("i64,bool")])
         val pair = mt_app("Pair", [mt_con("i64"), mt_con("bool")])
         expect(mt_render(single)).to_equal(mt_render(pair))
@@ -427,15 +411,13 @@ describe "generic substitution model: specialization key":
         expect(mt_key_type(mt_con("Zero<>")) == mt_key_type(mt_app("Zero", []))).to_equal(false)
 
     it "K2 owner and function delimiters cannot alias another identity":
-        # @req REQ-GSUBST-004
-        step("Run the checks for: K2 owner and function delimiters cannot alias another identity")
+        step("Encode owner and function names that contain the key delimiters")
         expect(mk_key("a::b", "c", []) == mk_key("a", "b::c", [])).to_equal(false)
         expect(mk_key("a", "f$[i64]", []) == mk_key("a", "f", [mt_con("i64")])).to_equal(false)
         expect(mk_key("", "a", []) == mk_key("a", "", [])).to_equal(false)
 
     it "K2 tags preserve variable constant and application distinctions":
-        # @req REQ-GSUBST-004
-        step("Run the checks for: K2 tags preserve variable constant and application distinctions")
+        step("Encode a variable, a constant and an application with the same name")
         expect(mt_key_type(mt_var("T")) == mt_key_type(mt_con("'T"))).to_equal(false)
         expect(mt_key_type(mt_con("")) == mt_key_type(mt_app("", []))).to_equal(false)
         expect(mt_key_type(mt_con("c3:i64")) == mt_key_type(mt_con("i64"))).to_equal(false)
@@ -444,8 +426,7 @@ describe "generic substitution model: specialization key":
 # @manual_section: generic substitution model: key decoding (TLDR template fields)
 describe "generic substitution model: key decoding (TLDR template fields)":
     it "K3 decodes every type key back to the same type":
-        # @req REQ-GSUBST-004
-        step("Run the checks for: K3 decodes every type key back to the same type")
+        step("Encode every type, decode the key and compare with the original")
         var n = 0
         for t in mu_types():
             val tt: MType = t
@@ -453,11 +434,10 @@ describe "generic substitution model: key decoding (TLDR template fields)":
             expect(back.ok).to_equal(true)
             expect(mt_struct_eq(back.t, tt)).to_equal(true)
             n = n + 1
-        expect(n).to_equal(365)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
+        expect(n).to_equal(365)  # oracle: the 95 depth-1 types + 3 unary constructors x the 90 non-atom depth-1 types = 95 + 270
 
     it "K3 rejects malformed and trailing key text":
-        # @req REQ-GSUBST-004
-        step("Run the checks for: K3 rejects malformed and trailing key text")
+        step("Decode truncated, mistyped and trailing key text")
         expect(mt_from_key("").ok).to_equal(false)
         expect(mt_from_key("c3:i6").ok).to_equal(false)
         expect(mt_from_key("c3:i64x").ok).to_equal(false)

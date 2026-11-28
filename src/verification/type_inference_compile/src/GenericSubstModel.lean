@@ -1,4 +1,5 @@
 /-!
+-- Simple model: src/compiler/30.types/generic_subst/generic_subst_model.spl; the correspondence table is in its header.
 Structural model of `src/compiler/30.types/generic_subst/generic_subst_model.spl`.
 This is a manual proof owner, not generated code. Production HIR refinement
 and executable Simple/Lean correspondence are separate obligations.
@@ -37,6 +38,7 @@ def compose (outer inner : Subst) : Subst := fun name =>
   | some t => some (apply outer t)
   | none => outer name
 
+-- Simple: ms_apply / ms_empty; spec "S0 the empty substitution is the identity" (lean_correspondence)
 theorem apply_empty (t : MType) : apply (fun _ => none) t = t := by
   cases t with
   | var name => simp [apply]
@@ -51,6 +53,7 @@ theorem apply_empty (t : MType) : apply (fun _ => none) t = t := by
     · exact List.map_id args
 termination_by sizeOf t
 
+-- Simple: ms_apply; law S3 closedness; spec "S1 idempotence and S3 closedness ..." (laws)
 theorem apply_closed (s : Subst) (t : MType) (h : Closed t) : apply s t = t := by
   cases t with
   | var name => simp [Closed] at h
@@ -66,6 +69,7 @@ theorem apply_closed (s : Subst) (t : MType) (h : Closed t) : apply s t = t := b
     · exact List.map_id args
 termination_by sizeOf t
 
+-- Simple: ms_compose / ms_apply; law S2; spec "S2 composition ..." (laws)
 theorem apply_compose (outer inner : Subst) (t : MType) :
     apply (compose outer inner) t = apply outer (apply inner t) := by
   cases t with
@@ -79,6 +83,7 @@ theorem apply_compose (outer inner : Subst) (t : MType) :
     exact apply_compose outer inner a
 termination_by sizeOf t
 
+-- Simple: ms_apply; law S1; spec "S1 idempotence and S3 closedness ..." (laws)
 theorem apply_idempotent (s : Subst) (h : ClosedRange s) (t : MType) :
     apply s (apply s t) = apply s t := by
   cases t with
@@ -95,6 +100,7 @@ theorem apply_idempotent (s : Subst) (h : ClosedRange s) (t : MType) :
     exact apply_idempotent s h a
 termination_by sizeOf t
 
+-- Simple: ms_apply / ms_range_closed; law S3; spec "S1 idempotence and S3 closedness ..." (laws)
 theorem apply_supported_closed (s : Subst) (hr : ClosedRange s)
     (t : MType) (ht : Supported s t) : Closed (apply s t) := by
   cases t with
@@ -111,10 +117,14 @@ theorem apply_supported_closed (s : Subst) (hr : ClosedRange s)
     exact apply_supported_closed s hr a (ht a ha)
 termination_by sizeOf t
 
+-- Simple: mt_is_closed / mt_unknown; spec "unknown is never closed ..." (lean_correspondence)
 theorem unknown_not_closed : ¬ Closed unknown := by simp [Closed, unknown]
+-- Simple: ms_apply / mt_unknown; spec "unknown is never closed ..." (lean_correspondence)
 theorem unknown_fixed (s : Subst) : apply s unknown = unknown := by simp [apply, unknown]
+-- Simple: ms_apply App arm; spec "an application keeps its constructor and arity" (lean_correspondence)
 theorem app_owner_preserved (s : Subst) (ctor : String) (args : List MType) :
     apply s (.app ctor args) = .app ctor (args.map (apply s)) := by simp [apply]
+-- Simple: ms_apply App arm; spec "an application keeps its constructor and arity" (lean_correspondence)
 theorem app_arity_preserved (s : Subst) (args : List MType) :
     (args.map (apply s)).length = args.length := List.length_map _
 
@@ -124,11 +134,13 @@ def chain : Subst := fun name =>
   if name = "T" then some (.var "U")
   else if name = "U" then some (.con "i64") else none
 
+-- Simple: ms_apply / ms_range_closed; spec "an open range is not idempotent ..." (lean_correspondence)
 theorem open_range_not_idempotent :
     apply chain (apply chain (.var "T")) ≠ apply chain (.var "T") := by
   simp [apply, chain]
 
 /- Known constructor names do not make an unknown argument concrete. -/
+-- Simple: mt_is_closed; spec "unknown is never closed ..." (lean_correspondence)
 theorem nested_unknown_not_closed : ¬ Closed (.app "Tuple" [unknown]) := by
   simp [Closed, unknown]
 
