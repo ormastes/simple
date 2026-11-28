@@ -1,34 +1,50 @@
 """
 ## Purpose and audience
-Purpose: Handoff red spec. Pins three inline `<svg>` placement gaps against
-Chrome 159 at k=4 that the svg-offset lane measured and did not fix:
-a viewBox-derived height is rounded to whole CSS px (12.25 -> 12, 16.667 -> 17),
-fractional `width`/`height` attributes are truncated (40.5 x 20.3 -> 40 x 20),
-and `vertical-align: middle` sits one device row high. `top` and `bottom`
-already match and are pinned as controls.
-EXPECTED RED, tagged `@tag:in-development` (a whole-suite run skips and COUNTS
-it). Owner: replaced-element sizing / inline vertical-align (layout lane).
-Audience: web renderer replaced-element layout.
+Purpose: Pin that an inline `<svg>` keeps its fractional used size and its
+`vertical-align: middle` position against Chrome 159, at k=4 and k=1. Three
+gaps, measured by the svg-offset lane and fixed by the fractional-size layout
+lane: a viewBox-derived height was rounded to whole CSS px (12.25 -> 12,
+16.667 -> 17), fractional `width`/`height` attributes were truncated
+(40.5 x 20.3 -> 40 x 20; a CSS-sized svg lost the fraction at k>1 too), and a
+`vertical-align: middle` atomic (svg or inline-block) sat on the CSS-px row
+instead of the device row (1 row high for 40x20, 3 rows for 40x21).
+`top` and `bottom` already matched and are pinned as controls.
+Audience: web renderer replaced-element layout and inline vertical-align.
 
 Chrome oracle: Chrome for Testing 159.0.8154.6 aarch64, `--headless=new
---disable-gpu --hide-scrollbars --force-device-scale-factor=4`, window 400 CSS
-px wide, Liberation Sans 16px/1.5. Each case is its own 60px block (240 rows).
+--disable-gpu --hide-scrollbars --force-device-scale-factor=K`, window 400 CSS
+px wide, Liberation Sans 16px/1.5. Each case is its own 60px block (240 rows at
+k=4). Rows / columns are the device rows / columns whose pixel is exactly the
+colour; Chrome anti-aliases the far edges of the 3:1 case (row 789 and columns
+89 / 288 at k=4 are blends), so its exact-colour extent is one px short there.
 
-| case | what | Chrome | base d40623d3f59 |
-|------|------|--------|------------------|
-| `vertical-align:middle` 40x20 | rect rows | 13..92 | 12..91 |
-| `vertical-align:top` 40x41 (control) | rect rows | 240..403 | 240..403 |
-| `width=49 viewBox="0 0 4 1"` | rect rows / first col | 501..549 / 89 | 502..549 / 93 |
-| `width=50 viewBox="0 0 3 1"` | rect rows | 723..788 | 722..789 |
-| `width=40.5 height=20.3` | rect rows / cols / line bg | 960..1040 / 89..250 / 960..1066 | 960..1039 / 89..248 / 960..1065 |
-| `vertical-align:bottom` 40x20 (control) | rect rows | 1216..1295 | 1216..1295 |
+Page A:
+
+| case | what | Chrome k=4 | base k=4 | Chrome k=1 | base k=1 |
+|------|------|------------|----------|------------|----------|
+| `vertical-align:middle` 40x20 | rect rows | 13..92 | 12..91 | 3..22 | same |
+| `vertical-align:top` 40x41 (control) | rect rows | 240..403 | same | 60..100 | same |
+| `width=49 viewBox="0 0 4 1"` | rect rows / cols | 501..549 / 89..284 | 502..549 / 93..284 | 125..136 / 22..70 | 125..136 / 23..70 |
+| `width=50 viewBox="0 0 3 1"` | rect rows / cols | 723..788 / 90..287 | 722..789 / 89..288 | 180..195 / 23..70 | 180..196 / 22..71 |
+| `width=40.5 height=20.3` | rect rows / cols / line bg | 960..1040 / 89..250 / 960..1066 | 960..1039 / 89..248 / 960..1065 | 240..259 / 22..62 / 240..266 | 240..259 / 22..61 / 240..266 |
+| `vertical-align:bottom` 40x20 (control) | rect rows | 1216..1295 | same | 304..323 | same |
+
+Page B:
+
+| case | what | Chrome k=4 | base k=4 | Chrome k=1 | base k=1 |
+|------|------|------------|----------|------------|----------|
+| inline-block 40.5x20.3 (control) | box rows / cols / line bg | 0..80 / 89..250 / 0..106 | same | 0..19 / 22..62 / 0..26 | same |
+| svg `style="width:40.5px;height:20.3px"` | rect rows / cols / line bg | 240..320 / 89..250 / 240..346 | 240..319 / 89..248 / 240..345 | 60..79 / 22..62 / 60..86 | same |
+| inline-block 40x20 `middle` | box rows | 493..572 | 492..571 | 123..142 | same |
+| inline-block 40.5x20.3 `middle` | box rows / cols | 733..813 / 89..250 | 732..812 / 89..250 | 183..202 / 22..62 | same |
+| svg 40x21 `middle` | rect rows | 971..1054 | 968..1051 | 242..262 | same |
+| svg `width=40.5 height=20.3` `middle` | rect rows / cols | 1213..1293 / 89..250 | 1212..1291 / 89..248 | 303..322 / 22..62 | 303..322 / 22..61 |
 """
 
 """
 Traceability: REQ-WEB-SVG-FRACTIONAL-SIZE-001 — an inline svg keeps its fractional used size and its vertical-align position at device scale.
 """
 # @tag: unit, browser_engine, device_scale, layout, svg, chrome159
-# @tag:in-development
 # @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl 1%
 use std.spec.*
 use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
@@ -37,25 +53,42 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{
 
 val CSS_W: i32 = 400
 val CSS_H: i32 = 360
-val K: i32 = 4
 
-val PAGE: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>body{{margin:0;background:#fff;font:16px/1.5 'Liberation Sans';color:#172033}}.b{{height:60px}}</style></head><body><div class=\"b\"><div style=\"background:#ffe0e0\">ab <svg width=\"40\" height=\"20\" style=\"vertical-align:middle\"><rect width=\"40\" height=\"20\" fill=\"#ff0000\"></rect></svg> cd</div></div><div class=\"b\"><div style=\"background:#e0ffe0\">ab <svg width=\"40\" height=\"41\" style=\"vertical-align:top\"><rect width=\"40\" height=\"41\" fill=\"#00ff00\"></rect></svg> cd</div></div><div class=\"b\"><div style=\"background:#e0e0ff\">ab <svg width=\"49\" viewBox=\"0 0 4 1\"><rect width=\"4\" height=\"1\" fill=\"#0000ff\"></rect></svg> cd</div></div><div class=\"b\"><div style=\"background:#ffe0ff\">ab <svg width=\"50\" viewBox=\"0 0 3 1\"><rect width=\"3\" height=\"1\" fill=\"#ff00ff\"></rect></svg> cd</div></div><div class=\"b\"><div style=\"background:#e0ffff\">ab <svg width=\"40.5\" height=\"20.3\"><rect width=\"100\" height=\"100\" fill=\"#00c0c0\"></rect></svg> cd</div></div><div class=\"b\"><div style=\"background:#ffffe0\">ab <svg width=\"40\" height=\"20\" style=\"vertical-align:bottom\"><rect width=\"40\" height=\"20\" fill=\"#ffa000\"></rect></svg> cd</div></div></body></html>"
+val PAGE_A: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>body{{margin:0;background:#fff;font:16px/1.5 'Liberation Sans';color:#172033}}.b{{height:60px}}</style></head><body><div class=\"b\"><div style=\"background:#ffe0e0\">ab <svg width=\"40\" height=\"20\" style=\"vertical-align:middle\"><rect width=\"40\" height=\"20\" fill=\"#ff0000\"></rect></svg> cd</div></div><div class=\"b\"><div style=\"background:#e0ffe0\">ab <svg width=\"40\" height=\"41\" style=\"vertical-align:top\"><rect width=\"40\" height=\"41\" fill=\"#00ff00\"></rect></svg> cd</div></div><div class=\"b\"><div style=\"background:#e0e0ff\">ab <svg width=\"49\" viewBox=\"0 0 4 1\"><rect width=\"4\" height=\"1\" fill=\"#0000ff\"></rect></svg> cd</div></div><div class=\"b\"><div style=\"background:#ffe0ff\">ab <svg width=\"50\" viewBox=\"0 0 3 1\"><rect width=\"3\" height=\"1\" fill=\"#ff00ff\"></rect></svg> cd</div></div><div class=\"b\"><div style=\"background:#e0ffff\">ab <svg width=\"40.5\" height=\"20.3\"><rect width=\"100\" height=\"100\" fill=\"#00c0c0\"></rect></svg> cd</div></div><div class=\"b\"><div style=\"background:#ffffe0\">ab <svg width=\"40\" height=\"20\" style=\"vertical-align:bottom\"><rect width=\"40\" height=\"20\" fill=\"#ffa000\"></rect></svg> cd</div></div></body></html>"
 
-var g_px: [u32] = []
+val PAGE_B: text = "<!doctype html><html><head><meta charset=\"utf-8\"><style>body{{margin:0;background:#fff;font:16px/1.5 'Liberation Sans';color:#172033}}.b{{height:60px}}</style></head><body><div class=\"b\"><div style=\"background:#ffe0e0\">ab <span style=\"display:inline-block;width:40.5px;height:20.3px;background:#ff0000\"></span> cd</div></div><div class=\"b\"><div style=\"background:#e0ffe0\">ab <svg style=\"width:40.5px;height:20.3px\"><rect width=\"100\" height=\"100\" fill=\"#00ff00\"></rect></svg> cd</div></div><div class=\"b\"><div style=\"background:#e0e0ff\">ab <span style=\"display:inline-block;width:40px;height:20px;background:#0000ff;vertical-align:middle\"></span> cd</div></div><div class=\"b\"><div style=\"background:#ffe0ff\">ab <span style=\"display:inline-block;width:40.5px;height:20.3px;background:#ff00ff;vertical-align:middle\"></span> cd</div></div><div class=\"b\"><div style=\"background:#e0ffff\">ab <svg width=\"40\" height=\"21\" style=\"vertical-align:middle\"><rect width=\"100\" height=\"100\" fill=\"#00c0c0\"></rect></svg> cd</div></div><div class=\"b\"><div style=\"background:#ffffe0\">ab <svg width=\"40.5\" height=\"20.3\" style=\"vertical-align:middle\"><rect width=\"100\" height=\"100\" fill=\"#ffa000\"></rect></svg> cd</div></div></body></html>"
 
-fn _px() -> [u32]:
-    if g_px.len() == 0:
-        g_px = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE, CSS_W, CSS_H, K, "cpu_simd")
-    g_px
+var g_a4: [u32] = []
+var g_a1: [u32] = []
+var g_b4: [u32] = []
+var g_b1: [u32] = []
 
-# "first..last" device rows on column x whose pixel is exactly rgb.
-fn _rows(x: i32, rgb: u32) -> text:
-    val px = _px()
-    val w = CSS_W * K
+fn _px(page_b: bool, k: i32) -> [u32]:
+    if page_b:
+        if k == 4:
+            if g_b4.len() == 0:
+                g_b4 = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE_B, CSS_W, CSS_H, 4, "cpu_simd")
+            return g_b4
+        if g_b1.len() == 0:
+            g_b1 = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE_B, CSS_W, CSS_H, 1, "cpu_simd")
+        return g_b1
+    if k == 4:
+        if g_a4.len() == 0:
+            g_a4 = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE_A, CSS_W, CSS_H, 4, "cpu_simd")
+        return g_a4
+    if g_a1.len() == 0:
+        g_a1 = simple_web_layout_render_html_pixels_engine2d_at_device_scale(PAGE_A, CSS_W, CSS_H, 1, "cpu_simd")
+    g_a1
+
+# "first..last" device rows on CSS column css_x whose pixel is exactly rgb.
+fn _rows(page_b: bool, k: i32, css_x: i32, rgb: u32) -> text:
+    val px = _px(page_b, k)
+    val w = CSS_W * k
+    val x = css_x * k
     var first = -1
     var last = -1
     var y = 0
-    while y < CSS_H * K:
+    while y < CSS_H * k:
         if (px[y * w + x] & 0xFFFFFFu32) == rgb:
             if first < 0:
                 first = y
@@ -63,10 +96,11 @@ fn _rows(x: i32, rgb: u32) -> text:
         y = y + 1
     "{first}..{last}"
 
-# "first..last" device columns on row y whose pixel is exactly rgb.
-fn _cols(y: i32, rgb: u32) -> text:
-    val px = _px()
-    val w = CSS_W * K
+# "first..last" device columns on CSS row css_y whose pixel is exactly rgb.
+fn _cols(page_b: bool, k: i32, css_y: i32, rgb: u32) -> text:
+    val px = _px(page_b, k)
+    val w = CSS_W * k
+    val y = css_y * k
     var first = -1
     var last = -1
     var x = 0
@@ -78,23 +112,68 @@ fn _cols(y: i32, rgb: u32) -> text:
         x = x + 1
     "{first}..{last}"
 
-describe "An inline svg keeps its fractional size and middle alignment (Chrome 159, k=4)":
-    it "AC-1: vertical-align middle puts the 40x20 svg on device rows 13..92":
-        expect(_px().len()).to_equal((CSS_W * K * CSS_H * K) as i64)
-        expect(_rows(150, 0xFF0000u32)).to_equal("13..92")
+describe "An inline svg keeps its fractional size and middle alignment (Chrome 159, k=4 and k=1)":
+    it "AC-1: vertical-align middle puts the 40x20 svg on device rows 13..92 (k=1: 3..22)":
+        expect(_px(false, 4).len()).to_equal((CSS_W * 4 * CSS_H * 4) as i64)
+        expect(_rows(false, 4, 40, 0xFF0000u32)).to_equal("13..92")
+        expect(_rows(false, 4, 250, 0xFFE0E0u32)).to_equal("0..95")
+        expect(_rows(false, 1, 40, 0xFF0000u32)).to_equal("3..22")
+        expect(_rows(false, 1, 250, 0xFFE0E0u32)).to_equal("0..23")
 
     it "AC-2: vertical-align top and bottom stay on Chrome's rows (controls)":
-        expect(_rows(150, 0x00FF00u32)).to_equal("240..403")
-        expect(_rows(150, 0xFFA000u32)).to_equal("1216..1295")
+        expect(_rows(false, 4, 40, 0x00FF00u32)).to_equal("240..403")
+        expect(_rows(false, 4, 40, 0xFFA000u32)).to_equal("1216..1295")
+        expect(_rows(false, 1, 40, 0x00FF00u32)).to_equal("60..100")
+        expect(_rows(false, 1, 40, 0xFFA000u32)).to_equal("304..323")
 
     it "AC-3: width 49 with a 4:1 viewBox is 12.25 px high: 49 device rows from column 89":
-        expect(_rows(150, 0x0000FFu32)).to_equal("501..549")
-        expect(_cols(525, 0x0000FFu32)).to_equal("89..284")
+        expect(_rows(false, 4, 40, 0x0000FFu32)).to_equal("501..549")
+        expect(_cols(false, 4, 131, 0x0000FFu32)).to_equal("89..284")
+        expect(_rows(false, 4, 250, 0xE0E0FFu32)).to_equal("480..575")
+        expect(_rows(false, 1, 40, 0x0000FFu32)).to_equal("125..136")
+        expect(_cols(false, 1, 131, 0x0000FFu32)).to_equal("22..70")
 
-    it "AC-4: width 50 with a 3:1 viewBox is 16.667 px high: rows 723..788":
-        expect(_rows(150, 0xFF00FFu32)).to_equal("723..788")
+    it "AC-4: width 50 with a 3:1 viewBox is 16.656 px high: full rows 723..788, columns 90..287":
+        expect(_rows(false, 4, 40, 0xFF00FFu32)).to_equal("723..788")
+        expect(_cols(false, 4, 191, 0xFF00FFu32)).to_equal("90..287")
+        expect(_rows(false, 4, 250, 0xFFE0FFu32)).to_equal("720..815")
+        expect(_rows(false, 1, 40, 0xFF00FFu32)).to_equal("180..195")
+        expect(_cols(false, 1, 191, 0xFF00FFu32)).to_equal("23..70")
 
     it "AC-5: width 40.5 and height 20.3 keep their fractions: 162 x 81 device px and a 107-row line":
-        expect(_rows(150, 0x00C0C0u32)).to_equal("960..1040")
-        expect(_cols(1000, 0x00C0C0u32)).to_equal("89..250")
-        expect(_rows(1000, 0xE0FFFFu32)).to_equal("960..1066")
+        expect(_rows(false, 4, 40, 0x00C0C0u32)).to_equal("960..1040")
+        expect(_cols(false, 4, 250, 0x00C0C0u32)).to_equal("89..250")
+        expect(_rows(false, 4, 250, 0xE0FFFFu32)).to_equal("960..1066")
+        expect(_rows(false, 1, 40, 0x00C0C0u32)).to_equal("240..259")
+        expect(_cols(false, 1, 250, 0x00C0C0u32)).to_equal("22..62")
+        expect(_rows(false, 1, 250, 0xE0FFFFu32)).to_equal("240..266")
+
+    it "AC-6: a CSS-sized 40.5 x 20.3 svg paints the box an inline-block of that size has":
+        expect(_rows(true, 4, 40, 0xFF0000u32)).to_equal("0..80")
+        expect(_cols(true, 4, 10, 0xFF0000u32)).to_equal("89..250")
+        expect(_rows(true, 4, 250, 0xFFE0E0u32)).to_equal("0..106")
+        expect(_rows(true, 4, 40, 0x00FF00u32)).to_equal("240..320")
+        expect(_cols(true, 4, 70, 0x00FF00u32)).to_equal("89..250")
+        expect(_rows(true, 4, 250, 0xE0FFE0u32)).to_equal("240..346")
+        expect(_rows(true, 1, 40, 0xFF0000u32)).to_equal("0..19")
+        expect(_rows(true, 1, 40, 0x00FF00u32)).to_equal("60..79")
+        expect(_cols(true, 1, 70, 0x00FF00u32)).to_equal("22..62")
+        expect(_rows(true, 1, 250, 0xE0FFE0u32)).to_equal("60..86")
+
+    it "AC-7: vertical-align middle is placed on the device row for inline-blocks and svgs alike":
+        expect(_rows(true, 4, 40, 0x0000FFu32)).to_equal("493..572")
+        expect(_rows(true, 4, 40, 0xFF00FFu32)).to_equal("733..813")
+        expect(_cols(true, 4, 190, 0xFF00FFu32)).to_equal("89..250")
+        expect(_rows(true, 4, 40, 0x00C0C0u32)).to_equal("971..1054")
+        expect(_rows(true, 4, 250, 0xE0FFFFu32)).to_equal("960..1055")
+        expect(_rows(true, 4, 40, 0xFFA000u32)).to_equal("1213..1293")
+        expect(_cols(true, 4, 310, 0xFFA000u32)).to_equal("89..250")
+        expect(_rows(true, 4, 250, 0xFFFFE0u32)).to_equal("1200..1295")
+
+    it "AC-8: k=1, the middle boxes stay on Chrome's rows":
+        expect(_rows(true, 1, 40, 0x0000FFu32)).to_equal("123..142")
+        expect(_rows(true, 1, 40, 0xFF00FFu32)).to_equal("183..202")
+        expect(_cols(true, 1, 190, 0xFF00FFu32)).to_equal("22..62")
+        expect(_rows(true, 1, 40, 0x00C0C0u32)).to_equal("242..262")
+        expect(_rows(true, 1, 40, 0xFFA000u32)).to_equal("303..322")
+        expect(_cols(true, 1, 310, 0xFFA000u32)).to_equal("22..62")

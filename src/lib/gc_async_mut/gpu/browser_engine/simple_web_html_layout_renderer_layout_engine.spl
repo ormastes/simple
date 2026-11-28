@@ -19,7 +19,7 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{S
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{parse_int, grid_track_fr_micro}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{text_pen_origin_reset, text_rest_pen_origin_reset, text_rest_pen_origin_restore, text_rest_pen_origin_record, g_text_rest_pen_origin_milli, box_frac_w_set, absolute_width_frac_milli, g_table_column_edge_frac_milli, text_pen_origin_restore, text_pen_origin_record, g_text_pen_origin_milli, inline_pen_err, inline_pen_err_carry_px, inline_item_width_err_milli, INLINE_PEN_ERR_UNKNOWN, box_device_dx_record, form_control_tag, layout_unit_ceil_milli, nowrap_collapsed_lead_reset, nowrap_collapsed_lead_record, nowrap_collapsed_lead_milli_at, nowrap_collapsed_lead_px_at, nowrap_collapsed_lead_table_milli, nowrap_collapsed_lead_table_px, nowrap_collapsed_lead_restore, nowrap_collapsed_post_width_px}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{box_device_inline_dy_record, text_line_rest_record, form_control_label_device_dy, form_control_line_frac_milli, absolute_margin_t, absolute_containing_width, inline_sole_text_run, box_frac_w_reset, item_frac_w_hand_over, box_frac_w_take, box_frac_w_at, BOX_FRAC_W_UNSET, flex_item_text_frac_delta_milli_px, text_run_exact_width_milli_px, box_device_extra_h_reset, box_device_top_px, box_device_extra_h_record, box_device_extra_w_record, select_device_extra_w, input_type_is_column_sized, form_control_device_extra_h, block_margin_milli, style_with_resolved_percent_margins, style_with_resolved_percent_padding, percent_padding_extra_w, vertical_margin_px_in, cursor_advance_px, cursor_advance_frac, text_device_dy_reset, text_device_dy_first_table, text_device_dy_rest_table, text_device_dy_restore, box_device_top_reset, box_device_top_record, box_device_top_record_milli, box_device_top_table, box_device_top_restore, box_device_top_shift, layout_device_scale, summary_marker_inline_milli, textarea_value_device_lines_record}
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{authored_height_frac_milli, layout_root_font_px}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{authored_height_frac_milli, layout_root_font_px, svg_exact_content_size_milli}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{line_h_frac_milli, inline_element_union_text_line_h, text_line_frac_record, text_line_steps_table, text_line_steps_restore}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{box_line_start_err_reset, box_line_start_err_record, box_line_start_err_at, box_right_edge_err_record, absolute_child_x_frac_milli, absolute_child_y_frac_milli, box_device_top_inherited_milli}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{grid_fr_track_floor, grid_fr_track_factor, button_device_extra_w, button_has_inline_follower, box_device_extra_w_at, inline_button_k1_snap_px, GridTrackLayout, grid_track_layout}
@@ -37,6 +37,11 @@ var g_float_x0: [i32] = []
 var g_float_x1: [i32] = []
 var g_float_y0: [i32] = []
 var g_float_y1: [i32] = []
+# Milli-px each float's exact margin-box bottom lies past its whole-px
+# `g_float_y1` (an authored 10.75px height, a 3.5px bottom margin): what
+# `clear`, a stacked float and a formatting-context root's auto height read.
+# Line boxes keep the whole px.
+var g_float_y1_frac: [i32] = []
 var g_float_base: i32 = 0
 # Lowest float bottom in the current context slice (smallest i32 when it has
 # no float): every query returns at once for a row at or below it, so text
@@ -73,6 +78,7 @@ fn float_ctx_reset():
     g_float_x1 = []
     g_float_y0 = []
     g_float_y1 = []
+    g_float_y1_frac = []
     g_float_base = 0
     g_float_max_y1 = -2147483648
     g_float_frac_i = -1
@@ -80,7 +86,8 @@ fn float_ctx_reset():
 fn float_ctx_count() -> i32:
     g_float_side.len() as i32
 
-fn float_ctx_add(side: i32, x0: i32, x1: i32, y0: i32, y1: i32):
+fn float_ctx_add(side: i32, x0: i32, x1: i32, y0: i32, y1: i32, y1_frac: i32):
+    g_float_y1_frac = g_float_y1_frac.push(y1_frac)
     g_float_side = g_float_side.push(side)
     g_float_x0 = g_float_x0.push(x0)
     g_float_x1 = g_float_x1.push(x1)
@@ -100,8 +107,10 @@ fn float_ctx_truncate(n: i32):
     var x1: [i32] = []
     var y0: [i32] = []
     var y1: [i32] = []
+    var y1_frac: [i32] = []
     var k = 0
     while k < n:
+        y1_frac = y1_frac.push(g_float_y1_frac[k])
         side = side.push(g_float_side[k])
         x0 = x0.push(g_float_x0[k])
         x1 = x1.push(g_float_x1[k])
@@ -113,6 +122,7 @@ fn float_ctx_truncate(n: i32):
     g_float_x1 = x1
     g_float_y0 = y0
     g_float_y1 = y1
+    g_float_y1_frac = y1_frac
 
 # Move the floats placed since `from` with the subtree that holds them.
 fn float_ctx_shift(from: i32, dx: i32, dy: i32):
@@ -179,6 +189,53 @@ fn float_ctx_clear_bottom(clear_mode: i32) -> i32:
             bottom = g_float_y1[k]
         k = k + 1
     bottom
+
+# Milli-px the lowest float `clear` names really ends past
+# `float_ctx_clear_bottom` (0 with no such float or a whole-px bottom).
+fn float_ctx_clear_bottom_frac(clear_mode: i32) -> i32:
+    var best: i64 = -9223372036854775808
+    var whole = -2147483648
+    var k = g_float_base
+    val n = float_ctx_count()
+    while k < n:
+        if clear_mode == 3 or g_float_side[k] == clear_mode:
+            val exact = g_float_y1[k].to_i64() * 1000 + g_float_y1_frac[k].to_i64()
+            if exact > best:
+                best = exact
+            if g_float_y1[k] > whole:
+                whole = g_float_y1[k]
+        k = k + 1
+    if whole == -2147483648: 0 else: (best - whole.to_i64() * 1000) as i32
+
+# Milli-px the lowest float placed since `from` really ends past
+# `float_ctx_max_bottom`.
+fn float_ctx_max_bottom_frac(from: i32) -> i32:
+    var best: i64 = -9223372036854775808
+    var whole = -2147483648
+    var k = if from > g_float_base: from else: g_float_base
+    val n = float_ctx_count()
+    while k < n:
+        val exact = g_float_y1[k].to_i64() * 1000 + g_float_y1_frac[k].to_i64()
+        if exact > best:
+            best = exact
+        if g_float_y1[k] > whole:
+            whole = g_float_y1[k]
+        k = k + 1
+    if whole == -2147483648: 0 else: (best - whole.to_i64() * 1000) as i32
+
+# Milli-px past whole-px row `y` at which the lowest float whose whole-px
+# bottom is `y` really ends: the residual a float moved down to `y` starts at.
+fn float_ctx_bottom_frac_at(y: i32) -> i32:
+    var frac = 0
+    var found = false
+    var k = g_float_base
+    val n = float_ctx_count()
+    while k < n:
+        if g_float_y1[k] == y and (not found or g_float_y1_frac[k] > frac):
+            frac = g_float_y1_frac[k]
+            found = true
+        k = k + 1
+    frac
 
 # Bottom of the lowest float placed since `from`, or the smallest i32.
 fn float_ctx_max_bottom(from: i32) -> i32:
@@ -2092,8 +2149,25 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
             out_bw[i] = constrained_outer_width(
                 node, st, replaced_auto_box_w(node, st, w)
             )
+        # An svg keeps the sub-pixel part of its used height (Chrome 159:
+        # `height=20.3` is 81 device px at k = 4, and `width=49
+        # viewBox="0 0 4 1"` is 12.25 px high). The box stays whole px; the
+        # fraction goes where an authored fractional height goes. Its width
+        # fraction is the authored-width one recorded above.
+        var svg_exact_h: i64 = 0
+        if node.tag == "svg" and not unsized_in_inline_flex:
+            val svg_inset_x = st.pad_l + st.pad_r + st.border_l + st.border_r
+            val svg_exact = svg_exact_content_size_milli(node, st, layout_root_font_px(nodes, styles), out_bw[i] - svg_inset_x)
+            svg_exact_h = svg_exact[1]
+            # An auto width derived through the viewBox ratio follows the
+            # exact height (`height=12.25 viewBox="0 0 4 1"` is 49 wide, not
+            # 4 x 12).
+            val svg_ratio_w = (svg_exact[0] / 1000) as i32 + svg_inset_x
+            if st.width_px == 0 and not st.width_zero and (svg_ratio_w == out_bw[i] + 1 or svg_ratio_w == out_bw[i] - 1) and constrained_outer_width(node, st, svg_ratio_w) == svg_ratio_w:
+                out_bw[i] = svg_ratio_w
         val explicit_replaced_h = if legacy_widget_box or st.border_box: st.height_px else: st.height_px + st.pad_t + st.pad_b + border_y
         var replaced_h = explicit_replaced_h
+        var replaced_frac_h = 0
         # A negative height is a percentage no caller could resolve (the
         # containing block's height is auto): CSS 2.1 §10.5 computes it to
         # `auto`. Chrome 159: `<svg height="100%">` in an auto-height div is
@@ -2102,7 +2176,34 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
             replaced_h = replaced_default_box_h(node.tag) + st.pad_t + st.pad_b + border_y
         elif st.height_px <= 0:
             replaced_h = replaced_auto_box_h(node, st, out_bw[i])
+            # The ratio height is rounded there; the box takes the floor and
+            # the rest is the fraction (16.65625 is 16 plus 656).
+            val svg_floor_h = (svg_exact_h / 1000) as i32 + st.pad_t + st.pad_b + border_y
+            if svg_exact_h > 0 and (replaced_h == svg_floor_h or replaced_h == svg_floor_h + 1):
+                replaced_h = svg_floor_h
+                replaced_frac_h = (svg_exact_h % 1000) as i32
+        elif svg_exact_h > 0:
+            replaced_frac_h = (svg_exact_h % 1000) as i32
+        val unclamped_replaced_h = replaced_h
         replaced_h = constrained_outer_height(node, st, replaced_h)
+        if replaced_h != unclamped_replaced_h or (st.max_height_px > 0 and css_outer_height(node, st, st.max_height_px) <= replaced_h):
+            replaced_frac_h = 0
+        if replaced_frac_h > 0:
+            # k = 1: the box takes the px Chrome's pixel snap gives it. A box
+            # hanging from the line's whole-px baseline snaps its TOP, so half
+            # a px stays out (`height:12.5px` under a 17 px strut paints 12
+            # rows); a box that starts on a whole px (a block, or one taller
+            # than the strut: 20.5px paints 21 rows) takes it. k > 1: paint
+            # extends the bottom edge in device px.
+            val hangs_from_baseline = st.display == "inline" and node.parent >= 0 and replaced_h < inline_line_strut_baseline_offset(styles[node.parent as i32])
+            val replaced_frac_px = if layout_device_scale() > 1: 0 elif hangs_from_baseline: (if replaced_frac_h > 500: 1 else: 0) else: cursor_advance_px(origin_frac, replaced_frac_h)
+            replaced_h = replaced_h + replaced_frac_px
+            val replaced_end_frac = origin_frac + replaced_frac_h - replaced_frac_px * 1000
+            box_device_extra_h_record(nodes.len() as i32, i, box_device_top_px(replaced_end_frac * layout_device_scale()) - box_device_top_px(origin_frac * layout_device_scale()))
+            out_bh[i] = replaced_h
+            val frac_placed = relative_layout_result(child_index, i, st, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, replaced_h)
+            # The parent's block cursor (or the float context) carries the rest.
+            return LayoutResult(bx: frac_placed.bx, by: frac_placed.by, bw: frac_placed.bw, bh: frac_placed.bh, wrap_starts: frac_placed.wrap_starts, wrap_ends: frac_placed.wrap_ends, intrinsic_widths: frac_placed.intrinsic_widths, height: frac_placed.height, end_frac_milli: replaced_end_frac, end_frac_valid: true)
         out_bh[i] = replaced_h
         return relative_layout_result(child_index, i, st, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, replaced_h)
     if node.tag == "#text":
@@ -4556,6 +4657,15 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     if inline_x > inline_start_x and inline_x + float_outer_w > line_iw:
                         float_min_y = cy + inline_line_h
                 val float_y = float_ctx_place_y(float_min_y, float_outer_w, cst.clear_mode, ix, ix + iw)
+                # Exact top of the float's box: the cursor residual (or the
+                # residual of the float bottom it moved down to) plus its top
+                # margin in milli px. A float in an open line keeps whole px.
+                val fmt_milli = block_margin_milli(cst, true, viewport_h, iw)
+                val fmb_milli = block_margin_milli(cst, false, viewport_h, iw)
+                val float_exact_top = not in_inline_run and cursor_advance_px(0, fmt_milli) == fmt
+                val float_top_frac = if not float_exact_top: 0 elif float_y == float_min_y: cursor_advance_frac(cy_frac, prev_margin_b) else: float_ctx_bottom_frac_at(float_y)
+                val float_box_y = if float_exact_top: float_y + cursor_advance_px(float_top_frac, fmt_milli) else: float_y + fmt
+                val float_origin_frac = if float_exact_top: cursor_advance_frac(float_top_frac, fmt_milli) else: 0
                 val float_edge = if cst.float_mode == 1: float_ctx_left_edge(float_y, float_y + 1, ix) else: float_ctx_right_edge(float_y, float_y + 1, ix + iw)
                 var float_x = if cst.float_mode == 1: float_edge + fml else: float_edge - fmr - float_w
                 # Fractional margins (or a fractional left-float edge): the float
@@ -4567,7 +4677,10 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 box_x_snap_clear(nodes.len() as i32, c)
                 if float_frac:
                     float_x = float_x + box_x_snap(nodes.len() as i32, c, if cst.float_mode == 1: float_edge_err + fml_err else: 0 - fmr_err)
-                val fchild = layout_with_style(nodes, styles, child_index, c, float_x, float_y + fmt, float_w, viewport_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, float_style)
+                if float_exact_top:
+                    g_origin_frac_milli = float_origin_frac
+                    box_device_top_record(nodes.len() as i32, c, float_origin_frac)
+                val fchild = layout_with_style(nodes, styles, child_index, c, float_x, float_box_y, float_w, viewport_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, float_style)
                 out_bx = fchild.bx
                 out_by = fchild.by
                 out_bw = fchild.bw
@@ -4576,7 +4689,10 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 out_wrap_ends = fchild.wrap_ends
                 out_intrinsic_widths = fchild.intrinsic_widths
                 shrink_box_device_extra_w(nodes, styles, child_index, c, cst, out_bw[c])
-                float_ctx_add(cst.float_mode, float_x - fml, float_x + out_bw[c] + fmr, float_y, float_y + fmt + out_bh[c] + fmb)
+                # The box ends at its returned residual (an authored 10.75px
+                # height, sub-pixel content); the bottom margin adds its own.
+                val float_end_frac = (if fchild.end_frac_valid: fchild.end_frac_milli else: float_origin_frac) + (if cursor_advance_px(0, fmb_milli) == fmb: fmb_milli - fmb * 1000 else: 0)
+                float_ctx_add(cst.float_mode, float_x - fml, float_x + out_bw[c] + fmr, float_y, float_box_y + out_bh[c] + fmb, float_end_frac)
                 if cst.float_mode == 1:
                     g_float_frac_i = float_ctx_count() - 1
                     g_float_frac_err = if float_frac: float_edge * 1000 + float_edge_err + fml * 1000 + fml_err + out_bw[c] * 1000 + fmr * 1000 + fmr_err - (float_x + out_bw[c] + fmr) * 1000 else: 0
@@ -5608,7 +5724,16 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
             var clearance_y = -2147483648
             if cst.clear_mode != 0:
                 clearance_y = float_ctx_clear_bottom(cst.clear_mode)
-                if clearance_y > cy:
+                val clearance_frac = float_ctx_clear_bottom_frac(cst.clear_mode)
+                if clearance_frac != 0:
+                    # A float ending between px (10.75px high): the cursor
+                    # takes the exact bottom, as after a block that high.
+                    if clearance_y.to_i64() * 1000 + clearance_frac.to_i64() > cy.to_i64() * 1000 + cy_frac.to_i64():
+                        cy = clearance_y + cursor_advance_px(0, clearance_frac)
+                        cy_frac = cursor_advance_frac(0, clearance_frac)
+                        top_frac_restore = cy_frac
+                        clearance_y = cy
+                elif clearance_y > cy:
                     cy = clearance_y
                     cy_frac = 0
                     top_frac_restore = 0
@@ -5855,7 +5980,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 var child_end_shifted = child_end_frac + (cy_frac - child_start_frac)
                 # An authored fractional height ends past its whole-px height;
                 # from half a px up the cursor takes the px and keeps the rest.
-                if cst.height_px > 0 and child_end_shifted >= 500 and child_end_shifted < 1500:
+                if (cst.height_px > 0 or nodes[c].tag == "svg") and child_end_shifted >= 500 and child_end_shifted < 1500:
                     cy = cy + 1
                     child_end_shifted = child_end_shifted - 1000
                 if child_end_shifted >= -500 and child_end_shifted < 500:
@@ -5929,7 +6054,12 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
     # inside it (CSS 2.2 10.6.7); any other block lets them overflow.
     if float_ctx_count() > g_float_base and float_ctx_establishes_bfc(nodes, styles, i, st):
         val enclosed_float_bottom = float_ctx_max_bottom(g_float_base)
-        if enclosed_float_bottom > cy:
+        val enclosed_float_frac = float_ctx_max_bottom_frac(g_float_base)
+        if enclosed_float_frac != 0:
+            if enclosed_float_bottom.to_i64() * 1000 + enclosed_float_frac.to_i64() > cy.to_i64() * 1000 + cy_frac.to_i64():
+                cy = enclosed_float_bottom + cursor_advance_px(0, enclosed_float_frac)
+                cy_frac = cursor_advance_frac(0, enclosed_float_frac)
+        elif enclosed_float_bottom > cy:
             cy = enclosed_float_bottom
     var h = (cy - y) + st.pad_b + st.border_b
     val content_h = h

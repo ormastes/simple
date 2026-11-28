@@ -1,0 +1,144 @@
+# Purpose and audience: regression specification for bidirectional parameter
+# checking in HmInferContext.infer_function_call.
+# @req REQ-SSPEC-UNIT
+# @cover src/compiler/30.types/type_infer/inference_expr_calls.spl
+
+use std.spec.{describe, it, expect, step}
+use compiler.types.type_infer_types.*
+use compiler.types.type_infer.context.*
+use compiler.types.type_infer.core.*
+use compiler.types.type_infer.inference_expr.*
+use compiler.types.type_infer.inference_expr_calls.*
+use compiler.hir.hir.*
+use compiler.frontend.core.lexer.*
+use compiler.common.diagnostics.span.{Span}
+
+fn fcp_sp() -> Span:
+    lex_span_empty()
+
+fn fcp_mk(kind: HirTypeKind) -> HirType:
+    HirType(kind: kind, span: fcp_sp())
+
+fn fcp_i64() -> HirType:
+    fcp_mk(HirTypeKind.Int(64, true))
+
+fn fcp_bool() -> HirType:
+    fcp_mk(HirTypeKind.Bool)
+
+fn fcp_text() -> HirType:
+    fcp_mk(HirTypeKind.Str)
+
+fn fcp_arg(expr: HirExpr) -> HirCallArg:
+    HirCallArg(has_name: false, name: "", value: expr, span: fcp_sp())
+
+fn fcp_int(v: i64) -> HirExpr:
+    HirExpr(kind: HirExprKind.IntLit(v, nil), has_type_: false, type_: fcp_i64(), span: fcp_sp())
+
+fn fcp_bool_lit(v: bool) -> HirExpr:
+    HirExpr(kind: HirExprKind.BoolLit(v), has_type_: false, type_: fcp_bool(), span: fcp_sp())
+
+fn fcp_str_lit(s: text) -> HirExpr:
+    HirExpr(kind: HirExprKind.StringLit(s, nil), has_type_: false, type_: fcp_text(), span: fcp_sp())
+
+fn fcp_var(id: i64, name: text, ty: HirType) -> HirExpr:
+    HirExpr(kind: HirExprKind.NamedVar(SymbolId(id: id), name), has_type_: true, type_: ty, span: fcp_sp())
+
+fn fcp_lambda_add_one(param_id: i64) -> HirExpr:
+    val p = HirParam(
+        symbol: SymbolId(id: param_id),
+        name: "x",
+        type_: fcp_mk(HirTypeKind.Infer(0, 0)),
+        default: nil,
+        is_mutable: false,
+        span: fcp_sp()
+    )
+    val x_ref = HirExpr(
+        kind: HirExprKind.NamedVar(SymbolId(id: param_id), "x"),
+        has_type_: false,
+        type_: fcp_mk(HirTypeKind.Infer(0, 0)),
+        span: fcp_sp()
+    )
+    val body = HirExpr(
+        kind: HirExprKind.Binary(HirBinOp.Add, x_ref, fcp_int(1)),
+        has_type_: false,
+        type_: fcp_mk(HirTypeKind.Infer(0, 0)),
+        span: fcp_sp()
+    )
+    HirExpr(kind: HirExprKind.Lambda([p], body, []), has_type_: false, type_: fcp_mk(HirTypeKind.Infer(0, 0)), span: fcp_sp())
+
+describe "infer_function_call expected parameter propagation":
+    it "checks matching arguments against HirTypeKind.Function parameters and returns callee return type":
+        step("Bind (i64, text) -> bool and infer call with (42, \"ok\")")
+        var ctx = HmInferContext.new()
+        val fn_ty = fcp_mk(HirTypeKind.Function([fcp_i64(), fcp_text()], fcp_bool(), []))
+        ctx.bind_mono("f_match", fn_ty)
+        ctx.bind_mono("1", fn_ty)
+        val callee = fcp_var(1, "f_match", fn_ty)
+        match ctx.infer_function_call(callee, [fcp_arg(fcp_int(42)), fcp_arg(fcp_str_lit("ok"))], [], fcp_sp()):
+            case Ok(ret_ty):
+                expect("{ret_ty.kind}").to_contain("Bool")
+            case Err(e):
+                expect("unexpected error: " + e.message()).to_equal("")
+
+    it "propagates expected function parameter types into untyped lambda arguments":
+        step("Pass untyped \\x: x + 1 into ((i64) -> i64) -> bool and verify parameter x is checked as i64")
+        var ctx = HmInferContext.new()
+        val cb_ty = fcp_mk(HirTypeKind.Function([fcp_i64()], fcp_i64(), []))
+        val hof_ty = fcp_mk(HirTypeKind.Function([cb_ty], fcp_bool(), []))
+        ctx.bind_mono("f_hof", hof_ty)
+        ctx.bind_mono("2", hof_ty)
+        val callee = fcp_var(2, "f_hof", hof_ty)
+        val lambda_arg = fcp_lambda_add_one(901)
+        match ctx.infer_function_call(callee, [fcp_arg(lambda_arg)], [], fcp_sp()):
+            case Ok(ret_ty):
+                expect("{ret_ty.kind}").to_contain("Bool")
+            case Err(e):
+                expect("unexpected error for checked lambda arg: " + e.message()).to_equal("")
+
+    it "rejects a mismatched lambda body against the expected parameter return type":
+        step("Pass untyped \\x: x + 1 where (i64) -> text is expected")
+        var ctx = HmInferContext.new()
+        val cb_ty = fcp_mk(HirTypeKind.Function([fcp_i64()], fcp_text(), []))
+        val hof_ty = fcp_mk(HirTypeKind.Function([cb_ty], fcp_bool(), []))
+        ctx.bind_mono("f_hof_bad", hof_ty)
+        ctx.bind_mono("3", hof_ty)
+        val callee = fcp_var(3, "f_hof_bad", hof_ty)
+        val lambda_arg = fcp_lambda_add_one(902)
+        var saw_mismatch = false
+        match ctx.infer_function_call(callee, [fcp_arg(lambda_arg)], [], fcp_sp()):
+            case Err(TypeInferError.Mismatch(_, _, _)):
+                saw_mismatch = true
+            case Err(e):
+                expect("expected Mismatch error, got: " + e.message()).to_equal("")
+            case Ok(_):
+                expect("expected type mismatch for lambda returning i64 vs text").to_equal("")
+        expect(saw_mismatch).to_equal(true)
+
+    it "falls through cleanly to arity unification for zero-parameter callees with extra args":
+        step("Call () -> i64 with 1 argument and expect arity mismatch")
+        var ctx = HmInferContext.new()
+        val zero_ty = fcp_mk(HirTypeKind.Function([], fcp_i64(), []))
+        ctx.bind_mono("f_zero", zero_ty)
+        ctx.bind_mono("4", zero_ty)
+        val callee = fcp_var(4, "f_zero", zero_ty)
+        var saw_arity_err = false
+        match ctx.infer_function_call(callee, [fcp_arg(fcp_bool_lit(true))], [], fcp_sp()):
+            case Err(e):
+                saw_arity_err = e.message().len() > 0
+            case Ok(_):
+                expect("expected arity error on 0-arg callee called with 1 arg").to_equal("")
+        expect(saw_arity_err).to_equal(true)
+
+    it "synthesizes arguments when callee is an unresolved inference variable":
+        step("Bind callee as fresh Infer var and call with (42)")
+        var ctx = HmInferContext.new()
+        val infer_ty = ctx.fresh_var(fcp_sp())
+        ctx.bind_mono("f_infer", infer_ty)
+        ctx.bind_mono("5", infer_ty)
+        val callee = fcp_var(5, "f_infer", infer_ty)
+        match ctx.infer_function_call(callee, [fcp_arg(fcp_int(42))], [], fcp_sp()):
+            case Ok(_):
+                val resolved = ctx.resolve(infer_ty)
+                expect("{resolved.kind}").to_contain("Function")
+            case Err(e):
+                expect("unexpected error for inferred callee: " + e.message()).to_equal("")

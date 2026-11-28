@@ -93,3 +93,28 @@ but the same account also runs the guest's other podman lanes. Whether those dep
 was not checked. The `SIMPLE_*`
 keys are how the acceptance spec is configured. Both are the unit owner's call: a second account for the
 fresh route, or a different way to hand the spec its configuration. Not changed here.
+
+### Audit 2026-11-28 (read from source, nothing started in the guest)
+
+Unit and account are made by `guest_provision_script` in
+`scripts/check/check-linux-orchestrator-host-qemu.shs`
+(`run-orchestrator-native-qualification.shs` only calls that script).
+
+| What | Guest today | What custody and the broker rule require | State |
+|---|---|---|---|
+| Account shell | `/usr/sbin/nologin` | `/usr/sbin/nologin` or `/sbin/nologin` | consistent |
+| Account name, uid, gid | `simple-host`, 950, 950; the profiles are generated from them | `serviceName`, `serviceUid`, `serviceGid` | consistent |
+| Account home | `/var/lib/simple-host`, created | `/nonexistent`, absent (`fresh-epoch-native-service-account`) | **open, owner decision** |
+| Unit `HOME`, `PATH` | not set; systemd gives the account home and its own default `PATH` | `HOME=/nonexistent`, `PATH=/usr/bin:/bin` | **open**, follows the account |
+| Unit extra environment | `EnvironmentFile` of 16 `SIMPLE_*` keys and `Environment=SIMPLE_HOST_EXEC=` | closed list; each is `fresh-epoch-inherited-broker-environment-unsupported:<key>` | **open, owner decision** |
+| Unit `XDG_RUNTIME_DIR` | not set (the user manager is masked) | absent is allowed; when present it must be the run root | consistent |
+| Run root `/run/simple-host/podman` | named by the generated profile; no `RuntimeDirectory=` and no `install -d` in the provisioning | must exist and be held by custody | **open**: who creates it on a fresh boot was not found |
+| Helper environment | set by the projection itself, not by the unit | `HOME` and `XDG_RUNTIME_DIR` = run root, `PATH=/usr/bin:/bin` | consistent, independent of the unit |
+| Unit file name | `${UNIT}` with no assignment since 3daa49c1dcd; under `set -eu` a fresh provisioning stopped at that line | `simple-orchestrator-host.service` (`hostUnit` of the generated profile) | **fixed 2026-11-28**: the assignment is back. Syntax-checked only; no guest was provisioned |
+
+TODO (guest, not a PASS):
+
+- Provision a fresh guest with the restored `UNIT=` line and read the unit back (`--verify`).
+- Decide the account home and the `SIMPLE_*` hand-over (second account or another configuration route),
+  then start the unit and take the first fresh-route launch past custody's account and environment checks.
+- Find or add what creates the run root before first use.

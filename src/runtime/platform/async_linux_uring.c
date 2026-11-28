@@ -33,6 +33,7 @@
 #include <limits.h>
 #include <stdlib.h>
 #include <string.h>
+#include <assert.h>
 #include <linux/time_types.h>  /* __kernel_timespec */
 
 /* ===================================================================
@@ -120,6 +121,7 @@ static bool bufs_ensure(uring_driver* ud)
 
 static void bufs_insert_no_grow(uring_driver* ud, buf_entry entry)
 {
+    assert(ud->bufs_cap > 0 && ud->bufs_count < ud->bufs_cap);
     int64_t slot = hash_slot(entry.op_id, ud->bufs_cap);
     while (ud->bufs[slot].op_id != 0)
         slot = (slot + 1) & (ud->bufs_cap - 1);
@@ -127,14 +129,15 @@ static void bufs_insert_no_grow(uring_driver* ud, buf_entry entry)
     ud->bufs_count++;
 }
 
-static bool bufs_put(uring_driver* ud, int64_t op_id, char* buf,
+/* Precondition: caller already ran bufs_ensure(ud), guaranteeing capacity for
+ * one more entry without resizing. Must not fail after io_uring_prep_*. */
+static void bufs_put(uring_driver* ud, int64_t op_id, char* buf,
                      int64_t len, int op_type, char* path)
 {
-    if (!bufs_ensure(ud)) return false;
+    assert(ud->bufs_cap > 0 && ud->bufs_count * 10 < ud->bufs_cap * 6);
     bufs_insert_no_grow(ud, (buf_entry){
         .op_id = op_id, .buf = buf, .len = len, .op_type = op_type, .path = path
     });
-    return true;
 }
 
 /* Find and remove entry. Returns the entry (with op_id=0 if not found). */
@@ -369,11 +372,9 @@ static int64_t uring_submit_connect(spl_driver* d, int64_t fd,
     io_uring_prep_connect(sqe, (int)fd, (struct sockaddr*)sa, sizeof(*sa));
     io_uring_sqe_set_data64(sqe, (uint64_t)id);
 
-    /* Track the sockaddr so we can free it after completion */
-    if (!bufs_put(ud, id, (char*)sa, (int64_t)sizeof(*sa), BUF_OP_CONNECT, NULL)) {
-        free(sa);
-        return -ENOMEM;
-    }
+    /* Track the sockaddr so we can free it after completion (bufs_ensure
+     * already succeeded above). */
+    bufs_put(ud, id, (char*)sa, (int64_t)sizeof(*sa), BUF_OP_CONNECT, NULL);
     ud->pending_submits++;
     return id;
 }
@@ -411,12 +412,8 @@ static int64_t uring_submit_buffered(spl_driver* d, int64_t fd, char* buf,
     }
     io_uring_sqe_set_data64(sqe, (uint64_t)id);
 
-    /* Unreachable after the caller's bufs_ensure(); see
-     * doc/08_tracking/bug/2026-11-24_uring_submit_bufs_put_enomem_arm_dead_code.md */
-    if (!bufs_put(ud, id, buf, len, op_type, NULL)) {
-        free(buf);
-        return -ENOMEM;
-    }
+    /* Callers already ran bufs_ensure(ud), so tracking cannot fail. */
+    bufs_put(ud, id, buf, len, op_type, NULL);
     ud->pending_submits++;
     return id;
 }
@@ -535,10 +532,7 @@ static int64_t uring_submit_open(spl_driver* d, const char* path,
     io_uring_prep_openat(sqe, AT_FDCWD, path_copy, (int)flags, (mode_t)mode);
     io_uring_sqe_set_data64(sqe, (uint64_t)id);
 
-    if (!bufs_put(ud, id, NULL, 0, BUF_OP_OPEN, path_copy)) {
-        free(path_copy);
-        return -ENOMEM;
-    }
+    bufs_put(ud, id, NULL, 0, BUF_OP_OPEN, path_copy);
     ud->pending_submits++;
     return id;
 }
@@ -600,10 +594,7 @@ static int64_t uring_submit_timeout(spl_driver* d, int64_t timeout_ms)
     io_uring_prep_timeout(sqe, ts, 0, 0);
     io_uring_sqe_set_data64(sqe, (uint64_t)id);
 
-    if (!bufs_put(ud, id, (char*)ts, (int64_t)sizeof(*ts), BUF_OP_TIMEOUT, NULL)) {
-        free(ts);
-        return -ENOMEM;
-    }
+    bufs_put(ud, id, (char*)ts, (int64_t)sizeof(*ts), BUF_OP_TIMEOUT, NULL);
     ud->pending_submits++;
     return id;
 }

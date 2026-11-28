@@ -511,6 +511,8 @@ static void t_uring_ring_full(void) {
     CHECK(r->vtable->submit_read(r, fd, 8, 0) == -EAGAIN);
     CHECK(r->vtable->submit_send(r, sv[0], "x", 1) == -EAGAIN);
     CHECK(r->vtable->submit_write(r, fd, "x", 1, 0) == -EAGAIN);
+    CHECK(r->vtable->submit_open(r, "/dev/null", O_RDONLY, 0) == -EAGAIN);
+    CHECK(r->vtable->submit_connect(r, sv[0], "127.0.0.1", 1) == -EAGAIN);
     CHECK(r->vtable->submit_timeout(r, 10) == -EAGAIN);
     CHECK(!r->vtable->cancel(r, last));
     CHECK(r->vtable->flush(r) == 16);
@@ -522,6 +524,25 @@ static void t_uring_ring_full(void) {
     free(c.data);
     r->vtable->destroy(r);  /* 16 pending recvs: LSan proves buffers reclaimed */
     close(sv[0]); close(sv[1]); close(fd);
+}
+
+static void t_uring_bufs_grow_and_drain(void) {
+    spl_driver* r = make_driver(128);  /* enough SQEs to grow bufs table (64 -> 128 -> 256) */
+    CHECK(r != NULL);
+    if (!r) return;
+    int sv[2]; pair(sv);
+    int64_t last = 0; int ok = 1;
+    for (int i = 0; i < 80; i++) {
+        int64_t id = (i % 2 == 0)
+            ? r->vtable->submit_recv(r, sv[0], 16)
+            : r->vtable->submit_timeout(r, 5000);
+        if (id != last + 1) ok = 0;
+        last = id;
+    }
+    CHECK(ok);
+    CHECK(r->vtable->flush(r) == 80);
+    r->vtable->destroy(r);  /* 80 pending ops across table resizes: LSan proves zero leaks */
+    close(sv[0]); close(sv[1]);
 }
 #endif
 
@@ -560,6 +581,7 @@ int main(void) {
     t_uring_einval();
     t_uring_send_zero_null();
     t_uring_ring_full();
+    t_uring_bufs_grow_and_drain();
 #endif
     V->destroy(D);
     DONE("async_" BACKEND "_characterization");
