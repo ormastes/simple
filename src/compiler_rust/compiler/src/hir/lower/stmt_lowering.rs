@@ -646,6 +646,7 @@ impl Lowerer {
                         );
                         self.reject_callable_for_enum_slot(ty, v, &slot)?;
                         self.reject_float_join_for_int_slot(ty, v, &slot)?;
+                        self.reject_array_element_mismatch_at(ty, v, &slot, let_stmt.span.line)?;
                     }
                 }
 
@@ -985,6 +986,12 @@ impl Lowerer {
                 let target = self.lower_expr(assign_target, ctx)?;
                 let value = self.lower_expr(&assign.value, ctx)?;
                 self.reject_float_join_for_int_slot(target.ty, &value, "the assignment target")?;
+                // An untyped `var w = []` has no declared element type yet:
+                // its default element is not a word-array declaration.
+                let untyped_empty = matches!(target.kind, HirExprKind::Local(i) if self.untyped_empty_array_locals.contains(&i));
+                if !untyped_empty {
+                    self.reject_array_element_mismatch_at(target.ty, &value, "the assignment target", assign.span.line)?;
+                }
 
                 // E1052: Check for self mutation in immutable fn method
                 self.check_self_mutation_in_fn_method(&target, ctx)?;
@@ -1128,7 +1135,8 @@ impl Lowerer {
                     // under the entry file's path, so a bare line number
                     // pointed at the wrong file.
                     // seed_lowering_error_names_entry_file_not_defining_module_2026-11-26
-                    self.validate_declared_return_type(ctx.return_type, expr.ty)
+                    self.reject_array_element_mismatch(ctx.return_type, &expr, "the return value")
+                        .and_then(|()| self.validate_declared_return_type(ctx.return_type, expr.ty))
                         .map_err(|error| match error {
                             LowerError::Unsupported(message) => LowerError::Unsupported(format!(
                                 "{message} ({}, return at line {})",
