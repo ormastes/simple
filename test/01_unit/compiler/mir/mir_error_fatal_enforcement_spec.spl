@@ -10,9 +10,10 @@ use compiler.common.dependency.visibility.{Visibility}
 use compiler.frontend.frontend.{parse_full_frontend}
 use compiler.hir.hir_lowering.types.{HirLowering}
 use compiler.hir.hir_lowering.items.*
-use compiler.hir.hir_definitions.{SymbolTable}
-use compiler.hir.hir_types.{AsmTargetSpec, SymbolKind, HirType, HirTypeKind}
+use compiler.hir.hir_definitions.{SymbolTable, HirExpr, HirExprKind, HirBlock}
+use compiler.hir.hir_types.{AsmTargetSpec, SymbolKind, SymbolId, HirType, HirTypeKind}
 use compiler.mir.mir.*
+use compiler.mir.mir_lowering_stmts.*
 use compiler.mir._MirLowering.module_lowering.*
 use compiler.mir._MirLowering.function_lowering.*
 use compiler.mir._MirLowering.asm_and_targets.*
@@ -94,12 +95,49 @@ describe "MirLowering fatal error enforcement across 50.mir":
         expect(advisory_lowering.errors[0].fatal).to_equal(false)
         expect(driver_mir_error_is_fatal_owned_v1(advisory_lowering.errors[0])).to_equal(false)
 
+    it "marks unsupported for-in non-array iterable diagnostics fatal with preserved span":
+        step("Invoke lower_for_iterator on integer and erased dictionary iterables and verify MirError.fatal")
+        val int_ty = HirType(kind: HirTypeKind.Int(64, true), span: Span.empty())
+        val dict_ty = HirType(kind: HirTypeKind.Dict(int_ty, int_ty), span: Span.empty())
+        val authored_span = Span(start: 10, end: 24, line: 42, col: 5, file: "for_in_probe.spl")
+        for declared in [int_ty, dict_ty]:
+            var lowering = MirLowering.new(SymbolTable.new())
+            var builder = lowering.builder
+            builder.begin_function(SymbolId(id: 91), "for_in_fatal_probe", MirSignature(
+                params: [], return_type: MirType.unit(), is_variadic: false), Span.empty())
+            val coll_local = builder.new_temp(MirType.i64())
+            lowering.builder = builder
+            lowering.bind_local(20, coll_local)
+            lowering.remember_local_hir_type(coll_local.id, declared, 0, 0)
+            val iter_expr = HirExpr(kind: HirExprKind.Var(SymbolId(id: 20)),
+                has_type_: false, type_: nil, span: Span.empty())
+            val empty_expr = HirExpr(kind: HirExprKind.NilLit, has_type_: false, type_: nil, span: Span.empty())
+            val body = HirBlock(stmts: [], has: false, value: empty_expr, span: Span.empty())
+            val _loop_local = lowering.lower_for_iterator(SymbolId(id: 21), iter_expr, body, authored_span)
+            var finished = lowering.builder
+            val _fn = finished.end_function()
+            lowering.builder = finished
+
+            expect(lowering.errors.len()).to_equal(1)
+            expect(lowering.errors[0].message).to_contain("for-in over non-array iterables")
+            expect(lowering.errors[0].fatal).to_equal(true)
+            expect(driver_mir_error_is_fatal_owned_v1(lowering.errors[0])).to_equal(true)
+            if val err_span = lowering.errors[0].span:
+                expect(err_span.file).to_equal("for_in_probe.spl")
+                expect(err_span.line).to_equal(42)
+            else:
+                expect(false).to_equal(true)
+            var ctx = CompileContext.create(driver_core_compile_options_default())
+            _driver_collect_mir_errors(ctx, lowering.errors)
+            expect(ctx.error_count_value).to_equal(1)
+
     it "uses self.error_fatal rather than self.error at all fatal MIR lowering sites in audited files":
         step("Verify audited 50.mir sources no longer rely on self.error for fatal arms")
         val expr_src = file_read("src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl")
         val calls_src = file_read("src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl")
         val switch_src = file_read("src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl")
         val fn_src = file_read("src/compiler/50.mir/_MirLowering/function_lowering.spl")
+        val stmts_src = file_read("src/compiler/50.mir/mir_lowering_stmts.spl")
         expect(expr_src.contains("self.error(message, None)")).to_equal(false)
         expect(expr_src.contains("self.error(\"E-MIR-EXPR-PAYLOAD:")).to_equal(false)
         expect(expr_src.contains("self.error(\"undefined variable")).to_equal(false)
@@ -111,3 +149,4 @@ describe "MirLowering fatal error enforcement across 50.mir":
         expect(switch_src.contains("self.error(\"enum construction: unregistered enum")).to_equal(false)
         expect(fn_src.contains("self.error(\"E-MIR-TYPE-PAYLOAD:")).to_equal(false)
         expect(fn_src.contains("self.error(\"E-MIR-TYPE-Any:")).to_equal(true)
+        expect(stmts_src.contains("self.error(")).to_equal(false)
