@@ -1,0 +1,73 @@
+"""Catalogue named NetListen authority must match the live owned-record net gate.
+
+Bug: catalog_service_named_capability_syscall_mismatch_2026-08-11
+Canonical doc: doc/08_tracking/bug/catalog_service_named_capability_syscall_mismatch_2026-08-11.md
+
+The root service catalogue mints the http child an exact named
+CapabilityKind.NetListen(port: 80) and the HTTP service contract
+(src/os/services/web/http_service_main.spl) states the kernel consumes that
+capability at NET_BIND / NET_LISTEN before delivery to the net service.  The
+live gate is os.kernel.ipc.syscall_ipc.owned_net_listen_broker_allows, pinned
+dynamically by net_listen_broker_spec.spl.  This spec is the executable
+alignment contract between the two sides: it fails if the catalogue table
+drifts from the live syscall implementation, if the exact-port fail-closed
+gate is removed, or if a wildcard port is substituted for the named grant.
+
+The dynamic confinement specs (net_listen_broker_spec.spl,
+portable_net_shim_capability_spec.spl, capability_mint_spec.spl) currently
+cannot load in this tree: they import os.kernel.scheduler.scheduler, whose
+cluster trips a pre-existing os.kernel.memory.vmm <-> vmm_vma circular import
+(OS-owner debt, see the bug doc addendum).  This spec therefore imports only
+std.spec so the alignment remains continuously verifiable on the seed binary.
+"""
+
+use std.spec.{describe, it, expect}
+
+val CATALOG: text = "src/os/kernel/loader/root_service_catalog.spl"
+val SYSCALL_IPC: text = "src/os/kernel/ipc/syscall_ipc.spl"
+val PORTABLE_NET: text = "src/os/kernel/ipc/syscall_net_portable_v1.spl"
+val BROKER_SPEC: text = "test/01_unit/os/kernel/ipc/net_listen_broker_spec.spl"
+val HTTP_MAIN: text = "src/os/services/web/http_service_main.spl"
+
+describe "catalogue NetListen table matches the live net-broker syscall gate":
+    it "catalogue mints exact named listener authority for http":
+        val catalog = file_read(CATALOG)
+        expect(catalog).to_contain(
+            "net.listen.http\", CapabilityKind.NetListen(port: 80u16)")
+        expect(catalog).to_contain("CapabilityKind.IpcListen(port_name: \"http\")")
+        expect(catalog).to_contain("CapabilityKind.IpcConnect(port_name: \"net\")")
+
+    it "catalogue never substitutes a wildcard listen or connect grant":
+        val catalog = file_read(CATALOG)
+        expect(catalog.index_of("NetListen(port: 0") < 0).to_equal(true)
+        expect(catalog.index_of("NetConnect(port: 0") < 0).to_equal(true)
+
+    it "http service contract still names the kernel NetListen consumption point":
+        val http = file_read(HTTP_MAIN)
+        expect(http).to_contain("catalogue-issued NetListen(80)")
+        expect(http).to_contain("NetListen(80) capability before delivery")
+
+    it "live owned-record gate checks the exact held NetListen port":
+        val ipc = file_read(SYSCALL_IPC)
+        expect(ipc).to_contain("pub fn owned_net_listen_broker_allows(")
+        expect(ipc).to_contain("export owned_net_listen_broker_allows")
+        expect(ipc).to_contain("caps.has(CapabilityKind.NetListen(port: port))")
+        expect(ipc).to_contain("if endpoint_name != \"net\":")
+        expect(ipc).to_contain("if method != NET_BROKER_BIND_METHOD")
+
+    it "live owned-record gate fails closed on truncated or unknown input":
+        val ipc = file_read(SYSCALL_IPC)
+        expect(ipc).to_contain("payload.len() < NET_BROKER_MIN_PORT_BYTES")
+        expect(ipc.index_of("NetListen(port: 0") < 0).to_equal(true)
+
+    it "socket syscall surface keeps the same exact-port fail-closed policy":
+        val portable = file_read(PORTABLE_NET)
+        expect(portable).to_contain(
+            "CapabilityKind.NetBindIpv4(")
+        expect(portable).to_contain("CapabilityKind.NetListen(port: addr.port)")
+        expect(portable).to_contain("case _: false")
+
+    it "pinned dynamic broker spec imports the same live gate":
+        val spec = file_read(BROKER_SPEC)
+        expect(spec).to_contain("os.kernel.ipc.syscall_ipc")
+        expect(spec).to_contain("owned_net_listen_broker_allows")

@@ -1,0 +1,303 @@
+# @cover src/app/ui.browser/app.spl 80%
+# @cover src/app/ui.browser/event_bridge.spl 80%
+# @cover src/app/ui.render/html_widgets.spl 80%
+# @cover src/lib/gc_async_mut/web/browser_session.spl 80%
+# @cover src/lib/gc_async_mut/web/browser_session_runtime.spl 80%
+# @cover src/lib/gc_async_mut/gpu/browser_engine/script/simple_script_vm.spl 80%
+# Purpose and audience: executable specification for end-to-end button, dropdown, scroll, and internal window drag events across Web DOM and UI Session.
+# @req REQ-WEB-SYS-EVENTS-001
+
+# @tag: rendering, web, ui, events, button, dropdown, scroll, window_drag
+# @req REQ-WEB-SYS-EVENTS-001
+# @evidence-display: links
+
+"""# Web & UI System Events: Button, Dropdown, Scroll, and Internal Window Drag
+
+Verifies end-to-end interactive event handling across both:
+1. Web DOM (`BrowserSession` with `<script>` JS and `<script type="text/simple">` SimpleScript)
+2. UI Session & Browser Host (`UISession` + `BrowserBackend` + `BrowserApp` + `render_html_tree`)
+
+Scenarios covered:
+- **Button:** click hit-test (`id` + coordinates), active state (`ui_pressed` / `.active`), counter & action dispatch.
+- **Dropdown:** open state toggle, option selection, `value`/`selectedIndex` update, `input`/`change` event firing, open popup rendering.
+- **Scroll:** wheel delta accumulation, `[0, max_scroll]` clamping, `scrollTop`/`scroll_offset` shift, and linked scroll sync.
+- **Internal Window Drag:** `mousedown` on titlebar (`#win-titlebar` / `internal_window`), `mousemove` `(dx, dy)` moving window `(left, top)`/`(x, y)` even outside titlebar, `mouseup` releasing capture, and subsequent `mousemove` ignored.
+"""
+
+use std.spec.{describe, it, expect, step}
+use common.ui.widget.{UIEvent, UIState, WidgetNode}
+use common.ui.parse.sdn_tree.{build_tree_from_source}
+use nogc_sync_mut.ui.session.{UISession}
+use app.ui.browser.event_bridge.{translate_wheel_event, has_active_pointer_drag}
+use app.ui.render.html_widgets.{render_html_tree}
+use std.gc_async_mut.web.browser_session.{BrowserSession}
+use std.gc_async_mut.web.browser_session_runtime.*
+use std.gc_async_mut.web.browser_session_loading.*
+use std.gc_async_mut.gpu.browser_engine.dom.{DomNodeRoute}
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
+    be_dom_find_by_id, be_dom_get_text_content, be_dom_get_attr
+}
+
+fn route_for(session: BrowserSession, id_val: text) -> DomNodeRoute:
+    val gen = session.document_generation()
+    val node = be_dom_find_by_id(session.current_dom, id_val).unwrap()
+    DomNodeRoute(generation: gen, node_id: node.node_id)
+
+fn text_of(session: BrowserSession, id_val: text) -> text:
+    be_dom_get_text_content(be_dom_find_by_id(session.current_dom, id_val).unwrap())
+
+fn attr_of(session: BrowserSession, id_val: text, attr: text) -> text:
+    be_dom_get_attr(be_dom_find_by_id(session.current_dom, id_val).unwrap(), attr)
+
+fn dom_events_page(use_ss: bool) -> text:
+    val script = if use_ss:
+        "<script type='text/simple'>\n" +
+        "var clicks = 0\n" +
+        "var win_drag = false\n" +
+        "var origin_x = 0\n" +
+        "var origin_y = 0\n" +
+        "var base_left = 30\n" +
+        "var base_top = 40\n" +
+        "val btn = document.getElementById(\"action-btn\")\n" +
+        "val badge = document.getElementById(\"btn-status\")\n" +
+        "btn.addEventListener(\"mousedown\", fn(ev):\n" +
+        "    btn.classList.add(\"active\")\n" +
+        ")\n" +
+        "btn.addEventListener(\"click\", fn(ev):\n" +
+        "    clicks += 1\n" +
+        "    btn.classList.remove(\"active\")\n" +
+        "    badge.textContent = \"Count: {{clicks}} at ({{ev.clientX}},{{ev.clientY}})\"\n" +
+        ")\n" +
+        "val sel = document.getElementById(\"mode-select\")\n" +
+        "sel.addEventListener(\"change\", fn(ev):\n" +
+        "    val v = sel.value\n" +
+        "    val idx = sel.selectedIndex\n" +
+        "    document.getElementById(\"drop-status\").textContent = \"Selected: \" + v + \" (#\" + str(idx) + \")\"\n" +
+        ")\n" +
+        "val sc = document.getElementById(\"scroll-box\")\n" +
+        "sc.addEventListener(\"scroll\", fn(ev):\n" +
+        "    val st = sc.scrollTop\n" +
+        "    document.getElementById(\"scroll-inner\").style.marginTop = \"-{{st}}px\"\n" +
+        "    document.getElementById(\"scroll-status\").textContent = \"scrollTop={{st}}px\"\n" +
+        "    document.getElementById(\"scroll-mirror\").textContent = \"Sync: {{st}}px\"\n" +
+        ")\n" +
+        "val win = document.getElementById(\"win-box\")\n" +
+        "val bar = document.getElementById(\"win-titlebar\")\n" +
+        "bar.addEventListener(\"mousedown\", fn(ev):\n" +
+        "    win_drag = true\n" +
+        "    origin_x = ev.clientX\n" +
+        "    origin_y = ev.clientY\n" +
+        ")\n" +
+        "document.addEventListener(\"mousemove\", fn(ev):\n" +
+        "    if win_drag:\n" +
+        "        val nx = base_left + (ev.clientX - origin_x)\n" +
+        "        val ny = base_top + (ev.clientY - origin_y)\n" +
+        "        win.style.left = \"{{nx}}px\"\n" +
+        "        win.style.top = \"{{ny}}px\"\n" +
+        "        document.getElementById(\"win-pos\").textContent = \"Window: ({{nx}}, {{ny}})\"\n" +
+        ")\n" +
+        "window.addEventListener(\"mouseup\", fn(ev):\n" +
+        "    if win_drag:\n" +
+        "        base_left = base_left + (ev.clientX - origin_x)\n" +
+        "        base_top = base_top + (ev.clientY - origin_y)\n" +
+        "        win_drag = false\n" +
+        ")\n" +
+        "</script>"
+    else:
+        "<script>" +
+        "var clicks = 0;" +
+        "var win_drag = false;" +
+        "var origin_x = 0;" +
+        "var origin_y = 0;" +
+        "var base_left = 30;" +
+        "var base_top = 40;" +
+        "var btn = document.getElementById('action-btn');" +
+        "var badge = document.getElementById('btn-status');" +
+        "btn.addEventListener('mousedown', function(ev) {{ btn.classList.add('active'); }});" +
+        "btn.addEventListener('click', function(ev) {{ clicks = clicks + 1; btn.classList.remove('active'); badge.textContent = 'Count: ' + clicks + ' at (' + ev.clientX + ',' + ev.clientY + ')'; }});" +
+        "var sel = document.getElementById('mode-select');" +
+        "sel.addEventListener('change', function(ev) {{ document.getElementById('drop-status').textContent = 'Selected: ' + sel.value + ' (#' + sel.selectedIndex + ')'; }});" +
+        "var sc = document.getElementById('scroll-box');" +
+        "sc.addEventListener('scroll', function(ev) {{ var st = sc.scrollTop; document.getElementById('scroll-inner').style.marginTop = '-' + st + 'px'; document.getElementById('scroll-status').textContent = 'scrollTop=' + st + 'px'; document.getElementById('scroll-mirror').textContent = 'Sync: ' + st + 'px'; }});" +
+        "var win = document.getElementById('win-box');" +
+        "var bar = document.getElementById('win-titlebar');" +
+        "bar.addEventListener('mousedown', function(ev) {{ win_drag = true; origin_x = ev.clientX; origin_y = ev.clientY; }});" +
+        "document.addEventListener('mousemove', function(ev) {{ if (win_drag) {{ var nx = base_left + (ev.clientX - origin_x); var ny = base_top + (ev.clientY - origin_y); win.style.left = nx + 'px'; win.style.top = ny + 'px'; document.getElementById('win-pos').textContent = 'Window: (' + nx + ', ' + ny + ')'; }} }});" +
+        "window.addEventListener('mouseup', function(ev) {{ if (win_drag) {{ base_left = base_left + (ev.clientX - origin_x); base_top = base_top + (ev.clientY - origin_y); win_drag = false; }} }});" +
+        "</script>"
+    "<!DOCTYPE html><html><body>" +
+    "<div id='desk-canvas'>Desktop</div>" +
+    "<button id='action-btn'>Run</button><div id='btn-status'>Count: 0</div>" +
+    "<select id='mode-select'><option value='slate' selected>Slate</option><option value='emerald'>Emerald</option><option value='amber'>Amber</option></select>" +
+    "<div id='drop-status'>Selected: slate (#0)</div>" +
+    "<div id='scroll-box' data-scroll-height='280' data-client-height='120'><div id='scroll-inner'>Rows</div></div>" +
+    "<div id='scroll-status'>scrollTop=0px</div><div id='scroll-mirror'>Sync: 0px</div>" +
+    "<div id='win-box' style='position:fixed;left:30px;top:40px;width:220px;height:120px;'>" +
+    "<div id='win-titlebar'>Title</div><div id='win-pos'>Window: (30, 40)</div></div>" +
+    script + "</body></html>"
+
+describe "System event handling for button, dropdown, scroll, and internal window drag":
+    # @manual scenario show
+    it "dispatches button, select dropdown, clamped wheel scroll, and captured window drag across JS and SimpleScript DOM":
+        # @req REQ-WEB-SYS-EVENTS-001
+        var mode_idx = 0
+        while mode_idx < 2:
+            val is_ss = mode_idx == 1
+            var session = BrowserSession.new()
+            expect(session.open_html("https://example.com/events.html", dom_events_page(is_ss)).is_ok()).to_equal(true)
+
+            step("Button: pointerdown sets active class and click increments counter with coordinates")
+            val btn_r = route_for(session, "action-btn")
+            val _ = session.dispatch_dom_primary_pointer_down_at(btn_r, 90, 82, 20, 10)
+            expect(attr_of(session, "action-btn", "class")).to_contain("active")
+            val _ = session.dispatch_dom_primary_pointer_up_at(btn_r, 90, 82, 20, 10, false, true)
+            val _ = session.dispatch_dom_primary_pointer_down_at(btn_r, 90, 82, 20, 10)
+            val _ = session.dispatch_dom_primary_pointer_up_at(btn_r, 90, 82, 20, 10, false, true)
+            expect(text_of(session, "btn-status")).to_equal("Count: 2 at (90,82)")
+
+            step("Dropdown: select option index 1 updates value, selectedIndex, and change listener")
+            val sel_r = route_for(session, "mode-select")
+            expect(session.dispatch_dom_select_index(sel_r, 1).is_ok()).to_equal(true)
+            expect(text_of(session, "drop-status")).to_equal("Selected: emerald (#1)")
+
+            step("Scroll: wheel accumulates scrollTop, clamps to [0, 160], and updates linked sync")
+            val sc_r = route_for(session, "scroll-box")
+            val st1 = session.dispatch_dom_wheel_at(sc_r, 100, 120, 0, 90).unwrap()
+            expect(st1).to_equal(90)
+            val st_max = session.dispatch_dom_wheel_at(sc_r, 100, 120, 0, 500).unwrap()
+            expect(st_max).to_equal(160)
+            val st_min = session.dispatch_dom_wheel_at(sc_r, 100, 120, 0, -400).unwrap()
+            expect(st_min).to_equal(0)
+            val st_mid = session.dispatch_dom_wheel_at(sc_r, 100, 120, 0, 120).unwrap()
+            expect(st_mid).to_equal(120)
+            expect(text_of(session, "scroll-status")).to_equal("scrollTop=120px")
+            expect(text_of(session, "scroll-mirror")).to_equal("Sync: 120px")
+
+            step("Internal window drag: titlebar mousedown captures pointer across canvas mousemove until mouseup")
+            val bar_r = route_for(session, "win-titlebar")
+            val desk_r = route_for(session, "desk-canvas")
+            val _ = session.dispatch_dom_primary_pointer_down_at(bar_r, 80, 52, 50, 12)
+            val _ = session.dispatch_dom_pointer_move_at(desk_r, 270, 182, 270, 182, 1)
+            expect(text_of(session, "win-pos")).to_equal("Window: (220, 170)")
+            val _ = session.dispatch_dom_primary_pointer_up_at(desk_r, 270, 182, 270, 182, false, false)
+            val _ = session.dispatch_dom_pointer_move_at(desk_r, 420, 310, 420, 310, 0)
+            expect(text_of(session, "win-pos")).to_equal("Window: (220, 170)")
+            expect(attr_of(session, "win-box", "style")).to_contain("left:220px")
+
+            mode_idx = mode_idx + 1
+
+    # @manual scenario show
+    it "routes button, dropdown popup, clamped scroll, and internal window drag through UISession and html_widgets":
+        # @req REQ-WEB-SYS-EVENTS-001
+        val sdn =
+            "app:\n" +
+            "    title: \"Sys Events UI Spec\"\n" +
+            "    theme: dark\n\n" +
+            "layout:\n" +
+            "    type: vbox\n" +
+            "    id: root\n" +
+            "    children:\n" +
+            "        ui_btn:\n" +
+            "            type: button\n" +
+            "            id: ui_btn\n" +
+            "            label: \"Run UI\"\n" +
+            "            action: \"ui_run\"\n" +
+            "        ui_drop:\n" +
+            "            type: dropdown\n" +
+            "            id: ui_drop\n" +
+            "            children:\n" +
+            "                0:\n" +
+            "                    type: text\n" +
+            "                    id: ui_drop_opt_0\n" +
+            "                    label: \"Alpha\"\n" +
+            "                1:\n" +
+            "                    type: text\n" +
+            "                    id: ui_drop_opt_1\n" +
+            "                    label: \"Beta\"\n" +
+            "        ui_scroll:\n" +
+            "            type: scroll\n" +
+            "            id: ui_scroll\n" +
+            "            max_height: 36\n" +
+            "            scroll_offset: 0\n" +
+            "            children:\n" +
+            "                r1:\n" +
+            "                    type: text\n" +
+            "                    id: s_r1\n" +
+            "                    height: 24\n" +
+            "                    content: \"Row 1\"\n" +
+            "                r2:\n" +
+            "                    type: text\n" +
+            "                    id: s_r2\n" +
+            "                    height: 24\n" +
+            "                    content: \"Row 2\"\n" +
+            "                r3:\n" +
+            "                    type: text\n" +
+            "                    id: s_r3\n" +
+            "                    height: 24\n" +
+            "                    content: \"Row 3\"\n" +
+            "                r4:\n" +
+            "                    type: text\n" +
+            "                    id: s_r4\n" +
+            "                    height: 24\n" +
+            "                    content: \"Row 4\"\n" +
+            "        ui_win:\n" +
+            "            type: dialog\n" +
+            "            id: ui_win\n" +
+            "            title: \"Floating\"\n" +
+            "            internal_window: true\n" +
+            "            draggable: true\n" +
+            "            x: 30\n" +
+            "            y: 180\n" +
+            "            width: 220\n" +
+            "            height: 110\n" +
+            "            z_order: 20\n" +
+            "            children:\n" +
+            "                ui_win_body:\n" +
+            "                    type: text\n" +
+            "                    id: ui_win_body\n" +
+            "                    content: \"Body\"\n"
+        val tree = build_tree_from_source(sdn).unwrap()
+        var session = UISession.new(tree)
+        session.dispatch(UIEvent.Resize(520, 340))
+
+        step("UI Button press and Dropdown open/select dispatch through UISession")
+        session.dispatch(UIEvent.TouchPress(40, 20))
+        val u_btn = session.current_tree().find_widget("ui_btn").unwrap()
+        expect(u_btn.get_prop("ui_pressed")).to_equal("true")
+        session.dispatch(UIEvent.TouchRelease(40, 20))
+        session.dispatch(UIEvent.TouchPress(40, 100))
+        val dd = session.current_tree().find_widget("ui_drop").unwrap()
+        expect(dd.get_prop("open")).to_equal("true")
+        u_btn.set_prop("ui_pressed", "true")
+        u_btn.set_prop("click_count", "1")
+        val html_open = render_html_tree(session.current_tree().root_node(), session.current_state())
+        expect(html_open).to_contain("widget-dropdown-popup")
+        expect(html_open).to_contain("data-click-count=\"1\"")
+        expect(html_open).to_contain("position: fixed; left: 30px; top: 180px;")
+        session.dispatch(UIEvent.TouchPress(40, 232))
+        expect(dd.get_prop("open")).to_equal("false")
+        expect(dd.get_prop("selected_index")).to_equal("1")
+        expect(dd.get_prop("value")).to_equal("Beta")
+
+        step("UI Internal Window drag capture across TouchPress -> TouchMove -> TouchRelease -> TouchMove")
+        val root = session.current_tree().root_node()
+        session.dispatch(UIEvent.TouchPress(80, 192))
+        expect(has_active_pointer_drag(root)).to_equal(true)
+        session.dispatch(UIEvent.TouchMove(210, 222))
+        val u_win = session.current_tree().find_widget("ui_win").unwrap()
+        expect(u_win.get_prop("x")).to_equal("160")
+        expect(u_win.get_prop("y")).to_equal("210")
+        session.dispatch(UIEvent.TouchRelease(210, 222))
+        expect(has_active_pointer_drag(root)).to_equal(false)
+        session.dispatch(UIEvent.TouchMove(400, 320))
+        expect(u_win.get_prop("x")).to_equal("160")
+        expect(u_win.get_prop("y")).to_equal("210")
+
+        step("UI Wheel event translation and clamped scroll offset rendering")
+        val wheel_ev = translate_wheel_event(40, 200, 0.0, 48.0)
+        session.dispatch(wheel_ev)
+        val u_sc = session.current_tree().find_widget("ui_scroll").unwrap()
+        expect(u_sc.get_prop("scroll_offset")).to_equal("48")
+        val html_scrolled = render_html_tree(session.current_tree().root_node(), session.current_state())
+        expect(html_scrolled).to_contain("margin-top: -48px;")
+        expect(html_scrolled).to_contain("left: 160px; top: 210px;")

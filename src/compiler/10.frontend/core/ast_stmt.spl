@@ -62,6 +62,18 @@ var stmt_mode_ready: bool = false
 var stmt_env_mirror_cached: bool = false
 var stmt_trace_tags_cached: bool = false
 
+# Bridge-scoped arena read mode (flat_ast_bridge_phase3_snapshot_throughput_
+# 2026-08-31): while a flat_ast_to_module conversion holds this scope, stmt
+# getters read the arena arrays instead of the SIMPLE_BOOTSTRAP_STMT_* env
+# mirror (same lockstep contract as ast_decl_bridge_scope in decl_nodes.spl).
+var stmt_bridge_scope: bool = false
+
+pub fn stmt_bridge_scope_enter():
+    stmt_bridge_scope = true
+
+pub fn stmt_bridge_scope_exit():
+    stmt_bridge_scope = false
+
 # High-water mark of the largest stmt index ever mirrored into the environment
 # since the last stmt_reset(). stmt_count_set(0) inside stmt_reset() would
 # otherwise erase the only record of how far the mirror reaches, so a SMALLER
@@ -122,6 +134,8 @@ fn stmt_i64_list_split(raw: text) -> [i64]:
     result
 
 fn stmt_env_mirror_enabled() -> bool:
+    if stmt_bridge_scope:
+        return false
     if stmt_mode_ready:
         return stmt_env_mirror_cached
     # Interpreter module variables may not persist between calls. Preserve its
@@ -612,9 +626,10 @@ fn stmt_get_tag(idx: i64) -> i64:
             print message
         return -1
     val fallback = stmt_tag[idx]
-    val trace_stmt_tags = env_get_nullable("SIMPLE_TRACE_STMT_TAGS") ?? ""
-    if (trace_stmt_tags != "" and not frontend_trace_suppressed() and
-        (idx < 8 or fallback <= 0)):
+    # Slot-gated (stmt_mode_slots_refresh per reset), not a raw env read: this
+    # gate is evaluated per statement node, including every flat-AST bridge
+    # conversion node in the interpreted lane.
+    if stmt_trace_tags_enabled() and (idx < 8 or fallback <= 0):
         print "[stmt_get_tag] idx={idx} arena={fallback}"
     fallback
 
@@ -767,6 +782,7 @@ export stmt_i64_set, stmt_text_set, stmt_list_set
 export stmt_body_store, stmt_body_store_one
 export stmt_reset, stmt_alloc
 export stmt_contract_clause
+export stmt_bridge_scope_enter, stmt_bridge_scope_exit
 
 # --- flat-AST pool codec: flat_stmt ------------------------------
 #

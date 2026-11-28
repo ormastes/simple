@@ -1181,6 +1181,10 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // =========================================================================
     RuntimeFuncSpec::new("rt_function_not_found", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_method_not_found", &[I64, I64, I64, I64], &[I64]),
+    // rt_value_not_callable(callee: RuntimeValue) -> RuntimeValue (never returns):
+    // runtime refusal emitted by compile_indirect_call when rt_closure_func_ptr
+    // answers NULL for the callee, instead of jumping through address zero.
+    RuntimeFuncSpec::new("rt_value_not_callable", &[I64], &[I64]),
     // =========================================================================
     // Contract checking (Design by Contract)
     // =========================================================================
@@ -1542,10 +1546,14 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_event_loop_create", &[], &[I64]),
     // rt_event_loop_register(epfd: i64, fd: i64, interest: i64, token: i64, edge: i64) -> ok: i64
     RuntimeFuncSpec::new("rt_event_loop_register", &[I64, I64, I64, I64, I64], &[I64]),
-    // rt_event_loop_poll(epfd: i64, max_events: i64, timeout_ms: i64) -> array_ptr: i64
+    // rt_event_loop_poll(epfd: i64, max_events: i64, timeout_ms: i64) -> ready count: i64 (fd/ready/token via rt_event_loop_poll_get_*)
     RuntimeFuncSpec::new("rt_event_loop_poll", &[I64, I64, I64], &[I64]),
     // rt_event_loop_poll_get_fd(index: i64) -> fd: i64
     RuntimeFuncSpec::new("rt_event_loop_poll_get_fd", &[I64], &[I64]),
+    // rt_event_loop_poll_get_ready(index: i64) -> ready: i64 (0=Read, 1=Write, 2=ReadWrite)
+    RuntimeFuncSpec::new("rt_event_loop_poll_get_ready", &[I64], &[I64]),
+    // rt_event_loop_poll_get_token(index: i64) -> token: i64
+    RuntimeFuncSpec::new("rt_event_loop_poll_get_token", &[I64], &[I64]),
     // =========================================================================
     // UDP networking operations
     // =========================================================================

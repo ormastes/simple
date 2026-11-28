@@ -78,11 +78,21 @@ scan() {
               printf '%s\n' "$content" | grep -q '\.tmp' && continue
               # filter 2: pure diagnostics
               case "$content" in
-                  *print\ *|*println*|*log_*|*'set_field("pid"'*) continue ;;
+                  *print\ *|*println*|*eprint*|*log_*|*'set_field("pid"'*) continue ;;
               esac
-              # must actually look like a path: contain a '/' or a known
-              # artifact extension inside the literal
-              printf '%s\n' "$content" | grep -qE '/|\.(o|ll|bc|a|c|so|obj|lib|sdn|exe)"' || continue
+              # must actually look like a path. Test EACH pid-interpolating
+              # literal on the line, not the whole line: a pid interpolated
+              # into file CONTENT ("{pid}\n{time / 1000}") sitting beside a
+              # fixed path literal ("/ice_owner") is not path keying.
+              # Interpolations are stripped inside each literal before the
+              # shape test: `{a() / b}` divides INSIDE the braces and is not
+              # path structure; only literal text between interpolations can
+              # be path structure.
+              pathish=$(printf '%s\n' "$content" |
+                  grep -oE '"[^"]*\{[^}]*((rt_)?getpid\(\)|_pid|\bpid\b|time_now_unix_micros\(\)|time_now_nanos\(\)|_ts\b|rt_random)[^}]*\}[^"]*"' |
+                  sed 's/{[^{}]*}//g' |
+                  grep -E '/|\.(o|ll|bc|a|c|so|obj|lib|sdn|exe)"' | head -1)
+              [ -n "$pathish" ] || continue
               # normalise whitespace so reindentation is not a false positive
               norm=$(printf '%s\n' "$content" | tr -s '[:space:]' ' ' | sed 's/^ //;s/ $//')
               printf '%s|%s\n' "$f" "$norm"
@@ -116,16 +126,32 @@ EOF
 fn f():
     print "[LLVM-LINK] pid={pid} for /some/path"
 EOF
+    # non-offender: diagnostic eprint (same class as print; the status/reap
+    # lanes emit pid-bearing eprint lines everywhere)
+    cat > "$st/src/compiler/70.backend/backend/ok_eprint.spl" <<'EOF'
+fn f():
+    eprint("[shard] shard={i}/{count} pid={pid} FAILED {label}")
+EOF
     # non-offender: content-keyed path, no pid/clock at all
     cat > "$st/src/compiler/70.backend/backend/ok_hash.spl" <<'EOF'
 fn f():
     val p = "{root}/{digest}/runtime.o"
 EOF
+    # non-offender: pid interpolated into file CONTENT, not a path. The only
+    # '/' in the literal is a division INSIDE an interpolation; the path
+    # literal ("/ice_owner") carries no pid. Flagging this class would punish
+    # writing a pid into a file, which the gate's intent does not cover.
+    cat > "$st/src/compiler/70.backend/backend/ok_content.spl" <<'EOF'
+fn f():
+    val _w = file_append_text(dir + "/ice_owner", "{getpid()}\n{time_now_unix_micros() / 1000000}")
+EOF
     out=$(scan "$st")
     echo "$out" | grep -q 'bad.spl|' || { echo "selftest: offender not detected" >&2; rc=1; }
     echo "$out" | grep -q 'ok_tmp.spl|'  && { echo "selftest: .tmp staging false-positived" >&2; rc=1; }
     echo "$out" | grep -q 'ok_log.spl|'  && { echo "selftest: diagnostic false-positived" >&2; rc=1; }
+    echo "$out" | grep -q 'ok_eprint.spl|' && { echo "selftest: eprint diagnostic false-positived" >&2; rc=1; }
     echo "$out" | grep -q 'ok_hash.spl|' && { echo "selftest: content-keyed path false-positived" >&2; rc=1; }
+    echo "$out" | grep -q 'ok_content.spl|' && { echo "selftest: content-write pid false-positived" >&2; rc=1; }
     printf '%s\n' "$out" | sort -c >/dev/null 2>&1 || { echo "selftest: scan output is not bytewise sorted" >&2; rc=1; }
     printf 'z|last\na|first\n' > "$st/unsorted-baseline.txt"
     baseline_is_sorted "$st/unsorted-baseline.txt" && { echo "selftest: unsorted baseline was accepted" >&2; rc=1; }

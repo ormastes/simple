@@ -195,6 +195,7 @@ pub use module_cache::{
     resolve_class_in_scope, owner_qualified_class_symbol, owner_qualified_classes_enabled, owner_qualified_namespace_class_symbol,
 };
 pub(crate) use module_cache::{class_identity_matches, note_renamed_class, renamed_classes_present, class_name_owned_elsewhere, class_slot_key, with_exec_owner, clear_owner_qualified_classes, enable_owner_qualified_classes};
+pub(crate) use module_cache::owned_class_candidates;
 pub use module_cache::clear_module_cache;
 pub use module_cache::{clear_probe_source_cache, probe_source_cached};
 pub use module_cache::{

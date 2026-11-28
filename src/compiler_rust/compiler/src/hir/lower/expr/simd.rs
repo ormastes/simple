@@ -332,12 +332,12 @@ impl Lowerer {
         if args_hir.iter().any(|a| self.is_u8_array_value(a))
             && args
                 .iter()
-                .all(|a| a.name.is_none() && !matches!(a.value, ast::Expr::Spread(_)))
+                .all(|a| !matches!(a.value, ast::Expr::Spread(_)))
         {
             let key = format!("{}.{}", class_name.rsplit('.').next().unwrap_or(class_name), method);
             if self.static_method_names.contains(&key) {
                 if let Some(row) = self.method_param_array_elems.get(&key) {
-                    self.reject_u8_arrays_in_row(row, &args_hir, &key)?;
+                    self.reject_u8_arrays_in_row(row, Some(args), &args_hir, &key)?;
                 }
             }
         }

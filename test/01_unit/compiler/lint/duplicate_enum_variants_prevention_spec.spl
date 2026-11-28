@@ -1,0 +1,51 @@
+"""
+## Purpose and audience
+Purpose: Prevent divergent duplicate terminal enum declarations from re-entering the compiler backend/frontend/driver type modules.
+Audience: Compiler engineers maintaining single-terminal enum boundaries.
+Bug: doc/08_tracking/bug/duplicate_backend_types_terminal_declarations.md
+"""
+# @cover src/compiler/35.semantics/lint/duplicate_enum_variants.spl
+# @cover src/compiler/70.backend/backend_types.spl
+# @cover src/compiler/70.backend/backend/backend_types.spl
+# @cover src/compiler/10.frontend/core/backend_types.spl
+# @req REQ-COMPFIX-7
+
+use std.spec.{describe, it, expect, step}
+use compiler.semantics.lint.duplicate_enum_variants.{
+    check_duplicate_enum_variants_files,
+    extract_enum_declarations
+}
+use std.nogc_sync_mut.io.file_ops.{file_read_text}
+
+describe "Duplicate terminal enum variant order prevention on compiler type modules":
+    it "reports zero divergent enum declarations across compiler backend/frontend/driver/common modules":
+        step("Scan the real compiler backend_types, driver_core_modes, linker, driver, and error modules")
+        val files = [
+            "src/compiler/70.backend/backend_types.spl",
+            "src/compiler/70.backend/backend/backend_types.spl",
+            "src/compiler/10.frontend/core/backend_types.spl",
+            "src/compiler/00.common/driver_core_modes.spl",
+            "src/compiler/70.backend/linker/link.spl",
+            "src/compiler/80.driver/build_mode.spl",
+            "src/compiler/00.common/error.spl"
+        ]
+        val findings = check_duplicate_enum_variants_files(files)
+        expect(findings.len()).to_equal(0)
+
+    it "confirms BackendKind has exactly one terminal declaration across all three backend_types files":
+        step("Count terminal BackendKind enum declarations in the three backend_types modules")
+        val files = [
+            "src/compiler/70.backend/backend_types.spl",
+            "src/compiler/70.backend/backend/backend_types.spl",
+            "src/compiler/10.frontend/core/backend_types.spl"
+        ]
+        var backend_kind_count = 0
+        var owner_path = ""
+        for p in files:
+            val decls = extract_enum_declarations(file_read_text(p), p)
+            for d in decls:
+                if d.name == "BackendKind":
+                    backend_kind_count = backend_kind_count + 1
+                    owner_path = d.file_path
+        expect(backend_kind_count).to_equal(1)
+        expect(owner_path).to_equal("src/compiler/70.backend/backend/backend_types.spl")

@@ -867,6 +867,7 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     // Error handling
     "rt_function_not_found",
     "rt_method_not_found",
+    "rt_value_not_callable",
     // I/O operations
     "rt_print_str",
     "rt_println_str",
@@ -1035,6 +1036,8 @@ pub const RUNTIME_SYMBOL_NAMES: &[&str] = &[
     "rt_event_loop_deregister",
     "rt_event_loop_poll",
     "rt_event_loop_poll_get_fd",
+    "rt_event_loop_poll_get_ready",
+    "rt_event_loop_poll_get_token",
     "rt_event_loop_close",
     "rt_value_raw_i64",
     "rt_tls_client_connect",

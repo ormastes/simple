@@ -25,6 +25,11 @@ fn views_of(kind: text) -> [NodeView]:
             val _ = 0
     out
 
+fn first_named_in(views: [NodeView], kind: text, name: text) -> NodeView?:
+    for v in views:
+        if v.kind == kind and v.name == name: return Some(v)
+    nil
+
 fn first_named(kind: text, name: text) -> NodeView?:
     for v in views_of(kind):
         if v.name == name: return Some(v)
@@ -124,6 +129,55 @@ describe "node_view_walk":
         expect(src.slice(outer.unwrap().name_start, outer.unwrap().name_end)).to_equal("str")
         expect(src.slice(inner.unwrap().name_start, inner.unwrap().name_end)).to_equal("int")
         expect(inner.unwrap().text).to_equal("int(x)")
+
+    it "anchors nested callees across the doc's unmatched-site class shapes":
+        # closure_views_miss_calls_nested_in_call_args_2026_11_07 — the LSP audit
+        # had to sed the 13 `int(text)` sites nested in call args by hand; every
+        # one of these shapes must yield an anchored, rename-ready call view.
+        step("nested class shapes")
+        val src = "fn f(x: i64) -> text:\n    str(int(x) + 1)\n\nfn g(xs: [i64], i: i64) -> i64:\n    xs[int(i)]\n\nclass C:\n    fn m(self, v: i64):\n        pass\n\nfn h(c: C, x: i64):\n    c.m(int(x))\n\nfn k(a: i64, b: i64) -> text:\n    str(int(a)) + str(int(b))\n\nfn n(x: i64) -> i64:\n    wrap(deep(x))\n"
+        var all: [NodeView] = []
+        match collect_node_views(source_snapshot("src/app/demo/nested_calls.spl", src)):
+            case Ok(views): all = views
+            case Err(_): val _ = 0
+        var int_count = 0
+        for v in all:
+            if v.kind == "call" and v.name == "int":
+                int_count += 1
+                expect(src.slice(v.name_start, v.name_end)).to_equal("int")
+        expect(int_count).to_equal(5)
+        # index-bracket arg: xs[int(i)]
+        var idx_int: NodeView? = nil
+        for v in all:
+            if v.kind == "call" and v.text == "int(i)": idx_int = Some(v)
+        expect(idx_int.unwrap().args_text).to_equal("i")
+        # method-call arg: c.m(int(x))
+        val m = first_named_in(all, "method_call", "m").unwrap()
+        expect(m.args_text).to_equal("int(x)")
+        var m_int: NodeView? = nil
+        for v in all:
+            if v.kind == "call" and v.text == "int(x)" and v.parent_kind == "method_call": m_int = Some(v)
+        expect(m_int.unwrap().name).to_equal("int")
+        var pos_str_a = -1
+        var pos_int_a = -1
+        var pos_str_b = -1
+        var pos_int_b = -1
+        var i = 0
+        while i < all.len():
+            val v = all[i]
+            if v.kind == "call" and v.text == "str(int(a))": pos_str_a = i
+            if v.kind == "call" and v.text == "int(a)": pos_int_a = i
+            if v.kind == "call" and v.text == "str(int(b))": pos_str_b = i
+            if v.kind == "call" and v.text == "int(b)": pos_int_b = i
+            i += 1
+        expect(pos_str_a).to_be_less_than(pos_int_a)
+        expect(pos_int_a).to_be_less_than(pos_str_b)
+        expect(pos_str_b).to_be_less_than(pos_int_b)
+        # direct arg: wrap(deep(x)) — outer before inner, both anchored
+        val wrap = first_named_in(all, "call", "wrap").unwrap()
+        val deep = first_named_in(all, "call", "deep").unwrap()
+        expect(wrap.args_text).to_equal("deep(x)")
+        expect(deep.text).to_equal("deep(x)")
 
     it "reports parse failure instead of views":
         step("reparse")

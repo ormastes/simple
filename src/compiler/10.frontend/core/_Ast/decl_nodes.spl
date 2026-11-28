@@ -171,6 +171,21 @@ fn ast_decl_imports_key(idx: i64) -> text:
 var ast_decl_mode_ready: bool = false
 var ast_decl_mode_cached: i64 = 1
 
+# Bridge-scoped arena read mode (flat_ast_bridge_phase3_snapshot_throughput_
+# 2026-08-31): while a flat_ast_to_module conversion holds this scope, decl
+# getters read the arena arrays instead of the SIMPLE_BOOTSTRAP_* env mirror.
+# Set for the duration of ONE conversion call by the bridge; the arrays and
+# the mirror are written in lockstep, and the frontend-cache hit path already
+# converts from restored arrays alone, so this reads the same values the
+# env-first legacy getters would return.
+var ast_decl_bridge_scope: bool = false
+
+pub fn ast_decl_bridge_scope_enter():
+    ast_decl_bridge_scope = true
+
+pub fn ast_decl_bridge_scope_exit():
+    ast_decl_bridge_scope = false
+
 fn ast_decl_arena_default() -> i64:
     # Bootstrap lanes keep the legacy default (env store on unless the lane
     # explicitly sets SIMPLE_NATIVE_ARENA_DECLS=1, as stage4 does): under a
@@ -187,7 +202,9 @@ fn ast_decl_mode_slots_refresh():
     ast_decl_mode_cached = _env_get_i64("SIMPLE_NATIVE_ARENA_DECLS", ast_decl_arena_default())
     ast_decl_mode_ready = true
 
-fn ast_decl_prefer_arena() -> bool:
+pub fn ast_decl_prefer_arena() -> bool:
+    if ast_decl_bridge_scope:
+        return true
     if ast_decl_mode_ready:
         return ast_decl_mode_cached == 1
     # Interpreter module variables may not persist between calls — fall back
@@ -195,7 +212,9 @@ fn ast_decl_prefer_arena() -> bool:
     _env_get_i64("SIMPLE_NATIVE_ARENA_DECLS", ast_decl_arena_default()) == 1
 
 fn ast_decl_env_mirror_enabled() -> bool:
-    _env_get_i64("SIMPLE_BOOTSTRAP", 0) == 1 and not ast_decl_prefer_arena()
+    if ast_decl_prefer_arena():
+        return false
+    _env_get_i64("SIMPLE_BOOTSTRAP", 0) == 1
 
 fn ast_decl_direct_set(key: text, value: text):
     if not ast_decl_prefer_arena():
@@ -1251,6 +1270,8 @@ pub fn decl_get_param_defaults(idx: i64) -> [i64]:
         val pooled = decl_param_default_text[idx]
         if pooled != "":
             return ast_i64_list_split(pooled)
+    if ast_decl_prefer_arena():
+        return []
     val env_value = ast_decl_text_get(idx, "PARAM_DEFAULTS")
     if env_value != "":
         return ast_i64_list_split(env_value)
@@ -2131,6 +2152,7 @@ pub fn flat_decl_pools_clear_chunks_v1() -> [text]:
     [ flat_pool_enc_i64(ast_decl_mirror_high_slot), flat_pool_enc_i64(ast_module_decl_mirror_high_slot)]
 
 export flat_decl_pools_dump, flat_decl_pools_restore, flat_decl_pools_clear_chunks_v1
+export ast_decl_bridge_scope_enter, ast_decl_bridge_scope_exit
 # Strict frontend cache admission calls this after every pool is restored.
 # The count slots are scalar arrays; an empty pristine slot means zero.
 # module_decls is a legacy compatibility pool: module_add_decl writes the

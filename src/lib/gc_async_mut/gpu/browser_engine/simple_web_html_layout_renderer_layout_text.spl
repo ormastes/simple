@@ -634,26 +634,49 @@ fn form_control_intrinsic_content_w(node: HNode, st: Style, cols: i32) -> i32:
 # reason: column count in, CSS px out; layout scalars.
 # @allow(primitive_api)
 pub fn input_auto_content_w(node: HNode, st: Style, cols: i32) -> i32:
-    val kind = attr_value(node.attrs_raw, "type").trim().lower()
-    if node.tag != "input" or not (kind == "submit" or kind == "button" or kind == "reset"):
+    if not input_is_button_kind(node):
         return form_control_intrinsic_content_w(node, st, cols)
-    var label = attr_value(node.attrs_raw, "value")
-    if label == "" and kind == "submit":
-        label = "Submit"
-    elif label == "" and kind == "reset":
-        label = "Reset"
+    val label = input_button_label_text(node)
     if label == "":
         return 0
-    # The label at the control's real (13.333 px) size, in milli-px: `Submit`
-    # 41.481 (Chrome 41.484), where the oversampled whole-px measure reads
-    # 41.500 and rounds the wrong way.
-    val family = browser_font_family_for_style(st.font_family, st.bold, st.font_style_italic)
-    val metrics = resolve_font_metrics_with_language_milli(family, label, font_milli_of(st.font_size, st.font_size_milli), "")
-    if not metrics.valid or metrics.width_milli < 0:
+    val exact = input_button_label_exact_milli(st, label)
+    if exact < 0:
         return form_control_label_width_px(st, label)
     # The box keeps the label's fractional width; a box at a whole-px x
     # paints it rounded (57.48 -> 57), unlike a `<select>`'s ceiled label.
-    (metrics.width_milli + 500) / 1000
+    ((exact + 500) / 1000) as i32
+
+# True for `<input type=submit|button|reset>`, whose box is sized by its label.
+fn input_is_button_kind(node: HNode) -> bool:
+    val kind = attr_value(node.attrs_raw, "type").trim().lower()
+    node.tag == "input" and (kind == "submit" or kind == "button" or kind == "reset")
+
+# The label an `<input type=submit|button|reset>` shows (its `value`, or the
+# UA `Submit` / `Reset`), "" for any other control or an empty button.
+# reason: the label is the control's own `value` attribute text.
+# @allow(primitive_api)
+pub fn input_button_label_text(node: HNode) -> text:
+    if not input_is_button_kind(node):
+        return ""
+    val kind = attr_value(node.attrs_raw, "type").trim().lower()
+    val label = attr_value(node.attrs_raw, "value")
+    if label == "" and kind == "submit":
+        return "Submit"
+    if label == "" and kind == "reset":
+        return "Reset"
+    label
+
+# The label at the control's real (13.333 px) size, in milli-px, -1 when the
+# face has no exact width: `Submit` 41.481 (Chrome 41.484), where the
+# oversampled whole-px measure reads 41.500 and rounds the wrong way.
+# reason: style and label in, milli-px width out; a layout scalar.
+# @allow(primitive_api)
+pub fn input_button_label_exact_milli(st: Style, label: text) -> i64:
+    val family = browser_font_family_for_style(st.font_family, st.bold, st.font_style_italic)
+    val metrics = resolve_font_metrics_with_language_milli(family, label, font_milli_of(st.font_size, st.font_size_milli), "")
+    if not metrics.valid or metrics.width_milli < 0:
+        return -1
+    metrics.width_milli
 
 # reason: column count and device scale in, device px out; all layout scalars.
 # @allow(primitive_api)
@@ -873,7 +896,11 @@ fn _lay_flex_item_max_content_width_inner(nodes: [HNode], styles: [Style], child
                     if inline_run > 0 and (gap_pending or text_starts_with_collapsible_space(nodes[c].text_data)) and not cst.white_space_pre:
                         inline_run = inline_run + resolved_space_advance(cst, text_codepoints(txt))
                     gap_pending = text_ends_with_collapsible_space(nodes[c].text_data) and not cst.white_space_pre
-                val resolved = if cst.resolved_font_width_milli > 0: (((cst.resolved_font_width_milli + 999) / 1000) as i32) else: cst.resolved_font_width
+                # A row-flex text child is its own anonymous flex item, so its
+                # width is ceiled. Inline pieces of one line are not: ceiling
+                # "ab ", "cd" and " ef" one by one grew a shrink-to-fit table
+                # or button by 2 px (combo matrix tt-td-code-w 65 -> 67).
+                val resolved = if row_flex and cst.resolved_font_width_milli > 0: (((cst.resolved_font_width_milli + 999) / 1000) as i32) else: cst.resolved_font_width
                 if resolved > 0:
                     inline_run = inline_run + resolved
                 else:

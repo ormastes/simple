@@ -581,6 +581,10 @@ fn _js_parser_expression(raw: text) -> JsExpression:
             left: _js_parser_expression(expr.slice(0, exponent.first)),
             right: _js_parser_expression(expr.slice(exponent.first + exponent.second.len(), expr.byte_len()))
         )
+    if expr.starts_with("++") and expr.len() > 2:
+        return JsExpression.Unary(op: "++pre", operand: _js_parser_expression(expr.slice(2, expr.byte_len())))
+    if expr.starts_with("--") and expr.len() > 2:
+        return JsExpression.Unary(op: "--pre", operand: _js_parser_expression(expr.slice(2, expr.byte_len())))
     if expr.starts_with("-") and expr.len() > 1:
         return JsExpression.Unary(op: "-", operand: _js_parser_expression(expr.slice(1, expr.byte_len())))
     if expr.starts_with("!") and expr.len() > 1:
@@ -676,6 +680,12 @@ fn _js_parser_postfix(expr: text) -> JsExpression:
             val key_text = if end > pos: expr.slice(pos + 1, end) else: ""
             current = JsExpression.ComputedMember(object: current, property: _js_parser_expression(key_text.trim()))
             pos = if end >= 0: end + 1 else: expr.len()
+        else if pos + 2 <= expr.byte_len() and expr.slice(pos, pos + 2) == "++":
+            current = JsExpression.Unary(op: "++post", operand: current)
+            pos = pos + 2
+        else if pos + 2 <= expr.byte_len() and expr.slice(pos, pos + 2) == "--":
+            current = JsExpression.Unary(op: "--post", operand: current)
+            pos = pos + 2
         else:
             pos = expr.len()
     current
@@ -1063,6 +1073,30 @@ fn _js_parser_find_top_level_right_binary_operator(expr: text, needle: text) -> 
         i = i + 1
     found
 
+fn _js_is_scientific_exponent_sign(expr: text, pos: i64) -> bool:
+    if pos < 2:
+        return false
+    val e_ch = expr.slice(pos - 1, pos)
+    if e_ch != "e" and e_ch != "E":
+        return false
+    val nxt = if pos + 1 < expr.byte_len(): expr.slice(pos + 1, pos + 2) else: ""
+    if not _js_parser_is_digit(nxt):
+        return false
+    var k = pos - 2
+    var saw_digit = false
+    while k >= 0:
+        val ch = expr.slice(k, k + 1)
+        if _js_parser_is_digit(ch):
+            saw_digit = true
+            k = k - 1
+        elif ch == ".":
+            k = k - 1
+        elif (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or ch == "_" or ch == "$":
+            return false
+        else:
+            break
+    saw_digit
+
 fn _js_parser_binary_operator_match_is_standalone(expr: text, pos: i64, op: text) -> bool:
     val prev = if pos > 0: expr.slice(pos - 1, pos) else: ""
     val op_bytes = op.byte_len()
@@ -1076,9 +1110,9 @@ fn _js_parser_binary_operator_match_is_standalone(expr: text, pos: i64, op: text
     if op == ">":
         return prev != "=" and next != "=" and next != ">"
     if op == "+":
-        return prev != "+" and next != "+"
+        return prev != "+" and next != "+" and not _js_is_scientific_exponent_sign(expr, pos)
     if op == "-":
-        return prev != "-" and next != "-"
+        return prev != "-" and next != "-" and not _js_is_scientific_exponent_sign(expr, pos)
     true
 
 fn _js_parser_binary_operator_is_unary(expr: text, pos: i64, op: text) -> bool:

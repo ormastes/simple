@@ -2692,9 +2692,8 @@ fn _aaa_flush(o: [i64]):
             else:
                 # A touched run is walked without the group test.
                 while x < w and o[8 + x] != 0:
-                    var a = o[8 + x]
-                    if a > 247: a = 255
-                    if a == 255:
+                    val a = o[8 + x]
+                    if a >= 248:
                         o[row + x] = 255
                     elif a >= 8:
                         o[row + x] = a + (((((255 - a) * o[row + x]) + 128) * 257) >> 16)
@@ -2799,11 +2798,13 @@ fn _aaa_alpha_above(al: [i64], off: i64, l: i64, r: i64, dy: i64, full: i64):
     val last = r - ((rr - 1) << 16)
     val first_h = ((first * dy) >> 16)
     al[off] = (((first * first_h) >> 16) >> 9) & 255
-    var a16 = (if (first_h + (dy >> 1)) > 2147483647: 2147483647 else: (if (first_h + (dy >> 1)) < -2147483648: -2147483648 else: (first_h + (dy >> 1))))
+    var a16 = first_h + (dy >> 1)
+    a16 = if a16 > 2147483647: 2147483647 else: (if a16 < -2147483648: -2147483648 else: a16)
     var i = 1
     while i < rr - 1:
         al[off + i] = (a16 >> 8) & 255
-        a16 = (if (a16 + dy) > 2147483647: 2147483647 else: (if (a16 + dy) < -2147483648: -2147483648 else: (a16 + dy)))
+        val s = a16 + dy
+        a16 = if s > 2147483647: 2147483647 else: (if s < -2147483648: -2147483648 else: s)
         i = i + 1
     al[off + rr - 1] = (full - ((((last >> 11) * (last >> 11) * (dy >> 11)) >> 8) & 255)) & 255
 
@@ -2817,11 +2818,13 @@ fn _aaa_alpha_below(al: [i64], off: i64, l: i64, r: i64, dy: i64, full: i64):
     val last = r - ((rr - 1) << 16)
     val last_h = ((last * dy) >> 16)
     al[off + rr - 1] = (((last * last_h) >> 16) >> 9) & 255
-    var a16 = (if (last_h + (dy >> 1)) > 2147483647: 2147483647 else: (if (last_h + (dy >> 1)) < -2147483648: -2147483648 else: (last_h + (dy >> 1))))
+    var a16 = last_h + (dy >> 1)
+    a16 = if a16 > 2147483647: 2147483647 else: (if a16 < -2147483648: -2147483648 else: a16)
     var i = rr - 2
     while i > 0:
         al[off + i] = (a16 >> 8) & 255
-        a16 = (if (a16 + dy) > 2147483647: 2147483647 else: (if (a16 + dy) < -2147483648: -2147483648 else: (a16 + dy)))
+        val s = a16 + dy
+        a16 = if s > 2147483647: 2147483647 else: (if s < -2147483648: -2147483648 else: s)
         i = i - 1
     al[off] = (full - ((((first >> 11) * (first >> 11) * (dy >> 11)) >> 8) & 255)) & 255
 
@@ -3348,8 +3351,11 @@ fn _aaa_cross(e: [i64], c: i64, ny: i64, nn: i64, fwd: bool) -> i64:
 # aaa_walk_edges (non-convex, nonzero winding).
 fn _aaa_walk(e: [i64], o: [i64], start_y: i64, stop_y: i64, left_clip: i64, right_clip: i64, skip_cross: bool, rec: [i64]):
     # `rec` non-empty: record every trapezoid row (gray phase replay).
+    # The count stays in a local and is written once at the end: `rec[0]` is
+    # read nowhere inside the walk, and each recorded row is one store.
+    val rec_lim = rec.len() - 11
+    var rec_n = 0
     var rec_on = rec.len() > 0
-    if rec_on: rec[0] = 0
     e[0] = left_clip
     e[2] = left_clip
     e[24] = right_clip
@@ -3399,26 +3405,23 @@ fn _aaa_walk(e: [i64], o: [i64], start_y: i64, stop_y: i64, left_clip: i64, righ
                 val lx = e[left_e]
                 val next_left = if lx > left_clip: lx else: left_clip
                 val next_rite = if nx_x < right_clip: nx_x else: right_clip
-                var nrb = false
+                val nxt = e[curr + 21]
+                # Neighbour-run blitter test (Skia fNeedsNextBlitter): the A
+                # half re-derives in replay from prev_rite, the B half is
+                # stored; both are needed only for full-height strips.
+                var nba = 0
+                var nbb = 0
                 if full == 255:
-                    nrb = prev_rite > (left >> 16) or prev_rite > (lx >> 16)
-                    if not nrb:
-                        val n = e[curr + 21]
-                        if e[n + 4] < next_y:
-                            val ndx = if e[n + 1] < 0: 0 - e[n + 1] else: e[n + 1]
-                            nrb = nx_x + 65536 >= e[n] - ndx
+                    if prev_rite > (left >> 16) or prev_rite > (lx >> 16): nba = 1
+                    if e[nxt + 4] < next_y:
+                        val ndx = if e[nxt + 1] < 0: 0 - e[nxt + 1] else: e[nxt + 1]
+                        if nx_x + 65536 >= e[nxt] - ndx: nbb = 1
+                val nrb = nba == 1 or nbb == 1
                 if rec_on:
                     # Phase replay record (see `_gray_aaa_replay`): raw, unclamped
                     # x, so another quarter phase re-derives the clamps and `nrb`.
-                    val rn = rec[0]
-                    val rb = 6 + rn * 11
-                    if rb + 11 <= rec.len():
-                        var nb2 = 0
-                        if full == 255:
-                            val rnx = e[curr + 21]
-                            if e[rnx + 4] < next_y:
-                                val rndx = if e[rnx + 1] < 0: 0 - e[rnx + 1] else: e[rnx + 1]
-                                if nx_x + 65536 >= e[rnx] - rndx: nb2 = 1
+                    val rb = 6 + rec_n * 11
+                    if rb <= rec_lim:
                         rec[rb] = ry
                         rec[rb + 1] = left_raw
                         rec[rb + 2] = cx
@@ -3429,13 +3432,17 @@ fn _aaa_walk(e: [i64], o: [i64], start_y: i64, stop_y: i64, left_clip: i64, righ
                         rec[rb + 7] = full
                         rec[rb + 8] = first_span
                         rec[rb + 9] = 0
-                        rec[rb + 10] = nb2
-                        rec[0] = rn + 1
+                        rec[rb + 10] = nbb
+                        rec_n = rec_n + 1
                     else:
                         rec[0] = -1
                         rec_on = false
                     first_span = 0
-                    _aaa_trap_row_gray(o, ry, left, rite, next_left, next_rite, left_dy, e[curr + 6], full, nrb)
+                    # The mask plane (a narrow path) has no gray-only row copy.
+                    if o[2] == 1:
+                        _aaa_trap_row(o, ry, left, rite, next_left, next_rite, left_dy, e[curr + 6], full, nrb)
+                    else:
+                        _aaa_trap_row_gray(o, ry, left, rite, next_left, next_rite, left_dy, e[curr + 6], full, nrb)
                 else:
                     _aaa_trap_row(o, ry, left, rite, next_left, next_rite, left_dy, e[curr + 6], full, nrb)
                 prev_rite = if rite > nx_x: (rite + 65535) >> 16 else: (nx_x + 65535) >> 16
@@ -3445,11 +3452,14 @@ fn _aaa_walk(e: [i64], o: [i64], start_y: i64, stop_y: i64, left_clip: i64, righ
                 left_dy = e[curr + 6]
                 left_e = curr
             val nxt = e[curr + 21]
-            var more = e[curr + 5] <= next_y and e[curr + 7] > 0
-            while more:
-                e[curr + 18] = e[curr]
-                e[curr + 19] = e[curr + 3]
-                more = _aaa_update_quad(e, curr) and e[curr + 5] <= next_y and e[curr + 7] > 0
+            var cur_x = nx_x
+            if e[curr + 5] <= next_y and e[curr + 7] > 0:
+                while true:
+                    e[curr + 18] = e[curr]
+                    e[curr + 19] = e[curr + 3]
+                    if not _aaa_update_quad(e, curr): break
+                    cur_x = e[curr]
+                    if not (e[curr + 5] <= next_y and e[curr + 7] > 0): break
             val lo = e[curr + 5]
             if lo <= next_y:
                 val rp1 = e[curr + 20]
@@ -3458,20 +3468,24 @@ fn _aaa_walk(e: [i64], o: [i64], start_y: i64, stop_y: i64, left_clip: i64, righ
                 e[rn1 + 20] = rp1
             else:
                 if lo < nn: nn = lo
-                val new_x = e[curr]
-                if new_x < prev_x:
-                    val p = _aaa_back_start(e, e[curr + 20], new_x)
+                if cur_x < prev_x:
+                    val p = _aaa_back_start(e, e[curr + 20], cur_x)
                     if e[p + 21] != curr:
                         val rp2 = e[curr + 20]
                         val rn2 = e[curr + 21]
                         e[rp2 + 21] = rn2
                         e[rn2 + 20] = rp2
-                        _aaa_insert_after(e, curr, p)
+                        # _aaa_insert_after, inline (a call is ~4 statements
+                        # on this lane and reordering is per-strip).
+                        e[curr + 20] = p
+                        e[curr + 21] = e[p + 21]
+                        e[e[p + 21] + 20] = curr
+                        e[p + 21] = curr
                 else:
-                    prev_x = new_x
+                    prev_x = cur_x
                 if not skip_cross:
                     val p = e[curr + 20]
-                    if e[p + 20] >= 0 and e[p] + e[p + 1] > new_x + e[curr + 1]: nn = next_y + 16384
+                    if e[p + 20] >= 0 and e[p] + e[p + 1] > cur_x + e[curr + 1]: nn = next_y + 16384
             curr = nxt
         if inside:
             val lx = e[left_e]
@@ -3488,11 +3502,20 @@ fn _aaa_walk(e: [i64], o: [i64], start_y: i64, stop_y: i64, left_clip: i64, righ
         y = next_y
         if y >= stop_fixed: break
         var ne = curr
+        if rec_on and e[ne + 20] == 0 and e[ne] < ((rec[1] >> 8) << 8):
+            # The next test compares `ne` with the head sentinel, whose x is the
+            # left clip (0 for SafeRLE, irl for the mask plane). An edge left of
+            # the path's sample bounds could take a different branch under the
+            # other blitter, so the record is dropped.
+            rec[0] = -1
+            rec_on = false
         if e[ne + 4] > y:
             nn = (if (e[ne + 4]) > y and (e[ne + 4]) < nn: (e[ne + 4]) else: nn)
         elif e[e[ne + 20]] <= e[ne]:
             while e[ne + 4] <= y:
-                nn = _aaa_cross(e, ne, y, nn, false)
+                # _aaa_cross(e, ne, y, nn, false), inline.
+                val ca = e[ne + 20]
+                if e[ca + 20] >= 0 and e[ca] + e[ca + 1] > e[ne] + e[ne + 1]: nn = y + 16384
                 nn = (if (e[ne + 5]) > y and (e[ne + 5]) < nn: (e[ne + 5]) else: nn)
                 ne = e[ne + 21]
             nn = (if (e[ne + 4]) > y and (e[ne + 4]) < nn: (e[ne + 4]) else: nn)
@@ -3517,14 +3540,22 @@ fn _aaa_walk(e: [i64], o: [i64], start_y: i64, stop_y: i64, left_clip: i64, righ
                     val rn3 = e[ne + 21]
                     e[rp3 + 21] = rn3
                     e[rn3 + 20] = rp3
-                    _aaa_insert_after(e, ne, start)
-                nn = _aaa_cross(e, ne, y, nn, false)
-                nn = _aaa_cross(e, ne, y, nn, true)
+                    # _aaa_insert_after, inline.
+                    e[ne + 20] = start
+                    e[ne + 21] = e[start + 21]
+                    e[e[start + 21] + 20] = ne
+                    e[start + 21] = ne
+                # _aaa_cross(e, ne, y, nn, false/true), both inline.
+                val fa = e[ne + 20]
+                if e[fa + 20] >= 0 and e[fa] + e[fa + 1] > e[ne] + e[ne + 1]: nn = y + 16384
+                val fb = e[ne + 21]
+                if e[fb + 21] >= 0 and e[ne] + e[ne + 1] > e[fb] + e[fb + 1]: nn = y + 16384
                 nn = (if (e[ne + 5]) > y and (e[ne + 5]) < nn: (e[ne + 5]) else: nn)
                 start = ne
                 ne = nx
                 again = e[ne + 4] <= y
             nn = (if (e[ne + 4]) > y and (e[ne + 4]) < nn: (e[ne + 4]) else: nn)
+    if rec_on: rec[0] = rec_n
 
 
 # Advance a convex-walker edge past `y`; false = the edge is exhausted.
@@ -3884,21 +3915,85 @@ fn _lcd_aaa_mask(commands: [SfntGlyfCommand], scale: f64, phase: f64, x0: i64, t
             k = k + 2
     if open: n = _aaa_push_line(e, n, qx, qy, sx, sy)
     if n == 0: return o
-    # Sort by (upper_y, x, dx), insertion (stable), then link head..tail.
+    # Sort by (upper_y, x, dx), stable, then link head..tail. Path order is
+    # only runs-sorted, so a plain insertion sort is quadratic in the edge
+    # count (a size-invariant cost that dominates wide glyphs on the
+    # interpreter lane). Bucket the edges by their top's pixel row with a
+    # stable counting sort over the path bounds irt..irb (+-2 rows of f32
+    # rounding slack) and run the same insertion compare inside each small
+    # bucket: identical total order, so the walk is unchanged. The
+    # unspecialised insertion sort stays for tiny lists and degenerate bands.
     var order: [i64] = []
     var i = 0
-    while i < n:
-        val b = (i + 2) * 24
-        var j = order.len()
-        order.push(b)
-        while j > 0:
-            val a = order[j - 1]
-            val later = e[a + 4] > e[b + 4] or (e[a + 4] == e[b + 4] and (e[a] > e[b] or (e[a] == e[b] and e[a + 1] > e[b + 1])))
-            if not later: break
-            order[j] = a
-            j = j - 1
-        order[j] = b
-        i = i + 1
+    val row_lo = irt - 2
+    val rows_sz = irb - irt + 5
+    if n < 32 or rows_sz > 8193:
+        while i < n:
+            val b = (i + 2) * 24
+            var j = order.len()
+            order.push(b)
+            while j > 0:
+                val a = order[j - 1]
+                val later = e[a + 4] > e[b + 4] or (e[a + 4] == e[b + 4] and (e[a] > e[b] or (e[a] == e[b] and e[a + 1] > e[b + 1])))
+                if not later: break
+                order[j] = a
+                j = j - 1
+            order[j] = b
+            i = i + 1
+    else:
+        var cnt: [i64] = [0; rows_sz + 1]
+        var bi = 0
+        while bi < n:
+            val b = (bi + 2) * 24
+            cnt[(e[b + 4] >> 16) - row_lo + 1] = cnt[(e[b + 4] >> 16) - row_lo + 1] + 1
+            bi = bi + 1
+        var ci = 1
+        var big = false
+        while ci <= rows_sz:
+            if cnt[ci] > 64: big = true
+            cnt[ci] = cnt[ci] + cnt[ci - 1]
+            ci = ci + 1
+        if big:
+            # A pathological band (nearly all tops on one row): keep the
+            # unspecialised insertion sort rather than a quadratic bucket.
+            while i < n:
+                val b = (i + 2) * 24
+                var j = order.len()
+                order.push(b)
+                while j > 0:
+                    val a = order[j - 1]
+                    val later = e[a + 4] > e[b + 4] or (e[a + 4] == e[b + 4] and (e[a] > e[b] or (e[a] == e[b] and e[a + 1] > e[b + 1])))
+                    if not later: break
+                    order[j] = a
+                    j = j - 1
+                order[j] = b
+                i = i + 1
+        else:
+            # Scatter from the end so equal rows keep input order (stable).
+            order = [0; n]
+            bi = n
+            while bi > 0:
+                bi = bi - 1
+                val b = (bi + 2) * 24
+                val r = (e[b + 4] >> 16) - row_lo
+                cnt[r + 1] = cnt[r + 1] - 1
+                order[cnt[r + 1]] = b
+            var bs = 0
+            while bs < rows_sz:
+                var j = cnt[bs] + 1
+                val be = cnt[bs + 1]
+                while j < be:
+                    val b = order[j]
+                    var k = j - 1
+                    while k >= cnt[bs]:
+                        val a = order[k]
+                        val later = e[a + 4] > e[b + 4] or (e[a + 4] == e[b + 4] and (e[a] > e[b] or (e[a] == e[b] and e[a + 1] > e[b + 1])))
+                        if not later: break
+                        order[k + 1] = a
+                        k = k - 1
+                    order[k + 1] = b
+                    j = j + 1
+                bs = bs + 1
     e[4] = -2147483648
     e[5] = -2147483648
     e[6] = 2147483647
@@ -3926,7 +4021,9 @@ fn _lcd_aaa_mask(commands: [SfntGlyfCommand], scale: f64, phase: f64, x0: i64, t
     if convex and n >= 2:
         _aaa_walk_convex(e, o, stop_y, left_b, right_b)
     else:
-        if use_mask or convex or rec.len() == 0:
+        # A rectangle is not recorded: at a phase where it takes the mask
+        # plane, a direct fill draws it with `_aaa_fat_rect`, not the walk.
+        if convex or rec.len() == 0 or (moves == 1 and _aaa_rect(pv, px, py, np).len() == 4):
             val no_rec: [i64] = []
             _aaa_walk(e, o, start_y, stop_y, left_b, right_b, np > (irb - irt) * 2, no_rec)
         else:
@@ -4224,22 +4321,63 @@ var _gray_aaa_recs: Dict<text, [i64]> = {}
 val _GRAY_AAA_REC_SLOT_BUDGET: i64 = 2000000
 var _gray_aaa_rec_slots: i64 = 0
 
+# Whether `_lcd_aaa_mask` (one sample per pixel) sees a convex path at
+# `phase`: the same f32 sample points and `_aaa_convex` test. Convexity is
+# not translation-invariant after the f32 rounding (Nunito `.` at 64 px and
+# `I` at 60/69/72 px are convex at some quarter phases only), and a convex
+# path takes the convex walker, which a record cannot replay.
+fn _gray_aaa_convex_at(commands: [SfntGlyfCommand], scale: f64, phase: f64, x0: i64, top: f64) -> bool:
+    val cx = (0 - x0) as f64
+    var px: [f64] = []
+    var py: [f64] = []
+    var moves = 0
+    for command in commands:
+        if command.verb == SFNT_GLYF_CLOSE: continue
+        if command.verb == SFNT_GLYF_MOVE:
+            moves = moves + 1
+            if moves > 1: return false
+        val ax = (((command.x1 * scale) as f32) as f64)
+        val ay = (((command.y1 * scale) as f32) as f64)
+        px.push((((1.0 * ((((ax + phase) as f32) as f64)) + cx) as f32) as f64))
+        py.push((((top - ay) as f32) as f64))
+        if command.verb == SFNT_GLYF_QUAD:
+            val bx = (((command.x2 * scale) as f32) as f64)
+            val by = (((command.y2 * scale) as f32) as f64)
+            px.push((((1.0 * ((((bx + phase) as f32) as f64)) + cx) as f32) as f64))
+            py.push((((top - by) as f32) as f64))
+    moves == 1 and _aaa_convex(px, py, px.len())
+
 # Replay recorded trapezoid rows shifted by `shift` (16.16) into a fresh
-# SafeRLE blitter state of `aw` x `h`: the writes `_aaa_walk` makes at that
-# phase (clip 0..aw, `nrb` and the previous span's right end re-derived as in
-# the walker).
-fn _gray_aaa_replay(rec: [i64], shift: i64, aw: i64, h: i64, irl: i64, irr: i64) -> [i64]:
-    var o: [i64] = [0; 8 + aw + (aw + 32) * h]
+# blitter state of `aw` x `h`: the writes `_aaa_walk` makes at that phase
+# (`nrb` and the previous span's right end re-derived as in the walker).
+# `mask`: the small-path mask plane `_lcd_aaa_mask` picks for this phase
+# (clip irl..irr, `_aaa_trap_row`'s mask writes); otherwise SafeRLE (clip
+# 0..aw). The walk depends on the blitter only through the left-clip x of
+# the head sentinel (`e[0]`); `_aaa_walk` drops a record whose edge order
+# test reached that sentinel left of the sample bounds, so a kept record
+# replays into both blitters.
+fn _gray_aaa_replay(rec: [i64], shift: i64, aw: i64, h: i64, irl: i64, irr: i64, mask: bool) -> [i64]:
+    var o: [i64] = []
+    var left_clip = 0
+    var right_clip = aw << 16
+    if mask:
+        o = [0; 8 + aw + (aw + 32) * h * 2]
+        o[2] = 1
+        o[7] = 24 + aw + (aw + 32) * h
+        if irl > 0: left_clip = irl << 16
+        if (irr << 16) < right_clip: right_clip = irr << 16
+    else:
+        o = [0; 8 + aw + (aw + 32) * h]
+        o[7] = 24 + aw
     o[0] = aw
     o[1] = h
     o[3] = 1
     o[4] = irl
     o[5] = irr
     o[6] = -1
-    o[7] = 24 + aw
-    val right_clip = aw << 16
+    val first_rite = left_clip >> 16
     val n = rec[0]
-    var prev_rite = 0
+    var prev_rite = first_rite
     var i = 0
     var rb = 6
     while i < n:
@@ -4248,13 +4386,16 @@ fn _gray_aaa_replay(rec: [i64], shift: i64, aw: i64, h: i64, irl: i64, irr: i64)
         val cx = rec[rb + 2] + shift
         val lx = rec[rb + 3] + shift
         val nx_x = rec[rb + 4] + shift
-        val left = if left_raw > 0: left_raw else: 0
+        val left = if left_raw > left_clip: left_raw else: left_clip
         val rite = if cx < right_clip: cx else: right_clip
-        if rec[rb + 8] == 1: prev_rite = 0
+        if rec[rb + 8] == 1: prev_rite = first_rite
         var nrb = false
         if full == 255:
             nrb = rec[rb + 10] == 1 or prev_rite > (left >> 16) or prev_rite > (lx >> 16)
-        _aaa_trap_row_gray(o, rec[rb], left, rite, if lx > 0: lx else: 0, if nx_x < right_clip: nx_x else: right_clip, rec[rb + 5], rec[rb + 6], full, nrb)
+        if mask:
+            _aaa_trap_row(o, rec[rb], left, rite, if lx > left_clip: lx else: left_clip, if nx_x < right_clip: nx_x else: right_clip, rec[rb + 5], rec[rb + 6], full, nrb)
+        else:
+            _aaa_trap_row_gray(o, rec[rb], left, rite, if lx > 0: lx else: 0, if nx_x < right_clip: nx_x else: right_clip, rec[rb + 5], rec[rb + 6], full, nrb)
         if full == 255: prev_rite = if rite > nx_x: (rite + 65535) >> 16 else: (nx_x + 65535) >> 16
         rb = rb + 11
         i = i + 1
@@ -4287,9 +4428,10 @@ pub fn sfnt_gray_outline_raster(outline: SfntLcdOutline, phase_q: i64) -> Option
             val irl = (rec[1] + shift) >> 16
             val irr = (rec[2] + shift + 65535) >> 16
             val irw = irr - irl
-            # Same blitter as a direct fill: a small path takes the mask plane.
-            if not (irw <= 32 and ((irw + 3) / 4 * 4) * rec[3] <= 1024):
-                mask = _gray_aaa_replay(rec, shift, width, height, irl, irr)
+            # Same blitter as a direct fill: a small path takes the mask plane,
+            # a path that is convex at this phase the convex walker.
+            if not _gray_aaa_convex_at(outline.slo_commands, scale, phase, x0, 0.0 - outline.slo_raster_top):
+                mask = _gray_aaa_replay(rec, shift, width, height, irl, irr, irw <= 32 and ((irw + 3) / 4 * 4) * rec[3] <= 1024)
     if mask.len() == 0:
         if known:
             mask = _lcd_aaa_mask(outline.slo_commands, scale, phase, x0, 0.0 - outline.slo_raster_top, width, height, 1, [])

@@ -31,6 +31,123 @@ fn _css_root_prefix_is_preamble(prefix: text) -> bool:
             return false
     remaining.len() == 0
 
+# CSS Syntax 3 4.3.2: a `/* */` comment is consumed before tokenization, so it
+# separates like whitespace and never reaches a selector or declaration. The
+# rule scanner splits on `{` `}` `;`, so comments go first or a commented run
+# such as `{/* a:1;b:2 */}` leaks `b:2`. An unterminated comment runs to EOF.
+# A `/*` is not a comment inside a "..." / '...' string (a backslash escapes
+# the quote; an unescaped newline ends a bad string, 4.3.5) or inside an
+# unquoted `url(...)` (4.3.6). Native `find_from` per comment / string / url;
+# a sheet without `/*` is returned as is.
+fn _css_strip_comments(css: text) -> text:
+    var open = find_from(css, "/*", 0)
+    if open < 0:
+        return css
+    var parts: [text] = []
+    var pos = 0
+    var scan = 0
+    val n = css.byte_len() as i32
+    var dq = find_from(css, "\"", 0)
+    var sq = find_from(css, "'", 0)
+    var url = find_from(css, "url(", 0)
+    while open >= 0:  # cpu-lane-loop-ok: one iteration per `/*` comment, string or url( before it in one stylesheet, located by native find_from; each advances scan or pos
+        if dq >= 0 and dq < scan:
+            dq = find_from(css, "\"", scan)
+        if sq >= 0 and sq < scan:
+            sq = find_from(css, "'", scan)
+        if url >= 0 and url < scan:
+            url = find_from(css, "url(", scan)
+        var skip_at = -1
+        var kind = 0
+        if dq >= 0 and dq < open:
+            skip_at = dq
+            kind = 1
+        if sq >= 0 and sq < open and (skip_at < 0 or sq < skip_at):
+            skip_at = sq
+            kind = 2
+        if url >= 0 and url < open and (skip_at < 0 or url < skip_at):
+            skip_at = url
+            kind = 3
+        if kind == 0:
+            parts.push(css.substring(pos, open))
+            parts.push(" ")
+            val close = find_from(css, "*/", open + 2)
+            if close < 0:
+                pos = n
+                open = -1
+            else:
+                pos = close + 2
+                scan = pos
+                open = find_from(css, "/*", pos)
+        else:
+            val after = if kind == 3:
+                _css_url_token_end(css, skip_at + 4)
+            elif kind == 1:
+                _css_string_end(css, skip_at, "\"")
+            else:
+                _css_string_end(css, skip_at, "'")
+            if after < 0:
+                open = -1
+            else:
+                scan = after
+                if open < scan:
+                    open = find_from(css, "/*", scan)
+    if pos < n:
+        parts.push(css.substring(pos, n))
+    parts.join("")
+
+# True when the byte at `at` is escaped: an odd run of backslashes precedes it.
+fn _css_byte_escaped(css: text, at: i32) -> bool:
+    var count = 0
+    var i = at - 1
+    while i >= 0 and css.byte_at(i) == 92:  # cpu-lane-loop-ok: walks back over the backslash run before ONE quote or newline; bound is that run's length
+        count = count + 1
+        i = i - 1
+    count % 2 == 1
+
+# Byte offset just past the string opened at `quote_at`, or -1 when it runs to
+# EOF. An escaped quote or newline continues it; an unescaped newline ends a
+# bad string before the newline.
+fn _css_string_end(css: text, quote_at: i32, mark: text) -> i32:
+    var from = quote_at + 1
+    var guard = 0
+    val n = css.byte_len() as i32
+    while guard <= n:  # cpu-lane-loop-ok: one iteration per escaped quote / newline inside ONE string, each advancing `from`; the sheet length bounds it
+        guard = guard + 1
+        val close = find_from(css, mark, from)
+        val nl = find_from(css, "\n", from)
+        if nl >= 0 and (close < 0 or nl < close):
+            if not _css_byte_escaped(css, nl):
+                return nl
+            from = nl + 1
+        elif close < 0:
+            return -1
+        elif _css_byte_escaped(css, close):
+            from = close + 1
+        else:
+            return close + 1
+    -1
+
+# Byte offset just past an unquoted url( ... ) whose body starts at `at`, or
+# `at` itself at a quote (the string is scanned as a string), or -1 at EOF.
+fn _css_url_token_end(css: text, at: i32) -> i32:
+    var i = at
+    val n = css.byte_len() as i32
+    while i < n:  # cpu-lane-loop-ok: skips the leading whitespace of ONE url( body; bound is that run's length
+        val b = css.byte_at(i)
+        if b != 32 and b != 9 and b != 10 and b != 13 and b != 12:
+            break
+        i = i + 1
+    if i >= n:
+        return -1
+    val b0 = css.byte_at(i)
+    if b0 == 34 or b0 == 39:
+        return i
+    val close = find_from(css, ")", i)
+    if close < 0:
+        return -1
+    close + 1
+
 fn _css_collect_custom_props(css: text, root_attrs: text) -> text:
     # Collect --name: value pairs from :root { } blocks.
     # Returns a compact string of "--name:value\n" entries.
@@ -1011,7 +1128,7 @@ fn _extract_css_vw_with_rule_limit(
         val pre_close = find_from(html, "</style", pre_open)
         if pre_close < 0:
             break
-        val pre_css = html.substring(pre_open + 1, pre_close)
+        val pre_css = _css_strip_comments(html.substring(pre_open + 1, pre_close))
         val collected_props = _css_collect_custom_props(pre_css, root_attrs)
         val scoped_props = _css_collect_scoped_custom_props(
             pre_css, collected_props
@@ -1048,7 +1165,7 @@ fn _extract_css_vw_with_rule_limit(
         val close = find_from(html, "</style", open)
         if close < 0:
             break
-        val css_raw = html.substring(open + 1, close)
+        val css_raw = _css_strip_comments(html.substring(open + 1, close))
         val _ppc_tv = if _ppc_on: time_now_micros() else: 0
         val css_var_state = CssVarResolutionState.new(custom_props)
         var css = css_raw

@@ -8,6 +8,23 @@ use std::collections::VecDeque;
 use std::io::Read;
 use std::process::Child;
 
+/// Read the environment-crossing counter (diagnostic; counts
+/// `rt_env_get`/`rt_env_get_i64` SFFI crossings in the runtime, gated by
+/// SIMPLE_FLATBRIDGE_ENV_COUNT=1 — see
+/// doc/08_tracking/bug/flat_ast_bridge_phase3_snapshot_throughput_2026-08-31).
+pub fn rt_env_get_counter_read(_args: &[Value]) -> Result<Value, CompileError> {
+    Ok(Value::Int(
+        simple_runtime::value::sffi::env_process::env_get_crossing_count() as i64,
+    ))
+}
+
+/// Reset the environment-crossing counter (diagnostic; see
+/// `rt_env_get_counter_read`).
+pub fn rt_env_get_counter_reset(_args: &[Value]) -> Result<Value, CompileError> {
+    simple_runtime::value::sffi::env_process::env_get_crossing_count_reset();
+    Ok(Value::Bool(true))
+}
+
 /// Owned-process V3 exposes opaque native leases that the interpreter cannot
 /// safely manufacture or project. Keep every registered entry fail-closed.
 pub fn rt_process_owned_v3_adapter_unavailable(_args: &[Value]) -> Result<Value, CompileError> {

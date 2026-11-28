@@ -32,6 +32,14 @@ fn method_not_found_message(type_name: &str, method_name: &str) -> String {
     format!("Runtime error: Method '{method_name}' not found on type '{type_name}'")
 }
 
+/// The diagnostic printed when a compiled program tries to call a value that
+/// is not callable. Kept in the interpreter's exact wording
+/// (`interpreter_call`: "value is not callable") so a program's verdict reads
+/// the same on both execution lanes.
+fn value_not_callable_message() -> String {
+    "Runtime error: value is not callable".to_string()
+}
+
 /// Both lookups used to print a warning and then return
 /// `RuntimeValue::from_special(tags::SPECIAL_ERROR)`. That sentinel formats as
 /// the six-character text `error` (see `sffi/io_print.rs`, arm
@@ -53,6 +61,12 @@ fn abort_not_found(message: String) -> ! {
          program error. Refusing to substitute a placeholder value (it would render as the \
          text 'error' and silently corrupt output)."
     );
+    abort_dispatch_gap()
+}
+
+/// Flush and terminate with the shared dispatch-gap exit status. Every refusal
+/// in this file funnels here so the exit code stays EX_SOFTWARE everywhere.
+fn abort_dispatch_gap() -> ! {
     use std::io::Write;
     let _ = std::io::stderr().flush();
     let _ = std::io::stdout().flush();
@@ -80,6 +94,31 @@ pub unsafe extern "C" fn rt_method_not_found(
     let type_name = string_from_raw_parts(type_ptr, type_len, "<unknown type>");
     let method_name = string_from_raw_parts(method_ptr, method_len, "<unknown method>");
     abort_not_found(method_not_found_message(&type_name, &method_name))
+}
+
+/// Refusal reached from JIT/AOT-compiled code when an indirect call's callee
+/// turns out not to be a function or closure value. Cranelift lowering
+/// (`compile_indirect_call`) resolves the target through `rt_closure_func_ptr`,
+/// which validates the heap-object type and answers NULL for every other
+/// value; calling through that NULL used to jump to address zero and SIGSEGV
+/// the process (exit 139). A program can steer a non-callable value into an
+/// indirect call even though the interpreter rejects the same program with
+/// "value is not callable" -- e.g. `pass(4)` parses as `()(4)` and
+/// `val n = 5; n(4)` keeps an i64 callee all the way down. Like the not-found
+/// refusals above, this is a dispatch gap, never a recoverable program
+/// condition, so it terminates with the shared diagnostic instead of crashing.
+///
+/// The callee word is accepted so the callsite stays uniform with
+/// `rt_closure_func_ptr`; the wording intentionally matches the interpreter.
+#[no_mangle]
+pub unsafe extern "C" fn rt_value_not_callable(_callee: RuntimeValue) -> RuntimeValue {
+    eprintln!("{}", value_not_callable_message());
+    eprintln!(
+        "Runtime error: non-callable callee -- this is a code-generation dispatch gap, not a \
+         program error. Refusing to jump through a value that is not a function (it would crash \
+         the process). The interpreter reports 'value is not callable' for the same program."
+    );
+    abort_dispatch_gap()
 }
 
 #[cfg(test)]
@@ -140,5 +179,12 @@ mod tests {
     #[test]
     fn not_found_exit_code_is_ex_software() {
         assert_eq!(NOT_FOUND_EXIT_CODE, 70);
+    }
+
+    #[test]
+    fn value_not_callable_message_matches_interpreter_wording() {
+        // The interpreter reports exactly "value is not callable"; the runtime
+        // refusal must open with the same words so both lanes read alike.
+        assert_eq!(value_not_callable_message(), "Runtime error: value is not callable");
     }
 }

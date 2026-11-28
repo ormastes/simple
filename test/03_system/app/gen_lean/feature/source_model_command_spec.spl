@@ -3,7 +3,7 @@
 # Authored command scenarios: UNRUN. Requires the qualified self-hosted
 # ./bin/simple and its normal SIMPLE_LIB setup in the checkout under test.
 # No substitute executable, mocked process, seed, or copied dispatcher.
-use std.spec.{describe, it, expect}
+use std.spec.{describe, it, expect, fail}
 use std.spec.step
 use app.io.process_ops.{process_run_timeout}
 use std.nogc_sync_mut.io.file_ops.{secure_temp_dir, file_create_exclusive,
@@ -31,6 +31,12 @@ fn ee_run_source_model_cli(source: text, target: text) -> Result<(text, text, i6
         return Err("EE-TEST-CLEANUP: command temporary scope remains")
     Ok((out, err, code as i64))
 
+fn seed_only_precondition() -> text:
+    val (out, err, _code) = process_run_timeout("./bin/simple", ["--version"], 30000)
+    if (out + err).contains("bootstrap seed only"):
+        return "precondition: self-hosted bin/simple required (bin/simple is the Rust bootstrap seed, which has no gen-lean source-model command)"
+    ""
+
 fn ee_assert_no_partial_model(output: text):
     expect(output.contains("formal_status=NOT_CHECKED")).to_equal(false)
     expect(output.contains("formal_status=PASS")).to_equal(false)
@@ -40,6 +46,10 @@ fn ee_assert_no_partial_model(output: text):
 
 describe "gen-lean source-model actual command":
     it "delegates a real enum source file and preserves successful exit and artifact output":
+        val blocked = seed_only_precondition()
+        if blocked != "":
+            fail(blocked)
+            return
         step("Run the public command through the actual dispatcher and worker using a private file")
         val source = ee_cli_enum_source()
         val (out, err, code) = ee_run_source_model_cli(source,
@@ -61,6 +71,10 @@ describe "gen-lean source-model actual command":
         expect(out.contains("formal_status=PASS")).to_equal(false)
 
     it "forwards each explicit target to the real frontend without host substitution":
+        val blocked = seed_only_precondition()
+        if blocked != "":
+            fail(blocked)
+            return
         step("Execute the dispatcher for two explicit targets against conditional source")
         val source = "@cfg(\"target_arch\", \"x86_64\")\nfn selected() -> i32:\n    31\n@cfg(\"target_arch\", \"aarch64\")\nfn selected() -> i32:\n    47\n"
         val (xout, xerr, xcode) = ee_run_source_model_cli(source,
@@ -81,6 +95,10 @@ describe "gen-lean source-model actual command":
         expect(aout.contains("(BitVec.ofInt 32 31)")).to_equal(false)
 
     it "propagates worker failure without publishing a partial artifact on either stream":
+        val blocked = seed_only_precondition()
+        if blocked != "":
+            fail(blocked)
+            return
         step("Delegate a valid enum function followed by an unsupported floating-point function")
         val source = ee_cli_enum_source() +
             "\nfn z_unsupported(value: f64) -> f64:\n    value\n"

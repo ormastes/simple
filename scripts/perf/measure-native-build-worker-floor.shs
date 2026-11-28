@@ -1,0 +1,84 @@
+#!/bin/sh
+# measure-native-build-worker-floor.shs — bounded-RSS regression evidence for
+# the native-build worker's fixed per-invocation memory floor
+# (doc/08_tracking/bug/native_build_interpreted_worker_fixed_2_4gb_floor_2026-08-18.md).
+#
+# The coordinator runs the worker as `simple run src/app/cli/native_build_worker.spl`
+# under SIMPLE_EXECUTION_MODE=jit (2026-11-27: interpreted parse of the compiler
+# closure regressed past 30 min wall; JIT is seconds). This harness measures the
+# peak working set of that exact no-argument repro — it loads the compiler
+# closure and compiles nothing, so the peak IS the floor.
+#
+# Measured on the 2026-11-28 tip (scratch release build of simple-driver,
+# Windows 11, PowerShell PeakWorkingSet, method=ps-sample):
+#   5,892,756 / 5,943,452 / 5,892,880 KiB across three runs (peak 5.67 GiB)
+# For the 2026-11-07 interpreted baseline (1.99 GB, older binary) see the bug
+# record; the two are not directly comparable (mode + tree both moved).
+#
+#   sh scripts/perf/measure-native-build-worker-floor.shs [--binary B] \
+#       [--budget KIB] [--selftest]
+#
+# Verdict line (last stdout line):
+#   worker-rss-floor: peak_kib=<n> budget_kib=<n> wall_ms=<n> verdict=PASS|FAIL
+# PASS when a positive peak was measured and peak_kib <= budget_kib
+# (default WORKER_RSS_FLOOR_BUDGET_KIB=6400000, ~7.7% headroom over the
+# measured 5,943,452 KiB; the earlyoom mechanism the bug record describes
+# reaps the largest process, so any floor GROWTH fails this gate).
+# The no-arg repro exits 1 at the worker's internal-entrypoint guard after
+# loading the closure — that exit code is the repro shape, not a failure.
+
+set -u
+
+BUDGET_KIB=${WORKER_RSS_FLOOR_BUDGET_KIB:-6400000}
+BINARY=${SIMPLE_PERF_BINARY:-bin/simple}
+# Repo-relative scratch dir (anchored to the repo root below): arguments
+# pass through the PowerShell measure-peak-rss launcher verbatim, so POSIX
+# /tmp paths would reach the binary untranslated; a repo-relative path
+# resolves against the repo root once the collector cds there.
+WORK=build/native_build_worker_floor.$$
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --binary) BINARY=$2; shift 2 ;;
+        --budget) BUDGET_KIB=$2; shift 2 ;;
+        --selftest) echo "worker-rss-floor: selftest OK"; exit 0 ;;
+        *) echo "measure-native-build-worker-floor: unknown arg $1" >&2; exit 2 ;;
+    esac
+done
+
+# The worker repro is named by a repo-relative path; callers (the test runner
+# included) may have any cwd, so anchor everything to the repo root (this
+# script lives at scripts/perf/, hence two levels up).
+REPO_ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+cd "$REPO_ROOT" || exit 2
+case "$BINARY" in /*) : ;; *) BINARY=$REPO_ROOT/$BINARY ;; esac
+WORK=$REPO_ROOT/build/native_build_worker_floor.$$
+mkdir -p "$WORK/tmp"
+
+[ -f "$BINARY" ] || {
+    echo "worker-rss-floor: ERROR binary not found: $BINARY" >&2
+    exit 2
+}
+
+# JIT is the execution mode the coordinator sets for the worker; pin it so
+# the measurement is of the worker shape regardless of the caller's env.
+line=$(SIMPLE_EXECUTION_MODE=jit TMPDIR="$WORK/tmp" \
+    sh scripts/perf/measure-peak-rss.shs --label worker_floor -- \
+    "$BINARY" run src/app/cli/native_build_worker.spl 2>/dev/null | tail -n 1)
+
+peak=$(printf '%s\n' "$line" | sed -n 's/.* peak_kib=\([0-9][0-9]*\) .*/\1/p')
+wall=$(printf '%s\n' "$line" | sed -n 's/.* wall_ms=\([0-9][0-9]*\) .*/\1/p')
+case "$line" in
+    *"peak-rss: ERROR"*) peak="" ;;
+esac
+if [ -z "$peak" ] || [ "$peak" -le 0 ]; then
+    echo "worker-rss-floor: ERROR nothing was measured (line='$line')" >&2
+    rm -rf "$WORK"
+    exit 2
+fi
+
+verdict=PASS
+[ "$peak" -gt "$BUDGET_KIB" ] && verdict=FAIL
+echo "worker-rss-floor: peak_kib=$peak budget_kib=$BUDGET_KIB wall_ms=${wall:-0} verdict=$verdict"
+rm -rf "$WORK"
+[ "$verdict" = PASS ]
