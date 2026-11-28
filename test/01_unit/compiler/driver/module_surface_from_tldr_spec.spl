@@ -323,3 +323,24 @@ describe "TLDR fail-closed guards and multiline const / pub impl support":
         expect(surf.is_none()).to_equal(true)
         expect(par_had_error_get()).to_equal(false)
         expect(par_had_error_mirror_get()).to_equal(false)
+
+    it "keeps multi-line impl member parameter lists so the stub parses":
+        # Shape of 60.mir_opt/mir_opt/const_fold.spl: before the fix the impl
+        # row kept only `me try_fold_binop(` and the stub failed with
+        # `expected ), got Ident 'try_fold_unaryop'`, falling back to a full parse.
+        val ml_src = "pub class Folder:\n    n: i64\n\nimpl Folder:\n    static fn new() -> Folder:\n        Folder(n: 0)\n\n    me try_fold_binop(\n        a: i64, b: i64\n    ) -> i64?:\n        None\n\n    me try_fold_unaryop(\n        op: i64,\n        operand: i64\n    ) -> i64?:\n        None\n\n    fn count() -> i64:\n        self.n\n"
+        val rows = tldr_summary_entries_v1("test.multiline_member", ml_src)
+        var impl_row = ""
+        for row in rows:
+            if row.starts_with("impl|"):
+                impl_row = row
+        expect(impl_row.contains("a: i64, b: i64")).to_equal(true)
+        expect(impl_row.contains("        operand: i64")).to_equal(true)
+        expect(impl_row.contains("None")).to_equal(false)
+        par_had_error_clear_v1()
+        par_had_error_mirror_clear()
+        val surf = module_surface_from_tldr_v1("test.multiline_member", rows)
+        expect(surf.is_some()).to_equal(true)
+        expect(surf.unwrap().impls.len()).to_equal(1)
+        expect(par_had_error_get()).to_equal(false)
+        expect(par_had_error_mirror_get()).to_equal(false)

@@ -26,6 +26,7 @@ use compiler.frontend.parser_types.{ParserModule}
 use compiler.hir.hir_lowering.module_surface_types.{ModuleSurface}
 use compiler.hir.hir_lowering.module_surface_declarations.{module_surface_from_module}
 use compiler.common.driver_core_types.{SourceFile}
+use compiler.driver.cache.module_tldr_sections_v1.{module_tldr_paren_delta_v1}
 
 fn _tldr_first_line(block: text) -> text:
     val nl = block.index_of("\n")
@@ -54,12 +55,25 @@ fn _tldr_impls_source_order_v1(rows: [text]) -> [text]:
 # Indented member headers of an impl / trait row get a `pass` body so the stub parses.
 fn _tldr_impl_with_bodies(block: text) -> text:
     var out: [text] = []
+    # Paren depth of a member header still open across lines (multi-line
+    # parameter list); its `pass` goes after the line that closes it.
+    var open_depth = 0
     for line in block.split("\n"):
         out.push(line)
         val t = line.trim()
+        if open_depth > 0:
+            open_depth = open_depth + module_tldr_paren_delta_v1(line)
+            if open_depth <= 0 and t.ends_with(":"):
+                out.push("        pass")
+            continue
         val d = if t.starts_with("pub "): t.substring(4) else: t
         val is_member = d.starts_with("fn ") or d.starts_with("me ") or d.starts_with("static fn ") or d.starts_with("static me ")
-        if is_member and t.ends_with(":") and line.starts_with(" "):
+        if not is_member or not line.starts_with(" "):
+            continue
+        val depth = module_tldr_paren_delta_v1(line)
+        if depth > 0:
+            open_depth = depth
+        elif t.ends_with(":"):
             out.push("        pass")
     out.join("\n")
 
