@@ -193,8 +193,8 @@ fn windows_process_build_command_line_v1(program: text, args: [text]) -> Result<
 fn windows_process_request_valid_v1(request: WindowsProcessRequestV1) -> text:
     if not windows_process_path_valid_v1(request.program) or not windows_process_path_valid_v1(request.directory):
         return "Windows owner requires absolute drive-rooted program and cwd"
-    if not windows_process_path_valid_v1(request.stdout_path) or not windows_process_path_valid_v1(request.stderr_path) or request.stdout_path == request.stderr_path:
-        return "Windows owner requires separate absolute stream paths"
+    if not windows_process_path_valid_v1(request.stdout_path) or not windows_process_path_valid_v1(request.stderr_path):
+        return "Windows owner requires absolute stream paths"
     # Match the builder contract: zero explicitly means no process deadline;
     # positive declared budgets extend through seven days. Cancellation remains
     # separately bounded and authoritative through the retained JobObject.
@@ -523,8 +523,11 @@ fn _windows_process_admit_core_v1(request: WindowsProcessRequestV1, memory_limit
         volatile_write_u32(security + windows_abi_security_attributes_inherit_offset(), 1)
         val stdin_handle = _windows_process_file_v1(heap, "NUL", 2147483648u32, 3u32, security, 3u32)
         val stdout_handle = _windows_process_file_v1(heap, request.stdout_path, 1073741824u32, 1u32, security, 1u32)
-        val stderr_handle = _windows_process_file_v1(heap, request.stderr_path, 1073741824u32, 1u32, security, 1u32)
-        handles = [stdin_handle, stdout_handle, stderr_handle]
+        # Equal stream paths mean one combined stream: one handle serves as both
+        # stdout and stderr so writes interleave in order (no positional clobber).
+        val combined_stream = request.stdout_path == request.stderr_path
+        val stderr_handle = if combined_stream: stdout_handle else: _windows_process_file_v1(heap, request.stderr_path, 1073741824u32, 1u32, security, 1u32)
+        handles = if combined_stream: [stdin_handle, stdout_handle] else: [stdin_handle, stdout_handle, stderr_handle]
         for handle in handles:
             if handle == 0: error = "cannot create exact inherited stream handles"
         if error == "":
@@ -535,7 +538,8 @@ fn _windows_process_admit_core_v1(request: WindowsProcessRequestV1, memory_limit
             windows_abi_write_ptr(startup + windows_abi_startupinfo_std_error_offset(), stderr_handle)
             windows_abi_write_ptr(allowed_handles, stdin_handle)
             windows_abi_write_ptr(allowed_handles + windows_abi_pointer_bytes(), stdout_handle)
-            windows_abi_write_ptr(allowed_handles + windows_abi_pointer_bytes() * 2, stderr_handle)
+            if not combined_stream:
+                windows_abi_write_ptr(allowed_handles + windows_abi_pointer_bytes() * 2, stderr_handle)
             val _sized = InitializeProcThreadAttributeList(0, 1u32, 0u32, size_slot)
             val required = windows_abi_read_ptr(size_slot)
             if required <= 0 or required > 1048576:
@@ -548,7 +552,7 @@ fn _windows_process_admit_core_v1(request: WindowsProcessRequestV1, memory_limit
                     error = "attribute-list initialization failed"
                 else:
                     attributes_initialized = true
-                    if windows_abi_update_proc_thread_attribute(attributes, 131074, allowed_handles, windows_abi_pointer_bytes() * 3) == 0:
+                    if windows_abi_update_proc_thread_attribute(attributes, 131074, allowed_handles, windows_abi_pointer_bytes() * handles.len()) == 0:
                         error = "handle allowlist admission failed"
                     windows_abi_write_ptr(startup + windows_abi_startupinfoex_attr_list_offset(), attributes)
     val limits_bytes = windows_abi_job_extended_limit_size()
