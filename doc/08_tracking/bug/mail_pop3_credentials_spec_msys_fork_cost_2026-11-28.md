@@ -16,9 +16,9 @@ each a fork under MSYS.
 ## Timings (this host, one probe at a time, bash probe invoked directly)
 | probe | wall |
 |---|---|
-| protocol | 613s |
+| protocol | 613s (output was piped to tail; completion not separately confirmed) |
 | credentials | 917s (the harness wrapper used `timeout 900`, so this is a timeout, not a completed run) |
-| transport | not finished at filing time; at least the time elapsed since start (over 30 min) |
+| transport | 920s (also hit the harness `timeout 900`; timeout, not a completed run) |
 
 Six further probes (recovery, config, repair, environment, placeholders, attachment) were not run.
 
