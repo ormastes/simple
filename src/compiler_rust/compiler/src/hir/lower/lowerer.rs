@@ -46,6 +46,16 @@ pub(super) struct GenericIdentityParamSpec {
     pub same_type_params: Vec<(usize, String)>,
 }
 
+/// A parameter declared as a word array: its name, array nesting depth and
+/// numeric leaf element (`data: [[i64]]` is `data`, 2, `i64`). `name` is empty
+/// for a slot that is not a parameter.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct WordArraySlot {
+    pub name: String,
+    pub depth: usize,
+    pub leaf: TypeId,
+}
+
 pub struct Lowerer {
     pub(super) module: HirModule,
     pub(super) globals: HashMap<String, TypeId>,
@@ -237,12 +247,12 @@ pub struct Lowerer {
     /// enum-slot check consumes it only for a receiver declared in the file
     /// being lowered; the float-into-int check consumes every row.
     pub(super) method_param_type_names: HashMap<String, Vec<Option<String>>>,
-    /// Declared numeric element type per array parameter (`[i64]`, `List<u32>`),
+    /// Declared word-array shape per array parameter (`[i64]`, `List<u32>`, `[[i64]]`, `[i64]?`),
     /// parallel to `fn_param_type_names` / `method_param_type_names`, keyed the
     /// same way. Lets the `[u8]`-into-word-array check see a slot whose type is
     /// known only by its AST spelling.
-    pub(super) fn_param_array_elems: HashMap<String, Vec<Option<TypeId>>>,
-    pub(super) method_param_array_elems: HashMap<String, Vec<Option<TypeId>>>,
+    pub(super) fn_param_array_elems: HashMap<String, Vec<Option<WordArraySlot>>>,
+    pub(super) method_param_array_elems: HashMap<String, Vec<Option<WordArraySlot>>>,
     /// `Owner.method` keys of `method_param_type_names` declared `static`:
     /// only these rows are checked at a `Type.method(args)` call, so an
     /// instance method called with an explicit receiver never shifts slots.

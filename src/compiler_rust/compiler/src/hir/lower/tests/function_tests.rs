@@ -509,3 +509,195 @@ fn array_param_rejects_u8_array_into_trait_method_parameter() {
     let good = format!("{decls}fn f(s: Store, b: [i64]) -> i64:\n    s.keep_words(b)\n");
     parse_and_lower(&good).unwrap_or_else(|e| panic!("trait [i64]: {e:?}"));
 }
+
+/// u8_array_into_word_array_unchecked_slots_2026-11-28: every `bad` source
+/// must fail with the E1003 `[u8]` diagnostic and every `good` one must
+/// lower. All offenders are reported together.
+fn assert_u8_word_slot_cases(bad: &[(&str, &str)], good: &[(&str, &str)]) {
+    let mut wrong = Vec::new();
+    for (label, src) in bad {
+        match parse_and_lower(src) {
+            Err(e) if format!("{e:?}").contains("error[E1003]") && format!("{e:?}").contains("u8]") => {}
+            Err(e) => wrong.push(format!("{label}: expected the E1003 [u8] diagnostic, got {e:?}")),
+            Ok(_) => wrong.push(format!("{label}: expected E1003, but it lowered")),
+        }
+    }
+    for (label, src) in good {
+        if let Err(e) = parse_and_lower(src) {
+            wrong.push(format!("{label}: must lower, got {e:?}"));
+        }
+    }
+    assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
+}
+
+/// Slot 1: a binding with a declared word-array type, initialised or
+/// reassigned from a `[u8]`.
+#[test]
+fn u8_array_rejected_in_annotated_let_and_assignment() {
+    assert_u8_word_slot_cases(
+        &[
+            ("val", "fn f(b: [u8]) -> i64:\n    val w: [i64] = b\n    w[0]\n"),
+            ("var", "fn f(b: [u8]) -> i64:\n    var w: [u32] = b\n    0\n"),
+            ("List", "fn f(b: [u8]) -> i64:\n    val w: List<i64> = b\n    w[0]\n"),
+            ("reassign", "fn f(b: [u8]) -> i64:\n    var w: [i64] = [1, 2]\n    w = b\n    w[0]\n"),
+        ],
+        &[
+            ("literal", "fn f() -> i64:\n    val w: [i64] = [1, 2]\n    w[0]\n"),
+            ("same", "fn f(b: [u8]) -> i64:\n    val w: [u8] = b\n    0\n"),
+            ("words", "fn f(a: [i64]) -> i64:\n    var w: [i64] = [1]\n    w = a\n    w[0]\n"),
+            ("word into u8 slot", "fn f(a: [i64]) -> i64:\n    val w: [u8] = a\n    0\n"),
+            ("map", "fn f(b: [u8]) -> i64:\n    val w: [i64] = b.map(\\x: x as i64)\n    w[0]\n"),
+            ("untyped empty", "fn f(b: [u8]) -> i64:\n    var w = []\n    w = b\n    0\n"),
+            ("inferred", "fn f(b: [u8]) -> i64:\n    val w = b\n    0\n"),
+        ],
+    );
+}
+
+/// Slot 2: a `[u8]` returned where a word array is declared, by `return`
+/// and by the implicit tail.
+#[test]
+fn u8_array_rejected_in_return() {
+    assert_u8_word_slot_cases(
+        &[
+            ("return", "fn g(b: [u8]) -> [i64]:\n    return b\n"),
+            ("tail", "fn g(b: [u8]) -> [i64]:\n    b\n"),
+            ("List", "fn g(b: [u8]) -> List<u16>:\n    return b\n"),
+            ("if tail", "fn g(b: [u8], c: bool) -> [i64]:\n    if c:\n        b\n    else:\n        [1, 2]\n"),
+        ],
+        &[
+            ("same", "fn g(b: [u8]) -> [u8]:\n    return b\n"),
+            ("literal", "fn g() -> [i64]:\n    return [1, 2]\n"),
+            ("literal tail", "fn g() -> [i64]:\n    [1, 2]\n"),
+            ("words", "fn g(a: [i64]) -> [i64]:\n    a\n"),
+            ("map", "fn g(b: [u8]) -> [i64]:\n    return b.map(\\x: x as i64)\n"),
+            ("map tail", "fn g(b: [u8]) -> [i64]:\n    b.map(\\x: x as i64)\n"),
+        ],
+    );
+}
+
+/// Slot 3: a `[u8]` stored into a struct/class field typed as a word array,
+/// by construction and by assignment.
+#[test]
+fn u8_array_rejected_in_field_init_and_assignment() {
+    let st = "struct W:\n    words: [i64]\n    n: i64\n\n";
+    let cl = "class C:\n    var words: List<i64>\n    me set(b: [u8]):\n        self.words = b\n    me set_words(a: [i64]):\n        self.words = a\n\n";
+    let cl_ok = cl.replace("        self.words = b\n", "        self.words = []\n");
+    assert_u8_word_slot_cases(
+        &[
+            ("struct named", &format!("{st}fn f(b: [u8]) -> W:\n    W(words: b, n: 1)\n")),
+            ("struct positional", &format!("{st}fn f(b: [u8]) -> W:\n    W(b, 1)\n")),
+            ("class init", &format!("{cl_ok}fn f(b: [u8]) -> C:\n    C(words: b)\n")),
+            ("self field assign", cl),
+            ("field assign", &format!("{st}fn f(b: [u8]) -> i64:\n    var w = W(words: [1], n: 1)\n    w.words = b\n    0\n")),
+        ],
+        &[
+            ("struct words", &format!("{st}fn f(a: [i64]) -> W:\n    W(words: a, n: 1)\n")),
+            ("struct literal", &format!("{st}fn f() -> W:\n    W(words: [1, 2], n: 1)\n")),
+            ("class ok", &format!("{cl_ok}fn f(a: [i64]) -> C:\n    C(words: a)\n")),
+            ("field assign words", &format!("{st}fn f(a: [i64]) -> i64:\n    var w = W(words: [1], n: 1)\n    w.words = a\n    0\n")),
+        ],
+    );
+}
+
+/// Slot 4: an optional word array, `[i64]?`.
+#[test]
+fn u8_array_rejected_in_optional_word_array_slot() {
+    let early = "fn at(data: [i64]?) -> i64:\n    0\n\n";
+    let late = "\nfn at(data: [i64]?) -> i64:\n    0\n";
+    assert_u8_word_slot_cases(
+        &[
+            ("param", &format!("{early}fn f(b: [u8]) -> i64:\n    at(b)\n")),
+            ("later-declared param", &format!("fn f(b: [u8]) -> i64:\n    at(b)\n{late}")),
+            ("let", "fn f(b: [u8]) -> i64:\n    val w: [i64]? = b\n    0\n"),
+            ("return", "fn g(b: [u8]) -> [i64]?:\n    return b\n"),
+        ],
+        &[
+            ("words", &format!("{early}fn f(a: [i64]) -> i64:\n    at(a)\n")),
+            ("later-declared words", &format!("fn f(a: [i64]) -> i64:\n    at(a)\n{late}")),
+            ("nil", &format!("{early}fn f() -> i64:\n    at(nil)\n")),
+            ("literal", &format!("{early}fn f() -> i64:\n    at([1, 2])\n")),
+            ("u8 optional", "fn f(b: [u8]) -> i64:\n    val w: [u8]? = b\n    0\n"),
+        ],
+    );
+}
+
+/// Slot 5: nested arrays, `[[u8]]` into `[[i64]]`, including a literal
+/// whose element is a `[u8]`.
+#[test]
+fn u8_array_rejected_in_nested_word_array_slot() {
+    let early = "fn rows(data: [[i64]]) -> i64:\n    0\n\n";
+    let late = "\nfn rows(data: [[i64]]) -> i64:\n    0\n";
+    assert_u8_word_slot_cases(
+        &[
+            ("param", &format!("{early}fn f(bb: [[u8]]) -> i64:\n    rows(bb)\n")),
+            ("later-declared param", &format!("fn f(bb: [[u8]]) -> i64:\n    rows(bb)\n{late}")),
+            ("let", "fn f(bb: [[u8]]) -> i64:\n    val w: [[i64]] = bb\n    0\n"),
+            ("return", "fn g(bb: [[u8]]) -> [[i64]]:\n    return bb\n"),
+            ("literal of u8 rows", "fn f(b: [u8]) -> i64:\n    val w: [[i64]] = [b]\n    0\n"),
+            ("literal of u8 rows param", &format!("{early}fn f(b: [u8]) -> i64:\n    rows([b, b])\n")),
+        ],
+        &[
+            ("words", &format!("{early}fn f(aa: [[i64]]) -> i64:\n    rows(aa)\n")),
+            ("same", "fn f(bb: [[u8]]) -> i64:\n    val w: [[u8]] = bb\n    0\n"),
+            ("literal rows", &format!("{early}fn f() -> i64:\n    rows([[1, 2], [3]])\n")),
+            ("literal of word rows", &format!("{early}fn f(a: [i64]) -> i64:\n    rows([a])\n")),
+            ("literal of u8 rows into u8", "fn f(b: [u8]) -> i64:\n    val w: [[u8]] = [b]\n    0\n"),
+        ],
+    );
+}
+
+/// Slot 6: a user method whose name is also a builtin collection method
+/// (`put`, `push`), on a trait-typed and on a class-typed receiver.
+#[test]
+fn u8_array_rejected_in_builtin_named_method() {
+    let tr = "trait Store:\n    fn put(data: [i64]) -> i64\n    fn push(data: [i64]) -> i64\n\n";
+    let cl = "class Bag:\n    var n: i64\n    fn push(data: [i64]) -> i64:\n        data[0]\n    fn put(data: [i64]) -> i64:\n        data[0]\n\n";
+    assert_u8_word_slot_cases(
+        &[
+            ("trait put", &format!("{tr}fn f(s: Store, b: [u8]) -> i64:\n    s.put(b)\n")),
+            ("trait push", &format!("{tr}fn f(s: Store, b: [u8]) -> i64:\n    s.push(b)\n")),
+            ("class push", &format!("{cl}fn f(g: Bag, b: [u8]) -> i64:\n    g.push(b)\n")),
+            ("class put", &format!("{cl}fn f(g: Bag, b: [u8]) -> i64:\n    g.put(b)\n")),
+        ],
+        &[
+            ("trait put words", &format!("{tr}fn f(s: Store, a: [i64]) -> i64:\n    s.put(a)\n")),
+            ("trait push words", &format!("{tr}fn f(s: Store, a: [i64]) -> i64:\n    s.push(a)\n")),
+            ("class push words", &format!("{cl}fn f(g: Bag, a: [i64]) -> i64:\n    g.push(a)\n")),
+            ("builtin push of a byte", "fn f(b: [u8]) -> i64:\n    var out: [u8] = []\n    out.push(b[0])\n    0\n"),
+            ("builtin push of u8 rows", "fn f(b: [u8]) -> i64:\n    var out: [[u8]] = []\n    out.push(b)\n    0\n"),
+        ],
+    );
+}
+
+/// Slot 7: the `[u8]` passed through a named argument.
+#[test]
+fn u8_array_rejected_in_named_argument() {
+    let decls = "class Box:\n    var n: i64\n    fn at(data: [i64], i: i64) -> i64:\n        data[i]\n    static fn sat(data: [i64]) -> i64:\n        data[0]\n\ntrait Store:\n    fn keep_words(i: i64, data: [i64]) -> i64\n\nfn at64(data: [i64], i: i64) -> i64:\n    data[i]\n\n";
+    assert_u8_word_slot_cases(
+        &[
+            ("method", &format!("{decls}fn f(bx: Box, b: [u8]) -> i64:\n    bx.at(data: b, i: 0)\n")),
+            ("method reordered", &format!("{decls}fn f(bx: Box, b: [u8]) -> i64:\n    bx.at(i: 0, data: b)\n")),
+            ("static", &format!("{decls}fn f(b: [u8]) -> i64:\n    Box.sat(data: b)\n")),
+            ("trait", &format!("{decls}fn f(s: Store, b: [u8]) -> i64:\n    s.keep_words(data: b, i: 0)\n")),
+            ("free fn", &format!("{decls}fn f(b: [u8]) -> i64:\n    at64(data: b, i: 0)\n")),
+            ("free fn reordered", &format!("{decls}fn f(b: [u8]) -> i64:\n    at64(i: 0, data: b)\n")),
+        ],
+        &[
+            ("method", &format!("{decls}fn f(bx: Box, a: [i64]) -> i64:\n    bx.at(data: a, i: 0)\n")),
+            ("method reordered", &format!("{decls}fn f(bx: Box, a: [i64]) -> i64:\n    bx.at(i: 0, data: a)\n")),
+            ("static", &format!("{decls}fn f(a: [i64]) -> i64:\n    Box.sat(data: a)\n")),
+            ("trait", &format!("{decls}fn f(s: Store, a: [i64]) -> i64:\n    s.keep_words(data: a, i: 0)\n")),
+            ("free fn", &format!("{decls}fn f(a: [i64]) -> i64:\n    at64(i: 0, data: a)\n")),
+        ],
+    );
+}
+
+/// An untyped `var x = []` that is never pushed to used to leave its local
+/// index marked, so a declared `[u8]` local at the same index of the next
+/// function was retyped to a word array by its first push (found by the
+/// assignment-slot check in `gcm_gf128_mul`).
+#[test]
+fn untyped_empty_array_mark_does_not_leak_into_next_function() {
+    let src = "fn a(p: i64, q: i64) -> i64:\n    var x = []\n    0\n\nfn f(n0: [u8], n1: [u8]) -> [u8]:\n    var z: [u8] = []\n    z.push(0x00)\n    z = n0\n    z\n";
+    parse_and_lower(src).unwrap_or_else(|e| panic!("declared [u8] local retyped: {e:?}"));
+}
