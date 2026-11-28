@@ -6429,3 +6429,14 @@ pins the border-box form, the default-UA gap is unfiled.
   - Trap: a `c = c + 1` one level too shallow closes the `while` above it and spins without output; the 900 s probe timeout hid it for three minutes.
   - Trap: `bug-db-shard.shs check` passes a shard that has lost its `bugs_active` table (a greedy rewrite of the log rows ate it here); after editing a shard by script, count its tables and its active row.
   - Trap: a newer FreeType is not a better oracle. Check the feature against a Chrome capture at the smallest size first: a rule that moves a contour by a whole pixel shows there and nowhere else.
+
+## 2026-11-28 combo-matrix 77 -> 130 regression (#12385)
+- Culprit: 3822f0bdb58 (commit 5358ad442c6) ceiled EVERY `#text` piece in
+  `_lay_flex_item_max_content_width_inner` (layout_text.spl). Inline pieces of one line
+  (`ab <code>cd</code> ef`) are not boxes; ceiling each grew shrink-to-fit tables/buttons
+  by up to 2 px (tt-td-*-w/-p, tt-*-button-c, tc-button-*-t, ln-tt-*: 68 new ids).
+- Fix: ceil only when `row_flex` (each text child is its own anonymous flex item).
+  Pinned by the "split inline text" case in overlay_inline_css_layout_parity_spec.spl.
+- Trap: a matrix width creeping by exactly 1-2 px across every button/td cell is a
+  per-piece rounding change in max-content, not a font change. Bisect with a mini page
+  through `layout_geometry_diff.spl simple-geom` (~2 s) before running the full matrix (~25 min).
