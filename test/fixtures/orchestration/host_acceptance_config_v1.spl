@@ -1,0 +1,28 @@
+# Acceptance configuration of the enrolled Linux Host specs.
+#
+# Owner decision 2026-11-28: the Host unit carries no `SIMPLE_*` environment, so these specs no longer
+# read their fixture paths with `env_get`. They read the root-owned `/etc/simple-host/host.sdn` through
+# `linux_host_config_v1`. Only when that file does not exist may a lane that is not the installed unit
+# (the host-side qualification run, which cannot write `/etc`) name its own caller-owned file in
+# SIMPLE_HOST_CONFIG_TEST_PATH; it never overrides an installed file. On the installed unit that name
+# could only be a unit environment entry, which unit custody (`linux_host_unit_environment_custody_v1`)
+# and the broker rule refuse. `src/lib` itself reads no environment for this.
+use std.spec.{fail}
+use std.nogc_sync_mut.io.env_ops.env_get
+use std.nogc_sync_mut.io.linux_host_config_v1.{linux_host_config_load_v1, linux_host_config_load_injected_v1,
+    linux_host_config_error_code_v1, linux_host_config_text_v1}
+
+# Empty when the file or the key is absent (the caller reports BLOCKED). Any other refusal fails the
+# example: a config that exists but is not custody's is never read as "unset".
+pub fn host_acceptance_config_text_v1(key: text) -> text:
+    var loaded = linux_host_config_load_v1()
+    if loaded.is_err() and linux_host_config_error_code_v1(loaded.unwrap_err()) == "host-config-missing":
+        val injected = env_get("SIMPLE_HOST_CONFIG_TEST_PATH")
+        if injected != "": loaded = linux_host_config_load_injected_v1(injected)
+    if loaded.is_err():
+        val code = linux_host_config_error_code_v1(loaded.unwrap_err())
+        if code != "host-config-missing": fail("Host config refused: " + code)
+        return ""
+    linux_host_config_text_v1(loaded.unwrap(), key)
+
+export host_acceptance_config_text_v1

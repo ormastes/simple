@@ -2,7 +2,9 @@
 
 - **Status:** helper environment FIXED in source 2026-11-27 (unit specs only), extended the same day with
   `XDG_RUNTIME_DIR` and `PATH` (section "Runtime directory and PATH"). The guest unit's own
-  environment is OPEN (section "Guest unit"). Nothing here was run in the guest.
+  environment is OPEN (section "Guest unit"), except its `SIMPLE_*` hand-over, which the owner decided on
+  2026-11-28 and which is changed in source (section "Unit environment: owner decision 2026-11-28").
+  Nothing here was run in the guest.
 - **Component:** `src/lib/nogc_sync_mut/io/linux_fresh_epoch_launch_v1.spl`
   (`linux_fresh_epoch_project_launch_v1`), custody account check
   (`src/lib/nogc_sync_mut/io/linux_fresh_epoch_native_v1.spl`), guest provisioning
@@ -107,7 +109,7 @@ Unit and account are made by `guest_provision_script` in
 | Account home | `/nonexistent`, not created (**changed 2026-11-28**, `useradd --no-create-home`; an older account is moved with `usermod --home`) | `/nonexistent`, absent (`fresh-epoch-native-service-account`) | **fixed in source 2026-11-28**; syntax-checked only |
 | Graph-root ancestry `/var/lib/simple-host`, `/var/lib/simple-host/podman` | service-owned (made by `--create-home` and `install -d -o $SVC ... 0700`) | every ancestor is a `root-dir`: uid 0, no group/other write (`linux_fresh_probe_native_security_v3`, `fresh-epoch-native-root-ancestry-writable`); only `graph` is the service's 0700 `private-dir` | **fixed in source 2026-11-28**: both root:root 0755, `graph` stays svc 0700; syntax-checked only |
 | Unit `HOME`, `PATH` | not set; systemd gives the account home (now `/nonexistent`) and its own default `PATH` | `HOME=/nonexistent`, `PATH=/usr/bin:/bin` | `HOME` follows the account now; `PATH` and any image `LANG` still **open** (not readable from source, not changed) |
-| Unit extra environment | `EnvironmentFile` of 16 `SIMPLE_*` keys and `Environment=SIMPLE_HOST_EXEC=` | closed list; each is `fresh-epoch-inherited-broker-environment-unsupported:<key>` | **open, owner decision** |
+| Unit extra environment | none (**changed 2026-11-28**; was an `EnvironmentFile` of 16 `SIMPLE_*` keys and `Environment=SIMPLE_HOST_EXEC=`) | closed list; each is `fresh-epoch-inherited-broker-environment-unsupported:<key>` | **fixed in source 2026-11-28** (owner decision, section below); syntax-checked only |
 | Unit `XDG_RUNTIME_DIR` | not set (the user manager is masked) | absent is allowed; when present it must be the run root | consistent |
 | Run root `/run/simple-host/podman` | named by the generated profile; no `RuntimeDirectory=` and no `install -d` in the provisioning | must exist and be held by custody | **open**: who creates it on a fresh boot was not found |
 | Helper environment | set by the projection itself, not by the unit | `HOME` and `XDG_RUNTIME_DIR` = run root, `PATH=/usr/bin:/bin` | consistent, independent of the unit |
@@ -148,3 +150,71 @@ point where the broker rule runs). The unit is therefore NOT claimed to comply.
 
 Evidence level: `sh -n` of the script and of the extracted guest heredoc. No guest was provisioned and
 the unit was not started.
+
+### Unit environment: owner decision 2026-11-28
+
+**Decision (owner):** the Host unit carries no `SIMPLE_*` environment entry. Its configuration is a
+root-owned SDN file at a fixed path. No design or custody document named a path for it (they name only
+`/etc/simple/container` for the profiles), so the path is the one the owner gave:
+`/etc/simple-host/host.sdn`, root:root 0644, in a root:root 0755 directory.
+
+Changed in source:
+
+- **Reader** `src/lib/nogc_sync_mut/io/linux_host_config_v1.spl`. `linux_host_config_load_v1()` opens the
+  fixed path through `retained_directory_open_trusted_v1`, reads owner and mode from the retained
+  descriptor, and decides with `linux_host_config_decide_v1`: owner 0, mode exactly 0644 or 0444, strict
+  SDN, one flat object, 16 known keys, non-empty single-line text values. Refusals are the enum
+  `LinuxHostConfigErrorV1` (`host-config-path`, `-missing`, `-directory-untrusted`, `-unreadable`,
+  `-owner-or-mode`, `-unparsable`, `-shape`, `-unknown-key`, `-value`). The module reads no environment.
+  `linux_host_config_load_injected_v1(path)` is for test lanes: the same rules, with the caller's own
+  effective uid as the required owner.
+- **Unit custody** `linux_host_unit_environment_custody_v1`, called by
+  `linux_fresh_epoch_manager_current_v1` on the Host unit's `Environment` property: any `SIMPLE_*` entry is
+  `fresh-epoch-host-unit-environment-unsupported:<key>`.
+- **Specs that read the unit's keys** (`host_linux_provision_startup_v3_spec`,
+  `linux_agent_attachment_v6_spec`, `linux_service_native_identity_v3_spec`,
+  `caret_configured_ssh_gateway_spec`) now read the file through
+  `test/fixtures/orchestration/host_acceptance_config_v1.spl`. A missing file or key is BLOCKED as before;
+  a file that exists and is refused fails the example.
+- **Provisioning** (`guest_provision_script`): writes `/etc/simple-host/host.candidates.sdn` and
+  `host.sdn` with `install -o root -g root -m 0644`; the unit has no `EnvironmentFile=` and no
+  `Environment=`; `host-entry` no longer execs a variable (the supervised route's drop-in names the staged
+  executable in `ExecStart=`); marker `provisioned.v3`. `--run-specs` rewrites `host.sdn` from the
+  candidates, omitting path entries without fixture content, and exports nothing. `--prove` dies when the
+  unit's `Environment`/`PassEnvironment` names `SIMPLE_`, when `EnvironmentFiles` is not empty, or when the
+  file or its directory is not root:root 0644 / 0755.
+
+Limits:
+
+- The host-side qualification lane (`run-orchestrator-native-qualification.shs`, uid 1000) cannot write
+  `/etc`. It writes its own `host.sdn` and names it in `SIMPLE_HOST_CONFIG_TEST_PATH`, read only by the
+  test fixture and only when the fixed file does not exist (it never overrides an installed file). This is
+  a remaining environment channel in spec code that also runs as the supervised MainPID: the
+  installed unit could only get that name as a unit environment entry, which the two
+  rules above refuse; the fixture itself does not tell the lanes apart (`INVOCATION_ID` is also set under
+  `systemd-run --scope`, measured, so it is not a usable discriminator).
+- `EnvironmentFiles` has D-Bus signature `a(sb)`; the bus owner reads string arrays only, so the manager
+  check does not see it. An environment file is caught by `--prove` and, at the first launch, by the
+  broker rule.
+- Still open and unchanged: the unit's `PATH` (systemd's default, not `/usr/bin:/bin`), any image `LANG`,
+  and who creates the run root. The unit is NOT claimed to comply with the broker rule.
+
+Evidence (Rust seed interpreter, diagnostic):
+
+| Spec | Before | After |
+|---|---|---|
+| `test/01_unit/lib/orchestration/linux_host_config_v1_spec.spl` | executed=0 (module absent) | executed=5 passed=5 |
+| `test/01_unit/lib/orchestration/linux_host_unit_environment_custody_v1_spec.spl` | executed=0 (function absent) | executed=4 passed=4 |
+
+The reader spec loads a real caller-owned file through the retained descriptor (accepted at 0644, refused
+at 0600); the root-owner success case is the pure decision only, since the seed does not run as root. The
+four system specs report on this host what they reported with the variables unset (BLOCKED / pending;
+`linux_service_native_identity_v3_spec` has the same three seed failures as the base commit). With an
+injected file `caret_configured_ssh_gateway_spec` goes past BLOCKED to its first fixture read. The script
+was checked with `sh -n` (whole file and the three guest heredocs) and the candidate filter was run on
+scratch files; the `--prove` custody block was run with stubbed `systemctl`/`stat` (clean unit rc 0; a
+`SIMPLE_` entry, an environment file, or both: rc 1). A guest provisioned under marker v2 is refused by
+`--run-specs` ("run overlay is not provisioned") until `--provision` runs again. No guest was provisioned,
+the unit was not started, the reader was not compiled natively, the qualification caret lane was not run
+end to end, and the manager check was not executed
+against a real bus.

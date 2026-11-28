@@ -810,3 +810,9 @@ remote enrollment, operator key-policy enrollment, agent workspace close) has an
 - Trap: the machine-policy decoder needs `version: 2` and canonical bytes; hand-written SDN never decodes.
 - The pure codecs (ed25519, entropy, gateway, binding, authority policy, enrollment issuer) all run on the seed; the
   installed-profile/policy/native-identity openers fail on the seed with `unknown extern function: gettid`.
+- Host unit configuration (owner decision 2026-11-28): the guest Host unit carries no `SIMPLE_*` environment. The
+  enrolled-Host system specs read `/etc/simple-host/host.sdn` (root:root 0644, flat object, 16 closed keys) through
+  `std.nogc_sync_mut.io.linux_host_config_v1` and `test/fixtures/orchestration/host_acceptance_config_v1.spl`; the
+  manager check refuses a `SIMPLE_*` entry in the unit's `Environment`. Trap: `retained_directory_open_trusted_v1`
+  refuses a group-writable final directory (`SCVDB_DIR_FINAL_UNTRUSTED`), so a umask-0002 `mkdir` needs `chmod 755`.
+  Trap: `INVOCATION_ID` is set under `systemd-run --scope` too; it does not identify the installed unit.
