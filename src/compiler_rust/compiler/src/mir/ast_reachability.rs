@@ -102,7 +102,8 @@ fn keys_of(name: &str) -> Vec<String> {
 const IMPLICIT_METHODS: &[&str] = &[
     "to_string", "str", "fmt", "debug", "format", "repr", "iter", "into_iter", "next", "has_next", "drop", "close",
     "finalize", "dispose", "eq", "hash", "cmp", "compare", "len", "get", "set", "index", "contains", "call", "clone",
-    "default", "new", "init", "unwrap",
+    "default", "new", "init", "unwrap", "equals", "from", "from_raw", "add_scalar", "sub_scalar", "mul_scalar",
+    "div_scalar",
 ];
 
 fn method_is_root(m: &FunctionDef) -> bool {
