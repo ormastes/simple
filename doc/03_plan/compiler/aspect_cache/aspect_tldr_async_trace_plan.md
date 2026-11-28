@@ -27,8 +27,8 @@ production change, from the acceptance column.
 | AW-2 | `join-point\|` module TLDR section; `DirectoryJoinPointFactsV1` built from member sections; `aspect_root_digest` computed from `aspect-decl\|` | none | AW-1 | Fable / sonnet |
 | AW-3 | One selector identity: `pointcut_selector_parse_v1` everywhere; retire `aop_selector_digest` and the substring read-set | none | AW-0 | Fable / sonnet |
 | AW-4 | Pure explain: per-node truth values and fields read for one selector over one `JoinPointFactV1` | none | AW-3 | Fable / sonnet |
-| AW-5 | Per-join-point ordered plan, order-conflict check, `plan_digest(file)`, apply key per decision D1 | none | AW-3 | Fable / sonnet |
-| AW-6 | Real `PointcutDirChangeV1` input to the planner; `aop-consumer` rows written by the current weave path | none | AW-5 | Fable / sonnet |
+| AW-5 | Per-join-point ordered plan, order-conflict check, `join_point_weave_key` (no shard-wide input; body digest per decision D1), `plan_digest(file)` | none | AW-3 | Fable / sonnet |
+| AW-6 | Per-file plan rows in the incremental manifest (the "old" side); real `PointcutDirChangeV1` input to the planner; `aop-consumer` rows written by the current weave path | none | AW-5 | Fable / sonnet |
 | AW-7a | `advice_index(scope)` and `effective_advice(dir)` as a pure fold over sections | none | AW-1, AW-2 | Fable / sonnet |
 | AW-7b | The same as async set-once slots; text scan and global registry no longer consulted for discovery | S1-3 (`read_tldr_async`), S1-5 (wake on publish), the five prerequisites of `tldr_caller_async_prerequisites_2026-10-30.md` | AW-7a | Fable / sonnet |
 | AW-8 | `match(selector, dir)` as an async slot with a packed, persisted shard; process-global match state deleted; limits through the ledger | S1-3, S1-5; S2-6 key record; S3-1 slots; S3-5 ledger | AW-7b | Fable / sonnet |
@@ -68,7 +68,7 @@ condition percentages for the modules it touched.
 | AW-2 | Facts from sections equal facts from HIR (`aop_directory_facts_from_hir_v1`) on a fixture with private functions, attributes and guards; a member without a section makes facts `complete = false`; `aspect_root_digest` is order-independent. |
 | AW-3 | The three former identities agree on a corpus of selectors or the difference is listed and resolved; equivalent spellings share one digest; unsupported selector is `supported = false` and never cached. |
 | AW-4 | For each selector operator, the explain result's root value equals `_selector_matches`; every atom reports the fact field it read; MC/DC over `!`, `&`, `\|`. |
-| AW-5 | Plan order is `(order, AdviceId)` and independent of input order; equal order on one join point is an error naming both advice ids; empty plan gives the fixed digest; under D1(b) a body-only change leaves `plan_digest` equal, under D1(a) it changes. |
+| AW-5 | Plan order is `(order, AdviceId)` and independent of input order; equal order on one join point is an error naming both advice ids; empty plan gives the fixed digest; adding a sibling join point or editing another selector leaves an unaffected join point's weave key equal; under D1(b) a body-only change leaves `plan_digest` equal, under D1(a) it changes. |
 | AW-6 | Selector edit: planner returns exactly `old \ new` ∪ `new \ old` owners plus intersection ids whose apply key changed; unrelated directory is not returned (negative control); incomplete shard returns all members of both inventories; RR receipt contains `aop-consumer` rows for a real weave and decodes; corrupt receipt falls back, never "zero affected". |
 | AW-7a | Index of a tree equals the union of member sections; an unchanged subtree is read by root digest without opening members (counter); scope filter admits and rejects by directory. |
 | AW-7b | N waiters on one index slot get one production (T-SF1 shape); a module declaring advice that no join point imports is still found; a failed slot is terminal for all waiters; no read of `aspect_registry_*` on the discovery path. |

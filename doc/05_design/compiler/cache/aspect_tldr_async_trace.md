@@ -54,7 +54,7 @@ the value.
 | G7 | **No production caller:** `advice_apply_key_v1`, `aspect_weave_from_base_v1` / `aspect_weave_base_record_v1` (weave from an immutable base), `aspect_match_forward_reads_v1`, `pointcut_match_universe_v1`, `aop_reverse_index_build`, `85.mdsoc/aop_cache/aop_group_manifest.spl` (0 importers). | `aspect_match_shard_v1.spl:427, 468, 505`; `35.semantics/aspect_weave.spl:178, 190`; `85.mdsoc/aop_index/reverse_index.spl:104` |
 | G8 | **Production weave mutates the module in place** and relies on a scan for an existing call to stay idempotent. | `35.semantics/aspect_weave.spl:70-87, 202-226`; `aop_match_cache_driver_v1.spl:325-328` |
 | G9 | **Directory TLDR store, gate and producer are unwired** (0 `src` importers outside themselves; one system spec). | `80.driver/cache/directory_tldr_{cache_gate,producer,store}_v2.spl`; plan `directory_tldr_native_qualification_2026-11-14.md` ("Full production routes remain UNRUN") |
-| G10 | **No `aop-consumer` rows from a real weave.** The only writers are the uncalled `aop_reverse_index_build` and the uncalled forward-reads helper. | `reverse_index.spl:20-24, 104-146`; `reverse_reference_facts.spl:424-427` |
+| G10 | **No `aop-consumer` rows from a real weave.** `reverse_reference_register_aop_v1` has one caller, the wrapper in `reverse_index.spl:24`, reached only from the uncalled `aop_reverse_index_build`; `incremental.spl:1045-1116` only projects whatever the registry holds, so the family is published empty or unknown. | `reverse_index.spl:20-24, 104-146`; `reverse_reference_facts.spl:424-427` |
 | G11 | **Three selector identities coexist:** `pointcut_selector_parse_v1` (shards), `aop_predicate_canonical_text` (MIR pass), `aop_selector_digest` (mdsoc index, substring read-set). | `aspect_match_shard_v1.spl:321`; `10.frontend/core/aop_predicate_parser.spl:43`; `85.mdsoc/aop_cache/aop_group_keys.spl:65`; `reverse_index.spl:9-13` |
 | G12 | **No trace surface.** `TraceViewProjection` has 0 source files; `TraceRelation` has no advice edge; no CLI, LSP or MCP entry answers "which advice applies here and why". | `src/lib/common/traceability/model.spl:267-284`; `git grep TraceViewProjection -- src` = 0 |
 | G13 | **Conflict detection and weave accounting are global.** | `driver_pipeline_aop.spl:103`; `50.mir/mir_aop_injection.spl:21-31` |
@@ -73,10 +73,17 @@ read them) and both written by that module's own compile task [PROP]:
 | `join-point\|` | `JoinPointId`, kind, name, owner file, signature digest, attributes, guard ids; includes non-exported functions | typed-HIR stage | `JoinPointFactV1` |
 
 Aggregation uses the fields `__init__.tld` already has [OBS
-`package_init_tld_v1.spl:22-38`]: `aspect_root_digest` = digest over the sorted
-`aspect-decl|` sections of the directory's members and its children's roots;
-`parent_scope_digest` chains upward; the inline join-point table is the
-directory's `DirectoryJoinPointFactsV1`.
+`package_init_tld_v1.spl:22-38`]. `aspect_root_digest` is a codec field with no
+producer today (it is only encoded, decoded and validated there), and
+`directory_tldr_roots_v2_2026-11-14.md` records that aspect catalog roots "are
+currently broader than a directory and require scoped aggregation". This design
+supplies that aggregation [PROP]: the per-module leaf is the landed
+`DirectoryAspectSemanticV2.interface_digest` [OBS
+`directory_aspect_semantic_v2.spl:100-113`: declaration rows + signature +
+effects, **no body**]; a directory's root is the digest over its members'
+sorted leaves and its children's roots. So an advice body edit does not move
+any aspect root. `parent_scope_digest` chains upward; the inline join-point
+table is the directory's `DirectoryJoinPointFactsV1`.
 
 `PointcutSelectorId` is the digest produced by `pointcut_selector_parse_v1`
 (the only parser with a typed AST and a `supported` flag). The other two
@@ -118,6 +125,14 @@ CompileTask(file):  parse -> HIR(base, immutable) -> weave_hir(base, plan)
   No task iterates "all modules". `advice_index` reads `aspect-decl|` sections,
   which exist after the parse stage of the declaring module (or from its cached
   TLDR with no parse at all), so it never waits on any HIR.
+- **Domain and cold cost.** The domain root is the root of the build's frozen
+  source inventory (the same inventory the directory snapshot capture pins).
+  On a cold build the first weave stage therefore waits for the parse-surface
+  TLDR of every module in the inventory. That is a demand on forward
+  declarations, which the engine produces anyway and overlaps with other files'
+  HIR/MIR/obj stages; it is not a barrier on HIR or on weaving. On a warm build
+  it is one root-digest hit. A file in a directory with no effective advice gets
+  the empty plan as soon as the index slot is set.
 - **Completeness.** A selector that needs the universe (negation, recursive
   `within`) awaits the facts of every directory its scope names
   (`pointcut_match_universe_v1`). A missing or incomplete facts slot makes the
@@ -128,7 +143,10 @@ CompileTask(file):  parse -> HIR(base, immutable) -> weave_hir(base, plan)
   `H(hir_key(file), plan_digest(file))` plus the usual MIR/OBJ target inputs.
   A file with an empty plan has the constant plan digest, so its key equals
   today's and aspects cost it nothing. This matches the sibling's
-  one-object-per-instance: one task, one object, named by its key.
+  one-object-per-instance: one task, one object, named by its key. The source
+  plan's per-join-point `ComposedBodyId` (§5.3) is the per-join-point weave key
+  of §5; the object is per file because a file is the engine's unit of object
+  emission (R03), and `plan_digest` is the digest of its join points' weave keys.
 - **Base body.** The HIR blob under `hir_key` is never mutated. Weaving produces
   a new value from base + plan (`aspect_weave_from_base_v1`, landed, uncalled).
   Unweaving is building from the base with a shorter plan.
@@ -161,12 +179,24 @@ CompileTask(file):  parse -> HIR(base, immutable) -> weave_hir(base, plan)
 | match shard | selector digest + facts key (`pointcut_match_key_v1`) | via facts key | packed blob; ids only |
 | woven unit object | `hir_key` + `plan_digest` + MIR/OBJ inputs | yes (MIR/OBJ level) | the file's object |
 
-`advice_apply_key` inputs are the match digest, advice name, mode, activation,
-signature digest, effects digest, order and base body digest [OBS
-`aspect_match_shard_v1.spl:427-431`]. It also folds the advice **body** digest
-today. Because the weave is call-only (§2.1), the join point's object bytes do
-not depend on the advice body, so two behaviours are possible; see owner
-decision D1 in §10. Digests are algorithm-tagged; an unknown algorithm is a miss
+**Per-join-point weave key [PROP].** The landed `advice_apply_key_v1` [OBS
+`aspect_match_shard_v1.spl:427-431`] folds the shard's `match_digest`, and that
+digest hashes the selector digest, the directory facts key and the whole id
+list [OBS `:378-388`]. With it, any sibling join-point edit or any selector edit
+changes every apply key in the directory, so neither "intersection reused" nor
+"sibling file not rebuilt" can hold. AW-5 therefore defines a second key that
+has no shard-wide input:
+
+```text
+join_point_weave_key = H(JoinPointId, base body digest,
+                         ordered [AdviceId, mode, activation, signature digest,
+                                  effects digest, order] (+ body digest under D1 = literal))
+```
+
+`plan_digest(file)` is built from these keys only. `advice_apply_key_v1` stays
+for the shard-level delta until AW-5 lands and is then retired. Because the
+weave is call-only (§2.1), the join point's object bytes do not depend on the
+advice body, so two behaviours are possible; see owner decision D1 in §10. Digests are algorithm-tagged; an unknown algorithm is a miss
 (`aop_digest_known_v1`, landed). Dynamic (`ActivationMode` = registry) advice is
 never keyed here and stays on the dynload registry path.
 
@@ -199,8 +229,12 @@ submit at all, the pre-edit impact preview, and trace. Rows go into the existing
 | RR shard incomplete or undecodable | recompute for the bounded affected scope | conservative: all members of the affected directories | never a narrower guess |
 
 The planner is the landed `pointcut_affected_files_v1`; it receives real
-`PointcutDirChangeV1` values (G6) built from the previous and current shard and
-plan receipts. No-change proof: the domain root `aspect_root_digest` and every
+`PointcutDirChangeV1` values (G6). The "old" side cannot come from shards, which
+are in memory only until AW-8 (G5): AW-6 extends the per-file incremental
+manifest row (`native_file_worker_incremental_v1`) with the file's plan rows
+`(JoinPointId, ordered AdviceId list, weave key)`. The old match set of a
+selector is the set of join points whose old plan names its advice; the old
+apply map is the old weave keys. No-change proof: the domain root `aspect_root_digest` and every
 file's `plan_digest` are in the object receipts checked by the final-artifact
 precheck (B-1..B-3), so an identical build submits no match task and no weave.
 
@@ -257,8 +291,11 @@ passes are deleted only after S2-3's standalone-versus-runner differential is gr
   in `advice_apply_key`; every woven unit recompiles and early cutoff stops at
   the unchanged object digest. Option (b): drop the body digest from the key
   while the weave is call-only; only the advice module object and the link are
-  rebuilt; the body digest returns to the key the day advice may be inlined.
-  Recommended: (b). The plan implements the key so the choice is one function.
+  rebuilt. (b) is sound only while no advice body is inlined into a join
+  point's object: the weavers have no inline path today, and when an advice
+  function is inlined by the backend its body must reach the unit through the
+  engine's existing "inline deps" invalidation input (S3-7), not through this
+  key. Recommended: (b), conditional on that input. The plan implements the key so the choice is one function.
 - **D2. Scope of kinds.** Keep the restriction to `forward` join points and
   static `before`/`after` (G14) for this work, with every other kind on its
   current path and reported `unknown` in trace. Recommended: yes.
