@@ -27,6 +27,7 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundati
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{Style}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{parse_int, grid_track_fr_micro}
 export use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_text.{IntrinsicWidthResult, LineWrapRanges, char_w, text_advance, style_char_w, style_text_advance, style_space_advance, line_h, style_line_h, style_used_face_line, _lay_style_run_byte_advances_inner, utf8_encoded_len, next_codepoint_start, byte_advances_range_width, style_text_line_advance_width_with, style_font_is_monospace, grid_item_is_replaced, replaced_default_box_w, FORM_CONTROL_UA_FONT_TRUNCATED_PX, FORM_CONTROL_UA_FONT_NUM, FORM_CONTROL_UA_FONT_DEN, FORM_CONTROL_MEASURE_MAX_PX, FORM_CONTROL_MEASURE_OVERSAMPLE, form_control_label_width_px, form_control_text_children_label_px, form_control_button_label_correction_px, form_control_first_text_child, form_control_label_text_node, replaced_default_is_content_size, replaced_specified_box_h, SVG_RATIO_MAX_BOX_PX, svg_ratio_view_box_milli, svg_ratio_scaled_px, replaced_auto_box_w, INPUT_COL_ADVANCE_PX, INPUT_CONTENT_INTERCEPT_PX, TEXTAREA_COL_ADVANCE_PX, TEXTAREA_CONTENT_INTERCEPT_PX, form_control_face_identity, form_control_intrinsic_content_w, form_control_intrinsic_content_device_w, form_control_content_w_for_face, form_control_cols, inline_replaced_predicted_width, _lay_intrinsic_text_width_inner, inline_subtree_edge_is_space, text_control_auto_outer_w, _lay_flex_item_max_content_width_inner, _table_text_min_content_width, _lay_flex_wrap_auto_base_width_inner, _lay_style_measured_run_advance_inner, codepoint_is_space, text_starts_with_collapsible_space, text_ends_with_collapsible_space, resolved_space_advance, _lay_inline_text_advance_width_inner, text_ink_y_offset, text_ink_x_offset, web_wrap_line_end, text_line_advance_width, style_text_line_advance_width, html_text_paint_fully_transparent, text_line_aligned_x, text_line_needs_paint_width, text_rtl_run_starts_box, _lay_ellipsize_text_for_width_inner, text_first_line_dx_at, text_line_box_dx, text_line_box_w, text_run_aligns_line_left, text_last_line_advance, compute_style_wrap_ranges_float_band, _lay_compute_wrap_ranges_inner, _lay_compute_style_wrap_ranges_inner, compute_style_wrap_ranges_first_line, compute_style_wrap_ranges_exact, _lay_compute_style_wrap_ranges_first_inner, first_word_advance_width, word_end_byte, css_outer_width, constrained_outer_width, cursor_advance_px, cursor_advance_frac, style_run_byte_advances, style_measured_run_advance, inline_text_advance_width, inline_text_width_after_lead, compute_style_wrap_ranges, compute_wrap_ranges, intrinsic_text_width, flex_item_max_content_width, flex_wrap_auto_base_width, ellipsize_text_for_width, layout_set_images, img_resource_auto_outer_h, img_resource_auto_outer_w}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_text.{input_button_label_text, input_button_label_exact_milli}
 
 # Build a LayoutNG-style ConstraintSpace for a CSS node, isolating available
 # size from percentage resolution size (`REQ-WEB-002`).
@@ -1114,11 +1115,19 @@ fn _measure_button_label_width_milli(st: Style, label: text, fallback_px: i32) -
     if num * over > FORM_CONTROL_MEASURE_MAX_PX:
         over = FORM_CONTROL_MEASURE_MAX_PX / num
     if over < 1:
-        return fallback_px * 1000
+        over = 1
     val metrics = resolve_font_metrics_with_language(family, label, num * over, "")
     if not metrics.valid or metrics.width <= 0:
         return fallback_px * 1000
     val scale = den * over
+    # A capped oversample (a huge font, or a big font at k > 1) rounds the run
+    # to 1/over px, so it takes the run's exact width instead, as a LayoutUnit
+    # of a device px: Chrome 159 `font-size:200px` `Go` is 266.797 CSS px at
+    # k = 1 and k = 4 (1067.19 device px), where the whole 400 px run gave 267.
+    if over < FORM_CONTROL_MILLI_OVERSAMPLE and metrics.width_milli > 0:
+        val device_milli = metrics.width_milli * (k as i64) / (scale as i64)
+        val device64 = (device_milli * 64 + 999) / 1000
+        return ((device64 * 1000 + (32 * k) as i64) / ((64 * k) as i64)) as i32
     ((metrics.width * 64) / scale) * 1000 / 64
 
 fn form_control_label_width_milli_px(st: Style, label: text) -> i32:
@@ -1824,8 +1833,11 @@ fn inline_button_width_err_milli(nodes: [HNode], styles: [Style], child_index: H
             val real_w = form_control_label_width_px(tst, nodes[t].text_trimmed)
             val used_w = if real_w > tst.resolved_font_width: real_w else: tst.resolved_font_width
             # Chrome stores the max-content width as a LayoutUnit rounded UP
-            # (`OK` 21.257 px is 21.2656): a later edge can round past it.
-            delta = delta + layout_unit_ceil_milli(tst.resolved_font_width_milli) - (used_w as i64) * 1000
+            # (`OK` 21.257 px is 21.2656): a later edge can round past it. At
+            # k > 1 the label is shaped at the device font size, a LayoutUnit
+            # of a device px (`Exercise controls` 101.508, not 101.484).
+            val label_milli: i64 = if g_layout_device_scale > 1: form_control_label_width_milli_px(tst, nodes[t].text_trimmed) as i64 else: layout_unit_ceil_milli(tst.resolved_font_width_milli)
+            delta = delta + label_milli - (used_w as i64) * 1000
         t = child_index.next_sibling[t]
     delta
 
@@ -1947,6 +1959,17 @@ pub fn inline_item_width_err_milli_with_lead(nodes: [HNode], styles: [Style], ch
         # keeps the fraction (`Go` 33.785 px in a 34 px box).
         if nodes[c].tag == "button" and st.width_px <= 0 and st.min_width_px <= 0 and st.max_width_px <= 0:
             return inline_button_width_err_milli(nodes, styles, child_index, c)
+        # An auto-width `<input type=submit|button|reset>` keeps its label's
+        # LayoutUnit width the same way, shaped at the device font size at
+        # k > 1: Chrome 159 starts the box after `<input type=submit
+        # value="Forms & Media">` at 108.359 (k = 1) and 108.383 (k = 4).
+        if nodes[c].tag == "input" and st.width_px == 0 and not st.width_zero and st.min_width_px <= 0 and st.max_width_px <= 0:
+            val input_label = input_button_label_text(nodes[c])
+            if input_label != "":
+                val label_milli: i64 = if g_layout_device_scale > 1: input_button_label_width_milli_px(st, input_label) as i64 else: layout_unit_ceil_milli(input_button_label_exact_milli(st, input_label))
+                if label_milli > 0:
+                    val content_px = bw[c] - st.pad_l - st.pad_r - st.border_l - st.border_r
+                    return label_milli - (content_px as i64) * 1000
         # A control sized in device px (a default `<input>` is 719 device px
         # at k = 4 in a 185 CSS px box): what follows it starts at that width.
         if g_layout_device_scale > 1 and box_device_extra_w_at(c) != 0 and form_control_tag(nodes[c].tag):
@@ -4033,6 +4056,31 @@ pub fn button_device_extra_w(nodes: [HNode], styles: [Style], child_index: HtmlC
     if delta >= 0:
         return 0
     0 - ((0 - delta * k + 500) / 1000)
+
+# Device milli-px by which an auto-width `<button>` or `<input type=submit|
+# button|reset>` laid out `bw` CSS px wide is wider than k x `bw`: its exact
+# LayoutUnit width at device scale k (label shaped at the device font size).
+# INLINE_PEN_ERR_UNKNOWN for any other box. The inline loop snaps the box's
+# right edge from its exact pen with it, as Chrome 159 does: after `<input
+# type=submit value="Forms & Media">` (108.383) a `<button>` of the same label
+# spans 434..867 device px at k = 4, not 434..868.
+# reason: node index and widths are layout-array scalars.
+# @allow(primitive_api)
+pub fn inline_control_device_delta_milli(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, c: i32, bw: i32) -> i64:
+    val k = g_layout_device_scale
+    val st = styles[c]
+    if k <= 1 or st.width_px != 0 or st.width_zero or st.min_width_px > 0 or st.min_width_milli > 0 or st.max_width_px > 0:
+        return INLINE_PEN_ERR_UNKNOWN
+    if nodes[c].tag == "button":
+        return (form_control_button_frac_delta_milli_px(nodes, styles, child_index, c) as i64) * (k as i64)
+    val label = input_button_label_text(nodes[c])
+    if label == "":
+        return INLINE_PEN_ERR_UNKNOWN
+    val label_milli = input_button_label_width_milli_px(st, label) as i64
+    if label_milli <= 0:
+        return INLINE_PEN_ERR_UNKNOWN
+    val content_px = bw - st.pad_l - st.pad_r - st.border_l - st.border_r
+    (label_milli - (content_px as i64) * 1000) * (k as i64)
 
 # Root font size (CSS px) for `rem` lengths; 16 without an <html> style.
 # reason: font size is a CSS px scalar.
