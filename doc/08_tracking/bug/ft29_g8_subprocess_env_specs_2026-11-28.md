@@ -26,3 +26,7 @@ Measured 2026-11-28 with `bin/simple.exe` (Rust bootstrap seed) on Windows.
 Original: `val r = if c:
     "a" else:
     "b: " + x` (the `else:` trailing the then-value on the same line, with the else body on following lines). Minimal repro fails: `expected Indent, found FString`. The same shape with `else:` on its own line aligned with `if` parses and runs, and the fully inline `if c: a else: b` also works. A trailing `else:` after an indented-block value has no defined grammar (the then-branch is an inline expression, the else-branch a block), so this is invalid syntax, not a parser gap; no workaround tag needed. The fix uses the aligned form and keeps `val`.
+
+## Follow-up request
+- Diagnostics: the seed reports `expected Indent, found FString` for a trailing `else:` after an inline then-value. A message naming the construct ("else-block after inline then-value is not allowed; put `else:` on its own line aligned with `if`") would make this self-explanatory. Feature request, not a parser bug.
+- Verified empirically (not just by diff): with the seed on this Windows host the two seed-gated specs reported `outcome=BLOCKED` (2 and 3 blocked), so `bin/simple` / `./bin/simple` resolve through the launcher here.

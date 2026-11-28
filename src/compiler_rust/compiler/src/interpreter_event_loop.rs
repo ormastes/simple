@@ -633,23 +633,37 @@ pub fn rt_event_loop_poll_interp(args: &[Value]) -> Result<Value, CompileError> 
     // codegen spec. Each event's fd is read back with rt_event_loop_poll_get_fd(i);
     // `platform_event.event_loop_poll_ready` is the canonical typed accessor that
     // rebuilds the [i64] triple array from that protocol.
-    let ready_fds: Vec<Value> = fds.chunks(3).filter_map(|t| t.first().cloned()).collect();
-    let count = ready_fds.len() as i64;
-    LAST_POLL_RESULTS.with(|r| *r.borrow_mut() = ready_fds);
+    // LAST_POLL_RESULTS keeps the flat (fd, ready, token) triples; get_fd,
+    // get_ready and get_token read one column each.
+    let count = (fds.len() / 3) as i64;
+    LAST_POLL_RESULTS.with(|r| *r.borrow_mut() = fds);
     Ok(Value::Int(count))
 }
 
-pub fn rt_event_loop_poll_get_fd_interp(args: &[Value]) -> Result<Value, CompileError> {
+fn poll_result_column(args: &[Value], column: usize) -> Value {
     let index = args.get(0).and_then(|v| v.as_int().ok()).unwrap_or(-1);
-    let fd = LAST_POLL_RESULTS.with(|r| {
+    let value = LAST_POLL_RESULTS.with(|r| {
         let results = r.borrow();
-        if index >= 0 && (index as usize) < results.len() {
-            results[index as usize].as_int().unwrap_or(-1)
+        let slot = (index as usize).saturating_mul(3).saturating_add(column);
+        if index >= 0 && slot < results.len() {
+            results[slot].as_int().unwrap_or(-1)
         } else {
             -1
         }
     });
-    Ok(Value::Int(fd))
+    Value::Int(value)
+}
+
+pub fn rt_event_loop_poll_get_fd_interp(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(poll_result_column(args, 0))
+}
+
+pub fn rt_event_loop_poll_get_ready_interp(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(poll_result_column(args, 1))
+}
+
+pub fn rt_event_loop_poll_get_token_interp(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(poll_result_column(args, 2))
 }
 
 pub fn rt_event_loop_close_interp(args: &[Value]) -> Result<Value, CompileError> {
