@@ -21026,9 +21026,11 @@ int64_t rt_event_loop_create(void) {
     return (int64_t)epoll_create1(0);
 }
 
+static int64_t poll_tokens_by_fd[65536];
+
 int64_t rt_event_loop_register(int64_t epfd, int64_t fd, int64_t mode, int64_t token, int64_t edge) {
-    (void)token;
     struct epoll_event ev;
+    if (fd >= 0 && fd < 65536) poll_tokens_by_fd[fd] = token;
     int edge_flag = edge ? EPOLLET : 0;
     ev.events = EPOLLIN | edge_flag;
     if (mode == 1) ev.events = EPOLLOUT | edge_flag;
@@ -21048,6 +21050,8 @@ int64_t rt_event_loop_deregister(int64_t epfd, int64_t fd) {
 }
 
 static int64_t poll_results[256];
+static int64_t poll_ready[256];
+static int64_t poll_tokens[256];
 
 int64_t rt_event_loop_poll(int64_t epfd, int64_t max_events, int64_t timeout_ms) {
     struct epoll_event events[256];
@@ -21055,7 +21059,12 @@ int64_t rt_event_loop_poll(int64_t epfd, int64_t max_events, int64_t timeout_ms)
     int n = epoll_wait((int)epfd, events, (int)max_events, (int)timeout_ms);
     if (n < 0) return 0;
     for (int i = 0; i < n; i++) {
-        poll_results[i] = (int64_t)events[i].data.fd;
+        int efd = events[i].data.fd;
+        int readable = (events[i].events & EPOLLIN) != 0;
+        int writable = (events[i].events & EPOLLOUT) != 0;
+        poll_results[i] = (int64_t)efd;
+        poll_ready[i] = (readable && writable) ? 2 : (writable ? 1 : 0);
+        poll_tokens[i] = (efd >= 0 && efd < 65536) ? poll_tokens_by_fd[efd] : (int64_t)efd;
     }
     return (int64_t)n;
 }
@@ -21072,19 +21081,18 @@ int64_t rt_event_loop_create(void) {
 }
 
 int64_t rt_event_loop_register(int64_t kqfd, int64_t fd, int64_t mode, int64_t token, int64_t edge) {
-    (void)token;
     struct kevent ev[2];
     uint16_t flags = EV_ADD;
     if (edge) flags = flags | EV_CLEAR;
     int count = 1;
     if (mode == 1) {
-        EV_SET(&ev[0], (uintptr_t)fd, EVFILT_WRITE, flags, 0, 0, NULL);
+        EV_SET(&ev[0], (uintptr_t)fd, EVFILT_WRITE, flags, 0, 0, (void*)(intptr_t)token);
     } else if (mode == 2) {
-        EV_SET(&ev[0], (uintptr_t)fd, EVFILT_READ, flags, 0, 0, NULL);
-        EV_SET(&ev[1], (uintptr_t)fd, EVFILT_WRITE, flags, 0, 0, NULL);
+        EV_SET(&ev[0], (uintptr_t)fd, EVFILT_READ, flags, 0, 0, (void*)(intptr_t)token);
+        EV_SET(&ev[1], (uintptr_t)fd, EVFILT_WRITE, flags, 0, 0, (void*)(intptr_t)token);
         count = 2;
     } else {
-        EV_SET(&ev[0], (uintptr_t)fd, EVFILT_READ, flags, 0, 0, NULL);
+        EV_SET(&ev[0], (uintptr_t)fd, EVFILT_READ, flags, 0, 0, (void*)(intptr_t)token);
     }
     int rc = kevent((int)kqfd, ev, count, NULL, 0, NULL);
     return rc == 0 ? 1 : 0;
@@ -21100,6 +21108,8 @@ int64_t rt_event_loop_deregister(int64_t kqfd, int64_t fd) {
 }
 
 static int64_t poll_results[256];
+static int64_t poll_ready[256];
+static int64_t poll_tokens[256];
 
 int64_t rt_event_loop_poll(int64_t kqfd, int64_t max_events, int64_t timeout_ms) {
     struct kevent events[256];
@@ -21111,6 +21121,8 @@ int64_t rt_event_loop_poll(int64_t kqfd, int64_t max_events, int64_t timeout_ms)
     if (n < 0) return 0;
     for (int i = 0; i < n; i++) {
         poll_results[i] = (int64_t)events[i].ident;
+        poll_ready[i] = (events[i].filter == EVFILT_WRITE) ? 1 : 0;
+        poll_tokens[i] = (int64_t)(intptr_t)events[i].udata;
     }
     return (int64_t)n;
 }
@@ -21125,6 +21137,8 @@ int64_t rt_event_loop_create(void) { return -1; }
 int64_t rt_event_loop_register(int64_t h, int64_t fd, int64_t mode, int64_t token, int64_t edge) { (void)h; (void)fd; (void)mode; (void)token; (void)edge; return -1; }
 int64_t rt_event_loop_deregister(int64_t h, int64_t fd) { (void)h; (void)fd; return -1; }
 static int64_t poll_results[256];
+static int64_t poll_ready[256];
+static int64_t poll_tokens[256];
 int64_t rt_event_loop_poll(int64_t h, int64_t max, int64_t ms) { (void)h; (void)max; (void)ms; return 0; }
 int64_t rt_event_loop_close(int64_t h) { (void)h; return -1; }
 
@@ -21133,6 +21147,16 @@ int64_t rt_event_loop_close(int64_t h) { (void)h; return -1; }
 int64_t rt_event_loop_poll_get_fd(int64_t index) {
     if (index < 0 || index >= 256) return -1;
     return poll_results[index];
+}
+
+int64_t rt_event_loop_poll_get_ready(int64_t index) {
+    if (index < 0 || index >= 256) return -1;
+    return poll_ready[index];
+}
+
+int64_t rt_event_loop_poll_get_token(int64_t index) {
+    if (index < 0 || index >= 256) return -1;
+    return poll_tokens[index];
 }
 
 int64_t rt_kqueue_create(void) { return rt_event_loop_create(); }
