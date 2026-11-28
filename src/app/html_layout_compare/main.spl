@@ -1,0 +1,519 @@
+# Pure-Simple Chrome vs Simple Web HTML Layout Comparison Runner
+#
+# Procedurally generates the 4 shared test image assets (sunset, avatar, cube, star),
+# renders variations via `simple_web_layout_render_html_software_pixels_with_images`,
+# computes pixel parity + 4x |diff| heatmaps against Chrome PNGs when present,
+# writes SDN report (`compare_report.sdn`) by default, and exports JSON/JS viewer
+# manifests (`compare_manifest.json`, `compare_manifest.js`) when `--json` is set.
+
+use std.common.gpu.simpleos_host_gpu_draw_ir.{
+    SimpleOsHostGpuImageResource, simpleos_host_gpu_image_resource
+}
+use std.common.image.png_decode.{decode_png_to_argb}
+use std.common.image.png_encode.{encode_argb_to_png, encode_argb_to_png_rgb}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_software_pixels_with_images
+}
+use std.io_runtime.{
+    dir_create_all, file_exists, file_read, file_read_bytes,
+    file_write, file_write_bytes, get_args, time_now_unix_micros
+}
+
+struct CompareVariationSpec:
+    id: text
+    title: text
+    width: i32
+    height: i32
+    category: text
+    tags: [text]
+    html_path: text
+
+struct CompareParityRequest:
+    width: i32
+    height: i32
+    chrome_argb: [u32]
+    simple_argb: [u32]
+
+struct CompareParityResult:
+    ok: bool
+    exact_pct_x100: i64
+    near12_pct_x100: i64
+    near32_pct_x100: i64
+    mad_x100: i64
+    diff_argb: [u32]
+
+struct CompareRecord:
+    spec: CompareVariationSpec
+    html: text
+    simple_bytes: i64
+    chrome_bytes: i64
+    diff_bytes: i64
+    chrome_present: bool
+    parity: CompareParityResult
+    render_ms: i64
+
+fn _abs_i64(v: i64) -> i64:
+    if v < 0: 0 - v else: v
+
+fn _abs_f64(v: f64) -> f64:
+    if v < 0.0: 0.0 - v else: v
+
+fn _clamp_byte(v: i64) -> u32:
+    if v < 0:
+        return 0u32
+    if v > 255:
+        return 255u32
+    v as u32
+
+fn _sqrt_f64(v: f64) -> f64:
+    if v <= 0.0:
+        return 0.0
+    var x = v
+    var i = 0
+    while i < 8:
+        x = 0.5 * (x + v / x)
+        i = i + 1
+    x
+
+fn _pack_rgba(r: i64, g: i64, b: i64, a: i64) -> u32:
+    (_clamp_byte(a) << 24) | (_clamp_byte(r) << 16) | (_clamp_byte(g) << 8) | _clamp_byte(b)
+
+fn _px_sunset(x: i32, y: i32, w: i32, h: i32) -> u32:
+    if x < 2 or x >= w - 2 or y < 2 or y >= h - 2:
+        return _pack_rgba(226, 232, 240, 255)
+    val xf = x as f64
+    val yf = y as f64
+    if y < 58:
+        val t = yf / 58.0
+        var r = 35.0 + 195.0 * t
+        var g = 48.0 + 70.0 * t
+        var b = 112.0 + 30.0 * (1.0 - t)
+        val dx = xf - 112.0
+        val dy = yf - 28.0
+        val d2 = dx * dx + dy * dy
+        if d2 < 196.0:
+            return _pack_rgba(254, 215, 102, 255)
+        elif d2 < 484.0:
+            val d = _sqrt_f64(d2)
+            val k = ((22.0 - d) / 8.0) * 0.45
+            r = r * (1.0 - k) + 253.0 * k
+            g = g * (1.0 - k) + 186.0 * k
+            b = b * (1.0 - k) + 116.0 * k
+        val span1 = 30.0 - _abs_f64(xf - 46.0) * 0.72
+        val span2 = 24.0 - _abs_f64(xf - 86.0) * 0.68
+        val m1 = 58.0 - (if span1 > 0.0: span1 else: 0.0)
+        val m2 = 58.0 - (if span2 > 0.0: span2 else: 0.0)
+        if yf >= m1 or yf >= m2:
+            return _pack_rgba(30, 41, 69, 255)
+        return _pack_rgba(r as i64, g as i64, b as i64, 255)
+    val denom = (h - 58) as f64
+    val t = (yf - 58.0) / denom
+    val r = 24.0 - 10.0 * t
+    val g = 62.0 - 22.0 * t
+    val b = 118.0 - 32.0 * t
+    if _abs_f64(xf - 112.0) < (12.0 - t * 6.0) and (y % 4) < 2:
+        return _pack_rgba(248, 196, 113, 255)
+    _pack_rgba(r as i64, g as i64, b as i64, 255)
+
+fn _px_avatar(x: i32, y: i32, w: i32, h: i32) -> u32:
+    val cx = (w as f64) / 2.0 - 0.5
+    val cy = (h as f64) / 2.0 - 0.5
+    val dx = (x as f64) - cx
+    val dy = (y as f64) - cy
+    val d2 = dx * dx + dy * dy
+    if d2 > 484.0:
+        return 0u32
+    if d2 > 400.0:
+        return _pack_rgba(56, 189, 248, 255)
+    val t = (y as f64) / (h as f64)
+    val r = 37.0 + 40.0 * t
+    val g = 99.0 + 30.0 * t
+    val b = 235.0 - 50.0 * t
+    val hdy = (y as f64) - 16.5
+    val bdx = dx * 0.85
+    val bdy = (y as f64) - 38.0
+    if (dx * dx + hdy * hdy) < 51.84 or (bdx * bdx + bdy * bdy) < 182.25:
+        return _pack_rgba(241, 245, 249, 255)
+    _pack_rgba(r as i64, g as i64, b as i64, 255)
+
+fn _px_cube(x: i32, y: i32, w: i32, h: i32) -> u32:
+    if x < 2 or x >= w - 2 or y < 2 or y >= h - 2:
+        return _pack_rgba(51, 65, 85, 255)
+    val mx = w / 2
+    val my = h / 2
+    var br: i64 = 236
+    var bg: i64 = 72
+    var bb: i64 = 153
+    if x < mx and y < my:
+        br = 59
+        bg = 130
+        bb = 246
+    elif x >= mx and y < my:
+        br = 16
+        bg = 185
+        bb = 129
+    elif x < mx and y >= my:
+        br = 245
+        bg = 158
+        bb = 11
+    val manhattan = _abs_i64((x - mx) as i64) + _abs_i64((y - my) as i64)
+    if manhattan < 20:
+        return _pack_rgba(248, 250, 252, 255)
+    if manhattan < 24:
+        return _pack_rgba(15, 23, 42, 255)
+    _pack_rgba(br, bg, bb, 255)
+
+fn _px_star(x: i32, y: i32, w: i32, h: i32) -> u32:
+    if x < 1 or x >= w - 1 or y < 1 or y >= h - 1:
+        return _pack_rgba(30, 41, 59, 255)
+    val dx = (x as f64) - 9.5
+    val dy = (y as f64) - 9.5
+    val d2 = dx * dx + dy * dy
+    if d2 < 27.04 or (_abs_f64(dx) < 1.8 and _abs_f64(dy) < 7.2) or (_abs_f64(dy) < 1.8 and _abs_f64(dx) < 7.2):
+        return _pack_rgba(250, 204, 21, 255)
+    _pack_rgba(30, 58, 138, 255)
+
+fn _build_procedural_pixels(kind: i32, w: i32, h: i32) -> [u32]:
+    val total = (w as i64) * (h as i64)
+    var px: [u32] = [0u32; total]
+    var y: i32 = 0
+    while y < h:
+        var x: i32 = 0
+        while x < w:
+            var c: u32 = 0u32
+            if kind == 0:
+                c = _px_sunset(x, y, w, h)
+            elif kind == 1:
+                c = _px_avatar(x, y, w, h)
+            elif kind == 2:
+                c = _px_cube(x, y, w, h)
+            else:
+                c = _px_star(x, y, w, h)
+            px[(y as i64) * (w as i64) + (x as i64)] = c
+            x = x + 1
+        y = y + 1
+    px
+
+pub fn compare_default_resources() -> [SimpleOsHostGpuImageResource]:
+    val sunset_px = _build_procedural_pixels(0, 160, 96)
+    val avatar_px = _build_procedural_pixels(1, 48, 48)
+    val cube_px = _build_procedural_pixels(2, 120, 80)
+    val star_px = _build_procedural_pixels(3, 20, 20)
+    [
+        simpleos_host_gpu_image_resource("../assets/sunset.png", 160, 96, sunset_px),
+        simpleos_host_gpu_image_resource("../assets/avatar.png", 48, 48, avatar_px),
+        simpleos_host_gpu_image_resource("../assets/cube.png", 120, 80, cube_px),
+        simpleos_host_gpu_image_resource("../assets/star.png", 20, 20, star_px),
+    ]
+
+fn _write_procedural_assets(out_dir: text, resources: [SimpleOsHostGpuImageResource]) -> bool:
+    val assets_dir = "{out_dir}/assets"
+    _ = dir_create_all(assets_dir)
+    val names = ["sunset.png", "avatar.png", "cube.png", "star.png"]
+    var i: i64 = 0
+    while i < resources.len() and i < names.len():
+        val res = resources[i]
+        val png = if names[i] == "avatar.png":
+            encode_argb_to_png(res.pixels, res.width, res.height)
+        else:
+            encode_argb_to_png_rgb(res.pixels, res.width, res.height)
+        if not file_write_bytes("{assets_dir}/{names[i]}", png):
+            return false
+        i = i + 1
+    true
+
+pub fn compare_compute_parity(req: CompareParityRequest) -> CompareParityResult:
+    val n = (req.width as i64) * (req.height as i64)
+    if n <= 0 or req.chrome_argb.len() < n or req.simple_argb.len() < n:
+        return CompareParityResult(
+            ok: false, exact_pct_x100: 0, near12_pct_x100: 0,
+            near32_pct_x100: 0, mad_x100: 0, diff_argb: []
+        )
+    var diff_px: [u32] = [0u32; n]
+    var exact: i64 = 0
+    var near12: i64 = 0
+    var near32: i64 = 0
+    var sum_abs: i64 = 0
+    var i: i64 = 0
+    while i < n:
+        val ca = req.chrome_argb[i]
+        val sa = req.simple_argb[i]
+        val cr = ((ca >> 16) & 255u32) as i64
+        val cg = ((ca >> 8) & 255u32) as i64
+        val cb = (ca & 255u32) as i64
+        val sr = ((sa >> 16) & 255u32) as i64
+        val sg = ((sa >> 8) & 255u32) as i64
+        val sb = (sa & 255u32) as i64
+        val dr = _abs_i64(cr - sr)
+        val dg = _abs_i64(cg - sg)
+        val db = _abs_i64(cb - sb)
+        var m = if dr >= dg: dr else: dg
+        if db > m:
+            m = db
+        sum_abs = sum_abs + dr + dg + db
+        if m == 0:
+            exact = exact + 1
+        if m <= 12:
+            near12 = near12 + 1
+        if m <= 32:
+            near32 = near32 + 1
+        if m == 0:
+            diff_px[i] = _pack_rgba(10 + (cr / 8), 14 + (cg / 8), 24 + (cb / 8), 255)
+        else:
+            diff_px[i] = _pack_rgba(dr * 4 + 32, dg * 3 + 12, db * 4 + 48, 255)
+        i = i + 1
+    CompareParityResult(
+        ok: true,
+        exact_pct_x100: (exact * 10000) / n,
+        near12_pct_x100: (near12 * 10000) / n,
+        near32_pct_x100: (near32 * 10000) / n,
+        mad_x100: (sum_abs * 100) / (n * 3),
+        diff_argb: diff_px
+    )
+
+fn _default_specs(pages_dir: text) -> [CompareVariationSpec]:
+    [
+        CompareVariationSpec(id: "v01", title: "Flex Hero & Feature Cards", width: 520, height: 340, category: "Flex & Grid", tags: ["Flexbox", "Hero", "Images"], html_path: "{pages_dir}/v01.html"),
+        CompareVariationSpec(id: "v02", title: "Editorial Float Left & Right Images", width: 520, height: 340, category: "Images & Float", tags: ["Float", "Text Wrap", "Clear"], html_path: "{pages_dir}/v02.html"),
+        CompareVariationSpec(id: "v03", title: "CSS Grid 3x2 Media & Metric Dashboard", width: 520, height: 340, category: "Flex & Grid", tags: ["CSS Grid", "Span 2", "Metrics"], html_path: "{pages_dir}/v03.html"),
+        CompareVariationSpec(id: "v04", title: "Holy Grail 3-Column App Workspace", width: 520, height: 340, category: "Flex & Grid", tags: ["App Shell", "3-Column", "Sticky Chrome"], html_path: "{pages_dir}/v04.html"),
+        CompareVariationSpec(id: "v05", title: "Media Object Comment & Reply Thread", width: 520, height: 340, category: "Images & Float", tags: ["Flex Row", "Avatars", "Nested Reply"], html_path: "{pages_dir}/v05.html"),
+        CompareVariationSpec(id: "v06", title: "Image object-fit & Aspect Matrix", width: 520, height: 340, category: "Images & Float", tags: ["object-fit", "contain/cover/fill", "Replaced Boxes"], html_path: "{pages_dir}/v06.html"),
+        CompareVariationSpec(id: "v07", title: "Data Table with Inline Icons, Pills & Colspan", width: 520, height: 340, category: "Tables & Forms", tags: ["HTML Table", "colspan", "Inline Badges"], html_path: "{pages_dir}/v07.html"),
+        CompareVariationSpec(id: "v08", title: "Positioned Pills, Caption Overlay & Z-Index", width: 520, height: 340, category: "Overlays & Inline", tags: ["position: relative", "position: absolute", "Z-Index"], html_path: "{pages_dir}/v08.html"),
+        CompareVariationSpec(id: "v09", title: "Inline Typography, Icons, Pills & Text Alignment", width: 520, height: 340, category: "Overlays & Inline", tags: ["Inline Spans", "Code Pills", "Text Align"], html_path: "{pages_dir}/v09.html"),
+        CompareVariationSpec(id: "v10", title: "Flex-Wrap Chips & Responsive Card Grid", width: 520, height: 340, category: "Flex & Grid", tags: ["flex-wrap: wrap", "Gap", "Multi-Row"], html_path: "{pages_dir}/v10.html"),
+        CompareVariationSpec(id: "v11", title: "Profile Card & Form Controls Layout", width: 520, height: 340, category: "Tables & Forms", tags: ["Forms", "Input/Select/Textarea", "Buttons"], html_path: "{pages_dir}/v11.html"),
+        CompareVariationSpec(id: "v12", title: "Two-Column Lists, Blockquote & Captioned Figures", width: 520, height: 340, category: "Images & Float", tags: ["Columns", "UL/OL Lists", "Blockquote"], html_path: "{pages_dir}/v12.html"),
+        CompareVariationSpec(id: "v13", title: "Browser Feature Showcase (Gradients, Badges, Cards)", width: 640, height: 420, category: "Full App", tags: ["Full App", "Gradients", "Showcase"], html_path: "examples/06_io/ui/browser_common_elements_showcase.html"),
+    ]
+
+fn _matches_filter(spec: CompareVariationSpec, filt: text) -> bool:
+    if filt == "":
+        return true
+    val low = filt.to_lower()
+    if spec.id.to_lower().contains(low) or spec.title.to_lower().contains(low) or spec.category.to_lower().contains(low):
+        return true
+    for tag in spec.tags:
+        if tag.to_lower().contains(low):
+            return true
+    false
+
+pub fn compare_render_variation(
+    spec: CompareVariationSpec,
+    resources: [SimpleOsHostGpuImageResource],
+    out_dir: text,
+    chrome_dir: text
+) -> CompareRecord:
+    val html = if file_exists(spec.html_path): file_read(spec.html_path) else: ""
+    val t0 = time_now_unix_micros()
+    val simple_px = simple_web_layout_render_html_software_pixels_with_images(
+        html, spec.width, spec.height, resources
+    )
+    val t1 = time_now_unix_micros()
+    val simple_png = encode_argb_to_png_rgb(simple_px, spec.width, spec.height)
+    _ = dir_create_all("{out_dir}/simple")
+    _ = file_write_bytes("{out_dir}/simple/{spec.id}.png", simple_png)
+
+    var chrome_bytes: i64 = 0
+    var diff_bytes: i64 = 0
+    var chrome_present = false
+    var parity = CompareParityResult(
+        ok: false, exact_pct_x100: 0, near12_pct_x100: 0,
+        near32_pct_x100: 0, mad_x100: 0, diff_argb: []
+    )
+    val chrome_path = "{chrome_dir}/{spec.id}.png"
+    if file_exists(chrome_path):
+        val raw_chrome = file_read_bytes(chrome_path)
+        chrome_bytes = raw_chrome.len() as i64
+        match decode_png_to_argb(raw_chrome):
+            Ok(img):
+                if img.width == spec.width and img.height == spec.height:
+                    chrome_present = true
+                    parity = compare_compute_parity(CompareParityRequest(
+                        width: spec.width,
+                        height: spec.height,
+                        chrome_argb: img.pixels,
+                        simple_argb: simple_px
+                    ))
+                    if parity.ok:
+                        val diff_png = encode_argb_to_png_rgb(parity.diff_argb, spec.width, spec.height)
+                        diff_bytes = diff_png.len() as i64
+                        _ = dir_create_all("{out_dir}/diff")
+                        _ = file_write_bytes("{out_dir}/diff/{spec.id}.png", diff_png)
+            Err(_):
+                pass_do_nothing
+
+    CompareRecord(
+        spec: spec,
+        html: html,
+        simple_bytes: simple_png.len() as i64,
+        chrome_bytes: chrome_bytes,
+        diff_bytes: diff_bytes,
+        chrome_present: chrome_present,
+        parity: parity,
+        render_ms: (t1 - t0) / 1000
+    )
+
+fn _x100_str(v: i64) -> text:
+    val whole = v / 100
+    val frac = _abs_i64(v - whole * 100)
+    val frac_txt = if frac < 10: "0{frac}" else: "{frac}"
+    "{whole}.{frac_txt}"
+
+fn _kb_str(bytes: i64) -> text:
+    val tenths = (bytes * 10 + 512) / 1024
+    val whole = tenths / 10
+    val frac = tenths - whole * 10
+    "{whole}.{frac}"
+
+fn _json_escape(s: text) -> text:
+    var out = ""
+    for ch in s.chars():
+        if ch == "\\":
+            out = out + "\\\\"
+        elif ch == "\"":
+            out = out + "\\\""
+        elif ch == "\n":
+            out = out + "\\n"
+        elif ch == "\r":
+            out = out + "\\r"
+        elif ch == "\t":
+            out = out + "\\t"
+        else:
+            out = out + ch
+    out
+
+pub fn compare_format_report_sdn(records: [CompareRecord]) -> text:
+    var out = "# Chrome (Blink/Skia) vs Pure-Simple Web Layout Comparison Report\n\n"
+    out = out + "summary |variations, chrome_compared, engine|\n"
+    var compared: i64 = 0
+    for rec in records:
+        if rec.chrome_present:
+            compared = compared + 1
+    out = out + "    {records.len()}, {compared}, pure_simple\n\n"
+    out = out + "variations |id, title, width, height, chrome_present, exact_pct, near12_pct, near32_pct, mean_abs_diff, render_ms, simple_kb, chrome_kb, diff_kb|\n"
+    for rec in records:
+        val ex = _x100_str(rec.parity.exact_pct_x100)
+        val n12 = _x100_str(rec.parity.near12_pct_x100)
+        val n32 = _x100_str(rec.parity.near32_pct_x100)
+        val mad = _x100_str(rec.parity.mad_x100)
+        val skb = _kb_str(rec.simple_bytes)
+        val ckb = _kb_str(rec.chrome_bytes)
+        val dkb = _kb_str(rec.diff_bytes)
+        out = out + "    {rec.spec.id}, \"{rec.spec.title}\", {rec.spec.width}, {rec.spec.height}, {rec.chrome_present}, {ex}, {n12}, {n32}, {mad}, {rec.render_ms}, {skb}, {ckb}, {dkb}\n"
+    out
+
+fn _format_manifest_json(records: [CompareRecord]) -> text:
+    var out = "[\n"
+    var idx: i64 = 0
+    for rec in records:
+        var tag_json = "["
+        var ti: i64 = 0
+        for t in rec.spec.tags:
+            if ti > 0:
+                tag_json = tag_json + ", "
+            tag_json = tag_json + "\"" + _json_escape(t) + "\""
+            ti = ti + 1
+        tag_json = tag_json + "]"
+        if idx > 0:
+            out = out + ",\n"
+        out = out + "  {\n"
+        out = out + "    \"id\": \"" + rec.spec.id + "\",\n"
+        out = out + "    \"title\": \"" + _json_escape(rec.spec.title) + "\",\n"
+        out = out + "    \"tags\": " + tag_json + ",\n"
+        out = out + "    \"w\": {rec.spec.width},\n"
+        out = out + "    \"h\": {rec.spec.height},\n"
+        out = out + "    \"html\": \"" + _json_escape(rec.html) + "\",\n"
+        out = out + "    \"chrome_present\": {rec.chrome_present},\n"
+        out = out + "    \"metrics\": {\n"
+        out = out + "      \"exact_pct\": " + _x100_str(rec.parity.exact_pct_x100) + ",\n"
+        out = out + "      \"near12_pct\": " + _x100_str(rec.parity.near12_pct_x100) + ",\n"
+        out = out + "      \"near32_pct\": " + _x100_str(rec.parity.near32_pct_x100) + ",\n"
+        out = out + "      \"mean_abs_diff\": " + _x100_str(rec.parity.mad_x100) + "\n"
+        out = out + "    },\n"
+        out = out + "    \"sizes_kb\": {\n"
+        out = out + "      \"chrome\": " + _kb_str(rec.chrome_bytes) + ",\n"
+        out = out + "      \"simple\": " + _kb_str(rec.simple_bytes) + ",\n"
+        out = out + "      \"diff\": " + _kb_str(rec.diff_bytes) + "\n"
+        out = out + "    }\n"
+        out = out + "  }"
+        idx = idx + 1
+    out + "\n]\n"
+
+fn _print_usage():
+    print "Usage: simple run src/app/html_layout_compare/main.spl [options]"
+    print "  --out-dir <dir>       Output directory (default: build/html_layout_compare)"
+    print "  --pages-dir <dir>     Variation HTML pages dir (default: examples/browser/html_layout_compare/pages)"
+    print "  --chrome-dir <dir>    Optional Chrome PNG dir (default: <out-dir>/chrome)"
+    print "  --variations <path>   Variations SDN path (default: examples/browser/html_layout_compare/variations.sdn)"
+    print "  --filter <tag>        Filter variations by id, category, or tag"
+    print "  --json                Also export compare_manifest.json and compare_manifest.js for Electron viewer"
+
+fn main() -> i64:
+    val args = get_args()
+    var out_dir = "build/html_layout_compare"
+    var pages_dir = "examples/browser/html_layout_compare/pages"
+    var chrome_dir = ""
+    var variations_path = "examples/browser/html_layout_compare/variations.sdn"
+    var filter_tag = ""
+    var emit_json = false
+
+    var i: i64 = 0
+    while i < args.len():
+        val a = args[i]
+        if a == "--help" or a == "-h":
+            _print_usage()
+            return 0
+        elif a == "--json":
+            emit_json = true
+        elif a == "--out-dir" and i + 1 < args.len():
+            i = i + 1
+            out_dir = args[i]
+        elif a == "--pages-dir" and i + 1 < args.len():
+            i = i + 1
+            pages_dir = args[i]
+        elif a == "--chrome-dir" and i + 1 < args.len():
+            i = i + 1
+            chrome_dir = args[i]
+        elif a == "--variations" and i + 1 < args.len():
+            i = i + 1
+            variations_path = args[i]
+        elif a == "--filter" and i + 1 < args.len():
+            i = i + 1
+            filter_tag = args[i]
+        i = i + 1
+
+    if chrome_dir == "":
+        chrome_dir = "{out_dir}/chrome"
+    _ = dir_create_all(out_dir)
+
+    val resources = compare_default_resources()
+    if not _write_procedural_assets(out_dir, resources):
+        print "[html_layout_compare] failed writing procedural PNG assets to {out_dir}/assets"
+        return 1
+
+    val all_specs = _default_specs(pages_dir)
+    var records: [CompareRecord] = []
+    for spec in all_specs:
+        if _matches_filter(spec, filter_tag) and file_exists(spec.html_path):
+            val rec = compare_render_variation(spec, resources, out_dir, chrome_dir)
+            records.push(rec)
+            print "[html_layout_compare] {rec.spec.id} ({rec.spec.width}x{rec.spec.height}) render_ms={rec.render_ms} chrome={rec.chrome_present} near12={_x100_str(rec.parity.near12_pct_x100)}%"
+
+    val sdn_report = compare_format_report_sdn(records)
+    if not file_write("{out_dir}/compare_report.sdn", sdn_report):
+        print "[html_layout_compare] failed writing {out_dir}/compare_report.sdn"
+        return 1
+    print "[html_layout_compare] wrote {out_dir}/compare_report.sdn (variations_sdn={variations_path})"
+
+    if emit_json:
+        val json_txt = _format_manifest_json(records)
+        _ = file_write("{out_dir}/compare_manifest.json", json_txt)
+        _ = file_write("{out_dir}/compare_manifest.js", "window.COMPARE_VARIATIONS = " + json_txt + ";\n")
+        print "[html_layout_compare] wrote {out_dir}/compare_manifest.json and {out_dir}/compare_manifest.js"
+
+    0
+
+export CompareVariationSpec, CompareParityRequest, CompareParityResult, CompareRecord
+export compare_default_resources, compare_compute_parity, compare_render_variation, compare_format_report_sdn
