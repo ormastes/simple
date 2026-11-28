@@ -320,6 +320,8 @@ int main(void) {
         rt_lg_residue_refusal(EEXIST) == RT_LG_RESIDUE_MOVE_FAILED_EXIT &&
         RT_LG_RESIDUE_MOVE_FAILED_EXIT > 255 && RT_LG_RESIDUE_MOVE_PERMISSION_EXIT > 255);
     if (geteuid() == 0) {
+        close(root_fd);
+        assert(unlinkat(scope_fd, "residue-selfcheck-root", AT_REMOVEDIR) == 0);
         puts("SKIP: delegated-root permission refusal cannot be checked as root; not a PASS");
         return 77;
     }

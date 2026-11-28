@@ -342,6 +342,12 @@ store). What was checked and pinned:
   retirement can neither kill twice nor pass with a group still recorded.
 - **Leak fixed.** `engine_group_retired_v3` removed the identity but kept the recorded device and inode in
   `engine_group_objects`. It now drops both.
+- Every route to the workspace settle runs the owner's own Stop: workspace Destroy is `inspect-exit`, `stop`,
+  `remove`, `absence`, and `stop` is skipped only when this owner already completed it. A workload that
+  exited by itself is stopped the same way (read in `machine_fresh_workspace_workflow_v3.spl`, pinned by
+  `linux_fresh_workspace_start_residue_v3_spec.spl`).
+- The probe lane's Start completes through the same `machine_fresh_workload_complete_v3`, so the typed move
+  refusal below applies there too.
 - The bound of four groups does not fail silently: `capture_v2` latches the owner when a fifth identity
   cannot be recorded (read, not changed).
 
@@ -378,10 +384,11 @@ the owner saw a clean start of a container whose monitor was dead.
 
 | Item | Why it is not proven | Needs |
 |---|---|---|
-| Epoch close retires the engine group | The epoch lifecycle and admission close are stateful owners; the seed stops at the native origin check. Source pins only. `retire_engine_group_v3` goes through `borrow_workload_observer_v2` on the epoch's own custody, which no run has exercised before a workload transfer. | Guest: an epoch `start` whose container outlives its helper, then `close_v1`; the group must be gone and the close must pass. |
+| Epoch close retires the engine group | The epoch lifecycle and admission close are stateful owners; the seed stops at the native origin check. Source pins only. `retire_engine_group_v3` goes through `borrow_workload_observer_v2` on the epoch's own custody: `epoch_native_workload_v2` first needs `epoch_native_current_v1` to pass and then opens the workload component lazily, and neither was ever run in a closing epoch whose engine group is still populated. If that observation refuses there, the close stays pending and repeatable, and the group stays under its name. | Guest: an epoch `start` whose container outlives its helper, then `close_v1`; the group must be gone and the close must pass. |
 | Start latches the typed move refusal | The `start` completion is in the stateful effects; pinned by source, the classifier is executed. | Guest: a delegated root the broker cannot create under; Start must fail with `...-move-permission`. |
 | Exit code 1001 reaches the owner | The runtime value is proven by the C selfcheck and the bounds were read (`linux_process_poll_decode_v1`, `group_process_observation_decode_v1`); the broker between them was not run. | Rebuilt broker in the guest. |
 | Stop, Destroy and settle of a workspace whose workload is still running | Order and forget are executed as DATA; the workspace workflow is not. | Guest: agent or remote-build workload alive at start-helper reap, then Stop, Destroy, the `settle` stage twice (the second must be the settled early return). |
+| Epoch `start` whose move was refused | The epoch creator has no reader of the helper's exit code, so 1000 and 1001 are not named on this path; the helper is collected like any other and the group is found absent at close. | A typed reason on the epoch path, once that path has a caller. |
 | `exec` from the epoch template | Not measured. | Host emulation of an epoch `exec` with the helper group killed. |
 
 ## Open
