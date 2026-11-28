@@ -4554,8 +4554,27 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     child_w = 1
                 var child_x = ix + cml
                 val col_item_align = effective_item_align(st, resolved_cst)
+                val col_non_stretch = (
+                    col_item_align != "stretch" and
+                    col_item_align != "normal" and
+                    col_item_align != ""
+                )
                 val col_child_outer_w = if resolved_cst.width_px > 0 or resolved_cst.width_zero:
                     if nodes[flex_c].has_widget_class or nodes[flex_c].has_icon_image_class or resolved_cst.border_box: resolved_cst.width_px else: resolved_cst.width_px + resolved_cst.pad_l + resolved_cst.pad_r + resolved_cst.border_l + resolved_cst.border_r
+                elif col_non_stretch:
+                    val col_auto_fit = if replaced_default_box_w(nodes[flex_c].tag) > 0:
+                        replaced_auto_box_w(nodes[flex_c], resolved_cst, child_w)
+                    else:
+                        var col_fit = flex_item_max_content_width(nodes, styles, child_index, flex_c)
+                        val col_inline_fit = intrinsic_text_width(nodes, styles, child_index, flex_c, out_intrinsic_widths)
+                        out_intrinsic_widths = col_inline_fit.widths
+                        if col_inline_fit.width > col_fit:
+                            col_fit = col_inline_fit.width
+                        col_fit = col_fit + percent_padding_extra_w(styles[flex_c], resolved_cst)
+                        if col_fit > child_w:
+                            col_fit = child_w
+                        constrained_outer_width(nodes[flex_c], resolved_cst, col_fit)
+                    if col_auto_fit < 0: 0 else: col_auto_fit
                 else:
                     child_w
                 val col_child_margin_w = cml + col_child_outer_w + cmr
@@ -4573,6 +4592,9 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     child_x = ix + cml + iw - col_child_margin_w
                     child_w = col_child_outer_w
                     col_exact_x = (iw - cmr - col_child_outer_w) * 1000 - col_mr_err
+                    col_aligned = true
+                elif col_non_stretch:
+                    child_w = col_child_outer_w
                     col_aligned = true
                 # Fractional margins: the item paints from its snapped device
                 # edge, as an in-flow block child does; a stretched auto-width
@@ -5359,8 +5381,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     not rst.white_space_pre and
                     inline_x > inline_start_x and
                     text_run_aligns_line_left(cst) and
-                    text_run_aligns_line_left(rst) and
-                    inline_start_x == inline_base_x and line_iw == iw
+                    text_run_aligns_line_left(rst)
                 ):
                     val run_lead_space = if text_starts_with_collapsible_space(nodes[run_node].text_data):
                         resolved_space_advance(
@@ -5579,27 +5600,59 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 # A mid-line run that wraps owns the whole line box; line 0 is
                 # inset by `text_first_dx` (see above).
                 var inline_box_x = ix + inline_x + inline_margin_l
+                var text_line_boxes: [i32] = []
+                if nodes[c].tag == "#text" and g_text_line_boxes_pending.len() > 0:
+                    text_line_boxes = g_text_line_boxes_pending
+                    inline_box_x = ix + inline_base_x
+                    inline_w = iw - inline_base_x
                 if text_first_dx > 0:
-                    inline_box_x = ix + inline_start_x
-                    inline_w = line_iw - inline_start_x
-                    g_text_first_line_dx_pending = text_first_dx
+                    val mid_float_boxes = float_ctx_line_boxes(cy, style_line_h(rst), ix + inline_base_x, ix + iw)
+                    if inline_start_x != inline_base_x or line_iw != iw or line_boxes_shorten(mid_float_boxes, iw - inline_base_x):
+                        val mid_pen = inline_start_x + text_first_dx
+                        val mid_dx = mid_pen - inline_base_x
+                        val mid_w = if line_iw > mid_pen: line_iw - mid_pen else: 0
+                        var shifted_boxes: [i32] = [mid_dx, mid_w]
+                        var fbi = 2
+                        while fbi + 1 < mid_float_boxes.len():
+                            shifted_boxes = shifted_boxes.push(mid_float_boxes[fbi])
+                            shifted_boxes = shifted_boxes.push(mid_float_boxes[fbi + 1])
+                            fbi = fbi + 2
+                        text_line_boxes = shifted_boxes
+                        inline_box_x = ix + inline_base_x
+                        inline_w = iw - inline_base_x
+                        g_text_line_boxes_pending = text_line_boxes
+                        text_first_dx = 0
+                    else:
+                        inline_box_x = ix + inline_start_x
+                        inline_w = line_iw - inline_start_x
+                        g_text_first_line_dx_pending = text_first_dx
                 # A run that opens a line while floats are beside it or below
                 # it, and does not fit that line: the run owns the whole line
                 # box of its block and wraps into per-line boxes, each bounded
                 # by the floats that intersect that line (`float_ctx_line_
                 # boxes`). The painters read the same boxes back through
                 # `text_line_box_dx` / `text_line_box_w`.
-                var text_line_boxes: [i32] = []
+                val open_plain_text_run = (
+                    run_node >= 0 and (
+                        nodes[c].tag == "#text" or (
+                            cst.border_l == 0 and cst.border_r == 0 and
+                            cst.pad_l == 0 and cst.pad_r == 0
+                        )
+                    )
+                )
+                val open_run_advance_w = if nodes[c].tag == "#text": text_advance_w elif open_plain_text_run: inline_text_advance_width(nodes[run_node], rst) else: 0
                 if (
-                    nodes[c].tag == "#text" and text_first_dx == 0 and
+                    open_plain_text_run and text_first_dx == 0 and
+                    text_line_boxes.len() == 0 and g_text_line_boxes_pending.len() == 0 and
                     inline_x == inline_start_x and
                     not cst.white_space_nowrap and not cst.white_space_pre and
-                    text_advance_w > line_iw - inline_start_x
+                    not rst.white_space_nowrap and not rst.white_space_pre and
+                    open_run_advance_w > line_iw - inline_start_x
                 ):
                     # Only when some line really is shortened: floats that do
                     # not reach this block's lines leave the normal wrap (and
                     # its long-word overflow) in charge.
-                    val float_line_boxes = float_ctx_line_boxes(cy, style_line_h(cst), ix + inline_base_x, ix + iw)
+                    val float_line_boxes = float_ctx_line_boxes(cy, style_line_h(rst), ix + inline_base_x, ix + iw)
                     if line_boxes_shorten(float_line_boxes, iw - inline_base_x):
                         text_line_boxes = float_line_boxes
                         inline_box_x = ix + inline_base_x
@@ -5645,6 +5698,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 val child_exit_nowrap_collapsed = if cst.display == "inline": g_inline_exit_nowrap_collapsed else: false
                 g_inline_exit_after_space = false
                 g_inline_exit_nowrap_collapsed = false
+                g_text_line_boxes_pending = []
                 if child_exit_nowrap_collapsed:
                     any_nowrap_collapsed = true
                 out_bx = child.bx
@@ -5753,7 +5807,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                         not rst.white_space_pre and
                         text_run_aligns_line_left(cst) and
                         text_run_aligns_line_left(rst) and
-                        ((inline_start_x == inline_base_x and line_iw == iw) or text_line_boxes.len() > 0)
+                        ((inline_start_x == inline_base_x and line_iw == iw) or text_line_boxes.len() > 0 or line_iw < iw or inline_start_x > inline_base_x)
                     ):
                         val run_line_h = style_line_h(cst)
                         if run_line_h > inline_line_h:
