@@ -29,8 +29,8 @@ stale seed; no binary was redeployed.
 
 ## Measurements that pin the cost (2026-11-28, host loaded by concurrent gates)
 - One empty `$(true)` fork under MSYS: about 340 ms (10 forks = 3.4 s).
-- `bash tools/mail-cli/bin/mail --help` alone, which does no mail work: 31.6 s, so roughly
-  90 forks of fixed startup cost per client invocation. The probes run the client dozens of
+- `bash tools/mail-cli/bin/mail --help` alone, which does no mail work: 31.6 s, so an estimated
+  90 forks (31.6 s divided by 340 ms; estimated, not counted) of fixed startup cost per client invocation. The probes run the client dozens of
   times per mode, so startup, not the per-step logic, dominates.
 - The probes already run as one bash process per mode; batching probe calls cannot help
   because each probe step must still invoke the client.
