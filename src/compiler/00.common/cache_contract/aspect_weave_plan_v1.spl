@@ -1,0 +1,228 @@
+# Per-file weave plan, per-join-point weave key and plan digest (aspect plan
+# AW-5, design doc/05_design/compiler/cache/aspect_tldr_async_trace.md sections
+# 4-5, decision D1).
+#
+# Pure: a function of the file's own join-point rows and the advice rows that
+# are effective in the file's directory. No shard, no directory facts key and no
+# match digest enters any key here, so a sibling join point or an edit of a
+# selector that does not reach a join point leaves that join point's weave key
+# unchanged.
+#
+#   join_point_weave_key = H(JoinPointId, join point signature digest, base body
+#                            digest, ordered [AdviceId, mode, activation,
+#                            signature digest, effects digest, order, body mark])
+#   plan_digest(file)    = H(sorted weave keys of the advised join points,
+#                            mir_rule_set_digest, log_config_digest)
+#
+# Body mark (interim D1 rule, until the inline-deps input of engine step S3-7):
+# a handler that has an `inline|` TLDR entry keeps its body digest in the key;
+# every other handler contributes the constant `call`, because the weave is
+# call-only and the join point's object does not depend on the advice body.
+#
+# Inputs this stage does not produce:
+#   - `WeavePlanJoinPointV1` is the projection of the `join-point|` row
+#     (`JoinPointFactV2`, stage AW-2): the v1 fact with a real
+#     `base_body_digest`, plus `signature_digest`.
+#   - `WeavePlanAdviceV1` / `WeavePlanRuleV1` are rows of `effective_advice(dir)`
+#     (stages AW-1 and AW-7a), already filtered by scope: a rule row that is not
+#     passed for a file does not touch that file's digest.
+#
+# Fail closed: `plan_digest` is "" (never a key) when two matched advice rows
+# have equal order on one join point, when a static advice row cannot be planned
+# here (unsupported selector, or a mode other than before/after), or when an
+# inline handler has no body digest.
+# The per-join-point lists and weave keys are still returned in that case, for
+# diagnostics only: they omit the rows that could not be planned and must not be
+# persisted or compared unless `incomplete_reason` is "" and `order_conflicts`
+# is empty.
+
+use std.common.crypto.sha256.{sha256_u8_hex}
+use std.common.string_core.{text_to_bytes}
+use compiler.common.cache_contract.aspect_match_shard_v1.{JoinPointFactV1, PointcutSelectorV1,
+    AdviceFacetsV1, aspect_advice_mode_cacheable_v1}
+use compiler.common.cache_contract.pointcut_explain_v1.{pointcut_explain_v1, PointcutExplainVerdictV1}
+
+# How a handler body reaches the join point object. `Inline`: the handler has
+# an `inline|` TLDR entry, so its body digest is a key input (interim D1 rule).
+pub enum AdviceBodyLinkV1:
+    CallOnly
+    Inline
+
+pub struct WeavePlanJoinPointV1:
+    fact: JoinPointFactV1
+    signature_digest: text
+
+# One logical-family advice row. `facets.order` and `advice_id` give the plan order.
+pub struct WeavePlanAdviceV1:
+    advice_id: text
+    selector: PointcutSelectorV1
+    facets: AdviceFacetsV1
+    body_link: AdviceBodyLinkV1
+
+# One mir-family rule row or one ambient log rule row (log rules have no
+# handler signature or effects digest).
+# @allow(primitive_api) `priority` mirrors DirectoryAspectDeclarationV2.priority (i64)
+pub struct WeavePlanRuleV1:
+    advice_id: text
+    selector_digest: text
+    form: text
+    priority: i64
+    signature_digest: text
+    effects_digest: text
+    body_digest: text
+    body_link: AdviceBodyLinkV1
+
+pub struct JoinPointWeavePlanV1:
+    join_point_id: text
+    ordered_advice_ids: [text]
+    weave_key: text
+
+pub struct FileWeavePlanV1:
+    # Every own join point, sorted by id; an unadvised one has an empty list.
+    join_points: [JoinPointWeavePlanV1]
+    mir_rule_set_digest: text
+    log_config_digest: text
+    order_conflicts: [text]
+    incomplete_reason: text
+    plan_digest: text
+
+fn _plan_framed_v1(domain: text, parts: [text]) -> text:
+    var framed = "{domain}\u0000"
+    for p in parts:
+        framed = framed + "{p.byte_len()}:{p}\u0000"
+    framed
+
+fn _plan_h_v1(domain: text, parts: [text]) -> text:
+    "sha256:" + sha256_u8_hex(text_to_bytes(_plan_framed_v1(domain, parts)))
+
+fn _plan_sorted_texts_v1(values: [text]) -> [text]:
+    var out: [text] = []
+    for v in values:
+        var i = out.len()
+        out.push(v)
+        while i > 0 and out[i - 1] > v:
+            out[i] = out[i - 1]
+            i = i - 1
+        out[i] = v
+    out
+
+fn _plan_body_mark_v1(body_link: AdviceBodyLinkV1, body_digest: text) -> text:
+    if body_link == AdviceBodyLinkV1.Inline: return "inline:" + body_digest
+    "call"
+
+fn _plan_advice_before_v1(a: WeavePlanAdviceV1, b: WeavePlanAdviceV1) -> bool:
+    if a.facets.order != b.facets.order: return a.facets.order < b.facets.order
+    a.advice_id < b.advice_id
+
+# Plan order: `(order, AdviceId)`, independent of the input order.
+fn _plan_sorted_advice_v1(values: [WeavePlanAdviceV1]) -> [WeavePlanAdviceV1]:
+    var out: [WeavePlanAdviceV1] = []
+    for v in values:
+        var i = out.len()
+        out.push(v)
+        while i > 0 and _plan_advice_before_v1(v, out[i - 1]):
+            out[i] = out[i - 1]
+            i = i - 1
+        out[i] = v
+    out
+
+fn _plan_sorted_points_v1(values: [WeavePlanJoinPointV1]) -> [WeavePlanJoinPointV1]:
+    var out: [WeavePlanJoinPointV1] = []
+    for v in values:
+        var i = out.len()
+        out.push(v)
+        while i > 0 and out[i - 1].fact.id > v.fact.id:
+            out[i] = out[i - 1]
+            i = i - 1
+        out[i] = v
+    out
+
+# Weave identity of one join point under its ordered advice. `ordered` is the
+# plan of that join point, already in plan order.
+pub fn join_point_weave_key_v1(jp: WeavePlanJoinPointV1, ordered: [WeavePlanAdviceV1]) -> text:
+    var entries: [text] = []
+    for a in ordered:
+        entries.push(_plan_framed_v1("aop-weave-advice/v1", [a.advice_id, a.facets.mode,
+            a.facets.activation, a.facets.signature_digest, a.facets.effects_digest,
+            "{a.facets.order}", _plan_body_mark_v1(a.body_link, a.facets.body_digest)]))
+    _plan_h_v1("aop-weave-key/v1", [jp.fact.id, jp.signature_digest, jp.fact.base_body_digest,
+        _plan_framed_v1("aop-weave-advice-list/v1", entries)])
+
+fn _plan_rule_set_digest_v1(domain: text, rules: [WeavePlanRuleV1]) -> text:
+    var rows: [text] = []
+    for r in rules:
+        rows.push(_plan_framed_v1("aop-rule/v1", [r.advice_id, r.selector_digest, r.form,
+            "{r.priority}", r.signature_digest, r.effects_digest,
+            _plan_body_mark_v1(r.body_link, r.body_digest)]))
+    _plan_h_v1(domain, _plan_sorted_texts_v1(rows))
+
+# Coarse per-file input: every mir-family rule effective in the file's scope,
+# whether or not one of the file's functions matches it (decision D2).
+pub fn aspect_mir_rule_set_digest_v1(rules: [WeavePlanRuleV1]) -> text:
+    _plan_rule_set_digest_v1("aop-mir-rule-set/v1", rules)
+
+# The ambient log rules derived from the aspect parameters. A configuration that
+# yields no rule has the same digest as no configuration at all.
+pub fn aspect_log_config_digest_v1(rules: [WeavePlanRuleV1]) -> text:
+    _plan_rule_set_digest_v1("aop-log-config/v1", rules)
+
+fn _plan_digest_v1(weave_keys: [text], mir_rule_set_digest: text, log_config_digest: text) -> text:
+    _plan_h_v1("aop-plan/v1", [_plan_framed_v1("aop-plan-keys/v1", _plan_sorted_texts_v1(weave_keys)),
+        mir_rule_set_digest, log_config_digest])
+
+# The digest of a file that no advice, no mir-family rule and no log rule reaches.
+pub fn aspect_weave_plan_empty_digest_v1() -> text:
+    _plan_digest_v1([], aspect_mir_rule_set_digest_v1([]), aspect_log_config_digest_v1([]))
+
+fn _plan_rules_incomplete_v1(rules: [WeavePlanRuleV1]) -> text:
+    for r in rules:
+        if r.body_link == AdviceBodyLinkV1.Inline and r.body_digest == "": return "inline-body-digest-missing:{r.advice_id}"
+    ""
+
+# First reason the logical rows cannot be planned here; "" when all can.
+# Advice that is not static stays on the registry path and is not planned.
+fn _plan_advice_incomplete_v1(advice: [WeavePlanAdviceV1]) -> text:
+    for a in advice:
+        if a.facets.activation == "static":
+            if not aspect_advice_mode_cacheable_v1(a.facets.mode, a.facets.activation):
+                return "uncacheable-advice-mode:{a.advice_id}"
+            if not a.selector.supported: return "unsupported-selector:{a.advice_id}"
+            if a.body_link == AdviceBodyLinkV1.Inline and a.facets.body_digest == "":
+                return "inline-body-digest-missing:{a.advice_id}"
+    ""
+
+pub fn aspect_weave_plan_v1(join_points: [WeavePlanJoinPointV1], advice: [WeavePlanAdviceV1],
+        mir_rules: [WeavePlanRuleV1], log_rules: [WeavePlanRuleV1]) -> FileWeavePlanV1:
+    val ordered_advice = _plan_sorted_advice_v1(advice)
+    var plans: [JoinPointWeavePlanV1] = []
+    var advised_keys: [text] = []
+    var conflicts: [text] = []
+    for jp in _plan_sorted_points_v1(join_points):
+        var matched: [WeavePlanAdviceV1] = []
+        var ids: [text] = []
+        for a in ordered_advice:
+            if aspect_advice_mode_cacheable_v1(a.facets.mode, a.facets.activation) and
+                    pointcut_explain_v1(a.selector, jp.fact).verdict == PointcutExplainVerdictV1.Matched:
+                if matched.len() > 0:
+                    val previous = matched[matched.len() - 1]
+                    if previous.facets.order == a.facets.order:
+                        conflicts.push("join point {jp.fact.id}: advice {previous.advice_id} and {a.advice_id} have equal order {a.facets.order}")
+                matched.push(a)
+                ids.push(a.advice_id)
+        val key = join_point_weave_key_v1(jp, matched)
+        if matched.len() > 0: advised_keys.push(key)
+        plans.push(JoinPointWeavePlanV1(join_point_id: jp.fact.id, ordered_advice_ids: ids, weave_key: key))
+    val mir_digest = aspect_mir_rule_set_digest_v1(mir_rules)
+    val log_digest = aspect_log_config_digest_v1(log_rules)
+    var reason = _plan_advice_incomplete_v1(advice)
+    if reason == "": reason = _plan_rules_incomplete_v1(mir_rules)
+    if reason == "": reason = _plan_rules_incomplete_v1(log_rules)
+    var digest = ""
+    if reason == "" and conflicts.len() == 0:
+        digest = _plan_digest_v1(advised_keys, mir_digest, log_digest)
+    FileWeavePlanV1(join_points: plans, mir_rule_set_digest: mir_digest, log_config_digest: log_digest,
+        order_conflicts: conflicts, incomplete_reason: reason, plan_digest: digest)
+
+export AdviceBodyLinkV1, WeavePlanJoinPointV1, WeavePlanAdviceV1, WeavePlanRuleV1, JoinPointWeavePlanV1, FileWeavePlanV1
+export join_point_weave_key_v1, aspect_mir_rule_set_digest_v1, aspect_log_config_digest_v1
+export aspect_weave_plan_empty_digest_v1, aspect_weave_plan_v1
