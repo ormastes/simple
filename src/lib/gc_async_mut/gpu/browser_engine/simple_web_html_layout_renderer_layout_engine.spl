@@ -1818,6 +1818,25 @@ fn text_container_frac_w(nodes: [HNode], styles: [Style], bw: [i32], run: i32, n
         p = q
     BOX_FRAC_W_UNSET
 
+# True when `button_i` is an item of a plain (one-line, not reversed) row flex
+# container: the row placed it on its exact edges and recorded its device
+# width, which the button's own layout must not reset. Wrapped and reversed
+# rows keep the whole-px button placement.
+fn button_in_flex_row(nodes: [HNode], styles: [Style], button_i: i32) -> bool:
+    val parent = nodes[button_i].parent
+    if parent < 0:
+        return false
+    val pst = styles[parent]
+    (pst.display == "flex" or pst.display == "inline-flex") and pst.flex_direction != "column" and pst.flex_direction != "column-reverse" and pst.flex_wrap == "nowrap" and not row_flex_main_reversed(pst)
+
+# True when box `i` is an auto-width `<button>` item of a row flex container:
+# its centred label fills the content box exactly (no centring slack; a
+# `min-width` can add some, so those are left out), so the
+# label starts at the item's exact left edge + border + padding and takes the
+# item's line-start error as its pen origin, like a left-aligned line.
+fn flex_row_button_label_at_edge(nodes: [HNode], styles: [Style], i: i32, st: Style) -> bool:
+    nodes[i].tag == "button" and st.width_px <= 0 and st.flex_grow <= 0 and st.min_width_px <= 0 and st.min_width_milli <= 0 and button_in_flex_row(nodes, styles, i)
+
 # Chrome keeps an absolute box's insets in LayoutUnits: it paints the box from
 # round(k x exact edge) device px and starts the box's text at the exact pen
 # (`left:40.5px` paints the background from x 41, its `l` at pen 40.5).
@@ -3940,7 +3959,11 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     val exact_right_milli = exact_left_milli + remaining_w * 1000 + item_frac_delta_milli
                     # A row with fractional margins also moves the item to its
                     # device column at k > 1 (`box_x_snap`), as block children do.
-                    draw_x = if margin_frac_row: cx + box_x_snap(nodes.len() as i32, fc, frac_adj_milli) else: (exact_left_milli + 500) / 1000
+                    # An auto-width `<button>` item does the same at every k and
+                    # hands the rest to its label (`box_line_start_err`): Chrome
+                    # 159 starts `HTML` in a tab row at 138.547, not 139.
+                    val plain_button_item = nodes[fc].tag == "button" and st.flex_wrap == "nowrap"
+                    draw_x = if margin_frac_row or plain_button_item: cx + box_x_snap(nodes.len() as i32, fc, frac_adj_milli) else: (exact_left_milli + 500) / 1000
                     # Only an item with its own remainder has a known exact
                     # width; any other (an `<img>` sized by its own layout)
                     # keeps its whole-px width, so only its left edge moves.
@@ -3950,7 +3973,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                             draw_w = 1
                         frac_snapped = true
                         val k = layout_device_scale()
-                        if (margin_frac_row or cst.min_width_milli > 0) and k > 1 and not form_control_tag(nodes[fc].tag):
+                        if k > 1 and (plain_button_item or ((margin_frac_row or cst.min_width_milli > 0) and not form_control_tag(nodes[fc].tag))):
                             box_device_extra_w_record(nodes.len() as i32, fc, box_device_top_px(exact_right_milli * k) - box_device_top_px(exact_left_milli * k) - k * draw_w)
                 # Fractional block-axis start (Chrome LayoutUnit): a plainly placed item
                 # starts at the container start fraction plus its top margin in milli-px,
@@ -5019,6 +5042,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 # <span></span> x` keeps ONE space in Chrome 159).
                 val node_pen_start = inline_x
                 var lead_charged = false
+                var lead_snap_milli: i64 = 0
                 var nowrap_lead_collapsed = false
                 var nowrap_lead_px = 0
                 var nowrap_lead_milli: i64 = 0
@@ -5064,7 +5088,20 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                         )
                         inline_x = inline_x + lead_space
                         if lead_err != INLINE_PEN_ERR_UNKNOWN and cst.resolved_space_milli > 0:
-                            val lead_milli = layout_unit_ceil_milli(if cst.resolved_lead_space_milli > 0: cst.resolved_lead_space_milli else: cst.resolved_space_milli)
+                            # Glyphs inside an item sit at float advances, so the run
+                            # starts at the exact space (Chrome 159, k=4:
+                            # `<code>animation-duration</code> — partial` starts the dash
+                            # at 185.815, the snapped space gives 185.875) and the
+                            # LayoutUnit snap joins the carry after the run. k == 1 took
+                            # the snapped space until the LCD pens were exact unit sums
+                            # (lcd_quarter_phase_long_run_chrome159_spec): it hid a pen
+                            # that drifted a few milli short of its quarter tie. 1x catalog
+                            # with exact pens: 13,762 px exact lead, 14,275 snapped (bug
+                            # web_render_k1_lead_space_run_start_tie_2026-11-28).
+                            val lead_exact_milli = if cst.resolved_lead_space_milli > 0: cst.resolved_lead_space_milli else: cst.resolved_space_milli
+                            val lead_snapped_milli = layout_unit_ceil_milli(lead_exact_milli)
+                            val lead_milli = lead_exact_milli
+                            lead_snap_milli = lead_snapped_milli - lead_milli
                             inline_err_milli = lead_err + lead_milli - (lead_space as i64) * 1000
                             inline_err_x = inline_x
                             inline_err_y = cy
@@ -5194,7 +5231,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 g_text_first_line_err_pending = if text_first_dx > 0 and nodes[c].tag == "#text" and run_pen_err != INLINE_PEN_ERR_UNKNOWN: (if cy == summary_line0_y: line_start_err + summary_err else: line_start_err) - run_pen_err else: INLINE_PEN_ERR_UNKNOWN
                 val run_pen_origin = if (
                     run_pen_err != INLINE_PEN_ERR_UNKNOWN and
-                    text_run_aligns_line_left(st) and text_run_aligns_line_left(cst)
+                    ((text_run_aligns_line_left(st) and text_run_aligns_line_left(cst)) or flex_row_button_label_at_edge(nodes, styles, i, st))
                 ):
                     run_pen_err as i32
                 else:
@@ -5436,6 +5473,11 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 ):
                     out_bw[c] = 0
                     any_nowrap_collapsed = true
+                # The lead space this run charged is part of its inline item:
+                # the item width snaps up to a LayoutUnit only now, after the
+                # run took its own pen origin from the exact advance.
+                if lead_snap_milli != 0:
+                    inline_err_milli = inline_err_milli + lead_snap_milli
                 val item_err = inline_pen_err(inline_x, inline_start_x, cy, inline_err_x, inline_err_y, inline_err_milli, (if cy == summary_line0_y: line_start_err + summary_err else: line_start_err))
                 val item_delta = inline_item_width_err_milli(nodes, styles, child_index, c, out_bw, out_wrap_starts)
                 if layout_device_scale() == 1 and nodes[c].tag == "button":
@@ -5948,7 +5990,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
     val end_frac = if has_auto_h: cy_frac else: origin_frac + authored_frac - authored_px * 1000
     val out_extra_device_h = if has_auto_h: flow_extra_device_h else: 0
     box_device_extra_h_record(nodes.len() as i32, i, box_device_top_px(end_frac * layout_device_scale()) - box_device_top_px(origin_frac * layout_device_scale()) + out_extra_device_h)
-    if node.tag == "button" and layout_device_scale() > 1 and st.width_px <= 0 and st.flex_grow <= 0:
+    if node.tag == "button" and layout_device_scale() > 1 and st.width_px <= 0 and st.flex_grow <= 0 and not button_in_flex_row(nodes, styles, i):
         box_device_extra_w_record(nodes.len() as i32, i, button_device_extra_w(nodes, styles, child_index, i))
     LayoutResult(bx: placed.bx, by: placed.by, bw: placed.bw, bh: placed.bh, wrap_starts: placed.wrap_starts, wrap_ends: placed.wrap_ends, intrinsic_widths: placed.intrinsic_widths, height: placed.height, trailing_margin_b: trailing_margin_b, leading_margin_t: leading_margin_t, end_frac_milli: end_frac, end_frac_valid: true, end_device_extra_h: out_extra_device_h)
 

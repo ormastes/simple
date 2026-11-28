@@ -1,0 +1,62 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-RUNTIME
+#
+# Extern return-shape canonicalisation, batch 10 (I/O, time, JIT, locks) plus batch 11 follow-ups
+#   (try_mutex_new / try_rwlock_new Option constructors, rt_mkdir and
+#   rt_jit_compile_source cases).
+#   rt_mkdir -> i64 status, rt_io_udp_set_nonblocking -> bool, rt_time_ms -> i64,
+#   rt_jit_compile_source -> text, rt_stdout_write -> i64, rt_stderr_write /
+#   rt_println_value -> (), rt_mutex_new / rt_rwlock_new -> i64? (nil only on OOM).
+use std.nogc_sync_mut.concurrent.mutex.{mutex_new_gate_handle, try_mutex_new}
+use std.nogc_sync_mut.concurrent.rwlock.{try_rwlock_new}
+
+@unsafe(reason: "raw epoch-millisecond ABI", capabilities: [ffi])
+extern fn rt_time_ms() -> i64
+@unsafe(reason: "raw UDP nonblocking ABI", capabilities: [ffi])
+extern fn rt_io_udp_set_nonblocking(fd: i64, enabled: bool) -> bool
+@unsafe(reason: "raw mkdir status ABI", capabilities: [ffi])
+extern fn rt_mkdir(path: text, mode: i64) -> i64
+@unsafe(reason: "raw interpreter JIT compile ABI", capabilities: [ffi])
+extern fn rt_jit_compile_source(handle: i64, source: text) -> text
+
+describe "extern return shapes: batch 10":
+    it "rt_time_ms is a positive i64 epoch":
+        step("milliseconds since the epoch are positive")
+        val ms = unsafe(capabilities: [ffi]):
+            rt_time_ms()
+        expect(ms > 0).to_equal(true)
+
+    it "rt_io_udp_set_nonblocking rejects an invalid handle with false":
+        step("fd -1 is not a socket")
+        val ok = unsafe(capabilities: [ffi]):
+            rt_io_udp_set_nonblocking(-1, true)
+        expect(ok).to_equal(false)
+
+    it "the mutex handle unwrap yields a non-zero handle":
+        step("allocation succeeds and the helper unwraps the optional")
+        expect(mutex_new_gate_handle(0) != 0).to_equal(true)
+
+    it "try_mutex_new and try_rwlock_new return Some on success":
+        step("Option-returning constructors do not panic")
+        expect(try_mutex_new(0).is_some()).to_equal(true)
+        expect(try_rwlock_new(0).is_some()).to_equal(true)
+
+    it "rt_mkdir returns 0 on success and -errno when the path exists":
+        step("create a fresh directory, then retry it")
+        val stamp = unsafe(capabilities: [ffi]):
+            rt_time_ms()
+        val path = "build/extern_shape_mkdir_probe_" + stamp.to_string()
+        unsafe(capabilities: [ffi]):
+            rt_mkdir("build", 493)
+        val first = unsafe(capabilities: [ffi]):
+            rt_mkdir(path, 493)
+        val second = unsafe(capabilities: [ffi]):
+            rt_mkdir(path, 493)
+        expect(first).to_equal(0)
+        expect(second < 0).to_equal(true)
+
+    it "rt_jit_compile_source returns error text, never nil, on unparsable source":
+        step("a parse failure is reported as text before any handle lookup")
+        val err = unsafe(capabilities: [ffi]):
+            rt_jit_compile_source(0, "fn (((")
+        expect(err.starts_with("parse:")).to_equal(true)

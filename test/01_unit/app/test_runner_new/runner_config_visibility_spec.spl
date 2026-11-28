@@ -1,0 +1,44 @@
+"""`simple test <spec>` must load the runner itself, not die on a private import.
+
+Why this spec exists (REPRODUCER, 2026-11-28). On release/1.0.0 every
+`simple test <spec>` failed before running a single example with
+`error: semantic: private fn resolve_effective_profile of module
+.../nogc_sync_mut/test_runner/test_runner_config.spl is not visible to
+.../test_runner_new/test_runner_single.spl`. Cause: df7cf56eba9 added a
+module-level `export a, b` list to test_runner_config.spl; an explicit export
+list makes every other non-`pub` fn module-private, so the runner's imports of
+resolve_effective_profile (and the facade re-exports) stopped resolving.
+
+The first group imports the runner-consumed names through the same facade the
+runner uses (a private name fails this file at load). The last example runs the
+real runner on a trivial spec in a child process.
+
+# @req REQ-TESTRUNNER-CONFIG-EXPORTS
+"""
+
+use std.spec.*
+use std.test_runner.test_runner_config.{resolve_effective_profile, mcdc_mode_error_message, get_flag_value, has_run_management_flag}
+use app.io.cli_ops.{cli_current_exe_path}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded}
+use std.nogc_sync_mut.io.file_ops.{file_write, secure_temp_dir}
+use std.test_runner.test_executor_parsing.{_tp_get_temp_dir}
+
+describe "test_runner_config exports used by the runner", :
+    it "makes resolve_effective_profile and mcdc_mode_error_message importable", :
+        val _probe = resolve_effective_profile
+        expect(mcdc_mode_error_message("on")).to_equal("")
+
+    it "makes get_flag_value and has_run_management_flag callable", :
+        expect(get_flag_value(["--x", "1"], "--x")).to_equal(Some("1"))
+        expect(has_run_management_flag(["plain"])).to_equal(false)
+
+describe "simple test on a trivial spec", :
+    it "runs the spec instead of failing on a private runner import", :
+        val dir = secure_temp_dir(_tp_get_temp_dir(), "trprof-").unwrap().replace("\\", "/")
+        val spec = dir + "/trivial_spec.spl"
+        file_write(spec, "use std.spec.*\n\ndescribe \"t\", :\n    it \"ok\", :\n        expect(1).to_equal(1)\n")
+        val (out, err, code) = process_run_bounded(cli_current_exe_path(), ["test", spec], 900000, 4194304)
+        val all = out + err
+        expect(all.contains("is not visible")).to_equal(false)
+        expect(all.contains("1 passed")).to_equal(true)
+        expect(code).to_equal(0)

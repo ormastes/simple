@@ -266,6 +266,15 @@ fn _milli_px_to_px_i64(milli: i64) -> i64:
     if milli <= 0: return 0
     (milli + 500) / 1000
 
+fn _fr_gcd(a: i64, b: i64) -> i64:
+    var x = if a < 0: 0 - a else: a
+    var y = if b < 0: 0 - b else: b
+    while y != 0:
+        val t = x % y
+        x = y
+        y = t
+    if x == 0: 1 else: x
+
 # round(value * num / den) for den > 0, half away from zero: the rescale
 # `resolve_font_metrics_with_language_milli` applies to a run's boundaries.
 fn _fr_scale_round(value: i64, num: i64, den: i64) -> i64:
@@ -992,6 +1001,22 @@ val _VEC_ATLAS_PROBE: bool = false
 val _WM_TRACE: bool = (env_get("SIMPLE_WM_TRACE") ?? "") == "1"
 var _vec_atlas_probe_count: i32 = 0
 var _vec_glyph_probe_count: i32 = 0
+
+# Atlas word of a gray (non-LCD) cell pixel by coverage: `(v << 24) | 0x00FFFFFF`.
+# A table read per pixel replaces a conversion, a shift and an or on the
+# interpreter lane (gray cells above the LCD cutoff are ~1500 px each).
+var _gray_atlas_words: [u32] = []
+
+fn _gray_atlas_word_table() -> [u32]:
+    if _gray_atlas_words.len() == 256:
+        return _gray_atlas_words
+    var words: [u32] = [0u32; 256]
+    var v: i64 = 0
+    while v < 256:
+        words[v] = ((v as u32) << 24) | 0x00FFFFFFu32
+        v = v + 1
+    _gray_atlas_words = words
+    words
 
 # See doc/08_tracking/bug/font_render_batch_transform_identity_default_not_applied_2026-07-19.md:
 # FontRenderBatch.transform_identity's class-field default reads back empty
@@ -1801,6 +1826,11 @@ class FontRenderer:
         # boundaries are rescaled to `size_milli`.
         var pens: [i64] = []
         var whole: [i64] = [0; n + 1]
+        # Integer-size runs also keep each pen as an exact count of
+        # 1/steps_per_px px (0 = no exact grid, milli pens decide).
+        var steps_per_px: i64 = 0
+        var unit_steps: i64 = 0
+        var pen_steps: [i64] = []
         if frac:
             var ref: i64 = ((size_milli + 500) / 1000) * 8
             if ref > 512:
@@ -1828,14 +1858,49 @@ class FontRenderer:
             # layout's pens.
             val upem = _fr_units_per_em(run_identity, self.selected_outline_blob)
             val grid_den: i64 = (font_size as i64) * 1000
-            var k: i64 = 0
+            # Each STEP (advance + kern, off by at most 1 milli) is snapped,
+            # not the running sum: the sum of n milli-rounded advances drifts
+            # by up to n/2 milli, more than half a unit (3.9 milli at 16 px)
+            # after about ten glyphs, and a tie pen deep in a line then
+            # rounded down again (lcd_quarter_phase_long_run_chrome159_spec).
+            # A step that is not a whole number of this face's units (a
+            # fallback glyph from another font, the no-glyph estimate) would
+            # add its own rounding to every later pen: such a run keeps the
+            # sum snap and the milli quarter.
+            # Gray runs (above the LCD cutoff, all body text at k=4) keep it
+            # too: their origin carries items of other faces and sizes.
+            var on_grid = upem > 0 and not gray
+            var k: i64 = 1
+            while on_grid and k <= n:
+                val step = pens[k] - pens[k - 1]
+                val off = step - _fr_scale_round(_fr_scale_round(step, upem, grid_den), grid_den, upem)
+                if off > 1 or off < -1:
+                    on_grid = false
+                k = k + 1
+            k = 0
+            var units: i64 = 0
+            var prev_pen: i64 = 0
+            if on_grid:
+                # Exact phase grid: Chrome's pen is item start (LayoutUnit,
+                # 1/64 px) + unit advances (size/upem px), so it sits on
+                # gcd(1/64, size/upem) px = 1/steps_per_px.
+                val g = _fr_gcd((font_size as i64) * 64, upem)
+                steps_per_px = 64 * upem / g
+                unit_steps = (font_size as i64) * 64 / g
+                pen_steps = [0; n + 1]
             while k <= n:
                 whole[k] = _milli_px_to_px_i64(pens[k])
-                if upem > 0:
-                    val units = _fr_scale_round(pens[k], upem, grid_den)
+                if on_grid:
+                    units = units + _fr_scale_round(pens[k] - prev_pen, upem, grid_den)
+                    prev_pen = pens[k]
                     pens[k] = _fr_scale_round(units, grid_den, upem)
+                    pen_steps[k] = units * unit_steps
+                elif upem > 0:
+                    pens[k] = _fr_scale_round(_fr_scale_round(pens[k], upem, grid_den), grid_den, upem)
                 k = k + 1
         if letter_milli != 0 or word_milli != 0:
+            # Spaced pens are milli sums again: no exact grid.
+            steps_per_px = 0
             var extra: i64 = 0
             var placed: i64 = 0
             var k: i64 = 0
@@ -1851,6 +1916,10 @@ class FontRenderer:
                         extra = extra + word_milli
                     placed = placed + advance_widths[k].to_i64()
                 k = k + 1
+        # The origin (LayoutUnits plus unit advances, in milli-px) takes its
+        # nearest step on a grid of 4 milli or coarser (16 px at 2048 upem:
+        # 1/128 px). Measured, not derived: 1x html 0.29 with it, 0.32 without.
+        val origin_steps: i64 = if steps_per_px > 0: _fr_scale_round(origin, steps_per_px, 1000) else: 0
         var byte_offsets: [i64] = [0; n]
         var shifts: [i32] = [0; n]
         var round_shifts: [i32] = [0; n]
@@ -1877,7 +1946,12 @@ class FontRenderer:
             # 0..3. The +16/-16 offsets keep both divisions on non-negative
             # operands (floor division) for |delta| < 3.6 px.
             val delta = pens[i] - px * 1000 + origin
-            val q = (delta + 125 + 4000) / 250 - 16
+            # Exact pen and origin in 1/steps_per_px px: an exact quarter tie
+            # stays a tie and rounds up as in Chrome (SkFixed pen + 1/8, floor).
+            val q = if steps_per_px > 0 and steps_per_px <= 250:
+                (8 * (pen_steps[i] - px * steps_per_px + origin_steps) + 33 * steps_per_px) / (2 * steps_per_px) - 16
+            else:
+                (delta + 125 + 4000) / 250 - 16
             val whole = (q + 16) / 4 - 4
             shifts[i] = whole.to_i32()
             phases[i] = q - whole * 4
@@ -3379,6 +3453,7 @@ class FontRenderer:
         var atlas = self.atlas_pixels
         self.atlas_pixels = []
         var line: [u32] = [0u32; gw]
+        val gray_words = _gray_atlas_word_table()
         var row: i64 = 0
         while row < gh:
             var col: i64 = 0
@@ -3392,8 +3467,17 @@ class FontRenderer:
                         (subpixels[sub + 1].to_u32() << 8) | subpixels[sub + 2].to_u32()
                     col = col + 1
             else:
+                # Four pixels a step: the loop test and the increment were a
+                # third of this per-pixel table read on the interpreter lane.
+                val gw4 = gw - 3
+                while col < gw4:
+                    line[col] = gray_words[gray[base + col] as i64]
+                    line[col + 1] = gray_words[gray[base + col + 1] as i64]
+                    line[col + 2] = gray_words[gray[base + col + 2] as i64]
+                    line[col + 3] = gray_words[gray[base + col + 3] as i64]
+                    col = col + 4
                 while col < gw:
-                    line[col] = (gray[base + col].to_u32() << 24) | 0x00FFFFFFu32
+                    line[col] = gray_words[gray[base + col] as i64]
                     col = col + 1
             if _VEC_ATLAS_PROBE:
                 var pc: i64 = 0

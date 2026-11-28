@@ -6,8 +6,8 @@ use crate::hir::lower::context::FunctionContext;
 use crate::hir::lower::error::{LowerError, LowerResult, LOWERING_TYPE_ERROR_TAG};
 use crate::hir::lower::lowerer::Lowerer;
 use crate::hir::types::{
-    ConcurrencyMode, FunctionLayoutHint, HirContract, HirExpr, HirFunction, HirStmt, HirType, LayoutAnchor, LayoutPhase,
-    LocalVar, PointerKind, TypeId,
+    ConcurrencyMode, FunctionLayoutHint, HirContract, HirExpr, HirExprKind, HirFunction, HirStmt, HirType,
+    LayoutAnchor, LayoutPhase, LocalVar, PointerKind, TypeId,
 };
 
 pub(crate) enum AstFnAbiOverride {
@@ -154,6 +154,21 @@ fn body_produces_value(body: &[HirStmt]) -> bool {
 /// doc/08_tracking/bug/float_passed_to_int_typed_param_or_return_engines_disagree_2026-11-24.md
 pub(crate) fn is_float_into_int(expected: TypeId, found: TypeId) -> bool {
     matches!(found, TypeId::F32 | TypeId::F64) && is_numeric_type(expected) && !matches!(expected, TypeId::F32 | TypeId::F64)
+}
+
+fn numeric_type_name(t: TypeId) -> &'static str {
+    match t {
+        TypeId::I8 => "i8",
+        TypeId::I16 => "i16",
+        TypeId::I32 => "i32",
+        TypeId::I64 => "i64",
+        TypeId::U8 => "u8",
+        TypeId::U16 => "u16",
+        TypeId::U32 => "u32",
+        TypeId::U64 => "u64",
+        TypeId::F32 => "f32",
+        _ => "f64",
+    }
 }
 
 fn is_numeric_type(ty: TypeId) -> bool {
@@ -481,26 +496,104 @@ impl Lowerer {
     /// `is_float_into_int`). Called beside `reject_callable_for_enum_slot` at
     /// every call site whose parameter types are resolved.
     pub(crate) fn reject_float_for_int_slot(&self, expected: TypeId, value: &HirExpr, slot: &str) -> LowerResult<()> {
+        self.reject_array_element_mismatch(expected, value, slot)?;
         if !is_float_into_int(expected, value.ty) || self.guessed_float_in_function.get() {
             return Ok(());
         }
-        let name = |t: TypeId| match t {
-            TypeId::I8 => "i8",
-            TypeId::I16 => "i16",
-            TypeId::I32 => "i32",
-            TypeId::I64 => "i64",
-            TypeId::U8 => "u8",
-            TypeId::U16 => "u16",
-            TypeId::U32 => "u32",
-            TypeId::U64 => "u64",
-            TypeId::F32 => "f32",
-            _ => "f64",
-        };
+        let name = numeric_type_name;
         let int = name(expected);
         Err(LowerError::Unsupported(format!(
             "{LOWERING_TYPE_ERROR_TAG} type mismatch: {slot} is declared as `{int}` but receives `{}`; convert explicitly with `as {int}` or `.to_{int}()`",
             name(value.ty)
         )))
+    }
+
+    /// A `[u8]` array bound to a slot of another numeric element type (`[i64]`,
+    /// `[u32]`, ...). A `[u8]` is byte-packed, so a word-typed callee does not
+    /// hold its elements: reads used to return 0 for a 255 byte on the JIT,
+    /// and word writes into it are refused. The language has no array element
+    /// coercion. Only the byte-packed source is rejected: a word array into a
+    /// `[u8]` slot narrows like scalar `i64` -> `u8`, which is accepted today
+    /// (separate owner question). An array literal is exempt: its elements take
+    /// the slot's type. doc: seed_jit_u8_array_into_i64_array_param_reads_zero_2026-11-27
+    fn reject_array_element_mismatch(&self, expected: TypeId, value: &HirExpr, slot: &str) -> LowerResult<()> {
+        // Same type, a scalar, or a literal: nothing to reject. Checked before
+        // any registry lookup, since this runs on every typed argument.
+        if expected == value.ty || !self.is_u8_array_value(value) {
+            return Ok(());
+        }
+        match self.module.types.get(expected) {
+            Some(HirType::Array { element, .. }) => self.reject_u8_array_into(*element, value, slot),
+            _ => Ok(()),
+        }
+    }
+
+    /// `value` is a `[u8]` array that is not an array literal (a literal's
+    /// elements take the slot's type).
+    pub(crate) fn is_u8_array_value(&self, value: &HirExpr) -> bool {
+        !is_numeric_type(value.ty)
+            && value.ty != TypeId::ANY
+            && !matches!(value.kind, HirExprKind::Array(_))
+            && matches!(self.module.types.get(value.ty), Some(HirType::Array { element, .. }) if *element == TypeId::U8)
+    }
+
+    /// The array check for a slot whose declared element type is known only
+    /// from its AST spelling (a callee declared later in the file, a method
+    /// or trait row): `want` is that element type.
+    pub(crate) fn reject_u8_array_into(&self, want: TypeId, value: &HirExpr, slot: &str) -> LowerResult<()> {
+        if want == TypeId::U8 || !is_numeric_type(want) || !self.is_u8_array_value(value) {
+            return Ok(());
+        }
+        let name = numeric_type_name;
+        Err(LowerError::Unsupported(format!(
+            "{LOWERING_TYPE_ERROR_TAG} type mismatch: {slot} is declared as `[{}]` but receives `[u8]`; arrays do not convert element types, build a new array with `.map(\\x: x as {})`",
+            name(want),
+            name(want)
+        )))
+    }
+
+    /// The numeric element type of a parameter spelled `[T]` or `List<T>`
+    /// with a primitive `T` (`int`/`float` included); `None` for every other
+    /// shape (aliases, `[T]?`, nested arrays).
+    pub(crate) fn numeric_array_param_element(&self, ty: Option<&simple_parser::ast::Type>) -> Option<TypeId> {
+        use simple_parser::ast::Type;
+        let element = match ty? {
+            Type::Array { element, .. } => element.as_ref(),
+            Type::Generic { name, args } if (name == "List" || name == "list") && args.len() == 1 => &args[0],
+            _ => return None,
+        };
+        match element {
+            Type::Simple(name) => self.module.types.lookup(name).filter(|t| is_numeric_type(*t)),
+            _ => None,
+        }
+    }
+
+    /// `numeric_array_param_element` for each parameter, or an empty row for a
+    /// variadic parameter list (same keying rule as `fn_param_type_names`).
+    pub(crate) fn numeric_array_param_row(&self, params: &[simple_parser::ast::Parameter]) -> Vec<Option<TypeId>> {
+        if params.iter().any(|p| p.variadic) {
+            return Vec::new();
+        }
+        params
+            .iter()
+            .map(|p| self.numeric_array_param_element(p.ty.as_ref()))
+            .collect()
+    }
+
+    /// Run `reject_u8_array_into` over positional arguments against a row of
+    /// declared element types.
+    pub(crate) fn reject_u8_arrays_in_row(
+        &self,
+        row: &[Option<TypeId>],
+        args: &[HirExpr],
+        callee: &str,
+    ) -> LowerResult<()> {
+        for (i, (arg, want)) in args.iter().zip(row.iter()).enumerate() {
+            if let Some(want) = want {
+                self.reject_u8_array_into(*want, arg, &format!("argument {} of `{callee}`", i + 1))?;
+            }
+        }
+        Ok(())
     }
 
     /// `T?` returned where a concrete scalar is declared. The seed's Option

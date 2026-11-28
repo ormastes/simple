@@ -8,7 +8,7 @@ declaring duplicate lock hooks.
 
 # --- SFFI declarations ---
 @unsafe(reason: "raw runtime mutex allocation ABI; contract: returned handle is runtime-owned", capabilities: [ffi])
-extern fn rt_mutex_new<T>(initial: T) -> i64
+extern fn rt_mutex_new<T>(initial: T) -> i64?
 @unsafe(reason: "raw runtime mutex lock ABI; contract: nil means stale or foreign handle", capabilities: [ffi])
 # The result is the PROTECTED VALUE as an already-tagged word, or nil for a
 # stale handle. Declared `-> i64?` (not `-> i64`) so the slot is carried as a
@@ -20,6 +20,19 @@ extern fn rt_mutex_lock(mutex: i64) -> i64?
 extern fn rt_mutex_try_lock(mutex: i64) -> i64?
 @unsafe(reason: "raw runtime mutex unlock ABI; contract: one means released and zero means invalid handle", capabilities: [ffi])
 extern fn rt_mutex_unlock<T>(mutex: i64, new_value: T) -> i64
+
+# The runtime returns nil only when the mutex allocation itself fails.
+fn _mutex_handle(handle: i64?) -> Result<i64, text>:
+    if val h = handle:
+        return Ok(h)
+    Err("E-SFFI-MUTEX-001: rt_mutex_new returned no handle")
+
+# Allocation-failure boundary for the non-optional constructors: the module-global
+# gates cannot carry an Option, so an OOM here aborts at the FFI edge.
+fn _mutex_handle_or_abort(handle: i64?) -> i64:
+    match _mutex_handle(handle):
+        case Ok(h): h
+        case Err(msg): panic(msg)
 
 # --- Mutex ---
 # @tag:api
@@ -108,7 +121,7 @@ class Mutex:
 fn mutex_new<T>(initial: T) -> Mutex:
     val handle = unsafe(capabilities: [ffi]):
         rt_mutex_new(initial)
-    Mutex(_handle: handle)
+    Mutex(_handle: _mutex_handle_or_abort(handle))
 
 # Free-function forms keep the Mutex value in an explicit argument. Use these
 # in pure-native paths until method-call lowering reliably preserves receivers.
@@ -199,7 +212,7 @@ fn mutex_unlock<T>(mutex: Mutex, new_value: T) -> i64:
 pub fn mutex_new_gate(initial: i64) -> Mutex:
     val handle = unsafe(capabilities: [ffi]):
         rt_mutex_new(initial)
-    Mutex(_handle: handle)
+    Mutex(_handle: _mutex_handle_or_abort(handle))
 
 @representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in mutex_unlock_gate", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 pub fn mutex_unlock_gate(mutex: Mutex, new_value: i64) -> i64:
@@ -213,7 +226,7 @@ pub fn mutex_unlock_gate(mutex: Mutex, new_value: i64) -> i64:
 @representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in mutex_new_gate_handle", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
 pub fn mutex_new_gate_handle(initial: i64) -> i64:
     unsafe(capabilities: [ffi]):
-        rt_mutex_new(initial)
+        _mutex_handle_or_abort(rt_mutex_new(initial))
 
 # @allow(primitive_api) raw runtime mutex handle kept scalar on purpose: a managed wrapper cannot live in a module global initialised mid build session
 @representation_boundary(kind: "ffi", reason: "Explicit unsafe ffi boundary in mutex_lock_gate_handle", reviewers: ["ormastes", "opus-review"], capabilities: ["ffi"])
@@ -230,3 +243,13 @@ pub fn mutex_unlock_gate_handle(handle: i64, new_value: i64) -> i64:
 export Mutex
 export mutex_new, mutex_with_lock
 export mutex_new_gate_handle, mutex_lock_gate_handle, mutex_unlock_gate_handle
+
+# Option-returning constructor: None when the runtime cannot allocate the mutex.
+fn try_mutex_new<T>(initial: T) -> Mutex?:
+    val handle = unsafe(capabilities: [ffi]):
+        rt_mutex_new(initial)
+    match _mutex_handle(handle):
+        case Ok(h): Some(Mutex(_handle: h))
+        case Err(_): None
+
+export try_mutex_new

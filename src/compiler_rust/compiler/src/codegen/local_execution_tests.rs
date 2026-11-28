@@ -576,6 +576,78 @@ fn test_code_info_no_main() {
     assert_eq!(info.entry_point, "helper");
 }
 
+#[test]
+fn test_cranelift_jit_u64_array_push_preserves_high_bits() {
+    let mut em = LocalExecutionManager::cranelift().expect("cranelift init");
+    let mir = source_to_mir(
+        r#"
+fn push_empty_typed_word(idx: i64) -> i64:
+    var words: [u64] = []
+    words.push(0x8000000000000000u64)
+    words.push(0xC000000000000000u64)
+    words.push(0xFFFFFFFFFFFFFFFFu64)
+    words.push(13643789653076310793u64)
+    var i: i64 = 0
+    while i < 20:
+        words.push(0x8000000000000000u64 + (i as u64))
+        i = i + 1
+    return words[idx] as i64
+
+fn push_untyped_refined(idx: i64) -> i64:
+    var words = []
+    words.push(0x8000000000000000u64)
+    words.push(0xC000000000000000u64)
+    words.push(0xFFFFFFFFFFFFFFFFu64)
+    words.push(13643789653076310793u64)
+    return words[idx] as i64
+
+fn push_unpacked_repeat_word(idx: i64) -> i64:
+    var words: [u64] = [0u64; 300]
+    words.push(0x8000000000000000u64)
+    words.push(0xC000000000000000u64)
+    words.push(0xFFFFFFFFFFFFFFFFu64)
+    words.push(13643789653076310793u64)
+    var sum_mismatch: i64 = 0
+    var i: i64 = 300
+    while i < 304:
+        val got = words[i]
+        if i == 300 and got != 0x8000000000000000u64:
+            sum_mismatch = sum_mismatch + 1
+        elif i == 301 and got != 0xC000000000000000u64:
+            sum_mismatch = sum_mismatch + 2
+        elif i == 302 and got != 0xFFFFFFFFFFFFFFFFu64:
+            sum_mismatch = sum_mismatch + 4
+        elif i == 303 and got != 13643789653076310793u64:
+            sum_mismatch = sum_mismatch + 8
+        i = i + 1
+    if sum_mismatch != 0:
+        return sum_mismatch
+    return words[300 + idx] as i64
+"#,
+    );
+
+    em.compile_module(&mir).expect("compile u64 push test module");
+
+    let expected: [u64; 4] = [
+        0x8000_0000_0000_0000,
+        0xC000_0000_0000_0000,
+        u64::MAX,
+        13_643_789_653_076_310_793,
+    ];
+    for (idx, &want) in expected.iter().enumerate() {
+        let got_typed = em.execute("push_empty_typed_word", &[idx as i64]).expect("typed empty") as u64;
+        assert_eq!(got_typed, want, "push_empty_typed_word[{idx}]");
+        let got_refined = em.execute("push_untyped_refined", &[idx as i64]).expect("untyped refined") as u64;
+        assert_eq!(got_refined, want, "push_untyped_refined[{idx}]");
+        let got_unpacked = em
+            .execute("push_unpacked_repeat_word", &[idx as i64])
+            .expect("unpacked repeat") as u64;
+        assert_eq!(got_unpacked, want, "push_unpacked_repeat_word[{idx}]");
+    }
+    let got_grown = em.execute("push_empty_typed_word", &[23]).expect("post-grow element") as u64;
+    assert_eq!(got_grown, 0x8000_0000_0000_0013);
+}
+
 // =============================================================================
 // LLVM JIT Tests (feature-gated)
 // =============================================================================

@@ -470,6 +470,121 @@ fn test_typed_words_u64_packed_storage_fast_path() {
 }
 
 #[test]
+fn test_typed_words_u64_push_preserves_high_bits_packed_and_unpacked() {
+    let words: [u64; 8] = [
+        0x8000_0000_0000_0000,
+        0xC000_0000_0000_0000,
+        u64::MAX,
+        13_643_789_653_076_310_793, // 0xbd58_4b84_231b_7c09 (Argon2-like high-bit word)
+        0x0FFF_FFFF_FFFF_FFFF,
+        0x1000_0000_0000_0000,
+        0xF000_0000_0000_0000,
+        42,
+    ];
+
+    for (is_packed, array) in [(true, rt_array_new_with_cap_u64(1)), (false, rt_array_new(1))] {
+        for &word in &words {
+            assert!(rt_typed_words_u64_push(array, word as i64));
+        }
+        assert_eq!(rt_array_len(array), words.len() as i64);
+
+        let raw_array = array.to_raw() & !7;
+        let data_ptr = unsafe { (*(raw_array as *const super::RuntimeArray)).data as i64 };
+        for (i, &expected) in words.iter().enumerate() {
+            let idx = i as i64;
+            assert_eq!(rt_typed_words_u64_at(array, idx) as u64, expected, "at[{i}]");
+            assert_eq!(
+                super::rt_typed_words_u64_unchecked(array, idx) as u64,
+                expected,
+                "unchecked[{i}]"
+            );
+            assert_eq!(
+                rt_typed_words_u64_data_at_checked(raw_array as i64, data_ptr, idx) as u64,
+                expected,
+                "data_at_checked[{i}]"
+            );
+            if is_packed {
+                assert_eq!(
+                    rt_typed_words_u64_raw_data_at(data_ptr, idx) as u64,
+                    expected,
+                    "raw_data_at[{i}]"
+                );
+            } else {
+                assert_eq!(
+                    super::rt_typed_words_u64_data_at(data_ptr, idx) as u64,
+                    expected,
+                    "data_at[{i}]"
+                );
+            }
+        }
+
+        // Exercise known-slot push/set/store variants against an unpacked array too.
+        assert!(rt_typed_words_u64_set(array, 0, 0xC000_0000_0000_0000u64 as i64));
+        assert_eq!(rt_typed_words_u64_at(array, 0) as u64, 0xC000_0000_0000_0000);
+        assert!(super::rt_typed_words_u64_store_known_data_at(
+            raw_array as i64,
+            data_ptr,
+            1,
+            0x8000_0000_0000_0000u64 as i64
+        ));
+        assert_eq!(rt_typed_words_u64_at(array, 1) as u64, 0x8000_0000_0000_0000);
+        rt_array_free(array);
+    }
+
+    // Verify `push_known_at` and `push_known_data_at` with spare capacity on unpacked array.
+    let known = rt_array_new(4);
+    assert!(super::rt_typed_words_u64_push_known_at(
+        known,
+        0,
+        0x8000_0000_0000_0000u64 as i64
+    ));
+    let raw_known = known.to_raw() & !7;
+    let known_data = unsafe { (*(raw_known as *const super::RuntimeArray)).data as i64 };
+    assert!(super::rt_typed_words_u64_push_known_data_at(
+        raw_known as i64,
+        known_data,
+        1,
+        13_643_789_653_076_310_793u64 as i64
+    ));
+    assert_eq!(rt_typed_words_u64_at(known, 0) as u64, 0x8000_0000_0000_0000);
+    assert_eq!(rt_typed_words_u64_at(known, 1) as u64, 13_643_789_653_076_310_793);
+    rt_array_free(known);
+}
+
+#[test]
+fn test_typed_words_i64_push_uses_signed_heap_int_when_unpacked() {
+    let arr = rt_array_new(4);
+    assert!(crate::value::rt_typed_words_i64_push(arr, 0));
+    assert!(crate::value::rt_typed_words_i64_push(arr, i64::MAX));
+    assert!(crate::value::rt_typed_words_i64_push(arr, i64::MIN));
+
+    let raw = arr.to_raw() & !7;
+    let is_packed = unsafe { (*(raw as *const super::RuntimeArray)).is_u64_packed() };
+    #[cfg(windows)]
+    assert!(!is_packed, "Windows arrays stay unpacked for wide i64 push");
+    if !is_packed {
+        let max_slot = rt_array_get(arr, 1);
+        let min_slot = rt_array_get(arr, 2);
+        assert_eq!(max_slot.as_heap_i64(), Some(i64::MAX));
+        assert_eq!(max_slot.as_heap_u64(), None);
+        assert_eq!(min_slot.as_heap_i64(), Some(i64::MIN));
+        assert_eq!(min_slot.as_heap_u64(), None);
+        assert_eq!(crate::value::rt_value_eq(max_slot, RuntimeValue::from_int(i64::MAX)), 1);
+        assert_eq!(crate::value::rt_value_eq(min_slot, RuntimeValue::from_int(i64::MIN)), 1);
+    }
+
+    let min_val = rt_array_min(arr);
+    assert_eq!(min_val.as_int(), i64::MIN);
+    assert_eq!(min_val.as_heap_i64(), Some(i64::MIN));
+    assert_eq!(min_val.as_heap_u64(), None);
+    assert_eq!(crate::value::rt_value_eq(min_val, RuntimeValue::from_int(i64::MIN)), 1);
+    assert_eq!(crate::value::rt_typed_words_i64_at(arr, 0), 0);
+    assert_eq!(crate::value::rt_typed_words_i64_at(arr, 1), i64::MAX);
+    assert_eq!(crate::value::rt_typed_words_i64_at(arr, 2), i64::MIN);
+    rt_array_free(arr);
+}
+
+#[test]
 fn test_byte_array_packed_storage_fast_path() {
     let array = rt_byte_array_new(2);
     let second = rt_byte_array_new(1);

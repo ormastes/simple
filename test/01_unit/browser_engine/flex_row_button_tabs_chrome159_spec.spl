@@ -1,0 +1,142 @@
+"""
+## Purpose and audience
+Purpose: pin where a row of auto-width `<button>` flex items (a tab bar) puts
+its box edges and its labels, against Chrome 159, at device scale 1 and 4.
+Chrome keeps every item at its exact LayoutUnit position: the label starts at
+the item's fractional left edge + border + padding (`HTML` at 90.547 CSS px,
+not 91), at k > 1 each edge is round(k x exact edge), and the label is shaped
+at the DEVICE font size (13.3333 px x 4), so its width is not 4 x the k = 1
+width.
+Audience: maintainers of the web layout engine.
+
+Chrome oracle (Chrome 159.0.8154.6 headless, `--hide-scrollbars
+--window-size=700,300`, `--force-device-scale-factor=1` and `=4`). Page: the
+catalog tab bar's own CSS, `body{margin:0;font:16px/1.5 sans-serif}`,
+`nav{display:flex;gap:8px}`, `button{padding:8px;border:1px solid #94a3b8;
+border-radius:5px}`, seven tabs. `getBoundingClientRect` at k = 4 (CSS px,
+left / width): Overview 0 / 73.5625, HTML 81.5625 / 54.293, CSS Layout
+143.855 / 89.148, CSS Paint 241.004 / 79.508, Forms & Media 328.512 /
+108.383, Animation 444.895 / 77.285, Evidence 530.18 / 72.848. At k = 1 the
+widths are 73.547, 54.297, 89.125, 79.5, 108.359, 77.281, 72.844.
+
+Measured in the screenshot, on both sides the same way:
+- border columns: where a run of pixels of exactly the border colour
+  (#94a3b8) starts on device row 26k (below the label, above the corner);
+  two per tab (left border, right border).
+- label ink: first and last column, inside each tab, holding a pixel darker
+  than 160 in every channel on device rows 9k..26k.
+
+| k | border run starts | label ink first/last |
+|---|-------------------|----------------------|
+| 1 | 0 73 82 135 144 232 241 319 328 436 445 521 530 602 | 10 63 92 125 154 222 251 310 339 426 454 511 540 592 |
+| 4 | 0 290 326 539 575 928 964 1278 1314 1744 1780 2085 2121 2408 | 39 257 367 505 614 895 1003 1245 1354 1711 1816 2048 2161 2373 |
+
+Before the fix (base 4b3a7b2f457): k = 4 borders were 4 x the k = 1 columns
+(0 292 328 540 576 928 964 1276 1312 1744 1780 2084 2120 2408) and every
+label started at a whole CSS px: k = 4 ink 39 257 368 506 615 895 1003 1245
+1352 1708 1816 2049 2160 2372, k = 1 ink differing at `CSS Layout` (last
+column 223) and `Forms & Media` (first column 338).
+"""
+
+"""
+Traceability: REQ-WEB-FORM-CHROME-PAINT-001 -- a row of auto-width `<button>` flex items keeps Chrome 159's exact item edges and label pens at device scale 1 and 4.
+"""
+# @tag: unit, browser_engine, layout, flex, form_control, device_scale, chrome159
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.simple_web_layout_engine2d_fast.{simple_web_layout_render_html_pixels_engine2d_at_device_scale}
+
+val FT_W: i32 = 700
+val FT_H: i32 = 60
+val FT_PAGE: text = "<!doctype html><html><head><style>body{{margin:0;background:#fff;font:16px/1.5 sans-serif}}nav{{display:flex;gap:8px}}button{{padding:8px;border:1px solid #94a3b8;border-radius:5px;color:#172033;background:#fff}}</style></head><body><nav><button>Overview</button><button>HTML</button><button>CSS Layout</button><button>CSS Paint</button><button>Forms &amp; Media</button><button>Animation</button><button>Evidence</button></nav></body></html>"
+val FT_BORDER: u32 = 0x94a3b8u32
+
+val FT_CHROME_BORDERS_K1: [i32] = [0, 73, 82, 135, 144, 232, 241, 319, 328, 436, 445, 521, 530, 602]
+val FT_CHROME_INK_K1: [i32] = [10, 63, 92, 125, 154, 222, 251, 310, 339, 426, 454, 511, 540, 592]
+val FT_CHROME_BORDERS_K4: [i32] = [0, 290, 326, 539, 575, 928, 964, 1278, 1314, 1744, 1780, 2085, 2121, 2408]
+val FT_CHROME_INK_K4: [i32] = [39, 257, 367, 505, 614, 895, 1003, 1245, 1354, 1711, 1816, 2048, 2161, 2373]
+
+fn ft_render(k: i32) -> [u32]:
+    simple_web_layout_render_html_pixels_engine2d_at_device_scale(FT_PAGE, FT_W, FT_H, k, "cpu_simd")
+
+# Columns where a run of border-coloured pixels starts on device row 26k.
+fn ft_border_starts(px: [u32], k: i32) -> [i32]:
+    val dw = FT_W * k
+    var out: [i32] = []
+    if px.len() != dw * FT_H * k:
+        return out
+    val y = 26 * k
+    var prev = false
+    var x = 0
+    while x < dw:
+        val b = (px[y * dw + x] & 0xffffffu32) == FT_BORDER
+        if b and not prev:
+            out.push(x)
+        prev = b
+        x = x + 1
+    out
+
+fn ft_dark_col(px: [u32], dw: i32, x: i32, y0: i32, y1: i32) -> bool:
+    var y = y0
+    while y < y1:
+        val p = px[y * dw + x]
+        if ((p >> 16) & 255u32) < 160u32 and ((p >> 8) & 255u32) < 160u32 and (p & 255u32) < 160u32:
+            return true
+        y = y + 1
+    false
+
+# First and last dark column inside each tab (between its two border runs).
+fn ft_label_ink(px: [u32], k: i32, borders: [i32]) -> [i32]:
+    val dw = FT_W * k
+    var out: [i32] = []
+    var i = 0
+    while i + 1 < borders.len():
+        var first = -1
+        var last = -1
+        var x = borders[i] + k
+        while x < borders[i + 1]:
+            if ft_dark_col(px, dw, x, 9 * k, 26 * k):
+                if first < 0:
+                    first = x
+                last = x
+            x = x + 1
+        out.push(first)
+        out.push(last)
+        i = i + 2
+    out
+
+fn ft_text(v: [i32]) -> text:
+    var s = ""
+    for n in v:
+        s = s + " {n}"
+    s
+
+fn ft_mismatches(what: text, k: i32, got: [i32], want: [i32]) -> i32:
+    var bad = 0
+    if got.len() != want.len():
+        bad = 99
+    else:
+        var i = 0
+        while i < want.len():
+            if got[i] != want[i]:
+                bad = bad + 1
+            i = i + 1
+    if bad != 0:
+        print "k={k} {what}:{ft_text(got)}, Chrome{ft_text(want)}"
+    bad
+
+describe "a row of auto-width button flex items (Chrome 159)":
+    it "AC-1: puts every tab edge on round(4 x exact edge) at device scale 4":
+        val px = ft_render(4)
+        expect(ft_mismatches("border starts", 4, ft_border_starts(px, 4), FT_CHROME_BORDERS_K4)).to_equal(0)
+
+    it "AC-2: starts every label at the tab's exact left edge + 9 px at device scale 4":
+        val px = ft_render(4)
+        expect(ft_mismatches("label ink", 4, ft_label_ink(px, 4, FT_CHROME_BORDERS_K4), FT_CHROME_INK_K4)).to_equal(0)
+
+    it "AC-3: keeps the device scale 1 tab edges":
+        val px = ft_render(1)
+        expect(ft_mismatches("border starts", 1, ft_border_starts(px, 1), FT_CHROME_BORDERS_K1)).to_equal(0)
+
+    it "AC-4: starts every label at the tab's fractional pen at device scale 1":
+        val px = ft_render(1)
+        expect(ft_mismatches("label ink", 1, ft_label_ink(px, 1, FT_CHROME_BORDERS_K1), FT_CHROME_INK_K1)).to_equal(0)

@@ -667,6 +667,82 @@ fn test_lower_empty_array() {
 }
 
 #[test]
+fn test_empty_array_nested_target_type_propagation() {
+    let assert_u64_empty_array = |module: &HirModule, expr: &HirExpr, label: &str| {
+        assert!(
+            matches!(&expr.kind, HirExprKind::Array(items) if items.is_empty()),
+            "{label}: expected empty array expr, got {:?}",
+            expr.kind
+        );
+        assert_eq!(
+            module.types.get(expr.ty),
+            Some(&HirType::Array {
+                element: TypeId::U64,
+                size: Some(0),
+            }),
+            "{label}: inner `[]` must receive `[u64; 0]`, got {:?}",
+            module.types.get(expr.ty)
+        );
+    };
+
+    let cases = [
+        (
+            "nested_single",
+            "fn test() -> i64:\n    var rows: [[u64]] = [[]]\n    return 0\n",
+            vec![0usize],
+        ),
+        (
+            "nested_after_nonempty",
+            "fn test() -> i64:\n    var rows: [[u64]] = [[1u64], []]\n    return 0\n",
+            vec![1usize],
+        ),
+        (
+            "nested_after_call",
+            "fn make_row() -> [u64]:\n    return []\n\nfn test() -> i64:\n    var rows: [[u64]] = [make_row(), []]\n    return 0\n",
+            vec![1usize],
+        ),
+        (
+            "nested_repeat",
+            "fn test() -> i64:\n    var rows: [[u64]] = [[]; 2]\n    return 0\n",
+            vec![0usize, 1usize],
+        ),
+    ];
+
+    for (name, src, empty_indices) in cases {
+        let module = parse_and_lower(src).expect(name);
+        let func = module.functions.iter().find(|f| f.name == "test").expect(name);
+        let init = func
+            .body
+            .iter()
+            .find_map(|stmt| match stmt {
+                HirStmt::Let { value: Some(expr), .. } => Some(expr),
+                _ => None,
+            })
+            .expect(name);
+
+        let HirExprKind::Array(elements) = &init.kind else {
+            panic!("{name}: expected outer array expr, got {:?}", init.kind);
+        };
+        for idx in empty_indices {
+            assert_u64_empty_array(&module, &elements[idx], &format!("{name}[{idx}]"));
+        }
+
+        let Some(HirType::Array { element: outer_elem, .. }) = module.types.get(init.ty) else {
+            panic!("{name}: expected outer array type, got {:?}", module.types.get(init.ty));
+        };
+        assert_eq!(
+            module.types.get(*outer_elem).and_then(|ty| match ty {
+                HirType::Array { element, .. } => Some(*element),
+                _ => None,
+            }),
+            Some(TypeId::U64),
+            "{name}: outer array element must be `[u64]` (not nested `[[u64]]` or `VOID`), got {:?}",
+            module.types.get(*outer_elem)
+        );
+    }
+}
+
+#[test]
 fn test_empty_array_append_refines_indexed_element_type() {
     let module = parse_and_lower(
         "class Handle:\n    value: i64\n    fn join() -> i64:\n        self.value\n\nfn test() -> i64:\n    var handles = []\n    handles.append(Handle(value: 7))\n    val handle = handles[0]\n    return handle.join()\n",

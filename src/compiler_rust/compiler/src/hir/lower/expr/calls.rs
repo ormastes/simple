@@ -556,6 +556,15 @@ impl Lowerer {
                     self.reject_float_for_int_slot(*pty, arg, &format!("argument {} of `{callee_name}`", i + 1))?;
                 }
             }
+            // A callee declared after the caller: its array parameter types
+            // are not in the name row above, so check the recorded elements.
+            if !matches!(self.module.types.get(func_hir.ty), Some(HirType::Function { .. })) {
+                if let (Expr::Identifier(_), HirExprKind::Global(symbol)) = (callee, &func_hir.kind) {
+                    if let Some(row) = self.fn_param_array_elems.get(symbol) {
+                        self.reject_u8_arrays_in_row(row, &args_hir, callee_name)?;
+                    }
+                }
+            }
         }
 
         // Prefer the declared return type for the named callee when we know it.

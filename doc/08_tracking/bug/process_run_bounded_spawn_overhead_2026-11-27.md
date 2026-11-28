@@ -1,7 +1,7 @@
 # process_run_bounded / process_run_bounded_bytes: ~11 ms fixed cost per child
 
 - Date: 2026-11-27
-- Status: open (perf)
+- Status: verification-pending (fix: backoff poll in `finish_child_output_bounded_mode`)
 - Area: `src/lib/nogc_sync_mut/io/process_ops.spl` (`process_run_bounded`,
   `process_run_bounded_bytes`) and their native runtime capture providers
 - Found by: the matched-app benchmark twin (`src/app/item5_perf/main.spl`) parity run
@@ -34,3 +34,22 @@ to Python's. Only the whole-cohort wall time and the
 Find the wait/poll interval in the native bounded capture provider and replace it
 with a blocking wait (pidfd/poll on the pipes plus waitpid). Re-measure with the
 loop above; the target is under 3 ms per child.
+
+## Fix (2026-11-28)
+
+The seed runtime's bounded wait loop (`env_process.rs`,
+`finish_child_output_bounded_mode`) slept a fixed 10 ms per iteration. Its
+stdout and stderr reader threads start inside that loop, so the first poll
+always missed and every child paid at least 10 ms. The poll interval now backs
+off from 100 us to 10 ms.
+
+Measured with the unit test `bounded_wait_adds_no_fixed_poll_quantum` on
+Windows, timing only the wait on a child that has already exited, 9 samples:
+
+| | median wait latency |
+|---|---|
+| fixed 10 ms (before) | 10.94 ms |
+| backoff (after) | 0.97 ms |
+
+Not yet re-measured: the Linux 100-child loop above. The WSL distro is
+read-only on the measuring host.

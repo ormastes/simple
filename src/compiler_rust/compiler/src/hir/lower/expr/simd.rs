@@ -328,6 +328,19 @@ impl Lowerer {
         let qualified_name = format!("{}.{}", class_name, method);
 
         let mut args_hir = self.lower_call_args(args, ctx)?;
+        // `[u8]` into a word-array parameter of a declared-`static` method.
+        if args_hir.iter().any(|a| self.is_u8_array_value(a))
+            && args
+                .iter()
+                .all(|a| a.name.is_none() && !matches!(a.value, ast::Expr::Spread(_)))
+        {
+            let key = format!("{}.{}", class_name.rsplit('.').next().unwrap_or(class_name), method);
+            if self.static_method_names.contains(&key) {
+                if let Some(row) = self.method_param_array_elems.get(&key) {
+                    self.reject_u8_arrays_in_row(row, &args_hir, &key)?;
+                }
+            }
+        }
         // Float-into-int admission for a declared-`static` method (owner
         // decision 2026-11-24); positional, unspread calls only.
         let bare_key = args_hir

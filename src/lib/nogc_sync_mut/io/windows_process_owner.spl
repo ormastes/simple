@@ -743,7 +743,26 @@ fn windows_process_peak_memory_v1(lease: WindowsProcessLeaseV1) -> Result<i64, t
         return Err("job memory accounting unavailable")
     Ok(peak)
 
+@unsafe(reason: "reads the memory limit back from the retained live JobObject", capabilities: [ffi, raw_ptr])
+fn windows_process_memory_limit_v1(lease: WindowsProcessLeaseV1) -> Result<i64, text>:
+    if lease.slot < 0 or lease.slot >= _windows_process_slots_v1.len(): return Err("invalid Windows owner slot")
+    val state = _windows_process_slots_v1[lease.slot]
+    if state.closed: return Err("Windows owner already collected")
+    val limits_bytes = windows_abi_job_extended_limit_size()
+    val information = windows_abi_heap_alloc(state.heap, limits_bytes)
+    if information == 0: return Err("job memory query allocation failed")
+    val queried = QueryInformationJobObject(state.job, 9, information, limits_bytes as u32, 0)
+    val flags = if queried != 0: volatile_read_u32(information + windows_abi_job_limit_flags_offset()) else: 0
+    val limit = if queried != 0: windows_abi_read_ptr(information + windows_abi_job_memory_limit_offset()) else: -1
+    val released = windows_abi_heap_free(state.heap, information)
+    if queried == 0 or released == 0 or limit < 0:
+        return Err("job memory limit unavailable")
+    # JOB_OBJECT_LIMIT_JOB_MEMORY (0x200) must be set, or the limit field is meaningless.
+    if (flags & 512) == 0: return Ok(0)
+    Ok(limit)
+
 export windows_process_start_with_memory_v1, windows_process_peak_memory_v1
+export windows_process_memory_limit_v1
 export WindowsProcessAdmissionV1, windows_process_admit_v1, windows_process_admit_with_reserve_v1
 export windows_available_memory_headroom_v1, windows_capacity_headroom_v1, windows_headroom_from_snapshot_v1
 export WindowsProcessContainExtrasV1, windows_process_admit_contained_v1

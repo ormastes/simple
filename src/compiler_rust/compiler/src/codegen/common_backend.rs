@@ -761,6 +761,7 @@ pub(crate) fn runtime_symbol_is_codegen_root(name: &str) -> bool {
             | "rt_is_none"
             | "rt_try_is_absent"
             | "rt_enum_check_variant"
+            | "rt_value_u64"
             | "rt_value_as_u64"
             | "rt_string_eq"
             // P0 fix (2026-07-22): rt_text_cmp_any backs the codegen/instr/core.rs
@@ -4075,6 +4076,8 @@ mod tests {
         assert!(runtime_symbol_is_codegen_root("rt_to_int_dynamic"));
         assert!(runtime_symbol_is_codegen_root("rt_enum_discriminant"));
         assert!(runtime_symbol_is_codegen_root("rt_enum_id"));
+        assert!(runtime_symbol_is_codegen_root("rt_value_u64"));
+        assert!(runtime_symbol_is_codegen_root("rt_value_as_u64"));
     }
 
     /// jit_is_some_is_none_method_dispatch_gap_2026-08-17, hard-stop shape.

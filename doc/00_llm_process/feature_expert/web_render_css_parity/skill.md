@@ -6089,3 +6089,221 @@ pins the border-box form, the default-UA gap is unfiled.
   - The offset goes through `_html_draw_ir_add_device_dy`, not a second `device-y-offset` prop: `_html_draw_ir_resolved_text_command` already adds one for a fallback face, `_dir_device_y_offset` reads the first and `_html_draw_ir_device_top` the last, so one was lost. Arabic value at k=3: 247..284 with two props, 246..284 (Chrome) summed.
   - Button-type values (`submit`, `button`, `reset`) and placeholders share the command and the rule. Chrome agrees at k = 2..4 (k=3 submit 46..73, button 247..274, reset in 40px 495..522; placeholders by baseline row), so the scope stays; AC-6 pins them.
   - Baseline: dpr4 forms-media row lowered 0.27 -> 0.19, the value base and head both measure. The drop is from earlier landed work, not this change.
+
+## 2026-11-28 — lead-space run: exact advance for the run, LayoutUnit snap for what follows
+
+- **Rule.** Chrome snaps an inline ITEM's width up to a LayoutUnit (1/64 px); glyphs inside the
+  item sit at float advances. A run that opens with a collapsible space after an inline element
+  (`<code>x</code> — partial`) is one item: its first glyph starts at the item start plus the
+  EXACT space advance, and only the pen after the run takes the snap. A whitespace-only node
+  between two elements is an item of its own, so its space is snapped (bug
+  `web_render_space_layoutunit_tie_2026-11-27`).
+- **Trap.** PR #12215 put `layout_unit_ceil_milli` on the lead space before `run_pen_err` was
+  read in `layout_with_style_flow`. The run moved by at most 8 milli-px, but at k=4 that crosses
+  a quarter-device-px phase on some rows: catalog animation 4x went 15997 -> 18267 px (3 of 22
+  inventory rows), with every 1x page and every spec green. The engine now keeps the raw lead
+  for the run's pen origin and adds the snap remainder (`lead_snap_milli`) to `inline_err_milli`
+  just before the item-width carry.
+- **Probe.** `inline_lead_space_run_pen_phase_k4_chrome159_spec.spl`: em-dash darkness centroid
+  (green `<code>` so it has no weight) and a red marker after the run, 22 rows, Chrome k=4.
+  Give each row `height:24px`: a `<code>` in a 24px line grows the line box in Chrome and the
+  rows drift.
+- **Not measured.** Chrome snaps the whole item once; Simple adds a snapped lead to a separately
+  snapped run width. The two differ by under 1/64 px and no row here tells them apart.
+- **k == 1 is the other way (measured).** With the exact lead at k=1 the 1x catalog rose (html
+  0.30 -> 0.36, css-paint 0.41 -> 0.44, animation 0.37 -> 0.41): there the run starts on a whole
+  px and the snapped lead breaks the rounding tie Chrome's way. So the exact lead is `k > 1`
+  only; k=1 keeps #12215's pen byte for byte. Run BOTH catalogs for any pen-carry change.
+
+## 2026-11-27 — gray glyphs above 48 device px: Skia analytic AA at one sample per pixel (`work/webrender-glyph-coverage-20261127`)
+
+- **Premise check.** "Simple text is lighter than Chrome" is not a global ink
+  deficit: total darkness Simple/Chrome is 1.001..1.005 on every catalog page at
+  1x and 4x. At 4x the mismatching px lean lighter (60/40) because round
+  shoulders lose ink while counters gain it. Gamma, preblend and stem darkening
+  were NOT touched (each would move total ink the wrong way).
+- **Root cause (4x, all body text: 16px x k4 = 64 device px, gray).** Chrome
+  fills a gray glyph's path with `SkScan_AAAPath` exactly like its LCD glyphs,
+  minus the 4x horizontal scale and the FIR (`GenerateImageFromPath`, A8:
+  translate by the mask origin). `sfnt_gray_outline_raster` used the float
+  exact-area accumulator (`_area_cells(.., 1)`).
+- **Proof (libskia harness, 13 glyphs `o e a s c g 8 S O R m n H`, 16px k4,
+  tolerance 8):** engine vs Chrome 454 px; libskia AAA of the engine's OWN gray
+  outline at the same quarter phase vs Chrome **0 px**; engine vs libskia 1815.
+  So outline, phase and bearing were already right; only the fill differed.
+- **Trap — "exact area" is not Chrome.** The true-curve exact area (no snapping,
+  finer chords) is FURTHER from Chrome: 1167..1628 px on the same fixture
+  (engine vs libskia 4710..6519). Skia's quad edges (forward differencing,
+  quarter-row snaps, few chords) bulge outside the true curve; only a port of
+  the walker reproduces it. Do not "improve" the fill toward the ideal area.
+- **Fix (`sfnt_glyf.spl`).** `_lcd_aaa_mask(.., per_px, rec)`: per_px 4 = LCD
+  (unchanged), per_px 1 = gray (`x' = (x*scale + phase) - x0`).
+  `sfnt_gray_outline_raster` reads that mask. Byte-exact against libskia:
+  1312 masks (Liberation Sans 64, Sans Bold 72, Serif 96, DejaVu Sans Mono 56;
+  41 glyphs x 4 phases x 2 record orders), max delta 0.
+- **Phase replay (perf).** At one sample per pixel a quarter phase is a
+  sub-sample shift, so the LCD phase-0 mask memo does not carry over. The WALK
+  does: a phase moves every x by one fixed amount and leaves strips, edge order
+  and y alone. The first phase drawn records each trapezoid row raw and
+  unclamped (`_gray_aaa_recs`, by `slo_key`); other phases replay them shifted
+  (`_gray_aaa_replay`) and redo only the clip clamps, the previous-span right
+  end, the real-blitter test `nrb` and the per-pixel coverage.
+  - Trap: record UNCLAMPED x. A clamped left edge replayed at another phase
+    put `&` phase 3 column 0 at 255 instead of 247.
+  - Only the non-convex SafeRLE walk records. Rect, convex and mask-plane
+    (`irw <= 32` and area <= 1024) routes stay direct; the replay re-checks the
+    mask-plane rule at its own phase.
+- **Same-pipeline perf work (pixels identical).** Cell copy mask -> `[u8]` as
+  one native `write_span` per row (the per-pixel copy was a fifth of a cold
+  cell); `_aaa_flush` skips untouched samples four at a time;
+  `_insert_font_atlas_glyph` reads gray atlas words from a 256-entry table,
+  four pixels a step. Tried, no gain: `fill_span` for whole-pixel runs.
+- **Interpreter cost of a cold 64 px cell:** exact-area 5.4 ms; AAA direct
+  ~12.5 ms (walk 5.2, trapezoid rows 3.8, flush 1.2, record 0.8, build 0.8);
+  AAA replay ~6.8 ms. A 4x catalog page draws ~180..195 gray cells from
+  ~83..96 outlines (2.2 phases per outline).
+- **1x residual is not this (catalog only).** The catalog has no k=1 text above
+  48 CSS px, so its 1x frames are byte-identical base vs head. Any k=1 text
+  above 48 px (a 64px heading) DOES take this gray path and changes. Catalog
+  1x body text is LCD (<= 48 device px) and its
+  mask is already byte-exact libskia for the engine's outline; 1x PPMs are
+  byte-identical base vs head on all 8 pages. What is left at 1x is the slight
+  autohinter's outline (see the lcdround entry), layout and box AA.
+- **Tools kept in the lane scratch (not in git):** `skgray.cpp` (libskia A8
+  path fill of a dumped outline), `graydump.spl`, `cm.c` (mask vs mask, mask
+  vs Chrome crop with phase and offset search).
+- **Perf follow-up (2026-11-27/28, owner: specialise first).**
+  - Quiet-host split (css-paint 4x, load 7-8, in-process timers): gray raster
+    0.96 -> 1.64 s, atlas insert 0.34 -> 0.185 s; the whole-run CPU delta
+    matches it. Earlier +6..13 % rounds were load 16-20 noise, not GC or atlas
+    growth.
+  - Where it goes: the FIRST phase of each outline (83 of 181 cells) pays the
+    walk: per 64 px glyph 86 strips for ~46 rows, 268 edge steps, 24 quad
+    updates, 103 trapezoid rows. No allocation or f64 in the hot loop; it is
+    interpreter statement count. Strip count is Skia's quarter-row stepping
+    and cannot drop without losing byte-exactness.
+  - `_aaa_trap_row_gray`: `_aaa_trap_row` without the mask-plane block and the
+    convex accumulate branch, the row check hoisted to one test per call.
+    Used by the recording walk and by `_gray_aaa_replay`; derived line for
+    line, so a change to one must be made in both. A record is taken only on
+    the non-convex walk (`convex` paths never record).
+  - The walker itself was NOT duplicated: its clip clamps are live (edge x
+    between strips goes 1/65536 px outside the frame), so a copy would only
+    drop the `rec_on` tests, ~2 of ~22 statements per edge step.
+  - Also: `_aaa_flush` walks a touched run without the group test, the
+    saturation test is hoisted out of the interior loop, replay updates
+    `prev_rite` on whole-row strips only.
+  - If more is needed: the walker as a seed kernel (like the blend spans), or
+    measure on the JIT lane once a JIT seed can load the tree.
+  - Guard: `sfnt_gray_aaa_replay_spec` pins the recording pass and every
+    replayed phase byte-equal to a record-free fill through the unspecialised
+    `_aaa_trap_row` (no libskia needed). `_gray_aaa_recs` is bounded by 512
+    outlines and by `_GRAY_AAA_REC_SLOT_BUDGET` (2,000,000 i64 slots).
+  - Final quiet-host A/B (load < 8 at each pair, 4 alternated rounds, seed
+    fb80903917d6): css-paint 4x -0.4 / +2.0 / +2.8 / +2.5 % (mean +1.7 %),
+    html 4x +3.2 / +1.7 / +1.9 / +8.9 % (mean +3.9 %, median ~+2.5 %).
+    In-process on css-paint: gray raster 0.97 -> 1.61 s, atlas insert
+    0.34 -> 0.19 s, net +0.48 s (~2.4 %). Still at or just over the 2 % line.
+
+## 2026-11-28 — tab bar: a row of auto-width `<button>` flex items on Chrome's exact edges and label pens (`work/webrender-tabbar-20261128`)
+
+- **Symptom.** tab-bar was the one catalog page the 4x glyph work did not move (0.13 at 4x, 0.23 at 1x). Not raster: split by layout vs paint, every difference above AA level was one of three geometry causes, all in "auto-width `<button>` items of a row flex container".
+- **How it was split.** Row scans of the two frames for runs of the exact border colour give the 14 box edges; per-label ink boxes with a -3..3 px shift search give the label pen. 1x boxes were already equal; 4x boxes differed on 8 of 14 edges; labels whose exact left edge is whole (`Overview` 57.0, `CSS Paint` 297.97) had only AA-level deltas, every other label was 1..2 px off.
+- **Chrome 159 (`getBoundingClientRect`, same CSS as the catalog):** tab lefts 0 / 81.5625 / 143.855 / 241.004 / 328.512 / 444.895 / 530.18 CSS px at k = 4, label left = tab left + 9 exactly. k = 1 widths 73.547 / 54.297 / 89.125 / 79.5 / 108.359 / 77.281 / 72.844, k = 4 widths 73.5625 / 54.293 / 89.148 / 79.508 / 108.383 / 77.285 / 72.848: the label is shaped at the DEVICE font size (13.3333 px x k, FreeType 26.6 size), so the k = 4 width is not the k = 1 width.
+- **Cause 1 (1x and 4x, most of the pixels): label pen.** The flex row already carried each button's fractional left (`frac_adj_milli`) but only snapped the box; the label started at the whole-px pen. `run_pen_origin` also refuses any centred line, and a button is `text-align:center`. An auto-width button has no centring slack, so its label starts at the box's exact left + border + padding. Fix: the row now places a button through `box_x_snap` at every k (records `box_line_start_err`), and `flex_row_button_label_at_edge` lets the label take that error as its pen origin.
+- **Cause 2 (k > 1): item edges were k x the whole-CSS-px edges.** The device records were gated off for form controls in the flex row, and the button's own layout reset `box_device_extra_w` to 0 (`button_device_extra_w` returns 0 under a flex parent). Fix: a button item records round(k x exact right) - round(k x exact left) in the row, and its own layout leaves that record alone (`button_in_flex_row`).
+- **Cause 3 (k > 1): label width.** `form_control_label_width_milli_px` measured at an oversampled size and floored to 1/64 CSS px, i.e. the k = 1 width. At k > 1 it now resolves the label at the device font size (`resolve_font_metrics_with_language_milli`, `num x 1000 x k / den`) and ceils to a LayoutUnit of a device px. This applies to every button label at k > 1, not only flex items; the existing button specs (`button_follower_*`, `button_label_width`, `form_control_width_dpr`) are unchanged.
+- **Result (base 4b3a7b2f457 -> head, seed1126b):** tab-bar 1x 0.23 -> 0.02, 4x 0.13 -> 0.01. The other seven 4x frames are byte-identical to base and the other 1x rows measure the same; matrix 77. Perf, 4 alternated rounds, median ms: tab-bar 4x 5620 -> 5397, tab-bar 1x 2520 -> 2537, forms-media 4x 20866 -> 20766; RSS equal.
+- **Spec:** `test/01_unit/browser_engine/flex_row_button_tabs_chrome159_spec.spl` (14 border columns and 14 label ink columns at k = 1 and k = 4; red 1/4 on base, green 4/4).
+- **Traps.**
+  - A label-ink threshold of 128 put Chrome's `F` stem column (113, 118, 130) on one side and Simple's (109, 114, 126) on the other. That is 4 levels of AA, not geometry; the spec uses 160 like the other button specs.
+  - On a 33 px tall button with a 5 px radius, row 28 is already inside the corner at k = 1; scan edges on row 26.
+  - 1x "LCD raster" attribution on this page was wrong for 5 of 7 labels: check the pen (ink first/last column) before blaming coverage.
+- **Open (not done here).**
+  - Label of an INLINE (non-flex) auto-width button still starts at the whole pen; only flex-row items got the exact pen.
+  - Reversed and wrapped flex rows keep the old button placement (the new paths are gated to a plain `nowrap` row), as does a button with a `min-width` (centring slack) and a centred row (`justify-content:center` is a whole-px offset).
+  - What is left on tab-bar is AA level (max delta 72): glyph edge coverage at 53.33 px and the 5 px corner arcs.
+## 2026-11-28 — 1x catalog breakdown by cause; LCD pens as exact unit sums (`work/webrender-1x-lcd-20261128`)
+
+- **Breakdown (1x, base 4b3a7b2f457, 17,108 mismatching px over 8 pages).**
+  - Text vs non-text (Chrome re-captured with `*{color:transparent}`; a text px is one that
+    changes, dilated 3x2): 96..100 % text on every page (css-layout 104 px, animation 16 px
+    non-text).
+  - Fill, FIR, preblend, composite: ~0. The engine's own outline through libskia
+    (`SkScan_AAAPath` 4x + `pack4xHToMask`) against the engine's render: 3 px of 1,760 ink px.
+    `#172033` text mismatches like black (165 vs 160 px): gamma / contrast are not a cause.
+  - **Hinted outline: the biggest cause, ~55..60 %** (components of 15 px or less: 53..68 % on
+    the six content pages). Chrome 159 hints through Skia's Fontations backend (skrifa
+    autohinter, `SkFontHinting::kSlight` -> light, forced for glyf). FreeType's
+    `FT_LOAD_TARGET_LIGHT` outline through libskia reproduces Chrome at 16 px: Regular a..z
+    3 px, A..Z 2, digits 0; Bold a..z 2, A..Z 1 (engine: 76, 57, 83 on the Regular glyphs at
+    Chrome's own phases). **It does NOT at 13 and 14 px** (Regular, 26 glyphs a line: 34..53
+    px, e.g. `A` 9, `T` 4; the engine has 47..112 there). FreeType and skrifa differ at those
+    sizes or the probe does; settle that before using `ftpath` as the oracle below 16 px.
+  - **Quarter phase of a pen: ~10..15 %.** One glyph at the wrong phase is 60..100 px
+    (a glyph with a hinter residual is 3..12). Fixed here for in-run drift and the k=1 lead.
+  - **Placement outside a run: the rest.** tab-bar is 97 % `<button>` label phase (flex item x
+    is whole px, Chrome's is fractional); css-layout has one 514 px component, the `absolute`
+    pill 1 row low. Both are layout.
+- **Trap — the outline has to be exact to 1/64 px, not close.** `o` at 16 px differs from
+  FreeType by at most 1/64 px in y on seven points and still mismatches 8 px: Skia's quad
+  chord count and quarter-row snaps flip on a 1/64 px change. Two measured sources of that
+  1/64: (1) an implied on-curve point must be the TRUNCATING midpoint of its two hinted 26.6
+  controls (`FT_Outline_Decompose`), not a midpoint in font units hinted on its own (124 such
+  points in a..z; alone worth 77 -> 73 px); (2) points between edges need FreeType's integer
+  arithmetic (`af_glyph_hints_align_strong_points`: `FT_MulFix(u - before.fpos, scale)`;
+  weak points: IUP per CONTOUR). The engine maps every point through one global knot map in
+  f64: `e`'s left extremum goes through the crossbar knots and lands 0.34 px low.
+- **Design for the outline (not done).** Port `af_latin` vertical hinting as integer code
+  beside `_hstem_knots`: point flags and directions (`af_glyph_hints_reload`), segments, edges,
+  blue edges, `af_latin_hint_edges`, then align edge / strong / weak points, x by `FT_MulFix`,
+  midpoints after hinting. Oracle per glyph and size: `ftpath` (below) must match point for
+  point at 0/64; then `orc` against a Chrome capture must report 0.
+- **Fix (pens).** At an integer size a pen is a whole number of font units. The engine summed
+  advances each rounded to milli-px and snapped the SUM to the unit grid, which holds only
+  while the drift is under half a unit (3.9 milli at 16 px): about ten glyphs.
+  `_lcd_apply_pen_phases` now snaps each STEP (advance + kern, off by at most 1 milli) and
+  keeps the pen as a count of 1/steps_per_px px, where 1/steps_per_px = gcd(1/64 px, size/upem
+  px) is the grid an in-run Chrome pen sits on (16 px at 2048 upem: 1/128 px). The quarter is
+  `floor((8 d + D) / 2D)` over exact pen + milli origin: an exact tie stays a tie and rounds
+  up. The origin takes its nearest grid step (measured: 1x html 0.29 with it, 0.32 without).
+  LCD runs only: a GRAY run (all 16 px text at k=4) keeps the old sum snap, because with the
+  exact grid one k=4 row of `inline_lead_space_run_pen_phase_k4_chrome159_spec` AC-2 moved a
+  quarter device px (its origin carries a 13.33 px mono `<code>`, which is not on that grid). Letter- / word-spaced and
+  fractional-size runs keep the milli path.
+- **k == 1 lead space is exact now too** (`layout_with_style_flow`), and that alone is NOT a
+  gain: Chrome's pen is ceil64(item) + exact lead; the engine had exact item + ceil64(lead)
+  and now has exact item + exact lead. Each is right on the lines whose item parity suits it.
+  Fixture `<li><code>button|audio|a|kbd</code> — ...` (4 lines, mismatching px): base 934,
+  snapped lead with exact pens 1052, exact lead with exact pens 1050, each wrong on two
+  lines. It was switched because with the snapped lead forms-media rose 0.39 -> 0.42; with the
+  exact lead no catalog page rises. No AC pins it. The item ceil below settles it.
+- **Off-grid runs keep the old path.** A step that is not a whole number of the face's units
+  (fallback glyph, no-glyph estimate) would add its rounding to every later pen, so such a run
+  keeps the sum snap and the milli quarter (`on_grid`).
+- **Open, layout owner:** the item before a run is not rounded up to a LayoutUnit
+  (bug `web_render_inline_item_layoutunit_ceil_pen_2026-11-28`, red in-development spec
+  `inline_item_layoutunit_ceil_pen_chrome159_spec`). Single-glyph phase misses left on the 1x
+  catalog: html 3, forms-media 4, animation 1; a trial ceil removed one on each page.
+- **Numbers (seed1126b, interpreter).** 1x base -> head: overview 0.17 -> 0.16, html 0.30 ->
+  0.29, css-layout 0.41 -> 0.40, css-paint 0.41 -> 0.35, forms-media 0.39 -> 0.34, animation
+  0.37 -> 0.34, evidence 0.18 -> 0.08, tab-bar 0.23 -> 0.23. 4x: every page on its row.
+- **Tools (lane scratch `lcd1x/`, not in git).** `ftpath` (FreeType hinted outline, 26.6),
+  `orc` (outline -> libskia LCD mask -> best phase / offset against a black-on-white Chrome
+  band, per glyph; `ORC_LUT` = measured raw-coverage -> Chrome level table, a pure function
+  over 7,731 samples), `od.sh` (engine outline vs FreeType point by point), `pd` / `cc` /
+  `blobs` (text vs non-text, component sizes, per-glyph mismatch). Build against
+  `~/skia-n2/skia/out/simple-upstream-ganesh-vulkan` (libskia + libfreetype2).
+  - Trap: `SkFont::getPath` returns the UNHINTED outline; load through FreeType directly.
+  - Trap: libskia's own FreeType LCD (`FT_Render_Glyph`) is not Chrome's raster; Chrome is
+    `GenerateImageFromPath` because Fontations sets `computeFromPath`.
+- **After the rebase on 8b2da8a67a1 (tab-bar fix in): the k=1 lead was decided by an A/B.**
+  1x catalog with the pen fix in, mismatching px: exact lead 13,762, snapped lead 14,275
+  (exact / snapped: overview 0.16 / 0.16, html 0.29 / 0.27, css-layout 0.40 / 0.37, css-paint
+  0.35 / 0.40, forms-media 0.34 / 0.42, animation 0.34 / 0.32, evidence 0.08 / 0.08, tab-bar
+  0.02 / 0.02). Exact kept; bug shard `web_render_k1_lead_space_run_start_tie_2026-11-28`
+  updated. The `<li><code>` fixture is still worse than upstream (1050 vs 934 px) until the
+  item ceil lands.
+- **Bug shards:** `web_render_lcd_hinted_outline_not_freetype_exact_2026-11-28` (the af_latin
+  port, the 13/14 px oracle question, the tools) and
+  `web_render_inline_item_layoutunit_ceil_pen_2026-11-28` (layout hand-off).

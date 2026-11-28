@@ -15,9 +15,6 @@
 use std.nogc_sync_mut.compression.gzip.types.{
     BLOCK_STORED, BLOCK_FIXED, BLOCK_DYNAMIC
 }
-use std.nogc_sync_mut.compression.gzip.huffman.{
-    deflate_length_decode_info, deflate_distance_decode_info
-}
 
 # =============================================================================
 # BIT ACCESS (RFC 1951 3.1.1: data elements are packed LSB-first)
@@ -59,7 +56,8 @@ struct HuffTable:
     fast: [i64]
 
 # Result of an inflate step: decoded bytes plus the end bit/byte position.
-struct InflateOut:
+@allow(primitive_api)  # reason: RFC 1951 codec: raw byte offsets and output byte budgets are the wire format itself
+pub struct InflateOut:
     output: [u8]
     end: i64
 
@@ -198,20 +196,63 @@ fn _fixed_litlen_lengths() -> [i64]:
 # Returns [block_output, new_bp] -- the NEW bytes only -- or nil on malformed or
 # truncated input.
 fn _inflate_codes(data: [u8], bp0: i64, total: i64, history: [u8], max_output: i64, lit: HuffTable, dist: HuffTable) -> InflateOut?:
+    # PERF (2026-11-28): this is the per-symbol hot loop. It keeps a local
+    # LSB-first bit buffer, so the input is read about once per 8 bits instead of
+    # three `[u8]` reads per symbol. Codes up to FAST_BITS decode inline from the
+    # fast table, with no `[i64]` pair returned per symbol. Length and distance
+    # bases come from flat RFC 1951 3.2.5 tables, not from an if-chain that
+    # allocates a fresh array. Codes longer than FAST_BITS fall back to
+    # huffman_decode_symbol. Bits past the end of input read as zero. The
+    # consumed count (`ip * 8 - bc`) is checked against `total` after every step.
     val lc: [i64] = lit.counts
     val ls: [i64] = lit.symbols
     val lf: [i64] = lit.fast
     val dc: [i64] = dist.counts
     val ds: [i64] = dist.symbols
     val df: [i64] = dist.fast
-    var bp = bp0
+    val len_base: [i64] = [3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131, 163, 195, 227, 258]
+    val len_extra: [i64] = [0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0]
+    val dist_base: [i64] = [1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537, 2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577]
+    val dist_extra: [i64] = [0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13]
+    val fast_mask = (1 << FAST_BITS) - 1
+    val nbytes = data.len()
     val hlen = history.len()
     var out: [u8] = []
+    # Bit buffer: `bc` valid bits in `bb`; `ip` is the next unread byte.
+    var ip = bp0 >> 3
+    var bb = 0
+    var bc = 0
+    if ip < nbytes:
+        bb = data[ip].to_i64() >> (bp0 & 7)
+        bc = 8 - (bp0 & 7)
+        ip = ip + 1
     loop:
-        val sr = huffman_decode_symbol(data, bp, total, lc, ls, lf)
-        val symbol: i64 = sr[0]
-        bp = sr[1]
-        if symbol < 0:
+        # Refill to >= 32 bits: enough for a 15-bit code plus 13 extra bits.
+        while bc < 32:
+            if ip < nbytes:
+                bb = bb | (data[ip].to_i64() << bc)
+            ip = ip + 1
+            bc = bc + 8
+        var symbol = -1
+        val e = lf[bb & fast_mask]
+        if e != 0:
+            symbol = e >> 4
+            bb = bb >> (e & 15)
+            bc = bc - (e & 15)
+        else:
+            val sr = huffman_decode_symbol(data, ip * 8 - bc, total, lc, ls, lf)
+            symbol = sr[0]
+            if symbol < 0:
+                return None
+            val npos: i64 = sr[1]
+            ip = npos >> 3
+            bb = 0
+            bc = 0
+            if ip < nbytes:
+                bb = data[ip].to_i64() >> (npos & 7)
+                bc = 8 - (npos & 7)
+                ip = ip + 1
+        if ip * 8 - bc > total:
             return None
         if symbol == 256:
             break
@@ -222,29 +263,48 @@ fn _inflate_codes(data: [u8], bp0: i64, total: i64, history: [u8], max_output: i
         else:
             if symbol > 285:
                 return None
-            val len_info = deflate_length_decode_info(symbol)
-            val base_len: i64 = len_info[0]
-            val ex_cnt: i64 = len_info[1]
-            var length = base_len
-            if ex_cnt > 0:
-                if bp + ex_cnt > total:
+            while bc < 32:
+                if ip < nbytes:
+                    bb = bb | (data[ip].to_i64() << bc)
+                ip = ip + 1
+                bc = bc + 8
+            val li = symbol - 257
+            val ex_cnt = len_extra[li]
+            val length = len_base[li] + (bb & ((1 << ex_cnt) - 1))
+            bb = bb >> ex_cnt
+            bc = bc - ex_cnt
+            var dist_code = -1
+            val de = df[bb & fast_mask]
+            if de != 0:
+                dist_code = de >> 4
+                bb = bb >> (de & 15)
+                bc = bc - (de & 15)
+            else:
+                val dr = huffman_decode_symbol(data, ip * 8 - bc, total, dc, ds, df)
+                dist_code = dr[0]
+                if dist_code < 0:
                     return None
-                length = base_len + _bits(data, bp, ex_cnt)
-                bp = bp + ex_cnt
-            val dr = huffman_decode_symbol(data, bp, total, dc, ds, df)
-            val dist_code: i64 = dr[0]
-            bp = dr[1]
-            if dist_code < 0 or dist_code > 29:
+                val dpos: i64 = dr[1]
+                ip = dpos >> 3
+                bb = 0
+                bc = 0
+                if ip < nbytes:
+                    bb = data[ip].to_i64() >> (dpos & 7)
+                    bc = 8 - (dpos & 7)
+                    ip = ip + 1
+            if dist_code > 29:
                 return None
-            val di_info = deflate_distance_decode_info(dist_code)
-            val base_dist: i64 = di_info[0]
-            val dex_cnt: i64 = di_info[1]
-            var distance = base_dist
-            if dex_cnt > 0:
-                if bp + dex_cnt > total:
-                    return None
-                distance = base_dist + _bits(data, bp, dex_cnt)
-                bp = bp + dex_cnt
+            while bc < 16:
+                if ip < nbytes:
+                    bb = bb | (data[ip].to_i64() << bc)
+                ip = ip + 1
+                bc = bc + 8
+            val dex_cnt = dist_extra[dist_code]
+            val distance = dist_base[dist_code] + (bb & ((1 << dex_cnt) - 1))
+            bb = bb >> dex_cnt
+            bc = bc - dex_cnt
+            if ip * 8 - bc > total:
+                return None
             if distance > hlen + out.len():
                 return None
             if max_output >= 0 and hlen + out.len() + length > max_output:
@@ -254,6 +314,10 @@ fn _inflate_codes(data: [u8], bp0: i64, total: i64, history: [u8], max_output: i
             if src >= hlen:
                 # Source lies wholly in this block (the common case).
                 src = src - hlen
+                if distance >= length:
+                    # Non-overlapping: one slice copy instead of per-byte pushes.
+                    out.extend(out[src:src + length])
+                    j = length
                 while j < length:
                     out.push(out[src + j])
                     j = j + 1
@@ -262,7 +326,7 @@ fn _inflate_codes(data: [u8], bp0: i64, total: i64, history: [u8], max_output: i
                     out.push(if src < hlen: history[src] else: out[src - hlen])
                     src = src + 1
                     j = j + 1
-    return InflateOut(output: out, end: bp)
+    return InflateOut(output: out, end: ip * 8 - bc)
 
 # Fixed-Huffman tables (RFC 1951 3.2.6) as [literal/length, distance]; built once per stream.
 fn _fixed_tables() -> [HuffTable]:
@@ -434,7 +498,8 @@ fn _inflate_core(input: [u8], start: i64, max_output: i64, member: bool) -> Infl
 
 # Decompress a complete DEFLATE stream without allowing output beyond max_output.
 # A negative max_output preserves the legacy unbounded API.
-fn inflate_bounded(input: [u8], max_output: i64) -> [u8]?:
+@allow(primitive_api)  # reason: RFC 1951 codec: raw byte offsets and output byte budgets are the wire format itself
+pub fn inflate_bounded(input: [u8], max_output: i64) -> [u8]?:
     val r = _inflate_core(input, 0, max_output, false)
     if r == nil:
         return None
@@ -444,13 +509,23 @@ fn inflate_bounded(input: [u8], max_output: i64) -> [u8]?:
 # Decompress ONE DEFLATE stream that starts at byte offset `start` of `input` and
 # must end with a BFINAL block; bytes after it are left alone (a gzip member
 # trailer follows). Returns InflateOut(output, end byte) or nil.
-fn inflate_member(input: [u8], start: i64) -> InflateOut?:
+@allow(primitive_api)  # reason: RFC 1951 codec: raw byte offsets and output byte budgets are the wire format itself
+pub fn inflate_member(input: [u8], start: i64) -> InflateOut?:
     _inflate_core(input, start, -1, true)
 
 # Decompress a complete DEFLATE stream (one or more blocks).
 # Returns decompressed [u8] or nil on error.
-fn inflate(input: [u8]) -> [u8]?:
+@allow(primitive_api)  # reason: RFC 1951 codec: raw byte offsets and output byte budgets are the wire format itself
+pub fn inflate(input: [u8]) -> [u8]?:
     inflate_bounded(input, -1)
+
+# Typed entry point: decompress one complete raw DEFLATE stream (RFC 1951, no
+# zlib/gzip wrapper). Handles stored, fixed-Huffman and dynamic-Huffman blocks.
+@allow(primitive_api)  # reason: RFC 1951 codec: raw byte offsets and output byte budgets are the wire format itself
+pub fn inflate_raw(data: [u8]) -> Result<[u8], text>:
+    match _inflate_core(data, 0, -1, false):
+        case Some(out): Ok(out.output)
+        case None: Err("raw DEFLATE stream is invalid or truncated")
 
 # =============================================================================
 # LEGACY INTERFACE - stored-block parser and Huffman block markers
@@ -466,7 +541,8 @@ pub struct DeflateBlockResult:
 # Returns the typed block description, or nil on error.
 # NOTE: For fixed-Huffman blocks the caller should use inflate() directly.
 # This shim is kept for backward compatibility with stored blocks.
-fn deflate_block_parse(data: [u8]?, offset: i64) -> DeflateBlockResult?:
+@allow(primitive_api)  # reason: RFC 1951 codec: raw byte offsets and output byte budgets are the wire format itself
+pub fn deflate_block_parse(data: [u8]?, offset: i64) -> DeflateBlockResult?:
     val input: [u8] = match data:
         case Some(bytes): bytes
         case None: return nil

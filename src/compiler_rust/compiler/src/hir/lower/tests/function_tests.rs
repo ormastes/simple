@@ -424,3 +424,88 @@ fn extern_abi_system_attribute_is_recorded_only_for_tagged_externs() {
     assert!(!module.extern_system_abi.contains_key("plain_c"));
     assert!(module.extern_param_types.contains_key("plain_c"));
 }
+
+/// seed_jit_u8_array_into_i64_array_param_reads_zero_2026-11-27: a `[u8]`
+/// array bound to a `[i64]` parameter is read with the wrong element width
+/// under the JIT (255 reads back as 0). The language has no array element
+/// coercion, so a byte-packed `[u8]` into another numeric element type is an
+/// E1003 type error.
+#[test]
+fn array_param_rejects_u8_array_into_wider_element_type() {
+    let callee = "fn at64(data: [i64], i: i64) -> i64:\n    data[i]\n\n";
+    for call in [
+        "fn f() -> i64:\n    val b: [u8] = [1u8, 255u8]\n    at64(b, 1)\n",
+        "fn f(b: [u8]) -> i64:\n    at64(b, 0)\n",
+    ] {
+        let error = parse_and_lower(&format!("{callee}{call}")).expect_err(call);
+        assert!(format!("{error:?}").contains("error[E1003]"), "{call}: {error:?}");
+    }
+    for call in [
+        "fn f(b: [i64]) -> i64:\n    at64(b, 0)\n",
+        "fn f() -> i64:\n    at64([1, 2, 3], 0)\n",
+    ] {
+        parse_and_lower(&format!("{callee}{call}")).unwrap_or_else(|e| panic!("{call}: {e:?}"));
+    }
+    let bytes = "fn first(data: [u8]) -> i64:\n    data[0]\n\nfn f() -> i64:\n    first([0, 1, 2])\n";
+    parse_and_lower(bytes).unwrap_or_else(|e| panic!("literal into [u8]: {e:?}"));
+}
+
+/// Shape 1: the callee is declared after the caller, so its HIR value type is
+/// not yet a `Function` and only the recorded parameter row is known.
+#[test]
+fn array_param_rejects_u8_array_into_later_declared_callee() {
+    let tail = "\nfn at64(data: [i64], i: i64) -> i64:\n    data[i]\n\nfn atl(data: List<u32>) -> i64:\n    0\n\nfn first(data: [u8]) -> i64:\n    data[0]\n";
+    for call in [
+        "fn f(b: [u8]) -> i64:\n    at64(b, 0)\n",
+        "fn f(b: [u8]) -> i64:\n    atl(b)\n",
+    ] {
+        let error = parse_and_lower(&format!("{call}{tail}")).expect_err(call);
+        assert!(format!("{error:?}").contains("error[E1003]"), "{call}: {error:?}");
+    }
+    for call in [
+        "fn f(b: [i64]) -> i64:\n    at64(b, 0)\n",
+        "fn f(b: [u8]) -> i64:\n    first(b)\n",
+        "fn f() -> i64:\n    at64([1, 2], 0)\n",
+    ] {
+        parse_and_lower(&format!("{call}{tail}")).unwrap_or_else(|e| panic!("{call}: {e:?}"));
+    }
+}
+
+/// Shape 2: instance, `self.`, static and impl-block methods whose parameter
+/// is spelled `[i64]`.
+#[test]
+fn array_param_rejects_u8_array_into_method_parameter() {
+    let decls = "class Box:\n    var n: i64\n    fn at(data: [i64], i: i64) -> i64:\n        data[i]\n    fn own(b: [u8]) -> i64:\n        self.at(b, 0)\n    static fn sat(data: [i64]) -> i64:\n        data[0]\n\nstruct P:\n    n: i64\n\nimpl P:\n    fn pat(data: [i64]) -> i64:\n        data[0]\n\n";
+    let decls_ok = decls.replace("        self.at(b, 0)", "        0");
+    for call in [
+        "fn f(bx: Box, b: [u8]) -> i64:\n    bx.at(b, 0)\n",
+        "fn f(b: [u8]) -> i64:\n    Box.sat(b)\n",
+        "fn f(p: P, b: [u8]) -> i64:\n    p.pat(b)\n",
+    ] {
+        let error = parse_and_lower(&format!("{decls_ok}{call}")).expect_err(call);
+        assert!(format!("{error:?}").contains("error[E1003]"), "{call}: {error:?}");
+    }
+    let error = parse_and_lower(decls).expect_err("self.at");
+    assert!(format!("{error:?}").contains("error[E1003]"), "self.at: {error:?}");
+    for call in [
+        "fn f(bx: Box, b: [i64]) -> i64:\n    bx.at(b, 0)\n",
+        "fn f(b: [i64]) -> i64:\n    Box.sat(b)\n",
+        "fn f(p: P) -> i64:\n    p.pat([1, 2])\n",
+    ] {
+        parse_and_lower(&format!("{decls_ok}{call}")).unwrap_or_else(|e| panic!("{call}: {e:?}"));
+    }
+}
+
+/// Shape 3: a trait-typed receiver, with no float argument in the call.
+#[test]
+fn array_param_rejects_u8_array_into_trait_method_parameter() {
+    // `keep_words`, not a builtin collection name such as `put`: a builtin
+    // name is taken by the builtin method lowering before the trait row is
+    // consulted (follow-up u8_array_into_word_array_unchecked_slots_2026-11-28).
+    let decls = "trait Store:\n    fn keep_words(data: [i64]) -> i64\n\n";
+    let bad = format!("{decls}fn f(s: Store, b: [u8]) -> i64:\n    s.keep_words(b)\n");
+    let error = parse_and_lower(&bad).expect_err("trait");
+    assert!(format!("{error:?}").contains("error[E1003]"), "trait: {error:?}");
+    let good = format!("{decls}fn f(s: Store, b: [i64]) -> i64:\n    s.keep_words(b)\n");
+    parse_and_lower(&good).unwrap_or_else(|e| panic!("trait [i64]: {e:?}"));
+}
