@@ -38,3 +38,54 @@ describe "extern return shapes: rt_event_loop_poll":
     it "event_loop_poll_ready rejects an invalid handle with an empty array":
         step("handle -1 is not a loop")
         expect(event_loop_poll_ready(-1, 8, 0).len()).to_equal(0)
+
+@unsafe(reason: "raw UDP bind ABI", capabilities: [ffi])
+extern fn rt_io_udp_bind(addr: text) -> i64
+@unsafe(reason: "raw UDP local address ABI", capabilities: [ffi])
+extern fn rt_io_udp_local_addr(fd: i64) -> text?
+@unsafe(reason: "raw UDP send ABI", capabilities: [ffi])
+extern fn rt_io_udp_send_to(fd: i64, data: [u8], addr: text) -> i64
+@unsafe(reason: "raw UDP close ABI", capabilities: [ffi])
+extern fn rt_io_udp_close(fd: i64) -> bool
+@unsafe(reason: "raw event loop register ABI", capabilities: [ffi])
+extern fn rt_event_loop_register(loop_fd: i64, fd: i64, interest: i64, token: i64, edge: bool) -> bool
+
+describe "extern return shapes: rt_event_loop_poll ready flag and token":
+    it "reports fd, Read and the registered token for a readable UDP socket":
+        step("bind a loopback UDP socket, send it a datagram, register with token 777")
+        val fd = unsafe(capabilities: [ffi]):
+            rt_io_udp_bind("127.0.0.1:0")
+        expect(fd >= 0).to_equal(true)
+        val addr = unsafe(capabilities: [ffi]):
+            rt_io_udp_local_addr(fd)
+        unsafe(capabilities: [ffi]):
+            rt_io_udp_send_to(fd, [104, 105], addr ?? "127.0.0.1:0")
+        val lp = unsafe(capabilities: [ffi]):
+            rt_event_loop_create()
+        unsafe(capabilities: [ffi]):
+            rt_event_loop_register(lp, fd, 0, 777, false)
+        val ready = event_loop_poll_ready(lp, 8, 1000)
+        unsafe(capabilities: [ffi]):
+            rt_event_loop_close(lp)
+            rt_io_udp_close(fd)
+        expect(ready.len()).to_equal(3)
+        expect(ready[0]).to_equal(fd)
+        expect(ready[1]).to_equal(0)
+        expect(ready[2]).to_equal(777)
+
+    it "reports Write readiness and the registered token for a writable UDP socket":
+        step("register an idle UDP socket for write interest with token 4242")
+        val fd = unsafe(capabilities: [ffi]):
+            rt_io_udp_bind("127.0.0.1:0")
+        val lp = unsafe(capabilities: [ffi]):
+            rt_event_loop_create()
+        unsafe(capabilities: [ffi]):
+            rt_event_loop_register(lp, fd, 1, 4242, false)
+        val ready = event_loop_poll_ready(lp, 8, 1000)
+        unsafe(capabilities: [ffi]):
+            rt_event_loop_close(lp)
+            rt_io_udp_close(fd)
+        expect(ready.len()).to_equal(3)
+        expect(ready[0]).to_equal(fd)
+        expect(ready[1]).to_equal(1)
+        expect(ready[2]).to_equal(4242)
