@@ -28,6 +28,7 @@ use std.nogc_sync_mut.database.wal_segmented.{database_wal_current_v1,
 use std.nogc_sync_mut.io.file_ops.{file_lock, file_unlock, file_atomic_write, file_read_regular_no_follow_bounded, file_exists, file_create_exclusive, secure_temp_dir, file_publish_noreplace}
 use std.nogc_sync_mut.io_runtime.{file_delete, dir_remove}
 use std.nogc_sync_mut.io.dir_entry_ops.{directory_create_private}
+use std.nogc_sync_mut.file_system.permissions.file_set_mode
 use std.nogc_sync_mut.io.file_lock_owned_v2.{FileLockOwnerV2, FileLockOpenV2,
     FileLockReleaseStateV2, file_lock_open_owned_v2, file_lock_release_owned_v2,
     file_lock_owner_live_v2, file_lock_owner_state_v2}
@@ -646,6 +647,12 @@ fn operation_publish_held_v3(owner: DistributedOperationJournalV2,
         file_delete(staged)
         dir_remove(stage, false)
         return Err("OPERATION_JOURNAL_RECORD_PUBLICATION_FAILED")
+    # file_create_exclusive yields 0666 & ~umask (0664 under a 0002 umask);
+    # journal records are private, matching the Linux protected store's 0600.
+    if not file_set_mode(staged, 0o600):
+        file_delete(staged)
+        dir_remove(stage, false)
+        return Err("OPERATION_JOURNAL_RECORD_MODE_FAILED")
     val checked_bytes = file_read_regular_no_follow_bounded(staged, 8388608)
     if checked_bytes.is_err() or checked_bytes.unwrap() != payload:
         file_delete(staged)
