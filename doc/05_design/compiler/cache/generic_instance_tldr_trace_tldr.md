@@ -7,9 +7,10 @@ Full design: `generic_instance_tldr_trace.md`. Addendum to
 - Demand-driven: a task that meets `Template<Args>` requests it through the single-flight reader; one set-once slot per `ConcreteTldrKey` is the cross-module dedup.
 - Provider: the template entry carries `body_digest` plus `open_needs` (instances its body requires as a function of its binders), a write-once slot filled by the typed-HIR stage.
 - Consumer: each module's TLDR carries a `needed-instance|` section of direct needs `(ConcreteTldrKey, TemplateId, ArgsId, origins)`; only `Concrete` views enter it.
-- Closure = async demand over direct needs + substituted `open_needs`; no body is opened to find instances. Instance set = slot table at scheduler quiescence, sorted by key. Depth 32 and a session budget bound it.
-- An instance owns itself: one task, one object named by its key. Concrete view and HIR are target-neutral; MIR/object keys add target, toolchain and lane.
-- Reverse refs (`generic-specialization`, existing family): body -> instances, signature/bound -> instances and consumer modules, instance -> requesters. A body edit rebuilds exactly that template's instance objects; consumer module objects stay.
+- Closure = async demand over direct needs + substituted `open_needs`; no body is opened to find instances. Cache hits replay their stored requests, so the set is complete on a partial rebuild. Instance set = slot table at scheduler quiescence, sorted by key. Per-key depth (32) and node limits and a session budget bound it.
+- Staged slots per key (`view` < `layout` < `mir0` < `mir1` < `obj`); each consumer names the stage it awaits, so no await cycle exists; a by-value layout cycle is a diagnostic; inlining reads callee `mir0`.
+- An instance owns itself: one task, one object named by its key. Concrete view and HIR are target-neutral; MIR/object keys add target, toolchain and lane. Instance keys also fold the argument types' definition digests and an impl coherence digest (argument keys are names).
+- Reverse refs (`generic-specialization`, existing family): body, signature, bound, argument type definition and impl set -> instances; signature/bound -> consumer modules; instance `mir0` -> inliners; instance -> requesters. A body edit rebuilds exactly that template's instance objects and their inliners; consumers that only call the symbol stay.
 - No-change build: zero instance tasks, zero links.
 - Trace queries (who / why / from where / cost) read the section and RR rows; the `TraceViewProjection` surface is not implemented yet.
 - Remote: an instance task is a content-keyed action; inputs are template entry, body section, argument keys, read TLDRs, target, toolchain. Local and remote objects must be byte-identical.

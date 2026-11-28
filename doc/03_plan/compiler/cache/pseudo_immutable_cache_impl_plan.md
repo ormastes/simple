@@ -56,17 +56,17 @@ C5 (target-neutral HIR) and S3 (fused source→OBJ default) follow step 3.
 
 Design addendum: `doc/05_design/compiler/cache/generic_instance_tldr_trace.md`.
 Stage rows and acceptance: `doc/03_plan/language/type_system/no_any_inference_plan.md`
-S3-F1..F10 (S3-D is reframed there as a specialization query, not a pass).
+S3-F0..F10 (S3-D is reframed there as a specialization query, not a pass).
 Owner direction: generic specialization is an async task in this engine; it
 adds no scheduler, cache protocol or registry (R01). Guide = Fable, Impl = lower
-model unless marked. In this section `S3-F1`..`S3-F10` are stages of the no-any plan; bare `S1-n`, `S2-n`, `S3-n` are this plan's own steps.
+model unless marked. **Step ids:** `S3-F0`..`S3-F10` are stages of the no-any plan. `S1-1`..`S1-6`, `S2-1`..`S2-7`, `S3-1`..`S3-7`, `A-1`..`A-3`, `B-1`..`B-3`, `P-1`, `P-2` below are the steps of **design §19** (`pseudo_immutable_cache_async_build_design.md`), not the S1/S2/S3 of §2 above; §4's steps 1-3 are the waves they belong to.
 
-| Generic stage | Wave slot here | Depends on (this plan) | Why |
+| Generic stage | Wave slot here | Depends on (design §19 step) | Why |
 |---|---|---|---|
 | S3-F0 restore `generic_subst_model.spl` | now (early start) | none | the one substitution implementation; restored from `200a05f5bc8^`, not the stage |
-| S3-F1 template `open_needs` | alongside step 3 | S3-1 write-once slot (may precede it by writing at publication) | the field is absent after parse and set once by typed HIR |
-| S3-F2 `needed-instance\|` section | alongside step 3 | S3-1; A-2 digest gate | a second set-once slot on the module TLDR record; the section crosses the trust boundary |
-| S3-F3 demand closure | end of step 1 | S1-3 `read_tldr_async`, S1-5 wake-on-publish | requests are lazy `(module_id, decl_id)` pointer fills; waiters must be woken on terminal failure |
+| S3-F1 template `open_needs` | now (early start); becomes a write-once slot at design §19 S3-1 | none to start (the field is written at publication until S3-1) | absent after parse, set once by typed HIR |
+| S3-F2 `needed-instance\|` section | now (early start), after S3-F1 | A-2 digest gate before the section is trusted across processes | a second set-once slot on the module TLDR record; the section crosses the trust boundary |
+| S3-F3 demand closure | end of step 1 (S3-F1, S3-F2 already done) | S1-3 `read_tldr_async`, S1-5 wake-on-publish | requests are lazy `(module_id, decl_id)` pointer fills; waiters must be woken on terminal failure |
 | S3-F4 specialization task (Impl = Fable) | step 2 | S1-1, S1-2 async stage nodes; S2-1 `CompileInvoker` | the task is `compile(task)` for a different task kind, written once |
 | S3-F5 keys and artifacts | alongside step 2, then step 3 | S2-6 key record; S3-4 `.sphb`, S3-5 ledger, S3-6 mmap writer; A-1 then P-1 | per-instance key record; packed blobs; target stays out of view and HIR keys |
 | S3-F6 reverse-reference rows | early half now; late half after S3-F4 | none | producer for an existing family |
@@ -80,8 +80,8 @@ Status check against `src` at `6b0b52f6f43` (`git grep`, not document status):
 `read_tldr_async`, `trait CompileInvoker`, `FiberInvoker`, `KeyRecordV2`,
 `.sphb`, `.spmb` and a usage ledger are **absent**. Present:
 `SourceReader.read_src_async`, `TldrTableV1.request_async`,
-`tldr_table_fill_async_v1`, `CacheSingleFlightV1` (daemon and AOP match cache
-only), `mir_cfg_select_arm`, `hir_variant_object_key_v1`, `.spab`. So S1-1,
+`tldr_table_fill_async_v1`, `CacheSingleFlightV1` (daemon, AOP match cache, `directory_tldr_store_v2.spl`, `macro_expansion_cache_v1.spl`; not the per-file compile path),
+`mir_cfg_select_arm`, `hir_variant_object_key_v1`, `.spab`. So S1-1,
 S1-2, S1-3 (TLDR half), S2-1, S2-6, S3-1..S3-6 are not landed, and S3-F3 onward
 cannot start before them. The target-neutral flag in code is
 `SIMPLE_HIR_CFG_SELECT`, not `SIMPLE_HIR_TARGET_NEUTRAL` as the design says.

@@ -24,9 +24,9 @@ A generic instance is a **compile task** like a file: `InstanceTask(key)` runs
 substitute -> MIR -> object inside the same scheduler and `CompileInvoker`
 (fiber or process) as `CompileTask(file)`. Nothing collects instances up front.
 A task that meets `Template<Args>` **requests** the instance through the
-single-flight reader; the first request creates a set-once slot and starts the
+single-flight reader; the first request creates the set-once slots and starts the
 task, later requests share it. An instance task requests the instances its own
-body needs. The needed set of a build is whatever slots exist when the
+body needs, and a cache hit replays its stored requests. The needed set of a build is whatever slots exist when the
 scheduler is quiescent. Every request is recorded as a TLDR fact with its origin
 span, so "who needs `Pair<i64,f64>`, why, from where" is a read, not a rebuild.
 
@@ -146,15 +146,15 @@ NeededInstanceV1 {
   template_id    # TemplateId
   args_id        # ArgsId
   arg_keys       # positional structural keys, closed (no binder variable)
-  origins        # sorted [(module_id, span, cause, via)]
+  origins        # sorted [(module_id, span, cause)]
 }
 NeededInstanceSetV1 { rows sorted by concrete_key, unique; complete: bool; digest }
 ```
 
-`via` is empty for a direct use and the parent `concrete_key` for a need that
-came from a template's `open_needs`. Only **direct** needs are stored in a
-module's section; transitive ones are derived (§5) and never duplicated into
-every consumer.
+Only a module's **direct** needs are stored in its section, so a row has no
+parent. Needs that come from a template's `open_needs` are stored once, on the
+instance that has them (`resolved_needs`, §5), and the `via` chain of the trace
+(§8) is read from the reverse-reference rows whose requester is an instance.
 
 Rules: a row is admitted only when its view is `GENERIC_CLOSURE_CONCRETE`.
 `Partial` and `Unresolved` views are IDE-only and never enter the set. A module
@@ -163,42 +163,97 @@ build that needs codegen from it fails closed (no silent erased fallback in
 safe code). Display spellings never enter identity; spans are presentation and
 trace data, outside the row digest used for invalidation.
 
+**`any` as a type argument.** `any` exists only in `unsafe` and script code. It
+is keyed explicitly as the constant `Any` (already one of the projector's
+primitives), so `Box<any>` is one ordinary instance whose `T` slots hold the
+tagged word. A request with an `Any` argument is admitted only when its origin
+span is in an `unsafe` region or a script-mode unit; from safe code it is a
+diagnostic at that span, never a row.
+
 The section is written by the consumer module's typed-HIR stage (a second
 write-once slot on the module's TLDR record), not by a text scan.
 
 ## 5. Closure by async demand
 
 There is one mechanism, the reader's single-flight slot table [OBS:
-`TldrTableV1.request_async`, `tldr_table_fill_async_v1`, `CacheSingleFlightV1`]:
+`TldrTableV1.request_async`, `tldr_table_fill_async_v1`, `CacheSingleFlightV1`].
+A key has **staged** set-once slots, not one future, and every consumer names
+the stage it awaits:
+
+| Stage slot | Holds | Awaits |
+|---|---|---|
+| `view` | concrete TLDR view: field and signature type keys, no layout | the template's TLDR entry (a file-level read) |
+| `layout` | size, alignment, field offsets | `view` of this key; `layout` of every by-value field type |
+| `mir0` | specialized body before cross-instance inlining; `resolved_needs` | `view` + `layout` of this key, `view` of each callee, the body section |
+| `mir1` | body after inlining | own `mir0`; `mir0` of each inlined callee |
+| `obj` | object for one target | own `mir1` |
+
+| Consumer | Awaits |
+|---|---|
+| `CompileTask(file)` typing or lowering a use | callee `view` (and `layout` when it stores the type by value); `mir0` only when it inlines |
+| `InstanceTask` | the rows of the table above |
+| Link | `obj` of every key in the set, after quiescence |
 
 ```text
 request_instance(concrete_key, origin):
-  slot = single_flight(kind = "tldr.concrete", key = concrete_key)   # set once
-  append origin to the requester's needed-instance rows
+  slots = single_flight(kind = "tldr.concrete", key = concrete_key)   # set once per stage
+  record origin on the requester (section row, or resolved_needs)
   first requester only -> scheduler.submit(InstanceTask(concrete_key))
-  return slot future
+  return slots
 
 InstanceTask(key):
   entry  = await read_tldr(template module) -> template entry (+ open_needs slot)
-  view   = concrete view (ConcreteTldrAstViewV1), must be Concrete
-  for need in substitute(entry.open_needs, view.arg_keys):
-      request_instance(need.key, origin = (template module, need.span, need.cause, via = key))
-  body   = await template body section
-  mir    = substitute + lower (no TypeParam / Infer / Any may remain)
-  obj    = emit; publish packed blob + object by temp + rename
+  view   = publish concrete view; must be Concrete
+  needs  = substitute(entry.open_needs, view.arg_keys)        # generic_subst_model
+  for need in needs: request_instance(need.key, origin = (template module, need.span, need.cause))
+  layout = publish after awaiting by-value field layouts
+  mir0   = substitute + lower the body; publish with resolved_needs = needs
+           (no TypeParam / Infer may remain; no Any unless the key carries one)
+  mir1   = inline; obj = emit; publish each by temp + rename
 ```
 
 - **Requesters.** `CompileTask(file)` at its typed-HIR stage (one request per
   distinct direct need) and `InstanceTask` (its substituted open needs). No
   other path creates an instance.
-- **Termination.** Each key has one slot, so a key is processed once. Keys grow
-  only through `open_needs`. Depth is a property of the **key**, not of the path
-  that reached it: the nesting depth of its argument keys may not exceed
-  `GENERIC_INSTANTIATION_DEPTH_LIMIT` (32) [OBS], so the same key passes or fails
-  whoever asks; polymorphic recursion grows nesting and hits it. The session
-  instance budget (count and bytes, existing cache limits) is a **build-level**
-  verdict: crossing it fails the build, reporting templates by instance count in
-  sorted order, never one arbitrary slot.
+- **Cache hits replay requests.** A slot table built only by tasks that ran
+  would miss everything behind a hit, and the link set would be incomplete. So
+  a hit still requests: a `CompileTask(file)` whose object is valid replays the
+  rows of its stored `needed-instance|` section (a TLDR read, no HIR), and an
+  instance whose stages are cache hits replays its stored `resolved_needs`. A
+  module section with `complete: false`, or an instance record without
+  `resolved_needs`, is not a hit. The set at quiescence is therefore the same
+  set whether zero or all artifacts were cached.
+- **No await cycle (argument).** Order the stages `view < layout < mir0 < mir1 <
+  obj`. A `view` awaits only file-level TLDR reads, which await no instance.
+  `mir0`, `mir1` and `obj` await only strictly lower stages, of any key.
+  `layout` awaits `view`s and, the one same-stage edge, the `layout` of its
+  by-value fields. So a cycle can only be a by-value layout cycle (`A<T>` holds
+  `B<T>` by value and `B<T>` holds `A<T>` by value), which is an infinitely
+  sized type. It is found **before** any layout await, by walking by-value
+  fields over `view`s (acyclic by the first sentence), and reported as a
+  diagnostic naming the cycle's keys in sorted order. Mutually recursive
+  **functions** (`A<T>` calls `B<T>` calls `A<T>`) await each other's `view`
+  only, and link by symbol.
+- **Inlining.** A consumer that inlines embeds a body: it awaits the callee's
+  `mir0` and records that read (§7). Reading `mir0`, never `mir1`, is what keeps
+  instance-to-instance inlining acyclic. The decision to inline is a function of
+  the callee's attributes in its template entry and of its `mir0` (always
+  awaited once the attributes make it a candidate); it never depends on whether
+  an artifact happens to be available, so two builds inline the same calls.
+- **Termination.** Each key has one slot set, so a key is processed once. Keys
+  grow only through `open_needs`. Both limits are properties of the **key**, so
+  the same key passes or fails whoever asks: argument nesting depth at most
+  `GENERIC_INSTANTIATION_DEPTH_LIMIT` (32; defined today, used by nothing, S3-F3
+  is its first use through `mt_depth`), and at most
+  `GENERIC_INSTANTIATION_NODE_LIMIT` type-term nodes over all argument keys
+  [PROP, 4,096]: `f<T>` needing `f<(T, T)>` doubles the nodes each step and
+  would otherwise reach 2^32 nodes at depth 32. Polymorphic recursion hits one
+  of the two.
+- **Budget.** The session instance budget (count and bytes, existing cache
+  limits) is a build-level verdict. When it is crossed no further instance task
+  is admitted and the build fails. The report is computed from stored data that
+  does not depend on scheduling: per-template counts of **direct** needs over
+  the modules' sections, sorted by count then TemplateId.
 - **Determinism.** The needed set is the least fixed point of a monotone
   function of (direct needs, `open_needs`); it does not depend on request order
   or on which requester arrived first. Three rules make the artifacts
@@ -207,25 +262,24 @@ InstanceTask(key):
   "first requester" never appears in any artifact; (3) quiescence is the
   scheduler's own rule: no runnable or parked task and zero outstanding
   `CompileTask` / `InstanceTask`. Link starts only after quiescence.
-- **Failure.** A failed slot is terminal for all waiters (the
+- **Failure.** A failed stage slot is terminal for all its waiters (the
   `tldr_async_owner_integration` "required terminal failure" rule). One failed
   instance fails the link; there is no partial link set.
-- **Cycles.** `A<T>` needing `B<T>` needing `A<T>` is two slots that reference
-  each other's **symbols**, not each other's completion: an instance task awaits
-  a callee's concrete view (signature), never its object. No await cycle exists.
 
 The closure needs bodies of nothing: template entries, `open_needs` and
 argument keys are enough. That is what "through TLDR" means here.
 
 ## 6. Ownership, dedup, keys, artifacts
 
-**Owner (decided 2026-11-28: one object per instance).** An instance is owned by **itself**: one `InstanceTask`, one
-object, named by its key. No consumer object embeds an instance body, and no
-consumer module is "the" owner. The single-flight slot is the cross-module
-dedup; two modules, or two processes through the daemon reader, that request
-the same key share one task. Linking takes the sorted instance objects as
-ordinary inputs, so no COMDAT trick is needed for correctness. Where a symbol
-must be named, its name derives from `ConcreteTldrKey`, never from a requester.
+**Owner (decided 2026-11-28: one object per instance).** An instance is owned
+by **itself**: one `InstanceTask`, one object per target, named by its key. No
+consumer module is "the" owner. A consumer object embeds an instance body only
+by inlining (§5), and then it still links against nothing but symbols. The
+single-flight slot is the cross-module dedup; two modules, or two processes
+through the daemon reader, that request the same key share one task. Linking
+takes the sorted instance objects as ordinary inputs, so no COMDAT trick is
+needed for correctness. Where a symbol must be named, its name derives from
+`ConcreteTldrKey`, never from a requester.
 
 **Keys.** Three levels, following the four artifact levels of the semantic
 cache plan §4.3:
@@ -233,8 +287,22 @@ cache plan §4.3:
 | Artifact | Key | Target in key? |
 |---|---|---|
 | Concrete TLDR view | `ConcreteTldrKey` = (TemplateId, ArgsId, constraint root, profile digest, active-guard root) [OBS] | no: target-neutral |
-| Instance HIR blob (`.sphb`) | `ConcreteTldrKey` + `generic.body` fingerprint + digest of the substituted `open_needs` keys + callee signature digests | no after P-1; until then the A-1 target fold applies (hazard C1) |
-| Instance MIR / object (`.spmb`, object) | the above + `hir_variant_target_id_v1` + toolchain / compiler identity (the `hir_variant_object_key_v1` shape) + lane scope | yes |
+| Instance HIR / `mir0` blob (`.sphb`) | `ConcreteTldrKey` + `generic.body` fingerprint + digest of the substituted `open_needs` keys + callee signature digests + **argument definition digests** + **impl coherence digest** | no after P-1; until then the A-1 target fold applies (hazard C1) |
+| Instance `mir1` / object (`.spmb`, object) | the above + `mir0` digests of inlined callees + `hir_variant_target_id_v1` + toolchain / compiler identity (the `hir_variant_object_key_v1` shape) + lane scope | yes |
+
+Argument keys are **names**: a nominal type is `Named:<module>.<Name>`
+(`generic_tldr_projector.spl:6-8`), so `ArgsId` does not move when a struct used
+as `T` gains a field. Two digests close that hole [PROP], both below the view
+level so a view stays shareable:
+
+- **argument definition digest:** for every nominal type named in the argument
+  keys, transitively through by-value fields, the layout / interface digest of
+  its declaration (from its module's TLDR summary);
+- **impl coherence digest:** for every bound of the template and every method
+  the body resolves on a parameter, the identity of the chosen impl plus the
+  digest of the impl set it was chosen from for that (trait, argument type), so
+  adding or removing an impl that changes or could change the choice moves the
+  key. The view-level `constraint_root` carries the chosen impl identities.
 
 Each key is one key record with at most three algorithm-tagged digests; xxh3 is
 a lookup hint only; compact 16/32-bit ids are session handles, never identity.
@@ -261,24 +329,29 @@ in `src`) is the direct form of the same row:
 | template facet `generic.body` -> instance key | `InstanceTask` | the instance was built from this body |
 | template facets `generic.signature`, `generic.bound` -> instance key | `InstanceTask` | |
 | template facets `generic.signature`, `generic.bound` -> consumer module object action | `CompileTask` | unchanged from the erased design |
+| argument type declaration (layout / interface) -> instance key | `InstanceTask` | the instance embeds that type's layout |
+| impl set of (trait, argument type) -> instance key | `InstanceTask` | the instance's dispatch was resolved against it |
+| instance `mir0` -> inlining consumer (module object action or instance key) | the inliner | the consumer embeds this body |
 | instance key -> requester (module object action, or parent instance key) | requester | the trace edge; also "who links this symbol" |
 
 Under erasure a body edit dirtied one template object. Now `generic.body` is
 consumed by N instance actions. A consumer **module** still does not read the
-body (`generic_caller_consumed_facets_v1` stays [bound, signature]); it reads
-the instance's symbol. So the exact dirty sets are:
+body (`generic_caller_consumed_facets_v1` stays [bound, signature]) unless it
+inlines; otherwise it reads the instance's symbol. So the exact dirty sets are:
 
 | Change | Dirty | Not dirty (negative control) |
 |---|---|---|
-| nothing | nothing: zero instance tasks run, zero links | every instance object |
-| template body (same `open_needs`) | all instance objects of that template, for the targets built; relink | consumer module objects; instances of other templates |
+| nothing | nothing: zero instance compiles, zero links (hits only replay requests) | every instance object |
+| nothing in source, but some module objects are cache hits and others rebuild | only the rebuilt modules; the link set still holds every instance, through replayed requests | instances needed only by the hit modules are neither rebuilt nor dropped |
+| template body (same `open_needs`) | all instance objects of that template, for the targets built; relink | consumer module objects that only call the symbol; instances of other templates |
 | template body, `open_needs` changed | the above + newly needed instances built; instances no longer needed leave the link set | their cached blobs stay valid until evicted |
+| template body, where a consumer **inlined** the instance (default for `FfiCodec<T>`) | additionally every inlining consumer's object (module or instance), through the `mir0` row | consumers that only call the symbol |
 | template signature or bound | instances of that template + every consumer module with that edge (a signature change moves TemplateId and so every `ConcreteTldrKey`; a bound change moves the bound facet and the constraint root, not TemplateId) | unrelated templates |
-| template body, where a consumer **inlined** the instance (default for `FfiCodec<T>`) | additionally that consumer's object: an inlining consumer records a read of the instance's MIR blob, which is an RR row like any other | consumers that only call the symbol |
 | a consumer changes an argument (`Box<i64>` -> `Box<f64>`) | that consumer's object; the new key built on a miss, shared on a hit | the old instance object stays valid for other consumers |
 | needed set of a module changes, no template change | only instances whose key is new to the build; relink | every existing instance object |
-| target, toolchain or lane changes | MIR / object level of every instance | concrete views and (after P-1) HIR blobs |
-| argument type's own definition changes (a struct used as `T` gains a field) | instances whose arg keys or callee signature digests include it | instances over other arguments |
+| target, toolchain or lane changes | `mir1` / object level of every instance | concrete views and (after P-1) `mir0` blobs |
+| a struct used as `T` gains a field (its name, and so `ArgsId`, unchanged) | every instance whose argument definition digest covers it, and their inliners | instances over other arguments; the concrete view key |
+| an impl of a trait is added, removed or changed for an argument type | instances whose impl coherence digest covers that (trait, type) | instances bound to other traits or types |
 | private non-generic body in the template's module | nothing generic | all instances (plan S3-F acceptance) |
 
 Planning reuses `plan_generic_invalidation_v1` [OBS]; only the consumer
@@ -312,7 +385,7 @@ this design adds no CLI or second query authority of its own.
   instance body after substitution (plan S3-D verifier), failing the slot.
 - `Partial` / `Unresolved` views are never codegen input; an `Unresolved`
   request is a diagnostic at its origin span.
-- Argument nesting depth 32 per key; session instance budget; the T3 cap (plan S3-A) applies to
+- Per key: argument nesting depth 32 and the node limit (§5); per session: the instance budget; the T3 cap (plan S3-A) applies to
   implicit generics before a request is made.
 - An unknown digest algorithm, a foreign slot reference, or a corrupt section is
   a miss or a terminal failure, never a hit.
@@ -330,7 +403,7 @@ publish against an old fence.
 Inputs a remote worker needs (`InputManifest`), all immutable and digest-named:
 the template's TLDR entry with `open_needs`; the template body section (or its
 `.sphb`); the closed argument keys; the TLDR entries the body reads (callee
-signatures, argument type layouts); target context; toolchain manifest. **No
+signatures, argument type layouts, the impl sets behind its bounds); target context; toolchain manifest. **No
 full source tree.** Discovery (requests) stays on the scheduler side: a remote
 worker returns its substituted needs in the result candidate and the parent
 submits them, so slots are created by one authority.
@@ -353,11 +426,11 @@ changes.
 Verified by `git grep` over `src/**/*.spl` at the base commit, not from
 document status.
 
-| Needed piece | In `src`? | Plan step |
+| Needed piece | In `src`? | Step (ids `S1-n`, `S2-n`, `S3-n`, `A-n`, `B-n`, `P-n` are those of `pseudo_immutable_cache_async_build_design.md` §19) |
 |---|---|---|
 | Template entry, section codec v1 / v2, `ConcreteTldrKey`, facets | yes | - |
 | `TldrTableV1.request_async`, `tldr_table_fill_async_v1`, `SourceReader.read_src_async` | yes | - |
-| `CacheSingleFlightV1` | yes (daemon and AOP match cache; not on the compile path) | S1-5 |
+| `CacheSingleFlightV1` | yes: daemon (`cache_daemon_main.spl`), AOP match cache, `directory_tldr_store_v2.spl`, `macro_expansion_cache_v1.spl`; not on the per-file compile path | S1-5 |
 | `mir_cfg_select_arm`, `hir_variant_object_key_v1` | yes | P-1 |
 | `plan_generic_invalidation_v1`, RR family and receipt | yes; register helper uncalled | - |
 | `parse_async` / `lower_hir_async` / `lower_mir_async` / `emit_object_async` | **no** | S1-1, S1-2 |
@@ -365,7 +438,8 @@ document status.
 | `trait CompileInvoker`, `FiberInvoker` | **no** | S2-1 |
 | `KeyRecordV2` | **no** | S2-6 |
 | Write-once slot type | **not found** as a type (a grep for set_once, write_once or SetOnce matches one file, `10.frontend/core/flat_pool_packed_v1.spl`); `TldrTableV1` entries are set-once | S3-1 |
-| `.sphb`, `.spmb` | **no** (`.spab` only) | S3-2..S3-4 |
+| `.sphb` | **no** (`.spab` only) | S3-2..S3-4 |
+| `.spmb` (instance MIR) | **no**; proposed in that design §8 but **no §19 step owns it** (S3-4 is HIR only): a gap to assign before S3-F5 | none |
 | Daemon usage ledger | **no** | S3-5 |
 | Concrete-view acquisition (`acquire_concrete_tldr`) | **no** (doc only) | F2 below |
 | `TraceViewProjection` | **no** (doc only) | extreme-typing lane |
