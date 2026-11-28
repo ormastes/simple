@@ -65,7 +65,7 @@ fn binop_result_type(op: BinOp, lhs_ty: Option<TypeId>) -> Option<TypeId> {
 /// is NOT topological once inlining appends callee blocks, so the walk repeats
 /// until no new entry appears. Consumers treat still-missing entries as
 /// "unknown" (default signed in FR-0002b).
-pub(super) fn build_vreg_types(
+pub(crate) fn build_vreg_types(
     func: &MirFunction,
     function_return_types: &HashMap<String, TypeId>,
 ) -> HashMap<VReg, TypeId> {

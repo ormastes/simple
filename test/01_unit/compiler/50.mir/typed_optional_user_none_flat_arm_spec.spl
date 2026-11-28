@@ -1,0 +1,97 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Typed `Q?` holding a user `Q.None`: flat match arms are read by payload variant name
+
+Seed JIT bug seed_jit_typed_optional_holding_user_none_takes_some_arm_2026-11-27:
+`enum Q: None | Here(i64)`, `val a: Q? = Q.None`, `match a: case Some(v): ... /
+case None: ...` takes the `Some` arm on the JIT and the `None` arm on the
+tree-walk interpreter. The interpreter reads a flat `None`/`nil`/`Some` arm by
+the PAYLOAD variant's name: a present `Q.None` is not `Some`, while staying
+present for `.?` / `??` / `if val`.
+
+This spec pins the pure-Simple MIR lowering of that rule, in-process:
+
+- the Option dual-ABI match normalization's FLAT lane tests the scrutinee with
+  `rt_is_none_variant` (nil sentinel OR the stamped None-named user variant OR
+  the boxed Option's own None), not the nil-sentinel-only `rt_is_some`. The
+  predicate is unconditional: the stamp can exist only on None-named user
+  variant values, so for scalar/struct/string payloads `rt_is_none_variant`
+  answers exactly like `rt_is_none` at runtime;
+- a `None`-named variant of a user enum is CONSTRUCTED by `rt_enum_new_none`
+  (which stamps the value) instead of `rt_enum_new`;
+
+Twin of the seed fix in hir/lower/expr/control.rs +
+hir/lower/stmt_lowering.rs (optional_payload_declares_none).
+"""
+
+# @tag: unit, compiler, mir, enum, optional, match
+
+use std.spec
+use compiler.common.config.Logger
+use compiler.frontend.frontend.parse_full_frontend
+use compiler.hir.hir_lowering.types.HirLowering
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.common.driver_core_types.{driver_core_compile_options_default}
+use compiler.driver.driver_mir_target.{driver_mir_target_context}
+
+struct ArmProbeShape:
+    callees: [text]
+    errors: text
+
+fn lower_shape(src: text) -> ArmProbeShape:
+    val file = "typed_optional_user_none_flat_arm_spec.spl"
+    val parsed = parse_full_frontend(src, file, "typed_optional_user_none_flat_arm_spec", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(file)
+    val hir = hir_lowering.lower_module(parsed)
+    var lowering = MirLowering.new_for_target(hir.symbols, driver_mir_target_context(driver_core_compile_options_default()))
+    val mir = lowering.lower_module(hir)
+    var callees: [text] = []
+    for function in mir.functions.values():
+        for block in function.blocks:
+            for instruction in block.instructions:
+                match instruction.kind:
+                    case MirInstKind.Call(_, callee, _):
+                        match callee.kind:
+                            case MirOperandKind.Const(MirConstValue.Str(name), _):
+                                callees = callees.push(name)
+                            case _: pass
+                    case _: pass
+    var errors = ""
+    for e in lowering.errors:
+        errors = errors + e.message + "\n"
+    ArmProbeShape(callees: callees, errors: errors)
+
+fn count_of(lst: [text], item: text) -> i64:
+    var n = 0
+    for x in lst:
+        if x == item:
+            n = n + 1
+    n
+
+val USER_NONE_SRC = "enum Q:\n    None\n    Here(i64)\n\nfn u(x: Q?) -> i64:\n    match x:\n        case Some(v):\n            return 1\n        case None:\n            return 0\n\nfn main() -> i64:\n    val a: Q? = Q.None\n    u(a)\n"
+
+val SCALAR_OPTION_SRC = "fn u(x: i64?) -> i64:\n    match x:\n        case Some(v):\n            return v\n        case None:\n            return 0\n\nfn main() -> i64:\n    u(nil)\n"
+
+val NO_NONE_VARIANT_SRC = "enum R:\n    A\n    B(i64)\n\nfn u(x: R?) -> i64:\n    match x:\n        case Some(v):\n            return 1\n        case None:\n            return 0\n\nfn main() -> i64:\n    val r: R? = R.A\n    u(r)\n"
+
+describe "typed optional holding a user None: flat arms read by variant name":
+    it "lowers the flat match lane to rt_is_none_variant and stamps Q.None at construction":
+        val shape = lower_shape(USER_NONE_SRC)
+        expect(shape.errors).to_equal("")
+        expect(count_of(shape.callees, "rt_is_none_variant")).to_equal(1)
+        expect(count_of(shape.callees, "rt_is_some")).to_equal(0)
+        expect(count_of(shape.callees, "rt_enum_new_none")).to_equal(1)
+
+    it "emits the runtime-equivalent rt_is_none_variant for a scalar i64? subject":
+        # No stamp can exist on a scalar payload, so the predicate answers
+        # exactly like the old rt_is_some probe; only the emitted name changes.
+        val shape = lower_shape(SCALAR_OPTION_SRC)
+        expect(shape.errors).to_equal("")
+        expect(count_of(shape.callees, "rt_is_none_variant")).to_equal(1)
+        expect(count_of(shape.callees, "rt_enum_new_none")).to_equal(0)
+
+    it "keeps rt_enum_new for a user enum without a None variant":
+        val shape = lower_shape(NO_NONE_VARIANT_SRC)
+        expect(shape.errors).to_equal("")
+        expect(count_of(shape.callees, "rt_enum_new_none")).to_equal(0)

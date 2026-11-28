@@ -1,0 +1,103 @@
+# @req REQ-SSPEC-UNIT
+# @cover src/compiler/70.backend/backend/cranelift_codegen_adapter.spl
+#
+# Regression guard for doc/08_tracking/bug/
+# stage2_cranelift_direct_segv_nil_struct_fields_2026-08-24.
+#
+# build_signature read `sig.params` / `sig.return_type.kind` with no nil
+# guard; a compiler carrying a MirSignature whose fields read back nil at
+# runtime (the stage2 nil-struct-field defect) dereferenced address 0 and
+# SEGV'd — recorded as `mov 0x8(%rbx),%rax; and $~7,%rax; mov (%rax)` on
+# sig.return_type.
+#
+# Fix: build_signature fails closed — a nil signature, nil params, or nil
+# return_type panics with E-BACKEND-CRANELIFT-NIL-SIG before any deref, so
+# the worst observable outcome is the loud diagnostic on stderr, never a
+# SEGV.
+#
+# The doc's original reduction (`simple compile h2.spl --format=smf` on a
+# stage2 binary) cannot gate this on Windows: a fresh stage2 at the fixing
+# tip compiled h2.spl through build_signature without the nil data shape
+# firing, and the SMF packager then failed closed on the COFF object
+# ("SMF packaging needs ELF object code") because SMF is ELF-only. So this
+# spec forges the recorded runtime data shape directly — a MirSignature
+# whose params and return_type ARE nil — and calls build_signature on it.
+# Pre-fix that SEGVs the child (rc 139 / 0xC0000005); post-fix the child
+# prints the E-BACKEND-CRANELIFT-NIL-SIG diagnostic. The probe runs in a
+# child process via process_run_timeout, so a crash cannot kill the lane.
+#
+# Re-verification recipe (Git Bash, from the checkout root; probe caches stay
+# under build/p3cache/nilsegv for lane isolation):
+#
+#   1. Probe on the default binary (or any seed/full binary):
+#        bin/simple run build/p3cache/nilsegv/probe_nil_sig.spl --mode=jit
+#      expect: stderr carries
+#      `compile error: E-BACKEND-CRANELIFT-NIL-SIG: ...`, no crash
+#      (a copy of the probe source lives under build/p3cache/nilsegv/ on the
+#      fixing lane; the spec writes its own copy under build/test/).
+#
+#   2. Spec:
+#        bin/simple test \
+#          test/01_unit/compiler/70.backend/build_signature_nil_fields_fail_closed_spec.spl
+#      expect: 1 example, 0 failures.
+#
+#   3. Stage2 shape check (optional, expensive; needs a stage2 native-build
+#      of bootstrap_main, see doc/07_guide/compiler/
+#      stage2_cranelift_nil_struct_fields_reverification.md): on Windows the
+#      h2.spl smf probe fails closed at the COFF/ELF SMF gate (rc 1), never
+#      SEGV; on a Linux stage2 it must print the E-BACKEND-CRANELIFT-NIL-SIG
+#      diagnostic instead of rc 139 when the nil-field data shape fires.
+use std.spec.*
+use std.io_runtime.{env_get, process_run_timeout, file_exists, file_write,
+    dir_create_all, getpid, time_now_unix_micros}
+
+fn _probe_simple_bin() -> text:
+    # SIMPLE_BINARY wins when set: it names the binary under test, which may
+    # be newer than the checkout's bin/simple. Fall back to bin/simple, then
+    # to the env, then to a bare name.
+    val from_env = env_get("SIMPLE_BINARY") ?? ""
+    if from_env != "":
+        return from_env
+    if file_exists("bin/simple.exe"):
+        return "bin/simple.exe"
+    if file_exists("bin/simple"):
+        return "bin/simple"
+    "bin/simple"
+
+fn _write_probe() -> text:
+    # The forged-nil probe: a MirSignature whose params and return_type read
+    # back nil, exactly the runtime data shape in the bug record. A dict miss
+    # yields the nil fields with the fields' declared types.
+    val directory = "build/test/build_signature_nil_fields_{getpid()}_{time_now_unix_micros()}"
+    val _made = dir_create_all(directory)
+    val path = directory + "/probe_nil_sig.spl"
+    val _wrote = file_write(path,
+        "use compiler.backend.cranelift_codegen_adapter.build_signature\n" +
+        "use compiler.mir.mir_types.{MirSignature, MirType}\n" +
+        "\n" +
+        "fn main() -> i64:\n" +
+        "    val ty_dict: Dict<text, MirType> = {}\n" +
+        "    val nil_ty = ty_dict[\"missing\"]\n" +
+        "    val arr_dict: Dict<text, [MirType]> = {}\n" +
+        "    val nil_params = arr_dict[\"missing\"]\n" +
+        "    val sig = MirSignature(params: nil_params, return_type: nil_ty, is_variadic: false)\n" +
+        "    build_signature(sig, false)\n" +
+        "    print \"UNREACHABLE: build_signature accepted nil signature fields\"\n" +
+        "    0\n")
+    path
+
+describe "build_signature fails closed on nil signature fields":
+    it "reports the nil-signature diagnostic instead of SEGV on the JIT lane":
+        val bin = _probe_simple_bin()
+        val probe = _write_probe()
+        val (_out, err, rc) = process_run_timeout(bin,
+            ["run", probe, "--mode=jit"], 300000)
+        # Post-fix: fail-closed panic carrying E-BACKEND-CRANELIFT-NIL-SIG on
+        # stderr (the seed exits 127 with the diagnostic; other lanes may use
+        # exit 1). Pre-fix: the unguarded deref SEGVs the child (rc 139 on
+        # Git Bash, 0xC0000005 as a raw status). Anything without the
+        # diagnostic is the defect or a regression and must fail this example.
+        val clean = err.contains("E-BACKEND-CRANELIFT-NIL-SIG")
+        if not clean:
+            print "probe FAILED rc={rc}\n--- stderr (tail) ---\n{err}"
+        expect(clean).to_equal(true)

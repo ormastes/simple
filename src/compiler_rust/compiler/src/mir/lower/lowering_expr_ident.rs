@@ -1,7 +1,7 @@
 //! Identifier expression lowering: Local variable loads and Global variable/enum loads.
 
 use super::lowering_core::{MirLowerError, MirLowerResult, MirLowerer};
-use crate::hir::TypeId;
+use crate::hir::{HirExpr, HirExprKind, HirType, TypeId};
 use crate::mir::instructions::{MirInst, VReg};
 
 impl<'a> MirLowerer<'a> {
@@ -84,6 +84,18 @@ impl<'a> MirLowerer<'a> {
             // (e.g. Point.origin). Fall through to GlobalLoad below.
         }
 
+        // Implicit receiver field read: a bare field name inside a class
+        // method (`kind` meaning `self.kind`) arrives here as an unresolved
+        // `Global` — HIR lowering's lenient branch emits `Global(name)` typed
+        // ANY for it. The pure-Simple HIR lane resolves the same idiom to the
+        // receiver's field
+        // (doc/08_tracking/bug/implicit_self_field_read_unresolved_in_plain_fn_method_2026-09-03.md);
+        // mirror that here so the MIR lanes (JIT, LLVM, MIR interpreter)
+        // compile it instead of dying on an unresolved GlobalLoad.
+        if let Some(reg) = self.lower_implicit_receiver_field(&name)? {
+            return Ok(reg);
+        }
+
         // Regular global variable - load via GlobalLoad instruction
         let ty = expr_ty; // Use the expression's type
         self.with_func(|func, current_block| {
@@ -96,5 +108,71 @@ impl<'a> MirLowerer<'a> {
             });
             dest
         })
+    }
+
+    /// Lower a bare receiver field read (`kind` meaning `self.kind`) when the
+    /// current function is a class method whose receiver declares `name` as a
+    /// field. Returns `Ok(None)` whenever the situation does not apply (free
+    /// function, no receiver, unknown receiver type, or `name` is a known
+    /// global/function/import — those keep the `GlobalLoad` path).
+    ///
+    /// The read is delegated to the ordinary field-access lowering via a
+    /// synthetic, CONCRETELY typed `self.<field>` expression. Typing matters:
+    /// the unresolved `Global` arrives typed ANY, and ANY-typed operands take
+    /// runtime tag-dispatched paths (`rt_any_add`, boxed equality) that
+    /// misinterpret the raw field word. Re-typing the read to the field's
+    /// declared type reproduces exactly what an explicit `self.<field>`
+    /// spelling lowers to — the semantics the pure-Simple lane implements.
+    fn lower_implicit_receiver_field(&mut self, name: &str) -> MirLowerResult<Option<VReg>> {
+        // A name that positively resolves to a module-level symbol stays a
+        // global reference; only genuinely unresolved names fall through to
+        // the receiver field. Same guard population as the enum-variant
+        // sibling above, plus function-value globals and imported names.
+        if self.global_types.contains_key(name)
+            || self.available_functions.contains(name)
+            || self.function_value_globals.contains(name)
+            || self.imported_function_names.contains(name)
+        {
+            return Ok(None);
+        }
+        let Some(registry) = self.type_registry else {
+            return Ok(None);
+        };
+        // The receiver is param local 0 whenever HIR lowering put `self` in
+        // scope (explicit parser-injected parameter or the implicit one added
+        // for plain `fn` class methods).
+        let receiver = self.with_func(|func, _| {
+            let param = func.params.first()?;
+            (param.name == "self" || param.name == "me").then(|| (0_usize, param.ty))
+        })?;
+        let Some((receiver_index, receiver_ty)) = receiver else {
+            return Ok(None);
+        };
+        let mut ty = registry.get(receiver_ty);
+        if let Some(HirType::Pointer { inner, .. }) = ty {
+            // Classes are commonly pointer-wrapped at the MIR boundary;
+            // follow one layer exactly like TypeRegistry::get_type_name.
+            if *inner != receiver_ty {
+                ty = registry.get(*inner);
+            }
+        }
+        let Some(HirType::Struct { fields, .. }) = ty else {
+            return Ok(None);
+        };
+        let Some(field_index) = fields.iter().position(|(field, _)| field == name) else {
+            return Ok(None);
+        };
+        let field_type = fields[field_index].1;
+        let synthetic = HirExpr {
+            kind: HirExprKind::FieldAccess {
+                receiver: Box::new(HirExpr {
+                    kind: HirExprKind::Local(receiver_index),
+                    ty: receiver_ty,
+                }),
+                field_index,
+            },
+            ty: field_type,
+        };
+        self.lower_expr(&synthetic).map(Some)
     }
 }

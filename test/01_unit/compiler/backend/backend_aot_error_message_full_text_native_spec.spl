@@ -1,0 +1,136 @@
+# Regression fence for
+# stage2_aot_error_message_lost_invalid_heap_2026-09-06.
+#
+# A forced AOT object-stage failure must reach the operator as the FULL backend
+# diagnostic text -- the unit name, the "AOT compile error in <unit>: ..."
+# wrapper, and the real reason (here: the object tool rejecting an admitted
+# CPU) -- on every lane. The 2026-09-06 stage-2 binary instead reported
+# `reason: AOT compile error in <unit>: <invalid-heap:0x...>`: the Err payload
+# text handle was destroyed crossing compiled frames, so the summary named a
+# misdecoded tagged word and the real reason was unrecoverable from the build
+# output. This spec forces that exact failure shape through the real
+# native-build pipeline and fails if the output shows a misdecoded word, an
+# empty "(none recorded ...)" reason, or loses the reason text.
+#
+# Drive it with a seed/self-hosted binary via SIMPLE_BINARY, like the sibling
+# while_block/bool_param specs:
+#   SIMPLE_BINARY=<repo>/build/p3cache/<lane>/cargo-target/<triple>/release/simple.exe \
+#     <that same binary> test \
+#     test/01_unit/compiler/backend/backend_aot_error_message_full_text_native_spec.spl
+# Run from the repository root: the fixture is admitted by repo-relative path.
+#
+# GREEN: current tree -- the message prints in full (raising site, ICE
+# receipt, [native-compile-failed] line, and end-of-build summary all carry
+# the real text; verified 2026-11-28 on a scratch x86_64-pc-windows-gnullvm
+# seed build).
+# RED: a binary whose AOT Err payload does not survive the crossing (the
+# 2026-09-06 stage-2 evidence) -- the `<invalid-heap:` marker appears and the
+# bogus-CPU reason text is absent. Stage-2 candidates must run this spec as
+# part of re-verification (see
+# doc/07_guide/compiler/stage2_aot_error_message_reverification.md).
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.io_runtime.{file_exists, env_get, env_set_process, env_remove_process, dir_create}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+use app.io.process_ops.{process_run_timeout}
+
+# Distinctive and guaranteed-invalid CPU name: the object tool (clang/llc)
+# rejects it with "unknown target CPU '<name>'", a REAL backend diagnostic
+# that must survive to the operator. A generic name risks colliding with a
+# future CPU table entry.
+val BOGUS_CPU = "simple-aotmsg-spec-bogus-cpu"
+val FIXTURE = "test/04_smoke/bootstrap_hello_world.spl"
+val UNIT_NAME = "test.04_smoke.bootstrap_hello_world"
+
+fn binary() -> text:
+    val env_bin = env_get("SIMPLE_BINARY") ?? ""
+    if env_bin != "": return env_bin
+    if file_exists("bin/simple.exe"): "bin/simple.exe" else: "bin/simple"
+
+fn forced_aot_failure_output() -> (text, text, i64):
+    # Bound outside the interpolations below: a nested quoted literal inside
+    # an f-string interpolation is mis-parsed (fstring_nested_quoted_literal_
+    # in_interpolation_misparsed_2026-08-17.md).
+    val scratch = get_temp_dir().replace("\\", "/")
+    val work = scratch + "/simple-aot-error-message-spec"
+    val _d = dir_create(work, true)
+    val tool = binary()
+    # Three environment contracts make the child deterministic, all restored
+    # afterwards:
+    # 1. SIMPLE_BINARY steers native-build's producer binding onto the
+    #    bootstrap route (compiling the compiler/runtime closure instead of
+    #    the fixture's single unit). It must be ABSENT for the child --
+    #    set-but-empty routes differently from unset (env unset-vs-empty
+    #    contract). The child is invoked by absolute path; it does not need
+    #    the variable.
+    # 2. The test runner executes specs on the interpreter, and its
+    #    SIMPLE_EXECUTION_MODE leaks to children: native-build then routes
+    #    through a worker subprocess with a different summary shape. The
+    #    record is about a COMPILED lane, so pin the child to the jit lane
+    #    explicitly (same class as the stage-2 binary under test).
+    # 3. The test runner collects MC/DC coverage for the spec run, and its
+    #    SIMPLE_MCDC_* settings leak to children: entry-closure builds then
+    #    inject the probe runtime modules (selected=11 instead of the
+    #    fixture's single unit) and the MIR shard lane dies before the
+    #    outcome summary. The record's lane is the ordinary build, so the
+    #    MC/DC knobs are removed for the child and restored afterwards.
+    val prior_bin = env_get("SIMPLE_BINARY") ?? ""
+    if prior_bin != "":
+        val _pb = env_remove_process("SIMPLE_BINARY")
+    val prior_mode = env_get("SIMPLE_EXECUTION_MODE") ?? ""
+    val _pm = env_set_process("SIMPLE_EXECUTION_MODE", "jit")
+    val prior_mcdc_mode = env_get("SIMPLE_MCDC_MODE") ?? ""
+    if prior_mcdc_mode != "":
+        val _mm = env_remove_process("SIMPLE_MCDC_MODE")
+    val prior_mcdc_inc = env_get("SIMPLE_MCDC_INCLUDE") ?? ""
+    if prior_mcdc_inc != "":
+        val _mi = env_remove_process("SIMPLE_MCDC_INCLUDE")
+    val prior_mcdc_exc = env_get("SIMPLE_MCDC_EXCLUDE") ?? ""
+    if prior_mcdc_exc != "":
+        val _me = env_remove_process("SIMPLE_MCDC_EXCLUDE")
+    val _e = env_set_process("SIMPLE_NATIVE_CPU", BOGUS_CPU)
+    val (out, err, rc) = process_run_timeout(tool, [
+        "native-build", "--backend", "llvm",
+        "--runtime-bundle", "core-c-bootstrap",
+        "--entry-closure", "--mode", "one-binary",
+        "--threads", "1",
+        "--cache-dir", "{work}/cache",
+        "--entry", FIXTURE,
+        "--output", "{work}/hw.exe"], 1800000)
+    val _r = env_set_process("SIMPLE_NATIVE_CPU", "")
+    if prior_mcdc_exc != "":
+        val _me = env_set_process("SIMPLE_MCDC_EXCLUDE", prior_mcdc_exc)
+    if prior_mcdc_inc != "":
+        val _mi = env_set_process("SIMPLE_MCDC_INCLUDE", prior_mcdc_inc)
+    if prior_mcdc_mode != "":
+        val _mm = env_set_process("SIMPLE_MCDC_MODE", prior_mcdc_mode)
+    if prior_mode != "":
+        val _rm = env_set_process("SIMPLE_EXECUTION_MODE", prior_mode)
+    else:
+        val _rm = env_remove_process("SIMPLE_EXECUTION_MODE")
+    if prior_bin != "":
+        val _rb = env_set_process("SIMPLE_BINARY", prior_bin)
+    (out, err, rc)
+
+describe "AOT compile error message reaches the operator in full":
+    it "forces an object-stage failure and keeps the real reason text":
+        step("force the backend object stage to reject the admitted CPU")
+        val (out, err, rc) = forced_aot_failure_output()
+        val combined = out + "\n" + err
+        expect(rc != 0).to_equal(true)
+
+        step("the failure is attributed to the unit through the AOT wrapper")
+        expect(combined.contains("AOT compile error in {UNIT_NAME}")).to_equal(true)
+
+        step("the reason carries the real backend diagnostic, payload intact")
+        expect(combined.contains(BOGUS_CPU)).to_equal(true)
+        expect(combined.contains("llc ")).to_equal(true)
+
+        step("the payload is never a misdecoded tagged word or an empty reason")
+        expect(combined.contains("<invalid-heap:")).to_equal(false)
+        expect(combined.contains("(none recorded")).to_equal(false)
+        expect(combined.contains("diagnostic lost crossing")).to_equal(false)
+
+        step("the end-of-build summary records a non-empty reason line")
+        expect(combined.contains("reason:")).to_equal(true)

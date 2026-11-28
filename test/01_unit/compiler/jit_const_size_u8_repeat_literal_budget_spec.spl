@@ -1,0 +1,109 @@
+# Regression spec for
+# doc/08_tracking/bug/jit_const_size_u8_repeat_literal_blowup_2026-11-27.md
+#
+# The bug: `var out: [u8] = [0u8; 16777216]` (literal constant size) in `main`
+# never finished seed JIT compilation on the reported lane -- >600 s wall, ~16
+# GB RSS. The seed HIR lowering expanded any constant-size `[value; N]` u8
+# repeat into an N-element array literal (the `large_scalar_fill` guard that
+# keeps i8..f64 repeats as a runtime fill deliberately excluded u8), so N
+# elements went through HIR construction one by one; the older seed then also
+# fed the literal element-by-element to Cranelift. A runtime-computed count
+# (`val n = ...; [0u8; n]`) was already fast because it lowers to the runtime
+# `ArrayRepeat` fill. The fix lets a large pure-scalar constant-size u8 repeat
+# stay a runtime `ArrayRepeat` too; the seed MIR lowers that through the
+# byte-packed bulk path (`rt_byte_array_new_len` + `rt_array_fill_span`, fill
+# skipped for a zero value), so compilation is O(1) in N.
+#
+# Measured on this lane's scratch build (2026-11-28, shared Windows box,
+# SIMPLE_EXECUTION_MODE=jit, child-tree peak RSS):
+#   [0u8; 16777216]  unpatched: 2-11 s, 0.7-3.5 GB RSS; patched: 2-4 s, flat
+#   [0u8; 67108864]  unpatched: 26-61 s, 14.2 GB RSS; patched: 3 s, flat
+# (The doc's older seed tipped >600 s at 16M because it additionally lowered
+# the expanded literal element-by-element through Cranelift; this tree has a
+# MIR literal-collapse mitigation, so the remaining unpatched cost is the O(N)
+# HIR expansion -- still linear in N, which the 64M case exposes inside a
+# 15 s budget.)
+#
+# This spec runs four fixtures through the selected binary's JIT lane with
+# bounded budgets and asserts exact stdout (element values must be identical
+# to the unrolled-literal behavior):
+#   * `[0u8; 16777216]` -- the doc repro: must compile and run with correct
+#     values far inside the budget (60 s vs the doc's >600 s failure);
+#   * `[0u8; 67108864]` -- scaling guard: O(1) fill finishes in ~3 s; any
+#     per-element lowering path blows the 15 s budget;
+#   * `[7u8; 1000000]` -- non-zero fill, exercises `rt_array_fill_span`;
+#   * `[0u8; 8]` -- small count still takes the literal path; a mutation
+#     proves the array is an independent value.
+#
+# Requires SIMPLE_BINARY to select the binary under test (defaults to
+# bin/simple).
+
+use std.spec.*
+use std.io_runtime.{env_get_opt, env_set, env_remove_process, file_write, dir_create_all}
+use app.io.process_ops.{process_run_timeout}
+
+val DOC_REPRO_BUDGET_MS: i64 = 60000
+val SCALING_BUDGET_MS: i64 = 15000
+val VARIANT_BUDGET_MS: i64 = 60000
+
+fn work_dir() -> text:
+    val configured = env_get_opt("TMPDIR") ?? ""
+    val root = if configured != "": configured else: "/tmp"
+    val dir = root + "/simple-spec-jit-u8-repeat-budget"
+    dir_create_all(dir)
+    dir
+
+fn simple_binary() -> text:
+    val configured = env_get_opt("SIMPLE_BINARY") ?? ""
+    if configured != "":
+        return configured
+    "bin/simple"
+
+fn run_jit(name: text, source: text, expected: text, budget_ms: i64):
+    step("Run " + name + " through the selected binary's JIT lane inside a bounded budget")
+    val path = work_dir() + "/" + name + ".spl"
+    expect(file_write(path, source)).to_equal(true)
+    val old_mode = env_get_opt("SIMPLE_EXECUTION_MODE")
+    env_set("SIMPLE_EXECUTION_MODE", "jit")
+    val run = process_run_timeout(simple_binary(), ["run", path], budget_ms)
+    if old_mode == nil:
+        env_remove_process("SIMPLE_EXECUTION_MODE")
+    else:
+        env_set("SIMPLE_EXECUTION_MODE", old_mode!)
+    expect(run.2).to_equal(0)
+    expect(run.0.replace("\r\n", "\n").trim()).to_equal(expected)
+
+describe "constant-size u8 array repeat compiles within budget on the JIT lane":
+    it "compiles [0u8; 16777216] within budget and every sampled element is zero":
+        run_jit("u8_repeat_16m", "fn main() -> i64:\n    var out: [u8] = [0u8; 16777216]\n    print \"len={{out.len()}} first={{out[0]}} mid={{out[8388608]}} last={{out[16777215]}}\"\n    0\n", "len=16777216 first=0 mid=0 last=0", DOC_REPRO_BUDGET_MS)
+
+    it "compiles [0u8; 67108864] inside the scaling budget (per-element lowering would blow it)":
+        run_jit("u8_repeat_64m", "fn main() -> i64:\n    var out: [u8] = [0u8; 67108864]\n    print \"len={{out.len()}} first={{out[0]}} mid={{out[33554432]}} last={{out[67108863]}}\"\n    0\n", "len=67108864 first=0 mid=0 last=0", SCALING_BUDGET_MS)
+
+    it "fills a non-zero constant repeat through the bulk span fill":
+        run_jit("u8_repeat_fill_7", "fn main() -> i64:\n    var out: [u8] = [7u8; 1000000]\n    print \"len={{out.len()}} first={{out[0]}} mid={{out[500000]}} last={{out[999999]}}\"\n    0\n", "len=1000000 first=7 mid=7 last=7", VARIANT_BUDGET_MS)
+
+    it "keeps the small-count literal path correct and independently owned":
+        run_jit("u8_repeat_small", "fn main() -> i64:\n    var out: [u8] = [0u8; 8]\n    out[3] = 9\n    print \"len={{out.len()}} third={{out[3]}} last={{out[7]}}\"\n    0\n", "len=8 third=9 last=0", VARIANT_BUDGET_MS)
+
+# Re-verification recipe (Windows scratch build, from the repo root, per the
+# bug doc's lane):
+#   cd src/compiler_rust
+#   CC="$HOME/.simple/toolchains/llvm-mingw-20260922-ucrt-x86_64/bin/clang.exe" \
+#     CARGO_TARGET_DIR="$PWD/../build/p3cache/u8repeat/cargo-target" \
+#     TMPDIR="$PWD/../build/p3cache/u8repeat/tmp" \
+#     SIMPLE_HIR_CACHE_DIR="$PWD/../build/p3cache/u8repeat/hir-cache" \
+#     cargo build --release -p simple-driver
+#   # RED on an unpatched tree (the 64M case exceeds its 15 s budget after
+#   # 26-61 s and multi-GB RSS), GREEN on the patched tree (binary is
+#   # cargo-target/release/simple.exe; invoke the runner directly):
+#   cd <repo root>
+#   SIMPLE_BINARY=build/p3cache/u8repeat/cargo-target/release/simple.exe \
+#     build/p3cache/u8repeat/cargo-target/release/simple.exe run \
+#     src/app/test_runner_new/main.spl \
+#     test/01_unit/compiler/jit_const_size_u8_repeat_literal_budget_spec.spl
+# Quick manual probe without the spec runner:
+#   SIMPLE_EXECUTION_MODE=jit \
+#     build/p3cache/u8repeat/cargo-target/release/simple.exe run \
+#     build/p3cache/u8repeat/probe/repro_16m.spl
+#   # patched: prints "len=16777216 first=0 mid=0 last=0" in seconds.

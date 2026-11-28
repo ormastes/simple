@@ -584,7 +584,16 @@ impl<'a> MirLowerer<'a> {
         // accidentally-correct `1` into wrongly-boxed `8`. Both sides now land
         // together: this box here, plus the `.get()` route through
         // `lower_index_expr` in `lowering_expr_method.rs` (search
-        // `receiver_is_dict`). Float/bool VALUE boxing remains a follow-up.
+        // `receiver_is_dict`).
+        //
+        // FLOAT values take the same lossless box as array/tuple elements.
+        // A raw f64 bit-pattern whose low 3 bits alias TAG_FLOAT (0b010) was
+        // read back by `UnboxFloat` -> `rt_value_as_float` as a legacy inline
+        // float, shifting the payload and zeroing the low 3 mantissa bits
+        // (`{"k": 0.1}` read as 0.09999999999999998,
+        // seed_jit_dict_f64_literal_value_read_loses_low_mantissa_bits_2026-11-27).
+        // Bool VALUE tagging remains a follow-up (the raw 0/1 word currently
+        // round-trips through the integer readers).
         for (key_expr, value_expr) in pairs {
             let key_reg = self.lower_expr(key_expr)?;
             // Boolean keys must match tagged membership/index reads. Preserve
@@ -595,7 +604,19 @@ impl<'a> MirLowerer<'a> {
                 self.box_int_operand(key_reg, key_expr.ty)?
             };
             let value_reg = self.lower_expr(value_expr)?;
-            let value_reg = self.box_int_operand(value_reg, value_expr.ty)?;
+            let value_reg = if matches!(value_expr.ty, TypeId::F32 | TypeId::F64) {
+                self.with_func(|func, current_block| {
+                    let boxed = func.new_vreg();
+                    let block = func.block_mut(current_block).unwrap();
+                    block.instructions.push(MirInst::BoxFloat {
+                        dest: boxed,
+                        value: value_reg,
+                    });
+                    boxed
+                })?
+            } else {
+                self.box_int_operand(value_reg, value_expr.ty)?
+            };
             let insert_target = CallTarget::from_name("rt_dict_set");
             self.with_func(|func, current_block| {
                 let block = func.block_mut(current_block).unwrap();

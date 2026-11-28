@@ -980,7 +980,6 @@ impl<'a> Parser<'a> {
                     // while `Type.new(args)` passed (args) and every argument arrived one
                     // register late (FlatPoolReader.new(blob) -> 0xC0000005 on every
                     // frontend-cache hit in the stage-2 CLI, bootstrap42, 2026-09-25).
-                    // Methods whose first param is not `self` or `me` are implicitly static.
                     if !is_static {
                         let has_self_param =
                             !f.params.is_empty() && (f.params[0].name == "self" || f.params[0].name == "me");
@@ -999,9 +998,34 @@ impl<'a> Parser<'a> {
                                 call_site_label: None,
                             };
                             f.params.insert(0, self_param);
-                        } else {
-                            // No self/me param and not a `me` method — treat as static
+                        } else if trait_impl_parsing::is_constructor_name(&f.name) {
+                            // Constructor-named factories (`new`/`create`/`default`/
+                            // `from_*`) without an explicit receiver stay static — the
+                            // pure-Simple frontend rule
+                            // (parser_decls_use.spl `method_name_is_implicitly_static`)
+                            // and the FlatPoolReader calling-convention fix above.
                             f.is_static = true;
+                        } else {
+                            // Plain `fn` method: an instance method with an implicit
+                            // immutable receiver, exactly like the pure-Simple
+                            // frontend (which synthesizes `self` for every
+                            // non-constructor class-body method). The bare
+                            // receiver-field read (`kind` for `self.kind`) needs
+                            // this receiver to exist; without it the read lowers
+                            // to an unresolved Global and every compiled lane
+                            // fails. See doc/08_tracking/bug/
+                            // implicit_self_field_read_unresolved_in_plain_fn_method_2026-09-03.md
+                            let self_param = Parameter {
+                                span: f.span,
+                                name: "self".to_string(),
+                                ty: None,
+                                default: None,
+                                mutability: Mutability::Immutable,
+                                inject: false,
+                                variadic: false,
+                                call_site_label: None,
+                            };
+                            f.params.insert(0, self_param);
                         }
                     }
                     methods.push(f);

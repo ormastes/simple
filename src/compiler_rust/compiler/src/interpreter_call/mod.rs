@@ -649,6 +649,84 @@ fn is_current_module_candidate(func: &Arc<FunctionDef>) -> bool {
     }
 }
 
+/// A discriminating class-argument position where every arity-compatible
+/// candidate declares a typed parameter that rejects the value. Returns the
+/// demangled class name only when the mismatch is provable at runtime: the
+/// value carries a concrete class identity (an aggregate class, never an
+/// erased/untyped value) and no fallback dispatch could legitimately accept
+/// it. The per-candidate comparison mirrors `overload_score`'s owner-scoped
+/// walk, so a candidate can never disagree with the score that rejected it.
+/// Bug: interpreter_wrong_owner_arg_overload_fallthrough_2026_11_27.
+fn provable_class_rejection(candidates: &[Arc<FunctionDef>], values: &[Value]) -> Option<String> {
+    let owner_exact = crate::interpreter::renamed_classes_present()
+        && values.iter().any(|value| {
+            value
+                .aggregate_class()
+                .is_some_and(|class| class.starts_with(crate::interpreter::FLATTEN_OWNER_SYMBOL_PREFIX))
+        });
+    let arity_ok = |func: &FunctionDef| {
+        let required = func.params.iter().filter(|p| p.default.is_none()).count();
+        (required..=func.params.len()).contains(&values.len())
+    };
+    for (index, value) in values.iter().enumerate() {
+        let Some(class_name) = value.aggregate_class() else {
+            continue;
+        };
+        let mut saw_typed = false;
+        let mut accepted = false;
+        for func in candidates {
+            if !arity_ok(func) {
+                continue;
+            }
+            let Some(param) = func.params.get(index) else {
+                continue;
+            };
+            let Some(ty) = &param.ty else {
+                // An untyped parameter accepts every value; this position
+                // cannot prove a mismatch.
+                accepted = true;
+                break;
+            };
+            saw_typed = true;
+            let owner = self::core::function_exec::function_module_owner(func);
+            let matched = if owner_exact {
+                crate::interpreter::with_exec_owner(owner, || value_matches_type(value, ty))
+            } else {
+                value_matches_type(value, ty)
+            };
+            if matched {
+                accepted = true;
+                break;
+            }
+        }
+        if saw_typed && !accepted {
+            return Some(crate::interpreter::flatten_owner_source_name(class_name).to_string());
+        }
+    }
+    None
+}
+
+/// Error for a call whose discriminating class-typed argument no
+/// arity-compatible overload accepts. Owner decision 2026-11-09 (no
+/// last-definition fallback): the lowering lanes report the analogous
+/// `AmbiguousCallable` at HIR time; this is the interpreter's counterpart.
+/// The candidate count is deliberately omitted: the registered overload set
+/// holds both a definition and its mangled `$dupN` twin, so a raw count
+/// disagrees with the "N co-compiled definitions" collision warning.
+fn no_matching_overload_error(name: &str, rejected_class: &str) -> CompileError {
+    let ctx = ErrorContext::new()
+        .with_code(codes::TYPE_MISMATCH)
+        .with_help(
+            "the argument's class is not the one any overload's parameter declares \
+             (another module's same-named class is a different type); pass an argument \
+             the overload accepts, or import the intended definition selectively",
+        );
+    CompileError::semantic_with_context(
+        format!("ambiguous call to `{name}`: argument of class `{rejected_class}` selects none of the overloads"),
+        ctx,
+    )
+}
+
 fn select_overload(candidates: &[Arc<FunctionDef>], values: &[Value]) -> Option<Arc<FunctionDef>> {
     let mut best: Option<(usize, Arc<FunctionDef>)> = None;
     for func in candidates {
@@ -1081,14 +1159,28 @@ fn evaluate_identifier_user_call(
             // When no candidate scores (untyped/erased argument values), the
             // flat map below is last-registration-wins across modules; the
             // calling module's own definition is what native lowering binds.
+            // A class-typed argument rejected by every arity-compatible
+            // candidate is a provable mismatch, not an erased/untyped value:
+            // suppress the arity-only fallback below and report a type error
+            // instead of letting the Priority-5 flat map (last registration,
+            // no scoring) run some overload. Owner decision 2026-11-09 (no
+            // last-definition fallback); interpreter lane of
+            // interpreter_wrong_owner_arg_overload_fallthrough_2026_11_27.
+            let rejected_class = provable_class_rejection(&overloads, &evaluated_args);
             let selected = select_overload(&own, &evaluated_args)
                 .or_else(|| select_overload(&overloads, &evaluated_args))
                 .or_else(|| {
+                    if rejected_class.is_some() {
+                        return None;
+                    }
                     candidate_declared_by(&caller, name, functions).filter(|own| {
                         let required = own.params.iter().filter(|p| p.default.is_none()).count();
                         (required..=own.params.len()).contains(&evaluated_args.len())
                     })
                 });
+            if let Some(rejected_class) = rejected_class {
+                return Err(no_matching_overload_error(name, &rejected_class));
+            }
             if let Some(func) = selected {
                 gate_private_call(name, &func)?;
                 if debug_dupdispatch() {

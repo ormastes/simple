@@ -742,6 +742,7 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     RuntimeFuncSpec::new("rt_opt_i64_to_string", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_i64_to_hex", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_opt_value_to_string", &[I64], &[I64]),
+    RuntimeFuncSpec::new("rt_opt_f64_value_to_string", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_opt_bool_to_string", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_opt_f64_to_string", &[I64], &[I64]),
     RuntimeFuncSpec::new("rt_value_to_string", &[I64], &[I64]),

@@ -304,6 +304,24 @@ impl Lowerer {
         let proven_nonescaping = resolved_callee_symbol
             .is_some_and(|symbol| self.proven_nonescaping_functions.contains(symbol))
             && !self.is_reference_type(ret_ty);
+        // Foreign-callee out-param borrows live only for the call itself (bug
+        // sffi_out_param_capability_violation_blocks_stage2_2026-08-27): a
+        // `&mut` argument handed to an `extern fn` out-slot must not stay in
+        // the capability env after the call, or the canonical retry/fallback
+        // idiom — sequential disjoint re-borrows of the same local at later
+        // extern calls — is rejected with "Aliasing violation: reference N
+        // already has Exclusive capability". The snapshot wraps argument
+        // lowering only: borrows acquired before the call remain active, and
+        // two `&mut` of the same local inside ONE call's argument list still
+        // conflict.
+        let extern_callee_capability_checkpoint = if resolved_callee_symbol
+            .is_some_and(|symbol| self.extern_fn_names.contains(symbol))
+            || matches!(callee, Expr::Identifier(name) if self.extern_fn_names.contains(name))
+        {
+            Some(self.capability_env.clone())
+        } else {
+            None
+        };
         // A lambda passed positionally to a fn-typed parameter takes that
         // parameter's declared callback param types. Without this, a
         // placeholder lambda (`apply(_1 + 1, 4)`) defaulted its params to ANY
@@ -359,6 +377,9 @@ impl Lowerer {
         } else {
             self.lower_call_args(args, ctx)?
         };
+        if let Some(checkpoint) = extern_callee_capability_checkpoint {
+            self.capability_env = checkpoint;
+        }
 
         // BOOL-ARG STATIC ADMISSION (doc/08_tracking/bug/bool_typed_parameter_accepts_non_bool_and_jit_corrupts_it_2026-08-04):
         // lowering-side mirror of the interpreter pre-scan in `bind_args`: a

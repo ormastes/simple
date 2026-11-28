@@ -1,0 +1,54 @@
+#!/bin/sh
+# Pin for x86_bootstrap_rust_authority_tuple_recompilation_cost_2026-08-22
+# (warm-reuse half): driver/build.rs must only emit
+# `cargo:rerun-if-changed=<test root>` for roots that exist. Cargo cannot
+# stably fingerprint a missing rerun-if-changed path, so watching the dead
+# legacy root test/unit/lib/std left the driver (seed bin) dirty on EVERY
+# authority invocation, warm or cold — recompiling and thin-LTO relinking the
+# most expensive unit in the tuple each time. Text contract on the real
+# build.rs (brace-depth check that the root watch sits inside the
+# `test_root.exists()` gate); no compiler.
+set -eu
+ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd -P)
+BUILD_RS=$ROOT/src/compiler_rust/driver/build.rs
+[ -f "$BUILD_RS" ] || { echo "FAIL: missing $BUILD_RS" >&2; exit 1; }
+
+python3 - "$BUILD_RS" <<'PY'
+import sys
+
+src = open(sys.argv[1], encoding="utf-8").read()
+marker = "fn generate_test_file"
+assert marker in src, "generate_test_file not found"
+start = src.index(marker)
+end = src.index("/// Convert a file path to a valid Rust test function name.")
+body = src[start:end]
+
+watch = 'println!("cargo:rerun-if-changed={}", test_root.display());'
+assert watch in body, "root rerun-if-changed emission not found"
+watch_at = body.index(watch)
+
+# The root-level watch must be inside an `if test_root.exists()` gate: scan
+# for the gate, then check its block is still open at the watch line.
+gate_open = None
+pos = 0
+for line in body.splitlines(keepends=True):
+    if "if test_root.exists()" in line and gate_open is None:
+        gate_open = pos + line.index("{")
+    pos += len(line)
+assert gate_open is not None, "no test_root.exists() gate in generate_test_file"
+assert gate_open < watch_at, "root watch emitted before any existence gate"
+
+depth = 0
+for ch in body[gate_open:watch_at]:
+    if ch == "{":
+        depth += 1
+    elif ch == "}":
+        depth -= 1
+    assert depth > 0, "root watch is not inside the test_root.exists() gate"
+
+# The .spl-file walk must sit behind the same gate (it is the block's tail).
+assert "WalkDir::new(test_root)" in body[gate_open:], ".spl walk missing after the gate"
+print("gate check ok")
+PY
+
+echo 'STATUS: PASS driver watch-root gate'

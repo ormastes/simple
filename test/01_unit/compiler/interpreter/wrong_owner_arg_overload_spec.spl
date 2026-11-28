@@ -1,0 +1,65 @@
+# Purpose and audience: compiler engineers who own cross-module overload
+# resolution in the interpreter.
+# @req REQ-SSPEC-UNIT
+# Tracks: interpreter_wrong_owner_arg_overload_fallthrough_2026_11_27
+#
+# Re-verification recipe (after touching the seed interpreter's overload
+# path in src/compiler_rust/compiler/src/interpreter_call/mod.rs):
+#   1. Scratch-build the seed driver (does NOT touch build/p3cache/fresh-seed):
+#        cd src/compiler_rust && CC="$HOME/.simple/toolchains/llvm-mingw-20260922-ucrt-x86_64/bin/clang.exe" \
+#          CARGO_TARGET_DIR=$PWD/../build/p3cache/owneroverload/cargo-target \
+#          cargo build --release -p simple-driver
+#   2. RED probe against the pristine seed (must print wrongowner=11, exit 0 —
+#      the bug); GREEN probe against the scratch build (must print
+#      "ambiguous call to `show`", exit 1):
+#        SIMPLE_EXECUTION_MODE=interpret <binary> run \
+#          test/fixtures/same_name_class/body/main_overload_neg.spl
+#   3. This spec, with SIMPLE_BIN pointed at the scratch build:
+#        SIMPLE_BIN=<scratch-simple> <scratch-simple> test \
+#          test/01_unit/compiler/interpreter/wrong_owner_arg_overload_spec.spl \
+#          --mode=interpret
+#      Expect 3/3. Isolation: SIMPLE_HIR_CACHE_DIR/TMPDIR under
+#      build/p3cache/owneroverload.
+"""
+# Wrong-owner class argument to an overloaded class-typed parameter
+
+`qb` declares `fn show(n: i64)` beside `fn show(t: Thing)`; `qc` declares a
+same-named `class Thing`. Passing a `qc` Thing to `qb`'s overloaded `show`
+selects no overload: owner decision 2026-11-09 (no last-definition fallback)
+makes that a type error, not a silent arity-only dispatch to some overload.
+"""
+use std.spec.step
+
+use std.spipe.*
+use std.io.{process_run, env_get}
+use test.fixtures.same_name_class.body.qb.{qb_show}
+
+fn simple_binary() -> text:
+    val configured = env_get("SIMPLE_BIN") ?? ""
+    if configured.len() > 0:
+        return configured
+    "bin/simple"
+
+fn run_fixture(mode: text, fixture: text) -> (text, i64):
+    val command = "SIMPLE_EXECUTION_MODE=" + mode + " " + simple_binary() + " run test/fixtures/same_name_class/body/" + fixture
+    val (stdout, stderr, code) = process_run("/bin/sh", ["-c", command])
+    (stdout + stderr, code)
+
+describe "wrong-owner class argument to an overloaded class-typed parameter":
+    it "still scores the caller's own right-owner overload in the test lane":
+        step("still scores the caller's own right-owner overload in the test lane")
+        expect(qb_show()).to_equal(1122)
+
+    it "reports a type error under the interpreter lane":
+        step("reports a type error under the interpreter lane")
+        val (out, code) = run_fixture("interpret", "main_overload_neg.spl")
+        expect(out.contains("wrongowner=11")).to_equal(false)
+        expect(out.contains("selects none of the")).to_equal(true)
+        expect(code == 0).to_equal(false)
+
+    it "reports a type error under the jit lane after demotion to the interpreter":
+        step("reports a type error under the jit lane after demotion to the interpreter")
+        val (out, code) = run_fixture("jit", "main_overload_neg.spl")
+        expect(out.contains("wrongowner=11")).to_equal(false)
+        expect(out.contains("selects none of the")).to_equal(true)
+        expect(code == 0).to_equal(false)

@@ -153,6 +153,7 @@ impl Lowerer {
                 ty => ty,
             };
 
+
             // Try to evaluate count as a compile-time constant
             let size = match count {
                 Expr::Integer(n) => Some(*n as usize),
@@ -161,22 +162,28 @@ impl Lowerer {
 
             let arr_ty = self.module.types.register(HirType::Array { element: elem_ty, size });
 
-            // A large repeat of a pure scalar stays a runtime `rt_array_repeat`
-            // fill instead of being unrolled: `[_KERN_EMPTY; 72200]` (a module
-            // global in font_renderer) became a 72,200-element literal -- 144k MIR
+            // A large repeat of a pure scalar stays a runtime fill instead of
+            // being unrolled: `[_KERN_EMPTY; 72200]` (a module global in
+            // font_renderer) became a 72,200-element literal -- 144k MIR
             // instructions that Cranelift spent ~20 minutes compiling (2026-10-05).
-            // Restricted to scalar element types (a fill shares ONE value, so a
-            // heap value would alias) and to side-effect-free value expressions
-            // (unrolling evaluates the value per element). `u8` keeps its existing
-            // literal path (byte-packed arrays are owned by a separate change), and
-            // so does `u64`: a full-width u64 fill reads back wrong through
-            // `rt_array_repeat` (`[u64::MAX; 300][0] == u64::MAX` was false while
-            // the unrolled literal is true -- the interpreter also answers false,
-            // a pre-existing divergence recorded in the bug doc).
+            // The same unrolling made `[0u8; 16777216]` uncompileable seed-JIT
+            // input (>600 s, 16 GB RSS; bug
+            // jit_const_size_u8_repeat_literal_blowup_2026-11-27) -- `u8` now
+            // stays a runtime fill too, lowered seed-side through the byte-packed
+            // bulk path (`rt_byte_array_new_len` plus `rt_array_fill_span`, with
+            // the fill skipped for a zero value). Restricted to scalar element
+            // types (a fill shares ONE value, so a heap value would alias) and to
+            // side-effect-free value expressions (unrolling evaluates the value
+            // per element). `u64` keeps its literal path: a full-width u64 fill
+            // reads back wrong through `rt_array_repeat` (`[u64::MAX; 300][0] ==
+            // u64::MAX` was false while the unrolled literal is true -- the
+            // interpreter also answers false, a pre-existing divergence recorded
+            // in the bug doc).
             let large_scalar_fill = size.is_some_and(|n| n >= Self::ARRAY_REPEAT_UNROLL_LIMIT)
                 && matches!(
                     elem_ty,
-                    TypeId::I8
+                    TypeId::U8
+                        | TypeId::I8
                         | TypeId::I16
                         | TypeId::I32
                         | TypeId::I64

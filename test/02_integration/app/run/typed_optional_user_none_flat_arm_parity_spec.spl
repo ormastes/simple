@@ -1,0 +1,105 @@
+# @manual: primary
+"""
+## Purpose and audience
+Engine-parity regression for
+`doc/08_tracking/bug/db/seed_jit_typed_optional_holding_user_none_takes_some_arm_2026-11-27.sdn`:
+a typed `Q?` holding a user-declared `Q.None` must take the flat `None` arm of
+a `Some`/`None` match on EVERY engine. The tree-walk interpreter reads a flat
+`None`/`nil`/`Some` arm by the payload variant's NAME: a present `Q.None` is
+not `Some`, while staying present for `.?` and `if val` (presence is a
+different predicate).
+
+Before the fix the seed JIT answered `u(a)=1` (Some arm) where the interpreter
+answered `u(a)=0` (None arm).
+
+## Operator workflow
+`bin/simple test test/02_integration/app/run/typed_optional_user_none_flat_arm_parity_spec.spl`
+(set `SIMPLE_BINARY` to the binary under test; each example spawns
+`<binary> run <fixture>` with `SIMPLE_EXECUTION_MODE` set to `interpreter` or
+`jit`).
+
+Re-verification recipe after the seed fix lands
+(`hir/lower/expr/control.rs` + `hir/lower/stmt_lowering.rs`,
+`optional_payload_declares_none` -> `rt_is_none_variant` flat-arm probes):
+
+    SIMPLE_BINARY=build/p3cache/fresh-seed/simple.exe \
+      bin/simple test test/02_integration/app/run/typed_optional_user_none_flat_arm_parity_spec.spl
+    # both examples must pass; before the fix the `jit` example fails with
+    # `u(a)=1` in the output where `u(a)=0` is expected. If the binary under
+    # test is a scratch cargo build rather than the canonical seed/self-hosted
+    # binary, the scratch binary must ALSO be the test runner (the runner
+    # rejects a non-canonical SIMPLE_BINARY child):
+    SIMPLE_BINARY=build/p3cache/typednone/cargo-target/release/simple.exe \
+      build/p3cache/typednone/cargo-target/release/simple.exe \
+      test test/02_integration/app/run/typed_optional_user_none_flat_arm_parity_spec.spl
+
+Scratch-build recipe (verified during the fix; do not overwrite
+build/p3cache/fresh-seed/simple.exe):
+
+    git worktree add --detach build/p3cache/typednone/scratch-wt <tip-sha>
+    # apply the control.rs + stmt_lowering.rs hunks there
+    (cd build/p3cache/typednone/scratch-wt/src/compiler_rust && \
+      CC="$HOME/.simple/toolchains/llvm-mingw-20260922-ucrt-x86_64/bin/clang.exe" \
+      CARGO_TARGET_DIR=$PWD/build/p3cache/typednone/cargo-target \
+      cargo build --release -p simple-driver)
+"""
+# @timeout_secs 300
+
+use std.spec.{step, expect}
+use std.io.{file_write, dir_create_all, file_exists}
+use std.io.{env_get, env_set}
+use std.io_runtime.{getpid, time_now_unix_micros}
+use std.nogc_sync_mut.env.variables.{env_unset}
+use std.nogc_sync_mut.io.process_ops.{process_run_bounded, SIMPLE_TEST_CHILD_ENV_SCRUB_ENV}
+
+val FIXTURE: text = "enum Q:\n    None\n    Here(i64)\n\nfn u(x: Q?) -> i64:\n    match x:\n        case Some(v):\n            return 1\n        case None:\n            return 0\n\nfn ifval(x: Q?) -> i64:\n    if val v = x:\n        return 1\n    return 0\n\nfn main() -> i64:\n    val a: Q? = Q.None\n    val c: Q? = nil\n    var r = \"u(a)=\{u(a)} u(c)=\{u(c)} ifval(a)=\{ifval(a)}\"\n    if a.?:\n        r = r + \" dotq=1\"\n    else:\n        r = r + \" dotq=0\"\n    print(r)\n    return 0\n"
+
+# Interpreter-canonical answers: the flat None arm matches the present
+# Q.None (u(a)=0); nil is absent (u(c)=0); presence predicates are untouched
+# (ifval(a)=1, dotq=1). A `Q.Here(3)` payload is deliberately NOT asserted
+# here: for payload enums that declare `None`/`Some` the interpreter reads
+# flat arms purely by variant name and `Q.Here(3)` falls through, while the
+# JIT keeps presence semantics -- that adjacent disagreement is the open
+# residual recorded in
+# doc/08_tracking/bug/optional_enum_some_variant_match_engine_divergence_2026-11-14.md,
+# outside this bug's scope.
+val EXPECTED: text = "u(a)=0 u(c)=0 ifval(a)=1 dotq=1"
+
+fn simple_binary() -> text:
+    val configured = env_get("SIMPLE_BINARY") ?? ""
+    if configured != "" and file_exists(configured):
+        return configured
+    "bin/simple"
+
+fn fixture_path() -> text:
+    val d = "build/test_fixtures/typed_optional_user_none_{getpid()}_{time_now_unix_micros()}"
+    dir_create_all(d)
+    val p = d + "/typed_optional_user_none.spl"
+    file_write(p, FIXTURE)
+    p
+
+fn run_in_mode(mode: text) -> text:
+    # The test runner pins SIMPLE_EXECUTION_MODE in a spec child's environment
+    # and marks it SIMPLE_TEST_CHILD_ENV_SCRUB, which process_run_bounded
+    # strips back out of every spawned grandchild. This spec deliberately
+    # forces one mode per grandchild (the documented explicit-set exception),
+    # so it unsets the scrub marker first; env_set then reaches the child.
+    val _ = env_unset(SIMPLE_TEST_CHILD_ENV_SCRUB_ENV)
+    val previous = env_get("SIMPLE_EXECUTION_MODE")
+    env_set("SIMPLE_EXECUTION_MODE", mode)
+    val (out, err, code) = process_run_bounded(simple_binary(), ["run", fixture_path()], 240000, 1000000)
+    match previous:
+        case Some(value): env_set("SIMPLE_EXECUTION_MODE", value)
+        case None: env_unset("SIMPLE_EXECUTION_MODE")
+    if code != 0:
+        return "EXIT={code}\n{err}"
+    out
+
+describe "typed Q? holding a user Q.None takes the None arm on every engine":
+    it "interpreter mode matches the flat None arm":
+        step("Run the fixture under SIMPLE_EXECUTION_MODE=interpreter")
+        expect(run_in_mode("interpreter")).to_contain(EXPECTED)
+
+    it "jit mode matches the flat None arm":
+        step("Run the fixture under SIMPLE_EXECUTION_MODE=jit")
+        expect(run_in_mode("jit")).to_contain(EXPECTED)
