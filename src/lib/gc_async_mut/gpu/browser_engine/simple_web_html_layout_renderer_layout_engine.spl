@@ -576,7 +576,7 @@ fn col_flex_base_h(nodes: [HNode], child_index: HtmlChildIndex, item: i32, st: S
 fn legacy_panel_fill(nodes: [HNode], i: i32) -> bool:
     nodes[i].has_widget_panel_class and nodes[0].legacy_widget_chrome
 
-fn col_flex_target_heights(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, st: Style, iw: i32, content_height_limit: i32, legacy_widget_box: bool, min_h: i32) -> [i32]:
+fn col_flex_target_heights(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, i: i32, st: Style, iw: i32, content_height_limit: i32, legacy_widget_box: bool, min_h: i32, viewport_w: i32, viewport_h: i32, bx: [i32], by: [i32], bw: [i32], bh: [i32], wrap_starts: [[i32]], wrap_ends: [[i32]], intrinsic_widths: [i32]) -> [i32]:
     if st.height_px <= 0 and st.max_height_px <= 0 and min_h <= 0:
         return []
     val frame_y = st.pad_t + st.pad_b + st.border_t + st.border_b
@@ -598,12 +598,35 @@ fn col_flex_target_heights(nodes: [HNode], styles: [Style], child_index: HtmlChi
         else:
             val kh = resolve_percent_height_px(kst.height_px, content_height_limit)
             val rst = if kh > 0 and kh != kst.height_px: style_with_height(kst, kh) else: kst
-            val kbase = col_flex_base_h(nodes, child_index, c, rst)
-            # ponytail: an auto-height item with element children has no
-            # measured content height here, so the whole container keeps its
-            # hypothetical heights. Measure the subtree to lift this.
+            var kbase = col_flex_base_h(nodes, child_index, c, rst)
             if kbase < 0:
-                return []
+                val k_ml = resolve_horizontal_margin(rst.margin_l, rst.margin_l_pct, iw)
+                val k_mr = resolve_horizontal_margin(rst.margin_r, rst.margin_r_pct, iw)
+                var k_child_w = iw - k_ml - k_mr
+                if k_child_w < 1:
+                    k_child_w = 1
+                val saved_float_n = float_ctx_count()
+                val saved_float_max = g_float_max_y1
+                val saved_origin_frac = g_origin_frac_milli
+                val saved_enter_after = g_inline_enter_after_space
+                val saved_enter_start = g_inline_enter_at_line_start
+                val saved_enter_err = g_inline_enter_err_milli
+                val trial_k = layout_with_style(nodes, styles, child_index, c, 0, 0, k_child_w, viewport_w, viewport_h, bx, by, bw, bh, wrap_starts, wrap_ends, intrinsic_widths, rst)
+                float_ctx_truncate(saved_float_n)
+                g_float_max_y1 = saved_float_max
+                g_origin_frac_milli = saved_origin_frac
+                g_inline_enter_after_space = saved_enter_after
+                g_inline_enter_at_line_start = saved_enter_start
+                g_inline_enter_err_milli = saved_enter_err
+                kbase = trial_k.height
+                if rst.max_height_px > 0:
+                    val kmax = css_outer_height(nodes[c], rst, rst.max_height_px)
+                    if kbase > kmax:
+                        kbase = kmax
+                if rst.min_height_px > 0:
+                    val kmin = css_outer_height(nodes[c], rst, rst.min_height_px)
+                    if kbase < kmin:
+                        kbase = kmin
             base = base.push(kbase)
             grow = grow.push(rst.flex_grow)
             shrink = shrink.push(rst.flex_shrink)
@@ -626,8 +649,18 @@ fn col_flex_target_heights(nodes: [HNode], styles: [Style], child_index: HtmlChi
     var main = -1
     if st.height_px > 0:
         main = if outer_is_box: st.height_px - frame_y else: st.height_px
+        if main < 0:
+            main = 0
+        if st.max_height_px > 0:
+            var max_main_explicit = if outer_is_box: st.max_height_px - frame_y else: st.max_height_px
+            if max_main_explicit < 0:
+                max_main_explicit = 0
+            if main > max_main_explicit:
+                main = max_main_explicit
     elif st.max_height_px > 0:
-        val max_main = if outer_is_box: st.max_height_px - frame_y else: st.max_height_px
+        var max_main = if outer_is_box: st.max_height_px - frame_y else: st.max_height_px
+        if max_main < 0:
+            max_main = 0
         if sum > max_main:
             main = max_main
     if main < 0 and st.height_px <= 0 and min_h > 0:
@@ -917,7 +950,14 @@ fn layout_with_style(nodes: [HNode], styles: [Style], child_index: HtmlChildInde
     # Callers resolve percentage min-/max- sizes against the real containing
     # block (normal flow, inline atomic, float, abspos, flex). One still
     # unresolved here (a table cell, which ignores max-width) is `none`.
-    val st = style_with_resolved_percent_min_max(authored_st, 0, 0)
+    var st = style_with_resolved_percent_min_max(authored_st, 0, 0)
+    if nodes[i].tag == "html" and viewport_h > 0:
+        var html_st = authored_st
+        if html_st.height_px < 0:
+            val html_h = resolve_percent_height_px(html_st.height_px, viewport_h)
+            if html_h > 0:
+                html_st = style_with_height(html_st, html_h)
+        st = style_with_resolved_percent_min_max(html_st, viewport_w, viewport_h)
     if not float_ctx_establishes_bfc(nodes, styles, i, st):
         return layout_with_style_flow(nodes, styles, child_index, i, x, y, w, viewport_w, viewport_h, bx, by, bw, bh, wrap_starts, wrap_ends, intrinsic_widths, st)
     val outer_base = g_float_base
@@ -4348,7 +4388,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
             col_measure = child_index.next_sibling[col_measure]
         if col_nonabs_count > 1:
             col_run_h = col_run_h + st.row_gap_px * (col_nonabs_count - 1)
-        val col_targets = col_flex_target_heights(nodes, styles, child_index, i, st, iw, content_height_limit, legacy_widget_box, if st.min_height_px > 0: st.min_height_px elif st.min_height_vh: viewport_h else: 0)
+        val col_targets = col_flex_target_heights(nodes, styles, child_index, i, st, iw, content_height_limit, legacy_widget_box, if st.min_height_px > 0: st.min_height_px elif st.min_height_vh: viewport_h else: 0, viewport_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths)
         var col_k = 0
         val col_container_main = if st.height_px > 0:
             if legacy_widget_box or st.border_box: st.height_px - st.pad_t - st.pad_b - border_y else: st.height_px
@@ -4471,7 +4511,8 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     if col_tc < 1:
                         col_tc = 1
                     item_cst = style_with_height(resolved_cst, col_tc)
-                    natural_first = resolved_cst.height_px == 0 and child_index.first_child[flex_c] >= 0
+                    val clips_or_scrolls_y = resolved_cst.overflow_hidden or resolved_cst.overflow_auto_y or resolved_cst.overflow_scroll_y
+                    natural_first = resolved_cst.height_px == 0 and child_index.first_child[flex_c] >= 0 and not clips_or_scrolls_y
                 val col_float_n = float_ctx_count()
                 val col_float_max = g_float_max_y1
                 var child = layout_with_style(nodes, styles, child_index, flex_c, child_x, cy_flex, child_w, viewport_w, viewport_h, out_bx, out_by, out_bw, out_bh, out_wrap_starts, out_wrap_ends, out_intrinsic_widths, if natural_first: resolved_cst else: item_cst)

@@ -1,0 +1,137 @@
+use std.spec.*
+use common.ui.widget.{WidgetNode, UITree, UIEvent, UIState}
+use common.ui.builder.{column, text_widget, tabs, scroll, checkbox, build_tree}
+use common.ui.state.{init_state, update_state}
+use nogc_sync_mut.ui.parse.sdn_tree.{parse_ui_to_tree}
+use app.ui.browser.app.{format_browser_window_title}
+use app.ui.render.html_widgets.{render_html_tree}
+use app.ui.web.html.{generate_css}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{parse_html, build_child_index}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{extract_css_vw, compute_styles, web_html_layout_tree, zero_i32_list, neg_one_i32_list, empty_i32_lists}
+
+fn _find_node_index_by_id(nodes, id_str: text) -> i32:
+    var i: i32 = 0
+    while i < nodes.len() as i32:
+        if nodes[i].id_attr == id_str:
+            return i
+        i = i + 1
+    return -1
+
+fn _widget_prop_or(tree: UITree, id: text, key: text) -> text:
+    val found = tree.find_widget(id)
+    if found != nil:
+        return found.get_prop(key)
+    return ""
+
+describe "Carbon Lane 2 — Window Titles, 960x640 Viewport Fit, Widget & Column-Flex Parity":
+    it "formats browser window title with explicit Pure-Simple and Chromium backend badges":
+        val t1 = format_browser_window_title("Simple Kitchen Sink", "pure_simple", "software")
+        expect(t1).to_equal("Simple Kitchen Sink — [Pure-Simple Base | engine=pure_simple | gpu=software]")
+
+        val t2 = format_browser_window_title("", "pure_simple", "metal")
+        expect(t2).to_equal("Simple Browser — [Pure-Simple Base | engine=pure_simple | gpu=metal]")
+
+        val t3 = format_browser_window_title("Demo App", "chromium", "vulkan")
+        expect(t3).to_equal("Demo App — [Chromium Offscreen Base | engine=chromium | gpu=vulkan]")
+
+        val t4 = format_browser_window_title("Pinned [Pure-Simple Base | engine=pure_simple | gpu=metal]", "pure_simple", "metal")
+        expect(t4).to_equal("Pinned [Pure-Simple Base | engine=pure_simple | gpu=metal]")
+
+    it "Bug L1: render_html_tabs omits tab-panel when active tab has bare label only":
+        val nav = tabs("nav_tabs", ["Overview", "Details"]).set_prop("active_index", "0")
+        val root = column("root", [nav])
+        val tree = build_tree(root)
+        val state = init_state(tree)
+        val html = render_html_tree(tree.root_node(), state)
+        expect(html).to_contain("class=\"widget-tabs\"")
+        expect(html).to_contain("Overview")
+        expect(html.contains("class=\"tab-panel\"")).to_equal(false)
+
+    it "Bug L1: render_html_tabs emits tab-panel when active tab has content or children":
+        val tab0 = WidgetNode.new("t0", "text").set_prop("label", "Overview").set_prop("content", "Tab body text")
+        val nav = WidgetNode.new("nav_tabs", "tabs").set_prop("active_index", "0").add_child(tab0)
+        val root = column("root", [nav])
+        val tree = build_tree(root)
+        val state = init_state(tree)
+        val html = render_html_tree(tree.root_node(), state)
+        expect(html).to_contain("class=\"tab-panel\"")
+        expect(html).to_contain("Tab body text")
+
+    it "Bug L2: render_html_scroll scales character-row max_height <= 40 to pixels and adds flex-shrink: 0":
+        val scroll_small = scroll("scroll_area", 5, [text_widget("s_item", "Row 1")])
+        val scroll_px = scroll("scroll_px", 100, [text_widget("s_item2", "Row 2")])
+        val root = column("root", [scroll_small, scroll_px])
+        val tree = build_tree(root)
+        val state = init_state(tree)
+        val html = render_html_tree(tree.root_node(), state)
+        expect(html).to_contain("max-height:110px; overflow-y: auto; flex-shrink: 0;")
+        expect(html).to_contain("max-height:100px; overflow-y: auto; flex-shrink: 0;")
+
+    it "Bug L3: CSS encloses html/body/#app to 100% height with flex-shrink: 0 leaf rules and single check-box":
+        val css = generate_css("dark")
+        expect(css).to_contain("html { height: 100%; max-height: 100%; overflow: hidden;")
+        expect(css).to_contain("body { height: 100%; max-height: 100%; margin: 0; overflow: hidden;")
+        expect(css).to_contain("#app { position: relative; z-index: 1; display: flex; flex-direction: column; height: 100%; max-height: 100%; box-sizing: border-box; overflow: hidden;")
+        expect(css).to_contain("#root.layout-vbox, #main_hbox.layout-hbox { overflow: hidden; }")
+        expect(css).to_contain(".panel-title { flex-shrink: 0;")
+        expect(css).to_contain(".panel-content { padding: 12px 14px; flex: 1; min-width: 0; min-height: 0; overflow-y: auto;")
+        expect(css).to_contain(".widget-textarea { flex-shrink: 0; min-height: 64px;")
+        expect(css).to_contain(".widget-checkbox .check-box { display: inline-flex; align-items: center; justify-content: center;")
+        expect(css).to_contain(".widget-checkbox.checked .check-box:empty::after")
+
+    it "Bug L4: handle_action toggle_ updates checked for checkbox, on for switch, expanded for tree":
+        val cb = checkbox("chk_dark", "Dark Theme", false)
+        val sw = WidgetNode.new("sw_sync", "switch").set_prop("on", "true")
+        val tn = WidgetNode.new("tree_node", "treenode").set_prop("expanded", "false")
+        val root = column("root", [cb, sw, tn])
+        var state = init_state(build_tree(root))
+
+        state = update_state(state, UIEvent.Action("toggle_chk_dark"))
+        expect(_widget_prop_or(state.tree, "chk_dark", "checked")).to_equal("true")
+        expect(_widget_prop_or(state.tree, "chk_dark", "expanded")).to_equal("")
+
+        state = update_state(state, UIEvent.Action("toggle_chk_dark"))
+        expect(_widget_prop_or(state.tree, "chk_dark", "checked")).to_equal("false")
+
+        state = update_state(state, UIEvent.Action("toggle_sw_sync"))
+        expect(_widget_prop_or(state.tree, "sw_sync", "on")).to_equal("false")
+
+        state = update_state(state, UIEvent.Action("toggle_tree_node"))
+        expect(_widget_prop_or(state.tree, "tree_node", "expanded")).to_equal("true")
+
+    it "Pure-Simple column-flex layout keeps demo_kitchen_sink within 960x640 viewport":
+        val parsed = parse_ui_to_tree("examples/06_io/ui/demo_kitchen_sink.ui.sdn")
+        expect(parsed.is_ok()).to_equal(true)
+        match parsed:
+            Ok(tree):
+                val state = init_state(tree)
+                val body_html = render_html_tree(tree.root_node(), state)
+                val css = generate_css("dark")
+                val full_html = "<!DOCTYPE html><html><head><style>{css}</style></head><body><div id=\"app\">{body_html}</div></body></html>"
+                val nodes = parse_html(full_html)
+                val rules = extract_css_vw(full_html, 960, false)
+                val child_index = build_child_index(nodes)
+                val styles = compute_styles(nodes, rules, child_index, false, true, 960, 640)
+                val n = nodes.len() as i32
+                val boxes = web_html_layout_tree(
+                    nodes, styles, child_index, 0, 0, 0, 960, 960, 640,
+                    zero_i32_list(n), zero_i32_list(n), zero_i32_list(n), zero_i32_list(n),
+                    empty_i32_lists(n), empty_i32_lists(n), neg_one_i32_list(n)
+                )
+                val idx_root = _find_node_index_by_id(nodes, "root")
+                val idx_hbox = _find_node_index_by_id(nodes, "main_hbox")
+                val idx_scroll = _find_node_index_by_id(nodes, "scroll_area")
+                val idx_status = _find_node_index_by_id(nodes, "status")
+                expect(idx_root).to_be_greater_than(0)
+                expect(idx_hbox).to_be_greater_than(0)
+                expect(idx_scroll).to_be_greater_than(0)
+                expect(idx_status).to_be_greater_than(0)
+                expect(boxes.by[idx_root] + boxes.bh[idx_root]).to_be_less_than(641)
+                expect(boxes.bh[idx_hbox]).to_be_greater_than(100)
+                expect(boxes.by[idx_hbox] + boxes.bh[idx_hbox]).to_be_less_than(641)
+                expect(boxes.bh[idx_scroll]).to_be_less_than(115)
+                expect(boxes.by[idx_scroll] + boxes.bh[idx_scroll]).to_be_less_than(641)
+                expect(boxes.bh[idx_status]).to_be_greater_than(10)
+                expect(boxes.by[idx_status] + boxes.bh[idx_status]).to_be_less_than(641)
+            Err(e):
+                expect(e).to_equal("")
