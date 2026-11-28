@@ -11,19 +11,138 @@ fn _gui_renderer_theme() -> text:
     else:
         default_theme_id()
 use common.ui.window_scene.{WmContentFrame}
+use common.ui.draw_ir.{
+    DrawIrBatch, DrawIrCommand, DrawIrComposition,
+    draw_ir_batch_with_source, draw_ir_composition
+}
 use nogc_sync_mut.ui.session.{UISession}
 use nogc_sync_mut.ui.session_draw_ir.{}
+use std.gc_async_mut.gpu.engine2d.backend.{engine2d_readback}
 use std.gc_async_mut.gpu.engine2d.draw_ir_adv.{
     Engine2dResolvedDrawIrImage,
     Engine2dDrawIrTileOutcome,
+    engine2d_draw_ir_adv_batch_owner_with_images,
     engine2d_draw_ir_adv_composition_with_images,
+    engine2d_draw_ir_command_samples_parent,
     engine2d_draw_ir_render_composition_damaged,
     engine2d_draw_ir_adv_composition_owner_with_images,
     engine2d_draw_ir_retained_idle,
     engine2d_draw_ir_retained_rejected,
 }
 use std.gc_async_mut.gpu.engine2d.engine.{Engine2D}
-use common.ui.render_opt.damage_plan.{DamagePlan, DAMAGE_PLAN_NONE}
+use common.ui.render_opt.damage_plan.{
+    DamagePlan, DAMAGE_PLAN_NONE, DAMAGE_PLAN_LOCAL, DAMAGE_PLAN_FULL
+}
+
+fn _gui_rect_overlaps_bounds(
+    rx: i64, ry: i64, rw: i64, rh: i64,
+    bx: i64, by: i64, bw: i64, bh: i64
+) -> bool:
+    rw > 0 and rh > 0 and bw > 0 and bh > 0 and rx < bx + bw and bx < rx + rw and ry < by + bh and by < ry + rh
+
+fn _gui_rects_overlap_bounds(rects: [i64], bx: i64, by: i64, bw: i64, bh: i64) -> bool:
+    var i: i64 = 0
+    while i + 3 < rects.len():
+        if _gui_rect_overlaps_bounds(rects[i], rects[i + 1], rects[i + 2], rects[i + 3], bx, by, bw, bh):
+            return true
+        i = i + 4
+    false
+
+fn _gui_batch_samples_parent(batch: DrawIrBatch) -> bool:
+    for command in batch.commands:
+        if engine2d_draw_ir_command_samples_parent(command):
+            return true
+    false
+
+fn _gui_composition_samples_parent(composition: DrawIrComposition) -> bool:
+    for batch in composition.batches:
+        if _gui_batch_samples_parent(batch):
+            return true
+    false
+
+fn _gui_batch_glass_padding(batch: DrawIrBatch) -> i64:
+    var total: i64 = 0
+    for command in batch.commands:
+        if engine2d_draw_ir_command_samples_parent(command):
+            var blur: i64 = 4
+            for prop in command.computed_style:
+                if prop.key == "backdrop-filter-realized-blur-radius-px":
+                    val parsed = prop.value.trim().to_int() ?? 4
+                    if parsed > 0:
+                        blur = parsed.to_i64()
+            total = total + blur
+    if total < 4: 4 elif total > 32: 32 else: total
+
+fn _gui_expand_and_coalesce_rects(rects: [i64], pad: i64, width: i64, height: i64) -> [i64]:
+    var expanded: [i64] = []
+    var i: i64 = 0
+    while i + 3 < rects.len():
+        var x0 = rects[i] - pad
+        var y0 = rects[i + 1] - pad
+        var x1 = rects[i] + rects[i + 2] + pad
+        var y1 = rects[i + 1] + rects[i + 3] + pad
+        if x0 < 0: x0 = 0
+        if y0 < 0: y0 = 0
+        if x1 > width: x1 = width
+        if y1 > height: y1 = height
+        if x1 > x0 and y1 > y0:
+            expanded.push(x0)
+            expanded.push(y0)
+            expanded.push(x1 - x0)
+            expanded.push(y1 - y0)
+        i = i + 4
+    var current = expanded
+    var merged = true
+    while merged:
+        merged = false
+        val n = current.len() / 4
+        var used: [bool] = [false; n.to_i32()]
+        var out: [i64] = []
+        var a: i64 = 0
+        while a < n:
+            if used[a.to_i32()]:
+                a = a + 1
+                continue
+            var ax0 = current[a * 4]
+            var ay0 = current[a * 4 + 1]
+            var ax1 = ax0 + current[a * 4 + 2]
+            var ay1 = ay0 + current[a * 4 + 3]
+            var b: i64 = a + 1
+            while b < n:
+                if not used[b.to_i32()]:
+                    val bx0 = current[b * 4]
+                    val by0 = current[b * 4 + 1]
+                    val bx1 = bx0 + current[b * 4 + 2]
+                    val by1 = by0 + current[b * 4 + 3]
+                    if ax0 < bx1 and bx0 < ax1 and ay0 < by1 and by0 < ay1:
+                        if bx0 < ax0: ax0 = bx0
+                        if by0 < ay0: ay0 = by0
+                        if bx1 > ax1: ax1 = bx1
+                        if by1 > ay1: ay1 = by1
+                        used[b.to_i32()] = true
+                        merged = true
+                b = b + 1
+            out.push(ax0)
+            out.push(ay0)
+            out.push(ax1 - ax0)
+            out.push(ay1 - ay0)
+            a = a + 1
+        current = out
+    current
+
+fn _gui_damage_rects_in_bounds(rects: [i64], width: i64, height: i64) -> bool:
+    if rects.len() == 0 or rects.len() % 4 != 0 or width <= 0 or height <= 0:
+        return false
+    var i: i64 = 0
+    while i + 3 < rects.len():
+        val rx = rects[i]
+        val ry = rects[i + 1]
+        val rw = rects[i + 2]
+        val rh = rects[i + 3]
+        if rx < 0 or ry < 0 or rw <= 0 or rh <= 0 or rw > width or rh > height or rx > width - rw or ry > height - rh:
+            return false
+        i = i + 4
+    true
 
 class GuiRetainedRenderSession:
     engine: Engine2D
@@ -63,6 +182,186 @@ class GuiRetainedRenderSession:
         self.seeded = true
         true
 
+    me _full_ordered_replay(composition: DrawIrComposition,
+                            readback_frame: bool) -> Engine2dDrawIrTileOutcome:
+        val use_gpu = self.backend != "cpu" and self.backend != "software"
+        self.engine.clear(gui_content_frame_clear_color())
+        val owned = engine2d_draw_ir_adv_composition_owner_with_images(
+            self.engine, composition, use_gpu, [])
+        self.engine = owned.engine
+        val rendered = owned.result
+        if (rendered.fallback_required or rendered.rendered_command_count <= 0 or
+            rendered.skipped_command_count != rendered.occluded_command_count):
+            val reason = if rendered.fallback_reason != "": rendered.fallback_reason else: "retained-full-replay-failed"
+            return engine2d_draw_ir_retained_rejected(self.engine, reason)
+        val rb = if readback_frame:
+            engine2d_readback(rendered.pixels, rendered.readback_source)
+        else:
+            engine2d_readback([], "not_requested")
+        Engine2dDrawIrTileOutcome(
+            engine: self.engine,
+            tiles_total: 1,
+            tiles_rendered: 1,
+            tiles_skipped: 0,
+            ops_rendered: rendered.rendered_command_count,
+            ops_skipped: rendered.skipped_command_count,
+            unsupported_kinds: "none",
+            readback: rb,
+            commands_considered: rendered.rendered_command_count + rendered.skipped_command_count,
+            commands_culled_by_damage: 0,
+            ops_culled_by_damage: 0)
+
+    me _replay_parent_sampling_damage(composition: DrawIrComposition,
+                                      damage_rects: [i64],
+                                      readback_frame: bool) -> Engine2dDrawIrTileOutcome:
+        val w64 = self.width.to_i64()
+        val h64 = self.height.to_i64()
+        if not _gui_damage_rects_in_bounds(damage_rects, w64, h64):
+            return engine2d_draw_ir_retained_rejected(self.engine, "invalid-damage-plan")
+        var any_intersecting_parent = false
+        var causal_pad: i64 = 0
+        for batch in composition.batches:
+            if _gui_batch_samples_parent(batch):
+                val emb = batch.embedding
+                if _gui_rects_overlap_bounds(damage_rects, emb.x.to_i64(), emb.y.to_i64(), emb.width.to_i64(), emb.height.to_i64()):
+                    any_intersecting_parent = true
+                    causal_pad = causal_pad + _gui_batch_glass_padding(batch)
+        if not any_intersecting_parent:
+            var non_parent: [DrawIrBatch] = []
+            for batch in composition.batches:
+                if not _gui_batch_samples_parent(batch):
+                    non_parent.push(batch)
+            val filtered = draw_ir_composition(
+                composition.composition_id,
+                composition.scene_key,
+                composition.backend_target,
+                non_parent)
+            val outcome = engine2d_draw_ir_render_composition_damaged(
+                self.engine, filtered, damage_rects, readback_frame)
+            self.engine = outcome.engine
+            return outcome
+        if causal_pad < 4:
+            causal_pad = 4
+        elif causal_pad > 32:
+            causal_pad = 32
+        val padded_rects = _gui_expand_and_coalesce_rects(damage_rects, causal_pad, w64, h64)
+        var first_parent_idx: i64 = -1
+        var bi: i64 = 0
+        while bi < composition.batches.len():
+            val b = composition.batches[bi]
+            if _gui_batch_samples_parent(b):
+                val emb = b.embedding
+                if _gui_rects_overlap_bounds(padded_rects, emb.x.to_i64(), emb.y.to_i64(), emb.width.to_i64(), emb.height.to_i64()):
+                    first_parent_idx = bi
+                    break
+            bi = bi + 1
+        var pre_batches: [DrawIrBatch] = []
+        bi = 0
+        while bi < first_parent_idx:
+            val b = composition.batches[bi]
+            if not _gui_batch_samples_parent(b):
+                pre_batches.push(b)
+            bi = bi + 1
+        if first_parent_idx < 0 or pre_batches.len() == 0:
+            return self._full_ordered_replay(composition, readback_frame)
+        var scratch = self.engine
+        match self.engine.draw_ir_create_offscreen_engine(self.width, self.height):
+            Err(_):
+                return self._full_ordered_replay(composition, readback_frame)
+            Ok(created):
+                scratch = created
+        val active_font = self.engine.selected_font_identity()
+        if active_font != "":
+            val _font_ok = scratch.select_font_identity(active_font)
+        val pre_comp = draw_ir_composition(
+            composition.composition_id,
+            composition.scene_key,
+            composition.backend_target,
+            pre_batches)
+        val pre_out = engine2d_draw_ir_render_composition_damaged(
+            scratch, pre_comp, padded_rects, false)
+        scratch = pre_out.engine
+        if pre_out.unsupported_kinds != "none" or pre_out.ops_rendered <= 0:
+            scratch.shutdown()
+            return self._full_ordered_replay(composition, readback_frame)
+        var total_ops = pre_out.ops_rendered
+        bi = first_parent_idx
+        while bi < composition.batches.len():
+            val b = composition.batches[bi]
+            val emb = b.embedding
+            if _gui_rects_overlap_bounds(padded_rects, emb.x.to_i64(), emb.y.to_i64(), emb.width.to_i64(), emb.height.to_i64()):
+                val b_res = engine2d_draw_ir_adv_batch_owner_with_images(scratch, b, false, [])
+                scratch = b_res.engine
+                if b_res.result.fallback_required or b_res.result.skipped_command_count != 0 or b_res.result.rendered_command_count <= 0:
+                    scratch.shutdown()
+                    return self._full_ordered_replay(composition, readback_frame)
+                total_ops = total_ops + b_res.result.rendered_command_count
+            bi = bi + 1
+        var patches_x: [i32] = []
+        var patches_y: [i32] = []
+        var patches_w: [i32] = []
+        var patches_h: [i32] = []
+        var patches_pixels: [[u32]] = []
+        var ri: i64 = 0
+        while ri + 3 < damage_rects.len():
+            val rx = damage_rects[ri].to_i32()
+            val ry = damage_rects[ri + 1].to_i32()
+            val rw = damage_rects[ri + 2].to_i32()
+            val rh = damage_rects[ri + 3].to_i32()
+            val patch_rb = scratch.read_pixels_region(rx, ry, rw, rh)
+            if patch_rb.pixels.len() != rw.to_i64() * rh.to_i64():
+                scratch.shutdown()
+                return self._full_ordered_replay(composition, readback_frame)
+            patches_x.push(rx)
+            patches_y.push(ry)
+            patches_w.push(rw)
+            patches_h.push(rh)
+            patches_pixels.push(patch_rb.pixels)
+            ri = ri + 4
+        scratch.shutdown()
+        var eng = self.engine
+        if eng.backend_name() == "vulkan" and not eng.stage_present_damage(damage_rects):
+            self.engine = eng
+            return engine2d_draw_ir_retained_rejected(self.engine, "vulkan-damage-stage-rejected")
+        var pi: i64 = 0
+        while pi < patches_x.len():
+            eng.draw_image(patches_x[pi], patches_y[pi], patches_w[pi], patches_h[pi], patches_pixels[pi])
+            pi = pi + 1
+        eng.submit_batch()
+        var readback = engine2d_readback([], "not_requested")
+        if readback_frame:
+            readback = eng.read_pixels_with_source()
+            eng.present()
+        else:
+            if not eng.finalize_compute_frame_no_readback():
+                eng.present()
+        self.engine = eng
+        Engine2dDrawIrTileOutcome(
+            engine: self.engine,
+            tiles_total: damage_rects.len().to_i32() / 4,
+            tiles_rendered: damage_rects.len().to_i32() / 4,
+            tiles_skipped: 0,
+            ops_rendered: total_ops,
+            ops_skipped: 0,
+            unsupported_kinds: "none",
+            readback: readback,
+            commands_considered: total_ops,
+            commands_culled_by_damage: 0,
+            ops_culled_by_damage: 0)
+
+    me render_composition_damage(composition: DrawIrComposition, plan: DamagePlan,
+                                 readback_frame: bool) -> Engine2dDrawIrTileOutcome:
+        if plan.mode == DAMAGE_PLAN_NONE and plan.rects.len() == 0:
+            return engine2d_draw_ir_retained_idle(self.engine, readback_frame)
+        if plan.mode == DAMAGE_PLAN_FULL:
+            return self._full_ordered_replay(composition, readback_frame)
+        if _gui_composition_samples_parent(composition):
+            return self._replay_parent_sampling_damage(composition, plan.rects, readback_frame)
+        val outcome = engine2d_draw_ir_render_composition_damaged(
+            self.engine, composition, plan.rects, readback_frame)
+        self.engine = outcome.engine
+        outcome
+
     me render_damage(session: UISession, plan: DamagePlan,
                      readback_frame: bool) -> Engine2dDrawIrTileOutcome:
         if not self.seeded:
@@ -76,10 +375,7 @@ class GuiRetainedRenderSession:
                 self.engine, readback_frame)
         val composition = session.submit_widget_draw_ir(
             self.width, self.height, self.backend)
-        val outcome = engine2d_draw_ir_render_composition_damaged(
-            self.engine, composition, plan.rects, readback_frame)
-        self.engine = outcome.engine
-        outcome
+        self.render_composition_damage(composition, plan, readback_frame)
 
     me shutdown():
         self.engine.shutdown()

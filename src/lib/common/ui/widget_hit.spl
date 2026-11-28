@@ -674,13 +674,16 @@ fn widget_dispatch_pointer_down(root: WidgetNode, w: i32, h: i32, px: i32, py: i
     """Handle pointer-down across context menus, dropdown popups, layered internal windows, draggable cards, buttons, and text fields."""
     val rects = if layout.len() > 0: layout else: compute_pixel_layout(root, 0, 0, w, h)
     root.set_prop("ui_drag_node_id", "")
+    root.set_prop("ui_captured_id", "")
 
     val ctx_hit = _hit_dispatch_open_context_menus(root, rects, w, h, px, py, true)
     if ctx_hit != "":
+        root.set_prop("ui_captured_id", ctx_hit)
         return ctx_hit
 
     val drop_popup_hit = _hit_dispatch_open_dropdowns(root, rects, 0, 0, w, h, px, py, true)
     if drop_popup_hit != "":
+        root.set_prop("ui_captured_id", drop_popup_hit)
         return drop_popup_hit
 
     val prev_open_drop = _hit_close_open_popups(root)
@@ -711,6 +714,7 @@ fn widget_dispatch_pointer_down(root: WidgetNode, w: i32, h: i32, px: i32, py: i
                 ci = ci - 1
             if val Some(cnode) = child_hit:
                 _hit_apply_control_action(root, cnode, prev_open_drop)
+                root.set_prop("ui_captured_id", cnode.id)
                 return cnode.id
             val is_win = fnode.kind_name() == "dialog" and fnode.get_prop("internal_window") == "true"
             val in_drag_handle = if is_win: py <= fy + 28 else: true
@@ -719,6 +723,7 @@ fn widget_dispatch_pointer_down(root: WidgetNode, w: i32, h: i32, px: i32, py: i
                 root.set_prop("ui_drag_offset_x", "{px - fx}")
                 root.set_prop("ui_drag_offset_y", "{py - fy}")
                 fnode.set_prop("ui_pressed", "true")
+            root.set_prop("ui_captured_id", fnode.id)
             return fnode.id
         idx = idx - 1
 
@@ -737,6 +742,7 @@ fn widget_dispatch_pointer_down(root: WidgetNode, w: i32, h: i32, px: i32, py: i
                 root.set_prop("ui_drag_offset_x", "{px - cur_x}")
                 root.set_prop("ui_drag_offset_y", "{py - cur_y}")
                 node.set_prop("ui_pressed", "true")
+            root.set_prop("ui_captured_id", r.id)
             return r.id
         r_i = r_i - 1
     ""
@@ -761,6 +767,12 @@ fn widget_dispatch_pointer_move(root: WidgetNode, w: i32, h: i32, px: i32, py: i
         dnode.set_prop("y", "{next_y}")
         return drag_id
 
+    val captured_id = root.get_prop("ui_captured_id")
+    if captured_id != "":
+        val over_id = _hit_test_rects_id(rects, px, py)
+        WidgetNode(id: captured_id).set_prop("ui_pressed", if over_id == captured_id: "true" else: "false")
+        return captured_id
+
     val ctx_hover = _hit_dispatch_open_context_menus(root, rects, w, h, px, py, false)
     if ctx_hover != "":
         return ctx_hover
@@ -775,12 +787,19 @@ fn widget_dispatch_pointer_move(root: WidgetNode, w: i32, h: i32, px: i32, py: i
 fn widget_dispatch_pointer_up(root: WidgetNode, w: i32, h: i32, px: i32, py: i32, layout: [WidgetRect] = []) -> text:
     """Finish an active drag or press interaction on pointer-up."""
     val drag_id = root.get_prop("ui_drag_node_id")
+    val captured_id = root.get_prop("ui_captured_id")
     root.set_prop("ui_drag_node_id", "")
+    root.set_prop("ui_captured_id", "")
     widget_clear_pressed(root)
     if drag_id != "":
         return drag_id
     val rects = if layout.len() > 0: layout else: compute_pixel_layout(root, 0, 0, w, h)
-    _hit_test_rects_id(rects, px, py)
+    val release_id = _hit_test_rects_id(rects, px, py)
+    if captured_id != "":
+        if release_id == captured_id:
+            return captured_id
+        return ""
+    release_id
 
 fn _hit_find_context_menu(node: WidgetNode, menu_id: text) -> text:
     if node.kind_name() == "context_menu":
