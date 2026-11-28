@@ -1,5 +1,5 @@
 /-!
-Structural model of `40.mono/model/generic_subst_model.spl`.
+Structural model of `src/compiler/30.types/generic_subst/generic_subst_model.spl`.
 This is a manual proof owner, not generated code. Production HIR refinement
 and executable Simple/Lean correspondence are separate obligations.
 -/
