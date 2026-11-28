@@ -1461,12 +1461,7 @@ pub(super) fn eval_bdd_builtin(
                 Err(ref e) => {
                     // Test failed due to execution error
                     println!("{}\x1b[31m✗ {}\x1b[0m", indent_str, name_str);
-                    let recorded = if BDD_EXPECT_FAILED.with(|cell| *cell.borrow()) {
-                        BDD_FAILURE_MSG.with(|cell| cell.borrow().summary())
-                    } else {
-                        None
-                    };
-                    let shown = err_report_message(e.to_string(), recorded);
+                    let shown = err_report_message(e.to_string(), recorded_failure_for_report());
                     println!("{}  \x1b[31m{}\x1b[0m", indent_str, shown);
                     BDD_COUNTS.with(|cell| cell.borrow_mut().1 += 1);
                     if !BDD_FAILED_RECORDED_IN_IT.with(|cell| *cell.borrow()) {
@@ -2974,10 +2969,23 @@ mod dsl_name_tests {
 /// `-> T` helper trip the non-optional nil-return contract; that contract error
 /// is a consequence of the recorded failure, so the recorded message is the one
 /// worth reporting.
+/// The original error stays visible after the recorded message, so a genuine
+/// nil-returning helper is never hidden.
 fn err_report_message(err_text: String, recorded: Option<String>) -> String {
     match recorded {
-        Some(msg) if err_text.contains("nil is forbidden by the non-optional return contract") => msg,
+        Some(msg) if err_text.contains("nil is forbidden by the non-optional return contract") => {
+            format!("{msg}\n  (also: {err_text})")
+        }
         _ => err_text,
+    }
+}
+
+/// Failure summary recorded in the current example, if a hard failure is set.
+fn recorded_failure_for_report() -> Option<String> {
+    if BDD_EXPECT_FAILED.with(|c| *c.borrow()) {
+        BDD_FAILURE_MSG.with(|c| c.borrow().summary())
+    } else {
+        None
     }
 }
 
@@ -2992,13 +3000,11 @@ mod fail_nil_mask_tests {
         clear_bdd_state();
         BDD_INSIDE_IT.with(|cell| *cell.borrow_mut() = true);
         record_assertion_failure("unimplemented oracle".to_string()).unwrap();
-        let recorded = if BDD_EXPECT_FAILED.with(|c| *c.borrow()) {
-            BDD_FAILURE_MSG.with(|c| c.borrow().summary())
-        } else {
-            None
-        };
+        let recorded = recorded_failure_for_report();
         clear_bdd_state();
-        assert_eq!(err_report_message(NIL_ERR.to_string(), recorded), "unimplemented oracle");
+        let out = err_report_message(NIL_ERR.to_string(), recorded);
+        assert!(out.starts_with("unimplemented oracle"), "{out}");
+        assert!(out.contains(NIL_ERR), "original error must stay visible: {out}");
     }
 
     #[test]
