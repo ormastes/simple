@@ -200,10 +200,10 @@ pub(super) fn eval_control_expr(
                 match flow {
                     // A `return` inside an if/match EXPRESSION arm must propagate out of the
                     // function, not become the expression's value. Reuse the `?`-operator
-                    // early-return channel (TryError), which is already caught at every
+                    // early-return channel (ArmReturn, a TryError sibling), which is already caught at every
                     // function/method/lambda/class boundary. See bug
                     // interp_return_in_match_expr_swallowed_2026-06-30.
-                    Control::Return(v) => return Err(CompileError::TryError(Box::new(v))),
+                    Control::Return(v) => return Err(CompileError::ArmReturn(Box::new(v))),
                     _ => last_val.unwrap_or(Value::Nil),
                 }
             } else {
@@ -378,10 +378,10 @@ pub(super) fn eval_control_expr(
                                         }
                                         // A `return` inside an if/match EXPRESSION arm must propagate out of the
                                         // function, not become the expression's value. Reuse the `?`-operator
-                                        // early-return channel (TryError), which is already caught at every
+                                        // early-return channel (ArmReturn, a TryError sibling), which is already caught at every
                                         // function/method/lambda/class boundary. See bug
                                         // interp_return_in_match_expr_swallowed_2026-06-30.
-                                        Control::Return(v) => return Err(CompileError::TryError(Box::new(v))),
+                                        Control::Return(v) => return Err(CompileError::ArmReturn(Box::new(v))),
                                         Control::Break(..) => return Ok(Some(Value::Nil)),
                                         Control::Continue(_) => break,
                                     }
@@ -402,10 +402,10 @@ pub(super) fn eval_control_expr(
                                         }
                                         // A `return` inside an if/match EXPRESSION arm must propagate out of the
                                         // function, not become the expression's value. Reuse the `?`-operator
-                                        // early-return channel (TryError), which is already caught at every
+                                        // early-return channel (ArmReturn, a TryError sibling), which is already caught at every
                                         // function/method/lambda/class boundary. See bug
                                         // interp_return_in_match_expr_swallowed_2026-06-30.
-                                        Control::Return(v) => return Err(CompileError::TryError(Box::new(v))),
+                                        Control::Return(v) => return Err(CompileError::ArmReturn(Box::new(v))),
                                         Control::Break(..) => return Ok(Some(Value::Nil)),
                                         Control::Continue(_) => break,
                                     }
@@ -422,10 +422,10 @@ pub(super) fn eval_control_expr(
                         match arm_ctrl {
                             // A `return` inside an if/match EXPRESSION arm must propagate out of the
                             // function, not become the expression's value. Reuse the `?`-operator
-                            // early-return channel (TryError), which is already caught at every
+                            // early-return channel (ArmReturn, a TryError sibling), which is already caught at every
                             // function/method/lambda/class boundary. See bug
                             // interp_return_in_match_expr_swallowed_2026-06-30.
-                            Control::Return(v) => return Err(CompileError::TryError(Box::new(v))),
+                            Control::Return(v) => return Err(CompileError::ArmReturn(Box::new(v))),
                             Control::Break(..) => return Ok(Some(Value::Nil)),
                             Control::Continue(_) => break,
                             // exec_node already ran the statement; re-evaluating a
@@ -486,7 +486,7 @@ pub(super) fn eval_control_expr(
             let (flow, last_value) =
                 super::super::exec_unsafe_block(nodes, env, functions, classes, enums, impl_methods)?;
             match flow {
-                Control::Return(value) => Err(CompileError::TryError(Box::new(value))),
+                Control::Return(value) => Err(CompileError::ArmReturn(Box::new(value))),
                 Control::Break(value, _) => Err(CompileError::LoopBreak(value)),
                 Control::Continue(_) => Err(CompileError::LoopContinue),
                 Control::Next => Ok(Some(last_value.unwrap_or(Value::Nil))),

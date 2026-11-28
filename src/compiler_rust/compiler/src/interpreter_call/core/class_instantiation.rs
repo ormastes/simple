@@ -310,7 +310,7 @@ pub(crate) fn instantiate_class(
                     .get("self")
                     .cloned()
                     .unwrap_or_else(|| Value::aggregate(class_name.to_string(), fields, class_def.is_value_type))),
-                Err(CompileError::TryError(val)) => Ok(*val),
+                Err(CompileError::TryError(val) | CompileError::ArmReturn(val)) => Ok(*val),
                 Err(e) => Err(e),
             };
 
@@ -355,7 +355,7 @@ pub(crate) fn instantiate_class(
             enums,
             impl_methods,
         ) {
-            Ok(_) | Err(CompileError::TryError(_)) => {}
+            Ok(_) | Err(CompileError::TryError(_) | CompileError::ArmReturn(_)) => {}
             Err(e) => return Err(e),
         }
 

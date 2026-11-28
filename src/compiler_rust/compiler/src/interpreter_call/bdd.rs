@@ -838,7 +838,7 @@ pub(crate) fn exec_block_value(
             env: captured,
         } => {
             let mut captured_clone = Env::clone(&captured);
-            exec_lambda(
+            localize_bdd_return(exec_lambda(
                 &params,
                 &body,
                 &[],
@@ -848,13 +848,20 @@ pub(crate) fn exec_block_value(
                 classes,
                 enums,
                 impl_methods,
-            )
+            ))
         }
         Value::BlockClosure { nodes, env: captured } => {
             let captured_clone = Env::clone(&captured);
             let _closure_origin =
                 crate::interpreter::interpreter_module::ClosureOriginGuard::enter_closure(&captured);
-            exec_block_closure(&nodes, &captured_clone, functions, classes, enums, impl_methods)
+            localize_bdd_return(exec_block_closure(
+                &nodes,
+                &captured_clone,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            ))
         }
         // A pending example (`it "x"` with no body) legitimately has a Nil body.
         Value::Nil => Ok(Value::Nil),
@@ -869,6 +876,10 @@ pub(crate) fn exec_block_value(
 fn localize_bdd_return(result: Result<Value, CompileError>) -> Result<Value, CompileError> {
     match result {
         Err(CompileError::BlockReturn(value)) => Ok(value),
+        // A `return` inside a match/if-expression arm of a BDD body travels as ArmReturn
+        // (interp_return_in_match_expr_swallowed_2026-06-30); it ends
+        // this example only and must not surface as "try: early return".
+        Err(CompileError::ArmReturn(value)) => Ok(*value),
         other => other,
     }
 }
