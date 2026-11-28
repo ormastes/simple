@@ -891,6 +891,57 @@ fn coff_attach_amd64_load_config(sections: [PeImageSection],
         return Err("COFF _load_config_used is not file-backed in an output section")
     Ok(result)
 
+fn _coff_sort_pdata_records(records: [[u8]]) -> [[u8]]:
+    """Sort runtime-function records by ascending BeginAddress RVA in O(N log N)."""
+    val n = records.len()
+    if n < 2:
+        return records
+    var begins: [i64] = []
+    var order: [i64] = []
+    var scratch: [i64] = []
+    var i: i64 = 0
+    while i < n:
+        begins = begins.push(_coff_read_u32(records[i], 0).unwrap())
+        order = order.push(i)
+        scratch = scratch.push(i)
+        i = i + 1
+    var width: i64 = 1
+    while width < n:
+        var left: i64 = 0
+        while left < n:
+            var mid = left + width
+            if mid > n:
+                mid = n
+            var right = left + width + width
+            if right > n:
+                right = n
+            var a = left
+            var b = mid
+            var k = left
+            while k < right:
+                var take_left = false
+                if a < mid:
+                    if b >= right:
+                        take_left = true
+                    elif begins[order[a]] <= begins[order[b]]:
+                        take_left = true
+                if take_left:
+                    scratch[k] = order[a]
+                    a = a + 1
+                else:
+                    scratch[k] = order[b]
+                    b = b + 1
+                k = k + 1
+            left = right
+        val swapped = order
+        order = scratch
+        scratch = swapped
+        width = width + width
+    var sorted_records: [[u8]] = []
+    for idx in order:
+        sorted_records = sorted_records.push(records[idx])
+    sorted_records
+
 fn coff_sort_amd64_exception_table(
         sections: [PeImageSection]) -> Result<[PeImageSection], text>:
     """Sort 12-byte AMD64 RUNTIME_FUNCTION rows by BeginAddress RVA."""
@@ -915,19 +966,9 @@ fn coff_sort_amd64_exception_table(
                     return Err("AMD64 .pdata entry has BeginAddress {begin} >= EndAddress {end}")
                 records = records.push(record)
                 offset = offset + 12
-            var a: i64 = 0
-            while a < records.len():
-                var b = a + 1
-                while b < records.len():
-                    if _coff_read_u32(records[b], 0).unwrap() <
-                            _coff_read_u32(records[a], 0).unwrap():
-                        val temporary = records[a]
-                        records[a] = records[b]
-                        records[b] = temporary
-                    b = b + 1
-                a = a + 1
+            val ordered_records = _coff_sort_pdata_records(records)
             var sorted: [u8] = []
-            for record in records:
+            for record in ordered_records:
                 for byte in record: sorted = sorted.push(byte)
             var updated = section
             updated.data = sorted
@@ -958,19 +999,9 @@ fn coff_sort_arm64_exception_table(
                     return Err("ARM64 .pdata BeginAddress {begin} is not instruction-aligned")
                 records = records.push(record)
                 offset = offset + 8
-            var a: i64 = 0
-            while a < records.len():
-                var b = a + 1
-                while b < records.len():
-                    if _coff_read_u32(records[b], 0).unwrap() <
-                            _coff_read_u32(records[a], 0).unwrap():
-                        val temporary = records[a]
-                        records[a] = records[b]
-                        records[b] = temporary
-                    b = b + 1
-                a = a + 1
+            val ordered_records = _coff_sort_pdata_records(records)
             var sorted: [u8] = []
-            for record in records:
+            for record in ordered_records:
                 for byte in record: sorted = sorted.push(byte)
             var updated = section
             updated.data = sorted
