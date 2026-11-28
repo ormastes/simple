@@ -681,6 +681,11 @@ fn _html_draw_ir_opens_context(st: Style) -> bool:
 fn _html_draw_ir_opens_group(st: Style) -> bool:
     st.opacity_pct < 100 or st.backdrop_filter_raw != ""
 
+# A flex or grid container: its items paint as one unit each, like
+# inline-blocks (CSS Flexbox 1 § 4, CSS Grid 1 § 6).
+fn _html_draw_ir_lays_out_items(st: Style) -> bool:
+    st.display == "flex" or st.display == "inline-flex" or st.display == "grid" or st.display == "inline-grid"
+
 fn _html_draw_ir_emit_scope(
     nodes: [HNode], styles: [Style],
     scope_self: [i32], scope_blocks: [[i32]], scope_floats: [[i32]], scope_inlines: [[i32]],
@@ -692,14 +697,12 @@ fn _html_draw_ir_emit_scope(
         if root_node >= 0:
             result.push(root_node)
     # CSS 2.2 Appendix E Step 4: non-positioned normal-flow blocks in tree order.
-    # Contiguous opacity/backdrop sub-scopes flush in place at their tree slot.
+    # A block-level opacity/backdrop sub-scope is a layer: it waits for Step 8.
+    var has_layer = false
     # cpu-lane-loop-ok: appends normal-flow block members of one scope once each
     for b in scope_blocks[scope_id]:
-        if _html_draw_ir_opens_group(styles[b]):
-            result = _html_draw_ir_emit_scope(
-                nodes, styles, scope_self, scope_blocks, scope_floats, scope_inlines,
-                child_contexts, b + 1, false, result
-            )
+        if scope_self[b + 1] == b:
+            has_layer = true
         else:
             result.push(b)
     # CSS 2.2 Appendix E Step 5: non-positioned floats & their non-positioned subtrees.
@@ -709,16 +712,29 @@ fn _html_draw_ir_emit_scope(
             nodes, styles, scope_self, scope_blocks, scope_floats, scope_inlines,
             child_contexts, f + 1, false, result
         )
-    # CSS 2.2 Appendix E Step 7: non-positioned inline boxes & #text runs.
+    # CSS 2.2 Appendix E Step 7: non-positioned inline boxes & #text runs. An
+    # atomic inline (`inline-*`), a flex or grid item and an inline
+    # opacity/backdrop group are sub-scopes: each paints whole at its tree slot.
     # cpu-lane-loop-ok: appends normal-flow inline/#text nodes of one scope once after floats
     for inl in scope_inlines[scope_id]:
-        if _html_draw_ir_opens_group(styles[inl]):
+        if scope_self[inl + 1] == inl:
             result = _html_draw_ir_emit_scope(
                 nodes, styles, scope_self, scope_blocks, scope_floats, scope_inlines,
                 child_contexts, inl + 1, false, result
             )
         else:
             result.push(inl)
+    # CSS 2.2 Appendix E Step 8: block-level opacity/backdrop layers, each one
+    # contiguous, over the inline content (Chrome 159: an opacity block covers
+    # a later block pulled up under it).
+    if has_layer:
+        # cpu-lane-loop-ok: second pass over one scope's block members, layers only
+        for b in scope_blocks[scope_id]:
+            if scope_self[b + 1] == b:
+                result = _html_draw_ir_emit_scope(
+                    nodes, styles, scope_self, scope_blocks, scope_floats, scope_inlines,
+                    child_contexts, b + 1, false, result
+                )
     if emit_contexts:
         val children = _sort_positive_z_indices(
             child_contexts[scope_id],
@@ -855,20 +871,39 @@ fn _html_draw_ir_node_paint_order(
             scope_self[i + 1] = i
         else:
             node_context[i] = parent_context
-            if st.float_mode != 0:
+            val is_text = nodes[i].tag == "#text"
+            # A flex or grid item ignores `float` and paints atomically. An
+            # absolute / fixed child is out of flow, not an item. Unreachable
+            # today: `z-index` parses without its sign, so every absolute /
+            # fixed box opens a context above (bug
+            # web_render_negative_z_index_parsed_positive_2026-11-28).
+            val is_item = not is_text and parent_valid and _html_draw_ir_lays_out_items(styles[parent]) and not (st.position_absolute or st.position_fixed)
+            if st.float_mode != 0 and not is_item:
                 scope_floats[parent_scope].push(i)
                 node_scope[i] = i + 1
                 scope_self[i + 1] = i
             elif _html_draw_ir_opens_group(st):
-                if nodes[i].tag == "#text" or st.display == "inline":
+                if is_text or st.display == "inline":
                     scope_inlines[parent_scope].push(i)
                 else:
                     scope_blocks[parent_scope].push(i)
                 node_scope[i] = i + 1
                 scope_self[i + 1] = i
+            # ponytail: a block-level form control is also a sub-scope with the
+            # inline content, in tree order, where spec order is Step 4: its
+            # value text has no font identity and Engine2D `draw_text` paints
+            # it with the face the previous text command selected (bug
+            # engine2d_plain_text_inherits_selected_face_2026-11-28). A
+            # sub-scope keeps a `<button>`'s block children over its own
+            # background. Upgrade by giving the value run its own face, then
+            # drop the form-control test here.
+            elif is_item or (not is_text and (st.display.starts_with("inline-") or _html_draw_ir_is_form_control_box(nodes[i]))):
+                scope_inlines[parent_scope].push(i)
+                node_scope[i] = i + 1
+                scope_self[i + 1] = i
             else:
                 node_scope[i] = parent_scope
-                if nodes[i].tag == "#text" or st.display == "inline":
+                if is_text or st.display == "inline":
                     scope_inlines[parent_scope].push(i)
                 else:
                     scope_blocks[parent_scope].push(i)
