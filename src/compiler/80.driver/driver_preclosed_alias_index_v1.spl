@@ -1,0 +1,214 @@
+# Shared preclosed alias index (bug
+# unit_child_replays_preclosed_alias_walk_2026-11-28).
+#
+# Every consumer of one frozen parse-closure selection -- each per-file unit
+# child is a fresh process -- used to run driver_preclosed_source_aliases_v1
+# over the WHOLE selection: one import resolution per (importer directory,
+# spec) of every admitted source, only to append alias rows that are identical
+# for every consumer of that selection. Measured on the Stage 2 full-CLI build
+# (4220 selected sources, about 4300 rows in, 7240 out): the walk is the ~75 s
+# between `load_sources:seeded` and `load_sources ... complete` of a ~92 s
+# load, and it grows the process by more than 10 GiB.
+#
+# By default (SIMPLE_PRECLOSED_ALIAS_INDEX!=0/false/off) the first consumer
+# with a HIR queue publishes the alias rows to `<hir_queue>/preclosed_alias.idx`
+# (pid-unique temp file + atomic rename) and every later consumer rebuilds the
+# same rows from it: zero resolutions, one file read. Only a successful walk is
+# published. The header binds the index to a stamp over every input the walk
+# reads: each row's path, authored path, module name and content hash in
+# order, the resolution roots, the snapshot root, the library mode and the
+# ambient resolver inputs (cwd and the resolver's environment keys). Any
+# mismatch, a missing or garbled file, an out-of-range row or no queue falls
+# back to the full walk, never to guessed rows. Explicit 0/false/off rolls back
+# to the per-process walk.
+use compiler.common.driver_core_types.{SourceFile}
+use compiler.driver.driver_preclosed_source_aliases.{driver_preclosed_source_aliases_v1}
+use compiler.driver.driver_source_loading.{
+    driver_entry_resolver_cache_release_v1,
+    driver_entry_sync_resolver_cwd_v1}
+use std.common.crypto.sha256.{sha256_text}
+use std.io_runtime.{file_exists, file_read, file_write, file_rename, file_delete, getpid}
+use std.nogc_async_mut.sosix.environment.{sosix_env_get_nullable, sosix_cwd}
+
+pub const PRECLOSED_ALIAS_INDEX_ENV_V1: text = "SIMPLE_PRECLOSED_ALIAS_INDEX"
+const PRECLOSED_ALIAS_INDEX_MAGIC_V1: text = "preclosed-alias-index/v1"
+
+# rows[i] is the input row an alias copies its path, authored path and content
+# from; names[i] is the alias module name. Appended in this order.
+pub struct PreclosedAliasIndexRowsV1:
+    rows: [i64]
+    names: [text]
+
+# reason: on/off verdict of the raw SIMPLE_PRECLOSED_ALIAS_INDEX environment value
+@allow(primitive_api)
+pub fn preclosed_alias_index_enabled_v1(raw: text) -> bool:
+    val trimmed = raw.trim()
+    trimmed != "0" and trimmed != "false" and trimmed != "off"
+
+pub fn preclosed_alias_index_path_v1(queue: text) -> text:
+    "{queue}/preclosed_alias.idx"
+
+fn _pai_field_v1(value: text) -> text:
+    "{value.byte_len()}:{value}"
+
+# Every field is length-prefixed and every row is hashed on its own, so no
+# separator inside a path, name or body can alias two selections.
+pub fn preclosed_alias_index_stamp_v1(sources: [SourceFile], roots: [text], snapshot_root: text,
+        library_mode: text, ambient: [text]) -> text:
+    var parts: [text] = []
+    for source in sources:
+        parts.push(sha256_text(_pai_field_v1(source.path) + _pai_field_v1(source.authored_path) +
+            _pai_field_v1(source.module_name) + sha256_text(source.content)))
+    var settings = _pai_field_v1(snapshot_root) + _pai_field_v1(library_mode)
+    settings = settings + "roots={roots.len()};"
+    for root in roots:
+        settings = settings + _pai_field_v1(root)
+    settings = settings + "ambient={ambient.len()};"
+    for value in ambient:
+        settings = settings + _pai_field_v1(value)
+    parts.push(sha256_text(settings))
+    sha256_text(parts.join(","))
+
+# Inputs the resolver reads that the walk's signature does not show.
+fn _pai_ambient_v1() -> [text]:
+    [sosix_cwd(),
+        sosix_env_get_nullable("SIMPLE_SCV_SNAPSHOT_ROOT") ?? "",
+        sosix_env_get_nullable("SIMPLE_NATIVE_BUILD_ENTRY") ?? "",
+        sosix_env_get_nullable("SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE") ?? ""]
+
+fn _pai_header_v1(source_count: i64, alias_count: i64, stamp: text) -> text:
+    "{PRECLOSED_ALIAS_INDEX_MAGIC_V1} n={source_count} aliases={alias_count} stamp={stamp}"
+
+# reason: source_count is the input row count the header binds, a plain array length
+@allow(primitive_api)
+pub fn preclosed_alias_index_encode_v1(source_count: i64, stamp: text, index: PreclosedAliasIndexRowsV1) -> text:
+    var lines: [text] = [_pai_header_v1(source_count, index.rows.len(), stamp)]
+    var i = 0
+    while i < index.rows.len():
+        lines.push("{index.rows[i]}\t{index.names[i]}")
+        i = i + 1
+    lines.join("\n") + "\n"
+
+# reason: source_count is the input row count the header binds, a plain array length
+@allow(primitive_api)
+pub fn preclosed_alias_index_decode_v1(source_count: i64, stamp: text, content: text) -> Result<PreclosedAliasIndexRowsV1, text>:
+    if not content.ends_with("\n"):
+        return Err("preclosed alias index truncated")
+    val lines = content.split("\n")
+    # The trailing newline leaves one empty last element.
+    val alias_count = lines.len() - 2
+    if alias_count < 0 or lines[lines.len() - 1] != "":
+        return Err("preclosed alias index row count mismatch")
+    if lines[0] != _pai_header_v1(source_count, alias_count, stamp):
+        return Err("preclosed alias index selection mismatch")
+    var rows: [i64] = []
+    var names: [text] = []
+    var i = 1
+    while i <= alias_count:
+        val cols = lines[i].split("\t")
+        if cols.len() != 2 or cols[1] == "":
+            return Err("preclosed alias index row {i} malformed")
+        val row = cols[0].to_i64() ?? -1
+        if row < 0 or row >= source_count or "{row}" != cols[0]:
+            return Err("preclosed alias index row {i} out of range")
+        rows.push(row)
+        names.push(cols[1])
+        i = i + 1
+    Ok(PreclosedAliasIndexRowsV1(rows: rows, names: names))
+
+# The walk appends each alias as a copy of the FIRST input row with that path
+# (its admitted physical owner), renamed. Err when a result is not exactly
+# "inputs, then such copies": that result is returned but never published.
+fn preclosed_alias_index_rows_of_v1(sources: [SourceFile], result: [SourceFile]) -> Result<PreclosedAliasIndexRowsV1, text>:
+    if result.len() < sources.len():
+        return Err("preclosed alias result dropped rows")
+    var first_row_by_path: Dict<text, i64> = {}
+    var i = 0
+    while i < sources.len():
+        val kept = result[i]
+        val given = sources[i]
+        if kept.path != given.path or kept.authored_path != given.authored_path or
+                kept.module_name != given.module_name or kept.content != given.content:
+            return Err("preclosed alias result changed an input row")
+        if not first_row_by_path.contains_key(given.path):
+            first_row_by_path[given.path] = i
+        i = i + 1
+    var rows: [i64] = []
+    var names: [text] = []
+    while i < result.len():
+        val alias = result[i]
+        if alias.module_name == "" or alias.module_name.contains("\n") or alias.module_name.contains("\t") or
+                alias.module_name.contains("\r") or not first_row_by_path.contains_key(alias.path):
+            return Err("preclosed alias row is not encodable")
+        val row = first_row_by_path[alias.path]
+        val owner = sources[row]
+        if owner.authored_path != alias.authored_path or owner.content != alias.content:
+            return Err("preclosed alias row is not a copy of its owner")
+        rows.push(row)
+        names.push(alias.module_name)
+        i = i + 1
+    Ok(PreclosedAliasIndexRowsV1(rows: rows, names: names))
+
+# Same row construction as the walk: inputs keep their order and canonical
+# names, alias rows follow.
+fn preclosed_alias_index_apply_v1(sources: [SourceFile], index: PreclosedAliasIndexRowsV1) -> [SourceFile]:
+    var result: [SourceFile] = []
+    for original in sources:
+        result.push(original)
+    var i = 0
+    while i < index.rows.len():
+        val admitted = sources[index.rows[i]]
+        result.push(SourceFile(path: admitted.path,
+            authored_path: admitted.authored_path, content: admitted.content,
+            module_name: index.names[i]))
+        i = i + 1
+    result
+
+fn preclosed_alias_index_load_v1(queue: text, source_count: i64, stamp: text) -> Result<PreclosedAliasIndexRowsV1, text>:
+    val path = preclosed_alias_index_path_v1(queue)
+    if queue == "" or not file_exists(path):
+        return Err("preclosed alias index absent")
+    preclosed_alias_index_decode_v1(source_count, stamp, file_read(path))
+
+# Temp + atomic rename: a concurrent reader sees the old file or the whole new
+# one. A lost race publishes identical bytes, so either winner is correct.
+fn preclosed_alias_index_publish_v1(queue: text, source_count: i64, stamp: text,
+        index: PreclosedAliasIndexRowsV1) -> bool:
+    if queue == "":
+        return false
+    val target = preclosed_alias_index_path_v1(queue)
+    val tmp = "{target}.{getpid()}.tmp"
+    if not file_write(tmp, preclosed_alias_index_encode_v1(source_count, stamp, index)):
+        return false
+    if file_rename(tmp, target):
+        return true
+    val _dropped = file_delete(tmp)
+    file_exists(target)
+
+# load_sources entry: rebuild the alias rows from the shared index when on and
+# valid; otherwise run the full walk (and, when on, publish it for later
+# consumers of the same selection).
+# reason: enabled is the already-parsed rollback switch handed in by load_sources
+@allow(primitive_api)
+pub fn driver_preclosed_source_aliases_indexed_v1(sources: [SourceFile], source_roots: [text],
+        snapshot_root: text, library_mode: text, enabled: bool, queue: text) -> Result<[SourceFile], text>:
+    if not enabled or queue == "":
+        return driver_preclosed_source_aliases_v1(sources, source_roots, snapshot_root, library_mode)
+    val stamp = preclosed_alias_index_stamp_v1(sources, source_roots, snapshot_root, library_mode,
+        _pai_ambient_v1())
+    val hit = preclosed_alias_index_load_v1(queue, sources.len(), stamp)
+    if hit.is_ok():
+        # Same resolver state the walk leaves at its entry.
+        driver_entry_resolver_cache_release_v1()
+        driver_entry_sync_resolver_cwd_v1()
+        val index = hit.unwrap()
+        print "[preclosed-alias] index hit rows={sources.len()} aliases={index.rows.len()} resolutions=0"
+        return Ok(preclosed_alias_index_apply_v1(sources, index))
+    val computed = driver_preclosed_source_aliases_v1(sources, source_roots, snapshot_root, library_mode)
+    if computed.is_ok():
+        val encodable = preclosed_alias_index_rows_of_v1(sources, computed.unwrap())
+        var published = false
+        if encodable.is_ok():
+            published = preclosed_alias_index_publish_v1(queue, sources.len(), stamp, encodable.unwrap())
+        print "[preclosed-alias] index miss reason={hit.unwrap_err()} rows={sources.len()} aliases={computed.unwrap().len() - sources.len()} published={published}"
+    computed
