@@ -35,6 +35,12 @@ use std.gc_async_mut.gpu.browser_engine.script.agent_script.{
 use std.gc_async_mut.gpu.browser_engine.script.js_transpiler.{
     js_is_javascript, js_is_simple
 }
+use std.gc_async_mut.gpu.browser_engine.script.simple_script_vm.{
+    SimpleScriptDomVm
+}
+use std.gc_async_mut.gpu.browser_engine.script.console_buffer.{
+    ConsoleBuffer
+}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
     simple_web_layout_render_html_software_pixels_with_images
 }
@@ -522,7 +528,29 @@ fn _simple_eval_expr(raw_expr: text, dom: BeDomNode, names: [text], values: [tex
                     return "{a * b}"
     expr
 
+fn _ss_script_uses_legacy_dsl(source: text) -> bool:
+    for raw_line in source.split("\n"):
+        val line = raw_line.trim()
+        if (line.starts_with("set_text ") or line.starts_with("set_html ") or
+            line.starts_with("append_html ") or line.starts_with("add_class ") or
+            line.starts_with("remove_class ") or line.starts_with("toggle_class ") or
+            line.starts_with("set_attr ") or line.starts_with("set_style ") or
+            line.starts_with("body_text ") or line.starts_with("body_html ") or
+            line.starts_with("title ") or line.starts_with("log ") or
+            line.contains("sum_attr(") or line.contains("count(")):
+            return true
+    false
+
 fn _execute_simple_script_on_dom(dom_in: BeDomNode, source: text, next_id_in: i64) -> (BeDomNode, i64, [text], [text]):
+    if not _ss_script_uses_legacy_dsl(source):
+        var vm = SimpleScriptDomVm.new(ConsoleBuffer.new())
+        vm.next_alloc_id = next_id_in
+        vm.install_document(dom_in, true)
+        val ok = vm.execute(source)
+        var errs: [text] = []
+        if not ok or vm.error != "":
+            errs.push(if vm.error != "": vm.error else: "simple script failed")
+        return (vm.dom, vm.next_alloc_id, vm.logs, errs)
     var dom = dom_in
     var next_id = next_id_in
     var logs: [text] = []

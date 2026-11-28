@@ -30,6 +30,7 @@ use std.gc_async_mut.gpu.browser_engine.net.entity.request_types.{
 }
 use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
     be_dom_find_by_tag,
+    be_dom_find_by_node_id,
     be_dom_get_attr, be_dom_get_text_content,
     be_dom_has_attr,
     be_dom_serialize_children, be_dom_serialize_html_for_render,
@@ -628,6 +629,9 @@ class BrowserDomEventExecutor:
     offset_y: i32
     button: i32
     buttons: i32
+    delta_x: f64
+    delta_y: f64
+    delta_mode: i32
     data_transfer_keys: [text]
     data_transfer_vals: [text]
     data_transfer_map_id: i64
@@ -880,16 +884,21 @@ class BrowserDomEventExecutor:
             self.runtime.set_host_property(
                 event_id, "buttons", JsValue.Number(v: btns.to_f64())
             )
-            if event.event_type == "wheel":
-                self.runtime.set_host_property(
-                    event_id, "deltaX", JsValue.Number(v: self.wheel_delta_x)
-                )
-                self.runtime.set_host_property(
-                    event_id, "deltaY", JsValue.Number(v: self.wheel_delta_y)
-                )
-                self.runtime.set_host_property(
-                    event_id, "deltaMode", JsValue.Number(v: 0.0)
-                )
+        if event.event_type == "wheel":
+            val dx = if self.delta_x != 0.0: self.delta_x else: self.wheel_delta_x
+            val dy = if self.delta_y != 0.0: self.delta_y else: self.wheel_delta_y
+            self.runtime.set_host_property(
+                event_id, "deltaX", JsValue.Number(v: dx)
+            )
+            self.runtime.set_host_property(
+                event_id, "deltaY", JsValue.Number(v: dy)
+            )
+            self.runtime.set_host_property(
+                event_id, "deltaZ", JsValue.Number(v: 0.0)
+            )
+            self.runtime.set_host_property(
+                event_id, "deltaMode", JsValue.Number(v: self.delta_mode.to_f64())
+            )
         self.runtime.set_host_property(
             event_id, "defaultPrevented",
             JsValue.Boolean(v: event.default_prevented)
@@ -2101,6 +2110,9 @@ impl BrowserSession:
         """Dispatch wheel at (client_x, client_y), clamp scrollTop to [0, max], and fire scroll."""
         self.wheel_delta_x = delta_x.to_f64()
         self.wheel_delta_y = delta_y.to_f64()
+        self.pending_wheel_delta_x = self.wheel_delta_x
+        self.pending_wheel_delta_y = self.wheel_delta_y
+        self.pending_wheel_delta_mode = 0
         val wheel_res = self.dispatch_dom_event_route_with_pointer(
             route, "wheel", true, true,
             client_x, client_y, client_x, client_y,
@@ -2108,6 +2120,9 @@ impl BrowserSession:
         )
         self.wheel_delta_x = 0.0
         self.wheel_delta_y = 0.0
+        self.pending_wheel_delta_x = 0.0
+        self.pending_wheel_delta_y = 0.0
+        self.pending_wheel_delta_mode = 0
         val dispatched = wheel_res?
         val index = self._live_dom_index_for_route(route)?
         var target = match be_dom_node_for_route(self.current_dom, index, route):
@@ -2128,6 +2143,9 @@ impl BrowserSession:
         if bound >= 0 and next_top > bound:
             next_top = bound
         target.set_attr("data-scroll-top", "{next_top}")
+        val target_id = be_dom_get_attr(target, "id")
+        if target_id != "":
+            self._set_element_scroll_top_by_id(target_id, next_top)
         val path = be_dom_path_for_route(self.current_dom, index, route)
         if path.len() == 0:
             return Err("stale_target")
@@ -2135,6 +2153,26 @@ impl BrowserSession:
         self._sync_runtime_body_from_dom()
         val _ = self.dispatch_dom_event_route(route, "scroll", false, false)?
         Ok(next_top)
+
+    # reason: matches pointer event dispatch scalar parameters plus float wheel deltas
+    # @allow(primitive_api)
+    me dispatch_dom_wheel_event_at(
+        route: DomNodeRoute, client_x: i32, client_y: i32,
+        offset_x: i32, offset_y: i32, delta_x: f64, delta_y: f64
+    ) -> Result<BeDomRouteEventDispatch, text>:
+        """Dispatch a wheel event with explicit client/offset coordinates and wheel deltas."""
+        self.pending_wheel_delta_x = delta_x
+        self.pending_wheel_delta_y = delta_y
+        self.pending_wheel_delta_mode = 0
+        val res = self.dispatch_dom_event_route_with_pointer(
+            route, "wheel", true, true,
+            client_x, client_y, client_x, client_y,
+            client_x, client_y, offset_x, offset_y, 0, 0, false
+        )
+        self.pending_wheel_delta_x = 0.0
+        self.pending_wheel_delta_y = 0.0
+        self.pending_wheel_delta_mode = 0
+        res
 
     me dispatch_dom_context_menu_at(
         route: DomNodeRoute, client_x: i32, client_y: i32,
@@ -2479,6 +2517,9 @@ impl BrowserSession:
                 offset_y: offset_y,
                 button: button,
                 buttons: buttons,
+                delta_x: self.pending_wheel_delta_x,
+                delta_y: self.pending_wheel_delta_y,
+                delta_mode: self.pending_wheel_delta_mode,
                 data_transfer_keys: self.drag_data_transfer_keys,
                 data_transfer_vals: self.drag_data_transfer_vals,
                 data_transfer_map_id: -1,
@@ -2546,9 +2587,9 @@ impl BrowserSession:
             vm.install_document(self.current_dom, false)
             vm.data_transfer_keys = self.drag_data_transfer_keys
             vm.data_transfer_vals = self.drag_data_transfer_vals
-            vm.current_delta_x = self.wheel_delta_x
-            vm.current_delta_y = self.wheel_delta_y
-            vm.current_delta_mode = 0
+            vm.current_delta_x = if self.pending_wheel_delta_x != 0.0: self.pending_wheel_delta_x else: self.wheel_delta_x
+            vm.current_delta_y = if self.pending_wheel_delta_y != 0.0: self.pending_wheel_delta_y else: self.wheel_delta_y
+            vm.current_delta_mode = self.pending_wheel_delta_mode.to_i64()
             val vm_ev_res = vm.dispatch_event(
                 normalized_event_type,
                 target.node_id,
@@ -2583,6 +2624,7 @@ impl BrowserSession:
                 val _ = self._publish_runtime_body_candidate(next_vm_dom, vm_structural)
             else:
                 self.simple_script_executor.dom_vm = vm
+            self._sync_simple_script_scroll_tops()
             if self.dom_generation.value != dispatch_generation.value:
                 return Ok(dispatch)
 
@@ -3276,15 +3318,71 @@ impl BrowserSession:
         result.node_count = _browser_session_dom_node_count(self.current_dom)
         result
 
+    me _set_element_scroll_top_by_id(id_attr: text, scroll_top: i32):
+        if id_attr == "":
+            return
+        val clamped = if scroll_top < 0: 0 else: scroll_top
+        var i: i64 = 0
+        while i < self.element_scroll_ids.len():
+            if self.element_scroll_ids[i] == id_attr:
+                self.element_scroll_tops[i] = clamped
+                return
+            i = i + 1
+        self.element_scroll_ids.push(id_attr)
+        self.element_scroll_tops.push(clamped)
+
+    me _sync_simple_script_scroll_tops():
+        val vm = self.simple_script_executor.dom_vm
+        var i: i64 = 0
+        while i < vm.scroll_node_ids.len() and i < vm.scroll_tops.len():
+            val nid = vm.scroll_node_ids[i]
+            val stop = vm.scroll_tops[i]
+            if val Some(node) = be_dom_find_by_node_id(self.current_dom, nid):
+                val id_attr = be_dom_get_attr(node, "id")
+                if id_attr != "":
+                    self._set_element_scroll_top_by_id(id_attr, stop)
+            i = i + 1
+
+    me _sync_element_scroll_tops_from_js():
+        if val Some(state) = self.runtime_state:
+            var idx: i64 = 0
+            while idx < state.dom_element_ids.len():
+                val id_snap = if idx < state.dom_id_snapshots.len(): state.dom_id_snapshots[idx] else: ""
+                if id_snap != "":
+                    val st_prop = state.runtime.get_host_property(state.dom_element_ids[idx], "scrollTop")
+                    match st_prop:
+                        JsValue.Number(n):
+                            val st_i32 = n.to_i32()
+                            if st_i32 != 0:
+                                self._set_element_scroll_top_by_id(id_snap, st_i32)
+                        _:
+                            pass_dn
+                idx = idx + 1
+
     me render_to_pixels(width: i32, height: i32) -> BeRenderResult:
         var renderer = BrowserRenderer.create(width, height)
         val html = self.render_html_document()
         self.prepare_css_animation_instances_with_html(width, html)
         val animation_time_ms = self.monotonic_time_ms - self.animation_start_time_ms
-        var result = renderer.render_html_to_pixels_at_time_with_animations_with_images(
-            html, animation_time_ms, self.css_animation_instances,
-            self.image_resources
-        )
+        var active_scroll_id = ""
+        var active_scroll_top: i32 = 0
+        var si: i64 = 0
+        while si < self.element_scroll_ids.len() and si < self.element_scroll_tops.len():
+            if self.element_scroll_tops[si] > 0:
+                active_scroll_id = self.element_scroll_ids[si]
+                active_scroll_top = self.element_scroll_tops[si]
+                break
+            si = si + 1
+        var result = if active_scroll_id != "":
+            renderer.render_html_to_pixels_at_time_with_animations_with_images_with_element_scroll(
+                html, animation_time_ms, self.css_animation_instances,
+                self.image_resources, active_scroll_id, active_scroll_top
+            )
+        else:
+            renderer.render_html_to_pixels_at_time_with_animations_with_images(
+                html, animation_time_ms, self.css_animation_instances,
+                self.image_resources
+            )
         result.node_count = _browser_session_dom_node_count(self.current_dom)
         result
 
@@ -4108,6 +4206,7 @@ impl BrowserSession:
                 self._reconcile_dynamic_image_sources(nil)
         else:
             self.runtime_state = Some(state)
+        self._sync_element_scroll_tops_from_js()
         Ok(true)
 
     me _push_runtime_history_entry():
