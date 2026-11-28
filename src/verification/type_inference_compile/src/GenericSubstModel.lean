@@ -1,6 +1,5 @@
 /-!
--- Simple model: src/compiler/30.types/generic_subst/generic_subst_model.spl; the correspondence table is in its header.
-Structural model of `src/compiler/30.types/generic_subst/generic_subst_model.spl`.
+Structural model of `src/compiler/30.types/generic_subst/generic_subst_model.spl`; the Simple law each theorem mirrors is named in the `-- Simple:` comment above it and in the correspondence table in that file's header.
 This is a manual proof owner, not generated code. Production HIR refinement
 and executable Simple/Lean correspondence are separate obligations.
 -/

@@ -372,7 +372,7 @@ expect(mm_render(mm_match(mt_app(MT_ARRAY, [mt_var("T")]), mt_app(MT_SLICE, [mt_
 - Match a variable against evidence that still holds a variable
    - Expected: mm_render(unknown) equals `Bound\{\}`
    - Expected: bad equals ``
-   - Expected: checked equals `218)  # oracle: enumerated open-evidence cases of this scenario (patterns x o... (full value in folded executable source)`
+   - Expected: checked equals `218)  # oracle: 365 types of the universe - 147 closed types = 218 open types... (full value in folded executable source)`
 
 
 <details>
@@ -397,7 +397,7 @@ for t in mu_types():
 val unknown = mm_match(mt_var("T"), mt_unknown(), ms_empty())
 expect(mm_render(unknown)).to_equal("Bound\{\}")
 expect(bad).to_equal("")
-expect(checked).to_equal(218)  # oracle: enumerated open-evidence cases of this scenario (patterns x open evidence shapes)
+expect(checked).to_equal(218)  # oracle: 365 types of the universe - 147 closed types = 218 open types, each matched against an open evidence shape
 ```
 
 </details>
@@ -590,7 +590,7 @@ expect(mk_key("m", "f", [mt_con("i64")])).to_equal("m1:mf1:fl1:c3:i64")
 - Encode every pair of closed types and compare key equality with structural equality
    - Expected: bad equals ``
    - Expected: checked equals `21609)  # oracle: 147 closed types squared: every ordered pair`
-   - Expected: equal_pairs equals `147)  # oracle: closed types of the universe: the closed members of the 365 (... (full value in folded executable source)`
+   - Expected: equal_pairs equals `147)  # oracle: the diagonal of the 147 x 147 grid: each closed type equals o... (full value in folded executable source)`
 
 
 <details>
@@ -628,7 +628,7 @@ while i < types.len():
 print "K2 pairs={checked} equal={equal_pairs}"
 expect(bad).to_equal("")
 expect(checked).to_equal(21609)  # oracle: 147 closed types squared: every ordered pair
-expect(equal_pairs).to_equal(147)  # oracle: closed types of the universe: the closed members of the 365 (no variable T or U anywhere)
+expect(equal_pairs).to_equal(147)  # oracle: the diagonal of the 147 x 147 grid: each closed type equals only itself
 ```
 
 </details>
@@ -896,15 +896,15 @@ Requirements covered by the scenarios in this manual:
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `538bfe04dbfe3be43cf6e4a058cd197b90d1a42ab7dde0f4296fd01878d186a0`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `8a99534036929b8063efb4117c1edeb5e5891c5c1de78d5d58b94fb44d03500f`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `538bfe04dbfe3be43cf6e4a058cd197b90d1a42ab7dde0f4296fd01878d186a0`.
+Source SHA-256: `8a99534036929b8063efb4117c1edeb5e5891c5c1de78d5d58b94fb44d03500f`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `538bfe04dbfe3be43cf6e4a058cd197b90d1a42ab7dde0f4296fd01878d186a0`  
+Source SHA-256: `8a99534036929b8063efb4117c1edeb5e5891c5c1de78d5d58b94fb44d03500f`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
 Raw score: **98/100**; effective score: **98/100**; blockers: **0**.
 

@@ -109,7 +109,7 @@ expect(mu_field_declarations().len()).to_equal(8)  # oracle: the 8 declared fiel
 - invalid capture metadata value: protocol_json (expected kind tui|gui|html|text|api|protocol|exec|binary|log|artifact and mode after_step|after_scenario|on_failure|off)
 
 
-- Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare
+- Step every input of the 'let with an annotation' kind through mf_step and its substituted copy, then compare
    - Expected: first_bad equals ``
    - Expected: ok_cases equals `26)  # oracle: each of the 26 flow types is accepted once (the destination eq... (full value in folded executable source)`
    - Expected: ill_cases equals `650)  # oracle: 676 ordered pairs of the 26 flow types minus the 26 pairs who... (full value in folded executable source)`
@@ -123,7 +123,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-GSUBST-004
-step("Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare")
+step("Step every input of the 'let with an annotation' kind through mf_step and its substituted copy, then compare")
 sweep_binary(MF_LET)
 expect(first_bad).to_equal("")
 expect(ok_cases).to_equal(26)  # oracle: each of the 26 flow types is accepted once (the destination equals the value, or the kind passes its input on)
@@ -138,7 +138,7 @@ expect(ill_cases).to_equal(650)  # oracle: 676 ordered pairs of the 26 flow type
 - invalid capture metadata value: protocol_json (expected kind tui|gui|html|text|api|protocol|exec|binary|log|artifact and mode after_step|after_scenario|on_failure|off)
 
 
-- Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare
+- Step every input of the 'let without an annotation' kind through mf_step and its substituted copy, then compare
    - Expected: first_bad equals ``
    - Expected: ok_cases equals `26)  # oracle: each of the 26 flow types is accepted once (the destination eq... (full value in folded executable source)`
 
@@ -151,7 +151,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-GSUBST-004
-step("Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare")
+step("Step every input of the 'let without an annotation' kind through mf_step and its substituted copy, then compare")
 sweep_unary(MF_LET_INFER)
 expect(first_bad).to_equal("")
 expect(ok_cases).to_equal(26)  # oracle: each of the 26 flow types is accepted once (the destination equals the value, or the kind passes its input on)
@@ -165,7 +165,7 @@ expect(ok_cases).to_equal(26)  # oracle: each of the 26 flow types is accepted o
 - invalid capture metadata value: protocol_json (expected kind tui|gui|html|text|api|protocol|exec|binary|log|artifact and mode after_step|after_scenario|on_failure|off)
 
 
-- Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare
+- Step every input of the 'assignment to a var' kind through mf_step and its substituted copy, then compare
    - Expected: first_bad equals ``
    - Expected: ok_cases equals `26)  # oracle: each of the 26 flow types is accepted once (the destination eq... (full value in folded executable source)`
 
@@ -178,7 +178,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-GSUBST-004
-step("Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare")
+step("Step every input of the 'assignment to a var' kind through mf_step and its substituted copy, then compare")
 sweep_binary(MF_ASSIGN)
 expect(first_bad).to_equal("")
 expect(ok_cases).to_equal(26)  # oracle: each of the 26 flow types is accepted once (the destination equals the value, or the kind passes its input on)
@@ -192,7 +192,7 @@ expect(ok_cases).to_equal(26)  # oracle: each of the 26 flow types is accepted o
 - invalid capture metadata value: protocol_json (expected kind tui|gui|html|text|api|protocol|exec|binary|log|artifact and mode after_step|after_scenario|on_failure|off)
 
 
-- Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare
+- Step every input of the 'argument passed to a parameter' kind through mf_step and its substituted copy, then compare
    - Expected: first_bad equals ``
    - Expected: ok_cases equals `26)  # oracle: each of the 26 flow types is accepted once (the destination eq... (full value in folded executable source)`
 
@@ -205,7 +205,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-GSUBST-004
-step("Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare")
+step("Step every input of the 'argument passed to a parameter' kind through mf_step and its substituted copy, then compare")
 sweep_binary(MF_PARAM)
 expect(first_bad).to_equal("")
 expect(ok_cases).to_equal(26)  # oracle: each of the 26 flow types is accepted once (the destination equals the value, or the kind passes its input on)
@@ -219,7 +219,7 @@ expect(ok_cases).to_equal(26)  # oracle: each of the 26 flow types is accepted o
 - invalid capture metadata value: protocol_json (expected kind tui|gui|html|text|api|protocol|exec|binary|log|artifact and mode after_step|after_scenario|on_failure|off)
 
 
-- Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare
+- Step every input of the 'value returned' kind through mf_step and its substituted copy, then compare
    - Expected: first_bad equals ``
    - Expected: ok_cases equals `26)  # oracle: each of the 26 flow types is accepted once (the destination eq... (full value in folded executable source)`
 
@@ -232,7 +232,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-GSUBST-004
-step("Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare")
+step("Step every input of the 'value returned' kind through mf_step and its substituted copy, then compare")
 sweep_binary(MF_RETURN)
 expect(first_bad).to_equal("")
 expect(ok_cases).to_equal(26)  # oracle: each of the 26 flow types is accepted once (the destination equals the value, or the kind passes its input on)
@@ -246,7 +246,7 @@ expect(ok_cases).to_equal(26)  # oracle: each of the 26 flow types is accepted o
 - invalid capture metadata value: protocol_json (expected kind tui|gui|html|text|api|protocol|exec|binary|log|artifact and mode after_step|after_scenario|on_failure|off)
 
 
-- Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare
+- Step every input of the 'closure capture' kind through mf_step and its substituted copy, then compare
    - Expected: first_bad equals ``
    - Expected: ok_cases equals `26)  # oracle: each of the 26 flow types is accepted once (the destination eq... (full value in folded executable source)`
 
@@ -259,7 +259,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-GSUBST-004
-step("Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare")
+step("Step every input of the 'closure capture' kind through mf_step and its substituted copy, then compare")
 sweep_unary(MF_CAPTURE)
 expect(first_bad).to_equal("")
 expect(ok_cases).to_equal(26)  # oracle: each of the 26 flow types is accepted once (the destination equals the value, or the kind passes its input on)
@@ -275,7 +275,7 @@ expect(ok_cases).to_equal(26)  # oracle: each of the 26 flow types is accepted o
 - invalid capture metadata value: protocol_json (expected kind tui|gui|html|text|api|protocol|exec|binary|log|artifact and mode after_step|after_scenario|on_failure|off)
 
 
-- Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare
+- Step every input of the 'array element read' kind through mf_step and its substituted copy, then compare
    - Expected: first_bad equals ``
    - Expected: ok_cases equals `5)  # oracle: 5 of the 26 flow types are arrays, the only container this kind... (full value in folded executable source)`
    - Expected: ill_cases equals `21)  # oracle: the 26 - 5 flow types that are not arrays are refused`
@@ -289,7 +289,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-GSUBST-004
-step("Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare")
+step("Step every input of the 'array element read' kind through mf_step and its substituted copy, then compare")
 sweep_unary(MF_ELEM_READ)
 expect(first_bad).to_equal("")
 expect(ok_cases).to_equal(5)  # oracle: 5 of the 26 flow types are arrays, the only container this kind accepts
@@ -304,7 +304,7 @@ expect(ill_cases).to_equal(21)  # oracle: the 26 - 5 flow types that are not arr
 - invalid capture metadata value: protocol_json (expected kind tui|gui|html|text|api|protocol|exec|binary|log|artifact and mode after_step|after_scenario|on_failure|off)
 
 
-- Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare
+- Step every input of the 'array element write' kind through mf_step and its substituted copy, then compare
    - Expected: first_bad equals ``
    - Expected: ok_cases equals `5)  # oracle: 5 of the 26 flow types are arrays, the only container this kind... (full value in folded executable source)`
 
@@ -317,7 +317,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-GSUBST-004
-step("Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare")
+step("Step every input of the 'array element write' kind through mf_step and its substituted copy, then compare")
 sweep_binary(MF_ELEM_WRITE)
 expect(first_bad).to_equal("")
 expect(ok_cases).to_equal(5)  # oracle: 5 of the 26 flow types are arrays, the only container this kind accepts
@@ -334,7 +334,7 @@ expect(ok_cases).to_equal(5)  # oracle: 5 of the 26 flow types are arrays, the o
 - invalid capture metadata value: protocol_json (expected kind tui|gui|html|text|api|protocol|exec|binary|log|artifact and mode after_step|after_scenario|on_failure|off)
 
 
-- Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare
+- Step every input of the 'loop variable' kind through mf_step and its substituted copy, then compare
    - Expected: first_bad equals ``
    - Expected: ok_cases equals `5)  # oracle: 5 of the 26 flow types are arrays, the only container this kind... (full value in folded executable source)`
 
@@ -347,7 +347,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-GSUBST-004
-step("Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare")
+step("Step every input of the 'loop variable' kind through mf_step and its substituted copy, then compare")
 sweep_unary(MF_LOOP)
 expect(first_bad).to_equal("")
 expect(ok_cases).to_equal(5)  # oracle: 5 of the 26 flow types are arrays, the only container this kind accepts
@@ -364,7 +364,7 @@ expect(ok_cases).to_equal(5)  # oracle: 5 of the 26 flow types are arrays, the o
 - invalid capture metadata value: protocol_json (expected kind tui|gui|html|text|api|protocol|exec|binary|log|artifact and mode after_step|after_scenario|on_failure|off)
 
 
-- Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare
+- Step every input of the 'dict entry read' kind through mf_step and its substituted copy, then compare
    - Expected: first_bad equals ``
    - Expected: ok_cases equals `2)  # oracle: only the two-argument constructor types of this kind (2 of the ... (full value in folded executable source)`
 
@@ -377,7 +377,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-GSUBST-004
-step("Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare")
+step("Step every input of the 'dict entry read' kind through mf_step and its substituted copy, then compare")
 sweep_binary(MF_DICT_READ)
 expect(first_bad).to_equal("")
 expect(ok_cases).to_equal(2)  # oracle: only the two-argument constructor types of this kind (2 of the 26 flow types) are accepted
@@ -391,7 +391,7 @@ expect(ok_cases).to_equal(2)  # oracle: only the two-argument constructor types 
 - invalid capture metadata value: protocol_json (expected kind tui|gui|html|text|api|protocol|exec|binary|log|artifact and mode after_step|after_scenario|on_failure|off)
 
 
-- Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare
+- Step every input of the 'dict entry write' kind through mf_step and its substituted copy, then compare
    - Expected: first_bad equals ``
    - Expected: ok_cases equals `2)  # oracle: only the two-argument constructor types of this kind (2 of the ... (full value in folded executable source)`
    - Expected: ok_cases + ill_cases equals `17576)  # oracle: 26 x 26 x 26 ordered triples of flow types`
@@ -405,7 +405,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-GSUBST-004
-step("Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare")
+step("Step every input of the 'dict entry write' kind through mf_step and its substituted copy, then compare")
 reset()
 val substs = flow_substs()
 val types = mu_flow_types()
@@ -435,7 +435,7 @@ expect(ok_cases + ill_cases).to_equal(17576)  # oracle: 26 x 26 x 26 ordered tri
 - invalid capture metadata value: protocol_json (expected kind tui|gui|html|text|api|protocol|exec|binary|log|artifact and mode after_step|after_scenario|on_failure|off)
 
 
-- Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare
+- Step every input of the 'tuple destructuring, both components' kind through mf_step and its substituted copy, then compare
    - Expected: first_bad equals ``
    - Expected: ok_cases equals `2)  # oracle: only the two-argument constructor types of this kind (2 of the ... (full value in folded executable source)`
    - Expected: first_bad equals ``
@@ -450,7 +450,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-GSUBST-004
-step("Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare")
+step("Step every input of the 'tuple destructuring, both components' kind through mf_step and its substituted copy, then compare")
 sweep_unary(MF_TUPLE_FIRST)
 expect(first_bad).to_equal("")
 expect(ok_cases).to_equal(2)  # oracle: only the two-argument constructor types of this kind (2 of the 26 flow types) are accepted
@@ -469,7 +469,7 @@ expect(ok_cases).to_equal(2)  # oracle: only the two-argument constructor types 
 - invalid capture metadata value: protocol_json (expected kind tui|gui|html|text|api|protocol|exec|binary|log|artifact and mode after_step|after_scenario|on_failure|off)
 
 
-- Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare
+- Step every input of the 'wrap into an optional' kind through mf_step and its substituted copy, then compare
    - Expected: first_bad equals ``
    - Expected: ok_cases equals `26)  # oracle: each of the 26 flow types is accepted once (the destination eq... (full value in folded executable source)`
 
@@ -482,7 +482,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-GSUBST-004
-step("Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare")
+step("Step every input of the 'wrap into an optional' kind through mf_step and its substituted copy, then compare")
 sweep_unary(MF_OPT_WRAP)
 expect(first_bad).to_equal("")
 expect(ok_cases).to_equal(26)  # oracle: each of the 26 flow types is accepted once (the destination equals the value, or the kind passes its input on)
@@ -496,9 +496,9 @@ expect(ok_cases).to_equal(26)  # oracle: each of the 26 flow types is accepted o
 - invalid capture metadata value: protocol_json (expected kind tui|gui|html|text|api|protocol|exec|binary|log|artifact and mode after_step|after_scenario|on_failure|off)
 
 
-- Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare
+- Step every input of the 'unwrap / payload pattern' kind through mf_step and its substituted copy, then compare
    - Expected: first_bad equals ``
-   - Expected: ok_cases equals `5)  # oracle: 5 of the 26 flow types are arrays, the only container this kind... (full value in folded executable source)`
+   - Expected: ok_cases equals `5)  # oracle: 5 of the 26 flow types are optionals, the only type this kind a... (full value in folded executable source)`
 
 
 <details>
@@ -509,10 +509,10 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-GSUBST-004
-step("Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare")
+step("Step every input of the 'unwrap / payload pattern' kind through mf_step and its substituted copy, then compare")
 sweep_unary(MF_OPT_UNWRAP)
 expect(first_bad).to_equal("")
-expect(ok_cases).to_equal(5)  # oracle: 5 of the 26 flow types are arrays, the only container this kind accepts
+expect(ok_cases).to_equal(5)  # oracle: 5 of the 26 flow types are optionals, the only type this kind accepts
 ```
 
 </details>
@@ -523,9 +523,9 @@ expect(ok_cases).to_equal(5)  # oracle: 5 of the 26 flow types are arrays, the o
 - invalid capture metadata value: protocol_json (expected kind tui|gui|html|text|api|protocol|exec|binary|log|artifact and mode after_step|after_scenario|on_failure|off)
 
 
-- Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare
+- Step every input of the 'coalesce with a default' kind through mf_step and its substituted copy, then compare
    - Expected: first_bad equals ``
-   - Expected: ok_cases equals `5)  # oracle: 5 of the 26 flow types are arrays, the only container this kind... (full value in folded executable source)`
+   - Expected: ok_cases equals `5)  # oracle: 5 of the 26 flow types are optionals, the only type this kind a... (full value in folded executable source)`
 
 
 <details>
@@ -536,10 +536,10 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-GSUBST-004
-step("Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare")
+step("Step every input of the 'coalesce with a default' kind through mf_step and its substituted copy, then compare")
 sweep_binary(MF_OPT_DEFAULT)
 expect(first_bad).to_equal("")
-expect(ok_cases).to_equal(5)  # oracle: 5 of the 26 flow types are arrays, the only container this kind accepts
+expect(ok_cases).to_equal(5)  # oracle: 5 of the 26 flow types are optionals, the only type this kind accepts
 ```
 
 </details>
@@ -550,7 +550,7 @@ expect(ok_cases).to_equal(5)  # oracle: 5 of the 26 flow types are arrays, the o
 - invalid capture metadata value: protocol_json (expected kind tui|gui|html|text|api|protocol|exec|binary|log|artifact and mode after_step|after_scenario|on_failure|off)
 
 
-- Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare
+- Step every input of the 'call through a closure value' kind through mf_step and its substituted copy, then compare
    - Expected: first_bad equals ``
    - Expected: ok_cases equals `2)  # oracle: only the two-argument constructor types of this kind (2 of the ... (full value in folded executable source)`
 
@@ -563,7 +563,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-GSUBST-004
-step("Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare")
+step("Step every input of the 'call through a closure value' kind through mf_step and its substituted copy, then compare")
 sweep_binary(MF_CLOSURE_CALL)
 expect(first_bad).to_equal("")
 expect(ok_cases).to_equal(2)  # oracle: only the two-argument constructor types of this kind (2 of the 26 flow types) are accepted
@@ -579,7 +579,7 @@ expect(ok_cases).to_equal(2)  # oracle: only the two-argument constructor types 
 - invalid capture metadata value: protocol_json (expected kind tui|gui|html|text|api|protocol|exec|binary|log|artifact and mode after_step|after_scenario|on_failure|off)
 
 
-- Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare
+- Read every declaration of the universe through every Pair instance and compare with substitution
    - Expected: first_bad equals ``
    - Expected: ok_cases equals `175)  # oracle: of the 8 x 25 = 200 declaration x instance pairs, 175 are acc... (full value in folded executable source)`
    - Expected: ill_cases equals `25)  # oracle: the remaining 25 of the 200 pairs are shape errors`
@@ -594,7 +594,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-GSUBST-004
-step("Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare")
+step("Read every declaration of the universe through every Pair instance and compare with substitution")
 reset()
 val substs = flow_substs()
 for inst in mu_pair_instances():
@@ -619,7 +619,7 @@ expect(mf_render(read)).to_equal("Ok(Array<'T>)")
 - invalid capture metadata value: protocol_json (expected kind tui|gui|html|text|api|protocol|exec|binary|log|artifact and mode after_step|after_scenario|on_failure|off)
 
 
-- Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare
+- Read a field through three hand-picked invalid instances: open declaration, wrong arity, not an instance
    - Expected: mf_render(open) equals `Ill(open_declaration)`
    - Expected: mf_render(wrong_arity) equals `Ill(shape)`
    - Expected: mf_render(not_an_instance) equals `Ill(shape)`
@@ -633,7 +633,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-GSUBST-004
-step("Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare")
+step("Read a field through three hand-picked invalid instances: open declaration, wrong arity, not an instance")
 val open = mf_step(MF_FIELD_READ, [mt_app(MU_PAIR, [mt_con("i64"), mt_con("i64")]), mt_var("T")], ["P", "Q"])
 expect(mf_render(open)).to_equal("Ill(open_declaration)")
 val wrong_arity = mf_step(MF_FIELD_READ, [mt_app(MU_BOX, [mt_con("i64")]), mt_var("P")], ["P", "Q"])
@@ -650,7 +650,7 @@ expect(mf_render(not_an_instance)).to_equal("Ill(shape)")
 - invalid capture metadata value: protocol_json (expected kind tui|gui|html|text|api|protocol|exec|binary|log|artifact and mode after_step|after_scenario|on_failure|off)
 
 
-- Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare
+- Write a field of every instance with every value type and compare with the instantiated field type
    - Expected: first_bad equals ``
    - Expected: ok_cases > 0 is true
    - Expected: ok_cases + ill_cases equals `5200)  # oracle: 200 declaration x instance pairs x 26 value types`
@@ -664,7 +664,7 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-GSUBST-004
-step("Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare")
+step("Write a field of every instance with every value type and compare with the instantiated field type")
 reset()
 val substs = flow_substs()
 val values = mu_flow_types()
@@ -707,15 +707,15 @@ Requirements covered by the scenarios in this manual:
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `34a2c25933fe8c3a44d62190444c95175a200d07da7ebf15d53f8a2c2a43eb7e`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `b29f101a357b86727b48a17e857078a224d75877264dd9a2b99e4230ff02e730`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `34a2c25933fe8c3a44d62190444c95175a200d07da7ebf15d53f8a2c2a43eb7e`.
+Source SHA-256: `b29f101a357b86727b48a17e857078a224d75877264dd9a2b99e4230ff02e730`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `34a2c25933fe8c3a44d62190444c95175a200d07da7ebf15d53f8a2c2a43eb7e`  
+Source SHA-256: `b29f101a357b86727b48a17e857078a224d75877264dd9a2b99e4230ff02e730`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
 Raw score: **95/100**; effective score: **95/100**; blockers: **0**.
 

@@ -37,7 +37,7 @@ Run `bin/simple test test/01_unit/compiler/30.types/generic_subst/generic_subst_
 after editing the model, the projector key helpers, or the Lean file.
 
 ## Compatibility and limitations
-The projector parity cases use closed types only (a binder id embeds the
+The projector parity cases cover closed types and, end to end, a template with one type parameter (a binder id embeds the
 declaration symbol). Lean proves substitution laws; the key and flow laws are
 bounded sweeps in the sibling specs.
 
@@ -266,7 +266,7 @@ Runnable source: 18 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-GSUBST-001
+# @req REQ-GSUBST-005
 step("Render types, substitutions, matches and inference results")
 val t = mt_app(MT_DICT, [mt_var("K"), mt_app(MT_ARRAY, [int_t()])])
 expect(mt_render(t)).to_equal("Dict<'K,Array<i64>>")
@@ -635,7 +635,7 @@ Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-GSUBST-002
+# @req REQ-GSUBST-004
 step("Step with the wrong number of inputs, with an unknown kind and with a malformed array")
 expect(mf_render(mf_step("let", [int_t()], []))).to_equal("Ill(arity)")
 expect(mf_render(mf_step("no_such_kind", [int_t(), int_t()], []))).to_equal("Ill(unknown_kind)")
@@ -664,7 +664,7 @@ Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-GSUBST-002
+# @req REQ-GSUBST-004
 step("Write into a dict, a non-dict, and with a wrong key or value type")
 val dict_t = mt_app(MT_DICT, [text_t(), int_t()])
 expect(mf_render(mf_step("dict_write", [dict_t, text_t(), int_t()], []))).to_equal("Ok(i64)")
@@ -759,22 +759,24 @@ expect(mt_struct_eq(back.t, t)).to_equal(true)
 Requirements covered by the scenarios in this manual:
 
 - `REQ-GSUBST-001`
+- `REQ-GSUBST-005`
 - `REQ-GSUBST-003`
 - `REQ-GSUBST-002`
+- `REQ-GSUBST-004`
 <!-- sspec-maintain:traceability:end -->
 
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `d6070647ed347c9f60540d715d2cfc80ee93bd0438a1d0b08e4d269fb81937da`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `01ef876c6248b14c324dda7d25bc9b06a770fd5ba2c2a54b813fff664f3dfda3`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `d6070647ed347c9f60540d715d2cfc80ee93bd0438a1d0b08e4d269fb81937da`.
+Source SHA-256: `01ef876c6248b14c324dda7d25bc9b06a770fd5ba2c2a54b813fff664f3dfda3`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `d6070647ed347c9f60540d715d2cfc80ee93bd0438a1d0b08e4d269fb81937da`  
+Source SHA-256: `01ef876c6248b14c324dda7d25bc9b06a770fd5ba2c2a54b813fff664f3dfda3`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
 Raw score: **98/100**; effective score: **98/100**; blockers: **0**.
 
