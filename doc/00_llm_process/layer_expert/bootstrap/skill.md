@@ -1050,11 +1050,13 @@ imports" and
   `mangle.rs`. A seed without `--features llvm` cannot show this class at all.
 - Cranelift has its own half in `codegen/instr/closures_structs.rs`: a bare
   (untyped-receiver) `byte_len` / `char_count` takes the text builtin unless
-  the calling module defines or imports one. The JIT is one unit, so that scope
-  test does not separate modules there.
+  the calling module defines or imports one.
+- The script lane (`simple main.spl`) is one flattened unit with no use map;
+  scope there comes from the flattener's owner tags and import markers
+  (`Lowerer::flatten_free_fn_out_of_scope`), applied in HIR method lowering.
 - "In the use map" is wider than "named in a `use`": `collect_use_imports`
   also inserts bare names with several project candidates that the imported
-  module owns.
+  module owns (not `byte_len` / `char_count` since 2026-11-28).
 - A copied seed binary stops linking Cranelift probes once the worktree it was
   built from is deleted (`refusing to weak-stub core enum runtime symbols`);
   measure baselines before removing the worktree.
