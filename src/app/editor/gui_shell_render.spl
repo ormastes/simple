@@ -27,16 +27,35 @@ use std.editor.common.types.{editor_mode_name}
 use std.editor.services.md_doc_stats.{md_stats_to_status_bar}
 use std.editor.view.preview_pane.{preview_pane_render_for_editor}
 use std.editor.view.outline_panel.{outline_panel_render}
+use std.io_runtime.{env_get, file_exists}
 use app.editor.editor_controller.{EditorController}
 use app.editor.gui_shell.{GuiShellState, DragState, MouseCoords}
 
 
 fn gui_shell_render_frame(state: GuiShellState) -> GuiFrame:
     val buffer = state.ctrl.active_buffer()
-    val tab_bar = gui_render_tab_bar_html(state.ctrl.session)
+    var tab_bar = gui_render_tab_bar_html(state.ctrl.session)
+    if tab_bar == "<div class=\"tab-bar\"></div>" and state.ctrl.session.documents.len() > 0:
+        var fallback_tabs = "<div class=\"tab-bar\">"
+        var dti: i64 = 0
+        while dti < state.ctrl.session.documents.len():
+            val doc_item = state.ctrl.session.documents[dti]
+            val active_cls = if dti == state.ctrl.session.active_index or (state.ctrl.session.active_index < 0 and dti == 0) then " active" else: ""
+            fallback_tabs = fallback_tabs + "<div class=\"tab" + active_cls + "\" data-event=\"tab-select\" data-value=\"" + dti.to_text() + "\">" + _gui_shell_escape_html(doc_item.display_name()) + "</div>"
+            dti = dti + 1
+        tab_bar = fallback_tabs + "</div>"
     var file_tree_html = ""
     if state.ctrl.file_tree_visible:
         file_tree_html = gui_render_file_tree_html(state.ctrl.file_tree)
+        if not file_tree_html.contains("tree-node file") and state.ctrl.session.documents.len() > 0:
+            var doc_tree = "<div class=\"file-tree\"><div class=\"tree-node folder selected\">.</div>"
+            var fti: i64 = 0
+            while fti < state.ctrl.session.documents.len():
+                val doc_item = state.ctrl.session.documents[fti]
+                val sel_cls = if fti == state.ctrl.session.active_index or (state.ctrl.session.active_index < 0 and fti == 0) then " selected" else: ""
+                doc_tree = doc_tree + "<div class=\"tree-node file" + sel_cls + "\" data-event=\"file-tree-select\" data-value=\"" + _gui_shell_escape_html(doc_item.path()) + "\">" + _gui_shell_escape_html(doc_item.display_name()) + "</div>"
+                fti = fti + 1
+            file_tree_html = doc_tree + "</div>"
     var editor_html = ""
     if state.ctrl.settings_view.is_some():
         editor_html = gui_render_settings_html(state.ctrl.settings_view, state.ctrl.config)
@@ -55,8 +74,10 @@ fn gui_shell_render_frame(state: GuiShellState) -> GuiFrame:
     val doc_frame = state.ctrl.session.active_document()
     val mode_str = editor_mode_name(state.ctrl.session.mode)
     var status_extra = ""
-    if doc_frame != nil and doc_frame.language_id == "markdown":
+    if doc_frame.language_id == "markdown":
         status_extra = " | " + md_stats_to_status_bar(doc_frame.cached_md_stats)
+    if doc_frame.custom_editor_id != "":
+        status_extra = status_extra + " | custom-editor:" + doc_frame.custom_editor_id
     val hover_html = gui_render_lsp_hover_popup_html(state.ctrl.lsp_hover_popup)
     val signature_html = gui_render_lsp_signature_popup_html(state.ctrl.lsp_signature_popup)
     val status_html = "<div class=\"status\">" + mode_str + " | " + state.ctrl.status_msg + status_extra + "</div>"
@@ -474,11 +495,27 @@ fn _ide_draw_text(eng: Engine2D, sfnt_path: text, x: i32, y: i32, txt: text, col
     else:
         eng.draw_text(x, y, txt, color, size_px)
 
+fn _ide_resolve_sfnt_path() -> text:
+    val direct = engine2d_sfnt_resolve_path("")
+    if direct != "":
+        return direct
+    val asset_root = env_get("SIMPLE_ASSET_ROOT")
+    if asset_root != "":
+        val mono_rel = "assets/fonts/google-fonts/ofl/notosansmono/NotoSansMono[wdth,wght].ttf"
+        val mono_abs = if asset_root.ends_with("/"): asset_root + mono_rel else: asset_root + "/" + mono_rel
+        if file_exists(mono_abs):
+            return mono_abs
+        val nunito_rel = "assets/fonts/google-fonts/ofl/nunito/Nunito[wght].ttf"
+        val nunito_abs = if asset_root.ends_with("/"): asset_root + nunito_rel else: asset_root + "/" + nunito_rel
+        if file_exists(nunito_abs):
+            return nunito_abs
+    ""
+
 fn ide_render_gui_frame(session: EditSession, profile: text, w: i32, h: i32, backend: text) -> IdeGuiFrame:
     val rw = if w < 640: 640 else: w
     val rh = if h < 420: 420 else: h
     var eng = Engine2D.create_with_backend(rw, rh, backend)
-    val sfnt_path = engine2d_sfnt_resolve_path("")
+    val sfnt_path = _ide_resolve_sfnt_path()
 
     val bg_root = rgb(24, 26, 33)
     val bg_activity = rgb(20, 22, 28)
@@ -525,10 +562,11 @@ fn ide_render_gui_frame(session: EditSession, profile: text, w: i32, h: i32, bac
     eng.draw_rect_filled(act_w, tab_h - 1, side_w, 1, border_col)
 
     eng.set_clip(act_w + 6, tab_h + 4, side_w - 12, body_h - tab_h - 8)
+    val max_exp_items: i64 = if ((body_h - tab_h - 16) / 28) > 7: ((body_h - tab_h - 16) / 28) as i64 else: 7
     var exp_items: [text] = []
     if session.documents.len() > 0:
         var di: i64 = 0
-        while di < session.documents.len() and exp_items.len() < 7:
+        while di < session.documents.len() and exp_items.len() < max_exp_items:
             exp_items.push(session.documents[di].display_name())
             di = di + 1
     if exp_items.len() == 0:
@@ -549,7 +587,7 @@ fn ide_render_gui_frame(session: EditSession, profile: text, w: i32, h: i32, bac
     # Tab Strip
     eng.draw_rect_filled(main_x, 0, main_w, tab_h, bg_tabs)
     eng.draw_rect_filled(main_x, tab_h - 1, main_w, 1, border_col)
-    val tab_w: i32 = 164
+    val tab_w: i32 = 188
     var ti: i64 = 0
     while ti < exp_items.len() and ti < 4:
         val tx = main_x + (ti as i32) * tab_w
@@ -562,7 +600,7 @@ fn ide_render_gui_frame(session: EditSession, profile: text, w: i32, h: i32, bac
         eng.draw_rect_filled(tx + tab_w - 1, 0, 1, tab_h, border_col)
         eng.set_clip(tx + 8, 4, tab_w - 16, tab_h - 8)
         val tab_col = if is_cur: txt_main else: txt_muted
-        _ide_draw_text(eng, sfnt_path, tx + 12, 10, _ide_fit_text(exp_items[ti], 18), tab_col, 12)
+        _ide_draw_text(eng, sfnt_path, tx + 12, 10, _ide_fit_text(exp_items[ti], 22), tab_col, 12)
         eng.clear_clip()
         ti = ti + 1
 
@@ -575,10 +613,11 @@ fn ide_render_gui_frame(session: EditSession, profile: text, w: i32, h: i32, bac
 
     val active_doc = session.active_document()
     val buf = session.active_buffer()
+    val max_code_lines: i64 = if ((ed_h - 20) / 24) > 14: ((ed_h - 20) / 24) as i64 else: 14
     var code_lines: [text] = []
     val lc = buf.line_count()
     var li: i64 = 0
-    while li < lc and code_lines.len() < 14:
+    while li < lc and code_lines.len() < max_code_lines:
         val ln = buf.line_at(li)
         code_lines.push(ln)
         li = li + 1
@@ -647,4 +686,4 @@ fn ide_render_gui_frame(session: EditSession, profile: text, w: i32, h: i32, bac
         active_file: active_name
     )
 
-export GuiFrame, IdeGuiFrame, ide_render_gui_frame
+export GuiFrame, IdeGuiFrame, ide_render_gui_frame, gui_shell_render_frame, gui_render_side_panel_html, gui_render_dock_zone_html, gui_render_lsp_hover_popup_html, gui_render_lsp_signature_popup_html, gui_render_wiki_graph_html, gui_render_diagnostics_tools_html, gui_render_diagnostics_table_html, gui_render_workspace_edit_tools_html, gui_render_lsp_navigation_tools_html, gui_render_lsp_result_rows_html
