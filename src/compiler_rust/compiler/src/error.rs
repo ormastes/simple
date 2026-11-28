@@ -496,6 +496,29 @@ impl ContextualError {
     }
 }
 
+/// Owner keys are normalized absolute paths (`\\?\C:\...` on Windows); show
+/// them cwd-relative with `/` separators like the entry path used to read.
+fn display_source_path(raw: &str) -> String {
+    // `\\?\UNC\server\share` is `\\server\share`, not `UNC\server\share`.
+    let unc;
+    let plain = if let Some(rest) = raw.strip_prefix(r"\\?\UNC\") {
+        unc = format!(r"\\{rest}");
+        unc.as_str()
+    } else {
+        raw.strip_prefix(r"\\?\").unwrap_or(raw)
+    };
+    let path = std::path::Path::new(plain);
+    let shown = std::env::current_dir()
+        .ok()
+        .and_then(|cwd| {
+            let cwd = cwd.to_string_lossy().to_string();
+            let cwd = cwd.strip_prefix(r"\\?\").unwrap_or(&cwd).to_string();
+            path.strip_prefix(&cwd).ok().map(|p| p.to_string_lossy().to_string())
+        })
+        .unwrap_or_else(|| plain.to_string());
+    shown.replace('\\', "/")
+}
+
 /// Compilation errors with optional rich context.
 #[derive(Error, Debug)]
 pub enum CompileError {
@@ -629,8 +652,20 @@ impl CompileError {
             context.span = crate::interpreter::get_current_node_span();
         }
         if context.file.is_none() {
-            context.file = crate::interpreter::get_current_file()
-                .map(|path| path.display().to_string());
+            // The span is the executing statement's, so the file must be the
+            // module that lexically wrote that statement, not the entry file
+            // (a library error used to print `spec.spl:<lib line>`). This is
+            // `private_call_caller`, the same rule lexical coverage uses: a
+            // closure body is its writing module (origin stamp, so an `it`
+            // block run by std.spec stays in the spec), a module's top level
+            // is that module, otherwise the executing fn's owner, else the
+            // entry file. "<entry>" means no file is known (in-memory source,
+            // where CURRENT_FILE was unset before too).
+            // Bug: seed_semantic_error_wrong_file_library_line_2026-11-28.
+            let file = crate::interpreter::interpreter_module::private_call_caller();
+            if &*file != "<entry>" {
+                context.file = Some(display_source_path(&file));
+            }
         }
         Self::SemanticWithContext(Box::new(ContextualError {
             message: message.into(),
@@ -864,5 +899,48 @@ mod tests {
         // Also test the From trait
         let err2: CompileError = "another error".into();
         assert_eq!(err2.message(), "another error");
+    }
+
+    /// A semantic error raised while a library function executes must name
+    /// the library's file, not the entry/spec file (the span is the library
+    /// statement's). Bug: seed_semantic_error_wrong_file_library_line_2026-11-28.
+    #[test]
+    fn semantic_with_context_uses_lexical_module_file() {
+        let lib = "C:/repo/src/lib/x/decompress.spl";
+        crate::interpreter::CURRENT_FILE
+            .with(|c| *c.borrow_mut() = Some(std::path::PathBuf::from("C:/repo/test/di_spec.spl")));
+        crate::interpreter::CURRENT_EXEC_MODULE.with(|c| *c.borrow_mut() = Some(std::sync::Arc::from(lib)));
+        let err = CompileError::semantic_with_context("boom", ErrorContext::new().with_span(Span::new(0, 1, 25, 9)));
+        crate::interpreter::CURRENT_EXEC_MODULE.with(|c| *c.borrow_mut() = None);
+        crate::interpreter::CURRENT_FILE.with(|c| *c.borrow_mut() = None);
+        let shown = err.to_string();
+        assert!(shown.contains("decompress.spl:25:9"), "{shown}");
+        assert!(!shown.contains("di_spec.spl"), "{shown}");
+    }
+
+    /// A closure written in a spec but run by a library function (an `it`
+    /// block run by std.spec, a lambda handed to a library HOF) inherits the
+    /// library as CURRENT_EXEC_MODULE; the error must still name the spec,
+    /// which wrote the statement. Here a module top-level scope stands in for
+    /// the closure's origin stamp (both set TOP_LEVEL_MODULE).
+    #[test]
+    fn semantic_with_context_uses_lexical_module_inside_closure() {
+        crate::interpreter::CURRENT_EXEC_MODULE
+            .with(|c| *c.borrow_mut() = Some(std::sync::Arc::from("C:/repo/src/lib/spec/runner.spl")));
+        let err = {
+            let _origin = crate::interpreter::interpreter_module::ClosureOriginGuard::enter_module_top_level(Some(
+                "C:/repo/test/attr_spec.spl",
+            ));
+            CompileError::semantic_with_context("boom", ErrorContext::new().with_span(Span::new(0, 1, 7, 3)))
+        };
+        crate::interpreter::CURRENT_EXEC_MODULE.with(|c| *c.borrow_mut() = None);
+        let shown = err.to_string();
+        assert!(shown.contains("attr_spec.spl:7:3"), "{shown}");
+        assert!(!shown.contains("runner.spl"), "{shown}");
+    }
+
+    #[test]
+    fn display_source_path_maps_verbatim_unc() {
+        assert_eq!(display_source_path(r"\\?\UNC\srv\share\a.spl"), "//srv/share/a.spl");
     }
 }
