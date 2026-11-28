@@ -1297,8 +1297,8 @@ impl ExecCore {
         // comprehension check so which modules de-JIT is unchanged. Soundness:
         // mir/ast_reachability.rs. HIR/MIR lowering must never synthesise a
         // by-convention call to an imported FREE function: such a callee has no
-        // name in the AST and would be pruned here (methods and `__module_init*`
-        // are safe). HIR/MIR errors in pruned dead code no longer force the
+        // name in the AST and would be pruned here (`__module_init*`
+        // are safe). Methods are pruned by bare name (see mir/ast_reachability.rs). HIR/MIR errors in pruned dead code no longer force the
         // interpreter fallback.
         if std::env::var("SIMPLE_JIT_AST_PRUNE").map_or(true, |v| v != "0") {
             if let Some((before, after)) = simple_compiler::mir::retain_reachable_ast_functions(&mut ast.items, path) {
