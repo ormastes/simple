@@ -1,0 +1,78 @@
+use std.spec
+use std.nogc_sync_mut.io.privdrop_v1.{PrivDropStepV1, PrivDropErrorV1, PosixUidV1, PosixGidV1, PosixPidV1, PosixDirFdV1, PrivSpawnSessionV1, PrivCredentialV1, PrivSpawnRequestV1, PrivSpawnJoinV1,
+    privdrop_lookup_user_v1, privdrop_self_v1, privdrop_spawn_v1, privdrop_error_v1, privdrop_wait_v1}
+
+# Unprivileged contract of the privilege-drop SFFI (Linux/FreeBSD). The
+# root-only behaviour lives in privdrop_v1_root_spec.spl.
+extern fn geteuid() -> u32
+
+fn nobody() -> PrivCredentialV1:
+    PrivCredentialV1(uid: PosixUidV1(value: 65534), gid: PosixGidV1(value: 65534), groups: [PosixGidV1(value: 65534)])
+
+fn step_of(result: Result<i64, PrivDropErrorV1>) -> PrivDropStepV1:
+    match result:
+        case Ok(_): PrivDropStepV1.Unknown
+        case Err(e): e.step
+
+fn request(path: text, env: [text], procs: Option<PrivSpawnJoinV1>) -> PrivSpawnRequestV1:
+    PrivSpawnRequestV1(path: path, args: [], env: env, credential: nobody(), session: PrivSpawnSessionV1.NewSession, procs_join: procs)
+
+describe "privdrop_v1 status decoding":
+    it "splits -(step * 65536 + errno) into a typed step and errno":
+        val e = privdrop_error_v1(0 - (6 * 65536 + 1))
+        expect(e.step).to_equal(PrivDropStepV1.SetGroups)
+        expect(e.errno).to_equal(1)
+        expect(privdrop_error_v1(0 - 14 * 65536).step).to_equal(PrivDropStepV1.Unsupported)
+
+describe "privdrop_v1 argument validation":
+    it "refuses to 'drop' to root":
+        match privdrop_self_v1(PrivCredentialV1(uid: PosixUidV1(value: 0), gid: PosixGidV1(value: 0), groups: [])):
+            case Ok(_): expect("dropped to uid 0").to_equal("refused")
+            case Err(e): expect(e.step).to_equal(PrivDropStepV1.Invalid)
+
+    it "refuses a relative executable path (no PATH search in the child)":
+        expect(step_of(privdrop_spawn_v1(request("bin/true", [], None)))).to_equal(PrivDropStepV1.Invalid)
+
+    it "refuses an environment entry without NAME=":
+        expect(step_of(privdrop_spawn_v1(request("/bin/true", ["NOEQUALS"], None)))).to_equal(PrivDropStepV1.Invalid)
+
+    it "refuses a join leaf that is not a single path component":
+        for leaf in ["a/b", "..", ".", ""]:
+            val target = Some(PrivSpawnJoinV1(dir_fd: PosixDirFdV1(value: 0), leaf: leaf))
+            expect(step_of(privdrop_spawn_v1(request("/bin/true", [], target)))).to_equal(PrivDropStepV1.Invalid)
+
+describe "privdrop_v1 user lookup (parent side)":
+    it "resolves nobody to its uid, gid and supplementary groups":
+        match privdrop_lookup_user_v1("nobody"):
+            case Err(e): expect(e.errno).to_equal(-1)
+            case Ok(c):
+                expect(c.uid.value).to_equal(65534)
+                expect(c.groups.len() > 0).to_equal(true)
+
+    it "reports an unknown user as a Lookup error":
+        match privdrop_lookup_user_v1("no-such-user-privdrop-v1"):
+            case Ok(_): expect("found").to_equal("missing")
+            case Err(e): expect(e.step).to_equal(PrivDropStepV1.Lookup)
+
+describe "privdrop_v1 without privilege":
+    it "fails closed at the first step (setgroups) with EPERM in-process":
+        expect(geteuid() == 0u32).to_equal(false)
+        match privdrop_self_v1(nobody()):
+            case Ok(_): expect("dropped").to_equal("refused")
+            case Err(e):
+                expect(e.step).to_equal(PrivDropStepV1.SetGroups)
+                expect(e.errno).to_equal(1)
+
+    it "reports the child's setgroups EPERM back to the parent as a typed error":
+        match privdrop_spawn_v1(request("/bin/true", ["PATH=/usr/bin:/bin"], None)):
+            case Ok(pid): expect(pid.value).to_equal(-1)
+            case Err(e):
+                expect(e.step).to_equal(PrivDropStepV1.SetGroups)
+                expect(e.errno).to_equal(1)
+
+    it "refuses to reap a pid that is not its child (typed Wait/ECHILD)":
+        match privdrop_wait_v1(PosixPidV1(value: 1)):
+            case Ok(status): expect(status).to_equal(-1)
+            case Err(e):
+                expect(e.step).to_equal(PrivDropStepV1.Wait)
+                expect(e.errno).to_equal(10)
