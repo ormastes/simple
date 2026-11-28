@@ -2,20 +2,11 @@
 #
 # Counterpart to png_decode.spl. Supports 8-bit RGB (color type 2) and
 # RGBA (color type 6), single IDAT chunk, all scanlines filter type 0 (None).
-# The IDAT payload is a valid zlib stream: 2-byte CMF/FLG header, stored
-# (BTYPE=00, uncompressed) DEFLATE blocks via the existing deflate_stored
-# codec, and a big-endian Adler-32 trailer.
-#
-# ponytail: stored blocks = zero compression, output ~= raw pixels + 11 bytes
-# per 64KB block. Upgrade path: swap deflate_stored for deflate_fixed /
-# LZ77 in src/lib/common/compress/typed/deflate_typed.spl if exported PNG
-# size ever becomes a measured problem (image_object_design_plan.md,
-# "Deferred" section).
+# Single-pass encoder: streams stored DEFLATE (BTYPE=00) blocks, pixels, and
+# Adler-32 directly into the pre-sized output buffer, then computes IHDR/IDAT
+# CRC-32 checksums in-place via an 8-byte-at-a-time IEEE lookup table.
 
-use std.common.bytes.span.{ByteSpan}
-use std.common.compress.gzip.{gzip_crc32}
-use std.common.hash.adler32.{adler32}
-use std.common.compress.typed.deflate_typed.{deflate_stored}
+extern fn rt_typed_bytes_u64_le_unchecked(buf: [u8], off: u64) -> u64
 
 # ============================================================================
 # Public API
@@ -27,45 +18,68 @@ pub fn encode_argb_to_png(pixels: [u32], width: i32, height: i32) -> [u8]:
     Pixel layout: A in bits 24-31, R in 16-23, G in 8-15, B in 0-7 —
     the exact format decode_png_to_argb produces, so encode/decode round-trip.
     """
-    _encode_png(pixels, width, height, 6)
+    _encode_png_fast(pixels, width, height, false)
 
 pub fn encode_argb_to_png_rgb(pixels: [u32], width: i32, height: i32) -> [u8]:
     """Encode ARGB [u32] pixels as an 8-bit RGB PNG (color type 2).
 
     Alpha bits are dropped; decode_png_to_argb restores them as 255.
     """
-    _encode_png(pixels, width, height, 2)
+    _encode_png_fast(pixels, width, height, true)
 
 # ============================================================================
 # Internals
 # ============================================================================
 
-fn _encode_png(pixels: [u32], width: i32, height: i32, color_type: i64) -> [u8]:
-    val raw = _filtered_scanlines(pixels, width, height, color_type)
-    val idat = _zlib_store(raw)
+fn _png_crc32_table() -> [i64]:
+    # Local LUT avoids module-level global arrays (native codegen FR hazard).
+    var tbl: [i64] = [0; 256]
+    var i = 0
+    while i < 256:
+        var c: i64 = i
+        var k = 0
+        while k < 8:
+            if (c & 1) != 0:
+                c = 0xEDB88320 ^ ((c >> 1) & 0x7FFFFFFF)
+            else:
+                c = (c >> 1) & 0x7FFFFFFF
+            k = k + 1
+        tbl[i] = c
+        i = i + 1
+    tbl
 
-    # IHDR data: width BE, height BE, bit depth 8, color type, 0, 0, 0
-    val w_be = _u32_be(width.to_i64())
-    val h_be = _u32_be(height.to_i64())
-    val ihdr: [u8] = [
-        w_be[0], w_be[1], w_be[2], w_be[3],
-        h_be[0], h_be[1], h_be[2], h_be[3],
-        8u8,
-        (color_type & 0xFF).to_u8(),
-        0u8,
-        0u8,
-        0u8
-    ]
+fn _png_crc32_range(buf: [u8], start: i64, end_pos: i64, tbl: [i64]) -> i64:
+    var crc: i64 = 0xFFFFFFFF
+    var i: i64 = start
+    while i + 8 <= end_pos:
+        val word = rt_typed_bytes_u64_le_unchecked(buf, i as u64) as i64
+        crc = ((crc >> 8) & 0xFFFFFF) ^ tbl[(crc ^ word) & 255]
+        crc = ((crc >> 8) & 0xFFFFFF) ^ tbl[(crc ^ (word >> 8)) & 255]
+        crc = ((crc >> 8) & 0xFFFFFF) ^ tbl[(crc ^ (word >> 16)) & 255]
+        crc = ((crc >> 8) & 0xFFFFFF) ^ tbl[(crc ^ (word >> 24)) & 255]
+        crc = ((crc >> 8) & 0xFFFFFF) ^ tbl[(crc ^ (word >> 32)) & 255]
+        crc = ((crc >> 8) & 0xFFFFFF) ^ tbl[(crc ^ (word >> 40)) & 255]
+        crc = ((crc >> 8) & 0xFFFFFF) ^ tbl[(crc ^ (word >> 48)) & 255]
+        crc = ((crc >> 8) & 0xFFFFFF) ^ tbl[(crc ^ (word >> 56)) & 255]
+        i = i + 8
+    while i < end_pos:
+        crc = ((crc >> 8) & 0xFFFFFF) ^ tbl[(crc ^ (buf[i as i32] as i64)) & 255]
+        i = i + 1
+    (crc ^ 0xFFFFFFFF) & 0xFFFFFFFF
 
-    val c_ihdr = _chunk("IHDR", ihdr)
-    val c_idat = _chunk("IDAT", idat)
-    var no_data: [u8] = []
-    val c_iend = _chunk("IEND", no_data)
+fn _encode_png_fast(pixels: [u32], width: i32, height: i32, rgb_only: bool) -> [u8]:
+    val w = if width > 0: width else: 0
+    val h = if height > 0: height else: 0
+    val bpp: i32 = if rgb_only: 3 else: 4
+    val row_bytes: i64 = 1 + (w as i64) * (bpp as i64)
+    val raw_len: i64 = if w <= 0 or h <= 0: 0 else: (h as i64) * row_bytes
+    val n_blocks: i64 = if raw_len == 0: 1 else: (raw_len + 65534) / 65535
+    val zlib_len: i64 = 2 + n_blocks * 5 + raw_len + 4
+    # 8 (sig) + 25 (IHDR) + 8 (IDAT hdr) + zlib_len + 4 (IDAT crc) + 12 (IEND)
+    val total_len: i64 = 57 + zlib_len
+    var out: [u8] = [0u8; total_len as i32]
 
-    val n_ihdr = c_ihdr.len()
-    val n_idat = c_idat.len()
-    val n_iend = c_iend.len()
-    var out: [u8] = [0u8; 8 + n_ihdr + n_idat + n_iend]
+    # PNG 8-byte signature
     out[0] = 137u8
     out[1] = 80u8
     out[2] = 78u8
@@ -74,118 +88,199 @@ fn _encode_png(pixels: [u32], width: i32, height: i32, color_type: i64) -> [u8]:
     out[5] = 10u8
     out[6] = 26u8
     out[7] = 10u8
-    var pos: i64 = 8
-    var i: i64 = 0
-    while i < n_ihdr:
-        out[pos] = c_ihdr[i]
-        pos = pos + 1
-        i = i + 1
-    i = 0
-    while i < n_idat:
-        out[pos] = c_idat[i]
-        pos = pos + 1
-        i = i + 1
-    i = 0
-    while i < n_iend:
-        out[pos] = c_iend[i]
-        pos = pos + 1
-        i = i + 1
-    out
 
-fn _filtered_scanlines(pixels: [u32], width: i32, height: i32, color_type: i64) -> [u8]:
-    """Serialize pixels as scanlines, each prefixed with filter byte 0 (None)."""
-    val w64 = width.to_i64()
-    val h64 = height.to_i64()
-    val bpp: i64 = if color_type == 6: 4 else: 3
-    val row_stride: i64 = 1 + w64 * bpp
-    var out: [u8] = [0u8; h64 * row_stride]
-    var pos: i64 = 0
-    var y: i64 = 0
-    while y < h64:
-        out[pos] = 0u8  # filter type: None
-        pos = pos + 1
-        val row_off = y * w64
-        var x: i64 = 0
-        while x < w64:
-            val px = pixels[row_off + x].to_i64()
-            out[pos] = ((px >> 16) & 0xFF).to_u8()      # R
-            out[pos + 1] = ((px >> 8) & 0xFF).to_u8()   # G
-            out[pos + 2] = (px & 0xFF).to_u8()          # B
-            if color_type == 6:
-                out[pos + 3] = ((px >> 24) & 0xFF).to_u8()  # A
-                pos = pos + 4
+    # IHDR chunk (length = 13; bytes 8..10, 26..28 already 0u8)
+    out[11] = 13u8
+    out[12] = 73u8
+    out[13] = 72u8
+    out[14] = 68u8
+    out[15] = 82u8
+    out[16] = ((width >> 24) & 255) as u8
+    out[17] = ((width >> 16) & 255) as u8
+    out[18] = ((width >> 8) & 255) as u8
+    out[19] = (width & 255) as u8
+    out[20] = ((height >> 24) & 255) as u8
+    out[21] = ((height >> 16) & 255) as u8
+    out[22] = ((height >> 8) & 255) as u8
+    out[23] = (height & 255) as u8
+    out[24] = 8u8
+    out[25] = if rgb_only: 2u8 else: 6u8
+
+    # IDAT chunk header + zlib CMF/FLG (0x78, 0x01)
+    out[33] = ((zlib_len >> 24) & 255) as u8
+    out[34] = ((zlib_len >> 16) & 255) as u8
+    out[35] = ((zlib_len >> 8) & 255) as u8
+    out[36] = (zlib_len & 255) as u8
+    out[37] = 73u8
+    out[38] = 68u8
+    out[39] = 65u8
+    out[40] = 84u8
+    out[41] = 0x78u8
+    out[42] = 0x01u8
+
+    var p: i32 = 43
+    var block_rem: i64 = 0
+    var raw_rem: i64 = raw_len
+    if raw_len == 0:
+        out[p] = 1u8
+        out[p + 3] = 255u8
+        out[p + 4] = 255u8
+        p = p + 5
+
+    var ad_a: i64 = 1
+    var ad_b: i64 = 0
+    var nmax_rem: i64 = 5552
+    val px_len: i32 = pixels.len() as i32
+    val has_full_px = (pixels.len() >= (w as i64) * (h as i64))
+
+    var y: i32 = 0
+    while raw_len > 0 and y < h:
+        if block_rem == 0:
+            val bl = if raw_rem > 65535: 65535 else: raw_rem
+            out[p] = if bl == raw_rem: 1u8 else: 0u8
+            out[p + 1] = (bl & 255) as u8
+            out[p + 2] = ((bl >> 8) & 255) as u8
+            val nlen = bl ^ 65535
+            out[p + 3] = (nlen & 255) as u8
+            out[p + 4] = ((nlen >> 8) & 255) as u8
+            p = p + 5
+            block_rem = bl
+            raw_rem = raw_rem - bl
+        # Filter type 0 (None); out[p] is already 0u8
+        p = p + 1
+        block_rem = block_rem - 1
+        ad_b = ad_b + ad_a
+        nmax_rem = nmax_rem - 1
+        if nmax_rem == 0:
+            ad_a = ad_a % 65521
+            ad_b = ad_b % 65521
+            nmax_rem = 5552
+
+        var x: i32 = 0
+        val row_off: i32 = y * w
+        while x < w:
+            var seg_px = w - x
+            val block_px = (block_rem as i32) / bpp
+            val adler_px = (nmax_rem as i32) / bpp
+            if block_px < seg_px:
+                seg_px = block_px
+            if adler_px < seg_px:
+                seg_px = adler_px
+            if seg_px > 0 and has_full_px:
+                val seg_end = x + seg_px
+                if rgb_only:
+                    while x < seg_end:
+                        val c = pixels[row_off + x] as i64
+                        val r = (c >> 16) & 255
+                        val g = (c >> 8) & 255
+                        val b = c & 255
+                        out[p] = r as u8
+                        out[p + 1] = g as u8
+                        out[p + 2] = b as u8
+                        p = p + 3
+                        val a1 = ad_a + r
+                        val a2 = a1 + g
+                        val a3 = a2 + b
+                        ad_b = ad_b + a1 + a2 + a3
+                        ad_a = a3
+                        x = x + 1
+                else:
+                    while x < seg_end:
+                        val c = pixels[row_off + x] as i64
+                        val r = (c >> 16) & 255
+                        val g = (c >> 8) & 255
+                        val b = c & 255
+                        val a = (c >> 24) & 255
+                        out[p] = r as u8
+                        out[p + 1] = g as u8
+                        out[p + 2] = b as u8
+                        out[p + 3] = a as u8
+                        p = p + 4
+                        val a1 = ad_a + r
+                        val a2 = a1 + g
+                        val a3 = a2 + b
+                        val a4 = a3 + a
+                        ad_b = ad_b + a1 + a2 + a3 + a4
+                        ad_a = a4
+                        x = x + 1
+                val consumed = (seg_px * bpp) as i64
+                block_rem = block_rem - consumed
+                nmax_rem = nmax_rem - consumed
             else:
-                pos = pos + 3
-            x = x + 1
+                # Boundary pixel across a 65535-byte stored block or Adler fold, or short input
+                val pi_idx = row_off + x
+                val c: i64 = if pi_idx < px_len: pixels[pi_idx] as i64 else: 0
+                var bi = 0
+                while bi < bpp:
+                    val bv = if bi == 0:
+                        (c >> 16) & 255
+                    elif bi == 1:
+                        (c >> 8) & 255
+                    elif bi == 2:
+                        c & 255
+                    else:
+                        (c >> 24) & 255
+                    if block_rem == 0:
+                        val bl = if raw_rem > 65535: 65535 else: raw_rem
+                        out[p] = if bl == raw_rem: 1u8 else: 0u8
+                        out[p + 1] = (bl & 255) as u8
+                        out[p + 2] = ((bl >> 8) & 255) as u8
+                        val nlen = bl ^ 65535
+                        out[p + 3] = (nlen & 255) as u8
+                        out[p + 4] = ((nlen >> 8) & 255) as u8
+                        p = p + 5
+                        block_rem = bl
+                        raw_rem = raw_rem - bl
+                    out[p] = bv as u8
+                    p = p + 1
+                    block_rem = block_rem - 1
+                    ad_a = ad_a + bv
+                    ad_b = ad_b + ad_a
+                    nmax_rem = nmax_rem - 1
+                    if nmax_rem == 0:
+                        ad_a = ad_a % 65521
+                        ad_b = ad_b % 65521
+                        nmax_rem = 5552
+                    bi = bi + 1
+                x = x + 1
+            if nmax_rem <= 0:
+                ad_a = ad_a % 65521
+                ad_b = ad_b % 65521
+                nmax_rem = 5552
         y = y + 1
+
+    # Adler-32 big-endian trailer
+    ad_a = ad_a % 65521
+    ad_b = ad_b % 65521
+    val adler = ((ad_b & 65535) << 16) | (ad_a & 65535)
+    out[p] = ((adler >> 24) & 255) as u8
+    out[p + 1] = ((adler >> 16) & 255) as u8
+    out[p + 2] = ((adler >> 8) & 255) as u8
+    out[p + 3] = (adler & 255) as u8
+
+    # In-place IEEE CRC-32 for IHDR and IDAT
+    val tbl = _png_crc32_table()
+    val ihdr_crc = _png_crc32_range(out, 12, 29, tbl)
+    out[29] = ((ihdr_crc >> 24) & 255) as u8
+    out[30] = ((ihdr_crc >> 16) & 255) as u8
+    out[31] = ((ihdr_crc >> 8) & 255) as u8
+    out[32] = (ihdr_crc & 255) as u8
+
+    val idat_crc_pos = (41 + zlib_len) as i32
+    val idat_crc = _png_crc32_range(out, 37, 41 + zlib_len, tbl)
+    out[idat_crc_pos] = ((idat_crc >> 24) & 255) as u8
+    out[idat_crc_pos + 1] = ((idat_crc >> 16) & 255) as u8
+    out[idat_crc_pos + 2] = ((idat_crc >> 8) & 255) as u8
+    out[idat_crc_pos + 3] = (idat_crc & 255) as u8
+
+    # IEND chunk (length = 0, pre-computed CRC 0xAE426082)
+    val iend_pos = idat_crc_pos + 4
+    out[iend_pos + 4] = 73u8
+    out[iend_pos + 5] = 69u8
+    out[iend_pos + 6] = 78u8
+    out[iend_pos + 7] = 68u8
+    out[iend_pos + 8] = 0xAEu8
+    out[iend_pos + 9] = 0x42u8
+    out[iend_pos + 10] = 0x60u8
+    out[iend_pos + 11] = 0x82u8
     out
-
-fn _zlib_store(data: [u8]) -> [u8]:
-    """Wrap data in a zlib stream using stored DEFLATE blocks.
-
-    0x78 0x01 = CM 8 (deflate), 32K window, no dict, FCHECK valid.
-    """
-    var deflated = deflate_stored(ByteSpan.new(data))
-    val dbuf = deflated.buf
-    val dlen = dbuf.len()
-    val ad = _u32_be(adler32(data))
-    var out: [u8] = [0u8; 2 + dlen + 4]
-    out[0] = 0x78u8
-    out[1] = 0x01u8
-    var i: i64 = 0
-    while i < dlen:
-        out[2 + i] = dbuf[i]
-        i = i + 1
-    val tail = 2 + dlen
-    out[tail] = ad[0]
-    out[tail + 1] = ad[1]
-    out[tail + 2] = ad[2]
-    out[tail + 3] = ad[3]
-    out
-
-fn _chunk(type_name: text, data: [u8]) -> [u8]:
-    """Build a PNG chunk: length BE, 4-byte type, data, CRC-32(type + data) BE.
-
-    CRC is computed over one flat [u8] via the gzip_crc32 free function, NOT
-    the incremental Crc32+ByteSpan pair: the cross-module ByteSpan misreads
-    small heap-built arrays on the deployed interpreter (every chunk CRC came
-    out wrong; see bug doc byte_span_cross_module_misread_2026-07-19), and
-    flat-array free functions are the documented safe cross-module shape.
-    """
-    val type_bytes = type_name.bytes()
-    val dlen = data.len()
-    val len_be = _u32_be(dlen)
-    var crc_input: [u8] = [0u8; 4 + dlen]
-    crc_input[0] = type_bytes[0]
-    crc_input[1] = type_bytes[1]
-    crc_input[2] = type_bytes[2]
-    crc_input[3] = type_bytes[3]
-    var i: i64 = 0
-    while i < dlen:
-        crc_input[4 + i] = data[i]
-        i = i + 1
-    val crc_be = _u32_be(gzip_crc32(crc_input).to_i64())
-    var out: [u8] = [0u8; 8 + dlen + 4]
-    out[0] = len_be[0]
-    out[1] = len_be[1]
-    out[2] = len_be[2]
-    out[3] = len_be[3]
-    i = 0
-    val clen = crc_input.len()
-    while i < clen:
-        out[4 + i] = crc_input[i]
-        i = i + 1
-    val tail = 4 + clen
-    out[tail] = crc_be[0]
-    out[tail + 1] = crc_be[1]
-    out[tail + 2] = crc_be[2]
-    out[tail + 3] = crc_be[3]
-    out
-
-fn _u32_be(v: i64) -> [u8]:
-    [
-        ((v >> 24) & 0xFF).to_u8(),
-        ((v >> 16) & 0xFF).to_u8(),
-        ((v >> 8) & 0xFF).to_u8(),
-        (v & 0xFF).to_u8()
-    ]
