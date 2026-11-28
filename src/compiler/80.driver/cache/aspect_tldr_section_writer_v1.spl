@@ -9,6 +9,12 @@ use compiler.hir.hir_definitions.{HirFunction}
 use compiler.common.cache_contract.directory_aspect_projection_v2.{DirectoryAspectSemanticV2}
 use compiler.common.cache_contract.aspect_decl_section_v1.{aspect_body_span_digest_v1,
     aspect_decl_section_of_semantic_v1, aspect_decl_section_entry_v1}
+use compiler.hir.abi_interface.{hir_abi_function_digest_v1}
+use compiler.semantics.join_point_model.{forward_join_points_for_module_v1}
+use compiler.frontend.join_point_attr_registry.{join_point_attr_names_of}
+use compiler.common.cache_contract.guard_id_v1.{GuardEvalV1}
+use compiler.common.cache_contract.join_point_section_v2.{JoinPointRowInputV2, join_point_section_v2,
+    join_point_section_entry_v2}
 
 pub fn aspect_function_body_digests_v1(module: HirModule, source: text) -> Dict<text, text>:
     """Function name -> body digest over that function's own source span.
@@ -30,4 +36,34 @@ pub fn aspect_decl_tldr_entry_v1(semantic: DirectoryAspectSemanticV2, module: Hi
         case Ok(section): aspect_decl_section_entry_v1(section)
         case Err(reason): Err(reason)
 
-export aspect_function_body_digests_v1, aspect_decl_tldr_entry_v1
+fn _signature_digest_v1(module: HirModule, function: HirFunction) -> text:
+    match hir_abi_function_digest_v1(module, function):
+        case Ok(digest): digest
+        case Err(reason): ""
+
+pub fn join_point_tldr_entry_v2(module_key: text, module: HirModule, source: text,
+        guard_profile: text, guards: [GuardEvalV1]) -> Result<text, text>:
+    """The `join-point|` TLDR entry of one module: every forward join point,
+    exported or not, with its signature digest and base body digest. `guards`
+    are the module's static guard evaluations for `guard_profile`."""
+    val path = if module.path != "": module.path else: module_key
+    var index_of_name: Dict<text, i64> = {}
+    val keys = module.functions.keys()
+    var i = 0
+    while i < keys.len():
+        val function: HirFunction = module.functions[keys[i]]
+        index_of_name[function.name] = i
+        i = i + 1
+    var inputs: [JoinPointRowInputV2] = []
+    for jp in forward_join_points_for_module_v1(module, 1):
+        val function: HirFunction = module.functions[keys[index_of_name[jp.source_symbol]]]
+        inputs.push(JoinPointRowInputV2(kind: jp.kind, symbol: jp.source_symbol,
+            attrs: join_point_attr_names_of(path, jp.source_symbol),
+            signature_digest: _signature_digest_v1(module, function),
+            base_body_digest: aspect_body_span_digest_v1(source, function.span.start,
+                function.span.end, function.name)))
+    match join_point_section_v2(module_key, path.replace("\\", "/"), guard_profile, guards, inputs):
+        case Ok(section): join_point_section_entry_v2(section)
+        case Err(reason): Err(reason)
+
+export aspect_function_body_digests_v1, aspect_decl_tldr_entry_v1, join_point_tldr_entry_v2

@@ -32,6 +32,13 @@ this layer resolves toward recomputation.
 - Formal model: `src/verification/cache_protocol/` (imports the frozen
   `cache_identity` v1 project; does not re-declare it)
 
+- Aspect TLDR sections (aspect plan AW-1/AW-2): `aspect-decl|` codec
+  `src/compiler/00.common/cache_contract/aspect_decl_section_v1.spl`, `join-point|` codec and
+  `JoinPointFactV2` in `cache_contract/join_point_section_v2.spl`, writers in
+  `src/compiler/80.driver/cache/aspect_tldr_section_writer_v1.spl`. Sections are byte-framed and
+  sealed; a decode is `ok`, `miss` or `reject`, never partial. The writers are not yet called by
+  TLDR publication (it runs before typed HIR).
+
 Feature wikis: [cache_identity](../../feature_expert/cache_identity/skill.md),
 [cache_tiering](../../feature_expert/cache_tiering/skill.md),
 [interface_compat](../../feature_expert/interface_compat/skill.md).
