@@ -631,6 +631,8 @@ class BrowserDomEventExecutor:
     data_transfer_keys: [text]
     data_transfer_vals: [text]
     data_transfer_map_id: i64
+    wheel_delta_x: f64
+    wheel_delta_y: f64
     error: text
 
     fn route_for_object_id(object_id: i64) -> DomNodeRoute?:
@@ -878,6 +880,16 @@ class BrowserDomEventExecutor:
             self.runtime.set_host_property(
                 event_id, "buttons", JsValue.Number(v: btns.to_f64())
             )
+            if event.event_type == "wheel":
+                self.runtime.set_host_property(
+                    event_id, "deltaX", JsValue.Number(v: self.wheel_delta_x)
+                )
+                self.runtime.set_host_property(
+                    event_id, "deltaY", JsValue.Number(v: self.wheel_delta_y)
+                )
+                self.runtime.set_host_property(
+                    event_id, "deltaMode", JsValue.Number(v: 0.0)
+                )
         self.runtime.set_host_property(
             event_id, "defaultPrevented",
             JsValue.Boolean(v: event.default_prevented)
@@ -2041,6 +2053,89 @@ impl BrowserSession:
         )?
         Ok(true)
 
+    # @allow(primitive_api)
+    me dispatch_dom_select_index(
+        route: DomNodeRoute, selected_idx: i64
+    ) -> Result<bool, text>:
+        """Select option at `selected_idx` on a <select> route and dispatch input/change."""
+        val index = self._live_dom_index_for_route(route)?
+        val target = match be_dom_node_for_route(self.current_dom, index, route):
+            Some(node): node
+            None: return Err("stale_target")
+        if target.tag_name != "select":
+            return Err("DOM target is not a <select> element")
+        var opt_i: i64 = 0
+        var chosen_val = ""
+        var new_children: [BeDomNode] = []
+        var found = false
+        for c in target.children:
+            var child = c
+            if child.tag_name == "option":
+                if opt_i == selected_idx and not be_dom_has_attr(child, "disabled"):
+                    child.set_attr("selected", "selected")
+                    chosen_val = if be_dom_has_attr(child, "value"): be_dom_get_attr(child, "value") else: be_dom_get_text_content(child)
+                    found = true
+                else:
+                    child.remove_attr("selected")
+                opt_i = opt_i + 1
+            new_children.push(child)
+        if not found:
+            return Ok(false)
+        var next_target = target
+        next_target.children = new_children
+        next_target.set_attr("value", chosen_val)
+        val path = be_dom_path_for_route(self.current_dom, index, route)
+        if path.len() == 0:
+            return Err("stale_target")
+        self.current_dom = _browser_session_replace_dom_path(path, next_target)
+        self._sync_runtime_body_from_dom()
+        val _ = self.dispatch_dom_event_route(route, "input", true, false)?
+        val _ = self.dispatch_dom_event_route(route, "change", true, false)?
+        Ok(true)
+
+    # @allow(primitive_api)
+    me dispatch_dom_wheel_at(
+        route: DomNodeRoute, client_x: i32, client_y: i32,
+        delta_x: i32, delta_y: i32, max_scroll_top: i32 = -1
+    ) -> Result<i32, text>:
+        """Dispatch wheel at (client_x, client_y), clamp scrollTop to [0, max], and fire scroll."""
+        self.wheel_delta_x = delta_x.to_f64()
+        self.wheel_delta_y = delta_y.to_f64()
+        val wheel_res = self.dispatch_dom_event_route_with_pointer(
+            route, "wheel", true, true,
+            client_x, client_y, client_x, client_y,
+            client_x, client_y, client_x, client_y, 0, 0, false
+        )
+        self.wheel_delta_x = 0.0
+        self.wheel_delta_y = 0.0
+        val dispatched = wheel_res?
+        val index = self._live_dom_index_for_route(route)?
+        var target = match be_dom_node_for_route(self.current_dom, index, route):
+            Some(node): node
+            None: return Err("stale_target")
+        val cur_top = (be_dom_get_attr(target, "data-scroll-top").trim().parse_i64() ?? 0).to_i32()
+        if dispatched.event.default_prevented:
+            return Ok(cur_top)
+        var next_top = cur_top + delta_y
+        if next_top < 0:
+            next_top = 0
+        var bound = max_scroll_top
+        if bound < 0:
+            val sh = (be_dom_get_attr(target, "data-scroll-height").trim().parse_i64() ?? -1).to_i32()
+            val ch = (be_dom_get_attr(target, "data-client-height").trim().parse_i64() ?? -1).to_i32()
+            if sh >= 0 and ch >= 0:
+                bound = if sh > ch: sh - ch else: 0
+        if bound >= 0 and next_top > bound:
+            next_top = bound
+        target.set_attr("data-scroll-top", "{next_top}")
+        val path = be_dom_path_for_route(self.current_dom, index, route)
+        if path.len() == 0:
+            return Err("stale_target")
+        self.current_dom = _browser_session_replace_dom_path(path, target)
+        self._sync_runtime_body_from_dom()
+        val _ = self.dispatch_dom_event_route(route, "scroll", false, false)?
+        Ok(next_top)
+
     me dispatch_dom_context_menu_at(
         route: DomNodeRoute, client_x: i32, client_y: i32,
         offset_x: i32, offset_y: i32
@@ -2387,6 +2482,8 @@ impl BrowserSession:
                 data_transfer_keys: self.drag_data_transfer_keys,
                 data_transfer_vals: self.drag_data_transfer_vals,
                 data_transfer_map_id: -1,
+                wheel_delta_x: self.wheel_delta_x,
+                wheel_delta_y: self.wheel_delta_y,
                 error: ""
             )
             dispatch = if input_type != "":
@@ -2449,6 +2546,9 @@ impl BrowserSession:
             vm.install_document(self.current_dom, false)
             vm.data_transfer_keys = self.drag_data_transfer_keys
             vm.data_transfer_vals = self.drag_data_transfer_vals
+            vm.current_delta_x = self.wheel_delta_x
+            vm.current_delta_y = self.wheel_delta_y
+            vm.current_delta_mode = 0
             val vm_ev_res = vm.dispatch_event(
                 normalized_event_type,
                 target.node_id,
