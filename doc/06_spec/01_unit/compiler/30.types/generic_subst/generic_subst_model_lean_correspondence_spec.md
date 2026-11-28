@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 18 | 18 | 0 | 0 |
+| 21 | 21 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -58,20 +58,19 @@ entry point). Sweeps assert their sizes so an empty sweep fails.
 
 #### S0 the empty substitution is the identity
 
-- Run the checks for: S0 the empty substitution is the identity
-   - Expected: n equals `365)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or t... (full value in folded executable source)`
+- Apply the empty substitution to every type of the universe
+   - Expected: n equals `365)  # oracle: the full universe of generic_subst_universe.spl: 95 + 270`
    - Expected: bad equals ``
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-GSUBST-004
-step("Run the checks for: S0 the empty substitution is the identity")
+step("Apply the empty substitution to every type of the universe")
 var n = 0
 var bad = ""
 for t in mu_types():
@@ -79,7 +78,7 @@ for t in mu_types():
     n = n + 1
     if not mt_struct_eq(ms_apply(ms_empty(), tt), tt):
         bad = mt_render(tt)
-expect(n).to_equal(365)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
+expect(n).to_equal(365)  # oracle: the full universe of generic_subst_universe.spl: 95 + 270
 expect(bad).to_equal("")
 ```
 
@@ -87,7 +86,7 @@ expect(bad).to_equal("")
 
 #### unknown is never closed and no substitution moves it
 
-- Run the checks for: unknown is never closed and no substitution moves it
+- Apply substitutions to the unknown type and test closedness around it
    - Expected: mt_is_closed(mt_unknown()) is false
    - Expected: mt_is_unknown(mt_unknown()) is true
    - Expected: mt_is_unknown(int_t()) is false
@@ -101,12 +100,11 @@ expect(bad).to_equal("")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-GSUBST-001
-step("Run the checks for: unknown is never closed and no substitution moves it")
+step("Apply substitutions to the unknown type and test closedness around it")
 expect(mt_is_closed(mt_unknown())).to_equal(false)
 expect(mt_is_unknown(mt_unknown())).to_equal(true)
 expect(mt_is_unknown(int_t())).to_equal(false)
@@ -122,7 +120,7 @@ expect(mt_is_unknown(ms_apply(ms_empty(), mt_unknown()))).to_equal(true)
 
 #### an application keeps its constructor and arity
 
-- Run the checks for: an application keeps its constructor and arity
+- Apply a substitution to every application and compare constructor and arity
    - Expected: apps > 0 is true
    - Expected: bad equals ``
 
@@ -130,12 +128,11 @@ expect(mt_is_unknown(ms_apply(ms_empty(), mt_unknown()))).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 20 lines folded for reproduction.
+Runnable source: 19 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-GSUBST-001
-step("Run the checks for: an application keeps its constructor and arity")
+step("Apply a substitution to every application and compare constructor and arity")
 var apps = 0
 var bad = ""
 val s = ms_bind(ms_bind(ms_empty(), "T", int_t()), "U", mt_app(MT_ARRAY, [text_t()]))
@@ -160,7 +157,7 @@ expect(bad).to_equal("")
 
 #### an open range is not idempotent (ClosedRange is needed)
 
-- Run the checks for: an open range is not idempotent (ClosedRange is needed)
+- Apply a chained substitution twice and show the second pass changes the result
    - Expected: ms_range_closed(chain) is false
    - Expected: mt_struct_eq(once, twice) is false
    - Expected: mt_render(twice) equals `i64`
@@ -171,12 +168,11 @@ expect(bad).to_equal("")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 11 lines folded for reproduction.
+Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-GSUBST-001
-step("Run the checks for: an open range is not idempotent (ClosedRange is needed)")
+step("Apply a chained substitution twice and show the second pass changes the result")
 val chain = ms_bind(ms_bind(ms_empty(), "T", mt_var("U")), "U", int_t())
 expect(ms_range_closed(chain)).to_equal(false)
 val once = ms_apply(chain, mt_var("T"))
@@ -192,7 +188,7 @@ expect(ms_range_closed(ms_empty())).to_equal(true)
 
 #### ms_get answers unknown for an unbound name
 
-- Run the checks for: ms_get answers unknown for an unbound name
+- Read a bound name and an unbound name from a substitution
    - Expected: ms_has(s, "T") is true
    - Expected: ms_has(s, "U") is false
    - Expected: mt_struct_eq(ms_get(s, "T"), int_t()) is true
@@ -202,12 +198,11 @@ expect(ms_range_closed(ms_empty())).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-GSUBST-001
-step("Run the checks for: ms_get answers unknown for an unbound name")
+step("Read a bound name and an unbound name from a substitution")
 val s = ms_bind(ms_empty(), "T", int_t())
 expect(ms_has(s, "T")).to_equal(true)
 expect(ms_has(s, "U")).to_equal(false)
@@ -219,7 +214,7 @@ expect(mt_is_unknown(ms_get(s, "U"))).to_equal(true)
 
 #### rendering is readable and order independent
 
-- Run the checks for: rendering is readable and order independent
+- Render types, substitutions, matches and inference results
    - Expected: mt_render(t) equals `Dict<'K,Array<i64>>`
    - Expected: mt_render_list([int_t(), mt_var("T")]) equals `[i64,'T]`
    - Expected: ms_render(a) equals `ms_render(b)`
@@ -238,12 +233,11 @@ expect(mt_is_unknown(ms_get(s, "U"))).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 18 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-GSUBST-001
-step("Run the checks for: rendering is readable and order independent")
+step("Render types, substitutions, matches and inference results")
 val t = mt_app(MT_DICT, [mt_var("K"), mt_app(MT_ARRAY, [int_t()])])
 expect(mt_render(t)).to_equal("Dict<'K,Array<i64>>")
 expect(mt_render_list([int_t(), mt_var("T")])).to_equal("[i64,'T]")
@@ -266,9 +260,9 @@ expect(mi_is_resolved(MInfer.Unresolved(MI_SHAPE))).to_equal(false)
 
 ### generic substitution model: key parity with the projector
 
-#### mt_key_type equals the projector key text
+#### mt_key_type equals the projector key text for closed types
 
-- Run the checks for: mt_key_type equals the projector key text
+- Project closed type texts and compare each key with the model key
    - Expected: cases.len() equals `expect_types.len()`
    - Expected: k.is_ok() is true
    - Expected: k.unwrap() equals `mt_key_type(expect_types[i])`
@@ -278,12 +272,11 @@ expect(mi_is_resolved(MInfer.Unresolved(MI_SHAPE))).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-GSUBST-004
-step("Run the checks for: mt_key_type equals the projector key text")
+step("Project closed type texts and compare each key with the model key")
 val d = probe_decl()
 val cases: [text] = ["i64", "text", "bool", "Array<i64>", "[text]", "Optional<bool>", "i64?",
     "Dict<text, i64>", "Pkg.Box<i64>", "Box<[text]>"]
@@ -307,11 +300,51 @@ expect(checked).to_equal(10)  # oracle: one projector comparison per listed type
 
 </details>
 
+### generic substitution model: projected templates instantiate through the model
+
+#### a template with a type parameter has the model key and instantiates closed
+
+- Project a template whose field mentions its parameter, then instantiate the projected key at i64
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Project a template whose field mentions its parameter, then instantiate the projected key at i64")
+expect_projected_box_instantiates("pkg")
+```
+
+</details>
+
+#### a non-ASCII module name is byte framed alike by the projector and the model
+
+- Project a template of a module with a Hangul name, then instantiate the projected key at i64
+   - Expected: mt_key_type(mt_var("모듈.Box#0")) equals `"v12:모듈.Box#0")  # oracle: 모듈 is 2 Hangul x 3 bytes = 6 and ".Box#0" is 6 byt... (full value in folded executable source)`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Project a template of a module with a Hangul name, then instantiate the projected key at i64")
+expect(mt_key_type(mt_var("모듈.Box#0"))).to_equal("v12:모듈.Box#0")  # oracle: 모듈 is 2 Hangul x 3 bytes = 6 and ".Box#0" is 6 bytes, so the frame is 12; character framing would say 8
+expect_projected_box_instantiates("모듈")
+```
+
+</details>
+
 ### generic substitution model: template instantiation
 
 #### substitutes positional binders and classifies the result closed
 
-- Run the checks for: substitutes positional binders and classifies the result closed
+- Instantiate a key whose binder is bound to i64
    - Expected: r.status equals `MI_STATUS_CLOSED`
    - Expected: mt_render(r.t) equals `Array<i64>`
 
@@ -319,12 +352,11 @@ expect(checked).to_equal(10)  # oracle: one projector comparison per listed type
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-GSUBST-006
-step("Run the checks for: substitutes positional binders and classifies the result closed")
+step("Instantiate a key whose binder is bound to i64")
 val key = mt_key_type(mt_app(MT_ARRAY, [mt_var("pkg.Box#0")]))
 val r = mt_instantiate_key(key, ["pkg.Box#0"], [int_t()], 8)
 expect(r.status).to_equal(MI_STATUS_CLOSED)
@@ -335,7 +367,7 @@ expect(mt_render(r.t)).to_equal("Array<i64>")
 
 #### reports open when a binder has no argument
 
-- Run the checks for: reports open when a binder has no argument
+- Instantiate a key with one binder left without an argument
    - Expected: r.status equals `MI_STATUS_OPEN`
    - Expected: mt_render(r.t) equals `Tuple<i64,'a#1>`
 
@@ -343,12 +375,11 @@ expect(mt_render(r.t)).to_equal("Array<i64>")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-GSUBST-006
-step("Run the checks for: reports open when a binder has no argument")
+step("Instantiate a key with one binder left without an argument")
 val key = mt_key_type(mt_app(MT_TUPLE, [mt_var("a#0"), mt_var("a#1")]))
 val r = mt_instantiate_key(key, ["a#0", "a#1"], [int_t()], 8)
 expect(r.status).to_equal(MI_STATUS_OPEN)
@@ -359,7 +390,7 @@ expect(mt_render(r.t)).to_equal("Tuple<i64,'a#1>")
 
 #### reports depth when the result nests deeper than the limit
 
-- Run the checks for: reports depth when the result nests deeper than the limit
+- Instantiate a nested key under a depth limit that is too small and then large enough
    - Expected: deep.status equals `MI_STATUS_DEPTH`
    - Expected: fits.status equals `MI_STATUS_CLOSED`
 
@@ -367,12 +398,11 @@ expect(mt_render(r.t)).to_equal("Tuple<i64,'a#1>")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-GSUBST-006
-step("Run the checks for: reports depth when the result nests deeper than the limit")
+step("Instantiate a nested key under a depth limit that is too small and then large enough")
 val key = mt_key_type(mt_app(MT_ARRAY, [mt_app(MT_ARRAY, [mt_var("a#0")])]))
 val deep = mt_instantiate_key(key, ["a#0"], [mt_app(MT_ARRAY, [int_t()])], 2)
 expect(deep.status).to_equal(MI_STATUS_DEPTH)
@@ -384,7 +414,7 @@ expect(fits.status).to_equal(MI_STATUS_CLOSED)
 
 #### reports malformed for undecodable key text
 
-- Run the checks for: reports malformed for undecodable key text
+- Instantiate text that is not a key
    - Expected: r.status equals `MI_STATUS_MALFORMED`
    - Expected: mt_is_unknown(r.t) is true
 
@@ -392,12 +422,11 @@ expect(fits.status).to_equal(MI_STATUS_CLOSED)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-GSUBST-004
-step("Run the checks for: reports malformed for undecodable key text")
+step("Instantiate text that is not a key")
 val r = mt_instantiate_key("zz", ["a#0"], [int_t()], 8)
 expect(r.status).to_equal(MI_STATUS_MALFORMED)
 expect(mt_is_unknown(r.t)).to_equal(true)
@@ -407,7 +436,7 @@ expect(mt_is_unknown(r.t)).to_equal(true)
 
 #### ms_from_positional ignores surplus binders and surplus arguments
 
-- Run the checks for: ms_from_positional ignores surplus binders and surplus arguments
+- Build positional substitutions with surplus binders and with surplus arguments
    - Expected: ms_has(short_args, "A") is true
    - Expected: ms_has(short_args, "B") is false
    - Expected: ms_domain(short_binders).len() equals `1)  # oracle: only the one supplied binder A is bound; the surplus argument i... (full value in folded executable source)`
@@ -416,12 +445,11 @@ expect(mt_is_unknown(r.t)).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-GSUBST-006
-step("Run the checks for: ms_from_positional ignores surplus binders and surplus arguments")
+step("Build positional substitutions with surplus binders and with surplus arguments")
 val short_args = ms_from_positional(["A", "B"], [int_t()])
 expect(ms_has(short_args, "A")).to_equal(true)
 expect(ms_has(short_args, "B")).to_equal(false)
@@ -435,7 +463,7 @@ expect(ms_domain(short_binders).len()).to_equal(1)  # oracle: only the one suppl
 
 #### matching a slice pattern accepts an array and refuses another constructor
 
-- Run the checks for: matching a slice pattern accepts an array and refuses another constructor
+- Match a slice pattern against an array and against an optional
    - Expected: mm_render(over_array) equals `Bound\{T:=i64}`
    - Expected: mm_render(over_optional) equals `Shape`
 
@@ -443,12 +471,11 @@ expect(ms_domain(short_binders).len()).to_equal(1)  # oracle: only the one suppl
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-GSUBST-002
-step("Run the checks for: matching a slice pattern accepts an array and refuses another constructor")
+step("Match a slice pattern against an array and against an optional")
 val slice_t = mt_app("Slice", [mt_var("T")])
 val over_array = mm_match(slice_t, mt_app(MT_ARRAY, [int_t()]), ms_empty())
 expect(mm_render(over_array)).to_equal("Bound\{T:=i64}")
@@ -460,7 +487,7 @@ expect(mm_render(over_optional)).to_equal("Shape")
 
 #### matching refuses the same constructor at a different arity
 
-- Run the checks for: matching refuses the same constructor at a different arity
+- Match a one-element tuple against a two-element tuple
    - Expected: mm_render(mm_match(pattern, evidence, ms_empty())) equals `Shape`
    - Expected: mt_struct_eq(pattern, evidence) is false
 
@@ -468,12 +495,11 @@ expect(mm_render(over_optional)).to_equal("Shape")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-GSUBST-002
-step("Run the checks for: matching refuses the same constructor at a different arity")
+step("Match a one-element tuple against a two-element tuple")
 val pattern = mt_app(MT_TUPLE, [mt_var("T")])
 val evidence = mt_app(MT_TUPLE, [int_t(), int_t()])
 expect(mm_render(mm_match(pattern, evidence, ms_empty()))).to_equal("Shape")
@@ -484,7 +510,7 @@ expect(mt_struct_eq(pattern, evidence)).to_equal(false)
 
 #### call-site inference tolerates missing arguments and an open expected type
 
-- Run the checks for: call-site inference tolerates missing arguments and an open expected type
+- Infer with fewer arguments than parameters and with an open expected type
    - Expected: mi_render(missing_arg) equals `Unresolved(no_evidence)`
    - Expected: mi_render(open_expected) equals `Unresolved(no_evidence)`
 
@@ -492,12 +518,11 @@ expect(mt_struct_eq(pattern, evidence)).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-GSUBST-003
-step("Run the checks for: call-site inference tolerates missing arguments and an open expected type")
+step("Infer with fewer arguments than parameters and with an open expected type")
 val missing_arg = mi_infer(["T", "U"], [mt_var("T"), mt_var("U")], int_t(), [], [int_t()], mt_unknown(), false)
 expect(mi_render(missing_arg)).to_equal("Unresolved(no_evidence)")
 val open_expected = mi_infer(["T"], [], mt_var("T"), [], [], mt_var("U"), false)
@@ -508,7 +533,7 @@ expect(mi_render(open_expected)).to_equal("Unresolved(no_evidence)")
 
 #### a step with the wrong number of inputs, or an unknown kind, is ill typed
 
-- Run the checks for: a step with the wrong number of inputs, or an unknown kind, is ill typed
+- Step with the wrong number of inputs, with an unknown kind and with a malformed array
    - Expected: mf_render(mf_step("let", [int_t()], [])) equals `Ill(arity)`
    - Expected: mf_render(mf_step("no_such_kind", [int_t(), int_t()], [])) equals `Ill(unknown_kind)`
    - Expected: mf_render(mf_step("elem_read", [mt_app(MT_ARRAY, [int_t(), int_t()])], [])) equals `Ill(shape)`
@@ -517,12 +542,11 @@ expect(mi_render(open_expected)).to_equal("Unresolved(no_evidence)")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-GSUBST-001
-step("Run the checks for: a step with the wrong number of inputs, or an unknown kind, is ill typed")
+step("Step with the wrong number of inputs, with an unknown kind and with a malformed array")
 expect(mf_render(mf_step("let", [int_t()], []))).to_equal("Ill(arity)")
 expect(mf_render(mf_step("no_such_kind", [int_t(), int_t()], []))).to_equal("Ill(unknown_kind)")
 expect(mf_render(mf_step("elem_read", [mt_app(MT_ARRAY, [int_t(), int_t()])], []))).to_equal("Ill(shape)")
@@ -532,7 +556,7 @@ expect(mf_render(mf_step("elem_read", [mt_app(MT_ARRAY, [int_t(), int_t()])], []
 
 #### a dict write checks the container shape and the key type
 
-- Run the checks for: a dict write checks the container shape and the key type
+- Write into a dict, a non-dict, and with a wrong key or value type
    - Expected: mf_render(mf_step("dict_write", [dict_t, text_t(), int_t()], [])) equals `Ok(i64)`
    - Expected: mf_render(mf_step("dict_write", [int_t(), text_t(), int_t()], [])) equals `Ill(shape)`
    - Expected: mf_render(mf_step("dict_write", [dict_t, int_t(), int_t()], [])) equals `Ill(mismatch)`
@@ -542,12 +566,11 @@ expect(mf_render(mf_step("elem_read", [mt_app(MT_ARRAY, [int_t(), int_t()])], []
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-GSUBST-004
-step("Run the checks for: a dict write checks the container shape and the key type")
+step("Write into a dict, a non-dict, and with a wrong key or value type")
 val dict_t = mt_app(MT_DICT, [text_t(), int_t()])
 expect(mf_render(mf_step("dict_write", [dict_t, text_t(), int_t()], []))).to_equal("Ok(i64)")
 expect(mf_render(mf_step("dict_write", [int_t(), text_t(), int_t()], []))).to_equal("Ill(shape)")
@@ -559,19 +582,18 @@ expect(mf_render(mf_step("dict_write", [dict_t, text_t(), text_t()], []))).to_eq
 
 #### key decoding refuses every malformed spelling
 
-- Run the checks for: key decoding refuses every malformed spelling
+- Decode eleven malformed spellings and count the refusals
    - Expected: refused equals `bad_keys.len()`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-GSUBST-004
-step("Run the checks for: key decoding refuses every malformed spelling")
+step("Decode eleven malformed spellings and count the refusals")
 val bad_keys: [text] = ["c5", "c:", "cx:", "c/:", "c1234567890123:x", "x1:a", "a1:X", "a1:Xz", "a1:Xlz:", "a1:Xl2:c1:a", ""]
 var refused = 0
 for k in bad_keys:
@@ -583,12 +605,42 @@ expect(refused).to_equal(bad_keys.len())
 
 </details>
 
+### generic substitution model: non-ASCII names
+
+#### key framing counts bytes and decoding returns the same type
+
+- Encode a type whose names hold multi-byte characters and decode it again
+   - Expected: key contains `9:Named:箱`
+   - Expected: key contains `c2:é`
+   - Expected: back.ok is true
+   - Expected: mt_struct_eq(back.t, t) is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Encode a type whose names hold multi-byte characters and decode it again")
+val t = mt_app("Named:箱", [mt_con("é"), mt_var("日本")])
+val key = mt_key_type(t)
+expect(key.contains("9:Named:箱")).to_equal(true)  # oracle: "Named:" is 6 bytes and the character 箱 is 3 bytes in UTF-8
+expect(key.contains("c2:é")).to_equal(true)  # oracle: é is 2 bytes in UTF-8
+val back = mt_from_key(key)
+expect(back.ok).to_equal(true)
+expect(mt_struct_eq(back.t, t)).to_equal(true)
+```
+
+</details>
+
 ## Scenario Summary
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 18 |
-| Active scenarios | 18 |
+| Total scenarios | 21 |
+| Active scenarios | 21 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
@@ -596,54 +648,45 @@ expect(refused).to_equal(bad_keys.len())
 
 </details>
 
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-GSUBST-004`
-- `REQ-GSUBST-001`
-- `REQ-GSUBST-006`
-- `REQ-GSUBST-002`
-- `REQ-GSUBST-003`
-<!-- sspec-maintain:traceability:end -->
-
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `2ad11742492a0ba356cb9487491c1a42b8edd8ef8733a6ca3bb976e862f3b15c`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `d62b173cb0331496a58926bbd47fb8749edefd0f0fd80dd36a3c19dd59118923`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `2ad11742492a0ba356cb9487491c1a42b8edd8ef8733a6ca3bb976e862f3b15c`.
+Source SHA-256: `d62b173cb0331496a58926bbd47fb8749edefd0f0fd80dd36a3c19dd59118923`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `2ad11742492a0ba356cb9487491c1a42b8edd8ef8733a6ca3bb976e862f3b15c`  
+Source SHA-256: `d62b173cb0331496a58926bbd47fb8749edefd0f0fd80dd36a3c19dd59118923`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+Raw score: **89/100**; effective score: **89/100**; blockers: **0**.
 
-SSpec documentization score: 92/100
+SSpec documentization score: 89/100
 source: 01_unit/compiler/30.types/generic_subst/generic_subst_model_lean_correspondence_spec.spl
 mirror: doc/06_spec/01_unit/compiler/30.types/generic_subst/generic_subst_model_lean_correspondence_spec.md (current)
-findings: 5 blockers: 0
+findings: 6 blockers: 0
   narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
+  traceability=80 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
 01_unit/compiler/30.types/generic_subst/generic_subst_model_lean_correspondence_spec.spl:1:1: advice SSDOC-MNT-007 [maintainability] (-10): research, plan, architecture, or design metadata links are incomplete
   why: Reviewers need selected lifecycle evidence, not inferred project state.
   improve: Link the selected lifecycle artifacts or configure a reasoned scope suppression.
-01_unit/compiler/30.types/generic_subst/generic_subst_model_lean_correspondence_spec.spl:56:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'S0 the empty substitution is the identity' has no retained capture or evidence
+01_unit/compiler/30.types/generic_subst/generic_subst_model_lean_correspondence_spec.spl:1:1: warning SSDOC-TRC-001 [traceability] (-20): no implemented requirement identity
+  why: Stable requirement identity connects intent, implementation, and evidence.
+  improve: Bind scenarios to stable selected REQ identities.
+01_unit/compiler/30.types/generic_subst/generic_subst_model_lean_correspondence_spec.spl:57:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'S0 the empty substitution is the identity' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
 01_unit/compiler/30.types/generic_subst/generic_subst_model_lean_correspondence_spec.spl:69:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'unknown is never closed and no substitution moves it' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-01_unit/compiler/30.types/generic_subst/generic_subst_model_lean_correspondence_spec.spl:82:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'an application keeps its constructor and arity' has no retained capture or evidence
+01_unit/compiler/30.types/generic_subst/generic_subst_model_lean_correspondence_spec.spl:81:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'an application keeps its constructor and arity' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-doc/06_spec/01_unit/compiler/30.types/generic_subst/generic_subst_model_lean_correspondence_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, assumptions/preconditions
+doc/06_spec/01_unit/compiler/30.types/generic_subst/generic_subst_model_lean_correspondence_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, assumptions/preconditions, traceability
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
 <!-- sspec-maintain:scorecard:end -->

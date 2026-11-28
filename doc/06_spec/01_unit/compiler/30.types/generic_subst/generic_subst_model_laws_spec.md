@@ -40,8 +40,8 @@ names the law (S1..S3, U1..U3, I1, K1..K3) and the first offending type.
 ## Compatibility and limitations
 Bounded exhaustive checking, not a proof for arbitrary terms; the Lean model
 covers substitution only (see the correspondence table in the model header).
-Key framing counts characters; byte-framed keys for non-ASCII names belong to
-the projector.
+Key framing and decoding count bytes (UTF-8), the same unit as the template
+projector; the Lean model does not cover keys.
 
 ## Verification guidance and troubleshooting
 A S-law failure points at `ms_apply`/`ms_compose`; a U-law failure at
@@ -49,8 +49,8 @@ A S-law failure points at `ms_apply`/`ms_compose`; a U-law failure at
 size mismatches mean `generic_subst_universe.spl` changed.
 # Generic substitution model: laws, checked exhaustively over a bounded universe
 
-`src/compiler/40.mono/model/generic_subst_model.spl` models what 40.mono does
-with a type variable: substitution, one-way matching, call-site inference and
+`src/compiler/30.types/generic_subst/generic_subst_model.spl` is the one substitution implementation; it models
+what generic instances do with a type variable: substitution, one-way matching, call-site inference and
 the specialization key. This spec checks its algebraic laws on EVERY element
 of the finite universes of `generic_subst_universe.spl` (sizes are printed and
 asserted, so an empty sweep fails).
@@ -78,35 +78,34 @@ substitution laws; it does not discharge executable key-encoding correctness.
 
 #### has the stated sizes and no duplicate
 
-- Run the checks for: has the stated sizes and no duplicate
-   - Expected: mu_depth1(mu_atoms()).len() equals `95)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or tr... (full value in folded executable source)`
-   - Expected: types.len() equals `365)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or t... (full value in folded executable source)`
-   - Expected: mu_closed_types().len() equals `147)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or t... (full value in folded executable source)`
-   - Expected: mu_substs(mu_closed_range(), false).len() equals `81)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or tr... (full value in folded executable source)`
-   - Expected: mu_substs(mu_closed_range(), true).len() equals `64)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or tr... (full value in folded executable source)`
-   - Expected: seen.keys().len() equals `365)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or t... (full value in folded executable source)`
+- Build the type, substitution and closed-range universes and count them
+   - Expected: mu_depth1(mu_atoms()).len() equals `95)  # oracle: 5 atoms + 3 unary constructors x 5 atoms + 3 binary constructo... (full value in folded executable source)`
+   - Expected: types.len() equals `365)  # oracle: the 95 depth-1 types + 3 unary constructors x the 90 non-atom... (full value in folded executable source)`
+   - Expected: mu_closed_types().len() equals `147)  # oracle: closed types of the universe: the closed members of the 365 (... (full value in folded executable source)`
+   - Expected: mu_substs(mu_closed_range(), false).len() equals `81)  # oracle: two variables, each unbound or bound to one of 8 closed types:... (full value in folded executable source)`
+   - Expected: mu_substs(mu_closed_range(), true).len() equals `64)  # oracle: two variables, each bound to one of 8 closed types: 8 x 8`
+   - Expected: seen.keys().len() equals `365)  # oracle: the 95 depth-1 types + 3 unary constructors x the 90 non-atom... (full value in folded executable source)`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 13 lines folded for reproduction.
+Runnable source: 12 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-GSUBST-001
-step("Run the checks for: has the stated sizes and no duplicate")
+step("Build the type, substitution and closed-range universes and count them")
 val types = mu_types()
-expect(mu_depth1(mu_atoms()).len()).to_equal(95)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
-expect(types.len()).to_equal(365)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
-expect(mu_closed_types().len()).to_equal(147)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
-expect(mu_substs(mu_closed_range(), false).len()).to_equal(81)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
-expect(mu_substs(mu_closed_range(), true).len()).to_equal(64)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
+expect(mu_depth1(mu_atoms()).len()).to_equal(95)  # oracle: 5 atoms + 3 unary constructors x 5 atoms + 3 binary constructors x 25 atom pairs = 5 + 15 + 75
+expect(types.len()).to_equal(365)  # oracle: the 95 depth-1 types + 3 unary constructors x the 90 non-atom depth-1 types = 95 + 270
+expect(mu_closed_types().len()).to_equal(147)  # oracle: closed types of the universe: the closed members of the 365 (no variable T or U anywhere)
+expect(mu_substs(mu_closed_range(), false).len()).to_equal(81)  # oracle: two variables, each unbound or bound to one of 8 closed types: 9 x 9
+expect(mu_substs(mu_closed_range(), true).len()).to_equal(64)  # oracle: two variables, each bound to one of 8 closed types: 8 x 8
 var seen: Dict<text, bool> = {}
 for t in types:
     val tt: MType = t
     seen[mt_render(tt)] = true
-expect(seen.keys().len()).to_equal(365)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
+expect(seen.keys().len()).to_equal(365)  # oracle: the 95 depth-1 types + 3 unary constructors x the 90 non-atom depth-1 types = 95 + 270
 ```
 
 </details>
@@ -115,21 +114,20 @@ expect(seen.keys().len()).to_equal(365)  # oracle: pinned size of the exhaustive
 
 #### S1 idempotence and S3 closedness on every type and closed substitution
 
-- Run the checks for: S1 idempotence and S3 closedness on every type and closed substitution
+- Apply every closed substitution to every type, twice, and compare free variables and closedness
    - Expected: bad equals ``
-   - Expected: checked equals `29565)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or... (full value in folded executable source)`
+   - Expected: checked equals `29565)  # oracle: 365 types x 81 closed substitutions, one check per pair`
    - Expected: closed_results > 0 is true
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-GSUBST-001
-step("Run the checks for: S1 idempotence and S3 closedness on every type and closed substitution")
+step("Apply every closed substitution to every type, twice, and compare free variables and closedness")
 val types = mu_types()
 val substs = mu_substs(mu_closed_range(), false)
 var checked = 0
@@ -153,7 +151,7 @@ for s in substs:
                 bad = "S3 closed {ms_render(st)} {mt_render(tt)}"
 print "S1/S3 checked={checked} closed_results={closed_results}"
 expect(bad).to_equal("")
-expect(checked).to_equal(29565)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
+expect(checked).to_equal(29565)  # oracle: 365 types x 81 closed substitutions, one check per pair
 expect(closed_results > 0).to_equal(true)
 ```
 
@@ -161,22 +159,21 @@ expect(closed_results > 0).to_equal(true)
 
 #### S2 composition on every depth<=1 type, open substitution and closed substitution
 
-- Run the checks for: S2 composition on every depth<=1 type, open substitution and closed substitution
+- Compose each open substitution with each closed one and compare with applying them in sequence
    - Expected: bad equals ``
-   - Expected: inner.len() equals `64)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or tr... (full value in folded executable source)`
-   - Expected: outer.len() equals `25)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or tr... (full value in folded executable source)`
-   - Expected: checked equals `152000)  # oracle: pinned size of the exhaustive sweep or fixture; an empty o... (full value in folded executable source)`
+   - Expected: inner.len() equals `64)  # oracle: two variables, each bound to one of 8 closed types: 8 x 8`
+   - Expected: outer.len() equals `25)  # oracle: two variables, each bound to one of the 5 atoms: 5 x 5`
+   - Expected: checked equals `152000)  # oracle: 95 types x 64 inner x 25 outer substitutions`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 22 lines folded for reproduction.
+Runnable source: 21 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-GSUBST-001
-step("Run the checks for: S2 composition on every depth<=1 type, open substitution and closed substitution")
+step("Compose each open substitution with each closed one and compare with applying them in sequence")
 val types = mu_depth1(mu_atoms())
 val inner = mu_substs(mu_open_range(), false)
 val outer = mu_substs(mu_small_closed_range(), false)
@@ -194,9 +191,9 @@ for s1 in inner:
                 bad = "S2 outer={ms_render(b)} inner={ms_render(a)} {mt_render(tt)}"
 print "S2 checked={checked} inner={inner.len()} outer={outer.len()}"
 expect(bad).to_equal("")
-expect(inner.len()).to_equal(64)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
-expect(outer.len()).to_equal(25)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
-expect(checked).to_equal(152000)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
+expect(inner.len()).to_equal(64)  # oracle: two variables, each bound to one of 8 closed types: 8 x 8
+expect(outer.len()).to_equal(25)  # oracle: two variables, each bound to one of the 5 atoms: 5 x 5
+expect(checked).to_equal(152000)  # oracle: 95 types x 64 inner x 25 outer substitutions
 ```
 
 </details>
@@ -205,20 +202,19 @@ expect(checked).to_equal(152000)  # oracle: pinned size of the exhaustive sweep 
 
 #### U1 soundness and U2 most-general on every pattern and total closed substitution
 
-- Run the checks for: U1 soundness and U2 most-general on every pattern and total closed substitution
+- Match every pattern against its own substituted instance and compare the binding with the substitution
    - Expected: bad equals ``
-   - Expected: checked equals `6080)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or ... (full value in folded executable source)`
+   - Expected: checked equals `6080)  # oracle: 95 patterns x 64 total substitutions`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-GSUBST-002
-step("Run the checks for: U1 soundness and U2 most-general on every pattern and total closed substitution")
+step("Match every pattern against its own substituted instance and compare the binding with the substitution")
 val patterns = mu_depth1(mu_atoms())
 val substs = mu_substs(mu_closed_range(), true)
 var checked = 0
@@ -245,28 +241,27 @@ for s in substs:
                 bad = "U2 agree {ms_render(st)} {mt_render(pt)}"
 print "U1/U2 checked={checked}"
 expect(bad).to_equal("")
-expect(checked).to_equal(6080)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
+expect(checked).to_equal(6080)  # oracle: 95 patterns x 64 total substitutions
 ```
 
 </details>
 
 #### U3 a repeated variable with two different witnesses is a Conflict
 
-- Run the checks for: U3 a repeated variable with two different witnesses is a Conflict
+- Match a repeated variable against every pair of closed witnesses
    - Expected: bad equals ``
-   - Expected: agreements equals `8)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or tru... (full value in folded executable source)`
-   - Expected: conflicts equals `56)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or tr... (full value in folded executable source)`
+   - Expected: agreements equals `8)  # oracle: the diagonal of the 8 x 8 closed-witness grid: both witnesses e... (full value in folded executable source)`
+   - Expected: conflicts equals `56)  # oracle: the off-diagonal of the 8 x 8 grid: 64 - 8 pairs with differen... (full value in folded executable source)`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-GSUBST-002
-step("Run the checks for: U3 a repeated variable with two different witnesses is a Conflict")
+step("Match a repeated variable against every pair of closed witnesses")
 val range = mu_closed_range()
 val pattern = mt_app(MT_TUPLE, [mt_var("T"), mt_var("T")])
 var conflicts = 0
@@ -286,17 +281,17 @@ for a in range:
             if mm_render(m) != "Conflict(T)":
                 bad = "conflict {mt_render(x)} {mt_render(y)}: {mm_render(m)}"
 expect(bad).to_equal("")
-expect(agreements).to_equal(8)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
-expect(conflicts).to_equal(56)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
+expect(agreements).to_equal(8)  # oracle: the diagonal of the 8 x 8 closed-witness grid: both witnesses equal, so no conflict
+expect(conflicts).to_equal(56)  # oracle: the off-diagonal of the 8 x 8 grid: 64 - 8 pairs with different witnesses conflict
 ```
 
 </details>
 
 #### U3 a different constructor or arity is a Shape mismatch
 
-- Run the checks for: U3 a different constructor or arity is a Shape mismatch
+- Match patterns against evidence with another constructor or another arity
    - Expected: bad equals ``
-   - Expected: checked equals `9)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or tru... (full value in folded executable source)`
+   - Expected: checked equals `9)  # oracle: 3 constructors x 3 arity or constructor mismatches enumerated i... (full value in folded executable source)`
    - Expected: mm_render(mm_match(mt_app(MT_SLICE, [mt_var("T")]), mt_app(MT_ARRAY, [mt_con("text")]), ms_empty())) equals `Bound\{T:=text\}`
    - Expected: mm_render(mm_match(mt_app(MT_ARRAY, [mt_var("T")]), mt_app(MT_SLICE, [mt_con("text")]), ms_empty())) equals `Shape`
 
@@ -304,12 +299,11 @@ expect(conflicts).to_equal(56)  # oracle: pinned size of the exhaustive sweep or
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 27 lines folded for reproduction.
+Runnable source: 26 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-GSUBST-002
-step("Run the checks for: U3 a different constructor or arity is a Shape mismatch")
+step("Match patterns against evidence with another constructor or another arity")
 var checked = 0
 var bad = ""
 for pc in mu_unary_ctors():
@@ -331,7 +325,7 @@ for pc in mu_unary_ctors():
     if mm_render(against_binary) != "Shape":
         bad = "{pctor} vs tuple: {mm_render(against_binary)}"
 expect(bad).to_equal("")
-expect(checked).to_equal(9)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
+expect(checked).to_equal(9)  # oracle: 3 constructors x 3 arity or constructor mismatches enumerated in this scenario
 # The one sanctioned widening: a Slice parameter accepts an Array.
 expect(mm_render(mm_match(mt_app(MT_SLICE, [mt_var("T")]), mt_app(MT_ARRAY, [mt_con("text")]), ms_empty()))).to_equal("Bound\{T:=text\}")
 expect(mm_render(mm_match(mt_app(MT_ARRAY, [mt_var("T")]), mt_app(MT_SLICE, [mt_con("text")]), ms_empty()))).to_equal("Shape")
@@ -341,21 +335,20 @@ expect(mm_render(mm_match(mt_app(MT_ARRAY, [mt_var("T")]), mt_app(MT_SLICE, [mt_
 
 #### U3 evidence that is not closed binds nothing
 
-- Run the checks for: U3 evidence that is not closed binds nothing
+- Match a variable against evidence that still holds a variable
    - Expected: mm_render(unknown) equals `Bound\{\}`
    - Expected: bad equals ``
-   - Expected: checked equals `218)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or t... (full value in folded executable source)`
+   - Expected: checked equals `218)  # oracle: enumerated open-evidence cases of this scenario (patterns x o... (full value in folded executable source)`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-GSUBST-002
-step("Run the checks for: U3 evidence that is not closed binds nothing")
+step("Match a variable against evidence that still holds a variable")
 var checked = 0
 var bad = ""
 for t in mu_types():
@@ -369,7 +362,7 @@ for t in mu_types():
 val unknown = mm_match(mt_var("T"), mt_unknown(), ms_empty())
 expect(mm_render(unknown)).to_equal("Bound\{\}")
 expect(bad).to_equal("")
-expect(checked).to_equal(218)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
+expect(checked).to_equal(218)  # oracle: enumerated open-evidence cases of this scenario (patterns x open evidence shapes)
 ```
 
 </details>
@@ -378,9 +371,9 @@ expect(checked).to_equal(218)  # oracle: pinned size of the exhaustive sweep or 
 
 #### I1 resolves exactly when every variable has evidence, and then to the witness
 
-- Run the checks for: I1 resolves exactly when every variable has evidence, and then to the witness
+- Infer every signature under every substitution and every evidence mask
    - Expected: bad equals ``
-   - Expected: checked equals `2304)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or ... (full value in folded executable source)`
+   - Expected: checked equals `2304)  # oracle: 36 signatures x 16 substitutions x 4 evidence masks`
    - Expected: resolved > 0 is true
    - Expected: unresolved > 0 is true
 
@@ -388,12 +381,11 @@ expect(checked).to_equal(218)  # oracle: pinned size of the exhaustive sweep or 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 48 lines folded for reproduction.
+Runnable source: 47 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-GSUBST-003
-step("Run the checks for: I1 resolves exactly when every variable has evidence, and then to the witness")
+step("Infer every signature under every substitution and every evidence mask")
 val gamma = ["T", "U"]
 val shapes = [mt_var("T"), mt_var("U"), mt_con("i64"),
               mt_app(MT_ARRAY, [mt_var("T")]),
@@ -437,7 +429,7 @@ for p1 in shapes:
                 mask = mask + 1
 print "I1 checked={checked} resolved={resolved} unresolved={unresolved}"
 expect(bad).to_equal("")
-expect(checked).to_equal(2304)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
+expect(checked).to_equal(2304)  # oracle: 36 signatures x 16 substitutions x 4 evidence masks
 expect(resolved > 0).to_equal(true)
 expect(unresolved > 0).to_equal(true)
 ```
@@ -446,7 +438,7 @@ expect(unresolved > 0).to_equal(true)
 
 #### uses the expected type as evidence for a return-only variable
 
-- Run the checks for: uses the expected type as evidence for a return-only variable
+- Infer a return-only variable from the expected type
    - Expected: mi_render(none) equals `Unresolved(no_evidence)`
    - Expected: mi_render(with_expected) equals `Resolved[i64,text]`
    - Expected: mi_render(disagreeing) equals `Unresolved(conflict)`
@@ -455,12 +447,11 @@ expect(unresolved > 0).to_equal(true)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-GSUBST-003
-step("Run the checks for: uses the expected type as evidence for a return-only variable")
+step("Infer a return-only variable from the expected type")
 val i64t = mt_con("i64")
 val textt = mt_con("text")
 val none = mi_infer(["T", "U"], [mt_var("T")], mt_var("U"), [], [i64t], mt_unknown(), false)
@@ -475,7 +466,7 @@ expect(mi_render(disagreeing)).to_equal("Unresolved(conflict)")
 
 #### takes written type arguments as the instantiation and never overrides them
 
-- Run the checks for: takes written type arguments as the instantiation and never overrides them
+- Infer with written type arguments, then with evidence that disagrees
    - Expected: mi_render(written) equals `Resolved[text]`
    - Expected: mi_render(contradicted) equals `Unresolved(conflict)`
    - Expected: mi_render(wrong_count) equals `Unresolved(explicit_arity)`
@@ -486,12 +477,11 @@ expect(mi_render(disagreeing)).to_equal("Unresolved(conflict)")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 14 lines folded for reproduction.
+Runnable source: 13 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-GSUBST-003
-step("Run the checks for: takes written type arguments as the instantiation and never overrides them")
+step("Infer with written type arguments, then with evidence that disagrees")
 val i64t = mt_con("i64")
 val textt = mt_con("text")
 val written = mi_infer(["T"], [mt_var("T")], mt_var("T"), [textt], [mt_unknown()], mt_unknown(), false)
@@ -512,7 +502,7 @@ expect(mi_render(named)).to_equal("Unresolved(named_args)")
 
 #### K1 is deterministic
 
-- Run the checks for: K1 is deterministic
+- Encode every closed type twice and compare the key texts
    - Expected: bad equals ``
    - Expected: mk_key("m", "f", [mt_con("i64")]) equals `m1:mf1:fl1:c3:i64`
 
@@ -520,12 +510,11 @@ expect(mi_render(named)).to_equal("Unresolved(named_args)")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-GSUBST-004
-step("Run the checks for: K1 is deterministic")
+step("Encode every closed type twice and compare the key texts")
 var bad = ""
 for t in mu_closed_types():
     val tt: MType = t
@@ -539,21 +528,20 @@ expect(mk_key("m", "f", [mt_con("i64")])).to_equal("m1:mf1:fl1:c3:i64")
 
 #### K2 the structural key separates types in the bounded universe
 
-- Run the checks for: K2 the structural key separates types in the bounded universe
+- Encode every pair of closed types and compare key equality with structural equality
    - Expected: bad equals ``
-   - Expected: checked equals `21609)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or... (full value in folded executable source)`
-   - Expected: equal_pairs equals `147)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or t... (full value in folded executable source)`
+   - Expected: checked equals `21609)  # oracle: 147 closed types squared: every ordered pair`
+   - Expected: equal_pairs equals `147)  # oracle: closed types of the universe: the closed members of the 365 (... (full value in folded executable source)`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 29 lines folded for reproduction.
+Runnable source: 28 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-GSUBST-004
-step("Run the checks for: K2 the structural key separates types in the bounded universe")
+step("Encode every pair of closed types and compare key equality with structural equality")
 val types = mu_closed_types()
 var renders: [text] = []
 for t in types:
@@ -579,18 +567,18 @@ while i < types.len():
     i = i + 1
 print "K2 pairs={checked} equal={equal_pairs}"
 expect(bad).to_equal("")
-expect(checked).to_equal(21609)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
-expect(equal_pairs).to_equal(147)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
+expect(checked).to_equal(21609)  # oracle: 147 closed types squared: every ordered pair
+expect(equal_pairs).to_equal(147)  # oracle: closed types of the universe: the closed members of the 365 (no variable T or U anywhere)
 ```
 
 </details>
 
 #### K2 distinct type-argument lists, of either length, never share a key
 
-- Run the checks for: K2 distinct type-argument lists, of either length, never share a key
-   - Expected: parts.len() equals `39)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or tr... (full value in folded executable source)`
-   - Expected: lists equals `1668)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or ... (full value in folded executable source)`
-   - Expected: keys.keys().len() equals `1668)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or ... (full value in folded executable source)`
+- Encode every argument list of length one and two and look for a shared key
+   - Expected: parts.len() equals `39)  # oracle: 3 closed atoms plus the closed applications used as list elements`
+   - Expected: lists equals `1668)  # oracle: 147 single-argument lists + 39 x 39 = 1521 two-argument lists`
+   - Expected: keys.keys().len() equals `1668)  # oracle: 147 single-argument lists + 39 x 39 = 1521 two-argument lists`
    - Expected: mk_key("a", "f", [mt_con("i64")]) == mk_key("b", "f", [mt_con("i64")]) is false
    - Expected: mk_key("a", "f", [mt_con("i64")]) == mk_key("a", "g", [mt_con("i64")]) is false
 
@@ -598,12 +586,11 @@ expect(equal_pairs).to_equal(147)  # oracle: pinned size of the exhaustive sweep
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 23 lines folded for reproduction.
+Runnable source: 22 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-GSUBST-004
-step("Run the checks for: K2 distinct type-argument lists, of either length, never share a key")
+step("Encode every argument list of length one and two and look for a shared key")
 val singles = mu_closed_types()
 val parts = mu_depth1(mu_closed_atoms())
 var keys: Dict<text, bool> = {}
@@ -619,9 +606,9 @@ for a in parts:
         keys[mk_key("m", "f", [x, y])] = true
         lists = lists + 1
 print "K2 lists={lists} keys={keys.keys().len()}"
-expect(parts.len()).to_equal(39)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
-expect(lists).to_equal(1668)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
-expect(keys.keys().len()).to_equal(1668)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
+expect(parts.len()).to_equal(39)  # oracle: 3 closed atoms plus the closed applications used as list elements
+expect(lists).to_equal(1668)  # oracle: 147 single-argument lists + 39 x 39 = 1521 two-argument lists
+expect(keys.keys().len()).to_equal(1668)  # oracle: 147 single-argument lists + 39 x 39 = 1521 two-argument lists
 # Owner module and template name are part of the identity.
 expect(mk_key("a", "f", [mt_con("i64")]) == mk_key("b", "f", [mt_con("i64")])).to_equal(false)
 expect(mk_key("a", "f", [mt_con("i64")]) == mk_key("a", "g", [mt_con("i64")])).to_equal(false)
@@ -631,7 +618,7 @@ expect(mk_key("a", "f", [mt_con("i64")]) == mk_key("a", "g", [mt_con("i64")])).t
 
 #### K2 constant spellings cannot alias application structure
 
-- Run the checks for: K2 constant spellings cannot alias application structure
+- Encode constants spelled like application syntax next to real applications
    - Expected: mt_is_closed(literal) is true
    - Expected: mt_is_closed(applied) is true
    - Expected: mt_render(literal) equals `mt_render(applied)`
@@ -642,12 +629,11 @@ expect(mk_key("a", "f", [mt_con("i64")]) == mk_key("a", "g", [mt_con("i64")])).t
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 9 lines folded for reproduction.
+Runnable source: 8 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-GSUBST-004
-step("Run the checks for: K2 constant spellings cannot alias application structure")
+step("Encode constants spelled like application syntax next to real applications")
 val literal = mt_con("Box<i64>")
 val applied = mt_app("Box", [mt_con("i64")])
 expect(mt_is_closed(literal)).to_equal(true)
@@ -661,7 +647,7 @@ expect(mk_key("m", "f", [literal]) == mk_key("m", "f", [applied])).to_equal(fals
 
 #### K2 argument boundaries and application arity are distinct
 
-- Run the checks for: K2 argument boundaries and application arity are distinct
+- Encode argument lists that differ only in element boundaries or arity
    - Expected: mt_render(single) equals `mt_render(pair)`
    - Expected: mt_key_type(single) == mt_key_type(pair) is false
    - Expected: mt_key_types([mt_con("i64,bool")]) == mt_key_types([mt_con("i64"), mt_con("bool")]) is false
@@ -671,12 +657,11 @@ expect(mk_key("m", "f", [literal]) == mk_key("m", "f", [applied])).to_equal(fals
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-GSUBST-004
-step("Run the checks for: K2 argument boundaries and application arity are distinct")
+step("Encode argument lists that differ only in element boundaries or arity")
 val single = mt_app("Pair", [mt_con("i64,bool")])
 val pair = mt_app("Pair", [mt_con("i64"), mt_con("bool")])
 expect(mt_render(single)).to_equal(mt_render(pair))
@@ -689,7 +674,7 @@ expect(mt_key_type(mt_con("Zero<>")) == mt_key_type(mt_app("Zero", []))).to_equa
 
 #### K2 owner and function delimiters cannot alias another identity
 
-- Run the checks for: K2 owner and function delimiters cannot alias another identity
+- Encode owner and function names that contain the key delimiters
    - Expected: mk_key("a::b", "c", []) == mk_key("a", "b::c", []) is false
    - Expected: mk_key("a", "f$[i64]", []) == mk_key("a", "f", [mt_con("i64")]) is false
    - Expected: mk_key("", "a", []) == mk_key("a", "", []) is false
@@ -698,12 +683,11 @@ expect(mt_key_type(mt_con("Zero<>")) == mt_key_type(mt_app("Zero", []))).to_equa
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-GSUBST-004
-step("Run the checks for: K2 owner and function delimiters cannot alias another identity")
+step("Encode owner and function names that contain the key delimiters")
 expect(mk_key("a::b", "c", []) == mk_key("a", "b::c", [])).to_equal(false)
 expect(mk_key("a", "f$[i64]", []) == mk_key("a", "f", [mt_con("i64")])).to_equal(false)
 expect(mk_key("", "a", []) == mk_key("a", "", [])).to_equal(false)
@@ -713,7 +697,7 @@ expect(mk_key("", "a", []) == mk_key("a", "", [])).to_equal(false)
 
 #### K2 tags preserve variable constant and application distinctions
 
-- Run the checks for: K2 tags preserve variable constant and application distinctions
+- Encode a variable, a constant and an application with the same name
    - Expected: mt_key_type(mt_var("T")) == mt_key_type(mt_con("'T")) is false
    - Expected: mt_key_type(mt_con("")) == mt_key_type(mt_app("", [])) is false
    - Expected: mt_key_type(mt_con("c3:i64")) == mt_key_type(mt_con("i64")) is false
@@ -723,12 +707,11 @@ expect(mk_key("", "a", []) == mk_key("a", "", [])).to_equal(false)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-GSUBST-004
-step("Run the checks for: K2 tags preserve variable constant and application distinctions")
+step("Encode a variable, a constant and an application with the same name")
 expect(mt_key_type(mt_var("T")) == mt_key_type(mt_con("'T"))).to_equal(false)
 expect(mt_key_type(mt_con("")) == mt_key_type(mt_app("", []))).to_equal(false)
 expect(mt_key_type(mt_con("c3:i64")) == mt_key_type(mt_con("i64"))).to_equal(false)
@@ -741,21 +724,20 @@ expect(mt_key_type(mt_app("名:<>", [mt_con("值,:$")])) == mt_key_type(mt_app("
 
 #### K3 decodes every type key back to the same type
 
-- Run the checks for: K3 decodes every type key back to the same type
+- Encode every type, decode the key and compare with the original
    - Expected: back.ok is true
    - Expected: mt_struct_eq(back.t, tt) is true
-   - Expected: n equals `365)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or t... (full value in folded executable source)`
+   - Expected: n equals `365)  # oracle: the 95 depth-1 types + 3 unary constructors x the 90 non-atom... (full value in folded executable source)`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 10 lines folded for reproduction.
+Runnable source: 9 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-GSUBST-004
-step("Run the checks for: K3 decodes every type key back to the same type")
+step("Encode every type, decode the key and compare with the original")
 var n = 0
 for t in mu_types():
     val tt: MType = t
@@ -763,14 +745,14 @@ for t in mu_types():
     expect(back.ok).to_equal(true)
     expect(mt_struct_eq(back.t, tt)).to_equal(true)
     n = n + 1
-expect(n).to_equal(365)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
+expect(n).to_equal(365)  # oracle: the 95 depth-1 types + 3 unary constructors x the 90 non-atom depth-1 types = 95 + 270
 ```
 
 </details>
 
 #### K3 rejects malformed and trailing key text
 
-- Run the checks for: K3 rejects malformed and trailing key text
+- Decode truncated, mistyped and trailing key text
    - Expected: mt_from_key("").ok is false
    - Expected: mt_from_key("c3:i6").ok is false
    - Expected: mt_from_key("c3:i64x").ok is false
@@ -780,12 +762,11 @@ expect(n).to_equal(365)  # oracle: pinned size of the exhaustive sweep or fixtur
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-GSUBST-004
-step("Run the checks for: K3 rejects malformed and trailing key text")
+step("Decode truncated, mistyped and trailing key text")
 expect(mt_from_key("").ok).to_equal(false)
 expect(mt_from_key("c3:i6").ok).to_equal(false)
 expect(mt_from_key("c3:i64x").ok).to_equal(false)
@@ -807,53 +788,45 @@ expect(mt_from_key("a5:Arrayl2:c3:i64").ok).to_equal(false)
 
 </details>
 
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-GSUBST-001`
-- `REQ-GSUBST-002`
-- `REQ-GSUBST-003`
-- `REQ-GSUBST-004`
-<!-- sspec-maintain:traceability:end -->
-
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `f941a380af4d84e0a608442a3d2b142b91584521c8337b2dc7cf855d2948359a`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `c7707924b68251f89c372b04cadbc1e5ee7b7493d6c990adbce57717ebe39716`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `f941a380af4d84e0a608442a3d2b142b91584521c8337b2dc7cf855d2948359a`.
+Source SHA-256: `c7707924b68251f89c372b04cadbc1e5ee7b7493d6c990adbce57717ebe39716`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `f941a380af4d84e0a608442a3d2b142b91584521c8337b2dc7cf855d2948359a`  
+Source SHA-256: `c7707924b68251f89c372b04cadbc1e5ee7b7493d6c990adbce57717ebe39716`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+Raw score: **89/100**; effective score: **89/100**; blockers: **0**.
 
-SSpec documentization score: 92/100
+SSpec documentization score: 89/100
 source: 01_unit/compiler/30.types/generic_subst/generic_subst_model_laws_spec.spl
 mirror: doc/06_spec/01_unit/compiler/30.types/generic_subst/generic_subst_model_laws_spec.md (current)
-findings: 5 blockers: 0
+findings: 6 blockers: 0
   narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
+  traceability=80 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
 01_unit/compiler/30.types/generic_subst/generic_subst_model_laws_spec.spl:1:1: advice SSDOC-MNT-007 [maintainability] (-10): research, plan, architecture, or design metadata links are incomplete
   why: Reviewers need selected lifecycle evidence, not inferred project state.
   improve: Link the selected lifecycle artifacts or configure a reasoned scope suppression.
-01_unit/compiler/30.types/generic_subst/generic_subst_model_laws_spec.spl:84:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'has the stated sizes and no duplicate' has no retained capture or evidence
+01_unit/compiler/30.types/generic_subst/generic_subst_model_laws_spec.spl:1:1: warning SSDOC-TRC-001 [traceability] (-20): no implemented requirement identity
+  why: Stable requirement identity connects intent, implementation, and evidence.
+  improve: Bind scenarios to stable selected REQ identities.
+01_unit/compiler/30.types/generic_subst/generic_subst_model_laws_spec.spl:83:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'has the stated sizes and no duplicate' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-01_unit/compiler/30.types/generic_subst/generic_subst_model_laws_spec.spl:101:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'S1 idempotence and S3 closedness on every type and closed substitution' has no retained capture or evidence
+01_unit/compiler/30.types/generic_subst/generic_subst_model_laws_spec.spl:99:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'S1 idempotence and S3 closedness on every type and closed substitution' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-01_unit/compiler/30.types/generic_subst/generic_subst_model_laws_spec.spl:130:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'S2 composition on every depth<=1 type, open substitution and closed substitution' has no retained capture or evidence
+01_unit/compiler/30.types/generic_subst/generic_subst_model_laws_spec.spl:127:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'S2 composition on every depth<=1 type, open substitution and closed substitution' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-doc/06_spec/01_unit/compiler/30.types/generic_subst/generic_subst_model_laws_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, assumptions/preconditions
+doc/06_spec/01_unit/compiler/30.types/generic_subst/generic_subst_model_laws_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, assumptions/preconditions, traceability
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
 <!-- sspec-maintain:scorecard:end -->

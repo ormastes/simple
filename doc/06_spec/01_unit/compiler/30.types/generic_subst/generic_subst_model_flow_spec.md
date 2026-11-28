@@ -71,28 +71,27 @@ well-typed case fails the spec.
 
 #### has the stated sizes
 
-- Run the checks for: has the stated sizes
-   - Expected: mf_kinds().len() equals `19)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or tr... (full value in folded executable source)`
-   - Expected: mu_flow_types().len() equals `26)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or tr... (full value in folded executable source)`
-   - Expected: flow_substs().len() equals `25)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or tr... (full value in folded executable source)`
-   - Expected: mu_pair_instances().len() equals `25)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or tr... (full value in folded executable source)`
-   - Expected: mu_field_declarations().len() equals `8)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or tru... (full value in folded executable source)`
+- Build the flow universes (kinds, types, substitutions, instances, declarations) and count them
+   - Expected: mf_kinds().len() equals `19)  # oracle: one per variable-change kind listed in mf_kinds(`
+   - Expected: mu_flow_types().len() equals `26)  # oracle: size of mu_flow_types(), the bounded flow universe`
+   - Expected: flow_substs().len() equals `25)  # oracle: two variables bound or not over the 5 atoms: 5 x 5`
+   - Expected: mu_pair_instances().len() equals `25)  # oracle: Pair<A,B> over 5 atoms for each argument: 5 x 5`
+   - Expected: mu_field_declarations().len() equals `8)  # oracle: the 8 declared field types of the universe`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 7 lines folded for reproduction.
+Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-GSUBST-005
-step("Run the checks for: has the stated sizes")
-expect(mf_kinds().len()).to_equal(19)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
-expect(mu_flow_types().len()).to_equal(26)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
-expect(flow_substs().len()).to_equal(25)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
-expect(mu_pair_instances().len()).to_equal(25)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
-expect(mu_field_declarations().len()).to_equal(8)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
+step("Build the flow universes (kinds, types, substitutions, instances, declarations) and count them")
+expect(mf_kinds().len()).to_equal(19)  # oracle: one per variable-change kind listed in mf_kinds()
+expect(mu_flow_types().len()).to_equal(26)  # oracle: size of mu_flow_types(), the bounded flow universe
+expect(flow_substs().len()).to_equal(25)  # oracle: two variables bound or not over the 5 atoms: 5 x 5
+expect(mu_pair_instances().len()).to_equal(25)  # oracle: Pair<A,B> over 5 atoms for each argument: 5 x 5
+expect(mu_field_declarations().len()).to_equal(8)  # oracle: the 8 declared field types of the universe
 ```
 
 </details>
@@ -101,140 +100,134 @@ expect(mu_field_declarations().len()).to_equal(8)  # oracle: pinned size of the 
 
 #### let with an annotation
 
-- Run the checks for: let with an annotation
+- Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare
    - Expected: first_bad equals ``
-   - Expected: ok_cases equals `26)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or tr... (full value in folded executable source)`
-   - Expected: ill_cases equals `650)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or t... (full value in folded executable source)`
+   - Expected: ok_cases equals `26)  # oracle: each of the 26 flow types is accepted once (the destination eq... (full value in folded executable source)`
+   - Expected: ill_cases equals `650)  # oracle: 676 ordered pairs of the 26 flow types minus the 26 pairs who... (full value in folded executable source)`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 6 lines folded for reproduction.
+Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-GSUBST-005
-step("Run the checks for: let with an annotation")
+step("Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare")
 sweep_binary(MF_LET)
 expect(first_bad).to_equal("")
-expect(ok_cases).to_equal(26)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
-expect(ill_cases).to_equal(650)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
+expect(ok_cases).to_equal(26)  # oracle: each of the 26 flow types is accepted once (the destination equals the value, or the kind passes its input on)
+expect(ill_cases).to_equal(650)  # oracle: 676 ordered pairs of the 26 flow types minus the 26 pairs whose types agree
 ```
 
 </details>
 
 #### let without an annotation
 
-- Run the checks for: let without an annotation
+- Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare
    - Expected: first_bad equals ``
-   - Expected: ok_cases equals `26)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or tr... (full value in folded executable source)`
+   - Expected: ok_cases equals `26)  # oracle: each of the 26 flow types is accepted once (the destination eq... (full value in folded executable source)`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-GSUBST-005
-step("Run the checks for: let without an annotation")
+step("Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare")
 sweep_unary(MF_LET_INFER)
 expect(first_bad).to_equal("")
-expect(ok_cases).to_equal(26)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
+expect(ok_cases).to_equal(26)  # oracle: each of the 26 flow types is accepted once (the destination equals the value, or the kind passes its input on)
 ```
 
 </details>
 
 #### assignment to a var
 
-- Run the checks for: assignment to a var
+- Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare
    - Expected: first_bad equals ``
-   - Expected: ok_cases equals `26)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or tr... (full value in folded executable source)`
+   - Expected: ok_cases equals `26)  # oracle: each of the 26 flow types is accepted once (the destination eq... (full value in folded executable source)`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-GSUBST-005
-step("Run the checks for: assignment to a var")
+step("Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare")
 sweep_binary(MF_ASSIGN)
 expect(first_bad).to_equal("")
-expect(ok_cases).to_equal(26)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
+expect(ok_cases).to_equal(26)  # oracle: each of the 26 flow types is accepted once (the destination equals the value, or the kind passes its input on)
 ```
 
 </details>
 
 #### argument passed to a parameter
 
-- Run the checks for: argument passed to a parameter
+- Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare
    - Expected: first_bad equals ``
-   - Expected: ok_cases equals `26)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or tr... (full value in folded executable source)`
+   - Expected: ok_cases equals `26)  # oracle: each of the 26 flow types is accepted once (the destination eq... (full value in folded executable source)`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-GSUBST-005
-step("Run the checks for: argument passed to a parameter")
+step("Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare")
 sweep_binary(MF_PARAM)
 expect(first_bad).to_equal("")
-expect(ok_cases).to_equal(26)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
+expect(ok_cases).to_equal(26)  # oracle: each of the 26 flow types is accepted once (the destination equals the value, or the kind passes its input on)
 ```
 
 </details>
 
 #### value returned
 
-- Run the checks for: value returned
+- Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare
    - Expected: first_bad equals ``
-   - Expected: ok_cases equals `26)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or tr... (full value in folded executable source)`
+   - Expected: ok_cases equals `26)  # oracle: each of the 26 flow types is accepted once (the destination eq... (full value in folded executable source)`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-GSUBST-005
-step("Run the checks for: value returned")
+step("Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare")
 sweep_binary(MF_RETURN)
 expect(first_bad).to_equal("")
-expect(ok_cases).to_equal(26)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
+expect(ok_cases).to_equal(26)  # oracle: each of the 26 flow types is accepted once (the destination equals the value, or the kind passes its input on)
 ```
 
 </details>
 
 #### closure capture
 
-- Run the checks for: closure capture
+- Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare
    - Expected: first_bad equals ``
-   - Expected: ok_cases equals `26)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or tr... (full value in folded executable source)`
+   - Expected: ok_cases equals `26)  # oracle: each of the 26 flow types is accepted once (the destination eq... (full value in folded executable source)`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-GSUBST-005
-step("Run the checks for: closure capture")
+step("Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare")
 sweep_unary(MF_CAPTURE)
 expect(first_bad).to_equal("")
-expect(ok_cases).to_equal(26)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
+expect(ok_cases).to_equal(26)  # oracle: each of the 26 flow types is accepted once (the destination equals the value, or the kind passes its input on)
 ```
 
 </details>
@@ -243,34 +236,10 @@ expect(ok_cases).to_equal(26)  # oracle: pinned size of the exhaustive sweep or 
 
 #### array element read
 
-- Run the checks for: array element read
+- Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare
    - Expected: first_bad equals ``
-   - Expected: ok_cases equals `5)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or tru... (full value in folded executable source)`
-   - Expected: ill_cases equals `21)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or tr... (full value in folded executable source)`
-
-
-<details>
-<summary>Executable SSpec</summary>
-
-Runnable source: 6 lines folded for reproduction.
-Reproduction: this block contains the complete executable scenario source.
-
-```simple
-# @req REQ-GSUBST-005
-step("Run the checks for: array element read")
-sweep_unary(MF_ELEM_READ)
-expect(first_bad).to_equal("")
-expect(ok_cases).to_equal(5)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
-expect(ill_cases).to_equal(21)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
-```
-
-</details>
-
-#### array element write
-
-- Run the checks for: array element write
-   - Expected: first_bad equals ``
-   - Expected: ok_cases equals `5)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or tru... (full value in folded executable source)`
+   - Expected: ok_cases equals `5)  # oracle: 5 of the 26 flow types are arrays, the only container this kind... (full value in folded executable source)`
+   - Expected: ill_cases equals `21)  # oracle: the 26 - 5 flow types that are not arrays are refused`
 
 
 <details>
@@ -280,11 +249,33 @@ Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-GSUBST-005
-step("Run the checks for: array element write")
+step("Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare")
+sweep_unary(MF_ELEM_READ)
+expect(first_bad).to_equal("")
+expect(ok_cases).to_equal(5)  # oracle: 5 of the 26 flow types are arrays, the only container this kind accepts
+expect(ill_cases).to_equal(21)  # oracle: the 26 - 5 flow types that are not arrays are refused
+```
+
+</details>
+
+#### array element write
+
+- Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare
+   - Expected: first_bad equals ``
+   - Expected: ok_cases equals `5)  # oracle: 5 of the 26 flow types are arrays, the only container this kind... (full value in folded executable source)`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare")
 sweep_binary(MF_ELEM_WRITE)
 expect(first_bad).to_equal("")
-expect(ok_cases).to_equal(5)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
+expect(ok_cases).to_equal(5)  # oracle: 5 of the 26 flow types are arrays, the only container this kind accepts
 ```
 
 </details>
@@ -294,23 +285,22 @@ expect(ok_cases).to_equal(5)  # oracle: pinned size of the exhaustive sweep or f
 
 #### loop variable
 
-- Run the checks for: loop variable
+- Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare
    - Expected: first_bad equals ``
-   - Expected: ok_cases equals `5)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or tru... (full value in folded executable source)`
+   - Expected: ok_cases equals `5)  # oracle: 5 of the 26 flow types are arrays, the only container this kind... (full value in folded executable source)`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-GSUBST-005
-step("Run the checks for: loop variable")
+step("Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare")
 sweep_unary(MF_LOOP)
 expect(first_bad).to_equal("")
-expect(ok_cases).to_equal(5)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
+expect(ok_cases).to_equal(5)  # oracle: 5 of the 26 flow types are arrays, the only container this kind accepts
 ```
 
 </details>
@@ -320,44 +310,42 @@ expect(ok_cases).to_equal(5)  # oracle: pinned size of the exhaustive sweep or f
 
 #### dict entry read
 
-- Run the checks for: dict entry read
+- Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare
    - Expected: first_bad equals ``
-   - Expected: ok_cases equals `2)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or tru... (full value in folded executable source)`
+   - Expected: ok_cases equals `2)  # oracle: only the two-argument constructor types of this kind (2 of the ... (full value in folded executable source)`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-GSUBST-005
-step("Run the checks for: dict entry read")
+step("Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare")
 sweep_binary(MF_DICT_READ)
 expect(first_bad).to_equal("")
-expect(ok_cases).to_equal(2)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
+expect(ok_cases).to_equal(2)  # oracle: only the two-argument constructor types of this kind (2 of the 26 flow types) are accepted
 ```
 
 </details>
 
 #### dict entry write
 
-- Run the checks for: dict entry write
+- Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare
    - Expected: first_bad equals ``
-   - Expected: ok_cases equals `2)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or tru... (full value in folded executable source)`
-   - Expected: ok_cases + ill_cases equals `17576)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or... (full value in folded executable source)`
+   - Expected: ok_cases equals `2)  # oracle: only the two-argument constructor types of this kind (2 of the ... (full value in folded executable source)`
+   - Expected: ok_cases + ill_cases equals `17576)  # oracle: 26 x 26 x 26 ordered triples of flow types`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 21 lines folded for reproduction.
+Runnable source: 20 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-GSUBST-005
-step("Run the checks for: dict entry write")
+step("Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare")
 reset()
 val substs = flow_substs()
 val types = mu_flow_types()
@@ -375,36 +363,35 @@ for a in types:
             skip_ill(types.len())
 print "dict_write: ok={ok_cases} ill={ill_cases} substituted={substituted}"
 expect(first_bad).to_equal("")
-expect(ok_cases).to_equal(2)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
-expect(ok_cases + ill_cases).to_equal(17576)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
+expect(ok_cases).to_equal(2)  # oracle: only the two-argument constructor types of this kind (2 of the 26 flow types) are accepted
+expect(ok_cases + ill_cases).to_equal(17576)  # oracle: 26 x 26 x 26 ordered triples of flow types
 ```
 
 </details>
 
 #### tuple destructuring, both components
 
-- Run the checks for: tuple destructuring, both components
+- Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare
    - Expected: first_bad equals ``
-   - Expected: ok_cases equals `2)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or tru... (full value in folded executable source)`
+   - Expected: ok_cases equals `2)  # oracle: only the two-argument constructor types of this kind (2 of the ... (full value in folded executable source)`
    - Expected: first_bad equals ``
-   - Expected: ok_cases equals `2)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or tru... (full value in folded executable source)`
+   - Expected: ok_cases equals `2)  # oracle: only the two-argument constructor types of this kind (2 of the ... (full value in folded executable source)`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-GSUBST-005
-step("Run the checks for: tuple destructuring, both components")
+step("Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare")
 sweep_unary(MF_TUPLE_FIRST)
 expect(first_bad).to_equal("")
-expect(ok_cases).to_equal(2)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
+expect(ok_cases).to_equal(2)  # oracle: only the two-argument constructor types of this kind (2 of the 26 flow types) are accepted
 sweep_unary(MF_TUPLE_SECOND)
 expect(first_bad).to_equal("")
-expect(ok_cases).to_equal(2)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
+expect(ok_cases).to_equal(2)  # oracle: only the two-argument constructor types of this kind (2 of the 26 flow types) are accepted
 ```
 
 </details>
@@ -413,92 +400,88 @@ expect(ok_cases).to_equal(2)  # oracle: pinned size of the exhaustive sweep or f
 
 #### wrap into an optional
 
-- Run the checks for: wrap into an optional
+- Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare
    - Expected: first_bad equals ``
-   - Expected: ok_cases equals `26)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or tr... (full value in folded executable source)`
+   - Expected: ok_cases equals `26)  # oracle: each of the 26 flow types is accepted once (the destination eq... (full value in folded executable source)`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-GSUBST-005
-step("Run the checks for: wrap into an optional")
+step("Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare")
 sweep_unary(MF_OPT_WRAP)
 expect(first_bad).to_equal("")
-expect(ok_cases).to_equal(26)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
+expect(ok_cases).to_equal(26)  # oracle: each of the 26 flow types is accepted once (the destination equals the value, or the kind passes its input on)
 ```
 
 </details>
 
 #### unwrap / payload pattern
 
-- Run the checks for: unwrap / payload pattern
+- Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare
    - Expected: first_bad equals ``
-   - Expected: ok_cases equals `5)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or tru... (full value in folded executable source)`
+   - Expected: ok_cases equals `5)  # oracle: 5 of the 26 flow types are arrays, the only container this kind... (full value in folded executable source)`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-GSUBST-005
-step("Run the checks for: unwrap / payload pattern")
+step("Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare")
 sweep_unary(MF_OPT_UNWRAP)
 expect(first_bad).to_equal("")
-expect(ok_cases).to_equal(5)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
+expect(ok_cases).to_equal(5)  # oracle: 5 of the 26 flow types are arrays, the only container this kind accepts
 ```
 
 </details>
 
 #### coalesce with a default
 
-- Run the checks for: coalesce with a default
+- Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare
    - Expected: first_bad equals ``
-   - Expected: ok_cases equals `5)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or tru... (full value in folded executable source)`
+   - Expected: ok_cases equals `5)  # oracle: 5 of the 26 flow types are arrays, the only container this kind... (full value in folded executable source)`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-GSUBST-005
-step("Run the checks for: coalesce with a default")
+step("Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare")
 sweep_binary(MF_OPT_DEFAULT)
 expect(first_bad).to_equal("")
-expect(ok_cases).to_equal(5)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
+expect(ok_cases).to_equal(5)  # oracle: 5 of the 26 flow types are arrays, the only container this kind accepts
 ```
 
 </details>
 
 #### call through a closure value
 
-- Run the checks for: call through a closure value
+- Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare
    - Expected: first_bad equals ``
-   - Expected: ok_cases equals `2)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or tru... (full value in folded executable source)`
+   - Expected: ok_cases equals `2)  # oracle: only the two-argument constructor types of this kind (2 of the ... (full value in folded executable source)`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 5 lines folded for reproduction.
+Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-GSUBST-005
-step("Run the checks for: call through a closure value")
+step("Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare")
 sweep_binary(MF_CLOSURE_CALL)
 expect(first_bad).to_equal("")
-expect(ok_cases).to_equal(2)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
+expect(ok_cases).to_equal(2)  # oracle: only the two-argument constructor types of this kind (2 of the 26 flow types) are accepted
 ```
 
 </details>
@@ -507,22 +490,21 @@ expect(ok_cases).to_equal(2)  # oracle: pinned size of the exhaustive sweep or f
 
 #### field read instantiates the declaration by the instance's arguments
 
-- Run the checks for: field read instantiates the declaration by the instance's arguments
+- Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare
    - Expected: first_bad equals ``
-   - Expected: ok_cases equals `175)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or t... (full value in folded executable source)`
-   - Expected: ill_cases equals `25)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or tr... (full value in folded executable source)`
+   - Expected: ok_cases equals `175)  # oracle: of the 8 x 25 = 200 declaration x instance pairs, 175 are acc... (full value in folded executable source)`
+   - Expected: ill_cases equals `25)  # oracle: the remaining 25 of the 200 pairs are shape errors`
    - Expected: mf_render(read) equals `Ok(Array<'T>)`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-GSUBST-005
-step("Run the checks for: field read instantiates the declaration by the instance's arguments")
+step("Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare")
 reset()
 val substs = flow_substs()
 for inst in mu_pair_instances():
@@ -533,8 +515,8 @@ for inst in mu_pair_instances():
 print "field_read: ok={ok_cases} ill={ill_cases} substituted={substituted}"
 expect(first_bad).to_equal("")
 # 25 instances x 7 declarations closed over P, Q; the eighth is open.
-expect(ok_cases).to_equal(175)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
-expect(ill_cases).to_equal(25)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
+expect(ok_cases).to_equal(175)  # oracle: of the 8 x 25 = 200 declaration x instance pairs, 175 are accepted
+expect(ill_cases).to_equal(25)  # oracle: the remaining 25 of the 200 pairs are shape errors
 val read = mf_step(MF_FIELD_READ, [mt_app(MU_PAIR, [mt_var("T"), mt_con("i64")]), mt_app(MT_ARRAY, [mt_var("P")])], ["P", "Q"])
 expect(mf_render(read)).to_equal("Ok(Array<'T>)")
 ```
@@ -543,7 +525,7 @@ expect(mf_render(read)).to_equal("Ok(Array<'T>)")
 
 #### a declaration open in a variable of the enclosing function is rejected
 
-- Run the checks for: a declaration open in a variable of the enclosing function is rejected
+- Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare
    - Expected: mf_render(open) equals `Ill(open_declaration)`
    - Expected: mf_render(wrong_arity) equals `Ill(shape)`
    - Expected: mf_render(not_an_instance) equals `Ill(shape)`
@@ -552,12 +534,11 @@ expect(mf_render(read)).to_equal("Ok(Array<'T>)")
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 8 lines folded for reproduction.
+Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-GSUBST-005
-step("Run the checks for: a declaration open in a variable of the enclosing function is rejected")
+step("Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare")
 val open = mf_step(MF_FIELD_READ, [mt_app(MU_PAIR, [mt_con("i64"), mt_con("i64")]), mt_var("T")], ["P", "Q"])
 expect(mf_render(open)).to_equal("Ill(open_declaration)")
 val wrong_arity = mf_step(MF_FIELD_READ, [mt_app(MU_BOX, [mt_con("i64")]), mt_var("P")], ["P", "Q"])
@@ -570,21 +551,20 @@ expect(mf_render(not_an_instance)).to_equal("Ill(shape)")
 
 #### field write accepts exactly the instantiated field type
 
-- Run the checks for: field write accepts exactly the instantiated field type
+- Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare
    - Expected: first_bad equals ``
    - Expected: ok_cases > 0 is true
-   - Expected: ok_cases + ill_cases equals `5200)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or ... (full value in folded executable source)`
+   - Expected: ok_cases + ill_cases equals `5200)  # oracle: 200 declaration x instance pairs x 26 value types`
 
 
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 16 lines folded for reproduction.
+Runnable source: 15 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-# @req REQ-GSUBST-005
-step("Run the checks for: field write accepts exactly the instantiated field type")
+step("Step every input of the bounded flow universe for this scenario through mf_step and through the substituted copy, then compare")
 reset()
 val substs = flow_substs()
 val values = mu_flow_types()
@@ -598,7 +578,7 @@ for inst in mu_pair_instances():
 print "field_write: ok={ok_cases} ill={ill_cases} substituted={substituted}"
 expect(first_bad).to_equal("")
 expect(ok_cases > 0).to_equal(true)
-expect(ok_cases + ill_cases).to_equal(5200)  # oracle: pinned size of the exhaustive sweep or fixture; an empty or truncated sweep changes it
+expect(ok_cases + ill_cases).to_equal(5200)  # oracle: 200 declaration x instance pairs x 26 value types
 ```
 
 </details>
@@ -616,50 +596,45 @@ expect(ok_cases + ill_cases).to_equal(5200)  # oracle: pinned size of the exhaus
 
 </details>
 
-<!-- sspec-maintain:traceability:start -->
-## Traceability
-
-Requirements covered by the scenarios in this manual:
-
-- `REQ-GSUBST-005`
-<!-- sspec-maintain:traceability:end -->
-
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `6cdcc298224078946a2e60b9315fee9f5d464ceff96046de5c95e2670628fc94`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `9242544f662cdb01e91471b1d2acac82e8b84feb78634f30de032518a286e11a`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `6cdcc298224078946a2e60b9315fee9f5d464ceff96046de5c95e2670628fc94`.
+Source SHA-256: `9242544f662cdb01e91471b1d2acac82e8b84feb78634f30de032518a286e11a`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `6cdcc298224078946a2e60b9315fee9f5d464ceff96046de5c95e2670628fc94`  
+Source SHA-256: `9242544f662cdb01e91471b1d2acac82e8b84feb78634f30de032518a286e11a`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
-Raw score: **92/100**; effective score: **92/100**; blockers: **0**.
+Raw score: **89/100**; effective score: **89/100**; blockers: **0**.
 
-SSpec documentization score: 92/100
+SSpec documentization score: 89/100
 source: 01_unit/compiler/30.types/generic_subst/generic_subst_model_flow_spec.spl
 mirror: doc/06_spec/01_unit/compiler/30.types/generic_subst/generic_subst_model_flow_spec.md (current)
-findings: 5 blockers: 0
+findings: 6 blockers: 0
   narrative=100 structure=100 oracle=100
-  traceability=100 evidence=70 coverage=100 maintainability=70
+  traceability=80 evidence=70 coverage=100 maintainability=70
   cache=not-used suppressed=0
   lint-owned related rules=SPIPE001,SPIPE002,SPIPE003,SPIPE004,SPIPE005,SPIPE006,SPIPE007
 01_unit/compiler/30.types/generic_subst/generic_subst_model_flow_spec.spl:1:1: advice SSDOC-MNT-007 [maintainability] (-10): research, plan, architecture, or design metadata links are incomplete
   why: Reviewers need selected lifecycle evidence, not inferred project state.
   improve: Link the selected lifecycle artifacts or configure a reasoned scope suppression.
-01_unit/compiler/30.types/generic_subst/generic_subst_model_flow_spec.spl:140:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'has the stated sizes' has no retained capture or evidence
+01_unit/compiler/30.types/generic_subst/generic_subst_model_flow_spec.spl:1:1: warning SSDOC-TRC-001 [traceability] (-20): no implemented requirement identity
+  why: Stable requirement identity connects intent, implementation, and evidence.
+  improve: Bind scenarios to stable selected REQ identities.
+01_unit/compiler/30.types/generic_subst/generic_subst_model_flow_spec.spl:139:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'has the stated sizes' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-01_unit/compiler/30.types/generic_subst/generic_subst_model_flow_spec.spl:151:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'let with an annotation' has no retained capture or evidence
+01_unit/compiler/30.types/generic_subst/generic_subst_model_flow_spec.spl:149:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'let with an annotation' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-01_unit/compiler/30.types/generic_subst/generic_subst_model_flow_spec.spl:159:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'let without an annotation' has no retained capture or evidence
+01_unit/compiler/30.types/generic_subst/generic_subst_model_flow_spec.spl:156:1: warning SSDOC-EVD-001 [evidence] (-10): visible scenario 'let without an annotation' has no retained capture or evidence
   why: Professional manuals need retained observable evidence.
   improve: Capture typed user/operator-facing evidence or explain why the oracle is complete.
-doc/06_spec/01_unit/compiler/30.types/generic_subst/generic_subst_model_flow_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, assumptions/preconditions
+doc/06_spec/01_unit/compiler/30.types/generic_subst/generic_subst_model_flow_spec.md:1:1: warning SSDOC-MNT-008 [maintainability] (-20): manual is missing: scope, assumptions/preconditions, traceability
   why: A test dump is not a complete professional specification manual.
   improve: Author the missing facts in SSpec and regenerate through canonical SPipe docgen.
 <!-- sspec-maintain:scorecard:end -->
