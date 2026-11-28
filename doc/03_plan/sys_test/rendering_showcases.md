@@ -37,3 +37,12 @@ Design: `doc/05_design/rendering_showcases.md`.
 - `check-rendering-showcase-captures.shs` — headless PPM captures for
   2d/gui/wm entries (nonzero checksum + provenance), web HTML artifact
   contains all tab ids, `bin/simple ui web` bounded HTTP 200 probe.
+
+## Chrome vs Pure-Simple HTML Layout & GUI Comparison Cross-Reference
+
+- **Catalog & Specs:** `examples/browser/html_layout_compare/variations.sdn` (`v01`–`v14`, `e01`–`e06`) and `examples/browser/html_layout_compare/pages/v01.html`..`v12.html`.
+- **Pure-Simple Renderer & Report Tool:** `SIMPLE_LIB=src bin/simple run src/app/html_layout_compare/main.spl --out-dir build/html_layout_compare [--json]` (writes `compare_report.sdn` by default, optional `--json` for `compare_manifest.{json,js}`).
+- **Chrome Offscreen Capture & 4-Tab Electron Studio (`1440x920`):**
+  - `npx electron tools/electron-shell/html_layout_compare_app.js --capture-chrome build/html_layout_compare --pages examples/browser/html_layout_compare/pages`
+  - `npx electron tools/electron-shell/html_layout_compare_app.js --dir build/html_layout_compare`
+- **Detailed Plans:** See `doc/03_plan/sys_test/simple_web_engine_completion.md` (§ 3) and `doc/03_plan/sys_test/simple_gui_completion.md` (§ 4).

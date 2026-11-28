@@ -1,0 +1,477 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Chrome (Blink/Skia) vs Pure-Simple Web — HTML Layout, Text, Image &amp; Event Studio</title>
+<style>
+  :root {
+    --bg: #0b1120;
+    --panel: #111827;
+    --card: #1e293b;
+    --border: #334155;
+    --text: #f1f5f9;
+    --muted: #94a3b8;
+    --accent: #38bdf8;
+    --ok: #34d399;
+    --warn: #fbbf24;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; width: 100%; height: 100%;
+    background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", Helvetica, Arial, sans-serif;
+    overflow: hidden;
+  }
+  .app { display: flex; flex-direction: column; height: 100vh; }
+  .topbar {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    padding: 10px 16px; background: var(--panel); border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .brand h1 { margin: 0; font-size: 15px; font-weight: 700; color: #f8fafc; }
+  .brand p { margin: 2px 0 0 0; font-size: 11px; color: var(--muted); }
+  .stats { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .stat-pill {
+    background: var(--card); border: 1px solid var(--border); border-radius: 999px;
+    padding: 4px 10px; font-size: 11px; color: #cbd5e1;
+  }
+  .stat-pill strong { color: var(--accent); }
+  .stat-pill.good strong { color: var(--ok); }
+  .controls {
+    display: flex; align-items: center; justify-content: space-between; gap: 12px;
+    padding: 8px 16px; background: #0f172a; border-bottom: 1px solid var(--border);
+    flex-shrink: 0; flex-wrap: wrap;
+  }
+  .tabs, .filters { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; }
+  button.tab-btn, button.flt-btn, button.ctrl-btn {
+    border: 1px solid var(--border); background: var(--card); color: #cbd5e1;
+    border-radius: 6px; padding: 5px 11px; font-size: 12px; cursor: pointer; font-weight: 600;
+  }
+  button.tab-btn.active { background: #2563eb; border-color: #60a5fa; color: #ffffff; }
+  button.flt-btn.active { background: #0e7490; border-color: #22d3ee; color: #ffffff; }
+  button.ctrl-btn:hover, button.tab-btn:hover, button.flt-btn:hover { border-color: #64748b; }
+  .content { flex: 1; min-height: 0; overflow: hidden; display: flex; }
+
+  .matrix-scroll { flex: 1; overflow-y: auto; padding: 14px 16px 28px 16px; }
+  .v-card {
+    background: var(--panel); border: 1px solid var(--border); border-radius: 10px;
+    padding: 12px; margin-bottom: 14px;
+  }
+  .v-head {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    margin-bottom: 10px; flex-wrap: wrap;
+  }
+  .v-title-group { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+  .v-id {
+    background: #1d4ed8; color: #ffffff; font-size: 11px; font-weight: 700;
+    padding: 2px 7px; border-radius: 4px; text-transform: uppercase;
+  }
+  .v-title { font-size: 14px; font-weight: 700; color: #f8fafc; }
+  .tag {
+    background: var(--card); border: 1px solid #475569; color: #94a3b8;
+    font-size: 10px; padding: 2px 6px; border-radius: 999px;
+  }
+  .v-metrics { display: flex; gap: 8px; align-items: center; font-size: 11px; color: var(--muted); }
+  .m-badge { padding: 2px 8px; border-radius: 4px; background: var(--card); border: 1px solid var(--border); }
+  .m-badge strong { color: var(--ok); }
+  .v-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; }
+  .pane {
+    background: #020617; border: 1px solid #1e293b; border-radius: 8px; padding: 6px;
+    display: flex; flex-direction: column; align-items: center;
+  }
+  .pane-lbl {
+    width: 100%; display: flex; justify-content: space-between;
+    font-size: 11px; color: var(--muted); margin-bottom: 5px; font-weight: 600;
+  }
+  .pane img {
+    max-width: 100%; height: auto; border-radius: 4px; display: block;
+    background: #090d16; cursor: pointer;
+  }
+
+  .sidebar {
+    width: 280px; border-right: 1px solid var(--border); background: var(--panel);
+    overflow-y: auto; flex-shrink: 0; padding: 8px;
+  }
+  .sb-item {
+    padding: 8px 10px; border-radius: 7px; border: 1px solid transparent;
+    cursor: pointer; margin-bottom: 5px;
+  }
+  .sb-item:hover { background: #1e293b; }
+  .sb-item.active { background: #1e3a8a; border-color: #60a5fa; }
+  .sb-top { display: flex; justify-content: space-between; align-items: center; font-size: 12px; font-weight: 700; }
+  .sb-sub { font-size: 11px; color: var(--muted); margin-top: 2px; }
+  .main-stage {
+    flex: 1; min-width: 0; overflow: auto; padding: 14px 16px;
+    display: flex; flex-direction: column; gap: 12px;
+  }
+  .stage-bar {
+    display: flex; align-items: center; justify-content: space-between; gap: 10px;
+    flex-wrap: wrap; background: var(--panel); border: 1px solid var(--border);
+    border-radius: 8px; padding: 8px 12px;
+  }
+  .sbs-row { display: flex; gap: 14px; flex-wrap: wrap; align-items: flex-start; }
+  .sbs-box {
+    background: #020617; border: 1px solid var(--border); border-radius: 8px; padding: 8px;
+  }
+  .sbs-box img.zoom2 { image-rendering: pixelated; }
+  pre.code-box {
+    background: #020617; border: 1px solid var(--border); border-radius: 8px;
+    padding: 10px 12px; color: #cbd5e1; font-size: 11px; line-height: 1.45;
+    overflow: auto; max-height: 240px; margin: 0; white-space: pre-wrap;
+  }
+  .wipe-wrap {
+    position: relative; display: inline-block; border: 1px solid #475569;
+    border-radius: 8px; overflow: hidden; background: #020617; user-select: none;
+  }
+  .wipe-wrap img { display: block; }
+  .wipe-top {
+    position: absolute; top: 0; left: 0; height: 100%; overflow: hidden;
+    border-right: 2px solid #38bdf8;
+  }
+  .wipe-badge-l, .wipe-badge-r {
+    position: absolute; top: 8px; padding: 3px 8px; border-radius: 4px;
+    font-size: 11px; font-weight: 700; pointer-events: none;
+  }
+  .wipe-badge-l { left: 8px; background: rgba(37, 99, 235, 0.9); color: #fff; }
+  .wipe-badge-r { right: 8px; background: rgba(16, 185, 129, 0.9); color: #052e16; }
+  input[type="range"] { width: 260px; accent-color: #38bdf8; }
+  .evt-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="topbar">
+    <div class="brand">
+      <h1>Chrome (Blink / Skia) vs Pure-Simple Web — Layout, Text, Image &amp; Event Studio</h1>
+      <p>Live pixel parity across Flexbox, Floats, CSS Grid, 3-Column Shells, Media Threads, object-fit, Tables, Z-Index, Inline Icons, Forms &amp; App Windows</p>
+    </div>
+    <div class="stats" id="global-stats"></div>
+  </div>
+  <div class="controls">
+    <div class="tabs">
+      <button class="tab-btn active" data-mode="matrix">1. All Variations Matrix</button>
+      <button class="tab-btn" data-mode="sbs">2. 1:1 / 2x Side-by-Side + HTML Source</button>
+      <button class="tab-btn" data-mode="wipe">3. Split Wipe &amp; Rapid Flip</button>
+      <button class="tab-btn" data-mode="events">4. JS &amp; Simple Script + Events</button>
+    </div>
+    <div class="filters" id="filter-bar"></div>
+  </div>
+  <div class="content" id="stage"></div>
+</div>
+<script>
+(function() {
+  const params = new URLSearchParams(window.location.search);
+  const bundleDir = params.get("bundle") || ".";
+  const baseHref = bundleDir.replace(/\/+$/, "") + "/";
+
+  const DEFAULT_EVENTS = [
+    { id: "e01", title: "Click Button & Action Dispatch", scope: "Chrome DOM click vs Pure-Simple BrowserSession / widget_hit", kind: "pointer_click", expected: "Clicked button updates DOM/action state and repaints active fill" },
+    { id: "e02", title: "Pointer Move & Drag Capture", scope: "Chrome drag vs HostCompositor / widget_dispatch_pointer_move", kind: "pointer_drag", expected: "Captured target tracks outside bounds and suppresses mismatched sibling release" },
+    { id: "e03", title: "Dropdown Select & Disclosure Toggle", scope: "Chrome select/details vs Pure-Simple popup/disclosure", kind: "toggle_select", expected: "Dropdown open state and selection value match across renders" },
+    { id: "e04", title: "Keyboard Input, Shift & Focus Traversal", scope: "Chrome Tab/keydown vs common.ui.event + ScreenGuiHost", kind: "keyboard_focus", expected: "Focus skips non-interactive/hidden/disabled nodes and clears preedit on blur" },
+    { id: "e05", title: "Wheel Scroll Clamping & Linked Sync", scope: "Chrome scrollTop vs BrowserSession / showcase scroll", kind: "wheel_scroll", expected: "Wheel delta clamps scroll_y cleanly and updates visible viewport band" },
+    { id: "e06", title: "JS / SimpleScript DOM Mutation & Re-render", scope: "Chrome JS listener vs SimpleScriptExecutor DOM revision", kind: "script_mutation", expected: "Listener DOM edit advances single UI revision and matches post-event frame" }
+  ];
+
+  function loadScript(src) {
+    return new Promise((resolve) => {
+      const s = document.createElement("script");
+      s.src = baseHref + src;
+      s.onload = () => resolve(true);
+      s.onerror = () => resolve(false);
+      document.head.appendChild(s);
+    });
+  }
+
+  let DATA = [];
+  let EVENTS = DEFAULT_EVENTS;
+  let mode = "matrix";
+  let filter = "All";
+  let selectedIdx = 0;
+  let zoom2x = false;
+  let wipePct = 50;
+  let flipEngine = "chrome";
+
+  const CATEGORIES = {
+    "All": () => true,
+    "Flex & Grid": m => ["v01", "v03", "v04", "v10"].includes(m.id),
+    "Images & Float": m => ["v02", "v05", "v06", "v12"].includes(m.id),
+    "Tables & Forms": m => ["v07", "v11"].includes(m.id),
+    "Overlays & Inline": m => ["v08", "v09"].includes(m.id),
+    "Full App": m => ["v13", "v14"].includes(m.id)
+  };
+
+  function imgSrc(sub, id) {
+    return baseHref + sub + "/" + id + ".png";
+  }
+
+  function filtered() {
+    const fn = CATEGORIES[filter] || CATEGORIES["All"];
+    return DATA.filter(fn);
+  }
+
+  function renderTopStats() {
+    const el = document.getElementById("global-stats");
+    if (!DATA.length) {
+      el.innerHTML = `<span class="stat-pill">Waiting for <code>compare_manifest.js</code> in bundle (${escHtml(bundleDir)})</span>`;
+      return;
+    }
+    const compared = DATA.filter(m => m.chrome_present !== false);
+    const avgNear12 = compared.length ? (compared.reduce((a, m) => a + m.metrics.near12_pct, 0) / compared.length).toFixed(2) : "n/a";
+    const avgExact = compared.length ? (compared.reduce((a, m) => a + m.metrics.exact_pct, 0) / compared.length).toFixed(2) : "n/a";
+    el.innerHTML =
+      `<span class="stat-pill">Variations: <strong>${DATA.length}</strong></span>` +
+      `<span class="stat-pill">Interactive Cases: <strong>${EVENTS.length} (e01-e06)</strong></span>` +
+      `<span class="stat-pill good">Avg &le;12px Match: <strong>${avgNear12}%</strong></span>` +
+      `<span class="stat-pill">Avg Exact: <strong>${avgExact}%</strong></span>`;
+  }
+
+  function renderFilters() {
+    const fb = document.getElementById("filter-bar");
+    if (mode === "events") {
+      fb.innerHTML = `<span class="stat-pill">Events Manifest: <strong>${window.COMPARE_SCRIPT_EVENTS ? "script_events_manifest.js" : "Built-in Spec View"}</strong></span>`;
+      return;
+    }
+    fb.innerHTML = Object.keys(CATEGORIES).map(cat => {
+      const cnt = DATA.filter(CATEGORIES[cat]).length;
+      return `<button class="flt-btn ${filter === cat ? 'active' : ''}" data-cat="${cat}">${cat} (${cnt})</button>`;
+    }).join("");
+    fb.querySelectorAll("button").forEach(btn => {
+      btn.onclick = () => {
+        filter = btn.dataset.cat;
+        const list = filtered();
+        if (list.length && !list.includes(DATA[selectedIdx])) {
+          selectedIdx = DATA.indexOf(list[0]);
+        }
+        render();
+      };
+    });
+  }
+
+  function escHtml(s) {
+    return (s || "").replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  }
+
+  function renderMatrix(stage) {
+    const list = filtered();
+    const wrap = document.createElement("div");
+    wrap.className = "matrix-scroll";
+    if (!list.length) {
+      wrap.innerHTML = `<div class="v-card"><div class="v-title">No variation manifest loaded.</div><p style="color:#94a3b8;font-size:12px;">Run <code>simple run src/app/html_layout_compare/main.spl --json --out-dir build/html_layout_compare</code> and optionally capture Chrome PNGs with <code>--capture-chrome</code>.</p></div>`;
+      stage.appendChild(wrap);
+      return;
+    }
+    wrap.innerHTML = list.map(m => {
+      const idx = DATA.indexOf(m);
+      const tags = (m.tags || []).map(t => `<span class="tag">${escHtml(t)}</span>`).join("");
+      return `
+        <div class="v-card">
+          <div class="v-head">
+            <div class="v-title-group">
+              <span class="v-id">${m.id}</span>
+              <span class="v-title">${escHtml(m.title)}</span>
+              ${tags}
+            </div>
+            <div class="v-metrics">
+              <span class="m-badge">${m.w}x${m.h}</span>
+              <span class="m-badge">Exact: <strong>${m.metrics.exact_pct}%</strong></span>
+              <span class="m-badge">&le;12: <strong>${m.metrics.near12_pct}%</strong></span>
+              <span class="m-badge">MAD: ${m.metrics.mean_abs_diff}</span>
+              <button class="ctrl-btn" data-inspect="${idx}">Inspect 1:1</button>
+              <button class="ctrl-btn" data-wipe="${idx}">Wipe</button>
+            </div>
+          </div>
+          <div class="v-grid">
+            <div class="pane">
+              <div class="pane-lbl"><span>Chrome (Blink / Skia)</span><span>${m.sizes_kb.chrome} KB</span></div>
+              <img src="${imgSrc('chrome', m.id)}" data-inspect="${idx}" alt="Chrome ${m.id}" />
+            </div>
+            <div class="pane">
+              <div class="pane-lbl"><span>Pure-Simple Web (engine=pure_simple)</span><span>${m.sizes_kb.simple} KB</span></div>
+              <img src="${imgSrc('simple', m.id)}" data-inspect="${idx}" alt="Simple Web ${m.id}" />
+            </div>
+            <div class="pane">
+              <div class="pane-lbl"><span>4x |Chrome - Simple Web| Diff</span><span>${m.sizes_kb.diff} KB</span></div>
+              <img src="${imgSrc('diff', m.id)}" data-wipe="${idx}" alt="Diff ${m.id}" />
+            </div>
+          </div>
+        </div>`;
+    }).join("");
+    stage.appendChild(wrap);
+    wrap.querySelectorAll("[data-inspect]").forEach(el => {
+      el.onclick = () => { selectedIdx = +el.dataset.inspect; setMode("sbs"); };
+    });
+    wrap.querySelectorAll("[data-wipe]").forEach(el => {
+      el.onclick = () => { selectedIdx = +el.dataset.wipe; setMode("wipe"); };
+    });
+  }
+
+  function buildSidebar(stage) {
+    const list = filtered();
+    const sb = document.createElement("div");
+    sb.className = "sidebar";
+    sb.innerHTML = list.map(m => {
+      const idx = DATA.indexOf(m);
+      return `
+        <div class="sb-item ${idx === selectedIdx ? 'active' : ''}" data-idx="${idx}">
+          <div class="sb-top"><span>${m.id.toUpperCase()} — ${m.w}x${m.h}</span><span>${m.metrics.near12_pct}%</span></div>
+          <div class="sb-sub">${escHtml(m.title)}</div>
+        </div>`;
+    }).join("");
+    sb.querySelectorAll(".sb-item").forEach(el => {
+      el.onclick = () => { selectedIdx = +el.dataset.idx; render(); };
+    });
+    stage.appendChild(sb);
+  }
+
+  function renderSideBySide(stage) {
+    buildSidebar(stage);
+    const m = DATA[selectedIdx] || DATA[0];
+    if (!m) return;
+    const scale = zoom2x ? 2 : 1;
+    const dispW = Math.min(m.w * scale, 1040);
+    const main = document.createElement("div");
+    main.className = "main-stage";
+    main.innerHTML = `
+      <div class="stage-bar">
+        <div>
+          <strong>${m.id.toUpperCase()}: ${escHtml(m.title)}</strong>
+          <span class="tag">${m.w}x${m.h}</span>
+          <span class="tag">Exact ${m.metrics.exact_pct}%</span>
+          <span class="tag">&le;12 ${m.metrics.near12_pct}%</span>
+          <span class="tag">MAD ${m.metrics.mean_abs_diff}</span>
+        </div>
+        <div style="display:flex;gap:8px;">
+          <button class="ctrl-btn" id="btn-prev">&uarr; Prev</button>
+          <button class="ctrl-btn" id="btn-next">&darr; Next</button>
+          <button class="ctrl-btn" id="btn-zoom">${zoom2x ? 'Zoom: 2x Pixelated' : 'Zoom: 1x Native'}</button>
+        </div>
+      </div>
+      <div class="sbs-row">
+        <div class="sbs-box"><div class="pane-lbl"><span>Chrome (Blink / Skia)</span><span>${m.w}x${m.h}</span></div><img class="${zoom2x ? 'zoom2' : ''}" style="width:${dispW}px;" src="${imgSrc('chrome', m.id)}" /></div>
+        <div class="sbs-box"><div class="pane-lbl"><span>Pure-Simple Web</span><span>${m.w}x${m.h}</span></div><img class="${zoom2x ? 'zoom2' : ''}" style="width:${dispW}px;" src="${imgSrc('simple', m.id)}" /></div>
+        <div class="sbs-box"><div class="pane-lbl"><span>4x |Diff| Heatmap</span><span>${m.w}x${m.h}</span></div><img class="${zoom2x ? 'zoom2' : ''}" style="width:${dispW}px;" src="${imgSrc('diff', m.id)}" /></div>
+      </div>
+      <div>
+        <div style="font-size:12px;font-weight:700;color:#94a3b8;margin-bottom:6px;">HTML / CSS / UI Source (${m.id})</div>
+        <pre class="code-box">${escHtml(m.html)}</pre>
+      </div>`;
+    stage.appendChild(main);
+    main.querySelector("#btn-zoom").onclick = () => { zoom2x = !zoom2x; render(); };
+    main.querySelector("#btn-prev").onclick = () => stepSelection(-1);
+    main.querySelector("#btn-next").onclick = () => stepSelection(1);
+  }
+
+  function renderWipe(stage) {
+    buildSidebar(stage);
+    const m = DATA[selectedIdx] || DATA[0];
+    if (!m) return;
+    const scale = m.w >= 900 ? 1 : (zoom2x ? 1.5 : 1.25);
+    const dw = Math.round(m.w * scale);
+    const dh = Math.round(m.h * scale);
+    const main = document.createElement("div");
+    main.className = "main-stage";
+    main.innerHTML = `
+      <div class="stage-bar">
+        <div><strong>${m.id.toUpperCase()}: ${escHtml(m.title)}</strong> <span class="tag">&le;12 Match ${m.metrics.near12_pct}%</span></div>
+        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap;">
+          <label style="font-size:12px;color:#cbd5e1;">Split: <strong id="wipe-val">${wipePct}%</strong>
+            <input type="range" min="0" max="100" value="${wipePct}" id="wipe-slider" />
+          </label>
+          <button class="ctrl-btn" id="btn-flip">Flip (Space): ${flipEngine === 'chrome' ? 'CHROME' : 'SIMPLE WEB'}</button>
+          <button class="ctrl-btn" id="btn-diff-overlay">Zoom ${zoom2x ? '1.5x' : '1.25x'}</button>
+        </div>
+      </div>
+      <div>
+        <div class="wipe-wrap" style="width:${dw}px;height:${dh}px;">
+          <img src="${imgSrc(flipEngine === 'chrome' ? 'simple' : 'chrome', m.id)}" style="width:${dw}px;height:${dh}px;" />
+          <div class="wipe-top" id="wipe-top" style="width:${wipePct}%;">
+            <img src="${imgSrc(flipEngine === 'chrome' ? 'chrome' : 'simple', m.id)}" style="width:${dw}px;height:${dh}px;max-width:none;" />
+          </div>
+          <span class="wipe-badge-l">${flipEngine === 'chrome' ? 'Chrome (Left)' : 'Simple Web (Left)'}</span>
+          <span class="wipe-badge-r">${flipEngine === 'chrome' ? 'Simple Web (Right)' : 'Chrome (Right)'}</span>
+        </div>
+      </div>`;
+    stage.appendChild(main);
+    const slider = main.querySelector("#wipe-slider");
+    const topEl = main.querySelector("#wipe-top");
+    const valEl = main.querySelector("#wipe-val");
+    slider.oninput = () => {
+      wipePct = +slider.value;
+      topEl.style.width = wipePct + "%";
+      valEl.textContent = wipePct + "%";
+    };
+    main.querySelector("#btn-flip").onclick = () => { flipEngine = flipEngine === "chrome" ? "simple" : "chrome"; render(); };
+    main.querySelector("#btn-diff-overlay").onclick = () => { zoom2x = !zoom2x; render(); };
+  }
+
+  function renderEvents(stage) {
+    const wrap = document.createElement("div");
+    wrap.className = "matrix-scroll";
+    wrap.innerHTML = `<div class="evt-grid">` + EVENTS.map(ev => `
+      <div class="v-card">
+        <div class="v-head">
+          <div class="v-title-group">
+            <span class="v-id">${escHtml(ev.id)}</span>
+            <span class="v-title">${escHtml(ev.title)}</span>
+          </div>
+          <span class="tag">${escHtml(ev.kind)}</span>
+        </div>
+        <div style="font-size:12px;color:#94a3b8;margin-bottom:6px;">${escHtml(ev.scope)}</div>
+        <div style="font-size:12px;color:#cbd5e1;"><strong>Parity Contract:</strong> ${escHtml(ev.expected)}</div>
+        ${ev.status ? `<div style="margin-top:8px;"><span class="m-badge">Status: <strong>${escHtml(ev.status)}</strong></span></div>` : ""}
+      </div>`).join("") + `</div>`;
+    stage.appendChild(wrap);
+  }
+
+  function stepSelection(delta) {
+    const list = filtered();
+    if (!list.length) return;
+    const pos = Math.max(0, list.indexOf(DATA[selectedIdx]));
+    const next = list[(pos + delta + list.length) % list.length];
+    selectedIdx = DATA.indexOf(next);
+    render();
+  }
+
+  function setMode(nextMode) {
+    mode = nextMode;
+    document.querySelectorAll(".tab-btn").forEach(b => b.classList.toggle("active", b.dataset.mode === mode));
+    render();
+  }
+
+  function render() {
+    renderFilters();
+    const stage = document.getElementById("stage");
+    stage.innerHTML = "";
+    if (mode === "matrix") renderMatrix(stage);
+    else if (mode === "sbs") renderSideBySide(stage);
+    else if (mode === "wipe") renderWipe(stage);
+    else renderEvents(stage);
+  }
+
+  document.querySelectorAll(".tab-btn").forEach(btn => {
+    btn.onclick = () => setMode(btn.dataset.mode);
+  });
+
+  window.addEventListener("keydown", e => {
+    if (e.key === "ArrowDown") { e.preventDefault(); stepSelection(1); }
+    else if (e.key === "ArrowUp") { e.preventDefault(); stepSelection(-1); }
+    else if (e.key === " " && mode === "wipe") {
+      e.preventDefault();
+      flipEngine = flipEngine === "chrome" ? "simple" : "chrome";
+      render();
+    }
+  });
+
+  Promise.all([loadScript("compare_manifest.js"), loadScript("script_events_manifest.js")]).then(() => {
+    DATA = window.COMPARE_VARIATIONS || [];
+    if (Array.isArray(window.COMPARE_SCRIPT_EVENTS) && window.COMPARE_SCRIPT_EVENTS.length) {
+      EVENTS = window.COMPARE_SCRIPT_EVENTS;
+    }
+    renderTopStats();
+    render();
+  });
+})();
+</script>
+</body>
+</html>
