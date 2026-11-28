@@ -26,6 +26,12 @@ reaches RR as data (`partition_id`, `parameter_digest`).
 
 ## 2. Facet model for generics (erased model, one body)
 
+> **Superseded (2026-11-28).** Owner decision D1 chose full monomorphization. The
+> "Consumed by" column and the body-edit rule below describe the erased model, and the
+> code as it is until plan S3-F4 lands. Replacement:
+> `doc/05_design/compiler/cache/generic_instance_tldr_trace.md` §7 (body -> every instance
+> of the template; consumer module objects still read signature + bound only).
+
 | Facet | Fingerprint source | Consumed by |
 |---|---|---|
 | `generic.signature` | symbol_id, params (kind, binder_id), fields (name, type_key) — `generic_template_summary_digest_v1` | every type-arg-bearing caller; the template's own object action |

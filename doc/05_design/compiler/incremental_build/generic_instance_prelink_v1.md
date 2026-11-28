@@ -3,6 +3,13 @@
 Status: plan, 2026-10-27. Owner: generic-instance lane. The per-file lane
 (PM1-PM3: HIR gate, default route, in-process invoker) is NOT changed here.
 
+> **Superseded (2026-11-28).** The symbols listed under "What already exists" are no
+> longer in `src` (removed with `40.mono`, `200a05f5bc8`), and no monomorphization pass
+> is being restored. Current design:
+> `doc/05_design/compiler/cache/generic_instance_tldr_trace.md` (instances as async
+> single-flight tasks; an instance owns its own object, so the COMDAT owner rule below is
+> not needed).
+
 ## What already exists (do not rebuild)
 - Per-module used-instance list: TLDR companion section `generic-spec|`
   (`GenericSpecializationListV1`, with a `complete` field), written by `module_tldr_update_generic_spec_from_mono_v1`
