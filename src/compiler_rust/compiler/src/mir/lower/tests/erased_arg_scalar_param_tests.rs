@@ -27,13 +27,24 @@ fn instructions(func: &MirFunction) -> Vec<&MirInst> {
 /// by `UnboxInt`. An empty callee matches indirect and virtual calls.
 fn call_arg_is_unboxed_int(func: &MirFunction, callee: &str, arg_index: usize) -> bool {
     let insts = instructions(func);
-    let unboxed: Vec<_> = insts
+    // A tagged word is decoded either by `UnboxInt` or, for a generic call
+    // result (HIR `any -> i64` cast, since a30fee1a6db / 2cca2ea9b06), by the
+    // runtime decoder `rt_any_cast_int`; an identity `Cast` may follow.
+    let mut unboxed: Vec<_> = insts
         .iter()
         .filter_map(|inst| match inst {
             MirInst::UnboxInt { dest, .. } => Some(*dest),
+            MirInst::Call { dest: Some(dest), target, .. } if target.name() == "rt_any_cast_int" => Some(*dest),
             _ => None,
         })
         .collect();
+    for inst in &insts {
+        if let MirInst::Cast { dest, source, from_ty, to_ty } = inst {
+            if from_ty == to_ty && unboxed.contains(source) {
+                unboxed.push(*dest);
+            }
+        }
+    }
     insts.iter().any(|inst| match inst {
         MirInst::Call { target, args, .. } if target.name() == callee => {
             args.get(arg_index).is_some_and(|a| unboxed.contains(a))

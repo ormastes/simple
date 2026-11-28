@@ -87,6 +87,14 @@ fn annotated_f64_binding_from_int_literal_is_float_const() {
 }
 
 #[test]
+fn annotated_f32_and_negative_binding_from_int_literal_is_float_const() {
+    let mir = compile_to_mir("fn probe() -> f64:\n    val y: f64 = -3\n    y\n").expect("lower");
+    assert!(float_const_is_used(function(&mir, "probe"), -3.0));
+    let mir = compile_to_mir("fn probe() -> f32:\n    val y: f32 = 5\n    y\n").expect("lower");
+    assert!(float_const_is_used(function(&mir, "probe"), 5.0));
+}
+
+#[test]
 fn assignment_of_int_literal_into_f64_local_is_float_const() {
     let source = "fn probe() -> f64:\n    var z: f64 = 1.0\n    z = 4\n    z\n";
     let mir = compile_to_mir(source).expect("lower");

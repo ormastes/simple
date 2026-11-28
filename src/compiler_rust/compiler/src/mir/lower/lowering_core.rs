@@ -1845,6 +1845,13 @@ impl<'a> MirLowerer<'a> {
         if !matches!(declared_ty, TypeId::F32 | TypeId::F64) {
             return Ok(value);
         }
+        // HIR wraps a numeric initializer whose type differs from an explicit
+        // annotation in `Cast { target: declared }` (e0767613532), so
+        // `val y: f64 = 3` arrives as `Cast(Integer 3)`; see through it.
+        let value_expr = match &value_expr.kind {
+            HirExprKind::Cast { expr, target } if *target == declared_ty => expr.as_ref(),
+            _ => value_expr,
+        };
         match Self::int_literal_value(value_expr) {
             Some(n) => self.lower_float_expr(n as f64),
             None => Ok(value),
