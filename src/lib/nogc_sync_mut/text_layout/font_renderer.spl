@@ -290,15 +290,36 @@ fn _fr_scale_round(value: i64, num: i64, den: i64) -> i64:
 # 18.7199993, x100 = 1871.9999 -> 18.71 px -> 1197/64 (not 1198/64); 20.72 x100
 # rounds to 2072.0 and keeps 1326/64 (font_cache_key_size_chrome159_spec).
 # units_per_em of the selected outline face (head.unitsPerEm), 0 when unknown.
-# One-entry memo keyed on the face identity: a run asks once per draw.
+# Memo keyed on the face identity, with the last face asked in front: a run
+# asks once per draw and once per measure, and a page alternates between its
+# faces (regular, bold, mono), so one entry alone parsed the table directory
+# again on almost every measured run.
 var _fr_upem_identity: text = ""
 var _fr_upem_value: i64 = 0
+var _fr_upem_memo: Dict<text, i64> = {}
+
+# The memoized units_per_em of face `identity`, -1 when not parsed yet. Lets a
+# caller skip reading the font blob (a whole-blob copy) for a known face.
+fn _fr_units_per_em_known(identity: text) -> i64:
+    if identity == "":
+        return -1
+    if identity == _fr_upem_identity:
+        return _fr_upem_value
+    if _fr_upem_memo.has(identity):
+        _fr_upem_identity = identity
+        _fr_upem_value = _fr_upem_memo[identity]
+        return _fr_upem_value
+    -1
 val _FR_TAG_HEAD: u32 = 1751474532u32
 
 fn _fr_units_per_em(identity: text, blob: [u8]) -> i64:
     if identity == "" or blob.len() < 12:
         return 0
     if identity == _fr_upem_identity:
+        return _fr_upem_value
+    if _fr_upem_memo.has(identity):
+        _fr_upem_identity = identity
+        _fr_upem_value = _fr_upem_memo[identity]
         return _fr_upem_value
     var upem: i64 = 0
     if val Some(font) = sfnt_glyf_parse_offset_table(blob):
@@ -308,6 +329,7 @@ fn _fr_units_per_em(identity: text, blob: [u8]) -> i64:
                 upem = sfnt_glyf_read_u16_be(blob, off + 18) as i64
     _fr_upem_identity = identity
     _fr_upem_value = upem
+    _fr_upem_memo[identity] = upem
     upem
 
 fn _fr_floor_f64(value: f64) -> i64:
@@ -525,6 +547,13 @@ class ResolvedFontMetrics:
     # A mid-line run's LCD pen phase is derived from it (Chrome 159 lays the
     # line out fractionally; see inline_run_pen_origin_chrome159_spec).
     width_milli: i64 = -1
+    # EXACT run width in 2^-20 px, taken from the run's font-unit sum (never
+    # from a milli value), or -1 when the run has no such sum (shaped,
+    # off-grid or spaced runs). Chrome rounds an inline item's width UP to a
+    # LayoutUnit (1/64 px); a milli-px width is not exact enough to do that:
+    # `button` (16 px DejaVu Sans Mono) is exactly 3699/64 px and reads 57.797
+    # or 57.798 in milli, one LayoutUnit up after a ceil.
+    width_q20: i64 = -1
     # A shaped run's exact glyph pens in 1/64 px, one per glyph; [] when the
     # run is not shaped. Paint derives the 1x quarter-px LCD phase and the
     # device pen floor(k x pen) from it without shaping again.
@@ -3217,10 +3246,16 @@ class FontRenderer:
                 gi = gi + 1
             if on_grid:
                 var units: i64 = 0
+                # Steps are taken from the UNSNAPPED sums: `boundaries[gi]` is
+                # rewritten below, and a step against the snapped value would
+                # carry the whole drift up to here into one step
+                # (lcd_quarter_phase_long_run_chrome159_spec: a tie 24 glyphs in).
+                var raw_prev: i64 = boundaries[0]
                 gi = 0
                 while gi < content_len:
-                    val step = boundaries[gi + 1] - boundaries[gi]
-                    units = units + _fr_scale_round(step, upem, grid_den)
+                    val raw = boundaries[gi + 1]
+                    units = units + _fr_scale_round(raw - raw_prev, upem, grid_den)
+                    raw_prev = raw
                     boundaries[gi + 1] = _fr_scale_round(units, grid_den, upem)
                     gi = gi + 1
         boundaries
@@ -3276,14 +3311,51 @@ class FontRenderer:
     # reason: mirrors measure_text_advances(content: text, font_size: i32).
     # @allow(primitive_api)
     me measure_text_width_milli(content: text, font_size: i32) -> i64:
+        self.measure_text_width_exact(content, font_size)[0]
+
+    # `[milli, q20]`: the exact pen end of `content` in milli-px (as
+    # `measure_text_width_milli`) and in 2^-20 px. The second is the run's
+    # font-unit sum scaled once, -1 when a step is not a whole number of this
+    # face's units (fallback glyph, no-glyph estimate) or the face has no
+    # units-per-em. Each STEP is snapped to units, as `_lcd_apply_pen_phases`
+    # does: the milli sum itself drifts by up to n/2 milli.
+    # reason: mirrors measure_text_width_milli(content: text, font_size: i32).
+    # @allow(primitive_api)
+    me measure_text_width_exact(content: text, font_size: i32) -> [i64]:
         val content_cps = text_codepoints(content)
-        if content_cps.len() == 0:
-            return 0
+        val n = content_cps.len()
+        if n == 0:
+            return [0, 0]
         var run_identity: text = ""
         if val run_rasterizer = self.ttf_rasterizer:
             run_identity = run_rasterizer.cache_identity()
         val boundaries = self._text_pen_milli(content_cps, font_size, run_identity)
-        boundaries[content_cps.len()]
+        var q20: i64 = -1
+        # The memoized upem first: reading `self.selected_outline_blob`
+        # copies the whole font blob, once per measured run.
+        var upem: i64 = 0
+        if font_size > 0:
+            upem = _fr_units_per_em_known(run_identity)
+            if upem < 0:
+                upem = _fr_units_per_em(run_identity, self.selected_outline_blob)
+        if upem > 0:
+            val grid_den: i64 = (font_size as i64) * 1000
+            var units: i64 = 0
+            var on_grid = true
+            var k = 1
+            while on_grid and k <= n:
+                val step = boundaries[k] - boundaries[k - 1]
+                # `_fr_scale_round` inlined for the usual positive step.
+                val step_units = if step >= 0: (step * upem + grid_den / 2) / grid_den else: _fr_scale_round(step, upem, grid_den)
+                val back = if step_units >= 0: (step_units * grid_den + upem / 2) / upem else: _fr_scale_round(step_units, grid_den, upem)
+                val off = step - back
+                if off > 1 or off < -1:
+                    on_grid = false
+                units = units + step_units
+                k = k + 1
+            if on_grid:
+                q20 = _fr_scale_round(units, (font_size as i64) * 1048576, upem)
+        [boundaries[n], q20]
 
     # -----------------------------------------------------------------------
     # Render text into a pixel buffer (ARGB u32)
@@ -5184,7 +5256,8 @@ fn _resolve_font_metrics_with_language_config_uncached(family: text, content: te
     if _WM_TRACE: print("[rfm] at=measure shaped_valid={shaped.valid}")
     val _fr_t0 = _fr_probe_now()
     val advances = if shaped.valid: shaped.advances else: renderer.measure_text_advances(content, font_size)
-    val width_milli: i64 = if shaped.valid: -1 else: renderer.measure_text_width_milli(content, font_size)
+    val width_exact: [i64] = if shaped.valid: [-1, -1] else: renderer.measure_text_width_exact(content, font_size)
+    val width_milli: i64 = width_exact[0]
     _fr_probe_add_measure(_fr_probe_now() - _fr_t0, (codepoints.len() as i64))
     if _WM_TRACE: print("[rfm] at=measured advances={advances.len()}")
     var width = 0
@@ -5223,7 +5296,8 @@ fn _resolve_font_metrics_with_language_config_uncached(family: text, content: te
         glyph_pens_64: if valid: shaped.pens_64 else: [],
         used_face_units: if valid and shaped.valid: shaped.face_units else: [],
         shaping_required: complex_script != 0,
-        width_milli: if valid: width_milli else: -1
+        width_milli: if valid: width_milli else: -1,
+        width_q20: if valid: width_exact[1] else: -1
     )
     if resolved.valid and cacheable:
         _resolved_font_metric_store(cache_key, resolved)
@@ -5314,6 +5388,7 @@ pub fn resolve_font_metrics_with_language_milli(family: text, content: text, fon
     # `width_milli` is always kept. `_lcd_apply_pen_phases` anchors the same.
     var width_milli: i64 = -1
     var width = previous
+    var width_q20: i64 = -1
     if at_ref.width_milli >= 0 and n > 0:
         val exact = _fr_scale_round(at_ref.width_milli, s266, (ref_px as i64) * 64)
         val anchored = _milli_px_to_px_i64(exact)
@@ -5322,6 +5397,8 @@ pub fn resolve_font_metrics_with_language_milli(family: text, content: text, fon
             advances[n - 1] = last as i32
             width = anchored
             width_milli = exact
+            if at_ref.width_q20 >= 0:
+                width_q20 = _fr_scale_round(at_ref.width_q20, s266, (ref_px as i64) * 64)
     ResolvedFontMetrics(valid: true, family: at_ref.family, identity: at_ref.identity, advances: advances,
         width: width as i32, line_height: line_height as i32, reason: at_ref.reason,
-        glyph_run: at_ref.glyph_run, shaping_required: false, width_milli: width_milli)
+        glyph_run: at_ref.glyph_run, shaping_required: false, width_milli: width_milli, width_q20: width_q20)

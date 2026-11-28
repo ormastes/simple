@@ -6325,3 +6325,71 @@ pins the border-box form, the default-UA gap is unfiled.
   - A `width` / `height` attribute reaches layout as `st.width_px` / `st.height_px`, never as an attribute: `attr_value(node.attrs_raw, "width")` branches in the replaced path are dead for sized elements.
 - **Open (bugs filed).** Float painted under a later block's background (`web_render_float_painted_under_later_block_background_2026-11-28`); text on a `top` / `bottom` line 2 device rows high at k = 4, inline-block `12.5px` below the strut at k = 1, `clear` with a top margin larger than the float, svg edge px not blended, `<br clear>` whole px (`web_render_fractional_layout_followups_2026-11-28`).
 - **Review catch (clamps).** Layout dropped the fraction under a min/max clamp but the svg paint path recomputed the exact size from the style, so `height:20.75px; max-height:20px` with a viewBox scaled to 20.75 and started 2 device rows low. An overflowing `<rect>` with no viewBox cannot show a scale error; a clamp case needs a viewBox whose rect fills it. The clamp now lives in `svg_exact_content_size_milli`, read by both sides (interactions spec AC-9).
+
+## 2026-11-28 — inline item width: LayoutUnit ceil from font units, once per item (`work/webrender-inline-ceil-20261128`)
+
+- **Rule.** Chrome stores a text item's width as `LayoutUnit::FromFloatCeil` of its exact advance
+  sum and starts the next item there. An item is everything one text node puts on the line: its
+  lead space, the run, its trailing space. Glyphs inside the item sit at float advances. So the
+  pen after `<code>a</code>` (9.6328125 px) is at 9.640625, and the run after it starts at that
+  plus the EXACT lead space.
+- **A LayoutUnit is 1/(64 k) CSS px at device scale k.** Chrome lays out in zoomed px
+  (zoom-for-dsf). At k=4 `x` + nine `a` (88.0859375 CSS px) is 22550/64 device px and is not
+  rounded at all. A 1/64 CSS px ceil there moved the next item a quarter device px right
+  (`inline_run_start_quarter_phase_k4_chrome159_spec` AC-1 row 9). With an integer font size and
+  integer k on a 2048-upem face the k=4 ceil is a no-op; it only acts on fractional sizes.
+- **Never ceil a milli width.** `button` (16 px DejaVu Sans Mono) is exactly 3699/64 px. Its milli
+  width reads 57.797 (or 57.798 as a sum of milli advances) and a ceil of either is 3700/64. The
+  width now also travels in 2^-20 px from the run's font-unit sum:
+  `FontRenderer.measure_text_width_exact` -> `ResolvedFontMetrics.width_q20` ->
+  `Style.resolved_font_width_q20` / `resolved_space_q20` / `resolved_lead_space_q20` /
+  `resolved_trail_space_q20`. -1 means no unit sum (shaped, off-grid, spaced runs); such a run
+  keeps the old carry (exact milli width, lead space ceiled on its own).
+- **Where.** `inline_item_width_err_milli(..., lead_milli)` in layout_foundation takes the ceil in
+  every text branch (one run, edge spaces, kerned edge spaces, nowrap collapsed lead) through
+  `layout_unit_ceil_q20_milli`. `layout_with_style_flow` passes the lead it charged; the separate
+  `lead_snap_milli` is gone.
+- **Milli is too coarse for a tie: round the item width UP to milli, at every k.** A
+  quarter-device-px tie is an odd multiple of 1000/8k milli-px (31.25 at k=4), and Skia rounds a
+  tie up. Whatever feeds the pen must not land under it: the item width is rounded UP to milli
+  from the LayoutUnit value, and at k > 1 the lead space (`lead_space_exact_milli`) too. With
+  nearest rounding `x<code>abcd</code>l` (pen 186.125 device px) went a quarter low, and two
+  forms-media inventory rows went from 71 to 992 mismatching px (4445.3125 milli lead read as
+  4445). k=1 needs it as well: nearest put a space item at 4453 (true 4453.125), and
+  `ib`(margin-right:.6px) sp `z` sp `ib` (109.5 px, Chrome 110) at 109
+  (`inline_line_end_space_align_chrome159_spec` AC-20). Rounding up at k=1 left the LCD specs and
+  the shard fixture (804) where nearest had them; 1x catalog html measured 0.26 (0.25 with
+  nearest, 0.29 on base), the other pages equal.
+- **Probe.** `inline_item_layoutunit_ceil_pen_chrome159_spec` (nowrap, one-run branch) and the
+  shard's `<li><code>button|audio|a|kbd</code> — ...` fixture (normal wrap, lead-charged branch;
+  they are different paths, check both). Fixture, mismatching px per line: 202 270 260 318
+  (1050) -> 202 212 197 193 (804).
+- **Open (not caused here, pre-existing origin error).** Text after an inline `<button>` at k > 1:
+  the pen after the button is taken from its device-snapped width
+  (`box_device_extra_w_at / k`), Chrome's is the button's LayoutUnit width. Glyphs of
+  `Not exercised` (forms-media, after `Exercise controls`) that sit on a tie flip with any
+  sub-milli change of the space item: 4x band y=1360..1440 is 1526 px on base and 1947 here,
+  while the `Name` row above it gained 80. Page total stays 0.05. Bug
+  `web_render_k4_button_follower_pen_from_device_width_2026-11-28`.
+- **Perf trap: the units-per-em memo was one entry.** `measure_text_width_exact` asks the
+  face's upem once per measured run; a page alternates faces (regular, bold, mono), so
+  `_fr_units_per_em` missed on almost every run and re-read the font blob and its table
+  directory: html 1x layout +5.1 % interpreter dispatches (21.85 M -> 22.96 M), css-layout
+  +1.6 %. It is a per-face `Dict` now (`_fr_units_per_em_known` answers before the blob is
+  read): html +0.9 %, css-layout +0.8 % for layout alone, and a full html render is +0.07 %
+  at 1x because the draw path stopped re-parsing too. What is left is the per-glyph unit loop.
+- **Measuring on a loaded host.** With load 20-30 a wall-clock A/B of a 5 s layout swings
+  +-25 % between rounds. `SIMPLE_INTERP_PROFILE=1 SIMPLE_INTERP_PROFILE_OUT=<file>` prints the
+  interpreter's `Expr` dispatch histogram at exit; the total is identical run to run, so it
+  bisects a regression hunk by hunk in one run per side. It does not see native cost (a blob
+  copy, a wider struct clone): confirm with an alternated wall A/B when the host is quiet.
+- **Rebased on ba32f7509eb's milli item ceil (2026-11-28).** Upstream landed the same
+  once-per-item ceil from milli widths (`inline_item_width_err_milli_with_lead`,
+  `lead_item_exact_milli`). Both are kept: the font-unit (`*_q20`) ceil when the run has a
+  font-unit width, upstream's milli ceil otherwise. Its `_text_pen_milli` snap loop took each
+  step against an already-snapped boundary; fixed in its own commit (long-run and target specs).
+  With the per-face upem memo that loop no longer re-parses the face per run: layout-only
+  dispatches vs 8fac9c07e44 are html -3.3 %, css-layout -0.1 %.
+- **In-place snap trap.** A loop that rewrites `boundaries[i]` while reading
+  `boundaries[i + 1] - boundaries[i]` mixes a snapped and an unsnapped sum; keep the previous
+  raw value in a local.
