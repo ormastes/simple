@@ -1,24 +1,76 @@
 # Generic substitution / matching / specialization-key MODEL.
 #
-# A small, pure, total model of what 40.mono does with type variables:
-# substitution, one-way matching (the inference step), the evidence order of
-# a call site, and the specialization key. It has NO dependency on HIR so its
-# laws can be checked exhaustively over a bounded type universe, and the
-# production code (`monomorphize_integration.spl`, `monomorphize/type_subst.spl`,
-# `monomorphize/mono_key.spl`) is checked AGAINST it by a differential spec.
+# THE one substitution implementation for generic instances (plan S3-F0,
+# restored 2026-11-28 from `200a05f5bc8^:src/compiler/40.mono/model/`; there is
+# no 40.mono stage any more and this is NOT a pass). A small, pure, total model
+# of type variables: substitution, one-way matching (the inference step), the
+# evidence order of a call site, the specialization key and its decoder. It has
+# NO dependency on HIR, so its laws are checked exhaustively over a bounded
+# type universe (`generic_subst_universe.spl`). Consumers: the instance task
+# (substitute), the TLDR view acquirer (`mt_instantiate_key`) and the template
+# projector (`generic_tldr_projector.spl`, which writes the `mt_key_type` text).
 #
-# Design: doc/05_design/compiler/generics/generic_instantiation_model.md
-# Laws (checked by the specs under test/01_unit/compiler/mono/model/):
-#   S1 idempotence, S2 composition, S3 closedness,
-#   U1 soundness, U2 most-general (binds exactly the evidenced variables),
-#   I1 no evidence => Unresolved (never a default),
-#   K1 key determinism, K2 key injectivity on closed types,
-#   F1-F3 every variable-change kind commutes with substitution, preserves
-#   closedness and invents no variable.
-# Nothing here is a machine-checked PROOF: the laws are bounded-exhaustively
-# checked by Simple code (Lean, the repo's proof lane, is not part of this
-# module). The spec prints and asserts the universe sizes so a vacuous sweep
-# fails.
+# Nothing here is a machine-checked PROOF of the Simple code: the laws are
+# bounded-exhaustively checked by Simple specs; the Lean file models the
+# substitution part only.
+#
+# --------------------------------------------------------------------------
+# Correspondence: Lean `src/verification/type_inference_compile/src/
+# GenericSubstModel.lean` (namespace GenericSubstModel) <-> this file <-> specs.
+# Specs live in test/01_unit/compiler/30.types/generic_subst/:
+#   L = generic_subst_model_laws_spec.spl, F = ..._flow_spec.spl,
+#   C = ..._lean_correspondence_spec.spl (Lean-only laws and decode/instantiate).
+# Lean `MType` var/con/app  <->  `MType.Var/Con/App`.  Lean `Subst`
+# (String -> Option MType) <-> `MSubst.mapping`; `apply` <-> `ms_apply`;
+# `compose` <-> `ms_compose`; `Closed` <-> `mt_is_closed`; `unknown` <->
+# `mt_unknown()`; `ClosedRange` <-> `ms_range_closed`.
+#
+#  Lean theorem                  Simple function(s)        Spec `it` that checks it
+#  ----------------------------  ------------------------  ---------------------------------------------
+#  apply_empty                   ms_apply, ms_empty        C "S0 the empty substitution is the identity"
+#  apply_closed  (S3 closed)     ms_apply, mt_is_closed    L "S1 idempotence and S3 closedness ..."
+#  apply_compose (S2)            ms_compose, ms_apply      L "S2 composition on every depth<=1 type ..."
+#  apply_idempotent (S1)         ms_apply                  L "S1 idempotence and S3 closedness ..."
+#  apply_supported_closed (S3)   ms_apply, ms_range_closed L "S1 idempotence and S3 closedness ..."
+#  unknown_not_closed            mt_is_closed, mt_unknown  C "unknown is never closed and no substitution moves it"
+#  unknown_fixed                 ms_apply, mt_unknown      C "unknown is never closed and no substitution moves it"
+#  app_owner_preserved           ms_apply (App arm)        C "an application keeps its constructor and arity"
+#  app_arity_preserved           ms_apply (App arm)        C "an application keeps its constructor and arity"
+#  open_range_not_idempotent     ms_apply                  C "an open range is not idempotent (ClosedRange is needed)"
+#  nested_unknown_not_closed     mt_is_closed              C "unknown is never closed and no substitution moves it"
+#
+#  Simple law (no Lean theorem)  Simple function(s)        Spec `it`
+#  ----------------------------  ------------------------  ---------------------------------------------
+#  S1 idempotence, S3 free vars  ms_apply, mt_free_vars    L "S1 idempotence and S3 closedness ..."
+#  S2 composition                ms_compose                L "S2 composition ..."
+#  U1 soundness, U2 most-general mm_match                  L "U1 soundness and U2 most-general ..."
+#  U3 conflict / shape / open    mm_match                  L the four "U3 ..." cases
+#  I1 no evidence => Unresolved  mi_infer                  L "I1 resolves exactly when ..." and the two
+#                                                              call-site inference cases
+#  K1 key determinism            mt_key_type, mk_key       L "K1 is deterministic"
+#  K2 key injectivity (closed)   mt_key_type, mk_key       L the six "K2 ..." cases
+#  K3 decode inverts the key     mt_from_key               L "K3 decodes every type key ..." and
+#                                                              "K3 rejects malformed and trailing key text"
+#  F1-F3 variable-change kinds   mf_step,                  F every `it` of the flow spec
+#                                mf_substitute_inputs
+#  TLDR instantiation            mt_instantiate_key,       C "instantiate key ..." cases
+#                                ms_from_positional
+#
+# Lean has NO theorem for K1-K3, F1-F3, U1-U3, I1: those are checked by the
+# bounded sweeps only. The Lean file's header still names the old path; the
+# Lean namespace and MType shape are unchanged.
+#
+# Key text: `mt_key_type` is the SAME text the projector's `_key_var/_key_con/
+# _key_app` write for the same type (`v<n>:name`, `c<n>:name`,
+# `a<n>:ctor l<k>:args`); spec C "mt_key_type equals the projector key text"
+# pins it. Length framing here counts `text.len()` (characters); the projector
+# also has a byte-framed variant for non-ASCII names, which this model does
+# not produce.
+#
+# Variable-change laws F1-F3 (every kind commutes with substitution, keeps
+# closedness, invents no variable), S1-S3, U1-U2, I1, K1-K3 are the laws the
+# specs assert; the specs print and assert the universe sizes so a vacuous
+# sweep fails.
 
 # Constructor names used by the model. Arity is part of the term, not the
 # name, so `Tuple` with 2 and 3 members are different terms and render apart.
@@ -26,7 +78,6 @@ pub val MT_ARRAY = "Array"
 val MT_SLICE = "Slice"
 pub val MT_OPTIONAL = "Optional"
 pub val MT_DICT = "Dict"
-val MT_RESULT = "Result"
 pub val MT_TUPLE = "Tuple"
 pub val MT_FN = "Fn"          # args = params..., last = return
 val MT_NAMED = "Named:"   # prefix; `Named:Box` is the user type Box<...>
@@ -151,6 +202,9 @@ fn ms_has(s: MSubst, name: text) -> bool:
     s.mapping.has(name)
 
 fn ms_get(s: MSubst, name: text) -> MType:
+    """The binding of `name`, or `mt_unknown()` (never closed) when unbound."""
+    if not s.mapping.has(name):
+        return mt_unknown()
     s.mapping[name]
 
 fn ms_domain(s: MSubst) -> [text]:
@@ -618,8 +672,16 @@ struct MKeyParse:
 fn _mk_bad() -> MKeyParse:
     MKeyParse(t: mt_unknown(), pos: -1, ok: false)
 
-fn _mk_number(key: text, pos: i64) -> [i64]:
-    """[value, position after ':'] or [] when malformed."""
+struct MKeyNum:
+    value: i64
+    next: i64
+    ok: bool
+
+fn _mk_num_bad() -> MKeyNum:
+    MKeyNum(value: 0, next: -1, ok: false)
+
+fn _mk_number(key: text, pos: i64) -> MKeyNum:
+    """A decimal length/count followed by ':'; `next` is the position after it."""
     var i = pos
     var n = 0
     var digits = 0
@@ -628,23 +690,23 @@ fn _mk_number(key: text, pos: i64) -> [i64]:
         if code == 58:
             break
         if code < 48 or code > 57:
-            return []
+            return _mk_num_bad()
         n = n * 10 + (code - 48)
         digits = digits + 1
         i = i + 1
     if digits == 0 or i >= key.len() or key.char_code_at(i) != 58:
-        return []
-    [n, i + 1]
+        return _mk_num_bad()
+    MKeyNum(value: n, next: i + 1, ok: true)
 
 fn _mk_parse(key: text, pos: i64) -> MKeyParse:
     if pos >= key.len():
         return _mk_bad()
     val tag = key.char_at(pos)
     val num = _mk_number(key, pos + 1)
-    if num.len() != 2 or num[1] + num[0] > key.len():
+    if not num.ok or num.next + num.value > key.len():
         return _mk_bad()
-    val name = key.substring(num[1], num[1] + num[0])
-    var next = num[1] + num[0]
+    val name = key.substring(num.next, num.next + num.value)
+    var next = num.next + num.value
     if tag == "v":
         return MKeyParse(t: MType.Var(name), pos: next, ok: true)
     if tag == "c":
@@ -652,12 +714,12 @@ fn _mk_parse(key: text, pos: i64) -> MKeyParse:
     if tag != "a" or next >= key.len() or key.char_at(next) != "l":
         return _mk_bad()
     val count = _mk_number(key, next + 1)
-    if count.len() != 2:
+    if not count.ok:
         return _mk_bad()
-    next = count[1]
+    next = count.next
     var args: [MType] = []
     var k = 0
-    while k < count[0]:
+    while k < count.value:
         val p = _mk_parse(key, next)
         if not p.ok:
             return _mk_bad()

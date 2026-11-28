@@ -1,0 +1,163 @@
+# @req REQ-SSPEC-COMPILER
+"""
+# Generic substitution model: Lean-only laws, key parity, template instantiation
+
+Checks the Lean theorems of `GenericSubstModel.lean` that the laws spec does not
+already cover (the correspondence table is the header of
+`generic_subst_model.spl`), the equality of `mt_key_type` with the text the
+template projector writes, and `mt_instantiate_key` (the TLDR view acquirer's
+entry point). Sweeps assert their sizes so an empty sweep fails.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:generics
+# @tag:model
+
+use std.spec
+use compiler.types.generic_subst.generic_subst_model.*
+use compiler.types.generic_subst.generic_subst_universe.*
+use compiler.frontend.cache_artifact.generic_tldr_projector.{GenericDeclInputV1, generic_type_text_key_v1}
+
+fn probe_decl() -> GenericDeclInputV1:
+    GenericDeclInputV1(module_path: "pkg", name: "Probe", params: [], param_kinds: [], fields: [],
+        visibility_root: "vis:pub", active_guard_root: "", source_digest: "src")
+
+fn int_t() -> MType:
+    mt_con("i64")
+
+fn text_t() -> MType:
+    mt_con("text")
+
+describe "generic substitution model: Lean-only laws":
+    it "S0 the empty substitution is the identity":
+        var n = 0
+        var bad = ""
+        for t in mu_types():
+            val tt: MType = t
+            n = n + 1
+            if not mt_struct_eq(ms_apply(ms_empty(), tt), tt):
+                bad = mt_render(tt)
+        expect(n).to_equal(365)
+        expect(bad).to_equal("")
+
+    it "unknown is never closed and no substitution moves it":
+        expect(mt_is_closed(mt_unknown())).to_equal(false)
+        expect(mt_is_unknown(mt_unknown())).to_equal(true)
+        expect(mt_is_unknown(int_t())).to_equal(false)
+        expect(mt_is_unknown(mt_var("T"))).to_equal(false)
+        expect(mt_is_closed(mt_app(MT_TUPLE, [mt_unknown()]))).to_equal(false)
+        expect(mt_is_closed(mt_app(MT_TUPLE, [int_t(), text_t()]))).to_equal(true)
+        val s = ms_bind(ms_bind(ms_empty(), "T", int_t()), "U", text_t())
+        expect(mt_is_unknown(ms_apply(s, mt_unknown()))).to_equal(true)
+        expect(mt_is_unknown(ms_apply(ms_empty(), mt_unknown()))).to_equal(true)
+
+    it "an application keeps its constructor and arity":
+        var apps = 0
+        var bad = ""
+        val s = ms_bind(ms_bind(ms_empty(), "T", int_t()), "U", mt_app(MT_ARRAY, [text_t()]))
+        for t in mu_types():
+            val tt: MType = t
+            match tt:
+                case MType.App(c, args):
+                    apps = apps + 1
+                    match ms_apply(s, tt):
+                        case MType.App(c2, args2):
+                            if c2 != c or args2.len() != args.len():
+                                bad = mt_render(tt)
+                        case _:
+                            bad = mt_render(tt)
+                case _:
+                    bad = bad
+        expect(apps > 0).to_equal(true)
+        expect(bad).to_equal("")
+
+    it "an open range is not idempotent (ClosedRange is needed)":
+        val chain = ms_bind(ms_bind(ms_empty(), "T", mt_var("U")), "U", int_t())
+        expect(ms_range_closed(chain)).to_equal(false)
+        val once = ms_apply(chain, mt_var("T"))
+        val twice = ms_apply(chain, once)
+        expect(mt_struct_eq(once, twice)).to_equal(false)
+        expect(mt_render(twice)).to_equal("i64")
+        val closed = ms_bind(ms_empty(), "T", int_t())
+        expect(ms_range_closed(closed)).to_equal(true)
+        expect(ms_range_closed(ms_empty())).to_equal(true)
+
+    it "ms_get answers unknown for an unbound name":
+        val s = ms_bind(ms_empty(), "T", int_t())
+        expect(ms_has(s, "T")).to_equal(true)
+        expect(ms_has(s, "U")).to_equal(false)
+        expect(mt_struct_eq(ms_get(s, "T"), int_t())).to_equal(true)
+        expect(mt_is_unknown(ms_get(s, "U"))).to_equal(true)
+
+    it "rendering is readable and order independent":
+        val t = mt_app(MT_DICT, [mt_var("K"), mt_app(MT_ARRAY, [int_t()])])
+        expect(mt_render(t)).to_equal("Dict<'K,Array<i64>>")
+        expect(mt_render_list([int_t(), mt_var("T")])).to_equal("[i64,'T]")
+        val a = ms_bind(ms_bind(ms_empty(), "B", int_t()), "A", text_t())
+        val b = ms_bind(ms_bind(ms_empty(), "A", text_t()), "B", int_t())
+        expect(ms_render(a)).to_equal(ms_render(b))
+        expect(mm_render(MMatch.Conflict("T"))).to_equal("Conflict(T)")
+        expect(mm_render(MMatch.Shape)).to_equal("Shape")
+        expect(mm_is_bound(MMatch.Shape)).to_equal(false)
+        expect(mm_is_bound(MMatch.Bound(a))).to_equal(true)
+        expect(ms_domain(mm_subst(MMatch.Shape)).len()).to_equal(0)
+        expect(ms_domain(mm_subst(MMatch.Bound(a))).len()).to_equal(2)
+        expect(mi_render(MInfer.Unresolved(MI_NO_EVIDENCE))).to_equal("Unresolved(no_evidence)")
+        expect(mi_render(MInfer.Resolved([int_t()]))).to_equal("Resolved[i64]")
+        expect(mi_is_resolved(MInfer.Resolved([]))).to_equal(true)
+        expect(mi_is_resolved(MInfer.Unresolved(MI_SHAPE))).to_equal(false)
+
+describe "generic substitution model: key parity with the projector":
+    it "mt_key_type equals the projector key text":
+        val d = probe_decl()
+        val cases: [text] = ["i64", "text", "bool", "Array<i64>", "[text]", "Optional<bool>", "i64?",
+            "Dict<text, i64>", "Pkg.Box<i64>", "Box<[text]>"]
+        val expect_types: [MType] = [
+            int_t(), text_t(), mt_con("bool"),
+            mt_app(MT_ARRAY, [int_t()]), mt_app(MT_ARRAY, [text_t()]),
+            mt_app(MT_OPTIONAL, [mt_con("bool")]), mt_app(MT_OPTIONAL, [int_t()]),
+            mt_app(MT_DICT, [text_t(), int_t()]),
+            mt_app("Named:Pkg.Box", [int_t()]), mt_app("Named:pkg.Box", [mt_app(MT_ARRAY, [text_t()])])]
+        expect(cases.len()).to_equal(expect_types.len())
+        var i = 0
+        var checked = 0
+        while i < cases.len():
+            val k = generic_type_text_key_v1(d, cases[i])
+            expect(k.is_ok()).to_equal(true)
+            expect(k.unwrap()).to_equal(mt_key_type(expect_types[i]))
+            checked = checked + 1
+            i = i + 1
+        expect(checked).to_equal(10)
+
+describe "generic substitution model: template instantiation":
+    it "substitutes positional binders and classifies the result closed":
+        val key = mt_key_type(mt_app(MT_ARRAY, [mt_var("pkg.Box#0")]))
+        val r = mt_instantiate_key(key, ["pkg.Box#0"], [int_t()], 8)
+        expect(r.status).to_equal(MI_STATUS_CLOSED)
+        expect(mt_render(r.t)).to_equal("Array<i64>")
+
+    it "reports open when a binder has no argument":
+        val key = mt_key_type(mt_app(MT_TUPLE, [mt_var("a#0"), mt_var("a#1")]))
+        val r = mt_instantiate_key(key, ["a#0", "a#1"], [int_t()], 8)
+        expect(r.status).to_equal(MI_STATUS_OPEN)
+        expect(mt_render(r.t)).to_equal("Tuple<i64,'a#1>")
+
+    it "reports depth when the result nests deeper than the limit":
+        val key = mt_key_type(mt_app(MT_ARRAY, [mt_app(MT_ARRAY, [mt_var("a#0")])]))
+        val deep = mt_instantiate_key(key, ["a#0"], [mt_app(MT_ARRAY, [int_t()])], 2)
+        expect(deep.status).to_equal(MI_STATUS_DEPTH)
+        val fits = mt_instantiate_key(key, ["a#0"], [mt_app(MT_ARRAY, [int_t()])], 3)
+        expect(fits.status).to_equal(MI_STATUS_CLOSED)
+
+    it "reports malformed for undecodable key text":
+        val r = mt_instantiate_key("zz", ["a#0"], [int_t()], 8)
+        expect(r.status).to_equal(MI_STATUS_MALFORMED)
+        expect(mt_is_unknown(r.t)).to_equal(true)
+
+    it "ms_from_positional ignores surplus binders and surplus arguments":
+        val short_args = ms_from_positional(["A", "B"], [int_t()])
+        expect(ms_has(short_args, "A")).to_equal(true)
+        expect(ms_has(short_args, "B")).to_equal(false)
+        val short_binders = ms_from_positional(["A"], [int_t(), text_t()])
+        expect(ms_domain(short_binders).len()).to_equal(1)
