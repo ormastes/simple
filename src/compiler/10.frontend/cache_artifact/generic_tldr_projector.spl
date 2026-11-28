@@ -40,18 +40,18 @@ pub struct GenericDeclInputV1:
 val _PRIMITIVES = ["i8", "i16", "i32", "i64", "u8", "u16", "u32", "u64",
     "f32", "f64", "bool", "text", "char", "unit", "Any"]
 
-fn _frame(value: text, byte_framed: bool = false) -> text:
-    val length = if byte_framed: value.byte_len() else: value.len()
+fn _frame(value: text) -> text:
+    val length = value.byte_len()
     "{length}:" + value
 
-fn _key_var(name: text, byte_framed: bool = false) -> text:
-    "v" + _frame(name, byte_framed)
+fn _key_var(name: text) -> text:
+    "v" + _frame(name)
 
-fn _key_con(name: text, byte_framed: bool = false) -> text:
-    "c" + _frame(name, byte_framed)
+fn _key_con(name: text) -> text:
+    "c" + _frame(name)
 
-fn _key_app(ctor: text, args: [text], byte_framed: bool = false) -> text:
-    "a" + _frame(ctor, byte_framed) + "l{args.len()}:" + args.join("")
+fn _key_app(ctor: text, args: [text]) -> text:
+    "a" + _frame(ctor) + "l{args.len()}:" + args.join("")
 
 struct _TyParse:
     key: text
@@ -71,13 +71,13 @@ fn _skip_ws(s: text, pos: i64) -> i64:
 fn _is_ident(ch: text) -> bool:
     (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or (ch >= "0" and ch <= "9") or ch == "_" or ch == "."
 
-fn _parse_args(s: text, pos: i64, d: GenericDeclInputV1, close: text, byte_framed: bool = false) -> [_TyParse]:
+fn _parse_args(s: text, pos: i64, d: GenericDeclInputV1, close: text) -> [_TyParse]:
     """Comma-separated type list up to `close`; last element carries the
     position after `close` (or an error)."""
     var out: [_TyParse] = []
     var i = _skip_ws(s, pos)
     while true:
-        val t = _parse_type(s, i, d, byte_framed)
+        val t = _parse_type(s, i, d)
         if t.error != "":
             return [t]
         out = out.push(t)
@@ -91,24 +91,24 @@ fn _parse_args(s: text, pos: i64, d: GenericDeclInputV1, close: text, byte_frame
         return [_fail("expected '" + close + "' in type '" + s + "'")]
     out
 
-fn _parse_postfix(s: text, base: _TyParse, byte_framed: bool = false) -> _TyParse:
+fn _parse_postfix(s: text, base: _TyParse) -> _TyParse:
     var t = base
     while t.pos < s.len() and s.char_at(t.pos) == "?":
-        t = _TyParse(key: _key_app("Optional", [t.key], byte_framed), pos: t.pos + 1, error: "", generic: t.generic)
+        t = _TyParse(key: _key_app("Optional", [t.key]), pos: t.pos + 1, error: "", generic: t.generic)
     t
 
-fn _parse_type(s: text, pos: i64, d: GenericDeclInputV1, byte_framed: bool = false) -> _TyParse:
+fn _parse_type(s: text, pos: i64, d: GenericDeclInputV1) -> _TyParse:
     var i = _skip_ws(s, pos)
     if i >= s.len():
         return _fail("empty type in '" + s + "'")
     if s.char_at(i) == "[":
-        val parts = _parse_args(s, i + 1, d, "]", byte_framed)
+        val parts = _parse_args(s, i + 1, d, "]")
         if parts.len() != 2:
             if parts.len() == 1:
                 return parts[0]
             return _fail("array type takes one element type")
-        return _parse_postfix(s, _TyParse(key: _key_app("Array", [parts[0].key], byte_framed), pos: parts[1].pos,
-            error: "", generic: parts[0].generic), byte_framed)
+        return _parse_postfix(s, _TyParse(key: _key_app("Array", [parts[0].key]), pos: parts[1].pos,
+            error: "", generic: parts[0].generic))
     var j = i
     while j < s.len() and _is_ident(s.char_at(j)):
         j = j + 1
@@ -120,7 +120,7 @@ fn _parse_type(s: text, pos: i64, d: GenericDeclInputV1, byte_framed: bool = fal
     var generic = false
     var has_args = false
     if k < s.len() and s.char_at(k) == "<":
-        val parts = _parse_args(s, k + 1, d, ">", byte_framed)
+        val parts = _parse_args(s, k + 1, d, ">")
         if parts.len() == 1 and parts[0].error != "":
             return parts[0]
         var a = 0
@@ -135,17 +135,17 @@ fn _parse_type(s: text, pos: i64, d: GenericDeclInputV1, byte_framed: bool = fal
         if d.params[p] == name:
             if has_args:
                 return _fail("higher-kinded binder '" + name + "' is unsupported")
-            return _parse_postfix(s, _TyParse(key: _key_var(_binder_id(d, p), byte_framed), pos: k, error: "", generic: true), byte_framed)
+            return _parse_postfix(s, _TyParse(key: _key_var(_binder_id(d, p)), pos: k, error: "", generic: true))
         p = p + 1
     var key = ""
     if not has_args and _PRIMITIVES.contains(name):
-        key = _key_con(name, byte_framed)
+        key = _key_con(name)
     elif name == "Array" or name == "Dict" or name == "Optional" or name == "Result":
-        key = _key_app(name, arg_keys, byte_framed)
+        key = _key_app(name, arg_keys)
     else:
         val qualified = if name.contains("."): name else: d.module_path + "." + name
-        key = _key_app("Named:" + qualified, arg_keys, byte_framed)
-    _parse_postfix(s, _TyParse(key: key, pos: k, error: "", generic: generic), byte_framed)
+        key = _key_app("Named:" + qualified, arg_keys)
+    _parse_postfix(s, _TyParse(key: key, pos: k, error: "", generic: generic))
 
 fn _symbol_id(d: GenericDeclInputV1) -> text:
     d.module_path + "." + d.name
@@ -161,7 +161,7 @@ pub fn generic_type_text_key_v1(d: GenericDeclInputV1, type_text: text) -> Resul
         return Err("trailing text in type '" + type_text + "'")
     Ok(t.key)
 
-fn _project_generic_template_framed_v2(d: GenericDeclInputV1, byte_framed: bool) -> Result<GenericTemplateEntryV1, text>:
+fn _project_generic_template(d: GenericDeclInputV1) -> Result<GenericTemplateEntryV1, text>:
     if d.params.len() != d.param_kinds.len():
         return Err("generic parameter kind list does not match parameter list")
     var params: [GenericParamV1] = []
@@ -179,7 +179,7 @@ fn _project_generic_template_framed_v2(d: GenericDeclInputV1, byte_framed: bool)
     var fields: [GenericTemplateFieldV1] = []
     for f in d.fields:
         val ff: GenericFieldInputV1 = f
-        val t = _parse_type(ff.type_text, 0, d, byte_framed)
+        val t = _parse_type(ff.type_text, 0, d)
         if t.error != "":
             return Err(t.error)
         if _skip_ws(ff.type_text, t.pos) != ff.type_text.len():
@@ -237,7 +237,7 @@ fn _generic_input_bounded_v2(d: GenericDeclInputV1) -> bool:
 
 pub fn project_generic_template_v2(d: GenericDeclInputV1) -> Result<GenericTemplateEntryV1, text>:
     if not _generic_input_bounded_v2(d): return Err("generic V2 type input bounds exceeded")
-    val base = _project_generic_template_framed_v2(d, true)
+    val base = _project_generic_template(d)
     if base.is_err(): return Err(base.unwrap_err())
     var entry = base.unwrap()
     entry.language_schema = GENERIC_TLDR_VIEW_SCHEMA_V2
@@ -248,4 +248,4 @@ pub fn project_generic_template_v2(d: GenericDeclInputV1) -> Result<GenericTempl
     Ok(entry)
 
 pub fn project_generic_template_v1(d: GenericDeclInputV1) -> Result<GenericTemplateEntryV1, text>:
-    _project_generic_template_framed_v2(d, false)
+    _project_generic_template(d)

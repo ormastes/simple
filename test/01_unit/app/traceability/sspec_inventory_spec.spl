@@ -75,6 +75,46 @@ describe "Production-parser SSpec inventory extraction":
                         expect(changed_inventory.cases[0].start_byte.value).to_equal(item.start_byte.value)
                         expect(changed_inventory.cases[0].case_name).to_equal(item.case_name)
 
+    it "measures non-ASCII sources in UTF-8 byte offsets":
+        # Regression: the character/byte prefix map must accumulate UTF-8 byte
+        # lengths, or any non-ASCII source aborts extraction with a mapping
+        # mismatch and produces no cases (no spec->test-case edges).
+        val header = "# 日本 comment decoy\n"
+        val source = header + _sspec_source([
+            "use std.spec.*",
+            "describe \"suite 日本\":",
+            "    it \"case 文\":",
+            "        val note = \"body 本 decoy\"",
+            "    test \"second\":",
+            "        pass"])
+        var source_bytes: [u8] = []
+        for byte in source.bytes(): source_bytes.push(byte)
+        match extract_sspec_inventory_single_owner("test/non_ascii_spec.spl", source):
+            case Err(reason): fail("non-ASCII SSpec source did not extract: {reason}")
+            case Ok(inventory):
+                expect(inventory.cases.len()).to_equal(2)
+                expect(inventory.cases[0].case_name).to_equal("suite 日本 > case 文")
+                expect(inventory.cases[1].case_name).to_equal("suite 日本 > second")
+                val first = inventory.cases[0]
+                # The prefix holds multi-byte characters, so byte offsets must
+                # exceed the character count and land exactly on the byte
+                # offset of the registration keyword.
+                val registration = header + "use std.spec.*\ndescribe \"suite 日本\":\n    "
+                expect(first.start_byte.value).to_equal(registration.byte_len())
+                expect(first.start_byte.value).to_be_greater_than(registration.len())
+                expect(first.end_byte.value).to_be_less_than(source_bytes.len() + 1)
+                expect(first.line.value).to_equal(4)
+                expect(first.column.value).to_equal(5)
+                match validated_utf8_bytes_to_text_linear(source_bytes[first.start_byte.value:first.end_byte.value]):
+                    case Err(reason): fail("non-ASCII declaration byte span is invalid UTF-8: {reason}")
+                    case Ok(fragment): expect(fragment.starts_with("it \"case 文\":")).to_equal(true)
+                val second = inventory.cases[1]
+                expect(second.kind).to_equal("test")
+                expect(second.start_byte.value).to_equal(first.end_byte.value)
+                match validated_utf8_bytes_to_text_linear(source_bytes[second.start_byte.value:second.end_byte.value]):
+                    case Err(reason): fail("second non-ASCII span is invalid UTF-8: {reason}")
+                    case Ok(fragment): expect(fragment.starts_with("test \"second\":")).to_equal(true)
+
     it "retains full nested paths and uses only the current suite and context in selectors":
         val source = _sspec_source([
             "use std.spec.*",

@@ -1,0 +1,139 @@
+# codex-system-test
+# @tag:system
+# @req REQ-IDE-GUI-LIQUID-001
+# @cover src/app/ide/feature_report.spl 80%
+# @cover src/app/ide/gui_sanity.spl 80%
+# @cover src/app/editor/gui_shell_render.spl 80%
+"""
+# Simple IDE GUI Liquid Glass Working Verification
+
+## Overview
+
+Verifies the Simple IDE GUI stack end-to-end without placeholders:
+1. Production feature report (`ide_feature_check_report("gui")`), GUI sanity
+   summary (`ide_gui_sanity_summary()`), and live editor/Office interaction
+   evidence (`ide_interaction_evidence("gui", ...)`).
+2. Real software Engine2D IDE frame rendering (`ide_render_gui_frame`) with real
+   `.spl` files opened in `EditSession` and PNG RGB encoding (`encode_argb_to_png_rgb`).
+3. HTML shell frame rendering (`gui_shell_render_frame`) including document tab
+   and file-tree rendering, custom-editor status reporting, and Pure-Simple web
+   Liquid Glass software pixel rasterization (`simple_web_layout_render_html_software_pixels_with_images`).
+4. Electron Liquid Glass IDE GUI shell artifacts (`tools/electron-shell/simple_ide_gui_app.js`
+   and `tools/electron-shell/simple_ide_gui_shell.html`).
+
+**Requirements:** doc/02_requirements/feature/evidence_showcase.md
+**Plan:** doc/03_plan/sys_test/evidence_showcase.md
+**Design:** doc/05_design/evidence_showcase.md
+
+## Examples
+
+Run this spec to verify both Pure-Simple IDE GUI rendering backends and the
+Electron Liquid Glass IDE shell contract.
+
+**Artifacts:** build/test-artifacts/03_system/app/ide/feature/simple_ide_gui_liquid_working/ide_engine2d_frame.png
+"""
+# @evidence-display: links
+
+use std.spec.*
+use app.ide.feature_report.{ide_feature_check_report}
+use app.ide.gui_sanity.{ide_gui_sanity_summary, ide_gui_bounds_valid}
+use app.ide.interaction_evidence.{ide_interaction_evidence, ide_interaction_exit_code}
+use std.editor.core.session.{EditSession}
+use app.editor.gui_shell.{gui_shell_new, gui_shell_apply_profile, gui_shell_render_frame}
+use app.editor.gui_shell_render.{IdeGuiFrame, ide_render_gui_frame}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{simple_web_layout_render_html_software_pixels_with_images}
+use std.common.gpu.simpleos_host_gpu_draw_ir.{SimpleOsHostGpuImageResource}
+use std.common.image.png_encode.{encode_argb_to_png_rgb}
+use std.io_runtime.{dir_create_all, file_exists, file_read, file_write, file_write_bytes}
+
+val ARTIFACT_DIR = "build/test-artifacts/03_system/app/ide/feature/simple_ide_gui_liquid_working"
+val FIXTURE_MD = "build/test-artifacts/03_system/app/ide/feature/simple_ide_gui_liquid_working/probe.md"
+val ENGINE2D_PNG = "build/test-artifacts/03_system/app/ide/feature/simple_ide_gui_liquid_working/ide_engine2d_frame.png"
+val ELECTRON_APP_JS = "tools/electron-shell/simple_ide_gui_app.js"
+val ELECTRON_SHELL_HTML = "tools/electron-shell/simple_ide_gui_shell.html"
+
+fn _liquid_probe_html(tab_bar: text, status_html: text) -> text:
+    "<!doctype html><html><body style=\"margin:0;padding:8px;width:240px;height:140px;background:#080d17;color:#eef4ff;font-family:Helvetica,Arial,sans-serif;\"><div style=\"padding:6px;border-radius:10px;background:rgba(16,24,40,0.78);border:1px solid rgba(148,184,255,0.22);\">" + tab_bar + status_html + "</div></body></html>"
+
+describe "REQ-IDE-GUI-LIQUID-001 Simple IDE GUI Liquid Glass verification":
+    it "verifies IDE GUI sanity, interaction evidence, Engine2D and Web Liquid rendering, and Electron shell":
+        step("Run production IDE feature report, GUI sanity summary, and interaction evidence")
+        expect(dir_create_all(ARTIFACT_DIR)).to_be(true)
+        expect(file_write(FIXTURE_MD, "# Simple IDE GUI Verify\n\nReady\n")).to_be(true)
+
+        val report_lines = ide_feature_check_report("gui")
+        val report_text = report_lines.join("\n")
+        expect(report_lines.len()).to_be_greater_than(10)
+        expect(report_text).to_contain("gui-backend:")
+
+        val gui_summary = ide_gui_sanity_summary()
+        expect(gui_summary).to_contain("gui-backend:")
+        expect(gui_summary).to_contain("md=true")
+        expect(ide_gui_bounds_valid()).to_be(true)
+
+        val ev = ide_interaction_evidence("gui", FIXTURE_MD)
+        expect(ev.opened).to_be(true)
+        expect(ev.edited).to_be(true)
+        expect(ev.diagnostic_count).to_equal(0)
+        expect(ev.office_component).to_equal("sheets")
+        expect(ide_interaction_exit_code(ev)).to_equal(0)
+
+        # @capture(gui)
+        step("Render software Engine2D IDE frame with real Simple sources and encode PNG")
+        var session = EditSession.new()
+        session.open_file("src/app/ide/main.spl")
+        session.open_file("src/app/editor/gui_shell_render.spl")
+        session.switch_to_index(0)
+
+        val e2d_frame = ide_render_gui_frame(session, "editor", 1120, 720, "software")
+        expect(e2d_frame.width).to_equal(1120)
+        expect(e2d_frame.height).to_equal(720)
+        expect(e2d_frame.resolved_backend).to_equal("software")
+        expect(e2d_frame.pixels.len()).to_equal(806400)
+        expect(e2d_frame.checksum).to_be_greater_than(0)
+        expect(e2d_frame.active_file).to_equal("main.spl")
+
+        val png_bytes = encode_argb_to_png_rgb(e2d_frame.pixels, e2d_frame.width, e2d_frame.height)
+        expect(png_bytes.len()).to_be_greater_than(1000)
+        expect(png_bytes[0]).to_equal(137u8)
+        expect(png_bytes[1]).to_equal(80u8)
+        expect(png_bytes[2]).to_equal(78u8)
+        expect(png_bytes[3]).to_equal(71u8)
+        expect(file_write_bytes(ENGINE2D_PNG, png_bytes)).to_be(true)
+
+        step("Verify gui_shell_render_frame populates tabs and tree and renders Liquid Glass web pixels")
+        var shell_state = gui_shell_new(session)
+        gui_shell_apply_profile(shell_state, "editor")
+        shell_state.ctrl.file_tree_visible = true
+        shell_state.ctrl.session.dock_layout.show_right("problems")
+        val gf = gui_shell_render_frame(shell_state)
+        expect(gf.tab_bar_html).to_contain("main.spl")
+        expect(gf.tab_bar_html).to_contain("gui_shell_render.spl")
+        expect(gf.file_tree_html).to_contain("main.spl")
+        expect(gf.editor_html).to_contain("editor-area")
+        expect(gf.editor_html).to_contain("problems-pane")
+        expect(gf.status_html).to_contain("status")
+
+        val empty_imgs: [SimpleOsHostGpuImageResource] = []
+        val web_px = simple_web_layout_render_html_software_pixels_with_images(
+            _liquid_probe_html(gf.tab_bar_html, gf.status_html),
+            240,
+            140,
+            empty_imgs
+        )
+        expect(web_px.len()).to_equal(33600)
+
+        step("Verify Electron Simple IDE Liquid Glass shell files and contracts")
+        expect(file_exists(ELECTRON_APP_JS)).to_be(true)
+        expect(file_exists(ELECTRON_SHELL_HTML)).to_be(true)
+        val app_js = file_read(ELECTRON_APP_JS)
+        val shell_html = file_read(ELECTRON_SHELL_HTML)
+        expect(app_js).to_contain("1380")
+        expect(app_js).to_contain("860")
+        expect(app_js).to_contain("force-color-profile")
+        expect(app_js).to_contain("[simple-ide-gui] ready")
+        expect(shell_html).to_contain("fluid_dark")
+        expect(shell_html).to_contain("glass_obsidian_dark")
+        expect(shell_html).to_contain("fluid_light")
+        expect(shell_html).to_contain("ide_engine2d_frame.png")
+        expect(shell_html).to_contain("ide_web_liquid_frame.png")

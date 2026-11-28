@@ -1,0 +1,170 @@
+# Regression fence for
+# glob_imported_private_fn_lowers_to_unmangled_extern_2026-09-13.
+#
+# Two same-directory modules each define a PRIVATE (non-pub, `_`-prefixed) fn
+# with the SAME signature; a third module glob-imports both (`use app.ma.*` +
+# `use app.mb.*`) and calls the private name. Glob bindings deliberately skip
+# `_`-private names and ambiguous private names keep no first-wins fallback in
+# the import maps, so a bare call target that reaches codegen with no
+# resolving map entry used to be fabricated as an extern declaration under the
+# raw UNMANGLED name -- the build then died at the final link (macOS Stage-2:
+# `Undefined symbols ... "_sffi_enum_discriminant"`) instead of reporting a
+# compile-time unresolved-name error.
+#
+# Fix (Rust seed): the Cranelift fabricate-an-import path
+# (codegen/instr/calls.rs `compile_call`) and the LLVM pre-pass
+# (pipeline/native_project/mangle.rs `reject_leaked_ambiguous_private_call_targets`)
+# now fail closed with "ambiguous private call `<name>` ... must be imported
+# explicitly" -- the call twin of the existing `declare_globals` guard for
+# ambiguous private GLOBALS (common_backend.rs).
+#
+# Per the bug record's re-verification recipe, a native build of this fixture
+# has exactly THREE acceptable outcomes:
+#   (a) it fails at COMPILE time with the "must be imported explicitly" error
+#       (the fixed seed, when no resolver binds the name);
+#   (b) it resolves per-module-mangled and links (lanes with a first-wins
+#       owner binder, e.g. the current Cranelift lane, which silently binds
+#       the first owner's body -- the separate "resolves permissively" leg
+#       the bug record keeps OPEN for the interpreter/import-binding path);
+#   (c) NEVER: a link-stage undefined-symbol diagnostic for the bare private
+#       name -- that is the 2026-09-13 defect this spec fences.
+#
+# Drive it with a seed/self-hosted binary via SIMPLE_BINARY, like the sibling
+# backend_aot_error_message_full_text_native_spec:
+#   SIMPLE_LIB=src SIMPLE_BINARY=<repo>/build/p3cache/<lane>/simple.exe \
+#     <that same binary> test \
+#     test/01_unit/compiler/backend/glob_private_fn_unmangled_extern_native_spec.spl
+# Run from the repository root.
+#
+# STATUS 2026-11-28 (lane p3-sweep5): the spec's child native-build is
+# currently blocked upstream of this fence by PR #12267
+# (055e3a38fa3, SPL-PAT-001 "Option pattern on non-Option scrutinee" hard
+# error): the native-build driver's transitive closure still carries
+# pre-desugar `case Some`/`case None` arms on plain-struct fields, so the
+# driver cannot JIT-compile on any seed built from that merge. Three real
+# violations were fixed as enabling fixes in this lane
+# (60.mir_opt/mir_opt/collection_opt_core.spl `local_id_or_invalid`/
+# `local_or_nil`, 70.backend/linker/link.spl `unify_hints`,
+# 35.semantics/resolve.spl `build_trait_impls` -- all dead post-desugar arms,
+# rewritten behavior-identically); the remaining queue starts at
+# `MethodResolver.resolve_block` (resolve.spl:412) and belongs to the w8-6
+# rollout lane. Once the driver closure is clean, this spec runs as written.
+# The guard itself is verified by the unit twins next to the fix:
+#   cargo test -p simple-compiler ambiguous_private
+#   cargo test -p simple-compiler reject_leaked
+
+#
+# GREEN: current tree -- outcome (a) or (b); the unit twins of the guard live
+# next to the fix (cargo test ambiguous_private / reject_leaked).
+# RED: a lane where the bare name leaks to the link (an unguarded LLVM backend
+# or a regressed owner binder) -- rc != 0 with a linker undefined-symbol
+# message and no "must be imported explicitly" text; or any build that
+# references the unmangled private name at link time.
+
+use std.spec.{describe, it, expect}
+use std.spec.step
+use std.io_runtime.{write_file, file_exists, env_get, env_set_process, env_remove_process, mkdir_p}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+use app.io.process_ops.{process_run_timeout}
+
+fn binary() -> text:
+    val env_bin = env_get("SIMPLE_BINARY") ?? ""
+    if env_bin != "": return env_bin
+    if file_exists("bin/simple.exe"): "bin/simple.exe" else: "bin/simple"
+
+# Two same-directory modules with an identically-signed PRIVATE fn, plus an
+# entry that glob-imports both and calls the private name -- the exact shape
+# of the 2026-09-13 Stage-2 link failure.
+fn write_two_def_fixture(root: text):
+    val _a = mkdir_p(root + "/app")
+    val _1 = write_file(root + "/app/ma.spl",
+        "fn _helper(x: i64) -> i64:\n    return x + 1\n\npub fn ma_public(x: i64) -> i64:\n    return _helper(x)\n")
+    val _2 = write_file(root + "/app/mb.spl",
+        "fn _helper(x: i64) -> i64:\n    return x + 10\n\npub fn mb_public(x: i64) -> i64:\n    return _helper(x)\n")
+    val _3 = write_file(root + "/app/main.spl",
+        "use app.ma.*\nuse app.mb.*\n\nfn main() -> i64:\n    print(\"R={{_helper(1)}}\")\n    return 0\n")
+
+# One module with a UNIQUE private fn, glob-imported by the entry: a unique
+# private name is legitimately served through the global import map, so this
+# build must keep succeeding (guard-scope fence: the fail-closed guard must
+# fire ONLY for ambiguous names, never for resolvable ones).
+fn write_single_def_fixture(root: text):
+    val _a = mkdir_p(root + "/app")
+    val _1 = write_file(root + "/app/ma.spl",
+        "fn _helper(x: i64) -> i64:\n    return x + 1\n\npub fn ma_public(x: i64) -> i64:\n    return _helper(x)\n")
+    val _2 = write_file(root + "/app/main.spl",
+        "use app.ma.*\n\nfn main() -> i64:\n    print(\"R={{_helper(1)}}\")\n    return 0\n")
+
+fn native_build(tag: text) -> (text, text, i64):
+    val root = get_temp_dir().replace("\\", "/") + "/glob_priv_extern_" + tag
+    if tag == "twodef":
+        write_two_def_fixture(root)
+    else:
+        write_single_def_fixture(root)
+    val work = root + "/work"
+    val _d = mkdir_p(work)
+    # Same child-environment contract as the sibling aot spec: SIMPLE_BINARY
+    # must be ABSENT for the child (set-but-empty routes differently from
+    # unset), the runner's SIMPLE_EXECUTION_MODE is pinned to jit so
+    # native-build stays on the compiled lane, and the runner's SIMPLE_MCDC_*
+    # knobs are removed so they cannot leak into the entry-closure build.
+    val prior_bin = env_get("SIMPLE_BINARY") ?? ""
+    if prior_bin != "":
+        val _pb = env_remove_process("SIMPLE_BINARY")
+    val prior_mode = env_get("SIMPLE_EXECUTION_MODE") ?? ""
+    val _pm = env_set_process("SIMPLE_EXECUTION_MODE", "jit")
+    val prior_mcdc_mode = env_get("SIMPLE_MCDC_MODE") ?? ""
+    if prior_mcdc_mode != "":
+        val _mm = env_remove_process("SIMPLE_MCDC_MODE")
+    val prior_mcdc_inc = env_get("SIMPLE_MCDC_INCLUDE") ?? ""
+    if prior_mcdc_inc != "":
+        val _mi = env_remove_process("SIMPLE_MCDC_INCLUDE")
+    val prior_mcdc_exc = env_get("SIMPLE_MCDC_EXCLUDE") ?? ""
+    if prior_mcdc_exc != "":
+        val _me = env_remove_process("SIMPLE_MCDC_EXCLUDE")
+    val (out, err, rc) = process_run_timeout(binary(), [
+        "native-build",
+        "--source", root,
+        "--entry-closure",
+        "--mode", "one-binary",
+        "--threads", "1",
+        "--cache-dir", "{work}/cache",
+        "--entry", "{root}/app/main.spl",
+        "--output", "{work}/app.exe"], 900000)
+    if prior_mcdc_exc != "":
+        val _me = env_set_process("SIMPLE_MCDC_EXCLUDE", prior_mcdc_exc)
+    if prior_mcdc_inc != "":
+        val _mi = env_set_process("SIMPLE_MCDC_INCLUDE", prior_mcdc_inc)
+    if prior_mcdc_mode != "":
+        val _mm = env_set_process("SIMPLE_MCDC_MODE", prior_mcdc_mode)
+    if prior_mode != "":
+        val _rm = env_set_process("SIMPLE_EXECUTION_MODE", prior_mode)
+    else:
+        val _rm = env_remove_process("SIMPLE_EXECUTION_MODE")
+    if prior_bin != "":
+        val _rb = env_set_process("SIMPLE_BINARY", prior_bin)
+    (out, err, rc)
+
+describe "glob-imported private fn must not lower to an unmangled extern":
+    it "two same-directory private definitions: compile error or per-module-mangled, never an unmangled link reference":
+        step("native-build a fixture whose only call target is an ambiguous glob-private name")
+        val (out, err, rc) = native_build("twodef")
+        val combined = out + "\n" + err
+        if rc != 0:
+            step("a failed build must be the compile-time unresolved-private-name error")
+            expect(combined.contains("ambiguous private call `_helper`")).to_equal(true)
+            step("the bare private name must never surface as a link-stage undefined symbol")
+            expect(combined.contains("undefined reference to")).to_equal(false)
+            expect(combined.contains("unresolved external symbol")).to_equal(false)
+        else:
+            step("a successful build resolved per-module-mangled (accepted outcome)")
+
+    it "a unique private name behind a glob still builds and runs":
+        step("native-build the single-definition control fixture")
+        val (out, err, rc) = native_build("onedef")
+        expect(rc).to_equal(0)
+        step("the built binary resolved the unique private name and prints R=2")
+        val exe = get_temp_dir().replace("\\", "/") + "/glob_priv_extern_onedef/work/app.exe"
+        val (run_out, run_err, run_rc) = process_run_timeout(exe, [], 120000)
+        expect(run_rc).to_equal(0)
+        expect((run_out + run_err).contains("R=2")).to_equal(true)

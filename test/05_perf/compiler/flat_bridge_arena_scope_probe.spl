@@ -1,0 +1,85 @@
+# Child perf probe for flat_bridge_arena_scope_spec.spl
+# (bug flat_ast_bridge_phase3_snapshot_throughput_2026-08-31).
+# Standalone script — the spec launches it TWICE (once per arm) as
+#   PROBE_ARM=scoped  <simple> run test/05_perf/compiler/flat_bridge_arena_scope_probe.spl --mode=interpreter
+#   PROBE_ARM=legacy  <simple> run test/05_perf/compiler/flat_bridge_arena_scope_probe.spl --mode=interpreter
+# with SIMPLE_BOOTSTRAP=1 and SIMPLE_NATIVE_BUILD_ENTRY_CLOSURE=1 inherited.
+# One process per arm: alternating the two modes inside one process measurably
+# interferes (mode-switch locality cost landed disproportionately on the
+# scoped arm), and sequential same-process arms hand the second arm a warmer
+# heap. Separate processes are the fair protocol.
+# Each run warms once, measures five conversions, prints one line:
+#   PROBEARM arm=<scoped|legacy> fns=<N> median_ns=<n> min_ns=<n> max_ns=<n>
+
+use std.nogc_sync_mut.io.file_ops.{file_read}
+use std.nogc_sync_mut.io_runtime.{dir_create_all, env_get_opt, env_set, file_write_exact, getpid}
+use compiler.core.parser.{parser_init_with_path}
+use compiler.core.parser_decls.{parse_module_body}
+use compiler.frontend.core.string_interpolation_expand.{expand_string_interpolations_with_placeholder_receipt}
+use compiler.frontend.flat_ast_bridge.{flat_ast_to_module}
+
+extern fn rt_time_now_nanos() -> i64
+
+val PERF_FNS: i64 = 400
+val SCRATCH: text = "/tmp/simple-flat-bridge-probe-{getpid()}"
+
+fn perf_fixture() -> text:
+    var parts: [text] = []
+    var i: i64 = 0
+    while i < PERF_FNS:
+        parts.push("fn pf_{i}(a: i64, b: i64) -> i64:\n    return a + b\n")
+        i = i + 1
+    parts.join("\n")
+
+fn median_of(samples: [i64]) -> i64:
+    var sorted: [i64] = []
+    for s in samples:
+        sorted.push(s)
+    var i = 1
+    while i < sorted.len():
+        val key = sorted[i]
+        var j = i - 1
+        while j >= 0 and sorted[j] > key:
+            sorted[j + 1] = sorted[j]
+            j = j - 1
+        sorted[j + 1] = key
+        i = i + 1
+    sorted[sorted.len() / 2]
+
+fn min_of(samples: [i64]) -> i64:
+    var best = samples[0]
+    for s in samples:
+        if s < best:
+            best = s
+    best
+
+fn max_of(samples: [i64]) -> i64:
+    var worst = samples[0]
+    for s in samples:
+        if s > worst:
+            worst = s
+    worst
+
+fn main():
+    val arm = env_get_opt("PROBE_ARM") ?? "scoped"
+    val _d = dir_create_all(SCRATCH)
+    val path = SCRATCH + "/perf_{PERF_FNS}.spl"
+    val _w = file_write_exact(path, perf_fixture())
+    val source = file_read(path)
+    parser_init_with_path(source, path)
+    parse_module_body()
+    val _ph = expand_string_interpolations_with_placeholder_receipt(0)
+    # scoped: arena scope active (default). legacy: opt out to the env mirror.
+    if arm == "legacy":
+        val _l = env_set("SIMPLE_FLAT_BRIDGE_ARENA_SCOPE", "0")
+    else:
+        val _s = env_set("SIMPLE_FLAT_BRIDGE_ARENA_SCOPE", "")
+    val _warm = flat_ast_to_module(path)
+    var samples: [i64] = []
+    var i: i64 = 0
+    while i < 5:
+        val t0 = rt_time_now_nanos()
+        val _m = flat_ast_to_module(path)
+        samples.push(rt_time_now_nanos() - t0)
+        i = i + 1
+    print "PROBEARM arm={arm} fns={PERF_FNS} median_ns={median_of(samples)} min_ns={min_of(samples)} max_ns={max_of(samples)}"

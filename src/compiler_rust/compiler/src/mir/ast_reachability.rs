@@ -14,9 +14,15 @@
 //!
 //! - Only free module-level functions that came from an IMPORTED file (they
 //!   carry the flatten owner attribute, and the owner is not the entry file)
-//!   are candidates. The entry file's own functions, every method inside a
-//!   class/struct/impl/trait, and every non-function item are kept and are
-//!   roots, so diagnostics on the user's own code are unchanged.
+//!   are candidates. The entry file's own functions and methods and every
+//!   non-function item are kept and are roots, so diagnostics on the user's own code are unchanged.
+//! - Methods of imported classes/structs/enums and plain (non-trait) impls are
+//!   candidates too (each method carries the owner tag). They are taken out of
+//!   their containers before the worklist so the container's own text does not
+//!   name them, and kept ones are restored in original order. A method is alive
+//!   when its bare name appears in any kept item, whatever the receiver type.
+//!   Always kept: methods of traits, mixins, actors and trait impls, `__*`
+//!   names, and [`IMPLICIT_METHODS`] (names the runtime calls by convention).
 //! - A candidate with a decorator, a [`super::reachability::ROOT_ATTRIBUTES`]
 //!   attribute, a `__module_init` name, or a name that shadows a codegen
 //!   runtime function is a root, as in the MIR pass.
@@ -89,8 +95,69 @@ fn keys_of(name: &str) -> Vec<String> {
     out
 }
 
-/// Drop imported free functions no kept item can name. Returns
-/// `(before, after)` item counts, or `None` when nothing was attempted.
+/// Method names the compiler or runtime calls by convention (operators on
+/// `for`/`+`/interpolation, drop, indexing, ...) without the name appearing in
+/// the AST. Always kept, as are `__*` names and anything in a trait, mixin,
+/// actor or trait impl.
+const IMPLICIT_METHODS: &[&str] = &[
+    "to_string", "str", "fmt", "debug", "format", "repr", "iter", "into_iter", "next", "has_next", "drop", "close",
+    "finalize", "dispose", "eq", "hash", "cmp", "compare", "len", "get", "set", "index", "contains", "call", "clone",
+    "default", "new", "init", "unwrap", "equals", "from", "from_raw", "add_scalar", "sub_scalar", "mul_scalar",
+    "div_scalar",
+];
+
+fn method_is_root(m: &FunctionDef) -> bool {
+    m.name.starts_with("__") || IMPLICIT_METHODS.contains(&m.name.as_str()) || is_root(m)
+}
+
+/// A pruning candidate taken out of its container: where it came from and the
+/// method itself.
+struct TakenMethod {
+    container: usize,
+    position: usize,
+    method: FunctionDef,
+}
+
+/// Move the candidate methods of `methods` (imported, not roots) out into
+/// `taken`, remembering their original position.
+fn take_candidates(
+    methods: &mut Vec<FunctionDef>,
+    container: usize,
+    entry: &str,
+    owners: &mut HashMap<String, bool>,
+    taken: &mut Vec<TakenMethod>,
+) {
+    let mut position = 0;
+    let all = std::mem::take(methods);
+    for method in all {
+        if imported_owner(&method, entry, owners) && !method_is_root(&method) {
+            taken.push(TakenMethod { container, position, method });
+        } else {
+            methods.push(method);
+        }
+        position += 1;
+    }
+}
+
+fn container_methods(item: &mut Node) -> Option<&mut Vec<FunctionDef>> {
+    match item {
+        Node::Class(c) => Some(&mut c.methods),
+        Node::Struct(s) => Some(&mut s.methods),
+        Node::Enum(e) => Some(&mut e.methods),
+        Node::Impl(i) if i.trait_name.is_none() => Some(&mut i.methods),
+        _ => None,
+    }
+}
+
+/// Drop imported free functions and methods no kept item can name. Returns
+/// `(before, after)` counts of free items plus candidate methods, or `None`
+/// when nothing was attempted.
+///
+/// Methods of imported classes, structs, enums and plain (non-trait) impls are
+/// candidates; they are taken out of their containers first so a container's
+/// own text does not count as naming them, and the survivors are put back in
+/// their original order. A method is alive when its bare name appears in any
+/// kept item or kept method, whatever the receiver type.
 pub fn retain_reachable_ast_functions(items: &mut Vec<Node>, entry: &Path) -> Option<(usize, usize)> {
     if !items.iter().any(|n| matches!(n, Node::Function(f) if f.name == "main")) {
         return None;
@@ -99,7 +166,15 @@ pub fn retain_reachable_ast_functions(items: &mut Vec<Node>, entry: &Path) -> Op
         .to_string_lossy()
         .to_string();
     let mut owners = HashMap::new();
-    let mut keep = vec![true; items.len()];
+    let mut taken: Vec<TakenMethod> = Vec::new();
+    for (ci, item) in items.iter_mut().enumerate() {
+        if let Some(methods) = container_methods(item) {
+            take_candidates(methods, ci, &entry, &mut owners, &mut taken);
+        }
+    }
+    // Ids `0..n_items` are free items; `n_items + t` is `taken[t]`.
+    let n_items = items.len();
+    let mut keep = vec![true; n_items + taken.len()];
     let mut by_key: HashMap<String, Vec<usize>> = HashMap::new();
     for (i, item) in items.iter().enumerate() {
         if let Node::Function(f) = item {
@@ -111,10 +186,20 @@ pub fn retain_reachable_ast_functions(items: &mut Vec<Node>, entry: &Path) -> Op
             }
         }
     }
-    let mut work: Vec<usize> = (0..items.len()).filter(|&i| keep[i]).collect();
+    for (t, tm) in taken.iter().enumerate() {
+        keep[n_items + t] = false;
+        for k in keys_of(&tm.method.name) {
+            by_key.entry(k).or_default().push(n_items + t);
+        }
+    }
+    let mut work: Vec<usize> = (0..keep.len()).filter(|&i| keep[i]).collect();
     let mut seen: HashSet<String> = HashSet::new();
     while let Some(i) = work.pop() {
-        let text = format!("{:?}", items[i]);
+        let text = if i < n_items {
+            format!("{:?}", items[i])
+        } else {
+            format!("{:?}", taken[i - n_items].method)
+        };
         let is_word = |c: char| c.is_alphanumeric() || matches!(c, '_' | '$' | '.' | ':');
         for quoted in quoted_strings(&text) {
             for word in quoted.split(|c: char| !is_word(c)).filter(|w| !w.is_empty()) {
@@ -137,13 +222,31 @@ pub fn retain_reachable_ast_functions(items: &mut Vec<Node>, entry: &Path) -> Op
             }
         }
     }
-    let before = items.len();
+    let before = n_items + taken.len();
+    let mut kept_methods = 0;
+    let (mut last_container, mut dropped) = (usize::MAX, 0);
+    // Ascending original position per container restores the original order.
+    for (t, tm) in taken.into_iter().enumerate() {
+        if tm.container != last_container {
+            (last_container, dropped) = (tm.container, 0);
+        }
+        if !keep[n_items + t] {
+            dropped += 1;
+            continue;
+        }
+        kept_methods += 1;
+        if let Some(methods) = container_methods(&mut items[tm.container]) {
+            // Earlier dropped siblings no longer occupy their slots.
+            let at = (tm.position - dropped).min(methods.len());
+            methods.insert(at, tm.method);
+        }
+    }
     let mut idx = 0;
     items.retain(|_| {
         idx += 1;
         keep[idx - 1]
     });
-    Some((before, items.len()))
+    Some((before, items.len() + kept_methods))
 }
 
 #[cfg(test)]
@@ -225,6 +328,125 @@ fn never_named():
         ] {
             assert!(kept.contains(&want.to_string()), "{want} kept: {kept:?}");
         }
+    }
+
+    fn method_names(items: &[Node], container: &str) -> Vec<String> {
+        for n in items {
+            match n {
+                Node::Class(c) if c.name == container => return c.methods.iter().map(|m| m.name.clone()).collect(),
+                Node::Struct(s) if s.name == container => return s.methods.iter().map(|m| m.name.clone()).collect(),
+                Node::Enum(e) if e.name == container => return e.methods.iter().map(|m| m.name.clone()).collect(),
+                _ => {}
+            }
+        }
+        panic!("no container {container}");
+    }
+
+    /// Imported methods are dropped unless their bare name appears in a kept
+    /// item or they are on the implicit/dunder/trait keep lists; survivors keep
+    /// their original order.
+    #[test]
+    fn prunes_unused_imported_methods_only() {
+        let src = r#"
+fn main():
+    val b = make()
+    b.used_one()
+
+fn make():
+    0
+
+class Box:
+    fn unused_a() -> i64:
+        0
+    fn used_one() -> i64:
+        chained()
+    fn chained() -> i64:
+        1
+    fn unused_b() -> i64:
+        2
+    fn len() -> i64:
+        3
+    fn __enter__() -> i64:
+        4
+
+struct Pt:
+    x: i64
+    fn dead_pt() -> i64:
+        0
+
+enum Color:
+    Red
+    fn dead_enum() -> i64:
+        0
+
+impl Pt:
+    fn dead_impl() -> i64:
+        0
+
+trait Shape:
+    fn area() -> i64
+
+impl Shape for Pt:
+    fn area() -> i64:
+        1
+    fn never_called_trait_impl() -> i64:
+        2
+"#;
+        let mut module = simple_parser::Parser::new(src).parse().expect("parse");
+        for item in module.items.iter_mut() {
+            match item {
+                Node::Function(f) if f.name == "main" => crate::interpreter::tag_function_module_owner(f, "/entry.spl"),
+                Node::Function(f) => crate::interpreter::tag_function_module_owner(f, "/lib/x.spl"),
+                Node::Class(c) => c
+                    .methods
+                    .iter_mut()
+                    .for_each(|m| crate::interpreter::tag_function_module_owner(m, "/lib/x.spl")),
+                Node::Struct(s) => s
+                    .methods
+                    .iter_mut()
+                    .for_each(|m| crate::interpreter::tag_function_module_owner(m, "/lib/x.spl")),
+                Node::Enum(e) => e
+                    .methods
+                    .iter_mut()
+                    .for_each(|m| crate::interpreter::tag_function_module_owner(m, "/lib/x.spl")),
+                Node::Impl(i) => i
+                    .methods
+                    .iter_mut()
+                    .for_each(|m| crate::interpreter::tag_function_module_owner(m, "/lib/x.spl")),
+                _ => {}
+            }
+        }
+        retain_reachable_ast_functions(&mut module.items, Path::new("/entry.spl")).expect("has main");
+        assert_eq!(
+            method_names(&module.items, "Box"),
+            vec!["used_one", "chained", "len", "__enter__"],
+            "order preserved; unused dropped; implicit + dunder kept"
+        );
+        assert!(method_names(&module.items, "Color").is_empty(), "dead enum method dropped");
+        // Struct `Pt` has two containers (struct + impl); the trait impl is untouched.
+        let pt_methods: Vec<String> = module
+            .items
+            .iter()
+            .filter_map(|n| match n {
+                Node::Struct(s) => Some(s.methods.iter().map(|m| m.name.clone()).collect::<Vec<_>>()),
+                Node::Impl(i) if i.trait_name.is_none() => {
+                    Some(i.methods.iter().map(|m| m.name.clone()).collect::<Vec<_>>())
+                }
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert!(pt_methods.is_empty(), "dead struct/impl methods dropped: {pt_methods:?}");
+        let trait_impl: Vec<String> = module
+            .items
+            .iter()
+            .filter_map(|n| match n {
+                Node::Impl(i) if i.trait_name.is_some() => Some(i.methods.iter().map(|m| m.name.clone()).collect::<Vec<_>>()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert_eq!(trait_impl, vec!["area", "never_called_trait_impl"], "trait impls untouched");
     }
 
     #[test]

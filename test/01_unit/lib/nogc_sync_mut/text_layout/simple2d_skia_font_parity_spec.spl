@@ -1,0 +1,538 @@
+"""
+# Simple2D vs Skia vs Browser TTF Font Rendering Parity Spec
+
+Verifies:
+1. Chrome 26.6 fractional `font_size_milli` (13.333px, 18.72px vs 18.715px) and
+   quarter-pixel pen splitting (`sfnt_font_cache_key_milli_px`, `sfnt_subpixel_pen_split_milli`).
+2. Horizontal kerning pairs (`AV`, `To`, `Mo`, `fl`) across `sfnt_kern`,
+   `FontRenderer.horizontal_kern_size_milli`, `SkFont.measure_text_kerned`,
+   and Browser TTF `ttf_paint_text_aa_clip_range_adv`.
+3. `hmtx.lsb != glyf.xMin` bearing alignment (`meta[19]` contour origin vs
+   `meta[3]` `hmtx.lsb` and Skia `sfnt_rasterize_glyph_baseline_aligned`).
+4. Synthetic bold advance widening & non-overlapping glyph placement in
+   Browser TTF fallback stepping (`ttf_paint_text_aa_clip_range_adv`).
+5. Engine2D 5x7 spaced fallback (`6 * scale`, UTF-8 codepoint stepping) vs Skia
+   5x7 fallback (`<= 1px` run width parity, `0` horizontal ink overlap).
+6. End-to-end run width parity (`<= 1px`) across Skia, `FontRenderer`,
+   `Engine2DFontOwner`, `ShapedRun`, and Browser TTF (`ttf_measure_text_px_milli`).
+"""
+# @req REQ-TEXT-LAYOUT-PARITY-001
+# @tag: unit, text_layout, font, skia, engine2d, browser_engine
+# @cover src/lib/common/encoding/sfnt_kern.spl 20%
+# @cover src/lib/common/encoding/sfnt_glyf.spl 15%
+# @cover src/lib/nogc_sync_mut/text_layout/font_renderer.spl 10%
+# @cover src/lib/gc_async_mut/gpu/engine2d/glyph.spl 40%
+# @cover src/lib/skia/entity/font.spl 25%
+# @cover src/lib/skia/feature/glyph/font_metrics.spl 30%
+# @cover src/lib/skia/feature/glyph/rasterize.spl 25%
+# @cover src/lib/skia/feature/shaper/shaper.spl 15%
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_gradients_text.spl 20%
+
+use std.spec.*
+use std.nogc_sync_mut.sffi.io.{file_exists, file_read_bytes}
+use std.common.encoding.utf8.{text_codepoints}
+use std.common.encoding.sfnt.{parse_offset_table, find_table}
+use std.common.encoding.sfnt_kern.{
+    sfnt_blob_kern_face_info, sfnt_kern_face_pair_milli_px, sfnt_kern_face_pair_size_milli_px
+}
+use std.common.encoding.sfnt_glyf.{
+    SFNT_GLYPH_SELECTOR_CODEPOINT, SFNT_GLYPH_SELECTOR_INDEX,
+    sfnt_font_cache_key_milli_px, sfnt_subpixel_pen_split_milli,
+    sfnt_measure_glyph_into, sfnt_glyf_measure_codepoint_advances,
+    sfnt_glyf_measure_codepoint_advances_kerned,
+    sfnt_rasterize_glyph_baseline_aligned
+}
+use std.nogc_sync_mut.text_layout.font_renderer.{FontRenderer}
+use std.gc_async_mut.gpu.engine2d.glyph.{
+    glyph_advance, glyph_spaced_advance, render_text_spaced_to_buffer
+}
+use std.gc_async_mut.gpu.engine2d.font_owner.{
+    Engine2DFontOwner, engine2d_font_owner_store,
+    engine2d_font_owner_measure_advances, engine2d_font_owner_measure_width_milli
+}
+use std.gc_async_mut.gpu.engine2d.backend_software.{SoftwareBackend}
+use std.skia.entity.font.{
+    SkFont, sk_typeface_from_attached_font, sk_font_style_normal, sk_font_new,
+    sk_font_measure_codepoints_advances_kerned
+}
+use std.skia.entity.geometry.{SkPoint}
+use std.skia.feature.glyph.font_metrics.{
+    parse_hhea, parse_os2, font_metrics_line_box_units, font_metrics_scale_round_px
+}
+use std.skia.feature.glyph.outline.{stub_box_outline, GlyphOutline, GlyphMetrics}
+use std.skia.feature.glyph.rasterize.{rasterize_outline, rasterize_outline_with_upem}
+use std.skia.feature.glyph.ascii_fallback.{ascii_glyph_advance_x}
+use std.skia.feature.text.text_render_parity.{skia_bitmap_5x7_metrics}
+use std.skia.feature.shaper.script_detect.{Script}
+use std.skia.feature.shaper.shaper.{
+    ShapedRun, ShapedGlyph, ArabicJoinForm, IndicClass,
+    shaped_run_rounded_advances, shaped_run_total_advance_px
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_gradients_text.{
+    ClipRect, ttf_paint_text_aa_clip_range_adv, ttf_measure_text_px_milli
+}
+
+val BUNDLED_FONT: text = "assets/fonts/google-fonts/ofl/nunito/Nunito[wght].ttf"
+
+fn _push_u16(mut out: [u8], v: i64):
+    out.push(((v >> 8) & 255) as u8)
+    out.push((v & 255) as u8)
+
+fn _push_i16(mut out: [u8], v: i64):
+    val u = if v < 0: 65536 + v else: v
+    _push_u16(out, u)
+
+fn _push_u32(mut out: [u8], v: i64):
+    out.push(((v >> 24) & 255) as u8)
+    out.push(((v >> 16) & 255) as u8)
+    out.push(((v >> 8) & 255) as u8)
+    out.push((v & 255) as u8)
+
+fn _push_tag(mut out: [u8], a: i64, b: i64, c: i64, d: i64):
+    out.push(a as u8)
+    out.push(b as u8)
+    out.push(c as u8)
+    out.push(d as u8)
+
+fn _pad4(mut data: [u8]) -> [u8]:
+    while data.len() % 4 != 0:
+        data.push(0u8)
+    data
+
+fn _simple_rect_glyf(x_min: i64, y_min: i64, x_max: i64, y_max: i64) -> [u8]:
+    var g: [u8] = []
+    _push_i16(g, 1)
+    _push_i16(g, x_min)
+    _push_i16(g, y_min)
+    _push_i16(g, x_max)
+    _push_i16(g, y_max)
+    _push_u16(g, 3)
+    _push_u16(g, 0)
+    # 4 on-curve flags with 16-bit signed coordinate deltas
+    g.push(1u8)
+    g.push(1u8)
+    g.push(1u8)
+    g.push(1u8)
+    val dx = x_max - x_min
+    val dy = y_max - y_min
+    _push_i16(g, x_min)
+    _push_i16(g, dx)
+    _push_i16(g, 0)
+    _push_i16(g, -dx)
+    _push_i16(g, y_min)
+    _push_i16(g, 0)
+    _push_i16(g, dy)
+    _push_i16(g, 0)
+    while g.len() % 2 != 0:
+        g.push(0u8)
+    g
+
+# Build a deterministic synthetic SFNT TTF blob (`upem = 1000`, `num_glyphs = 12`):
+# gids:
+#   0: .notdef (adv 500)
+#   1: ' ' (32, adv 280)
+#   2: 'A' (65, adv 722, lsb 40, xMin 40)
+#   3: 'F' (70, adv 611, lsb 50, xMin 50)
+#   4: 'M' (77, adv 833, lsb 180, contour xMin 60 -> intentional lsb != xMin)
+#   5: 'T' (84, adv 611, lsb 30, xMin 30)
+#   6: 'V' (86, adv 722, lsb 40, xMin 40)
+#   7: 'a' (97, adv 556, lsb 40, xMin 40)
+#   8: 'f' (102, adv 333, lsb 40, xMin 40)
+#   9: 'l' (108, adv 278, lsb 50, xMin 50)
+#  10: 'o' (111, adv 556, lsb 40, xMin 40)
+#  11: 'u' (117, adv 556, lsb 45, xMin 45)
+fn _build_parity_sfnt_ttf() -> [u8]:
+    # OS/2 (78 bytes)
+    var os2: [u8] = [0u8; 78]
+    os2[1] = 2u8
+    os2[62] = 0u8
+    os2[63] = 128u8  # USE_TYPO_METRICS
+    # typoAscender = 820, typoDescender = -180, typoLineGap = 80
+    os2[68] = ((820 >> 8) & 255) as u8
+    os2[69] = (820 & 255) as u8
+    val td = 65536 - 180
+    os2[70] = ((td >> 8) & 255) as u8
+    os2[71] = (td & 255) as u8
+    os2[72] = 0u8
+    os2[73] = 80u8
+    os2 = _pad4(os2)
+
+    # cmap format 4: 12 single-char segments + terminator = 13 segments
+    val seg_cps: [i64] = [32, 65, 70, 77, 84, 86, 97, 102, 108, 111, 117, 65535]
+    val seg_gids: [i64] = [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 1]
+    val seg_count = seg_cps.len()
+    val sub_len = 16 + seg_count * 8
+    var cmap: [u8] = []
+    _push_u16(cmap, 0)
+    _push_u16(cmap, 1)
+    _push_u16(cmap, 3)
+    _push_u16(cmap, 1)
+    _push_u32(cmap, 12)
+    _push_u16(cmap, 4)
+    _push_u16(cmap, sub_len)
+    _push_u16(cmap, 0)
+    _push_u16(cmap, seg_count * 2)
+    _push_u16(cmap, 16)
+    _push_u16(cmap, 3)
+    _push_u16(cmap, seg_count * 2 - 16)
+    for cp in seg_cps:
+        _push_u16(cmap, cp)
+    _push_u16(cmap, 0)
+    for cp in seg_cps:
+        _push_u16(cmap, cp)
+    var si: i64 = 0
+    while si < seg_count:
+        val cp = seg_cps[si]
+        val gid = seg_gids[si]
+        val delta = if cp == 65535: 1 else: ((gid - cp) & 65535)
+        _push_u16(cmap, delta)
+        si = si + 1
+    si = 0
+    while si < seg_count:
+        _push_u16(cmap, 0)
+        si = si + 1
+    cmap = _pad4(cmap)
+
+    # glyf + short loca (offsets / 2)
+    var glyf: [u8] = []
+    var loca: [u8] = []
+    val rect_xmins: [i64] = [0, 0, 40, 50, 60, 30, 40, 40, 40, 50, 40, 45]
+    val rect_xmaxs: [i64] = [450, 0, 680, 560, 770, 580, 680, 510, 290, 230, 510, 510]
+    var gi: i64 = 0
+    while gi < 12:
+        _push_u16(loca, glyf.len() / 2)
+        if gi != 1:
+            val g_bytes = _simple_rect_glyf(rect_xmins[gi], 0, rect_xmaxs[gi], 700)
+            for b in g_bytes:
+                glyf.push(b)
+        gi = gi + 1
+    _push_u16(loca, glyf.len() / 2)
+    glyf = _pad4(glyf)
+    loca = _pad4(loca)
+
+    # head (54 bytes, unitsPerEm = 1000, indexToLocFormat = 0)
+    var head: [u8] = [0u8; 54]
+    head[0] = 0u8
+    head[1] = 1u8
+    head[12] = 0x5Fu8
+    head[13] = 0x0Fu8
+    head[14] = 0x3Cu8
+    head[15] = 0xF5u8
+    head[18] = ((1000 >> 8) & 255) as u8
+    head[19] = (1000 & 255) as u8
+    head = _pad4(head)
+
+    # hhea (36 bytes: ascent = 850, descent = -200, lineGap = 50, numberOfHMetrics = 12)
+    var hhea: [u8] = []
+    _push_u32(hhea, 65536)
+    _push_i16(hhea, 850)
+    _push_i16(hhea, -200)
+    _push_i16(hhea, 50)
+    _push_u16(hhea, 833)
+    var zi: i64 = 0
+    while zi < 11:
+        _push_u16(hhea, 0)
+        zi = zi + 1
+    _push_u16(hhea, 12)
+    hhea = _pad4(hhea)
+
+    # hmtx (12 entries * 4 bytes = 48 bytes; gid 4 'M' has lsb 180 != glyf xMin 60)
+    val advs_fu: [i64] = [500, 280, 722, 611, 833, 611, 722, 556, 333, 278, 556, 556]
+    val lsbs_fu: [i64] = [0, 0, 40, 50, 180, 30, 40, 40, 40, 50, 40, 45]
+    var hmtx: [u8] = []
+    gi = 0
+    while gi < 12:
+        _push_u16(hmtx, advs_fu[gi])
+        _push_i16(hmtx, lsbs_fu[gi])
+        gi = gi + 1
+    hmtx = _pad4(hmtx)
+
+    # kern (MS header v0, 1 format-0 horizontal subtable, 4 sorted pairs)
+    # Pairs: (2,6) "AV" = -120, (4,10) "Mo" = -45, (5,10) "To" = -90, (8,9) "fl" = -35
+    var kern: [u8] = []
+    _push_u16(kern, 0)
+    _push_u16(kern, 1)
+    _push_u16(kern, 0)
+    _push_u16(kern, 6 + 8 + 4 * 6)
+    _push_u16(kern, 1)  # format 0 high byte, horizontal bit 0 set
+    _push_u16(kern, 4)
+    _push_u16(kern, 24)
+    _push_u16(kern, 2)
+    _push_u16(kern, 0)
+    _push_u16(kern, 2)
+    _push_u16(kern, 6)
+    _push_i16(kern, -120)
+    _push_u16(kern, 4)
+    _push_u16(kern, 10)
+    _push_i16(kern, -45)
+    _push_u16(kern, 5)
+    _push_u16(kern, 10)
+    _push_i16(kern, -90)
+    _push_u16(kern, 8)
+    _push_u16(kern, 9)
+    _push_i16(kern, -35)
+    kern = _pad4(kern)
+
+    # maxp (32 bytes, numGlyphs = 12)
+    var maxp: [u8] = [0u8; 32]
+    maxp[1] = 1u8
+    maxp[4] = 0u8
+    maxp[5] = 12u8
+    maxp = _pad4(maxp)
+
+    # Assemble sorted table directory: OS/2, cmap, glyf, head, hhea, hmtx, kern, loca, maxp
+    val header_size: i64 = 12 + 9 * 16
+    var offset: i64 = header_size
+    val off_os2 = offset; offset = offset + os2.len()
+    val off_cmap = offset; offset = offset + cmap.len()
+    val off_glyf = offset; offset = offset + glyf.len()
+    val off_head = offset; offset = offset + head.len()
+    val off_hhea = offset; offset = offset + hhea.len()
+    val off_hmtx = offset; offset = offset + hmtx.len()
+    val off_kern = offset; offset = offset + kern.len()
+    val off_loca = offset; offset = offset + loca.len()
+    val off_maxp = offset
+
+    var blob: [u8] = []
+    _push_u32(blob, 65536)
+    _push_u16(blob, 9)
+    _push_u16(blob, 128)
+    _push_u16(blob, 3)
+    _push_u16(blob, 16)
+
+    val tags_a: [i64] = [79, 99, 103, 104, 104, 104, 107, 108, 109]
+    val tags_b: [i64] = [83, 109, 108, 101, 104, 109, 101, 111, 97]
+    val tags_c: [i64] = [47, 97, 121, 97, 101, 116, 114, 99, 120]
+    val tags_d: [i64] = [50, 112, 102, 100, 97, 120, 110, 97, 112]
+    val offs: [i64] = [off_os2, off_cmap, off_glyf, off_head, off_hhea, off_hmtx, off_kern, off_loca, off_maxp]
+    val lens: [i64] = [os2.len(), cmap.len(), glyf.len(), head.len(), hhea.len(), hmtx.len(), kern.len(), loca.len(), maxp.len()]
+
+    var ti: i64 = 0
+    while ti < 9:
+        _push_tag(blob, tags_a[ti], tags_b[ti], tags_c[ti], tags_d[ti])
+        _push_u32(blob, 0)
+        _push_u32(blob, offs[ti])
+        _push_u32(blob, lens[ti])
+        ti = ti + 1
+
+    for b in os2: blob.push(b)
+    for b in cmap: blob.push(b)
+    for b in glyf: blob.push(b)
+    for b in head: blob.push(b)
+    for b in hhea: blob.push(b)
+    for b in hmtx: blob.push(b)
+    for b in kern: blob.push(b)
+    for b in loca: blob.push(b)
+    for b in maxp: blob.push(b)
+    blob
+
+fn _abs_i64(v: i64) -> i64:
+    if v < 0: 0 - v else: v
+
+fn _abs_f64(v: f64) -> f64:
+    if v < 0.0: 0.0 - v else: v
+
+fn _table_bytes(blob: [u8], off: i64, len: i64) -> [u8]:
+    var out: [u8] = []
+    var i: i64 = 0
+    while i < len and off + i < blob.len():
+        out.push(blob[off + i])
+        i = i + 1
+    out
+
+describe "Simple2D vs Skia vs Browser TTF font rendering parity":
+
+    it "maps fractional font_size_milli to Chrome 26.6 cache-key size and splits quarter phases":
+        step("Verify Chrome 26.6 fractional size parity (18.715/18.718/18.72 vs 18.710 and 13.333)")
+        val m_18715 = sfnt_font_cache_key_milli_px(18715)
+        val m_18718 = sfnt_font_cache_key_milli_px(18718)
+        val m_18720 = sfnt_font_cache_key_milli_px(18720)
+        val m_18710 = sfnt_font_cache_key_milli_px(18710)
+        expect(m_18715).to_equal(m_18720)
+        expect(m_18718).to_equal(m_18720)
+        expect(m_18710 < m_18720).to_equal(true)
+        expect(sfnt_font_cache_key_milli_px(16000)).to_equal(16000)
+        val m_13333 = sfnt_font_cache_key_milli_px(13333)
+        expect(m_13333 > 13000).to_equal(true)
+        expect(m_13333 < 14000).to_equal(true)
+
+        step("Verify quarter-phase pen split matches Chrome tie-up rounding")
+        expect(sfnt_subpixel_pen_split_milli(10125)).to_equal([10, 1])
+        expect(sfnt_subpixel_pen_split_milli(10700)).to_equal([10, 3])
+        expect(sfnt_subpixel_pen_split_milli(10900)).to_equal([11, 0])
+        expect(sfnt_subpixel_pen_split_milli(-300)).to_equal([-1, 3])
+
+    it "applies fractional-size kerning pairs AV, To, Mo, fl across sfnt_kern and Skia":
+        val blob = _build_parity_sfnt_ttf()
+        val kern_info = sfnt_blob_kern_face_info(blob)
+        expect(kern_info.len() >= 4).to_equal(true)
+
+        step("Verify symmetric fractional kerning at 13.333px (13333 milli)")
+        val k_av_13 = sfnt_kern_face_pair_size_milli_px(blob, kern_info, 2, 6, 13333)
+        val k_to_13 = sfnt_kern_face_pair_size_milli_px(blob, kern_info, 5, 10, 13333)
+        val k_mo_13 = sfnt_kern_face_pair_size_milli_px(blob, kern_info, 4, 10, 13333)
+        val k_fl_13 = sfnt_kern_face_pair_size_milli_px(blob, kern_info, 8, 9, 13333)
+        expect(k_av_13).to_equal(-1600)
+        expect(k_to_13).to_equal(-1200)
+        expect(k_mo_13).to_equal(-600)
+        expect(k_fl_13).to_equal(-467)
+
+        step("Verify kerned Skia SFNT measurement narrows AVToMofl relative to unkerned")
+        val cps = text_codepoints("AVToMofl")
+        val raw_advs = sfnt_glyf_measure_codepoint_advances(blob, cps, 13.333)
+        val kern_advs = sfnt_glyf_measure_codepoint_advances_kerned(blob, cps, 13.333, true)
+        expect(kern_advs.len()).to_equal(cps.len())
+        var raw_sum = 0.0
+        var kern_sum = 0.0
+        for a in raw_advs: raw_sum = raw_sum + a
+        for a in kern_advs: kern_sum = kern_sum + a
+        # Pairs AV (-1.6), To (-1.2), Mo (-0.6), fl (-0.467) => delta ~ -3.867 px
+        val delta = raw_sum - kern_sum
+        expect(delta > 3.5).to_equal(true)
+        expect(delta < 4.2).to_equal(true)
+
+    it "distinguishes hmtx.lsb vs glyf.xMin contour origin cleanly":
+        val blob = _build_parity_sfnt_ttf()
+        val font = parse_offset_table(blob).?
+        var meta: [i64] = [0; 20]
+        # gid 4 ('M'): hmtx.lsb = 180 (180*20/1000 = 3.6 -> 4), contour xMin = 60 (60*20/1000 = 1.2 -> 1)
+        sfnt_measure_glyph_into(blob, SFNT_GLYPH_SELECTOR_INDEX, 4, 20, meta)
+        expect(meta[7]).to_equal(310031)
+        expect(meta[3]).to_equal(4)
+        expect(meta[19]).to_equal(1)
+
+        val sk_g = sfnt_rasterize_glyph_baseline_aligned(font, 4u32, 20.0, 0.0).?
+        expect(sk_g.x0_px as i64).to_equal(meta[19])
+
+    it "aligns Skia metrics line-box, UPM outline scaling, and shaped run rounding":
+        val blob = _build_parity_sfnt_ttf()
+        val font = parse_offset_table(blob).?
+        val hhea_rec = find_table(font, 1751672161u32).?
+        val os2_rec = find_table(font, 0x4F532F32u32).?
+        val hhea_tbl = _table_bytes(font.blob, hhea_rec.offset as i64, hhea_rec.length as i64)
+        val os2_tbl = _table_bytes(font.blob, os2_rec.offset as i64, os2_rec.length as i64)
+        val hhea_opt = parse_hhea(hhea_tbl)
+        val os2_opt = parse_os2(os2_tbl)
+        expect(hhea_opt != None).to_equal(true)
+        expect(os2_opt != None).to_equal(true)
+        val units = font_metrics_line_box_units(hhea_opt.?, os2_opt)
+        expect(units).to_equal([820, 180, 80])
+        expect(font_metrics_scale_round_px(units[0], 13333, 1000)).to_equal(11)
+
+        step("Verify rasterize_outline_with_upem avoids bloating small UPM glyphs")
+        val small_outline = stub_box_outline(10u32, 500.0, 500.0)
+        val default_bmp = rasterize_outline(small_outline, 20.0)
+        val upem_bmp = rasterize_outline_with_upem(small_outline, 20.0, 1000)
+        expect(default_bmp.width).to_equal(20)
+        expect(upem_bmp.width).to_equal(10)
+        expect(upem_bmp.height).to_equal(10)
+
+        step("Verify shaped_run_total_advance_px rounds cumulative float advance instead of truncating")
+        val g0 = ShapedGlyph(glyph_id: 4u32, source_index: 0, cluster: 0, x_advance: 13.4, y_advance: 0.0,
+            x_offset: 0.0, y_offset: 0.0, join_form: ArabicJoinForm.Isolated, indic_class: IndicClass.Normal)
+        val g1 = ShapedGlyph(glyph_id: 10u32, source_index: 1, cluster: 1, x_advance: 8.4, y_advance: 0.0,
+            x_offset: 0.0, y_offset: 0.0, join_form: ArabicJoinForm.Isolated, indic_class: IndicClass.Normal)
+        val g2 = ShapedGlyph(glyph_id: 11u32, source_index: 2, cluster: 2, x_advance: 7.9, y_advance: 0.0,
+            x_offset: 0.0, y_offset: 0.0, join_form: ArabicJoinForm.Isolated, indic_class: IndicClass.Normal)
+        val srun = ShapedRun(script: Script.Latin, language: "en",
+            glyph_ids: [4u32, 10u32, 11u32],
+            positions: [SkPoint(x: 0.0, y: 0.0), SkPoint(x: 13.4, y: 0.0), SkPoint(x: 21.8, y: 0.0)],
+            font_handle: 1, font_generation: 1,
+            glyph_indices_valid: true, substitution_complete: true, positioning_complete: true,
+            is_rtl: false, glyphs: [g0, g1, g2])
+        # Sum = 29.7 -> rounded 30 (truncation would give 29)
+        expect(shaped_run_total_advance_px(srun)).to_equal(30)
+        expect(shaped_run_rounded_advances(srun)).to_equal([13, 9, 8])
+
+    it "matches Engine2D 5x7 spaced fallback with Skia 5x7 metrics and decodes UTF-8 by codepoint":
+        step("Verify legacy glyph_advance stays 5*scale while spaced matches Skia 6*scale")
+        expect(glyph_advance(2)).to_equal(10)
+        expect(glyph_spaced_advance(2)).to_equal(12)
+        expect(ascii_glyph_advance_x(65)).to_equal(6)
+        val sk_m = skia_bitmap_5x7_metrics("Module", 14.0)
+        # scale = 2, advance = 12 => 6 * 12 = 72 px
+        expect(sk_m.advance as i64).to_equal(72)
+
+        step("Verify render_text_spaced_to_buffer leaves column 5 (scale 1) clear between adjacent 'MM' glyphs")
+        var buf = [0u32; 24 * 12]
+        buf = render_text_spaced_to_buffer(buf, 24, 12, 0, 0, "MM", 0xFFFFFFFFu32, 7)
+        var col5_lit = 0
+        var col6_lit = 0
+        var r = 0
+        while r < 7:
+            if buf[r * 24 + 5] != 0u32: col5_lit = col5_lit + 1
+            if buf[r * 24 + 6] != 0u32: col6_lit = col6_lit + 1
+            r = r + 1
+        expect(col5_lit).to_equal(0)
+        expect(col6_lit > 0).to_equal(true)
+
+        step("Verify SoftwareBackend.draw_text_spaced handles multi-byte UTF-8 without trailing over-advance")
+        var sw = SoftwareBackend.create()
+        sw.init(40, 12)
+        sw.clear(0u32)
+        sw.draw_text_spaced(0, 0, "AéB", 0xFFFFFFFFu32, 7)
+        val sw_px = sw.read_pixels()
+        # 3 codepoints * 6px = 18px (columns >= 18 must be untouched background)
+        var tail_lit = 0
+        var y = 0
+        while y < 7:
+            var x = 18
+            while x < 40:
+                if sw_px[y * 40 + x] != 0u32:
+                    tail_lit = tail_lit + 1
+                x = x + 1
+            y = y + 1
+        expect(tail_lit).to_equal(0)
+
+    it "keeps bundled TTF run width within <=1px across Skia, FontRenderer, Engine2DFontOwner, and Browser TTF":
+        if not file_exists(BUNDLED_FONT):
+            return
+        val blob = file_read_bytes(BUNDLED_FONT)
+        val sample = "Module floated AV To"
+        val size_px = 16
+
+        step("Measure Skia kerned SFNT width")
+        val tf = sk_typeface_from_attached_font("Nunito", sk_font_style_normal(), BUNDLED_FONT, 0)
+        val sk_font = sk_font_new(tf, size_px.to_f64())
+        val sk_w = sk_font.measure_text_kerned(sample)
+        val sk_w_px = (sk_w + 0.5).floor().to_i64()
+
+        step("Measure FontRenderer & Engine2DFontOwner width")
+        var fr = FontRenderer.new()
+        expect(fr.try_load_runtime_ttf(BUNDLED_FONT)).to_equal(true)
+        val fr_w_milli = fr.measure_text_width_milli(sample, size_px)
+        val fr_w_px = (fr_w_milli + 500) / 1000
+        var owner = engine2d_font_owner_store(Engine2DFontOwner.new(), fr)
+        val e2d_advs = engine2d_font_owner_measure_advances(owner, sample, size_px)
+        expect(e2d_advs.len()).to_equal(text_codepoints(sample).len())
+        val e2d_w_milli = engine2d_font_owner_measure_width_milli(owner, sample, size_px)
+        expect(e2d_w_milli).to_equal(fr_w_milli)
+
+        step("Measure Browser TTF ttf_measure_text_px_milli & fractional render non-empty ink")
+        val br_w_px = ttf_measure_text_px_milli(sample, 0, sample.byte_len(), size_px, 16000, BUNDLED_FONT, "", false, false) as i64
+        expect(_abs_i64(sk_w_px - fr_w_px) <= 1).to_equal(true)
+        expect(_abs_i64(br_w_px - fr_w_px) <= 1).to_equal(true)
+        expect(_abs_i64(br_w_px - sk_w_px) <= 1).to_equal(true)
+
+        step("Verify fractional synthetic bold TTF painting places ink without trailing edge bleed beyond measured width")
+        val bold_w = ttf_measure_text_px_milli("Module", 0, 6, 13, 13333, BUNDLED_FONT, "", false, true)
+        expect(bold_w > 20).to_equal(true)
+        val fw: i32 = 160
+        val fh: i32 = 32
+        var fb: [u32] = [0xFFFFFFFFu32; fw * fh]
+        fb = ttf_paint_text_aa_clip_range_adv(
+            fb, fw, fh, 10, 22, "Module", 0, 6, 0xFF000000u32,
+            13, BUNDLED_FONT, "", false, true, ClipRect(x0: 0, y0: 0, x1: fw, y1: fh), [], 13333
+        )
+        var max_ink_x = -1
+        var py: i32 = 0
+        while py < fh:
+            var px: i32 = 0
+            while px < fw:
+                if fb[py * fw + px] != 0xFFFFFFFFu32:
+                    if px > max_ink_x:
+                        max_ink_x = px
+                px = px + 1
+            py = py + 1
+        expect(max_ink_x >= 10 + bold_w - 4).to_equal(true)
+        expect(max_ink_x <= 10 + bold_w + 2).to_equal(true)

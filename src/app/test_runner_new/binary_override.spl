@@ -1,0 +1,108 @@
+"""Binary/backend/toolchain selector bypass for the light-daemon lane.
+
+Importable on purpose, for the same reason `daemon_backlog.spl` and
+`no_examples_gate.spl` are: `test_runner_client.spl` is a standalone script
+with a bare `fn main` and cannot be imported by a spec (documented fn-main
+collision), so the DECISION lives here where a unit spec can pin it and the
+client keeps only the I/O.
+
+WHY THIS BYPASS EXISTS
+
+Bug: light_daemon_cannot_serve_pinned_native_exec_2026-11-03. The light
+daemon's v2 request (light_protocol.spl) carries a path, expiry, an
+environment digest and a generation, but NO binary and no execution mode,
+and the daemon is pinned for life to the binary that spawned it with its
+environment frozen at spawn time. A run that pins WHICH binary, backend or
+toolchain the spec exercises (the selector family below) therefore can never
+be served by the light daemon. Recorded decision: KEEP the documented bypass
+(pin: test/01_unit/app/test_daemon/light_daemon_pinned_bypass_spec.spl) —
+the client diverts every pinned run to the direct lane, where the caller's
+own environment reaches the spec. The sibling session daemon solves the same
+problem with an explicit native profile (src/app/test_daemon/
+native_profile.spl, PR #5407); the light lane deliberately does not.
+
+# Environment variables by which a caller selects WHICH binary, backend or
+# toolchain a spec exercises. These are the names specs resolve in a
+# `contract_binary()` / `simple_binary()` helper; see
+# test/01_unit/lib/mem_infra/guard_backend_parity_spec.spl and its siblings.
+# None of them is set in a normal run, so this list is inert on the hot path and
+# costs the daemon lane nothing — it only diverts the runs that actually asked
+# for an override.
+#
+# The list must stay CLOSED over the family. The daemon freezes its environment
+# at whichever invocation started it, so any selector NOT named here is silently
+# replayed from a previous run and the spec exercises the default target while
+# reporting the selected one's name — a sabotage check then passes for the wrong
+# reason. Measured 2026-08-04 on the Rust seed (`bin/simple`; bootstrap-identity
+# probe = 0), with one daemon alive across all three runs and
+# test/fixtures/mem_infra/env_selector_probe_spec.spl as the target:
+#
+#   run 1: <six sibling selectors>=BRAVO    body observed BRAVO   (this run
+#                                           STARTED the daemon — the trap: a
+#                                           single run always looks correct)
+#   run 2: same six =CHARLIE                body observed BRAVO   <- DEAD
+#   run 3: same six =DELTA + SIMPLE_TEST_BINARY=DELTA
+#                                           body observed DELTA   <- bypass works
+#
+# Run 3 differs from run 2 only in naming an allowlisted variable, so membership
+# in this list is exactly what makes a selector live.
+"""
+
+use std.nogc_sync_mut.io.env_ops.{env_get}
+
+fn binary_override_selector_vars() -> [text]:
+    ["SIMPLE_TEST_BINARY", "SIMPLE_BINARY", "SIMPLE_BIN",
+     "SIMPLE_SEED_BINARY", "SIMPLE_SPEC_COMPILER",
+     # sibling selectors, added 2026-08-04 after the probe above
+     "CPU_SIMD_RENDER_SCALE_TEST_SIMPLE_BIN",
+     "SIMPLEOS_QEMU_SIMPLE_BIN", "SIMPLEOS_DBFS_BOOT_QEMU_EXEC",
+     "SIMPLEOS_QEMU_SSH_TOOLCHAIN_LIVE",
+     "SIMPLE_HOSTED_BROWSER_EXECUTABLE", "DEVHUB_MAIL_BIN",
+     "T32_PYTHON_BINARY", "T32_BACKEND_PREFERENCE", "LLVM_BUILD",
+     "SIMPLE_MMU_DIRECT_BACKEND", "SIMPLE_MMU_DEVICE_INITIATED_BACKEND",
+     "SIMPLE_WEB_GPU_PAINT_MEASURE_BACKEND", "SIMPLE_NATIVE_BUILD_TARGET",
+     "SIMPLE_ENGINE2D_RUNNER_MODE", "SIMPLE_ENGINE2D_FULL_MODE",
+     # the GPU-compiler provenance family travels together: the *_PATH/PRODUCER
+     # names select the artifact, the *_SHA256 names are the expected values
+     # checked against it, and a half-frozen pair is worse than a frozen one.
+     "SIMPLE_GPU_COMPILER_PRODUCER", "SIMPLE_GPU_COMPILER_PRODUCER_SHA256",
+     "SIMPLE_GPU_COMPILER_RUNTIME_PATH", "SIMPLE_GPU_COMPILER_RUNTIME_SHA256",
+     "SIMPLE_GPU_COMPILER_BACKFILL_SHA256",
+     # PERF-7, 2026-09-13: a perf spec resolves the interpreter it measures
+     # from SIMPLE_PERF_SELF_BIN. It is a binary selector exactly like the
+     # names above, and it was missing here, so a daemon-served run answered
+     # from the daemon's FROZEN environment: a lane asked for the BASE seed,
+     # got the CANDIDATE, and reported 10/10 green for a spec that is RED on
+     # base. Caught only because the spec prints the binary it resolved.
+     "SIMPLE_PERF_SELF_BIN"]
+
+# The decision, pure: which selectors are pinned, given (name, value) pairs.
+# Order follows the pair input; the env wrapper below supplies family order
+# so the bypass message is deterministic.
+# A selector is "set" when its value is non-empty — "" is the only spelling
+# of "not set" across every consumer of these names.
+fn binary_override_active_selectors(pairs: [(text, text)]) -> [text]:
+    var active: [text] = []
+    for pair in pairs:
+        val (name, value) = pair
+        if value != "":
+            active.push(name)
+    active
+
+fn binary_override_env_selectors() -> [text]:
+    var pairs: [(text, text)] = []
+    for name in binary_override_selector_vars():
+        pairs.push((name, env_get(name) ?? ""))
+    binary_override_active_selectors(pairs)
+
+fn has_binary_override() -> bool:
+    binary_override_env_selectors().len() > 0
+
+fn binary_override_names() -> text:
+    binary_override_env_selectors().join(", ")
+
+export binary_override_selector_vars
+export binary_override_active_selectors
+export binary_override_env_selectors
+export has_binary_override
+export binary_override_names

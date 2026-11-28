@@ -1005,6 +1005,18 @@ pub(crate) fn call_method_on_value_with_args(
             // Not found — fall through to trait/UFCS/error below.
         }
 
+        // Read-only dict methods on a chained receiver
+        // (`plan.unwrap().contains_key("--confirm")`). Mirrors the read arms of
+        // `handle_dict_methods` (interpreter_method/collections.rs) over the
+        // already-evaluated arguments; anything else falls through to the
+        // trait/UFCS/error path below.
+        // Bug: seed_nested_call_dict_methods_missing_2026-11-28.
+        Value::Dict(map) | Value::FrozenDict(map) => {
+            if let Some(result) = crate::interpreter::dict_read_method_on_values(map, method, _args)? {
+                return Ok(result);
+            }
+        }
+
         _ => {}
     }
 
@@ -1496,6 +1508,39 @@ mod tests {
         );
         assert_eq!(call(normalized, "rfind", &[Value::text(":".to_string())]), Value::Int(-1));
         assert_eq!(call(Value::text("café/a/b".to_string()), "rfind", &[Value::text("/".to_string())]), Value::Int(7));
+    }
+
+    /// `plan.unwrap().contains_key(k)`: a dict in chained position used to
+    /// fail "method 'contains_key' not found on value of type dict in nested
+    /// call context" (seed_nested_call_dict_methods_missing_2026-11-28).
+    #[test]
+    fn nested_dict_read_methods_dispatch_on_temporary_dict() {
+        let mut env = Env::new();
+        let mut functions = HashMap::new();
+        let mut classes = HashMap::new();
+        let enums = HashMap::new();
+        let impl_methods = HashMap::new();
+        let mut map = crate::value::DictMap::new();
+        map.insert("a".to_string(), Value::text("1".to_string()));
+        for dict in [Value::Dict(Arc::new(map.clone())), Value::FrozenDict(Arc::new(map))] {
+            let mut call = |method: &str, args: &[Value]| {
+                call_method_on_value(dict.clone(), method, args, &mut env, &mut functions, &mut classes, &enums, &impl_methods)
+                    .expect("nested dict read method should dispatch")
+            };
+            let a = Value::text("a".to_string());
+            let z = Value::text("z".to_string());
+            for m in ["contains_key", "has", "contains"] {
+                assert_eq!(call(m, &[a.clone()]), Value::Bool(true), "{m}");
+                assert_eq!(call(m, &[z.clone()]), Value::Bool(false), "{m}");
+            }
+            assert_eq!(call("len", &[]), Value::Int(1));
+            assert_eq!(call("is_empty", &[]), Value::Bool(false));
+            assert_eq!(call("get", &[a.clone()]), Value::text("1".to_string()));
+            assert_eq!(call("get", &[z.clone()]), Value::Nil);
+            assert_eq!(call("get_or", &[z, Value::Int(7)]), Value::Int(7));
+            assert_eq!(call("keys", &[]), Value::array(vec![a]));
+            assert_eq!(call("values", &[]), Value::array(vec![Value::text("1".to_string())]));
+        }
     }
 
     #[test]

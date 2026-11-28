@@ -1,0 +1,151 @@
+# @req REQ-SSPEC-COMPILER
+# @cover src/compiler/50.mir/mir_lowering_stmts.spl
+# @cover src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl
+# @cover src/lib/scv/compile_snapshot.spl
+# @cover src/lib/scv/compile_snapshot_retention_v1.spl
+#
+# Regression: flat tagged-RuntimeValue optionals (`text.parse_i64()` /
+# `text.parse_f64()`, which return tagged scalar values or RT_NIL=3 without an
+# Option box) must normalize into canonical enum-id-1 Option handles across:
+# - untyped `if` / `if-elif` / `match` joins (`join_untyped_optional_arms`),
+# - mixed canonical-handle + flat-RV joins (e.g. `Some(42)` vs `"42".parse_i64()`),
+# - `ensure_option_handle` when flowing into typed `T?` bindings/returns,
+# - scalar `==`, plain-scalar sinks (`val x: i64 = v`), `!`, `.unwrap()`, and `??`.
+
+use std.spec.*
+use std.io_runtime.{file_read}
+use std.scv.compile_snapshot_retention_v1.{scv_compile_snapshot_recover_v1}
+use app.io.mod.{dir_create}
+use app.io.file_ops.{path_absolute}
+use std.nogc_sync_mut.io_runtime.{dir_exists, dir_remove, getpid}
+
+fn join_if_bang(flag: bool, raw: text) -> i64:
+    val v = if flag: raw.parse_i64() else: nil
+    v!
+
+fn join_if_unwrap(flag: bool, raw: text) -> i64:
+    val v = if flag: raw.parse_i64() else: nil
+    v.unwrap()
+
+fn join_if_coalesce(flag: bool, raw: text, fallback: i64) -> i64:
+    val v = if flag: raw.parse_i64() else: nil
+    v ?? fallback
+
+fn join_elif_bang(mode: i64, raw: text) -> i64:
+    val v = if mode == 1:
+        raw.parse_i64()
+    elif mode == 2:
+        "84".parse_i64()
+    else:
+        nil
+    v!
+
+fn join_elif_coalesce(mode: i64, raw: text, fallback: i64) -> i64:
+    val v = if mode == 1:
+        raw.parse_i64()
+    elif mode == 2:
+        "84".parse_i64()
+    else:
+        nil
+    v ?? fallback
+
+fn join_match_unwrap(mode: i64, raw: text) -> i64:
+    val v = match mode:
+        case 1: raw.parse_i64()
+        case _: nil
+    v.unwrap()
+
+fn join_match_is_nil(mode: i64, raw: text) -> bool:
+    val v = match mode:
+        case 1: raw.parse_i64()
+        case _: nil
+    v == nil
+
+fn join_mixed_handle_or_parse(use_some: bool, raw: text) -> i64?:
+    val v = if use_some: Some(42) else: raw.parse_i64()
+    v
+
+fn join_parse_f64_bang(flag: bool, raw: text) -> f64:
+    val v = if flag: raw.parse_f64() else: nil
+    v!
+
+fn join_parse_f64_coalesce(flag: bool, raw: text, fallback: f64) -> f64:
+    val v = if flag: raw.parse_f64() else: nil
+    v ?? fallback
+
+fn flow_direct_parse_to_opt(raw: text) -> i64?:
+    val d = raw.parse_i64()
+    val w: i64? = d
+    w
+
+fn flow_joined_parse_to_opt(flag: bool, raw: text) -> i64?:
+    val v = if flag: raw.parse_i64() else: nil
+    val w: i64? = v
+    w
+
+fn take_opt_int(v: i64?) -> i64:
+    v ?? -1
+
+describe "normalized flat RuntimeValue optionals across joins, T? sinks, and SCV recover":
+    it "unwraps non-nil and boundary parse_i64 across if-else, elif, and match without leaking n << 3":
+        expect(join_if_bang(true, "12345")).to_equal(12345)
+        expect(join_if_unwrap(true, "12345")).to_equal(12345)
+        expect(join_if_coalesce(true, "12345", 0)).to_equal(12345)
+        expect(join_if_coalesce(false, "12345", 99)).to_equal(99)
+
+        expect(join_if_bang(true, "0")).to_equal(0)
+        expect(join_if_bang(true, "3")).to_equal(3)
+        expect(join_if_coalesce(true, "bad", 77)).to_equal(77)
+
+        expect(join_elif_bang(1, "42")).to_equal(42)
+        expect(join_elif_coalesce(1, "42", -1)).to_equal(42)
+        expect(join_elif_coalesce(0, "42", 77)).to_equal(77)
+        expect(join_match_unwrap(1, "42")).to_equal(42)
+        expect(join_match_is_nil(0, "42")).to_equal(true)
+
+    it "normalizes mixed Some(T) + parse_i64 joins, parse_f64 joins, scalar eq, and T? sinks":
+        val m_some = join_mixed_handle_or_parse(true, "19")
+        val m_parse = join_mixed_handle_or_parse(false, "19")
+        val m_bad = join_mixed_handle_or_parse(false, "bad")
+        expect(m_some!).to_equal(42)
+        expect(m_parse!).to_equal(19)
+        expect(m_parse.unwrap()).to_equal(19)
+        expect(m_parse == 19).to_equal(true)
+        expect(m_parse == Some(19)).to_equal(true)
+        expect(m_bad == nil).to_equal(true)
+        expect(m_bad ?? 55).to_equal(55)
+
+        expect(join_parse_f64_bang(true, "1.5") > 1.49 and join_parse_f64_bang(true, "1.5") < 1.51).to_equal(true)
+        expect(join_parse_f64_coalesce(false, "1.5", 2.5) > 2.49 and join_parse_f64_coalesce(false, "1.5", 2.5) < 2.51).to_equal(true)
+
+        val d_opt = flow_direct_parse_to_opt("77")
+        val j_opt = flow_joined_parse_to_opt(true, "88")
+        val j_nil = flow_joined_parse_to_opt(false, "88")
+        expect(d_opt!).to_equal(77)
+        expect(take_opt_int(d_opt)).to_equal(77)
+        expect(j_opt!).to_equal(88)
+        expect(j_opt == 88).to_equal(true)
+        expect(j_nil == nil).to_equal(true)
+        val plain: i64 = j_opt
+        expect(plain).to_equal(88)
+
+    it "preserves current PID .tmp staging dir in scv_compile_snapshot_recover_v1 and runs recover before secure_temp_dir_raw":
+        val pid = getpid()
+        val cache = path_absolute("build/test-artifacts/scv-recover-self-{pid}").replace("\\", "/")
+        dir_remove(cache, true)
+        val live_dir = "{cache}/snapshots/.tmp.{pid}.live"
+        val dead_dir = "{cache}/snapshots/.tmp.99999999.stale"
+        expect(dir_create(live_dir, true)).to_equal(true)
+        expect(dir_create(dead_dir, true)).to_equal(true)
+
+        val removed = scv_compile_snapshot_recover_v1(cache)
+        expect(removed).to_equal(1)
+        expect(dir_exists(live_dir)).to_equal(true)
+        expect(dir_exists(dead_dir)).to_equal(false)
+        dir_remove(cache, true)
+
+        val snap_src = file_read("src/lib/scv/compile_snapshot.spl")
+        val rec_pos = snap_src.find("scv_compile_snapshot_recover_v1(owned_cache_root)") ?? -1
+        val tmp_pos = snap_src.find("secure_temp_dir_raw(staging_parent") ?? -1
+        expect(rec_pos >= 0).to_equal(true)
+        expect(tmp_pos > rec_pos).to_equal(true)

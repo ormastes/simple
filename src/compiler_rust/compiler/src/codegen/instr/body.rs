@@ -401,7 +401,16 @@ pub(crate) fn build_vreg_types(
                             // the result VReg is untyped and a directly-printed
                             // `sqrt(16.0)` renders the float as an integer.
                             // Emitted by mir/lower/lowering_expr_builtin.rs
-                            // (`lower_libm_math`, Defect B).
+                            // (`lower_libm_math`, Defect B). The rest of the
+                            // f64-returning family (sin/cos/tan/...) is stamped
+                            // by the RUNTIME_FUNCS fallback below the receiver-
+                            // polymorphic block: engine wrappers call
+                            // `rt_math_sin`/`rt_math_cos` directly, and an
+                            // unstamped f64 result combined with a float
+                            // operand in one expression is read as an integer
+                            // word by the BinOp float path (fcvt_from_sint over
+                            // the f64 bit pattern) — the renderer half of
+                            // jit_class_array_field_store_write_lost_2026-11-27.
                             "rt_math_sqrt" | "rt_math_floor" | "rt_math_ceil" | "rt_math_pow" | "rt_math_round" => {
                                 Some(TypeId::F64)
                             }
@@ -462,6 +471,19 @@ pub(crate) fn build_vreg_types(
                                 }
                             }
                             _ => None,
+                        });
+                        // RUNTIME_FUNCS fallback (see the comment above the
+                        // `let ty = match base` block): stamp any runtime
+                        // helper whose declared signature returns exactly one
+                        // f64, covering the libm family the explicit arms do
+                        // not name (rt_math_sin/cos/tan/exp/log/...).
+                        let ty = ty.or_else(|| {
+                            match crate::codegen::runtime_sffi::spec_for(base) {
+                                Some(spec) if spec.returns.len() == 1 && spec.returns[0] == types::F64 => {
+                                    Some(TypeId::F64)
+                                }
+                                _ => None,
+                            }
                         });
                         if let Some(ty) = ty {
                             types_map.insert(*d, ty);

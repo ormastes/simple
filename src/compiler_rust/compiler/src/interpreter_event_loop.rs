@@ -628,30 +628,42 @@ pub fn rt_event_loop_poll_interp(args: &[Value]) -> Result<Value, CompileError> 
     let max_events = args.get(1).and_then(|v| v.as_int().ok()).unwrap_or(64);
     let timeout_ms = args.get(2).and_then(|v| v.as_int().ok()).unwrap_or(-1);
     let fds = platform::poll(loop_fd, max_events, timeout_ms);
-    // Contract: `extern fn rt_event_loop_poll(...) -> [i64]` — a flat
-    // (fd, ready, token) triple array, same as the native runtime and the
-    // rt_kqueue_poll/rt_iocp_poll interp shims below. This shim used to
-    // return Int(count) (an obsolete count+get_fd protocol), which surfaced
-    // in .spl as `raw` being i64 0 so EventLoop.poll's `raw.len()` died with
-    // "method `len` not found on type `i64`" (see
-    // doc/08_tracking/bug/interp_empty_event_array_result_match_erasure_2026-07-21.md).
-    // LAST_POLL_RESULTS is still populated so rt_event_loop_poll_get_fd
-    // keeps working for any remaining old-protocol caller.
-    LAST_POLL_RESULTS.with(|r| *r.borrow_mut() = fds.clone());
-    Ok(Value::array(fds))
+    // Contract: `extern fn rt_event_loop_poll(...) -> i64` — the ready-event
+    // COUNT, identical to the native runtime (runtime_native.c, net.rs) and the
+    // codegen spec. Each event's fd is read back with rt_event_loop_poll_get_fd(i);
+    // `platform_event.event_loop_poll_ready` is the canonical typed accessor that
+    // rebuilds the [i64] triple array from that protocol.
+    // LAST_POLL_RESULTS keeps the flat (fd, ready, token) triples; get_fd,
+    // get_ready and get_token read one column each.
+    let count = (fds.len() / 3) as i64;
+    LAST_POLL_RESULTS.with(|r| *r.borrow_mut() = fds);
+    Ok(Value::Int(count))
 }
 
-pub fn rt_event_loop_poll_get_fd_interp(args: &[Value]) -> Result<Value, CompileError> {
+fn poll_result_column(args: &[Value], column: usize) -> Value {
     let index = args.get(0).and_then(|v| v.as_int().ok()).unwrap_or(-1);
-    let fd = LAST_POLL_RESULTS.with(|r| {
+    let value = LAST_POLL_RESULTS.with(|r| {
         let results = r.borrow();
-        if index >= 0 && (index as usize) < results.len() {
-            results[index as usize].as_int().unwrap_or(-1)
+        let slot = (index as usize).saturating_mul(3).saturating_add(column);
+        if index >= 0 && slot < results.len() {
+            results[slot].as_int().unwrap_or(-1)
         } else {
             -1
         }
     });
-    Ok(Value::Int(fd))
+    Value::Int(value)
+}
+
+pub fn rt_event_loop_poll_get_fd_interp(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(poll_result_column(args, 0))
+}
+
+pub fn rt_event_loop_poll_get_ready_interp(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(poll_result_column(args, 1))
+}
+
+pub fn rt_event_loop_poll_get_token_interp(args: &[Value]) -> Result<Value, CompileError> {
+    Ok(poll_result_column(args, 2))
 }
 
 pub fn rt_event_loop_close_interp(args: &[Value]) -> Result<Value, CompileError> {

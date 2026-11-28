@@ -16,7 +16,7 @@ use simple_parser::{self as ast, ast::ReferenceCapability, Expr};
 use crate::hir::lower::context::FunctionContext;
 use crate::hir::lower::error::{LowerError, LowerResult};
 use crate::hir::lower::lenient_global_diag::LenientGlobalKind;
-use crate::hir::lower::lowerer::Lowerer;
+use crate::hir::lower::lowerer::{Lowerer, WordArraySlot};
 use crate::hir::types::*;
 use crate::value::BUILTIN_SPAWN;
 
@@ -1816,21 +1816,24 @@ impl Lowerer {
         // Enum-slot admission for a user method (see
         // `reject_callable_for_enum_slot`): only positional calls on a
         // receiver whose class/struct is declared in this file, so the
-        // recorded `Owner.method` row is the one the author wrote.
-        if args.iter().all(|a| a.name.is_none() && !matches!(a.value, Expr::Spread(_))) {
+        // recorded `Owner.method` row is the one the author wrote. The
+        // `[u8]`-into-word-array check also follows named arguments.
+        if !args.iter().any(|a| matches!(a.value, Expr::Spread(_))) {
+            let positional = args.iter().all(|a| a.name.is_none());
             // The float-into-int check can only reject a float argument.
-            let has_float_arg = hir_args.iter().any(|a| matches!(a.ty, TypeId::F32 | TypeId::F64));
+            let has_float_arg = positional && hir_args.iter().any(|a| matches!(a.ty, TypeId::F32 | TypeId::F64));
             // The `[u8]`-into-word-array check can only reject a `[u8]` argument.
             let has_u8_array_arg = hir_args.iter().any(|a| self.is_u8_array_value(a));
             if let Some(HirType::Struct { name: owner, .. }) = self.module.types.get(receiver_hir.ty) {
                 let bare_owner = owner.rsplit('.').next().unwrap_or(owner).to_string();
-                let declared_here = self
-                    .struct_decl_files
-                    .get(&bare_owner)
-                    .is_some_and(|decl_file| *decl_file == self.current_file);
+                let declared_here = positional
+                    && self
+                        .struct_decl_files
+                        .get(&bare_owner)
+                        .is_some_and(|decl_file| *decl_file == self.current_file);
                 if has_u8_array_arg {
                     if let Some(row) = self.method_param_array_elems.get(&format!("{bare_owner}.{method}")) {
-                        self.reject_u8_arrays_in_row(row, &hir_args, &format!("{bare_owner}.{method}"))?;
+                        self.reject_u8_arrays_in_row(row, Some(args), &hir_args, &format!("{bare_owner}.{method}"))?;
                     }
                 }
                 if declared_here || has_float_arg {
@@ -1852,35 +1855,14 @@ impl Lowerer {
                     }
                 }
             }
-            // A trait-typed receiver is erased to ANY. A `val x: Trait` local
-            // carries the exact declaring TraitDef; a parameter keeps only its
-            // declared type name, resolved the same way.
-            if let (true, HirExprKind::Local(idx)) = (has_float_arg || has_u8_array_arg, &receiver_hir.kind) {
-                let idx = *idx;
-                let trait_slots: Option<(String, Vec<Option<String>>, Vec<Option<TypeId>>)> = ctx
-                    .locals
-                    .get(idx)
-                    .and_then(|l| {
-                        l.trait_dispatch_owner.clone().or_else(|| {
-                            l.type_name_hint.as_deref().and_then(|n| self.trait_declaration_for_current_owner(n))
-                        })
-                    })
-                    .and_then(|d| {
-                        let m = d.declaration.methods.iter().find(|m| m.name == method)?;
-                        let user = if m.params.first().is_some_and(|p| p.name == "self") { &m.params[1..] } else { &m.params[..] };
-                        (!user.iter().any(|p| p.variadic)).then(|| {
-                            (
-                                d.declaration.name.clone(),
-                                user.iter().map(|p| Self::simple_param_type_name(p.ty.as_ref())).collect(),
-                                self.numeric_array_param_row(user),
-                            )
-                        })
-                    });
-                if let Some((trait_name, names, array_row)) = trait_slots {
-                    self.reject_u8_arrays_in_row(&array_row, &hir_args, &format!("{trait_name}.{method}"))?;
-                    for (i, (arg, name)) in hir_args.iter().zip(names.iter()).enumerate() {
-                        if let Some(pty) = name.as_deref().and_then(|n| self.module.types.lookup(n)) {
-                            self.reject_float_for_int_slot(pty, arg, &format!("argument {} of `{trait_name}.{method}`", i + 1))?;
+            if has_float_arg || has_u8_array_arg {
+                if let Some((trait_name, names, array_row)) = self.trait_method_param_rows(&receiver_hir, method, ctx) {
+                    self.reject_u8_arrays_in_row(&array_row, Some(args), &hir_args, &format!("{trait_name}.{method}"))?;
+                    if positional {
+                        for (i, (arg, name)) in hir_args.iter().zip(names.iter()).enumerate() {
+                            if let Some(pty) = name.as_deref().and_then(|n| self.module.types.lookup(n)) {
+                                self.reject_float_for_int_slot(pty, arg, &format!("argument {} of `{trait_name}.{method}`", i + 1))?;
+                            }
                         }
                     }
                 }
@@ -2385,6 +2367,65 @@ impl Lowerer {
         }))
     }
 
+    /// The declared parameter rows of `method` on a trait-typed receiver:
+    /// trait name, simple type name per parameter, word-array shape per
+    /// parameter. A trait-typed receiver is erased to ANY. A `val x: Trait`
+    /// local carries the exact declaring TraitDef; a parameter keeps only its
+    /// declared type name, resolved the same way. A field receiver that is
+    /// not a bare local (`self.inner.store.put(b)`; one-level `self.store` is
+    /// rewritten to a local before this runs) resolves the field's AUTHORED
+    /// declared type through the receiver struct's owner, exactly like
+    /// `trait_field_dispatch` does at the AST level. No method-name or
+    /// same-field-name search is allowed.
+    fn trait_method_param_rows(
+        &self,
+        receiver: &HirExpr,
+        method: &str,
+        ctx: &FunctionContext,
+    ) -> Option<(String, Vec<Option<String>>, Vec<Option<WordArraySlot>>)> {
+        if let HirExprKind::Local(idx) = receiver.kind {
+            let local = ctx.locals.get(idx)?;
+            let d = local.trait_dispatch_owner.clone().or_else(|| {
+                local.type_name_hint.as_deref().and_then(|n| self.trait_declaration_for_current_owner(n))
+            })?;
+            return self.trait_method_rows_from_dispatch(&d, method);
+        }
+        let HirExprKind::FieldAccess { receiver: base, field_index } = &receiver.kind else {
+            return None;
+        };
+        let mut ty = base.ty;
+        if let Some(HirType::Pointer { inner, .. }) = self.module.types.get(ty) {
+            ty = *inner;
+        }
+        let Some(HirType::Struct { fields, .. }) = self.module.types.get(ty) else {
+            return None;
+        };
+        let (field_name, _) = fields.get(*field_index)?;
+        let (owner, declared) = self.struct_field_declared_types.get(&ty)?.as_ref()?;
+        let declared_ty = declared.get(field_name)?;
+        let d = self.declared_trait_dispatch_in_owner(declared_ty, owner)?;
+        self.trait_method_rows_from_dispatch(&d, method)
+    }
+
+    /// Parameter rows of `method` declared on the trait `d` (`self`
+    /// excluded), or `None` when the method is unknown or the declaration
+    /// is variadic.
+    fn trait_method_rows_from_dispatch(
+        &self,
+        d: &crate::hir::HirTraitDispatch,
+        method: &str,
+    ) -> Option<(String, Vec<Option<String>>, Vec<Option<WordArraySlot>>)> {
+        let m = d.declaration.methods.iter().find(|m| m.name == method)?;
+        let user = if m.params.first().is_some_and(|p| p.name == "self") { &m.params[1..] } else { &m.params[..] };
+        (!user.iter().any(|p| p.variadic)).then(|| {
+            (
+                d.declaration.name.clone(),
+                user.iter().map(|p| Self::simple_param_type_name(p.ty.as_ref())).collect(),
+                self.numeric_array_param_row(user),
+            )
+        })
+    }
+
     /// Handle builtin method calls on strings, arrays
     fn lower_builtin_method_call(
         &mut self,
@@ -2445,6 +2486,14 @@ impl Lowerer {
             _ => self.lower_call_args(args, ctx)?,
         };
 
+        // A trait method named like a builtin (`put`, `push`) is lowered
+        // here, so its declared word-array parameters are checked here too.
+        if !args.iter().any(|a| matches!(a.value, Expr::Spread(_))) && hir_args.iter().any(|a| self.is_u8_array_value(a)) {
+            if let Some((trait_name, _, array_row)) = self.trait_method_param_rows(&receiver, method, ctx) {
+                self.reject_u8_arrays_in_row(&array_row, Some(args), &hir_args, &format!("{trait_name}.{method}"))?;
+            }
+        }
+
         if matches!(method, "push" | "append") && hir_args.len() == 1 {
             if let HirExprKind::Local(local_index) = receiver.kind {
                 if self.untyped_empty_array_locals.remove(&local_index) {
@@ -2466,6 +2515,21 @@ impl Lowerer {
                     }
                     receiver.ty = specialized_array_ty;
                 }
+            }
+        }
+
+        // A `[u8]` pushed into a word-array element (`[[i64]].push(b)`):
+        // the builtin element slot is checked exactly like a declared slot.
+        // Runs after the untyped-empty refinement above, which retypes an
+        // untyped `var rows = []` receiver to the pushed element's own type
+        // (a receiver whose type was actually declared keeps that word
+        // element here, so the pushed value is compared against it).
+        if matches!(method, "push" | "append")
+            && hir_args.len() == 1
+            && !args.iter().any(|a| matches!(a.value, Expr::Spread(_)))
+        {
+            if let Some(element) = element_ty {
+                self.reject_u8_array_push_element(element, &hir_args[0], method)?;
             }
         }
 

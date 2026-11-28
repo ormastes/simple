@@ -1,0 +1,132 @@
+# @req REQ-SSPEC-APP
+"""
+# Canonical `@workaround` Audit Across Live `src/` Files
+
+Dynamically scans live `src/` `.spl` files containing `@workaround` (excluding
+`vendor/` and the workaround tooling under `src/app/bug/` / `src/app/workaround_recover/`)
+to verify:
+1. Zero non-canonical `# @workaround(...)` / `// @workaround(...)` markers and
+   zero `parse_workaround_source` errors across all discovered `src/` files
+   (retirement-safe: no hardcoded site count or mandatory bug-ID presence).
+2. Any still-present `@workaround` in the 9 files canonicalized by Lane A
+   retains accurate `ROOT-FIXED+...` gate metadata (passes cleanly if retired).
+3. `workaround_lexical_state` parses `@workaround` markers after single-line
+   docstrings containing multi-byte UTF-8 characters (`§`, `—`).
+"""
+
+# @tag: unit, app, bug, workaround
+
+use std.spec.{describe, it, expect}
+use std.nogc_sync_mut.io.file_ops.{file_exists, file_read}
+use std.nogc_sync_mut.io.process_ops.{process_run}
+use app.bug.workaround_index.{parse_workaround_source}
+
+struct CanonicalGateCheck:
+    path: text
+    bug_id: text
+    expected_reason_token: text
+
+val CANONICALIZED_GATES: [CanonicalGateCheck] = [
+    CanonicalGateCheck(
+        path: "src/compiler/80.driver/driver_build/file_fiber_tldr_bridge_v1.spl",
+        bug_id: "phase2_llvm_if_val_match_value_void_2026-11-16",
+        expected_reason_token: "ROOT-FIXED+STAGE2-GATED"
+    ),
+    CanonicalGateCheck(
+        path: "src/app/cli/shard_worker_reap_v1.spl",
+        bug_id: "seed_native_inline_if_else_or_chain_false_2026-11-27",
+        expected_reason_token: "ROOT-FIXED+SEED-GATED"
+    ),
+    CanonicalGateCheck(
+        path: "src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl",
+        bug_id: "stage2_if_val_text_option_transport_tls_end_2026-11-04",
+        expected_reason_token: "ROOT-FIXED+STAGE2-GATED"
+    ),
+    CanonicalGateCheck(
+        path: "src/compiler/80.driver/driver_build/incremental.spl",
+        bug_id: "stage2_ifexpr_continuation_else_parse_2026_11_01",
+        expected_reason_token: "ROOT-FIXED+STAGE2-GATED"
+    ),
+    CanonicalGateCheck(
+        path: "src/lib/common/contracts/container/pure_backend_v1.spl",
+        bug_id: "p3_cold_hir_unresolved_public_interfaces_2026-10-05",
+        expected_reason_token: "ROOT-FIXED+STAGE3-GATED"
+    ),
+    CanonicalGateCheck(
+        path: "src/lib/common/crypto/argon2.spl",
+        bug_id: "jit_u64_array_push_high_bit_corruption_2026-11-27",
+        expected_reason_token: "ROOT-FIXED+SEED-GATED"
+    ),
+    CanonicalGateCheck(
+        path: "src/lib/common/crypto/pbkdf2.spl",
+        bug_id: "jit_u8_repeat_literal_copy_push_leak_2026-11-27",
+        expected_reason_token: "ROOT-FIXED+SEED-GATED"
+    ),
+    CanonicalGateCheck(
+        path: "src/lib/common/sdn/parser.spl",
+        bug_id: "mir_text_bytes_unresolved_inferred_trim_receiver_2026-10-23",
+        expected_reason_token: "ROOT-FIXED+STAGE2-GATED"
+    ),
+    CanonicalGateCheck(
+        path: "src/lib/nogc_sync_mut/orchestration/host_linux_service_agent_v4.spl",
+        bug_id: "mir_cross_module_struct_field_default_error_2026-11-19",
+        expected_reason_token: "ROOT-FIXED+STAGE2-GATED"
+    )
+]
+
+fn is_excluded_wa_scan_path(path: text) -> bool:
+    path.contains("/vendor/") or path.starts_with("src/app/bug/") or path.starts_with("src/app/workaround_recover/")
+
+fn has_noncanonical_paren_marker(content: text) -> bool:
+    for raw_line in content.split("\n"):
+        val trimmed = raw_line.trim()
+        if trimmed.starts_with("# @workaround(") or trimmed.starts_with("// @workaround("):
+            return true
+    false
+
+describe "live src/ @workaround canonical format and retirement-safe gate checks":
+    it "parses every live src/ file mentioning @workaround with zero parse errors and zero non-canonical @workaround(...) markers":
+        val (listing, _err, code) = process_run("git", ["grep", "-l", "@workaround", "--", "src/*.spl"])
+        # Exit 0 = matches found; exit 1 = zero @workaround files left in src/ (valid after full retirement).
+        expect(code == 0 or code == 1).to_equal(true)
+        var errors: [text] = []
+        if code == 0:
+            for raw_path in listing.split("\n"):
+                val path = raw_path.trim()
+                if path == "" or is_excluded_wa_scan_path(path):
+                    continue
+                if not file_exists(path):
+                    continue
+                val content = file_read(path)
+                if has_noncanonical_paren_marker(content):
+                    errors.push("{path}: non-canonical @workaround(...) syntax present")
+                val parsed = parse_workaround_source(path, content)
+                if parsed.is_err():
+                    errors.push("{path}: " + parsed.unwrap_err())
+        expect(errors).to_equal([])
+
+    it "verifies accurate ROOT-FIXED gate metadata for any still-present canonicalized site":
+        var bad_reason: [text] = []
+        for site in CANONICALIZED_GATES:
+            if not file_exists(site.path):
+                continue
+            val content = file_read(site.path)
+            val parsed = parse_workaround_source(site.path, content)
+            if parsed.is_err():
+                bad_reason.push("{site.path}:{site.bug_id} parse error: " + parsed.unwrap_err())
+                continue
+            for link in parsed.unwrap():
+                if link.bug_id == site.bug_id:
+                    if not link.reason.contains(site.expected_reason_token):
+                        bad_reason.push("{site.path}:{site.bug_id} missing '{site.expected_reason_token}' in '{link.reason}'")
+        expect(bad_reason).to_equal([])
+
+    it "parses @workaround markers after single-line docstrings containing multi-byte UTF-8":
+        val sample = "fn helper():\n    \"\"\"RFC 2898 §5.2 — multi-byte docstring.\"\"\"\n    0\n\n# @workaround bug=utf8_docstring_wa_2026_11_28 reason=ROOT-FIXED+STAGE2-GATED\nfn affected() -> i64:\n    1\n"
+        val parsed = parse_workaround_source("src/probe_utf8.spl", sample)
+        expect(parsed.is_ok()).to_equal(true)
+        if parsed.is_ok():
+            val links = parsed.unwrap()
+            expect(links.len()).to_equal(1)
+            expect(links[0].bug_id).to_equal("utf8_docstring_wa_2026_11_28")
+            expect(links[0].reason).to_equal("ROOT-FIXED+STAGE2-GATED")

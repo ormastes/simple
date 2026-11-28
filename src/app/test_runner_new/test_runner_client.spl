@@ -5,6 +5,7 @@ use app.io.process_ops.{process_run, process_run_bounded}
 use std.nogc_sync_mut.io.env_ops.{env_get, env_set, host_os}
 use app.io.cli_ops.{cli_current_exe_path}
 use app.test_runner_new.client_arg_shape.{client_flag_consumes_value, client_select_tagged, client_dropped_execution_flags}
+use app.test_runner_new.binary_override.{has_binary_override, binary_override_names}
 use app.test_runner_new.timeout_budget.{client_default_timeout_secs, resolve_timeout_secs, timeout_value_is_well_formed}
 use app.test_runner_new.daemon_backlog.{daemon_backlog_bypass, count_pending_requests, daemon_claim_wait_expired, daemon_platform_bypass}
 use app.test_runner_new.no_examples_gate.{no_examples_is_silent_green, no_examples_exit_code}
@@ -658,70 +659,13 @@ fn run_one_via_daemon(path: text, timeout_ms: i64, seq: i64,
     1
 
 # Environment variables by which a caller selects WHICH binary, backend or
-# toolchain a spec exercises. These are the names specs resolve in a
-# `contract_binary()` / `simple_binary()` helper; see
-# test/01_unit/lib/mem_infra/guard_backend_parity_spec.spl and its siblings.
-# None of them is set in a normal run, so this list is inert on the hot path and
-# costs the daemon lane nothing — it only diverts the runs that actually asked
-# for an override.
-#
-# The list must stay CLOSED over the family. The daemon freezes its environment
-# at whichever invocation started it, so any selector NOT named here is silently
-# replayed from a previous run and the spec exercises the default target while
-# reporting the selected one's name — a sabotage check then passes for the wrong
-# reason. Measured 2026-08-04 on the Rust seed (`bin/simple`; bootstrap-identity
-# probe = 0), with one daemon alive across all three runs and
-# test/fixtures/mem_infra/env_selector_probe_spec.spl as the target:
-#
-#   run 1: <six sibling selectors>=BRAVO    body observed BRAVO   (this run
-#                                           STARTED the daemon — the trap: a
-#                                           single run always looks correct)
-#   run 2: same six =CHARLIE                body observed BRAVO   <- DEAD
-#   run 3: same six =DELTA + SIMPLE_TEST_BINARY=DELTA
-#                                           body observed DELTA   <- bypass works
-#
-# Run 3 differs from run 2 only in naming an allowlisted variable, so membership
-# in this list is exactly what makes a selector live.
-fn _binary_override_vars() -> [text]:
-    ["SIMPLE_TEST_BINARY", "SIMPLE_BINARY", "SIMPLE_BIN",
-     "SIMPLE_SEED_BINARY", "SIMPLE_SPEC_COMPILER",
-     # sibling selectors, added 2026-08-04 after the probe above
-     "CPU_SIMD_RENDER_SCALE_TEST_SIMPLE_BIN",
-     "SIMPLEOS_QEMU_SIMPLE_BIN", "SIMPLEOS_DBFS_BOOT_QEMU_EXEC",
-     "SIMPLEOS_QEMU_SSH_TOOLCHAIN_LIVE",
-     "SIMPLE_HOSTED_BROWSER_EXECUTABLE", "DEVHUB_MAIL_BIN",
-     "T32_PYTHON_BINARY", "T32_BACKEND_PREFERENCE", "LLVM_BUILD",
-     "SIMPLE_MMU_DIRECT_BACKEND", "SIMPLE_MMU_DEVICE_INITIATED_BACKEND",
-     "SIMPLE_WEB_GPU_PAINT_MEASURE_BACKEND", "SIMPLE_NATIVE_BUILD_TARGET",
-     "SIMPLE_ENGINE2D_RUNNER_MODE", "SIMPLE_ENGINE2D_FULL_MODE",
-     # the GPU-compiler provenance family travels together: the *_PATH/PRODUCER
-     # names select the artifact, the *_SHA256 names are the expected values
-     # checked against it, and a half-frozen pair is worse than a frozen one.
-     "SIMPLE_GPU_COMPILER_PRODUCER", "SIMPLE_GPU_COMPILER_PRODUCER_SHA256",
-     "SIMPLE_GPU_COMPILER_RUNTIME_PATH", "SIMPLE_GPU_COMPILER_RUNTIME_SHA256",
-     "SIMPLE_GPU_COMPILER_BACKFILL_SHA256",
-     # PERF-7, 2026-09-13: a perf spec resolves the interpreter it measures
-     # from SIMPLE_PERF_SELF_BIN. It is a binary selector exactly like the
-     # names above, and it was missing here, so a daemon-served run answered
-     # from the daemon's FROZEN environment: a lane asked for the BASE seed,
-     # got the CANDIDATE, and reported 10/10 green for a spec that is RED on
-     # base. Caught only because the spec prints the binary it resolved.
-     "SIMPLE_PERF_SELF_BIN"]
-
-fn _has_binary_override() -> bool:
-    for name in _binary_override_vars():
-        val v = env_get(name) ?? ""
-        if v != "":
-            return true
-    false
-
-fn _binary_override_names() -> text:
-    var names: [text] = []
-    for name in _binary_override_vars():
-        val v = env_get(name) ?? ""
-        if v != "":
-            names.push(name)
-    names.join(", ")
+# toolchain a spec exercises, and the decision built from them, live in
+# binary_override.spl: the client is a bare-fn-main script a spec cannot
+# import, so the DECISION is importable there and only the I/O stays here.
+# The list must stay CLOSED over the family (see that module for the measured
+# 2026-08-04 frozen-env probe and the PERF-7 2026-09-13 candidate/base story);
+# any selector NOT named there is silently replayed from the daemon's frozen
+# environment and a sabotage check passes for the wrong reason.
 
 # P14 2026-08-09: the std.common.test_env_gate family. Measured on the daemon
 # lane: env reaches a spec body ONLY at the invocation that STARTED the daemon;
@@ -870,7 +814,7 @@ fn main() -> i64:
     val cov_bypass = cov_env != "" and cov_env != "0"
     val require_gpu_env = env_get("SIMPLE_REQUIRE_GPU") ?? ""
     val require_gpu_bypass = require_gpu_env != "" and require_gpu_env != "0"
-    val binary_override_bypass = _has_binary_override()
+    val binary_override_bypass = has_binary_override()
     val env_gate_names = _test_env_gate_names()
     val env_gate_bypass = env_gate_names != ""
     val compiler_bypass = client_options.compiler != ""
@@ -913,7 +857,7 @@ fn main() -> i64:
         if daemon_host_bypass:
             print "test-daemon: light daemon requires Linux /proc; running directly on {daemon_host}"
             if binary_override_bypass:
-                print "binary-override: {_binary_override_names()} set; bypassing test daemon so the override reaches the spec"
+                print "binary-override: {binary_override_names()} set; bypassing test daemon so the override reaches the spec"
         elif compiler_bypass:
             print "compiler-select: --compiler={client_options.compiler}; bypassing test daemon so the selected compiler executes the spec"
         elif cov_bypass:
@@ -927,7 +871,7 @@ fn main() -> i64:
         elif environment_bypass or not caller_environment.valid:
             print "environment-identity: caller environment differs from the live daemon or could not be snapshotted; running directly"
         elif binary_override_bypass:
-            print "binary-override: {_binary_override_names()} set; bypassing test daemon so the override reaches the spec"
+            print "binary-override: {binary_override_names()} set; bypassing test daemon so the override reaches the spec"
         elif backlog_bypass:
             print "daemon-backlog: {backlog_pending} request(s) queued on the single-worker test daemon; running directly"
         elif long_timeout_bypass:

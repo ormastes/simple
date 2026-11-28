@@ -978,7 +978,7 @@ pub(crate) fn execute_function_body(
             },
             None,
         ),
-        Err(CompileError::TryError(val)) => (SffiReturnOrigin::ForeignRawResult, Some(*val)),
+        Err(CompileError::TryError(val) | CompileError::ArmReturn(val)) => (SffiReturnOrigin::ForeignRawResult, Some(*val)),
         Err(e) => return Err(e),
     };
     let result = match extracted {

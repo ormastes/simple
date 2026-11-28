@@ -39,3 +39,68 @@
 2. `find doc/06_spec -name '*_spec.spl' | wc -l` -> `0`
 3. `<simple_bin> check` on modified modules under `src/lib/common/ui`, `src/lib/nogc_sync_mut/ui`, `src/lib/nogc_sync_mut/tiny/gui`, `src/lib/gc_async_mut/ui`, `src/app/ui_showcase`, `src/app/ui.web`, `src/os/compositor` -> exit `0`
 4. Sequential single-file `<simple_bin> test --no-session-daemon <spec>` runs across all specs in Section 2.
+
+---
+
+## 4. Chrome Base vs Pure-Simple Base & Multi-Variation Comparison App
+
+In addition to unit/system SSpec gates, GUI and hosted UI parity against Chrome (`Blink/Skia`) is verified visually and pixel-quantitatively through the in-tree comparison pipeline (`src/app/html_layout_compare/main.spl`, `examples/browser/html_layout_compare/variations.sdn`, and `tools/electron-shell/html_layout_compare_app.js`):
+
+### 4.1 Scope & Variations (`v01`–`v14`)
+- **HTML/CSS/Text/Image Variations (`v01`–`v12`, `520x340`):** Flexbox hero/cards (`v01`), left/right floats (`v02`), CSS Grid 3x2 (`v03`), 3-column workspace shell (`v04`), media thread (`v05`), `object-fit` matrix (`v06`), data tables with `colspan` (`v07`), positioned overlays & `z-index` (`v08`), inline typography & alignment (`v09`), `flex-wrap` chips/cards (`v10`), form controls (`v11`), and 2-column lists/blockquotes (`v12`).
+- **Full Browser Showcase (`v13`, `640x420`):** `examples/06_io/ui/browser_common_elements_showcase.html` full standards showcase parity.
+- **Full GUI Kitchen Sink Window (`v14`, `960x640`):** `examples/06_io/ui/demo_kitchen_sink.ui.sdn` rendered across Chrome (`capture_after_chrome_960x640.png`) vs Pure-Simple headless/GUI window (`6.66%` exact, `53.27%` `<=12px`, `84.16%` `<=32px`, `18.27` MAD in the macOS reference bundle).
+
+### 4.2 Interactive JS / SimpleScript & Event Cases (`e01`–`e06`)
+| Event Case | Interaction Surface | Expected Chrome vs Pure-Simple Parity |
+|---|---|---|
+| `e01` | Click Button & Action Dispatch | DOM/widget click updates target active visual fill and action receipt. |
+| `e02` | Pointer Move & Drag Capture | Window/widget drag tracks outside bounds cleanly (`ui_captured_id`) and ignores sibling release. |
+| `e03` | Dropdown `<select>` & `<details>` Toggle | Popup open state and selected value match across post-toggle captures. |
+| `e04` | Keyboard Input, Shift & Focus Traversal | `Tab` / `FocusNext` skips disabled/hidden/static nodes, preserves Shift glyphs, and clears `preedit` on blur. |
+| `e05` | Wheel Scroll Clamping & Linked Sync | Wheel delta clamps `scroll_y` cleanly and keeps linked panels synchronized. |
+| `e06` | JS / SimpleScript DOM Mutation & Re-render | Script listener mutates DOM once per revision and matches post-event repaint. |
+
+### 4.3 Backend Provenance Titles & Launch / Verify Commands
+- Every comparison pane displays explicit provenance titles (`Chrome (Blink / Skia)` vs `Pure-Simple Web (engine=pure_simple)` vs `4x |Chrome - Simple Web| Diff`) so no fallback capture can masquerade as native parity.
+- **Render & write SDN report (`compare_report.sdn`):**
+  ```sh
+  SIMPLE_LIB=src bin/simple run src/app/html_layout_compare/main.spl --out-dir build/html_layout_compare
+  ```
+- **Capture Chrome reference PNGs & export Electron manifest (`--json`):**
+  ```sh
+  npx electron tools/electron-shell/html_layout_compare_app.js --capture-chrome build/html_layout_compare --pages examples/browser/html_layout_compare/pages
+  SIMPLE_LIB=src bin/simple run src/app/html_layout_compare/main.spl --out-dir build/html_layout_compare --json
+  ```
+- **Launch interactive `1440x920` 4-tab Compare Studio:**
+  ```sh
+  npx electron tools/electron-shell/html_layout_compare_app.js --dir build/html_layout_compare
+  ```
+- **SPipe system test gate:**
+  ```sh
+  SIMPLE_LIB=src bin/simple test test/03_system/app/simple_web/feature/chrome_vs_simple_web_layout_compare_spec.spl --mode=interpreter --memory-limit=1G
+  ```
+
+---
+
+## 5. Suite 2 (`fw01`–`fw06`), Suite 3 (`lq01`–`lq06` Liquid Theme) & Multi-Script (`ms01`–`ms04`) Extensions
+
+### 5.1 Suite 2: Famous Web Page Rendering Diff (`fw01`–`fw06`, `640x420`)
+- `fw01`: Google Search & Knowledge Panel (`640x420`)
+- `fw02`: Wikipedia Encyclopedia Article & Infobox (`640x420`)
+- `fw03`: Hacker News Front Page Table & Ranks (`640x420`)
+- `fw04`: GitHub Repository & PR Code Diff (`640x420`)
+- `fw05`: YouTube Watch Player & Up-Next Queue (`640x420`)
+- `fw06`: New York Times Multi-Column Editorial Front Page (`640x420`)
+
+### 5.2 Suite 3: Liquid Theme Rendering Diff (`lq01`–`lq06`) & CPU Raster Aura Overrides
+- `browser_cpu_raster_css_overrides` (`src/app/ui.browser/backend.spl`) suppresses multi-pass `76px` `backdrop-filter` blur, `box-shadow` stacks, and `body::before`/`body::after` stripes on CPU rasterizers while preserving Liquid Glass radial+linear ambient aura (`body { background: radial-gradient(...) linear-gradient(...) !important; }`) and top-edge specular highlights (`border-top-color: rgba(255,255,255,0.22)` dark / `0.85` light on `.widget-panel`, `.widget-card`, `.widget-menubar`, `.widget-statusbar`).
+- `lq01`: Liquid Dark Theme (`fluid_dark` Aura, Glass Panels & Glow, `640x420`)
+- `lq02`: Liquid Light Theme (`fluid_light` Celestial Ether, `640x420`)
+- `lq03`: macOS Glass Dark Window Gallery (`glass_css.spl`, `640x420`)
+- `lq04`: Stitch Glass Obsidian Dark (`glass_obsidian_dark`, `640x420`)
+- `lq05`: Liquid Frosted `backdrop-filter: blur(12px)` Over Photo & Orbs (`640x420`)
+- `lq06`: UI Kitchen Sink Window (`960x640`, Chrome vs Pure-Simple Liquid Glass aura parity)
+
+### 5.3 Multi-Script Comparison Lanes (`ms01`–`ms04`, `520x340`)
+- Exercises JS, `SimpleScript` (`<script type="text/simple">`), and `AgentScript` (`<script type="text/agent">`) against Chrome across `ms01` (KPI card), `ms02` (Form fill + select + live preview), `ms03` (Kanban column transition), and `ms04` (Cooperative JS + Simple + Agent 3-stage pipeline).

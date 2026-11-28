@@ -1,0 +1,91 @@
+"""
+## Purpose and audience
+Purpose: Pin that CSS `contain: layout` (and `content`, which implies it)
+makes a box an independent formatting context against Chrome 159: a first
+child's top margin stays inside it, and a cleared first child is placed by
+its own margin, not by clearance through the parent. Only the HTML
+`contain` attribute was read before, so the CSS property did nothing here.
+Audience: browser-engine layout maintainers.
+
+Chrome oracle (Chrome 159.0.8154.6 headless, 900x2000,
+`body{margin:0;font:16px/1.5 sans-serif}`, every case in a 100px slot of a
+`position:relative` 400px column, getBoundingClientRect().y relative to the
+column). Layout y is whole px here; Chrome's fraction is in brackets.
+`F` is `float:left;width:20px;height:30.75px`, `C` is
+`clear:both;margin-top:40.5px;height:5px`.
+
+| id | case                                             | Chrome y        |
+|----|--------------------------------------------------|-----------------|
+| a2 | `contain:layout;height:50px` around `F` `C`       | 41 (40.5)       |
+| b2 | `contain:content;height:50px` around `F` `C`      | 141 (140.5)     |
+| d2 | plain `height:50px` around `F` `C` (control)      | 331 (330.75)    |
+| e  | `contain:layout` around a `margin-top:20px` child | 400             |
+| e2 | that child                                       | 420             |
+"""
+
+"""
+Traceability: REQ-BROWSER-ENGINE-CSS-CONTAIN-LAYOUT-MARGIN-CHROME159-001 — CSS `contain: layout` / `content` stop parent-child top margin collapse and clearance-through-parent, matching Chrome 159.
+"""
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_foundation.spl 1%
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.containment.{contain_value_contains_layout, contain_value_contains_paint}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+val FC: text = "<div style=\"float:left;width:20px;height:30.75px\"></div>"
+val PAGE: text = "<html><head><style>body{margin:0;font:16px/1.5 sans-serif}.s{position:relative;width:400px;height:900px;overflow:hidden}.w{height:100px}</style></head><body><div class=\"s\"><div class=\"w\"><div id=\"a\" style=\"contain:layout;height:50px\">" + FC + "<div id=\"a2\" style=\"clear:both;margin-top:40.5px;height:5px\"></div></div></div><div class=\"w\"><div id=\"b\" style=\"contain:content;height:50px\">" + FC + "<div id=\"b2\" style=\"clear:both;margin-top:40.5px;height:5px\"></div></div></div><div class=\"w\"><div id=\"c\" style=\"height:50px\"></div></div><div class=\"w\"><div id=\"d\" style=\"height:50px\">" + FC + "<div id=\"d2\" style=\"clear:both;margin-top:40.5px;height:5px\"></div></div></div><div class=\"w\"><div id=\"e\" style=\"contain:layout\"><div id=\"e2\" style=\"margin-top:20px;height:5px\"></div></div></div></div></body></html>"
+
+fn y(id: text) -> text:
+    simple_web_layout_debug_layout_by_id(PAGE, 900, 2000, id, "y")
+
+describe "CSS contain: layout is a formatting-context boundary (Chrome 159)":
+    it "AC-1: a cleared first child keeps its own margin inside a contained box":
+        expect(y("a2")).to_equal("41")
+        expect(y("b2")).to_equal("141")
+        step("control: without containment the clearance is measured through the parent")
+        expect(y("d2")).to_equal("331")
+
+    it "AC-2: a first child's top margin does not collapse through contain: layout":
+        expect(y("e")).to_equal("400")
+        expect(y("e2")).to_equal("420")
+
+# Review follow-up: `strict` and `content` imply layout AND paint
+# containment, and `paint` alone is an independent formatting context too
+# (Chrome 159.0.8154.6 headless, same column, y relative to it):
+# f `contain:strict;height:50px` around `F` `C` -> f 100, f2 140.5 (layout 141)
+# g `contain:strict` (size: 0 tall) around a margin-top:20px child -> g 200 h 0, g2 220
+# h `contain:content` around that child -> h 300 h 25, h2 320
+# p `contain:paint` around that child -> p 400 h 25, p2 420
+val MC: text = "<div style=\"margin-top:20px;height:5px\" id="
+val PAGE2: text = "<html><head><style>body{{margin:0;font:16px/1.5 sans-serif}}.s{{position:relative;width:400px;height:900px;overflow:hidden}}.w{{height:100px}}</style></head><body><div class=\"s\"><div class=\"w\"><div id=\"a\" style=\"contain:layout;height:50px\">" + FC + "<div id=\"a2\" style=\"clear:both;margin-top:40.5px;height:5px\"></div></div></div><div class=\"w\"><div id=\"f\" style=\"contain:strict;height:50px\">" + FC + "<div id=\"f2\" style=\"clear:both;margin-top:40.5px;height:5px\"></div></div></div><div class=\"w\"><div id=\"g\" style=\"contain:strict\">" + MC + "\"g2\"></div></div></div><div class=\"w\"><div id=\"h\" style=\"contain:content\">" + MC + "\"h2\"></div></div></div><div class=\"w\"><div id=\"p\" style=\"contain:paint\">" + MC + "\"p2\"></div></div></div></div></body></html>"
+
+fn f2(id: text, name: text) -> text:
+    simple_web_layout_debug_layout_by_id(PAGE2, 900, 2000, id, name)
+
+describe "CSS contain: strict / content / paint containment (Chrome 159)":
+    it "AC-3: contain: strict blocks clearance through the parent like layout":
+        expect(f2("f", "y")).to_equal("100")
+        expect(f2("f2", "y")).to_equal("141")
+
+    it "AC-4: strict, content and paint keep a first child's margin inside":
+        step("Chrome 159: strict adds size containment, so the box is 0 tall")
+        expect(f2("g", "y")).to_equal("200")
+        expect(f2("g", "h")).to_equal("0")
+        expect(f2("g2", "y")).to_equal("220")
+        expect(f2("h", "y")).to_equal("300")
+        expect(f2("h", "h")).to_equal("25")
+        expect(f2("h2", "y")).to_equal("320")
+        expect(f2("p", "y")).to_equal("400")
+        expect(f2("p", "h")).to_equal("25")
+        expect(f2("p2", "y")).to_equal("420")
+
+    it "AC-5: the contain value helpers treat strict and content as layout + paint":
+        step("CSS Contain 2: strict = size layout paint style, content = layout paint style")
+        expect(contain_value_contains_layout("strict")).to_equal(true)
+        expect(contain_value_contains_paint("strict")).to_equal(true)
+        expect(contain_value_contains_layout("content")).to_equal(true)
+        expect(contain_value_contains_paint("content")).to_equal(true)
+        step("control: paint alone does not imply layout; size alone implies neither")
+        expect(contain_value_contains_layout("paint")).to_equal(false)
+        expect(contain_value_contains_paint("size")).to_equal(false)

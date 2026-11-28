@@ -12,6 +12,9 @@
 #ifndef SPL_RUNTIME_NATIVE_TWIN
 #define SPL_RUNTIME_NATIVE_TWIN
 #endif
+#ifndef SPL_RUNTIME_OWNER_TWIN
+#define SPL_RUNTIME_OWNER_TWIN
+#endif
 
 #ifndef _POSIX_C_SOURCE
 #define _POSIX_C_SOURCE 200809L
@@ -64,6 +67,14 @@ static int unlink_cb(const char *fpath, const struct stat *sb,
     return remove(fpath);
 }
 
+/* mkdir one component; an existing path counts only when it is a directory. */
+static int rt_unix_mkdir_one(const char* path) {
+    if (mkdir(path, 0755) == 0) return 1;
+    if (errno != EEXIST) return 0;
+    struct stat st;
+    return stat(path, &st) == 0 && S_ISDIR(st.st_mode);
+}
+
 /* C-string worker. The public rt_dir_* entry point lives in runtime.c and
  * converts the compiler's (ptr, len) `text` pair before calling this; a Simple
  * `text` is not NUL-terminated. See rt_text_arg_to_path in runtime.c. */
@@ -86,8 +97,8 @@ SPL_RUNTIME_NATIVE_TWIN bool rt_dir_create_cpath(const char* path, bool recursiv
     strncpy(tmp, path, sizeof(tmp) - 1);
     tmp[sizeof(tmp) - 1] = '\0';
     
-    /* Remove trailing slash */
-    if (tmp[len - 1] == '/') {
+    /* Remove trailing slash (but keep the root itself) */
+    if (len > 1 && tmp[len - 1] == '/') {
         tmp[len - 1] = '\0';
     }
     
@@ -95,7 +106,7 @@ SPL_RUNTIME_NATIVE_TWIN bool rt_dir_create_cpath(const char* path, bool recursiv
     for (p = tmp + 1; *p; p++) {
         if (*p == '/') {
             *p = '\0';
-            if (mkdir(tmp, 0755) != 0 && errno != EEXIST) {
+            if (!rt_unix_mkdir_one(tmp)) {
                 return false;
             }
             *p = '/';
@@ -103,7 +114,7 @@ SPL_RUNTIME_NATIVE_TWIN bool rt_dir_create_cpath(const char* path, bool recursiv
     }
     
     /* Create final directory */
-    return mkdir(tmp, 0755) == 0 || errno == EEXIST;
+    return rt_unix_mkdir_one(tmp) != 0;
 }
 
 /* C-string worker. The public rt_dir_list entry point lives in runtime.c and
@@ -197,7 +208,8 @@ SPL_RUNTIME_NATIVE_TWIN int64_t rt_file_lock(const uint8_t* path_ptr, uint64_t p
     memcpy(path, path_ptr, (size_t)path_len);
     path[path_len] = 0;  /* NUL-terminate */
 
-    int fd = open(path, O_RDWR | O_CREAT, 0644);
+    /* O_CLOEXEC: a spawned child must not inherit (and so keep) the lock. */
+    int fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0644);
     if (fd < 0) return -1;
 
     if (timeout_secs <= 0) {
@@ -217,7 +229,7 @@ SPL_RUNTIME_NATIVE_TWIN int64_t rt_file_lock(const uint8_t* path_ptr, uint64_t p
     while (waited_ms <= timeout_ms) {
         int result = flock(fd, LOCK_EX | LOCK_NB);
         if (result == 0) return fd;
-        if (errno != EWOULDBLOCK && errno != EAGAIN) {
+        if (errno != EWOULDBLOCK && errno != EAGAIN && errno != EINTR) {
             close(fd);
             return -1;
         }
@@ -232,9 +244,9 @@ SPL_RUNTIME_NATIVE_TWIN int64_t rt_file_lock(const uint8_t* path_ptr, uint64_t p
 
 SPL_RUNTIME_NATIVE_TWIN bool rt_file_unlock(int64_t handle) {
     if (handle < 0) return false;
-    flock((int)handle, LOCK_UN);
-    close((int)handle);
-    return true;
+    bool unlocked = flock((int)handle, LOCK_UN) == 0;
+    bool closed = close((int)handle) == 0;
+    return unlocked && closed;
 }
 
 /* ----------------------------------------------------------------
@@ -244,6 +256,9 @@ SPL_RUNTIME_NATIVE_TWIN bool rt_file_unlock(int64_t handle) {
 /* SFFI_LEGACY_UNSAFE: mixed static/heap ownership; checked managed-text callers
  * must not bind this compatibility export. */
 SPL_RUNTIME_NATIVE_TWIN const char* rt_file_read_text_at(const char* path, int64_t offset, int64_t size) {
+    /* Tagged text or char*, like the runtime_native.c twin. */
+    const uint8_t* text_bytes = rt_string_data((int64_t)(uintptr_t)path);
+    if (text_bytes) path = (const char*)text_bytes;
     if (!path || size <= 0 || offset < 0) return "";
 
     int fd = open(path, O_RDONLY);
@@ -431,6 +446,9 @@ int64_t rt_munlock(int64_t addr, int64_t length) {
 }
 
 int64_t rt_open_fd(const char* path, int64_t flags, int64_t mode) {
+    /* Tagged text or char*, like the runtime_native.c twin. */
+    const uint8_t* text_bytes = rt_string_data((int64_t)(uintptr_t)path);
+    if (text_bytes) path = (const char*)text_bytes;
     if (!path) return -1;
     return (int64_t)open(path, (int)flags, (mode_t)mode);
 }
@@ -669,7 +687,10 @@ static int64_t rt_unix_wait_status_to_code(int status) {
     return -1;
 }
 
-SPL_RUNTIME_NATIVE_TWIN int64_t rt_process_wait(int64_t pid, int64_t timeout_ms) {
+/* SPL_RUNTIME_OWNER_TWIN: runtime_process.c's body also records the reaped
+ * child's rusage for rt_process_last_child_peak_rss_kib; it must win wherever
+ * both are linked. */
+SPL_RUNTIME_OWNER_TWIN int64_t rt_process_wait(int64_t pid, int64_t timeout_ms) {
     if (pid <= 0) return -1;
 
     int status = 0;
@@ -828,11 +849,16 @@ int64_t rt_unix_socket_connect(const char* path) {
     return (int64_t)fd;
 }
 
-/* Write data to an open fd. Returns bytes written or -1. */
+/* Write all of data to an open fd. Returns bytes written or -1. */
 SPL_RUNTIME_NATIVE_TWIN int64_t rt_fd_write(int64_t fd, const char* data, int64_t len) {
-    if (fd < 0 || !data || len <= 0) return -1;
-    ssize_t n = write((int)fd, data, (size_t)len);
-    return (int64_t)n;
+    if (fd < 0 || !data || len < 0) return -1;
+    ssize_t written = 0;
+    while (written < (ssize_t)len) {
+        ssize_t n = write((int)fd, data + written, (size_t)(len - written));
+        if (n <= 0) return written > 0 ? (int64_t)written : -1;
+        written += n;
+    }
+    return (int64_t)written;
 }
 
 /* Read up to max bytes from fd, stopping when stop_byte is seen or max reached.

@@ -25,17 +25,21 @@ describe "bounded async HTTP handler lifecycle":
         val inbox = channel_new()
         val response = default_response_data(201, "Created", "async")
         expect(send_async_handler_completion(inbox.id(), job_id, response)).to_equal(true)
-        val raw_message = inbox.try_recv()
+        # `as` cannot narrow the `T?` box the channel returns (ERR-01:
+        # optional_as_cast_yields_zero_2026_11_09); unwrap with `if val`.
+        val raw_message: AsyncHandlerCompletionMessage? = inbox.try_recv()
         expect(raw_message.?).to_equal(true)
-        val completion = raw_message as AsyncHandlerCompletionMessage
-        expect(completion.job_id).to_equal(job_id)
-        expect(lifecycle.complete(completion.job_id, completion.response)).to_equal(true)
-        match lifecycle.take_completed(job_id):
-            AsyncCompletionResult.Ready(delivered):
-                expect(delivered.status).to_equal(201)
-                expect(delivered.body).to_equal("async")
-            _:
-                fail("expected inbox completion to resume the lifecycle")
+        if val completion = raw_message:
+            expect(completion.job_id).to_equal(job_id)
+            expect(lifecycle.complete(completion.job_id, completion.response)).to_equal(true)
+            match lifecycle.take_completed(job_id):
+                AsyncCompletionResult.Ready(delivered):
+                    expect(delivered.status).to_equal(201)
+                    expect(delivered.body).to_equal("async")
+                _:
+                    fail("expected inbox completion to resume the lifecycle")
+        else:
+            fail("expected inbox completion message")
         inbox.close()
 
     it "enforces capacity and exactly-once terminal cleanup":

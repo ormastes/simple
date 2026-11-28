@@ -49,7 +49,7 @@ pub(crate) fn eval_lambda_body(
         // A `return` inside a lambda body must leave the enclosing function,
         // not silently become the body's value. Same early-return channel the
         // if/match expression arms use (interpreter/expr/control.rs).
-        Control::Return(v) => Err(CompileError::TryError(Box::new(v))),
+        Control::Return(v) => Err(CompileError::ArmReturn(Box::new(v))),
         _ => Ok(last_val.unwrap_or(Value::Nil)),
     }
 }

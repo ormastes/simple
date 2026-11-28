@@ -2814,6 +2814,8 @@ impl LlvmBackend {
                         .map(|ty| {
                             if *ty == cranelift_codegen::ir::types::I8 {
                                 i8_type.into()
+                            } else if *ty == cranelift_codegen::ir::types::I16 {
+                                context.i16_type().into()
                             } else if *ty == cranelift_codegen::ir::types::I32 {
                                 i32_type.into()
                             } else {
@@ -2824,6 +2826,7 @@ impl LlvmBackend {
                     let fn_type = match spec.returns {
                         [] => context.void_type().fn_type(&param_types, false),
                         [ret] if *ret == cranelift_codegen::ir::types::I8 => i8_type.fn_type(&param_types, false),
+                        [ret] if *ret == cranelift_codegen::ir::types::I16 => context.i16_type().fn_type(&param_types, false),
                         [ret] if *ret == cranelift_codegen::ir::types::I32 => i32_type.fn_type(&param_types, false),
                         _ => i64_type.fn_type(&param_types, false),
                     };

@@ -1,5 +1,7 @@
 use std.common.encoding.sfnt.{OtFont, OtTable, read_u16_be, read_i16_be, find_table, parse_offset_table}
 use std.common.encoding.sfnt_cmap.{sfnt_cmap_glyph_id, sfnt_cmap_glyph_ids_into}
+use std.common.encoding.sfnt_kern.{sfnt_blob_kern_face_info, sfnt_kern_face_pair_size_milli_px}
+use std.common.encoding.sfnt_af_latin.{AF_LATIN_BLUE_CHARS, AF_LATIN_STANDARD_CHAR, af_latin_face_metrics, af_latin_scaled_metrics, af_latin_hint_points, af_latin_is_nonbase}
 
 pub val SFNT_GLYPH_SELECTOR_CODEPOINT: i64 = 0
 pub val SFNT_GLYPH_SELECTOR_INDEX: i64 = 1
@@ -19,6 +21,9 @@ class SfntGlyfCommand:
 class SfntGlyfOutline:
     commands: [SfntGlyfCommand]
     components: i64
+    # The glyf points behind `commands` for the autohinter: x, y, tag per point
+    # in font units; tag bit 0 = on-curve, bit 1 = last point of its contour.
+    sgo_points: [i64]
 
 class SfntGlyfBitmap:
     # Unique prefixes prevent receiver-blind native field lookup from selecting
@@ -72,7 +77,19 @@ fn _append_transformed(dst: [SfntGlyfCommand], src: [SfntGlyfCommand], xx: f64, 
                 yx * command.x2 + yy * command.y2 + dy))
     out
 
-fn _parse_simple_slice(blob: [u8], start: i64, end: i64, contour_count: i64) -> Option<[SfntGlyfCommand]>:
+# Composite component points: FreeType transforms and rounds them to font units.
+fn _append_transformed_points(mut dst: [i64], src: [i64], xx: f64, xy: f64, yx: f64, yy: f64, dx: f64, dy: f64):
+    var i: i64 = 0
+    while i + 2 < src.len():
+        val x = src[i] as f64
+        val y = src[i + 1] as f64
+        dst.push(_floor_glyf(xx * x + xy * y + dx + 0.5))
+        dst.push(_floor_glyf(yx * x + yy * y + dy + 0.5))
+        dst.push(src[i + 2])
+        i = i + 3
+
+# `points` receives x, y, tag per point (see SfntGlyfOutline.sgo_points).
+fn _parse_simple_slice(blob: [u8], start: i64, end: i64, contour_count: i64, mut points: [i64]) -> Option<[SfntGlyfCommand]>:
     if contour_count < 0 or start + 10 > end or contour_count > (end - start - 10) / 2:
         return None
     if contour_count == 0:
@@ -169,6 +186,18 @@ fn _parse_simple_slice(blob: [u8], start: i64, end: i64, contour_count: i64) -> 
         ys.append(current)
         i = i + 1
 
+    i = 0
+    var point_contour: i64 = 0
+    while i < point_count:
+        var tag: i64 = if (flags[i] & 1) != 0: 1 else: 0
+        if i == endpoints[point_contour] as i64:
+            tag = tag | 2
+            point_contour = point_contour + 1
+        points.push(xs[i] as i64)
+        points.push(ys[i] as i64)
+        points.push(tag)
+        i = i + 1
+
     var commands: [SfntGlyfCommand] = []
     var contour_start: i64 = 0
     var contour: i64 = 0
@@ -237,7 +266,7 @@ fn _parse_glyph(font: OtFont, glyf: OtTable, loca: OtTable, glyph_id: u32, num_g
     val start = glyf.offset as i64 + relative_start
     val end = glyf.offset as i64 + relative_end
     if start == end:
-        return Some(SfntGlyfOutline(commands: [], components: components))
+        return Some(SfntGlyfOutline(commands: [], components: components, sgo_points: []))
     if end - start < 10:
         return None
     val contour_count = read_i16_be(font.blob, start) as i64
@@ -246,10 +275,11 @@ fn _parse_glyph(font: OtFont, glyf: OtTable, loca: OtTable, glyph_id: u32, num_g
         # mis-evaluate on the baremetal native lane (2026-07-18 render-fault
         # chain); match Some/None is the kernel-proven form (applies to every
         # conversion in this file).
-        val simple = _parse_simple_slice(font.blob, start, end, contour_count)
+        var simple_points: [i64] = []
+        val simple = _parse_simple_slice(font.blob, start, end, contour_count, simple_points)
         match simple:
             Some(simple_commands):
-                return Some(SfntGlyfOutline(commands: simple_commands, components: components))
+                return Some(SfntGlyfOutline(commands: simple_commands, components: components, sgo_points: simple_points))
             None:
                 return None
     if contour_count != -1:
@@ -259,6 +289,7 @@ fn _parse_glyph(font: OtFont, glyf: OtTable, loca: OtTable, glyph_id: u32, num_g
     next_active.append(glyph_id)
     var pos = start + 10
     var commands: [SfntGlyfCommand] = []
+    var points: [i64] = []
     var total = components
     var more = true
     var last_flags: u16 = 0
@@ -331,6 +362,7 @@ fn _parse_glyph(font: OtFont, glyf: OtTable, loca: OtTable, glyph_id: u32, num_g
             None: return None
         total = parsed.components
         commands = _append_transformed(commands, parsed.commands, xx, xy, yx, yy, dx, dy)
+        _append_transformed_points(points, parsed.sgo_points, xx, xy, yx, yy, dx, dy)
         more = (flags & 32) != 0
         last_flags = flags
     if (last_flags & 256) != 0:
@@ -343,7 +375,7 @@ fn _parse_glyph(font: OtFont, glyf: OtTable, loca: OtTable, glyph_id: u32, num_g
         pos = pos + instruction_length
     if pos > end:
         return None
-    Some(SfntGlyfOutline(commands: commands, components: total))
+    Some(SfntGlyfOutline(commands: commands, components: total, sgo_points: points))
 
 fn blob_u32(blob: [u8], offset: i64) -> u32:
     ((blob[offset] as u32) << 24) | ((blob[offset + 1] as u32) << 16) | ((blob[offset + 2] as u32) << 8) | (blob[offset + 3] as u32)
@@ -359,9 +391,6 @@ var _sfnt_memo_blob: [u8] = []
 var _sfnt_memo_fonts: [OtFont] = []
 var _sfnt_memo_outlines: Dict<i64, SfntGlyfOutline> = {}
 var _sfnt_memo_outline_count: i64 = 0
-# Hint reference extents (`_hint_glyph_y_extent`) per codepoint: the cmap
-# lookup behind each costs ~7 ms, seven per hinted size.
-var _sfnt_memo_extents: Dict<i64, [f64]> = {}
 val _SFNT_MEMO_OUTLINE_LIMIT: i64 = 4096
 
 fn _sfnt_memo_holds(blob: [u8]) -> bool:
@@ -431,10 +460,11 @@ fn parse_sfnt_glyf_simple_at(font: OtFont, glyph_offset: u32) -> Option<SfntGlyf
     if start < table.offset as i64 or start + 10 > end: return None
     val contour_count = read_i16_be(font.blob, start) as i64
     if contour_count < 0: return None
-    val commands = match _parse_simple_slice(font.blob, start, end, contour_count):
+    var points: [i64] = []
+    val commands = match _parse_simple_slice(font.blob, start, end, contour_count, points):
         Some(value): value
         None: return None
-    Some(SfntGlyfOutline(commands: commands, components: 0))
+    Some(SfntGlyfOutline(commands: commands, components: 0, sgo_points: points))
 
 fn _round_glyf_metric(value: f64) -> i64:
     # Compute the rounded float first, then cast ONCE. Casting inside both branches
@@ -1028,6 +1058,8 @@ fn sfnt_measure_glyph_into(blob: [u8], selector_kind: i64, selector_value: i64, 
     meta[15] = selector_kind
     meta[16] = selector_value
     meta[17] = _round_glyf_metric(read_i16_be(font.blob, hhea_table.offset as i64 + 4) as f64 * scale)
+    if meta.len() >= 20:
+        meta[19] = _round_glyf_metric(bounds.left * scale)
     meta[7] = 310031
 
 fn sfnt_render_glyph_into(blob: [u8], selector_kind: i64, selector_value: i64, size_px: i64, mut meta: [i64], mut pixels: [u8]):
@@ -1157,7 +1189,7 @@ pub fn sfnt_glyph_gray_row_has_ink(blob: [u8], glyph_id: i64, size_px: i64) -> b
 # pen-relative x `slg_bearing_x`, and `phase_q` shifts the outline right by
 # phase_q/4 px (Skia's quarter-pixel positions). One padding pixel on each side
 # holds the filter's one-pixel spread. Vertically the outline is baseline-anchored and
-# warped by the slight-hinting blue-zone fit (_lcd_hint_knots), so unlike
+# hinted by the Latin autohinter in light mode (sfnt_af_latin.spl), so unlike
 # sfnt_render_glyph_into (unhinted; hung from its ink top up to 48 px, see `_gray_frame`) its rows differ too.
 class SfntLcdGlyph:
     slg_width: i64
@@ -1419,6 +1451,30 @@ fn _area_cells(commands: [SfntGlyfCommand], scale: f64, left: f64, top: f64, str
             pen_y = move_y
     a
 
+var _lcd_area_font_memo: Dict<text, bool> = {}
+fn _lcd_area_font(font: OtFont, key: text) -> bool:
+    if val Some(hit) = _lcd_area_font_memo.get(key):
+        return hit
+    # OS/2 ulUnicodeRange1 bit 15 (Devanagari) first: a font that does not
+    # declare the block skips the ~3.5 ms cmap parse.
+    var area = false
+    if val Some(os2) = find_table(font, 1330851634):
+        if os2.length >= 46 and ((blob_u32(font.blob, os2.offset as i64 + 42) >> 15) & 1) == 1:
+            area = sfnt_cmap_glyph_id(font, 2325) != 0
+    _lcd_area_font_memo[key] = area
+    area
+
+# --- Knot hinter: Devanagari-gated fonts only --------------------------------
+# The Latin autohinter port (sfnt_af_latin.spl) hints every other font. A font
+# behind the Devanagari gate (`_lcd_area_font`) keeps this older approximation
+# (blue-zone knots plus horizontal-stem knots, one f64 map per glyph) until the
+# port has the Devanagari style: with Latin edge hinting its low matras lose a
+# row (devanagari_mark_position_chrome159_spec AC-8 / AC-10).
+# Upgrade: the deva style (bug web_render_af_non_latin_styles_not_ported_2026-11-28),
+# then delete this block.
+# Hint reference extents (`_hint_glyph_y_extent`) per codepoint: the cmap
+# lookup behind each costs ~7 ms, seven per hinted size.
+var _sfnt_memo_extents: Dict<i64, [f64]> = {}
 # --- Slight (y-only) autohinter approximation ---------------------------------
 # Chrome on Linux renders through FreeType with hinting "slight": the latin
 # autohinter, y direction only. Two effects reach the pixels at text sizes:
@@ -1565,7 +1621,6 @@ fn _hint_map_y(knots: [f64], y: f64) -> f64:
     val t1 = knots[(j + 1) * 2 + 1]
     t0 + (y - f0) * (t1 - t0) / (f1 - f0)
 
-var _lcd_area_font_memo: Dict<text, bool> = {}
 var _lcd_stdw_memo: Dict<text, f64> = {}
 
 # FreeType's standard horizontal-stem width (`axis->widths[0]`) of font `fid`:
@@ -1589,18 +1644,6 @@ fn _lcd_stdw(font: OtFont, fid: text, units_per_em: i64) -> f64:
             if thinnest > 0.0: stdw = thinnest
     _lcd_stdw_memo[fid] = stdw
     stdw
-
-fn _lcd_area_font(font: OtFont, key: text) -> bool:
-    if val Some(hit) = _lcd_area_font_memo.get(key):
-        return hit
-    # OS/2 ulUnicodeRange1 bit 15 (Devanagari) first: a font that does not
-    # declare the block skips the ~3.5 ms cmap parse.
-    var area = false
-    if val Some(os2) = find_table(font, 1330851634):
-        if os2.length >= 46 and ((blob_u32(font.blob, os2.offset as i64 + 42) >> 15) & 1) == 1:
-            area = sfnt_cmap_glyph_id(font, 2325) != 0
-    _lcd_area_font_memo[key] = area
-    area
 
 fn _lcd_hint_knots_cached(font: OtFont, fid: text, units_per_em: i64, size_px: i64, size_milli: i64) -> [f64]:
     val key = "{fid}|{size_px}|{size_milli}"
@@ -2003,15 +2046,6 @@ fn _hstem_put(base: [f64], fy: f64, ty: f64) -> [f64]:
     if not placed: out = out + [fy, ty]
     out
 
-fn _scale_commands_x(commands: [SfntGlyfCommand], ratio: f64) -> [SfntGlyfCommand]:
-    var out: [SfntGlyfCommand] = []
-    for c in commands:
-        if c.verb == SFNT_GLYF_CLOSE:
-            out = out.push(c)
-        else:
-            out = out.push(_command(c.verb, c.x1 * ratio, c.y1, c.x2 * ratio, c.y2))
-    out
-
 # The hinter works in 26.6 fixed point (FreeType af_*, and skrifa's port that
 # Chrome 159 runs), so every hinted point lands on a 1/64 px grid in x as
 # well as y: the 16 px `i` stem (136..316 units) becomes 69/64..159/64 px,
@@ -2026,6 +2060,133 @@ fn _hint_commands(commands: [SfntGlyfCommand], knots: [f64], scale: f64) -> [Sfn
             out = out.push(c)
         else:
             out = out.push(_command(c.verb, _hint_grid(c.x1 * scale, scale), _hint_grid(_hint_map_y(knots, c.y1), scale), _hint_grid(c.x2 * scale, scale), _hint_grid(_hint_map_y(knots, c.y2), scale)))
+    out
+
+fn _scale_commands_x(commands: [SfntGlyfCommand], ratio: f64) -> [SfntGlyfCommand]:
+    var out: [SfntGlyfCommand] = []
+    for c in commands:
+        if c.verb == SFNT_GLYF_CLOSE:
+            out = out.push(c)
+        else:
+            out = out.push(_command(c.verb, c.x1 * ratio, c.y1, c.x2 * ratio, c.y2))
+    out
+
+var _af_face_memo: Dict<text, [i64]> = {}
+var _af_scaled_memo: Dict<text, [i64]> = {}
+
+# The autohinter's per-font metrics (standard width, blue zones) of font
+# `fid`; empty when the font has no Latin blue zone (it is then not hinted).
+# One cmap pass for the blue characters and the standard character.
+fn _af_face(font: OtFont, fid: text, units_per_em: i64) -> [i64]:
+    if val Some(hit) = _af_face_memo.get(fid):
+        return hit
+    var codepoints: [i64] = [AF_LATIN_STANDARD_CHAR]
+    var ci: i64 = 0
+    while ci < AF_LATIN_BLUE_CHARS.byte_len():
+        val cp = AF_LATIN_BLUE_CHARS.char_code_at(ci)
+        if cp != 124: codepoints.push(cp)
+        ci = ci + 1
+    var glyph_ids: [i64] = []
+    while glyph_ids.len() < codepoints.len():
+        glyph_ids.push(0)
+    sfnt_cmap_glyph_ids_into(font, codepoints, glyph_ids)
+    var std_pts: [i64] = []
+    var blue_pts: [[i64]] = []
+    var gi: i64 = 0
+    while gi < glyph_ids.len():
+        var pts: [i64] = []
+        if glyph_ids[gi] > 0:
+            if val Some(outline) = _sfnt_outline_memo(font, glyph_ids[gi] as u32):
+                pts = outline.sgo_points
+        if gi == 0: std_pts = pts
+        else: blue_pts.push(pts)
+        gi = gi + 1
+    val face = af_latin_face_metrics(units_per_em, std_pts, blue_pts)
+    _af_face_memo[fid] = face
+    face
+
+fn _af_scaled(face: [i64], fid: text, size64: i64) -> [i64]:
+    val key = "{fid}|{size64}"
+    if val Some(hit) = _af_scaled_memo.get(key):
+        return hit
+    val scaled = af_latin_scaled_metrics(face, size64)
+    _af_scaled_memo[key] = scaled
+    scaled
+
+var _af_nonbase_fonts: Dict<text, bool> = {}
+var _af_nonbase_memo: Dict<text, bool> = {}
+
+# Whether glyph `glyph_id` is one of the autohinter's non-base glyphs (a
+# spacing or combining accent, hinted without blue zones). FreeType marks the
+# glyphs its cmap gives for the non-base codepoints; one cmap pass per font
+# over those up to U+036F.
+fn _af_glyph_nonbase(font: OtFont, fid: text, glyph_id: i64) -> bool:
+    if not _af_nonbase_fonts.has(fid):
+        var codepoints: [i64] = []
+        var cp: i64 = 94
+        while cp <= 879:
+            if af_latin_is_nonbase(cp): codepoints.push(cp)
+            cp = cp + 1
+        var glyph_ids: [i64] = []
+        while glyph_ids.len() < codepoints.len():
+            glyph_ids.push(0)
+        sfnt_cmap_glyph_ids_into(font, codepoints, glyph_ids)
+        for gid in glyph_ids:
+            if gid > 0: _af_nonbase_memo["{fid}|{gid}"] = true
+        _af_nonbase_fonts[fid] = true
+    _af_nonbase_memo.has("{fid}|{glyph_id}")
+
+# The hinted outline as commands in font units of `scale` (hinted 26.6 px /
+# (64 scale)), decomposed like FT_Outline_Decompose: an implied on-curve point
+# is the truncating midpoint of its two HINTED controls.
+fn _af_commands(pts: [i64], hinted: [i64], scale: f64) -> [SfntGlyfCommand]:
+    val unit = 64.0 * scale
+    var out: [SfntGlyfCommand] = []
+    val n = pts.len() / 3
+    var first: i64 = 0
+    var i: i64 = 0
+    while i < n:
+        if (pts[i * 3 + 2] & 2) != 0:
+            var limit = i
+            var sx = hinted[first * 2]
+            var sy = hinted[first * 2 + 1]
+            var point = first + 1
+            if (pts[first * 3 + 2] & 1) == 0:
+                if (pts[i * 3 + 2] & 1) != 0:
+                    sx = hinted[i * 2]
+                    sy = hinted[i * 2 + 1]
+                    limit = i - 1
+                else:
+                    sx = (sx + hinted[i * 2]) / 2
+                    sy = (sy + hinted[i * 2 + 1]) / 2
+                point = first
+            out = out.push(_command(SFNT_GLYF_MOVE, sx as f64 / unit, sy as f64 / unit, 0.0, 0.0))
+            while point <= limit:
+                if (pts[point * 3 + 2] & 1) != 0:
+                    out = out.push(_command(SFNT_GLYF_LINE, hinted[point * 2] as f64 / unit, hinted[point * 2 + 1] as f64 / unit, 0.0, 0.0))
+                else:
+                    var cx = hinted[point * 2]
+                    var cy = hinted[point * 2 + 1]
+                    var open = true
+                    while open:
+                        if point < limit:
+                            point = point + 1
+                            val vx = hinted[point * 2]
+                            val vy = hinted[point * 2 + 1]
+                            if (pts[point * 3 + 2] & 1) != 0:
+                                out = out.push(_command(SFNT_GLYF_QUAD, cx as f64 / unit, cy as f64 / unit, vx as f64 / unit, vy as f64 / unit))
+                                open = false
+                            else:
+                                out = out.push(_command(SFNT_GLYF_QUAD, cx as f64 / unit, cy as f64 / unit, ((cx + vx) / 2) as f64 / unit, ((cy + vy) / 2) as f64 / unit))
+                                cx = vx
+                                cy = vy
+                        else:
+                            out = out.push(_command(SFNT_GLYF_QUAD, cx as f64 / unit, cy as f64 / unit, sx as f64 / unit, sy as f64 / unit))
+                            open = false
+                point = point + 1
+            out = out.push(_command(SFNT_GLYF_CLOSE, 0.0, 0.0, 0.0, 0.0))
+            first = i + 1
+        i = i + 1
     out
 
 # reason: SFNT selector/size/phase scalars are the font-table domain;
@@ -2051,10 +2212,10 @@ pub fn sfnt_font_cache_key_size_26_6(size_milli: i64) -> i64:
 # in milli-px; 0 or a whole `size_px * 1000` is the plain whole-px glyph.
 # Measured against Chrome 159 (Liberation Sans/Serif, 1x): 18.72 px and 19 px
 # ink sit on the same rows, as do 13.28 px and 13 px. FreeType's light
-# autohinter scales at the float size and fits the x-height to the pixel grid,
-# so the hint knots and their cache key take the milli size (13.3333 px mono
-# caps are 10 rows, as in Chrome); the outline's x is scaled by
-# `x_milli / (size_px * 1000)`.
+# autohinter scales both axes at the 26.6 size (`sfnt_font_cache_key_size_26_6`,
+# which the caller applies before `x_milli`)
+# and fits the x-height to the pixel grid (13.3333 px mono caps are 10 rows, as
+# in Chrome).
 # reason: SFNT selector/size/phase scalars are the font-table domain;
 # consumed by text_layout/font_renderer.spl, so it must be public.
 # @allow(primitive_api)
@@ -2157,22 +2318,36 @@ fn _glyph_outline(blob: [u8], selector_kind: i64, selector_value: i64, size_px: 
     # Font identity (blob length, head checkSumAdjustment): the key of the
     # per-font hint, stem-width and gate memos.
     val fid = "{font.blob.len()}|{blob_u32(font.blob, head_table.offset as i64 + 8)}"
-    var knots: [f64] = []
-    if not gray:
-        knots = _lcd_hint_knots_cached(font, fid, units_per_em, size_px, if x_frac: x_milli else: size_px * 1000)
+    # Chrome hints a glyf outline with the Latin autohinter in light mode at
+    # its 26.6 size.
     # ponytail: font-level gate. FreeType hints Devanagari glyphs in its
-    # deva style (headline x-height, deva blue zones); this hinter only has
-    # the Latin style, so a Devanagari font keeps the exact-area mask, which
-    # matches Chrome on its marks (devanagari_mark_position_chrome159_spec).
-    # Upgrade: deva-style knots, then drop the gate.
+    # deva style (headline x-height, deva blue zones); the port only has
+    # the Latin style, so a Devanagari font keeps the knot hinter and the
+    # exact-area mask, which match Chrome on its marks
+    # (devanagari_mark_position_chrome159_spec).
+    # Upgrade: the deva style in sfnt_af_latin.spl, then drop the gate.
     val area = not gray and _lcd_area_font(font, fid)
-    if knots.len() > 0:
-        draw_commands = _hint_commands(commands, _hstem_knots(commands, knots, units_per_em as f64), scale)
-        val hinted = match _outline_bounds(draw_commands):
+    var hinted = false
+    if area:
+        val knots = _lcd_hint_knots_cached(font, fid, units_per_em, size_px, if x_frac: x_milli else: size_px * 1000)
+        if knots.len() > 0:
+            draw_commands = _hint_commands(commands, _hstem_knots(commands, knots, units_per_em as f64), scale)
+            hinted = true
+    else if not gray and parsed_outline.sgo_points.len() > 0:
+        val face = _af_face(font, fid, units_per_em)
+        if face.len() > 0:
+            # `x_milli` is the 26.6 size rounded to milli-px (the callers derive it
+            # from sfnt_font_cache_key_size_26_6), so this recovers it exactly.
+            val size64 = if x_frac: (x_milli * 64 + 500) / 1000 else: size_px * 64
+            val nonbase = if selector_kind == SFNT_GLYPH_SELECTOR_CODEPOINT: af_latin_is_nonbase(selector_value) else: _af_glyph_nonbase(font, fid, glyph_id as i64)
+            draw_commands = _af_commands(parsed_outline.sgo_points, af_latin_hint_points(parsed_outline.sgo_points, face, _af_scaled(face, fid, size64), not nonbase), scale)
+            hinted = true
+    if hinted:
+        val hinted_bounds = match _outline_bounds(draw_commands):
             Some(value): value
             None: return None
-        val bottom_px = _floor_glyf(hinted.top * scale + 0.0001)
-        val top_px = _ceil_glyf(hinted.bottom * scale - 0.0001)
+        val bottom_px = _floor_glyf(hinted_bounds.top * scale + 0.0001)
+        val top_px = _ceil_glyf(hinted_bounds.bottom * scale - 0.0001)
         height = if top_px > bottom_px: top_px - bottom_px else: 1
         raster_top = 0.0 - (bottom_px + height) as f64
         bearing_y = bottom_px
@@ -2517,9 +2692,8 @@ fn _aaa_flush(o: [i64]):
             else:
                 # A touched run is walked without the group test.
                 while x < w and o[8 + x] != 0:
-                    var a = o[8 + x]
-                    if a > 247: a = 255
-                    if a == 255:
+                    val a = o[8 + x]
+                    if a >= 248:
                         o[row + x] = 255
                     elif a >= 8:
                         o[row + x] = a + (((((255 - a) * o[row + x]) + 128) * 257) >> 16)
@@ -2624,11 +2798,13 @@ fn _aaa_alpha_above(al: [i64], off: i64, l: i64, r: i64, dy: i64, full: i64):
     val last = r - ((rr - 1) << 16)
     val first_h = ((first * dy) >> 16)
     al[off] = (((first * first_h) >> 16) >> 9) & 255
-    var a16 = (if (first_h + (dy >> 1)) > 2147483647: 2147483647 else: (if (first_h + (dy >> 1)) < -2147483648: -2147483648 else: (first_h + (dy >> 1))))
+    var a16 = first_h + (dy >> 1)
+    a16 = if a16 > 2147483647: 2147483647 else: (if a16 < -2147483648: -2147483648 else: a16)
     var i = 1
     while i < rr - 1:
         al[off + i] = (a16 >> 8) & 255
-        a16 = (if (a16 + dy) > 2147483647: 2147483647 else: (if (a16 + dy) < -2147483648: -2147483648 else: (a16 + dy)))
+        val s = a16 + dy
+        a16 = if s > 2147483647: 2147483647 else: (if s < -2147483648: -2147483648 else: s)
         i = i + 1
     al[off + rr - 1] = (full - ((((last >> 11) * (last >> 11) * (dy >> 11)) >> 8) & 255)) & 255
 
@@ -2642,11 +2818,13 @@ fn _aaa_alpha_below(al: [i64], off: i64, l: i64, r: i64, dy: i64, full: i64):
     val last = r - ((rr - 1) << 16)
     val last_h = ((last * dy) >> 16)
     al[off + rr - 1] = (((last * last_h) >> 16) >> 9) & 255
-    var a16 = (if (last_h + (dy >> 1)) > 2147483647: 2147483647 else: (if (last_h + (dy >> 1)) < -2147483648: -2147483648 else: (last_h + (dy >> 1))))
+    var a16 = last_h + (dy >> 1)
+    a16 = if a16 > 2147483647: 2147483647 else: (if a16 < -2147483648: -2147483648 else: a16)
     var i = rr - 2
     while i > 0:
         al[off + i] = (a16 >> 8) & 255
-        a16 = (if (a16 + dy) > 2147483647: 2147483647 else: (if (a16 + dy) < -2147483648: -2147483648 else: (a16 + dy)))
+        val s = a16 + dy
+        a16 = if s > 2147483647: 2147483647 else: (if s < -2147483648: -2147483648 else: s)
         i = i - 1
     al[off] = (full - ((((first >> 11) * (first >> 11) * (dy >> 11)) >> 8) & 255)) & 255
 
@@ -3173,8 +3351,11 @@ fn _aaa_cross(e: [i64], c: i64, ny: i64, nn: i64, fwd: bool) -> i64:
 # aaa_walk_edges (non-convex, nonzero winding).
 fn _aaa_walk(e: [i64], o: [i64], start_y: i64, stop_y: i64, left_clip: i64, right_clip: i64, skip_cross: bool, rec: [i64]):
     # `rec` non-empty: record every trapezoid row (gray phase replay).
+    # The count stays in a local and is written once at the end: `rec[0]` is
+    # read nowhere inside the walk, and each recorded row is one store.
+    val rec_lim = rec.len() - 11
+    var rec_n = 0
     var rec_on = rec.len() > 0
-    if rec_on: rec[0] = 0
     e[0] = left_clip
     e[2] = left_clip
     e[24] = right_clip
@@ -3224,26 +3405,23 @@ fn _aaa_walk(e: [i64], o: [i64], start_y: i64, stop_y: i64, left_clip: i64, righ
                 val lx = e[left_e]
                 val next_left = if lx > left_clip: lx else: left_clip
                 val next_rite = if nx_x < right_clip: nx_x else: right_clip
-                var nrb = false
+                val nxt = e[curr + 21]
+                # Neighbour-run blitter test (Skia fNeedsNextBlitter): the A
+                # half re-derives in replay from prev_rite, the B half is
+                # stored; both are needed only for full-height strips.
+                var nba = 0
+                var nbb = 0
                 if full == 255:
-                    nrb = prev_rite > (left >> 16) or prev_rite > (lx >> 16)
-                    if not nrb:
-                        val n = e[curr + 21]
-                        if e[n + 4] < next_y:
-                            val ndx = if e[n + 1] < 0: 0 - e[n + 1] else: e[n + 1]
-                            nrb = nx_x + 65536 >= e[n] - ndx
+                    if prev_rite > (left >> 16) or prev_rite > (lx >> 16): nba = 1
+                    if e[nxt + 4] < next_y:
+                        val ndx = if e[nxt + 1] < 0: 0 - e[nxt + 1] else: e[nxt + 1]
+                        if nx_x + 65536 >= e[nxt] - ndx: nbb = 1
+                val nrb = nba == 1 or nbb == 1
                 if rec_on:
                     # Phase replay record (see `_gray_aaa_replay`): raw, unclamped
                     # x, so another quarter phase re-derives the clamps and `nrb`.
-                    val rn = rec[0]
-                    val rb = 6 + rn * 11
-                    if rb + 11 <= rec.len():
-                        var nb2 = 0
-                        if full == 255:
-                            val rnx = e[curr + 21]
-                            if e[rnx + 4] < next_y:
-                                val rndx = if e[rnx + 1] < 0: 0 - e[rnx + 1] else: e[rnx + 1]
-                                if nx_x + 65536 >= e[rnx] - rndx: nb2 = 1
+                    val rb = 6 + rec_n * 11
+                    if rb <= rec_lim:
                         rec[rb] = ry
                         rec[rb + 1] = left_raw
                         rec[rb + 2] = cx
@@ -3254,13 +3432,17 @@ fn _aaa_walk(e: [i64], o: [i64], start_y: i64, stop_y: i64, left_clip: i64, righ
                         rec[rb + 7] = full
                         rec[rb + 8] = first_span
                         rec[rb + 9] = 0
-                        rec[rb + 10] = nb2
-                        rec[0] = rn + 1
+                        rec[rb + 10] = nbb
+                        rec_n = rec_n + 1
                     else:
                         rec[0] = -1
                         rec_on = false
                     first_span = 0
-                    _aaa_trap_row_gray(o, ry, left, rite, next_left, next_rite, left_dy, e[curr + 6], full, nrb)
+                    # The mask plane (a narrow path) has no gray-only row copy.
+                    if o[2] == 1:
+                        _aaa_trap_row(o, ry, left, rite, next_left, next_rite, left_dy, e[curr + 6], full, nrb)
+                    else:
+                        _aaa_trap_row_gray(o, ry, left, rite, next_left, next_rite, left_dy, e[curr + 6], full, nrb)
                 else:
                     _aaa_trap_row(o, ry, left, rite, next_left, next_rite, left_dy, e[curr + 6], full, nrb)
                 prev_rite = if rite > nx_x: (rite + 65535) >> 16 else: (nx_x + 65535) >> 16
@@ -3270,11 +3452,14 @@ fn _aaa_walk(e: [i64], o: [i64], start_y: i64, stop_y: i64, left_clip: i64, righ
                 left_dy = e[curr + 6]
                 left_e = curr
             val nxt = e[curr + 21]
-            var more = e[curr + 5] <= next_y and e[curr + 7] > 0
-            while more:
-                e[curr + 18] = e[curr]
-                e[curr + 19] = e[curr + 3]
-                more = _aaa_update_quad(e, curr) and e[curr + 5] <= next_y and e[curr + 7] > 0
+            var cur_x = nx_x
+            if e[curr + 5] <= next_y and e[curr + 7] > 0:
+                while true:
+                    e[curr + 18] = e[curr]
+                    e[curr + 19] = e[curr + 3]
+                    if not _aaa_update_quad(e, curr): break
+                    cur_x = e[curr]
+                    if not (e[curr + 5] <= next_y and e[curr + 7] > 0): break
             val lo = e[curr + 5]
             if lo <= next_y:
                 val rp1 = e[curr + 20]
@@ -3283,20 +3468,24 @@ fn _aaa_walk(e: [i64], o: [i64], start_y: i64, stop_y: i64, left_clip: i64, righ
                 e[rn1 + 20] = rp1
             else:
                 if lo < nn: nn = lo
-                val new_x = e[curr]
-                if new_x < prev_x:
-                    val p = _aaa_back_start(e, e[curr + 20], new_x)
+                if cur_x < prev_x:
+                    val p = _aaa_back_start(e, e[curr + 20], cur_x)
                     if e[p + 21] != curr:
                         val rp2 = e[curr + 20]
                         val rn2 = e[curr + 21]
                         e[rp2 + 21] = rn2
                         e[rn2 + 20] = rp2
-                        _aaa_insert_after(e, curr, p)
+                        # _aaa_insert_after, inline (a call is ~4 statements
+                        # on this lane and reordering is per-strip).
+                        e[curr + 20] = p
+                        e[curr + 21] = e[p + 21]
+                        e[e[p + 21] + 20] = curr
+                        e[p + 21] = curr
                 else:
-                    prev_x = new_x
+                    prev_x = cur_x
                 if not skip_cross:
                     val p = e[curr + 20]
-                    if e[p + 20] >= 0 and e[p] + e[p + 1] > new_x + e[curr + 1]: nn = next_y + 16384
+                    if e[p + 20] >= 0 and e[p] + e[p + 1] > cur_x + e[curr + 1]: nn = next_y + 16384
             curr = nxt
         if inside:
             val lx = e[left_e]
@@ -3313,11 +3502,20 @@ fn _aaa_walk(e: [i64], o: [i64], start_y: i64, stop_y: i64, left_clip: i64, righ
         y = next_y
         if y >= stop_fixed: break
         var ne = curr
+        if rec_on and e[ne + 20] == 0 and e[ne] < ((rec[1] >> 8) << 8):
+            # The next test compares `ne` with the head sentinel, whose x is the
+            # left clip (0 for SafeRLE, irl for the mask plane). An edge left of
+            # the path's sample bounds could take a different branch under the
+            # other blitter, so the record is dropped.
+            rec[0] = -1
+            rec_on = false
         if e[ne + 4] > y:
             nn = (if (e[ne + 4]) > y and (e[ne + 4]) < nn: (e[ne + 4]) else: nn)
         elif e[e[ne + 20]] <= e[ne]:
             while e[ne + 4] <= y:
-                nn = _aaa_cross(e, ne, y, nn, false)
+                # _aaa_cross(e, ne, y, nn, false), inline.
+                val ca = e[ne + 20]
+                if e[ca + 20] >= 0 and e[ca] + e[ca + 1] > e[ne] + e[ne + 1]: nn = y + 16384
                 nn = (if (e[ne + 5]) > y and (e[ne + 5]) < nn: (e[ne + 5]) else: nn)
                 ne = e[ne + 21]
             nn = (if (e[ne + 4]) > y and (e[ne + 4]) < nn: (e[ne + 4]) else: nn)
@@ -3342,14 +3540,22 @@ fn _aaa_walk(e: [i64], o: [i64], start_y: i64, stop_y: i64, left_clip: i64, righ
                     val rn3 = e[ne + 21]
                     e[rp3 + 21] = rn3
                     e[rn3 + 20] = rp3
-                    _aaa_insert_after(e, ne, start)
-                nn = _aaa_cross(e, ne, y, nn, false)
-                nn = _aaa_cross(e, ne, y, nn, true)
+                    # _aaa_insert_after, inline.
+                    e[ne + 20] = start
+                    e[ne + 21] = e[start + 21]
+                    e[e[start + 21] + 20] = ne
+                    e[start + 21] = ne
+                # _aaa_cross(e, ne, y, nn, false/true), both inline.
+                val fa = e[ne + 20]
+                if e[fa + 20] >= 0 and e[fa] + e[fa + 1] > e[ne] + e[ne + 1]: nn = y + 16384
+                val fb = e[ne + 21]
+                if e[fb + 21] >= 0 and e[ne] + e[ne + 1] > e[fb] + e[fb + 1]: nn = y + 16384
                 nn = (if (e[ne + 5]) > y and (e[ne + 5]) < nn: (e[ne + 5]) else: nn)
                 start = ne
                 ne = nx
                 again = e[ne + 4] <= y
             nn = (if (e[ne + 4]) > y and (e[ne + 4]) < nn: (e[ne + 4]) else: nn)
+    if rec_on: rec[0] = rec_n
 
 
 # Advance a convex-walker edge past `y`; false = the edge is exhausted.
@@ -3709,21 +3915,85 @@ fn _lcd_aaa_mask(commands: [SfntGlyfCommand], scale: f64, phase: f64, x0: i64, t
             k = k + 2
     if open: n = _aaa_push_line(e, n, qx, qy, sx, sy)
     if n == 0: return o
-    # Sort by (upper_y, x, dx), insertion (stable), then link head..tail.
+    # Sort by (upper_y, x, dx), stable, then link head..tail. Path order is
+    # only runs-sorted, so a plain insertion sort is quadratic in the edge
+    # count (a size-invariant cost that dominates wide glyphs on the
+    # interpreter lane). Bucket the edges by their top's pixel row with a
+    # stable counting sort over the path bounds irt..irb (+-2 rows of f32
+    # rounding slack) and run the same insertion compare inside each small
+    # bucket: identical total order, so the walk is unchanged. The
+    # unspecialised insertion sort stays for tiny lists and degenerate bands.
     var order: [i64] = []
     var i = 0
-    while i < n:
-        val b = (i + 2) * 24
-        var j = order.len()
-        order.push(b)
-        while j > 0:
-            val a = order[j - 1]
-            val later = e[a + 4] > e[b + 4] or (e[a + 4] == e[b + 4] and (e[a] > e[b] or (e[a] == e[b] and e[a + 1] > e[b + 1])))
-            if not later: break
-            order[j] = a
-            j = j - 1
-        order[j] = b
-        i = i + 1
+    val row_lo = irt - 2
+    val rows_sz = irb - irt + 5
+    if n < 32 or rows_sz > 8193:
+        while i < n:
+            val b = (i + 2) * 24
+            var j = order.len()
+            order.push(b)
+            while j > 0:
+                val a = order[j - 1]
+                val later = e[a + 4] > e[b + 4] or (e[a + 4] == e[b + 4] and (e[a] > e[b] or (e[a] == e[b] and e[a + 1] > e[b + 1])))
+                if not later: break
+                order[j] = a
+                j = j - 1
+            order[j] = b
+            i = i + 1
+    else:
+        var cnt: [i64] = [0; rows_sz + 1]
+        var bi = 0
+        while bi < n:
+            val b = (bi + 2) * 24
+            cnt[(e[b + 4] >> 16) - row_lo + 1] = cnt[(e[b + 4] >> 16) - row_lo + 1] + 1
+            bi = bi + 1
+        var ci = 1
+        var big = false
+        while ci <= rows_sz:
+            if cnt[ci] > 64: big = true
+            cnt[ci] = cnt[ci] + cnt[ci - 1]
+            ci = ci + 1
+        if big:
+            # A pathological band (nearly all tops on one row): keep the
+            # unspecialised insertion sort rather than a quadratic bucket.
+            while i < n:
+                val b = (i + 2) * 24
+                var j = order.len()
+                order.push(b)
+                while j > 0:
+                    val a = order[j - 1]
+                    val later = e[a + 4] > e[b + 4] or (e[a + 4] == e[b + 4] and (e[a] > e[b] or (e[a] == e[b] and e[a + 1] > e[b + 1])))
+                    if not later: break
+                    order[j] = a
+                    j = j - 1
+                order[j] = b
+                i = i + 1
+        else:
+            # Scatter from the end so equal rows keep input order (stable).
+            order = [0; n]
+            bi = n
+            while bi > 0:
+                bi = bi - 1
+                val b = (bi + 2) * 24
+                val r = (e[b + 4] >> 16) - row_lo
+                cnt[r + 1] = cnt[r + 1] - 1
+                order[cnt[r + 1]] = b
+            var bs = 0
+            while bs < rows_sz:
+                var j = cnt[bs] + 1
+                val be = cnt[bs + 1]
+                while j < be:
+                    val b = order[j]
+                    var k = j - 1
+                    while k >= cnt[bs]:
+                        val a = order[k]
+                        val later = e[a + 4] > e[b + 4] or (e[a + 4] == e[b + 4] and (e[a] > e[b] or (e[a] == e[b] and e[a + 1] > e[b + 1])))
+                        if not later: break
+                        order[k + 1] = a
+                        k = k - 1
+                    order[k + 1] = b
+                    j = j + 1
+                bs = bs + 1
     e[4] = -2147483648
     e[5] = -2147483648
     e[6] = 2147483647
@@ -3751,7 +4021,9 @@ fn _lcd_aaa_mask(commands: [SfntGlyfCommand], scale: f64, phase: f64, x0: i64, t
     if convex and n >= 2:
         _aaa_walk_convex(e, o, stop_y, left_b, right_b)
     else:
-        if use_mask or convex or rec.len() == 0:
+        # A rectangle is not recorded: at a phase where it takes the mask
+        # plane, a direct fill draws it with `_aaa_fat_rect`, not the walk.
+        if convex or rec.len() == 0 or (moves == 1 and _aaa_rect(pv, px, py, np).len() == 4):
             val no_rec: [i64] = []
             _aaa_walk(e, o, start_y, stop_y, left_b, right_b, np > (irb - irt) * 2, no_rec)
         else:
@@ -4049,22 +4321,63 @@ var _gray_aaa_recs: Dict<text, [i64]> = {}
 val _GRAY_AAA_REC_SLOT_BUDGET: i64 = 2000000
 var _gray_aaa_rec_slots: i64 = 0
 
+# Whether `_lcd_aaa_mask` (one sample per pixel) sees a convex path at
+# `phase`: the same f32 sample points and `_aaa_convex` test. Convexity is
+# not translation-invariant after the f32 rounding (Nunito `.` at 64 px and
+# `I` at 60/69/72 px are convex at some quarter phases only), and a convex
+# path takes the convex walker, which a record cannot replay.
+fn _gray_aaa_convex_at(commands: [SfntGlyfCommand], scale: f64, phase: f64, x0: i64, top: f64) -> bool:
+    val cx = (0 - x0) as f64
+    var px: [f64] = []
+    var py: [f64] = []
+    var moves = 0
+    for command in commands:
+        if command.verb == SFNT_GLYF_CLOSE: continue
+        if command.verb == SFNT_GLYF_MOVE:
+            moves = moves + 1
+            if moves > 1: return false
+        val ax = (((command.x1 * scale) as f32) as f64)
+        val ay = (((command.y1 * scale) as f32) as f64)
+        px.push((((1.0 * ((((ax + phase) as f32) as f64)) + cx) as f32) as f64))
+        py.push((((top - ay) as f32) as f64))
+        if command.verb == SFNT_GLYF_QUAD:
+            val bx = (((command.x2 * scale) as f32) as f64)
+            val by = (((command.y2 * scale) as f32) as f64)
+            px.push((((1.0 * ((((bx + phase) as f32) as f64)) + cx) as f32) as f64))
+            py.push((((top - by) as f32) as f64))
+    moves == 1 and _aaa_convex(px, py, px.len())
+
 # Replay recorded trapezoid rows shifted by `shift` (16.16) into a fresh
-# SafeRLE blitter state of `aw` x `h`: the writes `_aaa_walk` makes at that
-# phase (clip 0..aw, `nrb` and the previous span's right end re-derived as in
-# the walker).
-fn _gray_aaa_replay(rec: [i64], shift: i64, aw: i64, h: i64, irl: i64, irr: i64) -> [i64]:
-    var o: [i64] = [0; 8 + aw + (aw + 32) * h]
+# blitter state of `aw` x `h`: the writes `_aaa_walk` makes at that phase
+# (`nrb` and the previous span's right end re-derived as in the walker).
+# `mask`: the small-path mask plane `_lcd_aaa_mask` picks for this phase
+# (clip irl..irr, `_aaa_trap_row`'s mask writes); otherwise SafeRLE (clip
+# 0..aw). The walk depends on the blitter only through the left-clip x of
+# the head sentinel (`e[0]`); `_aaa_walk` drops a record whose edge order
+# test reached that sentinel left of the sample bounds, so a kept record
+# replays into both blitters.
+fn _gray_aaa_replay(rec: [i64], shift: i64, aw: i64, h: i64, irl: i64, irr: i64, mask: bool) -> [i64]:
+    var o: [i64] = []
+    var left_clip = 0
+    var right_clip = aw << 16
+    if mask:
+        o = [0; 8 + aw + (aw + 32) * h * 2]
+        o[2] = 1
+        o[7] = 24 + aw + (aw + 32) * h
+        if irl > 0: left_clip = irl << 16
+        if (irr << 16) < right_clip: right_clip = irr << 16
+    else:
+        o = [0; 8 + aw + (aw + 32) * h]
+        o[7] = 24 + aw
     o[0] = aw
     o[1] = h
     o[3] = 1
     o[4] = irl
     o[5] = irr
     o[6] = -1
-    o[7] = 24 + aw
-    val right_clip = aw << 16
+    val first_rite = left_clip >> 16
     val n = rec[0]
-    var prev_rite = 0
+    var prev_rite = first_rite
     var i = 0
     var rb = 6
     while i < n:
@@ -4073,13 +4386,16 @@ fn _gray_aaa_replay(rec: [i64], shift: i64, aw: i64, h: i64, irl: i64, irr: i64)
         val cx = rec[rb + 2] + shift
         val lx = rec[rb + 3] + shift
         val nx_x = rec[rb + 4] + shift
-        val left = if left_raw > 0: left_raw else: 0
+        val left = if left_raw > left_clip: left_raw else: left_clip
         val rite = if cx < right_clip: cx else: right_clip
-        if rec[rb + 8] == 1: prev_rite = 0
+        if rec[rb + 8] == 1: prev_rite = first_rite
         var nrb = false
         if full == 255:
             nrb = rec[rb + 10] == 1 or prev_rite > (left >> 16) or prev_rite > (lx >> 16)
-        _aaa_trap_row_gray(o, rec[rb], left, rite, if lx > 0: lx else: 0, if nx_x < right_clip: nx_x else: right_clip, rec[rb + 5], rec[rb + 6], full, nrb)
+        if mask:
+            _aaa_trap_row(o, rec[rb], left, rite, if lx > left_clip: lx else: left_clip, if nx_x < right_clip: nx_x else: right_clip, rec[rb + 5], rec[rb + 6], full, nrb)
+        else:
+            _aaa_trap_row_gray(o, rec[rb], left, rite, if lx > 0: lx else: 0, if nx_x < right_clip: nx_x else: right_clip, rec[rb + 5], rec[rb + 6], full, nrb)
         if full == 255: prev_rite = if rite > nx_x: (rite + 65535) >> 16 else: (nx_x + 65535) >> 16
         rb = rb + 11
         i = i + 1
@@ -4112,9 +4428,10 @@ pub fn sfnt_gray_outline_raster(outline: SfntLcdOutline, phase_q: i64) -> Option
             val irl = (rec[1] + shift) >> 16
             val irr = (rec[2] + shift + 65535) >> 16
             val irw = irr - irl
-            # Same blitter as a direct fill: a small path takes the mask plane.
-            if not (irw <= 32 and ((irw + 3) / 4 * 4) * rec[3] <= 1024):
-                mask = _gray_aaa_replay(rec, shift, width, height, irl, irr)
+            # Same blitter as a direct fill: a small path takes the mask plane,
+            # a path that is convex at this phase the convex walker.
+            if not _gray_aaa_convex_at(outline.slo_commands, scale, phase, x0, 0.0 - outline.slo_raster_top):
+                mask = _gray_aaa_replay(rec, shift, width, height, irl, irr, irw <= 32 and ((irw + 3) / 4 * 4) * rec[3] <= 1024)
     if mask.len() == 0:
         if known:
             mask = _lcd_aaa_mask(outline.slo_commands, scale, phase, x0, 0.0 - outline.slo_raster_top, width, height, 1, [])
@@ -4447,3 +4764,53 @@ pub fn sfnt_rasterize_glyph_baseline_aligned(font: OtFont, glyph_id: u32, size_p
         advance_px: advance_px,
         pixels: pixels
     ))
+
+# Effective fractional size in milli-pixels using Chrome/Skia's 26.6 cache key.
+# Preserves exact integer `size_milli` when divisible by 1000.
+# @allow(primitive_api)
+pub fn sfnt_font_cache_key_milli_px(size_milli: i64) -> i64:
+    if size_milli <= 0 or size_milli > 512000:
+        return size_milli
+    if size_milli % 1000 == 0:
+        return size_milli
+    (sfnt_font_cache_key_size_26_6(size_milli) * 1000 + 32) / 64
+
+# Split continuous milli-pixel pen `pen_milli` into `[whole_px, phase_q]` with
+# Chrome/Skia quarter-pixel rounding (`phase_q` in 0..3).
+# Matches `FontRenderer._lcd_apply_pen_phases` for `|pen_milli| <= 4000000`.
+# @allow(primitive_api)
+pub fn sfnt_subpixel_pen_split_milli(pen_milli: i64) -> [i64]:
+    val bias = 4000000
+    val shifted = if pen_milli + bias >= 0: pen_milli + bias else: 0
+    val q = (shifted + 125) / 250 - 16000
+    val whole = (q + 16000) / 4 - 4000
+    val phase_q = q - whole * 4
+    [whole, phase_q]
+
+# Kerning-aware counterpart to `sfnt_glyf_measure_codepoint_advances`.
+# Shares the `hmtx` advance reader and applies `kern` format-0 horizontal pairs
+# attributed to each preceding codepoint when `apply_kern` is true.
+# @allow(primitive_api)
+pub fn sfnt_glyf_measure_codepoint_advances_kerned(blob: [u8], codepoints: [i64], size_px: f64, apply_kern: bool) -> [f64]:
+    var advs = sfnt_glyf_measure_codepoint_advances(blob, codepoints, size_px)
+    if not apply_kern or advs.len() <= 1 or blob.len() == 0 or size_px <= 0.0:
+        return advs
+    val font = match parse_offset_table(blob):
+        Some(value): value
+        None: return advs
+    val kern_info = sfnt_blob_kern_face_info(blob)
+    if kern_info.len() < 4:
+        return advs
+    var gids: [i64] = [0; codepoints.len()]
+    sfnt_cmap_glyph_ids_into(font, codepoints, gids)
+    val size_milli = (size_px * 1000.0 + 0.5) as i64
+    var ci: i64 = 1
+    while ci < codepoints.len():
+        val left_gid = gids[ci - 1]
+        val right_gid = gids[ci]
+        if left_gid > 0 and right_gid > 0:
+            val kern_milli = sfnt_kern_face_pair_size_milli_px(blob, kern_info, left_gid, right_gid, size_milli)
+            if kern_milli != 0:
+                advs[ci - 1] = advs[ci - 1] + (kern_milli as f64) / 1000.0
+        ci = ci + 1
+    advs

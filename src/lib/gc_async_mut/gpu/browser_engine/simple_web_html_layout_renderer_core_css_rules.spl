@@ -1,11 +1,12 @@
 export use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_core_rule_index.{unquote_css_attr_value, attr_selector_matches, attr_name_present, class_words_has, base_selector_matches, simple_match, class_has_all, class_contains, simple_match_ctx, PSEUDO_NOT, PSEUDO_ANY, PSEUDO_ROOT, PSEUDO_EMPTY, PSEUDO_FIRST_CHILD, PSEUDO_LAST_CHILD, PSEUDO_ONLY_CHILD, PSEUDO_NTH_CHILD, PSEUDO_HAS, ATTR_OP_PRESENT, ATTR_OP_EXACT, ATTR_OP_PREFIX, ATTR_OP_SUFFIX, ATTR_OP_SUBSTR, ATTR_OP_TOKEN, ATTR_OP_DASH, parsed_attr_matches, parse_selector_part, parse_selector_group, simple_match_parsed, simple_match_ctx_parsed, selector_group_matches_node_parsed, selector_group_ancestor_keys, selector_node_feature_keys, selector_ancestor_keys_present, split_selector_groups, selector_list_has_unknown_pseudo, normalize_child_combinators, selector_group_parts, selector_rightmost_part, selector_bucket_base, selector_bucket_kind, selector_bucket_kind_from_base, selector_bucket_value, selector_bucket_value_from_base, text_key_index_count, i32_list_prefix, text_seen_before, merge_two_sorted_rule_lists_unique, merge_sorted_rule_lists_unique_count, rule_lists_from_counts, dict_key_index_count, build_rule_buckets, dict_key_index, style_rule_candidates, selector_group_matches_node_parts, Rules, CssWrapperKind, CssRuleScan, CSS_SCAN_CANDIDATE_CAP, CSS_VAR_SUBSTITUTION_BUDGET, CSS_SELECTOR_GROUP_CAP, CSS_SELECTOR_PART_CAP, CssVarResolution, CssVarResolutionState, ParsedAttr, ParsedSel, RuleBuckets, sticky_top_inset_value, border_spacing_px, css_cascade_viewport_set, BackgroundShorthand, parse_supported_nonnegative_px, decl_tbl_get_last_valid_nonnegative_px, parse_supported_outline_shorthand_width_px, resolve_writing_mode_decls, normalized_grid_positive_int, grid_matching_paren, grid_top_level_comma, grid_expand_track_functions, normalized_grid_track_list, normalized_grid_placement, normalized_grid_area, normalized_grid_auto_flow, normalized_grid_template_areas, apply_grid_decls, apply_authored_style_metadata, apply_decls_on_writing_mode, apply_decls_without_display_on_writing_mode, apply_decls, FORM_CONTROL_UA_FONT_SIZE_PX, FORM_CONTROL_UA_LINE_HEIGHT_RATIO, tag_defaults, SIMPLE_WEB_STICKY_TOP_AUTO, Style, renderer_default_style, inherit_style_legacy, inherit_style, is_inline_tag, is_heading, is_non_rendered_tag, parse_font_shorthand_number, parse_font_shorthand_size_milli, parse_font_shorthand_family, BoxShadowAgg, text_list_prefix, split_top_level_commas, parse_float_to_255, shadow_layer_alpha, shadow_length_prefix, paren_matching_close, BgLayers, parse_background_layers, parse_box_shadow_agg, CssDeclarationPrioritySplit, css_important_marker_start, css_declaration_priority_split, ComputedStyleHot, computed_style_hot_from, simple_web_style_hot_is_display_none, css_math_fn_name, css_math_args, css_math_primary, css_math_implied_max_px, css_math_implied_min_px, WEB_STYLE_CASCADE_MEMO_LIMIT, web_style_cascade_memo_reset, web_style_cascade_memo_hits, web_style_cascade_memo_misses, web_style_cascade_memo_lookup, web_style_cascade_memo_store, CSS_INTEGER_PX_INVALID, CSS_INTEGER_PX_ABS_MAX, CssCornerRadii, WebBoxShadowLayer, WebBoxShadowParseResult, parse_border_radius_shorthand, resolve_authored_border_radii, parse_box_shadow_layers, CSS_PROP_UNKNOWN, CSS_PROP_BOX_SIZING, CSS_PROP_COLOR, CSS_PROP_WIDTH, CSS_PROP_HEIGHT, CSS_PROP_MIN_HEIGHT, CSS_PROP_MARGIN_LEFT, CSS_PROP_Z_INDEX, CSS_PROP_DISPLAY, CSS_PROP_GRID_TEMPLATE_COLUMNS, CSS_PROP_GRID_TEMPLATE_ROWS, CSS_PROP_GRID_COLUMN, CSS_PROP_GRID_ROW, CSS_PROP_BORDER_COLLAPSE, CSS_PROP_JUSTIFY_CONTENT, CSS_PROP_ALIGN_ITEMS, CSS_PROP_GAP, CSS_PROP_FLEX_BASIS, CSS_PROP_TEXT_ALIGN, CSS_PROP_FONT_STYLE, CSS_PROP_CURSOR, CSS_PROP_OUTLINE, CSS_PROP_OVERFLOW, CSS_PROP_BOX_SHADOW, CSS_PROP_PADDING, CSS_PROP_MARGIN, CSS_PROP_BORDER_RADIUS, CSS_PROP_RADIUS_TL, CSS_PROP_RADIUS_TR, CSS_PROP_RADIUS_BR, CSS_PROP_RADIUS_BL, CSS_PROP_RADIUS_SS, CSS_PROP_RADIUS_SE, CSS_PROP_RADIUS_ES, CSS_PROP_RADIUS_EE, css_prop_id, css_prop_mask, css_prop_mask_has, css_prop_mask_has_radius_family, css_probe_reset, css_probe_note, css_probe_count}
 use std.gc_async_mut.gpu.browser_engine.style.supports.{eval_supports_query}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_core_selectors.{_compound_base_tokens}
 use std.nogc_sync_mut.text_layout.font_provider.{browser_font_family_for_weight}
 use std.gc_async_mut.io.mod_stub.{env_get}
 use std.gc_async_mut.io.time_ops.{time_now_micros}
 use std.common.ui.ui_frame_clock.{FrameClock}
 use std.nogc_sync_mut.ui.host_frame_clock.{default_frame_clock}
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{parse_int}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{parse_int, HNode}
 fn _css_root_prefix_is_preamble(prefix: text) -> bool:
     var remaining = prefix.trim()
     var guard = 0
@@ -29,6 +30,123 @@ fn _css_root_prefix_is_preamble(prefix: text) -> bool:
         else:
             return false
     remaining.len() == 0
+
+# CSS Syntax 3 4.3.2: a `/* */` comment is consumed before tokenization, so it
+# separates like whitespace and never reaches a selector or declaration. The
+# rule scanner splits on `{` `}` `;`, so comments go first or a commented run
+# such as `{/* a:1;b:2 */}` leaks `b:2`. An unterminated comment runs to EOF.
+# A `/*` is not a comment inside a "..." / '...' string (a backslash escapes
+# the quote; an unescaped newline ends a bad string, 4.3.5) or inside an
+# unquoted `url(...)` (4.3.6). Native `find_from` per comment / string / url;
+# a sheet without `/*` is returned as is.
+fn _css_strip_comments(css: text) -> text:
+    var open = find_from(css, "/*", 0)
+    if open < 0:
+        return css
+    var parts: [text] = []
+    var pos = 0
+    var scan = 0
+    val n = css.byte_len() as i32
+    var dq = find_from(css, "\"", 0)
+    var sq = find_from(css, "'", 0)
+    var url = find_from(css, "url(", 0)
+    while open >= 0:  # cpu-lane-loop-ok: one iteration per `/*` comment, string or url( before it in one stylesheet, located by native find_from; each advances scan or pos
+        if dq >= 0 and dq < scan:
+            dq = find_from(css, "\"", scan)
+        if sq >= 0 and sq < scan:
+            sq = find_from(css, "'", scan)
+        if url >= 0 and url < scan:
+            url = find_from(css, "url(", scan)
+        var skip_at = -1
+        var kind = 0
+        if dq >= 0 and dq < open:
+            skip_at = dq
+            kind = 1
+        if sq >= 0 and sq < open and (skip_at < 0 or sq < skip_at):
+            skip_at = sq
+            kind = 2
+        if url >= 0 and url < open and (skip_at < 0 or url < skip_at):
+            skip_at = url
+            kind = 3
+        if kind == 0:
+            parts.push(css.substring(pos, open))
+            parts.push(" ")
+            val close = find_from(css, "*/", open + 2)
+            if close < 0:
+                pos = n
+                open = -1
+            else:
+                pos = close + 2
+                scan = pos
+                open = find_from(css, "/*", pos)
+        else:
+            val after = if kind == 3:
+                _css_url_token_end(css, skip_at + 4)
+            elif kind == 1:
+                _css_string_end(css, skip_at, "\"")
+            else:
+                _css_string_end(css, skip_at, "'")
+            if after < 0:
+                open = -1
+            else:
+                scan = after
+                if open < scan:
+                    open = find_from(css, "/*", scan)
+    if pos < n:
+        parts.push(css.substring(pos, n))
+    parts.join("")
+
+# True when the byte at `at` is escaped: an odd run of backslashes precedes it.
+fn _css_byte_escaped(css: text, at: i32) -> bool:
+    var count = 0
+    var i = at - 1
+    while i >= 0 and css.byte_at(i) == 92:  # cpu-lane-loop-ok: walks back over the backslash run before ONE quote or newline; bound is that run's length
+        count = count + 1
+        i = i - 1
+    count % 2 == 1
+
+# Byte offset just past the string opened at `quote_at`, or -1 when it runs to
+# EOF. An escaped quote or newline continues it; an unescaped newline ends a
+# bad string before the newline.
+fn _css_string_end(css: text, quote_at: i32, mark: text) -> i32:
+    var from = quote_at + 1
+    var guard = 0
+    val n = css.byte_len() as i32
+    while guard <= n:  # cpu-lane-loop-ok: one iteration per escaped quote / newline inside ONE string, each advancing `from`; the sheet length bounds it
+        guard = guard + 1
+        val close = find_from(css, mark, from)
+        val nl = find_from(css, "\n", from)
+        if nl >= 0 and (close < 0 or nl < close):
+            if not _css_byte_escaped(css, nl):
+                return nl
+            from = nl + 1
+        elif close < 0:
+            return -1
+        elif _css_byte_escaped(css, close):
+            from = close + 1
+        else:
+            return close + 1
+    -1
+
+# Byte offset just past an unquoted url( ... ) whose body starts at `at`, or
+# `at` itself at a quote (the string is scanned as a string), or -1 at EOF.
+fn _css_url_token_end(css: text, at: i32) -> i32:
+    var i = at
+    val n = css.byte_len() as i32
+    while i < n:  # cpu-lane-loop-ok: skips the leading whitespace of ONE url( body; bound is that run's length
+        val b = css.byte_at(i)
+        if b != 32 and b != 9 and b != 10 and b != 13 and b != 12:
+            break
+        i = i + 1
+    if i >= n:
+        return -1
+    val b0 = css.byte_at(i)
+    if b0 == 34 or b0 == 39:
+        return i
+    val close = find_from(css, ")", i)
+    if close < 0:
+        return -1
+    close + 1
 
 fn _css_collect_custom_props(css: text, root_attrs: text) -> text:
     # Collect --name: value pairs from :root { } blocks.
@@ -62,8 +180,8 @@ fn _css_collect_custom_props(css: text, root_attrs: text) -> text:
             break
         var selector_start = rp
         while selector_start > 0:
-            val previous = css.substring(selector_start - 1, selector_start - 1 + 1)
-            if previous == "{" or previous == "}" or previous == ",":
+            val prev_b = css.byte_at(selector_start - 1)
+            if prev_b == 123 or prev_b == 125 or prev_b == 44:
                 break
             selector_start = selector_start - 1
         if not _css_root_prefix_is_preamble(
@@ -140,8 +258,13 @@ fn _css_collect_scoped_custom_props(css: text, existing: text) -> text:
     keeps winning exactly as before, and this pass is purely additive for
     names that were previously unresolvable.
     """
+    var seen_props: Dict<text, bool> = {}
+    if existing.byte_len() > 0:
+        for line in existing.split("\n"):
+            val c_pos = find_from(line, ":", 0)
+            if c_pos > 2:
+                seen_props[line.substring(0, c_pos)] = true
     var entries: [text] = []
-    var pool = existing
     var pos: i64 = 0
     var guard = 0
     val css_len = css.byte_len()
@@ -160,6 +283,9 @@ fn _css_collect_scoped_custom_props(css: text, existing: text) -> text:
             pos = dd + 2
             continue
         val semi = find_from(css, ";", colon)
+        if semi >= 0 and semi < colon:
+            pos = dd + 2
+            continue
         val close = find_from(css, "}", colon)
         var val_end = semi
         if val_end < 0 or (close >= 0 and close < val_end):
@@ -169,13 +295,13 @@ fn _css_collect_scoped_custom_props(css: text, existing: text) -> text:
         val name = css.substring(dd, colon).trim()
         val prop_val = css.substring(colon + 1, val_end).trim()
         if (
-            name.byte_len() > 2 and prop_val.len() > 0 and
+            name.byte_len() > 2 and prop_val.byte_len() > 0 and
             name.index_of(" ") < 0 and
-            not _css_props_contains_name(pool, name)
+            not seen_props.has(name)
         ):
             val entry = name + ":" + prop_val + "\n"
             entries.push(entry)
-            pool = pool + entry
+            seen_props[name] = true
             pos = val_end + 1
         else:
             # Advance past the "--" only, never past this candidate's
@@ -195,8 +321,7 @@ fn _css_resolve_vars(
         return CssVarResolution.Resolved(value: css)
     if state.remaining <= 0:
         return CssVarResolution.BudgetExceeded
-    var chunks: [text] = [""; 801]
-    var chunk_count = 0
+    var chunks: [text] = []
     # Unresolved-var accounting for the top-level pass. A `var()` that cannot
     # be resolved used to be spliced out to the EMPTY string while the pass
     # still reported `Resolved`, which is silent AND wrong (see the
@@ -212,7 +337,7 @@ fn _css_resolve_vars(
     val css_len = css.byte_len()
     var scan = 0
     var vg = 0
-    while scan < css_len and vg < 400:  # cpu-lane-loop-ok: walks the `var(` occurrences in one stylesheet via native find_from, capped at 400 substitutions per resolve pass; once per style invalidation
+    while scan < css_len and vg < 2048:  # cpu-lane-loop-ok: walks `var(` occurrences via native find_from, bounded by state.remaining and sheet size; once per style invalidation
         vg = vg + 1
         val open = find_from(css, "var(", scan)
         if open < 0:
@@ -220,53 +345,54 @@ fn _css_resolve_vars(
         if state.remaining <= 0:
             return CssVarResolution.BudgetExceeded
         state.remaining = state.remaining - 1
-        # Match the closing paren by depth: var() args may nest more var()/
-        # calc() parens, so the first ")" is not necessarily the close.
+        # Jump paren-to-paren with native find_from instead of char-by-char
+        # css.substring(k, k + 1) across a ~336KB stylesheet.
         var depth = 1
-        var k = open + 4
-        while k < css_len and depth > 0:  # cpu-lane-loop-ok: matches the closing paren of ONE `var(` by paren depth; bound is the distance to that paren and it exits at depth 0
-            if css.substring(k, k + 1) == "(":
+        var pscan = open + 4
+        var next_open = find_from(css, "(", pscan)
+        var next_close = find_from(css, ")", pscan)
+        while depth > 0 and next_close >= 0:  # cpu-lane-loop-ok: jumps directly between `(` and `)` tokens to close ONE `var(`
+            if next_open >= 0 and next_open < next_close:
                 depth = depth + 1
-            elif css.substring(k, k + 1) == ")":
+                pscan = next_open + 1
+                next_open = find_from(css, "(", pscan)
+            else:
                 depth = depth - 1
-            k = k + 1
+                if depth == 0:
+                    pscan = next_close + 1
+                    break
+                pscan = next_close + 1
+                next_close = find_from(css, ")", pscan)
         if depth != 0:
             return CssVarResolution.Invalid
-        val close = k - 1
-        if chunk_count + 2 >= chunks.len():
-            return CssVarResolution.BudgetExceeded
+        val close = pscan - 1
         # Split "--name, fallback" at the first TOP-LEVEL comma; the fallback
         # itself may be another var() and is resolved recursively per spec.
         val inner = css.substring(open + 4, close)
-        var cdepth = 0
         var comma = -1
-        var m = 0
         val inner_len = inner.byte_len()
-        while m < inner_len:  # cpu-lane-loop-ok: scans ONE var() argument for its first top-level comma; bound is that argument's length, not the sheet's
-            val ch = inner.substring(m, m + 1)
-            if ch == "(":
-                cdepth = cdepth + 1
-            elif ch == ")":
-                cdepth = cdepth - 1
-            elif ch == "," and cdepth == 0:
-                comma = m
-                break
-            m = m + 1
+        val first_comma = find_from(inner, ",", 0)
+        if first_comma >= 0:
+            if find_from(inner, "(", 0) < 0:
+                comma = first_comma
+            else:
+                var cdepth = 0
+                var m = 0
+                while m < inner_len:  # cpu-lane-loop-ok: scans ONE var() argument for its first top-level comma; bound is that argument's length, not the sheet's
+                    val ch = inner.substring(m, m + 1)
+                    if ch == "(":
+                        cdepth = cdepth + 1
+                    elif ch == ")":
+                        cdepth = cdepth - 1
+                    elif ch == "," and cdepth == 0:
+                        comma = m
+                        break
+                    m = m + 1
         val prop_name = (if comma >= 0: inner.substring(0, comma) else: inner).trim()
-        # `text_starts_with_portable` (byte compare), NOT `.starts_with()`.
-        # The x86_64 freestanding kernel build mis-marshals boolean results
-        # from text builtins at call depth
-        # (doc/08_tracking/bug/x64_freestanding_text_char_at_starts_with.md,
-        # residual item 3) — the same defect that once collapsed
-        # `_html_scan_events` to zero events in the guest while the host
-        # produced a full DOM. This call site sits deep inside the style pass
-        # AND recurses, so a mis-marshalled `false` here would declare every
-        # custom-property name invalid and splice every `var()` away, which is
-        # precisely the SimpleOS WM rung-(d) signature.
         val prop_name_sw_raw = prop_name.starts_with("--")
         val prop_name_sw_portable = text_starts_with_portable(prop_name, "--")
         val valid_var_name = (
-            prop_name.len() > 2 and prop_name_sw_portable
+            prop_name.byte_len() > 2 and prop_name_sw_portable
         )
         # CSS declarations are last-wins. Search backwards so a matching
         # :root variant (or a later base declaration) overrides an earlier
@@ -279,8 +405,7 @@ fn _css_resolve_vars(
                 break
             prop_scan = prop_scan - 1
         val prefix = css.substring(scan, open)
-        chunks[chunk_count] = prefix
-        chunk_count = chunk_count + 1
+        chunks.push(prefix)
         var replacement = CssVarResolution.Invalid
         if not valid_var_name:
             replacement = CssVarResolution.Invalid
@@ -349,30 +474,6 @@ fn _css_resolve_vars(
                 fallback, state, resolution_depth + 1,
                 active_count, true
             )
-        # An unresolvable `var()` must NOT become the empty string. CSS makes
-        # such a declaration invalid at computed-value time (css-variables-1
-        # §3.2); splicing empty instead manufactures a syntactically parseable
-        # but semantically wrong value. Measured on the `aetheric_dark` sheet:
-        # `backdrop-filter: blur(var(--blur-surface)) saturate(170%)` became
-        # `blur() saturate(170%)` (21 chars, rejected by
-        # simple_web_backdrop_admission because the blur term no longer ends in
-        # `px)`), and `background: linear-gradient(...), var(--app-surface)`
-        # became `linear-gradient(...),` (73 chars, a bare trailing comma)
-        # whose colour was then read off the GRADIENT'S FIRST STOP
-        # (0x14FFFFFF) rather than the surface. Those are exactly the three
-        # numbers the SimpleOS WM x86_64 lane reported, and they read as a
-        # theme/content mismatch rather than as dead variables.
-        #
-        # This resolver is driven over a WHOLE `<style>` sheet, not one
-        # declaration, so "drop the declaration" cannot be expressed by
-        # returning `Invalid` (that would drop the entire stylesheet). The
-        # fail-closed equivalent at this granularity is to leave the `var(...)`
-        # SOURCE TEXT verbatim in place: downstream value parsers already treat
-        # a literal `var(` as unparseable, and
-        # `src/os/compositor/simple_web_window_renderer.spl` states the intent
-        # explicitly — it keeps "unresolved variables as rejection witnesses".
-        # The declaration therefore fails loudly instead of attesting a colour
-        # it never had.
         var replacement_text = ""
         val unresolved_source = css.substring(open, close + 1)
         var unresolved_here = false
@@ -407,45 +508,24 @@ fn _css_resolve_vars(
                 first_unresolved_prop_idx = prop_idx
             unresolved_var_count = unresolved_var_count + 1
         if (
-            resolved_len + prefix.len() + replacement_text.len() >
+            resolved_len + prefix.byte_len() + replacement_text.byte_len() >
             SIMPLE_WEB_MAX_HTML_BYTES
         ):
             return CssVarResolution.Invalid
         resolved_len = (
-            resolved_len + prefix.len() + replacement_text.len()
+            resolved_len + prefix.byte_len() + replacement_text.byte_len()
         )
-        chunks[chunk_count] = replacement_text
-        chunk_count = chunk_count + 1
+        chunks.push(replacement_text)
         scan = close + 1
-    if scan < css_len and chunk_count < chunks.len():
-        # A pass that hit the 400-substitution cap mid-sheet still made
-        # progress: return the partially resolved text (suffix appended
-        # verbatim) and let the caller re-pass over it. Only a hard budget
-        # wall (state.remaining exhausted) bails wholesale from here.
+    if scan < css_len:
         val suffix = css.substring(scan, css_len)
-        if resolved_len + suffix.len() > SIMPLE_WEB_MAX_HTML_BYTES:
+        if resolved_len + suffix.byte_len() > SIMPLE_WEB_MAX_HTML_BYTES:
             return CssVarResolution.Invalid
-        chunks[chunk_count] = suffix
-        chunk_count = chunk_count + 1
-    # One line, only when something actually failed to resolve, only for the
-    # top-level pass. Silent on a healthy sheet.
-    #
-    # Do NOT replace this with a post-hoc `resolved.index_of("var(") >= 0`
-    # check on the caller side: that test was written, measured against a
-    # provably-unresolved sheet, and DID NOT FIRE, because under the old
-    # splice-to-empty behaviour the `var(` text was already gone by the time
-    # anyone could look. The receipt has to live at the substitution site.
-    #
-    # `props` separates "no custom properties collected" from "collected but
-    # the lookup missed" (`idx=-1` with `props>0`). `sw_raw`/`sw_portable`
-    # separate BOTH of those from the x86_64 freestanding boolean
-    # mis-marshalling of `text.starts_with` at depth: `sw_raw=false` with
-    # `sw_portable=true` on a name that plainly begins with `--` is that
-    # defect and nothing else.
+        chunks.push(suffix)
     if unresolved_var_count > 0 and not nested and _web_style_trace_enabled():
         print "[web-style-producer] css-var-unresolved count={unresolved_var_count} first={first_unresolved_name} idx={first_unresolved_prop_idx} props={state.prop_count} sw_raw={first_unresolved_sw_raw} sw_portable={first_unresolved_sw_portable} css_len={css_len}"
     CssVarResolution.Resolved(
-        value: text_list_prefix(chunks, chunk_count).join("")
+        value: chunks.join("")
     )
 
 # Evaluate one comma-group of a @media prelude: every parenthesized term must
@@ -885,6 +965,94 @@ fn _html_without_inert_template_sources_scan(source: text) -> text:
         parts.push(source.substring(visible_start, source_blen))
     parts.join("")
 
+class _CssExtractCacheEntry:
+    raw_html_len: i64
+    raw_html: text
+    style_key_len: i64
+    style_key: text
+    viewport_w: i32
+    rule_limit: i32
+    rules: Rules
+
+val _CSS_EXTRACT_CACHE_MAX: i32 = 12
+var _css_extract_cache: [_CssExtractCacheEntry] = []
+var _css_extract_cache_hits_count: i64 = 0
+var _css_extract_cache_misses_count: i64 = 0
+
+# reason: test/telemetry reset hook for bounded CSS extract parse cache
+# @allow(primitive_api)
+pub fn simple_web_layout_css_extract_cache_reset():
+    _css_extract_cache = []
+    _css_extract_cache_hits_count = 0
+    _css_extract_cache_misses_count = 0
+
+# reason: telemetry counter for CSS parse cache hits
+# @allow(primitive_api)
+pub fn simple_web_layout_css_extract_cache_hits() -> i64:
+    _css_extract_cache_hits_count
+
+# reason: telemetry counter for CSS parse cache misses
+# @allow(primitive_api)
+pub fn simple_web_layout_css_extract_cache_misses() -> i64:
+    _css_extract_cache_misses_count
+
+fn _css_extract_root_attrs(html: text) -> text:
+    val h_blen = html.byte_len()
+    var html_tag = find_from(html, "<html", 0)
+    var html_tag_guard = 0
+    while html_tag >= 0 and html_tag_guard < 20:  # cpu-lane-loop-ok: fixed <=20 retries locating <html tag
+        html_tag_guard = html_tag_guard + 1
+        val after_tag = html_tag + 5
+        if after_tag >= h_blen:
+            html_tag = -1
+            break
+        val boundary = html.substring(after_tag, after_tag + 1)
+        if boundary == ">" or boundary == " " or boundary == "\t" or boundary == "\n" or boundary == "\r":
+            break
+        html_tag = find_from(html, "<html", after_tag)
+    val html_tag_close = if html_tag >= 0: find_from(html, ">", html_tag + 5) else: -1
+    if html_tag >= 0 and html_tag_close >= 0: html.substring(html_tag + 5, html_tag_close) else: ""
+
+fn _css_extract_style_key(html: text, root_attrs: text) -> text:
+    var parts: [text] = [root_attrs]
+    var pos = 0
+    var guard = 0
+    while guard < 1000:  # cpu-lane-loop-ok: scans <style> blocks for exact style-sheet cache key
+        guard = guard + 1
+        val sp = find_from(html, "<style", pos)
+        if sp < 0:
+            break
+        val open = find_from(html, ">", sp)
+        if open < 0:
+            break
+        val close = find_from(html, "</style", open)
+        if close < 0:
+            break
+        parts.push(html.substring(open + 1, close))
+        pos = close + 1
+    parts.join("\x01")
+
+fn _css_extract_cache_store(
+    raw_html_len: i64, raw_html: text, style_key_len: i64, style_key: text,
+    viewport_w: i32, rule_limit: i32, rules: Rules
+):
+    if (_css_extract_cache.len() as i32) >= _CSS_EXTRACT_CACHE_MAX:
+        var shifted: [_CssExtractCacheEntry] = []
+        var i = 1
+        while i < _css_extract_cache.len():
+            shifted.push(_css_extract_cache[i])
+            i = i + 1
+        _css_extract_cache = shifted
+    _css_extract_cache.push(_CssExtractCacheEntry(
+        raw_html_len: raw_html_len,
+        raw_html: raw_html,
+        style_key_len: style_key_len,
+        style_key: style_key,
+        viewport_w: viewport_w,
+        rule_limit: rule_limit,
+        rules: rules
+    ))
+
 fn _extract_css_vw_with_rule_limit(
     source_html: text, viewport_w: i32, trace_stages: bool,
     requested_rule_limit: i32
@@ -902,12 +1070,20 @@ fn _extract_css_vw_with_rule_limit(
             group_parts: [], group_specificities: [], decls: [],
             important_decls: []
         )
-    # CSS-parse sub-timers (round 10). `pp_css_us` has been a single opaque
-    # number since round 6; these six split it into its leaves so the largest
-    # one can be named instead of guessed. Same idiom as the phase trace: the
-    # clock is read only when the trace is on, so an untraced parse pays
-    # nothing.
     val _ppc_on = _web_phase_trace_enabled()
+    val use_cache = (not trace_stages) and (not _ppc_on) and (not _web_style_trace_enabled())
+    val raw_html_len = source_html.byte_len()
+    if use_cache:
+        var ci = (_css_extract_cache.len() as i32) - 1
+        while ci >= 0:
+            val entry = _css_extract_cache[ci]
+            if (entry.raw_html_len == raw_html_len and
+                entry.viewport_w == viewport_w and
+                entry.rule_limit == rule_limit and
+                entry.raw_html == source_html):
+                _css_extract_cache_hits_count = _css_extract_cache_hits_count + 1
+                return entry.rules
+            ci = ci - 1
     var _ppc_tmpl: i64 = 0
     var _ppc_props: i64 = 0
     var _ppc_var: i64 = 0
@@ -918,22 +1094,25 @@ fn _extract_css_vw_with_rule_limit(
     val html = _html_without_inert_template_sources(source_html)
     if _ppc_on:
         _ppc_tmpl = time_now_micros() - _ppc_t0
+    val root_attrs = _css_extract_root_attrs(html)
+    var style_key = ""
+    var style_key_len: i64 = 0
+    if use_cache:
+        style_key = _css_extract_style_key(html, root_attrs)
+        style_key_len = style_key.byte_len()
+        var si = (_css_extract_cache.len() as i32) - 1
+        while si >= 0:
+            val entry = _css_extract_cache[si]
+            if (entry.style_key_len == style_key_len and
+                entry.viewport_w == viewport_w and
+                entry.rule_limit == rule_limit and
+                entry.style_key == style_key):
+                _css_extract_cache_hits_count = _css_extract_cache_hits_count + 1
+                return entry.rules
+            si = si - 1
+        _css_extract_cache_misses_count = _css_extract_cache_misses_count + 1
     val _ppc_t1 = if _ppc_on: time_now_micros() else: 0
     # First pass: collect CSS custom properties from all :root blocks
-    var html_tag = find_from(html, "<html", 0)
-    var html_tag_guard = 0
-    while html_tag >= 0 and html_tag_guard < 20:  # cpu-lane-loop-ok: detector false positive: bound is the literal guard `< 20` retries while locating the real `<html` tag
-        html_tag_guard = html_tag_guard + 1
-        val after_tag = html_tag + 5
-        if after_tag >= html.byte_len():
-            html_tag = -1
-            break
-        val boundary = html.substring(after_tag, after_tag + 1)
-        if boundary == ">" or boundary == " " or boundary == "\t" or boundary == "\n" or boundary == "\r":
-            break
-        html_tag = find_from(html, "<html", after_tag)
-    val html_tag_close = if html_tag >= 0: find_from(html, ">", html_tag + 5) else: -1
-    val root_attrs = if html_tag >= 0 and html_tag_close >= 0: html.substring(html_tag + 5, html_tag_close) else: ""
     var custom_prop_parts: [text] = [""; 100]
     var custom_prop_count = 0
     var pre_pos = 0
@@ -949,20 +1128,11 @@ fn _extract_css_vw_with_rule_limit(
         val pre_close = find_from(html, "</style", pre_open)
         if pre_close < 0:
             break
-        val pre_css = html.substring(pre_open + 1, pre_close)
+        val pre_css = _css_strip_comments(html.substring(pre_open + 1, pre_close))
         val collected_props = _css_collect_custom_props(pre_css, root_attrs)
         val scoped_props = _css_collect_scoped_custom_props(
             pre_css, collected_props
         )
-        # STAGE 1 of the `props=0` chain. `props={state.prop_count}` on the
-        # `css-var-unresolved` receipt is NOT this function's return value --
-        # it is the end of collect -> join -> re-parse, and a zero there is
-        # consistent with a failure at any of the three. This receipt pins the
-        # collector itself: `pre_css_len>0` with `collected_len=0` means the
-        # collector found no `:root` custom properties in a non-empty <style>
-        # block. Silent when the block yields properties.
-        # PROVEN SILENT 2026-08-09 in the WM lane -- the collector is healthy in
-        # the guest; do not re-suspect it without new evidence.
         if collected_props.len() == 0 and _web_style_trace_enabled():
             print "[web-style-producer] css-props-stage1 block={pre_guard} pre_css_len={pre_css.len()} collected_len=0"
         if collected_props.len() > 0 and custom_prop_count < custom_prop_parts.len():
@@ -973,11 +1143,6 @@ fn _extract_css_vw_with_rule_limit(
             custom_prop_count = custom_prop_count + 1
         pre_pos = pre_close + 1
     val custom_props = if custom_prop_count == 0: "" else: custom_prop_parts.join("")
-    # STAGE 2 of the `props=0` chain: the gate at `collected_props.len() > 0`
-    # plus the `join("")`. A zero here with a non-zero stage-1 collection means
-    # the accumulate/join lost the data rather than the collector.
-    # PROVEN SILENT 2026-08-09 in the WM lane -- the join delivers 1365 chars,
-    # the host's exact value. The defect is downstream, in the re-parse.
     if custom_props.len() == 0 and _web_style_trace_enabled():
         print "[web-style-producer] css-props-stage2 parts={custom_prop_count} custom_props_len=0"
     if _ppc_on:
@@ -1000,16 +1165,9 @@ fn _extract_css_vw_with_rule_limit(
         val close = find_from(html, "</style", open)
         if close < 0:
             break
-        val css_raw = html.substring(open + 1, close)
+        val css_raw = _css_strip_comments(html.substring(open + 1, close))
         val _ppc_tv = if _ppc_on: time_now_micros() else: 0
         val css_var_state = CssVarResolutionState.new(custom_props)
-        # One substitution pass rewrites at most 400 `var()` occurrences (the
-        # chunk-array bound inside `_css_resolve_vars`), and a realistic theme
-        # sheet exceeds that — the wholesale bail then used the RAW text with
-        # every remaining `var()` still literal, so late-sheet rules lost their
-        # colours (glass accent panels). Re-pass over the partially resolved
-        # text until no `var(` remains, the text stops changing, or the shared
-        # substitution budget exhausts.
         var css = css_raw
         var css_passes = 0
         var css_pass_bailed = false
@@ -1024,19 +1182,8 @@ fn _extract_css_vw_with_rule_limit(
                 _:
                     css_passes = 8
                     css_pass_bailed = true
-        # The OTHER silent path: the substitution loop bailed WHOLESALE
-        # (budget/depth/invalid) and the sheet keeps unresolved `var()` text.
-        # Distinct from the per-`var()` unresolved case reported by
-        # `css-var-unresolved` inside `_css_resolve_vars`, and the two must not
-        # be confused — the 2026-08-08 WM rung-(d) misdiagnosis came from
-        # mistaking one for the other. Silent on a healthy sheet.
         if css_pass_bailed and _web_style_trace_enabled():
             print "[web-style-producer] css-var-pass-bailed block={guard} props_len={custom_props.len()} css_len={css_raw.len()}"
-        # Rule-boundary scan: split the sheet ONCE on "{"/"}" natively rather
-        # than walking it a character at a time in interpreted Simple (which
-        # cost seconds-to-minutes on a realistic theme sheet). See
-        # `_css_scan_rules_simple`. Selector-group splitting, @media condition
-        # evaluation, and CSS-variable substitution stay in Simple below.
         if _ppc_on:
             _ppc_var = _ppc_var + (time_now_micros() - _ppc_tv)
         val remaining_rules = rule_limit - group_parts.len()
@@ -1098,13 +1245,6 @@ fn _extract_css_vw_with_rule_limit(
                 val sel: text = b_sel_text[bi]
                 val decl: text = b_decl_text[bi]
                 val rule_groups: [text] = if selector_list_has_unknown_pseudo(sel): [] else: split_selector_groups(sel)
-                # INLINED on purpose (was split_selector_group_parts): a
-                # [[text]] return crossing a Simple-function boundary loses
-                # data in the freestanding SimpleOS build (see
-                # doc/08_tracking/bug/
-                # cranelift_native_aggregate_return_nil_receiver_hosted_wm_2026-07-26.md).
-                # Building the nested array as a local and assigning it
-                # in-place keeps the handoff inside one call frame.
                 val rule_group_count = rule_groups.len()
                 var rule_parts: [[text]] = [[]; rule_group_count]
                 var rule_specificities: [i32] = [0; rule_group_count]
@@ -1120,21 +1260,16 @@ fn _extract_css_vw_with_rule_limit(
                 block_important_decls[out_i] = priority_decls.important
                 out_i = out_i + 1
             bi = bi + 1
-        # INLINED on purpose (was group_parts_list_prefix): same aggregate
-        # cross-function-return hazard as above — append each element
-        # directly instead of returning a [[[text]]] prefix slice.
         if _ppc_on:
             _ppc_rules = _ppc_rules + (time_now_micros() - _ppc_tr)
         val _ppc_ta = if _ppc_on: time_now_micros() else: 0
         var gi = 0
         while gi < out_i:
-            group_parts = group_parts + [block_group_parts[gi]]
-            group_specificities = group_specificities + [block_group_specificities[gi]]
+            group_parts.push(block_group_parts[gi])
+            group_specificities.push(block_group_specificities[gi])
+            decls.push(block_decls[gi])
+            important_decls.push(block_important_decls[gi])
             gi = gi + 1
-        decls = decls + text_list_prefix(block_decls, out_i)
-        important_decls = important_decls + text_list_prefix(
-            block_important_decls, out_i
-        )
         if _ppc_on:
             _ppc_append = _ppc_append + (time_now_micros() - _ppc_ta)
         pos = close + 1
@@ -1149,14 +1284,148 @@ fn _extract_css_vw_with_rule_limit(
         important_decls: important_decls)
     if trace_stages:
         print "[layout-trace] css_result rules={result.group_parts.len()} decls={result.decls.len()}"
-    # Silent-on-healthy attribution receipt: scanned at least one candidate
-    # rule but the Rules struct came back with zero selector groups. The
-    # split/inline handoffs above are proven-local now; if this still fires,
-    # the remaining suspect is the Rules struct return itself (see
-    # doc/08_tracking/bug/cranelift_native_aggregate_return_nil_receiver_hosted_wm_2026-07-26.md).
     if total_candidates > 0 and group_parts.len() == 0:
         print "[css-extract] degenerate candidates={total_candidates} groups=0"
+    if use_cache:
+        _css_extract_cache_store(
+            raw_html_len, source_html, style_key_len, style_key,
+            viewport_w, rule_limit, result
+        )
     result
+
+fn _selector_strip_generated_origin(part: text) -> text:
+    if text_index_of(part, ":") < 0:
+        return part
+    val lower = part.lower()
+    var cut = -1
+    if lower.ends_with("::before"):
+        cut = part.byte_len() - 8
+    elif lower.ends_with("::after") or lower.ends_with(":before"):
+        cut = part.byte_len() - 7
+    elif lower.ends_with(":after"):
+        cut = part.byte_len() - 6
+    if cut < 0:
+        return part
+    val origin = part.substring(0, cut)
+    if origin == "": "*" else: origin
+
+fn _selector_part_can_match_dom(
+    part: text,
+    present_tags: Dict<text, bool>,
+    present_ids: Dict<text, bool>,
+    present_ids_lower: Dict<text, bool>,
+    present_classes: Dict<text, bool>,
+    present_classes_lower: Dict<text, bool>
+) -> bool:
+    val origin = _selector_strip_generated_origin(part)
+    if origin == "" or origin == "*":
+        return true
+    val base = selector_bucket_base(origin)
+    if base == "" or base == "*":
+        return true
+    if base.contains("\\"):
+        return true
+    val toks = _compound_base_tokens(base)
+    if toks[0] != "" and not present_tags.has(toks[0].lower()):
+        return false
+    if toks[1] != "" and toks[2] != "":
+        val id_tok = toks[2]
+        if not present_ids.has(id_tok) and not present_ids_lower.has(id_tok.lower()):
+            return false
+    var ci = 3
+    while ci < toks.len():  # cpu-lane-loop-ok: checks required .class tokens of ONE compound selector
+        val cls_tok = toks[ci]
+        if cls_tok != "" and not present_classes.has(cls_tok) and not present_classes_lower.has(cls_tok.lower()):
+            return false
+        ci = ci + 1
+    true
+
+fn _selector_group_can_match_dom(
+    parts: [text],
+    present_tags: Dict<text, bool>,
+    present_ids: Dict<text, bool>,
+    present_ids_lower: Dict<text, bool>,
+    present_classes: Dict<text, bool>,
+    present_classes_lower: Dict<text, bool>
+) -> bool:
+    var pi = 0
+    while pi < parts.len():  # cpu-lane-loop-ok: walks parts of ONE selector group (<=CSS_SELECTOR_PART_CAP)
+        val part = parts[pi]
+        if part != "" and part != ">" and part != "+" and part != "~" and part != " ":
+            if not _selector_part_can_match_dom(
+                part, present_tags, present_ids, present_ids_lower,
+                present_classes, present_classes_lower
+            ):
+                return false
+        pi = pi + 1
+    true
+
+pub fn filter_rules_for_dom(rules: Rules, nodes: [HNode]) -> Rules:
+    """Prune CSS selector groups targeting classes, ids, or tags absent from `nodes`.
+
+    Preserves rule order, specificities, and 100% of CSS matching semantics
+    for universal selectors, pseudo-selectors, attributes, and combinators.
+    """
+    val rule_count = rules.group_parts.len()
+    if rule_count == 0:
+        return rules
+    var present_tags: Dict<text, bool> = {}
+    var present_ids: Dict<text, bool> = {}
+    var present_ids_lower: Dict<text, bool> = {}
+    var present_classes: Dict<text, bool> = {}
+    var present_classes_lower: Dict<text, bool> = {}
+    for nd in nodes:  # cpu-lane-loop-ok: collects tags, ids, and class tokens once per style pass
+        if nd.tag != "#text" and nd.tag != "#comment":
+            present_tags[nd.tag.lower()] = true
+            if nd.id_attr != "":
+                present_ids[nd.id_attr] = true
+                present_ids_lower[nd.id_attr.lower()] = true
+            for cls in nd.class_words:
+                if cls != "":
+                    present_classes[cls] = true
+                    present_classes_lower[cls.lower()] = true
+    var out_groups: [[[text]]] = []
+    var out_specs: [[i32]] = []
+    var out_decls: [text] = []
+    var out_imps: [text] = []
+    var r = 0
+    while r < rule_count:  # cpu-lane-loop-ok: single O(rules) DOM presence filter before build_rule_buckets
+        val groups = rules.group_parts[r]
+        val specs = rules.group_specificities[r]
+        val g_count = groups.len()
+        if g_count == 1:
+            if _selector_group_can_match_dom(
+                groups[0], present_tags, present_ids, present_ids_lower,
+                present_classes, present_classes_lower
+            ):
+                out_groups.push(groups)
+                out_specs.push(specs)
+                out_decls.push(rules.decls[r])
+                out_imps.push(rules.important_decls[r])
+        else:
+            var kept_groups: [[text]] = []
+            var kept_specs: [i32] = []
+            var g = 0
+            while g < g_count:
+                if _selector_group_can_match_dom(
+                    groups[g], present_tags, present_ids, present_ids_lower,
+                    present_classes, present_classes_lower
+                ):
+                    kept_groups.push(groups[g])
+                    kept_specs.push(specs[g])
+                g = g + 1
+            if kept_groups.len() > 0:
+                out_groups.push(kept_groups)
+                out_specs.push(kept_specs)
+                out_decls.push(rules.decls[r])
+                out_imps.push(rules.important_decls[r])
+        r = r + 1
+    Rules(
+        group_parts: out_groups,
+        group_specificities: out_specs,
+        decls: out_decls,
+        important_decls: out_imps
+    )
 
 # Equivalence oracle for the round-10 `<template`-absent fast path in
 # `_html_without_inert_template_sources`. Returns "OK" when the fast-path

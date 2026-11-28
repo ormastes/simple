@@ -166,6 +166,10 @@ lazy_static! {
     static ref NEXT_HANDLE: AtomicI64 = AtomicI64::new(1);
     static ref EVENT_LOOP_REGISTRY: Mutex<HashMap<i64, Vec<(i64, i64)>>> = Mutex::new(HashMap::new());
     static ref EVENT_LOOP_POLL_RESULTS: Mutex<Vec<i64>> = Mutex::new(Vec::new());
+    /// (ready, token) per entry of EVENT_LOOP_POLL_RESULTS; ready: 0=Read, 1=Write, 2=ReadWrite
+    static ref EVENT_LOOP_POLL_META: Mutex<Vec<(i64, i64)>> = Mutex::new(Vec::new());
+    /// Token registered for (loop_fd, fd)
+    static ref EVENT_LOOP_TOKENS: Mutex<HashMap<(i64, i64), i64>> = Mutex::new(HashMap::new());
 }
 
 /// Allocate a new handle for a socket
@@ -482,7 +486,8 @@ pub extern "C" fn rt_event_loop_create() -> i64 {
 }
 
 #[no_mangle]
-pub extern "C" fn rt_event_loop_register(loop_fd: i64, fd: i64, _interest: i64, _token: i64, _edge: bool) -> bool {
+pub extern "C" fn rt_event_loop_register(loop_fd: i64, fd: i64, _interest: i64, token: i64, _edge: bool) -> bool {
+    EVENT_LOOP_TOKENS.lock().unwrap().insert((loop_fd, fd), token);
     let mut registry = EVENT_LOOP_REGISTRY.lock().unwrap();
     let Some(entries) = registry.get_mut(&loop_fd) else {
         return false;
@@ -497,6 +502,7 @@ pub extern "C" fn rt_event_loop_register(loop_fd: i64, fd: i64, _interest: i64, 
 
 #[no_mangle]
 pub extern "C" fn rt_event_loop_deregister(loop_fd: i64, fd: i64) -> bool {
+    EVENT_LOOP_TOKENS.lock().unwrap().remove(&(loop_fd, fd));
     let mut registry = EVENT_LOOP_REGISTRY.lock().unwrap();
     let Some(entries) = registry.get_mut(&loop_fd) else {
         return false;
@@ -508,6 +514,7 @@ pub extern "C" fn rt_event_loop_deregister(loop_fd: i64, fd: i64) -> bool {
 #[no_mangle]
 pub extern "C" fn rt_event_loop_poll(loop_fd: i64, max_events: i64, timeout_ms: i64) -> i64 {
     EVENT_LOOP_POLL_RESULTS.lock().unwrap().clear();
+    EVENT_LOOP_POLL_META.lock().unwrap().clear();
 
     #[cfg(unix)]
     {
@@ -566,10 +573,20 @@ pub extern "C" fn rt_event_loop_poll(loop_fd: i64, max_events: i64, timeout_ms: 
         }
 
         let mut results = EVENT_LOOP_POLL_RESULTS.lock().unwrap();
+        let mut meta = EVENT_LOOP_POLL_META.lock().unwrap();
+        let tokens = EVENT_LOOP_TOKENS.lock().unwrap();
         let limit = max_events.min(256) as usize;
         for (handle, poll_fd) in poll_fds {
             if poll_fd.revents != 0 {
+                let readable = (poll_fd.revents & libc::POLLIN) != 0;
+                let writable = (poll_fd.revents & libc::POLLOUT) != 0;
+                let ready: i64 = match (readable, writable) {
+                    (true, true) => 2,
+                    (false, true) => 1,
+                    _ => 0,
+                };
                 results.push(handle);
+                meta.push((ready, tokens.get(&(loop_fd, handle)).copied().unwrap_or(handle)));
                 if results.len() >= limit {
                     break;
                 }
@@ -597,6 +614,32 @@ pub extern "C" fn rt_event_loop_poll_get_fd(index: i64) -> i64 {
         .unwrap()
         .get(index as usize)
         .copied()
+        .unwrap_or(-1)
+}
+
+#[no_mangle]
+pub extern "C" fn rt_event_loop_poll_get_ready(index: i64) -> i64 {
+    if index < 0 {
+        return -1;
+    }
+    EVENT_LOOP_POLL_META
+        .lock()
+        .unwrap()
+        .get(index as usize)
+        .map(|m| m.0)
+        .unwrap_or(-1)
+}
+
+#[no_mangle]
+pub extern "C" fn rt_event_loop_poll_get_token(index: i64) -> i64 {
+    if index < 0 {
+        return -1;
+    }
+    EVENT_LOOP_POLL_META
+        .lock()
+        .unwrap()
+        .get(index as usize)
+        .map(|m| m.1)
         .unwrap_or(-1)
 }
 

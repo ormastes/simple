@@ -1,0 +1,240 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-UNIT
+# research: doc/01_research/domain/sspec_documentization_maintenance.md ; plan: doc/03_plan/sspec_modernization_plan.md ; architecture: doc/04_architecture/sspec_documentization_maintenance.md ; design: doc/05_design/infra/sspec/modern_sspec_typed_evidence_design.md
+
+"""
+## Purpose and audience
+
+Purpose: pin that a `.?` existence check in VALUE position on the left of
+`and`/`or` short-circuits correctly on the seed Cranelift JIT lane — an absent
+`.?` must not evaluate the right-hand side, and the expression must yield the
+same bool as the interpreter lane — and that `simple lint` of a warning-free
+target therefore completes cleanly on the forced-JIT lane with a verdict
+byte-identical to the interpreter lane.
+Audience: compiler engineers maintaining the seed HIR/MIR lowering and the
+lint JIT-parity lane.
+
+Bug: doc/08_tracking/bug/lint_forced_jit_clean_target_unwrap_none_2026-11-27.md
+— with the lint entry closure truly on the JIT lane, linting a warning-free
+target on the forced-JIT lane crashed fail-closed:
+`error: called unwrap on None` (rc 127, ~18 s, any clean .spl). Root cause
+(SEED HIR lowering, NOT lint logic): `and`/`or` return a bool and decide on
+operand presence, and `x.?` in condition position (`if x.?:`) is lowered to
+the `rt_is_present` bool predicate — but the same `x.?` in VALUE position
+(`val c = x.? and x.unwrap() == ...`) was lowered to the raw `T?` word whose
+absent arm is the canonical nil sentinel `3` (non-zero). The MIR short-circuit
+branch tests that word with `!= 0`, so an absent `x.?` read as TRUTHY on the
+JIT lane: the RHS ran regardless, and `config.profile.unwrap()` (lint
+`_LintMain/entry_and_fixes.spl`, profile legitimately None for the resolved
+config) crashed. The interpreter's `BinOp::And` always returns
+`Value::Bool` with `.?` special-cased as a presence test, so only the JIT lane
+diverged. Fix: `hir/lower/expr/operators.rs lower_binary` now coerces
+`.?` operands to the same bool presence predicate condition position gets
+(`coerce_exists_value_to_bool_in_place`), mirroring the pre-existing
+`not x.?` fix in `lower_unary`.
+
+## Operator workflow (re-verification recipe)
+
+The test runner refuses a SIMPLE_BINARY that differs from the binary running
+the spec, so each run below uses the binary under test as both runner and
+child. Isolation knobs used throughout:
+`SIMPLE_HIR_CACHE_DIR=$PWD/build/p3cache/lintunwrap/hir-cache` and
+`TMPDIR=$PWD/build/p3cache/lintunwrap/tmp`.
+
+1. RED: build the pre-fix seed (any commit before the `lower_binary`
+   coercion) and run it against itself:
+     cd src/compiler_rust && \
+       CC="$HOME/.simple/toolchains/llvm-mingw-20260922-ucrt-x86_64/bin/clang.exe" \
+       CARGO_TARGET_DIR=C:/dev/lanes/p3-sweep/build/p3cache/lintunwrap/cargo-target \
+       cargo build --release -p simple-driver
+     SIMPLE_LIB=src SIMPLE_BINARY=$PWD/build/p3cache/lintunwrap/cargo-target/release/simple.exe \
+       build/p3cache/lintunwrap/cargo-target/release/simple.exe test \
+       test/01_unit/compiler/seed_jit_value_position_dotq_short_circuit_spec.spl
+   Both examples FAIL: the probe child on the JIT lane evaluates the
+   `and`-RHS (`A-RHS=1`, `A-RES=true`) and then dies with
+   `error: called unwrap on None` (rc 127) at the unwrap crash shape; the
+   lint child dies the same way before printing any verdict. Pre-fix
+   evidence on the fixing lane: build/p3cache/lintunwrap/logs/repro-jit-stderr.log
+   (rc 127) vs build/p3cache/lintunwrap/logs/repro-interp-stdout.log (rc 0,
+   `Lint passed: all files clean`).
+2. GREEN: current tree (the `lower_binary` coercion), same build + test
+   command. Both examples pass; the two lanes' lint stdout is byte-identical
+   after removing the `[engine-receipt]` line the JIT child is asked to print.
+3. Direct probe without the spec:
+     SIMPLE_LIB=src SIMPLE_EXECUTION_MODE=jit \
+       build/p3cache/lintunwrap/cargo-target/release/simple.exe run \
+       build/p3cache/lintunwrap/dotq_probe.spl
+   (the spec writes its own copies under
+   build/p3cache/lintunwrap/spec/<pid>_<micros>/ — the lane-isolated scratch
+   namespace, NOT build/test/, which concurrent lanes' suites sweep; any copy
+   of the embedded probe source works). Expect the exact marker block
+   documented in the example, rc 0. With `SIMPLE_EXECUTION_MODE=interpreter`
+   the stdout is byte-identical.
+
+## Compatibility and limitations
+
+Each example shells out to the seed binary (`SIMPLE_BIN` / `SIMPLE_BINARY` /
+`SIMPLE_RUNTIME` / `SIMPLE_TEST_BINARY`, default `bin/simple`) through
+`sh -c` with a shell env prefix: the test runner's child-env scrub
+(`SIMPLE_TEST_CHILD_ENV_SCRUB=1`, test_runner_mode_env_leak_2026_11_12) strips
+`SIMPLE_EXECUTION_MODE` pins from direct `process_run` spawns, and the shell
+prefix is that scrub's documented escape hatch (same pattern as
+test/01_unit/compiler/seed_lint_entry_stays_on_jit_lane_spec.spl).
+`SIMPLE_ENGINE_RECEIPT=1` travels in the same prefix for the JIT children;
+the receipt is the non-forgeable lane oracle (`engine=cranelift-jit
+demoted=no`). Each JIT lint child compiles the whole lint closure and takes
+~40 s wall. The lint target is a synthetic warning-free probe
+(`fn main(): print "ok"`), written under build/p3cache/lintunwrap/spec/ —
+the closure under test
+is the lint command itself, exercised through the same
+`_append_semantic_api_results` site that crashed.
+"""
+
+use std.spec.*
+use std.spec.step
+use std.io_runtime.{process_run_timeout, env_get, file_write, file_exists, dir_create_all,
+    getpid, time_now_unix_micros}
+
+fn simple_binary() -> text:
+    var configured = env_get("SIMPLE_BIN") ?? ""
+    if configured == "":
+        configured = env_get("SIMPLE_BINARY") ?? ""
+    if configured == "":
+        configured = env_get("SIMPLE_RUNTIME") ?? ""
+    if configured == "":
+        configured = env_get("SIMPLE_TEST_BINARY") ?? ""
+    if configured.len() > 0:
+        return configured
+    "bin/simple"
+
+fn probe_dir() -> text:
+    # Lane-isolated scratch: NOT build/test/ — other lanes' spec suites sweep
+    # build/test/ concurrently (observed 2026-11-28: a parallel suite removed
+    # this spec's freshly-written probe between write and child spawn, and the
+    # child failed with a spurious `semantic: variable rhs_ran not found`).
+    "build/p3cache/lintunwrap/spec/{getpid()}_{time_now_unix_micros()}"
+
+fn write_probe_file(name: text, source: text) -> text:
+    dir_create_all(probe_dir())
+    val path = probe_dir() + "/" + name
+    val wrote = file_write(path, source)
+    if not file_exists(path):
+        print "file_write failed for {path}: {wrote}"
+        expect(false).to_equal(true)
+    path
+
+# Behavioral probe for the value-position `.?` short-circuit defect: an absent
+# `.?` on the LHS of `and` must not evaluate the RHS (interpreter semantics,
+# which `and` must mirror on every lane). The C- shape is the exact lint crash
+# reduction (`x.? and x.unwrap()`); the O-/P- shapes prove the `or` and
+# present-arm paths still evaluate the RHS exactly as the interpreter does.
+# No globals and no string interpolation in the probe source: the marker
+# count/placement IS the RHS-evaluation evidence (a global counter made the
+# probe sensitive to module-global resolution under SIMPLE_LIB=src, and brace
+# interpolation in spec string literals is resolved by a concurrently
+# refactored frontend — 2026-11-28).
+fn write_dotq_probe() -> text:
+    write_probe_file("dotq_probe.spl",
+        "fn side_effect() -> bool:\n" +
+        "    print(\"RHS-RAN\")\n" +
+        "    true\n" +
+        "\n" +
+        "fn main() -> i64:\n" +
+        "    val absent: text? = nil\n" +
+        "    val present: text? = Some(\"p\")\n" +
+        "    val a = absent.? and side_effect()\n" +
+        "    if a:\n" +
+        "        print(\"A-RES=true\")\n" +
+        "    else:\n" +
+        "        print(\"A-RES=false\")\n" +
+        "    val c = absent.? and absent.unwrap() == \"x\"\n" +
+        "    if c:\n" +
+        "        print(\"C-RES=true\")\n" +
+        "    else:\n" +
+        "        print(\"C-RES=false\")\n" +
+        "    val o = absent.? or side_effect()\n" +
+        "    if o:\n" +
+        "        print(\"O-RES=true\")\n" +
+        "    else:\n" +
+        "        print(\"O-RES=false\")\n" +
+        "    val p = present.? and side_effect()\n" +
+        "    if p:\n" +
+        "        print(\"P-RES=true\")\n" +
+        "    else:\n" +
+        "        print(\"P-RES=false\")\n" +
+        "    0\n")
+
+# Warning-free lint target: the acceptance shape of
+# lint_forced_jit_clean_target_unwrap_none_2026-11-27 (verified warning-free
+# under the repository lint config on the interpreter lane).
+fn write_clean_lint_target() -> text:
+    write_probe_file("clean_probe.spl", "fn main():\n    print \"ok\"\n")
+
+fn run_sh_child(script: text) -> (text, text, i64):
+    # 15 min per child: a forced-JIT lint child compiles the whole lint
+    # closure (~40 s warm cache, minutes cold) and the interpreter-lane child
+    # takes ~3-10 min under build-farm load; the sibling lane contract spec
+    # (seed_lint_entry_stays_on_jit_lane_spec.spl) uses an unbounded
+    # process_run for the same reason.
+    process_run_timeout("sh", ["-c", script], 900000)
+
+fn receipt_line(combined: text) -> text:
+    for raw in combined.split("\n"):
+        val line = raw.trim()
+        if line.contains("[engine-receipt]"):
+            return line
+    ""
+
+fn receipt_field(line: text, key: text) -> text:
+    val marker = key + "="
+    val start = line.index_of(marker)
+    if start < 0:
+        return ""
+    val rest = line.substring(start + marker.len(), line.len())
+    val stop = rest.index_of(" ")
+    if stop < 0:
+        return rest
+    rest.substring(0, stop)
+
+describe "value-position .? short-circuits on the seed JIT lane":
+    # @manual scenario evidence
+
+    it "an absent .? LHS does not evaluate the and-RHS, identically on both lanes":
+        step("Write the behavioral probe and run it on the forced JIT lane and the interpreter lane")
+        val probe = write_dotq_probe()
+        val bin = simple_binary()
+        val (jit_out, jit_err, jit_code) = run_sh_child(
+            "SIMPLE_EXECUTION_MODE=jit \"{bin}\" run \"{probe}\"")
+        val (interp_out, _, interp_code) = run_sh_child(
+            "SIMPLE_EXECUTION_MODE=interpreter \"{bin}\" run \"{probe}\"")
+        step("Both lanes exit 0 and agree byte-for-byte")
+        expect(jit_code).to_equal(0)
+        expect(interp_code).to_equal(0)
+        expect(jit_out == interp_out).to_equal(true)
+        step("The absent arm never ran the RHS; or/present arms ran it once each (RHS-RAN markers)")
+        val expected = "A-RES=false\nC-RES=false\nRHS-RAN\nO-RES=true\nRHS-RAN\nP-RES=true"
+        expect(jit_out.contains(expected)).to_equal(true)
+        if not jit_out.contains(expected):
+            print "probe stdout:\n{jit_out}\nstderr:\n{jit_err}"
+
+    it "lint of a warning-free target is clean on the forced JIT lane, byte-identical to the interpreter lane":
+        step("Write the warning-free target and lint it on the forced JIT lane")
+        val target = write_clean_lint_target()
+        val bin = simple_binary()
+        val (jit_out, jit_err, jit_code) = run_sh_child(
+            "SIMPLE_EXECUTION_MODE=jit SIMPLE_ENGINE_RECEIPT=1 \"{bin}\" lint \"{target}\"")
+        step("The JIT child receipts the compiled engine with no demotion and lints clean")
+        expect(jit_code).to_equal(0)
+        val line = receipt_line(jit_out + jit_err)
+        expect(line == "").to_equal(false)
+        expect(receipt_field(line, "engine")).to_equal("cranelift-jit")
+        expect(receipt_field(line, "demoted")).to_equal("no")
+        step("Lint the same target on the interpreter lane")
+        val (interp_out, _, interp_code) = run_sh_child(
+            "SIMPLE_EXECUTION_MODE=interpreter \"{bin}\" lint \"{target}\"")
+        expect(interp_code).to_equal(0)
+        step("Both lanes print the byte-identical zero-error clean verdict on stdout")
+        expect(jit_out.contains("Lint passed: all files clean")).to_equal(true)
+        if jit_out != interp_out:
+            print "jit stdout:\n{jit_out}\ninterp stdout:\n{interp_out}"
+        expect(jit_out == interp_out).to_equal(true)

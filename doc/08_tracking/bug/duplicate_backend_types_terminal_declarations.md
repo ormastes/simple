@@ -189,3 +189,11 @@ duplicate-terminal check in `scripts/check/` or lint) is untouched and
 remains OPEN, as the header states. No spec run attempted — `bin/simple.exe
 test` is blocked repo-wide at release/1.0.0 HEAD by
 `unknown decorator '@representation_boundary'` (pinned seed vs cfd89933699).
+
+## Detector Implementation & Verification (2026-11-28, Lane C)
+
+- **Detector added (`W-DUP-ENUM-001`):** Implemented `src/compiler/35.semantics/lint/duplicate_enum_variants.spl` (re-exported from `src/compiler/35.semantics/lint/__init__.spl`) with `extract_enum_declarations`, `enum_variant_order_divergences`, `check_duplicate_enum_variants`, and `check_duplicate_enum_variants_files`. Flags any enum declared in multiple non-vendored terminal modules sharing >= 2 variant names with divergent positional indices (catching the exact `BackendKind` `Byl` index 6 vs 0 sabotage case while ignoring identical-order declarations, disjoint same-named enums, and `export use` re-exports).
+- **Verified single-terminal compiler modules:** Re-ran `duplicate_backend_types_prevention_spec.spl` (2/2 PASS), `duplicate_backend_types_terminal_spec.spl` (3/3 PASS), and added:
+  - Reproducer: `test/01_unit/compiler/lint/duplicate_enum_variants_spec.spl` (7/7 PASS)
+  - Prevention: `test/01_unit/compiler/lint/duplicate_enum_variants_prevention_spec.spl` (2/2 PASS, scanning all live compiler `backend_types`, `driver_core_modes`, `link`, `build_mode`, and `error` modules with 0 divergent findings).
+- Status: `FIXED`.

@@ -8,13 +8,16 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundati
     WEB_BUDGET_SITE_PAINT_SCROLLBARS, WEB_BUDGET_SITE_PAINT_TEXT
 }
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{Style, split_top_level_commas, shadow_length_prefix, shadow_layer_alpha}
-use std.gc_async_mut.gpu.browser_engine.form_control_chrome.{chrome_checkable_spans, chrome_frame_spans}
+use std.gc_async_mut.gpu.browser_engine.form_control_chrome.{chrome_checkable_spans, chrome_disc_spans, chrome_frame_spans}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_primitives.{
     fb_border_sides_styled_clip, fb_select_chevron_clip, fb_textarea_grip_clip, fb_chrome_spans_clip, fb_rounded_rect_corners_opacity_clip,
-    fb_text_ttf_available, fb_text_ttf_ascent_px, fb_text_ttf_line_baseline_y,
-    fb_text_ttf_aa_clip_range_adv, radial_gradient_box_paintable, canvas_background_extent,
+    radial_gradient_box_paintable, canvas_background_extent,
     canvas_gradient_source, canvas_gradient_layers,
     background_gradient_layers_paintable, background_gradient_layers, fb_gradient_layers_clip
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_gradients_text.{
+    ttf_available, ttf_ascent_px_milli, ttf_line_baseline_y_milli,
+    ttf_measure_text_px_milli, ttf_paint_text_aa_clip_range_adv
 }
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_core.{web_bitmap_paint_lane}
 export use std.gc_async_mut.gpu.browser_engine.layout_insets.{ancestor_bottom_inset}
@@ -24,7 +27,7 @@ export use std.gc_async_mut.gpu.browser_engine.layout_insets.{ancestor_bottom_in
 # there directly and never imports this CPU framebuffer owner.
 export use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_text_control.{input_uses_accent_color, checkable_author_box_hidden, input_is_checked, input_paints_text, input_accepts_text_overlay, input_text_prefix, INPUT_PASSWORD_MASK_GLYPH, input_text_glyph_advance, input_text_for_paint, InputTextPaintPlan, InputTextVisualMap, INPUT_TEXT_SELECTION_ALPHA, input_caret_color, input_selection_color, input_text_visual_map, input_text_x_at_source_byte, input_text_source_byte_at_x, input_text_paint_plan, input_text_paint_plan_with_overlay, input_value_vector_x, html_image_fit_size}
 use std.common.gpu.simpleos_host_gpu_draw_ir.{SimpleOsHostGpuImageResource}
-use std.gpu.engine2d.color.{blend as engine2d_color_blend}
+use std.gc_async_mut.gpu.engine2d.color.{blend as engine2d_color_blend}
 use common.string_builder.{StringBuilder}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_paint_tiles.{
     TILE_MARGIN_PX, TileOp, tile_bin_ops, tile_count, tile_grid_make,
@@ -1316,24 +1319,53 @@ fn _fb_paint_img_clip(out: [u32], fbw: i32, fbh: i32, nd: HNode, st: Style, x: i
     # Chrome composites an <img> with its own opacity as a one-member layer:
     # the layer pixel is the image pixel, restored at round(opacity * 255).
     val alpha8 = css_opacity_group_alpha8(opacity_pct)
+    val in_l = st.border_l + st.pad_l
+    val in_t = st.border_t + st.pad_t
+    val in_r = st.border_r + st.pad_r
+    val in_b = st.border_b + st.pad_b
+    val max_tl = if in_l > in_t: in_l else: in_t
+    val max_tr = if in_r > in_t: in_r else: in_t
+    val max_br = if in_r > in_b: in_r else: in_b
+    val max_bl = if in_l > in_b: in_l else: in_b
+    val raw_tl = if st.border_radius_tl_px > max_tl: st.border_radius_tl_px - max_tl else: 0
+    val raw_tr = if st.border_radius_tr_px > max_tr: st.border_radius_tr_px - max_tr else: 0
+    val raw_br = if st.border_radius_br_px > max_br: st.border_radius_br_px - max_br else: 0
+    val raw_bl = if st.border_radius_bl_px > max_bl: st.border_radius_bl_px - max_bl else: 0
+    val half_min = (if box_w < box_h: box_w else: box_h) / 2
+    val r_tl = if raw_tl < half_min: raw_tl else: half_min
+    val r_tr = if raw_tr < half_min: raw_tr else: half_min
+    val r_br = if raw_br < half_min: raw_br else: half_min
+    val r_bl = if raw_bl < half_min: raw_bl else: half_min
+    val has_radius = r_tl > 0 or r_tr > 0 or r_br > 0 or r_bl > 0
+    val left_band = if r_tl > r_bl: r_tl else: r_bl
+    val right_band = if r_tr > r_br: r_tr else: r_br
+    val top_band = if r_tl > r_tr: r_tl else: r_tr
+    val bot_band = if r_bl > r_br: r_bl else: r_br
     var res = out
     var py = y0
     # cpu-lane-loop-ok: one blend per covered pixel of the clipped image rect; bound is the visible rect area
     while py < y1:
         val sy = ((py - dy).to_i64() * im.height.to_i64() / dh.to_i64()).to_i32()
+        val row_in_band = has_radius and (py < box_y + top_band or py >= box_y + box_h - bot_band)
         var px = x0
         while px < x1:  # cpu-lane-loop-ok: row of the same clipped image rect
-            val sx = ((px - dx).to_i64() * im.width.to_i64() / dw.to_i64()).to_i32()
-            val at = py * fbw + px
-            val ip = im.pixels[sy * im.width + sx]
-            res[at] = if opacity_pct >= 100: engine2d_color_blend(ip, res[at]) else: css_opacity_group_composite_pixel(ip, res[at], alpha8)
+            val cov = if row_in_band and (px < box_x + left_band or px >= box_x + box_w - right_band):
+                rounded_rect_coverage256(px, py, box_x, box_y, box_w, box_h, r_tl, r_tr, r_br, r_bl)
+            else:
+                256
+            if cov > 0:
+                val sx = ((px - dx).to_i64() * im.width.to_i64() / dw.to_i64()).to_i32()
+                val at = py * fbw + px
+                val ip = im.pixels[sy * im.width + sx]
+                val blended = if opacity_pct >= 100: engine2d_color_blend(ip, res[at]) else: css_opacity_group_composite_pixel(ip, res[at], alpha8)
+                res[at] = if cov >= 256: blended else: engine2d_mix256(blended, res[at], cov)
             px = px + 1
         py = py + 1
     res
 
-# True when a visible positioned box (absolute, or inside a relative paint
-# root) overlaps node `oi`'s outline ring: that box paints after the outline in
-# Chrome, so the raster keeps such an outline under passes 2-4.
+# True when a visible positioned box (absolute, fixed, or inside a relative
+# paint root) overlaps node `oi`'s outline ring: that box paints after the
+# outline in Chrome, so the raster keeps such an outline under positioned layers.
 fn _outline_overlaps_positioned(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [i32], oi: i32) -> bool:
     val ost = styles[oi]
     val grow = ost.outline_w + ost.outline_offset_px
@@ -1345,27 +1377,587 @@ fn _outline_overlaps_positioned(nodes: [HNode], styles: [Style], bx: [i32], by: 
     # cpu-lane-loop-ok: overlap scan for one deferred outline; bound is node_count
     while j < nodes.len():
         val st = styles[j]
-        if j != oi and nodes[j].tag != "#text" and st.display != "none" and (st.position_absolute or has_relative_paint_root(nodes, styles, j)):
+        if j != oi and nodes[j].tag != "#text" and st.display != "none" and (st.position_absolute or st.position_fixed or has_relative_paint_root(nodes, styles, j)):
             if bx[j] < x1 and bx[j] + bw[j] > x0 and by[j] < y1 and by[j] + bh[j] > y0:
                 return true
         j = j + 1
     false
 
-# A positioned z<=0 generated (::before/::after) box: pass 2 paints it in tree order.
+# True when `st` starts a positioned overlay stacking subtree:
+# `position: absolute`, `position: fixed`, or `position: relative`/`sticky` with `z-index != 0`.
+fn _raster_is_overlay_owner(st: Style) -> bool:
+    st.position_absolute or st.position_fixed or ((st.position_relative or st.position_sticky) and st.z_index != 0)
+
+fn _fb_aa_circle_clip(out: [u32], fbw: i32, fbh: i32, mx0: i32, my0: i32, side: i32, ring: bool, color: u32, clip: ClipRect) -> [u32]:
+    if side <= 0 or color == 0u32:
+        return out
+    val alpha = ((color >> 24) & 255u32) as i32
+    if alpha <= 0:
+        return out
+    var x0 = if mx0 > 0: mx0 else: 0
+    var y0 = if my0 > 0: my0 else: 0
+    var x1 = if mx0 + side < fbw: mx0 + side else: fbw
+    var y1 = if my0 + side < fbh: my0 + side else: fbh
+    if x0 < clip.x0: x0 = clip.x0
+    if y0 < clip.y0: y0 = clip.y0
+    if x1 > clip.x1: x1 = clip.x1
+    if y1 > clip.y1: y1 = clip.y1
+    if x1 <= x0 or y1 <= y0:
+        return out
+    val center = side * 4
+    val r_out2 = center * center
+    val stroke = if side >= 8: 8 else: 6
+    val r_in = if ring and center > stroke: center - stroke else: 0
+    val r_in2 = r_in * r_in
+    val rgb = color & 0x00FFFFFFu32
+    var res = out
+    var py = y0
+    # cpu-lane-loop-ok: 4x4 supersampled AA bullet circle/ring; bound is side (<= 12 px)
+    while py < y1:
+        var px = x0
+        while px < x1:
+            var hits = 0
+            var sy = 0
+            while sy < 4:
+                val dy = (py - my0) * 8 + sy * 2 + 1 - center
+                val dy2 = dy * dy
+                var sx = 0
+                while sx < 4:
+                    val dx = (px - mx0) * 8 + sx * 2 + 1 - center
+                    val d2 = dx * dx + dy2
+                    if d2 <= r_out2 and (not ring or d2 >= r_in2):
+                        hits = hits + 1
+                    sx = sx + 1
+                sy = sy + 1
+            if hits > 0:
+                val cov_alpha = (alpha * hits + 8) / 16
+                if cov_alpha > 0:
+                    val src = ((cov_alpha as u32) << 24) | rgb
+                    val at = py * fbw + px
+                    res[at] = engine2d_color_blend(src, res[at])
+            px = px + 1
+        py = py + 1
+    res
+
+fn _raster_list_style_token(raw: text) -> text:
+    val v = raw.trim().lower()
+    if v == "":
+        return ""
+    if v.contains("none"):
+        return "none"
+    if v.contains("decimal"):
+        return "decimal"
+    if v.contains("square"):
+        return "square"
+    if v.contains("circle"):
+        return "circle"
+    if v.contains("disc"):
+        return "disc"
+    ""
+
+fn _raster_li_marker_kind(nd: HNode, list_nd: HNode) -> text:
+    var tok = _raster_list_style_token(decl_get(nd.style_attr, "list-style-type"))
+    if tok != "": return tok
+    tok = _raster_list_style_token(decl_get(nd.style_attr, "list-style"))
+    if tok != "": return tok
+    tok = _raster_list_style_token(attr_value(nd.attrs_raw, "type"))
+    if tok != "": return tok
+    tok = _raster_list_style_token(decl_get(list_nd.style_attr, "list-style-type"))
+    if tok != "": return tok
+    tok = _raster_list_style_token(decl_get(list_nd.style_attr, "list-style"))
+    if tok != "": return tok
+    tok = _raster_list_style_token(attr_value(list_nd.attrs_raw, "type"))
+    if tok != "": return tok
+    if list_nd.tag == "ol": "decimal" else: "disc"
+
+fn _raster_li_descendant_font_identity(nodes: [HNode], styles: [Style], li_idx: i32) -> text:
+    val n = nodes.len() as i32
+    var j = li_idx + 1
+    # cpu-lane-loop-ok: pre-order subtree scan of one <li> to reuse its resolved text font identity; stops as soon as a non-empty identity or sibling outside <li> is reached
+    while j < n:
+        var cur = nodes[j].parent as i32
+        var inside = false
+        while cur >= li_idx:
+            if cur == li_idx:
+                inside = true
+                break
+            cur = nodes[cur].parent as i32
+        if not inside:
+            break
+        if styles[j].resolved_font_identity != "":
+            return styles[j].resolved_font_identity
+        j = j + 1
+    ""
+
+fn _raster_paint_li_marker(out: [u32], fbw: i32, fbh: i32, nodes: [HNode], styles: [Style], bx: [i32], by: [i32], i: i32, clip: ClipRect) -> [u32]:
+    val nd = nodes[i]
+    val st = styles[i]
+    if st.list_style_none:
+        return out
+    var list_i = nd.parent as i32
+    while list_i >= 0:  # cpu-lane-loop-ok: depth-bounded walk to nearest enclosing ul/ol/menu ancestor
+        val ltag = nodes[list_i].tag
+        if ltag == "ul" or ltag == "ol" or ltag == "menu":
+            break
+        list_i = nodes[list_i].parent as i32
+    if list_i < 0 or styles[list_i].list_style_none:
+        return out
+    if i + 1 < nodes.len() and nodes[i + 1].tag == "::marker" and nodes[i + 1].parent == i.to_i64() and styles[i + 1].display == "none":
+        return out
+    val marker_kind = _raster_li_marker_kind(nd, nodes[list_i])
+    if marker_kind == "none":
+        return out
+    val x = bx[i]
+    val y = by[i]
+    val baseline = y + st.border_t + st.pad_t + inline_line_strut_baseline_offset(st)
+    if marker_kind == "decimal":
+        var ordinal = 0
+        var k = list_i + 1
+        while k <= i:  # cpu-lane-loop-ok: sibling li count inside enclosing list up to item i
+            if nodes[k].parent == list_i.to_i64() and nodes[k].tag == "li" and styles[k].display != "none":
+                ordinal = ordinal + 1
+            k = k + 1
+        if ordinal <= 0:
+            ordinal = 1
+        if attr_present(nodes[list_i].attrs_raw, "start"):
+            val start_v = parse_int(attr_value(nodes[list_i].attrs_raw, "start"))
+            if start_v > 0:
+                ordinal = ordinal + start_v - 1
+        val label = "{ordinal}."
+        val label_blen = label.byte_len()
+        val marker_id = if st.resolved_font_identity != "": st.resolved_font_identity else: _raster_li_descendant_font_identity(nodes, styles, i)
+        val use_ttf = (not web_bitmap_paint_lane()) and st.font_size > 8 and marker_id != "" and ttf_available(marker_id, st.font_family, st.bold, st.font_style_italic)
+        if use_ttf:
+            val label_w = ttf_measure_text_px_milli(
+                label, 0, label_blen, st.font_size, st.font_size_milli,
+                marker_id, st.font_family, st.font_style_italic, st.bold
+            )
+            val mx = x - 5 - label_w
+            return ttf_paint_text_aa_clip_range_adv(
+                out, fbw, fbh, mx, baseline, label, 0, label_blen, st.fg,
+                st.font_size, marker_id, st.font_family,
+                st.font_style_italic, st.bold, clip, [], st.font_size_milli
+            )
+        val scale = web_glyph_scale(st.font_size)
+        val adv = style_text_advance(st)
+        val space_adv = style_space_advance(st)
+        val label_w = style_text_line_advance_width_with([], label, 0, label_blen, adv, space_adv)
+        val mx = x - 5 - label_w
+        val by_bm = y + st.border_t + st.pad_t + text_ink_y_offset(st.font_size)
+        return fb_text_thin_scaled_clip_range(
+            out, fbw, fbh, mx, by_bm, label, 0, label_blen, st.fg,
+            scale, adv, space_adv, st.font_style_italic, st.bold, clip
+        )
+    var side = (st.font_size * 5 + 8) / 16
+    if side < 4:
+        side = 4
+    elif side > 12:
+        side = 12
+    val mx0 = x - 11
+    val cy = baseline - st.font_size / 3
+    val my0 = cy - side / 2
+    if marker_kind == "square":
+        return fb_rect_clip(out, fbw, fbh, mx0, my0, side, side, st.fg, clip)
+    if marker_kind == "circle":
+        return _fb_aa_circle_clip(out, fbw, fbh, mx0, my0, side, true, st.fg, clip)
+    if side >= 4 and side <= 7:
+        val spans = chrome_disc_spans(side, st.fg)
+        if spans.xs.len() > 0:
+            return fb_chrome_spans_clip(out, fbw, fbh, spans, mx0, my0, clip)
+    _fb_aa_circle_clip(out, fbw, fbh, mx0, my0, side, false, st.fg, clip)
+
+fn _raster_paint_node_box_and_img(
+    out: [u32], fbw: i32, fbh: i32, nodes: [HNode], styles: [Style],
+    bx: [i32], by: [i32], bw: [i32], bh: [i32], i: i32,
+    clip_cache: PaintClipCache, canvas_src: i32,
+    has_widget_panel: bool, widget_mode: bool, defer_outline: bool
+) -> [u32]:
+    val nd = nodes[i]
+    val st = styles[i]
+    val x = bx[i]
+    val y = by[i]
+    val w = bw[i]
+    val h = bh[i]
+    val skip_widget_page_bg = has_widget_panel and (nd.tag == "html" or nd.tag == "body")
+    val skip_widget_node_bg = widget_mode and (nd.has_widget_class or nd.has_icon_image_class)
+    val visible_node = st.display != "none" and not st.visibility_hidden and not content_paint_hidden_by_ancestor(nodes, styles, i)
+    val visible_box = visible_node and nd.tag != "#text" and y < fbh
+    val non_widget_mode = not widget_mode
+    var res = out
+    if visible_box:
+        # Chrome 159 rounds the native frame of an unrestyled control: it is
+        # blended from `chrome_frame_spans` in place of the box's own fill and
+        # border (the Draw IR twin is _html_draw_ir_native_frame_commands).
+        val native_frame = non_widget_mode and st.native_frame != 0 and w > 0 and h > 0
+        val checkable = non_widget_mode and checkable_author_box_hidden(nd, st)
+        val paint_bg = not native_frame and not checkable and i != canvas_src and not skip_widget_page_bg and not skip_widget_node_bg and (st.bg != 0u32 or (st.background_gradient_from != 0u32 and st.background_gradient_to != 0u32) or radial_gradient_box_paintable(st) or background_gradient_layers_paintable(st))
+        val paint_border = not native_frame and not checkable and not skip_widget_node_bg and (st.border_l > 0 or st.border_t > 0 or st.border_r > 0 or st.border_b > 0)
+        if i == canvas_src:
+            val canvas = canvas_background_extent(nodes, bx, by, bw, bh, fbw, fbh)
+            val root_layers = canvas_gradient_layers(nodes, styles, bx, by, bw, bh, i)
+            res = fb_gradient_layers_clip(res, fbw, fbh, 0, 0, canvas[0], canvas[1], root_layers, st.opacity_pct, paint_clip_at(clip_cache, i))
+        val paint_outline = (not defer_outline) and not skip_widget_node_bg and st.outline_w > 0 and st.outline_color != 0u32
+        val paint_shadow = not skip_widget_node_bg and (st.box_shadow_color != 0u32 or st.box_shadow_raw != "")
+        if skip_widget_page_bg and nd.tag == "body" and st.bg_layers_raw != "":
+            # widget pages suppress the flat page bg, but a radial-carrying
+            # body background stack is the Chromium-visible page tint:
+            # paint the linear base ramp, then the radial layers over it
+            val clip = paint_clip_at(clip_cache, i)
+            if st.background_gradient_from != 0u32 and st.background_gradient_to != 0u32:
+                res = fb_style_background_opacity_clip(res, fbw, fbh, x, y, w, h, st, clip)
+            val canvas = canvas_background_extent(nodes, bx, by, bw, bh, fbw, fbh)
+            val canvas_layers = background_gradient_layers(st.bg_layers_raw, 0, 0, canvas[0], canvas[1], st.font_size)
+            if canvas_layers.len() > 0:
+                res = fb_gradient_layers_clip(res, fbw, fbh, 0, 0, canvas[0], canvas[1], canvas_layers, st.opacity_pct, clip)
+            else:
+                res = fb_background_radial_stack_clip(res, fbw, fbh, 0, 0, canvas[0], canvas[1], st.bg_layers_raw, st.opacity_pct, clip)
+        if native_frame:
+            res = fb_chrome_spans_clip(res, fbw, fbh, chrome_frame_spans(st.native_frame, w, h, 1), x, y, paint_clip_at(clip_cache, i))
+        if st.backdrop_filter_raw != "":
+            res = _paint_backdrop_blur(res, fbw, fbh, x, y, w, h, st, paint_clip_at(clip_cache, i))
+        if paint_shadow or paint_bg or paint_border or paint_outline:
+            val clip = paint_clip_at(clip_cache, i)
+            if paint_shadow:
+                res = _paint_box_shadow_outside_box(res, fbw, fbh, x, y, w, h, st, clip)
+            if paint_bg:
+                res = fb_style_background_opacity_clip(res, fbw, fbh, x, y, w, h, st, clip)
+            if paint_border:
+                res = _paint_node_border(res, fbw, fbh, x, y, w, h, nd, st, clip)
+            if paint_outline:
+                res = fb_outline_clip(res, fbw, fbh, x, y, w, h, st.outline_w, st.outline_offset_px, st.outline_color, clip)
+        if non_widget_mode and nd.tag == "img" and not nd.has_widget_image_class and _raster_images.len() > 0:
+            res = _fb_paint_img_clip(res, fbw, fbh, nd, st, x, y, w, h, paint_clip_at(clip_cache, i))
+    if non_widget_mode and visible_node and nd.has_widget_panel_class and y < fbh:
+        val panel_h = h
+        if st.bg == 0u32 and st.background_gradient_from == 0u32:
+            res = fb_rect(res, fbw, fbh, x, y, w, panel_h, web_argb(245, 245, 245))
+        if nd.has_focused_class and st.bg == 0u32 and st.background_gradient_from == 0u32:
+            res = fb_rect(res, fbw, fbh, x, y, w, 1, web_argb(0, 102, 204))
+    if non_widget_mode and visible_node and nd.has_widget_button_class and y < fbh:
+        if st.bg == 0u32 and st.background_gradient_from == 0u32:
+            res = fb_rect(res, fbw, fbh, x, y, w, h, web_argb(203, 213, 225))
+    res
+
+fn _raster_paint_node_scrollbar(
+    out: [u32], fbw: i32, fbh: i32, nodes: [HNode], styles: [Style],
+    bx: [i32], by: [i32], bw: [i32], bh: [i32], i: i32,
+    clip_cache: PaintClipCache, widget_mode: bool
+) -> [u32]:
+    if widget_mode:
+        return out
+    val nd = nodes[i]
+    val st = styles[i]
+    if st.display != "none" and not st.visibility_hidden and not content_paint_hidden_by_ancestor(nodes, styles, i) and nd.tag != "#text" and st.overflow_auto_y and st.overflow_hidden and not st.scrollbar_width_none:
+        val x = bx[i]
+        val y = by[i]
+        val w = bw[i]
+        val h = bh[i]
+        if w >= 15 and h >= 8 and y < fbh:
+            val clip = paint_clip_at(clip_cache, i)
+            return fb_vertical_scrollbar_clip(out, fbw, fbh, x + w - st.border_r - 15, y + st.border_t, h - st.border_t - st.border_b, st.scrollbar_track_color, st.scrollbar_thumb_color, clip)
+    out
+
+fn _raster_paint_node_text_or_control(
+    out: [u32], fbw: i32, fbh: i32, nodes: [HNode], styles: [Style],
+    bx: [i32], by: [i32], bw: [i32], bh: [i32], wrap_cache: TextWrapCache,
+    i: i32, clip_cache: PaintClipCache, widget_mode: bool, chrome_widget_text: bool
+) -> [u32]:
+    val nd = nodes[i]
+    val st = styles[i]
+    val x = bx[i]
+    val y = by[i]
+    val w = bw[i]
+    val h = bh[i]
+    val visible_node = st.display != "none" and not st.visibility_hidden and not content_paint_hidden_by_ancestor(nodes, styles, i)
+    if not visible_node:
+        return out
+    val non_widget_mode = not widget_mode
+    var res = out
+    if non_widget_mode and checkable_author_box_hidden(nd, st):
+        val clip = paint_clip_at(clip_cache, i)
+        res = fb_input_accent_control_clip(
+            res, fbw, fbh, x, y, w, h,
+            attr_value(nd.attrs_raw, "type").trim().lower(),
+            input_is_checked(nd), attr_present(nd.attrs_raw, "disabled"), st.accent_color, clip
+        )
+    if non_widget_mode and nd.tag == "img" and nd.has_widget_image_class:
+        res = fb_widget_image_placeholder_clip(res, fbw, fbh, x, y, w, h, st.object_fit, st.object_position, paint_clip_at(clip_cache, i))
+    if non_widget_mode and nd.has_icon_image_class:
+        val icon_color = if st.bg != 0u32: st.bg else: web_argb(37, 99, 235)
+        res = fb_rect_clip(res, fbw, fbh, x, y, 6, 6, icon_color, paint_clip_at(clip_cache, i))
+    if non_widget_mode and nd.tag == "select" and y < fbh and y + h > 0:
+        res = fb_select_chevron_clip(
+            res, fbw, fbh, x, y, w, h,
+            st.border_r, st.fg, paint_clip_at(clip_cache, i)
+        )
+    if non_widget_mode and nd.tag == "textarea" and st.resize != "none" and y < fbh and y + h > 0:
+        res = fb_textarea_grip_clip(res, fbw, fbh, x, y, w, h, st.border_l, st.border_t, st.border_r, st.border_b, paint_clip_at(clip_cache, i))
+    if non_widget_mode and nd.tag == "svg" and y < fbh and y + h > 0:
+        res = _fb_paint_svg_rects_clip(res, fbw, fbh, nodes, styles, bx, by, bw, bh, i, paint_clip_at(clip_cache, i))
+    if non_widget_mode and nd.tag == "li" and y < fbh:
+        res = _raster_paint_li_marker(res, fbw, fbh, nodes, styles, bx, by, i, paint_clip_at(clip_cache, i))
+    if non_widget_mode and nd.tag == "input" and not input_uses_accent_color(nd) and input_paints_text(nd):
+        val scale = web_glyph_scale(st.font_size)
+        val adv = input_text_glyph_advance(nd, st)
+        val space_adv = style_space_advance(st)
+        val content_w = w - st.border_l - st.border_r - st.pad_l - st.pad_r
+        if content_w > 0:
+            val plan = input_text_paint_plan(nd, st, x, y, w, h, paint_clip_at(clip_cache, i))
+            if plan.text_value != "" and plan.baseline_y < fbh:
+                val use_ttf = (not web_bitmap_paint_lane()) and st.font_size > 8 and ttf_available(st.resolved_font_identity, st.font_family, st.bold, st.font_style_italic)
+                if use_ttf:
+                    val ttf_content_y = y + st.border_t + st.pad_t
+                    val ttf_content_h = h - st.border_t - st.border_b - st.pad_t - st.pad_b
+                    val ttf_base_y = ttf_line_baseline_y_milli(
+                        ttf_content_y, ttf_content_h, st.font_size, st.font_size_milli,
+                        st.resolved_font_identity, st.font_family, st.bold, st.font_style_italic
+                    )
+                    val input_by = style_run_byte_advances(st, plan.text_value)
+                    var input_real_w = 0
+                    # cpu-lane-loop-ok: sums one input value's byte advances; bound is its byte length
+                    for byte_advance in input_by:
+                        input_real_w = input_real_w + byte_advance
+                    val ttf_x = input_value_vector_x(plan, x + st.border_l + st.pad_l, content_w, input_real_w)
+                    val pv_blen = plan.text_value.byte_len()
+                    if st.text_shadow_color != 0u32:
+                        res = ttf_paint_text_aa_clip_range_adv(
+                            res, fbw, fbh,
+                            ttf_x + st.text_shadow_x_px, ttf_base_y + st.text_shadow_y_px,
+                            plan.text_value, 0, pv_blen, st.text_shadow_color, st.font_size,
+                            st.resolved_font_identity, st.font_family,
+                            st.font_style_italic, st.bold, plan.clip, input_by, st.font_size_milli
+                        )
+                    res = ttf_paint_text_aa_clip_range_adv(
+                        res, fbw, fbh, ttf_x, ttf_base_y,
+                        plan.text_value, 0, pv_blen, plan.color, st.font_size,
+                        st.resolved_font_identity, st.font_family,
+                        st.font_style_italic, st.bold, plan.clip, input_by, st.font_size_milli
+                    )
+                else:
+                    val pv_blen = plan.text_value.byte_len()
+                    if st.text_shadow_color != 0u32:
+                        res = fb_text_thin_scaled_clip_range(
+                            res, fbw, fbh,
+                            plan.baseline_x + st.text_shadow_x_px, plan.baseline_y + st.text_shadow_y_px,
+                            plan.text_value, 0, pv_blen, st.text_shadow_color,
+                            scale, adv, space_adv, st.font_style_italic, st.bold, plan.clip
+                        )
+                    res = fb_text_thin_scaled_clip_range(
+                        res, fbw, fbh, plan.baseline_x, plan.baseline_y,
+                        plan.text_value, 0, pv_blen, plan.color,
+                        scale, adv, space_adv, st.font_style_italic, st.bold, plan.clip
+                    )
+    if nd.tag == "#text" and not html_text_paint_fully_transparent(nd, st):
+        val node_starts = wrap_cache.starts[i]
+        val node_ends = wrap_cache.ends[i]
+        val line_count = node_starts.len()
+        val last_wrap_end = if line_count > 0: node_ends[line_count - 1] else: 0
+        # Match the layout measure: white-space:pre/nowrap preserves raw text,
+        # and white-space:pre-wrap / <textarea> keeps newlines when layout did.
+        val use_raw_text = st.white_space_nowrap or (st.white_space_newline and (nd.text_data == nd.text_trimmed or last_wrap_end > nd.text_trimmed.byte_len()))
+        val raw_txt: text = if use_raw_text: nd.text_data else: nd.text_trimmed
+        val transformed_txt = apply_text_transform_for_paint(raw_txt, st.text_transform)
+        val txt = if st.direction_rtl: bidi_visual_text_for_rtl(transformed_txt) else: transformed_txt
+        if txt.byte_len() > 0 and y < fbh:
+            val lh = style_line_h(st)
+            if not chrome_widget_text:
+                if widget_mode:
+                    res = fb_widget_chrome_rects(res, fbw, fbh, widget_offset_text_node_rects(nodes, styles, bx, by, bw, wrap_cache, i, fbw, fbh))
+                else:
+                    val scale = web_glyph_scale(st.font_size)
+                    val adv = style_text_advance(st)
+                    val space_adv = style_space_advance(st)
+                    val use_ttf = (not web_bitmap_paint_lane()) and st.font_size > 8 and ttf_available(st.resolved_font_identity, st.font_family, st.bold, st.font_style_italic)
+                    val text_x = if use_ttf: x else: (x + text_ink_x_offset(st.font_size))
+                    var ly = if use_ttf: y else: (y + text_ink_y_offset(st.font_size))
+                    if line_count > 0:
+                        val clip = paint_clip_at(clip_cache, i)
+                        val txt_by = style_run_byte_advances(st, txt)
+                        val ttf_asc = if use_ttf: ttf_ascent_px_milli(st.font_size, st.font_size_milli, st.resolved_font_identity, st.font_family, st.bold, st.font_style_italic) else: 0
+                        var line_i = 0
+                        # cpu-lane-loop-ok: per-wrapped-line glyph emission for one #text node on the normal path; bound is line_count from the wrap cache and it stops early at ly >= fbh
+                        while line_i < line_count and ly < fbh:
+                            val draw_txt = if st.text_overflow_ellipsis and line_i == 0: ellipsize_text_for_width(txt, node_starts[line_i], node_ends[line_i], w - st.text_indent_px, st, adv, space_adv) else: txt
+                            val draw_start = if st.text_overflow_ellipsis and line_i == 0: 0 else: node_starts[line_i]
+                            val draw_end = if st.text_overflow_ellipsis and line_i == 0: draw_txt.byte_len() else: node_ends[line_i]
+                            val line_dx = text_line_box_dx(wrap_cache.first_line_dx, wrap_cache.line_boxes, i, line_i)
+                            val line_base_x = if line_i == 0: text_x + st.text_indent_px + line_dx else: text_x + line_dx
+                            val line_box_w = text_line_box_w(wrap_cache.first_line_dx, wrap_cache.line_boxes, i, line_i, w) - (if line_i == 0: st.text_indent_px else: 0)
+                            val line_by = if st.text_overflow_ellipsis and line_i == 0: [] else: txt_by
+                            val use_ttf_line_measure = use_ttf and line_by.is_empty()
+                            val line_w = if text_line_needs_paint_width(st, line_i, line_count): (if use_ttf_line_measure: ttf_measure_text_px_milli(draw_txt, draw_start, draw_end, st.font_size, st.font_size_milli, st.resolved_font_identity, st.font_family, st.font_style_italic, st.bold) else: style_text_line_advance_width_with(line_by, draw_txt, draw_start, draw_end, adv, space_adv)) else: 0
+                            val line_text_x = if line_count == 1 and text_rtl_run_starts_box(nodes[i], st, w, txt == transformed_txt): line_base_x else: text_line_aligned_x(line_base_x, line_box_w, line_w, st, line_i, line_count)
+                            if use_ttf:
+                                val base_y = ly + inline_line_strut_baseline_offset(st)
+                                if st.text_shadow_color != 0u32:
+                                    res = ttf_paint_text_aa_clip_range_adv(res, fbw, fbh, line_text_x + st.text_shadow_x_px, base_y + st.text_shadow_y_px, draw_txt, draw_start, draw_end, st.text_shadow_color, st.font_size, st.resolved_font_identity, st.font_family, st.font_style_italic, st.bold, clip, line_by, st.font_size_milli)
+                                res = ttf_paint_text_aa_clip_range_adv(res, fbw, fbh, line_text_x, base_y, draw_txt, draw_start, draw_end, st.fg, st.font_size, st.resolved_font_identity, st.font_family, st.font_style_italic, st.bold, clip, line_by, st.font_size_milli)
+                                if st.text_decoration_underline or st.text_decoration_overline or st.text_decoration_line_through:
+                                    val underline_w = line_w
+                                    val ul_gap = if st.font_size / 10 > 1: st.font_size / 10 else: 1
+                                    val underline_y = base_y + ul_gap + st.text_underline_offset_px
+                                    val underline_color = if st.text_decoration_color != 0u32: st.text_decoration_color else: st.fg
+                                    if st.text_decoration_underline:
+                                        res = fb_text_underline_clip(res, fbw, fbh, line_text_x, underline_y, underline_w, style_decoration_thickness_px(st), st.text_decoration_style, underline_color, clip)
+                                    if st.text_decoration_overline:
+                                        res = fb_text_underline_clip(res, fbw, fbh, line_text_x, base_y - ttf_asc, underline_w, style_decoration_thickness_px(st), st.text_decoration_style, underline_color, clip)
+                                    if st.text_decoration_line_through:
+                                        val strike_up = if st.font_size * 3 / 10 > 1: st.font_size * 3 / 10 else: 1
+                                        res = fb_text_underline_clip(res, fbw, fbh, line_text_x, base_y - strike_up, underline_w, style_decoration_thickness_px(st), st.text_decoration_style, underline_color, clip)
+                            else:
+                                if st.text_shadow_color != 0u32:
+                                    res = fb_text_thin_scaled_clip_range_adv(res, fbw, fbh, line_text_x + st.text_shadow_x_px, ly + st.text_shadow_y_px, draw_txt, draw_start, draw_end, st.text_shadow_color, scale, adv, space_adv, st.font_style_italic, st.bold, clip, line_by)
+                                res = fb_text_thin_scaled_clip_range_adv(res, fbw, fbh, line_text_x, ly, draw_txt, draw_start, draw_end, st.fg, scale, adv, space_adv, st.font_style_italic, st.bold, clip, line_by)
+                                if st.text_decoration_underline or st.text_decoration_overline or st.text_decoration_line_through:
+                                    val underline_w = line_w
+                                    val underline_y = ly + 7 * scale + st.text_underline_offset_px
+                                    val underline_color = if st.text_decoration_color != 0u32: st.text_decoration_color else: st.fg
+                                    if st.text_decoration_underline:
+                                        res = fb_text_underline_clip(res, fbw, fbh, line_text_x, underline_y, underline_w, style_decoration_thickness_px(st), st.text_decoration_style, underline_color, clip)
+                                    if st.text_decoration_overline:
+                                        res = fb_text_underline_clip(res, fbw, fbh, line_text_x, ly, underline_w, style_decoration_thickness_px(st), st.text_decoration_style, underline_color, clip)
+                                    if st.text_decoration_line_through:
+                                        res = fb_text_underline_clip(res, fbw, fbh, line_text_x, ly + 4 * scale, underline_w, style_decoration_thickness_px(st), st.text_decoration_style, underline_color, clip)
+                            line_i = line_i + 1
+                            ly = ly + lh
+    res
+
+fn _raster_paint_sc_children(
+    out: [u32], fbw: i32, fbh: i32, nodes: [HNode], styles: [Style],
+    bx: [i32], by: [i32], bw: [i32], bh: [i32], wrap_cache: TextWrapCache,
+    clip_cache: PaintClipCache, canvas_src: i32, has_widget_panel: bool,
+    widget_mode: bool, chrome_widget_text: bool,
+    sc_root: i32, want_sign: i32,
+    node_parent_sc: [i32], overlay_roots: [i32], overlay_root_count: i32,
+    owner_first: [i32], owner_next: [i32], nonpos_float: [bool]
+) -> [u32]:
+    var matches: [i32] = []
+    var k = 0
+    # cpu-lane-loop-ok: gathers direct child overlay roots of stacking context sc_root for the given z sign; bound is overlay_root_count
+    while k < overlay_root_count:
+        val r = overlay_roots[k]
+        if node_parent_sc[r] == sc_root:
+            val z = styles[r].z_index
+            if (want_sign < 0 and z < 0) or (want_sign == 0 and z == 0) or (want_sign > 0 and z > 0):
+                matches.push(r)
+        k = k + 1
+    if matches.len() == 0:
+        return out
+    val ordered = if want_sign == 0: matches else: _sort_positive_z_indices(matches, matches.len() as i32, styles)
+    val site = if want_sign > 0: WEB_BUDGET_SITE_PAINT_ABSOLUTE_HIGH_Z else: WEB_BUDGET_SITE_PAINT_ABSOLUTE_LOW_Z
+    var res = out
+    var idx = 0
+    # cpu-lane-loop-ok: paints each child overlay stacking subtree in ascending z-index / tree order; bound is ordered.len()
+    while idx < ordered.len():
+        if _web_budget_expired_at(site):
+            break
+        val r = ordered[idx]
+        res = _raster_paint_overlay_subtree(
+            res, fbw, fbh, nodes, styles, bx, by, bw, bh, wrap_cache,
+            clip_cache, canvas_src, has_widget_panel, widget_mode, chrome_widget_text,
+            r, node_parent_sc, overlay_roots, overlay_root_count,
+            owner_first, owner_next, nonpos_float
+        )
+        idx = idx + 1
+    res
+
+fn _raster_paint_overlay_subtree(
+    out: [u32], fbw: i32, fbh: i32, nodes: [HNode], styles: [Style],
+    bx: [i32], by: [i32], bw: [i32], bh: [i32], wrap_cache: TextWrapCache,
+    clip_cache: PaintClipCache, canvas_src: i32, has_widget_panel: bool,
+    widget_mode: bool, chrome_widget_text: bool,
+    r: i32, node_parent_sc: [i32], overlay_roots: [i32], overlay_root_count: i32,
+    owner_first: [i32], owner_next: [i32], nonpos_float: [bool]
+) -> [u32]:
+    var res = out
+    # 1. Paint root `r`'s own box + replaced image first.
+    res = _raster_paint_node_box_and_img(
+        res, fbw, fbh, nodes, styles, bx, by, bw, bh, r,
+        clip_cache, canvas_src, has_widget_panel, widget_mode, false
+    )
+    val creates_sc = styles[r].z_index != 0
+    # 2. If `r` forms a stacking context (z != 0), paint its z < 0 child contexts before its flow content.
+    if creates_sc:
+        res = _raster_paint_sc_children(
+            res, fbw, fbh, nodes, styles, bx, by, bw, bh, wrap_cache,
+            clip_cache, canvas_src, has_widget_panel, widget_mode, chrome_widget_text,
+            r, -1, node_parent_sc, overlay_roots, overlay_root_count,
+            owner_first, owner_next, nonpos_float
+        )
+    # 3. Paint non-positioned descendant boxes (normal blocks -> floats -> relative z=0 roots) owned by `r`.
+    var has_float_or_rel = false
+    var cur = owner_first[r]
+    # cpu-lane-loop-ok: normal-flow boxes inside overlay root r; bound is |subtree(r)|
+    while cur >= 0:
+        if cur != r:
+            if nonpos_float[cur] or has_relative_paint_root(nodes, styles, cur):
+                has_float_or_rel = true
+            else:
+                res = _raster_paint_node_box_and_img(
+                    res, fbw, fbh, nodes, styles, bx, by, bw, bh, cur,
+                    clip_cache, canvas_src, has_widget_panel, widget_mode, false
+                )
+        cur = owner_next[cur]
+    if has_float_or_rel:
+        cur = owner_first[r]
+        # cpu-lane-loop-ok: non-positioned floats inside overlay root r; bound is |subtree(r)|
+        while cur >= 0:
+            if cur != r and nonpos_float[cur] and not has_relative_paint_root(nodes, styles, cur):
+                res = _raster_paint_node_box_and_img(
+                    res, fbw, fbh, nodes, styles, bx, by, bw, bh, cur,
+                    clip_cache, canvas_src, has_widget_panel, widget_mode, false
+                )
+            cur = owner_next[cur]
+        cur = owner_first[r]
+        # cpu-lane-loop-ok: relative z=0 boxes inside overlay root r; bound is |subtree(r)|
+        while cur >= 0:
+            if cur != r and has_relative_paint_root(nodes, styles, cur):
+                res = _raster_paint_node_box_and_img(
+                    res, fbw, fbh, nodes, styles, bx, by, bw, bh, cur,
+                    clip_cache, canvas_src, has_widget_panel, widget_mode, false
+                )
+            cur = owner_next[cur]
+    # 4. Scrollbars for nodes owned by `r`.
+    cur = owner_first[r]
+    # cpu-lane-loop-ok: scrollbars inside overlay root r; bound is |subtree(r)|
+    while cur >= 0:
+        res = _raster_paint_node_scrollbar(res, fbw, fbh, nodes, styles, bx, by, bw, bh, cur, clip_cache, widget_mode)
+        cur = owner_next[cur]
+    # 5. Text, form controls, inline SVGs, and list markers owned by `r`.
+    cur = owner_first[r]
+    # cpu-lane-loop-ok: text/control/marker emission inside overlay root r; bound is |subtree(r)|
+    while cur >= 0:
+        if _web_budget_expired_at(WEB_BUDGET_SITE_PAINT_TEXT):
+            break
+        res = _raster_paint_node_text_or_control(
+            res, fbw, fbh, nodes, styles, bx, by, bw, bh, wrap_cache,
+            cur, clip_cache, widget_mode, chrome_widget_text
+        )
+        cur = owner_next[cur]
+    # 6. If `r` forms a stacking context, paint its z == 0 and z > 0 child stacking contexts on top.
+    if creates_sc:
+        res = _raster_paint_sc_children(
+            res, fbw, fbh, nodes, styles, bx, by, bw, bh, wrap_cache,
+            clip_cache, canvas_src, has_widget_panel, widget_mode, chrome_widget_text,
+            r, 0, node_parent_sc, overlay_roots, overlay_root_count,
+            owner_first, owner_next, nonpos_float
+        )
+        res = _raster_paint_sc_children(
+            res, fbw, fbh, nodes, styles, bx, by, bw, bh, wrap_cache,
+            clip_cache, canvas_src, has_widget_panel, widget_mode, chrome_widget_text,
+            r, 1, node_parent_sc, overlay_roots, overlay_root_count,
+            owner_first, owner_next, nonpos_float
+        )
+    res
+
+# A positioned z<=0 generated (::before/::after) box: tree-order Layer 1 paints it.
 fn _raster_generated_low_z(styles: [Style], i: i32, gen_start: i32) -> bool:
     gen_start >= 0 and i >= gen_start and styles[i].position_absolute and styles[i].z_index <= 0
 
 fn _paint_passes(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32], bh: [i32], wrap_cache: TextWrapCache, fb: [u32], fbw: i32, fbh: i32, widget_mode: bool) -> [u32]:
     var out = fb
     # Reserve roughly half of whatever time remains in the paint stage for the
-    # text pass. Draw order requires backgrounds/structural passes to run
-    # first (text must land on top), but on a large real page those passes
-    # alone can consume the entire remaining budget before the text pass —
-    # the actually-visible content — ever gets a turn, leaving a degraded
-    # render blank even though real geometry was computed. Restored to the
-    # full paint deadline before the text pass below. In the common case
-    # (budget never trips) this never matters: every pass finishes long
-    # before either deadline.
+    # text and overlay passes so box passes cannot starve visible foreground content.
     val paint_now_us = _web_budget_clock.now_micros()
     val paint_deadline_us = _web_render_deadline_us
     if paint_deadline_us > paint_now_us:
@@ -1378,542 +1970,171 @@ fn _paint_passes(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32
     # Outside widget mode a root gradient list is the canvas background: it
     # paints the canvas (positioned on the html box) instead of its own box.
     val canvas_src = if widget_mode: -1 else: canvas_gradient_source(nodes, styles)
-    # backgrounds first (document order = back to front): CSS 2.2 Appendix E
-    # Step 4 paints non-float normal-flow blocks (`flow_phase == 0`), then Step 5
-    # paints non-positioned float subtrees (`flow_phase == 1`) before relative /
-    # positioned layers and Pass 6 text.
+    # Classify stacking context owners (CSS 2.2 Appendix E) in tree order once:
+    # - Layer -1: z < 0 positioned subtrees (painted after root/body canvas, before Layer 0)
+    # - Layer  0: normal-flow blocks -> non-positioned floats -> relative (z=0) boxes -> Layer 0 scrollbars & text/controls/markers
+    # - Layer  1: z == 0 / auto positioned subtrees in tree order (boxes -> descendants -> scrollbars -> text/controls)
+    # - Layer  2: z > 0 positioned subtrees sorted ascending by z-index (boxes -> descendants -> scrollbars -> text/controls)
     val node_count = nodes.len()
+    val gen_start = html_generated_start(nodes)
+    val tree_order: [i32] = if gen_start >= 0: html_tree_order(nodes, build_child_index(nodes)) else: []
+    val tree_count = if gen_start >= 0: tree_order.len() else: node_count
     var nonpos_float: [bool] = [false; node_count]
-    val pass1_gen_start = html_generated_start(nodes)
-    val pass1_order: [i32] = if pass1_gen_start >= 0: html_tree_order(nodes, build_child_index(nodes)) else: []
-    val pass1_count = if pass1_gen_start >= 0: pass1_order.len() else: node_count
-    var fi = 0
-    # cpu-lane-loop-ok: classifies non-positioned float subtrees in tree order once per paint; bound is node_count
-    while fi < pass1_count:
-        val fnode = if pass1_gen_start >= 0: pass1_order[fi] else: fi
+    var overlay_owner: [i32] = [-1; node_count]
+    var stacking_ctx_of: [i32] = [-1; node_count]
+    var node_parent_sc: [i32] = [-1; node_count]
+    var owner_first: [i32] = [-1; node_count]
+    var owner_last: [i32] = [-1; node_count]
+    var owner_next: [i32] = [-1; node_count]
+    var overlay_roots: [i32] = []
+    var has_root_neg_z = false
+    var has_root_zero_z = false
+    var has_root_pos_z = false
+    var ti = 0
+    # cpu-lane-loop-ok: classifies non-positioned floats and CSS 2.2 stacking owners in tree order once per paint; bound is node_count
+    while ti < tree_count:
+        val fnode = if gen_start >= 0: tree_order[ti] else: ti
         val fst = styles[fnode]
-        if not fst.position_absolute and not has_relative_paint_root(nodes, styles, fnode):
-            val fparent = nodes[fnode].parent as i32
-            if fst.float_mode != 0 or (fparent >= 0 and nonpos_float[fparent]):
+        val fparent = nodes[fnode].parent as i32
+        val parent_sc = if fparent >= 0: stacking_ctx_of[fparent] else: -1
+        val parent_own = if fparent >= 0: overlay_owner[fparent] else: -1
+        val is_own = _raster_is_overlay_owner(fst)
+        val own = if is_own: fnode else: parent_own
+        overlay_owner[fnode] = own
+        if is_own:
+            node_parent_sc[fnode] = parent_sc
+            stacking_ctx_of[fnode] = if fst.z_index != 0: fnode else: parent_sc
+            overlay_roots.push(fnode)
+            if parent_sc < 0:
+                if fst.z_index < 0: has_root_neg_z = true
+                elif fst.z_index == 0: has_root_zero_z = true
+                else: has_root_pos_z = true
+        else:
+            stacking_ctx_of[fnode] = parent_sc
+        if own >= 0:
+            if owner_first[own] < 0:
+                owner_first[own] = fnode
+            else:
+                owner_next[owner_last[own]] = fnode
+            owner_last[own] = fnode
+        if not is_own and not has_relative_paint_root(nodes, styles, fnode):
+            if fst.float_mode != 0 or (fparent >= 0 and overlay_owner[fparent] == own and nonpos_float[fparent]):
                 nonpos_float[fnode] = true
-        fi = fi + 1
-    var i = 0
-    var has_absolute_node = false
-    # In-flow outlines paint in Chrome's outline phase: after every in-flow
-    # box of the context, so a later in-flow sibling never covers them, and
-    # before positioned boxes (passes 2-4), which still do.
+        ti = ti + 1
+    val overlay_root_count = overlay_roots.len() as i32
+    var canvas_painted: [bool] = [false; node_count]
+    if has_root_neg_z:
+        var ci = 0
+        # cpu-lane-loop-ok: CSS 2.2 Step 1-2 root/body canvas background before negative-z positioned subtrees; bound is node_count
+        while ci < tree_count:
+            val cnode = if gen_start >= 0: tree_order[ci] else: ci
+            val ctag = nodes[cnode].tag
+            if overlay_owner[cnode] < 0 and (cnode == canvas_src or ctag == "html" or ctag == "body"):
+                out = _raster_paint_node_box_and_img(
+                    out, fbw, fbh, nodes, styles, bx, by, bw, bh, cnode,
+                    clip_cache, canvas_src, has_widget_panel, widget_mode, false
+                )
+                canvas_painted[cnode] = true
+            ci = ci + 1
+        out = _raster_paint_sc_children(
+            out, fbw, fbh, nodes, styles, bx, by, bw, bh, wrap_cache,
+            clip_cache, canvas_src, has_widget_panel, widget_mode, chrome_widget_text,
+            -1, -1, node_parent_sc, overlay_roots, overlay_root_count,
+            owner_first, owner_next, nonpos_float
+        )
+    # In-flow outlines paint after in-flow boxes/text of Layer 0 unless
+    # overlapped by a positioned box, in which case they paint before Layer 1/2.
     var flow_outlines: [i32] = []
     var flow_phase = 0
     while flow_phase < 2:
-        i = 0
-        # cpu-lane-loop-ok: fn paint pass 1 of 6 (flow_phase 0 = Step 4 normal-flow blocks, flow_phase 1 = Step 5 non-positioned float subtrees): non-absolute, non-relative-root box paint - shadow, background, border, outline plus widget panel and button fills. Bound is node_count per phase, budget-guarded via _web_budget_expired_at
-        while i < node_count:
-            # Budget guard: stop painting backgrounds on expiry; the framebuffer keeps
-            # whatever was painted so far (already sized width*height).
+        var pi = 0
+        # cpu-lane-loop-ok: fn paint pass 1 of 6 (Layer 0 flow_phase 0 = normal-flow blocks, flow_phase 1 = non-positioned floats); bound is node_count per phase, budget-guarded via _web_budget_expired_at
+        while pi < tree_count:
             if _web_budget_expired_at(WEB_BUDGET_SITE_PAINT_BACKGROUNDS):
                 break
-            val nd = nodes[i]
-            val st = styles[i]
-            if flow_phase == 0 and st.position_absolute:
-                has_absolute_node = true
-            val in_phase = if flow_phase == 0: not nonpos_float[i] else: nonpos_float[i]
-            val x = bx[i]
-            val y = by[i]
-            val w = bw[i]
-            val h = bh[i]
-            val skip_widget_page_bg = has_widget_panel and (nd.tag == "html" or nd.tag == "body")
-            val skip_widget_node_bg = widget_mode and (nd.has_widget_class or nd.has_icon_image_class)
-            val relative_paint_root = has_relative_paint_root(nodes, styles, i)
-            val normal_flow = in_phase and not st.position_absolute and not relative_paint_root
-            val visible_node = st.display != "none" and not st.visibility_hidden and not content_paint_hidden_by_ancestor(nodes, styles, i)
-            val visible_box = normal_flow and visible_node and nd.tag != "#text" and y < fbh
-            val non_widget_mode = not widget_mode
-            if visible_box:
-                # Chrome 159 rounds the native frame of an unrestyled control: it is
-                # blended from `chrome_frame_spans` in place of the box's own fill and
-                # border (the Draw IR twin is _html_draw_ir_native_frame_commands).
-                val native_frame = non_widget_mode and st.native_frame != 0 and w > 0 and h > 0
-                val checkable = non_widget_mode and checkable_author_box_hidden(nd, st)
-                val paint_bg = not native_frame and not checkable and i != canvas_src and not skip_widget_page_bg and not skip_widget_node_bg and (st.bg != 0u32 or (st.background_gradient_from != 0u32 and st.background_gradient_to != 0u32) or radial_gradient_box_paintable(st) or background_gradient_layers_paintable(st))
-                val paint_border = not native_frame and not checkable and not skip_widget_node_bg and (st.border_l > 0 or st.border_t > 0 or st.border_r > 0 or st.border_b > 0)
-                if i == canvas_src:
-                    val canvas = canvas_background_extent(nodes, bx, by, bw, bh, fbw, fbh)
-                    val root_layers = canvas_gradient_layers(nodes, styles, bx, by, bw, bh, i)
-                    out = fb_gradient_layers_clip(out, fbw, fbh, 0, 0, canvas[0], canvas[1], root_layers, st.opacity_pct, paint_clip_at(clip_cache, i))
-                val paint_outline = not skip_widget_node_bg and st.outline_w > 0 and st.outline_color != 0u32
-                val paint_shadow = not skip_widget_node_bg and (st.box_shadow_color != 0u32 or st.box_shadow_raw != "")
-                if skip_widget_page_bg and nd.tag == "body" and st.bg_layers_raw != "":
-                    # widget pages suppress the flat page bg, but a radial-carrying
-                    # body background stack is the Chromium-visible page tint:
-                    # paint the linear base ramp, then the radial layers over it
-                    val clip = paint_clip_at(clip_cache, i)
-                    if st.background_gradient_from != 0u32 and st.background_gradient_to != 0u32:
-                        out = fb_style_background_opacity_clip(out, fbw, fbh, x, y, w, h, st, clip)
-                    # Chrome propagates the body background to the canvas: its
-                    # radial layers are positioned on, and paint, the canvas.
-                    # A gradient-only list paints every layer (linear too); any
-                    # other list keeps the radial-only stack painter.
-                    val canvas = canvas_background_extent(nodes, bx, by, bw, bh, fbw, fbh)
-                    val canvas_layers = background_gradient_layers(st.bg_layers_raw, 0, 0, canvas[0], canvas[1], st.font_size)
-                    if canvas_layers.len() > 0:
-                        out = fb_gradient_layers_clip(out, fbw, fbh, 0, 0, canvas[0], canvas[1], canvas_layers, st.opacity_pct, clip)
-                    else:
-                        out = fb_background_radial_stack_clip(out, fbw, fbh, 0, 0, canvas[0], canvas[1], st.bg_layers_raw, st.opacity_pct, clip)
-                if native_frame:
-                    out = fb_chrome_spans_clip(out, fbw, fbh, chrome_frame_spans(st.native_frame, w, h, 1), x, y, paint_clip_at(clip_cache, i))
-                if st.backdrop_filter_raw != "":
-                    out = _paint_backdrop_blur(out, fbw, fbh, x, y, w, h, st, paint_clip_at(clip_cache, i))
-                if paint_shadow or paint_bg or paint_border or paint_outline:
-                    val clip = paint_clip_at(clip_cache, i)
-                    if paint_shadow:
-                        out = _paint_box_shadow_outside_box(out, fbw, fbh, x, y, w, h, st, clip)
-                    if paint_bg:
-                        out = fb_style_background_opacity_clip(out, fbw, fbh, x, y, w, h, st, clip)
-                    if paint_border:
-                        out = _paint_node_border(out, fbw, fbh, x, y, w, h, nd, st, clip)
-                    if paint_outline:
+            val i = if gen_start >= 0: tree_order[pi] else: pi
+            if not canvas_painted[i] and overlay_owner[i] < 0 and not has_relative_paint_root(nodes, styles, i):
+                val in_phase = if flow_phase == 0: not nonpos_float[i] else: nonpos_float[i]
+                if in_phase:
+                    val nd = nodes[i]
+                    val st = styles[i]
+                    val skip_widget_node_bg = widget_mode and (nd.has_widget_class or nd.has_icon_image_class)
+                    val visible_node = st.display != "none" and not st.visibility_hidden and not content_paint_hidden_by_ancestor(nodes, styles, i)
+                    if visible_node and nd.tag != "#text" and by[i] < fbh and not skip_widget_node_bg and st.outline_w > 0 and st.outline_color != 0u32:
                         flow_outlines.push(i)
-                if non_widget_mode and nd.tag == "img" and not nd.has_widget_image_class and _raster_images.len() > 0:
-                    out = _fb_paint_img_clip(out, fbw, fbh, nd, st, x, y, w, h, paint_clip_at(clip_cache, i))
-            if normal_flow and non_widget_mode and visible_node and nd.has_widget_panel_class and y < fbh:
-                val panel_h = h
-                if st.bg == 0u32 and st.background_gradient_from == 0u32:
-                    out = fb_rect(out, fbw, fbh, x, y, w, panel_h, web_argb(245, 245, 245))
-                if nd.has_focused_class and st.bg == 0u32 and st.background_gradient_from == 0u32:
-                    out = fb_rect(out, fbw, fbh, x, y, w, 1, web_argb(0, 102, 204))
-            if normal_flow and non_widget_mode and visible_node and nd.has_widget_button_class and y < fbh:
-                if st.bg == 0u32 and st.background_gradient_from == 0u32:
-                    out = fb_rect(out, fbw, fbh, x, y, w, h, web_argb(203, 213, 225))
-            i = i + 1
+                    out = _raster_paint_node_box_and_img(
+                        out, fbw, fbh, nodes, styles, bx, by, bw, bh, i,
+                        clip_cache, canvas_src, has_widget_panel, widget_mode, true
+                    )
+            pi = pi + 1
         flow_phase = flow_phase + 1
-    # Chrome paints them over in-flow text too, so an outline no positioned
-    # box overlaps waits for the end of pass 6; one that a positioned box
-    # overlaps paints here, under passes 2-4.
-    # ponytail: an overlapped outline still sits under pass 6 text; upgrade by
-    # moving text into a per-context foreground phase.
     var late_outlines: [i32] = []
-    # cpu-lane-loop-ok: paints the outlines pass 1 deferred, in document order; bound is the number of in-flow outlined boxes
+    # cpu-lane-loop-ok: paints the outlines pass 1 deferred when overlapped by positioned boxes; bound is flow_outlines.len()
     for oi in flow_outlines:
         val ost = styles[oi]
         if _outline_overlaps_positioned(nodes, styles, bx, by, bw, bh, oi):
             out = fb_outline_clip(out, fbw, fbh, bx[oi], by[oi], bw[oi], bh[oi], ost.outline_w, ost.outline_offset_px, ost.outline_color, paint_clip_at(clip_cache, oi))
         else:
             late_outlines.push(oi)
-    # Generated ::before/::after boxes sit after the parsed arena. When a page
-    # has any, pass 2 walks tree order and also paints a positioned z<=0
-    # generated box there, at its tree position among the relative roots
-    # (Chrome's z-0/auto layer), instead of over all of them in pass 3.
-    val gen_start = html_generated_start(nodes)
-    val pass2_order: [i32] = if gen_start >= 0: html_tree_order(nodes, build_child_index(nodes)) else: []
-    val pass2_count = if gen_start >= 0: pass2_order.len() else: node_count
     var k = 0
-    # cpu-lane-loop-ok: fn paint pass 2 of 6: the relative-paint-root boxes pass 1 deliberately skipped, painted after normal flow so position:relative subtrees land above it. Disjoint node set from pass 1, so it cannot be fused without breaking paint order. Bound is node_count, budget-guarded
-    while k < pass2_count:
-        # Budget guard: stop scanning for relative-paint-root nodes on expiry.
-        # This pass was completely unguarded — unlike every other O(node_count)
-        # paint pass — so on a large real page it silently burned the rest of
-        # the paint slice walking has_relative_paint_root/content_hidden_by_ancestor
-        # for every node before the text pass ever got a chance to run, which is
-        # why a degraded render still came out fully blank.
+    # cpu-lane-loop-ok: fn paint pass 2 of 6: Layer 0 relative-paint-root boxes (z == 0) above normal flow and below Layer 0 text / positioned overlays. Bound is node_count, budget-guarded
+    while k < tree_count:
         if _web_budget_expired_at(WEB_BUDGET_SITE_PAINT_RELATIVE_ROOTS):
             break
-        i = if gen_start >= 0: pass2_order[k] else: k
-        val nd = nodes[i]
-        val st = styles[i]
-        if (has_relative_paint_root(nodes, styles, i) and not st.position_absolute) or _raster_generated_low_z(styles, i, gen_start):
-            val x = bx[i]
-            val y = by[i]
-            val w = bw[i]
-            val h = bh[i]
-            val skip_widget_page_bg = has_widget_panel and (nd.tag == "html" or nd.tag == "body")
-            val skip_widget_node_bg = widget_mode and (nd.has_widget_class or nd.has_icon_image_class)
-            val visible_node = st.display != "none" and not st.visibility_hidden and not content_paint_hidden_by_ancestor(nodes, styles, i)
-            val visible_box = visible_node and nd.tag != "#text" and y < fbh
-            val non_widget_mode = not widget_mode
-            if visible_box:
-                # Chrome 159 rounds the native frame of an unrestyled control: it is
-                # blended from `chrome_frame_spans` in place of the box's own fill and
-                # border (the Draw IR twin is _html_draw_ir_native_frame_commands).
-                val native_frame = non_widget_mode and st.native_frame != 0 and w > 0 and h > 0
-                val checkable = non_widget_mode and checkable_author_box_hidden(nd, st)
-                val paint_bg = not native_frame and not checkable and not skip_widget_page_bg and not skip_widget_node_bg and (st.bg != 0u32 or (st.background_gradient_from != 0u32 and st.background_gradient_to != 0u32) or radial_gradient_box_paintable(st) or background_gradient_layers_paintable(st))
-                val paint_border = not native_frame and not checkable and not skip_widget_node_bg and (st.border_l > 0 or st.border_t > 0 or st.border_r > 0 or st.border_b > 0)
-                val paint_outline = not skip_widget_node_bg and st.outline_w > 0 and st.outline_color != 0u32
-                val paint_shadow = not skip_widget_node_bg and (st.box_shadow_color != 0u32 or st.box_shadow_raw != "")
-                if native_frame:
-                    out = fb_chrome_spans_clip(out, fbw, fbh, chrome_frame_spans(st.native_frame, w, h, 1), x, y, paint_clip_at(clip_cache, i))
-                if st.backdrop_filter_raw != "":
-                    out = _paint_backdrop_blur(out, fbw, fbh, x, y, w, h, st, paint_clip_at(clip_cache, i))
-                if paint_shadow or paint_bg or paint_border or paint_outline:
-                    val clip = paint_clip_at(clip_cache, i)
-                    if paint_shadow:
-                        out = _paint_box_shadow_outside_box(out, fbw, fbh, x, y, w, h, st, clip)
-                    if paint_bg:
-                        out = fb_style_background_opacity_clip(out, fbw, fbh, x, y, w, h, st, clip)
-                    if paint_border:
-                        out = _paint_node_border(out, fbw, fbh, x, y, w, h, nd, st, clip)
-                    if paint_outline:
-                        out = fb_outline_clip(out, fbw, fbh, x, y, w, h, st.outline_w, st.outline_offset_px, st.outline_color, clip)
-                if non_widget_mode and nd.tag == "img" and not nd.has_widget_image_class and _raster_images.len() > 0:
-                    out = _fb_paint_img_clip(out, fbw, fbh, nd, st, x, y, w, h, paint_clip_at(clip_cache, i))
-            if non_widget_mode and visible_node and nd.has_widget_panel_class and y < fbh:
-                val panel_h = h
-                if st.bg == 0u32 and st.background_gradient_from == 0u32:
-                    out = fb_rect(out, fbw, fbh, x, y, w, panel_h, web_argb(245, 245, 245))
-                if nd.has_focused_class and st.bg == 0u32 and st.background_gradient_from == 0u32:
-                    out = fb_rect(out, fbw, fbh, x, y, w, 1, web_argb(0, 102, 204))
-            if non_widget_mode and visible_node and nd.has_widget_button_class and y < fbh:
-                if st.bg == 0u32 and st.background_gradient_from == 0u32:
-                    out = fb_rect(out, fbw, fbh, x, y, w, h, web_argb(203, 213, 225))
+        val i = if gen_start >= 0: tree_order[k] else: k
+        if overlay_owner[i] < 0 and has_relative_paint_root(nodes, styles, i):
+            out = _raster_paint_node_box_and_img(
+                out, fbw, fbh, nodes, styles, bx, by, bw, bh, i,
+                clip_cache, canvas_src, has_widget_panel, widget_mode, false
+            )
         k = k + 1
-    var positive_z_indices: [i32] = []
-    var positive_z_count = 0
-    var positive_z_sorted = true
-    var last_positive_z = 0
-    if has_absolute_node:
-        i = 0
-        # cpu-lane-loop-ok: fn paint pass 3 of 6: position:absolute boxes with z-index <= 0, plus collection of the positive-z indices consumed by pass 4. Bound is node_count, entered only when pass 1 saw an absolute node, budget-guarded
-        while i < node_count:
-            # Budget guard: stop scanning for absolute/z-index nodes on expiry.
-            # This loop was unbounded — unlike the normal-flow background loop
-            # right above it — so a page with any position:absolute node could
-            # silently burn the rest of the paint slice here before the text
-            # pass ever ran.
-            if _web_budget_expired_at(WEB_BUDGET_SITE_PAINT_ABSOLUTE_LOW_Z):
-                break
-            val nd = nodes[i]
-            val st = styles[i]
-            if st.position_absolute and st.z_index <= 0 and not _raster_generated_low_z(styles, i, gen_start):
-                val x = bx[i]
-                val y = by[i]
-                val w = bw[i]
-                val h = bh[i]
-                val skip_widget_page_bg = has_widget_panel and (nd.tag == "html" or nd.tag == "body")
-                val skip_widget_node_bg = widget_mode and (nd.has_widget_class or nd.has_icon_image_class)
-                val visible_node = st.display != "none" and not st.visibility_hidden and not content_paint_hidden_by_ancestor(nodes, styles, i)
-                val visible_box = visible_node and nd.tag != "#text" and y < fbh
-                val non_widget_mode = not widget_mode
-                if visible_box:
-                    # Chrome 159 rounds the native frame of an unrestyled control: it is
-                    # blended from `chrome_frame_spans` in place of the box's own fill and
-                    # border (the Draw IR twin is _html_draw_ir_native_frame_commands).
-                    val native_frame = non_widget_mode and st.native_frame != 0 and w > 0 and h > 0
-                    val checkable = non_widget_mode and checkable_author_box_hidden(nd, st)
-                    val paint_bg = not native_frame and not checkable and not skip_widget_page_bg and not skip_widget_node_bg and (st.bg != 0u32 or (st.background_gradient_from != 0u32 and st.background_gradient_to != 0u32) or radial_gradient_box_paintable(st) or background_gradient_layers_paintable(st))
-                    val paint_border = not native_frame and not checkable and not skip_widget_node_bg and (st.border_l > 0 or st.border_t > 0 or st.border_r > 0 or st.border_b > 0)
-                    val paint_outline = not skip_widget_node_bg and st.outline_w > 0 and st.outline_color != 0u32
-                    val paint_shadow = not skip_widget_node_bg and (st.box_shadow_color != 0u32 or st.box_shadow_raw != "")
-                    if native_frame:
-                        out = fb_chrome_spans_clip(out, fbw, fbh, chrome_frame_spans(st.native_frame, w, h, 1), x, y, paint_clip_at(clip_cache, i))
-                    if st.backdrop_filter_raw != "":
-                        out = _paint_backdrop_blur(out, fbw, fbh, x, y, w, h, st, paint_clip_at(clip_cache, i))
-                    if paint_shadow or paint_bg or paint_border or paint_outline:
-                        val clip = paint_clip_at(clip_cache, i)
-                        if paint_shadow:
-                            out = _paint_box_shadow_outside_box(out, fbw, fbh, x, y, w, h, st, clip)
-                        if paint_bg:
-                            out = fb_style_background_opacity_clip(out, fbw, fbh, x, y, w, h, st, clip)
-                        if paint_border:
-                            out = _paint_node_border(out, fbw, fbh, x, y, w, h, nd, st, clip)
-                        if paint_outline:
-                            out = fb_outline_clip(out, fbw, fbh, x, y, w, h, st.outline_w, st.outline_offset_px, st.outline_color, clip)
-                    if non_widget_mode and nd.tag == "img" and not nd.has_widget_image_class and _raster_images.len() > 0:
-                        out = _fb_paint_img_clip(out, fbw, fbh, nd, st, x, y, w, h, paint_clip_at(clip_cache, i))
-                if non_widget_mode and visible_node and nd.has_widget_panel_class and y < fbh:
-                    val panel_h = h
-                    if st.bg == 0u32 and st.background_gradient_from == 0u32:
-                        out = fb_rect(out, fbw, fbh, x, y, w, panel_h, web_argb(245, 245, 245))
-                    if nd.has_focused_class and st.bg == 0u32 and st.background_gradient_from == 0u32:
-                        out = fb_rect(out, fbw, fbh, x, y, w, 1, web_argb(0, 102, 204))
-                if non_widget_mode and visible_node and nd.has_widget_button_class and y < fbh:
-                    if st.bg == 0u32 and st.background_gradient_from == 0u32:
-                        out = fb_rect(out, fbw, fbh, x, y, w, h, web_argb(203, 213, 225))
-            elif st.position_absolute and st.z_index > 0:
-                if positive_z_count == 0 and positive_z_indices.len() == 0:
-                    positive_z_indices = [0; node_count]
-                val current_positive_z = st.z_index
-                if positive_z_count > 0 and current_positive_z < last_positive_z:
-                    positive_z_sorted = false
-                last_positive_z = current_positive_z
-                positive_z_indices[positive_z_count] = i
-                positive_z_count = positive_z_count + 1
-            i = i + 1
-    if positive_z_count > 0:
-        if not positive_z_sorted:
-            positive_z_indices = _sort_positive_z_indices(positive_z_indices, positive_z_count, styles)
-        var positive_z_pos = 0
-        # cpu-lane-loop-ok: fn paint pass 4 of 6: the positive-z absolute boxes gathered by pass 3, walked in z-sorted order. Bound is positive_z_count (absolute nodes with z-index > 0), not node_count
-        while positive_z_pos < positive_z_count:
-            # Budget guard: stop painting positive-z absolute boxes on expiry.
-            # positive_z_count bounds this pass below node_count, so it is not
-            # runaway the way passes 1-3 were -- but "bounded" is not "free":
-            # every iteration walks content_paint_hidden_by_ancestor and can
-            # rasterise a shadow/gradient, and passes 5 (scrollbars) and 6
-            # (text) run AFTER it. Leaving this one pass unguarded is exactly
-            # how a truncated render loses its text and still reports success,
-            # so it names its site like the other five rather than being the
-            # single silent exit in the family.
-            if _web_budget_expired_at(WEB_BUDGET_SITE_PAINT_ABSOLUTE_HIGH_Z):
-                break
-            i = positive_z_indices[positive_z_pos]
-            val nd = nodes[i]
-            val st = styles[i]
-            val x = bx[i]
-            val y = by[i]
-            val w = bw[i]
-            val h = bh[i]
-            val skip_widget_page_bg = has_widget_panel and (nd.tag == "html" or nd.tag == "body")
-            val skip_widget_node_bg = widget_mode and (nd.has_widget_class or nd.has_icon_image_class)
-            val visible_node = st.display != "none" and not st.visibility_hidden and not content_paint_hidden_by_ancestor(nodes, styles, i)
-            val visible_box = visible_node and nd.tag != "#text" and y < fbh
-            val non_widget_mode = not widget_mode
-            if visible_box:
-                # Chrome 159 rounds the native frame of an unrestyled control: it is
-                # blended from `chrome_frame_spans` in place of the box's own fill and
-                # border (the Draw IR twin is _html_draw_ir_native_frame_commands).
-                val native_frame = non_widget_mode and st.native_frame != 0 and w > 0 and h > 0
-                val checkable = non_widget_mode and checkable_author_box_hidden(nd, st)
-                val paint_bg = not native_frame and not checkable and not skip_widget_page_bg and not skip_widget_node_bg and (st.bg != 0u32 or (st.background_gradient_from != 0u32 and st.background_gradient_to != 0u32) or radial_gradient_box_paintable(st) or background_gradient_layers_paintable(st))
-                val paint_border = not native_frame and not checkable and not skip_widget_node_bg and (st.border_l > 0 or st.border_t > 0 or st.border_r > 0 or st.border_b > 0)
-                val paint_outline = not skip_widget_node_bg and st.outline_w > 0 and st.outline_color != 0u32
-                val paint_shadow = not skip_widget_node_bg and (st.box_shadow_color != 0u32 or st.box_shadow_raw != "")
-                if native_frame:
-                    out = fb_chrome_spans_clip(out, fbw, fbh, chrome_frame_spans(st.native_frame, w, h, 1), x, y, paint_clip_at(clip_cache, i))
-                if st.backdrop_filter_raw != "":
-                    out = _paint_backdrop_blur(out, fbw, fbh, x, y, w, h, st, paint_clip_at(clip_cache, i))
-                if paint_shadow or paint_bg or paint_border or paint_outline:
-                    val clip = paint_clip_at(clip_cache, i)
-                    if paint_shadow:
-                        out = _paint_box_shadow_outside_box(out, fbw, fbh, x, y, w, h, st, clip)
-                    if paint_bg:
-                        out = fb_style_background_opacity_clip(out, fbw, fbh, x, y, w, h, st, clip)
-                    if paint_border:
-                        out = _paint_node_border(out, fbw, fbh, x, y, w, h, nd, st, clip)
-                    if paint_outline:
-                        out = fb_outline_clip(out, fbw, fbh, x, y, w, h, st.outline_w, st.outline_offset_px, st.outline_color, clip)
-                if non_widget_mode and nd.tag == "img" and not nd.has_widget_image_class and _raster_images.len() > 0:
-                    out = _fb_paint_img_clip(out, fbw, fbh, nd, st, x, y, w, h, paint_clip_at(clip_cache, i))
-            if non_widget_mode and visible_node and nd.has_widget_panel_class and y < fbh:
-                val panel_h = h
-                if st.bg == 0u32 and st.background_gradient_from == 0u32:
-                    out = fb_rect(out, fbw, fbh, x, y, w, panel_h, web_argb(245, 245, 245))
-                if nd.has_focused_class and st.bg == 0u32 and st.background_gradient_from == 0u32:
-                    out = fb_rect(out, fbw, fbh, x, y, w, 1, web_argb(0, 102, 204))
-            if non_widget_mode and visible_node and nd.has_widget_button_class and y < fbh:
-                if st.bg == 0u32 and st.background_gradient_from == 0u32:
-                    out = fb_rect(out, fbw, fbh, x, y, w, h, web_argb(203, 213, 225))
-            positive_z_pos = positive_z_pos + 1
-    if widget_mode:
-        out = fb_widget_chrome_rects(out, fbw, fbh, widget_frame_rects(fbw, fbh))
     if not widget_mode:
-        i = 0
-        # cpu-lane-loop-ok: fn paint pass 5 of 6: vertical scrollbar chrome for overflow-auto-y scrollports, painted above box content and below text. Bound is node_count, non-widget mode only, budget-guarded
-        while i < node_count:
-            # Budget guard: stop drawing scrollbars on expiry. This loop sits
-            # between two already-guarded passes (backgrounds above, text below)
-            # but was itself unbounded — on a large real page it could silently
-            # burn the entire remaining paint slice walking content_hidden_by_ancestor
-            # for every node before the text pass ever got a chance to run.
+        var si = 0
+        # cpu-lane-loop-ok: fn paint pass 5 of 6 (Layer 0): vertical scrollbar chrome for Layer 0 overflow-auto-y scrollports. Bound is node_count, budget-guarded
+        while si < tree_count:
             if _web_budget_expired_at(WEB_BUDGET_SITE_PAINT_SCROLLBARS):
                 break
-            val nd = nodes[i]
-            val st = styles[i]
-            if st.display != "none" and not st.visibility_hidden and not content_paint_hidden_by_ancestor(nodes, styles, i) and nd.tag != "#text" and st.overflow_auto_y and st.overflow_hidden and not st.scrollbar_width_none:
-                val x = bx[i]
-                val y = by[i]
-                val w = bw[i]
-                val h = bh[i]
-                if w >= 15 and h >= 8 and y < fbh:
-                    val clip = paint_clip_at(clip_cache, i)
-                    out = fb_vertical_scrollbar_clip(out, fbw, fbh, x + w - st.border_r - 15, y + st.border_t, h - st.border_t - st.border_b, st.scrollbar_track_color, st.scrollbar_thumb_color, clip)
-            i = i + 1
-    # Text is the actually-visible content: restore the full paint-stage
-    # deadline (undoing the halving above) so the text pass gets whatever
-    # time is left, instead of sharing what the structural passes didn't use.
+            val i = if gen_start >= 0: tree_order[si] else: si
+            if overlay_owner[i] < 0:
+                out = _raster_paint_node_scrollbar(out, fbw, fbh, nodes, styles, bx, by, bw, bh, i, clip_cache, widget_mode)
+            si = si + 1
+    # Restore full paint deadline before text and overlay passes.
     _web_budget_rearm(paint_deadline_us)
-    # text on top
-    i = 0
-    # cpu-lane-loop-ok: fn paint pass 6 of 6: the content-on-top pass - #text runs, input accent controls, input text, widget image placeholders and icon chips. Bound is node_count; text must paint after every box pass, so this cannot be fused into them
-    while i < node_count:
-        # Budget guard: stop drawing text on expiry; painted pixels are kept.
+    # Layer 0 text, form controls, inline SVGs, and list markers BEFORE z >= 0 positioned overlays.
+    var ti2 = 0
+    # cpu-lane-loop-ok: fn paint pass 6 of 6 (Layer 0 text/controls/markers): must paint after Layer 0 boxes and before Layer 1/2 overlays. Bound is node_count, budget-guarded
+    while ti2 < tree_count:
         if _web_budget_expired_at(WEB_BUDGET_SITE_PAINT_TEXT):
             break
-        val nd = nodes[i]
-        val st = styles[i]
-        val x = bx[i]
-        val y = by[i]
-        val w = bw[i]
-        val h = bh[i]
-        val visible_node = st.display != "none" and not st.visibility_hidden and not content_paint_hidden_by_ancestor(nodes, styles, i)
-        val non_widget_mode = not widget_mode
-        if non_widget_mode and visible_node and checkable_author_box_hidden(nd, st):
-            val clip = paint_clip_at(clip_cache, i)
-            out = fb_input_accent_control_clip(
-                out, fbw, fbh, x, y, w, h,
-                attr_value(nd.attrs_raw, "type").trim().lower(),
-                input_is_checked(nd), attr_present(nd.attrs_raw, "disabled"), st.accent_color, clip
+        val i = if gen_start >= 0: tree_order[ti2] else: ti2
+        if overlay_owner[i] < 0:
+            out = _raster_paint_node_text_or_control(
+                out, fbw, fbh, nodes, styles, bx, by, bw, bh, wrap_cache,
+                i, clip_cache, widget_mode, chrome_widget_text
             )
-        if non_widget_mode and visible_node and nd.tag == "img" and nd.has_widget_image_class:
-            val clip = paint_clip_at(clip_cache, i)
-            out = fb_widget_image_placeholder_clip(out, fbw, fbh, x, y, w, h, st.object_fit, st.object_position, clip)
-        if non_widget_mode and visible_node and nd.has_icon_image_class:
-            val clip = paint_clip_at(clip_cache, i)
-            val icon_color = if st.bg != 0u32: st.bg else: web_argb(37, 99, 235)
-            out = fb_rect_clip(out, fbw, fbh, x, y, 6, 6, icon_color, clip)
-        if non_widget_mode and visible_node and nd.tag == "select" and y < fbh and y + h > 0:
-            val clip = paint_clip_at(clip_cache, i)
-            out = fb_select_chevron_clip(
-                out, fbw, fbh, x, y, w, h,
-                st.border_r, st.fg, clip
-            )
-        if non_widget_mode and visible_node and nd.tag == "textarea" and st.resize != "none" and y < fbh and y + h > 0:
-            val clip = paint_clip_at(clip_cache, i)
-            out = fb_textarea_grip_clip(out, fbw, fbh, x, y, w, h, st.border_l, st.border_t, st.border_r, st.border_b, clip)
-        if non_widget_mode and visible_node and nd.tag == "svg" and y < fbh and y + h > 0:
-            val clip = paint_clip_at(clip_cache, i)
-            out = _fb_paint_svg_rects_clip(out, fbw, fbh, nodes, styles, bx, by, bw, bh, i, clip)
-        if (
-            non_widget_mode and visible_node and nd.tag == "input" and
-            not input_uses_accent_color(nd) and input_paints_text(nd)
-        ):
-            val scale = web_glyph_scale(st.font_size)
-            val adv = input_text_glyph_advance(nd, st)
-            val space_adv = style_space_advance(st)
-            val content_w = w - st.border_l - st.border_r - st.pad_l - st.pad_r
-            if content_w > 0:
-                val plan = input_text_paint_plan(
-                    nd, st, x, y, w, h, paint_clip_at(clip_cache, i)
-                )
-                if plan.text_value != "" and plan.baseline_y < fbh:
-                    val use_ttf = (not web_bitmap_paint_lane()) and st.font_size > 8 and fb_text_ttf_available(st.resolved_font_identity, st.font_family, st.bold, st.font_style_italic)
-                    if use_ttf:
-                        val ttf_content_y = y + st.border_t + st.pad_t
-                        val ttf_content_h = h - st.border_t - st.border_b - st.pad_t - st.pad_b
-                        val ttf_base_y = fb_text_ttf_line_baseline_y(
-                            ttf_content_y, ttf_content_h, st.font_size,
-                            st.resolved_font_identity, st.font_family,
-                            st.bold, st.font_style_italic
-                        )
-                        val input_by = style_run_byte_advances(st, plan.text_value)
-                        var input_real_w = 0
-                        # cpu-lane-loop-ok: sums one input value's byte advances; bound is its byte length
-                        for byte_advance in input_by:
-                            input_real_w = input_real_w + byte_advance
-                        val ttf_x = input_value_vector_x(plan, x + st.border_l + st.pad_l, content_w, input_real_w)
-                        if st.text_shadow_color != 0u32:
-                            out = fb_text_ttf_aa_clip_range_adv(
-                                out, fbw, fbh,
-                                ttf_x + st.text_shadow_x_px,
-                                ttf_base_y + st.text_shadow_y_px,
-                                plan.text_value, 0, plan.text_value.byte_len(),
-                                st.text_shadow_color, st.font_size,
-                                st.resolved_font_identity, st.font_family,
-                                st.font_style_italic, st.bold, plan.clip, input_by, st.font_size_milli
-                            )
-                        out = fb_text_ttf_aa_clip_range_adv(
-                            out, fbw, fbh, ttf_x, ttf_base_y,
-                            plan.text_value, 0, plan.text_value.byte_len(),
-                            plan.color, st.font_size,
-                            st.resolved_font_identity, st.font_family,
-                            st.font_style_italic, st.bold, plan.clip, input_by, st.font_size_milli
-                        )
-                    else:
-                        if st.text_shadow_color != 0u32:
-                            out = fb_text_thin_scaled_clip_range(
-                                out, fbw, fbh,
-                                plan.baseline_x + st.text_shadow_x_px,
-                                plan.baseline_y + st.text_shadow_y_px,
-                                plan.text_value, 0, plan.text_value.byte_len(),
-                                st.text_shadow_color, scale, adv, space_adv,
-                                st.font_style_italic, st.bold, plan.clip
-                            )
-                        out = fb_text_thin_scaled_clip_range(
-                            out, fbw, fbh, plan.baseline_x, plan.baseline_y,
-                            plan.text_value, 0, plan.text_value.byte_len(), plan.color,
-                            scale, adv, space_adv, st.font_style_italic, st.bold, plan.clip
-                        )
-        if visible_node and nd.tag == "#text" and not html_text_paint_fully_transparent(nd, st):
-            # Match the layout measure: white-space:pre/nowrap preserves raw text
-            # (leading indentation), normal flow uses trimmed text.
-            val raw_txt: text = if st.white_space_nowrap: nd.text_data else: nd.text_trimmed
-            val transformed_txt = apply_text_transform_for_paint(raw_txt, st.text_transform)
-            val txt = if st.direction_rtl: bidi_visual_text_for_rtl(transformed_txt) else: transformed_txt
-            if txt.len() > 0 and y < fbh:
-                val lh = style_line_h(st)
-                val node_starts = wrap_cache.starts[i]
-                val node_ends = wrap_cache.ends[i]
-                val line_count = node_starts.len()
-                # Per-line box (`text_line_box_dx` / `text_line_box_w`): a run that starts
-                # mid-line insets its first line only; a run beside a left
-                # float insets exactly the lines layout shortened.
-                if not chrome_widget_text:
-                    if widget_mode:
-                        out = fb_widget_chrome_rects(out, fbw, fbh, widget_offset_text_node_rects(nodes, styles, bx, by, bw, wrap_cache, i, fbw, fbh))
-                    else:
-                        val scale = web_glyph_scale(st.font_size)
-                        val adv = style_text_advance(st)
-                        val space_adv = style_space_advance(st)
-                        val use_ttf = (not web_bitmap_paint_lane()) and st.font_size > 8 and fb_text_ttf_available(st.resolved_font_identity, st.font_family, st.bold, st.font_style_italic)
-                        val text_x = x + text_ink_x_offset(st.font_size)
-                        var ly = if use_ttf: y else: (y + text_ink_y_offset(st.font_size))
-                        if line_count > 0:
-                            val clip = paint_clip_at(clip_cache, i)
-                            # ONE advance table for this run, built from the
-                            # metrics LAYOUT measured it with, and handed to
-                            # both the aligned-width call and the glyph walk
-                            # below so the two cannot disagree.
-                            val txt_by = style_run_byte_advances(st, txt)
-                            val ttf_asc = if use_ttf: fb_text_ttf_ascent_px(st.font_size, st.resolved_font_identity, st.font_family, st.bold, st.font_style_italic) else: 0
-                            var line_i = 0
-                            # cpu-lane-loop-ok: per-wrapped-line glyph emission for one #text node on the normal path; bound is line_count from the wrap cache and it stops early at ly >= fbh; scale/adv/space_adv are already hoisted above the loop
-                            while line_i < line_count and ly < fbh:
-                                val draw_txt = if st.text_overflow_ellipsis and line_i == 0: ellipsize_text_for_width(txt, node_starts[line_i], node_ends[line_i], w - st.text_indent_px, st, adv, space_adv) else: txt
-                                val draw_start = if st.text_overflow_ellipsis and line_i == 0: 0 else: node_starts[line_i]
-                                val draw_end = if st.text_overflow_ellipsis and line_i == 0: draw_txt.byte_len() else: node_ends[line_i]
-                                val line_dx = text_line_box_dx(wrap_cache.first_line_dx, wrap_cache.line_boxes, i, line_i)
-                                val line_base_x = if line_i == 0: text_x + st.text_indent_px + line_dx else: text_x + line_dx
-                                val line_box_w = text_line_box_w(wrap_cache.first_line_dx, wrap_cache.line_boxes, i, line_i, w) - (if line_i == 0: st.text_indent_px else: 0)
-                                val line_by = if st.text_overflow_ellipsis and line_i == 0: [] else: txt_by
-                                val line_w = if text_line_needs_paint_width(st, line_i, line_count): style_text_line_advance_width_with(line_by, draw_txt, draw_start, draw_end, adv, space_adv) else: 0
-                                val line_text_x = if line_count == 1 and text_rtl_run_starts_box(nodes[i], st, w, txt == transformed_txt): line_base_x else: text_line_aligned_x(line_base_x, line_box_w, line_w, st, line_i, line_count)
-                                if use_ttf:
-                                    val base_y = ly + inline_line_strut_baseline_offset(st)
-                                    if st.text_shadow_color != 0u32:
-                                        out = fb_text_ttf_aa_clip_range_adv(out, fbw, fbh, line_text_x + st.text_shadow_x_px, base_y + st.text_shadow_y_px, draw_txt, draw_start, draw_end, st.text_shadow_color, st.font_size, st.resolved_font_identity, st.font_family, st.font_style_italic, st.bold, clip, line_by, st.font_size_milli)
-                                    out = fb_text_ttf_aa_clip_range_adv(out, fbw, fbh, line_text_x, base_y, draw_txt, draw_start, draw_end, st.fg, st.font_size, st.resolved_font_identity, st.font_family, st.font_style_italic, st.bold, clip, line_by, st.font_size_milli)
-                                    if st.text_decoration_underline or st.text_decoration_overline or st.text_decoration_line_through:
-                                        val underline_w = line_w
-                                        val ul_gap = if st.font_size / 10 > 1: st.font_size / 10 else: 1
-                                        val underline_y = base_y + ul_gap + st.text_underline_offset_px
-                                        val underline_color = if st.text_decoration_color != 0u32: st.text_decoration_color else: st.fg
-                                        if st.text_decoration_underline:
-                                            out = fb_text_underline_clip(out, fbw, fbh, line_text_x, underline_y, underline_w, style_decoration_thickness_px(st), st.text_decoration_style, underline_color, clip)
-                                        if st.text_decoration_overline:
-                                            out = fb_text_underline_clip(out, fbw, fbh, line_text_x, base_y - ttf_asc, underline_w, style_decoration_thickness_px(st), st.text_decoration_style, underline_color, clip)
-                                        if st.text_decoration_line_through:
-                                            val strike_up = if st.font_size * 3 / 10 > 1: st.font_size * 3 / 10 else: 1
-                                            out = fb_text_underline_clip(out, fbw, fbh, line_text_x, base_y - strike_up, underline_w, style_decoration_thickness_px(st), st.text_decoration_style, underline_color, clip)
-                                else:
-                                    if st.text_shadow_color != 0u32:
-                                        out = fb_text_thin_scaled_clip_range_adv(out, fbw, fbh, line_text_x + st.text_shadow_x_px, ly + st.text_shadow_y_px, draw_txt, draw_start, draw_end, st.text_shadow_color, scale, adv, space_adv, st.font_style_italic, st.bold, clip, line_by)
-                                    out = fb_text_thin_scaled_clip_range_adv(out, fbw, fbh, line_text_x, ly, draw_txt, draw_start, draw_end, st.fg, scale, adv, space_adv, st.font_style_italic, st.bold, clip, line_by)
-                                    if st.text_decoration_underline or st.text_decoration_overline or st.text_decoration_line_through:
-                                        val underline_w = line_w
-                                        val underline_y = ly + 7 * scale + st.text_underline_offset_px
-                                        val underline_color = if st.text_decoration_color != 0u32: st.text_decoration_color else: st.fg
-                                        if st.text_decoration_underline:
-                                            out = fb_text_underline_clip(out, fbw, fbh, line_text_x, underline_y, underline_w, style_decoration_thickness_px(st), st.text_decoration_style, underline_color, clip)
-                                        if st.text_decoration_overline:
-                                            out = fb_text_underline_clip(out, fbw, fbh, line_text_x, ly, underline_w, style_decoration_thickness_px(st), st.text_decoration_style, underline_color, clip)
-                                        if st.text_decoration_line_through:
-                                            out = fb_text_underline_clip(out, fbw, fbh, line_text_x, ly + 4 * scale, underline_w, style_decoration_thickness_px(st), st.text_decoration_style, underline_color, clip)
-                                line_i = line_i + 1
-                                ly = ly + lh
-        i = i + 1
-    # cpu-lane-loop-ok: the in-flow outlines no positioned box overlaps, over all text; bound is the number of in-flow outlined boxes
+        ti2 = ti2 + 1
+    # cpu-lane-loop-ok: paints Layer 0 outlines over Layer 0 text and under Layer 1/2 overlays; bound is late_outlines.len()
     for oi in late_outlines:
         val ost = styles[oi]
         out = fb_outline_clip(out, fbw, fbh, bx[oi], by[oi], bw[oi], bh[oi], ost.outline_w, ost.outline_offset_px, ost.outline_color, paint_clip_at(clip_cache, oi))
+    # Layer 1: z == 0 / auto positioned subtrees (boxes -> descendants -> scrollbars -> text/controls) in tree order.
+    if has_root_zero_z:
+        out = _raster_paint_sc_children(
+            out, fbw, fbh, nodes, styles, bx, by, bw, bh, wrap_cache,
+            clip_cache, canvas_src, has_widget_panel, widget_mode, chrome_widget_text,
+            -1, 0, node_parent_sc, overlay_roots, overlay_root_count,
+            owner_first, owner_next, nonpos_float
+        )
+    # Layer 2: z > 0 positioned subtrees sorted ascending by z-index (tree order on ties).
+    if has_root_pos_z:
+        out = _raster_paint_sc_children(
+            out, fbw, fbh, nodes, styles, bx, by, bw, bh, wrap_cache,
+            clip_cache, canvas_src, has_widget_panel, widget_mode, chrome_widget_text,
+            -1, 1, node_parent_sc, overlay_roots, overlay_root_count,
+            owner_first, owner_next, nonpos_float
+        )
+    if widget_mode:
+        out = fb_widget_chrome_rects(out, fbw, fbh, widget_frame_rects(fbw, fbh))
     if chrome_widget_text:
         out = fb_generated_widget_chrome_text(out, fbw, fbh)
     # Captured-Chromium overlays are not applied here: they paste expected
@@ -2056,8 +2277,8 @@ fn _tile_text_op(
     if not visible_node:
         return _tile_hidden_op(i)
     if nd.tag == "#text":
-        val raw_txt: text = if st.white_space_nowrap: nd.text_data else: nd.text_trimmed
-        if raw_txt.len() == 0 or by[i] >= fbh:
+        val raw_txt: text = if st.white_space_nowrap or st.white_space_newline: nd.text_data else: nd.text_trimmed
+        if raw_txt.byte_len() == 0 or by[i] >= fbh:
             return _tile_hidden_op(i)
         val clip = paint_clip_at(clip_cache, i)
         # Decoration ink overflows the glyph/line box independently. CSS px
@@ -2077,14 +2298,16 @@ fn _tile_text_op(
             false, false, _tile_style_hash(st), -1
         )
     val is_content = (
-        nd.tag == "input" or nd.tag == "select" or nd.tag == "svg" or
+        nd.tag == "input" or nd.tag == "select" or nd.tag == "textarea" or
+        nd.tag == "svg" or nd.tag == "li" or
         (nd.tag == "img" and nd.has_widget_image_class) or
         nd.has_icon_image_class
     )
     if not is_content:
         return _tile_hidden_op(i)
     val clip = paint_clip_at(clip_cache, i)
-    var x0 = bx[i] - 8
+    val gutter = if nd.tag == "li": 32 else: 8
+    var x0 = bx[i] - gutter
     var y0 = by[i] - 8
     var x1 = bx[i] + bw[i] + 8
     var y1 = by[i] + bh[i] + 8

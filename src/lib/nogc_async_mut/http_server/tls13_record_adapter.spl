@@ -1,0 +1,200 @@
+"""
+# HTTP TLS 1.3 Record Adapter
+
+Socket-neutral TLS 1.3 record layer for HTTP application data. Adapts the
+os.tls13 record primitives to the worker's async read/write model:
+encryption commits the directional sequence, decryption tolerates split
+wire batches through a bounded reassembly buffer, and unsupported cipher
+suites or post-handshake transitions fail closed with a stable reason
+instead of dispatching to the wrong AEAD.
+"""
+
+use os.tls13.server.{Tls13ServerContext}
+use os.tls13.record13.{RecordKey, record13_decrypt_for_suite, record13_encrypt_for_suite}
+
+# ============================================================================
+# Constants
+# ============================================================================
+
+# RFC 8446 §4.1.3 / B.4 cipher suite identifiers.
+val _TLS13_CIPHER_AES_128_GCM_SHA256: u16 = 0x1301
+val _TLS13_CIPHER_AES_256_GCM_SHA384: u16 = 0x1302
+val _TLS13_CIPHER_CHACHA20_POLY1305_SHA256: u16 = 0x1303
+
+# TLS 1.3 outer record content type (opaque application_data).
+val _TLS13_CONTENT_APPLICATION: u8 = 0x17
+
+# Cap on buffered receive bytes; a batch beyond this closes the connection
+# rather than growing the reassembly buffer without bound.
+val HTTP_TLS13_RECEIVE_BUFFER_LIMIT: u64 = 32768
+
+# ============================================================================
+# Session and actions
+# ============================================================================
+
+class HttpTls13Session:
+    """Application-traffic session state carried across adapter actions."""
+    cipher_suite: u16
+    client_app_key: [u8]
+    client_app_iv: [u8]
+    server_app_key: [u8]
+    server_app_iv: [u8]
+    client_seq: u64
+    server_seq: u64
+    pending: [u8]
+
+enum HttpTls13OpenAction:
+    """Outcome of opening an application session from a server context."""
+    Ready(session: HttpTls13Session)
+    Close(reason: text)
+
+enum HttpTls13SendAction:
+    """Outcome of encrypting one application-data plaintext."""
+    WireRecord(session: HttpTls13Session, record: [u8])
+    Close(session: HttpTls13Session, reason: text)
+
+enum HttpTls13ReceiveAction:
+    """Outcome of feeding wire bytes into the receive path."""
+    Plaintext(session: HttpTls13Session, data: [u8])
+    NeedMore(session: HttpTls13Session)
+    Close(session: HttpTls13Session, reason: text)
+
+# ============================================================================
+# Session helpers
+# ============================================================================
+
+fn _httptls_session_with(session: HttpTls13Session, client_seq: u64, pending: [u8]) -> HttpTls13Session:
+    """Copy of `session` with a new client sequence and reassembly buffer."""
+    HttpTls13Session(
+        cipher_suite: session.cipher_suite,
+        client_app_key: session.client_app_key,
+        client_app_iv: session.client_app_iv,
+        server_app_key: session.server_app_key,
+        server_app_iv: session.server_app_iv,
+        client_seq: client_seq,
+        server_seq: session.server_seq,
+        pending: pending
+    )
+
+fn _httptls_append_bytes(first: [u8], second: [u8]) -> [u8]:
+    """Concatenate two byte arrays."""
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < first.len():
+        out.push(first[i])
+        i = i + 1
+    i = 0
+    while i < second.len():
+        out.push(second[i])
+        i = i + 1
+    out
+
+fn _httptls_prefix(data: [u8], count: u64) -> [u8]:
+    """First `count` bytes of `data`."""
+    var out: [u8] = []
+    var i: u64 = 0
+    while i < count:
+        out.push(data[i])
+        i = i + 1
+    out
+
+fn _httptls_suffix(data: [u8], start: u64) -> [u8]:
+    """Bytes of `data` from index `start` onward."""
+    var out: [u8] = []
+    var i: u64 = start
+    while i < data.len():
+        out.push(data[i])
+        i = i + 1
+    out
+
+# ============================================================================
+# Adapter actions
+# ============================================================================
+
+fn http_tls13_open(ctx: Tls13ServerContext) -> HttpTls13OpenAction:
+    """Open an application-data session for a negotiated server context.
+
+    Only AES-128-GCM (0x1301) application records are wired here; AES-256
+    and ChaCha20 fail closed with a stable reason rather than dispatching
+    to a mismatched AEAD.
+    """
+    if ctx.cipher_suite == _TLS13_CIPHER_AES_256_GCM_SHA384:
+        return HttpTls13OpenAction.Close("tls13_aes256_gcm_application_records_unimplemented")
+    if ctx.cipher_suite == _TLS13_CIPHER_CHACHA20_POLY1305_SHA256:
+        return HttpTls13OpenAction.Close("tls13_chacha20_application_keys_unresolved")
+    if ctx.cipher_suite != _TLS13_CIPHER_AES_128_GCM_SHA256:
+        return HttpTls13OpenAction.Close("tls13_cipher_suite_unsupported")
+    HttpTls13OpenAction.Ready(HttpTls13Session(
+        cipher_suite: ctx.cipher_suite,
+        client_app_key: ctx.client_app_key,
+        client_app_iv: ctx.client_app_iv,
+        server_app_key: ctx.server_app_key,
+        server_app_iv: ctx.server_app_iv,
+        client_seq: ctx.client_seq,
+        server_seq: ctx.server_seq,
+        pending: []
+    ))
+
+fn http_tls13_send(session: HttpTls13Session, plaintext: [u8]) -> HttpTls13SendAction:
+    """Encrypt one application-data plaintext with the server traffic key.
+
+    The returned session carries server_seq + 1; the wire record is the
+    5-byte header || ciphertext || 16-byte tag produced by record13.
+    """
+    val record = record13_encrypt_for_suite(
+        session.cipher_suite,
+        RecordKey(key: session.server_app_key, iv: session.server_app_iv),
+        session.server_seq,
+        _TLS13_CONTENT_APPLICATION,
+        plaintext
+    )
+    HttpTls13SendAction.WireRecord(
+        HttpTls13Session(
+            cipher_suite: session.cipher_suite,
+            client_app_key: session.client_app_key,
+            client_app_iv: session.client_app_iv,
+            server_app_key: session.server_app_key,
+            server_app_iv: session.server_app_iv,
+            client_seq: session.client_seq,
+            server_seq: session.server_seq + 1u64,
+            pending: session.pending
+        ),
+        record
+    )
+
+fn http_tls13_receive(session: HttpTls13Session, incoming: [u8]) -> HttpTls13ReceiveAction:
+    """Feed wire bytes into the receive path.
+
+    Buffers a split record until its full TLSCiphertext is present
+    (NeedMore), yields the decrypted application plaintext and commits
+    client_seq + 1 once complete, and fails closed on oversized batches,
+    authentication failures, and encrypted post-handshake transitions.
+    """
+    if session.pending.len() + incoming.len() > HTTP_TLS13_RECEIVE_BUFFER_LIMIT:
+        return HttpTls13ReceiveAction.Close(session, "tls13_receive_buffer_limit")
+    val buffered = _httptls_append_bytes(session.pending, incoming)
+    if buffered.len() < 5:
+        return HttpTls13ReceiveAction.NeedMore(
+            _httptls_session_with(session, session.client_seq, buffered))
+    val payload_length = (buffered[3].to_u64() << 8) | buffered[4].to_u64()
+    val record_length = 5u64 + payload_length
+    if buffered.len() < record_length:
+        return HttpTls13ReceiveAction.NeedMore(
+            _httptls_session_with(session, session.client_seq, buffered))
+    val record = _httptls_prefix(buffered, record_length)
+    val rest = _httptls_suffix(buffered, record_length)
+    val key = RecordKey(key: session.client_app_key, iv: session.client_app_iv)
+    match record13_decrypt_for_suite(session.cipher_suite, key, session.client_seq, record):
+        case RecordResult.Ok(content_type, data):
+            if content_type == 0x17:
+                return HttpTls13ReceiveAction.Plaintext(
+                    _httptls_session_with(session, session.client_seq + 1u64, rest),
+                    data)
+            HttpTls13ReceiveAction.Close(
+                _httptls_session_with(session, session.client_seq, rest),
+                "tls13_post_handshake_transition_unimplemented")
+        case RecordResult.Err(msg):
+            HttpTls13ReceiveAction.Close(session, msg)
+
+export HttpTls13Session, HttpTls13OpenAction, HttpTls13SendAction, HttpTls13ReceiveAction
+export http_tls13_open, http_tls13_send, http_tls13_receive

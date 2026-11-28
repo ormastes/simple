@@ -51,4 +51,18 @@ int64_t simple_process_spawn_async_environment_v1(const char* cmd, SplArray* arg
 #define PIPED_WAIT_OS_ERROR_V1 (-5)
 #define PIPED_WAIT_INVALID_V1 (-22)
 int64_t simple_piped_owner_wait_readable_v1(int64_t pid, int64_t stream, int64_t timeout_ms);
+
+/* Split-stderr / byte-safe owner hooks. Each is one nonblocking OS step under
+ * the existing registry lock; none parks. stream 1 = stdout, 2 = stderr.
+ * read: count >= 0 (0 = nothing buffered), -1 unknown handle/stream/argument.
+ * stream_state: -2 stream not separately piped, -1 unknown, 0 open, 1 EOF.
+ * write: same contract as rt_process_write_stdin_some over raw bytes. */
+int64_t simple_piped_owner_spawn_split_v1(const char* cmd, int64_t cmd_len, SplArray* args);
+int64_t simple_piped_owner_read_v1(int64_t pid, int64_t stream, uint8_t* out, int64_t cap);
+int64_t simple_piped_owner_stream_state_v1(int64_t pid, int64_t stream);
+const char* simple_piped_owner_read_stderr_text_v1(int64_t pid);
+int64_t simple_piped_owner_write_v1(int64_t pid, const uint8_t* data, int64_t data_len,
+    int64_t offset, int64_t max_bytes);
+/* Packed [u8] allocation for the bytes returned by either provider lane. */
+SplArray* simple_piped_bytes_new_v1(const uint8_t* data, int64_t len);
 #endif

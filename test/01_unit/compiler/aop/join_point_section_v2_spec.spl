@@ -1,0 +1,532 @@
+# @req REQ-ASPECT-AW2-FACT
+# @req REQ-ASPECT-AW2-CODEC
+# @req REQ-ASPECT-AW2-FAILCLOSED
+# @req REQ-ASPECT-AW2-DIRECTORY
+# @req REQ-ASPECT-AW2-ROOT
+"""
+# `join-point|`: the join points a module publishes in its TLDR
+
+## Purpose and audience
+
+Purpose: document and pin
+`src/compiler/00.common/cache_contract/join_point_section_v2.spl` (aspect plan
+stage AW-2). A module writes its forward join points into its own TLDR as
+`JoinPointFactV2` rows. A directory's join-point facts are then built from its
+members' sections, and a directory's aspect root is computed from its members'
+aspect leaf digests, without opening any member's HIR.
+
+Audience: compiler engineers who build weave plans, directory facts or the
+incremental planner on top of these rows, and reviewers checking that a
+missing or damaged section can only make facts incomplete, never wrong.
+
+## What JoinPointFactV2 adds
+
+| Field | V1 | V2 |
+|-------|----|----|
+| id, kind, symbol, attrs, owner file | yes | same values |
+| `base_body_digest` | field exists, production leaves it empty | always present |
+| `signature_digest` | absent | always present |
+| `guard_ids` | absent | ids of the static guards evaluated in the owning file |
+
+The builder refuses a row that lacks a signature or body digest, so a section
+never holds a half-filled fact. Non-exported functions are rows like any
+other: advice applies to private forwarders too.
+
+## Operator workflow
+
+1. Run `bin/simple test test/01_unit/compiler/aop/join_point_section_v2_spec.spl`
+   from the repository root. No fixture file and no host fact is read.
+2. Measure coverage with
+   `SIMPLE_EXECUTION_MODE=interpreter SIMPLE_COVERAGE=1 SIMPLE_COVERAGE_OUTPUT=<f> <seed> run <this spec>`
+   (doc/07_guide/infra/testing/coverage.md).
+
+## Completeness of directory facts
+
+`directory_join_point_facts_of_sections_v2` returns `complete = true` only
+when every member file has exactly one section written for the requested guard
+profile. A section of a file outside the directory, a second section of one
+member, or a section of another profile is left out and makes the facts
+incomplete. Incomplete facts are a cache miss for every consumer.
+
+## Aspect root
+
+`aspect_root_digest_v1` hashes the members' leaf digests and the child
+directories' roots as sorted lists. The leaf digest holds no advice body, so
+an advice body edit moves no root.
+
+## Lifecycle
+
+Research: doc/01_research/local/dir_tldr_aspect.md
+Plan: doc/03_plan/compiler/aspect_cache/aspect_tldr_async_trace_plan.md (AW-2)
+Architecture: doc/04_architecture/compiler/aspect_dynload/typed_facet_pipeline_2026-08-22.md
+Design: doc/05_design/compiler/cache/aspect_tldr_async_trace.md (sections 3 and 5, gap G15)
+
+## Decision inventory (MC/DC)
+
+Function names refer to `join_point_section_v2.spl`.
+
+| Function | Decision | Covering scenario |
+|----------|----------|-------------------|
+| `_sorted_texts_v2` | insertion stops at the front or at a smaller value | "a module's join points become sorted V2 facts" |
+| `_guard_ids_v2` | guard has a digest; digest already listed | same |
+| `join_point_section_v2` | key or file empty; symbol or kind empty; signature empty; body empty; insertion position; duplicate id | "a row without an owner, symbol, signature or body digest is refused", "two rows of one symbol are refused" |
+| `join_point_section_encode_v2` | point limit; guard limit; field limit; section limit | "encoding refuses every over-limit section" |
+| `_point_decode_v2` | known key; duplicate; optional `?` key; missing key; attrs unreadable | "an unknown optional field is ignored", "a row with an unknown, repeated, missing or unreadable field is rejected" |
+| `join_point_section_decode_v2` | size; framing; fewer than seven values; magic; seal miss; seal reject; guard count unreadable or over limit; guards overrun; guard flag; point count unreadable or over limit; rows run out; pair count unreadable or overrunning; row error; trailing values; builder rule | the `decode` scenarios |
+| `join_point_section_of_entries_v2` | entry has the kind prefix; none; more than one | "a module TLDR carries exactly one section" |
+| `directory_join_point_facts_of_sections_v2` | non-member; second section; other profile; member without section | the `directory facts` scenarios |
+
+Exclusions: none.
+
+## Compatibility and limitations
+
+`guard_ids` has file granularity: every fact of a file lists all guards
+evaluated in that file, not only the guards that enclose its function.
+The directory facts are `DirectoryJoinPointFactsV1`, so existing shard and
+planner code reads them unchanged; `signature_digest` and `guard_ids` are read
+from the section rows.
+"""
+
+# @tag:unit
+# @tag:compiler
+# @tag:aop
+# @tag:cache
+# @tag:coverage
+
+use std.spec.*
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.cache_contract.join_point_section_v2.*
+use compiler.common.cache_contract.aspect_decl_section_v1.{ASPECT_SECTION_OK_V1, aspect_section_frame_v1,
+    aspect_section_seal_v1}
+use compiler.common.cache_contract.aspect_match_shard_v1.{JoinPointFactV1, DirectoryJoinPointFactsV1,
+    directory_join_point_facts_guarded_v1}
+use compiler.common.cache_contract.guard_id_v1.{GuardIdV1, GuardEvalV1, guard_id_v1, active_guard_root_v1}
+use compiler.driver.cache.module_tldr_sections_v1.{module_tldr_sections_render_v1,
+    module_tldr_sections_parse_v1}
+
+val PROFILE = "linux/x86_64"
+
+fn guard(kind: text, expr: text, evaluable: bool, active: bool) -> GuardEvalV1:
+    GuardEvalV1(guard: guard_id_v1(kind, expr), evaluable: evaluable, active: active)
+
+fn row(symbol: text, attrs: [text]) -> JoinPointRowInputV2:
+    JoinPointRowInputV2(kind: "forward", symbol: symbol, attrs: attrs,
+        signature_digest: sha256_text("signature of " + symbol),
+        base_body_digest: sha256_text("body of " + symbol))
+
+fn guards_of_a() -> [GuardEvalV1]:
+    [guard("when", "1:when:os=\"linux\"", true, true), guard("cfg", "9:cfg:arch=\"arm\"", true, false)]
+
+fn section_a() -> JoinPointSectionV2:
+    join_point_section_v2("pay_a", "pay/pay_a.spl", PROFILE, guards_of_a(),
+        [row("submit_view", ["logged"]), row("audit_view", [])]).unwrap()
+
+fn section_b() -> JoinPointSectionV2:
+    join_point_section_v2("pay_b", "pay/pay_b.spl", PROFILE, [], [row("refund_view", [])]).unwrap()
+
+fn error_of(key: text, file: text, input: JoinPointRowInputV2) -> text:
+    join_point_section_v2(key, file, PROFILE, [], [input]).unwrap_err()
+
+fn ids(points: [JoinPointFactV2]) -> [text]:
+    var out: [text] = []
+    for point in points:
+        out.push(point.id)
+    out
+
+fn repeated(unit: text, count: i64) -> text:
+    var out = ""
+    var chunk = unit
+    var left = count
+    while left > 0:
+        if left % 2 == 1:
+            out = out + chunk
+        chunk = chunk + chunk
+        left = left / 2
+    out
+
+# A sealed section text from raw values, to reach every decode rule behind the seal.
+fn sealed(values: [text]) -> text:
+    var body = ""
+    for value in values:
+        body = body + aspect_section_frame_v1(value)
+    aspect_section_frame_v1(aspect_section_seal_v1(body)) + body
+
+fn head(guard_count: text) -> [text]:
+    [JOIN_POINT_SECTION_MAGIC_V2, "pay_a", "pay/pay_a.spl", PROFILE, guard_count]
+
+fn valid_pairs(symbol: text) -> [text]:
+    ["kind", "forward", "symbol", symbol, "attrs", aspect_section_frame_v1("logged"),
+        "signature", sha256_text("signature"), "body", sha256_text("body")]
+
+fn joined(parts: [[text]]) -> [text]:
+    var out: [text] = []
+    for part in parts:
+        for value in part:
+            out.push(value)
+    out
+
+fn one_point(pairs: [text]) -> JoinPointSectionDecodeV2:
+    val count = pairs.len() / 2
+    join_point_section_decode_v2(sealed(joined([head("0"), ["1", "{count}"], pairs])))
+
+fn with_value(pairs: [text], key: text, value: text) -> [text]:
+    var out: [text] = []
+    var i = 0
+    while i < pairs.len():
+        out.push(pairs[i])
+        if pairs[i] == key:
+            out.push(value)
+        else:
+            out.push(pairs[i + 1])
+        i = i + 2
+    out
+
+fn without_key(pairs: [text], key: text) -> [text]:
+    var out: [text] = []
+    var i = 0
+    while i < pairs.len():
+        if pairs[i] != key:
+            out.push(pairs[i])
+            out.push(pairs[i + 1])
+        i = i + 2
+    out
+
+fn outcome(result: JoinPointSectionDecodeV2) -> text:
+    "{result.status}:{result.reason}:{result.section.points.len()}"
+
+fn facts_summary(facts: DirectoryJoinPointFactsV1) -> [text]:
+    var out: [text] = ["{facts.complete}", facts.facts_key, facts.negative_root, facts.active_guard_root]
+    for point in facts.sorted_join_points:
+        out.push(point.id + "@" + point.owner_file + "#" + point.base_body_digest)
+    out
+
+# ---------------------------------------------------------------------------
+
+# @manual_section: Building a module's facts
+describe "join_point_section_v2":
+    it "a module's join points become sorted V2 facts":
+        # @req REQ-ASPECT-AW2-FACT
+        step("Build a section from three rows given out of order, with unsorted attributes and four guards")
+        val guards = [guard("when", "b", true, true), guard("cfg", "a", true, false),
+            guard("when", "b", true, true), guard("weird", "c", false, false)]
+        val section = join_point_section_v2("pay_a", "pay/pay_a.spl", PROFILE, guards,
+            [row("submit_view", ["traced", "logged"]), row("audit_view", []), row("pay_view", ["x"])]).unwrap()
+        val first = section.points[0]
+        val last = section.points[2]
+        # @capture(exec): built facts
+        step("Rows are sorted by id; each fact has sorted attributes, both digests and the file's guard ids")
+        expect(ids(section.points)).to_equal(["pay_a::audit_view", "pay_a::pay_view", "pay_a::submit_view"])
+        expect([last.kind, last.symbol, last.owner_file]).to_equal(["forward", "submit_view", "pay/pay_a.spl"])
+        expect(last.attrs).to_equal(["logged", "traced"])
+        expect(last.signature_digest).to_equal(sha256_text("signature of submit_view"))
+        expect(last.base_body_digest).to_equal(sha256_text("body of submit_view"))
+        val want_ids = [guard_id_v1("when", "b").digest, guard_id_v1("cfg", "a").digest]
+        expect(last.guard_ids.len()).to_equal(want_ids.len())
+        expect(last.guard_ids.contains(want_ids[0]) and last.guard_ids.contains(want_ids[1])).to_equal(true)
+        expect(last.guard_ids[0] < last.guard_ids[1]).to_equal(true)
+        expect(first.guard_ids).to_equal(last.guard_ids)
+        expect(section.guards.len()).to_equal(guards.len())
+
+    it "a row without an owner, symbol, signature or body digest is refused":
+        # @req REQ-ASPECT-AW2-FAILCLOSED
+        step("Build sections with an empty module key, file, symbol, kind, signature digest and body digest")
+        val good = row("submit_view", [])
+        val errors = [error_of("", "pay/pay_a.spl", good), error_of("pay_a", "", good),
+            error_of("pay_a", "pay/pay_a.spl", JoinPointRowInputV2(..good, symbol: "")),
+            error_of("pay_a", "pay/pay_a.spl", JoinPointRowInputV2(..good, kind: "")),
+            error_of("pay_a", "pay/pay_a.spl", JoinPointRowInputV2(..good, signature_digest: "")),
+            error_of("pay_a", "pay/pay_a.spl", JoinPointRowInputV2(..good, base_body_digest: ""))]
+        # @capture(exec): builder errors
+        step("Each is refused with its own reason, so a section never holds a half-filled fact")
+        expect(errors).to_equal(["join-point-owner-missing", "join-point-owner-missing",
+            "join-point-symbol-missing", "join-point-symbol-missing",
+            "join-point-signature-unavailable", "join-point-body-unavailable"])
+
+    it "two rows of one symbol are refused":
+        # @req REQ-ASPECT-AW2-FAILCLOSED
+        step("Build a section whose rows name `submit_view` twice, among other rows")
+        val result = join_point_section_v2("pay_a", "pay/pay_a.spl", PROFILE, [],
+            [row("submit_view", []), row("audit_view", []), row("submit_view", ["logged"])])
+        # @capture(exec): duplicate error
+        step("The section is refused: a join-point id is unique in its module")
+        expect(result.unwrap_err()).to_equal("join-point-duplicate")
+
+    it "a V2 fact projects to the V1 fact with a real body digest":
+        # @req REQ-ASPECT-AW2-FACT
+        step("Project the facts of a built section to JoinPointFactV1")
+        val point = section_a().points[1]
+        val v1 = join_point_fact_v1_of_v2(point)
+        # @capture(exec): projected fact
+        step("Every shared field is copied and the body digest is not empty")
+        expect([v1.id, v1.kind, v1.symbol, v1.owner_file]).to_equal(
+            ["pay_a::submit_view", "forward", "submit_view", "pay/pay_a.spl"])
+        expect(v1.attrs).to_equal(["logged"])
+        expect(v1.base_body_digest).to_equal(sha256_text("body of submit_view"))
+
+# @manual_section: Encoding a section
+describe "join-point section text":
+    it "a section round trips with its guards and rows":
+        # @req REQ-ASPECT-AW2-CODEC
+        step("Encode a section with an active, an inactive and an unevaluable guard and a non-ASCII attribute, then decode it")
+        val guards = [guard("when", "1:when:os=\"linux\"", true, true), guard("cfg", "4:cfg:x", true, false),
+            guard("when", "unevaluable:no atom", false, false)]
+        val section = join_point_section_v2("결제_a", "pay/결제_a.spl", PROFILE, guards,
+            [row("submit_view", ["기록", "logged"]), row("_private_view", [])]).unwrap()
+        val decoded = join_point_section_decode_v2(join_point_section_encode_v2(section).unwrap())
+        # @capture(exec): decoded section
+        step("Status is ok; header, guards and every field of every row equal the encoded ones")
+        expect(outcome(decoded)).to_equal("ok::2")
+        expect([decoded.section.module_key, decoded.section.owner_file, decoded.section.guard_profile]).to_equal(
+            ["결제_a", "pay/결제_a.spl", PROFILE])
+        for i in 0..3:
+            expect([decoded.section.guards[i].guard.kind, decoded.section.guards[i].guard.canonical_expr,
+                decoded.section.guards[i].guard.digest]).to_equal([guards[i].guard.kind,
+                guards[i].guard.canonical_expr, guards[i].guard.digest])
+            expect([decoded.section.guards[i].evaluable, decoded.section.guards[i].active]).to_equal(
+                [guards[i].evaluable, guards[i].active])
+        for i in 0..2:
+            val want = section.points[i]
+            val got = decoded.section.points[i]
+            expect([got.id, got.kind, got.symbol, got.owner_file, got.signature_digest,
+                got.base_body_digest]).to_equal([want.id, want.kind, want.symbol, want.owner_file,
+                want.signature_digest, want.base_body_digest])
+            expect(got.attrs).to_equal(want.attrs)
+            expect(got.guard_ids).to_equal(want.guard_ids)
+
+    it "encoding refuses every over-limit section":
+        # @req REQ-ASPECT-AW2-FAILCLOSED
+        step("Encode 4097 rows, 1025 guards, a symbol over 64 KiB, and 71 rows of 60 KiB symbols")
+        val base = section_a()
+        val point = base.points[0]
+        var many_points: [JoinPointFactV2] = []
+        for i in 0..4097:
+            many_points.push(point)
+        var many_guards: [GuardEvalV1] = []
+        for i in 0..1025:
+            many_guards.push(guards_of_a()[0])
+        val wide = repeated("x", JOIN_POINT_SECTION_MAX_FIELD_BYTES_V2 + 1)
+        val heavy_point = JoinPointFactV2(..point, symbol: repeated("y", 60000))
+        var heavy: [JoinPointFactV2] = []
+        for i in 0..71:
+            heavy.push(heavy_point)
+        val errors = [
+            join_point_section_encode_v2(JoinPointSectionV2(..base, points: many_points)).unwrap_err(),
+            join_point_section_encode_v2(JoinPointSectionV2(..base, guards: many_guards)).unwrap_err(),
+            join_point_section_encode_v2(JoinPointSectionV2(..base, points: [JoinPointFactV2(..point, symbol: wide)])).unwrap_err(),
+            join_point_section_encode_v2(JoinPointSectionV2(..base, points: heavy)).unwrap_err()]
+        # @capture(exec): encode errors
+        step("Each is refused with the limit it broke; one 60 KiB row alone still encodes")
+        expect(errors).to_equal(["point-limit", "guard-limit", "field-limit", "section-limit"])
+        expect(join_point_section_encode_v2(JoinPointSectionV2(..base, points: [heavy_point])).is_ok()).to_equal(true)
+
+# @manual_section: Decoding fails closed
+describe "join-point section decode":
+    it "a truncated or oversized section is rejected":
+        # @req REQ-ASPECT-AW2-FAILCLOSED
+        step("Cut a valid section mid-frame, cut it to its header start, and decode a text over the byte limit")
+        val wire = join_point_section_encode_v2(section_a()).unwrap()
+        val verdicts = [outcome(join_point_section_decode_v2(wire.substring(0, wire.byte_len() - 9))),
+            outcome(join_point_section_decode_v2(sealed([JOIN_POINT_SECTION_MAGIC_V2, "pay_a", "f", PROFILE]))),
+            outcome(join_point_section_decode_v2(repeated("x", JOIN_POINT_SECTION_MAX_BYTES_V2 + 1)))]
+        # @capture(exec): truncation and size verdicts
+        step("They are a malformed frame, a truncated section and a size reject; none yields rows")
+        expect(verdicts).to_equal(["reject:malformed-frame:0", "reject:truncated-section:0",
+            "reject:section-limit:0"])
+
+    it "a foreign magic or a changed byte is rejected and an unknown seal algorithm is a miss":
+        # @req REQ-ASPECT-AW2-FAILCLOSED
+        step("Decode a sealed section with another magic, a valid one with a changed value, and one with a foreign seal")
+        val wire = join_point_section_encode_v2(section_a()).unwrap()
+        val body = wire.substring(aspect_section_frame_v1(aspect_section_seal_v1("")).byte_len(), wire.byte_len())
+        val verdicts = [
+            outcome(join_point_section_decode_v2(sealed(["join-point/v9", "pay_a", "f", PROFILE, "0", "0"]))),
+            outcome(join_point_section_decode_v2(wire.replace("submit_view", "submit_vieW"))),
+            outcome(join_point_section_decode_v2(aspect_section_frame_v1("sha9:" + sha256_text(body)) + body))]
+        # @capture(exec): magic, seal and algorithm verdicts
+        step("Bad magic and seal mismatch are rejects; the unknown algorithm is a miss, so the reader recomputes")
+        expect(verdicts).to_equal(["reject:bad-magic:0", "reject:seal-mismatch:0",
+            "miss:unknown-digest-algorithm:0"])
+
+    it "a bad guard block is rejected":
+        # @req REQ-ASPECT-AW2-FAILCLOSED
+        step("Decode sections with an unreadable guard count, 1025 guards, a guard that is cut off, and guard flags of 2")
+        val g = ["when", "expr", "sha256:" + sha256_text("g")]
+        val verdicts = [
+            outcome(join_point_section_decode_v2(sealed(joined([head("x"), ["0"]])))),
+            outcome(join_point_section_decode_v2(sealed(joined([head("1025"), ["0"]])))),
+            outcome(join_point_section_decode_v2(sealed(joined([head("1"), g, ["1", "0"]])))),
+            outcome(join_point_section_decode_v2(sealed(joined([head("1"), g, ["2", "0"], ["0"]])))),
+            outcome(join_point_section_decode_v2(sealed(joined([head("1"), g, ["1", "2"], ["0"]])))),
+            outcome(join_point_section_decode_v2(sealed(joined([head("1"), g, ["1", "0"], ["0"]]))))]
+        # @capture(exec): guard block verdicts
+        step("Count and overrun rejects name the limit or the truncation; bad flags are bad flags; the valid block decodes")
+        expect(verdicts).to_equal(["reject:guard-limit:0", "reject:guard-limit:0",
+            "reject:truncated-section:0", "reject:bad-flag:0", "reject:bad-flag:0", "ok::0"])
+
+    it "a bad point count or a cut-off row is rejected":
+        # @req REQ-ASPECT-AW2-FAILCLOSED
+        step("Decode sections with an unreadable point count, 4097 points, a promised row that is absent, and bad pair counts")
+        val verdicts = [
+            outcome(join_point_section_decode_v2(sealed(joined([head("0"), ["x"]])))),
+            outcome(join_point_section_decode_v2(sealed(joined([head("0"), ["4097"]])))),
+            outcome(join_point_section_decode_v2(sealed(joined([head("0"), ["1"]])))),
+            outcome(join_point_section_decode_v2(sealed(joined([head("0"), ["1", "x"], valid_pairs("f")])))),
+            outcome(join_point_section_decode_v2(sealed(joined([head("0"), ["1", "6"], valid_pairs("f")])))),
+            outcome(join_point_section_decode_v2(sealed(joined([head("0"), ["1", "5"], valid_pairs("f"), ["extra"]]))))]
+        # @capture(exec): count and row verdicts
+        step("Each is rejected with its own reason")
+        expect(verdicts).to_equal(["reject:point-limit:0", "reject:point-limit:0",
+            "reject:truncated-section:0", "reject:truncated-row:0", "reject:truncated-row:0",
+            "reject:trailing-data:0"])
+
+    it "an unknown optional field is ignored":
+        # @req REQ-ASPECT-AW2-CODEC
+        step("Add a `?`-prefixed field this reader does not know to a valid row")
+        var pairs = valid_pairs("submit_view")
+        pairs.push("?mir_site")
+        pairs.push("anything")
+        val result = one_point(pairs)
+        # @capture(exec): decoded row with optional field
+        step("The row decodes with its known fields unchanged")
+        expect(outcome(result)).to_equal("ok::1")
+        expect([result.section.points[0].id, result.section.points[0].signature_digest]).to_equal(
+            ["pay_a::submit_view", sha256_text("signature")])
+        expect(result.section.points[0].attrs).to_equal(["logged"])
+
+    it "a row with an unknown, repeated, missing or unreadable field is rejected":
+        # @req REQ-ASPECT-AW2-FAILCLOSED
+        step("Decode rows with a field lacking the `?` prefix, a repeated field, a dropped field and a broken attribute list")
+        var unknown = valid_pairs("f")
+        unknown.push("around_site")
+        unknown.push("1")
+        var duplicate = valid_pairs("f")
+        duplicate.push("symbol")
+        duplicate.push("g")
+        val verdicts = [outcome(one_point(unknown)), outcome(one_point(duplicate)),
+            outcome(one_point(without_key(valid_pairs("f"), "body"))),
+            outcome(one_point(with_value(valid_pairs("f"), "attrs", "9:logged")))]
+        # @capture(exec): field verdicts
+        step("Each is rejected with its own reason")
+        expect(verdicts).to_equal(["reject:unknown-mandatory-field:0", "reject:duplicate-field:0",
+            "reject:missing-field:0", "reject:bad-attrs:0"])
+
+    it "a decoded row must satisfy the builder's rules":
+        # @req REQ-ASPECT-AW2-FAILCLOSED
+        step("Decode a well-framed row with an empty signature digest, and a section whose two rows share a symbol")
+        val empty_signature = one_point(with_value(valid_pairs("f"), "signature", ""))
+        val twins = join_point_section_decode_v2(sealed(joined([head("0"), ["2", "5"], valid_pairs("f"),
+            ["5"], valid_pairs("f")])))
+        # @capture(exec): builder rule verdicts
+        step("Both are rejected with the builder's own reason")
+        expect(outcome(empty_signature)).to_equal("reject:join-point-signature-unavailable:0")
+        expect(outcome(twins)).to_equal("reject:join-point-duplicate:0")
+
+# @manual_section: The section inside a module TLDR
+describe "join-point TLDR entry":
+    it "a module TLDR carries exactly one section":
+        # @req REQ-ASPECT-AW2-CODEC
+        step("Render the entry among other TLDR sections, parse the TLDR text back, and read the section")
+        val entry = join_point_section_entry_v2(section_a()).unwrap()
+        val wire = module_tldr_sections_render_v1(["const|val LIMIT: i64 = 42", entry])
+        val (entries, consumed) = module_tldr_sections_parse_v1(wire)
+        val found = join_point_section_of_entries_v2(entries)
+        # @capture(exec): TLDR round trip
+        step("The TLDR parser admits the `join-point` kind and the section decodes with both rows")
+        expect(entry.starts_with("join-point|")).to_equal(true)
+        expect(consumed).to_equal(wire.byte_len())
+        expect(outcome(found)).to_equal("ok::2")
+        expect(ids(found.section.points)).to_equal(["pay_a::audit_view", "pay_a::submit_view"])
+
+    it "a TLDR without the section is a miss and a TLDR with two is rejected":
+        # @req REQ-ASPECT-AW2-FAILCLOSED
+        step("Read the section from entries that have none, from entries that have it twice, and encode an over-limit section")
+        val entry = join_point_section_entry_v2(section_a()).unwrap()
+        var many: [GuardEvalV1] = []
+        for i in 0..1025:
+            many.push(guards_of_a()[0])
+        # @capture(exec): entry lookup verdicts
+        step("Absence is a miss, duplication is a reject, and an over-limit section has no entry at all")
+        expect(outcome(join_point_section_of_entries_v2(["const|val LIMIT: i64 = 42"]))).to_equal("miss:section-absent:0")
+        expect(outcome(join_point_section_of_entries_v2([entry, entry]))).to_equal("reject:duplicate-section:0")
+        expect(join_point_section_entry_v2(JoinPointSectionV2(..section_a(), guards: many)).unwrap_err()).to_equal("guard-limit")
+
+# @manual_section: Directory facts from member sections
+describe "directory facts from sections":
+    it "every member's section gives complete facts equal to the direct construction":
+        # @req REQ-ASPECT-AW2-DIRECTORY
+        step("Build the facts of directory `pay` from the sections of its two members, in both section orders")
+        val files = ["pay/pay_a.spl", "pay/pay_b.spl"]
+        val facts = directory_join_point_facts_of_sections_v2("pay", files, [section_a(), section_b()], PROFILE)
+        val swapped = directory_join_point_facts_of_sections_v2("pay", files, [section_b(), section_a()], PROFILE)
+        var direct_points: [JoinPointFactV1] = []
+        for point in section_a().points:
+            direct_points.push(join_point_fact_v1_of_v2(point))
+        for point in section_b().points:
+            direct_points.push(join_point_fact_v1_of_v2(point))
+        val direct = directory_join_point_facts_guarded_v1("pay", files, direct_points, [], true,
+            active_guard_root_v1(PROFILE, guards_of_a()))
+        # @capture(exec): facts key, roots and join points
+        step("The facts are complete, independent of section order, and every join point has a body digest")
+        expect(facts.complete).to_equal(true)
+        expect(facts_summary(facts)).to_equal(facts_summary(direct))
+        expect(facts_summary(swapped)).to_equal(facts_summary(facts))
+        expect(facts.sorted_join_points.len()).to_equal(direct_points.len())
+        for point in facts.sorted_join_points:
+            expect(point.base_body_digest == "").to_equal(false)
+
+    it "a member without a section makes the facts incomplete":
+        # @req REQ-ASPECT-AW2-DIRECTORY
+        step("Build the facts of a two-member directory from the section of one member only")
+        val facts = directory_join_point_facts_of_sections_v2("pay", ["pay/pay_a.spl", "pay/pay_b.spl"],
+            [section_a()], PROFILE)
+        # @capture(exec): incomplete facts
+        step("The facts are incomplete, so no shard computed from them can be admitted")
+        expect(facts.complete).to_equal(false)
+        expect(facts.sorted_join_points.len()).to_equal(section_a().points.len())
+
+    it "a foreign, repeated or other-profile section is left out and makes the facts incomplete":
+        # @req REQ-ASPECT-AW2-DIRECTORY
+        step("Add a section of a file outside the directory, a second section of a member, and a section of another guard profile")
+        val files = ["pay/pay_a.spl", "pay/pay_b.spl"]
+        val outsider = join_point_section_v2("other", "other/x.spl", PROFILE, [], [row("x_view", [])]).unwrap()
+        val other_profile = JoinPointSectionV2(..section_b(), guard_profile: "windows/x86_64")
+        val with_outsider = directory_join_point_facts_of_sections_v2("pay", files,
+            [section_a(), section_b(), outsider], PROFILE)
+        val with_repeat = directory_join_point_facts_of_sections_v2("pay", files,
+            [section_a(), section_b(), section_a()], PROFILE)
+        val with_profile = directory_join_point_facts_of_sections_v2("pay", files,
+            [section_a(), other_profile], PROFILE)
+        # @capture(exec): completeness and join-point counts
+        step("Each case is incomplete and the offending section's rows are not in the facts")
+        expect([with_outsider.complete, with_repeat.complete, with_profile.complete]).to_equal([false, false, false])
+        val all_rows = section_a().points.len() + section_b().points.len()
+        expect(with_outsider.sorted_join_points.len()).to_equal(all_rows)
+        expect(with_repeat.sorted_join_points.len()).to_equal(all_rows)
+        expect(with_profile.sorted_join_points.len()).to_equal(section_a().points.len())
+
+# @manual_section: Aspect root digest
+describe "aspect_root_digest_v1":
+    it "the root does not depend on the order of leaves or children":
+        # @req REQ-ASPECT-AW2-ROOT
+        step("Compute the root of two leaves and two child roots in every order")
+        val root = aspect_root_digest_v1(["leaf-a", "leaf-b"], ["child-1", "child-2"])
+        # @capture(exec): root digests
+        step("All orders give one tagged sha256 root")
+        expect(root.starts_with("sha256:")).to_equal(true)
+        expect(aspect_root_digest_v1(["leaf-b", "leaf-a"], ["child-1", "child-2"])).to_equal(root)
+        expect(aspect_root_digest_v1(["leaf-a", "leaf-b"], ["child-2", "child-1"])).to_equal(root)
+
+    it "the root changes with any leaf, any child, and their roles":
+        # @req REQ-ASPECT-AW2-ROOT
+        step("Change one leaf, one child, repeat a leaf, and move a digest from the leaves to the children")
+        val root = aspect_root_digest_v1(["leaf-a", "leaf-b"], ["child-1"])
+        val variants = [aspect_root_digest_v1(["leaf-a", "leaf-c"], ["child-1"]),
+            aspect_root_digest_v1(["leaf-a", "leaf-b"], ["child-9"]),
+            aspect_root_digest_v1(["leaf-a", "leaf-b", "leaf-b"], ["child-1"]),
+            aspect_root_digest_v1(["leaf-a"], ["leaf-b", "child-1"]),
+            aspect_root_digest_v1([], [])]
+        # @capture(exec): variant roots
+        step("Every variant is a different root, including the empty directory")
+        for variant in variants:
+            expect(variant == root).to_equal(false)
+        expect(variants[4].starts_with("sha256:")).to_equal(true)

@@ -1,0 +1,130 @@
+# `generic-template|` section schema v3: template entries plus their open needs
+# (plan S3-F1; design doc/05_design/compiler/cache/generic_instance_tldr_trace.md
+# section 3).
+#
+# v3 changes the SECTION, not the entry identity: `language_schema` stays
+# `generic-tldr-view/v2`, so no TemplateId, facet fingerprint or
+# ConcreteTldrKey moves when a section is rewritten as v3. Layout:
+#
+#   <seal> "generic-template-section/v3" <sealed v2 section> <slot>*
+#
+# - the sealed v2 section is the unchanged v2 wire form, carried as one frame;
+# - one open-needs slot per entry, in the entry order of the v2 section;
+# - the seal is sha256 over every frame after it.
+#
+# Two digests: `section.digest` is the carried v2 table digest (templates
+# only), while the v3 seal also covers the open needs, so a needs-only change
+# moves the seal and leaves the table digest alone. A section is at most
+# 16 MiB on the wire, as in v2; both the encoder and the decoder refuse more.
+#
+# Open needs are therefore outside every template fingerprint by construction:
+# the v2 frame that the fingerprints are computed from does not contain them.
+# A v2 reader given v3 bytes fails its magic check and misses; a v3 reader
+# given v2 bytes does the same.
+#
+# The slot is write-once. Until the write-once slot type of the
+# pseudo-immutable plan (PI-S3-1) lands, the typed-HIR stage fills it at
+# publication time through `generic_template_fill_open_needs_v1`, which refuses
+# a second fill.
+
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.cache_contract.generic_tldr_view_v1.{GenericTemplateEntryV1,
+    GenericTemplateSectionV1, generic_template_section_encode_v2,
+    generic_template_section_decode_v2}
+use compiler.common.cache_contract.generic_open_need_v1.{GenericOpenNeedV1,
+    GenericOpenNeedsSlotV1, generic_open_needs_canonical_v1,
+    generic_open_needs_slot_encode_v1, generic_open_needs_slot_decode_v1,
+    generic_need_frames_v1, generic_need_frames_read_v1}
+
+pub val GENERIC_TEMPLATE_SECTION_MAGIC_V3 = "generic-template-section/v3"
+pub val GENERIC_TEMPLATE_SECTION_V3_MAX_BYTES = 16777216
+
+pub struct GenericTemplateSectionV3:
+    section: GenericTemplateSectionV1   # entries with their slots; digest = v2 table digest
+    seal: text                          # sha256 over magic, v2 table and every slot
+
+pub fn generic_template_fill_open_needs_v1(entry: GenericTemplateEntryV1,
+        rows: [GenericOpenNeedV1]) -> Result<GenericTemplateEntryV1, text>:
+    """The entry with its open-needs slot filled by the canonical form of
+    `rows`. Set-once: an already filled slot is refused, even with equal rows."""
+    match entry.open_needs:
+        case GenericOpenNeedsSlotV1.Filled(_):
+            return Err("open needs of " + entry.symbol_id + " are already filled")
+        case GenericOpenNeedsSlotV1.Absent:
+            pass
+    val canonical = generic_open_needs_canonical_v1(rows)
+    if canonical.is_err():
+        return Err("open needs of " + entry.symbol_id + ": " + canonical.unwrap_err())
+    var filled = entry
+    filled.open_needs = GenericOpenNeedsSlotV1.Filled(canonical.unwrap())
+    Ok(filled)
+
+fn _sealed_frames_v3(section: GenericTemplateSectionV1) -> Result<text, text>:
+    """Every frame the seal covers: magic, sealed v2 table, one slot per entry."""
+    val inner = generic_template_section_encode_v2(section)
+    if inner.is_err():
+        return Err(inner.unwrap_err())
+    var values = [GENERIC_TEMPLATE_SECTION_MAGIC_V3, inner.unwrap()]
+    for entry in section.entries:
+        val slot = generic_open_needs_slot_encode_v1(entry.open_needs)
+        if slot.is_err():
+            return Err("open needs of " + entry.symbol_id + ": " + slot.unwrap_err())
+        values = values.push(slot.unwrap())
+    val body = generic_need_frames_v1(values)
+    if body.byte_len() > GENERIC_TEMPLATE_SECTION_V3_MAX_BYTES:
+        return Err("v3 byte bound exceeded")
+    Ok(body)
+
+pub fn generic_template_section_seal_v3(section: GenericTemplateSectionV1) -> Result<text, text>:
+    """The v3 seal of a section: it covers the template table and every
+    open-needs slot, so it moves when only the needs change."""
+    val body = _sealed_frames_v3(section)
+    if body.is_err():
+        return Err(body.unwrap_err())
+    Ok(sha256_text(body.unwrap()))
+
+pub fn generic_template_section_encode_v3(section: GenericTemplateSectionV1) -> Result<text, text>:
+    """Seal a v2-valid section together with every entry's open-needs slot."""
+    val body = _sealed_frames_v3(section)
+    if body.is_err():
+        return Err(body.unwrap_err())
+    Ok(generic_need_frames_v1([sha256_text(body.unwrap())]) + body.unwrap())
+
+pub fn generic_template_section_decode_v3(data: text) -> Result<GenericTemplateSectionV3, text>:
+    """Strict decode: the byte bound, framing, magic, seal, the inner v2
+    section and one canonical slot per entry must all verify; anything else
+    is a miss. The byte bound is checked before any frame is read."""
+    if data.byte_len() > GENERIC_TEMPLATE_SECTION_V3_MAX_BYTES:
+        return Err("v3 byte bound exceeded")
+    val parts = generic_need_frames_read_v1(data)
+    if parts.is_err():
+        return Err("malformed v3 frame: " + parts.unwrap_err())
+    val values = parts.unwrap()
+    if values.len() < 3:
+        return Err("v3 magic required")
+    if values[1] != GENERIC_TEMPLATE_SECTION_MAGIC_V3:
+        return Err("v3 magic required")
+    var sealed: [text] = []
+    var i = 1
+    while i < values.len():
+        sealed = sealed.push(values[i])
+        i = i + 1
+    if sha256_text(generic_need_frames_v1(sealed)) != values[0]:
+        return Err("v3 section seal mismatch")
+    val inner = generic_template_section_decode_v2(values[2])
+    if not inner.ok:
+        return Err("v3 template table: " + inner.error)
+    if values.len() - 3 != inner.section.entries.len():
+        return Err("v3 needs table does not match the template table")
+    var entries: [GenericTemplateEntryV1] = []
+    var e = 0
+    for entry in inner.section.entries:
+        val slot = generic_open_needs_slot_decode_v1(values[3 + e])
+        if slot.is_err():
+            return Err("open needs of " + entry.symbol_id + ": " + slot.unwrap_err())
+        var filled = entry
+        filled.open_needs = slot.unwrap()
+        entries = entries.push(filled)
+        e = e + 1
+    Ok(GenericTemplateSectionV3(section: GenericTemplateSectionV1(entries: entries,
+        digest: inner.section.digest), seal: values[0]))

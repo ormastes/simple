@@ -2039,7 +2039,12 @@ fn current_owner() -> Arc<str> {
 /// order. Two slots that hold the same allocation or the same owner count
 /// once (identity, never a structural `ClassDef` compare). Memoised per
 /// generation: a hit is one hash probe plus an `Arc` clone.
-fn owned_class_candidates(name: &str) -> Arc<[(Arc<str>, Arc<ClassDef>)]> {
+///
+/// `pub(crate)` for the tier-shim exemption in
+/// `interpreter_call::provable_class_rejection` (runtime-tier shim modules
+/// re-declare byte-identical struct families; the exemption needs each
+/// definition's owner path and a pairwise layout comparison).
+pub(crate) fn owned_class_candidates(name: &str) -> Arc<[(Arc<str>, Arc<ClassDef>)]> {
     let generation = registry_generation();
     let hit = CANDIDATES_CACHE.with(|c| {
         c.borrow()

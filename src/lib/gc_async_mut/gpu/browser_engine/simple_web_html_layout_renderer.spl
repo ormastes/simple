@@ -72,7 +72,78 @@ use std.gc_async_mut.gpu.browser_engine.style.animation.{
     animation_css_value_text, sample_keyframes_with_underlying,
     browser_css_animation_capacity_available
 }
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_core_css_rules.{filter_rules_for_dom}
+export filter_rules_for_dom
+export SimpleWebCssLayoutBox, SimpleWebCssHitSnapshot
+export simple_web_last_layout_hit_snapshot, simple_web_last_layout_hit_boxes
+export simple_web_last_layout_doc_bottom, simple_web_last_layout_hit_snapshot_reset
 export use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_compose_support.{SimpleWebInputTextHitMap, SimpleWebLayoutHitIndex, SimpleWebElementScrollReason, simple_web_element_scroll_reason_text, SimpleWebElementScrollState, simple_web_layout_hit_test_index, simple_web_layout_hit_test_index_node, _simple_web_root_sticky_admitted, _SimpleWebScrolledLayout, _SimpleWebElementScrolledLayout, _simple_web_scrolled_layout, _simple_web_element_scrolled_layout, SimpleWebLayoutMaterialWitness, _SimpleWebInputTextHitBuild, _simple_web_input_text_hit_build, simple_web_layout_material_provenance_after_execution, simple_web_layout_material_provenance_after_backend_execution, simple_web_material_fallback_realized, _simple_web_material_witness_from_sidecar, _simple_web_visible_material_witness, _animation_direction_progress, _animation_direction_is_forwards, _css_animation_signature, CSS_ANIMATION_MAX_TIME_MS, CSS_ANIMATION_MIN_TIME_MS, _css_animation_iteration_count, _css_animation_add_ms_no_wrap, _css_animation_sub_ms_no_wrap, _css_animation_active_duration_ms, _css_animation_next_frame_ms, _simple_web_animation_frame_index, simple_web_layout_reconcile_animation_instances, _animation_computed_length, _animation_computed_color, _simple_web_css_animation_instance_next_ms, simple_web_layout_animation_instances_next_ms, _simple_web_layout_animation_schedule, simple_web_layout_animation_end_ms, _simple_web_layout_canvas_base, _SIMPLE_WEB_OPACITY_NEST_MAX_LEVEL, _simple_web_opacity_root_on_chain, _simple_web_fractional_opacity_command_roots, _simple_web_backdrop_root_flags, _SimpleWebOpacityRootBounds, _simple_web_opacity_halo, _simple_web_draw_ir_command_translatable, _simple_web_opacity_root_bounds, SIMPLE_WEB_OPACITY_NEST_PROP, _simple_web_opacity_nest_texts, _simple_web_opacity_top_root, _simple_web_draw_ir_css_background, _simple_web_iframe_fractional_ancestor, _simple_web_draw_ir_has_material_request, _simple_web_layout_merge_material_witness, _simple_web_layout_segment_batch, simple_web_layout_empty_retained, simple_web_layout_render_html_software_pixels_traced, simple_web_layout_render_html_software_pixels_tile_lane, _web_gpu_paint_state, simple_web_layout_debug_gpu_paint_state_visits, _web_gpu_solid_fill_ops, _web_gpu_solid_only_frame, simple_web_layout_render_html_software_pixels_at_scroll}
+
+class SimpleWebCssLayoutBox:
+    id: text
+    x: i32
+    y: i32
+    width: i32
+    height: i32
+
+class SimpleWebCssHitSnapshot:
+    valid: bool
+    html: text
+    width: i32
+    height: i32
+    has_bounds: bool
+    raw_bottom_y: i32
+    boxes: [SimpleWebCssLayoutBox]
+
+var _last_layout_hit_snapshot: SimpleWebCssHitSnapshot = SimpleWebCssHitSnapshot(
+    valid: false, html: "", width: 0, height: 0, has_bounds: false, raw_bottom_y: 0, boxes: []
+)
+
+fn _simple_web_record_layout_hit_snapshot(
+    html: text, width: i32, height: i32, nodes: [HNode], boxes: LayoutResult
+):
+    val node_count = nodes.len()
+    var hit_boxes: [SimpleWebCssLayoutBox] = []
+    var has_bounds = false
+    var raw_bottom: i32 = 0
+    var i: i32 = 0
+    while i < node_count as i32:
+        val bw = boxes.bw[i]
+        val bh = boxes.bh[i]
+        if bw > 0 and bh > 0:
+            val doc_bottom = boxes.by[i] + bh
+            if not has_bounds or doc_bottom > raw_bottom:
+                raw_bottom = doc_bottom
+                has_bounds = true
+            val node_id = nodes[i].id_attr
+            if node_id != "" and node_id != "browser_scroll_plane":
+                hit_boxes.push(SimpleWebCssLayoutBox(
+                    id: node_id, x: boxes.bx[i], y: boxes.by[i],
+                    width: bw, height: bh
+                ))
+        i = i + 1
+    _last_layout_hit_snapshot = SimpleWebCssHitSnapshot(
+        valid: true, html: html, width: width, height: height,
+        has_bounds: has_bounds, raw_bottom_y: raw_bottom, boxes: hit_boxes
+    )
+
+pub fn simple_web_last_layout_hit_snapshot() -> SimpleWebCssHitSnapshot:
+    _last_layout_hit_snapshot
+
+pub fn simple_web_last_layout_hit_boxes() -> [SimpleWebCssLayoutBox]:
+    _last_layout_hit_snapshot.boxes
+
+# reason: scalar bottom-y pixel coordinate of the most recent pure_simple document layout pass
+# @allow(primitive_api)
+pub fn simple_web_last_layout_doc_bottom() -> i32:
+    _last_layout_hit_snapshot.raw_bottom_y
+
+# reason: test/telemetry reset hook for the recorded pure_simple document layout snapshot
+# @allow(primitive_api)
+pub fn simple_web_last_layout_hit_snapshot_reset():
+    _last_layout_hit_snapshot = SimpleWebCssHitSnapshot(
+        valid: false, html: "", width: 0, height: 0, has_bounds: false, raw_bottom_y: 0, boxes: []
+    )
 
 pub fn simple_web_layout_hit_test_target_at_time(
     html: text, width: i32, height: i32,
@@ -89,7 +160,7 @@ pub fn simple_web_layout_hit_test_target_at_time_with_animations(
 ) -> text:
     _web_budget_begin(WEB_RENDER_BUDGET_MS)
     val nodes = parse_html(html)
-    val rules = extract_css_vw(html, width, false)
+    val rules = filter_rules_for_dom(extract_css_vw(html, width, false), nodes)
     val child_index = build_child_index(nodes)
     var styles = compute_styles(nodes, rules, child_index, false, true, width, height)
     if animation_time_ms >= 0:
@@ -1238,8 +1309,9 @@ fn _simple_web_layout_compose_document(
     var solid_material_nodes: [i32] = []
     if _phase_on:
         print "[web-phase] phase=style_start elapsed_ms={(default_frame_clock().now_micros() - render_start_us) / 1000}"
+    val filtered_rules = filter_rules_for_dom(rules, nodes)
     val base_styles = compute_styles_with_material(
-        nodes, rules, child_index, false, vector_fonts,
+        nodes, filtered_rules, child_index, false, vector_fonts,
         material_entries, material_counts,
         cpu_material_nodes, solid_material_nodes, width, height)
     if _phase_on:
@@ -1304,6 +1376,8 @@ fn _simple_web_layout_compose_document(
         neg_one_i32_list(node_count)
     )
     layout_set_images([])
+    if depth == 0:
+        _simple_web_record_layout_hit_snapshot(html, width, height, nodes, raw_boxes)
     if _phase_on:
         print "[web-phase] phase=layout elapsed_ms={(default_frame_clock().now_micros() - render_start_us) / 1000}"
     val _phase_composed = _simple_web_layout_compose_retained(
@@ -1358,7 +1432,7 @@ pub fn simple_web_layout_prepare_retained(
     val default_budget_ms = if area_floor_ms > WEB_RENDER_BUDGET_MS: area_floor_ms else: WEB_RENDER_BUDGET_MS
     _web_budget_begin(if env_override > 0: env_override else: default_budget_ms)
     val nodes = parse_html(html)
-    val rules = extract_css_vw(html, width, false)
+    val rules = filter_rules_for_dom(extract_css_vw(html, width, false), nodes)
     val child_index = build_child_index(nodes)
     var material_entries: [text] = ["", ""]
     var material_counts: [i64] = [0, 0]
@@ -1682,6 +1756,28 @@ pub fn simple_web_layout_render_html_draw_ir_result_at_time_with_animations_with
         browser_text_input_overlay_empty(), animation_instances, images
     )
 
+# reason: mirrors simple_web_layout_render_html_draw_ir_result_at_time_with_element_scroll for BrowserSession scrolled pixel parity
+# @allow(primitive_api)
+pub fn simple_web_layout_render_html_draw_ir_result_at_time_with_animations_with_images_with_element_scroll(
+    html: text, width: i32, height: i32, animation_time_ms: i64,
+    animation_instances: [BrowserCssAnimationInstance],
+    images: [SimpleOsHostGpuImageResource],
+    element_id: text, scroll_top: i32
+) -> SimpleWebLayoutDrawIrResult:
+    val env_override = _web_render_budget_ms_env_override()
+    val area_floor_ms = (width as i64) * (height as i64) / 16
+    val default_budget_ms = if area_floor_ms > WEB_RENDER_BUDGET_MS:
+        area_floor_ms
+    else:
+        WEB_RENDER_BUDGET_MS
+    _web_budget_begin(if env_override > 0: env_override else: default_budget_ms)
+    _simple_web_layout_compose_document(
+        html, width, height, true, animation_time_ms, 0,
+        true, element_id, scroll_top,
+        browser_text_input_overlay_empty(), animation_instances, images, _web_empty_rules(), 0,
+        _web_render_deadline_us
+    )
+
 pub fn simple_web_layout_render_html_draw_ir_result_with_overlay_at_time(
     html: text, width: i32, height: i32, animation_time_ms: i64,
     overlay: BrowserTextInputOverlay
@@ -1830,7 +1926,8 @@ pub fn simple_web_layout_render_html_software_result_with_images(html: text, wid
     # build (the `trace_stages` receipt fired from this call site even though
     # the only trace-enabled caller never ran), so this render path does not
     # rely on default-argument materialization.
-    val rules = extract_css_vw(html, width, false)
+    val own_rules = extract_css_vw(html, width, false)
+    val rules = filter_rules_for_dom(own_rules, nodes)
     val child_index = build_child_index(nodes)
     # Style gets at most 70% of the total budget.
     _web_budget_rearm(render_start_us + budget_us * 7 / 10)
@@ -1867,6 +1964,7 @@ pub fn simple_web_layout_render_html_software_result_with_images(html: text, wid
         neg_one_i32_list(node_count)
     )
     layout_set_images([])
+    _simple_web_record_layout_hit_snapshot(html, width, height, nodes, boxes)
     # Paint gets the final slice: the original full deadline.
     _web_budget_rearm(render_start_us + budget_us)
     val widget_mode = simple_web_layout_uses_legacy_widget_chrome(html)
@@ -1882,7 +1980,7 @@ pub fn simple_web_layout_render_html_software_result_with_images(html: text, wid
         paint_tiled(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, wrap_cache, fb, width, height, widget_mode, 0, height)
     else:
         paint(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, wrap_cache, fb, width, height, widget_mode)
-    painted = _web_paint_iframes(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, rules, painted, width, height, 0)
+    painted = _web_paint_iframes(nodes, styles, boxes.bx, boxes.by, boxes.bw, boxes.bh, own_rules, painted, width, height, 0)
     raster_set_images([])
     val material_witness = _simple_web_visible_material_witness(
         material_entries, cpu_material_nodes, solid_material_nodes,
@@ -1937,7 +2035,7 @@ pub fn simple_web_layout_render_html_gpu_frame(html: text, width: i32, height: i
     # build (the `trace_stages` receipt fired from this call site even though
     # the only trace-enabled caller never ran), so this render path does not
     # rely on default-argument materialization.
-    val rules = extract_css_vw(html, width, false)
+    val rules = filter_rules_for_dom(extract_css_vw(html, width, false), nodes)
     val child_index = build_child_index(nodes)
     val styles = compute_styles(nodes, rules, child_index, false, true, width, height)
     val node_count = nodes.len() as i32

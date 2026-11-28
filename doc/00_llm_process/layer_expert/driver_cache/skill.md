@@ -32,6 +32,13 @@ this layer resolves toward recomputation.
 - Formal model: `src/verification/cache_protocol/` (imports the frozen
   `cache_identity` v1 project; does not re-declare it)
 
+- Aspect TLDR sections (aspect plan AW-1/AW-2): `aspect-decl|` codec
+  `src/compiler/00.common/cache_contract/aspect_decl_section_v1.spl`, `join-point|` codec and
+  `JoinPointFactV2` in `cache_contract/join_point_section_v2.spl`, writers in
+  `src/compiler/80.driver/cache/aspect_tldr_section_writer_v1.spl`. Sections are byte-framed and
+  sealed; a decode is `ok`, `miss` or `reject`, never partial. The writers are not yet called by
+  TLDR publication (it runs before typed HIR).
+
 Feature wikis: [cache_identity](../../feature_expert/cache_identity/skill.md),
 [cache_tiering](../../feature_expert/cache_tiering/skill.md),
 [interface_compat](../../feature_expert/interface_compat/skill.md).
@@ -99,3 +106,5 @@ exist but have no consumers.
 - Superseded 2026-10-25; default updated 2026-10-26: `.spab` is the DEFAULT parse-cache store (#4582, #4589 zero-copy hit); `SIMPLE_FRONTEND_SPAB=0` opts out (`src/compiler/10.frontend/frontend_spab_cache_v1.spl:11,40`). The true per-file `--file-worker` pipeline (#4576 #4584 #4585 #4588 #4594 #4575 #4580 #4597 #4598 #4603) is selected by default when `SIMPLE_FILE_WORKERS` is unset (`NATIVE_PER_FILE_PIPELINE_DEFAULT_V1 = "1"`); `SIMPLE_FILE_WORKERS=0` opts out. `SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1` keeps the whole-program route. No native overlap receipt exists yet, so the shared default is not qualification evidence. Contract: `doc/05_design/compiler/incremental_build/true_per_file_pipeline_v1.md`.
 
 - Latest user override, 2026-10-26: the earlier PR #4865 enablement above is historical. Source default `NATIVE_PER_FILE_PIPELINE_DEFAULT_V1 = "0"` leaves the true file-worker pool off when unset; `SIMPLE_FILE_WORKERS=1` explicitly opts in. `SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1` retains precedence. Land this default adjustment without new runtime verification as requested; native overlap and full Phase 3 qualification remain pending.
+
+- 2026-11-28: generic instance provider contract (plan S3-F1) landed as data only: `generic-template-section/v3` (template entries plus their open needs) in `src/compiler/00.common/cache_contract/`. Nothing in `80.driver` reads or writes it yet. See `../../feature_expert/generic_instance_tldr/skill.md`.

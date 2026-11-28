@@ -838,7 +838,7 @@ pub(crate) fn exec_block_value(
             env: captured,
         } => {
             let mut captured_clone = Env::clone(&captured);
-            exec_lambda(
+            localize_bdd_return(exec_lambda(
                 &params,
                 &body,
                 &[],
@@ -848,13 +848,20 @@ pub(crate) fn exec_block_value(
                 classes,
                 enums,
                 impl_methods,
-            )
+            ))
         }
         Value::BlockClosure { nodes, env: captured } => {
             let captured_clone = Env::clone(&captured);
             let _closure_origin =
                 crate::interpreter::interpreter_module::ClosureOriginGuard::enter_closure(&captured);
-            exec_block_closure(&nodes, &captured_clone, functions, classes, enums, impl_methods)
+            localize_bdd_return(exec_block_closure(
+                &nodes,
+                &captured_clone,
+                functions,
+                classes,
+                enums,
+                impl_methods,
+            ))
         }
         // A pending example (`it "x"` with no body) legitimately has a Nil body.
         Value::Nil => Ok(Value::Nil),
@@ -869,6 +876,10 @@ pub(crate) fn exec_block_value(
 fn localize_bdd_return(result: Result<Value, CompileError>) -> Result<Value, CompileError> {
     match result {
         Err(CompileError::BlockReturn(value)) => Ok(value),
+        // A `return` inside a match/if-expression arm of a BDD body travels as ArmReturn
+        // (interp_return_in_match_expr_swallowed_2026-06-30); it ends
+        // this example only and must not surface as "try: early return".
+        Err(CompileError::ArmReturn(value)) => Ok(*value),
         other => other,
     }
 }
@@ -1461,7 +1472,13 @@ pub(super) fn eval_bdd_builtin(
                 Err(ref e) => {
                     // Test failed due to execution error
                     println!("{}\x1b[31m✗ {}\x1b[0m", indent_str, name_str);
-                    println!("{}  \x1b[31m{}\x1b[0m", indent_str, e);
+                    let recorded = if BDD_EXPECT_FAILED.with(|cell| *cell.borrow()) {
+                        BDD_FAILURE_MSG.with(|cell| cell.borrow().summary())
+                    } else {
+                        None
+                    };
+                    let shown = err_report_message(e.to_string(), recorded);
+                    println!("{}  \x1b[31m{}\x1b[0m", indent_str, shown);
                     BDD_COUNTS.with(|cell| cell.borrow_mut().1 += 1);
                     if !BDD_FAILED_RECORDED_IN_IT.with(|cell| *cell.borrow()) {
                         BDD_TOTALS.with(|cell| cell.borrow_mut().1 += 1);
@@ -2960,5 +2977,49 @@ mod dsl_name_tests {
                 }
             }
         }
+    }
+}
+
+/// Message to print for an example whose body errored. A failing assertion
+/// (`fail("msg")`, which records the failure and evaluates to nil) can make a
+/// `-> T` helper trip the non-optional nil-return contract; that contract error
+/// is a consequence of the recorded failure, so the recorded message is the one
+/// worth reporting.
+fn err_report_message(err_text: String, recorded: Option<String>) -> String {
+    match recorded {
+        Some(msg) if err_text.contains("nil is forbidden by the non-optional return contract") => msg,
+        _ => err_text,
+    }
+}
+
+#[cfg(test)]
+mod fail_nil_mask_tests {
+    use super::*;
+
+    const NIL_ERR: &str = "nil is forbidden by the non-optional return contract of 'freeze_compile_snapshot'";
+
+    #[test]
+    fn recorded_fail_message_replaces_nil_contract_error() {
+        clear_bdd_state();
+        BDD_INSIDE_IT.with(|cell| *cell.borrow_mut() = true);
+        record_assertion_failure("unimplemented oracle".to_string()).unwrap();
+        let recorded = if BDD_EXPECT_FAILED.with(|c| *c.borrow()) {
+            BDD_FAILURE_MSG.with(|c| c.borrow().summary())
+        } else {
+            None
+        };
+        clear_bdd_state();
+        assert_eq!(err_report_message(NIL_ERR.to_string(), recorded), "unimplemented oracle");
+    }
+
+    #[test]
+    fn nil_contract_error_kept_without_recorded_failure() {
+        assert_eq!(err_report_message(NIL_ERR.to_string(), None), NIL_ERR);
+    }
+
+    #[test]
+    fn unrelated_error_never_replaced() {
+        let other = "undefined variable x".to_string();
+        assert_eq!(err_report_message(other.clone(), Some("unimplemented oracle".to_string())), other);
     }
 }

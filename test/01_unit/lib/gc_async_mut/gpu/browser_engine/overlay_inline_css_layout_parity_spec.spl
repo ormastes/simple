@@ -1,0 +1,229 @@
+"""
+## Purpose and audience
+Purpose: Regression parity suite covering:
+1. 2-decimal unitless `line-height` (`1.55`, `1.45`, `1.35`) and host-font `line-height: normal`.
+2. Overlay auto-height `bottom:` positioning (`position: absolute` / auto-height containers).
+3. Padded/bordered `display: inline` baseline and non-inflated line box, plus inline `<img>` spacing.
+4. `flex-wrap` row-flex max-content gap/ceiling sizing, form controls `width: 100%`, and table cell `vertical-align: middle`.
+Audience: browser_engine and rendering parity maintainers.
+"""
+
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_foundation_values.spl 5%
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_decl_apply.spl 2%
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_foundation.spl 5%
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_text.spl 5%
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl 10%
+# @req FR-WEB-LAYOUT-OVERLAY-INLINE-PARITY
+
+use std.spec.{describe, it, expect, step}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id,
+    simple_web_layout_element_geometry_lines
+}
+
+fn _parse_i32(raw: text) -> i32:
+    if raw == "":
+        return -1
+    (raw.to_int() ?? -1) as i32
+
+fn _geom_i32(html: text, vw: i32, vh: i32, id: text, field: text) -> i32:
+    _parse_i32(simple_web_layout_debug_layout_by_id(html, vw, vh, id, field))
+
+fn _body_geom_rows(html: text, vw: i32, vh: i32) -> [text]:
+    val lines = simple_web_layout_element_geometry_lines(html, vw, vh)
+    var rows: [text] = []
+    var seen_body = false
+    for line in lines:
+        val parts = line.split("|")
+        if parts.len() >= 7:
+            val tag = parts[2]
+            if tag == "body":
+                seen_body = true
+            elif seen_body:
+                rows.push(line)
+    rows
+
+fn _row_col(rows: [text], idx: i32, col: i32) -> i32:
+    if idx < 0 or idx >= rows.len() as i32:
+        return -1
+    val parts = rows[idx].split("|")
+    if col < 0 or col >= parts.len() as i32:
+        return -1
+    _parse_i32(parts[col])
+
+fn _row_x(rows: [text], idx: i32) -> i32:
+    _row_col(rows, idx, 3)
+
+fn _row_y(rows: [text], idx: i32) -> i32:
+    _row_col(rows, idx, 4)
+
+fn _row_w(rows: [text], idx: i32) -> i32:
+    _row_col(rows, idx, 5)
+
+fn _row_h(rows: [text], idx: i32) -> i32:
+    _row_col(rows, idx, 6)
+
+describe "2-decimal unitless line-height parity":
+
+    it "preserves hundredth precision for 1.55, 1.45, 1.35 and keeps 1.50 compatible":
+        step("Compute single-line block heights at 20px font-size")
+        val rows = _body_geom_rows(
+            "<!doctype html><html><body style='margin:0;font-family:sans-serif'>" +
+            "<div style='font-size:20px;line-height:1.55'>Alpha</div>" +
+            "<div style='font-size:20px;line-height:1.45'>Beta</div>" +
+            "<div style='font-size:20px;line-height:1.35'>Gamma</div>" +
+            "<div style='font-size:20px;line-height:1.50'>Delta</div>" +
+            "<div style='font-size:20px;line-height:1.5'>Eps</div>" +
+            "</body></html>",
+            400, 300
+        )
+        expect(_row_h(rows, 0)).to_equal(31)
+        expect(_row_h(rows, 1)).to_equal(29)
+        expect(_row_h(rows, 2)).to_equal(27)
+        expect(_row_h(rows, 3)).to_equal(30)
+        expect(_row_h(rows, 4)).to_equal(30)
+
+describe "Overlay auto-height bottom positioning (v08)":
+
+    it "anchors multi-line auto-height abspos toast against fixed relative container bottom":
+        step("Layout auto-height wrapped toast with bottom: 16px inside 200px stage")
+        val rows = _body_geom_rows(
+            "<!doctype html><html><body style='margin:0'>" +
+            "<div style='position:relative;width:240px;height:200px;box-sizing:border-box'>" +
+            "<div style='position:absolute;left:16px;right:16px;bottom:16px;padding:10px;box-sizing:border-box;font:16px/1.5 monospace'>Line one wraps cleanly across multiple lines inside toast</div>" +
+            "</div></body></html>",
+            400, 400
+        )
+        val toast_y = _row_y(rows, 1)
+        val toast_h = _row_h(rows, 1)
+        expect(toast_h).to_be_greater_than(40)
+        expect(toast_y + toast_h).to_equal(184)
+
+    it "adjusts auto-height abspos bottom children once auto-height positioned container finishes":
+        step("Layout bottom-pinned abspos overlay inside auto-height relative block and flex containers")
+        val rows = _body_geom_rows(
+            "<!doctype html><html><body style='margin:0'>" +
+            "<div style='position:relative;width:240px;padding:10px;box-sizing:border-box'>" +
+            "<div style='height:120px'></div>" +
+            "<div style='position:absolute;left:12px;width:120px;bottom:12px;font:16px/1.5 monospace'>Multi line badge overlay text</div>" +
+            "</div>" +
+            "<div style='position:relative;display:flex;width:240px;padding:8px;box-sizing:border-box'>" +
+            "<div style='height:100px;width:80px'></div>" +
+            "<div style='position:absolute;left:8px;width:120px;bottom:10px;font:16px/1.5 monospace'>Flex bottom badge text</div>" +
+            "</div></body></html>",
+            400, 400
+        )
+        # 0=autostage, 1=spacer, 2=overlay, 3=flexstage, 4=flex_spacer, 5=flex_overlay
+        expect(_row_h(rows, 0)).to_equal(140)
+        expect(_row_y(rows, 2) + _row_h(rows, 2)).to_equal(_row_y(rows, 0) + _row_h(rows, 0) - 12)
+        expect(_row_h(rows, 3)).to_equal(116)
+        expect(_row_y(rows, 5) + _row_h(rows, 5)).to_equal(_row_y(rows, 3) + _row_h(rows, 3) - 10)
+
+describe "Inline padded spans and inline img spacing (v09)":
+
+    it "keeps vertical padding on inline spans out of line-box height and aligns inner text baseline":
+        step("Compare plain paragraph text_y against padded inline span text_y")
+        val html = (
+            "<!doctype html><html><body style='margin:0;font:16px/1.5 sans-serif'>" +
+            "<p id='p' style='margin:0'>Plain <span id='badge' style='padding:4px 10px;border:1px solid #334155'>Pill</span> end</p>" +
+            "</body></html>"
+        )
+        val rows = _body_geom_rows(html, 500, 200)
+        val p_h = _row_h(rows, 0)
+        val badge_y = _row_y(rows, 1)
+        val badge_h = _row_h(rows, 1)
+        val p_text_y = _geom_i32(html, 500, 200, "p", "text_y")
+        val badge_text_y = _geom_i32(html, 500, 200, "badge", "text_y")
+        expect(p_h).to_equal(24)
+        expect(badge_h).to_be_greater_than(p_h)
+        expect(badge_text_y).to_equal(p_text_y)
+        expect(badge_y).to_equal(p_text_y - 5)
+
+    it "keeps exact spacing after CSS-sized inline img without dropping or double-counting spaces":
+        step("Verify CSS width:14px inline img matches HTML width='14' pen carry and following word x")
+        val rows = _body_geom_rows(
+            "<!doctype html><html><body style='margin:0;font:16px/1.5 monospace'>" +
+            "<p style='margin:0'>Typography <img style='width:14px;height:14px' /> <span>Verification</span></p>" +
+            "<p style='margin:0'>Typography <img width='14' height='14' style='width:14px;height:14px' /> <span>Verification</span></p>" +
+            "</body></html>",
+            600, 200
+        )
+        # 0=p1, 1=ico_css, 2=after_css, 3=p2, 4=ico_attr, 5=after_attr
+        val ico_css_x = _row_x(rows, 1)
+        val after_css_x = _row_x(rows, 2)
+        val ico_attr_x = _row_x(rows, 4)
+        val after_attr_x = _row_x(rows, 5)
+        expect(ico_css_x).to_equal(ico_attr_x)
+        expect(after_css_x).to_equal(after_attr_x)
+        expect(after_css_x - (ico_css_x + 14)).to_be_greater_than(2)
+        expect(after_css_x - (ico_css_x + 14)).to_be_less_than(16)
+
+describe "Flex-wrap row-flex max-content gap, 100% form controls, and table middle alignment":
+
+    it "accounts for row_flex column_gap between text and element children in flex-wrap auto sizing":
+        step("Verify auto flex-basis row-flex item inside flex-wrap includes column-gap without premature wrap")
+        val rows = _body_geom_rows(
+            "<!doctype html><html><body style='margin:0;font:14px/1.4 monospace'>" +
+            "<div style='display:flex;flex-wrap:wrap;width:420px;gap:10px'>" +
+            "<div style='display:flex;column-gap:16px;flex:0 0 auto'>Alpha<span>Beta</span></div>" +
+            "<div style='display:flex;column-gap:0px;flex:0 0 auto'>Alpha<span>Beta</span></div>" +
+            "</div></body></html>",
+            500, 200
+        )
+        # 0=wrap, 1=rf_gap, 2=span, 3=rf_nogap, 4=span
+        expect(_row_w(rows, 1) - _row_w(rows, 3)).to_equal(16)
+        expect(_row_y(rows, 1)).to_equal(_row_y(rows, 3))
+
+    it "resolves percentage widths on inline replaced input and select controls (v11)":
+        step("Check width:100% on inline <input> and <select> vs explicit px control")
+        val rows = _body_geom_rows(
+            "<!doctype html><html><body style='margin:0'>" +
+            "<div style='width:240px'>" +
+            "<input type='text' style='width:100%;box-sizing:border-box' />" +
+            "<select style='width:100%;box-sizing:border-box'><option>Alpha</option></select>" +
+            "<input type='text' style='width:150px;box-sizing:border-box' />" +
+            "</div></body></html>",
+            400, 200
+        )
+        # 0=container, 1=inp, 2=sel, 3=inp_px
+        expect(_row_w(rows, 1)).to_equal(240)
+        expect(_row_w(rows, 2)).to_equal(240)
+        expect(_row_w(rows, 3)).to_equal(150)
+
+    it "vertically centers table cell children for middle and default vertical-align (v07)":
+        step("Check vertical-align middle, default, and top inside 80px table row")
+        val rows = _body_geom_rows(
+            "<!doctype html><html><body style='margin:0'>" +
+            "<table style='width:300px;border-collapse:separate;border-spacing:0'>" +
+            "<tr>" +
+            "<td style='padding:0;vertical-align:top'><div style='height:80px;width:100px'></div></td>" +
+            "<td style='padding:0;vertical-align:middle'><div style='height:20px;width:100px'></div></td>" +
+            "<td style='padding:0'><div style='height:20px;width:100px'></div></td>" +
+            "<td style='padding:0;vertical-align:top'><div style='height:20px;width:100px'></div></td>" +
+            "</tr></table></body></html>",
+            500, 200
+        )
+        # 0=table, 1=tr, 2=td_tall, 3=tall_div, 4=td_mid, 5=mid_box, 6=td_def, 7=def_box, 8=td_top, 9=top_box
+        expect(_row_h(rows, 4)).to_equal(80)
+        expect(_row_y(rows, 5) - _row_y(rows, 4)).to_equal(30)
+        expect(_row_y(rows, 7) - _row_y(rows, 6)).to_equal(30)
+        expect(_row_y(rows, 9) - _row_y(rows, 8)).to_equal(0)
+
+describe "Shrink-to-fit max-content of split inline text (combo matrix)":
+
+    it "does not round each inline text piece up when sizing a table or button":
+        step("Lay out the combo-matrix cells tt-td-code and tt-div-button at 16px/1.5 sans-serif")
+        # Chrome 159 (combo matrix harvest, 900x2000, scale 1): table
+        # tt-td-code-w is 65 px wide, its td 61; button tt-div-button-c is
+        # 30 px. Rounding "ab ", "cd" and " ef" up one by one made them 67/63/32.
+        val rows = _body_geom_rows(
+            "<!doctype html><html><body style='margin:0;font:16px/1.5 sans-serif'>" +
+            "<table><tr><td>ab <code>cd</code> ef</td></tr></table>" +
+            "<div>ab <button>cd</button> ef</div>" +
+            "</body></html>",
+            900, 2000
+        )
+        # 0=table, 1=tbody, 2=tr, 3=td, 4=code, 5=div, 6=button
+        expect(_row_w(rows, 0)).to_equal(65)
+        expect(_row_w(rows, 3)).to_equal(61)
+        expect(_row_w(rows, 6)).to_be_less_than(32)

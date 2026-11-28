@@ -1,0 +1,190 @@
+"""
+## Purpose and audience
+Purpose: Pin Chrome LayoutNG geometry parity fixes in Simple's browser engine
+across Flexbox overlap/shrinking/wrapping, inline & inline-block flow, block
+float-containing BFC, omitted-template Grid, collapsed Table colspan/groups,
+and Draw IR viewport/scroll clipping (Bug 0).
+Audience: browser_engine and rendering parity maintainers.
+"""
+
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_engine.spl 15%
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_layout_foundation.spl 10%
+# @cover src/lib/gc_async_mut/gpu/browser_engine/simple_web_html_layout_renderer_paint_layout.spl 10%
+# @req FR-WEB-LAYOUT-CHROME-PARITY
+
+use std.spec.{describe, it, expect}
+use std.common.web.browser_renderer_protocol.{browser_text_input_overlay_empty}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id,
+    simple_web_layout_render_html_draw_ir,
+    simple_web_layout_render_html_draw_ir_result_with_overlay_at_scroll_time
+}
+
+fn _geom_i32(html: text, vw: i32, vh: i32, id: text, field: text) -> i32:
+    val raw = simple_web_layout_debug_layout_by_id(html, vw, vh, id, field)
+    if raw == "":
+        return -1
+    (raw.to_int() ?? -1) as i32
+
+describe "CSS Flexbox Chrome parity (overlap, shrink freeze, % fallback, wrap)":
+
+    it "places header space-between left title and right pill badge without overlap":
+        val html = (
+            "<!doctype html><html><body style='margin:0;font:16px/1.5 sans-serif'>" +
+            "<header id='hdr' style='display:flex;justify-content:space-between;align-items:center;width:480px;padding:12px 16px;box-sizing:border-box'>" +
+            "<div id='title'>Simple Web Standards Overview</div>" +
+            "<span id='pill' style='padding:4px 10px;border:1px solid #334155'>Forms &amp; Paint</span>" +
+            "</header></body></html>"
+        )
+        val title_x = _geom_i32(html, 600, 200, "title", "x")
+        val title_w = _geom_i32(html, 600, 200, "title", "w")
+        val pill_x = _geom_i32(html, 600, 200, "pill", "x")
+        val pill_w = _geom_i32(html, 600, 200, "pill", "w")
+        expect(pill_x >= title_x + title_w).to_equal(true)
+        expect(pill_x + pill_w).to_be_less_than(480)
+
+    it "shrinks auto-width flex items cleanly and freezes min-width without sibling overlap":
+        val html = (
+            "<!doctype html><html><body style='margin:0;font:16px/1.5 sans-serif'>" +
+            "<div id='row' style='display:flex;width:200px'>" +
+            "<div id='a' style='overflow:hidden'>AlphaBetaGammaDeltaEpsilonZetaEtaThetaIota</div>" +
+            "<div id='b' style='min-width:80px;box-sizing:border-box'>Tag</div>" +
+            "</div></body></html>"
+        )
+        val ax = _geom_i32(html, 400, 200, "a", "x")
+        val aw = _geom_i32(html, 400, 200, "a", "w")
+        val bx = _geom_i32(html, 400, 200, "b", "x")
+        val bw = _geom_i32(html, 400, 200, "b", "w")
+        expect(bw).to_equal(80)
+        expect(bx).to_equal(ax + aw)
+        expect(bx + bw).to_equal(200)
+
+    it "uses authored percentage width instead of 100% in non-growing flex rows":
+        val html = (
+            "<!doctype html><html><body style='margin:0'>" +
+            "<div style='display:flex;width:200px;height:20px'>" +
+            "<div id='p40' style='width:40%;flex-shrink:0'></div>" +
+            "<div id='p20' style='width:20%;flex-shrink:0'></div>" +
+            "</div></body></html>"
+        )
+        expect(_geom_i32(html, 400, 100, "p40", "w")).to_equal(80)
+        expect(_geom_i32(html, 400, 100, "p20", "x")).to_equal(80)
+        expect(_geom_i32(html, 400, 100, "p20", "w")).to_equal(40)
+
+    it "sizes auto flex-grow items with flex-basis:auto in flex-wrap:wrap by content before wrapping":
+        val html = (
+            "<!doctype html><html><body style='margin:0;font:16px/1.5 monospace'>" +
+            "<div id='wraprow' style='display:flex;flex-wrap:wrap;width:400px;gap:10px'>" +
+            "<div id='c1' style='flex:1 1 auto'>One</div>" +
+            "<div id='c2' style='flex:1 1 auto'>Two</div>" +
+            "</div></body></html>"
+        )
+        expect(_geom_i32(html, 500, 200, "c1", "y")).to_equal(_geom_i32(html, 500, 200, "c2", "y"))
+        expect(_geom_i32(html, 500, 200, "c2", "x")).to_be_greater_than(_geom_i32(html, 500, 200, "c1", "x"))
+
+describe "CSS Inline, Block/Float BFC, Grid, and Table Chrome parity":
+
+    it "wraps padded inline badge cleanly onto next line instead of overflowing container":
+        val html = (
+            "<!doctype html><html><body style='margin:0;font:16px/1.5 monospace'>" +
+            "<div style='width:120px'>" +
+            "<span id='prefix' style='display:inline-block;width:90px;height:16px'></span>" +
+            "<span id='badge' style='padding:2px 8px;border:1px solid #000'>Badge</span>" +
+            "</div></body></html>"
+        )
+        val prefix_y = _geom_i32(html, 300, 200, "prefix", "y")
+        val badge_x = _geom_i32(html, 300, 200, "badge", "x")
+        val badge_y = _geom_i32(html, 300, 200, "badge", "y")
+        expect(badge_x).to_equal(0)
+        expect(badge_y).to_be_greater_than(prefix_y)
+
+    it "keeps inline-block on a float-shortened line when it fits remaining space":
+        val html = (
+            "<!doctype html><html><body style='margin:0'>" +
+            "<div style='width:200px'>" +
+            "<div id='fl' style='float:left;width:60px;height:40px'></div>" +
+            "<span id='ib' style='display:inline-block;width:80px;height:20px'></span>" +
+            "</div></body></html>"
+        )
+        expect(_geom_i32(html, 300, 200, "ib", "x")).to_equal(60)
+        expect(_geom_i32(html, 300, 200, "ib", "y")).to_equal(0)
+
+    it "grows flow-root BFC container auto-height to enclose floats and clear siblings":
+        val html = (
+            "<!doctype html><html><body style='margin:0'>" +
+            "<div id='bfc' style='display:flow-root;width:200px'>" +
+            "<div style='float:left;width:50px;height:65px'></div>" +
+            "<div id='sib' style='clear:left;height:15px'></div>" +
+            "</div></body></html>"
+        )
+        expect(_geom_i32(html, 300, 200, "sib", "y")).to_equal(65)
+        expect(_geom_i32(html, 300, 200, "bfc", "h")).to_equal(80)
+
+    it "runs grid layout with gap and non-collapsing margins when grid-template-columns is omitted":
+        val html = (
+            "<!doctype html><html><body style='margin:0'>" +
+            "<div id='g' style='display:grid;width:200px;gap:12px'>" +
+            "<div id='ga' style='height:20px;margin-bottom:10px'></div>" +
+            "<div id='gb' style='height:25px;margin-top:10px'></div>" +
+            "</div></body></html>"
+        )
+        # In CSS Grid, margins do NOT collapse across grid tracks and row_gap applies cleanly:
+        # row0 = 20 + 10(margin-b) = 30; gap = 12 => row1 top = 42, gb y = 42 + 10(margin-t) = 52
+        expect(_geom_i32(html, 300, 200, "gb", "y")).to_equal(52)
+
+    it "lays out border-collapse table with colspan and min-width horizontally instead of block stacking":
+        val html = (
+            "<!doctype html><html><body style='margin:0'>" +
+            "<table id='tbl' style='width:300px;border-collapse:collapse'>" +
+            "<thead id='th'><tr><th id='hspan' colspan='2'>Header</th></tr></thead>" +
+            "<tbody id='tb'><tr><td id='c1' style='min-width:100px;height:20px'>A</td><td id='c2' style='height:20px'>B</td></tr></tbody>" +
+            "</table></body></html>"
+        )
+        val c1_y = _geom_i32(html, 400, 200, "c1", "y")
+        val c2_y = _geom_i32(html, 400, 200, "c2", "y")
+        val c1_x = _geom_i32(html, 400, 200, "c1", "x")
+        val c1_w = _geom_i32(html, 400, 200, "c1", "w")
+        val c2_x = _geom_i32(html, 400, 200, "c2", "x")
+        expect(c1_y).to_equal(c2_y)
+        expect(c2_x).to_be_greater_than(c1_x)
+        expect(c1_w >= 100).to_equal(true)
+        expect(_geom_i32(html, 400, 200, "tb", "h")).to_be_greater_than(0)
+
+describe "Draw IR Viewport Clip (Bug 0) & scroll_y support":
+
+    it "emits Draw IR commands for below-the-fold boxes beyond viewport_h":
+        val html = (
+            "<!doctype html><html><body style='margin:0'>" +
+            "<div id='topbox' style='height:80px;background:#112233'>Top</div>" +
+            "<div style='height:400px'></div>" +
+            "<div id='belowbox' style='height:50px;background:#445566'>Below</div>" +
+            "</body></html>"
+        )
+        val comp = simple_web_layout_render_html_draw_ir(html, 300, 200)
+        var found_below = false
+        var below_y: i32 = -1
+        for batch in comp.batches:
+            for cmd in batch.commands:
+                if cmd.component_id == "belowbox":
+                    found_below = true
+                    below_y = cmd.y
+        expect(found_below).to_equal(true)
+        expect(below_y).to_equal(480)
+
+    it "handles scroll_y offset cleanly without losing scrolled-into-view boxes":
+        val html = (
+            "<!doctype html><html><body style='margin:0'>" +
+            "<div style='height:400px'></div>" +
+            "<div id='target' style='height:40px;background:#00ff00'>Target</div>" +
+            "</body></html>"
+        )
+        val res = simple_web_layout_render_html_draw_ir_result_with_overlay_at_scroll_time(
+            html, 300, 200, -1, 350, browser_text_input_overlay_empty()
+        )
+        var target_y: i32 = -1
+        for batch in res.composition.batches:
+            for cmd in batch.commands:
+                if cmd.component_id == "target":
+                    target_y = cmd.y
+        expect(res.resolved_scroll_y).to_equal(240)
+        expect(target_y).to_equal(160)

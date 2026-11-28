@@ -3,13 +3,20 @@ use object::{Object, ObjectSymbol};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-const OBSERVERS: [&str; 4] = [
+const OBSERVERS: [&str; 10] = [
     "rt_process_stdout_state",
     "rt_process_piped_exit_status_value",
     "rt_process_spawn_piped_environment_v1",
     "rt_process_wait_readable_v1",
+    // Split-stderr / byte-safe piped family (runtime_process.c tail).
+    "rt_process_spawn_piped_split_v1",
+    "rt_process_read_stdout_bytes_v1",
+    "rt_process_read_stderr_bytes_v1",
+    "rt_process_read_stderr",
+    "rt_process_stderr_state_v1",
+    "rt_process_write_stdin_bytes_some_v1",
 ];
-const C_CONTRACT: [&str; 8] = [
+const C_CONTRACT: [&str; 19] = [
     "simple_piped_owner_observe_v1",
     "simple_piped_receipt_new_v1",
     "simple_piped_owner_spawn_environment_v1",
@@ -18,6 +25,17 @@ const C_CONTRACT: [&str; 8] = [
     "rt_array_push",
     "rt_array_free",
     "rt_value_int",
+    "simple_piped_owner_spawn_split_v1",
+    "simple_piped_owner_read_v1",
+    "simple_piped_owner_stream_state_v1",
+    "simple_piped_owner_read_stderr_text_v1",
+    "simple_piped_owner_write_v1",
+    "simple_piped_bytes_new_v1",
+    "rt_array_bytes_basis_len",
+    "rt_array_bytes_basis_ptr",
+    "rt_array_len",
+    "rt_array_get",
+    "rt_value_as_int",
 ];
 
 #[derive(Clone, Debug, Default)]

@@ -46,7 +46,8 @@ The executable process fixture is
 `test/fixtures/orchestration/local_controller_process_native_probe.spl`. It
 invokes a supplied compiled controller separately for every command and checks
 the retained source file independently. Its mirrored SSpec expects the binary at
-`build/orchestrator-controller-cli/simple-orchestrator`; absence fails the test.
+`build/orchestrator-controller-cli/simple-orchestrator`; absence reports BLOCKED
+(named path, todo 495), and a present binary must pass every check.
 
 These commands retain metadata only. Dispatch, host enrollment/prepare/execute,
 provider observation, workload termination and resource release are not exposed

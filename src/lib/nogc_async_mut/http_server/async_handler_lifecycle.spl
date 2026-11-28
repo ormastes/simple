@@ -1,0 +1,267 @@
+"""
+# Async Handler Lifecycle
+
+Bounded lifecycle registry for asynchronous HTTP handler jobs.
+
+Each accepted job moves submitted -> pending -> completed, with timeout
+(expire), cancellation (connection close, single job, or shutdown), and
+graceful drain as the terminal paths. Jobs are retained after reaching a
+terminal state until the worker reclaims them through delivery
+(take_completed), explicit reclaim (reclaim_terminal), or a cleanup sweep
+(cleanup_terminal); retained jobs count against the capacity bound.
+"""
+
+use std.concurrent.channel.{channel_from_id}
+use std.http_server.types.{HttpResponseData}
+
+# ============================================================================
+# States and results
+# ============================================================================
+
+enum AsyncHandlerState:
+    """Lifecycle state of one retained async handler job."""
+    Submitted
+    Pending
+    Completed
+    TimedOut
+    Cancelled
+    Missing
+
+enum AsyncSubmitResult:
+    """Outcome of attempting to admit one async handler job."""
+    Accepted(job_id: i64)
+    Rejected
+
+enum AsyncCompletionResult:
+    """Outcome of attempting to deliver one completed job's response."""
+    Ready(delivered: HttpResponseData)
+    Gone
+
+class AsyncHandlerCompletionMessage:
+    """Typed completion announcement sent to a worker inbox channel."""
+    job_id: i64
+    response: HttpResponseData
+
+# ============================================================================
+# State helpers
+# ============================================================================
+
+fn _ahl_state_is_active(state: AsyncHandlerState) -> bool:
+    """True while a job may still produce a response (submitted or pending)."""
+    match state:
+        case AsyncHandlerState.Submitted: true
+        case AsyncHandlerState.Pending: true
+        case _: false
+
+fn _ahl_state_is_terminal(state: AsyncHandlerState) -> bool:
+    """True once a job can no longer produce a response."""
+    match state:
+        case AsyncHandlerState.Completed: true
+        case AsyncHandlerState.TimedOut: true
+        case AsyncHandlerState.Cancelled: true
+        case _: false
+
+fn async_handler_state_label(state: AsyncHandlerState) -> text:
+    """Stable wire label for one lifecycle state."""
+    match state:
+        case AsyncHandlerState.Submitted: "submitted"
+        case AsyncHandlerState.Pending: "pending"
+        case AsyncHandlerState.Completed: "completed"
+        case AsyncHandlerState.TimedOut: "timedout"
+        case AsyncHandlerState.Cancelled: "cancelled"
+        case AsyncHandlerState.Missing: "missing"
+
+# ============================================================================
+# Lifecycle registry
+# ============================================================================
+
+class AsyncHandlerJob:
+    """One retained async handler job and its terminal payload."""
+    job_id: i64
+    connection_id: i64
+    deadline_ms: i64
+    state: AsyncHandlerState
+    response: HttpResponseData?
+
+class AsyncHandlerLifecycle:
+    """Capacity-bounded registry of async handler jobs for one worker."""
+    capacity: i64
+    next_job_id: i64
+    draining: bool
+    jobs: Dict<i64, AsyncHandlerJob>
+
+    static fn create(capacity: i64) -> AsyncHandlerLifecycle:
+        """Create an empty registry admitting up to `capacity` retained jobs."""
+        return AsyncHandlerLifecycle(
+            capacity: capacity,
+            next_job_id: 1,
+            draining: false,
+            jobs: {}
+        )
+
+    fn retained_count() -> i64:
+        """Number of jobs still held by the registry (any state)."""
+        self.jobs.len()
+
+    fn state_of(job_id: i64) -> AsyncHandlerState:
+        """Current state of a retained job, or Missing when unknown/reclaimed."""
+        if self.jobs.contains_key(job_id):
+            return self.jobs[job_id].state
+        AsyncHandlerState.Missing
+
+    me submit(connection_id: i64, issued_ms: i64, timeout_ms: i64) -> AsyncSubmitResult:
+        """Admit one job due at `issued_ms + timeout_ms` unless full or draining."""
+        if self.draining:
+            return AsyncSubmitResult.Rejected
+        if self.jobs.len() >= self.capacity:
+            return AsyncSubmitResult.Rejected
+        val job_id = self.next_job_id
+        self.next_job_id = self.next_job_id + 1
+        self.jobs[job_id] = AsyncHandlerJob(
+            job_id: job_id,
+            connection_id: connection_id,
+            deadline_ms: issued_ms + timeout_ms,
+            state: AsyncHandlerState.Submitted,
+            response: None
+        )
+        AsyncSubmitResult.Accepted(job_id)
+
+    me mark_pending(job_id: i64) -> bool:
+        """Hand one submitted job to its executor. False unless submitted."""
+        if not self.jobs.contains_key(job_id):
+            return false
+        var job = self.jobs[job_id]
+        match job.state:
+            case AsyncHandlerState.Submitted:
+                job.state = AsyncHandlerState.Pending
+                self.jobs[job_id] = job
+                true
+            case _: false
+
+    me complete(job_id: i64, response: HttpResponseData) -> bool:
+        """Record one executor response. Exactly-once per job."""
+        if not self.jobs.contains_key(job_id):
+            return false
+        var job = self.jobs[job_id]
+        match job.state:
+            case AsyncHandlerState.Pending:
+                job.state = AsyncHandlerState.Completed
+                job.response = Some(response)
+                self.jobs[job_id] = job
+                true
+            case _: false
+
+    me take_completed(job_id: i64) -> AsyncCompletionResult:
+        """Deliver one completed response, reclaiming the job.
+
+        Ready carries the response for a completed job; everything else is
+        Gone. Terminal jobs are reclaimed either way.
+        """
+        if not self.jobs.contains_key(job_id):
+            return AsyncCompletionResult.Gone
+        var job = self.jobs[job_id]
+        match job.state:
+            case AsyncHandlerState.Completed:
+                self.jobs.remove(job_id)
+                if val response = job.response:
+                    return AsyncCompletionResult.Ready(response)
+                AsyncCompletionResult.Gone
+            case _:
+                if _ahl_state_is_terminal(job.state):
+                    self.jobs.remove(job_id)
+                AsyncCompletionResult.Gone
+
+    me expire(now_ms: i64) -> i64:
+        """Time out all active jobs whose deadline has passed. Returns count."""
+        var expired_ids: [i64] = []
+        for entry in self.jobs:
+            var job = entry.1
+            if _ahl_state_is_active(job.state) and job.deadline_ms <= now_ms:
+                expired_ids.append(job.job_id)
+        for job_id in expired_ids:
+            var job = self.jobs[job_id]
+            job.state = AsyncHandlerState.TimedOut
+            self.jobs[job_id] = job
+        expired_ids.len()
+
+    me cancel_connection(connection_id: i64) -> i64:
+        """Cancel all active jobs of one connection. Returns count."""
+        var cancelled_ids: [i64] = []
+        for entry in self.jobs:
+            var job = entry.1
+            if _ahl_state_is_active(job.state) and job.connection_id == connection_id:
+                cancelled_ids.append(job.job_id)
+        for job_id in cancelled_ids:
+            var job = self.jobs[job_id]
+            job.state = AsyncHandlerState.Cancelled
+            self.jobs[job_id] = job
+        cancelled_ids.len()
+
+    me cancel(job_id: i64) -> bool:
+        """Cancel one active job without touching its multiplexed siblings."""
+        if not self.jobs.contains_key(job_id):
+            return false
+        var job = self.jobs[job_id]
+        if not _ahl_state_is_active(job.state):
+            return false
+        job.state = AsyncHandlerState.Cancelled
+        self.jobs[job_id] = job
+        true
+
+    me cancel_all() -> i64:
+        """Cancel every active job (forced shutdown). Returns count."""
+        var cancelled_ids: [i64] = []
+        for entry in self.jobs:
+            var job = entry.1
+            if _ahl_state_is_active(job.state):
+                cancelled_ids.append(job.job_id)
+        for job_id in cancelled_ids:
+            var job = self.jobs[job_id]
+            job.state = AsyncHandlerState.Cancelled
+            self.jobs[job_id] = job
+        cancelled_ids.len()
+
+    me begin_drain() -> i64:
+        """Stop admitting new jobs; in-flight jobs may still finish."""
+        self.draining = true
+        var in_flight = 0
+        for entry in self.jobs:
+            if _ahl_state_is_active(entry.1.state):
+                in_flight = in_flight + 1
+        in_flight
+
+    me reclaim_terminal(job_id: i64) -> bool:
+        """Reclaim one retained terminal job. False unless retained+terminal."""
+        if not self.jobs.contains_key(job_id):
+            return false
+        if not _ahl_state_is_terminal(self.jobs[job_id].state):
+            return false
+        self.jobs.remove(job_id)
+        true
+
+    me cleanup_terminal() -> i64:
+        """Reclaim every retained terminal job. Returns count."""
+        var terminal_ids: [i64] = []
+        for entry in self.jobs:
+            if _ahl_state_is_terminal(entry.1.state):
+                terminal_ids.append(entry.0)
+        for job_id in terminal_ids:
+            self.jobs.remove(job_id)
+        terminal_ids.len()
+
+# ============================================================================
+# Inbox completion delivery
+# ============================================================================
+
+fn send_async_handler_completion(inbox_id: i64, job_id: i64, response: HttpResponseData) -> bool:
+    """Announce one executor completion on a worker inbox channel.
+
+    Returns false when the runtime rejects the message (closed or full
+    channel); the submitter then retries or drops the completion.
+    """
+    channel_from_id(inbox_id).try_send(
+        AsyncHandlerCompletionMessage(job_id: job_id, response: response))
+
+export AsyncHandlerLifecycle, AsyncHandlerJob, AsyncHandlerState
+export AsyncSubmitResult, AsyncCompletionResult, AsyncHandlerCompletionMessage
+export async_handler_state_label, send_async_handler_completion

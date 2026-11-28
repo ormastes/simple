@@ -279,6 +279,27 @@ fn _convert_builtins(src: text) -> text:
     s = s.replace("gl_FragColor", "output_color")
     s
 
+# Convert "void main() {" into a WGSL vertex entry point. The body's closing
+# brace still closes the emitted fn; the var declaration seeds the position
+# builtin target so token-level output stays structurally readable.
+fn _convert_vertex_entry(src: text) -> text:
+    var s = src
+    if s.contains("void main() {"):
+        s = s.replace("void main() {", "@vertex\nfn vs_main() -> VertexOutput {\n    var output: VertexOutput;")
+    else:
+        s = s.replace("void main()", "@vertex\nfn vs_main() -> VertexOutput")
+    s
+
+# Convert "void main() {" into a WGSL fragment entry point with a located
+# color output, mirroring _convert_vertex_entry.
+fn _convert_fragment_entry(src: text) -> text:
+    var s = src
+    if s.contains("void main() {"):
+        s = s.replace("void main() {", "@fragment\nfn fs_main() -> FragmentOutput {\n    var output_color: vec4f;")
+    else:
+        s = s.replace("void main()", "@fragment\nfn fs_main() -> FragmentOutput")
+    s
+
 # ---------------------------------------------------------------------------
 # Vertex shader emission
 # ---------------------------------------------------------------------------
@@ -292,11 +313,15 @@ fn wgsl_emit_vertex(glsl: text) -> text:
     s = _convert_layout_in(s)
     s = _convert_builtins(s)
     s = _convert_texture_calls(s)
+    s = _convert_vertex_entry(s)
     # Wrap with WGSL vertex entry point boilerplate comment
     "// WGSL vertex shader (transpiled from GLSL)\n" +
     "// NOTE: Struct declarations for in/out and push-constant uniforms\n" +
     "// must be manually completed for full WGSL validity.\n" +
     "// The following is a best-effort token-level transpilation.\n\n" +
+    "struct VertexOutput {\n" +
+    "    @builtin(position) position: vec4f,\n" +
+    "};\n\n" +
     s
 
 # ---------------------------------------------------------------------------
@@ -312,6 +337,10 @@ fn wgsl_emit_fragment(glsl: text) -> text:
     s = _convert_layout_in(s)
     s = _convert_builtins(s)
     s = _convert_texture_calls(s)
+    s = _convert_fragment_entry(s)
     "// WGSL fragment shader (transpiled from GLSL)\n" +
     "// NOTE: Token-level transpilation — may require manual fixups.\n\n" +
+    "struct FragmentOutput {\n" +
+    "    @location(0) color: vec4f,\n" +
+    "};\n\n" +
     s

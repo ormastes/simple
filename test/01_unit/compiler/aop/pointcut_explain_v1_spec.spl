@@ -1,0 +1,260 @@
+# @req REQ-ASPECT-AW4-EXPLAIN
+"""
+# Why a pointcut does or does not match one join point
+
+## Purpose and audience
+Purpose: Prove that `pointcut_explain_v1` answers "why does this selector (not) match this function" with the truth value of every selector node and the fact field every atom read, and that its verdict is the shard matcher's.
+Audience: compiler engineers who maintain aspect matching and the engineers
+who build trace surfaces (CLI, LSP, MCP) on top of the explain rows.
+
+Lifecycle: research doc/01_research/domain/dir_tldr_aspect.md; plan
+doc/03_plan/compiler/aspect_cache/aspect_tldr_async_trace_plan.md (stage AW-4);
+architecture doc/04_architecture/extreme_typing_traceability.md; design
+doc/05_design/compiler/cache/aspect_tldr_async_trace.md (section 7).
+
+## What the operator can rely on
+The explanation is a pure function of one selector and one join-point fact. It
+reads no shard, no directory and no cache.
+
+| Atom | Field read | True when |
+|---|---|---|
+| `execution(name)`, bare `name` | `symbol` | the symbol equals the name |
+| `execution(prefix*)` | `symbol` | the symbol starts with the prefix |
+| `attr(name)` | `attrs` | the attribute list contains the name |
+| `within(dir)` | `owner_file` | the owner file is directly in the directory |
+| `within(dir.*)` | `owner_file` | the owner file is in the directory or below it |
+
+`!`, `&` and `|` nodes carry the value computed from their children and read no
+field. Every node is evaluated, also where a matcher would stop early, so the
+failing atom of an `&` and the passing atom of an `|` are both visible.
+
+The verdict is `Matched` or `NotMatched` by the root value, except for an
+unsupported selector (`Unsupported`, no nodes are reported) and for a join
+point whose kind is not `forward` (`KindNotAdmitted`; the nodes still carry
+their values).
+`fields_read` starts with `kind` and lists each atom field once.
+
+## Decision inventory (pointcut_explain_v1.spl)
+
+| Decision | Conditions | Covering examples |
+|---|---|---|
+| owner file has no directory | c1 | `top.spl` / `app/core/run.spl` |
+| atom form reads the symbol | exact, prefix | exact / prefix / attr |
+| atom form reads the attributes | c1 | attr / within |
+| atom form reads the owner file | within, within_tree | within / within_tree / unknown form |
+| exact, prefix, attr, within, within_tree value | one each | matching and non-matching fact per form |
+| tree: directory equals, directory is below | c1, c2 | same directory / sub-directory / sibling prefix |
+| selector is unsupported | c1 | `cflow(x)` / every supported selector |
+| node is `not`, `and`, `or` | one each | operator examples |
+| `and` value | left, right | TT, TF, FT |
+| `or` value | left, right | FF, TF, FT |
+| field is new for this evaluation | has field, not yet listed | repeated atom field / unknown form |
+| verdict | kind is not forward / root value | other kind / forward and true / forward and false |
+"""
+
+# @manual: primary
+# @tag:unit
+# @tag:compiler
+# @tag:aop
+# @tag:trace
+
+use std.spec.*
+use compiler.common.cache_contract.aspect_match_shard_v1.{JoinPointFactV1, PointcutSelectorV1,
+    PointcutSelNodeV1, directory_join_point_facts_v1, pointcut_selector_parse_v1,
+    pointcut_match_shard_compute_v1}
+use compiler.common.cache_contract.pointcut_explain_v1.{PointcutExplainV1, PointcutExplainVerdictV1,
+    pointcut_explain_v1}
+
+fn fact(file: text, symbol: text, attrs: [text]) -> JoinPointFactV1:
+    JoinPointFactV1(id: "{file}::{symbol}", kind: "forward", symbol: symbol, attrs: attrs,
+        owner_file: file, base_body_digest: "")
+
+fn probe_facts() -> [JoinPointFactV1]:
+    [fact("app/core/run.spl", "run", []),
+     fact("app/core/run.spl", "run_fast", ["inline"]),
+     fact("app/core/deep/stop.spl", "stop", ["inline", "hot"]),
+     fact("app/corex/other.spl", "other", ["hot"]),
+     fact("top.spl", "run", [])]
+
+fn explain(source: text, p: JoinPointFactV1) -> PointcutExplainV1:
+    pointcut_explain_v1(pointcut_selector_parse_v1(source), p)
+
+fn verdict_of(e: PointcutExplainV1) -> text:
+    match e.verdict:
+        case Matched: "matched"
+        case NotMatched: "not-matched"
+        case KindNotAdmitted: "kind-not-admitted"
+        case Unsupported: "unsupported"
+
+fn is_matched(source: text, p: JoinPointFactV1) -> bool:
+    explain(source, p).verdict == PointcutExplainVerdictV1.Matched
+
+# The shard matcher's verdict for the same selector and the same single fact.
+fn shard_verdict(source: text, p: JoinPointFactV1) -> bool:
+    val dir = directory_join_point_facts_v1("scope", [p.owner_file], [p], [], true)
+    pointcut_match_shard_compute_v1(pointcut_selector_parse_v1(source), dir).sorted_matching_ids.len() == 1
+
+# Every probe fact on which explain and the shard matcher disagree.
+fn verdict_differences(source: text) -> [text]:
+    var out: [text] = []
+    for p in probe_facts():
+        if is_matched(source, p) != shard_verdict(source, p): out.push("{source} on {p.id}")
+    out
+
+# The node values of an explanation, in node order.
+fn node_values(e: PointcutExplainV1) -> [bool]:
+    var out: [bool] = []
+    for n in e.nodes:
+        out.push(n.value)
+    out
+
+fn node_fields(e: PointcutExplainV1) -> [text]:
+    var out: [text] = []
+    for n in e.nodes:
+        out.push(n.field_read)
+    out
+
+describe "Explain agrees with the shard matcher":
+    it "gives the matcher's verdict for every atom form":
+        # @capture(exec): disagreement list per selector
+        step("Compare the explain verdict with the shard verdict for each atom form on five facts")
+        # @req: REQ-ASPECT-AW4-EXPLAIN
+        expect(verdict_differences("execution(run)")).to_equal([])
+        expect(verdict_differences("run_fast")).to_equal([])
+        expect(verdict_differences("execution(run*)")).to_equal([])
+        expect(verdict_differences("attr(inline)")).to_equal([])
+        expect(verdict_differences("within(app.core)")).to_equal([])
+        expect(verdict_differences("within(app.core.*)")).to_equal([])
+
+    it "gives the matcher's verdict for every operator":
+        # @capture(exec): disagreement list per selector
+        step("Compare the explain verdict with the shard verdict for not, and, or and nesting")
+        # @req: REQ-ASPECT-AW4-EXPLAIN
+        expect(verdict_differences("!attr(inline)")).to_equal([])
+        expect(verdict_differences("execution(run*) & attr(inline)")).to_equal([])
+        expect(verdict_differences("execution(run) | attr(hot)")).to_equal([])
+        expect(verdict_differences("!(execution(run*) & within(app.core)) | attr(hot)")).to_equal([])
+
+    it "matches where the matcher matches, so agreement is not two empty answers":
+        # @capture(exec): matched flag per fact
+        step("Pin one true and one false verdict per atom form")
+        # @req: REQ-ASPECT-AW4-EXPLAIN
+        expect(is_matched("execution(run)", fact("app/core/run.spl", "run", []))).to_equal(true)
+        expect(is_matched("execution(run)", fact("app/core/run.spl", "run_fast", []))).to_equal(false)
+        expect(is_matched("execution(run*)", fact("app/core/run.spl", "run_fast", []))).to_equal(true)
+        expect(is_matched("execution(run*)", fact("app/core/run.spl", "stop", []))).to_equal(false)
+        expect(is_matched("attr(inline)", fact("a/x.spl", "f", ["hot", "inline"]))).to_equal(true)
+        expect(is_matched("attr(inline)", fact("a/x.spl", "f", ["hot"]))).to_equal(false)
+        expect(is_matched("within(app.core)", fact("app/core/run.spl", "f", []))).to_equal(true)
+        expect(is_matched("within(app.core)", fact("app/core/deep/stop.spl", "f", []))).to_equal(false)
+        expect(is_matched("within(app.core.*)", fact("app/core/run.spl", "f", []))).to_equal(true)
+        expect(is_matched("within(app.core.*)", fact("app/core/deep/stop.spl", "f", []))).to_equal(true)
+        expect(is_matched("within(app.core.*)", fact("app/corex/other.spl", "f", []))).to_equal(false)
+        expect(is_matched("within(app)", fact("top.spl", "f", []))).to_equal(false)
+
+describe "Every atom reports the fact field it read":
+    it "names the field of each atom form and no field for an operator":
+        # @capture(exec): field per node
+        step("Explain one selector per atom form and read each node's field")
+        # @req: REQ-ASPECT-AW4-EXPLAIN
+        val p = fact("app/core/run.spl", "run", ["inline"])
+        expect(node_fields(explain("execution(run)", p))).to_equal(["symbol"])
+        expect(node_fields(explain("execution(ru*)", p))).to_equal(["symbol"])
+        expect(node_fields(explain("attr(inline)", p))).to_equal(["attrs"])
+        expect(node_fields(explain("within(app.core)", p))).to_equal(["owner_file"])
+        expect(node_fields(explain("within(app.*)", p))).to_equal(["owner_file"])
+        expect(node_fields(explain("!attr(inline) & run | within(app)", p))).to_equal(
+            ["attrs", "", "symbol", "", "owner_file", ""])
+
+    it "lists the join point kind first and each atom field once":
+        # @capture(exec): fields_read of one evaluation
+        step("Explain a selector that reads the symbol twice and the attributes once")
+        # @req: REQ-ASPECT-AW4-EXPLAIN
+        val e = explain("execution(run) | execution(stop) | attr(hot)", fact("a/x.spl", "run", []))
+        expect(e.fields_read).to_equal(["kind", "symbol", "attrs"])
+        expect(e.join_point_id).to_equal("a/x.spl::run")
+        expect(e.selector_digest).to_equal(pointcut_selector_parse_v1("execution(run) | execution(stop) | attr(hot)").selector_digest)
+
+    it "keeps the node shape of the selector so a surface can render the tree":
+        # @capture(exec): operator, operand and child indexes of each node
+        step("Explain a conjunction and read its three nodes")
+        # @req: REQ-ASPECT-AW4-EXPLAIN
+        val e = explain("execution(run*) & attr(inline)", fact("a/x.spl", "run_fast", []))
+        expect(e.nodes.len()).to_equal(3)  # oracle: 3 - two atoms and the conjunction
+        expect(e.root).to_equal(2)  # oracle: 2 - the conjunction is pushed after its operands
+        expect(e.nodes[0].form).to_equal("prefix")
+        expect(e.nodes[0].operand).to_equal("run")
+        expect(e.nodes[1].operand).to_equal("inline")
+        expect(e.nodes[2].op).to_equal("and")
+        expect(e.nodes[2].left).to_equal(0)  # oracle: 0 - index of the prefix atom
+        expect(e.nodes[2].right).to_equal(1)  # oracle: 1 - index of the attribute atom
+
+describe "Truth value of every node (MC/DC over !, & and |)":
+    it "flips a negation with its operand":
+        # @capture(exec): node values for both operand values
+        step("Explain a negation over a true atom and over a false atom")
+        # @req: REQ-ASPECT-AW4-EXPLAIN
+        expect(node_values(explain("!attr(inline)", fact("a/x.spl", "f", ["inline"])))).to_equal([true, false])
+        expect(node_values(explain("!attr(inline)", fact("a/x.spl", "f", [])))).to_equal([false, true])
+
+    it "lets each operand of a conjunction decide the result on its own":
+        # @capture(exec): node values for TT, TF and FT
+        step("Explain a conjunction with both operands true, then each one false in turn")
+        # @req: REQ-ASPECT-AW4-EXPLAIN
+        val source = "execution(run*) & attr(inline)"
+        expect(node_values(explain(source, fact("a/x.spl", "run_fast", ["inline"])))).to_equal([true, true, true])
+        expect(node_values(explain(source, fact("a/x.spl", "run_fast", [])))).to_equal([true, false, false])
+        expect(node_values(explain(source, fact("a/x.spl", "stop", ["inline"])))).to_equal([false, true, false])
+
+    it "lets each operand of a disjunction decide the result on its own":
+        # @capture(exec): node values for FF, TF and FT
+        step("Explain a disjunction with both operands false, then each one true in turn")
+        # @req: REQ-ASPECT-AW4-EXPLAIN
+        val source = "execution(run) | attr(hot)"
+        expect(node_values(explain(source, fact("a/x.spl", "stop", [])))).to_equal([false, false, false])
+        expect(node_values(explain(source, fact("a/x.spl", "run", [])))).to_equal([true, false, true])
+        expect(node_values(explain(source, fact("a/x.spl", "stop", ["hot"])))).to_equal([false, true, true])
+
+    it "still evaluates the right operand when the left one already decides":
+        # @capture(exec): right operand value under a deciding left operand
+        step("Explain a false conjunction and a true disjunction whose right operands differ from the result")
+        # @req: REQ-ASPECT-AW4-EXPLAIN
+        expect(node_values(explain("execution(stop) & attr(hot)", fact("a/x.spl", "run", ["hot"])))).to_equal([false, true, false])
+        expect(node_values(explain("execution(run) | attr(hot)", fact("a/x.spl", "run", ["hot"])))).to_equal([true, true, true])
+
+describe "Verdicts that are not the root value":
+    it "never matches an unsupported selector and reports no node":
+        # @capture(exec): verdict and node count
+        step("Explain a selector with an atom the shard matcher cannot evaluate")
+        # @req: REQ-ASPECT-AW4-EXPLAIN
+        val e = explain("cflow(run)", fact("a/x.spl", "run", []))
+        expect(verdict_of(e)).to_equal("unsupported")
+        expect(e.nodes.len()).to_equal(0)  # oracle: 0 - an unsupported selector has no evaluable node
+        expect(e.root).to_equal(-1)  # oracle: -1 - no root node
+        expect(e.fields_read).to_equal([])
+        expect(shard_verdict("cflow(run)", fact("a/x.spl", "run", []))).to_equal(false)
+
+    it "never matches a join point that is not a forward join point, and still shows the node values":
+        # @capture(exec): verdict and node values
+        step("Explain a matching selector over a join point of another kind")
+        # @req: REQ-ASPECT-AW4-EXPLAIN
+        val call_site = JoinPointFactV1(id: "a/x.spl::run@call", kind: "call", symbol: "run", attrs: [],
+            owner_file: "a/x.spl", base_body_digest: "")
+        val e = explain("execution(run)", call_site)
+        expect(verdict_of(e)).to_equal("kind-not-admitted")
+        expect(node_values(e)).to_equal([true])
+        expect(shard_verdict("execution(run)", call_site)).to_equal(false)
+        expect(verdict_of(explain("execution(run)", fact("a/x.spl", "run", [])))).to_equal("matched")
+        expect(verdict_of(explain("execution(stop)", call_site))).to_equal("kind-not-admitted")
+
+    it "evaluates an atom form it does not know as false and reads no field for it":
+        # @capture(exec): value and field of the unknown atom
+        step("Explain a hand-built selector whose only atom has a form the parser never produces")
+        # @req: REQ-ASPECT-AW4-EXPLAIN
+        val unknown = PointcutSelectorV1(source: "future(x)", form: "future", operand: "x", supported: true,
+            nodes: [PointcutSelNodeV1(op: "atom", form: "future", operand: "x", left: -1, right: -1)],
+            root: 0, needs_universe: true, selector_digest: "sha256:test")
+        val e = pointcut_explain_v1(unknown, fact("a/x.spl", "x", []))
+        expect(verdict_of(e)).to_equal("not-matched")
+        expect(node_fields(e)).to_equal([""])
+        expect(e.fields_read).to_equal(["kind"])

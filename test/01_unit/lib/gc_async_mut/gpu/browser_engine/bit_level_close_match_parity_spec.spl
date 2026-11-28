@@ -1,0 +1,103 @@
+# Bit-level close-match parity regression spec:
+# 1. Mid-line inline runs and links (`<a>`) beside right/left floats wrap inside
+#    the float-narrowed band and resume on the wrapped tail line (`fw02`).
+# 2. `flex-direction: column` children with `width: auto` and non-stretch
+#    `align-self` (`flex-start`, `center`, `flex-end`) shrink-to-fit instead of
+#    stretching full container width (`lq01` / `lq02`).
+# 3. macOS `Georgia` / `Times` / `serif` font stack resolution and bold/italic
+#    face variants (`fw02`, `fw06`).
+use std.spec.*
+use std.nogc_sync_mut.sffi.io.{file_exists}
+use std.nogc_sync_mut.text_layout.font_provider.{
+    browser_font_candidates_for_family,
+    browser_serif_font_candidates,
+    browser_font_family_for_weight,
+    browser_font_family_for_style,
+    browser_family_has_host_face,
+    browser_host_has_measured_linux_face_set
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_debug_layout_by_id
+}
+
+fn _to_i32(raw: text) -> i32:
+    val n = raw.trim().to_i64() ?? -1
+    n.to_i32()
+
+describe "bit-level close-match layout and font parity":
+    it "wraps mid-line inline links cleanly beside a right float without overlapping":
+        val html = (
+            "<html><body style='margin:0;width:520px;font-family:Helvetica,Arial,sans-serif;font-size:12px;line-height:1.5;'>" +
+            "<div id='box' style='width:496px;'>" +
+            "<div id='flt' style='float:right;width:190px;height:140px;margin:2px 0 8px 14px;'>Float</div>" +
+            "<p id='p1' style='margin:0;'>A <strong>browser engine</strong> transforms structured " +
+            "<a id='lnk' href='#h'>HTML documents</a> " +
+            "<span id='tail'>and CSS stylesheets into an interactive visual representation on screen across desktop and embedded viewports.</span>" +
+            "</p></div></body></html>"
+        )
+        val lnk_lines = _to_i32(simple_web_layout_debug_layout_by_id(html, 520, 340, "lnk", "text_lines"))
+        val lnk_x0 = _to_i32(simple_web_layout_debug_layout_by_id(html, 520, 340, "lnk", "text_line_x0"))
+        val lnk_x1 = _to_i32(simple_web_layout_debug_layout_by_id(html, 520, 340, "lnk", "text_line_x1"))
+        val lnk_ty = _to_i32(simple_web_layout_debug_layout_by_id(html, 520, 340, "lnk", "text_y"))
+        val tail_x0 = _to_i32(simple_web_layout_debug_layout_by_id(html, 520, 340, "tail", "text_line_x0"))
+        val tail_ty = _to_i32(simple_web_layout_debug_layout_by_id(html, 520, 340, "tail", "text_y"))
+        val tail_lines = _to_i32(simple_web_layout_debug_layout_by_id(html, 520, 340, "tail", "text_lines"))
+        # Float starts at 496 - 190 - 14 = 292px. Link wraps at 292px boundary, so
+        # line 0 starts mid-line (> 200) and line 1 drops to x=0 before resuming tail.
+        expect(lnk_lines).to_equal(2)
+        expect(lnk_x0).to_be_greater_than(200)
+        expect(lnk_x1).to_equal(0)
+        expect(tail_ty).to_equal(lnk_ty + 18)
+        expect(tail_x0).to_be_less_than(292)
+        expect(tail_x0).to_be_greater_than(40)
+        expect(tail_lines).to_be_greater_than(1)
+
+    it "shrink-to-fits column-flex items with non-stretch align-self":
+        val html = (
+            "<html><body style='margin:0;font-family:Helvetica,Arial,sans-serif;font-size:12px;'>" +
+            "<div style='width:300px;display:flex;flex-direction:column;gap:8px;'>" +
+            "<div id='stretch' style='padding:7px 14px;'>Stretch Item</div>" +
+            "<div id='start' style='align-self:flex-start;padding:7px 14px;'>Launch Preview</div>" +
+            "<div id='center' style='align-self:center;padding:7px 14px;'>Center</div>" +
+            "<div id='end' style='align-self:flex-end;padding:7px 14px;'>End</div>" +
+            "</div></body></html>"
+        )
+        val stretch_w = _to_i32(simple_web_layout_debug_layout_by_id(html, 400, 300, "stretch", "w"))
+        val start_x = _to_i32(simple_web_layout_debug_layout_by_id(html, 400, 300, "start", "x"))
+        val start_w = _to_i32(simple_web_layout_debug_layout_by_id(html, 400, 300, "start", "w"))
+        val center_x = _to_i32(simple_web_layout_debug_layout_by_id(html, 400, 300, "center", "x"))
+        val center_w = _to_i32(simple_web_layout_debug_layout_by_id(html, 400, 300, "center", "w"))
+        val end_x = _to_i32(simple_web_layout_debug_layout_by_id(html, 400, 300, "end", "x"))
+        val end_w = _to_i32(simple_web_layout_debug_layout_by_id(html, 400, 300, "end", "w"))
+        expect(stretch_w).to_equal(300)
+        expect(start_x).to_equal(0)
+        expect(start_w).to_be_less_than(200)
+        expect(start_w).to_be_greater_than(60)
+        expect(center_w).to_be_less_than(150)
+        expect(center_x).to_be_greater_than(50)
+        expect(end_w).to_be_less_than(150)
+        expect(end_x + end_w).to_equal(300)
+
+    it "resolves macOS Georgia and Times serif faces and weights":
+        if (
+            file_exists("/System/Library/Fonts/Supplemental/Georgia.ttf") and
+            file_exists("/System/Library/Fonts/Times.ttc") and
+            not browser_host_has_measured_linux_face_set()
+        ):
+            val geo = browser_font_candidates_for_family("Georgia, Times, serif")
+            val times = browser_font_candidates_for_family("Times, Georgia, serif")
+            val serif = browser_serif_font_candidates()
+            expect(geo[0]).to_equal("/System/Library/Fonts/Supplemental/Georgia.ttf")
+            expect(times[0]).to_equal("/System/Library/Fonts/Times.ttc#0")
+            expect(serif[0]).to_equal("/System/Library/Fonts/Times.ttc#0")
+            expect(browser_font_family_for_weight("Georgia", true)).to_start_with(
+                "__simple_font_face__|/System/Library/Fonts/Supplemental/Georgia Bold.ttf|"
+            )
+            expect(browser_font_family_for_style("Georgia", true, true)).to_start_with(
+                "__simple_font_face__|/System/Library/Fonts/Supplemental/Georgia Bold Italic.ttf|"
+            )
+            expect(browser_font_family_for_style("serif", true, true)).to_start_with(
+                "__simple_font_face__|/System/Library/Fonts/Times.ttc#3|"
+            )
+            expect(browser_family_has_host_face("Georgia, Times, serif")).to_equal(true)
+            expect(browser_family_has_host_face("serif")).to_equal(true)

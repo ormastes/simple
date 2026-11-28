@@ -542,6 +542,43 @@ fn _html_draw_ir_saturated_i32(value: i64) -> i32:
         value, 0i64 - 2147483647i64 - 1i64, 2147483647i64
     ).to_i32()
 
+fn _html_draw_ir_doc_bottom_y(boxes: LayoutResult, default_clip: ClipRect) -> i32:
+    var max_bottom = default_clip.y1
+    var i: i32 = 0
+    val n = boxes.by.len() as i32
+    # cpu-lane-loop-ok: computes full scrollable layout bottom once per Draw IR frame so below-the-fold nodes are not culled at viewport_h (Bug 0).
+    while i < n:
+        val bottom = boxes.by[i] + boxes.bh[i]
+        if bottom > max_bottom:
+            max_bottom = bottom
+        i = i + 1
+    max_bottom
+
+fn _html_draw_ir_effective_clip(
+    nodes: [HNode], styles: [Style], boxes: LayoutResult,
+    clip_cache: PaintClipCache, i: i32, doc_bottom_y: i32
+) -> ClipRect:
+    val def = clip_cache.default_clip
+    if doc_bottom_y <= def.y1:
+        return paint_clip_at(clip_cache, i)
+    var clip = ClipRect(x0: def.x0, y0: def.y0, x1: def.x1, y1: doc_bottom_y)
+    if not clip_cache.has_node_clips:
+        return clip
+    var cur = nodes[i].parent as i32
+    var depth: i32 = 0
+    # cpu-lane-loop-ok: bounded DOM ancestor chain for explicit overflow scrollport clipping on tall scrollable pages.
+    while cur >= 0 and depth < 64:
+        val pst = styles[cur]
+        if (pst.overflow_hidden or pst.overflow_auto_y or pst.overflow_scroll_y or nodes[cur].tag == "textarea") and pst.display != "none":
+            val cx0 = boxes.bx[cur] + pst.border_l
+            val cy0 = boxes.by[cur] + pst.border_t
+            val cx1 = boxes.bx[cur] + boxes.bw[cur] - pst.border_r
+            val cy1 = boxes.by[cur] + boxes.bh[cur] - pst.border_b
+            clip = clip_intersect(clip, cx0, cy0, cx1, cy1)
+        cur = nodes[cur].parent as i32
+        depth = depth + 1
+    clip
+
 fn _html_draw_ir_visible(
     nodes: [HNode], styles: [Style], boxes: LayoutResult,
     i: i32, clip: ClipRect
@@ -628,11 +665,12 @@ fn _html_draw_ir_visible_nodes(
     clip_cache: PaintClipCache
 ) -> [bool]:
     var visible: [bool] = [false; nodes.len()]
+    val doc_bottom_y = _html_draw_ir_doc_bottom_y(boxes, clip_cache.default_clip)
     var i: i32 = 0
     # cpu-lane-loop-ok: one visibility decision per node into a reusable [bool] mask so downstream Draw IR emission does not recompute visibility; bound is nodes.len()
     while i < nodes.len():
         visible[i] = _html_draw_ir_visible(
-            nodes, styles, boxes, i, paint_clip_at(clip_cache, i)
+            nodes, styles, boxes, i, _html_draw_ir_effective_clip(nodes, styles, boxes, clip_cache, i, doc_bottom_y)
         )
         i = i + 1
     visible
@@ -642,6 +680,11 @@ fn _html_draw_ir_opens_context(st: Style) -> bool:
 
 fn _html_draw_ir_opens_group(st: Style) -> bool:
     st.opacity_pct < 100 or st.backdrop_filter_raw != ""
+
+# A flex or grid container: its items paint as one unit each, like
+# inline-blocks (CSS Flexbox 1 § 4, CSS Grid 1 § 6).
+fn _html_draw_ir_lays_out_items(st: Style) -> bool:
+    st.display == "flex" or st.display == "inline-flex" or st.display == "grid" or st.display == "inline-grid"
 
 fn _html_draw_ir_emit_scope(
     nodes: [HNode], styles: [Style],
@@ -654,14 +697,12 @@ fn _html_draw_ir_emit_scope(
         if root_node >= 0:
             result.push(root_node)
     # CSS 2.2 Appendix E Step 4: non-positioned normal-flow blocks in tree order.
-    # Contiguous opacity/backdrop sub-scopes flush in place at their tree slot.
+    # A block-level opacity/backdrop sub-scope is a layer: it waits for Step 8.
+    var has_layer = false
     # cpu-lane-loop-ok: appends normal-flow block members of one scope once each
     for b in scope_blocks[scope_id]:
-        if _html_draw_ir_opens_group(styles[b]):
-            result = _html_draw_ir_emit_scope(
-                nodes, styles, scope_self, scope_blocks, scope_floats, scope_inlines,
-                child_contexts, b + 1, false, result
-            )
+        if scope_self[b + 1] == b:
+            has_layer = true
         else:
             result.push(b)
     # CSS 2.2 Appendix E Step 5: non-positioned floats & their non-positioned subtrees.
@@ -671,16 +712,29 @@ fn _html_draw_ir_emit_scope(
             nodes, styles, scope_self, scope_blocks, scope_floats, scope_inlines,
             child_contexts, f + 1, false, result
         )
-    # CSS 2.2 Appendix E Step 7: non-positioned inline boxes & #text runs.
+    # CSS 2.2 Appendix E Step 7: non-positioned inline boxes & #text runs. An
+    # atomic inline (`inline-*`), a flex or grid item and an inline
+    # opacity/backdrop group are sub-scopes: each paints whole at its tree slot.
     # cpu-lane-loop-ok: appends normal-flow inline/#text nodes of one scope once after floats
     for inl in scope_inlines[scope_id]:
-        if _html_draw_ir_opens_group(styles[inl]):
+        if scope_self[inl + 1] == inl:
             result = _html_draw_ir_emit_scope(
                 nodes, styles, scope_self, scope_blocks, scope_floats, scope_inlines,
                 child_contexts, inl + 1, false, result
             )
         else:
             result.push(inl)
+    # CSS 2.2 Appendix E Step 8: block-level opacity/backdrop layers, each one
+    # contiguous, over the inline content (Chrome 159: an opacity block covers
+    # a later block pulled up under it).
+    if has_layer:
+        # cpu-lane-loop-ok: second pass over one scope's block members, layers only
+        for b in scope_blocks[scope_id]:
+            if scope_self[b + 1] == b:
+                result = _html_draw_ir_emit_scope(
+                    nodes, styles, scope_self, scope_blocks, scope_floats, scope_inlines,
+                    child_contexts, b + 1, false, result
+                )
     if emit_contexts:
         val children = _sort_positive_z_indices(
             child_contexts[scope_id],
@@ -817,20 +871,39 @@ fn _html_draw_ir_node_paint_order(
             scope_self[i + 1] = i
         else:
             node_context[i] = parent_context
-            if st.float_mode != 0:
+            val is_text = nodes[i].tag == "#text"
+            # A flex or grid item ignores `float` and paints atomically. An
+            # absolute / fixed child is out of flow, not an item. Unreachable
+            # today: `z-index` parses without its sign, so every absolute /
+            # fixed box opens a context above (bug
+            # web_render_negative_z_index_parsed_positive_2026-11-28).
+            val is_item = not is_text and parent_valid and _html_draw_ir_lays_out_items(styles[parent]) and not (st.position_absolute or st.position_fixed)
+            if st.float_mode != 0 and not is_item:
                 scope_floats[parent_scope].push(i)
                 node_scope[i] = i + 1
                 scope_self[i + 1] = i
             elif _html_draw_ir_opens_group(st):
-                if nodes[i].tag == "#text" or st.display == "inline":
+                if is_text or st.display == "inline":
                     scope_inlines[parent_scope].push(i)
                 else:
                     scope_blocks[parent_scope].push(i)
                 node_scope[i] = i + 1
                 scope_self[i + 1] = i
+            # ponytail: a block-level form control is also a sub-scope with the
+            # inline content, in tree order, where spec order is Step 4: its
+            # value text has no font identity and Engine2D `draw_text` paints
+            # it with the face the previous text command selected (bug
+            # engine2d_plain_text_inherits_selected_face_2026-11-28). A
+            # sub-scope keeps a `<button>`'s block children over its own
+            # background. Upgrade by giving the value run its own face, then
+            # drop the form-control test here.
+            elif is_item or (not is_text and (st.display.starts_with("inline-") or _html_draw_ir_is_form_control_box(nodes[i]))):
+                scope_inlines[parent_scope].push(i)
+                node_scope[i] = i + 1
+                scope_self[i + 1] = i
             else:
                 node_scope[i] = parent_scope
-                if nodes[i].tag == "#text" or st.display == "inline":
+                if is_text or st.display == "inline":
                     scope_inlines[parent_scope].push(i)
                 else:
                     scope_blocks[parent_scope].push(i)
@@ -922,6 +995,7 @@ fn _html_draw_ir_commands(
     element_scroll_max: i32, widget_mode: bool, widget_chrome_text: bool
 ) -> ([DrawIrCommand], [i32]):
     val boxes = _html_draw_ir_k1_snapped_boxes(nodes, layout_boxes)
+    val doc_bottom_y = _html_draw_ir_doc_bottom_y(boxes, clip_cache.default_clip)
     # One uri -> index map per render. The per-node loop below used to rescan
     # the whole image list for every img, video and background layer.
     val image_index_by_uri = _html_draw_ir_image_index_by_uri(images)
@@ -1027,8 +1101,8 @@ fn _html_draw_ir_commands(
                     val track_x = _html_draw_ir_saturated_i32(track_x64)
                     val track_y = _html_draw_ir_saturated_i32(track_y64)
                     val track_h = _html_draw_ir_saturated_i32(track_h64)
-                    val node_clip = paint_clip_at(
-                        clip_cache, scrollbar_index
+                    val node_clip = _html_draw_ir_effective_clip(
+                        nodes, styles, boxes, clip_cache, scrollbar_index, doc_bottom_y
                     )
                     val scrollport_clip = clip_intersect(
                         node_clip,
@@ -1162,7 +1236,9 @@ fn _html_draw_ir_commands(
         # this loop, as the raster `paint` does) replaces its glyphs.
         val widget_replaces_text = widget_mode and nodes[i].tag == "#text"
         if i < visible_nodes.len() and visible_nodes[i] and not widget_replaces_text:
-            val node_clip = paint_clip_at(clip_cache, i)
+            val node_clip = _html_draw_ir_effective_clip(
+                nodes, styles, boxes, clip_cache, i, doc_bottom_y
+            )
             val component_id = _html_draw_ir_component_id(nodes[i], i)
             val parent = nodes[i].parent
             val parent_id = if parent >= 0 and parent < nodes.len():

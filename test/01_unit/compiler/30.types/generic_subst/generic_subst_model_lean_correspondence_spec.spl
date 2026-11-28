@@ -1,0 +1,340 @@
+"""
+## Purpose and audience
+Contract for the parts of the substitution model that the laws and flow specs
+do not cover: the Lean-only theorems of `GenericSubstModel.lean`, byte-equality
+of the model key with the text the template projector writes, template
+instantiation for the TLDR generic view, and the boundary behaviour of
+matching, inference, flow steps and key decoding. Compiler engineers wiring
+the instance task or the TLDR view read it to learn the exact classification
+(closed, open, depth, malformed) they will receive.
+
+## Operator workflow
+Run `bin/simple test test/01_unit/compiler/30.types/generic_subst/generic_subst_model_lean_correspondence_spec.spl`
+after editing the model, the projector key helpers, or the Lean file.
+
+## Compatibility and limitations
+The projector parity cases cover closed types and, end to end, a template with one type parameter (a binder id embeds the
+declaration symbol). Lean proves substitution laws; the key and flow laws are
+bounded sweeps in the sibling specs.
+
+## Verification guidance and troubleshooting
+A parity failure means `mt_key_type` and the projector's `_key_*` helpers
+diverged; fix whichever changed last and rerun the TLDR view specs.
+# Generic substitution model: Lean-only laws, key parity, template instantiation
+
+Checks the Lean theorems of `GenericSubstModel.lean` that the laws spec does not
+already cover (the correspondence table is the header of
+`generic_subst_model.spl`), the equality of `mt_key_type` with the text the
+template projector writes, and `mt_instantiate_key` (the TLDR view acquirer's
+entry point). Sweeps assert their sizes so an empty sweep fails.
+"""
+
+# Lifecycle: doc/01_research/compiler/cache/global_content_addressed_cache_audit_2026-07-24.md
+# doc/02_requirements/compiler/generic_subst_model.md
+# doc/04_architecture/compiler/00_compiler_architecture.md
+# doc/05_design/compiler/generics/generic_instantiation_model.md
+# doc/03_plan/compiler/generics/generics_refactoring_formal_verification_plan_2026-10-31.md
+# @tag:unit
+# @tag:compiler
+# @tag:generics
+# @tag:model
+
+use std.spec
+use compiler.types.generic_subst.generic_subst_model.*
+use compiler.types.generic_subst.generic_subst_universe.*
+use compiler.frontend.cache_artifact.generic_tldr_projector.{GenericDeclInputV1, GenericFieldInputV1, generic_type_text_key_v1, project_generic_template_v1}
+use compiler.common.cache_contract.generic_tldr_view_v1.{GENERIC_PARAM_KIND_TYPE}
+
+fn probe_decl() -> GenericDeclInputV1:
+    GenericDeclInputV1(module_path: "pkg", name: "Probe", params: [], param_kinds: [], fields: [],
+        visibility_root: "vis:pub", active_guard_root: "", source_digest: "src")
+
+fn int_t() -> MType:
+    mt_con("i64")
+
+fn text_t() -> MType:
+    mt_con("text")
+
+# @manual_section: generic substitution model: Lean-only laws
+describe "generic substitution model: Lean-only laws":
+    it "S0 the empty substitution is the identity":
+        # @req REQ-GSUBST-001
+        # @capture(protocol_json): asserted values and first offending case of "S0 the empty substitution is the identity"
+        step("Apply the empty substitution to every type of the universe")
+        var n = 0
+        var bad = ""
+        for t in mu_types():
+            val tt: MType = t
+            n = n + 1
+            if not mt_struct_eq(ms_apply(ms_empty(), tt), tt):
+                bad = mt_render(tt)
+        expect(n).to_equal(365)  # oracle: the full universe of generic_subst_universe.spl: 95 + 270
+        expect(bad).to_equal("")
+
+    it "unknown is never closed and no substitution moves it":
+        # @req REQ-GSUBST-001
+        # @capture(protocol_json): asserted values and first offending case of "unknown is never closed and no substitution moves it"
+        step("Apply substitutions to the unknown type and test closedness around it")
+        expect(mt_is_closed(mt_unknown())).to_equal(false)
+        expect(mt_is_unknown(mt_unknown())).to_equal(true)
+        expect(mt_is_unknown(int_t())).to_equal(false)
+        expect(mt_is_unknown(mt_var("T"))).to_equal(false)
+        expect(mt_is_closed(mt_app(MT_TUPLE, [mt_unknown()]))).to_equal(false)
+        expect(mt_is_closed(mt_app(MT_TUPLE, [int_t(), text_t()]))).to_equal(true)
+        val s = ms_bind(ms_bind(ms_empty(), "T", int_t()), "U", text_t())
+        expect(mt_is_unknown(ms_apply(s, mt_unknown()))).to_equal(true)
+        expect(mt_is_unknown(ms_apply(ms_empty(), mt_unknown()))).to_equal(true)
+
+    it "an application keeps its constructor and arity":
+        # @req REQ-GSUBST-001
+        # @capture(protocol_json): asserted values and first offending case of "an application keeps its constructor and arity"
+        step("Apply a substitution to every application and compare constructor and arity")
+        var apps = 0
+        var bad = ""
+        val s = ms_bind(ms_bind(ms_empty(), "T", int_t()), "U", mt_app(MT_ARRAY, [text_t()]))
+        for t in mu_types():
+            val tt: MType = t
+            match tt:
+                case MType.App(c, args):
+                    apps = apps + 1
+                    match ms_apply(s, tt):
+                        case MType.App(c2, args2):
+                            if c2 != c or args2.len() != args.len():
+                                bad = mt_render(tt)
+                        case _:
+                            bad = mt_render(tt)
+                case _:
+                    bad = bad
+        expect(apps > 0).to_equal(true)
+        expect(bad).to_equal("")
+
+    it "an open range is not idempotent (ClosedRange is needed)":
+        # @req REQ-GSUBST-001
+        # @capture(protocol_json): asserted values and first offending case of "an open range is not idempotent (ClosedRange is needed)"
+        step("Apply a chained substitution twice and show the second pass changes the result")
+        val chain = ms_bind(ms_bind(ms_empty(), "T", mt_var("U")), "U", int_t())
+        expect(ms_range_closed(chain)).to_equal(false)
+        val once = ms_apply(chain, mt_var("T"))
+        val twice = ms_apply(chain, once)
+        expect(mt_struct_eq(once, twice)).to_equal(false)
+        expect(mt_render(twice)).to_equal("i64")
+        val closed = ms_bind(ms_empty(), "T", int_t())
+        expect(ms_range_closed(closed)).to_equal(true)
+        expect(ms_range_closed(ms_empty())).to_equal(true)
+
+    it "ms_get answers unknown for an unbound name":
+        # @req REQ-GSUBST-001
+        # @capture(protocol_json): asserted values and first offending case of "ms_get answers unknown for an unbound name"
+        step("Read a bound name and an unbound name from a substitution")
+        val s = ms_bind(ms_empty(), "T", int_t())
+        expect(ms_has(s, "T")).to_equal(true)
+        expect(ms_has(s, "U")).to_equal(false)
+        expect(mt_struct_eq(ms_get(s, "T"), int_t())).to_equal(true)
+        expect(mt_is_unknown(ms_get(s, "U"))).to_equal(true)
+
+    it "rendering is readable and order independent":
+        # @req REQ-GSUBST-005
+        # @capture(protocol_json): asserted values and first offending case of "rendering is readable and order independent"
+        step("Render types, substitutions, matches and inference results")
+        val t = mt_app(MT_DICT, [mt_var("K"), mt_app(MT_ARRAY, [int_t()])])
+        expect(mt_render(t)).to_equal("Dict<'K,Array<i64>>")
+        expect(mt_render_list([int_t(), mt_var("T")])).to_equal("[i64,'T]")
+        val a = ms_bind(ms_bind(ms_empty(), "B", int_t()), "A", text_t())
+        val b = ms_bind(ms_bind(ms_empty(), "A", text_t()), "B", int_t())
+        expect(ms_render(a)).to_equal(ms_render(b))
+        expect(mm_render(MMatch.Conflict("T"))).to_equal("Conflict(T)")
+        expect(mm_render(MMatch.Shape)).to_equal("Shape")
+        expect(mm_is_bound(MMatch.Shape)).to_equal(false)
+        expect(mm_is_bound(MMatch.Bound(a))).to_equal(true)
+        expect(ms_domain(mm_subst(MMatch.Shape)).len()).to_equal(0)  # oracle: a non-Bound match carries the empty substitution; the Bound case binds the two names A and B
+        expect(ms_domain(mm_subst(MMatch.Bound(a))).len()).to_equal(2)  # oracle: a non-Bound match carries the empty substitution; the Bound case binds the two names A and B
+        expect(mi_render(MInfer.Unresolved(MI_NO_EVIDENCE))).to_equal("Unresolved(no_evidence)")
+        expect(mi_render(MInfer.Resolved([int_t()]))).to_equal("Resolved[i64]")
+        expect(mi_is_resolved(MInfer.Resolved([]))).to_equal(true)
+        expect(mi_is_resolved(MInfer.Unresolved(MI_SHAPE))).to_equal(false)
+
+# @manual_section: generic substitution model: key parity with the projector
+describe "generic substitution model: key parity with the projector":
+    it "mt_key_type equals the projector key text for closed types":
+        # @req REQ-GSUBST-003
+        # @capture(protocol_json): asserted values and first offending case of "mt_key_type equals the projector key text for closed types"
+        step("Project closed type texts and compare each key with the model key")
+        val d = probe_decl()
+        val cases: [text] = ["i64", "text", "bool", "Array<i64>", "[text]", "Optional<bool>", "i64?",
+            "Dict<text, i64>", "Pkg.Box<i64>", "Box<[text]>"]
+        val expect_types: [MType] = [
+            int_t(), text_t(), mt_con("bool"),
+            mt_app(MT_ARRAY, [int_t()]), mt_app(MT_ARRAY, [text_t()]),
+            mt_app(MT_OPTIONAL, [mt_con("bool")]), mt_app(MT_OPTIONAL, [int_t()]),
+            mt_app(MT_DICT, [text_t(), int_t()]),
+            mt_app("Named:Pkg.Box", [int_t()]), mt_app("Named:pkg.Box", [mt_app(MT_ARRAY, [text_t()])])]
+        expect(cases.len()).to_equal(expect_types.len())
+        var i = 0
+        var checked = 0
+        while i < cases.len():
+            val k = generic_type_text_key_v1(d, cases[i])
+            expect(k.is_ok()).to_equal(true)
+            expect(k.unwrap()).to_equal(mt_key_type(expect_types[i]))
+            checked = checked + 1
+            i = i + 1
+        expect(checked).to_equal(10)  # oracle: one projector comparison per listed type text (10 texts)
+
+fn box_decl(module_path: text) -> GenericDeclInputV1:
+    GenericDeclInputV1(module_path: module_path, name: "Box", params: ["T"],
+        param_kinds: [GENERIC_PARAM_KIND_TYPE], fields: [GenericFieldInputV1(name: "items", type_text: "Array<T>"),
+        GenericFieldInputV1(name: "pair", type_text: "Dict<text, T>")],
+        visibility_root: "vis:pub", active_guard_root: "", source_digest: "src")
+
+# Projects `Box<T>` { items: Array<T>, pair: Dict<text, T> } in `module_path`, then
+# checks that both projected field keys equal the model key of the same type over
+# the binder `<module_path>.Box#0` and instantiate to a closed type at i64.
+fn expect_projected_box_instantiates(module_path: text):
+    val entry = project_generic_template_v1(box_decl(module_path)).unwrap()
+    val binder = entry.params[0].binder_id
+    expect(binder).to_equal(module_path + ".Box#0")
+    val items_key = mt_key_type(mt_app(MT_ARRAY, [mt_var(binder)]))
+    val pair_key = mt_key_type(mt_app(MT_DICT, [text_t(), mt_var(binder)]))
+    expect(entry.fields[0].type_key).to_equal(items_key)
+    expect(entry.fields[1].type_key).to_equal(pair_key)
+    val items = mt_instantiate_key(entry.fields[0].type_key, [binder], [int_t()], 8)
+    expect(items.status).to_equal(MI_STATUS_CLOSED)
+    expect(mt_render(items.t)).to_equal("Array<i64>")
+    val pair = mt_instantiate_key(entry.fields[1].type_key, [binder], [int_t()], 8)
+    expect(pair.status).to_equal(MI_STATUS_CLOSED)
+    expect(mt_render(pair.t)).to_equal("Dict<text,i64>")
+
+describe "generic substitution model: projected templates instantiate through the model":
+    it "a template with a type parameter has the model key and instantiates closed":
+        # @req REQ-GSUBST-003
+        # @capture(protocol_json): asserted values and first offending case of "a template with a type parameter has the model key and instantiates closed"
+        step("Project a template whose field mentions its parameter, then instantiate the projected key at i64")
+        expect_projected_box_instantiates("pkg")
+
+    it "a non-ASCII module name is byte framed alike by the projector and the model":
+        # @req REQ-GSUBST-003
+        # @capture(protocol_json): asserted values and first offending case of "a non-ASCII module name is byte framed alike by the projector and the model"
+        step("Project a template of a module with a Hangul name, then instantiate the projected key at i64")
+        expect(mt_key_type(mt_var("모듈.Box#0"))).to_equal("v12:모듈.Box#0")  # oracle: 모듈 is 2 Hangul x 3 bytes = 6 and ".Box#0" is 6 bytes, so the frame is 12; character framing would say 8
+        expect_projected_box_instantiates("모듈")
+
+# @manual_section: generic substitution model: template instantiation
+describe "generic substitution model: template instantiation":
+    it "substitutes positional binders and classifies the result closed":
+        # @req REQ-GSUBST-003
+        # @capture(protocol_json): asserted values and first offending case of "substitutes positional binders and classifies the result closed"
+        step("Instantiate a key whose binder is bound to i64")
+        val key = mt_key_type(mt_app(MT_ARRAY, [mt_var("pkg.Box#0")]))
+        val r = mt_instantiate_key(key, ["pkg.Box#0"], [int_t()], 8)
+        expect(r.status).to_equal(MI_STATUS_CLOSED)
+        expect(mt_render(r.t)).to_equal("Array<i64>")
+
+    it "reports open when a binder has no argument":
+        # @req REQ-GSUBST-003
+        # @capture(protocol_json): asserted values and first offending case of "reports open when a binder has no argument"
+        step("Instantiate a key with one binder left without an argument")
+        val key = mt_key_type(mt_app(MT_TUPLE, [mt_var("a#0"), mt_var("a#1")]))
+        val r = mt_instantiate_key(key, ["a#0", "a#1"], [int_t()], 8)
+        expect(r.status).to_equal(MI_STATUS_OPEN)
+        expect(mt_render(r.t)).to_equal("Tuple<i64,'a#1>")
+
+    it "reports depth when the result nests deeper than the limit":
+        # @req REQ-GSUBST-003
+        # @capture(protocol_json): asserted values and first offending case of "reports depth when the result nests deeper than the limit"
+        step("Instantiate a nested key under a depth limit that is too small and then large enough")
+        val key = mt_key_type(mt_app(MT_ARRAY, [mt_app(MT_ARRAY, [mt_var("a#0")])]))
+        val deep = mt_instantiate_key(key, ["a#0"], [mt_app(MT_ARRAY, [int_t()])], 2)
+        expect(deep.status).to_equal(MI_STATUS_DEPTH)
+        val fits = mt_instantiate_key(key, ["a#0"], [mt_app(MT_ARRAY, [int_t()])], 3)
+        expect(fits.status).to_equal(MI_STATUS_CLOSED)
+
+    it "reports malformed for undecodable key text":
+        # @req REQ-GSUBST-003
+        # @capture(protocol_json): asserted values and first offending case of "reports malformed for undecodable key text"
+        step("Instantiate text that is not a key")
+        val r = mt_instantiate_key("zz", ["a#0"], [int_t()], 8)
+        expect(r.status).to_equal(MI_STATUS_MALFORMED)
+        expect(mt_is_unknown(r.t)).to_equal(true)
+
+    it "ms_from_positional ignores surplus binders and surplus arguments":
+        # @req REQ-GSUBST-003
+        # @capture(protocol_json): asserted values and first offending case of "ms_from_positional ignores surplus binders and surplus arguments"
+        step("Build positional substitutions with surplus binders and with surplus arguments")
+        val short_args = ms_from_positional(["A", "B"], [int_t()])
+        expect(ms_has(short_args, "A")).to_equal(true)
+        expect(ms_has(short_args, "B")).to_equal(false)
+        val short_binders = ms_from_positional(["A"], [int_t(), text_t()])
+        expect(ms_domain(short_binders).len()).to_equal(1)  # oracle: only the one supplied binder A is bound; the surplus argument is dropped
+
+# @manual_section: generic substitution model: boundary behaviour
+describe "generic substitution model: boundary behaviour":
+    it "matching a slice pattern accepts an array and refuses another constructor":
+        # @req REQ-GSUBST-002
+        # @capture(protocol_json): asserted values and first offending case of "matching a slice pattern accepts an array and refuses another constructor"
+        step("Match a slice pattern against an array and against an optional")
+        val slice_t = mt_app("Slice", [mt_var("T")])
+        val over_array = mm_match(slice_t, mt_app(MT_ARRAY, [int_t()]), ms_empty())
+        expect(mm_render(over_array)).to_equal("Bound\{T:=i64}")
+        val over_optional = mm_match(slice_t, mt_app(MT_OPTIONAL, [int_t()]), ms_empty())
+        expect(mm_render(over_optional)).to_equal("Shape")
+
+    it "matching refuses the same constructor at a different arity":
+        # @req REQ-GSUBST-002
+        # @capture(protocol_json): asserted values and first offending case of "matching refuses the same constructor at a different arity"
+        step("Match a one-element tuple against a two-element tuple")
+        val pattern = mt_app(MT_TUPLE, [mt_var("T")])
+        val evidence = mt_app(MT_TUPLE, [int_t(), int_t()])
+        expect(mm_render(mm_match(pattern, evidence, ms_empty()))).to_equal("Shape")
+        expect(mt_struct_eq(pattern, evidence)).to_equal(false)
+
+    it "call-site inference tolerates missing arguments and an open expected type":
+        # @req REQ-GSUBST-002
+        # @capture(protocol_json): asserted values and first offending case of "call-site inference tolerates missing arguments and an open expected type"
+        step("Infer with fewer arguments than parameters and with an open expected type")
+        val missing_arg = mi_infer(["T", "U"], [mt_var("T"), mt_var("U")], int_t(), [], [int_t()], mt_unknown(), false)
+        expect(mi_render(missing_arg)).to_equal("Unresolved(no_evidence)")
+        val open_expected = mi_infer(["T"], [], mt_var("T"), [], [], mt_var("U"), false)
+        expect(mi_render(open_expected)).to_equal("Unresolved(no_evidence)")
+
+    it "a step with the wrong number of inputs, or an unknown kind, is ill typed":
+        # @req REQ-GSUBST-004
+        # @capture(protocol_json): asserted values and first offending case of "a step with the wrong number of inputs, or an unknown kind, is ill typed"
+        step("Step with the wrong number of inputs, with an unknown kind and with a malformed array")
+        expect(mf_render(mf_step("let", [int_t()], []))).to_equal("Ill(arity)")
+        expect(mf_render(mf_step("no_such_kind", [int_t(), int_t()], []))).to_equal("Ill(unknown_kind)")
+        expect(mf_render(mf_step("elem_read", [mt_app(MT_ARRAY, [int_t(), int_t()])], []))).to_equal("Ill(shape)")
+
+    it "a dict write checks the container shape and the key type":
+        # @req REQ-GSUBST-004
+        # @capture(protocol_json): asserted values and first offending case of "a dict write checks the container shape and the key type"
+        step("Write into a dict, a non-dict, and with a wrong key or value type")
+        val dict_t = mt_app(MT_DICT, [text_t(), int_t()])
+        expect(mf_render(mf_step("dict_write", [dict_t, text_t(), int_t()], []))).to_equal("Ok(i64)")
+        expect(mf_render(mf_step("dict_write", [int_t(), text_t(), int_t()], []))).to_equal("Ill(shape)")
+        expect(mf_render(mf_step("dict_write", [dict_t, int_t(), int_t()], []))).to_equal("Ill(mismatch)")
+        expect(mf_render(mf_step("dict_write", [dict_t, text_t(), text_t()], []))).to_equal("Ill(mismatch)")
+
+    it "key decoding refuses every malformed spelling":
+        # @req REQ-GSUBST-003
+        # @capture(protocol_json): asserted values and first offending case of "key decoding refuses every malformed spelling"
+        step("Decode eleven malformed spellings and count the refusals")
+        val bad_keys: [text] = ["c5", "c:", "cx:", "c/:", "c1234567890123:x", "x1:a", "a1:X", "a1:Xz", "a1:Xlz:", "a1:Xl2:c1:a", ""]
+        var refused = 0
+        for k in bad_keys:
+            val kk: text = k
+            if not mt_from_key(kk).ok:
+                refused = refused + 1
+        expect(refused).to_equal(bad_keys.len())
+
+# @manual_section: generic substitution model: non-ASCII names
+describe "generic substitution model: non-ASCII names":
+    it "key framing counts bytes and decoding returns the same type":
+        # @req REQ-GSUBST-003
+        # @capture(protocol_json): asserted values and first offending case of "key framing counts bytes and decoding returns the same type"
+        step("Encode a type whose names hold multi-byte characters and decode it again")
+        val t = mt_app("Named:箱", [mt_con("é"), mt_var("日本")])
+        val key = mt_key_type(t)
+        expect(key.contains("9:Named:箱")).to_equal(true)  # oracle: "Named:" is 6 bytes and the character 箱 is 3 bytes in UTF-8
+        expect(key.contains("c2:é")).to_equal(true)  # oracle: é is 2 bytes in UTF-8
+        val back = mt_from_key(key)
+        expect(back.ok).to_equal(true)
+        expect(mt_struct_eq(back.t, t)).to_equal(true)

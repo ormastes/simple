@@ -35,6 +35,7 @@
 
 #define SPL_LEGACY_VALUE_RUNTIME 1
 #define SIMPLE_RETAINED_PRIVATE_CREDENTIAL_IMPLEMENTATION
+#define SIMPLE_PRIVDROP_V1_IMPLEMENTATION
 #include "runtime.h"
 #include "runtime_nonnull.h"
 #if defined(__APPLE__)
@@ -64,6 +65,16 @@ int64_t rt_simple_abi_version_deferred(void) {
 #  define SPL_RUNTIME_NATIVE_TWIN __attribute__((weak))
 #else
 #  define SPL_RUNTIME_NATIVE_TWIN
+#endif
+/* SPL_RUNTIME_OWNER_TWIN marks a twin whose owner body carries state this
+ * file cannot reach, so the owner must win on ELF too, where first-definition-
+ * wins would otherwise pick this copy (runtime.o is first on the link line).
+ * Weak still resolves when this object is linked alone. Pinned by
+ * scripts/check/check-runtime-c-twin-bodies.shs. */
+#if defined(__APPLE__) || defined(__ELF__)
+#  define SPL_RUNTIME_OWNER_TWIN __attribute__((weak))
+#else
+#  define SPL_RUNTIME_OWNER_TWIN
 #endif
 #include "platform/platform.h"
 #include "runtime_memtrack.h"
@@ -1176,7 +1187,9 @@ double spl_bits_to_f64(int64_t bits) {
 }
 
 int64_t spl_str_ptr(const char* s) {
-    return (int64_t)(uintptr_t)s;
+    /* A tagged text yields its bytes, like the runtime_native.c twin. */
+    const uint8_t* data = rt_string_data((int64_t)(uintptr_t)s);
+    return (int64_t)(uintptr_t)(data ? (const char*)data : s);
 }
 
 char* spl_sprintf(const char* fmt, ...) {
@@ -2442,6 +2455,9 @@ int64_t rt_mkdir(int64_t path_value, int64_t mode) {
 }
 
 int64_t rt_remove(const char* path) {
+    /* Tagged text or char*, like the runtime_native.c twin. */
+    const uint8_t* text_bytes = rt_string_data((int64_t)(uintptr_t)path);
+    if (text_bytes) path = (const char*)text_bytes;
     if (!path) return -1;
     struct stat st;
     if (stat(path, &st) != 0) return -(int64_t)errno;
