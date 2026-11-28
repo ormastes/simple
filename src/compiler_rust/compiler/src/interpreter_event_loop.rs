@@ -38,6 +38,12 @@ mod platform {
         static EPOLL_LOOPS: RefCell<HashMap<i64, EpollState>> = RefCell::new(HashMap::new());
     }
 
+    /// Interpreter sockets are handles (1000+), not descriptors: resolve a
+    /// handle to its raw fd; anything else is taken as a raw fd already.
+    fn raw_fd(fd: i64) -> i32 {
+        crate::interpreter::interpreter_native_net::socket_handle_raw_fd(fd).unwrap_or(fd as i32)
+    }
+
     pub fn create() -> i64 {
         let epfd = unsafe { libc::epoll_create1(0) };
         if epfd < 0 {
@@ -74,13 +80,15 @@ mod platform {
                 events |= libc::EPOLLET as u32;
             }
 
-            // Store fd in data.u64 so poll() knows which descriptor fired
+            // Store the caller's fd/handle in data.u64 so poll() reports what
+            // the caller registered; the kernel gets the raw descriptor.
             let mut ev = libc::epoll_event { events, u64: fd as u64 };
+            let raw = raw_fd(fd);
 
-            let ret = unsafe { libc::epoll_ctl(state.epfd, libc::EPOLL_CTL_ADD, fd as i32, &mut ev) };
+            let ret = unsafe { libc::epoll_ctl(state.epfd, libc::EPOLL_CTL_ADD, raw, &mut ev) };
             if ret < 0 {
                 // Try MOD in case it was already registered
-                let ret2 = unsafe { libc::epoll_ctl(state.epfd, libc::EPOLL_CTL_MOD, fd as i32, &mut ev) };
+                let ret2 = unsafe { libc::epoll_ctl(state.epfd, libc::EPOLL_CTL_MOD, raw, &mut ev) };
                 if ret2 != 0 {
                     return false;
                 }
@@ -98,7 +106,7 @@ mod platform {
                 return false;
             };
             state.tokens.remove(&(fd as i32));
-            let ret = unsafe { libc::epoll_ctl(state.epfd, libc::EPOLL_CTL_DEL, fd as i32, std::ptr::null_mut()) };
+            let ret = unsafe { libc::epoll_ctl(state.epfd, libc::EPOLL_CTL_DEL, raw_fd(fd), std::ptr::null_mut()) };
             ret == 0
         })
     }
@@ -905,5 +913,30 @@ pub fn rt_event_ports_close_interp(args: &[Value]) -> Result<Value, CompileError
     {
         let _ = args;
         Ok(Value::Bool(false))
+    }
+}
+
+// Linux only: the epoll backend must resolve interpreter socket handles
+// (1000+) to raw fds before epoll_ctl, and report the caller's handle back.
+#[cfg(all(test, target_os = "linux"))]
+mod handle_mapping_tests {
+    use super::*;
+    use crate::interpreter::rt_io_udp_bind_interp;
+
+    #[test]
+    fn writable_udp_handle_reports_handle_write_and_token() {
+        let handle = rt_io_udp_bind_interp(&[Value::text("127.0.0.1:0".to_string())])
+            .unwrap()
+            .as_int()
+            .unwrap();
+        assert!(handle >= 1000, "interpreter sockets are handles, not fds");
+        let lp = platform::create();
+        assert!(lp >= 0);
+        assert!(platform::register(lp, handle, 1, 4242, false));
+        let got: Vec<i64> = platform::poll(lp, 8, 1000).iter().map(|v| v.as_int().unwrap()).collect();
+        assert_eq!(got, vec![handle, 1, 4242]);
+        assert!(platform::deregister(lp, handle));
+        assert!(platform::poll(lp, 8, 0).is_empty());
+        assert!(platform::close(lp));
     }
 }

@@ -38,8 +38,9 @@ int main(void) {
     CHECK(rt_event_loop_register(b, sv[1], 1, 444, 0) == 1);
     CHECK(rt_event_loop_deregister(b, sv[1]) == 1);
     CHECK(rt_event_loop_poll(b, 8, 0) == 0);
-    rt_event_loop_close(a);
-    rt_event_loop_close(b);
+    CHECK(rt_event_loop_close(a) == 1); /* bool ABI: true on success */
+    CHECK(rt_event_loop_close(b) == 1);
+    CHECK(rt_event_loop_close(-1) == 0);
     close(sv[0]);
     close(sv[1]);
     return 0;

@@ -85,6 +85,20 @@ pub(crate) fn clear_socket_handles() {
     SOCKET_HANDLES.clear();
 }
 
+/// Raw OS fd behind an interpreter socket handle (1000+), for the event-loop
+/// backends: they must hand the kernel the real descriptor, not the handle id
+/// (same mapping the Rust runtime's rt_event_loop_poll does via SOCKET_REGISTRY).
+#[cfg(unix)]
+pub(crate) fn socket_handle_raw_fd(id: i64) -> Option<i32> {
+    use std::os::unix::io::AsRawFd;
+    socket_entry(id).map(|entry| match entry.as_ref() {
+        SocketHandle::TcpListener(s) => s.as_raw_fd(),
+        SocketHandle::TcpStream(s) => s.as_raw_fd(),
+        SocketHandle::UdpSocket(s) => s.as_raw_fd(),
+        SocketHandle::RawSocket(s) => s.as_raw_fd(),
+    })
+}
+
 fn allocate_socket(socket: SocketHandle) -> i64 {
     let id = NEXT_SOCKET_HANDLE_ID.fetch_add(1, NetOrdering::SeqCst);
     SOCKET_HANDLES.insert(id, Arc::new(socket));
