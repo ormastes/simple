@@ -438,14 +438,14 @@ fn _adv_cache_store(identity: text, font_size: i32, codepoint: i32, advance: i32
     _adv_overflow_val[_adv_overflow_cursor] = advance
     _adv_overflow_cursor = (_adv_overflow_cursor + 1) % _ADV_OVERFLOW_CAP
 use std.nogc_sync_mut.sffi.spl_fonts.{FontRasterizer, LayoutGlyph, SubpixelGlyphBitmap}
-use std.common.encoding.sfnt.{font_unmanaged_identity_face_spec, font_face_spec_path}
+use std.common.encoding.sfnt.{font_unmanaged_identity_face_spec, font_face_spec_path, font_face_spec_index, sfnt_face_blob}
 use std.nogc_sync_mut.text_layout.font_provider.{
     browser_font_dylib_candidates,
     browser_serif_font_candidates,
     browser_font_candidates_for_family,
     browser_font_family_category,
     browser_font_family_for_style,
-    browser_host_has_measured_linux_face_set,
+    browser_host_has_measured_face_set,
     browser_family_has_host_face,
     browser_platform_hangul_faces,
     browser_bundled_font_path_for_family
@@ -858,13 +858,15 @@ fn _registered_selected_font_bytes(path: text) -> ([u8], bool):
     _browser_default_font_lock_release(active_lock)
     ([], false)
 
-fn font_renderer_registered_selected_bytes_only() -> bool:
+# reason: exposes registered-bytes-only runtime mode predicate across text_layout facade.
+# @allow(primitive_api)
+pub fn font_renderer_registered_selected_bytes_only() -> bool:
     val active_lock = _browser_default_font_lock_acquire()
     val enabled = _registered_selected_fonts_only
     _browser_default_font_lock_release(active_lock)
     enabled
 
-fn font_renderer_use_registered_selected_bytes_only():
+pub fn font_renderer_use_registered_selected_bytes_only():
     """Keep freestanding consumers away from host-only file externs."""
     # Flip the flag BEFORE the first lock use: _font_mutex_acquire/_release
     # skip the real Mutex.lock()/unlock() once this is true (see their
@@ -1164,7 +1166,9 @@ fn _font_render_config_candidate(config: FontRenderConfig) -> FontAssetCandidate
         return None
     candidate
 
-fn font_render_config_selection_supported(config: FontRenderConfig) -> bool:
+# reason: exposes FontRenderConfig support gate across text_layout facade.
+# @allow(primitive_api)
+pub fn font_render_config_selection_supported(config: FontRenderConfig) -> bool:
     # Sequential explicit gates with per-gate receipts, not one mixed and/or
     # chain. ROOT CAUSE (2026-08-11, rung-(d) blocker): on the freestanding
     # entry-closure lane this single expression returned false for a config
@@ -4480,15 +4484,17 @@ fn _resolved_font_script_language(language: text, complex_script: i32) -> text:
 # and an element style used `9 * (font_size / 8)`: 9/18/27/36 at
 # 12/16/24/32px where Chrome's Liberation Sans is 14/18/28/37.
 #
-# SCOPE: only the host the numbers were measured on
-# (`browser_host_has_measured_linux_face_set`). Elsewhere this answers 0 and
-# every caller keeps the value it had. `ResolvedFontMetrics.line_height` is
-# deliberately NOT changed, so non-web consumers (common/ui/draw_ir.spl text
-# height, widget and window-scene text) are untouched on every host.
+# SCOPE: only hosts with measured system faces
+# (`browser_host_has_measured_face_set`: Linux Chrome-159 or macOS CoreText).
+# Elsewhere this answers 0 and every caller keeps the value it had.
+# `ResolvedFontMetrics.line_height` is deliberately NOT changed, so non-web
+# consumers (common/ui/draw_ir.spl text height, widget and window-scene text)
+# are untouched on every host.
 #
-# A candidate whose file is a TrueType COLLECTION (`path#N`, macOS .ttc) has a
-# `ttcf` header, not an offset table: its units row is empty and the walk moves
-# to the next candidate. No collection is in the measured Linux stacks.
+# A candidate whose file is a TrueType collection (`path#N`, macOS .ttc) extracts
+# face `N` via `sfnt_face_blob` before reading its SFNT line metric units, and
+# applies Blink/CoreText's +15% ascent adjustment for macOS Helvetica /
+# HelveticaNeue / Times / Courier when `lineGap == 0`.
 val BROWSER_NORMAL_LINE_MEMO_LIMIT: i32 = 2048
 var _browser_normal_line_px_memo: Dict<text, i32> = {}
 var _browser_normal_line_px_memo_count: i32 = 0
@@ -4496,6 +4502,12 @@ var _browser_face_line_units_memo: Dict<text, [i64]> = {}
 var _browser_face_line_units_memo_count: i32 = 0
 
 var _browser_face_ascent_descent_memo: Dict<text, [i32]> = {}
+
+fn _browser_face_file_path(spec_path: text) -> text:
+    font_face_spec_path(spec_path)
+
+fn _browser_face_ttc_index(spec_path: text) -> i64:
+    font_face_spec_index(spec_path)
 
 # [ascent, descent] in whole px of the face `line-height: normal` resolves to
 # (the same first-existing candidate walk as `browser_normal_line_height_px`),
@@ -4525,7 +4537,7 @@ pub fn browser_face_ascent_descent_milli_px(family: text, bold: bool, italic: bo
 pub fn browser_face_ascent_descent_device_px(family: text, bold: bool, italic: bool, font_size_milli: i32, k: i32) -> [i32]:
     if font_size_milli <= 0 or font_size_milli > 512000 or k < 1:
         return []
-    if not browser_host_has_measured_linux_face_set():
+    if not browser_host_has_measured_face_set():
         return []
     val style_key = if bold and italic: "|bi|" elif bold: "|b|" elif italic: "|i|" else: "|r|"
     val key = family + style_key + font_size_milli.to_string() + (if k > 1: "@" + k.to_string() else: "")
@@ -4536,9 +4548,9 @@ pub fn browser_face_ascent_descent_device_px(family: text, bold: bool, italic: b
     val candidates = browser_font_candidates_for_family(browser_font_family_for_style(family, bold, italic))
     for candidate in candidates:
         if out.len() == 0:
-            val path = font_face_spec_path(candidate)
-            if file_exists(path):
-                val ad = sfnt_line_metric_units_ascent_descent_device_px(_browser_face_line_units(path), font_size_milli.to_i64(), k.to_i64())
+            val clean_path = _browser_face_file_path(candidate)
+            if clean_path != "" and file_exists(clean_path):
+                val ad = sfnt_line_metric_units_ascent_descent_device_px(_browser_face_line_units(candidate), font_size_milli.to_i64(), k.to_i64())
                 if ad.len() == 2:
                     out = [ad[0] as i32, ad[1] as i32]
     if memoisable and out.len() == 2:
@@ -4554,12 +4566,14 @@ pub fn browser_face_ascent_descent_device_px(family: text, bold: bool, italic: b
 # reason: family name and style flags are the web-style domain.
 # @allow(primitive_api)
 pub fn browser_face_line_units(family: text, bold: bool, italic: bool) -> [i64]:
-    if not browser_host_has_measured_linux_face_set():
+    if not browser_host_has_measured_face_set():
         return []
     for candidate in browser_font_candidates_for_family(browser_font_family_for_style(family, bold, italic)):
-        val path = font_face_spec_path(candidate)
-        if file_exists(path):
-            return _browser_face_line_units(path)
+        val clean_path = _browser_face_file_path(candidate)
+        if clean_path != "" and file_exists(clean_path):
+            val units = _browser_face_line_units(candidate)
+            if units.len() == 4:
+                return units
     []
 
 # [ascent, descent] in whole px at font_size_milli * k of a run's USED face
@@ -4582,17 +4596,29 @@ pub fn browser_used_face_line_ascent_descent_device_px(units: [i64], font_size_m
     val above = (line - ad[0] - ad[1]) / 2
     [(ad[0] + above) as i32, (line - ad[0] - above) as i32]
 
-fn _browser_face_line_units(path: text) -> [i64]:
-    if _browser_face_line_units_memo.has(path):
-        return _browser_face_line_units_memo[path]
-    val blob = file_read_bytes(path)
-    val units = sfnt_blob_line_metric_units(blob)
+fn _browser_face_line_units(spec_path: text) -> [i64]:
+    if _browser_face_line_units_memo.has(spec_path):
+        return _browser_face_line_units_memo[spec_path]
+    val clean_path = _browser_face_file_path(spec_path)
+    val face_idx = _browser_face_ttc_index(spec_path)
+    if clean_path == "" or face_idx < 0 or not file_exists(clean_path):
+        return []
+    val raw_blob = file_read_bytes(clean_path)
+    if raw_blob.len() == 0:
+        return []
+    val sfnt_blob = sfnt_face_blob(raw_blob, face_idx)
+    if sfnt_blob.len() == 0:
+        return []
+    var units = sfnt_blob_line_metric_units(sfnt_blob)
     if units.len() == 0:
         return units
+    if (clean_path.ends_with("/Helvetica.ttc") or clean_path.ends_with("/HelveticaNeue.ttc") or clean_path.ends_with("/Times.ttc") or clean_path.ends_with("/Courier.ttc")) and units.len() == 4 and units[2] == 0:
+        val extra = ((units[0] + units[1]) * 15 + 50) / 100
+        units = [units[0] + extra, units[1], units[2], units[3]]
     if _browser_face_line_units_memo_count >= 256:
         _browser_face_line_units_memo = {}
         _browser_face_line_units_memo_count = 0
-    _browser_face_line_units_memo[path] = units
+    _browser_face_line_units_memo[spec_path] = units
     _browser_face_line_units_memo_count = _browser_face_line_units_memo_count + 1
     units
 
@@ -4608,7 +4634,7 @@ pub fn browser_normal_line_height_px(family: text, bold: bool, italic: bool, fon
 pub fn browser_normal_line_height_milli_px(family: text, bold: bool, italic: bool, font_size_milli: i32) -> i32:
     if font_size_milli <= 0 or font_size_milli > 512000:
         return 0
-    if not browser_host_has_measured_linux_face_set():
+    if not browser_host_has_measured_face_set():
         return 0
     val style_key = if bold and italic: "|bi|" elif bold: "|b|" elif italic: "|i|" else: "|r|"
     val key = family + style_key + font_size_milli.to_string()
@@ -4622,9 +4648,9 @@ pub fn browser_normal_line_height_milli_px(family: text, bold: bool, italic: boo
     val candidates = browser_font_candidates_for_family(browser_font_family_for_style(family, bold, italic))
     for candidate in candidates:
         if px == 0:
-            val path = font_face_spec_path(candidate)
-            if file_exists(path):
-                val units = _browser_face_line_units(path)
+            val clean_path = _browser_face_file_path(candidate)
+            if clean_path != "" and file_exists(clean_path):
+                val units = _browser_face_line_units(candidate)
                 px = sfnt_line_metric_units_normal_line_height_milli_px(units, font_size_milli.to_i64()) as i32
     # 0 is "no face answered" (a file that was not there yet, a collection):
     # never memoised, so a later call can still succeed.
