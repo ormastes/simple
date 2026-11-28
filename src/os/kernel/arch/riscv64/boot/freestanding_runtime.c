@@ -999,20 +999,20 @@ spl_i64 rt_any_add(spl_i64 lhs, spl_i64 rhs) {
     return lhs + rhs;
 }
 
-spl_i64 rt_mmio_read_u8(spl_i64 addr) {
-    return (spl_i64)(*(volatile unsigned char *)(spl_u64)addr);
+spl_u8 rt_mmio_read_u8(spl_i64 addr) {
+    return (*(volatile unsigned char *)(spl_u64)addr);
 }
 
-spl_i64 rt_mmio_read_u16(spl_i64 addr) {
-    return (spl_i64)(*(volatile unsigned short *)(spl_u64)addr);
+spl_u16 rt_mmio_read_u16(spl_i64 addr) {
+    return (*(volatile unsigned short *)(spl_u64)addr);
 }
 
-spl_i64 rt_mmio_read_u32(spl_i64 addr) {
-    return (spl_i64)(*(volatile unsigned int *)(spl_u64)addr);
+spl_u32 rt_mmio_read_u32(spl_i64 addr) {
+    return (*(volatile unsigned int *)(spl_u64)addr);
 }
 
-spl_i64 rt_mmio_read_u64(spl_i64 addr) {
-    return (spl_i64)(*(volatile spl_u64 *)(spl_u64)addr);
+spl_u64 rt_mmio_read_u64(spl_i64 addr) {
+    return (*(volatile spl_u64 *)(spl_u64)addr);
 }
 
 void rt_mmio_write_u8(spl_i64 addr, spl_i64 value) {
@@ -1042,7 +1042,7 @@ spl_i64 rt_value_int(spl_i64 value) {
 spl_i64 rt_value_as_int(spl_i64 value) {
     return value >> 3;
 }
-spl_i64 rt_volatile_read_u8(spl_i64 addr) {
+spl_u8 rt_volatile_read_u8(spl_i64 addr) {
     return rt_mmio_read_u8(addr);
 }
 spl_i64 rt_hosted_volatile_admitted(void) { return 0; }
@@ -1056,7 +1056,7 @@ void rt_volatile_write_u8(spl_i64 addr, spl_i64 value) {
 /* rt_volatile_read/write_u16/u32/u64 and rt_load_barrier/rt_store_barrier:
  * completing the rt_volatile_* family declared in src/runtime/runtime.h and
  * implemented for the hosted build in
- * src/runtime/runtime_native.c:4874-4906 (int64_t addr/value ABI, matching
+ * src/runtime/runtime_native.c:4874-4906 (narrow uintN_t return, int64_t addr/value ABI, matching
  * the `extern fn` declarations in src/lib/nogc_sync_mut/io/volatile_ops.spl).
  * Only the u8 pair existed here before; the riscv64 kernel closure's
  * os.kernel.boot.mmio_hardware module calls the u16/u32/u64 read/write and
@@ -1070,13 +1070,13 @@ void rt_volatile_write_u8(spl_i64 addr, spl_i64 value) {
  * safe to implement here as acquire/release barriers, matching the semantics
  * documented in io/volatile_ops.spl ("load_barrier() - acquire fence",
  * "store_barrier() - release fence"). */
-spl_i64 rt_volatile_read_u16(spl_i64 addr) {
+spl_u16 rt_volatile_read_u16(spl_i64 addr) {
     return rt_mmio_read_u16(addr);
 }
-spl_i64 rt_volatile_read_u32(spl_i64 addr) {
+spl_u32 rt_volatile_read_u32(spl_i64 addr) {
     return rt_mmio_read_u32(addr);
 }
-spl_i64 rt_volatile_read_u64(spl_i64 addr) {
+spl_u64 rt_volatile_read_u64(spl_i64 addr) {
     return rt_mmio_read_u64(addr);
 }
 void rt_volatile_write_u16(spl_i64 addr, spl_i64 value) {

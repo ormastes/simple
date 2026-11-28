@@ -1,0 +1,177 @@
+# @req REQ-WEB4K-001
+"""
+## Purpose and audience
+Behavioral promotion oracle for the web renderable feature inventory. Every
+`renderable` row must show a structured Draw IR difference on its focused
+witness fixture against a declaration-free control document; lexical
+occurrence of a name in fixture text is a secondary census signal that never
+promotes. Written for the web renderer and 4K showcase owners.
+## Operator workflow
+Run the file with the seed lane:
+`./src/compiler_rust/target/bootstrap/simple run test/01_unit/lib/gc_async_mut/gpu/browser_engine/web_renderable_feature_render_oracle_spec.spl`
+and read the `SPEC FILE VERDICT` line.
+## Compatibility and limitations
+Runs the production layout and paint path in-process at 320x240; no browser
+frame is opened and no GPU pixel readback happens here. The lexical matchers
+mirror the retired shell gate's regexes over ASCII fixture text.
+## Verification guidance and troubleshooting
+A failure names the inventory row whose structured-output effect vanished or
+whose lexical-only fixture suddenly promoted; compare the verdict decision
+string before editing the inventory tables.
+"""
+# Regression evidence for doc/08_tracking/bug/html_css_rendering_inventory_lexical_false_pass_2026-09-05.md:
+# the manifest traceability gate passed fixture blobs whose stylesheet was
+# inert (probe: every </style> close tag mangled to </styl> — the stylesheet
+# extractor silently drops the whole sheet while every declaration text stays
+# in the blob). These scenarios exercise that exact shape and require the
+# behavioral oracle to decline it.
+# Lifecycle: doc/01_research/domain/simple_web_browser_engine_production_hardening.md ;
+# doc/04_architecture/simple_web_browser_engine_production_hardening.md ;
+# doc/05_design/simple_web_browser_engine_production_hardening.md
+# @manual_section: web renderable feature render oracle
+
+use std.spec.*
+use std.gc_async_mut.gpu.browser_engine.web_renderable_feature_inventory.{
+    WebRenderableFeatureRow, WEB_FEATURE_CSS, WEB_FEATURE_HTML, WEB_RENDERABLE,
+    web_renderable_feature_inventory, web_renderable_find}
+use std.gc_async_mut.gpu.browser_engine.web_renderable_feature_witness.{
+    web_feature_css_witness_declaration}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_draw_ir_result,
+    simple_web_layout_draw_ir_comparable}
+use std.gc_async_mut.gpu.browser_engine.web_renderable_feature_render_oracle.{
+    WEB_RENDER_DECISION_ABSENT,
+    WEB_RENDER_DECISION_DECLINED,
+    WEB_RENDER_DECISION_STRUCTURAL,
+    WebFeatureFixturePair,
+    web_feature_fixture_pair,
+    web_feature_render_verdict,
+    web_feature_render_pair_verdict,
+    web_feature_render_promotes,
+    web_feature_lexical_occurrence,
+    web_feature_draw_ir_fingerprint,
+    WEB_FEATURE_ORACLE_VIEW_WIDTH,
+    WEB_FEATURE_ORACLE_VIEW_HEIGHT}
+
+describe "Web renderable feature render oracle":
+
+    it "promotes every renderable row only through a structured Draw IR difference":
+        # @req REQ-WEB4K-001
+        # @capture(statistics): behavioral promotion census over renderable rows
+        step("Render every renderable row's focused fixture and control, then count observed and structural verdicts")
+        val inventory = web_renderable_feature_inventory()
+        var observed = 0
+        var structural = 0
+        for row in inventory.rows:
+            if row.status != WEB_RENDERABLE:
+                continue
+            val verdict = web_feature_render_verdict(row)
+            expect(verdict.row_id).to_equal(row.id)
+            val pair = web_feature_fixture_pair(row)
+            if pair.structural:
+                structural = structural + 1
+                expect(verdict.decision).to_start_with(WEB_RENDER_DECISION_STRUCTURAL)
+                expect(verdict.fixture).to_equal(verdict.control)
+                expect(web_feature_render_promotes(verdict)).to_be(false)
+            else:
+                expect(verdict.comparable).to_be(true)
+                expect(verdict.draw_ir_effect).to_be(true)
+                expect(web_feature_render_promotes(verdict)).to_be(true)
+                expect(verdict.lexical_occurrence).to_be(true)
+                observed = observed + 1
+        expect(observed).to_equal(110)  # oracle: 110 renderable rows carry a standalone witness whose fixture changes the structured Draw IR output on the 2026-11-27 seed runtime
+        expect(structural).to_equal(4)  # oracle: html, body, main, and colgroup have no standalone sample and are structural, matching the inventory contract spec
+
+    it "makes no pixel claim for the four structural document rows":
+        # @req REQ-WEB4K-001
+        # @capture(bit_table): structural row verdicts
+        step("Look up the structural rows and assert document-presence verdicts")
+        val inventory = web_renderable_feature_inventory()
+        for name in ["html", "body", "main", "colgroup"]:
+            val found = web_renderable_find(inventory, WEB_FEATURE_HTML, name)
+            expect(found != nil).to_be(true)
+            if val row = found:
+                expect(row.status).to_equal(WEB_RENDERABLE)
+                val verdict = web_feature_render_verdict(row)
+                expect(verdict.decision).to_start_with(WEB_RENDER_DECISION_STRUCTURAL)
+                expect(verdict.comparable).to_be(true)
+                expect(verdict.draw_ir_effect).to_be(false)
+                expect(web_feature_render_promotes(verdict)).to_be(false)
+
+    it "declines rows that are not classified renderable even when their name occurs lexically":
+        # @req REQ-WEB4K-001
+        # @capture(statistics): fail-closed verdict for partial and unsupported rows
+        step("Look up a partial and an unsupported row and assert declined verdicts without renders")
+        val inventory = web_renderable_feature_inventory()
+        val display = web_renderable_find(inventory, WEB_FEATURE_CSS, "display")
+        expect(display != nil).to_be(true)
+        if val row = display:
+            expect(row.status).to_equal("partial")
+            val verdict = web_feature_render_verdict(row)
+            expect(verdict.decision).to_start_with(WEB_RENDER_DECISION_DECLINED)
+            expect(verdict.decision).to_contain("row-not-renderable")
+            expect(web_feature_render_promotes(verdict)).to_be(false)
+        val transform_box = web_renderable_find(inventory, WEB_FEATURE_CSS, "transform-box")
+        expect(transform_box != nil).to_be(true)
+        if val row = transform_box:
+            expect(row.status).to_equal("unsupported")
+            val verdict = web_feature_render_verdict(row)
+            expect(verdict.decision).to_start_with(WEB_RENDER_DECISION_DECLINED)
+            expect(web_feature_render_promotes(verdict)).to_be(false)
+
+    it "catches the lexical false-pass shape: declarations that occur only as commented-out CSS":
+        # @req REQ-WEB4K-001
+        # @capture(statistics): lexical-positive, behaviorally-inert fixtures per renderable CSS row
+        step("Inject every renderable CSS row's declaration as a CSS comment into the control document and assert the oracle declines promotion")
+        val inventory = web_renderable_feature_inventory()
+        var declined = 0
+        for row in inventory.rows:
+            if row.kind != WEB_FEATURE_CSS or row.status != WEB_RENDERABLE:
+                continue
+            val declaration = web_feature_css_witness_declaration(row.name)
+            expect(declaration.starts_with(row.name + ":")).to_be(true)
+            val pair = web_feature_fixture_pair(row)
+            val lexical_only = pair.control.replace(
+                "<body>",
+                "<body><style>/* " + declaration + " */</style>")
+            expect(web_feature_lexical_occurrence(row, lexical_only)).to_be(true)
+            val verdict = web_feature_render_pair_verdict(row,
+                WebFeatureFixturePair(
+                    fixture: lexical_only, control: pair.control, structural: false))
+            expect(verdict.comparable).to_be(true)
+            expect(verdict.draw_ir_effect).to_be(false)
+            expect(verdict.lexical_occurrence).to_be(true)
+            expect(web_feature_render_promotes(verdict)).to_be(false)
+            expect(verdict.decision).to_start_with(WEB_RENDER_DECISION_ABSENT)
+            declined = declined + 1
+        expect(declined).to_equal(50)  # oracle: 50 renderable CSS property rows are exercised by the commented-out false-pass shape on the 2026-11-27 seed runtime
+
+    it "catches the lexical false-pass shape: a manifest scene whose stylesheet no longer parses":
+        # @req REQ-WEB4K-001
+        # @capture(decision): scene-level structured output with an inert stylesheet
+        step("Render a styled scene and its broken-close variant; the lexical census still fires while the structured output collapses")
+        val inventory = web_renderable_feature_inventory()
+        val scene = "<html><head><style>.box{background-color:#d04060;width:40px;height:20px}</style></head><body><div class=\"box\"></div></body></html>"
+        # One character of the close tag is enough for the stylesheet extractor
+        # to silently drop the whole sheet; every declaration text remains in
+        # the document, which is all the retired lexical gate scanned for.
+        val broken_close = scene.replace("</style>", "</styl>")
+        val found = web_renderable_find(inventory, WEB_FEATURE_CSS, "background-color")
+        expect(found != nil).to_be(true)
+        if val row = found:
+            expect(web_feature_lexical_occurrence(row, broken_close)).to_be(true)
+        val styled_render = simple_web_layout_render_html_draw_ir_result(
+            scene, WEB_FEATURE_ORACLE_VIEW_WIDTH, WEB_FEATURE_ORACLE_VIEW_HEIGHT)
+        val broken_render = simple_web_layout_render_html_draw_ir_result(
+            broken_close, WEB_FEATURE_ORACLE_VIEW_WIDTH, WEB_FEATURE_ORACLE_VIEW_HEIGHT)
+        expect(simple_web_layout_draw_ir_comparable(styled_render)).to_be(true)
+        expect(simple_web_layout_draw_ir_comparable(broken_render)).to_be(true)
+        expect(web_feature_draw_ir_fingerprint(styled_render) !=
+            web_feature_draw_ir_fingerprint(broken_render)).to_be(true)
+        var styled_commands = 0
+        for batch in styled_render.composition.batches:
+            styled_commands = styled_commands + batch.commands.len()
+        var broken_commands = 0
+        for batch in broken_render.composition.batches:
+            broken_commands = broken_commands + batch.commands.len()
+        expect(broken_commands).to_be_less_than(styled_commands)

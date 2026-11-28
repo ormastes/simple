@@ -1555,6 +1555,40 @@ impl Lowerer {
         (own != imported).then_some([own, imported])
     }
 
+    /// True when the flattened unit declares a free function `name` that the
+    /// function being lowered can NOT see: its module neither defines `name`
+    /// nor imports it (selectively, or through a glob / re-export facade).
+    ///
+    /// Flattening merges every imported module's functions into one namespace,
+    /// so codegen finds such a function under its bare name and binds an
+    /// erased-receiver `x.name()` to it. For a text-only builtin
+    /// (`byte_len`, `char_count`) that turned `fn f(x): x.byte_len()` into a
+    /// call of an unrelated module's `fn byte_len(data: [u8])`
+    /// (seed_free_fn_byte_len_hijacks_text_byte_len_stage2_scv_cold_init_2026-11-28).
+    pub(super) fn flatten_free_fn_out_of_scope(&self, name: &str) -> bool {
+        if !self.flatten_fn_owners.contains_key(name) {
+            return false;
+        }
+        let current = self.current_function_owner.as_deref();
+        if self.flatten_owner_defines(current, name) {
+            return false;
+        }
+        let importer = current.unwrap_or("<entry>");
+        if self
+            .flatten_owner_import_bindings
+            .get(importer)
+            .is_some_and(|bindings| bindings.contains_key(name))
+        {
+            return false;
+        }
+        !self
+            .flatten_owner_glob_sources
+            .get(importer)
+            .into_iter()
+            .flatten()
+            .any(|glob_owner| self.flatten_reexport_definer(importer, glob_owner, name).is_some())
+    }
+
     pub(super) fn flatten_owner_defines(&self, owner: Option<&str>, name: &str) -> bool {
         self.flatten_fn_owners
             .get(name)

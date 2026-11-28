@@ -332,7 +332,7 @@ uint64_t rt_read_cr3(void);
 void     rt_write_cr3(uint64_t value);
 uint64_t rt_read_cr3_raw(void);
 void     rt_write_cr3_raw(uint64_t value);
-int64_t  rt_volatile_read_u8(int64_t addr);
+uint8_t  rt_volatile_read_u8(int64_t addr);
 int64_t  rt_ptr_read_u8(int64_t addr, int64_t offset);
 void     rt_ptr_write_i16(int64_t addr, int64_t offset, int32_t value);
 int64_t  rt_ptr_write_bytes_raw(int64_t addr, int64_t offset, const void* src, int64_t len);
@@ -344,9 +344,9 @@ int64_t  rt_dyncall_3(int64_t fn_ptr, int64_t arg0, int64_t arg1, int64_t arg2);
 int64_t  rt_dyncall_4(int64_t fn_ptr, int64_t arg0, int64_t arg1, int64_t arg2, int64_t arg3);
 int64_t  rt_dyncall_5(int64_t fn_ptr, int64_t arg0, int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4);
 int64_t  rt_dyncall_6(int64_t fn_ptr, int64_t arg0, int64_t arg1, int64_t arg2, int64_t arg3, int64_t arg4, int64_t arg5);
-int64_t  rt_volatile_read_u16(int64_t addr);
-int64_t  rt_volatile_read_u32(int64_t addr);
-int64_t  rt_volatile_read_u64(int64_t addr);
+uint16_t rt_volatile_read_u16(int64_t addr);
+uint32_t rt_volatile_read_u32(int64_t addr);
+uint64_t rt_volatile_read_u64(int64_t addr);
 void     rt_volatile_write_u8(int64_t addr, int64_t value);
 void     rt_volatile_write_u16(int64_t addr, int64_t value);
 void     rt_volatile_write_u32(int64_t addr, int64_t value);
@@ -1612,6 +1612,17 @@ SplArray* rt_linux_group_collect_v1(int64_t token);
 /* ===== Process Piped (editor LSP transport) ===== */
 
 int64_t     rt_process_spawn_piped(const char* cmd, SplArray* args);
+/* Split-stderr / byte-safe piped family (runtime_process.c; Rust twin in
+ * compiler_rust/runtime/src/piped_process_observer.rs). Spawn gives stderr its
+ * own pipe (legacy spawn merges it into stdout on Windows, inherits on POSIX).
+ * Every read/write is one nonblocking step; byte reads return [] when idle.
+ * stderr state: -2 not separately piped, -1 error/unknown, 0 open, 1 EOF. */
+int64_t     rt_process_spawn_piped_split_v1(const char* cmd, int64_t cmd_len, SplArray* args);
+SplArray*   rt_process_read_stdout_bytes_v1(int64_t pid, int64_t max_bytes);
+SplArray*   rt_process_read_stderr_bytes_v1(int64_t pid, int64_t max_bytes);
+const char* rt_process_read_stderr(int64_t pid);
+int64_t     rt_process_stderr_state_v1(int64_t pid);
+int64_t     rt_process_write_stdin_bytes_some_v1(int64_t pid, SplArray* data, int64_t offset, int64_t max_bytes);
 /* Additive v1 receipt [version=1, state=-1/0/1, actual_exit_code, native_error].
  * Query only before close; success requires drained stdout and observed/reaped
  * leader status. No status is fabricated from ECHILD or close success. */
@@ -2518,6 +2529,7 @@ void     rt_rank_select_free(int64_t handle);
 /* Workspace storage ABI: tagged text, scalar leases, no cleanup side effects. */
 #include "runtime_workspace_storage_v1.h"
 #include "runtime_retained_private_credential_v1.h"
+#include "runtime_privdrop_v1.h"
 
 /* Forward decl: RtCoreString is defined in runtime_native.c */
 struct RtCoreString;

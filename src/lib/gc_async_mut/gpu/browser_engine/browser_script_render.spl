@@ -1,5 +1,7 @@
 use std.gc_async_mut.gpu.browser_engine.browser_renderer.{BrowserRenderer}
-use std.gc_async_mut.gpu.browser_engine.browser_script_execute.{execute_scripts_in_html}
+use std.gc_async_mut.gpu.browser_engine.browser_script_execute.{
+    execute_scripts_in_html, execute_dom_scripts_via_session
+}
 
 extern fn rt_bytes_alloc(n: i64) -> [u8]?
 
@@ -163,10 +165,18 @@ impl BeScriptRenderResult:
 pub fn render_html_to_pixels_with_scripts(html: text, width: i32, height: i32) -> BeScriptRenderResult:
     if not browser_script_render_size_ok(width, height):
         return browser_script_render_refused(width, height, "invalid render size")
-    var renderer = BrowserRenderer.create(width, height)
-    val render = renderer.render_html(html)
-
     val execution = execute_scripts_in_html(html)
+    var effective_html = html
+    var console_out = execution.console_output
+    if execution.scripts_denied == 0:
+        val dom_exec = execute_dom_scripts_via_session(html)
+        if dom_exec.mutated_html != "":
+            effective_html = dom_exec.mutated_html
+        for line in dom_exec.console_output:
+            if not console_out.contains(line):
+                console_out.push(line)
+    var renderer = BrowserRenderer.create(width, height)
+    val render = renderer.render_html(effective_html)
 
     BeScriptRenderResult(
         pixels: render.pixels,
@@ -178,6 +188,6 @@ pub fn render_html_to_pixels_with_scripts(html: text, width: i32, height: i32) -
         scripts_collected: execution.scripts_collected,
         scripts_executed: execution.scripts_executed,
         scripts_denied: execution.scripts_denied,
-        console_output: execution.console_output,
+        console_output: console_out,
         diagnostics: execution.diagnostics
     )

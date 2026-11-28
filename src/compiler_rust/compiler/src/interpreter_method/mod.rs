@@ -597,6 +597,7 @@ fn try_bare_some_option_method(
 }
 
 // Re-export the with-self-update functions
+pub(crate) use collections::dict_read_method_on_values;
 pub(crate) use special::{
     evaluate_call_args, exec_function_with_self_return, find_and_exec_method_with_self,
     find_and_exec_method_with_self_owned, exec_resolved_method_with_self_owned_values, lookup_class_method_index,

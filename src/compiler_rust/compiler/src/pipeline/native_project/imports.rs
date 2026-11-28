@@ -1748,6 +1748,16 @@ fn collect_use_imports(
                 if raw_name.contains('.') || use_map.contains_key(raw_name) {
                     continue;
                 }
+                // This scan brings in names the `use` did not write. A
+                // text-only builtin must be imported BY NAME to shadow the
+                // builtin: with a free `byte_len` in the imported module and
+                // any second `byte_len` in the project, `use m.{other}` put a
+                // bare `byte_len` in this module's use map and an untyped
+                // `x.byte_len()` bound to it
+                // (seed_free_fn_byte_len_hijacks_text_byte_len_stage2_scv_cold_init_2026-11-28).
+                if matches!(raw_name.as_str(), "byte_len" | "char_count") {
+                    continue;
+                }
                 // Only act when there are multiple candidates — single-candidate names
                 // are already unambiguous and don't need the module-scoped override.
                 if candidates.len() <= 1 {

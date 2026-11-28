@@ -17,6 +17,7 @@
 #   - main_static_tools.spl    — _mcp_static_tools_result (tools/list cache)
 
 use std.io_runtime.{env_get, file_exists, exit, get_args}
+use std.nogc_sync_mut.sffi.transient.{transient_scope_begin, transient_scope_pause, transient_scope_end, transient_promote}
 use app.protocol.framing.{frame_strip_line_end, frame_parse_decimal, frame_line_is_jsonl_payload}
 use app.protocol.mcp_request_envelope.{mcp_parse_request_envelope_v1}
 use std.nogc_sync_mut.io.stderr_ops.{stderr_write, stderr_flush}
@@ -67,7 +68,9 @@ use app.mcp.main_lazy_dispatch.{
     mcp_lazy_handle_prompts_list,
     mcp_lazy_handle_prompts_get,
     mcp_lazy_handle_completion_req,
-    mcp_lazy_get_cwd
+    mcp_lazy_get_cwd,
+    mcp_lazy_promote_static_caches,
+    mcp_lazy_promote_tool_state
 }
 
 val SERVER_NAME = "simple-mcp-full"
@@ -385,96 +388,128 @@ fn main() -> i64:
 
 
     # Serve loop — uses direct stdio framing to avoid native Optional transport
-    # issues that can stop after the first framed request.
-    while true:
-        val msg = _mcp_read_message()
-        if msg == "":
-            exit(0)
-            return 0
-
-        val envelope = mcp_parse_request_envelope_v1(msg)
-        if not envelope.valid:
-            val reason = if envelope.error_code == -32700: "Parse error" else: "Invalid Request"
-            _mcp_write_message(make_error(envelope.request_id_raw, envelope.error_code, reason))
-            continue
-        val method = envelope.method
-
-        # Core methods: delegate to the McpServer facade.
-        # tools/list is handled locally so we return the full static-table tool list
-        # without registry pagination (smoke check requires all tools in one response).
-        var response = ""
-        if method == "initialize":
-            val id = envelope.request_id_raw
-            response = make_json_result(id, _mcp_initialize_result())
-        elif method == "tools/call":
-            val id = envelope.request_id_raw
-            val params = if envelope.params_raw.starts_with(LB()): envelope.params_raw else: ""
-            var tool_name = ""
-            var args_raw = "{}"
-            if params != "":
-                tool_name = extract_field(json: params, key: "name")
-                val extracted_args = _mcp_request_obj(params, "arguments")
-                if extracted_args != "":
-                    args_raw = extracted_args
-            response = _mcp_dispatch_tool_lazy(id, tool_name, args_raw)
-        elif method == "tools/list":
-            val id = envelope.request_id_raw
-            response = make_json_result(id, _mcp_tools_list_payload())
-        elif method == "notifications/initialized" or (
-            method == "notifications/cancelled") or (
-            method == "notifications/roots/list_changed") or (
-            method == "initialized"):
-            response = ""
-        elif method == "shutdown":
-            val id = envelope.request_id_raw
-            response = make_json_result(id, "null")
-        elif method == "resources/list":
-            val id = envelope.request_id_raw
-            response = mcp_lazy_handle_resources_list(id)
-        elif method == "resources/templates/list":
-            val id = envelope.request_id_raw
-            response = mcp_lazy_handle_resource_templates_list(id)
-        elif method == "resources/read":
-            val id = envelope.request_id_raw
-            val uri = extract_nested(msg, "uri")
-            response = mcp_lazy_handle_resources_read(id, uri)
-        elif method == "prompts/list":
-            val id = envelope.request_id_raw
-            response = mcp_lazy_handle_prompts_list(id)
-        elif method == "prompts/get":
-            val id = envelope.request_id_raw
-            val prompt_name = extract_nested(msg, "name")
-            response = mcp_lazy_handle_prompts_get(id, prompt_name, msg)
-        elif method == "completion/complete" or method == "completions/complete":
-            val id = envelope.request_id_raw
-            response = mcp_lazy_handle_completion_req(id, msg)
-        elif method == "logging/setLevel":
-            val id = envelope.request_id_raw
-            val level = extract_nested(msg, "level")
-            if level != "":
-                MCP_LOG_LEVEL = level
-            response = make_json_result(id, jo1(jp("level", js(MCP_LOG_LEVEL))))
-        elif method == "roots/list":
-            val id = envelope.request_id_raw
-            val cwd = mcp_lazy_get_cwd()
-            var root = LB()
-            root = root + jp("uri", js("file://" + cwd))
-            root = root + "," + jp("name", js("workspace"))
-            root = root + RB()
-            response = make_json_result(id, jo1(jp("roots", "[" + root + "]")))
-        elif method == "ping":
-            val id = envelope.request_id_raw
-            response = make_json_result(id, LB() + RB())
-        else:
-            val id = envelope.request_id_raw
-            if id != "" and id != "null":
-                response = make_error(id, -32601, "Method not found")
-        if response != "" and envelope.has_id:
-            _mcp_write_message(response)
-            if _mcp_take_emit_list_changed():
-                val notif = "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/tools/list_changed\"}"
-                _mcp_write_message(notif)
+    # issues that can stop after the first framed request. Each request runs
+    # inside a transient heap scope (opt-out via SIMPLE_MCP_REQUEST_SCOPE=0)
+    # with persistent cross-request globals promoted before teardown.
+    val request_scope_enabled = (env_get("SIMPLE_MCP_REQUEST_SCOPE") ?? "") != "0"
+    var running = true
+    while running:
+        running = _mcp_serve_one_iteration(request_scope_enabled)
+    exit(0)
     0
+
+fn _mcp_end_request_scope(scoped: bool, touched_log_level: bool, touched_static_tools: bool, touched_tool_name: text):
+    if not scoped:
+        return
+    val _paused = transient_scope_pause()
+    val _p_mode = transient_promote(_MCP_TRANSPORT_MODE)
+    if touched_log_level:
+        val _p_log = transient_promote(MCP_LOG_LEVEL)
+    if touched_static_tools:
+        mcp_lazy_promote_static_caches()
+    if touched_tool_name != "":
+        mcp_lazy_promote_tool_state(touched_tool_name)
+    val _ended = transient_scope_end()
+
+fn _mcp_serve_one_iteration(request_scope_enabled: bool) -> bool:
+    val scoped = request_scope_enabled and transient_scope_begin()
+    val msg = _mcp_read_message()
+    if msg == "":
+        _mcp_end_request_scope(scoped, false, false, "")
+        return false
+
+    val envelope = mcp_parse_request_envelope_v1(msg)
+    if not envelope.valid:
+        val reason = if envelope.error_code == -32700: "Parse error" else: "Invalid Request"
+        _mcp_write_message(make_error(envelope.request_id_raw, envelope.error_code, reason))
+        _mcp_end_request_scope(scoped, false, false, "")
+        return true
+    val method = envelope.method
+
+    var touched_log_level = false
+    var touched_static_tools = false
+    var touched_tool_name = ""
+
+    # Core methods: delegate to the McpServer facade.
+    # tools/list is handled locally so we return the full static-table tool list
+    # without registry pagination (smoke check requires all tools in one response).
+    var response = ""
+    if method == "initialize":
+        val id = envelope.request_id_raw
+        response = make_json_result(id, _mcp_initialize_result())
+    elif method == "tools/call":
+        val id = envelope.request_id_raw
+        val params = if envelope.params_raw.starts_with(LB()): envelope.params_raw else: ""
+        var tool_name = ""
+        var args_raw = "{}"
+        if params != "":
+            tool_name = extract_field(json: params, key: "name")
+            val extracted_args = _mcp_request_obj(params, "arguments")
+            if extracted_args != "":
+                args_raw = extracted_args
+        touched_tool_name = tool_name
+        response = _mcp_dispatch_tool_lazy(id, tool_name, args_raw)
+    elif method == "tools/list":
+        val id = envelope.request_id_raw
+        touched_static_tools = true
+        response = make_json_result(id, _mcp_tools_list_payload())
+    elif method == "notifications/initialized" or (
+        method == "notifications/cancelled") or (
+        method == "notifications/roots/list_changed") or (
+        method == "initialized"):
+        response = ""
+    elif method == "shutdown":
+        val id = envelope.request_id_raw
+        response = make_json_result(id, "null")
+    elif method == "resources/list":
+        val id = envelope.request_id_raw
+        response = mcp_lazy_handle_resources_list(id)
+    elif method == "resources/templates/list":
+        val id = envelope.request_id_raw
+        response = mcp_lazy_handle_resource_templates_list(id)
+    elif method == "resources/read":
+        val id = envelope.request_id_raw
+        val uri = extract_nested(msg, "uri")
+        response = mcp_lazy_handle_resources_read(id, uri)
+    elif method == "prompts/list":
+        val id = envelope.request_id_raw
+        response = mcp_lazy_handle_prompts_list(id)
+    elif method == "prompts/get":
+        val id = envelope.request_id_raw
+        val prompt_name = extract_nested(msg, "name")
+        response = mcp_lazy_handle_prompts_get(id, prompt_name, msg)
+    elif method == "completion/complete" or method == "completions/complete":
+        val id = envelope.request_id_raw
+        response = mcp_lazy_handle_completion_req(id, msg)
+    elif method == "logging/setLevel":
+        val id = envelope.request_id_raw
+        val level = extract_nested(msg, "level")
+        if level != "":
+            MCP_LOG_LEVEL = level
+            touched_log_level = true
+        response = make_json_result(id, jo1(jp("level", js(MCP_LOG_LEVEL))))
+    elif method == "roots/list":
+        val id = envelope.request_id_raw
+        val cwd = mcp_lazy_get_cwd()
+        var root = LB()
+        root = root + jp("uri", js("file://" + cwd))
+        root = root + "," + jp("name", js("workspace"))
+        root = root + RB()
+        response = make_json_result(id, jo1(jp("roots", "[" + root + "]")))
+    elif method == "ping":
+        val id = envelope.request_id_raw
+        response = make_json_result(id, LB() + RB())
+    else:
+        val id = envelope.request_id_raw
+        if id != "" and id != "null":
+            response = make_error(id, -32601, "Method not found")
+    if response != "" and envelope.has_id:
+        _mcp_write_message(response)
+        if _mcp_take_emit_list_changed():
+            val notif = "{\"jsonrpc\":\"2.0\",\"method\":\"notifications/tools/list_changed\"}"
+            _mcp_write_message(notif)
+    _mcp_end_request_scope(scoped, touched_log_level, touched_static_tools, touched_tool_name)
+    true
 
 # Module-level lazy bridge call on purpose (no function-local `use` in this
 # entry module, preserving seed JIT safety while deferring app.mcp.main_dispatch

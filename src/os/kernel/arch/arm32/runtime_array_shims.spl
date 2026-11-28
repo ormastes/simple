@@ -45,15 +45,15 @@
 # arm64 twin: src/os/kernel/arch/arm64/runtime_value_shims.spl.
 
 @cfg(arm32)
-extern fn rt_mmio_read_u8(addr: i64) -> i64
+extern fn rt_mmio_read_u8(addr: i64) -> u8
 @cfg(arm32)
-extern fn rt_mmio_read_u32(addr: i64) -> i64
+extern fn rt_mmio_read_u32(addr: i64) -> u32
 @cfg(arm32)
 extern fn rt_mmio_write_u8(addr: i64, value: i64)
 @cfg(arm32)
 extern fn rt_mmio_write_u32(addr: i64, value: i64)
 @cfg(arm32)
-extern fn rt_mmio_read_u64(addr: i64) -> i64
+extern fn rt_mmio_read_u64(addr: i64) -> u64
 @cfg(arm32)
 extern fn rt_mmio_write_u64(addr: i64, value: i64)
 @cfg(arm32)
@@ -131,13 +131,13 @@ fn _a32_obj(v: i64, heap_type: i64) -> i64:
     val p = v & -8
     if p == 0:
         return 0
-    if rt_mmio_read_u32(p) != heap_type:
+    if (rt_mmio_read_u32(p) as i64) != heap_type:
         return 0
     p
 
 @cfg(arm32)
 fn _a32_len(p: i64) -> i64:
-    rt_mmio_read_u32(p + 8)
+    (rt_mmio_read_u32(p + 8) as i64)
 
 @cfg(arm32)
 fn _a32_slot(p: i64, i: i64) -> i64:
@@ -213,7 +213,7 @@ fn rt_array_copy(array: i64) -> i64:
     if src == 0:
         return A32_NIL
     val n = _a32_len(src)
-    var cap = rt_mmio_read_u32(src + 12)
+    var cap = (rt_mmio_read_u32(src + 12) as i64)
     if n > cap or cap > A32_MAX_ELEMS:
         return A32_NIL
     if cap == 0:
@@ -223,7 +223,7 @@ fn rt_array_copy(array: i64) -> i64:
         return A32_NIL
     var i: i64 = 0
     while i < n:
-        out = rt_array_push(out, rt_mmio_read_u64(_a32_slot(src, i)))
+        out = rt_array_push(out, (rt_mmio_read_u64(_a32_slot(src, i)) as i64))
         i = i + 1
     out
 
@@ -269,7 +269,7 @@ fn rt_bytes_from_raw(ptr: i64, len: i64) -> i64:
         return A32_NIL
     var i: i64 = 0
     while i < n:
-        out = rt_array_push(out, a32_word_encode(rt_mmio_read_u8(base + i)))
+        out = rt_array_push(out, a32_word_encode((rt_mmio_read_u8(base + i) as i64)))
         i = i + 1
     out
 
@@ -280,7 +280,7 @@ fn _a32_utf8_well_formed(src: i64, n: i64) -> bool:
     # truncation and > U+10FFFF are ill-formed.
     var i: i64 = 0
     while i < n:
-        val b = a32_raw_or_encoded(rt_mmio_read_u64(_a32_slot(src, i))) & 255
+        val b = a32_raw_or_encoded((rt_mmio_read_u64(_a32_slot(src, i)) as i64)) & 255
         if b < 0x80:
             i = i + 1
             continue
@@ -307,7 +307,7 @@ fn _a32_utf8_well_formed(src: i64, n: i64) -> bool:
         while j <= need:
             if i + j >= n:
                 return false
-            val c = a32_raw_or_encoded(rt_mmio_read_u64(_a32_slot(src, i + j))) & 255
+            val c = a32_raw_or_encoded((rt_mmio_read_u64(_a32_slot(src, i + j)) as i64)) & 255
             if c < lo or c > hi:
                 return false
             lo = 0x80
@@ -337,7 +337,7 @@ fn rt_bytes_to_text(array: i64) -> i64:
     rt_mmio_write_u32(s + 8, n)
     var i: i64 = 0
     while i < n:
-        rt_mmio_write_u8(s + 12 + i, a32_raw_or_encoded(rt_mmio_read_u64(_a32_slot(src, i))) & 255)
+        rt_mmio_write_u8(s + 12 + i, a32_raw_or_encoded((rt_mmio_read_u64(_a32_slot(src, i)) as i64)) & 255)
         i = i + 1
     rt_mmio_write_u8(s + 12 + n, 0)
     s | A32_TAG_HEAP
@@ -353,10 +353,10 @@ fn rt_collection_remove(receiver: i64, key: i64) -> i64:
     val index = a32_raw_or_encoded(key)
     if index < 0 or index >= n:
         return A32_NIL
-    val removed = rt_mmio_read_u64(_a32_slot(p, index))
+    val removed = (rt_mmio_read_u64(_a32_slot(p, index)) as i64)
     var i = index
     while i + 1 < n:
-        rt_mmio_write_u64(_a32_slot(p, i), rt_mmio_read_u64(_a32_slot(p, i + 1)))
+        rt_mmio_write_u64(_a32_slot(p, i), (rt_mmio_read_u64(_a32_slot(p, i + 1)) as i64))
         i = i + 1
     rt_mmio_write_u64(_a32_slot(p, n - 1), A32_NIL)
     rt_mmio_write_u32(p + 8, n - 1)
@@ -394,17 +394,17 @@ fn rt_typed_bytes_u8_data_at(data: i64, index: i64) -> i64:
         # Tagged slots come from rt_array_data_ptr: the RuntimeArray header
         # sits A32_ARRAY_ITEMS bytes below, len at +8.
         val p = base - A32_ARRAY_ITEMS
-        if rt_mmio_read_u32(p) != A32_HEAP_ARRAY:
+        if (rt_mmio_read_u32(p) as i64) != A32_HEAP_ARRAY:
             return 0
         if a32_index_ok(index, _a32_len(p)) == 0:
             return 0
-        return a32_raw_or_encoded(rt_mmio_read_u64(_a32_slot(p, index))) & 255
+        return a32_raw_or_encoded((rt_mmio_read_u64(_a32_slot(p, index)) as i64)) & 255
     # Byte-packed: arm32 has no byte-packed RuntimeArray (see
     # rt_array_is_byte_packed), so only a raw buffer can reach here and it
     # carries no length; bound by the element limit.
     if a32_index_ok(index, A32_MAX_ELEMS) == 0:
         return 0
-    rt_mmio_read_u8(base + index)
+    (rt_mmio_read_u8(base + index) as i64)
 
 @cfg(arm32)
 @export("C")
@@ -416,7 +416,7 @@ fn rt_typed_words_u64_at(array: i64, index: i64) -> i64:
     val i = index >> 3
     if (index & A32_TAG_MASK) != 0 or i < 0 or i >= _a32_len(p):
         return 0
-    rt_mmio_read_u64(_a32_slot(p, i))
+    (rt_mmio_read_u64(_a32_slot(p, i)) as i64)
 
 @cfg(arm32)
 @export("C")

@@ -83,6 +83,18 @@ static bool piped_ref_spawn_input_valid_v1(const char* cmd, int64_t cmd_len, Spl
     }
     return true;
 }
+
+/* Byte reads first hand back any incomplete UTF-8 prefix a previous TEXT read
+ * of the same stream held, so mixing text and byte reads never drops or
+ * reorders a byte. Returns the count copied; the remainder stays held. */
+static int64_t piped_tail_take(struct PipedUtf8Tail* tail, uint8_t* out, int64_t cap) {
+    int64_t count = tail->len < cap ? (int64_t)tail->len : cap;
+    if (count <= 0) return 0;
+    memcpy(out, tail->bytes, (size_t)count);
+    memmove(tail->bytes, tail->bytes + count, (size_t)(tail->len - count));
+    tail->len = (uint8_t)(tail->len - count);
+    return count;
+}
 #if defined(__APPLE__)
 #include <libproc.h>
 #include <mach-o/dyld.h>
@@ -887,6 +899,11 @@ struct WinPipedSlot {
     HANDLE stdout_read;
     int stdout_state;
     struct PipedUtf8Tail stdout_tail;
+    /* Split spawn only (rt_process_spawn_piped_split_v1). NULL means stderr
+     * is merged into stdout_read, the legacy rt_process_spawn_piped shape. */
+    HANDLE stderr_read;
+    int stderr_state;
+    struct PipedUtf8Tail stderr_tail;
 };
 
 #define WIN_PIPED_MAX 16
@@ -975,6 +992,7 @@ static bool win_piped_free(struct WinPipedSlot* slot) {
     win_close_handle(&slot->stdin_write);
     win_close_handle(&slot->stdin_event);
     win_close_handle(&slot->stdout_read);
+    win_close_handle(&slot->stderr_read);
     win_close_handle(&slot->process);
     win_close_handle(&slot->job);
     return true;
@@ -996,7 +1014,7 @@ static void win_piped_release_failed_spawn(struct WinPipedSlot* slot) {
 /* explicit_environment: borrowed private UTF-16 block (the caller frees it), or
  * NULL for the established filtered ANSI inheritance. */
 static int64_t win_core_rt_process_spawn_piped(struct WinPipedSlot* slot, const char* cmd, SplArray* args,
-        const wchar_t* explicit_environment) {
+        const wchar_t* explicit_environment, bool split_stderr) {
     const char** child_args = NULL;
     char* cmdline = NULL;
     char* environment = NULL;
@@ -1005,6 +1023,10 @@ static int64_t win_core_rt_process_spawn_piped(struct WinPipedSlot* slot, const 
     HANDLE stdin_event = NULL;
     HANDLE stdout_read = NULL;
     HANDLE stdout_write = NULL;
+    HANDLE stderr_read = NULL;
+    HANDLE stderr_write = NULL;
+    /* Split children get 64 KiB pipes: fewer wakeups for bulk byte traffic. */
+    DWORD pipe_size = split_stderr ? 65536U : 0U;
     HANDLE job = NULL;
     LPPROC_THREAD_ATTRIBUTE_LIST attributes = NULL;
     int attributes_initialized = 0;
@@ -1054,8 +1076,13 @@ static int64_t win_core_rt_process_spawn_piped(struct WinPipedSlot* slot, const 
     if ((!ConnectNamedPipe(stdin_read, NULL) &&
          GetLastError() != ERROR_PIPE_CONNECTED) ||
         !SetHandleInformation(stdin_write, HANDLE_FLAG_INHERIT, 0) ||
-        !CreatePipe(&stdout_read, &stdout_write, &security, 0) ||
+        !CreatePipe(&stdout_read, &stdout_write, &security, pipe_size) ||
         !SetHandleInformation(stdout_read, HANDLE_FLAG_INHERIT, 0)) {
+        goto fail;
+    }
+    if (split_stderr &&
+        (!CreatePipe(&stderr_read, &stderr_write, &security, pipe_size) ||
+         !SetHandleInformation(stderr_read, HANDLE_FLAG_INHERIT, 0))) {
         goto fail;
     }
     stdin_event = CreateEventA(NULL, TRUE, FALSE, NULL);
@@ -1078,10 +1105,12 @@ static int64_t win_core_rt_process_spawn_piped(struct WinPipedSlot* slot, const 
         goto fail;
     }
     attributes_initialized = 1;
-    HANDLE inherited[] = {stdin_read, stdout_write};
+    /* Inherit exactly the handles the child owns; a NULL entry is invalid. */
+    HANDLE inherited[3] = {stdin_read, stdout_write, stderr_write};
+    SIZE_T inherited_size = (split_stderr ? 3U : 2U) * sizeof(HANDLE);
     if (!UpdateProcThreadAttribute(
             attributes, 0, PROC_THREAD_ATTRIBUTE_HANDLE_LIST,
-            inherited, sizeof(inherited), NULL, NULL)) {
+            inherited, inherited_size, NULL, NULL)) {
         goto fail;
     }
 
@@ -1090,7 +1119,7 @@ static int64_t win_core_rt_process_spawn_piped(struct WinPipedSlot* slot, const 
     startup.StartupInfo.dwFlags = STARTF_USESTDHANDLES;
     startup.StartupInfo.hStdInput = stdin_read;
     startup.StartupInfo.hStdOutput = stdout_write;
-    startup.StartupInfo.hStdError = stdout_write;
+    startup.StartupInfo.hStdError = split_stderr ? stderr_write : stdout_write;
     DWORD creation_flags =
         CREATE_SUSPENDED | EXTENDED_STARTUPINFO_PRESENT | CREATE_NO_WINDOW;
     if (explicit_environment) creation_flags |= CREATE_UNICODE_ENVIRONMENT;
@@ -1109,12 +1138,16 @@ static int64_t win_core_rt_process_spawn_piped(struct WinPipedSlot* slot, const 
     win_close_handle(&process.hThread);
     win_close_handle(&stdin_read);
     win_close_handle(&stdout_write);
+    win_close_handle(&stderr_write);
     if (attributes_initialized) DeleteProcThreadAttributeList(attributes);
     free(attributes);
     free(environment);
     free(cmdline);
     free(child_args);
     AcquireSRWLockExclusive(&win_piped_lock);
+    slot->stderr_read = stderr_read;
+    slot->stderr_state = 0;
+    memset(&slot->stderr_tail, 0, sizeof(slot->stderr_tail));
     slot->pid = pid;
     slot->process = process.hProcess;
     slot->job = job;
@@ -1140,6 +1173,8 @@ fail:
     win_close_handle(&stdin_event);
     win_close_handle(&stdout_read);
     win_close_handle(&stdout_write);
+    win_close_handle(&stderr_read);
+    win_close_handle(&stderr_write);
     win_close_handle(&job);
     if (attributes_initialized) DeleteProcThreadAttributeList(attributes);
     free(attributes);
@@ -1296,7 +1331,7 @@ static bool win_core_rt_process_close_piped(struct WinPipedSlot* slot) {
 int64_t rt_process_spawn_piped(const char* cmd, SplArray* args) {
     struct WinPipedSlot* slot = win_piped_reserve_spawn();
     if (!slot) return -1;
-    int64_t result = win_core_rt_process_spawn_piped(slot,cmd,args,NULL);
+    int64_t result = win_core_rt_process_spawn_piped(slot, cmd, args, NULL, false);
     if (result < 0) win_piped_release_failed_spawn(slot);
     return result;
 }
@@ -1305,7 +1340,7 @@ int64_t rt_process_spawn_piped_generation_v1(const char* cmd, int64_t cmd_len, S
     struct WinPipedSlot* slot = win_piped_reserve_spawn();
     if (!slot) return -1;
     uint64_t generation = slot->generation; /* closing reservation: cannot recycle */
-    int64_t pid = win_core_rt_process_spawn_piped(slot, cmd, args, NULL);
+    int64_t pid = win_core_rt_process_spawn_piped(slot, cmd, args, NULL, false);
     if (pid < 0) { win_piped_release_failed_spawn(slot); return -1; }
     return (int64_t)generation;
 }
@@ -1520,7 +1555,7 @@ int64_t simple_piped_owner_spawn_environment_v1(const char* cmd, SplArray* args,
     if (!block) return error == ERROR_NOT_ENOUGH_MEMORY ? -1 : PIPED_ENV_INVALID_V1;
     win_piped_strip_stack_env_v1(block);
     struct WinPipedSlot* slot = win_piped_reserve_spawn();
-    int64_t pid = slot ? win_core_rt_process_spawn_piped(slot, cmd, args, block) : -1;
+    int64_t pid = slot ? win_core_rt_process_spawn_piped(slot, cmd, args, block, false) : -1;
     if (slot && pid < 0) win_piped_release_failed_spawn(slot);
     free(block);
     return pid;
@@ -1589,6 +1624,111 @@ int64_t simple_piped_owner_wait_readable_v1(int64_t pid, int64_t stream, int64_t
     if (early != 0) return early;
     int64_t result = win_piped_wait_handle_v1(pipe, timeout_ms);
     CloseHandle(pipe);
+    return result;
+}
+
+/* Split-stderr / byte-safe owner hooks. Both provider lanes (the C exports
+ * below and piped_process_observer.rs) reach the registry only through these;
+ * each is one bounded nonblocking OS call under the existing registry lock, so
+ * no caller can park while another stream fills. */
+int64_t simple_piped_owner_spawn_split_v1(const char* cmd, int64_t cmd_len, SplArray* args) {
+    if (!piped_ref_spawn_input_valid_v1(cmd, cmd_len, args)) return -1;
+    struct WinPipedSlot* slot = win_piped_reserve_spawn();
+    if (!slot) return -1;
+    int64_t pid = win_core_rt_process_spawn_piped(slot, cmd, args, NULL, true);
+    if (pid < 0) win_piped_release_failed_spawn(slot);
+    return pid;
+}
+
+/* Caller holds win_piped_lock. PeekNamedPipe first: an anonymous pipe has no
+ * O_NONBLOCK, so ReadFile is only issued for bytes already buffered. */
+static int64_t win_piped_read_raw_slot(struct WinPipedSlot* slot, int64_t stream,
+        uint8_t* out, int64_t cap) {
+    if (!slot || slot->closing) return -1;
+    HANDLE handle = stream == 2 ? slot->stderr_read : slot->stdout_read;
+    int* state = stream == 2 ? &slot->stderr_state : &slot->stdout_state;
+    if (!handle) return -1;
+    int64_t count = piped_tail_take(stream == 2 ? &slot->stderr_tail : &slot->stdout_tail, out, cap);
+    if (*state != 0 || count == cap) return count;
+    DWORD available = 0;
+    if (!PeekNamedPipe(handle, NULL, 0, NULL, &available, NULL)) {
+        *state = GetLastError() == ERROR_BROKEN_PIPE ? 1 : -1;
+        return count;
+    }
+    if (available == 0) return count;
+    DWORD request = (uint64_t)(cap - count) < (uint64_t)available ? (DWORD)(cap - count) : available;
+    DWORD got = 0;
+    if (!ReadFile(handle, out + count, request, &got, NULL)) {
+        *state = GetLastError() == ERROR_BROKEN_PIPE ? 1 : -1;
+        got = 0;
+    }
+    return count + (int64_t)got;
+}
+
+int64_t simple_piped_owner_read_v1(int64_t pid, int64_t stream, uint8_t* out, int64_t cap) {
+    if (pid <= 0 || pid > UINT32_MAX || (stream != 1 && stream != 2) || !out || cap <= 0) return -1;
+    AcquireSRWLockExclusive(&win_piped_lock);
+    int64_t count = win_piped_read_raw_slot(win_piped_find((DWORD)pid), stream, out, cap);
+    ReleaseSRWLockExclusive(&win_piped_lock);
+    return count;
+}
+
+/* -2 = stream not separately piped (legacy merged stderr), -1 = unknown/error,
+ * 0 = open, 1 = EOF observed with every buffered byte delivered. */
+int64_t simple_piped_owner_stream_state_v1(int64_t pid, int64_t stream) {
+    if (pid <= 0 || pid > UINT32_MAX || (stream != 1 && stream != 2)) return -1;
+    AcquireSRWLockExclusive(&win_piped_lock);
+    struct WinPipedSlot* slot = win_piped_find((DWORD)pid);
+    int64_t state = -1;
+    if (slot && !slot->closing) {
+        if (stream == 1) state = slot->stdout_tail.len && slot->stdout_state == 1 ? 0 : slot->stdout_state;
+        else if (!slot->stderr_read) state = -2;
+        else state = slot->stderr_tail.len && slot->stderr_state == 1 ? 0 : slot->stderr_state;
+    }
+    ReleaseSRWLockExclusive(&win_piped_lock);
+    return state;
+}
+
+#if defined(_MSC_VER)
+static __declspec(thread) char win_piped_err_buf[PIPED_TEXT_CAP+1];
+#else
+static _Thread_local char win_piped_err_buf[PIPED_TEXT_CAP+1];
+#endif
+/* Text twin of rt_process_read_stdout for the split stderr stream: identical
+ * UTF-8 framing (maximal-subpart replacement, incomplete tail held). */
+const char* simple_piped_owner_read_stderr_text_v1(int64_t pid) {
+    win_piped_err_buf[0] = 0;
+    if (pid <= 0 || pid > UINT32_MAX) return win_piped_err_buf;
+    AcquireSRWLockExclusive(&win_piped_lock);
+    struct WinPipedSlot* slot = win_piped_find((DWORD)pid);
+    if (slot && !slot->closing && slot->stderr_read && slot->stderr_state == 0) {
+        uint8_t raw[PIPED_RAW_CAP]; DWORD available = 0, count = 0; int eof = 0;
+        if (!PeekNamedPipe(slot->stderr_read, NULL, 0, NULL, &available, NULL)) {
+            eof = GetLastError() == ERROR_BROKEN_PIPE; if (!eof) slot->stderr_state = -1;
+        } else if (available > 0) {
+            DWORD request = available < PIPED_RAW_CAP ? available : PIPED_RAW_CAP;
+            if (!ReadFile(slot->stderr_read, raw, request, &count, NULL)) {
+                eof = GetLastError() == ERROR_BROKEN_PIPE; count = 0; if (!eof) slot->stderr_state = -1;
+            }
+        }
+        size_t written = 0;
+        if (slot->stderr_state == 0 && !piped_utf8_frame(&slot->stderr_tail, raw, count, eof,
+                (uint8_t*)win_piped_err_buf, PIPED_TEXT_CAP, &written)) {
+            slot->stderr_state = -1; written = 0;
+        }
+        win_piped_err_buf[written] = 0;
+        if (eof && slot->stderr_state == 0 && slot->stderr_tail.len == 0) slot->stderr_state = 1;
+    }
+    ReleaseSRWLockExclusive(&win_piped_lock);
+    return win_piped_err_buf;
+}
+
+int64_t simple_piped_owner_write_v1(int64_t pid, const uint8_t* data, int64_t data_len,
+        int64_t offset, int64_t max_bytes) {
+    AcquireSRWLockExclusive(&win_piped_lock);
+    int64_t result = win_core_rt_process_write_stdin_some(
+        pid, (const char*)data, data_len, offset, max_bytes);
+    ReleaseSRWLockExclusive(&win_piped_lock);
     return result;
 }
 
@@ -1826,6 +1966,11 @@ struct RtProcSlot {
     bool  tree_stopped;
     int   stdout_state;
     struct PipedUtf8Tail stdout_tail;
+    /* Split spawn only: parent reads child's stderr here (O_NONBLOCK). -1
+     * means stderr is not separately piped (inherited, legacy shape). */
+    int   stderr_fd;
+    int   stderr_state;
+    struct PipedUtf8Tail stderr_tail;
 };
 
 static struct RtProcSlot s_procs[RT_PROC_MAX];
@@ -1875,6 +2020,9 @@ static struct RtProcSlot* proc_alloc_locked(bool sandboxed_renderer) {
             memset(s_procs[i].input_last_target,0,65);memset(s_procs[i].input_last_nonce,0,65);
             s_procs[i].stdin_fd = -1;
             s_procs[i].stdout_fd = -1;
+            s_procs[i].stderr_fd = -1;
+            s_procs[i].stderr_state = 0;
+            memset(&s_procs[i].stderr_tail,0,sizeof(s_procs[i].stderr_tail));
             s_procs[i].sandboxed_renderer = sandboxed_renderer;
             s_procs[i].leader_reaped = false;
             s_procs[i].leader_status_valid = false;
@@ -1898,7 +2046,7 @@ static struct RtProcSlot* proc_alloc(bool sandboxed_renderer) {
 /* Caller holds s_proc_lock. Close/free cannot race a read or state query. */
 static void proc_free_locked(struct RtProcSlot* slot) {
     if (!slot || (slot->pid == 0 && !slot->byte_endpoint)) return;
-    int stdin_fd=slot->stdin_fd, stdout_fd=slot->stdout_fd;
+    int stdin_fd=slot->stdin_fd, stdout_fd=slot->stdout_fd, stderr_fd=slot->stderr_fd;
     if (slot->stream_child_in >= 0) close(slot->stream_child_in);
     if (slot->stream_child_out >= 0) close(slot->stream_child_out);
     if (slot->stream_root_fd >= 0) close(slot->stream_root_fd);
@@ -1907,12 +2055,14 @@ static void proc_free_locked(struct RtProcSlot* slot) {
     slot->stream_root[0] = slot->stream_identity[0] = 0;
     if (slot->sandboxed_renderer && s_renderer_slots_active>0) s_renderer_slots_active--;
     slot->stdin_fd=-1;slot->stdout_fd=-1;slot->sandboxed_renderer=false;
+    slot->stderr_fd=-1;slot->stderr_state=0;slot->stderr_tail.len=0;
     slot->leader_reaped=false;slot->leader_status_valid=false;slot->leader_status=0;
     slot->tree_stopped=false;slot->stdout_state=0;
     slot->byte_endpoint=false;slot->stdout_started=false;slot->byte_binding[0]=0;
     slot->closing=false;slot->generation=0;slot->pid=0;
     if (stdin_fd>=0) close(stdin_fd);
     if (stdout_fd>=0) close(stdout_fd);
+    if (stderr_fd>=0) close(stderr_fd);
 }
 static void proc_free(struct RtProcSlot* slot) {
     if (pthread_mutex_lock(&s_proc_lock)!=0) return;
@@ -1964,6 +2114,12 @@ static ssize_t proc_write_some_no_sigpipe(int fd, const char* data, size_t len) 
     }
     if (written < 0) errno = write_error;
     return written;
+}
+
+static void proc_close_pair(int fds[2]) {
+    if (fds[0] >= 0) close(fds[0]);
+    if (fds[1] >= 0) close(fds[1]);
+    fds[0] = fds[1] = -1;
 }
 
 static bool proc_pipe_cloexec(int fds[2]) {
@@ -2019,7 +2175,8 @@ static bool proc_move_pipe_fds_above_stdio(int fds[2]) {
 
 static pid_t proc_spawn_piped_apple(
         const char* cmd, char** argv, char* const* envp,
-        const int stdin_pipe[2], const int stdout_pipe[2]) {
+        const int stdin_pipe[2], const int stdout_pipe[2],
+        const int* stderr_pipe /* NULL = inherit the parent's stderr */) {
     posix_spawn_file_actions_t actions;
     posix_spawnattr_t attributes;
     bool actions_initialized = false;
@@ -2038,11 +2195,20 @@ static pid_t proc_spawn_piped_apple(
             &actions, stdout_pipe[1], STDOUT_FILENO) != 0) {
         goto done;
     }
-    int stderr_flags = fcntl(STDERR_FILENO, F_GETFD);
-    if (stderr_flags >= 0 && (stderr_flags & FD_CLOEXEC) == 0 &&
-        posix_spawn_file_actions_addinherit_np(
-            &actions, STDERR_FILENO) != 0) {
-        goto done;
+    if (stderr_pipe) {
+        if (posix_spawn_file_actions_adddup2(
+                &actions, stderr_pipe[1], STDERR_FILENO) != 0 ||
+            posix_spawn_file_actions_addclose(&actions, stderr_pipe[0]) != 0 ||
+            posix_spawn_file_actions_addclose(&actions, stderr_pipe[1]) != 0) {
+            goto done;
+        }
+    } else {
+        int stderr_flags = fcntl(STDERR_FILENO, F_GETFD);
+        if (stderr_flags >= 0 && (stderr_flags & FD_CLOEXEC) == 0 &&
+            posix_spawn_file_actions_addinherit_np(
+                &actions, STDERR_FILENO) != 0) {
+            goto done;
+        }
     }
     if (posix_spawn_file_actions_addclose(&actions, stdin_pipe[0]) != 0 ||
         posix_spawn_file_actions_addclose(&actions, stdin_pipe[1]) != 0 ||
@@ -2241,8 +2407,11 @@ static bool rt_hal_worker_contain_process_tree(void) {
 
 static int64_t proc_spawn_piped_argv_owned_v1(
         const char* cmd, char** argv, bool sandboxed_renderer,
-        int pinned_executable_fd, uint64_t* generation_out, char* const* envp) {
+        int pinned_executable_fd, uint64_t* generation_out, char* const* envp,
+        bool split_stderr) {
     if (!cmd || !*cmd) return -1;
+    /* Split stderr is only offered on the ordinary execvp lane. */
+    if (split_stderr && (sandboxed_renderer || pinned_executable_fd >= 0)) return -1;
 #ifndef __linux__
     if (sandboxed_renderer) return -1;
 #else
@@ -2306,18 +2475,38 @@ static int64_t proc_spawn_piped_argv_owned_v1(
         return -1;
     }
 
+    /* stderr_pipe[0] = parent reads (O_NONBLOCK), stderr_pipe[1] = child's fd 2. */
+    int stderr_pipe[2] = {-1, -1};
+    if (split_stderr) {
+        int stderr_flags = -1;
+        bool ready = proc_pipe_cloexec(stderr_pipe);
+#ifdef __APPLE__
+        ready = ready && proc_move_pipe_fds_above_stdio(stderr_pipe);
+#endif
+        if (ready) stderr_flags = fcntl(stderr_pipe[0], F_GETFL, 0);
+        if (!ready || stderr_flags < 0 ||
+            fcntl(stderr_pipe[0], F_SETFL, stderr_flags | O_NONBLOCK) != 0) {
+            proc_close_pair(stderr_pipe);
+            close(stdin_pipe[0]); close(stdin_pipe[1]);
+            close(stdout_pipe[0]); close(stdout_pipe[1]);
+            proc_free(slot);
+            return -1;
+        }
+    }
+
     fflush(stdout);
     fflush(stderr);
 
 #ifdef __APPLE__
     pid_t pid = proc_spawn_piped_apple(
-        cmd, argv, envp, stdin_pipe, stdout_pipe);
+        cmd, argv, envp, stdin_pipe, stdout_pipe, split_stderr ? stderr_pipe : NULL);
 #else
     pid_t expected_parent = getpid();
     pid_t pid = fork();
     if (pid < 0) {
         close(stdin_pipe[0]); close(stdin_pipe[1]);
         close(stdout_pipe[0]); close(stdout_pipe[1]);
+        proc_close_pair(stderr_pipe);
         proc_free(slot);
         return -1;
     }
@@ -2349,7 +2538,8 @@ static int64_t proc_spawn_piped_argv_owned_v1(
                 STDOUT_FILENO) < 0 ||
             (sandboxed_renderer && dup2(null_fd, STDERR_FILENO) < 0) ||
             (pinned_executable_fd >= 0 &&
-             dup2(stdout_pipe[1], STDERR_FILENO) < 0)) {
+             dup2(stdout_pipe[1], STDERR_FILENO) < 0) ||
+            (split_stderr && dup2(stderr_pipe[1], STDERR_FILENO) < 0)) {
             _exit(127);
         }
 
@@ -2395,6 +2585,7 @@ static int64_t proc_spawn_piped_argv_owned_v1(
         while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {}
         close(stdin_pipe[0]); close(stdin_pipe[1]);
         close(stdout_pipe[0]); close(stdout_pipe[1]);
+        proc_close_pair(stderr_pipe);
         proc_free(slot);
         return -1;
     }
@@ -2402,6 +2593,7 @@ static int64_t proc_spawn_piped_argv_owned_v1(
     if (pid < 0) {
         close(stdin_pipe[0]); close(stdin_pipe[1]);
         close(stdout_pipe[0]); close(stdout_pipe[1]);
+        proc_close_pair(stderr_pipe);
         proc_free(slot);
         return -1;
     }
@@ -2409,10 +2601,12 @@ static int64_t proc_spawn_piped_argv_owned_v1(
     /* Close child-side ends */
     close(stdin_pipe[0]);
     close(stdout_pipe[1]);
+    if (stderr_pipe[1] >= 0) { close(stderr_pipe[1]); stderr_pipe[1] = -1; }
 
     /* The reserved slot is invisible until all endpoints are ready. */
     if (pthread_mutex_lock(&s_proc_lock) != 0) {
         close(stdin_pipe[1]); close(stdout_pipe[0]);
+        proc_close_pair(stderr_pipe);
         (void)proc_signal_tree(pid, SIGKILL, false);
         while (waitpid(pid, NULL, 0) < 0 && errno == EINTR) {}
         proc_free(slot);
@@ -2420,6 +2614,9 @@ static int64_t proc_spawn_piped_argv_owned_v1(
     }
     slot->stdin_fd = stdin_pipe[1];
     slot->stdout_fd = stdout_pipe[0];
+    slot->stderr_fd = stderr_pipe[0];
+    slot->stderr_state = 0;
+    slot->stderr_tail.len = 0;
     slot->pid = pid;
     if (generation_out) *generation_out = generation;
     (void)pthread_mutex_unlock(&s_proc_lock);
@@ -2429,7 +2626,7 @@ static int64_t proc_spawn_piped_argv_owned_v1(
 
 static int64_t rt_process_spawn_piped_argv(const char* cmd, char** argv,
         bool sandboxed_renderer, int pinned_executable_fd) {
-    return proc_spawn_piped_argv_owned_v1(cmd, argv, sandboxed_renderer, pinned_executable_fd, NULL, NULL);
+    return proc_spawn_piped_argv_owned_v1(cmd, argv, sandboxed_renderer, pinned_executable_fd, NULL, NULL, false);
 }
 
 /*
@@ -2459,7 +2656,7 @@ int64_t rt_process_spawn_piped_generation_v1(const char* cmd, int64_t cmd_len, S
     for (int64_t i = 0; i < count; i++) argv[i+1] = (char*)rt_string_data(rt_array_get(args, i));
     argv[count+1] = NULL;
     uint64_t generation = 0;
-    if (proc_spawn_piped_argv_owned_v1(cmd, argv, false, -1, &generation, NULL) <= 0) return -1;
+    if (proc_spawn_piped_argv_owned_v1(cmd, argv, false, -1, &generation, NULL, false) <= 0) return -1;
     return (int64_t)generation;
 }
 
@@ -2570,7 +2767,7 @@ int64_t simple_piped_owner_spawn_environment_v1(const char* cmd, SplArray* args,
     char** argv = posix_resolve_command_v1(cmd, resolved, sizeof(resolved))
         ? posix_spawn_argv_v1(cmd, args) : NULL;
     int64_t pid = argv
-        ? proc_spawn_piped_argv_owned_v1(resolved, argv, false, -1, NULL, envp) : -1;
+        ? proc_spawn_piped_argv_owned_v1(resolved, argv, false, -1, NULL, envp, false) : -1;
     free(argv);
     free(envp);
     return pid;
@@ -3349,6 +3546,96 @@ void simple_piped_owner_observe_v1(int64_t pid, int64_t collect_exit,
         }
     }
     (void)pthread_mutex_unlock(&s_proc_lock);
+}
+
+/* Split-stderr / byte-safe owner hooks; see the Windows twins above for the
+ * contract. Every parent endpoint is O_NONBLOCK, so each hook is one bounded
+ * syscall under the existing registry lock and never parks. */
+int64_t simple_piped_owner_spawn_split_v1(const char* cmd, int64_t cmd_len, SplArray* args) {
+    if (!piped_ref_spawn_input_valid_v1(cmd, cmd_len, args)) return -1;
+    int64_t count = args ? rt_array_len(args) : 0;
+    char* argv[PIPED_REF_MAX_ARGS_V1 + 2];
+    argv[0] = (char*)cmd;
+    for (int64_t i = 0; i < count; i++) argv[i+1] = (char*)rt_string_data(rt_array_get(args, i));
+    argv[count+1] = NULL;
+    return proc_spawn_piped_argv_owned_v1(cmd, argv, false, -1, NULL, NULL, true);
+}
+
+/* Caller holds s_proc_lock. */
+static int64_t posix_piped_read_raw_slot(struct RtProcSlot* slot, int64_t stream,
+        uint8_t* out, int64_t cap) {
+    if (!slot || slot->closing || slot->stream_ticket) return -1;
+    int fd = stream == 2 ? slot->stderr_fd : slot->stdout_fd;
+    int* state = stream == 2 ? &slot->stderr_state : &slot->stdout_state;
+    if (fd < 0) return -1;
+    if (stream == 1) slot->stdout_started = true;
+    int64_t count = piped_tail_take(stream == 2 ? &slot->stderr_tail : &slot->stdout_tail, out, cap);
+    if (*state != 0 || count == cap) return count;
+    ssize_t got = read(fd, out + count, (size_t)(cap - count));
+    if (got == 0) *state = 1;
+    else if (got < 0) {
+        if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) *state = -1;
+        got = 0;
+    }
+    return count + (int64_t)got;
+}
+
+int64_t simple_piped_owner_read_v1(int64_t pid, int64_t stream, uint8_t* out, int64_t cap) {
+    if (pid <= 0 || (int64_t)(pid_t)pid != pid || (stream != 1 && stream != 2) ||
+        !out || cap <= 0 || pthread_mutex_lock(&s_proc_lock) != 0) return -1;
+    int64_t count = posix_piped_read_raw_slot(proc_find((pid_t)pid), stream, out, cap);
+    (void)pthread_mutex_unlock(&s_proc_lock);
+    return count;
+}
+
+int64_t simple_piped_owner_stream_state_v1(int64_t pid, int64_t stream) {
+    if (pid <= 0 || (int64_t)(pid_t)pid != pid || (stream != 1 && stream != 2) ||
+        pthread_mutex_lock(&s_proc_lock) != 0) return -1;
+    struct RtProcSlot* slot = proc_find((pid_t)pid);
+    int64_t state = -1;
+    if (slot && !slot->closing && !slot->stream_ticket) {
+        if (stream == 1) state = slot->stdout_tail.len && slot->stdout_state == 1 ? 0 : slot->stdout_state;
+        else if (slot->stderr_fd < 0) state = -2;
+        else state = slot->stderr_tail.len && slot->stderr_state == 1 ? 0 : slot->stderr_state;
+    }
+    (void)pthread_mutex_unlock(&s_proc_lock);
+    return state;
+}
+
+static _Thread_local char s_err_read_buf[PIPED_TEXT_CAP+1];
+const char* simple_piped_owner_read_stderr_text_v1(int64_t pid) {
+    s_err_read_buf[0] = 0;
+    if (pid <= 0 || (int64_t)(pid_t)pid != pid || pthread_mutex_lock(&s_proc_lock) != 0)
+        return s_err_read_buf;
+    struct RtProcSlot* slot = proc_find((pid_t)pid);
+    if (slot && !slot->closing && !slot->stream_ticket && slot->stderr_fd >= 0 &&
+        slot->stderr_state == 0) {
+        uint8_t raw[PIPED_RAW_CAP];
+        ssize_t count = read(slot->stderr_fd, raw, sizeof(raw));
+        int eof = count == 0;
+        if (count < 0) {
+            if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) slot->stderr_state = -1;
+            count = 0;
+        }
+        size_t written = 0;
+        if (slot->stderr_state == 0 && !piped_utf8_frame(&slot->stderr_tail, raw, (size_t)count, eof,
+                (uint8_t*)s_err_read_buf, PIPED_TEXT_CAP, &written)) {
+            slot->stderr_state = -1; written = 0;
+        }
+        s_err_read_buf[written] = 0;
+        if (eof && slot->stderr_state == 0 && slot->stderr_tail.len == 0) slot->stderr_state = 1;
+    }
+    (void)pthread_mutex_unlock(&s_proc_lock);
+    return s_err_read_buf;
+}
+
+int64_t simple_piped_owner_write_v1(int64_t pid, const uint8_t* data, int64_t data_len,
+        int64_t offset, int64_t max_bytes) {
+    if (pthread_mutex_lock(&s_proc_lock) != 0) return -1;
+    int64_t result = posix_core_rt_process_write_stdin_some(
+        pid, (const char*)data, data_len, offset, max_bytes);
+    (void)pthread_mutex_unlock(&s_proc_lock);
+    return result;
 }
 
 #if !defined(SIMPLE_RUNTIME_RUST_PIPED_OBSERVER_V1)
@@ -5235,3 +5522,84 @@ int64_t rt_process_spawn_async_env_v1(const char* cmd, SplArray* args,
         SplArray* environment, int64_t mode) {
     return simple_process_spawn_async_environment_v1(cmd, args, environment, mode);
 }
+
+/* ===== Split-stderr / byte-safe piped exports (C lane) =====
+ * Rust twin: src/compiler_rust/runtime/src/piped_process_observer.rs, selected
+ * with SIMPLE_RUNTIME_RUST_PIPED_OBSERVER_V1. Both lanes apply the same policy
+ * over the simple_piped_owner_*_v1 hooks:
+ *   - every read/write is one nonblocking step; no export ever parks, so a
+ *     caller that polls stdout and stderr in turn (process_piped_pump_bytes_v1)
+ *     cannot deadlock against a child filling the other pipe;
+ *   - a byte read returns at most min(max_bytes, PIPED_BYTES_CAP_V1) bytes and
+ *     an empty array when nothing is buffered (state tells EOF from "not yet");
+ *   - a byte write takes [u8] at an explicit offset and returns the count
+ *     accepted (0 = pipe full / overlapped write still pending), -1 on error.
+ *     Retry a pending write with the same offset and max_bytes. */
+#define PIPED_BYTES_CAP_V1 65536
+#define PIPED_WRITE_CHUNK_V1 4096
+
+SplArray* simple_piped_bytes_new_v1(const uint8_t* data, int64_t len) {
+    if (len < 0 || (len > 0 && !data)) return NULL;
+    SplArray* result = rt_byte_array_new_len((uint64_t)len);
+    if (!result) return NULL;
+    uint8_t* dest = (uint8_t*)(uintptr_t)rt_array_bytes_basis_ptr(result);
+    if (len > 0) {
+        if (!dest) return NULL;
+        memcpy(dest, data, (size_t)len);
+    }
+    return result;
+}
+
+#if !defined(SIMPLE_RUNTIME_RUST_PIPED_OBSERVER_V1)
+int64_t rt_process_spawn_piped_split_v1(const char* cmd, int64_t cmd_len, SplArray* args) {
+    return simple_piped_owner_spawn_split_v1(cmd, cmd_len, args);
+}
+
+static SplArray* piped_read_bytes_export_v1(int64_t pid, int64_t stream, int64_t max_bytes) {
+    uint8_t buffer[PIPED_BYTES_CAP_V1];
+    int64_t cap = max_bytes <= 0 ? 0 : (max_bytes < PIPED_BYTES_CAP_V1 ? max_bytes : PIPED_BYTES_CAP_V1);
+    int64_t count = pid > 0 && cap > 0 ? simple_piped_owner_read_v1(pid, stream, buffer, cap) : -1;
+    return simple_piped_bytes_new_v1(buffer, count > 0 ? count : 0);
+}
+SplArray* rt_process_read_stdout_bytes_v1(int64_t pid, int64_t max_bytes) {
+    return piped_read_bytes_export_v1(pid, 1, max_bytes);
+}
+SplArray* rt_process_read_stderr_bytes_v1(int64_t pid, int64_t max_bytes) {
+    return piped_read_bytes_export_v1(pid, 2, max_bytes);
+}
+const char* rt_process_read_stderr(int64_t pid) {
+    return simple_piped_owner_read_stderr_text_v1(pid);
+}
+int64_t rt_process_stderr_state_v1(int64_t pid) {
+    return simple_piped_owner_stream_state_v1(pid, 2);
+}
+
+int64_t rt_process_write_stdin_bytes_some_v1(int64_t pid, SplArray* data, int64_t offset, int64_t max_bytes) {
+    if (pid <= 0 || !data || offset < 0 || max_bytes <= 0) return -1;
+    int64_t packed_len = rt_array_bytes_basis_len(data);
+    if (packed_len >= 0) {
+        /* Packed [u8]: hand the owner the live buffer and absolute offset so a
+         * Windows overlapped retry is matched against the same bytes. */
+        const uint8_t* bytes = (const uint8_t*)(uintptr_t)rt_array_bytes_basis_ptr(data);
+        if (offset > packed_len) return -1;
+        if (offset == packed_len) return 0;
+        if (!bytes) return -1;
+        return simple_piped_owner_write_v1(pid, bytes, packed_len, offset, max_bytes);
+    }
+    /* Boxed element array: copy one bounded chunk; values outside 0..255 are
+     * refused rather than truncated. */
+    int64_t total = rt_array_len(data);
+    if (offset > total) return -1;
+    if (offset == total) return 0;
+    uint8_t chunk[PIPED_WRITE_CHUNK_V1];
+    int64_t want = total - offset;
+    if (want > max_bytes) want = max_bytes;
+    if (want > PIPED_WRITE_CHUNK_V1) want = PIPED_WRITE_CHUNK_V1;
+    for (int64_t i = 0; i < want; i++) {
+        int64_t value = rt_value_as_int(rt_array_get(data, offset + i));
+        if (value < 0 || value > 255) return -1;
+        chunk[i] = (uint8_t)value;
+    }
+    return simple_piped_owner_write_v1(pid, chunk, want, 0, want);
+}
+#endif /* C exports selected unless a bound Rust observer object is linked. */

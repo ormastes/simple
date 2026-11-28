@@ -263,9 +263,96 @@ mod tests {
         assert_eq!(text_arg_indices("rt_linux_group_poll_v1"), None);
     }
 
+    /// glob_imported_private_fn_lowers_to_unmangled_extern_2026-09-13
+    /// (Cranelift lane): a glob import never binds `_`-private names and an
+    /// ambiguous private name keeps no first-wins fallback, so when such a
+    /// call target reaches the cross-module fabricate path, declaring an
+    /// Import under the raw name would emit an unmangled extern that only
+    /// fails at link time. It must be a compile error instead -- the call
+    /// twin of the `declare_globals` "ambiguous private global" guard.
     #[test]
-    fn linux_parent_generated_call_keeps_four_machine_arguments() {
-        use cranelift_codegen::{ir::{types, AbiParam, InstBuilder}, settings};
+    fn ambiguous_private_call_refuses_unmangled_extern_fabrication() {
+        use cranelift_codegen::{ir::{types, AbiParam}, settings};
+        use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
+        use cranelift_jit::{JITBuilder, JITModule};
+        use cranelift_module::Module;
+
+        let isa = cranelift_native::builder().expect("host ISA")
+            .finish(settings::Flags::new(settings::builder())).expect("ISA flags");
+        let jit = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+        let mut module = JITModule::new(jit);
+        let mut context = module.make_context();
+        context.func.signature = module.make_signature();
+        context.func.signature.returns.push(AbiParam::new(types::I64));
+        let mut frontend = FunctionBuilderContext::new();
+        let ambiguous = std::collections::HashSet::from(["_helper".to_string()]);
+        let mut ctx = super::super::InstrContext::new_for_test_with_ambiguous(
+            &mut module,
+            &std::collections::HashMap::new(),
+            ambiguous,
+        );
+        let result = {
+            let mut builder = FunctionBuilder::new(&mut context.func, &mut frontend);
+            let block = builder.create_block();
+            builder.switch_to_block(block);
+            builder.seal_block(block);
+            let target = crate::mir::CallTarget::from_name("_helper");
+            let outcome = super::compile_call(&mut ctx, &mut builder, &None, &target, &[]);
+            builder.finalize();
+            outcome
+        };
+        let err = result.expect_err("bare ambiguous private call must fail closed");
+        assert!(err.contains("ambiguous private call `_helper`"), "got: {err}");
+        assert!(err.contains("must be imported explicitly"), "got: {err}");
+        // And the module must NOT have gained the fabricated import.
+        assert!(
+            ctx.func_ids.get("_helper").is_none(),
+            "the unmangled extern must not be declared"
+        );
+    }
+
+    /// The guard is scoped: a private name that is NOT in the ambiguous set
+    /// (a unique name the import map serves elsewhere) keeps the historical
+    /// fabricate-an-import behavior.
+    #[test]
+    fn non_ambiguous_private_call_keeps_fabricate_behavior() {
+        use cranelift_codegen::{ir::{types, AbiParam}, settings};
+        use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
+        use cranelift_jit::{JITBuilder, JITModule};
+        use cranelift_module::Module;
+
+        let isa = cranelift_native::builder().expect("host ISA")
+            .finish(settings::Flags::new(settings::builder())).expect("ISA flags");
+        let jit = JITBuilder::with_isa(isa, cranelift_module::default_libcall_names());
+        let mut module = JITModule::new(jit);
+        let mut context = module.make_context();
+        context.func.signature = module.make_signature();
+        context.func.signature.returns.push(AbiParam::new(types::I64));
+        let mut frontend = FunctionBuilderContext::new();
+        let mut ctx = super::super::InstrContext::new_for_test_with_ambiguous(
+            &mut module,
+            &std::collections::HashMap::new(),
+            std::collections::HashSet::new(),
+        );
+        let result = {
+            let mut builder = FunctionBuilder::new(&mut context.func, &mut frontend);
+            let block = builder.create_block();
+            builder.switch_to_block(block);
+            builder.seal_block(block);
+            let target = crate::mir::CallTarget::from_name("_helper");
+            let outcome = super::compile_call(&mut ctx, &mut builder, &None, &target, &[]);
+            builder.finalize();
+            outcome
+        };
+        result.expect("non-ambiguous private call keeps the fabricate-an-import path");
+        assert!(
+            ctx.func_ids.get("_helper").is_some(),
+            "the import declaration must be fabricated as before"
+        );
+    }
+
+    #[test]
+    fn linux_parent_generated_call_keeps_four_machine_arguments() {        use cranelift_codegen::{ir::{types, AbiParam, InstBuilder}, settings};
         use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
         use cranelift_jit::{JITBuilder, JITModule};
         use cranelift_module::Module;
@@ -4566,7 +4653,7 @@ pub fn compile_call<M: Module>(
                 let dest_signed = super::core::vreg_is_signed(ctx, *d) == Some(true);
                 if let Some(ret_type) = crate::codegen::runtime_sffi::fam_aware_return_type(ctx.fam_arrays, sffi_name)
                 {
-                    if ret_type == types::I32 || ret_type == types::I8 {
+                    if ret_type == types::I32 || ret_type == types::I8 || ret_type == types::I16 {
                         result = if dest_signed {
                             builder.ins().sextend(types::I64, result)
                         } else {
@@ -5156,6 +5243,25 @@ pub fn compile_call<M: Module>(
         {
             Ok(existing)
         } else {
+            // A glob-imported PRIVATE fn reaches here as a bare name the maps
+            // deliberately refuse to serve (glob bindings skip `_`-prefixed
+            // names; ambiguous private names keep no first-wins fallback), and
+            // every co-compiled definition is module-mangled, so the bare name
+            // has no definition. Fabricating an Import under the raw name would
+            // emit an unmangled extern that only fails at link time
+            // (glob_imported_private_fn_lowers_to_unmangled_extern_2026-09-13).
+            // The globals lane already fails closed the same way
+            // (common_backend.rs `declare_globals`: "ambiguous private global
+            // must be imported explicitly"); calls take the identical guard.
+            if !has_resolved_name && func_name.starts_with('_') && ctx.ambiguous_names.contains(func_name) {
+                return Err(format!(
+                    "ambiguous private call `{func_name}` must be imported explicitly: a glob \
+                     import never binds `_`-private functions, the bare name has no definition, \
+                     and lowering it would emit an unmangled extern that fails at link time. \
+                     Import the intended definition selectively (`use <module>.{{name}}`) or \
+                     rename the duplicate definitions. [compiler_cross_module_private_symbol_collision]"
+                ));
+            }
             if is_cross_module_data_export(ctx, func_name, resolved_name.as_ref()) {
                 return Err(format!(
                     "cross-module call '{}' resolved to data/type export '{}'; expected a function. \

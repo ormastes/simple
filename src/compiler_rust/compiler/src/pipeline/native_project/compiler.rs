@@ -1047,6 +1047,8 @@ pub(crate) fn compile_file_to_object(
                     &use_map,
                     &global_suffix_index,
                 );
+                super::mangle::reject_leaked_ambiguous_private_call_targets(&mir, imports.ambiguous_names.as_ref())
+                    .map_err(|e| format!("{}: mir mangle: {e}", file_path.display()))?;
                 if unresolved > 0 && std::env::var("SIMPLE_BOOTSTRAP").as_deref() != Ok("1") {
                     eprintln!(
                         "[llvm-entry-closure] {} unresolved call(s) in module `{}` before codegen; continuing so normal stub/link closure can resolve what bootstrap export discovery cannot",

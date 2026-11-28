@@ -1,0 +1,357 @@
+#!/bin/sh
+# check-runtime-c-twin-bodies.shs — every C runtime symbol that two objects of
+# the hosted bundle both define must have ONE body, or a reviewed reason.
+#
+# The ordinary hosted bundle (the `sources` list in
+# src/compiler/70.backend/backend/runtime_compiler.spl) compiles runtime.c and
+# runtime_native.c together, and the ELF link accepts their shared names with
+# --allow-multiple-definition. Which body runs is then decided by the linker:
+# a strong definition beats a weak one, and among equals the FIRST object on
+# the link line wins — runtime.o. On Mach-O the SPL_RUNTIME_NATIVE_TWIN copies
+# are weak, so the other body runs there. When the two bodies differ, the same
+# source behaves differently per platform and per bundle, silently:
+# rt_bytes_to_text copied a tagged-slot [u8] verbatim in runtime.c and
+# sha256_text returned nil in every Stage 2 native binary (2026-11-28).
+#
+# What this does, from real objects and not from source regexes:
+#   1. reads the ordered `sources` list and compiles it with clang in the two
+#      define sets the driver uses (dynload: SIMPLE_CORE_C_STANDALONE +
+#      SIMPLE_RUNTIME_DYNLOAD_OWNER plus runtime_dynload; native-all: neither);
+#   2. takes every global symbol two objects define (`nm`) and names the ELF
+#      winner (first strong, else first weak);
+#   3. finds each definition through the preprocessor's line markers, so the
+#      body compared is the one the #if branches really selected, and compares
+#      the comment/whitespace/weak-marker-normalized SOURCE text;
+#   4. a pair whose bodies differ must have a row in
+#      scripts/check/runtime_c_twin_allowlist.txt:
+#        <symbol> TAB <definers> TAB <winner> TAB <class> TAB <hash> TAB <reason>
+#      The hash covers both bodies, so editing either one, or changing which
+#      one wins, invalidates the review. A row nothing matches is stale.
+#   5. runs the behaviour selfchecks with runtime.o first AND last, so a fixed
+#      twin stays fixed whichever body the linker picks:
+#      src/runtime/test/rt_bytes_to_text_layouts_selfcheck.c and
+#      src/runtime/test/rt_twin_winner_selfcheck.c.
+#
+# Usage:
+#   sh scripts/check/check-runtime-c-twin-bodies.shs            # selftest + scan
+#   sh scripts/check/check-runtime-c-twin-bodies.shs --selftest # fixtures only
+#   sh scripts/check/check-runtime-c-twin-bodies.shs --rows     # print a row per
+#        differing pair (class/reason left as REVIEW) for a reviewed update;
+#        never paste rows without reading both bodies.
+#
+# Verdict (last stdout line):
+#   PASS  — <n> duplicate symbol(s) checked ...      exit 0
+#   FAIL  — ...                                      exit 1
+#   ERROR — nothing was checked (<reason>)           exit 2
+set -u
+
+script=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)/$(basename -- "$0")
+root=$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)
+mode=scan
+behaviour=1
+allowlist=
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --selftest) mode=selftest ;;
+        --rows) mode=rows ;;
+        --no-selftest) mode=scan_only ;;
+        --no-behaviour) behaviour=0 ;;
+        --root) shift; root=$1 ;;
+        --allowlist) shift; allowlist=$1 ;;
+        *) echo "ERROR — nothing was checked (unknown argument $1)"; exit 2 ;;
+    esac
+    shift
+done
+[ -n "$allowlist" ] || allowlist="$root/scripts/check/runtime_c_twin_allowlist.txt"
+
+cc=${CC:-}
+[ -n "$cc" ] || cc=$(command -v clang 2>/dev/null || true)
+[ -n "$cc" ] || { echo "ERROR — nothing was checked (no clang; set CC)"; exit 2; }
+command -v "$cc" >/dev/null 2>&1 || { echo "ERROR — nothing was checked (CC=$cc is not runnable)"; exit 2; }
+command -v nm >/dev/null 2>&1 || { echo "ERROR — nothing was checked (no nm)"; exit 2; }
+if command -v sha256sum >/dev/null 2>&1; then hasher="sha256sum"
+elif command -v shasum >/dev/null 2>&1; then hasher="shasum -a 256"
+else echo "ERROR — nothing was checked (no sha256sum or shasum)"; exit 2; fi
+
+work=$(mktemp -d "${TMPDIR:-/tmp}/rt-c-twin.XXXXXX") || { echo "ERROR — nothing was checked (mktemp failed)"; exit 2; }
+trap 'rm -rf "$work"' EXIT INT TERM
+tab=$(printf '\t')
+
+# ---------------------------------------------------------------- selftest
+fixture() {
+    # $1 = dir, $2 = sources (space separated)
+    mkdir -p "$1/src/runtime/platform" "$1/src/compiler/70.backend/backend" "$1/scripts/check"
+    _list=
+    for _n in $2; do _list="$_list\"$_n\", "; done
+    printf '    var sources: [text] = [%s]\n' "${_list%, }" \
+        > "$1/src/compiler/70.backend/backend/runtime_compiler.spl"
+    : > "$1/scripts/check/runtime_c_twin_allowlist.txt"
+}
+expect() {
+    # $1 = label, $2 = fixture dir, $3 = expected rc, $4 = grep pattern
+    sh "$script" --no-selftest --no-behaviour --root "$2" > "$work/st.out" 2>&1
+    _rc=$?
+    if [ "$_rc" -ne "$3" ] || ! grep -q -- "$4" "$work/st.out"; then
+        tail -5 "$work/st.out"
+        echo "ERROR — nothing was checked (selftest $1: rc=$_rc, wanted $3 with '$4')"
+        exit 2
+    fi
+}
+selftest() {
+    _f="$work/fx"
+    # 1 identical twin (comments, spacing and a weak marker differ) -> PASS
+    fixture "$_f/same" "runtime runtime_native"
+    printf 'int rt_a(int x) {\n    /* one */ return x + 1;\n}\n' > "$_f/same/src/runtime/runtime.c"
+    printf '__attribute__((weak)) int rt_a(int x) { return x + 1; } // two\nint rt_only(void) { return 0; }\n' > "$_f/same/src/runtime/runtime_native.c"
+    expect identical "$_f/same" 0 "1 identical, 0 allowlisted"
+    # 2 divergent, no row -> FAIL new, winner is the first strong object
+    fixture "$_f/new" "runtime runtime_native"
+    printf 'int rt_a(int x) { return x + 1; }\n' > "$_f/new/src/runtime/runtime.c"
+    printf 'int rt_a(int x) { return x + 2; }\n' > "$_f/new/src/runtime/runtime_native.c"
+    expect new-divergent "$_f/new" 1 "new: rt_a (runtime wins)"
+    # 3 the same pair with its row -> PASS
+    cp -R "$_f/new" "$_f/listed"
+    sh "$script" --no-selftest --no-behaviour --rows --root "$_f/listed" 2>/dev/null |
+        sed 's/REVIEW-CLASS/benign/; s/REVIEW-REASON/fixture/' > "$_f/listed/scripts/check/runtime_c_twin_allowlist.txt"
+    expect allowlisted "$_f/listed" 0 "0 identical, 1 allowlisted"
+    # 4 a listed body is edited afterwards -> FAIL drift
+    cp -R "$_f/listed" "$_f/drift"
+    printf 'int rt_a(int x) { return x + 3; }\n' > "$_f/drift/src/runtime/runtime_native.c"
+    expect body-drift "$_f/drift" 1 "drifted: rt_a"
+    # 5 link order changes the winner -> FAIL
+    cp -R "$_f/listed" "$_f/order"
+    printf '    var sources: [text] = ["runtime_native", "runtime"]\n' \
+        > "$_f/order/src/compiler/70.backend/backend/runtime_compiler.spl"
+    expect winner-change "$_f/order" 1 "drifted: rt_a"
+    # 6 a row nothing matches -> FAIL stale
+    cp -R "$_f/same" "$_f/stale"
+    printf 'rt_gone\truntime,runtime_native\truntime\tbenign\t0000000000000000\tfixture\n' \
+        > "$_f/stale/scripts/check/runtime_c_twin_allowlist.txt"
+    expect stale-row "$_f/stale" 1 "stale: rt_gone"
+    # 7 strong beats weak although it links second
+    fixture "$_f/weak" "runtime runtime_native"
+    printf '__attribute__((weak)) int rt_a(int x) { return x + 1; }\n' > "$_f/weak/src/runtime/runtime.c"
+    printf 'int rt_a(int x) { return x + 2; }\n' > "$_f/weak/src/runtime/runtime_native.c"
+    expect strong-beats-weak "$_f/weak" 1 "new: rt_a (runtime_native wins)"
+    # 8 a row without a reason, or with an unknown class -> FAIL
+    cp -R "$_f/listed" "$_f/noreason"
+    sed 's/fixture$//; s/benign/whatever/' "$_f/listed/scripts/check/runtime_c_twin_allowlist.txt" \
+        > "$_f/noreason/scripts/check/runtime_c_twin_allowlist.txt"
+    expect bad-row "$_f/noreason" 1 "malformed"
+    # 9 #if-selected body: only the active branch is compared
+    fixture "$_f/branch" "runtime runtime_native"
+    printf '#if defined(NEVER_DEFINED_FIXTURE)\nint rt_a(int x) { return x + 9; }\n#else\nint rt_a(int x) { return x + 1; }\n#endif\n' > "$_f/branch/src/runtime/runtime.c"
+    printf 'int rt_a(int x) { return x + 1; }\n' > "$_f/branch/src/runtime/runtime_native.c"
+    expect active-branch "$_f/branch" 0 "1 identical"
+    # 10 no duplicate at all is still a real scan of 2 objects -> PASS with 0
+    fixture "$_f/none" "runtime runtime_native"
+    printf 'int rt_a(void) { return 1; }\n' > "$_f/none/src/runtime/runtime.c"
+    printf 'int rt_b(void) { return 2; }\n' > "$_f/none/src/runtime/runtime_native.c"
+    expect no-duplicates "$_f/none" 0 "0 duplicate symbol(s)"
+    # 11 the bundle list lost runtime.c -> ERROR, never a pass
+    fixture "$_f/lost" "runtime_native runtime_extra"
+    printf 'int rt_a(void) { return 1; }\n' > "$_f/lost/src/runtime/runtime_native.c"
+    printf 'int rt_b(void) { return 2; }\n' > "$_f/lost/src/runtime/runtime_extra.c"
+    expect list-lost-runtime "$_f/lost" 2 "nothing was checked"
+    # 12 a source that does not compile -> ERROR
+    fixture "$_f/broken" "runtime runtime_native"
+    printf 'int rt_a(void) { return undeclared_thing; }\n' > "$_f/broken/src/runtime/runtime.c"
+    printf 'int rt_b(void) { return 2; }\n' > "$_f/broken/src/runtime/runtime_native.c"
+    expect compile-failure "$_f/broken" 2 "did not compile"
+    selftests=12
+}
+case "$mode" in
+    selftest) selftest; echo "PASS — $selftests selftest fixture(s) behaved"; exit 0 ;;
+    scan) selftest ;;
+esac
+
+# -------------------------------------------------------------------- scan
+rt="$root/src/runtime"
+spl="$root/src/compiler/70.backend/backend/runtime_compiler.spl"
+[ -f "$spl" ] || { echo "ERROR — nothing was checked (missing $spl)"; exit 2; }
+grep -m1 -E '^ *var sources(: *\[text\])? *= *\[' "$spl" | grep -oE '"[A-Za-z0-9_]+"' | tr -d '"' > "$work/sources.txt"
+grep -qx runtime "$work/sources.txt" && grep -qx runtime_native "$work/sources.txt" ||
+    { echo "ERROR — nothing was checked (the sources list in runtime_compiler.spl no longer names runtime and runtime_native)"; exit 2; }
+[ -f "$allowlist" ] || { echo "ERROR — nothing was checked (missing $allowlist)"; exit 2; }
+
+base_flags="-DSIMPLE_ABI_VERSION=1 -DSIMPLE_ABI_VERSION_DEFERRED=0 -fPIC -ffunction-sections -fdata-sections -std=gnu11 -DSIMPLE_RUNTIME_MEMORY_OWNER=1 -I$rt -I$rt/platform"
+jobs=$( (getconf _NPROCESSORS_ONLN 2>/dev/null || echo 2) | awk '{print ($1 > 4) ? 4 : ($1 < 1 ? 1 : $1)}')
+
+# The locator: walk the preprocessed unit, track file/line through the line
+# markers, and report where each wanted top-level definition starts and ends.
+cat > "$work/locate.awk" <<'EOF'
+BEGIN { n = split(syms, a, " "); for (i = 1; i <= n; i++) want[a[i]] = 1; depth = 0; hdr = "" }
+/^# [0-9]+ "/ { line = $2 - 1; f = $3; gsub(/"/, "", f); file = f; next }
+/^#/ { next }
+{
+    line++
+    s = $0
+    gsub(/"([^"\\]|\\.)*"/, "\"\"", s)
+    gsub(/'([^'\\]|\\.)'/, "' '", s)
+    if (depth == 0) {
+        if (hdr ~ /^[ \t]*$/) { hdr = ""; hfile = file; hline = line }
+        hdr = hdr " " s
+    }
+    o = gsub(/\{/, "{", s); c = gsub(/\}/, "}", s)
+    if (depth == 0 && o > 0) {
+        h = hdr; sub(/\{.*/, "", h); cur = ""
+        if (h !~ /=/) for (k in want) if (match(h, "(^|[^A-Za-z0-9_])" k "[ \t]*\\(")) { cur = k; break }
+        sfile = hfile; sline = hline
+    }
+    depth += o - c
+    if (depth == 0) {
+        if (o > 0 || c > 0) { if (cur != "") print cur "\t" sfile "\t" sline "\t" line; cur = ""; hdr = "" }
+        else if (s ~ /;[ \t]*$/) hdr = ""
+    }
+}
+EOF
+normalize() {
+    # $1 = file, $2 = first line, $3 = last line -> one normalized line
+    sed -n "$2,$3p" "$1" | awk '{ s = $0
+        while (1) {
+            if (inc) { i = index(s, "*/"); if (i == 0) { s = ""; break } s = substr(s, i + 2); inc = 0 }
+            i = index(s, "/*"); if (i == 0) break
+            j = index(substr(s, i + 2), "*/")
+            if (j == 0) { s = substr(s, 1, i - 1); inc = 1; break }
+            s = substr(s, 1, i - 1) " " substr(s, i + j + 3)
+        }
+        sub(/\/\/.*/, "", s); print s }' |
+        sed -e 's/__attribute__((weak))//g' -e 's/SPL_RUNTIME_NATIVE_TWIN//g' -e 's/SPL_RUNTIME_OWNER_TWIN//g' \
+            -e 's/SPL_CORE_C_WEAK//g' -e 's/SPL_HOSTED_UNAVAILABLE_WEAK//g' |
+        tr -s ' \t\n' '   ' | sed -e 's/^ //' -e 's/ $//'
+}
+
+: > "$work/pairs.txt"   # composition TAB symbol TAB definers TAB winner TAB same|hash
+compositions=0
+objects_total=0
+run_composition() {
+    # $1 = name, $2 = extra defines, $3 = extra sources
+    _c=$1; _dir="$work/$_c"; mkdir -p "$_dir"
+    cp "$work/sources.txt" "$_dir/order.txt"
+    for _n in $3; do echo "$_n" >> "$_dir/order.txt"; done
+    while read -r _n; do
+        [ -f "$rt/$_n.c" ] || { echo "ERROR — nothing was checked ($_c: src/runtime/$_n.c is in the sources list but missing)"; exit 2; }
+    done < "$_dir/order.txt"
+    xargs < "$_dir/order.txt" -P "$jobs" -I{} sh -c "\"$cc\" -c -O0 $base_flags $2 -o \"$_dir/{}.o\" \"$rt/{}.c\" 2> \"$_dir/{}.err\" || echo {} >> \"$_dir/failed.txt\""
+    if [ -s "$_dir/failed.txt" ]; then
+        _bad=$(sort "$_dir/failed.txt" | head -1)
+        grep -m3 'error' "$_dir/$_bad.err"
+        echo "ERROR — nothing was checked ($_c: $_bad.c did not compile)"
+        exit 2
+    fi
+    : > "$_dir/defs.txt"
+    while read -r _n; do
+        nm --defined-only "$_dir/$_n.o" 2>/dev/null |
+            awk -v o="$_n" '$2 ~ /^[TDBRSWV]$/ { print $3 "\t" (($2 == "W" || $2 == "V") ? "weak" : "strong") "\t" o }' >> "$_dir/defs.txt"
+        objects_total=$((objects_total + 1))
+    done < "$_dir/order.txt"
+    [ -s "$_dir/defs.txt" ] || { echo "ERROR — nothing was checked ($_c: nm listed no defined symbol)"; exit 2; }
+    # duplicates, in link order: symbol TAB definers TAB winner
+    awk -F'\t' '{ n[$1]++; d[$1] = d[$1] (d[$1] == "" ? "" : ",") $3
+                  if (!($1 in w) || (b[$1] == "weak" && $2 == "strong")) { w[$1] = $3; b[$1] = $2 } }
+                END { for (s in n) if (n[s] > 1) print s "\t" d[s] "\t" w[s] }' "$_dir/defs.txt" | sort > "$_dir/dups.txt"
+    _syms=$(cut -f1 "$_dir/dups.txt" | tr '\n' ' ')
+    : > "$_dir/loc.txt"
+    if [ -n "$_syms" ]; then
+        for _n in $(cut -f2 "$_dir/dups.txt" | tr ',' '\n' | sort -u); do
+            "$cc" -E $base_flags $2 "$rt/$_n.c" 2>/dev/null |
+                awk -v syms="$_syms" -f "$work/locate.awk" | sed "s/^/$_n$tab/" >> "$_dir/loc.txt"
+        done
+    fi
+    while IFS="$tab" read -r _sym _defs _win; do
+        _first=; _same=1; : > "$_dir/cat.txt"
+        for _n in $(printf '%s' "$_defs" | tr ',' ' '); do
+            _loc=$(awk -F'\t' -v o="$_n" -v s="$_sym" '$1 == o && $2 == s { print $3 "\t" $4 "\t" $5; exit }' "$_dir/loc.txt")
+            if [ -z "$_loc" ]; then
+                echo "FAIL — $_c: cannot locate the definition of $_sym in $_n.c (macro-generated or unusual layout); the pair cannot be compared"
+                exit 1
+            fi
+            _file=$(printf '%s' "$_loc" | cut -f1); _a=$(printf '%s' "$_loc" | cut -f2); _b=$(printf '%s' "$_loc" | cut -f3)
+            _body=$(normalize "$_file" "$_a" "$_b")
+            printf '%s\n' "$_body" >> "$_dir/cat.txt"
+            if [ -z "$_first" ]; then _first=$_body; elif [ "$_body" != "$_first" ]; then _same=0; fi
+        done
+        if [ "$_same" -eq 1 ]; then _h=same
+        else _h=$( { printf '%s\n' "$_win"; cat "$_dir/cat.txt"; } | $hasher | cut -c1-16); fi
+        printf '%s\t%s\t%s\t%s\t%s\n' "$_c" "$_sym" "$_defs" "$_win" "$_h" >> "$work/pairs.txt"
+    done < "$_dir/dups.txt"
+    compositions=$((compositions + 1))
+}
+run_composition dynload "-DSIMPLE_CORE_C_STANDALONE=1 -DSIMPLE_RUNTIME_DYNLOAD_OWNER=1" "$( [ -f "$rt/runtime_dynload.c" ] && echo runtime_dynload )"
+run_composition native_all "" ""
+
+# One verdict per distinct (symbol, definers, winner, hash); compositions that
+# agree collapse into one row.
+cut -f2- "$work/pairs.txt" | sort -u > "$work/found.txt"
+grep -v "${tab}same\$" "$work/found.txt" > "$work/differ.txt"
+identical=$(grep -c "${tab}same\$" "$work/found.txt")
+checked=$(cut -f1 "$work/found.txt" | sort -u | wc -l | tr -d ' ')
+
+if [ "$mode" = rows ]; then
+    awk -F'\t' '{ print $1 "\t" $2 "\t" $3 "\tREVIEW-CLASS\t" $4 "\tREVIEW-REASON" }' "$work/differ.txt"
+    exit 0
+fi
+
+grep -v '^#' "$allowlist" | grep -v '^[[:space:]]*$' > "$work/rows.txt"
+malformed=$(awk -F'\t' 'NF != 6 || $6 == "" || ($4 != "benign" && $4 != "weak-fallback" && $4 != "design") { printf "%s ", $1 }' "$work/rows.txt")
+new=; drifted=; allowlisted=0
+while IFS="$tab" read -r _sym _defs _win _h; do
+    if grep -q "^$_sym$tab$_defs$tab$_win$tab[a-z-]*$tab$_h$tab" "$work/rows.txt"; then
+        allowlisted=$((allowlisted + 1))
+    elif grep -q "^$_sym$tab" "$work/rows.txt"; then
+        drifted="$drifted$_sym "
+    else
+        new="$new$_sym ($_win wins) "
+    fi
+done < "$work/differ.txt"
+stale=
+while IFS="$tab" read -r _sym _defs _win _class _h _reason; do
+    grep -q "^$_sym$tab$_defs$tab$_win$tab$_h\$" "$work/differ.txt" && continue
+    grep -q "^$_sym$tab" "$work/differ.txt" && continue   # reported as drifted
+    stale="$stale$_sym "
+done < "$work/rows.txt"
+
+# ------------------------------------------------------------- behaviour
+runs=0
+link_run() {
+    # $1 = label, $2 = selfcheck object, rest = objects in link order
+    _label=$1; _tobj=$2; shift 2
+    "$cc" "$_tobj" "$@" -Wl,--gc-sections -Wl,--allow-multiple-definition \
+        -lpthread -lm -ldl -o "$work/$_label" 2> "$work/$_label.err"
+    _rc=$?
+    if [ "$_rc" -ne 0 ]; then
+        head -5 "$work/$_label.err"
+        echo "ERROR — nothing was checked ($_label did not link, rc=$_rc)"
+        exit 2
+    fi
+    "$work/$_label" > "$work/$_label.out" 2>&1
+    _rc=$?
+    if [ "$_rc" -ne 0 ]; then
+        grep '^FAIL' "$work/$_label.out" | head -10
+        echo "FAIL — $_label: behaviour selfcheck exit $_rc"
+        exit 1
+    fi
+    runs=$((runs + 1))
+}
+if [ "$behaviour" -eq 1 ]; then
+    _d="$work/dynload"
+    _rest=$(grep -vx runtime "$_d/order.txt" | sed "s|^|$_d/|; s|\$|.o|" | tr '\n' ' ')
+    for _t in rt_bytes_to_text_layouts_selfcheck rt_twin_winner_selfcheck; do
+        [ -f "$rt/test/$_t.c" ] || { echo "ERROR — nothing was checked (missing src/runtime/test/$_t.c)"; exit 2; }
+        "$cc" -std=gnu11 -c "$rt/test/$_t.c" -o "$work/$_t.o" 2> "$work/$_t.err" ||
+            { head -5 "$work/$_t.err"; echo "ERROR — nothing was checked ($_t.c did not compile)"; exit 2; }
+        # shellcheck disable=SC2086
+        link_run "${_t}_runtime_first" "$work/$_t.o" "$_d/runtime.o" $_rest
+        # shellcheck disable=SC2086
+        link_run "${_t}_runtime_last" "$work/$_t.o" $_rest "$_d/runtime.o"
+    done
+fi
+
+summary="$checked duplicate symbol(s) checked across $objects_total object(s) in $compositions composition(s): $identical identical, $allowlisted allowlisted"
+if [ -n "$malformed$new$drifted$stale" ]; then
+    echo "FAIL — $summary${malformed:+; malformed rows (6 tab fields, class benign|weak-fallback|design, a reason): $malformed}${new:+; new: $new}${drifted:+; drifted: $drifted}${stale:+; stale: $stale}"
+    echo "  new = two bodies differ with no reviewed row; drifted = a body, the definers or the winner changed since the review; stale = the row matches no differing pair." >&2
+    echo "  Make the bodies agree, or re-review and update scripts/check/runtime_c_twin_allowlist.txt (--rows prints current hashes)." >&2
+    exit 1
+fi
+echo "PASS — $summary, 0 new, 0 drifted, 0 stale; $runs behaviour run(s) with runtime.o first and last"

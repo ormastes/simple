@@ -1,0 +1,88 @@
+# Owner decision 2026-11-28: the orchestrator Host unit carries no `SIMPLE_*` environment entry. What the
+# unit used to hand over through `EnvironmentFile`/`Environment` is one root-owned SDN file at the fixed
+# path `/etc/simple-host/host.sdn` (root:root 0644). The reader fails closed with a typed refusal.
+# Record: doc/08_tracking/bug/container_fresh_route_helper_home_2026-11-27.md
+use std.spec.{describe, it, expect, step}
+use std.io.file_read_text
+use std.common.text_bytes.text_to_utf8_bytes
+use std.sosix.time.sosix_time_now_monotonic_ms
+use std.nogc_sync_mut.io.dir_ops.dir_create_all
+use std.nogc_sync_mut.io.file_ops.{file_atomic_write, package_chmod}
+use std.nogc_sync_mut.io.linux_host_config_v1.{LINUX_HOST_CONFIG_PATH_V1, linux_host_config_decide_v1,
+    linux_host_config_error_code_v1, linux_host_config_text_v1, linux_host_config_load_injected_v1}
+
+val HOST_CONFIG_GOOD = "provisionInputDir: \"/srv/simple-fixture/input\"\nprovisionController: \"fixture-controller\"\n"
+
+fn host_config_refusal(owner: u32, required: u32, mode: u32, source: text) -> text:
+    val decided = linux_host_config_decide_v1(owner, required, mode, text_to_utf8_bytes(source))
+    if decided.is_ok(): return "accepted"
+    linux_host_config_error_code_v1(decided.unwrap_err())
+
+describe "Linux Host config V1":
+    it "reads the fixed root-owned SDN file and returns its text entries":
+        expect(LINUX_HOST_CONFIG_PATH_V1).to_equal("/etc/simple-host/host.sdn")
+        step("A root-owned 0644 regular file with known keys is accepted")
+        val decided = linux_host_config_decide_v1(0u32, 0u32, 33188u32, text_to_utf8_bytes(HOST_CONFIG_GOOD))
+        expect(decided.is_ok()).to_equal(true)
+        val config = decided.unwrap()
+        expect(linux_host_config_text_v1(config, "provisionInputDir")).to_equal("/srv/simple-fixture/input")
+        expect(linux_host_config_text_v1(config, "provisionController")).to_equal("fixture-controller")
+        step("A key the file does not carry reads as empty, so its spec reports BLOCKED")
+        expect(linux_host_config_text_v1(config, "attachReady")).to_equal("")
+        step("A read-only 0444 file is accepted as well")
+        expect(host_config_refusal(0u32, 0u32, 33060u32, HOST_CONFIG_GOOD)).to_equal("accepted")
+
+    it "refuses a file whose owner or mode is not the custody one":
+        step("Owned by the service account instead of root")
+        expect(host_config_refusal(950u32, 0u32, 33188u32, HOST_CONFIG_GOOD)).to_equal("host-config-owner-or-mode")
+        step("Group writable, world writable, private 0640 and a directory mode")
+        for mode in [33204u32, 33206u32, 33184u32, 16877u32]:
+            expect(host_config_refusal(0u32, 0u32, mode, HOST_CONFIG_GOOD)).to_equal("host-config-owner-or-mode")
+
+    it "refuses content that is not one flat object of known text keys":
+        step("Malformed, empty and repeated-key documents do not parse")
+        expect(host_config_refusal(0u32, 0u32, 33188u32,
+            "provisionController: \"a\"\nprovisionController: \"b\"\n").starts_with("host-config-unparsable:")).to_equal(true)
+        expect(host_config_refusal(0u32, 0u32, 33188u32, "provisionInputDir: [unterminated\n").starts_with(
+            "host-config-unparsable:")).to_equal(true)
+        expect(host_config_refusal(0u32, 0u32, 33188u32, "")).to_equal("host-config-unparsable:empty_document")
+        step("An array, an unknown key and a non-text or empty value are refused by name")
+        expect(host_config_refusal(0u32, 0u32, 33188u32, "[\"provisionInputDir\"]\n")).to_equal("host-config-shape")
+        expect(host_config_refusal(0u32, 0u32, 33188u32, "SIMPLE_HOST_EXEC: \"/bin/true\"\n")).to_equal(
+            "host-config-unknown-key:SIMPLE_HOST_EXEC")
+        expect(host_config_refusal(0u32, 0u32, 33188u32, "provisionInputDir: 7\n")).to_equal(
+            "host-config-value:provisionInputDir")
+        expect(host_config_refusal(0u32, 0u32, 33188u32, "provisionInputDir: \"\"\n")).to_equal(
+            "host-config-value:provisionInputDir")
+
+    it "refuses a missing file and a path that is not canonical, with no environment fallback":
+        step("An absent file is the typed missing refusal")
+        val missing = linux_host_config_load_injected_v1("/nonexistent/simple-host/host.sdn")
+        expect(missing.is_err()).to_equal(true)
+        expect(linux_host_config_error_code_v1(missing.unwrap_err())).to_equal("host-config-missing")
+        step("A relative, trailing-slash, doubled-slash, dot-dot or root-level path is refused")
+        for bad in ["", "host.sdn", "/etc/simple-host/", "/etc//host.sdn", "/etc/../host.sdn", "/host.sdn"]:
+            val refused = linux_host_config_load_injected_v1(bad)
+            expect(refused.is_err()).to_equal(true)
+            expect(linux_host_config_error_code_v1(refused.unwrap_err())).to_equal("host-config-path")
+        step("The reader never consults the process environment")
+        val source = file_read_text("src/lib/nogc_sync_mut/io/linux_host_config_v1.spl")
+        expect(source.contains("env_get")).to_equal(false)
+        expect(source.contains("env_vars")).to_equal(false)
+
+    it "loads an injected file owned by the caller and refuses it once its mode is private":
+        val directory = "/tmp/simple-linux-host-config-v1-spec-" + str(sosix_time_now_monotonic_ms())
+        val path = directory + "/host.sdn"
+        expect(dir_create_all(directory)).to_equal(true)
+        expect(package_chmod(directory, 0o755)).to_equal(0)
+        expect(file_atomic_write(path, HOST_CONFIG_GOOD)).to_equal(true)
+        step("Mode 0644, owner is the caller: accepted through the retained descriptor")
+        expect(package_chmod(path, 0o644)).to_equal(0)
+        val loaded = linux_host_config_load_injected_v1(path)
+        expect(loaded.is_ok()).to_equal(true)
+        expect(linux_host_config_text_v1(loaded.unwrap(), "provisionController")).to_equal("fixture-controller")
+        step("Mode 0600: refused, never read as configuration")
+        expect(package_chmod(path, 0o600)).to_equal(0)
+        val refused = linux_host_config_load_injected_v1(path)
+        expect(refused.is_err()).to_equal(true)
+        expect(linux_host_config_error_code_v1(refused.unwrap_err())).to_equal("host-config-owner-or-mode")

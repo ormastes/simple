@@ -3415,6 +3415,36 @@ impl Lowerer {
                 other => other,
             };
 
+            // `byte_len` / `char_count` exist only on text. When the unit's
+            // only free function of that name is one this module neither
+            // defines nor imports, and no type declares such a method, the
+            // receiver can only be a text: say so, so the call lowers as the
+            // typed `str.byte_len` builtin instead of a bare name that codegen
+            // binds to that out-of-scope function. See
+            // `Lowerer::flatten_free_fn_out_of_scope`.
+            let text_only_receiver = matches!(method, "byte_len" | "char_count")
+                && hir_args.is_empty()
+                && dict_kv.is_none()
+                && self.flatten_free_fn_out_of_scope(method)
+                && !self
+                    .method_return_types
+                    .keys()
+                    .any(|key| key.rsplit_once('.').is_some_and(|(_, leaf)| leaf == method));
+            if text_only_receiver {
+                let mut text_receiver = receiver.clone();
+                text_receiver.ty = TypeId::STRING;
+                return Ok(Some(HirExpr {
+                    kind: HirExprKind::MethodCall {
+                        receiver: Box::new(text_receiver),
+                        method: method.to_string(),
+                        args: hir_args,
+                        dispatch: DispatchMode::Static,
+                        generic_args: Vec::new(),
+                    },
+                    ty: TypeId::I64,
+                }));
+            }
+
             if let Some(ty) = result_ty {
                 return Ok(Some(HirExpr {
                     kind: HirExprKind::MethodCall {

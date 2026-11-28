@@ -1,0 +1,701 @@
+# Unified Multi-Script Web Engine
+#
+# Executes `<script>` / `text/javascript` (JS Engine), `<script type="text/simple">`
+# (in-process Simple Script DOM DSL), and `<script type="text/agent">` /
+# `application/agent-script` (Agent Script automation) in document order against
+# one shared `BeDomNode` tree, commits DOM mutations back to serialized HTML,
+# and renders software RGBA/ARGB pixels via `simple_web_html_layout_renderer`.
+
+use std.gc_async_mut.gpu.browser_js_host.{
+    JsRuntime, JsValue, js_runtime_with_default_logger,
+    js_to_string, to_boolean, browser_js_camel_to_kebab,
+    browser_js_dom_shim_source,
+    NATIVE_DOM_EVENT_TARGET_ADD, NATIVE_DOM_EVENT_TARGET_REMOVE,
+    NATIVE_DOM_EVENT_TARGET_DISPATCH
+}
+use std.gc_async_mut.gpu.browser_engine.browser_script_render.{
+    browser_renderer_parse_html_with_scripts
+}
+use std.gc_async_mut.gpu.browser_engine.dom.{
+    BeDomNode, be_dom_find_by_id, be_dom_query_selector,
+    be_dom_query_selector_all, be_dom_get_text_content
+}
+use std.gc_async_mut.gpu.browser_engine.dom_accessors.{
+    be_dom_get_attr, be_dom_set_attr, be_dom_get_style, be_dom_find_by_tag,
+    be_dom_serialize_html, be_dom_serialize_html_for_render
+}
+use std.gc_async_mut.gpu.browser_engine.html_tree_builder.{
+    html_tree_builder_build
+}
+use std.gc_async_mut.gpu.browser_engine.script.agent_script.{
+    AgentScriptExecutor, AgentScriptReceipt, agent_script_is_type,
+    agent_parse_line_tokens, dom_merge_inline_style, dom_parse_fragment_children,
+    dom_tree_apply_selector_op
+}
+use std.gc_async_mut.gpu.browser_engine.script.js_transpiler.{
+    js_is_javascript, js_is_simple
+}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_software_pixels_with_images
+}
+use std.common.gpu.simpleos_host_gpu_draw_ir.{SimpleOsHostGpuImageResource}
+
+# reason: multi-script render result mirrors BeScriptRenderResult viewport dims and script counters
+# @allow(primitive_api)
+pub class WebMultiScriptRenderResult:
+    pixels: [u32]
+    width: i32
+    height: i32
+    mutated_html: text
+    render_html: text
+    scripts_executed: i64
+    js_scripts_run: i64
+    simple_scripts_run: i64
+    agent_scripts_run: i64
+    agent_receipt: AgentScriptReceipt
+    logs: [text]
+    errors: [text]
+    ok: bool
+
+class _JsDomCursor:
+    runtime: JsRuntime
+    seed_id: i64
+    count: i64
+    body_idx: i64
+    body_obj_id: i64
+    doc_elem_idx: i64
+
+fn _bind_dom_event_methods(rt: JsRuntime, obj_id: i64) -> JsRuntime:
+    var runtime = rt
+    runtime._define_method_on(obj_id, "addEventListener", NATIVE_DOM_EVENT_TARGET_ADD)
+    runtime._define_method_on(obj_id, "removeEventListener", NATIVE_DOM_EVENT_TARGET_REMOVE)
+    runtime._define_method_on(obj_id, "dispatchEvent", NATIVE_DOM_EVENT_TARGET_DISPATCH)
+    runtime
+
+fn _project_node_to_js(cursor: _JsDomCursor, node: BeDomNode, parent_idx: i64):
+    if node.tag_name == "#document":
+        for child in node.children:
+            _project_node_to_js(cursor, child, -1)
+        return
+    val idx = cursor.count
+    cursor.count = idx + 1
+    var runtime = cursor.runtime
+    var obj_id: i64 = -1
+    if node.tag_name == "#text":
+        obj_id = runtime.create_host_object()
+        runtime = _bind_dom_event_methods(runtime, obj_id)
+        runtime.set_host_property(obj_id, "nodeType", JsValue.Number(v: 3.0))
+        runtime.set_host_property(obj_id, "tagName", JsValue.String(v: "#text"))
+        runtime.set_host_property(obj_id, "nodeName", JsValue.String(v: "#text"))
+        runtime.set_host_property(obj_id, "data", JsValue.String(v: node.data))
+        runtime.set_host_property(obj_id, "nodeValue", JsValue.String(v: node.data))
+        runtime.set_host_property(obj_id, "textContent", JsValue.String(v: node.data))
+        runtime.set_host_property(obj_id, "__simple_idx", JsValue.Number(v: idx.to_f64()))
+        runtime.set_host_property(obj_id, "__simple_parent_idx", JsValue.Number(v: parent_idx.to_f64()))
+    else:
+        val tag_lower = node.tag_name.lower()
+        val tag_upper = tag_lower.upper()
+        obj_id = runtime.create_host_object()
+        runtime = _bind_dom_event_methods(runtime, obj_id)
+        runtime.set_host_property(obj_id, "nodeType", JsValue.Number(v: 1.0))
+        runtime.set_host_property(obj_id, "tagName", JsValue.String(v: tag_upper))
+        runtime.set_host_property(obj_id, "nodeName", JsValue.String(v: tag_upper))
+        val id_val = be_dom_get_attr(node, "id")
+        val cls_val = be_dom_get_attr(node, "class")
+        val txt_val = be_dom_get_text_content(node)
+        val val_attr = be_dom_get_attr(node, "value")
+        val is_checked = node.has_attr("checked")
+        runtime.set_host_property(obj_id, "id", JsValue.String(v: id_val))
+        runtime.set_host_property(obj_id, "className", JsValue.String(v: cls_val))
+        runtime.set_host_property(obj_id, "textContent", JsValue.String(v: txt_val))
+        runtime.set_host_property(obj_id, "value", JsValue.String(v: val_attr))
+        runtime.set_host_property(obj_id, "checked", JsValue.Boolean(v: is_checked))
+        runtime.set_host_property(obj_id, "__simple_idx", JsValue.Number(v: idx.to_f64()))
+        runtime.set_host_property(obj_id, "__simple_parent_idx", JsValue.Number(v: parent_idx.to_f64()))
+        val attrs_id = runtime.create_host_object()
+        for attr_name in node.attr_names():
+            runtime.set_host_property(attrs_id, attr_name, JsValue.String(v: node.get_attr(attr_name)))
+        runtime.set_host_property(obj_id, "__attrs", JsValue.Object(id: attrs_id))
+        val style_map_id = runtime.create_host_object()
+        val inline_style = node.get_attr("style")
+        if inline_style != "":
+            for decl in inline_style.split(";"):
+                val colon = decl.index_of(":") ?? -1
+                if colon > 0:
+                    val p = decl.slice(0, colon).trim().lower()
+                    val v = decl.slice(colon + 1, decl.byte_len()).trim()
+                    if p != "" and v != "":
+                        runtime.set_host_property(style_map_id, p, JsValue.String(v: v))
+        runtime.set_host_property(obj_id, "__styles", JsValue.Object(id: style_map_id))
+        if cursor.doc_elem_idx < 0 and parent_idx < 0:
+            cursor.doc_elem_idx = idx
+        if tag_lower == "html":
+            cursor.doc_elem_idx = idx
+        if tag_lower == "body":
+            cursor.body_idx = idx
+            cursor.body_obj_id = obj_id
+    runtime.set_host_property(cursor.seed_id, "n" + idx.to_text(), JsValue.Object(id: obj_id))
+    cursor.runtime = runtime
+    for child in node.children:
+        _project_node_to_js(cursor, child, idx)
+
+fn _ensure_js_runtime(rt_opt: JsRuntime?, dom: BeDomNode) -> JsRuntime:
+    var runtime = if val Some(existing) = rt_opt:
+        existing
+    else:
+        val fresh = js_runtime_with_default_logger("multi-script")
+        val loc_id = fresh.create_host_object()
+        fresh.set_host_property(loc_id, "href", JsValue.String(v: "about:blank"))
+        val doc_id = fresh.create_host_object()
+        var r = _bind_dom_event_methods(fresh, doc_id)
+        r.set_host_property(doc_id, "location", JsValue.Object(id: loc_id))
+        val win_id = r.create_host_object()
+        r = _bind_dom_event_methods(r, win_id)
+        r.set_host_property(win_id, "document", JsValue.Object(id: doc_id))
+        r.set_host_property(win_id, "window", JsValue.Object(id: win_id))
+        r.set_host_property(win_id, "self", JsValue.Object(id: win_id))
+        r.set_host_property(win_id, "globalThis", JsValue.Object(id: win_id))
+        r.interpreter.define_global_value("window", JsValue.Object(id: win_id))
+        r.interpreter.define_global_value("self", JsValue.Object(id: win_id))
+        r.interpreter.define_global_value("globalThis", JsValue.Object(id: win_id))
+        r.interpreter.define_global_value("document", JsValue.Object(id: doc_id))
+        var interp = r.interpreter
+        interp.host_document_id = doc_id
+        interp.host_window_id = win_id
+        interp.host_location_id = loc_id
+        r.interpreter = interp
+        val _ = r.eval(browser_js_dom_shim_source())
+        r
+    val doc_id = runtime.interpreter.host_document_id
+    val seed_id = runtime.create_host_object()
+    var cursor = _JsDomCursor(
+        runtime: runtime,
+        seed_id: seed_id,
+        count: 0,
+        body_idx: -1,
+        body_obj_id: -1,
+        doc_elem_idx: -1
+    )
+    _project_node_to_js(cursor, dom, -1)
+    runtime = cursor.runtime
+    runtime.set_host_property(seed_id, "count", JsValue.Number(v: cursor.count.to_f64()))
+    runtime.set_host_property(seed_id, "bodyIdx", JsValue.Number(v: cursor.body_idx.to_f64()))
+    runtime.set_host_property(seed_id, "docElemIdx", JsValue.Number(v: cursor.doc_elem_idx.to_f64()))
+    runtime.set_host_property(doc_id, "__simple_dom_seed", JsValue.Object(id: seed_id))
+    if cursor.body_obj_id >= 0:
+        runtime.set_host_property(doc_id, "body", JsValue.Object(id: cursor.body_obj_id))
+        var interp2 = runtime.interpreter
+        interp2.host_body_id = cursor.body_obj_id
+        runtime.interpreter = interp2
+    val _ = runtime.eval("__simple_hyd_dom();")
+    runtime
+
+fn _is_js_style_builtin_key(k: text) -> bool:
+    (
+        k == "__el" or k == "setProperty" or k == "getPropertyValue" or
+        k == "removeProperty" or k == "cssText"
+    )
+
+fn _js_array_ids(rt: JsRuntime, arr_val: JsValue) -> [i64]:
+    var ids: [i64] = []
+    match arr_val:
+        JsValue.Array(arr_id):
+            val len_val = rt.get_host_property(arr_id, "length")
+            val arr_len = match len_val:
+                JsValue.Number(n): n.to_i64()
+                _: 0
+            var i: i64 = 0
+            while i < arr_len:
+                val elem = rt.get_host_property(arr_id, "{i}")
+                match elem:
+                    JsValue.Object(cid): ids.push(cid)
+                    _: pass_dn
+                i = i + 1
+        _: pass_dn
+    ids
+
+fn _js_obj_text_prop(rt: JsRuntime, obj_id: i64, prop: text) -> text?:
+    val v = rt.get_host_property(obj_id, prop)
+    match v:
+        JsValue.String(s): Some(s)
+        JsValue.Number(_): Some(js_to_string(v))
+        JsValue.Boolean(_): Some(js_to_string(v))
+        _: None
+
+fn _extract_js_node_recursive(rt: JsRuntime, obj_id: i64, next_id: i64) -> (BeDomNode, i64):
+    val ntype = match rt.get_host_property(obj_id, "nodeType"):
+        JsValue.Number(n): n.to_i64()
+        _: 1
+    if ntype == 3:
+        val text_data = _js_obj_text_prop(rt, obj_id, "data") ?? (_js_obj_text_prop(rt, obj_id, "textContent") ?? "")
+        return (BeDomNode.text_node(next_id, text_data), next_id + 1)
+
+    val raw_tag = (_js_obj_text_prop(rt, obj_id, "tagName") ?? "div").lower()
+    val tag = if raw_tag == "": "div" else: raw_tag
+    var node = BeDomNode.element_with_id(next_id, tag)
+    var nid = next_id + 1
+
+    # 1. Copy attributes stored in __attrs (skip Undefined / deleted attrs)
+    val attrs_id = match rt.get_host_property(obj_id, "__attrs"):
+        JsValue.Object(aid): aid
+        _: -1
+    if attrs_id >= 0:
+        val attr_obj = rt.interpreter.object_store.get_object(attrs_id)
+        for prop in attr_obj.properties:
+            if not prop.key.starts_with("__"):
+                match prop.value:
+                    JsValue.Undefined: pass_dn
+                    JsValue.Null: pass_dn
+                    _: node.set_attr(prop.key, js_to_string(prop.value))
+
+    # 2. Direct property overrides on element: id, className, value, checked
+    if val Some(id_val) = _js_obj_text_prop(rt, obj_id, "id"):
+        if id_val != "":
+            node.set_attr("id", id_val)
+        elif node.has_attr("id"):
+            node.remove_attr("id")
+    if val Some(cls_val) = _js_obj_text_prop(rt, obj_id, "className"):
+        if cls_val != "":
+            node.set_attr("class", cls_val)
+        elif node.has_attr("class"):
+            node.remove_attr("class")
+    if tag == "input" or tag == "select" or tag == "option" or tag == "textarea":
+        if val Some(val_str) = _js_obj_text_prop(rt, obj_id, "value"):
+            if val_str != "" or node.has_attr("value"):
+                node.set_attr("value", val_str)
+        val chk_val = rt.get_host_property(obj_id, "checked")
+        match chk_val:
+            JsValue.Boolean(b):
+                if b:
+                    node.set_attr("checked", "checked")
+                else:
+                    node.remove_attr("checked")
+            _: pass_dn
+
+    # 3. Merge inline styles from __attrs["style"] + __styles + el.style properties
+    var merged_style = node.get_attr("style")
+    val styles_map_id = match rt.get_host_property(obj_id, "__styles"):
+        JsValue.Object(sid): sid
+        _: -1
+    if styles_map_id >= 0:
+        val sobj = rt.interpreter.object_store.get_object(styles_map_id)
+        for prop in sobj.properties:
+            if not prop.key.starts_with("__"):
+                match prop.value:
+                    JsValue.Undefined:
+                        merged_style = dom_merge_inline_style(merged_style, prop.key, "")
+                    JsValue.Null:
+                        merged_style = dom_merge_inline_style(merged_style, prop.key, "")
+                    _:
+                        merged_style = dom_merge_inline_style(merged_style, prop.key, js_to_string(prop.value))
+    val direct_style_id = match rt.get_host_property(obj_id, "style"):
+        JsValue.Object(dsid): dsid
+        _: -1
+    if direct_style_id >= 0:
+        val dsobj = rt.interpreter.object_store.get_object(direct_style_id)
+        for prop in dsobj.properties:
+            if not _is_js_style_builtin_key(prop.key) and not prop.key.starts_with("__"):
+                val kebab = browser_js_camel_to_kebab(prop.key)
+                match prop.value:
+                    JsValue.Undefined:
+                        merged_style = dom_merge_inline_style(merged_style, kebab, "")
+                    JsValue.Null:
+                        merged_style = dom_merge_inline_style(merged_style, kebab, "")
+                    _:
+                        merged_style = dom_merge_inline_style(merged_style, kebab, js_to_string(prop.value))
+    if merged_style != "":
+        node.set_attr("style", merged_style)
+    elif node.has_attr("style"):
+        node.remove_attr("style")
+
+    # 4. Children / innerHTML / direct textContent assignment
+    val init_inner = _js_obj_text_prop(rt, obj_id, "__simple_init_inner_html") ?? ""
+    if val Some(inner_html) = _js_obj_text_prop(rt, obj_id, "innerHTML"):
+        if inner_html != init_inner:
+            val frag = dom_parse_fragment_children(inner_html, nid)
+            var attached: [BeDomNode] = []
+            for fc in frag.0:
+                var c = fc
+                c.parent_id = node.node_id
+                attached.push(c)
+            node.children = attached
+            return (node, frag.1)
+
+    val child_ids = _js_array_ids(rt, rt.get_host_property(obj_id, "children"))
+    var extracted_children: [BeDomNode] = []
+    var children_text = ""
+    for cid in child_ids:
+        val child_res = _extract_js_node_recursive(rt, cid, nid)
+        var ch_node = child_res.0
+        ch_node.parent_id = node.node_id
+        nid = child_res.1
+        children_text = children_text + be_dom_get_text_content(ch_node)
+        extracted_children.push(ch_node)
+
+    val init_text = _js_obj_text_prop(rt, obj_id, "__simple_init_text") ?? ""
+    val cur_text = _js_obj_text_prop(rt, obj_id, "textContent") ?? children_text
+    val is_structural = (
+        tag == "html" or tag == "head" or tag == "body" or
+        tag == "style" or tag == "script"
+    )
+    if (
+        (not is_structural or extracted_children.len() == 0) and
+        cur_text != init_text and
+        cur_text != children_text
+    ):
+        if cur_text == "":
+            node.children = []
+        else:
+            var tn = BeDomNode.text_node(nid, cur_text)
+            tn.parent_id = node.node_id
+            nid = nid + 1
+            node.children = [tn]
+    else:
+        node.children = extracted_children
+
+    (node, nid)
+
+fn _extract_js_dom_to_bedom(rt: JsRuntime) -> BeDomNode:
+    val doc_id = rt.interpreter.host_document_id
+    var doc = BeDomNode.document()
+    val root_ids = _js_array_ids(rt, rt.get_host_property(doc_id, "__simple_roots"))
+    var next_id: i64 = 1
+    for rid in root_ids:
+        val res = _extract_js_node_recursive(rt, rid, next_id)
+        var ch = res.0
+        ch.parent_id = 0
+        doc.children.push(ch)
+        next_id = res.1
+    doc
+
+# --- In-process Simple Script DOM DSL evaluator (`<script type="text/simple">`) ---
+
+fn _simple_strip_quotes(s: text) -> text:
+    val t = s.trim()
+    if t.len() >= 2:
+        val first = t.slice(0, 1)
+        val last = t.slice(t.byte_len() - 1, t.byte_len())
+        if (first == "\"" and last == "\"") or (first == "'" and last == "'"):
+            return t.slice(1, t.byte_len() - 1)
+    t
+
+fn _simple_lookup_var(names: [text], values: [text], key: text) -> text?:
+    var i = names.len() - 1
+    while i >= 0:
+        if names[i] == key:
+            return Some(values[i])
+        i = i - 1
+    None
+
+fn _simple_interpolate(raw: text, names: [text], values: [text]) -> text:
+    var out = ""
+    var i = 0
+    val n = raw.byte_len()
+    while i < n:
+        val ch = raw.slice(i, i + 1)
+        if ch == "{{":
+            val rest = raw.slice(i + 1, n)
+            val close_rel = rest.index_of("}}") ?? -1
+            if close_rel > 0:
+                val var_name = rest.slice(0, close_rel).trim()
+                if val Some(v) = _simple_lookup_var(names, values, var_name):
+                    out = out + v
+                else:
+                    out = out + "{{" + var_name + "}}"
+                i = i + 1 + close_rel + 1
+                continue
+        out = out + ch
+        i = i + 1
+    out
+
+fn _simple_parse_call_args(inner: text) -> [text]:
+    var args: [text] = []
+    var cur = ""
+    var quote = ""
+    var i = 0
+    val n = inner.byte_len()
+    while i < n:
+        val ch = inner.slice(i, i + 1)
+        if quote != "":
+            cur = cur + ch
+            if ch == quote:
+                quote = ""
+        elif ch == "\"" or ch == "'":
+            quote = ch
+            cur = cur + ch
+        elif ch == ",":
+            args.push(cur.trim())
+            cur = ""
+        else:
+            cur = cur + ch
+        i = i + 1
+    if cur.trim() != "":
+        args.push(cur.trim())
+    args
+
+fn _simple_eval_expr(raw_expr: text, dom: BeDomNode, names: [text], values: [text]) -> text:
+    val expr = raw_expr.trim()
+    if expr == "":
+        return ""
+    if (expr.starts_with("\"") and expr.ends_with("\"")) or (expr.starts_with("'") and expr.ends_with("'")):
+        return _simple_interpolate(_simple_strip_quotes(expr), names, values)
+
+    # Built-in DOM queries: text_of(...), attr_of(...), count(...), count_matches(...), sum_attr(...), sum_text(...)
+    if expr.ends_with(")"):
+        val open_idx = expr.index_of("(") ?? -1
+        if open_idx > 0:
+            val fn_name = expr.slice(0, open_idx).trim()
+            val inner = expr.slice(open_idx + 1, expr.byte_len() - 1)
+            val cargs = _simple_parse_call_args(inner)
+            if fn_name == "text_of" and cargs.len() >= 1:
+                val sel = _simple_eval_expr(cargs[0], dom, names, values)
+                if val Some(node) = be_dom_query_selector(dom, sel):
+                    return be_dom_get_text_content(node).trim()
+                return ""
+            if fn_name == "attr_of" and cargs.len() >= 2:
+                val sel = _simple_eval_expr(cargs[0], dom, names, values)
+                val attr = _simple_eval_expr(cargs[1], dom, names, values)
+                if val Some(node) = be_dom_query_selector(dom, sel):
+                    return node.get_attr(attr)
+                return ""
+            if (fn_name == "count" or fn_name == "count_matches") and cargs.len() >= 1:
+                val sel = _simple_eval_expr(cargs[0], dom, names, values)
+                return "{be_dom_query_selector_all(dom, sel).len()}"
+            if fn_name == "sum_attr" and cargs.len() >= 2:
+                val sel = _simple_eval_expr(cargs[0], dom, names, values)
+                val attr = _simple_eval_expr(cargs[1], dom, names, values)
+                var total: i64 = 0
+                for m in be_dom_query_selector_all(dom, sel):
+                    total = total + (m.get_attr(attr).trim().to_i64() ?? 0)
+                return "{total}"
+            if fn_name == "sum_text" and cargs.len() >= 1:
+                val sel = _simple_eval_expr(cargs[0], dom, names, values)
+                var total: i64 = 0
+                for m in be_dom_query_selector_all(dom, sel):
+                    total = total + (be_dom_get_text_content(m).trim().to_i64() ?? 0)
+                return "{total}"
+            if fn_name == "upper" and cargs.len() >= 1:
+                return _simple_eval_expr(cargs[0], dom, names, values).upper()
+            if fn_name == "lower" and cargs.len() >= 1:
+                return _simple_eval_expr(cargs[0], dom, names, values).lower()
+            if fn_name == "trim" and cargs.len() >= 1:
+                return _simple_eval_expr(cargs[0], dom, names, values).trim()
+
+    # Variable lookup
+    if val Some(v) = _simple_lookup_var(names, values, expr):
+        return v
+
+    # Simple binary arithmetic (+, -, *) outside quotes
+    var op_pos: i64 = -1
+    var op_ch = ""
+    var quote = ""
+    var i = 0
+    while i < expr.byte_len():
+        val ch = expr.slice(i, i + 1)
+        if quote != "":
+            if ch == quote:
+                quote = ""
+        elif ch == "\"" or ch == "'":
+            quote = ch
+        elif (ch == "+" or ch == "-" or ch == "*") and i > 0:
+            op_pos = i
+            op_ch = ch
+            break
+        i = i + 1
+    if op_pos > 0:
+        val lhs = _simple_eval_expr(expr.slice(0, op_pos), dom, names, values)
+        val rhs = _simple_eval_expr(expr.slice(op_pos + 1, expr.byte_len()), dom, names, values)
+        val li = lhs.trim().to_i64()
+        val ri = rhs.trim().to_i64()
+        if op_ch == "+":
+            if val Some(a) = li:
+                if val Some(b) = ri:
+                    return "{a + b}"
+            return lhs + rhs
+        if op_ch == "-":
+            if val Some(a) = li:
+                if val Some(b) = ri:
+                    return "{a - b}"
+        if op_ch == "*":
+            if val Some(a) = li:
+                if val Some(b) = ri:
+                    return "{a * b}"
+    expr
+
+fn _execute_simple_script_on_dom(dom_in: BeDomNode, source: text, next_id_in: i64) -> (BeDomNode, i64, [text], [text]):
+    var dom = dom_in
+    var next_id = next_id_in
+    var logs: [text] = []
+    var errors: [text] = []
+    var var_names: [text] = []
+    var var_vals: [text] = []
+
+    for raw_line in source.split("\n"):
+        val line = raw_line.trim()
+        if line == "" or line.starts_with("#") or line.starts_with("//"):
+            continue
+
+        if line.starts_with("val ") or line.starts_with("var ") or line.starts_with("let "):
+            val tail = line.slice(4, line.byte_len()).trim()
+            val eq = tail.index_of("=") ?? -1
+            if eq > 0:
+                val name = tail.slice(0, eq).trim()
+                val rhs = tail.slice(eq + 1, tail.byte_len()).trim()
+                var_names.push(name)
+                var_vals.push(_simple_eval_expr(rhs, dom, var_names, var_vals))
+                continue
+
+        if line.starts_with("body_text "):
+            val text_val = _simple_eval_expr(line.slice(10, line.byte_len()), dom, var_names, var_vals)
+            val res = dom_tree_apply_selector_op(dom, "body", "set_text", "", text_val, next_id)
+            dom = res.0
+            next_id = res.2
+            continue
+
+        if line.starts_with("body_html "):
+            val html_val = _simple_eval_expr(line.slice(10, line.byte_len()), dom, var_names, var_vals)
+            val res = dom_tree_apply_selector_op(dom, "body", "set_html", "", html_val, next_id)
+            dom = res.0
+            next_id = res.2
+            continue
+
+        if line.starts_with("title "):
+            val t_val = _simple_eval_expr(line.slice(6, line.byte_len()), dom, var_names, var_vals)
+            val res = dom_tree_apply_selector_op(dom, "title", "set_text", "", t_val, next_id)
+            dom = res.0
+            next_id = res.2
+            continue
+
+        val toks = agent_parse_line_tokens(line)
+        if toks.len() == 0:
+            continue
+        val cmd = toks[0].lower()
+
+        if cmd == "log":
+            val msg = if toks.len() > 1: _simple_interpolate(toks[1], var_names, var_vals) else: ""
+            logs.push(msg)
+            continue
+
+        if cmd == "set_text" or cmd == "set_html" or cmd == "append_html" or cmd == "add_class" or cmd == "remove_class" or cmd == "toggle_class":
+            if toks.len() >= 3:
+                val sel = _simple_interpolate(toks[1], var_names, var_vals)
+                val v = _simple_interpolate(toks[2], var_names, var_vals)
+                val res = dom_tree_apply_selector_op(dom, sel, cmd, "", v, next_id)
+                dom = res.0
+                next_id = res.2
+                if not res.1:
+                    errors.push("simple script {cmd}: selector not found: {sel}")
+            else:
+                errors.push("simple script {cmd}: missing arguments")
+            continue
+
+        if cmd == "set_attr" or cmd == "set_style":
+            if toks.len() >= 4:
+                val sel = _simple_interpolate(toks[1], var_names, var_vals)
+                val k = _simple_interpolate(toks[2], var_names, var_vals)
+                val v = _simple_interpolate(toks[3], var_names, var_vals)
+                val res = dom_tree_apply_selector_op(dom, sel, cmd, k, v, next_id)
+                dom = res.0
+                next_id = res.2
+                if not res.1:
+                    errors.push("simple script {cmd}: selector not found: {sel}")
+            else:
+                errors.push("simple script {cmd}: missing arguments")
+            continue
+
+        errors.push("simple script unsupported line: {line}")
+
+    (dom, next_id, logs, errors)
+
+# --- Unified multi-script execution & software render entrypoint ---
+
+# reason: mirrors `simple_web_layout_render_html_software_pixels_with_images(html, width, height, images)`
+# @allow(primitive_api)
+pub fn web_multi_script_run_and_render_html(
+    html: text,
+    width: i32,
+    height: i32,
+    images: [SimpleOsHostGpuImageResource]
+) -> WebMultiScriptRenderResult:
+    var dom = html_tree_builder_build(html)
+    val parsed = browser_renderer_parse_html_with_scripts(html)
+    var js_rt: JsRuntime? = None
+    var next_id: i64 = 10000
+    var scripts_executed: i64 = 0
+    var js_scripts_run: i64 = 0
+    var simple_scripts_run: i64 = 0
+    var agent_scripts_run: i64 = 0
+    var combined_receipt = AgentScriptReceipt.empty()
+    var logs: [text] = []
+    var errors: [text] = []
+
+    var i: i64 = 0
+    while i < parsed.scripts.len():
+        val body = parsed.scripts[i]
+        val stype = if i < parsed.script_types.len(): parsed.script_types[i] else: ""
+        i = i + 1
+        if body.trim() == "":
+            continue
+
+        if agent_script_is_type(stype):
+            var exec = AgentScriptExecutor.new(dom)
+            exec.next_node_id = next_id
+            val rec = exec.execute(body)
+            dom = exec.dom
+            next_id = exec.next_node_id
+            agent_scripts_run = agent_scripts_run + 1
+            scripts_executed = scripts_executed + 1
+            combined_receipt.steps_run = combined_receipt.steps_run + rec.steps_run
+            combined_receipt.passed = combined_receipt.passed + rec.passed
+            combined_receipt.failed = combined_receipt.failed + rec.failed
+            combined_receipt.mutations = combined_receipt.mutations + rec.mutations
+            if not rec.ok:
+                combined_receipt.ok = false
+            for l in rec.logs:
+                combined_receipt.logs.push(l)
+                logs.push(l)
+            for e in rec.errors:
+                combined_receipt.errors.push(e)
+                errors.push(e)
+        elif js_is_simple(stype):
+            val ss = _execute_simple_script_on_dom(dom, body, next_id)
+            dom = ss.0
+            next_id = ss.1
+            simple_scripts_run = simple_scripts_run + 1
+            scripts_executed = scripts_executed + 1
+            for l in ss.2:
+                logs.push(l)
+            for e in ss.3:
+                errors.push(e)
+        elif js_is_javascript(stype):
+            var rt = _ensure_js_runtime(js_rt, dom)
+            match rt.eval(body):
+                Ok(_):
+                    pass_dn
+                Err(e):
+                    errors.push("js error: " + e.message)
+            dom = _extract_js_dom_to_bedom(rt)
+            js_rt = Some(rt)
+            js_scripts_run = js_scripts_run + 1
+            scripts_executed = scripts_executed + 1
+
+    val mutated_html = be_dom_serialize_html(dom)
+    val render_html = be_dom_serialize_html_for_render(dom)
+    val pixels = simple_web_layout_render_html_software_pixels_with_images(
+        render_html, width, height, images
+    )
+    WebMultiScriptRenderResult(
+        pixels: pixels,
+        width: width,
+        height: height,
+        mutated_html: mutated_html,
+        render_html: render_html,
+        scripts_executed: scripts_executed,
+        js_scripts_run: js_scripts_run,
+        simple_scripts_run: simple_scripts_run,
+        agent_scripts_run: agent_scripts_run,
+        agent_receipt: combined_receipt,
+        logs: logs,
+        errors: errors,
+        ok: errors.len() == 0 and combined_receipt.ok
+    )

@@ -216,14 +216,18 @@ fn handle_action(state: UIState, name: text) -> UIState:
                 tabs_node.set_prop("active_index", idx_str)
         return state
 
-    # Handle tree node toggle actions (toggle_<node_id>)
+    # Handle widget toggle actions (toggle_<node_id>)
     if name.starts_with("toggle_"):
         val node_id = name.slice(7, name.byte_len())
         val node = state.tree.find_widget(node_id)
         if node != nil:
-            val current = node.get_prop("expanded")
+            val prop_name = match node.kind_name():
+                "checkbox": "checked"
+                "switch": "on"
+                _: "expanded"
+            val current = node.get_prop(prop_name)
             val new_val = if current == "true": "false" else: "true"
-            node.set_prop("expanded", new_val)
+            node.set_prop(prop_name, new_val)
         return state
 
     # Handle table sort: "sort_col_N" -> toggle sort on column N
@@ -397,17 +401,53 @@ fn handle_composition_commit(state: UIState, text: text) -> UIState:
     widget_dispatch_composition_commit(state.focused_id, text)
     return state
 
+fn _is_focusable_kind(kind: text) -> bool:
+    (kind == "button" or kind == "checkbox" or kind == "radio" or
+     kind == "radio_button" or kind == "input" or kind == "textfield" or
+     kind == "textarea" or kind == "dropdown" or kind == "list" or
+     kind == "tabs" or kind == "tab_bar" or kind == "switch" or
+     kind == "segmented_control" or kind == "search_bar" or
+     kind == "command_bar" or kind == "menubar" or kind == "tree" or
+     kind == "treenode" or kind == "scroll")
+
+fn _is_widget_focusable(node: WidgetNode) -> bool:
+    if not node.is_visible():
+        return false
+    if node.get_prop("disabled") == "true":
+        return false
+    val explicit = node.get_prop("focusable")
+    if explicit == "false":
+        return false
+    if explicit == "true" or node.get_prop("tab_index") != "":
+        return true
+    _is_focusable_kind(node.kind_name())
+
+fn _transition_focus(state: UIState, next_id: text) -> UIState:
+    if state.focused_id != "" and state.focused_id != next_id:
+        val prev = WidgetNode(id: state.focused_id)
+        prev.set_prop("ui_focus", "false")
+        prev.set_prop("preedit", "")
+    if next_id != "":
+        WidgetNode(id: next_id).set_prop("ui_focus", "true")
+    UIState(
+        tree: state.tree,
+        mode: state.mode,
+        focused_id: next_id,
+        command_buffer: state.command_buffer
+    )
+
 fn handle_focus_event(state: UIState, target_id: text, kind: text) -> UIState:
     if kind == "blur":
+        if target_id != "":
+            val blurred = WidgetNode(id: target_id)
+            blurred.set_prop("ui_focus", "false")
+            blurred.set_prop("preedit", "")
+        if target_id == "" or state.focused_id == target_id:
+            return _transition_focus(state, "")
         return state
     val target = state.tree.find_widget(target_id)
-    if target != nil:
-        return UIState(
-            tree: state.tree,
-            mode: state.mode,
-            focused_id: target_id,
-            command_buffer: state.command_buffer
-        )
+    if target != nil and _is_widget_focusable(target):
+        return _transition_focus(state, target_id)
     state
 
 fn handle_input_change(state: UIState, target_id: text, value: text) -> UIState:
@@ -442,12 +482,7 @@ fn focus_next(state: UIState) -> UIState:
         return state
 
     val next_id = get_next_id(focusable, state.focused_id)
-    return UIState(
-        tree: state.tree,
-        mode: state.mode,
-        focused_id: next_id,
-        command_buffer: state.command_buffer
-    )
+    _transition_focus(state, next_id)
 
 fn focus_prev(state: UIState) -> UIState:
     """Move focus to the previous widget (tab_index order)."""
@@ -456,18 +491,13 @@ fn focus_prev(state: UIState) -> UIState:
         return state
 
     val prev_id = get_prev_id(focusable, state.focused_id)
-    return UIState(
-        tree: state.tree,
-        mode: state.mode,
-        focused_id: prev_id,
-        command_buffer: state.command_buffer
-    )
+    _transition_focus(state, prev_id)
 
 fn get_focusable_ids(ids: [text]) -> [text]:
     """Filter to only focusable widget IDs (non-empty)."""
     var result: [text] = []
     for id in ids:
-        if id != "":
+        if id != "" and _is_widget_focusable(WidgetNode(id: id)):
             result = result.push(id)
     return result
 
@@ -485,12 +515,14 @@ fn get_focusable_ordered(tree: UITree) -> [text]:
     var pos = 0
     for id in ids:
         if id != "":
-            val raw = WidgetNode(id: id).get_prop("tab_index")
-            var key = pos
-            if raw != "":
-                key = (raw.to_int() ?? pos.to_i64()).to_i32()
-            f_ids = f_ids.push(id)
-            f_keys = f_keys.push(key)
+            val node = WidgetNode(id: id)
+            if _is_widget_focusable(node):
+                val raw = node.get_prop("tab_index")
+                var key = pos
+                if raw != "":
+                    key = (raw.to_int() ?? pos.to_i64()).to_i32()
+                f_ids = f_ids.push(id)
+                f_keys = f_keys.push(key)
             pos = pos + 1
     val n = f_ids.len()
     # Stable selection sort: scanning candidates in ascending original index

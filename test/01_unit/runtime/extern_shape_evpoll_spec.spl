@@ -1,0 +1,40 @@
+# Purpose and audience: executable specification evidence for the owning engineering team.
+# @req REQ-SSPEC-RUNTIME
+#
+# Extern return-shape canonicalisation: rt_event_loop_poll.
+#   The runtime (C runtime_native.c, Rust runtime net.rs, codegen spec) returns an
+#   i64 READY COUNT; ready fds are read back with rt_event_loop_poll_get_fd(i).
+#   The canonical typed accessor is platform_event.event_loop_poll_ready, which
+#   turns that into the flat [i64] (fd, ready, token) triple array.
+use std.nogc_async_mut.io.platform_event.{event_loop_poll_ready}
+
+@unsafe(reason: "raw event loop create ABI", capabilities: [ffi])
+extern fn rt_event_loop_create() -> i64
+@unsafe(reason: "raw event loop poll ABI: returns the ready count", capabilities: [ffi])
+extern fn rt_event_loop_poll(loop_fd: i64, max_events: i64, timeout_ms: i64) -> i64
+@unsafe(reason: "raw event loop close ABI", capabilities: [ffi])
+extern fn rt_event_loop_close(loop_fd: i64) -> bool
+
+describe "extern return shapes: rt_event_loop_poll":
+    it "raw rt_event_loop_poll returns an i64 count of 0 on an idle loop":
+        step("create a loop, poll without blocking")
+        val lp = unsafe(capabilities: [ffi]):
+            rt_event_loop_create()
+        val n = unsafe(capabilities: [ffi]):
+            rt_event_loop_poll(lp, 8, 0)
+        unsafe(capabilities: [ffi]):
+            rt_event_loop_close(lp)
+        expect(n).to_equal(0)
+
+    it "event_loop_poll_ready yields an empty triple array on an idle loop":
+        step("the typed accessor wraps count + get_fd")
+        val lp = unsafe(capabilities: [ffi]):
+            rt_event_loop_create()
+        val ready = event_loop_poll_ready(lp, 8, 0)
+        unsafe(capabilities: [ffi]):
+            rt_event_loop_close(lp)
+        expect(ready.len()).to_equal(0)
+
+    it "event_loop_poll_ready rejects an invalid handle with an empty array":
+        step("handle -1 is not a loop")
+        expect(event_loop_poll_ready(-1, 8, 0).len()).to_equal(0)

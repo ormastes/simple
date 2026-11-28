@@ -59,6 +59,7 @@ pub mod process;
 #[cfg(target_os = "macos")]
 pub mod process_observation_v4;
 pub mod process_owned_v3;
+pub mod privdrop_v1;
 pub mod pty;
 pub mod time;
 pub mod math;
@@ -1667,6 +1668,24 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_file_lock_owned_acquire_v2", file_io::rt_file_lock_owned_acquire_v2);
     insert_simple!("rt_file_lock_owned_state_v2", file_io::rt_file_lock_owned_state_v2);
     insert_simple!("rt_file_lock_owned_release_v2", file_io::rt_file_lock_owned_release_v2);
+    insert_simple!("rt_privcred_new_v1", privdrop_v1::rt_privcred_new_v1);
+    insert_simple!("rt_privcred_from_user_v1", privdrop_v1::rt_privcred_from_user_v1);
+    insert_simple!("rt_privcred_add_group_v1", privdrop_v1::rt_privcred_add_group_v1);
+    insert_simple!("rt_privcred_uid_v1", privdrop_v1::rt_privcred_uid_v1);
+    insert_simple!("rt_privcred_gid_v1", privdrop_v1::rt_privcred_gid_v1);
+    insert_simple!("rt_privcred_group_count_v1", privdrop_v1::rt_privcred_group_count_v1);
+    insert_simple!("rt_privcred_group_at_v1", privdrop_v1::rt_privcred_group_at_v1);
+    insert_simple!("rt_privcred_drop_self_v1", privdrop_v1::rt_privcred_drop_self_v1);
+    insert_simple!("rt_privcred_free_v1", privdrop_v1::rt_privcred_free_v1);
+    insert_simple!("rt_privspawn_new_v1", privdrop_v1::rt_privspawn_new_v1);
+    insert_simple!("rt_privspawn_arg_v1", privdrop_v1::rt_privspawn_arg_v1);
+    insert_simple!("rt_privspawn_env_v1", privdrop_v1::rt_privspawn_env_v1);
+    insert_simple!("rt_privspawn_cred_v1", privdrop_v1::rt_privspawn_cred_v1);
+    insert_simple!("rt_privspawn_join_procs_v1", privdrop_v1::rt_privspawn_join_procs_v1);
+    insert_simple!("rt_privspawn_new_session_v1", privdrop_v1::rt_privspawn_new_session_v1);
+    insert_simple!("rt_privspawn_run_v1", privdrop_v1::rt_privspawn_run_v1);
+    insert_simple!("rt_privspawn_free_v1", privdrop_v1::rt_privspawn_free_v1);
+    insert_simple!("rt_privspawn_wait_v1", privdrop_v1::rt_privspawn_wait_v1);
     insert_simple!("rt_file_write_bytes", file_io::rt_file_write_bytes);
     insert_simple!("rt_file_write_bytes_array", file_io::rt_file_write_bytes);
     insert_simple!("rt_file_wrap_smf_dynlib", file_io::rt_file_wrap_smf_dynlib);
@@ -2157,6 +2176,12 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     // doc/08_tracking/bug/interpreter_sffi_missing_piped_process_externs_2026-07-29.md
     insert_simple!("rt_process_spawn_piped", system::rt_process_spawn_piped);
     insert_simple!("rt_process_spawn_piped_generation_v1", system::rt_process_spawn_piped_generation_v1);
+    insert_simple!("rt_process_spawn_piped_split_v1", system::rt_process_spawn_piped_split_v1);
+    insert_simple!("rt_process_read_stdout_bytes_v1", system::rt_process_read_stdout_bytes_v1);
+    insert_simple!("rt_process_read_stderr_bytes_v1", system::rt_process_read_stderr_bytes_v1);
+    insert_simple!("rt_process_read_stderr", system::rt_process_read_stderr);
+    insert_simple!("rt_process_stderr_state_v1", system::rt_process_stderr_state_v1);
+    insert_simple!("rt_process_write_stdin_bytes_some_v1", system::rt_process_write_stdin_bytes_some_v1);
     insert_simple!("rt_process_piped_pid_for_generation_v1", system::rt_process_piped_pid_for_generation_v1);
     insert_simple!("rt_process_read_stdout_ref_v1", system::rt_process_read_stdout_ref_v1);
     insert_simple!("rt_process_stdout_state_ref_v1", system::rt_process_stdout_state_ref_v1);

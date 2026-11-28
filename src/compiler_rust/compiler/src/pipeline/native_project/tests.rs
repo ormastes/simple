@@ -5761,6 +5761,54 @@ fn test_build_use_map_glob_import_populates_symbol_entries() {
     assert_eq!(use_map.get("log_info"), Some(&expected));
 }
 
+/// seed_free_fn_byte_len_hijacks_text_byte_len_stage2_scv_cold_init_2026-11-28:
+/// the use map's bare multi-candidate scan brings in names the `use` did not
+/// write. It must not do so for a text-only builtin: importing `helper` from a
+/// module that also owns a free `byte_len` must not put `byte_len` in scope,
+/// while naming it in the `use` still does. `dup_name` is the control showing
+/// the scan itself still runs.
+#[test]
+fn use_map_bare_scan_never_imports_text_only_builtin_names() {
+    let temp = tempfile::tempdir().unwrap();
+    let src_root = temp.path().join("src");
+    let bytes_path = src_root.join("util/bytes.spl");
+    let other_path = src_root.join("util/other.spl");
+    let consumer_path = src_root.join("app/consumer.spl");
+    std::fs::create_dir_all(bytes_path.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(consumer_path.parent().unwrap()).unwrap();
+    std::fs::write(
+        &bytes_path,
+        "fn byte_len(data: [u8]) -> i64:\n    99\n\nfn dup_name() -> i64:\n    1\n\nfn helper() -> i64:\n    2\n",
+    )
+    .unwrap();
+    // A second candidate for both names makes them multi-candidate.
+    std::fs::write(
+        &other_path,
+        "struct Buf:\n    n: i64\n\nimpl Buf:\n    fn byte_len() -> i64:\n        self.n\n\nfn dup_name() -> i64:\n    3\n",
+    )
+    .unwrap();
+    std::fs::write(&consumer_path, "use util.bytes.{helper}\nfn main():\n    helper()\n").unwrap();
+
+    let file_sources: Vec<(PathBuf, String)> = [&bytes_path, &other_path, &consumer_path]
+        .iter()
+        .map(|path| ((*path).clone(), std::fs::read_to_string(path).unwrap()))
+        .collect();
+    let result = super::imports::build_import_map(&file_sources, std::slice::from_ref(&src_root), &src_root);
+    let bytes_prefix = module_prefix_from_path(&bytes_path, &src_root);
+
+    let use_map_for = |source: &str| {
+        let ast = simple_parser::Parser::new(source).parse().unwrap();
+        super::imports::build_use_map_from_ast(&ast, &result.all_mangled, &result.re_exports)
+    };
+    let unnamed = use_map_for("use util.bytes.{helper}\nfn main():\n    helper()\n");
+    assert_eq!(unnamed.get("helper"), Some(&format!("{bytes_prefix}__helper")));
+    assert_eq!(unnamed.get("dup_name"), Some(&format!("{bytes_prefix}__dup_name")));
+    assert_eq!(unnamed.get("byte_len"), None, "byte_len was not named in the use");
+
+    let named = use_map_for("use util.bytes.{helper, byte_len}\nfn main():\n    helper()\n");
+    assert_eq!(named.get("byte_len"), Some(&format!("{bytes_prefix}__byte_len")));
+}
+
 #[test]
 fn native_project_fs_platform_aliases_keep_the_sync_path_owner() {
     let repo_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))

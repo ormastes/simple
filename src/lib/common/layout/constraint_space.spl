@@ -1,0 +1,629 @@
+# Shared Constraint Space, Intrinsic Sizing, Spacing & Axis Distribution
+#
+# Pure dependency-leaf layout primitives shared across Simple UI widget layout
+# (`common.ui.layout`) and browser engine CSS layout (`browser_engine`).
+# Zero dependencies on DOM, Style, or WidgetNode types.
+
+pub val LAYOUT_UNIT_CELLS: i32 = 0
+pub val LAYOUT_UNIT_PIXELS: i32 = 1
+
+# Clamp `size` into [min_v, max_v], where max_v < 0 means uncapped.
+# CSS 2.1 §10.4 / UI layout invariant: min_v wins over max_v; never negative.
+pub fn clamp_span(size: i32, min_v: i32, max_v: i32) -> i32:
+    var s = size
+    if max_v >= 0 and s > max_v:
+        s = max_v
+    if min_v > 0 and s < min_v:
+        s = min_v
+    if s < 0:
+        s = 0
+    s
+
+struct LayoutBounds:
+    """Axis-aligned integer layout rectangle."""
+    x: i32
+    y: i32
+    w: i32
+    h: i32
+
+struct EdgeInsets:
+    """Four-sided padding/border inset in layout units."""
+    top: i32
+    right: i32
+    bottom: i32
+    left: i32
+
+impl EdgeInsets:
+    static fn zero() -> EdgeInsets:
+        """All insets zero."""
+        EdgeInsets(top: 0, right: 0, bottom: 0, left: 0)
+
+    static fn uniform(v: i32) -> EdgeInsets:
+        """Equal inset on all four sides."""
+        val c = if v > 0: v else: 0
+        EdgeInsets(top: c, right: c, bottom: c, left: c)
+
+    static fn symmetric(vertical: i32, horizontal: i32) -> EdgeInsets:
+        """Symmetric vertical and horizontal insets."""
+        val vt = if vertical > 0: vertical else: 0
+        val hz = if horizontal > 0: horizontal else: 0
+        EdgeInsets(top: vt, right: hz, bottom: vt, left: hz)
+
+    fn horizontal(self) -> i32:
+        """Total horizontal inset (left + right)."""
+        self.left + self.right
+
+    fn vertical(self) -> i32:
+        """Total vertical inset (top + bottom)."""
+        self.top + self.bottom
+
+    fn inset_bounds(self, x: i32, y: i32, w: i32, h: i32) -> LayoutBounds:
+        """Shrink rectangle (x, y, w, h) by these insets, clamping size at 0."""
+        var iw = w - self.left - self.right
+        var ih = h - self.top - self.bottom
+        if iw < 0:
+            iw = 0
+        if ih < 0:
+            ih = 0
+        LayoutBounds(x: x + self.left, y: y + self.top, w: iw, h: ih)
+
+struct GapSpacing:
+    """Container row/column gap in layout units."""
+    row_gap: i32
+    col_gap: i32
+
+impl GapSpacing:
+    static fn zero() -> GapSpacing:
+        """Zero gaps on both axes."""
+        GapSpacing(row_gap: 0, col_gap: 0)
+
+    static fn uniform(gap: i32) -> GapSpacing:
+        """Equal row and column gap."""
+        val g = if gap > 0: gap else: 0
+        GapSpacing(row_gap: g, col_gap: g)
+
+    static fn total_gap(count: i32, gap: i32) -> i32:
+        """Total inter-item gap span across `count` items."""
+        if count <= 1 or gap <= 0:
+            return 0
+        (count - 1) * gap
+
+struct MinMaxSizes:
+    """Intrinsic width/height pair matching LayoutNG MinMaxSizes."""
+    min_content: i32
+    max_content: i32
+
+impl MinMaxSizes:
+    static fn zero() -> MinMaxSizes:
+        """Zero intrinsic sizes."""
+        MinMaxSizes(min_content: 0, max_content: 0)
+
+    static fn fixed(size: i32) -> MinMaxSizes:
+        """Definite non-flexible size (min == max)."""
+        val s = if size > 0: size else: 0
+        MinMaxSizes(min_content: s, max_content: s)
+
+    fn shrink_to_fit(self, available: i32) -> i32:
+        """CSS 2.1 §10.3.5 shrink-to-fit: min(max(min_content, available), max_content)."""
+        val ceil_w = if self.max_content > self.min_content: self.max_content else: self.min_content
+        var used = available
+        if used > ceil_w:
+            used = ceil_w
+        if used < self.min_content:
+            used = self.min_content
+        if used < 0:
+            used = 0
+        used
+
+    fn clamp_value(self, size: i32) -> i32:
+        """Clamp `size` inside [min_content, max_content] when max_content > 0."""
+        val max_v = if self.max_content > 0: self.max_content else: -1
+        clamp_span(size, self.min_content, max_v)
+
+struct ConstraintSpace:
+    """Immutable top-down layout constraints modeled after Blink NGConstraintSpace."""
+    available_w: i32
+    available_h: i32
+    percent_base_w: i32
+    percent_base_h: i32
+    is_fixed_w: bool
+    is_fixed_h: bool
+    is_shrink_to_fit: bool
+    unit_mode: i32
+    scale_permille: i32
+    panel_title_height: i32
+    min_w: i32
+    max_w: i32
+    min_h: i32
+    max_h: i32
+
+impl ConstraintSpace:
+    fn is_pixel_mode(self) -> bool:
+        """True when units represent scaled device pixels rather than TUI cells."""
+        self.unit_mode == LAYOUT_UNIT_PIXELS
+
+    fn scale_dim(self, logical_v: i32) -> i32:
+        """Convert an authored logical length into this space's scaled units."""
+        if self.scale_permille == 1000:
+            return logical_v
+        (logical_v * self.scale_permille) / 1000
+
+    fn scale_max_dim(self, logical_max: i32) -> i32:
+        """Scale a max constraint while preserving negative 'uncapped' sentinel."""
+        if logical_max < 0:
+            return logical_max
+        self.scale_dim(logical_max)
+
+    fn clamp_w(self, w: i32) -> i32:
+        """Clamp width using this space's min/max bounds (min wins over max)."""
+        clamp_span(w, self.min_w, self.max_w)
+
+    fn clamp_h(self, h: i32) -> i32:
+        """Clamp height using this space's min/max bounds (min wins over max)."""
+        clamp_span(h, self.min_h, self.max_h)
+
+# reason: layout bounds and permille scale scalars match UI/CSS integer coordinate contracts.
+# @allow(primitive_api)
+pub fn ui_constraint_space_cells(avail_w: i32, avail_h: i32, scale_permille: i32 = 1000) -> ConstraintSpace:
+    """Construct a TUI character-cell ConstraintSpace."""
+    ConstraintSpace(
+        available_w: avail_w,
+        available_h: avail_h,
+        percent_base_w: avail_w,
+        percent_base_h: avail_h,
+        is_fixed_w: true,
+        is_fixed_h: true,
+        is_shrink_to_fit: false,
+        unit_mode: LAYOUT_UNIT_CELLS,
+        scale_permille: scale_permille,
+        panel_title_height: 0,
+        min_w: 0,
+        max_w: -1,
+        min_h: 0,
+        max_h: -1
+    )
+
+# reason: pixel dimensions, permille DPI scale, and title band height are layout scalar primitives.
+# @allow(primitive_api)
+pub fn ui_constraint_space_pixels(avail_w: i32, avail_h: i32, scale_permille: i32 = 1000, panel_title_height: i32 = 18) -> ConstraintSpace:
+    """Construct a pixel-unit ConstraintSpace with DPI scale and panel title band."""
+    ConstraintSpace(
+        available_w: avail_w,
+        available_h: avail_h,
+        percent_base_w: avail_w,
+        percent_base_h: avail_h,
+        is_fixed_w: true,
+        is_fixed_h: true,
+        is_shrink_to_fit: false,
+        unit_mode: LAYOUT_UNIT_PIXELS,
+        scale_permille: scale_permille,
+        panel_title_height: panel_title_height,
+        min_w: 0,
+        max_w: -1,
+        min_h: 0,
+        max_h: -1
+    )
+
+# reason: mirrors Blink NGConstraintSpace scalar inputs without coupling to DOM or Style structs.
+# @allow(primitive_api)
+pub fn css_constraint_space(
+    avail_w: i32, avail_h: i32,
+    percent_base_w: i32, percent_base_h: i32,
+    is_fixed_w: bool, is_fixed_h: bool, is_shrink_to_fit: bool,
+    device_scale: i32 = 1
+) -> ConstraintSpace:
+    """Construct a CSS layout ConstraintSpace separating available vs % resolution sizes."""
+    val safe_scale = if device_scale > 0: device_scale else: 1
+    ConstraintSpace(
+        available_w: avail_w,
+        available_h: avail_h,
+        percent_base_w: percent_base_w,
+        percent_base_h: percent_base_h,
+        is_fixed_w: is_fixed_w,
+        is_fixed_h: is_fixed_h,
+        is_shrink_to_fit: is_shrink_to_fit,
+        unit_mode: LAYOUT_UNIT_PIXELS,
+        scale_permille: safe_scale * 1000,
+        panel_title_height: 0,
+        min_w: 0,
+        max_w: -1,
+        min_h: 0,
+        max_h: -1
+    )
+
+struct AxisTrackSpec:
+    """Input specification for one item or track along a single layout axis."""
+    fixed_size: i32
+    flex_grow: i32
+    flex_shrink: i32
+    min_size: i32
+    max_size: i32
+    intrinsic_max: i32
+    margin_before: i32
+    margin_after: i32
+    margin_before_auto: bool
+    margin_after_auto: bool
+
+impl AxisTrackSpec:
+    static fn fixed_item(size: i32, min_size: i32 = 0, max_size: i32 = -1) -> AxisTrackSpec:
+        """Create a non-growing fixed-size item specification."""
+        AxisTrackSpec(
+            fixed_size: size, flex_grow: 0, flex_shrink: 1,
+            min_size: min_size, max_size: max_size, intrinsic_max: 0,
+            margin_before: 0, margin_after: 0,
+            margin_before_auto: false, margin_after_auto: false
+        )
+
+    static fn flex_item(flex_grow: i32, min_size: i32 = 0, max_size: i32 = -1, fixed_size: i32 = 0, flex_shrink: i32 = 1) -> AxisTrackSpec:
+        """Create a flexible track/item specification."""
+        AxisTrackSpec(
+            fixed_size: fixed_size, flex_grow: flex_grow, flex_shrink: flex_shrink,
+            min_size: min_size, max_size: max_size, intrinsic_max: 0,
+            margin_before: 0, margin_after: 0,
+            margin_before_auto: false, margin_after_auto: false
+        )
+
+struct AxisSlot:
+    """Resolved offset and size along the distributed axis."""
+    offset: i32
+    size: i32
+    margin_before: i32
+    margin_after: i32
+    clamped_min: bool
+    clamped_max: bool
+
+struct AxisDistributionResult:
+    """Complete result of `axis_distribute` over a sequence of items/tracks."""
+    slots: [AxisSlot]
+    used_span: i32
+    free_space: i32
+    overflow: bool
+
+# Unified single-axis distributor shared between UI flex/grid and CSS flex/track sizing.
+# When `last_remainder_mode` is true, UI widget semantics apply: fixed items reserve
+# space first, then remaining space is split as `weight * floor(rem/total_flex)` with
+# the integer remainder awarded exactly once to the last item with `flex_grow > 0`.
+# When `last_remainder_mode` is false, CSS Flexbox §9.7 semantics apply: iterative
+# min/max freeze-and-redistribute for both flex-grow and flex-shrink (using scaled
+# shrink factor `flex_shrink * base_size`, including auto-intrinsic items), followed by
+# auto-margin and `justify` placement.
+# reason: axis available span, gap, and UI/CSS mode flag form a pure integer solver boundary.
+# @allow(primitive_api)
+pub fn axis_distribute(
+    available: i32,
+    gap: i32,
+    justify: text,
+    specs: [AxisTrackSpec],
+    last_remainder_mode: bool
+) -> AxisDistributionResult:
+    val n = specs.len() as i32
+    if n <= 0:
+        return AxisDistributionResult(slots: [], used_span: 0, free_space: available, overflow: false)
+
+    val safe_gap = if gap > 0: gap else: 0
+    if last_remainder_mode:
+        return _axis_distribute_ui_mode(available, safe_gap, justify, specs, n)
+    _axis_distribute_css_mode(available, safe_gap, justify, specs, n)
+
+fn _axis_distribute_ui_mode(
+    available: i32,
+    gap: i32,
+    justify: text,
+    specs: [AxisTrackSpec],
+    n: i32
+) -> AxisDistributionResult:
+    var total_fixed: i32 = 0
+    var total_flex: i32 = 0
+    var total_margins: i32 = 0
+    var active_count: i32 = 0
+    var i: i32 = 0
+    while i < n:
+        val sp = specs[i]
+        val ml = if sp.margin_before_auto: 0 else: sp.margin_before
+        val mr = if sp.margin_after_auto: 0 else: sp.margin_after
+        total_margins = total_margins + ml + mr
+        if sp.fixed_size > 0:
+            total_fixed = total_fixed + sp.fixed_size
+            active_count = active_count + 1
+        else:
+            val w = if sp.flex_grow > 0: sp.flex_grow else: 0
+            total_flex = total_flex + w
+            if w > 0 or sp.min_size > 0:
+                active_count = active_count + 1
+        i = i + 1
+
+    val total_gap = GapSpacing.total_gap(active_count, gap)
+    var remaining = available - total_fixed - total_gap - total_margins
+    if remaining < 0:
+        remaining = 0
+    val flex_unit = if total_flex > 0: remaining / total_flex else: 0
+    val flex_remainder = if total_flex > 0: remaining - flex_unit * total_flex else: 0
+
+    var sizes: [i32] = []
+    var clamped_mins: [bool] = []
+    var clamped_maxs: [bool] = []
+    var flex_idx: i32 = 0
+    var used_items_span: i32 = 0
+    var emitted_active: i32 = 0
+    i = 0
+    while i < n:
+        val sp = specs[i]
+        var raw_sz: i32 = 0
+        if sp.fixed_size > 0:
+            raw_sz = sp.fixed_size
+        else:
+            val w = if sp.flex_grow > 0: sp.flex_grow else: 0
+            flex_idx = flex_idx + w
+            if w > 0 and flex_idx >= total_flex:
+                raw_sz = w * flex_unit + flex_remainder
+            else:
+                raw_sz = w * flex_unit
+        val clamped = clamp_span(raw_sz, sp.min_size, sp.max_size)
+        sizes.push(clamped)
+        clamped_mins.push(sp.min_size > 0 and clamped > raw_sz)
+        clamped_maxs.push(sp.max_size >= 0 and clamped < raw_sz)
+        if clamped > 0:
+            emitted_active = emitted_active + 1
+            val ml = if sp.margin_before_auto: 0 else: sp.margin_before
+            val mr = if sp.margin_after_auto: 0 else: sp.margin_after
+            used_items_span = used_items_span + ml + clamped + mr
+        i = i + 1
+
+    val actual_total_gap = GapSpacing.total_gap(emitted_active, gap)
+    val used_total = used_items_span + actual_total_gap
+    val free = available - used_total
+    var start_offset = 0
+    var gap_extra = 0
+    if free > 0 and emitted_active > 0:
+        if justify == "center":
+            start_offset = free / 2
+        elif justify == "flex-end" or justify == "end":
+            start_offset = free
+        elif justify == "space-between" and emitted_active > 1:
+            gap_extra = free / (emitted_active - 1)
+
+    var slots: [AxisSlot] = []
+    var cursor = start_offset
+    var first_emitted = true
+    i = 0
+    while i < n:
+        val sp = specs[i]
+        val sz = sizes[i]
+        val ml = if sp.margin_before_auto: 0 else: sp.margin_before
+        val mr = if sp.margin_after_auto: 0 else: sp.margin_after
+        if sz > 0:
+            if not first_emitted:
+                cursor = cursor + gap + gap_extra
+            first_emitted = false
+            val item_off = cursor + ml
+            slots.push(AxisSlot(
+                offset: item_off,
+                size: sz,
+                margin_before: ml,
+                margin_after: mr,
+                clamped_min: clamped_mins[i],
+                clamped_max: clamped_maxs[i]
+            ))
+            cursor = item_off + sz + mr
+        else:
+            slots.push(AxisSlot(
+                offset: cursor,
+                size: 0,
+                margin_before: ml,
+                margin_after: mr,
+                clamped_min: clamped_mins[i],
+                clamped_max: clamped_maxs[i]
+            ))
+        i = i + 1
+
+    AxisDistributionResult(
+        slots: slots,
+        used_span: used_total,
+        free_space: free,
+        overflow: used_total > available
+    )
+
+fn _axis_distribute_css_mode(
+    available: i32,
+    gap: i32,
+    justify: text,
+    specs: [AxisTrackSpec],
+    n: i32
+) -> AxisDistributionResult:
+    var bases: [i32] = []
+    var sizes: [i32] = []
+    var frozen: [bool] = []
+    var clamped_min: [bool] = []
+    var clamped_max: [bool] = []
+    var auto_margins_total: i32 = 0
+    var fixed_margins_total: i32 = 0
+    var sum_bases: i32 = 0
+    var i: i32 = 0
+    while i < n:
+        val sp = specs[i]
+        val base = if sp.fixed_size > 0:
+            sp.fixed_size
+        elif sp.intrinsic_max > 0:
+            sp.intrinsic_max
+        else:
+            0
+        bases.push(base)
+        sizes.push(base)
+        frozen.push(false)
+        clamped_min.push(false)
+        clamped_max.push(false)
+        sum_bases = sum_bases + base
+        if sp.margin_before_auto:
+            auto_margins_total = auto_margins_total + 1
+        else:
+            fixed_margins_total = fixed_margins_total + sp.margin_before
+        if sp.margin_after_auto:
+            auto_margins_total = auto_margins_total + 1
+        else:
+            fixed_margins_total = fixed_margins_total + sp.margin_after
+        i = i + 1
+
+    val total_gap = GapSpacing.total_gap(n, gap)
+    val initial_free = available - sum_bases - fixed_margins_total - total_gap
+
+    if initial_free > 0:
+        # Flex grow freeze loop (CSS Flexbox 9.7 step 4)
+        var grow_changed = true
+        while grow_changed:
+            grow_changed = false
+            var unfrozen_grow: i32 = 0
+            var frozen_used: i32 = fixed_margins_total + total_gap
+            i = 0
+            while i < n:
+                if frozen[i] or specs[i].flex_grow <= 0:
+                    frozen_used = frozen_used + sizes[i]
+                else:
+                    frozen_used = frozen_used + bases[i]
+                    unfrozen_grow = unfrozen_grow + specs[i].flex_grow
+                i = i + 1
+            if unfrozen_grow <= 0:
+                break
+            val free_grow = available - frozen_used
+            if free_grow <= 0:
+                i = 0
+                while i < n:
+                    if not frozen[i] and specs[i].flex_grow > 0:
+                        val floor_sz = clamp_span(bases[i], specs[i].min_size, specs[i].max_size)
+                        sizes[i] = floor_sz
+                        frozen[i] = true
+                        clamped_min[i] = specs[i].min_size > 0 and floor_sz > bases[i]
+                    i = i + 1
+                break
+            var acc_grow: i32 = 0
+            var assigned_grow: i32 = 0
+            i = 0
+            while i < n:
+                if not frozen[i] and specs[i].flex_grow > 0:
+                    acc_grow = acc_grow + specs[i].flex_grow
+                    val after_px = (free_grow * acc_grow + unfrozen_grow / 2) / unfrozen_grow
+                    val delta = after_px - assigned_grow
+                    assigned_grow = after_px
+                    val cand = bases[i] + delta
+                    val clamped = clamp_span(cand, specs[i].min_size, specs[i].max_size)
+                    if specs[i].min_size > 0 and cand < specs[i].min_size:
+                        sizes[i] = clamped
+                        frozen[i] = true
+                        clamped_min[i] = true
+                        grow_changed = true
+                    elif specs[i].max_size >= 0 and cand > specs[i].max_size:
+                        sizes[i] = clamped
+                        frozen[i] = true
+                        clamped_max[i] = true
+                        grow_changed = true
+                    else:
+                        sizes[i] = cand
+                i = i + 1
+    elif initial_free < 0:
+        # Flex shrink freeze loop (CSS Flexbox 9.7 step 4)
+        var shrink_changed = true
+        while shrink_changed:
+            shrink_changed = false
+            var scaled_total: i64 = 0
+            var frozen_used: i32 = fixed_margins_total + total_gap
+            i = 0
+            while i < n:
+                val sh = if specs[i].flex_shrink > 0: specs[i].flex_shrink else: 0
+                if frozen[i] or sh == 0 or bases[i] <= 0:
+                    frozen_used = frozen_used + sizes[i]
+                else:
+                    frozen_used = frozen_used + bases[i]
+                    scaled_total = scaled_total + (sh as i64) * (bases[i] as i64)
+                i = i + 1
+            val deficit = frozen_used - available
+            if deficit <= 0 or scaled_total <= 0:
+                break
+            var acc_scaled: i64 = 0
+            var assigned_cut: i64 = 0
+            i = 0
+            while i < n:
+                val sh = if specs[i].flex_shrink > 0: specs[i].flex_shrink else: 0
+                if not frozen[i] and sh > 0 and bases[i] > 0:
+                    val w = (sh as i64) * (bases[i] as i64)
+                    acc_scaled = acc_scaled + w
+                    val cut_after = ((deficit as i64) * acc_scaled + scaled_total / 2) / scaled_total
+                    val cut_i = (cut_after - assigned_cut) as i32
+                    assigned_cut = cut_after
+                    var cand = bases[i] - cut_i
+                    val floor_sz = if specs[i].min_size > 0: specs[i].min_size else: 0
+                    if cand <= floor_sz:
+                        sizes[i] = floor_sz
+                        frozen[i] = true
+                        clamped_min[i] = true
+                        shrink_changed = true
+                    else:
+                        if specs[i].max_size >= 0 and cand > specs[i].max_size:
+                            cand = specs[i].max_size
+                            clamped_max[i] = true
+                        sizes[i] = cand
+                i = i + 1
+
+    # Recompute used span & distribute remaining free space via auto margins or justify
+    var sum_sizes: i32 = 0
+    i = 0
+    while i < n:
+        sum_sizes = sum_sizes + sizes[i]
+        i = i + 1
+    val used_no_auto = sum_sizes + fixed_margins_total + total_gap
+    val rem_free = available - used_no_auto
+
+    var auto_margin_px: i32 = 0
+    var auto_margin_rem: i32 = 0
+    var start_offset: i32 = 0
+    var gap_extra: i32 = 0
+    if rem_free > 0 and auto_margins_total > 0:
+        auto_margin_px = rem_free / auto_margins_total
+        auto_margin_rem = rem_free - auto_margin_px * auto_margins_total
+    elif rem_free > 0:
+        if justify == "space-between" and n > 1:
+            gap_extra = rem_free / (n - 1)
+        elif justify == "space-around":
+            start_offset = rem_free / (n * 2)
+            gap_extra = rem_free / n
+        elif justify == "space-evenly":
+            start_offset = rem_free / (n + 1)
+            gap_extra = rem_free / (n + 1)
+        elif justify == "center" or justify == "safe-center" or justify == "unsafe-center":
+            start_offset = rem_free / 2
+        elif justify == "flex-end" or justify == "end":
+            start_offset = rem_free
+
+    var slots: [AxisSlot] = []
+    var cursor = start_offset
+    var auto_seen: i32 = 0
+    i = 0
+    while i < n:
+        val sp = specs[i]
+        if i > 0:
+            cursor = cursor + gap + gap_extra
+        var ml = sp.margin_before
+        if sp.margin_before_auto:
+            auto_seen = auto_seen + 1
+            ml = auto_margin_px + (if auto_seen == auto_margins_total: auto_margin_rem else: 0)
+        var mr = sp.margin_after
+        if sp.margin_after_auto:
+            auto_seen = auto_seen + 1
+            mr = auto_margin_px + (if auto_seen == auto_margins_total: auto_margin_rem else: 0)
+        val item_off = cursor + ml
+        val sz = sizes[i]
+        slots.push(AxisSlot(
+            offset: item_off,
+            size: sz,
+            margin_before: ml,
+            margin_after: mr,
+            clamped_min: clamped_min[i],
+            clamped_max: clamped_max[i]
+        ))
+        cursor = item_off + sz + mr
+        i = i + 1
+
+    AxisDistributionResult(
+        slots: slots,
+        used_span: used_no_auto,
+        free_space: rem_free,
+        overflow: used_no_auto > available
+    )

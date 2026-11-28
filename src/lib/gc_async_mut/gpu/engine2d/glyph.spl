@@ -13,6 +13,7 @@
 #   use std.gpu.engine2d.glyph.{glyph_data, render_glyph_to_buffer, render_text_to_buffer}
 
 use common.ui.glyph_bitmap_5x7.{glyph_rows_for_char, glyph_index_for_char_code, glyph_row_bits}
+use std.common.encoding.utf8.{text_codepoints}
 
 # File-local conversion keeps glyph lookup independent from platform character
 # objects while char_code_at supplies the now-fixed raw scalar value.
@@ -46,9 +47,17 @@ fn glyph_height() -> i32:
     7
 
 fn glyph_advance(scale: i32) -> i32:
-    """Horizontal advance per character, unified with the browser paint advance
-    (text_advance = 5*scale in simple_web_html_layout_renderer.spl)."""
+    """Horizontal advance per character, unified with the browser packed bitmap
+    advance (`text_advance = 5*scale` and Vulkan dense bitmap atlas cells)."""
     5 * scale
+
+# reason: 2D engine pixel advance query returns i32 bitmap cell width from i32 scale
+# @allow(primitive_api)
+pub fn glyph_spaced_advance(scale: i32) -> i32:
+    """Horizontal advance per character with 1x inter-glyph gap (`6 * scale`),
+    matching Skia `skia_bitmap_5x7_metrics` / `ascii_glyph_advance_x` with zero
+    horizontal ink overlap between adjacent 5x7 glyphs."""
+    6 * scale
 
 # ============================================================================
 # Glyph Bitmap Data
@@ -147,20 +156,15 @@ pub fn render_glyph_to_buffer(mut buf: [u32], buf_w: i32, x: i32, y: i32, ch: te
         row = row + 1
     buf
 
-fn render_text_to_buffer(mut buf: [u32], buf_w: i32, buf_h: i32, x: i32, y: i32, text_val: text, color: u32, font_size: i32) -> [u32]:
-    """Render a full text string into a u32 ARGB pixel buffer.
-
-    Uses the built-in bitmap glyph path so hermetic interpreter tests and
-    no-GPU hosts do not depend on the optional dynamic font renderer.
-    """
-    val scale = if font_size <= 7: 1 else: (font_size / 7)
-    val text_len = text_val.len()
+fn _render_bitmap_text_to_buffer(mut buf: [u32], buf_w: i32, buf_h: i32, x: i32, y: i32, text_val: text, color: u32, scale: i32, advance: i32) -> [u32]:
+    """Render UTF-8 codepoints of `text_val` into `buf` stepping by `advance`."""
+    val cps = text_codepoints(text_val)
+    val text_len = cps.len()
     val buf_len = buf.len()
-    val advance = glyph_advance(scale)
     var i: i64 = 0
     var cursor_x = x
     while i < text_len:
-        val code: i64 = text_val.char_code_at(i)
+        val code: i64 = cps[i]
         val ch = _e2d_char_from_code(code)
         val bitmap = glyph_data(ch)
         var row = 0
@@ -187,3 +191,20 @@ fn render_text_to_buffer(mut buf: [u32], buf_w: i32, buf_h: i32, x: i32, y: i32,
         cursor_x = cursor_x + advance
         i = i + 1
     buf
+
+fn render_text_to_buffer(mut buf: [u32], buf_w: i32, buf_h: i32, x: i32, y: i32, text_val: text, color: u32, font_size: i32) -> [u32]:
+    """Render a full text string into a u32 ARGB pixel buffer.
+
+    Uses the built-in bitmap glyph path so hermetic interpreter tests and
+    no-GPU hosts do not depend on the optional dynamic font renderer.
+    """
+    val scale = if font_size <= 7: 1 else: (font_size / 7)
+    _render_bitmap_text_to_buffer(buf, buf_w, buf_h, x, y, text_val, color, scale, glyph_advance(scale))
+
+# reason: 2D engine pixel-buffer rasterizer draws spaced 5x7 glyphs at raw i32 coords/u32 color
+# @allow(primitive_api)
+pub fn render_text_spaced_to_buffer(mut buf: [u32], buf_w: i32, buf_h: i32, x: i32, y: i32, text_val: text, color: u32, font_size: i32) -> [u32]:
+    """Render text with 1x inter-glyph spacing (`glyph_spaced_advance = 6 * scale`),
+    matching Skia 5x7 fallback without horizontal ink collision."""
+    val scale = if font_size <= 7: 1 else: (font_size / 7)
+    _render_bitmap_text_to_buffer(buf, buf_w, buf_h, x, y, text_val, color, scale, glyph_spaced_advance(scale))

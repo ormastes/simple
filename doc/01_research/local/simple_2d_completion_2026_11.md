@@ -1,0 +1,74 @@
+# Local Research: Simple 2D Completion (Engine2D & Skia CPU)
+
+- **Date:** 2026-11-28
+- **Workspace:** `/Users/ormastes/work/web_2d_gui_2d` (branch `work/simple-2d-complete`)
+- **Author / Role:** Simple 2D Research & Options Lead
+- **Sidecar Status:** `N/A` for Step 1 research (conducted directly in-branch against source and bug records; Step 2 design may assign separate sidecars per module lane if needed).
+
+---
+
+## 1. Knowledge Route Receipt
+
+Read from `doc/00_llm_process/knowledge_registry.sdn` (`version: 2`, `selection: exact-feature-then-longest-source-prefix`):
+
+| Route Type | Key / Prefix | `group_id` | `group_path` | `expert_path` | `architecture_profile` |
+|---|---|---|---|---|---|
+| `feature_routes` | `simple_2d_web_renderer_gpu_optimization` | `rendering_ui` | `doc/00_llm_process/feature_group/rendering_ui/skill.md` | `doc/00_llm_process/feature_expert/gpu_offload_check/skill.md` | — |
+| `feature_routes` | `web_renderer_vulkan_4k_showcase_hardening` | `rendering_ui` | `doc/00_llm_process/feature_group/rendering_ui/skill.md` | `doc/00_llm_process/feature_expert/gpu_offload_check/skill.md` | — |
+| `feature_routes` | `chromium_web_renderer_primitive_differential` | `rendering_ui` | `doc/00_llm_process/feature_group/rendering_ui/skill.md` | `doc/00_llm_process/feature_expert/gpu_offload_check/skill.md` | — |
+| `feature_routes` | `gpu_renderer_processing_backends` | `rendering_ui` | `doc/00_llm_process/feature_group/rendering_ui/skill.md` | `doc/00_llm_process/feature_expert/gpu_offload_check/skill.md` | — |
+| `layer_routes` | `src/lib/gc_async_mut/gpu/engine2d` | `rendering_ui` | `doc/00_llm_process/feature_group/rendering_ui/skill.md` | `doc/00_llm_process/feature_expert/gpu_offload_check/skill.md` | `mdsoc_plus` |
+| `layer_routes` | `src/lib` | `runtime_memory_io` | `doc/00_llm_process/layer_base/runtime_memory_io/skill.md` | — | `mdsoc_plus` |
+
+Additional required process skills consulted:
+- `doc/00_llm_process/feature_group/rendering_ui/skill.md` (GPU-resident UI optimization contract: zero timed allocations/full-frame readbacks, `Simple p95 / C p95 <= 2.0x` ceiling, device-present without readback in steady state, bounded damage generations).
+- `doc/00_llm_process/layer_expert/ui_render/skill.md` (UI render layer ownership, `DrawIrV3Scene`, pixel boxing / SIMD blend allocation notes, duplicate Engine2D layout note).
+- `doc/00_llm_process/feature_expert/engine2d_vulkan_parity/skill.md` (C Vulkan parity gates, 13/34 GPU primitives vs 16 `emu_*` CPU + 5 device->host round trips, MoltenVK intermittent SIGBUS warning, pixel-sharp text rules).
+
+---
+
+## 2. Local Code Architecture & Module Inventory
+
+### 2.1 Engine2D (`src/lib/gc_async_mut/gpu/engine2d/` & `src/lib/nogc_sync_mut/gpu/engine2d/`)
+- `src/lib/gc_async_mut/gpu/engine2d/` is the active full-featured Engine2D tree (~136 entries including backends, SPIR-V blobs, DrawIR executors, font offload, and shaders).
+- `src/lib/nogc_sync_mut/gpu/engine2d/` contains 26 files (`backend_session.spl`, `vulkan_session.spl`, `sffi_*.spl`, `ffi_*.spl`, `simd_kernels.spl`, `simd_native_rows.spl`, `simd_isa_provider.spl`, `cpu_simd_session.spl`, etc.). Note `ui_render/skill.md` records that `nogc_sync_mut` vs `gc_async_mut` has split ownership (with `sffi_vulkan.spl` and `simd_*` residing in `nogc_sync_mut` and consumed by `gc_async_mut/gpu/engine2d/engine.spl` and `backend_software.spl`), while `nogc_sync_mut/gpu/engine2d/vulkan_session.spl:21-25` explicitly warns its compatibility `VulkanComputeSession` has no C/Rust provider and the maintained ABI is `rt_vk_device_create`/`rt_vk_command_buffer_*`.
+- Key Engine2D files inspected:
+  - `src/lib/gc_async_mut/gpu/engine2d/engine.spl` (L1-120, L2661, L2789, L4067, L4377, L4444, L4786-4836): `Engine2D` facade, backend selection (`metal > cuda > rocm/hip > qualcomm > vulkan > directx > opencl > opengl > intel > webgpu > cpu_simd > software > cpu`), `draw_ir_composite_readback`, `draw_ir_composite_readback_css_group`, `read_pixels_with_source`.
+  - `src/lib/gc_async_mut/gpu/engine2d/backend_vulkan.spl` (L1295-1340, L1579-1790, L1826-1837, L1950-2220, L2520-2760, L2860-3000, L3135-3220): `VulkanBackend`, `_draw_rect_filled_impl`, `draw_rounded_rect` (delegates to `emu_draw_rounded_rect`), `_draw_image_composite_native_impl`, `consume_damage_hint`, `_refresh_host_frame_damage`, `_refresh_host_full`, `_refresh_host_damage`, `present`, `read_pixels_with_source`, `_draw_image_blend_impl`.
+  - `src/lib/gc_async_mut/gpu/engine2d/backend_vulkan_glsl.spl` (L58-160, L650-733): `_glsl_clear`, `_glsl_rect_filled`, `_glsl_blit` (handles `composite_mode` 0 = copy, 1 = `SRC_OVER` image/layer, 2 = `SRC_OVER_SOLID` rect blend, `opacity_milli`, translucent `da != 255u` via `_blend_premul_over`-equivalent integer formula).
+  - `src/lib/gc_async_mut/gpu/engine2d/backend_software.spl` (L170-250, L480-550, L660-735, L905-990, L1925-1965, L2315-2360): `SoftwareBackend`, `draw_rect_filled`, `draw_rounded_rect` (delegates to `emu_draw_rounded_rect`), `read_pixels_region`, `read_pixels_region_raw` (row-clipped `write_span` without whole-surface snapshot), `scale_alpha_in_place`, `sw_blend_const_raw_span`, `sw_set_pixel_blend`.
+  - `src/lib/gc_async_mut/gpu/engine2d/backend_cpu.spl` (L1-105): `CpuBackend` wrapping `SoftwareBackend` and forwarding `read_pixels_region` / `read_pixels_region_raw` (L74-79).
+  - `src/lib/gc_async_mut/gpu/engine2d/backend_emu.spl` (L428-501, L1689-1725): `_emu_corner_cov256`, `emu_draw_rounded_rect`, `_emu_corner_box_aa`, `emu_draw_rect_blend` (calls `core.read_pixels_region_raw(x, y, w, h)` at L1707).
+  - `src/lib/gc_async_mut/gpu/engine2d/color.spl` (L80-147): `_blend_premul_over`, `_blend_rule`, `blend`, `blend_solid`.
+  - `src/lib/gc_async_mut/gpu/engine2d/draw_ir_adv.spl` (L2028-2104, L3980-4195, L4992-5050, L5195-5660): `_engine2d_draw_ir_fresh_device_reason`, `_engine2d_draw_ir_uses_embedded_surface`, `_engine2d_draw_ir_retained_layer_batch`, `engine2d_draw_ir_prepare_damage_plan`, `_engine2d_draw_ir_render_prepared_damage_plan_with_images`, `_engine2d_draw_ir_render_composition_damaged_with_images`, `engine2d_draw_ir_render_composition_damaged`.
+  - `src/lib/gc_async_mut/gpu/engine2d/draw_ir_box_effects.spl` (L1415-1573): `_e2d_corner_table_blend`, `engine2d_draw_ir_render_hairline_rrect_border`, `engine2d_draw_ir_render_shrunk_rrect_background`.
+
+### 2.2 Render Scene Engine2D Executor (`src/lib/gc_async_mut/render_scene/engine2d_executor.spl`)
+- `execute_scene_to_engine2d(scene, engine)` (L19-82): maps `RenderScene` commands (`fill_rect`, `stroke_rect`, `text`, `line`, `circle`, `circle_filled`, `rounded_rect`, `gradient_rect`, `image`, `clip_push`, `clip_pop`) to `Engine2D` and calls `engine.present()`.
+  - Note: calls `engine.clear(0xFFFFFFFF)` unconditionally at L31 (risky on MoltenVK multi-frame runs per `vulkan_engine2d_sequential_frames_flaky_moltenvk_2026-09-02.md`) and `execute_scene_to_engine2d_pixels` (L87-101) calls `engine.read_pixels()` for full-surface readback.
+
+### 2.3 Skia CPU (`src/lib/skia/`)
+- `src/lib/skia/entity/canvas.spl` (L70-100, L182-208, L241-310): `SkCanvas` records `SkPictureOp` items into `SkPictureRecorder`. `_canvas_record_set_matrix` (L79-100) still packs `(tx, ty, sx, sy)` into `op.rect`, `rot_deg` into `op.rx`, and `mirror_sign` into `op.ry`.
+- `src/lib/skia/entity/picture.spl` (L14-40): `SkPictureOp` has only `(kind, rect, rx, ry, path, image, paint, x, y)` — no full 3x3 matrix field.
+- `src/lib/common/drawing/vector.spl` (L181-299, re-exported by `src/lib/skia/entity/matrix.spl`): `Matrix3x3` now implements `map_point` (L278) and `invert` (L285).
+- `src/lib/skia/backend/cpu/backend.spl` (L25-101, L123-160, L176-435, L484-672): `SkCpuSurface` + `CpuBackend.render_picture`.
+- `src/lib/skia/backend/cpu/raster_prims.spl` (L58-110, L115-294, L300-564, L570-684): `Bitmap`, `fill_rect`, `fill_rrect`, `_Edge` / `_collect_edges` / `fill_path_aa` (4-subrow analytical-overlap coverage rasterizer), `stroke_path`.
+- `src/lib/skia/backend/cpu/shaders.spl` (L16-22, L141-357): `_sqrt` delegates to `sqrt_f64`; `eval_shader`, `sample_image_bilinear`, `apply_blend` -> `compose`.
+- `src/lib/skia/feature/blend/blend_compose.spl` (L23-53) & `porter_duff.spl` (L16-78) & `hsl.spl`: full 29-mode Porter-Duff + separable/HSL `compose(src, dst, mode)` implementation already exists.
+
+---
+
+## 3. Verification of Open Bugs Against Current Code
+
+| Bug Record | Claimed Status | Verified Code Status | Exact Code Evidence & Remaining Gap |
+|---|---|---|---|
+| `doc/08_tracking/bug/engine2d_rect_blend_reads_whole_frame_2026-11-24.md` | FIXED | **FIXED** | `backend_emu.spl:1707` (`emu_draw_rect_blend`) calls `core.read_pixels_region_raw(x, y, w, h)`. `SoftwareBackend.read_pixels_region_raw` (`backend_software.spl:932-960`) copies clipped spans via `write_span` without snapshotting the whole framebuffer; `CpuBackend` delegates at `backend_cpu.spl:78-79`. |
+| `doc/08_tracking/bug/engine2d_vulkan_damage_readback_reads_whole_surface_2026-11-15.md` | RESOLVED (2026-11-22) | **RESOLVED** | `VulkanBackend.read_pixels_with_source` (`backend_vulkan.spl:2947-2959`) checks `self.present_damage_valid and self.host_mirror_valid` and invokes `self._refresh_host_damage()`; `_refresh_host_damage` (`L2691-2760`) patches `host_buf` per row and updates `last_host_checksum`; `consume_damage_hint` (`L2546-2556`) intersects active clip bounds. |
+| `doc/08_tracking/bug/engine2d_retained_damage_replay_differs_from_full_frame_on_vulkan_embedded_surfaces_2026-11-26.md` | Fixed (with perf note) | **CORRECT, SLOW ON VULKAN** | `_engine2d_draw_ir_uses_embedded_surface` (`draw_ir_adv.spl:5285-5303`) and `_engine2d_draw_ir_retained_layer_batch` (`L5305-5312`) unify full-frame and replay layering. However, on Vulkan any replay intersecting a layered window creates and reads back a fresh device offscreen (`L5409-5438`), costing ~full frame (`5.68-11.6s` on GB10 vs `53 ms` off-window). |
+| `doc/08_tracking/bug/engine2d_retained_damage_rejects_unfocused_window_opacity_2026-11-26.md` | Open / partially fixed | **PARTIALLY FIXED (2 paths + parent-sampling gap)** | General replay `_engine2d_draw_ir_render_composition_damaged_with_images` (`draw_ir_adv.spl:5341-5346`) now accepts `_engine2d_draw_ir_retained_layer_batch(batch, engine)`. **Still open:** `engine2d_draw_ir_prepare_damage_plan` (`draw_ir_adv.spl:5014-5019`) and `engine2d_draw_ir_render_composition_damaged` (`L5639-5647`) still hard-reject `embedding.opacity_milli != 1000`. Sibling `wm_retained_damage_rejects_parent_sampling_window_material_2026-11-26.md` implemented CPU replay in `src/os/compositor/engine2d_wm_frame_executor.spl` (`software-retained-damage`), still awaiting Vulkan device verification. |
+| `doc/08_tracking/bug/engine2d_focused_window_corner_aa_device_differs_from_cpu_2026-11-26.md` | Open (P3) | **OPEN — Root cause verified** | `_engine2d_draw_ir_uses_embedded_surface` (`draw_ir_adv.spl:5297-5303`) sets `needs_real_offscreen = true` whenever `backend == "vulkan"`, even when `opacity_milli == 1000` and `embedding.clip == true`. Thus on **Vulkan**, a focused window renders its `shrunk_rrect_background` (`draw_ir_box_effects.spl:1522-1555`) and `hairline_rrect_border` (`L1462-1484`) into a transparent offscreen (`da == 0` -> translucent intermediate blend in `backend_vulkan_glsl.spl:702-713`), then composites via `draw_ir_composite_readback` (`draw_ir_adv.spl:4178`). On **CPU**, `use_embedded_surface` is `false` for `opacity_milli == 1000` + `clip == true`, so both corner AA passes blend directly onto the opaque desktop (`da == 255` at `draw_ir_adv.spl:4068-4080`), creating a 1 LSB rounding difference at 20 corner pixels (`test/02_integration/rendering/engine2d_focused_window_corner_device_spec.spl`, `@tag:in-development`). Unfocused windows (`opacity_milli == 930`) use offscreen on both backends and match bit-for-bit. |
+| `doc/08_tracking/bug/engine2d_fresh_device_preflight_rejects_themed_wm_chrome_2026-11-26.md` | VERIFIED 2026-11-26 | **FIXED** | `_engine2d_draw_ir_fresh_device_reason` (`draw_ir_adv.spl:2054-2058`) admits `translucent_over_opaque_root` for style-free translucent `RECT` commands in a full-target opaque non-CSS-group batch after the opaque initializer. |
+| `doc/08_tracking/bug/skia_cpu_backend_transforms_recorded_not_applied_2026-10-05.md` | Open | **PARTIALLY FIXED (shear/skew still dropped)** | `CpuBackend.render_picture` (`backend.spl:257-429`, `484-580`) now applies `cur.transform` to `DrawRect`, `DrawRRect`, `DrawOval`, `DrawPath`, `DrawImage`, `DrawTextBlob` (note redundant duplicate `val color` at `backend.spl:306-307`). **Remaining defect:** `_canvas_record_set_matrix` (`canvas.spl:79-100`) and `SetMatrix` replay (`backend.spl:266-279`) still decompose into `(tx, ty, sx, sy, rot_deg, mirror_sign)` using `op.rect`/`rx`/`ry`, dropping shear/skew (`m01`/`m10` non-orthogonal terms) from `concat()` / `set_matrix()`. |
+| `doc/08_tracking/bug/skia_cpu_backend_ignores_blend_modes_and_layers_2026-10-05.md` | OPEN | **OPEN — Multiple gaps verified** | `reftest_spec.spl:34-38` documents 3 RED parity scenes (`porter_duff`, `mix_blend_mode`, `backdrop_filter`). Verified in `src/lib/skia/backend/cpu/backend.spl`: (1) `SaveLayer` (`L208-231`) does NOT allocate an offscreen layer bitmap and `Restore` (`L233-238`) only pops `state_stack` without compositing; (2) `cur.mode` is applied per child draw ONLY for identity-transform `DrawRect` via `_fill_rect_mode` (`L149-160`, `L308-322`), which also skips edge AA; (3) `DrawRRect` (`L324-354`), `DrawOval` (`L355-375`), `DrawPath` (`L377-387`), `DrawPaint` (`L414-425`), and transformed `DrawRect` (`L322`) all ignore `op.paint.blend_mode` and `cur.mode`; (4) `DrawImage` (`L403-404`, `L577-578`) passes a zero `dst` `SkColor4f(0,0,0,0)` to `apply_blend` instead of reading the destination pixel from `bitmap`, then executes `bitmap.blend_pixel` (hardcoded `SrcOver`). |
+| `doc/08_tracking/bug/skia_fill_path_aa_fake_vertical_aa_2026-10-05.md` | Fixed | **FIXED** | `raster_prims.spl:300-564` keeps fractional `_Edge` y bounds, samples `_AA_SUBROWS = 4` sub-scanlines with exact horizontal overlap accumulation, implicitly closes subpaths, and blends once per pixel; `shaders.spl:16-22` uses `sqrt_f64`. Note: `reftest_spec.spl:49-52` bug doc mentions `sk_color_red()` call bug in parity goldens if any older golden was broken — parity specs should be verified when executing Skia fixes. |
+| *(Related macOS MoltenVK)* `doc/08_tracking/bug/vulkan_engine2d_sequential_frames_flaky_moltenvk_2026-09-02.md` | Superseded w/ live macOS residue | **OPEN ON MACOS** | Intermittent `Bus error: 10` (SIGBUS) on frame 2 under JIT + MoltenVK 1.4.350 (`aarch64-apple-darwin`) and `_dispatch_framebuffer_checked < 0` if `engine.clear` is called per frame (note `engine2d_executor.spl:31` still calls `engine.clear(0xFFFFFFFF)`). |

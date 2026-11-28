@@ -112,3 +112,106 @@ pub extern "C" fn rt_process_wait_readable_v1(pid: i64, stream: i64, timeout_ms:
         _ => PIPED_WAIT_OS_ERROR,
     }
 }
+
+// ---------------------------------------------------------------------------
+// Split-stderr / byte-safe piped family: the Rust twin of the C exports at the
+// end of src/runtime/runtime_process.c. The C owner keeps the registry and the
+// OS handles (one owner, so a C-spawned child is readable from this lane and
+// vice versa); this lane owns the caller-facing policy: argument validation,
+// per-call caps, packed-vs-boxed [u8] handling, and result allocation through
+// the owner's array allocator. Every owner hook is one nonblocking OS step, so
+// no export here can park while the child fills the other pipe.
+// ---------------------------------------------------------------------------
+
+unsafe extern "C" {
+    fn simple_piped_owner_spawn_split_v1(cmd: *const u8, cmd_len: i64, args: *mut c_void) -> i64;
+    fn simple_piped_owner_read_v1(pid: i64, stream: i64, out: *mut u8, cap: i64) -> i64;
+    fn simple_piped_owner_stream_state_v1(pid: i64, stream: i64) -> i64;
+    fn simple_piped_owner_read_stderr_text_v1(pid: i64) -> *const u8;
+    fn simple_piped_owner_write_v1(pid: i64, data: *const u8, data_len: i64, offset: i64, max_bytes: i64) -> i64;
+    fn simple_piped_bytes_new_v1(data: *const u8, len: i64) -> *mut c_void;
+    fn rt_array_bytes_basis_len(array: *mut c_void) -> i64;
+    fn rt_array_bytes_basis_ptr(array: *mut c_void) -> i64;
+    fn rt_array_len(array: *mut c_void) -> i64;
+    fn rt_array_get(array: *mut c_void, index: i64) -> i64;
+    fn rt_value_as_int(value: i64) -> i64;
+}
+
+/// Must equal PIPED_BYTES_CAP_V1 / PIPED_WRITE_CHUNK_V1 in runtime_process.c.
+const PIPED_BYTES_CAP: usize = 65536;
+const PIPED_WRITE_CHUNK: usize = 4096;
+const STREAM_STDOUT: i64 = 1;
+const STREAM_STDERR: i64 = 2;
+
+#[no_mangle]
+pub extern "C" fn rt_process_spawn_piped_split_v1(cmd: *const u8, cmd_len: i64, args: *mut c_void) -> i64 {
+    if cmd.is_null() || cmd_len <= 0 { return -1; }
+    let pid = unsafe { simple_piped_owner_spawn_split_v1(cmd, cmd_len, args) };
+    if pid > 0 { pid } else { -1 }
+}
+
+fn read_bytes(pid: i64, stream: i64, max_bytes: i64) -> *mut c_void {
+    let mut buffer = [0u8; PIPED_BYTES_CAP];
+    let cap = if max_bytes <= 0 { 0 } else if max_bytes as u64 > PIPED_BYTES_CAP as u64 {
+        PIPED_BYTES_CAP as i64 } else { max_bytes };
+    let count = if pid > 0 && cap > 0 {
+        unsafe { simple_piped_owner_read_v1(pid, stream, buffer.as_mut_ptr(), cap) }
+    } else { -1 };
+    // An owner reporting more than it was given is a broken contract: deliver
+    // nothing rather than read past the buffer.
+    let count = if count > 0 && count <= cap { count } else { 0 };
+    unsafe { simple_piped_bytes_new_v1(buffer.as_ptr(), count) }
+}
+
+#[no_mangle]
+pub extern "C" fn rt_process_read_stdout_bytes_v1(pid: i64, max_bytes: i64) -> *mut c_void {
+    read_bytes(pid, STREAM_STDOUT, max_bytes)
+}
+
+#[no_mangle]
+pub extern "C" fn rt_process_read_stderr_bytes_v1(pid: i64, max_bytes: i64) -> *mut c_void {
+    read_bytes(pid, STREAM_STDERR, max_bytes)
+}
+
+#[no_mangle]
+pub extern "C" fn rt_process_read_stderr(pid: i64) -> *const u8 {
+    // The owner returns its own thread-local, NUL-terminated buffer even for an
+    // invalid pid, so the empty-text sentinel matches the C lane exactly.
+    unsafe { simple_piped_owner_read_stderr_text_v1(pid) }
+}
+
+#[no_mangle]
+pub extern "C" fn rt_process_stderr_state_v1(pid: i64) -> i64 {
+    let state = unsafe { simple_piped_owner_stream_state_v1(pid, STREAM_STDERR) };
+    match state { -2 | -1 | 0 | 1 => state, _ => -1 }
+}
+
+#[no_mangle]
+pub extern "C" fn rt_process_write_stdin_bytes_some_v1(
+    pid: i64, data: *mut c_void, offset: i64, max_bytes: i64,
+) -> i64 {
+    if pid <= 0 || data.is_null() || offset < 0 || max_bytes <= 0 { return -1; }
+    let packed_len = unsafe { rt_array_bytes_basis_len(data) };
+    if packed_len >= 0 {
+        if offset > packed_len { return -1; }
+        if offset == packed_len { return 0; }
+        let bytes = unsafe { rt_array_bytes_basis_ptr(data) } as usize as *const u8;
+        if bytes.is_null() { return -1; }
+        return unsafe { simple_piped_owner_write_v1(pid, bytes, packed_len, offset, max_bytes) };
+    }
+    let total = unsafe { rt_array_len(data) };
+    if offset > total { return -1; }
+    if offset == total { return 0; }
+    let mut chunk = [0u8; PIPED_WRITE_CHUNK];
+    let mut want = total - offset;
+    if want > max_bytes { want = max_bytes; }
+    if want > PIPED_WRITE_CHUNK as i64 { want = PIPED_WRITE_CHUNK as i64; }
+    let mut index = 0usize;
+    while (index as i64) < want {
+        let value = unsafe { rt_value_as_int(rt_array_get(data, offset + index as i64)) };
+        if !(0..=255).contains(&value) { return -1; }
+        chunk[index] = value as u8;
+        index += 1;
+    }
+    unsafe { simple_piped_owner_write_v1(pid, chunk.as_ptr(), want, 0, want) }
+}

@@ -1,0 +1,92 @@
+# @cover src/app/ui_showcase/showcase_core.spl 80%
+# @cover src/app/ui_showcase/hosts/scene_raster.spl 80%
+# @cover src/app/ui_showcase/hosts/host_2d.spl 80%
+# @cover src/app/ui_showcase/hosts/host_gui.spl 80%
+# @tag:system
+# @gui: headless
+
+"""
+# DrawIrV3Scene & Showcase Host Gate Specification
+
+Verifies deterministic `DrawIrV3Scene` rasterization, 2x HiDPI block scaling,
+pixel checksum stability across repeated presents, and `Screen2dHost` /
+`ScreenGuiHost` input/scale round-trip contracts.
+"""
+
+use std.spec.*
+use std.spec.step
+use app.ui_showcase.showcase_core.{showcase_build, showcase_scene, showcase_run}
+use app.ui_showcase.hosts.scene_raster.{
+    raster_scene_argb, raster_scene_argb_scaled, raster_distinct_pixel_count
+}
+use app.ui_showcase.hosts.host_2d.{Screen2dHost}
+use app.ui_showcase.hosts.host_gui.{gui_device_scale, gui_event_to_logical, gui_event_to_host}
+use common.ui.host_input_event.{HostInputEvent, HOST_MOD_SHIFT}
+use nogc_sync_mut.ui.gui_renderer.{GuiWindowEvent, GUI_EVT_KEYBOARD, GUI_EVT_SCALE_CHANGED}
+
+fn _pixels_checksum(pixels: [u32]) -> i64:
+    var h: i64 = 5381
+    for px in pixels:
+        h = ((h * 33) + px.to_i64()) & 2147483647
+    h
+
+describe "DrawIrV3Scene and showcase host gate":
+
+    it "produces deterministic DrawIrV3Scene pixels across repeated software rasters":
+        # @req REQ-SGUI-009
+        step("Build showcase scene and rasterize twice at 320x200")
+        val st = showcase_build("v3_det")
+        val scene = showcase_scene(st, 320, 200)
+        expect(scene.commands.len()).to_be_greater_than(0)
+        val p1 = raster_scene_argb(scene, 320, 200)
+        val p2 = raster_scene_argb(scene, 320, 200)
+        expect(p1.len()).to_equal(320 * 200)
+        expect(_pixels_checksum(p1)).to_equal(_pixels_checksum(p2))
+        expect(raster_distinct_pixel_count(p1)).to_be_greater_than(1)
+
+    it "maintains exact 2x2 HiDPI device block parity between 1x and 2x rasters":
+        # @req REQ-SGUI-006
+        # @req REQ-SGUI-009
+        step("Rasterize showcase scene at 1x (160x120) and 2x (320x240) and compare blocks")
+        val st = showcase_build("v3_hidpi")
+        val scene = showcase_scene(st, 160, 120)
+        val p1 = raster_scene_argb(scene, 160, 120)
+        val p2 = raster_scene_argb_scaled(scene, 320, 240, 2)
+        expect(p2.len()).to_equal(320 * 240)
+        var mismatches = 0
+        var y = 0
+        while y < 120:
+            var x = 0
+            while x < 160:
+                val base = p1[y * 160 + x]
+                val q0 = p2[(y * 2) * 320 + (x * 2)]
+                val q1 = p2[(y * 2) * 320 + (x * 2 + 1)]
+                val q2 = p2[(y * 2 + 1) * 320 + (x * 2)]
+                val q3 = p2[(y * 2 + 1) * 320 + (x * 2 + 1)]
+                if q0 != base or q1 != base or q2 != base or q3 != base:
+                    mismatches = mismatches + 1
+                x = x + 1
+            y = y + 1
+        expect(mismatches).to_equal(0)
+
+    it "runs Screen2dHost over scripted pointer and key inputs cleanly":
+        # @req REQ-SGUI-008
+        # @req REQ-SGUI-009
+        step("Execute showcase_run on Screen2dHost with click and type script")
+        val host = Screen2dHost.open(320, 240, "click 20,10;type hi")
+        val report = showcase_run(host, "v3_host", 5)
+        expect(report.frames).to_be_greater_than(0)
+        expect(host.pixels().len()).to_equal(320 * 240)
+        expect(report.typed_text).to_equal("hi")
+        host.shutdown()
+        step("Verify ScreenGuiHost scale and shift helpers align with showcase input contract")
+        expect(gui_device_scale("", 2000)).to_equal(2)
+        val scaled_ev = gui_event_to_logical(
+            GuiWindowEvent(native_id: 0, kind: GUI_EVT_SCALE_CHANGED, scancode: 0, keycode: 0, btn: 0, pressed: false, x: 640.0, y: 480.0, scale_milli: 2000),
+            2
+        )
+        expect(scaled_ev.scale_milli).to_equal(2000)
+        val key_ev = gui_event_to_host(
+            GuiWindowEvent(native_id: 0, kind: GUI_EVT_KEYBOARD, scancode: 0, keycode: 65, btn: 0, pressed: true, x: 0.0, y: 0.0, mods: HOST_MOD_SHIFT)
+        )
+        expect(key_ev.is_some()).to_equal(true)

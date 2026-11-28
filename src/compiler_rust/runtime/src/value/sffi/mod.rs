@@ -81,6 +81,7 @@ pub mod time;
 // Phase 6: File I/O & path operations
 pub mod file_io;
 pub mod file_lock_owned_v2;
+pub mod privdrop_v1;
 
 // Phase 7: Environment & process operations
 pub mod env_process;

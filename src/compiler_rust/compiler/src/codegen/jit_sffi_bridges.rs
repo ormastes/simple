@@ -735,3 +735,44 @@ pub(crate) extern "C" fn jit_rt_linux_group_launch_stream_broker_profiled_v3(
         ))
     }
 }
+
+// Split-stderr / byte-safe piped family (interpreter twin in system.rs).
+pub(crate) extern "C" fn jit_rt_process_spawn_piped_split_v1(cmd: i64, cmd_len: i64, args: i64) -> i64 {
+    match system::rt_process_spawn_piped_split_v1(&[rv_to_value(cmd), Value::Int(cmd_len), rv_to_value(args)]) {
+        Ok(Value::Int(pid)) => pid,
+        _ => -1,
+    }
+}
+
+pub(crate) extern "C" fn jit_rt_process_read_stdout_bytes_v1(pid: i64, max_bytes: i64) -> i64 {
+    let value = system::rt_process_read_stdout_bytes_v1(&[Value::Int(pid), Value::Int(max_bytes)])
+        .unwrap_or_else(|_| Value::byte_array(Vec::new()));
+    value_to_rv(&value)
+}
+
+pub(crate) extern "C" fn jit_rt_process_read_stderr_bytes_v1(pid: i64, max_bytes: i64) -> i64 {
+    let value = system::rt_process_read_stderr_bytes_v1(&[Value::Int(pid), Value::Int(max_bytes)])
+        .unwrap_or_else(|_| Value::byte_array(Vec::new()));
+    value_to_rv(&value)
+}
+
+pub(crate) extern "C" fn jit_rt_process_read_stderr(pid: i64) -> i64 {
+    match system::rt_process_read_stderr(&[Value::Int(pid)]) {
+        Ok(val) => value_to_rv(&val),
+        Err(_) => empty_text_rv(),
+    }
+}
+
+pub(crate) extern "C" fn jit_rt_process_stderr_state_v1(pid: i64) -> i64 {
+    match system::rt_process_stderr_state_v1(&[Value::Int(pid)]) {
+        Ok(Value::Int(state)) => state,
+        _ => -1,
+    }
+}
+
+pub(crate) extern "C" fn jit_rt_process_write_stdin_bytes_some_v1(pid: i64, data: i64, offset: i64, max_bytes: i64) -> i64 {
+    match system::rt_process_write_stdin_bytes_some_v1(&[Value::Int(pid), rv_to_value(data), Value::Int(offset), Value::Int(max_bytes)]) {
+        Ok(Value::Int(n)) => n,
+        _ => -1,
+    }
+}

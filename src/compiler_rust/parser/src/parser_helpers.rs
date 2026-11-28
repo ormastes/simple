@@ -1142,6 +1142,20 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Returns true when `lexeme` is a valid digit-led module/path segment
+    /// (`[0-9][A-Za-z0-9_]*`), e.g. `03_system`, `01_unit`, `00`, `2d_math`.
+    pub(crate) fn is_digit_led_path_segment_lexeme(lexeme: &str) -> bool {
+        !lexeme.is_empty()
+            && lexeme.as_bytes()[0].is_ascii_digit()
+            && lexeme.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    }
+
+    /// Returns true when `lexeme` can continue an immediately adjacent digit-led
+    /// path segment (zero whitespace gap), e.g. the `d_math` tail of `2d_math`.
+    pub(crate) fn is_adjacent_path_segment_continuation(lexeme: &str) -> bool {
+        !lexeme.is_empty() && lexeme.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+    }
+
     /// Expect an identifier or a keyword that can be used as a path segment.
     /// This allows using reserved words like 'unit', 'test', etc. in module paths.
     pub(crate) fn expect_path_segment(&mut self) -> Result<String, ParseError> {
@@ -1159,10 +1173,40 @@ impl<'a> Parser<'a> {
             return Ok(name);
         }
 
-        // Allow integer literals as path segments (for numbered directories like 70.backend)
-        if let TokenKind::Integer(n) = &self.current.kind {
-            let name = n.to_string();
+        // Allow numeric-led path segments (for numbered directories like `70.backend`,
+        // `00.common`, `03_system`, `01_unit`, `02_integration`, `2d_math`).
+        // The lexer turns `03_system` into `TypedInteger(3, Unit("system"))` and
+        // `03i64` into `TypedInteger(3, I64)` (and `0b_bin` / `0o_oct` / `1e_exp`
+        // into `Error(...)`), while preserving the exact source spelling — including
+        // leading zeros — in `self.current.lexeme`.
+        let digit_led_start = match &self.current.kind {
+            TokenKind::Integer(n) => {
+                if !self.current.lexeme.is_empty() {
+                    Some(self.current.lexeme.clone())
+                } else {
+                    Some(n.to_string())
+                }
+            }
+            TokenKind::TypedInteger(..) | TokenKind::TypedFloat(..) | TokenKind::Error(_)
+                if Self::is_digit_led_path_segment_lexeme(&self.current.lexeme) =>
+            {
+                Some(self.current.lexeme.clone())
+            }
+            _ => None,
+        };
+        if let Some(mut name) = digit_led_start {
+            let mut last_end = self.current.span.end;
             self.advance();
+            // Re-join any immediately adjacent alphanumeric/_ token (no whitespace)
+            // so segments like `2d_math` (`Integer(2)` + `Identifier("d_math")`) or
+            // `0x_foo` (`Integer(15)` + `Identifier("oo")`) stay a single segment.
+            while self.current.span.start == last_end
+                && Self::is_adjacent_path_segment_continuation(&self.current.lexeme)
+            {
+                name.push_str(&self.current.lexeme);
+                last_end = self.current.span.end;
+                self.advance();
+            }
             return Ok(name);
         }
 
