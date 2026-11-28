@@ -1,6 +1,6 @@
 # C epoll token table is process-wide and lossy for large fds (2026-11-28)
 
-Status: open (found in review of PR #12418)
+Status: verification-pending (epoll loop handle is now a per-loop RtEvLoop with a growable fd->token table, no fd cap, cleared on deregister; no shared statics, no lock. Fallback rule for all three lanes: an fd with no registered token reports the fd (C, Rust net.rs, interpreter now agree). Doc comment states ERR/HUP-only => Read. Prevention: src/runtime/test/rt_event_loop_token_selfcheck.c (real epoll/kqueue). Verified on Windows only with a fake-syscall harness + clang -fsyntax-only; needs a Linux run)
 
 `src/runtime/runtime_native.c` keeps `poll_tokens_by_fd[65536]` for the epoll backend:
 - one table per process, not per loop: the same fd registered in two loops with
