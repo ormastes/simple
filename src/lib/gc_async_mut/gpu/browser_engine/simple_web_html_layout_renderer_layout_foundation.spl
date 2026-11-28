@@ -1001,6 +1001,33 @@ pub val SELECT_INNER_BLOCK_PADDING_PX: i32 = 2
 # (1/30 px steps drifted a fifth button's left edge over the .5 boundary).
 val FORM_CONTROL_MILLI_OVERSAMPLE: i32 = 12
 
+fn _measure_button_label_width_milli(st: Style, label: text, fallback_px: i32) -> i32:
+    var num = st.font_size
+    var den = 1
+    if st.font_size == FORM_CONTROL_UA_FONT_TRUNCATED_PX:
+        num = FORM_CONTROL_UA_FONT_NUM
+        den = FORM_CONTROL_UA_FONT_DEN
+    val family = browser_font_family_for_style(st.font_family, st.bold, st.font_style_italic)
+    # Device scale k > 1: Chrome shapes the label at the device font size
+    # (13.3333 px x k) and keeps the sum in LayoutUnits of a DEVICE px, capped
+    # at FORM_CONTROL_MEASURE_MAX_PX so huge fonts fall back to oversampling.
+    val k = g_layout_device_scale
+    if k > 1 and (num as i64) * (k as i64) <= (FORM_CONTROL_MEASURE_MAX_PX as i64) * (den as i64):
+        val device = resolve_font_metrics_with_language_milli(family, label, num * 1000 * k / den, "")
+        if device.valid and device.width_milli > 0:
+            val device64 = (device.width_milli * 64 + 999) / 1000
+            return ((device64 * 1000 + (32 * k) as i64) / ((64 * k) as i64)) as i32
+    var over = FORM_CONTROL_MILLI_OVERSAMPLE
+    if num * over > FORM_CONTROL_MEASURE_MAX_PX:
+        over = FORM_CONTROL_MEASURE_MAX_PX / num
+    if over < 1:
+        return fallback_px * 1000
+    val metrics = resolve_font_metrics_with_language(family, label, num * over, "")
+    if not metrics.valid or metrics.width <= 0:
+        return fallback_px * 1000
+    val scale = den * over
+    ((metrics.width * 64) / scale) * 1000 / 64
+
 fn form_control_label_width_milli_px(st: Style, label: text) -> i32:
     """Width of one control label in milli-px (1/1000 px), NOT rounded up:
     the fractional width Chrome keeps in LayoutUnit (1/64 px steps). Falls back to the whole
@@ -1010,35 +1037,17 @@ fn form_control_label_width_milli_px(st: Style, label: text) -> i32:
         return 0
     if st.resolved_font_identity == "" or st.resolved_font_width <= 0:
         return form_control_label_width_px(st, label) * 1000
-    var num = st.font_size
-    var den = 1
-    if st.font_size == FORM_CONTROL_UA_FONT_TRUNCATED_PX:
-        num = FORM_CONTROL_UA_FONT_NUM
-        den = FORM_CONTROL_UA_FONT_DEN
-    val family = browser_font_family_for_style(st.font_family, st.bold, st.font_style_italic)
-    # Device scale k > 1: Chrome shapes the label at the device font size
-    # (13.3333 px x 4 = 53.33 px) and keeps the sum in LayoutUnits of a DEVICE
-    # px, so `Forms & Media` is 361.53 device px (90.3828 CSS px) where 4 x its
-    # k = 1 width (90.3594) is 361.44; over a row of tabs the difference moves
-    # an edge to the next device column.
-    val k = g_layout_device_scale
-    if k > 1:
-        val device = resolve_font_metrics_with_language_milli(family, label, num * 1000 * k / den, "")
-        if device.valid and device.width_milli > 0:
-            val device64 = (device.width_milli * 64 + 999) / 1000
-            return ((device64 * 1000 + (32 * k) as i64) / ((64 * k) as i64)) as i32
-    var over = FORM_CONTROL_MILLI_OVERSAMPLE
-    if num * over > FORM_CONTROL_MEASURE_MAX_PX:
-        over = FORM_CONTROL_MEASURE_MAX_PX / num
-    if over < 1:
-        return st.resolved_font_width * 1000
-    val metrics = resolve_font_metrics_with_language(family, label, num * over, "")
-    if not metrics.valid or metrics.width <= 0:
-        return st.resolved_font_width * 1000
-    val scale = den * over
-    # Floor to Chrome's LayoutUnit (1/64 px), then to milli-px. Flooring (not
-    # rounding) offsets the small upward bias of the oversampled measurement.
-    ((metrics.width * 64) / scale) * 1000 / 64
+    _measure_button_label_width_milli(st, label, st.resolved_font_width)
+
+# reason: internal browser_engine milli-px control width scalar matching form_control_label_width_milli_px
+# @allow(primitive_api)
+pub fn input_button_label_width_milli_px(st: Style, label: text) -> i32:
+    """Fractional label width for `<input type=button|submit|reset>` (which has
+    no #text child so `resolved_font_identity` is unset), device-shaped at k > 1."""
+    if label.len() == 0:
+        return 0
+    val fallback_px = form_control_label_width_px(st, label)
+    _measure_button_label_width_milli(st, label, fallback_px)
 
 fn form_control_widest_option_label_px(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, select_i: i32) -> i32:
     """Widest `<option>` label of a `<select>`, including options nested in an
@@ -1079,7 +1088,7 @@ fn form_control_button_frac_delta_milli_px(nodes: [HNode], styles: [Style], chil
 pub fn layout_unit_ceil_milli(milli: i64) -> i64:
     if milli <= 0:
         return 0
-    val w64 = (milli * 64 + 999) / 1000
+    val w64 = (milli * 64 + 961) / 1000
     (w64 * 1000 + 63) / 64
 
 # The one non-empty `#text` child of `item` when its children are all text,
@@ -1781,6 +1790,11 @@ pub fn form_control_tag(tag: text) -> bool:
 # reason: node index into the per-node layout tables.
 # @allow(primitive_api)
 pub fn inline_item_width_err_milli(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, c: i32, bw: [i32], wrap_starts: [[i32]]) -> i64:
+    inline_item_width_err_milli_with_lead(nodes, styles, child_index, c, bw, wrap_starts, 0)
+
+# reason: internal browser_engine pen arithmetic in milli-px matching inline_item_width_err_milli
+# @allow(primitive_api)
+pub fn inline_item_width_err_milli_with_lead(nodes: [HNode], styles: [Style], child_index: HtmlChildIndex, c: i32, bw: [i32], wrap_starts: [[i32]], lead_exact_milli: i64) -> i64:
     var run = c
     if nodes[c].tag != "#text":
         val st = styles[c]
@@ -1843,33 +1857,31 @@ pub fn inline_item_width_err_milli(nodes: [HNode], styles: [Style], child_index:
     else:
         rst.resolved_font_width
     if bw[run] == base_width_px or (collapsed_lead > 0 and bw[run] == rst.resolved_font_width):
-        return base_width_milli - (base_width_px as i64) * 1000
+        val item_milli = layout_unit_ceil_milli(lead_exact_milli + base_width_milli) - lead_exact_milli
+        return item_milli - (base_width_px as i64) * 1000
     # A run measured over its trimmed text whose box also holds one or two
-    # edge spaces, rounded once with them (`Lead ` is 35.59 + 4.45 -> 40).
+    # edge spaces, rounded once as a single LayoutUnit item (`Lead ` is 35.59 + 4.45 -> 40).
     if rst.resolved_space_milli > 0:
-        val space_m = layout_unit_ceil_milli(rst.resolved_space_milli)
         var k: i64 = 1
         while k <= 2:
             val exact = base_width_milli + k * rst.resolved_space_milli
-            val exact_lu = base_width_milli + k * space_m
+            val exact_lu = layout_unit_ceil_milli(exact)
             if (bw[run] as i64) == (exact + 500) / 1000 or (bw[run] as i64) == (exact_lu + 500) / 1000:
-                return exact_lu - (bw[run] as i64) * 1000
+                val item_milli = layout_unit_ceil_milli(lead_exact_milli + exact) - lead_exact_milli
+                return item_milli - (bw[run] as i64) * 1000
             k = k + 1
         # The same box with its edge space(s) kerned against the run's glyph.
         if rst.resolved_lead_space_milli > 0 or rst.resolved_trail_space_milli > 0:
-
             val raw_lead_m = if rst.resolved_lead_space_milli > 0: rst.resolved_lead_space_milli else: rst.resolved_space_milli
             val raw_trail_m = if rst.resolved_trail_space_milli > 0: rst.resolved_trail_space_milli else: rst.resolved_space_milli
-            val lead_m = layout_unit_ceil_milli(raw_lead_m)
-            val trail_m = layout_unit_ceil_milli(raw_trail_m)
             val raw_edges: [i64] = [raw_trail_m, raw_lead_m, raw_lead_m + raw_trail_m]
-            val lu_edges: [i64] = [trail_m, lead_m, lead_m + trail_m]
             var ei = 0
             while ei < 3:
                 val exact = base_width_milli + raw_edges[ei]
-                val exact_lu = base_width_milli + lu_edges[ei]
+                val exact_lu = layout_unit_ceil_milli(exact)
                 if (bw[run] as i64) == (exact + 500) / 1000 or (bw[run] as i64) == (exact_lu + 500) / 1000:
-                    return exact_lu - (bw[run] as i64) * 1000
+                    val item_milli = layout_unit_ceil_milli(lead_exact_milli + exact) - lead_exact_milli
+                    return item_milli - (bw[run] as i64) * 1000
                 ei = ei + 1
     INLINE_PEN_ERR_UNKNOWN
 
@@ -2637,6 +2649,7 @@ pub fn form_control_device_extra_h(node: HNode, st: Style, rows: i32) -> i32:
 fn align_inline_line_device_dy(child_index: HtmlChildIndex, line_style: Style, html_nodes: [HNode], nodes: [i32], margin_ts: [i32], margin_bs: [i32], styles: [Style], bh: [i32], css_ascent: i32, css_descent: i32, has_valign: bool, middle_ascent64: i32, line_frac_milli: i32 = 0, origin_frac_milli: i32 = 0, line_ascent64: i32 = 0) -> i32:
     val k = g_layout_device_scale
     var middle_slots: [i32] = []
+    var has_text_valign = false
     var ascent = inline_line_strut_baseline_offset_device(line_style, k)
     # The ascent of the baseline-aligned boxes alone: what a middle box
     # centres on when a top/bottom box shares the line.
@@ -2652,8 +2665,16 @@ fn align_inline_line_device_dy(child_index: HtmlChildIndex, line_style: Style, h
     while i < nodes.len():
         val node_index = nodes[i]
         val node_style = styles[node_index]
-        if inline_atomic_valign(html_nodes[node_index], node_style) == "middle":
+        val node_valign = inline_atomic_valign(html_nodes[node_index], node_style)
+        if node_valign == "middle":
             middle_slots.push(i)
+            i = i + 1
+            continue
+        elif node_valign == "top" or node_valign == "bottom":
+            i = i + 1
+            continue
+        elif node_valign != "":
+            has_text_valign = true
             i = i + 1
             continue
         val node_replaced = replaced_media_bottom_edge_tag(html_nodes[node_index].tag)
@@ -2697,7 +2718,7 @@ fn align_inline_line_device_dy(child_index: HtmlChildIndex, line_style: Style, h
         ascent = middle_ascent
     if middle_ascent > baseline_ascent:
         baseline_ascent = middle_ascent
-    val line_delta = if has_valign: 0 else: ascent - k * css_ascent
+    val line_delta = if has_text_valign: 0 else: ascent - k * css_ascent
     # The line starts at the cursor's residual; its container already carries
     # the residual it started at (origin), so only the difference moves the
     # boxes (an svg after an h2 with 19.92px margins: device row 439, not 440).
@@ -2719,7 +2740,7 @@ fn align_inline_line_device_dy(child_index: HtmlChildIndex, line_style: Style, h
     # A control hangs from the device baseline by its own device baseline.
     i = 0
     while i < widget_nodes.len():
-        box_device_inline_dy_record(html_nodes.len() as i32, widget_nodes[i], if has_valign: 0 else: line_delta - widget_deltas[i] + line_start_dy)
+        box_device_inline_dy_record(html_nodes.len() as i32, widget_nodes[i], (if has_text_valign: 0 else: line_delta - widget_deltas[i]) + (if has_valign: 0 else: line_start_dy))
         i = i + 1
     i = 0
     while i < nodes.len():

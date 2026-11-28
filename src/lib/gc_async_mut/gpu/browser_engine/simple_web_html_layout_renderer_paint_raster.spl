@@ -1378,92 +1378,114 @@ fn _paint_passes(nodes: [HNode], styles: [Style], bx: [i32], by: [i32], bw: [i32
     # Outside widget mode a root gradient list is the canvas background: it
     # paints the canvas (positioned on the html box) instead of its own box.
     val canvas_src = if widget_mode: -1 else: canvas_gradient_source(nodes, styles)
-    # backgrounds first (document order = back to front)
+    # backgrounds first (document order = back to front): CSS 2.2 Appendix E
+    # Step 4 paints non-float normal-flow blocks (`flow_phase == 0`), then Step 5
+    # paints non-positioned float subtrees (`flow_phase == 1`) before relative /
+    # positioned layers and Pass 6 text.
     val node_count = nodes.len()
+    var nonpos_float: [bool] = [false; node_count]
+    val pass1_gen_start = html_generated_start(nodes)
+    val pass1_order: [i32] = if pass1_gen_start >= 0: html_tree_order(nodes, build_child_index(nodes)) else: []
+    val pass1_count = if pass1_gen_start >= 0: pass1_order.len() else: node_count
+    var fi = 0
+    # cpu-lane-loop-ok: classifies non-positioned float subtrees in tree order once per paint; bound is node_count
+    while fi < pass1_count:
+        val fnode = if pass1_gen_start >= 0: pass1_order[fi] else: fi
+        val fst = styles[fnode]
+        if not fst.position_absolute and not has_relative_paint_root(nodes, styles, fnode):
+            val fparent = nodes[fnode].parent as i32
+            if fst.float_mode != 0 or (fparent >= 0 and nonpos_float[fparent]):
+                nonpos_float[fnode] = true
+        fi = fi + 1
     var i = 0
     var has_absolute_node = false
     # In-flow outlines paint in Chrome's outline phase: after every in-flow
     # box of the context, so a later in-flow sibling never covers them, and
     # before positioned boxes (passes 2-4), which still do.
     var flow_outlines: [i32] = []
-    # cpu-lane-loop-ok: fn paint pass 1 of 6: normal-flow (non-absolute, non-relative-root) box paint - shadow, background, border, outline plus widget panel and button fills, in document order = back to front. Bound is node_count; the CPU lane rasterises per node by design, and the pass is budget-guarded via _web_budget_expired_at
-    while i < node_count:
-        # Budget guard: stop painting backgrounds on expiry; the framebuffer keeps
-        # whatever was painted so far (already sized width*height).
-        if _web_budget_expired_at(WEB_BUDGET_SITE_PAINT_BACKGROUNDS):
-            break
-        val nd = nodes[i]
-        val st = styles[i]
-        if st.position_absolute:
-            has_absolute_node = true
-        val x = bx[i]
-        val y = by[i]
-        val w = bw[i]
-        val h = bh[i]
-        val skip_widget_page_bg = has_widget_panel and (nd.tag == "html" or nd.tag == "body")
-        val skip_widget_node_bg = widget_mode and (nd.has_widget_class or nd.has_icon_image_class)
-        val relative_paint_root = has_relative_paint_root(nodes, styles, i)
-        val normal_flow = not st.position_absolute and not relative_paint_root
-        val visible_node = st.display != "none" and not st.visibility_hidden and not content_paint_hidden_by_ancestor(nodes, styles, i)
-        val visible_box = normal_flow and visible_node and nd.tag != "#text" and y < fbh
-        val non_widget_mode = not widget_mode
-        if visible_box:
-            # Chrome 159 rounds the native frame of an unrestyled control: it is
-            # blended from `chrome_frame_spans` in place of the box's own fill and
-            # border (the Draw IR twin is _html_draw_ir_native_frame_commands).
-            val native_frame = non_widget_mode and st.native_frame != 0 and w > 0 and h > 0
-            val checkable = non_widget_mode and checkable_author_box_hidden(nd, st)
-            val paint_bg = not native_frame and not checkable and i != canvas_src and not skip_widget_page_bg and not skip_widget_node_bg and (st.bg != 0u32 or (st.background_gradient_from != 0u32 and st.background_gradient_to != 0u32) or radial_gradient_box_paintable(st) or background_gradient_layers_paintable(st))
-            val paint_border = not native_frame and not checkable and not skip_widget_node_bg and (st.border_l > 0 or st.border_t > 0 or st.border_r > 0 or st.border_b > 0)
-            if i == canvas_src:
-                val canvas = canvas_background_extent(nodes, bx, by, bw, bh, fbw, fbh)
-                val root_layers = canvas_gradient_layers(nodes, styles, bx, by, bw, bh, i)
-                out = fb_gradient_layers_clip(out, fbw, fbh, 0, 0, canvas[0], canvas[1], root_layers, st.opacity_pct, paint_clip_at(clip_cache, i))
-            val paint_outline = not skip_widget_node_bg and st.outline_w > 0 and st.outline_color != 0u32
-            val paint_shadow = not skip_widget_node_bg and (st.box_shadow_color != 0u32 or st.box_shadow_raw != "")
-            if skip_widget_page_bg and nd.tag == "body" and st.bg_layers_raw != "":
-                # widget pages suppress the flat page bg, but a radial-carrying
-                # body background stack is the Chromium-visible page tint:
-                # paint the linear base ramp, then the radial layers over it
-                val clip = paint_clip_at(clip_cache, i)
-                if st.background_gradient_from != 0u32 and st.background_gradient_to != 0u32:
-                    out = fb_style_background_opacity_clip(out, fbw, fbh, x, y, w, h, st, clip)
-                # Chrome propagates the body background to the canvas: its
-                # radial layers are positioned on, and paint, the canvas.
-                # A gradient-only list paints every layer (linear too); any
-                # other list keeps the radial-only stack painter.
-                val canvas = canvas_background_extent(nodes, bx, by, bw, bh, fbw, fbh)
-                val canvas_layers = background_gradient_layers(st.bg_layers_raw, 0, 0, canvas[0], canvas[1], st.font_size)
-                if canvas_layers.len() > 0:
-                    out = fb_gradient_layers_clip(out, fbw, fbh, 0, 0, canvas[0], canvas[1], canvas_layers, st.opacity_pct, clip)
-                else:
-                    out = fb_background_radial_stack_clip(out, fbw, fbh, 0, 0, canvas[0], canvas[1], st.bg_layers_raw, st.opacity_pct, clip)
-            if native_frame:
-                out = fb_chrome_spans_clip(out, fbw, fbh, chrome_frame_spans(st.native_frame, w, h, 1), x, y, paint_clip_at(clip_cache, i))
-            if st.backdrop_filter_raw != "":
-                out = _paint_backdrop_blur(out, fbw, fbh, x, y, w, h, st, paint_clip_at(clip_cache, i))
-            if paint_shadow or paint_bg or paint_border or paint_outline:
-                val clip = paint_clip_at(clip_cache, i)
-                if paint_shadow:
-                    out = _paint_box_shadow_outside_box(out, fbw, fbh, x, y, w, h, st, clip)
-                if paint_bg:
-                    out = fb_style_background_opacity_clip(out, fbw, fbh, x, y, w, h, st, clip)
-                if paint_border:
-                    out = _paint_node_border(out, fbw, fbh, x, y, w, h, nd, st, clip)
-                if paint_outline:
-                    flow_outlines.push(i)
-            if non_widget_mode and nd.tag == "img" and not nd.has_widget_image_class and _raster_images.len() > 0:
-                out = _fb_paint_img_clip(out, fbw, fbh, nd, st, x, y, w, h, paint_clip_at(clip_cache, i))
-        if normal_flow and non_widget_mode and visible_node and nd.has_widget_panel_class and y < fbh:
-            val panel_h = h
-            if st.bg == 0u32 and st.background_gradient_from == 0u32:
-                out = fb_rect(out, fbw, fbh, x, y, w, panel_h, web_argb(245, 245, 245))
-            if nd.has_focused_class and st.bg == 0u32 and st.background_gradient_from == 0u32:
-                out = fb_rect(out, fbw, fbh, x, y, w, 1, web_argb(0, 102, 204))
-        if normal_flow and non_widget_mode and visible_node and nd.has_widget_button_class and y < fbh:
-            if st.bg == 0u32 and st.background_gradient_from == 0u32:
-                out = fb_rect(out, fbw, fbh, x, y, w, h, web_argb(203, 213, 225))
-        i = i + 1
+    var flow_phase = 0
+    while flow_phase < 2:
+        i = 0
+        # cpu-lane-loop-ok: fn paint pass 1 of 6 (flow_phase 0 = Step 4 normal-flow blocks, flow_phase 1 = Step 5 non-positioned float subtrees): non-absolute, non-relative-root box paint - shadow, background, border, outline plus widget panel and button fills. Bound is node_count per phase, budget-guarded via _web_budget_expired_at
+        while i < node_count:
+            # Budget guard: stop painting backgrounds on expiry; the framebuffer keeps
+            # whatever was painted so far (already sized width*height).
+            if _web_budget_expired_at(WEB_BUDGET_SITE_PAINT_BACKGROUNDS):
+                break
+            val nd = nodes[i]
+            val st = styles[i]
+            if flow_phase == 0 and st.position_absolute:
+                has_absolute_node = true
+            val in_phase = if flow_phase == 0: not nonpos_float[i] else: nonpos_float[i]
+            val x = bx[i]
+            val y = by[i]
+            val w = bw[i]
+            val h = bh[i]
+            val skip_widget_page_bg = has_widget_panel and (nd.tag == "html" or nd.tag == "body")
+            val skip_widget_node_bg = widget_mode and (nd.has_widget_class or nd.has_icon_image_class)
+            val relative_paint_root = has_relative_paint_root(nodes, styles, i)
+            val normal_flow = in_phase and not st.position_absolute and not relative_paint_root
+            val visible_node = st.display != "none" and not st.visibility_hidden and not content_paint_hidden_by_ancestor(nodes, styles, i)
+            val visible_box = normal_flow and visible_node and nd.tag != "#text" and y < fbh
+            val non_widget_mode = not widget_mode
+            if visible_box:
+                # Chrome 159 rounds the native frame of an unrestyled control: it is
+                # blended from `chrome_frame_spans` in place of the box's own fill and
+                # border (the Draw IR twin is _html_draw_ir_native_frame_commands).
+                val native_frame = non_widget_mode and st.native_frame != 0 and w > 0 and h > 0
+                val checkable = non_widget_mode and checkable_author_box_hidden(nd, st)
+                val paint_bg = not native_frame and not checkable and i != canvas_src and not skip_widget_page_bg and not skip_widget_node_bg and (st.bg != 0u32 or (st.background_gradient_from != 0u32 and st.background_gradient_to != 0u32) or radial_gradient_box_paintable(st) or background_gradient_layers_paintable(st))
+                val paint_border = not native_frame and not checkable and not skip_widget_node_bg and (st.border_l > 0 or st.border_t > 0 or st.border_r > 0 or st.border_b > 0)
+                if i == canvas_src:
+                    val canvas = canvas_background_extent(nodes, bx, by, bw, bh, fbw, fbh)
+                    val root_layers = canvas_gradient_layers(nodes, styles, bx, by, bw, bh, i)
+                    out = fb_gradient_layers_clip(out, fbw, fbh, 0, 0, canvas[0], canvas[1], root_layers, st.opacity_pct, paint_clip_at(clip_cache, i))
+                val paint_outline = not skip_widget_node_bg and st.outline_w > 0 and st.outline_color != 0u32
+                val paint_shadow = not skip_widget_node_bg and (st.box_shadow_color != 0u32 or st.box_shadow_raw != "")
+                if skip_widget_page_bg and nd.tag == "body" and st.bg_layers_raw != "":
+                    # widget pages suppress the flat page bg, but a radial-carrying
+                    # body background stack is the Chromium-visible page tint:
+                    # paint the linear base ramp, then the radial layers over it
+                    val clip = paint_clip_at(clip_cache, i)
+                    if st.background_gradient_from != 0u32 and st.background_gradient_to != 0u32:
+                        out = fb_style_background_opacity_clip(out, fbw, fbh, x, y, w, h, st, clip)
+                    # Chrome propagates the body background to the canvas: its
+                    # radial layers are positioned on, and paint, the canvas.
+                    # A gradient-only list paints every layer (linear too); any
+                    # other list keeps the radial-only stack painter.
+                    val canvas = canvas_background_extent(nodes, bx, by, bw, bh, fbw, fbh)
+                    val canvas_layers = background_gradient_layers(st.bg_layers_raw, 0, 0, canvas[0], canvas[1], st.font_size)
+                    if canvas_layers.len() > 0:
+                        out = fb_gradient_layers_clip(out, fbw, fbh, 0, 0, canvas[0], canvas[1], canvas_layers, st.opacity_pct, clip)
+                    else:
+                        out = fb_background_radial_stack_clip(out, fbw, fbh, 0, 0, canvas[0], canvas[1], st.bg_layers_raw, st.opacity_pct, clip)
+                if native_frame:
+                    out = fb_chrome_spans_clip(out, fbw, fbh, chrome_frame_spans(st.native_frame, w, h, 1), x, y, paint_clip_at(clip_cache, i))
+                if st.backdrop_filter_raw != "":
+                    out = _paint_backdrop_blur(out, fbw, fbh, x, y, w, h, st, paint_clip_at(clip_cache, i))
+                if paint_shadow or paint_bg or paint_border or paint_outline:
+                    val clip = paint_clip_at(clip_cache, i)
+                    if paint_shadow:
+                        out = _paint_box_shadow_outside_box(out, fbw, fbh, x, y, w, h, st, clip)
+                    if paint_bg:
+                        out = fb_style_background_opacity_clip(out, fbw, fbh, x, y, w, h, st, clip)
+                    if paint_border:
+                        out = _paint_node_border(out, fbw, fbh, x, y, w, h, nd, st, clip)
+                    if paint_outline:
+                        flow_outlines.push(i)
+                if non_widget_mode and nd.tag == "img" and not nd.has_widget_image_class and _raster_images.len() > 0:
+                    out = _fb_paint_img_clip(out, fbw, fbh, nd, st, x, y, w, h, paint_clip_at(clip_cache, i))
+            if normal_flow and non_widget_mode and visible_node and nd.has_widget_panel_class and y < fbh:
+                val panel_h = h
+                if st.bg == 0u32 and st.background_gradient_from == 0u32:
+                    out = fb_rect(out, fbw, fbh, x, y, w, panel_h, web_argb(245, 245, 245))
+                if nd.has_focused_class and st.bg == 0u32 and st.background_gradient_from == 0u32:
+                    out = fb_rect(out, fbw, fbh, x, y, w, 1, web_argb(0, 102, 204))
+            if normal_flow and non_widget_mode and visible_node and nd.has_widget_button_class and y < fbh:
+                if st.bg == 0u32 and st.background_gradient_from == 0u32:
+                    out = fb_rect(out, fbw, fbh, x, y, w, h, web_argb(203, 213, 225))
+            i = i + 1
+        flow_phase = flow_phase + 1
     # Chrome paints them over in-flow text too, so an outline no positioned
     # box overlaps waits for the end of pass 6; one that a positioned box
     # overlaps paints here, under passes 2-4.
