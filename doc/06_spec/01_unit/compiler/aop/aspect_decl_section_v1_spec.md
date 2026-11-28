@@ -46,6 +46,7 @@ no advice".
 | leaf digest | the module's aspect interface digest (rows, handler signature, effects; no body); the input of the directory `aspect_root_digest` |
 | row | family (`logical` or `mir`), `AdviceId`, handler, form, mode, activation, selector text and selector id, scope id, order, the three contract flags, signature digest, effects digest |
 | `advice.body` facet | the handler body digest; excluded from the row digest and from the leaf |
+| `family_inventory_index` | the position of the declaration in its family; kept for order, excluded from the row digest |
 
 `form` is the declaration as written: the advice form of a mir row (`before`,
 `after`, `around`) or the join-point kind of a logical row (`forward`). `mode`
@@ -99,7 +100,7 @@ Function names refer to `aspect_decl_section_v1.spl`.
 | `aspect_section_frames_read_v1` | width scan stops at end of data, at 12 digits, at `:`; bad width, missing `:`, 13th digit, value overruns | "a frame list is read back value for value", "bytes outside a frame invalidate the whole list" |
 | `aspect_section_seal_status_v1` | unparsable seal; algorithm is not sha256; text differs | "a seal verifies only for its own bytes and its own algorithm" |
 | `aspect_body_span_digest_v1` | negative start, empty span, span past the end; name absent | "a body digest covers exactly the function's own span" |
-| `aspect_decl_row_digest_v1` | key is `body` | "an advice body edit changes only the body facet" |
+| `aspect_decl_row_digest_v1` | key is `body`; key is `index` | "an advice body edit changes only the body facet", "adding an unrelated earlier advice leaves later advice ids unchanged" |
 | `aspect_decl_row_v1` | family is `mir` | "a resolved handler becomes one row of its family" |
 | `aspect_decl_section_of_semantic_v1` | handler has no digest; digest is empty; handler already declared in this family | "a handler without a body digest is an error", "two declarations of one handler get different advice ids" |
 | `aspect_decl_section_encode_v1` | row limit; head field limit; row field limit; section limit | "encoding refuses every over-limit section" |
@@ -353,7 +354,7 @@ expect(edited.advice_id).to_equal(id)
 #### adding an unrelated earlier advice leaves later advice ids unchanged
 
 - Build the section of a module with two advice, then again with an unrelated advice declared before them
-- Both existing advice keep their ids although their inventory index moved; the new advice has its own id
+- Both existing advice keep their ids and their row digests although their inventory index moved; the new advice has its own id
    - Exec capture: after_step
    - Evidence: execution result verified by 2 expected checks
    - Expected: [after.rows[1].family_inventory_index, before.rows[0].family_inventory_index] equals `[1, 0]`
@@ -363,7 +364,7 @@ expect(edited.advice_id).to_equal(id)
 <details>
 <summary>Executable SSpec</summary>
 
-Runnable source: 15 lines folded for reproduction.
+Runnable source: 17 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
@@ -377,9 +378,11 @@ val after = aspect_decl_section_of_semantic_v1(semantic_of([
     resolved("logical", 0, "early_probe", "probe_view", "static", 0),
     resolved("logical", 1, "trace_submit", "submit_view", "static", 0),
     resolved("logical", 2, "audit_call", "audit_view", "static", 0)]), digests).unwrap()
-step("Both existing advice keep their ids although their inventory index moved; the new advice has its own id")
+step("Both existing advice keep their ids and their row digests although their inventory index moved; the new advice has its own id")
 expect([after.rows[1].advice_id, after.rows[2].advice_id]).to_equal(
     [before.rows[0].advice_id, before.rows[1].advice_id])
+expect([aspect_decl_row_digest_v1(after.rows[1]), aspect_decl_row_digest_v1(after.rows[2])]).to_equal(
+    [aspect_decl_row_digest_v1(before.rows[0]), aspect_decl_row_digest_v1(before.rows[1])])
 expect([after.rows[1].family_inventory_index, before.rows[0].family_inventory_index]).to_equal([1, 0])
 expect(after.rows[0].advice_id == before.rows[0].advice_id).to_equal(false)
 ```
@@ -1059,15 +1062,15 @@ Requirements covered by the scenarios in this manual:
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `efb3adfe13150f7089980c0b510442255bbf6f82197fb63ba72096c277eb6821`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `a10760eb175166403146e6fc06a29a31a8a07da49eed0c79723f052971bba808`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `efb3adfe13150f7089980c0b510442255bbf6f82197fb63ba72096c277eb6821`.
+Source SHA-256: `a10760eb175166403146e6fc06a29a31a8a07da49eed0c79723f052971bba808`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `efb3adfe13150f7089980c0b510442255bbf6f82197fb63ba72096c277eb6821`  
+Source SHA-256: `a10760eb175166403146e6fc06a29a31a8a07da49eed0c79723f052971bba808`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
 Raw score: **97/100**; effective score: **97/100**; blockers: **0**.
 
