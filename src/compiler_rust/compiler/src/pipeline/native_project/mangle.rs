@@ -943,6 +943,51 @@ pub(crate) fn mangle_mir(
     unresolved_count
 }
 
+/// Fail closed when a glob-imported PRIVATE call target survived [`mangle_mir`]
+/// as a bare name (bug glob_imported_private_fn_lowers_to_unmangled_extern_
+/// 2026-09-13): glob bindings deliberately skip `_`-prefixed names and ambiguous
+/// private names keep no first-wins fallback (imports.rs `build_import_map`),
+/// so every co-compiled definition is module-mangled and the bare name has no
+/// definition. Left in the MIR, the LLVM backend fabricates an extern
+/// declaration under the raw unmangled name and the build dies at the final
+/// link instead of at compile time. Runs after `mangle_mir` rewrote every
+/// name it could; anything still bare, private, and ambiguous here is exactly
+/// that leak. The Cranelift backend carries the twin guard at codegen
+/// (`codegen/instr/calls.rs` `compile_call`), next to the identical
+/// "ambiguous private global must be imported explicitly" check in
+/// `common_backend.rs` `declare_globals`.
+pub(crate) fn reject_leaked_ambiguous_private_call_targets(
+    mir: &crate::mir::MirModule,
+    ambiguous_names: &std::collections::HashSet<String>,
+) -> Result<(), String> {
+    use crate::mir::MirInst;
+    for func in &mir.functions {
+        for block in &func.blocks {
+            for inst in &block.instructions {
+                let MirInst::Call { target, .. } = inst else { continue };
+                let name = target.name();
+                if name.starts_with('_')
+                    && !name.contains("__")
+                    && !name.contains('.')
+                    && ambiguous_names.contains(name)
+                    && !is_runtime_or_builtin_name(name, &mir.extern_fn_names)
+                {
+                    return Err(format!(
+                        "ambiguous private call `{name}` in `{}` must be imported explicitly: \
+                         a glob import never binds `_`-private functions, the bare name has no \
+                         definition, and lowering it would emit an unmangled extern that fails \
+                         at link time. Import the intended definition selectively \
+                         (`use <module>.{{name}}`) or rename the duplicate definitions. \
+                         [compiler_cross_module_private_symbol_collision]",
+                        func.name
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Resolve a name by checking local_map → use_map → import_map → variant resolution → suffix resolution.
 ///
 /// This is the common resolution chain used by InterpCall, GlobalLoad/GlobalStore, and other
@@ -1701,9 +1746,75 @@ mod symbol_tests;
 
 #[cfg(test)]
 mod tests {
-    use super::{enum_helper_owner_matches, is_enum_helper_method, resolve_call_target, resolve_method_call_static};
+    use super::{
+        enum_helper_owner_matches, is_enum_helper_method, reject_leaked_ambiguous_private_call_targets,
+        resolve_call_target, resolve_method_call_static,
+    };
     use crate::mir::CallTarget;
     use std::collections::HashMap;
+
+    fn mir_with_bare_call(name: &str) -> crate::mir::MirModule {
+        use crate::mir::{MirFunction, MirInst, MirModule, Terminator};
+        let mut mir = MirModule::new();
+        let mut func =
+            MirFunction::new("caller_fn".to_string(), crate::hir::TypeId::I64, simple_parser::Visibility::Private);
+        func.blocks[0].instructions.push(MirInst::Call {
+            dest: None,
+            target: CallTarget::Pure(name.to_string()),
+            args: vec![],
+        });
+        func.blocks[0].terminator = Terminator::Return(None);
+        mir.functions.push(func);
+        mir
+    }
+
+    /// glob_imported_private_fn_lowers_to_unmangled_extern_2026-09-13 (LLVM
+    /// lane): a glob import never binds `_`-private names and an ambiguous
+    /// private name keeps no first-wins fallback, so a surviving bare
+    /// ambiguous-private call target would auto-declare an unmangled extern
+    /// and die at the final link. It must be a compile-time error instead.
+    #[test]
+    fn ambiguous_private_call_target_is_a_hard_error() {
+        let ambiguous = std::collections::HashSet::from(["_helper".to_string()]);
+        let err = reject_leaked_ambiguous_private_call_targets(&mir_with_bare_call("_helper"), &ambiguous)
+            .expect_err("bare ambiguous private call must fail closed");
+        assert!(err.contains("ambiguous private call `_helper`"), "got: {err}");
+        assert!(err.contains("must be imported explicitly"), "got: {err}");
+    }
+
+    /// The guard is scoped to AMBIGUOUS private names: a unique private name
+    /// the global import map legitimately serves (or a non-private unresolved
+    /// name codegen resolves through another route) must pass untouched.
+    #[test]
+    fn unique_or_public_unresolved_call_targets_still_pass() {
+        // Not in the ambiguous set: unique private names resolve through the
+        // global import map before codegen, so the post-mangle bare spelling
+        // never occurs; if one does, other lanes own that diagnosis.
+        let ambiguous = std::collections::HashSet::from(["_other".to_string()]);
+        reject_leaked_ambiguous_private_call_targets(&mir_with_bare_call("_helper"), &ambiguous)
+            .expect("non-ambiguous private name must not be flagged");
+        // Public names are never glob-skipped.
+        let ambiguous = std::collections::HashSet::from(["helper".to_string()]);
+        reject_leaked_ambiguous_private_call_targets(&mir_with_bare_call("helper"), &ambiguous)
+            .expect("public name must not be flagged");
+        // Runtime/builtin carve-out: rt_* targets are auto-declared against
+        // the runtime on purpose, even if a colliding entry were ambiguous.
+        let ambiguous = std::collections::HashSet::from(["rt_len".to_string()]);
+        reject_leaked_ambiguous_private_call_targets(&mir_with_bare_call("rt_len"), &ambiguous)
+            .expect("runtime names must not be flagged");
+    }
+
+    /// A module-declared `extern fn` of the same name is a legitimate bare
+    /// extern and must not be flagged either.
+    #[test]
+    fn module_declared_extern_is_not_flagged() {
+        let mut mir = mir_with_bare_call("_helper");
+        mir.extern_fn_names.insert("_helper".to_string());
+        let ambiguous = std::collections::HashSet::from(["_helper".to_string()]);
+        reject_leaked_ambiguous_private_call_targets(&mir, &ambiguous)
+            .expect("an explicit extern declaration owns the bare name");
+    }
+
 
     fn poll_index() -> HashMap<String, Vec<String>> {
         HashMap::from([(
