@@ -584,19 +584,31 @@ impl JitCompiler {
     /// de-JITed on spl_thread_current_id even though the call bridged fine).
     fn unresolved_imports_called(&self, mir: &MirModule) -> Vec<String> {
         use cranelift_module::{Linkage, Module};
-        let mut directly_called: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let mut directly_called: std::collections::HashSet<String> = std::collections::HashSet::new();
         for func in &mir.functions {
             for block in &func.blocks {
                 for inst in &block.instructions {
                     if let crate::mir::MirInst::Call { target, .. } = inst {
                         let raw = target.name();
-                        directly_called.insert(raw);
+                        directly_called.insert(raw.to_string());
                         // Mirror the alias expansion in referenced_call_names
                         // (common_backend.rs): a Call to `rt_file_delete` also
                         // needs `rt_file_remove` declared/resolved.
                         let base = super::instr::calls::strip_call_module_prefix(raw);
                         if let Some(alias) = super::instr::calls::sffi_alias_target(base) {
-                            directly_called.insert(alias);
+                            directly_called.insert(alias.to_string());
+                        }
+                        // Dotted targets are DECLARED as imports under their
+                        // sanitized spelling (`Thing.create` -> `Thing_dot_create`,
+                        // see the cross-module arms of compile_call and
+                        // compile_method_call_static). Without the sanitized
+                        // spelling here the declaration-name match below never
+                        // fires, the import finalizes to a NULL GOT slot, and the
+                        // call SIGSEGVs -- the block-scoped `use` of a class whose
+                        // static method is called hits exactly that
+                        // (doc/08_tracking/bug/jit_block_use_same_name_class_segv_2026-11-27).
+                        if raw.contains('.') {
+                            directly_called.insert(raw.replace('.', "_dot_"));
                         }
                     }
                 }

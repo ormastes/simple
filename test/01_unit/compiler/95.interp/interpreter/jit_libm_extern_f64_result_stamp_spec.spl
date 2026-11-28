@@ -1,0 +1,136 @@
+# Bug: jit_class_array_field_store_write_lost_2026-11-27 (R2 residual of
+# engine_specs_spec_runner_interpreter_divergence_2026-09-16)
+#
+# The renderer3d_bugfix "positioned node produces different pixels" case was
+# RED on the JIT lane because `ForwardRenderer3D.render_scene` drew nothing:
+# `Camera3DData.projection_matrix()` builds `f = 1 / tan(fov/2)` from the
+# rt_math_sin / rt_math_cos runtime externs, and codegen's vreg type stamp
+# (codegen/instr/body.rs::build_vreg_types) named only sqrt/floor/ceil/pow/
+# round. An unstamped f64 extern result combined with a float operand in ONE
+# expression (here: `_sin(x) / _cos(x)`) is read as an integer word by the
+# BinOp float path — `fcvt_from_sint` over the f64 bit pattern — so `f` came
+# out as ~1e-19, the MVP matrix had zeroed x/y rows, every vertex projected
+# to the screen centre, and both renders returned the all-clear buffer
+# (pixels "identical"; the node-store write itself was never lost — reads
+# through NodeStore3D.get_node stayed correct on both lanes).
+#
+# Fix: build_vreg_types now stamps ANY runtime helper whose RUNTIME_FUNCS
+# spec declares a single f64 return (runtime_sffi.rs is the single source
+# of truth), covering sin/cos/tan/exp/log/... and future libm additions.
+#
+# In-process pins run in the spec-runner interpreter; the differential
+# examples spawn the same binary under SIMPLE_EXECUTION_MODE=interpreter and
+# =jit and require byte-identical, CORRECT output.
+#
+# Patch-only seed fix (src/compiler_rust): codegen/instr/body.rs
+# (build_vreg_types RUNTIME_FUNCS f64 fallback). Re-verify with a seed built
+# from this tree:
+#   cd src/compiler_rust && CC=$HOME/.simple/toolchains/llvm-mingw-*/bin/clang.exe \
+#     CARGO_TARGET_DIR=<repo>/build/p3cache/jitstore/cargo-target \
+#     cargo build --release -p simple-driver
+#   SIMPLE_BINARY=<repo>/build/p3cache/jitstore/cargo-target/release/simple.exe \
+#     bin/simple test test/01_unit/compiler/95.interp/interpreter/jit_libm_extern_f64_result_stamp_spec.spl --mode=interpreter
+use std.spec.{describe, it, expect}
+use std.io_runtime.{write_file, file_exists, env_get, env_set_process}
+use std.nogc_sync_mut.env.platform.{get_temp_dir}
+use std.common.engine.math3d.{Mat4}
+use std.common.engine.units.{Angle}
+use app.io.process_ops.{process_run_timeout}
+
+fn binary() -> text:
+    val env_bin = env_get("SIMPLE_BINARY") ?? ""
+    if env_bin != "": return env_bin
+    if file_exists("bin/simple.exe"): "bin/simple.exe" else: "bin/simple"
+
+fn run_src(tag: text, src: text, mode: text) -> (text, i64):
+    val file = get_temp_dir().replace("\\", "/") + "/libm_f64_" + tag + ".spl"
+    val _w = write_file(file, src)
+    val _e = env_set_process("SIMPLE_EXECUTION_MODE", mode)
+    val (out, err, rc) = process_run_timeout(binary(), [file], 300000)
+    val _r = env_set_process("SIMPLE_EXECUTION_MODE", "")
+    (out + err, rc)
+
+# Minimal shape: two f64-returning runtime externs combined in ONE expression.
+# The unstamped rt_math_cos result was int-reinterpreted, so the ratio came
+# out as ~1e-19 on the JIT instead of tan(0.5).
+val PROBE_LIBM = "use std.common.engine.math3d.{{Mat4}}\n" +
+    "use std.common.engine.units.{{Angle}}\n" +
+    "fn main():\n" +
+    "    val c = Mat4.perspective(Angle(radians: 1.0), 1.0, 0.1, 100.0)\n" +
+    "    print(c.get(0, 0))\n" +
+    "    print(c.get(1, 1))\n" +
+    "    print(c.get(2, 2))\n" +
+    "main()\n"
+
+# Acceptance shape from the bug doc: store.set_position then read
+# store.nodes[i].position back, rendered through ForwardRenderer3D — the
+# second render must see the moved position on BOTH lanes (pixels differ).
+val PROBE_STORE = "use std.common.engine.math3d.{{Vec3}}\n" +
+    "use std.common.engine.color.{{EngineColor}}\n" +
+    "use std.common.engine.units.{{Angle}}\n" +
+    "use std.nogc_sync_mut.engine.scene.node3d.{{NodeStore3D}}\n" +
+    "use std.nogc_sync_mut.engine.component.registry3d.{{ComponentRegistry3D, Component3D}}\n" +
+    "use std.nogc_sync_mut.engine.component.mesh.{{create_cube}}\n" +
+    "use std.nogc_sync_mut.engine.component.camera3d.{{Camera3DData}}\n" +
+    "use std.nogc_sync_mut.engine.render.material3d.{{unlit_material}}\n" +
+    "use std.nogc_sync_mut.engine.render.renderer3d.{{ForwardRenderer3D}}\n" +
+    "fn main():\n" +
+    "    var nodes = NodeStore3D.create()\n" +
+    "    var components = ComponentRegistry3D.create()\n" +
+    "    val cam_id = nodes.create_node(\"camera\")\n" +
+    "    nodes.set_position(cam_id, Vec3(x: 0.0, y: 0.0, z: 10.0))\n" +
+    "    val cam = Camera3DData.perspective(Angle(radians: 1.0), 1.0, 0.1, 100.0)\n" +
+    "    components.attach(cam_id, Component3D.Camera(data: cam))\n" +
+    "    val mesh_id = nodes.create_node(\"cube_origin\")\n" +
+    "    nodes.set_position(mesh_id, Vec3(x: 0.0, y: 0.0, z: 20.0))\n" +
+    "    val mesh = create_cube(1.0)\n" +
+    "    val material = unlit_material(EngineColor.red())\n" +
+    "    components.attach(mesh_id, Component3D.Mesh(mesh: mesh, material: material))\n" +
+    "    var renderer_a = ForwardRenderer3D.create(32, 32)\n" +
+    "    renderer_a.clear()\n" +
+    "    val stats_a = renderer_a.render_scene(nodes, components, cam_id)\n" +
+    "    val pixels_a = renderer_a.get_pixels()\n" +
+    "    nodes.set_position(mesh_id, Vec3(x: 5.0, y: 0.0, z: 20.0))\n" +
+    "    var renderer_b = ForwardRenderer3D.create(32, 32)\n" +
+    "    renderer_b.clear()\n" +
+    "    val stats_b = renderer_b.render_scene(nodes, components, cam_id)\n" +
+    "    val pixels_b = renderer_b.get_pixels()\n" +
+    "    print(stats_a.draw_calls)\n" +
+    "    print(stats_b.draw_calls)\n" +
+    "    var differ = false\n" +
+    "    var i = 0\n" +
+    "    while i < pixels_a.len():\n" +
+    "        if pixels_a[i] != pixels_b[i]:\n" +
+    "            differ = true\n" +
+    "        i = i + 1\n" +
+    "    print(differ)\n" +
+    "main()\n"
+
+describe "JIT stamps f64 runtime extern results from RUNTIME_FUNCS":
+    it "projection_matrix x/y focal terms are finite and correct in-process":
+        val c = Mat4.perspective(Angle(radians: 1.0), 1.0, 0.1, 100.0)
+        # 1 / tan(0.5) = 1.830487721712452; a denormal-strength value here
+        # means the sin/cos extern result lost its f64 type stamp.
+        expect(c.get(0, 0)).to_be_greater_than(1.0)
+        expect(c.get(0, 0)).to_be_less_than(2.0)
+        expect(c.get(1, 1)).to_be_greater_than(1.0)
+        expect(c.get(1, 1)).to_be_less_than(2.0)
+
+describe "interpreter and JIT agree on libm-derived projection terms":
+    it "prints identical focal terms under both execution modes":
+        val (oi, rci) = run_src("libm", PROBE_LIBM, "interpreter")
+        val (oj, rcj) = run_src("libm", PROBE_LIBM, "jit")
+        expect(rci).to_equal(0)
+        expect(rcj).to_equal(0)
+        expect(oi).to_equal(oj)
+        expect(oi.contains("1.830487721712452")).to_equal(true)
+
+describe "interpreter and JIT agree on positioned-node renders":
+    it "store.set_position then read sees the new position on both lanes":
+        val (oi, rci) = run_src("store", PROBE_STORE, "interpreter")
+        val (oj, rcj) = run_src("store", PROBE_STORE, "jit")
+        expect(rci).to_equal(0)
+        expect(rcj).to_equal(0)
+        expect(oi).to_equal(oj)
+        # both draws happened and the second render saw the moved position
+        expect(oi.contains("1\n1\ntrue")).to_equal(true)

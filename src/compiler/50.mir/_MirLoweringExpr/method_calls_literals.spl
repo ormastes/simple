@@ -6777,12 +6777,13 @@ impl MirLowering:
                     val left_element = self.array_concat_element_authority_v1(receiver, unresolved_receiver_local)
                     # Contextual literals use the existing element adaptation
                     # boundary; already typed arrays must agree without casts.
-                    val concat_other = if val expected = left_element:
-                        match args[0].value.kind:
+                    var concat_other: LocalId = 0
+                    if val expected = left_element:
+                        concat_other = match args[0].value.kind:
                             case HirExprKind.ArrayLit(elements, _): self.lower_array_lit(elements, Some(expected))
                             case _: self.lower_expr(args[0].value)
                     else:
-                        self.lower_expr(args[0].value)
+                        concat_other = self.lower_expr(args[0].value)
                     if not self.builtin_array_receiver_proven(args[0].value, concat_other):
                         self.error_fatal("array concat requires an array argument", Some(args[0].value.span))
                         return unresolved_receiver_local
@@ -7495,10 +7496,11 @@ impl MirLowering:
             # build-time failure, so that path is NOT taken here; this is a
             # guard-only fix (still a clean loud build failure, never a crash).
             val errors_before = self.errors.len()
-            var local = if val expected = element_context:
-                self.lower_declared_enum_payload_expression(expected, elem)
+            var local: LocalId = 0
+            if val expected = element_context:
+                local = self.lower_declared_enum_payload_expression(expected, elem)
             else:
-                self.lower_expr(elem)
+                local = self.lower_expr(elem)
             if self.errors.len() != errors_before:
                 return self.builder.emit_const_int(0)
             if val expected = element_context:
@@ -7553,7 +7555,9 @@ impl MirLowering:
 
         # The lowered local is authoritative. Flat HIR expression metadata may
         # still carry the parser's default i64 for typed variables.
-        val elem_type = if val expected = element_context: self.lower_type(expected) else: lowered_elem_type
+        var elem_type = lowered_elem_type
+        if val expected = element_context:
+            elem_type = self.lower_type(expected)
         val array_type = MirType(kind: MirTypeKind.Array(elem_type, elements.len()))
 
         val arr_local = self.builder.emit_aggregate(
@@ -7612,8 +7616,12 @@ impl MirLowering:
             MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
         ), call_origin: MirCallOrigin.Runtime)
         val cap_hint = MirOperand(kind: MirOperandKind.Const(MirConstValue.Int(0), MirType.i64()))
-        var key_type = if val expected = key_context: self.lower_type(expected) else: MirType.i64()
-        var value_type = if val expected = value_context: self.lower_type(expected) else: MirType.i64()
+        var key_type = MirType.i64()
+        if val expected = key_context:
+            key_type = self.lower_type(expected)
+        var value_type = MirType.i64()
+        if val expected = value_context:
+            value_type = self.lower_type(expected)
         var inferred_key_hir = HirType(kind: HirTypeKind.Error, span: Span.empty())
         var observed_key_hir = false
         var complete_key_hir = true
@@ -7658,10 +7666,11 @@ impl MirLowering:
                 # sum. Lower the key raw first (capturing its true type), box
                 # it after, exactly like the value already does.
                 val errors_before = self.errors.len()
-                var key_local_raw = if val expected = key_context:
-                    self.lower_declared_enum_payload_expression(expected, key_expr)
+                var key_local_raw: LocalId = 0
+                if val expected = key_context:
+                    key_local_raw = self.lower_declared_enum_payload_expression(expected, key_expr)
                 else:
-                    self.lower_expr(key_expr)
+                    key_local_raw = self.lower_expr(key_expr)
                 if self.errors.len() != errors_before:
                     return self.builder.emit_const_int(0)
                 if val expected = key_context:
@@ -7690,10 +7699,11 @@ impl MirLowering:
                             elif not hir_types_equal(inferred_key_hir, current_key_hir):
                                 complete_key_hir = false
                 val key_local = self.box_struct_or_runtime_value_key_v1(key_local_raw)
-                var value_local = if val expected = value_context:
-                    self.lower_declared_enum_payload_expression(expected, value_expr)
+                var value_local: LocalId = 0
+                if val expected = value_context:
+                    value_local = self.lower_declared_enum_payload_expression(expected, value_expr)
                 else:
-                    self.lower_expr(value_expr)
+                    value_local = self.lower_expr(value_expr)
                 if self.errors.len() != errors_before:
                     return self.builder.emit_const_int(0)
                 if val expected = value_context:
@@ -8122,11 +8132,12 @@ impl MirLowering:
                 MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false), MirType.i64())
         else:
             var b_lam_call = self.builder
-            val call_result = if val environment = filter_environment:
-                b_lam_call.emit_call_indirect(filter_target, [environment, mir_operand_copy(elem_raw)],
+            var call_result: LocalId? = None
+            if val environment = filter_environment:
+                call_result = b_lam_call.emit_call_indirect(filter_target, [environment, mir_operand_copy(elem_raw)],
                     MirSignature(params: [MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false), MirType.i64())
             else:
-                b_lam_call.emit_call(filter_target, [mir_operand_copy(elem_raw)], MirType.i64())
+                call_result = b_lam_call.emit_call(filter_target, [mir_operand_copy(elem_raw)], MirType.i64())
             pred_raw = call_result ?? b_lam_call.new_temp(MirType.i64())
             self.builder = b_lam_call
         var b_call = self.builder
@@ -8238,11 +8249,12 @@ impl MirLowering:
         val elem_raw = self.decode_runtime_value(elem_tagged, MirType.i64())
 
         var b_call = self.builder
-        val call_result = if val environment = pred_environment:
-            b_call.emit_call_indirect(pred_target, [environment, mir_operand_copy(elem_raw)],
+        var call_result: LocalId? = None
+        if val environment = pred_environment:
+            call_result = b_call.emit_call_indirect(pred_target, [environment, mir_operand_copy(elem_raw)],
                 MirSignature(params: [MirType.i64(), MirType.i64()], return_type: MirType.i64(), is_variadic: false), MirType.i64())
         else:
-            b_call.emit_call(pred_target, [mir_operand_copy(elem_raw)], MirType.i64())
+            call_result = b_call.emit_call(pred_target, [mir_operand_copy(elem_raw)], MirType.i64())
         val pred_raw = call_result ?? b_call.new_temp(MirType.i64())
         val zero_pred = b_call.emit_const_int(0)
         # `any` decides on a truthy predicate, `all` on a falsy one.

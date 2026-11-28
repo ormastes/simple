@@ -1072,6 +1072,43 @@ impl NativeProjectBuilder {
             .collect())
     }
 
+    /// Defined symbols a shared runtime image actually EXPORTS -- its dynamic
+    /// binding surface (ELF .dynsym, Mach-O export trie, PE export directory),
+    /// read in-process with the `object` crate.
+    ///
+    /// Deliberately NOT `nm -g`: the full symtab also lists internal mirrors
+    /// the Rust runtime deliberately does not export (doc-era measurement on
+    /// this lane: 165 archive `rt_*` names are present in the `.so` but not
+    /// exported). Classifying a non-exported mirror as owned would project the
+    /// core-C supplement into dropping the only definition the final link can
+    /// resolve (`rt_alloc`, `rt_mmap_raw`, ...), failing the link closed.
+    fn read_shared_runtime_export_set(obj: &Path) -> Result<HashSet<String>, String> {
+        let bytes = std::fs::read(obj)
+            .map_err(|e| format!("read shared runtime {}: {e}", obj.display()))?;
+        let parsed = object::File::parse(bytes.as_slice())
+            .map_err(|e| format!("parse shared runtime {}: {e}", obj.display()))?;
+        let mut exports = HashSet::new();
+        for export in parsed
+            .exports()
+            .map_err(|e| format!("read exports of {}: {e}", obj.display()))?
+        {
+            let name = std::str::from_utf8(export.name())
+                .map_err(|e| format!("non-UTF-8 export name in {}: {e}", obj.display()))?;
+            // Mach-O export-trie names carry the linker underscore, matching
+            // `nm` output; canonicalize like read_global_symbol_types does so
+            // both sides of the ownership comparison use plain C names.
+            let name = if cfg!(target_os = "macos") {
+                name.strip_prefix('_').unwrap_or(name)
+            } else {
+                name
+            };
+            if !name.is_empty() {
+                exports.insert(name.to_string());
+            }
+        }
+        Ok(exports)
+    }
+
     fn read_undefined_symbol_set(obj: &Path) -> Result<HashSet<String>, String> {
         if let Some(globals) = read_relocatable_globals_in_process(obj)? {
             return Ok(globals
@@ -2341,7 +2378,9 @@ int main(int argc, char** argv) {
                     #[cfg(target_os = "macos")]
                     cmd.arg("-Wl,-rpath,@loader_path");
 
-                    // Core-C supplement, appended AFTER the shared runtime.
+                    // Core-C supplement, appended AFTER the shared runtime --
+                    // PROJECTED so it contributes only the C-only gap and never
+                    // a second definition of a symbol the shared runtime owns.
                     //
                     // The shared runtime is the Rust runtime crate built as a
                     // cdylib; it is not a superset of the static
@@ -2361,20 +2400,45 @@ int main(int argc, char** argv) {
                     // So the composition is additive, not a swap: the `.so`
                     // supplies the 1,646 Rust-side symbols the core-C archive
                     // never had (the cause of the 167 unresolved symbols), and
-                    // the archive still supplies the C-only remainder.
-                    //
-                    // Ordering matters and is safe here in a way it is not for
-                    // two archives. Members are pulled only for symbols still
-                    // undefined at this point, and a static definition never
-                    // COLLIDES with a shared-object one -- the executable's copy
-                    // simply wins for the whole process, including calls made
-                    // from inside the runtime. That is why this needs no
-                    // `--allow-multiple-definition`, unlike the Windows
-                    // native_all + core-C layering below.
+                    // the archive still supplies the C-only remainder. But the
+                    // remainder is ALL the archive may contribute. Pulled whole,
+                    // its members also define ~509 names the `.so` exports, and
+                    // a static definition never COLLIDES with a shared-object
+                    // one -- the executable's copy simply wins for the whole
+                    // process, including calls made from inside the Rust
+                    // runtime. That is the measured ABI seam of
+                    // doc/08_tracking/bug/dynamic_runtime_lane_dual_rt_definitions_2026-09-06.md,
+                    // and link precedence can never catch it, so the supplement
+                    // is projected instead: retain STRONG only the single-
+                    // defined archive globals the `.so` does not export (the
+                    // C-only gap above), and weaken every `.so`-owned closure
+                    // passenger to an owner-overridable fallback -- the same
+                    // discipline `build_stage4_rust_runtime_projection_archive`
+                    // applies to the Rust runtime archive, in the opposite
+                    // direction. The projection refuses to link on an unreadable
+                    // owner export set or a multi-defined root, so the single
+                    // owner is enforced mechanically rather than by ordering.
                     let core_c = build_core_c_runtime_supplement_library(&temp_dir.join("dynamic_runtime_core_c_supplement"))
                         .ok_or_else(|| {
                             "failed to build the core-C supplement for the dynamic-runtime lane".to_string()
                         })?;
+                    // read_shared_runtime_export_set FAILS CLOSED (Err when the
+                    // image cannot be parsed), and an empty export set would
+                    // make the projection retain the WHOLE archive, silently
+                    // restoring the seam. Refuse, the same discipline the
+                    // native_all + core-c-bootstrap layering applies below.
+                    let exported = Self::read_shared_runtime_export_set(runtime_lib)?;
+                    if exported.is_empty() {
+                        return Err(format!(
+                            "dynamic-runtime: {} exports no symbols -- refusing to link with an unknown runtime owner",
+                            runtime_lib.display()
+                        ));
+                    }
+                    let core_c = super::tools::project_dynamic_runtime_core_c_supplement(
+                        &core_c,
+                        &exported,
+                        &temp_dir.join("dynamic_runtime_core_c_projected"),
+                    )?;
                     cmd.arg(core_c);
                 } else if *is_native_all {
                     #[cfg(target_os = "macos")]

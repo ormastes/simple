@@ -834,6 +834,14 @@ pub(crate) fn runtime_symbol_is_codegen_root(name: &str) -> bool {
             | "rt_closure_set_capture"
             | "rt_closure_get_capture"
             | "rt_closure_func_ptr"
+            // P2 fix (2026-11-28): `compile_indirect_call` emits this refusal
+            // when `rt_closure_func_ptr` answers NULL for a would-be callee,
+            // so compiled code declines to jump through a non-callable value
+            // (SIGSEGV, exit 139) and prints the shared "value is not
+            // callable" diagnostic instead. Emitted straight from codegen,
+            // never a MIR call node.
+            // doc/08_tracking/bug/seed_jit_call_to_function_named_pass_segfaults_2026-11-28.md
+            | "rt_value_not_callable"
             // Closure-taking collection helpers. These are emitted by the
             // `MethodCallStatic`/builtin-method dispatch table in
             // codegen/instr/closures_structs.rs straight from a method NAME

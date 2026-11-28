@@ -315,14 +315,38 @@ impl Lowerer {
             _ => left_hir.ty,
         };
 
-        Ok(HirExpr {
+        let mut lowered = HirExpr {
             kind: HirExprKind::Binary {
                 op: (*op).into(),
                 left: left_hir,
                 right: right_hir,
             },
             ty,
-        })
+        };
+        // VALUE-POSITION `and`/`or` FIX (JIT short-circuit, 2026-11-28).
+        //
+        // `and`/`or` return a bool and decide purely on each operand's
+        // presence/truthiness (the interpreter's `BinOp::And`/`BinOp::Or`
+        // always yield `Value::Bool`). An operand written `x.?` is therefore a
+        // condition here exactly as in an `if` test, but `lower_condition`
+        // never sees this subtree — it is VALUE position (`val c = a.? and b`),
+        // so `lower_exists_check` yields the `T?` word whose absent arm is the
+        // canonical nil sentinel `3` (non-zero, `lower_nil_expr`). The MIR
+        // short-circuit lowering (`mir/lower/lowering_expr_ops.rs
+        // lower_short_circuit_logical`) branches on that raw word with a
+        // `!= 0` test, so an ABSENT `x.?` read as TRUTHY: the RHS was
+        // evaluated regardless (`config.profile.? and config.profile.unwrap()`
+        // crashed fail-closed on `unwrap` for a warning-free lint target on
+        // the forced-JIT lane; any side-effecting RHS would also have run).
+        // Coerce each `.?` operand to the same `rt_is_present` bool predicate
+        // condition position gets (`coerce_exists_value_to_bool_in_place`
+        // recurses only through and/or/not/if/block shapes, so a `.?` used as
+        // a VALUE deeper inside an operand — `a and b.? + 1 > 2` — keeps its
+        // payload form). Mirrors the existing `not x.?` fix in `lower_unary`.
+        if matches!(op, ast::BinOp::And | ast::BinOp::Or) {
+            Self::coerce_exists_value_to_bool_in_place(&mut lowered);
+        }
+        Ok(lowered)
     }
 
     /// Lower a unary operation to HIR

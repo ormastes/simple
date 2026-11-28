@@ -14,7 +14,48 @@ use crate::value::collections::{
 };
 use crate::value::heap::{get_typed_ptr, HeapObjectType};
 use crate::value::{RuntimeString, RuntimeValue};
-use std::sync::{OnceLock, RwLock};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Once, OnceLock, RwLock};
+
+// ============================================================================
+// Environment-crossing diagnostic counter
+// ============================================================================
+//
+// Diagnostic counter for bug flat_ast_bridge_phase3_snapshot_throughput_
+// 2026-08-31 (acceptance #3 evidence): when SIMPLE_FLATBRIDGE_ENV_COUNT=1,
+// every rt_env_get / rt_env_get_i64 crossing is counted so a spec can prove
+// zero getter crossings while the flat-AST arena bridge scope is active.
+// This is the single choke point for every lane (interpreted hybrid calls,
+// Cranelift JIT, LLVM native): the compiler may also route the name through
+// its interpreter-extern registry, but that wrapper funnels into these
+// functions, so counting here counts each crossing exactly once.
+// Disabled by default; the enabled flag is latched once per process and the
+// hot-path cost when disabled is one relaxed atomic load.
+static ENV_GET_COUNTER_ENABLED: AtomicBool = AtomicBool::new(false);
+static ENV_GET_COUNTER: AtomicU64 = AtomicU64::new(0);
+static ENV_GET_COUNTER_INIT: Once = Once::new();
+
+fn env_get_counter_note_call() {
+    ENV_GET_COUNTER_INIT.call_once(|| {
+        let enabled = std::env::var_os("SIMPLE_FLATBRIDGE_ENV_COUNT")
+            .map(|v| v.to_string_lossy() == "1")
+            .unwrap_or(false);
+        ENV_GET_COUNTER_ENABLED.store(enabled, Ordering::Relaxed);
+    });
+    if ENV_GET_COUNTER_ENABLED.load(Ordering::Relaxed) {
+        ENV_GET_COUNTER.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Current crossing count (diagnostic; see `env_get_counter_note_call`).
+pub fn env_get_crossing_count() -> u64 {
+    ENV_GET_COUNTER.load(Ordering::Relaxed)
+}
+
+/// Reset the crossing count (diagnostic; see `env_get_counter_note_call`).
+pub fn env_get_crossing_count_reset() {
+    ENV_GET_COUNTER.store(0, Ordering::Relaxed);
+}
 
 #[cfg(windows)]
 #[path = "process_bytes_windows.rs"]
@@ -309,6 +350,7 @@ pub extern "C" fn sys_exit_alias(code: i32) -> ! {
 /// Get environment variable value
 #[no_mangle]
 pub unsafe extern "C" fn rt_env_get(name_ptr: *const u8, name_len: u64) -> RuntimeValue {
+    env_get_counter_note_call();
     let Some(name) = ptr_string(name_ptr, name_len, 4095) else {
         return RuntimeValue::NIL;
     };
@@ -364,6 +406,7 @@ pub extern "C" fn rt_lexer_source_slice(start: i64, end: i64) -> RuntimeValue {
 /// Get environment variable parsed as i64, or return the supplied default.
 #[no_mangle]
 pub unsafe extern "C" fn rt_env_get_i64(name_ptr: *const u8, name_len: u64, default_value: i64) -> i64 {
+    env_get_counter_note_call();
     let Some(name) = ptr_string(name_ptr, name_len, 4095) else {
         return default_value;
     };

@@ -1181,6 +1181,10 @@ pub static RUNTIME_FUNCS: &[RuntimeFuncSpec] = &[
     // =========================================================================
     RuntimeFuncSpec::new("rt_function_not_found", &[I64, I64], &[I64]),
     RuntimeFuncSpec::new("rt_method_not_found", &[I64, I64, I64, I64], &[I64]),
+    // rt_value_not_callable(callee: RuntimeValue) -> RuntimeValue (never returns):
+    // runtime refusal emitted by compile_indirect_call when rt_closure_func_ptr
+    // answers NULL for the callee, instead of jumping through address zero.
+    RuntimeFuncSpec::new("rt_value_not_callable", &[I64], &[I64]),
     // =========================================================================
     // Contract checking (Design by Contract)
     // =========================================================================

@@ -1452,6 +1452,8 @@ fn init_dispatch_table() -> HashMap<&'static str, ExternHandler> {
     insert_simple!("rt_env_get_i64", system::rt_env_get_i64);
     insert_simple!("rt_env_get", system::rt_env_get);
     insert_simple!("rt_env_get_raw", system::rt_env_get_raw);
+    insert_simple!("rt_env_get_counter_read", system::rt_env_get_counter_read);
+    insert_simple!("rt_env_get_counter_reset", system::rt_env_get_counter_reset);
     insert_simple!("rt_lexer_source_set", system::rt_lexer_source_set);
     insert_simple!("rt_lexer_source_slice", system::rt_lexer_source_slice);
     insert_simple!("rt_env_get_var", env_sffi::rt_env_get_var);

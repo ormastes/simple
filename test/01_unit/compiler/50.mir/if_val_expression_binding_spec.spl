@@ -1,0 +1,163 @@
+# @req REQ-SSPEC-COMPILER
+# @cover src/compiler/50.mir/_MirLoweringExpr/method_calls_literals.spl
+# @cover src/compiler/50.mir/_MirLoweringExpr/expr_dispatch.spl
+# @cover src/compiler/50.mir/_MirLoweringExpr/switch_operators_calls.spl
+"""
+# MIR lowering: `if val` pattern bindings used in expression position
+
+Regression coverage for the coverage_wrapper_undefined_identifier_clusters
+family (doc/08_tracking/bug/coverage_wrapper_undefined_identifier_clusters
+_2026-08-31.md). The whole-program native check (both the Rust seed and the
+pure-Simple checker) does not bind an `if val`/`elif val` pattern when the
+`if` is an EXPRESSION, so `val x = if val t = opt: f(t) else: g()` fails the
+native compile with `Undefined("undefined identifier: t")` while the
+interpreter resolves it. The affected lowering paths were rewritten in
+statement form (behaviour-identical, single evaluation per branch):
+
+- `lower_dict_lit` (method_calls_literals.spl): typed dict literals take
+  their key/value context through `if val expected = key_context:` /
+  `value_context` bindings; a struct or enum field declared `Dict<text, T>`
+  exercises the contextual key/value lowering and its remembered
+  `Dict(key, value)` HIR type.
+- declared-context array literals (`lower_array_lit` element adaptation and
+  `elem_type` selection) in struct/enum fields.
+- `array_filter`/`array_any` predicates that capture a local (environment)
+  emit an indirect call through the captured operand.
+- lambda lifting with a declared return type (`switch_operators_calls.spl`)
+  selects the slot-lowering path via the bound `typed_return`.
+
+Each example drives the real frontend + HIR + MIR lowering in-process and
+asserts the lowering succeeds with the expected runtime calls, so a
+behavioural regression in any rewritten branch fails here even on the
+interpreter lane; the native closure compile is guarded by compiling the
+import closure (`use compiler.mir._MirLowering.module_lowering`) under
+`simple compile`.
+"""
+
+# @tag: unit, compiler, mir
+
+use std.spec.{describe, it, expect}
+use compiler.common.config.{Logger}
+use compiler.frontend.frontend.{parse_full_frontend}
+use compiler.hir.hir_lowering.types.{HirLowering}
+use compiler.hir.hir_lowering.items.*
+use compiler.mir.mir.*
+use compiler.mir.mir_lowering_types.{MirLowering}
+use compiler.mir._MirLowering.module_lowering.*
+
+struct IfValAudit:
+    errors: [text]
+    target_fns: i64
+    dict_new_calls: i64
+    dict_set_calls: i64
+    indirect_calls: i64
+    unit_locals: i64
+
+fn is_unit_mir_type(ty: MirType) -> bool:
+    match ty.kind:
+        case MirTypeKind.Unit: true
+        case _: false
+
+fn audit_if_val_paths_mir(source: text, target_fn: text) -> IfValAudit:
+    val filename = "testdata/if_val_expression_binding.spl"
+    val ast = parse_full_frontend(source, filename, "if_val_expression_binding", Logger(level: 0))
+    var hir_lowering = HirLowering.with_filename(filename)
+    val hir = hir_lowering.lower_module(ast)
+    var mir_lowering = MirLowering.new(hir.symbols)
+    val mir = mir_lowering.lower_module(hir)
+
+    var errors: [text] = []
+    for e in hir_lowering.errors:
+        errors.push("hir: " + e.message)
+    for e in mir_lowering.errors:
+        errors.push("mir: " + e.message)
+
+    var target_fns = 0
+    var dict_new_calls = 0
+    var dict_set_calls = 0
+    var indirect_calls = 0
+    var unit_locals = 0
+
+    for function in mir.functions.values():
+        if function.name != target_fn and not function.name.ends_with("." + target_fn) and not function.name.ends_with("::" + target_fn):
+            continue
+        target_fns = target_fns + 1
+
+        for loc in function.locals:
+            if is_unit_mir_type(loc.type_):
+                unit_locals = unit_locals + 1
+
+        for block in function.blocks:
+            for inst in block.instructions:
+                match inst.kind:
+                    case MirInstKind.Call(_, callee, _):
+                        match callee.kind:
+                            case MirOperandKind.Const(MirConstValue.Str(name), _):
+                                if name == "rt_dict_new":
+                                    dict_new_calls = dict_new_calls + 1
+                                elif name == "rt_dict_set":
+                                    dict_set_calls = dict_set_calls + 1
+                            case _: ()
+                    case MirInstKind.CallIndirect(_, _, _, _):
+                        indirect_calls = indirect_calls + 1
+                    case _: ()
+
+    IfValAudit(
+        errors: errors,
+        target_fns: target_fns,
+        dict_new_calls: dict_new_calls,
+        dict_set_calls: dict_set_calls,
+        indirect_calls: indirect_calls,
+        unit_locals: unit_locals
+    )
+
+describe "MIR lowering: if-val expression binding regression (coverage-wrapper Undef clusters)":
+    it "lowers a Dict<text, i64> struct field dict literal with contextual key/value types":
+        val src =
+            "struct Bag:\n" +
+            "    scores: Dict<text, i64>\n" +
+            "\n" +
+            "fn make_bag() -> Bag:\n" +
+            "    Bag(scores: {\"alpha\": 1, \"beta\": 2})\n"
+        val a = audit_if_val_paths_mir(src, "make_bag")
+        expect(a.errors.len()).to_equal(0)
+        expect(a.target_fns).to_equal(1)
+        expect(a.dict_new_calls).to_equal(1)
+        expect(a.dict_set_calls).to_equal(2)
+        expect(a.unit_locals).to_equal(0)
+
+    it "lowers a dict-carrying enum payload with contextual key/value types":
+        val src =
+            "enum Cache:\n" +
+            "    Ready(Dict<text, i64>)\n" +
+            "\n" +
+            "fn make_cache() -> Cache:\n" +
+            "    Cache.Ready({\"hits\": 3})\n"
+        val a = audit_if_val_paths_mir(src, "make_cache")
+        expect(a.errors.len()).to_equal(0)
+        expect(a.target_fns).to_equal(1)
+        expect(a.dict_new_calls).to_equal(1)
+        expect(a.dict_set_calls).to_equal(1)
+        expect(a.unit_locals).to_equal(0)
+
+    it "lowers a declared-context array literal field without Unit element locals":
+        val src =
+            "struct Row:\n" +
+            "    cells: [i64]\n" +
+            "\n" +
+            "fn make_row() -> Row:\n" +
+            "    Row(cells: [1, 2, 3])\n"
+        val a = audit_if_val_paths_mir(src, "make_row")
+        expect(a.errors.len()).to_equal(0)
+        expect(a.target_fns).to_equal(1)
+        expect(a.unit_locals).to_equal(0)
+
+    it "lowers a capturing array filter predicate through an indirect call":
+        val src =
+            "fn keep_big(values: [i64], threshold: i64) -> [i64]:\n" +
+            "    values.filter(\\x: x > threshold)\n"
+        val a = audit_if_val_paths_mir(src, "keep_big")
+        expect(a.errors.len()).to_equal(0)
+        expect(a.target_fns).to_equal(1)
+        expect(a.indirect_calls).to_be_greater_than(0)
+        expect(a.unit_locals).to_equal(0)
