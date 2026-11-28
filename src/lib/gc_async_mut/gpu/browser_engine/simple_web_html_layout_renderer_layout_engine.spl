@@ -24,7 +24,7 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_f
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{box_line_start_err_reset, box_line_start_err_record, box_line_start_err_at, box_right_edge_err_record, absolute_child_x_frac_milli, absolute_child_y_frac_milli, box_device_top_inherited_milli}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{grid_fr_track_floor, grid_fr_track_factor, button_device_extra_w, button_has_inline_follower, box_device_extra_w_at, inline_button_k1_snap_px, GridTrackLayout, grid_track_layout}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_text.{input_auto_content_w}
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{input_button_label_width_milli_px}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{input_button_label_width_milli_px, css_flex_row_shrink_frozen, css_style_constraint_space, css_style_min_max_bounds}
 
 
 # --- Float context (CSS 2.2 section 9.5) -----------------------------------
@@ -800,6 +800,16 @@ fn inline_subtree_horizontal_margins_w(
         c = child_index.next_sibling[c]
     total
 
+fn _flex_item_has_block_child(styles: [Style], child_index: HtmlChildIndex, item: i32) -> bool:
+    var c = child_index.first_child[item]
+    while c >= 0:
+        val cst = styles[c]
+        if cst.display != "none" and not cst.position_absolute and not cst.position_fixed:
+            if cst.display != "inline" and cst.display != "inline-block":
+                return true
+        c = child_index.next_sibling[c]
+    false
+
 fn row_flex_item_auto_intrinsic_w(
     nodes: [HNode], styles: [Style], child_index: HtmlChildIndex,
     item: i32, st: Style, iw: i32, widths: [i32]
@@ -886,12 +896,15 @@ fn row_flex_item_auto_intrinsic_w_with_pct_basis(
     val pct_pad_w = percent_padding_extra_w(styles[item], st)
     if intrinsic.width > 0:
         val inline_margins_w = inline_subtree_horizontal_margins_w(nodes, styles, child_index, item, pct_basis)
-        if inline_margins_w > 0 or pct_pad_w > 0:
-            return IntrinsicWidthResult(
-                width: constrained_outer_width(node, st, intrinsic.width + inline_margins_w + pct_pad_w),
-                widths: intrinsic.widths
-            )
-        return intrinsic
+        var measured_w = intrinsic.width + inline_margins_w
+        if _flex_item_has_block_child(styles, child_index, item):
+            val block_max_w = flex_item_max_content_width(nodes, styles, child_index, item)
+            if block_max_w > measured_w:
+                measured_w = block_max_w
+        return IntrinsicWidthResult(
+            width: constrained_outer_width(node, st, measured_w + pct_pad_w),
+            widths: intrinsic.widths
+        )
     val max_content_w = flex_item_max_content_width(nodes, styles, child_index, item)
     if max_content_w > 0:
         return IntrinsicWidthResult(
@@ -2540,17 +2553,20 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
     # Chrome's fractional left edge of each column just resolved (empty when
     # unknown); copied now, before a nested table overwrites the global.
     val auto_column_edge_frac: [i32] = if auto_column_offsets.len() > 0: g_table_column_edge_frac_milli else: []
+    val table_rows_pre = if st.display == "table":
+        simple_web_collect_table_rows(nodes, child_index, i)
+    else:
+        simple_web_collect_table_rows(nodes, child_index, -1)
     if (
         st.display == "table" and (
             st.table_layout == "fixed" or
             auto_column_offsets.len() > 0 or
             table_spacing_x > 0 or
-            table_spacing_y > 0
+            table_spacing_y > 0 or
+            table_rows_pre.rows.len() > 0
         )
     ):
-        val table_rows = simple_web_collect_table_rows(
-            nodes, child_index, i
-        )
+        val table_rows = table_rows_pre
         val column_count = simple_web_fixed_table_column_count(
             nodes, child_index, table_rows
         )
@@ -2610,10 +2626,13 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
             table_child = child_index.next_sibling[table_child]
         if table_rows.rows.len() > 0:
             table_y = table_y + table_spacing_y + collapse_outer_y
+        var last_table_group = -1
         var table_row_index = 0
         while table_row_index < table_rows.rows.len():
             val table_row = table_rows.rows[table_row_index]
             val table_group = table_rows.groups[table_row_index]
+            if table_group >= 0:
+                last_table_group = table_group
             if table_group >= 0 and out_bh[table_group] == 0:
                 out_bx[table_group] = ix + table_spacing_x + collapse_outer_x
                 out_by[table_group] = table_y
@@ -2746,6 +2765,8 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
         # the table: a 2px collapsed border otherwise overhangs it by 1px.
         if table_rows.rows.len() > 0:
             table_y = table_y + collapse_outer_b
+            if last_table_group >= 0 and collapse_outer_b > 0:
+                out_bh[last_table_group] = out_bh[last_table_group] + collapse_outer_b
         table_child = child_index.first_child[i]
         while table_child >= 0:
             if (
@@ -2793,6 +2814,8 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
         area_rects = grid_template_area_rects(st.grid_template_areas)
         grid_extents = grid_item_line_extents(styles, child_index, i, area_rects)
         grid_auto_template_n = grid_template_auto_track_count(st.grid_template_columns)
+        if grid_auto_template_n == 0 and st.grid_template_columns.trim() == "" and st.grid_auto_columns == "" and not st.grid_auto_flow_column:
+            grid_auto_template_n = if grid_extents[0] > 1: grid_extents[0] else: 1
         if grid_auto_template_n == 0 and st.grid_template_columns.trim() == "auto" and (st.grid_auto_flow_column or st.grid_auto_columns != "" or grid_extents[0] > 1):
             grid_auto_template_n = 1
         if grid_auto_template_n == 0:
@@ -3601,6 +3624,10 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
         # its final outer width once that is fixed (-1 while it still grows).
         var zero_floor_w: [i32] = [0; ordered_flex_child_count]
         var zero_fixed_w: [i32] = [-1; ordered_flex_child_count]
+        var shrink_base_w: [i32] = [0; ordered_flex_child_count]
+        var shrink_floor_w: [i32] = [0; ordered_flex_child_count]
+        var shrink_factor_w: [i32] = [0; ordered_flex_child_count]
+        var sum_shrink_base_w = 0
         var zero_excess_total = 0
         var zero_has_max = false
         var nonabs_count = 0
@@ -3632,6 +3659,19 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     # it takes no part in sharing a deficit.
                     val shrink_factor = if pcst.flex_shrink > 0 and not zero_item: pcst.flex_shrink else: 0
                     shrink_scaled_total = shrink_scaled_total + (shrink_factor * base_w)
+                    if shrink_factor > 0 and base_w > 0:
+                        shrink_base_w[ps_i] = base_w
+                        shrink_factor_w[ps_i] = shrink_factor
+                        sum_shrink_base_w = sum_shrink_base_w + base_w
+                        if pcst.min_width_set:
+                            val mf = if nodes[ps].has_widget_class or nodes[ps].has_icon_image_class or pcst.border_box: pcst.min_width_px else: pcst.min_width_px + flex_item_frame_w(pcst)
+                            shrink_floor_w[ps_i] = if mf > flex_item_frame_w(pcst): mf else: flex_item_frame_w(pcst)
+                        elif not pcst.overflow_hidden and not pcst.overflow_auto_y:
+                            val fi = intrinsic_text_width(nodes, styles, child_index, ps, out_intrinsic_widths)
+                            out_intrinsic_widths = fi.widths
+                            shrink_floor_w[ps_i] = if fi.width > 0: (if fi.width < base_w: fi.width else: base_w) else: flex_item_frame_w(pcst)
+                        else:
+                            shrink_floor_w[ps_i] = flex_item_frame_w(pcst)
                 else:
                     val intrinsic = row_flex_item_auto_intrinsic_w(nodes, styles, child_index, ps, pcst, iw, out_intrinsic_widths)
                     out_intrinsic_widths = intrinsic.widths
@@ -3643,6 +3683,17 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                         shrink_scaled_total = shrink_scaled_total + (shrink_factor * base_w)
                         if shrink_factor > 0:
                             shrink_has_auto = true
+                            shrink_base_w[ps_i] = base_w
+                            shrink_factor_w[ps_i] = shrink_factor
+                            sum_shrink_base_w = sum_shrink_base_w + base_w
+                            if pcst.min_width_set:
+                                val amf = if nodes[ps].has_widget_class or nodes[ps].has_icon_image_class or pcst.border_box: pcst.min_width_px else: pcst.min_width_px + flex_item_frame_w(pcst)
+                                shrink_floor_w[ps_i] = if amf > flex_item_frame_w(pcst): amf else: flex_item_frame_w(pcst)
+                            elif not pcst.overflow_hidden and not pcst.overflow_auto_y:
+                                val mc = flex_item_min_content_w(nodes, styles, child_index, ps)
+                                shrink_floor_w[ps_i] = if mc > 0 and mc < base_w: mc else: flex_item_frame_w(pcst)
+                            else:
+                                shrink_floor_w[ps_i] = flex_item_frame_w(pcst)
                     else:
                         val grow = if pcst.flex_grow > 0: pcst.flex_grow else: 1
                         auto_weight = auto_weight + grow
@@ -3834,6 +3885,13 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
         var grow_definite_assigned = 0
         var shrink_scaled_used = 0
         var shrink_width_assigned = 0
+        val int_shrink_resolved_w: [i32] = if shrink_deficit > 0 and shrink_scaled_total > 0 and sum_shrink_base_w > 0:
+            css_flex_row_shrink_frozen(
+                shrink_base_w, shrink_floor_w, shrink_factor_w,
+                iw, (sum_explicit + gaps_total) - sum_shrink_base_w
+            )
+        else:
+            []
         var max_baseline = 0
         if st.align_items == "baseline":
             var pb_i = 0
@@ -3919,6 +3977,9 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                         grown_outer_w = 1
                     remaining_w = grown_outer_w
                     force_used_w = true
+                elif shrink_deficit > 0 and shrink_scaled_total > 0 and shrink_factor_w[fc_i] > 0 and int_shrink_resolved_w.len() == ordered_flex_child_count:
+                    remaining_w = int_shrink_resolved_w[fc_i]
+                    force_used_w = true
                 elif shrink_deficit > 0 and shrink_scaled_total > 0 and (cst.width_px != 0 or cst.flex_basis_px > 0):
                     # width_px < 0 is the percentage sentinel: a %-width flex item
                     # (e.g. width:100% taskbar pills in a row) must shrink from the
@@ -3995,7 +4056,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                         flex_width_assigned = cumulative_target
                         grow_w_item = grow
                 elif cst.width_px < 0:
-                    remaining_w = iw
+                    remaining_w = flex_item_authored_outer_w(nodes[fc], cst, iw)
                 elif cst.flex_basis_px > 0:
                     remaining_w = cst.flex_basis_px
                 elif shrink_deficit > 0 and shrink_scaled_total > 0:
@@ -5136,7 +5197,7 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 # inside it takes the first-line inset.
                 val run_node = if nodes[c].tag == "#text":
                     c
-                elif inline_margin_l == 0 and inline_margin_r == 0:
+                elif inline_margin_l == 0 and inline_margin_r == 0 and cst.pad_l == 0 and cst.pad_r == 0 and cst.border_l == 0 and cst.border_r == 0:
                     inline_sole_text_run(nodes, styles, c)
                 else:
                     -1
@@ -5303,11 +5364,21 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                 val inline_outer_w = (
                     inline_margin_l + inline_w + inline_margin_r
                 )
+                val inline_atomic_span = (
+                    cst.display == "inline" and
+                    not grid_item_is_replaced(nodes[c]) and
+                    nodes[c].tag != "#text" and
+                    (
+                        cst.white_space_nowrap or
+                        ((cst.pad_l + cst.pad_r + cst.border_l + cst.border_r > 0) and inline_outer_w <= line_iw - inline_start_x)
+                    )
+                )
                 # An inline REPLACED box is atomic exactly like an inline-block:
                 # it cannot be split across lines, so it wraps whole when it no
                 # longer fits the remainder of the current line.
                 if (
-                    (inline_block or inline_replaced) and inline_x > 0 and
+                    (inline_block or inline_replaced or inline_atomic_span) and
+                    inline_x > inline_start_x and
                     inline_x + inline_outer_w > line_iw
                 ):
                     val h_aligned = align_inline_line_horizontal(

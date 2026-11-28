@@ -13,6 +13,11 @@ use std.gc_async_mut.gpu.browser_engine.layout_m14_types.{collapse_margins_signe
 # consumes it rather than keeping a private copy.
 # See doc/08_tracking/bug/live_lane_inline_text_measure_counts_utf8_bytes_2026-08-11.md
 use std.common.layout.text_metrics.{codepoint_cells, text_cell_width}
+use std.common.layout.constraint_space.{
+    ConstraintSpace, EdgeInsets, GapSpacing, MinMaxSizes,
+    AxisTrackSpec, AxisSlot, AxisDistributionResult,
+    css_constraint_space, clamp_span, axis_distribute
+}
 use std.common.encoding.utf8.{text_codepoints}
 use std.nogc_sync_mut.text_layout.font_provider.{browser_font_family_is_monospace, browser_face_x_height_units}
 use std.nogc_sync_mut.text_layout.font_renderer.{browser_normal_line_height_px, browser_face_ascent_descent_px, browser_normal_line_height_milli_px, browser_face_ascent_descent_milli_px, browser_face_ascent_descent_device_px}
@@ -22,6 +27,83 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundati
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{Style}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_foundation.{parse_int, grid_track_fr_micro}
 export use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_text.{IntrinsicWidthResult, LineWrapRanges, char_w, text_advance, style_char_w, style_text_advance, style_space_advance, line_h, style_line_h, style_used_face_line, _lay_style_run_byte_advances_inner, utf8_encoded_len, next_codepoint_start, byte_advances_range_width, style_text_line_advance_width_with, style_font_is_monospace, grid_item_is_replaced, replaced_default_box_w, FORM_CONTROL_UA_FONT_TRUNCATED_PX, FORM_CONTROL_UA_FONT_NUM, FORM_CONTROL_UA_FONT_DEN, FORM_CONTROL_MEASURE_MAX_PX, FORM_CONTROL_MEASURE_OVERSAMPLE, form_control_label_width_px, form_control_text_children_label_px, form_control_button_label_correction_px, form_control_first_text_child, form_control_label_text_node, replaced_default_is_content_size, replaced_specified_box_h, SVG_RATIO_MAX_BOX_PX, svg_ratio_view_box_milli, svg_ratio_scaled_px, replaced_auto_box_w, INPUT_COL_ADVANCE_PX, INPUT_CONTENT_INTERCEPT_PX, TEXTAREA_COL_ADVANCE_PX, TEXTAREA_CONTENT_INTERCEPT_PX, form_control_face_identity, form_control_intrinsic_content_w, form_control_intrinsic_content_device_w, form_control_content_w_for_face, form_control_cols, inline_replaced_predicted_width, _lay_intrinsic_text_width_inner, inline_subtree_edge_is_space, text_control_auto_outer_w, _lay_flex_item_max_content_width_inner, _table_text_min_content_width, _lay_flex_wrap_auto_base_width_inner, _lay_style_measured_run_advance_inner, codepoint_is_space, text_starts_with_collapsible_space, text_ends_with_collapsible_space, resolved_space_advance, _lay_inline_text_advance_width_inner, text_ink_y_offset, text_ink_x_offset, web_wrap_line_end, text_line_advance_width, style_text_line_advance_width, html_text_paint_fully_transparent, text_line_aligned_x, text_line_needs_paint_width, text_rtl_run_starts_box, _lay_ellipsize_text_for_width_inner, text_first_line_dx_at, text_line_box_dx, text_line_box_w, text_run_aligns_line_left, text_last_line_advance, compute_style_wrap_ranges_float_band, _lay_compute_wrap_ranges_inner, _lay_compute_style_wrap_ranges_inner, compute_style_wrap_ranges_first_line, compute_style_wrap_ranges_exact, _lay_compute_style_wrap_ranges_first_inner, first_word_advance_width, word_end_byte, css_outer_width, constrained_outer_width, cursor_advance_px, cursor_advance_frac, style_run_byte_advances, style_measured_run_advance, inline_text_advance_width, inline_text_width_after_lead, compute_style_wrap_ranges, compute_wrap_ranges, intrinsic_text_width, flex_item_max_content_width, flex_wrap_auto_base_width, ellipsize_text_for_width, layout_set_images, img_resource_auto_outer_h, img_resource_auto_outer_w}
+
+# Build a LayoutNG-style ConstraintSpace for a CSS node, isolating available
+# size from percentage resolution size (`REQ-WEB-002`).
+# reason: layout pass passes pixel coordinates and mode flags directly into ConstraintSpace.
+# @allow(primitive_api)
+pub fn css_style_constraint_space(
+    st: Style,
+    avail_w: i32,
+    avail_h: i32,
+    pct_base_w: i32,
+    pct_base_h: i32,
+    is_shrink_to_fit: bool,
+    device_scale: i32
+) -> ConstraintSpace:
+    """Create a CSS ConstraintSpace separating available size and percentage base."""
+    css_constraint_space(
+        avail_w, avail_h, pct_base_w, pct_base_h,
+        st.width_px > 0 or st.width_zero,
+        st.height_px > 0,
+        is_shrink_to_fit,
+        device_scale
+    )
+
+# Build MinMaxSizes clamped by the node's CSS min/max bounds.
+# reason: min_w and max_w are pixel layout scalars produced by intrinsic pass helpers.
+# @allow(primitive_api)
+pub fn css_style_min_max_bounds(node: HNode, st: Style, min_w: i32, max_w: i32) -> MinMaxSizes:
+    """Resolve CSS MinMaxSizes clamped by min-width and max-width constraints."""
+    val clamped_min = constrained_outer_width(node, st, min_w)
+    val clamped_max = constrained_outer_width(node, st, max_w)
+    val final_max = if clamped_max >= clamped_min: clamped_max else: clamped_min
+    MinMaxSizes(min_content: clamped_min, max_content: final_max)
+
+# Resolve CSS Flexbox §9.7 row shrink with min-width / min-width:auto freeze
+# convergence, delegating directly to the shared common.layout axis_distribute
+# solver so auto-width and definite-width items share one shrink path.
+# reason: array-indexed flex item vectors match the flat layout pass arrays.
+# @allow(primitive_api)
+pub fn css_flex_row_shrink_frozen(
+    base_widths: [i32],
+    floor_widths: [i32],
+    shrink_factors: [i32],
+    available_w: i32,
+    fixed_non_shrink_w: i32
+) -> [i32]:
+    """Compute shrunk item widths via CSS Flexbox §9.7 freeze-and-redistribute."""
+    val n = base_widths.len() as i32
+    if n <= 0:
+        return []
+    var specs: [AxisTrackSpec] = []
+    var i: i32 = 0
+    while i < n:
+        val bw = base_widths[i]
+        val fl = floor_widths[i]
+        val sh = shrink_factors[i]
+        specs.push(AxisTrackSpec(
+            fixed_size: bw,
+            flex_grow: 0,
+            flex_shrink: if sh > 0: sh else: 0,
+            min_size: if fl > 0: fl else: 0,
+            max_size: -1,
+            intrinsic_max: 0,
+            margin_before: 0,
+            margin_after: 0,
+            margin_before_auto: false,
+            margin_after_auto: false
+        ))
+        i = i + 1
+    val room = available_w - fixed_non_shrink_w
+    val dist = axis_distribute(if room > 0: room else: 0, 0, "flex-start", specs, false)
+    var out: [i32] = []
+    i = 0
+    while i < n:
+        val sz = dist.slots[i].size
+        out.push(if sz > 0: sz else: (if base_widths[i] > 0: 1 else: 0))
+        i = i + 1
+    out
 
 # A `<summary>`'s disclosure marker (Chrome 159 list_marker.cc): the symbol
 # box is `0.66em` square and an inside marker adds a `0.4em` end margin, each
@@ -2865,12 +2947,6 @@ fn explicit_auto_table_column_offsets(
                     nodes[cell], column_count
                 )
                 val cell_style = styles[cell]
-                if not has_authored_spacing and (
-                    span != 1 or
-                    cell_style.min_width_px > 0 or
-                    cell_style.max_width_px > 0
-                ):
-                    return []
                 if span == 1 and column < column_count:
                     var cell_width = if cell_style.width_px > 0:
                         css_outer_width(
@@ -2945,68 +3021,73 @@ fn explicit_auto_table_column_offsets(
                         col_min[column] = cell_min
                 column = column + span
             cell = child_index.next_sibling[cell]
-    if has_authored_spacing:
-        for row in rows.rows:
-            var span_column = 0
-            var span_cell = child_index.first_child[row]
-            while span_cell >= 0:
-                if styles[span_cell].display == "table-cell":
-                    val span = simple_web_fixed_table_cell_span(
-                        nodes[span_cell], column_count
-                    )
-                    val next_column = if span_column + span < column_count:
-                        span_column + span
-                    else:
-                        column_count
-                    if span > 1 and span_column < column_count:
-                        val span_style = styles[span_cell]
-                        var required_width = if span_style.width_px > 0:
-                            css_outer_width(
-                                nodes[span_cell], span_style,
-                                span_style.width_px
-                            )
-                        else:
-                            0
-                        if span_style.min_width_px > 0:
-                            val span_min_width = css_outer_width(
-                                nodes[span_cell], span_style,
-                                span_style.min_width_px
-                            )
-                            if required_width < span_min_width:
-                                required_width = span_min_width
-                        var current_width = (
-                            spacing_x * (next_column - span_column - 1)
+    for row in rows.rows:
+        var span_column = 0
+        var span_cell = child_index.first_child[row]
+        while span_cell >= 0:
+            if styles[span_cell].display == "table-cell":
+                val span = simple_web_fixed_table_cell_span(
+                    nodes[span_cell], column_count
+                )
+                val next_column = if span_column + span < column_count:
+                    span_column + span
+                else:
+                    column_count
+                if span > 1 and span_column < column_count:
+                    val span_style = styles[span_cell]
+                    var required_width = if span_style.width_px > 0:
+                        css_outer_width(
+                            nodes[span_cell], span_style,
+                            span_style.width_px
                         )
-                        var width_column = span_column
-                        while width_column < next_column:
-                            current_width = current_width + widths[width_column]
-                            width_column = width_column + 1
-                        if required_width > current_width:
-                            val deficit = required_width - current_width
-                            val span_count = next_column - span_column
-                            val grow_each = deficit / span_count
-                            val grow_remainder = (
-                                deficit - grow_each * span_count
+                    else:
+                        table_cell_max_content_width(
+                            nodes, styles, child_index, span_cell
+                        )
+                    if styles[table].border_collapse == "collapse" and required_width > 1:
+                        required_width = required_width - (
+                            (span_style.border_l + span_style.border_r) / 2
+                        )
+                    if span_style.min_width_px > 0:
+                        val span_min_width = css_outer_width(
+                            nodes[span_cell], span_style,
+                            span_style.min_width_px
+                        )
+                        if required_width < span_min_width:
+                            required_width = span_min_width
+                    var current_width = (
+                        spacing_x * (next_column - span_column - 1)
+                    )
+                    var width_column = span_column
+                    while width_column < next_column:
+                        current_width = current_width + widths[width_column]
+                        width_column = width_column + 1
+                    if required_width > current_width:
+                        val deficit = required_width - current_width
+                        val span_count = next_column - span_column
+                        val grow_each = deficit / span_count
+                        val grow_remainder = (
+                            deficit - grow_each * span_count
+                        )
+                        var grow_column = span_column
+                        while grow_column < next_column:
+                            val grow_share = grow_each + (if (
+                                grow_column - span_column < grow_remainder
+                            ): 1 else: 0)
+                            widths[grow_column] = (
+                                widths[grow_column] + grow_share
                             )
-                            var grow_column = span_column
-                            while grow_column < next_column:
-                                val grow_share = grow_each + (if (
-                                    grow_column - span_column < grow_remainder
-                                ): 1 else: 0)
-                                widths[grow_column] = (
-                                    widths[grow_column] + grow_share
-                                )
-                                # The floor rises with the ceiling: a spanning
-                                # cell's stated requirement is a requirement in
-                                # both directions, or the columns it covers
-                                # could be compressed back below it.
-                                col_min[grow_column] = (
-                                    col_min[grow_column] + grow_share
-                                )
-                                col_exact[grow_column] = false
-                                grow_column = grow_column + 1
-                    span_column = next_column
-                span_cell = child_index.next_sibling[span_cell]
+                            # The floor rises with the ceiling: a spanning
+                            # cell's stated requirement is a requirement in
+                            # both directions, or the columns it covers
+                            # could be compressed back below it.
+                            col_min[grow_column] = (
+                                col_min[grow_column] + grow_share
+                            )
+                            col_exact[grow_column] = false
+                            grow_column = grow_column + 1
+                span_column = next_column
+            span_cell = child_index.next_sibling[span_cell]
     var sum_max = 0
     var c_i = 0
     while c_i < column_count:
