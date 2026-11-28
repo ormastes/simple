@@ -22,19 +22,19 @@ production change, from the acceptance column.
 
 | Stage | Change | Depends on (engine) | Depends on (this plan) | Guide / Impl |
 |---|---|---|---|---|
-| AW-0 | Coverage gate script (shared with S3-F10), baseline numbers for the module set, red specs for G6 and G10 | none (A-3 pattern: script + manifest row + dispatch case) | none | Fable / sonnet |
+| AW-0 | The ONE coverage gate script for both lanes (same stage as S3-F10; `scripts/check/check-tldr-trace-coverage.shs`: decision + condition + function-entered + path normalisation), baseline numbers for the module set, red specs for G6 and G10 | none (A-3 pattern: script + manifest row + dispatch case) | none | Fable / sonnet |
 | AW-1 | `aspect-decl\|` module TLDR section: codec, limits, writer at TLDR publication; signature/effects written at publication until write-once slots exist | none; A-2 digest gate before any cross-trust read | AW-0 | Fable / sonnet |
 | AW-2 | `join-point\|` module TLDR section; `DirectoryJoinPointFactsV1` built from member sections; `aspect_root_digest` computed from `aspect-decl\|` | none | AW-1 | Fable / sonnet |
 | AW-3 | One selector identity: `pointcut_selector_parse_v1` everywhere; retire `aop_selector_digest` and the substring read-set | none | AW-0 | Fable / sonnet |
 | AW-4 | Pure explain: per-node truth values and fields read for one selector over one `JoinPointFactV1` | none | AW-3 | Fable / sonnet |
-| AW-5 | Per-join-point ordered plan, order-conflict check, `join_point_weave_key` (no shard-wide input; body digest per decision D1), `plan_digest(file)` | none | AW-3 | Fable / sonnet |
+| AW-5 | Per-join-point ordered plan, order-conflict check, `join_point_weave_key` (no shard-wide input, no advice body digest: D1), `plan_digest(file)` | none | AW-3 | Fable / sonnet |
 | AW-6 | Per-file plan rows in the incremental manifest (the "old" side); real `PointcutDirChangeV1` input to the planner; `aop-consumer` rows written by the current weave path | none | AW-5 | Fable / sonnet |
 | AW-7a | `advice_index(scope)` and `effective_advice(dir)` as a pure fold over sections | none | AW-1, AW-2 | Fable / sonnet |
 | AW-7b | The same as async set-once slots; text scan and global registry no longer consulted for discovery | S1-3 (`read_tldr_async`), S1-5 (wake on publish), the five prerequisites of `tldr_caller_async_prerequisites_2026-10-30.md` | AW-7a | Fable / sonnet |
 | AW-8 | `match(selector, dir)` as an async slot with a packed, persisted shard; process-global match state deleted; limits through the ledger | S1-3, S1-5; S2-6 key record; S3-1 slots; S3-5 ledger | AW-7b | Fable / sonnet |
 | AW-9 | `weave_hir` and `weave_mir` as stages of the file task, from the immutable base; woven unit key `hir_key + plan_digest`; per-task output checks | S1-1, S1-2 (async stage nodes); S2-1 (`CompileInvoker`); S3-4 for the packed HIR base | AW-5, AW-8 | Fable / **Fable** |
 | AW-10 | Receipts carry `aspect_root_digest` and `plan_digest`; identical build runs zero match tasks and zero weave stages | B-1..B-3; S3-7 (one invalidation input per PR) | AW-9 | Fable / sonnet |
-| AW-11 | Trace rows function; `advises` relation in the trace model/schema/codec; CLI, LSP and MCP through `TraceViewProjection` | none here; projection per decision D3 | AW-4, AW-6 | Fable / sonnet |
+| AW-11 | Aspect fact rows for trace (rows function + `advises` relation in the trace model/schema/codec). Surfaces come from shared stage TV-1 | none here; TV-1 for surfaces | AW-4, AW-6 | Fable / sonnet |
 | AW-12 | Delete the two weave passes, global validation loop, global conflict detection, weave accounting globals; native qualification fixture | S2-3 (standalone vs runner differential); P-2 for the default flip | AW-9, AW-10 | Fable / sonnet |
 
 ### Start now, before any engine step
@@ -68,13 +68,13 @@ condition percentages for the modules it touched.
 | AW-2 | Facts from sections equal facts from HIR (`aop_directory_facts_from_hir_v1`) on a fixture with private functions, attributes and guards; a member without a section makes facts `complete = false`; `aspect_root_digest` is order-independent. |
 | AW-3 | The three former identities agree on a corpus of selectors or the difference is listed and resolved; equivalent spellings share one digest; unsupported selector is `supported = false` and never cached. |
 | AW-4 | For each selector operator, the explain result's root value equals `_selector_matches`; every atom reports the fact field it read; MC/DC over `!`, `&`, `\|`. |
-| AW-5 | Plan order is `(order, AdviceId)` and independent of input order; equal order on one join point is an error naming both advice ids; empty plan gives the fixed digest; adding a sibling join point or editing another selector leaves an unaffected join point's weave key equal; under D1(b) a body-only change leaves `plan_digest` equal, under D1(a) it changes. |
+| AW-5 | Plan order is `(order, AdviceId)` and independent of input order; equal order on one join point is an error naming both advice ids; empty plan gives the fixed digest; adding a sibling join point or editing another selector leaves an unaffected join point's weave key equal; a body-only advice change leaves `plan_digest` equal (D1); with the advice listed in the inline-deps input the unit key changes (negative control). |
 | AW-6 | Selector edit: planner returns exactly `old \ new` ∪ `new \ old` owners plus intersection ids whose apply key changed; unrelated directory is not returned (negative control); incomplete shard returns all members of both inventories; RR receipt contains `aop-consumer` rows for a real weave and decodes; corrupt receipt falls back, never "zero affected". |
 | AW-7a | Index of a tree equals the union of member sections; an unchanged subtree is read by root digest without opening members (counter); scope filter admits and rejects by directory. |
 | AW-7b | N waiters on one index slot get one production (T-SF1 shape); a module declaring advice that no join point imports is still found; a failed slot is terminal for all waiters; no read of `aspect_registry_*` on the discovery path. |
 | AW-8 | Shard read back from disk equals the computed one; second process hits without computing; over-limit rejects with a diagnostic; forged or unknown-algorithm shard is a miss; no module-level mutable state remains (source-binding check). |
 | AW-9 | Woven object bytes equal the pass-based build on the differential fixture; each join point has exactly plan-length advice calls in plan order; weaving twice from the base gives identical bytes; a shorter plan removes the call (unweave); overlap receipt shows a file's weave stage running while another file is still in HIR (T-OV1 shape). |
-| AW-10 | Identical second build: 0 match tasks, 0 weave stages, 0 compiles, 0 links (T-NC1 shape). Advice body edit: 0 match tasks, advice object rebuilt, woven units per D1. Signature edit: every woven unit with that advice rebuilt, files without it not. Selector edit: only old ∪ new owners rebuilt. |
+| AW-10 | Identical second build: 0 match tasks, 0 weave stages, 0 compiles, 0 links (T-NC1 shape). Advice body edit, not inlined: 0 match tasks, advice object rebuilt, 0 woven units rebuilt, relink. Negative control: same edit with the advice inlined into a unit (inline-deps input, S3-7): exactly the inlining units rebuild. Signature edit: every woven unit with that advice rebuilt, files without it not. Selector edit: only old ∪ new owners rebuilt. |
 | AW-11 | "Which advice applies to f" returns the plan in order; "which join points for advice a" spans two directories; "why not" names the failing atom; incomplete shard yields precision `bounded_set` or `unknown`, never `exact`; CLI, LSP and MCP outputs are renderings of the same rows (differential). |
 | AW-12 | The deleted symbols have no caller (`git grep`); the native qualification steps 1-5 of `directory_tldr_native_qualification_2026-11-14.md` that concern aspects pass on an admitted compiler; set coverage >= 70 %. |
 
@@ -95,8 +95,19 @@ spec. AW-0 records the rest.
 
 - Around advice, structural transforms, runtime interception, dynload registry
   activation: existing paths, unchanged.
-- `TraceViewProjection` itself, unless decision D3 assigns it here.
+- A second trace projection or query authority: TV-1 is the only one.
 - A pointer row in `pseudo_immutable_cache_impl_plan.md`: add after the generic
   lane's §5 lands, to avoid a conflict on that file.
 - Directory job scheduling policy (D1/D-T3 of the directory TLDR selection):
   owned by `doc/03_plan/agent_tasks/dir_tldr_aspect.md`.
+
+## 5. Shared stage TV-1 and decisions (owner, 2026-11-28)
+
+| Stage | Change | Depends on | Acceptance | Guide / Impl |
+|---|---|---|---|---|
+| TV-1 | ONE `TraceViewProjection` (pure, `src/lib/common/traceability`) with CLI, LSP and MCP adapters, shared by the generic and aspect lanes. Same stage as the one the generic plan names for S3-F8's surface; neither lane builds its own | fact rows from AW-11 and S3-F8 (either may land first; the projection accepts both row kinds) | one projection renders generic rows ("who needs `Pair<i64,f64>`") and aspect rows ("which advice applies to f, why"); CLI, LSP and MCP outputs are renderings of the same rows (differential); precision `exact` / `bounded_set` / `unknown` preserved; no file re-parsed for a query (read counter) | Fable / sonnet |
+
+Decisions: D1 advice-body edit rebuilds only the advice object and relinks,
+guarded by the inline-deps input (AW-5, AW-10 carry the negative control);
+D2 forward + static before/after only; D3 = TV-1 above; D4 decision/condition
+proxy, one script for both lanes (AW-0 = S3-F10). Detail: design §10.1.

@@ -190,7 +190,7 @@ has no shard-wide input:
 ```text
 join_point_weave_key = H(JoinPointId, base body digest,
                          ordered [AdviceId, mode, activation, signature digest,
-                                  effects digest, order] (+ body digest under D1 = literal))
+                                  effects digest, order] )   # no advice body digest (D1 decided)
 ```
 
 `plan_digest(file)` is built from these keys only. `advice_apply_key_v1` stays
@@ -213,14 +213,14 @@ submit at all, the pre-edit impact preview, and trace. Rows go into the existing
 | directory facts key -> match shard key | match task |
 | match shard key -> `JoinPointId` | match task |
 | advice facet `advice.signature` / `advice.effects` / order -> woven unit key | file task, weave stage |
-| advice facet `advice.body` -> advice module object (and woven unit key under D1 = literal) | advice module task |
+| advice facet `advice.body` -> advice module object (not the woven unit key; D1 decided) | advice module task |
 | `JoinPointId` -> ordered `AdviceId` list | file task (the trace edge) |
 
 | Change | Match work | Rebuilt | Not rebuilt (negative control) |
 |---|---|---|---|
 | nothing | none: zero match tasks, zero weave stages | nothing; zero links | everything |
 | selector text / AST | shards of old ∪ new candidate directories | files owning ids in `old \ new` (unwoven from base), `new \ old` (woven); intersection only if its apply key changed | files in neither set; every shard of other selectors |
-| advice body, same signature and effects | none; every shard reused | advice module object + relink; woven units too only under D1 = literal | match sets; unrelated files |
+| advice body, same signature and effects | none; every shard reused | advice module object + relink; woven units only if the inline-deps input lists the advice as inlined (D1) | match sets; unrelated files |
 | advice signature, effects or order | none | every woven unit that has the advice in its plan; compatibility recheck; ABI consumers of the advice symbol | match sets; files without the advice |
 | join point added / renamed / attribute or signature change | owning directory's facts and its shards; ancestors only where a scope names them | files whose `plan_digest` changed | sibling files with unchanged plan digest (early cutoff at `plan_digest`) |
 | join-point body only | none | that file | others |
@@ -283,7 +283,7 @@ Weave as a stage of the file task needs S1-1, S1-2 and S2-1. Packed artifacts
 and limits need S2-6, S3-1, S3-4 and S3-5. Zero-reweave needs B-1..B-3. The two
 passes are deleted only after S2-3's standalone-versus-runner differential is green.
 
-## 10. Owner decisions
+## 10. Owner decisions (options as raised; outcome in §10.1)
 
 - **D1. Advice body edit.** The directive says an advice body change dirties
   woven objects. The weave is call-only and formally bound, so a rebuilt join
@@ -363,3 +363,24 @@ names): `cache_contract/aspect_match_shard_v1`, `directory_aspect_{draft,project
 `incremental_rebuild_plan_v1`, `35.semantics/aspect_weave`, `50.mir/mir_aop_injection`,
 `85.mdsoc/aop_index/reverse_index`, and the new section codec, query, plan,
 explain and trace-row modules.
+
+## 10.1 Decisions recorded (owner, 2026-11-28)
+
+- **D1 = (b).** An advice body edit rebuilds only the advice module object and
+  relinks. `join_point_weave_key` has no advice body digest. This is valid only
+  while advice is never inlined into a join point's object; the guard is the
+  engine's inline-deps invalidation input (S3-7): when that input lists an
+  advice function as inlined into a unit, the advice body digest is an input of
+  that unit and the woven object rebuilds. Both directions are specified in
+  AW-5 and AW-10 (positive: body edit, not inlined, zero woven units rebuilt;
+  negative control: body edit, inlined, exactly the inlining units rebuilt).
+- **D2 = keep.** `forward` join points and static `before`/`after` only.
+- **D3 = one shared stage, `TV-1`.** `TraceViewProjection` plus its CLI, LSP and
+  MCP adapters is built once for generics and aspects. Each lane contributes
+  only fact rows: this lane AW-11, the generic lane S3-F8. Both plans name the
+  stage `TV-1`; neither adds a second projection or query authority.
+- **D4 = decision/condition proxy stays.** One coverage script for both lanes
+  (`scripts/check/check-tldr-trace-coverage.shs`, stage AW-0 = S3-F10), with
+  decision coverage, condition coverage, the function-entered check and
+  `\?\` path normalisation; each lane supplies a scope list and a spec list.
+  Seed line sites are not requested now.
