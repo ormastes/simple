@@ -24,7 +24,7 @@ use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_f
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{box_line_start_err_reset, box_line_start_err_record, box_line_start_err_at, box_right_edge_err_record, absolute_child_x_frac_milli, absolute_child_y_frac_milli, box_device_top_inherited_milli}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{grid_fr_track_floor, grid_fr_track_factor, button_device_extra_w, button_has_inline_follower, box_device_extra_w_at, inline_button_k1_snap_px, GridTrackLayout, grid_track_layout}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_text.{input_auto_content_w}
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{input_button_label_width_milli_px, css_flex_row_shrink_frozen, css_style_constraint_space, css_style_min_max_bounds}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_layout_foundation.{input_button_label_width_milli_px, inline_control_device_delta_milli, css_flex_row_shrink_frozen, css_style_constraint_space, css_style_min_max_bounds}
 
 
 # --- Float context (CSS 2.2 section 9.5) -----------------------------------
@@ -3666,6 +3666,11 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                         )
                         out_bx = shifted.bx
                         out_by = shifted.by
+                    elif layout_device_scale() == 1 and wrap_frac_delta != 0 and nodes[fc_wrap].tag == "button":
+                        # k = 1: the button paints to its rounded exact right
+                        # edge, as in an unwrapped row (Chrome 159: `Forms` at
+                        # 73.547 + 55.766 ends at column 129, not 130).
+                        box_device_extra_w_record(nodes.len() as i32, fc_wrap, inline_button_k1_snap_px(draw_x_wrap, ((cx_wrap - draw_x_wrap) * 1000 + frac_wrap_milli) as i64, out_bw[fc_wrap], wrap_frac_delta as i64))
                     cx_wrap = cx_wrap + out_bw[fc_wrap] + effective_cmr
                     frac_wrap_milli = frac_wrap_milli + wrap_frac_delta
                     val actual_item_h = resolved_cst.margin_t + out_bh[fc_wrap] + resolved_cst.margin_b
@@ -5732,7 +5737,14 @@ fn layout_with_style_flow(nodes: [HNode], styles: [Style], child_index: HtmlChil
                     # text-align (a `<button>` centres its label) says nothing
                     # about where the box starts.
                     val box_pen_err: i64 = if run_pen_err != INLINE_PEN_ERR_UNKNOWN and text_run_aligns_line_left(st): run_pen_err else: 0
-                    box_device_dx_record(nodes.len() as i32, c, inline_pen_err_carry_px(box_pen_err * (layout_device_scale() as i64)))
+                    val box_dx = inline_pen_err_carry_px(box_pen_err * (layout_device_scale() as i64))
+                    box_device_dx_record(nodes.len() as i32, c, box_dx)
+                    # An auto-width button's right edge is round(k x its exact
+                    # right edge), not its snapped left plus a rounded width.
+                    if run_pen_err != INLINE_PEN_ERR_UNKNOWN and text_run_aligns_line_left(st):
+                        val control_dev_delta = inline_control_device_delta_milli(nodes, styles, child_index, c, out_bw[c])
+                        if control_dev_delta != INLINE_PEN_ERR_UNKNOWN:
+                            box_device_extra_w_record(nodes.len() as i32, c, box_device_top_px((box_pen_err * (layout_device_scale() as i64) + control_dev_delta) as i32) - box_dx)
                     # With no exact pen here, what follows a narrowed button keeps
                     # its CSS-snapped x: keep the button k x CSS wide, or it
                     # opens a 1 px gap (centred / rtl lines, after an inline-block).
