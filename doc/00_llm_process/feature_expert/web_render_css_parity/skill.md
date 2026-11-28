@@ -6393,3 +6393,13 @@ pins the border-box form, the default-UA gap is unfiled.
 - **In-place snap trap.** A loop that rewrites `boundaries[i]` while reading
   `boundaries[i + 1] - boundaries[i]` mixes a snapped and an unsnapped sum; keep the previous
   raw value in a local.
+
+## 2026-11-28 — catalog ratchet bound is noise-sized: max(0.02, 5% of row) (`work/catalog-tolerance-20261128`)
+
+- **Rule.** `check-chrome-catalog-pixel-diff.shs` fails a page above `row + max(0.02, 5% of the row)` (bound included, compared in whole 1/10000 points). The flat `+0.25` it replaces was larger than most rows: it passed css-layout 1x at 0.40 on a 0.35 row and would have passed any 4x page (rows 0.00 to 0.05) at 0.27.
+- **Noise behind the bound.** Three serial 1x runs on one binary (seed1126b, `f4993f775b8`) gave the same value on all 8 pages. The 557 full-catalog logs then in the scratchpad hold 39 distinct 1x vectors and 52 distinct 4x vectors; every change between neighbours traced to a code change (the html 0.29 / 0.32 / 0.29 and 4x html 0.03 / 0.02 flips in `lcd1x` were edits between runs). The widest same-code spread on record is animation 3.47 to 3.59 (3.4% of the row), from before the capture dropped `--virtual-time-budget`. So 0.02 is two display steps, and 5% only matters for rows above 0.40 (today the 4K Vulkan lane).
+- **A page above its row is a regression until proven otherwise.** css-layout 1x reads 0.40 on a 0.35 row and now FAILs. It is not host drift: on the same binary and host, `cc85cd23dda` (parent) measures 0.35 and `589d7493a0c` (merge of PR #12215, `work/w5-5-layout-engine-chrome159-20261127`) measures 0.41; the LCD pen lane later took it to 0.40. The row stays 0.35.
+- **Traps.**
+  - Float awk gets the boundary wrong (`0.35 + 0.02` is not `0.37`); keep the integer compare.
+  - A row or measurement that is not a plain decimal is an offender (`<page>:unreadable`), not a silent zero.
+  - Do not edit the script while a catalog run is using it: `sh` reads it incrementally.
