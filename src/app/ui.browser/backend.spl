@@ -22,7 +22,7 @@ use app.ui.web.html.{generate_css, wm_root_data_attrs}
 use app.ui.browser.event_bridge.{translate_key_event, translate_mouse_event, hit_test}
 use std.gc_async_mut.ui.web_render_pixel_backend.{web_render_html_request_to_pixel_artifact_with_backend, web_render_resolved_engine2d_backend_name}
 use std.gc_async_mut.gpu.browser_engine.web_render_backend.{web_render_backend, web_render_backend_names}
-use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{extract_css_vw, compute_styles, web_html_layout_tree, zero_i32_list, neg_one_i32_list, empty_i32_lists}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{extract_css_vw, compute_styles, web_html_layout_tree, zero_i32_list, neg_one_i32_list, empty_i32_lists, filter_rules_for_dom, simple_web_last_layout_hit_snapshot}
 use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{parse_html, build_child_index}
 use std.nogc_async_mut.gpu.engine2d.host_gpu_draw_ir_event_flow.{engine2d_host_gpu_draw_ir_event_flow, engine2d_host_gpu_draw_ir_event_flow_summary}
 use std.gpu.engine2d.helpers_availability.{backend_canonical_name}
@@ -514,9 +514,12 @@ class BrowserBackend:
         widget_tree_to_draw_ir_with_theme(state.tree.root_node(), self.width, self.height, DRAW_IR_BACKEND_GPU, theme_snapshot)
 
     me render_frame(tree: UITree, state: UIState):
-        self.render_frame_with_composition(tree, state, self.widget_draw_ir_composition(state))
+        self.render_frame_core(tree, state)
 
     me render_frame_with_composition(tree: UITree, state: UIState, _composition: DrawIrComposition):
+        self.render_frame_core(tree, state)
+
+    me render_frame_core(tree: UITree, state: UIState):
         """Convert widget tree to DOM, layout, and paint to framebuffer."""
         val revision = widget_store_revision()
         val theme_snapshot = browser_theme_render_snapshot(state.tree.theme_name())
@@ -565,9 +568,49 @@ class BrowserBackend:
                 self.static_shell_html_stores = self.static_shell_html_stores + 1
         self.last_render_html_us = browser_backend_time_us() - html_start_us
 
-        # Step 2: Compute real CSS layout boxes for hit testing and document content height.
-        val dom_layout_start_us = browser_backend_time_us()
-        val (css_entries, max_bottom) = compute_css_layout_entries(full_html, self.width, self.height, self.scroll_y)
+        var css_entries: [LayoutEntry] = []
+        var max_bottom: i32 = 0
+        var artifact = if self.web_render_engine == WEB_RENDER_ENGINE_CHROMIUM:
+            val dom_layout_start_us = browser_backend_time_us()
+            val (entries_ch, bottom_ch) = compute_css_layout_entries(full_html, self.width, self.height, self.scroll_y)
+            css_entries = entries_ch
+            max_bottom = bottom_ch
+            self.last_render_dom_layout_us = browser_backend_time_us() - dom_layout_start_us
+            val pixel_start_us = browser_backend_time_us()
+            val ch_art = browser_backend_chromium_pixel_artifact(req, self.width, self.height, full_html)
+            self.last_render_pixel_artifact_us = browser_backend_time_us() - pixel_start_us
+            ch_art
+        else:
+            # Single-pass pure_simple pipeline: render pixels first, then consume the
+            # exact layout hit boxes and document bottom recorded during that pass.
+            val pixel_start_us = browser_backend_time_us()
+            val ps_art = browser_backend_pure_simple_pixel_artifact(
+                req, full_html, self.gpu_backend_name
+            )
+            self.last_render_pixel_artifact_us = browser_backend_time_us() - pixel_start_us
+            val dom_layout_start_us = browser_backend_time_us()
+            val snap = simple_web_last_layout_hit_snapshot()
+            if snap.valid and snap.width == self.width and snap.height == self.height and snap.html == full_html:
+                var bi = 0
+                while bi < snap.boxes.len():
+                    val box = snap.boxes[bi]
+                    css_entries.push(LayoutEntry(
+                        id: box.id,
+                        x: box.x.to_f64(),
+                        y: box.y.to_f64(),
+                        width: box.width.to_f64(),
+                        height: box.height.to_f64()
+                    ))
+                    bi = bi + 1
+                val doc_b = if snap.has_bounds: snap.raw_bottom_y + self.scroll_y else: 0
+                max_bottom = if doc_b > 0: doc_b else: 0
+            else:
+                val (entries_fb, bottom_fb) = compute_css_layout_entries(full_html, self.width, self.height, self.scroll_y)
+                css_entries = entries_fb
+                max_bottom = bottom_fb
+            self.last_render_dom_layout_us = browser_backend_time_us() - dom_layout_start_us
+            ps_art
+
         self.content_height = max_bottom
         if css_entries.len() > 0:
             self.layout_cache = css_entries
@@ -577,23 +620,6 @@ class BrowserBackend:
             val layout = browser_dom_compute_layout(dom, self.width, self.height)
             self.layout_cache = collect_layout_entries(layout, [])
         self.layout_cache_theme_identity = theme_identity
-        self.last_render_dom_layout_us = browser_backend_time_us() - dom_layout_start_us
-        val pixel_start_us = browser_backend_time_us()
-        # Gap B: engine selection happens here, through the WebRenderer facade
-        # shape. Default ("pure_simple") executes canonical HTML/CSS layout
-        # Draw IR.
-        # "chromium" instead renders through the real
-        # WebRenderBackend facade and reports honest provenance (engine2d
-        # status "compatibility_renderer" + backend "chromium"). The former
-        # `web_backend_env_get` alias-resolution failure is fixed in
-        # web_render_backend.spl by using the direct env facade import.
-        var artifact = if self.web_render_engine == WEB_RENDER_ENGINE_CHROMIUM:
-            browser_backend_chromium_pixel_artifact(req, self.width, self.height, full_html)
-        else:
-            browser_backend_pure_simple_pixel_artifact(
-                req, full_html, self.gpu_backend_name
-            )
-        self.last_render_pixel_artifact_us = browser_backend_time_us() - pixel_start_us
         self.last_render_draw_ir_dispatch_us = 0
         val framebuffer_start_us = browser_backend_time_us()
         self.framebuffer = framebuffer_from_argb_pixels(self.width, self.height, artifact.pixels)
@@ -867,10 +893,32 @@ fn collect_layout_entries(box: BlockLayoutBox, acc: [LayoutEntry]) -> [LayoutEnt
     collector.collect(box)
     return collector.entries
 
+class _CssLayoutCacheEntry:
+    html_len: i64
+    html: text
+    viewport_w: i32
+    viewport_h: i32
+    scroll_y: i32
+    entries: [LayoutEntry]
+    max_bottom: i32
+
+var _css_layout_entries_cache: [_CssLayoutCacheEntry] = []
+
 fn compute_css_layout_entries(full_html: text, viewport_w: i32, viewport_h: i32, scroll_y: i32) -> ([LayoutEntry], i32):
     """Compute real CSS layout boxes and unscrolled document height from `full_html`."""
+    val hlen = full_html.byte_len()
+    var ci = (_css_layout_entries_cache.len() as i32) - 1
+    while ci >= 0:
+        val cached = _css_layout_entries_cache[ci]
+        if (cached.html_len == hlen and
+            cached.viewport_w == viewport_w and
+            cached.viewport_h == viewport_h and
+            cached.scroll_y == scroll_y and
+            cached.html == full_html):
+            return (cached.entries, cached.max_bottom)
+        ci = ci - 1
     val nodes = parse_html(full_html)
-    val rules = extract_css_vw(full_html, viewport_w, false)
+    val rules = filter_rules_for_dom(extract_css_vw(full_html, viewport_w, false), nodes)
     val child_index = build_child_index(nodes)
     val styles = compute_styles(nodes, rules, child_index, false, true, viewport_w, viewport_h)
     val node_count = nodes.len() as i32
@@ -906,7 +954,7 @@ fn compute_css_layout_entries(full_html: text, viewport_w: i32, viewport_h: i32,
                 max_bottom = doc_bottom
             val node_id = nodes[i].id_attr
             if node_id != "" and node_id != "browser_scroll_plane":
-                entries = entries.push(LayoutEntry(
+                entries.push(LayoutEntry(
                     id: node_id,
                     x: boxes.bx[i].to_f64(),
                     y: boxes.by[i].to_f64(),
@@ -914,6 +962,22 @@ fn compute_css_layout_entries(full_html: text, viewport_w: i32, viewport_h: i32,
                     height: bh.to_f64()
                 ))
         i = i + 1
+    if (_css_layout_entries_cache.len() as i32) >= 8:
+        var shifted: [_CssLayoutCacheEntry] = []
+        var si = 1
+        while si < _css_layout_entries_cache.len():
+            shifted.push(_css_layout_entries_cache[si])
+            si = si + 1
+        _css_layout_entries_cache = shifted
+    _css_layout_entries_cache.push(_CssLayoutCacheEntry(
+        html_len: hlen,
+        html: full_html,
+        viewport_w: viewport_w,
+        viewport_h: viewport_h,
+        scroll_y: scroll_y,
+        entries: entries,
+        max_bottom: max_bottom
+    ))
     (entries, max_bottom)
 
 fn hit_test_entries(entries: [LayoutEntry], px: i32, py: i32) -> text:
