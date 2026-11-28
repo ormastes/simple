@@ -1,0 +1,124 @@
+# Regression spec: packed `.spab` CLEAR restore of custom_primitive_symbol_ids
+# Ensures flat_type_pools_restore rebuilds cleared custom_primitive_symbol_ids to -1
+# so HIR custom_primitive_bind_symbol does not panic with bounds_check (index=0, len=0).
+
+use std.spec
+use compiler.frontend.core.types.{
+    reset_all_pools,
+    custom_primitive_register,
+    custom_primitive_find,
+    custom_primitive_bind_symbol,
+    custom_primitive_underlying_type_tag_by_symbol,
+    flat_type_pools_dump,
+    flat_type_pools_restore,
+    TYPE_I64
+}
+use compiler.frontend.core.flat_pool_codec.{FlatPoolReader}
+use compiler.frontend.flat_ast_bridge.{
+    flat_pool_capture_arm,
+    flat_pool_capture_take,
+    flat_pool_capture_take_trace,
+    parse_and_build_module_scoped,
+    build_module_from_packed_view_v1
+}
+use compiler.frontend.core.flat_pool_packed_v1.{
+    flat_packed_encode_v1,
+    flat_packed_view_v1,
+    SpabDigestV1,
+    SPAB_SUBJECT_SOURCE,
+    SPAB_SUBJECT_COMPILER
+}
+use compiler.common.cache_contract.hash_algorithm_registry_v1.{HASH_ALGO_XXH3_128_V1}
+use std.nogc_sync_mut.sffi.runtime.{xxh3_128_text}
+
+fn _replace_custom_primitive_symbol_ids_lines(dump: text, replacement_lines: [text]) -> text:
+    val lines = dump.split("\n")
+    var out: [text] = []
+    var i = 0
+    while i < lines.len():
+        # Layout after reset_all_pools() + 1 custom_primitive_register:
+        # 0: array_generic_elem_tags ("0")
+        # 1: atomic_inner_tags ("0")
+        # 2: custom_primitive_names count ("1")
+        # 3: custom_primitive_names[0] ("Meters")
+        # 4: custom_primitive_symbol_ids count ("1")
+        # 5: custom_primitive_symbol_ids[0] ("-1")
+        if i == 4:
+            for rep in replacement_lines:
+                out.push(rep)
+            i = 6
+            continue
+        out.push(lines[i])
+        i = i + 1
+    out.join("\n")
+
+describe "spab custom_primitive_symbol_ids restore":
+    it "rebuilds cleared custom_primitive_symbol_ids across a real .spab roundtrip":
+        val src = "unit ByteSize: i64\nunit Capacity: i64\n"
+        val path = "/tmp/spab_custom_primitive_restore_spec_unit.spl"
+        flat_pool_capture_arm()
+        parse_and_build_module_scoped(src, path, false)
+        val blob = flat_pool_capture_take()
+        val trace = flat_pool_capture_take_trace()
+
+        val module_key = xxh3_128_text(path)
+        val digests = [
+            SpabDigestV1(subject: SPAB_SUBJECT_SOURCE, algo: HASH_ALGO_XXH3_128_V1, hex: xxh3_128_text(src)),
+            SpabDigestV1(subject: SPAB_SUBJECT_COMPILER, algo: HASH_ALGO_XXH3_128_V1, hex: xxh3_128_text("spec-compiler-v1"))
+        ]
+        val packed = flat_packed_encode_v1(blob, trace, digests, module_key)
+        expect(packed.len()).to_be_greater_than(0)
+
+        val view = flat_packed_view_v1(packed)
+        expect(view.valid).to_be(true)
+
+        reset_all_pools()
+        val restored = build_module_from_packed_view_v1(view, src, path)
+        expect(restored == nil).to_be(false)
+
+        expect(custom_primitive_find("ByteSize")).to_equal(0)
+        expect(custom_primitive_find("Capacity")).to_equal(1)
+
+        custom_primitive_bind_symbol("ByteSize", 42)
+        custom_primitive_bind_symbol("Capacity", 43)
+        expect(custom_primitive_underlying_type_tag_by_symbol(42)).to_equal(TYPE_I64)
+        expect(custom_primitive_underlying_type_tag_by_symbol(43)).to_equal(TYPE_I64)
+
+    it "rebuilds empty custom_primitive_symbol_ids in flat_type_pools_restore":
+        reset_all_pools()
+        val idx = custom_primitive_register("Meters", TYPE_I64)
+        expect(idx).to_equal(0)
+        val dump = flat_type_pools_dump()
+        val lines = dump.split("\n")
+        expect(lines[2]).to_equal("1")
+        expect(lines[3]).to_equal("Meters")
+        expect(lines[4]).to_equal("1")
+
+        val cleared_blob = _replace_custom_primitive_symbol_ids_lines(dump, ["0"])
+        reset_all_pools()
+        val reader = FlatPoolReader.new_canonical(cleared_blob)
+        expect(flat_type_pools_restore(reader)).to_be(true)
+        expect(custom_primitive_find("Meters")).to_equal(0)
+
+        custom_primitive_bind_symbol("Meters", 77)
+        expect(custom_primitive_underlying_type_tag_by_symbol(77)).to_equal(TYPE_I64)
+
+    it "rejects non-empty mismatched custom_primitive_symbol_ids":
+        reset_all_pools()
+        custom_primitive_register("Meters", TYPE_I64)
+        val dump = flat_type_pools_dump()
+        val mismatched_blob = _replace_custom_primitive_symbol_ids_lines(dump, ["2", "-1", "-1"])
+        reset_all_pools()
+        val reader = FlatPoolReader.new_canonical(mismatched_blob)
+        expect(flat_type_pools_restore(reader)).to_be(false)
+
+    it "guards custom_primitive_bind_symbol if symbol_ids is shorter than names":
+        reset_all_pools()
+        custom_primitive_register("Meters", TYPE_I64)
+        val dump = flat_type_pools_dump()
+        # Even if bind is called directly after a cleared restore, it binds cleanly without panic
+        val cleared_blob = _replace_custom_primitive_symbol_ids_lines(dump, ["0"])
+        reset_all_pools()
+        expect(flat_type_pools_restore(FlatPoolReader.new_canonical(cleared_blob))).to_be(true)
+        custom_primitive_bind_symbol("Meters", 99)
+        expect(custom_primitive_underlying_type_tag_by_symbol(99)).to_equal(TYPE_I64)
