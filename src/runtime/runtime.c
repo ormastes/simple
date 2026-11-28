@@ -3942,12 +3942,20 @@ SPL_RUNTIME_NATIVE_TWIN int64_t rt_text_to_bytes(int64_t text_value) {
  * --allow-multiple-definition), and it used to copy the array data verbatim:
  * a slot array gave the low bytes of `value << 3`, and any byte >= 0x80 made
  * strict UTF-8 return NIL -- every sha256_text hex digest in a Stage 2 native
- * binary. The array owner narrows both layouts; a bad element is NIL, as in
+ * binary. Packed bytes are still copied verbatim; slots are narrowed by the
+ * array owner; a bad element is NIL, as in
  * runtime_native.c and the Rust runtime. See doc/08_tracking/bug/
  * runtime_c_twin_first_definition_wins_linux_divergence_2026-10-20.md. */
 SPL_RUNTIME_NATIVE_TWIN int64_t rt_bytes_to_text(int64_t bytes_value) {
     int64_t len = rt_array_len_safe(bytes_value);
     if (bytes_value == 0 || len <= 0) return rt_string_new(NULL, 0);
+    int64_t packed = rt_array_bytes_basis_len((SplArray*)(uintptr_t)bytes_value);
+    if (packed > 0) {
+        const uint8_t* data =
+            (const uint8_t*)(uintptr_t)rt_array_bytes_basis_ptr((SplArray*)(uintptr_t)bytes_value);
+        if (!data) return rt_string_new(NULL, 0);
+        return spl_text_from_utf8_strict(data, (size_t)packed);
+    }
     int64_t length = rt_array_bytes_validate(bytes_value);
     if (length <= 0) return SPL_UTF8_TEXT_REJECTED;
     uint8_t* narrowed = (uint8_t*)malloc((size_t)length);
