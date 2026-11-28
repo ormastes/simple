@@ -883,6 +883,8 @@ impl MirLowering:
         # so without this `fn pass(v: i64?) -> i64?: v` returned Some(handle)
         # and a None caller value arrived as present.
         if self.local_declared_hir_type_is_optional(local.id):
+            if self.is_runtime_value_local(local.id) and not self.option_value_locals.contains(local.id):
+                return self.normalize_flat_rv_optional_handle(local, option_type)
             self.option_value_locals[local.id] = true
             self.mark_runtime_value_local(local.id)
             return local
@@ -1311,6 +1313,104 @@ impl MirLowering:
         Some(3), Some(true) and Some(0) are heap handles, never the raw
         sentinel, and a handle is never wrapped twice."""
         self.classify_option_word(local, option_type, true)
+
+    me normalize_flat_rv_optional_handle(local: LocalId, option_type: HirType) -> LocalId:
+        """Promote a flat tagged-RuntimeValue scalar optional (or a mix of
+        canonical handles and flat tagged-RuntimeValue scalars) into the canonical
+        enum-id-1 Option handle: already an enum-id-1 handle -> unchanged;
+        RT_NIL (3) -> None; otherwise decode via decode_runtime_value and box
+        as Some(raw_payload)."""
+        var inner_hir_opt: HirType? = None
+        match option_type.kind:
+            case HirTypeKind.Optional(inner): inner_hir_opt = Some(inner)
+            case _: ()
+        if inner_hir_opt == None:
+            return self.normalize_option_handle(local, option_type)
+        val inner_hir: HirType = inner_hir_opt.unwrap()
+        var is_scalar = false
+        match inner_hir.kind:
+            case HirTypeKind.Int(_, _) | HirTypeKind.Float(_) | HirTypeKind.Bool | HirTypeKind.Char:
+                is_scalar = true
+            case _: ()
+        if not is_scalar:
+            return self.normalize_option_handle(local, option_type)
+        val inner_mir = self.lower_type(inner_hir)
+        var b = self.builder
+        val enum_id_fn = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_enum_id"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+        ), call_origin: MirCallOrigin.Runtime)
+        val id_res = b.emit_call(enum_id_fn, [mir_operand_copy(local)], MirType.i64())
+        val id_local = id_res ?? LocalId(id: 0)
+        val option_id = b.emit_const_int(1)
+        val is_handle = b.emit_binop(MirBinOp.Eq, mir_operand_copy(id_local), mir_operand_copy(option_id), MirType.bool())
+        val handle_block = b.new_block(Some("flat_rv_opt_handle"))
+        val raw_block = b.new_block(Some("flat_rv_opt_raw"))
+        val nil_block = b.new_block(Some("flat_rv_opt_nil"))
+        val present_block = b.new_block(Some("flat_rv_opt_present"))
+        val merge_block = b.new_block(Some("flat_rv_opt_merge"))
+        val result = b.new_temp(MirType.i64())
+        b.terminate_if(mir_operand_copy(is_handle), handle_block, raw_block)
+
+        b.switch_to_block(handle_block)
+        b.emit_copy(result, local)
+        b.terminate_goto(merge_block)
+
+        b.switch_to_block(raw_block)
+        val nil_key = b.emit_const_int(3)
+        val is_nil = b.emit_binop(MirBinOp.Eq, mir_operand_copy(local), mir_operand_copy(nil_key), MirType.bool())
+        b.terminate_if(mir_operand_copy(is_nil), nil_block, present_block)
+
+        b.switch_to_block(nil_block)
+        val nil_enum_id = b.new_temp(MirType(kind: MirTypeKind.I32))
+        b.emit_const(nil_enum_id, MirConstValue.Int(1), MirType(kind: MirTypeKind.I32))
+        val nil_disc = b.new_temp(MirType(kind: MirTypeKind.I32))
+        b.emit_const(nil_disc, MirConstValue.Int(1), MirType(kind: MirTypeKind.I32))
+        val nil_payload = b.emit_const_int(3)
+        val nil_ctor = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_enum_new"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType(kind: MirTypeKind.I32), MirType(kind: MirTypeKind.I32), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+        ), call_origin: MirCallOrigin.Runtime)
+        val nil_boxed_res = b.emit_call(nil_ctor, [mir_operand_copy(nil_enum_id), mir_operand_copy(nil_disc), mir_operand_copy(nil_payload)], MirType.i64())
+        val nil_boxed = nil_boxed_res ?? LocalId(id: 0)
+        b.emit_copy(result, nil_boxed)
+        b.terminate_goto(merge_block)
+
+        b.switch_to_block(present_block)
+        self.builder = b
+        var decoded = self.decode_runtime_value(local, inner_mir)
+        var b2 = self.builder
+        var payload_word = decoded
+        match inner_mir.kind:
+            case MirTypeKind.F64:
+                payload_word = b2.emit_bitcast(mir_operand_copy(decoded), MirType.i64())
+            case MirTypeKind.F32:
+                val promoted = b2.emit_cast(mir_operand_copy(decoded), MirType.f64())
+                payload_word = b2.emit_bitcast(mir_operand_copy(promoted), MirType.i64())
+            case MirTypeKind.I64 | MirTypeKind.U64:
+                ()
+            case _:
+                payload_word = b2.emit_cast(mir_operand_copy(decoded), MirType.i64())
+        val some_enum_id = b2.new_temp(MirType(kind: MirTypeKind.I32))
+        b2.emit_const(some_enum_id, MirConstValue.Int(1), MirType(kind: MirTypeKind.I32))
+        val some_disc = b2.new_temp(MirType(kind: MirTypeKind.I32))
+        b2.emit_const(some_disc, MirConstValue.Int(0), MirType(kind: MirTypeKind.I32))
+        val some_ctor = MirOperand(kind: MirOperandKind.Const(
+            MirConstValue.Str("rt_enum_new"),
+            MirType(kind: MirTypeKind.FuncPtr(MirSignature(params: [MirType(kind: MirTypeKind.I32), MirType(kind: MirTypeKind.I32), MirType.i64()], return_type: MirType.i64(), is_variadic: false)))
+        ), call_origin: MirCallOrigin.Runtime)
+        val some_boxed_res = b2.emit_call(some_ctor, [mir_operand_copy(some_enum_id), mir_operand_copy(some_disc), mir_operand_copy(payload_word)], MirType.i64())
+        val some_boxed = some_boxed_res ?? LocalId(id: 0)
+        b2.emit_copy(result, some_boxed)
+        b2.terminate_goto(merge_block)
+
+        b2.switch_to_block(merge_block)
+        self.builder = b2
+        val tagged = self.tag_enum_construct_result(result)
+        self.option_value_locals[tagged.id] = true
+        self.mark_runtime_value_local(tagged.id)
+        self.remember_local_hir_type(tagged.id, option_type, 2, 0)
+        tagged
 
     me normalize_present_option_handle(local: LocalId, option_type: HirType) -> LocalId:
         """normalize_option_handle for a word that is PRESENT by construction
