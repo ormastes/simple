@@ -1823,8 +1823,8 @@ fn _html_draw_ir_svg_shape_commands(
     # exact size from its origin. A shape paints the device px it covers
     # fully (Chrome 159 anti-aliases the rest: `width=50 viewBox="0 0 3 1"`
     # at k = 4 fills rows 723..788 and blends row 789).
-    # ponytail: the partly covered edge px stay unpainted; blending them needs
-    # a coverage rect.
+    # Partly covered edge px get a coverage rect (alpha = covered fraction),
+    # at k = 1 as well as k > 1.
     val k = layout_device_scale()
     val device_w = k * box_w + (if k > 1: box_device_extra_w_at(i) else: 0)
     val device_h = k * box_h + (if k > 1: box_device_extra_h_at(i) else: 0)
@@ -1886,11 +1886,24 @@ fn _html_draw_ir_svg_shape_commands(
                     (shape_y + shape_h - view_y) * scale_num / scale_den + offset_y)
                 val radius = _html_svg_round_milli(
                     svg_number_milli(radius_raw) * scale_num / scale_den)
-                if fractional:
-                    val ex0 = ((shape_x - view_x) * scale_num / scale_den + offset_x) * k.to_i64()
-                    val ey0 = ((shape_y - view_y) * scale_num / scale_den + offset_y) * k.to_i64()
-                    val ex1 = ((shape_x + shape_w - view_x) * scale_num / scale_den + offset_x) * k.to_i64()
-                    val ey1 = ((shape_y + shape_h - view_y) * scale_num / scale_den + offset_y) * k.to_i64()
+                val sx0 = (shape_x - view_x) * scale_num / scale_den + offset_x
+                val sy0 = (shape_y - view_y) * scale_num / scale_den + offset_y
+                val sx1 = (shape_x + shape_w - view_x) * scale_num / scale_den + offset_x
+                val sy1 = (shape_y + shape_h - view_y) * scale_num / scale_den + offset_y
+                # A whole-px box whose viewBox puts a shape edge between CSS px
+                # (`width=50 viewBox="0 0 3 1"` with `min-height:17px` centres a
+                # 16.667 px tall rect) takes the coverage path too: Chrome 159
+                # fills rows 71..85 at k = 1 and blends rows 70 / 86. Only a
+                # square-cornered opaque rect: the coverage path blends edge px
+                # for that shape alone, so a rounded or translucent rect would
+                # lose its partly covered edge px; it keeps the rounded path.
+                val edge_frac = sx0 % 1000 != 0 or sy0 % 1000 != 0 or sx1 % 1000 != 0 or sy1 % 1000 != 0
+                val shape_fractional = fractional or (edge_frac and radius == 0 and (color >> 24) == 255u32)
+                if shape_fractional:
+                    val ex0 = sx0 * k.to_i64()
+                    val ey0 = sy0 * k.to_i64()
+                    val ex1 = sx1 * k.to_i64()
+                    val ey1 = sy1 * k.to_i64()
                     var dx0 = 0 - _html_svg_floor_milli(0 - ex0)
                     var dy0 = 0 - _html_svg_floor_milli(0 - ey0)
                     var dx1 = _html_svg_floor_milli(ex1)
@@ -1931,7 +1944,7 @@ fn _html_draw_ir_svg_shape_commands(
                                 "border-radius", "{radius}"
                             ))
                         commands.push(frac_rect)
-                        if k > 1 and radius == 0 and (color >> 24) == 255u32:
+                        if radius == 0 and (color >> 24) == 255u32:
                             val cov_l = if dx0 > 0 and dx0.to_i64() * 1000 > ex0: dx0.to_i64() * 1000 - ex0 else: 0
                             val cov_r = if dx1 < device_w and ex1 > dx1.to_i64() * 1000: ex1 - dx1.to_i64() * 1000 else: 0
                             val cov_t = if dy0 > 0 and dy0.to_i64() * 1000 > ey0: dy0.to_i64() * 1000 - ey0 else: 0
@@ -1951,16 +1964,25 @@ fn _html_draw_ir_svg_shape_commands(
                                 val alpha = ((ecov * 255 + 500) / 1000) as i32
                                 if edge_ew[ei] > 0 and edge_eh[ei] > 0 and alpha > 0 and alpha < 255:
                                     val edge_c = (color & 0x00FFFFFFu32) | ((alpha.to_u32()) << 24)
-                                    var edge_rect = _html_draw_ir_overlay_rect(
-                                        component_id + "_svg_rect_{j}_aa_{ei}",
-                                        ClipRect(x0: box_x, y0: box_y, x1: box_x + box_w + 1, y1: box_y + box_h + 1),
-                                        edge_c, svg_clip
-                                    )
+                                    # k = 1: device px are CSS px, a plain rect.
+                                    var edge_rect = if k <= 1:
+                                        _html_draw_ir_overlay_rect(
+                                            component_id + "_svg_rect_{j}_aa_{ei}",
+                                            ClipRect(x0: box_x + edge_ex[ei], y0: box_y + edge_ey[ei], x1: box_x + edge_ex[ei] + edge_ew[ei], y1: box_y + edge_ey[ei] + edge_eh[ei]),
+                                            edge_c, viewport
+                                        )
+                                    else:
+                                        _html_draw_ir_overlay_rect(
+                                            component_id + "_svg_rect_{j}_aa_{ei}",
+                                            ClipRect(x0: box_x, y0: box_y, x1: box_x + box_w + 1, y1: box_y + box_h + 1),
+                                            edge_c, svg_clip
+                                        )
                                     edge_rect.parent_id = component_id
                                     edge_rect.computed_style = [
-                                        draw_ir_style_prop("replaced-media-part", "svg-rect"),
-                                        draw_ir_style_prop("device-rect", "{edge_ex[ei]},{edge_ey[ei]},{edge_ew[ei]},{edge_eh[ei]}")
+                                        draw_ir_style_prop("replaced-media-part", "svg-rect")
                                     ]
+                                    if k > 1:
+                                        edge_rect.computed_style.push(draw_ir_style_prop("device-rect", "{edge_ex[ei]},{edge_ey[ei]},{edge_ew[ei]},{edge_eh[ei]}"))
                                     commands.push(edge_rect)
                                 ei = ei + 1
                 elif x1 > x0 and y1 > y0:

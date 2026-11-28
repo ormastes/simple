@@ -882,6 +882,8 @@ pub use net::{
     rt_event_loop_deregister,
     rt_event_loop_poll,
     rt_event_loop_poll_get_fd,
+    rt_event_loop_poll_get_ready,
+    rt_event_loop_poll_get_token,
     rt_event_loop_register,
     // HTTP functions
     native_http_send,

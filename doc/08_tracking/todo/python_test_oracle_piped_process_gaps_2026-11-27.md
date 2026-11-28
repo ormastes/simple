@@ -26,3 +26,9 @@ Blocked rows: `test/02_integration/app/{lsp,mcp}_native_stdio_protocol_test.py`,
 
 Not blocked by this, only by having a runnable binary: porting needs a built pure-Simple full CLI or
 the target server binary on the host to prove parity; the seed cannot run them.
+
+## Follow-ups from gaps 1+2 (PR #12272, 2026-11-28)
+
+- [ ] **Windows `wait_readable` stderr on split children.** `simple_piped_owner_wait_readable_v1` (runtime_process.c, Windows) still returns `PIPED_WAIT_NOT_PIPED_V1` (-3) for stream 2 even when the child was spawned by `rt_process_spawn_piped_split_v1` and has `stderr_read`. Callers must not trust -3 there until it waits on `stderr_read`.
+- [ ] **No stdin close.** There is no `rt_process_close_stdin_v1`, so `process_piped_exchange_bytes_v1` only suits children that know their input length (`head -c N`) or read none. Add the extern in all three lanes (C, Rust observer, interpreter).
+- [ ] **POSIX C lane never executed.** The POSIX owner hooks and split spawn (incl. Apple `posix_spawn` stderr wiring) were `clang -fsyntax-only` checked against x86_64-linux-musl only. Run `process_piped_stderr_bytes_spec.spl` on Linux and macOS natively.
