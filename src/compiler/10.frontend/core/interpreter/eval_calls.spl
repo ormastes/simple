@@ -25,6 +25,9 @@ use compiler.core.interpreter.eval_ops.{eval_enum_variant_call, eval_struct_cons
 use compiler.core.interpreter.eval_stmts.{eval_stmt}
 use compiler.core.interpreter.eval_tables.{enum_table_lookup_in, func_flat_lookup_for_caller, func_module_namespace_lookup, func_resolve_for_caller, func_resolve_module_member_for_caller}
 use compiler.core.interpreter.eval_tables.{FUNC_LOOKUP_AMBIGUOUS, func_ambiguous_call_message, func_owners_of}
+use compiler.core.interpreter.eval_tables.{FUNC_LOOKUP_OWN_IMPORT_AMBIGUOUS, func_own_import_ambiguous_message, func_own_import_pair}
+use compiler.core.ast.{decl_get_param_defaults, decl_get_param_types}
+use compiler.core.ast_expr.{EXPR_INT_LIT, EXPR_FLOAT_LIT, EXPR_STRING_LIT, EXPR_BOOL_LIT}
 use compiler.core.interpreter.eval_tables.{func_table_lookup, struct_table_lookup, func_yield_cache_get, func_yield_cache_set}
 use compiler.core.interpreter.eval_tables.{struct_resolve_for_caller, struct_resolve_module_member_for_caller, struct_member_decl, struct_decl_name_for}
 use compiler.core.interpreter.jit.{jit_is_compiled, jit_record_call, jit_try_execute_checked}
@@ -74,6 +77,12 @@ fn eval_call(eid: i64) -> i64:
 
         # Check function table
         var decl_id = func_resolve_for_caller(eval_caller_file(), name)
+        val decl_id_pair = func_own_import_pair(eval_caller_file(), name)
+        if decl_id_pair.0 >= 0:
+            decl_id = eval_pick_own_or_import(decl_id_pair.0, decl_id_pair.1, arg_eids, arg_names)
+        if decl_id == FUNC_LOOKUP_OWN_IMPORT_AMBIGUOUS:
+            eval_set_error(func_own_import_ambiguous_message(name))
+            return -1
         if decl_id < 0:
             decl_id = func_flat_lookup_for_caller(eval_caller_file(), name)
         if decl_id == FUNC_LOOKUP_AMBIGUOUS:
@@ -93,6 +102,12 @@ fn eval_call(eid: i64) -> i64:
         val forced_ok = try_force_any_deferred_for(name, eval_caller_file())
         if forced_ok == 1:
             var decl_id2 = func_resolve_for_caller(eval_caller_file(), name)
+            val decl_id2_pair = func_own_import_pair(eval_caller_file(), name)
+            if decl_id2_pair.0 >= 0:
+                decl_id2 = eval_pick_own_or_import(decl_id2_pair.0, decl_id2_pair.1, arg_eids, arg_names)
+            if decl_id2 == FUNC_LOOKUP_OWN_IMPORT_AMBIGUOUS:
+                eval_set_error(func_own_import_ambiguous_message(name))
+                return -1
             if decl_id2 < 0:
                 decl_id2 = func_flat_lookup_for_caller(eval_caller_file(), name)
             if decl_id2 == FUNC_LOOKUP_AMBIGUOUS:
@@ -204,6 +219,75 @@ fn eval_call(eid: i64) -> i64:
 
     eval_set_error("value is not callable")
     -1
+
+# Own vs selectively imported definition of one name (func_own_import_pair):
+# arity first (defaulted parameters optional, as in the seed's
+# `overload_score`), then each literal/identifier argument's value type
+# against the declared parameter type -- exact typed match 2, untyped slot 1.
+# Other arguments are not evaluated here (no double side effects) and fit any
+# slot. Named arguments do not rank: two fitting candidates with different
+# signatures are then a tie. A unique best wins; identical signatures keep
+# the own definition; a remaining tie is FUNC_LOOKUP_OWN_IMPORT_AMBIGUOUS.
+# Bug: seed_same_name_fn_binding_2026-11-27.
+@allow(primitive_api) # reason: core-interpreter dense decl_id arena index (or FUNC_LOOKUP_* sentinel)
+fn eval_pick_own_or_import(own: i64, imported: i64, arg_eids: [i64], arg_names: [text]) -> i64:
+    var has_named = false
+    for n in arg_names:
+        if n != "":
+            has_named = true
+    val own_score = _own_import_score(own, arg_eids, has_named)
+    val imported_score = _own_import_score(imported, arg_eids, has_named)
+    if imported_score > own_score:
+        return imported
+    if own_score > imported_score or own_score < 0:
+        return own
+    if _same_param_types(decl_get_param_types(own), decl_get_param_types(imported)):
+        return own
+    FUNC_LOOKUP_OWN_IMPORT_AMBIGUOUS
+
+fn _same_param_types(a: [i64], b: [i64]) -> bool:
+    if a.len() != b.len():
+        return false
+    var i: i64 = 0
+    while i < a.len():
+        if a[i] != b[i]:
+            return false
+        i = i + 1
+    true
+
+# -1 = does not accept these arguments.
+fn _own_import_score(decl_id: i64, arg_eids: [i64], has_named: bool) -> i64:
+    val types = decl_get_param_types(decl_id)
+    val defaults = decl_get_param_defaults(decl_id)
+    var required = types.len()
+    if defaults.len() == types.len():
+        required = 0
+        for d in defaults:
+            if d < 0:
+                required = required + 1
+    if arg_eids.len() < required or arg_eids.len() > types.len():
+        return -1
+    if has_named:
+        return 0
+    var score: i64 = 0
+    var i: i64 = 0
+    while i < arg_eids.len():
+        val node = expr_get(arg_eids[i])
+        val tag = node.tag
+        val literal = tag == EXPR_INT_LIT or tag == EXPR_FLOAT_LIT or tag == EXPR_STRING_LIT or tag == EXPR_BOOL_LIT
+        var v: i64 = -1
+        if types[i] != 0 and literal:
+            v = eval_expr(arg_eids[i])
+        elif types[i] != 0 and tag == EXPR_IDENT:
+            v = env_lookup(node.s_val)
+        if v < 0:
+            score = score + 1
+        elif type_check_value(v, types[i]):
+            score = score + 2
+        else:
+            return -1
+        i = i + 1
+    score
 
 fn eval_function_call(decl_id: i64, arg_eids: [i64], arg_names: [text]) -> i64:
     val d_node = decl_get(decl_id)

@@ -1526,7 +1526,36 @@ impl Lowerer {
         found
     }
 
-    fn flatten_owner_defines(&self, owner: Option<&str>, name: &str) -> bool {
+    /// Call-site candidates for a bare `name(args)` whose module BOTH declares
+    /// a colliding `name` and selectively imports another module's `name`
+    /// (`use alpha.{same_name}` beside a local `fn same_name(n: i64)`).
+    ///
+    /// `flatten_owned_callable` rule 1 is name-only and returns the module's
+    /// own definition, so `same_name("x", "y")` used to run the `(i64)` body
+    /// with a text handle read as an integer. Both definitions are visible to
+    /// the caller; the arguments choose (`select_flatten_call_candidate`).
+    /// `None` when the module sees only one definition -- the existing rules
+    /// stand. Bug: seed_same_name_fn_binding_2026-11-27 (form 1).
+    pub(super) fn flatten_call_site_candidates(&self, name: &str) -> Option<[String; 2]> {
+        if !self.flatten_is_collision(name) {
+            return None;
+        }
+        let current = self.current_function_owner.as_deref();
+        if !self.flatten_owner_defines(current, name) {
+            return None;
+        }
+        let importer = current.unwrap_or("<entry>");
+        let (source_owner, source_name) = self
+            .flatten_owner_import_bindings
+            .get(importer)
+            .and_then(|bindings| bindings.get(name))
+            .and_then(|(owner, source)| self.flatten_reexport_definer(importer, owner, source))?;
+        let own = self.flatten_emitted_symbol(current, name);
+        let imported = self.flatten_emitted_symbol(Some(&source_owner), &source_name);
+        (own != imported).then_some([own, imported])
+    }
+
+    pub(super) fn flatten_owner_defines(&self, owner: Option<&str>, name: &str) -> bool {
         self.flatten_fn_owners
             .get(name)
             .is_some_and(|owners| owners.iter().any(|o| o.as_deref() == owner))

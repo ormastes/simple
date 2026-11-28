@@ -1,0 +1,47 @@
+# Same-named function binding: a module that declares `same_name(i64)` AND
+# selectively imports `same_name(text, text)` must let the call's arguments
+# choose; an equally fitting own/imported pair must fail, never run silently.
+# Bug: doc/08_tracking/bug/seed_same_name_fn_binding_2026-11-27.md (form 1).
+#
+# Subprocess probes, one per engine: plain `run` is the JIT, and the two
+# engines resolved this differently before the fix (interpreter right, JIT
+# ran the local body with a text handle read as an integer).
+use std.spec.step
+use std.spec.*
+use std.io_runtime.{process_run, env_get}
+
+val FIXTURES: text = "test/01_unit/compiler/pipeline/fixtures/"
+
+fn run_probe(mode: text, probe: text) -> text:
+    var bin = env_get("SIMPLE_BIN")
+    if bin == "":
+        bin = "bin/simple"
+    val cmd = "SIMPLE_RUST_SEED_WARNING=0 SIMPLE_EXECUTION_MODE=" + mode + " " + bin + " run " +
+        FIXTURES + probe + " 2>&1"
+    process_run("sh", ["-c", cmd]).0
+
+describe "same-named function: own definition vs selective import":
+    # @manual scenario evidence
+    it "binds by arguments on the interpreter":
+        # @req REQ-SSPEC-UNIT
+        step("Run the binding probe under SIMPLE_EXECUTION_MODE=interpreter")
+        val out = run_probe("interpreter", "probe_same_name_binding.spl")
+        expect(out).to_contain("imported=alpha:xy")
+        expect(out).to_contain("own=beta:7")
+        expect(out).to_contain("entry=beta:5")
+
+    it "binds by arguments under the JIT":
+        # @req REQ-SSPEC-UNIT
+        step("Run the binding probe under SIMPLE_EXECUTION_MODE=jit")
+        val out = run_probe("jit", "probe_same_name_binding.spl")
+        expect(out).to_contain("imported=alpha:xy")
+        expect(out).to_contain("own=beta:7")
+
+    it "rejects an equally fitting own/imported pair on every engine":
+        # @req REQ-SSPEC-UNIT
+        step("Run the ambiguity probe on both engines")
+        for mode in ["interpreter", "jit"]:
+            val out = run_probe(mode, "probe_same_name_ambiguous.spl")
+            expect(out).to_contain("ambiguous call to")
+            expect(out).to_contain("compiler_cross_module_private_symbol_collision")
+            expect(out.contains("result=")).to_equal(false)

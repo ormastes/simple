@@ -541,16 +541,18 @@ fn import_bound_candidate(
     name: &str,
     functions: &HashMap<String, Arc<FunctionDef>>,
     values: &[Value],
-) -> Option<Arc<FunctionDef>> {
+    named: bool,
+) -> Result<Option<Arc<FunctionDef>>, CompileError> {
     // The loader records root imports under the same <entry> owner used
     // for root function declarations. Top-level execution has no active
     // function owner, but its explicit import bindings still apply.
     let current = CURRENT_EXEC_MODULE
         .with(|cell| cell.borrow().clone())
         .unwrap_or_else(|| Arc::from("<entry>"));
-    if candidate_declared_by(&current, name, functions).is_some() {
-        return None;
-    }
+    // The caller's own declaration is ONE of the visible definitions, not a
+    // veto: when the module also imports `name`, the arguments choose
+    // (`own_vs_import_bound`). Bug: seed_same_name_fn_binding_2026-11-27.
+    let own = candidate_declared_by(&current, name, functions);
     if debug_dupdispatch() {
         let b = crate::interpreter::owner_bindings(&current);
         eprintln!(
@@ -559,8 +561,11 @@ fn import_bound_candidate(
             b.as_ref().and_then(|t| t.get(name).map(std::borrow::Cow::into_owned))
         );
     }
-    let (mut source_owner, mut source_name) =
-        crate::interpreter::owner_bindings(&current).and_then(|bindings| bindings.get(name).map(std::borrow::Cow::into_owned))?;
+    let Some((mut source_owner, mut source_name)) =
+        crate::interpreter::owner_bindings(&current).and_then(|bindings| bindings.get(name).map(std::borrow::Cow::into_owned))
+    else {
+        return Ok(None);
+    };
     // Walk re-export facades to the module that actually DECLARES the
     // function, mirroring the bounded chain walk HIR lowering performs in
     // `collect_flattened_import_aliases`. At each hop, a candidate declared
@@ -599,15 +604,68 @@ fn import_bound_candidate(
             _ => break,
         }
     }
-    let target = target?;
+    let Some(target) = target else {
+        return Ok(None);
+    };
+    if let Some(own) = own {
+        return own_vs_import_bound(name, own, target, values, named);
+    }
     if debug_dupdispatch() {
         eprintln!(
             "[dupdispatch] import-bound name={name} current={current} source_owner={source_owner} source_name={source_name} target_owner={:?}",
             function_module_owner(&target)
         );
     }
-    overload_score(&target, values)?;
-    Some(target)
+    Ok(overload_score(&target, values).map(|_| target))
+}
+
+/// The caller declares `name` AND imports another module's `name`: both are
+/// visible, so the arguments choose. `Ok(None)` hands the call to the
+/// own-module-first selection (the own definition fits at least as well);
+/// `Ok(Some(import))` when only -- or best -- the import fits. Two distinct
+/// signatures that fit equally well are a compile error, the twin of the HIR
+/// lowerer's `select_flatten_call_candidate`.
+fn own_vs_import_bound(
+    name: &str,
+    own: Arc<FunctionDef>,
+    import: Arc<FunctionDef>,
+    values: &[Value],
+    named: bool,
+) -> Result<Option<Arc<FunctionDef>>, CompileError> {
+    if Arc::ptr_eq(&own, &import) {
+        return Ok(None);
+    }
+    // Named arguments do not rank (positional `values` misorder them): fit
+    // is arity-only and any two fitting candidates tie, mirroring the HIR
+    // lowerer.
+    let score = |f: &FunctionDef| {
+        if named {
+            let required = f.params.iter().filter(|p| p.default.is_none()).count();
+            (values.len() >= required && values.len() <= f.params.len()).then_some(0)
+        } else {
+            overload_score(f, values)
+        }
+    };
+    let Some(import_score) = score(&import) else {
+        return Ok(None);
+    };
+    let own_score = score(&own);
+    match own_score {
+        None => Ok(Some(import)),
+        Some(own_score) if own_score > import_score => Ok(None),
+        Some(own_score) if own_score < import_score => Ok(Some(import)),
+        Some(_) => {
+            let sig = |f: &FunctionDef| {
+                f.params.iter().map(|p| p.ty.as_ref().map_or("_".to_string(), |t| format!("{t:?}"))).collect::<Vec<_>>()
+            };
+            if sig(&own) == sig(&import) {
+                return Ok(None);
+            }
+            Err(CompileError::semantic(format!(
+                "ambiguous call to `{name}`: this module defines `{name}` and also imports one, and the arguments fit both definitions equally. Rename one definition or import the other under an alias. [compiler_cross_module_private_symbol_collision]"
+            )))
+        }
+    }
 }
 
 /// The extern an aliased import binds `name` to, if any: walk the calling
@@ -1126,7 +1184,7 @@ fn evaluate_identifier_user_call(
             // An explicit `use m.{name}` in the calling module binds the
             // call to m's definition; only when no such binding resolves
             // does the historical score/tie selection below apply.
-            if let Some(func) = import_bound_candidate(name, functions, &evaluated_args) {
+            if let Some(func) = import_bound_candidate(name, functions, &evaluated_args, args.iter().any(|a| a.name.is_some()))? {
                 // A glob import binds the name; it does not make it visible.
                 // Judge the definition the binding resolved to (its own
                 // name), not the call-site spelling.
@@ -1542,8 +1600,20 @@ pub(crate) fn evaluate_call(
         // short-circuits this by handling the DSL names directly and only returns
         // `Some` for names it actually recognizes, so non-DSL calls still fall
         // through to the user-function lookup unchanged.
-        if let Some(result) = bdd::eval_bdd_builtin(name, args, env, functions, classes, enums, impl_methods)? {
-            return Ok(result);
+        // A spec-DSL name the CALLING module declares itself (`fn context(v)`
+        // in a spec file) is that module's function, not the framework's: the
+        // DSL arm used to intercept it and evaluate to nil. `std.spec` defines
+        // the DSL names as real functions too, so "is user-defined" cannot be
+        // the test -- only the lexical caller's own declaration shadows.
+        // Bug: seed_same_name_fn_binding_2026-11-27 (form 2).
+        let caller_shadows_dsl = bdd::is_bdd_dsl_name(name) && {
+            let caller = lexical_caller_owner();
+            !bdd::is_spec_framework_owner(&caller) && candidate_declared_by(&caller, name, functions).is_some()
+        };
+        if !caller_shadows_dsl {
+            if let Some(result) = bdd::eval_bdd_builtin(name, args, env, functions, classes, enums, impl_methods)? {
+                return Ok(result);
+            }
         }
         phase_end(&pc::EVALCALL_NS_P3_BDD, t);
         return evaluate_identifier_user_call(name, args, env, functions, classes, enums, impl_methods);
