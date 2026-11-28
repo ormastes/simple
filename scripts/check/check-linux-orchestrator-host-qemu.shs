@@ -38,8 +38,12 @@ set -eu
 # requires the installed Host unit's MainPID to be the spec process itself.
 # --run-specs runs `simple test` over SSH as root, so that case needs the
 # supervised AOT route (doc/07_guide/infra/testing/native_test_binary_workflow.md):
-# put `Environment=SIMPLE_HOST_EXEC=<staged spec exe> --simple-native-evidence=<dir>`
-# in a drop-in for simple-orchestrator-host.service and start the unit.
+# a drop-in for simple-orchestrator-host.service with an empty `ExecStart=` and then
+# `ExecStart=<staged spec exe> --simple-native-evidence=<dir>`, and start the unit.
+#
+# The unit carries NO `SIMPLE_*` environment (owner decision 2026-11-28; the broker
+# rule refuses every such key). What a spec needs is in the root-owned SDN file
+# $GUEST_CFG (root:root 0644), read by std.nogc_sync_mut.io.linux_host_config_v1.
 
 ROOT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")/../.." && pwd)"
 cd "$ROOT_DIR"
@@ -68,8 +72,8 @@ SEED_ISO="${VM_DIR}/cloudinit-seed.iso"
 VARS="${VM_DIR}/efi-vars.fd"
 PIDFILE="${VM_DIR}/qemu.pid"
 SERIAL="${VM_DIR}/serial.log"
-MARKER=/var/lib/simple-orch-guest/provisioned.v2
-GUEST_ENV=/etc/simple/orchestrator-host.env
+MARKER=/var/lib/simple-orch-guest/provisioned.v3
+GUEST_CFG=/etc/simple-host/host.sdn
 
 say() { printf 'linux-orch-guest: %s\n' "$*"; }
 die() {
@@ -196,7 +200,7 @@ do_smoke() {
 guest_provision_script() {
     cat <<'GUEST'
 set -eu
-MARKER=/var/lib/simple-orch-guest/provisioned.v2
+MARKER=/var/lib/simple-orch-guest/provisioned.v3
 if [ -f "$MARKER" ]; then echo "already provisioned: $(cat "$MARKER")"; exit 0; fi
 export DEBIAN_FRONTEND=noninteractive
 apt-get update -q
@@ -253,34 +257,43 @@ MID=$(cat /etc/machine-id)
 # NOT written here: --run-specs generates them on every fresh run overlay with the canonical encoders
 # (enrolled_host_signed_fixture_gen.spl, todo 481), from this guest's machine-id, service UID/GID and podman sha256.
 
-# Protected acceptance environment (root:svc 0640, resolvable by the service UID).
-cat > /etc/simple/orchestrator-host.env <<EOF
-SIMPLE_LINUX_PROVISION_ACCEPTANCE_INPUT_DIR=${F}/input
-SIMPLE_LINUX_PROVISION_ACCEPTANCE_DISPATCH_ROOT=${F}/machine-parent/dispatch
-SIMPLE_LINUX_PROVISION_ACCEPTANCE_CONTROLLER=fixture-controller
-SIMPLE_LINUX_PROVISION_ACCEPTANCE_KEY_STORE=${F}/key-store
-SIMPLE_LINUX_PROVISION_ACCEPTANCE_OUTPUT_STORE=${F}/output-store
-SIMPLE_LINUX_PROVISION_ACCEPTANCE_APPROVER=fixture-approver
-SIMPLE_LINUX_ATTACH_V6_READY=${F}/attach-v6/ready.sdn
-SIMPLE_LINUX_ATTACH_V6_ATTACH=${F}/attach-v6/attach.sdn
-SIMPLE_LINUX_ATTACH_V6_INVOKE=${F}/attach-v6/invoke.sdn
-SIMPLE_LINUX_ATTACH_V6_DETACH=${F}/attach-v6/detach.sdn
-SIMPLE_LINUX_SERVICE_INSTALL_FIXTURE_PARENT=${F}/installer-parent
-SIMPLE_CARET_SSH_ACCEPTANCE_CONFIG=${F}/caret-ssh/config.sdn
-SIMPLE_CARET_SSH_ACCEPTANCE_CONTEXT=${F}/caret-ssh/context.sdn
-SIMPLE_CARET_SSH_ACCEPTANCE_SERVER=${F}/caret-ssh/server.sdn
-SIMPLE_CARET_SSH_ACCEPTANCE_PROFILE=${F}/caret-ssh/profile.sdn
-SIMPLE_CARET_SSH_ACCEPTANCE_REQUEST=${F}/caret-ssh/request.sdn
+# Host configuration (owner decision 2026-11-28): one flat SDN object, root:root 0644 in a root:root
+# 0755 directory, read by linux_host_config_v1. It replaces the unit's former environment file; the
+# unit below carries no `SIMPLE_*` environment. host.candidates.sdn names every fixture; --run-specs
+# rewrites host.sdn from it with the entries whose fixture content exists.
+install -d -o root -g root -m 0755 /etc/simple-host
+CFG_NEW=$(mktemp)
+cat > "$CFG_NEW" <<EOF
+provisionInputDir: "${F}/input"
+provisionDispatchRoot: "${F}/machine-parent/dispatch"
+provisionController: "fixture-controller"
+provisionKeyStore: "${F}/key-store"
+provisionOutputStore: "${F}/output-store"
+provisionApprover: "fixture-approver"
+attachReady: "${F}/attach-v6/ready.sdn"
+attachAttach: "${F}/attach-v6/attach.sdn"
+attachInvoke: "${F}/attach-v6/invoke.sdn"
+attachDetach: "${F}/attach-v6/detach.sdn"
+serviceInstallFixtureParent: "${F}/installer-parent"
+caretSshConfig: "${F}/caret-ssh/config.sdn"
+caretSshContext: "${F}/caret-ssh/context.sdn"
+caretSshServer: "${F}/caret-ssh/server.sdn"
+caretSshProfile: "${F}/caret-ssh/profile.sdn"
+caretSshRequest: "${F}/caret-ssh/request.sdn"
 EOF
-chown root:"$SVC" /etc/simple/orchestrator-host.env; chmod 0640 /etc/simple/orchestrator-host.env
+install -o root -g root -m 0644 "$CFG_NEW" /etc/simple-host/host.candidates.sdn
+install -o root -g root -m 0644 "$CFG_NEW" /etc/simple-host/host.sdn
+rm -f "$CFG_NEW"
+# The environment file of an image provisioned before v3.
+rm -f /etc/simple/orchestrator-host.e*
 
-# Host unit: static account, numeric group, delegated cgroup. Installed but
-# not enabled or started; ExecStart is a drop-in so a staged spec executable
-# can become MainPID.
+# Host unit: static account, numeric group, delegated cgroup, no environment directive. Installed
+# but not enabled or started; a drop-in replaces ExecStart with the staged spec executable so that
+# executable is MainPID.
 cat > /opt/simple/host/host-entry <<'EOF'
 #!/bin/sh
-[ -n "${SIMPLE_HOST_EXEC:-}" ] || { echo "SIMPLE_HOST_EXEC unset" >&2; exit 64; }
-exec $SIMPLE_HOST_EXEC
+echo "no ExecStart drop-in: name the staged executable there (configuration: /etc/simple-host/host.sdn)" >&2
+exit 64
 EOF
 chmod 0755 /opt/simple/host/host-entry
 UNIT=simple-orchestrator-host.service
@@ -294,8 +307,6 @@ Type=exec
 User=${SVC}
 Group=${SVC_GID}
 Delegate=yes
-EnvironmentFile=/etc/simple/orchestrator-host.env
-Environment=SIMPLE_HOST_EXEC=
 ExecStart=/opt/simple/host/host-entry
 NoNewPrivileges=yes
 EOF
@@ -314,17 +325,46 @@ guest_prove_script() {
     cat <<'GUEST'
 set -eu
 echo "== id: $(id -un) uid=$(id -u)"
-echo "== marker: $(cat /var/lib/simple-orch-guest/provisioned.v2)"
+echo "== marker: $(cat /var/lib/simple-orch-guest/provisioned.v3)"
 echo "== /etc/simple/container"; ls -l /etc/simple/container
 stat -c '%n %U:%G %a' /etc/simple/container /var/lib/simple/container
-echo "== unit"; systemctl cat simple-orchestrator-host.service | grep -E '^(User|Group|Delegate|EnvironmentFile)='
+echo "== unit"; systemctl cat simple-orchestrator-host.service | grep -E '^(User|Group|Delegate|ExecStart)='
 echo "unit Delegate property: $(systemctl show -p Delegate simple-orchestrator-host.service)"
+# Custody (owner decision 2026-11-28): no SIMPLE_* environment and no environment file on the unit,
+# drop-ins included; the configuration is the root-owned SDN file.
+UENV=$(systemctl show -p Environment -p PassEnvironment simple-orchestrator-host.service)
+UFILES=$(systemctl show -p EnvironmentFiles --value simple-orchestrator-host.service)
+echo "unit environment: $(echo $UENV) EnvironmentFiles=[$UFILES]"
+case "$UENV" in *SIMPLE_*) echo "FAIL: unit carries SIMPLE_ environment"; exit 1;; esac
+[ -z "$UFILES" ] || { echo "FAIL: unit carries SIMPLE_ environment through an environment file"; exit 1; }
+CFG_DIR=$(stat -c '%U:%G %a %F' /etc/simple-host); CFG_FILE=$(stat -c '%U:%G %a %F' /etc/simple-host/host.sdn)
+echo "== host config: /etc/simple-host [$CFG_DIR] host.sdn [$CFG_FILE]"; cat /etc/simple-host/host.sdn
+[ "$CFG_DIR" = "root:root 755 directory" ] && [ "$CFG_FILE" = "root:root 644 regular file" ] \
+    || { echo "FAIL: host config is not root:root 0644 in a root:root 0755 directory"; exit 1; }
 echo "masked: podman.socket=$(systemctl is-enabled podman.socket 2>&1) user@950=$(systemctl is-enabled user@950.service 2>&1)"
 echo "== stores"; stat -c '%n %U:%G %a' /srv/simple-fixture/key-store /srv/simple-fixture/output-store/journal
 echo "== podman"; podman --version; podman run --rm docker.io/library/busybox:1.36 true && echo "podman run --rm busybox:1.36 true: rc=0"
-echo "== env file $(stat -c '%U:%G %a' /etc/simple/orchestrator-host.env)"; cat /etc/simple/orchestrator-host.env
 echo "== podman-live env"; cat /etc/simple/podman-live-spec.env
 echo "template: $(ls -l /etc/simple/podman-live-launch-template.sdn 2>&1)"
+GUEST
+}
+
+# Rewrites the root-owned host.sdn from host.candidates.sdn (one `key: "value"` per line), keeping a
+# path entry only when its fixture content exists.
+guest_config_script() {
+    cat <<'GUEST'
+set -eu
+D=/etc/simple-host
+NEW=$(mktemp)
+while IFS= read -r line; do
+    k=${line%%:*}; v=${line#*\"}; v=${v%\"}
+    case "$v" in /*)
+        [ -f "$v" ] || { [ -d "$v" ] && [ -n "$(ls -A "$v")" ]; } || { echo "# config: omit $k (no fixture content)"; continue; };;
+    esac
+    printf '%s: "%s"\n' "$k" "$v" >> "$NEW"
+done < "$D/host.candidates.sdn"
+install -o root -g root -m 0644 "$NEW" "$D/host.sdn"
+rm -f "$NEW"
 GUEST
 }
 
@@ -361,8 +401,9 @@ do_provision() {
 do_prove() {
     started=0
     vm_running || { do_start "$PROVISIONED"; started=1; }
-    guest_prove_script | ssh_vm 'sudo sh -s'
+    prove_rc=0; guest_prove_script | ssh_vm 'sudo sh -s' || prove_rc=$?
     [ "$started" -eq 0 ] || do_stop
+    [ "$prove_rc" -eq 0 ] || die "guest proof failed (rc=$prove_rc)"
 }
 
 SPECS="test/03_system/app/orchestrator/feature/enrolled_host_signed_fixture_spec.spl
@@ -487,14 +528,12 @@ do_run_specs() {
         printf '%s\n' "$tpl_out" | grep -q '^TEMPLATE OK ' || printf '# template-gen: no TEMPLATE OK line; podman live spec will report BLOCKED\n' >> "$RUN_OUT"
     fi
     printf '# template: %s\n' "$(ssh_vm 'ls -l /etc/simple/podman-live-launch-template.sdn 2>&1')" >> "$RUN_OUT"
-    # Export a path variable only when its fixture content exists (file present
-    # or directory non-empty), so a spec whose signed fixture is not yet
-    # authored reports BLOCKED (pending) instead of a misleading FAIL.
-    ssh_vm "sudo sh -c 'while IFS== read -r k v; do case \"\$v\" in /*) \
-        [ -f \"\$v\" ] || { [ -d \"\$v\" ] && [ -n \"\$(ls -A \"\$v\")\" ]; } || { echo \"# unset \$k (no fixture content)\"; continue; };; esac; \
-        echo \"\$k=\$v\"; done < $GUEST_ENV > $GUEST_ENV.run'" \
-        || run_error "guest env assembly failed"
-    ssh_vm "sudo cat $GUEST_ENV.run" | sed 's/^/# env: /' >> "$RUN_OUT"
+    # Keep a path entry only when its fixture content exists (file present or
+    # directory non-empty), so a spec whose signed fixture is not yet authored
+    # reports BLOCKED (pending) instead of a misleading FAIL. The specs read
+    # $GUEST_CFG; nothing is exported into their environment.
+    guest_config_script | ssh_vm 'sudo sh -s' >> "$RUN_OUT" || run_error "guest host config assembly failed"
+    ssh_vm "sudo cat $GUEST_CFG" | sed 's/^/# config: /' >> "$RUN_OUT"
     logs="${VM_DIR}/last-run-logs"; rm -rf "$logs"; mkdir -p "$logs"
     nfail=$gen_fail; nerr=0; nblock=0; npass=0
     for spec in $SPECS; do
@@ -502,7 +541,7 @@ do_run_specs() {
         if ! git -C "$ROOT_DIR" cat-file -e "${src_sha}:$spec" 2>/dev/null; then
             printf 'ERROR %s NOT IN SOURCE %s\n' "$spec" "$src_sha" | tee -a "$RUN_OUT"; nerr=$((nerr+1)); continue
         fi
-        ssh_vm "sudo sh -c 'set -a; . $GUEST_ENV.run; set +a; cd /opt/simple/src && \
+        ssh_vm "sudo sh -c 'cd /opt/simple/src && \
             timeout ${ORCH_SPEC_TIMEOUT:-3600} bin/simple test $spec --verbose > $glog 2>&1; echo rc=\$? >> $glog'" || true
         ssh_vm "sudo cat $glog" > "${logs}/${name}.log" 2>/dev/null || true
         status=$(classify_spec_log < "${logs}/${name}.log")

@@ -1,0 +1,45 @@
+# Owner decision 2026-11-28: the Host unit carries no `SIMPLE_*` environment entry; its configuration is
+# the root-owned SDN file `/etc/simple-host/host.sdn`. The manager check refuses a unit whose `Environment`
+# property names one, and the guest provisioning writes none.
+# Record: doc/08_tracking/bug/container_fresh_route_helper_home_2026-11-27.md
+use std.spec.{describe, it, expect, step}
+use std.io.file_read_text
+use std.nogc_sync_mut.io.linux_host_config_v1.linux_host_unit_environment_custody_v1
+
+describe "Linux Host unit environment custody V1":
+    it "accepts a unit with no environment entry or only non-Simple ones":
+        step("No entry at all, then two entries the broker rule itself allows")
+        expect(linux_host_unit_environment_custody_v1([]).is_ok()).to_equal(true)
+        expect(linux_host_unit_environment_custody_v1(["LANG=C", "PATH=/usr/bin:/bin"]).is_ok()).to_equal(true)
+
+    it "rejects a unit that carries a SIMPLE_ environment entry and names the key":
+        step("The former executable hand-over is refused by key")
+        val exec = linux_host_unit_environment_custody_v1(["SIMPLE_HOST_EXEC=/opt/simple/host/spec"])
+        expect(exec.is_err()).to_equal(true)
+        expect(exec.unwrap_err()).to_equal("fresh-epoch-host-unit-environment-unsupported:SIMPLE_HOST_EXEC")
+        step("An empty assignment and a later entry are refused too")
+        expect(linux_host_unit_environment_custody_v1(["SIMPLE_HOST_EXEC="]).unwrap_err()).to_equal(
+            "fresh-epoch-host-unit-environment-unsupported:SIMPLE_HOST_EXEC")
+        expect(linux_host_unit_environment_custody_v1(["LANG=C", "SIMPLE_LINUX_ATTACH_V6_READY=/x"]).unwrap_err()).to_equal(
+            "fresh-epoch-host-unit-environment-unsupported:SIMPLE_LINUX_ATTACH_V6_READY")
+        expect(linux_host_unit_environment_custody_v1(["SIMPLE_BARE"]).unwrap_err()).to_equal(
+            "fresh-epoch-host-unit-environment-unsupported:SIMPLE_BARE")
+
+    it "is applied to the installed Host unit by the manager check":
+        step("The manager reads the Host unit Environment property and applies the rule")
+        val manager = file_read_text("src/lib/nogc_sync_mut/io/linux_fresh_epoch_manager_v1.spl")
+        expect(manager.contains(
+            "linux_host_unit_environment_custody_v1(bus.string_array_property_v1(host, service, \"Environment\")?)?")).to_equal(true)
+
+    it "is what the guest provisioning writes: an SDN file and a unit without Simple environment":
+        step("The unit text names no environment directive and the old environment file is gone")
+        val script = file_read_text("scripts/check/check-linux-orchestrator-host-qemu.shs")
+        expect(script.contains("EnvironmentFile=")).to_equal(false)
+        expect(script.contains("Environment=SIMPLE_")).to_equal(false)
+        expect(script.contains("orchestrator-host.env")).to_equal(false)
+        step("The configuration is installed root-owned 0644 at the fixed path")
+        expect(script.contains("GUEST_CFG=/etc/simple-host/host.sdn")).to_equal(true)
+        expect(script.contains("install -o root -g root -m 0644")).to_equal(true)
+        step("The prove lane refuses a unit that still names a Simple environment entry, and dies on it")
+        expect(script.contains("unit carries SIMPLE_ environment")).to_equal(true)
+        expect(script.contains("[ \"$prove_rc\" -eq 0 ] || die \"guest proof failed (rc=$prove_rc)\"")).to_equal(true)
