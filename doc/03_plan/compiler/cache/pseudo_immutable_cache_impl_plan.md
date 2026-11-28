@@ -51,3 +51,39 @@ Wave C is executed in this order, small PRs each. Wave A/B correctness fixes may
    - **Alongside step 2 — multi-algorithm hash IDs** (after step 1): one record with ≥3 algorithm-tagged digests side by side, O(1) lookup by any admitted algorithm, unknown algorithm = miss; extends the #4421 registry/DigestV1. Full hashes shrink to compact 16/32-bit reference IDs guarded by a bloom filter (collision ⇒ full-digest fallback or a new ID; never an identity proof), scoped global / per-file / local, grouped by base file (was S2).
 3. **Step 3 — pseudo-immutable storage:** empty fields, dense arrays, sparse-hash attribute slots (was C4).
 C5 (target-neutral HIR) and S3 (fused source→OBJ default) follow step 3.
+
+## 5. Generic instances on this engine (added 2026-11-28)
+
+Design addendum: `doc/05_design/compiler/cache/generic_instance_tldr_trace.md`.
+Stage rows and acceptance: `doc/03_plan/language/type_system/no_any_inference_plan.md`
+S3-F1..F10 (S3-D is reframed there as a specialization query, not a pass).
+Owner direction: generic specialization is an async task in this engine; it
+adds no scheduler, cache protocol or registry (R01). Guide = Fable, Impl = lower
+model unless marked.
+
+| Generic stage | Wave slot here | Depends on (this plan) | Why |
+|---|---|---|---|
+| S3-F1 template `open_needs` | alongside step 3 | S3-1 write-once slot (may precede it by writing at publication) | the field is absent after parse and set once by typed HIR |
+| S3-F2 `needed-instance\|` section | alongside step 3 | S3-1; A-2 digest gate | a second set-once slot on the module TLDR record; the section crosses the trust boundary |
+| S3-F3 demand closure | end of step 1 | S1-3 `read_tldr_async`, S1-5 wake-on-publish | requests are lazy `(module_id, decl_id)` pointer fills; waiters must be woken on terminal failure |
+| S3-F4 specialization task (Impl = Fable) | step 2 | S1-1, S1-2 async stage nodes; S2-1 `CompileInvoker` | the task is `compile(task)` for a different task kind, written once |
+| S3-F5 keys and artifacts | alongside step 2, then step 3 | S2-6 key record; S3-4 `.sphb`, S3-5 ledger, S3-6 mmap writer; A-1 then P-1 | per-instance key record; packed blobs; target stays out of view and HIR keys |
+| S3-F6 reverse-reference rows | after S3-F3 | none | producer for an existing family |
+| S3-F7 invalidation | after Wave B and S3-F5 | B-1..B-3 no-change build; S3-7 invalidation inputs | zero instance tasks on an identical build |
+| S3-F8 trace queries | after S3-F6 | none here | projection owned by the extreme-typing lane |
+| S3-F9 remote action | after step 2 | S2-2 `ProcessInvoker`, S2-4 | same action key locally and remotely |
+| S3-F10 coverage gate | from the start | A-3 pattern (script + manifest row + dispatch case) | a script alone enforces nothing |
+
+Status check against `src` at `6b0b52f6f43` (`git grep`, not document status):
+`parse_async`, `lower_hir_async`, `lower_mir_async`, `emit_object_async`,
+`read_tldr_async`, `trait CompileInvoker`, `FiberInvoker`, `KeyRecordV2`,
+`.sphb`, `.spmb` and a usage ledger are **absent**. Present:
+`SourceReader.read_src_async`, `TldrTableV1.request_async`,
+`tldr_table_fill_async_v1`, `CacheSingleFlightV1` (daemon and AOP match cache
+only), `mir_cfg_select_arm`, `hir_variant_object_key_v1`, `.spab`. So S1-1,
+S1-2, S1-3 (TLDR half), S2-1, S2-6, S3-1..S3-6 are not landed, and S3-F3 onward
+cannot start before them. The target-neutral flag in code is
+`SIMPLE_HIR_CFG_SELECT`, not `SIMPLE_HIR_TARGET_NEUTRAL` as the design says.
+`tldr_async_owner_integration_2026-10-30.md` excludes mono semantics from its
+slice and `tldr_caller_async_prerequisites_2026-10-30.md` lists five blocking
+prerequisites for a real async caller; S3-F3 is such a caller.

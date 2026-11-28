@@ -359,7 +359,8 @@ document status.
 | Daemon usage ledger | **no** | S3-5 |
 | Concrete-view acquisition (`acquire_concrete_tldr`) | **no** (doc only) | F2 below |
 | `TraceViewProjection` | **no** (doc only) | extreme-typing lane |
-| `40.mono` substitution / naming / verifier | **no** (deleted) | plan S3-D |
+| `generic_subst_model` (the one substitution implementation) | **no**: it was `40.mono/model/generic_subst_model.spl`, deleted with the stage; only its Lean model and the `mt_key_type` encoding remain | S3-F4 restores that one file, not the stage |
+| Instance naming, per-task output invariant | **no** | S3-F4 |
 
 Conflicts to resolve before implementation:
 
