@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 34 | 34 | 0 | 0 |
+| 40 | 40 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -46,6 +46,9 @@ Design: doc/05_design/compiler/cache/aspect_tldr_async_trace.md (section 3)
 
 ## Decision inventory
 
+Line numbers refer to `module_tldr_sections_v1.spl` at the commit this spec
+was last measured against.
+
 | Line | Decision | Conditions | Covering its |
 |------|----------|------------|--------------|
 | 27 | `pub ` prefix strip | c1 | pub and bare declarations |
@@ -58,27 +61,38 @@ Design: doc/05_design/compiler/cache/aspect_tldr_async_trace.md (section 3)
 | 50 | impl / extend | c1, c2 | impl it |
 | 52 | generic fn | c1 | generic detection its |
 | 59 | fn / me / static fn member | c1..c3 | impl header members it |
-| 62-63 | block end: bound, blank, space, tab | c1..c4 | block extent its |
-| 72 | skip `@attribute` lines | c1 index>=0, c2 index<len, c3 `@` | attribute its |
-| 74 | start out of range | c1, c2 | out-of-range its |
-| 77 | head not a declaration | c1..c4 | block_at head its |
-| 81 | trim trailing blanks | c1 last>start, c2 blank | trailing blank its |
-| 85 | member loop | c1 | single and multi-line blocks |
-| 86 | `kind != "impl" or member header` | c1, c2 | impl vs non-impl its |
-| 96, 98 | scan loop, no-section line | c1 | sections_of_source its |
-| 107 | entries loop | c1 | render its |
-| 109 | `bar <= 0` | c1 | no bar, leading bar, normal |
-| 117-124 | kind validity, 23 kinds | c1..c23 | one it per kind group, unknown kind |
-| 131 | more records | c1 | none, one, many |
-| 134 | missing newline | c1 | header without newline |
-| 138 | no kind/count separator | c1 | empty head, leading space, no space |
-| 142 | `not valid or count < 0` | c1, c2 | bad kind, bad count, good |
-| 145 | count overruns text | c1 | overrun vs exact fit |
-| 147 | terminator is not newline | c1 | wrong terminator |
+| 71 | paren scan loop | c1 | empty line, non-empty line |
+| 73 | inside a string literal | c1 | "parentheses inside a string literal are not counted" |
+| 74 | previous byte was a backslash | c1 | "an escaped quote does not end the literal" |
+| 76 | byte is a backslash | c1 | same |
+| 78 | byte is the closing quote | c1 | both string its |
+| 80 | byte opens a string | c1 | both string its, plain line |
+| 82 | byte is `#` outside a string | c1 | "a comment ends the count" |
+| 84, 86 | `(` and `)` | c1 | "counts open minus close parentheses" |
+| 93-94 | block end: bound, blank, space, tab | c1..c4 | block extent its |
+| 103 | skip `@attribute` lines | c1 index>=0, c2 index<len, c3 `@` | attribute its |
+| 105 | start out of range | c1, c2 | out-of-range its |
+| 108 | head not a declaration | c1..c4 | block_at head its |
+| 112 | trim trailing blanks | c1 last>start, c2 blank | trailing blank its |
+| 116 | member loop | c1 | single and multi-line blocks |
+| 117 | `kind != "impl"` | c1 | impl vs non-impl its |
+| 119 | line is a member header | c1 | impl header members it |
+| 125 | `depth > 0 and j + 1 <= last` | c1 open list, c2 lines left | "keeps the continuation lines of a multi-line parameter list", "an unclosed parameter list stops at the end of the block" |
+| 137, 139 | scan loop, no-section line | c1 | sections_of_source its |
+| 150 | `bar <= 0` | c1 | no bar, leading bar, normal |
+| 158-165 | kind validity, 23 kinds | c1..c23 | one it per kind group, unknown kind |
+| 172 | more records | c1 | none, one, many |
+| 175 | missing newline | c1 | header without newline |
+| 179 | no kind/count separator | c1 | empty head, leading space, no space |
+| 183 | `not valid or count < 0` | c1, c2 | bad kind, bad count, good |
+| 186 | count overruns text | c1 | overrun vs exact fit |
+| 188 | terminator is not newline | c1 | wrong terminator |
 
-All conditions are exercised true and false (short-circuit aware). Gaps: none
-known; every decision above is reachable from the public API.
-Bug suspects: none observed.
+Measured: 39 of 39 decisions and 60 of 60 conditions, each both true and
+false (short-circuit aware). Exclusions: none.
+Known defect, recorded and not asserted here: the record count is written in
+characters and read in bytes
+(doc/08_tracking/bug/tldr_section_framing_byte_char_unit_mix_2026-11-28.md).
 
 ## Scenarios
 
@@ -467,6 +481,167 @@ step("Cut a trait block that has a method signature and a val line")
 step("Every line of the trait is kept because only impl blocks are reduced to headers")
 val lines = ["trait T:", "    fn a() -> i64", "    val z = 1"]
 expect(module_tldr_block_at_v1(lines, 0, "trait")).to_equal("trait T:\n    fn a() -> i64\n    val z = 1")
+```
+
+</details>
+
+#### keeps the continuation lines of a multi-line parameter list
+
+- Cut an impl block whose first member spreads its parameters over three lines, followed by a body line and a second member
+- The header keeps all three lines up to the closing parenthesis, the body line is dropped and the next member follows
+   - Text capture: after_step
+   - Evidence: text output verified by 1 expected check
+   - Expected: module_tldr_block_at_v1(lines, 0, "impl") equals `expected`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-ASPECT-TLDR-AW1
+step("Cut an impl block whose first member spreads its parameters over three lines, followed by a body line and a second member")
+step("The header keeps all three lines up to the closing parenthesis, the body line is dropped and the next member follows")
+val lines = ["impl T for P:", "    fn a(x: i64,", "            y: i64", "        ) -> i64:", "        x + y", "    me b():"]
+val expected = "impl T for P:\n    fn a(x: i64,\n            y: i64\n        ) -> i64:\n    me b():"
+expect(module_tldr_block_at_v1(lines, 0, "impl")).to_equal(expected)
+```
+
+</details>
+
+#### an unclosed parameter list stops at the end of the block
+
+- Cut an impl block whose only member opens a parameter list that never closes, first with one more line and then with none
+- Every remaining line is kept and the cut ends with the block, never reading past it
+   - Text capture: after_step
+   - Evidence: text output verified by 2 expected checks
+   - Expected: module_tldr_block_at_v1(open_list, 0, "impl") equals `impl T for P:\n    fn a(x: i64,\n        y: i64`
+   - Expected: module_tldr_block_at_v1(last_line, 0, "impl") equals `impl T for P:\n    fn a(x: i64,`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-ASPECT-TLDR-AW1
+step("Cut an impl block whose only member opens a parameter list that never closes, first with one more line and then with none")
+step("Every remaining line is kept and the cut ends with the block, never reading past it")
+val open_list = ["impl T for P:", "    fn a(x: i64,", "        y: i64", "val NEXT = 1"]
+expect(module_tldr_block_at_v1(open_list, 0, "impl")).to_equal("impl T for P:\n    fn a(x: i64,\n        y: i64")
+val last_line = ["impl T for P:", "    fn a(x: i64,"]
+expect(module_tldr_block_at_v1(last_line, 0, "impl")).to_equal("impl T for P:\n    fn a(x: i64,")
+```
+
+</details>
+
+### TLDR sections: parenthesis balance of a line
+
+#### counts open minus close parentheses
+
+- Count an empty line, a closed list, an opening line, a closing line and a nested opening line
+- A balanced or empty line is zero, an open list is positive, a closing line is negative
+   - Exec capture: after_step
+   - Evidence: execution result verified by 1 expected check
+   - Expected: deltas equals `[0, 0, 1, -1, 2]`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-ASPECT-TLDR-AW1
+step("Count an empty line, a closed list, an opening line, a closing line and a nested opening line")
+val deltas = [module_tldr_paren_delta_v1(""), module_tldr_paren_delta_v1("fn a(x: i64) -> i64:"),
+    module_tldr_paren_delta_v1("fn a(x: i64,"), module_tldr_paren_delta_v1("    ) -> i64:"),
+    module_tldr_paren_delta_v1("fn a(f: fn(i64,")]
+step("A balanced or empty line is zero, an open list is positive, a closing line is negative")
+expect(deltas).to_equal([0, 0, 1, -1, 2])
+```
+
+</details>
+
+#### parentheses inside a string literal are not counted
+
+- Count a line whose default argument is a string holding parentheses, closed and then left open after the literal
+- Only the parentheses outside the literal count, so a literal cannot fake an open list
+   - Exec capture: after_step
+   - Evidence: execution result verified by 1 expected check
+   - Expected: deltas equals `[0, 1, 0]`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-ASPECT-TLDR-AW1
+step("Count a line whose default argument is a string holding parentheses, closed and then left open after the literal")
+val deltas = [module_tldr_paren_delta_v1("fn a(s: text = \"((\") -> i64:"),
+    module_tldr_paren_delta_v1("fn a(s: text = \")\","), module_tldr_paren_delta_v1("\"(((\"")]
+step("Only the parentheses outside the literal count, so a literal cannot fake an open list")
+expect(deltas).to_equal([0, 1, 0])
+```
+
+</details>
+
+#### an escaped quote does not end the literal
+
+- Count a line whose string holds an escaped quote and an escaped backslash before parentheses
+- After an escaped quote the literal continues; after an escaped backslash the next quote closes it
+   - Exec capture: after_step
+   - Evidence: execution result verified by 1 expected check
+   - Expected: [quote, backslash] equals `[1, 2]`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-ASPECT-TLDR-AW1
+step("Count a line whose string holds an escaped quote and an escaped backslash before parentheses")
+val quote = module_tldr_paren_delta_v1("fn a(s: text = \"\\\"(\",")
+val backslash = module_tldr_paren_delta_v1("fn a(s: text = \"\\\\\", (")
+step("After an escaped quote the literal continues; after an escaped backslash the next quote closes it")
+expect([quote, backslash]).to_equal([1, 2])
+```
+
+</details>
+
+#### a comment ends the count
+
+- Count a line with a parenthesis after `#`, and a line whose `#` sits inside a string
+- Parentheses in a comment are ignored, but a `#` inside a literal is not a comment
+   - Exec capture: after_step
+   - Evidence: execution result verified by 1 expected check
+   - Expected: deltas equals `[1, 0, 2]`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-ASPECT-TLDR-AW1
+step("Count a line with a parenthesis after `#`, and a line whose `#` sits inside a string")
+val deltas = [module_tldr_paren_delta_v1("fn a(x: i64,  # see (note"),
+    module_tldr_paren_delta_v1("# (((("), module_tldr_paren_delta_v1("fn a(s: text = \"#\", (")]
+step("Parentheses in a comment are ignored, but a `#` inside a literal is not a comment")
+expect(deltas).to_equal([1, 0, 2])
 ```
 
 </details>
@@ -1044,8 +1219,8 @@ expect(parsed_one("join-point")).to_equal("join-point|ab")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 34 |
-| Active scenarios | 34 |
+| Total scenarios | 40 |
+| Active scenarios | 40 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
@@ -1064,15 +1239,15 @@ Requirements covered by the scenarios in this manual:
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `9009cf53f81bcb24f836a4e21284c0037cac480bbe3731237d67f4f1d69b9846`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `267b4df3c3066e9dde912259db49608c4342801106313b9e53747b1a5c94657a`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `9009cf53f81bcb24f836a4e21284c0037cac480bbe3731237d67f4f1d69b9846`.
+Source SHA-256: `267b4df3c3066e9dde912259db49608c4342801106313b9e53747b1a5c94657a`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `9009cf53f81bcb24f836a4e21284c0037cac480bbe3731237d67f4f1d69b9846`  
+Source SHA-256: `267b4df3c3066e9dde912259db49608c4342801106313b9e53747b1a5c94657a`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
 Raw score: **97/100**; effective score: **97/100**; blockers: **0**.
 

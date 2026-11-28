@@ -137,13 +137,17 @@ pub fn aspect_body_span_digest_v1(source: text, start: i64, end: i64, fn_name: t
         return ""
     sha256_text(aspect_section_frame_v1("aop-body-span/v1") + aspect_section_frame_v1(block))
 
-# @allow(primitive_api) the i64 index is DirectoryAspectDeclarationV2.family_inventory_index
-pub fn aspect_decl_advice_id_v1(module_identity: text, family: text, family_inventory_index: i64,
-        handler: text) -> text:
-    """AdviceId: the declaration slot inside its owning module. Stable under a
-    selector, order, signature or body edit of that declaration."""
-    var framed = aspect_section_frame_v1("aop-advice-id/v1")
-    for part in [module_identity, family, "{family_inventory_index}", handler]:
+# @allow(primitive_api) a 0-based occurrence ordinal; a count has no closer domain type in this contract layer
+pub fn aspect_decl_advice_id_v1(module_identity: text, family: text, handler: text,
+        occurrence: i64) -> text:
+    """AdviceId: the `occurrence`-th declaration (0-based, in declaration
+    order) that names `handler` in `family` inside its owning module. Stable
+    under a selector, order, signature or body edit of that declaration and
+    under adding or removing a declaration of any other handler. It is not
+    the family inventory index, which shifts when an earlier declaration is
+    added."""
+    var framed = aspect_section_frame_v1("aop-advice-id/v2")
+    for part in [module_identity, family, handler, "{occurrence}"]:
         framed = framed + aspect_section_frame_v1(part)
     "sha256:" + sha256_text(framed)
 
@@ -173,9 +177,11 @@ pub fn aspect_decl_row_digest_v1(row: AspectDeclRowV1) -> text:
         i = i + 1
     "sha256:" + sha256_text(framed)
 
+# @allow(primitive_api) the occurrence ordinal of aspect_decl_advice_id_v1
 pub fn aspect_decl_row_v1(module_identity: text, handler: DirectoryAspectHandlerV2,
-        body_digest: text) -> AspectDeclRowV1:
-    """One section row from a resolved handler.
+        occurrence: i64, body_digest: text) -> AspectDeclRowV1:
+    """One section row from a resolved handler; `occurrence` counts the earlier
+    rows of the same family and handler in this module.
     `form` is the declaration's own form: the advice form of a mir row
     (`before`/`after`/`around`), the join-point kind of a logical row.
     `mode` is where the advice runs, as AdviceFacetsV1.mode reads it: the form
@@ -186,7 +192,7 @@ pub fn aspect_decl_row_v1(module_identity: text, handler: DirectoryAspectHandler
     unrestricted scope id."""
     val d = handler.declaration
     AspectDeclRowV1(family: d.family, family_inventory_index: d.family_inventory_index,
-        advice_id: aspect_decl_advice_id_v1(module_identity, d.family, d.family_inventory_index, d.handler),
+        advice_id: aspect_decl_advice_id_v1(module_identity, d.family, d.handler, occurrence),
         handler: d.handler, form: d.form, mode: if d.family == "mir": d.form else: "before",
         activation: d.mode,
         selector: d.selector, selector_id: pointcut_selector_parse_v1(d.selector).selector_digest,
@@ -201,12 +207,18 @@ pub fn aspect_decl_section_of_semantic_v1(semantic: DirectoryAspectSemanticV2,
     maps a handler name to its body digest; a handler without one is an error,
     never a row with an empty facet."""
     var rows: [AspectDeclRowV1] = []
+    var seen: Dict<text, i64> = {}
     for item in semantic.handlers:
         val handler: DirectoryAspectHandlerV2 = item
         val name = handler.declaration.handler
         if not body_digests.contains_key(name) or body_digests[name] == "":
             return Err("advice-body-unavailable")
-        rows.push(aspect_decl_row_v1(semantic.module_identity, handler, body_digests[name]))
+        val slot = aspect_section_frame_v1(handler.declaration.family) + aspect_section_frame_v1(name)
+        var occurrence = 0
+        if seen.contains_key(slot):
+            occurrence = seen[slot]
+        seen[slot] = occurrence + 1
+        rows.push(aspect_decl_row_v1(semantic.module_identity, handler, occurrence, body_digests[name]))
     Ok(AspectDeclSectionV1(module_identity: semantic.module_identity,
         coverage_schema: semantic.coverage_schema, leaf_digest: semantic.interface_digest, rows: rows))
 

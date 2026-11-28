@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 26 | 26 | 0 | 0 |
+| 28 | 28 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -54,6 +54,11 @@ row, which is always woven as a call at the start of the forwarder.
 `activation` is the declared weave mode (`static` unless a registry mode is
 named).
 
+`AdviceId` names a declaration by module, family, handler and the 0-based
+occurrence of that handler in that family. It is not the position of the
+declaration in the module, so adding or removing another advice leaves it
+unchanged; `family_inventory_index` is that position and does shift.
+
 A row digest (`aspect_decl_row_digest_v1`) is the identity of a declaration.
 Editing an advice body changes only the facet. Editing a selector changes the
 row digest. Both rules are proved here on hand-built rows and again on real
@@ -96,7 +101,7 @@ Function names refer to `aspect_decl_section_v1.spl`.
 | `aspect_body_span_digest_v1` | negative start, empty span, span past the end; name absent | "a body digest covers exactly the function's own span" |
 | `aspect_decl_row_digest_v1` | key is `body` | "an advice body edit changes only the body facet" |
 | `aspect_decl_row_v1` | family is `mir` | "a resolved handler becomes one row of its family" |
-| `aspect_decl_section_of_semantic_v1` | handler has no digest; digest is empty | "a handler without a body digest is an error" |
+| `aspect_decl_section_of_semantic_v1` | handler has no digest; digest is empty; handler already declared in this family | "a handler without a body digest is an error", "two declarations of one handler get different advice ids" |
 | `aspect_decl_section_encode_v1` | row limit; head field limit; row field limit; section limit | "encoding refuses every over-limit section" |
 | `_int_v1` | leading `-`; bad magnitude; bad number | "order may be negative", "a row with a bad number or flag is rejected" |
 | `_row_decode_v1` | known key; duplicate; optional `?` key; missing key; flag not `1` and not `0`; index or order unreadable; index negative | "an unknown optional field is ignored", "an unknown mandatory field is rejected", "a row with a bad number or flag is rejected" |
@@ -309,12 +314,12 @@ expect(digests).to_equal(["", "", "", ""])
 
 #### an advice id names the declaration slot, not its selector
 
-- Build ids for one slot and for a different module, family, index and handler
+- Build ids for one slot and for a different module, family, handler and occurrence
 - The id is a tagged sha256, repeatable, and each changed part gives another id
    - Exec capture: after_step
    - Evidence: execution result verified by 4 expected checks
    - Expected: id.starts_with("sha256:") is true
-   - Expected: aspect_decl_advice_id_v1(MODULE, "logical", 0, "trace_submit") equals `id`
+   - Expected: aspect_decl_advice_id_v1(MODULE, "logical", "trace_submit", 0) equals `id`
    - Expected: other == id is false
    - Expected: edited.advice_id equals `id`
 
@@ -327,20 +332,85 @@ Reproduction: this block contains the complete executable scenario source.
 
 ```simple
 # @req REQ-ASPECT-AW1-FACETS
-step("Build ids for one slot and for a different module, family, index and handler")
-val id = aspect_decl_advice_id_v1(MODULE, "logical", 0, "trace_submit")
-val others = [aspect_decl_advice_id_v1("pkg.other", "logical", 0, "trace_submit"),
-    aspect_decl_advice_id_v1(MODULE, "mir", 0, "trace_submit"),
-    aspect_decl_advice_id_v1(MODULE, "logical", 1, "trace_submit"),
-    aspect_decl_advice_id_v1(MODULE, "logical", 0, "trace_other")]
+step("Build ids for one slot and for a different module, family, handler and occurrence")
+val id = aspect_decl_advice_id_v1(MODULE, "logical", "trace_submit", 0)
+val others = [aspect_decl_advice_id_v1("pkg.other", "logical", "trace_submit", 0),
+    aspect_decl_advice_id_v1(MODULE, "mir", "trace_submit", 0),
+    aspect_decl_advice_id_v1(MODULE, "logical", "trace_submit", 1),
+    aspect_decl_advice_id_v1(MODULE, "logical", "trace_other", 0)]
 step("The id is a tagged sha256, repeatable, and each changed part gives another id")
 expect(id.starts_with("sha256:")).to_equal(true)
-expect(aspect_decl_advice_id_v1(MODULE, "logical", 0, "trace_submit")).to_equal(id)
+expect(aspect_decl_advice_id_v1(MODULE, "logical", "trace_submit", 0)).to_equal(id)
 for other in others:
     expect(other == id).to_equal(false)
-val edited = aspect_decl_row_v1(MODULE, resolved("logical", 0, "trace_submit", "pay_view", "static", 3),
-    "b")
+val edited = aspect_decl_row_v1(MODULE, resolved("logical", 7, "trace_submit", "pay_view", "static", 3),
+    0, "b")
 expect(edited.advice_id).to_equal(id)
+```
+
+</details>
+
+#### adding an unrelated earlier advice leaves later advice ids unchanged
+
+- Build the section of a module with two advice, then again with an unrelated advice declared before them
+- Both existing advice keep their ids although their inventory index moved; the new advice has its own id
+   - Exec capture: after_step
+   - Evidence: execution result verified by 2 expected checks
+   - Expected: [after.rows[1].family_inventory_index, before.rows[0].family_inventory_index] equals `[1, 0]`
+   - Expected: after.rows[0].advice_id == before.rows[0].advice_id is false
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 15 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-ASPECT-AW1-FACETS
+step("Build the section of a module with two advice, then again with an unrelated advice declared before them")
+val digests = {"trace_submit": "b1", "audit_call": "b2", "early_probe": "b3"}
+val before = aspect_decl_section_of_semantic_v1(semantic_of([
+    resolved("logical", 0, "trace_submit", "submit_view", "static", 0),
+    resolved("logical", 1, "audit_call", "audit_view", "static", 0)]), digests).unwrap()
+val after = aspect_decl_section_of_semantic_v1(semantic_of([
+    resolved("logical", 0, "early_probe", "probe_view", "static", 0),
+    resolved("logical", 1, "trace_submit", "submit_view", "static", 0),
+    resolved("logical", 2, "audit_call", "audit_view", "static", 0)]), digests).unwrap()
+step("Both existing advice keep their ids although their inventory index moved; the new advice has its own id")
+expect([after.rows[1].advice_id, after.rows[2].advice_id]).to_equal(
+    [before.rows[0].advice_id, before.rows[1].advice_id])
+expect([after.rows[1].family_inventory_index, before.rows[0].family_inventory_index]).to_equal([1, 0])
+expect(after.rows[0].advice_id == before.rows[0].advice_id).to_equal(false)
+```
+
+</details>
+
+#### two declarations of one handler get different advice ids
+
+- Build the section of a module that attaches one handler to two selectors, and to a mir rule of the same name
+- Each row has its own id: occurrence 0 per family, then occurrence 1 for the repeated logical handler
+   - Exec capture: after_step
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 11 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+# @req REQ-ASPECT-AW1-FACETS
+step("Build the section of a module that attaches one handler to two selectors, and to a mir rule of the same name")
+val section = aspect_decl_section_of_semantic_v1(semantic_of([
+    resolved("mir", 0, "trace_submit", "execution(pay*)", "static", 0),
+    resolved("logical", 0, "trace_submit", "submit_view", "static", 0),
+    resolved("logical", 1, "trace_submit", "pay_view", "static", 0)]), {"trace_submit": "b1"}).unwrap()
+step("Each row has its own id: occurrence 0 per family, then occurrence 1 for the repeated logical handler")
+expect([section.rows[0].advice_id, section.rows[1].advice_id, section.rows[2].advice_id]).to_equal(
+    [aspect_decl_advice_id_v1(MODULE, "mir", "trace_submit", 0),
+    aspect_decl_advice_id_v1(MODULE, "logical", "trace_submit", 0),
+    aspect_decl_advice_id_v1(MODULE, "logical", "trace_submit", 1)])
 ```
 
 </details>
@@ -370,8 +440,8 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # @req REQ-ASPECT-AW1-CODEC
 step("Build a row from a static logical handler and from a mir handler in registry mode")
-val logical = aspect_decl_row_v1(MODULE, logical_handler(), "body-1")
-val dynamic = aspect_decl_row_v1(MODULE, resolved("mir", 2, "audit_call", "execution(audit*)", "registry", 9), "body-2")
+val logical = aspect_decl_row_v1(MODULE, logical_handler(), 0, "body-1")
+val dynamic = aspect_decl_row_v1(MODULE, resolved("mir", 2, "audit_call", "execution(audit*)", "registry", 9), 0, "body-2")
 step("Fields are copied, order is the priority, mode is where the advice runs and activation is the declared weave mode")
 expect([logical.family, logical.handler, logical.form, logical.mode, logical.activation,
     logical.selector]).to_equal(["logical", "trace_submit", "forward", "before", "static", "submit_view"])
@@ -409,10 +479,10 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # @req REQ-ASPECT-AW1-FACETS
 step("Build the same declaration with two body digests, then with another selector")
-val before = aspect_decl_row_v1(MODULE, logical_handler(), "body-1")
-val body_edit = aspect_decl_row_v1(MODULE, logical_handler(), "body-2")
+val before = aspect_decl_row_v1(MODULE, logical_handler(), 0, "body-1")
+val body_edit = aspect_decl_row_v1(MODULE, logical_handler(), 0, "body-2")
 val selector_edit = aspect_decl_row_v1(MODULE,
-    resolved("logical", 0, "trace_submit", "pay_view", "static", 0), "body-1")
+    resolved("logical", 0, "trace_submit", "pay_view", "static", 0), 0, "body-1")
 step("The body edit keeps the row digest; the selector edit changes the row digest and the selector id")
 expect(aspect_decl_row_digest_v1(body_edit)).to_equal(aspect_decl_row_digest_v1(before))
 expect(body_edit.body_digest == before.body_digest).to_equal(false)
@@ -574,12 +644,12 @@ Reproduction: this block contains the complete executable scenario source.
 ```simple
 # @req REQ-ASPECT-AW1-FAILCLOSED
 step("Encode 1025 rows, a module name over 64 KiB, a selector over 64 KiB, and 17 rows of 64 KiB selectors")
-val row = aspect_decl_row_v1(MODULE, logical_handler(), "b")
+val row = aspect_decl_row_v1(MODULE, logical_handler(), 0, "b")
 var many: [AspectDeclRowV1] = []
 for i in 0..1025:
     many.push(row)
 val wide = repeated("x", ASPECT_DECL_SECTION_MAX_FIELD_BYTES_V1)
-val wide_row = aspect_decl_row_v1(MODULE, resolved("logical", 0, "trace_submit", wide, "static", 0), "b")
+val wide_row = aspect_decl_row_v1(MODULE, resolved("logical", 0, "trace_submit", wide, "static", 0), 0, "b")
 var heavy: [AspectDeclRowV1] = []
 for i in 0..17:
     heavy.push(wide_row)
@@ -967,8 +1037,8 @@ expect(aspect_decl_section_entry_v1(AspectDeclSectionV1(..both_families(), rows:
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 26 |
-| Active scenarios | 26 |
+| Total scenarios | 28 |
+| Active scenarios | 28 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
@@ -989,15 +1059,15 @@ Requirements covered by the scenarios in this manual:
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `3a29bb24d718e1efda71452afd1c0bca39576b0cad0b301e487e4e1c8d2efcae`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `efb3adfe13150f7089980c0b510442255bbf6f82197fb63ba72096c277eb6821`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `3a29bb24d718e1efda71452afd1c0bca39576b0cad0b301e487e4e1c8d2efcae`.
+Source SHA-256: `efb3adfe13150f7089980c0b510442255bbf6f82197fb63ba72096c277eb6821`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `3a29bb24d718e1efda71452afd1c0bca39576b0cad0b301e487e4e1c8d2efcae`  
+Source SHA-256: `efb3adfe13150f7089980c0b510442255bbf6f82197fb63ba72096c277eb6821`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
 Raw score: **97/100**; effective score: **97/100**; blockers: **0**.
 
