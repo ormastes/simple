@@ -1,0 +1,595 @@
+# @req: REQ-GENERIC-F1A-001 REQ-GENERIC-F1A-002 REQ-GENERIC-F1A-003 REQ-GENERIC-F1A-004 REQ-GENERIC-F1A-005 - open needs: the provider half of generic instance traceability (S3-F1).
+"""
+# Generic open needs (`generic_open_need_v1`)
+
+## Purpose and audience
+
+Purpose: pin the behaviour of the leaf module that describes what instances a
+generic template body needs, as rows over the template's own binders: the row,
+its canonical order, the identity digest that instance keys fold, the nested
+frame codec, and the wire form of the write-once open-needs slot.
+
+Audience: compiler-cache maintainers who change the generic TLDR sections, and
+reviewers who must be sure that moving a call never rebuilds an instance while
+adding a needed instance always does.
+
+Scope: `src/compiler/00.common/cache_contract/generic_open_need_v1.spl` only.
+The section that carries the slot is specified in `generic_template_section_v3_spec.spl`.
+
+Assumptions: argument keys are opaque non-empty text here; a binder key looks
+like `v<symbol>#<index>` but this module never parses it.
+
+Limitations: the evidence is runs of this spec on the Rust-seed interpreter
+(`simple-local-20261128f.exe`); no native-compiled run backs it.
+
+Verification and troubleshooting: run `simple test` on this file and read the
+`SPEC FILE VERDICT:` line. A failure naming an error text means a refusal rule
+changed its wording; the wording is part of the contract because callers surface it.
+
+**Research:** doc/01_research/compiler/compile_speed/mono_instance_census_2026-10-19.md (instance census this stage serves)
+**Architecture:** doc/04_architecture/generic_rr_hir_variant_obj.md (generic template facets and instance objects)
+**Plan:** doc/03_plan/language/type_system/no_any_inference_plan.md (rows S3-F0..F10, row S3-F1)
+**Design:** doc/05_design/compiler/cache/generic_instance_tldr_trace.md (sections 3, 4, 5, 9, 14)
+
+| Requirement | Plan acceptance sentence it serves |
+|---|---|
+| REQ-GENERIC-F1A-001 frames | a v2 reader misses; every codec refusal is a miss, not a guess |
+| REQ-GENERIC-F1A-002 rows and order | editing a body so that it needs one more instance changes the decoded open needs |
+| REQ-GENERIC-F1A-003 identity digest | a call that only moves keeps its keys; a new needed instance changes them |
+| REQ-GENERIC-F1A-004 instance key | the keys of that template's instances change with its needs |
+| REQ-GENERIC-F1A-005 slot wire | Absent and Filled-empty differ on the wire; decode is the strict inverse of encode |
+"""
+# @tag:unit
+# @tag:compiler
+# @tag:cache
+# @tag:generics
+
+use std.spec.*
+use std.spec.step
+use std.common.crypto.sha256.{sha256_text}
+use compiler.common.cache_contract.generic_open_need_v1.*
+
+fn span(a: i64, b: i64) -> GenericNeedSpanV1:
+    GenericNeedSpanV1(start: GenericSourceOffsetV1(value: a), end: GenericSourceOffsetV1(value: b))
+
+fn need(callee: text, keys: [text], a: i64, b: i64, cause: text) -> GenericOpenNeedV1:
+    GenericOpenNeedV1(callee_template_id: callee, arg_keys: keys, span: span(a, b), cause: cause)
+
+fn simple_need() -> GenericOpenNeedV1:
+    need("c", ["x"], 3, 12, "call")
+
+fn callees_of(rows: [GenericOpenNeedV1]) -> [text]:
+    var out: [text] = []
+    for row in rows:
+        out = out.push(row.callee_template_id)
+    out
+
+fn starts_of(rows: [GenericOpenNeedV1]) -> [i64]:
+    var out: [i64] = []
+    for row in rows:
+        out = out.push(row.span.start.value)
+    out
+
+fn causes_of(rows: [GenericOpenNeedV1]) -> [text]:
+    var out: [text] = []
+    for row in rows:
+        out = out.push(row.cause)
+    out
+
+fn is_absent(slot: GenericOpenNeedsSlotV1) -> bool:
+    match slot:
+        case GenericOpenNeedsSlotV1.Absent: true
+        case GenericOpenNeedsSlotV1.Filled(_): false
+
+fn filled_rows(slot: GenericOpenNeedsSlotV1) -> [GenericOpenNeedV1]:
+    match slot:
+        case GenericOpenNeedsSlotV1.Absent: []
+        case GenericOpenNeedsSlotV1.Filled(rows): rows
+
+# One slot refusal: the text the decoder returns for `wire`.
+fn slot_refusal(wire: text) -> text:
+    val r = generic_open_needs_slot_decode_v1(wire)
+    if r.is_ok():
+        return "ACCEPTED"
+    r.unwrap_err()
+
+val DIGEST_LABEL = "generic-open-needs-identity/v1"
+
+describe "open needs of a generic template (plan S3-F1, provider side)":
+    context "Frame codec of open needs":
+        context "writing frames":
+            it "writes each value as its byte length, a colon and the value":
+                # @capture(exec): the frame text written for two values
+                # @req REQ-GENERIC-F1A-001
+                step("write two values as frames")
+                expect(generic_need_frames_v1(["ab", "c"])).to_equal("2:ab1:c")
+
+            it "writes an empty value as a zero-length frame":
+                # @capture(exec): the frame text written for one empty value
+                step("write one empty value")
+                expect(generic_need_frames_v1([""])).to_equal("0:")
+
+            it "counts UTF-8 bytes, not characters, for a non-ASCII value":
+                # @capture(exec): the frame text written for a three-byte character, with its byte length
+                step("write one non-ASCII value")
+                # oracle: the character 箱 is three UTF-8 bytes
+                expect(generic_need_frames_v1(["箱"])).to_equal("3:箱")
+
+            it "writes no frames for no values":
+                # @capture(exec): the frame text written for an empty value list
+                step("write an empty value list")
+                expect(generic_need_frames_v1([])).to_equal("")
+
+        context "reading frames back":
+            it "returns the original values, including empty and non-ASCII ones":
+                # @capture(exec): the values read back from frames holding an empty and a non-ASCII value
+                step("produce the values read back from frames holding an empty and a non-ASCII value")
+                val values = ["ab", "", "箱", "x:y"]
+                val back = generic_need_frames_read_v1(generic_need_frames_v1(values))
+                expect(back.is_ok()).to_equal(true)
+                expect(back.unwrap()).to_equal(values)
+
+            it "reads a nested frame list as one value and the inner list again":
+                # @capture(exec): the outer values and the inner values read from a nested frame
+                step("write an inner list and wrap it as a single outer frame")
+                val inner = generic_need_frames_v1(["k1", "k2"])
+                val outer = generic_need_frames_v1(["head", inner])
+                step("read the outer list, then the inner frame")
+                val outer_values = generic_need_frames_read_v1(outer).unwrap()
+                expect(outer_values.len()).to_equal(2)   # oracle: the outer list holds the head and the inner list
+                expect(outer_values[1]).to_equal(inner)
+                expect(generic_need_frames_read_v1(outer_values[1]).unwrap()).to_equal(["k1", "k2"])
+
+            it "reads empty data as no values":
+                # @capture(exec): the value list read from empty data
+                step("produce the value list read from empty data")
+                expect(generic_need_frames_read_v1("").unwrap()).to_equal([])
+
+            it "refuses a header with no colon":
+                # @manual: folded
+                # @capture(exec): the error text of the read of a header lacking its colon
+                step("read a frame header with no colon")
+                val r = generic_need_frames_read_v1("5")
+                expect(r.is_err()).to_equal(true)
+                expect(r.unwrap_err()).to_equal("frame header has no ':'")
+
+            it "refuses a non-digit length":
+                # @capture(exec): the error text of the read of a non-digit length
+                step("run the refused case: the read of a non-digit length")
+                expect(generic_need_frames_read_v1("x:a").unwrap_err()).to_equal("frame length: decimal holds a non-digit")
+
+            it "refuses an empty length":
+                # @capture(exec): the error text of the read of an empty length
+                step("run the refused case: the read of an empty length")
+                expect(generic_need_frames_read_v1(":a").unwrap_err()).to_equal("frame length: empty decimal")
+
+            it "refuses a length with a leading zero":
+                # @capture(exec): the error text of the read of a leading-zero length
+                step("run the refused case: the read of a leading-zero length")
+                expect(generic_need_frames_read_v1("01:a").unwrap_err()).to_equal("frame length: decimal has a leading zero")
+
+            it "refuses a frame that runs past the end":
+                # @capture(exec): the error text of the read of a frame longer than the data
+                step("run the refused case: the read of a frame longer than the data")
+                expect(generic_need_frames_read_v1("5:ab").unwrap_err()).to_equal("frame runs past the end")
+
+    context "Canonical decimals of a span":
+        # The decimal reader is private; its rules are reached through the span wire form.
+        context "accepted spellings":
+            it "accepts zero and the widest twelve-digit offset":
+                # @capture(exec): the start and end offsets parsed from the smallest and widest spellings
+                step("produce the start and end offsets parsed from the smallest and widest spellings")
+                # oracle: the module allows 12 digits, so twelve 9s is the largest spelling
+                val widest = "999999999999"
+                val r = generic_need_span_from_values_v1("0", widest)
+                expect(r.is_ok()).to_equal(true)
+                expect(r.unwrap().start.value).to_equal(0)   # oracle: "0" is the smallest canonical offset
+                expect(r.unwrap().end.value).to_equal(999999999999)   # oracle: twelve nines is the widest spelling
+
+        context "rejected spellings":
+            it "refuses an empty offset":
+                # @capture(exec): the error text naming the empty span start
+                step("run the refused case: the error text naming the empty span start")
+                expect(generic_need_span_from_values_v1("", "1").unwrap_err()).to_equal("span start: empty decimal")
+
+            it "refuses a thirteen-digit offset as too long":
+                # @capture(exec): the error text naming the too-long span end
+                step("run the refused case: the error text naming the too-long span end")
+                # oracle: 13 digits is one more than the 12-digit width
+                expect(generic_need_span_from_values_v1("1", "1234567890123").unwrap_err()).to_equal("span end: decimal too long")
+
+            it "refuses a character just below the digits":
+                # @capture(exec): the error text for the character below the digits
+                step("run the refused case: the error text for the character below the digits")
+                # oracle: '/' is code 47, one below '0'
+                expect(generic_need_span_from_values_v1("/", "1").unwrap_err()).to_equal("span start: decimal holds a non-digit")
+
+            it "refuses a character just above the digits":
+                # @capture(exec): the error text for the character above the digits
+                step("run the refused case: the error text for the character above the digits")
+                # oracle: ':' is code 58, one above '9'
+                expect(generic_need_span_from_values_v1("1", ":").unwrap_err()).to_equal("span end: decimal holds a non-digit")
+
+            it "refuses a leading zero":
+                # @capture(exec): the error text naming the leading-zero span start
+                step("run the refused case: the error text naming the leading-zero span start")
+                expect(generic_need_span_from_values_v1("01", "2").unwrap_err()).to_equal("span start: decimal has a leading zero")
+
+    context "Canonical order of ranks":
+        it "lists indices in ascending rank order":
+            # @capture(exec): the order of the returned indices for three distinct ranks
+            step("produce the order of the returned indices for three distinct ranks")
+            expect(generic_need_order_v1(["c", "a", "b"])).to_equal([1, 2, 0])
+
+        it "keeps an already sorted list in place":
+            # @capture(exec): the order of the returned indices for ascending input
+            step("produce the order of the returned indices for ascending input")
+            expect(generic_need_order_v1(["a", "b", "c"])).to_equal([0, 1, 2])
+
+        it "reverses a reverse-sorted list":
+            # @capture(exec): the order of the returned indices for descending input
+            step("produce the order of the returned indices for descending input")
+            expect(generic_need_order_v1(["c", "b", "a"])).to_equal([2, 1, 0])
+
+        it "drops a duplicate rank and keeps its first occurrence":
+            # @capture(exec): the indices kept after a repeated rank was dropped
+            step("produce the indices kept after a repeated rank was dropped")
+            expect(generic_need_order_v1(["b", "a", "b", "c"])).to_equal([1, 0, 3])
+
+        it "returns no indices for no ranks":
+            # @capture(exec): the indices returned for an empty rank list
+            step("produce the indices returned for an empty rank list")
+            expect(generic_need_order_v1([])).to_equal([])
+
+    context "Causes and spans of a need":
+        context "the four known causes":
+            it "accepts field, call, construct and bound-dispatch":
+                # @capture(exec): the verdict of the cause check for each of the four known causes
+                step("produce the verdict of the cause check for each of the four known causes")
+                expect(generic_need_cause_check_v1(GENERIC_NEED_CAUSE_FIELD).unwrap()).to_equal("field")
+                expect(generic_need_cause_check_v1(GENERIC_NEED_CAUSE_CALL).unwrap()).to_equal("call")
+                expect(generic_need_cause_check_v1(GENERIC_NEED_CAUSE_CONSTRUCT).unwrap()).to_equal("construct")
+                expect(generic_need_cause_check_v1(GENERIC_NEED_CAUSE_BOUND_DISPATCH).unwrap()).to_equal("bound-dispatch")
+
+            it "refuses an unknown cause and names it":
+                # @capture(exec): the error text of the refused cause
+                step("run the refused case: the refused cause")
+                expect(generic_need_cause_check_v1("guess").unwrap_err()).to_equal("unknown need cause 'guess'")
+
+        context "span ordering rule":
+            it "accepts an empty span and a forward span":
+                # @capture(exec): the verdicts of the span check for an empty and a forward span
+                step("produce the verdicts of the span check for an empty and a forward span")
+                expect(generic_need_span_check_v1(span(5, 5)).is_ok()).to_equal(true)
+                expect(generic_need_span_check_v1(span(5, 9)).is_ok()).to_equal(true)
+
+            it "refuses a span that starts before the source":
+                # @capture(exec): the error text of the span with a negative start
+                step("run the refused case: the span with a negative start")
+                expect(generic_need_span_check_v1(span(-1, 4)).unwrap_err()).to_equal("span starts before the source")
+
+            it "refuses a span that ends before it starts":
+                # @capture(exec): the error text of the span ending before its start
+                step("run the refused case: the span ending before its start")
+                expect(generic_need_span_check_v1(span(9, 4)).unwrap_err()).to_equal("span ends before it starts")
+
+        context "span wire values":
+            it "spells a span as two canonical decimals":
+                # @capture(exec): the two decimal texts written for a span
+                step("produce the two decimal texts written for a span")
+                expect(generic_need_span_values_v1(span(7, 30))).to_equal(["7", "30"])
+
+            it "refuses a backward span read from the wire":
+                # @capture(exec): the error text of the backward span read from wire values
+                step("run the refused case: the backward span read from wire values")
+                expect(generic_need_span_from_values_v1("9", "4").unwrap_err()).to_equal("span ends before it starts")
+
+            it "ranks spans numerically, not alphabetically":
+                # @capture(exec): the comparison of the ranks of spans starting at offsets 9 and 10
+                step("produce the comparison of the ranks of spans starting at offsets 9 and 10")
+                val nine = generic_need_span_rank_v1(span(9, 12))
+                val ten = generic_need_span_rank_v1(span(10, 12))
+                expect(nine < ten).to_equal(true)
+
+    context "Rows of open needs":
+        context "a well-formed row":
+            it "is accepted unchanged":
+                # @capture(exec): the verdict and callee of the checked well-formed row
+                step("produce the verdict and callee of the checked well-formed row")
+                val r = generic_open_need_check_v1(simple_need())
+                expect(r.is_ok()).to_equal(true)
+                expect(r.unwrap().callee_template_id).to_equal("c")
+
+        context "row rejection rules":
+            it "refuses a need with no callee":
+                # @capture(exec): the error text of the row with no callee
+                step("run the refused case: the row with no callee")
+                expect(generic_open_need_check_v1(need("", ["x"], 1, 2, "call")).unwrap_err()).to_equal("need names no callee template")
+
+            it "refuses an empty argument key":
+                # @capture(exec): the error text of the row with an empty argument key
+                step("run the refused case: the row with an empty argument key")
+                expect(generic_open_need_check_v1(need("c", ["x", ""], 1, 2, "call")).unwrap_err()).to_equal("need holds an empty argument key")
+
+            it "refuses an unknown cause":
+                # @capture(exec): the error text of the row with an unknown cause
+                step("run the refused case: the row with an unknown cause")
+                expect(generic_open_need_check_v1(need("c", ["x"], 1, 2, "wish")).unwrap_err()).to_equal("unknown need cause 'wish'")
+
+            it "refuses a malformed span":
+                # @capture(exec): the error text of the row with a backward span
+                step("run the refused case: the row with a backward span")
+                expect(generic_open_need_check_v1(need("c", ["x"], 5, 2, "call")).unwrap_err()).to_equal("span ends before it starts")
+
+            it "accepts a need with no argument keys":
+                # @capture(exec): the verdict of the check of a row with no argument keys
+                step("produce the verdict of the check of a row with no argument keys")
+                expect(generic_open_need_check_v1(need("c", [], 1, 2, "field")).is_ok()).to_equal(true)
+
+    context "Canonical order of a row list":
+        it "orders rows by callee first":
+            # @capture(exec): the callee order of the sorted rows
+            step("produce the callee order of the sorted rows")
+            # @req REQ-GENERIC-F1A-002
+            val rows = [need("b", ["x"], 1, 2, "call"), need("a", ["x"], 1, 2, "call")]
+            expect(callees_of(generic_open_needs_canonical_v1(rows).unwrap())).to_equal(["a", "b"])
+
+        it "orders rows of one callee by argument keys":
+            # @capture(exec): the argument keys of the two sorted rows
+            step("produce the argument keys of the two sorted rows")
+            val rows = [need("c", ["y"], 1, 2, "call"), need("c", ["x"], 1, 2, "call")]
+            val sorted = generic_open_needs_canonical_v1(rows).unwrap()
+            expect(sorted[0].arg_keys).to_equal(["x"])
+            expect(sorted[1].arg_keys).to_equal(["y"])
+
+        it "orders rows with equal callee and keys by span numerically (offset 9 before offset 10)":
+            # @capture(exec): the start offsets of the sorted rows
+            step("produce the start offsets of the sorted rows")
+            val rows = [need("c", ["x"], 10, 11, "call"), need("c", ["x"], 9, 11, "call")]
+            expect(starts_of(generic_open_needs_canonical_v1(rows).unwrap())).to_equal([9, 10])
+
+        it "orders rows that differ only by cause by the cause text":
+            # @capture(exec): the cause order of the sorted rows
+            step("produce the cause order of the sorted rows")
+            val rows = [need("c", ["x"], 1, 2, "field"), need("c", ["x"], 1, 2, "call")]
+            expect(causes_of(generic_open_needs_canonical_v1(rows).unwrap())).to_equal(["call", "field"])
+
+        it "drops an exact duplicate row":
+            # @capture(exec): the row count after an exact duplicate was given twice
+            step("produce the row count after an exact duplicate was given twice")
+            val rows = [simple_need(), simple_need()]
+            expect(generic_open_needs_canonical_v1(rows).unwrap().len()).to_equal(1)   # oracle: an exact duplicate collapses to one row
+
+        it "keeps rows that differ only by span":
+            # @capture(exec): the row count when only the span differs
+            step("produce the row count when only the span differs")
+            val rows = [need("c", ["x"], 1, 2, "call"), need("c", ["x"], 3, 4, "call")]
+            expect(generic_open_needs_canonical_v1(rows).unwrap().len()).to_equal(2)   # oracle: rows that differ only by span are both kept
+
+        it "fails the whole list when one row is malformed":
+            # @capture(exec): the verdict and error text of the list with one malformed row
+            step("produce the verdict and error text of the list with one malformed row")
+            val rows = [simple_need(), need("", ["x"], 1, 2, "call")]
+            val r = generic_open_needs_canonical_v1(rows)
+            expect(r.is_err()).to_equal(true)
+            expect(r.unwrap_err()).to_equal("need names no callee template")
+
+        it "returns an empty list for no rows":
+            # @capture(exec): the row count of an empty list
+            step("produce the row count of an empty list")
+            expect(generic_open_needs_canonical_v1([]).unwrap().len()).to_equal(0)   # oracle: no rows in, no rows out
+
+    context "Identity digest of open needs":
+        it "equals a sha256 over the label and the hand-framed identity":
+            # @capture(exec): the identity digest against a sha256 of the hand-framed identity
+            step("produce the identity digest against a sha256 of the hand-framed identity")
+            # @req REQ-GENERIC-F1A-003
+            # oracle: identity of callee "c" with keys ["x"] is "1:c" + "3:1:x" (the key list "1:x" is
+            # three bytes); the label is 30 bytes; the identity frame is 8 bytes.
+            val expected = sha256_text("30:" + DIGEST_LABEL + "8:1:c3:1:x")
+            expect(generic_open_needs_identity_digest_v1([simple_need()])).to_equal(expected)
+
+        it "ignores where a call moved to":
+            # @capture(exec): the identity digest before and after the span moves
+            step("produce the identity digest before and after the span moves")
+            val before = generic_open_needs_identity_digest_v1([need("c", ["x"], 3, 12, "call")])
+            val after = generic_open_needs_identity_digest_v1([need("c", ["x"], 400, 420, "call")])
+            expect(after).to_equal(before)
+
+        it "ignores why the instance is needed":
+            # @capture(exec): the identity digest before and after the cause changes
+            step("produce the identity digest before and after the cause changes")
+            val a = generic_open_needs_identity_digest_v1([need("c", ["x"], 3, 12, "call")])
+            val b = generic_open_needs_identity_digest_v1([need("c", ["x"], 3, 12, "construct")])
+            expect(b).to_equal(a)
+
+        it "ignores the order of rows and repeated rows":
+            # @capture(exec): the identity digest of the rows in two orders and with repeats
+            step("produce the identity digest of the rows in two orders and with repeats")
+            val one = need("a", ["x"], 1, 2, "call")
+            val two = need("b", ["y"], 5, 6, "field")
+            val base = generic_open_needs_identity_digest_v1([one, two])
+            expect(generic_open_needs_identity_digest_v1([two, one])).to_equal(base)
+            expect(generic_open_needs_identity_digest_v1([one, two, one, one])).to_equal(base)
+
+        it "changes when a callee changes":
+            # @capture(exec): the identity digest before and after the callee changes
+            step("produce the identity digest before and after the callee changes")
+            val a = generic_open_needs_identity_digest_v1([need("c", ["x"], 1, 2, "call")])
+            val b = generic_open_needs_identity_digest_v1([need("d", ["x"], 1, 2, "call")])
+            expect(b != a).to_equal(true)
+
+        it "changes when an argument key changes":
+            # @capture(exec): the identity digest before and after an argument key changes
+            step("produce the identity digest before and after an argument key changes")
+            val a = generic_open_needs_identity_digest_v1([need("c", ["x"], 1, 2, "call")])
+            val b = generic_open_needs_identity_digest_v1([need("c", ["y"], 1, 2, "call")])
+            expect(b != a).to_equal(true)
+
+        it "changes when a row is added":
+            # @capture(exec): the identity digest before and after a row is added
+            step("produce the identity digest before and after a row is added")
+            val a = generic_open_needs_identity_digest_v1([need("c", ["x"], 1, 2, "call")])
+            val b = generic_open_needs_identity_digest_v1([need("c", ["x"], 1, 2, "call"), need("c", ["z"], 8, 9, "call")])
+            expect(b != a).to_equal(true)
+
+        it "differs between no needs and one need":
+            # @capture(exec): the identity digest of no needs and of one need
+            step("produce the identity digest of no needs and of one need")
+            expect(generic_open_needs_identity_digest_v1([]) != generic_open_needs_identity_digest_v1([simple_need()])).to_equal(true)
+
+    context "Open-needs component of an instance key":
+        it "equals a sha256 over the label, the concrete key and the needs digest":
+            # @capture(exec): the instance needs key against a sha256 of the hand-framed parts
+            step("produce the instance needs key against a sha256 of the hand-framed parts")
+            # @req REQ-GENERIC-F1A-004
+            # oracle: label "generic-instance-needs/v1" is 25 bytes; "ck" is 2; "nd" is 2
+            expect(generic_instance_needs_key_v1("ck", "nd")).to_equal(sha256_text("25:generic-instance-needs/v12:ck2:nd"))
+
+        it "moves when the concrete instance changes":
+            # @capture(exec): the instance needs key under two concrete keys
+            step("produce the instance needs key under two concrete keys")
+            expect(generic_instance_needs_key_v1("ck1", "nd") != generic_instance_needs_key_v1("ck2", "nd")).to_equal(true)
+
+        it "moves when the needs it was built against change":
+            # @capture(exec): the instance needs key under two needs digests
+            step("produce the instance needs key under two needs digests")
+            expect(generic_instance_needs_key_v1("ck", "nd1") != generic_instance_needs_key_v1("ck", "nd2")).to_equal(true)
+
+    context "Wire form of the open-needs slot":
+        context "complete literal wires":
+            it "writes an absent slot as the single frame 'absent'":
+                # @capture(exec): the encoded text of an absent slot
+                step("produce the encoded text of an absent slot")
+                expect(generic_open_needs_slot_encode_v1(GenericOpenNeedsSlotV1.Absent).unwrap()).to_equal("6:absent")
+
+            it "writes a filled slot with no rows as the single frame 'filled'":
+                # @capture(exec): the encoded text of a filled slot with no rows
+                step("produce the encoded text of a filled slot with no rows")
+                expect(generic_open_needs_slot_encode_v1(GenericOpenNeedsSlotV1.Filled(rows: [])).unwrap()).to_equal("6:filled")
+
+            it "writes one row as state, then one nested row frame":
+                # @capture(exec): the complete wire text of a slot with one row
+                step("produce the complete wire text of a slot with one row")
+                # @req REQ-GENERIC-F1A-005
+                # oracle: row blob = "1:c" "1:3" "2:12" "4:call" "3:1:x" = 21 bytes, so the slot is
+                # the 6-byte state frame followed by "21:" and that blob
+                val wire = generic_open_needs_slot_encode_v1(GenericOpenNeedsSlotV1.Filled(rows: [simple_need()])).unwrap()
+                expect(wire).to_equal("6:filled21:1:c1:32:124:call3:1:x")
+
+        context "round trip":
+            it "decodes what it encoded, with a non-ASCII callee and several keys":
+                # @capture(exec): the decoded row fields and the re-encoded wire
+                step("produce the decoded row fields and the re-encoded wire")
+                val row = need("箱", ["k1", "k2"], 4, 8, "construct")
+                val wire = generic_open_needs_slot_encode_v1(GenericOpenNeedsSlotV1.Filled(rows: [row])).unwrap()
+                val back = generic_open_needs_slot_decode_v1(wire).unwrap()
+                val rows = filled_rows(back)
+                expect(rows.len()).to_equal(1)   # oracle: one row was written
+                expect(rows[0].callee_template_id).to_equal("箱")
+                expect(rows[0].arg_keys).to_equal(["k1", "k2"])
+                expect(rows[0].span.end.value).to_equal(8)   # oracle: the row was written with end offset 8
+                expect(generic_open_needs_slot_encode_v1(back).unwrap()).to_equal(wire)
+
+            it "keeps an absent slot and a filled-empty slot apart":
+                # @capture(exec): the wire text and the decoded state of each slot kind
+                step("encode both states")
+                val absent_wire = generic_open_needs_slot_encode_v1(GenericOpenNeedsSlotV1.Absent).unwrap()
+                val empty_wire = generic_open_needs_slot_encode_v1(GenericOpenNeedsSlotV1.Filled(rows: [])).unwrap()
+                expect(absent_wire != empty_wire).to_equal(true)
+                step("decode both and read the state back")
+                val absent_back = generic_open_needs_slot_decode_v1(absent_wire).unwrap()
+                val empty_back = generic_open_needs_slot_decode_v1(empty_wire).unwrap()
+                expect(is_absent(absent_back)).to_equal(true)
+                expect(is_absent(empty_back)).to_equal(false)
+                expect(filled_rows(empty_back).len()).to_equal(0)   # oracle: a filled-empty slot holds no rows
+
+            it "writes the canonical order whatever order the rows arrive in":
+                # @capture(exec): the wires of one row set given in two orders
+                step("produce the wires of one row set given in two orders")
+                val a = need("a", ["x"], 1, 2, "call")
+                val b = need("b", ["x"], 1, 2, "call")
+                val w1 = generic_open_needs_slot_encode_v1(GenericOpenNeedsSlotV1.Filled(rows: [a, b])).unwrap()
+                val w2 = generic_open_needs_slot_encode_v1(GenericOpenNeedsSlotV1.Filled(rows: [b, a])).unwrap()
+                expect(w2).to_equal(w1)
+
+        context "encoder refusal":
+            it "refuses to write a filled slot holding a malformed row":
+                # @capture(exec): the error text of encoding a slot with a malformed row
+                step("run the refused case: encoding a slot with a malformed row")
+                val r = generic_open_needs_slot_encode_v1(GenericOpenNeedsSlotV1.Filled(rows: [need("c", [""], 1, 2, "call")]))
+                expect(r.is_err()).to_equal(true)
+                expect(r.unwrap_err()).to_equal("need holds an empty argument key")
+
+        context "decoder refusal: framing and state":
+            it "refuses broken framing":
+                # @capture(exec): the error text of decoding a slot whose frame is cut short
+                step("run the refused case: decoding a slot whose frame is cut short")
+                expect(slot_refusal("6:abs")).to_equal("frame runs past the end")
+
+            it "refuses a slot with no state":
+                # @capture(exec): the error text of decoding an empty slot
+                step("run the refused case: decoding an empty slot")
+                expect(slot_refusal("")).to_equal("open-needs slot has no state")
+
+            it "refuses an absent slot that holds rows":
+                # @capture(exec): the error text of an absent slot followed by a frame
+                step("run the refused case: an absent slot followed by a frame")
+                expect(slot_refusal("6:absent2:ab")).to_equal("absent open-needs slot holds rows")
+
+            it "refuses an unknown state":
+                # @capture(exec): the error text of a slot with the state later
+                step("run the refused case: a slot with the state later")
+                expect(slot_refusal("5:later")).to_equal("unknown open-needs state 'later'")
+
+        context "decoder refusal: rows":
+            it "refuses a row with the wrong number of frames":
+                # @capture(exec): the error text of a row with one frame instead of five
+                step("run the refused case: a row with one frame instead of five")
+                # oracle: a row blob must hold five frames; "1:a" holds one
+                expect(slot_refusal("6:filled3:1:a")).to_equal("need row does not hold five frames")
+
+            it "refuses a row whose inner framing is broken":
+                # @capture(exec): the error text of a row whose inner frame has no colon
+                step("run the refused case: a row whose inner frame has no colon")
+                expect(slot_refusal("6:filled2:ab")).to_equal("frame header has no ':'")
+
+            it "refuses a row with a bad span":
+                # @capture(exec): the error text of a row whose end precedes its start
+                step("run the refused case: a row whose end precedes its start")
+                # row blob "1:c" "1:3" "1:2" "4:call" "3:1:x": end 2 is before start 3
+                expect(slot_refusal("6:filled20:1:c1:31:24:call3:1:x")).to_equal("span ends before it starts")
+
+            it "refuses a row with a non-canonical span decimal":
+                # @capture(exec): the error text of a row with a leading-zero span start
+                step("run the refused case: a row with a leading-zero span start")
+                # start spelled "03"
+                expect(slot_refusal("6:filled21:1:c2:031:24:call3:1:x")).to_equal("span start: decimal has a leading zero")
+
+            it "refuses a row whose argument keys are not valid frames":
+                # @capture(exec): the error text of a row whose argument keys overrun their frame
+                step("run the refused case: a row whose argument keys overrun their frame")
+                # key list "5:ab" claims five bytes but holds two
+                expect(slot_refusal("6:filled22:1:c1:12:124:call4:5:ab")).to_equal("frame runs past the end")
+
+            it "refuses a row with an unknown cause":
+                # @capture(exec): the error text of a row with the cause wish
+                step("run the refused case: a row with the cause wish")
+                # row blob "1:c" "1:3" "2:12" "4:wish" "3:1:x"
+                expect(slot_refusal("6:filled21:1:c1:32:124:wish3:1:x")).to_equal("unknown need cause 'wish'")
+
+            it "refuses rows that are not in canonical order":
+                # @capture(exec): the error text of two rows written in reverse order
+                step("run the refused case: two rows written in reverse order")
+                # rows "b" then "a": a valid encoder would write "a" first
+                val b_row = generic_need_frames_v1(["b", "1", "2", "call", generic_need_frames_v1(["x"])])
+                val a_row = generic_need_frames_v1(["a", "1", "2", "call", generic_need_frames_v1(["x"])])
+                val wire = generic_need_frames_v1(["filled", b_row, a_row])
+                expect(slot_refusal(wire)).to_equal("open-needs slot is not in canonical form")
+
+            it "refuses a duplicate row":
+                # @capture(exec): the error text of the same row written twice
+                step("run the refused case: the same row written twice")
+                val row = generic_need_frames_v1(["a", "1", "2", "call", generic_need_frames_v1(["x"])])
+                val wire = generic_need_frames_v1(["filled", row, row])
+                expect(slot_refusal(wire)).to_equal("open-needs slot is not in canonical form")

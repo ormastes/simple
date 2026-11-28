@@ -1,0 +1,299 @@
+# Generic open needs: the provider half of instance traceability (plan S3-F1).
+#
+# Design: doc/05_design/compiler/cache/generic_instance_tldr_trace.md section 3.
+#
+# An open need says "the body of this template requires instance
+# `callee<arg keys>`", where an argument key may still mention the template's
+# own binder variables (`v<symbol>#<index>`). Substituting an instance's
+# arguments into the rows yields that instance's concrete needs without
+# opening the body.
+#
+# This module is a leaf: it owns the row, its canonical order, its two digests
+# and the nested frame codec shared by the `generic-template|` v3 section and
+# the `needed-instance|` section. It parses no type key and scans no source:
+# rows arrive typed from the typed-HIR stage.
+#
+# Two digests, on purpose:
+#   - the IDENTITY digest covers (callee template, argument keys) only. It is
+#     what an instance key folds, so moving a call to another line rebuilds
+#     nothing;
+#   - the sealed wire form covers spans and causes too (trace data).
+#
+# The slot is write-once: `Absent` after parse, `Filled` once by the defining
+# module's typed-HIR stage. "Absent" is a data state, distinct on the wire from
+# "filled with no rows".
+
+use std.common.crypto.sha256.{sha256_text}
+
+pub val GENERIC_NEED_CAUSE_FIELD = "field"
+pub val GENERIC_NEED_CAUSE_CALL = "call"
+pub val GENERIC_NEED_CAUSE_CONSTRUCT = "construct"
+pub val GENERIC_NEED_CAUSE_BOUND_DISPATCH = "bound-dispatch"
+
+pub val GENERIC_OPEN_NEEDS_STATE_ABSENT = "absent"
+pub val GENERIC_OPEN_NEEDS_STATE_FILLED = "filled"
+
+# Largest decimal a frame length or a source offset may spell (12 digits).
+val GENERIC_NEED_DECIMAL_WIDTH = 12
+
+pub struct GenericSourceOffsetV1:
+    value: i64   # byte offset into the declaring module's source
+
+pub struct GenericNeedSpanV1:
+    start: GenericSourceOffsetV1
+    end: GenericSourceOffsetV1   # exclusive; start <= end
+
+pub struct GenericOpenNeedV1:
+    callee_template_id: text   # TemplateId of the needed template
+    arg_keys: [text]           # positional structural keys; may mention binders
+    span: GenericNeedSpanV1    # origin span: trace data, never identity
+    cause: text                # one of GENERIC_NEED_CAUSE_*
+
+pub enum GenericOpenNeedsSlotV1:
+    Absent
+    Filled(rows: [GenericOpenNeedV1])
+
+# ----------------------------------------------------------------------------
+# Frames (byte-framed, nested: a frame may hold a frame list)
+# ----------------------------------------------------------------------------
+
+pub fn generic_need_frames_v1(values: [text]) -> text:
+    """`<length>:<value>` for each value, concatenated. Lengths count UTF-8 bytes."""
+    var parts: [text] = []
+    for value in values:
+        parts = parts.push("{value.byte_len()}:" + value)
+    parts.join("")
+
+fn _decimal_v1(value: text) -> Result<GenericSourceOffsetV1, text>:
+    """Canonical non-negative decimal: digits only, no leading zero, bounded width."""
+    if value == "":
+        return Err("empty decimal")
+    if value.byte_len() > GENERIC_NEED_DECIMAL_WIDTH:
+        return Err("decimal too long")
+    var n = 0
+    var i = 0
+    while i < value.byte_len():
+        val code = value.byte_at(i)
+        if code < 48u8 or code > 57u8:
+            return Err("decimal holds a non-digit")
+        n = n * 10 + (code - 48u8) as i64
+        i = i + 1
+    if "{n}" != value:
+        return Err("decimal has a leading zero")
+    Ok(GenericSourceOffsetV1(value: n))
+
+pub fn generic_need_frames_read_v1(data: text) -> Result<[text], text>:
+    """Inverse of `generic_need_frames_v1`. Fails closed on a missing ':', a
+    non-canonical length, or a frame that runs past the end."""
+    var out: [text] = []
+    val total = data.byte_len()
+    var pos = 0
+    while pos < total:
+        var colon = pos
+        while colon < total and data.byte_at(colon) != 58u8:   # 58 is the colon
+            colon = colon + 1
+        if colon >= total:
+            return Err("frame header has no ':'")
+        val length = _decimal_v1(data.substring(pos, colon))
+        if length.is_err():
+            return Err("frame length: " + length.unwrap_err())
+        val stop = colon + 1 + length.unwrap().value
+        if stop > total:
+            return Err("frame runs past the end")
+        out = out.push(data.substring(colon + 1, stop))
+        pos = stop
+    Ok(out)
+
+pub fn generic_need_order_v1(ranks: [text]) -> [i64]:
+    """Indices of `ranks` in ascending rank order, one index per distinct rank
+    (the first occurrence wins). Insertion sort: sections are small."""
+    var order: [i64] = []
+    var index = 0
+    for rank in ranks:
+        var placed: [i64] = []
+        var inserted = false
+        var duplicate = false
+        for other in order:
+            if ranks[other] == rank:
+                duplicate = true
+            if not inserted and rank < ranks[other]:
+                placed = placed.push(index)
+                inserted = true
+            placed = placed.push(other)
+        if not duplicate:
+            if not inserted:
+                placed = placed.push(index)
+            order = placed
+        index = index + 1
+    order
+
+# ----------------------------------------------------------------------------
+# Spans and causes
+# ----------------------------------------------------------------------------
+
+pub fn generic_need_cause_check_v1(cause: text) -> Result<text, text>:
+    """The cause itself when it is one of the four known causes."""
+    if [GENERIC_NEED_CAUSE_FIELD, GENERIC_NEED_CAUSE_CALL, GENERIC_NEED_CAUSE_CONSTRUCT,
+            GENERIC_NEED_CAUSE_BOUND_DISPATCH].contains(cause):
+        return Ok(cause)
+    Err("unknown need cause '" + cause + "'")
+
+pub fn generic_need_span_check_v1(span: GenericNeedSpanV1) -> Result<GenericNeedSpanV1, text>:
+    """A span starts at or after offset 0 and does not end before it starts."""
+    if span.start.value < 0:
+        return Err("span starts before the source")
+    if span.end.value < span.start.value:
+        return Err("span ends before it starts")
+    Ok(span)
+
+pub fn generic_need_span_values_v1(span: GenericNeedSpanV1) -> [text]:
+    """Wire form: [start, end] as canonical decimals."""
+    ["{span.start.value}", "{span.end.value}"]
+
+pub fn generic_need_span_from_values_v1(start: text, end: text) -> Result<GenericNeedSpanV1, text>:
+    val first = _decimal_v1(start)
+    if first.is_err():
+        return Err("span start: " + first.unwrap_err())
+    val last = _decimal_v1(end)
+    if last.is_err():
+        return Err("span end: " + last.unwrap_err())
+    generic_need_span_check_v1(GenericNeedSpanV1(start: first.unwrap(), end: last.unwrap()))
+
+fn _padded_v1(offset: GenericSourceOffsetV1) -> text:
+    # Fixed width so text order equals numeric order.
+    var digits = "{offset.value}"
+    while digits.len() < GENERIC_NEED_DECIMAL_WIDTH:
+        digits = "0" + digits
+    digits
+
+pub fn generic_need_span_rank_v1(span: GenericNeedSpanV1) -> text:
+    """Sort key of a span: (start, end) in numeric order."""
+    _padded_v1(span.start) + _padded_v1(span.end)
+
+# ----------------------------------------------------------------------------
+# Rows
+# ----------------------------------------------------------------------------
+
+pub fn generic_open_need_check_v1(row: GenericOpenNeedV1) -> Result<GenericOpenNeedV1, text>:
+    """A row names a callee, has no empty argument key, a known cause and a
+    well-formed span."""
+    if row.callee_template_id == "":
+        return Err("need names no callee template")
+    for key in row.arg_keys:
+        if key == "":
+            return Err("need holds an empty argument key")
+    val cause = generic_need_cause_check_v1(row.cause)
+    if cause.is_err():
+        return Err(cause.unwrap_err())
+    val span = generic_need_span_check_v1(row.span)
+    if span.is_err():
+        return Err(span.unwrap_err())
+    Ok(row)
+
+pub fn generic_need_identity_v1(callee_template_id: text, arg_keys: [text]) -> text:
+    """Identity of one need: the callee and its positional argument keys."""
+    generic_need_frames_v1([callee_template_id, generic_need_frames_v1(arg_keys)])
+
+fn _row_rank_v1(row: GenericOpenNeedV1) -> text:
+    generic_need_identity_v1(row.callee_template_id, row.arg_keys) +
+        generic_need_span_rank_v1(row.span) + row.cause
+
+pub fn generic_open_needs_canonical_v1(rows: [GenericOpenNeedV1]) -> Result<[GenericOpenNeedV1], text>:
+    """Checked rows in canonical order, exact duplicates dropped: by the
+    length-framed (callee template, argument keys) identity, then span, then
+    cause. Template ids are fixed-length digests, so rows of one list order by
+    callee text. Any malformed row fails the whole list."""
+    var ranks: [text] = []
+    for row in rows:
+        val checked = generic_open_need_check_v1(row)
+        if checked.is_err():
+            return Err(checked.unwrap_err())
+        ranks = ranks.push(_row_rank_v1(row))
+    var out: [GenericOpenNeedV1] = []
+    for index in generic_need_order_v1(ranks):
+        out = out.push(rows[index])
+    Ok(out)
+
+pub fn generic_open_needs_identity_digest_v1(rows: [GenericOpenNeedV1]) -> text:
+    """sha256 over the sorted distinct (callee, argument keys) of `rows`.
+    Spans and causes are excluded, so a need that only moves keeps its digest."""
+    var identities: [text] = []
+    for row in rows:
+        identities = identities.push(generic_need_identity_v1(row.callee_template_id, row.arg_keys))
+    var values = ["generic-open-needs-identity/v1"]
+    for index in generic_need_order_v1(identities):
+        values = values.push(identities[index])
+    sha256_text(generic_need_frames_v1(values))
+
+pub fn generic_instance_needs_key_v1(concrete_key: text, needs_identity_digest: text) -> text:
+    """The open-needs component of one instance's key: it moves when the
+    instance changes (`concrete_key`) or when the needs it was built against
+    change. The full per-instance key record is plan S3-F5."""
+    sha256_text(generic_need_frames_v1(["generic-instance-needs/v1", concrete_key, needs_identity_digest]))
+
+# ----------------------------------------------------------------------------
+# Slot wire form
+# ----------------------------------------------------------------------------
+
+fn _row_blob_v1(row: GenericOpenNeedV1) -> text:
+    generic_need_frames_v1([row.callee_template_id] + generic_need_span_values_v1(row.span) +
+        [row.cause, generic_need_frames_v1(row.arg_keys)])
+
+fn _row_from_blob_v1(blob: text) -> Result<GenericOpenNeedV1, text>:
+    val parts = generic_need_frames_read_v1(blob)
+    if parts.is_err():
+        return Err(parts.unwrap_err())
+    val values = parts.unwrap()
+    if values.len() != 5:
+        return Err("need row does not hold five frames")
+    val span = generic_need_span_from_values_v1(values[1], values[2])
+    if span.is_err():
+        return Err(span.unwrap_err())
+    val keys = generic_need_frames_read_v1(values[4])
+    if keys.is_err():
+        return Err(keys.unwrap_err())
+    generic_open_need_check_v1(GenericOpenNeedV1(callee_template_id: values[0], arg_keys: keys.unwrap(),
+        span: span.unwrap(), cause: values[3]))
+
+pub fn generic_open_needs_slot_encode_v1(slot: GenericOpenNeedsSlotV1) -> Result<text, text>:
+    """One slot as a frame list: [state] then one frame per canonical row."""
+    match slot:
+        case GenericOpenNeedsSlotV1.Absent:
+            Ok(generic_need_frames_v1([GENERIC_OPEN_NEEDS_STATE_ABSENT]))
+        case GenericOpenNeedsSlotV1.Filled(rows):
+            val canonical = generic_open_needs_canonical_v1(rows)
+            if canonical.is_err():
+                return Err(canonical.unwrap_err())
+            var values = [GENERIC_OPEN_NEEDS_STATE_FILLED]
+            for row in canonical.unwrap():
+                values = values.push(_row_blob_v1(row))
+            Ok(generic_need_frames_v1(values))
+
+pub fn generic_open_needs_slot_decode_v1(data: text) -> Result<GenericOpenNeedsSlotV1, text>:
+    """Strict inverse of the encoder: the bytes must be exactly what the
+    encoder writes for the decoded slot (sorted, unique, canonical decimals)."""
+    val parts = generic_need_frames_read_v1(data)
+    if parts.is_err():
+        return Err(parts.unwrap_err())
+    val values = parts.unwrap()
+    if values.len() == 0:
+        return Err("open-needs slot has no state")
+    if values[0] == GENERIC_OPEN_NEEDS_STATE_ABSENT:
+        if values.len() != 1:
+            return Err("absent open-needs slot holds rows")
+        return Ok(GenericOpenNeedsSlotV1.Absent)
+    if values[0] != GENERIC_OPEN_NEEDS_STATE_FILLED:
+        return Err("unknown open-needs state '" + values[0] + "'")
+    var rows: [GenericOpenNeedV1] = []
+    var i = 1
+    while i < values.len():
+        val row = _row_from_blob_v1(values[i])
+        if row.is_err():
+            return Err(row.unwrap_err())
+        rows = rows.push(row.unwrap())
+        i = i + 1
+    val slot = GenericOpenNeedsSlotV1.Filled(rows)
+    val again = generic_open_needs_slot_encode_v1(slot)
+    if again.unwrap_or("") != data:
+        return Err("open-needs slot is not in canonical form")
+    Ok(slot)
