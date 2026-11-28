@@ -22,6 +22,8 @@ use app.ui.web.html.{generate_css, wm_root_data_attrs}
 use app.ui.browser.event_bridge.{translate_key_event, translate_mouse_event, hit_test}
 use std.gc_async_mut.ui.web_render_pixel_backend.{web_render_html_request_to_pixel_artifact_with_backend, web_render_resolved_engine2d_backend_name}
 use std.gc_async_mut.gpu.browser_engine.web_render_backend.{web_render_backend, web_render_backend_names}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{extract_css_vw, compute_styles, web_html_layout_tree, zero_i32_list, neg_one_i32_list, empty_i32_lists}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer_style.{parse_html, build_child_index}
 use std.nogc_async_mut.gpu.engine2d.host_gpu_draw_ir_event_flow.{engine2d_host_gpu_draw_ir_event_flow, engine2d_host_gpu_draw_ir_event_flow_summary}
 use std.gpu.engine2d.helpers_availability.{backend_canonical_name}
 use std.io_runtime.{write_file, time_now_unix_micros}
@@ -285,10 +287,13 @@ class BrowserBackend:
     static_frame_height: i32
     static_frame_revision: i64
     static_frame_theme_identity: text
+    static_frame_scroll_y: i32
     static_frame_fast_hits: i32
     static_frame_fast_stores: i32
     static_frame_hits: i32
     static_frame_stores: i32
+    scroll_y: i32
+    content_height: i32
     present_pixels_cache: [i64]
     present_pixels_cache_valid: bool
     present_pixels_cache_theme_identity: text
@@ -388,10 +393,13 @@ class BrowserBackend:
             static_frame_height: 0,
             static_frame_revision: -1,
             static_frame_theme_identity: "",
+            static_frame_scroll_y: 0,
             static_frame_fast_hits: 0,
             static_frame_fast_stores: 0,
             static_frame_hits: 0,
             static_frame_stores: 0,
+            scroll_y: 0,
+            content_height: 0,
             present_pixels_cache: [],
             present_pixels_cache_valid: false,
             present_pixels_cache_theme_identity: "",
@@ -453,6 +461,30 @@ class BrowserBackend:
             self.last_input_event_to_render_us = if elapsed >= 0: elapsed else: 0
             self.last_input_event_roundtrip_status = "rendered"
 
+    me scroll_by(dy: i32) -> bool:
+        """Scroll viewport vertically by `dy` pixels and invalidate frame caches if changed."""
+        self.set_scroll_y(self.scroll_y + dy)
+
+    me set_scroll_y(y: i32) -> bool:
+        """Clamp and apply viewport `scroll_y`, returning true if the offset changed."""
+        val max_scroll = if self.content_height > 0:
+            if self.content_height > self.height: self.content_height - self.height else: 0
+        else:
+            2400
+        var next_y = y
+        if next_y < 0:
+            next_y = 0
+        if next_y > max_scroll:
+            next_y = max_scroll
+        if next_y == self.scroll_y:
+            return false
+        self.scroll_y = next_y
+        self.static_frame_state_valid = false
+        self.present_pixels_cache_valid = false
+        self.present_pixels_cache_theme_identity = ""
+        self.static_shell_cache_key = ""
+        true
+
     fn static_frame_matches(tree: UITree, state: UIState, revision: i64, theme_identity: text) -> bool:
         (self.static_frame_state_valid
             and self.static_frame_root_id == tree.root_id
@@ -462,7 +494,8 @@ class BrowserBackend:
             and self.static_frame_width == self.width
             and self.static_frame_height == self.height
             and self.static_frame_revision == revision
-            and self.static_frame_theme_identity == theme_identity)
+            and self.static_frame_theme_identity == theme_identity
+            and self.static_frame_scroll_y == self.scroll_y)
 
     me store_static_frame_state(tree: UITree, state: UIState, revision: i64, theme_identity: text):
         self.static_frame_state_valid = true
@@ -474,6 +507,7 @@ class BrowserBackend:
         self.static_frame_height = self.height
         self.static_frame_revision = revision
         self.static_frame_theme_identity = theme_identity
+        self.static_frame_scroll_y = self.scroll_y
 
     fn widget_draw_ir_composition(state: UIState) -> DrawIrComposition:
         val theme_snapshot = browser_theme_render_snapshot(state.tree.theme_name())
@@ -497,7 +531,11 @@ class BrowserBackend:
             self.finish_event_render_roundtrip()
             return
 
-        val body = render_html_tree(tree.root_node(), state)
+        val raw_body = render_html_tree(tree.root_node(), state)
+        val body = if self.scroll_y > 0:
+            "<div id=\"browser_scroll_plane\" style=\"margin-top: -{self.scroll_y}px;\">{raw_body}</div>"
+        else:
+            raw_body
         val theme = state.tree.theme_name()
         val req = web_render_adapter_request(WEB_RENDER_TARGET_PURE_SIMPLE, "", "", body, browser_theme_composed_css(theme), "", self.width, self.height).with_root_attrs(wm_root_data_attrs(theme))
         self.last_semantic_snapshot_json = semantic_ui_snapshot_to_json(browser_semantic_snapshot(state))
@@ -507,30 +545,13 @@ class BrowserBackend:
             theme_snapshot.id,
             theme_snapshot.source_manifest_sha256,
             theme_snapshot.material_sha256
-        )
+        ) + "|scroll:{self.scroll_y}"
         if profile.cacheable_static_shell and self.static_shell_cache_key == themed_cache_key and self.render_cached_static_frame():
             self.reset_runtime_queue_diagnostics()
             self.finish_event_render_roundtrip()
             return
 
-        # Step 1: Build DOM from widget tree
-        val dom_layout_start_us = browser_backend_time_us()
-        val root_node = tree.root_node()
-        val dom = widget_to_dom(root_node)
-
-        # Step 2: Compute layout (block layout)
-        val layout = browser_dom_compute_layout(dom, self.width, self.height)
-
-        # Step 3: Cache layout for hit testing
-        self.layout_cache = collect_layout_entries(layout, [])
-        self.layout_cache_theme_identity = theme_identity
-        self.last_render_dom_layout_us = browser_backend_time_us() - dom_layout_start_us
-
-        # Step 4: Render canonical Web HTML/CSS layout Draw IR through Engine2D
-        # for the pure-Simple lane. `_composition` preserves the independent
-        # GUI widget submission boundary used by callers; Web pixels must not
-        # bypass computed CSS. Chromium remains an explicit HTML compatibility
-        # renderer. Mirror the selected pixels into the legacy host framebuffer.
+        # Step 1: Build full HTML first so CSS layout hit boxes match painted pixels.
         val html_start_us = browser_backend_time_us()
         var full_html = ""
         if profile.cacheable_static_shell and self.static_shell_cache_key == themed_cache_key and self.static_shell_full_html != "":
@@ -543,6 +564,20 @@ class BrowserBackend:
                 self.static_shell_full_html = full_html
                 self.static_shell_html_stores = self.static_shell_html_stores + 1
         self.last_render_html_us = browser_backend_time_us() - html_start_us
+
+        # Step 2: Compute real CSS layout boxes for hit testing and document content height.
+        val dom_layout_start_us = browser_backend_time_us()
+        val (css_entries, max_bottom) = compute_css_layout_entries(full_html, self.width, self.height, self.scroll_y)
+        self.content_height = max_bottom
+        if css_entries.len() > 0:
+            self.layout_cache = css_entries
+        else:
+            val root_node = tree.root_node()
+            val dom = widget_to_dom(root_node)
+            val layout = browser_dom_compute_layout(dom, self.width, self.height)
+            self.layout_cache = collect_layout_entries(layout, [])
+        self.layout_cache_theme_identity = theme_identity
+        self.last_render_dom_layout_us = browser_backend_time_us() - dom_layout_start_us
         val pixel_start_us = browser_backend_time_us()
         # Gap B: engine selection happens here, through the WebRenderer facade
         # shape. Default ("pure_simple") executes canonical HTML/CSS layout
@@ -684,11 +719,16 @@ class BrowserBackend:
         self.framebuffer = Framebuffer.create(w, h)
         self.static_frame_state_valid = false
         self.static_frame_theme_identity = ""
+        self.static_shell_cache_key = ""
         self.layout_cache_theme_identity = ""
         self.last_render_theme_identity = ""
         self.present_pixels_cache = []
         self.present_pixels_cache_valid = false
         self.present_pixels_cache_theme_identity = ""
+        if self.content_height > 0:
+            val max_scroll = if self.content_height > h: self.content_height - h else: 0
+            if self.scroll_y > max_scroll:
+                self.scroll_y = max_scroll
 
     me shutdown():
         """Release resources."""
@@ -826,6 +866,55 @@ fn collect_layout_entries(box: BlockLayoutBox, acc: [LayoutEntry]) -> [LayoutEnt
     val collector = LayoutEntryCollector.create(acc)
     collector.collect(box)
     return collector.entries
+
+fn compute_css_layout_entries(full_html: text, viewport_w: i32, viewport_h: i32, scroll_y: i32) -> ([LayoutEntry], i32):
+    """Compute real CSS layout boxes and unscrolled document height from `full_html`."""
+    val nodes = parse_html(full_html)
+    val rules = extract_css_vw(full_html, viewport_w, false)
+    val child_index = build_child_index(nodes)
+    val styles = compute_styles(nodes, rules, child_index, false, true, viewport_w, viewport_h)
+    val node_count = nodes.len() as i32
+    val empty_starts = empty_i32_lists(node_count)
+    val empty_ends = empty_i32_lists(node_count)
+    val boxes = web_html_layout_tree(
+        nodes,
+        styles,
+        child_index,
+        0,
+        0,
+        0,
+        viewport_w,
+        viewport_w,
+        viewport_h,
+        zero_i32_list(node_count),
+        zero_i32_list(node_count),
+        zero_i32_list(node_count),
+        zero_i32_list(node_count),
+        empty_starts,
+        empty_ends,
+        neg_one_i32_list(node_count)
+    )
+    var entries: [LayoutEntry] = []
+    var max_bottom: i32 = 0
+    var i: i32 = 0
+    while i < node_count:
+        val bw = boxes.bw[i]
+        val bh = boxes.bh[i]
+        if bw > 0 and bh > 0:
+            val doc_bottom = boxes.by[i] + bh + scroll_y
+            if doc_bottom > max_bottom:
+                max_bottom = doc_bottom
+            val node_id = nodes[i].id_attr
+            if node_id != "" and node_id != "browser_scroll_plane":
+                entries = entries.push(LayoutEntry(
+                    id: node_id,
+                    x: boxes.bx[i].to_f64(),
+                    y: boxes.by[i].to_f64(),
+                    width: bw.to_f64(),
+                    height: bh.to_f64()
+                ))
+        i = i + 1
+    (entries, max_bottom)
 
 fn hit_test_entries(entries: [LayoutEntry], px: i32, py: i32) -> text:
     """Find the deepest (last) entry that contains the point."""
