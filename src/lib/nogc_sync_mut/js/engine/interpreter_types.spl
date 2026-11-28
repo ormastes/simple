@@ -31,13 +31,24 @@ fn env_new() -> Environment:
 
 class EnvironmentStack:
     frames: [Environment]
+    # Flat parent view of the same chain the frames walk uses: env_parent_ids[i]
+    # is the parent of env i (or -1 for a root). Maintained in lockstep with
+    # frames by create_env so owners can inspect or reject forged links without
+    # a hop-bound walk. next_id mirrors frames.len() and is the rejection
+    # oracle: a parent at or beyond it is a future/self alias.
+    env_parent_ids: [i64]
+    next_id: i64
 
 fn env_stack_new() -> EnvironmentStack:
-    EnvironmentStack(frames: [env_new()])
+    # Interpreter entry: frame 0 is the pre-created global the JsInterpreter
+    # addresses as env 0 from birth.
+    EnvironmentStack(frames: [env_new()], env_parent_ids: [-1], next_id: 1)
 
 impl EnvironmentStack:
     static fn new() -> EnvironmentStack:
-        env_stack_new()
+        # Standalone entry (specs, fixtures): an empty stack; the first
+        # create_env(-1) allocates the root env as id 0.
+        EnvironmentStack(frames: [], env_parent_ids: [], next_id: 0)
 
     fn clone() -> EnvironmentStack:
         var cloned_frames: [Environment] = []
@@ -45,14 +56,27 @@ impl EnvironmentStack:
         while i < self.frames.len():
             cloned_frames.push(self.frames[i].clone())
             i = i + 1
-        EnvironmentStack(frames: cloned_frames)
+        var cloned_parents: [i64] = []
+        var j = 0
+        while j < self.env_parent_ids.len():
+            cloned_parents.push(self.env_parent_ids[j])
+            j = j + 1
+        EnvironmentStack(frames: cloned_frames, env_parent_ids: cloned_parents, next_id: self.next_id)
 
     me create_env(parent: i64) -> i64:
+        # Reject future/self aliases (parent at or beyond the next id, or below
+        # the root sentinel) without creating anything; a stale or forged id
+        # must not occupy a slot. Valid parents create the frame and record the
+        # parent in both views.
+        if parent < -1 or parent >= self.next_id:
+            return -1
         var frame = env_new()
-        val new_id = self.frames.len()
-        if parent >= 0 and parent < new_id:
+        if parent >= 0:
             frame.parent = parent
+        val new_id = self.next_id
         self.frames.push(frame)
+        self.env_parent_ids.push(parent)
+        self.next_id = self.next_id + 1
         new_id
 
     me define_var(env: i64, name: text, value: JsValue):
