@@ -30,9 +30,9 @@ Binary: admitted Stage 2 compiler, sha256
 
 | Point | Process time | Process RSS |
 |---|---|---|
-| `compile:start` | +2.5 s | 0.43 GiB |
-| `load_sources:preclosed:admitted` (2 inventory reads, visibility maps) | +13.3 s | 0.88 GiB |
-| `load_sources:seeded` (4220 files read and digest-checked) | +16.4 s | 1.50 GiB |
+| `compile:start` | +2.5 s | 0.41 GiB |
+| `load_sources:preclosed:admitted` (2 inventory reads, visibility maps) | +13.3 s | 0.84 GiB |
+| `load_sources:seeded` (4220 files read and digest-checked) | +16.4 s | 1.43 GiB |
 | alias walk, still running | +79 s | cgroup at the 12 GiB cap, OOM-killed |
 
 The walk did not finish under the cap, so its duration is "more than 63 s" here; the production log
@@ -78,7 +78,7 @@ roots, truncation, switch-off and no-queue all fall back to the walk).
 ## Acceptance run still owed
 A Stage 2 binary built from this change, same recipe: the second unit's `load_sources` should drop
 from ~92 s to ~20 s with `index hit` in its log, objects and cache keys unchanged, and its RSS at
-`load_sources ... complete` should be near the 1.5 GiB seeded figure.
+`load_sources ... complete` should be near the 1.4 GiB seeded figure.
 
 ## Not fixed here
 - The first consumer, and any consumer without a HIR queue (parse-shard workers, the coordinator's
