@@ -190,6 +190,15 @@ mod platform {
     thread_local! {
         /// Maps handle id -> raw kqueue fd
         static KQUEUE_FDS: RefCell<HashMap<i64, i32>> = RefCell::new(HashMap::new());
+        /// (loop handle, raw fd) -> what the caller registered (socket handle
+        /// or raw fd), so poll reports the caller's value, not ev.ident.
+        static KQUEUE_CALLERS: RefCell<HashMap<(i64, i32), i64>> = RefCell::new(HashMap::new());
+    }
+
+    /// Interpreter sockets are handles (1000+), not descriptors: resolve a
+    /// handle to its raw fd; anything else is taken as a raw fd already.
+    fn raw_fd(fd: i64) -> i32 {
+        crate::interpreter::interpreter_native_net::socket_handle_raw_fd(fd).unwrap_or(fd as i32)
     }
 
     #[cfg(target_os = "freebsd")]
@@ -255,11 +264,12 @@ mod platform {
             };
 
             let mut changes: Vec<libc::kevent> = Vec::with_capacity(2);
+            let raw = raw_fd(fd);
 
             // interest: 0=Read, 1=Write, 2=ReadWrite
             if interest == 0 || interest == 2 {
                 changes.push(make_kevent(
-                    fd as libc::uintptr_t,
+                    raw as libc::uintptr_t,
                     libc::EVFILT_READ,
                     flags,
                     0,
@@ -269,7 +279,7 @@ mod platform {
             }
             if interest == 1 || interest == 2 {
                 changes.push(make_kevent(
-                    fd as libc::uintptr_t,
+                    raw as libc::uintptr_t,
                     libc::EVFILT_WRITE,
                     flags,
                     0,
@@ -292,6 +302,9 @@ mod platform {
                     std::ptr::null(),
                 )
             };
+            if ret >= 0 {
+                KQUEUE_CALLERS.with(|c| c.borrow_mut().insert((loop_fd, raw), fd));
+            }
             ret >= 0
         })
     }
@@ -303,30 +316,23 @@ mod platform {
                 return false;
             };
 
-            // Remove both filters; ignore ENOENT if one wasn't registered
-            let changes = [
-                make_kevent(
-                    fd as libc::uintptr_t,
-                    libc::EVFILT_READ,
+            let raw = raw_fd(fd);
+            KQUEUE_CALLERS.with(|c| c.borrow_mut().remove(&(loop_fd, raw)));
+            // Remove both filters, one per kevent call: with no event list
+            // kevent stops at the first failing change, so a missing READ
+            // filter (write-only registration) would otherwise leave WRITE.
+            // ENOENT for a filter that was never added is expected.
+            for filter in [libc::EVFILT_READ, libc::EVFILT_WRITE] {
+                let change = make_kevent(
+                    raw as libc::uintptr_t,
+                    filter,
                     libc::EV_DELETE as u16,
                     0,
                     0,
                     std::ptr::null_mut(),
-                ),
-                make_kevent(
-                    fd as libc::uintptr_t,
-                    libc::EVFILT_WRITE,
-                    libc::EV_DELETE as u16,
-                    0,
-                    0,
-                    std::ptr::null_mut(),
-                ),
-            ];
-
-            // Best-effort: at least one delete should succeed
-            let ret = unsafe { libc::kevent(kqfd, changes.as_ptr(), 2, std::ptr::null_mut(), 0, std::ptr::null()) };
-            // ret < 0 with ENOENT is acceptable (filter wasn't registered)
-            let _ = ret;
+                );
+                let _ = unsafe { libc::kevent(kqfd, &change, 1, std::ptr::null_mut(), 0, std::ptr::null()) };
+            }
             true
         })
     }
@@ -364,7 +370,10 @@ mod platform {
 
             for i in 0..n as usize {
                 let ev = &events[i];
-                let ev_fd = ev.ident as i64;
+                let raw = ev.ident as i32;
+                let ev_fd = KQUEUE_CALLERS
+                    .with(|c| c.borrow().get(&(loop_fd, raw)).copied())
+                    .unwrap_or(raw as i64);
                 let ev_token = ev.udata as i64;
                 let ready: i64 = if ev.filter == libc::EVFILT_READ {
                     0 // Read
@@ -402,6 +411,7 @@ mod platform {
             let mut fds = fds.borrow_mut();
             if let Some(kqfd) = fds.remove(&loop_fd) {
                 unsafe { libc::close(kqfd) };
+                KQUEUE_CALLERS.with(|c| c.borrow_mut().retain(|(lp, _), _| *lp != loop_fd));
                 true
             } else {
                 false
@@ -416,6 +426,7 @@ mod platform {
                 unsafe { libc::close(kqfd) };
             }
         });
+        KQUEUE_CALLERS.with(|c| c.borrow_mut().clear());
     }
 
     pub fn backend_name() -> &'static str {
@@ -916,9 +927,9 @@ pub fn rt_event_ports_close_interp(args: &[Value]) -> Result<Value, CompileError
     }
 }
 
-// Linux only: the epoll backend must resolve interpreter socket handles
-// (1000+) to raw fds before epoll_ctl, and report the caller's handle back.
-#[cfg(all(test, target_os = "linux"))]
+// epoll and kqueue backends must resolve interpreter socket handles
+// (1000+) to raw fds before epoll_ctl / kevent, and report the caller's handle back.
+#[cfg(all(test, any(target_os = "linux", target_os = "macos", target_os = "freebsd")))]
 mod handle_mapping_tests {
     use super::*;
     use crate::interpreter::rt_io_udp_bind_interp;
