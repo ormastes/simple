@@ -674,9 +674,9 @@ val _TTF_BLOB_CACHE_LIMIT: i32 = 16
 
 val _TTF_FACE_CACHE_LIMIT: i32 = 24
 
-val _TTF_RESOLVE_CACHE_LIMIT: i32 = 64
+val _TTF_RESOLVE_CACHE_LIMIT: i32 = 128
 
-val _TTF_GLYPH_DM_SIZE: i32 = 512
+val _TTF_GLYPH_DM_SIZE: i32 = 2048
 
 fn _ttf_empty_cmap12() -> CmapFormat12:
     CmapFormat12(group_count: 0u32, start_codes: [], end_codes: [], start_glyph_ids: [])
@@ -758,9 +758,10 @@ fn _ttf_rasterize_glyph_phased(face: _TtfFaceEntry, gid: u32, font_size: i32, fo
     var has_outline = false
     var used_hinted = false
     # Up to Skia's SK_MAX_SIZE_FOR_LCDTEXT (48 px, `FONT_LCD_MAX_SIZE_PX` in
-    # font_renderer.spl) Chrome 159 draws the light-autohinted outline (y
-    # knots at the milli size), the outline the cpu_simd and vulkan lanes
-    # take. This lane scans that outline for plain gray coverage (the LCD
+    # font_renderer.spl) Chrome 159 draws the light-autohinted outline (the
+    # Latin autohinter port at the 26.6 size, sfnt_af_latin.spl; the knot
+    # hinter for a Devanagari-gated font), the outline the cpu_simd and
+    # vulkan lanes take. This lane scans that outline for plain gray coverage (the LCD
     # gray is FIR-blurred: no 16 px stem reaches full coverage). Above 48 px,
     # and for synthetic bold/italic, the plain outline stays: an exact-area
     # scan of the hinted 100 px outline inks the 1/4-px rise of the stem-only
@@ -1070,7 +1071,7 @@ fn _pgt_read_blob(path: text) -> [u8]:
         if _pgt_blob_paths[i] == path:
             return _pgt_blob_bytes[i]
         i = i + 1
-    val bytes = browser_file_read_bytes(path)
+    val bytes: [u8] = browser_file_read_bytes(path) ?? []
     if _pgt_blob_paths.len() >= (_TTF_BLOB_CACHE_LIMIT as i64):
         _pgt_blob_paths = []
         _pgt_blob_bytes = []
@@ -1272,6 +1273,9 @@ fn _pgt_fallback_scale(fs: i32) -> i32:
         s = 1
     s
 
+fn _ttf_fallback_scale(fs: i32) -> i32:
+    _pgt_fallback_scale(fs)
+
 # @allow(primitive_api)
 pub fn ttf_available(resolved_font_identity: text, font_family: text, bold: bool, italic: bool) -> bool:
     _pgt_resolve_face(resolved_font_identity, font_family, bold, italic) >= 0
@@ -1310,6 +1314,204 @@ pub fn ttf_line_baseline_y_milli(line_top: i32, line_h_px: i32, font_size: i32, 
     val text_top = (2 * line_top + line_h_px - asc_px - desc_px) / 2
     text_top + asc_px
 
+fn _pgt_is_ui_symbol(cp: i64) -> bool:
+    (cp == 0x25B2 or cp == 0x25B4 or cp == 0x25B6 or cp == 0x25B8 or
+     cp == 0x25BC or cp == 0x25BE or cp == 0x25C0 or cp == 0x25C2 or
+     cp == 0x2713 or cp == 0x2714 or cp == 0x2715 or cp == 0x00D7 or
+     cp == 0x2022)
+
+fn _pgt_ui_symbol_adv_milli(eff_milli: i64) -> i64:
+    val adv = (eff_milli * 3 + 2) / 4
+    if adv < 6000: 6000 else: adv
+
+fn _pgt_seg_dist(px: f64, py: f64, ax: f64, ay: f64, bx: f64, by: f64) -> f64:
+    val vx = bx - ax
+    val vy = by - ay
+    val vv = vx * vx + vy * vy
+    if vv <= 0.000001:
+        val dx = px - ax
+        val dy = py - ay
+        return (dx * dx + dy * dy).sqrt()
+    var t = ((px - ax) * vx + (py - ay) * vy) / vv
+    if t < 0.0:
+        t = 0.0
+    elif t > 1.0:
+        t = 1.0
+    val cx = ax + t * vx
+    val cy = ay + t * vy
+    val dx = px - cx
+    val dy = py - cy
+    (dx * dx + dy * dy).sqrt()
+
+fn _pgt_edge_normal(px: f64, py: f64, qx: f64, qy: f64, mx: f64, my: f64) -> (f64, f64):
+    val ex = qx - px
+    val ey = qy - py
+    val elen = (ex * ex + ey * ey).sqrt()
+    if elen <= 0.000001:
+        return (0.0, 0.0)
+    var nx = ey / elen
+    var ny = (0.0 - ex) / elen
+    if (mx - px) * nx + (my - py) * ny > 0.0:
+        nx = 0.0 - nx
+        ny = 0.0 - ny
+    (nx, ny)
+
+fn _pgt_paint_ui_symbol_clip(
+    fb: [u32], fbw: i32, fbh: i32, pen_x: i32, baseline_y: i32,
+    font_size: i32, adv_px: i32, cp: i64, color: u32, fg_alpha: i32,
+    synth_bold: bool, clip: ClipRect
+) -> [u32]:
+    if font_size <= 0 or fg_alpha <= 0 or fbw <= 0 or fbh <= 0:
+        return fb
+    var cx0 = if clip.x0 > 0: clip.x0 else: 0
+    var cy0 = if clip.y0 > 0: clip.y0 else: 0
+    var cx1 = if clip.x1 < fbw: clip.x1 else: fbw
+    var cy1 = if clip.y1 < fbh: clip.y1 else: fbh
+    if cx0 >= cx1 or cy0 >= cy1:
+        return fb
+    val fs = font_size as f64
+    val aw = (if adv_px > 0: adv_px else: 6) as f64
+    val cx = (pen_x as f64) + aw * 0.5
+    val cy = (baseline_y as f64) - fs * 0.34
+    val is_small = (cp == 0x25B4 or cp == 0x25B8 or cp == 0x25BE or cp == 0x25C2)
+    val h = fs * (if is_small: 0.22 elif cp == 0x00D7: 0.24 else: 0.30)
+    val base_sr = if fs * 0.068 > 0.65: fs * 0.068 else: 0.65
+    val stroke_r = base_sr * (if cp == 0x2714: 1.35 elif synth_bold: 1.25 else: 1.0)
+    val bullet_r = if fs * 0.16 > 1.8: fs * 0.16 else: 1.8
+    val pad = h + stroke_r + 1.5
+    var bx0 = _ttf_floor_i32(cx - pad)
+    var by0 = _ttf_floor_i32(cy - pad)
+    var bx1 = _ttf_ceil_i32(cx + pad)
+    var by1 = _ttf_ceil_i32(cy + pad)
+    if bx0 < cx0:
+        bx0 = cx0
+    if by0 < cy0:
+        by0 = cy0
+    if bx1 > cx1:
+        bx1 = cx1
+    if by1 > cy1:
+        by1 = cy1
+    if bx0 >= bx1 or by0 >= by1:
+        return fb
+    var out = fb
+    val is_tri = (cp == 0x25B2 or cp == 0x25B4 or cp == 0x25B6 or cp == 0x25B8 or
+                  cp == 0x25BC or cp == 0x25BE or cp == 0x25C0 or cp == 0x25C2)
+    if is_tri:
+        var ax = cx
+        var ay = cy
+        var bx = cx
+        var by_p = cy
+        var vx = cx
+        var vy = cy
+        if cp == 0x25B2 or cp == 0x25B4:
+            ax = cx; ay = cy - h * 0.85
+            bx = cx - h; by_p = cy + h * 0.78
+            vx = cx + h; vy = cy + h * 0.78
+        elif cp == 0x25BC or cp == 0x25BE:
+            ax = cx - h; ay = cy - h * 0.72
+            bx = cx + h; by_p = cy - h * 0.72
+            vx = cx; vy = cy + h * 0.85
+        elif cp == 0x25B6 or cp == 0x25B8:
+            ax = cx - h * 0.72; ay = cy - h
+            bx = cx + h * 0.85; by_p = cy
+            vx = cx - h * 0.72; vy = cy + h
+        else:
+            ax = cx - h * 0.85; ay = cy
+            bx = cx + h * 0.72; by_p = cy - h
+            vx = cx + h * 0.72; vy = cy + h
+        val mx = (ax + bx + vx) / 3.0
+        val my = (ay + by_p + vy) / 3.0
+        val (n0x, n0y) = _pgt_edge_normal(ax, ay, bx, by_p, mx, my)
+        val (n1x, n1y) = _pgt_edge_normal(bx, by_p, vx, vy, mx, my)
+        val (n2x, n2y) = _pgt_edge_normal(vx, vy, ax, ay, mx, my)
+        var py = by0
+        while py < by1:
+            val pyf = (py as f64) + 0.5
+            val row_off = py * fbw
+            var px = bx0
+            while px < bx1:
+                val pxf = (px as f64) + 0.5
+                val d0 = (pxf - ax) * n0x + (pyf - ay) * n0y
+                val d1 = (pxf - bx) * n1x + (pyf - by_p) * n1y
+                val d2 = (pxf - vx) * n2x + (pyf - vy) * n2y
+                val sd = if d0 > d1: (if d0 > d2: d0 else: d2) else: (if d1 > d2: d1 else: d2)
+                if sd < 0.5:
+                    val cov_f = (0.5 - sd) * 255.0
+                    var cov = if cov_f >= 255.0: 255 else: (cov_f + 0.5) as i32
+                    if cov > 0:
+                        val eff = if fg_alpha == 255: cov else: (cov * fg_alpha + 127) / 255
+                        if eff > 0:
+                            val idx = row_off + px
+                            out[idx] = composite_over_base(color, eff, out[idx])
+                px = px + 1
+            py = py + 1
+        return out
+    if cp == 0x2022:
+        val r_outer = bullet_r + 0.5
+        val r_outer2 = r_outer * r_outer
+        var py = by0
+        while py < by1:
+            val pyf = (py as f64) + 0.5 - cy
+            val row_off = py * fbw
+            var px = bx0
+            while px < bx1:
+                val pxf = (px as f64) + 0.5 - cx
+                val d2 = pxf * pxf + pyf * pyf
+                if d2 < r_outer2:
+                    val sd = d2.sqrt() - bullet_r
+                    val cov_f = (0.5 - sd) * 255.0
+                    val cov = if cov_f >= 255.0: 255 else: (cov_f + 0.5) as i32
+                    if cov > 0:
+                        val eff = if fg_alpha == 255: cov else: (cov * fg_alpha + 127) / 255
+                        if eff > 0:
+                            val idx = row_off + px
+                            out[idx] = composite_over_base(color, eff, out[idx])
+                px = px + 1
+            py = py + 1
+        return out
+    # Two-stroke symbols: check marks (0x2713, 0x2714) and crosses (0x2715, 0x00D7)
+    var s0ax = cx
+    var s0ay = cy
+    var s0bx = cx
+    var s0by = cy
+    var s1ax = cx
+    var s1ay = cy
+    var s1bx = cx
+    var s1by = cy
+    if cp == 0x2713 or cp == 0x2714:
+        s0ax = cx - h * 0.88; s0ay = cy + h * 0.08
+        s0bx = cx - h * 0.22; s0by = cy + h * 0.72
+        s1ax = s0bx; s1ay = s0by
+        s1bx = cx + h * 0.92; s1by = cy - h * 0.72
+    else:
+        val d = h * 0.85
+        s0ax = cx - d; s0ay = cy - d
+        s0bx = cx + d; s0by = cy + d
+        s1ax = cx - d; s1ay = cy + d
+        s1bx = cx + d; s1by = cy - d
+    var py = by0
+    while py < by1:
+        val pyf = (py as f64) + 0.5
+        val row_off = py * fbw
+        var px = bx0
+        while px < bx1:
+            val pxf = (px as f64) + 0.5
+            val d0 = _pgt_seg_dist(pxf, pyf, s0ax, s0ay, s0bx, s0by)
+            val d1 = _pgt_seg_dist(pxf, pyf, s1ax, s1ay, s1bx, s1by)
+            val md = if d0 < d1: d0 else: d1
+            val sd = md - stroke_r
+            if sd < 0.5:
+                val cov_f = (0.5 - sd) * 255.0
+                val cov = if cov_f >= 255.0: 255 else: (cov_f + 0.5) as i32
+                if cov > 0:
+                    val eff = if fg_alpha == 255: cov else: (cov * fg_alpha + 127) / 255
+                    if eff > 0:
+                        val idx = row_off + px
+                        out[idx] = composite_over_base(color, eff, out[idx])
+            px = px + 1
+        py = py + 1
+    out
+
 # Measure un-`by` text run width in whole pixels using unified milli-px + kerning accumulation.
 # @allow(primitive_api)
 pub fn ttf_measure_text_px_milli(s: text, start: i32, endv: i32, font_size: i32, font_size_milli: i32, resolved_font_identity: text, font_family: text, italic: bool, bold: bool) -> i32:
@@ -1324,19 +1526,29 @@ pub fn ttf_measure_text_px_milli(s: text, start: i32, endv: i32, font_size: i32,
     val eff_milli = _ttf_effective_milli(font_size, font_size_milli)
     val s_blen = s.byte_len()
     val clamped_end = if endv < s_blen: endv else: s_blen
-    val sb = s.bytes()
-    val cps = text_codepoints(s)
+    if start < 0 or start >= clamped_end:
+        return 0
+    val aligned_slice = (
+        (start > 0 or clamped_end < s_blen) and
+        (start == 0 or s.byte_at(start) < 128 or s.byte_at(start) >= 192) and
+        (clamped_end == s_blen or s.byte_at(clamped_end) < 128 or s.byte_at(clamped_end) >= 192)
+    )
+    val work = if aligned_slice: s.substring(start, clamped_end) else: s
+    val work_start = if aligned_slice: 0 else: start
+    val work_end = if aligned_slice: work.byte_len() else: clamped_end
+    val sb = work.bytes()
+    val cps = text_codepoints(work)
     var ci: i64 = 0
     var k: i32 = 0
-    while k < start and k < s_blen:
+    while k < work_start and k < work.byte_len():
         if sb[k] < 128 or sb[k] >= 192:
             ci = ci + 1
         k = k + 1
     var pen_milli: i64 = 0
     var prev_gid: u32 = 0u32
-    val fb_step_milli: i64 = (_ttf_fallback_scale(font_size) * 6 * 1000) as i64
-    var i = start
-    while i < clamped_end:
+    val fb_step_milli: i64 = (_pgt_fallback_scale(font_size) * 6 * 1000) as i64
+    var i = work_start
+    while i < work_end:
         val b = sb[i]
         if b < 128 or b >= 192:
             val cp = if ci < cps.len(): cps[ci] else: 0
@@ -1349,7 +1561,10 @@ pub fn ttf_measure_text_px_milli(s: text, start: i32, endv: i32, font_size: i32,
                 pen_milli = pen_milli + _ttf_hmtx_advance_milli(face, gid, eff_milli, false)
                 prev_gid = gid
             elif gid == 0u32:
-                pen_milli = pen_milli + fb_step_milli
+                if _pgt_is_ui_symbol(cp):
+                    pen_milli = pen_milli + _pgt_ui_symbol_adv_milli(eff_milli)
+                else:
+                    pen_milli = pen_milli + fb_step_milli
                 prev_gid = 0u32
             else:
                 if prev_gid > 0u32:
@@ -1374,7 +1589,7 @@ pub fn ttf_paint_text_aa_clip_range_adv(
         return fb
     val face_slot = _pgt_resolve_face(resolved_font_identity, font_family, bold, italic)
     if face_slot < 0:
-        val fallback_scale = _ttf_fallback_scale(font_size)
+        val fallback_scale = _pgt_fallback_scale(font_size)
         return fb_text_thin_scaled_clip_range_adv(
             fb, fbw, fbh, x, baseline_y - 7 * fallback_scale, s, start, endv,
             color, fallback_scale, 6 * fallback_scale, 3 * fallback_scale, italic, bold, clip, by
@@ -1393,11 +1608,22 @@ pub fn ttf_paint_text_aa_clip_range_adv(
     val s_blen = s.byte_len()
     val use_by = by.len() == s_blen
     val clamped_end = if endv < s_blen: endv else: s_blen
-    val sb = s.bytes()
-    val cps = text_codepoints(s)
+    if start < 0 or start >= clamped_end:
+        return fb
+    val aligned_slice = (
+        (start > 0 or clamped_end < s_blen) and
+        (start == 0 or s.byte_at(start) < 128 or s.byte_at(start) >= 192) and
+        (clamped_end == s_blen or s.byte_at(clamped_end) < 128 or s.byte_at(clamped_end) >= 192)
+    )
+    val work = if aligned_slice: s.substring(start, clamped_end) else: s
+    val work_start = if aligned_slice: 0 else: start
+    val work_end = if aligned_slice: work.byte_len() else: clamped_end
+    val by_base = if aligned_slice: start else: 0
+    val sb = work.bytes()
+    val cps = text_codepoints(work)
     var ci: i64 = 0
     var k: i32 = 0
-    while k < start and k < s_blen:
+    while k < work_start and k < work.byte_len():
         if sb[k] < 128 or sb[k] >= 192:
             ci = ci + 1
         k = k + 1
@@ -1405,10 +1631,10 @@ pub fn ttf_paint_text_aa_clip_range_adv(
     var pen_milli: i64 = 0
     var by_pen_px: i32 = 0
     var prev_gid: u32 = 0u32
-    val fb_scale = _ttf_fallback_scale(font_size)
+    val fb_scale = _pgt_fallback_scale(font_size)
     val fb_step_milli: i64 = (6 * fb_scale * 1000) as i64
-    var i = start
-    while i < clamped_end:
+    var i = work_start
+    while i < work_end:
         val cur_pen_px = if use_by: x + by_pen_px else: x + ((pen_milli + 500) / 1000) as i32
         if cur_pen_px - font_size >= cx1:
             return out
@@ -1424,13 +1650,22 @@ pub fn ttf_paint_text_aa_clip_range_adv(
                 pen_milli = pen_milli + _ttf_hmtx_advance_milli(face, gid, eff_milli, false)
                 prev_gid = gid
             elif gid == 0u32:
-                val gi = glyph_index_for_char_code(cp)
-                if gi >= 0 and gi != 36:
-                    out = fb_glyph_thin_scaled_clip(
-                        out, fbw, fbh, cur_pen_px, baseline_y - 7 * fb_scale,
-                        gi, color, fb_scale, italic, bold, clip
+                if _pgt_is_ui_symbol(cp):
+                    val sym_adv_milli = _pgt_ui_symbol_adv_milli(eff_milli)
+                    val sym_adv_px = ((sym_adv_milli + 500) / 1000) as i32
+                    out = _pgt_paint_ui_symbol_clip(
+                        out, fbw, fbh, cur_pen_px, baseline_y, font_size, sym_adv_px,
+                        cp, color, fg_alpha, synth_bold, clip
                     )
-                pen_milli = pen_milli + fb_step_milli
+                    pen_milli = pen_milli + sym_adv_milli
+                else:
+                    val gi = glyph_index_for_char_code(cp)
+                    if gi >= 0 and gi != 36:
+                        out = fb_glyph_thin_scaled_clip(
+                            out, fbw, fbh, cur_pen_px, baseline_y - 7 * fb_scale,
+                            gi, color, fb_scale, italic, bold, clip
+                        )
+                    pen_milli = pen_milli + fb_step_milli
                 prev_gid = 0u32
             else:
                 var place_x = cur_pen_px
@@ -1474,7 +1709,7 @@ pub fn ttf_paint_text_aa_clip_range_adv(
                 pen_milli = pen_milli + _ttf_hmtx_advance_milli(face, gid, eff_milli, synth_bold and not use_by)
                 prev_gid = gid
         if use_by:
-            by_pen_px = by_pen_px + by[i]
+            by_pen_px = by_pen_px + by[by_base + i]
         i = i + 1
     out
 

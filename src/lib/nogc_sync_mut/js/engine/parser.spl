@@ -490,10 +490,11 @@ fn _js_parser_expression(raw: text) -> JsExpression:
     val expr = _js_parser_strip_outer_parens(raw.trim())
     val arrow = _js_parser_find_top_level(expr, "=>")
     val assign = _js_parser_find_top_level_assignment(expr)
+    val compound = _js_parser_find_top_level_compound_assignment(expr)
     val question = _js_parser_find_ternary_question(expr)
     val colon = if question >= 0: _js_parser_find_ternary_colon(expr, question) else: -1
     val ternary = if question >= 0 and colon > question: question else: -1
-    # Assignment, arrow functions, and conditional (`?:`) share JS
+    # Assignment, compound assignment, arrow functions, and conditional (`?:`) share JS
     # AssignmentExpression precedence, so dispatch whichever appears leftmost at
     # depth 0 so branch assignments/arrows remain inside `?:` instead of stealing.
     var best_kind = 0
@@ -504,6 +505,9 @@ fn _js_parser_expression(raw: text) -> JsExpression:
     if assign >= 0 and (best_pos < 0 or assign < best_pos):
         best_kind = 2
         best_pos = assign
+    if compound >= 0 and (best_pos < 0 or compound < best_pos):
+        best_kind = 4
+        best_pos = compound
     if ternary >= 0 and (best_pos < 0 or ternary < best_pos):
         best_kind = 3
         best_pos = ternary
@@ -513,6 +517,14 @@ fn _js_parser_expression(raw: text) -> JsExpression:
         return JsExpression.Assignment(
             target: _js_parser_expression(expr.slice(0, assign)),
             value: _js_parser_expression(expr.slice(assign + 1, expr.byte_len()))
+        )
+    if best_kind == 4:
+        val lhs_expr = _js_parser_expression(expr.slice(0, compound))
+        val op_ch = expr.slice(compound, compound + 1)
+        val rhs_expr = _js_parser_expression(expr.slice(compound + 2, expr.byte_len()))
+        return JsExpression.Assignment(
+            target: lhs_expr,
+            value: JsExpression.Binary(op: op_ch, left: lhs_expr, right: rhs_expr)
         )
     if best_kind == 3:
         return JsExpression.Ternary(
@@ -720,6 +732,12 @@ fn _js_parser_primary_at(expr: text, pos_in: i64) -> JsExpression:
         return JsExpression.ObjectExpr(properties: props)
     if expr.slice(pos, expr.byte_len()).starts_with("function"):
         return _js_parser_function_expression(expr, pos)
+    val num_end = _js_parser_number_end(expr, pos)
+    if num_end > pos:
+        val num_token = expr.slice(pos, num_end)
+        val parsed = num_token.parse_float()
+        if val Some(n) = parsed:
+            return JsExpression.Literal(value: JsValue.Number(v: n))
     val end = _js_parser_identifier_end(expr, pos)
     val token = expr.slice(pos, end)
     if token == "true":
@@ -764,6 +782,9 @@ fn _js_parser_primary_end(expr: text, pos_in: i64) -> i64:
         if body_start >= 0:
             val end = _js_parser_matching_brace(expr, body_start)
             return if end >= 0: end + 1 else: expr.len()
+    val num_end = _js_parser_number_end(expr, pos)
+    if num_end > pos:
+        return num_end
     _js_parser_identifier_end(expr, pos)
 
 fn _js_parser_find_function_body_start(expr: text, pos: i64) -> i64:
@@ -810,6 +831,39 @@ fn _js_parser_function_expression(expr: text, pos: i64) -> JsExpression:
         return JsExpression.ArrowFunction(params: params, body: [])
     val body_text = expr.slice(body_start + 1, body_end)
     JsExpression.ArrowFunction(params: params, body: js_parse_program_subset(body_text))
+
+fn _js_parser_is_digit(ch: text) -> bool:
+    ch >= "0" and ch <= "9"
+
+fn _js_parser_number_end(expr: text, pos: i64) -> i64:
+    val n = expr.len()
+    if pos >= n:
+        return pos
+    val first = expr.slice(pos, pos + 1)
+    val starts_dot_num = first == "." and pos + 1 < n and _js_parser_is_digit(expr.slice(pos + 1, pos + 2))
+    if not _js_parser_is_digit(first) and not starts_dot_num:
+        return pos
+    var i = pos
+    while i < n and _js_parser_is_digit(expr.slice(i, i + 1)):
+        i = i + 1
+    if i < n and expr.slice(i, i + 1) == ".":
+        if i + 1 < n and _js_parser_is_digit(expr.slice(i + 1, i + 2)):
+            i = i + 1
+            while i < n and _js_parser_is_digit(expr.slice(i, i + 1)):
+                i = i + 1
+    if i < n:
+        val exp_ch = expr.slice(i, i + 1)
+        if exp_ch == "e" or exp_ch == "E":
+            var j = i + 1
+            if j < n:
+                val sign_ch = expr.slice(j, j + 1)
+                if sign_ch == "+" or sign_ch == "-":
+                    j = j + 1
+            if j < n and _js_parser_is_digit(expr.slice(j, j + 1)):
+                i = j
+                while i < n and _js_parser_is_digit(expr.slice(i, i + 1)):
+                    i = i + 1
+    i
 
 fn _js_parser_identifier_end(expr: text, pos: i64) -> i64:
     var i = pos
@@ -1067,7 +1121,40 @@ fn _js_parser_find_top_level_assignment(expr: text) -> i64:
             else if depth == 0 and ch == "=":
                 val prev = if i > 0: expr.slice(i - 1, i) else: ""
                 val next = if i + 1 < expr.len(): expr.slice(i + 1, i + 2) else: ""
-                if prev != "=" and prev != "!" and prev != "<" and prev != ">" and next != "=" and next != ">":
+                if (
+                    prev != "=" and prev != "!" and prev != "<" and prev != ">" and
+                    prev != "+" and prev != "-" and prev != "*" and prev != "/" and prev != "%" and
+                    next != "=" and next != ">"
+                ):
+                    return i
+        i = i + 1
+    -1
+
+fn _js_parser_find_top_level_compound_assignment(expr: text) -> i64:
+    var depth = 0
+    var quote = ""
+    var i = 0
+    while i + 1 < expr.len():
+        val ch = expr.slice(i, i + 1)
+        if quote != "":
+            if ch == "\\":
+                i = i + 1
+            else if ch == quote:
+                quote = ""
+        else:
+            val lit_end = _js_parser_skip_literal_end(expr, i)
+            if lit_end > i:
+                i = lit_end
+            else if ch == "'" or ch == "\"":
+                quote = ch
+            else if ch == "(" or ch == "[" or ch == "{":
+                depth = depth + 1
+            else if ch == ")" or ch == "]" or ch == "}":
+                depth = depth - 1
+            else if depth == 0 and (ch == "+" or ch == "-" or ch == "*" or ch == "/" or ch == "%"):
+                val next = expr.slice(i + 1, i + 2)
+                val after = if i + 2 < expr.len(): expr.slice(i + 2, i + 3) else: ""
+                if next == "=" and after != "=":
                     return i
         i = i + 1
     -1

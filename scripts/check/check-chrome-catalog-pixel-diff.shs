@@ -37,8 +37,14 @@
 # (suffix .dprK), so the 1x ratchet is never judged against it.
 #
 # --baseline FILE is the per-page ratchet: lines of "<page> <mismatch_pct>".
-# A page whose mismatch exceeds its row by more than 0.25 points, or that has
-# no row, FAILs. Default: scripts/check/chrome_catalog_pixel_diff_baseline.
+# A page whose mismatch exceeds its row by more than max(0.02 points, 5% of
+# the row), or that has no row, or whose value is unreadable, FAILs. The bound
+# covers run-to-run noise only: three 1x runs on one binary (2026-11-28,
+# f4993f775b8) gave identical values on all 8 pages, same-code 4x repeats are
+# identical too, and the widest same-code spread on record is 3.4% of the row
+# (animation 3.47-3.59, before the capture dropped --virtual-time-budget).
+# The flat +0.25 it replaces passed css-layout 1x at 0.40 on a 0.35 row.
+# Default: scripts/check/chrome_catalog_pixel_diff_baseline.
 # <uname -s>-<uname -m>.txt when present (mismatch depends on the host's fonts
 # and Chrome build, so a baseline is per host class). Without one the verdict
 # says "compared, not judged" -- a comparison alone is not a parity claim.
@@ -63,7 +69,10 @@ SIMPLE_ONLY=0
 CHROME_TIMEOUT=90
 BACKEND="cpu_simd"
 BASELINE=""
-RATCHET_TOLERANCE="0.25"
+# Ratchet bound: max(RATCHET_FLOOR points, RATCHET_REL_PCT % of the row).
+RATCHET_FLOOR="0.02"
+RATCHET_REL_PCT="5"
+RATCHET_BOUND="+max($RATCHET_FLOOR, $RATCHET_REL_PCT% of row)"
 DEVICE_SCALE=1
 
 while [ $# -gt 0 ]; do
@@ -240,12 +249,21 @@ baseline_lane_suffix() {
 
 # ratchet_offenders <baseline> <results>: both files are "<page> <pct>" lines.
 # Prints one "<page>:<pct>>base" or "<page>:unbaselined" word per offender.
+# A page may sit above its row by max(RATCHET_FLOOR, RATCHET_REL_PCT% of the
+# row), bound included. The compare runs in whole 1/10000 points: in float awk
+# 0.35 + 0.02 is not 0.37. A row or a measurement that is not a plain decimal
+# is an offender too (fail closed), never a silent zero.
 ratchet_offenders() {
-    awk -v tol="$RATCHET_TOLERANCE" '
+    awk -v floor_pct="$RATCHET_FLOOR" -v rel="$RATCHET_REL_PCT" '
+        function units(x) { return int(x * 10000 + 0.5) }
+        function plain(x) { return x ~ /^[0-9]+(\.[0-9]+)?$/ }
         NR == FNR { if ($1 !~ /^#/ && NF >= 2) base[$1] = $2; next }
-        NF >= 2 {
+        NF >= 1 {
             if (!($1 in base)) { printf "%s:unbaselined ", $1; next }
-            if ($2 + 0 > base[$1] + tol) printf "%s:%s>%s ", $1, $2, base[$1]
+            if (!plain($2) || !plain(base[$1])) { printf "%s:unreadable ", $1; next }
+            b = units(base[$1]); tol = int(b * rel / 100)
+            if (tol < units(floor_pct)) tol = units(floor_pct)
+            if (units($2) > b + tol) printf "%s:%s>%s ", $1, $2, base[$1]
         }' "$1" "$2"
 }
 
@@ -332,10 +350,25 @@ run_selftest() {
     # Ratchet: within tolerance passes, a regression and an unbaselined page are
     # both named. Without the negative fixtures the ratchet could accept anything.
     printf 'a 2.00\nb 5.00\n' > "$st_dir/base.txt"
-    printf 'a 2.20\nb 4.00\n' > "$st_dir/ok.txt"
-    printf 'a 2.30\nb 4.00\nc 1.00\n' > "$st_dir/bad.txt"
+    printf 'a 2.10\nb 4.00\n' > "$st_dir/ok.txt"
+    printf 'a 2.11\nb 4.00\nc 1.00\n' > "$st_dir/bad.txt"
     [ "$(ratchet_offenders "$st_dir/base.txt" "$st_dir/ok.txt")" = "" ] || { echo "selftest: ratchet flagged an in-tolerance run"; return 1; }
-    [ "$(ratchet_offenders "$st_dir/base.txt" "$st_dir/bad.txt")" = "a:2.30>2.00 c:unbaselined " ] || { echo "selftest: ratchet missed a regression or an unbaselined page"; return 1; }
+    [ "$(ratchet_offenders "$st_dir/base.txt" "$st_dir/bad.txt")" = "a:2.11>2.00 c:unbaselined " ] || { echo "selftest: ratchet missed a regression or an unbaselined page"; return 1; }
+    # The bound is max(0.02, 5% of the row), bound included. The old flat +0.25
+    # passed every row below: css-layout 1x at 0.40 on a 0.35 row (measured
+    # 2026-11-28), a 4x page going from 0.02 to 0.27, and a 0.00 row at 0.25.
+    printf 'css-layout 0.35\nk4 0.02\nzero 0.00\n' > "$st_dir/tight_base.txt"
+    printf 'css-layout 0.37\nk4 0.04\nzero 0.02\n' > "$st_dir/tight_ok.txt"
+    printf 'css-layout 0.40\nk4 0.27\nzero 0.25\n' > "$st_dir/tight_old.txt"
+    printf 'css-layout 0.38\nk4 0.05\nzero 0.03\n' > "$st_dir/tight_step.txt"
+    [ "$(ratchet_offenders "$st_dir/tight_base.txt" "$st_dir/tight_ok.txt")" = "" ] || { echo "selftest: ratchet flagged a page exactly on its bound"; return 1; }
+    [ "$(ratchet_offenders "$st_dir/tight_base.txt" "$st_dir/tight_old.txt")" = "css-layout:0.40>0.35 k4:0.27>0.02 zero:0.25>0.00 " ] || { echo "selftest: ratchet passed a regression the flat +0.25 bound let through"; return 1; }
+    [ "$(ratchet_offenders "$st_dir/tight_base.txt" "$st_dir/tight_step.txt")" = "css-layout:0.38>0.35 k4:0.05>0.02 zero:0.03>0.00 " ] || { echo "selftest: ratchet passed a page 0.01 above its bound"; return 1; }
+    # Fail closed: a measurement or a row that is not a plain decimal is named.
+    printf 'a nan\nb\n' > "$st_dir/junk.txt"
+    printf 'a 2.00\nb x\n' > "$st_dir/junk_base.txt"
+    [ "$(ratchet_offenders "$st_dir/base.txt" "$st_dir/junk.txt")" = "a:unreadable b:unreadable " ] || { echo "selftest: ratchet accepted an unreadable measurement"; return 1; }
+    [ "$(ratchet_offenders "$st_dir/junk_base.txt" "$st_dir/ok.txt")" = "b:unreadable " ] || { echo "selftest: ratchet accepted an unreadable baseline row"; return 1; }
     # --device-scale: only an integer >= 1 is accepted, and k>1 gets its own
     # baseline lane while k=1 keeps the existing file names byte-for-byte.
     for st_k in 0 -1 1.5 x ''; do
@@ -358,7 +391,7 @@ if ! valid_device_scale "$DEVICE_SCALE"; then
     exit 2
 fi
 if [ "$SELFTEST" -eq 1 ]; then
-    echo "PASS — 16 selftest fixture(s) checked, newest Playwright build by number, differ discriminates and stays on the JIT within its 1 Mpx wall bound, viewport crop is explicit, zero-pixel-render is named, ratchet names regressions, device scale is validated and lane-separated"
+    echo "PASS — 23 selftest fixture(s) checked, newest Playwright build by number, differ discriminates and stays on the JIT within its 1 Mpx wall bound, viewport crop is explicit, zero-pixel-render is named, ratchet names regressions within max(0.02, 5% of row) and unreadable values, device scale is validated and lane-separated"
     exit 0
 fi
 
@@ -528,10 +561,10 @@ case "$verdict" in
         if [ -f "$BASELINE" ]; then
             offenders=$(ratchet_offenders "$BASELINE" "$OUT/.results")
             if [ -n "$offenders" ]; then
-                echo "FAIL — $compared page(s) compared, over baseline (+$RATCHET_TOLERANCE): $offenders"
+                echo "FAIL — $compared page(s) compared, over baseline ($RATCHET_BOUND): $offenders"
                 exit 1
             fi
-            verdict="$verdict, all within baseline $(basename "$BASELINE") (+$RATCHET_TOLERANCE)"
+            verdict="$verdict, all within baseline $(basename "$BASELINE") ($RATCHET_BOUND)"
         else
             verdict="$verdict (compared, not judged: no ratchet baseline for this host)"
         fi ;;

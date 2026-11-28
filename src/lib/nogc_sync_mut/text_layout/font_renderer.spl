@@ -290,15 +290,36 @@ fn _fr_scale_round(value: i64, num: i64, den: i64) -> i64:
 # 18.7199993, x100 = 1871.9999 -> 18.71 px -> 1197/64 (not 1198/64); 20.72 x100
 # rounds to 2072.0 and keeps 1326/64 (font_cache_key_size_chrome159_spec).
 # units_per_em of the selected outline face (head.unitsPerEm), 0 when unknown.
-# One-entry memo keyed on the face identity: a run asks once per draw.
+# Memo keyed on the face identity, with the last face asked in front: a run
+# asks once per draw and once per measure, and a page alternates between its
+# faces (regular, bold, mono), so one entry alone parsed the table directory
+# again on almost every measured run.
 var _fr_upem_identity: text = ""
 var _fr_upem_value: i64 = 0
+var _fr_upem_memo: Dict<text, i64> = {}
+
+# The memoized units_per_em of face `identity`, -1 when not parsed yet. Lets a
+# caller skip reading the font blob (a whole-blob copy) for a known face.
+fn _fr_units_per_em_known(identity: text) -> i64:
+    if identity == "":
+        return -1
+    if identity == _fr_upem_identity:
+        return _fr_upem_value
+    if _fr_upem_memo.has(identity):
+        _fr_upem_identity = identity
+        _fr_upem_value = _fr_upem_memo[identity]
+        return _fr_upem_value
+    -1
 val _FR_TAG_HEAD: u32 = 1751474532u32
 
 fn _fr_units_per_em(identity: text, blob: [u8]) -> i64:
     if identity == "" or blob.len() < 12:
         return 0
     if identity == _fr_upem_identity:
+        return _fr_upem_value
+    if _fr_upem_memo.has(identity):
+        _fr_upem_identity = identity
+        _fr_upem_value = _fr_upem_memo[identity]
         return _fr_upem_value
     var upem: i64 = 0
     if val Some(font) = sfnt_glyf_parse_offset_table(blob):
@@ -308,7 +329,86 @@ fn _fr_units_per_em(identity: text, blob: [u8]) -> i64:
                 upem = sfnt_glyf_read_u16_be(blob, off + 18) as i64
     _fr_upem_identity = identity
     _fr_upem_value = upem
+    _fr_upem_memo[identity] = upem
     upem
+
+fn _fr_floor_f64(value: f64) -> i64:
+    val whole = value as i64
+    if (whole as f64) > value: whole - 1 else: whole
+
+fn _fr_ceil_f64(value: f64) -> i64:
+    val whole = value as i64
+    if (whole as f64) < value: whole + 1 else: whole
+
+fn _fr_embolden_cov_bitmap(pixels: [u8], w: i64, h: i64, extra_cols: i64) -> (i64, [u8]):
+    if w <= 0 or h <= 0 or extra_cols <= 0:
+        return (w, pixels)
+    val nw = w + extra_cols
+    var out: [u8] = [0u8; nw * h]
+    var r: i64 = 0
+    while r < h:
+        val src_off = r * w
+        val dst_off = r * nw
+        var c: i64 = 0
+        while c < nw:
+            var best: i64 = if c < w: pixels[src_off + c] as i64 else: 0
+            var k: i64 = 1
+            while k <= extra_cols:
+                val sc = c - k
+                if sc >= 0 and sc < w:
+                    val cand = pixels[src_off + sc] as i64
+                    if cand > best:
+                        best = cand
+                k = k + 1
+            out[dst_off + c] = best as u8
+            c = c + 1
+        r = r + 1
+    (nw, out)
+
+fn _fr_shear_cov_bitmap(pixels: [u8], w: i64, h: i64, draw_x: i64, draw_y: i64, baseline_y_i: i64, skew: f64) -> (i64, i64, [u8]):
+    if w <= 0 or h <= 0:
+        return (draw_x, w, pixels)
+    var min_dx: i64 = 0
+    var max_dx: i64 = w
+    var first = true
+    var r: i64 = 0
+    while r < h:
+        val y_rel = (draw_y + r - baseline_y_i) as f64
+        val shift = -y_rel * skew
+        val lo = _fr_floor_f64(shift)
+        val hi = _fr_ceil_f64((w as f64) + shift)
+        if first:
+            min_dx = lo
+            max_dx = hi
+            first = false
+        else:
+            if lo < min_dx: min_dx = lo
+            if hi > max_dx: max_dx = hi
+        r = r + 1
+    val nw = max_dx - min_dx
+    if nw <= 0 or nw > 4096:
+        return (draw_x, w, pixels)
+    var out: [u8] = [0u8; nw * h]
+    r = 0
+    while r < h:
+        val y_rel = (draw_y + r - baseline_y_i) as f64
+        val shift = -y_rel * skew
+        val src_off = r * w
+        val dst_off = r * nw
+        var dc: i64 = 0
+        while dc < nw:
+            val sx = ((min_dx + dc) as f64) - shift
+            val x0 = _fr_floor_f64(sx)
+            val tx = sx - (x0 as f64)
+            val v0 = if x0 >= 0 and x0 < w: pixels[src_off + x0] as f64 else: 0.0
+            val v1 = if x0 + 1 >= 0 and x0 + 1 < w: pixels[src_off + x0 + 1] as f64 else: 0.0
+            var interp = ((v0 * (1.0 - tx) + v1 * tx) + 0.5) as i64
+            if interp < 0: interp = 0
+            if interp > 255: interp = 255
+            out[dst_off + dc] = interp as u8
+            dc = dc + 1
+        r = r + 1
+    (draw_x + min_dx, nw, out)
 
 fn _adv_cache_lookup(identity: text, font_size: i32, codepoint: i32) -> i32:
     if codepoint >= _ADV_ASCII_LO and codepoint <= _ADV_ASCII_HI:
@@ -360,14 +460,14 @@ fn _adv_cache_store(identity: text, font_size: i32, codepoint: i32, advance: i32
     _adv_overflow_val[_adv_overflow_cursor] = advance
     _adv_overflow_cursor = (_adv_overflow_cursor + 1) % _ADV_OVERFLOW_CAP
 use std.nogc_sync_mut.sffi.spl_fonts.{FontRasterizer, LayoutGlyph, SubpixelGlyphBitmap}
-use std.common.encoding.sfnt.{font_unmanaged_identity_face_spec, font_face_spec_path}
+use std.common.encoding.sfnt.{font_unmanaged_identity_face_spec, font_face_spec_path, font_face_spec_index, sfnt_face_blob}
 use std.nogc_sync_mut.text_layout.font_provider.{
     browser_font_dylib_candidates,
     browser_serif_font_candidates,
     browser_font_candidates_for_family,
     browser_font_family_category,
     browser_font_family_for_style,
-    browser_host_has_measured_linux_face_set,
+    browser_host_has_measured_face_set,
     browser_family_has_host_face,
     browser_platform_hangul_faces,
     browser_bundled_font_path_for_family
@@ -395,7 +495,7 @@ use std.nogc_sync_mut.io.time_ops.{rt_time_now_micros}
 use std.common.encoding.utf8.{text_codepoints, utf8_codepoint_byte_len}
 use std.common.gpu.font_atlas_composite.{FONT_ATLAS_COMPOSITE_PROGRAM_VERSION}
 use std.common.encoding.sfnt_glyf.{sfnt_glyph_gray_row_has_ink, SFNT_GLYPH_SELECTOR_CODEPOINT, SFNT_GLYPH_SELECTOR_INDEX, sfnt_blob_glyph_advances_into, sfnt_blob_glyph_ids_into, sfnt_glyph_advance_into, sfnt_measure_glyph_into, sfnt_render_glyph_into, sfnt_lcd_glyph_outline, sfnt_lcd_outline_frame, sfnt_lcd_outline_raster, sfnt_gray_glyph_outline, sfnt_gray_outline_frame, sfnt_gray_outline_raster, SfntLcdGlyph, SfntLcdOutline}
-use std.common.encoding.sfnt_glyf.{sfnt_font_cache_key_size_26_6, sfnt_glyf_parse_offset_table, sfnt_glyf_find_table, sfnt_glyf_read_u16_be}
+use std.common.encoding.sfnt_glyf.{sfnt_font_cache_key_size_26_6, sfnt_font_cache_key_milli_px, sfnt_subpixel_pen_split_milli, sfnt_glyf_parse_offset_table, sfnt_glyf_find_table, sfnt_glyf_read_u16_be, sfnt_glyf_cmap_ids_into, sfnt_glyf_measure_codepoint_advances_kerned}
 use std.common.encoding.font_registry.{FontAssetCandidate, FontAssetRuntimeValidation, clear_registered_selected_font_fixtures, register_selected_font_fixture, selected_font_asset_candidates, selected_font_asset_candidate_for_path, selected_font_asset_candidate_for_identity, selected_font_asset_for_language_category, selected_font_asset_identity, selected_font_asset_identity_for_path, selected_font_asset_local_path_for_identity, selected_font_asset_physical_path, selected_font_language_ranks, selected_font_simple_tuple_accepted, validate_selected_font_asset}
 use std.common.encoding.sfnt_kern.{sfnt_blob_kern_face_info, sfnt_kern_face_pair_milli_px, sfnt_kern_face_pair_size_milli_px, sfnt_blob_line_metric_units, sfnt_line_metric_units_normal_line_height_px, sfnt_line_metric_units_ascent_descent_px, sfnt_line_metric_units_normal_line_height_milli_px, sfnt_line_metric_units_ascent_descent_milli_px, sfnt_line_metric_units_ascent_descent_device_px}
 use std.common.encoding.utf8.{text_codepoints}
@@ -447,6 +547,13 @@ class ResolvedFontMetrics:
     # A mid-line run's LCD pen phase is derived from it (Chrome 159 lays the
     # line out fractionally; see inline_run_pen_origin_chrome159_spec).
     width_milli: i64 = -1
+    # EXACT run width in 2^-20 px, taken from the run's font-unit sum (never
+    # from a milli value), or -1 when the run has no such sum (shaped,
+    # off-grid or spaced runs). Chrome rounds an inline item's width UP to a
+    # LayoutUnit (1/64 px); a milli-px width is not exact enough to do that:
+    # `button` (16 px DejaVu Sans Mono) is exactly 3699/64 px and reads 57.797
+    # or 57.798 in milli, one LayoutUnit up after a ceil.
+    width_q20: i64 = -1
     # A shaped run's exact glyph pens in 1/64 px, one per glyph; [] when the
     # run is not shaped. Paint derives the 1x quarter-px LCD phase and the
     # device pen floor(k x pen) from it without shaping again.
@@ -780,13 +887,15 @@ fn _registered_selected_font_bytes(path: text) -> ([u8], bool):
     _browser_default_font_lock_release(active_lock)
     ([], false)
 
-fn font_renderer_registered_selected_bytes_only() -> bool:
+# reason: exposes registered-bytes-only runtime mode predicate across text_layout facade.
+# @allow(primitive_api)
+pub fn font_renderer_registered_selected_bytes_only() -> bool:
     val active_lock = _browser_default_font_lock_acquire()
     val enabled = _registered_selected_fonts_only
     _browser_default_font_lock_release(active_lock)
     enabled
 
-fn font_renderer_use_registered_selected_bytes_only():
+pub fn font_renderer_use_registered_selected_bytes_only():
     """Keep freestanding consumers away from host-only file externs."""
     # Flip the flag BEFORE the first lock use: _font_mutex_acquire/_release
     # skip the real Mutex.lock()/unlock() once this is true (see their
@@ -1086,7 +1195,9 @@ fn _font_render_config_candidate(config: FontRenderConfig) -> FontAssetCandidate
         return None
     candidate
 
-fn font_render_config_selection_supported(config: FontRenderConfig) -> bool:
+# reason: exposes FontRenderConfig support gate across text_layout facade.
+# @allow(primitive_api)
+pub fn font_render_config_selection_supported(config: FontRenderConfig) -> bool:
     # Sequential explicit gates with per-gate receipts, not one mixed and/or
     # chain. ROOT CAUSE (2026-08-11, rung-(d) blocker): on the freestanding
     # entry-closure lane this single expression returned false for a config
@@ -3139,10 +3250,16 @@ class FontRenderer:
                 gi = gi + 1
             if on_grid:
                 var units: i64 = 0
+                # Steps are taken from the UNSNAPPED sums: `boundaries[gi]` is
+                # rewritten below, and a step against the snapped value would
+                # carry the whole drift up to here into one step
+                # (lcd_quarter_phase_long_run_chrome159_spec: a tie 24 glyphs in).
+                var raw_prev: i64 = boundaries[0]
                 gi = 0
                 while gi < content_len:
-                    val step = boundaries[gi + 1] - boundaries[gi]
-                    units = units + _fr_scale_round(step, upem, grid_den)
+                    val raw = boundaries[gi + 1]
+                    units = units + _fr_scale_round(raw - raw_prev, upem, grid_den)
+                    raw_prev = raw
                     boundaries[gi + 1] = _fr_scale_round(units, grid_den, upem)
                     gi = gi + 1
         boundaries
@@ -3198,23 +3315,80 @@ class FontRenderer:
     # reason: mirrors measure_text_advances(content: text, font_size: i32).
     # @allow(primitive_api)
     me measure_text_width_milli(content: text, font_size: i32) -> i64:
+        self.measure_text_width_exact(content, font_size)[0]
+
+    # `[milli, q20]`: the exact pen end of `content` in milli-px (as
+    # `measure_text_width_milli`) and in 2^-20 px. The second is the run's
+    # font-unit sum scaled once, -1 when a step is not a whole number of this
+    # face's units (fallback glyph, no-glyph estimate) or the face has no
+    # units-per-em. Each STEP is snapped to units, as `_lcd_apply_pen_phases`
+    # does: the milli sum itself drifts by up to n/2 milli.
+    # reason: mirrors measure_text_width_milli(content: text, font_size: i32).
+    # @allow(primitive_api)
+    me measure_text_width_exact(content: text, font_size: i32) -> [i64]:
         val content_cps = text_codepoints(content)
-        if content_cps.len() == 0:
-            return 0
+        val n = content_cps.len()
+        if n == 0:
+            return [0, 0]
         var run_identity: text = ""
         if val run_rasterizer = self.ttf_rasterizer:
             run_identity = run_rasterizer.cache_identity()
         val boundaries = self._text_pen_milli(content_cps, font_size, run_identity)
-        boundaries[content_cps.len()]
+        var q20: i64 = -1
+        # The memoized upem first: reading `self.selected_outline_blob`
+        # copies the whole font blob, once per measured run.
+        var upem: i64 = 0
+        if font_size > 0:
+            upem = _fr_units_per_em_known(run_identity)
+            if upem < 0:
+                upem = _fr_units_per_em(run_identity, self.selected_outline_blob)
+        if upem > 0:
+            val grid_den: i64 = (font_size as i64) * 1000
+            var units: i64 = 0
+            var on_grid = true
+            var k = 1
+            while on_grid and k <= n:
+                val step = boundaries[k] - boundaries[k - 1]
+                # `_fr_scale_round` inlined for the usual positive step.
+                val step_units = if step >= 0: (step * upem + grid_den / 2) / grid_den else: _fr_scale_round(step, upem, grid_den)
+                val back = if step_units >= 0: (step_units * grid_den + upem / 2) / upem else: _fr_scale_round(step_units, grid_den, upem)
+                val off = step - back
+                if off > 1 or off < -1:
+                    on_grid = false
+                units = units + step_units
+                k = k + 1
+            if on_grid:
+                q20 = _fr_scale_round(units, (font_size as i64) * 1048576, upem)
+        [boundaries[n], q20]
 
     # -----------------------------------------------------------------------
     # Render text into a pixel buffer (ARGB u32)
     # -----------------------------------------------------------------------
+    me _render_baseline_offset(content_cps: [i64], font_size: i32) -> i32:
+        val content_len = content_cps.len()
+        if content_len == 0:
+            return 0
+        if self.selected_outline_blob.len() > 0:
+            var ascent_meta: [i64] = [0; 20]
+            sfnt_measure_glyph_into(self.selected_outline_blob, SFNT_GLYPH_SELECTOR_CODEPOINT,
+                content_cps[0], font_size.to_i64(), ascent_meta)
+            if ascent_meta[7] == 310031 and ascent_meta[17] > 0:
+                return ascent_meta[17].to_i32()
+        var baseline: i32 = 0
+        var fi = 0
+        while fi < content_len:
+            val fg = self.get_glyph(content_cps[fi] as i32, font_size)
+            val ink_top = fg.bearing_y + fg.height
+            if ink_top > baseline:
+                baseline = ink_top
+            fi = fi + 1
+        baseline
+
     me render_text(buffer: [u32], buf_w: i32, buf_h: i32,
                    x: i32, y: i32, content: text,
                    color: u32, font_size: i32) -> [u32]:
         """Render text string into an ARGB pixel buffer with unified cumulative milli-px
-        pen stepping and kerning matching measure_text_advances."""
+        pen stepping, kerning matching measure_text_advances, and baseline alignment."""
         var out = buffer
         val content_cps = text_codepoints(content)
         val content_len = content_cps.len()
@@ -3224,14 +3398,142 @@ class FontRenderer:
         if val run_rasterizer = self.ttf_rasterizer:
             run_identity = run_rasterizer.cache_identity()
         val boundaries = self._text_pen_milli(content_cps, font_size, run_identity)
+        val baseline = self._render_baseline_offset(content_cps, font_size)
         var ci = 0
         while ci < content_len:
             val cp = content_cps[ci] as i32
             val glyph = self.get_glyph(cp, font_size)
             val pen_x = x + _milli_px_to_px(boundaries[ci])
             val draw_x = if not self.use_bitmap: pen_x + glyph.bearing_x else: pen_x
+            val draw_y = y + baseline - glyph.bearing_y - glyph.height
             if glyph.width > 0 and glyph.height > 0:
-                out = blit_glyph(out, buf_w, buf_h, draw_x, y, glyph, color)
+                out = blit_glyph(out, buf_w, buf_h, draw_x, draw_y, glyph, color)
+            ci = ci + 1
+        out
+
+    me _text_pen_milli_styled_size(content_cps: [i64], size_milli: i64, bold: bool) -> [i64]:
+        val n = content_cps.len()
+        if n == 0:
+            return [0]
+        val eff_size_milli = sfnt_font_cache_key_milli_px(size_milli)
+        val eff_sz_px = (eff_size_milli as f64) / 1000.0
+        val bold_widen_milli: i64 = if bold: (if eff_sz_px >= 24.0: 1500 else: 750) else: 0
+        var run_identity: text = ""
+        if val run_rasterizer = self.ttf_rasterizer:
+            run_identity = run_rasterizer.cache_identity()
+        if eff_size_milli % 1000 == 0 and self.selected_outline_blob.len() == 0:
+            val base = self._text_pen_milli(content_cps, (eff_size_milli / 1000) as i32, run_identity)
+            if bold_widen_milli == 0:
+                return base
+            var styled_b: [i64] = [0; n + 1]
+            var bi = 0
+            while bi <= n:
+                styled_b[bi] = base[bi] + (bi as i64) * bold_widen_milli
+                bi = bi + 1
+            return styled_b
+        if self.selected_outline_blob.len() > 0:
+            val kerned_advs = sfnt_glyf_measure_codepoint_advances_kerned(self.selected_outline_blob, content_cps, eff_sz_px, true)
+            if kerned_advs.len() == n:
+                var boundaries: [i64] = [0; n + 1]
+                var acc: f64 = 0.0
+                var ci = 0
+                while ci < n:
+                    boundaries[ci] = ((acc + (if acc >= 0.0: 0.5 else: -0.5)) as i64)
+                    acc = acc + kerned_advs[ci] * 1000.0 + (bold_widen_milli as f64)
+                    ci = ci + 1
+                boundaries[n] = ((acc + (if acc >= 0.0: 0.5 else: -0.5)) as i64)
+                return boundaries
+        val whole_sz = ((eff_size_milli + 500) / 1000) as i32
+        val base = self._text_pen_milli(content_cps, whole_sz, run_identity)
+        if bold_widen_milli == 0:
+            return base
+        var out_b: [i64] = [0; n + 1]
+        var bi = 0
+        while bi <= n:
+            out_b[bi] = base[bi] + (bi as i64) * bold_widen_milli
+            bi = bi + 1
+        out_b
+
+    me measure_text_width_size_milli(content: text, size_milli: i64, bold: bool = false) -> i64:
+        """Measure exact fractional-size run width in milli-px using SFNT kerning."""
+        val content_cps = text_codepoints(content)
+        if content_cps.len() == 0:
+            return 0
+        val boundaries = self._text_pen_milli_styled_size(content_cps, size_milli, bold)
+        boundaries[content_cps.len()]
+
+    me render_text_baseline_styled(buffer: [u32], buf_w: i32, buf_h: i32,
+                                   x_px: f64, baseline_y: f64, content: text,
+                                   color: u32, font_size_px: f64, bold: bool, italic: bool) -> [u32]:
+        """Render baseline-aligned text into ARGB buffer with fractional font sizes,
+        SFNT kerning, quarter-pixel phase snapping, and deterministic bold/italic styling."""
+        val cps = text_codepoints(content)
+        val n = cps.len()
+        if n == 0:
+            return buffer
+        val sz = if font_size_px > 0.0: font_size_px else: 12.0
+        val size_milli = (sz * 1000.0 + 0.5) as i64
+        val eff_size_milli = sfnt_font_cache_key_milli_px(size_milli)
+        val whole_px = (eff_size_milli + 500) / 1000
+        if self.selected_outline_blob.len() == 0:
+            val top_y = (baseline_y - sz * 0.8 + 0.5) as i32
+            return self.render_text(buffer, buf_w, buf_h, (x_px + 0.5) as i32, top_y, content, color, whole_px as i32)
+        val x_milli_arg: i64 = if eff_size_milli % 1000 != 0: eff_size_milli else: 0
+        val boundaries = self._text_pen_milli_styled_size(cps, eff_size_milli, bold)
+        val origin_milli = (x_px * 1000.0 + (if x_px >= 0.0: 0.5 else: -0.5)) as i64
+        val baseline_y_i = (baseline_y + (if baseline_y >= 0.0: 0.5 else: -0.5)) as i64
+        val eff_sz_px = (eff_size_milli as f64) / 1000.0
+        val bold_extra: i64 = if bold: (if eff_sz_px >= 24.0: 2 else: 1) else: 0
+        var gid_slot: i64 = -1
+        if val Some(rast) = self.ttf_rasterizer:
+            if rast.has_glyph_reads_selected_blob():
+                gid_slot = _gid_warm(rast.cache_identity(), self.selected_outline_blob)
+        var out = buffer
+        var ci = 0
+        while ci < n:
+            val cp = cps[ci] as i32
+            val pen_milli = origin_milli + boundaries[ci]
+            val split = sfnt_subpixel_pen_split_milli(pen_milli)
+            val pen_base = split[0]
+            val phase_q = split[1]
+            var sel_kind = SFNT_GLYPH_SELECTOR_CODEPOINT
+            var sel_val: i64 = cp as i64
+            if gid_slot >= 0:
+                val known_gid = _gid_lookup(gid_slot, cp)
+                if known_gid > 0:
+                    sel_kind = SFNT_GLYPH_SELECTOR_INDEX
+                    sel_val = known_gid
+            if val Some(outline) = sfnt_gray_glyph_outline(self.selected_outline_blob, sel_kind, sel_val, whole_px, x_milli_arg):
+                if val Some(g) = sfnt_gray_outline_raster(outline, phase_q):
+                    var gw = g.slg_width
+                    val gh = g.slg_height
+                    var gp = g.slg_gray
+                    var draw_x = pen_base + g.slg_bearing_x
+                    val draw_y = baseline_y_i - g.slg_bearing_y - gh
+                    if gw > 0 and gh > 0 and gp.len() == gw * gh:
+                        if italic:
+                            val sheared = _fr_shear_cov_bitmap(gp, gw, gh, draw_x, draw_y, baseline_y_i, 0.21)
+                            draw_x = sheared.0
+                            gw = sheared.1
+                            gp = sheared.2
+                        if bold and bold_extra > 0:
+                            val emb = _fr_embolden_cov_bitmap(gp, gw, gh, bold_extra)
+                            gw = emb.0
+                            gp = emb.1
+                        val styled_glyph = CachedGlyph(
+                            codepoint: cp,
+                            face_id: 0,
+                            face_generation: 0,
+                            glyph_index: -1,
+                            font_size: whole_px as i32,
+                            width: gw as i32,
+                            height: gh as i32,
+                            advance: g.slg_advance as i32,
+                            bearing_x: (draw_x - pen_base) as i32,
+                            bearing_y: g.slg_bearing_y as i32,
+                            pixels: gp
+                        )
+                        out = blit_glyph(out, buf_w, buf_h, draw_x as i32, draw_y as i32, styled_glyph, color)
             ci = ci + 1
         out
 
@@ -4254,15 +4556,17 @@ fn _resolved_font_script_language(language: text, complex_script: i32) -> text:
 # and an element style used `9 * (font_size / 8)`: 9/18/27/36 at
 # 12/16/24/32px where Chrome's Liberation Sans is 14/18/28/37.
 #
-# SCOPE: only the host the numbers were measured on
-# (`browser_host_has_measured_linux_face_set`). Elsewhere this answers 0 and
-# every caller keeps the value it had. `ResolvedFontMetrics.line_height` is
-# deliberately NOT changed, so non-web consumers (common/ui/draw_ir.spl text
-# height, widget and window-scene text) are untouched on every host.
+# SCOPE: only hosts with measured system faces
+# (`browser_host_has_measured_face_set`: Linux Chrome-159 or macOS CoreText).
+# Elsewhere this answers 0 and every caller keeps the value it had.
+# `ResolvedFontMetrics.line_height` is deliberately NOT changed, so non-web
+# consumers (common/ui/draw_ir.spl text height, widget and window-scene text)
+# are untouched on every host.
 #
-# A candidate whose file is a TrueType COLLECTION (`path#N`, macOS .ttc) has a
-# `ttcf` header, not an offset table: its units row is empty and the walk moves
-# to the next candidate. No collection is in the measured Linux stacks.
+# A candidate whose file is a TrueType collection (`path#N`, macOS .ttc) extracts
+# face `N` via `sfnt_face_blob` before reading its SFNT line metric units, and
+# applies Blink/CoreText's +15% ascent adjustment for macOS Helvetica /
+# HelveticaNeue / Times / Courier when `lineGap == 0`.
 val BROWSER_NORMAL_LINE_MEMO_LIMIT: i32 = 2048
 var _browser_normal_line_px_memo: Dict<text, i32> = {}
 var _browser_normal_line_px_memo_count: i32 = 0
@@ -4270,6 +4574,12 @@ var _browser_face_line_units_memo: Dict<text, [i64]> = {}
 var _browser_face_line_units_memo_count: i32 = 0
 
 var _browser_face_ascent_descent_memo: Dict<text, [i32]> = {}
+
+fn _browser_face_file_path(spec_path: text) -> text:
+    font_face_spec_path(spec_path)
+
+fn _browser_face_ttc_index(spec_path: text) -> i64:
+    font_face_spec_index(spec_path)
 
 # [ascent, descent] in whole px of the face `line-height: normal` resolves to
 # (the same first-existing candidate walk as `browser_normal_line_height_px`),
@@ -4299,7 +4609,7 @@ pub fn browser_face_ascent_descent_milli_px(family: text, bold: bool, italic: bo
 pub fn browser_face_ascent_descent_device_px(family: text, bold: bool, italic: bool, font_size_milli: i32, k: i32) -> [i32]:
     if font_size_milli <= 0 or font_size_milli > 512000 or k < 1:
         return []
-    if not browser_host_has_measured_linux_face_set():
+    if not browser_host_has_measured_face_set():
         return []
     val style_key = if bold and italic: "|bi|" elif bold: "|b|" elif italic: "|i|" else: "|r|"
     val key = family + style_key + font_size_milli.to_string() + (if k > 1: "@" + k.to_string() else: "")
@@ -4310,9 +4620,9 @@ pub fn browser_face_ascent_descent_device_px(family: text, bold: bool, italic: b
     val candidates = browser_font_candidates_for_family(browser_font_family_for_style(family, bold, italic))
     for candidate in candidates:
         if out.len() == 0:
-            val path = font_face_spec_path(candidate)
-            if file_exists(path):
-                val ad = sfnt_line_metric_units_ascent_descent_device_px(_browser_face_line_units(path), font_size_milli.to_i64(), k.to_i64())
+            val clean_path = _browser_face_file_path(candidate)
+            if clean_path != "" and file_exists(clean_path):
+                val ad = sfnt_line_metric_units_ascent_descent_device_px(_browser_face_line_units(candidate), font_size_milli.to_i64(), k.to_i64())
                 if ad.len() == 2:
                     out = [ad[0] as i32, ad[1] as i32]
     if memoisable and out.len() == 2:
@@ -4328,12 +4638,14 @@ pub fn browser_face_ascent_descent_device_px(family: text, bold: bool, italic: b
 # reason: family name and style flags are the web-style domain.
 # @allow(primitive_api)
 pub fn browser_face_line_units(family: text, bold: bool, italic: bool) -> [i64]:
-    if not browser_host_has_measured_linux_face_set():
+    if not browser_host_has_measured_face_set():
         return []
     for candidate in browser_font_candidates_for_family(browser_font_family_for_style(family, bold, italic)):
-        val path = font_face_spec_path(candidate)
-        if file_exists(path):
-            return _browser_face_line_units(path)
+        val clean_path = _browser_face_file_path(candidate)
+        if clean_path != "" and file_exists(clean_path):
+            val units = _browser_face_line_units(candidate)
+            if units.len() == 4:
+                return units
     []
 
 # [ascent, descent] in whole px at font_size_milli * k of a run's USED face
@@ -4356,17 +4668,29 @@ pub fn browser_used_face_line_ascent_descent_device_px(units: [i64], font_size_m
     val above = (line - ad[0] - ad[1]) / 2
     [(ad[0] + above) as i32, (line - ad[0] - above) as i32]
 
-fn _browser_face_line_units(path: text) -> [i64]:
-    if _browser_face_line_units_memo.has(path):
-        return _browser_face_line_units_memo[path]
-    val blob = file_read_bytes(path)
-    val units = sfnt_blob_line_metric_units(blob)
+fn _browser_face_line_units(spec_path: text) -> [i64]:
+    if _browser_face_line_units_memo.has(spec_path):
+        return _browser_face_line_units_memo[spec_path]
+    val clean_path = _browser_face_file_path(spec_path)
+    val face_idx = _browser_face_ttc_index(spec_path)
+    if clean_path == "" or face_idx < 0 or not file_exists(clean_path):
+        return []
+    val raw_blob = file_read_bytes(clean_path)
+    if raw_blob.len() == 0:
+        return []
+    val sfnt_blob = sfnt_face_blob(raw_blob, face_idx)
+    if sfnt_blob.len() == 0:
+        return []
+    var units = sfnt_blob_line_metric_units(sfnt_blob)
     if units.len() == 0:
         return units
+    if (clean_path.ends_with("/Helvetica.ttc") or clean_path.ends_with("/HelveticaNeue.ttc") or clean_path.ends_with("/Times.ttc") or clean_path.ends_with("/Courier.ttc")) and units.len() == 4 and units[2] == 0:
+        val extra = ((units[0] + units[1]) * 15 + 50) / 100
+        units = [units[0] + extra, units[1], units[2], units[3]]
     if _browser_face_line_units_memo_count >= 256:
         _browser_face_line_units_memo = {}
         _browser_face_line_units_memo_count = 0
-    _browser_face_line_units_memo[path] = units
+    _browser_face_line_units_memo[spec_path] = units
     _browser_face_line_units_memo_count = _browser_face_line_units_memo_count + 1
     units
 
@@ -4382,7 +4706,7 @@ pub fn browser_normal_line_height_px(family: text, bold: bool, italic: bool, fon
 pub fn browser_normal_line_height_milli_px(family: text, bold: bool, italic: bool, font_size_milli: i32) -> i32:
     if font_size_milli <= 0 or font_size_milli > 512000:
         return 0
-    if not browser_host_has_measured_linux_face_set():
+    if not browser_host_has_measured_face_set():
         return 0
     val style_key = if bold and italic: "|bi|" elif bold: "|b|" elif italic: "|i|" else: "|r|"
     val key = family + style_key + font_size_milli.to_string()
@@ -4396,9 +4720,9 @@ pub fn browser_normal_line_height_milli_px(family: text, bold: bool, italic: boo
     val candidates = browser_font_candidates_for_family(browser_font_family_for_style(family, bold, italic))
     for candidate in candidates:
         if px == 0:
-            val path = font_face_spec_path(candidate)
-            if file_exists(path):
-                val units = _browser_face_line_units(path)
+            val clean_path = _browser_face_file_path(candidate)
+            if clean_path != "" and file_exists(clean_path):
+                val units = _browser_face_line_units(candidate)
                 px = sfnt_line_metric_units_normal_line_height_milli_px(units, font_size_milli.to_i64()) as i32
     # 0 is "no face answered" (a file that was not there yet, a collection):
     # never memoised, so a later call can still succeed.
@@ -4958,7 +5282,8 @@ fn _resolve_font_metrics_with_language_config_uncached(family: text, content: te
     if _WM_TRACE: print("[rfm] at=measure shaped_valid={shaped.valid}")
     val _fr_t0 = _fr_probe_now()
     val advances = if shaped.valid: shaped.advances else: renderer.measure_text_advances(content, font_size)
-    val width_milli: i64 = if shaped.valid: -1 else: renderer.measure_text_width_milli(content, font_size)
+    val width_exact: [i64] = if shaped.valid: [-1, -1] else: renderer.measure_text_width_exact(content, font_size)
+    val width_milli: i64 = width_exact[0]
     _fr_probe_add_measure(_fr_probe_now() - _fr_t0, (codepoints.len() as i64))
     if _WM_TRACE: print("[rfm] at=measured advances={advances.len()}")
     var width = 0
@@ -4997,7 +5322,8 @@ fn _resolve_font_metrics_with_language_config_uncached(family: text, content: te
         glyph_pens_64: if valid: shaped.pens_64 else: [],
         used_face_units: if valid and shaped.valid: shaped.face_units else: [],
         shaping_required: complex_script != 0,
-        width_milli: if valid: width_milli else: -1
+        width_milli: if valid: width_milli else: -1,
+        width_q20: if valid: width_exact[1] else: -1
     )
     if resolved.valid and cacheable:
         _resolved_font_metric_store(cache_key, resolved)
@@ -5088,6 +5414,7 @@ pub fn resolve_font_metrics_with_language_milli(family: text, content: text, fon
     # `width_milli` is always kept. `_lcd_apply_pen_phases` anchors the same.
     var width_milli: i64 = -1
     var width = previous
+    var width_q20: i64 = -1
     if at_ref.width_milli >= 0 and n > 0:
         val exact = _fr_scale_round(at_ref.width_milli, s266, (ref_px as i64) * 64)
         val anchored = _milli_px_to_px_i64(exact)
@@ -5096,6 +5423,8 @@ pub fn resolve_font_metrics_with_language_milli(family: text, content: text, fon
             advances[n - 1] = last as i32
             width = anchored
             width_milli = exact
+            if at_ref.width_q20 >= 0:
+                width_q20 = _fr_scale_round(at_ref.width_q20, s266, (ref_px as i64) * 64)
     ResolvedFontMetrics(valid: true, family: at_ref.family, identity: at_ref.identity, advances: advances,
         width: width as i32, line_height: line_height as i32, reason: at_ref.reason,
-        glyph_run: at_ref.glyph_run, shaping_required: false, width_milli: width_milli)
+        glyph_run: at_ref.glyph_run, shaping_required: false, width_milli: width_milli, width_q20: width_q20)

@@ -1,0 +1,137 @@
+# @cover src/app/html_layout_compare/main.spl 80%
+# @tag: system, rendering, web, compare, electron
+# @req REQ-WEB-008
+# @evidence-display: links
+
+"""
+# Chrome (Blink/Skia) vs Pure-Simple Web HTML Layout Comparison Specification
+
+Verifies that the pure-Simple comparison runner procedurally synthesizes the
+4 shared image assets (`sunset`, `avatar`, `cube`, `star`), renders `v08`
+overlay, `v09` inline typography, and `v10` flex-wrap variation pages to
+valid PNG bitmaps through `simple_web_layout_render_html_software_pixels_with_images`,
+computes exact / near-12 / near-32 / MAD pixel parity metrics + `4x |diff|`
+heatmaps, and emits valid SDN reports by default.
+"""
+
+use std.spec.*
+use std.spec.step
+use app.html_layout_compare.main.{
+    CompareVariationSpec, CompareParityRequest, CompareParityResult, CompareRecord,
+    compare_default_resources, compare_compute_parity,
+    compare_render_variation, compare_format_report_sdn
+}
+use std.common.image.png_encode.{encode_argb_to_png_rgb}
+use std.gc_async_mut.gpu.browser_engine.simple_web_html_layout_renderer.{
+    simple_web_layout_render_html_software_pixels_with_images
+}
+use std.io_runtime.{file_exists, file_read}
+
+fn _count_distinct_colors(pixels: [u32], limit: i64) -> i64:
+    var seen: [u32] = []
+    var i: i64 = 0
+    val n = pixels.len() as i64
+    while i < n and seen.len() < limit:
+        val px = pixels[i]
+        var found = false
+        for s in seen:
+            if s == px:
+                found = true
+                break
+        if not found:
+            seen.push(px)
+        i = i + 1
+    seen.len() as i64
+
+describe "Chrome vs Pure-Simple Web HTML layout comparison app":
+
+    it "procedurally generates all 4 shared SimpleOsHostGpuImageResource assets":
+        # @req REQ-WEB-008
+        step("Generate sunset, avatar, cube, and star image resources")
+        val resources = compare_default_resources()
+        expect(resources.len()).to_equal(4)
+        expect(resources[0].image_uri).to_equal("../assets/sunset.png")
+        expect(resources[0].width).to_equal(160)
+        expect(resources[0].height).to_equal(96)
+        expect(resources[0].pixels.len()).to_equal(160 * 96)
+        expect(resources[1].image_uri).to_equal("../assets/avatar.png")
+        expect(resources[1].width).to_equal(48)
+        expect(resources[1].height).to_equal(48)
+        # Corner pixel of circular avatar has transparent alpha == 0
+        expect(resources[1].pixels[0]).to_equal(0u32)
+        expect(resources[2].image_uri).to_equal("../assets/cube.png")
+        expect(resources[2].pixels.len()).to_equal(120 * 80)
+        expect(resources[3].image_uri).to_equal("../assets/star.png")
+        expect(resources[3].pixels.len()).to_equal(20 * 20)
+
+    it "renders v08 overlay, v09 inline typography, and v10 flex-wrap variations to PNGs":
+        # @req REQ-WEB-008
+        step("Verify variation HTML files exist under examples/browser/html_layout_compare/pages")
+        val p08 = "examples/browser/html_layout_compare/pages/v08.html"
+        val p09 = "examples/browser/html_layout_compare/pages/v09.html"
+        val p10 = "examples/browser/html_layout_compare/pages/v10.html"
+        expect(file_exists(p08)).to_equal(true)
+        expect(file_exists(p09)).to_equal(true)
+        expect(file_exists(p10)).to_equal(true)
+        val resources = compare_default_resources()
+
+        step("Render v08, v09, and v10 at 520x340 with procedural image resources")
+        for path in [p08, p09, p10]:
+            val html = file_read(path)
+            val px = simple_web_layout_render_html_software_pixels_with_images(html, 520, 340, resources)
+            expect(px.len()).to_equal(520 * 340)
+            expect(_count_distinct_colors(px, 8)).to_be_greater_than(2)
+            val png = encode_argb_to_png_rgb(px, 520, 340)
+            expect(png.len()).to_be_greater_than(100)
+            # PNG signature bytes: 137 80 78 71
+            expect(png[0] as i64).to_equal(137)
+            expect(png[1] as i64).to_equal(80)
+            expect(png[2] as i64).to_equal(78)
+            expect(png[3] as i64).to_equal(71)
+
+    it "computes pixel parity heatmaps and formats SDN comparison reports":
+        # @req REQ-WEB-008
+        step("Verify exact match produces 100% parity and zero MAD")
+        val a = [0xFF102030u32, 0xFF405060u32, 0xFF708090u32, 0xFFA0B0C0u32]
+        val exact_res = compare_compute_parity(CompareParityRequest(
+            width: 2, height: 2, chrome_argb: a, simple_argb: a
+        ))
+        expect(exact_res.ok).to_equal(true)
+        expect(exact_res.exact_pct_x100).to_equal(10000)
+        expect(exact_res.near12_pct_x100).to_equal(10000)
+        expect(exact_res.mad_x100).to_equal(0)
+        expect(exact_res.diff_argb.len()).to_equal(4)
+
+        step("Verify partial mismatch computes near12, near32, MAD, and 4x diff pixels")
+        val b = [0xFF102030u32, 0xFF485060u32, 0xFF905060u32, 0xFFA0B0C0u32]
+        val diff_res = compare_compute_parity(CompareParityRequest(
+            width: 2, height: 2, chrome_argb: a, simple_argb: b
+        ))
+        expect(diff_res.ok).to_equal(true)
+        expect(diff_res.exact_pct_x100).to_equal(5000)
+        expect(diff_res.near12_pct_x100).to_equal(7500)
+        expect(diff_res.mad_x100).to_be_greater_than(0)
+
+        step("Verify SDN report table formatting includes summary and variations header")
+        val rec = CompareRecord(
+            spec: CompareVariationSpec(
+                id: "v08",
+                title: "Positioned Pills, Caption Overlay & Z-Index",
+                width: 520,
+                height: 340,
+                category: "Overlays & Inline",
+                tags: ["Z-Index"],
+                html_path: "examples/browser/html_layout_compare/pages/v08.html"
+            ),
+            html: "",
+            simple_bytes: 12000,
+            chrome_bytes: 14000,
+            diff_bytes: 15000,
+            chrome_present: true,
+            parity: diff_res,
+            render_ms: 12
+        )
+        val sdn = compare_format_report_sdn([rec])
+        expect(sdn).to_contain("summary |variations, chrome_compared, engine|")
+        expect(sdn).to_contain("variations |id, title, width, height, chrome_present,")
+        expect(sdn).to_contain("v08, \"Positioned Pills, Caption Overlay & Z-Index\", 520, 340, true, 50.00, 75.00")

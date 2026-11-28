@@ -1,6 +1,6 @@
 #!/bin/sh
 # check-extern-return-shape.shs — ratchet: an `rt_*` extern name may have only
-# ONE return shape across src/**.
+# ONE return shape across src/** and examples/**.
 #
 # Why: the seed flattens modules and resolves an extern's return type by bare
 # name. PR #12057 made a *direct* call use its own module's declaration, but a
@@ -34,6 +34,10 @@
 # conflicting name: `name<TAB>shape | shape ...` (sorted). FAIL on a NEW
 # conflicting name, on a CHANGED shape set, and on a STALE row (name no longer
 # conflicts) — a baseline that no longer describes the tree stops ratcheting.
+#
+# examples/** scope (2026-11-28): 24 conflicts newly visible (23 NEW + 1 CHANGED, 23 -> 46 names) are
+# baselined, not rewritten: examples/ are freestanding hardware/OS/GUI demos whose rt_* shapes
+# (u32/u64/u16 port+MMIO+fb widths) mirror their targets and have no single canonical shape yet.
 #
 # Usage: check-extern-return-shape.shs [--rev REV] [--root DIR]
 #        check-extern-return-shape.shs --generate-baseline [--rev REV]   (reviewed updates only)
@@ -90,17 +94,17 @@ normalize() {
 
 # census for repo $1 at rev $2 -> decls file $3; prints decl count
 census() {
-    git -C "$1" grep -n -I -E 'extern[[:space:]]+fn[[:space:]]+rt_' "$2" -- 'src/**/*.spl' ':(exclude)**/vendor/**' ':(exclude)src/compiler_rust/lib/std/**' 2>/dev/null \
+    git -C "$1" grep -n -I -E 'extern[[:space:]]+fn[[:space:]]+rt_' "$2" -- 'src/**/*.spl' 'examples/**/*.spl' ':(exclude)**/vendor/**' ':(exclude)src/compiler_rust/lib/std/**' 2>/dev/null \
         | sed "s#^$2:##" | normalize > "$3.raw"
     # Non-generic type aliases (`type NAME = TARGET`), same pathspec. An alias
     # is substituted only when every definition of NAME tree-wide names the
     # same TARGET and no struct/class/enum/union/trait shares NAME (a
     # nominal type of that name could be in scope instead); otherwise the
     # alias stays as written.
-    git -C "$1" grep -h -I -E '^[[:space:]]*(pub[[:space:]]+)?type[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=' "$2" -- 'src/**/*.spl' ':(exclude)**/vendor/**' ':(exclude)src/compiler_rust/lib/std/**' 2>/dev/null \
+    git -C "$1" grep -h -I -E '^[[:space:]]*(pub[[:space:]]+)?type[[:space:]]+[A-Za-z_][A-Za-z0-9_]*[[:space:]]*=' "$2" -- 'src/**/*.spl' 'examples/**/*.spl' ':(exclude)**/vendor/**' ':(exclude)src/compiler_rust/lib/std/**' 2>/dev/null \
         | awk '{ s=$0; sub(/#.*$/,"",s); sub(/^[ \t]*(pub[ \t]+)?type[ \t]+/,"",s); p=index(s,"="); n=substr(s,1,p-1); t=substr(s,p+1)
                  gsub(/[ \t]/,"",n); gsub(/[ \t]/,"",t); if (n!="" && t!="") print n "\t" t }' \
-        | { cat; git -C "$1" grep -h -I -o -E '^[[:space:]]*(pub[[:space:]]+)?(struct|class|enum|union|trait)[[:space:]]+[A-Za-z_][A-Za-z0-9_]*' "$2" -- 'src/**/*.spl' ':(exclude)**/vendor/**' ':(exclude)src/compiler_rust/lib/std/**' 2>/dev/null | awk '{ print $NF "\t#nominal" }'; } \
+        | { cat; git -C "$1" grep -h -I -o -E '^[[:space:]]*(pub[[:space:]]+)?(struct|class|enum|union|trait)[[:space:]]+[A-Za-z_][A-Za-z0-9_]*' "$2" -- 'src/**/*.spl' 'examples/**/*.spl' ':(exclude)**/vendor/**' ':(exclude)src/compiler_rust/lib/std/**' 2>/dev/null | awk '{ print $NF "\t#nominal" }'; } \
         | sort -u | awk -F'\t' '{ c[$1]++; t[$1]=$2 } END { for (n in c) if (c[n]==1 && t[n]!="#nominal") print n "\t" t[n] }' > "$3.alias"
     alias_resolve "$3.alias" < "$3.raw" > "$3"
     rm -f "$3.raw" "$3.alias"
@@ -176,6 +180,9 @@ selftest() {
     printf 'extern fn rt_one(x: i64) -> u8\n' >> "$r/src/b/m.spl"; git -C "$r" commit -qam new
     out=$(MODE=check run_check "$r" HEAD "$st/base_ok"); echo "$out" | tail -1 | grep -q '^FAIL' && echo "$out" | grep -q 'NEW: rt_one' || { echo "selftest: new conflict must FAIL naming rt_one: $out"; fails=1; }
     git -C "$r" reset -q --hard HEAD~1
+    mkdir -p "$r/examples/e"; printf 'extern fn rt_one(x: i64) -> u8\n' > "$r/examples/e/m.spl"; git -C "$r" add -A; git -C "$r" commit -qm ex
+    out=$(MODE=check run_check "$r" HEAD "$st/base_ok"); echo "$out" | tail -1 | grep -q '^FAIL' && echo "$out" | grep -q 'NEW: rt_one' || { echo "selftest: conflict in examples/ must FAIL naming rt_one (examples/ scanned): $out"; fails=1; }
+    git -C "$r" reset -q --hard HEAD~1
     printf 'rt_amb\tAmb | i64\nrt_dup\ti64 | text?\nrt_nom\ti64? | Nom?\nrt_gone\ti64 | u8\n' > "$st/base_stale"
     out=$(MODE=check run_check "$r" HEAD "$st/base_stale"); echo "$out" | grep -q 'STALE: rt_gone' || { echo "selftest: stale row must FAIL: $out"; fails=1; }
     e="$st/empty"; mkdir -p "$e/src"; git -C "$e" init -q; git -C "$e" config core.autocrlf false; git -C "$e" config user.email t@t; git -C "$e" config user.name t
@@ -186,7 +193,7 @@ selftest() {
 }
 
 if ! selftest; then echo "FAIL — selftest failed"; exit 1; fi
-[ "$MODE" = selftest ] && { echo "PASS — selftest: 4 fixture(s) checked"; exit 0; }
+[ "$MODE" = selftest ] && { echo "PASS — selftest: 5 fixture(s) checked"; exit 0; }
 git -C "$ROOT" rev-parse -q --verify "$REV^{commit}" >/dev/null 2>&1 || { echo "ERROR — nothing was checked (cannot resolve rev $REV)"; exit 2; }
 run_check "$ROOT" "$REV" "$BASELINE"
 exit $?

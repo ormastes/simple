@@ -1,0 +1,81 @@
+"""
+## Purpose and audience
+Purpose: EXPECTED RED, `@tag:in-development`. Chrome 159 paints the last ink
+column of the last glyph of a 1x LCD text run; the engine leaves it white.
+Measured on the fixture of `lcd_af_latin_hinted_outline_chrome159_spec.spl`:
+after the autohinter port these four px are the whole mismatch of its four
+rows (one per row), and the base misses them too.
+Audience: web renderer / font rasteriser maintainers.
+
+Chrome oracle (Chrome for Testing 159, `--headless=new --disable-gpu
+--force-device-scale-factor=1 --window-size=400,300`, `color:#000` on white,
+`font-family:'Liberation Sans'`, `white-space:pre`, `line-height:20px`, each
+`<p>` absolutely positioned at `left:10px`).
+
+| top | size | text | last ink column (x,y) | Chrome | engine |
+|-----|------|------|-----------------------|--------|--------|
+| 6 | 16 px | `a b g m o p s y` | (115,12) | cff7ff | ffffff |
+| 30 | 16 px | `employs gamma` | (127,44) | 4f9fdf | ffffff |
+| 54 | 13 px | `a b g m o p s y  employs gamma` | (198,67) | e7ffff | ffffff |
+| 78 | 14 px | same | (212,92) | 67bfef | ffffff |
+
+Facts for the fix: the column is painted when more text follows in the same
+run (`employs gamma l`: 0 mismatching px on the `a`), and an explicit
+`width:300px` on the block does not bring it back, so it is the run's own
+extent, not the box. A lone `a` at `left:10px` loses (19,134) c7efff; ` a`
+loses (23,164) 4f9fdf.
+
+Tolerance: 8 levels per channel, the catalog differ's own tolerance
+(src/app/ui/chrome_showcase/pixel_diff.spl TOLERANCE).
+"""
+
+"""
+Traceability: REQ-WEB-TEXT-HINT-003 - Draw IR LCD text rasterises each glyph's coverage like Chrome's Skia LCD16 path.
+"""
+# @tag: unit, browser_engine, text, engine2d, chrome159
+# @tag:in-development
+# Tracks: doc/08_tracking/bug/db/web_render_lcd_run_end_ink_column_not_painted_2026-11-28.sdn
+use std.spec.*
+use std.io_runtime.{file_exists}
+use std.gc_async_mut.gpu.browser_engine.simple_web_renderer.{
+    simple_web_render_html_to_pixels_with_engine2d_backend
+}
+
+val SANS: text = "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf"
+val W: i32 = 400
+val H: i32 = 300
+val TOL: i64 = 8
+
+fn _p(top: i32, size: i32, content: text) -> text:
+    "<p style=\"position:absolute;left:10px;top:{top}px;margin:0;white-space:pre;color:#000;font-size:{size}px;line-height:20px\">{content}</p>"
+
+fn _page() -> text:
+    "<!doctype html><html><body style=\"margin:0;background:#fff;font-family:'Liberation Sans'\">" + _p(6, 16, "a b g m o p s y") + _p(30, 16, "employs gamma") + _p(54, 13, "a b g m o p s y  employs gamma") + _p(78, 14, "a b g m o p s y  employs gamma") + "</body></html>"
+
+fn _chan(v: u32, shift: u32) -> i64:
+    ((v >> shift) & 0xFFu32).to_i64()
+
+# Every channel of pixel (x, y) is within TOL of Chrome's `want`.
+fn _near(px: [u32], x: i32, y: i32, want: u32) -> bool:
+    val got = px[y * W + x] & 0xFFFFFFu32
+    var ok = true
+    var shift: u32 = 0u32
+    while shift <= 16u32:
+        var d = _chan(got, shift) - _chan(want, shift)
+        if d < 0: d = 0 - d
+        if d > TOL: ok = false
+        shift = shift + 8u32
+    ok
+
+describe "1x LCD last ink column of a run against Chrome 159":
+    it "AC-1: the last glyph of each run keeps its last ink column":
+        if not file_exists(SANS):
+            skip("no Liberation Sans on this host")
+            return
+        val px = simple_web_render_html_to_pixels_with_engine2d_backend(_page(), W, H, "cpu_simd")
+        expect(px.len()).to_equal((W * H).to_i64())
+        step("(115,12) cff7ff, (127,44) 4f9fdf, (198,67) e7ffff, (212,92) 67bfef")
+        expect(_near(px, 115, 12, 0xcff7ffu32)).to_equal(true)
+        expect(_near(px, 127, 44, 0x4f9fdfu32)).to_equal(true)
+        expect(_near(px, 198, 67, 0xe7ffffu32)).to_equal(true)
+        expect(_near(px, 212, 92, 0x67bfefu32)).to_equal(true)

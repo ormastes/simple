@@ -706,7 +706,7 @@ impl Lowerer {
             if !matches!(self.module.types.get(func_hir.ty), Some(HirType::Function { .. })) {
                 if let (Expr::Identifier(_), HirExprKind::Global(symbol)) = (callee, &func_hir.kind) {
                     if let Some(row) = self.fn_param_array_elems.get(symbol) {
-                        self.reject_u8_arrays_in_row(row, &args_hir, callee_name)?;
+                        self.reject_u8_arrays_in_row(row, None, &args_hir, callee_name)?;
                     }
                 }
             }

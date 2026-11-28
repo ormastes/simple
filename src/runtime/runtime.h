@@ -1612,6 +1612,17 @@ SplArray* rt_linux_group_collect_v1(int64_t token);
 /* ===== Process Piped (editor LSP transport) ===== */
 
 int64_t     rt_process_spawn_piped(const char* cmd, SplArray* args);
+/* Split-stderr / byte-safe piped family (runtime_process.c; Rust twin in
+ * compiler_rust/runtime/src/piped_process_observer.rs). Spawn gives stderr its
+ * own pipe (legacy spawn merges it into stdout on Windows, inherits on POSIX).
+ * Every read/write is one nonblocking step; byte reads return [] when idle.
+ * stderr state: -2 not separately piped, -1 error/unknown, 0 open, 1 EOF. */
+int64_t     rt_process_spawn_piped_split_v1(const char* cmd, int64_t cmd_len, SplArray* args);
+SplArray*   rt_process_read_stdout_bytes_v1(int64_t pid, int64_t max_bytes);
+SplArray*   rt_process_read_stderr_bytes_v1(int64_t pid, int64_t max_bytes);
+const char* rt_process_read_stderr(int64_t pid);
+int64_t     rt_process_stderr_state_v1(int64_t pid);
+int64_t     rt_process_write_stdin_bytes_some_v1(int64_t pid, SplArray* data, int64_t offset, int64_t max_bytes);
 /* Additive v1 receipt [version=1, state=-1/0/1, actual_exit_code, native_error].
  * Query only before close; success requires drained stdout and observed/reaped
  * leader status. No status is fabricated from ECHILD or close success. */
@@ -2518,6 +2529,7 @@ void     rt_rank_select_free(int64_t handle);
 /* Workspace storage ABI: tagged text, scalar leases, no cleanup side effects. */
 #include "runtime_workspace_storage_v1.h"
 #include "runtime_retained_private_credential_v1.h"
+#include "runtime_privdrop_v1.h"
 
 /* Forward decl: RtCoreString is defined in runtime_native.c */
 struct RtCoreString;

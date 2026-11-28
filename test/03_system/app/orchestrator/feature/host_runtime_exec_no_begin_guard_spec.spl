@@ -117,8 +117,8 @@ describe "Qualified no-BEGIN child barrier projection":
         no_begin_guard_charged_v3(current)
         no_begin_cancel_fixture_close_v3(fixture, current)
 
-    it "reopens exact parent completion with qualified child and preserves unrelated no-effect release":
-        step("reopens exact parent completion with qualified child and preserves unrelated no-effect release")
+    it "reopens exact parent completion with qualified child, keeps unrelated no-effect quarantined, releases it on continuity reopen":
+        step("reopens exact parent completion with qualified child, keeps unrelated no-effect quarantined, releases it on continuity reopen")
         val fixture = no_begin_cancel_fixture_v3(Some(9223372036854775807))
         val cancelled = no_begin_cancel_run_v3(fixture)
         expect(cancelled.error).to_equal("")
@@ -154,12 +154,34 @@ describe "Qualified no-BEGIN child barrier projection":
         val capacity = current.capacity.ledger.capacity
         host_owned_journal_closed_v2(current.capacity)
         current.capacity = host_owned_journal_ready_v2(host_capacity_owner_open_quarantined_owned_v2(current.capacity.journal.root, capacity, "e".repeat(64), 100))
+        # Owner decision 2026-11-28 (750356ce7c6): a quarantined reopen releases
+        # only rows with completion proof; the unrelated cancelled row stays
+        # Uncertain and charged until a continuity-proven path releases it.
         var parent_released = false
+        var unrelated_uncertain = false
+        var rows_seen = 0
+        for row in current.capacity.ledger.reservations:
+            if row.operation_id == fixture.begin.packet.parent_binding.host_operation.id:
+                parent_released = row.state == HostReservationStateV1.Released
+                rows_seen = rows_seen + 1
+            if row.operation_id == operation.id:
+                unrelated_uncertain = row.state == HostReservationStateV1.Uncertain
+                rows_seen = rows_seen + 1
+        expect(rows_seen).to_equal(2)
+        assert(parent_released)
+        assert(unrelated_uncertain)
+        expect(host_available_capacity_v1(current.capacity.ledger).unwrap().memory_bytes).to_equal(capacity.memory_bytes - 1)
+        assert(host_cleanup_settled_v1(current, cleaned.receipt.unwrap()).unwrap())
+        # Documented non-quarantine path: an ordinary continuity-proven open
+        # releases the exact admitted->cancelled abort outcome with no child barrier.
+        host_owned_journal_closed_v2(current.capacity)
+        current.capacity = host_owned_journal_ready_v2(host_capacity_owner_open_owned_v2(current.capacity.journal.root, capacity, "f".repeat(64), 100, true))
+        var parent_released_again = false
         var unrelated_released = false
         for row in current.capacity.ledger.reservations:
-            if row.operation_id == fixture.begin.packet.parent_binding.host_operation.id: parent_released = row.state == HostReservationStateV1.Released
+            if row.operation_id == fixture.begin.packet.parent_binding.host_operation.id: parent_released_again = row.state == HostReservationStateV1.Released
             if row.operation_id == operation.id: unrelated_released = row.state == HostReservationStateV1.Released
-        assert(parent_released)
+        assert(parent_released_again)
         assert(unrelated_released)
         expect(host_available_capacity_v1(current.capacity.ledger).unwrap().memory_bytes).to_equal(capacity.memory_bytes)
         assert(host_cleanup_settled_v1(current, cleaned.receipt.unwrap()).unwrap())

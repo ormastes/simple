@@ -1,0 +1,207 @@
+# Privilege drop + privilege-dropping spawn (Linux, FreeBSD).
+#
+# Runtime contract: src/runtime/runtime_privdrop_v1.h (C) and its Rust twin
+# src/compiler_rust/runtime/src/value/sffi/privdrop_v1.rs; the interpreter
+# delegates to the Rust twin. Runtime handles never leave this module: callers
+# hold plain values, so a forged or reused handle cannot reach the runtime.
+#
+# Fixed drop order, identical in-process and in the spawned child:
+#   setgroups(explicit list) -> setresgid -> setresuid -> verify
+# where verify requires real/effective/saved ids equal the target, the group
+# set equal the requested set, and setresuid(0)/setresgid(0)/setuid(0) refused.
+# User names are resolved in the PARENT (getpwnam_r + getgrouplist); the child
+# runs no name service code. The spawn's child sequence is
+#   [setsid] -> [openat(dir_fd, leaf, O_WRONLY|O_NOFOLLOW) <- own pid] ->
+#   every inherited fd >= 3 close-on-exec -> drop -> execve(absolute path, env)
+# with failures reported back over a close-on-exec pipe as typed errors.
+# Windows and other hosts: every call is Err(step: Unsupported).
+
+extern fn rt_privcred_new_v1(uid: i64, gid: i64) -> i64
+extern fn rt_privcred_from_user_v1(name: text) -> i64
+extern fn rt_privcred_add_group_v1(cred: i64, gid: i64) -> i64
+extern fn rt_privcred_uid_v1(cred: i64) -> i64
+extern fn rt_privcred_gid_v1(cred: i64) -> i64
+extern fn rt_privcred_group_count_v1(cred: i64) -> i64
+extern fn rt_privcred_group_at_v1(cred: i64, index: i64) -> i64
+extern fn rt_privcred_drop_self_v1(cred: i64) -> i64
+extern fn rt_privcred_free_v1(cred: i64) -> i64
+extern fn rt_privspawn_new_v1(path: text) -> i64
+extern fn rt_privspawn_arg_v1(spawn: i64, arg: text) -> i64
+extern fn rt_privspawn_env_v1(spawn: i64, entry: text) -> i64
+extern fn rt_privspawn_cred_v1(spawn: i64, cred: i64) -> i64
+extern fn rt_privspawn_join_procs_v1(spawn: i64, dir_fd: i64, name: text) -> i64
+extern fn rt_privspawn_new_session_v1(spawn: i64) -> i64
+extern fn rt_privspawn_run_v1(spawn: i64) -> i64
+extern fn rt_privspawn_free_v1(spawn: i64) -> i64
+extern fn rt_privspawn_wait_v1(pid: i64) -> i64
+
+pub enum PrivDropStepV1:
+    Invalid
+    Lookup
+    NewSession
+    JoinOpen
+    JoinWrite
+    SetGroups
+    SetGid
+    SetUid
+    Verify
+    Exec
+    Fork
+    Pipe
+    NoMemory
+    Unsupported
+    Descriptors
+    Wait
+    Unknown
+
+# Distinct id types so a uid can never be passed where a gid is expected.
+pub struct PosixUidV1:
+    value: i64
+
+pub struct PosixGidV1:
+    value: i64
+
+pub struct PosixPidV1:
+    value: i64
+
+# A borrowed, already-open directory descriptor (the caller owns and closes it).
+pub struct PosixDirFdV1:
+    value: i64
+
+# `errno` is the raw OS errno: the value is the platform ABI itself.
+@allow(primitive_api)
+pub struct PrivDropErrorV1:
+    step: PrivDropStepV1
+    errno: i64
+
+# Target identity. `groups` is the exact supplementary set to install.
+pub struct PrivCredentialV1:
+    uid: PosixUidV1
+    gid: PosixGidV1
+    groups: [PosixGidV1]
+
+# A pre-opened directory fd plus a single leaf name (no '/', '.' or '..');
+# the child writes its own pid into openat(dir_fd, leaf, O_WRONLY|O_NOFOLLOW)
+# before dropping privileges (cgroup.procs join).
+pub struct PrivSpawnJoinV1:
+    dir_fd: PosixDirFdV1
+    leaf: text
+
+# Whether the child keeps the caller's session or starts its own (setsid).
+pub enum PrivSpawnSessionV1:
+    Inherit
+    NewSession
+
+# `path` must be absolute (no PATH search). `env` is the COMPLETE child
+# environment ("NAME=value" entries); nothing is inherited.
+pub struct PrivSpawnRequestV1:
+    path: text
+    args: [text]
+    env: [text]
+    credential: PrivCredentialV1
+    session: PrivSpawnSessionV1
+    procs_join: Option<PrivSpawnJoinV1>
+
+fn privdrop_step_v1(code: i64) -> PrivDropStepV1:
+    match code:
+        case 1: PrivDropStepV1.Invalid
+        case 2: PrivDropStepV1.Lookup
+        case 3: PrivDropStepV1.NewSession
+        case 4: PrivDropStepV1.JoinOpen
+        case 5: PrivDropStepV1.JoinWrite
+        case 6: PrivDropStepV1.SetGroups
+        case 7: PrivDropStepV1.SetGid
+        case 8: PrivDropStepV1.SetUid
+        case 9: PrivDropStepV1.Verify
+        case 10: PrivDropStepV1.Exec
+        case 11: PrivDropStepV1.Fork
+        case 12: PrivDropStepV1.Pipe
+        case 13: PrivDropStepV1.NoMemory
+        case 14: PrivDropStepV1.Unsupported
+        case 15: PrivDropStepV1.Descriptors
+        case 16: PrivDropStepV1.Wait
+        case _: PrivDropStepV1.Unknown
+
+# Decode a negative runtime status -(step * 65536 + errno).
+# The raw runtime status is the ABI being decoded.
+@allow(primitive_api)
+pub fn privdrop_error_v1(status: i64) -> PrivDropErrorV1:
+    val magnitude = 0 - status
+    PrivDropErrorV1(step: privdrop_step_v1(magnitude / 65536), errno: magnitude % 65536)
+
+fn privdrop_check_v1(status: i64) -> Result<i64, PrivDropErrorV1>:
+    if status < 0:
+        return Err(privdrop_error_v1(status))
+    Ok(status)
+
+# Build a runtime credential handle from a plain value. Caller frees it.
+fn privcred_handle_v1(credential: PrivCredentialV1) -> Result<i64, PrivDropErrorV1>:
+    val handle = rt_privcred_new_v1(credential.uid.value, credential.gid.value)
+    if handle < 0:
+        return Err(privdrop_error_v1(handle))
+    for gid in credential.groups:
+        val rc = rt_privcred_add_group_v1(handle, gid.value)
+        if rc < 0:
+            rt_privcred_free_v1(handle)
+            return Err(privdrop_error_v1(rc))
+    Ok(handle)
+
+# Resolve a user name to uid, primary gid and full supplementary group list.
+pub fn privdrop_lookup_user_v1(name: text) -> Result<PrivCredentialV1, PrivDropErrorV1>:
+    val handle = rt_privcred_from_user_v1(name)
+    if handle < 0:
+        return Err(privdrop_error_v1(handle))
+    val count = rt_privcred_group_count_v1(handle)
+    var groups: [PosixGidV1] = []
+    var i = 0
+    while i < count:
+        groups.push(PosixGidV1(value: rt_privcred_group_at_v1(handle, i)))
+        i = i + 1
+    val credential = PrivCredentialV1(uid: PosixUidV1(value: rt_privcred_uid_v1(handle)), gid: PosixGidV1(value: rt_privcred_gid_v1(handle)), groups: groups)
+    rt_privcred_free_v1(handle)
+    Ok(credential)
+
+# Irreversibly drop this process to `credential`. Ok(()) only after the
+# verification step proved root cannot be regained.
+pub fn privdrop_self_v1(credential: PrivCredentialV1) -> Result<(), PrivDropErrorV1>:
+    val handle = privcred_handle_v1(credential)?
+    val rc = rt_privcred_drop_self_v1(handle)
+    rt_privcred_free_v1(handle)
+    if rc < 0:
+        return Err(privdrop_error_v1(rc))
+    Ok(())
+
+# Spawn `request.path` with privileges dropped in the child before exec.
+# Ok(pid) means execve succeeded; the caller reaps the pid.
+pub fn privdrop_spawn_v1(request: PrivSpawnRequestV1) -> Result<PosixPidV1, PrivDropErrorV1>:
+    val cred = privcred_handle_v1(request.credential)?
+    val spawn = rt_privspawn_new_v1(request.path)
+    if spawn < 0:
+        rt_privcred_free_v1(cred)
+        return Err(privdrop_error_v1(spawn))
+    val result = privdrop_spawn_configure_v1(spawn, cred, request)
+    rt_privspawn_free_v1(spawn)
+    rt_privcred_free_v1(cred)
+    result
+
+fn privdrop_spawn_configure_v1(spawn: i64, cred: i64, request: PrivSpawnRequestV1) -> Result<PosixPidV1, PrivDropErrorV1>:
+    for arg in request.args:
+        privdrop_check_v1(rt_privspawn_arg_v1(spawn, arg))?
+    for entry in request.env:
+        privdrop_check_v1(rt_privspawn_env_v1(spawn, entry))?
+    privdrop_check_v1(rt_privspawn_cred_v1(spawn, cred))?
+    if request.session == PrivSpawnSessionV1.NewSession:
+        privdrop_check_v1(rt_privspawn_new_session_v1(spawn))?
+    match request.procs_join:
+        case Some(target):
+            privdrop_check_v1(rt_privspawn_join_procs_v1(spawn, target.dir_fd.value, target.leaf))?
+        case None:
+            ()
+    Ok(PosixPidV1(value: privdrop_check_v1(rt_privspawn_run_v1(spawn))?))
+
+# Reap a pid returned by privdrop_spawn_v1 (blocking). Ok(raw wait status);
+# decoding exit code / signal is the caller's (raw status, not interpreted).
+# Ok holds the raw wait status word, deliberately undecoded (the OS ABI).
+@allow(primitive_api)
+pub fn privdrop_wait_v1(pid: PosixPidV1) -> Result<i64, PrivDropErrorV1>:
+    privdrop_check_v1(rt_privspawn_wait_v1(pid.value))

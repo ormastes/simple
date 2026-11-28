@@ -6325,3 +6325,107 @@ pins the border-box form, the default-UA gap is unfiled.
   - A `width` / `height` attribute reaches layout as `st.width_px` / `st.height_px`, never as an attribute: `attr_value(node.attrs_raw, "width")` branches in the replaced path are dead for sized elements.
 - **Open (bugs filed).** Float painted under a later block's background (`web_render_float_painted_under_later_block_background_2026-11-28`); text on a `top` / `bottom` line 2 device rows high at k = 4, inline-block `12.5px` below the strut at k = 1, `clear` with a top margin larger than the float, svg edge px not blended, `<br clear>` whole px (`web_render_fractional_layout_followups_2026-11-28`).
 - **Review catch (clamps).** Layout dropped the fraction under a min/max clamp but the svg paint path recomputed the exact size from the style, so `height:20.75px; max-height:20px` with a viewBox scaled to 20.75 and started 2 device rows low. An overflowing `<rect>` with no viewBox cannot show a scale error; a clamp case needs a viewBox whose rect fills it. The clamp now lives in `svg_exact_content_size_milli`, read by both sides (interactions spec AC-9).
+
+## 2026-11-28 — inline item width: LayoutUnit ceil from font units, once per item (`work/webrender-inline-ceil-20261128`)
+
+- **Rule.** Chrome stores a text item's width as `LayoutUnit::FromFloatCeil` of its exact advance
+  sum and starts the next item there. An item is everything one text node puts on the line: its
+  lead space, the run, its trailing space. Glyphs inside the item sit at float advances. So the
+  pen after `<code>a</code>` (9.6328125 px) is at 9.640625, and the run after it starts at that
+  plus the EXACT lead space.
+- **A LayoutUnit is 1/(64 k) CSS px at device scale k.** Chrome lays out in zoomed px
+  (zoom-for-dsf). At k=4 `x` + nine `a` (88.0859375 CSS px) is 22550/64 device px and is not
+  rounded at all. A 1/64 CSS px ceil there moved the next item a quarter device px right
+  (`inline_run_start_quarter_phase_k4_chrome159_spec` AC-1 row 9). With an integer font size and
+  integer k on a 2048-upem face the k=4 ceil is a no-op; it only acts on fractional sizes.
+- **Never ceil a milli width.** `button` (16 px DejaVu Sans Mono) is exactly 3699/64 px. Its milli
+  width reads 57.797 (or 57.798 as a sum of milli advances) and a ceil of either is 3700/64. The
+  width now also travels in 2^-20 px from the run's font-unit sum:
+  `FontRenderer.measure_text_width_exact` -> `ResolvedFontMetrics.width_q20` ->
+  `Style.resolved_font_width_q20` / `resolved_space_q20` / `resolved_lead_space_q20` /
+  `resolved_trail_space_q20`. -1 means no unit sum (shaped, off-grid, spaced runs); such a run
+  keeps the old carry (exact milli width, lead space ceiled on its own).
+- **Where.** `inline_item_width_err_milli(..., lead_milli)` in layout_foundation takes the ceil in
+  every text branch (one run, edge spaces, kerned edge spaces, nowrap collapsed lead) through
+  `layout_unit_ceil_q20_milli`. `layout_with_style_flow` passes the lead it charged; the separate
+  `lead_snap_milli` is gone.
+- **Milli is too coarse for a tie: round the item width UP to milli, at every k.** A
+  quarter-device-px tie is an odd multiple of 1000/8k milli-px (31.25 at k=4), and Skia rounds a
+  tie up. Whatever feeds the pen must not land under it: the item width is rounded UP to milli
+  from the LayoutUnit value, and at k > 1 the lead space (`lead_space_exact_milli`) too. With
+  nearest rounding `x<code>abcd</code>l` (pen 186.125 device px) went a quarter low, and two
+  forms-media inventory rows went from 71 to 992 mismatching px (4445.3125 milli lead read as
+  4445). k=1 needs it as well: nearest put a space item at 4453 (true 4453.125), and
+  `ib`(margin-right:.6px) sp `z` sp `ib` (109.5 px, Chrome 110) at 109
+  (`inline_line_end_space_align_chrome159_spec` AC-20). Rounding up at k=1 left the LCD specs and
+  the shard fixture (804) where nearest had them; 1x catalog html measured 0.26 (0.25 with
+  nearest, 0.29 on base), the other pages equal.
+- **Probe.** `inline_item_layoutunit_ceil_pen_chrome159_spec` (nowrap, one-run branch) and the
+  shard's `<li><code>button|audio|a|kbd</code> — ...` fixture (normal wrap, lead-charged branch;
+  they are different paths, check both). Fixture, mismatching px per line: 202 270 260 318
+  (1050) -> 202 212 197 193 (804).
+- **Open (not caused here, pre-existing origin error).** Text after an inline `<button>` at k > 1:
+  the pen after the button is taken from its device-snapped width
+  (`box_device_extra_w_at / k`), Chrome's is the button's LayoutUnit width. Glyphs of
+  `Not exercised` (forms-media, after `Exercise controls`) that sit on a tie flip with any
+  sub-milli change of the space item: 4x band y=1360..1440 is 1526 px on base and 1947 here,
+  while the `Name` row above it gained 80. Page total stays 0.05. Bug
+  `web_render_k4_button_follower_pen_from_device_width_2026-11-28`.
+- **Perf trap: the units-per-em memo was one entry.** `measure_text_width_exact` asks the
+  face's upem once per measured run; a page alternates faces (regular, bold, mono), so
+  `_fr_units_per_em` missed on almost every run and re-read the font blob and its table
+  directory: html 1x layout +5.1 % interpreter dispatches (21.85 M -> 22.96 M), css-layout
+  +1.6 %. It is a per-face `Dict` now (`_fr_units_per_em_known` answers before the blob is
+  read): html +0.9 %, css-layout +0.8 % for layout alone, and a full html render is +0.07 %
+  at 1x because the draw path stopped re-parsing too. What is left is the per-glyph unit loop.
+- **Measuring on a loaded host.** With load 20-30 a wall-clock A/B of a 5 s layout swings
+  +-25 % between rounds. `SIMPLE_INTERP_PROFILE=1 SIMPLE_INTERP_PROFILE_OUT=<file>` prints the
+  interpreter's `Expr` dispatch histogram at exit; the total is identical run to run, so it
+  bisects a regression hunk by hunk in one run per side. It does not see native cost (a blob
+  copy, a wider struct clone): confirm with an alternated wall A/B when the host is quiet.
+- **Rebased on ba32f7509eb's milli item ceil (2026-11-28).** Upstream landed the same
+  once-per-item ceil from milli widths (`inline_item_width_err_milli_with_lead`,
+  `lead_item_exact_milli`). Both are kept: the font-unit (`*_q20`) ceil when the run has a
+  font-unit width, upstream's milli ceil otherwise. Its `_text_pen_milli` snap loop took each
+  step against an already-snapped boundary; fixed in its own commit (long-run and target specs).
+  With the per-face upem memo that loop no longer re-parses the face per run: layout-only
+  dispatches vs 8fac9c07e44 are html -3.3 %, css-layout -0.1 %.
+- **In-place snap trap.** A loop that rewrites `boundaries[i]` while reading
+  `boundaries[i + 1] - boundaries[i]` mixes a snapped and an unsnapped sum; keep the previous
+  raw value in a local.
+
+## 2026-11-28 — catalog ratchet bound is noise-sized: max(0.02, 5% of row) (`work/catalog-tolerance-20261128`)
+
+- **Rule.** `check-chrome-catalog-pixel-diff.shs` fails a page above `row + max(0.02, 5% of the row)` (bound included, compared in whole 1/10000 points). The flat `+0.25` it replaces was larger than most rows: it passed css-layout 1x at 0.40 on a 0.35 row and would have passed any 4x page (rows 0.00 to 0.05) at 0.27.
+- **Noise behind the bound.** Three serial 1x runs on one binary (seed1126b, `f4993f775b8`) gave the same value on all 8 pages. The 557 full-catalog logs then in the scratchpad hold 39 distinct 1x vectors and 52 distinct 4x vectors; every change between neighbours traced to a code change (the html 0.29 / 0.32 / 0.29 and 4x html 0.03 / 0.02 flips in `lcd1x` were edits between runs). The widest same-code spread on record is animation 3.47 to 3.59 (3.4% of the row), from before the capture dropped `--virtual-time-budget`. So 0.02 is two display steps, and 5% only matters for rows above 0.40 (today the 4K Vulkan lane).
+- **A page above its row is a regression until proven otherwise.** css-layout 1x reads 0.40 on a 0.35 row and now FAILs. It is not host drift: on the same binary and host, `cc85cd23dda` (parent) measures 0.35 and `589d7493a0c` (merge of PR #12215, `work/w5-5-layout-engine-chrome159-20261127`) measures 0.41; the LCD pen lane later took it to 0.40. The row stays 0.35.
+- **Traps.**
+  - Float awk gets the boundary wrong (`0.35 + 0.02` is not `0.37`); keep the integer compare.
+  - A row or measurement that is not a plain decimal is an offender (`<page>:unreadable`), not a silent zero.
+  - Do not edit the script while a catalog run is using it: `sh` reads it incrementally.
+## 2026-11-28 — 1x LCD outline: integer `af_latin` port (`work/webrender-af-latin-hint-20261128`)
+
+- **What changed.** The knot hinter (`_lcd_hint_knots`, `_hstem_knots`, `_hint_commands`; about 590 lines of f64 in `sfnt_glyf.spl`) no longer hints Latin fonts; it stays for fonts behind the Devanagari gate only (below). `src/lib/common/encoding/sfnt_af_latin.spl` is an integer port of FreeType's Latin autohinter in light mode (`afhints.c` / `aflatin.c`): face metrics (standard width of `o`, the six Latin blue zones), scaled metrics (x-height fit of the scale, fitted blues), then per glyph `af_glyph_hints_reload` (directions, weak points), segments, links, edges, blue edges, `af_latin_hint_edges` and edge / strong / weak point alignment. `_glyph_outline` feeds it the raw glyf points (`SfntGlyfOutline.sgo_points`: x, y, tag; composites transformed and rounded) and decomposes the hinted points like `FT_Outline_Decompose` (`_af_commands`: an implied on-curve point is the truncating midpoint of its two HINTED controls).
+- **Oracle question settled: FreeType's light autohinter IS Chrome at 13, 14 and 16 px.** The "34..53 px at 13 / 14 px" of the previous lane was the probe, not the hinter: `orc` compared a window 3 px around each glyph blob, and at 13 px the LCD fringe of the NEXT glyph falls inside it for narrow-bearing glyphs (`A T V W Y k f j t`). With the window at 1 px (`ORC_PAD=1`, scratch `afl/orc2`) the FreeType outline through libskia reproduces the Chrome capture with 0 mismatching and 0 non-exact px on a..z, A..Z and 0..9 at 13, 14 and 16 px, and on a..z at 11, 12, 15, 18, 20 and 24 px (one non-exact px at 20). Light and forced-autohint loads are byte-identical.
+- **`orc` is blind below about 10 px and to shifts under about 1/10 px.** At 8..10 px the glyph blobs of a spaced row merge and the blob-to-character map slips (it reported 320..680 px there, and `^` / `_` as wrong at 10 px while the page pixels are identical to Chrome's). A 6/64 px vertical move of the dot of `i` changes no output level (the raw-coverage -> level table sends thin coverage to 0). Below 11 px, and for any single-glyph question, compare the PAGE render to the capture (`afl/dl`, `afl/px`).
+- **The port equals FreeType 2.14 point for point, except where 2.14 has something Chrome does not.** `afl/cmp.sh` (engine outline vs `ftpath`, command by command at 0/64): 90 printable ASCII glyphs x 19 sizes (6..32 px) x 8 Liberation faces (Sans Regular / Bold / Italic, Serif Regular / Bold / Italic, Mono Regular / Bold), plus 36..48 px and the fractional sizes 853, 896, 1197 and 1216 /64: equal on 101 of the 152 face-size cells; on the other 51 only `i` and `j` differ, by the lift of the dot that 2.14 has and Chrome does not (6..61/64 px, mostly at 6..13 px).
+- **Other fonts.** DejaVu Sans, DejaVu Sans Mono and Mono Bold (10..20 px, FreeType with the autohinter forced, `CMP_MODE=auto`): equal but for the same `i` / `j` lift. Every glyph id of nine fonts (the three DejaVu faces and DejaVu Serif, Kacst Book (Arabic), Lohit Assamese, three Liberation faces: about 23,700 glyphs) builds at 13 and 16 px without a hang or an index error (`afl/gall.spl`).
+- **FreeType 2.14's diacritic adjustment database is NOT in Chrome 159 (skrifa).** 2.14 (`afadjust.c`) moves an accent or the dot of `i` / `j` up until a whole pixel separates it from the base glyph, stretches tildes and switches blue alignment off under `Ç` / `ç`. Chrome's 8 px `i` has the dot against the stem (2.14 lifts it 40/64 px: a whole row), and a row of accented letters (`é è ê ë á à â ä å í ó ö ú ü ñ ã õ É È Å Ö Ü Ñ ø Ø`, 8..20 px) matches Chrome WITHOUT the database (0..16 mismatching px a row, all cedilla or run-end columns; base 120..540). A first version of the port carried the database and matched FreeType on 84 of 95 Latin-1 glyphs; it was removed. The mandatory spec that caught it: `browser_renderer_spec` / `simple_web_renderer_spec` (8 px text).
+- **Chrome-vs-FreeType facts the port depends on.**
+  - **x-height threshold is 40/64 at every size.** FreeType's `increase-x-height` (52/64 for 6..14 ppem) is off by default (`AF_PROP_INCREASE_X_HEIGHT_MAX` 0), and Chrome agrees: 8 px `x` is 4 rows, 6 px 3. The old "refuse a round-up that grows the em 1.25 px" rule was this threshold seen from the other side. The fitted blue is the zone's SHOOT (the round `o` top), not the flat `x` top.
+  - **The scale change is refused when it moves `max(upem, blue ascenders, -descenders)` by 2 px or more** (`-128 < dist < 128` in 26.6), not when the cap height moves.
+  - **`^ _ `` ~` and the other `af_latn_nonbase_uniranges` glyphs take no blue zone** (`_` then sits on a half-pixel centre instead of the descender zone); a glyph selected by index gets the mark through the cmap (`_af_glyph_nonbase`).
+- **Catalog (seed1126b, interpreter), base 85ea9caddc5 -> head.** 1x: overview 0.16 -> 0.02, html 0.29 -> 0.05, css-layout 0.40 -> 0.12, css-paint 0.35 -> 0.00, forms-media 0.34 -> 0.04, animation 0.34 -> 0.02, evidence 0.08 -> 0.00, tab-bar 0.02 -> 0.00. 4x: every page unchanged (0.03 0.02 0.02 0.01 0.05 0.02 0.00 0.01): at k = 4 text is above the LCD cutoff and takes the unhinted gray outline. Combo matrix 77 = base.
+- **After the rebase on 3cb5a3d3eeb the same head measures higher, with the base.** 1x base -> head: overview 0.17 -> 0.03, html 0.30 -> 0.06, css-layout 0.40 -> 0.12, css-paint 0.40 -> 0.06, forms-media 0.38 -> 0.08, animation 0.37 -> 0.05, evidence 0.18 -> 0.10, tab-bar 0.02 -> 0.00. The rows are min(row, measured), so evidence stays 0.08. What rose between the two bases (evidence 0.08 -> 0.18 on the base alone) is not the hinter.
+- **After the second rebase, on a3b55a1bc49 (inline item LayoutUnit ceil in), the 1x pages measure 0.02 0.02 0.09 0.00 0.04 0.00 0.00 0.00** (rows before: 0.16 0.26 0.35 0.35 0.33 0.32 0.08 0.02) and the rows are those values; 4x equals the rows of that base. Both pins hold there (rtl ink 86, darkest pixel 0xFF4B3E5A).
+- **Two engine-state pins moved.** `simple_web_renderer_spec` "uses explicit line-height for wrapped text layout" pins the darkest ink pixel of an 8 px page: 0xFF483751 -> 0xFF4B3E5A, which is Chrome's own value (whole image vs Chrome 77 -> 4 px). `browser_renderer_spec` "renders direction rtl Latin text ..." pins non-white ink counts: rtl 87 -> 86 (Chrome 87; owner decision 2026-11-28) while the line's mismatch against Chrome fell 88 -> 84; what is left there is the rtl run's pen phase (`web_render_rtl_run_pen_phase_residual_2026-11-28`); the owed quiet-window wall-clock A/B has its own shard, `web_render_af_latin_port_wall_clock_ab_owed_2026-11-28`.
+- **Interpreter cost: field arrays, not records.** The first port kept each point as 13 slots of one flat array (`p[i * _PS + _P_FX]`) and cost 3.1 ms a glyph against about 1.5 ms for the knot hinter. Measured per operation on the interpreter lane: a store through two module constants 0.52 us, through literals 0.26 us, into a one-field array 0.16 us; a call of a one-line helper 1.1 us more than the inline expression; `push` 0.35 us an element against nothing for `[0; n]`. One array per field, `[0; n]` allocation, inlined `abs` / `FT_MulFix` in the per-point loops and interpolating `py` against `oy` in place (FreeType copies both to `u` / `v`) brought a whole outline build (parse memo, hint, decompose, frame) from 4.05 ms to about 3.0 ms a glyph against 2.5..2.9 ms on the base (62 glyphs at 13 and 14 px, interpreter, minimum of eight alternating runs at head bbbc1cf0e87). Trap: an element of a nested array is a COPY (`val a = bundle[0]; a[7] = 1` does not write the bundle), so the field arrays are separate parameters.
+- **Perf was argued from counts, not from page wall time.** The box ran at load 20..30 (other lanes, bootstraps): the same page took 3.2, 6.7 and 9.6 CPU-seconds in three rounds, on both sides, so an alternating page A/B cannot resolve 2 % (4 rounds, medians: total -5.8 %, single pages -31 %..+17 %). What is stable: outline builds a page (a temporary `print` in `_glyph_outline`: evidence 40, tab-bar 54, overview 74, css-paint 98, animation 102, css-layout 103, html 113, forms-media 139) times the build cost above (+0.5 ms): 20..70 ms on pages of 3..20 s, 0.3..0.9 %. RSS equal (about 870 MB both sides). Interpreter dispatch counts (`SIMPLE_INTERP_PROFILE=1`, whole 1x render, head against base 3cb5a3d3eeb): html 223,697,890 -> 224,324,954 (+0.28 %), css-paint 350,726,239 -> 351,168,972 (+0.13 %).
+- **Devanagari-gated fonts keep the knot hinter.** With the Latin port on Noto Sans Devanagari, `devanagari_mark_position_chrome159_spec` (in-development) fell from 8 of 9 to 6 of 9: the low u-matra (glyph 702, unhinted y -3.41..0.26 px at 16 px) is centred on a half pixel by the Latin stem rule (-3.16..0.98) and its last ink row is lost (AC-8, AC-10); the knot hinter had it at -4.16..0. No hinting at all gave 4 of 9 and `devanagari_render` 9 of 10; the port without blue zones 4 of 9. FreeType hints these glyphs in its `deva` style (own blue strings, top-to-bottom edge order, matras as non-base), which is the real fix; until then `_glyph_outline` sends an `_lcd_area_font` font through the old knots, and its outlines are identical to the base (all 1,110 glyphs of Noto Sans Devanagari at 13 and 16 px, `afl/gall.spl` checksums).
+- **Not ported / open (bug shards).** The superscript / subscript styles `latp` / `latb` and every non-Latin style (Cyrillic, Greek, Devanagari keep the Latin zones or the area mask) (`web_render_af_non_latin_styles_not_ported_2026-11-28`). The cedilla of `ç` / `Ç` is the one accent that still differs from Chrome (7 px a glyph at 16 px; FreeType 2.14's rule for it is not Chrome's either) (`web_render_af_cedilla_hint_differs_from_chrome_2026-11-28`).
+- **Found on the way: the last ink column of a run's last glyph is not painted** (base too), nor the left fringe column of its first glyph (`A` at `left:10px` loses x = 9). After the port these are the whole residual: the lane's fixture has one such px per row, and the previous lane's glyph fixture (`fx2.html`: a..z, A..Z, 0..9 at 13 / 14 / 16 px and Bold, through the page path with glyph-index selection) went from 621 mismatching px to 8, all of them first or last ink columns. It comes back when more text follows in the run; a wider box does not bring it back. Red in-development spec `lcd_run_end_ink_column_chrome159_spec`, shard `web_render_lcd_run_end_ink_column_not_painted_2026-11-28`.
+- **Tools (lane scratch `afl/`, not in git).** `orc2` (`orc` plus `ORC_PAD`, `ORC_XH` = FreeType `increase-x-height`, `ORC_V` per-pixel dump), `cmp.sh` / `cmp2.sh` / `cmpf.sh` (ASCII / Latin-1 codepoint range / fractional size against `ftpath`, exact), `sweep.sh` (sizes x faces), `dl` (mismatch count and list for a row band), `px` (ink grid, Chrome | engine), `nw` (non-white counts), `reg` (region mismatch, summed delta, darkest pixel), `prof.spl` (per-phase microseconds of the hinter on the interpreter), `ab.sh` (alternating page A/B).
+  - Trap: `go` and `pass` are reserved words; a variable of that name is a parse error that names only the token.
+  - Trap: a `c = c + 1` one level too shallow closes the `while` above it and spins without output; the 900 s probe timeout hid it for three minutes.
+  - Trap: `bug-db-shard.shs check` passes a shard that has lost its `bugs_active` table (a greedy rewrite of the log rows ate it here); after editing a shard by script, count its tables and its active row.
+  - Trap: a newer FreeType is not a better oracle. Check the feature against a Chrome capture at the smallest size first: a rule that moves a contour by a whole pixel shows there and nowhere else.
