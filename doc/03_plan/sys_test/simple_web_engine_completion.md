@@ -58,3 +58,35 @@ The in-tree comparison suite (`examples/browser/html_layout_compare/variations.s
 - **Electron Runner & 4-Tab Studio (`tools/electron-shell/html_layout_compare_app.js` + `html_layout_compare_viewer.html`):** Offscreen Chrome capture (`--capture-chrome <dir> --pages <pages_dir>`) and `1440x920` dark UI supporting `1. All Variations Matrix`, `2. 1:1 / 2x Side-by-Side + HTML Source`, `3. Split Wipe & Rapid Flip`, and `4. JS & Simple Script + Events` (`script_events_manifest.js`).
 - **Automated SSpec Gate:** `test/03_system/app/simple_web/feature/chrome_vs_simple_web_layout_compare_spec.spl` (manual at `doc/06_spec/03_system/app/simple_web/feature/chrome_vs_simple_web_layout_compare_spec.md`).
 - **Parity Acceptance Criteria:** Zero render crashes/timeouts, valid non-empty PNG dimensions for every variation, accurate `compare_report.sdn` emission, and steady convergence on `<=12px` / `MAD` parity per lane without silent tolerances or skipped specs.
+
+---
+
+## 4. Suite 2 (Famous Web Pages), Suite 3 (Liquid Theme) & Multi-Script Lanes
+
+### 4.1 Suite 2: Famous Web Page Rendering Diff (`fw01`–`fw06`, `640x420`)
+| ID | Page / Layout Archetype | Viewport | Primary Focus |
+|---|---|---|---|
+| `fw01` | Google Search & Knowledge Panel | `640x420` | Search bar, two-column SERP + right knowledge card |
+| `fw02` | Wikipedia Encyclopedia Article & Infobox | `640x420` | Float-right infobox table, lead prose, TOC |
+| `fw03` | Hacker News Front Page Table & Ranks | `640x420` | Compact tabular row rhythm, header bar, metadata links |
+| `fw04` | GitHub Repository & PR Code Diff | `640x420` | Header tabs, split diff table, status pills |
+| `fw05` | YouTube Watch Player & Up-Next Queue | `640x420` | 16:9 media frame, channel row, right recommendation list |
+| `fw06` | New York Times Multi-Column Editorial Front Page | `640x420` | Masthead rules, multi-column headlines & figure wraps |
+
+### 4.2 Suite 3: Liquid Theme Rendering Diff (`lq01`–`lq06`)
+| ID | Theme / Glass Surface | Viewport | CPU Raster Parity Notes (`browser_cpu_raster_css_overrides`) |
+|---|---|---|---|
+| `lq01` | Liquid Dark Theme (`fluid_dark` Aura, Glass Panels & Glow) | `640x420` | Preserves 3-orb radial + 145deg linear dark aura & `rgba(255,255,255,0.22)` top specular border |
+| `lq02` | Liquid Light Theme (`fluid_light` Celestial Ether) | `640x420` | Preserves cyan/indigo radial + 155deg light aura & `rgba(255,255,255,0.85)` top specular border |
+| `lq03` | macOS Glass Dark Window Gallery (`glass_css.spl`) | `640x420` | Suppresses heavy multi-pass blur & `body::before`/`after` stripes on CPU raster |
+| `lq04` | Stitch Glass Obsidian Dark (`glass_obsidian_dark`) | `640x420` | Deep obsidian palette parity with top specular chrome highlight |
+| `lq05` | Liquid Frosted `backdrop-filter: blur(12px)` Over Photo & Orbs | `640x420` | Translucent HUD & toast stacking over `sunset.png` and glow orbs |
+| `lq06` | UI Kitchen Sink Window (`demo_kitchen_sink.ui.sdn`) | `960x640` | Full hosted GUI comparison under Liquid Glass aura overrides |
+
+### 4.3 Multi-Script Comparison Lanes (`ms01`–`ms04`, `520x340`)
+| ID | Scenario | Measured Parity Across `simple_js` / `simple_script` / `agent_script` (`Exact / <=12 / <=32 / MAD`) |
+|---|---|---|
+| `ms01` | MS01: KPI Card & Status Computation | `0.05% / 88.67% / 93.55% / 6.60` (all 3 script lanes) |
+| `ms02` | MS02: Form Fill + Select + Live Preview | `0.05% / 85.04% / 93.65-93.66% / 6.83-6.84` |
+| `ms03` | MS03: Kanban State Transition & Column Move | `2.87% / 88.47% / 95.00% / 5.04` |
+| `ms04` | MS04: Cooperative Multi-Script Pipeline (JS + Simple + Agent) | `0.08% / 64.18% / 85.48% / 10.78` |
