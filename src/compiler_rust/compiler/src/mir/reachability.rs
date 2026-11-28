@@ -21,6 +21,11 @@
 //! function is kept when any of its keys equals a key of any name a reachable
 //! function mentions. In particular every function that shares a probed tail
 //! stays, so tail resolution sees exactly the candidates it saw before.
+//! Method definitions (`Type.method`) are the exception: their keys keep the
+//! `Type` owner, because a direct `Call` binds names exactly and the tail
+//! index files `Type.foo` under `Type_dot_foo`, so a bare `foo` call cannot
+//! reach it. Only an erased-receiver `MethodCallStatic` / `BuiltinMethod`
+//! rebinds a bare name to `T.method`, and those wake every same-named method.
 //!
 //! Names are collected from every string an instruction carries: the
 //! name-bearing variants explicitly, a list of hot variants that carry no
@@ -488,7 +493,10 @@ mod tests {
     #[test]
     fn every_function_sharing_a_probed_tail_is_kept() {
         // A probe `foo` may bind to the unique `<prefix>__foo`; both must
-        // stay, or removing one would make the other unique.
+        // stay, or removing one would make the other unique. A direct `Call`
+        // never binds a method: `compile_call` looks names up exactly and the
+        // tail index files `Type.foo` under `Type_dot_foo`, not `foo`. Only an
+        // erased-receiver `MethodCallStatic` rebinds a bare name to `T.foo`.
         let mut m = module(vec![
             func("main", vec![call("foo")]),
             func("a__foo", vec![]),
@@ -497,10 +505,20 @@ mod tests {
             func("unrelated", vec![]),
         ]);
         let keep = reachable_function_names(&m);
-        for name in ["main", "a__foo", "b__foo", "Type.foo"] {
+        for name in ["main", "a__foo", "b__foo"] {
             assert!(keep.contains(name), "{name} dropped: {keep:?}");
         }
+        assert!(!keep.contains("Type.foo"), "{keep:?}");
         assert!(!keep.contains("unrelated"));
+        let entry = m.functions[0].entry_block;
+        m.functions[0].block_mut(entry).unwrap().instructions.push(MirInst::MethodCallStatic {
+            dest: None,
+            receiver: VReg(0),
+            func_name: "foo".to_string(),
+            args: vec![],
+        });
+        let keep = reachable_function_names(&m);
+        assert!(keep.contains("Type.foo"), "erased-receiver foo must keep Type.foo: {keep:?}");
         retain_reachable_functions(&mut m);
         assert_eq!(m.functions.len(), 4);
     }
@@ -716,6 +734,7 @@ mod tests {
             ),
             func("__spl_flat_win_spl_deadbeef__create", vec![]),
             func("__spl_flat_pty_spl_cafe__read", vec![]),
+            func("rt_file_exists", vec![]),
             func("PlatformEvent.create", vec![call("rt_kqueue_create")]),
             func("LinuxSimpleContainerAdapterV2.read", vec![call("rt_linux_group_start_v1")]),
         ]);
