@@ -13,7 +13,7 @@ use std.nogc_sync_mut.io_runtime.{file_delete, file_hash_sha256_or_empty}
 # Version & Limits
 # ============================================================================
 
-pub val TEST_RESULT_CACHE_VERSION: i64 = 3
+pub val TEST_RESULT_CACHE_VERSION: i64 = 4
 pub val MAX_SHARED_TEST_CACHE_ENTRIES: i64 = 8192
 val MAX_DEP_HASH_MEMO_ENTRIES: i64 = 16384
 val RACELESS_MEMO_MIN_AGE_SECS: i64 = 2
@@ -76,7 +76,9 @@ struct TestCacheEntry:
     cached_at: i64           # Unix micros when entry was written
     last_run_ms: i64         # Unix millis when entry was recorded
 
-fn stale_entry(test_path: text) -> TestCacheEntry:
+# reason: cache callers construct explicit stale sentinel records from a raw test path
+@allow(primitive_api)
+pub fn stale_entry(test_path: text) -> TestCacheEntry:
     """Return a sentinel entry representing a stale/missing cache result."""
     TestCacheEntry(
         test_path: test_path,
@@ -241,7 +243,41 @@ pub fn shared_cache_prune_entries(entries: {text: TestCacheEntry}) -> {text: Tes
 # Shared cache operations
 # ============================================================================
 
-fn shared_cache_check_freshness(entries: {text: TestCacheEntry}, test_path: text, dep_paths: [text]) -> TestCacheEntry:
+fn _encode_cache_output(s: text) -> text:
+    s.replace("\\", "\\\\").replace("|", "\\p").replace("\n", "\\n").replace("\r", "\\r")
+
+fn _decode_cache_output(s: text) -> text:
+    if not s.contains("\\"):
+        return s
+    val segs = s.split("\\")
+    var out: [text] = [segs[0]]
+    var i = 1
+    while i < segs.len():
+        val seg = segs[i]
+        if seg == "":
+            if i + 1 < segs.len():
+                out.push("\\" + segs[i + 1])
+                i = i + 2
+            else:
+                out.push("\\")
+                i = i + 1
+        else:
+            val tag = seg.substring(0, 1)
+            val rest = seg.substring(1, seg.byte_len())
+            if tag == "p":
+                out.push("|" + rest)
+            elif tag == "n":
+                out.push("\n" + rest)
+            elif tag == "r":
+                out.push("\r" + rest)
+            else:
+                out.push("\\" + seg)
+            i = i + 1
+    out.join("")
+
+# reason: daemon and runner callers pass raw filesystem paths to check cache freshness
+@allow(primitive_api)
+pub fn shared_cache_check_freshness(entries: {text: TestCacheEntry}, test_path: text, dep_paths: [text]) -> TestCacheEntry:
     """Return the cached entry if still fresh, or a stale sentinel."""
     if not entries.contains_key(test_path):
         return stale_entry(test_path)
@@ -251,7 +287,9 @@ fn shared_cache_check_freshness(entries: {text: TestCacheEntry}, test_path: text
         return stale_entry(test_path)
     entry
 
-fn shared_cache_build_entry(test_path: text, dep_paths: [text], status: i64, passed: i64, failed: i64, skipped: i64, duration_ms: i64, output: text) -> TestCacheEntry:
+# reason: runner callers construct cache entries from raw test metadata and counters
+@allow(primitive_api)
+pub fn shared_cache_build_entry(test_path: text, dep_paths: [text], status: i64, passed: i64, failed: i64, skipped: i64, duration_ms: i64, output: text) -> TestCacheEntry:
     """Build a new cache entry for the given test result."""
     shared_cache_invalidate_path(test_path)
     val computed_hash = _dep_hash(test_path, dep_paths)
@@ -270,7 +308,9 @@ fn shared_cache_build_entry(test_path: text, dep_paths: [text], status: i64, pas
         last_run_ms: now_ms
     )
 
-fn shared_cache_save(entries: {text: TestCacheEntry}, cache_path: text) -> {text: TestCacheEntry}:
+# reason: runner callers persist cache maps to a raw cache file path
+@allow(primitive_api)
+pub fn shared_cache_save(entries: {text: TestCacheEntry}, cache_path: text) -> {text: TestCacheEntry}:
     """Serialize live, bounded entries to a line-based cache file and return the pruned map."""
     val (selected_keys, selected) = _select_entries_to_save(entries)
     val pruned = _entries_map_from_selected(selected_keys, selected)
@@ -278,7 +318,8 @@ fn shared_cache_save(entries: {text: TestCacheEntry}, cache_path: text) -> {text
     lines = lines.push("version:{TEST_RESULT_CACHE_VERSION}")
     for e in selected:
         val run_ms = _entry_last_run_ms(e)
-        val line = "{e.test_path}|{e.dep_hash}|{e.result_status}|{e.passed}|{e.failed}|{e.skipped}|{e.duration_ms}|{run_ms}"
+        val encoded_output = _encode_cache_output(e.output)
+        val line = "{e.test_path}|{e.dep_hash}|{e.result_status}|{e.passed}|{e.failed}|{e.skipped}|{e.duration_ms}|{run_ms}|{e.cached_at}|{encoded_output}"
         lines = lines.push(line)
     # Atomic: unique temp file + rename, so concurrent runners never tear the file.
     val tmp = "{cache_path}.tmp.{getpid()}"
@@ -289,21 +330,30 @@ fn shared_cache_save(entries: {text: TestCacheEntry}, cache_path: text) -> {text
         file_delete(tmp)
     pruned
 
-fn shared_cache_load_entries(cache_path: text) -> {text: TestCacheEntry}:
-    """Load entries from a cache file. Returns empty dict on any error."""
+# reason: runner callers load cache maps from a raw cache file path
+@allow(primitive_api)
+pub fn shared_cache_load_entries(cache_path: text) -> {text: TestCacheEntry}:
+    """Load entries from a cache file. Returns empty dict on version mismatch or error."""
     shared_cache_clear_memo()
     var entries: {text: TestCacheEntry} = {}
     val raw = file_read_text(cache_path)
     if raw == "":
         return entries
     val lines = raw.split("\n")
+    var version_ok = false
     for line in lines:
         if line.starts_with("version:"):
-            pass_dn
+            val ver = line[8:].trim().to_int() ?? -1
+            if ver != TEST_RESULT_CACHE_VERSION:
+                return {}
+            version_ok = true
         elif line.len() > 0:
+            if not version_ok:
+                return {}
             val parts = line.split("|")
-            if parts.len() >= 7:
-                val loaded_run_ms = if parts.len() >= 8: parts[7].to_int() ?? 0 else: 0
+            if parts.len() >= 10:
+                val loaded_run_ms = parts[7].to_int() ?? 0
+                val loaded_cached_at = parts[8].to_int() ?? (loaded_run_ms * 1000)
                 if loaded_run_ms > _last_recorded_ms:
                     _last_recorded_ms = loaded_run_ms
                 val entry = TestCacheEntry(
@@ -314,8 +364,8 @@ fn shared_cache_load_entries(cache_path: text) -> {text: TestCacheEntry}:
                     failed: parts[4].to_int() ?? 0,
                     skipped: parts[5].to_int() ?? 0,
                     duration_ms: parts[6].to_int() ?? 0,
-                    output: "",
-                    cached_at: loaded_run_ms * 1000,
+                    output: _decode_cache_output(parts[9]),
+                    cached_at: loaded_cached_at,
                     last_run_ms: loaded_run_ms
                 )
                 entries[entry.test_path] = entry
