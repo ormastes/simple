@@ -1,0 +1,90 @@
+use std.spec.{describe, it, expect, step}
+use common.ui.widget.{UIState, UITree, UIMode}
+use common.ui.builder.{panel, column, row, tabs, text_widget, list_widget, scroll, input, textfield, textarea, tree_widget, tree_node, table_widget, with_width, build_tree}
+use common.ui.state.{init_state, update_state}
+use common.ui.widget.{UIEvent}
+use app.ui.render.html_widgets.{render_html_widget}
+
+describe "HTML layout, tabs panel, scroll offset, hit ids, and input focus rendering":
+    it "scales column-unit panel widths <= 80 while keeping pixel widths > 80":
+        step("Verify column width scaling vs pixel width passthrough")
+        val narrow = with_width(panel("sidebar", "Sidebar", []), 30)
+        val wide = with_width(panel("wide_panel", "Wide", []), 250)
+        val tree_narrow = build_tree(narrow)
+        val tree_wide = build_tree(wide)
+        val html_narrow = render_html_widget(narrow, init_state(tree_narrow))
+        val html_wide = render_html_widget(wide, init_state(tree_wide))
+        expect(html_narrow).to_contain("width: 240px; min-width: 210px; flex: none;")
+        expect(html_wide).to_contain("width: 250px; flex: none;")
+
+    it "adds gap and min-width/min-height zero to vbox and hbox":
+        step("Verify vbox and hbox flex gap and shrink rules")
+        val vb = column("vb_1", [text_widget("t_1", "A")])
+        val hb = row("hb_1", [text_widget("t_2", "B")])
+        val vb_html = render_html_widget(vb, init_state(build_tree(vb)))
+        val hb_html = render_html_widget(hb, init_state(build_tree(hb)))
+        expect(vb_html).to_contain("gap: 12px; min-width: 0; min-height: 0;")
+        expect(hb_html).to_contain("gap: 12px; min-width: 0; min-height: 0;")
+
+    it "renders deterministic tab ids and updates tab-panel when tab action fires":
+        step("Click second tab and verify tab-panel switches content")
+        val t = tabs("nav_tabs", ["Overview", "Details"])
+        val tree = build_tree(t)
+        var state = init_state(tree)
+        val initial_html = render_html_widget(t, state)
+        expect(initial_html).to_contain("id=\"ui_action_tab_nav_tabs_0\"")
+        expect(initial_html).to_contain("id=\"ui_action_tab_nav_tabs_1\"")
+        expect(initial_html).to_contain("<div class=\"tab-panel\" id=\"nav_tabs_panel\"")
+        expect(initial_html).to_contain("Overview</div></div>")
+
+        state = update_state(state, UIEvent.Action(name: "tab_nav_tabs_1"))
+        val updated_html = render_html_widget(state.tree.root_node(), state)
+        expect(updated_html).to_contain("Details</div></div>")
+
+    it "renders deterministic ui_action ids for list items, tree toggles, and table headers":
+        step("Verify list, tree, and table action ids")
+        val lw = list_widget("sidebar_list", ["Home", "Reports"])
+        val lw_html = render_html_widget(lw, init_state(build_tree(lw)))
+        expect(lw_html).to_contain("id=\"ui_action_select_sidebar_list_0\"")
+        expect(lw_html).to_contain("data-action=\"select_sidebar_list_0\"")
+
+        val tn = tree_node("d_src", "src", [tree_node("f_main", "main.spl", [])])
+        val tw = tree_widget("file_tree", [tn])
+        val tw_html = render_html_widget(tw, init_state(build_tree(tw)))
+        expect(tw_html).to_contain("id=\"ui_action_toggle_d_src\"")
+
+        val tbl = table_widget("data_table", ["Col A", "Col B"], [["A1", "B1"]])
+        val tbl_html = render_html_widget(tbl, init_state(build_tree(tbl)))
+        expect(tbl_html).to_contain("id=\"ui_action_sort_col_0\"")
+        expect(tbl_html).to_contain("id=\"ui_action_sort_col_1\"")
+
+    it "renders scroll_offset inner wrapper when scroll_offset > 0":
+        step("Set scroll_offset and verify widget-scroll-inner margin-top")
+        val sc = scroll("scroll_area", 100, [text_widget("line_0", "Row 0")])
+        sc.set_prop("scroll_offset", "36")
+        val sc_html = render_html_widget(sc, init_state(build_tree(sc)))
+        expect(sc_html).to_contain("overflow-y: auto;")
+        expect(sc_html).to_contain("<div class=\"widget-scroll-inner\" style=\"margin-top: -36px;\">")
+
+    it "emits data-target-id and focus style on focused inputs":
+        step("Verify focused and unfocused input, textfield, and textarea attributes")
+        val inp = input("search_input", "Search")
+        val tf = textfield("edit_field", "val", "Placeholder")
+        val ta = textarea("notes_area", "body", "Notes", 3)
+        val root = column("form_root", [inp, tf, ta])
+        val tree = build_tree(root)
+
+        val focused_inp_state = UIState(tree: tree, mode: UIMode.Insert, focused_id: "search_input", command_buffer: "")
+        val inp_html = render_html_widget(inp, focused_inp_state)
+        expect(inp_html).to_contain("data-target-id=\"search_input\"")
+        expect(inp_html).to_contain("data-focused=\"true\"")
+        expect(inp_html).to_contain("border: 2px solid #38bdf8; outline: none;")
+
+        val unfocused_tf_html = render_html_widget(tf, focused_inp_state)
+        expect(unfocused_tf_html).to_contain("data-target-id=\"edit_field\"")
+        expect(unfocused_tf_html.contains("data-focused=\"true\"")).to_equal(false)
+
+        val focused_ta_state = UIState(tree: tree, mode: UIMode.Insert, focused_id: "notes_area", command_buffer: "")
+        val ta_html = render_html_widget(ta, focused_ta_state)
+        expect(ta_html).to_contain("data-target-id=\"notes_area\"")
+        expect(ta_html).to_contain("data-focused=\"true\"")
