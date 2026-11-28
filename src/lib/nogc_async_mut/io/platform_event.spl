@@ -124,8 +124,10 @@ extern fn rt_event_loop_create() -> i64
 extern fn rt_event_loop_register(loop_fd: i64, fd: i64, interest: i64, token: i64, edge: bool) -> bool
 @unsafe(reason: "deregisters unbranded raw epoll and descriptor handles", capabilities: [ffi, raw_ptr])
 extern fn rt_event_loop_deregister(loop_fd: i64, fd: i64) -> bool
-@unsafe(reason: "polls a copyable raw epoll handle and returns an unverified descriptor array", capabilities: [ffi, raw_ptr])
-extern fn rt_event_loop_poll(loop_fd: i64, max_events: i64, timeout_ms: i64) -> [i64]
+@unsafe(reason: "polls a copyable raw epoll handle and returns the ready-event count", capabilities: [ffi, raw_ptr])
+extern fn rt_event_loop_poll(loop_fd: i64, max_events: i64, timeout_ms: i64) -> i64
+@unsafe(reason: "reads the fd of the index-th event of the last epoll poll", capabilities: [ffi, raw_ptr])
+extern fn rt_event_loop_poll_get_fd(index: i64) -> i64
 @unsafe(reason: "closes a copyable raw epoll handle", capabilities: [ffi, raw_ptr])
 extern fn rt_event_loop_close(loop_fd: i64) -> bool
 
@@ -169,6 +171,27 @@ extern fn rt_event_ports_deregister(loop_fd: i64, fd: i64) -> bool
 extern fn rt_event_ports_poll(loop_fd: i64, max_events: i64, timeout_ms: i64) -> [i64]
 @unsafe(reason: "closes a copyable raw event-port handle", capabilities: [ffi, raw_ptr])
 extern fn rt_event_ports_close(loop_fd: i64) -> bool
+
+fn event_loop_poll_ready(loop_fd: i64, max_events: i64, timeout_ms: i64) -> [i64]:
+    """Canonical typed accessor for rt_event_loop_poll.
+
+    The runtime (C, Rust, codegen) returns an i64 ready COUNT and exposes each
+    ready fd through rt_event_loop_poll_get_fd(i). This wraps that protocol as
+    the flat [i64] (fd, ready, token) triple array PlatformEvent.poll returns.
+    The runtime reports only the fd, so ready is Read (0) and token is the fd.
+    """
+    var out: [i64] = []
+    unsafe(capabilities: [ffi, raw_ptr]):
+        val n = rt_event_loop_poll(loop_fd, max_events, timeout_ms)
+        var i: i64 = 0
+        while i < n:
+            val fd = rt_event_loop_poll_get_fd(i)
+            if fd >= 0:
+                out.push(fd)
+                out.push(0)
+                out.push(fd)
+            i = i + 1
+    out
 
 # ============================================================================
 # PlatformEvent — Cross-Platform Event Abstraction
@@ -397,7 +420,7 @@ class PlatformEvent:
             return []
         unsafe(capabilities: [ffi, raw_ptr]):
             match self._backend:
-                case EventBackend.Epoll: rt_event_loop_poll(handle, max, timeout_ms)
+                case EventBackend.Epoll: event_loop_poll_ready(handle, max, timeout_ms)
                 case EventBackend.Kqueue: rt_kqueue_poll(handle, max, timeout_ms)
                 case EventBackend.Iocp: rt_iocp_poll(handle, max, timeout_ms)
                 case EventBackend.EventPorts: rt_event_ports_poll(handle, max, timeout_ms)
