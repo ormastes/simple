@@ -88,3 +88,9 @@ occurrences through HIR+MIR; codegen confirmation is pending.
 
 - **Backend diagnostics:** Added `llvm_llc_not_found_message_v1` in `src/compiler/70.backend/backend/llvm_backend_tools.spl` and wired `last_tool_probe_diagnostic()` into all three `"llc not found"` error returns (`compile_ir_to_object`, `compile_ir_to_object_path`, `compile_ir_to_wasm`), so callers see transient `--version` probe diagnostics instead of bare `"llc not found"`.
 - **Tests:** Verified `test/01_unit/compiler/interp/llvm_tool_probe_transient_cache_spec.spl` (13/13) and added `test/01_unit/compiler/backend/llvm_llc_probe_diagnostic_spec.spl`.
+
+## Single-Probe Resolution & Per-Tool Diagnostic Isolation Update (2026-11-28)
+
+- **Eliminated per-unit double-probing & strict fallback bug:** Updated `_llvm_resolve_object_tools_v1()` in `src/compiler/70.backend/backend/llvm_backend_tools.spl` so non-strict mode probes `find_clang()` once (instead of twice via `llvm_object_llc_v1()` + `find_clang()`, which halved clang's miss budget on transient failures), and strict mode skips `find_clang()` (avoiding strict `cc` / `clang-cl` fallback).
+- **Per-tool cached diagnostics:** Added `llc_probe_candidates()`, `clang_probe_candidates()`, and read-only `tool_probe_diagnostic_for_candidates()` in `src/compiler/95.interp/interpreter/llvm/tools.spl`, plus `llvm_combine_tool_probe_diagnostics_v1()` in `llvm_backend_tools.spl`, preventing cross-tool diagnostic clobbering across cached failures.
+- **Tests:** `llvm_llc_probe_diagnostic_spec.spl` (3/3 PASS), `llvm_llc_tool_resolution_cache_spec.spl` (4/4 PASS), `llvm_tool_probe_transient_cache_spec.spl` (13/13 PASS). Full Phase 2 native-build load verification remains pending.

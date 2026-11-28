@@ -25,6 +25,24 @@ pub fn resolve_strategies_publish_unresolved_method_v1(subject: text,
     reverse_reference_owner_mark_known_v1("unresolved-method-candidate")
     reverse_reference_register_unresolved_method_v1(subject, consumer, evidence)
 
+pub fn unresolved_method_unknown_receiver_diagnostic_v1(method: text) -> text:
+    """Format resolution error when receiver type is unknown, with nil-check guidance for `is_nil`."""
+    var msg = "cannot resolve method '{method}': receiver type is unknown. " +
+        "Ensure the receiver expression has a valid type."
+    if method == "is_nil":
+        msg = msg + " 'is_nil' is not a language builtin; use '== nil' or '.?' instead."
+    msg
+
+pub fn unresolved_method_diagnostic_v1(method: text, type_name: text, suggestions: [text]) -> text:
+    """Format resolution error for a missing method, pointing `is_nil` callers at `== nil` / `.?`."""
+    var error_msg = "no method '{method}' found for type '{type_name}'"
+    if method == "is_nil":
+        error_msg = error_msg + ": 'is_nil' is not a language builtin; use '== nil' or '.?' instead"
+    error_msg = error_msg + ". Tried: (1) instance method, (2) trait method, (3) free function '{method}({type_name}, ...)'"
+    if suggestions.len() > 0:
+        error_msg = error_msg + ". Did you mean: {suggestions.join(\", \")}"
+    error_msg
+
 fn primitive_intrinsic_method_name_v1(receiver_kind: HirTypeKind, method: text) -> bool:
     """True when `method` names a compiler intrinsic on a primitive scalar
     receiver (i64/f64/bool/char/text), which UFCS must never override.
@@ -70,8 +88,7 @@ impl MethodResolver:
             resolve_strategies_publish_unresolved_method_v1(
                 method, "unknown-receiver", "receiver-type-unknown")
             self.add_error(
-                ("cannot resolve method '{method}': receiver type is unknown. " +
-                "Ensure the receiver expression has a valid type."),
+                unresolved_method_unknown_receiver_diagnostic_v1(method),
                 receiver.span
             )
             return MethodResolution.Unresolved
@@ -102,14 +119,8 @@ impl MethodResolver:
             return builtin
 
         # No resolution found - provide helpful error message
-        val arg_count = args.len()
         val suggestions = self.get_method_suggestions(ty, method)
-
-        var error_msg = "no method '{method}' found for type '{type_name}'"
-        error_msg = error_msg + ". Tried: (1) instance method, (2) trait method, (3) free function '{method}({type_name}, ...)'"
-
-        if suggestions.len() > 0:
-            error_msg = error_msg + ". Did you mean: {suggestions.join(\", \")}"
+        val error_msg = unresolved_method_diagnostic_v1(method, type_name, suggestions)
 
         self.add_error(error_msg, receiver.span)
         MethodResolution.Unresolved
