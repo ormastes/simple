@@ -1,6 +1,6 @@
 # Stage 2 test-runner build: `00.common/simple.sdn: project.name is missing` (2026-11-27)
 
-**Status:** root cause found; worked around in source (`str_slice`, below) and fixed in the Rust seed resolver (2026-11-27, this section's "Seed fix" under Open). Not yet confirmed by a rebuilt Stage 2. Owner: bootstrap lane.
+**Status:** fix-implemented, workarounds removed. The Rust seed resolver fix (2026-11-27, "Seed fix" under Open) is confirmed by a rebuilt Stage 2 (2026-11-28: pin `f3cf72db4299` contains `af6ed58435c`; its `test_runner_build` run passed the library-unit packaging step that failed pre-fix — evidence under Workaround below), so both workarounds (the `str_slice` body below and the manifest reorder `a17add1a2c0`) were removed. Not formally closed: no reproducer/prevention spec pair is attached. Owner: bootstrap lane.
 
 ## Root cause (2026-11-27, proven with the exact Stage 2 producer)
 
@@ -38,9 +38,11 @@ A closure without a `str_slice` function (any small probe, or anything built by 
 
 ## Workaround
 
-`src/compiler/10.frontend/core/types.spl`: `str_slice` now returns `s.substring(start, end_idx)` (byte offsets, lowered straight to `rt_slice_text_bytes`), tagged `@workaround`. This corrects all 62 rebound sites at once. `str_slice` has no source caller in `src/compiler`. Remove it once the seed fix below is deployed.
+REMOVED 2026-11-28. `src/compiler/10.frontend/core/types.spl`: `str_slice` had returned `s.substring(start, end_idx)` (byte offsets, lowered straight to `rt_slice_text_bytes`), tagged `@workaround`; with the seed fix deployed it is back to `s[start:end_idx]` and the tag is gone. The manifest reorder `a17add1a2c0` is reverted too; `src/compiler/00.common/simple.sdn` is back to the essay-first layout.
 
-The manifest reorder `a17add1a2c0` also avoids the failure, but only incidentally: with content on line 1, strip returns the source unsliced. A non-ASCII character ahead of any other `.slice` cut would still misparse.
+Removal evidence: the rebuilt Stage 2 at pin `f3cf72db4299` (seed fix `af6ed58435c` is an ancestor) ran `test_runner_build` on 2026-11-28 with the exact pre-fix failure step green — `[library-unit-dynlib] units=4 reused=0 built=4`, `phase=link state=succeeded` for `simple_test_runner` (`build/bootstrap/pinned-src/pinned-f3cf72db4299/.simple/storage/build/bootstrap/stage2-compiler-tests/aarch64-unknown-linux-gnu/verification/logs/test_runner_build.log`) — plus the seed fix's `numeric_receiver_resolution_tests` cargo unit tests (7/7).
+
+The manifest reorder `a17add1a2c0` had also avoided the failure, but only incidentally: with content on line 1, strip returns the source unsliced. A non-ASCII character ahead of any other `.slice` cut would still have misparsed.
 
 ## Open
 
@@ -55,14 +57,15 @@ The manifest reorder `a17add1a2c0` also avoids the failure, but only incidentall
   User-type factory resolution through the same lookup is unchanged (positive
   control in the new tests). Regression coverage: three new tests in
   `numeric_receiver_resolution_tests` (`cargo test -p simple-compiler --lib
-  numeric_receiver_resolution_tests`). Still open: a rebuilt Stage 2 running
-  `test_runner_build` end-to-end; until that passes, keep the `str_slice`
-  source workaround below. The Cranelift ladders carry the same spelling
+  numeric_receiver_resolution_tests`). The end-to-end check is done: a rebuilt
+  Stage 2 at pin `f3cf72db4299` ran `test_runner_build` with the library-unit
+  packaging step green (2026-11-28, log cited under Workaround), and the
+  `str_slice` source workaround below is removed. The Cranelift ladders carry the same spelling
   (`codegen/instr/calls.rs:4966`, `closures_structs.rs:1594`) and are NOT
   gated — a Cranelift seed build did not reproduce on the minimal shape, so
   they were left alone; revisit if a Cranelift lane ever shows the symptom.
 - **Sibling rebindings, same mechanism (proven).** With the same producer, a closure defining sentinel `str_len`, `str_char_at`, `str_index_of`, `str_starts_with`, `str_contains`, `str_ends_with` and `str_replace` has `s.len()`, `s.char_at(1)`, `s.index_of(..)`, `s.starts_with(..)`, `s.contains(..)`, `s.ends_with(..)` and `s.replace(..)` all return the sentinels (`len=-111 char_at=HIJACK_CHAR_AT index_of=-222 ...`); the seed interpreter runs the builtins. Calls into `compiler.frontend.core.types` from outside the core package in the Stage 2 binary (direct source calls not separated out): `str_starts_with` 1747, `str_len` 1457, `str_contains` 1016, `str_ends_with` 555, `str_replace` 525, `str_index_of` 187, `str_slice` 62, `str_char_at` 30. The one with a visible unit difference is `str_len`: it is `rt_string_len`, which returned the byte count (2489) for the em-dash manifest, while the interpreter's `.len()` counts code points (7 for an 11-byte text). Consequences were not examined.
-- No rebuilt Stage 2 has run `test_runner_build` with the workaround yet.
+- ~~No rebuilt Stage 2 has run `test_runner_build` with the workaround yet.~~ Done 2026-11-28: pin `f3cf72db4299` (contains the seed fix), library-unit packaging green (log cited under Workaround).
 - The `compiler_cli_build` failure in the same verification (`FILE-WORKER-E-CLOSURE-INCOMPLETE`, `failed_modules=3347`) is a separate problem.
 
 ## History
@@ -102,6 +105,6 @@ No qualified self-hosted `SIMPLE_BIN` or test runner exists. This blocks native 
 
 ## Shard Registration (2026-11-27)
 
-- **Workaround site:** `src/compiler/10.frontend/core/types.spl:36-38` (`str_slice` delegates to `s.substring(start, end_idx)`, tagged `# @workaround bug=stage2_test_runner_libunit_project_name_missing_2026-11-27`).
+- **Workaround site:** `src/compiler/10.frontend/core/types.spl:36-37` (`str_slice` was `s.substring(start, end_idx)`, tagged `# @workaround bug=stage2_test_runner_libunit_project_name_missing_2026-11-27`; REMOVED 2026-11-28, back to `s[start:end_idx]` after the seed fix was confirmed by a rebuilt Stage 2).
 - **Seed fix commit:** `3850673f958` (`src/compiler_rust/compiler/src/pipeline/native_project/imports.rs`, `resolve_name_variants` gated by `is_builtin_receiver_type`).
 - **Shard:** `doc/08_tracking/bug/db/stage2_test_runner_libunit_project_name_missing_2026-11-27.sdn` (`status=fix-implemented-verification-pending`, waiting for rebuilt Stage 2 passing `test_runner_build` end-to-end before retiring `str_slice` workaround).
