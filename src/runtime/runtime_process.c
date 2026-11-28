@@ -1529,6 +1529,24 @@ void simple_piped_owner_observe_v1(int64_t pid, int64_t collect_exit,
     ReleaseSRWLockExclusive(&win_piped_lock);
 }
 
+/* ===== Explicit child environment + bounded readiness (Windows) ===== */
+/* _SIMPLE_STACK_SET is internal stack plumbing: never hand it to a child,
+ * matching win_filtered_environment. In place on a double-NUL UTF-16 block. */
+static void win_piped_strip_stack_env_v1(wchar_t* block) {
+    static const wchar_t hidden[] = L"_SIMPLE_STACK_SET=";
+    const size_t hidden_len = sizeof(hidden) / sizeof(wchar_t) - 1;
+    wchar_t* out = block;
+    for (const wchar_t* in = block; *in; ) {
+        size_t length = wcslen(in);
+        if (_wcsnicmp(in, hidden, hidden_len) != 0) {
+            if (out != in) memmove(out, in, (length + 1) * sizeof(wchar_t));
+            out += length + 1;
+        }
+        in += length + 1;
+    }
+    out[0] = 0;
+    if (out == block) out[1] = 0; /* every block holds at least two units */
+}
 int64_t simple_piped_owner_spawn_environment_v1(const char* cmd, SplArray* args,
         SplArray* environment, int64_t mode) {
     if (!cmd || !*cmd) return PIPED_ENV_INVALID_V1;
@@ -3540,7 +3558,7 @@ int64_t simple_piped_owner_spawn_split_v1(const char* cmd, int64_t cmd_len, SplA
     argv[0] = (char*)cmd;
     for (int64_t i = 0; i < count; i++) argv[i+1] = (char*)rt_string_data(rt_array_get(args, i));
     argv[count+1] = NULL;
-    return proc_spawn_piped_argv_owned_v1(cmd, argv, false, -1, NULL, true);
+    return proc_spawn_piped_argv_owned_v1(cmd, argv, false, -1, NULL, NULL, true);
 }
 
 /* Caller holds s_proc_lock. */
