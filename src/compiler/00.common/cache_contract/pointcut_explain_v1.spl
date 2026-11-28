@@ -1,0 +1,102 @@
+# Pure "why does it (not) match" for one selector over one join-point fact
+# (aspect plan AW-4, design doc/05_design/compiler/cache/aspect_tldr_async_trace.md
+# section 7).
+#
+# Re-evaluates the selector AST of aspect_match_shard_v1 over a single fact and
+# returns every node's truth value and, for each atom, the fact field it read.
+# Nothing is cached and nothing else is read: the answer is a function of the
+# selector and the fact only. The root value equals the shard matcher's
+# `_selector_matches` (pinned by the unit spec through
+# `pointcut_match_shard_compute_v1`), including its two early-outs: an
+# unsupported selector and a join point whose kind is not `forward` never match.
+#
+# Every node is evaluated, also where the matcher would short-circuit, so a
+# trace surface can name the failing atom of an `&` and the passing atom of an
+# `|`. Children precede their parent in `PointcutSelectorV1.nodes`, so one
+# forward pass is enough.
+
+use compiler.common.cache_contract.aspect_match_shard_v1.{JoinPointFactV1, PointcutSelectorV1}
+
+# Why the selector does or does not select the join point. `KindNotAdmitted`:
+# the selector is evaluable but the join point is not a `forward` join point.
+pub enum PointcutExplainVerdictV1:
+    Matched
+    NotMatched
+    KindNotAdmitted
+    Unsupported
+
+# @allow(primitive_api) node shape mirrors PointcutSelNodeV1 (i64 child indexes); `value` is the truth value of a boolean selector node
+pub struct PointcutExplainNodeV1:
+    op: text
+    form: text
+    operand: text
+    left: i64
+    right: i64
+    value: bool
+    # Atoms: `symbol`, `attrs` or `owner_file`. Operators and unknown forms: "".
+    field_read: text
+
+# @allow(primitive_api) `root` mirrors PointcutSelectorV1.root (i64 node index, -1 when there is no node)
+pub struct PointcutExplainV1:
+    selector_digest: text
+    join_point_id: text
+    verdict: PointcutExplainVerdictV1
+    root: i64
+    nodes: [PointcutExplainNodeV1]
+    # Distinct fact fields the evaluation read, in first-read order.
+    fields_read: [text]
+
+fn _explain_dir_of_v1(path: text) -> text:
+    val i = path.rfind("/")
+    if i < 0: return ""
+    path.slice(0, i)
+
+fn _explain_atom_field_v1(form: text) -> text:
+    if form == "exact" or form == "prefix": return "symbol"
+    if form == "attr": return "attrs"
+    if form == "within" or form == "within_tree": return "owner_file"
+    ""
+
+fn _explain_atom_value_v1(form: text, operand: text, p: JoinPointFactV1) -> bool:
+    if form == "exact": return p.symbol == operand
+    if form == "prefix": return p.symbol.starts_with(operand)
+    if form == "attr": return p.attrs.contains(operand)
+    if form == "within": return _explain_dir_of_v1(p.owner_file) == operand
+    if form == "within_tree":
+        val d = _explain_dir_of_v1(p.owner_file)
+        return d == operand or d.starts_with(operand + "/")
+    false
+
+pub fn pointcut_explain_v1(sel: PointcutSelectorV1, p: JoinPointFactV1) -> PointcutExplainV1:
+    if not sel.supported:
+        return PointcutExplainV1(selector_digest: sel.selector_digest, join_point_id: p.id,
+            verdict: PointcutExplainVerdictV1.Unsupported, root: -1, nodes: [],
+            fields_read: [])
+    var nodes: [PointcutExplainNodeV1] = []
+    var values: [bool] = []
+    var fields: [text] = ["kind"]
+    for n in sel.nodes:
+        var value = false
+        var field = ""
+        if n.op == "not":
+            value = not values[n.left]
+        elif n.op == "and":
+            value = values[n.left] and values[n.right]
+        elif n.op == "or":
+            value = values[n.left] or values[n.right]
+        else:
+            field = _explain_atom_field_v1(n.form)
+            value = _explain_atom_value_v1(n.form, n.operand, p)
+            if field != "" and not fields.contains(field): fields.push(field)
+        values.push(value)
+        nodes.push(PointcutExplainNodeV1(op: n.op, form: n.form, operand: n.operand, left: n.left,
+            right: n.right, value: value, field_read: field))
+    var verdict = PointcutExplainVerdictV1.NotMatched
+    if p.kind != "forward":
+        verdict = PointcutExplainVerdictV1.KindNotAdmitted
+    elif values[sel.root]:
+        verdict = PointcutExplainVerdictV1.Matched
+    PointcutExplainV1(selector_digest: sel.selector_digest, join_point_id: p.id, verdict: verdict,
+        root: sel.root, nodes: nodes, fields_read: fields)
+
+export PointcutExplainNodeV1, PointcutExplainV1, PointcutExplainVerdictV1, pointcut_explain_v1
