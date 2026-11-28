@@ -1718,6 +1718,52 @@ class Engine2D with DrawIrRenderTarget:
         child.clear(0x00000000u32)
         Ok(child)
 
+    me acquire_shared_vulkan_offscreen_pooled(width: i32, height: i32) -> Result<Engine2D, text>:
+        """Acquire an offscreen Engine2D reusing this parent's Vulkan device scratch framebuffer."""
+        val pixel_count = width.to_i64() * height.to_i64()
+        if width <= 0 or height <= 0 or pixel_count <= 0 or pixel_count > 2147483647:
+            return Err("invalid-shared-vulkan-surface-size")
+        val active = self.vulkan_backend
+        if active.is_none():
+            return Err("shared-vulkan-parent-required")
+        var parent = active
+        if not parent.owns_session or not parent.session.is_valid():
+            return Err("shared-vulkan-session-required")
+        val scratch_fb = parent.acquire_embed_scratch_fb(width, height)
+        if scratch_fb <= 0:
+            return self.create_shared_vulkan_offscreen(width, height)
+        self.vulkan_backend = Some(parent)
+        self.backend = parent
+        var vulkan = VulkanBackend.create()
+        if not vulkan.init_with_session_borrowed_fb(width, height, parent.session, scratch_fb):
+            return self.create_shared_vulkan_offscreen(width, height)
+        vulkan.enable_frame_batching()
+        var child = Engine2D(
+            backend: vulkan, capability: backend_capability_default(),
+            baremetal_backend: None, virtio_gpu_backend: None,
+            cuda_backend: None, vulkan_backend: Some(vulkan),
+            vulkan_font_state_unknown: false,
+            last_vulkan_font_evidence: None, metal_backend: None,
+            opencl_backend: None, rocm_backend: None, software_backend: None,
+            font_owner: Engine2DFontOwner.new(), last_font_execution_attempts: [],
+            last_font_execution_target: "",
+            w: width, h: height, pacing: make_frame_pacing_counters(),
+            selected_backend_name: "vulkan")
+        child.clear(0x00000000u32)
+        Ok(child)
+
+    me release_shared_vulkan_offscreen_pooled(layer: Engine2D):
+        """Release a pooled offscreen wrapper without freeing the parent's scratch framebuffer."""
+        if val Some(lvk) = layer.vulkan_backend:
+            val parent_owns = if val Some(pvk) = self.vulkan_backend:
+                pvk.embed_scratch_fb > 0 and pvk.embed_scratch_fb == lvk.d_framebuffer
+            else:
+                false
+            if parent_owns:
+                val _flushed = lvk._flush_pending_compute_at("release-pooled-offscreen")
+                lvk.d_framebuffer = 0
+        layer.shutdown()
+
     me create_shared_metal_offscreen(width: i32, height: i32) -> Result<Engine2D, text>:
         """Create one transparent child framebuffer on this engine's Metal session."""
         val pixel_count = width.to_i64() * height.to_i64()
@@ -4436,6 +4482,30 @@ class Engine2D with DrawIrRenderTarget:
                 val restored = vk.draw_css_group_restore_device(
                     lvk.d_framebuffer, dst_x, dst_y, width, height,
                     css_opacity_group_alpha8_milli(opacity_milli))
+                self.vulkan_backend = Some(vk)
+                self.backend = vk
+                return restored
+        false
+
+    me draw_ir_composite_device_milli(layer: Engine2D, dst_x: i32, dst_y: i32, width: i32, height: i32, opacity_milli: i32) -> bool:
+        """Composite a rendered Vulkan offscreen layer directly onto this surface on the device."""
+        if width <= 0 or height <= 0 or opacity_milli <= 0 or opacity_milli > 1000:
+            return false
+        if self.backend_name() != "vulkan" or layer.backend_name() != "vulkan":
+            return false
+        if self.vulkan_font_state_unknown or layer.vulkan_font_state_unknown:
+            return false
+        if val Some(lvk) = layer._vulkan_primitive_target():
+            if lvk.w != width or lvk.h != height or lvk.completion_unknown or lvk.d_framebuffer <= 0:
+                return false
+            val flushed = lvk._flush_pending_compute_at("milli-layer")
+            if flushed < 0:
+                lvk.mark_completion_unknown()
+            if flushed != 1 or lvk.cpu_fallback_used:
+                return false
+            if val Some(vk) = self._vulkan_primitive_target():
+                val restored = vk.draw_image_layer_device(
+                    lvk.d_framebuffer, dst_x, dst_y, width, height, opacity_milli)
                 self.vulkan_backend = Some(vk)
                 self.backend = vk
                 return restored
