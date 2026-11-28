@@ -21066,7 +21066,9 @@ static int rt_ev_set_token(RtEvLoop* lp, int64_t fd, int64_t token) {
 int64_t rt_event_loop_register(int64_t h, int64_t fd, int64_t mode, int64_t token, int64_t edge) {
     struct epoll_event ev;
     RtEvLoop* lp = rt_ev_loop(h);
-    if (!lp || !rt_ev_set_token(lp, fd, token)) return 0;
+    if (!lp || fd < 0) return 0;
+    RtEvReg prev = fd < lp->cap ? lp->regs[fd] : (RtEvReg){0, 0};
+    if (!rt_ev_set_token(lp, fd, token)) return 0;
     int epfd = lp->epfd;
     int edge_flag = edge ? EPOLLET : 0;
     ev.events = EPOLLIN | edge_flag;
@@ -21077,7 +21079,7 @@ int64_t rt_event_loop_register(int64_t h, int64_t fd, int64_t mode, int64_t toke
     if (rc != 0 && errno == EEXIST) {
         rc = epoll_ctl(epfd, EPOLL_CTL_MOD, (int)fd, &ev);
     }
-    if (rc != 0) lp->regs[fd].set = 0;
+    if (rc != 0) lp->regs[fd] = prev; /* failed MOD: the old registration is still live */
     return rc == 0 ? 1 : 0;
 }
 
@@ -21147,12 +21149,16 @@ int64_t rt_event_loop_register(int64_t kqfd, int64_t fd, int64_t mode, int64_t t
 }
 
 int64_t rt_event_loop_deregister(int64_t kqfd, int64_t fd) {
-    struct kevent ev[2];
-    EV_SET(&ev[0], (uintptr_t)fd, EVFILT_READ, EV_DELETE, 0, 0, NULL);
-    EV_SET(&ev[1], (uintptr_t)fd, EVFILT_WRITE, EV_DELETE, 0, 0, NULL);
-    int rc = kevent((int)kqfd, ev, 2, NULL, 0, NULL);
-    if (rc != 0 && errno == ENOENT) return 1;
-    return rc == 0 ? 1 : 0;
+    /* One change per call: with no event list kevent stops at the first
+     * failing change, so a missing READ filter (mode 1) would leave WRITE. */
+    static const int16_t filters[2] = { EVFILT_READ, EVFILT_WRITE };
+    int ok = 1;
+    for (int i = 0; i < 2; i++) {
+        struct kevent ev;
+        EV_SET(&ev, (uintptr_t)fd, filters[i], EV_DELETE, 0, 0, NULL);
+        if (kevent((int)kqfd, &ev, 1, NULL, 0, NULL) != 0 && errno != ENOENT) ok = 0;
+    }
+    return ok;
 }
 
 static int64_t poll_results[256];
