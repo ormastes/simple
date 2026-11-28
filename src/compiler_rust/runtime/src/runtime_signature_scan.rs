@@ -97,7 +97,7 @@ fn parse_type_list(input: &str, line_index: usize) -> Result<(Vec<String>, &str)
     let mut types = Vec::new();
     for item in list.split(',').map(str::trim).filter(|item| !item.is_empty()) {
         match item {
-            "I8" | "I32" | "I64" | "F64" => types.push(item.to_string()),
+            "I8" | "I16" | "I32" | "I64" | "F64" => types.push(item.to_string()),
             other => return Err(format!("line {} uses unknown ABI type {other}", line_index + 1)),
         }
     }

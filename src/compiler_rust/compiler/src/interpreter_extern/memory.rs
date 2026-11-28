@@ -1909,7 +1909,7 @@ pub fn rt_invlpg(args: &[Value]) -> Result<Value, CompileError> {
 /// accessors. The volatile operations preserve the native lane's access
 /// semantics while the registered barriers above preserve ordering.
 ///
-/// Callable from Simple as: `rt_volatile_read_u8(addr: i64) -> i64`
+/// Callable from Simple as: `rt_volatile_read_u8(addr: i64) -> u8`
 pub fn rt_volatile_read_u8(args: &[Value]) -> Result<Value, CompileError> {
     if args.is_empty() {
         return Err(CompileError::runtime("rt_volatile_read_u8 requires 1 argument (addr)"));
@@ -1918,7 +1918,7 @@ pub fn rt_volatile_read_u8(args: &[Value]) -> Result<Value, CompileError> {
     unsafe { Ok(Value::Int((addr as *const u8).read_volatile() as i64)) }
 }
 
-/// Callable from Simple as: `rt_volatile_read_u16(addr: i64) -> i64`
+/// Callable from Simple as: `rt_volatile_read_u16(addr: i64) -> u16`
 pub fn rt_volatile_read_u16(args: &[Value]) -> Result<Value, CompileError> {
     if args.is_empty() {
         return Err(CompileError::runtime("rt_volatile_read_u16 requires 1 argument (addr)"));
@@ -1927,7 +1927,7 @@ pub fn rt_volatile_read_u16(args: &[Value]) -> Result<Value, CompileError> {
     unsafe { Ok(Value::Int((addr as *const u16).read_volatile() as i64)) }
 }
 
-/// Callable from Simple as: `rt_volatile_read_u32(addr: i64) -> i64`
+/// Callable from Simple as: `rt_volatile_read_u32(addr: i64) -> u32`
 pub fn rt_volatile_read_u32(args: &[Value]) -> Result<Value, CompileError> {
     if args.is_empty() {
         return Err(CompileError::runtime("rt_volatile_read_u32 requires 1 argument (addr)"));
@@ -1936,7 +1936,7 @@ pub fn rt_volatile_read_u32(args: &[Value]) -> Result<Value, CompileError> {
     unsafe { Ok(Value::Int((addr as *const u32).read_volatile() as i64)) }
 }
 
-/// Callable from Simple as: `rt_volatile_read_u64(addr: i64) -> i64`
+/// Callable from Simple as: `rt_volatile_read_u64(addr: i64) -> u64`
 pub fn rt_volatile_read_u64(args: &[Value]) -> Result<Value, CompileError> {
     if args.is_empty() {
         return Err(CompileError::runtime("rt_volatile_read_u64 requires 1 argument (addr)"));

@@ -8956,20 +8956,20 @@ void rt_write_cr3_raw(uint64_t value) {
     rt_write_cr3(value);
 }
 
-int64_t rt_volatile_read_u8(int64_t addr) {
+uint8_t rt_volatile_read_u8(int64_t addr) {
     return *(volatile uint8_t*)(uintptr_t)addr;
 }
 
-int64_t rt_volatile_read_u16(int64_t addr) {
+uint16_t rt_volatile_read_u16(int64_t addr) {
     return *(volatile uint16_t*)(uintptr_t)addr;
 }
 
-int64_t rt_volatile_read_u32(int64_t addr) {
+uint32_t rt_volatile_read_u32(int64_t addr) {
     return *(volatile uint32_t*)(uintptr_t)addr;
 }
 
-int64_t rt_volatile_read_u64(int64_t addr) {
-    return (int64_t)*(volatile uint64_t*)(uintptr_t)addr;
+uint64_t rt_volatile_read_u64(int64_t addr) {
+    return *(volatile uint64_t *)(uintptr_t)addr;
 }
 
 void rt_volatile_write_u8(int64_t addr, int64_t value) {
