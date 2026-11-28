@@ -44,3 +44,7 @@ coverage-binding assertions. Neither is a spec-only fix.
       restore the stricter `closure_ready` checks) or retire the V2 coverage specs.
 - [ ] After a forward-port: run `fv2_wave6_orchestrator_spec`, `verification_ir_spec`,
       `exact_core_gate_collector_spec` before/after on the self-hosted binary.
+
+## Owner decision (2026-11-28)
+
+Deferred: restore the coverage binding in `verification_ir` only after the Phase 3 -> Phase 3 self-build succeeds, so this compiler change cannot disturb the current bootstrap. `fv2_wave6_orchestrator` stays 9/12 (Rust seed interpreter, diagnostic) until then; this record stays open and is the resume point.
