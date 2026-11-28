@@ -499,7 +499,14 @@ impl ContextualError {
 /// Owner keys are normalized absolute paths (`\\?\C:\...` on Windows); show
 /// them cwd-relative with `/` separators like the entry path used to read.
 fn display_source_path(raw: &str) -> String {
-    let plain = raw.strip_prefix(r"\\?\").unwrap_or(raw);
+    // `\\?\UNC\server\share` is `\\server\share`, not `UNC\server\share`.
+    let unc;
+    let plain = if let Some(rest) = raw.strip_prefix(r"\\?\UNC\") {
+        unc = format!(r"\\{rest}");
+        unc.as_str()
+    } else {
+        raw.strip_prefix(r"\\?\").unwrap_or(raw)
+    };
     let path = std::path::Path::new(plain);
     let shown = std::env::current_dir()
         .ok()
@@ -646,12 +653,17 @@ impl CompileError {
         }
         if context.file.is_none() {
             // The span is the executing statement's, so the file must be the
-            // executing function's owning module, not the entry file: a library
-            // error used to print `spec.spl:<lib line>`. The owner lookup falls
-            // back to the entry file, and "<entry>" (in-memory source) means
-            // no file at all. Bug: seed_semantic_error_wrong_file_library_line_2026-11-28.
-            let file = crate::interpreter::current_coverage_file();
-            if file != "<entry>" {
+            // module that lexically wrote that statement, not the entry file
+            // (a library error used to print `spec.spl:<lib line>`). This is
+            // `private_call_caller`, the same rule lexical coverage uses: a
+            // closure body is its writing module (origin stamp, so an `it`
+            // block run by std.spec stays in the spec), a module's top level
+            // is that module, otherwise the executing fn's owner, else the
+            // entry file. "<entry>" means no file is known (in-memory source,
+            // where CURRENT_FILE was unset before too).
+            // Bug: seed_semantic_error_wrong_file_library_line_2026-11-28.
+            let file = crate::interpreter::interpreter_module::private_call_caller();
+            if &*file != "<entry>" {
                 context.file = Some(display_source_path(&file));
             }
         }
@@ -904,5 +916,31 @@ mod tests {
         let shown = err.to_string();
         assert!(shown.contains("decompress.spl:25:9"), "{shown}");
         assert!(!shown.contains("di_spec.spl"), "{shown}");
+    }
+
+    /// A closure written in a spec but run by a library function (an `it`
+    /// block run by std.spec, a lambda handed to a library HOF) inherits the
+    /// library as CURRENT_EXEC_MODULE; the error must still name the spec,
+    /// which wrote the statement. Here a module top-level scope stands in for
+    /// the closure's origin stamp (both set TOP_LEVEL_MODULE).
+    #[test]
+    fn semantic_with_context_uses_lexical_module_inside_closure() {
+        crate::interpreter::CURRENT_EXEC_MODULE
+            .with(|c| *c.borrow_mut() = Some(std::sync::Arc::from("C:/repo/src/lib/spec/runner.spl")));
+        let err = {
+            let _origin = crate::interpreter::interpreter_module::ClosureOriginGuard::enter_module_top_level(Some(
+                "C:/repo/test/attr_spec.spl",
+            ));
+            CompileError::semantic_with_context("boom", ErrorContext::new().with_span(Span::new(0, 1, 7, 3)))
+        };
+        crate::interpreter::CURRENT_EXEC_MODULE.with(|c| *c.borrow_mut() = None);
+        let shown = err.to_string();
+        assert!(shown.contains("attr_spec.spl:7:3"), "{shown}");
+        assert!(!shown.contains("runner.spl"), "{shown}");
+    }
+
+    #[test]
+    fn display_source_path_maps_verbatim_unc() {
+        assert_eq!(display_source_path(r"\\?\UNC\srv\share\a.spl"), "//srv/share/a.spl");
     }
 }
