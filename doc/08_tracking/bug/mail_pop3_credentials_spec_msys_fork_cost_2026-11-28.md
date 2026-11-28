@@ -27,25 +27,32 @@ Budget not raised and no example skipped (no owner approval). A real fix is a po
 client's config/format/inbox parsing to in-process Simple, which needs a newer binary than the
 stale seed; no binary was redeployed.
 
-## Measurements that pin the cost (2026-11-28, host loaded by concurrent gates)
-- One empty `$(true)` fork under MSYS: about 340 ms (10 forks = 3.4 s).
-- `bash tools/mail-cli/bin/mail --help` alone, which does no mail work: 31.6 s, so an estimated
-  90 forks (31.6 s divided by 340 ms; estimated, not counted) of fixed startup cost per client invocation. The probes run the client dozens of
-  times per mode, so startup, not the per-step logic, dominates.
+## Measurements that pin the cost
+Correction (2026-11-28): the first draft of this doc quoted `--help` = 31.6 s and 340 ms per
+fork. Those were taken while pre-push gates loaded the host and are wrong. Re-measured on a
+quieter host:
+- One empty `$(true)` fork under MSYS: about 36 ms (10 forks = 0.36 s).
+- `bash tools/mail-cli/bin/mail --help`: 2.1 s. The startup path (`bin/mail`, `lib/config.bash`)
+  holds about 10 forks, so startup is not the dominant cost; the earlier "about 90 forks"
+  estimate is withdrawn.
+- `pop3_credentials_probe.shs protocol` alone: 254 s, rc=0, all 10 PASS lines present
+  (613 s when measured under gate load). Nine examples at that rate is on the order of 30+
+  minutes, still far over a runner budget.
+- Loaded-host timings for the other probes: credentials 917 s and transport 920 s, both cut
+  off by a `timeout 900` wrapper, so those are lower bounds, likely inflated by overlapping gates.
 - The probes already run as one bash process per mode; batching probe calls cannot help
   because each probe step must still invoke the client.
 
-## Concrete fix plan (bash-only, needs no new binary; not yet implemented)
-1. `tools/mail-cli/bin/mail:33-38`: replace the four `$(cd ... && pwd)` / `dirname` / `readlink`
-   substitutions with parameter expansion (`${SELF%/*}`) and `cd -P` plus `$PWD` via `printf -v`.
-2. `tools/mail-cli/lib/config.bash:16-18` (`mail_expand_path`, `dirname`) and the per-field
-   loops near lines 501-572: return values through `printf -v`/globals instead of `$(...)`,
-   and read all account fields with the single existing `jq` call.
-3. `tools/mail-cli/lib/format.bash` (22 external-tool uses: `sed`, `tr`, `date`, `wc`, `head`,
-   `od`): replace with bash builtins (`${var//}`, `${var,,}`, `printf '%(%s)T'`, `read -r`),
-   and compute `date -R`/message-id lazily only in the send path, not at source time.
-4. Source libs lazily per subcommand (`lib/inbox.bash`, `lib/send.bash`, `lib/auth.bash`
-   only when the subcommand needs them), so `pop3`/`credentials` probes skip about two thirds of sourcing.
-5. Target: client startup from about 90 forks to fewer than 15; re-time with
-   `bash tools/mail-cli/bin/mail --help` (goal under 5 s here) and then each probe mode.
+## Fix plan (not yet implemented)
+The dominant cost is per-step work inside each client call, not startup. First step is to
+profile one `protocol` probe step (bash `PS4='+${EPOCHREALTIME} '` xtrace of a single
+`tools/mail-cli/bin/mail` call against the synthetic curl) and cut the forks that account for
+the time. Candidate sites, to be confirmed by that profile:
+1. `tools/mail-cli/lib/config.bash` (about 56 `$(...)`; the per-field account loop near
+   lines 501-572 should use the single `jq` call already present) and `mail_expand_path`
+   (return through `printf -v` instead of a substitution).
+2. `tools/mail-cli/lib/format.bash` (22 `sed`/`tr`/`date`/`wc`/`head`/`od` uses) to bash builtins.
+3. `tools/mail-cli/bin/mail:33-38` path resolution via parameter expansion.
+4. The probe's synthetic `curl` shim and credential helper are each a separate bash process
+   per call; make them cheaper (no `cat`/`printf` subshells).
 Acceptance: all nine examples pass unchanged within the runner budget.
