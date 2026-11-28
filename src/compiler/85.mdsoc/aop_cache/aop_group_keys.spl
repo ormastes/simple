@@ -1,12 +1,11 @@
-use compiler.frontend.core.aop_predicate_parser.{aop_predicate_canonical_text}
+use compiler.frontend.core.aop_selector_identity_v1.{aop_selector_id_v1}
 
 # AOP cache group keys (Semantic Incremental Build v2, design §16.2).
 #
 # Built over what the tree ACTUALLY has today (plan §2b reality gaps):
-#   - Pointcut selectors use shared lexical canonicalization (schema v2).
-#     This is not a semantic query IR: Boolean-equivalent reordered queries
-#     may still have distinct digests. Legacy non-selector predicates retain
-#     whitespace normalization; no typed field consumer is enabled here.
+#   - Selector identity is the one PointcutSelectorId (aspect plan AW-3):
+#     10.frontend/core/aop_selector_identity_v1.spl lowers the predicate into
+#     the shard selector AST, or marks it unsupported. No second digest here.
 #   - A join-point descriptor can only read JoinPointContext's real fields:
 #     function_name, module_path, signature, attributes, effects.
 #   - Weaving mutates MIR in place (50.mir/mir_aop_injection.spl); there is
@@ -35,38 +34,6 @@ pub val AOP_DESCRIPTOR_SCHEMA_VERSION: i64 = 1
 # input that has no producer in the tree yet (c0 freeze sentinel rule).
 fn aop_empty_seq_sentinel() -> text:
     sha256_text(canon_seq([]))
-
-# ============================================================================
-# Selector identity (stands in for "normalized pointcut query", plan §2b)
-# ============================================================================
-
-# Shared selector tokens normalize punctuation/whitespace and comments.
-# Legacy non-selector predicates retain their prior whitespace contract.
-fn aop_normalize_predicate(p: text) -> text:
-    val trimmed = p.trim()
-    val legacy = trimmed.starts_with("@") or trimmed.starts_with("module:") or trimmed.starts_with("effect:")
-    if p.contains("(") and not legacy:
-        return aop_predicate_canonical_text(p)
-    var out = ""
-    var pending_space = false
-    var started = false
-    for ch in p.chars():
-        if ch == " " or ch == "\t" or ch == "\n" or ch == "\r":
-            if started:
-                pending_space = true
-        else:
-            if pending_space:
-                out = out + " "
-                pending_space = false
-            out = out + ch
-            started = true
-    out
-
-fn aop_selector_digest(predicate_text: text) -> text:
-    var inner: [text] = []
-    inner.push(canon_field("normalizedPredicate", canon_str(aop_normalize_predicate(predicate_text))))
-    inner.push(canon_field("matcherSchemaVersion", canon_nat(AOP_MATCHER_SCHEMA_VERSION)))
-    sha256_text(canon_field("simple/aop-selector/v1", canon_seq(inner)))
 
 # ============================================================================
 # Join-point descriptor digest (candidate leaf identity)
@@ -173,7 +140,7 @@ fn aop_candidate_partition_key_digest(k: AopCandidatePartitionKey) -> text:
 # advice implementation digest — advice-body-only changes must not move it.
 struct AopSelectionKey:
     pointcut_surface_digest: text        # sentinel until pointcuts exist
-    normalized_query_digest: text        # aop_selector_digest(predicate_text)
+    normalized_query_digest: text        # aop_selector_id_v1(predicate_text)
     matcher_schema_digest: text
     visible_aspect_catalog_digest: text  # loader-owned validated catalog digest
     candidate_partition_roots: [text]    # set; sorted at encode time
@@ -210,7 +177,7 @@ fn aop_selection_key_digest(k: AopSelectionKey) -> text:
 fn aop_selection_key_today(predicate_text: text, partition_roots: [text], advice_interface_digests: [text], visible_aspect_catalog_digest: text) -> AopSelectionKey:
     AopSelectionKey(
         pointcut_surface_digest: aop_empty_seq_sentinel(),
-        normalized_query_digest: aop_selector_digest(predicate_text),
+        normalized_query_digest: aop_selector_id_v1(predicate_text),
         matcher_schema_digest: aop_matcher_schema_digest(),
         visible_aspect_catalog_digest: visible_aspect_catalog_digest,
         candidate_partition_roots: partition_roots,

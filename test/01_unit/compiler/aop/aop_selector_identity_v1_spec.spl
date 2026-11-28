@@ -1,0 +1,275 @@
+# @req REQ-ASPECT-AW3-SELECTOR-IDENTITY
+"""
+# One selector identity for both advice families
+
+## Purpose and audience
+Purpose: Prove that a pointcut has exactly one identity, the `PointcutSelectorId` produced by `pointcut_selector_parse_v1`, whether it is written as a logical-family selector or as a mir-family predicate.
+Audience: compiler engineers who maintain aspect matching, the aspect cache
+keys and the reverse-reference tables.
+
+Lifecycle: research doc/01_research/domain/dir_tldr_aspect.md; plan
+doc/03_plan/compiler/aspect_cache/aspect_tldr_async_trace_plan.md (stage AW-3);
+architecture doc/04_architecture/extreme_typing_traceability.md; design
+doc/05_design/compiler/cache/aspect_tldr_async_trace.md (section 3, gap G11).
+
+## What the operator can rely on
+A mir-family predicate (`on pc{...}` advice) is lowered into the shard selector
+by `aop_predicate_lower_v1`. Lowering either gives a selector that matches
+exactly the functions the mir matcher (`match_advice_for_join_point`, the
+matcher `weave_function` uses) matches, or it gives `supported = false`. An
+unsupported predicate is never cached; it still has a stable digest so that
+its consumers can be named.
+
+| mir predicate | lowered selector | why |
+|---|---|---|
+| `execution(* run(..))`, `run` | `execution(run)` | exact function name |
+| `execution(* run_*(..))`, `run_*` | `execution(run_*)` | prefix glob |
+| `@inline` | `attr(inline)` | attribute membership |
+| `!`, `&`, `|`, `( )` | unchanged | same precedence in both grammars |
+| `*`, `execution(* *(..))`, `*_run`, `a*b` | unsupported | no match-all, suffix or infix atom |
+| `execution(* app.run(..))` | unsupported | dotted names are not shard symbols |
+| `module:...`, `effect:...`, `join:...` | unsupported | facts carry no such field |
+| `execution(run)`, `execution(* run)` | unsupported | the mir matcher never matches them |
+| `attr(x)`, `within(x)` as selector calls | unsupported | the mir matcher never matches them |
+
+Equality with the mir matcher is stated for `forward` join-point facts whose
+`symbol` is the function name and whose `attrs` are its attributes.
+
+## Retired identity
+`aop_selector_digest` and its substring read-set are deleted. The mdsoc
+selection key and reverse index use `aop_selector_id_v1`; the read-set is
+derived from the atoms of the lowered selector.
+
+## Decision inventory (aop_selector_identity_v1.spl)
+
+| Decision | Conditions | Covering examples |
+|---|---|---|
+| name is empty | c1 | empty predicate / every named predicate |
+| character is an identifier character | lower, upper, digit, underscore ranges | `Run_2`, `a.b`, `a{b`, `a:b` |
+| glob is an identifier | c1 | `run` / `run*` |
+| glob ends with `*` | c1 | `run*` / `a.b` |
+| prefix is an identifier | c1 | `run*` / `*` |
+| call-end scan: in range and depth open | c1, c2 | call ends the predicate (`execution(* run(..))`) / an operator follows the call |
+| token opens / closes a group | c1 / c1 | nested argument lists |
+| name scan: before call end and not `(` | c1, c2 | `execution(* run)` / `execution(* run(..))` |
+| token is an operator or a parenthesis | five alternatives | `!`, `&`, `|`, `(`, `)` examples |
+| selector call is not `execution` | c1 | `attr(inline)` / `execution(...)` |
+| execution atom is not expressible | c1 | `execution(* *(..))` / `execution(* run(..))` |
+| predicate starts with `@` | c1 | `@inline` / `run` |
+| attribute name is an identifier | c1 | `@inline` / `@name(x)` |
+| `module:` or `effect:` form | c1, c2 | `module:app.*`, `effect:io`, `run` |
+| predicate has a selector call | c1 | `execution(...)` / `run` |
+| token stream validates | c1 | `execution(* run(..))` / `execution(* run(..)) &` |
+| nothing was lowered | c1 | every unsupported / supported pair |
+"""
+
+# @manual: primary
+# @tag:unit
+# @tag:compiler
+# @tag:aop
+# @tag:cache
+
+use std.spec.*
+use std.io.{file_read}
+use compiler.frontend.core.aop.{JoinPoint, JoinPointContext, JoinPointKind, WeavingConfig,
+    WeavingRule, AdviceForm, match_advice_for_join_point}
+use compiler.common.cache_contract.aspect_match_shard_v1.{JoinPointFactV1,
+    directory_join_point_facts_v1, pointcut_selector_parse_v1, pointcut_match_shard_compute_v1}
+use compiler.frontend.core.aop_selector_identity_v1.{aop_predicate_lower_v1, aop_selector_id_v1}
+
+struct ProbeFn:
+    name: text
+    attrs: [text]
+
+fn probe_functions() -> [ProbeFn]:
+    [ProbeFn(name: "run", attrs: []),
+     ProbeFn(name: "run_fast", attrs: ["inline"]),
+     ProbeFn(name: "run_2", attrs: ["hot", "inline"]),
+     ProbeFn(name: "Run_2", attrs: []),
+     ProbeFn(name: "app_run", attrs: ["hot"]),
+     ProbeFn(name: "stop", attrs: ["inline"]),
+     ProbeFn(name: "execution", attrs: []),
+     ProbeFn(name: "inline", attrs: [])]
+
+# The mir matcher: one rule, one execution join point, exactly as weave_function asks.
+fn mir_matches(predicate: text, probe: ProbeFn) -> bool:
+    val context = JoinPointContext(function_name: probe.name, module_path: "app.core",
+        signature: "* {probe.name}(...)", attributes: probe.attrs, effects: ["io"])
+    val join_point = JoinPoint(JoinPointKind.Execution, probe.name, context.signature, "", "", 0, 0, context)
+    val config = WeavingConfig.from_rules([WeavingRule(predicate_text: predicate,
+        advice_function: "advice", form: AdviceForm.Before, priority: 1)])
+    match_advice_for_join_point(config, join_point).matched.len() == 1
+
+# The shard matcher over the one forward fact of the same function.
+fn shard_matches(predicate: text, probe: ProbeFn) -> bool:
+    val fact = JoinPointFactV1(id: "app/core.spl::{probe.name}", kind: "forward", symbol: probe.name,
+        attrs: probe.attrs, owner_file: "app/core.spl", base_body_digest: "")
+    val facts = directory_join_point_facts_v1("app", ["app/core.spl"], [fact], [], true)
+    pointcut_match_shard_compute_v1(aop_predicate_lower_v1(predicate), facts).sorted_matching_ids.len() == 1
+
+# Every (predicate, function) pair on which the two matchers disagree.
+fn disagreements(predicates: [text]) -> [text]:
+    var out: [text] = []
+    for predicate in predicates:
+        for probe in probe_functions():
+            if mir_matches(predicate, probe) != shard_matches(predicate, probe):
+                out.push("{predicate} on {probe.name}")
+    out
+
+# Predicates of the list whose lowering is supported.
+fn supported_of(predicates: [text]) -> [text]:
+    var out: [text] = []
+    for predicate in predicates:
+        if aop_predicate_lower_v1(predicate).supported: out.push(predicate)
+    out
+
+fn expressible_corpus() -> [text]:
+    ["execution(* run(..))",
+     "execution ( * run ( .. ) )",
+     "execution(i64 run())",
+     "execution(* Run_2(a, (b)))",
+     "execution(* run_*(..))",
+     "run",
+     "  run_fast  ",
+     "run*",
+     "@inline",
+     "  @hot ",
+     "execution(* run(..)) | execution(* stop(..))",
+     "execution(* run*(..)) & !execution(* run_fast(..))",
+     "!(execution(* run(..)) | execution(* stop(..)))",
+     "execution(* run(..)) # trailing note\n",
+     "execution(* execution(..))"]
+
+fn inexpressible_corpus() -> [text]:
+    ["*",
+     "",
+     "execution(* *(..))",
+     "execution(* *_run(..))",
+     "*_run",
+     "a*b",
+     "a.b",
+     "a\{b",
+     "a:b",
+     "execution(* app.run(..))",
+     "module:app.*",
+     "effect:io",
+     "join:execution",
+     "execution(run)",
+     "execution(* run)",
+     "attr(inline)",
+     "!attr(inline)",
+     "within(app.core)",
+     "execution(* run(..)) & attr(inline)",
+     "@name(x)",
+     "@",
+     "execution(* run(..)) &",
+     "get(run)",
+     "mystery()"]
+
+describe "Lowering a mir-family predicate into the shard selector":
+    it "lowers every expressible predicate and matches exactly what the mir matcher matches":
+        # @capture(exec): the compared match results and digests
+        step("Lower each expressible predicate and compare both matchers on every probe function")
+        # @req: REQ-ASPECT-AW3-SELECTOR-IDENTITY
+        expect(supported_of(expressible_corpus())).to_equal(expressible_corpus())
+        expect(disagreements(expressible_corpus())).to_equal([])
+
+    it "selects the functions the mir matcher selects, not merely the same count":
+        # @capture(exec): the compared match results and digests
+        step("Pin concrete match results so that agreement cannot be vacuous")
+        # @req: REQ-ASPECT-AW3-SELECTOR-IDENTITY
+        val run = ProbeFn(name: "run", attrs: [])
+        val fast = ProbeFn(name: "run_fast", attrs: ["inline"])
+        expect(mir_matches("execution(* run(..))", run)).to_equal(true)
+        expect(shard_matches("execution(* run(..))", run)).to_equal(true)
+        expect(shard_matches("execution(* run(..))", fast)).to_equal(false)
+        expect(shard_matches("execution(* run*(..)) & !execution(* run_fast(..))", fast)).to_equal(false)
+        expect(shard_matches("execution(* run*(..)) & !execution(* run_fast(..))", run)).to_equal(true)
+        expect(shard_matches("@inline", fast)).to_equal(true)
+        expect(shard_matches("@inline", run)).to_equal(false)
+
+    it "marks every predicate without an equivalent shard atom unsupported":
+        # @capture(exec): the compared match results and digests
+        step("Lower each inexpressible predicate and require supported = false")
+        # @req: REQ-ASPECT-AW3-SELECTOR-IDENTITY
+        expect(supported_of(inexpressible_corpus())).to_equal([])
+
+    it "never claims a match for an unsupported predicate, so it cannot skip a weave":
+        # @capture(exec): the compared match results and digests
+        step("An unsupported selector matches nothing in a shard even where the mir matcher matches")
+        # @req: REQ-ASPECT-AW3-SELECTOR-IDENTITY
+        val run = ProbeFn(name: "run", attrs: [])
+        expect(mir_matches("*", run)).to_equal(true)
+        expect(shard_matches("*", run)).to_equal(false)
+        expect(aop_predicate_lower_v1("*").needs_universe).to_equal(true)
+
+    it "does not read attr() or within() selector calls as shard atoms":
+        # @capture(exec): the compared match results and digests
+        step("The mir matcher never matches these calls; passing them through would match")
+        # @req: REQ-ASPECT-AW3-SELECTOR-IDENTITY
+        val fast = ProbeFn(name: "run_fast", attrs: ["inline"])
+        expect(mir_matches("attr(inline)", fast)).to_equal(false)
+        expect(pointcut_selector_parse_v1("attr(inline)").supported).to_equal(true)
+        expect(aop_predicate_lower_v1("attr(inline)").supported).to_equal(false)
+        expect(aop_predicate_lower_v1("execution(run_fast)").supported).to_equal(false)
+
+describe "Equivalent spellings share one PointcutSelectorId":
+    it "gives the mir spellings of one function the logical selector's digest":
+        # @capture(exec): the compared match results and digests
+        step("Compare the ids of four spellings with the logical-family selector digest")
+        # @req: REQ-ASPECT-AW3-SELECTOR-IDENTITY
+        val logical = pointcut_selector_parse_v1("execution(run)").selector_digest
+        expect(aop_selector_id_v1("execution(* run(..))")).to_equal(logical)
+        expect(aop_selector_id_v1("execution ( * run ( .. ) )")).to_equal(logical)
+        expect(aop_selector_id_v1("execution(i64 run()) # note\n")).to_equal(logical)
+        expect(aop_selector_id_v1("  run ")).to_equal(logical)
+        expect(logical.starts_with("sha256:")).to_equal(true)
+
+    it "gives prefix and attribute predicates the logical selector's digest":
+        # @capture(exec): the compared match results and digests
+        step("Compare prefix and attribute spellings with their logical selectors")
+        # @req: REQ-ASPECT-AW3-SELECTOR-IDENTITY
+        expect(aop_selector_id_v1("run_*")).to_equal(pointcut_selector_parse_v1("execution(run_*)").selector_digest)
+        expect(aop_selector_id_v1("execution(* run_*(..))")).to_equal(aop_selector_id_v1("run_*"))
+        expect(aop_selector_id_v1("@inline")).to_equal(pointcut_selector_parse_v1("attr(inline)").selector_digest)
+
+    it "keeps different selectors apart":
+        # @capture(exec): the compared match results and digests
+        step("Different names, forms and operators give different ids")
+        # @req: REQ-ASPECT-AW3-SELECTOR-IDENTITY
+        expect(aop_selector_id_v1("run") == aop_selector_id_v1("stop")).to_equal(false)
+        expect(aop_selector_id_v1("run") == aop_selector_id_v1("run*")).to_equal(false)
+        expect(aop_selector_id_v1("run") == aop_selector_id_v1("@run")).to_equal(false)
+        expect(aop_selector_id_v1("execution(* a(..)) & execution(* b(..))") ==
+            aop_selector_id_v1("execution(* a(..)) | execution(* b(..))")).to_equal(false)
+
+    it "shares one digest between token respellings of an unsupported predicate":
+        # @capture(exec): the compared match results and digests
+        step("Whitespace and comments do not split an unsupported token-form predicate")
+        # @req: REQ-ASPECT-AW3-SELECTOR-IDENTITY
+        expect(aop_selector_id_v1("execution(* app.run(..))")).to_equal(aop_selector_id_v1("execution ( * app . run ( .. ) )"))
+        expect(aop_selector_id_v1("execution(* app.run(..)) # note\n")).to_equal(aop_selector_id_v1("execution(* app.run(..))"))
+        expect(aop_selector_id_v1("  module:app.*  ")).to_equal(aop_selector_id_v1("module:app.*"))
+
+    it "keeps unsupported predicates with different match text apart":
+        # @capture(exec): the compared match results and digests
+        step("The mir matcher compares these texts exactly, so their ids must differ")
+        # @req: REQ-ASPECT-AW3-SELECTOR-IDENTITY
+        expect(aop_selector_id_v1("@name(x)#first") == aop_selector_id_v1("@name(x)#second")).to_equal(false)
+        expect(aop_selector_id_v1("module:app(x)#first") == aop_selector_id_v1("module:app(x)#second")).to_equal(false)
+        expect(aop_selector_id_v1("effect:io(x)#first") == aop_selector_id_v1("effect:io(x)#second")).to_equal(false)
+        expect(aop_selector_id_v1("module:app.*") == aop_selector_id_v1("effect:app.*")).to_equal(false)
+        expect(aop_selector_id_v1("execution(* app.run(..))") == aop_selector_id_v1("execution(* app.stop(..))")).to_equal(false)
+
+describe "The retired selector digest":
+    it "has no definition and no caller left in the compiler sources":
+        # @capture(exec): the compared match results and digests
+        step("Read the two former owners and require the retired name to be absent")
+        # @req: REQ-ASPECT-AW3-SELECTOR-IDENTITY
+        val keys = file_read("src/compiler/85.mdsoc/aop_cache/aop_group_keys.spl") ?? ""
+        val index = file_read("src/compiler/85.mdsoc/aop_index/reverse_index.spl") ?? ""
+        expect(keys.contains("aop_selector_id_v1(predicate_text)")).to_equal(true)
+        expect(index.contains("aop_predicate_lower_v1(rule.predicate_text)")).to_equal(true)
+        expect(keys.contains("aop_selector_digest")).to_equal(false)
+        expect(index.contains("aop_selector_digest")).to_equal(false)
+        expect(index.contains("predicate_text.contains(")).to_equal(false)

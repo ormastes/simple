@@ -1,0 +1,118 @@
+# One selector identity for both advice families (aspect plan AW-3, design
+# doc/05_design/compiler/cache/aspect_tldr_async_trace.md section 3).
+#
+# `PointcutSelectorId` is the digest of `pointcut_selector_parse_v1`. A
+# mir-family predicate (`on pc{...}` advice, WeavingRule.predicate_text) is
+# lowered here into that selector when every atom has a shard atom with the SAME
+# match result as the mir matcher (10.frontend/core/aop.spl `matches_predicate`,
+# reached through `match_advice_for_join_point`); otherwise the result is
+# `supported = false`: evaluated by the file's own task, never cached.
+#
+# The two grammars spell `execution` differently, so the token stream is
+# translated, never passed through:
+#
+#   mir predicate                    selector atom
+#   execution(RET name(ARGS))        execution(name)     exact
+#   execution(RET prefix*(ARGS))     execution(prefix*)  prefix
+#   name / prefix*   (bare glob)     the same two atoms
+#   @attribute                       attr(attribute)
+#   ! & | ( )                        unchanged
+#
+# Not expressible, so `supported = false`: `*` and `execution(RET *(ARGS))`
+# (match all), suffix and infix globs, dotted names, `module:` and `effect:`,
+# `join:*`, `execution(name)` without a return type and an argument list (the
+# mir matcher reads `name` as the return type and never matches), and any
+# `attr(...)` / `within(...)` selector call (the mir matcher parses them but
+# they never match, while the shard atoms do).
+#
+# Equality with the mir matcher holds on `forward` join-point facts whose
+# `symbol` is the function name and whose `attrs` are its attributes; the shard
+# matcher is false for every other kind (decision D2).
+
+use compiler.frontend.core.aop_predicate_parser.{aop_predicate_tokens, validate_predicate_tokens}
+use compiler.common.cache_contract.aspect_match_shard_v1.{PointcutSelectorV1, pointcut_selector_parse_v1}
+
+fn _aop_lower_is_ident_v1(s: text) -> bool:
+    if s.len() == 0: return false
+    for ch in s.chars():
+        val ok = (ch >= "a" and ch <= "z") or (ch >= "A" and ch <= "Z") or
+            (ch >= "0" and ch <= "9") or ch == "_"
+        if not ok: return false
+    true
+
+# Selector atom for a function-name glob; "" when the glob has no shard atom.
+fn _aop_lower_name_atom_v1(pattern: text) -> text:
+    if _aop_lower_is_ident_v1(pattern): return "execution({pattern})"
+    if pattern.ends_with("*"):
+        val prefix = pattern.slice(0, pattern.byte_len() - 1)
+        if _aop_lower_is_ident_v1(prefix): return "execution({prefix}*)"
+    ""
+
+# tokens[open] == "("; index just past its matching ")".
+fn _aop_lower_call_end_v1(tokens: [text], open: i64) -> i64:
+    var depth = 1
+    var i = open + 1
+    while i < tokens.len() and depth > 0:
+        if tokens[i] == "(":
+            depth = depth + 1
+        elif tokens[i] == ")":
+            depth = depth - 1
+        i = i + 1
+    i
+
+# The function-name glob the mir matcher reads from `execution ( RET NAME (`:
+# everything after RET up to the argument list (or to the end of the call).
+fn _aop_lower_execution_name_v1(tokens: [text], open: i64, end: i64) -> text:
+    var name = ""
+    var i = open + 2
+    while i < end and tokens[i] != "(":
+        name = name + tokens[i]
+        i = i + 1
+    name
+
+# Validated tokens only: every token outside a selector call is `!`, `&`, `|`,
+# `(` or `)`, and every selector name is followed by a balanced argument list.
+fn _aop_lower_tokens_v1(tokens: [text]) -> text:
+    var out = ""
+    var i = 0
+    while i < tokens.len():
+        val token = tokens[i]
+        if token == "!" or token == "&" or token == "|" or token == "(" or token == ")":
+            out = out + token
+            i = i + 1
+        else:
+            if token != "execution": return ""
+            val end = _aop_lower_call_end_v1(tokens, i + 1)
+            val atom = _aop_lower_name_atom_v1(_aop_lower_execution_name_v1(tokens, i + 1, end))
+            if atom == "": return ""
+            out = out + atom
+            i = end
+    out
+
+# The selector a mir-family predicate denotes. Unsupported predicates keep one
+# digest per spelling class: token form by its canonical token text, every
+# other form by its trimmed text (the mir matcher compares that text exactly).
+pub fn aop_predicate_lower_v1(predicate_text: text) -> PointcutSelectorV1:
+    val pred = predicate_text.trim()
+    val field_form = pred.starts_with("module:") or pred.starts_with("effect:")
+    var identity = "raw:" + pred
+    var lowered = ""
+    if pred.starts_with("@"):
+        val name = pred.slice(1, pred.byte_len())
+        if _aop_lower_is_ident_v1(name): lowered = "attr({name})"
+    elif not field_form:
+        if pred.contains("("):
+            val tokens = aop_predicate_tokens(pred)
+            identity = "tok:" + tokens.join(" ")
+            if validate_predicate_tokens(tokens) == "": lowered = _aop_lower_tokens_v1(tokens)
+        else:
+            lowered = _aop_lower_name_atom_v1(pred)
+    # `mir:` cannot start a selector expression, so this parse is always
+    # `supported = false` with a digest over the identity text.
+    if lowered == "": return pointcut_selector_parse_v1("mir:" + identity)
+    pointcut_selector_parse_v1(lowered)
+
+pub fn aop_selector_id_v1(predicate_text: text) -> text:
+    aop_predicate_lower_v1(predicate_text).selector_digest
+
+export aop_predicate_lower_v1, aop_selector_id_v1
