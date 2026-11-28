@@ -90,3 +90,23 @@ The in-tree comparison suite (`examples/browser/html_layout_compare/variations.s
 | `ms02` | MS02: Form Fill + Select + Live Preview | `0.05% / 85.04% / 93.65-93.66% / 6.83-6.84` |
 | `ms03` | MS03: Kanban State Transition & Column Move | `2.87% / 88.47% / 95.00% / 5.04` |
 | `ms04` | MS04: Cooperative Multi-Script Pipeline (JS + Simple + Agent) | `0.08% / 64.18% / 85.48% / 10.78` |
+
+---
+
+## 5. Multi-Script Web Engine (`Agent Script`, `Simple Script`, `JS Engine`)
+
+- **Requirement:** `REQ-WEB-009`
+- **Core Modules:**
+  - `src/lib/nogc_sync_mut/js/**` + `src/lib/common/js/engine/string_trim.spl` + `src/lib/gc_async_mut/gpu/browser_js_host.spl` (hardened JS float literal lexer/parser, compound assignments `+=`/`-=`/`*=`/`/=`/`%=`, `f64_to_i64`/`Math.{floor,ceil,round}`, `parseInt`/`parseFloat` CSS-unit & radix parsing, `js_trim_text` visibility, `browser_js_camel_to_kebab`, and `__simple_hyd_dom` / `__simple_sync_text` host DOM bridge).
+  - `src/lib/gc_async_mut/gpu/browser_engine/script/agent_script.spl`: `AgentScriptExecutor` (`<script type="text/agent">` and `application/agent-script`) supporting action verbs (`click`, `fill`, `select`, `drag`, `hover`, `check`, `uncheck`, `submit`), DOM mutations (`set_text`, `set_attr`, `set_style`, `add_class`, `remove_class`), assertions/logging (`expect_text`, `expect_attr`, `log`), and SDN receipts (`AgentScriptReceipt.to_sdn()`).
+  - `src/lib/gc_async_mut/gpu/browser_engine/web_multi_script_engine.spl`: `web_multi_script_run_and_render_html` coordinating `<script>` / `text/javascript`, `<script type="text/simple">`, and `<script type="text/agent">` in document order over one shared `BeDomNode` tree before software rasterization via `simple_web_layout_render_html_software_pixels_with_images`.
+- **SSpec Gate:** `test/03_system/app/simple_web/feature/web_multi_script_agent_simple_js_spec.spl` (manual: `doc/06_spec/03_system/app/simple_web/feature/web_multi_script_agent_simple_js_spec.md`).
+
+### 5.1 4-Way Visual Parity Baseline (`ms01`–`ms04`, `520x340` macOS Chrome vs JS / Simple Script / Agent Script)
+
+| ID | Scenario | JS Engine (`<=12px / MAD`) | Simple Script (`<=12px / MAD`) | Agent Script (`<=12px / MAD`) |
+|---|---|---|---|---|
+| `ms01` | KPI Card & Status Computation | `88.67% / 6.6` | `88.67% / 6.6` | `88.67% / 6.6` |
+| `ms02` | Form Fill + `<select>` + Live Preview | `85.04% / 6.83` | `85.04% / 6.84` | `85.04% / 6.83` |
+| `ms03` | Kanban State Transition & Column Move | `88.47% / 5.04` | `88.47% / 5.04` | `88.47% / 5.04` |
+| `ms04` | Cooperative Multi-Script Pipeline (`JS` + `Simple` + `Agent`) | `64.18% / 10.78` | `64.18% / 10.78` | `64.18% / 10.78` |
