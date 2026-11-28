@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 75 | 75 | 0 | 0 |
+| 82 | 82 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -161,7 +161,7 @@ expect(generic_need_frames_v1([])).to_equal("")
 
 #### returns the original values, including empty and non-ASCII ones
 
-- produce the values read back from frames holding an empty and a non-ASCII value
+- write the frames of ab, an empty value, 箱 and x:y, then read them back
    - Exec capture: after_step
    - Evidence: execution result verified by 2 expected checks
    - Expected: back.is_ok() is true
@@ -175,7 +175,7 @@ Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("produce the values read back from frames holding an empty and a non-ASCII value")
+step("write the frames of ab, an empty value, 箱 and x:y, then read them back")
 val values = ["ab", "", "箱", "x:y"]
 val back = generic_need_frames_read_v1(generic_need_frames_v1(values))
 expect(back.is_ok()).to_equal(true)
@@ -215,7 +215,7 @@ expect(generic_need_frames_read_v1(outer_values[1]).unwrap()).to_equal(["k1", "k
 
 #### reads empty data as no values
 
-- produce the value list read from empty data
+- read the empty string as a frame list
    - Exec capture: after_step
    - Evidence: execution result verified by 1 expected check
    - Expected: generic_need_frames_read_v1("").unwrap() equals `[]`
@@ -228,7 +228,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("produce the value list read from empty data")
+step("read the empty string as a frame list")
 expect(generic_need_frames_read_v1("").unwrap()).to_equal([])
 ```
 
@@ -261,7 +261,7 @@ expect(r.unwrap_err()).to_equal("frame header has no ':'")
 
 #### refuses a non-digit length
 
-- run the refused case: the read of a non-digit length
+- read the data x:a
    - Text capture: after_step
    - Evidence: text output verified by 1 expected check
    - Expected: generic_need_frames_read_v1("x:a").unwrap_err() equals `frame length: decimal holds a non-digit`
@@ -274,7 +274,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("run the refused case: the read of a non-digit length")
+step("read the data x:a")
 expect(generic_need_frames_read_v1("x:a").unwrap_err()).to_equal("frame length: decimal holds a non-digit")
 ```
 
@@ -282,7 +282,7 @@ expect(generic_need_frames_read_v1("x:a").unwrap_err()).to_equal("frame length: 
 
 #### refuses an empty length
 
-- run the refused case: the read of an empty length
+- read the data :a
    - Text capture: after_step
    - Evidence: text output verified by 1 expected check
    - Expected: generic_need_frames_read_v1(":a").unwrap_err() equals `frame length: empty decimal`
@@ -295,7 +295,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("run the refused case: the read of an empty length")
+step("read the data :a")
 expect(generic_need_frames_read_v1(":a").unwrap_err()).to_equal("frame length: empty decimal")
 ```
 
@@ -303,7 +303,7 @@ expect(generic_need_frames_read_v1(":a").unwrap_err()).to_equal("frame length: e
 
 #### refuses a length with a leading zero
 
-- run the refused case: the read of a leading-zero length
+- read the data 01:a
    - Text capture: after_step
    - Evidence: text output verified by 1 expected check
    - Expected: generic_need_frames_read_v1("01:a").unwrap_err() equals `frame length: decimal has a leading zero`
@@ -316,7 +316,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("run the refused case: the read of a leading-zero length")
+step("read the data 01:a")
 expect(generic_need_frames_read_v1("01:a").unwrap_err()).to_equal("frame length: decimal has a leading zero")
 ```
 
@@ -324,7 +324,7 @@ expect(generic_need_frames_read_v1("01:a").unwrap_err()).to_equal("frame length:
 
 #### refuses a frame that runs past the end
 
-- run the refused case: the read of a frame longer than the data
+- read the data 5:ab
    - Text capture: after_step
    - Evidence: text output verified by 1 expected check
    - Expected: generic_need_frames_read_v1("5:ab").unwrap_err() equals `frame runs past the end`
@@ -337,7 +337,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("run the refused case: the read of a frame longer than the data")
+step("read the data 5:ab")
 expect(generic_need_frames_read_v1("5:ab").unwrap_err()).to_equal("frame runs past the end")
 ```
 
@@ -349,7 +349,7 @@ expect(generic_need_frames_read_v1("5:ab").unwrap_err()).to_equal("frame runs pa
 
 #### accepts zero and the widest twelve-digit offset
 
-- produce the start and end offsets parsed from the smallest and widest spellings
+- parse the offsets 0 and 999999999999
    - Expected: r.is_ok() is true
    - Expected: r.unwrap().start.value equals `0)   # oracle: "0" is the smallest canonical offset`
    - Expected: r.unwrap().end.value equals `999999999999)   # oracle: twelve nines is the widest spelling`
@@ -362,7 +362,7 @@ Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("produce the start and end offsets parsed from the smallest and widest spellings")
+step("parse the offsets 0 and 999999999999")
 # oracle: the module allows 12 digits, so twelve 9s is the largest spelling
 val widest = "999999999999"
 val r = generic_need_span_from_values_v1("0", widest)
@@ -377,7 +377,7 @@ expect(r.unwrap().end.value).to_equal(999999999999)   # oracle: twelve nines is 
 
 #### refuses an empty offset
 
-- run the refused case: the error text naming the empty span start
+- parse an empty start with the end 1
    - Text capture: after_step
    - Evidence: text output verified by 1 expected check
    - Expected: generic_need_span_from_values_v1("", "1").unwrap_err() equals `span start: empty decimal`
@@ -390,7 +390,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("run the refused case: the error text naming the empty span start")
+step("parse an empty start with the end 1")
 expect(generic_need_span_from_values_v1("", "1").unwrap_err()).to_equal("span start: empty decimal")
 ```
 
@@ -398,7 +398,7 @@ expect(generic_need_span_from_values_v1("", "1").unwrap_err()).to_equal("span st
 
 #### refuses a thirteen-digit offset as too long
 
-- run the refused case: the error text naming the too-long span end
+- parse the end 1234567890123
    - Text capture: after_step
    - Evidence: text output verified by 1 expected check
    - Expected: generic_need_span_from_values_v1("1", "1234567890123").unwrap_err() equals `span end: decimal too long`
@@ -411,7 +411,7 @@ Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("run the refused case: the error text naming the too-long span end")
+step("parse the end 1234567890123")
 # oracle: 13 digits is one more than the 12-digit width
 expect(generic_need_span_from_values_v1("1", "1234567890123").unwrap_err()).to_equal("span end: decimal too long")
 ```
@@ -420,7 +420,7 @@ expect(generic_need_span_from_values_v1("1", "1234567890123").unwrap_err()).to_e
 
 #### refuses a character just below the digits
 
-- run the refused case: the error text for the character below the digits
+- parse the start /
    - Text capture: after_step
    - Evidence: text output verified by 1 expected check
    - Expected: generic_need_span_from_values_v1("/", "1").unwrap_err() equals `span start: decimal holds a non-digit`
@@ -433,7 +433,7 @@ Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("run the refused case: the error text for the character below the digits")
+step("parse the start /")
 # oracle: '/' is code 47, one below '0'
 expect(generic_need_span_from_values_v1("/", "1").unwrap_err()).to_equal("span start: decimal holds a non-digit")
 ```
@@ -442,7 +442,7 @@ expect(generic_need_span_from_values_v1("/", "1").unwrap_err()).to_equal("span s
 
 #### refuses a character just above the digits
 
-- run the refused case: the error text for the character above the digits
+- parse the end :
    - Text capture: after_step
    - Evidence: text output verified by 1 expected check
    - Expected: generic_need_span_from_values_v1("1", ":").unwrap_err() equals `span end: decimal holds a non-digit`
@@ -455,7 +455,7 @@ Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("run the refused case: the error text for the character above the digits")
+step("parse the end :")
 # oracle: ':' is code 58, one above '9'
 expect(generic_need_span_from_values_v1("1", ":").unwrap_err()).to_equal("span end: decimal holds a non-digit")
 ```
@@ -464,7 +464,7 @@ expect(generic_need_span_from_values_v1("1", ":").unwrap_err()).to_equal("span e
 
 #### refuses a leading zero
 
-- run the refused case: the error text naming the leading-zero span start
+- parse the start 01 with the end 2
    - Text capture: after_step
    - Evidence: text output verified by 1 expected check
    - Expected: generic_need_span_from_values_v1("01", "2").unwrap_err() equals `span start: decimal has a leading zero`
@@ -477,7 +477,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("run the refused case: the error text naming the leading-zero span start")
+step("parse the start 01 with the end 2")
 expect(generic_need_span_from_values_v1("01", "2").unwrap_err()).to_equal("span start: decimal has a leading zero")
 ```
 
@@ -487,7 +487,7 @@ expect(generic_need_span_from_values_v1("01", "2").unwrap_err()).to_equal("span 
 
 #### lists indices in ascending rank order
 
-- produce the order of the returned indices for three distinct ranks
+- order the ranks c, a, b
    - Exec capture: after_step
    - Evidence: execution result verified by 1 expected check
    - Expected: generic_need_order_v1(["c", "a", "b"]) equals `[1, 2, 0]`
@@ -500,7 +500,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("produce the order of the returned indices for three distinct ranks")
+step("order the ranks c, a, b")
 expect(generic_need_order_v1(["c", "a", "b"])).to_equal([1, 2, 0])
 ```
 
@@ -508,7 +508,7 @@ expect(generic_need_order_v1(["c", "a", "b"])).to_equal([1, 2, 0])
 
 #### keeps an already sorted list in place
 
-- produce the order of the returned indices for ascending input
+- order the ranks a, b, c
    - Exec capture: after_step
    - Evidence: execution result verified by 1 expected check
    - Expected: generic_need_order_v1(["a", "b", "c"]) equals `[0, 1, 2]`
@@ -521,7 +521,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("produce the order of the returned indices for ascending input")
+step("order the ranks a, b, c")
 expect(generic_need_order_v1(["a", "b", "c"])).to_equal([0, 1, 2])
 ```
 
@@ -529,7 +529,7 @@ expect(generic_need_order_v1(["a", "b", "c"])).to_equal([0, 1, 2])
 
 #### reverses a reverse-sorted list
 
-- produce the order of the returned indices for descending input
+- order the ranks c, b, a
    - Exec capture: after_step
    - Evidence: execution result verified by 1 expected check
    - Expected: generic_need_order_v1(["c", "b", "a"]) equals `[2, 1, 0]`
@@ -542,7 +542,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("produce the order of the returned indices for descending input")
+step("order the ranks c, b, a")
 expect(generic_need_order_v1(["c", "b", "a"])).to_equal([2, 1, 0])
 ```
 
@@ -550,7 +550,7 @@ expect(generic_need_order_v1(["c", "b", "a"])).to_equal([2, 1, 0])
 
 #### drops a duplicate rank and keeps its first occurrence
 
-- produce the indices kept after a repeated rank was dropped
+- order the ranks b, a, b, c
    - Exec capture: after_step
    - Evidence: execution result verified by 1 expected check
    - Expected: generic_need_order_v1(["b", "a", "b", "c"]) equals `[1, 0, 3]`
@@ -563,7 +563,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("produce the indices kept after a repeated rank was dropped")
+step("order the ranks b, a, b, c")
 expect(generic_need_order_v1(["b", "a", "b", "c"])).to_equal([1, 0, 3])
 ```
 
@@ -571,7 +571,7 @@ expect(generic_need_order_v1(["b", "a", "b", "c"])).to_equal([1, 0, 3])
 
 #### returns no indices for no ranks
 
-- produce the indices returned for an empty rank list
+- order an empty rank list
    - Exec capture: after_step
    - Evidence: execution result verified by 1 expected check
    - Expected: generic_need_order_v1([]) equals `[]`
@@ -584,7 +584,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("produce the indices returned for an empty rank list")
+step("order an empty rank list")
 expect(generic_need_order_v1([])).to_equal([])
 ```
 
@@ -596,7 +596,7 @@ expect(generic_need_order_v1([])).to_equal([])
 
 #### accepts field, call, construct and bound-dispatch
 
-- produce the verdict of the cause check for each of the four known causes
+- check each cause constant
    - Exec capture: after_step
    - Evidence: execution result verified by 4 expected checks
    - Expected: generic_need_cause_check_v1(GENERIC_NEED_CAUSE_FIELD).unwrap() equals `field`
@@ -612,7 +612,7 @@ Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("produce the verdict of the cause check for each of the four known causes")
+step("check each cause constant")
 expect(generic_need_cause_check_v1(GENERIC_NEED_CAUSE_FIELD).unwrap()).to_equal("field")
 expect(generic_need_cause_check_v1(GENERIC_NEED_CAUSE_CALL).unwrap()).to_equal("call")
 expect(generic_need_cause_check_v1(GENERIC_NEED_CAUSE_CONSTRUCT).unwrap()).to_equal("construct")
@@ -623,7 +623,7 @@ expect(generic_need_cause_check_v1(GENERIC_NEED_CAUSE_BOUND_DISPATCH).unwrap()).
 
 #### refuses an unknown cause and names it
 
-- run the refused case: the refused cause
+- check the cause guess
    - Text capture: after_step
    - Evidence: text output verified by 1 expected check
    - Expected: generic_need_cause_check_v1("guess").unwrap_err() equals `unknown need cause 'guess'`
@@ -636,7 +636,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("run the refused case: the refused cause")
+step("check the cause guess")
 expect(generic_need_cause_check_v1("guess").unwrap_err()).to_equal("unknown need cause 'guess'")
 ```
 
@@ -646,7 +646,7 @@ expect(generic_need_cause_check_v1("guess").unwrap_err()).to_equal("unknown need
 
 #### accepts an empty span and a forward span
 
-- produce the verdicts of the span check for an empty and a forward span
+- check the spans 5..5 and 5..9
    - Exec capture: after_step
    - Evidence: execution result verified by 2 expected checks
    - Expected: generic_need_span_check_v1(span(5, 5)).is_ok() is true
@@ -660,7 +660,7 @@ Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("produce the verdicts of the span check for an empty and a forward span")
+step("check the spans 5..5 and 5..9")
 expect(generic_need_span_check_v1(span(5, 5)).is_ok()).to_equal(true)
 expect(generic_need_span_check_v1(span(5, 9)).is_ok()).to_equal(true)
 ```
@@ -669,7 +669,7 @@ expect(generic_need_span_check_v1(span(5, 9)).is_ok()).to_equal(true)
 
 #### refuses a span that starts before the source
 
-- run the refused case: the span with a negative start
+- check the span -1..4
    - Text capture: after_step
    - Evidence: text output verified by 1 expected check
    - Expected: generic_need_span_check_v1(span(-1, 4)).unwrap_err() equals `span starts before the source`
@@ -682,7 +682,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("run the refused case: the span with a negative start")
+step("check the span -1..4")
 expect(generic_need_span_check_v1(span(-1, 4)).unwrap_err()).to_equal("span starts before the source")
 ```
 
@@ -690,7 +690,7 @@ expect(generic_need_span_check_v1(span(-1, 4)).unwrap_err()).to_equal("span star
 
 #### refuses a span that ends before it starts
 
-- run the refused case: the span ending before its start
+- check the span 9..4
    - Text capture: after_step
    - Evidence: text output verified by 1 expected check
    - Expected: generic_need_span_check_v1(span(9, 4)).unwrap_err() equals `span ends before it starts`
@@ -703,7 +703,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("run the refused case: the span ending before its start")
+step("check the span 9..4")
 expect(generic_need_span_check_v1(span(9, 4)).unwrap_err()).to_equal("span ends before it starts")
 ```
 
@@ -713,7 +713,7 @@ expect(generic_need_span_check_v1(span(9, 4)).unwrap_err()).to_equal("span ends 
 
 #### spells a span as two canonical decimals
 
-- produce the two decimal texts written for a span
+- write the wire values of the span 7..30
    - Text capture: after_step
    - Evidence: text output verified by 1 expected check
    - Expected: generic_need_span_values_v1(span(7, 30)) equals `["7", "30"]`
@@ -726,7 +726,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("produce the two decimal texts written for a span")
+step("write the wire values of the span 7..30")
 expect(generic_need_span_values_v1(span(7, 30))).to_equal(["7", "30"])
 ```
 
@@ -734,7 +734,7 @@ expect(generic_need_span_values_v1(span(7, 30))).to_equal(["7", "30"])
 
 #### refuses a backward span read from the wire
 
-- run the refused case: the backward span read from wire values
+- parse the start 9 with the end 4
    - Text capture: after_step
    - Evidence: text output verified by 1 expected check
    - Expected: generic_need_span_from_values_v1("9", "4").unwrap_err() equals `span ends before it starts`
@@ -747,7 +747,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("run the refused case: the backward span read from wire values")
+step("parse the start 9 with the end 4")
 expect(generic_need_span_from_values_v1("9", "4").unwrap_err()).to_equal("span ends before it starts")
 ```
 
@@ -755,7 +755,7 @@ expect(generic_need_span_from_values_v1("9", "4").unwrap_err()).to_equal("span e
 
 #### ranks spans numerically, not alphabetically
 
-- produce the comparison of the ranks of spans starting at offsets 9 and 10
+- rank the spans 9..12 and 10..12
    - Expected: nine < ten is true
 
 
@@ -766,7 +766,7 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("produce the comparison of the ranks of spans starting at offsets 9 and 10")
+step("rank the spans 9..12 and 10..12")
 val nine = generic_need_span_rank_v1(span(9, 12))
 val ten = generic_need_span_rank_v1(span(10, 12))
 expect(nine < ten).to_equal(true)
@@ -780,7 +780,7 @@ expect(nine < ten).to_equal(true)
 
 #### is accepted unchanged
 
-- produce the verdict and callee of the checked well-formed row
+- check the row c<x> at 3..12 caused by call
    - Exec capture: after_step
    - Evidence: execution result verified by 2 expected checks
    - Expected: r.is_ok() is true
@@ -794,7 +794,7 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("produce the verdict and callee of the checked well-formed row")
+step("check the row c<x> at 3..12 caused by call")
 val r = generic_open_need_check_v1(simple_need())
 expect(r.is_ok()).to_equal(true)
 expect(r.unwrap().callee_template_id).to_equal("c")
@@ -806,7 +806,7 @@ expect(r.unwrap().callee_template_id).to_equal("c")
 
 #### refuses a need with no callee
 
-- run the refused case: the row with no callee
+- check a row whose callee is empty
    - Text capture: after_step
    - Evidence: text output verified by 1 expected check
    - Expected: generic_open_need_check_v1(need("", ["x"], 1, 2, "call")).unwrap_err() equals `need names no callee template`
@@ -819,7 +819,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("run the refused case: the row with no callee")
+step("check a row whose callee is empty")
 expect(generic_open_need_check_v1(need("", ["x"], 1, 2, "call")).unwrap_err()).to_equal("need names no callee template")
 ```
 
@@ -827,7 +827,7 @@ expect(generic_open_need_check_v1(need("", ["x"], 1, 2, "call")).unwrap_err()).t
 
 #### refuses an empty argument key
 
-- run the refused case: the row with an empty argument key
+- check a row with the keys x and an empty key
    - Text capture: after_step
    - Evidence: text output verified by 1 expected check
    - Expected: generic_open_need_check_v1(need("c", ["x", ""], 1, 2, "call")).unwrap_err() equals `need holds an empty argument key`
@@ -840,7 +840,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("run the refused case: the row with an empty argument key")
+step("check a row with the keys x and an empty key")
 expect(generic_open_need_check_v1(need("c", ["x", ""], 1, 2, "call")).unwrap_err()).to_equal("need holds an empty argument key")
 ```
 
@@ -848,7 +848,7 @@ expect(generic_open_need_check_v1(need("c", ["x", ""], 1, 2, "call")).unwrap_err
 
 #### refuses an unknown cause
 
-- run the refused case: the row with an unknown cause
+- check a row with the cause wish
    - Text capture: after_step
    - Evidence: text output verified by 1 expected check
    - Expected: generic_open_need_check_v1(need("c", ["x"], 1, 2, "wish")).unwrap_err() equals `unknown need cause 'wish'`
@@ -861,7 +861,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("run the refused case: the row with an unknown cause")
+step("check a row with the cause wish")
 expect(generic_open_need_check_v1(need("c", ["x"], 1, 2, "wish")).unwrap_err()).to_equal("unknown need cause 'wish'")
 ```
 
@@ -869,7 +869,7 @@ expect(generic_open_need_check_v1(need("c", ["x"], 1, 2, "wish")).unwrap_err()).
 
 #### refuses a malformed span
 
-- run the refused case: the row with a backward span
+- check a row spanning 5..2
    - Text capture: after_step
    - Evidence: text output verified by 1 expected check
    - Expected: generic_open_need_check_v1(need("c", ["x"], 5, 2, "call")).unwrap_err() equals `span ends before it starts`
@@ -882,7 +882,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("run the refused case: the row with a backward span")
+step("check a row spanning 5..2")
 expect(generic_open_need_check_v1(need("c", ["x"], 5, 2, "call")).unwrap_err()).to_equal("span ends before it starts")
 ```
 
@@ -890,7 +890,7 @@ expect(generic_open_need_check_v1(need("c", ["x"], 5, 2, "call")).unwrap_err()).
 
 #### accepts a need with no argument keys
 
-- produce the verdict of the check of a row with no argument keys
+- check a row with no argument keys
    - Exec capture: after_step
    - Evidence: execution result verified by 1 expected check
    - Expected: generic_open_need_check_v1(need("c", [], 1, 2, "field")).is_ok() is true
@@ -903,7 +903,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("produce the verdict of the check of a row with no argument keys")
+step("check a row with no argument keys")
 expect(generic_open_need_check_v1(need("c", [], 1, 2, "field")).is_ok()).to_equal(true)
 ```
 
@@ -913,7 +913,7 @@ expect(generic_open_need_check_v1(need("c", [], 1, 2, "field")).is_ok()).to_equa
 
 #### orders rows by callee first
 
-- produce the callee order of the sorted rows
+- sort the rows b<x> and a<x>
    - Exec capture: after_step
    - Evidence: execution result verified by 1 expected check
    - Expected: callees_of(generic_open_needs_canonical_v1(rows).unwrap()) equals `["a", "b"]`
@@ -926,7 +926,7 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("produce the callee order of the sorted rows")
+step("sort the rows b<x> and a<x>")
 # @req REQ-GENERIC-F1A-002
 val rows = [need("b", ["x"], 1, 2, "call"), need("a", ["x"], 1, 2, "call")]
 expect(callees_of(generic_open_needs_canonical_v1(rows).unwrap())).to_equal(["a", "b"])
@@ -936,7 +936,7 @@ expect(callees_of(generic_open_needs_canonical_v1(rows).unwrap())).to_equal(["a"
 
 #### orders rows of one callee by argument keys
 
-- produce the argument keys of the two sorted rows
+- sort the rows c<y> and c<x>
    - Exec capture: after_step
    - Evidence: execution result verified by 2 expected checks
    - Expected: sorted[0].arg_keys equals `["x"]`
@@ -950,7 +950,7 @@ Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("produce the argument keys of the two sorted rows")
+step("sort the rows c<y> and c<x>")
 val rows = [need("c", ["y"], 1, 2, "call"), need("c", ["x"], 1, 2, "call")]
 val sorted = generic_open_needs_canonical_v1(rows).unwrap()
 expect(sorted[0].arg_keys).to_equal(["x"])
@@ -961,7 +961,7 @@ expect(sorted[1].arg_keys).to_equal(["y"])
 
 #### orders rows with equal callee and keys by span numerically (offset 9 before offset 10)
 
-- produce the start offsets of the sorted rows
+- sort the rows c<x> at 10..11 and 9..11
    - Expected: starts_of(generic_open_needs_canonical_v1(rows).unwrap()) equals `[9, 10]`
 
 
@@ -972,7 +972,7 @@ Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("produce the start offsets of the sorted rows")
+step("sort the rows c<x> at 10..11 and 9..11")
 val rows = [need("c", ["x"], 10, 11, "call"), need("c", ["x"], 9, 11, "call")]
 expect(starts_of(generic_open_needs_canonical_v1(rows).unwrap())).to_equal([9, 10])
 ```
@@ -981,7 +981,7 @@ expect(starts_of(generic_open_needs_canonical_v1(rows).unwrap())).to_equal([9, 1
 
 #### orders rows that differ only by cause by the cause text
 
-- produce the cause order of the sorted rows
+- sort the rows c<x> caused by field and by call
    - Exec capture: after_step
    - Evidence: execution result verified by 1 expected check
    - Expected: causes_of(generic_open_needs_canonical_v1(rows).unwrap()) equals `["call", "field"]`
@@ -994,7 +994,7 @@ Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("produce the cause order of the sorted rows")
+step("sort the rows c<x> caused by field and by call")
 val rows = [need("c", ["x"], 1, 2, "field"), need("c", ["x"], 1, 2, "call")]
 expect(causes_of(generic_open_needs_canonical_v1(rows).unwrap())).to_equal(["call", "field"])
 ```
@@ -1003,7 +1003,7 @@ expect(causes_of(generic_open_needs_canonical_v1(rows).unwrap())).to_equal(["cal
 
 #### drops an exact duplicate row
 
-- produce the row count after an exact duplicate was given twice
+- sort the same row given twice
    - Exec capture: after_step
    - Evidence: execution result verified by 1 expected check
    - Expected: generic_open_needs_canonical_v1(rows).unwrap().len() equals `1)   # oracle: an exact duplicate collapses to one row`
@@ -1016,7 +1016,7 @@ Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("produce the row count after an exact duplicate was given twice")
+step("sort the same row given twice")
 val rows = [simple_need(), simple_need()]
 expect(generic_open_needs_canonical_v1(rows).unwrap().len()).to_equal(1)   # oracle: an exact duplicate collapses to one row
 ```
@@ -1025,7 +1025,7 @@ expect(generic_open_needs_canonical_v1(rows).unwrap().len()).to_equal(1)   # ora
 
 #### keeps rows that differ only by span
 
-- produce the row count when only the span differs
+- sort the rows c<x> at 1..2 and 3..4
    - Exec capture: after_step
    - Evidence: execution result verified by 1 expected check
    - Expected: generic_open_needs_canonical_v1(rows).unwrap().len() equals `2)   # oracle: rows that differ only by span are both kept`
@@ -1038,7 +1038,7 @@ Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("produce the row count when only the span differs")
+step("sort the rows c<x> at 1..2 and 3..4")
 val rows = [need("c", ["x"], 1, 2, "call"), need("c", ["x"], 3, 4, "call")]
 expect(generic_open_needs_canonical_v1(rows).unwrap().len()).to_equal(2)   # oracle: rows that differ only by span are both kept
 ```
@@ -1047,7 +1047,7 @@ expect(generic_open_needs_canonical_v1(rows).unwrap().len()).to_equal(2)   # ora
 
 #### fails the whole list when one row is malformed
 
-- produce the verdict and error text of the list with one malformed row
+- sort a valid row together with a row of empty callee
    - Text capture: after_step
    - Evidence: text output verified by 2 expected checks
    - Expected: r.is_err() is true
@@ -1061,7 +1061,7 @@ Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("produce the verdict and error text of the list with one malformed row")
+step("sort a valid row together with a row of empty callee")
 val rows = [simple_need(), need("", ["x"], 1, 2, "call")]
 val r = generic_open_needs_canonical_v1(rows)
 expect(r.is_err()).to_equal(true)
@@ -1072,7 +1072,7 @@ expect(r.unwrap_err()).to_equal("need names no callee template")
 
 #### returns an empty list for no rows
 
-- produce the row count of an empty list
+- sort an empty row list
    - Exec capture: after_step
    - Evidence: execution result verified by 1 expected check
    - Expected: generic_open_needs_canonical_v1([]).unwrap().len() equals `0)   # oracle: no rows in, no rows out`
@@ -1085,7 +1085,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("produce the row count of an empty list")
+step("sort an empty row list")
 expect(generic_open_needs_canonical_v1([]).unwrap().len()).to_equal(0)   # oracle: no rows in, no rows out
 ```
 
@@ -1095,7 +1095,7 @@ expect(generic_open_needs_canonical_v1([]).unwrap().len()).to_equal(0)   # oracl
 
 #### equals a sha256 over the label and the hand-framed identity
 
-- produce the identity digest against a sha256 of the hand-framed identity
+- digest the single row c<x> and hash the hand-framed text
    - Exec capture: after_step
    - Evidence: execution result verified by 1 expected check
    - Expected: generic_open_needs_identity_digest_v1([simple_need()]) equals `expected`
@@ -1108,7 +1108,7 @@ Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("produce the identity digest against a sha256 of the hand-framed identity")
+step("digest the single row c<x> and hash the hand-framed text")
 # @req REQ-GENERIC-F1A-003
 # oracle: identity of callee "c" with keys ["x"] is "1:c" + "3:1:x" (the key list "1:x" is
 # three bytes); the label is 30 bytes; the identity frame is 8 bytes.
@@ -1120,7 +1120,7 @@ expect(generic_open_needs_identity_digest_v1([simple_need()])).to_equal(expected
 
 #### ignores where a call moved to
 
-- produce the identity digest before and after the span moves
+- digest the row c<x> at 3..12 and at 400..420
    - Exec capture: after_step
    - Evidence: execution result verified by 1 expected check
    - Expected: after equals `before`
@@ -1133,7 +1133,7 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("produce the identity digest before and after the span moves")
+step("digest the row c<x> at 3..12 and at 400..420")
 val before = generic_open_needs_identity_digest_v1([need("c", ["x"], 3, 12, "call")])
 val after = generic_open_needs_identity_digest_v1([need("c", ["x"], 400, 420, "call")])
 expect(after).to_equal(before)
@@ -1143,7 +1143,7 @@ expect(after).to_equal(before)
 
 #### ignores why the instance is needed
 
-- produce the identity digest before and after the cause changes
+- digest the row c<x> caused by call and by construct
    - Exec capture: after_step
    - Evidence: execution result verified by 1 expected check
    - Expected: b equals `a`
@@ -1156,7 +1156,7 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("produce the identity digest before and after the cause changes")
+step("digest the row c<x> caused by call and by construct")
 val a = generic_open_needs_identity_digest_v1([need("c", ["x"], 3, 12, "call")])
 val b = generic_open_needs_identity_digest_v1([need("c", ["x"], 3, 12, "construct")])
 expect(b).to_equal(a)
@@ -1166,7 +1166,7 @@ expect(b).to_equal(a)
 
 #### ignores the order of rows and repeated rows
 
-- produce the identity digest of the rows in two orders and with repeats
+- digest rows a and b in both orders and with repeats
    - Exec capture: after_step
    - Evidence: execution result verified by 2 expected checks
    - Expected: generic_open_needs_identity_digest_v1([two, one]) equals `base`
@@ -1180,7 +1180,7 @@ Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("produce the identity digest of the rows in two orders and with repeats")
+step("digest rows a and b in both orders and with repeats")
 val one = need("a", ["x"], 1, 2, "call")
 val two = need("b", ["y"], 5, 6, "field")
 val base = generic_open_needs_identity_digest_v1([one, two])
@@ -1192,7 +1192,7 @@ expect(generic_open_needs_identity_digest_v1([one, two, one, one])).to_equal(bas
 
 #### changes when a callee changes
 
-- produce the identity digest before and after the callee changes
+- digest the row c<x> and the row d<x>
    - Exec capture: after_step
    - Evidence: execution result verified by 1 expected check
    - Expected: b != a is true
@@ -1205,7 +1205,7 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("produce the identity digest before and after the callee changes")
+step("digest the row c<x> and the row d<x>")
 val a = generic_open_needs_identity_digest_v1([need("c", ["x"], 1, 2, "call")])
 val b = generic_open_needs_identity_digest_v1([need("d", ["x"], 1, 2, "call")])
 expect(b != a).to_equal(true)
@@ -1215,7 +1215,7 @@ expect(b != a).to_equal(true)
 
 #### changes when an argument key changes
 
-- produce the identity digest before and after an argument key changes
+- digest the row c<x> and the row c<y>
    - Exec capture: after_step
    - Evidence: execution result verified by 1 expected check
    - Expected: b != a is true
@@ -1228,7 +1228,7 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("produce the identity digest before and after an argument key changes")
+step("digest the row c<x> and the row c<y>")
 val a = generic_open_needs_identity_digest_v1([need("c", ["x"], 1, 2, "call")])
 val b = generic_open_needs_identity_digest_v1([need("c", ["y"], 1, 2, "call")])
 expect(b != a).to_equal(true)
@@ -1238,7 +1238,7 @@ expect(b != a).to_equal(true)
 
 #### changes when a row is added
 
-- produce the identity digest before and after a row is added
+- digest the row c<x> alone and with c<z> added
    - Exec capture: after_step
    - Evidence: execution result verified by 1 expected check
    - Expected: b != a is true
@@ -1251,7 +1251,7 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("produce the identity digest before and after a row is added")
+step("digest the row c<x> alone and with c<z> added")
 val a = generic_open_needs_identity_digest_v1([need("c", ["x"], 1, 2, "call")])
 val b = generic_open_needs_identity_digest_v1([need("c", ["x"], 1, 2, "call"), need("c", ["z"], 8, 9, "call")])
 expect(b != a).to_equal(true)
@@ -1261,7 +1261,7 @@ expect(b != a).to_equal(true)
 
 #### differs between no needs and one need
 
-- produce the identity digest of no needs and of one need
+- digest an empty row list and a one-row list
    - Exec capture: after_step
    - Evidence: execution result verified by 1 expected check
    - Expected: generic_open_needs_identity_digest_v1([]) != generic_open_needs_identity_digest_v1([simple_need()]) is true
@@ -1274,7 +1274,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("produce the identity digest of no needs and of one need")
+step("digest an empty row list and a one-row list")
 expect(generic_open_needs_identity_digest_v1([]) != generic_open_needs_identity_digest_v1([simple_need()])).to_equal(true)
 ```
 
@@ -1284,7 +1284,7 @@ expect(generic_open_needs_identity_digest_v1([]) != generic_open_needs_identity_
 
 #### equals a sha256 over the label, the concrete key and the needs digest
 
-- produce the instance needs key against a sha256 of the hand-framed parts
+- build the key of ck and nd and hash the hand-framed text
    - Exec capture: after_step
    - Evidence: execution result verified by 1 expected check
    - Expected: generic_instance_needs_key_v1("ck", "nd") equals `sha256_text("25:generic-instance-needs/v12:ck2:nd")`
@@ -1297,7 +1297,7 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("produce the instance needs key against a sha256 of the hand-framed parts")
+step("build the key of ck and nd and hash the hand-framed text")
 # @req REQ-GENERIC-F1A-004
 # oracle: label "generic-instance-needs/v1" is 25 bytes; "ck" is 2; "nd" is 2
 expect(generic_instance_needs_key_v1("ck", "nd")).to_equal(sha256_text("25:generic-instance-needs/v12:ck2:nd"))
@@ -1307,7 +1307,7 @@ expect(generic_instance_needs_key_v1("ck", "nd")).to_equal(sha256_text("25:gener
 
 #### moves when the concrete instance changes
 
-- produce the instance needs key under two concrete keys
+- build the keys of ck1 and ck2 over the needs digest nd
    - Exec capture: after_step
    - Evidence: execution result verified by 1 expected check
    - Expected: generic_instance_needs_key_v1("ck1", "nd") != generic_instance_needs_key_v1("ck2", "nd") is true
@@ -1320,7 +1320,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("produce the instance needs key under two concrete keys")
+step("build the keys of ck1 and ck2 over the needs digest nd")
 expect(generic_instance_needs_key_v1("ck1", "nd") != generic_instance_needs_key_v1("ck2", "nd")).to_equal(true)
 ```
 
@@ -1328,7 +1328,7 @@ expect(generic_instance_needs_key_v1("ck1", "nd") != generic_instance_needs_key_
 
 #### moves when the needs it was built against change
 
-- produce the instance needs key under two needs digests
+- build the keys of ck over the needs digests nd1 and nd2
    - Exec capture: after_step
    - Evidence: execution result verified by 1 expected check
    - Expected: generic_instance_needs_key_v1("ck", "nd1") != generic_instance_needs_key_v1("ck", "nd2") is true
@@ -1341,7 +1341,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("produce the instance needs key under two needs digests")
+step("build the keys of ck over the needs digests nd1 and nd2")
 expect(generic_instance_needs_key_v1("ck", "nd1") != generic_instance_needs_key_v1("ck", "nd2")).to_equal(true)
 ```
 
@@ -1353,7 +1353,7 @@ expect(generic_instance_needs_key_v1("ck", "nd1") != generic_instance_needs_key_
 
 #### writes an absent slot as the single frame 'absent'
 
-- produce the encoded text of an absent slot
+- encode the absent slot
    - Text capture: after_step
    - Evidence: text output verified by 1 expected check
    - Expected: generic_open_needs_slot_encode_v1(GenericOpenNeedsSlotV1.Absent).unwrap() equals `6:absent`
@@ -1366,7 +1366,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("produce the encoded text of an absent slot")
+step("encode the absent slot")
 expect(generic_open_needs_slot_encode_v1(GenericOpenNeedsSlotV1.Absent).unwrap()).to_equal("6:absent")
 ```
 
@@ -1374,7 +1374,7 @@ expect(generic_open_needs_slot_encode_v1(GenericOpenNeedsSlotV1.Absent).unwrap()
 
 #### writes a filled slot with no rows as the single frame 'filled'
 
-- produce the encoded text of a filled slot with no rows
+- encode the filled slot holding no rows
    - Text capture: after_step
    - Evidence: text output verified by 1 expected check
    - Expected: generic_open_needs_slot_encode_v1(GenericOpenNeedsSlotV1.Filled(rows: [])).unwrap() equals `6:filled`
@@ -1387,7 +1387,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("produce the encoded text of a filled slot with no rows")
+step("encode the filled slot holding no rows")
 expect(generic_open_needs_slot_encode_v1(GenericOpenNeedsSlotV1.Filled(rows: [])).unwrap()).to_equal("6:filled")
 ```
 
@@ -1395,7 +1395,7 @@ expect(generic_open_needs_slot_encode_v1(GenericOpenNeedsSlotV1.Filled(rows: [])
 
 #### writes one row as state, then one nested row frame
 
-- produce the complete wire text of a slot with one row
+- encode the slot holding the row c<x> at 3..12 caused by call
    - Text capture: after_step
    - Evidence: text output verified by 1 expected check
    - Expected: wire equals `6:filled21:1:c1:32:124:call3:1:x`
@@ -1408,7 +1408,7 @@ Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("produce the complete wire text of a slot with one row")
+step("encode the slot holding the row c<x> at 3..12 caused by call")
 # @req REQ-GENERIC-F1A-005
 # oracle: row blob = "1:c" "1:3" "2:12" "4:call" "3:1:x" = 21 bytes, so the slot is
 # the 6-byte state frame followed by "21:" and that blob
@@ -1422,7 +1422,7 @@ expect(wire).to_equal("6:filled21:1:c1:32:124:call3:1:x")
 
 #### decodes what it encoded, with a non-ASCII callee and several keys
 
-- produce the decoded row fields and the re-encoded wire
+- encode the row 箱<k1, k2> at 4..8, decode it and encode it again
    - Exec capture: after_step
    - Evidence: execution result verified by 5 expected checks
    - Expected: rows.len() equals `1)   # oracle: one row was written`
@@ -1439,7 +1439,7 @@ Runnable source: 10 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("produce the decoded row fields and the re-encoded wire")
+step("encode the row 箱<k1, k2> at 4..8, decode it and encode it again")
 val row = need("箱", ["k1", "k2"], 4, 8, "construct")
 val wire = generic_open_needs_slot_encode_v1(GenericOpenNeedsSlotV1.Filled(rows: [row])).unwrap()
 val back = generic_open_needs_slot_decode_v1(wire).unwrap()
@@ -1488,7 +1488,7 @@ expect(filled_rows(empty_back).len()).to_equal(0)   # oracle: a filled-empty slo
 
 #### writes the canonical order whatever order the rows arrive in
 
-- produce the wires of one row set given in two orders
+- encode the rows a and b in both orders
    - Exec capture: after_step
    - Evidence: execution result verified by 1 expected check
    - Expected: w2 equals `w1`
@@ -1501,7 +1501,7 @@ Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("produce the wires of one row set given in two orders")
+step("encode the rows a and b in both orders")
 val a = need("a", ["x"], 1, 2, "call")
 val b = need("b", ["x"], 1, 2, "call")
 val w1 = generic_open_needs_slot_encode_v1(GenericOpenNeedsSlotV1.Filled(rows: [a, b])).unwrap()
@@ -1515,7 +1515,7 @@ expect(w2).to_equal(w1)
 
 #### refuses to write a filled slot holding a malformed row
 
-- run the refused case: encoding a slot with a malformed row
+- encode a slot whose row has an empty argument key
    - Text capture: after_step
    - Evidence: text output verified by 2 expected checks
    - Expected: r.is_err() is true
@@ -1529,7 +1529,7 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("run the refused case: encoding a slot with a malformed row")
+step("encode a slot whose row has an empty argument key")
 val r = generic_open_needs_slot_encode_v1(GenericOpenNeedsSlotV1.Filled(rows: [need("c", [""], 1, 2, "call")]))
 expect(r.is_err()).to_equal(true)
 expect(r.unwrap_err()).to_equal("need holds an empty argument key")
@@ -1541,7 +1541,7 @@ expect(r.unwrap_err()).to_equal("need holds an empty argument key")
 
 #### refuses broken framing
 
-- run the refused case: decoding a slot whose frame is cut short
+- decode the data 6:abs
    - Text capture: after_step
    - Evidence: text output verified by 1 expected check
    - Expected: slot_refusal("6:abs") equals `frame runs past the end`
@@ -1554,7 +1554,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("run the refused case: decoding a slot whose frame is cut short")
+step("decode the data 6:abs")
 expect(slot_refusal("6:abs")).to_equal("frame runs past the end")
 ```
 
@@ -1562,7 +1562,7 @@ expect(slot_refusal("6:abs")).to_equal("frame runs past the end")
 
 #### refuses a slot with no state
 
-- run the refused case: decoding an empty slot
+- decode the empty string as a slot
    - Text capture: after_step
    - Evidence: text output verified by 1 expected check
    - Expected: slot_refusal("") equals `open-needs slot has no state`
@@ -1575,7 +1575,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("run the refused case: decoding an empty slot")
+step("decode the empty string as a slot")
 expect(slot_refusal("")).to_equal("open-needs slot has no state")
 ```
 
@@ -1583,7 +1583,7 @@ expect(slot_refusal("")).to_equal("open-needs slot has no state")
 
 #### refuses an absent slot that holds rows
 
-- run the refused case: an absent slot followed by a frame
+- decode the frames absent and ab
    - Text capture: after_step
    - Evidence: text output verified by 1 expected check
    - Expected: slot_refusal("6:absent2:ab") equals `absent open-needs slot holds rows`
@@ -1596,7 +1596,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("run the refused case: an absent slot followed by a frame")
+step("decode the frames absent and ab")
 expect(slot_refusal("6:absent2:ab")).to_equal("absent open-needs slot holds rows")
 ```
 
@@ -1604,7 +1604,7 @@ expect(slot_refusal("6:absent2:ab")).to_equal("absent open-needs slot holds rows
 
 #### refuses an unknown state
 
-- run the refused case: a slot with the state later
+- decode the frame later
    - Text capture: after_step
    - Evidence: text output verified by 1 expected check
    - Expected: slot_refusal("5:later") equals `unknown open-needs state 'later'`
@@ -1617,7 +1617,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("run the refused case: a slot with the state later")
+step("decode the frame later")
 expect(slot_refusal("5:later")).to_equal("unknown open-needs state 'later'")
 ```
 
@@ -1627,7 +1627,7 @@ expect(slot_refusal("5:later")).to_equal("unknown open-needs state 'later'")
 
 #### refuses a row with the wrong number of frames
 
-- run the refused case: a row with one frame instead of five
+- decode filled with one row frame holding only 1:a
    - Text capture: after_step
    - Evidence: text output verified by 1 expected check
    - Expected: slot_refusal("6:filled3:1:a") equals `need row does not hold five frames`
@@ -1640,7 +1640,7 @@ Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("run the refused case: a row with one frame instead of five")
+step("decode filled with one row frame holding only 1:a")
 # oracle: a row blob must hold five frames; "1:a" holds one
 expect(slot_refusal("6:filled3:1:a")).to_equal("need row does not hold five frames")
 ```
@@ -1649,7 +1649,7 @@ expect(slot_refusal("6:filled3:1:a")).to_equal("need row does not hold five fram
 
 #### refuses a row whose inner framing is broken
 
-- run the refused case: a row whose inner frame has no colon
+- decode filled with a row frame ab
    - Text capture: after_step
    - Evidence: text output verified by 1 expected check
    - Expected: slot_refusal("6:filled2:ab") equals `frame header has no ':'`
@@ -1662,7 +1662,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("run the refused case: a row whose inner frame has no colon")
+step("decode filled with a row frame ab")
 expect(slot_refusal("6:filled2:ab")).to_equal("frame header has no ':'")
 ```
 
@@ -1670,7 +1670,7 @@ expect(slot_refusal("6:filled2:ab")).to_equal("frame header has no ':'")
 
 #### refuses a row with a bad span
 
-- run the refused case: a row whose end precedes its start
+- decode a row spanning 3..2
    - Text capture: after_step
    - Evidence: text output verified by 1 expected check
    - Expected: slot_refusal("6:filled20:1:c1:31:24:call3:1:x") equals `span ends before it starts`
@@ -1683,7 +1683,7 @@ Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("run the refused case: a row whose end precedes its start")
+step("decode a row spanning 3..2")
 # row blob "1:c" "1:3" "1:2" "4:call" "3:1:x": end 2 is before start 3
 expect(slot_refusal("6:filled20:1:c1:31:24:call3:1:x")).to_equal("span ends before it starts")
 ```
@@ -1692,7 +1692,7 @@ expect(slot_refusal("6:filled20:1:c1:31:24:call3:1:x")).to_equal("span ends befo
 
 #### refuses a row with a non-canonical span decimal
 
-- run the refused case: a row with a leading-zero span start
+- decode a row whose start is spelled 03
    - Text capture: after_step
    - Evidence: text output verified by 1 expected check
    - Expected: slot_refusal("6:filled21:1:c2:031:24:call3:1:x") equals `span start: decimal has a leading zero`
@@ -1705,7 +1705,7 @@ Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("run the refused case: a row with a leading-zero span start")
+step("decode a row whose start is spelled 03")
 # start spelled "03"
 expect(slot_refusal("6:filled21:1:c2:031:24:call3:1:x")).to_equal("span start: decimal has a leading zero")
 ```
@@ -1714,7 +1714,7 @@ expect(slot_refusal("6:filled21:1:c2:031:24:call3:1:x")).to_equal("span start: d
 
 #### refuses a row whose argument keys are not valid frames
 
-- run the refused case: a row whose argument keys overrun their frame
+- decode a row whose key list is 5:ab
    - Text capture: after_step
    - Evidence: text output verified by 1 expected check
    - Expected: slot_refusal("6:filled22:1:c1:12:124:call4:5:ab") equals `frame runs past the end`
@@ -1727,7 +1727,7 @@ Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("run the refused case: a row whose argument keys overrun their frame")
+step("decode a row whose key list is 5:ab")
 # key list "5:ab" claims five bytes but holds two
 expect(slot_refusal("6:filled22:1:c1:12:124:call4:5:ab")).to_equal("frame runs past the end")
 ```
@@ -1736,7 +1736,7 @@ expect(slot_refusal("6:filled22:1:c1:12:124:call4:5:ab")).to_equal("frame runs p
 
 #### refuses a row with an unknown cause
 
-- run the refused case: a row with the cause wish
+- decode a row with the cause wish
    - Text capture: after_step
    - Evidence: text output verified by 1 expected check
    - Expected: slot_refusal("6:filled21:1:c1:32:124:wish3:1:x") equals `unknown need cause 'wish'`
@@ -1749,7 +1749,7 @@ Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("run the refused case: a row with the cause wish")
+step("decode a row with the cause wish")
 # row blob "1:c" "1:3" "2:12" "4:wish" "3:1:x"
 expect(slot_refusal("6:filled21:1:c1:32:124:wish3:1:x")).to_equal("unknown need cause 'wish'")
 ```
@@ -1758,7 +1758,7 @@ expect(slot_refusal("6:filled21:1:c1:32:124:wish3:1:x")).to_equal("unknown need 
 
 #### refuses rows that are not in canonical order
 
-- run the refused case: two rows written in reverse order
+- decode the rows b then a
    - Text capture: after_step
    - Evidence: text output verified by 1 expected check
    - Expected: slot_refusal(wire) equals `open-needs slot is not in canonical form`
@@ -1771,7 +1771,7 @@ Runnable source: 6 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("run the refused case: two rows written in reverse order")
+step("decode the rows b then a")
 # rows "b" then "a": a valid encoder would write "a" first
 val b_row = generic_need_frames_v1(["b", "1", "2", "call", generic_need_frames_v1(["x"])])
 val a_row = generic_need_frames_v1(["a", "1", "2", "call", generic_need_frames_v1(["x"])])
@@ -1783,7 +1783,7 @@ expect(slot_refusal(wire)).to_equal("open-needs slot is not in canonical form")
 
 #### refuses a duplicate row
 
-- run the refused case: the same row written twice
+- decode the row a written twice
    - Text capture: after_step
    - Evidence: text output verified by 1 expected check
    - Expected: slot_refusal(wire) equals `open-needs slot is not in canonical form`
@@ -1796,10 +1796,172 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("run the refused case: the same row written twice")
+step("decode the row a written twice")
 val row = generic_need_frames_v1(["a", "1", "2", "call", generic_need_frames_v1(["x"])])
 val wire = generic_need_frames_v1(["filled", row, row])
 expect(slot_refusal(wire)).to_equal("open-needs slot is not in canonical form")
+```
+
+</details>
+
+#### Span end bound of the wire form
+
+#### accepts a span ending at the largest encodable offset
+
+- check a span from 0 to 999999999999
+   - Expected: generic_need_span_check_v1(span(0, LARGEST_ENCODABLE_OFFSET)).is_ok() is true
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 2 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("check a span from 0 to 999999999999")
+expect(generic_need_span_check_v1(span(0, LARGEST_ENCODABLE_OFFSET)).is_ok()).to_equal(true)
+```
+
+</details>
+
+#### refuses a span ending one past the largest encodable offset
+
+- check a span from 0 to 1000000000000
+   - Expected: r.is_err() is true
+   - Expected: r.unwrap_err() equals `span ends past the largest encodable offset`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("check a span from 0 to 1000000000000")
+val r = generic_need_span_check_v1(span(0, LARGEST_ENCODABLE_OFFSET + 1))
+expect(r.is_err()).to_equal(true)
+expect(r.unwrap_err()).to_equal("span ends past the largest encodable offset")
+```
+
+</details>
+
+#### refuses such a row in the row check, in canonicalisation and in slot encoding
+
+- take a row ending one past the largest offset and pass it to each entry point
+   - Text capture: after_step
+   - Evidence: text output verified by 3 expected checks
+   - Expected: generic_open_need_check_v1(row).unwrap_err() equals `span ends past the largest encodable offset`
+   - Expected: generic_open_needs_canonical_v1([simple_need(), row]).unwrap_err() equals `span ends past the largest encodable offset`
+   - Expected: encoded.unwrap_err() equals `span ends past the largest encodable offset`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("take a row ending one past the largest offset and pass it to each entry point")
+val row = need("c", ["x"], 1, LARGEST_ENCODABLE_OFFSET + 1, "call")
+expect(generic_open_need_check_v1(row).unwrap_err()).to_equal("span ends past the largest encodable offset")
+expect(generic_open_needs_canonical_v1([simple_need(), row]).unwrap_err()).to_equal("span ends past the largest encodable offset")
+val encoded = generic_open_needs_slot_encode_v1(GenericOpenNeedsSlotV1.Filled(rows: [row]))
+expect(encoded.unwrap_err()).to_equal("span ends past the largest encodable offset")
+```
+
+</details>
+
+#### round-trips a row ending at the largest encodable offset
+
+- encode and decode a slot holding a row from 5 to 999999999999
+   - Expected: back.len() equals `1)   # oracle: one row was written`
+   - Expected: back[0].span.end.value equals `LARGEST_ENCODABLE_OFFSET`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("encode and decode a slot holding a row from 5 to 999999999999")
+val row = need("c", ["x"], 5, LARGEST_ENCODABLE_OFFSET, "call")
+val wire = generic_open_needs_slot_encode_v1(GenericOpenNeedsSlotV1.Filled(rows: [row])).unwrap()
+val back = filled_rows(generic_open_needs_slot_decode_v1(wire).unwrap())
+expect(back.len()).to_equal(1)   # oracle: one row was written
+expect(back[0].span.end.value).to_equal(LARGEST_ENCODABLE_OFFSET)
+```
+
+</details>
+
+#### reaches a thirteen-digit end from the wire only as a too-long decimal
+
+- read the end offset 1000000000000 from wire values
+   - Text capture: after_step
+   - Evidence: text output verified by 1 expected check
+   - Expected: generic_need_span_from_values_v1("0", "1000000000000").unwrap_err() equals `span end: decimal too long`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("read the end offset 1000000000000 from wire values")
+# The decimal rule fires first, so the span bound is reached only by typed values.
+expect(generic_need_span_from_values_v1("0", "1000000000000").unwrap_err()).to_equal("span end: decimal too long")
+```
+
+</details>
+
+#### Bytewise order of ranks
+
+#### orders ranks by UTF-8 bytes: B, a, é, 한 (this pins bytewise order)
+
+- order the ranks 한, a, B, é
+   - Exec capture: after_step
+   - Evidence: execution result verified by 1 expected check
+   - Expected: generic_need_order_v1(["한", "a", "B", "é"]) equals `[2, 1, 3, 0]`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("order the ranks 한, a, B, é")
+# oracle: UTF-8 first bytes are B 0x42, a 0x61, é 0xC3, 한 0xED, so B, a, é, 한 are input indices 2, 1, 3, 0
+expect(generic_need_order_v1(["한", "a", "B", "é"])).to_equal([2, 1, 3, 0])
+```
+
+</details>
+
+#### puts an upper-case letter before its lower-case twin after a shared prefix (bytewise)
+
+- order the ranks key-a, key-B, key-b, key-A
+   - Exec capture: after_step
+   - Evidence: execution result verified by 1 expected check
+   - Expected: generic_need_order_v1(["key-a", "key-B", "key-b", "key-A"]) equals `[3, 1, 0, 2]`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 3 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("order the ranks key-a, key-B, key-b, key-A")
+# oracle: bytewise A 0x41 < B 0x42 < a 0x61 < b 0x62, so input indices 3, 1, 0, 2
+expect(generic_need_order_v1(["key-a", "key-B", "key-b", "key-A"])).to_equal([3, 1, 0, 2])
 ```
 
 </details>
@@ -1808,8 +1970,8 @@ expect(slot_refusal(wire)).to_equal("open-needs slot is not in canonical form")
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 75 |
-| Active scenarios | 75 |
+| Total scenarios | 82 |
+| Active scenarios | 82 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
@@ -1839,15 +2001,15 @@ Requirements covered by the scenarios in this manual:
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `640ed4a099518adf7585d39fb66ac49b459157c63266e4a6f56ecefe3c9cd1b7`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `1b0cc5e08db17982bb5720e39a8384701ebb3b41261307c301e640fa1b44560c`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `640ed4a099518adf7585d39fb66ac49b459157c63266e4a6f56ecefe3c9cd1b7`.
+Source SHA-256: `1b0cc5e08db17982bb5720e39a8384701ebb3b41261307c301e640fa1b44560c`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `640ed4a099518adf7585d39fb66ac49b459157c63266e4a6f56ecefe3c9cd1b7`  
+Source SHA-256: `1b0cc5e08db17982bb5720e39a8384701ebb3b41261307c301e640fa1b44560c`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
 Raw score: **98/100**; effective score: **98/100**; blockers: **0**.
 

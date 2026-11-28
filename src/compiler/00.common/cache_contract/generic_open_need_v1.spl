@@ -35,6 +35,8 @@ pub val GENERIC_OPEN_NEEDS_STATE_FILLED = "filled"
 
 # Largest decimal a frame length or a source offset may spell (12 digits).
 val GENERIC_NEED_DECIMAL_WIDTH = 12
+# Largest source offset the wire form can spell: twelve nines.
+val GENERIC_NEED_OFFSET_MAX = 999999999999
 
 pub struct GenericSourceOffsetV1:
     value: i64   # byte offset into the declaring module's source
@@ -106,7 +108,12 @@ pub fn generic_need_frames_read_v1(data: text) -> Result<[text], text>:
 
 pub fn generic_need_order_v1(ranks: [text]) -> [i64]:
     """Indices of `ranks` in ascending rank order, one index per distinct rank
-    (the first occurrence wins). Insertion sort: sections are small."""
+    (the first occurrence wins). Insertion sort: sections are small.
+
+    Order is the bytewise order of the UTF-8 text (`B` < `a` < `é` < `한`);
+    it is part of every sealed section, so any backend's text `<` must agree.
+    Evidence so far is the Rust-seed interpreter only: the native comparator
+    is unverified."""
     var order: [i64] = []
     var index = 0
     for rank in ranks:
@@ -139,11 +146,14 @@ pub fn generic_need_cause_check_v1(cause: text) -> Result<text, text>:
     Err("unknown need cause '" + cause + "'")
 
 pub fn generic_need_span_check_v1(span: GenericNeedSpanV1) -> Result<GenericNeedSpanV1, text>:
-    """A span starts at or after offset 0 and does not end before it starts."""
+    """A span starts at or after offset 0, does not end before it starts, and
+    ends at an offset the wire form can spell (at most twelve digits)."""
     if span.start.value < 0:
         return Err("span starts before the source")
     if span.end.value < span.start.value:
         return Err("span ends before it starts")
+    if span.end.value > GENERIC_NEED_OFFSET_MAX:
+        return Err("span ends past the largest encodable offset")
     Ok(span)
 
 pub fn generic_need_span_values_v1(span: GenericNeedSpanV1) -> [text]:

@@ -119,6 +119,20 @@ fn slot_is_absent(entry: GenericTemplateEntryV1) -> bool:
         case GenericOpenNeedsSlotV1.Absent: true
         case GenericOpenNeedsSlotV1.Filled(_): false
 
+# oracle: the module bound is 16 MiB = 16 * 1024 * 1024 bytes
+val V3_BOUND_BYTES = 16777216
+
+# The v1 reader names its own magic failure; v3 bytes do not carry the v1 magic.
+val V1_REFUSAL_OF_V3 = "bad magic"
+
+# Text of exactly `length` bytes, built by repeated doubling (no hashing).
+fn filler_of(length: i64) -> text:
+    var s = "x"
+    while s.byte_len() < length:
+        s = s + s
+    s.substring(0, length)
+
+
 # Decoder verdict as one string: the error text, or "ACCEPTED".
 fn v3_refusal(wire: text) -> text:
     val r = generic_template_section_decode_v3(wire)
@@ -147,7 +161,7 @@ describe "template section v3 with open needs (plan S3-F1)":
         context "a fresh template":
             it "has an absent slot after projection":
                 # @capture(exec): the slot state of a freshly projected template
-                step("produce the slot state of a freshly projected template")
+                step("project the declaration Box<T> and read its slot")
                 # @req REQ-GENERIC-F1B-001
                 expect(slot_is_absent(box_template())).to_equal(true)
 
@@ -166,7 +180,7 @@ describe "template section v3 with open needs (plan S3-F1)":
 
             it "leaves the original entry untouched":
                 # @capture(exec): the slot states of the original entry and of the filled copy
-                step("produce the slot states of the original entry and of the filled copy")
+                step("fill a copy of the Box template and read both slots")
                 val entry = box_template()
                 val f = filled(entry, one_need_rows(entry))
                 expect(slot_is_absent(entry)).to_equal(true)
@@ -174,7 +188,7 @@ describe "template section v3 with open needs (plan S3-F1)":
 
             it "accepts a fill with no rows and records it as filled":
                 # @capture(exec): the slot state and row count after a fill with no rows
-                step("produce the slot state and row count after a fill with no rows")
+                step("fill the Box template with an empty row list")
                 val f = filled(box_template(), [])
                 expect(slot_is_absent(f)).to_equal(false)
                 expect(slot_rows(f).len()).to_equal(0)   # oracle: no rows were given
@@ -192,7 +206,7 @@ describe "template section v3 with open needs (plan S3-F1)":
 
             it "is refused after a fill with no rows":
                 # @capture(exec): the verdict of a fill after a fill with no rows
-                step("produce the verdict of a fill after a fill with no rows")
+                step("fill the Box template twice, first with no rows, then with one row")
                 val entry = box_template()
                 val f = filled(entry, [])
                 expect(generic_template_fill_open_needs_v1(f, one_need_rows(entry)).is_err()).to_equal(true)
@@ -200,7 +214,7 @@ describe "template section v3 with open needs (plan S3-F1)":
         context "a malformed row":
             it "refuses the fill and names the symbol and the reason":
                 # @capture(exec): the error text of the fill with a row naming no callee
-                step("run the refused case: the fill with a row naming no callee")
+                step("fill the Box template with a row whose callee is empty")
                 val entry = box_template()
                 val r = generic_template_fill_open_needs_v1(entry, [need("", ["c3:i64"], 1, "call")])
                 expect(r.is_err()).to_equal(true)
@@ -217,8 +231,8 @@ describe "template section v3 with open needs (plan S3-F1)":
             step("encode both as v3 sections and decode them")
             val wire_before = wire_of([before])
             val wire_after = wire_of([after])
-            val rows_before = slot_rows(generic_template_section_decode_v3(wire_before).unwrap().entries[0])
-            val rows_after = slot_rows(generic_template_section_decode_v3(wire_after).unwrap().entries[0])
+            val rows_before = slot_rows(generic_template_section_decode_v3(wire_before).unwrap().section.entries[0])
+            val rows_after = slot_rows(generic_template_section_decode_v3(wire_after).unwrap().section.entries[0])
             expect(wire_after != wire_before).to_equal(true)
             expect(rows_before.len()).to_equal(1)   # oracle: one need was filled
             expect(rows_after.len()).to_equal(2)   # oracle: one more need was filled
@@ -238,21 +252,21 @@ describe "template section v3 with open needs (plan S3-F1)":
             step("compare their keys")
             expect(instance_key(box, "c3:i64", new_rows) != instance_key(box, "c3:i64", old_rows)).to_equal(true)
             expect(instance_key(box, "c4:text", new_rows) != instance_key(box, "c4:text", old_rows)).to_equal(true)
-            val other_old = section_old.entries[1]
-            val other_new = section_new.entries[1]
+            val other_old = section_old.section.entries[1]
+            val other_new = section_new.section.entries[1]
             expect(other_old.symbol_id).to_equal(other.symbol_id)
             expect(instance_key(other_new, "c3:i64", slot_rows(other_new))).to_equal(instance_key(other_old, "c3:i64", slot_rows(other_old)))
 
         it "keeps the instances of one template apart":
             # @capture(exec): the instance keys of Box for two argument types
-            step("produce the instance keys of Box for two argument types")
+            step("build the instance keys of Box for i64 and for text")
             val box = box_template()
             val rows = one_need_rows(box)
             expect(instance_key(box, "c3:i64", rows) != instance_key(box, "c4:text", rows)).to_equal(true)
 
         it "keeps the key of a template when only a call moves":
             # @capture(exec): the instance keys of Box with the call at two offsets and with another cause
-            step("produce the instance keys of Box with the call at two offsets and with another cause")
+            step("build the instance keys of Box with the call at offset 10 and at 900")
             val box = box_template()
             val here = [need("sha256:lst", [binder_key(box)], 10, "field")]
             val moved = [need("sha256:lst", [binder_key(box)], 900, "call")]
@@ -278,7 +292,7 @@ describe "template section v3 with open needs (plan S3-F1)":
 
         it "keeps the slot frame of the v3 section identical (only the displayed binder name differs in the template table)":
             # @capture(exec): the slot frame and the template-table frame of the sections for binders T and U
-            step("produce the slot frame and the template-table frame of the sections for binders T and U")
+            step("seal Box<T> and Box<U> with their own binder keys and compare the frames")
             val with_t = filled(template("Box", "T", "T"), two_need_rows(template("Box", "T", "T")))
             val with_u = filled(template("Box", "U", "U"), two_need_rows(template("Box", "U", "U")))
             val slot_t = sealed_values(wire_of([with_t]))[2]
@@ -308,7 +322,7 @@ describe "template section v3 with open needs (plan S3-F1)":
 
         it "leaves the section digest of the carried v2 table alone":
             # @capture(exec): the digest of the carried v2 table with the slot absent and filled
-            step("produce the digest of the carried v2 table with the slot absent and filled")
+            step("build the table digest with the slot absent and with two needs")
             val absent = box_template()
             val full = filled(absent, two_need_rows(absent))
             expect(section_of([full]).digest).to_equal(section_of([absent]).digest)
@@ -317,7 +331,7 @@ describe "template section v3 with open needs (plan S3-F1)":
         context "a v2 reader given v3 bytes":
             it "misses on the v2 magic check":
                 # @capture(exec): the ok flag and error text of the v2 decoder on a v3 wire
-                step("produce the ok flag and error text of the v2 decoder on a v3 wire")
+                step("decode a v3 wire with the v2 decoder")
                 # @req REQ-GENERIC-F1B-005
                 val entry = box_template()
                 val wire = wire_of([filled(entry, one_need_rows(entry))])
@@ -328,14 +342,14 @@ describe "template section v3 with open needs (plan S3-F1)":
         context "a v3 reader given older bytes":
             it "refuses a v2 section":
                 # @capture(exec): the error text of the v3 decoder on a v2 wire
-                step("run the refused case: the v3 decoder on a v2 wire")
+                step("decode a v2 wire with the v3 decoder")
                 val entry = box_template()
                 val v2 = generic_template_section_encode_v2(section_of([entry])).unwrap()
                 expect(v3_refusal(v2)).to_equal("v3 magic required")
 
             it "refuses a v1 section":
                 # @capture(exec): the error text of the v3 decoder on a v1 wire
-                step("run the refused case: the v3 decoder on a v1 wire")
+                step("decode a v1 wire with the v3 decoder")
                 val v1_entry = project_generic_template_v1(decl("Box", "T", "T")).unwrap()
                 val v1 = generic_template_section_encode_v1(build_generic_template_section_v1([v1_entry]))
                 expect(v3_refusal(v1)).to_equal("v3 magic required")
@@ -349,9 +363,9 @@ describe "template section v3 with open needs (plan S3-F1)":
             val wire = wire_of([filled(entry, two_need_rows(entry))])
             step("decode, then encode again")
             val back = generic_template_section_decode_v3(wire).unwrap()
-            expect(generic_template_section_encode_v3(back).unwrap()).to_equal(wire)
-            expect(back.entries[0].symbol_id).to_equal(entry.symbol_id)
-            expect(slot_rows(back.entries[0]).len()).to_equal(2)   # oracle: two needs were filled
+            expect(generic_template_section_encode_v3(back.section).unwrap()).to_equal(wire)
+            expect(back.section.entries[0].symbol_id).to_equal(entry.symbol_id)
+            expect(slot_rows(back.section.entries[0]).len()).to_equal(2)   # oracle: two needs were filled
 
         it "keeps an absent slot and a filled-empty slot apart on the wire and after decoding":
             # @capture(exec): the slot state and row count of each decoded entry and the re-encoded wire
@@ -361,24 +375,24 @@ describe "template section v3 with open needs (plan S3-F1)":
             val wire = wire_of([never, none])
             step("decode and look at each slot")
             val back = generic_template_section_decode_v3(wire).unwrap()
-            expect(back.entries.len()).to_equal(2)   # oracle: two templates were sealed
-            expect(slot_is_absent(back.entries[0])).to_equal(true)
-            expect(slot_is_absent(back.entries[1])).to_equal(false)
-            expect(slot_rows(back.entries[1]).len()).to_equal(0)   # oracle: filled with no rows
-            expect(generic_template_section_encode_v3(back).unwrap()).to_equal(wire)
+            expect(back.section.entries.len()).to_equal(2)   # oracle: two templates were sealed
+            expect(slot_is_absent(back.section.entries[0])).to_equal(true)
+            expect(slot_is_absent(back.section.entries[1])).to_equal(false)
+            expect(slot_rows(back.section.entries[1]).len()).to_equal(0)   # oracle: filled with no rows
+            expect(generic_template_section_encode_v3(back.section).unwrap()).to_equal(wire)
 
         it "carries the template table digest through unchanged":
             # @capture(exec): the table digest before and after the round trip
-            step("produce the table digest before and after the round trip")
+            step("encode and decode a one-need section and compare the table digests")
             val entry = box_template()
             val section = section_of([filled(entry, one_need_rows(entry))])
             val back = generic_template_section_decode_v3(generic_template_section_encode_v3(section).unwrap()).unwrap()
-            expect(back.digest).to_equal(section.digest)
+            expect(back.section.digest).to_equal(section.digest)
 
     context "Encoding refusals":
         it "refuses a section whose v2 table has a wrong seal":
             # @capture(exec): the error text of encoding a section whose table digest is wrong
-            step("run the refused case: encoding a section whose table digest is wrong")
+            step("encode a section whose digest is the text bad seal")
             val entry = box_template()
             val section = section_of([entry])
             val bad = GenericTemplateSectionV1(entries: section.entries, digest: "bad seal")
@@ -407,12 +421,12 @@ describe "template section v3 with open needs (plan S3-F1)":
         context "rule: a seal, a magic and an inner table must be present":
             it "refuses fewer than three frames":
                 # @capture(exec): the error text of the v3 decoder on a two-frame wire
-                step("run the refused case: the v3 decoder on a two-frame wire")
+                step("decode the two frames a and b")
                 expect(v3_refusal(generic_need_frames_v1(["a", "b"]))).to_equal("v3 magic required")
 
             it "refuses a wrong magic even when the seal is right":
                 # @capture(exec): the error text of the v3 decoder on a wrongly named magic under a valid seal
-                step("run the refused case: the v3 decoder on a wrongly named magic under a valid seal")
+                step("decode a correctly sealed wire naming magic v9")
                 val wire = reseal(["generic-template-section/v9", "inner"])
                 expect(v3_refusal(wire)).to_equal("v3 magic required")
 
@@ -437,7 +451,7 @@ describe "template section v3 with open needs (plan S3-F1)":
         context "rule: the carried v2 table must itself be valid":
             it "refuses a corrupt inner table behind a correct seal":
                 # @capture(exec): the error text of the v3 decoder on a garbage inner table
-                step("run the refused case: the v3 decoder on a garbage inner table")
+                step("decode a correctly sealed wire whose inner table is the text garbage")
                 val wire = reseal([GENERIC_TEMPLATE_SECTION_MAGIC_V3, "garbage"])
                 val verdict = v3_refusal(wire)
                 expect(verdict).to_equal("v3 template table: invalid v2 UTF8 frame")
@@ -445,7 +459,7 @@ describe "template section v3 with open needs (plan S3-F1)":
         context "rule: there is exactly one slot per template":
             it "refuses a wire with a missing slot":
                 # @capture(exec): the error text of the v3 decoder on a wire with no slot for its entry
-                step("run the refused case: the v3 decoder on a wire with no slot for its entry")
+                step("decode a re-sealed wire with the slot frame removed")
                 val entry = box_template()
                 val values = sealed_values(wire_of([filled(entry, one_need_rows(entry))]))
                 val wire = reseal([values[0], values[1]])
@@ -453,7 +467,7 @@ describe "template section v3 with open needs (plan S3-F1)":
 
             it "refuses a wire with one slot too many":
                 # @capture(exec): the error text of the v3 decoder on a wire with two slots for one entry
-                step("run the refused case: the v3 decoder on a wire with two slots for one entry")
+                step("decode a re-sealed wire with the slot frame doubled")
                 val entry = box_template()
                 val values = sealed_values(wire_of([filled(entry, one_need_rows(entry))]))
                 val wire = reseal([values[0], values[1], values[2], values[2]])
@@ -481,6 +495,78 @@ describe "template section v3 with open needs (plan S3-F1)":
         context "a valid wire":
             it "is accepted":
                 # @capture(exec): the verdict of the v3 decoder on an untampered wire
-                step("produce the verdict of the v3 decoder on an untampered wire")
+                step("decode an untampered one-need wire")
                 val entry = box_template()
                 expect(v3_refusal(wire_of([filled(entry, one_need_rows(entry))]))).to_equal("ACCEPTED")
+
+    context "Byte bound of a v3 section":
+        # oracle: the module bound is 16 MiB = 16 * 1024 * 1024 bytes
+        it "refuses input one byte over the bound before reading any frame":
+            # @capture(exec): the error text of the v3 decoder on garbage one byte over the bound
+            step("build a filler of bound + 1 bytes by repeated doubling and decode it")
+            val over = filler_of(V3_BOUND_BYTES + 1)
+            expect(over.byte_len()).to_equal(V3_BOUND_BYTES + 1)
+            expect(v3_refusal(over)).to_equal("v3 byte bound exceeded")
+
+        it "lets input of exactly the bound through to framing, which refuses it as garbage":
+            # @capture(exec): the error text of the v3 decoder on garbage of exactly the bound length
+            step("decode a filler of exactly bound bytes")
+            val exact = filler_of(V3_BOUND_BYTES)
+            expect(exact.byte_len()).to_equal(V3_BOUND_BYTES)
+            expect(v3_refusal(exact)).to_equal("malformed v3 frame: frame header has no ':'")
+
+        it "refuses to encode a section whose sealed frames exceed the bound":
+            # @capture(exec): the error text of encoding one entry with a single need whose key is longer than the bound
+            step("fill one entry with a need whose argument key is bound + 1 bytes long")
+            val entry = box_template()
+            var big = entry
+            big.open_needs = GenericOpenNeedsSlotV1.Filled(rows: [need("sha256:lst", [filler_of(V3_BOUND_BYTES + 1)], 1, "call")])
+            val r = generic_template_section_encode_v3(section_of([big]))
+            expect(r.is_err()).to_equal(true)
+            expect(r.unwrap_err()).to_equal("v3 byte bound exceeded")
+
+    context "Readers of older schemas given v3 bytes":
+        it "makes the v1 reader fail closed on a v3 wire":
+            # @capture(exec): the ok flag and error text of the v1 decoder on a v3 wire
+            step("decode a v3 wire with the v1 decoder")
+            val entry = box_template()
+            val r = generic_template_section_decode_v1(wire_of([filled(entry, one_need_rows(entry))]))
+            expect(r.ok).to_equal(false)
+            expect(r.error).to_equal(V1_REFUSAL_OF_V3)
+
+    context "Seal of a v3 section":
+        it "equals the seal of the decoded wire and the first frame of the wire":
+            # @capture(exec): the computed seal, the decoded seal and the first frame of the wire
+            step("seal a filled section, encode it, decode it")
+            val entry = box_template()
+            val section = section_of([filled(entry, one_need_rows(entry))])
+            val wire = generic_template_section_encode_v3(section).unwrap()
+            val decoded = generic_template_section_decode_v3(wire).unwrap()
+            val computed = generic_template_section_seal_v3(section).unwrap()
+            expect(decoded.seal).to_equal(computed)
+            expect(generic_need_frames_read_v1(wire).unwrap()[0]).to_equal(computed)
+
+        it "moves with the open needs while the table digest and the template id stay":
+            # @capture(exec): the seal, the table digest and the template id with the slot absent, filled-empty and filled
+            step("seal the same template with an absent slot, a filled-empty slot and a one-row slot")
+            val absent = box_template()
+            val empty = filled(absent, [])
+            val one = filled(absent, one_need_rows(absent))
+            val seal_absent = generic_template_section_seal_v3(section_of([absent])).unwrap()
+            val seal_empty = generic_template_section_seal_v3(section_of([empty])).unwrap()
+            val seal_one = generic_template_section_seal_v3(section_of([one])).unwrap()
+            expect(seal_empty != seal_absent).to_equal(true)
+            expect(seal_one != seal_empty).to_equal(true)
+            expect(seal_one != seal_absent).to_equal(true)
+            expect(section_of([one]).digest).to_equal(section_of([absent]).digest)
+            expect(section_of([empty]).digest).to_equal(section_of([absent]).digest)
+            expect(generic_template_id_v2(one)).to_equal(generic_template_id_v2(absent))
+
+        it "is refused for an invalid section":
+            # @capture(exec): the error text of the seal request for a section with a wrong table digest
+            step("seal a section whose table digest is wrong")
+            val section = section_of([box_template()])
+            val bad = GenericTemplateSectionV1(entries: section.entries, digest: "bad seal")
+            val r = generic_template_section_seal_v3(bad)
+            expect(r.is_err()).to_equal(true)
+            expect(r.unwrap_err()).to_equal("invalid v2 section seal")

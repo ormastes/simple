@@ -4,7 +4,7 @@
 
 | Tests | Active | Skipped | Pending |
 |-------|--------|---------|--------:|
-| 34 | 34 | 0 | 0 |
+| 41 | 41 | 0 | 0 |
 
 <details>
 <summary>Full Scenario Manual</summary>
@@ -78,7 +78,7 @@ wording or its rule order changed; both are part of the contract.
 
 #### has an absent slot after projection
 
-- produce the slot state of a freshly projected template
+- project the declaration Box<T> and read its slot
    - Exec capture: after_step
    - Evidence: execution result verified by 1 expected check
    - Expected: slot_is_absent(box_template()) is true
@@ -91,7 +91,7 @@ Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("produce the slot state of a freshly projected template")
+step("project the declaration Box<T> and read its slot")
 # @req REQ-GENERIC-F1B-001
 expect(slot_is_absent(box_template())).to_equal(true)
 ```
@@ -132,7 +132,7 @@ expect(stored[1].callee_template_id).to_equal("sha256:zz")
 
 #### leaves the original entry untouched
 
-- produce the slot states of the original entry and of the filled copy
+- fill a copy of the Box template and read both slots
    - Exec capture: after_step
    - Evidence: execution result verified by 2 expected checks
    - Expected: slot_is_absent(entry) is true
@@ -146,7 +146,7 @@ Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("produce the slot states of the original entry and of the filled copy")
+step("fill a copy of the Box template and read both slots")
 val entry = box_template()
 val f = filled(entry, one_need_rows(entry))
 expect(slot_is_absent(entry)).to_equal(true)
@@ -157,7 +157,7 @@ expect(slot_is_absent(f)).to_equal(false)
 
 #### accepts a fill with no rows and records it as filled
 
-- produce the slot state and row count after a fill with no rows
+- fill the Box template with an empty row list
    - Exec capture: after_step
    - Evidence: execution result verified by 2 expected checks
    - Expected: slot_is_absent(f) is false
@@ -171,7 +171,7 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("produce the slot state and row count after a fill with no rows")
+step("fill the Box template with an empty row list")
 val f = filled(box_template(), [])
 expect(slot_is_absent(f)).to_equal(false)
 expect(slot_rows(f).len()).to_equal(0)   # oracle: no rows were given
@@ -210,7 +210,7 @@ expect(again.unwrap_err()).to_equal("open needs of " + entry.symbol_id + " are a
 
 #### is refused after a fill with no rows
 
-- produce the verdict of a fill after a fill with no rows
+- fill the Box template twice, first with no rows, then with one row
    - Exec capture: after_step
    - Evidence: execution result verified by 1 expected check
    - Expected: generic_template_fill_open_needs_v1(f, one_need_rows(entry)).is_err() is true
@@ -223,7 +223,7 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("produce the verdict of a fill after a fill with no rows")
+step("fill the Box template twice, first with no rows, then with one row")
 val entry = box_template()
 val f = filled(entry, [])
 expect(generic_template_fill_open_needs_v1(f, one_need_rows(entry)).is_err()).to_equal(true)
@@ -235,7 +235,7 @@ expect(generic_template_fill_open_needs_v1(f, one_need_rows(entry)).is_err()).to
 
 #### refuses the fill and names the symbol and the reason
 
-- run the refused case: the fill with a row naming no callee
+- fill the Box template with a row whose callee is empty
    - Text capture: after_step
    - Evidence: text output verified by 2 expected checks
    - Expected: r.is_err() is true
@@ -249,7 +249,7 @@ Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("run the refused case: the fill with a row naming no callee")
+step("fill the Box template with a row whose callee is empty")
 val entry = box_template()
 val r = generic_template_fill_open_needs_v1(entry, [need("", ["c3:i64"], 1, "call")])
 expect(r.is_err()).to_equal(true)
@@ -286,8 +286,8 @@ val after = filled(entry, two_need_rows(entry))
 step("encode both as v3 sections and decode them")
 val wire_before = wire_of([before])
 val wire_after = wire_of([after])
-val rows_before = slot_rows(generic_template_section_decode_v3(wire_before).unwrap().entries[0])
-val rows_after = slot_rows(generic_template_section_decode_v3(wire_after).unwrap().entries[0])
+val rows_before = slot_rows(generic_template_section_decode_v3(wire_before).unwrap().section.entries[0])
+val rows_after = slot_rows(generic_template_section_decode_v3(wire_after).unwrap().section.entries[0])
 expect(wire_after != wire_before).to_equal(true)
 expect(rows_before.len()).to_equal(1)   # oracle: one need was filled
 expect(rows_after.len()).to_equal(2)   # oracle: one more need was filled
@@ -327,8 +327,8 @@ val section_new = generic_template_section_decode_v3(wire_of([filled(box, new_ro
 step("compare their keys")
 expect(instance_key(box, "c3:i64", new_rows) != instance_key(box, "c3:i64", old_rows)).to_equal(true)
 expect(instance_key(box, "c4:text", new_rows) != instance_key(box, "c4:text", old_rows)).to_equal(true)
-val other_old = section_old.entries[1]
-val other_new = section_new.entries[1]
+val other_old = section_old.section.entries[1]
+val other_new = section_new.section.entries[1]
 expect(other_old.symbol_id).to_equal(other.symbol_id)
 expect(instance_key(other_new, "c3:i64", slot_rows(other_new))).to_equal(instance_key(other_old, "c3:i64", slot_rows(other_old)))
 ```
@@ -337,7 +337,7 @@ expect(instance_key(other_new, "c3:i64", slot_rows(other_new))).to_equal(instanc
 
 #### keeps the instances of one template apart
 
-- produce the instance keys of Box for two argument types
+- build the instance keys of Box for i64 and for text
    - Exec capture: after_step
    - Evidence: execution result verified by 1 expected check
    - Expected: instance_key(box, "c3:i64", rows) != instance_key(box, "c4:text", rows) is true
@@ -350,7 +350,7 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("produce the instance keys of Box for two argument types")
+step("build the instance keys of Box for i64 and for text")
 val box = box_template()
 val rows = one_need_rows(box)
 expect(instance_key(box, "c3:i64", rows) != instance_key(box, "c4:text", rows)).to_equal(true)
@@ -360,7 +360,7 @@ expect(instance_key(box, "c3:i64", rows) != instance_key(box, "c4:text", rows)).
 
 #### keeps the key of a template when only a call moves
 
-- produce the instance keys of Box with the call at two offsets and with another cause
+- build the instance keys of Box with the call at offset 10 and at 900
    - Expected: instance_key(box, "c3:i64", moved) equals `instance_key(box, "c3:i64", here)`
 
 
@@ -371,7 +371,7 @@ Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("produce the instance keys of Box with the call at two offsets and with another cause")
+step("build the instance keys of Box with the call at offset 10 and at 900")
 val box = box_template()
 val here = [need("sha256:lst", [binder_key(box)], 10, "field")]
 val moved = [need("sha256:lst", [binder_key(box)], 900, "call")]
@@ -421,7 +421,7 @@ expect(instance_key(filled_u, "c4:text", rows_u)).to_equal(instance_key(filled_t
 
 #### keeps the slot frame of the v3 section identical (only the displayed binder name differs in the template table)
 
-- produce the slot frame and the template-table frame of the sections for binders T and U
+- seal Box<T> and Box<U> with their own binder keys and compare the frames
    - Exec capture: after_step
    - Evidence: execution result verified by 2 expected checks
    - Expected: slot_u equals `slot_t`
@@ -435,7 +435,7 @@ Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("produce the slot frame and the template-table frame of the sections for binders T and U")
+step("seal Box<T> and Box<U> with their own binder keys and compare the frames")
 val with_t = filled(template("Box", "T", "T"), two_need_rows(template("Box", "T", "T")))
 val with_u = filled(template("Box", "U", "U"), two_need_rows(template("Box", "U", "U")))
 val slot_t = sealed_values(wire_of([with_t]))[2]
@@ -490,7 +490,7 @@ for other in [empty, full]:
 
 #### leaves the section digest of the carried v2 table alone
 
-- produce the digest of the carried v2 table with the slot absent and filled
+- build the table digest with the slot absent and with two needs
    - Exec capture: after_step
    - Evidence: execution result verified by 1 expected check
    - Expected: section_of([full]).digest equals `section_of([absent]).digest`
@@ -503,7 +503,7 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("produce the digest of the carried v2 table with the slot absent and filled")
+step("build the table digest with the slot absent and with two needs")
 val absent = box_template()
 val full = filled(absent, two_need_rows(absent))
 expect(section_of([full]).digest).to_equal(section_of([absent]).digest)
@@ -517,7 +517,7 @@ expect(section_of([full]).digest).to_equal(section_of([absent]).digest)
 
 #### misses on the v2 magic check
 
-- produce the ok flag and error text of the v2 decoder on a v3 wire
+- decode a v3 wire with the v2 decoder
    - Text capture: after_step
    - Evidence: text output verified by 2 expected checks
    - Expected: r.ok is false
@@ -531,7 +531,7 @@ Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("produce the ok flag and error text of the v2 decoder on a v3 wire")
+step("decode a v3 wire with the v2 decoder")
 # @req REQ-GENERIC-F1B-005
 val entry = box_template()
 val wire = wire_of([filled(entry, one_need_rows(entry))])
@@ -546,7 +546,7 @@ expect(r.error).to_equal("v2 magic required")
 
 #### refuses a v2 section
 
-- run the refused case: the v3 decoder on a v2 wire
+- decode a v2 wire with the v3 decoder
    - Text capture: after_step
    - Evidence: text output verified by 1 expected check
    - Expected: v3_refusal(v2) equals `v3 magic required`
@@ -559,7 +559,7 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("run the refused case: the v3 decoder on a v2 wire")
+step("decode a v2 wire with the v3 decoder")
 val entry = box_template()
 val v2 = generic_template_section_encode_v2(section_of([entry])).unwrap()
 expect(v3_refusal(v2)).to_equal("v3 magic required")
@@ -569,7 +569,7 @@ expect(v3_refusal(v2)).to_equal("v3 magic required")
 
 #### refuses a v1 section
 
-- run the refused case: the v3 decoder on a v1 wire
+- decode a v1 wire with the v3 decoder
    - Text capture: after_step
    - Evidence: text output verified by 1 expected check
    - Expected: v3_refusal(v1) equals `v3 magic required`
@@ -582,7 +582,7 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("run the refused case: the v3 decoder on a v1 wire")
+step("decode a v1 wire with the v3 decoder")
 val v1_entry = project_generic_template_v1(decl("Box", "T", "T")).unwrap()
 val v1 = generic_template_section_encode_v1(build_generic_template_section_v1([v1_entry]))
 expect(v3_refusal(v1)).to_equal("v3 magic required")
@@ -597,9 +597,9 @@ expect(v3_refusal(v1)).to_equal("v3 magic required")
 - fill a template named 箱 and seal it
    - Exec capture: after_step
 - decode, then encode again
-   - Expected: generic_template_section_encode_v3(back).unwrap() equals `wire`
-   - Expected: back.entries[0].symbol_id equals `entry.symbol_id`
-   - Expected: slot_rows(back.entries[0]).len() equals `2)   # oracle: two needs were filled`
+   - Expected: generic_template_section_encode_v3(back.section).unwrap() equals `wire`
+   - Expected: back.section.entries[0].symbol_id equals `entry.symbol_id`
+   - Expected: slot_rows(back.section.entries[0]).len() equals `2)   # oracle: two needs were filled`
 
 
 <details>
@@ -615,9 +615,9 @@ val entry = template("箱", "T", "T")
 val wire = wire_of([filled(entry, two_need_rows(entry))])
 step("decode, then encode again")
 val back = generic_template_section_decode_v3(wire).unwrap()
-expect(generic_template_section_encode_v3(back).unwrap()).to_equal(wire)
-expect(back.entries[0].symbol_id).to_equal(entry.symbol_id)
-expect(slot_rows(back.entries[0]).len()).to_equal(2)   # oracle: two needs were filled
+expect(generic_template_section_encode_v3(back.section).unwrap()).to_equal(wire)
+expect(back.section.entries[0].symbol_id).to_equal(entry.symbol_id)
+expect(slot_rows(back.section.entries[0]).len()).to_equal(2)   # oracle: two needs were filled
 ```
 
 </details>
@@ -627,11 +627,11 @@ expect(slot_rows(back.entries[0]).len()).to_equal(2)   # oracle: two needs were 
 - seal one section of two templates, one never filled and one filled with no rows
    - Exec capture: after_step
 - decode and look at each slot
-   - Expected: back.entries.len() equals `2)   # oracle: two templates were sealed`
-   - Expected: slot_is_absent(back.entries[0]) is true
-   - Expected: slot_is_absent(back.entries[1]) is false
-   - Expected: slot_rows(back.entries[1]).len() equals `0)   # oracle: filled with no rows`
-   - Expected: generic_template_section_encode_v3(back).unwrap() equals `wire`
+   - Expected: back.section.entries.len() equals `2)   # oracle: two templates were sealed`
+   - Expected: slot_is_absent(back.section.entries[0]) is true
+   - Expected: slot_is_absent(back.section.entries[1]) is false
+   - Expected: slot_rows(back.section.entries[1]).len() equals `0)   # oracle: filled with no rows`
+   - Expected: generic_template_section_encode_v3(back.section).unwrap() equals `wire`
 
 
 <details>
@@ -647,21 +647,21 @@ val none = filled(template("Bbb", "T", "T"), [])
 val wire = wire_of([never, none])
 step("decode and look at each slot")
 val back = generic_template_section_decode_v3(wire).unwrap()
-expect(back.entries.len()).to_equal(2)   # oracle: two templates were sealed
-expect(slot_is_absent(back.entries[0])).to_equal(true)
-expect(slot_is_absent(back.entries[1])).to_equal(false)
-expect(slot_rows(back.entries[1]).len()).to_equal(0)   # oracle: filled with no rows
-expect(generic_template_section_encode_v3(back).unwrap()).to_equal(wire)
+expect(back.section.entries.len()).to_equal(2)   # oracle: two templates were sealed
+expect(slot_is_absent(back.section.entries[0])).to_equal(true)
+expect(slot_is_absent(back.section.entries[1])).to_equal(false)
+expect(slot_rows(back.section.entries[1]).len()).to_equal(0)   # oracle: filled with no rows
+expect(generic_template_section_encode_v3(back.section).unwrap()).to_equal(wire)
 ```
 
 </details>
 
 #### carries the template table digest through unchanged
 
-- produce the table digest before and after the round trip
+- encode and decode a one-need section and compare the table digests
    - Exec capture: after_step
    - Evidence: execution result verified by 1 expected check
-   - Expected: back.digest equals `section.digest`
+   - Expected: back.section.digest equals `section.digest`
 
 
 <details>
@@ -671,11 +671,11 @@ Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("produce the table digest before and after the round trip")
+step("encode and decode a one-need section and compare the table digests")
 val entry = box_template()
 val section = section_of([filled(entry, one_need_rows(entry))])
 val back = generic_template_section_decode_v3(generic_template_section_encode_v3(section).unwrap()).unwrap()
-expect(back.digest).to_equal(section.digest)
+expect(back.section.digest).to_equal(section.digest)
 ```
 
 </details>
@@ -684,7 +684,7 @@ expect(back.digest).to_equal(section.digest)
 
 #### refuses a section whose v2 table has a wrong seal
 
-- run the refused case: encoding a section whose table digest is wrong
+- encode a section whose digest is the text bad seal
    - Text capture: after_step
    - Evidence: text output verified by 2 expected checks
    - Expected: r.is_err() is true
@@ -698,7 +698,7 @@ Runnable source: 7 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("run the refused case: encoding a section whose table digest is wrong")
+step("encode a section whose digest is the text bad seal")
 val entry = box_template()
 val section = section_of([entry])
 val bad = GenericTemplateSectionV1(entries: section.entries, digest: "bad seal")
@@ -766,7 +766,7 @@ expect(v3_refusal("5")).to_equal("malformed v3 frame: frame header has no ':'")
 
 #### refuses fewer than three frames
 
-- run the refused case: the v3 decoder on a two-frame wire
+- decode the two frames a and b
    - Text capture: after_step
    - Evidence: text output verified by 1 expected check
    - Expected: v3_refusal(generic_need_frames_v1(["a", "b"])) equals `v3 magic required`
@@ -779,7 +779,7 @@ Runnable source: 2 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("run the refused case: the v3 decoder on a two-frame wire")
+step("decode the two frames a and b")
 expect(v3_refusal(generic_need_frames_v1(["a", "b"]))).to_equal("v3 magic required")
 ```
 
@@ -787,7 +787,7 @@ expect(v3_refusal(generic_need_frames_v1(["a", "b"]))).to_equal("v3 magic requir
 
 #### refuses a wrong magic even when the seal is right
 
-- run the refused case: the v3 decoder on a wrongly named magic under a valid seal
+- decode a correctly sealed wire naming magic v9
    - Text capture: after_step
    - Evidence: text output verified by 1 expected check
    - Expected: v3_refusal(wire) equals `v3 magic required`
@@ -800,7 +800,7 @@ Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("run the refused case: the v3 decoder on a wrongly named magic under a valid seal")
+step("decode a correctly sealed wire naming magic v9")
 val wire = reseal(["generic-template-section/v9", "inner"])
 expect(v3_refusal(wire)).to_equal("v3 magic required")
 ```
@@ -863,7 +863,7 @@ expect(v3_refusal(tampered)).to_equal("v3 section seal mismatch")
 
 #### refuses a corrupt inner table behind a correct seal
 
-- run the refused case: the v3 decoder on a garbage inner table
+- decode a correctly sealed wire whose inner table is the text garbage
    - Text capture: after_step
    - Evidence: text output verified by 1 expected check
    - Expected: verdict equals `v3 template table: invalid v2 UTF8 frame`
@@ -876,7 +876,7 @@ Runnable source: 4 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("run the refused case: the v3 decoder on a garbage inner table")
+step("decode a correctly sealed wire whose inner table is the text garbage")
 val wire = reseal([GENERIC_TEMPLATE_SECTION_MAGIC_V3, "garbage"])
 val verdict = v3_refusal(wire)
 expect(verdict).to_equal("v3 template table: invalid v2 UTF8 frame")
@@ -888,7 +888,7 @@ expect(verdict).to_equal("v3 template table: invalid v2 UTF8 frame")
 
 #### refuses a wire with a missing slot
 
-- run the refused case: the v3 decoder on a wire with no slot for its entry
+- decode a re-sealed wire with the slot frame removed
    - Text capture: after_step
    - Evidence: text output verified by 1 expected check
    - Expected: v3_refusal(wire) equals `v3 needs table does not match the template table`
@@ -901,7 +901,7 @@ Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("run the refused case: the v3 decoder on a wire with no slot for its entry")
+step("decode a re-sealed wire with the slot frame removed")
 val entry = box_template()
 val values = sealed_values(wire_of([filled(entry, one_need_rows(entry))]))
 val wire = reseal([values[0], values[1]])
@@ -912,7 +912,7 @@ expect(v3_refusal(wire)).to_equal("v3 needs table does not match the template ta
 
 #### refuses a wire with one slot too many
 
-- run the refused case: the v3 decoder on a wire with two slots for one entry
+- decode a re-sealed wire with the slot frame doubled
    - Text capture: after_step
    - Evidence: text output verified by 1 expected check
    - Expected: v3_refusal(wire) equals `v3 needs table does not match the template table`
@@ -925,7 +925,7 @@ Runnable source: 5 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("run the refused case: the v3 decoder on a wire with two slots for one entry")
+step("decode a re-sealed wire with the slot frame doubled")
 val entry = box_template()
 val values = sealed_values(wire_of([filled(entry, one_need_rows(entry))]))
 val wire = reseal([values[0], values[1], values[2], values[2]])
@@ -990,7 +990,7 @@ expect(v3_refusal(wire)).to_equal("open needs of " + entry.symbol_id + ": open-n
 
 #### is accepted
 
-- produce the verdict of the v3 decoder on an untampered wire
+- decode an untampered one-need wire
    - Exec capture: after_step
    - Evidence: execution result verified by 1 expected check
    - Expected: v3_refusal(wire_of([filled(entry, one_need_rows(entry))])) equals `ACCEPTED`
@@ -1003,9 +1003,206 @@ Runnable source: 3 lines folded for reproduction.
 Reproduction: this block contains the complete executable scenario source.
 
 ```simple
-step("produce the verdict of the v3 decoder on an untampered wire")
+step("decode an untampered one-need wire")
 val entry = box_template()
 expect(v3_refusal(wire_of([filled(entry, one_need_rows(entry))]))).to_equal("ACCEPTED")
+```
+
+</details>
+
+#### Byte bound of a v3 section
+
+#### refuses input one byte over the bound before reading any frame
+
+- build a filler of bound + 1 bytes by repeated doubling and decode it
+   - Text capture: after_step
+   - Evidence: text output verified by 2 expected checks
+   - Expected: over.byte_len() equals `V3_BOUND_BYTES + 1`
+   - Expected: v3_refusal(over) equals `v3 byte bound exceeded`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("build a filler of bound + 1 bytes by repeated doubling and decode it")
+val over = filler_of(V3_BOUND_BYTES + 1)
+expect(over.byte_len()).to_equal(V3_BOUND_BYTES + 1)
+expect(v3_refusal(over)).to_equal("v3 byte bound exceeded")
+```
+
+</details>
+
+#### lets input of exactly the bound through to framing, which refuses it as garbage
+
+- decode a filler of exactly bound bytes
+   - Text capture: after_step
+   - Evidence: text output verified by 2 expected checks
+   - Expected: exact.byte_len() equals `V3_BOUND_BYTES`
+   - Expected: v3_refusal(exact) equals `malformed v3 frame: frame header has no ':'`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 4 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("decode a filler of exactly bound bytes")
+val exact = filler_of(V3_BOUND_BYTES)
+expect(exact.byte_len()).to_equal(V3_BOUND_BYTES)
+expect(v3_refusal(exact)).to_equal("malformed v3 frame: frame header has no ':'")
+```
+
+</details>
+
+#### refuses to encode a section whose sealed frames exceed the bound
+
+- fill one entry with a need whose argument key is bound + 1 bytes long
+   - Text capture: after_step
+   - Evidence: text output verified by 2 expected checks
+   - Expected: r.is_err() is true
+   - Expected: r.unwrap_err() equals `v3 byte bound exceeded`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 7 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("fill one entry with a need whose argument key is bound + 1 bytes long")
+val entry = box_template()
+var big = entry
+big.open_needs = GenericOpenNeedsSlotV1.Filled(rows: [need("sha256:lst", [filler_of(V3_BOUND_BYTES + 1)], 1, "call")])
+val r = generic_template_section_encode_v3(section_of([big]))
+expect(r.is_err()).to_equal(true)
+expect(r.unwrap_err()).to_equal("v3 byte bound exceeded")
+```
+
+</details>
+
+#### Readers of older schemas given v3 bytes
+
+#### makes the v1 reader fail closed on a v3 wire
+
+- decode a v3 wire with the v1 decoder
+   - Text capture: after_step
+   - Evidence: text output verified by 2 expected checks
+   - Expected: r.ok is false
+   - Expected: r.error equals `V1_REFUSAL_OF_V3`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 5 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("decode a v3 wire with the v1 decoder")
+val entry = box_template()
+val r = generic_template_section_decode_v1(wire_of([filled(entry, one_need_rows(entry))]))
+expect(r.ok).to_equal(false)
+expect(r.error).to_equal(V1_REFUSAL_OF_V3)
+```
+
+</details>
+
+#### Seal of a v3 section
+
+#### equals the seal of the decoded wire and the first frame of the wire
+
+- seal a filled section, encode it, decode it
+   - Exec capture: after_step
+   - Evidence: execution result verified by 2 expected checks
+   - Expected: decoded.seal equals `computed`
+   - Expected: generic_need_frames_read_v1(wire).unwrap()[0] equals `computed`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 8 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("seal a filled section, encode it, decode it")
+val entry = box_template()
+val section = section_of([filled(entry, one_need_rows(entry))])
+val wire = generic_template_section_encode_v3(section).unwrap()
+val decoded = generic_template_section_decode_v3(wire).unwrap()
+val computed = generic_template_section_seal_v3(section).unwrap()
+expect(decoded.seal).to_equal(computed)
+expect(generic_need_frames_read_v1(wire).unwrap()[0]).to_equal(computed)
+```
+
+</details>
+
+#### moves with the open needs while the table digest and the template id stay
+
+- seal the same template with an absent slot, a filled-empty slot and a one-row slot
+   - Exec capture: after_step
+   - Evidence: execution result verified by 6 expected checks
+   - Expected: seal_empty != seal_absent is true
+   - Expected: seal_one != seal_empty is true
+   - Expected: seal_one != seal_absent is true
+   - Expected: section_of([one]).digest equals `section_of([absent]).digest`
+   - Expected: section_of([empty]).digest equals `section_of([absent]).digest`
+   - Expected: generic_template_id_v2(one) equals `generic_template_id_v2(absent)`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 13 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("seal the same template with an absent slot, a filled-empty slot and a one-row slot")
+val absent = box_template()
+val empty = filled(absent, [])
+val one = filled(absent, one_need_rows(absent))
+val seal_absent = generic_template_section_seal_v3(section_of([absent])).unwrap()
+val seal_empty = generic_template_section_seal_v3(section_of([empty])).unwrap()
+val seal_one = generic_template_section_seal_v3(section_of([one])).unwrap()
+expect(seal_empty != seal_absent).to_equal(true)
+expect(seal_one != seal_empty).to_equal(true)
+expect(seal_one != seal_absent).to_equal(true)
+expect(section_of([one]).digest).to_equal(section_of([absent]).digest)
+expect(section_of([empty]).digest).to_equal(section_of([absent]).digest)
+expect(generic_template_id_v2(one)).to_equal(generic_template_id_v2(absent))
+```
+
+</details>
+
+#### is refused for an invalid section
+
+- seal a section whose table digest is wrong
+   - Text capture: after_step
+   - Evidence: text output verified by 2 expected checks
+   - Expected: r.is_err() is true
+   - Expected: r.unwrap_err() equals `invalid v2 section seal`
+
+
+<details>
+<summary>Executable SSpec</summary>
+
+Runnable source: 6 lines folded for reproduction.
+Reproduction: this block contains the complete executable scenario source.
+
+```simple
+step("seal a section whose table digest is wrong")
+val section = section_of([box_template()])
+val bad = GenericTemplateSectionV1(entries: section.entries, digest: "bad seal")
+val r = generic_template_section_seal_v3(bad)
+expect(r.is_err()).to_equal(true)
+expect(r.unwrap_err()).to_equal("invalid v2 section seal")
 ```
 
 </details>
@@ -1014,8 +1211,8 @@ expect(v3_refusal(wire_of([filled(entry, one_need_rows(entry))]))).to_equal("ACC
 
 | Metric | Count |
 |--------|------:|
-| Total scenarios | 34 |
-| Active scenarios | 34 |
+| Total scenarios | 41 |
+| Active scenarios | 41 |
 | Slow scenarios | 0 |
 | Skipped scenarios | 0 |
 | Pending scenarios | 0 |
@@ -1046,15 +1243,15 @@ Requirements covered by the scenarios in this manual:
 <!-- sspec-maintain:provenance:start -->
 ## Generation history
 
-- Canonical SPipe generation for source `1f35907ffc0bca2fe94e9b503008da9a20a760df905e7fb26e5334c0bf56520a`; maintenance tool `1`, rules `ssdoc-rules/1`.
+- Canonical SPipe generation for source `1220bc2c13459351c1bddd71c36c76358a41a44bf21a076f78734537665e7a63`; maintenance tool `1`, rules `ssdoc-rules/1`.
 
-Source SHA-256: `1f35907ffc0bca2fe94e9b503008da9a20a760df905e7fb26e5334c0bf56520a`.
+Source SHA-256: `1220bc2c13459351c1bddd71c36c76358a41a44bf21a076f78734537665e7a63`.
 <!-- sspec-maintain:provenance:end -->
 
 <!-- sspec-maintain:scorecard:start -->
 ## SSpec documentization scorecard
 
-Source SHA-256: `1f35907ffc0bca2fe94e9b503008da9a20a760df905e7fb26e5334c0bf56520a`  
+Source SHA-256: `1220bc2c13459351c1bddd71c36c76358a41a44bf21a076f78734537665e7a63`  
 Analyzer: `1`; rules: `ssdoc-rules/1`  
 Raw score: **98/100**; effective score: **98/100**; blockers: **0**.
 

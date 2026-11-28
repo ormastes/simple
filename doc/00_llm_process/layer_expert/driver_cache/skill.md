@@ -100,4 +100,4 @@ exist but have no consumers.
 
 - Latest user override, 2026-10-26: the earlier PR #4865 enablement above is historical. Source default `NATIVE_PER_FILE_PIPELINE_DEFAULT_V1 = "0"` leaves the true file-worker pool off when unset; `SIMPLE_FILE_WORKERS=1` explicitly opts in. `SIMPLE_BOOTSTRAP_WHOLE_PROGRAM=1` retains precedence. Land this default adjustment without new runtime verification as requested; native overlap and full Phase 3 qualification remain pending.
 
-- 2026-11-28: generic instance contracts (plan S3-F1, S3-F2) landed as data only: `generic-template-section/v3` (open needs) and the `needed-instance|` companion section in `src/compiler/00.common/cache_contract/`, concrete-view acquisition in `src/compiler/30.types/generic_subst/`. Nothing in `80.driver` reads or writes them yet. See `../../feature_expert/generic_instance_tldr/skill.md`.
+- 2026-11-28: generic instance provider contract (plan S3-F1) landed as data only: `generic-template-section/v3` (template entries plus their open needs) in `src/compiler/00.common/cache_contract/`. Nothing in `80.driver` reads or writes it yet. See `../../feature_expert/generic_instance_tldr/skill.md`.
